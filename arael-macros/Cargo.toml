@@ -1,0 +1,19 @@
+[package]
+name = "arael-macros"
+version = "0.1.0"
+edition = "2024"
+description = "Proc macros for the arael optimization framework: #[arael::model], constraint codegen"
+license = "MIT"
+repository = "https://github.com/harakas/arael"
+keywords = ["proc-macro", "optimization", "code-generation", "differentiation"]
+categories = ["development-tools::procedural-macro-helpers"]
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "2", features = ["full", "visit-mut"] }
+quote = "1"
+proc-macro2 = "1"
+arael-sym = { version = "0.1.0", path = "../arael-sym" }
+arael-sym-macros = { version = "0.1.0", path = "../arael-sym-macros" }

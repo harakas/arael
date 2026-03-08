@@ -1,0 +1,12 @@
+[package]
+name = "arael-sym"
+version = "0.1.0"
+edition = "2024"
+description = "Symbolic math library: expression trees, automatic differentiation, simplification, CSE, code generation"
+license = "MIT"
+repository = "https://github.com/harakas/arael"
+keywords = ["symbolic-math", "differentiation", "computer-algebra", "code-generation", "cse"]
+categories = ["mathematics", "science"]
+
+[dependencies]
+arael-sym-macros = { version = "0.1.0", path = "../arael-sym-macros" }

@@ -1,0 +1,1811 @@
+//! Procedural macros for the arael optimization framework.
+//!
+//! This crate provides the `#[arael::model]` attribute macro and the
+//! `#[derive(Model)]` derive macro.
+//!
+//! ## `#[arael::model]`
+//!
+//! Applied to a struct, this attribute macro:
+//!
+//! - Generates the `Model` trait implementation (serialize, deserialize, update,
+//!   block accumulation) by inspecting `Param<T>`, `SimpleEulerAngleParam`,
+//!   and `EulerAngleParam` fields.
+//! - Rewrites shorthand block types: `SelfBlock<A>` becomes
+//!   `SelfBlock<A, {A_PARAM_COUNT}>`, and `CrossBlock<A, B>` becomes
+//!   `CrossBlock<A, B, {A_PARAM_COUNT + B_PARAM_COUNT}>`.
+//! - Detects `SimpleEulerAngleParam` and `EulerAngleParam` fields by type
+//!   name and generates appropriate precompute calls for rotation matrices.
+//! - Generates the symbolic companion struct (`FooSym`) and `ModelSym` impl.
+//!
+//! ## `#[arael(root)]`
+//!
+//! When placed on the root model struct, triggers code generation for all
+//! stashed `#[arael(constraint(...))]` attributes: symbolic differentiation,
+//! CSE, and emission of `LmProblem` trait methods.
+
+mod constraint;
+
+use std::collections::{HashSet, HashMap};
+use std::sync::Mutex;
+use proc_macro::TokenStream;
+use proc_macro2::TokenStream as TokenStream2;
+use quote::quote;
+use syn::{
+    parse_macro_input,
+    Expr, Pat, Stmt,
+};
+
+// ---------------------------------------------------------------------------
+// Sym field registry — shared state between #[arael::model] invocations
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug)]
+enum SymFieldType {
+    Scalar,
+    Vec2,
+    Vec3,
+    Mat3,
+    Struct(String),        // reference to another registered struct
+    OptionalStruct(String), // Option<T> wrapping a struct
+    Skip,
+}
+
+#[derive(Clone, Debug)]
+struct SymLayout {
+    fields: Vec<(String, SymFieldType)>,
+    param_fields: Vec<String>,       // field names that are Param<T>
+    ref_paths: Vec<(String, String)>, // (field_name, resolution_path) for #[arael(ref = ...)]
+    euler_angle_fields: Vec<String>,  // field names detected as SimpleEulerAngleParam
+    universal_euler_angle_fields: Vec<String>, // field names detected as EulerAngleParam
+    /// Symbolic substitutions: (from_expr, to_expr) applied before CSE.
+    /// Stored as string pairs for thread-safe registry storage.
+    #[allow(dead_code)]
+    substitutions: Vec<(String, String)>, // (from_sym_str, to_sym_str)
+}
+
+/// Stashed constraint: struct name + raw attribute tokens, waiting for root to generate code.
+#[derive(Clone)]
+struct StashedConstraint {
+    struct_name: String,
+    attr_tokens: String,         // serialized constraint attribute content
+    fields_tokens: String,       // serialized struct fields
+}
+
+struct Registry {
+    layouts: HashMap<String, SymLayout>,
+    constraints: Vec<StashedConstraint>,
+}
+
+static SYM_REGISTRY: Mutex<Option<Registry>> = Mutex::new(None);
+
+fn registry_store(name: &str, layout: SymLayout) {
+    let mut guard = SYM_REGISTRY.lock().unwrap();
+    let reg = guard.get_or_insert_with(|| Registry {
+        layouts: HashMap::new(),
+        constraints: Vec::new(),
+    });
+    reg.layouts.insert(name.to_string(), layout);
+}
+
+fn registry_lookup(name: &str) -> Option<SymLayout> {
+    let guard = SYM_REGISTRY.lock().unwrap();
+    guard.as_ref().and_then(|reg| reg.layouts.get(name).cloned())
+}
+
+fn registry_stash_constraint(c: StashedConstraint) {
+    let mut guard = SYM_REGISTRY.lock().unwrap();
+    let reg = guard.get_or_insert_with(|| Registry {
+        layouts: HashMap::new(),
+        constraints: Vec::new(),
+    });
+    reg.constraints.push(c);
+}
+
+fn registry_take_constraints() -> Vec<StashedConstraint> {
+    let mut guard = SYM_REGISTRY.lock().unwrap();
+    guard.as_mut().map(|reg| std::mem::take(&mut reg.constraints)).unwrap_or_default()
+}
+
+
+// ===========================================================================
+// #[derive(Model)] — generate Model trait impl for structs
+// ===========================================================================
+
+/// Attribute macro for arael model structs.
+///
+/// Generates the `Model` trait implementation, rewrites `SelfBlock<A>` to
+/// `SelfBlock<A, {A_PARAM_COUNT}>` and `CrossBlock<A, B>` to
+/// `CrossBlock<A, B, {A_PARAM_COUNT + B_PARAM_COUNT}>`, emits a
+/// `const StructName_PARAM_COUNT: usize = ...;`, and produces the symbolic
+/// companion struct with `ModelSym` impl.
+///
+/// # Struct-level attributes
+///
+/// ## `#[arael(constraint(block, { ... }))]`
+///
+/// Define a constraint expression on this struct. The body is symbolically
+/// differentiated at compile time. Returns a residual array.
+///
+/// ```ignore
+/// #[arael::model]
+/// #[arael(constraint(hb_pose, {
+///     [(pose.ea.x - pose.info.tilt_roll) * path.tilt_isigma,
+///      (pose.ea.y - pose.info.tilt_pitch) * path.tilt_isigma]
+/// }))]
+/// struct Pose { /* ... */ }
+/// ```
+///
+/// Options: `guard = expr` for conditional evaluation, `parent = name` to
+/// name the parent variable in nested constraints.
+///
+/// ## `#[arael(fit(data, |e| expr))]`
+///
+/// Auto-generate a complete `LmProblem` implementation for simple curve
+/// fitting. Iterates over `data`, evaluates the residual expression for each
+/// entry, and generates `calc_cost()`, `calc_grad_hessian_*()`, and
+/// `fit_with()` methods.
+///
+/// ```ignore
+/// #[arael::model]
+/// #[arael(fit(data, |e| {
+///     let plain_r = (a * e.x + b - e.y) / sigma;
+///     gamma * atan(plain_r / gamma)
+/// }))]
+/// struct LinearModel {
+///     a: Param<f32>,
+///     b: Param<f32>,
+///     data: Vec<DataEntry>,
+///     sigma: f32,
+///     gamma: f32,
+/// }
+/// ```
+///
+/// ## `#[arael(root)]` / `#[arael(root, f32)]`
+///
+/// Mark this struct as the optimization root. Triggers code generation for
+/// all stashed `constraint` attributes in the model hierarchy. Generates
+/// the `LmProblem` trait implementation with methods: `calc_cost()`,
+/// `calc_grad_hessian_dense()`, `calc_grad_hessian_band()`,
+/// `calc_grad_hessian_sparse()`, `calc_grad_hessian_sparse_direct()`,
+/// `calc_grad_hessian_sparse_indexed()`, and `advance()`.
+/// Also generates `serialize64()` / `deserialize64()` convenience methods
+/// and `__set_block_indices()` / `__compute_blocks()` internals.
+///
+/// Use `f32` for single-precision optimization.
+///
+/// ```ignore
+/// #[arael::model]
+/// #[arael(root)]
+/// struct Path {
+///     poses: refs::Deque<Pose>,
+///     landmarks: refs::Vec<PointLandmark>,
+///     /* ... */
+/// }
+/// ```
+///
+/// The generated `calc_cost` traverses all constraints, evaluating
+/// CSE-optimized compiled code. Example fragment (from `cargo expand`):
+///
+/// ```ignore
+/// fn calc_cost(&mut self, params: &[f64]) -> f64 {
+///     arael::model::Model::update64(self, params);
+///     let mut __cost = 0.0 as f64;
+///     for __item in self.poses.iter() {
+///         // Tilt constraint -- precomputed rotation matrix used directly:
+///         let __r_0 = (pose.ea.work().x - pose.info.tilt_roll)
+///             * path.tilt_isigma;
+///         let __r_1 = (pose.ea.work().y - pose.info.tilt_pitch)
+///             * path.tilt_isigma;
+///         __cost += __r_0 * __r_0 + __r_1 * __r_1;
+///         // ... odometry, GPS, feature constraints with CSE intermediates
+///     }
+///     __cost
+/// }
+/// ```
+///
+/// View the full generated code with:
+///
+/// ```ignore
+/// cargo expand --example slam_demo
+/// ```
+#[proc_macro_attribute]
+pub fn model(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let mut input = parse_macro_input!(item as syn::DeriveInput);
+    match model_attribute(&mut input) {
+        Ok(tokens) => tokens.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+fn model_attribute(input: &mut syn::DeriveInput) -> syn::Result<TokenStream2> {
+    let name = &input.ident;
+
+    // Compute PARAM_COUNT from Param<T> fields
+    let fields = match &input.data {
+        syn::Data::Struct(data) => match &data.fields {
+            syn::Fields::Named(named) => &named.named,
+            _ => return Err(syn::Error::new_spanned(input, "arael::model requires named fields")),
+        },
+        _ => return Err(syn::Error::new_spanned(input, "arael::model requires a struct")),
+    };
+
+    let mut param_count: u32 = 0;
+    let mut sym_fields: Vec<(String, SymFieldType)> = Vec::new();
+    let mut param_field_names_for_reg: Vec<String> = Vec::new();
+    let mut ref_paths_for_reg: Vec<(String, String)> = Vec::new();
+    let mut euler_angle_fields_reg: Vec<String> = Vec::new();
+    let mut universal_euler_angle_fields_reg: Vec<String> = Vec::new();
+    for field in fields {
+        let field_name = field.ident.as_ref().unwrap().to_string();
+        // Check for #[arael(ref = ...)] on this field
+        if let Ok(Some(attr)) = parse_arael_attr(&field.attrs) {
+            match attr {
+                AraelAttr::RefResolve(path) => ref_paths_for_reg.push((field_name.clone(), path)),
+                _ => {}
+            }
+        }
+        // Detect euler angle param types by type name (in addition to attribute)
+        if let Some(ea_kind) = is_euler_angle_param_type(&field.ty) {
+            match ea_kind {
+                "simple" => euler_angle_fields_reg.push(field_name.clone()),
+                "universal" => universal_euler_angle_fields_reg.push(field_name.clone()),
+                _ => {}
+            }
+        }
+        if is_param_type(&field.ty) {
+            param_count += param_type_size(&field.ty);
+            param_field_names_for_reg.push(field_name.clone());
+            let sft = match param_type_size(&field.ty) {
+                1 => SymFieldType::Scalar,
+                2 => SymFieldType::Vec2,
+                3 => SymFieldType::Vec3,
+                _ => SymFieldType::Scalar,
+            };
+            sym_fields.push((field_name, sft));
+        } else if is_hessian_block_type(&field.ty) || is_option_hessian_block(&field.ty) {
+            sym_fields.push((field_name, SymFieldType::Skip));
+        } else if is_sym_skip_type(&field.ty) {
+            // For Vec<T>/Deque<T>, record the inner type for constraint traversal
+            let inner_type = extract_wrapper_inner(&field.ty, "Vec")
+                .or_else(|| extract_wrapper_inner(&field.ty, "Deque"))
+                .or_else(|| extract_wrapper_inner(&field.ty, "Arena"));
+            if let Some((_, inner_ident)) = inner_type {
+                sym_fields.push((field_name, SymFieldType::Struct(inner_ident.to_string())));
+            } else {
+                sym_fields.push((field_name, SymFieldType::Skip));
+            }
+        } else {
+            let sft = classify_field_sym_type(&field.ty);
+            sym_fields.push((field_name, sft));
+        }
+    }
+    // Build symbolic substitutions for euler_angles fields
+    let mut substitutions_reg: Vec<(String, String)> = Vec::new();
+    for ea_field in &euler_angle_fields_reg {
+        // These substitutions will be applied with a variable base prefix later.
+        // Store them as template patterns with the field name as placeholder.
+        // sin(FIELD.work().x) -> FIELD_sincos.0.x, etc.
+        for (comp, _idx) in [("x", 0), ("y", 1), ("z", 2)] {
+            let sin_from = format!("SIN({}.work().{})", ea_field, comp);
+            let sin_to = format!("{}_sincos.0.{}", ea_field, comp);
+            let cos_from = format!("COS({}.work().{})", ea_field, comp);
+            let cos_to = format!("{}_sincos.1.{}", ea_field, comp);
+            substitutions_reg.push((sin_from, sin_to));
+            substitutions_reg.push((cos_from, cos_to));
+        }
+    }
+
+    // Register injected fields in sym layout
+    for ea_field in &euler_angle_fields_reg {
+        sym_fields.push((format!("{}_sincos", ea_field), SymFieldType::Skip));
+        sym_fields.push((format!("{}_rotation_matrix", ea_field), SymFieldType::Mat3));
+    }
+    for ea_field in &universal_euler_angle_fields_reg {
+        sym_fields.push((format!("{}_ref_rotation", ea_field), SymFieldType::Skip));
+        sym_fields.push((format!("{}_delta", ea_field), SymFieldType::Skip));
+        sym_fields.push((format!("{}_sincos", ea_field), SymFieldType::Skip));
+        sym_fields.push((format!("{}_rotation_matrix", ea_field), SymFieldType::Mat3));
+        sym_fields.push((format!("{}_delta_sincos", ea_field), SymFieldType::Skip));
+    }
+
+    registry_store(&name.to_string(), SymLayout {
+        fields: sym_fields,
+        param_fields: param_field_names_for_reg,
+        ref_paths: ref_paths_for_reg,
+        euler_angle_fields: euler_angle_fields_reg.clone(),
+        universal_euler_angle_fields: universal_euler_angle_fields_reg.clone(),
+        substitutions: substitutions_reg,
+    });
+
+    // No field injection needed — SimpleEulerAngleParam/EulerAngleParam contain their own state.
+
+    // Re-read fields (no injection, but keep the pattern for compatibility)
+    let _fields = match &input.data {
+        syn::Data::Struct(data) => match &data.fields {
+            syn::Fields::Named(named) => &named.named,
+            _ => unreachable!(),
+        },
+        _ => unreachable!(),
+    };
+
+    // Rewrite SelfBlock<A> and CrossBlock<A, B> field types
+    if let syn::Data::Struct(ref mut data) = input.data {
+        if let syn::Fields::Named(ref mut named) = data.fields {
+            for field in named.named.iter_mut() {
+                rewrite_block_type(&mut field.ty);
+            }
+        }
+    }
+
+    // Emit const
+    let const_name = syn::Ident::new(&format!("{}_PARAM_COUNT", name), name.span());
+    let param_count_lit = param_count as usize;
+
+    // Generate Model impl and friends using the (now-rewritten) struct
+    let model_impl = impl_model(input)?;
+
+    // Strip #[arael(...)] attributes from the emitted struct so they don't
+    // get re-interpreted as attribute macro invocations
+    input.attrs.retain(|attr| !attr.path().is_ident("arael"));
+    if let syn::Data::Struct(ref mut data) = input.data {
+        if let syn::Fields::Named(ref mut named) = data.fields {
+            for field in named.named.iter_mut() {
+                field.attrs.retain(|attr| !attr.path().is_ident("arael"));
+            }
+        }
+    }
+
+    Ok(quote! {
+        #input
+        #[allow(non_upper_case_globals)]
+        const #const_name: usize = #param_count_lit;
+        #model_impl
+    })
+}
+
+/// Classify a non-Param field's sym type from its type path.
+fn classify_field_sym_type(ty: &syn::Type) -> SymFieldType {
+    if let syn::Type::Path(tp) = ty {
+        if let Some(seg) = tp.path.segments.last() {
+            let name = seg.ident.to_string();
+            return match name.as_str() {
+                "f32" | "f64" | "bool" | "u32" | "i32" | "usize" => SymFieldType::Scalar,
+                "vect2f" | "vect2d" => SymFieldType::Vec2,
+                "vect3f" | "vect3d" => SymFieldType::Vec3,
+                "matrix3f" | "matrix3d" => SymFieldType::Mat3,
+                "matrix2f" | "matrix2d" => SymFieldType::Skip, // not commonly used in constraints
+                _ => {
+                    // Check if it's a Ref<T> — extract inner type name
+                    if let Some((_, inner_ident)) = extract_wrapper_inner(ty, "Ref") {
+                        return SymFieldType::Struct(inner_ident.to_string());
+                    }
+                    if let Some((_, inner_ident)) = extract_wrapper_inner(ty, "Option") {
+                        return SymFieldType::OptionalStruct(inner_ident.to_string());
+                    }
+                    // Assume it's a struct
+                    SymFieldType::Struct(name)
+                }
+            };
+        }
+    }
+    SymFieldType::Skip
+}
+
+/// Extract the SIZE of a Param<T> field's inner type.
+fn param_type_size(ty: &syn::Type) -> u32 {
+    if let syn::Type::Path(tp) = ty {
+        if let Some(seg) = tp.path.segments.last() {
+            let name = seg.ident.to_string();
+            if name == "Param" {
+                if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                    if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
+                        return inner_type_size(inner);
+                    }
+                }
+            }
+            if name == "SimpleEulerAngleParam" || name == "EulerAngleParam" {
+                return 3; // always vect3 = 3 params
+            }
+        }
+    }
+    0
+}
+
+/// Return the ParamType::SIZE for known types.
+fn inner_type_size(ty: &syn::Type) -> u32 {
+    if let syn::Type::Path(tp) = ty {
+        if let Some(seg) = tp.path.segments.last() {
+            return match seg.ident.to_string().as_str() {
+                "f32" | "f64" => 1,
+                "vect2f" | "vect2d" => 2,
+                "vect3f" | "vect3d" => 3,
+                _ => 0,
+            };
+        }
+    }
+    0
+}
+
+/// Rewrite SelfBlock<A> to SelfBlock<A, {A_PARAM_COUNT}> and
+/// SelfBlock<A, f32> to SelfBlock<A, {A_PARAM_COUNT}, f32> and
+/// CrossBlock<A, B> to CrossBlock<A, B, {A_PARAM_COUNT + B_PARAM_COUNT}> and
+/// CrossBlock<A, B, f32> to CrossBlock<A, B, {A_PARAM_COUNT + B_PARAM_COUNT}, f32>.
+fn rewrite_block_type(ty: &mut syn::Type) {
+    if let syn::Type::Path(tp) = ty {
+        if let Some(seg) = tp.path.segments.last_mut() {
+            let type_name = seg.ident.to_string();
+            if type_name == "SelfBlock" {
+                if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                    let type_args: Vec<&syn::Type> = args.args.iter()
+                        .filter_map(|a| if let syn::GenericArgument::Type(t) = a { Some(t) } else { None })
+                        .collect();
+                    if type_args.len() == 1 || type_args.len() == 2 {
+                        // First arg is the model type A
+                        if let syn::Type::Path(a_path) = type_args[0] {
+                            if let Some(a_seg) = a_path.path.segments.last() {
+                                let const_name = syn::Ident::new(
+                                    &format!("{}_PARAM_COUNT", a_seg.ident),
+                                    a_seg.ident.span(),
+                                );
+                                let a_path = type_args[0];
+                                if type_args.len() == 2 {
+                                    // SelfBlock<A, f32> -> SelfBlock<A, {N}, f32>
+                                    let float_ty = type_args[1];
+                                    let new_ty: syn::Type = syn::parse_quote! {
+                                        SelfBlock<#a_path, { #const_name }, #float_ty>
+                                    };
+                                    *ty = new_ty;
+                                } else {
+                                    // SelfBlock<A> -> SelfBlock<A, {N}>
+                                    let new_ty: syn::Type = syn::parse_quote! {
+                                        SelfBlock<#a_path, { #const_name }>
+                                    };
+                                    *ty = new_ty;
+                                }
+                            }
+                        }
+                    }
+                }
+            } else if type_name == "CrossBlock" {
+                if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                    let type_args: Vec<&syn::Type> = args.args.iter()
+                        .filter_map(|a| if let syn::GenericArgument::Type(t) = a { Some(t) } else { None })
+                        .collect();
+                    if type_args.len() == 2 || type_args.len() == 3 {
+                        if let (syn::Type::Path(a_path), syn::Type::Path(b_path)) =
+                            (type_args[0], type_args[1])
+                        {
+                            if let (Some(a_seg), Some(b_seg)) = (a_path.path.segments.last(), b_path.path.segments.last()) {
+                                let a_const = syn::Ident::new(
+                                    &format!("{}_PARAM_COUNT", a_seg.ident),
+                                    a_seg.ident.span(),
+                                );
+                                let b_const = syn::Ident::new(
+                                    &format!("{}_PARAM_COUNT", b_seg.ident),
+                                    b_seg.ident.span(),
+                                );
+                                let a_ty = type_args[0];
+                                let b_ty = type_args[1];
+                                if type_args.len() == 3 {
+                                    // CrossBlock<A, B, f32> -> CrossBlock<A, B, {N}, f32>
+                                    let float_ty = type_args[2];
+                                    let new_ty: syn::Type = syn::parse_quote! {
+                                        CrossBlock<#a_ty, #b_ty, { #a_const + #b_const }, #float_ty>
+                                    };
+                                    *ty = new_ty;
+                                } else {
+                                    // CrossBlock<A, B> -> CrossBlock<A, B, {N}>
+                                    let new_ty: syn::Type = syn::parse_quote! {
+                                        CrossBlock<#a_ty, #b_ty, { #a_const + #b_const }>
+                                    };
+                                    *ty = new_ty;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[proc_macro_derive(Model, attributes(arael))]
+pub fn derive_model(input: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(input as syn::DeriveInput);
+    match impl_model(&input) {
+        Ok(tokens) => tokens.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
+    let name = &input.ident;
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+
+    let fields = match &input.data {
+        syn::Data::Struct(data) => match &data.fields {
+            syn::Fields::Named(named) => &named.named,
+            _ => return Err(syn::Error::new_spanned(input, "Model derive requires named fields")),
+        },
+        _ => return Err(syn::Error::new_spanned(input, "Model derive requires a struct")),
+    };
+
+    // Pass 1: identify Param<T> fields
+    let mut param_field_names: HashSet<String> = HashSet::new();
+    for field in fields {
+        if is_param_type(&field.ty) {
+            if let Some(ident) = &field.ident {
+                param_field_names.insert(ident.to_string());
+            }
+        }
+    }
+
+    // Detect euler angle param types and generate precompute calls
+    let mut euler_compute_stmts: Vec<TokenStream2> = Vec::new();
+    for field in fields {
+        if is_euler_angle_param_type(&field.ty).is_some() {
+            let ea_ident = field.ident.as_ref().unwrap();
+            euler_compute_stmts.push(quote! {
+                self.#ea_ident.__precompute();
+            });
+        }
+    }
+
+    // Pass 2: classify fields and generate method bodies
+    let mut serialize_stmts: Vec<TokenStream2> = Vec::new();
+    let mut deserialize_stmts: Vec<TokenStream2> = Vec::new();
+    let mut update_phase1: Vec<TokenStream2> = Vec::new();
+    let mut update_self_phase1: Vec<TokenStream2> = Vec::new();
+    let mut compute_stmts: Vec<TokenStream2> = Vec::new();
+    let mut serialize64_stmts: Vec<TokenStream2> = Vec::new();
+    let mut deserialize64_stmts: Vec<TokenStream2> = Vec::new();
+    let mut update64_phase1: Vec<TokenStream2> = Vec::new();
+    let mut zero_blocks_stmts: Vec<TokenStream2> = Vec::new();
+    let mut accumulate_blocks32_stmts: Vec<TokenStream2> = Vec::new();
+    let mut accumulate_blocks64_stmts: Vec<TokenStream2> = Vec::new();
+    let mut accumulate_blocks_band32_stmts: Vec<TokenStream2> = Vec::new();
+    let mut accumulate_blocks_band64_stmts: Vec<TokenStream2> = Vec::new();
+    let mut accumulate_blocks_sparse32_stmts: Vec<TokenStream2> = Vec::new();
+    let mut accumulate_blocks_sparse64_stmts: Vec<TokenStream2> = Vec::new();
+    let mut accumulate_blocks_sparse_direct32_stmts: Vec<TokenStream2> = Vec::new();
+    let mut accumulate_blocks_sparse_direct64_stmts: Vec<TokenStream2> = Vec::new();
+    let mut accumulate_blocks_sparse_indexed32_stmts: Vec<TokenStream2> = Vec::new();
+    let mut accumulate_blocks_sparse_indexed64_stmts: Vec<TokenStream2> = Vec::new();
+    let mut param_count_terms: Vec<TokenStream2> = Vec::new();
+    let mut serialize_size_stmts: Vec<TokenStream2> = Vec::new();
+    let mut param_symbols_stmts: Vec<TokenStream2> = Vec::new();
+
+    for field in fields {
+        let ident = field.ident.as_ref().unwrap();
+        let attr = parse_arael_attr(&field.attrs)?;
+
+        match attr {
+            Some(AraelAttr::Skip) => continue,
+            Some(AraelAttr::Compute(expr_tokens)) => {
+                let substituted = substitute_param_idents(expr_tokens, &param_field_names);
+                compute_stmts.push(quote! { self.#ident = #substituted; });
+            }
+            Some(AraelAttr::RefResolve(_)) | None => {
+                // HessianBlock fields: skip serialize, handle in zero/accumulate
+                if is_hessian_block_type(&field.ty) {
+                    zero_blocks_stmts.push(quote! { self.#ident.zero(); });
+                    let acc_dense = quote! { self.#ident.accumulate(grad, hessian); };
+                    let acc_band = quote! { self.#ident.accumulate_band(grad, band, kd)?; };
+                    let acc_sparse = quote! { self.#ident.accumulate_sparse(grad, coo); };
+                    let acc_sparse_direct = quote! { self.#ident.accumulate_sparse_direct(grad, csc); };
+                    let acc_sparse_indexed = quote! { self.#ident.accumulate_sparse_indexed(grad, vals, positions, cursor); };
+                    if block_is_f32(&field.ty) {
+                        accumulate_blocks32_stmts.push(acc_dense);
+                        accumulate_blocks_band32_stmts.push(acc_band);
+                        accumulate_blocks_sparse32_stmts.push(acc_sparse);
+                        accumulate_blocks_sparse_direct32_stmts.push(acc_sparse_direct);
+                        accumulate_blocks_sparse_indexed32_stmts.push(acc_sparse_indexed);
+                    } else {
+                        accumulate_blocks64_stmts.push(acc_dense);
+                        accumulate_blocks_band64_stmts.push(acc_band);
+                        accumulate_blocks_sparse64_stmts.push(acc_sparse);
+                        accumulate_blocks_sparse_direct64_stmts.push(acc_sparse_direct);
+                        accumulate_blocks_sparse_indexed64_stmts.push(acc_sparse_indexed);
+                    }
+                    continue;
+                }
+                // Option<HessianBlock> fields: skip serialize, handle in zero/accumulate
+                if is_option_hessian_block(&field.ty) {
+                    zero_blocks_stmts.push(quote! {
+                        if let Some(ref mut __hb) = self.#ident { __hb.zero(); }
+                    });
+                    let acc_dense = quote! {
+                        if let Some(ref __hb) = self.#ident { __hb.accumulate(grad, hessian); }
+                    };
+                    let acc_band = quote! {
+                        if let Some(ref __hb) = self.#ident { __hb.accumulate_band(grad, band, kd)?; }
+                    };
+                    let acc_sparse = quote! {
+                        if let Some(ref __hb) = self.#ident { __hb.accumulate_sparse(grad, coo); }
+                    };
+                    let acc_sparse_direct = quote! {
+                        if let Some(ref __hb) = self.#ident { __hb.accumulate_sparse_direct(grad, csc); }
+                    };
+                    let acc_sparse_indexed = quote! {
+                        if let Some(ref __hb) = self.#ident { __hb.accumulate_sparse_indexed(grad, vals, positions, cursor); }
+                    };
+                    if block_is_f32(&field.ty) {
+                        accumulate_blocks32_stmts.push(acc_dense);
+                        accumulate_blocks_band32_stmts.push(acc_band);
+                        accumulate_blocks_sparse32_stmts.push(acc_sparse);
+                        accumulate_blocks_sparse_direct32_stmts.push(acc_sparse_direct);
+                        accumulate_blocks_sparse_indexed32_stmts.push(acc_sparse_indexed);
+                    } else {
+                        accumulate_blocks64_stmts.push(acc_dense);
+                        accumulate_blocks_band64_stmts.push(acc_band);
+                        accumulate_blocks_sparse64_stmts.push(acc_sparse);
+                        accumulate_blocks_sparse_direct64_stmts.push(acc_sparse_direct);
+                        accumulate_blocks_sparse_indexed64_stmts.push(acc_sparse_indexed);
+                    }
+                    continue;
+                }
+
+                let ty = &field.ty;
+
+                if is_param_type(ty) {
+                    param_count_terms.push(quote! {
+                        <#ty as arael::model::Model>::PARAM_COUNT
+                    });
+                    let field_name = ident.to_string();
+                    param_symbols_stmts.push(quote! {
+                        <#ty as arael::model::Model>::param_symbols(
+                            &format!("{}.{}", base, #field_name), out
+                        );
+                    });
+                }
+
+                // All param types (Param, SimpleEulerAngleParam, EulerAngleParam)
+                // use their own Model trait impl for serialize/deserialize/update.
+                serialize_stmts.push(quote! {
+                    arael::model::Model::serialize_params32(&mut self.#ident, data);
+                });
+                deserialize_stmts.push(quote! {
+                    arael::model::Model::deserialize_params32(&mut self.#ident, data);
+                });
+                update_phase1.push(quote! {
+                    arael::model::Model::update32(&mut self.#ident, data);
+                });
+                update_self_phase1.push(quote! {
+                    arael::model::Model::update_self(&mut self.#ident);
+                });
+                serialize64_stmts.push(quote! {
+                    arael::model::Model::serialize_params64(&mut self.#ident, data);
+                });
+                deserialize64_stmts.push(quote! {
+                    arael::model::Model::deserialize_params64(&mut self.#ident, data);
+                });
+                update64_phase1.push(quote! {
+                    arael::model::Model::update64(&mut self.#ident, data);
+                });
+                serialize_size_stmts.push(quote! {
+                    arael::model::Model::serialize_size(&self.#ident)
+                });
+                // Also recurse into sub-models for zero/accumulate
+                zero_blocks_stmts.push(quote! {
+                    arael::model::Model::zero_blocks(&mut self.#ident);
+                });
+                accumulate_blocks32_stmts.push(quote! {
+                    arael::model::Model::accumulate_blocks32(&self.#ident, grad, hessian);
+                });
+                accumulate_blocks64_stmts.push(quote! {
+                    arael::model::Model::accumulate_blocks64(&self.#ident, grad, hessian);
+                });
+                accumulate_blocks_band32_stmts.push(quote! {
+                    arael::model::Model::accumulate_blocks_band32(&self.#ident, grad, band, kd)?;
+                });
+                accumulate_blocks_band64_stmts.push(quote! {
+                    arael::model::Model::accumulate_blocks_band64(&self.#ident, grad, band, kd)?;
+                });
+                accumulate_blocks_sparse32_stmts.push(quote! {
+                    arael::model::Model::accumulate_blocks_sparse32(&self.#ident, grad, coo);
+                });
+                accumulate_blocks_sparse64_stmts.push(quote! {
+                    arael::model::Model::accumulate_blocks_sparse64(&self.#ident, grad, coo);
+                });
+                accumulate_blocks_sparse_direct32_stmts.push(quote! {
+                    arael::model::Model::accumulate_blocks_sparse_direct32(&self.#ident, grad, csc);
+                });
+                accumulate_blocks_sparse_direct64_stmts.push(quote! {
+                    arael::model::Model::accumulate_blocks_sparse_direct64(&self.#ident, grad, csc);
+                });
+                accumulate_blocks_sparse_indexed32_stmts.push(quote! {
+                    arael::model::Model::accumulate_blocks_sparse_indexed32(&self.#ident, grad, vals, positions, cursor);
+                });
+                accumulate_blocks_sparse_indexed64_stmts.push(quote! {
+                    arael::model::Model::accumulate_blocks_sparse_indexed64(&self.#ident, grad, vals, positions, cursor);
+                });
+            }
+        }
+    }
+
+    let model_impl = quote! {
+        impl #impl_generics arael::model::Model for #name #ty_generics #where_clause {
+            fn serialize_params32(&mut self, data: &mut std::vec::Vec<f32>) {
+                #(#serialize_stmts)*
+            }
+            fn deserialize_params32(&mut self, data: &[f32]) {
+                #(#deserialize_stmts)*
+            }
+            fn update32(&mut self, data: &[f32]) {
+                #(#update_phase1)*
+                #(#compute_stmts)*
+                #(#euler_compute_stmts)*
+            }
+            fn update_self(&mut self) {
+                #(#update_self_phase1)*
+                #(#compute_stmts)*
+                #(#euler_compute_stmts)*
+            }
+            fn serialize_params64(&mut self, data: &mut std::vec::Vec<f64>) {
+                #(#serialize64_stmts)*
+            }
+            fn deserialize_params64(&mut self, data: &[f64]) {
+                #(#deserialize64_stmts)*
+            }
+            fn update64(&mut self, data: &[f64]) {
+                #(#update64_phase1)*
+                #(#compute_stmts)*
+                #(#euler_compute_stmts)*
+            }
+            const PARAM_COUNT: u32 = 0 #(+ #param_count_terms)*;
+            fn serialize_size(&self) -> u32 {
+                0 #(+ #serialize_size_stmts)*
+            }
+            fn param_symbols(base: &str, out: &mut std::vec::Vec<String>) {
+                #(#param_symbols_stmts)*
+            }
+            fn zero_blocks(&mut self) {
+                #(#zero_blocks_stmts)*
+            }
+            fn accumulate_blocks32(&self, grad: &mut [f32], hessian: &mut [f32]) {
+                #(#accumulate_blocks32_stmts)*
+            }
+            fn accumulate_blocks64(&self, grad: &mut [f64], hessian: &mut [f64]) {
+                #(#accumulate_blocks64_stmts)*
+            }
+            fn accumulate_blocks_band32(&self, grad: &mut [f32], band: &mut [f32], kd: usize) -> Result<(), arael::simple_lm::BandError> {
+                #(#accumulate_blocks_band32_stmts)*
+                Ok(())
+            }
+            fn accumulate_blocks_band64(&self, grad: &mut [f64], band: &mut [f64], kd: usize) -> Result<(), arael::simple_lm::BandError> {
+                #(#accumulate_blocks_band64_stmts)*
+                Ok(())
+            }
+            fn accumulate_blocks_sparse32(&self, grad: &mut [f32], coo: &mut arael::simple_lm::CooMatrix<f32>) {
+                #(#accumulate_blocks_sparse32_stmts)*
+            }
+            fn accumulate_blocks_sparse64(&self, grad: &mut [f64], coo: &mut arael::simple_lm::CooMatrix<f64>) {
+                #(#accumulate_blocks_sparse64_stmts)*
+            }
+            fn accumulate_blocks_sparse_direct32(&self, grad: &mut [f32], csc: &mut arael::simple_lm::CscMatrix<f32>) {
+                #(#accumulate_blocks_sparse_direct32_stmts)*
+            }
+            fn accumulate_blocks_sparse_direct64(&self, grad: &mut [f64], csc: &mut arael::simple_lm::CscMatrix<f64>) {
+                #(#accumulate_blocks_sparse_direct64_stmts)*
+            }
+            fn accumulate_blocks_sparse_indexed32(&self, grad: &mut [f32], vals: &mut [f32], positions: &[usize], cursor: &mut usize) {
+                #(#accumulate_blocks_sparse_indexed32_stmts)*
+            }
+            fn accumulate_blocks_sparse_indexed64(&self, grad: &mut [f64], vals: &mut [f64], positions: &[usize], cursor: &mut usize) {
+                #(#accumulate_blocks_sparse_indexed64_stmts)*
+            }
+        }
+    };
+
+    // Generate *Sym companion struct and ModelSym impl
+    let sym_impl = generate_sym_impl(name, fields)?;
+
+    // Check for #[arael(fit(...))] on the struct
+    let fit_impl = match parse_fit_attr(&input.attrs)? {
+        Some(fit) => generate_fit_impl(name, fields, &fit)?,
+        None => quote! {},
+    };
+
+    // Check for #[arael(constraint(...))] — stash ALL constraints for later generation
+    {
+        let fields_ts = quote! { #fields };
+        for attr in &input.attrs {
+            if !attr.path().is_ident("arael") { continue; }
+            let content: TokenStream2 = attr.parse_args().unwrap_or_default();
+            let tvec: Vec<proc_macro2::TokenTree> = content.into_iter().collect();
+            if tvec.is_empty() { continue; }
+            if let proc_macro2::TokenTree::Ident(ref id) = tvec[0] {
+                if id.to_string() == "constraint" {
+                    let tokens: TokenStream2 = tvec.into_iter().collect();
+                    registry_stash_constraint(StashedConstraint {
+                        struct_name: name.to_string(),
+                        attr_tokens: tokens.to_string(),
+                        fields_tokens: fields_ts.to_string(),
+                    });
+                }
+            }
+        }
+    }
+
+    // Check for #[arael(root)] or #[arael(root, f32)] — trigger generation of all stashed constraints
+    let root_precision = input.attrs.iter().find_map(|attr| {
+        if !attr.path().is_ident("arael") { return None; }
+        let content: TokenStream2 = attr.parse_args().ok()?;
+        let tvec: Vec<proc_macro2::TokenTree> = content.into_iter().collect();
+        if let Some(proc_macro2::TokenTree::Ident(id)) = tvec.first() {
+            if id.to_string() != "root" { return None; }
+            // Parse optional precision keyword after comma: root, f32
+            let mut precision = "f64".to_string();
+            let mut pos = 1;
+            while pos < tvec.len() {
+                if let proc_macro2::TokenTree::Punct(p) = &tvec[pos] {
+                    if p.as_char() == ',' {
+                        pos += 1;
+                        if let Some(proc_macro2::TokenTree::Ident(kw)) = tvec.get(pos) {
+                            let kw_str = kw.to_string();
+                            if kw_str == "f32" || kw_str == "f64" {
+                                precision = kw_str;
+                            }
+                        }
+                    }
+                }
+                pos += 1;
+            }
+            return Some(precision);
+        }
+        None
+    });
+
+    let constraint_impls = if let Some(ref precision) = root_precision {
+        constraint::generate_root_methods(name, fields, precision)?
+    } else {
+        quote! {}
+    };
+
+    Ok(quote! {
+        #model_impl
+        #sym_impl
+        #fit_impl
+        #constraint_impls
+    })
+}
+
+/// Check if a type is `Param<...>` by looking at the last path segment.
+fn is_param_type(ty: &syn::Type) -> bool {
+    if let syn::Type::Path(tp) = ty {
+        if let Some(seg) = tp.path.segments.last() {
+            let name = seg.ident.to_string();
+            return name == "Param" || name == "SimpleEulerAngleParam" || name == "EulerAngleParam";
+        }
+    }
+    false
+}
+
+fn is_euler_angle_param_type(ty: &syn::Type) -> Option<&'static str> {
+    if let syn::Type::Path(tp) = ty {
+        if let Some(seg) = tp.path.segments.last() {
+            let name = seg.ident.to_string();
+            if name == "SimpleEulerAngleParam" { return Some("simple"); }
+            if name == "EulerAngleParam" { return Some("universal"); }
+        }
+    }
+    None
+}
+
+/// Check if a block type (SelfBlock or CrossBlock) has explicit f32 as its last type arg.
+/// SelfBlock<A, f32> or CrossBlock<A, B, f32> -> true. Default (no float arg) -> false.
+/// Also handles Option<SelfBlock<..., f32>>.
+fn block_is_f32(ty: &syn::Type) -> bool {
+    if let syn::Type::Path(tp) = ty {
+        if let Some(seg) = tp.path.segments.last() {
+            // Unwrap Option<...> if needed
+            if seg.ident == "Option" {
+                if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                    if let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
+                        return block_is_f32(inner_ty);
+                    }
+                }
+                return false;
+            }
+            // SelfBlock or CrossBlock: check if last type arg is f32
+            if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                if let Some(syn::GenericArgument::Type(syn::Type::Path(last))) = args.args.last() {
+                    if let Some(last_seg) = last.path.segments.last() {
+                        return last_seg.ident == "f32";
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Check if a type is `SelfBlock<...>` or `CrossBlock<...>`.
+fn is_hessian_block_type(ty: &syn::Type) -> bool {
+    if let syn::Type::Path(tp) = ty {
+        if let Some(seg) = tp.path.segments.last() {
+            let name = seg.ident.to_string();
+            return matches!(name.as_str(), "SelfBlock" | "CrossBlock");
+        }
+    }
+    false
+}
+
+/// Check if a type is `Option<SelfBlock<...>>` or `Option<CrossBlock<...>>`.
+fn is_option_hessian_block(ty: &syn::Type) -> bool {
+    if let syn::Type::Path(tp) = ty {
+        if let Some(seg) = tp.path.segments.last() {
+            if seg.ident == "Option" {
+                if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                    if let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
+                        return is_hessian_block_type(inner_ty);
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Check if a type should be skipped in Sym generation (Vec, Deque, SelfBlock, CrossBlock).
+fn is_sym_skip_type(ty: &syn::Type) -> bool {
+    if is_hessian_block_type(ty) || is_option_hessian_block(ty) {
+        return true;
+    }
+    if let syn::Type::Path(tp) = ty {
+        if let Some(seg) = tp.path.segments.last() {
+            let name = seg.ident.to_string();
+            return matches!(name.as_str(), "Vec" | "Deque" | "Arena");
+        }
+    }
+    false
+}
+
+/// Extract the inner type T from a generic wrapper like Ref<T> or Option<T>.
+/// Returns the inner type and the last ident of T's path (e.g. "Pose").
+fn extract_wrapper_inner<'a>(ty: &'a syn::Type, wrapper: &str) -> Option<(&'a syn::Type, &'a syn::Ident)> {
+    if let syn::Type::Path(tp) = ty {
+        if let Some(seg) = tp.path.segments.last() {
+            if seg.ident == wrapper {
+                if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                    if let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
+                        if let syn::Type::Path(inner_tp) = inner_ty {
+                            if let Some(inner_seg) = inner_tp.path.segments.last() {
+                                return Some((inner_ty, &inner_seg.ident));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Convert a type name to a lowercase plural collection name: Pose -> poses
+fn to_collection_name(ident: &syn::Ident) -> String {
+    let s = ident.to_string();
+    let mut result = String::new();
+    for (i, c) in s.chars().enumerate() {
+        if i > 0 && c.is_uppercase() {
+            result.push('_');
+        }
+        result.push(c.to_ascii_lowercase());
+    }
+    result.push('s');
+    result
+}
+
+/// Generate the `*Sym` companion struct and `ModelSym` impl.
+fn generate_sym_impl(
+    name: &syn::Ident,
+    fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
+) -> syn::Result<TokenStream2> {
+    let sym_name = syn::Ident::new(&format!("{}Sym", name), name.span());
+
+    let mut sym_fields: Vec<TokenStream2> = Vec::new();
+    let mut sym_inits: Vec<TokenStream2> = Vec::new();
+
+    for field in fields {
+        let ident = field.ident.as_ref().unwrap();
+        let ty = &field.ty;
+
+        // Skip fields with #[arael(skip)] or #[arael(compute = ...)]
+        match parse_arael_attr(&field.attrs)? {
+            Some(AraelAttr::Skip) | Some(AraelAttr::Compute(_)) => continue,
+            _ => {}
+        }
+
+        // Skip collection and hessian block types
+        if is_sym_skip_type(ty) {
+            continue;
+        }
+
+        let field_name = ident.to_string();
+
+        // Ref<T>: resolve via collection lookup, e.g. "poses[base.pose]"
+        if let Some((inner_ty, inner_ident)) = extract_wrapper_inner(ty, "Ref") {
+            let collection = to_collection_name(inner_ident);
+            sym_fields.push(quote! {
+                pub #ident: <#inner_ty as arael::model::ModelSym>::Sym,
+            });
+            sym_inits.push(quote! {
+                #ident: <#inner_ty as arael::model::ModelSym>::sym(
+                    &format!("{}[{}.{}]", #collection, base, #field_name)
+                ),
+            });
+            continue;
+        }
+
+        // Option<T>: unwrap via as_ref().unwrap(), e.g. "base.gps.as_ref().unwrap()"
+        if let Some((inner_ty, _)) = extract_wrapper_inner(ty, "Option") {
+            sym_fields.push(quote! {
+                pub #ident: <#inner_ty as arael::model::ModelSym>::Sym,
+            });
+            sym_inits.push(quote! {
+                #ident: <#inner_ty as arael::model::ModelSym>::sym(
+                    &format!("{}.{}.as_ref().unwrap()", base, #field_name)
+                ),
+            });
+            continue;
+        }
+
+        // Regular fields
+        sym_fields.push(quote! {
+            pub #ident: <#ty as arael::model::ModelSym>::Sym,
+        });
+
+        sym_inits.push(quote! {
+            #ident: <#ty as arael::model::ModelSym>::sym(&format!("{}.{}", base, #field_name)),
+        });
+    }
+
+    Ok(quote! {
+        #[derive(Clone)]
+        pub struct #sym_name {
+            #(#sym_fields)*
+        }
+
+        impl arael::model::ModelSym for #name {
+            type Sym = #sym_name;
+            fn sym(base: &str) -> #sym_name {
+                #sym_name {
+                    #(#sym_inits)*
+                }
+            }
+        }
+    })
+}
+
+enum AraelAttr {
+    Skip,
+    Compute(TokenStream2),
+    RefResolve(String),  // resolution path, e.g. "root.poses"
+}
+
+/// Parse `#[arael(skip)]` or `#[arael(compute = <expr>)]` from field attributes.
+fn parse_arael_attr(attrs: &[syn::Attribute]) -> syn::Result<Option<AraelAttr>> {
+    for attr in attrs {
+        if attr.path().is_ident("arael") {
+            let content: TokenStream2 = attr.parse_args()?;
+            let tokens: Vec<proc_macro2::TokenTree> = content.into_iter().collect();
+
+            if tokens.is_empty() {
+                continue;
+            }
+
+            if let proc_macro2::TokenTree::Ident(ref ident) = tokens[0] {
+                let kw = ident.to_string();
+                if kw == "skip" {
+                    return Ok(Some(AraelAttr::Skip));
+                }
+                // #[arael(ref = root.poses)]
+                if kw == "ref" {
+                    if tokens.len() >= 3 {
+                        if let proc_macro2::TokenTree::Punct(ref p) = tokens[1] {
+                            if p.as_char() == '=' {
+                                let path_tokens: TokenStream2 =
+                                    tokens[2..].iter().cloned().collect();
+                                return Ok(Some(AraelAttr::RefResolve(path_tokens.to_string())));
+                            }
+                        }
+                    }
+                    return Err(syn::Error::new_spanned(
+                        &tokens[0],
+                        "expected `ref = <path>`",
+                    ));
+                }
+                if kw == "compute" {
+                    if tokens.len() >= 3 {
+                        if let proc_macro2::TokenTree::Punct(ref p) = tokens[1] {
+                            if p.as_char() == '=' {
+                                let expr_tokens: TokenStream2 =
+                                    tokens[2..].iter().cloned().collect();
+                                return Ok(Some(AraelAttr::Compute(expr_tokens)));
+                            }
+                        }
+                    }
+                    return Err(syn::Error::new_spanned(
+                        &tokens[0],
+                        "expected `compute = <expression>`",
+                    ));
+                }
+            }
+
+            return Err(syn::Error::new_spanned(
+                attr,
+                "unknown arael attribute, expected `skip` or `compute = <expr>`",
+            ));
+        }
+    }
+    Ok(None)
+}
+
+/// In a compute expression, replace bare identifiers matching Param field names
+/// with `self.<name>.work()`. Identifiers that are part of a `::` path are not
+/// replaced (e.g. `matrix3f::rotation_from_euler_angles` stays as-is).
+fn substitute_param_idents(
+    tokens: TokenStream2,
+    param_names: &HashSet<String>,
+) -> TokenStream2 {
+    use proc_macro2::{TokenTree, Group};
+
+    let token_vec: Vec<TokenTree> = tokens.into_iter().collect();
+    let mut result = TokenStream2::new();
+    let len = token_vec.len();
+
+    for i in 0..len {
+        match &token_vec[i] {
+            TokenTree::Ident(ident) => {
+                let name = ident.to_string();
+                if param_names.contains(&name) {
+                    let prev_is_colon = i >= 1
+                        && matches!(&token_vec[i - 1], TokenTree::Punct(p) if p.as_char() == ':');
+                    let next_is_colon = i + 1 < len
+                        && matches!(&token_vec[i + 1], TokenTree::Punct(p) if p.as_char() == ':');
+
+                    if !prev_is_colon && !next_is_colon {
+                        let span = ident.span();
+                        let self_id = proc_macro2::Ident::new("self", span);
+                        let field_id = proc_macro2::Ident::new(&name, span);
+                        let work_id = proc_macro2::Ident::new("work", span);
+                        result.extend(quote! { #self_id.#field_id.#work_id() });
+                        continue;
+                    }
+                }
+                result.extend(std::iter::once(TokenTree::Ident(ident.clone())));
+            }
+            TokenTree::Group(group) => {
+                let inner = substitute_param_idents(group.stream(), param_names);
+                let mut new_group = Group::new(group.delimiter(), inner);
+                new_group.set_span(group.span());
+                result.extend(std::iter::once(TokenTree::Group(new_group)));
+            }
+            other => {
+                result.extend(std::iter::once(other.clone()));
+            }
+        }
+    }
+
+    result
+}
+
+// ===========================================================================
+// #[arael(fit(...))] — auto-generate cost, gradient, hessian, and fit methods
+// ===========================================================================
+
+struct FitAttr {
+    data_field: proc_macro2::Ident,
+    loop_var: proc_macro2::Ident,
+    body_stmts: Vec<Stmt>,
+}
+
+/// Parse `#[arael(fit(data, |e| { ... }))]` from struct-level attributes.
+fn parse_fit_attr(attrs: &[syn::Attribute]) -> syn::Result<Option<FitAttr>> {
+    for attr in attrs {
+        if !attr.path().is_ident("arael") {
+            continue;
+        }
+        let content: TokenStream2 = attr.parse_args()?;
+        let tokens: Vec<proc_macro2::TokenTree> = content.into_iter().collect();
+        if tokens.is_empty() {
+            continue;
+        }
+
+        if let proc_macro2::TokenTree::Ident(ref ident) = tokens[0] {
+            if ident.to_string() != "fit" {
+                continue;
+            }
+
+            if tokens.len() < 2 {
+                return Err(syn::Error::new_spanned(
+                    ident,
+                    "expected fit(data_field, |var| { ... })",
+                ));
+            }
+
+            if let proc_macro2::TokenTree::Group(ref group) = tokens[1] {
+                if group.delimiter() != proc_macro2::Delimiter::Parenthesis {
+                    return Err(syn::Error::new_spanned(
+                        ident,
+                        "expected parentheses after fit",
+                    ));
+                }
+                let inner: Vec<proc_macro2::TokenTree> =
+                    group.stream().into_iter().collect();
+                return parse_fit_inner(&inner, ident);
+            }
+
+            return Err(syn::Error::new_spanned(
+                ident,
+                "expected fit(...)",
+            ));
+        }
+    }
+    Ok(None)
+}
+
+fn parse_fit_inner(
+    tokens: &[proc_macro2::TokenTree],
+    err_span: &proc_macro2::Ident,
+) -> syn::Result<Option<FitAttr>> {
+    // Expected tokens: data_field , | loop_var | { body }
+    //              or: data_field , | loop_var | expr
+    let mut pos = 0;
+
+    let data_field = match tokens.get(pos) {
+        Some(proc_macro2::TokenTree::Ident(id)) => id.clone(),
+        _ => {
+            return Err(syn::Error::new_spanned(
+                err_span,
+                "expected data field name as first argument to fit()",
+            ))
+        }
+    };
+    pos += 1;
+
+    // comma
+    match tokens.get(pos) {
+        Some(proc_macro2::TokenTree::Punct(p)) if p.as_char() == ',' => {}
+        _ => {
+            return Err(syn::Error::new_spanned(
+                err_span,
+                "expected comma after data field name",
+            ))
+        }
+    }
+    pos += 1;
+
+    // | loop_var |
+    match tokens.get(pos) {
+        Some(proc_macro2::TokenTree::Punct(p)) if p.as_char() == '|' => {}
+        _ => {
+            return Err(syn::Error::new_spanned(
+                err_span,
+                "expected |variable| closure syntax",
+            ))
+        }
+    }
+    pos += 1;
+
+    let loop_var = match tokens.get(pos) {
+        Some(proc_macro2::TokenTree::Ident(id)) => id.clone(),
+        _ => {
+            return Err(syn::Error::new_spanned(
+                err_span,
+                "expected loop variable name",
+            ))
+        }
+    };
+    pos += 1;
+
+    match tokens.get(pos) {
+        Some(proc_macro2::TokenTree::Punct(p)) if p.as_char() == '|' => {}
+        _ => {
+            return Err(syn::Error::new_spanned(
+                err_span,
+                "expected closing | after loop variable",
+            ))
+        }
+    }
+    pos += 1;
+
+    // Either { block } or remaining expression tokens
+    let body_stmts = match tokens.get(pos) {
+        Some(proc_macro2::TokenTree::Group(g))
+            if g.delimiter() == proc_macro2::Delimiter::Brace =>
+        {
+            let block_tokens =
+                proc_macro2::TokenStream::from(proc_macro2::TokenTree::Group(g.clone()));
+            let block: syn::Block = syn::parse2(block_tokens)?;
+            block.stmts
+        }
+        _ => {
+            // Remaining tokens form a direct expression
+            let remaining: TokenStream2 = tokens[pos..].iter().cloned().collect();
+            let expr: Expr = syn::parse2(remaining)?;
+            vec![Stmt::Expr(expr, None)]
+        }
+    };
+
+    Ok(Some(FitAttr {
+        data_field,
+        loop_var,
+        body_stmts,
+    }))
+}
+
+// ---------------------------------------------------------------------------
+// syn::Expr → arael_sym::E conversion
+// ---------------------------------------------------------------------------
+
+struct SymContext {
+    loop_var: String,
+    param_names: Vec<String>,
+    constant_names: HashSet<String>,
+    let_bindings: HashMap<String, arael_sym::E>,
+    data_fields: HashSet<String>,
+    used_constants: HashSet<String>,
+}
+
+fn syn_expr_to_sym(expr: &Expr, ctx: &mut SymContext) -> syn::Result<arael_sym::E> {
+    match expr {
+        Expr::Path(ep) if ep.qself.is_none() => {
+            if let Some(ident) = ep.path.get_ident() {
+                let name = ident.to_string();
+                // Check let bindings first (inline expansion)
+                if let Some(e) = ctx.let_bindings.get(&name) {
+                    return Ok(e.clone());
+                }
+                // Check params
+                if ctx.param_names.contains(&name) {
+                    return Ok(arael_sym::symbol(&name));
+                }
+                // Check constants
+                if ctx.constant_names.contains(&name) {
+                    ctx.used_constants.insert(name.clone());
+                    return Ok(arael_sym::symbol(&name));
+                }
+                return Err(syn::Error::new_spanned(
+                    ident,
+                    format!("unknown variable '{name}' in fit expression (not a Param field, plain field, or let binding)"),
+                ));
+            }
+            Err(syn::Error::new_spanned(
+                expr,
+                "qualified paths not supported in fit expression",
+            ))
+        }
+
+        Expr::Field(ef) => {
+            // e.x where e is the loop variable
+            if let Expr::Path(base_path) = ef.base.as_ref() {
+                if let Some(base_ident) = base_path.path.get_ident() {
+                    if base_ident.to_string() == ctx.loop_var {
+                        if let syn::Member::Named(field_name) = &ef.member {
+                            let sym_name =
+                                format!("{}_{}", ctx.loop_var, field_name);
+                            ctx.data_fields.insert(field_name.to_string());
+                            return Ok(arael_sym::symbol(&sym_name));
+                        }
+                    }
+                }
+            }
+            Err(syn::Error::new_spanned(
+                expr,
+                "only loop_variable.field access is supported in fit expressions",
+            ))
+        }
+
+        Expr::Binary(eb) => {
+            let left = syn_expr_to_sym(&eb.left, ctx)?;
+            let right = syn_expr_to_sym(&eb.right, ctx)?;
+            match eb.op {
+                syn::BinOp::Add(_) => Ok(left + right),
+                syn::BinOp::Sub(_) => Ok(left - right),
+                syn::BinOp::Mul(_) => Ok(left * right),
+                syn::BinOp::Div(_) => Ok(left / right),
+                _ => Err(syn::Error::new_spanned(
+                    &eb.op,
+                    "only +, -, *, / operators are supported in fit expressions",
+                )),
+            }
+        }
+
+        Expr::Unary(eu) => {
+            let inner = syn_expr_to_sym(&eu.expr, ctx)?;
+            match eu.op {
+                syn::UnOp::Neg(_) => Ok(-inner),
+                _ => Err(syn::Error::new_spanned(
+                    expr,
+                    "only unary negation is supported in fit expressions",
+                )),
+            }
+        }
+
+        Expr::Lit(el) => match &el.lit {
+            syn::Lit::Float(lf) => {
+                let val: f64 = lf.base10_parse()?;
+                Ok(arael_sym::constant(val))
+            }
+            syn::Lit::Int(li) => {
+                let val: i64 = li.base10_parse()?;
+                Ok(arael_sym::constant(val as f64))
+            }
+            _ => Err(syn::Error::new_spanned(
+                expr,
+                "only numeric literals are supported in fit expressions",
+            )),
+        },
+
+        Expr::Call(ec) => {
+            if let Expr::Path(func_path) = ec.func.as_ref() {
+                if let Some(func_name) = func_path.path.get_ident() {
+                    let args: Vec<arael_sym::E> = ec
+                        .args
+                        .iter()
+                        .map(|a| syn_expr_to_sym(a, ctx))
+                        .collect::<Result<_, _>>()?;
+
+                    let fname = func_name.to_string();
+                    return match fname.as_str() {
+                        "sin" => expect_sym_unary(func_name, args, arael_sym::sin),
+                        "cos" => expect_sym_unary(func_name, args, arael_sym::cos),
+                        "tan" => expect_sym_unary(func_name, args, arael_sym::tan),
+                        "asin" => expect_sym_unary(func_name, args, arael_sym::asin),
+                        "acos" => expect_sym_unary(func_name, args, arael_sym::acos),
+                        "atan" => expect_sym_unary(func_name, args, arael_sym::atan),
+                        "sinh" => expect_sym_unary(func_name, args, arael_sym::sinh),
+                        "cosh" => expect_sym_unary(func_name, args, arael_sym::cosh),
+                        "tanh" => expect_sym_unary(func_name, args, arael_sym::tanh),
+                        "exp" => expect_sym_unary(func_name, args, arael_sym::exp),
+                        "ln" => expect_sym_unary(func_name, args, arael_sym::ln),
+                        "log2" => expect_sym_unary(func_name, args, arael_sym::log2),
+                        "log10" => expect_sym_unary(func_name, args, arael_sym::log10),
+                        "sqrt" => expect_sym_unary(func_name, args, arael_sym::sqrt),
+                        "abs" => expect_sym_unary(func_name, args, arael_sym::abs),
+                        "atan2" => expect_sym_binary(func_name, args, arael_sym::atan2),
+                        "pow" => expect_sym_binary(func_name, args, arael_sym::pow),
+                        _ => Err(syn::Error::new_spanned(
+                            func_name,
+                            format!("unknown function '{fname}' in fit expression"),
+                        )),
+                    };
+                }
+            }
+            Err(syn::Error::new_spanned(
+                expr,
+                "unsupported function call in fit expression",
+            ))
+        }
+
+        Expr::Paren(ep) => syn_expr_to_sym(&ep.expr, ctx),
+
+        Expr::Group(eg) => syn_expr_to_sym(&eg.expr, ctx),
+
+        _ => Err(syn::Error::new_spanned(
+            expr,
+            "unsupported expression type in fit expression",
+        )),
+    }
+}
+
+fn expect_sym_unary(
+    name: &syn::Ident,
+    args: Vec<arael_sym::E>,
+    f: fn(arael_sym::E) -> arael_sym::E,
+) -> syn::Result<arael_sym::E> {
+    if args.len() != 1 {
+        return Err(syn::Error::new_spanned(
+            name,
+            format!("{} expects 1 argument, got {}", name, args.len()),
+        ));
+    }
+    Ok(f(args.into_iter().next().unwrap()))
+}
+
+fn expect_sym_binary(
+    name: &syn::Ident,
+    args: Vec<arael_sym::E>,
+    f: fn(arael_sym::E, arael_sym::E) -> arael_sym::E,
+) -> syn::Result<arael_sym::E> {
+    if args.len() != 2 {
+        return Err(syn::Error::new_spanned(
+            name,
+            format!("{} expects 2 arguments, got {}", name, args.len()),
+        ));
+    }
+    let mut it = args.into_iter();
+    Ok(f(it.next().unwrap(), it.next().unwrap()))
+}
+
+// ---------------------------------------------------------------------------
+// Code generation: calc_cost, calc_grad_hessian, fit, fit_with
+// ---------------------------------------------------------------------------
+
+fn generate_fit_impl(
+    name: &syn::Ident,
+    fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
+    fit: &FitAttr,
+) -> syn::Result<TokenStream2> {
+    // 1. Classify fields
+    let mut param_names: Vec<String> = Vec::new();
+    let mut constant_names: HashSet<String> = HashSet::new();
+    let data_field_name = fit.data_field.to_string();
+
+    for field in fields {
+        let ident = field.ident.as_ref().unwrap();
+        let field_name = ident.to_string();
+        let attr = parse_arael_attr(&field.attrs)?;
+        if matches!(attr, Some(AraelAttr::Skip) | Some(AraelAttr::Compute(_))) {
+            continue;
+        }
+        if is_param_type(&field.ty) {
+            param_names.push(field_name);
+        } else if field_name != data_field_name {
+            constant_names.insert(field_name);
+        }
+    }
+
+    // 2. Process body: convert let bindings + final expression to sym
+    let mut ctx = SymContext {
+        loop_var: fit.loop_var.to_string(),
+        param_names: param_names.clone(),
+        constant_names,
+        let_bindings: HashMap::new(),
+        data_fields: HashSet::new(),
+        used_constants: HashSet::new(),
+    };
+
+    let mut residual: Option<arael_sym::E> = None;
+
+    for stmt in &fit.body_stmts {
+        match stmt {
+            Stmt::Local(local) => {
+                let binding_name = match &local.pat {
+                    Pat::Ident(pi) => pi.ident.to_string(),
+                    _ => {
+                        return Err(syn::Error::new_spanned(
+                            &local.pat,
+                            "only simple `let name = expr;` bindings are supported in fit expressions",
+                        ))
+                    }
+                };
+                let init = local.init.as_ref().ok_or_else(|| {
+                    syn::Error::new_spanned(local, "let binding must have an initializer")
+                })?;
+                let sym_expr = syn_expr_to_sym(&init.expr, &mut ctx)?;
+                ctx.let_bindings.insert(binding_name, sym_expr);
+            }
+            Stmt::Expr(expr, _) => {
+                residual = Some(syn_expr_to_sym(expr, &mut ctx)?);
+            }
+            _ => {
+                return Err(syn::Error::new_spanned(
+                    &fit.body_stmts.first(),
+                    "only let bindings and expressions are supported in fit body",
+                ))
+            }
+        }
+    }
+
+    let residual = residual.ok_or_else(|| {
+        syn::Error::new_spanned(
+            &fit.data_field,
+            "fit body must end with a residual expression",
+        )
+    })?;
+
+    // 3. Differentiate w.r.t. each param
+    let n = param_names.len();
+    let derivatives: Vec<arael_sym::E> = param_names
+        .iter()
+        .map(|p| residual.diff(p.as_str()))
+        .collect();
+
+    // 4. Generate Rust code strings and parse to syn::Expr
+    let r_code = residual.to_rust("f32");
+    let r_expr: Expr = syn::parse_str(&r_code).map_err(|e| {
+        syn::Error::new_spanned(
+            &fit.data_field,
+            format!("failed to parse generated residual code: {e}\ngenerated: {r_code}"),
+        )
+    })?;
+
+    let dr_exprs: Vec<Expr> = derivatives
+        .iter()
+        .enumerate()
+        .map(|(i, d)| {
+            let code = d.to_rust("f32");
+            syn::parse_str(&code).map_err(|e| {
+                syn::Error::new_spanned(
+                    &fit.data_field,
+                    format!(
+                        "failed to parse generated derivative code for param '{}': {e}\ngenerated: {code}",
+                        param_names[i]
+                    ),
+                )
+            })
+        })
+        .collect::<Result<_, _>>()?;
+
+    // 5. Build code fragments
+
+    // Param unpacking: let a = params[0]; let b = params[1]; ...
+    let param_unpack: Vec<TokenStream2> = param_names
+        .iter()
+        .enumerate()
+        .map(|(idx, pname)| {
+            let id = proc_macro2::Ident::new(pname, proc_macro2::Span::call_site());
+            quote! { let #id = params[#idx]; }
+        })
+        .collect();
+
+    // Constant binding: let sigma = self.sigma; ...
+    let mut sorted_constants: Vec<&String> = ctx.used_constants.iter().collect();
+    sorted_constants.sort();
+    let constant_bind: Vec<TokenStream2> = sorted_constants
+        .iter()
+        .map(|cname| {
+            let id = proc_macro2::Ident::new(cname, proc_macro2::Span::call_site());
+            quote! { let #id = self.#id; }
+        })
+        .collect();
+
+    // Data field binding: let e_x = e.x; ...
+    let mut sorted_data_fields: Vec<&String> = ctx.data_fields.iter().collect();
+    sorted_data_fields.sort();
+    let loop_var_id = &fit.loop_var;
+    let data_bind: Vec<TokenStream2> = sorted_data_fields
+        .iter()
+        .map(|fname| {
+            let sym_id = proc_macro2::Ident::new(
+                &format!("{}_{}", ctx.loop_var, fname),
+                proc_macro2::Span::call_site(),
+            );
+            let field_id = proc_macro2::Ident::new(fname, proc_macro2::Span::call_site());
+            quote! { let #sym_id = #loop_var_id.#field_id; }
+        })
+        .collect();
+
+    // Derivative bindings: let __dr_0 = <expr>; ...
+    let dr_idents: Vec<proc_macro2::Ident> = (0..n)
+        .map(|i| proc_macro2::Ident::new(&format!("__dr_{i}"), proc_macro2::Span::call_site()))
+        .collect();
+    let dr_bindings: Vec<TokenStream2> = (0..n)
+        .map(|i| {
+            let dr_id = &dr_idents[i];
+            let dr_expr = &dr_exprs[i];
+            quote! { let #dr_id: f32 = #dr_expr; }
+        })
+        .collect();
+
+    // Gradient accumulation
+    let grad_accum: Vec<TokenStream2> = (0..n)
+        .map(|i| {
+            let dr_id = &dr_idents[i];
+            quote! { grad[#i] += 2.0_f32 * __r * #dr_id; }
+        })
+        .collect();
+
+    // Hessian accumulation (upper triangle only)
+    let hessian_accum: Vec<TokenStream2> = (0..n)
+        .flat_map(|i| {
+            let dr_idents = &dr_idents;
+            (i..n).map(move |j| {
+                let idx = i * n + j;
+                let dr_i = &dr_idents[i];
+                let dr_j = &dr_idents[j];
+                quote! { hessian[#idx] += 2.0_f32 * #dr_i * #dr_j; }
+            })
+        })
+        .collect();
+
+    // Symmetric fill (lower triangle)
+    let hessian_symmetry: Vec<TokenStream2> = (0..n)
+        .flat_map(|i| {
+            (i + 1..n).map(move |j| {
+                let ij = i * n + j;
+                let ji = j * n + i;
+                quote! { hessian[#ji] = hessian[#ij]; }
+            })
+        })
+        .collect();
+
+    let data_field_id = &fit.data_field;
+
+    Ok(quote! {
+        impl arael::simple_lm::LmProblem<f32> for #name {
+            fn calc_cost(&mut self, params: &[f32]) -> f32 {
+                #(#param_unpack)*
+                #(#constant_bind)*
+                let mut __cost = 0.0_f32;
+                for #loop_var_id in &self.#data_field_id {
+                    #(#data_bind)*
+                    let __r: f32 = #r_expr;
+                    __cost += __r * __r;
+                }
+                __cost
+            }
+
+            fn calc_grad_hessian_dense(
+                &mut self,
+                params: &[f32],
+                grad: &mut [f32],
+                hessian: &mut [f32],
+            ) {
+                #(#param_unpack)*
+                #(#constant_bind)*
+                grad.iter_mut().for_each(|g| *g = 0.0);
+                hessian.iter_mut().for_each(|h| *h = 0.0);
+                for #loop_var_id in &self.#data_field_id {
+                    #(#data_bind)*
+                    let __r: f32 = #r_expr;
+                    #(#dr_bindings)*
+                    #(#grad_accum)*
+                    #(#hessian_accum)*
+                }
+                #(#hessian_symmetry)*
+            }
+
+            fn calc_grad_hessian_band(
+                &mut self,
+                _params: &[f32],
+                _grad: &mut [f32],
+                _band: &mut [f32],
+                _kd: usize,
+            ) -> Result<(), arael::simple_lm::BandError> {
+                unimplemented!("fit models do not support band assembly")
+            }
+
+            fn calc_grad_hessian_sparse(
+                &mut self,
+                _params: &[f32],
+                _grad: &mut [f32],
+                _coo: &mut arael::simple_lm::CooMatrix<f32>,
+            ) {
+                unimplemented!("fit models do not support sparse assembly")
+            }
+
+            fn calc_grad_hessian_sparse_direct(
+                &mut self,
+                _params: &[f32],
+                _grad: &mut [f32],
+                _csc: &mut arael::simple_lm::CscMatrix<f32>,
+            ) {
+                unimplemented!("fit models do not support sparse direct assembly")
+            }
+
+            fn calc_grad_hessian_sparse_indexed(
+                &mut self,
+                _params: &[f32],
+                _grad: &mut [f32],
+                _vals: &mut [f32],
+                _positions: &[usize],
+            ) {
+                unimplemented!("fit models do not support sparse indexed assembly")
+            }
+        }
+
+        impl #name {
+            pub fn fit(&mut self) -> arael::simple_lm::LmResult<f32> {
+                self.fit_with(&arael::simple_lm::LmConfig::default())
+            }
+
+            pub fn fit_with(
+                &mut self,
+                config: &arael::simple_lm::LmConfig<f32>,
+            ) -> arael::simple_lm::LmResult<f32> {
+                let mut __params = std::vec::Vec::new();
+                arael::model::Model::serialize_params32(self, &mut __params);
+                let __result = arael::simple_lm::solve_f32(
+                    &__params,
+                    self,
+                    config,
+                );
+                arael::model::Model::deserialize_params32(self, &__result.x);
+                __result
+            }
+        }
+    })
+}

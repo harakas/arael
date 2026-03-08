@@ -1,0 +1,43 @@
+[workspace]
+members = ["arael-macros", "arael-sym", "arael-sym-macros", "arael-sketch"]
+
+[package]
+name = "arael"
+version = "0.1.0"
+edition = "2024"
+description = "Nonlinear optimization framework with compile-time symbolic differentiation"
+license = "MIT"
+repository = "https://github.com/harakas/arael"
+keywords = ["optimization", "nonlinear", "least-squares", "symbolic-math", "slam"]
+categories = ["science::robotics", "mathematics", "algorithms"]
+
+[features]
+lapack = ["dep:lapack-sys"]
+eigen = ["dep:cc"]
+cholmod = ["eigen"]
+
+[dependencies]
+arael-macros = { version = "0.1.0", path = "arael-macros" }
+arael-sym = { version = "0.1.0", path = "arael-sym" }
+num = "0.4"
+nalgebra = "0.33"
+rand = "0.9"
+rand_distr = "0.5"
+serde = { version = "1", features = ["derive"] }
+lapack-sys = { version = "0.15", optional = true }
+faer = { version = "0.24", default-features = false, features = ["std", "sparse-linalg"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { version = "0.3", features = ["wasm_js"] }
+web-time = "1"
+
+[build-dependencies]
+cc = { version = "1", optional = true }
+
+[dev-dependencies]
+criterion = "0.5"
+image = "0.25"
+
+[[bench]]
+name = "benchmarks"
+harness = false
