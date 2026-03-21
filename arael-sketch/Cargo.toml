@@ -2,6 +2,8 @@
 name = "arael-sketch"
 version = "0.1.0"
 edition = "2024"
+authors = ["Indrek Mandre <indrek@mare.ee>"]
+readme = "../README.md"
 description = "2D constraint-based sketch solver and interactive editor"
 license = "MIT"
 repository = "https://github.com/harakas/arael"

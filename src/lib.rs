@@ -96,6 +96,8 @@
 //!
 //! [![Sketch Editor](https://raw.githubusercontent.com/harakas/arael/refs/heads/master/docs/sketch.png)](https://sketch.mare.ee/)
 //!
+//! [Try it in the browser](https://sketch.mare.ee/)
+//!
 //! # Example: SLAM Constraints
 //!
 //! For multi-body optimization (SLAM, bundle adjustment), define model

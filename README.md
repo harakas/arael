@@ -196,7 +196,9 @@ See [examples/loc_demo.rs](examples/loc_demo.rs).
 
 An interactive constraint-based 2D sketch editor built on the arael optimization framework. Draw geometry, apply constraints, and the solver keeps everything consistent in real time.
 
-![Sketch Editor](docs/sketch.png)
+[![Sketch Editor](docs/sketch.png)](https://sketch.mare.ee/)
+
+[Try it in the browser](https://sketch.mare.ee/)
 
 ### Running (native)
 

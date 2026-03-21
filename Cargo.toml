@@ -5,6 +5,7 @@ members = ["arael-macros", "arael-sym", "arael-sym-macros", "arael-sketch"]
 name = "arael"
 version = "0.1.0"
 edition = "2024"
+authors = ["Indrek Mandre <indrek@mare.ee>"]
 description = "Nonlinear optimization framework with compile-time symbolic differentiation"
 license = "MIT"
 repository = "https://github.com/harakas/arael"
