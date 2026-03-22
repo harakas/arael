@@ -635,32 +635,64 @@ impl Sketch {
             };
         }
 
-        // Compute starting cost to scale solver parameters
+        // Compute starting cost to decide strategy
         let start_cost = self.calc_cost(&params64);
 
-        // Scale lambda with cost: small for near-solved, large for
-        // far-from-solved (gradient descent first to avoid overshooting)
-        let lambda = if start_cost > 1.0 {
-            (start_cost * 1e-6).clamp(1e-4, 1.0)
+        // Graduated optimization: when starting cost is high, the Hessian
+        // condition number (constraint_isigma/drift_isigma)^2 can make LM
+        // oscillate. Solve with reduced constraint strength first to get
+        // close to the solution, then ramp up to full strength.
+        let full_isigma = self.constraint_isigma;
+        let graduated = start_cost > n as f64 * 1e-3;
+        let stages: &[f64] = if graduated {
+            &[0.01, 0.1, 1.0]
         } else {
-            1e-6
+            &[1.0]
         };
 
-        let config = arael::simple_lm::LmConfig::<f64> {
-            initial_lambda: lambda,
-            abs_precision: 1e-6,
-            rel_precision: 1e-4,
-            cost_threshold: n as f64 * 1e-6,
-            min_iters: if start_cost > (n as f64 * 1e-4) { 32 } else { 8 },
-            verbose: false,
-            ..Default::default()
+        let mut total_iters = 0usize;
+        let mut result = arael::simple_lm::LmResult {
+            x: params64.clone(),
+            start_cost,
+            end_cost: start_cost,
+            iterations: 0,
         };
-        let result = if n >= 64 {
-            arael::simple_lm::solve_sparse_faer(&params64, self, &config)
-        } else {
-            arael::simple_lm::solve(&params64, self, &config)
-        };
-        self.deserialize64(&result.x);
+
+        for &scale in stages {
+            self.constraint_isigma = full_isigma * scale;
+
+            let mut params = std::vec::Vec::new();
+            self.serialize64(&mut params);
+            let cost = self.calc_cost(&params);
+
+            let lambda = if cost > 1.0 {
+                (cost * 1e-6).clamp(1e-4, 1.0)
+            } else {
+                1e-6
+            };
+
+            let config = arael::simple_lm::LmConfig::<f64> {
+                initial_lambda: lambda,
+                abs_precision: 1e-6,
+                rel_precision: 1e-4,
+                cost_threshold: n as f64 * 1e-6,
+                min_iters: if cost > (n as f64 * 1e-4) { 32 } else { 8 },
+                verbose: false,
+                ..Default::default()
+            };
+            let stage_result = if n >= 64 {
+                arael::simple_lm::solve_sparse_faer(&params, self, &config)
+            } else {
+                arael::simple_lm::solve(&params, self, &config)
+            };
+            self.deserialize64(&stage_result.x);
+            total_iters += stage_result.iterations;
+            result.end_cost = stage_result.end_cost;
+            result.x = stage_result.x;
+        }
+
+        self.constraint_isigma = full_isigma;
+        result.iterations = total_iters;
         result
     }
 }

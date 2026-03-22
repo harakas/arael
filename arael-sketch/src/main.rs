@@ -646,11 +646,9 @@ impl EditorApp {
         let pending = self.dof_pending.clone();
         if let Some(data) = sketch_data {
             std::thread::spawn(move || {
-                let t0 = std::time::Instant::now();
                 if let Ok(mut sketch) = bincode::deserialize::<Sketch>(&data) {
                     let dof = compute_dof(&mut sketch);
                     *pending.lock().unwrap() = Some(dof);
-                    eprintln!("DOF={} computed in {:.1}ms", dof, t0.elapsed().as_secs_f64() * 1000.0);
                 }
             });
         }

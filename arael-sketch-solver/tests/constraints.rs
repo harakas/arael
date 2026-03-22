@@ -539,3 +539,25 @@ fn test_serde_roundtrip_rectangle_with_fixed() {
     assert_near(restored.lines[bottom].p2.value.x, 4.0, 0.01);
     assert_near(restored.lines[right].p2.value.y, 2.0, 0.1);
 }
+
+#[test]
+fn test_graduated_optimization_length() {
+    // Reproduces a previously-broken case: single line with length constraint
+    // far from target. Without graduated optimization, the rank-1 Hessian
+    // caused LM to oscillate and never converge.
+    let mut sketch = Sketch::new();
+    let line = sketch.add_line(
+        vect2d::new(-4.300650119781494, -0.0029095385689288378),
+        vect2d::new(-0.0643674734517385, -2.2063466414334907),
+    );
+    sketch.lines[line].constraints.has_length = true;
+    sketch.lines[line].constraints.length = 3.0;
+
+    let result = sketch.solve();
+
+    let l = &sketch.lines[line];
+    let len = ((l.p2.value.x - l.p1.value.x).powi(2)
+        + (l.p2.value.y - l.p1.value.y).powi(2)).sqrt();
+    assert_near(len, 3.0, 0.001);
+    assert!(result.end_cost < 1.0, "cost={} should be near zero", result.end_cost);
+}
