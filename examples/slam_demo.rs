@@ -621,6 +621,7 @@ fn main() {
         println!("\nPass {} (isigma scale={}):", pass + 1, scale);
         let config = arael::simple_lm::LmConfig::<f64> {
             verbose: true,
+            rel_precision: 1e-6,
             ..Default::default()
         };
         let result = match solver_name.as_str() {

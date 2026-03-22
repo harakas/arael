@@ -622,12 +622,30 @@ impl Sketch {
 
     /// Solve the sketch constraints using Levenberg-Marquardt.
     /// Uses sparse faer Cholesky for n > 64 params, dense Cholesky otherwise.
+    /// Scales solver parameters based on starting cost and problem size.
     pub fn solve(&mut self) -> arael::simple_lm::LmResult<f64> {
+        use arael::simple_lm::LmProblem;
         let mut params64: std::vec::Vec<f64> = std::vec::Vec::new();
         self.serialize64(&mut params64);
         let n = params64.len();
 
+        // Compute starting cost to scale solver parameters
+        let start_cost = self.calc_cost(&params64);
+
+        // Scale lambda with cost: small for near-solved, large for
+        // far-from-solved (gradient descent first to avoid overshooting)
+        let lambda = if start_cost > 1.0 {
+            (start_cost * 1e-6).clamp(1e-4, 1.0)
+        } else {
+            1e-6
+        };
+
         let config = arael::simple_lm::LmConfig::<f64> {
+            initial_lambda: lambda,
+            abs_precision: 1e-6,
+            rel_precision: 1e-4,
+            cost_threshold: n as f64 * 1e-6,
+            min_iters: if start_cost > (n as f64 * 1e-4) { 32 } else { 8 },
             verbose: false,
             ..Default::default()
         };

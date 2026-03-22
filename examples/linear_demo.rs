@@ -88,10 +88,8 @@ fn main() {
 
     // Step 2: robust nonlinear fit with suppressed residuals
     let result = model.fit_with(&LmConfig {
-        abs_precision: 0.01,
-        max_iters: 100,
-        initial_lambda: 0.001,
         verbose: true,
+        ..Default::default()
     });
     println!(
         "\nIterations: {}, cost: {:.6} -> {:.6}",

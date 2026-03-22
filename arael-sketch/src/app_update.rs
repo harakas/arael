@@ -691,6 +691,7 @@ impl eframe::App for EditorApp {
                             // Confirm position, enter text input
                             self.dim_placing = false;
                             self.dim_editing = true;
+                            self.dim_select_all = true;
                         }
                     } else if !self.dim_editing {
                         // Phase 1: selecting entities
