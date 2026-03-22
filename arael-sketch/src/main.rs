@@ -109,15 +109,13 @@ impl EditorApp {
 
 
 
-        // Point at apex + circle (full arc, r=1.5) centered there
-        let p0 = sketch.add_point(vect2d::new(0.0, 0.0));
+        // Circle (full arc, r=1.5) centered at apex
         let a0 = sketch.add_arc(vect2d::new(0.0, 0.0), 1.5, 0.0, std::f64::consts::TAU, true);
 
         // Equal length: L0 = L2 (isoceles)
         sketch.equal_length.push(EqualLength { a: l2, b: l0, hb: CrossBlock::new() });
 
-        // Arc center = L0.p1 (apex), point = L0.p1
-        sketch.coincident_lp1.push(CoincidentLP1 { line: l0, point: p0, hb: CrossBlock::new() });
+        // Arc center = L0.p1 (apex)
         sketch.coincident_lp1_arc_center.push(CoincidentLP1ArcCenter { line: l0, arc: a0, hb: CrossBlock::new() });
 
         // Dimensions (via Action, then adjust offsets for nice layout)
