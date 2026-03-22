@@ -523,7 +523,11 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
     config: &LmConfig<T>,
 ) -> LmResult<T> {
     let n = x0.len();
-    assert!(n > 0);
+    if n == 0 {
+        return LmResult {
+            x: x0.to_vec(), start_cost: T::zero(), end_cost: T::zero(), iterations: 0,
+        };
+    }
 
     let mut cur_x = x0.to_vec();
     let mut try_x = vec![T::zero(); n];

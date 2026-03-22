@@ -12,6 +12,9 @@ use crate::{EditorApp, spawn_async};
 
 impl eframe::App for EditorApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Poll background DOF computation
+        self.poll_dof();
+
         // Check for pending file load from async dialog
         let pending_json = self.pending_load.lock().unwrap().take();
         if let Some(json) = pending_json {
@@ -189,6 +192,7 @@ impl eframe::App for EditorApp {
                         self.sketch = restored;
                         self.selection.clear();
                         self.update_cost();
+                        self.compute_dof_async();
                     }
                 }
                 if ui.add_enabled(self.history.can_redo(), egui::Button::new("Redo")).clicked() {
@@ -196,6 +200,7 @@ impl eframe::App for EditorApp {
                         self.sketch = restored;
                         self.selection.clear();
                         self.update_cost();
+                        self.compute_dof_async();
                     }
                 }
             });
@@ -314,12 +319,14 @@ impl eframe::App for EditorApp {
                     self.sketch = restored;
                     self.selection.clear();
                     self.update_cost();
+                    self.compute_dof_async();
                 }
             } else if ctrl && ui.input(|i| i.key_pressed(egui::Key::Z)) {
                 if let Some(restored) = self.history.undo() {
                     self.sketch = restored;
                     self.selection.clear();
                     self.update_cost();
+                    self.compute_dof_async();
                 }
             }
             if ctrl && ui.input(|i| i.key_pressed(egui::Key::S)) {
@@ -853,8 +860,13 @@ impl eframe::App for EditorApp {
                 self.colors.status_text,
             );
 
-            // Solver cost + version at bottom-right
-            let info = format!("cost: {:.6}  |  arael v{}", self.last_cost, env!("CARGO_PKG_VERSION"));
+            // DOF + cost + version at bottom-right
+            let dof_str = match self.dof_display {
+                Some(0) => "DOF: 0 (fully constrained)".to_string(),
+                Some(d) => format!("DOF: {}", d),
+                None => "DOF: ...".to_string(),
+            };
+            let info = format!("{}  |  cost: {:.6}  |  arael v{}", dof_str, self.last_cost, env!("CARGO_PKG_VERSION"));
             painter.text(
                 egui::Pos2::new(rect.right() - 10.0, rect.bottom() - 20.0),
                 egui::Align2::RIGHT_CENTER,

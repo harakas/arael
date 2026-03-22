@@ -629,6 +629,12 @@ impl Sketch {
         self.serialize64(&mut params64);
         let n = params64.len();
 
+        if n == 0 {
+            return arael::simple_lm::LmResult {
+                x: params64, start_cost: 0.0, end_cost: 0.0, iterations: 0,
+            };
+        }
+
         // Compute starting cost to scale solver parameters
         let start_cost = self.calc_cost(&params64);
 

@@ -40,6 +40,44 @@ fn spawn_async<F: std::future::Future<Output = ()> + Send + 'static>(f: F) {
 }
 
 // ---------------------------------------------------------------------------
+// DOF computation (Hessian rank analysis)
+// ---------------------------------------------------------------------------
+
+/// Compute degrees of freedom: total_params - rank(J^T J).
+/// Uses eigendecomposition of the dense Hessian.
+fn compute_dof(sketch: &mut Sketch) -> usize {
+    use arael::simple_lm::LmProblem;
+
+    // Disable drift constraints — they regularize every direction and
+    // would make DOF always 0. We want DOF from user constraints only.
+    let saved_drift = sketch.drift_isigma;
+    sketch.drift_isigma = 0.0;
+
+    let mut params = Vec::new();
+    sketch.serialize64(&mut params);
+    let n = params.len();
+    if n == 0 {
+        sketch.drift_isigma = saved_drift;
+        return 0;
+    }
+
+    let mut grad = vec![0.0f64; n];
+    let mut hessian = vec![0.0f64; n * n];
+    sketch.calc_grad_hessian_dense(&params, &mut grad, &mut hessian);
+
+    sketch.drift_isigma = saved_drift;
+
+    // Build nalgebra matrix and compute eigenvalues
+    let h = nalgebra::DMatrix::from_row_slice(n, n, &hessian);
+    let eigen = nalgebra::SymmetricEigen::new(h);
+    let max_ev = eigen.eigenvalues.iter().cloned().fold(0.0f64, f64::max);
+    let threshold = max_ev * 1e-8;
+    let rank = eigen.eigenvalues.iter().filter(|&&ev| ev.abs() > threshold).count();
+
+    n.saturating_sub(rank)
+}
+
+// ---------------------------------------------------------------------------
 // Editor state
 // ---------------------------------------------------------------------------
 
@@ -95,6 +133,10 @@ pub struct EditorApp {
     pub last_cost: f64,
     drag_saved_cost: f64,              // best cost seen during drag
     drag_saved_snapshot: Option<Vec<u8>>, // sketch state at that best cost
+
+    // DOF (degrees of freedom) computed in background thread
+    pub dof_display: Option<usize>,    // None = computing or unknown
+    dof_pending: std::sync::Arc<std::sync::Mutex<Option<usize>>>,
 }
 
 impl EditorApp {
@@ -174,13 +216,17 @@ impl EditorApp {
             last_cost,
             drag_saved_cost: 0.0,
             drag_saved_snapshot: None,
+            dof_display: None,
+            dof_pending: std::sync::Arc::new(std::sync::Mutex::new(None)),
         }
     }
 }
 
 impl Default for EditorApp {
     fn default() -> Self {
-        Self::demo()
+        let mut app = Self::demo();
+        app.compute_dof_async();
+        app
     }
 }
 
@@ -570,6 +616,7 @@ impl EditorApp {
                 self.arc_draw = None;
                 self.pending_fit = true;
                 self.status_error = None;
+                self.compute_dof_async();
             }
             Err(e) => eprintln!("Failed to parse sketch: {}", e),
         }
@@ -581,6 +628,38 @@ impl EditorApp {
         let mut params = Vec::new();
         self.sketch.serialize64(&mut params);
         self.last_cost = self.sketch.calc_cost(&params);
+    }
+
+    /// Check if background DOF computation finished, update display.
+    pub fn poll_dof(&mut self) {
+        if let Some(dof) = self.dof_pending.lock().unwrap().take() {
+            self.dof_display = Some(dof);
+        }
+    }
+
+    /// Spawn background DOF computation (Hessian rank analysis).
+    /// DOF = total_params - rank(J^T J).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn compute_dof_async(&mut self) {
+        self.dof_display = None; // show "computing"
+        let sketch_data = bincode::serialize(&self.sketch).ok();
+        let pending = self.dof_pending.clone();
+        if let Some(data) = sketch_data {
+            std::thread::spawn(move || {
+                let t0 = std::time::Instant::now();
+                if let Ok(mut sketch) = bincode::deserialize::<Sketch>(&data) {
+                    let dof = compute_dof(&mut sketch);
+                    *pending.lock().unwrap() = Some(dof);
+                    eprintln!("DOF={} computed in {:.1}ms", dof, t0.elapsed().as_secs_f64() * 1000.0);
+                }
+            });
+        }
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn compute_dof_async(&mut self) {
+        // No threads on WASM — compute synchronously
+        self.dof_display = Some(compute_dof(&mut self.sketch));
     }
 
     // Execute an action: apply to sketch and record in history.
@@ -624,6 +703,7 @@ impl EditorApp {
             self.sketch.dedup_constraints();
             self.history.push(action, &self.sketch);
         }
+        self.compute_dof_async();
     }
 
     // Apply constraint to current selection

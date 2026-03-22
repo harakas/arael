@@ -258,6 +258,7 @@ dependencies = [
  "arael-sketch-solver",
  "bincode",
  "eframe",
+ "nalgebra",
  "pollster",
  "rfd",
  "serde",
