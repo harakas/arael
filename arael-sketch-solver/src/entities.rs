@@ -149,6 +149,8 @@ pub struct Arc {
     pub radius: Param<f64>,
     pub start_angle: Param<f64>,
     pub end_angle: Param<f64>,
+    /// Full circle (true) vs partial arc (false). When true, start/end
+    /// angles are fixed and excluded from optimization.
     #[arael(skip)]
     pub closed: bool,
     #[arael(skip)]

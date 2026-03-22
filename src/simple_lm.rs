@@ -10,7 +10,7 @@
 //! gain-ratio-based lambda updates, trust region methods, or even
 //! machine-learned parameter selection and termination criteria.
 //! The current design favors transparency and ease of tuning via
-//! [`LmConfig`] over automatic sophistication.
+//! [`LmConfig`](crate::simple_lm::LmConfig) over automatic sophistication.
 //!
 //! # Example
 //!

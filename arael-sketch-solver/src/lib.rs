@@ -11,8 +11,8 @@
 //! - [`Point`] -- 2D position (x, y)
 //! - [`Line`] -- two endpoints p1, p2 (4 params), plus optional
 //!   horizontal/vertical/length constraints
-//! - [`Arc`] -- center, radius, start/end angle (5 params), optionally
-//!   closed (full circle)
+//! - [`Arc`] -- center, radius, start/end angle (5 params for arcs,
+//!   3 for circles where angles are fixed)
 //!
 //! Shared geometry (e.g. two lines meeting at a point) is enforced via
 //! coincident constraints, not shared references.
@@ -129,6 +129,7 @@ pub struct Sketch {
 // ---------------------------------------------------------------------------
 
 impl Sketch {
+    /// Create an empty sketch with default solver parameters.
     pub fn new() -> Self {
         let drift_sigma = 1000.0_f64;
         Sketch {
@@ -195,6 +196,7 @@ impl Sketch {
         }
     }
 
+    /// Add a free point at the given position.
     pub fn add_point(&mut self, pos: vect2d) -> Ref<Point> {
         let name = format!("P{}", self.next_point_id);
         self.next_point_id += 1;
@@ -206,6 +208,7 @@ impl Sketch {
         })
     }
 
+    /// Add a fixed (non-optimizable) point at the given position.
     pub fn add_point_fixed(&mut self, pos: vect2d) -> Ref<Point> {
         let name = format!("P{}", self.next_point_id);
         self.next_point_id += 1;
@@ -217,6 +220,7 @@ impl Sketch {
         })
     }
 
+    /// Add a helper point (auto-removed when no constraints reference it).
     pub fn add_helper_point(&mut self, pos: vect2d) -> Ref<Point> {
         let name = format!("Pc{}", self.next_point_id);
         self.next_point_id += 1;
@@ -228,6 +232,7 @@ impl Sketch {
         })
     }
 
+    /// Add a line with two free endpoints.
     pub fn add_line(&mut self, p1: vect2d, p2: vect2d) -> Ref<Line> {
         let name = format!("L{}", self.next_line_id);
         self.next_line_id += 1;
@@ -240,6 +245,8 @@ impl Sketch {
         })
     }
 
+    /// Add an arc or circle. When `closed` is true, start/end angles are
+    /// fixed (not optimized) since they are meaningless for a full circle.
     pub fn add_arc(&mut self, center: vect2d, radius: f64, start: f64, end: f64, closed: bool) -> Ref<Arc> {
         let name = format!("A{}", self.next_arc_id);
         self.next_arc_id += 1;
@@ -621,8 +628,10 @@ impl Sketch {
     }
 
     /// Solve the sketch constraints using Levenberg-Marquardt.
-    /// Uses sparse faer Cholesky for n > 64 params, dense Cholesky otherwise.
-    /// Scales solver parameters based on starting cost and problem size.
+    /// Uses sparse faer Cholesky for n >= 64 params, dense Cholesky otherwise.
+    /// When starting cost is high, uses graduated optimization (1% -> 10% ->
+    /// 100% constraint strength) to avoid ill-conditioning from the large
+    /// constraint/drift sigma ratio.
     pub fn solve(&mut self) -> arael::simple_lm::LmResult<f64> {
         use arael::simple_lm::LmProblem;
         let mut params64: std::vec::Vec<f64> = std::vec::Vec::new();
