@@ -77,6 +77,10 @@ pub struct Sketch {
     pub vdistance_pp: std::vec::Vec<VerticalDistancePP>,
     pub point_on_line: std::vec::Vec<PointOnLine>,
     pub midpoint: std::vec::Vec<MidpointConstraint>,
+    pub midpoint_lp1: std::vec::Vec<MidpointLP1>,
+    pub midpoint_lp2: std::vec::Vec<MidpointLP2>,
+    pub midpoint_arc_start: std::vec::Vec<MidpointArcStart>,
+    pub midpoint_arc_end: std::vec::Vec<MidpointArcEnd>,
     pub point_on_arc: std::vec::Vec<PointOnArc>,
     pub parallel: std::vec::Vec<Parallel>,
     pub perpendicular: std::vec::Vec<Perpendicular>,
@@ -153,6 +157,10 @@ impl Sketch {
             vdistance_pp: Vec::new(),
             point_on_line: Vec::new(),
             midpoint: Vec::new(),
+            midpoint_lp1: Vec::new(),
+            midpoint_lp2: Vec::new(),
+            midpoint_arc_start: Vec::new(),
+            midpoint_arc_end: Vec::new(),
             point_on_arc: Vec::new(),
             parallel: Vec::new(),
             perpendicular: Vec::new(),
@@ -295,6 +303,10 @@ impl Sketch {
         self.coincident_ll22.retain(|c| c.a != r && c.b != r);
         self.point_on_line.retain(|c| c.line != r);
         self.midpoint.retain(|c| c.line != r);
+        self.midpoint_lp1.retain(|c| c.line != r && c.target != r);
+        self.midpoint_lp2.retain(|c| c.line != r && c.target != r);
+        self.midpoint_arc_start.retain(|c| c.line != r);
+        self.midpoint_arc_end.retain(|c| c.line != r);
         self.parallel.retain(|c| c.a != r && c.b != r);
         self.perpendicular.retain(|c| c.a != r && c.b != r);
         self.collinear.retain(|c| c.a != r && c.b != r);
@@ -332,6 +344,8 @@ impl Sketch {
         self.concentric.retain(|c| c.a != r && c.b != r);
         self.equal_radius.retain(|c| c.a != r && c.b != r);
         self.tangent_aa.retain(|c| c.a != r && c.b != r);
+        self.midpoint_arc_start.retain(|c| c.arc != r);
+        self.midpoint_arc_end.retain(|c| c.arc != r);
         self.coincident_arc_center.retain(|c| c.arc != r);
         self.coincident_arc_start.retain(|c| c.arc != r);
         self.coincident_arc_end.retain(|c| c.arc != r);
@@ -511,6 +525,22 @@ impl Sketch {
         dedup_ab!(self.vdistance_pp, "vdistance_pp", self.points, self.points);
         dedup_pl!(self.point_on_line, "point_on_line");
         dedup_pl!(self.midpoint, "midpoint");
+        {
+            let mut seen = std::collections::HashSet::new();
+            self.midpoint_lp1.retain(|c| seen.insert((c.line.index(), c.target.index())));
+        }
+        {
+            let mut seen = std::collections::HashSet::new();
+            self.midpoint_lp2.retain(|c| seen.insert((c.line.index(), c.target.index())));
+        }
+        {
+            let mut seen = std::collections::HashSet::new();
+            self.midpoint_arc_start.retain(|c| seen.insert((c.arc.index(), c.line.index())));
+        }
+        {
+            let mut seen = std::collections::HashSet::new();
+            self.midpoint_arc_end.retain(|c| seen.insert((c.arc.index(), c.line.index())));
+        }
         dedup_pa!(self.point_on_arc, "point_on_arc");
         dedup_ab!(self.parallel, "parallel", self.lines, self.lines);
         dedup_ab!(self.perpendicular, "perpendicular", self.lines, self.lines);

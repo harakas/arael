@@ -200,6 +200,9 @@ pub fn check_constraint_conflict(sketch: &Sketch, action: &Action) -> Option<Str
         Action::ApplyTangentAA { a, b } if a == b => {
             return Some(format!("Cannot constrain {} to itself", arc_name(sketch, *a)));
         }
+        Action::ApplyCollinear { a, b } if a == b => {
+            return Some(format!("Cannot constrain {} to itself", line_name(sketch, *a)));
+        }
 
         // ----- Direct H/V conflict -----
         Action::ApplyHorizontal { lines } => {
@@ -411,6 +414,22 @@ pub fn check_constraint_conflict(sketch: &Sketch, action: &Action) -> Option<Str
                 return Some(format!(
                     "{} and {} are already tangent",
                     arc_name(sketch, *a), arc_name(sketch, *b)
+                ));
+            }
+        }
+
+        Action::ApplyCollinear { a, b } => {
+            if pair_exists(&sketch.collinear, *a, *b, |p| (p.a, p.b)) {
+                return Some(format!(
+                    "{} and {} are already collinear",
+                    line_name(sketch, *a), line_name(sketch, *b)
+                ));
+            }
+            // Conflict: perpendicular lines cannot be collinear
+            if pair_exists(&sketch.perpendicular, *a, *b, |p| (p.a, p.b)) {
+                return Some(format!(
+                    "{} and {} are perpendicular, cannot be collinear",
+                    line_name(sketch, *a), line_name(sketch, *b)
                 ));
             }
         }

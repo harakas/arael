@@ -740,6 +740,19 @@ impl EditorApp {
                     || (sel.iter().all(|s| matches!(s, Selection::Line(_))))
                 }
             }
+            ConstraintType::Collinear => {
+                sel.len() == 2 && sel.iter().all(|s| matches!(s, Selection::Line(_)))
+            }
+            ConstraintType::Midpoint => {
+                sel.len() == 2 && {
+                    let point_like = |s: &Selection| matches!(s,
+                        Selection::Point(_) | Selection::LineP1(_) | Selection::LineP2(_)
+                        | Selection::ArcStart(_) | Selection::ArcEnd(_));
+                    let lines = sel.iter().filter(|s| matches!(s, Selection::Line(_))).count();
+                    let pts = sel.iter().filter(|s| point_like(s)).count();
+                    pts == 1 && lines == 1
+                }
+            }
             ConstraintType::Lock => {
                 !sel.is_empty() && sel.iter().all(|s| matches!(s,
                     Selection::Point(_) | Selection::LineP1(_) | Selection::LineP2(_)
@@ -796,6 +809,13 @@ impl EditorApp {
                     | Selection::ArcCenter(_) | Selection::ArcStart(_) | Selection::ArcEnd(_)
                     | Selection::Line(_) | Selection::Arc(_))
             }
+            ConstraintType::Collinear => {
+                matches!(sel, Selection::Line(_))
+            }
+            ConstraintType::Midpoint => {
+                matches!(sel, Selection::Point(_) | Selection::LineP1(_) | Selection::LineP2(_)
+                    | Selection::ArcStart(_) | Selection::ArcEnd(_) | Selection::Line(_))
+            }
             ConstraintType::Lock => {
                 matches!(sel, Selection::Point(_) | Selection::LineP1(_) | Selection::LineP2(_)
                     | Selection::ArcCenter(_) | Selection::ArcStart(_) | Selection::ArcEnd(_))
@@ -818,6 +838,8 @@ impl EditorApp {
                 ConstraintType::Perpendicular => self.apply_perpendicular(),
                 ConstraintType::EqualLength => self.apply_equal_length(),
                 ConstraintType::Tangent => self.apply_tangent(),
+                ConstraintType::Collinear => self.apply_collinear(),
+                ConstraintType::Midpoint => self.apply_midpoint(),
                 ConstraintType::Lock => self.apply_lock(),
                 ConstraintType::ToggleStyle => self.apply_toggle_style(),
             }
@@ -1372,6 +1394,47 @@ impl EditorApp {
         }
     }
 
+    fn apply_collinear(&mut self) {
+        self.begin_group();
+        if self.selection.len() == 2 {
+            if let (Selection::Line(a), Selection::Line(b)) = (self.selection[0], self.selection[1]) {
+                let action = Action::ApplyCollinear { a, b };
+                if let Some(err) = conflicts::check_constraint_conflict(&self.sketch, &action) {
+                    self.status_error = Some(err);
+                    return;
+                }
+                self.exec(action);
+            }
+        }
+    }
+
+    fn apply_midpoint(&mut self) {
+        self.begin_group();
+        if self.selection.len() != 2 { return; }
+        let (s0, s1) = (self.selection[0], self.selection[1]);
+        // Find the line and the point-like entity
+        let action = match (s0, s1) {
+            (Selection::Point(p), Selection::Line(l)) | (Selection::Line(l), Selection::Point(p)) =>
+                Some(Action::ApplyMidpoint { point: p, line: l }),
+            (Selection::LineP1(src), Selection::Line(tgt)) | (Selection::Line(tgt), Selection::LineP1(src)) =>
+                Some(Action::ApplyMidpointLP1 { line: src, target: tgt }),
+            (Selection::LineP2(src), Selection::Line(tgt)) | (Selection::Line(tgt), Selection::LineP2(src)) =>
+                Some(Action::ApplyMidpointLP2 { line: src, target: tgt }),
+            (Selection::ArcStart(arc), Selection::Line(l)) | (Selection::Line(l), Selection::ArcStart(arc)) =>
+                Some(Action::ApplyMidpointArcStart { arc, line: l }),
+            (Selection::ArcEnd(arc), Selection::Line(l)) | (Selection::Line(l), Selection::ArcEnd(arc)) =>
+                Some(Action::ApplyMidpointArcEnd { arc, line: l }),
+            _ => None,
+        };
+        if let Some(action) = action {
+            if let Some(err) = conflicts::check_constraint_conflict(&self.sketch, &action) {
+                self.status_error = Some(err);
+                return;
+            }
+            self.exec(action);
+        }
+    }
+
     fn apply_toggle_style(&mut self) {
         self.begin_group();
         for sel in &self.selection.clone() {
@@ -1756,6 +1819,17 @@ impl EditorApp {
             ConstraintId::EqualRadius(i) => { let c = &self.sketch.equal_radius[i]; format!("EqualR({}, {})", an(c.a), an(c.b)) }
             ConstraintId::TangentLA(i) => { let c = &self.sketch.tangent_la[i]; format!("Tangent({}, {})", ln(c.line), an(c.arc)) }
             ConstraintId::TangentAA(i) => { let c = &self.sketch.tangent_aa[i]; format!("Tangent({}, {})", an(c.a), an(c.b)) }
+            ConstraintId::Collinear(i) => { let c = &self.sketch.collinear[i]; format!("Collinear({}, {})", ln(c.a), ln(c.b)) }
+            ConstraintId::Midpoint(kind, i) => {
+                let desc = match kind {
+                    MidpointKind::Point => { let c = &self.sketch.midpoint[i]; format!("{} @ mid({})", pn(c.point), ln(c.line)) }
+                    MidpointKind::LP1 => { let c = &self.sketch.midpoint_lp1[i]; format!("{}.p1 @ mid({})", ln(c.line), ln(c.target)) }
+                    MidpointKind::LP2 => { let c = &self.sketch.midpoint_lp2[i]; format!("{}.p2 @ mid({})", ln(c.line), ln(c.target)) }
+                    MidpointKind::ArcStart => { let c = &self.sketch.midpoint_arc_start[i]; format!("{}.s @ mid({})", an(c.arc), ln(c.line)) }
+                    MidpointKind::ArcEnd => { let c = &self.sketch.midpoint_arc_end[i]; format!("{}.e @ mid({})", an(c.arc), ln(c.line)) }
+                };
+                format!("Midpoint({})", desc)
+            }
             ConstraintId::Coincident(kind, i) => {
                 let desc = match kind {
                     CoincidentKind::PP => { let c = &self.sketch.coincident_pp[i]; format!("{} = {}", pn(c.a), pn(c.b)) }
@@ -1835,6 +1909,19 @@ impl EditorApp {
             ConstraintId::TangentAA(i) => {
                 let c = &self.sketch.tangent_aa[i];
                 arcs.push(c.a); arcs.push(c.b);
+            }
+            ConstraintId::Collinear(i) => {
+                let c = &self.sketch.collinear[i];
+                lines.push(c.a); lines.push(c.b);
+            }
+            ConstraintId::Midpoint(kind, i) => {
+                match kind {
+                    MidpointKind::Point => { let c = &self.sketch.midpoint[i]; lines.push(c.line); }
+                    MidpointKind::LP1 => { let c = &self.sketch.midpoint_lp1[i]; lines.push(c.line); lines.push(c.target); }
+                    MidpointKind::LP2 => { let c = &self.sketch.midpoint_lp2[i]; lines.push(c.line); lines.push(c.target); }
+                    MidpointKind::ArcStart => { let c = &self.sketch.midpoint_arc_start[i]; arcs.push(c.arc); lines.push(c.line); }
+                    MidpointKind::ArcEnd => { let c = &self.sketch.midpoint_arc_end[i]; arcs.push(c.arc); lines.push(c.line); }
+                }
             }
             ConstraintId::Coincident(kind, i) => {
                 match kind {
@@ -1928,6 +2015,16 @@ impl EditorApp {
             ConstraintId::EqualRadius(i) => { self.sketch.equal_radius.remove(i); }
             ConstraintId::TangentLA(i) => { self.sketch.tangent_la.remove(i); }
             ConstraintId::TangentAA(i) => { self.sketch.tangent_aa.remove(i); }
+            ConstraintId::Collinear(i) => { self.sketch.collinear.remove(i); }
+            ConstraintId::Midpoint(kind, i) => {
+                match kind {
+                    MidpointKind::Point => { self.sketch.midpoint.remove(i); }
+                    MidpointKind::LP1 => { self.sketch.midpoint_lp1.remove(i); }
+                    MidpointKind::LP2 => { self.sketch.midpoint_lp2.remove(i); }
+                    MidpointKind::ArcStart => { self.sketch.midpoint_arc_start.remove(i); }
+                    MidpointKind::ArcEnd => { self.sketch.midpoint_arc_end.remove(i); }
+                }
+            }
             ConstraintId::Coincident(kind, i) => {
                 match kind {
                     CoincidentKind::PP => { self.sketch.coincident_pp.remove(i); }

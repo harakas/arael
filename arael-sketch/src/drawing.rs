@@ -372,6 +372,32 @@ impl EditorApp {
             add_arc_marker(self, &mut markers, c.a, ConstraintSymbol::Equal, id, &mut arc_marker_count);
             add_arc_marker(self, &mut markers, c.b, ConstraintSymbol::Equal, id, &mut arc_marker_count);
         }
+        for (i, c) in self.sketch.collinear.iter().enumerate() {
+            let id = ConstraintId::Collinear(i);
+            add_line_marker(self, &mut markers, c.a, ConstraintSymbol::Collinear, id, &mut line_marker_count);
+            add_line_marker(self, &mut markers, c.b, ConstraintSymbol::Collinear, id, &mut line_marker_count);
+        }
+        // Midpoint constraints -- place marker on the target line
+        for (i, c) in self.sketch.midpoint.iter().enumerate() {
+            let id = ConstraintId::Midpoint(MidpointKind::Point, i);
+            add_line_marker(self, &mut markers, c.line, ConstraintSymbol::Midpoint, id, &mut line_marker_count);
+        }
+        for (i, c) in self.sketch.midpoint_lp1.iter().enumerate() {
+            let id = ConstraintId::Midpoint(MidpointKind::LP1, i);
+            add_line_marker(self, &mut markers, c.target, ConstraintSymbol::Midpoint, id, &mut line_marker_count);
+        }
+        for (i, c) in self.sketch.midpoint_lp2.iter().enumerate() {
+            let id = ConstraintId::Midpoint(MidpointKind::LP2, i);
+            add_line_marker(self, &mut markers, c.target, ConstraintSymbol::Midpoint, id, &mut line_marker_count);
+        }
+        for (i, c) in self.sketch.midpoint_arc_start.iter().enumerate() {
+            let id = ConstraintId::Midpoint(MidpointKind::ArcStart, i);
+            add_line_marker(self, &mut markers, c.line, ConstraintSymbol::Midpoint, id, &mut line_marker_count);
+        }
+        for (i, c) in self.sketch.midpoint_arc_end.iter().enumerate() {
+            let id = ConstraintId::Midpoint(MidpointKind::ArcEnd, i);
+            add_line_marker(self, &mut markers, c.line, ConstraintSymbol::Midpoint, id, &mut line_marker_count);
+        }
         for (i, c) in self.sketch.tangent_la.iter().enumerate() {
             let id = ConstraintId::TangentLA(i);
             add_line_marker(self, &mut markers, c.line, ConstraintSymbol::Tangent, id, &mut line_marker_count);
@@ -836,6 +862,28 @@ impl EditorApp {
                         egui::Pos2::new(tx - k * half, ty - k * half),
                         egui::Pos2::new(tx + k * half, ty + k * half),
                     ], stroke);
+                }
+                ConstraintSymbol::Collinear => {
+                    // Diagonal line with gap in the middle
+                    painter.line_segment([
+                        egui::Pos2::new(p.x - s * 0.7, p.y + s * 0.7),
+                        egui::Pos2::new(p.x - s * 0.1, p.y + s * 0.1),
+                    ], stroke);
+                    painter.line_segment([
+                        egui::Pos2::new(p.x + s * 0.1, p.y - s * 0.1),
+                        egui::Pos2::new(p.x + s * 0.7, p.y - s * 0.7),
+                    ], stroke);
+                }
+                ConstraintSymbol::Midpoint => {
+                    // Triangle pointing up
+                    let h = s * 1.56;
+                    let half_w = s * 1.04;
+                    let top = egui::Pos2::new(p.x, p.y - h * 0.5);
+                    let bl = egui::Pos2::new(p.x - half_w, p.y + h * 0.5);
+                    let br = egui::Pos2::new(p.x + half_w, p.y + h * 0.5);
+                    painter.line_segment([top, bl], stroke);
+                    painter.line_segment([bl, br], stroke);
+                    painter.line_segment([br, top], stroke);
                 }
                 ConstraintSymbol::Coincident => {
                     // Corner with dot: small filled square + lines going right and up

@@ -40,6 +40,8 @@ pub enum ConstraintType {
     Perpendicular,
     EqualLength,
     Tangent,
+    Collinear,
+    Midpoint,
     Lock,
     ToggleStyle,
 }
@@ -55,6 +57,8 @@ impl ConstraintType {
             ConstraintType::Perpendicular => "Perpendicular",
             ConstraintType::EqualLength => "Equal",
             ConstraintType::Tangent => "Tangent",
+            ConstraintType::Collinear => "Collinear",
+            ConstraintType::Midpoint => "Midpoint",
             ConstraintType::Lock => "Lock",
             ConstraintType::ToggleStyle => "Style",
         }
@@ -119,6 +123,15 @@ pub enum CoincidentKind {
 }
 
 #[derive(Clone, Copy, PartialEq)]
+pub enum MidpointKind {
+    Point,       // Point at midpoint of line
+    LP1,         // Line P1 at midpoint of another line
+    LP2,         // Line P2 at midpoint of another line
+    ArcStart,    // Arc start at midpoint of line
+    ArcEnd,      // Arc end at midpoint of line
+}
+
+#[derive(Clone, Copy, PartialEq)]
 pub enum ConstraintId {
     Horizontal(Ref<Line>),
     Vertical(Ref<Line>),
@@ -128,7 +141,9 @@ pub enum ConstraintId {
     EqualRadius(usize),
     TangentLA(usize),
     TangentAA(usize),
+    Collinear(usize),
     Coincident(CoincidentKind, usize),
+    Midpoint(MidpointKind, usize),
     HelperBridge(Ref<Point>),  // helper point bridging two constraints
 }
 
@@ -141,6 +156,8 @@ pub enum ConstraintSymbol {
     Perpendicular, // upside-down T
     Equal,       // =
     Tangent,     // T
+    Collinear,   // diagonal line with gap
+    Midpoint,    // triangle
     Coincident,  // corner with dot
 }
 

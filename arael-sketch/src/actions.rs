@@ -54,6 +54,12 @@ pub enum Action {
     ApplyTangentAA { a: Ref<Arc>, b: Ref<Arc> },
     ApplyPointOnLine { point: Ref<Point>, line: Ref<Line> },
     ApplyPointOnArc { point: Ref<Point>, arc: Ref<Arc> },
+    ApplyCollinear { a: Ref<Line>, b: Ref<Line> },
+    ApplyMidpoint { point: Ref<Point>, line: Ref<Line> },
+    ApplyMidpointLP1 { line: Ref<Line>, target: Ref<Line> },
+    ApplyMidpointLP2 { line: Ref<Line>, target: Ref<Line> },
+    ApplyMidpointArcStart { arc: Ref<Arc>, line: Ref<Line> },
+    ApplyMidpointArcEnd { arc: Ref<Arc>, line: Ref<Line> },
     ApplyLineP1OnLine { a: Ref<Line>, b: Ref<Line> },
     ApplyLineP2OnLine { a: Ref<Line>, b: Ref<Line> },
     LockPoint { point: Ref<Point>, pos: vect2d },
@@ -100,6 +106,10 @@ impl Action {
             Action::ApplyLineP1OnArc { .. } | Action::ApplyLineP2OnArc { .. } |
             Action::ApplyEqualRadius { .. } |
             Action::ApplyTangentLA { .. } | Action::ApplyTangentAA { .. } |
+            Action::ApplyCollinear { .. } |
+            Action::ApplyMidpoint { .. } | Action::ApplyMidpointLP1 { .. } |
+            Action::ApplyMidpointLP2 { .. } | Action::ApplyMidpointArcStart { .. } |
+            Action::ApplyMidpointArcEnd { .. } |
             Action::ApplyPointOnLine { .. } | Action::ApplyPointOnArc { .. } |
             Action::ApplyLineP1OnLine { .. } | Action::ApplyLineP2OnLine { .. } |
             Action::AddDimension { .. }
@@ -309,6 +319,30 @@ impl Action {
             }
             Action::ApplyPointOnArc { point, arc } => {
                 sketch.point_on_arc.push(PointOnArc { point: *point, arc: *arc, hb: CrossBlock::new() });
+                sketch.solve();
+            }
+            Action::ApplyCollinear { a, b } => {
+                sketch.collinear.push(Collinear { a: *a, b: *b, hb: CrossBlock::new() });
+                sketch.solve();
+            }
+            Action::ApplyMidpoint { point, line } => {
+                sketch.midpoint.push(MidpointConstraint { point: *point, line: *line, hb: CrossBlock::new() });
+                sketch.solve();
+            }
+            Action::ApplyMidpointLP1 { line, target } => {
+                sketch.midpoint_lp1.push(MidpointLP1 { line: *line, target: *target, hb: CrossBlock::new() });
+                sketch.solve();
+            }
+            Action::ApplyMidpointLP2 { line, target } => {
+                sketch.midpoint_lp2.push(MidpointLP2 { line: *line, target: *target, hb: CrossBlock::new() });
+                sketch.solve();
+            }
+            Action::ApplyMidpointArcStart { arc, line } => {
+                sketch.midpoint_arc_start.push(MidpointArcStart { arc: *arc, line: *line, hb: CrossBlock::new() });
+                sketch.solve();
+            }
+            Action::ApplyMidpointArcEnd { arc, line } => {
+                sketch.midpoint_arc_end.push(MidpointArcEnd { arc: *arc, line: *line, hb: CrossBlock::new() });
                 sketch.solve();
             }
             Action::ApplyLineP1OnLine { a, b } => {

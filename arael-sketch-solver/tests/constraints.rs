@@ -583,3 +583,71 @@ fn test_arc_has_5_params() {
     sketch.serialize64(&mut params);
     assert_eq!(params.len(), 5, "arc should have 5 params (cx, cy, r, sa, ea)");
 }
+
+#[test]
+fn test_collinear_nonaligned() {
+    let mut sketch = Sketch::new();
+    let a = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(2.0, 1.0));
+    let b = sketch.add_line(vect2d::new(3.0, 2.0), vect2d::new(5.0, 3.5));
+    sketch.collinear.push(Collinear { a, b, hb: CrossBlock::new() });
+    sketch.solve();
+    // Both endpoints of b should lie on the infinite line through a
+    let la = &sketch.lines[a];
+    let lb = &sketch.lines[b];
+    let dx = la.p2.value.x - la.p1.value.x;
+    let dy = la.p2.value.y - la.p1.value.y;
+    let len = (dx * dx + dy * dy).sqrt();
+    let cross1 = ((lb.p1.value.x - la.p1.value.x) * dy
+        - (lb.p1.value.y - la.p1.value.y) * dx) / len;
+    let cross2 = ((lb.p2.value.x - la.p1.value.x) * dy
+        - (lb.p2.value.y - la.p1.value.y) * dx) / len;
+    assert_near(cross1, 0.0, 0.01);
+    assert_near(cross2, 0.0, 0.01);
+}
+
+#[test]
+fn test_midpoint_point() {
+    let mut sketch = Sketch::new();
+    let p = sketch.add_point(vect2d::new(3.0, 1.0));
+    let l = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(4.0, 2.0));
+    sketch.midpoint.push(MidpointConstraint { point: p, line: l, hb: CrossBlock::new() });
+    sketch.solve();
+    let pt = sketch.points[p].pos.value;
+    let ln = &sketch.lines[l];
+    let mx = (ln.p1.value.x + ln.p2.value.x) * 0.5;
+    let my = (ln.p1.value.y + ln.p2.value.y) * 0.5;
+    assert_near(pt.x, mx, 0.01);
+    assert_near(pt.y, my, 0.01);
+}
+
+#[test]
+fn test_midpoint_lp1() {
+    let mut sketch = Sketch::new();
+    let src = sketch.add_line(vect2d::new(5.0, 5.0), vect2d::new(6.0, 6.0));
+    let tgt = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(4.0, 2.0));
+    sketch.midpoint_lp1.push(MidpointLP1 { line: src, target: tgt, hb: CrossBlock::new() });
+    sketch.solve();
+    let p1 = sketch.lines[src].p1.value;
+    let tl = &sketch.lines[tgt];
+    let mx = (tl.p1.value.x + tl.p2.value.x) * 0.5;
+    let my = (tl.p1.value.y + tl.p2.value.y) * 0.5;
+    assert_near(p1.x, mx, 0.01);
+    assert_near(p1.y, my, 0.01);
+}
+
+#[test]
+fn test_midpoint_arc_start() {
+    let mut sketch = Sketch::new();
+    let arc = sketch.add_arc(vect2d::new(5.0, 5.0), 2.0, 0.0, 1.5, false);
+    let l = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(4.0, 2.0));
+    sketch.midpoint_arc_start.push(MidpointArcStart { arc, line: l, hb: CrossBlock::new() });
+    sketch.solve();
+    let a = &sketch.arcs[arc];
+    let sx = a.center.value.x + a.radius.value * a.start_angle.value.cos();
+    let sy = a.center.value.y + a.radius.value * a.start_angle.value.sin();
+    let ln = &sketch.lines[l];
+    let mx = (ln.p1.value.x + ln.p2.value.x) * 0.5;
+    let my = (ln.p1.value.y + ln.p2.value.y) * 0.5;
+    assert_near(sx, mx, 0.01);
+    assert_near(sy, my, 0.01);
+}
