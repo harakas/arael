@@ -92,6 +92,9 @@ pub struct EditorApp {
 
     // Constraint conflict error message
     pub status_error: Option<String>,
+    pub last_cost: f64,
+    drag_saved_cost: f64,              // best cost seen during drag
+    drag_saved_snapshot: Option<Vec<u8>>, // sketch state at that best cost
 }
 
 impl EditorApp {
@@ -136,7 +139,8 @@ impl EditorApp {
         Action::AddDimension { kind: DimensionKind::ArcRadius(a0), value: 1.5 }.apply(&mut sketch);
         sketch.dimensions.last_mut().unwrap().offset = vect2d::new(0.91, 0.0);
 
-        sketch.solve();
+        let result = sketch.solve();
+        let last_cost = result.end_cost;
         let history = History::new(&sketch);
 
         EditorApp {
@@ -167,6 +171,9 @@ impl EditorApp {
             dark_mode: cfg!(target_arch = "wasm32"),
             colors: if cfg!(target_arch = "wasm32") { ColorScheme::dark() } else { ColorScheme::light() },
             status_error: None,
+            last_cost,
+            drag_saved_cost: 0.0,
+            drag_saved_snapshot: None,
         }
     }
 }
@@ -374,6 +381,10 @@ impl EditorApp {
 
     // Start dragging: create a temporary fixed point and coincident constraint
     fn start_drag(&mut self, target: GrabTarget, mouse_pos: vect2d) {
+        // Save pre-drag state before adding drag apparatus
+        self.drag_saved_cost = self.last_cost;
+        self.drag_saved_snapshot = bincode::serialize(&self.sketch).ok();
+
         // Create a fixed point at mouse position
         let drag_pt = self.sketch.add_point_fixed(mouse_pos);
         self.drag_point = Some(drag_pt);
@@ -414,35 +425,76 @@ impl EditorApp {
         self.grab = Some(target);
     }
 
-    // Update drag position and re-solve
+    // Update drag position and re-solve.
+    // Track the best (lowest cost) clean state seen during the drag.
     fn update_drag(&mut self, mouse_pos: vect2d) {
         if let Some(drag_pt) = self.drag_point {
             self.sketch.points[drag_pt].pos = Param::fixed(mouse_pos);
-            self.sketch.solve();
+            let result = self.sketch.solve();
+            self.last_cost = result.end_cost;
+
+            // If cost is good, save a clean snapshot (without drag apparatus)
+            if self.last_cost < self.drag_saved_cost + 1e-3 {
+                if let Ok(snap) = bincode::serialize(&self.sketch) {
+                    if let Ok(mut clean) = bincode::deserialize::<Sketch>(&snap) {
+                        // Remove drag constraint from clone
+                        match self.grab {
+                            Some(GrabTarget::Point(_)) => { clean.coincident_pp.pop(); }
+                            Some(GrabTarget::LineP1(_)) => { clean.coincident_lp1.pop(); }
+                            Some(GrabTarget::LineP2(_)) => { clean.coincident_lp2.pop(); }
+                            Some(GrabTarget::ArcCenter(_)) => { clean.coincident_arc_center.pop(); }
+                            Some(GrabTarget::ArcStart(_)) => { clean.coincident_arc_start.pop(); }
+                            Some(GrabTarget::ArcEnd(_)) => { clean.coincident_arc_end.pop(); }
+                            None => {}
+                        }
+                        clean.points.remove(drag_pt);
+                        self.drag_saved_cost = self.last_cost;
+                        self.drag_saved_snapshot = bincode::serialize(&clean).ok();
+                    }
+                }
+            }
         }
     }
 
-    // End drag: remove temporary point and constraint, auto-snap, record action
+    // Remove the drag apparatus (temp point + constraint) from the sketch.
+    fn remove_drag_apparatus(&mut self, drag_pt: arael::refs::Ref<Point>) {
+        match self.grab {
+            Some(GrabTarget::Point(_)) => { self.sketch.coincident_pp.pop(); }
+            Some(GrabTarget::LineP1(_)) => { self.sketch.coincident_lp1.pop(); }
+            Some(GrabTarget::LineP2(_)) => { self.sketch.coincident_lp2.pop(); }
+            Some(GrabTarget::ArcCenter(_)) => { self.sketch.coincident_arc_center.pop(); }
+            Some(GrabTarget::ArcStart(_)) => { self.sketch.coincident_arc_start.pop(); }
+            Some(GrabTarget::ArcEnd(_)) => { self.sketch.coincident_arc_end.pop(); }
+            None => {}
+        }
+        self.sketch.points.remove(drag_pt);
+    }
+
+
+    // End drag: remove temporary point and constraint, auto-snap, record action.
+    // If the final cost is much worse than pre-drag, revert to pre-drag state.
     fn end_drag(&mut self, hit_threshold: f64) {
         self.begin_group();
         if let Some(drag_pt) = self.drag_point.take() {
-            // Get final position of the dragged endpoint for snap detection
             let _drag_pos = self.sketch.points[drag_pt].pos.value;
             let grab = self.grab;
 
-            // Remove the last coincident constraint (the drag one)
-            match grab {
-                Some(GrabTarget::Point(_)) => { self.sketch.coincident_pp.pop(); }
-                Some(GrabTarget::LineP1(_)) => { self.sketch.coincident_lp1.pop(); }
-                Some(GrabTarget::LineP2(_)) => { self.sketch.coincident_lp2.pop(); }
-                Some(GrabTarget::ArcCenter(_)) => { self.sketch.coincident_arc_center.pop(); }
-                Some(GrabTarget::ArcStart(_)) => { self.sketch.coincident_arc_start.pop(); }
-                Some(GrabTarget::ArcEnd(_)) => { self.sketch.coincident_arc_end.pop(); }
-                None => {}
+            // Remove drag apparatus and re-solve
+            self.remove_drag_apparatus(drag_pt);
+            let result = self.sketch.solve();
+            self.last_cost = result.end_cost;
+
+            // If cost is much worse than pre-drag, revert to pre-drag state
+            if self.last_cost > self.drag_saved_cost + 1e-3 {
+                if let Some(snap) = self.drag_saved_snapshot.take() {
+                    if let Ok(restored) = bincode::deserialize::<Sketch>(&snap) {
+                        self.sketch = restored;
+                        let result = self.sketch.solve();
+                        self.last_cost = result.end_cost;
+                    }
+                }
             }
-            // Remove the drag point and re-solve without the drag constraint
-            self.sketch.points.remove(drag_pt);
-            self.sketch.solve();
+            self.drag_saved_snapshot = None;
 
             // Record drag as a non-deterministic action with full state snapshot
             let snapshot = bincode::serialize(&self.sketch).unwrap();
@@ -508,7 +560,8 @@ impl EditorApp {
             Ok(mut sketch) => {
                 sketch.dedup_constraints();
                 sketch.consolidate_helper_constraints();
-                sketch.solve();
+                let result = sketch.solve();
+                self.last_cost = result.end_cost;
                 self.sketch = sketch;
                 self.selection.clear();
                 self.history = History::new(&self.sketch);
@@ -522,6 +575,13 @@ impl EditorApp {
         }
     }
 
+
+    /// Recompute cached cost from the current sketch state.
+    pub fn update_cost(&mut self) {
+        let mut params = Vec::new();
+        self.sketch.serialize64(&mut params);
+        self.last_cost = self.sketch.calc_cost(&params);
+    }
 
     // Execute an action: apply to sketch and record in history.
     // For constraint actions: validates by solving and checking cost.
@@ -557,6 +617,7 @@ impl EditorApp {
                 }
             }
 
+            self.last_cost = new_cost;
             self.history.push(action, &self.sketch);
         } else {
             action.apply(&mut self.sketch);
@@ -1828,7 +1889,8 @@ impl EditorApp {
                 self.sketch.delete_point(pt);
             }
         }
-        self.sketch.solve();
+        let result = self.sketch.solve();
+        self.last_cost = result.end_cost;
         let snapshot = bincode::serialize(&self.sketch).unwrap();
         let action = Action::Drag { snapshot };
         self.history.push(action, &self.sketch);

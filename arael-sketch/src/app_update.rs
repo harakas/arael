@@ -188,12 +188,14 @@ impl eframe::App for EditorApp {
                     if let Some(restored) = self.history.undo() {
                         self.sketch = restored;
                         self.selection.clear();
+                        self.update_cost();
                     }
                 }
                 if ui.add_enabled(self.history.can_redo(), egui::Button::new("Redo")).clicked() {
                     if let Some(restored) = self.history.redo() {
                         self.sketch = restored;
                         self.selection.clear();
+                        self.update_cost();
                     }
                 }
             });
@@ -311,11 +313,13 @@ impl eframe::App for EditorApp {
                 if let Some(restored) = self.history.redo() {
                     self.sketch = restored;
                     self.selection.clear();
+                    self.update_cost();
                 }
             } else if ctrl && ui.input(|i| i.key_pressed(egui::Key::Z)) {
                 if let Some(restored) = self.history.undo() {
                     self.sketch = restored;
                     self.selection.clear();
+                    self.update_cost();
                 }
             }
             if ctrl && ui.input(|i| i.key_pressed(egui::Key::S)) {
@@ -845,6 +849,16 @@ impl eframe::App for EditorApp {
                 egui::Align2::LEFT_CENTER,
                 status,
                 egui::FontId::proportional(12.0),
+                self.colors.status_text,
+            );
+
+            // Solver cost + version at bottom-right
+            let info = format!("cost: {:.6}  |  arael v{}", self.last_cost, env!("CARGO_PKG_VERSION"));
+            painter.text(
+                egui::Pos2::new(rect.right() - 10.0, rect.bottom() - 20.0),
+                egui::Align2::RIGHT_CENTER,
+                info,
+                egui::FontId::proportional(11.0),
                 self.colors.status_text,
             );
         });
