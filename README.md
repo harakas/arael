@@ -2,13 +2,13 @@
 
 **Algorithms for Robust Autonomy, Estimation, and Localization**
 
-A Rust framework for nonlinear optimization with compile-time symbolic differentiation. Define your model and constraints declaratively -- the macro system symbolically differentiates, applies common subexpression elimination, and generates compiled cost/gradient/hessian code.
+A Rust framework for nonlinear optimization with compile-time symbolic differentiation. Define your model and constraints declaratively -- the macro system symbolically differentiates, applies common subexpression elimination, and generates compiled cost, gradient, and Gauss-Newton hessian (J^T J approximation) code.
 
 ## Features
 
 - **Symbolic math** -- expression trees with automatic differentiation, simplification, expansion, LaTeX/Rust code generation
 - **Compile-time constraint code generation** -- write constraints symbolically, get compiled derivative code with CSE
-- **Levenberg-Marquardt solver** -- with robust error suppression via the [Starship method (US12346118)](https://patents.google.com/patent/US12346118) `gamma * atan(r / gamma)`
+- **Levenberg-Marquardt solver** -- with robust error suppression via the [Starship method (US12346118)](https://patents.google.com/patent/US12346118) `gamma * atan(r / gamma)` and switchable constraints (`guard = expr`)
 - **Multiple solver backends** via `LmSolver` trait:
   - **Dense Cholesky** (nalgebra) -- fixed-size dispatch up to 9x9, dynamic for larger
   - **Band Cholesky** -- pure Rust O(n*kd^2) for block-tridiagonal systems (9.4x faster than dense at 500 poses)
@@ -20,7 +20,23 @@ A Rust framework for nonlinear optimization with compile-time symbolic different
 - **Model trait** -- hierarchical serialize/deserialize/update protocol for parameter optimization
 - **Type-safe references** -- `Ref<T>`, `Vec<T>`, `Deque<T>`, `Arena<T>` for indexed collections with stable references
 - **Hessian blocks** -- `SelfBlock<A>` and `CrossBlock<A, B>` generic over float type for sparse hessian structure
+- **Gimbal-lock-free rotations** -- `EulerAngleParam` optimizes a small delta around a reference rotation matrix
 - **WASM/browser support** -- the sketch editor compiles to WebAssembly and runs in the browser via eframe/egui
+
+## Scope
+
+Arael is a **nonlinear optimization framework**, not a complete SLAM or state estimation system. The SLAM and localization demos show how to use arael as the optimizer backend, but a production SLAM pipeline would additionally need:
+
+- **Front-end perception**: feature detection, descriptor extraction
+- **Data association**: matching observed features to existing landmarks, handling ambiguous or incorrect matches
+- **Landmark management**: initializing new landmarks from observations, merging duplicates, pruning unreliable ones
+- **Keyframe selection**: deciding when to add new poses vs. discard redundant frames
+- **Loop closure**: detecting revisited places, verifying loop closure candidates, and injecting constraints
+- **Outlier rejection logic**: deciding which observations to reject
+- **Marginalization / sliding window**: limiting optimization scope for real-time operation, marginalizing old poses while preserving their information
+- **Map management**: spatial indexing, map saving/loading, multi-session map merging
+
+Arael provides the compile-time-differentiated solver that sits at the core of such a system. Everything above is application-level logic that builds on top of it.
 
 ## Quick Example: Symbolic Math
 
@@ -29,7 +45,7 @@ use arael::sym::*;
 
 arael::sym! {
     let x = symbol("x");
-    let f = sin(x) * x + c(1.0);
+    let f = sin(x) * x + 1.0;
 
     println!("f(x)   = {}", f);           // sin(x) * x + 1
     println!("f'(x)  = {}", f.diff("x")); // x * cos(x) + sin(x)

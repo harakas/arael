@@ -15,7 +15,8 @@
 //! - **Compile-time constraint code generation** -- write constraints
 //!   symbolically, get compiled derivative code with CSE
 //! - **Levenberg-Marquardt solver** -- with robust error suppression
-//!   via the Starship method `gamma * atan(r / gamma)` and switchable
+//!   via the [Starship method (US12346118)](https://patents.google.com/patent/US12346118)
+//!   `gamma * atan(r / gamma)` and switchable
 //!   constraints (`guard = expr`)
 //! - **Multiple solver backends** via `LmSolver` trait:
 //!   - Dense Cholesky (nalgebra) -- fixed-size dispatch up to 9x9

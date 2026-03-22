@@ -4,3 +4,4 @@
  * When adding a new feature -- add tests for it.
  * We use following euler angles and coordinate system convention: x is roll, y is pitch, z is yaw. Axes are x=forward, y=left, z=up.
  * When committing a sub-crate/component, prefix commit message with `<component name>: message`
+ * When updating README.md also update src/lib.rs crate documentation -- and the other way around
