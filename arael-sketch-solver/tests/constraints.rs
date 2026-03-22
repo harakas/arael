@@ -1,6 +1,6 @@
 use arael::model::{CrossBlock, Param};
 use arael::vect::vect2d;
-use arael_sketch::*;
+use arael_sketch_solver::*;
 
 fn assert_near(a: f64, b: f64, tol: f64) {
     assert!((a - b).abs() < tol, "expected {a} ~= {b} (diff={})", (a - b).abs());

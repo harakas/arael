@@ -1,0 +1,18 @@
+[package]
+name = "arael-sketch-solver"
+version = "0.1.0"
+edition = "2024"
+authors = ["Indrek Mandre <indrek@mare.ee>"]
+readme = "../README.md"
+description = "2D constraint-based sketch solver: entities, constraints, and optimization"
+license = "MIT"
+repository = "https://github.com/harakas/arael"
+keywords = ["constraint-solver", "sketch", "cad", "2d", "optimization"]
+categories = ["mathematics", "science"]
+
+[dependencies]
+arael = { version = "0.1.0", path = ".." }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+serde_json = "1"

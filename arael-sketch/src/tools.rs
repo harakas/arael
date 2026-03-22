@@ -1,0 +1,169 @@
+// Tool, selection, and constraint type enums for the sketch editor.
+
+use arael::refs::Ref;
+use arael::vect::vect2d;
+use arael_sketch_solver::*;
+
+// What the user can grab and drag
+#[derive(Clone, Copy, PartialEq)]
+pub enum GrabTarget {
+    Point(Ref<Point>),
+    LineP1(Ref<Line>),
+    LineP2(Ref<Line>),
+    ArcCenter(Ref<Arc>),
+    ArcStart(Ref<Arc>),
+    ArcEnd(Ref<Arc>),
+}
+
+// Selection -- what entity is selected for constraint application
+#[derive(Clone, Copy, PartialEq)]
+pub enum Selection {
+    Point(Ref<Point>),
+    Line(Ref<Line>),
+    LineP1(Ref<Line>),
+    LineP2(Ref<Line>),
+    Arc(Ref<Arc>),
+    ArcCenter(Ref<Arc>),
+    ArcStart(Ref<Arc>),
+    ArcEnd(Ref<Arc>),
+    Constraint(ConstraintId),
+    Dimension(usize),
+}
+
+// Constraint type for constraint mode
+#[derive(Clone, Copy, PartialEq)]
+pub enum ConstraintType {
+    Horizontal,
+    Vertical,
+    Coincident,
+    Parallel,
+    Perpendicular,
+    EqualLength,
+    Tangent,
+    Lock,
+    ToggleStyle,
+}
+
+impl ConstraintType {
+    #[allow(dead_code)]
+    pub fn name(self) -> &'static str {
+        match self {
+            ConstraintType::Horizontal => "Horizontal",
+            ConstraintType::Vertical => "Vertical",
+            ConstraintType::Coincident => "Coincident",
+            ConstraintType::Parallel => "Parallel",
+            ConstraintType::Perpendicular => "Perpendicular",
+            ConstraintType::EqualLength => "Equal",
+            ConstraintType::Tangent => "Tangent",
+            ConstraintType::Lock => "Lock",
+            ConstraintType::ToggleStyle => "Style",
+        }
+    }
+}
+
+// Active tool
+#[derive(Clone, Copy, PartialEq)]
+pub enum Tool {
+    Select,
+    DrawPoint,
+    DrawLine,
+    DrawCircle,
+    DrawArc,
+    ConstraintMode(ConstraintType),
+    Dimension,
+}
+
+// Delete target
+#[derive(Clone, Copy)]
+#[allow(dead_code)]
+pub enum DeleteTarget {
+    Point(Ref<Point>),
+    Line(Ref<Line>),
+    Arc(Ref<Arc>),
+}
+
+// In-progress line drawing state
+pub struct LineDrawState {
+    pub start: vect2d,
+    // What the start point snapped to (for auto-coincident on completion)
+    pub snap_start: Option<SnapTarget>,
+}
+
+pub struct CircleDrawState {
+    pub center: vect2d,
+    pub snap_center: Option<SnapTarget>,
+}
+
+pub struct ArcDrawState {
+    pub start: vect2d,
+    pub snap_start: Option<SnapTarget>,
+    pub end: Option<(vect2d, Option<SnapTarget>)>,  // None until second click
+}
+
+// Constraint identification (for selection and deletion)
+#[derive(Clone, Copy, PartialEq)]
+pub enum CoincidentKind {
+    PP, LP1, LP2,
+    LL11, LL12, LL21, LL22,
+    PointOnLine, PointOnArc,
+    LP1OnLine, LP2OnLine,
+    LP1OnArc, LP2OnArc,
+    ArcCenter, ArcStart, ArcEnd,
+    LP1ArcCenter, LP2ArcCenter,
+    LP1ArcStart, LP2ArcStart,
+    LP1ArcEnd, LP2ArcEnd,
+    ArcCenterStart, ArcCenterEnd,
+    ArcStartCenter, ArcEndCenter,
+    ArcStartStart, ArcStartEnd,
+    ArcEndStart, ArcEndEnd,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+pub enum ConstraintId {
+    Horizontal(Ref<Line>),
+    Vertical(Ref<Line>),
+    Parallel(usize),
+    Perpendicular(usize),
+    EqualLength(usize),
+    EqualRadius(usize),
+    TangentLA(usize),
+    TangentAA(usize),
+    Coincident(CoincidentKind, usize),
+    HelperBridge(Ref<Point>),  // helper point bridging two constraints
+}
+
+// Constraint symbol types (drawn with painter, not text)
+#[derive(Clone, Copy)]
+pub enum ConstraintSymbol {
+    H,           // Horizontal
+    V,           // Vertical
+    Parallel,    // ||
+    Perpendicular, // upside-down T
+    Equal,       // =
+    Tangent,     // T
+    Coincident,  // corner with dot
+}
+
+// A drawn constraint marker with screen position
+pub struct ConstraintMarker {
+    pub pos: eframe::egui::Pos2,
+    pub symbol: ConstraintSymbol,
+    pub id: ConstraintId,
+}
+
+// Which point on an arc we're referring to
+#[derive(Clone, Copy)]
+pub enum ArcPoint { Center, Start, End }
+
+// What a point/endpoint snapped to
+#[derive(Clone, Copy)]
+pub enum SnapTarget {
+    Point(Ref<Point>),
+    LineP1(Ref<Line>),
+    LineP2(Ref<Line>),
+    Line(Ref<Line>),  // on line body (not endpoint)
+    ArcCenter(Ref<Arc>),
+    ArcStart(Ref<Arc>),
+    ArcEnd(Ref<Arc>),
+    ArcBody(Ref<Arc>),  // on arc/circle curve
+}

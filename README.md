@@ -203,7 +203,7 @@ An interactive constraint-based 2D sketch editor built on the arael optimization
 ### Running (native)
 
 ```bash
-cargo run -r -p arael-sketch --example editor --features editor
+cargo run -r -p arael-sketch
 ```
 
 ### Running (browser)
@@ -214,7 +214,7 @@ Requires [trunk](https://trunkrs.dev/) (`cargo install trunk`) and the
 
 ```bash
 cd arael-sketch
-trunk build --release --example editor --features editor
+trunk build --release
 python3 -m http.server -d dist 8080
 # Open http://localhost:8080
 ```
@@ -304,11 +304,22 @@ arael-macros/       Procedural macros
     lib.rs          #[arael::model], sym!, field rewriting
     constraint.rs   Constraint code generation, CSE integration
 
-arael-sketch/       2D sketch constraint solver + editor
+arael-sketch-solver/ 2D constraint solver library
   src/
-    lib.rs          Entities, constraints, solver, Arena storage
-  examples/
-    editor.rs       Interactive egui-based sketch editor
+    lib.rs          Sketch root, solve(), entity management
+    entities.rs     Point, Line, Arc types
+    constraints.rs  40+ cross-constraint types
+    dimensions.rs   Dimension annotations
+
+arael-sketch/       Interactive sketch editor application
+  src/
+    main.rs         Entry points, EditorApp, core logic
+    actions.rs      Action enum, undo-able operations
+    history.rs      Undo/redo system
+    tools.rs        Tool modes, selection, constraint types
+    drawing.rs      Canvas rendering, grid, dimensions
+    colors.rs       Color scheme (light/dark)
+    geometry.rs     Coordinate transforms, snapping
 ```
 
 ## License

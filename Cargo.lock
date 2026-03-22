@@ -255,6 +255,7 @@ name = "arael-sketch"
 version = "0.1.0"
 dependencies = [
  "arael",
+ "arael-sketch-solver",
  "bincode",
  "eframe",
  "pollster",
@@ -264,6 +265,15 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+]
+
+[[package]]
+name = "arael-sketch-solver"
+version = "0.1.0"
+dependencies = [
+ "arael",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
