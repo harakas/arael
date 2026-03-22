@@ -877,6 +877,7 @@ struct EditorApp {
     dim_offset: vect2d,         // current offset being placed
     dim_text_along: f64,        // text position along line during creation
     dim_edit_index: Option<usize>, // index of dimension being edited (for double-click edit)
+    dim_select_all: bool,           // one-shot: select all text on next frame
 
     // Display
     show_constraints: bool,
@@ -956,6 +957,7 @@ impl EditorApp {
             dim_offset: vect2d::new(0.0, 1.0),
             dim_text_along: 0.0,
             dim_edit_index: None,
+            dim_select_all: false,
             show_constraints: true,
             dark_mode: cfg!(target_arch = "wasm32"),
             colors: if cfg!(target_arch = "wasm32") { ColorScheme::dark() } else { ColorScheme::light() },
@@ -3954,8 +3956,9 @@ impl eframe::App for EditorApp {
                 let label = if self.dim_edit_index.is_some() { "Edit dimension:" } else { "New dimension:" };
                 ui.label(label);
                 let response = ui.text_edit_singleline(&mut self.dim_input);
-                // Auto-focus and select all text when first shown
-                if response.gained_focus() {
+                // Select all text when entering edit mode (one-shot flag)
+                if self.dim_select_all && response.has_focus() {
+                    self.dim_select_all = false;
                     let mut state = egui::TextEdit::load_state(ui.ctx(), response.id).unwrap_or_default();
                     state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
                         egui::text::CCursor::new(0),
@@ -3963,7 +3966,8 @@ impl eframe::App for EditorApp {
                     )));
                     egui::TextEdit::store_state(ui.ctx(), response.id, state);
                 }
-                if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if enter_pressed || (response.lost_focus() && enter_pressed) {
                     if let Ok(value) = self.dim_input.parse::<f64>() {
                         self.begin_group();
                         if let Some(edit_idx) = self.dim_edit_index.take() {
@@ -4231,6 +4235,7 @@ impl eframe::App for EditorApp {
                                 self.dim_offset = dim.offset;
                                 self.dim_edit_index = Some(i);
                                 self.dim_editing = true;
+                                self.dim_select_all = true;
                                 self.dim_placing = false;
                                 self.tool = Tool::Dimension;
                                 self.selection.clear();
@@ -4568,6 +4573,7 @@ impl eframe::App for EditorApp {
                                 self.dim_offset = dim.offset;
                                 self.dim_edit_index = Some(i);
                                 self.dim_editing = true;
+                                self.dim_select_all = true;
                                 self.dim_placing = false;
                                 break;
                             }
