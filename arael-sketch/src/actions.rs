@@ -75,6 +75,38 @@ pub enum Action {
     Drag { snapshot: Vec<u8> },
 }
 
+impl Action {
+    /// Returns true for constraint-adding actions that should be validated
+    /// by the solver (cost check after application).
+    pub fn is_constraint_action(&self) -> bool {
+        matches!(self,
+            Action::ApplyHorizontal { .. } | Action::ApplyVertical { .. } |
+            Action::ApplyCoincidentPP { .. } |
+            Action::ApplyCoincidentLL11 { .. } | Action::ApplyCoincidentLL12 { .. } |
+            Action::ApplyCoincidentLL21 { .. } | Action::ApplyCoincidentLL22 { .. } |
+            Action::ApplyCoincidentLP1 { .. } | Action::ApplyCoincidentLP2 { .. } |
+            Action::ApplyParallel { .. } | Action::ApplyPerpendicular { .. } |
+            Action::ApplyEqualLength { .. } |
+            Action::ApplyCoincidentArcCenter { .. } | Action::ApplyCoincidentArcStart { .. } |
+            Action::ApplyCoincidentArcEnd { .. } |
+            Action::ApplyConcentric { .. } |
+            Action::ApplyCoincidentLP1ArcCenter { .. } | Action::ApplyCoincidentLP2ArcCenter { .. } |
+            Action::ApplyCoincidentLP1ArcStart { .. } | Action::ApplyCoincidentLP2ArcStart { .. } |
+            Action::ApplyCoincidentLP1ArcEnd { .. } | Action::ApplyCoincidentLP2ArcEnd { .. } |
+            Action::ApplyCoincidentArcCenterStart { .. } | Action::ApplyCoincidentArcCenterEnd { .. } |
+            Action::ApplyCoincidentArcStartCenter { .. } | Action::ApplyCoincidentArcEndCenter { .. } |
+            Action::ApplyCoincidentArcStartStart { .. } | Action::ApplyCoincidentArcStartEnd { .. } |
+            Action::ApplyCoincidentArcEndStart { .. } | Action::ApplyCoincidentArcEndEnd { .. } |
+            Action::ApplyLineP1OnArc { .. } | Action::ApplyLineP2OnArc { .. } |
+            Action::ApplyEqualRadius { .. } |
+            Action::ApplyTangentLA { .. } | Action::ApplyTangentAA { .. } |
+            Action::ApplyPointOnLine { .. } | Action::ApplyPointOnArc { .. } |
+            Action::ApplyLineP1OnLine { .. } | Action::ApplyLineP2OnLine { .. } |
+            Action::AddDimension { .. }
+        )
+    }
+}
+
 // Resolve a DimensionEndpoint to a Ref<Point>, creating helper point + constraint if needed.
 pub fn resolve_dim_endpoint(sketch: &mut Sketch, ep: &DimensionEndpoint) -> Ref<Point> {
     match *ep {

@@ -123,11 +123,16 @@ impl eframe::App for EditorApp {
                                 d.text_along = self.dim_text_along;
                             }
                         } else if let Some(kind) = self.dim_kind.take() {
-                            // New dimension
-                            self.exec(Action::AddDimension { kind, value });
-                            if let Some(d) = self.sketch.dimensions.last_mut() {
-                                d.offset = self.dim_offset;
-                                d.text_along = self.dim_text_along;
+                            // New dimension -- check for duplicate
+                            let is_dup = self.sketch.dimensions.iter().any(|d| d.kind == kind);
+                            if is_dup {
+                                self.status_error = Some("Dimension already exists".into());
+                            } else {
+                                self.exec(Action::AddDimension { kind, value });
+                                if let Some(d) = self.sketch.dimensions.last_mut() {
+                                    d.offset = self.dim_offset;
+                                    d.text_along = self.dim_text_along;
+                                }
                             }
                         }
                     }
@@ -219,6 +224,12 @@ impl eframe::App for EditorApp {
                 }).collect();
                 ui.label(format!("Selected: {}", names.join(", ")));
             }
+
+            // Constraint conflict error message
+            if let Some(ref err) = self.status_error {
+                ui.separator();
+                ui.colored_label(egui::Color32::from_rgb(255, 80, 80), err.as_str());
+            }
         });
 
         // Central panel: canvas
@@ -270,6 +281,7 @@ impl eframe::App for EditorApp {
                 self.dim_kind = None;
                 self.dim_placing = false;
                 self.dim_edit_index = None;
+                self.status_error = None;
                 self.tool = Tool::Select;
             }
 

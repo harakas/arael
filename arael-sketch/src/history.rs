@@ -7,16 +7,18 @@ pub struct History {
     pub actions: Vec<Action>,
     pub snapshots: Vec<Vec<u8>>,  // bincode-serialized Sketch after each action
     pub groups: Vec<u32>,         // group id for each action
-    pub cursor: usize,            // number of applied actions (0 = empty sketch)
+    pub cursor: usize,            // number of applied actions (0 = initial state)
     pub next_group: u32,
     pub current_group: u32,
+    initial_snapshot: Vec<u8>,    // state before any actions
 }
 
 impl History {
-    pub fn new() -> Self {
+    pub fn new(sketch: &Sketch) -> Self {
         History {
             actions: Vec::new(), snapshots: Vec::new(), groups: Vec::new(),
             cursor: 0, next_group: 0, current_group: 0,
+            initial_snapshot: bincode::serialize(sketch).unwrap(),
         }
     }
 
@@ -48,7 +50,9 @@ impl History {
             self.cursor -= 1;
         }
         if self.cursor == 0 {
-            Some(Sketch::new())
+            let mut sketch: Sketch = bincode::deserialize(&self.initial_snapshot).unwrap();
+            sketch.solve();
+            Some(sketch)
         } else {
             let mut sketch: Sketch = bincode::deserialize(&self.snapshots[self.cursor - 1]).unwrap();
             sketch.solve();

@@ -11,9 +11,11 @@ mod history;
 mod geometry;
 mod drawing;
 mod app_update;
+mod conflicts;
 
 use eframe::egui;
 use arael::model::{Param, CrossBlock};
+use arael::simple_lm::LmProblem;
 use arael::vect::vect2d;
 use arael::refs::Ref;
 use arael_sketch_solver::*;
@@ -87,12 +89,14 @@ pub struct EditorApp {
     // Theme
     pub dark_mode: bool,
     pub colors: ColorScheme,
+
+    // Constraint conflict error message
+    pub status_error: Option<String>,
 }
 
 impl EditorApp {
     fn demo() -> Self {
         let mut sketch = Sketch::new();
-        let history = History::new();
 
         // Isoceles triangle with a circle at the apex
         // L0: apex (0,0) -> bottom-left (-1.5,-5)
@@ -133,6 +137,7 @@ impl EditorApp {
         sketch.dimensions.last_mut().unwrap().offset = vect2d::new(0.91, 0.0);
 
         sketch.solve();
+        let history = History::new(&sketch);
 
         EditorApp {
             sketch,
@@ -161,6 +166,7 @@ impl EditorApp {
             show_constraints: true,
             dark_mode: cfg!(target_arch = "wasm32"),
             colors: if cfg!(target_arch = "wasm32") { ColorScheme::dark() } else { ColorScheme::light() },
+            status_error: None,
         }
     }
 }
@@ -505,22 +511,58 @@ impl EditorApp {
                 sketch.solve();
                 self.sketch = sketch;
                 self.selection.clear();
-                self.history = History::new();
+                self.history = History::new(&self.sketch);
                 self.line_draw = None;
                 self.circle_draw = None;
                 self.arc_draw = None;
                 self.pending_fit = true;
+                self.status_error = None;
             }
             Err(e) => eprintln!("Failed to parse sketch: {}", e),
         }
     }
 
 
-    // Execute an action: apply to sketch and record in history
+    // Execute an action: apply to sketch and record in history.
+    // For constraint actions: validates by solving and checking cost.
+    // Rejects constraints that make a healthy sketch unsolvable.
     pub fn exec(&mut self, action: Action) {
-        action.apply(&mut self.sketch);
-        self.sketch.dedup_constraints();
-        self.history.push(action, &self.sketch);
+        self.status_error = None;
+
+        if action.is_constraint_action() {
+            // Snapshot before applying for potential rollback
+            let snapshot = bincode::serialize(&self.sketch).ok();
+            let old_cost = {
+                let mut params = Vec::new();
+                self.sketch.serialize64(&mut params);
+                self.sketch.calc_cost(&params)
+            };
+
+            action.apply(&mut self.sketch);
+            self.sketch.dedup_constraints();
+            let result = self.sketch.solve();
+            let new_cost = result.end_cost;
+
+            // Reject if the sketch was healthy (well-solved) but the new
+            // constraint makes it unsolvable (cost jumps significantly).
+            let cost_jumped = new_cost > old_cost + 1e-3;
+            if cost_jumped {
+                if let Some(snap) = snapshot {
+                    if let Ok(restored) = bincode::deserialize(&snap) {
+                        self.sketch = restored;
+                        self.status_error = Some(
+                            "Constraint rejected: solver failed to satisfy all constraints".into());
+                        return;
+                    }
+                }
+            }
+
+            self.history.push(action, &self.sketch);
+        } else {
+            action.apply(&mut self.sketch);
+            self.sketch.dedup_constraints();
+            self.history.push(action, &self.sketch);
+        }
     }
 
     // Apply constraint to current selection
@@ -627,6 +669,7 @@ impl EditorApp {
 
     // Try to apply constraint if selection is valid, otherwise enter constraint mode
     fn try_apply_or_enter_mode(&mut self, ct: ConstraintType) {
+        self.status_error = None;
         if self.can_apply_constraint(ct) {
             match ct {
                 ConstraintType::Horizontal => self.apply_horizontal(),
@@ -884,7 +927,12 @@ impl EditorApp {
             if let Selection::Line(r) = s { Some(*r) } else { None }
         }).collect();
         if !lines.is_empty() {
-            self.exec(Action::ApplyHorizontal { lines });
+            let action = Action::ApplyHorizontal { lines };
+            if let Some(err) = conflicts::check_constraint_conflict(&self.sketch, &action) {
+                self.status_error = Some(err);
+                return;
+            }
+            self.exec(action);
         }
     }
 
@@ -894,7 +942,34 @@ impl EditorApp {
             if let Selection::Line(r) = s { Some(*r) } else { None }
         }).collect();
         if !lines.is_empty() {
-            self.exec(Action::ApplyVertical { lines });
+            let action = Action::ApplyVertical { lines };
+            if let Some(err) = conflicts::check_constraint_conflict(&self.sketch, &action) {
+                self.status_error = Some(err);
+                return;
+            }
+            self.exec(action);
+        }
+    }
+
+    // Get a human-readable name for a selection
+    fn selection_name(&self, sel: Selection) -> String {
+        match sel {
+            Selection::Point(r) => self.sketch.points[r].name.clone(),
+            Selection::Line(r) => self.sketch.lines[r].name.clone(),
+            Selection::LineP1(r) => format!("{}.p1", self.sketch.lines[r].name),
+            Selection::LineP2(r) => format!("{}.p2", self.sketch.lines[r].name),
+            Selection::Arc(r) => self.sketch.arcs[r].name.clone(),
+            Selection::ArcCenter(r) => format!("{}.c", self.sketch.arcs[r].name),
+            Selection::ArcStart(r) => format!("{}.s", self.sketch.arcs[r].name),
+            Selection::ArcEnd(r) => format!("{}.e", self.sketch.arcs[r].name),
+            Selection::Constraint(_) => "constraint".to_string(),
+            Selection::Dimension(i) => {
+                if i < self.sketch.dimensions.len() {
+                    self.sketch.dimensions[i].name.clone()
+                } else {
+                    "dim?".to_string()
+                }
+            }
         }
     }
 
@@ -929,6 +1004,14 @@ impl EditorApp {
         self.begin_group();
         if self.selection.len() != 2 { return; }
         let (s0, s1) = (self.selection[0], self.selection[1]);
+
+        // Check for transitive coincidence (already coincident through other constraints)
+        if self.are_transitively_coincident(s0, s1) {
+            let name_a = self.selection_name(s0);
+            let name_b = self.selection_name(s1);
+            self.status_error = Some(format!("{} and {} are already coincident", name_a, name_b));
+            return;
+        }
 
         // Point-on-line / endpoint-on-line: special cases (different constraint type)
         match (s0, s1) {
@@ -994,7 +1077,12 @@ impl EditorApp {
             }
             // Line-to-line (default: a.p2 == b.p1)
             (Selection::Line(a), Selection::Line(b)) => {
-                self.exec(Action::ApplyCoincidentLL21 { a, b });
+                let action = Action::ApplyCoincidentLL21 { a, b };
+                if let Some(err) = conflicts::check_constraint_conflict(&self.sketch, &action) {
+                    self.status_error = Some(err);
+                    return;
+                }
+                self.exec(action);
                 return;
             }
             _ => {}
@@ -1046,7 +1134,12 @@ impl EditorApp {
                 self.exec(Action::ApplyCoincidentArcEnd { point, arc }); return;
             }
             (Selection::ArcCenter(a), Selection::ArcCenter(b)) => {
-                self.exec(Action::ApplyConcentric { a, b }); return;
+                let action = Action::ApplyConcentric { a, b };
+                if let Some(err) = conflicts::check_constraint_conflict(&self.sketch, &action) {
+                    self.status_error = Some(err);
+                    return;
+                }
+                self.exec(action); return;
             }
             // Line endpoint <-> Arc point (direct)
             (Selection::LineP1(line), Selection::ArcCenter(arc))
@@ -1116,7 +1209,12 @@ impl EditorApp {
         self.begin_group();
         if self.selection.len() == 2 {
             if let (Selection::Line(a), Selection::Line(b)) = (self.selection[0], self.selection[1]) {
-                self.exec(Action::ApplyParallel { a, b });
+                let action = Action::ApplyParallel { a, b };
+                if let Some(err) = conflicts::check_constraint_conflict(&self.sketch, &action) {
+                    self.status_error = Some(err);
+                    return;
+                }
+                self.exec(action);
             }
         }
     }
@@ -1125,7 +1223,12 @@ impl EditorApp {
         self.begin_group();
         if self.selection.len() == 2 {
             if let (Selection::Line(a), Selection::Line(b)) = (self.selection[0], self.selection[1]) {
-                self.exec(Action::ApplyPerpendicular { a, b });
+                let action = Action::ApplyPerpendicular { a, b };
+                if let Some(err) = conflicts::check_constraint_conflict(&self.sketch, &action) {
+                    self.status_error = Some(err);
+                    return;
+                }
+                self.exec(action);
             }
         }
     }
@@ -1271,7 +1374,12 @@ impl EditorApp {
                 self.exec(Action::ApplyTangentLA { line, arc });
             }
             (Selection::Arc(a), Selection::Arc(b)) => {
-                self.exec(Action::ApplyTangentAA { a, b });
+                let action = Action::ApplyTangentAA { a, b };
+                if let Some(err) = conflicts::check_constraint_conflict(&self.sketch, &action) {
+                    self.status_error = Some(err);
+                    return;
+                }
+                self.exec(action);
             }
             _ => {}
         }
@@ -1282,10 +1390,20 @@ impl EditorApp {
         if self.selection.len() == 2 {
             match (self.selection[0], self.selection[1]) {
                 (Selection::Line(a), Selection::Line(b)) => {
-                    self.exec(Action::ApplyEqualLength { a, b });
+                    let action = Action::ApplyEqualLength { a, b };
+                    if let Some(err) = conflicts::check_constraint_conflict(&self.sketch, &action) {
+                        self.status_error = Some(err);
+                        return;
+                    }
+                    self.exec(action);
                 }
                 (Selection::Arc(a), Selection::Arc(b)) => {
-                    self.exec(Action::ApplyEqualRadius { a, b });
+                    let action = Action::ApplyEqualRadius { a, b };
+                    if let Some(err) = conflicts::check_constraint_conflict(&self.sketch, &action) {
+                        self.status_error = Some(err);
+                        return;
+                    }
+                    self.exec(action);
                 }
                 _ => {}
             }
