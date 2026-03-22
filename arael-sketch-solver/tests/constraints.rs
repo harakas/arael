@@ -561,3 +561,25 @@ fn test_graduated_optimization_length() {
     assert_near(len, 3.0, 0.001);
     assert!(result.end_cost < 1.0, "cost={} should be near zero", result.end_cost);
 }
+
+#[test]
+fn test_circle_has_3_params() {
+    // A circle (closed arc) should have 3 optimizable params: center.x, center.y, radius.
+    // start_angle and end_angle are fixed since they are meaningless for a full circle.
+    let mut sketch = Sketch::new();
+    sketch.add_arc(vect2d::new(1.0, 2.0), 3.0, 0.0, std::f64::consts::TAU, true);
+    let mut params = Vec::new();
+    sketch.serialize64(&mut params);
+    assert_eq!(params.len(), 3, "circle should have 3 params (cx, cy, r)");
+}
+
+#[test]
+fn test_arc_has_5_params() {
+    // An arc (non-closed) should have 5 optimizable params:
+    // center.x, center.y, radius, start_angle, end_angle.
+    let mut sketch = Sketch::new();
+    sketch.add_arc(vect2d::new(1.0, 2.0), 3.0, 0.0, 1.5, false);
+    let mut params = Vec::new();
+    sketch.serialize64(&mut params);
+    assert_eq!(params.len(), 5, "arc should have 5 params (cx, cy, r, sa, ea)");
+}

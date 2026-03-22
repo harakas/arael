@@ -246,8 +246,8 @@ impl Sketch {
         self.arcs.push(Arc {
             center: Param::new(center),
             radius: Param::new(radius),
-            start_angle: Param::new(start),
-            end_angle: Param::new(end),
+            start_angle: if closed { Param::fixed(start) } else { Param::new(start) },
+            end_angle: if closed { Param::fixed(end) } else { Param::new(end) },
             closed,
             style: LineStyle::Solid, name,
             constraints: ArcConstraints { has_target_radius: false, target_radius: 0.0 },
