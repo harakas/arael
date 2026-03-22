@@ -5,7 +5,8 @@
 //! Define model structs with optimizable parameters, write constraints as
 //! symbolic expressions, and the framework symbolically differentiates at
 //! compile time, applies common subexpression elimination, and generates
-//! compiled cost/gradient/hessian code.
+//! compiled cost, gradient, and Gauss-Newton hessian (J^T J approximation)
+//! code.
 //!
 //! # Features
 //!
@@ -14,7 +15,8 @@
 //! - **Compile-time constraint code generation** -- write constraints
 //!   symbolically, get compiled derivative code with CSE
 //! - **Levenberg-Marquardt solver** -- with robust error suppression
-//!   via the Starship method `gamma * atan(r / gamma)`
+//!   via the Starship method `gamma * atan(r / gamma)` and switchable
+//!   constraints (`guard = expr`)
 //! - **Multiple solver backends** via `LmSolver` trait:
 //!   - Dense Cholesky (nalgebra) -- fixed-size dispatch up to 9x9
 //!   - Band Cholesky -- pure Rust O(n*kd^2) for block-tridiagonal systems
@@ -33,6 +35,33 @@
 //!   delta around a reference rotation matrix
 //! - **WASM/browser support** -- compiles to WebAssembly; the `arael-sketch`
 //!   constraint editor runs in the browser via eframe/egui
+//!
+//! # Scope
+//!
+//! Arael is a **nonlinear optimization framework**, not a complete SLAM or
+//! state estimation system. The SLAM and localization demos show how to use
+//! arael as the optimizer backend, but a production SLAM pipeline would
+//! additionally need:
+//!
+//! - **Front-end perception**: feature detection, descriptor extraction
+//! - **Data association**: matching observed features to existing landmarks,
+//!   handling ambiguous or incorrect matches
+//! - **Landmark management**: initializing new landmarks from observations,
+//!   merging duplicates, pruning unreliable ones
+//! - **Keyframe selection**: deciding when to add new poses vs. discard
+//!   redundant frames
+//! - **Loop closure**: detecting revisited places, verifying loop closure
+//!   candidates, and injecting constraints
+//! - **Outlier rejection logic**: deciding which observations to reject
+//! - **Marginalization / sliding window**: limiting optimization scope for
+//!   real-time operation, marginalizing old poses while preserving their
+//!   information
+//! - **Map management**: spatial indexing, map saving/loading, multi-session
+//!   map merging
+//!
+//! Arael provides the compile-time-differentiated solver that sits at the
+//! core of such a system. Everything above is application-level logic that
+//! builds on top of it.
 //!
 //! # Example: Symbolic Math
 //!
