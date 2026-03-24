@@ -675,37 +675,30 @@ fn test_angle_dimension_45deg() {
 
 #[test]
 fn test_symmetry_ll() {
-    // 3 parallel lines, not equidistant. B endpoints should become equidistant
-    // from A and C after symmetry constraint.
+    // B is vertical mirror, A and C are roughly symmetric.
     let mut sketch = Sketch::new();
-    let a = sketch.add_line(vect2d::new(0.0, 3.0), vect2d::new(4.0, 3.0));
-    let b = sketch.add_line(vect2d::new(0.0, 1.0), vect2d::new(4.0, 1.0));
-    let c = sketch.add_line(vect2d::new(0.0, -2.0), vect2d::new(4.0, -2.0));
-    sketch.parallel.push(Parallel { a, b, hb: CrossBlock::new() });
-    sketch.parallel.push(Parallel { a: b, b: c, hb: CrossBlock::new() });
+    let a = sketch.add_line(vect2d::new(-4.0, 2.0), vect2d::new(-1.0, 3.0));
+    let b = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(0.0, 5.0));
+    let c = sketch.add_line(vect2d::new(1.0, 3.0), vect2d::new(4.0, 2.0));
     sketch.symmetry_ll.push(SymmetryLL {
         a, b, c, hb: arael::model::TripletBlock::new(),
     });
-    // Pin distance so lines don't collapse
-    sketch.distance_ll11.push(DistanceLL11 { a, b, distance: 2.0, hb: CrossBlock::new() });
     sketch.solve();
 
-    // Check B.p1 is equidistant from A and C
+    // Verify: projection of B endpoints onto A and C, dotted with B_normal, sum to ~0
     let la = &sketch.lines[a];
     let lb = &sketch.lines[b];
     let lc = &sketch.lines[c];
-    let dist_b1_a = point_to_line_dist(lb.p1.value, la);
-    let dist_b1_c = point_to_line_dist(lb.p1.value, lc);
-    let dist_b2_a = point_to_line_dist(lb.p2.value, la);
-    let dist_b2_c = point_to_line_dist(lb.p2.value, lc);
-    assert_near(dist_b1_a, dist_b1_c, 0.01);
-    assert_near(dist_b2_a, dist_b2_c, 0.01);
-    assert!(dist_b1_a > 1.5, "lines should not have collapsed: dist={}", dist_b1_a);
+    let (d1a, d1c) = projection_distances(lb.p1.value, lb, la, lc);
+    let (d2a, d2c) = projection_distances(lb.p2.value, lb, la, lc);
+    assert_near(d1a + d1c, 0.0, 0.01);
+    assert_near(d2a + d2c, 0.0, 0.01);
+    assert!(d1a.abs() > 0.5, "lines collapsed: d1a={}", d1a);
 }
 
 #[test]
 fn test_symmetry_ll_nonparallel() {
-    // Symmetry with non-parallel lines (V-shape). B is the bisector.
+    // Symmetry with non-parallel lines. B bisects the angle.
     let mut sketch = Sketch::new();
     let a = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(4.0, 2.0));
     let b = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(5.0, 0.0));
@@ -718,18 +711,28 @@ fn test_symmetry_ll_nonparallel() {
     let la = &sketch.lines[a];
     let lb = &sketch.lines[b];
     let lc = &sketch.lines[c];
-    let dist_b1_a = point_to_line_dist(lb.p1.value, la);
-    let dist_b1_c = point_to_line_dist(lb.p1.value, lc);
-    let dist_b2_a = point_to_line_dist(lb.p2.value, la);
-    let dist_b2_c = point_to_line_dist(lb.p2.value, lc);
-    assert_near(dist_b1_a, dist_b1_c, 0.01);
-    assert_near(dist_b2_a, dist_b2_c, 0.01);
+    let (d1a, d1c) = projection_distances(lb.p1.value, lb, la, lc);
+    let (d2a, d2c) = projection_distances(lb.p2.value, lb, la, lc);
+    assert_near(d1a + d1c, 0.0, 0.01);
+    assert_near(d2a + d2c, 0.0, 0.01);
 }
 
-fn point_to_line_dist(p: arael::vect::vect2d, l: &Line) -> f64 {
-    let dx = l.p2.value.x - l.p1.value.x;
-    let dy = l.p2.value.y - l.p1.value.y;
-    let len = (dx * dx + dy * dy).sqrt();
-    if len < 1e-12 { return 0.0; }
-    (((p.x - l.p1.value.x) * dy - (p.y - l.p1.value.y) * dx) / len).abs()
+/// Compute projection-based signed distances: project P onto A and C,
+/// dot (foot - P) with B_normal. Returns (d_a, d_c).
+fn projection_distances(p: arael::vect::vect2d, lb: &Line, la: &Line, lc: &Line) -> (f64, f64) {
+    let bdx = lb.p2.value.x - lb.p1.value.x;
+    let bdy = lb.p2.value.y - lb.p1.value.y;
+    let blen = (bdx * bdx + bdy * bdy).sqrt();
+    let bnx = bdy / blen;
+    let bny = bdx / blen;
+    let project = |l: &Line| -> f64 {
+        let dx = l.p2.value.x - l.p1.value.x;
+        let dy = l.p2.value.y - l.p1.value.y;
+        let len2 = dx * dx + dy * dy;
+        let t = ((p.x - l.p1.value.x) * dx + (p.y - l.p1.value.y) * dy) / len2;
+        let fx = l.p1.value.x + t * dx - p.x;
+        let fy = l.p1.value.y + t * dy - p.y;
+        fx * bnx - fy * bny
+    };
+    (project(la), project(lc))
 }
