@@ -203,6 +203,9 @@ pub fn check_constraint_conflict(sketch: &Sketch, action: &Action) -> Option<Str
         Action::ApplyCollinear { a, b } if a == b => {
             return Some(format!("Cannot constrain {} to itself", line_name(sketch, *a)));
         }
+        Action::ApplySymmetryLL { a, b, c } if a == b || b == c || a == c => {
+            return Some("Symmetry requires 3 distinct lines".into());
+        }
 
         // ----- Direct H/V conflict -----
         Action::ApplyHorizontal { lines } => {

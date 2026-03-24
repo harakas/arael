@@ -85,6 +85,7 @@ impl eframe::App for EditorApp {
             constraint_btn(ui, self, ConstraintType::Tangent, "Tangent (T)");
             constraint_btn(ui, self, ConstraintType::Collinear, "Collinear");
             constraint_btn(ui, self, ConstraintType::Midpoint, "Midpoint (M)");
+            constraint_btn(ui, self, ConstraintType::Symmetry, "Symmetry (S)");
             constraint_btn(ui, self, ConstraintType::Lock, "Lock (K)");
             constraint_btn(ui, self, ConstraintType::ToggleStyle, "Style (X)");
 
@@ -277,6 +278,7 @@ impl eframe::App for EditorApp {
             if ui.input(|i| i.key_pressed(egui::Key::K)) { self.try_apply_or_enter_mode(ConstraintType::Lock); }
             if ui.input(|i| i.key_pressed(egui::Key::T)) { self.try_apply_or_enter_mode(ConstraintType::Tangent); }
             if ui.input(|i| i.key_pressed(egui::Key::M)) { self.try_apply_or_enter_mode(ConstraintType::Midpoint); }
+            if ui.input(|i| i.key_pressed(egui::Key::S)) { self.try_apply_or_enter_mode(ConstraintType::Symmetry); }
             if ui.input(|i| i.key_pressed(egui::Key::X)) { self.try_apply_or_enter_mode(ConstraintType::ToggleStyle); }
             if ui.input(|i| i.key_pressed(egui::Key::D) && !i.modifiers.ctrl && !i.modifiers.mac_cmd) {
                 self.tool = Tool::Dimension;
@@ -672,6 +674,7 @@ impl eframe::App for EditorApp {
                                         ConstraintType::Tangent => self.apply_tangent(),
                                         ConstraintType::Collinear => self.apply_collinear(),
                                         ConstraintType::Midpoint => self.apply_midpoint(),
+                                        ConstraintType::Symmetry => self.apply_symmetry(),
                                         ConstraintType::Lock => self.apply_lock(),
                                         ConstraintType::ToggleStyle => self.apply_toggle_style(),
                                     }

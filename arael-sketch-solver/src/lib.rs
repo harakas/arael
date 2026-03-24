@@ -548,6 +548,10 @@ impl Sketch {
         dedup_ab!(self.parallel, "parallel", self.lines, self.lines);
         dedup_ab!(self.perpendicular, "perpendicular", self.lines, self.lines);
         dedup_ab!(self.collinear, "collinear", self.lines, self.lines);
+        {
+            let mut seen = std::collections::HashSet::new();
+            self.symmetry_ll.retain(|c| seen.insert((c.a.index(), c.b.index(), c.c.index())));
+        }
         dedup_ab!(self.equal_length, "equal_length", self.lines, self.lines);
         dedup_ab!(self.angle, "angle", self.lines, self.lines);
         dedup_la!(self.tangent_la, "tangent_la");

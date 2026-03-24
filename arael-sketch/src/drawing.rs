@@ -628,6 +628,12 @@ impl EditorApp {
             let id = ConstraintId::Midpoint(MidpointKind::ArcEnd, i);
             add_line_marker(self, &mut markers, c.line, ConstraintSymbol::Midpoint, id, &mut line_marker_count);
         }
+        for (i, c) in self.sketch.symmetry_ll.iter().enumerate() {
+            let id = ConstraintId::Symmetry(i);
+            add_line_marker(self, &mut markers, c.a, ConstraintSymbol::Symmetry, id, &mut line_marker_count);
+            add_line_marker(self, &mut markers, c.b, ConstraintSymbol::Symmetry, id, &mut line_marker_count);
+            add_line_marker(self, &mut markers, c.c, ConstraintSymbol::Symmetry, id, &mut line_marker_count);
+        }
         for (i, c) in self.sketch.tangent_la.iter().enumerate() {
             let id = ConstraintId::TangentLA(i);
             add_line_marker(self, &mut markers, c.line, ConstraintSymbol::Tangent, id, &mut line_marker_count);
@@ -1114,6 +1120,30 @@ impl EditorApp {
                     painter.line_segment([top, bl], stroke);
                     painter.line_segment([bl, br], stroke);
                     painter.line_segment([br, top], stroke);
+                }
+                ConstraintSymbol::Symmetry => {
+                    // Three parallel vertical lines, middle one dashed
+                    let h = s * 1.2;
+                    let gap = s * 0.75;
+                    let thin = egui::Stroke::new(w * 0.6, color);
+                    // Outer lines (solid)
+                    for dx in [-gap, gap] {
+                        painter.line_segment([
+                            egui::Pos2::new(p.x + dx as f32, p.y - h),
+                            egui::Pos2::new(p.x + dx as f32, p.y + h),
+                        ], thin);
+                    }
+                    // Middle line (dashed)
+                    let dash = h * 0.4;
+                    let mut y = p.y - h;
+                    while y < p.y + h {
+                        let y_end = (y + dash).min(p.y + h);
+                        painter.line_segment([
+                            egui::Pos2::new(p.x, y),
+                            egui::Pos2::new(p.x, y_end),
+                        ], thin);
+                        y += dash * 2.0;
+                    }
                 }
                 ConstraintSymbol::Coincident => {
                     // Corner with dot: small filled square + lines going right and up

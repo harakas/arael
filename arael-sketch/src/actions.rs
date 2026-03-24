@@ -1,6 +1,6 @@
 // Action enum and apply() for undo/redo in the sketch editor.
 
-use arael::model::{Param, CrossBlock};
+use arael::model::{Param, CrossBlock, TripletBlock};
 use arael::refs::Ref;
 use arael::utils::deg2rad;
 use arael::vect::vect2d;
@@ -56,6 +56,7 @@ pub enum Action {
     ApplyPointOnLine { point: Ref<Point>, line: Ref<Line> },
     ApplyPointOnArc { point: Ref<Point>, arc: Ref<Arc> },
     ApplyCollinear { a: Ref<Line>, b: Ref<Line> },
+    ApplySymmetryLL { a: Ref<Line>, b: Ref<Line>, c: Ref<Line> },
     ApplyMidpoint { point: Ref<Point>, line: Ref<Line> },
     ApplyMidpointLP1 { line: Ref<Line>, target: Ref<Line> },
     ApplyMidpointLP2 { line: Ref<Line>, target: Ref<Line> },
@@ -107,7 +108,7 @@ impl Action {
             Action::ApplyLineP1OnArc { .. } | Action::ApplyLineP2OnArc { .. } |
             Action::ApplyEqualRadius { .. } |
             Action::ApplyTangentLA { .. } | Action::ApplyTangentAA { .. } |
-            Action::ApplyCollinear { .. } |
+            Action::ApplyCollinear { .. } | Action::ApplySymmetryLL { .. } |
             Action::ApplyMidpoint { .. } | Action::ApplyMidpointLP1 { .. } |
             Action::ApplyMidpointLP2 { .. } | Action::ApplyMidpointArcStart { .. } |
             Action::ApplyMidpointArcEnd { .. } |
@@ -324,6 +325,10 @@ impl Action {
             }
             Action::ApplyCollinear { a, b } => {
                 sketch.collinear.push(Collinear { a: *a, b: *b, hb: CrossBlock::new() });
+                sketch.solve();
+            }
+            Action::ApplySymmetryLL { a, b, c } => {
+                sketch.symmetry_ll.push(SymmetryLL { a: *a, b: *b, c: *c, hb: TripletBlock::new() });
                 sketch.solve();
             }
             Action::ApplyMidpoint { point, line } => {

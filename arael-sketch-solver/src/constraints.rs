@@ -934,24 +934,32 @@ pub struct LineP2OnArc {
 
 // -- Symmetry (3-entity) --
 
-// Symmetry of 3 lines: line B is equidistant from lines A and C.
-// Also enforces A||B||C via p2 distance residuals (no separate parallel
-// constraints needed).
-// Uses TripletBlock for 3-entity Hessian accumulation with compile-time
-// symbolic differentiation.
+// Symmetry of 3 lines: each endpoint of mirror line B is equidistant
+// from lines A and C (on opposite sides). The signed perpendicular
+// distance is corrected by dot(L_normal, B_normal) so that A/C line
+// direction doesn't affect the sign — only B's direction matters.
+// Uses TripletBlock for 3-entity Hessian accumulation.
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
-    let dx = b.p2.x - b.p1.x;
-    let dy = b.p2.y - b.p1.y;
-    let len = sqrt(dx * dx + dy * dy);
-    let dist_a1 = ((a.p1.x - b.p1.x) * dy - (a.p1.y - b.p1.y) * dx) / len;
-    let dist_a2 = ((a.p2.x - b.p1.x) * dy - (a.p2.y - b.p1.y) * dx) / len;
-    let dist_c1 = ((c.p1.x - b.p1.x) * dy - (c.p1.y - b.p1.y) * dx) / len;
-    let dist_c2 = ((c.p2.x - b.p1.x) * dy - (c.p2.y - b.p1.y) * dx) / len;
-    [(dist_a1 + dist_c1) * sketch.constraint_isigma,
-     (dist_a1 - dist_a2) * sketch.constraint_isigma,
-     (dist_c1 - dist_c2) * sketch.constraint_isigma]
+    let adx = a.p2.x - a.p1.x;
+    let ady = a.p2.y - a.p1.y;
+    let cdx = c.p2.x - c.p1.x;
+    let cdy = c.p2.y - c.p1.y;
+    let bdx = b.p2.x - b.p1.x;
+    let bdy = b.p2.y - b.p1.y;
+    // dot(A_normal, B_normal) = dot((-ady,adx), (-bdy,bdx)) = ady*bdy + adx*bdx
+    let ab_dot = adx * bdx + ady * bdy;
+    let cb_dot = cdx * bdx + cdy * bdy;
+    // Signed distance from P to line L, corrected by dot(L_normal, B_normal):
+    //   cross(P-L.p1, L_dir) * dot(L_normal, B_normal) / |L|^2
+    // This makes the sign depend only on B's direction.
+    let d1a = ((b.p1.x - a.p1.x) * ady - (b.p1.y - a.p1.y) * adx) * ab_dot / (adx*adx + ady*ady);
+    let d1c = ((b.p1.x - c.p1.x) * cdy - (b.p1.y - c.p1.y) * cdx) * cb_dot / (cdx*cdx + cdy*cdy);
+    let d2a = ((b.p2.x - a.p1.x) * ady - (b.p2.y - a.p1.y) * adx) * ab_dot / (adx*adx + ady*ady);
+    let d2c = ((b.p2.x - c.p1.x) * cdy - (b.p2.y - c.p1.y) * cdx) * cb_dot / (cdx*cdx + cdy*cdy);
+    [(d1a + d1c) * sketch.constraint_isigma,
+     (d2a + d2c) * sketch.constraint_isigma]
 }))]
 pub struct SymmetryLL {
     #[arael(ref = root.lines)]

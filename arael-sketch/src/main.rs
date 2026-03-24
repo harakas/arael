@@ -754,6 +754,9 @@ impl EditorApp {
                     pts == 1 && lines == 1
                 }
             }
+            ConstraintType::Symmetry => {
+                sel.len() == 3 && sel.iter().all(|s| matches!(s, Selection::Line(_)))
+            }
             ConstraintType::Lock => {
                 !sel.is_empty() && sel.iter().all(|s| matches!(s,
                     Selection::Point(_) | Selection::LineP1(_) | Selection::LineP2(_)
@@ -817,6 +820,9 @@ impl EditorApp {
                 matches!(sel, Selection::Point(_) | Selection::LineP1(_) | Selection::LineP2(_)
                     | Selection::ArcStart(_) | Selection::ArcEnd(_) | Selection::Line(_))
             }
+            ConstraintType::Symmetry => {
+                matches!(sel, Selection::Line(_))
+            }
             ConstraintType::Lock => {
                 matches!(sel, Selection::Point(_) | Selection::LineP1(_) | Selection::LineP2(_)
                     | Selection::ArcCenter(_) | Selection::ArcStart(_) | Selection::ArcEnd(_))
@@ -841,6 +847,7 @@ impl EditorApp {
                 ConstraintType::Tangent => self.apply_tangent(),
                 ConstraintType::Collinear => self.apply_collinear(),
                 ConstraintType::Midpoint => self.apply_midpoint(),
+                ConstraintType::Symmetry => self.apply_symmetry(),
                 ConstraintType::Lock => self.apply_lock(),
                 ConstraintType::ToggleStyle => self.apply_toggle_style(),
             }
@@ -1436,6 +1443,23 @@ impl EditorApp {
         }
     }
 
+    fn apply_symmetry(&mut self) {
+        self.begin_group();
+        if self.selection.len() == 3 {
+            if let (Selection::Line(a), Selection::Line(c), Selection::Line(b)) =
+                (self.selection[0], self.selection[1], self.selection[2])
+            {
+                // First two = sides (a, c), third = mirror (b)
+                let action = Action::ApplySymmetryLL { a, b, c };
+                if let Some(err) = conflicts::check_constraint_conflict(&self.sketch, &action) {
+                    self.status_error = Some(err);
+                    return;
+                }
+                self.exec(action);
+            }
+        }
+    }
+
     fn apply_midpoint(&mut self) {
         self.begin_group();
         if self.selection.len() != 2 { return; }
@@ -1848,6 +1872,7 @@ impl EditorApp {
             ConstraintId::TangentLA(i) => { let c = &self.sketch.tangent_la[i]; format!("Tangent({}, {})", ln(c.line), an(c.arc)) }
             ConstraintId::TangentAA(i) => { let c = &self.sketch.tangent_aa[i]; format!("Tangent({}, {})", an(c.a), an(c.b)) }
             ConstraintId::Collinear(i) => { let c = &self.sketch.collinear[i]; format!("Collinear({}, {})", ln(c.a), ln(c.b)) }
+            ConstraintId::Symmetry(i) => { let c = &self.sketch.symmetry_ll[i]; format!("Symmetry({}, {}, {})", ln(c.a), ln(c.b), ln(c.c)) }
             ConstraintId::Midpoint(kind, i) => {
                 let desc = match kind {
                     MidpointKind::Point => { let c = &self.sketch.midpoint[i]; format!("{} @ mid({})", pn(c.point), ln(c.line)) }
@@ -1941,6 +1966,10 @@ impl EditorApp {
             ConstraintId::Collinear(i) => {
                 let c = &self.sketch.collinear[i];
                 lines.push(c.a); lines.push(c.b);
+            }
+            ConstraintId::Symmetry(i) => {
+                let c = &self.sketch.symmetry_ll[i];
+                lines.push(c.a); lines.push(c.b); lines.push(c.c);
             }
             ConstraintId::Midpoint(kind, i) => {
                 match kind {
@@ -2044,6 +2073,7 @@ impl EditorApp {
             ConstraintId::TangentLA(i) => { self.sketch.tangent_la.remove(i); }
             ConstraintId::TangentAA(i) => { self.sketch.tangent_aa.remove(i); }
             ConstraintId::Collinear(i) => { self.sketch.collinear.remove(i); }
+            ConstraintId::Symmetry(i) => { self.sketch.symmetry_ll.remove(i); }
             ConstraintId::Midpoint(kind, i) => {
                 match kind {
                     MidpointKind::Point => { self.sketch.midpoint.remove(i); }

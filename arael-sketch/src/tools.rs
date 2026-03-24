@@ -42,6 +42,7 @@ pub enum ConstraintType {
     Tangent,
     Collinear,
     Midpoint,
+    Symmetry,
     Lock,
     ToggleStyle,
 }
@@ -59,6 +60,7 @@ impl ConstraintType {
             ConstraintType::Tangent => "Tangent",
             ConstraintType::Collinear => "Collinear",
             ConstraintType::Midpoint => "Midpoint",
+            ConstraintType::Symmetry => "Symmetry",
             ConstraintType::Lock => "Lock",
             ConstraintType::ToggleStyle => "Style",
         }
@@ -142,6 +144,7 @@ pub enum ConstraintId {
     TangentLA(usize),
     TangentAA(usize),
     Collinear(usize),
+    Symmetry(usize),
     Coincident(CoincidentKind, usize),
     Midpoint(MidpointKind, usize),
     HelperBridge(Ref<Point>),  // helper point bridging two constraints
@@ -158,6 +161,7 @@ pub enum ConstraintSymbol {
     Tangent,     // T
     Collinear,   // diagonal line with gap
     Midpoint,    // triangle
+    Symmetry,    // three parallel vertical lines |||
     Coincident,  // corner with dot
 }
 
