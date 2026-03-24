@@ -651,3 +651,24 @@ fn test_midpoint_arc_start() {
     assert_near(sx, mx, 0.01);
     assert_near(sy, my, 0.01);
 }
+
+#[test]
+fn test_angle_dimension_45deg() {
+    // Constrain angle between two lines to 45 degrees
+    let mut sketch = Sketch::new();
+    let a = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(3.0, 0.0));
+    let b = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(2.0, 1.0));
+    let target_rad = std::f64::consts::FRAC_PI_4; // 45 degrees
+    sketch.angle.push(AngleConstraint { a, b, angle: target_rad, hb: CrossBlock::new() });
+    sketch.solve();
+    let la = &sketch.lines[a];
+    let lb = &sketch.lines[b];
+    let dx1 = la.p2.value.x - la.p1.value.x;
+    let dy1 = la.p2.value.y - la.p1.value.y;
+    let dx2 = lb.p2.value.x - lb.p1.value.x;
+    let dy2 = lb.p2.value.y - lb.p1.value.y;
+    let cross = dx1 * dy2 - dy1 * dx2;
+    let dot = dx1 * dx2 + dy1 * dy2;
+    let angle = cross.atan2(dot);
+    assert_near(angle, target_rad, 0.01);
+}

@@ -23,6 +23,9 @@ pub enum DimensionKind {
     PointPointDistance(DimensionEndpoint, DimensionEndpoint),
     PointLineDistance(DimensionEndpoint, Ref<Line>),
     ArcRadius(Ref<Arc>),
+    /// Angle between two lines. The bool is `supplement`: when true,
+    /// constrains the supplementary angle (pi - angle) instead.
+    Angle(Ref<Line>, Ref<Line>, bool),
 }
 
 impl DimensionEndpoint {
@@ -50,6 +53,7 @@ impl DimensionKind {
             DimensionKind::LineLength(l) => *l == r,
             DimensionKind::PointPointDistance(a, b) => a.references_line(r) || b.references_line(r),
             DimensionKind::PointLineDistance(a, l) => a.references_line(r) || *l == r,
+            DimensionKind::Angle(a, b, _) => *a == r || *b == r,
             _ => false,
         }
     }

@@ -1,6 +1,7 @@
 // eframe::App implementation for EditorApp.
 
 use eframe::egui;
+use arael::utils::rad2rad;
 use arael::vect::vect2d;
 use arael::refs::Ref;
 use arael_sketch_solver::*;
@@ -445,6 +446,23 @@ impl eframe::App for EditorApp {
                                             .atan2(mouse_sketch.x - a.center.value.x);
                                         self.sketch.dimensions[dim_idx].offset = vect2d::new(angle, 0.0);
                                     }
+                                } else if let DimensionKind::Angle(a, b, sup) = kind {
+                                    // Drag existing: lock to 2 opposing sectors (same supplement)
+                                    let la = &self.sketch.lines[a];
+                                    let lb = &self.sketch.lines[b];
+                                    let ix = line_line_intersection(
+                                        la.p1.value, la.p2.value, lb.p1.value, lb.p2.value);
+                                    let dist = ((mouse_sketch.x - ix.x).powi(2)
+                                        + (mouse_sketch.y - ix.y).powi(2)).sqrt();
+                                    let mouse_angle = (mouse_sketch.y - ix.y).atan2(mouse_sketch.x - ix.x);
+                                    let sector_mid = self.angle_dim_opposing_sector(a, b, sup, mouse_angle);
+                                    let new_offset = vect2d::new(sector_mid, dist.max(0.3));
+                                    // Compute text_along from mouse angle relative to sector
+                                    let (_ix, start, sweep) = self.angle_dim_sector(a, b, sup, new_offset);
+                                    let delta = rad2rad(mouse_angle - start);
+                                    let along = if sweep.abs() > 1e-6 { delta / sweep - 0.5 } else { 0.0 };
+                                    self.sketch.dimensions[dim_idx].offset = new_offset;
+                                    self.sketch.dimensions[dim_idx].text_along = along;
                                 } else {
                                     // Decompose mouse into perpendicular offset and along-line position
                                     let (p1, p2) = self.dim_endpoints(&kind);
@@ -679,6 +697,31 @@ impl eframe::App for EditorApp {
                                     self.dim_offset = vect2d::new(angle, 0.0);
                                     self.dim_text_along = 0.0;
                                 }
+                            } else if let DimensionKind::Angle(a, b, _) = kind {
+                                // Mouse position determines arc radius and which of 4 sectors
+                                let la = &self.sketch.lines[*a];
+                                let lb = &self.sketch.lines[*b];
+                                let ix = line_line_intersection(
+                                    la.p1.value, la.p2.value, lb.p1.value, lb.p2.value);
+                                let dist = ((mouse_sketch.x - ix.x).powi(2)
+                                    + (mouse_sketch.y - ix.y).powi(2)).sqrt();
+                                let mouse_angle = (mouse_sketch.y - ix.y).atan2(mouse_sketch.x - ix.x);
+                                let (sector_mid, sup) = self.angle_dim_sector_from_mouse(*a, *b, mouse_angle);
+                                let new_offset = vect2d::new(sector_mid, dist.max(0.3));
+                                // Compute text_along from mouse angle
+                                let (_ix, start, sweep) = self.angle_dim_sector(*a, *b, sup, new_offset);
+                                let delta = rad2rad(mouse_angle - start);
+                                let along = if sweep.abs() > 1e-6 { delta / sweep - 0.5 } else { 0.0 };
+                                self.dim_offset = new_offset;
+                                self.dim_text_along = along.clamp(-0.5, 0.5); // During creation, clamp to sector
+                                // Update supplement flag and measured value
+                                if let Some(DimensionKind::Angle(_, _, ref mut s)) = self.dim_kind {
+                                    if *s != sup {
+                                        *s = sup;
+                                        let measured = self.measure_dimension(&self.dim_kind.clone().unwrap());
+                                        self.dim_input = format!("{:.4}", measured);
+                                    }
+                                }
                             } else {
                                 // Decompose mouse into perpendicular and along
                                 let (p1, p2) = self.dim_endpoints(kind);
@@ -700,10 +743,30 @@ impl eframe::App for EditorApp {
                             }
                         }
                         if response.clicked_by(egui::PointerButton::Primary) {
-                            // Confirm position, enter text input
-                            self.dim_placing = false;
-                            self.dim_editing = true;
-                            self.dim_select_all = true;
+                            // If clicking on a geometry entity, cancel placing and
+                            // add it to selection (to switch dimension type)
+                            let hit = self.hit_test_selection(mouse_sketch, hit_threshold);
+                            let hit_geometry = hit.as_ref().is_some_and(|s| matches!(s,
+                                Selection::Line(_) | Selection::Arc(_) | Selection::Point(_)
+                                | Selection::LineP1(_) | Selection::LineP2(_)
+                                | Selection::ArcCenter(_) | Selection::ArcStart(_) | Selection::ArcEnd(_)));
+                            if hit_geometry {
+                                self.dim_placing = false;
+                                self.toggle_selection(hit.unwrap());
+                                if let Some(kind) = self.selection_to_dim_kind() {
+                                    let measured = self.measure_dimension(&kind);
+                                    self.dim_input = format!("{:.4}", measured);
+                                    self.dim_kind = Some(kind);
+                                    self.dim_placing = true;
+                                    self.dim_offset = vect2d::new(0.0, 1.0);
+                                    self.dim_text_along = 0.0;
+                                }
+                            } else {
+                                // Confirm position, enter text input
+                                self.dim_placing = false;
+                                self.dim_editing = true;
+                                self.dim_select_all = true;
+                            }
                         }
                     } else if !self.dim_editing {
                         // Phase 1: selecting entities

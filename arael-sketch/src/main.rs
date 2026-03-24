@@ -16,6 +16,7 @@ mod conflicts;
 use eframe::egui;
 use arael::model::{Param, CrossBlock};
 use arael::simple_lm::LmProblem;
+use arael::utils::rad2deg;
 use arael::vect::vect2d;
 use arael::refs::Ref;
 use arael_sketch_solver::*;
@@ -386,9 +387,9 @@ impl EditorApp {
             // Text segment
             let (ts, te) = self.dim_text_segment(dim);
             let dt = Self::screen_point_to_segment_dist(screen_pos, ts, te);
-            // Arrow line segment
-            let da = if matches!(dim.kind, DimensionKind::ArcRadius(_)) {
-                dt // for radius, text check is enough
+            // Arrow line segment (for angle dimensions, use the arc)
+            let da = if matches!(dim.kind, DimensionKind::ArcRadius(_) | DimensionKind::Angle(..)) {
+                dt // for radius and angle, text check is enough
             } else {
                 let (p1, p2) = self.dim_endpoints(&dim.kind);
                 let dx = p2.x - p1.x;
@@ -403,7 +404,7 @@ impl EditorApp {
                 let sq2 = self.to_screen(q2);
                 Self::screen_point_to_segment_dist(screen_pos, sq1, sq2)
             };
-            if dt < 12.0 || da < 8.0 {
+            if dt < 15.0 || da < 8.0 {
                 return Some(Selection::Dimension(i));
             }
         }
@@ -988,6 +989,19 @@ impl EditorApp {
             DimensionKind::ArcRadius(r) => {
                 self.sketch.arcs[*r].radius.value
             }
+            DimensionKind::Angle(a, b, supplement) => {
+                let la = &self.sketch.lines[*a];
+                let lb = &self.sketch.lines[*b];
+                let dx1 = la.p2.value.x - la.p1.value.x;
+                let dy1 = la.p2.value.y - la.p1.value.y;
+                let dx2 = lb.p2.value.x - lb.p1.value.x;
+                let dy2 = lb.p2.value.y - lb.p1.value.y;
+                let cross = dx1 * dy2 - dy1 * dx2;
+                let dot = dx1 * dx2 + dy1 * dy2;
+                let angle_rad = cross.atan2(dot).abs();
+                let angle_deg = if *supplement { 180.0 - rad2deg(angle_rad) } else { rad2deg(angle_rad) };
+                angle_deg
+            }
         }
     }
 
@@ -1015,6 +1029,10 @@ impl EditorApp {
             }
         }
         if sel.len() == 2 {
+            // Two lines -> angle dimension
+            if let (Selection::Line(a), Selection::Line(b)) = (sel[0], sel[1]) {
+                return Some(DimensionKind::Angle(a, b, false));
+            }
             // Point + Line -> point-line distance
             let point_ep = sel.iter().find_map(|s| Self::selection_to_dim_endpoint(s));
             let line_ref = sel.iter().find_map(|s| if let Selection::Line(r) = s { Some(*r) } else { None });
@@ -1073,6 +1091,16 @@ impl EditorApp {
                 let a = &self.sketch.arcs[*r];
                 let edge = vect2d::new(a.center.value.x + a.radius.value, a.center.value.y);
                 (a.center.value, edge)
+            }
+            DimensionKind::Angle(a, b, _) => {
+                // Return midpoints of both lines (for hit testing fallback)
+                let la = &self.sketch.lines[*a];
+                let lb = &self.sketch.lines[*b];
+                let ma = vect2d::new((la.p1.value.x + la.p2.value.x) / 2.0,
+                                     (la.p1.value.y + la.p2.value.y) / 2.0);
+                let mb = vect2d::new((lb.p1.value.x + lb.p2.value.x) / 2.0,
+                                     (lb.p1.value.y + lb.p2.value.y) / 2.0);
+                (ma, mb)
             }
         }
     }

@@ -2,6 +2,7 @@
 
 use eframe::egui;
 use arael::refs::Ref;
+use arael::utils::rad2rad;
 use arael::vect::vect2d;
 use arael_sketch_solver::*;
 
@@ -89,6 +90,12 @@ impl EditorApp {
                 return self.draw_rotated_text(painter, mid, ax, ay, &text,
                     egui::FontId::proportional(12.0), color);
             }
+        }
+
+        // Angle dimension: draw arc between two lines
+        if let DimensionKind::Angle(a_ref, b_ref, supplement) = kind {
+            return self.draw_angle_dimension(painter, *a_ref, *b_ref, *supplement,
+                value, offset, text_along, color);
         }
 
         let (p1_sketch, p2_sketch) = self.dim_endpoints(kind);
@@ -179,6 +186,206 @@ impl EditorApp {
             egui::FontId::proportional(12.0), color)
     }
 
+    /// Compute the angle sector start and sweep for an angle dimension.
+    /// offset.x stores the sector midpoint angle chosen during placement.
+    /// Finds the actual sector around offset.x using the 4 half-line boundaries.
+    /// Compute sector start and sweep for an angle dimension.
+    /// Uses the supplement flag to select the correct pair of opposing sectors,
+    /// then picks the one closest to offset.x. This is stable under line rotation.
+    pub fn angle_dim_sector(&self, a_ref: Ref<Line>, b_ref: Ref<Line>, supplement: bool,
+                        offset: vect2d) -> (vect2d, f64, f64) {
+        let la = &self.sketch.lines[a_ref];
+        let lb = &self.sketch.lines[b_ref];
+        let ix = crate::geometry::line_line_intersection(
+            la.p1.value, la.p2.value, lb.p1.value, lb.p2.value);
+
+        let da = vect2d::new(la.p2.value.x - la.p1.value.x, la.p2.value.y - la.p1.value.y);
+        let db = vect2d::new(lb.p2.value.x - lb.p1.value.x, lb.p2.value.y - lb.p1.value.y);
+        let ang_a = da.y.atan2(da.x);
+        let ang_b = db.y.atan2(db.x);
+        let pi = std::f64::consts::PI;
+        // Compute sweep for the supplement pair
+        let ang_a_eff = if supplement { ang_a + pi } else { ang_a };
+        let sweep = rad2rad(ang_b - ang_a_eff);
+
+        // Two opposing sectors: start at ang_a_eff and ang_a_eff+pi
+        let start1 = rad2rad(ang_a_eff);
+        let start2 = rad2rad(ang_a_eff + pi);
+        let mid1 = rad2rad(start1 + sweep * 0.5);
+        let mid2 = rad2rad(start2 + sweep * 0.5);
+
+        // Pick the sector whose midpoint is closest to offset.x
+        let d1 = rad2rad(offset.x - mid1).abs();
+        let d2 = rad2rad(offset.x - mid2).abs();
+        let start = if d1 <= d2 { start1 } else { start2 };
+
+        (ix, start, sweep)
+    }
+
+    /// Determine which of the 4 angle sectors the mouse is in.
+    /// Returns (sector_midpoint_angle, supplement_flag).
+    /// The 4 half-lines (ang_a, ang_a+pi, ang_b, ang_b+pi) divide the plane
+    /// into 4 sectors. We sort them, find which sector the mouse is in,
+    /// and determine the supplement flag from the bounding half-lines.
+    pub fn angle_dim_sector_from_mouse(&self, a_ref: Ref<Line>, b_ref: Ref<Line>,
+                                        mouse_angle: f64) -> (f64, bool) {
+        let la = &self.sketch.lines[a_ref];
+        let lb = &self.sketch.lines[b_ref];
+        let da = vect2d::new(la.p2.value.x - la.p1.value.x, la.p2.value.y - la.p1.value.y);
+        let db = vect2d::new(lb.p2.value.x - lb.p1.value.x, lb.p2.value.y - lb.p1.value.y);
+        let ang_a = da.y.atan2(da.x);
+        let ang_b = db.y.atan2(db.x);
+        let pi = std::f64::consts::PI;
+        // 4 half-line directions, tagged: (angle, is_line_a)
+        let mut halves = [
+            (rad2rad(ang_a), true),
+            (rad2rad(ang_a + pi), true),
+            (rad2rad(ang_b), false),
+            (rad2rad(ang_b + pi), false),
+        ];
+        halves.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+
+        // Find which sector the mouse is in
+        let m = rad2rad(mouse_angle);
+        let mut sector_idx = 3; // default: between halves[3] and halves[0] (wrapping)
+        for i in 0..4 {
+            let next = (i + 1) % 4;
+            let mut span = halves[next].0 - halves[i].0;
+            if span <= 0.0 { span += 2.0 * pi; }
+            let mut delta = m - halves[i].0;
+            if delta < 0.0 { delta += 2.0 * pi; }
+            if delta < span {
+                sector_idx = i;
+                break;
+            }
+        }
+
+        // Sector is between halves[sector_idx] and halves[(sector_idx+1)%4]
+        let i0 = sector_idx;
+        let i1 = (sector_idx + 1) % 4;
+        let a0 = halves[i0].0;
+        let a1 = halves[i1].0;
+        let mut span = a1 - a0;
+        if span <= 0.0 { span += 2.0 * pi; }
+        let mid = rad2rad(a0 + span * 0.5);
+
+        // Determine supplement: compute the direct angle between lines
+        let cross = da.x * db.y - da.y * db.x;
+        let dot = da.x * db.x + da.y * db.y;
+        let direct_angle = cross.atan2(dot).abs();
+        // If this sector's span is closer to pi-direct_angle, it's the supplement
+        let supplement = (span - (pi - direct_angle)).abs() < (span - direct_angle).abs();
+
+        (mid, supplement)
+    }
+
+    /// Pick between 2 opposing sectors for a given supplement value.
+    /// Used when dragging an existing dimension (no sector type change allowed).
+    pub fn angle_dim_opposing_sector(&self, a_ref: Ref<Line>, b_ref: Ref<Line>,
+                                      supplement: bool, mouse_angle: f64) -> f64 {
+        let la = &self.sketch.lines[a_ref];
+        let lb = &self.sketch.lines[b_ref];
+        let da = vect2d::new(la.p2.value.x - la.p1.value.x, la.p2.value.y - la.p1.value.y);
+        let db = vect2d::new(lb.p2.value.x - lb.p1.value.x, lb.p2.value.y - lb.p1.value.y);
+        let ang_a = da.y.atan2(da.x);
+        let ang_b = db.y.atan2(db.x);
+        let pi = std::f64::consts::PI;
+        let normalize = |mut a: f64| -> f64 {
+            while a > pi { a -= 2.0 * pi; }
+            while a <= -pi { a += 2.0 * pi; }
+            a
+        };
+
+        let ang_a_eff = if supplement { ang_a + pi } else { ang_a };
+        let sweep = normalize(ang_b - ang_a_eff);
+
+        // Two opposing sectors: start at ang_a_eff and ang_a_eff+pi
+        let mid1 = normalize(ang_a_eff + sweep * 0.5);
+        let mid2 = normalize(ang_a_eff + pi + sweep * 0.5);
+        let d1 = normalize(mouse_angle - mid1).abs();
+        let d2 = normalize(mouse_angle - mid2).abs();
+        if d1 <= d2 { mid1 } else { mid2 }
+    }
+
+    /// Draw an angle dimension arc with arrowheads, extension lines, and text.
+    /// text_along: 0 = arc midpoint, +/- shifts along arc. Values outside
+    /// [-0.5, 0.5] extend beyond the sector with a thin extension arc.
+    fn draw_angle_dimension(&self, painter: &egui::Painter, a_ref: Ref<Line>,
+                            b_ref: Ref<Line>, supplement: bool, value: f64,
+                            offset: vect2d, text_along: f64,
+                            color: egui::Color32) -> (egui::Pos2, egui::Pos2) {
+        let (ix, start_angle, sweep) = self.angle_dim_sector(a_ref, b_ref, supplement, offset);
+        let radius = offset.y.max(0.3);
+        let stroke = egui::Stroke::new(1.0, color);
+        let ext_stroke = egui::Stroke::new(0.5, color);
+        let six = self.to_screen(ix);
+
+        // Draw thin extension lines from intersection to arc endpoints
+        let arc_start_pt = vect2d::new(ix.x + radius * start_angle.cos(), ix.y + radius * start_angle.sin());
+        let arc_end_pt = vect2d::new(ix.x + radius * (start_angle + sweep).cos(),
+                                     ix.y + radius * (start_angle + sweep).sin());
+        painter.line_segment([six, self.to_screen(arc_start_pt)], ext_stroke);
+        painter.line_segment([six, self.to_screen(arc_end_pt)], ext_stroke);
+
+        // Draw main arc as polyline
+        let draw_arc = |a_start: f64, a_sweep: f64, s: egui::Stroke| {
+            let n = ((a_sweep.abs() * 20.0).ceil() as usize).max(8);
+            let pts: Vec<egui::Pos2> = (0..=n).map(|i| {
+                let t = i as f64 / n as f64;
+                let ang = a_start + a_sweep * t;
+                self.to_screen(vect2d::new(ix.x + radius * ang.cos(), ix.y + radius * ang.sin()))
+            }).collect();
+            for w in pts.windows(2) { painter.line_segment([w[0], w[1]], s); }
+            pts
+        };
+        let points = draw_arc(start_angle, sweep, stroke);
+
+        // Arrowheads at both ends of main arc
+        let asz = 6.0;
+        let draw_arrow = |tip: egui::Pos2, prev: egui::Pos2| {
+            let adx = prev.x - tip.x;
+            let ady = prev.y - tip.y;
+            let alen = (adx * adx + ady * ady).sqrt().max(1.0);
+            let (ax, ay) = (adx / alen, ady / alen);
+            painter.line_segment([tip, egui::Pos2::new(tip.x + ax * asz + ay * asz * 0.4,
+                tip.y + ay * asz - ax * asz * 0.4)], stroke);
+            painter.line_segment([tip, egui::Pos2::new(tip.x + ax * asz - ay * asz * 0.4,
+                tip.y + ay * asz + ax * asz * 0.4)], stroke);
+        };
+        if points.len() >= 2 {
+            draw_arrow(points[0], points[1]);
+            let n = points.len();
+            draw_arrow(points[n - 1], points[n - 2]);
+        }
+
+        // Text position along arc: text_along=0 is center, +-0.5 at edges
+        let text_angle = start_angle + sweep * (0.5 + text_along);
+
+        // If text is outside sector, draw extension arc past the text
+        // Extra angle to extend under the text (half text width in screen px / arc radius in screen px)
+        let screen_radius = (self.to_screen(vect2d::new(ix.x + radius, ix.y)).x - six.x).abs().max(1.0);
+        let text_half_angle = 20.0 / screen_radius; // ~20px half-width in angle
+        let extra = (text_half_angle as f64) * sweep.signum();
+        if text_along < -0.5 {
+            let ext_sweep = sweep * (text_along + 0.5) - extra;
+            draw_arc(start_angle, ext_sweep, ext_stroke);
+        } else if text_along > 0.5 {
+            let ext_sweep = sweep * (text_along - 0.5) + extra;
+            draw_arc(start_angle + sweep, ext_sweep, ext_stroke);
+        }
+
+        // Draw rotated text tangent to arc at text position
+        let text_pt = vect2d::new(ix.x + radius * text_angle.cos(), ix.y + radius * text_angle.sin());
+        let screen_pt = self.to_screen(text_pt);
+        // Tangent direction in screen space (Y is flipped vs math convention)
+        let sign = if sweep >= 0.0 { 1.0f32 } else { -1.0f32 };
+        let tx = -(text_angle.sin() as f32) * sign;
+        let ty = -(text_angle.cos() as f32) * sign;
+        let text = format!("{:.1}\u{00b0}", value);
+        self.draw_rotated_text(painter, screen_pt, tx, ty, &text,
+            egui::FontId::proportional(12.0), color)
+    }
+
     // Compute the screen-space text segment for a dimension (for hit testing without drawing)
     pub fn dim_text_segment(&self, dim: &Dimension) -> (egui::Pos2, egui::Pos2) {
         let is_radius = matches!(dim.kind, DimensionKind::ArcRadius(_));
@@ -218,6 +425,29 @@ impl EditorApp {
                     egui::Pos2::new(mid.x + dx * total_width / 2.0, mid.y + dy * total_width / 2.0),
                 );
             }
+        }
+
+        // Angle dimension: text along arc -- match draw_rotated_text positioning
+        if let DimensionKind::Angle(a_ref, b_ref, supplement) = dim.kind {
+            let (ix, start, sweep) = self.angle_dim_sector(a_ref, b_ref, supplement, dim.offset);
+            let radius = dim.offset.y.max(0.3);
+            let text_angle = start + sweep * (0.5 + dim.text_along);
+            let text_pt = vect2d::new(ix.x + radius * text_angle.cos(), ix.y + radius * text_angle.sin());
+            let screen_pt = self.to_screen(text_pt);
+            // Same tangent as draw_angle_dimension
+            let sign = if sweep >= 0.0 { 1.0f32 } else { -1.0f32 };
+            let tx = -(text_angle.sin() as f32) * sign;
+            let ty = -(text_angle.cos() as f32) * sign;
+            // draw_rotated_text ensures left-to-right
+            let (dx, dy) = if tx < 0.0 { (-tx, -ty) } else { (tx, ty) };
+            let nx = -dy;
+            let ny = dx;
+            let half_h = 6.0;
+            let mid = egui::Pos2::new(screen_pt.x - nx * (half_h + 2.0), screen_pt.y - ny * (half_h + 2.0));
+            return (
+                egui::Pos2::new(mid.x - dx * total_width / 2.0, mid.y - dy * total_width / 2.0),
+                egui::Pos2::new(mid.x + dx * total_width / 2.0, mid.y + dy * total_width / 2.0),
+            );
         }
 
         let (p1, p2) = self.dim_endpoints(&dim.kind);

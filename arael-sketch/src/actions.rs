@@ -2,6 +2,7 @@
 
 use arael::model::{Param, CrossBlock};
 use arael::refs::Ref;
+use arael::utils::deg2rad;
 use arael::vect::vect2d;
 use arael_sketch_solver::*;
 
@@ -483,6 +484,14 @@ impl Action {
                         sketch.arcs[*arc].constraints.has_target_radius = true;
                         sketch.arcs[*arc].constraints.target_radius = *value;
                     }
+                    DimensionKind::Angle(a, b, supplement) => {
+                        // value is in degrees, constraint uses radians
+                        let mut angle_rad = deg2rad(*value);
+                        if *supplement { angle_rad = std::f64::consts::PI - angle_rad; }
+                        sketch.angle.push(AngleConstraint {
+                            a: *a, b: *b, angle: angle_rad, hb: CrossBlock::new(),
+                        });
+                    }
                 }
                 sketch.dimensions.push(Dimension {
                     kind: *kind, value: *value,
@@ -545,6 +554,9 @@ impl Action {
                             if let Some(idx) = sketch.distance_pl.iter().position(|c| (c.distance.abs() - dim.value.abs()).abs() < 1e-9) {
                                 sketch.distance_pl.remove(idx);
                             }
+                        }
+                        DimensionKind::Angle(a, b, _) => {
+                            sketch.angle.retain(|c| !(c.a == a && c.b == b));
                         }
                     }
                     sketch.cleanup_helper_points();

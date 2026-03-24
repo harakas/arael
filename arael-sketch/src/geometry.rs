@@ -130,3 +130,19 @@ pub fn project_onto_segment(p: vect2d, a: vect2d, b: vect2d) -> vect2d {
     let t = (((p.x - a.x) * dx + (p.y - a.y) * dy) / len2).clamp(0.0, 1.0);
     vect2d::new(a.x + t * dx, a.y + t * dy)
 }
+
+/// Intersection of two infinite lines (p1-p2 and p3-p4).
+/// Returns midpoint of closest approach if nearly parallel.
+pub fn line_line_intersection(p1: vect2d, p2: vect2d, p3: vect2d, p4: vect2d) -> vect2d {
+    let d1x = p2.x - p1.x;
+    let d1y = p2.y - p1.y;
+    let d2x = p4.x - p3.x;
+    let d2y = p4.y - p3.y;
+    let denom = d1x * d2y - d1y * d2x;
+    if denom.abs() < 1e-12 {
+        // Nearly parallel -- return midpoint
+        return vect2d::new((p1.x + p3.x) / 2.0, (p1.y + p3.y) / 2.0);
+    }
+    let t = ((p3.x - p1.x) * d2y - (p3.y - p1.y) * d2x) / denom;
+    vect2d::new(p1.x + t * d1x, p1.y + t * d1y)
+}
