@@ -932,6 +932,38 @@ pub struct LineP2OnArc {
     pub hb: CrossBlock<Line, Arc>,
 }
 
+// -- Symmetry (3-entity) --
+
+// Symmetry of 3 lines: line B is equidistant from lines A and C.
+// Also enforces A||B||C via p2 distance residuals (no separate parallel
+// constraints needed).
+// Uses TripletBlock for 3-entity Hessian accumulation with compile-time
+// symbolic differentiation.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[arael::model]
+#[arael(constraint(hb, {
+    let dx = b.p2.x - b.p1.x;
+    let dy = b.p2.y - b.p1.y;
+    let len = sqrt(dx * dx + dy * dy);
+    let dist_a1 = ((a.p1.x - b.p1.x) * dy - (a.p1.y - b.p1.y) * dx) / len;
+    let dist_a2 = ((a.p2.x - b.p1.x) * dy - (a.p2.y - b.p1.y) * dx) / len;
+    let dist_c1 = ((c.p1.x - b.p1.x) * dy - (c.p1.y - b.p1.y) * dx) / len;
+    let dist_c2 = ((c.p2.x - b.p1.x) * dy - (c.p2.y - b.p1.y) * dx) / len;
+    [(dist_a1 + dist_c1) * sketch.constraint_isigma,
+     (dist_a1 - dist_a2) * sketch.constraint_isigma,
+     (dist_c1 - dist_c2) * sketch.constraint_isigma]
+}))]
+pub struct SymmetryLL {
+    #[arael(ref = root.lines)]
+    pub a: Ref<Line>,
+    #[arael(ref = root.lines)]
+    pub b: Ref<Line>,
+    #[arael(ref = root.lines)]
+    pub c: Ref<Line>,
+    #[serde(skip)]
+    pub hb: TripletBlock<f64>,
+}
+
 // -- Distance Point-Line --
 
 #[derive(serde::Serialize, serde::Deserialize)]

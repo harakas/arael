@@ -33,7 +33,7 @@
 pub mod dimensions;
 pub use dimensions::*;
 
-use arael::model::{Model, Param, SelfBlock, CrossBlock};
+use arael::model::{Model, Param, SelfBlock, CrossBlock, TripletBlock};
 use arael::vect::vect2d;
 use arael::refs::{Ref, Arena};
 
@@ -91,6 +91,7 @@ pub struct Sketch {
     pub concentric: std::vec::Vec<Concentric>,
     pub equal_radius: std::vec::Vec<EqualRadius>,
     pub tangent_aa: std::vec::Vec<TangentAA>,
+    pub symmetry_ll: std::vec::Vec<SymmetryLL>,
     pub distance_pl: std::vec::Vec<DistancePL>,
     pub line_p1_on_line: std::vec::Vec<LineP1OnLine>,
     pub line_p2_on_line: std::vec::Vec<LineP2OnLine>,
@@ -171,6 +172,7 @@ impl Sketch {
             concentric: Vec::new(),
             equal_radius: Vec::new(),
             tangent_aa: Vec::new(),
+            symmetry_ll: Vec::new(),
             distance_pl: Vec::new(),
             line_p1_on_line: Vec::new(),
             line_p2_on_line: Vec::new(),
@@ -313,6 +315,7 @@ impl Sketch {
         self.equal_length.retain(|c| c.a != r && c.b != r);
         self.angle.retain(|c| c.a != r && c.b != r);
         self.tangent_la.retain(|c| c.line != r);
+        self.symmetry_ll.retain(|c| c.a != r && c.b != r && c.c != r);
         self.distance_pl.retain(|c| c.line != r);
         self.line_p1_on_line.retain(|c| c.a != r && c.b != r);
         self.line_p2_on_line.retain(|c| c.a != r && c.b != r);

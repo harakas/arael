@@ -672,3 +672,41 @@ fn test_angle_dimension_45deg() {
     let angle = cross.atan2(dot);
     assert_near(angle, target_rad, 0.01);
 }
+
+#[test]
+fn test_symmetry_ll() {
+    // 3 non-parallel lines, not equidistant. Symmetry constraint should
+    // make them parallel AND equidistant (no separate parallel constraints).
+    let mut sketch = Sketch::new();
+    let a = sketch.add_line(vect2d::new(0.0, 3.0), vect2d::new(4.0, 3.2));
+    let b = sketch.add_line(vect2d::new(0.0, 1.0), vect2d::new(4.0, 0.8));
+    let c = sketch.add_line(vect2d::new(0.0, -2.0), vect2d::new(4.0, -1.5));
+    // Symmetry enforces both equidistance and parallelism
+    sketch.symmetry_ll.push(SymmetryLL {
+        a, b, c, hb: arael::model::TripletBlock::new(),
+    });
+    // Pin distance between A and B so they don't collapse to zero
+    sketch.distance_ll11.push(DistanceLL11 { a, b, distance: 2.0, hb: CrossBlock::new() });
+    let result = sketch.solve();
+    eprintln!("symmetry test: cost={:.6} iters={}", result.end_cost, result.iterations);
+
+    // Check that signed distances from A.p1 and C.p1 to B sum to ~0
+    let la = &sketch.lines[a];
+    let lb = &sketch.lines[b];
+    let lc = &sketch.lines[c];
+    let bx = lb.p2.value.x - lb.p1.value.x;
+    let by = lb.p2.value.y - lb.p1.value.y;
+    let blen = (bx * bx + by * by).sqrt();
+    let dist_a = ((la.p1.value.x - lb.p1.value.x) * (-by) + (la.p1.value.y - lb.p1.value.y) * bx) / blen;
+    let dist_c = ((lc.p1.value.x - lb.p1.value.x) * (-by) + (lc.p1.value.y - lb.p1.value.y) * bx) / blen;
+    eprintln!("  dist_a={:.4} dist_c={:.4} sum={:.4}", dist_a, dist_c, dist_a + dist_c);
+    assert_near(dist_a + dist_c, 0.0, 0.01);
+    assert_near(dist_a.abs(), dist_c.abs(), 0.01);
+    // Distances should be ~2.0 (from the distance constraint)
+    assert!(dist_a.abs() > 1.5, "lines should not have collapsed: dist_a={}", dist_a);
+    // Verify parallelism: A.p2 should be at same distance from B as A.p1
+    let dist_a2 = ((la.p2.value.x - lb.p1.value.x) * (-by) + (la.p2.value.y - lb.p1.value.y) * bx) / blen;
+    let dist_c2 = ((lc.p2.value.x - lb.p1.value.x) * (-by) + (lc.p2.value.y - lb.p1.value.y) * bx) / blen;
+    assert_near(dist_a, dist_a2, 0.01);
+    assert_near(dist_c, dist_c2, 0.01);
+}
