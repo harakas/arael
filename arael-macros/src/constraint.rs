@@ -148,6 +148,20 @@ fn eval_expr(expr: &Expr, ctx: &mut ConstraintCtx) -> Result<SymVal, syn::Error>
                 (SymVal::Mat3(m), "get_euler_angles") => {
                     Ok(SymVal::Vec3(m.get_euler_angles()))
                 }
+                (SymVal::Vec2(v), "norm") => Ok(SymVal::Scalar(v.norm())),
+                (SymVal::Vec2(v), "square") => Ok(SymVal::Scalar(v.square())),
+                (SymVal::Vec2(v), "unit") => Ok(SymVal::Vec2(v.clone().unit())),
+                (SymVal::Vec2(v), "across") => Ok(SymVal::Vec2(v.clone().across())),
+                (SymVal::Vec2(v), "cross") => {
+                    if mc.args.len() != 1 {
+                        return Err(syn::Error::new_spanned(&mc.method, ".cross() requires 1 argument"));
+                    }
+                    let arg = eval_expr(&mc.args[0], ctx)?;
+                    match arg {
+                        SymVal::Vec2(rhs) => Ok(SymVal::Scalar(v.cross(&rhs))),
+                        _ => Err(syn::Error::new_spanned(&mc.args[0], ".cross() argument must be Vec2")),
+                    }
+                }
                 _ => Err(syn::Error::new_spanned(&mc.method,
                     format!("unsupported method .{}() on {}", method, receiver.type_name()))),
             }
@@ -289,6 +303,20 @@ fn eval_function(name: &str, args: Vec<SymVal>, span: &Expr) -> Result<SymVal, s
                 _ => Err(syn::Error::new_spanned(span, format!("{} expects a scalar argument", name))),
             }
         }
+        "dot" | "cross2" => {
+            if args.len() != 2 { return Err(syn::Error::new_spanned(span, format!("{} expects 2 args", name))); }
+            let mut it = args.into_iter();
+            let a = it.next().unwrap();
+            let b = it.next().unwrap();
+            if name == "dot" {
+                sym_mul(a, b, span)
+            } else {
+                match (a, b) {
+                    (SymVal::Vec2(va), SymVal::Vec2(vb)) => Ok(SymVal::Scalar(va.cross(&vb))),
+                    _ => Err(syn::Error::new_spanned(span, "cross2 expects Vec2 arguments")),
+                }
+            }
+        }
         _ => Err(syn::Error::new_spanned(span, format!("unknown function '{}' in constraint", name))),
     }
 }
@@ -345,6 +373,7 @@ fn sym_mul(left: SymVal, right: SymVal, span: &Expr) -> Result<SymVal, syn::Erro
         (SymVal::Vec2(a), SymVal::Scalar(b)) => Ok(SymVal::Vec2(arael_sym::geo::vect2sym { x: a.x * b.clone(), y: a.y * b })),
         (SymVal::Scalar(a), SymVal::Vec3(b)) => Ok(SymVal::Vec3(a * b)),
         (SymVal::Vec3(a), SymVal::Scalar(b)) => Ok(SymVal::Vec3(a * b)),
+        (SymVal::Vec2(a), SymVal::Vec2(b)) => Ok(SymVal::Scalar(a * b)), // dot product
         (SymVal::Vec3(a), SymVal::Vec3(b)) => Ok(SymVal::Scalar(a * b)), // dot product
         (SymVal::Mat3(a), SymVal::Vec3(b)) => Ok(SymVal::Vec3(a * b)),
         (SymVal::Mat3(a), SymVal::Mat3(b)) => Ok(SymVal::Mat3(a * b)),
@@ -355,7 +384,8 @@ fn sym_mul(left: SymVal, right: SymVal, span: &Expr) -> Result<SymVal, syn::Erro
 fn sym_div(left: SymVal, right: SymVal, span: &Expr) -> Result<SymVal, syn::Error> {
     match (left, right) {
         (SymVal::Scalar(a), SymVal::Scalar(b)) => Ok(SymVal::Scalar(a / b)),
-        _ => Err(syn::Error::new_spanned(span, "division only supported between scalars")),
+        (SymVal::Vec2(a), SymVal::Scalar(b)) => Ok(SymVal::Vec2(a / b)),
+        _ => Err(syn::Error::new_spanned(span, "unsupported division types")),
     }
 }
 

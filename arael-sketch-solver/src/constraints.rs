@@ -934,36 +934,28 @@ pub struct LineP2OnArc {
 
 // -- Symmetry (3-entity) --
 
-// Symmetry of 3 lines: each endpoint of mirror line B is equidistant
-// from lines A and C (on opposite sides). Projects B endpoints onto
-// A and C, then measures signed distance of projected feet to B using
-// B's normal. Direction of A/C doesn't affect the result.
+// Symmetry of 3 lines: from each B endpoint, cast a ray along B's
+// normal. Intersect with A and C. The signed ray parameters (distances
+// along bn) must sum to zero (opposite sides, equal distance).
+// Ray: P + t*bn intersects line L.p1 + s*Ld.
+// t = cross(L.p1 - P, Ld) / cross(bn, Ld)
+// where cross(u,v) = u.x*v.y - u.y*v.x
 // Uses TripletBlock for 3-entity Hessian accumulation.
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
-    let bdx = b.p2.x - b.p1.x;
-    let bdy = b.p2.y - b.p1.y;
-    let blen = sqrt(bdx * bdx + bdy * bdy);
-    let bnx = bdy / blen;
-    let bny = bdx / blen;
-    let adx = a.p2.x - a.p1.x;
-    let ady = a.p2.y - a.p1.y;
-    let alen2 = adx * adx + ady * ady;
-    let cdx = c.p2.x - c.p1.x;
-    let cdy = c.p2.y - c.p1.y;
-    let clen2 = cdx * cdx + cdy * cdy;
-    // foot_on_A(P) - P, dotted with B_normal
-    let t1a = ((b.p1.x - a.p1.x) * adx + (b.p1.y - a.p1.y) * ady) / alen2;
-    let d1a = (a.p1.x + t1a * adx - b.p1.x) * bnx - (a.p1.y + t1a * ady - b.p1.y) * bny;
-    let t1c = ((b.p1.x - c.p1.x) * cdx + (b.p1.y - c.p1.y) * cdy) / clen2;
-    let d1c = (c.p1.x + t1c * cdx - b.p1.x) * bnx - (c.p1.y + t1c * cdy - b.p1.y) * bny;
-    let t2a = ((b.p2.x - a.p1.x) * adx + (b.p2.y - a.p1.y) * ady) / alen2;
-    let d2a = (a.p1.x + t2a * adx - b.p2.x) * bnx - (a.p1.y + t2a * ady - b.p2.y) * bny;
-    let t2c = ((b.p2.x - c.p1.x) * cdx + (b.p2.y - c.p1.y) * cdy) / clen2;
-    let d2c = (c.p1.x + t2c * cdx - b.p2.x) * bnx - (c.p1.y + t2c * cdy - b.p2.y) * bny;
-    [(d1a + d1c) * sketch.constraint_isigma,
-     (d2a + d2c) * sketch.constraint_isigma]
+    let bn = (b.p2 - b.p1).across();
+    let ad = a.p2 - a.p1;
+    let cd = c.p2 - c.p1;
+    // Ray intersection: t = cross(L.p1-P, Ld) / cross(bn, Ld)
+    // Multiply through by both denominators to avoid division:
+    // cross(a.p1-P, ad)*cross(bn,cd) + cross(c.p1-P, cd)*cross(bn,ad) = 0
+    let bna = bn.cross(ad);
+    let bnc = bn.cross(cd);
+    let r1 = (a.p1 - b.p1).cross(ad) * bnc + (c.p1 - b.p1).cross(cd) * bna;
+    let r2 = (a.p1 - b.p2).cross(ad) * bnc + (c.p1 - b.p2).cross(cd) * bna;
+    [r1 * sketch.constraint_isigma,
+     r2 * sketch.constraint_isigma]
 }))]
 pub struct SymmetryLL {
     #[arael(ref = root.lines)]

@@ -163,6 +163,59 @@ impl ops::Neg for vect2sym {
     }
 }
 
+impl ops::Mul<E> for vect2sym {
+    type Output = vect2sym;
+    fn mul(self, rhs: E) -> vect2sym {
+        vect2sym { x: self.x * rhs.clone(), y: self.y * rhs }
+    }
+}
+
+impl ops::Mul<vect2sym> for E {
+    type Output = vect2sym;
+    fn mul(self, rhs: vect2sym) -> vect2sym {
+        vect2sym { x: self.clone() * rhs.x, y: self * rhs.y }
+    }
+}
+
+impl ops::Mul<vect2sym> for vect2sym {
+    type Output = E;
+    /// Dot product.
+    fn mul(self, rhs: vect2sym) -> E {
+        self.x * rhs.x + self.y * rhs.y
+    }
+}
+
+impl ops::Div<E> for vect2sym {
+    type Output = vect2sym;
+    fn div(self, rhs: E) -> vect2sym {
+        vect2sym { x: self.x / rhs.clone(), y: self.y / rhs }
+    }
+}
+
+impl vect2sym {
+    /// Squared length (dot product with self).
+    pub fn square(&self) -> E {
+        self.x.clone() * self.x.clone() + self.y.clone() * self.y.clone()
+    }
+    /// Length (Euclidean norm).
+    pub fn norm(&self) -> E {
+        crate::sqrt(self.square())
+    }
+    /// Unit (normalized) vector.
+    pub fn unit(self) -> vect2sym {
+        let n = self.norm();
+        self / n
+    }
+    /// Perpendicular vector (90-degree counter-clockwise rotation).
+    pub fn across(self) -> vect2sym {
+        vect2sym { x: -self.y, y: self.x }
+    }
+    /// 2D cross product (determinant): self.x * rhs.y - self.y * rhs.x.
+    pub fn cross(&self, rhs: &vect2sym) -> E {
+        self.x.clone() * rhs.y.clone() - self.y.clone() * rhs.x.clone()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // matrix3sym
 // ---------------------------------------------------------------------------
