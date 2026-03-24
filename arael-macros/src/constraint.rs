@@ -733,6 +733,10 @@ fn parse_sym_code(code: &str) -> syn::Result<Expr> {
 fn extract_block_type_args(ty: &syn::Type) -> syn::Result<(String, Option<String>)> {
     if let syn::Type::Path(tp) = ty {
         if let Some(seg) = tp.path.segments.last() {
+            // TripletBlock has no entity type args — all entities come from Ref fields
+            if seg.ident == "TripletBlock" {
+                return Ok(("__triplet__".to_string(), None));
+            }
             if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
                 let type_args: Vec<&syn::Type> = args.args.iter()
                     .filter_map(|a| if let syn::GenericArgument::Type(t) = a { Some(t) } else { None })
@@ -749,7 +753,7 @@ fn extract_block_type_args(ty: &syn::Type) -> syn::Result<(String, Option<String
             }
         }
     }
-    Err(syn::Error::new_spanned(ty, "expected SelfBlock<A> or CrossBlock<A, B>"))
+    Err(syn::Error::new_spanned(ty, "expected SelfBlock<A>, CrossBlock<A, B>, or TripletBlock"))
 }
 
 fn type_ident_name(ty: &syn::Type) -> syn::Result<String> {
@@ -937,7 +941,8 @@ pub fn generate_root_methods(
             .unwrap_or_else(|| a_type.to_lowercase());
         let a_type_ident = syn::Ident::new(&a_type, proc_macro2::Span::call_site());
 
-        let is_self_block = b_type.is_none() && !is_remote_block;
+        let is_self_block = b_type.is_none() && !is_remote_block && a_type != "__triplet__";
+        let is_triplet = a_type == "__triplet__";
 
         // For SelfBlock: the struct itself is in a root collection
         // For CrossBlock: find parent collection + frines field
@@ -948,7 +953,7 @@ pub fn generate_root_methods(
         };
 
         // Find root collection containing the constrained type
-        let coll_type = if is_self_block { &sc.struct_name } else { &a_type };
+        let coll_type = if is_triplet || is_self_block { &sc.struct_name } else { &a_type };
         let root_collection = find_root_collection(root_fields, coll_type);
         if root_collection.is_none() { continue; }
         let (coll_ident_str, _) = root_collection.unwrap();
@@ -960,7 +965,7 @@ pub fn generate_root_methods(
         let mut parent_ident = None;
         let mut is_root_level_cross = false;  // constraint struct lives directly on root
 
-        if !is_self_block || is_remote_block {
+        if is_triplet || (!is_self_block || is_remote_block) {
             // First try: constraint struct nested under A-type (e.g. PointFrine under PointLandmark)
             let parent_layout = registry_lookup(&a_type);
             let frines_field = parent_layout.as_ref().and_then(|l| {
@@ -1109,7 +1114,12 @@ pub fn generate_root_methods(
                 idx += 1;
             }
             let dr_f64: Vec<TokenStream2> = dr_idents.iter().map(|d| quote! { #d as #cast_type }).collect();
-            if is_remote_block {
+            if is_triplet {
+                // TripletBlock: pass indices + derivatives as slices
+                gh_stmts.push(quote! {
+                    __frine.#block_ident.add_residual(#r_ident as #cast_type, &__all_idx, &[#(#dr_f64),*]);
+                });
+            } else if is_remote_block {
                 gh_stmts.push(quote! {
                     __target_block.add_residual(#r_ident as #cast_type, &[#(#dr_f64),*]);
                 });
@@ -1220,6 +1230,44 @@ pub fn generate_root_methods(
                 SymFieldType::Scalar => 1usize, SymFieldType::Vec2 => 2, SymFieldType::Vec3 => 3, _ => 0,
             }).unwrap_or(0)
         }).sum::<usize>()).unwrap_or(0);
+
+        // TripletBlock: build flat index array from all ref fields
+        let mut triplet_idx_stmts: Vec<TokenStream2> = Vec::new();
+        let mut triplet_param_count = 0usize;
+        if is_triplet {
+            let struct_layout = registry_lookup(&sc.struct_name);
+            let ref_paths = struct_layout.as_ref().map(|l| l.ref_paths.clone()).unwrap_or_default();
+            let mut used = std::collections::HashSet::new();
+            for (field_name, _) in &ref_paths {
+                if !used.insert(field_name.clone()) { continue; }
+                if let Some(field) = fields.named.iter().find(|f|
+                    f.ident.as_ref().map(|i| i.to_string()) == Some(field_name.clone())) {
+                    if let Some((_, inner_ident)) = extract_wrapper_inner(&field.ty, "Ref") {
+                        let type_name = inner_ident.to_string();
+                        if let Some(layout) = registry_lookup(&type_name) {
+                            let var_ident = syn::Ident::new(field_name, proc_macro2::Span::call_site());
+                            for pf in &layout.param_fields {
+                                let pf_ident = syn::Ident::new(pf, proc_macro2::Span::call_site());
+                                let size = layout.fields.iter()
+                                    .find(|(n, _)| n == pf)
+                                    .map(|(_, sft)| match sft {
+                                        SymFieldType::Scalar => 1usize,
+                                        SymFieldType::Vec2 => 2,
+                                        SymFieldType::Vec3 => 3,
+                                        _ => 0,
+                                    }).unwrap_or(0);
+                                let offset = triplet_param_count;
+                                let end = offset + size;
+                                triplet_idx_stmts.push(quote! {
+                                    #var_ident.#pf_ident.write_indices(&mut __all_idx[#offset..#end]);
+                                });
+                                triplet_param_count += size;
+                            }
+                        }
+                    }
+                }
+            }
+        }
 
         // Parse guard expression — replace "self" with the loop variable
         let guard_expr: Option<syn::Expr> = constraint.guard.as_ref()
@@ -1353,6 +1401,29 @@ pub fn generate_root_methods(
             }
             group.cost_entries.push(cost_entry);
             group.gh_entries.push(gh_entry);
+        } else if is_triplet {
+            // TripletBlock: N-ary constraint, flat iteration on root collection
+            let rc_ident = frines_ident.unwrap();
+            let tp = triplet_param_count;
+
+            cost_loops.push(quote! {
+                for __frine in self.#rc_ident.iter() {
+                    #(#resolve_stmts)*
+                    let #root_var_ident = &*__self_ref;
+                    #(#cost_stmts)*
+                }
+            });
+
+            grad_hessian_loops.push(quote! {
+                for __frine in self.#rc_ident.iter_mut() {
+                    #(#resolve_stmts)*
+                    let #root_var_ident = &*__self_ref;
+                    let mut __all_idx = [0u32; #tp];
+                    #(#triplet_idx_stmts)*
+                    { #(#gh_stmts)* }
+                }
+            });
+            // No set_block_indices needed for TripletBlock
         } else if is_root_level_cross {
             // Root-level CrossBlock: constraint struct is directly on root (e.g. PosePair, CoincidentPP)
             // Flat iteration, no nesting. frines_ident = root collection name of constraint struct.
@@ -1680,7 +1751,9 @@ fn interpret_constraint_body(
                 }
             }
         }
-        var_infos.push((parent_name.clone(), a_type.clone()));
+        if a_type != "__triplet__" {
+            var_infos.push((parent_name.clone(), a_type.clone()));
+        }
         let root_var = root_type_name.to_lowercase();
         var_infos.push((root_var, root_type_name.to_string()));
     }
@@ -1694,7 +1767,7 @@ fn interpret_constraint_body(
     // Register the constraint struct's own non-Ref fields
     // For CrossBlock: accessible via lowercase struct name, code uses __frine
     // For SelfBlock: the struct IS the variable (already registered above via var_infos)
-    if b_type.is_some() {
+    if b_type.is_some() || a_type == "__triplet__" {
         // Use a simple name derived from the struct name
         // Derive self-reference name from struct: PosePair -> "posepair"
         let self_var = struct_name.to_string().to_lowercase();
@@ -1702,46 +1775,63 @@ fn interpret_constraint_body(
     }
 
     // Collect param symbols
-    // For A and B types, we need the variable names that the constraint body uses.
-    // For nested CrossBlock: A = parent_name (e.g. "lm"), B = first matching ref
-    // For root-level CrossBlock: A = first ref matching A-type, B = second ref matching B-type
     let mut param_symbols: Vec<String> = Vec::new();
+    let is_triplet = a_type == "__triplet__";
 
-    // Find the actual variable names for A and B from var_infos
-    let a_var_name = {
-        // Find first var_info matching A-type
-        var_infos.iter().find(|(_, tn)| *tn == a_type)
-            .map(|(vn, _)| vn.clone()).unwrap_or(parent_name.clone())
-    };
-
-    if let Some(a_layout) = registry_lookup(&a_type) {
-        for pf in &a_layout.param_fields {
-            let sym_base = if a_layout.universal_euler_angle_fields.contains(pf) {
-                format!("{}.{}.delta", a_var_name, pf)
-            } else {
-                format!("{}.{}.work()", a_var_name, pf)
-            };
-            add_param_symbols(&sym_base,
-                a_layout.fields.iter().find(|(n, _)| n == pf).map(|(_, t)| t).unwrap(),
-                &mut param_symbols);
+    if is_triplet {
+        // TripletBlock: collect params from ALL ref fields (no A/B distinction)
+        let mut used_vars = std::collections::HashSet::new();
+        for (var_name, type_name) in &var_infos {
+            if type_name == root_type_name { continue; } // skip root
+            if !used_vars.insert(var_name.clone()) { continue; }
+            if let Some(layout) = registry_lookup(type_name) {
+                for pf in &layout.param_fields {
+                    let sym_base = if layout.universal_euler_angle_fields.contains(pf) {
+                        format!("{}.{}.delta", var_name, pf)
+                    } else {
+                        format!("{}.{}.work()", var_name, pf)
+                    };
+                    add_param_symbols(&sym_base,
+                        layout.fields.iter().find(|(n, _)| n == pf).map(|(_, t)| t).unwrap(),
+                        &mut param_symbols);
+                }
+            }
         }
-    }
-    if let Some(ref b_type_name) = b_type {
-        if let Some(b_layout) = registry_lookup(b_type_name) {
-            // Find B variable: skip the one used for A if A==B
-            let b_var = var_infos.iter().find(|(vn, tn)| {
-                tn == b_type_name && *vn != a_var_name
-            }).or_else(|| var_infos.iter().find(|(_, tn)| tn == b_type_name))
-                .map(|(vn, _)| vn.clone()).unwrap_or_else(|| b_type_name.to_lowercase());
-            for pf in &b_layout.param_fields {
-                let sym_base = if b_layout.universal_euler_angle_fields.contains(pf) {
-                    format!("{}.{}.delta", b_var, pf)
+    } else {
+        // SelfBlock/CrossBlock: collect params from A and optionally B
+        let a_var_name = {
+            var_infos.iter().find(|(_, tn)| *tn == a_type)
+                .map(|(vn, _)| vn.clone()).unwrap_or(parent_name.clone())
+        };
+
+        if let Some(a_layout) = registry_lookup(&a_type) {
+            for pf in &a_layout.param_fields {
+                let sym_base = if a_layout.universal_euler_angle_fields.contains(pf) {
+                    format!("{}.{}.delta", a_var_name, pf)
                 } else {
-                    format!("{}.{}.work()", b_var, pf)
+                    format!("{}.{}.work()", a_var_name, pf)
                 };
                 add_param_symbols(&sym_base,
-                    b_layout.fields.iter().find(|(n, _)| n == pf).map(|(_, t)| t).unwrap(),
+                    a_layout.fields.iter().find(|(n, _)| n == pf).map(|(_, t)| t).unwrap(),
                     &mut param_symbols);
+            }
+        }
+        if let Some(ref b_type_name) = b_type {
+            if let Some(b_layout) = registry_lookup(b_type_name) {
+                let b_var = var_infos.iter().find(|(vn, tn)| {
+                    tn == b_type_name && *vn != a_var_name
+                }).or_else(|| var_infos.iter().find(|(_, tn)| tn == b_type_name))
+                    .map(|(vn, _)| vn.clone()).unwrap_or_else(|| b_type_name.to_lowercase());
+                for pf in &b_layout.param_fields {
+                    let sym_base = if b_layout.universal_euler_angle_fields.contains(pf) {
+                        format!("{}.{}.delta", b_var, pf)
+                    } else {
+                        format!("{}.{}.work()", b_var, pf)
+                    };
+                    add_param_symbols(&sym_base,
+                        b_layout.fields.iter().find(|(n, _)| n == pf).map(|(_, t)| t).unwrap(),
+                        &mut param_symbols);
+                }
             }
         }
     }

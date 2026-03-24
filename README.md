@@ -19,7 +19,7 @@ A Rust framework for nonlinear optimization with compile-time symbolic different
 - **f32 and f64 precision** -- `#[arael(root)]` for f64, `#[arael(root, f32)]` for f32 throughout
 - **Model trait** -- hierarchical serialize/deserialize/update protocol for parameter optimization
 - **Type-safe references** -- `Ref<T>`, `Vec<T>`, `Deque<T>`, `Arena<T>` for indexed collections with stable references
-- **Hessian blocks** -- `SelfBlock<A>` and `CrossBlock<A, B>` generic over float type for sparse hessian structure
+- **Hessian blocks** -- `SelfBlock<A>` and `CrossBlock<A, B>` for 1- and 2-entity constraints (packed dense); `TripletBlock` for 3+ entities (COO sparse)
 - **Gimbal-lock-free rotations** -- `EulerAngleParam` optimizes a small delta around a reference rotation matrix
 - **WASM/browser support** -- the sketch editor compiles to WebAssembly and runs in the browser via eframe/egui
 
@@ -294,7 +294,7 @@ See [arael-sketch/](arael-sketch/) for the full implementation.
 ```
 arael/              Main library
   src/
-    model.rs        Param<T>, Model trait, SelfBlock, CrossBlock (generic over float type)
+    model.rs        Param<T>, Model trait, SelfBlock, CrossBlock, TripletBlock
     simple_lm.rs    LM solver, LmSolver trait, Dense/Band/Sparse backends, CooMatrix, CscMatrix
     refs.rs         Type-safe Vec<T>, Deque<T>, Arena<T>, Ref<T>
     vect.rs         vect2<T>, vect3<T>

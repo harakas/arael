@@ -13,6 +13,7 @@
 //! - Rewrites shorthand block types: `SelfBlock<A>` becomes
 //!   `SelfBlock<A, {A_PARAM_COUNT}>`, and `CrossBlock<A, B>` becomes
 //!   `CrossBlock<A, B, {A_PARAM_COUNT + B_PARAM_COUNT}>`.
+//!   `TripletBlock` is passed through as-is (COO sparse, for 3+ entity constraints).
 //! - Detects `SimpleEulerAngleParam` and `EulerAngleParam` fields by type
 //!   name and generates appropriate precompute calls for rotation matrices.
 //! - Generates the symbolic companion struct (`FooSym`) and `ModelSym` impl.
@@ -115,7 +116,8 @@ fn registry_take_constraints() -> Vec<StashedConstraint> {
 ///
 /// Generates the `Model` trait implementation, rewrites `SelfBlock<A>` to
 /// `SelfBlock<A, {A_PARAM_COUNT}>` and `CrossBlock<A, B>` to
-/// `CrossBlock<A, B, {A_PARAM_COUNT + B_PARAM_COUNT}>`, emits a
+/// `CrossBlock<A, B, {A_PARAM_COUNT + B_PARAM_COUNT}>` (TripletBlock
+/// is recognized but not rewritten), emits a
 /// `const StructName_PARAM_COUNT: usize = ...;`, and produces the symbolic
 /// companion struct with `ModelSym` impl.
 ///
@@ -925,7 +927,7 @@ fn is_hessian_block_type(ty: &syn::Type) -> bool {
     if let syn::Type::Path(tp) = ty {
         if let Some(seg) = tp.path.segments.last() {
             let name = seg.ident.to_string();
-            return matches!(name.as_str(), "SelfBlock" | "CrossBlock");
+            return matches!(name.as_str(), "SelfBlock" | "CrossBlock" | "TripletBlock");
         }
     }
     false

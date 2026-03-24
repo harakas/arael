@@ -1182,6 +1182,139 @@ impl<A: Model, B: Model, const N: usize, T: crate::utils::Float> CrossBlock<A, B
 }
 
 // ---------------------------------------------------------------------------
+// TripletBlock -- sparse Hessian/gradient accumulation for N-ary constraints
+// ---------------------------------------------------------------------------
+
+/// Sparse Hessian and gradient accumulation block using COO (triplet) format.
+///
+/// Unlike [`SelfBlock`] and [`CrossBlock`] which use packed dense storage for
+/// fixed-size blocks, `TripletBlock` stores individual `(index, value)` entries.
+/// This supports constraints that reference 3 or more entities where the total
+/// parameter count spans multiple entity types.
+///
+/// **Prefer [`CrossBlock`] for 2-entity constraints.** CrossBlock uses packed
+/// dense storage with compile-time-known sizes, which is more cache-friendly
+/// and avoids the Vec allocation overhead of COO format. Use TripletBlock only
+/// when a constraint couples 3+ entities that cannot fit in a single CrossBlock.
+///
+/// Call [`add_residual`](TripletBlock::add_residual) with the global parameter
+/// indices and derivatives for each residual. Then [`accumulate`] merges the
+/// entries into the global dense or sparse matrices.
+pub struct TripletBlock<T: crate::utils::Float = f64> {
+    pub grad: std::vec::Vec<(u32, T)>,
+    pub hessian: std::vec::Vec<(u32, u32, T)>,
+}
+
+impl<T: crate::utils::Float> Default for TripletBlock<T> {
+    fn default() -> Self { Self::new() }
+}
+
+impl<T: crate::utils::Float> TripletBlock<T> {
+    pub fn new() -> Self {
+        TripletBlock { grad: std::vec::Vec::new(), hessian: std::vec::Vec::new() }
+    }
+
+    /// Reset to empty (called at start of each optimization step).
+    pub fn zero(&mut self) {
+        self.grad.clear();
+        self.hessian.clear();
+    }
+
+    /// Add one residual's contribution.
+    /// `indices` and `dr` must have the same length (one per parameter).
+    /// Accumulates 2*r*dr into gradient and 2*dr*dr^T into hessian (upper triangle).
+    pub fn add_residual(&mut self, r: T, indices: &[u32], dr: &[T]) {
+        let two = T::two();
+        let n = indices.len();
+        for i in 0..n {
+            if indices[i] == u32::MAX { continue; }
+            self.grad.push((indices[i], two * r * dr[i]));
+            for j in i..n {
+                if indices[j] == u32::MAX { continue; }
+                let (lo, hi) = if indices[i] <= indices[j] {
+                    (indices[i], indices[j])
+                } else {
+                    (indices[j], indices[i])
+                };
+                self.hessian.push((lo, hi, two * dr[i] * dr[j]));
+            }
+        }
+    }
+
+    /// Accumulate into full dense gradient and symmetric hessian.
+    pub fn accumulate(&self, grad: &mut [T], hessian: &mut [T]) {
+        let n_total = grad.len();
+        for &(i, v) in &self.grad {
+            grad[i as usize] += v;
+        }
+        for &(i, j, v) in &self.hessian {
+            let (i, j) = (i as usize, j as usize);
+            hessian[i * n_total + j] += v;
+            if i != j {
+                hessian[j * n_total + i] += v;
+            }
+        }
+    }
+
+    /// Accumulate into upper-band format. Returns Err if any element exceeds bandwidth.
+    pub fn accumulate_band(&self, grad: &mut [T], band: &mut [T], kd: usize)
+        -> Result<(), crate::simple_lm::BandError>
+    {
+        let ldab = kd + 1;
+        for &(i, v) in &self.grad {
+            grad[i as usize] += v;
+        }
+        for &(row, col, v) in &self.hessian {
+            let (r, c) = (row as usize, col as usize);
+            if c < r || c - r > kd {
+                return Err(crate::simple_lm::BandError { row: r, col: c, kd });
+            }
+            band[(c - r) + r * ldab] += v;
+        }
+        Ok(())
+    }
+
+    /// Accumulate into COO (triplet) sparse format. Upper triangle only.
+    pub fn accumulate_sparse(&self, grad: &mut [T], coo: &mut crate::simple_lm::CooMatrix<T>) {
+        for &(i, v) in &self.grad {
+            grad[i as usize] += v;
+        }
+        for &(i, j, v) in &self.hessian {
+            coo.push(i, j, v);
+        }
+    }
+
+    /// Accumulate directly into CSC vals array using position lookup.
+    pub fn accumulate_sparse_direct(&self, grad: &mut [T], csc: &mut crate::simple_lm::CscMatrix<T>) {
+        for &(i, v) in &self.grad {
+            grad[i as usize] += v;
+        }
+        for &(row, col, v) in &self.hessian {
+            if let Some(pos) = csc.find_pos(row as usize, col as usize) {
+                csc.vals[pos] = csc.vals[pos] + v;
+            }
+        }
+    }
+
+    /// Accumulate into CSC vals using precomputed position list.
+    /// Note: TripletBlock cannot use precomputed positions since entries
+    /// are dynamic. Falls back to find_pos lookup.
+    /// Accumulate into CSC vals using precomputed position list.
+    /// TripletBlock entries are deterministic (same entity refs produce
+    /// same entries in same order), so the cursor advances in lockstep
+    /// with the COO entries emitted during pattern discovery.
+    pub fn accumulate_sparse_indexed(&self, grad: &mut [T], vals: &mut [T], positions: &[usize], cursor: &mut usize) {
+        for &(i, v) in &self.grad {
+            grad[i as usize] += v;
+        }
+        for &(_, _, v) in &self.hessian {
+            vals[positions[*cursor]] += v;
+            *cursor += 1;
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ModelSym -- symbolic companion type generation
 // ---------------------------------------------------------------------------
 

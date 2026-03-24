@@ -30,8 +30,8 @@
 //!   `#[arael(root, f32)]` for f32 throughout
 //! - **Model trait** -- hierarchical serialize/deserialize/update protocol
 //! - **Type-safe references** -- `Ref<T>`, `Vec<T>`, `Deque<T>`, `Arena<T>`
-//! - **Hessian blocks** -- `SelfBlock<A>` and `CrossBlock<A, B>` generic
-//!   over float type
+//! - **Hessian blocks** -- `SelfBlock<A>` and `CrossBlock<A, B>` for 1- and
+//!   2-entity constraints (packed dense); `TripletBlock` for 3+ entities (COO sparse)
 //! - **Gimbal-lock-free rotations** -- `EulerAngleParam` optimizes a small
 //!   delta around a reference rotation matrix
 //! - **WASM/browser support** -- compiles to WebAssembly; the `arael-sketch`
