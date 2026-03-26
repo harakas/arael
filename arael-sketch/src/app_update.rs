@@ -299,7 +299,8 @@ impl eframe::App for EditorApp {
             }
 
             // Delete selected entities/constraints with Backspace/Delete
-            if ui.input(|i| i.key_pressed(egui::Key::Backspace) || i.key_pressed(egui::Key::Delete)) {
+            // (skip when editing dimension text — Backspace edits the text field)
+            if !self.dim_editing && ui.input(|i| i.key_pressed(egui::Key::Backspace) || i.key_pressed(egui::Key::Delete)) {
                 let sel = self.selection.clone();
                 if !sel.is_empty() {
                     self.begin_group();
