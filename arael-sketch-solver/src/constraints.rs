@@ -947,19 +947,18 @@ pub struct LineP2OnArc {
     let bd = b.p2 - b.p1;
     let ad = a.p2 - a.p1;
     let cd = c.p2 - c.p1;
+    // Normalize by direction vector lengths for well-conditioned residuals
+    let alen = ad.norm();
+    let clen = cd.norm();
+    let blen = bd.norm();
     // Ray along B's normal: equidistant perpendicular to B
-    let bna = bn.cross(ad);
-    let bnc = bn.cross(cd);
-    let rn1 = (a.p1 - b.p1).cross(ad) * bnc + (c.p1 - b.p1).cross(cd) * bna;
-    let rn2 = (a.p1 - b.p2).cross(ad) * bnc + (c.p1 - b.p2).cross(cd) * bna;
-    // Intersection of A and C lies on line B (cross-multiplied to avoid division).
-    // When A||C this is trivially 0. When A/C are perpendicular to B, this
-    // provides the constraint that the bn residuals lose.
-    // intersection = A.p1 + t*Ad where t = cross(C.p1-A.p1, Cd) / cross(Ad, Cd)
-    // residual = cross(intersection - B.p1, Bd) * cross(Ad, Cd)
-    //          = cross(A.p1-B.p1, Bd)*cross(Ad,Cd) + cross(Ad, Bd)*cross(C.p1-A.p1, Cd)
-    let adc = ad.cross(cd);
-    let r3 = (a.p1 - b.p1).cross(bd) * adc + ad.cross(bd) * (c.p1 - a.p1).cross(cd);
+    let bna = bn.cross(ad) / (blen * alen);
+    let bnc = bn.cross(cd) / (blen * clen);
+    let rn1 = (a.p1 - b.p1).cross(ad) / alen * bnc + (c.p1 - b.p1).cross(cd) / clen * bna;
+    let rn2 = (a.p1 - b.p2).cross(ad) / alen * bnc + (c.p1 - b.p2).cross(cd) / clen * bna;
+    // Intersection of A and C lies on line B (normalized)
+    let adc = ad.cross(cd) / (alen * clen);
+    let r3 = (a.p1 - b.p1).cross(bd) / blen * adc + ad.cross(bd) / (alen * blen) * (c.p1 - a.p1).cross(cd) / clen;
     [rn1 * sketch.constraint_isigma,
      rn2 * sketch.constraint_isigma,
      r3 * sketch.constraint_isigma]
