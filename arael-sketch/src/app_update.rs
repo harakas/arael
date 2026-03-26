@@ -122,12 +122,15 @@ impl eframe::App for EditorApp {
                             // Editing existing: remove old, add new with same offset
                             let offset = self.dim_offset;
                             let kind = self.dim_kind.take().unwrap();
+                            let n_dims_before = self.sketch.dimensions.len();
                             self.exec(Action::RemoveDimension { index: edit_idx });
                             self.exec(Action::AddDimension { kind, value });
-                            // Update offset and text_along on the newly created dimension
-                            if let Some(d) = self.sketch.dimensions.last_mut() {
-                                d.offset = offset;
-                                d.text_along = self.dim_text_along;
+                            // Update offset only if dimension was added
+                            if self.sketch.dimensions.len() > n_dims_before - 1 {
+                                if let Some(d) = self.sketch.dimensions.last_mut() {
+                                    d.offset = offset;
+                                    d.text_along = self.dim_text_along;
+                                }
                             }
                         } else if let Some(kind) = self.dim_kind.take() {
                             // New dimension -- check for duplicate
@@ -135,10 +138,15 @@ impl eframe::App for EditorApp {
                             if is_dup {
                                 self.status_error = Some("Dimension already exists".into());
                             } else {
+                                let n_dims_before = self.sketch.dimensions.len();
                                 self.exec(Action::AddDimension { kind, value });
-                                if let Some(d) = self.sketch.dimensions.last_mut() {
-                                    d.offset = self.dim_offset;
-                                    d.text_along = self.dim_text_along;
+                                // Only update offset if the dimension was actually added
+                                // (exec may have rejected it and restored snapshot)
+                                if self.sketch.dimensions.len() > n_dims_before {
+                                    if let Some(d) = self.sketch.dimensions.last_mut() {
+                                        d.offset = self.dim_offset;
+                                        d.text_along = self.dim_text_along;
+                                    }
                                 }
                             }
                         }
