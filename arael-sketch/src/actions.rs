@@ -490,11 +490,22 @@ impl Action {
                         sketch.arcs[*arc].constraints.target_radius = *value;
                     }
                     DimensionKind::Angle(a, b, supplement) => {
-                        // value is in degrees, constraint uses radians
-                        let mut angle_rad = deg2rad(*value);
-                        if *supplement { angle_rad = std::f64::consts::PI - angle_rad; }
+                        // value is in degrees, constraint uses radians.
+                        // Compute target angle closest to current atan2 value
+                        // so the solver doesn't have to cross a discontinuity.
+                        let la = &sketch.lines[*a];
+                        let lb = &sketch.lines[*b];
+                        let dx1 = la.p2.value.x - la.p1.value.x;
+                        let dy1 = la.p2.value.y - la.p1.value.y;
+                        let dx2 = lb.p2.value.x - lb.p1.value.x;
+                        let dy2 = lb.p2.value.y - lb.p1.value.y;
+                        let current = (dx1 * dy2 - dy1 * dx2).atan2(dx1 * dx2 + dy1 * dy2);
+                        let mut target = deg2rad(*value);
+                        if *supplement { target = std::f64::consts::PI - target; }
+                        // Match sign to current atan2
+                        if current < 0.0 { target = -target; }
                         sketch.angle.push(AngleConstraint {
-                            a: *a, b: *b, angle: angle_rad, hb: CrossBlock::new(),
+                            a: *a, b: *b, angle: target, hb: CrossBlock::new(),
                         });
                     }
                 }

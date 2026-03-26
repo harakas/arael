@@ -674,6 +674,39 @@ fn test_angle_dimension_45deg() {
 }
 
 #[test]
+fn test_angle_dimension_negative_atan2() {
+    // When atan2 is negative, the constraint angle must also be negative.
+    // This reproduces a bug where supplement angles got the wrong sign.
+    let mut sketch = Sketch::new();
+    let a = sketch.add_line(vect2d::new(0.0, 1.0), vect2d::new(-1.0, -4.0));
+    let b = sketch.add_line(vect2d::new(1.5, -4.0), vect2d::new(0.0, 1.0));
+    // Current angle is negative (~ -148 deg). Supplement sector shows ~31 deg.
+    // Setting supplement to 35 deg means target = -(pi - rad(35)) = -2.53 rad.
+    let la = &sketch.lines[a];
+    let lb = &sketch.lines[b];
+    let dx1 = la.p2.value.x - la.p1.value.x;
+    let dy1 = la.p2.value.y - la.p1.value.y;
+    let dx2 = lb.p2.value.x - lb.p1.value.x;
+    let dy2 = lb.p2.value.y - lb.p1.value.y;
+    let current = (dx1 * dy2 - dy1 * dx2).atan2(dx1 * dx2 + dy1 * dy2);
+    assert!(current < 0.0, "test setup: atan2 should be negative, got {}", current);
+    // Target: supplement of 35 deg, matching sign of current
+    let mut target = std::f64::consts::PI - 35.0f64.to_radians();
+    if current < 0.0 { target = -target; }
+    sketch.angle.push(AngleConstraint { a, b, angle: target, hb: CrossBlock::new() });
+    let result = sketch.solve();
+    assert!(result.end_cost < 1.0, "solver failed: cost={}", result.end_cost);
+    let la = &sketch.lines[a];
+    let lb = &sketch.lines[b];
+    let dx1 = la.p2.value.x - la.p1.value.x;
+    let dy1 = la.p2.value.y - la.p1.value.y;
+    let dx2 = lb.p2.value.x - lb.p1.value.x;
+    let dy2 = lb.p2.value.y - lb.p1.value.y;
+    let final_angle = (dx1 * dy2 - dy1 * dx2).atan2(dx1 * dx2 + dy1 * dy2);
+    assert_near(final_angle, target, 0.01);
+}
+
+#[test]
 fn test_symmetry_ll() {
     // B is vertical mirror, A and C are roughly symmetric.
     let mut sketch = Sketch::new();
