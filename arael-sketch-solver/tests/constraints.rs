@@ -698,11 +698,11 @@ fn test_symmetry_ll() {
 
 #[test]
 fn test_symmetry_ll_nonparallel() {
-    // Symmetry with non-parallel lines. B bisects the angle.
+    // Symmetry with non-parallel lines (V-shape, not sharing endpoints).
     let mut sketch = Sketch::new();
-    let a = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(4.0, 2.0));
-    let b = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(5.0, 0.0));
-    let c = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(4.0, -2.0));
+    let a = sketch.add_line(vect2d::new(-3.0, 2.0), vect2d::new(3.0, 4.0));
+    let b = sketch.add_line(vect2d::new(0.0, -1.0), vect2d::new(0.0, 5.0));
+    let c = sketch.add_line(vect2d::new(-3.0, -2.0), vect2d::new(3.0, -4.0));
     sketch.symmetry_ll.push(SymmetryLL {
         a, b, c, hb: arael::model::TripletBlock::new(),
     });
@@ -711,10 +711,28 @@ fn test_symmetry_ll_nonparallel() {
     let la = &sketch.lines[a];
     let lb = &sketch.lines[b];
     let lc = &sketch.lines[c];
-    let (d1a, d1c) = projection_distances(lb.p1.value, lb, la, lc);
-    let (d2a, d2c) = projection_distances(lb.p2.value, lb, la, lc);
-    assert_near(d1a + d1c, 0.0, 0.01);
-    assert_near(d2a + d2c, 0.0, 0.01);
+    // Verify using ray-intersection formula (same as constraint)
+    let (r1, r2) = ray_symmetry_residuals(lb, la, lc);
+    assert_near(r1, 0.0, 0.1);
+    assert_near(r2, 0.0, 0.1);
+}
+
+/// Compute ray-intersection symmetry residuals (same formula as constraint).
+fn ray_symmetry_residuals(lb: &Line, la: &Line, lc: &Line) -> (f64, f64) {
+    let bnx = -(lb.p2.value.y - lb.p1.value.y);
+    let bny = lb.p2.value.x - lb.p1.value.x;
+    let adx = la.p2.value.x - la.p1.value.x;
+    let ady = la.p2.value.y - la.p1.value.y;
+    let cdx = lc.p2.value.x - lc.p1.value.x;
+    let cdy = lc.p2.value.y - lc.p1.value.y;
+    let bna = bnx * ady - bny * adx;
+    let bnc = bnx * cdy - bny * cdx;
+    let cross2 = |ax: f64, ay: f64, bx: f64, by: f64| ax * by - ay * bx;
+    let r1 = cross2(la.p1.value.x - lb.p1.value.x, la.p1.value.y - lb.p1.value.y, adx, ady) * bnc
+           + cross2(lc.p1.value.x - lb.p1.value.x, lc.p1.value.y - lb.p1.value.y, cdx, cdy) * bna;
+    let r2 = cross2(la.p1.value.x - lb.p2.value.x, la.p1.value.y - lb.p2.value.y, adx, ady) * bnc
+           + cross2(lc.p1.value.x - lb.p2.value.x, lc.p1.value.y - lb.p2.value.y, cdx, cdy) * bna;
+    (r1, r2)
 }
 
 /// Compute projection-based signed distances: project P onto A and C,

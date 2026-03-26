@@ -934,28 +934,35 @@ pub struct LineP2OnArc {
 
 // -- Symmetry (3-entity) --
 
-// Symmetry of 3 lines: from each B endpoint, cast a ray along B's
-// normal. Intersect with A and C. The signed ray parameters (distances
-// along bn) must sum to zero (opposite sides, equal distance).
-// Ray: P + t*bn intersects line L.p1 + s*Ld.
-// t = cross(L.p1 - P, Ld) / cross(bn, Ld)
-// where cross(u,v) = u.x*v.y - u.y*v.x
+// Symmetry of 3 lines: from each B endpoint, cast a ray and intersect
+// with A and C. Signed ray parameters must sum to zero.
+// `use_normal_ray` selects ray direction: true = B's normal (default),
+// false = B's direction (for when A/C are nearly perpendicular to B).
+// Set at constraint creation based on initial geometry.
 // Uses TripletBlock for 3-entity Hessian accumulation.
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let bn = (b.p2 - b.p1).across();
+    let bd = b.p2 - b.p1;
     let ad = a.p2 - a.p1;
     let cd = c.p2 - c.p1;
-    // Ray intersection: t = cross(L.p1-P, Ld) / cross(bn, Ld)
-    // Multiply through by both denominators to avoid division:
-    // cross(a.p1-P, ad)*cross(bn,cd) + cross(c.p1-P, cd)*cross(bn,ad) = 0
+    // Ray along B's normal: equidistant perpendicular to B
     let bna = bn.cross(ad);
     let bnc = bn.cross(cd);
-    let r1 = (a.p1 - b.p1).cross(ad) * bnc + (c.p1 - b.p1).cross(cd) * bna;
-    let r2 = (a.p1 - b.p2).cross(ad) * bnc + (c.p1 - b.p2).cross(cd) * bna;
-    [r1 * sketch.constraint_isigma,
-     r2 * sketch.constraint_isigma]
+    let rn1 = (a.p1 - b.p1).cross(ad) * bnc + (c.p1 - b.p1).cross(cd) * bna;
+    let rn2 = (a.p1 - b.p2).cross(ad) * bnc + (c.p1 - b.p2).cross(cd) * bna;
+    // Intersection of A and C lies on line B (cross-multiplied to avoid division).
+    // When A||C this is trivially 0. When A/C are perpendicular to B, this
+    // provides the constraint that the bn residuals lose.
+    // intersection = A.p1 + t*Ad where t = cross(C.p1-A.p1, Cd) / cross(Ad, Cd)
+    // residual = cross(intersection - B.p1, Bd) * cross(Ad, Cd)
+    //          = cross(A.p1-B.p1, Bd)*cross(Ad,Cd) + cross(Ad, Bd)*cross(C.p1-A.p1, Cd)
+    let adc = ad.cross(cd);
+    let r3 = (a.p1 - b.p1).cross(bd) * adc + ad.cross(bd) * (c.p1 - a.p1).cross(cd);
+    [rn1 * sketch.constraint_isigma,
+     rn2 * sketch.constraint_isigma,
+     r3 * sketch.constraint_isigma]
 }))]
 pub struct SymmetryLL {
     #[arael(ref = root.lines)]
