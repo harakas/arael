@@ -419,7 +419,7 @@ impl Action {
                 sketch.solve();
             }
             Action::AddDimension { kind, value } => {
-                let name = format!("D{}", sketch.next_dimension_id);
+                let name = format!("d{}", sketch.next_dimension_id);
                 sketch.next_dimension_id += 1;
                 // Apply the constraint
                 match kind {
