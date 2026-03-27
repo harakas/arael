@@ -6,6 +6,13 @@ fn assert_near(a: f64, b: f64, tol: f64) {
     assert!((a - b).abs() < tol, "expected {a} ~= {b} (diff={})", (a - b).abs());
 }
 
+fn line_length(sketch: &Sketch, r: arael::refs::Ref<Line>) -> f64 {
+    let l = &sketch.lines[r];
+    let dx = l.p2.value.x - l.p1.value.x;
+    let dy = l.p2.value.y - l.p1.value.y;
+    (dx * dx + dy * dy).sqrt()
+}
+
 // -- Point-Point --
 
 #[test]
@@ -1039,4 +1046,92 @@ fn test_expr_dim_angle_reference() {
     eprintln!("  angle L0-L1={:.2} deg, angle L2-L3={:.2} deg", angle_01, angle_23);
     assert_near(angle_01, 20.0, 1.0);
     assert_near(angle_23, 20.0, 1.0);
+}
+
+// -- UpdateDimension preserves name --
+
+#[test]
+fn test_update_dimension_preserves_name() {
+    // Create a line with a length dimension, then update the value.
+    // The dimension name must stay the same so expression references work.
+    let mut sketch = Sketch::new();
+    let l0 = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(5.0, 0.0));
+    // Add dimension d0 with value 10
+    sketch.lines[l0].constraints.has_length = true;
+    sketch.lines[l0].constraints.length = 10.0;
+    sketch.dimensions.push(Dimension {
+        kind: DimensionKind::LineLength(l0),
+        value: 10.0,
+        offset: vect2d::new(0.0, 1.0),
+        text_along: 0.0,
+        name: "d0".into(),
+        expr_str: None,
+    });
+    sketch.solve();
+    let len0 = line_length(&sketch, l0);
+    assert_near(len0, 10.0, 0.01);
+    assert_eq!(sketch.dimensions[0].name, "d0");
+
+    // Update dimension to value 15 (simulates what UpdateDimension action does)
+    // 1. Remove old constraint
+    sketch.lines[l0].constraints.has_length = false;
+    // 2. Update dimension in place
+    sketch.dimensions[0].value = 15.0;
+    // 3. Apply new constraint
+    sketch.lines[l0].constraints.has_length = true;
+    sketch.lines[l0].constraints.length = 15.0;
+    sketch.solve();
+
+    let len1 = line_length(&sketch, l0);
+    assert_near(len1, 15.0, 0.01);
+    // Name must be preserved
+    assert_eq!(sketch.dimensions[0].name, "d0");
+}
+
+#[test]
+fn test_update_dimension_numeric_to_expr() {
+    // Start with a numeric dimension, update it to an expression dimension.
+    // The name must be preserved.
+    let mut sketch = Sketch::new();
+    let l0 = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(5.0, 0.0));
+    let l1 = sketch.add_line(vect2d::new(0.0, 2.0), vect2d::new(3.0, 2.0));
+
+    // d0 = line length of L0 = 10
+    sketch.next_dimension_id = 1;
+    sketch.lines[l0].constraints.has_length = true;
+    sketch.lines[l0].constraints.length = 10.0;
+    sketch.dimensions.push(Dimension {
+        kind: DimensionKind::LineLength(l0),
+        value: 10.0,
+        offset: vect2d::new(0.0, 1.0),
+        text_along: 0.0,
+        name: "d0".into(),
+        expr_str: None,
+    });
+    sketch.solve();
+    assert_near(line_length(&sketch, l0), 10.0, 0.01);
+
+    // d1 = line length of L1 = d0 * 2
+    sketch.add_expr_dimension(
+        DimensionKind::LineLength(l1), "d0 * 2",
+        vect2d::new(0.0, 1.0), 0.0,
+    ).unwrap();
+    sketch.solve();
+    sketch.update_expr_dim_values();
+    assert_near(line_length(&sketch, l1), 20.0, 0.01);
+    assert_eq!(sketch.dimensions[1].name, "d1");
+
+    // Now update d0 from 10 to 5 -- d1 should become 10
+    sketch.lines[l0].constraints.has_length = false;
+    sketch.dimensions[0].value = 5.0;
+    sketch.dimensions[0].expr_str = None;
+    sketch.lines[l0].constraints.has_length = true;
+    sketch.lines[l0].constraints.length = 5.0;
+    sketch.solve();
+    sketch.update_expr_dim_values();
+    assert_near(line_length(&sketch, l0), 5.0, 0.01);
+    assert_near(line_length(&sketch, l1), 10.0, 0.01);
+    // Name preserved
+    assert_eq!(sketch.dimensions[0].name, "d0");
+    assert_eq!(sketch.dimensions[1].name, "d1");
 }

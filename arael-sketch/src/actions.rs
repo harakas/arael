@@ -78,6 +78,7 @@ pub enum Action {
     ToggleStyleArc { arc: Ref<Arc> },
     DeleteArc { arc: Ref<Arc> },
     AddDimension { kind: DimensionKind, value: f64 },
+    UpdateDimension { index: usize, value: f64, expr: Option<String> },
     RemoveDimension { index: usize },
     // Drag is non-deterministic; store full state after drag completes
     Drag { snapshot: Vec<u8> },
@@ -114,7 +115,7 @@ impl Action {
             Action::ApplyMidpointArcEnd { .. } |
             Action::ApplyPointOnLine { .. } | Action::ApplyPointOnArc { .. } |
             Action::ApplyLineP1OnLine { .. } | Action::ApplyLineP2OnLine { .. } |
-            Action::AddDimension { .. }
+            Action::AddDimension { .. } | Action::UpdateDimension { .. }
         )
     }
 }
@@ -516,6 +517,159 @@ impl Action {
                     name,
                     expr_str: None,
                 });
+                sketch.solve();
+            }
+            Action::UpdateDimension { index, value, expr } => {
+                if *index >= sketch.dimensions.len() { return; }
+                // Remove old underlying constraint (only for numeric dims)
+                {
+                    let dim = &sketch.dimensions[*index];
+                    if dim.expr_str.is_none() {
+                        match dim.kind {
+                            DimensionKind::LineLength(line) => {
+                                if let Some(l) = sketch.lines.get_mut(line) {
+                                    l.constraints.has_length = false;
+                                }
+                            }
+                            DimensionKind::ArcRadius(arc) => {
+                                if let Some(a) = sketch.arcs.get_mut(arc) {
+                                    a.constraints.has_target_radius = false;
+                                }
+                            }
+                            DimensionKind::PointPointDistance(a, b) => {
+                                let val = dim.value;
+                                match (a, b) {
+                                    (DimensionEndpoint::Point(pa), DimensionEndpoint::Point(pb)) => {
+                                        sketch.distance_pp.retain(|c| !(c.a == pa && c.b == pb && (c.distance - val).abs() < 1e-9));
+                                    }
+                                    (DimensionEndpoint::LineP1(la), DimensionEndpoint::LineP1(lb)) => {
+                                        sketch.distance_ll11.retain(|c| !(c.a == la && c.b == lb && (c.distance - val).abs() < 1e-9));
+                                    }
+                                    (DimensionEndpoint::LineP1(la), DimensionEndpoint::LineP2(lb)) => {
+                                        sketch.distance_ll12.retain(|c| !(c.a == la && c.b == lb && (c.distance - val).abs() < 1e-9));
+                                    }
+                                    (DimensionEndpoint::LineP2(la), DimensionEndpoint::LineP1(lb)) => {
+                                        sketch.distance_ll21.retain(|c| !(c.a == la && c.b == lb && (c.distance - val).abs() < 1e-9));
+                                    }
+                                    (DimensionEndpoint::LineP2(la), DimensionEndpoint::LineP2(lb)) => {
+                                        sketch.distance_ll22.retain(|c| !(c.a == la && c.b == lb && (c.distance - val).abs() < 1e-9));
+                                    }
+                                    (DimensionEndpoint::LineP1(l), DimensionEndpoint::Point(p))
+                                    | (DimensionEndpoint::Point(p), DimensionEndpoint::LineP1(l)) => {
+                                        sketch.distance_lp1.retain(|c| !(c.line == l && c.point == p && (c.distance - val).abs() < 1e-9));
+                                    }
+                                    (DimensionEndpoint::LineP2(l), DimensionEndpoint::Point(p))
+                                    | (DimensionEndpoint::Point(p), DimensionEndpoint::LineP2(l)) => {
+                                        sketch.distance_lp2.retain(|c| !(c.line == l && c.point == p && (c.distance - val).abs() < 1e-9));
+                                    }
+                                    _ => {
+                                        if let Some(idx) = sketch.distance_pp.iter().position(|c| (c.distance - val).abs() < 1e-9) {
+                                            sketch.distance_pp.remove(idx);
+                                        }
+                                    }
+                                }
+                            }
+                            DimensionKind::PointLineDistance(_, _) => {
+                                let val = dim.value;
+                                if let Some(idx) = sketch.distance_pl.iter().position(|c| (c.distance.abs() - val.abs()).abs() < 1e-9) {
+                                    sketch.distance_pl.remove(idx);
+                                }
+                            }
+                            DimensionKind::Angle(a, b, _) => {
+                                sketch.angle.retain(|c| !(c.a == a && c.b == b));
+                            }
+                        }
+                    }
+                }
+                // Update dimension in place (keeps name, kind, offset, text_along)
+                let dim = &mut sketch.dimensions[*index];
+                dim.value = *value;
+                dim.expr_str = expr.clone();
+                // Add new underlying constraint (only for numeric dims)
+                if expr.is_none() {
+                    let kind = dim.kind;
+                    let value = *value;
+                    match kind {
+                        DimensionKind::LineLength(line) => {
+                            sketch.lines[line].constraints.has_length = true;
+                            sketch.lines[line].constraints.length = value;
+                        }
+                        DimensionKind::ArcRadius(arc) => {
+                            sketch.arcs[arc].constraints.has_target_radius = true;
+                            sketch.arcs[arc].constraints.target_radius = value;
+                        }
+                        DimensionKind::PointPointDistance(a, b) => {
+                            match (a, b) {
+                                (DimensionEndpoint::Point(pa), DimensionEndpoint::Point(pb)) => {
+                                    sketch.distance_pp.push(DistancePP { a: pa, b: pb, distance: value, hb: CrossBlock::new() });
+                                }
+                                (DimensionEndpoint::LineP1(la), DimensionEndpoint::LineP1(lb)) => {
+                                    sketch.distance_ll11.push(DistanceLL11 { a: la, b: lb, distance: value, hb: CrossBlock::new() });
+                                }
+                                (DimensionEndpoint::LineP1(la), DimensionEndpoint::LineP2(lb)) => {
+                                    sketch.distance_ll12.push(DistanceLL12 { a: la, b: lb, distance: value, hb: CrossBlock::new() });
+                                }
+                                (DimensionEndpoint::LineP2(la), DimensionEndpoint::LineP1(lb)) => {
+                                    sketch.distance_ll21.push(DistanceLL21 { a: la, b: lb, distance: value, hb: CrossBlock::new() });
+                                }
+                                (DimensionEndpoint::LineP2(la), DimensionEndpoint::LineP2(lb)) => {
+                                    sketch.distance_ll22.push(DistanceLL22 { a: la, b: lb, distance: value, hb: CrossBlock::new() });
+                                }
+                                (DimensionEndpoint::LineP1(l), DimensionEndpoint::Point(p))
+                                | (DimensionEndpoint::Point(p), DimensionEndpoint::LineP1(l)) => {
+                                    sketch.distance_lp1.push(DistanceLP1 { line: l, point: p, distance: value, hb: CrossBlock::new() });
+                                }
+                                (DimensionEndpoint::LineP2(l), DimensionEndpoint::Point(p))
+                                | (DimensionEndpoint::Point(p), DimensionEndpoint::LineP2(l)) => {
+                                    sketch.distance_lp2.push(DistanceLP2 { line: l, point: p, distance: value, hb: CrossBlock::new() });
+                                }
+                                _ => {
+                                    let pa = resolve_dim_endpoint(sketch, &a);
+                                    let pb = resolve_dim_endpoint(sketch, &b);
+                                    sketch.distance_pp.push(DistancePP { a: pa, b: pb, distance: value, hb: CrossBlock::new() });
+                                }
+                            }
+                        }
+                        DimensionKind::PointLineDistance(pt, line) => {
+                            let compute_signed = |sketch: &Sketch, pt_pos: vect2d, line: Ref<Line>| -> f64 {
+                                let l = &sketch.lines[line];
+                                let ldx = l.p2.value.x - l.p1.value.x;
+                                let ldy = l.p2.value.y - l.p1.value.y;
+                                let len = (ldx * ldx + ldy * ldy).sqrt();
+                                if len < 1e-12 { return value; }
+                                let sign = ((pt_pos.x - l.p1.value.x) * ldy - (pt_pos.y - l.p1.value.y) * ldx) / len;
+                                if sign >= 0.0 { value } else { -value }
+                            };
+                            match pt {
+                                DimensionEndpoint::Point(p) => {
+                                    let signed = compute_signed(sketch, sketch.points[p].pos.value, line);
+                                    sketch.distance_pl.push(DistancePL { point: p, line, distance: signed, hb: CrossBlock::new() });
+                                }
+                                _ => {
+                                    let p = resolve_dim_endpoint(sketch, &pt);
+                                    let signed = compute_signed(sketch, sketch.points[p].pos.value, line);
+                                    sketch.distance_pl.push(DistancePL { point: p, line, distance: signed, hb: CrossBlock::new() });
+                                }
+                            }
+                        }
+                        DimensionKind::Angle(a, b, supplement) => {
+                            let la = &sketch.lines[a];
+                            let lb = &sketch.lines[b];
+                            let dx1 = la.p2.value.x - la.p1.value.x;
+                            let dy1 = la.p2.value.y - la.p1.value.y;
+                            let dx2 = lb.p2.value.x - lb.p1.value.x;
+                            let dy2 = lb.p2.value.y - lb.p1.value.y;
+                            let current = (dx1 * dy2 - dy1 * dx2).atan2(dx1 * dx2 + dy1 * dy2);
+                            let mut target = deg2rad(value);
+                            if supplement { target = std::f64::consts::PI - target; }
+                            if current < 0.0 { target = -target; }
+                            sketch.angle.push(AngleConstraint {
+                                a, b, angle: target, hb: CrossBlock::new(),
+                            });
+                        }
+                    }
+                }
+                // Expression dims: rebuild_expr_constraints() in solve() handles it
                 sketch.solve();
             }
             Action::RemoveDimension { index } => {

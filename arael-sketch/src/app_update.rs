@@ -123,27 +123,15 @@ impl eframe::App for EditorApp {
                     if is_numeric || is_expr {
                         self.begin_group();
                         if let Some(edit_idx) = self.dim_edit_index.take() {
-                            // Editing existing: remove old, add new with same offset
-                            let offset = self.dim_offset;
-                            let kind = self.dim_kind.take().unwrap();
-                            let n_dims_before = self.sketch.dimensions.len();
-                            self.exec(Action::RemoveDimension { index: edit_idx });
+                            // Editing existing: update in place (preserves name)
                             if is_numeric {
                                 let value = input.parse::<f64>().unwrap();
-                                self.exec(Action::AddDimension { kind, value });
+                                self.exec(Action::UpdateDimension { index: edit_idx, value, expr: None });
                             } else {
-                                if let Err(e) = self.sketch.add_expr_dimension(
-                                    kind, &input, offset, self.dim_text_along) {
-                                    self.status_error = Some(format!("Expression error: {}", e));
-                                } else {
-                                    self.sketch.solve();
-                                }
-                            }
-                            if self.sketch.dimensions.len() > n_dims_before - 1 {
-                                if let Some(d) = self.sketch.dimensions.last_mut() {
-                                    d.offset = offset;
-                                    d.text_along = self.dim_text_along;
-                                }
+                                self.exec(Action::UpdateDimension {
+                                    index: edit_idx, value: 0.0,
+                                    expr: Some(input.clone()),
+                                });
                             }
                         } else if let Some(kind) = self.dim_kind.take() {
                             let is_dup = self.sketch.dimensions.iter().any(|d| d.kind == kind);
