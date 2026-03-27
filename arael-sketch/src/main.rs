@@ -2345,6 +2345,57 @@ impl EditorApp {
 
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+
+    let mut file_path: Option<String> = None;
+    let mut verbose = false;
+    let mut empty = false;
+
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--help" | "-h" => {
+                eprintln!("Usage: arael-sketch [OPTIONS] [FILE.json]");
+                eprintln!();
+                eprintln!("Options:");
+                eprintln!("  --verbose, -v   Print solver iterations");
+                eprintln!("  --empty         Start with empty sketch");
+                eprintln!("  --help, -h      Show this help");
+                std::process::exit(0);
+            }
+            "--verbose" | "-v" => verbose = true,
+            "--empty" => empty = true,
+            arg if !arg.starts_with('-') => file_path = Some(arg.to_string()),
+            other => {
+                eprintln!("Unknown option: {}", other);
+                std::process::exit(1);
+            }
+        }
+        i += 1;
+    }
+
+    let mut app = if let Some(ref path) = file_path {
+        let json = std::fs::read_to_string(path).unwrap_or_else(|e| {
+            eprintln!("Failed to read {}: {}", path, e);
+            std::process::exit(1);
+        });
+        let mut app = EditorApp::default();
+        app.load_from_json(&json);
+        app
+    } else if empty {
+        let mut app = EditorApp::default();
+        let empty_sketch = serde_json::to_string(&Sketch::new()).unwrap();
+        app.load_from_json(&empty_sketch);
+        app
+    } else {
+        EditorApp::default()
+    };
+
+    if verbose {
+        app.sketch.verbose = true;
+    }
+    app.compute_dof_async();
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1024.0, 768.0])
@@ -2355,7 +2406,7 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "Arael Sketch Editor",
         options,
-        Box::new(|_cc| Ok(Box::new(EditorApp::default()))),
+        Box::new(|_cc| Ok(Box::new(app))),
     )
 }
 

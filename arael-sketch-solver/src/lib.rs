@@ -61,6 +61,9 @@ pub struct Sketch {
     // Solver parameters
     pub drift_isigma: f64,
     pub constraint_isigma: f64,
+    #[arael(skip)]
+    #[serde(default)]
+    pub verbose: bool,
     // Auto-naming counters
     #[arael(skip)]
     pub next_point_id: u32,
@@ -157,6 +160,7 @@ impl Sketch {
             arcs: Arena::new(),
             drift_isigma: 1.0 / drift_sigma,
             constraint_isigma: 1000.0, // tight constraints
+            verbose: false,
             next_point_id: 0,
             next_line_id: 0,
             next_arc_id: 0,
@@ -808,7 +812,7 @@ impl Sketch {
                 rel_precision: 1e-4,
                 cost_threshold: n as f64 * 1e-6,
                 min_iters: if cost > (n as f64 * 1e-4) { 32 } else { 8 },
-                verbose: false,
+                verbose: self.verbose,
                 ..Default::default()
             };
             let stage_result = if n >= 64 {
