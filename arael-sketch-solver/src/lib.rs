@@ -32,6 +32,10 @@
 
 pub mod dimensions;
 pub use dimensions::*;
+pub mod symbol_bag;
+pub use symbol_bag::SymbolBag;
+pub mod expr_constraint;
+pub use expr_constraint::ExpressionConstraint;
 
 use arael::model::{Model, Param, SelfBlock, CrossBlock, TripletBlock};
 use arael::vect::vect2d;
@@ -49,7 +53,7 @@ include!("constraints.rs");
 
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
-#[arael(root)]
+#[arael(root, extended)]
 pub struct Sketch {
     pub points: Arena<Point>,
     pub lines: Arena<Line>,
@@ -127,6 +131,16 @@ pub struct Sketch {
     pub dimensions: std::vec::Vec<Dimension>,
     #[arael(skip)]
     pub next_dimension_id: u32,
+    // Expression constraints (parametric dimensions)
+    #[arael(skip)]
+    #[serde(skip)]
+    pub expr_constraints: std::vec::Vec<ExpressionConstraint>,
+    #[arael(skip)]
+    #[serde(skip)]
+    symbol_bag: Option<SymbolBag>,
+    // Shared TripletBlock for all expression constraints
+    #[serde(skip)]
+    pub expr_hb: TripletBlock<f64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -203,6 +217,9 @@ impl Sketch {
             distance_lp2: Vec::new(),
             dimensions: Vec::new(),
             next_dimension_id: 0,
+            expr_constraints: Vec::new(),
+            symbol_bag: None,
+            expr_hb: TripletBlock::new(),
         }
     }
 
@@ -664,6 +681,65 @@ impl Sketch {
         self.dedup_constraints();
     }
 
+}
+
+impl arael::model::ExtendedModel for Sketch {
+    fn extended_cost64(&self, params: &[f64]) -> f64 {
+        if self.expr_constraints.is_empty() { return 0.0; }
+        let bag = self.symbol_bag.as_ref().expect("symbol_bag not built");
+        let vars = bag.eval_vars(params);
+        let isigma = self.constraint_isigma;
+        self.expr_constraints.iter()
+            .map(|ec| ec.cost(&vars, isigma))
+            .sum()
+    }
+
+    fn extended_compute64(&mut self, params: &[f64]) {
+        if self.expr_constraints.is_empty() { return; }
+        let bag = self.symbol_bag.as_ref().expect("symbol_bag not built");
+        let vars = bag.eval_vars(params);
+        let isigma = self.constraint_isigma;
+        let hb = &mut self.expr_hb as *mut TripletBlock<f64>;
+        for ec in &self.expr_constraints {
+            ec.compute(&vars, isigma, unsafe { &mut *hb });
+        }
+    }
+}
+
+impl Sketch {
+    /// Add an expression constraint. The expression should evaluate to 0
+    /// when satisfied. Symbols are resolved against current entity names
+    /// and dimensions.
+    /// Add an expression constraint. The expression should evaluate to 0
+    /// when satisfied. Symbol resolution and differentiation happen at
+    /// solve() time.
+    pub fn add_expr_constraint(&mut self, expr: arael_sym::E, description: String) {
+        self.expr_constraints.push(ExpressionConstraint::new_unresolved(expr, description));
+    }
+
+    /// Add an expression-based dimension. The expression string is parsed
+    /// and the constraint is: `measured_property - parsed_expr = 0`.
+    /// Returns Err if the expression fails to parse.
+    pub fn add_expr_dimension(&mut self, kind: DimensionKind, expr_str: &str,
+                              offset: vect2d, text_along: f64) -> Result<(), String> {
+        let parsed = arael_sym::parse(expr_str).map_err(|e| e.to_string())?;
+        let name = format!("d{}", self.next_dimension_id);
+        self.next_dimension_id += 1;
+
+        // Build the measured property expression
+        let dim = Dimension {
+            kind, value: 0.0, offset, text_along,
+            name: name.clone(), expr_str: Some(expr_str.to_string()),
+        };
+        let measured = dim.measured_symbol(self);
+        self.dimensions.push(dim);
+
+        // Residual: measured - expr = 0
+        let residual = measured - parsed;
+        self.add_expr_constraint(residual, format!("{} = {}", name, expr_str));
+        Ok(())
+    }
+
     /// Solve the sketch constraints using Levenberg-Marquardt.
     /// Uses sparse faer Cholesky for n >= 64 params, dense Cholesky otherwise.
     /// When starting cost is high, uses graduated optimization (1% -> 10% ->
@@ -679,6 +755,15 @@ impl Sketch {
             return arael::simple_lm::LmResult {
                 x: params64, start_cost: 0.0, end_cost: 0.0, iterations: 0,
             };
+        }
+
+        // Build symbol bag and resolve expression constraints
+        if !self.expr_constraints.is_empty() {
+            let bag = SymbolBag::build(self);
+            for ec in &mut self.expr_constraints {
+                ec.resolve(&bag);
+            }
+            self.symbol_bag = Some(bag);
         }
 
         // Compute starting cost to decide strategy
@@ -738,7 +823,26 @@ impl Sketch {
         }
 
         self.constraint_isigma = full_isigma;
+        self.update_expr_dim_values();
         result.iterations = total_iters;
         result
+    }
+
+    /// Evaluate expression dimensions and cache their computed values.
+    pub fn update_expr_dim_values(&mut self) {
+        let has_expr = self.dimensions.iter().any(|d| d.expr_str.is_some());
+        if !has_expr { return; }
+        let bag = SymbolBag::build(self);
+        let mut params = Vec::new();
+        self.serialize64(&mut params);
+        let vars = bag.eval_vars(&params);
+        for dim in &mut self.dimensions {
+            if let Some(ref expr_str) = dim.expr_str {
+                if let Ok(parsed) = arael_sym::parse(expr_str) {
+                    let expanded = expr_constraint::expand_derived(&parsed, &bag);
+                    dim.value = expanded.eval(&vars);
+                }
+            }
+        }
     }
 }

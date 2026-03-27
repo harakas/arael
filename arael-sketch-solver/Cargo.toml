@@ -12,7 +12,9 @@ categories = ["mathematics", "science"]
 
 [dependencies]
 arael = { version = "0.2.0", path = ".." }
+arael-sym = { version = "0.2.0", path = "../arael-sym" }
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]
 serde_json = "1"
+bincode = "1"

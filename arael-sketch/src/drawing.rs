@@ -57,7 +57,8 @@ impl EditorApp {
 
     // Draw a dimension annotation. Returns (text_start, text_end) screen segment for hit testing.
     pub fn draw_dimension(&self, painter: &egui::Painter, kind: &DimensionKind, value: f64,
-                       offset: vect2d, text_along: f64, color: egui::Color32, is_radius: bool) -> (egui::Pos2, egui::Pos2) {
+                       offset: vect2d, text_along: f64, color: egui::Color32, is_radius: bool,
+                       is_expr: bool) -> (egui::Pos2, egui::Pos2) {
         if is_radius {
             if let DimensionKind::ArcRadius(r) = kind {
                 let a = &self.sketch.arcs[*r];
@@ -86,7 +87,7 @@ impl EditorApp {
                 painter.line_segment([se, egui::Pos2::new(se.x + ax * asz - ay * asz * 0.4, se.y + ay * asz + ax * asz * 0.4)], stroke);
                 // Text along arrow
                 let mid = egui::Pos2::new((se.x + si.x) / 2.0, (se.y + si.y) / 2.0);
-                let text = format!("R{:.2}", value);
+                let text = if is_expr { format!("fx: R{:.2}", value) } else { format!("R{:.2}", value) };
                 return self.draw_rotated_text(painter, mid, ax, ay, &text,
                     egui::FontId::proportional(12.0), color);
             }
@@ -95,7 +96,7 @@ impl EditorApp {
         // Angle dimension: draw arc between two lines
         if let DimensionKind::Angle(a_ref, b_ref, supplement) = kind {
             return self.draw_angle_dimension(painter, *a_ref, *b_ref, *supplement,
-                value, offset, text_along, color);
+                value, offset, text_along, color, is_expr);
         }
 
         let (p1_sketch, p2_sketch) = self.dim_endpoints(kind);
@@ -141,7 +142,7 @@ impl EditorApp {
         let asz = 6.0;
 
         // Text position along the line
-        let text = format!("{:.2}", value);
+        let text = if is_expr { format!("fx: {:.2}", value) } else { format!("{:.2}", value) };
         let char_width = 12.0 * 0.6;
         let text_half_w = text.len() as f32 * char_width / 2.0;
         let text_center = egui::Pos2::new(
@@ -313,7 +314,7 @@ impl EditorApp {
     fn draw_angle_dimension(&self, painter: &egui::Painter, a_ref: Ref<Line>,
                             b_ref: Ref<Line>, supplement: bool, value: f64,
                             offset: vect2d, text_along: f64,
-                            color: egui::Color32) -> (egui::Pos2, egui::Pos2) {
+                            color: egui::Color32, is_expr: bool) -> (egui::Pos2, egui::Pos2) {
         let (ix, start_angle, sweep) = self.angle_dim_sector(a_ref, b_ref, supplement, offset);
         let radius = offset.y.max(0.3);
         let stroke = egui::Stroke::new(1.0, color);
@@ -381,7 +382,7 @@ impl EditorApp {
         let sign = if sweep >= 0.0 { 1.0f32 } else { -1.0f32 };
         let tx = -(text_angle.sin() as f32) * sign;
         let ty = -(text_angle.cos() as f32) * sign;
-        let text = format!("{:.1}\u{00b0}", value);
+        let text = if is_expr { format!("fx: {:.1}\u{00b0}", value) } else { format!("{:.1}\u{00b0}", value) };
         self.draw_rotated_text(painter, screen_pt, tx, ty, &text,
             egui::FontId::proportional(12.0), color)
     }
@@ -1174,7 +1175,8 @@ impl EditorApp {
             let selected = self.selection.contains(&Selection::Dimension(i));
             let color = if selected { dim_sel_color } else { dim_color };
             let is_radius = matches!(dim.kind, DimensionKind::ArcRadius(_));
-            self.draw_dimension(painter, &dim.kind, dim.value, dim.offset, dim.text_along, color, is_radius);
+            let is_expr = dim.expr_str.is_some();
+            self.draw_dimension(painter, &dim.kind, dim.value, dim.offset, dim.text_along, color, is_radius, is_expr);
         }
 
         // Redraw selected and locked points/endpoints on top so they're not obscured

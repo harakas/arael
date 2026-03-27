@@ -256,6 +256,7 @@ version = "0.2.0"
 dependencies = [
  "arael",
  "arael-sketch-solver",
+ "arael-sym",
  "bincode",
  "eframe",
  "nalgebra",
@@ -273,6 +274,8 @@ name = "arael-sketch-solver"
 version = "0.2.0"
 dependencies = [
  "arael",
+ "arael-sym",
+ "bincode",
  "serde",
  "serde_json",
 ]

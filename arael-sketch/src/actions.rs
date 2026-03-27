@@ -514,12 +514,20 @@ impl Action {
                     offset: vect2d::new(0.0, 1.0),
                     text_along: 0.0,
                     name,
+                    expr_str: None,
                 });
                 sketch.solve();
             }
             Action::RemoveDimension { index } => {
                 if *index < sketch.dimensions.len() {
                     let dim = sketch.dimensions.remove(*index);
+                    // Expression dimension: remove the ExpressionConstraint
+                    if dim.expr_str.is_some() {
+                        let desc_prefix = format!("{} = ", dim.name);
+                        sketch.expr_constraints.retain(|ec| !ec.description.starts_with(&desc_prefix));
+                        sketch.solve();
+                        return;  // skip normal constraint removal
+                    }
                     // Remove the underlying constraint
                     match dim.kind {
                         DimensionKind::LineLength(line) => {

@@ -116,7 +116,11 @@ impl eframe::App for EditorApp {
                 }
                 let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
                 if enter_pressed || (response.lost_focus() && enter_pressed) {
-                    if let Ok(value) = self.dim_input.parse::<f64>() {
+                    let input = self.dim_input.trim().to_string();
+                    let is_numeric = input.parse::<f64>().is_ok();
+                    let is_expr = !is_numeric && arael_sym::parse(&input).is_ok();
+
+                    if is_numeric || is_expr {
                         self.begin_group();
                         if let Some(edit_idx) = self.dim_edit_index.take() {
                             // Editing existing: remove old, add new with same offset
@@ -124,8 +128,17 @@ impl eframe::App for EditorApp {
                             let kind = self.dim_kind.take().unwrap();
                             let n_dims_before = self.sketch.dimensions.len();
                             self.exec(Action::RemoveDimension { index: edit_idx });
-                            self.exec(Action::AddDimension { kind, value });
-                            // Update offset only if dimension was added
+                            if is_numeric {
+                                let value = input.parse::<f64>().unwrap();
+                                self.exec(Action::AddDimension { kind, value });
+                            } else {
+                                if let Err(e) = self.sketch.add_expr_dimension(
+                                    kind, &input, offset, self.dim_text_along) {
+                                    self.status_error = Some(format!("Expression error: {}", e));
+                                } else {
+                                    self.sketch.solve();
+                                }
+                            }
                             if self.sketch.dimensions.len() > n_dims_before - 1 {
                                 if let Some(d) = self.sketch.dimensions.last_mut() {
                                     d.offset = offset;
@@ -133,23 +146,31 @@ impl eframe::App for EditorApp {
                                 }
                             }
                         } else if let Some(kind) = self.dim_kind.take() {
-                            // New dimension -- check for duplicate
                             let is_dup = self.sketch.dimensions.iter().any(|d| d.kind == kind);
                             if is_dup {
                                 self.status_error = Some("Dimension already exists".into());
-                            } else {
+                            } else if is_numeric {
+                                let value = input.parse::<f64>().unwrap();
                                 let n_dims_before = self.sketch.dimensions.len();
                                 self.exec(Action::AddDimension { kind, value });
-                                // Only update offset if the dimension was actually added
-                                // (exec may have rejected it and restored snapshot)
                                 if self.sketch.dimensions.len() > n_dims_before {
                                     if let Some(d) = self.sketch.dimensions.last_mut() {
                                         d.offset = self.dim_offset;
                                         d.text_along = self.dim_text_along;
                                     }
                                 }
+                            } else {
+                                if let Err(e) = self.sketch.add_expr_dimension(
+                                    kind, &input, self.dim_offset, self.dim_text_along) {
+                                    self.status_error = Some(format!("Expression error: {}", e));
+                                } else {
+                                    self.sketch.solve();
+                                    self.last_cost = 0.0; // will be updated
+                                }
                             }
                         }
+                    } else if !input.is_empty() {
+                        self.status_error = Some(format!("Invalid value or expression: {}", input));
                     }
                     self.dim_editing = false;
                     self.dim_placing = false;
@@ -265,7 +286,8 @@ impl eframe::App for EditorApp {
                 self.pending_fit = false;
             }
 
-            // Keyboard shortcuts
+            // Keyboard shortcuts (skip when editing dimension text)
+            if !self.dim_editing {
             if ui.input(|i| i.key_pressed(egui::Key::S) && !i.modifiers.ctrl && !i.modifiers.mac_cmd) { self.tool = Tool::Select; }
             if ui.input(|i| i.key_pressed(egui::Key::P)) { self.tool = Tool::DrawPoint; }
             if ui.input(|i| i.key_pressed(egui::Key::L)) {
@@ -293,6 +315,7 @@ impl eframe::App for EditorApp {
                 self.dim_editing = false;
                 self.dim_kind = None;
             }
+            } // !self.dim_editing
             if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                 self.selection.clear();
                 self.line_draw = None;
@@ -409,7 +432,11 @@ impl eframe::App for EditorApp {
                             let (ts, te) = self.dim_text_segment(dim);
                             let d = Self::screen_point_to_segment_dist(mouse_screen, ts, te);
                             if d < 15.0 {
-                                self.dim_input = format!("{:.4}", dim.value);
+                                self.dim_input = if let Some(ref expr) = dim.expr_str {
+                                    expr.clone()
+                                } else {
+                                    format!("{:.4}", dim.value)
+                                };
                                 self.dim_kind = Some(dim.kind.clone());
                                 self.dim_offset = dim.offset;
                                 self.dim_edit_index = Some(i);
@@ -813,7 +840,11 @@ impl eframe::App for EditorApp {
                             let (ts, te) = self.dim_text_segment(dim);
                             let d = Self::screen_point_to_segment_dist(mouse_screen, ts, te);
                             if d < 15.0 {
-                                self.dim_input = format!("{:.4}", dim.value);
+                                self.dim_input = if let Some(ref expr) = dim.expr_str {
+                                    expr.clone()
+                                } else {
+                                    format!("{:.4}", dim.value)
+                                };
                                 self.dim_kind = Some(dim.kind.clone());
                                 self.dim_offset = dim.offset;
                                 self.dim_edit_index = Some(i);
@@ -841,7 +872,7 @@ impl eframe::App for EditorApp {
                 let measured = self.measure_dimension(&kind);
                 let is_radius = matches!(kind, DimensionKind::ArcRadius(_));
                 let preview_color = egui::Color32::from_rgba_premultiplied(200, 100, 50, 180);
-                self.draw_dimension(&painter, &kind, measured, self.dim_offset, self.dim_text_along, preview_color, is_radius);
+                self.draw_dimension(&painter, &kind, measured, self.dim_offset, self.dim_text_along, preview_color, is_radius, false);
             }
 
             // Draw overlays ON TOP of canvas: preview line and cursor crosshair

@@ -787,3 +787,144 @@ fn projection_distances(p: arael::vect::vect2d, lb: &Line, la: &Line, lc: &Line)
     };
     (project(la), project(lc))
 }
+
+// -- Expression dimension tests --
+
+#[test]
+fn test_expr_dim_reference() {
+    // L0 length=10 via normal dim, L1 length="d0" via expression dim
+    let mut sketch = Sketch::new();
+    let l0 = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(3.0, 0.0));
+    let _l1 = sketch.add_line(vect2d::new(5.0, 0.0), vect2d::new(8.0, 0.0));
+
+    // Normal dimension on L0
+    sketch.lines[l0].constraints.has_length = true;
+    sketch.lines[l0].constraints.length = 10.0;
+    sketch.dimensions.push(Dimension {
+        kind: DimensionKind::LineLength(l0), value: 10.0,
+        offset: vect2d::new(0.0, 1.0), text_along: 0.0,
+        name: "d0".into(), expr_str: None,
+    });
+    sketch.next_dimension_id = 1;
+
+    // Expression dimension on L1: length = d0
+    let l1_ref = arael::refs::Ref::<Line>::new(1);
+    sketch.add_expr_dimension(
+        DimensionKind::LineLength(l1_ref), "d0",
+        vect2d::new(0.0, 1.0), 0.0,
+    ).unwrap();
+
+    let result = sketch.solve();
+    assert!(result.end_cost < 1.0, "solver failed: cost={}", result.end_cost);
+    let l1 = &sketch.lines[l1_ref];
+    let l1_len = (l1.p2.value - l1.p1.value).norm();
+    assert_near(l1_len, 10.0, 0.1);
+}
+
+#[test]
+fn test_expr_dim_arithmetic() {
+    // L0 length=5, L1 length="d0 * 2 + 3" -> should be 13
+    let mut sketch = Sketch::new();
+    let l0 = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(3.0, 0.0));
+    let _l1 = sketch.add_line(vect2d::new(5.0, 0.0), vect2d::new(8.0, 0.0));
+
+    sketch.lines[l0].constraints.has_length = true;
+    sketch.lines[l0].constraints.length = 5.0;
+    sketch.dimensions.push(Dimension {
+        kind: DimensionKind::LineLength(l0), value: 5.0,
+        offset: vect2d::new(0.0, 1.0), text_along: 0.0,
+        name: "d0".into(), expr_str: None,
+    });
+    sketch.next_dimension_id = 1;
+
+    let l1_ref = arael::refs::Ref::<Line>::new(1);
+    sketch.add_expr_dimension(
+        DimensionKind::LineLength(l1_ref), "d0 * 2 + 3",
+        vect2d::new(0.0, 1.0), 0.0,
+    ).unwrap();
+
+    let result = sketch.solve();
+    assert!(result.end_cost < 1.0, "solver failed: cost={}", result.end_cost);
+    let l1 = &sketch.lines[l1_ref];
+    let l1_len = (l1.p2.value - l1.p1.value).norm();
+    assert_near(l1_len, 13.0, 0.1);
+}
+
+#[test]
+fn test_expr_dim_derived_property() {
+    // L1 length = L0.length (both should end up the same)
+    let mut sketch = Sketch::new();
+    sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(3.0, 4.0)); // L0, length=5
+    sketch.add_line(vect2d::new(5.0, 0.0), vect2d::new(8.0, 0.0)); // L1, length=3
+
+    let l1_ref = arael::refs::Ref::<Line>::new(1);
+    sketch.add_expr_dimension(
+        DimensionKind::LineLength(l1_ref), "L0.length",
+        vect2d::new(0.0, 1.0), 0.0,
+    ).unwrap();
+
+    let result = sketch.solve();
+    assert!(result.end_cost < 1.0, "solver failed: cost={}", result.end_cost);
+
+    let l0 = &sketch.lines[arael::refs::Ref::<Line>::new(0)];
+    let l1 = &sketch.lines[l1_ref];
+    let l0_len = (l0.p2.value - l0.p1.value).norm();
+    let l1_len = (l1.p2.value - l1.p1.value).norm();
+    assert_near(l0_len, l1_len, 0.1);
+}
+
+#[test]
+fn test_expr_constraint_linked_dimensions() {
+    // Two lines. Set L0 length to 10 via normal dimension.
+    // Set L1 length to match d0 via expression constraint.
+    let mut sketch = Sketch::new();
+    let l0 = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(3.0, 0.0));
+    let _l1 = sketch.add_line(vect2d::new(5.0, 0.0), vect2d::new(8.0, 0.0));
+
+    // L0 length dimension = 10
+    sketch.lines[l0].constraints.has_length = true;
+    sketch.lines[l0].constraints.length = 10.0;
+    sketch.dimensions.push(Dimension {
+        kind: DimensionKind::LineLength(l0),
+        value: 10.0,
+        offset: vect2d::new(0.0, 1.0),
+        text_along: 0.0,
+        name: "d0".into(),
+        expr_str: None,
+    });
+
+    // Expression constraint: L1.length - d0 = 0 (L1 length equals d0)
+    let expr = arael_sym::symbol("L1.length") - arael_sym::symbol("d0");
+    sketch.add_expr_constraint(expr, "L1.length = d0".into());
+
+    // Solve
+    let result = sketch.solve();
+    assert!(result.end_cost < 1.0, "solver failed: cost={}", result.end_cost);
+
+    // Check L1 length is ~10
+    let l1 = &sketch.lines[arael::refs::Ref::<Line>::new(1)];
+    let l1_len = (l1.p2.value - l1.p1.value).norm();
+    assert_near(l1_len, 10.0, 0.1);
+}
+
+#[test]
+fn test_bincode_roundtrip() {
+    // Reproduces undo crash: bincode serialize/deserialize of Sketch
+    // with dimensions (including expr_str field).
+    let mut sketch = Sketch::new();
+    let l0 = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(3.0, 4.0));
+    sketch.lines[l0].constraints.has_length = true;
+    sketch.lines[l0].constraints.length = 5.0;
+    sketch.dimensions.push(Dimension {
+        kind: DimensionKind::LineLength(l0), value: 5.0,
+        offset: vect2d::new(0.0, 1.0), text_along: 0.0,
+        name: "d0".into(), expr_str: None,
+    });
+    sketch.next_dimension_id = 1;
+
+    // Serialize and deserialize with bincode (same as History)
+    let bytes = bincode::serialize(&sketch).unwrap();
+    let restored: Sketch = bincode::deserialize(&bytes).unwrap();
+    assert_eq!(restored.dimensions.len(), 1);
+    assert_near(restored.dimensions[0].value, 5.0, 0.001);
+}
