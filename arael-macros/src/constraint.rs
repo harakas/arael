@@ -1642,11 +1642,13 @@ pub fn generate_root_methods(
         stmts
     };
 
-    let (extended_cost_call, extended_compute_call) = if precision == "f64" {
-        (quote! { __cost += arael::model::ExtendedModel::extended_cost64(self, params); },
+    let (extended_update_call, extended_cost_call, extended_compute_call) = if precision == "f64" {
+        (quote! { arael::model::ExtendedModel::extended_update64(self, params); },
+         quote! { __cost += arael::model::ExtendedModel::extended_cost64(self, params); },
          quote! { arael::model::ExtendedModel::extended_compute64(self, params); })
     } else {
-        (quote! { __cost += arael::model::ExtendedModel::extended_cost32(self, params); },
+        (quote! { arael::model::ExtendedModel::extended_update32(self, params); },
+         quote! { __cost += arael::model::ExtendedModel::extended_cost32(self, params); },
          quote! { arael::model::ExtendedModel::extended_compute32(self, params); })
     };
 
@@ -1675,6 +1677,7 @@ pub fn generate_root_methods(
 
             fn __compute_blocks(&mut self, params: &[#prec_type]) {
                 arael::model::Model::#update_method(self, params);
+                #extended_update_call
                 let __self_ref = unsafe { &*(self as *const Self) };
                 self.zero_blocks();
                 #(#grad_hessian_loops)*
@@ -1685,6 +1688,7 @@ pub fn generate_root_methods(
         impl arael::simple_lm::LmProblem<#prec_type> for #root_name {
             fn calc_cost(&mut self, params: &[#prec_type]) -> #prec_type {
                 arael::model::Model::#update_method(self, params);
+                #extended_update_call
                 let __self_ref = unsafe { &*(self as *const Self) };
                 let mut __cost = 0.0 as #prec_type;
                 #(#cost_loops)*

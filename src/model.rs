@@ -173,26 +173,84 @@ pub trait Model {
 // ExtendedModel -- user-defined constraint hook for root structs
 // ---------------------------------------------------------------------------
 
-/// Hook for runtime constraints on `#[arael(root, extended)]` structs.
+/// Extension hooks for custom constraints on `#[arael(root, extended)]` structs.
 ///
-/// The macro-generated `LmProblem` implementation calls these methods
-/// at the appropriate points in the optimization loop. Default
-/// implementations are no-ops.
+/// Use this when you need constraints that can't be expressed via
+/// `#[arael(constraint(...))]` at compile time — for example, constraints
+/// computed at runtime, or constraints that need access to the full root
+/// struct.
 ///
-/// Use `#[arael(root, extended)]` and implement this trait for constraints
-/// that can't be expressed via `#[arael(constraint(...))]` — e.g. runtime
-/// expression constraints. Hessian blocks (TripletBlock etc.) on model
-/// fields are accumulated automatically by the macro — no manual
-/// accumulate methods needed.
+/// To use: mark the root struct with `#[arael(root, extended)]` and
+/// implement this trait. The macro-generated `LmProblem` calls these
+/// methods at the appropriate points in the optimization loop. Default
+/// implementations are no-ops, so you only override what you need.
+///
+/// To write custom gradient and Hessian contributions, add a
+/// [`TripletBlock`] field to the root struct. The macro automatically
+/// zeroes and accumulates it. In `extended_compute`, push residual
+/// contributions into it via [`TripletBlock::add_residual`].
+///
+/// # Execution order
+///
+/// Each solver iteration runs:
+/// 1. `Model::update` — copies params into working values
+/// 2. **`extended_update`** — set up derived state before calculations
+/// 3. `zero_blocks` — zeros all Hessian blocks (including TripletBlocks)
+/// 4. Macro-generated constraint loops — fill SelfBlock/CrossBlock
+/// 5. **`extended_compute`** — fill TripletBlocks with custom residuals
+/// 6. `accumulate_blocks` — reads all blocks into global grad/Hessian
+///
+/// For cost evaluation: `Model::update` → `extended_update` →
+/// macro-generated cost loop → **`extended_cost`**.
+///
+/// # Example
+///
+/// ```ignore
+/// #[arael::model]
+/// #[arael(root, extended)]
+/// pub struct MyModel {
+///     pub things: Arena<Thing>,
+///     // Shared block for custom constraints
+///     #[serde(skip)]
+///     pub custom_hb: TripletBlock<f64>,
+///     // Runtime constraint data (not part of model tree)
+///     #[arael(skip)]
+///     #[serde(skip)]
+///     pub my_constraints: Vec<MyConstraint>,
+/// }
+///
+/// impl ExtendedModel for MyModel {
+///     fn extended_compute64(&mut self, params: &[f64]) {
+///         for c in &self.my_constraints {
+///             let r = /* compute residual */;
+///             let indices = /* param indices */;
+///             let dr = /* derivatives */;
+///             self.custom_hb.add_residual(r, &indices, &dr);
+///         }
+///     }
+///
+///     fn extended_cost64(&self, params: &[f64]) -> f64 {
+///         /* sum of squared residuals for custom constraints */
+///         0.0
+///     }
+/// }
+/// ```
 pub trait ExtendedModel {
-    /// Additional cost (f64). Called after the macro-generated cost loop.
+    /// Called after `update64`, before cost/constraint calculations.
+    /// Use to compute derived state that constraints depend on.
+    fn extended_update64(&mut self, _params: &[f64]) {}
+    /// Called after `update32`, before cost/constraint calculations.
+    fn extended_update32(&mut self, _params: &[f32]) {}
+    /// Additional cost contribution (f64). Called after the
+    /// macro-generated cost loop.
     fn extended_cost64(&self, _params: &[f64]) -> f64 { 0.0 }
-    /// Additional cost (f32).
+    /// Additional cost contribution (f32).
     fn extended_cost32(&self, _params: &[f32]) -> f32 { 0.0 }
-    /// Compute extended constraint residuals (f64). Called after
-    /// `__compute_blocks` — fill TripletBlocks here.
+    /// Compute custom constraint residuals (f64). Called after
+    /// macro-generated constraints and before accumulation. Push
+    /// gradient/Hessian contributions into a [`TripletBlock`] field.
     fn extended_compute64(&mut self, _params: &[f64]) {}
-    /// Compute extended constraint residuals (f32).
+    /// Compute custom constraint residuals (f32).
     fn extended_compute32(&mut self, _params: &[f32]) {}
 }
 
