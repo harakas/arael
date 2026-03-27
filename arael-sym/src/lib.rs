@@ -179,6 +179,63 @@ impl E {
     fn new(expr: Expr) -> E {
         E(Rc::new(expr))
     }
+
+    /// Collect all symbol names referenced in this expression.
+    pub fn symbols(&self) -> std::collections::HashSet<String> {
+        let mut out = std::collections::HashSet::new();
+        self.collect_symbols(&mut out);
+        out
+    }
+
+    fn collect_symbols(&self, out: &mut std::collections::HashSet<String>) {
+        match &*self.0 {
+            Expr::Sym(s) => { out.insert(s.clone()); }
+            Expr::Const(_) => {}
+            Expr::Neg(a) | Expr::Sin(a) | Expr::Cos(a) | Expr::Tan(a)
+            | Expr::Asin(a) | Expr::Acos(a) | Expr::Atan(a)
+            | Expr::Sinh(a) | Expr::Cosh(a) | Expr::Tanh(a)
+            | Expr::Exp(a) | Expr::Ln(a) | Expr::Log2(a) | Expr::Log10(a)
+            | Expr::Sqrt(a) | Expr::Abs(a) => { a.collect_symbols(out); }
+            Expr::Add(a, b) | Expr::Sub(a, b) | Expr::Mul(a, b)
+            | Expr::Div(a, b) | Expr::Pow(a, b) | Expr::Atan2(a, b) => {
+                a.collect_symbols(out);
+                b.collect_symbols(out);
+            }
+        }
+    }
+
+    /// Substitute symbols in this expression. Each pair `(from, to)` replaces
+    /// occurrences of `from` with `to`. Returns a new expression.
+    pub fn substitute(&self, subs: &[(E, E)]) -> E {
+        for (from, to) in subs {
+            if self == from { return to.clone(); }
+        }
+        match &*self.0 {
+            Expr::Sym(_) | Expr::Const(_) => self.clone(),
+            Expr::Neg(a) => -a.substitute(subs),
+            Expr::Add(a, b) => a.substitute(subs) + b.substitute(subs),
+            Expr::Sub(a, b) => a.substitute(subs) - b.substitute(subs),
+            Expr::Mul(a, b) => a.substitute(subs) * b.substitute(subs),
+            Expr::Div(a, b) => a.substitute(subs) / b.substitute(subs),
+            Expr::Pow(a, b) => pow(a.substitute(subs), b.substitute(subs)),
+            Expr::Sin(a) => sin(a.substitute(subs)),
+            Expr::Cos(a) => cos(a.substitute(subs)),
+            Expr::Tan(a) => tan(a.substitute(subs)),
+            Expr::Asin(a) => asin(a.substitute(subs)),
+            Expr::Acos(a) => acos(a.substitute(subs)),
+            Expr::Atan(a) => atan(a.substitute(subs)),
+            Expr::Atan2(a, b) => atan2(a.substitute(subs), b.substitute(subs)),
+            Expr::Sinh(a) => sinh(a.substitute(subs)),
+            Expr::Cosh(a) => cosh(a.substitute(subs)),
+            Expr::Tanh(a) => tanh(a.substitute(subs)),
+            Expr::Exp(a) => exp(a.substitute(subs)),
+            Expr::Ln(a) => ln(a.substitute(subs)),
+            Expr::Log2(a) => log2(a.substitute(subs)),
+            Expr::Log10(a) => ln(a.substitute(subs)) / ln(constant(10.0)),
+            Expr::Sqrt(a) => sqrt(a.substitute(subs)),
+            Expr::Abs(a) => abs(a.substitute(subs)),
+        }
+    }
 }
 
 impl std::ops::Deref for E {

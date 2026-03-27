@@ -92,7 +92,7 @@ impl Lexer {
                 let mut s = String::new();
                 s.push(c);
                 while self.pos < self.chars.len()
-                    && (self.chars[self.pos].is_ascii_alphanumeric() || self.chars[self.pos] == '_')
+                    && (self.chars[self.pos].is_ascii_alphanumeric() || self.chars[self.pos] == '_' || self.chars[self.pos] == '.')
                 {
                     s.push(self.chars[self.pos]);
                     self.pos += 1;

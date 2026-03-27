@@ -817,6 +817,7 @@ pub fn generate_root_methods(
     root_name: &syn::Ident,
     root_fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
     precision: &str,
+    custom: bool,
 ) -> syn::Result<TokenStream2> {
     let stashed = crate::registry_take_constraints();
     let root_var_name = root_name.to_string().to_lowercase();
@@ -1641,7 +1642,15 @@ pub fn generate_root_methods(
         stmts
     };
 
-    Ok(quote! {
+    let (extended_cost_call, extended_compute_call) = if precision == "f64" {
+        (quote! { __cost += arael::model::ExtendedModel::extended_cost64(self, params); },
+         quote! { arael::model::ExtendedModel::extended_compute64(self, params); })
+    } else {
+        (quote! { __cost += arael::model::ExtendedModel::extended_cost32(self, params); },
+         quote! { arael::model::ExtendedModel::extended_compute32(self, params); })
+    };
+
+    let mut tokens = quote! {
         #(#constraint_impls)*
 
         impl #root_name {
@@ -1669,6 +1678,7 @@ pub fn generate_root_methods(
                 let __self_ref = unsafe { &*(self as *const Self) };
                 self.zero_blocks();
                 #(#grad_hessian_loops)*
+                #extended_compute_call
             }
         }
 
@@ -1678,6 +1688,7 @@ pub fn generate_root_methods(
                 let __self_ref = unsafe { &*(self as *const Self) };
                 let mut __cost = 0.0 as #prec_type;
                 #(#cost_loops)*
+                #extended_cost_call
                 __cost
             }
 
@@ -1721,7 +1732,16 @@ pub fn generate_root_methods(
                 #(#advance_stmts)*
             }
         }
-    })
+    };
+
+    // Generate default ExtendedModel impl unless `extended` flag is set
+    if !custom {
+        tokens.extend(quote! {
+            impl arael::model::ExtendedModel for #root_name {}
+        });
+    }
+
+    Ok(tokens)
 }
 
 /// Interpret constraint body and return (residual expressions, param symbols).

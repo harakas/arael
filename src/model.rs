@@ -170,6 +170,34 @@ pub trait Model {
 }
 
 // ---------------------------------------------------------------------------
+// ExtendedModel -- user-defined constraint hook for root structs
+// ---------------------------------------------------------------------------
+
+/// Hook for runtime constraints on `#[arael(root, extended)]` structs.
+///
+/// The macro-generated `LmProblem` implementation calls these methods
+/// at the appropriate points in the optimization loop. Default
+/// implementations are no-ops.
+///
+/// Use `#[arael(root, extended)]` and implement this trait for constraints
+/// that can't be expressed via `#[arael(constraint(...))]` — e.g. runtime
+/// expression constraints. Hessian blocks (TripletBlock etc.) on model
+/// fields are accumulated automatically by the macro — no manual
+/// accumulate methods needed.
+pub trait ExtendedModel {
+    /// Additional cost (f64). Called after the macro-generated cost loop.
+    fn extended_cost64(&self, _params: &[f64]) -> f64 { 0.0 }
+    /// Additional cost (f32).
+    fn extended_cost32(&self, _params: &[f32]) -> f32 { 0.0 }
+    /// Compute extended constraint residuals (f64). Called after
+    /// `__compute_blocks` — fill TripletBlocks here.
+    fn extended_compute64(&mut self, _params: &[f64]) {}
+    /// Compute extended constraint residuals (f32).
+    fn extended_compute32(&mut self, _params: &[f32]) {}
+}
+
+
+// ---------------------------------------------------------------------------
 // Model impl for Param<T>
 // ---------------------------------------------------------------------------
 

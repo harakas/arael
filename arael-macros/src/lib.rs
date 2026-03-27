@@ -830,14 +830,15 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
     }
 
     // Check for #[arael(root)] or #[arael(root, f32)] — trigger generation of all stashed constraints
-    let root_precision = input.attrs.iter().find_map(|attr| {
+    let root_info = input.attrs.iter().find_map(|attr| {
         if !attr.path().is_ident("arael") { return None; }
         let content: TokenStream2 = attr.parse_args().ok()?;
         let tvec: Vec<proc_macro2::TokenTree> = content.into_iter().collect();
         if let Some(proc_macro2::TokenTree::Ident(id)) = tvec.first() {
             if id.to_string() != "root" { return None; }
-            // Parse optional precision keyword after comma: root, f32
+            // Parse optional keywords after comma: root, f32, custom
             let mut precision = "f64".to_string();
+            let mut custom = false;
             let mut pos = 1;
             while pos < tvec.len() {
                 if let proc_macro2::TokenTree::Punct(p) = &tvec[pos] {
@@ -847,19 +848,23 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                             let kw_str = kw.to_string();
                             if kw_str == "f32" || kw_str == "f64" {
                                 precision = kw_str;
+                            } else if kw_str == "extended" {
+                                custom = true;
                             }
                         }
                     }
                 }
                 pos += 1;
             }
-            return Some(precision);
+            return Some((precision, custom));
         }
         None
     });
+    let root_precision = root_info.as_ref().map(|(p, _)| p.clone());
+    let root_custom = root_info.as_ref().map(|(_, c)| *c).unwrap_or(false);
 
     let constraint_impls = if let Some(ref precision) = root_precision {
-        constraint::generate_root_methods(name, fields, precision)?
+        constraint::generate_root_methods(name, fields, precision, root_custom)?
     } else {
         quote! {}
     };
