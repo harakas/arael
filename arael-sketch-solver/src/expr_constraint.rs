@@ -73,22 +73,23 @@ impl ExpressionConstraint {
 /// E.g. if expr contains symbol "L0.length", replace it with
 /// sqrt((L0.p2.x - L0.p1.x)^2 + (L0.p2.y - L0.p1.y)^2).
 pub fn expand_derived(expr: &E, bag: &SymbolBag) -> E {
-    // Collect all symbols, check if any are derived
-    let symbols = expr.symbols();
-    let mut substitutions: Vec<(E, E)> = Vec::new();
-    for sym in &symbols {
-        if let Some(expansion) = bag.derived.get(sym.as_str()) {
-            substitutions.push((arael_sym::symbol(sym), expansion.clone()));
+    let mut result = expr.clone();
+    // Iterate until no more derived/dim symbols remain (max 16 to prevent infinite loops)
+    for _ in 0..16 {
+        let symbols = result.symbols();
+        let mut substitutions: Vec<(E, E)> = Vec::new();
+        for sym in &symbols {
+            if let Some(expansion) = bag.derived.get(sym.as_str()) {
+                substitutions.push((arael_sym::symbol(sym), expansion.clone()));
+            }
+            if let Some(&val) = bag.dim_values.get(sym.as_str()) {
+                substitutions.push((arael_sym::symbol(sym), arael_sym::constant(val)));
+            }
         }
-        // Dimension values become constants
-        if let Some(&val) = bag.dim_values.get(sym.as_str()) {
-            substitutions.push((arael_sym::symbol(sym), arael_sym::constant(val)));
-        }
+        if substitutions.is_empty() { break; }
+        result = result.substitute(&substitutions);
     }
-    if substitutions.is_empty() {
-        return expr.clone();
-    }
-    expr.substitute(&substitutions)
+    result
 }
 
 #[cfg(test)]

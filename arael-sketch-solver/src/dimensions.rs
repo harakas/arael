@@ -132,10 +132,24 @@ impl Dimension {
                 let cross = dx1.clone() * dy2.clone() - dy1.clone() * dx2.clone();
                 let dot = dx1 * dx2 + dy1 * dy2;
                 let angle = arael_sym::atan2(cross, dot);
+                // Determine sign from current geometry
+                let la_line = &sketch.lines[*a];
+                let lb_line = &sketch.lines[*b];
+                let cur_dx1 = la_line.p2.value.x - la_line.p1.value.x;
+                let cur_dy1 = la_line.p2.value.y - la_line.p1.value.y;
+                let cur_dx2 = lb_line.p2.value.x - lb_line.p1.value.x;
+                let cur_dy2 = lb_line.p2.value.y - lb_line.p1.value.y;
+                let cur_cross = cur_dx1 * cur_dy2 - cur_dy1 * cur_dx2;
+                let cur_dot = cur_dx1 * cur_dx2 + cur_dy1 * cur_dy2;
+                let cur_angle = cur_cross.atan2(cur_dot);
+                // Convert to degrees, matching sign of current angle
+                let deg_factor = arael_sym::constant(180.0 / std::f64::consts::PI);
+                let signed_deg = angle * deg_factor;
                 if *supplement {
-                    arael_sym::constant(std::f64::consts::PI) - arael_sym::abs(angle)
+                    let sup_sign = if cur_angle >= 0.0 { 1.0 } else { -1.0 };
+                    arael_sym::constant(sup_sign * 180.0) - signed_deg
                 } else {
-                    arael_sym::abs(angle)
+                    if cur_angle >= 0.0 { signed_deg } else { -signed_deg }
                 }
             }
         }

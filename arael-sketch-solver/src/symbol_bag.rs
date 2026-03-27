@@ -24,19 +24,25 @@ impl SymbolBag {
     /// Must be called after `serialize64()` so parameter indices are assigned.
     pub fn build(sketch: &Sketch) -> Self {
         let mut param_indices = HashMap::new();
+        let mut dim_values = HashMap::new();
         let mut derived = HashMap::new();
 
         // Points: P{n}.pos.x, P{n}.pos.y
         for r in sketch.points.refs() {
             let p = &sketch.points[r];
-            if !p.pos.optimize { continue; }
             let name = &p.name;
-            let idx = p.pos.index();
-            param_indices.insert(format!("{}.pos.x", name), idx);
-            param_indices.insert(format!("{}.pos.y", name), idx + 1);
-            // Shorthand: P0.x, P0.y
-            param_indices.insert(format!("{}.x", name), idx);
-            param_indices.insert(format!("{}.y", name), idx + 1);
+            if p.pos.optimize {
+                let idx = p.pos.index();
+                param_indices.insert(format!("{}.pos.x", name), idx);
+                param_indices.insert(format!("{}.pos.y", name), idx + 1);
+                param_indices.insert(format!("{}.x", name), idx);
+                param_indices.insert(format!("{}.y", name), idx + 1);
+            } else {
+                dim_values.insert(format!("{}.pos.x", name), p.pos.value.x);
+                dim_values.insert(format!("{}.pos.y", name), p.pos.value.y);
+                dim_values.insert(format!("{}.x", name), p.pos.value.x);
+                dim_values.insert(format!("{}.y", name), p.pos.value.y);
+            }
         }
 
         // Lines: L{n}.p1.x, L{n}.p1.y, L{n}.p2.x, L{n}.p2.y
@@ -47,11 +53,17 @@ impl SymbolBag {
                 let idx = l.p1.index();
                 param_indices.insert(format!("{}.p1.x", name), idx);
                 param_indices.insert(format!("{}.p1.y", name), idx + 1);
+            } else {
+                dim_values.insert(format!("{}.p1.x", name), l.p1.value.x);
+                dim_values.insert(format!("{}.p1.y", name), l.p1.value.y);
             }
             if l.p2.optimize {
                 let idx = l.p2.index();
                 param_indices.insert(format!("{}.p2.x", name), idx);
                 param_indices.insert(format!("{}.p2.y", name), idx + 1);
+            } else {
+                dim_values.insert(format!("{}.p2.x", name), l.p2.value.x);
+                dim_values.insert(format!("{}.p2.y", name), l.p2.value.y);
             }
             // Derived: L{n}.length, L{n}.angle
             let p1x = arael_sym::symbol(&format!("{}.p1.x", name));
@@ -74,25 +86,42 @@ impl SymbolBag {
                 let idx = a.center.index();
                 param_indices.insert(format!("{}.center.x", name), idx);
                 param_indices.insert(format!("{}.center.y", name), idx + 1);
+            } else {
+                dim_values.insert(format!("{}.center.x", name), a.center.value.x);
+                dim_values.insert(format!("{}.center.y", name), a.center.value.y);
             }
             if a.radius.optimize {
                 param_indices.insert(format!("{}.radius", name), a.radius.index());
+            } else {
+                dim_values.insert(format!("{}.radius", name), a.radius.value);
             }
             if a.start_angle.optimize {
                 param_indices.insert(format!("{}.start_angle", name), a.start_angle.index());
+            } else {
+                dim_values.insert(format!("{}.start_angle", name), a.start_angle.value);
             }
             if a.end_angle.optimize {
                 param_indices.insert(format!("{}.end_angle", name), a.end_angle.index());
+            } else {
+                dim_values.insert(format!("{}.end_angle", name), a.end_angle.value);
             }
             // Derived
             let r_sym = arael_sym::symbol(&format!("{}.radius", name));
             derived.insert(format!("{}.diameter", name), r_sym * arael_sym::constant(2.0));
         }
 
-        // Dimensions: d{n} -> target value
-        let mut dim_values = HashMap::new();
+        // Dimensions: d{n} -> target value or live expression
         for dim in &sketch.dimensions {
-            dim_values.insert(dim.name.clone(), dim.value);
+            if let Some(ref expr_str) = dim.expr_str {
+                // Expression dimension: resolve to live symbolic expression
+                if let Ok(parsed) = arael_sym::parse(expr_str) {
+                    derived.insert(dim.name.clone(), parsed);
+                } else {
+                    dim_values.insert(dim.name.clone(), dim.value);
+                }
+            } else {
+                dim_values.insert(dim.name.clone(), dim.value);
+            }
         }
 
         SymbolBag { param_indices, dim_values, derived }

@@ -721,6 +721,24 @@ impl Sketch {
         self.expr_constraints.push(ExpressionConstraint::new_unresolved(expr, description));
     }
 
+    /// Rebuild expr_constraints from dimensions that have expr_str.
+    /// Called at the start of every solve() since the set of optimizable
+    /// params can change between solves (lock/unlock).
+    fn rebuild_expr_constraints(&mut self) {
+        self.expr_constraints.clear();
+        for i in 0..self.dimensions.len() {
+            if let Some(ref expr_str) = self.dimensions[i].expr_str {
+                if let Ok(parsed) = arael_sym::parse(expr_str) {
+                    let measured = self.dimensions[i].measured_symbol(self);
+                    let residual = measured - parsed;
+                    let desc = format!("{} = {}", self.dimensions[i].name, expr_str);
+                    self.expr_constraints.push(
+                        ExpressionConstraint::new_unresolved(residual, desc));
+                }
+            }
+        }
+    }
+
     /// Add an expression-based dimension. The expression string is parsed
     /// and the constraint is: `measured_property - parsed_expr = 0`.
     /// Returns Err if the expression fails to parse.
@@ -751,6 +769,10 @@ impl Sketch {
     /// constraint/drift sigma ratio.
     pub fn solve(&mut self) -> arael::simple_lm::LmResult<f64> {
         use arael::simple_lm::LmProblem;
+        // Rebuild expression constraints from dimensions with expr_str
+        // (needed after load/undo since expr_constraints is not serialized)
+        self.rebuild_expr_constraints();
+
         let mut params64: std::vec::Vec<f64> = std::vec::Vec::new();
         self.serialize64(&mut params64);
         let n = params64.len();
