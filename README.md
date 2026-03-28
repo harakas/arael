@@ -19,6 +19,7 @@ A Rust framework for nonlinear optimization with compile-time symbolic different
 - **f32 and f64 precision** -- `#[arael(root)]` for f64, `#[arael(root, f32)]` for f32 throughout
 - **Model trait** -- hierarchical serialize/deserialize/update protocol for parameter optimization
 - **Type-safe references** -- `Ref<T>`, `Vec<T>`, `Deque<T>`, `Arena<T>` for indexed collections with stable references
+- **Runtime differentiation** -- parse equations from strings at runtime, auto-differentiate symbolically, and optimize via `ExtendedModel` + `TripletBlock` (used by the sketch editor for parametric expression dimensions)
 - **Hessian blocks** -- `SelfBlock<A>` and `CrossBlock<A, B>` for 1- and 2-entity constraints (packed dense); `TripletBlock` for 3+ entities (COO sparse)
 - **Gimbal-lock-free rotations** -- `EulerAngleParam` optimizes a small delta around a reference rotation matrix
 - **WASM/browser support** -- the sketch editor compiles to WebAssembly and runs in the browser via eframe/egui
@@ -107,6 +108,41 @@ The robust fit ignores outliers while tracking the inlier data:
 ![Linear Regression](docs/linear_regression.png)
 
 See [docs/LINEAR.md](docs/LINEAR.md) for the full walkthrough. Full source: [examples/linear_demo.rs](examples/linear_demo.rs).
+
+## Runtime Differentiation
+
+Compile-time differentiation generates optimized Rust code with CSE at build time -- ideal when the model structure is fixed. But many applications need equations that are only known at runtime: user-typed formulas in a CAD parametric dimension, configuration-driven curve fitting, or symbolic constraints loaded from a file.
+
+Arael supports this through **runtime differentiation**: parse an equation string with `arael_sym::parse`, symbolically differentiate once at setup with `E::diff`, then evaluate the expression tree numerically each solver iteration. The `ExtendedModel` trait and `TripletBlock` provide the integration point with the LM solver.
+
+The sketch editor (`arael-sketch`) uses this extensively for parametric expression dimensions -- a user can type `d0 * 2 + 3` as a dimension value, and the solver constrains the geometry to satisfy the equation in real time, with full symbolic derivatives.
+
+```rust
+// Parse equation at runtime, differentiate symbolically
+let expr = arael_sym::parse("a * x + b").unwrap();
+let residual = expr - arael_sym::symbol("y");
+let dr_da = residual.diff("a");  // symbolic derivative w.r.t. a
+let dr_db = residual.diff("b");  // symbolic derivative w.r.t. b
+
+// In ExtendedModel::extended_compute64 -- each solver iteration:
+for &(x, y) in &data {
+    vars.insert("x", x);
+    vars.insert("y", y);
+    let r = residual.eval(&vars)?;
+    let dr = vec![dr_da.eval(&vars)?, dr_db.eval(&vars)?];
+    hb.add_residual(r, &param_indices, &dr);
+}
+```
+
+The demo accepts an arbitrary equation from the command line:
+
+```bash
+cargo run --example runtime_fit_demo                            # default: y = a * x + b
+cargo run --example runtime_fit_demo -- "a * x^2 + b * x + c"  # quadratic
+cargo run --example runtime_fit_demo -- "a * sin(x * b) + c"   # sinusoidal
+```
+
+Full source: [examples/runtime_fit_demo.rs](examples/runtime_fit_demo.rs).
 
 ## SLAM Path Optimization
 
@@ -216,6 +252,13 @@ An interactive constraint-based 2D sketch editor built on the arael optimization
 
 [Try it in the browser](https://sketch.mare.ee/)
 
+The sketch solver combines both differentiation modes:
+
+- **Geometric constraints** (horizontal, coincident, parallel, tangent, etc.) use **compile-time differentiation** -- the macro generates optimized Gauss-Newton code with CSE for each constraint type.
+- **Parametric dimensions** use **runtime differentiation** -- the user types an expression like `d0 * 2 + 3` as a dimension value, and the solver parses it, differentiates symbolically, and constrains the geometry to satisfy the equation in real time. Dimensions can reference each other, entity properties (`L0.length`, `A0.radius`), and arithmetic expressions. Broken references (deleted entities) are detected and the dimension falls back to its last computed value.
+
+This makes the sketch editor a fully parametric constraint solver where changing one dimension propagates through all dependent expressions.
+
 ### Running (native)
 
 ```bash
@@ -238,13 +281,13 @@ python3 -m http.server -d dist 8080
 ### Tools
 
 - **Line (L)**, **Circle (O)**, **Arc (A)**, **Point (P)** -- draw geometry with auto-snap to nearby points, endpoints, and curves
-- **Dimension (D)** -- add length, distance, and radius dimensions with draggable annotations
+- **Dimension (D)** -- add length, distance, radius, angle, and point-to-line distance dimensions with draggable annotations. Supports numeric values and parametric expressions (`d0 * 2`, `L0.length + 3`).
 - **Select (S)** -- click to select, drag to move entities, Backspace/Delete to remove
 - **Dark/Light mode** toggle, **Save/Load** (JSON), **Undo/Redo** (Ctrl+Z/Ctrl+Shift+Z)
 
 ### Constraints
 
-Horizontal (H), Vertical (V), Coincident (C), Parallel, Perpendicular, Equal length/radius, Tangent (T), Lock (K), Line style (X). Constraints are visualized as symbols on the geometry and can be selected and deleted.
+Horizontal (H), Vertical (V), Coincident (C), Parallel, Perpendicular, Equal length/radius, Tangent (T), Collinear, Midpoint (M), Symmetry, Lock (K), Line style (X). Constraints are visualized as symbols on the geometry and can be selected and deleted.
 
 ### Example: Sketch Solver API
 
@@ -285,7 +328,7 @@ sketch.solve();
 // bottom: (0,0)->(4,0), right: (4,0)->(4,2), top: (4,2)->(0,2), left: (0,2)->(0,0)
 ```
 
-The sketch solver uses Levenberg-Marquardt optimization with drift regularization and robust drag constraints. All constraints are symbolically differentiated at compile time.
+The sketch solver uses Levenberg-Marquardt optimization with drift regularization and robust drag constraints. Geometric constraints are differentiated at compile time; parametric expression dimensions use runtime differentiation via `ExtendedModel`.
 
 See [arael-sketch/](arael-sketch/) for the full implementation.
 

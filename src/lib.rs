@@ -30,6 +30,9 @@
 //!   `#[arael(root, f32)]` for f32 throughout
 //! - **Model trait** -- hierarchical serialize/deserialize/update protocol
 //! - **Type-safe references** -- `Ref<T>`, `Vec<T>`, `Deque<T>`, `Arena<T>`
+//! - **Runtime differentiation** -- parse equations from strings at runtime,
+//!   auto-differentiate symbolically, and optimize via `ExtendedModel` +
+//!   `TripletBlock` (see `examples/runtime_fit_demo.rs`)
 //! - **Hessian blocks** -- `SelfBlock<A>` and `CrossBlock<A, B>` for 1- and
 //!   2-entity constraints (packed dense); `TripletBlock` for 3+ entities (COO sparse)
 //! - **Gimbal-lock-free rotations** -- `EulerAngleParam` optimizes a small
@@ -118,11 +121,71 @@
 //!
 //! See [examples/linear_demo.rs](https://github.com/harakas/arael/blob/master/examples/linear_demo.rs) for the full source.
 //!
+//! # Runtime Differentiation
+//!
+//! Compile-time differentiation generates optimized Rust code with CSE at
+//! build time -- ideal when the model structure is fixed. But many
+//! applications need equations that are only known at runtime: user-typed
+//! formulas in a CAD parametric dimension, configuration-driven curve
+//! fitting, or symbolic constraints loaded from a file.
+//!
+//! Arael supports this through **runtime differentiation**: parse an
+//! equation string with [`arael_sym::parse`], symbolically differentiate
+//! once at setup with [`E::diff`], then evaluate the expression tree
+//! numerically each solver iteration. The [`ExtendedModel`] trait and
+//! [`TripletBlock`] provide the integration point with the LM solver.
+//!
+//! The sketch editor (`arael-sketch`) uses this extensively for parametric
+//! expression dimensions -- a user can type `d0 * 2 + 3` as a dimension
+//! value, and the solver constrains the geometry to satisfy the equation
+//! in real time, with full symbolic derivatives.
+//!
+//! The model uses `#[arael(root, extended)]` and implements
+//! [`ExtendedModel`] to push residuals and derivatives into a
+//! [`TripletBlock`] at each solver iteration:
+//!
+//! ```ignore
+//! #[arael::model]
+//! #[arael(root, extended)]
+//! struct RegressionModel {
+//!     coeffs: refs::Vec<Coefficient>,         // optimizable parameters
+//!     hb: TripletBlock<f64>,                  // Gauss-Newton accumulator
+//!     residual_expr: Option<arael_sym::E>,    // parsed equation
+//!     derivs: Vec<(String, u32, arael_sym::E)>, // pre-computed derivatives
+//!     // ...
+//! }
+//!
+//! impl ExtendedModel for RegressionModel {
+//!     fn extended_compute64(&mut self, params: &[f64]) {
+//!         for &(x, y) in &self.data {
+//!             vars.insert("x", x);
+//!             vars.insert("y", y);
+//!             let r = residual.eval(&vars).unwrap();
+//!             let dr: Vec<f64> = self.derivs.iter()
+//!                 .map(|(_, _, d)| d.eval(&vars).unwrap()).collect();
+//!             self.hb.add_residual(r, &indices, &dr);
+//!         }
+//!     }
+//! }
+//! ```
+//!
+//! See
+//! [examples/runtime_fit_demo.rs](https://github.com/harakas/arael/blob/master/examples/runtime_fit_demo.rs)
+//! for a complete example that accepts an arbitrary equation from the
+//! command line and fits it to data with robust error suppression.
+//!
 //! # 2D Sketch Editor
 //!
 //! The `arael-sketch` crate provides an interactive constraint-based 2D sketch
-//! editor built on the optimization framework. Runs natively and in the browser
-//! via WebAssembly.
+//! editor built on the optimization framework. It combines both differentiation
+//! modes: geometric constraints (horizontal, coincident, parallel, tangent, etc.)
+//! use compile-time differentiation, while parametric dimensions use runtime
+//! differentiation -- the user types an expression like `d0 * 2 + 3` and the
+//! solver constrains the geometry to satisfy it in real time, with full symbolic
+//! derivatives. Dimensions can reference each other, entity properties
+//! (`L0.length`, `A0.radius`), and arithmetic expressions, making it a fully
+//! parametric constraint solver. Runs natively and in the browser via
+//! WebAssembly.
 //!
 //! [![Sketch Editor](https://raw.githubusercontent.com/harakas/arael/refs/heads/master/docs/sketch.png)](https://sketch.mare.ee/)
 //!

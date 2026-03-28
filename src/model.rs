@@ -177,8 +177,16 @@ pub trait Model {
 ///
 /// Use this when you need constraints that can't be expressed via
 /// `#[arael(constraint(...))]` at compile time — for example, constraints
-/// computed at runtime, or constraints that need access to the full root
-/// struct.
+/// parsed from user input at runtime, or constraints that need access to
+/// the full root struct.
+///
+/// A key use case is **runtime differentiation**: parse an equation string
+/// with [`arael_sym::parse`], symbolically differentiate with
+/// [`E::diff`], then evaluate numerically each solver iteration. This
+/// powers the parametric expression dimensions in `arael-sketch` (where
+/// the user types `d0 * 2 + 3` as a dimension value) and the
+/// `runtime_fit_demo` example (which accepts an arbitrary curve-fitting
+/// equation from the command line).
 ///
 /// To use: mark the root struct with `#[arael(root, extended)]` and
 /// implement this trait. The macro-generated `LmProblem` calls these
@@ -205,36 +213,58 @@ pub trait Model {
 ///
 /// # Example
 ///
+/// Robust curve fitting where the equation is parsed at runtime. The
+/// residual and its derivatives are symbolic expressions evaluated
+/// numerically each iteration (see `examples/runtime_fit_demo.rs`):
+///
 /// ```ignore
 /// #[arael::model]
 /// #[arael(root, extended)]
-/// pub struct MyModel {
-///     pub things: Arena<Thing>,
-///     // Shared block for custom constraints
-///     #[serde(skip)]
-///     pub custom_hb: TripletBlock<f64>,
-///     // Runtime constraint data (not part of model tree)
-///     #[arael(skip)]
-///     #[serde(skip)]
-///     pub my_constraints: Vec<MyConstraint>,
+/// struct RegressionModel {
+///     coeffs: refs::Vec<Coefficient>,         // optimizable parameters
+///     hb: TripletBlock<f64>,                  // Gauss-Newton accumulator
+///     residual_expr: Option<arael_sym::E>,    // parsed equation
+///     derivs: Vec<(String, u32, arael_sym::E)>, // (name, param_index, d_residual/d_param)
+///     data: Vec<(f64, f64)>,
+///     param_names: Vec<String>,
 /// }
 ///
-/// impl ExtendedModel for MyModel {
+/// // Setup: parse equation, differentiate symbolically (once)
+/// let expr = arael_sym::parse("a * x + b").unwrap();
+/// let residual = (expr - arael_sym::symbol("y")) / arael_sym::constant(sigma);
+/// let dr_da = residual.diff("a");
+/// let dr_db = residual.diff("b");
+///
+/// impl ExtendedModel for RegressionModel {
 ///     fn extended_compute64(&mut self, params: &[f64]) {
-///         for c in &self.my_constraints {
-///             let r = /* compute residual */;
-///             let indices = /* param indices */;
-///             let dr = /* derivatives */;
-///             self.custom_hb.add_residual(r, &indices, &dr);
+///         // Evaluate symbolically-differentiated expressions numerically
+///         for &(x, y) in &self.data {
+///             vars.insert("x", x);
+///             vars.insert("y", y);
+///             let r = self.residual_expr.eval(&vars).unwrap();
+///             let dr: Vec<f64> = self.derivs.iter()
+///                 .map(|(_, _, d)| d.eval(&vars).unwrap()).collect();
+///             let indices: Vec<u32> = self.derivs.iter()
+///                 .map(|(_, idx, _)| *idx).collect();
+///             self.hb.add_residual(r, &indices, &dr);
 ///         }
 ///     }
 ///
 ///     fn extended_cost64(&self, params: &[f64]) -> f64 {
-///         /* sum of squared residuals for custom constraints */
-///         0.0
+///         // Sum of squared residuals
+///         self.data.iter().filter_map(|&(x, y)| {
+///             vars.insert("x", x);
+///             vars.insert("y", y);
+///             let r = self.residual_expr.eval(&vars).ok()?;
+///             Some(r * r)
+///         }).sum()
 ///     }
 /// }
 /// ```
+///
+/// See `examples/runtime_fit_demo.rs` for the complete working example,
+/// and `arael-sketch-solver` for a production use of this pattern with
+/// parametric expression dimensions.
 pub trait ExtendedModel {
     /// Called after `update64`, before cost/constraint calculations.
     /// Use to compute derived state that constraints depend on.
