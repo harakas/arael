@@ -77,7 +77,7 @@ pub enum Action {
     ToggleStyleLine { line: Ref<Line> },
     ToggleStyleArc { arc: Ref<Arc> },
     DeleteArc { arc: Ref<Arc> },
-    AddDimension { kind: DimensionKind, value: f64 },
+    AddDimension { kind: DimensionKind, value: f64, expr: Option<String> },
     UpdateDimension { index: usize, value: f64, expr: Option<String> },
     RemoveDimension { index: usize },
     // Drag is non-deterministic; store full state after drag completes
@@ -419,10 +419,17 @@ impl Action {
                 sketch.delete_arc(*arc);
                 sketch.solve();
             }
-            Action::AddDimension { kind, value } => {
+            Action::AddDimension { kind, value, expr } => {
+                // Expression dimension: delegate to add_expr_dimension
+                if let Some(expr_str) = expr {
+                    let _ = sketch.add_expr_dimension(*kind, expr_str,
+                        vect2d::new(0.0, 1.0), 0.0);
+                    sketch.solve();
+                    return;
+                }
                 let name = format!("d{}", sketch.next_dimension_id);
                 sketch.next_dimension_id += 1;
-                // Apply the constraint
+                // Apply the numeric constraint
                 match kind {
                     DimensionKind::LineLength(line) => {
                         sketch.lines[*line].constraints.has_length = true;
@@ -516,6 +523,7 @@ impl Action {
                     text_along: 0.0,
                     name,
                     expr_str: None,
+                    broken: false,
                 });
                 sketch.solve();
             }

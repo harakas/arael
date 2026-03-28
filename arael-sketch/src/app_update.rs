@@ -120,6 +120,7 @@ impl eframe::App for EditorApp {
                     let is_numeric = input.parse::<f64>().is_ok();
                     let is_expr = !is_numeric && arael_sym::parse(&input).is_ok();
 
+                    let mut success = false;
                     if is_numeric || is_expr {
                         self.begin_group();
                         if let Some(edit_idx) = self.dim_edit_index.take() {
@@ -127,43 +128,60 @@ impl eframe::App for EditorApp {
                             if is_numeric {
                                 let value = input.parse::<f64>().unwrap();
                                 self.exec(Action::UpdateDimension { index: edit_idx, value, expr: None });
+                                success = true;
+                            } else if let Err(e) = self.sketch.validate_expr(&input) {
+                                self.status_error = Some(format!("Expression error: {}", e));
+                                self.dim_edit_index = Some(edit_idx); // restore
                             } else {
                                 self.exec(Action::UpdateDimension {
                                     index: edit_idx, value: 0.0,
                                     expr: Some(input.clone()),
                                 });
+                                success = true;
                             }
-                        } else if let Some(kind) = self.dim_kind.take() {
+                        } else if let Some(kind) = self.dim_kind.clone() {
                             let is_dup = self.sketch.dimensions.iter().any(|d| d.kind == kind);
                             if is_dup {
                                 self.status_error = Some("Dimension already exists".into());
                             } else if is_numeric {
                                 let value = input.parse::<f64>().unwrap();
                                 let n_dims_before = self.sketch.dimensions.len();
-                                self.exec(Action::AddDimension { kind, value });
+                                self.exec(Action::AddDimension { kind, value, expr: None });
                                 if self.sketch.dimensions.len() > n_dims_before {
                                     if let Some(d) = self.sketch.dimensions.last_mut() {
                                         d.offset = self.dim_offset;
                                         d.text_along = self.dim_text_along;
                                     }
                                 }
+                                success = true;
                             } else {
-                                if let Err(e) = self.sketch.add_expr_dimension(
-                                    kind, &input, self.dim_offset, self.dim_text_along) {
+                                if let Err(e) = self.sketch.validate_expr(&input) {
                                     self.status_error = Some(format!("Expression error: {}", e));
                                 } else {
-                                    self.sketch.solve();
-                                    self.last_cost = 0.0; // will be updated
+                                    let n_dims_before = self.sketch.dimensions.len();
+                                    self.exec(Action::AddDimension {
+                                        kind, value: 0.0, expr: Some(input.clone()),
+                                    });
+                                    if self.sketch.dimensions.len() > n_dims_before {
+                                        if let Some(d) = self.sketch.dimensions.last_mut() {
+                                            d.offset = self.dim_offset;
+                                            d.text_along = self.dim_text_along;
+                                        }
+                                    }
+                                    success = true;
                                 }
                             }
                         }
                     } else if !input.is_empty() {
                         self.status_error = Some(format!("Invalid value or expression: {}", input));
                     }
-                    self.dim_editing = false;
-                    self.dim_placing = false;
-                    self.dim_edit_index = None;
-                    self.selection.clear();
+                    if success {
+                        self.dim_editing = false;
+                        self.dim_placing = false;
+                        self.dim_edit_index = None;
+                        self.dim_kind = None;
+                        self.selection.clear();
+                    }
                 } else if !response.has_focus() && self.dim_editing {
                     response.request_focus();
                 }

@@ -169,17 +169,18 @@ impl EditorApp {
         sketch.coincident_lp1_arc_center.push(CoincidentLP1ArcCenter { line: l0, arc: a0, hb: CrossBlock::new() });
 
         // Dimensions (via Action, then adjust offsets for nice layout)
-        Action::AddDimension { kind: DimensionKind::LineLength(l1), value: 3.0 }.apply(&mut sketch);
+        Action::AddDimension { kind: DimensionKind::LineLength(l1), value: 3.0, expr: None }.apply(&mut sketch);
         sketch.dimensions.last_mut().unwrap().offset = vect2d::new(0.0, -0.32);
         sketch.dimensions.last_mut().unwrap().text_along = -0.27;
 
         Action::AddDimension {
             kind: DimensionKind::PointLineDistance(DimensionEndpoint::LineP1(l0), l1), value: 5.0,
+            expr: None,
         }.apply(&mut sketch);
         sketch.dimensions.last_mut().unwrap().offset = vect2d::new(0.0, 1.72);
         sketch.dimensions.last_mut().unwrap().text_along = 0.20;
 
-        Action::AddDimension { kind: DimensionKind::ArcRadius(a0), value: 1.5 }.apply(&mut sketch);
+        Action::AddDimension { kind: DimensionKind::ArcRadius(a0), value: 1.5, expr: None }.apply(&mut sketch);
         sketch.dimensions.last_mut().unwrap().offset = vect2d::new(0.91, 0.0);
 
         let result = sketch.solve();
