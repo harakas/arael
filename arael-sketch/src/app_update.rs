@@ -573,9 +573,9 @@ impl eframe::App for EditorApp {
                 });
             }
 
-            // Zoom (scroll wheel)
+            // Zoom (scroll wheel, only when mouse is over the canvas)
             let scroll = ui.input(|i| i.raw_scroll_delta.y);
-            if scroll != 0.0 {
+            if scroll != 0.0 && response.hovered() {
                 let zoom_factor = if scroll > 0.0 { 1.1 } else { 1.0 / 1.1 };
                 if let Some(mouse) = ui.input(|i| i.pointer.hover_pos()) {
                     // Zoom toward mouse position
