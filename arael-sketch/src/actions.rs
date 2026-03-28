@@ -80,6 +80,9 @@ pub enum Action {
     AddDimension { kind: DimensionKind, value: f64, expr: Option<String> },
     UpdateDimension { index: usize, value: f64, expr: Option<String> },
     RemoveDimension { index: usize },
+    AddUserParam { name: String, expr_str: String },
+    UpdateUserParam { index: usize, name: String, expr_str: String },
+    RemoveUserParam { index: usize },
     // Drag is non-deterministic; store full state after drag completes
     Drag { snapshot: Vec<u8> },
 }
@@ -747,6 +750,55 @@ impl Action {
                     }
                     sketch.cleanup_helper_points();
                     sketch.solve();
+                }
+            }
+            Action::AddUserParam { name, expr_str } => {
+                let value = expr_str.trim().parse::<f64>().unwrap_or(0.0);
+                sketch.user_params.push(UserParam {
+                    name: name.clone(), expr_str: expr_str.clone(),
+                    value, broken: false,
+                });
+                sketch.solve();
+                sketch.update_expr_dim_values();
+            }
+            Action::UpdateUserParam { index, name, expr_str } => {
+                if *index < sketch.user_params.len() {
+                    let old_name = sketch.user_params[*index].name.clone();
+                    sketch.user_params[*index].name = name.clone();
+                    sketch.user_params[*index].expr_str = expr_str.clone();
+                    if let Ok(v) = expr_str.trim().parse::<f64>() {
+                        sketch.user_params[*index].value = v;
+                    }
+                    // Propagate name change to expressions that reference the old name
+                    if old_name != *name {
+                        for p in &mut sketch.user_params {
+                            if let Ok(parsed) = arael_sym::parse(&p.expr_str) {
+                                if parsed.symbols().contains(&old_name) {
+                                    let replaced = parsed.subs(&old_name, &arael_sym::symbol(name));
+                                    p.expr_str = format!("{}", replaced);
+                                }
+                            }
+                        }
+                        for d in &mut sketch.dimensions {
+                            if let Some(ref es) = d.expr_str {
+                                if let Ok(parsed) = arael_sym::parse(es) {
+                                    if parsed.symbols().contains(&old_name) {
+                                        let replaced = parsed.subs(&old_name, &arael_sym::symbol(name));
+                                        d.expr_str = Some(format!("{}", replaced));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    sketch.solve();
+                    sketch.update_expr_dim_values();
+                }
+            }
+            Action::RemoveUserParam { index } => {
+                if *index < sketch.user_params.len() {
+                    sketch.user_params.remove(*index);
+                    sketch.solve();
+                    sketch.update_expr_dim_values();
                 }
             }
             Action::Drag { snapshot } => {

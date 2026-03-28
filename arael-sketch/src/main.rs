@@ -129,6 +129,16 @@ pub struct EditorApp {
     pub dark_mode: bool,
     pub colors: ColorScheme,
 
+    // Parameters panel
+    pub show_params: bool,
+    pub param_new_name: String,
+    pub param_new_expr: String,
+    pub param_edit_index: Option<usize>,
+    pub param_edit_name: String,
+    pub param_edit_expr: String,
+    pub param_focus_new: bool,
+    pub param_focus_field: Option<bool>, // None=no focus request, Some(false)=name, Some(true)=expr
+
     // Constraint conflict error message
     pub status_error: Option<String>,
     pub last_cost: f64,
@@ -168,8 +178,13 @@ impl EditorApp {
         // Arc center = L0.p1 (apex)
         sketch.coincident_lp1_arc_center.push(CoincidentLP1ArcCenter { line: l0, arc: a0, hb: CrossBlock::new() });
 
+        // User parameter for the base length
+        sketch.user_params.push(UserParam {
+            name: "base_length".into(), expr_str: "3".into(), value: 3.0, broken: false,
+        });
+
         // Dimensions (via Action, then adjust offsets for nice layout)
-        Action::AddDimension { kind: DimensionKind::LineLength(l1), value: 3.0, expr: None }.apply(&mut sketch);
+        Action::AddDimension { kind: DimensionKind::LineLength(l1), value: 0.0, expr: Some("base_length".into()) }.apply(&mut sketch);
         sketch.dimensions.last_mut().unwrap().offset = vect2d::new(0.0, -0.32);
         sketch.dimensions.last_mut().unwrap().text_along = -0.27;
 
@@ -212,6 +227,14 @@ impl EditorApp {
             dim_edit_index: None,
             dim_select_all: false,
             show_constraints: true,
+            show_params: false,
+            param_new_name: String::new(),
+            param_new_expr: String::new(),
+            param_edit_index: None,
+            param_edit_name: String::new(),
+            param_edit_expr: String::new(),
+            param_focus_new: false,
+            param_focus_field: None,
             dark_mode: cfg!(target_arch = "wasm32"),
             colors: if cfg!(target_arch = "wasm32") { ColorScheme::dark() } else { ColorScheme::light() },
             status_error: None,

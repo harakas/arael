@@ -84,6 +84,40 @@ pub struct Dimension {
     pub broken: bool,
 }
 
+// ---------------------------------------------------------------------------
+// User-defined parameters
+// ---------------------------------------------------------------------------
+
+/// A named parameter defined by the user, usable in dimension expressions.
+/// The value can be a numeric literal or an expression referencing other
+/// parameters, dimensions, and entity properties.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct UserParam {
+    pub name: String,
+    pub expr_str: String,
+    pub value: f64,
+    #[serde(default)]
+    pub broken: bool,
+}
+
+/// Check whether a name matches a system naming pattern (d0, L0, P0, A0, etc.)
+/// that could conflict with auto-generated entity/dimension names.
+pub fn is_system_name(name: &str) -> bool {
+    if name.is_empty() { return false; }
+    let bytes = name.as_bytes();
+    // Single-letter prefix + digits: d0, L5, P0, A3, etc.
+    let prefix = bytes[0];
+    if matches!(prefix, b'd' | b'L' | b'P' | b'A') && bytes.len() > 1 {
+        let rest = &name[1..];
+        // Could be "L0" or "L0.p1.x" -- check if first part after prefix is digits
+        let num_part = rest.split('.').next().unwrap_or("");
+        if !num_part.is_empty() && num_part.bytes().all(|b| b.is_ascii_digit()) {
+            return true;
+        }
+    }
+    false
+}
+
 impl Dimension {
     /// Build a symbolic expression for the measured property of this
     /// dimension kind, using entity names from the sketch.

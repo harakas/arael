@@ -38,6 +38,10 @@ impl eframe::App for EditorApp {
                 if ui.button(constr_label).clicked() {
                     self.show_constraints = !self.show_constraints;
                 }
+                let params_label = if self.show_params { "Hide Params" } else { "Params" };
+                if ui.button(params_label).clicked() {
+                    self.show_params = !self.show_params;
+                }
             });
             ui.separator();
 
@@ -276,7 +280,174 @@ impl eframe::App for EditorApp {
                 ui.separator();
                 ui.colored_label(egui::Color32::from_rgb(255, 80, 80), err.as_str());
             }
+
         });
+
+        // Parameters panel (top, toggled)
+        if self.show_params {
+            egui::TopBottomPanel::top("parameters").show(ctx, |ui| {
+                use egui_extras::{TableBuilder, Column};
+                ui.horizontal(|ui| {
+                    ui.heading("Parameters");
+                });
+                let broken_color = egui::Color32::from_rgb(255, 30, 30);
+                let normal_color = ui.visuals().text_color();
+                let row_height = 20.0;
+                let mut remove_idx = None;
+                let mut update_action = None;
+                let mut start_edit: Option<(usize, bool)> = None; // (row, focus_expr)
+                let mut add_new = false;
+
+                TableBuilder::new(ui)
+                    .striped(true)
+                    .resizable(true)
+                    .cell_layout(egui::Layout::left_to_right(egui::Align::Center))
+                    .column(Column::initial(80.0).at_least(40.0).resizable(true))
+                    .column(Column::initial(140.0).at_least(60.0).resizable(true).clip(true))
+                    .column(Column::initial(80.0).at_least(40.0).resizable(true))
+                    .column(Column::auto())
+                    .header(row_height, |mut header| {
+                        header.col(|ui| { ui.strong("Name"); });
+                        header.col(|ui| { ui.strong("Expression"); });
+                        header.col(|ui| { ui.strong("Value"); });
+                        header.col(|_ui| {});
+                    })
+                    .body(|mut body| {
+                        // Existing params
+                        for i in 0..self.sketch.user_params.len() {
+                            body.row(row_height, |mut row| {
+                                let p = &self.sketch.user_params[i];
+                                let color = if p.broken { broken_color } else { normal_color };
+                                let editing = self.param_edit_index == Some(i);
+
+                                row.col(|ui| {
+                                    if editing {
+                                        let r = ui.add(egui::TextEdit::singleline(&mut self.param_edit_name)
+                                            .desired_width(ui.available_width()));
+                                        if self.param_focus_field == Some(false) {
+                                            r.request_focus();
+                                            self.param_focus_field = None;
+                                        }
+                                    } else {
+                                        ui.colored_label(color, &p.name);
+                                        if ui.interact(ui.max_rect(), ui.id().with(("name", i)), egui::Sense::click()).clicked() {
+                                            start_edit = Some((i, false));
+                                        }
+                                    }
+                                });
+                                row.col(|ui| {
+                                    if editing {
+                                        let r = ui.add(egui::TextEdit::singleline(&mut self.param_edit_expr)
+                                            .desired_width(ui.available_width()));
+                                        if self.param_focus_field == Some(true) {
+                                            r.request_focus();
+                                            self.param_focus_field = None;
+                                        }
+                                    } else {
+                                        ui.colored_label(color, &p.expr_str);
+                                        if ui.interact(ui.max_rect(), ui.id().with(("expr", i)), egui::Sense::click()).clicked() {
+                                            start_edit = Some((i, true));
+                                        }
+                                    }
+                                });
+                                row.col(|ui| {
+                                    ui.colored_label(color, format!("{:.4}", p.value));
+                                });
+                                row.col(|ui| {
+                                    if ui.small_button("x").clicked() {
+                                        remove_idx = Some(i);
+                                    }
+                                    if editing {
+                                        let enter = ui.input(|inp| inp.key_pressed(egui::Key::Enter));
+                                        let escape = ui.input(|inp| inp.key_pressed(egui::Key::Escape));
+                                        if enter {
+                                            let n = self.param_edit_name.trim().to_string();
+                                            let e = self.param_edit_expr.trim().to_string();
+                                            if !n.is_empty() && !e.is_empty() {
+                                                update_action = Some((i, n, e));
+                                            }
+                                            self.param_edit_index = None;
+                                        } else if escape {
+                                            self.param_edit_index = None;
+                                        }
+                                    }
+                                });
+                            });
+                        }
+                        // Add-new row (aligned to same columns)
+                        body.row(row_height, |mut row| {
+                            row.col(|ui| {
+                                let r = ui.add(egui::TextEdit::singleline(&mut self.param_new_name)
+                                    .desired_width(ui.available_width()).hint_text("name"));
+                                if self.param_focus_new {
+                                    r.request_focus();
+                                    self.param_focus_new = false;
+                                }
+                            });
+                            row.col(|ui| {
+                                let r = ui.add(egui::TextEdit::singleline(&mut self.param_new_expr)
+                                    .desired_width(ui.available_width()).hint_text("expression"));
+                                if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                                    add_new = true;
+                                }
+                            });
+                            row.col(|_ui| {});
+                            row.col(|ui| {
+                                if ui.small_button("+").clicked() {
+                                    add_new = true;
+                                }
+                            });
+                        });
+                    });
+
+                // Deferred actions (must be outside table closure)
+                if let Some((i, focus_expr)) = start_edit {
+                    // If already editing a different row, save it first
+                    if let Some(prev) = self.param_edit_index {
+                        if prev != i {
+                            let n = self.param_edit_name.trim().to_string();
+                            let e = self.param_edit_expr.trim().to_string();
+                            if !n.is_empty() && !e.is_empty() && prev < self.sketch.user_params.len() {
+                                update_action = Some((prev, n, e));
+                            }
+                        }
+                    }
+                    if i < self.sketch.user_params.len() {
+                        self.param_edit_index = Some(i);
+                        self.param_edit_name = self.sketch.user_params[i].name.clone();
+                        self.param_edit_expr = self.sketch.user_params[i].expr_str.clone();
+                        self.param_focus_field = Some(focus_expr);
+                    }
+                }
+                if let Some((idx, new_name, new_expr)) = update_action {
+                    if let Err(e) = self.sketch.validate_param_name(&new_name, Some(idx)) {
+                        self.status_error = Some(e);
+                    } else {
+                        self.begin_group();
+                        self.exec(Action::UpdateUserParam { index: idx, name: new_name, expr_str: new_expr });
+                    }
+                }
+                if let Some(idx) = remove_idx {
+                    self.begin_group();
+                    self.exec(Action::RemoveUserParam { index: idx });
+                }
+                if add_new {
+                    let name = self.param_new_name.trim().to_string();
+                    let expr = self.param_new_expr.trim().to_string();
+                    if !name.is_empty() && !expr.is_empty() {
+                        if let Err(e) = self.sketch.validate_param_name(&name, None) {
+                            self.status_error = Some(e);
+                        } else {
+                            self.begin_group();
+                            self.exec(Action::AddUserParam { name, expr_str: expr });
+                            self.param_new_name.clear();
+                            self.param_new_expr.clear();
+                            self.param_focus_new = true;
+                        }
+                    }
+                }
+            });
+        }
 
         // Central panel: canvas
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -292,8 +463,8 @@ impl eframe::App for EditorApp {
                 self.pending_fit = false;
             }
 
-            // Keyboard shortcuts (skip when editing dimension text)
-            if !self.dim_editing {
+            // Keyboard shortcuts (skip when any text field has focus)
+            if !ctx.wants_keyboard_input() {
             if ui.input(|i| i.key_pressed(egui::Key::S) && !i.modifiers.ctrl && !i.modifiers.mac_cmd) { self.tool = Tool::Select; }
             if ui.input(|i| i.key_pressed(egui::Key::P)) { self.tool = Tool::DrawPoint; }
             if ui.input(|i| i.key_pressed(egui::Key::L)) {
@@ -321,7 +492,7 @@ impl eframe::App for EditorApp {
                 self.dim_editing = false;
                 self.dim_kind = None;
             }
-            } // !self.dim_editing
+            } // !wants_keyboard_input
             if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                 self.selection.clear();
                 self.line_draw = None;
@@ -337,7 +508,7 @@ impl eframe::App for EditorApp {
 
             // Delete selected entities/constraints with Backspace/Delete
             // (skip when editing dimension text — Backspace edits the text field)
-            if !self.dim_editing && ui.input(|i| i.key_pressed(egui::Key::Backspace) || i.key_pressed(egui::Key::Delete)) {
+            if !ctx.wants_keyboard_input() && ui.input(|i| i.key_pressed(egui::Key::Backspace) || i.key_pressed(egui::Key::Delete)) {
                 let sel = self.selection.clone();
                 if !sel.is_empty() {
                     self.begin_group();
@@ -986,14 +1157,26 @@ impl eframe::App for EditorApp {
                 Some(d) => format!("DOF: {}", d),
                 None => "DOF: ...".to_string(),
             };
-            let info = format!("{}  |  cost: {:.6}  |  arael v{}", dof_str, self.last_cost, env!("CARGO_PKG_VERSION"));
+            let version_str = format!("arael v{}", env!("CARGO_PKG_VERSION"));
+            let info = format!("{}  |  cost: {:.6}  |  ", dof_str, self.last_cost);
+            let version_galley = painter.layout_no_wrap(
+                version_str.clone(), egui::FontId::proportional(11.0), self.colors.status_text);
+            let version_w = version_galley.size().x;
             painter.text(
-                egui::Pos2::new(rect.right() - 10.0, rect.bottom() - 20.0),
+                egui::Pos2::new(rect.right() - 10.0 - version_w, rect.bottom() - 20.0),
                 egui::Align2::RIGHT_CENTER,
                 info,
                 egui::FontId::proportional(11.0),
                 self.colors.status_text,
             );
+            let version_rect = egui::Rect::from_min_size(
+                egui::Pos2::new(rect.right() - 10.0 - version_w, rect.bottom() - 28.0),
+                egui::Vec2::new(version_w, 16.0),
+            );
+            ui.put(version_rect, egui::Hyperlink::from_label_and_url(
+                egui::RichText::new(version_str).size(11.0),
+                "https://github.com/harakas/arael",
+            ).open_in_new_tab(true));
         });
     }
 }

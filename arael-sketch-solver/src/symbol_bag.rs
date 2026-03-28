@@ -127,6 +127,22 @@ impl SymbolBag {
             }
         }
 
+        // User parameters: name -> constant or live expression
+        for p in &sketch.user_params {
+            if p.broken {
+                dim_values.insert(p.name.clone(), p.value);
+            } else if let Ok(parsed) = arael_sym::parse(&p.expr_str) {
+                // If it's a plain numeric literal, store as constant
+                if p.expr_str.trim().parse::<f64>().is_ok() {
+                    dim_values.insert(p.name.clone(), p.value);
+                } else {
+                    derived.insert(p.name.clone(), parsed);
+                }
+            } else {
+                dim_values.insert(p.name.clone(), p.value);
+            }
+        }
+
         SymbolBag { param_indices, dim_values, derived }
     }
 

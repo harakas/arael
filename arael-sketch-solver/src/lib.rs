@@ -134,6 +134,10 @@ pub struct Sketch {
     pub dimensions: std::vec::Vec<Dimension>,
     #[arael(skip)]
     pub next_dimension_id: u32,
+    // User-defined parameters
+    #[arael(skip)]
+    #[serde(default)]
+    pub user_params: std::vec::Vec<UserParam>,
     // Expression constraints (parametric dimensions)
     #[arael(skip)]
     #[serde(skip)]
@@ -221,6 +225,7 @@ impl Sketch {
             distance_lp2: Vec::new(),
             dimensions: Vec::new(),
             next_dimension_id: 0,
+            user_params: Vec::new(),
             expr_constraints: Vec::new(),
             symbol_bag: None,
             expr_hb: TripletBlock::new(),
@@ -734,7 +739,8 @@ impl Sketch {
     fn rebuild_expr_constraints(&mut self) {
         self.expr_constraints.clear();
         let has_expr = self.dimensions.iter().any(|d| d.expr_str.is_some());
-        if !has_expr {
+        let has_user_params = !self.user_params.is_empty();
+        if !has_expr && !has_user_params {
             for d in &mut self.dimensions { d.broken = false; }
             return;
         }
@@ -742,6 +748,7 @@ impl Sketch {
         // Reset broken flags so SymbolBag always starts fresh --
         // stale flags from a previous solve can hide circular refs.
         for d in &mut self.dimensions { d.broken = false; }
+        for p in &mut self.user_params { p.broken = false; }
 
         // Need param indices assigned for SymbolBag; serialize to assign them.
         {
@@ -749,6 +756,32 @@ impl Sketch {
             self.serialize64(&mut tmp);
         }
         let mut bag = SymbolBag::build(self);
+
+        // Detect broken user params first (they feed into dimensions).
+        // Process in order so earlier params that break get frozen before
+        // downstream params/dims are checked.
+        for i in 0..self.user_params.len() {
+            let expr_str = &self.user_params[i].expr_str;
+            // Pure numeric literals are never broken
+            if expr_str.trim().parse::<f64>().is_ok() { continue; }
+            let is_broken = if let Ok(parsed) = arael_sym::parse(expr_str) {
+                let expanded = expr_constraint::expand_derived(&parsed, &bag);
+                !expanded.symbols().iter().all(|sym|
+                    bag.param_indices.contains_key(sym.as_str())
+                    || bag.dim_values.contains_key(sym.as_str())
+                )
+            } else {
+                true
+            };
+            self.user_params[i].broken = is_broken;
+            if is_broken {
+                bag.derived.remove(&self.user_params[i].name);
+                bag.dim_values.insert(
+                    self.user_params[i].name.clone(),
+                    self.user_params[i].value,
+                );
+            }
+        }
 
         // Detect broken references and create expression constraints.
         // Process in order so broken dims get frozen in the bag before
@@ -813,6 +846,40 @@ impl Sketch {
         ).collect();
         if !unresolved.is_empty() {
             return Err(format!("Unknown symbol: {}", unresolved.join(", ")));
+        }
+        Ok(())
+    }
+
+    /// Validate a user parameter name. Returns Err if the name is empty,
+    /// a duplicate, a system name pattern, or already used by an entity.
+    pub fn validate_param_name(&self, name: &str, exclude_index: Option<usize>) -> Result<(), String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("Name cannot be empty".into());
+        }
+        // Must be a valid identifier: alphanumeric + underscore, not starting with digit
+        if name.bytes().next().map_or(true, |b| b.is_ascii_digit()) {
+            return Err("Name cannot start with a digit".into());
+        }
+        if !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
+            return Err("Name can only contain letters, digits, and underscores".into());
+        }
+        // Not a system name pattern (d0, L0, P0, A0, etc.)
+        if is_system_name(name) {
+            return Err(format!("'{}' conflicts with system naming (d/L/P/A + number)", name));
+        }
+        // Not a duplicate of another user param
+        for (i, p) in self.user_params.iter().enumerate() {
+            if Some(i) == exclude_index { continue; }
+            if p.name == name {
+                return Err(format!("Parameter '{}' already exists", name));
+            }
+        }
+        // Not a dimension name
+        for d in &self.dimensions {
+            if d.name == name {
+                return Err(format!("'{}' is already used by a dimension", name));
+            }
         }
         Ok(())
     }
@@ -935,14 +1002,27 @@ impl Sketch {
         result
     }
 
-    /// Evaluate expression dimensions and cache their computed values.
+    /// Evaluate expression dimensions and user params, cache their computed values.
     pub fn update_expr_dim_values(&mut self) {
-        let has_expr = self.dimensions.iter().any(|d| d.expr_str.is_some());
+        let has_expr = self.dimensions.iter().any(|d| d.expr_str.is_some())
+            || self.user_params.iter().any(|p| !p.broken);
         if !has_expr { return; }
         let bag = SymbolBag::build(self);
         let mut params = Vec::new();
         self.serialize64(&mut params);
         let vars = bag.eval_vars(&params);
+        // Update user params first (dims may reference them)
+        for p in &mut self.user_params {
+            if p.broken { continue; }
+            if p.expr_str.trim().parse::<f64>().is_ok() { continue; }
+            if let Ok(parsed) = arael_sym::parse(&p.expr_str) {
+                let expanded = expr_constraint::expand_derived(&parsed, &bag);
+                match expanded.eval(&vars) {
+                    Ok(val) => p.value = val,
+                    Err(_) => p.broken = true,
+                }
+            }
+        }
         for dim in &mut self.dimensions {
             if dim.broken { continue; }
             if let Some(ref expr_str) = dim.expr_str {
