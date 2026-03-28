@@ -181,8 +181,8 @@ pub trait Model {
 /// the full root struct.
 ///
 /// A key use case is **runtime differentiation**: parse an equation string
-/// with [`arael_sym::parse`], symbolically differentiate with
-/// [`E::diff`], then evaluate numerically each solver iteration. This
+/// with `arael_sym::parse`, symbolically differentiate with
+/// `E::diff`, then evaluate numerically each solver iteration. This
 /// powers the parametric expression dimensions in `arael-sketch` (where
 /// the user types `d0 * 2 + 3` as a dimension value) and the
 /// `runtime_fit_demo` example (which accepts an arbitrary curve-fitting
@@ -1314,7 +1314,7 @@ impl<A: Model, B: Model, const N: usize, T: crate::utils::Float> CrossBlock<A, B
 /// when a constraint couples 3+ entities that cannot fit in a single CrossBlock.
 ///
 /// Call [`add_residual`](TripletBlock::add_residual) with the global parameter
-/// indices and derivatives for each residual. Then [`accumulate`] merges the
+/// indices and derivatives for each residual. Then [`accumulate`](TripletBlock::accumulate) merges the
 /// entries into the global dense or sparse matrices.
 pub struct TripletBlock<T: crate::utils::Float = f64> {
     pub grad: std::vec::Vec<(u32, T)>,

@@ -104,7 +104,7 @@ mod tests {
         // Set up: two lines with a length dimension d0=10
         let mut sketch = Sketch::new();
         let l0 = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(3.0, 0.0));
-        let l1 = sketch.add_line(vect2d::new(5.0, 0.0), vect2d::new(8.0, 0.0));
+        let _l1 = sketch.add_line(vect2d::new(5.0, 0.0), vect2d::new(8.0, 0.0));
         sketch.lines[l0].constraints.has_length = true;
         sketch.lines[l0].constraints.length = 10.0;
         sketch.dimensions.push(crate::Dimension {

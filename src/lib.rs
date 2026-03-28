@@ -130,10 +130,12 @@
 //! fitting, or symbolic constraints loaded from a file.
 //!
 //! Arael supports this through **runtime differentiation**: parse an
-//! equation string with [`arael_sym::parse`], symbolically differentiate
-//! once at setup with [`E::diff`], then evaluate the expression tree
-//! numerically each solver iteration. The [`ExtendedModel`] trait and
-//! [`TripletBlock`] provide the integration point with the LM solver.
+//! equation string with `arael_sym::parse`, symbolically differentiate
+//! once at setup with `E::diff`, then evaluate the expression tree
+//! numerically each solver iteration. The
+//! [`ExtendedModel`](model::ExtendedModel) trait and
+//! [`TripletBlock`](model::TripletBlock) provide the integration point
+//! with the LM solver.
 //!
 //! The sketch editor (`arael-sketch`) uses this extensively for parametric
 //! expression dimensions -- a user can type `d0 * 2 + 3` as a dimension
@@ -141,8 +143,9 @@
 //! in real time, with full symbolic derivatives.
 //!
 //! The model uses `#[arael(root, extended)]` and implements
-//! [`ExtendedModel`] to push residuals and derivatives into a
-//! [`TripletBlock`] at each solver iteration:
+//! [`ExtendedModel`](model::ExtendedModel) to push residuals and
+//! derivatives into a [`TripletBlock`](model::TripletBlock) at each
+//! solver iteration:
 //!
 //! ```ignore
 //! #[arael::model]
