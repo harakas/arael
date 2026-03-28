@@ -810,7 +810,7 @@ fn test_expr_dim_reference() {
     sketch.dimensions.push(Dimension {
         kind: DimensionKind::LineLength(l0), value: 10.0,
         offset: vect2d::new(0.0, 1.0), text_along: 0.0,
-        name: "d0".into(), expr_str: None,
+        name: "d0".into(), expr_str: None, broken: false,
     });
     sketch.next_dimension_id = 1;
 
@@ -840,7 +840,7 @@ fn test_expr_dim_arithmetic() {
     sketch.dimensions.push(Dimension {
         kind: DimensionKind::LineLength(l0), value: 5.0,
         offset: vect2d::new(0.0, 1.0), text_along: 0.0,
-        name: "d0".into(), expr_str: None,
+        name: "d0".into(), expr_str: None, broken: false,
     });
     sketch.next_dimension_id = 1;
 
@@ -894,7 +894,7 @@ fn test_bincode_roundtrip() {
     sketch.dimensions.push(Dimension {
         kind: DimensionKind::LineLength(l0), value: 5.0,
         offset: vect2d::new(0.0, 1.0), text_along: 0.0,
-        name: "d0".into(), expr_str: None,
+        name: "d0".into(), expr_str: None, broken: false,
     });
     sketch.next_dimension_id = 1;
 
@@ -1016,7 +1016,7 @@ fn test_expr_dim_angle_reference() {
     sketch.dimensions.push(Dimension {
         kind: DimensionKind::Angle(l0, l1, true), value: 20.0,
         offset: vect2d::new(0.0, 1.0), text_along: 0.0,
-        name: "d1".into(), expr_str: None,
+        name: "d1".into(), expr_str: None, broken: false,
     });
     sketch.next_dimension_id = 2;
 
@@ -1065,7 +1065,7 @@ fn test_update_dimension_preserves_name() {
         offset: vect2d::new(0.0, 1.0),
         text_along: 0.0,
         name: "d0".into(),
-        expr_str: None,
+        expr_str: None, broken: false,
     });
     sketch.solve();
     let len0 = line_length(&sketch, l0);
@@ -1106,7 +1106,7 @@ fn test_update_dimension_numeric_to_expr() {
         offset: vect2d::new(0.0, 1.0),
         text_along: 0.0,
         name: "d0".into(),
-        expr_str: None,
+        expr_str: None, broken: false,
     });
     sketch.solve();
     assert_near(line_length(&sketch, l0), 10.0, 0.01);
@@ -1134,4 +1134,148 @@ fn test_update_dimension_numeric_to_expr() {
     // Name preserved
     assert_eq!(sketch.dimensions[0].name, "d0");
     assert_eq!(sketch.dimensions[1].name, "d1");
+}
+
+// -- Broken expression dimension detection --
+
+#[test]
+fn test_broken_expr_dim_detection() {
+    // d0 = length of L0 = 10, d1 = length of L1 = "d0 * 2".
+    // Delete L0 (removes d0). d1 should become broken and freeze to 20.
+    let mut sketch = Sketch::new();
+    let l0 = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(5.0, 0.0));
+    let l1 = sketch.add_line(vect2d::new(0.0, 2.0), vect2d::new(3.0, 2.0));
+
+    // d0 = line length of L0 = 10
+    sketch.lines[l0].constraints.has_length = true;
+    sketch.lines[l0].constraints.length = 10.0;
+    sketch.dimensions.push(Dimension {
+        kind: DimensionKind::LineLength(l0),
+        value: 10.0,
+        offset: vect2d::new(0.0, 1.0),
+        text_along: 0.0,
+        name: "d0".into(),
+        expr_str: None, broken: false,
+    });
+    sketch.next_dimension_id = 1;
+
+    // d1 = line length of L1 = d0 * 2
+    sketch.add_expr_dimension(
+        DimensionKind::LineLength(l1), "d0 * 2",
+        vect2d::new(0.0, 1.0), 0.0,
+    ).unwrap();
+    sketch.solve();
+    sketch.update_expr_dim_values();
+    assert_near(line_length(&sketch, l1), 20.0, 0.1);
+    assert!(!sketch.dimensions[1].broken);
+
+    // Delete L0 -- this removes d0 (LineLength references L0)
+    sketch.delete_line(l0);
+    sketch.solve();
+
+    // d1 should now be broken, frozen to its last value (20)
+    assert_eq!(sketch.dimensions.len(), 1); // only d1 remains
+    assert!(sketch.dimensions[0].broken, "d1 should be broken");
+    assert_near(sketch.dimensions[0].value, 20.0, 0.1);
+    // L1 should still be constrained to 20 (frozen value)
+    assert_near(line_length(&sketch, l1), 20.0, 0.1);
+}
+
+#[test]
+fn test_broken_expr_dim_no_cascade() {
+    // d0 = length of L0 = 10
+    // d1 = length of L1 = "d0 * 2"  (will break)
+    // d2 = length of L2 = "d1 + 3"  (should NOT break -- d1 freezes to constant)
+    let mut sketch = Sketch::new();
+    let l0 = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(5.0, 0.0));
+    let l1 = sketch.add_line(vect2d::new(0.0, 2.0), vect2d::new(3.0, 2.0));
+    let l2 = sketch.add_line(vect2d::new(0.0, 4.0), vect2d::new(4.0, 4.0));
+
+    sketch.lines[l0].constraints.has_length = true;
+    sketch.lines[l0].constraints.length = 10.0;
+    sketch.dimensions.push(Dimension {
+        kind: DimensionKind::LineLength(l0),
+        value: 10.0,
+        offset: vect2d::new(0.0, 1.0),
+        text_along: 0.0,
+        name: "d0".into(),
+        expr_str: None, broken: false,
+    });
+    sketch.next_dimension_id = 1;
+
+    sketch.add_expr_dimension(
+        DimensionKind::LineLength(l1), "d0 * 2",
+        vect2d::new(0.0, 1.0), 0.0,
+    ).unwrap();
+    sketch.add_expr_dimension(
+        DimensionKind::LineLength(l2), "d1 + 3",
+        vect2d::new(0.0, 1.0), 0.0,
+    ).unwrap();
+    sketch.solve();
+    sketch.update_expr_dim_values();
+    assert_near(line_length(&sketch, l1), 20.0, 0.1);
+    assert_near(line_length(&sketch, l2), 23.0, 0.1);
+
+    // Delete L0 -- removes d0
+    sketch.delete_line(l0);
+    sketch.solve();
+    sketch.update_expr_dim_values();
+
+    // d1 (now index 0) should be broken, d2 (now index 1) should NOT
+    assert_eq!(sketch.dimensions.len(), 2);
+    assert!(sketch.dimensions[0].broken, "d1 should be broken");
+    assert!(!sketch.dimensions[1].broken, "d2 should NOT be broken (d1 frozen to constant)");
+    assert_near(line_length(&sketch, l1), 20.0, 0.1);
+    assert_near(line_length(&sketch, l2), 23.0, 0.1);
+}
+
+#[test]
+fn test_circular_expr_dim_ref() {
+    // d0=10 (numeric), d1="d0" (expr). Then change d0 to "d1" (circular).
+    // Must not panic. Both should be detected as broken.
+    let mut sketch = Sketch::new();
+    let l0 = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(5.0, 0.0));
+    let l1 = sketch.add_line(vect2d::new(0.0, 2.0), vect2d::new(3.0, 2.0));
+
+    // d0 = line length of L0 = 10 (numeric)
+    sketch.lines[l0].constraints.has_length = true;
+    sketch.lines[l0].constraints.length = 10.0;
+    sketch.dimensions.push(Dimension {
+        kind: DimensionKind::LineLength(l0),
+        value: 10.0,
+        offset: vect2d::new(0.0, 1.0),
+        text_along: 0.0,
+        name: "d0".into(),
+        expr_str: None, broken: false,
+    });
+    sketch.next_dimension_id = 1;
+
+    // d1 = line length of L1 = "d0" (expression)
+    sketch.add_expr_dimension(
+        DimensionKind::LineLength(l1), "d0",
+        vect2d::new(0.0, 1.0), 0.0,
+    ).unwrap();
+    sketch.solve();
+    sketch.update_expr_dim_values();
+    assert_near(line_length(&sketch, l0), 10.0, 0.1);
+    assert_near(line_length(&sketch, l1), 10.0, 0.1);
+
+    // Now change d0 from numeric to "d1" -- creates circular ref d0 -> d1 -> d0
+    sketch.lines[l0].constraints.has_length = false;
+    sketch.dimensions[0].value = 10.0; // last known value
+    sketch.dimensions[0].expr_str = Some("d1".into());
+
+    // Call solve() twice (exec does this). Must not panic.
+    sketch.solve();
+    sketch.solve();
+
+    // At least one should be broken (circular ref detected)
+    let any_broken = sketch.dimensions.iter().any(|d| d.broken);
+    assert!(any_broken, "circular ref should be detected as broken");
+
+    // Geometry should still be constrained (frozen values), not NaN
+    let len0 = line_length(&sketch, l0);
+    let len1 = line_length(&sketch, l1);
+    assert!(len0.is_finite(), "L0 length should be finite, got {}", len0);
+    assert!(len1.is_finite(), "L1 length should be finite, got {}", len1);
 }

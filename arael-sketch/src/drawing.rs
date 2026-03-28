@@ -1171,9 +1171,12 @@ impl EditorApp {
         // Dimension annotations
         let dim_color = egui::Color32::from_rgb(200, 100, 50);
         let dim_sel_color = egui::Color32::from_rgb(220, 40, 40);
+        let dim_broken_color = egui::Color32::from_rgb(255, 30, 30);
         for (i, dim) in self.sketch.dimensions.iter().enumerate() {
             let selected = self.selection.contains(&Selection::Dimension(i));
-            let color = if selected { dim_sel_color } else { dim_color };
+            let color = if dim.broken { dim_broken_color }
+                        else if selected { dim_sel_color }
+                        else { dim_color };
             let is_radius = matches!(dim.kind, DimensionKind::ArcRadius(_));
             let is_expr = dim.expr_str.is_some();
             self.draw_dimension(painter, &dim.kind, dim.value, dim.offset, dim.text_along, color, is_radius, is_expr);

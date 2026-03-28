@@ -54,18 +54,19 @@ impl ExpressionConstraint {
     }
 
     /// Compute the residual and derivatives, push into the shared TripletBlock.
-    pub fn compute(&self, vars: &HashMap<&str, f64>, constraint_isigma: f64, hb: &mut TripletBlock<f64>) {
-        let r = self.expr.eval(vars) * constraint_isigma;
-        let dr: Vec<f64> = self.param_derivs.iter()
-            .map(|(_, deriv)| deriv.eval(vars) * constraint_isigma)
+    pub fn compute(&self, vars: &HashMap<&str, f64>, constraint_isigma: f64, hb: &mut TripletBlock<f64>) -> Result<(), String> {
+        let r = self.expr.eval(vars)? * constraint_isigma;
+        let dr: Result<Vec<f64>, String> = self.param_derivs.iter()
+            .map(|(_, deriv)| Ok(deriv.eval(vars)? * constraint_isigma))
             .collect();
-        hb.add_residual(r, &self.indices, &dr);
+        hb.add_residual(r, &self.indices, &dr?);
+        Ok(())
     }
 
     /// Compute the squared residual (cost contribution).
-    pub fn cost(&self, vars: &HashMap<&str, f64>, constraint_isigma: f64) -> f64 {
-        let r = self.expr.eval(vars) * constraint_isigma;
-        r * r
+    pub fn cost(&self, vars: &HashMap<&str, f64>, constraint_isigma: f64) -> Result<f64, String> {
+        let r = self.expr.eval(vars)? * constraint_isigma;
+        Ok(r * r)
     }
 }
 
@@ -112,7 +113,7 @@ mod tests {
             offset: vect2d::new(0.0, 1.0),
             text_along: 0.0,
             name: "d0".into(),
-            expr_str: None,
+            expr_str: None, broken: false,
         });
 
         let mut params = Vec::new();
@@ -131,7 +132,7 @@ mod tests {
 
         // Evaluate: L1 length is 3, d0 is 10, so residual should be 3-10 = -7
         let vars = bag.eval_vars(&params);
-        let r = ec.expr.eval(&vars);
+        let r = ec.expr.eval(&vars).unwrap();
         assert!((r - (-7.0)).abs() < 0.01, "residual should be -7, got {}", r);
     }
 
@@ -147,7 +148,7 @@ mod tests {
         // L0.length should be 5
         let length_expr = bag.resolve("L0.length").unwrap();
         let vars = bag.eval_vars(&params);
-        let length = length_expr.eval(&vars);
+        let length = length_expr.eval(&vars).unwrap();
         assert!((length - 5.0).abs() < 0.01);
 
         // Create constraint: L0.length - 7 = 0 (want length to be 7)

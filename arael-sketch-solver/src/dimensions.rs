@@ -78,6 +78,10 @@ pub struct Dimension {
     /// None = constant numeric value.
     #[serde(default)]
     pub expr_str: Option<String>,
+    /// True when an expression dimension references a symbol that no
+    /// longer exists. The dimension falls back to its last computed value.
+    #[serde(default)]
+    pub broken: bool,
 }
 
 impl Dimension {

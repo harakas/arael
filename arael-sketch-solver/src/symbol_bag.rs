@@ -112,7 +112,10 @@ impl SymbolBag {
 
         // Dimensions: d{n} -> target value or live expression
         for dim in &sketch.dimensions {
-            if let Some(ref expr_str) = dim.expr_str {
+            if dim.broken {
+                // Broken expression: expose as constant with frozen value
+                dim_values.insert(dim.name.clone(), dim.value);
+            } else if let Some(ref expr_str) = dim.expr_str {
                 // Expression dimension: resolve to live symbolic expression
                 if let Ok(parsed) = arael_sym::parse(expr_str) {
                     derived.insert(dim.name.clone(), parsed);
@@ -213,7 +216,7 @@ mod tests {
         // Evaluate L0.length using current params
         let vars = bag.eval_vars(&params);
         let length_expr = bag.derived.get("L0.length").unwrap();
-        let length = length_expr.eval(&vars);
+        let length = length_expr.eval(&vars).unwrap();
         assert!((length - 5.0).abs() < 0.01, "L0 length should be 5, got {}", length);
     }
 

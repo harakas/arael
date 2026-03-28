@@ -693,9 +693,14 @@ impl arael::model::ExtendedModel for Sketch {
         let bag = self.symbol_bag.as_ref().expect("symbol_bag not built");
         let vars = bag.eval_vars(params);
         let isigma = self.constraint_isigma;
-        self.expr_constraints.iter()
-            .map(|ec| ec.cost(&vars, isigma))
-            .sum()
+        let mut total = 0.0;
+        for ec in &self.expr_constraints {
+            match ec.cost(&vars, isigma) {
+                Ok(c) => total += c,
+                Err(e) => eprintln!("expr constraint eval error: {}: {}", ec.description, e),
+            }
+        }
+        total
     }
 
     fn extended_compute64(&mut self, params: &[f64]) {
@@ -705,7 +710,9 @@ impl arael::model::ExtendedModel for Sketch {
         let isigma = self.constraint_isigma;
         let hb = &mut self.expr_hb as *mut TripletBlock<f64>;
         for ec in &self.expr_constraints {
-            ec.compute(&vars, isigma, unsafe { &mut *hb });
+            if let Err(e) = ec.compute(&vars, isigma, unsafe { &mut *hb }) {
+                eprintln!("expr constraint eval error: {}: {}", ec.description, e);
+            }
         }
     }
 }
@@ -726,25 +733,98 @@ impl Sketch {
     /// params can change between solves (lock/unlock).
     fn rebuild_expr_constraints(&mut self) {
         self.expr_constraints.clear();
+        let has_expr = self.dimensions.iter().any(|d| d.expr_str.is_some());
+        if !has_expr {
+            for d in &mut self.dimensions { d.broken = false; }
+            return;
+        }
+
+        // Reset broken flags so SymbolBag always starts fresh --
+        // stale flags from a previous solve can hide circular refs.
+        for d in &mut self.dimensions { d.broken = false; }
+
+        // Need param indices assigned for SymbolBag; serialize to assign them.
+        {
+            let mut tmp = std::vec::Vec::new();
+            self.serialize64(&mut tmp);
+        }
+        let mut bag = SymbolBag::build(self);
+
+        // Detect broken references and create expression constraints.
+        // Process in order so broken dims get frozen in the bag before
+        // downstream dims that reference them are checked.
         for i in 0..self.dimensions.len() {
             if let Some(ref expr_str) = self.dimensions[i].expr_str {
-                if let Ok(parsed) = arael_sym::parse(expr_str) {
+                let is_broken = if let Ok(parsed) = arael_sym::parse(expr_str) {
+                    let expanded = expr_constraint::expand_derived(&parsed, &bag);
+                    let all_resolved = expanded.symbols().iter().all(|sym|
+                        bag.param_indices.contains_key(sym.as_str())
+                        || bag.dim_values.contains_key(sym.as_str())
+                    );
+                    if all_resolved {
+                        // Normal: measured - expr = 0
+                        let measured = self.dimensions[i].measured_symbol(self);
+                        let residual = measured - parsed;
+                        let desc = format!("{} = {}", self.dimensions[i].name, expr_str);
+                        self.expr_constraints.push(
+                            ExpressionConstraint::new_unresolved(residual, desc));
+                        false
+                    } else {
+                        true
+                    }
+                } else {
+                    true
+                };
+
+                self.dimensions[i].broken = is_broken;
+                if is_broken {
+                    // Freeze in bag so downstream dims see a constant
+                    bag.derived.remove(&self.dimensions[i].name);
+                    bag.dim_values.insert(
+                        self.dimensions[i].name.clone(),
+                        self.dimensions[i].value,
+                    );
+                    // Fallback: constrain to last computed value
                     let measured = self.dimensions[i].measured_symbol(self);
-                    let residual = measured - parsed;
-                    let desc = format!("{} = {}", self.dimensions[i].name, expr_str);
+                    let residual = measured - arael_sym::constant(self.dimensions[i].value);
+                    let desc = format!("{} = {} [broken]", self.dimensions[i].name, self.dimensions[i].value);
                     self.expr_constraints.push(
                         ExpressionConstraint::new_unresolved(residual, desc));
                 }
+            } else {
+                self.dimensions[i].broken = false;
             }
         }
     }
 
+    /// Validate an expression string: parse it and check all symbols resolve.
+    /// Returns Err with a description if invalid.
+    pub fn validate_expr(&mut self, expr_str: &str) -> Result<(), String> {
+        let parsed = arael_sym::parse(expr_str).map_err(|e| e.to_string())?;
+        {
+            let mut tmp = std::vec::Vec::new();
+            self.serialize64(&mut tmp);
+        }
+        let bag = SymbolBag::build(self);
+        let expanded = expr_constraint::expand_derived(&parsed, &bag);
+        let unresolved: Vec<String> = expanded.symbols().into_iter().filter(|sym|
+            !bag.param_indices.contains_key(sym.as_str())
+            && !bag.dim_values.contains_key(sym.as_str())
+        ).collect();
+        if !unresolved.is_empty() {
+            return Err(format!("Unknown symbol: {}", unresolved.join(", ")));
+        }
+        Ok(())
+    }
+
     /// Add an expression-based dimension. The expression string is parsed
     /// and the constraint is: `measured_property - parsed_expr = 0`.
-    /// Returns Err if the expression fails to parse.
+    /// Returns Err if the expression fails to parse or references unknown symbols.
     pub fn add_expr_dimension(&mut self, kind: DimensionKind, expr_str: &str,
                               offset: vect2d, text_along: f64) -> Result<(), String> {
-        let parsed = arael_sym::parse(expr_str).map_err(|e| e.to_string())?;
+        self.validate_expr(expr_str)?;
+        let parsed = arael_sym::parse(expr_str).unwrap(); // safe: validate_expr checked parse
+
         let name = format!("d{}", self.next_dimension_id);
         self.next_dimension_id += 1;
 
@@ -752,6 +832,7 @@ impl Sketch {
         let dim = Dimension {
             kind, value: 0.0, offset, text_along,
             name: name.clone(), expr_str: Some(expr_str.to_string()),
+            broken: false,
         };
         let measured = dim.measured_symbol(self);
         self.dimensions.push(dim);
@@ -863,10 +944,14 @@ impl Sketch {
         self.serialize64(&mut params);
         let vars = bag.eval_vars(&params);
         for dim in &mut self.dimensions {
+            if dim.broken { continue; }
             if let Some(ref expr_str) = dim.expr_str {
                 if let Ok(parsed) = arael_sym::parse(expr_str) {
                     let expanded = expr_constraint::expand_derived(&parsed, &bag);
-                    dim.value = expanded.eval(&vars);
+                    match expanded.eval(&vars) {
+                        Ok(val) => dim.value = val,
+                        Err(_) => dim.broken = true,
+                    }
                 }
             }
         }
