@@ -568,7 +568,10 @@ impl eframe::App for EditorApp {
                 }
 
                 Tool::DrawLine => {
-                    if response.clicked_by(egui::PointerButton::Primary) {
+                    // Double-click terminates the line chain without adding a segment.
+                    if response.double_clicked_by(egui::PointerButton::Primary) {
+                        self.line_draw = None;
+                    } else if response.clicked_by(egui::PointerButton::Primary) {
                         self.begin_group();
                         if let Some(state) = self.line_draw.take() {
                             // Second click: finish line
