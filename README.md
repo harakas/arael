@@ -51,7 +51,7 @@ arael::sym! {
     println!("f'(x)  = {}", f.diff("x")); // x * cos(x) + sin(x)
 
     let vars = std::collections::HashMap::from([("x", 2.0)]);
-    println!("f(2.0) = {}", f.eval(&vars)); // 2.8185...
+    println!("f(2.0) = {}", f.eval(&vars).unwrap()); // 2.8185...
 }
 ```
 

@@ -65,7 +65,7 @@
 //!     let x = symbol("x");
 //!     let f = x * x + 1.0;
 //!     let vars = std::collections::HashMap::from([("x", 3.0)]);
-//!     f.eval(&vars)
+//!     f.eval(&vars).unwrap()
 //! };
 //! assert_eq!(val, 10.0);
 //! ```
@@ -148,7 +148,7 @@
 //! assert_eq!(format!("{}", f), "sin(x)^2 + cos(x)^2");
 //!
 //! let vars = std::collections::HashMap::from([("x", 1.0)]);
-//! assert!((f.eval(&vars) - 1.0).abs() < 1e-10);
+//! assert!((f.eval(&vars).unwrap() - 1.0).abs() < 1e-10);
 //! ```
 
 #![allow(clippy::should_implement_trait)]

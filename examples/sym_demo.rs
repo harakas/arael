@@ -102,7 +102,7 @@ fn main() {
         let expr = pow(x, c(2.0)) + c(3.0) * x + c(1.0);
         let vars = HashMap::from([("x", 2.0)]);
         println!("f(x) = {expr}");
-        println!("f(2) = {}", expr.eval(&vars));
+        println!("f(2) = {}", expr.eval(&vars).unwrap());
 
         let subst = expr.subs("x", &(y + c(1.0)));
         println!("f(y+1) = {subst}");

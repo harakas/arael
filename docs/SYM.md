@@ -112,7 +112,7 @@ arael::sym! {
     let f = pow(x, c(2.0)) + 3.0 * x + 1.0;
 
     let vars = HashMap::from([("x", 2.0)]);
-    println!("f(2) = {}", f.eval(&vars)); // 11
+    println!("f(2) = {}", f.eval(&vars).unwrap()); // 11
 
     println!("f(y+1) = {}", f.subs("x", &(y + 1.0)));
     // (y + 1)^2 + 3 * (y + 1) + 1

@@ -13,14 +13,14 @@ fn approx_eq(a: f64, b: f64) -> bool {
 /// Verify symbolic derivative numerically via finite differences
 fn check_diff_numerically(expr: &E, var: &str, vars: &HashMap<&str, f64>, eps: f64) {
     let deriv = expr.diff(var);
-    let symbolic_val = deriv.eval(vars);
+    let symbolic_val = deriv.eval(vars).unwrap();
 
     let mut vars_plus = vars.clone();
     let mut vars_minus = vars.clone();
     let v = *vars.get(var).unwrap();
     vars_plus.insert(var, v + eps);
     vars_minus.insert(var, v - eps);
-    let numerical_val = (expr.eval(&vars_plus) - expr.eval(&vars_minus)) / (2.0 * eps);
+    let numerical_val = (expr.eval(&vars_plus).unwrap() - expr.eval(&vars_minus).unwrap()) / (2.0 * eps);
 
     assert!(
         approx_eq(symbolic_val, numerical_val),
@@ -137,7 +137,7 @@ fn test_diff_add() {
     // d/dx(x+y) = 1 + 0
     let d = sum.diff("x");
     let vars = HashMap::from([("x", 2.0), ("y", 3.0)]);
-    assert!(approx_eq(d.eval(&vars), 1.0));
+    assert!(approx_eq(d.eval(&vars).unwrap(), 1.0));
 }
 
 #[test]
@@ -149,7 +149,7 @@ fn test_diff_mul_product_rule() {
         // d/dx(x*y) = 1*y + x*0 = y
         let d = prod.diff("x");
         let vars = HashMap::from([("x", 2.0), ("y", 3.0)]);
-        assert!(approx_eq(d.eval(&vars), 3.0)); // = y
+        assert!(approx_eq(d.eval(&vars).unwrap(), 3.0)); // = y
     }
 }
 
@@ -174,7 +174,7 @@ fn test_diff_pow_x_squared() {
         // d/dx(x^2) = 2x (via general formula)
         let d = e.diff("x");
         let vars = HashMap::from([("x", 3.0)]);
-        assert!(approx_eq(d.eval(&vars), 6.0));
+        assert!(approx_eq(d.eval(&vars).unwrap(), 6.0));
     }
 }
 
@@ -186,7 +186,7 @@ fn test_diff_pow_x_cubed() {
         let d = e.diff("x");
         let vars = HashMap::from([("x", 2.0)]);
         // d/dx(x^3) = 3x^2 = 12
-        assert!(approx_eq(d.eval(&vars), 12.0));
+        assert!(approx_eq(d.eval(&vars).unwrap(), 12.0));
     }
 }
 
@@ -399,7 +399,7 @@ fn test_eval_add() {
     let y = symbol("y");
     let e = x + y;
     let vars = HashMap::from([("x", 1.0), ("y", 2.0)]);
-    assert!(approx_eq(e.eval(&vars), 3.0));
+    assert!(approx_eq(e.eval(&vars).unwrap(), 3.0));
 }
 
 #[test]
@@ -407,7 +407,7 @@ fn test_eval_sin_pi_half() {
     let x = symbol("x");
     let e = sin(x);
     let vars = HashMap::from([("x", std::f64::consts::FRAC_PI_2)]);
-    assert!(approx_eq(e.eval(&vars), 1.0));
+    assert!(approx_eq(e.eval(&vars).unwrap(), 1.0));
 }
 
 #[test]
@@ -418,7 +418,7 @@ fn test_eval_complex() {
         let e = pow(x, constant(2.0)) + constant(3.0) * x + constant(1.0);
         let vars = HashMap::from([("x", 2.0)]);
         // 4 + 6 + 1 = 11
-        assert!(approx_eq(e.eval(&vars), 11.0));
+        assert!(approx_eq(e.eval(&vars).unwrap(), 11.0));
     }
 }
 
@@ -433,7 +433,7 @@ fn test_subs_basic() {
     let e = x + y;
     let result = e.subs("x", &constant(3.0));
     let vars = HashMap::from([("y", 2.0)]);
-    assert!(approx_eq(result.eval(&vars), 5.0));
+    assert!(approx_eq(result.eval(&vars).unwrap(), 5.0));
 }
 
 #[test]
@@ -446,7 +446,7 @@ fn test_subs_expr_for_var() {
         let result = e.subs("x", &(y + constant(1.0)));
         let vars = HashMap::from([("y", 2.0)]);
         // (y+1)^2 = 9
-        assert!(approx_eq(result.eval(&vars), 9.0));
+        assert!(approx_eq(result.eval(&vars).unwrap(), 9.0));
     }
 }
 
@@ -489,8 +489,8 @@ fn test_gradient() {
         let grad = f.diff_all(&["x", "y"]);
         let vars = HashMap::from([("x", 3.0), ("y", 4.0)]);
         // df/dx = 2x = 6, df/dy = 2y = 8
-        assert!(approx_eq(grad[0].eval(&vars), 6.0));
-        assert!(approx_eq(grad[1].eval(&vars), 8.0));
+        assert!(approx_eq(grad[0].eval(&vars).unwrap(), 6.0));
+        assert!(approx_eq(grad[1].eval(&vars).unwrap(), 8.0));
     }
 }
 
@@ -503,7 +503,7 @@ fn test_jacobian() {
         let f2 = x + y;      // f2 = x+y
         let j = jacobian(&[f1, f2], &["x", "y"]);
         let vars = HashMap::from([("x", 2.0), ("y", 3.0)]);
-        let jeval = j.eval(&vars);
+        let jeval = j.eval(&vars).unwrap();
         // J = [[y, x], [1, 1]] = [[3, 2], [1, 1]]
         assert!(approx_eq(jeval[0][0], 3.0)); // df1/dx = y
         assert!(approx_eq(jeval[0][1], 2.0)); // df1/dy = x
@@ -629,7 +629,7 @@ fn test_expand_basic() {
         let expanded = e.expand();
         // Verify by evaluation
         let vars = HashMap::from([("x", 2.0), ("a", 3.0), ("b", 4.0)]);
-        assert!(approx_eq(e.eval(&vars), expanded.eval(&vars)));
+        assert!(approx_eq(e.eval(&vars).unwrap(), expanded.eval(&vars).unwrap()));
         // Check structure: should be Add
         assert_eq!(format!("{}", &expanded), "a * x + b * x");
     }
@@ -645,7 +645,7 @@ fn test_expand_double() {
         let e = (a + b) * (c + d);
         let expanded = e.expand();
         let vars = HashMap::from([("a", 1.0), ("b", 2.0), ("c", 3.0), ("d", 4.0)]);
-        assert!(approx_eq(e.eval(&vars), expanded.eval(&vars)));
+        assert!(approx_eq(e.eval(&vars).unwrap(), expanded.eval(&vars).unwrap()));
     }
 }
 
@@ -658,7 +658,7 @@ fn test_expand_pow() {
         let e = pow(x + y, constant(2.0));
         let expanded = e.expand();
         let vars = HashMap::from([("x", 2.0), ("y", 3.0)]);
-        assert!(approx_eq(e.eval(&vars), expanded.eval(&vars)));
+        assert!(approx_eq(e.eval(&vars).unwrap(), expanded.eval(&vars).unwrap()));
     }
 }
 
@@ -676,7 +676,7 @@ fn test_collect_basic() {
         let e = a * x + b * x;
         let collected = e.collect(&x);
         let vars = HashMap::from([("x", 2.0), ("a", 3.0), ("b", 4.0)]);
-        assert!(approx_eq(e.eval(&vars), collected.eval(&vars)));
+        assert!(approx_eq(e.eval(&vars).unwrap(), collected.eval(&vars).unwrap()));
     }
 }
 
@@ -800,7 +800,7 @@ fn test_symvec_add() {
         let v2 = SymVec::new(vec![y, x]);
         let sum = v1 + v2;
         let vars = HashMap::from([("x", 1.0), ("y", 2.0)]);
-        let result = sum.eval(&vars);
+        let result = sum.eval(&vars).unwrap();
         assert!(approx_eq(result[0], 3.0));
         assert!(approx_eq(result[1], 3.0));
     }
@@ -813,7 +813,7 @@ fn test_symvec_scalar_mul() {
         let v = SymVec::new(vec![x, constant(2.0)]);
         let scaled = v * constant(3.0);
         let vars = HashMap::from([("x", 4.0)]);
-        let result = scaled.eval(&vars);
+        let result = scaled.eval(&vars).unwrap();
         assert!(approx_eq(result[0], 12.0));
         assert!(approx_eq(result[1], 6.0));
     }
@@ -829,7 +829,7 @@ fn test_symvec_dot() {
         let dot = v1.dot(&v2);
         let vars = HashMap::from([("x", 2.0), ("y", 3.0)]);
         // x*y + y*x = 2*x*y = 12
-        assert!(approx_eq(dot.eval(&vars), 12.0));
+        assert!(approx_eq(dot.eval(&vars).unwrap(), 12.0));
     }
 }
 
@@ -841,7 +841,7 @@ fn test_symvec_diff() {
         let v = SymVec::new(vec![pow(x, constant(2.0)), x * y]);
         let dv = v.diff("x");
         let vars = HashMap::from([("x", 3.0), ("y", 4.0)]);
-        let result = dv.eval(&vars);
+        let result = dv.eval(&vars).unwrap();
         assert!(approx_eq(result[0], 6.0)); // 2x = 6
         assert!(approx_eq(result[1], 4.0)); // y = 4
     }
@@ -855,7 +855,7 @@ fn test_symvec_diff() {
 fn test_symmat_identity() {
     let id = SymMat::identity(2);
     let vars = HashMap::new();
-    let result = id.eval(&vars);
+    let result = id.eval(&vars).unwrap();
     assert!(approx_eq(result[0][0], 1.0));
     assert!(approx_eq(result[0][1], 0.0));
     assert!(approx_eq(result[1][0], 0.0));
@@ -866,7 +866,7 @@ fn test_symmat_identity() {
 fn test_symmat_zeros() {
     let z = SymMat::zeros(2, 3);
     let vars = HashMap::new();
-    let result = z.eval(&vars);
+    let result = z.eval(&vars).unwrap();
     for row in &result {
         for val in row {
             assert!(approx_eq(*val, 0.0));
@@ -882,7 +882,7 @@ fn test_symmat_add() {
         let m2 = SymMat::new(1, 2, vec![constant(2.0), x]);
         let sum = m1 + m2;
         let vars = HashMap::from([("x", 3.0)]);
-        let result = sum.eval(&vars);
+        let result = sum.eval(&vars).unwrap();
         assert!(approx_eq(result[0][0], 5.0));
         assert!(approx_eq(result[0][1], 4.0));
     }
@@ -900,8 +900,8 @@ fn test_symmat_mul() {
         let m2 = SymMat::identity(2);
         let result = (m1.clone() * m2).simplify();
         let vars = HashMap::from([("a", 1.0), ("b", 2.0), ("c", 3.0), ("d", 4.0)]);
-        let ev_orig = m1.eval(&vars);
-        let ev_result = result.eval(&vars);
+        let ev_orig = m1.eval(&vars).unwrap();
+        let ev_result = result.eval(&vars).unwrap();
         assert!(approx_eq(ev_orig[0][0], ev_result[0][0]));
         assert!(approx_eq(ev_orig[0][1], ev_result[0][1]));
         assert!(approx_eq(ev_orig[1][0], ev_result[1][0]));
@@ -918,7 +918,7 @@ fn test_symmat_vec_mul() {
         let v = SymVec::new(vec![x, y]);
         let result = m * v;
         let vars = HashMap::from([("x", 1.0), ("y", 2.0)]);
-        let ev = result.eval(&vars);
+        let ev = result.eval(&vars).unwrap();
         assert!(approx_eq(ev[0], 5.0));  // 1*1 + 2*2
         assert!(approx_eq(ev[1], 11.0)); // 3*1 + 4*2
     }
@@ -934,7 +934,7 @@ fn test_symmat_transpose() {
     assert_eq!(mt.rows, 3);
     assert_eq!(mt.cols, 2);
     let vars = HashMap::new();
-    let ev = mt.eval(&vars);
+    let ev = mt.eval(&vars).unwrap();
     assert!(approx_eq(ev[0][0], 1.0));
     assert!(approx_eq(ev[0][1], 4.0));
     assert!(approx_eq(ev[1][0], 2.0));
@@ -950,7 +950,7 @@ fn test_symmat_diff() {
         let m = SymMat::new(1, 2, vec![pow(x, constant(2.0)), x]);
         let dm = m.diff("x");
         let vars = HashMap::from([("x", 3.0)]);
-        let ev = dm.eval(&vars);
+        let ev = dm.eval(&vars).unwrap();
         assert!(approx_eq(ev[0][0], 6.0)); // 2x
         assert!(approx_eq(ev[0][1], 1.0)); // 1
     }
@@ -1281,7 +1281,7 @@ fn test_parse_complex_expression() {
         let parsed = parse("x^2 + 3*x + 1").unwrap();
         let built = pow(x, c(2.0)) + c(3.0) * x + c(1.0);
         let vars = HashMap::from([("x", 2.0)]);
-        assert!(approx_eq(parsed.eval(&vars), built.eval(&vars)));
+        assert!(approx_eq(parsed.eval(&vars).unwrap(), built.eval(&vars).unwrap()));
     }
 }
 
@@ -1317,21 +1317,21 @@ fn test_cse_shared_subexpr() {
     // Evaluate: build vars including intermediate values
     let mut vars: HashMap<&str, f64> = HashMap::from([("x", 3.0), ("y", 4.0)]);
     for (name, expr) in &intermediates {
-        let val = expr.eval(&vars);
+        let val = expr.eval(&vars).unwrap();
         vars.insert(name.as_str(), val);
     }
-    assert!(approx_eq(results[0].eval(&vars), 14.0)); // (3+4)*2
-    assert!(approx_eq(results[1].eval(&vars), 21.0)); // (3+4)*3
+    assert!(approx_eq(results[0].eval(&vars).unwrap(), 14.0)); // (3+4)*2
+    assert!(approx_eq(results[1].eval(&vars).unwrap(), 21.0)); // (3+4)*3
 }
 
 /// Helper: evaluate CSE result by building vars map with intermediate values
 fn eval_cse(intermediates: &[(String, E)], expr: &E, base_vars: &HashMap<&str, f64>) -> f64 {
     let mut vars = base_vars.clone();
     for (name, e) in intermediates {
-        let val = e.eval(&vars);
+        let val = e.eval(&vars).unwrap();
         vars.insert(name.as_str(), val);
     }
-    expr.eval(&vars)
+    expr.eval(&vars).unwrap()
 }
 
 #[test]
@@ -1400,8 +1400,8 @@ fn test_cse_preserves_values() {
     let e1 = sin(xy.clone()) + cos(xy.clone());
     let e2 = sin(xy.clone()) * cos(xy);
     let vars = HashMap::from([("x", 1.5), ("y", 2.3)]);
-    let orig1 = e1.eval(&vars);
-    let orig2 = e2.eval(&vars);
+    let orig1 = e1.eval(&vars).unwrap();
+    let orig2 = e2.eval(&vars).unwrap();
     let (intermediates, results) = cse(&[e1, e2]);
     assert!(approx_eq(eval_cse(&intermediates, &results[0], &vars), orig1),
         "CSE changed result 0");
@@ -1437,9 +1437,9 @@ fn test_cse_derivative_sharing() {
     let dr_x = r.diff("x");
     let dr_y = r.diff("y");
     let vars = HashMap::from([("x", 1.2), ("y", 0.8)]);
-    let orig_r = r.eval(&vars);
-    let orig_dx = dr_x.eval(&vars);
-    let orig_dy = dr_y.eval(&vars);
+    let orig_r = r.eval(&vars).unwrap();
+    let orig_dx = dr_x.eval(&vars).unwrap();
+    let orig_dy = dr_y.eval(&vars).unwrap();
     let (intermediates, results) = cse(&[r, dr_x, dr_y]);
     // x*y, sin(x*y), cos(x*y) should all be extracted
     assert!(intermediates.len() >= 3, "should extract at least 3 subexprs, got {}", intermediates.len());
@@ -1458,8 +1458,8 @@ fn test_cse_chain_rule_sharing() {
     let df = f.diff("x");
     let dg = g.diff("x");
     let vars = HashMap::from([("x", 1.5)]);
-    let orig_df = df.eval(&vars);
-    let orig_dg = dg.eval(&vars);
+    let orig_df = df.eval(&vars).unwrap();
+    let orig_dg = dg.eval(&vars).unwrap();
     let (intermediates, results) = cse(&[df.clone(), dg.clone()]);
     assert!(!intermediates.is_empty(), "should extract chain rule subexprs");
     assert!(approx_eq(eval_cse(&intermediates, &results[0], &vars), orig_df));
@@ -1476,7 +1476,7 @@ fn test_cse_rotation_matrix_like() {
     let e2 = sa.clone() * ca.clone() * c(2.0);
     let e3 = ca.clone() * ca.clone() - sa.clone() * sa.clone();
     let vars = HashMap::from([("a", 0.7)]);
-    let orig = [e1.eval(&vars), e2.eval(&vars), e3.eval(&vars)];
+    let orig = [e1.eval(&vars).unwrap(), e2.eval(&vars).unwrap(), e3.eval(&vars).unwrap()];
     let (intermediates, results) = cse(&[e1, e2, e3]);
     assert!(intermediates.len() >= 2, "should extract sin(a) and cos(a)");
     for (i, r) in results.iter().enumerate() {
@@ -1495,7 +1495,7 @@ fn test_cse_many_expressions() {
         common.clone() + c(i as f64)
     }).collect();
     let vars = HashMap::from([("x", 1.0), ("y", 2.0)]);
-    let origs: Vec<f64> = exprs.iter().map(|e| e.eval(&vars)).collect();
+    let origs: Vec<f64> = exprs.iter().map(|e| e.eval(&vars).unwrap()).collect();
     let (intermediates, results) = cse(&exprs);
     assert!(!intermediates.is_empty());
     for (i, r) in results.iter().enumerate() {
@@ -1570,4 +1570,20 @@ fn test_cse_large_expression_count() {
         assert!(approx_eq(eval_cse(&intermediates, r, &vars), base_val * i as f64),
             "result {} differs", i);
     }
+}
+
+#[test]
+fn test_eval_unbound_symbol() {
+    use std::collections::HashMap;
+    let expr = arael_sym::symbol("x") + arael_sym::symbol("y");
+    let mut vars = HashMap::new();
+    vars.insert("x", 1.0);
+    // "y" is missing -- should return Err, not panic
+    let result = expr.eval(&vars);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("unbound symbol: y"));
+
+    // With both vars bound, should succeed
+    vars.insert("y", 2.0);
+    assert!((expr.eval(&vars).unwrap() - 3.0).abs() < 1e-10);
 }

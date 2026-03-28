@@ -53,7 +53,7 @@ impl SymVec {
     }
 
     /// Evaluate each element numerically given variable bindings.
-    pub fn eval(&self, vars: &HashMap<&str, f64>) -> Vec<f64> {
+    pub fn eval(&self, vars: &HashMap<&str, f64>) -> Result<Vec<f64>, String> {
         self.0.iter().map(|e| e.eval(vars)).collect()
     }
 
@@ -214,16 +214,16 @@ impl SymMat {
     }
 
     /// Evaluate every element numerically, returning a nested `Vec<Vec<f64>>`.
-    pub fn eval(&self, vars: &HashMap<&str, f64>) -> Vec<Vec<f64>> {
+    pub fn eval(&self, vars: &HashMap<&str, f64>) -> Result<Vec<Vec<f64>>, String> {
         let mut result = Vec::with_capacity(self.rows);
         for i in 0..self.rows {
             let mut row = Vec::with_capacity(self.cols);
             for j in 0..self.cols {
-                row.push(self.get(i, j).eval(vars));
+                row.push(self.get(i, j).eval(vars)?);
             }
             result.push(row);
         }
-        result
+        Ok(result)
     }
 
     /// Simplify every element.

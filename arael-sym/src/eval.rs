@@ -4,35 +4,36 @@ use super::{Expr, E};
 impl Expr {
     /// Evaluate the expression numerically given variable bindings.
     ///
-    /// Panics if any symbol in the expression is not present in `vars`.
-    pub fn eval(&self, vars: &HashMap<&str, f64>) -> f64 {
+    /// Returns `Err` if any symbol in the expression is not bound in `vars`.
+    pub fn eval(&self, vars: &HashMap<&str, f64>) -> Result<f64, String> {
         match self {
             Expr::Sym(name) => {
-                *vars.get(name.as_str()).unwrap_or_else(|| panic!("unbound symbol: {name}"))
+                vars.get(name.as_str()).copied()
+                    .ok_or_else(|| format!("unbound symbol: {name}"))
             }
-            Expr::Const(v) => *v,
-            Expr::Neg(a) => -a.eval(vars),
-            Expr::Add(a, b) => a.eval(vars) + b.eval(vars),
-            Expr::Sub(a, b) => a.eval(vars) - b.eval(vars),
-            Expr::Mul(a, b) => a.eval(vars) * b.eval(vars),
-            Expr::Div(a, b) => a.eval(vars) / b.eval(vars),
-            Expr::Pow(a, b) => a.eval(vars).powf(b.eval(vars)),
-            Expr::Sin(a) => a.eval(vars).sin(),
-            Expr::Cos(a) => a.eval(vars).cos(),
-            Expr::Tan(a) => a.eval(vars).tan(),
-            Expr::Asin(a) => a.eval(vars).asin(),
-            Expr::Acos(a) => a.eval(vars).acos(),
-            Expr::Atan(a) => a.eval(vars).atan(),
-            Expr::Atan2(y, x) => y.eval(vars).atan2(x.eval(vars)),
-            Expr::Sinh(a) => a.eval(vars).sinh(),
-            Expr::Cosh(a) => a.eval(vars).cosh(),
-            Expr::Tanh(a) => a.eval(vars).tanh(),
-            Expr::Exp(a) => a.eval(vars).exp(),
-            Expr::Ln(a) => a.eval(vars).ln(),
-            Expr::Log2(a) => a.eval(vars).log2(),
-            Expr::Log10(a) => a.eval(vars).log10(),
-            Expr::Sqrt(a) => a.eval(vars).sqrt(),
-            Expr::Abs(a) => a.eval(vars).abs(),
+            Expr::Const(v) => Ok(*v),
+            Expr::Neg(a) => Ok(-a.eval(vars)?),
+            Expr::Add(a, b) => Ok(a.eval(vars)? + b.eval(vars)?),
+            Expr::Sub(a, b) => Ok(a.eval(vars)? - b.eval(vars)?),
+            Expr::Mul(a, b) => Ok(a.eval(vars)? * b.eval(vars)?),
+            Expr::Div(a, b) => Ok(a.eval(vars)? / b.eval(vars)?),
+            Expr::Pow(a, b) => Ok(a.eval(vars)?.powf(b.eval(vars)?)),
+            Expr::Sin(a) => Ok(a.eval(vars)?.sin()),
+            Expr::Cos(a) => Ok(a.eval(vars)?.cos()),
+            Expr::Tan(a) => Ok(a.eval(vars)?.tan()),
+            Expr::Asin(a) => Ok(a.eval(vars)?.asin()),
+            Expr::Acos(a) => Ok(a.eval(vars)?.acos()),
+            Expr::Atan(a) => Ok(a.eval(vars)?.atan()),
+            Expr::Atan2(y, x) => Ok(y.eval(vars)?.atan2(x.eval(vars)?)),
+            Expr::Sinh(a) => Ok(a.eval(vars)?.sinh()),
+            Expr::Cosh(a) => Ok(a.eval(vars)?.cosh()),
+            Expr::Tanh(a) => Ok(a.eval(vars)?.tanh()),
+            Expr::Exp(a) => Ok(a.eval(vars)?.exp()),
+            Expr::Ln(a) => Ok(a.eval(vars)?.ln()),
+            Expr::Log2(a) => Ok(a.eval(vars)?.log2()),
+            Expr::Log10(a) => Ok(a.eval(vars)?.log10()),
+            Expr::Sqrt(a) => Ok(a.eval(vars)?.sqrt()),
+            Expr::Abs(a) => Ok(a.eval(vars)?.abs()),
         }
     }
 
