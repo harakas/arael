@@ -13,6 +13,8 @@ mod drawing;
 mod app_update;
 mod conflicts;
 mod commands;
+#[cfg(not(target_arch = "wasm32"))]
+mod mcp_server;
 
 use std::collections::HashMap;
 use eframe::egui;
@@ -163,6 +165,10 @@ pub struct EditorApp {
     // DOF (degrees of freedom) computed in background thread
     pub dof_display: Option<usize>,    // None = computing or unknown
     dof_pending: std::sync::Arc<std::sync::Mutex<Option<usize>>>,
+
+    // MCP server channel (None when --mcp not used)
+    #[cfg(not(target_arch = "wasm32"))]
+    pub mcp_rx: Option<tokio::sync::mpsc::Receiver<mcp_server::McpRequest>>,
 }
 
 impl EditorApp {
@@ -269,6 +275,8 @@ impl EditorApp {
             drag_saved_snapshot: None,
             dof_display: None,
             dof_pending: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            #[cfg(not(target_arch = "wasm32"))]
+            mcp_rx: None,
         }
     }
 }
@@ -731,9 +739,51 @@ impl EditorApp {
             offset_x: self.offset.x,
             offset_y: self.offset.y,
             pending_fit: self.pending_fit,
+            blocked_commands: Vec::new(),
         };
         let results = crate::commands::execute(&mut ctx, input);
         // Sync back
+        self.sketch = ctx.sketch;
+        self.history = ctx.history;
+        self.selection = ctx.selection;
+        self.session_vars = ctx.session_vars;
+        self.session_vecs = ctx.session_vecs;
+        self.session_names = ctx.session_names;
+        self.command_cursor = ctx.cursor;
+        self.status_error = ctx.status_error;
+        self.last_cost = ctx.last_cost;
+        self.dof_display = ctx.dof;
+        self.scale = ctx.scale;
+        self.offset.x = ctx.offset_x;
+        self.offset.y = ctx.offset_y;
+        self.pending_fit = ctx.pending_fit;
+        self.show_hints = false;
+        self.compute_dof_async();
+        results
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn run_commands_with_blocked(&mut self, input: &str, blocked: Vec<&'static str>) -> Vec<crate::commands::CommandResult> {
+        let empty_sketch = Sketch::new();
+        let empty_history = crate::history::History::new(&empty_sketch);
+        let mut ctx = crate::commands::CommandContext {
+            sketch: std::mem::replace(&mut self.sketch, empty_sketch),
+            history: std::mem::replace(&mut self.history, empty_history),
+            selection: std::mem::replace(&mut self.selection, Vec::new()),
+            session_vars: std::mem::replace(&mut self.session_vars, HashMap::new()),
+            session_vecs: std::mem::replace(&mut self.session_vecs, HashMap::new()),
+            session_names: std::mem::replace(&mut self.session_names, HashMap::new()),
+            cursor: self.command_cursor,
+            status_error: self.status_error.take(),
+            last_cost: self.last_cost,
+            dof: self.dof_display,
+            scale: self.scale,
+            offset_x: self.offset.x,
+            offset_y: self.offset.y,
+            pending_fit: self.pending_fit,
+            blocked_commands: blocked,
+        };
+        let results = crate::commands::execute(&mut ctx, input);
         self.sketch = ctx.sketch;
         self.history = ctx.history;
         self.selection = ctx.selection;
@@ -2443,6 +2493,8 @@ fn main() -> eframe::Result {
     let mut file_path: Option<String> = None;
     let mut verbose = false;
     let mut empty = false;
+    let mut mcp_addr: Option<std::net::SocketAddr> = None;
+    let mut mcp_verbose = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -2453,11 +2505,32 @@ fn main() -> eframe::Result {
                 eprintln!("Options:");
                 eprintln!("  --verbose, -v   Print solver iterations");
                 eprintln!("  --empty         Start with empty sketch");
+                eprintln!("  --mcp [addr]    Start MCP server (default 127.0.0.1:8585)");
+                eprintln!("  --mcp-verbose   Log all MCP traffic to stdout");
                 eprintln!("  --help, -h      Show this help");
                 std::process::exit(0);
             }
             "--verbose" | "-v" => verbose = true,
             "--empty" => empty = true,
+            "--mcp-verbose" => mcp_verbose = true,
+            "--mcp" => {
+                // Check if next arg is an address
+                let addr_str = if i + 1 < args.len() && !args[i + 1].starts_with('-') {
+                    i += 1;
+                    args[i].as_str()
+                } else {
+                    "127.0.0.1:8585"
+                };
+                // Parse: could be "host:port" or just "port"
+                mcp_addr = Some(if let Ok(port) = addr_str.parse::<u16>() {
+                    std::net::SocketAddr::from(([127, 0, 0, 1], port))
+                } else {
+                    addr_str.parse().unwrap_or_else(|e| {
+                        eprintln!("Invalid MCP address '{}': {}", addr_str, e);
+                        std::process::exit(1);
+                    })
+                });
+            }
             arg if !arg.starts_with('-') => file_path = Some(arg.to_string()),
             other => {
                 eprintln!("Unknown option: {}", other);
@@ -2486,6 +2559,9 @@ fn main() -> eframe::Result {
 
     if verbose {
         app.sketch.verbose = true;
+    }
+    if let Some(addr) = mcp_addr {
+        app.mcp_rx = Some(mcp_server::start(addr, mcp_verbose));
     }
     app.compute_dof_async();
 

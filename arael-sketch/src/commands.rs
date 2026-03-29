@@ -31,6 +31,8 @@ pub struct CommandContext {
     pub offset_x: f32,
     pub offset_y: f32,
     pub pending_fit: bool,
+    /// Commands blocked in this context (e.g. "save", "load" for MCP).
+    pub blocked_commands: Vec<&'static str>,
 }
 
 impl CommandContext {
@@ -51,6 +53,7 @@ impl CommandContext {
             offset_x: 400.0,
             offset_y: 300.0,
             pending_fit: false,
+            blocked_commands: Vec::new(),
         }
     }
 
@@ -70,6 +73,7 @@ impl CommandContext {
             offset_x: 400.0,
             offset_y: 300.0,
             pending_fit: false,
+            blocked_commands: Vec::new(),
         }
     }
 
@@ -720,6 +724,11 @@ fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
     // Substitute session_names aliases in arguments
     let parts: Vec<&str> = input.splitn(2, char::is_whitespace).collect();
     let cmd = parts[0];
+
+    // Check if command is blocked in this context
+    if ctx.blocked_commands.iter().any(|&b| b == cmd) {
+        return err(format!("'{}' is not allowed in this context", cmd));
+    }
     let raw_args = if parts.len() > 1 { parts[1].trim() } else { "" };
 
     // Replace known aliases in args (word-boundary aware)
@@ -781,6 +790,8 @@ fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
         "save" => cmd_save(ctx, args_str),
         "load" => cmd_load(ctx, args_str),
         "help" => cmd_help(args_str),
+        "ai" => ok("AI assistant not yet configured. Use --mcp to enable MCP server for external AI agents."),
+        _ if cmd.starts_with('!') => ok("AI assistant not yet configured. Use --mcp to enable MCP server for external AI agents."),
         _ => err(format!("Unknown command: {}. Type 'help' for commands.", cmd)),
     }
 }

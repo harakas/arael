@@ -25,6 +25,37 @@ impl eframe::App for EditorApp {
         // Apply egui visuals for widgets (side panel, buttons, etc.)
         ctx.set_visuals(if self.dark_mode { egui::Visuals::dark() } else { egui::Visuals::light() });
 
+        // Process pending MCP requests
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let mut pending = Vec::new();
+            if let Some(ref mut mcp_rx) = self.mcp_rx {
+                while let Ok(req) = mcp_rx.try_recv() {
+                    pending.push(req);
+                }
+            }
+            for req in pending {
+                // Show MCP commands in command history (unless it's a msg command)
+                let is_msg = req.command.starts_with("msg ");
+                if !is_msg {
+                    self.command_output.push((format!("**MCP>** {}", req.command), false, true));
+                }
+                let results = self.run_commands_with_blocked(&req.command, req.blocked_commands);
+                let output = results.iter()
+                    .filter(|r| !r.output.is_empty())
+                    .map(|r| if r.is_error { format!("ERROR: {}", r.output) } else { r.output.clone() })
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                // Show results in command history
+                for result in &results {
+                    if !result.output.is_empty() {
+                        self.command_output.push((result.output.clone(), result.is_error, result.markdown));
+                    }
+                }
+                let _ = req.response_tx.send(output);
+            }
+        }
+
         // Side panel: toolbar
         egui::SidePanel::left("toolbar").min_width(50.0).default_width(50.0).show(ctx, |ui| {
             // Toggle buttons (2x2 grid)

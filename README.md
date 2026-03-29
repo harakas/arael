@@ -330,6 +330,39 @@ sketch.solve();
 
 The sketch solver uses Levenberg-Marquardt optimization with drift regularization and robust drag constraints. Geometric constraints are differentiated at compile time; parametric expression dimensions use runtime differentiation via `ExtendedModel`.
 
+### Command Panel & Scripting
+
+Press `/` to open the command panel. Full scripting support with 40+ commands for geometry creation, constraints, dimensions, parameters, introspection, and view control. Commands support expressions, coordinate references (`L0.p2`, `@dx,dy`), geometric functions (`midpoint(L0)`, `intersect(L0,L1)`), and vector arithmetic (`L0.p2 + normal(L0) * 3`).
+
+See [arael-sketch/docs/COMMANDS.md](arael-sketch/docs/COMMANDS.md) for the full command reference.
+
+### AI Agent Integration (MCP)
+
+The sketch editor embeds an MCP (Model Context Protocol) server, enabling AI agents like Claude Code to create and modify sketches programmatically. The AI sends sketch commands and reads state through the standard MCP tool interface.
+
+![Dark mode with AI-drawn geometry](arael-sketch/docs/dark.png)
+
+*Dark mode with parameters panel, command history showing MCP agent connection, and geometry drawn by Claude Code.*
+
+Start the editor with MCP enabled:
+```bash
+cargo run -r -p arael-sketch -- --mcp
+```
+
+Configure Claude Code (`~/.claude.json`):
+```json
+{
+  "mcpServers": {
+    "arael-sketch": {
+      "type": "http",
+      "url": "http://127.0.0.1:8585/mcp"
+    }
+  }
+}
+```
+
+The MCP server exposes tools for executing sketch commands (`execute_command`, `execute_script`), querying state (`get_sketch_state`), and reading documentation (`get_help`). The `initialize` response includes a condensed command reference that the AI loads into context automatically. File operations (`save`, `load`) are blocked for security.
+
 See [arael-sketch/](arael-sketch/) for the full implementation.
 
 ## Project Structure
