@@ -143,6 +143,7 @@ pub struct EditorApp {
 
     // Command panel
     pub show_command: bool,
+    pub show_hints: bool,
     pub command_input: String,
     pub command_history: Vec<String>,
     pub command_history_pos: usize,
@@ -250,6 +251,7 @@ impl EditorApp {
             param_focus_new: false,
             param_focus_field: None,
             show_command: false,
+            show_hints: true,
             command_input: String::new(),
             command_history: Vec::new(),
             command_history_pos: 0,
@@ -754,6 +756,7 @@ impl EditorApp {
     // Rejects constraints that make a healthy sketch unsolvable.
     pub fn exec(&mut self, action: Action) {
         self.status_error = None;
+        self.show_hints = false;
 
         if action.is_constraint_action() {
             // Snapshot before applying for potential rollback

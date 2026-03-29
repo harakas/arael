@@ -122,11 +122,13 @@ Alias: `rc` (e.g., `rc L0 horizontal`)
 length L0 5.0                Set line length (numeric)
 length L0 "width * 2"        Set line length (expression)
 radius A0 1.5                Set arc radius
-angle L0 L1 45               Set angle between lines (degrees)
+angle L0 L1 45               Set angle between lines (degrees, auto-selects sector)
 distance L0.p1 L1.p2 5.0     Point-point distance
 distance P0 L0 3.0            Point-line distance
 remove_dim d0                 Remove dimension by name
 ```
+
+The `angle` command automatically selects the sector (direct or supplementary) that is closest to the given value. For example, if two lines form a 30-degree acute angle, `angle L0 L1 45` targets the direct sector, while `angle L0 L1 150` targets the supplementary sector.
 
 ## Locking
 

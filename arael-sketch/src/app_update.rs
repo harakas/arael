@@ -521,6 +521,7 @@ impl eframe::App for EditorApp {
                             .max_height(scroll_h)
                             .stick_to_bottom(true)
                             .show(ui, |ui| {
+                            ui.set_min_width(ui.available_width());
                             for (text, is_err) in &self.command_output {
                                 let color = if *is_err {
                                     egui::Color32::from_rgb(255, 80, 80)
@@ -1205,7 +1206,8 @@ impl eframe::App for EditorApp {
                     egui::Stroke::new(0.5, self.colors.cursor_crosshair));
             }
 
-            // Status bar at bottom
+            // Status bar at bottom (hidden after first modification)
+            if self.show_hints {
             let status = match self.tool {
                 Tool::Select => "Select: click to select/deselect, drag to move. Ctrl+Z undo, Ctrl+Shift+Z redo.",
                 Tool::DrawPoint => "Point: click to place.",
@@ -1242,6 +1244,7 @@ impl eframe::App for EditorApp {
                 egui::FontId::proportional(12.0),
                 self.colors.status_text,
             );
+            } // show_hints
 
             // DOF + cost + version at bottom-right
             let dof_str = match self.dof_display {

@@ -1622,18 +1622,37 @@ fn cmd_angle(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let a = match resolve_line(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
     let b = match resolve_line(&ctx.sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
     let val_str = tokens[2].trim().trim_matches('"');
+
+    // Compute current angle to decide which sector (direct or supplement) is closest
+    let la = &ctx.sketch.lines[a];
+    let lb = &ctx.sketch.lines[b];
+    let dx1 = la.p2.value.x - la.p1.value.x;
+    let dy1 = la.p2.value.y - la.p1.value.y;
+    let dx2 = lb.p2.value.x - lb.p1.value.x;
+    let dy2 = lb.p2.value.y - lb.p1.value.y;
+    let cross = dx1 * dy2 - dy1 * dx2;
+    let dot = dx1 * dx2 + dy1 * dy2;
+    let current_deg = cross.atan2(dot).to_degrees().abs();
+    let supplement_deg = 180.0 - current_deg;
+
     if let Ok(value) = val_str.parse::<f64>() {
+        let supplement = (value - supplement_deg).abs() < (value - current_deg).abs();
         ctx.begin_group();
         ctx.exec(Action::AddDimension {
-            kind: DimensionKind::Angle(a, b, false), value, expr: None,
+            kind: DimensionKind::Angle(a, b, supplement), value, expr: None,
         });
-        ok(format!("Set angle {} {} = {}", tokens[0], tokens[1], value))
+        let sector = if supplement { "supplement" } else { "direct" };
+        ok(format!("Set angle {} {} = {} ({})", tokens[0], tokens[1], value, sector))
     } else {
+        // For expressions, evaluate to pick sector
+        let value = eval_expr(&ctx.sketch, val_str).unwrap_or(0.0);
+        let supplement = (value - supplement_deg).abs() < (value - current_deg).abs();
         ctx.begin_group();
         ctx.exec(Action::AddDimension {
-            kind: DimensionKind::Angle(a, b, false), value: 0.0, expr: Some(val_str.to_string()),
+            kind: DimensionKind::Angle(a, b, supplement), value: 0.0, expr: Some(val_str.to_string()),
         });
-        ok(format!("Set angle {} {} = {}", tokens[0], tokens[1], val_str))
+        let sector = if supplement { "supplement" } else { "direct" };
+        ok(format!("Set angle {} {} = {} ({})", tokens[0], tokens[1], val_str, sector))
     }
 }
 
