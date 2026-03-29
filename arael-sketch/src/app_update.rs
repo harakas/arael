@@ -147,6 +147,7 @@ impl eframe::App for EditorApp {
                 ui.separator();
                 let label = if self.dim_edit_index.is_some() { "Edit dimension:" } else { "New dimension:" };
                 ui.label(label);
+                ui.checkbox(&mut self.dim_derived, "Derived");
                 let response = ui.text_edit_singleline(&mut self.dim_input);
                 // Select all text when entering edit mode (one-shot flag)
                 if self.dim_select_all && response.has_focus() {
@@ -165,11 +166,21 @@ impl eframe::App for EditorApp {
                     let is_expr = !is_numeric && arael_sym::parse(&input).is_ok();
 
                     let mut success = false;
-                    if is_numeric || is_expr {
+                    if is_numeric || is_expr || (input.is_empty() && self.dim_derived) {
                         self.begin_group();
                         if let Some(edit_idx) = self.dim_edit_index.take() {
                             // Editing existing: update in place (preserves name)
-                            if is_numeric {
+                            if self.dim_derived != self.sketch.dimensions[edit_idx].derived {
+                                // Toggle derived status
+                                let name = self.sketch.dimensions[edit_idx].name.clone();
+                                if self.dim_derived {
+                                    self.run_commands(&format!("set_derived {}", name));
+                                } else {
+                                    let val = if is_numeric { input.parse::<f64>().unwrap() } else { self.sketch.dimensions[edit_idx].value };
+                                    self.run_commands(&format!("set_driven {} {}", name, val));
+                                }
+                                success = true;
+                            } else if is_numeric {
                                 let value = input.parse::<f64>().unwrap();
                                 self.exec(Action::UpdateDimension { index: edit_idx, value, expr: None });
                                 success = true;
@@ -187,10 +198,10 @@ impl eframe::App for EditorApp {
                             let is_dup = self.sketch.dimensions.iter().any(|d| d.kind == kind);
                             if is_dup {
                                 self.status_error = Some("Dimension already exists".into());
-                            } else if is_numeric {
-                                let value = input.parse::<f64>().unwrap();
+                            } else if is_numeric || (input.is_empty() && self.dim_derived) {
+                                let value = input.parse::<f64>().unwrap_or(0.0);
                                 let n_dims_before = self.sketch.dimensions.len();
-                                self.exec(Action::AddDimension { kind, value, expr: None });
+                                self.exec(Action::AddDimension { kind, value, expr: None, derived: self.dim_derived });
                                 if self.sketch.dimensions.len() > n_dims_before {
                                     if let Some(d) = self.sketch.dimensions.last_mut() {
                                         d.offset = self.dim_offset;
@@ -204,7 +215,7 @@ impl eframe::App for EditorApp {
                                 } else {
                                     let n_dims_before = self.sketch.dimensions.len();
                                     self.exec(Action::AddDimension {
-                                        kind, value: 0.0, expr: Some(input.clone()),
+                                        kind, value: 0.0, expr: Some(input.clone()), derived: self.dim_derived,
                                     });
                                     if self.sketch.dimensions.len() > n_dims_before {
                                         if let Some(d) = self.sketch.dimensions.last_mut() {
@@ -757,6 +768,7 @@ impl eframe::App for EditorApp {
                                 self.dim_editing = true;
                                 self.dim_select_all = true;
                                 self.dim_placing = false;
+                                self.dim_derived = dim.derived;
                                 self.tool = Tool::Dimension;
                                 self.selection.clear();
                                 self.selection.push(Selection::Dimension(i));
@@ -1122,6 +1134,7 @@ impl eframe::App for EditorApp {
                                 self.dim_placing = false;
                                 self.dim_editing = true;
                                 self.dim_select_all = true;
+                                self.dim_derived = false;
                             }
                         }
                     } else if !self.dim_editing {
@@ -1168,6 +1181,7 @@ impl eframe::App for EditorApp {
                                 self.dim_editing = true;
                                 self.dim_select_all = true;
                                 self.dim_placing = false;
+                                self.dim_derived = dim.derived;
                                 break;
                             }
                         }
@@ -1189,7 +1203,7 @@ impl eframe::App for EditorApp {
                 let measured = self.measure_dimension(&kind);
                 let is_radius = matches!(kind, DimensionKind::ArcRadius(_));
                 let preview_color = egui::Color32::from_rgba_premultiplied(200, 100, 50, 180);
-                self.draw_dimension(&painter, &kind, measured, self.dim_offset, self.dim_text_along, preview_color, is_radius, false);
+                self.draw_dimension(&painter, &kind, measured, self.dim_offset, self.dim_text_along, preview_color, is_radius, false, false);
             }
 
             // Draw overlays ON TOP of canvas: preview line and cursor crosshair

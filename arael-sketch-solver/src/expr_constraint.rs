@@ -113,7 +113,7 @@ mod tests {
             offset: vect2d::new(0.0, 1.0),
             text_along: 0.0,
             name: "d0".into(),
-            expr_str: None, broken: false,
+            expr_str: None, broken: false, derived: false,
         });
 
         let mut params = Vec::new();

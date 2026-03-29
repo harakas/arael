@@ -82,6 +82,10 @@ pub struct Dimension {
     /// longer exists. The dimension falls back to its last computed value.
     #[serde(default)]
     pub broken: bool,
+    /// Derived (reference) dimension: displays measured value but does
+    /// not constrain the solver. Shown with parentheses: "(3.40)".
+    #[serde(default)]
+    pub derived: bool,
 }
 
 // ---------------------------------------------------------------------------

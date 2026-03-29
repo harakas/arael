@@ -125,6 +125,7 @@ pub struct EditorApp {
     pub dim_text_along: f64,        // text position along line during creation
     pub dim_edit_index: Option<usize>, // index of dimension being edited (for double-click edit)
     pub dim_select_all: bool,           // one-shot: select all text on next frame
+    pub dim_derived: bool,              // checkbox state for derived (reference) dimensions
 
     // Display
     pub show_constraints: bool,
@@ -205,18 +206,18 @@ impl EditorApp {
         });
 
         // Dimensions (via Action, then adjust offsets for nice layout)
-        Action::AddDimension { kind: DimensionKind::LineLength(l1), value: 0.0, expr: Some("base_length".into()) }.apply(&mut sketch);
+        Action::AddDimension { kind: DimensionKind::LineLength(l1), value: 0.0, expr: Some("base_length".into()), derived: false }.apply(&mut sketch);
         sketch.dimensions.last_mut().unwrap().offset = vect2d::new(0.0, -0.32);
         sketch.dimensions.last_mut().unwrap().text_along = -0.27;
 
         Action::AddDimension {
             kind: DimensionKind::PointLineDistance(DimensionEndpoint::LineP1(l0), l1), value: 5.0,
-            expr: None,
+            expr: None, derived: false,
         }.apply(&mut sketch);
         sketch.dimensions.last_mut().unwrap().offset = vect2d::new(0.0, 1.72);
         sketch.dimensions.last_mut().unwrap().text_along = 0.20;
 
-        Action::AddDimension { kind: DimensionKind::ArcRadius(a0), value: 1.5, expr: None }.apply(&mut sketch);
+        Action::AddDimension { kind: DimensionKind::ArcRadius(a0), value: 1.5, expr: None, derived: false }.apply(&mut sketch);
         sketch.dimensions.last_mut().unwrap().offset = vect2d::new(0.91, 0.0);
 
         let result = sketch.solve();
@@ -247,6 +248,7 @@ impl EditorApp {
             dim_text_along: 0.0,
             dim_edit_index: None,
             dim_select_all: false,
+            dim_derived: false,
             show_constraints: true,
             show_params: false,
             param_new_name: String::new(),

@@ -80,7 +80,7 @@ pub enum Action {
     SetStyleLine { line: Ref<Line>, style: LineStyle },
     SetStyleArc { arc: Ref<Arc>, style: LineStyle },
     DeleteArc { arc: Ref<Arc> },
-    AddDimension { kind: DimensionKind, value: f64, expr: Option<String> },
+    AddDimension { kind: DimensionKind, value: f64, expr: Option<String>, derived: bool },
     UpdateDimension { index: usize, value: f64, expr: Option<String> },
     RemoveDimension { index: usize },
     AddUserParam { name: String, expr_str: String },
@@ -505,18 +505,21 @@ impl Action {
                 sketch.delete_arc(*arc);
                 sketch.solve();
             }
-            Action::AddDimension { kind, value, expr } => {
+            Action::AddDimension { kind, value, expr, derived } => {
                 // Expression dimension: delegate to add_expr_dimension
                 if let Some(expr_str) = expr {
                     let _ = sketch.add_expr_dimension(*kind, expr_str,
                         vect2d::new(0.0, 1.0), 0.0);
+                    if *derived {
+                        if let Some(d) = sketch.dimensions.last_mut() { d.derived = true; }
+                    }
                     sketch.solve();
                     return;
                 }
                 let name = format!("d{}", sketch.next_dimension_id);
                 sketch.next_dimension_id += 1;
-                // Apply the numeric constraint
-                match kind {
+                // Apply the numeric constraint (skip for derived dims)
+                if !derived { match kind {
                     DimensionKind::LineLength(line) => {
                         sketch.lines[*line].constraints.has_length = true;
                         sketch.lines[*line].constraints.length = *value;
@@ -603,22 +606,23 @@ impl Action {
                         });
                     }
                 }
+                } // end if !derived
                 sketch.dimensions.push(Dimension {
                     kind: *kind, value: *value,
                     offset: vect2d::new(0.0, 1.0),
                     text_along: 0.0,
                     name,
                     expr_str: None,
-                    broken: false,
+                    broken: false, derived: *derived,
                 });
                 sketch.solve();
             }
             Action::UpdateDimension { index, value, expr } => {
                 if *index >= sketch.dimensions.len() { return; }
-                // Remove old underlying constraint (only for numeric dims)
+                // Remove old underlying constraint (only for numeric, non-derived dims)
                 {
                     let dim = &sketch.dimensions[*index];
-                    if dim.expr_str.is_none() {
+                    if dim.expr_str.is_none() && !dim.derived {
                         match dim.kind {
                             DimensionKind::LineLength(line) => {
                                 if let Some(l) = sketch.lines.get_mut(line) {
@@ -679,8 +683,8 @@ impl Action {
                 let dim = &mut sketch.dimensions[*index];
                 dim.value = *value;
                 dim.expr_str = expr.clone();
-                // Add new underlying constraint (only for numeric dims)
-                if expr.is_none() {
+                // Add new underlying constraint (only for numeric, non-derived dims)
+                if expr.is_none() && !dim.derived {
                     let kind = dim.kind;
                     let value = *value;
                     match kind {

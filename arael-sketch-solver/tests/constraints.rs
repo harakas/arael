@@ -810,7 +810,7 @@ fn test_expr_dim_reference() {
     sketch.dimensions.push(Dimension {
         kind: DimensionKind::LineLength(l0), value: 10.0,
         offset: vect2d::new(0.0, 1.0), text_along: 0.0,
-        name: "d0".into(), expr_str: None, broken: false,
+        name: "d0".into(), expr_str: None, broken: false, derived: false,
     });
     sketch.next_dimension_id = 1;
 
@@ -840,7 +840,7 @@ fn test_expr_dim_arithmetic() {
     sketch.dimensions.push(Dimension {
         kind: DimensionKind::LineLength(l0), value: 5.0,
         offset: vect2d::new(0.0, 1.0), text_along: 0.0,
-        name: "d0".into(), expr_str: None, broken: false,
+        name: "d0".into(), expr_str: None, broken: false, derived: false,
     });
     sketch.next_dimension_id = 1;
 
@@ -894,7 +894,7 @@ fn test_bincode_roundtrip() {
     sketch.dimensions.push(Dimension {
         kind: DimensionKind::LineLength(l0), value: 5.0,
         offset: vect2d::new(0.0, 1.0), text_along: 0.0,
-        name: "d0".into(), expr_str: None, broken: false,
+        name: "d0".into(), expr_str: None, broken: false, derived: false,
     });
     sketch.next_dimension_id = 1;
 
@@ -1016,7 +1016,7 @@ fn test_expr_dim_angle_reference() {
     sketch.dimensions.push(Dimension {
         kind: DimensionKind::Angle(l0, l1, true), value: 20.0,
         offset: vect2d::new(0.0, 1.0), text_along: 0.0,
-        name: "d1".into(), expr_str: None, broken: false,
+        name: "d1".into(), expr_str: None, broken: false, derived: false,
     });
     sketch.next_dimension_id = 2;
 
@@ -1065,7 +1065,7 @@ fn test_update_dimension_preserves_name() {
         offset: vect2d::new(0.0, 1.0),
         text_along: 0.0,
         name: "d0".into(),
-        expr_str: None, broken: false,
+        expr_str: None, broken: false, derived: false,
     });
     sketch.solve();
     let len0 = line_length(&sketch, l0);
@@ -1106,7 +1106,7 @@ fn test_update_dimension_numeric_to_expr() {
         offset: vect2d::new(0.0, 1.0),
         text_along: 0.0,
         name: "d0".into(),
-        expr_str: None, broken: false,
+        expr_str: None, broken: false, derived: false,
     });
     sketch.solve();
     assert_near(line_length(&sketch, l0), 10.0, 0.01);
@@ -1155,7 +1155,7 @@ fn test_broken_expr_dim_detection() {
         offset: vect2d::new(0.0, 1.0),
         text_along: 0.0,
         name: "d0".into(),
-        expr_str: None, broken: false,
+        expr_str: None, broken: false, derived: false,
     });
     sketch.next_dimension_id = 1;
 
@@ -1199,7 +1199,7 @@ fn test_broken_expr_dim_no_cascade() {
         offset: vect2d::new(0.0, 1.0),
         text_along: 0.0,
         name: "d0".into(),
-        expr_str: None, broken: false,
+        expr_str: None, broken: false, derived: false,
     });
     sketch.next_dimension_id = 1;
 
@@ -1246,7 +1246,7 @@ fn test_circular_expr_dim_ref() {
         offset: vect2d::new(0.0, 1.0),
         text_along: 0.0,
         name: "d0".into(),
-        expr_str: None, broken: false,
+        expr_str: None, broken: false, derived: false,
     });
     sketch.next_dimension_id = 1;
 
@@ -1445,7 +1445,7 @@ fn test_user_param_in_dimension() {
     sketch.dimensions.push(Dimension {
         kind: DimensionKind::LineLength(l0), value: 5.0,
         offset: vect2d::new(0.0, 1.0), text_along: 0.0,
-        name: "d0".into(), expr_str: Some("gap".into()), broken: false,
+        name: "d0".into(), expr_str: Some("gap".into()), broken: false, derived: false,
     });
     sketch.next_dimension_id = 1;
     sketch.solve();
@@ -1537,4 +1537,60 @@ fn test_user_param_serialization() {
     assert_eq!(restored.user_params[0].name, "width");
     assert_eq!(restored.user_params[1].expr_str, "width / 2");
     assert_near(restored.user_params[0].value, 10.0, 0.01);
+}
+
+// -- Derived dimensions --
+
+#[test]
+fn test_derived_length() {
+    // A derived length dimension should not constrain the line length
+    let mut sketch = Sketch::new();
+    let l = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(5.0, 0.0));
+    sketch.dimensions.push(Dimension {
+        kind: DimensionKind::LineLength(l),
+        value: 0.0,
+        offset: vect2d::new(0.0, 1.0),
+        text_along: 0.0,
+        name: "d0".into(),
+        expr_str: None,
+        broken: false,
+        derived: true,
+    });
+    sketch.solve();
+    sketch.update_expr_dim_values();
+    // Line should remain at its original length (~5), not be constrained
+    let len = line_length(&sketch, l);
+    assert_near(len, 5.0, 0.01);
+    // Derived dim value should reflect the measured length
+    assert_near(sketch.dimensions[0].value, 5.0, 0.01);
+    // Line should NOT have has_length set (derived doesn't add constraints)
+    assert!(!sketch.lines[l].constraints.has_length);
+}
+
+#[test]
+fn test_derived_to_driven() {
+    // Start with a derived dim, convert to driven, verify constraint appears
+    let mut sketch = Sketch::new();
+    let l = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(5.0, 0.0));
+    // Add as derived first
+    sketch.dimensions.push(Dimension {
+        kind: DimensionKind::LineLength(l),
+        value: 5.0,
+        offset: vect2d::new(0.0, 1.0),
+        text_along: 0.0,
+        name: "d0".into(),
+        expr_str: None,
+        broken: false,
+        derived: true,
+    });
+    sketch.solve();
+    assert!(!sketch.lines[l].constraints.has_length);
+    // Convert to driven: set derived=false, add constraint
+    sketch.dimensions[0].derived = false;
+    sketch.lines[l].constraints.has_length = true;
+    sketch.lines[l].constraints.length = 3.0;
+    sketch.dimensions[0].value = 3.0;
+    sketch.solve();
+    let len = line_length(&sketch, l);
+    assert_near(len, 3.0, 0.01);
 }

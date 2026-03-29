@@ -133,6 +133,29 @@ remove_dim d0                 Remove dimension by name
 
 The `angle` command automatically selects the sector (direct or supplementary) that is closest to the given value. For example, if two lines form a 30-degree acute angle, `angle L0 L1 45` targets the direct sector, while `angle L0 L1 150` targets the supplementary sector.
 
+### Derived (Reference) Dimensions
+
+Derived dimensions display the measured value but do not constrain the solver. They are shown with parentheses, e.g. `(3.40)`. Add `derived` to any dimension command to create one:
+
+```
+length L0 5 derived          Derived length with explicit value
+length L0 derived            Derived length (measures current geometry)
+radius A0 derived            Derived radius
+radius A0 1.5 derived        Derived radius with explicit value
+angle L0 L1 derived          Derived angle (measures current geometry)
+angle L0 L1 45 derived       Derived angle with explicit value
+distance L0.p1 L1.p2 derived Derived distance (measures current geometry)
+distance L0.p1 L1.p2 5 derived Derived distance with explicit value
+```
+
+Toggle between derived and driven:
+
+```
+set_derived d0               Make dimension derived (removes constraint)
+set_driven d0                Make dimension driven (adds constraint, keeps current value)
+set_driven d0 5              Make driven with a new value
+```
+
 ## Locking
 
 ```
@@ -307,13 +330,13 @@ info L0.p1                   Endpoint position, lock status, constraints
 info P0                      Point details + constraints
 info A0                      Arc details + constraints
 info A0.center               Arc endpoint position
-info d0                      Dimension details (kind, value, expression)
+info d0                      Dimension details (value, expression, derived status)
 info width                   Parameter details (value, expression, broken)
 list                         List all entities, dimensions, parameters
 list lines                   List only lines
 list points                  List only points
 list arcs                    List only arcs
-list dims                    List only dimensions
+list dims                    List only dimensions (shows "derived" tag)
 list params                  List only parameters
 list constraints             List all active constraints
 find x,y [radius]            Find entities near a coordinate

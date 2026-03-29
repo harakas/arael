@@ -791,6 +791,8 @@ impl Sketch {
         // Process in order so broken dims get frozen in the bag before
         // downstream dims that reference them are checked.
         for i in 0..self.dimensions.len() {
+            // Derived dimensions don't create constraints
+            if self.dimensions[i].derived { continue; }
             if let Some(ref expr_str) = self.dimensions[i].expr_str {
                 let is_broken = if let Ok(parsed) = arael_sym::parse(expr_str) {
                     let expanded = expr_constraint::expand_derived(&parsed, &bag);
@@ -965,6 +967,7 @@ impl Sketch {
             kind, value: 0.0, offset, text_along,
             name: name.clone(), expr_str: Some(expr_str.to_string()),
             broken: false,
+            derived: false,
         };
         let measured = dim.measured_symbol(self);
         self.dimensions.push(dim);
@@ -1067,11 +1070,11 @@ impl Sketch {
         result
     }
 
-    /// Evaluate expression dimensions and user params, cache their computed values.
+    /// Evaluate expression/derived dimensions and user params, cache their computed values.
     pub fn update_expr_dim_values(&mut self) {
-        let has_expr = self.dimensions.iter().any(|d| d.expr_str.is_some())
+        let has_work = self.dimensions.iter().any(|d| d.expr_str.is_some() || d.derived)
             || self.user_params.iter().any(|p| !p.broken);
-        if !has_expr { return; }
+        if !has_work { return; }
         let bag = SymbolBag::build(self);
         let mut params = Vec::new();
         self.serialize64(&mut params);
@@ -1099,6 +1102,18 @@ impl Sketch {
                     }
                 }
             }
+        }
+        // Update derived numeric dims from measured geometry
+        let derived_vals: Vec<(usize, f64)> = (0..self.dimensions.len())
+            .filter(|&i| self.dimensions[i].derived && self.dimensions[i].expr_str.is_none() && !self.dimensions[i].broken)
+            .filter_map(|i| {
+                let measured = self.dimensions[i].measured_symbol(self);
+                let expanded = expr_constraint::expand_derived(&measured, &bag);
+                expanded.eval(&vars).ok().map(|v| (i, v))
+            })
+            .collect();
+        for (i, val) in derived_vals {
+            self.dimensions[i].value = val;
         }
     }
 }
