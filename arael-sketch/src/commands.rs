@@ -120,23 +120,25 @@ impl CommandContext {
 pub struct CommandResult {
     pub output: String,
     pub is_error: bool,
+    pub no_echo: bool,
+    pub markdown: bool,
 }
 
 fn ok(msg: impl Into<String>) -> CommandResult {
-    CommandResult { output: msg.into(), is_error: false }
+    CommandResult { output: msg.into(), is_error: false, no_echo: false, markdown: false }
 }
 
 /// Return ok or the status_error if the last exec was rejected.
 fn ok_or_status(ctx: &mut CommandContext, msg: impl Into<String>) -> CommandResult {
     if let Some(e) = ctx.status_error.take() {
-        CommandResult { output: e, is_error: true }
+        CommandResult { output: e, is_error: true, no_echo: false, markdown: false }
     } else {
-        CommandResult { output: msg.into(), is_error: false }
+        CommandResult { output: msg.into(), is_error: false, no_echo: false, markdown: false }
     }
 }
 
 fn err(msg: impl Into<String>) -> CommandResult {
-    CommandResult { output: msg.into(), is_error: true }
+    CommandResult { output: msg.into(), is_error: true, no_echo: false, markdown: false }
 }
 
 // ---------------------------------------------------------------------------
@@ -769,6 +771,9 @@ fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
         "goto" => cmd_goto(ctx, args_str),
         "center" => cmd_center(ctx, args_str),
         "zoom" => cmd_zoom(ctx, args_str),
+        "msg" => CommandResult {
+            output: args_str.replace("\\n", "\n"), is_error: false, no_echo: true, markdown: true,
+        },
         "cursor" => cmd_cursor(ctx, args_str),
         "dim_pos" => cmd_dim_pos(ctx, args_str),
         "clear" => { ctx.sketch = Sketch::new(); ctx.history = crate::history::History::new(&ctx.sketch); ok("Cleared") },
@@ -2128,6 +2133,7 @@ fn cmd_help(args: &str) -> CommandResult {
             "goto" => "goto <position> (jump to history position)",
             "center" => "center L0 | center x,y | center (fit all)",
             "zoom" => "zoom + | zoom - | zoom 2.0",
+            "msg" => "msg text — print message to history (supports markdown, \\n for newlines)",
             "cursor" => "cursor [x,y | @dx,dy | on | off] — show/set/hide command cursor",
             "dim_pos" => "dim_pos d0 offset 1.5 | dim_pos d0 along 0.3 (@ for relative)",
             "clear" => "clear (new empty sketch)",

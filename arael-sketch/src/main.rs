@@ -147,7 +147,7 @@ pub struct EditorApp {
     pub command_input: String,
     pub command_history: Vec<String>,
     pub command_history_pos: usize,
-    pub command_output: Vec<(String, bool)>, // (text, is_error)
+    pub command_output: Vec<(String, bool, bool)>, // (text, is_error, is_markdown)
     pub command_focus: bool,                  // request focus next frame
     pub command_cursor: Option<vect2d>,   // for chaining add_line
     pub session_vars: HashMap<String, f64>,  // session variables from 'let' commands

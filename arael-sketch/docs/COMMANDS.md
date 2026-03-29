@@ -265,6 +265,18 @@ dim_pos d0 along @-0.1       Relative along change
 
 `info d0` shows current offset and along values.
 
+## Messages
+
+Print messages to the command history output. Supports Markdown formatting. The command itself is not echoed.
+
+```
+msg Hello world
+msg **Bold** and *italic* text
+msg Line 1\nLine 2           Newlines with \n
+msg # Heading
+msg - item 1\n- item 2       Lists
+```
+
 ## Session Variables
 
 Assign intermediate results for reuse within the session:

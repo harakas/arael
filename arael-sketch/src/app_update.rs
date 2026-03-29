@@ -485,11 +485,14 @@ impl eframe::App for EditorApp {
                             if !input.is_empty() {
                                 self.command_history.push(input.clone());
                                 self.command_history_pos = self.command_history.len();
-                                self.command_output.push((format!("> {}", input), false));
                                 let results = self.run_commands(&input);
+                                let no_echo = results.first().map_or(false, |r| r.no_echo);
+                                if !no_echo {
+                                    self.command_output.push((format!("> {}", input), false, false));
+                                }
                                 for result in results {
                                     if !result.output.is_empty() {
-                                        self.command_output.push((result.output, result.is_error));
+                                        self.command_output.push((result.output, result.is_error, result.markdown));
                                     }
                                 }
                                 self.command_input.clear();
@@ -526,14 +529,20 @@ impl eframe::App for EditorApp {
                             .stick_to_bottom(true)
                             .show(ui, |ui| {
                             ui.set_min_width(ui.available_width());
-                            for (text, is_err) in &self.command_output {
-                                let color = if *is_err {
-                                    egui::Color32::from_rgb(255, 80, 80)
+                            let mut md_cache = egui_commonmark::CommonMarkCache::default();
+                            for (idx, (text, is_err, is_md)) in self.command_output.iter().enumerate() {
+                                if *is_md {
+                                    egui_commonmark::CommonMarkViewer::new()
+                                        .show(ui, &mut md_cache, text);
                                 } else {
-                                    ui.visuals().text_color()
-                                };
-                                for line in text.lines() {
-                                    ui.colored_label(color, line);
+                                    let color = if *is_err {
+                                        egui::Color32::from_rgb(255, 80, 80)
+                                    } else {
+                                        ui.visuals().text_color()
+                                    };
+                                    for line in text.lines() {
+                                        ui.colored_label(color, line);
+                                    }
                                 }
                             }
                         });
