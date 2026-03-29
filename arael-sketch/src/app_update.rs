@@ -26,9 +26,9 @@ impl eframe::App for EditorApp {
         ctx.set_visuals(if self.dark_mode { egui::Visuals::dark() } else { egui::Visuals::light() });
 
         // Side panel: toolbar
-        egui::SidePanel::left("toolbar").min_width(140.0).show(ctx, |ui| {
-            // Theme toggle
-            ui.horizontal(|ui| {
+        egui::SidePanel::left("toolbar").min_width(50.0).default_width(50.0).show(ctx, |ui| {
+            // Toggle buttons (2x2 grid)
+            egui::Grid::new("toggle_grid").num_columns(2).show(ui, |ui| {
                 if ui.selectable_label(self.dark_mode, "Dark").clicked() {
                     self.dark_mode = !self.dark_mode;
                     self.colors = if self.dark_mode { ColorScheme::dark() } else { ColorScheme::light() };
@@ -36,6 +36,7 @@ impl eframe::App for EditorApp {
                 if ui.selectable_label(self.show_constraints, "Cstr").clicked() {
                     self.show_constraints = !self.show_constraints;
                 }
+                ui.end_row();
                 if ui.selectable_label(self.show_params, "Param").clicked() {
                     self.show_params = !self.show_params;
                 }
@@ -43,29 +44,36 @@ impl eframe::App for EditorApp {
                     self.show_command = !self.show_command;
                     if self.show_command { self.command_focus = true; }
                 }
+                ui.end_row();
             });
             ui.separator();
 
+            // Tools (two columns)
             ui.heading("Tools");
             ui.separator();
-            if ui.selectable_label(self.tool == Tool::Select, "Select (S)").clicked() {
-                self.tool = Tool::Select;
-            }
-            if ui.selectable_label(self.tool == Tool::DrawPoint, "Point (P)").clicked() {
-                self.tool = Tool::DrawPoint;
-            }
-            if ui.selectable_label(self.tool == Tool::DrawLine, "Line (L)").clicked() {
-                self.tool = Tool::DrawLine;
-                self.line_draw = None;
-            }
-            if ui.selectable_label(self.tool == Tool::DrawCircle, "Circle (O)").clicked() {
-                self.tool = Tool::DrawCircle;
-                self.circle_draw = None;
-            }
-            if ui.selectable_label(self.tool == Tool::DrawArc, "Arc (A)").clicked() {
-                self.tool = Tool::DrawArc;
-                self.arc_draw = None;
-            }
+            egui::Grid::new("tools_grid").num_columns(2).show(ui, |ui| {
+                if ui.selectable_label(self.tool == Tool::Select, "Select (S)").clicked() {
+                    self.tool = Tool::Select;
+                }
+                if ui.selectable_label(self.tool == Tool::DrawPoint, "Point (P)").clicked() {
+                    self.tool = Tool::DrawPoint;
+                }
+                ui.end_row();
+                if ui.selectable_label(self.tool == Tool::DrawLine, "Line (L)").clicked() {
+                    self.tool = Tool::DrawLine;
+                    self.line_draw = None;
+                }
+                if ui.selectable_label(self.tool == Tool::DrawCircle, "Circle (O)").clicked() {
+                    self.tool = Tool::DrawCircle;
+                    self.circle_draw = None;
+                }
+                ui.end_row();
+                if ui.selectable_label(self.tool == Tool::DrawArc, "Arc (A)").clicked() {
+                    self.tool = Tool::DrawArc;
+                    self.arc_draw = None;
+                }
+                ui.end_row();
+            });
 
             ui.separator();
             ui.heading("Constraints");
@@ -1200,6 +1208,16 @@ impl eframe::App for EditorApp {
                     [egui::Pos2::new(rect.left(), mouse_screen.y),
                      egui::Pos2::new(rect.right(), mouse_screen.y)],
                     egui::Stroke::new(0.5, self.colors.cursor_crosshair));
+            }
+
+            // Command cursor crosshair (full canvas lines)
+            if let Some(pos) = self.command_cursor {
+                let sp = self.to_screen(pos);
+                let stroke = egui::Stroke::new(0.5, egui::Color32::from_rgb(0, 160, 255));
+                painter.line_segment(
+                    [egui::Pos2::new(sp.x, rect.top()), egui::Pos2::new(sp.x, rect.bottom())], stroke);
+                painter.line_segment(
+                    [egui::Pos2::new(rect.left(), sp.y), egui::Pos2::new(rect.right(), sp.y)], stroke);
             }
 
             // Status bar at bottom (hidden after first modification)

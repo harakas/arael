@@ -18,7 +18,8 @@ Coordinates can be specified as:
 | Format | Example | Description |
 |--------|---------|-------------|
 | `x,y` | `5,3` | Absolute position |
-| `@dx,dy` | `@0,3` | Relative to previous point |
+| `@dx,dy` | `@0,3` | Relative to cursor |
+| `cursor` | `cursor` | Current cursor position |
 | Endpoint ref | `L0.p2` | Current position of an endpoint |
 | Session var | `p` | A variable set with `let` |
 | Geo function | `midpoint(L0)` | Result of a geometric function |
@@ -223,6 +224,46 @@ coincident base.p2 side.p1                       Use aliases in endpoint refs
 ```
 
 Both `name = command` and `let name = command` work. The alias is resolved transparently — anywhere you'd write `L0`, you can write `base` instead.
+
+## Cursor
+
+The cursor is a visible crosshair at a fixed sketch position. It serves as a reference point for relative coordinates and can be used as a coordinate in commands.
+
+```
+cursor                       Show current position
+cursor 5,3                   Set to absolute position
+cursor L0.p2                 Set to endpoint
+cursor @dx,dy                Move relative to current position
+cursor on                    Show (at 0,0 if not set)
+cursor off                   Hide cursor
+```
+
+The cursor is automatically set to the last created endpoint:
+- `add_line` → cursor at p2
+- `add_point` → cursor at point position
+- `add_circle` → cursor at center
+
+Append `nocursor` to suppress: `add_line 0,0 5,0 nocursor`
+
+Use `cursor` as a coordinate in any command:
+```
+cursor 5,0
+add_line cursor 5,3          Line from cursor position
+add_point cursor              Point at cursor
+```
+
+## Dimension Text Position
+
+Control where dimension text is rendered:
+
+```
+dim_pos d0 offset 1.5        Set perpendicular offset from dimension line
+dim_pos d0 along 0.3         Set position along dimension (-0.5 to 0.5)
+dim_pos d0 offset @0.5       Relative offset change
+dim_pos d0 along @-0.1       Relative along change
+```
+
+`info d0` shows current offset and along values.
 
 ## Session Variables
 

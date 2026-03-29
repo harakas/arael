@@ -22,7 +22,7 @@ pub struct CommandContext {
     pub session_vars: HashMap<String, f64>,
     pub session_vecs: HashMap<String, vect2d>,
     pub session_names: HashMap<String, String>, // variable -> entity name aliases
-    pub last_point: Option<vect2d>,
+    pub cursor: Option<vect2d>,
     pub status_error: Option<String>,
     pub last_cost: f64,
     pub dof: Option<usize>,
@@ -43,7 +43,7 @@ impl CommandContext {
             session_vars: HashMap::new(),
             session_vecs: HashMap::new(),
             session_names: HashMap::new(),
-            last_point: None,
+            cursor: None,
             status_error: None,
             last_cost: 0.0,
             dof: None,
@@ -62,7 +62,7 @@ impl CommandContext {
             session_vars: HashMap::new(),
             session_vecs: HashMap::new(),
             session_names: HashMap::new(),
-            last_point: None,
+            cursor: None,
             status_error: None,
             last_cost: 0.0,
             dof: None,
@@ -421,18 +421,22 @@ fn eval_geo_scalar(sketch: &Sketch, call: &str) -> Option<Result<f64, String>> {
 // Coordinate parsing
 // ---------------------------------------------------------------------------
 
-fn parse_coord(ctx: &CommandContext, arg: &str, last_point: Option<vect2d>) -> Result<vect2d, String> {
+fn parse_coord(ctx: &CommandContext, arg: &str, cursor: Option<vect2d>) -> Result<vect2d, String> {
     let sketch = &ctx.sketch;
     let arg = arg.trim();
     // Relative coordinate: @dx,dy
     if let Some(rest) = arg.strip_prefix('@') {
-        let prev = last_point.ok_or("No previous point for relative coordinate")?;
+        let prev = cursor.ok_or("No previous point for relative coordinate")?;
         if let Some((x_str, y_str)) = rest.split_once(',') {
             let dx = eval_expr_with(sketch, x_str.trim(), &ctx.session_vars)?;
             let dy = eval_expr_with(sketch, y_str.trim(), &ctx.session_vars)?;
             return Ok(vect2d::new(prev.x + dx, prev.y + dy));
         }
         return Err(format!("Relative coordinate needs @dx,dy format: {}", arg));
+    }
+    // Cursor keyword
+    if arg == "cursor" {
+        return ctx.cursor.ok_or("Cursor not set".into());
     }
     // Geometric function: intersect(L0, L1), midpoint(L0), tangent(L0), etc.
     if let Some(result) = eval_geo_coord(sketch, arg) {
@@ -765,6 +769,8 @@ fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
         "goto" => cmd_goto(ctx, args_str),
         "center" => cmd_center(ctx, args_str),
         "zoom" => cmd_zoom(ctx, args_str),
+        "cursor" => cmd_cursor(ctx, args_str),
+        "dim_pos" => cmd_dim_pos(ctx, args_str),
         "clear" => { ctx.sketch = Sketch::new(); ctx.history = crate::history::History::new(&ctx.sketch); ok("Cleared") },
         "let" => cmd_let(ctx, args_str),
         "save" => cmd_save(ctx, args_str),
@@ -828,11 +834,13 @@ fn auto_coincident_line(ctx: &mut CommandContext, line_ref: Ref<Line>) -> Vec<St
 
 fn cmd_add_line(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let mut tokens: Vec<&str> = args.split_whitespace().collect();
+    let nocursor = tokens.last() == Some(&"nocursor");
+    if nocursor { tokens.pop(); }
     let noconnect = tokens.last() == Some(&"noconnect");
     if noconnect { tokens.pop(); }
     let (p1, p2) = match tokens.len() {
         2 => {
-            let p1 = match parse_coord(ctx, tokens[0], ctx.last_point) {
+            let p1 = match parse_coord(ctx, tokens[0], ctx.cursor) {
                 Ok(p) => p, Err(e) => return err(e),
             };
             let p2 = match parse_coord(ctx, tokens[1], Some(p1)) {
@@ -841,7 +849,7 @@ fn cmd_add_line(ctx: &mut CommandContext, args: &str) -> CommandResult {
             (p1, p2)
         }
         1 => {
-            let prev = match ctx.last_point {
+            let prev = match ctx.cursor {
                 Some(p) => p,
                 None => return err("No previous point. Use: add_line x1,y1 x2,y2"),
             };
@@ -856,7 +864,7 @@ fn cmd_add_line(ctx: &mut CommandContext, args: &str) -> CommandResult {
     ctx.exec(Action::AddLine { p1, p2 });
     let line_ref = ctx.sketch.lines.refs().last().unwrap();
     let name = ctx.sketch.lines[line_ref].name.clone();
-    ctx.last_point = Some(p2);
+    if !nocursor { ctx.cursor = Some(p2); }
     ctx.session_names.insert("_".into(), name.clone());
     let mut msg = format!("Added {}: ({:.2},{:.2})-({:.2},{:.2})", name, p1.x, p1.y, p2.x, p2.y);
     if !noconnect {
@@ -869,13 +877,13 @@ fn cmd_add_line(ctx: &mut CommandContext, args: &str) -> CommandResult {
 }
 
 fn cmd_add_point(ctx: &mut CommandContext, args: &str) -> CommandResult {
-    let pos = match parse_coord(ctx, args.trim(), ctx.last_point) {
+    let pos = match parse_coord(ctx, args.trim(), ctx.cursor) {
         Ok(p) => p, Err(e) => return err(e),
     };
     ctx.begin_group();
     ctx.exec(Action::AddPoint { pos });
     let name = ctx.sketch.points.refs().last().map(|r| ctx.sketch.points[r].name.clone()).unwrap_or_default();
-    ctx.last_point = Some(pos);
+    ctx.cursor = Some(pos);
     ctx.session_names.insert("_".into(), name.clone());
     ok(format!("Added {}: ({:.2},{:.2})", name, pos.x, pos.y))
 }
@@ -885,7 +893,7 @@ fn cmd_add_circle(ctx: &mut CommandContext, args: &str) -> CommandResult {
     if tokens.len() != 2 {
         return err("Usage: add_circle cx,cy radius");
     }
-    let center = match parse_coord(ctx, tokens[0], ctx.last_point) {
+    let center = match parse_coord(ctx, tokens[0], ctx.cursor) {
         Ok(p) => p, Err(e) => return err(e),
     };
     let r = match eval_expr(&ctx.sketch, tokens[1]) {
@@ -1358,7 +1366,8 @@ fn cmd_info(ctx: &mut CommandContext, args: &str) -> CommandResult {
     } else if name.starts_with('d') {
         if let Some(d) = ctx.sketch.dimensions.iter().find(|d| d.name == name) {
             let expr = d.expr_str.as_deref().unwrap_or("(numeric)");
-            ok(format!("{}: value={:.4} expr={}{}", d.name, d.value, expr,
+            ok(format!("{}: value={:.4} expr={} offset={:.2} along={:.2}{}",
+                d.name, d.value, expr, d.offset.y, d.text_along,
                 if d.broken { " [BROKEN]" } else { "" }))
         } else {
             err(format!("Unknown dimension: {}", name))
@@ -1523,13 +1532,13 @@ fn cmd_zoom(ctx: &mut CommandContext, args: &str) -> CommandResult {
 fn cmd_add_arc(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let tokens: Vec<&str> = args.split_whitespace().collect();
     if tokens.len() != 3 { return err("Usage: add_arc x1,y1 x2,y2 xm,ym (start, end, midpoint)"); }
-    let p1 = match parse_coord(ctx, tokens[0], ctx.last_point) { Ok(p) => p, Err(e) => return err(e) };
+    let p1 = match parse_coord(ctx, tokens[0], ctx.cursor) { Ok(p) => p, Err(e) => return err(e) };
     let p2 = match parse_coord(ctx, tokens[1], Some(p1)) { Ok(p) => p, Err(e) => return err(e) };
     let pm = match parse_coord(ctx, tokens[2], None) { Ok(p) => p, Err(e) => return err(e) };
     ctx.begin_group();
     ctx.exec(Action::AddArc { start: p1, end: p2, mid: pm, swapped: false });
     let name = ctx.sketch.arcs.refs().last().map(|r| ctx.sketch.arcs[r].name.clone()).unwrap_or_default();
-    ctx.last_point = Some(p2);
+    ctx.cursor = Some(p2);
     ctx.session_names.insert("_".into(), name.clone());
     ok(format!("Added {}", name))
 }
@@ -1551,7 +1560,7 @@ fn cmd_offset_line(ctx: &mut CommandContext, args: &str) -> CommandResult {
     ctx.begin_group();
     ctx.exec(Action::AddLine { p1, p2 });
     let name = ctx.sketch.lines.refs().last().map(|r| ctx.sketch.lines[r].name.clone()).unwrap_or_default();
-    ctx.last_point = Some(p2);
+    ctx.cursor = Some(p2);
     ctx.session_names.insert("_".into(), name.clone());
     ok(format!("Added {} (offset of {} by {})", name, tokens[0], d))
 }
@@ -1999,6 +2008,73 @@ fn cmd_load(ctx: &mut CommandContext, args: &str) -> CommandResult {
 }
 
 // ---------------------------------------------------------------------------
+// Cursor
+// ---------------------------------------------------------------------------
+
+fn cmd_cursor(ctx: &mut CommandContext, args: &str) -> CommandResult {
+    let args = args.trim();
+    if args.is_empty() {
+        // Show cursor position
+        return match ctx.cursor {
+            Some(p) => ok(format!("Cursor: ({:.4}, {:.4})", p.x, p.y)),
+            None => ok("Cursor: off"),
+        };
+    }
+    match args {
+        "off" | "hide" => { ctx.cursor = None; return ok("Cursor hidden"); }
+        "on" | "show" => {
+            if ctx.cursor.is_none() { ctx.cursor = Some(vect2d::new(0.0, 0.0)); }
+            let p = ctx.cursor.unwrap();
+            return ok(format!("Cursor: ({:.4}, {:.4})", p.x, p.y));
+        }
+        _ => {}
+    }
+    // Set cursor to coordinate (absolute, relative, endpoint ref, etc.)
+    match parse_coord(ctx, args, ctx.cursor) {
+        Ok(p) => { ctx.cursor = Some(p); ok(format!("Cursor: ({:.4}, {:.4})", p.x, p.y)) }
+        Err(e) => err(e),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Dimension text position
+// ---------------------------------------------------------------------------
+
+fn cmd_dim_pos(ctx: &mut CommandContext, args: &str) -> CommandResult {
+    let tokens: Vec<&str> = args.split_whitespace().collect();
+    if tokens.len() != 3 { return err("Usage: dim_pos d0 offset 1.5  or  dim_pos d0 along 0.3"); }
+    let dim_name = tokens[0];
+    let field = tokens[1];
+    let val_str = tokens[2];
+    let idx = match ctx.sketch.dimensions.iter().position(|d| d.name == dim_name) {
+        Some(i) => i,
+        None => return err(format!("Unknown dimension: {}", dim_name)),
+    };
+    let is_relative = val_str.starts_with('@');
+    let val_str = val_str.strip_prefix('@').unwrap_or(val_str);
+    let val = match eval_expr(&ctx.sketch, val_str) { Ok(v) => v, Err(e) => return err(e) };
+    match field {
+        "offset" => {
+            if is_relative {
+                ctx.sketch.dimensions[idx].offset.y += val;
+            } else {
+                ctx.sketch.dimensions[idx].offset.y = val;
+            }
+            ok(format!("{} offset = {:.4}", dim_name, ctx.sketch.dimensions[idx].offset.y))
+        }
+        "along" => {
+            if is_relative {
+                ctx.sketch.dimensions[idx].text_along += val;
+            } else {
+                ctx.sketch.dimensions[idx].text_along = val;
+            }
+            ok(format!("{} along = {:.4}", dim_name, ctx.sketch.dimensions[idx].text_along))
+        }
+        _ => err(format!("Unknown field '{}'. Use: offset, along", field)),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Help
 // ---------------------------------------------------------------------------
 
@@ -2008,7 +2084,7 @@ fn cmd_help(args: &str) -> CommandResult {
             parallel perpendicular equal collinear tangent coincident concentric midpoint \
             symmetry point_on length radius angle distance remove_dim lock unlock param \
             del_param rename_param style select deselect print info list find dof cost \
-            undo redo history goto center zoom clear let save load \
+            undo redo history goto center zoom cursor dim_pos clear let save load \
             remove_constraint(rc) help\n\
             Type 'help <command>' for details. Use / to open command panel.")
     } else {
@@ -2052,6 +2128,8 @@ fn cmd_help(args: &str) -> CommandResult {
             "goto" => "goto <position> (jump to history position)",
             "center" => "center L0 | center x,y | center (fit all)",
             "zoom" => "zoom + | zoom - | zoom 2.0",
+            "cursor" => "cursor [x,y | @dx,dy | on | off] — show/set/hide command cursor",
+            "dim_pos" => "dim_pos d0 offset 1.5 | dim_pos d0 along 0.3 (@ for relative)",
             "clear" => "clear (new empty sketch)",
             "add_arc" => "add_arc x1,y1 x2,y2 xm,ym (start, end, midpoint)",
             "offset_line" | "offset" => "offset_line L0 distance (create parallel line offset by distance)",
@@ -2652,5 +2730,104 @@ mod tests {
         let mut ctx = CommandContext::new();
         let out = run_ok(&mut ctx, "param kala 12+3*4");
         assert!(out.contains("24"), "Should show evaluated value: {}", out);
+    }
+
+    // -- Cursor --
+
+    #[test]
+    fn test_cursor_set() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "cursor 5,3");
+        assert!(ctx.cursor.is_some());
+        assert!(near(ctx.cursor.unwrap().x, 5.0));
+        assert!(near(ctx.cursor.unwrap().y, 3.0));
+    }
+
+    #[test]
+    fn test_cursor_from_add_line() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0");
+        assert!(ctx.cursor.is_some());
+        assert!(near(ctx.cursor.unwrap().x, 5.0));
+        assert!(near(ctx.cursor.unwrap().y, 0.0));
+    }
+
+    #[test]
+    fn test_cursor_relative() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "cursor 1,1");
+        run_ok(&mut ctx, "cursor @2,3");
+        assert!(near(ctx.cursor.unwrap().x, 3.0));
+        assert!(near(ctx.cursor.unwrap().y, 4.0));
+    }
+
+    #[test]
+    fn test_cursor_as_coord() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "cursor 5,0");
+        run_ok(&mut ctx, "add_line cursor 5,3");
+        let r = resolve_line(&ctx.sketch, "L0").unwrap();
+        assert!(near(ctx.sketch.lines[r].p1.value.x, 5.0));
+        assert!(near(ctx.sketch.lines[r].p1.value.y, 0.0));
+    }
+
+    #[test]
+    fn test_cursor_off() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "cursor 5,3");
+        assert!(ctx.cursor.is_some());
+        run_ok(&mut ctx, "cursor off");
+        assert!(ctx.cursor.is_none());
+    }
+
+    #[test]
+    fn test_cursor_nocursor() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "cursor 1,1");
+        run_ok(&mut ctx, "add_line 0,0 5,0 nocursor");
+        // Cursor should still be at 1,1, not moved to 5,0
+        assert!(near(ctx.cursor.unwrap().x, 1.0));
+    }
+
+    #[test]
+    fn test_cursor_endpoint_ref() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0");
+        run_ok(&mut ctx, "cursor L0.p1");
+        assert!(near(ctx.cursor.unwrap().x, 0.0));
+    }
+
+    #[test]
+    fn test_cursor_query() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "cursor 3,7");
+        let out = run_ok(&mut ctx, "cursor");
+        assert!(out.contains("3.0000") && out.contains("7.0000"));
+    }
+
+    // -- Dimension text position --
+
+    #[test]
+    fn test_dim_pos_offset() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0; length L0 3");
+        run_ok(&mut ctx, "dim_pos d0 offset 2.0");
+        assert!(near(ctx.sketch.dimensions[0].offset.y, 2.0));
+    }
+
+    #[test]
+    fn test_dim_pos_along() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0; length L0 3");
+        run_ok(&mut ctx, "dim_pos d0 along 0.5");
+        assert!(near(ctx.sketch.dimensions[0].text_along, 0.5));
+    }
+
+    #[test]
+    fn test_dim_info_shows_position() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0; length L0 3");
+        let out = run_ok(&mut ctx, "info d0");
+        assert!(out.contains("offset=") && out.contains("along="));
     }
 }

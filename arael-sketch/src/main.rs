@@ -149,7 +149,7 @@ pub struct EditorApp {
     pub command_history_pos: usize,
     pub command_output: Vec<(String, bool)>, // (text, is_error)
     pub command_focus: bool,                  // request focus next frame
-    pub last_command_point: Option<vect2d>,   // for chaining add_line
+    pub command_cursor: Option<vect2d>,   // for chaining add_line
     pub session_vars: HashMap<String, f64>,  // session variables from 'let' commands
     pub session_vecs: HashMap<String, vect2d>, // session coordinate variables
     pub session_names: HashMap<String, String>, // entity name aliases
@@ -257,7 +257,7 @@ impl EditorApp {
             command_history_pos: 0,
             command_output: Vec::new(),
             command_focus: false,
-            last_command_point: None,
+            command_cursor: None,
             session_vars: HashMap::new(),
             session_vecs: HashMap::new(),
             session_names: HashMap::new(),
@@ -723,7 +723,7 @@ impl EditorApp {
             session_vars: std::mem::replace(&mut self.session_vars, HashMap::new()),
             session_vecs: std::mem::replace(&mut self.session_vecs, HashMap::new()),
             session_names: std::mem::replace(&mut self.session_names, HashMap::new()),
-            last_point: self.last_command_point,
+            cursor: self.command_cursor,
             status_error: self.status_error.take(),
             last_cost: self.last_cost,
             dof: self.dof_display,
@@ -740,7 +740,7 @@ impl EditorApp {
         self.session_vars = ctx.session_vars;
         self.session_vecs = ctx.session_vecs;
         self.session_names = ctx.session_names;
-        self.last_command_point = ctx.last_point;
+        self.command_cursor = ctx.cursor;
         self.status_error = ctx.status_error;
         self.last_cost = ctx.last_cost;
         self.dof_display = ctx.dof;
