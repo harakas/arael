@@ -29,21 +29,17 @@ impl eframe::App for EditorApp {
         egui::SidePanel::left("toolbar").min_width(140.0).show(ctx, |ui| {
             // Theme toggle
             ui.horizontal(|ui| {
-                let theme_label = if self.dark_mode { "Light" } else { "Dark" };
-                if ui.button(theme_label).clicked() {
+                if ui.selectable_label(self.dark_mode, "Dark").clicked() {
                     self.dark_mode = !self.dark_mode;
                     self.colors = if self.dark_mode { ColorScheme::dark() } else { ColorScheme::light() };
                 }
-                let constr_label = if self.show_constraints { "Hide Cstr" } else { "Show Cstr" };
-                if ui.button(constr_label).clicked() {
+                if ui.selectable_label(self.show_constraints, "Cstr").clicked() {
                     self.show_constraints = !self.show_constraints;
                 }
-                let params_label = if self.show_params { "Hide Params" } else { "Params" };
-                if ui.button(params_label).clicked() {
+                if ui.selectable_label(self.show_params, "Param").clicked() {
                     self.show_params = !self.show_params;
                 }
-                let cmd_label = if self.show_command { "Hide (/)" } else { "(/) Cmd" };
-                if ui.button(cmd_label).clicked() {
+                if ui.selectable_label(self.show_command, "/Cmd").clicked() {
                     self.show_command = !self.show_command;
                     if self.show_command { self.command_focus = true; }
                 }
