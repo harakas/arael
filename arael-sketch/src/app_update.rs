@@ -449,6 +449,89 @@ impl eframe::App for EditorApp {
             });
         }
 
+        // Command panel (bottom, toggled with /)
+        if self.show_command {
+            egui::TopBottomPanel::bottom("command_panel")
+                .resizable(true)
+                .min_height(60.0)
+                .default_height(150.0)
+                .show(ctx, |ui| {
+                // Layout: input pinned to bottom, scroll area fills the rest above
+                ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+                    // Input row (at the bottom)
+                    ui.horizontal(|ui| {
+                        ui.label(">");
+                        let r = ui.add(
+                            egui::TextEdit::singleline(&mut self.command_input)
+                                .desired_width(ui.available_width() - 10.0)
+                                .hint_text("type command, / to toggle, help for commands")
+                                .font(egui::TextStyle::Monospace),
+                        );
+                        if self.command_focus {
+                            r.request_focus();
+                            self.command_focus = false;
+                        }
+                        if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                            let input = self.command_input.trim().to_string();
+                            if !input.is_empty() {
+                                self.command_history.push(input.clone());
+                                self.command_history_pos = self.command_history.len();
+                                self.command_output.push((format!("> {}", input), false));
+                                let results = self.run_commands(&input);
+                                for result in results {
+                                    if !result.output.is_empty() {
+                                        self.command_output.push((result.output, result.is_error));
+                                    }
+                                }
+                                self.command_input.clear();
+                            }
+                            self.command_focus = true;
+                        }
+                        if r.has_focus() {
+                            if ui.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
+                                if self.command_history_pos > 0 {
+                                    self.command_history_pos -= 1;
+                                    self.command_input = self.command_history[self.command_history_pos].clone();
+                                }
+                            }
+                            if ui.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
+                                if self.command_history_pos < self.command_history.len() {
+                                    self.command_history_pos += 1;
+                                    if self.command_history_pos < self.command_history.len() {
+                                        self.command_input = self.command_history[self.command_history_pos].clone();
+                                    } else {
+                                        self.command_input.clear();
+                                    }
+                                }
+                            }
+                            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                                self.show_command = false;
+                            }
+                        }
+                    });
+                    // Scroll area fills remaining space above input (normal top-down order)
+                    let scroll_h = ui.available_height();
+                    ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
+                        egui::ScrollArea::vertical()
+                            .max_height(scroll_h)
+                            .stick_to_bottom(true)
+                            .show(ui, |ui| {
+                            for (text, is_err) in &self.command_output {
+                                let color = if *is_err {
+                                    egui::Color32::from_rgb(255, 80, 80)
+                                } else {
+                                    ui.visuals().text_color()
+                                };
+                                for line in text.lines() {
+                                    ui.colored_label(color, line);
+                                }
+                            }
+                        });
+                    });
+                });
+            });
+        }
+
         // Central panel: canvas
         egui::CentralPanel::default().show(ctx, |ui| {
             let (response, painter) = ui.allocate_painter(
@@ -491,6 +574,10 @@ impl eframe::App for EditorApp {
                 self.tool = Tool::Dimension;
                 self.dim_editing = false;
                 self.dim_kind = None;
+            }
+            if ui.input(|i| i.key_pressed(egui::Key::Slash)) {
+                self.show_command = !self.show_command;
+                if self.show_command { self.command_focus = true; }
             }
             } // !wants_keyboard_input
             if ui.input(|i| i.key_pressed(egui::Key::Escape)) {

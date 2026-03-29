@@ -12,7 +12,9 @@ mod geometry;
 mod drawing;
 mod app_update;
 mod conflicts;
+mod commands;
 
+use std::collections::HashMap;
 use eframe::egui;
 use arael::model::{Param, CrossBlock};
 use arael::simple_lm::LmProblem;
@@ -139,6 +141,18 @@ pub struct EditorApp {
     pub param_focus_new: bool,
     pub param_focus_field: Option<bool>, // None=no focus request, Some(false)=name, Some(true)=expr
 
+    // Command panel
+    pub show_command: bool,
+    pub command_input: String,
+    pub command_history: Vec<String>,
+    pub command_history_pos: usize,
+    pub command_output: Vec<(String, bool)>, // (text, is_error)
+    pub command_focus: bool,                  // request focus next frame
+    pub last_command_point: Option<vect2d>,   // for chaining add_line
+    pub session_vars: HashMap<String, f64>,  // session variables from 'let' commands
+    pub session_vecs: HashMap<String, vect2d>, // session coordinate variables
+    pub session_names: HashMap<String, String>, // entity name aliases
+
     // Constraint conflict error message
     pub status_error: Option<String>,
     pub last_cost: f64,
@@ -235,6 +249,16 @@ impl EditorApp {
             param_edit_expr: String::new(),
             param_focus_new: false,
             param_focus_field: None,
+            show_command: false,
+            command_input: String::new(),
+            command_history: Vec::new(),
+            command_history_pos: 0,
+            command_output: Vec::new(),
+            command_focus: false,
+            last_command_point: None,
+            session_vars: HashMap::new(),
+            session_vecs: HashMap::new(),
+            session_names: HashMap::new(),
             dark_mode: cfg!(target_arch = "wasm32"),
             colors: if cfg!(target_arch = "wasm32") { ColorScheme::dark() } else { ColorScheme::light() },
             status_error: None,
@@ -683,6 +707,46 @@ impl EditorApp {
     pub fn compute_dof_async(&mut self) {
         // No threads on WASM — compute synchronously
         self.dof_display = Some(compute_dof(&mut self.sketch));
+    }
+
+    /// Create a CommandContext view of this app's state, run commands, sync back.
+    pub fn run_commands(&mut self, input: &str) -> Vec<crate::commands::CommandResult> {
+        let empty_sketch = Sketch::new();
+        let empty_history = crate::history::History::new(&empty_sketch);
+        let mut ctx = crate::commands::CommandContext {
+            sketch: std::mem::replace(&mut self.sketch, empty_sketch),
+            history: std::mem::replace(&mut self.history, empty_history),
+            selection: std::mem::replace(&mut self.selection, Vec::new()),
+            session_vars: std::mem::replace(&mut self.session_vars, HashMap::new()),
+            session_vecs: std::mem::replace(&mut self.session_vecs, HashMap::new()),
+            session_names: std::mem::replace(&mut self.session_names, HashMap::new()),
+            last_point: self.last_command_point,
+            status_error: self.status_error.take(),
+            last_cost: self.last_cost,
+            dof: self.dof_display,
+            scale: self.scale,
+            offset_x: self.offset.x,
+            offset_y: self.offset.y,
+            pending_fit: self.pending_fit,
+        };
+        let results = crate::commands::execute(&mut ctx, input);
+        // Sync back
+        self.sketch = ctx.sketch;
+        self.history = ctx.history;
+        self.selection = ctx.selection;
+        self.session_vars = ctx.session_vars;
+        self.session_vecs = ctx.session_vecs;
+        self.session_names = ctx.session_names;
+        self.last_command_point = ctx.last_point;
+        self.status_error = ctx.status_error;
+        self.last_cost = ctx.last_cost;
+        self.dof_display = ctx.dof;
+        self.scale = ctx.scale;
+        self.offset.x = ctx.offset_x;
+        self.offset.y = ctx.offset_y;
+        self.pending_fit = ctx.pending_fit;
+        self.compute_dof_async();
+        results
     }
 
     // Execute an action: apply to sketch and record in history.
