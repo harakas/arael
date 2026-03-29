@@ -71,4 +71,38 @@ impl History {
         sketch.solve();
         Some(sketch)
     }
+
+    /// Return a list of (group_id, end_position, first_action_description) for
+    /// all groups in the history. Position is the cursor value after the group.
+    pub fn group_list(&self) -> Vec<(u32, usize, String)> {
+        let mut result = Vec::new();
+        let mut i = 0;
+        while i < self.actions.len() {
+            let gid = self.groups[i];
+            let desc = self.actions[i].describe();
+            let mut count = 0;
+            while i < self.actions.len() && self.groups[i] == gid {
+                i += 1;
+                count += 1;
+            }
+            let label = if count > 1 { format!("{} (+{})", desc, count - 1) } else { desc };
+            result.push((gid, i, label));
+        }
+        result
+    }
+
+    /// Undo/redo to reach the given cursor position.
+    /// Returns the resulting sketch, or None if position is invalid.
+    pub fn goto(&mut self, target: usize) -> Option<Sketch> {
+        let mut result = None;
+        while self.cursor > target {
+            result = self.undo();
+            if result.is_none() { break; }
+        }
+        while self.cursor < target {
+            result = self.redo();
+            if result.is_none() { break; }
+        }
+        result
+    }
 }

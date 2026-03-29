@@ -76,6 +76,8 @@ pub enum Action {
     DeleteLine { line: Ref<Line> },
     ToggleStyleLine { line: Ref<Line> },
     ToggleStyleArc { arc: Ref<Arc> },
+    SetStyleLine { line: Ref<Line>, style: LineStyle },
+    SetStyleArc { arc: Ref<Arc>, style: LineStyle },
     DeleteArc { arc: Ref<Arc> },
     AddDimension { kind: DimensionKind, value: f64, expr: Option<String> },
     UpdateDimension { index: usize, value: f64, expr: Option<String> },
@@ -88,6 +90,76 @@ pub enum Action {
 }
 
 impl Action {
+    /// Human-readable description of this action.
+    pub fn describe(&self) -> String {
+        match self {
+            Action::AddPoint { .. } => "Add point".into(),
+            Action::AddHelperPoint { .. } => "Add helper point".into(),
+            Action::AddLine { .. } => "Add line".into(),
+            Action::AddCircle { .. } => "Add circle".into(),
+            Action::AddArc { .. } => "Add arc".into(),
+            Action::ApplyHorizontal { lines } => format!("Horizontal ({})", lines.len()),
+            Action::ApplyVertical { lines } => format!("Vertical ({})", lines.len()),
+            Action::ApplyCoincidentPP { .. } => "Coincident PP".into(),
+            Action::ApplyCoincidentLL11 { .. } | Action::ApplyCoincidentLL12 { .. } |
+            Action::ApplyCoincidentLL21 { .. } | Action::ApplyCoincidentLL22 { .. } => "Coincident LL".into(),
+            Action::ApplyCoincidentLP1 { .. } | Action::ApplyCoincidentLP2 { .. } => "Coincident LP".into(),
+            Action::ApplyParallel { .. } => "Parallel".into(),
+            Action::ApplyPerpendicular { .. } => "Perpendicular".into(),
+            Action::ApplyEqualLength { .. } => "Equal length".into(),
+            Action::ApplyCollinear { .. } => "Collinear".into(),
+            Action::ApplySymmetryLL { .. } => "Symmetry".into(),
+            Action::ApplyMidpoint { .. } | Action::ApplyMidpointLP1 { .. } |
+            Action::ApplyMidpointLP2 { .. } | Action::ApplyMidpointArcStart { .. } |
+            Action::ApplyMidpointArcEnd { .. } => "Midpoint".into(),
+            Action::ApplyPointOnLine { .. } => "Point on line".into(),
+            Action::ApplyPointOnArc { .. } => "Point on arc".into(),
+            Action::ApplyLineP1OnLine { .. } | Action::ApplyLineP2OnLine { .. } => "Endpoint on line".into(),
+            Action::ApplyLineP1OnArc { .. } | Action::ApplyLineP2OnArc { .. } => "Endpoint on arc".into(),
+            Action::ApplyTangentLA { .. } => "Tangent LA".into(),
+            Action::ApplyTangentAA { .. } => "Tangent AA".into(),
+            Action::ApplyConcentric { .. } => "Concentric".into(),
+            Action::ApplyEqualRadius { .. } => "Equal radius".into(),
+            Action::ApplyCoincidentArcCenter { .. } | Action::ApplyCoincidentArcStart { .. } |
+            Action::ApplyCoincidentArcEnd { .. } => "Coincident arc point".into(),
+            Action::ApplyCoincidentLP1ArcCenter { .. } | Action::ApplyCoincidentLP2ArcCenter { .. } |
+            Action::ApplyCoincidentLP1ArcStart { .. } | Action::ApplyCoincidentLP2ArcStart { .. } |
+            Action::ApplyCoincidentLP1ArcEnd { .. } | Action::ApplyCoincidentLP2ArcEnd { .. } => "Coincident line-arc".into(),
+            Action::ApplyCoincidentArcCenterStart { .. } | Action::ApplyCoincidentArcCenterEnd { .. } |
+            Action::ApplyCoincidentArcStartCenter { .. } | Action::ApplyCoincidentArcEndCenter { .. } |
+            Action::ApplyCoincidentArcStartStart { .. } | Action::ApplyCoincidentArcStartEnd { .. } |
+            Action::ApplyCoincidentArcEndStart { .. } | Action::ApplyCoincidentArcEndEnd { .. } => "Coincident arc-arc".into(),
+            Action::LockPoint { .. } => "Lock point".into(),
+            Action::UnlockPoint { .. } => "Unlock point".into(),
+            Action::LockLineP1 { .. } | Action::LockLineP2 { .. } => "Lock endpoint".into(),
+            Action::UnlockLineP1 { .. } | Action::UnlockLineP2 { .. } => "Unlock endpoint".into(),
+            Action::LockArcCenter { .. } => "Lock arc center".into(),
+            Action::UnlockArcCenter { .. } => "Unlock arc center".into(),
+            Action::DeletePoint { .. } => "Delete point".into(),
+            Action::DeleteLine { .. } => "Delete line".into(),
+            Action::DeleteArc { .. } => "Delete arc".into(),
+            Action::ToggleStyleLine { .. } | Action::ToggleStyleArc { .. } => "Toggle style".into(),
+            Action::SetStyleLine { .. } | Action::SetStyleArc { .. } => "Set style".into(),
+            Action::AddDimension { kind, expr, .. } => {
+                let kind_str = match kind {
+                    DimensionKind::LineLength(_) => "length",
+                    DimensionKind::ArcRadius(_) => "radius",
+                    DimensionKind::PointPointDistance(_, _) => "distance",
+                    DimensionKind::PointLineDistance(_, _) => "distance",
+                    DimensionKind::Angle(_, _, _) => "angle",
+                };
+                if expr.is_some() { format!("Add {} (expr)", kind_str) }
+                else { format!("Add {}", kind_str) }
+            }
+            Action::UpdateDimension { .. } => "Update dimension".into(),
+            Action::RemoveDimension { .. } => "Remove dimension".into(),
+            Action::AddUserParam { name, .. } => format!("Add param {}", name),
+            Action::UpdateUserParam { name, .. } => format!("Update param {}", name),
+            Action::RemoveUserParam { .. } => "Remove param".into(),
+            Action::Drag { .. } => "Drag".into(),
+        }
+    }
+
     /// Returns true for constraint-adding actions that should be validated
     /// by the solver (cost check after application).
     pub fn is_constraint_action(&self) -> bool {
@@ -417,6 +489,12 @@ impl Action {
             }
             Action::ToggleStyleArc { arc } => {
                 sketch.arcs[*arc].style = sketch.arcs[*arc].style.next();
+            }
+            Action::SetStyleLine { line, style } => {
+                sketch.lines[*line].style = *style;
+            }
+            Action::SetStyleArc { arc, style } => {
+                sketch.arcs[*arc].style = *style;
             }
             Action::DeleteArc { arc } => {
                 sketch.delete_arc(*arc);

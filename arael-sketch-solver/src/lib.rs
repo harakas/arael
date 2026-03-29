@@ -885,6 +885,66 @@ impl Sketch {
     }
 
     /// Add an expression-based dimension. The expression string is parsed
+    /// List all active constraints as human-readable strings.
+    pub fn list_constraints(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        // Entity-level flags
+        for r in self.lines.refs() {
+            let l = &self.lines[r];
+            if l.constraints.horizontal { out.push(format!("horizontal {}", l.name)); }
+            if l.constraints.vertical { out.push(format!("vertical {}", l.name)); }
+            if l.constraints.has_length { out.push(format!("length {} = {}", l.name, l.constraints.length)); }
+            if !l.p1.optimize { out.push(format!("lock {}.p1", l.name)); }
+            if !l.p2.optimize { out.push(format!("lock {}.p2", l.name)); }
+        }
+        for r in self.points.refs() {
+            let p = &self.points[r];
+            if p.constraints.has_fix_x || p.constraints.has_fix_y {
+                out.push(format!("lock {}", p.name));
+            }
+        }
+        for r in self.arcs.refs() {
+            let a = &self.arcs[r];
+            if a.constraints.has_target_radius { out.push(format!("radius {} = {}", a.name, a.constraints.target_radius)); }
+            if !a.center.optimize { out.push(format!("lock {}.center", a.name)); }
+        }
+        // Constraint vectors (use macros to reduce repetition)
+        macro_rules! list_cross {
+            ($vec:expr, $name:literal, $fa:ident, $fb:ident) => {
+                for c in &$vec {
+                    let na = &self.lines[c.$fa].name;
+                    let nb = &self.lines[c.$fb].name;
+                    out.push(format!("{} {} {}", $name, na, nb));
+                }
+            };
+        }
+        list_cross!(self.parallel, "parallel", a, b);
+        list_cross!(self.perpendicular, "perpendicular", a, b);
+        list_cross!(self.collinear, "collinear", a, b);
+        list_cross!(self.equal_length, "equal_length", a, b);
+        for c in &self.coincident_pp {
+            out.push(format!("coincident {} {}", self.points[c.a].name, self.points[c.b].name));
+        }
+        for c in &self.coincident_ll11 { out.push(format!("coincident {}.p1 {}.p1", self.lines[c.a].name, self.lines[c.b].name)); }
+        for c in &self.coincident_ll12 { out.push(format!("coincident {}.p1 {}.p2", self.lines[c.a].name, self.lines[c.b].name)); }
+        for c in &self.coincident_ll21 { out.push(format!("coincident {}.p2 {}.p1", self.lines[c.a].name, self.lines[c.b].name)); }
+        for c in &self.coincident_ll22 { out.push(format!("coincident {}.p2 {}.p2", self.lines[c.a].name, self.lines[c.b].name)); }
+        for c in &self.coincident_lp1 { out.push(format!("coincident {}.p1 {}", self.lines[c.line].name, self.points[c.point].name)); }
+        for c in &self.coincident_lp2 { out.push(format!("coincident {}.p2 {}", self.lines[c.line].name, self.points[c.point].name)); }
+        for c in &self.angle { out.push(format!("angle {} {} = {:.1}deg", self.lines[c.a].name, self.lines[c.b].name, c.angle.to_degrees())); }
+        for c in &self.tangent_la { out.push(format!("tangent {} {}", self.lines[c.line].name, self.arcs[c.arc].name)); }
+        for c in &self.tangent_aa { out.push(format!("tangent {} {}", self.arcs[c.a].name, self.arcs[c.b].name)); }
+        for c in &self.concentric { out.push(format!("concentric {} {}", self.arcs[c.a].name, self.arcs[c.b].name)); }
+        for c in &self.equal_radius { out.push(format!("equal_radius {} {}", self.arcs[c.a].name, self.arcs[c.b].name)); }
+        for c in &self.symmetry_ll { out.push(format!("symmetry {} {} {}", self.lines[c.a].name, self.lines[c.b].name, self.lines[c.c].name)); }
+        for c in &self.point_on_line { out.push(format!("point_on {} {}", self.points[c.point].name, self.lines[c.line].name)); }
+        for c in &self.point_on_arc { out.push(format!("point_on {} {}", self.points[c.point].name, self.arcs[c.arc].name)); }
+        for c in &self.midpoint { out.push(format!("midpoint {} {}", self.points[c.point].name, self.lines[c.line].name)); }
+        for c in &self.distance_pp { out.push(format!("distance {} {} = {}", self.points[c.a].name, self.points[c.b].name, c.distance)); }
+        for c in &self.distance_pl { out.push(format!("distance_pl {} = {}", self.lines[c.line].name, c.distance)); }
+        out
+    }
+
     /// and the constraint is: `measured_property - parsed_expr = 0`.
     /// Returns Err if the expression fails to parse or references unknown symbols.
     pub fn add_expr_dimension(&mut self, kind: DimensionKind, expr_str: &str,

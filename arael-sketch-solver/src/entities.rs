@@ -2,7 +2,7 @@
 // Line/arc visual style
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub enum LineStyle {
     #[default]
     Solid,
@@ -16,6 +16,21 @@ impl LineStyle {
             LineStyle::Solid => LineStyle::Dashed,
             LineStyle::Dashed => LineStyle::DashDot,
             LineStyle::DashDot => LineStyle::Solid,
+        }
+    }
+    pub fn from_name(s: &str) -> Option<Self> {
+        match s {
+            "solid" => Some(Self::Solid),
+            "dashed" => Some(Self::Dashed),
+            "dashdot" | "dash_dot" | "dash-dot" => Some(Self::DashDot),
+            _ => None,
+        }
+    }
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Solid => "solid",
+            Self::Dashed => "dashed",
+            Self::DashDot => "dashdot",
         }
     }
 }
