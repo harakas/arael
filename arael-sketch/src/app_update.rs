@@ -42,6 +42,11 @@ impl eframe::App for EditorApp {
                 if ui.button(params_label).clicked() {
                     self.show_params = !self.show_params;
                 }
+                let cmd_label = if self.show_command { "Hide (/)" } else { "(/) Cmd" };
+                if ui.button(cmd_label).clicked() {
+                    self.show_command = !self.show_command;
+                    if self.show_command { self.command_focus = true; }
+                }
             });
             ui.separator();
 

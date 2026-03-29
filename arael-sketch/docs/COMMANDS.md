@@ -47,6 +47,22 @@ add_arc x1,y1 x2,y2 xm,ym  Create an arc through start, end, midpoint
 offset_line L0 distance      Create a parallel line offset by distance (alias: offset)
 ```
 
+### Auto-Coincident
+
+When creating a line, endpoints that are within 1e-3 distance of existing endpoints are automatically connected with coincident constraints:
+
+```
+add_line 0,0 5,0              L0
+add_line 5,0 5,3              L1 — auto-connects L1.p1 to L0.p2
+```
+
+The output shows what was connected: `Added L1: ... [connected: L1.p1=L0.p2]`
+
+Append `noconnect` to suppress auto-connection:
+```
+add_line 5,0 5,3 noconnect   No auto-coincident
+```
+
 ### Line Chaining
 
 When `add_line` is given only one coordinate, it starts from the last created endpoint:
@@ -127,8 +143,9 @@ unlock L0.p1                 Unlock endpoint
 User-defined named parameters that can be referenced in expressions and dimensions.
 
 ```
-param width 10               Create parameter (or update existing)
-param height "width * 2"     Parameter with expression
+param width 10               Create parameter — shows: Added width = 10 (10.0000)
+param height width * 2       Expression — shows: Added height = width * 2 (20.0000)
+param width 15               Update existing — shows: Updated width = 15 (15.0000)
 del_param width              Delete parameter
 rename_param width w         Rename (propagates to all references)
 ```
@@ -146,7 +163,9 @@ style L0                     Query current style
 ## Selection
 
 ```
-select L0                    Add to selection
+select L0                    Select whole line
+select L0.p1                 Select line endpoint
+select A0.center             Select arc center
 select L0 L1 P0              Select multiple
 deselect                     Clear selection
 ```
@@ -226,9 +245,11 @@ print <expression>           Evaluate and display
 print L0.length              Entity property
 print dist(P0, L0)           Geometric function
 print width * 2 + 1          Expression with parameters
-info L0                      Line details (endpoints, length, constraints)
-info P0                      Point details (position, locked)
-info A0                      Arc details (center, radius, angles)
+info L0                      Line details + all constraints referencing L0
+info L0.p1                   Endpoint position, lock status, constraints
+info P0                      Point details + constraints
+info A0                      Arc details + constraints
+info A0.center               Arc endpoint position
 info d0                      Dimension details (kind, value, expression)
 info width                   Parameter details (value, expression, broken)
 list                         List all entities, dimensions, parameters

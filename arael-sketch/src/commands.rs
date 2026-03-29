@@ -769,8 +769,58 @@ fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
 // Geometry commands
 // ---------------------------------------------------------------------------
 
+const SNAP_THRESHOLD: f64 = 1e-3;
+
+/// Auto-connect endpoints of the last created line to nearby existing endpoints.
+fn auto_coincident_line(ctx: &mut CommandContext, line_ref: Ref<Line>) -> Vec<String> {
+    let mut actions: Vec<(Action, String)> = Vec::new();
+    let l = &ctx.sketch.lines[line_ref];
+    let p1 = l.p1.value;
+    let p2 = l.p2.value;
+    let this_name = l.name.clone();
+
+    for r in ctx.sketch.lines.refs() {
+        if r == line_ref { continue; }
+        let other = &ctx.sketch.lines[r];
+        if (other.p1.value.x - p1.x).abs() < SNAP_THRESHOLD && (other.p1.value.y - p1.y).abs() < SNAP_THRESHOLD {
+            actions.push((Action::ApplyCoincidentLL11 { a: line_ref, b: r },
+                format!("{}.p1={}.p1", this_name, other.name)));
+        } else if (other.p2.value.x - p1.x).abs() < SNAP_THRESHOLD && (other.p2.value.y - p1.y).abs() < SNAP_THRESHOLD {
+            actions.push((Action::ApplyCoincidentLL12 { a: line_ref, b: r },
+                format!("{}.p1={}.p2", this_name, other.name)));
+        }
+        if (other.p1.value.x - p2.x).abs() < SNAP_THRESHOLD && (other.p1.value.y - p2.y).abs() < SNAP_THRESHOLD {
+            actions.push((Action::ApplyCoincidentLL21 { a: line_ref, b: r },
+                format!("{}.p2={}.p1", this_name, other.name)));
+        } else if (other.p2.value.x - p2.x).abs() < SNAP_THRESHOLD && (other.p2.value.y - p2.y).abs() < SNAP_THRESHOLD {
+            actions.push((Action::ApplyCoincidentLL22 { a: line_ref, b: r },
+                format!("{}.p2={}.p2", this_name, other.name)));
+        }
+    }
+    for r in ctx.sketch.points.refs() {
+        let pt = &ctx.sketch.points[r];
+        if pt.helper { continue; }
+        if (pt.pos.value.x - p1.x).abs() < SNAP_THRESHOLD && (pt.pos.value.y - p1.y).abs() < SNAP_THRESHOLD {
+            actions.push((Action::ApplyCoincidentLP1 { line: line_ref, point: r },
+                format!("{}.p1={}", this_name, pt.name)));
+        }
+        if (pt.pos.value.x - p2.x).abs() < SNAP_THRESHOLD && (pt.pos.value.y - p2.y).abs() < SNAP_THRESHOLD {
+            actions.push((Action::ApplyCoincidentLP2 { line: line_ref, point: r },
+                format!("{}.p2={}", this_name, pt.name)));
+        }
+    }
+    let mut connected = Vec::new();
+    for (action, desc) in actions {
+        ctx.exec(action);
+        connected.push(desc);
+    }
+    connected
+}
+
 fn cmd_add_line(ctx: &mut CommandContext, args: &str) -> CommandResult {
-    let tokens: Vec<&str> = args.split_whitespace().collect();
+    let mut tokens: Vec<&str> = args.split_whitespace().collect();
+    let noconnect = tokens.last() == Some(&"noconnect");
+    if noconnect { tokens.pop(); }
     let (p1, p2) = match tokens.len() {
         2 => {
             let p1 = match parse_coord(ctx, tokens[0], ctx.last_point) {
@@ -782,7 +832,6 @@ fn cmd_add_line(ctx: &mut CommandContext, args: &str) -> CommandResult {
             (p1, p2)
         }
         1 => {
-            // Single arg: from last endpoint
             let prev = match ctx.last_point {
                 Some(p) => p,
                 None => return err("No previous point. Use: add_line x1,y1 x2,y2"),
@@ -796,10 +845,18 @@ fn cmd_add_line(ctx: &mut CommandContext, args: &str) -> CommandResult {
     };
     ctx.begin_group();
     ctx.exec(Action::AddLine { p1, p2 });
-    let name = ctx.sketch.lines.refs().last().map(|r| ctx.sketch.lines[r].name.clone()).unwrap_or_default();
+    let line_ref = ctx.sketch.lines.refs().last().unwrap();
+    let name = ctx.sketch.lines[line_ref].name.clone();
     ctx.last_point = Some(p2);
     ctx.session_names.insert("_".into(), name.clone());
-    ok(format!("Added {}: ({:.2},{:.2})-({:.2},{:.2})", name, p1.x, p1.y, p2.x, p2.y))
+    let mut msg = format!("Added {}: ({:.2},{:.2})-({:.2},{:.2})", name, p1.x, p1.y, p2.x, p2.y);
+    if !noconnect {
+        let connected = auto_coincident_line(ctx, line_ref);
+        if !connected.is_empty() {
+            msg += &format!(" [connected: {}]", connected.join(", "));
+        }
+    }
+    ok(msg)
 }
 
 fn cmd_add_point(ctx: &mut CommandContext, args: &str) -> CommandResult {
@@ -1094,14 +1151,18 @@ fn cmd_param(ctx: &mut CommandContext, args: &str) -> CommandResult {
     if let Some(idx) = ctx.sketch.user_params.iter().position(|p| p.name == name) {
         ctx.begin_group();
         ctx.exec(Action::UpdateUserParam { index: idx, name: name.to_string(), expr_str: expr.to_string() });
-        ok(format!("Updated {} = {}", name, expr))
+        ctx.sketch.update_expr_dim_values();
+        let val = ctx.sketch.user_params.iter().find(|p| p.name == name).map(|p| p.value).unwrap_or(0.0);
+        ok(format!("Updated {} = {} ({:.4})", name, expr, val))
     } else {
         if let Err(e) = ctx.sketch.validate_param_name(name, None) {
             return err(e);
         }
         ctx.begin_group();
         ctx.exec(Action::AddUserParam { name: name.to_string(), expr_str: expr.to_string() });
-        ok(format!("Added {} = {}", name, expr))
+        ctx.sketch.update_expr_dim_values();
+        let val = ctx.sketch.user_params.iter().find(|p| p.name == name).map(|p| p.value).unwrap_or(0.0);
+        ok(format!("Added {} = {} ({:.4})", name, expr, val))
     }
 }
 
@@ -1160,13 +1221,25 @@ fn cmd_style(ctx: &mut CommandContext, args: &str) -> CommandResult {
 
 fn cmd_select(ctx: &mut CommandContext, args: &str) -> CommandResult {
     for name in args.split_whitespace() {
-        if name.starts_with('L') && !name.contains('.') {
+        if name.contains('.') {
+            // Endpoint selection
+            let sel = match resolve_endpoint_ref(&ctx.sketch, name) {
+                Ok(EndpointRef::Point(r)) => Selection::Point(r),
+                Ok(EndpointRef::LineP1(r)) => Selection::LineP1(r),
+                Ok(EndpointRef::LineP2(r)) => Selection::LineP2(r),
+                Ok(EndpointRef::ArcCenter(r)) => Selection::ArcCenter(r),
+                Ok(EndpointRef::ArcStart(r)) => Selection::ArcStart(r),
+                Ok(EndpointRef::ArcEnd(r)) => Selection::ArcEnd(r),
+                Err(e) => return err(e),
+            };
+            ctx.selection.push(sel);
+        } else if name.starts_with('L') {
             let r = match resolve_line(&ctx.sketch, name) { Ok(r) => r, Err(e) => return err(e) };
             ctx.selection.push(Selection::Line(r));
-        } else if name.starts_with('P') && !name.contains('.') {
+        } else if name.starts_with('P') {
             let r = match resolve_point(&ctx.sketch, name) { Ok(r) => r, Err(e) => return err(e) };
             ctx.selection.push(Selection::Point(r));
-        } else if name.starts_with('A') && !name.contains('.') {
+        } else if name.starts_with('A') {
             let r = match resolve_arc(&ctx.sketch, name) { Ok(r) => r, Err(e) => return err(e) };
             ctx.selection.push(Selection::Arc(r));
         } else {
@@ -1215,34 +1288,64 @@ fn cmd_print(ctx: &mut CommandContext, args: &str) -> CommandResult {
     }
 }
 
+/// Get all constraints that mention a given entity name.
+fn constraints_for(sketch: &Sketch, name: &str) -> Vec<String> {
+    sketch.list_constraints().into_iter()
+        .filter(|c| c.split_whitespace().any(|w| w == name || w.starts_with(&format!("{}.", name))))
+        .collect()
+}
+
 fn cmd_info(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let name = args.trim();
+    // Endpoint info: L0.p1, L0.p2, A0.center, etc.
+    if name.contains('.') {
+        if let Ok(pos) = resolve_endpoint_pos(&ctx.sketch, name) {
+            let mut s = format!("{}: ({:.4}, {:.4})", name, pos.x, pos.y);
+            // Check lock status
+            if let Some((entity, field)) = name.split_once('.') {
+                if entity.starts_with('L') {
+                    if let Ok(r) = resolve_line(&ctx.sketch, entity) {
+                        let l = &ctx.sketch.lines[r];
+                        if field == "p1" && !l.p1.optimize { s += " [locked]"; }
+                        if field == "p2" && !l.p2.optimize { s += " [locked]"; }
+                    }
+                }
+            }
+            let cstrs = constraints_for(&ctx.sketch, name);
+            if !cstrs.is_empty() { s += &format!("\n  constraints: {}", cstrs.join(", ")); }
+            return ok(s);
+        }
+    }
     if name.starts_with('L') && !name.contains('.') {
         let r = match resolve_line(&ctx.sketch, name) { Ok(r) => r, Err(e) => return err(e) };
         let l = &ctx.sketch.lines[r];
         let len = ((l.p2.value.x - l.p1.value.x).powi(2) + (l.p2.value.y - l.p1.value.y).powi(2)).sqrt();
-        let mut s = format!("{}: ({:.4},{:.4})-({:.4},{:.4}) len={:.4}",
-            l.name, l.p1.value.x, l.p1.value.y, l.p2.value.x, l.p2.value.y, len);
-        if l.constraints.horizontal { s += " [horizontal]"; }
-        if l.constraints.vertical { s += " [vertical]"; }
-        if l.constraints.has_length { s += &format!(" [length={}]", l.constraints.length); }
+        let mut s = format!("{}: ({:.4},{:.4})-({:.4},{:.4}) len={:.4} style={:?}",
+            l.name, l.p1.value.x, l.p1.value.y, l.p2.value.x, l.p2.value.y, len, l.style);
         if !l.p1.optimize { s += " [p1 locked]"; }
         if !l.p2.optimize { s += " [p2 locked]"; }
-        s += &format!(" style={:?}", l.style);
+        let cstrs = constraints_for(&ctx.sketch, name);
+        if !cstrs.is_empty() { s += &format!("\n  constraints: {}", cstrs.join(", ")); }
         ok(s)
-    } else if name.starts_with('P') {
+    } else if name.starts_with('P') && !name.contains('.') {
         let r = match resolve_point(&ctx.sketch, name) { Ok(r) => r, Err(e) => return err(e) };
         let p = &ctx.sketch.points[r];
         let locked = p.constraints.has_fix_x || p.constraints.has_fix_y;
-        ok(format!("{}: ({:.4},{:.4}){}", p.name, p.pos.value.x, p.pos.value.y,
-            if locked { " [locked]" } else { "" }))
+        let mut s = format!("{}: ({:.4},{:.4}){}", p.name, p.pos.value.x, p.pos.value.y,
+            if locked { " [locked]" } else { "" });
+        let cstrs = constraints_for(&ctx.sketch, name);
+        if !cstrs.is_empty() { s += &format!("\n  constraints: {}", cstrs.join(", ")); }
+        ok(s)
     } else if name.starts_with('A') && !name.contains('.') {
         let r = match resolve_arc(&ctx.sketch, name) { Ok(r) => r, Err(e) => return err(e) };
         let a = &ctx.sketch.arcs[r];
-        ok(format!("{}: center=({:.4},{:.4}) r={:.4} angles={:.1}..{:.1} {}",
+        let mut s = format!("{}: center=({:.4},{:.4}) r={:.4} angles={:.1}..{:.1} {}",
             a.name, a.center.value.x, a.center.value.y, a.radius.value,
             a.start_angle.value.to_degrees(), a.end_angle.value.to_degrees(),
-            if a.closed { "[circle]" } else { "" }))
+            if a.closed { "[circle]" } else { "" });
+        let cstrs = constraints_for(&ctx.sketch, name);
+        if !cstrs.is_empty() { s += &format!("\n  constraints: {}", cstrs.join(", ")); }
+        ok(s)
     } else if name.starts_with('d') {
         if let Some(d) = ctx.sketch.dimensions.iter().find(|d| d.name == name) {
             let expr = d.expr_str.as_deref().unwrap_or("(numeric)");
@@ -1252,7 +1355,6 @@ fn cmd_info(ctx: &mut CommandContext, args: &str) -> CommandResult {
             err(format!("Unknown dimension: {}", name))
         }
     } else {
-        // Try user param
         if let Some(p) = ctx.sketch.user_params.iter().find(|p| p.name == name) {
             ok(format!("{}: value={:.4} expr={}{}", p.name, p.value, p.expr_str,
                 if p.broken { " [BROKEN]" } else { "" }))
@@ -2459,5 +2561,68 @@ mod tests {
         let r = resolve_line(&ctx.sketch, "L0").unwrap();
         assert!(ctx.sketch.lines[r].constraints.horizontal);
         assert!(near(line_len(&ctx, "L0"), 3.0));
+    }
+
+    // -- Auto-coincident --
+
+    #[test]
+    fn test_auto_coincident() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0");
+        let out = run_ok(&mut ctx, "add_line 5,0 5,3");
+        assert!(out.contains("connected"), "Should auto-connect: {}", out);
+        // L1.p1==L0.p2 -> coincident_ll12 (a.p1 == b.p2 where a=L1, b=L0)
+        let has_coincident = !ctx.sketch.coincident_ll12.is_empty()
+            || !ctx.sketch.coincident_ll21.is_empty()
+            || !ctx.sketch.coincident_ll11.is_empty()
+            || !ctx.sketch.coincident_ll22.is_empty();
+        assert!(has_coincident, "Should have coincident constraint");
+    }
+
+    #[test]
+    fn test_noconnect() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0");
+        let out = run_ok(&mut ctx, "add_line 5,0 5,3 noconnect");
+        assert!(!out.contains("connected"), "Should NOT auto-connect: {}", out);
+        assert!(ctx.sketch.coincident_ll21.is_empty());
+    }
+
+    // -- Info with constraints --
+
+    #[test]
+    fn test_info_shows_constraints() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,1; horizontal L0");
+        let out = run_ok(&mut ctx, "info L0");
+        assert!(out.contains("horizontal"), "info should show constraints: {}", out);
+    }
+
+    #[test]
+    fn test_info_endpoint() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0");
+        let out = run_ok(&mut ctx, "info L0.p1");
+        assert!(out.contains("0.0000"), "info L0.p1 should show position: {}", out);
+    }
+
+    // -- Select endpoints --
+
+    #[test]
+    fn test_select_endpoint() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0");
+        run_ok(&mut ctx, "select L0.p1");
+        assert_eq!(ctx.selection.len(), 1);
+        assert!(matches!(ctx.selection[0], Selection::LineP1(_)));
+    }
+
+    // -- Param shows value --
+
+    #[test]
+    fn test_param_shows_value() {
+        let mut ctx = CommandContext::new();
+        let out = run_ok(&mut ctx, "param kala 12+3*4");
+        assert!(out.contains("24"), "Should show evaluated value: {}", out);
     }
 }
