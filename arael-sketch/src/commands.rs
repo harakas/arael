@@ -1603,9 +1603,57 @@ fn cmd_midpoint(ctx: &mut CommandContext, args: &str) -> CommandResult {
     ok_or_status(ctx, "Applied midpoint")
 }
 
+/// Resolve a name to a Ref<Point>, creating a helper point + coincident if it's an endpoint ref.
+fn resolve_as_point(ctx: &mut CommandContext, name: &str) -> Result<Ref<Point>, String> {
+    // Try as a standalone point first
+    if let Ok(r) = resolve_point(&ctx.sketch, name) {
+        return Ok(r);
+    }
+    // Try as endpoint ref — create helper point + coincident constraint
+    let ep = resolve_endpoint_ref(&ctx.sketch, name)?;
+    let pos = resolve_endpoint_pos(&ctx.sketch, name)?;
+    let hp = ctx.sketch.add_helper_point(pos);
+    match ep {
+        EndpointRef::Point(p) => {
+            ctx.exec(Action::ApplyCoincidentPP { a: hp, b: p });
+        }
+        EndpointRef::LineP1(l) => {
+            ctx.exec(Action::ApplyCoincidentLP1 { line: l, point: hp });
+        }
+        EndpointRef::LineP2(l) => {
+            ctx.exec(Action::ApplyCoincidentLP2 { line: l, point: hp });
+        }
+        EndpointRef::ArcCenter(a) => {
+            ctx.exec(Action::ApplyCoincidentArcCenter { point: hp, arc: a });
+        }
+        EndpointRef::ArcStart(a) => {
+            ctx.exec(Action::ApplyCoincidentArcStart { point: hp, arc: a });
+        }
+        EndpointRef::ArcEnd(a) => {
+            ctx.exec(Action::ApplyCoincidentArcEnd { point: hp, arc: a });
+        }
+    }
+    Ok(hp)
+}
+
 fn cmd_symmetry(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let tokens: Vec<&str> = args.split_whitespace().collect();
-    if tokens.len() != 3 { return err("Usage: symmetry L0 L1 L2 (L0,L2 symmetric about L1)"); }
+    if tokens.len() != 3 { return err("Usage: symmetry L0 L1 L2 | symmetry P0 L0 P1 | symmetry L0.p1 L1 L0.p2"); }
+    // Try point/endpoint + line + point/endpoint symmetry
+    let mid_is_line = resolve_line(&ctx.sketch, tokens[1]).is_ok();
+    let first_is_pointlike = resolve_point(&ctx.sketch, tokens[0]).is_ok()
+        || resolve_endpoint_ref(&ctx.sketch, tokens[0]).is_ok();
+    let third_is_pointlike = resolve_point(&ctx.sketch, tokens[2]).is_ok()
+        || resolve_endpoint_ref(&ctx.sketch, tokens[2]).is_ok();
+    if mid_is_line && first_is_pointlike && third_is_pointlike {
+        ctx.begin_group();
+        let a = match resolve_as_point(ctx, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
+        let line = resolve_line(&ctx.sketch, tokens[1]).unwrap();
+        let c = match resolve_as_point(ctx, tokens[2]) { Ok(r) => r, Err(e) => return err(e) };
+        ctx.exec(Action::ApplySymmetryPP { a, line, c });
+        return ok_or_status(ctx, "Applied point symmetry");
+    }
+    // Fall back to line-line-line symmetry
     let a = match resolve_line(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
     let b = match resolve_line(&ctx.sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
     let c = match resolve_line(&ctx.sketch, tokens[2]) { Ok(r) => r, Err(e) => return err(e) };
@@ -2846,5 +2894,15 @@ mod tests {
         run_ok(&mut ctx, "add_line 0,0 5,0; length L0 3");
         let out = run_ok(&mut ctx, "info d0");
         assert!(out.contains("offset=") && out.contains("along="));
+    }
+
+    // -- Point symmetry command --
+
+    #[test]
+    fn test_cmd_symmetry_pp() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_point 3,2; add_point 7,2; add_line 5,0 5,10");
+        run_ok(&mut ctx, "symmetry P0 L0 P1");
+        assert!(!ctx.sketch.symmetry_pp.is_empty());
     }
 }

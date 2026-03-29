@@ -97,7 +97,9 @@ coincident L0.p2 L1.p1       Coincident: any endpoint pair
 concentric A0 A1             Concentric arcs
 midpoint P0 L0               Point at midpoint of line
 midpoint L0.p1 L1            Line endpoint at midpoint of another line
-symmetry L0 L1 L2            L0 and L2 symmetric about L1
+symmetry L0 L1 L2            Lines L0,L2 symmetric about L1
+symmetry P0 L0 P1            Points P0,P1 symmetric about L0
+symmetry L0.p1 L1 L2.p1     Endpoints symmetric about L1
 point_on P0 L0               Point on line
 point_on L0.p1 A0            Line endpoint on arc
 ```

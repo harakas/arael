@@ -994,3 +994,34 @@ pub struct DistancePL {
     #[serde(skip)]
     pub hb: CrossBlock<Point, Line>,
 }
+
+// ---------------------------------------------------------------------------
+// Symmetry: two points about a mirror line
+// ---------------------------------------------------------------------------
+
+/// Two points forced symmetric about a mirror line.
+/// Residual: reflect a across line, compare to c.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[arael::model]
+#[arael(constraint(hb, {
+    let dx = line.p2.x - line.p1.x;
+    let dy = line.p2.y - line.p1.y;
+    let len2 = dx * dx + dy * dy;
+    // Signed perpendicular distance of a from line (unnormalized)
+    let da = (a.pos.x - line.p1.x) * dy - (a.pos.y - line.p1.y) * dx;
+    // Reflect a across line
+    let rx = a.pos.x - 2.0 * da * dy / len2;
+    let ry = a.pos.y + 2.0 * da * dx / len2;
+    [(rx - c.pos.x) * sketch.constraint_isigma,
+     (ry - c.pos.y) * sketch.constraint_isigma]
+}))]
+pub struct SymmetryPP {
+    #[arael(ref = root.points)]
+    pub a: Ref<Point>,
+    #[arael(ref = root.points)]
+    pub c: Ref<Point>,
+    #[arael(ref = root.lines)]
+    pub line: Ref<Line>,
+    #[serde(skip)]
+    pub hb: TripletBlock<f64>,
+}

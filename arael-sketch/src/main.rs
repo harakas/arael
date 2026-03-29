@@ -898,7 +898,13 @@ impl EditorApp {
                 }
             }
             ConstraintType::Symmetry => {
-                sel.len() == 3 && sel.iter().all(|s| matches!(s, Selection::Line(_)))
+                if sel.len() != 3 { return false; }
+                // 3 lines (LL symmetry) or 2 point-likes + 1 line (PP symmetry)
+                let lines = sel.iter().filter(|s| matches!(s, Selection::Line(_))).count();
+                let point_likes = sel.iter().filter(|s| matches!(s,
+                    Selection::Point(_) | Selection::LineP1(_) | Selection::LineP2(_)
+                    | Selection::ArcCenter(_) | Selection::ArcStart(_) | Selection::ArcEnd(_))).count();
+                (lines == 3) || (lines == 1 && point_likes == 2)
             }
             ConstraintType::Lock => {
                 !sel.is_empty() && sel.iter().all(|s| matches!(s,
@@ -964,7 +970,9 @@ impl EditorApp {
                     | Selection::ArcStart(_) | Selection::ArcEnd(_) | Selection::Line(_))
             }
             ConstraintType::Symmetry => {
-                matches!(sel, Selection::Line(_))
+                matches!(sel, Selection::Line(_) | Selection::Point(_)
+                    | Selection::LineP1(_) | Selection::LineP2(_)
+                    | Selection::ArcCenter(_) | Selection::ArcStart(_) | Selection::ArcEnd(_))
             }
             ConstraintType::Lock => {
                 matches!(sel, Selection::Point(_) | Selection::LineP1(_) | Selection::LineP2(_)
@@ -1589,16 +1597,53 @@ impl EditorApp {
     fn apply_symmetry(&mut self) {
         self.begin_group();
         if self.selection.len() == 3 {
+            // Line-Line-Line: first two = sides, third = mirror
             if let (Selection::Line(a), Selection::Line(c), Selection::Line(b)) =
                 (self.selection[0], self.selection[1], self.selection[2])
             {
-                // First two = sides (a, c), third = mirror (b)
                 let action = Action::ApplySymmetryLL { a, b, c };
                 if let Some(err) = conflicts::check_constraint_conflict(&self.sketch, &action) {
                     self.status_error = Some(err);
                     return;
                 }
                 self.exec(action);
+                return;
+            }
+            // Point/endpoint - Line - Point/endpoint symmetry
+            let sel = self.selection.clone();
+            let to_point = |sketch: &mut Sketch, s: &Selection| -> Option<Ref<Point>> {
+                match s {
+                    Selection::Point(r) => Some(*r),
+                    Selection::LineP1(r) => {
+                        let pos = sketch.lines[*r].p1.value;
+                        let hp = sketch.add_helper_point(pos);
+                        sketch.coincident_lp1.push(CoincidentLP1 { line: *r, point: hp, hb: CrossBlock::new() });
+                        Some(hp)
+                    }
+                    Selection::LineP2(r) => {
+                        let pos = sketch.lines[*r].p2.value;
+                        let hp = sketch.add_helper_point(pos);
+                        sketch.coincident_lp2.push(CoincidentLP2 { line: *r, point: hp, hb: CrossBlock::new() });
+                        Some(hp)
+                    }
+                    Selection::ArcCenter(r) => {
+                        let pos = sketch.arcs[*r].center.value;
+                        let hp = sketch.add_helper_point(pos);
+                        sketch.coincident_arc_center.push(CoincidentArcCenter { point: hp, arc: *r, hb: CrossBlock::new() });
+                        Some(hp)
+                    }
+                    _ => None,
+                }
+            };
+            let to_line = |s: &Selection| -> Option<Ref<Line>> {
+                match s { Selection::Line(r) => Some(*r), _ => None }
+            };
+            if let Some(line) = to_line(&sel[1]) {
+                let a = to_point(&mut self.sketch, &sel[0]);
+                let c = to_point(&mut self.sketch, &sel[2]);
+                if let (Some(a), Some(c)) = (a, c) {
+                    self.exec(Action::ApplySymmetryPP { a, line, c });
+                }
             }
         }
     }
@@ -2016,6 +2061,7 @@ impl EditorApp {
             ConstraintId::TangentAA(i) => { let c = &self.sketch.tangent_aa[i]; format!("Tangent({}, {})", an(c.a), an(c.b)) }
             ConstraintId::Collinear(i) => { let c = &self.sketch.collinear[i]; format!("Collinear({}, {})", ln(c.a), ln(c.b)) }
             ConstraintId::Symmetry(i) => { let c = &self.sketch.symmetry_ll[i]; format!("Symmetry({}, {}, {})", ln(c.a), ln(c.b), ln(c.c)) }
+            ConstraintId::SymmetryPP(i) => { let c = &self.sketch.symmetry_pp[i]; format!("Symmetry({}, {}, {})", pn(c.a), ln(c.line), pn(c.c)) }
             ConstraintId::Midpoint(kind, i) => {
                 let desc = match kind {
                     MidpointKind::Point => { let c = &self.sketch.midpoint[i]; format!("{} @ mid({})", pn(c.point), ln(c.line)) }
@@ -2076,10 +2122,11 @@ impl EditorApp {
         }
     }
 
-    // Get the line/arc refs involved in a constraint (for highlighting)
-    pub fn constraint_entities(&self, id: ConstraintId) -> (Vec<Ref<Line>>, Vec<Ref<Arc>>) {
+    // Get the line/arc/point refs involved in a constraint (for highlighting)
+    pub fn constraint_entities(&self, id: ConstraintId) -> (Vec<Ref<Line>>, Vec<Ref<Arc>>, Vec<Ref<Point>>) {
         let mut lines = Vec::new();
         let mut arcs = Vec::new();
+        let mut points = Vec::new();
         match id {
             ConstraintId::Horizontal(r) | ConstraintId::Vertical(r) => { lines.push(r); }
             ConstraintId::Parallel(i) => {
@@ -2113,6 +2160,12 @@ impl EditorApp {
             ConstraintId::Symmetry(i) => {
                 let c = &self.sketch.symmetry_ll[i];
                 lines.push(c.a); lines.push(c.b); lines.push(c.c);
+            }
+            ConstraintId::SymmetryPP(i) => {
+                let c = &self.sketch.symmetry_pp[i];
+                lines.push(c.line);
+                points.push(c.a);
+                points.push(c.c);
             }
             ConstraintId::Midpoint(kind, i) => {
                 match kind {
@@ -2194,7 +2247,7 @@ impl EditorApp {
                 for c in &self.sketch.coincident_arc_end { if c.point == pt { arcs.push(c.arc); } }
             }
         }
-        (lines, arcs)
+        (lines, arcs, points)
     }
 
     // Delete a constraint by id
@@ -2217,6 +2270,7 @@ impl EditorApp {
             ConstraintId::TangentAA(i) => { self.sketch.tangent_aa.remove(i); }
             ConstraintId::Collinear(i) => { self.sketch.collinear.remove(i); }
             ConstraintId::Symmetry(i) => { self.sketch.symmetry_ll.remove(i); }
+            ConstraintId::SymmetryPP(i) => { self.sketch.symmetry_pp.remove(i); }
             ConstraintId::Midpoint(kind, i) => {
                 match kind {
                     MidpointKind::Point => { self.sketch.midpoint.remove(i); }

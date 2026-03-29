@@ -99,6 +99,7 @@ pub struct Sketch {
     pub equal_radius: std::vec::Vec<EqualRadius>,
     pub tangent_aa: std::vec::Vec<TangentAA>,
     pub symmetry_ll: std::vec::Vec<SymmetryLL>,
+    pub symmetry_pp: std::vec::Vec<SymmetryPP>,
     pub distance_pl: std::vec::Vec<DistancePL>,
     pub line_p1_on_line: std::vec::Vec<LineP1OnLine>,
     pub line_p2_on_line: std::vec::Vec<LineP2OnLine>,
@@ -195,6 +196,7 @@ impl Sketch {
             equal_radius: Vec::new(),
             tangent_aa: Vec::new(),
             symmetry_ll: Vec::new(),
+            symmetry_pp: Vec::new(),
             distance_pl: Vec::new(),
             line_p1_on_line: Vec::new(),
             line_p2_on_line: Vec::new(),
@@ -317,6 +319,7 @@ impl Sketch {
         self.coincident_arc_end.retain(|c| c.point != r);
         self.distance_lp1.retain(|c| c.point != r);
         self.distance_lp2.retain(|c| c.point != r);
+        self.symmetry_pp.retain(|c| c.a != r && c.c != r);
     }
 
     /// Remove a line and all constraints referencing it.
@@ -342,6 +345,7 @@ impl Sketch {
         self.angle.retain(|c| c.a != r && c.b != r);
         self.tangent_la.retain(|c| c.line != r);
         self.symmetry_ll.retain(|c| c.a != r && c.b != r && c.c != r);
+        self.symmetry_pp.retain(|c| c.line != r);
         self.distance_pl.retain(|c| c.line != r);
         self.line_p1_on_line.retain(|c| c.a != r && c.b != r);
         self.line_p2_on_line.retain(|c| c.a != r && c.b != r);
@@ -937,6 +941,7 @@ impl Sketch {
         for c in &self.concentric { out.push(format!("concentric {} {}", self.arcs[c.a].name, self.arcs[c.b].name)); }
         for c in &self.equal_radius { out.push(format!("equal_radius {} {}", self.arcs[c.a].name, self.arcs[c.b].name)); }
         for c in &self.symmetry_ll { out.push(format!("symmetry {} {} {}", self.lines[c.a].name, self.lines[c.b].name, self.lines[c.c].name)); }
+        for c in &self.symmetry_pp { out.push(format!("symmetry {} {} {}", self.points[c.a].name, self.lines[c.line].name, self.points[c.c].name)); }
         for c in &self.point_on_line { out.push(format!("point_on {} {}", self.points[c.point].name, self.lines[c.line].name)); }
         for c in &self.point_on_arc { out.push(format!("point_on {} {}", self.points[c.point].name, self.arcs[c.arc].name)); }
         for c in &self.midpoint { out.push(format!("midpoint {} {}", self.points[c.point].name, self.lines[c.line].name)); }

@@ -57,6 +57,7 @@ pub enum Action {
     ApplyPointOnArc { point: Ref<Point>, arc: Ref<Arc> },
     ApplyCollinear { a: Ref<Line>, b: Ref<Line> },
     ApplySymmetryLL { a: Ref<Line>, b: Ref<Line>, c: Ref<Line> },
+    ApplySymmetryPP { a: Ref<Point>, line: Ref<Line>, c: Ref<Point> },
     ApplyMidpoint { point: Ref<Point>, line: Ref<Line> },
     ApplyMidpointLP1 { line: Ref<Line>, target: Ref<Line> },
     ApplyMidpointLP2 { line: Ref<Line>, target: Ref<Line> },
@@ -108,7 +109,7 @@ impl Action {
             Action::ApplyPerpendicular { .. } => "Perpendicular".into(),
             Action::ApplyEqualLength { .. } => "Equal length".into(),
             Action::ApplyCollinear { .. } => "Collinear".into(),
-            Action::ApplySymmetryLL { .. } => "Symmetry".into(),
+            Action::ApplySymmetryLL { .. } | Action::ApplySymmetryPP { .. } => "Symmetry".into(),
             Action::ApplyMidpoint { .. } | Action::ApplyMidpointLP1 { .. } |
             Action::ApplyMidpointLP2 { .. } | Action::ApplyMidpointArcStart { .. } |
             Action::ApplyMidpointArcEnd { .. } => "Midpoint".into(),
@@ -184,7 +185,7 @@ impl Action {
             Action::ApplyLineP1OnArc { .. } | Action::ApplyLineP2OnArc { .. } |
             Action::ApplyEqualRadius { .. } |
             Action::ApplyTangentLA { .. } | Action::ApplyTangentAA { .. } |
-            Action::ApplyCollinear { .. } | Action::ApplySymmetryLL { .. } |
+            Action::ApplyCollinear { .. } | Action::ApplySymmetryLL { .. } | Action::ApplySymmetryPP { .. } |
             Action::ApplyMidpoint { .. } | Action::ApplyMidpointLP1 { .. } |
             Action::ApplyMidpointLP2 { .. } | Action::ApplyMidpointArcStart { .. } |
             Action::ApplyMidpointArcEnd { .. } |
@@ -405,6 +406,10 @@ impl Action {
             }
             Action::ApplySymmetryLL { a, b, c } => {
                 sketch.symmetry_ll.push(SymmetryLL { a: *a, b: *b, c: *c, hb: TripletBlock::new() });
+                sketch.solve();
+            }
+            Action::ApplySymmetryPP { a, line, c } => {
+                sketch.symmetry_pp.push(SymmetryPP { a: *a, c: *c, line: *line, hb: TripletBlock::new() });
                 sketch.solve();
             }
             Action::ApplyMidpoint { point, line } => {

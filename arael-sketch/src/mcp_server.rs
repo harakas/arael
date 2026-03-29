@@ -313,7 +313,7 @@ Line chaining: add_line @dx,dy (from cursor). Auto-coincident at matching endpoi
 
 CAPTURE: _ = last entity. name = add_line ... to name it. Use names in commands: horizontal base.
 
-CONSTRAINTS: horizontal L0 | vertical L0 | parallel L0 L1 | perpendicular L0 L1 | equal L0 L1 | collinear L0 L1 | tangent L0 A0 | coincident L0.p2 L1.p1 | concentric A0 A1 | midpoint P0 L0 | symmetry L0 L1 L2 | point_on P0 L0
+CONSTRAINTS: horizontal L0 | vertical L0 | parallel L0 L1 | perpendicular L0 L1 | equal L0 L1 | collinear L0 L1 | tangent L0 A0 | coincident L0.p2 L1.p1 | concentric A0 A1 | midpoint P0 L0 | symmetry L0 L1 L2 | symmetry P0 L0 P1 | symmetry L0.p1 L1 L2.p1 | point_on P0 L0
 
 DIMENSIONS: length L0 5 | length L0 "expr" | radius A0 1.5 | angle L0 L1 45 | distance L0.p1 L1.p2 3
 

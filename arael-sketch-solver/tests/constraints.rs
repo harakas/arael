@@ -1,4 +1,4 @@
-use arael::model::{CrossBlock, Param};
+use arael::model::{CrossBlock, Param, TripletBlock};
 use arael::vect::vect2d;
 use arael_sketch_solver::*;
 
@@ -1278,6 +1278,52 @@ fn test_circular_expr_dim_ref() {
     let len1 = line_length(&sketch, l1);
     assert!(len0.is_finite(), "L0 length should be finite, got {}", len0);
     assert!(len1.is_finite(), "L1 length should be finite, got {}", len1);
+}
+
+// -- Point symmetry --
+
+#[test]
+fn test_symmetry_pp() {
+    // Two points symmetric about a vertical line at x=5
+    let mut sketch = Sketch::new();
+    let p0 = sketch.add_point(vect2d::new(3.0, 2.0));
+    let p1 = sketch.add_point(vect2d::new(7.5, 2.5));
+    let mirror = sketch.add_line(vect2d::new(5.0, 0.0), vect2d::new(5.0, 10.0));
+    sketch.lines[mirror].p1 = Param::fixed(vect2d::new(5.0, 0.0));
+    sketch.lines[mirror].p2 = Param::fixed(vect2d::new(5.0, 10.0));
+    sketch.symmetry_pp.push(SymmetryPP {
+        a: p0, c: p1, line: mirror, hb: TripletBlock::new(),
+    });
+    let result = sketch.solve();
+    assert!(result.end_cost < 1.0, "solver failed: cost={}", result.end_cost);
+    let pa = sketch.points[p0].pos.value;
+    let pb = sketch.points[p1].pos.value;
+    // Midpoint should be on the mirror line (x=5)
+    let mx = (pa.x + pb.x) / 2.0;
+    assert_near(mx, 5.0, 0.1);
+    // Equal distance from line
+    assert_near((5.0 - pa.x).abs(), (pb.x - 5.0).abs(), 0.1);
+    // Same y coordinate
+    assert_near(pa.y, pb.y, 0.1);
+}
+
+#[test]
+fn test_symmetry_pp_diagonal() {
+    // Two points symmetric about a diagonal line y=x
+    let mut sketch = Sketch::new();
+    let p0 = sketch.add_point(vect2d::new(1.0, 3.0));
+    let p1 = sketch.add_point(vect2d::new(3.5, 1.5));
+    let mirror = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(5.0, 5.0));
+    sketch.symmetry_pp.push(SymmetryPP {
+        a: p0, c: p1, line: mirror, hb: TripletBlock::new(),
+    });
+    let result = sketch.solve();
+    assert!(result.end_cost < 1.0, "solver failed: cost={}", result.end_cost);
+    let pa = sketch.points[p0].pos.value;
+    let pb = sketch.points[p1].pos.value;
+    // For reflection across y=x: (x,y) -> (y,x)
+    assert_near(pa.x, pb.y, 0.1);
+    assert_near(pa.y, pb.x, 0.1);
 }
 
 // -- User parameters --

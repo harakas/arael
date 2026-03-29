@@ -635,6 +635,10 @@ impl EditorApp {
             add_line_marker(self, &mut markers, c.b, ConstraintSymbol::Symmetry, id, &mut line_marker_count);
             add_line_marker(self, &mut markers, c.c, ConstraintSymbol::Symmetry, id, &mut line_marker_count);
         }
+        for (i, c) in self.sketch.symmetry_pp.iter().enumerate() {
+            let id = ConstraintId::SymmetryPP(i);
+            add_line_marker(self, &mut markers, c.line, ConstraintSymbol::Symmetry, id, &mut line_marker_count);
+        }
         for (i, c) in self.sketch.tangent_la.iter().enumerate() {
             let id = ConstraintId::TangentLA(i);
             add_line_marker(self, &mut markers, c.line, ConstraintSymbol::Tangent, id, &mut line_marker_count);
@@ -901,11 +905,13 @@ impl EditorApp {
         // Compute constraint-highlighted entities
         let mut highlight_lines: std::collections::HashSet<u32> = std::collections::HashSet::new();
         let mut highlight_arcs: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        let mut highlight_points: std::collections::HashSet<u32> = std::collections::HashSet::new();
         for sel in &self.selection {
             if let Selection::Constraint(id) = sel {
-                let (lines, arcs) = self.constraint_entities(*id);
+                let (lines, arcs, points) = self.constraint_entities(*id);
                 for l in lines { highlight_lines.insert(l.index()); }
                 for a in arcs { highlight_arcs.insert(a.index()); }
+                for p in points { highlight_points.insert(p.index()); }
             }
         }
         let highlight_color = egui::Color32::from_rgb(255, 120, 180); // pink
@@ -969,6 +975,7 @@ impl EditorApp {
             let sp = self.to_screen(p.pos.value);
             let selected = self.selection.contains(&Selection::Point(r));
             let color = if selected { c.point_selected }
+                else if highlight_points.contains(&r.index()) { highlight_color }
                 else if pt_locked.contains(&r.index()) { c.point_locked }
                 else { c.point };
             painter.circle_filled(sp, 5.0, color);

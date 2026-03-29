@@ -287,7 +287,7 @@ python3 -m http.server -d dist 8080
 
 ### Constraints
 
-Horizontal (H), Vertical (V), Coincident (C), Parallel, Perpendicular, Equal length/radius, Tangent (T), Collinear, Midpoint (M), Symmetry, Lock (K), Line style (X). Constraints are visualized as symbols on the geometry and can be selected and deleted.
+Horizontal (H), Vertical (V), Coincident (C), Parallel, Perpendicular, Equal length/radius, Tangent (T), Collinear, Midpoint (M), Symmetry (lines or points about a mirror line), Lock (K), Line style (X). Constraints are visualized as symbols on the geometry and can be selected and deleted.
 
 ### Example: Sketch Solver API
 
