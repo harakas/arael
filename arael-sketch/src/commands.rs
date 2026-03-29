@@ -126,6 +126,15 @@ fn ok(msg: impl Into<String>) -> CommandResult {
     CommandResult { output: msg.into(), is_error: false }
 }
 
+/// Return ok or the status_error if the last exec was rejected.
+fn ok_or_status(ctx: &mut CommandContext, msg: impl Into<String>) -> CommandResult {
+    if let Some(e) = ctx.status_error.take() {
+        CommandResult { output: e, is_error: true }
+    } else {
+        CommandResult { output: msg.into(), is_error: false }
+    }
+}
+
 fn err(msg: impl Into<String>) -> CommandResult {
     CommandResult { output: msg.into(), is_error: true }
 }
@@ -927,7 +936,7 @@ fn cmd_horizontal(ctx: &mut CommandContext, args: &str) -> CommandResult {
     if lines.is_empty() { return err("Usage: horizontal L0 [L1 ...]"); }
     ctx.begin_group();
     ctx.exec(Action::ApplyHorizontal { lines });
-    ok("Applied horizontal")
+    ok_or_status(ctx, "Applied horizontal")
 }
 
 fn cmd_vertical(ctx: &mut CommandContext, args: &str) -> CommandResult {
@@ -941,7 +950,7 @@ fn cmd_vertical(ctx: &mut CommandContext, args: &str) -> CommandResult {
     if lines.is_empty() { return err("Usage: vertical L0 [L1 ...]"); }
     ctx.begin_group();
     ctx.exec(Action::ApplyVertical { lines });
-    ok("Applied vertical")
+    ok_or_status(ctx, "Applied vertical")
 }
 
 fn cmd_parallel(ctx: &mut CommandContext, args: &str) -> CommandResult {
@@ -951,7 +960,7 @@ fn cmd_parallel(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let b = match resolve_line(&ctx.sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
     ctx.begin_group();
     ctx.exec(Action::ApplyParallel { a, b });
-    ok("Applied parallel")
+    ok_or_status(ctx, "Applied parallel")
 }
 
 fn cmd_perpendicular(ctx: &mut CommandContext, args: &str) -> CommandResult {
@@ -961,7 +970,7 @@ fn cmd_perpendicular(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let b = match resolve_line(&ctx.sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
     ctx.begin_group();
     ctx.exec(Action::ApplyPerpendicular { a, b });
-    ok("Applied perpendicular")
+    ok_or_status(ctx, "Applied perpendicular")
 }
 
 fn cmd_equal(ctx: &mut CommandContext, args: &str) -> CommandResult {
@@ -972,13 +981,13 @@ fn cmd_equal(ctx: &mut CommandContext, args: &str) -> CommandResult {
         let b = match resolve_line(&ctx.sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
         ctx.begin_group();
         ctx.exec(Action::ApplyEqualLength { a, b });
-        ok("Applied equal length")
+        ok_or_status(ctx, "Applied equal length")
     } else if tokens[0].starts_with('A') && tokens[1].starts_with('A') {
         let a = match resolve_arc(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
         let b = match resolve_arc(&ctx.sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
         ctx.begin_group();
         ctx.exec(Action::ApplyEqualRadius { a, b });
-        ok("Applied equal radius")
+        ok_or_status(ctx, "Applied equal radius")
     } else {
         err("equal needs two lines or two arcs")
     }
@@ -991,7 +1000,7 @@ fn cmd_collinear(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let b = match resolve_line(&ctx.sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
     ctx.begin_group();
     ctx.exec(Action::ApplyCollinear { a, b });
-    ok("Applied collinear")
+    ok_or_status(ctx, "Applied collinear")
 }
 
 fn cmd_tangent(ctx: &mut CommandContext, args: &str) -> CommandResult {
@@ -1002,13 +1011,13 @@ fn cmd_tangent(ctx: &mut CommandContext, args: &str) -> CommandResult {
         let arc = match resolve_arc(&ctx.sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
         ctx.begin_group();
         ctx.exec(Action::ApplyTangentLA { line, arc });
-        ok("Applied tangent")
+        ok_or_status(ctx, "Applied tangent")
     } else if tokens[0].starts_with('A') && tokens[1].starts_with('A') {
         let a = match resolve_arc(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
         let b = match resolve_arc(&ctx.sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
         ctx.begin_group();
         ctx.exec(Action::ApplyTangentAA { a, b });
-        ok("Applied tangent")
+        ok_or_status(ctx, "Applied tangent")
     } else {
         err("tangent needs line+arc or arc+arc")
     }
@@ -1041,7 +1050,7 @@ fn cmd_coincident(ctx: &mut CommandContext, args: &str) -> CommandResult {
     };
     ctx.begin_group();
     ctx.exec(action);
-    ok("Applied coincident")
+    ok_or_status(ctx, "Applied coincident")
 }
 
 fn cmd_concentric(ctx: &mut CommandContext, args: &str) -> CommandResult {
@@ -1051,7 +1060,7 @@ fn cmd_concentric(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let b = match resolve_arc(&ctx.sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
     ctx.begin_group();
     ctx.exec(Action::ApplyConcentric { a, b });
-    ok("Applied concentric")
+    ok_or_status(ctx, "Applied concentric")
 }
 
 // ---------------------------------------------------------------------------
@@ -1320,8 +1329,8 @@ fn cmd_info(ctx: &mut CommandContext, args: &str) -> CommandResult {
         let r = match resolve_line(&ctx.sketch, name) { Ok(r) => r, Err(e) => return err(e) };
         let l = &ctx.sketch.lines[r];
         let len = ((l.p2.value.x - l.p1.value.x).powi(2) + (l.p2.value.y - l.p1.value.y).powi(2)).sqrt();
-        let mut s = format!("{}: ({:.4},{:.4})-({:.4},{:.4}) len={:.4} style={:?}",
-            l.name, l.p1.value.x, l.p1.value.y, l.p2.value.x, l.p2.value.y, len, l.style);
+        let mut s = format!("{}: ({:.4},{:.4})-({:.4},{:.4}) len={:.4} style={}",
+            l.name, l.p1.value.x, l.p1.value.y, l.p2.value.x, l.p2.value.y, len, l.style.name());
         if !l.p1.optimize { s += " [p1 locked]"; }
         if !l.p2.optimize { s += " [p2 locked]"; }
         let cstrs = constraints_for(&ctx.sketch, name);
@@ -1566,7 +1575,7 @@ fn cmd_midpoint(ctx: &mut CommandContext, args: &str) -> CommandResult {
     };
     ctx.begin_group();
     ctx.exec(action);
-    ok("Applied midpoint")
+    ok_or_status(ctx, "Applied midpoint")
 }
 
 fn cmd_symmetry(ctx: &mut CommandContext, args: &str) -> CommandResult {
@@ -1577,7 +1586,7 @@ fn cmd_symmetry(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let c = match resolve_line(&ctx.sketch, tokens[2]) { Ok(r) => r, Err(e) => return err(e) };
     ctx.begin_group();
     ctx.exec(Action::ApplySymmetryLL { a, b, c });
-    ok("Applied symmetry")
+    ok_or_status(ctx, "Applied symmetry")
 }
 
 fn cmd_point_on(ctx: &mut CommandContext, args: &str) -> CommandResult {
@@ -1595,7 +1604,7 @@ fn cmd_point_on(ctx: &mut CommandContext, args: &str) -> CommandResult {
         };
         ctx.begin_group();
         ctx.exec(action);
-        ok("Applied point-on-line")
+        ok_or_status(ctx, "Applied point-on-line")
     } else if target.starts_with('A') {
         let arc = match resolve_arc(&ctx.sketch, target) { Ok(r) => r, Err(e) => return err(e) };
         let action = match ep {
@@ -1606,7 +1615,7 @@ fn cmd_point_on(ctx: &mut CommandContext, args: &str) -> CommandResult {
         };
         ctx.begin_group();
         ctx.exec(action);
-        ok("Applied point-on-arc")
+        ok_or_status(ctx, "Applied point-on-arc")
     } else {
         err("Second arg must be a line (L0) or arc (A0)")
     }

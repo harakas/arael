@@ -478,6 +478,7 @@ impl EditorApp {
 
     // Start dragging: create a temporary fixed point and coincident constraint
     fn start_drag(&mut self, target: GrabTarget, mouse_pos: vect2d) {
+        self.show_hints = false;
         // Save pre-drag state before adding drag apparatus
         self.drag_saved_cost = self.last_cost;
         self.drag_saved_snapshot = bincode::serialize(&self.sketch).ok();
@@ -747,6 +748,7 @@ impl EditorApp {
         self.offset.x = ctx.offset_x;
         self.offset.y = ctx.offset_y;
         self.pending_fit = ctx.pending_fit;
+        self.show_hints = false;
         self.compute_dof_async();
         results
     }
