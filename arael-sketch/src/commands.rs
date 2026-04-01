@@ -1948,6 +1948,7 @@ fn cmd_remove_constraint(ctx: &mut CommandContext, args: &str) -> CommandResult 
         _ => { return err(format!("Unknown constraint type: {}. Use: horizontal, vertical, parallel, perpendicular, equal, collinear, tangent, concentric, lock", ctype)); }
     };
     if removed {
+        sketch.cleanup_helper_points();
         sketch.solve();
         ok(format!("Removed {} constraint", ctype))
     } else {
@@ -3103,5 +3104,205 @@ mod tests {
         assert_eq!(ctx.sketch.dimensions.len(), 1);
         assert!(ctx.sketch.dimensions[0].derived);
         assert!(near(ctx.sketch.dimensions[0].value, 1.0));
+    }
+
+    // -- Helper point display and cleanup tests --
+
+    fn has_helper_points(ctx: &CommandContext) -> bool {
+        ctx.sketch.points.refs().any(|r| ctx.sketch.points[r].helper)
+    }
+
+    fn list_constraints_output(ctx: &mut CommandContext) -> String {
+        run_ok(ctx, "list constraints")
+    }
+
+    // 6A: Display tests -- list constraints shows no Pc names
+
+    #[test]
+    fn test_list_no_pc_distance_ll_endpoints() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 3,0; add_line 5,0 8,0");
+        run_ok(&mut ctx, "distance L0.p2 L1.p1 2");
+        let out = list_constraints_output(&mut ctx);
+        assert!(!out.contains("Pc"), "list should not contain Pc: {}", out);
+        assert!(out.contains("distance"), "should list distance constraint: {}", out);
+    }
+
+    #[test]
+    fn test_list_no_pc_distance_arc_endpoints() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_circle 0,0 3; add_circle 10,0 2");
+        run_ok(&mut ctx, "distance A0.center A1.center 10");
+        let out = list_constraints_output(&mut ctx);
+        assert!(!out.contains("Pc"), "list should not contain Pc: {}", out);
+        assert!(out.contains("distance") && out.contains("A0.center") && out.contains("A1.center"),
+            "should show semantic names: {}", out);
+    }
+
+    #[test]
+    fn test_list_no_pc_distance_mixed_arc_line() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0; add_circle 10,0 2");
+        run_ok(&mut ctx, "distance A0.center L0.p1 10");
+        let out = list_constraints_output(&mut ctx);
+        assert!(!out.contains("Pc"), "list should not contain Pc: {}", out);
+    }
+
+    #[test]
+    fn test_list_no_pc_distance_point_line() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,3 5,3");
+        run_ok(&mut ctx, "distance L0.p1 L1 3");
+        let out = list_constraints_output(&mut ctx);
+        assert!(!out.contains("Pc"), "list should not contain Pc: {}", out);
+    }
+
+    #[test]
+    fn test_list_no_pc_symmetry_pp_endpoints() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0; add_line 3,-5 3,5");
+        run_ok(&mut ctx, "symmetry L0.p1 L1 L0.p2");
+        let out = list_constraints_output(&mut ctx);
+        assert!(!out.contains("Pc"), "list should not contain Pc: {}", out);
+        assert!(out.contains("symmetry") && out.contains("L0.p1") && out.contains("L0.p2"),
+            "should show semantic names: {}", out);
+    }
+
+    #[test]
+    fn test_list_no_pc_symmetry_pp_arc() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_circle 0,0 3; add_line 5,-5 5,5; add_circle 10,0 3");
+        run_ok(&mut ctx, "symmetry A0.center L0 A1.center");
+        let out = list_constraints_output(&mut ctx);
+        assert!(!out.contains("Pc"), "list should not contain Pc: {}", out);
+    }
+
+    #[test]
+    fn test_list_no_bridge_constraints() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 3,0; add_line 5,0 8,0");
+        run_ok(&mut ctx, "distance L0.p2 L1.p1 2");
+        let out = list_constraints_output(&mut ctx);
+        // Should not contain bridge coincident entries
+        let lines: Vec<&str> = out.lines().collect();
+        for line in &lines {
+            if line.starts_with("coincident") {
+                assert!(!line.contains("Pc"), "bridge constraint should be hidden: {}", line);
+            }
+        }
+    }
+
+    // 6B: Cleanup on object deletion
+    // Note: Line-Line endpoint distances (DistanceLL*) don't create helpers.
+    // Helpers are created for Arc endpoint distances and PointLineDistance
+    // with non-Point endpoints.
+
+    #[test]
+    fn test_cleanup_delete_line_removes_symmetry_helpers() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0; add_line 3,-5 3,5");
+        run_ok(&mut ctx, "symmetry L0.p1 L1 L0.p2");
+        assert!(has_helper_points(&ctx), "should have helpers after symmetry");
+        run_ok(&mut ctx, "delete L0");
+        assert!(!has_helper_points(&ctx), "helpers should be cleaned up after delete L0");
+        assert!(ctx.sketch.symmetry_pp.is_empty(), "symmetry_pp should be empty");
+    }
+
+    #[test]
+    fn test_cleanup_delete_arc_removes_distance_helpers() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_circle 0,0 3; add_circle 10,0 2");
+        run_ok(&mut ctx, "distance A0.center A1.center 10");
+        assert!(has_helper_points(&ctx), "should have helpers");
+        run_ok(&mut ctx, "delete A0");
+        assert!(!has_helper_points(&ctx), "helpers should be cleaned up");
+        assert!(ctx.sketch.distance_pp.is_empty(), "distance_pp should be empty");
+    }
+
+    #[test]
+    fn test_cleanup_delete_arc_removes_symmetry_helpers() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_circle 0,0 3; add_line 5,-5 5,5; add_circle 10,0 3");
+        run_ok(&mut ctx, "symmetry A0.center L0 A1.center");
+        assert!(has_helper_points(&ctx), "should have helpers");
+        run_ok(&mut ctx, "delete A0");
+        assert!(!has_helper_points(&ctx), "helpers should be cleaned up");
+        assert!(ctx.sketch.symmetry_pp.is_empty(), "symmetry_pp should be empty");
+    }
+
+    #[test]
+    fn test_cleanup_delete_mirror_line_removes_symmetry_helpers() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0; add_line 3,-5 3,5");
+        run_ok(&mut ctx, "symmetry L0.p1 L1 L0.p2");
+        assert!(!ctx.sketch.symmetry_pp.is_empty());
+        run_ok(&mut ctx, "delete L1");
+        assert!(ctx.sketch.symmetry_pp.is_empty(), "symmetry gone after mirror line deleted");
+        assert!(!has_helper_points(&ctx), "helpers cleaned up");
+    }
+
+    #[test]
+    fn test_cleanup_delete_line_removes_pl_distance_helpers() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,3 5,3");
+        // distance from line endpoint to other line creates a helper
+        run_ok(&mut ctx, "distance L0.p1 L1 3");
+        assert!(has_helper_points(&ctx), "should have helper for L0.p1");
+        run_ok(&mut ctx, "delete L0");
+        assert!(!has_helper_points(&ctx), "helpers cleaned up");
+        assert!(ctx.sketch.distance_pl.is_empty(), "distance_pl should be empty");
+    }
+
+    // 6C: Cleanup on dimension removal
+
+    #[test]
+    fn test_cleanup_remove_dim_distance_arc() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_circle 0,0 3; add_circle 10,0 2");
+        run_ok(&mut ctx, "distance A0.center A1.center 10");
+        assert!(has_helper_points(&ctx));
+        run_ok(&mut ctx, "remove_dim d0");
+        assert!(!has_helper_points(&ctx), "helpers cleaned up after remove_dim");
+    }
+
+    #[test]
+    fn test_cleanup_remove_dim_distance_point_line() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,3 5,3");
+        run_ok(&mut ctx, "distance L0.p1 L1 3");
+        assert!(has_helper_points(&ctx));
+        run_ok(&mut ctx, "remove_dim d0");
+        assert!(!has_helper_points(&ctx), "helpers cleaned up after remove_dim");
+    }
+
+    #[test]
+    fn test_cleanup_remove_dim_distance_arc_line() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_circle 0,0 3; add_line 0,5 5,5");
+        run_ok(&mut ctx, "distance A0.center L0 5");
+        assert!(has_helper_points(&ctx));
+        run_ok(&mut ctx, "remove_dim d0");
+        assert!(!has_helper_points(&ctx), "helpers cleaned up after remove_dim");
+    }
+
+    #[test]
+    fn test_cleanup_remove_dim_distance_arc_mixed() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_circle 0,0 3; add_line 10,0 15,0");
+        run_ok(&mut ctx, "distance A0.center L0.p1 10");
+        assert!(has_helper_points(&ctx));
+        run_ok(&mut ctx, "remove_dim d0");
+        assert!(!has_helper_points(&ctx), "helpers cleaned up after remove_dim");
+    }
+
+    // 6D: No Pc in distance constraints that don't need helpers (regression)
+
+    #[test]
+    fn test_no_helpers_for_line_line_distance() {
+        // Line-Line endpoint distances use specialized constraints, no helpers
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 3,0; add_line 5,0 8,0");
+        run_ok(&mut ctx, "distance L0.p2 L1.p1 2");
+        assert!(!has_helper_points(&ctx), "DistanceLL should not create helpers");
     }
 }

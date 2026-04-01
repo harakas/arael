@@ -400,34 +400,63 @@ impl Sketch {
         self.cleanup_helper_points();
     }
 
-    /// Remove helper points that have no remaining constraints referencing them.
+    /// Remove helper points that are no longer needed.
+    /// A helper is removed if it lost its bridge constraint (semantic origin
+    /// gone) or has no purpose constraint. Cascades until stable.
     pub fn cleanup_helper_points(&mut self) {
-        // Collect all point refs that appear in any constraint
-        let mut referenced: std::collections::HashSet<u32> = std::collections::HashSet::new();
-        let mut add_pt = |r: Ref<Point>| { referenced.insert(r.index()); };
-        for c in &self.coincident_pp { add_pt(c.a); add_pt(c.b); }
-        for c in &self.coincident_lp1 { add_pt(c.point); }
-        for c in &self.coincident_lp2 { add_pt(c.point); }
-        for c in &self.distance_pp { add_pt(c.a); add_pt(c.b); }
-        for c in &self.hdistance_pp { add_pt(c.a); add_pt(c.b); }
-        for c in &self.vdistance_pp { add_pt(c.a); add_pt(c.b); }
-        for c in &self.point_on_line { add_pt(c.point); }
-        for c in &self.midpoint { add_pt(c.point); }
-        for c in &self.point_on_arc { add_pt(c.point); }
-        for c in &self.distance_pl { add_pt(c.point); }
-        for c in &self.coincident_arc_center { add_pt(c.point); }
-        for c in &self.coincident_arc_start { add_pt(c.point); }
-        for c in &self.coincident_arc_end { add_pt(c.point); }
+        loop {
+            // Find which helpers have a bridge (know what they represent)
+            let mut has_bridge: std::collections::HashSet<u32> = std::collections::HashSet::new();
+            for c in &self.coincident_lp1 { if self.points.get(c.point).map_or(false, |p| p.helper) { has_bridge.insert(c.point.index()); } }
+            for c in &self.coincident_lp2 { if self.points.get(c.point).map_or(false, |p| p.helper) { has_bridge.insert(c.point.index()); } }
+            for c in &self.coincident_arc_center { if self.points.get(c.point).map_or(false, |p| p.helper) { has_bridge.insert(c.point.index()); } }
+            for c in &self.coincident_arc_start { if self.points.get(c.point).map_or(false, |p| p.helper) { has_bridge.insert(c.point.index()); } }
+            for c in &self.coincident_arc_end { if self.points.get(c.point).map_or(false, |p| p.helper) { has_bridge.insert(c.point.index()); } }
+            for c in &self.coincident_pp {
+                if self.points.get(c.a).map_or(false, |p| p.helper) { has_bridge.insert(c.a.index()); }
+                if self.points.get(c.b).map_or(false, |p| p.helper) { has_bridge.insert(c.b.index()); }
+            }
 
-        // Remove unreferenced helper points
-        let to_remove: std::vec::Vec<Ref<Point>> = self.points.refs()
-            .filter(|r| {
-                let p = &self.points[*r];
-                p.helper && !referenced.contains(&r.index())
-            })
-            .collect();
-        for r in to_remove {
-            self.points.remove(r);
+            // Find which helpers have a purpose constraint
+            let mut has_purpose: std::collections::HashSet<u32> = std::collections::HashSet::new();
+            let mut add_pt = |r: Ref<Point>| { has_purpose.insert(r.index()); };
+            for c in &self.distance_pp { add_pt(c.a); add_pt(c.b); }
+            for c in &self.hdistance_pp { add_pt(c.a); add_pt(c.b); }
+            for c in &self.vdistance_pp { add_pt(c.a); add_pt(c.b); }
+            for c in &self.point_on_line { add_pt(c.point); }
+            for c in &self.midpoint { add_pt(c.point); }
+            for c in &self.point_on_arc { add_pt(c.point); }
+            for c in &self.distance_pl { add_pt(c.point); }
+            for c in &self.distance_lp1 { add_pt(c.point); }
+            for c in &self.distance_lp2 { add_pt(c.point); }
+            for c in &self.symmetry_pp { add_pt(c.a); add_pt(c.c); }
+
+            // Remove helpers that lost their bridge OR have no purpose
+            let to_remove: std::vec::Vec<Ref<Point>> = self.points.refs()
+                .filter(|r| self.points[*r].helper
+                    && (!has_bridge.contains(&r.index()) || !has_purpose.contains(&r.index())))
+                .collect();
+            if to_remove.is_empty() { break; }
+
+            for r in &to_remove {
+                self.coincident_pp.retain(|c| c.a != *r && c.b != *r);
+                self.coincident_lp1.retain(|c| c.point != *r);
+                self.coincident_lp2.retain(|c| c.point != *r);
+                self.coincident_arc_center.retain(|c| c.point != *r);
+                self.coincident_arc_start.retain(|c| c.point != *r);
+                self.coincident_arc_end.retain(|c| c.point != *r);
+                self.symmetry_pp.retain(|c| c.a != *r && c.c != *r);
+                self.distance_pp.retain(|c| c.a != *r && c.b != *r);
+                self.hdistance_pp.retain(|c| c.a != *r && c.b != *r);
+                self.vdistance_pp.retain(|c| c.a != *r && c.b != *r);
+                self.point_on_line.retain(|c| c.point != *r);
+                self.midpoint.retain(|c| c.point != *r);
+                self.point_on_arc.retain(|c| c.point != *r);
+                self.distance_pl.retain(|c| c.point != *r);
+                self.distance_lp1.retain(|c| c.point != *r);
+                self.distance_lp2.retain(|c| c.point != *r);
+            }
+            for r in to_remove { self.points.remove(r); }
         }
     }
 
@@ -891,6 +920,29 @@ impl Sketch {
         Ok(())
     }
 
+    /// Get a display-friendly name for a point. For helper points, resolves
+    /// through bridge constraints to show the semantic origin (e.g. "L0.p1").
+    pub fn point_display_name(&self, r: Ref<Point>) -> String {
+        let p = &self.points[r];
+        if !p.helper { return p.name.clone(); }
+        for c in &self.coincident_lp1 {
+            if c.point == r { return format!("{}.p1", self.lines[c.line].name); }
+        }
+        for c in &self.coincident_lp2 {
+            if c.point == r { return format!("{}.p2", self.lines[c.line].name); }
+        }
+        for c in &self.coincident_arc_center {
+            if c.point == r { return format!("{}.center", self.arcs[c.arc].name); }
+        }
+        for c in &self.coincident_arc_start {
+            if c.point == r { return format!("{}.start", self.arcs[c.arc].name); }
+        }
+        for c in &self.coincident_arc_end {
+            if c.point == r { return format!("{}.end", self.arcs[c.arc].name); }
+        }
+        p.name.clone()
+    }
+
     /// Add an expression-based dimension. The expression string is parsed
     /// List all active constraints as human-readable strings.
     pub fn list_constraints(&self) -> Vec<String> {
@@ -929,27 +981,90 @@ impl Sketch {
         list_cross!(self.perpendicular, "perpendicular", a, b);
         list_cross!(self.collinear, "collinear", a, b);
         list_cross!(self.equal_length, "equal_length", a, b);
+        // Coincident: suppress bridge constraints (helper point bridges)
         for c in &self.coincident_pp {
-            out.push(format!("coincident {} {}", self.points[c.a].name, self.points[c.b].name));
+            if !self.points[c.a].helper && !self.points[c.b].helper {
+                out.push(format!("coincident {} {}", self.points[c.a].name, self.points[c.b].name));
+            }
         }
         for c in &self.coincident_ll11 { out.push(format!("coincident {}.p1 {}.p1", self.lines[c.a].name, self.lines[c.b].name)); }
         for c in &self.coincident_ll12 { out.push(format!("coincident {}.p1 {}.p2", self.lines[c.a].name, self.lines[c.b].name)); }
         for c in &self.coincident_ll21 { out.push(format!("coincident {}.p2 {}.p1", self.lines[c.a].name, self.lines[c.b].name)); }
         for c in &self.coincident_ll22 { out.push(format!("coincident {}.p2 {}.p2", self.lines[c.a].name, self.lines[c.b].name)); }
-        for c in &self.coincident_lp1 { out.push(format!("coincident {}.p1 {}", self.lines[c.line].name, self.points[c.point].name)); }
-        for c in &self.coincident_lp2 { out.push(format!("coincident {}.p2 {}", self.lines[c.line].name, self.points[c.point].name)); }
+        for c in &self.coincident_lp1 {
+            if !self.points[c.point].helper {
+                out.push(format!("coincident {}.p1 {}", self.lines[c.line].name, self.points[c.point].name));
+            }
+        }
+        for c in &self.coincident_lp2 {
+            if !self.points[c.point].helper {
+                out.push(format!("coincident {}.p2 {}", self.lines[c.line].name, self.points[c.point].name));
+            }
+        }
+        // Point-Arc coincident: suppress helper bridges
+        for c in &self.coincident_arc_center {
+            if !self.points[c.point].helper {
+                out.push(format!("coincident {} {}.center", self.points[c.point].name, self.arcs[c.arc].name));
+            }
+        }
+        for c in &self.coincident_arc_start {
+            if !self.points[c.point].helper {
+                out.push(format!("coincident {} {}.start", self.points[c.point].name, self.arcs[c.arc].name));
+            }
+        }
+        for c in &self.coincident_arc_end {
+            if !self.points[c.point].helper {
+                out.push(format!("coincident {} {}.end", self.points[c.point].name, self.arcs[c.arc].name));
+            }
+        }
+        // Line-Arc coincident
+        for c in &self.coincident_lp1_arc_center { out.push(format!("coincident {}.p1 {}.center", self.lines[c.line].name, self.arcs[c.arc].name)); }
+        for c in &self.coincident_lp2_arc_center { out.push(format!("coincident {}.p2 {}.center", self.lines[c.line].name, self.arcs[c.arc].name)); }
+        for c in &self.coincident_lp1_arc_start { out.push(format!("coincident {}.p1 {}.start", self.lines[c.line].name, self.arcs[c.arc].name)); }
+        for c in &self.coincident_lp2_arc_start { out.push(format!("coincident {}.p2 {}.start", self.lines[c.line].name, self.arcs[c.arc].name)); }
+        for c in &self.coincident_lp1_arc_end { out.push(format!("coincident {}.p1 {}.end", self.lines[c.line].name, self.arcs[c.arc].name)); }
+        for c in &self.coincident_lp2_arc_end { out.push(format!("coincident {}.p2 {}.end", self.lines[c.line].name, self.arcs[c.arc].name)); }
+        // Arc-Arc coincident
+        for c in &self.coincident_arc_center_start { out.push(format!("coincident {}.center {}.start", self.arcs[c.a].name, self.arcs[c.b].name)); }
+        for c in &self.coincident_arc_center_end { out.push(format!("coincident {}.center {}.end", self.arcs[c.a].name, self.arcs[c.b].name)); }
+        for c in &self.coincident_arc_start_center { out.push(format!("coincident {}.start {}.center", self.arcs[c.a].name, self.arcs[c.b].name)); }
+        for c in &self.coincident_arc_end_center { out.push(format!("coincident {}.end {}.center", self.arcs[c.a].name, self.arcs[c.b].name)); }
+        for c in &self.coincident_arc_start_start { out.push(format!("coincident {}.start {}.start", self.arcs[c.a].name, self.arcs[c.b].name)); }
+        for c in &self.coincident_arc_start_end { out.push(format!("coincident {}.start {}.end", self.arcs[c.a].name, self.arcs[c.b].name)); }
+        for c in &self.coincident_arc_end_start { out.push(format!("coincident {}.end {}.start", self.arcs[c.a].name, self.arcs[c.b].name)); }
+        for c in &self.coincident_arc_end_end { out.push(format!("coincident {}.end {}.end", self.arcs[c.a].name, self.arcs[c.b].name)); }
+        // Line endpoint on line/arc
+        for c in &self.line_p1_on_line { out.push(format!("point_on {}.p1 {}", self.lines[c.a].name, self.lines[c.b].name)); }
+        for c in &self.line_p2_on_line { out.push(format!("point_on {}.p2 {}", self.lines[c.a].name, self.lines[c.b].name)); }
+        for c in &self.line_p1_on_arc { out.push(format!("point_on {}.p1 {}", self.lines[c.line].name, self.arcs[c.arc].name)); }
+        for c in &self.line_p2_on_arc { out.push(format!("point_on {}.p2 {}", self.lines[c.line].name, self.arcs[c.arc].name)); }
         for c in &self.angle { out.push(format!("angle {} {} = {:.1}deg", self.lines[c.a].name, self.lines[c.b].name, c.angle.to_degrees())); }
         for c in &self.tangent_la { out.push(format!("tangent {} {}", self.lines[c.line].name, self.arcs[c.arc].name)); }
         for c in &self.tangent_aa { out.push(format!("tangent {} {}", self.arcs[c.a].name, self.arcs[c.b].name)); }
         for c in &self.concentric { out.push(format!("concentric {} {}", self.arcs[c.a].name, self.arcs[c.b].name)); }
         for c in &self.equal_radius { out.push(format!("equal_radius {} {}", self.arcs[c.a].name, self.arcs[c.b].name)); }
         for c in &self.symmetry_ll { out.push(format!("symmetry {} {} {}", self.lines[c.a].name, self.lines[c.b].name, self.lines[c.c].name)); }
-        for c in &self.symmetry_pp { out.push(format!("symmetry {} {} {}", self.points[c.a].name, self.lines[c.line].name, self.points[c.c].name)); }
-        for c in &self.point_on_line { out.push(format!("point_on {} {}", self.points[c.point].name, self.lines[c.line].name)); }
-        for c in &self.point_on_arc { out.push(format!("point_on {} {}", self.points[c.point].name, self.arcs[c.arc].name)); }
-        for c in &self.midpoint { out.push(format!("midpoint {} {}", self.points[c.point].name, self.lines[c.line].name)); }
-        for c in &self.distance_pp { out.push(format!("distance {} {} = {}", self.points[c.a].name, self.points[c.b].name, c.distance)); }
-        for c in &self.distance_pl { out.push(format!("distance_pl {} = {}", self.lines[c.line].name, c.distance)); }
+        for c in &self.symmetry_pp { out.push(format!("symmetry {} {} {}", self.point_display_name(c.a), self.lines[c.line].name, self.point_display_name(c.c))); }
+        // Point-based constraints: use display names to resolve helpers
+        for c in &self.point_on_line { out.push(format!("point_on {} {}", self.point_display_name(c.point), self.lines[c.line].name)); }
+        for c in &self.point_on_arc { out.push(format!("point_on {} {}", self.point_display_name(c.point), self.arcs[c.arc].name)); }
+        for c in &self.midpoint { out.push(format!("midpoint {} {}", self.point_display_name(c.point), self.lines[c.line].name)); }
+        for c in &self.distance_pp { out.push(format!("distance {} {} = {}", self.point_display_name(c.a), self.point_display_name(c.b), c.distance)); }
+        for c in &self.hdistance_pp { out.push(format!("hdistance {} {} = {}", self.point_display_name(c.a), self.point_display_name(c.b), c.distance)); }
+        for c in &self.vdistance_pp { out.push(format!("vdistance {} {} = {}", self.point_display_name(c.a), self.point_display_name(c.b), c.distance)); }
+        for c in &self.distance_pl { out.push(format!("distance {} {} = {}", self.point_display_name(c.point), self.lines[c.line].name, c.distance)); }
+        // Line-endpoint distance constraints
+        for c in &self.distance_ll11 { out.push(format!("distance {}.p1 {}.p1 = {}", self.lines[c.a].name, self.lines[c.b].name, c.distance)); }
+        for c in &self.distance_ll12 { out.push(format!("distance {}.p1 {}.p2 = {}", self.lines[c.a].name, self.lines[c.b].name, c.distance)); }
+        for c in &self.distance_ll21 { out.push(format!("distance {}.p2 {}.p1 = {}", self.lines[c.a].name, self.lines[c.b].name, c.distance)); }
+        for c in &self.distance_ll22 { out.push(format!("distance {}.p2 {}.p2 = {}", self.lines[c.a].name, self.lines[c.b].name, c.distance)); }
+        for c in &self.distance_lp1 { out.push(format!("distance {}.p1 {} = {}", self.lines[c.line].name, self.point_display_name(c.point), c.distance)); }
+        for c in &self.distance_lp2 { out.push(format!("distance {}.p2 {} = {}", self.lines[c.line].name, self.point_display_name(c.point), c.distance)); }
+        // Midpoint variants
+        for c in &self.midpoint_lp1 { out.push(format!("midpoint {}.p1 {}", self.lines[c.target].name, self.lines[c.line].name)); }
+        for c in &self.midpoint_lp2 { out.push(format!("midpoint {}.p2 {}", self.lines[c.target].name, self.lines[c.line].name)); }
+        for c in &self.midpoint_arc_start { out.push(format!("midpoint {}.start {}", self.arcs[c.arc].name, self.lines[c.line].name)); }
+        for c in &self.midpoint_arc_end { out.push(format!("midpoint {}.end {}", self.arcs[c.arc].name, self.lines[c.line].name)); }
         out
     }
 
