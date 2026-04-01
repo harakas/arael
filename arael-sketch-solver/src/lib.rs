@@ -99,6 +99,7 @@ pub struct Sketch {
     pub equal_radius: std::vec::Vec<EqualRadius>,
     pub tangent_aa: std::vec::Vec<TangentAA>,
     pub symmetry_ll: std::vec::Vec<SymmetryLL>,
+    #[serde(default)]
     pub symmetry_pp: std::vec::Vec<SymmetryPP>,
     pub distance_pl: std::vec::Vec<DistancePL>,
     pub line_p1_on_line: std::vec::Vec<LineP1OnLine>,
