@@ -8,6 +8,7 @@ use arael::vect::vect2d;
 use arael_sketch_solver::*;
 
 use crate::actions::Action;
+use crate::geometry::{arc_start_pos, arc_end_pos};
 use crate::history::History;
 use crate::tools::Selection;
 
@@ -96,8 +97,18 @@ impl CommandContext {
 
             action.apply(&mut self.sketch);
             self.sketch.dedup_constraints();
-            let result = self.sketch.solve();
-            let new_cost = result.end_cost;
+
+            // Quick cost check: skip solver if new constraint didn't increase cost
+            let quick_cost = {
+                let mut params = Vec::new();
+                self.sketch.serialize64(&mut params);
+                self.sketch.calc_cost(&params)
+            };
+            let new_cost = if quick_cost <= old_cost + 1e-6 {
+                quick_cost
+            } else {
+                self.sketch.solve().end_cost
+            };
 
             let cost_jumped = new_cost > old_cost + 1e-3;
             if cost_jumped {
@@ -691,6 +702,11 @@ pub fn execute(ctx: &mut CommandContext, input: &str) -> Vec<CommandResult> {
 fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
     let input = input.trim();
 
+    // Comments
+    if input.starts_with('#') {
+        return CommandResult { output: String::new(), is_error: false, no_echo: true, markdown: false };
+    }
+
     // Assignment: "name = command args" or "let name = ..."
     let assign_input = input.strip_prefix("let ").map(|s| (true, s)).unwrap_or((false, input));
     if let Some((lhs, rhs)) = assign_input.1.split_once('=') {
@@ -804,6 +820,10 @@ fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
 
 const SNAP_THRESHOLD: f64 = 1e-3;
 
+fn snap_near(a: vect2d, b: vect2d) -> bool {
+    (a.x - b.x).abs() < SNAP_THRESHOLD && (a.y - b.y).abs() < SNAP_THRESHOLD
+}
+
 /// Auto-connect endpoints of the last created line to nearby existing endpoints.
 fn auto_coincident_line(ctx: &mut CommandContext, line_ref: Ref<Line>) -> Vec<String> {
     let mut actions: Vec<(Action, String)> = Vec::new();
@@ -815,17 +835,17 @@ fn auto_coincident_line(ctx: &mut CommandContext, line_ref: Ref<Line>) -> Vec<St
     for r in ctx.sketch.lines.refs() {
         if r == line_ref { continue; }
         let other = &ctx.sketch.lines[r];
-        if (other.p1.value.x - p1.x).abs() < SNAP_THRESHOLD && (other.p1.value.y - p1.y).abs() < SNAP_THRESHOLD {
+        if snap_near(p1, other.p1.value) {
             actions.push((Action::ApplyCoincidentLL11 { a: line_ref, b: r },
                 format!("{}.p1={}.p1", this_name, other.name)));
-        } else if (other.p2.value.x - p1.x).abs() < SNAP_THRESHOLD && (other.p2.value.y - p1.y).abs() < SNAP_THRESHOLD {
+        } else if snap_near(p1, other.p2.value) {
             actions.push((Action::ApplyCoincidentLL12 { a: line_ref, b: r },
                 format!("{}.p1={}.p2", this_name, other.name)));
         }
-        if (other.p1.value.x - p2.x).abs() < SNAP_THRESHOLD && (other.p1.value.y - p2.y).abs() < SNAP_THRESHOLD {
+        if snap_near(p2, other.p1.value) {
             actions.push((Action::ApplyCoincidentLL21 { a: line_ref, b: r },
                 format!("{}.p2={}.p1", this_name, other.name)));
-        } else if (other.p2.value.x - p2.x).abs() < SNAP_THRESHOLD && (other.p2.value.y - p2.y).abs() < SNAP_THRESHOLD {
+        } else if snap_near(p2, other.p2.value) {
             actions.push((Action::ApplyCoincidentLL22 { a: line_ref, b: r },
                 format!("{}.p2={}.p2", this_name, other.name)));
         }
@@ -833,15 +853,163 @@ fn auto_coincident_line(ctx: &mut CommandContext, line_ref: Ref<Line>) -> Vec<St
     for r in ctx.sketch.points.refs() {
         let pt = &ctx.sketch.points[r];
         if pt.helper { continue; }
-        if (pt.pos.value.x - p1.x).abs() < SNAP_THRESHOLD && (pt.pos.value.y - p1.y).abs() < SNAP_THRESHOLD {
+        if snap_near(p1, pt.pos.value) {
             actions.push((Action::ApplyCoincidentLP1 { line: line_ref, point: r },
                 format!("{}.p1={}", this_name, pt.name)));
         }
-        if (pt.pos.value.x - p2.x).abs() < SNAP_THRESHOLD && (pt.pos.value.y - p2.y).abs() < SNAP_THRESHOLD {
+        if snap_near(p2, pt.pos.value) {
             actions.push((Action::ApplyCoincidentLP2 { line: line_ref, point: r },
                 format!("{}.p2={}", this_name, pt.name)));
         }
     }
+    for r in ctx.sketch.arcs.refs() {
+        let arc = &ctx.sketch.arcs[r];
+        let ac = arc.center.value;
+        let a_start = arc_start_pos(arc);
+        let a_end = arc_end_pos(arc);
+        if snap_near(p1, ac) {
+            actions.push((Action::ApplyCoincidentLP1ArcCenter { line: line_ref, arc: r },
+                format!("{}.p1={}.center", this_name, arc.name)));
+        }
+        if snap_near(p1, a_start) {
+            actions.push((Action::ApplyCoincidentLP1ArcStart { line: line_ref, arc: r },
+                format!("{}.p1={}.start", this_name, arc.name)));
+        }
+        if snap_near(p1, a_end) {
+            actions.push((Action::ApplyCoincidentLP1ArcEnd { line: line_ref, arc: r },
+                format!("{}.p1={}.end", this_name, arc.name)));
+        }
+        if snap_near(p2, ac) {
+            actions.push((Action::ApplyCoincidentLP2ArcCenter { line: line_ref, arc: r },
+                format!("{}.p2={}.center", this_name, arc.name)));
+        }
+        if snap_near(p2, a_start) {
+            actions.push((Action::ApplyCoincidentLP2ArcStart { line: line_ref, arc: r },
+                format!("{}.p2={}.start", this_name, arc.name)));
+        }
+        if snap_near(p2, a_end) {
+            actions.push((Action::ApplyCoincidentLP2ArcEnd { line: line_ref, arc: r },
+                format!("{}.p2={}.end", this_name, arc.name)));
+        }
+    }
+    let mut connected = Vec::new();
+    for (action, desc) in actions {
+        ctx.exec(action);
+        connected.push(desc);
+    }
+    connected
+}
+
+/// Auto-connect arc endpoints to nearby existing geometry.
+/// center_only=true for circles (start/end are edge points, not snap targets).
+fn auto_coincident_arc(ctx: &mut CommandContext, arc_ref: Ref<Arc>, center_only: bool) -> Vec<String> {
+    let mut actions: Vec<(Action, String)> = Vec::new();
+    let arc = &ctx.sketch.arcs[arc_ref];
+    let center = arc.center.value;
+    let start = arc_start_pos(arc);
+    let end = arc_end_pos(arc);
+    let this_name = arc.name.clone();
+
+    // Check against line endpoints
+    for r in ctx.sketch.lines.refs() {
+        let line = &ctx.sketch.lines[r];
+        let lp1 = line.p1.value;
+        let lp2 = line.p2.value;
+        if snap_near(center, lp1) {
+            actions.push((Action::ApplyCoincidentLP1ArcCenter { line: r, arc: arc_ref },
+                format!("{}.center={}.p1", this_name, line.name)));
+        }
+        if snap_near(center, lp2) {
+            actions.push((Action::ApplyCoincidentLP2ArcCenter { line: r, arc: arc_ref },
+                format!("{}.center={}.p2", this_name, line.name)));
+        }
+        if !center_only {
+            if snap_near(start, lp1) {
+                actions.push((Action::ApplyCoincidentLP1ArcStart { line: r, arc: arc_ref },
+                    format!("{}.start={}.p1", this_name, line.name)));
+            }
+            if snap_near(start, lp2) {
+                actions.push((Action::ApplyCoincidentLP2ArcStart { line: r, arc: arc_ref },
+                    format!("{}.start={}.p2", this_name, line.name)));
+            }
+            if snap_near(end, lp1) {
+                actions.push((Action::ApplyCoincidentLP1ArcEnd { line: r, arc: arc_ref },
+                    format!("{}.end={}.p1", this_name, line.name)));
+            }
+            if snap_near(end, lp2) {
+                actions.push((Action::ApplyCoincidentLP2ArcEnd { line: r, arc: arc_ref },
+                    format!("{}.end={}.p2", this_name, line.name)));
+            }
+        }
+    }
+
+    // Check against other arc endpoints
+    for r in ctx.sketch.arcs.refs() {
+        if r == arc_ref { continue; }
+        let other = &ctx.sketch.arcs[r];
+        let oc = other.center.value;
+        let os = arc_start_pos(other);
+        let oe = arc_end_pos(other);
+        if snap_near(center, oc) {
+            actions.push((Action::ApplyConcentric { a: arc_ref, b: r },
+                format!("{}.center={}.center", this_name, other.name)));
+        }
+        if snap_near(center, os) {
+            actions.push((Action::ApplyCoincidentArcCenterStart { a: arc_ref, b: r },
+                format!("{}.center={}.start", this_name, other.name)));
+        }
+        if snap_near(center, oe) {
+            actions.push((Action::ApplyCoincidentArcCenterEnd { a: arc_ref, b: r },
+                format!("{}.center={}.end", this_name, other.name)));
+        }
+        if !center_only {
+            if snap_near(start, oc) {
+                actions.push((Action::ApplyCoincidentArcStartCenter { a: arc_ref, b: r },
+                    format!("{}.start={}.center", this_name, other.name)));
+            }
+            if snap_near(start, os) {
+                actions.push((Action::ApplyCoincidentArcStartStart { a: arc_ref, b: r },
+                    format!("{}.start={}.start", this_name, other.name)));
+            }
+            if snap_near(start, oe) {
+                actions.push((Action::ApplyCoincidentArcStartEnd { a: arc_ref, b: r },
+                    format!("{}.start={}.end", this_name, other.name)));
+            }
+            if snap_near(end, oc) {
+                actions.push((Action::ApplyCoincidentArcEndCenter { a: arc_ref, b: r },
+                    format!("{}.end={}.center", this_name, other.name)));
+            }
+            if snap_near(end, os) {
+                actions.push((Action::ApplyCoincidentArcEndStart { a: arc_ref, b: r },
+                    format!("{}.end={}.start", this_name, other.name)));
+            }
+            if snap_near(end, oe) {
+                actions.push((Action::ApplyCoincidentArcEndEnd { a: arc_ref, b: r },
+                    format!("{}.end={}.end", this_name, other.name)));
+            }
+        }
+    }
+
+    // Check against free points (skip helpers)
+    for r in ctx.sketch.points.refs() {
+        let pt = &ctx.sketch.points[r];
+        if pt.helper { continue; }
+        if snap_near(center, pt.pos.value) {
+            actions.push((Action::ApplyCoincidentArcCenter { point: r, arc: arc_ref },
+                format!("{}.center={}", this_name, pt.name)));
+        }
+        if !center_only {
+            if snap_near(start, pt.pos.value) {
+                actions.push((Action::ApplyCoincidentArcStart { point: r, arc: arc_ref },
+                    format!("{}.start={}", this_name, pt.name)));
+            }
+            if snap_near(end, pt.pos.value) {
+                actions.push((Action::ApplyCoincidentArcEnd { point: r, arc: arc_ref },
+                    format!("{}.end={}", this_name, pt.name)));
+            }
+        }
+    }
+
     let mut connected = Vec::new();
     for (action, desc) in actions {
         ctx.exec(action);
@@ -907,9 +1075,13 @@ fn cmd_add_point(ctx: &mut CommandContext, args: &str) -> CommandResult {
 }
 
 fn cmd_add_circle(ctx: &mut CommandContext, args: &str) -> CommandResult {
-    let tokens: Vec<&str> = args.split_whitespace().collect();
+    let mut tokens: Vec<&str> = args.split_whitespace().collect();
+    let nocursor = tokens.last() == Some(&"nocursor");
+    if nocursor { tokens.pop(); }
+    let noconnect = tokens.last() == Some(&"noconnect");
+    if noconnect { tokens.pop(); }
     if tokens.len() != 2 {
-        return err("Usage: add_circle cx,cy radius");
+        return err("Usage: add_circle cx,cy radius [noconnect] [nocursor]");
     }
     let center = match parse_coord(ctx, tokens[0], ctx.cursor) {
         Ok(p) => p, Err(e) => return err(e),
@@ -920,9 +1092,18 @@ fn cmd_add_circle(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let edge = vect2d::new(center.x + r, center.y);
     ctx.begin_group();
     ctx.exec(Action::AddCircle { center, edge });
-    let name = ctx.sketch.arcs.refs().last().map(|r| ctx.sketch.arcs[r].name.clone()).unwrap_or_default();
+    let arc_ref = ctx.sketch.arcs.refs().last().unwrap();
+    let name = ctx.sketch.arcs[arc_ref].name.clone();
+    if !nocursor { ctx.cursor = Some(center); }
     ctx.session_names.insert("_".into(), name.clone());
-    ok(format!("Added {}: center=({:.2},{:.2}) r={:.2}", name, center.x, center.y, r))
+    let mut msg = format!("Added {}: center=({:.2},{:.2}) r={:.2}", name, center.x, center.y, r);
+    if !noconnect {
+        let connected = auto_coincident_arc(ctx, arc_ref, true);
+        if !connected.is_empty() {
+            msg += &format!(" [connected: {}]", connected.join(", "));
+        }
+    }
+    ok(msg)
 }
 
 fn cmd_delete(ctx: &mut CommandContext, args: &str) -> CommandResult {
@@ -1578,17 +1759,29 @@ fn cmd_zoom(ctx: &mut CommandContext, args: &str) -> CommandResult {
 // ---------------------------------------------------------------------------
 
 fn cmd_add_arc(ctx: &mut CommandContext, args: &str) -> CommandResult {
-    let tokens: Vec<&str> = args.split_whitespace().collect();
-    if tokens.len() != 3 { return err("Usage: add_arc x1,y1 x2,y2 xm,ym (start, end, midpoint)"); }
+    let mut tokens: Vec<&str> = args.split_whitespace().collect();
+    let nocursor = tokens.last() == Some(&"nocursor");
+    if nocursor { tokens.pop(); }
+    let noconnect = tokens.last() == Some(&"noconnect");
+    if noconnect { tokens.pop(); }
+    if tokens.len() != 3 { return err("Usage: add_arc x1,y1 x2,y2 xm,ym [noconnect] [nocursor]"); }
     let p1 = match parse_coord(ctx, tokens[0], ctx.cursor) { Ok(p) => p, Err(e) => return err(e) };
     let p2 = match parse_coord(ctx, tokens[1], Some(p1)) { Ok(p) => p, Err(e) => return err(e) };
     let pm = match parse_coord(ctx, tokens[2], None) { Ok(p) => p, Err(e) => return err(e) };
     ctx.begin_group();
     ctx.exec(Action::AddArc { start: p1, end: p2, mid: pm, swapped: false });
-    let name = ctx.sketch.arcs.refs().last().map(|r| ctx.sketch.arcs[r].name.clone()).unwrap_or_default();
-    ctx.cursor = Some(p2);
+    let arc_ref = ctx.sketch.arcs.refs().last().unwrap();
+    let name = ctx.sketch.arcs[arc_ref].name.clone();
+    if !nocursor { ctx.cursor = Some(p2); }
     ctx.session_names.insert("_".into(), name.clone());
-    ok(format!("Added {}", name))
+    let mut msg = format!("Added {}", name);
+    if !noconnect {
+        let connected = auto_coincident_arc(ctx, arc_ref, false);
+        if !connected.is_empty() {
+            msg += &format!(" [connected: {}]", connected.join(", "));
+        }
+    }
+    ok(msg)
 }
 
 fn cmd_offset_line(ctx: &mut CommandContext, args: &str) -> CommandResult {
@@ -2876,6 +3069,67 @@ mod tests {
         let out = run_ok(&mut ctx, "add_line 5,0 5,3 noconnect");
         assert!(!out.contains("connected"), "Should NOT auto-connect: {}", out);
         assert!(ctx.sketch.coincident_ll21.is_empty());
+    }
+
+    // -- Auto-coincident for arcs/circles --
+
+    #[test]
+    fn test_auto_coincident_circle_to_line_endpoint() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0");
+        let out = run_ok(&mut ctx, "add_circle 5,0 1");
+        assert!(out.contains("connected"), "Should auto-connect: {}", out);
+        assert!(out.contains("A0.center=L0.p2"), "Should mention A0.center=L0.p2: {}", out);
+        assert!(!ctx.sketch.coincident_lp2_arc_center.is_empty(),
+            "Should have coincident_lp2_arc_center");
+    }
+
+    #[test]
+    fn test_auto_coincident_circle_to_point() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_point 3,3");
+        let out = run_ok(&mut ctx, "add_circle 3,3 1");
+        assert!(out.contains("connected"), "Should auto-connect: {}", out);
+        assert!(!ctx.sketch.coincident_arc_center.is_empty(),
+            "Should have coincident_arc_center");
+    }
+
+    #[test]
+    fn test_auto_coincident_circle_concentric() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_circle 0,0 2");
+        let out = run_ok(&mut ctx, "add_circle 0,0 3");
+        assert!(out.contains("connected"), "Should auto-connect: {}", out);
+        assert!(out.contains("A1.center=A0.center"), "Should mention concentric: {}", out);
+        assert!(!ctx.sketch.concentric.is_empty(), "Should have concentric constraint");
+    }
+
+    #[test]
+    fn test_auto_coincident_line_to_arc_center() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_circle 5,3 1");
+        let out = run_ok(&mut ctx, "add_line 0,0 5,3");
+        assert!(out.contains("connected"), "Should auto-connect: {}", out);
+        assert!(out.contains("L0.p2=A0.center"), "Should mention A0.center: {}", out);
+        assert!(!ctx.sketch.coincident_lp2_arc_center.is_empty(),
+            "Should have coincident_lp2_arc_center");
+    }
+
+    #[test]
+    fn test_noconnect_circle() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0");
+        let out = run_ok(&mut ctx, "add_circle 5,0 1 noconnect");
+        assert!(!out.contains("connected"), "Should NOT auto-connect: {}", out);
+        assert!(ctx.sketch.coincident_lp2_arc_center.is_empty());
+    }
+
+    #[test]
+    fn test_noconnect_arc() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0");
+        let out = run_ok(&mut ctx, "add_arc 5,0 5,3 6,1.5 noconnect");
+        assert!(!out.contains("connected"), "Should NOT auto-connect: {}", out);
     }
 
     // -- Info with constraints --

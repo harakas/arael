@@ -163,9 +163,13 @@ pub struct EditorApp {
     drag_saved_cost: f64,              // best cost seen during drag
     drag_saved_snapshot: Option<Vec<u8>>, // sketch state at that best cost
 
-    // DOF (degrees of freedom) computed in background thread
+    // DOF (degrees of freedom) computed in background thread.
+    // Single worker thread reads latest sketch data from dof_input,
+    // computes DOF, writes result to dof_output. Intermediate requests
+    // are overwritten -- only the newest sketch state is computed.
     pub dof_display: Option<usize>,    // None = computing or unknown
-    dof_pending: std::sync::Arc<std::sync::Mutex<Option<usize>>>,
+    dof_input: std::sync::Arc<std::sync::Mutex<Option<Vec<u8>>>>,
+    dof_output: std::sync::Arc<std::sync::Mutex<Option<usize>>>,
 
     // MCP server channel (None when --mcp not used)
     #[cfg(not(target_arch = "wasm32"))]
@@ -276,7 +280,8 @@ impl EditorApp {
             drag_saved_cost: 0.0,
             drag_saved_snapshot: None,
             dof_display: None,
-            dof_pending: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            dof_input: std::sync::Arc::new(std::sync::Mutex::new(None)),
+            dof_output: std::sync::Arc::new(std::sync::Mutex::new(None)),
             #[cfg(not(target_arch = "wasm32"))]
             mcp_rx: None,
         }
@@ -286,6 +291,24 @@ impl EditorApp {
 impl Default for EditorApp {
     fn default() -> Self {
         let mut app = Self::demo();
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let input = std::sync::Arc::clone(&app.dof_input);
+            let output = std::sync::Arc::clone(&app.dof_output);
+            std::thread::spawn(move || {
+                loop {
+                    let data = input.lock().unwrap().take();
+                    if let Some(data) = data {
+                        if let Ok(mut sketch) = bincode::deserialize::<Sketch>(&data) {
+                            let dof = compute_dof(&mut sketch);
+                            *output.lock().unwrap() = Some(dof);
+                        }
+                    } else {
+                        std::thread::sleep(std::time::Duration::from_millis(10));
+                    }
+                }
+            });
+        }
         app.compute_dof_async();
         app
     }
@@ -694,25 +717,18 @@ impl EditorApp {
 
     /// Check if background DOF computation finished, update display.
     pub fn poll_dof(&mut self) {
-        if let Some(dof) = self.dof_pending.lock().unwrap().take() {
+        if let Some(dof) = self.dof_output.lock().unwrap().take() {
             self.dof_display = Some(dof);
         }
     }
 
-    /// Spawn background DOF computation (Hessian rank analysis).
-    /// DOF = total_params - rank(J^T J).
+    /// Queue DOF computation on the background worker thread.
+    /// Only the latest sketch state is kept -- intermediate requests are discarded.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn compute_dof_async(&mut self) {
-        self.dof_display = None; // show "computing"
-        let sketch_data = bincode::serialize(&self.sketch).ok();
-        let pending = self.dof_pending.clone();
-        if let Some(data) = sketch_data {
-            std::thread::spawn(move || {
-                if let Ok(mut sketch) = bincode::deserialize::<Sketch>(&data) {
-                    let dof = compute_dof(&mut sketch);
-                    *pending.lock().unwrap() = Some(dof);
-                }
-            });
+        self.dof_display = None;
+        if let Some(data) = bincode::serialize(&self.sketch).ok() {
+            *self.dof_input.lock().unwrap() = Some(data);
         }
     }
 
@@ -2551,6 +2567,7 @@ fn main() -> eframe::Result {
     let mut empty = false;
     let mut mcp_addr: Option<std::net::SocketAddr> = None;
     let mut mcp_verbose = false;
+    let mut script_path: Option<String> = None;
 
     let mut i = 0;
     while i < args.len() {
@@ -2561,6 +2578,7 @@ fn main() -> eframe::Result {
                 eprintln!("Options:");
                 eprintln!("  --verbose, -v   Print solver iterations");
                 eprintln!("  --empty         Start with empty sketch");
+                eprintln!("  --script FILE   Execute commands from file at startup");
                 eprintln!("  --mcp [addr]    Start MCP server (default 127.0.0.1:8585)");
                 eprintln!("  --mcp-verbose   Log all MCP traffic to stdout");
                 eprintln!("  --help, -h      Show this help");
@@ -2569,6 +2587,15 @@ fn main() -> eframe::Result {
             "--verbose" | "-v" => verbose = true,
             "--empty" => empty = true,
             "--mcp-verbose" => mcp_verbose = true,
+            "--script" => {
+                if i + 1 < args.len() {
+                    i += 1;
+                    script_path = Some(args[i].clone());
+                } else {
+                    eprintln!("--script requires a file path");
+                    std::process::exit(1);
+                }
+            }
             "--mcp" => {
                 // Check if next arg is an address
                 let addr_str = if i + 1 < args.len() && !args[i + 1].starts_with('-') {
@@ -2615,6 +2642,23 @@ fn main() -> eframe::Result {
 
     if verbose {
         app.sketch.verbose = true;
+    }
+    if let Some(ref script) = script_path {
+        let content = std::fs::read_to_string(script).unwrap_or_else(|e| {
+            eprintln!("Failed to read script {}: {}", script, e);
+            std::process::exit(1);
+        });
+        // Join non-comment lines with ; for single-batch execution
+        let commands: Vec<&str> = content.lines()
+            .map(|l| l.trim())
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            .collect();
+        let line_count = commands.len();
+        let batch = commands.join(";");
+        let start = std::time::Instant::now();
+        app.run_commands(&batch);
+        let elapsed = start.elapsed();
+        eprintln!("Script {} executed {} commands in {:.3}s", script, line_count, elapsed.as_secs_f64());
     }
     if let Some(addr) = mcp_addr {
         app.mcp_rx = Some(mcp_server::start(addr, mcp_verbose));

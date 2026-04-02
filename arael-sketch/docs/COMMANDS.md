@@ -50,18 +50,23 @@ offset_line L0 distance      Create a parallel line offset by distance (alias: o
 
 ### Auto-Coincident
 
-When creating a line, endpoints that are within 1e-3 distance of existing endpoints are automatically connected with coincident constraints:
+When creating geometry (`add_line`, `add_circle`, `add_arc`), endpoints that are within 1e-3 distance of existing endpoints are automatically connected with coincident constraints. Lines snap to line endpoints, points, and arc endpoints. Circles and arcs snap their center (and start/end for arcs) to line endpoints, other arc endpoints, and points.
 
 ```
 add_line 0,0 5,0              L0
 add_line 5,0 5,3              L1 — auto-connects L1.p1 to L0.p2
+add_circle 5,0 1              A0 — auto-connects A0.center to L0.p2
+add_circle 0,0 2              A1 — auto-connects to L0.p1
+add_line 0,0 5,3              L2 — auto-connects L2.p2 to A0.center
 ```
 
 The output shows what was connected: `Added L1: ... [connected: L1.p1=L0.p2]`
 
 Append `noconnect` to suppress auto-connection:
 ```
-add_line 5,0 5,3 noconnect   No auto-coincident
+add_line 5,0 5,3 noconnect      No auto-coincident
+add_circle 5,0 1 noconnect      No auto-coincident
+add_arc 0,0 5,0 2,3 noconnect   No auto-coincident
 ```
 
 ### Line Chaining
