@@ -1,6 +1,8 @@
-# Sketch Command Reference
+# Arael Sketch — Command Reference
 
-The command panel provides a text interface for creating geometry, applying constraints, managing parameters, and inspecting the sketch. Press `/` to open, `Escape` to close. Commands can be chained with `;`.
+Arael Sketch is a 2D parametric constraint-based sketch editor. You build geometry (lines, arcs, circles, points), apply geometric constraints (horizontal, parallel, coincident, tangent, etc.), and add dimensions to control sizes and distances. The solver automatically adjusts geometry to satisfy all constraints and dimensions in real time.
+
+This is the complete command reference. Commands can be entered in the command panel (press `/` to open, `Escape` to close) or sent programmatically via the MCP server. Commands can be chained with `;`.
 
 ## Entity References
 

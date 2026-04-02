@@ -2,21 +2,23 @@
 // Runs an async HTTP server (axum/tokio) in a background thread.
 // Communicates with the GUI thread via channels.
 //
-// Protocol: JSON-RPC 2.0 over HTTP POST on /mcp
+// Protocol: Streamable HTTP (MCP spec 2025-03-26)
 // Spec: https://modelcontextprotocol.io/specification/
 
 #![cfg(not(target_arch = "wasm32"))]
 
 use std::net::SocketAddr;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
 use axum::{
     extract::State,
-    http::{HeaderMap, StatusCode},
-    response::IntoResponse,
-    routing::post,
+    http::{HeaderMap, StatusCode, Method, Uri},
+    middleware::{self, Next},
+    response::{IntoResponse, Response},
+    routing::{get, post, delete},
     Json, Router,
 };
+use eframe::egui;
 use serde_json::{json, Value};
 
 /// A request from the MCP server to the GUI thread.
@@ -30,19 +32,34 @@ pub struct McpRequest {
 struct McpState {
     tx: Arc<mpsc::Sender<McpRequest>>,
     verbose: bool,
+    egui_ctx: Arc<Mutex<Option<egui::Context>>>,
+    session_id: Arc<Mutex<Option<String>>>,
 }
 
 /// Start the MCP server on the given address.
 /// Returns a receiver for commands that the GUI thread should poll.
-pub fn start(addr: SocketAddr, verbose: bool) -> mpsc::Receiver<McpRequest> {
+pub fn start(
+    addr: SocketAddr,
+    verbose: bool,
+    egui_ctx: Arc<Mutex<Option<egui::Context>>>,
+) -> mpsc::Receiver<McpRequest> {
     let (tx, rx) = mpsc::channel::<McpRequest>(32);
-    let state = McpState { tx: Arc::new(tx), verbose };
+    let state = McpState {
+        tx: Arc::new(tx),
+        verbose,
+        egui_ctx,
+        session_id: Arc::new(Mutex::new(None)),
+    };
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new()
             .expect("Failed to create tokio runtime for MCP server");
         rt.block_on(async move {
             let app = Router::new()
                 .route("/mcp", post(handle_post))
+                .route("/mcp", get(handle_get))
+                .route("/mcp", delete(handle_delete))
+                .fallback(handle_fallback)
+                .layer(middleware::from_fn_with_state(state.clone(), log_middleware))
                 .with_state(state);
             let listener = tokio::net::TcpListener::bind(addr).await
                 .unwrap_or_else(|e| panic!("MCP server failed to bind {}: {}", addr, e));
@@ -53,19 +70,60 @@ pub fn start(addr: SocketAddr, verbose: bool) -> mpsc::Receiver<McpRequest> {
     rx
 }
 
+// ---------------------------------------------------------------------------
+// Middleware: log all requests when verbose
+// ---------------------------------------------------------------------------
+
+async fn log_middleware(
+    State(state): State<McpState>,
+    method: Method,
+    uri: Uri,
+    request: axum::extract::Request,
+    next: Next,
+) -> Response {
+    if state.verbose {
+        eprintln!("[MCP] {} {}", method, uri);
+    }
+    let response = next.run(request).await;
+    if state.verbose {
+        eprintln!("[MCP] {} {} -> {}", method, uri, response.status());
+    }
+    response
+}
+
+// ---------------------------------------------------------------------------
+// Route handlers
+// ---------------------------------------------------------------------------
+
+/// Wake the GUI thread so it polls the MCP channel.
+fn wake_gui(state: &McpState) {
+    if let Some(ctx) = state.egui_ctx.lock().unwrap().as_ref() {
+        ctx.request_repaint();
+    }
+}
+
+/// Build response headers (session ID, content-type).
+fn response_headers(state: &McpState) -> HeaderMap {
+    let mut headers = HeaderMap::new();
+    if let Some(ref sid) = *state.session_id.lock().unwrap() {
+        headers.insert("Mcp-Session-Id", sid.parse().unwrap());
+    }
+    headers
+}
+
 async fn handle_post(
     State(state): State<McpState>,
-    _headers: HeaderMap,
+    headers: HeaderMap,
     body: String,
-) -> impl IntoResponse {
+) -> Response {
     if state.verbose {
         eprintln!("MCP <<< {}", body);
     }
-    let request_tx = &state.tx;
+
     let request: Value = match serde_json::from_str(&body) {
         Ok(v) => v,
         Err(e) => {
-            return (StatusCode::BAD_REQUEST, Json(json!({
+            return (StatusCode::BAD_REQUEST, response_headers(&state), Json(json!({
                 "jsonrpc": "2.0", "id": null,
                 "error": { "code": -32700, "message": format!("Parse error: {}", e) }
             }))).into_response();
@@ -75,33 +133,83 @@ async fn handle_post(
     let method = request.get("method").and_then(|v| v.as_str()).unwrap_or("");
     let id = request.get("id").cloned().unwrap_or(Value::Null);
 
-    let response = match method {
-        "initialize" => handle_initialize(id, &request, request_tx).await.into_response(),
-        "notifications/initialized" => StatusCode::OK.into_response(),
-        "tools/list" => handle_tools_list(id).into_response(),
-        "tools/call" => handle_tools_call(id, &request, request_tx).await.into_response(),
-        "resources/list" => handle_resources_list(id).into_response(),
-        "resources/read" => handle_resources_read(id, &request).into_response(),
-        _ => (StatusCode::OK, Json(json!({
+    // Validate session ID on non-initialize requests
+    if method != "initialize" {
+        let current_sid = state.session_id.lock().unwrap().clone();
+        if let Some(ref expected) = current_sid {
+            let client_sid = headers.get("mcp-session-id").and_then(|v| v.to_str().ok());
+            if client_sid != Some(expected.as_str()) {
+                return (StatusCode::NOT_FOUND, response_headers(&state), Json(json!({
+                    "jsonrpc": "2.0", "id": id,
+                    "error": { "code": -32600, "message": "Invalid or missing session ID" }
+                }))).into_response();
+            }
+        }
+    }
+
+    let mut resp_headers = response_headers(&state);
+    let (resp_body, no_body) = match method {
+        "initialize" => {
+            let sid = generate_session_id();
+            *state.session_id.lock().unwrap() = Some(sid.clone());
+            resp_headers.insert("Mcp-Session-Id", sid.parse().unwrap());
+            (handle_initialize(id, &request, &state).await, false)
+        }
+        "notifications/initialized" => (Value::Null, true),
+        "tools/list" => (handle_tools_list(id), false),
+        "tools/call" => (handle_tools_call(id, &request, &state).await, false),
+        "resources/list" => (handle_resources_list(id), false),
+        "resources/read" => (handle_resources_read(id, &request), false),
+        _ => (json!({
             "jsonrpc": "2.0", "id": id,
             "error": { "code": -32601, "message": format!("Method not found: {}", method) }
-        }))).into_response(),
+        }), false),
     };
+
     if state.verbose {
-        // Log response body (extract from response is complex, just log method)
-        eprintln!("MCP >>> responded to: {}", method);
+        if no_body {
+            eprintln!("MCP >>> (no body)");
+        } else {
+            eprintln!("MCP >>> {}", resp_body);
+        }
     }
-    response
+
+    if no_body {
+        (StatusCode::OK, resp_headers).into_response()
+    } else {
+        (StatusCode::OK, resp_headers, Json(resp_body)).into_response()
+    }
 }
 
-async fn handle_initialize(id: Value, request: &Value, request_tx: &mpsc::Sender<McpRequest>) -> impl IntoResponse {
+/// GET /mcp - SSE streaming (not supported, return 405)
+async fn handle_get() -> Response {
+    StatusCode::METHOD_NOT_ALLOWED.into_response()
+}
+
+/// DELETE /mcp - session termination (not supported, return 405)
+async fn handle_delete() -> Response {
+    StatusCode::METHOD_NOT_ALLOWED.into_response()
+}
+
+/// Fallback for unknown paths - return JSON 404 (not empty body)
+async fn handle_fallback(method: Method, uri: Uri) -> Response {
+    (StatusCode::NOT_FOUND, Json(json!({
+        "error": format!("Not found: {} {}", method, uri)
+    }))).into_response()
+}
+
+// ---------------------------------------------------------------------------
+// MCP method handlers
+// ---------------------------------------------------------------------------
+
+async fn handle_initialize(id: Value, request: &Value, state: &McpState) -> Value {
     let client_name = request.pointer("/params/clientInfo/name").and_then(|v| v.as_str()).unwrap_or("unknown");
     let client_version = request.pointer("/params/clientInfo/version").and_then(|v| v.as_str()).unwrap_or("?");
     eprintln!("MCP: agent connected: {} v{}", client_name, client_version);
     // Notify GUI via a msg command
     let msg = format!("msg **MCP agent connected:** {} v{}", client_name, client_version);
-    let _ = send_command(request_tx, &msg).await;
-    Json(json!({
+    let _ = send_command_str(&state.tx, &msg, state).await;
+    json!({
         "jsonrpc": "2.0",
         "id": id,
         "result": {
@@ -114,13 +222,13 @@ async fn handle_initialize(id: Value, request: &Value, request_tx: &mpsc::Sender
                 "name": "arael-sketch",
                 "version": env!("CARGO_PKG_VERSION")
             },
-            "instructions": MCP_INSTRUCTIONS
+            "instructions": format!("{}\n\n{}", MCP_PREAMBLE, include_str!("../docs/COMMANDS.md"))
         }
-    }))
+    })
 }
 
-fn handle_tools_list(id: Value) -> impl IntoResponse {
-    Json(json!({
+fn handle_tools_list(id: Value) -> Value {
+    json!({
         "jsonrpc": "2.0",
         "id": id,
         "result": {
@@ -171,10 +279,10 @@ fn handle_tools_list(id: Value) -> impl IntoResponse {
                 }
             ]
         }
-    }))
+    })
 }
 
-async fn handle_tools_call(id: Value, request: &Value, request_tx: &mpsc::Sender<McpRequest>) -> impl IntoResponse {
+async fn handle_tools_call(id: Value, request: &Value, state: &McpState) -> Value {
     let name = request.pointer("/params/name").and_then(|v| v.as_str()).unwrap_or("");
     let args = request.pointer("/params/arguments").cloned().unwrap_or(json!({}));
 
@@ -182,45 +290,44 @@ async fn handle_tools_call(id: Value, request: &Value, request_tx: &mpsc::Sender
         "execute_command" => {
             let command = args.get("command").and_then(|v| v.as_str()).unwrap_or("");
             if command.is_empty() {
-                return Json(tool_error(id, "Missing 'command' argument"));
+                return tool_error(id, "Missing 'command' argument");
             }
-            let result = send_command(request_tx, command).await;
-            Json(tool_result(id, &result))
+            let result = send_command_str(&state.tx, command, state).await;
+            tool_result(id, &result)
         }
         "execute_script" => {
             let script = args.get("script").and_then(|v| v.as_str()).unwrap_or("");
             if script.is_empty() {
-                return Json(tool_error(id, "Missing 'script' argument"));
+                return tool_error(id, "Missing 'script' argument");
             }
-            // Execute each line as a separate command, collect results
             let mut outputs = Vec::new();
             for line in script.lines() {
                 let line = line.trim();
                 if line.is_empty() || line.starts_with('#') { continue; }
-                let result = send_command(request_tx, line).await;
+                let result = send_command_str(&state.tx, line, state).await;
                 outputs.push(result);
             }
-            Json(tool_result(id, &outputs.join("\n")))
+            tool_result(id, &outputs.join("\n"))
         }
         "get_sketch_state" => {
-            let result = send_command(request_tx, "list").await;
-            let constraints = send_command(request_tx, "list constraints").await;
-            Json(tool_result(id, &format!("{}\n\nConstraints:\n{}", result, constraints)))
+            let result = send_command_str(&state.tx, "list", state).await;
+            let constraints = send_command_str(&state.tx, "list constraints", state).await;
+            tool_result(id, &format!("{}\n\nConstraints:\n{}", result, constraints))
         }
         "get_help" => {
-            Json(tool_result(id, include_str!("../docs/COMMANDS.md")))
+            tool_result(id, include_str!("../docs/COMMANDS.md"))
         }
         _ => {
-            Json(json!({
+            json!({
                 "jsonrpc": "2.0", "id": id,
                 "error": { "code": -32602, "message": format!("Unknown tool: {}", name) }
-            }))
+            })
         }
     }
 }
 
-fn handle_resources_list(id: Value) -> impl IntoResponse {
-    Json(json!({
+fn handle_resources_list(id: Value) -> Value {
+    json!({
         "jsonrpc": "2.0",
         "id": id,
         "result": {
@@ -239,13 +346,13 @@ fn handle_resources_list(id: Value) -> impl IntoResponse {
                 }
             ]
         }
-    }))
+    })
 }
 
-fn handle_resources_read(id: Value, request: &Value) -> impl IntoResponse {
+fn handle_resources_read(id: Value, request: &Value) -> Value {
     let uri = request.pointer("/params/uri").and_then(|v| v.as_str()).unwrap_or("");
     match uri {
-        "sketch://commands" => Json(json!({
+        "sketch://commands" => json!({
             "jsonrpc": "2.0", "id": id,
             "result": {
                 "contents": [{
@@ -254,17 +361,21 @@ fn handle_resources_read(id: Value, request: &Value) -> impl IntoResponse {
                     "text": include_str!("../docs/COMMANDS.md")
                 }]
             }
-        })),
-        _ => Json(json!({
+        }),
+        _ => json!({
             "jsonrpc": "2.0", "id": id,
             "error": { "code": -32602, "message": format!("Unknown resource: {}", uri) }
-        })),
+        }),
     }
 }
 
+// ---------------------------------------------------------------------------
+// Channel communication with GUI
+// ---------------------------------------------------------------------------
+
 const MCP_BLOCKED: &[&str] = &["save", "load"];
 
-async fn send_command(tx: &mpsc::Sender<McpRequest>, command: &str) -> String {
+async fn send_command_str(tx: &mpsc::Sender<McpRequest>, command: &str, state: &McpState) -> String {
     let (resp_tx, resp_rx) = oneshot::channel();
     if tx.send(McpRequest {
         command: command.to_string(),
@@ -273,7 +384,16 @@ async fn send_command(tx: &mpsc::Sender<McpRequest>, command: &str) -> String {
     }).await.is_err() {
         return "Error: sketch editor disconnected".to_string();
     }
+    wake_gui(state);
     resp_rx.await.unwrap_or_else(|_| "Error: no response from sketch editor".to_string())
+}
+
+fn generate_session_id() -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    std::time::SystemTime::now().hash(&mut hasher);
+    std::thread::current().id().hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }
 
 fn tool_result(id: Value, text: &str) -> Value {
@@ -297,39 +417,10 @@ fn tool_error(id: Value, text: &str) -> Value {
 }
 
 // ---------------------------------------------------------------------------
-// Condensed instructions sent to AI agents on initialize
+// Preamble sent before COMMANDS.md to AI agents on initialize
 // ---------------------------------------------------------------------------
 
-const MCP_INSTRUCTIONS: &str = r#"You are controlling arael-sketch, a 2D parametric constraint-based sketch editor.
-
-ENTITIES: Lines (L0, L1...), Points (P0...), Arcs/Circles (A0...), Dimensions (d0...).
-Endpoints: L0.p1, L0.p2, A0.center, A0.start, A0.end.
-
-COORDINATES: x,y | @dx,dy (relative to cursor) | cursor | L0.p2 | midpoint(L0)
-EXPRESSIONS: Entity properties (L0.length, A0.radius), params, math (sqrt, sin, pi).
-
-GEOMETRY: add_line x1,y1 x2,y2 | add_point x,y | add_circle cx,cy r | add_arc x1,y1 x2,y2 xm,ym | offset_line L0 dist
-Line chaining: add_line @dx,dy (from cursor). Auto-coincident at matching endpoints (noconnect to suppress).
-
-CAPTURE: _ = last entity. name = add_line ... to name it. Use names in commands: horizontal base.
-
-CONSTRAINTS: horizontal L0 | vertical L0 | parallel L0 L1 | perpendicular L0 L1 | equal L0 L1 | collinear L0 L1 | tangent L0 A0 | coincident L0.p2 L1.p1 | concentric A0 A1 | midpoint P0 L0 | symmetry L0 L1 L2 | symmetry P0 L0 P1 | symmetry L0.p1 L1 L2.p1 | point_on P0 L0
-
-DIMENSIONS: length L0 5 | length L0 "expr" | radius A0 1.5 | angle L0 L1 45 | distance L0.p1 L1.p2 3
-DERIVED DIMS: Append 'derived' to create display-only dims: length L0 derived | radius A0 1.5 derived. Toggle: set_derived d0 | set_driven d0 [value]
-
-PARAMS: param name value | param name "expr" | del_param name | rename_param old new
-
-INTROSPECTION: info L0 | list | list constraints | print expr | find x,y [r] | dof | cost
-
-STYLE: style L0 solid|dashed|dashdot
-CURSOR: cursor x,y | cursor @dx,dy | cursor off
-LOCK: lock L0.p1 | unlock L0.p1
-HISTORY: undo [n] | redo [n] | history
-FILE: save path.json | load path.json | clear
-REMOVE: delete L0 | remove_dim d0 | remove_constraint L0 horizontal | remove_constraint L0 L1 parallel
-
-GEO FUNCTIONS: intersect(L0,L1) | midpoint(L0) | project(P0,L0) | along(L0,0.5) | tangent(L0) | normal(L0) | rotate(P0,center,angle) | mirror(P0,L0) | dist(P0,P1) | dist(P0,L0) | angle(L0,L1)
-
-Use execute_command for single commands. Use execute_script for multi-line scripts (# comments, blank lines skipped). Use get_sketch_state to see current state. Use get_help for full documentation.
-"#;
+const MCP_PREAMBLE: &str = "You are controlling arael-sketch, a 2D CAD/drawing program, via MCP tools. \
+You can create technical drawings by building geometry and constraining it. \
+Use execute_command for single commands, execute_script for multi-line scripts \
+(# comments and blank lines are skipped), and get_sketch_state to inspect the current sketch.";

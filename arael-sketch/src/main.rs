@@ -174,6 +174,9 @@ pub struct EditorApp {
     // MCP server channel (None when --mcp not used)
     #[cfg(not(target_arch = "wasm32"))]
     pub mcp_rx: Option<tokio::sync::mpsc::Receiver<mcp_server::McpRequest>>,
+    // Shared egui context for MCP server to wake the GUI thread
+    #[cfg(not(target_arch = "wasm32"))]
+    egui_ctx: std::sync::Arc<std::sync::Mutex<Option<egui::Context>>>,
 }
 
 impl EditorApp {
@@ -284,6 +287,8 @@ impl EditorApp {
             dof_output: std::sync::Arc::new(std::sync::Mutex::new(None)),
             #[cfg(not(target_arch = "wasm32"))]
             mcp_rx: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            egui_ctx: std::sync::Arc::new(std::sync::Mutex::new(None)),
         }
     }
 }
@@ -2661,7 +2666,7 @@ fn main() -> eframe::Result {
         eprintln!("Script {} executed {} commands in {:.3}s", script, line_count, elapsed.as_secs_f64());
     }
     if let Some(addr) = mcp_addr {
-        app.mcp_rx = Some(mcp_server::start(addr, mcp_verbose));
+        app.mcp_rx = Some(mcp_server::start(addr, mcp_verbose, std::sync::Arc::clone(&app.egui_ctx)));
     }
     app.compute_dof_async();
 

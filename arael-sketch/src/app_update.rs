@@ -16,6 +16,12 @@ impl eframe::App for EditorApp {
         // Poll background DOF computation
         self.poll_dof();
 
+        // Give MCP server access to egui context for waking the GUI
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.egui_ctx.lock().unwrap().is_none() {
+            *self.egui_ctx.lock().unwrap() = Some(ctx.clone());
+        }
+
         // Check for pending file load from async dialog
         let pending_json = self.pending_load.lock().unwrap().take();
         if let Some(json) = pending_json {
