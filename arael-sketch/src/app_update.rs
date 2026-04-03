@@ -526,78 +526,88 @@ impl eframe::App for EditorApp {
                 .show(ctx, |ui| {
                 // Layout: input pinned to bottom, scroll area fills the rest above
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-                    // Input row (at the bottom)
-                    ui.horizontal(|ui| {
-                        ui.label(">");
-                        let cmd_id = egui::Id::new("command_input");
-                        let r = ui.add(
-                            egui::TextEdit::singleline(&mut self.command_input)
-                                .id(cmd_id)
-                                .desired_width(ui.available_width() - 10.0)
-                                .hint_text("type command, / to toggle, help for commands")
-                                .font(egui::TextStyle::Monospace),
-                        );
-                        if self.command_focus {
-                            r.request_focus();
-                            self.command_focus = false;
-                        }
-                        if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
-                            let input = self.command_input.trim().to_string();
-                            if !input.is_empty() {
-                                self.command_history.push(input.clone());
-                                self.command_history_pos = self.command_history.len();
-                                let results = self.run_commands(&input);
-                                let no_echo = results.first().map_or(false, |r| r.no_echo);
-                                if !no_echo {
-                                    self.command_output.push((format!("> {}", input), false, false));
-                                }
+                    // Input area (at the bottom, fixed height)
+                    // Multiline: Shift+Enter adds newline, Enter executes all lines
+                    let cmd_id = egui::Id::new("command_input");
+                    let line_height = ui.text_style_height(&egui::TextStyle::Monospace);
+                    let num_rows = self.command_input.lines().count().max(1).min(8);
+                    let input_h = line_height * num_rows as f32 + 10.0;
+                    let input_w = ui.available_width();
+
+                    let r = ui.add_sized(
+                        egui::vec2(input_w, input_h),
+                        egui::TextEdit::multiline(&mut self.command_input)
+                            .id(cmd_id)
+                            .return_key(egui::KeyboardShortcut::new(
+                                egui::Modifiers::SHIFT, egui::Key::Enter))
+                            .desired_rows(num_rows)
+                            .lock_focus(true)
+                            .hint_text("type command, Shift+Enter for newline")
+                            .font(egui::TextStyle::Monospace),
+                    );
+                    if self.command_focus {
+                        r.request_focus();
+                        self.command_focus = false;
+                    }
+                    // Enter (without Shift) executes all lines
+                    let enter_pressed = r.has_focus() && ui.input(|i|
+                        i.key_pressed(egui::Key::Enter) && !i.modifiers.shift);
+                    if enter_pressed {
+                        let input = self.command_input.trim().to_string();
+                        if !input.is_empty() {
+                            self.command_history.push(input.clone());
+                            self.command_history_pos = self.command_history.len();
+                            for line in input.lines() {
+                                let line = line.trim();
+                                if line.is_empty() || line.starts_with('#') { continue; }
+                                self.command_output.push((format!("> {}", line), false, false));
+                                let results = self.run_commands(line);
                                 for result in results {
                                     if !result.output.is_empty() {
                                         self.command_output.push((result.output, result.is_error, result.markdown));
                                     }
                                 }
-                                self.command_input.clear();
                             }
-                            self.command_focus = true;
+                            self.command_input.clear();
                         }
-                        // command_has_focus = "user is in command-entry mode".
-                        // Set by / key or gaining focus. Cleared by Escape.
-                        // Canvas clicks paste while in this mode, then re-focus input.
-                        if r.has_focus() {
-                            self.command_has_focus = true;
-                        }
+                        self.command_focus = true;
+                    }
+                    // command_has_focus = "user is in command-entry mode".
+                    if r.has_focus() {
+                        self.command_has_focus = true;
+                    }
 
-                        if r.has_focus() {
-                            let mut history_changed = false;
-                            if ui.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
-                                if self.command_history_pos > 0 {
-                                    self.command_history_pos -= 1;
-                                    self.command_input = self.command_history[self.command_history_pos].clone();
-                                    history_changed = true;
-                                }
+                    // History navigation (only for single-line input)
+                    if r.has_focus() && !self.command_input.contains('\n') {
+                        let mut history_changed = false;
+                        if ui.input(|i| i.key_pressed(egui::Key::ArrowUp)) && !ui.input(|i| i.modifiers.shift) {
+                            if self.command_history_pos > 0 {
+                                self.command_history_pos -= 1;
+                                self.command_input = self.command_history[self.command_history_pos].clone();
+                                history_changed = true;
                             }
-                            if ui.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
-                                if self.command_history_pos < self.command_history.len() {
-                                    self.command_history_pos += 1;
-                                    if self.command_history_pos < self.command_history.len() {
-                                        self.command_input = self.command_history[self.command_history_pos].clone();
-                                    } else {
-                                        self.command_input.clear();
-                                    }
-                                    history_changed = true;
-                                }
-                            }
-                            if history_changed {
-                                if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), cmd_id) {
-                                    let end = egui::text::CCursor::new(self.command_input.len());
-                                    state.cursor.set_char_range(Some(egui::text::CCursorRange::one(end)));
-                                    egui::TextEdit::store_state(ui.ctx(), cmd_id, state);
-                                }
-                            }
-                            // Escape handled globally at frame start
                         }
-                    });
-                    // Scroll area fills remaining space above input (normal top-down order)
+                        if ui.input(|i| i.key_pressed(egui::Key::ArrowDown)) && !ui.input(|i| i.modifiers.shift) {
+                            if self.command_history_pos < self.command_history.len() {
+                                self.command_history_pos += 1;
+                                if self.command_history_pos < self.command_history.len() {
+                                    self.command_input = self.command_history[self.command_history_pos].clone();
+                                } else {
+                                    self.command_input.clear();
+                                }
+                                history_changed = true;
+                            }
+                        }
+                        if history_changed {
+                            if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), cmd_id) {
+                                let end = egui::text::CCursor::new(self.command_input.len());
+                                state.cursor.set_char_range(Some(egui::text::CCursorRange::one(end)));
+                                egui::TextEdit::store_state(ui.ctx(), cmd_id, state);
+                            }
+                        }
+                    }
+
+                    // Scroll area fills remaining space above input
                     let scroll_h = ui.available_height();
                     ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
                         egui::ScrollArea::vertical()
@@ -606,7 +616,7 @@ impl eframe::App for EditorApp {
                             .show(ui, |ui| {
                             ui.set_min_width(ui.available_width());
                             let mut md_cache = egui_commonmark::CommonMarkCache::default();
-                            for (idx, (text, is_err, is_md)) in self.command_output.iter().enumerate() {
+                            for (text, is_err, is_md) in self.command_output.iter() {
                                 if *is_md {
                                     egui_commonmark::CommonMarkViewer::new()
                                         .show(ui, &mut md_cache, text);
