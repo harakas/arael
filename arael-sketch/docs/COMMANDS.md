@@ -4,6 +4,10 @@ Arael Sketch is a 2D parametric constraint-based sketch editor. You build geomet
 
 This is the complete command reference. Commands can be entered in the command panel (press `/` to open, `Escape` to close) or sent programmatically via the MCP server. Commands can be chained with `;`.
 
+## Coordinate System
+
+The coordinate system uses standard math convention: **X-axis points right, Y-axis points up**. Positive angles are counter-clockwise. This is NOT screen convention (where Y points down).
+
 ## Entity References
 
 Entities are referenced by name: `L0`, `L1` (lines), `P0`, `P1` (points), `A0`, `A1` (arcs/circles).
@@ -161,6 +165,7 @@ Toggle between derived and driven:
 set_derived d0               Make dimension derived (removes constraint)
 set_driven d0                Make dimension driven (adds constraint, keeps current value)
 set_driven d0 5              Make driven with a new value
+set_driven d0 "width*2"     Make driven with a parametric expression
 ```
 
 ## Locking

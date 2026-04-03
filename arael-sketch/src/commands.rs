@@ -789,7 +789,7 @@ fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
         "info" => cmd_info(ctx, args_str),
         "list" => cmd_list(ctx, args_str),
         "find" => cmd_find(ctx, args_str),
-        "dof" => ok(format!("DOF: {}", ctx.dof.map_or("unknown".into(), |d| d.to_string()))),
+        "dof" => ok(format!("DOF: {}", ctx.dof.map_or("pending".into(), |d| d.to_string()))),
         "cost" => ok(format!("Cost: {:.6}", ctx.last_cost)),
         "undo" => cmd_undo(ctx, args_str),
         "redo" => cmd_redo(ctx, args_str),
@@ -1345,36 +1345,60 @@ fn cmd_concentric(ctx: &mut CommandContext, args: &str) -> CommandResult {
 // Dimension commands
 // ---------------------------------------------------------------------------
 
+/// Find existing dimension index matching the given kind.
+/// For Angle, matches regardless of supplement flag. For PointPointDistance, matches either order.
+fn find_existing_dimension(sketch: &Sketch, kind: &DimensionKind) -> Option<usize> {
+    sketch.dimensions.iter().position(|d| match (&d.kind, kind) {
+        (DimensionKind::Angle(da, db, _), DimensionKind::Angle(a, b, _)) =>
+            (*da == *a && *db == *b) || (*da == *b && *db == *a),
+        (DimensionKind::PointPointDistance(a1, b1), DimensionKind::PointPointDistance(a2, b2)) =>
+            (a1 == a2 && b1 == b2) || (a1 == b2 && b1 == a2),
+        (a, b) => a == b,
+    })
+}
+
 fn cmd_length(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let mut tokens: Vec<&str> = args.split_whitespace().collect();
     let is_derived = tokens.last() == Some(&"derived");
     if is_derived { tokens.pop(); }
     if tokens.len() == 1 && is_derived {
-        // "length L0 derived" — measure current length, create derived dim
         let line = match resolve_line(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
         let l = &ctx.sketch.lines[line];
         let dx = l.p2.value.x - l.p1.value.x;
         let dy = l.p2.value.y - l.p1.value.y;
         let len = (dx * dx + dy * dy).sqrt();
+        let kind = DimensionKind::LineLength(line);
         ctx.begin_group();
-        ctx.exec(Action::AddDimension {
-            kind: DimensionKind::LineLength(line), value: len, expr: None, derived: true });
+        if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
+            let name = ctx.sketch.dimensions[idx].name.clone();
+            ctx.exec(Action::UpdateDimension { index: idx, value: len, expr: None });
+            return ok(format!("Updated {} derived length = ({:.4})", name, len));
+        }
+        ctx.exec(Action::AddDimension { kind, value: len, expr: None, derived: true });
         return ok(format!("Derived {} length = ({:.4})", tokens[0], len));
     }
     if tokens.len() != 2 { return err("Usage: length L0 5.0 [derived]"); }
     let line = match resolve_line(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
+    let kind = DimensionKind::LineLength(line);
     let val_str = tokens[1].trim().trim_matches('"');
     if let Ok(value) = val_str.parse::<f64>() {
         ctx.begin_group();
-        ctx.exec(Action::AddDimension {
-            kind: DimensionKind::LineLength(line), value, expr: None, derived: is_derived });
+        if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
+            let name = ctx.sketch.dimensions[idx].name.clone();
+            ctx.exec(Action::UpdateDimension { index: idx, value, expr: None });
+            return ok(format!("Updated {} length = {}", name, value));
+        }
+        ctx.exec(Action::AddDimension { kind, value, expr: None, derived: is_derived });
         let prefix = if is_derived { "Derived" } else { "Set" };
         ok(format!("{} {} length = {}", prefix, tokens[0], value))
     } else {
         ctx.begin_group();
-        ctx.exec(Action::AddDimension {
-            kind: DimensionKind::LineLength(line), value: 0.0, expr: Some(val_str.to_string()), derived: is_derived,
-        });
+        if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
+            let name = ctx.sketch.dimensions[idx].name.clone();
+            ctx.exec(Action::UpdateDimension { index: idx, value: 0.0, expr: Some(val_str.to_string()) });
+            return ok(format!("Updated {} length = {}", name, val_str));
+        }
+        ctx.exec(Action::AddDimension { kind, value: 0.0, expr: Some(val_str.to_string()), derived: is_derived });
         ok(format!("Set {} length = {}", tokens[0], val_str))
     }
 }
@@ -1386,25 +1410,38 @@ fn cmd_radius(ctx: &mut CommandContext, args: &str) -> CommandResult {
     if tokens.len() == 1 && is_derived {
         let arc = match resolve_arc(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
         let r = ctx.sketch.arcs[arc].radius.value;
+        let kind = DimensionKind::ArcRadius(arc);
         ctx.begin_group();
-        ctx.exec(Action::AddDimension {
-            kind: DimensionKind::ArcRadius(arc), value: r, expr: None, derived: true });
+        if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
+            let name = ctx.sketch.dimensions[idx].name.clone();
+            ctx.exec(Action::UpdateDimension { index: idx, value: r, expr: None });
+            return ok(format!("Updated {} derived radius = ({:.4})", name, r));
+        }
+        ctx.exec(Action::AddDimension { kind, value: r, expr: None, derived: true });
         return ok(format!("Derived {} radius = ({:.4})", tokens[0], r));
     }
     if tokens.len() != 2 { return err("Usage: radius A0 1.5 [derived]"); }
     let arc = match resolve_arc(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
+    let kind = DimensionKind::ArcRadius(arc);
     let val_str = tokens[1].trim().trim_matches('"');
     if let Ok(value) = val_str.parse::<f64>() {
         ctx.begin_group();
-        ctx.exec(Action::AddDimension {
-            kind: DimensionKind::ArcRadius(arc), value, expr: None, derived: is_derived });
+        if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
+            let name = ctx.sketch.dimensions[idx].name.clone();
+            ctx.exec(Action::UpdateDimension { index: idx, value, expr: None });
+            return ok(format!("Updated {} radius = {}", name, value));
+        }
+        ctx.exec(Action::AddDimension { kind, value, expr: None, derived: is_derived });
         let prefix = if is_derived { "Derived" } else { "Set" };
         ok(format!("{} {} radius = {}", prefix, tokens[0], value))
     } else {
         ctx.begin_group();
-        ctx.exec(Action::AddDimension {
-            kind: DimensionKind::ArcRadius(arc), value: 0.0, expr: Some(val_str.to_string()), derived: is_derived,
-        });
+        if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
+            let name = ctx.sketch.dimensions[idx].name.clone();
+            ctx.exec(Action::UpdateDimension { index: idx, value: 0.0, expr: Some(val_str.to_string()) });
+            return ok(format!("Updated {} radius = {}", name, val_str));
+        }
+        ctx.exec(Action::AddDimension { kind, value: 0.0, expr: Some(val_str.to_string()), derived: is_derived });
         ok(format!("Set {} radius = {}", tokens[0], val_str))
     }
 }
@@ -2052,9 +2089,14 @@ fn cmd_angle(ctx: &mut CommandContext, args: &str) -> CommandResult {
         let a = match resolve_line(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
         let b = match resolve_line(&ctx.sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
         let (current_deg, _) = compute_angle(ctx, a, b);
+        let kind = DimensionKind::Angle(a, b, false);
         ctx.begin_group();
-        ctx.exec(Action::AddDimension {
-            kind: DimensionKind::Angle(a, b, false), value: current_deg, expr: None, derived: true });
+        if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
+            let name = ctx.sketch.dimensions[idx].name.clone();
+            ctx.exec(Action::UpdateDimension { index: idx, value: current_deg, expr: None });
+            return ok(format!("Updated {} derived angle = ({:.4})", name, current_deg));
+        }
+        ctx.exec(Action::AddDimension { kind, value: current_deg, expr: None, derived: true });
         return ok(format!("Derived angle {} {} = ({:.4})", tokens[0], tokens[1], current_deg));
     }
 
@@ -2066,19 +2108,30 @@ fn cmd_angle(ctx: &mut CommandContext, args: &str) -> CommandResult {
 
     if let Ok(value) = val_str.parse::<f64>() {
         let supplement = (value - supplement_deg).abs() < (value - current_deg).abs();
+        let kind = DimensionKind::Angle(a, b, supplement);
         ctx.begin_group();
-        ctx.exec(Action::AddDimension {
-            kind: DimensionKind::Angle(a, b, supplement), value, expr: None, derived: is_derived });
+        if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
+            let name = ctx.sketch.dimensions[idx].name.clone();
+            ctx.exec(Action::UpdateDimension { index: idx, value, expr: None });
+            let sector = if supplement { "supplement" } else { "direct" };
+            return ok(format!("Updated {} angle = {} ({})", name, value, sector));
+        }
+        ctx.exec(Action::AddDimension { kind, value, expr: None, derived: is_derived });
         let sector = if supplement { "supplement" } else { "direct" };
         let prefix = if is_derived { "Derived" } else { "Set" };
         ok(format!("{} angle {} {} = {} ({})", prefix, tokens[0], tokens[1], value, sector))
     } else {
         let value = eval_expr(&ctx.sketch, val_str).unwrap_or(0.0);
         let supplement = (value - supplement_deg).abs() < (value - current_deg).abs();
+        let kind = DimensionKind::Angle(a, b, supplement);
         ctx.begin_group();
-        ctx.exec(Action::AddDimension {
-            kind: DimensionKind::Angle(a, b, supplement), value: 0.0, expr: Some(val_str.to_string()), derived: is_derived,
-        });
+        if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
+            let name = ctx.sketch.dimensions[idx].name.clone();
+            ctx.exec(Action::UpdateDimension { index: idx, value: 0.0, expr: Some(val_str.to_string()) });
+            let sector = if supplement { "supplement" } else { "direct" };
+            return ok(format!("Updated {} angle = {} ({})", name, val_str, sector));
+        }
+        ctx.exec(Action::AddDimension { kind, value: 0.0, expr: Some(val_str.to_string()), derived: is_derived });
         let sector = if supplement { "supplement" } else { "direct" };
         ok(format!("Set angle {} {} = {} ({})", tokens[0], tokens[1], val_str, sector))
     }
@@ -2108,11 +2161,14 @@ fn cmd_distance(ctx: &mut CommandContext, args: &str) -> CommandResult {
         let pb = resolve_endpoint_pos(&ctx.sketch, tokens[1]).unwrap();
         let dx = pa.x - pb.x; let dy = pa.y - pb.y;
         let dist = (dx * dx + dy * dy).sqrt();
+        let kind = DimensionKind::PointPointDistance(to_dim_ep(ep_a), to_dim_ep(ep_b));
         ctx.begin_group();
-        ctx.exec(Action::AddDimension {
-            kind: DimensionKind::PointPointDistance(to_dim_ep(ep_a), to_dim_ep(ep_b)),
-            value: dist, expr: None, derived: true,
-        });
+        if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
+            let name = ctx.sketch.dimensions[idx].name.clone();
+            ctx.exec(Action::UpdateDimension { index: idx, value: dist, expr: None });
+            return ok(format!("Updated {} derived distance = ({:.4})", name, dist));
+        }
+        ctx.exec(Action::AddDimension { kind, value: dist, expr: None, derived: true });
         return ok(format!("Derived distance {} {} = ({:.4})", tokens[0], tokens[1], dist));
     }
 
@@ -2126,10 +2182,14 @@ fn cmd_distance(ctx: &mut CommandContext, args: &str) -> CommandResult {
     if (tokens[0].starts_with('P') || tokens[0].contains('.')) && tokens[1].starts_with('L') && !tokens[1].contains('.') {
         let ep = match resolve_endpoint_ref(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
         let line = match resolve_line(&ctx.sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
+        let kind = DimensionKind::PointLineDistance(to_dim_ep(ep), line);
         ctx.begin_group();
-        ctx.exec(Action::AddDimension {
-            kind: DimensionKind::PointLineDistance(to_dim_ep(ep), line), value: val, expr, derived: is_derived,
-        });
+        if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
+            let name = ctx.sketch.dimensions[idx].name.clone();
+            ctx.exec(Action::UpdateDimension { index: idx, value: val, expr });
+            return ok(format!("Updated {} distance = {}", name, tokens[2]));
+        }
+        ctx.exec(Action::AddDimension { kind, value: val, expr, derived: is_derived });
         let prefix = if is_derived { "Derived distance" } else { "Set distance" };
         return ok(format!("{} = {}", prefix, tokens[2]));
     }
@@ -2137,10 +2197,14 @@ fn cmd_distance(ctx: &mut CommandContext, args: &str) -> CommandResult {
     // Point-point distance
     let ep_a = match resolve_endpoint_ref(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
     let ep_b = match resolve_endpoint_ref(&ctx.sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
+    let kind = DimensionKind::PointPointDistance(to_dim_ep(ep_a), to_dim_ep(ep_b));
     ctx.begin_group();
-    ctx.exec(Action::AddDimension {
-        kind: DimensionKind::PointPointDistance(to_dim_ep(ep_a), to_dim_ep(ep_b)), value: val, expr, derived: is_derived,
-    });
+    if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
+        let name = ctx.sketch.dimensions[idx].name.clone();
+        ctx.exec(Action::UpdateDimension { index: idx, value: val, expr });
+        return ok(format!("Updated {} distance = {}", name, tokens[2]));
+    }
+    ctx.exec(Action::AddDimension { kind, value: val, expr, derived: is_derived });
     let prefix = if is_derived { "Derived distance" } else { "Set distance" };
     ok(format!("{} = {}", prefix, tokens[2]))
 }
@@ -2532,17 +2596,24 @@ fn cmd_set_driven(ctx: &mut CommandContext, args: &str) -> CommandResult {
     if !ctx.sketch.dimensions[idx].derived {
         return ok(format!("{} is already driven (constraining)", name));
     }
-    let new_value = if tokens.len() > 1 {
-        match eval_expr(&ctx.sketch, tokens[1]) { Ok(v) => v, Err(e) => return err(e) }
+    let (new_value, new_expr) = if tokens.len() > 1 {
+        let val_str = tokens[1].trim().trim_matches('"');
+        if let Ok(v) = val_str.parse::<f64>() {
+            (v, None)
+        } else {
+            // Expression: evaluate for initial value, store as expr
+            let v = match eval_expr(&ctx.sketch, val_str) { Ok(v) => v, Err(e) => return err(e) };
+            (v, Some(val_str.to_string()))
+        }
     } else {
-        ctx.sketch.dimensions[idx].value
+        (ctx.sketch.dimensions[idx].value, ctx.sketch.dimensions[idx].expr_str.clone())
     };
     // Remove derived dim and re-add as driven
     let dim = ctx.sketch.dimensions[idx].clone();
     ctx.sketch.dimensions.remove(idx);
     ctx.begin_group();
     ctx.exec(Action::AddDimension {
-        kind: dim.kind, value: new_value, expr: dim.expr_str, derived: false,
+        kind: dim.kind, value: new_value, expr: new_expr.clone(), derived: false,
     });
     // Restore visual properties
     if let Some(d) = ctx.sketch.dimensions.last_mut() {
@@ -2551,7 +2622,11 @@ fn cmd_set_driven(ctx: &mut CommandContext, args: &str) -> CommandResult {
         d.name = dim.name.clone();
     }
     ctx.sketch.solve();
-    ok(format!("{} is now driven (constraining) = {:.4}", name, new_value))
+    if let Some(expr) = new_expr {
+        ok(format!("{} is now driven (constraining) = {}", name, expr))
+    } else {
+        ok(format!("{} is now driven (constraining) = {:.4}", name, new_value))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2597,7 +2672,7 @@ fn cmd_help(args: &str) -> CommandResult {
             "distance" => "distance L0.p1 L1.p2 5.0 [derived] | distance P0 L0 3.0 [derived]",
             "remove_dim" => "remove_dim d0",
             "set_derived" => "set_derived d0 (make dimension display-only)",
-            "set_driven" => "set_driven d0 [value] (make dimension constraining)",
+            "set_driven" => "set_driven d0 [value|\"expr\"] (make dimension constraining)",
             "lock" => "lock P0 | lock L0.p1 | lock L0.p1 x,y",
             "unlock" => "unlock P0 | unlock L0.p1",
             "param" => "param name value | param name \"expr\" (creates or updates)",
@@ -4382,6 +4457,134 @@ mod tests {
     fn completions(ctx: &CommandContext, input: &str) -> Vec<String> {
         complete(&ctx.sketch, &ctx.session_names, input, input.len())
     }
+
+    // -- Dimension update (no duplicates) --
+
+    #[test]
+    fn test_dimension_update_length() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0");
+        run_ok(&mut ctx, "length L0 5");
+        assert_eq!(ctx.sketch.dimensions.len(), 1);
+        let out = run_ok(&mut ctx, "length L0 10");
+        assert!(out.contains("Updated"), "Should update existing: {}", out);
+        assert_eq!(ctx.sketch.dimensions.len(), 1, "Should still be 1 dimension");
+    }
+
+    #[test]
+    fn test_dimension_update_radius() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_circle 0,0 5");
+        run_ok(&mut ctx, "radius A0 5");
+        assert_eq!(ctx.sketch.dimensions.len(), 1);
+        let out = run_ok(&mut ctx, "radius A0 10");
+        assert!(out.contains("Updated"), "Should update: {}", out);
+        assert_eq!(ctx.sketch.dimensions.len(), 1);
+    }
+
+    #[test]
+    fn test_dimension_update_radius_to_expr() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_circle 0,0 5");
+        run_ok(&mut ctx, "radius A0 5");
+        run_ok(&mut ctx, "param scale 2");
+        let out = run_ok(&mut ctx, "radius A0 \"5*scale\"");
+        assert!(out.contains("Updated"), "Should update: {}", out);
+        assert_eq!(ctx.sketch.dimensions.len(), 1);
+    }
+
+    #[test]
+    fn test_dimension_update_angle() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,0 3,4");
+        run_ok(&mut ctx, "angle L0 L1 45");
+        assert_eq!(ctx.sketch.dimensions.len(), 1);
+        let out = run_ok(&mut ctx, "angle L0 L1 90");
+        assert!(out.contains("Updated"), "Should update: {}", out);
+        assert_eq!(ctx.sketch.dimensions.len(), 1);
+    }
+
+    #[test]
+    fn test_dimension_update_distance() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0; add_line 7,0 10,0");
+        run_ok(&mut ctx, "distance L0.p2 L1.p1 3");
+        assert_eq!(ctx.sketch.dimensions.len(), 1);
+        let out = run_ok(&mut ctx, "distance L0.p2 L1.p1 5");
+        assert!(out.contains("Updated"), "Should update: {}", out);
+        assert_eq!(ctx.sketch.dimensions.len(), 1);
+    }
+
+    #[test]
+    #[test]
+    fn test_dimension_expr_constrains() {
+        // Exact reproduction from bug report
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "clear");
+        run_ok(&mut ctx, "param scale 1");
+        run_ok(&mut ctx, "add_circle 0,0 5");
+        run_ok(&mut ctx, "radius A0 5*scale");
+        // Check that expr_constraints were created
+        ctx.sketch.solve();
+        assert!(!ctx.sketch.expr_constraints.is_empty(),
+            "Expression dimension should create expr_constraint, got none. dims: {:?}",
+            ctx.sketch.dimensions.iter().map(|d| (&d.name, &d.expr_str, d.value)).collect::<Vec<_>>());
+        // Verify it actually constrains the radius
+        let r = ctx.sketch.arcs.refs().next().unwrap();
+        let radius = ctx.sketch.arcs[r].radius.value;
+        assert!((radius - 5.0).abs() < 0.1,
+            "radius should be 5*1=5, got {}", radius);
+    }
+
+    #[test]
+    fn test_dimension_expr_constrains_fresh() {
+        // Fresh expression dim without prior numeric — exact bug report scenario
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "param scale 1");
+        run_ok(&mut ctx, "add_circle 0,0 5");
+        // No prior "radius A0 5" — go straight to expression
+        run_ok(&mut ctx, "radius A0 5*scale");
+        // Check dimension was created with expression
+        assert_eq!(ctx.sketch.dimensions.len(), 1);
+        assert_eq!(ctx.sketch.dimensions[0].expr_str.as_deref(), Some("5*scale"));
+        // Solve and check expr constraints are built
+        let result = ctx.sketch.solve();
+        assert!(!ctx.sketch.expr_constraints.is_empty(),
+            "Should have expr_constraints after solve");
+        // Check radius is actually constrained to 5
+        let r = ctx.sketch.arcs.refs().next().unwrap();
+        assert!((ctx.sketch.arcs[r].radius.value - 5.0).abs() < 0.1,
+            "radius should be 5*1=5, got {}", ctx.sketch.arcs[r].radius.value);
+        assert!(result.end_cost < 0.01, "cost should be near zero, got {}", result.end_cost);
+    }
+
+    #[test]
+    fn test_dimension_expr_update_constrains() {
+        // Updating numeric dim to expression should constrain
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_circle 0,0 5");
+        run_ok(&mut ctx, "radius A0 5");
+        run_ok(&mut ctx, "param scale 3");
+        run_ok(&mut ctx, "radius A0 \"2*scale\"");
+        ctx.sketch.solve();
+        assert!(!ctx.sketch.expr_constraints.is_empty(),
+            "Updated expression should create expr_constraint");
+        let r = ctx.sketch.arcs.refs().next().unwrap();
+        let radius = ctx.sketch.arcs[r].radius.value;
+        assert!((radius - 6.0).abs() < 0.1,
+            "radius should be 2*3=6, got {}", radius);
+    }
+
+    #[test]
+    fn test_dimension_no_cross_update() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,1 5,1");
+        run_ok(&mut ctx, "length L0 5");
+        run_ok(&mut ctx, "length L1 3");
+        assert_eq!(ctx.sketch.dimensions.len(), 2, "Different entities should have separate dims");
+    }
+
+    // -- Autocomplete tests --
 
     #[test]
     fn test_complete_empty_input() {

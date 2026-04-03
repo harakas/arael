@@ -1094,6 +1094,22 @@ impl Sketch {
         Ok(())
     }
 
+    /// Rebuild expression constraints and resolve them so they contribute
+    /// to Hessian assembly (via extended_compute64). Needed before calling
+    /// calc_grad_hessian_dense directly (outside of solve()), e.g. for DOF.
+    pub fn prepare_expr_constraints(&mut self) {
+        self.rebuild_expr_constraints();
+        if !self.expr_constraints.is_empty() {
+            let mut tmp = Vec::new();
+            self.serialize64(&mut tmp);
+            let bag = SymbolBag::build(self);
+            for ec in &mut self.expr_constraints {
+                ec.resolve(&bag);
+            }
+            self.symbol_bag = Some(bag);
+        }
+    }
+
     /// Solve the sketch constraints using Levenberg-Marquardt.
     /// Uses sparse faer Cholesky for n >= 64 params, dense Cholesky otherwise.
     /// When starting cost is high, uses graduated optimization (1% -> 10% ->

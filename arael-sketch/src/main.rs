@@ -53,6 +53,12 @@ fn spawn_async<F: std::future::Future<Output = ()> + Send + 'static>(f: F) {
 fn compute_dof(sketch: &mut Sketch) -> usize {
     use arael::simple_lm::LmProblem;
 
+    // Rebuild expression constraints — they are #[serde(skip)] so lost
+    // during bincode serialization in the async DOF worker thread.
+    // This sets up expr_constraints and symbol_bag so that
+    // calc_grad_hessian_dense (via extended_compute64) includes them.
+    sketch.prepare_expr_constraints();
+
     // Disable drift constraints — they regularize every direction and
     // would make DOF always 0. We want DOF from user constraints only.
     let saved_drift = sketch.drift_isigma;
