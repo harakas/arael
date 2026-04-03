@@ -730,6 +730,7 @@ impl EditorApp {
             Ok(mut sketch) => {
                 sketch.dedup_constraints();
                 sketch.consolidate_helper_constraints();
+                sketch.fixup_tangent_signs();
                 let result = sketch.solve();
                 self.last_cost = result.end_cost;
                 self.sketch = sketch;
@@ -797,6 +798,8 @@ impl EditorApp {
             offset_y: self.offset.y,
             pending_fit: self.pending_fit,
             blocked_commands: Vec::new(),
+            cached_dof: None,
+            skip_dof_check: false,
         };
         let results = crate::commands::execute(&mut ctx, input);
         // Sync back
@@ -839,6 +842,8 @@ impl EditorApp {
             offset_y: self.offset.y,
             pending_fit: self.pending_fit,
             blocked_commands: blocked,
+            cached_dof: None,
+            skip_dof_check: false,
         };
         let results = crate::commands::execute(&mut ctx, input);
         self.sketch = ctx.sketch;
@@ -868,35 +873,19 @@ impl EditorApp {
         self.show_hints = false;
 
         if action.is_constraint_action() {
-            // Snapshot before applying for potential rollback
-            let snapshot = bincode::serialize(&self.sketch).ok();
-            let old_cost = {
-                let mut params = Vec::new();
-                self.sketch.serialize64(&mut params);
-                self.sketch.calc_cost(&params)
-            };
-
-            action.apply(&mut self.sketch);
-            self.sketch.dedup_constraints();
-            let result = self.sketch.solve();
-            let new_cost = result.end_cost;
-
-            // Reject if the sketch was healthy (well-solved) but the new
-            // constraint makes it unsolvable (cost jumps significantly).
-            let cost_jumped = new_cost > old_cost + 1e-3;
-            if cost_jumped {
-                if let Some(snap) = snapshot {
-                    if let Ok(restored) = bincode::deserialize(&snap) {
-                        self.sketch = restored;
-                        self.status_error = Some(
-                            "Constraint rejected: solver failed to satisfy all constraints".into());
-                        return;
-                    }
+            // GUI constraints always check DOF (no force flag)
+            let mut cached_dof: Option<usize> = None;
+            match crate::commands::validate_and_apply_constraint(
+                &mut self.sketch, &action, false, &mut cached_dof)
+            {
+                Ok(new_cost) => {
+                    self.last_cost = new_cost;
+                    self.history.push(action, &self.sketch);
+                }
+                Err(msg) => {
+                    self.status_error = Some(msg);
                 }
             }
-
-            self.last_cost = new_cost;
-            self.history.push(action, &self.sketch);
         } else {
             action.apply(&mut self.sketch);
             self.sketch.dedup_constraints();

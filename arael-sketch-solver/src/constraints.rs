@@ -539,7 +539,9 @@ pub struct CoincidentLL22 {
 
 // -- Line-Arc --
 
-// Line tangent to arc (distance from center to infinite line = radius)
+// Line tangent to arc: signed perpendicular distance from center to line = sign * radius.
+// sign is +1 or -1, determined at creation time based on which side of the line
+// the arc center is on. Using linear residual (not squared) for good Hessian conditioning.
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
@@ -547,16 +549,20 @@ pub struct CoincidentLL22 {
     let dy = line.p2.y - line.p1.y;
     let len = sqrt(dx * dx + dy * dy);
     let dist = ((arc.center.x - line.p1.x) * dy - (arc.center.y - line.p1.y) * dx) / len;
-    [(dist * dist - arc.radius * arc.radius) * sketch.constraint_isigma]
+    [(dist - tangentla.sign * arc.radius) * sketch.constraint_isigma]
 }))]
 pub struct TangentLA {
     #[arael(ref = root.lines)]
     pub line: Ref<Line>,
     #[arael(ref = root.arcs)]
     pub arc: Ref<Arc>,
+    #[serde(default = "default_tangent_sign")]
+    pub sign: f64,
     #[serde(skip)]
     pub hb: CrossBlock<Line, Arc>,
 }
+
+fn default_tangent_sign() -> f64 { 1.0 }
 
 // -- Arc-Arc --
 

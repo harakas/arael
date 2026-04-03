@@ -643,6 +643,22 @@ impl Sketch {
         let _ = total_removed;
     }
 
+    /// Recompute tangent_la sign fields from current geometry.
+    /// Needed after loading old saves that default sign to 1.0.
+    pub fn fixup_tangent_signs(&mut self) {
+        for t in &mut self.tangent_la {
+            let l = &self.lines[t.line];
+            let a = &self.arcs[t.arc];
+            let dx = l.p2.value.x - l.p1.value.x;
+            let dy = l.p2.value.y - l.p1.value.y;
+            let len = (dx * dx + dy * dy).sqrt();
+            if len < 1e-12 { continue; }
+            let dist = ((a.center.value.x - l.p1.value.x) * dy
+                      - (a.center.value.y - l.p1.value.y) * dx) / len;
+            t.sign = if dist >= 0.0 { 1.0 } else { -1.0 };
+        }
+    }
+
     /// Merge duplicate helper points at the same position and consolidate
     /// helper-point-bridged constraints into direct constraints.
     pub fn consolidate_helper_constraints(&mut self) {

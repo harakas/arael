@@ -129,6 +129,13 @@ point_on L0.p1 A0            Line endpoint on arc
 point_on A0.center L0        Arc center on line (creates helper point internally)
 ```
 
+All constraint and dimension commands check that DOF decreases after application. If a constraint doesn't reduce DOF (redundant or degenerate), it is rejected. Append `force` to skip this check:
+
+```
+equal L0 L1 force            Skip DOF check (use in scripts for known-valid constraints)
+length L0 5 force            Skip DOF check for dimensions
+```
+
 ### Removing Constraints
 
 ```

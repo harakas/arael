@@ -3,7 +3,6 @@
 
 use std::collections::HashMap;
 use arael::refs::Ref;
-use arael::simple_lm::LmProblem;
 use arael::vect::vect2d;
 use arael_sketch_solver::*;
 
@@ -27,6 +26,8 @@ pub struct CommandContext {
     pub status_error: Option<String>,
     pub last_cost: f64,
     pub dof: Option<usize>,
+    pub cached_dof: Option<usize>,
+    pub skip_dof_check: bool,
     // View state (used by center/zoom commands; GUI overrides with real values)
     pub scale: f32,
     pub offset_x: f32,
@@ -50,6 +51,8 @@ impl CommandContext {
             status_error: None,
             last_cost: 0.0,
             dof: None,
+            cached_dof: None,
+            skip_dof_check: false,
             scale: 80.0,
             offset_x: 400.0,
             offset_y: 300.0,
@@ -70,6 +73,8 @@ impl CommandContext {
             status_error: None,
             last_cost: 0.0,
             dof: None,
+            cached_dof: None,
+            skip_dof_check: false,
             scale: 80.0,
             offset_x: 400.0,
             offset_y: 300.0,
@@ -78,57 +83,125 @@ impl CommandContext {
         }
     }
 
+    /// Set skip_dof_check for the duration of a constraint command.
+    fn set_force(&mut self, force: bool) {
+        self.skip_dof_check = force;
+    }
+
     pub fn begin_group(&mut self) {
         self.history.begin_group();
     }
+}
+
+/// Validate and apply a constraint action on a sketch.
+/// Returns Ok(new_cost) on success, Err(message) on rejection.
+/// Handles snapshot/restore, cost checking, and DOF checking.
+pub fn validate_and_apply_constraint(
+    sketch: &mut Sketch,
+    action: &Action,
+    skip_dof_check: bool,
+    cached_dof: &mut Option<usize>,
+) -> Result<f64, String> {
+    use arael::simple_lm::LmProblem;
+
+    let snapshot = bincode::serialize(sketch).ok();
+    let old_cost = {
+        let mut params = Vec::new();
+        sketch.serialize64(&mut params);
+        sketch.calc_cost(&params)
+    };
+
+    // Skip DOF check for internal/non-constraining actions
+    let should_check_dof = !skip_dof_check && match action {
+        Action::UpdateDimension { .. } => false,
+        Action::AddDimension { derived: true, .. } => false,
+        Action::ApplyCoincidentPP { a, .. } => !sketch.points.get(*a).map_or(false, |p| p.helper),
+        Action::ApplyCoincidentLP1 { point, .. } | Action::ApplyCoincidentLP2 { point, .. } =>
+            !sketch.points.get(*point).map_or(false, |p| p.helper),
+        Action::ApplyCoincidentArcCenter { point, .. } | Action::ApplyCoincidentArcStart { point, .. } |
+        Action::ApplyCoincidentArcEnd { point, .. } =>
+            !sketch.points.get(*point).map_or(false, |p| p.helper),
+        _ => true,
+    };
+
+    let old_dof = if should_check_dof {
+        Some(cached_dof.unwrap_or_else(|| compute_dof_count(sketch)))
+    } else {
+        None
+    };
+
+    action.apply(sketch);
+    sketch.dedup_constraints();
+
+    // Quick cost check
+    let quick_cost = {
+        let mut params = Vec::new();
+        sketch.serialize64(&mut params);
+        sketch.calc_cost(&params)
+    };
+    let new_cost = if quick_cost <= old_cost + 1e-6 {
+        quick_cost
+    } else {
+        sketch.solve().end_cost
+    };
+
+    // Cost rejection
+    if new_cost > old_cost + 1e-3 {
+        if let Some(ref snap) = snapshot {
+            if let Ok(restored) = bincode::deserialize(snap) {
+                *sketch = restored;
+                return Err(format!(
+                    "Constraint rejected: could not satisfy all constraints (cost {:.4} -> {:.4})",
+                    old_cost, new_cost));
+            }
+        }
+    }
+
+    // DOF rejection
+    if let Some(old_dof) = old_dof {
+        let new_dof = compute_dof_count(sketch);
+        if new_dof >= old_dof {
+            if let Some(ref snap) = snapshot {
+                if let Ok(restored) = bincode::deserialize(snap) {
+                    *sketch = restored;
+                    *cached_dof = Some(old_dof);
+                    return Err(format!(
+                        "Constraint rejected: DOF unchanged at {}. Constraint is redundant or degenerate. Use 'force' to override.",
+                        new_dof));
+                }
+            }
+        }
+        *cached_dof = Some(new_dof);
+    } else {
+        *cached_dof = None;
+    }
+
+    Ok(new_cost)
+}
+
+impl CommandContext {
 
     /// Execute an action: apply to sketch and record in history.
-    /// For constraint actions: validates by solving and checking cost.
+    /// For constraint actions: validates by solving, checking cost, and optionally checking DOF.
     pub fn exec(&mut self, action: Action) {
         self.status_error = None;
 
         if action.is_constraint_action() {
-            let snapshot = bincode::serialize(&self.sketch).ok();
-            let old_cost = {
-                let mut params = Vec::new();
-                self.sketch.serialize64(&mut params);
-                self.sketch.calc_cost(&params)
-            };
-
-            action.apply(&mut self.sketch);
-            self.sketch.dedup_constraints();
-
-            // Quick cost check: skip solver if new constraint didn't increase cost
-            let quick_cost = {
-                let mut params = Vec::new();
-                self.sketch.serialize64(&mut params);
-                self.sketch.calc_cost(&params)
-            };
-            let new_cost = if quick_cost <= old_cost + 1e-6 {
-                quick_cost
-            } else {
-                self.sketch.solve().end_cost
-            };
-
-            let cost_jumped = new_cost > old_cost + 1e-3;
-            if cost_jumped {
-                let msg = format!(
-                    "Constraint rejected: could not satisfy all constraints (cost {:.4} -> {:.4})",
-                    old_cost, new_cost);
-                if let Some(snap) = snapshot {
-                    if let Ok(restored) = bincode::deserialize(&snap) {
-                        self.sketch = restored;
-                        self.status_error = Some(msg);
-                        return;
-                    }
+            match validate_and_apply_constraint(
+                &mut self.sketch, &action, self.skip_dof_check, &mut self.cached_dof)
+            {
+                Ok(new_cost) => {
+                    self.last_cost = new_cost;
+                    self.history.push(action, &self.sketch);
+                }
+                Err(msg) => {
+                    self.status_error = Some(msg);
                 }
             }
-
-            self.last_cost = new_cost;
-            self.history.push(action, &self.sketch);
         } else {
             action.apply(&mut self.sketch);
             self.sketch.dedup_constraints();
+            self.cached_dof = None; // geometry changed, invalidate
             self.history.push(action, &self.sketch);
         }
     }
@@ -146,7 +219,9 @@ fn ok(msg: impl Into<String>) -> CommandResult {
 }
 
 /// Return ok or the status_error if the last exec was rejected.
+/// Also resets skip_dof_check to false.
 fn ok_or_status(ctx: &mut CommandContext, msg: impl Into<String>) -> CommandResult {
+    ctx.skip_dof_check = false;
     if let Some(e) = ctx.status_error.take() {
         CommandResult { output: e, is_error: true, no_echo: false, markdown: false }
     } else {
@@ -714,6 +789,10 @@ pub fn execute(ctx: &mut CommandContext, input: &str) -> Vec<CommandResult> {
 fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
     let input = input.trim();
 
+    // Strip trailing "force" keyword — skips DOF check on constraint commands
+    let (input, force) = strip_force(input);
+    ctx.skip_dof_check = force;
+
     // Comments
     if input.starts_with('#') {
         return CommandResult { output: String::new(), is_error: false, no_echo: true, markdown: false };
@@ -905,10 +984,13 @@ fn auto_coincident_line(ctx: &mut CommandContext, line_ref: Ref<Line>) -> Vec<St
         }
     }
     let mut connected = Vec::new();
+    let saved = ctx.skip_dof_check;
+    ctx.skip_dof_check = true; // auto-coincident is positional, don't DOF-check
     for (action, desc) in actions {
         ctx.exec(action);
         connected.push(desc);
     }
+    ctx.skip_dof_check = saved;
     connected
 }
 
@@ -1023,10 +1105,13 @@ fn auto_coincident_arc(ctx: &mut CommandContext, arc_ref: Ref<Arc>, center_only:
     }
 
     let mut connected = Vec::new();
+    let saved = ctx.skip_dof_check;
+    ctx.skip_dof_check = true; // auto-coincident is positional, don't DOF-check
     for (action, desc) in actions {
         ctx.exec(action);
         connected.push(desc);
     }
+    ctx.skip_dof_check = saved;
     connected
 }
 
@@ -1147,6 +1232,20 @@ fn cmd_delete(ctx: &mut CommandContext, args: &str) -> CommandResult {
 // ---------------------------------------------------------------------------
 // Constraint commands
 // ---------------------------------------------------------------------------
+
+/// Strip trailing "force" keyword from args, return (cleaned_args, is_force).
+fn strip_force(args: &str) -> (&str, bool) {
+    if args.trim().ends_with(" force") || args.trim() == "force" {
+        let trimmed = args.trim();
+        if trimmed == "force" {
+            ("", true)
+        } else {
+            (&trimmed[..trimmed.len() - 6], true)
+        }
+    } else {
+        (args, false)
+    }
+}
 
 fn cmd_horizontal(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let mut lines = Vec::new();
@@ -1383,10 +1482,10 @@ fn cmd_length(ctx: &mut CommandContext, args: &str) -> CommandResult {
         if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
             let name = ctx.sketch.dimensions[idx].name.clone();
             ctx.exec(Action::UpdateDimension { index: idx, value: len, expr: None });
-            return ok(format!("Updated {} derived length = ({:.4})", name, len));
+            return ok_or_status(ctx, format!("Updated {} derived length = ({:.4})", name, len));
         }
         ctx.exec(Action::AddDimension { kind, value: len, expr: None, derived: true });
-        return ok(format!("Derived {} length = ({:.4})", tokens[0], len));
+        return ok_or_status(ctx, format!("Derived {} length = ({:.4})", tokens[0], len));
     }
     if tokens.len() != 2 { return err("Usage: length L0 5.0 [derived]"); }
     let line = match resolve_line(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
@@ -1397,20 +1496,20 @@ fn cmd_length(ctx: &mut CommandContext, args: &str) -> CommandResult {
         if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
             let name = ctx.sketch.dimensions[idx].name.clone();
             ctx.exec(Action::UpdateDimension { index: idx, value, expr: None });
-            return ok(format!("Updated {} length = {}", name, value));
+            return ok_or_status(ctx, format!("Updated {} length = {}", name, value));
         }
         ctx.exec(Action::AddDimension { kind, value, expr: None, derived: is_derived });
         let prefix = if is_derived { "Derived" } else { "Set" };
-        ok(format!("{} {} length = {}", prefix, tokens[0], value))
+        ok_or_status(ctx, format!("{} {} length = {}", prefix, tokens[0], value))
     } else {
         ctx.begin_group();
         if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
             let name = ctx.sketch.dimensions[idx].name.clone();
             ctx.exec(Action::UpdateDimension { index: idx, value: 0.0, expr: Some(val_str.to_string()) });
-            return ok(format!("Updated {} length = {}", name, val_str));
+            return ok_or_status(ctx, format!("Updated {} length = {}", name, val_str));
         }
         ctx.exec(Action::AddDimension { kind, value: 0.0, expr: Some(val_str.to_string()), derived: is_derived });
-        ok(format!("Set {} length = {}", tokens[0], val_str))
+        ok_or_status(ctx, format!("Set {} length = {}", tokens[0], val_str))
     }
 }
 
@@ -1426,10 +1525,10 @@ fn cmd_radius(ctx: &mut CommandContext, args: &str) -> CommandResult {
         if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
             let name = ctx.sketch.dimensions[idx].name.clone();
             ctx.exec(Action::UpdateDimension { index: idx, value: r, expr: None });
-            return ok(format!("Updated {} derived radius = ({:.4})", name, r));
+            return ok_or_status(ctx, format!("Updated {} derived radius = ({:.4})", name, r));
         }
         ctx.exec(Action::AddDimension { kind, value: r, expr: None, derived: true });
-        return ok(format!("Derived {} radius = ({:.4})", tokens[0], r));
+        return ok_or_status(ctx, format!("Derived {} radius = ({:.4})", tokens[0], r));
     }
     if tokens.len() != 2 { return err("Usage: radius A0 1.5 [derived]"); }
     let arc = match resolve_arc(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
@@ -1440,20 +1539,20 @@ fn cmd_radius(ctx: &mut CommandContext, args: &str) -> CommandResult {
         if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
             let name = ctx.sketch.dimensions[idx].name.clone();
             ctx.exec(Action::UpdateDimension { index: idx, value, expr: None });
-            return ok(format!("Updated {} radius = {}", name, value));
+            return ok_or_status(ctx, format!("Updated {} radius = {}", name, value));
         }
         ctx.exec(Action::AddDimension { kind, value, expr: None, derived: is_derived });
         let prefix = if is_derived { "Derived" } else { "Set" };
-        ok(format!("{} {} radius = {}", prefix, tokens[0], value))
+        ok_or_status(ctx, format!("{} {} radius = {}", prefix, tokens[0], value))
     } else {
         ctx.begin_group();
         if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
             let name = ctx.sketch.dimensions[idx].name.clone();
             ctx.exec(Action::UpdateDimension { index: idx, value: 0.0, expr: Some(val_str.to_string()) });
-            return ok(format!("Updated {} radius = {}", name, val_str));
+            return ok_or_status(ctx, format!("Updated {} radius = {}", name, val_str));
         }
         ctx.exec(Action::AddDimension { kind, value: 0.0, expr: Some(val_str.to_string()), derived: is_derived });
-        ok(format!("Set {} radius = {}", tokens[0], val_str))
+        ok_or_status(ctx, format!("Set {} radius = {}", tokens[0], val_str))
     }
 }
 
@@ -2156,10 +2255,10 @@ fn cmd_angle(ctx: &mut CommandContext, args: &str) -> CommandResult {
         if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
             let name = ctx.sketch.dimensions[idx].name.clone();
             ctx.exec(Action::UpdateDimension { index: idx, value: current_deg, expr: None });
-            return ok(format!("Updated {} derived angle = ({:.4})", name, current_deg));
+            return ok_or_status(ctx, format!("Updated {} derived angle = ({:.4})", name, current_deg));
         }
         ctx.exec(Action::AddDimension { kind, value: current_deg, expr: None, derived: true });
-        return ok(format!("Derived angle {} {} = ({:.4})", tokens[0], tokens[1], current_deg));
+        return ok_or_status(ctx, format!("Derived angle {} {} = ({:.4})", tokens[0], tokens[1], current_deg));
     }
 
     if tokens.len() != 3 { return err("Usage: angle L0 L1 45 [derived]"); }
@@ -2176,12 +2275,12 @@ fn cmd_angle(ctx: &mut CommandContext, args: &str) -> CommandResult {
             let name = ctx.sketch.dimensions[idx].name.clone();
             ctx.exec(Action::UpdateDimension { index: idx, value, expr: None });
             let sector = if supplement { "supplement" } else { "direct" };
-            return ok(format!("Updated {} angle = {} ({})", name, value, sector));
+            return ok_or_status(ctx, format!("Updated {} angle = {} ({})", name, value, sector));
         }
         ctx.exec(Action::AddDimension { kind, value, expr: None, derived: is_derived });
         let sector = if supplement { "supplement" } else { "direct" };
         let prefix = if is_derived { "Derived" } else { "Set" };
-        ok(format!("{} angle {} {} = {} ({})", prefix, tokens[0], tokens[1], value, sector))
+        ok_or_status(ctx, format!("{} angle {} {} = {} ({})", prefix, tokens[0], tokens[1], value, sector))
     } else {
         let value = eval_expr(&ctx.sketch, val_str).unwrap_or(0.0);
         let supplement = (value - supplement_deg).abs() < (value - current_deg).abs();
@@ -2191,11 +2290,11 @@ fn cmd_angle(ctx: &mut CommandContext, args: &str) -> CommandResult {
             let name = ctx.sketch.dimensions[idx].name.clone();
             ctx.exec(Action::UpdateDimension { index: idx, value: 0.0, expr: Some(val_str.to_string()) });
             let sector = if supplement { "supplement" } else { "direct" };
-            return ok(format!("Updated {} angle = {} ({})", name, val_str, sector));
+            return ok_or_status(ctx, format!("Updated {} angle = {} ({})", name, val_str, sector));
         }
         ctx.exec(Action::AddDimension { kind, value: 0.0, expr: Some(val_str.to_string()), derived: is_derived });
         let sector = if supplement { "supplement" } else { "direct" };
-        ok(format!("Set angle {} {} = {} ({})", tokens[0], tokens[1], val_str, sector))
+        ok_or_status(ctx, format!("Set angle {} {} = {} ({})", tokens[0], tokens[1], val_str, sector))
     }
 }
 
@@ -2228,10 +2327,10 @@ fn cmd_distance(ctx: &mut CommandContext, args: &str) -> CommandResult {
         if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
             let name = ctx.sketch.dimensions[idx].name.clone();
             ctx.exec(Action::UpdateDimension { index: idx, value: dist, expr: None });
-            return ok(format!("Updated {} derived distance = ({:.4})", name, dist));
+            return ok_or_status(ctx, format!("Updated {} derived distance = ({:.4})", name, dist));
         }
         ctx.exec(Action::AddDimension { kind, value: dist, expr: None, derived: true });
-        return ok(format!("Derived distance {} {} = ({:.4})", tokens[0], tokens[1], dist));
+        return ok_or_status(ctx, format!("Derived distance {} {} = ({:.4})", tokens[0], tokens[1], dist));
     }
 
     if tokens.len() != 3 { return err("Usage: distance L0.p1 L1.p2 5.0 [derived]  or  distance P0 L0 3.0 [derived]"); }
@@ -2249,11 +2348,11 @@ fn cmd_distance(ctx: &mut CommandContext, args: &str) -> CommandResult {
         if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
             let name = ctx.sketch.dimensions[idx].name.clone();
             ctx.exec(Action::UpdateDimension { index: idx, value: val, expr });
-            return ok(format!("Updated {} distance = {}", name, tokens[2]));
+            return ok_or_status(ctx, format!("Updated {} distance = {}", name, tokens[2]));
         }
         ctx.exec(Action::AddDimension { kind, value: val, expr, derived: is_derived });
         let prefix = if is_derived { "Derived distance" } else { "Set distance" };
-        return ok(format!("{} = {}", prefix, tokens[2]));
+        return ok_or_status(ctx, format!("{} = {}", prefix, tokens[2]));
     }
 
     // Point-point distance
@@ -2264,11 +2363,11 @@ fn cmd_distance(ctx: &mut CommandContext, args: &str) -> CommandResult {
     if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
         let name = ctx.sketch.dimensions[idx].name.clone();
         ctx.exec(Action::UpdateDimension { index: idx, value: val, expr });
-        return ok(format!("Updated {} distance = {}", name, tokens[2]));
+        return ok_or_status(ctx, format!("Updated {} distance = {}", name, tokens[2]));
     }
     ctx.exec(Action::AddDimension { kind, value: val, expr, derived: is_derived });
     let prefix = if is_derived { "Derived distance" } else { "Set distance" };
-    ok(format!("{} = {}", prefix, tokens[2]))
+    ok_or_status(ctx, format!("{} = {}", prefix, tokens[2]))
 }
 
 fn cmd_remove_dim(ctx: &mut CommandContext, args: &str) -> CommandResult {
@@ -2696,6 +2795,27 @@ fn cmd_set_driven(ctx: &mut CommandContext, args: &str) -> CommandResult {
 // ---------------------------------------------------------------------------
 
 /// Compute DOF synchronously and return (dof_count, free_direction_descriptions).
+/// Compute DOF count only (no free direction analysis). Used for constraint validation.
+fn compute_dof_count(sketch: &mut Sketch) -> usize {
+    use arael::simple_lm::LmProblem;
+    sketch.prepare_expr_constraints();
+    let saved_drift = sketch.drift_isigma;
+    sketch.drift_isigma = 0.0;
+    let mut params = Vec::new();
+    sketch.serialize64(&mut params);
+    let n = params.len();
+    if n == 0 { sketch.drift_isigma = saved_drift; return 0; }
+    let mut grad = vec![0.0f64; n];
+    let mut hessian = vec![0.0f64; n * n];
+    sketch.calc_grad_hessian_dense(&params, &mut grad, &mut hessian);
+    sketch.drift_isigma = saved_drift;
+    let h = nalgebra::DMatrix::from_row_slice(n, n, &hessian);
+    let eigen = nalgebra::SymmetricEigen::new(h);
+    let max_ev = eigen.eigenvalues.iter().cloned().fold(0.0f64, f64::max);
+    let threshold = if max_ev > 0.0 { max_ev * 1e-8 } else { 1e-10 };
+    eigen.eigenvalues.iter().filter(|&&ev| ev.abs() <= threshold).count()
+}
+
 fn compute_dof_sync(sketch: &mut Sketch) -> (usize, Vec<String>) {
     use arael::simple_lm::LmProblem;
     use arael_sketch_solver::SymbolBag;
@@ -4698,6 +4818,31 @@ mod tests {
 
     fn completions(ctx: &CommandContext, input: &str) -> Vec<String> {
         complete(&ctx.sketch, &ctx.session_names, input, input.len())
+    }
+
+    // -- DOF check on constraints --
+
+    #[test]
+    fn test_dof_check_accepts_valid() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0");
+        run_ok(&mut ctx, "horizontal L0");
+        // horizontal removes 1 DOF, should succeed
+    }
+
+    #[test]
+    fn test_dof_check_force_overrides() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0");
+        run_ok(&mut ctx, "horizontal L0");
+        // Adding a redundant perpendicular to a non-existent L1 won't work,
+        // but we can test force with a degenerate scenario:
+        // Two parallel lines, then add parallel again with force
+        run_ok(&mut ctx, "add_line 0,1 5,1");
+        run_ok(&mut ctx, "parallel L0 L1");
+        // collinear on already-parallel lines is degenerate — might not reduce DOF
+        // Try with force
+        run_ok(&mut ctx, "collinear L0 L1 force");
     }
 
     // -- DOF analysis --

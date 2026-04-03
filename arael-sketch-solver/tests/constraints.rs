@@ -364,8 +364,16 @@ fn test_tangent_la() {
     let mut sketch = Sketch::new();
     let l = sketch.add_line(vect2d::new(-2.0, 2.5), vect2d::new(3.0, 2.5));
     let a = sketch.add_arc(vect2d::new(0.0, 0.0), 2.0, 0.0, std::f64::consts::PI, false);
+    // Compute sign: center is below the line (positive signed distance)
+    let l_ref = &sketch.lines[l];
+    let dx = l_ref.p2.value.x - l_ref.p1.value.x;
+    let dy = l_ref.p2.value.y - l_ref.p1.value.y;
+    let len = (dx * dx + dy * dy).sqrt();
+    let dist = ((sketch.arcs[a].center.value.x - l_ref.p1.value.x) * dy
+              - (sketch.arcs[a].center.value.y - l_ref.p1.value.y) * dx) / len;
+    let sign = if dist >= 0.0 { 1.0 } else { -1.0 };
     sketch.tangent_la.push(TangentLA {
-        line: l, arc: a, hb: CrossBlock::new(),
+        line: l, arc: a, sign, hb: CrossBlock::new(),
     });
     sketch.solve();
     let lp = &sketch.lines[l];

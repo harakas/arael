@@ -389,7 +389,16 @@ impl Action {
                 sketch.solve();
             }
             Action::ApplyTangentLA { line, arc } => {
-                sketch.tangent_la.push(TangentLA { line: *line, arc: *arc, hb: CrossBlock::new() });
+                // Compute sign: which side of the line the arc center is on
+                let l = &sketch.lines[*line];
+                let a = &sketch.arcs[*arc];
+                let dx = l.p2.value.x - l.p1.value.x;
+                let dy = l.p2.value.y - l.p1.value.y;
+                let len = (dx * dx + dy * dy).sqrt();
+                let dist = ((a.center.value.x - l.p1.value.x) * dy
+                          - (a.center.value.y - l.p1.value.y) * dx) / len;
+                let sign = if dist >= 0.0 { 1.0 } else { -1.0 };
+                sketch.tangent_la.push(TangentLA { line: *line, arc: *arc, sign, hb: CrossBlock::new() });
                 sketch.solve();
             }
             Action::ApplyTangentAA { a, b } => {

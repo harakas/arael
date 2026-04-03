@@ -273,263 +273,263 @@ add_circle 49.75924,-4.90086 1
 add_circle 49.93977,-2.45338 1
 
 # Phase 3: Equal-length constraints (chain)
-equal L0 L1
-equal L1 L2
-equal L2 L3
-equal L3 L4
-equal L4 L5
-equal L5 L6
-equal L6 L7
-equal L7 L8
-equal L8 L9
-equal L9 L10
-equal L10 L11
-equal L11 L12
-equal L12 L13
-equal L13 L14
-equal L14 L15
-equal L15 L16
-equal L16 L17
-equal L17 L18
-equal L18 L19
-equal L19 L20
-equal L20 L21
-equal L21 L22
-equal L22 L23
-equal L23 L24
-equal L24 L25
-equal L25 L26
-equal L26 L27
-equal L27 L28
-equal L28 L29
-equal L29 L30
-equal L30 L31
-equal L31 L32
-equal L32 L33
-equal L33 L34
-equal L34 L35
-equal L35 L36
-equal L36 L37
-equal L37 L38
-equal L38 L39
-equal L39 L40
-equal L40 L41
-equal L41 L42
-equal L42 L43
-equal L43 L44
-equal L44 L45
-equal L45 L46
-equal L46 L47
-equal L47 L48
-equal L48 L49
-equal L49 L50
-equal L50 L51
-equal L51 L52
-equal L52 L53
-equal L53 L54
-equal L54 L55
-equal L55 L56
-equal L56 L57
-equal L57 L58
-equal L58 L59
-equal L59 L60
-equal L60 L61
-equal L61 L62
-equal L62 L63
-equal L63 L64
-equal L64 L65
-equal L65 L66
-equal L66 L67
-equal L67 L68
-equal L68 L69
-equal L69 L70
-equal L70 L71
-equal L71 L72
-equal L72 L73
-equal L73 L74
-equal L74 L75
-equal L75 L76
-equal L76 L77
-equal L77 L78
-equal L78 L79
-equal L79 L80
-equal L80 L81
-equal L81 L82
-equal L82 L83
-equal L83 L84
-equal L84 L85
-equal L85 L86
-equal L86 L87
-equal L87 L88
-equal L88 L89
-equal L89 L90
-equal L90 L91
-equal L91 L92
-equal L92 L93
-equal L93 L94
-equal L94 L95
-equal L95 L96
-equal L96 L97
-equal L97 L98
-equal L98 L99
-equal L99 L100
-equal L100 L101
-equal L101 L102
-equal L102 L103
-equal L103 L104
-equal L104 L105
-equal L105 L106
-equal L106 L107
-equal L107 L108
-equal L108 L109
-equal L109 L110
-equal L110 L111
-equal L111 L112
-equal L112 L113
-equal L113 L114
-equal L114 L115
-equal L115 L116
-equal L116 L117
-equal L117 L118
-equal L118 L119
-equal L119 L120
-equal L120 L121
-equal L121 L122
-equal L122 L123
-equal L123 L124
-equal L124 L125
-equal L125 L126
-equal L126 L127
+equal L0 L1 force
+equal L1 L2 force
+equal L2 L3 force
+equal L3 L4 force
+equal L4 L5 force
+equal L5 L6 force
+equal L6 L7 force
+equal L7 L8 force
+equal L8 L9 force
+equal L9 L10 force
+equal L10 L11 force
+equal L11 L12 force
+equal L12 L13 force
+equal L13 L14 force
+equal L14 L15 force
+equal L15 L16 force
+equal L16 L17 force
+equal L17 L18 force
+equal L18 L19 force
+equal L19 L20 force
+equal L20 L21 force
+equal L21 L22 force
+equal L22 L23 force
+equal L23 L24 force
+equal L24 L25 force
+equal L25 L26 force
+equal L26 L27 force
+equal L27 L28 force
+equal L28 L29 force
+equal L29 L30 force
+equal L30 L31 force
+equal L31 L32 force
+equal L32 L33 force
+equal L33 L34 force
+equal L34 L35 force
+equal L35 L36 force
+equal L36 L37 force
+equal L37 L38 force
+equal L38 L39 force
+equal L39 L40 force
+equal L40 L41 force
+equal L41 L42 force
+equal L42 L43 force
+equal L43 L44 force
+equal L44 L45 force
+equal L45 L46 force
+equal L46 L47 force
+equal L47 L48 force
+equal L48 L49 force
+equal L49 L50 force
+equal L50 L51 force
+equal L51 L52 force
+equal L52 L53 force
+equal L53 L54 force
+equal L54 L55 force
+equal L55 L56 force
+equal L56 L57 force
+equal L57 L58 force
+equal L58 L59 force
+equal L59 L60 force
+equal L60 L61 force
+equal L61 L62 force
+equal L62 L63 force
+equal L63 L64 force
+equal L64 L65 force
+equal L65 L66 force
+equal L66 L67 force
+equal L67 L68 force
+equal L68 L69 force
+equal L69 L70 force
+equal L70 L71 force
+equal L71 L72 force
+equal L72 L73 force
+equal L73 L74 force
+equal L74 L75 force
+equal L75 L76 force
+equal L76 L77 force
+equal L77 L78 force
+equal L78 L79 force
+equal L79 L80 force
+equal L80 L81 force
+equal L81 L82 force
+equal L82 L83 force
+equal L83 L84 force
+equal L84 L85 force
+equal L85 L86 force
+equal L86 L87 force
+equal L87 L88 force
+equal L88 L89 force
+equal L89 L90 force
+equal L90 L91 force
+equal L91 L92 force
+equal L92 L93 force
+equal L93 L94 force
+equal L94 L95 force
+equal L95 L96 force
+equal L96 L97 force
+equal L97 L98 force
+equal L98 L99 force
+equal L99 L100 force
+equal L100 L101 force
+equal L101 L102 force
+equal L102 L103 force
+equal L103 L104 force
+equal L104 L105 force
+equal L105 L106 force
+equal L106 L107 force
+equal L107 L108 force
+equal L108 L109 force
+equal L109 L110 force
+equal L110 L111 force
+equal L111 L112 force
+equal L112 L113 force
+equal L113 L114 force
+equal L114 L115 force
+equal L115 L116 force
+equal L116 L117 force
+equal L117 L118 force
+equal L118 L119 force
+equal L119 L120 force
+equal L120 L121 force
+equal L121 L122 force
+equal L122 L123 force
+equal L123 L124 force
+equal L124 L125 force
+equal L125 L126 force
+equal L126 L127 force
 
 # Phase 4: Equal-radius constraints (chain)
-equal A0 A1
-equal A1 A2
-equal A2 A3
-equal A3 A4
-equal A4 A5
-equal A5 A6
-equal A6 A7
-equal A7 A8
-equal A8 A9
-equal A9 A10
-equal A10 A11
-equal A11 A12
-equal A12 A13
-equal A13 A14
-equal A14 A15
-equal A15 A16
-equal A16 A17
-equal A17 A18
-equal A18 A19
-equal A19 A20
-equal A20 A21
-equal A21 A22
-equal A22 A23
-equal A23 A24
-equal A24 A25
-equal A25 A26
-equal A26 A27
-equal A27 A28
-equal A28 A29
-equal A29 A30
-equal A30 A31
-equal A31 A32
-equal A32 A33
-equal A33 A34
-equal A34 A35
-equal A35 A36
-equal A36 A37
-equal A37 A38
-equal A38 A39
-equal A39 A40
-equal A40 A41
-equal A41 A42
-equal A42 A43
-equal A43 A44
-equal A44 A45
-equal A45 A46
-equal A46 A47
-equal A47 A48
-equal A48 A49
-equal A49 A50
-equal A50 A51
-equal A51 A52
-equal A52 A53
-equal A53 A54
-equal A54 A55
-equal A55 A56
-equal A56 A57
-equal A57 A58
-equal A58 A59
-equal A59 A60
-equal A60 A61
-equal A61 A62
-equal A62 A63
-equal A63 A64
-equal A64 A65
-equal A65 A66
-equal A66 A67
-equal A67 A68
-equal A68 A69
-equal A69 A70
-equal A70 A71
-equal A71 A72
-equal A72 A73
-equal A73 A74
-equal A74 A75
-equal A75 A76
-equal A76 A77
-equal A77 A78
-equal A78 A79
-equal A79 A80
-equal A80 A81
-equal A81 A82
-equal A82 A83
-equal A83 A84
-equal A84 A85
-equal A85 A86
-equal A86 A87
-equal A87 A88
-equal A88 A89
-equal A89 A90
-equal A90 A91
-equal A91 A92
-equal A92 A93
-equal A93 A94
-equal A94 A95
-equal A95 A96
-equal A96 A97
-equal A97 A98
-equal A98 A99
-equal A99 A100
-equal A100 A101
-equal A101 A102
-equal A102 A103
-equal A103 A104
-equal A104 A105
-equal A105 A106
-equal A106 A107
-equal A107 A108
-equal A108 A109
-equal A109 A110
-equal A110 A111
-equal A111 A112
-equal A112 A113
-equal A113 A114
-equal A114 A115
-equal A115 A116
-equal A116 A117
-equal A117 A118
-equal A118 A119
-equal A119 A120
-equal A120 A121
-equal A121 A122
-equal A122 A123
-equal A123 A124
-equal A124 A125
-equal A125 A126
-equal A126 A127
+equal A0 A1 force
+equal A1 A2 force
+equal A2 A3 force
+equal A3 A4 force
+equal A4 A5 force
+equal A5 A6 force
+equal A6 A7 force
+equal A7 A8 force
+equal A8 A9 force
+equal A9 A10 force
+equal A10 A11 force
+equal A11 A12 force
+equal A12 A13 force
+equal A13 A14 force
+equal A14 A15 force
+equal A15 A16 force
+equal A16 A17 force
+equal A17 A18 force
+equal A18 A19 force
+equal A19 A20 force
+equal A20 A21 force
+equal A21 A22 force
+equal A22 A23 force
+equal A23 A24 force
+equal A24 A25 force
+equal A25 A26 force
+equal A26 A27 force
+equal A27 A28 force
+equal A28 A29 force
+equal A29 A30 force
+equal A30 A31 force
+equal A31 A32 force
+equal A32 A33 force
+equal A33 A34 force
+equal A34 A35 force
+equal A35 A36 force
+equal A36 A37 force
+equal A37 A38 force
+equal A38 A39 force
+equal A39 A40 force
+equal A40 A41 force
+equal A41 A42 force
+equal A42 A43 force
+equal A43 A44 force
+equal A44 A45 force
+equal A45 A46 force
+equal A46 A47 force
+equal A47 A48 force
+equal A48 A49 force
+equal A49 A50 force
+equal A50 A51 force
+equal A51 A52 force
+equal A52 A53 force
+equal A53 A54 force
+equal A54 A55 force
+equal A55 A56 force
+equal A56 A57 force
+equal A57 A58 force
+equal A58 A59 force
+equal A59 A60 force
+equal A60 A61 force
+equal A61 A62 force
+equal A62 A63 force
+equal A63 A64 force
+equal A64 A65 force
+equal A65 A66 force
+equal A66 A67 force
+equal A67 A68 force
+equal A68 A69 force
+equal A69 A70 force
+equal A70 A71 force
+equal A71 A72 force
+equal A72 A73 force
+equal A73 A74 force
+equal A74 A75 force
+equal A75 A76 force
+equal A76 A77 force
+equal A77 A78 force
+equal A78 A79 force
+equal A79 A80 force
+equal A80 A81 force
+equal A81 A82 force
+equal A82 A83 force
+equal A83 A84 force
+equal A84 A85 force
+equal A85 A86 force
+equal A86 A87 force
+equal A87 A88 force
+equal A88 A89 force
+equal A89 A90 force
+equal A90 A91 force
+equal A91 A92 force
+equal A92 A93 force
+equal A93 A94 force
+equal A94 A95 force
+equal A95 A96 force
+equal A96 A97 force
+equal A97 A98 force
+equal A98 A99 force
+equal A99 A100 force
+equal A100 A101 force
+equal A101 A102 force
+equal A102 A103 force
+equal A103 A104 force
+equal A104 A105 force
+equal A105 A106 force
+equal A106 A107 force
+equal A107 A108 force
+equal A108 A109 force
+equal A109 A110 force
+equal A110 A111 force
+equal A111 A112 force
+equal A112 A113 force
+equal A113 A114 force
+equal A114 A115 force
+equal A115 A116 force
+equal A116 A117 force
+equal A117 A118 force
+equal A118 A119 force
+equal A119 A120 force
+equal A120 A121 force
+equal A121 A122 force
+equal A122 A123 force
+equal A123 A124 force
+equal A124 A125 force
+equal A125 A126 force
+equal A126 A127 force
 
 # Phase 5: Dimensions
-length L0 2.5
-radius A0 0.5
+length L0 2.5 force
+radius A0 0.5 force
