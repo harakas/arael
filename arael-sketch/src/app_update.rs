@@ -29,10 +29,38 @@ impl eframe::App for EditorApp {
         }
 
         // Global key handling (before any widgets process input)
-        // Escape exits command-entry mode (TextEdit handles its own unfocus internally,
-        // so we can't rely on checking r.has_focus() inside the widget).
-        if self.command_has_focus && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        // Escape: if completions showing, consume the event, close popup, suppress until space/dot.
+        // If no completions but command focused, exit command mode.
+        if !self.completions.is_empty() || self.completion_suppressed {
+            // Consume Escape so TextEdit doesn't unfocus
+            let esc = ctx.input_mut(|i| {
+                let mut found = false;
+                i.events.retain(|e| {
+                    if matches!(e, egui::Event::Key { key: egui::Key::Escape, pressed: true, .. }) {
+                        found = true;
+                        false // consume
+                    } else { true }
+                });
+                found
+            });
+            if esc {
+                self.completions.clear();
+                self.completion_suppressed = true;
+            }
+        } else if self.command_has_focus && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.command_has_focus = false;
+        }
+        // Reset suppression when user types a separator (space, dot, semicolon, #, newline)
+        if self.completion_suppressed {
+            let reset = ctx.input(|i| {
+                i.events.iter().any(|e| match e {
+                    egui::Event::Text(t) => t.chars().any(|c| !c.is_alphanumeric() && c != '_'),
+                    egui::Event::Key { key: egui::Key::Enter, pressed: true, modifiers, .. }
+                        if modifiers.shift => true, // Shift+Enter = new line
+                    _ => false,
+                })
+            });
+            if reset { self.completion_suppressed = false; }
         }
 
         // Apply egui visuals for widgets (side panel, buttons, etc.)
@@ -534,6 +562,38 @@ impl eframe::App for EditorApp {
                     let input_h = line_height * num_rows as f32 + 10.0;
                     let input_w = ui.available_width();
 
+                    // Intercept keys BEFORE TextEdit sees them (when completions are showing)
+                    let (tab_accepted, arrow_up, arrow_down) = if !self.completions.is_empty() {
+                        ui.input_mut(|i| {
+                            let mut accepted = false;
+                            let mut up = false;
+                            let mut down = false;
+                            i.events.retain(|e| {
+                                match e {
+                                    egui::Event::Key { key: egui::Key::Tab, pressed: true, .. } => {
+                                        accepted = true;
+                                        false
+                                    }
+                                    egui::Event::Key { key: egui::Key::Enter, pressed: true, modifiers, .. }
+                                        if !modifiers.shift => {
+                                        accepted = true;
+                                        false
+                                    }
+                                    egui::Event::Key { key: egui::Key::ArrowUp, pressed: true, .. } => {
+                                        up = true;
+                                        false
+                                    }
+                                    egui::Event::Key { key: egui::Key::ArrowDown, pressed: true, .. } => {
+                                        down = true;
+                                        false
+                                    }
+                                    _ => true,
+                                }
+                            });
+                            (accepted, up, down)
+                        })
+                    } else { (false, false, false) };
+
                     let r = ui.add_sized(
                         egui::vec2(input_w, input_h),
                         egui::TextEdit::multiline(&mut self.command_input)
@@ -548,6 +608,18 @@ impl eframe::App for EditorApp {
                     if self.command_focus {
                         r.request_focus();
                         self.command_focus = false;
+                    }
+                    // When completions are showing, tell egui's focus manager
+                    // that we handle Escape (so it won't unfocus the TextEdit).
+                    if !self.completions.is_empty() {
+                        ui.memory_mut(|mem| {
+                            mem.set_focus_lock_filter(cmd_id, egui::EventFilter {
+                                tab: true,
+                                escape: true,
+                                horizontal_arrows: true,
+                                vertical_arrows: true,
+                            });
+                        });
                     }
                     // Enter (without Shift) executes all lines
                     let enter_pressed = r.has_focus() && ui.input(|i|
@@ -577,8 +649,8 @@ impl eframe::App for EditorApp {
                         self.command_has_focus = true;
                     }
 
-                    // History navigation (only for single-line input)
-                    if r.has_focus() && !self.command_input.contains('\n') {
+                    // History navigation (only for single-line input, not when completions showing)
+                    if r.has_focus() && !self.command_input.contains('\n') && self.completions.is_empty() {
                         let mut history_changed = false;
                         if ui.input(|i| i.key_pressed(egui::Key::ArrowUp)) && !ui.input(|i| i.modifiers.shift) {
                             if self.command_history_pos > 0 {
@@ -605,6 +677,121 @@ impl eframe::App for EditorApp {
                                 egui::TextEdit::store_state(ui.ctx(), cmd_id, state);
                             }
                         }
+                    }
+
+                    // Autocomplete (skip when suppressed by Escape)
+                    if r.has_focus() && !self.completion_suppressed {
+                        let cursor_pos = egui::TextEdit::load_state(ui.ctx(), cmd_id)
+                            .and_then(|s| s.cursor.char_range())
+                            .map(|cr| cr.primary.index)
+                            .unwrap_or(self.command_input.len());
+                        self.completions = crate::commands::complete(
+                            &self.sketch, &self.session_names,
+                            &self.command_input, cursor_pos);
+                        if self.completions.is_empty() {
+                            self.completion_idx = 0;
+                        } else {
+                            self.completion_idx = self.completion_idx.min(self.completions.len() - 1);
+                        }
+
+                        // Tab or Enter: accept selected completion (events consumed above)
+                        if !self.completions.is_empty() && tab_accepted {
+                            let completion = self.completions[self.completion_idx].clone();
+                            // Find current word boundaries to replace
+                            let input_before_cursor = &self.command_input[..cursor_pos.min(self.command_input.len())];
+                            let current_line = input_before_cursor.lines().last().unwrap_or("");
+                            let line_start = input_before_cursor.len() - current_line.len();
+                            let word_start = line_start + current_line.rfind(|c: char| c.is_whitespace())
+                                .map(|i| i + 1).unwrap_or(0);
+                            let word_end = cursor_pos.min(self.command_input.len());
+                            // Replace current word with completion
+                            self.command_input.replace_range(word_start..word_end, &completion);
+                            let new_pos = word_start + completion.len();
+                            // Add space after command names (no dot in completion)
+                            if !completion.contains('.') {
+                                self.command_input.insert(new_pos, ' ');
+                            }
+                            if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), cmd_id) {
+                                let cursor = egui::text::CCursor::new(
+                                    if completion.contains('.') { new_pos } else { new_pos + 1 });
+                                state.cursor.set_char_range(Some(egui::text::CCursorRange::one(cursor)));
+                                egui::TextEdit::store_state(ui.ctx(), cmd_id, state);
+                            }
+                            self.completions.clear();
+                        }
+
+                        // Up/Down: navigate completion list (events consumed above)
+                        if !self.completions.is_empty() {
+                            if arrow_up && self.completion_idx > 0 {
+                                self.completion_idx -= 1;
+                            }
+                            if arrow_down && self.completion_idx + 1 < self.completions.len() {
+                                self.completion_idx += 1;
+                            }
+                        }
+                    } else {
+                        self.completions.clear();
+                    }
+
+                    // Show completion popup above the input, at cursor position
+                    let mut clicked_completion: Option<String> = None;
+                    if !self.completions.is_empty() {
+                        let num_shown = self.completions.len().min(8);
+                        let item_h = 18.0;
+                        let popup_h = num_shown as f32 * item_h + 12.0;
+
+                        // Get cursor screen X by measuring text up to cursor
+                        let cursor_pos = egui::TextEdit::load_state(ui.ctx(), cmd_id)
+                            .and_then(|s| s.cursor.char_range())
+                            .map(|cr| cr.primary.index)
+                            .unwrap_or(self.command_input.len());
+                        let text_before_cursor = &self.command_input[..cursor_pos.min(self.command_input.len())];
+                        let current_line_text = text_before_cursor.lines().last().unwrap_or("");
+                        let font_id = egui::TextStyle::Monospace.resolve(ui.style());
+                        let text_width = ui.fonts(|f| f.layout_no_wrap(
+                            current_line_text.to_string(), font_id.clone(), egui::Color32::WHITE)).size().x;
+                        let cursor_x = r.rect.left() + 4.0 + text_width;
+                        let popup_x = cursor_x.min(r.rect.right() - 150.0).max(r.rect.left());
+                        let popup_pos = egui::pos2(popup_x, r.rect.top() - popup_h);
+
+                        // Compute min width from longest suggestion
+                        let max_len = self.completions.iter().take(8).map(|s| s.len()).max().unwrap_or(10);
+                        let char_w = ui.fonts(|f| f.layout_no_wrap(
+                            "M".to_string(), font_id.clone(), egui::Color32::WHITE)).size().x;
+                        let min_w = (max_len as f32 * char_w + 20.0).max(120.0);
+
+                        egui::Area::new(egui::Id::new("cmd_completions"))
+                            .fixed_pos(popup_pos)
+                            .order(egui::Order::Foreground)
+                            .show(ui.ctx(), |ui| {
+                                egui::Frame::popup(ui.style()).show(ui, |ui| {
+                                    ui.set_min_width(min_w);
+                                    for (i, suggestion) in self.completions.iter().enumerate().take(8) {
+                                        let selected = i == self.completion_idx;
+                                        if ui.add(egui::SelectableLabel::new(selected, suggestion)).clicked() {
+                                            clicked_completion = Some(suggestion.clone());
+                                        }
+                                    }
+                                });
+                            });
+                    }
+                    if let Some(completion) = clicked_completion {
+                        let cursor_pos = egui::TextEdit::load_state(ui.ctx(), cmd_id)
+                            .and_then(|s| s.cursor.char_range())
+                            .map(|cr| cr.primary.index)
+                            .unwrap_or(self.command_input.len());
+                        let input_before = &self.command_input[..cursor_pos.min(self.command_input.len())];
+                        let cl = input_before.lines().last().unwrap_or("");
+                        let ls = input_before.len() - cl.len();
+                        let ws = ls + cl.rfind(|c: char| c.is_whitespace()).map(|i| i + 1).unwrap_or(0);
+                        let we = cursor_pos.min(self.command_input.len());
+                        self.command_input.replace_range(ws..we, &completion);
+                        let np = ws + completion.len();
+                        if !completion.contains('.') {
+                            self.command_input.insert(np, ' ');
+                        }
+                        self.command_focus = true;
+                        self.completions.clear();
                     }
 
                     // Scroll area fills remaining space above input

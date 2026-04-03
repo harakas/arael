@@ -153,6 +153,9 @@ pub struct EditorApp {
     pub command_output: Vec<(String, bool, bool)>, // (text, is_error, is_markdown)
     pub command_focus: bool,                  // request focus next frame
     pub command_has_focus: bool,              // true if command input had focus last frame
+    pub completions: Vec<String>,             // autocomplete suggestions
+    pub completion_idx: usize,                // selected suggestion index
+    pub completion_suppressed: bool,          // true after Escape dismisses popup; reset on space/dot
     pub command_cursor: Option<vect2d>,   // for chaining add_line
     pub session_vars: HashMap<String, f64>,  // session variables from 'let' commands
     pub session_vecs: HashMap<String, vect2d>, // session coordinate variables
@@ -274,6 +277,9 @@ impl EditorApp {
             command_output: Vec::new(),
             command_focus: false,
             command_has_focus: false,
+            completions: Vec::new(),
+            completion_idx: 0,
+            completion_suppressed: false,
             command_cursor: None,
             session_vars: HashMap::new(),
             session_vecs: HashMap::new(),

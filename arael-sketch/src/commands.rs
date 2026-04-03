@@ -2629,6 +2629,232 @@ fn cmd_help(args: &str) -> CommandResult {
 }
 
 // ---------------------------------------------------------------------------
+// Autocomplete
+// ---------------------------------------------------------------------------
+
+const COMMAND_NAMES: &[&str] = &[
+    "add_line", "add_point", "add_circle", "add_arc", "offset_line", "offset",
+    "delete", "horizontal", "vertical", "parallel", "perpendicular", "perp",
+    "equal", "collinear", "tangent", "coincident", "concentric", "midpoint",
+    "symmetry", "point_on", "length", "radius", "angle", "distance",
+    "remove_dim", "remove_constraint", "rc", "set_derived", "set_driven",
+    "lock", "unlock", "param", "del_param", "rename_param", "style",
+    "select", "deselect", "print", "info", "list", "find", "let",
+    "dof", "cost", "undo", "redo", "history", "goto", "center", "zoom",
+    "cursor", "dim_pos", "clear", "save", "load", "help", "msg",
+];
+
+const GEO_FUNCTIONS: &[&str] = &[
+    "intersect", "midpoint", "project", "along", "arc_point",
+    "rotate", "mirror", "tangent", "normal", "dist", "angle",
+];
+
+const MATH_FUNCTIONS: &[&str] = &[
+    "sin", "cos", "tan", "asin", "acos", "atan", "atan2",
+    "sinh", "cosh", "tanh", "exp", "ln", "log2", "log10",
+    "sqrt", "abs", "pow", "pi",
+];
+
+/// Generate autocomplete suggestions for the command input.
+/// Returns completions for the word at `cursor_pos` in `input`.
+pub fn complete(
+    sketch: &Sketch,
+    session_names: &HashMap<String, String>,
+    input: &str,
+    cursor_pos: usize,
+) -> Vec<String> {
+    let input = &input[..cursor_pos.min(input.len())];
+
+    // Find the current line (for multiline input)
+    let current_line = input.lines().last().unwrap_or("");
+
+    // Find the current word: scan back from end to whitespace
+    let word_start = current_line.rfind(|c: char| c.is_whitespace()).map(|i| i + 1).unwrap_or(0);
+    let current_word = &current_line[word_start..];
+
+    // Is this the first token on the line?
+    let is_first_token = current_line[..word_start].trim().is_empty();
+
+    // No completions when nothing typed yet
+    if current_word.is_empty() {
+        return Vec::new();
+    }
+
+    // Check for dot completion: "L0." or "L0.p1."
+    if let Some(dot_pos) = current_word.rfind('.') {
+        let before_dot = &current_word[..dot_pos];
+        let after_dot = &current_word[dot_pos + 1..];
+        let mut r = complete_after_dot(sketch, before_dot, after_dot);
+        r.retain(|s| s != current_word);
+        return r;
+    }
+
+    let mut results = Vec::new();
+
+    // First token: command names
+    if is_first_token {
+        for &cmd in COMMAND_NAMES {
+            if cmd.starts_with(current_word) && cmd != current_word {
+                results.push(cmd.to_string());
+            }
+        }
+        // Also complete entity names as first token (for things like "L0" standalone)
+    }
+
+    // Entity names (lines, points, arcs)
+    {
+        for r in sketch.lines.refs() {
+            let name = &sketch.lines[r].name;
+            if name.starts_with(current_word) && name != current_word {
+                results.push(name.clone());
+            }
+        }
+        for r in sketch.points.refs() {
+            let p = &sketch.points[r];
+            if p.helper { continue; }
+            if p.name.starts_with(current_word) && p.name != current_word {
+                results.push(p.name.clone());
+            }
+        }
+        for r in sketch.arcs.refs() {
+            let name = &sketch.arcs[r].name;
+            if name.starts_with(current_word) && name != current_word {
+                results.push(name.clone());
+            }
+        }
+        // Dimension names
+        for d in &sketch.dimensions {
+            if d.name.starts_with(current_word) && d.name != current_word {
+                results.push(d.name.clone());
+            }
+        }
+        // User parameter names
+        for p in &sketch.user_params {
+            if p.name.starts_with(current_word) && p.name != current_word {
+                results.push(p.name.clone());
+            }
+        }
+        // Session variable names
+        for (name, _) in session_names {
+            if name == "_" { continue; }
+            if name.starts_with(current_word) && name != current_word {
+                results.push(name.clone());
+            }
+        }
+    }
+
+    // Context-sensitive: after "list " suggest filters
+    let first_cmd = current_line.split_whitespace().next().unwrap_or("");
+    if !is_first_token {
+        match first_cmd {
+            "list" => {
+                for &f in &["lines", "points", "arcs", "dims", "params", "constraints"] {
+                    if f.starts_with(current_word) && f != current_word {
+                        results.push(f.to_string());
+                    }
+                }
+            }
+            "help" => {
+                if "full".starts_with(current_word) && "full" != current_word {
+                    results.push("full".to_string());
+                }
+                for &cmd in COMMAND_NAMES {
+                    if cmd.starts_with(current_word) && cmd != current_word {
+                        results.push(cmd.to_string());
+                    }
+                }
+            }
+            "style" => {
+                // Second arg is entity, third is style value
+                let token_count = current_line.split_whitespace().count();
+                if token_count >= 2 {
+                    for &s in &["solid", "dashed", "dashdot"] {
+                        if s.starts_with(current_word) && s != current_word {
+                            results.push(s.to_string());
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+        // Keywords that can appear as trailing args
+        for &kw in &["noconnect", "nocursor", "derived"] {
+            if kw.starts_with(current_word) && kw != current_word {
+                results.push(kw.to_string());
+            }
+        }
+        // Geo functions and math functions in expression context
+        for &f in GEO_FUNCTIONS {
+            if f.starts_with(current_word) && f != current_word {
+                results.push(f.to_string());
+            }
+        }
+        for &f in MATH_FUNCTIONS {
+            if f.starts_with(current_word) && f != current_word {
+                results.push(f.to_string());
+            }
+        }
+    }
+
+    results.sort();
+    results.dedup();
+    results.truncate(20);
+    results
+}
+
+/// Complete after a dot: "L0." → ["p1", "p2"], "A0." → ["center", "start", "end"], etc.
+fn complete_after_dot(sketch: &Sketch, before_dot: &str, after_dot: &str) -> Vec<String> {
+    let mut results = Vec::new();
+
+    // Check for double-dot: "L0.p1." → x, y
+    if let Some(first_dot) = before_dot.rfind('.') {
+        let entity = &before_dot[..first_dot];
+        let prop = &before_dot[first_dot + 1..];
+        // L<N>.p1. or L<N>.p2. → x, y
+        if entity.starts_with('L') && (prop == "p1" || prop == "p2") {
+            for &s in &["x", "y"] {
+                if s.starts_with(after_dot) {
+                    results.push(format!("{}.{}", before_dot, s));
+                }
+            }
+        }
+        // A<N>.center. → x, y
+        if entity.starts_with('A') && prop == "center" {
+            for &s in &["x", "y"] {
+                if s.starts_with(after_dot) {
+                    results.push(format!("{}.{}", before_dot, s));
+                }
+            }
+        }
+        // P<N>. after P<N>.pos or similar
+        return results;
+    }
+
+    // Single dot: entity.suffix
+    if before_dot.starts_with('L') && sketch.lines.refs().any(|r| sketch.lines[r].name == before_dot) {
+        for &s in &["p1", "p2", "length", "angle"] {
+            if s.starts_with(after_dot) {
+                results.push(format!("{}.{}", before_dot, s));
+            }
+        }
+    } else if before_dot.starts_with('A') && sketch.arcs.refs().any(|r| sketch.arcs[r].name == before_dot) {
+        for &s in &["center", "start", "end", "radius", "start_angle", "end_angle"] {
+            if s.starts_with(after_dot) {
+                results.push(format!("{}.{}", before_dot, s));
+            }
+        }
+    } else if before_dot.starts_with('P') && sketch.points.refs().any(|r| sketch.points[r].name == before_dot) {
+        for &s in &["x", "y"] {
+            if s.starts_with(after_dot) {
+                results.push(format!("{}.{}", before_dot, s));
+            }
+        }
+    }
+
+    results
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
