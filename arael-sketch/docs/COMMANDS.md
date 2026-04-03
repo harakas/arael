@@ -353,7 +353,7 @@ list dims                    List only dimensions (shows "derived" tag)
 list params                  List only parameters
 list constraints             List all active constraints
 find x,y [radius]            Find entities near a coordinate
-dof                          Show degrees of freedom
+dof                          Show degrees of freedom (computed in background, may show "pending")
 cost                         Show current solver cost
 ```
 
