@@ -1064,13 +1064,17 @@ fn cmd_add_line(ctx: &mut CommandContext, args: &str) -> CommandResult {
 }
 
 fn cmd_add_point(ctx: &mut CommandContext, args: &str) -> CommandResult {
-    let pos = match parse_coord(ctx, args.trim(), ctx.cursor) {
+    let mut tokens: Vec<&str> = args.split_whitespace().collect();
+    let nocursor = tokens.last() == Some(&"nocursor");
+    if nocursor { tokens.pop(); }
+    if tokens.len() != 1 { return err("Usage: add_point x,y [nocursor]"); }
+    let pos = match parse_coord(ctx, tokens[0], ctx.cursor) {
         Ok(p) => p, Err(e) => return err(e),
     };
     ctx.begin_group();
     ctx.exec(Action::AddPoint { pos });
     let name = ctx.sketch.points.refs().last().map(|r| ctx.sketch.points[r].name.clone()).unwrap_or_default();
-    ctx.cursor = Some(pos);
+    if !nocursor { ctx.cursor = Some(pos); }
     ctx.session_names.insert("_".into(), name.clone());
     ok(format!("Added {}: ({:.2},{:.2})", name, pos.x, pos.y))
 }
@@ -2572,7 +2576,7 @@ fn cmd_help(args: &str) -> CommandResult {
     } else {
         let msg = match args.trim() {
             "add_line" => "add_line x1,y1 x2,y2 | add_line @dx,dy (from last point) | add_line x,y (from last point)",
-            "add_point" => "add_point x,y",
+            "add_point" => "add_point x,y [nocursor]",
             "add_circle" => "add_circle cx,cy radius",
             "delete" => "delete L0 | delete P0 | delete A0",
             "horizontal" => "horizontal L0 [L1 ...]",
@@ -2604,7 +2608,7 @@ fn cmd_help(args: &str) -> CommandResult {
             "deselect" => "deselect (clears selection)",
             "print" => "print <expression> (evaluate and display)",
             "info" => "info L0 | info P0 | info A0 | info d0 | info paramname",
-            "list" => "list [lines|points|arcs|dims|params]",
+            "list" => "list [all|lines|points|arcs|dims|params|constraints]",
             "find" => "find x,y [radius] (list nearby entities)",
             "undo" => "undo [n]",
             "redo" => "redo [n]",
@@ -2697,8 +2701,8 @@ pub fn complete(
     let token_index = current_line[..word_start].split_whitespace().count();
     // token_index: 1 = arg1, 2 = arg2, 3 = arg3
 
-    // Collect already-typed args (for excluding from variadic completions)
-    let typed_args: Vec<&str> = current_line.split_whitespace().skip(1).collect();
+    // Collect already-completed args (excluding current word being typed)
+    let typed_args: Vec<&str> = current_line[..word_start].split_whitespace().skip(1).collect();
 
     match first_cmd {
         // Variadic line commands: exclude already-typed lines
@@ -2920,13 +2924,78 @@ pub fn complete(
             }
         }
 
-        // Geometry creation: coordinates, cursor keyword, trailing flags
-        "add_line" | "add_point" | "add_circle" | "add_arc" => {
-            add_matching(&mut results, current_word, &["cursor"]);
-            add_matching(&mut results, current_word, &["noconnect", "nocursor"]);
-            // Offer entity endpoints for coordinate references
-            add_all_entities(sketch, &mut results, current_word);
-            add_session_names(session_names, &mut results, current_word);
+        // Geometry creation: position-aware completions
+        // add_line: [coord1] [coord2] [noconnect] [nocursor]
+        // add_point: [coord] (no flags)
+        // add_circle: [center] [radius] [noconnect] [nocursor]
+        // add_arc: [start] [end] [mid] [noconnect] [nocursor]
+        "add_line" => {
+            let max_coords = if typed_args.iter().any(|a| *a == "noconnect" || *a == "nocursor") { 0 } else { 2 };
+            let coord_args = typed_args.iter().filter(|a| **a != "noconnect" && **a != "nocursor").count();
+            if coord_args < max_coords {
+                // Still entering coordinates
+                add_matching(&mut results, current_word, &["cursor"]);
+                add_all_entities(sketch, &mut results, current_word);
+                add_session_names(session_names, &mut results, current_word);
+            }
+            // Offer flags not already typed (after at least 1 coord)
+            if coord_args >= 1 {
+                if !typed_args.contains(&"noconnect") {
+                    add_matching(&mut results, current_word, &["noconnect"]);
+                }
+                if !typed_args.contains(&"nocursor") {
+                    add_matching(&mut results, current_word, &["nocursor"]);
+                }
+            }
+        }
+        "add_point" => {
+            let coord_args = typed_args.iter().filter(|a| **a != "nocursor").count();
+            if coord_args < 1 {
+                add_matching(&mut results, current_word, &["cursor"]);
+                add_all_entities(sketch, &mut results, current_word);
+                add_session_names(session_names, &mut results, current_word);
+            }
+            if coord_args >= 1 && !typed_args.contains(&"nocursor") {
+                add_matching(&mut results, current_word, &["nocursor"]);
+            }
+        }
+        "add_circle" => {
+            let coord_args = typed_args.iter().filter(|a| **a != "noconnect" && **a != "nocursor").count();
+            if coord_args < 2 {
+                // arg1=center coord, arg2=radius (expression)
+                if coord_args == 0 {
+                    add_matching(&mut results, current_word, &["cursor"]);
+                    add_all_entities(sketch, &mut results, current_word);
+                    add_session_names(session_names, &mut results, current_word);
+                } else {
+                    // radius: expression context
+                    add_expression_completions(sketch, session_names, &mut results, current_word);
+                }
+            }
+            if coord_args >= 2 {
+                if !typed_args.contains(&"noconnect") {
+                    add_matching(&mut results, current_word, &["noconnect"]);
+                }
+                if !typed_args.contains(&"nocursor") {
+                    add_matching(&mut results, current_word, &["nocursor"]);
+                }
+            }
+        }
+        "add_arc" => {
+            let coord_args = typed_args.iter().filter(|a| **a != "noconnect" && **a != "nocursor").count();
+            if coord_args < 3 {
+                add_matching(&mut results, current_word, &["cursor"]);
+                add_all_entities(sketch, &mut results, current_word);
+                add_session_names(session_names, &mut results, current_word);
+            }
+            if coord_args >= 3 {
+                if !typed_args.contains(&"noconnect") {
+                    add_matching(&mut results, current_word, &["noconnect"]);
+                }
+                if !typed_args.contains(&"nocursor") {
+                    add_matching(&mut results, current_word, &["nocursor"]);
+                }
+            }
         }
 
         // Expression-only: print, let
@@ -4517,6 +4586,55 @@ mod tests {
         let ctx = setup_complete_ctx();
         // Just a space or empty — no suggestions
         assert!(completions(&ctx, "").is_empty());
+    }
+
+    #[test]
+    fn test_complete_add_line_after_coords_only_flags() {
+        let ctx = setup_complete_ctx();
+        let c = completions(&ctx, "add_line 0,0 5,0 ");
+        assert!(c.contains(&"noconnect".to_string()));
+        assert!(c.contains(&"nocursor".to_string()));
+        assert!(!c.iter().any(|s| s.starts_with('L')), "Should not offer entities after coords: {:?}", c);
+    }
+
+    #[test]
+    fn test_complete_add_line_flag_excludes_typed() {
+        let ctx = setup_complete_ctx();
+        let c = completions(&ctx, "add_line 0,0 5,0 nocursor ");
+        assert!(c.contains(&"noconnect".to_string()));
+        assert!(!c.contains(&"nocursor".to_string()), "Should not re-offer nocursor");
+    }
+
+    #[test]
+    fn test_complete_add_line_first_coord() {
+        let ctx = setup_complete_ctx();
+        let c = completions(&ctx, "add_line curs");
+        assert!(c.contains(&"cursor".to_string()));
+    }
+
+    #[test]
+    fn test_complete_add_point_after_coord() {
+        let ctx = setup_complete_ctx();
+        let c = completions(&ctx, "add_point 0,0 ");
+        assert!(c.contains(&"nocursor".to_string()));
+        assert!(!c.iter().any(|s| s.starts_with('L')), "Should not offer entities: {:?}", c);
+    }
+
+    #[test]
+    fn test_complete_add_circle_radius_position() {
+        let ctx = setup_complete_ctx();
+        // After center coord, radius is expression context
+        let c = completions(&ctx, "add_circle 0,0 w");
+        assert!(c.contains(&"width".to_string()));
+        assert!(!c.contains(&"cursor".to_string()));
+    }
+
+    #[test]
+    fn test_complete_add_arc_after_3_coords() {
+        let ctx = setup_complete_ctx();
+        let c = completions(&ctx, "add_arc 0,0 5,0 2,3 ");
+        assert!(c.contains(&"noconnect".to_string()));
+        assert!(!c.iter().any(|s| s.starts_with('L')));
     }
 
     #[test]

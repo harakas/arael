@@ -44,7 +44,7 @@ Anywhere a numeric value is expected, an expression can be used. Expressions can
 add_line x1,y1 x2,y2        Create a line between two points
 add_line x2,y2               Continue from last endpoint (chaining)
 add_line @dx,dy              Continue with relative offset
-add_point x,y                Create a free point
+add_point x,y [nocursor]     Create a free point
 add_circle cx,cy radius      Create a circle (full arc)
 add_arc x1,y1 x2,y2 xm,ym  Create an arc through start, end, midpoint
 offset_line L0 distance      Create a parallel line offset by distance (alias: offset)
@@ -340,6 +340,7 @@ info A0.center               Arc endpoint position
 info d0                      Dimension details (value, expression, derived status)
 info width                   Parameter details (value, expression, broken)
 list                         List all entities, dimensions, parameters
+list all                     Same as list (explicit)
 list lines                   List only lines
 list points                  List only points
 list arcs                    List only arcs
