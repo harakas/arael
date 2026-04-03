@@ -568,10 +568,12 @@ impl eframe::App for EditorApp {
                         }
 
                         if r.has_focus() {
+                            let mut history_changed = false;
                             if ui.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
                                 if self.command_history_pos > 0 {
                                     self.command_history_pos -= 1;
                                     self.command_input = self.command_history[self.command_history_pos].clone();
+                                    history_changed = true;
                                 }
                             }
                             if ui.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
@@ -582,6 +584,14 @@ impl eframe::App for EditorApp {
                                     } else {
                                         self.command_input.clear();
                                     }
+                                    history_changed = true;
+                                }
+                            }
+                            if history_changed {
+                                if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), cmd_id) {
+                                    let end = egui::text::CCursor::new(self.command_input.len());
+                                    state.cursor.set_char_range(Some(egui::text::CCursorRange::one(end)));
+                                    egui::TextEdit::store_state(ui.ctx(), cmd_id, state);
                                 }
                             }
                             // Escape handled globally at frame start
