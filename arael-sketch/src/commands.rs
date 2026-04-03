@@ -1612,6 +1612,9 @@ fn cmd_info(ctx: &mut CommandContext, args: &str) -> CommandResult {
 
 fn cmd_list(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let filter = args.trim();
+    if !filter.is_empty() && !matches!(filter, "lines" | "points" | "arcs" | "dims" | "params" | "constraints") {
+        return err(format!("Unknown filter: {}. Use: lines, points, arcs, dims, params, constraints", filter));
+    }
     let mut lines = Vec::new();
     let show_all = filter.is_empty();
 

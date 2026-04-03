@@ -2570,6 +2570,7 @@ fn main() -> eframe::Result {
     let mut file_path: Option<String> = None;
     let mut verbose = false;
     let mut empty = false;
+    let mut dark = false;
     let mut mcp_addr: Option<std::net::SocketAddr> = None;
     let mut mcp_verbose = false;
     let mut script_path: Option<String> = None;
@@ -2583,6 +2584,7 @@ fn main() -> eframe::Result {
                 eprintln!("Options:");
                 eprintln!("  --verbose, -v   Print solver iterations");
                 eprintln!("  --empty         Start with empty sketch");
+                eprintln!("  --dark          Start in dark mode");
                 eprintln!("  --script FILE   Execute commands from file at startup");
                 eprintln!("  --mcp [addr]    Start MCP server (default 127.0.0.1:8585)");
                 eprintln!("  --mcp-verbose   Log all MCP traffic to stdout");
@@ -2591,6 +2593,7 @@ fn main() -> eframe::Result {
             }
             "--verbose" | "-v" => verbose = true,
             "--empty" => empty = true,
+            "--dark" => dark = true,
             "--mcp-verbose" => mcp_verbose = true,
             "--script" => {
                 if i + 1 < args.len() {
@@ -2647,6 +2650,10 @@ fn main() -> eframe::Result {
 
     if verbose {
         app.sketch.verbose = true;
+    }
+    if dark {
+        app.dark_mode = true;
+        app.colors = ColorScheme::dark();
     }
     if let Some(ref script) = script_path {
         let content = std::fs::read_to_string(script).unwrap_or_else(|e| {
