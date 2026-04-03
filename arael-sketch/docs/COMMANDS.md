@@ -113,6 +113,7 @@ symmetry P0 L0 P1            Points P0,P1 symmetric about L0
 symmetry L0.p1 L1 L2.p1     Endpoints symmetric about L1
 point_on P0 L0               Point on line
 point_on L0.p1 A0            Line endpoint on arc
+point_on A0.center L0        Arc center on line (creates helper point internally)
 ```
 
 ### Removing Constraints
@@ -143,6 +144,8 @@ remove_dim d0                 Remove dimension by name
 ```
 
 The `angle` command automatically selects the sector (direct or supplementary) that is closest to the given value. For example, if two lines form a 30-degree acute angle, `angle L0 L1 45` targets the direct sector, while `angle L0 L1 150` targets the supplementary sector.
+
+If a dimension of the same type already exists on an entity (e.g., calling `radius A0 7` when a radius dimension already exists on A0), the existing dimension is updated in place rather than creating a duplicate. This also works for converting numeric dimensions to parametric expressions: `radius A0 "5*scale"` updates the existing radius dimension.
 
 ### Derived (Reference) Dimensions
 
@@ -444,3 +447,56 @@ Or manually with vector arithmetic:
 add_line 0,0 10,0
 add_line L0.p1+normal(L0)*2 L0.p2+normal(L0)*2
 ```
+
+## Best Practices for Parametric Sketches
+
+### Plan the constraint strategy before drawing
+
+Decide on axes of symmetry, which dimensions should be parametric, and your target DOF. DOF 0 means fully constrained (typical for manufacturing drawings). DOF 3 means the shape can translate and rotate freely (good for reusable components).
+
+### Use construction lines as reference geometry
+
+Add construction lines with `style L0 dashdot` to define axes of symmetry and reference frames. These constrain like normal lines but are visually distinct. Anchor both endpoints to known geometry (e.g., `coincident L0.p1 A0.center` + `midpoint P0 L0`) rather than using length + angle, which adds unnecessary DOF complexity.
+
+### Use symmetry instead of duplicating constraints
+
+For symmetric shapes, fully constrain one side and use `symmetry P0 L_axis P1` to mirror points. This is cleaner than constraining both sides independently. Symmetry makes some constraints redundant:
+
+- Two points symmetric about a line means the segment between them is **automatically perpendicular** to that line.
+- If endpoints of two lines are mirrored, their lengths are **automatically equal**.
+- An arc centered on the symmetry axis with symmetric endpoints may already be tangent to adjacent lines.
+
+### Prefer relative constraints over absolute ones
+
+- Use `perpendicular L0 L1` instead of `horizontal` / `vertical` -- absolute constraints pin geometry to the global frame and prevent free rotation.
+- Use `perpendicular L0 L1` instead of `angle L0 L1 90` -- the perpendicular constraint is more efficient, expresses intent more clearly, and doesn't create a dimension entry (keeps `list dims` cleaner).
+- Use `angle`, `distance`, `symmetry` between entities rather than `lock` for positioning.
+- Only use `horizontal` / `vertical` / `lock` when you intentionally want to fix something to the global coordinate system.
+
+### Monitor DOF as you build
+
+Check `dof` after each batch of constraints. If DOF doesn't drop as expected, a constraint is redundant. If the solver rejects a constraint, it conflicts with the current system. Use `list constraints` and `get_sketch_state` to verify the current state.
+
+### Use parameters for scalable dimensions
+
+Define `param scale 1` (or `param width 10`, `param height 5`, etc.) and write dimensions as expressions: `radius A0 5*scale`, `length L0 width`. This makes the sketch parametric. Angles generally don't need parameters since they are scale-independent.
+
+### Constrain one side, then close the loop
+
+For closed shapes: fully constrain one chain of segments (lengths + angles between adjacent segments), then use symmetry or explicit constraints to close the loop. Be aware that closure conditions can make some constraints redundant.
+
+### Use point_on for positioning features
+
+`point_on A0.center L0` constrains an arc's center to lie on a line (removes 1 DOF). Use this for placing features like circles on a construction line.
+
+### Use execute_script for batching
+
+Send multiple commands at once using `execute_script`. Use `#` comments to document sections. Check results with `get_sketch_state` after major operations.
+
+### Coordinate system
+
+Y-axis points up (math convention, not screen convention). Plan your geometry accordingly -- positive Y is upward.
+
+### Undo recovers mistakes
+
+`undo` reverses the last operation, including grouped operations (e.g., a constraint that created helper points undoes as one unit). Use `undo` freely when experimenting with constraint strategies.
