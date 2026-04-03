@@ -2456,6 +2456,12 @@ fn cmd_set_driven(ctx: &mut CommandContext, args: &str) -> CommandResult {
 // ---------------------------------------------------------------------------
 
 fn cmd_help(args: &str) -> CommandResult {
+    if args.trim() == "full" {
+        return CommandResult {
+            output: include_str!("../docs/COMMANDS.md").to_string(),
+            is_error: false, no_echo: false, markdown: true,
+        };
+    }
     if args.is_empty() {
         ok("Commands: add_line add_point add_circle add_arc offset_line delete horizontal vertical \
             parallel perpendicular equal collinear tangent coincident concentric midpoint \
@@ -2463,7 +2469,7 @@ fn cmd_help(args: &str) -> CommandResult {
             lock unlock param del_param rename_param style select deselect print info list \
             find dof cost undo redo history goto center zoom cursor dim_pos clear let save load \
             remove_constraint(rc) help\n\
-            Type 'help <command>' for details. Use / to open command panel.")
+            Type 'help <command>' for details. 'help full' for complete reference.")
     } else {
         let msg = match args.trim() {
             "add_line" => "add_line x1,y1 x2,y2 | add_line @dx,dy (from last point) | add_line x,y (from last point)",
@@ -2517,7 +2523,7 @@ fn cmd_help(args: &str) -> CommandResult {
             "save" => "save path.json",
             "load" => "load path.json",
             "perp" => "alias for perpendicular",
-            _ => "Unknown command",
+            other => return err(format!("help: unknown command: {}. Usage: help | help <command> | help full", other)),
         };
         ok(msg.to_string())
     }

@@ -152,6 +152,7 @@ pub struct EditorApp {
     pub command_history_pos: usize,
     pub command_output: Vec<(String, bool, bool)>, // (text, is_error, is_markdown)
     pub command_focus: bool,                  // request focus next frame
+    pub command_has_focus: bool,              // true if command input had focus last frame
     pub command_cursor: Option<vect2d>,   // for chaining add_line
     pub session_vars: HashMap<String, f64>,  // session variables from 'let' commands
     pub session_vecs: HashMap<String, vect2d>, // session coordinate variables
@@ -272,6 +273,7 @@ impl EditorApp {
             command_history_pos: 0,
             command_output: Vec::new(),
             command_focus: false,
+            command_has_focus: false,
             command_cursor: None,
             session_vars: HashMap::new(),
             session_vecs: HashMap::new(),
@@ -676,6 +678,26 @@ impl EditorApp {
     }
 
     // Toggle selection
+    /// Return a command-compatible name for a selection (for pasting into command input).
+    fn selection_command_name(&self, sel: &Selection) -> Option<String> {
+        match *sel {
+            Selection::Point(r) => Some(self.sketch.points[r].name.clone()),
+            Selection::Line(r) => Some(self.sketch.lines[r].name.clone()),
+            Selection::LineP1(r) => Some(format!("{}.p1", self.sketch.lines[r].name)),
+            Selection::LineP2(r) => Some(format!("{}.p2", self.sketch.lines[r].name)),
+            Selection::Arc(r) => Some(self.sketch.arcs[r].name.clone()),
+            Selection::ArcCenter(r) => Some(format!("{}.center", self.sketch.arcs[r].name)),
+            Selection::ArcStart(r) => Some(format!("{}.start", self.sketch.arcs[r].name)),
+            Selection::ArcEnd(r) => Some(format!("{}.end", self.sketch.arcs[r].name)),
+            Selection::Dimension(i) => {
+                if i < self.sketch.dimensions.len() {
+                    Some(self.sketch.dimensions[i].name.clone())
+                } else { None }
+            }
+            Selection::Constraint(_) => None,
+        }
+    }
+
     fn toggle_selection(&mut self, sel: Selection) {
         if let Some(idx) = self.selection.iter().position(|s| *s == sel) {
             self.selection.remove(idx);

@@ -28,6 +28,13 @@ impl eframe::App for EditorApp {
             self.load_from_json(&json);
         }
 
+        // Global key handling (before any widgets process input)
+        // Escape exits command-entry mode (TextEdit handles its own unfocus internally,
+        // so we can't rely on checking r.has_focus() inside the widget).
+        if self.command_has_focus && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.command_has_focus = false;
+        }
+
         // Apply egui visuals for widgets (side panel, buttons, etc.)
         ctx.set_visuals(if self.dark_mode { egui::Visuals::dark() } else { egui::Visuals::light() });
 
@@ -79,7 +86,11 @@ impl eframe::App for EditorApp {
                 }
                 if ui.selectable_label(self.show_command, "/Cmd").clicked() {
                     self.show_command = !self.show_command;
-                    if self.show_command { self.command_focus = true; }
+                    if self.show_command {
+                        self.command_focus = true;
+                    } else {
+                        self.command_has_focus = false;
+                    }
                 }
                 ui.end_row();
             });
@@ -518,8 +529,10 @@ impl eframe::App for EditorApp {
                     // Input row (at the bottom)
                     ui.horizontal(|ui| {
                         ui.label(">");
+                        let cmd_id = egui::Id::new("command_input");
                         let r = ui.add(
                             egui::TextEdit::singleline(&mut self.command_input)
+                                .id(cmd_id)
                                 .desired_width(ui.available_width() - 10.0)
                                 .hint_text("type command, / to toggle, help for commands")
                                 .font(egui::TextStyle::Monospace),
@@ -547,6 +560,13 @@ impl eframe::App for EditorApp {
                             }
                             self.command_focus = true;
                         }
+                        // command_has_focus = "user is in command-entry mode".
+                        // Set by / key or gaining focus. Cleared by Escape.
+                        // Canvas clicks paste while in this mode, then re-focus input.
+                        if r.has_focus() {
+                            self.command_has_focus = true;
+                        }
+
                         if r.has_focus() {
                             if ui.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
                                 if self.command_history_pos > 0 {
@@ -564,9 +584,7 @@ impl eframe::App for EditorApp {
                                     }
                                 }
                             }
-                            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                                self.show_command = false;
-                            }
+                            // Escape handled globally at frame start
                         }
                     });
                     // Scroll area fills remaining space above input (normal top-down order)
@@ -643,8 +661,8 @@ impl eframe::App for EditorApp {
                 self.dim_kind = None;
             }
             if ui.input(|i| i.key_pressed(egui::Key::Slash)) {
-                self.show_command = !self.show_command;
-                if self.show_command { self.command_focus = true; }
+                self.show_command = true;
+                self.command_focus = true;
             }
             } // !wants_keyboard_input
             if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
@@ -869,12 +887,39 @@ impl eframe::App for EditorApp {
                         self.drag_dimension = None;
                     }
 
-                    // Click (no drag): select/deselect
+                    // Click (no drag): paste into command prompt if focused, else select/deselect
                     if response.clicked_by(egui::PointerButton::Primary) {
                         if let Some(sel) = self.hit_test_selection(mouse_sketch, hit_threshold) {
-                            self.toggle_selection(sel);
+                            if self.show_command && self.command_has_focus {
+                                if let Some(name) = self.selection_command_name(&sel) {
+                                    // Insert at cursor position, not at end
+                                    let cmd_id = egui::Id::new("command_input");
+                                    let cursor_pos = egui::TextEdit::load_state(ui.ctx(), cmd_id)
+                                        .and_then(|s| s.cursor.char_range())
+                                        .map(|r| r.primary.index)
+                                        .unwrap_or(self.command_input.len());
+                                    let pos = cursor_pos.min(self.command_input.len());
+                                    // Add space before if needed
+                                    let need_space = pos > 0
+                                        && !self.command_input[..pos].ends_with(' ');
+                                    let insert = if need_space { format!(" {}", name) } else { name.clone() };
+                                    self.command_input.insert_str(pos, &insert);
+                                    // Move cursor after inserted text
+                                    let new_pos = pos + insert.len();
+                                    if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), cmd_id) {
+                                        let ccursor = egui::text::CCursor::new(new_pos);
+                                        state.cursor.set_char_range(Some(egui::text::CCursorRange::one(ccursor)));
+                                        egui::TextEdit::store_state(ui.ctx(), cmd_id, state);
+                                    }
+                                    self.command_focus = true; // re-focus after paste
+                                }
+                            } else {
+                                self.toggle_selection(sel);
+                            }
                         } else {
-                            self.selection.clear();
+                            if !(self.show_command && self.command_has_focus) {
+                                self.selection.clear();
+                            }
                         }
                     }
                 }
