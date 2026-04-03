@@ -2025,6 +2025,37 @@ fn cmd_symmetry(ctx: &mut CommandContext, args: &str) -> CommandResult {
     ok_or_status(ctx, "Applied symmetry")
 }
 
+/// Which arc endpoint a helper point bridges to.
+enum ArcEp { Center, Start, End }
+
+/// Check if an arc endpoint already has a point_on_line constraint via a helper point.
+fn has_arc_endpoint_on_line(s: &Sketch, arc: Ref<Arc>, ep: ArcEp, line: Ref<Line>) -> bool {
+    // Find helper points bridged to this arc endpoint
+    let bridged_points: Vec<Ref<Point>> = match ep {
+        ArcEp::Center => s.coincident_arc_center.iter()
+            .filter(|c| c.arc == arc).map(|c| c.point).collect(),
+        ArcEp::Start => s.coincident_arc_start.iter()
+            .filter(|c| c.arc == arc).map(|c| c.point).collect(),
+        ArcEp::End => s.coincident_arc_end.iter()
+            .filter(|c| c.arc == arc).map(|c| c.point).collect(),
+    };
+    // Check if any of those points are on the target line
+    bridged_points.iter().any(|p| s.point_on_line.iter().any(|c| c.point == *p && c.line == line))
+}
+
+/// Check if an arc endpoint already has a point_on_arc constraint via a helper point.
+fn has_arc_endpoint_on_arc(s: &Sketch, src: Ref<Arc>, ep: ArcEp, target: Ref<Arc>) -> bool {
+    let bridged_points: Vec<Ref<Point>> = match ep {
+        ArcEp::Center => s.coincident_arc_center.iter()
+            .filter(|c| c.arc == src).map(|c| c.point).collect(),
+        ArcEp::Start => s.coincident_arc_start.iter()
+            .filter(|c| c.arc == src).map(|c| c.point).collect(),
+        ArcEp::End => s.coincident_arc_end.iter()
+            .filter(|c| c.arc == src).map(|c| c.point).collect(),
+    };
+    bridged_points.iter().any(|p| s.point_on_arc.iter().any(|c| c.point == *p && c.arc == target))
+}
+
 fn cmd_point_on(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let tokens: Vec<&str> = args.split_whitespace().collect();
     if tokens.len() != 2 { return err("Usage: point_on P0 L0  or  point_on L0.p1 A0"); }
@@ -2037,16 +2068,21 @@ fn cmd_point_on(ctx: &mut CommandContext, args: &str) -> CommandResult {
             EndpointRef::Point(p) => s.point_on_line.iter().any(|c| c.point == p && c.line == line),
             EndpointRef::LineP1(l) => s.line_p1_on_line.iter().any(|c| c.a == l && c.b == line),
             EndpointRef::LineP2(l) => s.line_p2_on_line.iter().any(|c| c.a == l && c.b == line),
-            _ => false,
+            EndpointRef::ArcCenter(arc) => has_arc_endpoint_on_line(s, arc, ArcEp::Center, line),
+            EndpointRef::ArcStart(arc) => has_arc_endpoint_on_line(s, arc, ArcEp::Start, line),
+            EndpointRef::ArcEnd(arc) => has_arc_endpoint_on_line(s, arc, ArcEp::End, line),
         };
         if exists { return err("Point-on-line constraint already exists"); }
+        ctx.begin_group();
         let action = match ep {
             EndpointRef::Point(p) => Action::ApplyPointOnLine { point: p, line },
             EndpointRef::LineP1(l) => Action::ApplyLineP1OnLine { a: l, b: line },
             EndpointRef::LineP2(l) => Action::ApplyLineP2OnLine { a: l, b: line },
-            _ => return err("Cannot place arc endpoint on line"),
+            EndpointRef::ArcCenter(_) | EndpointRef::ArcStart(_) | EndpointRef::ArcEnd(_) => {
+                let p = match resolve_as_point(ctx, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
+                Action::ApplyPointOnLine { point: p, line }
+            }
         };
-        ctx.begin_group();
         ctx.exec(action);
         ok_or_status(ctx, "Applied point-on-line")
     } else if target.starts_with('A') {
@@ -2056,16 +2092,22 @@ fn cmd_point_on(ctx: &mut CommandContext, args: &str) -> CommandResult {
             EndpointRef::Point(p) => s.point_on_arc.iter().any(|c| c.point == p && c.arc == arc),
             EndpointRef::LineP1(l) => s.line_p1_on_arc.iter().any(|c| c.line == l && c.arc == arc),
             EndpointRef::LineP2(l) => s.line_p2_on_arc.iter().any(|c| c.line == l && c.arc == arc),
-            _ => false,
+            EndpointRef::ArcCenter(src) => has_arc_endpoint_on_arc(s, src, ArcEp::Center, arc),
+            EndpointRef::ArcStart(src) => has_arc_endpoint_on_arc(s, src, ArcEp::Start, arc),
+            EndpointRef::ArcEnd(src) => has_arc_endpoint_on_arc(s, src, ArcEp::End, arc),
         };
         if exists { return err("Point-on-arc constraint already exists"); }
+        ctx.begin_group();
         let action = match ep {
             EndpointRef::Point(p) => Action::ApplyPointOnArc { point: p, arc },
             EndpointRef::LineP1(l) => Action::ApplyLineP1OnArc { line: l, arc },
             EndpointRef::LineP2(l) => Action::ApplyLineP2OnArc { line: l, arc },
-            _ => return err("Cannot place arc endpoint on arc"),
+            // Arc endpoints: create helper point, then constrain on arc
+            EndpointRef::ArcCenter(_) | EndpointRef::ArcStart(_) | EndpointRef::ArcEnd(_) => {
+                let p = match resolve_as_point(ctx, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
+                Action::ApplyPointOnArc { point: p, arc }
+            }
         };
-        ctx.begin_group();
         ctx.exec(action);
         ok_or_status(ctx, "Applied point-on-arc")
     } else {
@@ -4467,6 +4509,42 @@ mod tests {
 
     fn completions(ctx: &CommandContext, input: &str) -> Vec<String> {
         complete(&ctx.sketch, &ctx.session_names, input, input.len())
+    }
+
+    // -- point_on with arc endpoints --
+
+    #[test]
+    fn test_point_on_arc_center_on_line_no_duplicate() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0; add_circle 2,1 1");
+        run_ok(&mut ctx, "point_on A0.center L0");
+        let arc_center_count = ctx.sketch.coincident_arc_center.len();
+        let pol_count = ctx.sketch.point_on_line.len();
+        eprintln!("After first: arc_center={}, point_on_line={}", arc_center_count, pol_count);
+        let out2 = run_err(&mut ctx, "point_on A0.center L0");
+        eprintln!("Second attempt: {}", out2);
+        assert!(out2.contains("already exists"), "Should reject duplicate: {}", out2);
+    }
+
+    #[test]
+    fn test_point_on_arc_center_on_line() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_circle 0,0.5 2; add_line -5,0 5,0");
+        let out = run_ok(&mut ctx, "point_on A0.center L0");
+        assert!(out.contains("point-on-line"), "Should succeed: {}", out);
+        // Verify helper point was created and point_on_line constraint exists
+        assert!(!ctx.sketch.point_on_line.is_empty(),
+            "Should have point_on_line constraint");
+    }
+
+    #[test]
+    fn test_point_on_arc_center_on_arc() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_circle 0,0 5; add_circle 4.5,0 1");
+        let out = run_ok(&mut ctx, "point_on A1.center A0");
+        assert!(out.contains("point-on-arc"), "Should succeed: {}", out);
+        assert!(!ctx.sketch.point_on_arc.is_empty(),
+            "Should have point_on_arc constraint");
     }
 
     // -- Dimension update (no duplicates) --
