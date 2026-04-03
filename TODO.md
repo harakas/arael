@@ -19,4 +19,5 @@
 - text placement
 - polygon tool
 - **Duplicate constraint check**: `symmetry_pp` (point symmetry) skips duplicate detection because `resolve_as_point` creates helper points before we can check — need to compare semantic endpoints, not Ref<Point> values
+- **Redundancy warning**: Warn when a constraint is accepted but DOF doesn't change (likely redundant or degenerate). Requires synchronous DOF check after each constraint — would use the same Hessian eigenvalue analysis as `dof analyze` but inline in `exec()`. Performance concern: eigendecomposition on every constraint action.
 

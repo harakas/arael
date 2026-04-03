@@ -8,6 +8,19 @@ This is the complete command reference. Commands can be entered in the command p
 
 The coordinate system uses standard math convention: **X-axis points right, Y-axis points up**. Positive angles are counter-clockwise. This is NOT screen convention (where Y points down).
 
+## Entity Parameters and DOF
+
+Each entity type has a fixed number of degrees of freedom (DOF) — parameters the solver can adjust:
+
+| Entity | DOF | Parameters |
+|--------|-----|------------|
+| Point  | 2   | x, y |
+| Line   | 4   | p1.x, p1.y, p2.x, p2.y |
+| Arc    | 5   | center.x, center.y, radius, start_angle, end_angle |
+| Circle | 3   | center.x, center.y, radius (angles fixed at 0 and 2pi) |
+
+Each constraint removes 1 or more DOF. A fully constrained sketch has DOF 0. Use `dof` to check, `dof analyze` to see which entities can still move.
+
 ## Entity References
 
 Entities are referenced by name: `L0`, `L1` (lines), `P0`, `P1` (points), `A0`, `A1` (arcs/circles).
@@ -138,7 +151,8 @@ length L0 5.0                Set line length (numeric)
 length L0 "width * 2"        Set line length (expression)
 radius A0 1.5                Set arc radius
 angle L0 L1 45               Set angle between lines (degrees, auto-selects sector)
-distance L0.p1 L1.p2 5.0     Point-point distance
+distance L0.p1 L1.p2 5.0     Point-point distance (numeric)
+distance L0.p1 L1.p2 "2*scale"  Point-point distance (expression)
 distance P0 L0 3.0            Point-line distance
 remove_dim d0                 Remove dimension by name
 ```
@@ -463,9 +477,11 @@ Add construction lines with `style L0 dashdot` to define axes of symmetry and re
 
 For symmetric shapes, fully constrain one side and use `symmetry P0 L_axis P1` to mirror points. This is cleaner than constraining both sides independently. Symmetry makes some constraints redundant:
 
-- Two points symmetric about a line means the segment between them is **automatically perpendicular** to that line.
-- If endpoints of two lines are mirrored, their lengths are **automatically equal**.
-- An arc centered on the symmetry axis with symmetric endpoints may already be tangent to adjacent lines.
+- Two points symmetric about a line means the segment between them is **automatically perpendicular** to that line — don't add `perpendicular`.
+- If endpoints of two lines are mirrored, their lengths are **automatically equal** — don't add `equal`.
+- If two points are symmetric about a line and both lie on an arc centered on that line, tangent at those points is **already implied** — don't add `tangent`.
+- If a line endpoint is coincident with an arc center, `point_on` for that center on the line is **redundant**.
+- If a line is parallel to the symmetry axis and its mirror exists, `equal` between the line and its mirror is **redundant**.
 
 ### Prefer relative constraints over absolute ones
 
@@ -473,6 +489,7 @@ For symmetric shapes, fully constrain one side and use `symmetry P0 L_axis P1` t
 - Use `perpendicular L0 L1` instead of `angle L0 L1 90` -- the perpendicular constraint is more efficient, expresses intent more clearly, and doesn't create a dimension entry (keeps `list dims` cleaner).
 - Use `angle`, `distance`, `symmetry` between entities rather than `lock` for positioning.
 - Only use `horizontal` / `vertical` / `lock` when you intentionally want to fix something to the global coordinate system.
+- For a DOF=0 sketch, ideally use at most one `lock` constraint (to pin position) and one `horizontal`/`vertical` (to pin orientation). All other constraints should be relative.
 
 ### Monitor DOF as you build
 
@@ -501,3 +518,37 @@ Y-axis points up (math convention, not screen convention). Plan your geometry ac
 ### Undo recovers mistakes
 
 `undo` reverses the last operation, including grouped operations (e.g., a constraint that created helper points undoes as one unit). Use `undo` freely when experimenting with constraint strategies.
+
+### Watch out for degenerate constraints
+
+Some constraints are accepted by the solver but don't actually reduce DOF because their Jacobian is zero at the current geometry. This happens when:
+
+- `tangent` between a line and arc at a point where the line is already radial (perpendicular to the arc)
+- `distance` set to the maximum possible value (e.g., chord equal to diameter)
+- Any constraint that is algebraically satisfied by the current configuration but has zero gradient
+
+The solver gives no warning — the constraint appears in `list constraints` but `dof` doesn't change. If a constraint doesn't reduce DOF as expected, try an algebraically equivalent but non-degenerate formulation. For example, use `distance A0.center L1.p2` (center-to-endpoint) instead of `tangent` at the diameter.
+
+Use `dof analyze` to see exactly which directions remain free.
+
+### DOF=3 pattern for reusable components
+
+To create a freely movable/rotatable component (DOF=3), use only relative constraints — no `horizontal`, `vertical`, or `lock`:
+
+```
+# Example: symmetric diamond shape, DOF=3 (can translate + rotate)
+# Construction axis through two arc centers
+add_circle 0,0 2
+add_circle 6,0 2
+add_line 0,0 6,0
+coincident L0.p1 A0.center
+coincident L0.p2 A1.center
+# Add lines and constrain relative to axis
+add_line 0,2 3,3
+add_line 3,3 6,2
+equal L1 L2
+symmetry L1.p2 L0 L2.p1     # midpoint symmetric about axis
+# All constraints are relative — shape can translate and rotate freely
+```
+
+Key pattern: anchor a construction axis by making its endpoints coincident with feature points, then use `symmetry`, `equal`, `perpendicular`, `distance`, and `angle` between entities. Avoid absolute constraints entirely.
