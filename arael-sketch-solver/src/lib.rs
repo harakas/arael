@@ -980,7 +980,7 @@ impl Sketch {
         list_cross!(self.parallel, "parallel", a, b);
         list_cross!(self.perpendicular, "perpendicular", a, b);
         list_cross!(self.collinear, "collinear", a, b);
-        list_cross!(self.equal_length, "equal_length", a, b);
+        list_cross!(self.equal_length, "equal", a, b);
         // Coincident: suppress bridge constraints (helper point bridges)
         for c in &self.coincident_pp {
             if !self.points[c.a].helper && !self.points[c.b].helper {
@@ -1042,7 +1042,7 @@ impl Sketch {
         for c in &self.tangent_la { out.push(format!("tangent {} {}", self.lines[c.line].name, self.arcs[c.arc].name)); }
         for c in &self.tangent_aa { out.push(format!("tangent {} {}", self.arcs[c.a].name, self.arcs[c.b].name)); }
         for c in &self.concentric { out.push(format!("concentric {} {}", self.arcs[c.a].name, self.arcs[c.b].name)); }
-        for c in &self.equal_radius { out.push(format!("equal_radius {} {}", self.arcs[c.a].name, self.arcs[c.b].name)); }
+        for c in &self.equal_radius { out.push(format!("equal {} {}", self.arcs[c.a].name, self.arcs[c.b].name)); }
         for c in &self.symmetry_ll { out.push(format!("symmetry {} {} {}", self.lines[c.a].name, self.lines[c.b].name, self.lines[c.c].name)); }
         for c in &self.symmetry_pp { out.push(format!("symmetry {} {} {}", self.point_display_name(c.a), self.lines[c.line].name, self.point_display_name(c.c))); }
         // Point-based constraints: use display names to resolve helpers

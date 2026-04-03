@@ -1679,11 +1679,11 @@ fn cmd_info(ctx: &mut CommandContext, args: &str) -> CommandResult {
 
 fn cmd_list(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let filter = args.trim();
-    if !filter.is_empty() && !matches!(filter, "lines" | "points" | "arcs" | "dims" | "params" | "constraints") {
-        return err(format!("Unknown filter: {}. Use: lines, points, arcs, dims, params, constraints", filter));
+    if !filter.is_empty() && !matches!(filter, "all" | "lines" | "points" | "arcs" | "dims" | "params" | "constraints") {
+        return err(format!("Unknown filter: {}. Use: all, lines, points, arcs, dims, params, constraints", filter));
     }
     let mut lines = Vec::new();
-    let show_all = filter.is_empty();
+    let show_all = filter.is_empty() || filter == "all";
 
     if show_all || filter == "lines" {
         for r in ctx.sketch.lines.refs() {
@@ -2664,23 +2664,15 @@ pub fn complete(
     cursor_pos: usize,
 ) -> Vec<String> {
     let input = &input[..cursor_pos.min(input.len())];
-
-    // Find the current line (for multiline input)
     let current_line = input.lines().last().unwrap_or("");
-
-    // Find the current word: scan back from end to whitespace
     let word_start = current_line.rfind(|c: char| c.is_whitespace()).map(|i| i + 1).unwrap_or(0);
     let current_word = &current_line[word_start..];
-
-    // Is this the first token on the line?
     let is_first_token = current_line[..word_start].trim().is_empty();
 
-    // No completions when nothing typed yet
-    if current_word.is_empty() {
-        return Vec::new();
-    }
+    // No completions when nothing typed on first token (would show all commands)
+    if current_word.is_empty() && is_first_token { return Vec::new(); }
 
-    // Check for dot completion: "L0." or "L0.p1."
+    // Dot completion (context-independent)
     if let Some(dot_pos) = current_word.rfind('.') {
         let before_dot = &current_word[..dot_pos];
         let after_dot = &current_word[dot_pos + 1..];
@@ -2691,115 +2683,381 @@ pub fn complete(
 
     let mut results = Vec::new();
 
-    // First token: command names
+    // First token: command names only
     if is_first_token {
-        for &cmd in COMMAND_NAMES {
-            if cmd.starts_with(current_word) && cmd != current_word {
-                results.push(cmd.to_string());
-            }
-        }
-        // Also complete entity names as first token (for things like "L0" standalone)
+        add_matching(&mut results, current_word, COMMAND_NAMES);
+        results.sort();
+        results.dedup();
+        results.truncate(20);
+        return results;
     }
 
-    // Entity names (lines, points, arcs)
-    {
-        for r in sketch.lines.refs() {
-            let name = &sketch.lines[r].name;
-            if name.starts_with(current_word) && name != current_word {
-                results.push(name.clone());
-            }
-        }
-        for r in sketch.points.refs() {
-            let p = &sketch.points[r];
-            if p.helper { continue; }
-            if p.name.starts_with(current_word) && p.name != current_word {
-                results.push(p.name.clone());
-            }
-        }
-        for r in sketch.arcs.refs() {
-            let name = &sketch.arcs[r].name;
-            if name.starts_with(current_word) && name != current_word {
-                results.push(name.clone());
-            }
-        }
-        // Dimension names
-        for d in &sketch.dimensions {
-            if d.name.starts_with(current_word) && d.name != current_word {
-                results.push(d.name.clone());
-            }
-        }
-        // User parameter names
-        for p in &sketch.user_params {
-            if p.name.starts_with(current_word) && p.name != current_word {
-                results.push(p.name.clone());
-            }
-        }
-        // Session variable names
-        for (name, _) in session_names {
-            if name == "_" { continue; }
-            if name.starts_with(current_word) && name != current_word {
-                results.push(name.clone());
-            }
-        }
-    }
-
-    // Context-sensitive: after "list " suggest filters
+    // Non-first token: command-specific completions
     let first_cmd = current_line.split_whitespace().next().unwrap_or("");
-    if !is_first_token {
-        match first_cmd {
-            "list" => {
-                for &f in &["lines", "points", "arcs", "dims", "params", "constraints"] {
-                    if f.starts_with(current_word) && f != current_word {
-                        results.push(f.to_string());
-                    }
-                }
-            }
-            "help" => {
-                if "full".starts_with(current_word) && "full" != current_word {
-                    results.push("full".to_string());
-                }
-                for &cmd in COMMAND_NAMES {
-                    if cmd.starts_with(current_word) && cmd != current_word {
-                        results.push(cmd.to_string());
-                    }
-                }
-            }
-            "style" => {
-                // Second arg is entity, third is style value
-                let token_count = current_line.split_whitespace().count();
-                if token_count >= 2 {
-                    for &s in &["solid", "dashed", "dashdot"] {
-                        if s.starts_with(current_word) && s != current_word {
-                            results.push(s.to_string());
-                        }
-                    }
-                }
-            }
-            _ => {}
+    let token_index = current_line[..word_start].split_whitespace().count();
+    // token_index: 1 = arg1, 2 = arg2, 3 = arg3
+
+    // Collect already-typed args (for excluding from variadic completions)
+    let typed_args: Vec<&str> = current_line.split_whitespace().skip(1).collect();
+
+    match first_cmd {
+        // Variadic line commands: exclude already-typed lines
+        "horizontal" | "vertical" => {
+            add_lines_excluding(sketch, &mut results, current_word, &typed_args);
         }
-        // Keywords that can appear as trailing args
-        for &kw in &["noconnect", "nocursor", "derived"] {
-            if kw.starts_with(current_word) && kw != current_word {
-                results.push(kw.to_string());
+
+        // Two-line commands: no suggestions after 2 args
+        "parallel" | "perpendicular" | "perp" | "collinear" => {
+            if token_index <= 2 {
+                add_lines(sketch, &mut results, current_word);
             }
         }
-        // Geo functions and math functions in expression context
-        for &f in GEO_FUNCTIONS {
-            if f.starts_with(current_word) && f != current_word {
-                results.push(f.to_string());
+
+        // Arc-only, exactly 2 args
+        "concentric" => {
+            if token_index <= 2 {
+                add_arcs(sketch, &mut results, current_word);
             }
         }
-        for &f in MATH_FUNCTIONS {
-            if f.starts_with(current_word) && f != current_word {
-                results.push(f.to_string());
+
+        // Equal: match type of first arg, exactly 2 args
+        "equal" => {
+            if token_index == 1 {
+                add_lines(sketch, &mut results, current_word);
+                add_arcs(sketch, &mut results, current_word);
+            } else if token_index == 2 {
+                let arg1 = current_line.split_whitespace().nth(1).unwrap_or("");
+                if arg1.starts_with('L') {
+                    add_lines(sketch, &mut results, current_word);
+                } else if arg1.starts_with('A') {
+                    add_arcs(sketch, &mut results, current_word);
+                }
             }
         }
+
+        // Tangent: line+arc or arc+arc, exactly 2 args
+        "tangent" => {
+            if token_index == 1 {
+                add_lines(sketch, &mut results, current_word);
+                add_arcs(sketch, &mut results, current_word);
+            } else if token_index == 2 {
+                add_arcs(sketch, &mut results, current_word);
+            }
+        }
+
+        // Variadic entity commands: exclude already-typed
+        "delete" | "select" => {
+            add_all_entities_excluding(sketch, &mut results, current_word, &typed_args);
+        }
+
+        // Single entity arg
+        "info" | "center" => {
+            if token_index == 1 {
+                add_all_entities(sketch, &mut results, current_word);
+            }
+        }
+
+        // Endpoint commands: exactly 2 args
+        "coincident" => {
+            if token_index <= 2 {
+                add_all_entities(sketch, &mut results, current_word);
+            }
+        }
+        "lock" | "unlock" => {
+            if token_index == 1 {
+                add_all_entities(sketch, &mut results, current_word);
+            }
+        }
+
+        // Midpoint: arg1=point/endpoint, arg2=line
+        "midpoint" => {
+            if token_index == 1 {
+                add_points(sketch, &mut results, current_word);
+                add_lines(sketch, &mut results, current_word);
+                add_arcs(sketch, &mut results, current_word);
+            } else if token_index == 2 {
+                add_lines(sketch, &mut results, current_word);
+            }
+        }
+
+        // Point_on: arg1=point/endpoint, arg2=line or arc
+        "point_on" => {
+            if token_index == 1 {
+                add_points(sketch, &mut results, current_word);
+                add_lines(sketch, &mut results, current_word);
+            } else if token_index == 2 {
+                add_lines(sketch, &mut results, current_word);
+                add_arcs(sketch, &mut results, current_word);
+            }
+        }
+
+        // Symmetry: arg1=entity, arg2=line(mirror), arg3=entity
+        "symmetry" => {
+            if token_index <= 3 {
+                if token_index == 2 {
+                    add_lines(sketch, &mut results, current_word);
+                } else {
+                    add_all_entities(sketch, &mut results, current_word);
+                }
+            }
+        }
+
+        // Dimension: length (arg1=line, arg2=value/derived)
+        "length" => {
+            if token_index == 1 {
+                add_lines(sketch, &mut results, current_word);
+            } else if token_index == 2 {
+                add_matching(&mut results, current_word, &["derived"]);
+                add_expression_completions(sketch, session_names, &mut results, current_word);
+            }
+        }
+
+        // Dimension: radius (arg1=arc, arg2=value/derived)
+        "radius" => {
+            if token_index == 1 {
+                add_arcs(sketch, &mut results, current_word);
+            } else if token_index == 2 {
+                add_matching(&mut results, current_word, &["derived"]);
+                add_expression_completions(sketch, session_names, &mut results, current_word);
+            }
+        }
+
+        // Dimension: angle (arg1=line, arg2=line, arg3=value/derived)
+        "angle" => {
+            if token_index <= 2 {
+                add_lines(sketch, &mut results, current_word);
+            } else if token_index == 3 {
+                add_matching(&mut results, current_word, &["derived"]);
+                add_expression_completions(sketch, session_names, &mut results, current_word);
+            }
+        }
+
+        // Dimension: distance (arg1=endpoint, arg2=endpoint/line, arg3=value/derived)
+        "distance" => {
+            if token_index <= 2 {
+                add_all_entities(sketch, &mut results, current_word);
+            } else if token_index == 3 {
+                add_matching(&mut results, current_word, &["derived"]);
+                add_expression_completions(sketch, session_names, &mut results, current_word);
+            }
+        }
+
+        // Dimension management: single dim arg
+        "remove_dim" | "set_derived" | "set_driven" => {
+            if token_index == 1 {
+                add_dimensions(sketch, &mut results, current_word);
+            }
+        }
+
+        // dim_pos: arg1=dim, arg2=offset/along, arg3=value
+        "dim_pos" => {
+            if token_index == 1 {
+                add_dimensions(sketch, &mut results, current_word);
+            } else if token_index == 2 {
+                add_matching(&mut results, current_word, &["offset", "along"]);
+            }
+        }
+
+        // Style: arg1=entity, arg2=style value
+        "style" => {
+            if token_index == 1 {
+                add_lines(sketch, &mut results, current_word);
+                add_arcs(sketch, &mut results, current_word);
+            } else if token_index == 2 {
+                add_matching(&mut results, current_word, &["solid", "dashed", "dashdot"]);
+            }
+        }
+
+        // List: single filter arg
+        "list" => {
+            if token_index == 1 {
+                add_matching(&mut results, current_word,
+                    &["all", "lines", "points", "arcs", "dims", "params", "constraints"]);
+            }
+        }
+
+        // Help: single arg (full or command name)
+        "help" => {
+            if token_index == 1 {
+                add_matching(&mut results, current_word, &["full"]);
+                add_matching(&mut results, current_word, COMMAND_NAMES);
+            }
+        }
+
+        // Cursor: single keyword arg
+        "cursor" => {
+            if token_index == 1 {
+                add_matching(&mut results, current_word, &["on", "off", "show", "hide"]);
+            }
+        }
+
+        // Remove constraint
+        "remove_constraint" | "rc" => {
+            if token_index == 1 {
+                add_all_entities(sketch, &mut results, current_word);
+            } else if token_index <= 3 {
+                add_all_entities(sketch, &mut results, current_word);
+                add_matching(&mut results, current_word,
+                    &["horizontal", "vertical", "parallel", "perpendicular",
+                      "equal", "equal_length", "equal_radius", "collinear",
+                      "tangent", "concentric", "lock"]);
+            }
+        }
+
+        // Param commands: single param name
+        "param" | "del_param" | "rename_param" => {
+            if token_index == 1 {
+                add_params(sketch, &mut results, current_word);
+            }
+        }
+
+        // Offset: arg1=line, arg2=expression
+        "offset_line" | "offset" => {
+            if token_index == 1 {
+                add_lines(sketch, &mut results, current_word);
+            } else {
+                add_expression_completions(sketch, session_names, &mut results, current_word);
+            }
+        }
+
+        // Geometry creation: coordinates, cursor keyword, trailing flags
+        "add_line" | "add_point" | "add_circle" | "add_arc" => {
+            add_matching(&mut results, current_word, &["cursor"]);
+            add_matching(&mut results, current_word, &["noconnect", "nocursor"]);
+            // Offer entity endpoints for coordinate references
+            add_all_entities(sketch, &mut results, current_word);
+            add_session_names(session_names, &mut results, current_word);
+        }
+
+        // Expression-only: print, let
+        "print" => {
+            add_expression_completions(sketch, session_names, &mut results, current_word);
+            add_all_entities(sketch, &mut results, current_word);
+        }
+        "let" => {
+            add_expression_completions(sketch, session_names, &mut results, current_word);
+            add_all_entities(sketch, &mut results, current_word);
+        }
+
+        // No completions for these
+        "undo" | "redo" | "history" | "goto" | "dof" | "cost" | "clear"
+        | "deselect" | "save" | "load" | "msg" | "find" | "zoom" => {}
+
+        _ => {}
     }
 
     results.sort();
     results.dedup();
     results.truncate(20);
     results
+}
+
+// --- Completion helpers ---
+
+fn add_matching(results: &mut Vec<String>, prefix: &str, candidates: &[&str]) {
+    for &c in candidates {
+        if c.starts_with(prefix) && c != prefix {
+            results.push(c.to_string());
+        }
+    }
+}
+
+fn add_lines(sketch: &Sketch, results: &mut Vec<String>, prefix: &str) {
+    for r in sketch.lines.refs() {
+        let name = &sketch.lines[r].name;
+        if name.starts_with(prefix) && name != prefix {
+            results.push(name.clone());
+        }
+    }
+}
+
+fn add_arcs(sketch: &Sketch, results: &mut Vec<String>, prefix: &str) {
+    for r in sketch.arcs.refs() {
+        let name = &sketch.arcs[r].name;
+        if name.starts_with(prefix) && name != prefix {
+            results.push(name.clone());
+        }
+    }
+}
+
+fn add_points(sketch: &Sketch, results: &mut Vec<String>, prefix: &str) {
+    for r in sketch.points.refs() {
+        let p = &sketch.points[r];
+        if p.helper { continue; }
+        if p.name.starts_with(prefix) && p.name != prefix {
+            results.push(p.name.clone());
+        }
+    }
+}
+
+fn add_all_entities(sketch: &Sketch, results: &mut Vec<String>, prefix: &str) {
+    add_lines(sketch, results, prefix);
+    add_points(sketch, results, prefix);
+    add_arcs(sketch, results, prefix);
+}
+
+fn add_lines_excluding(sketch: &Sketch, results: &mut Vec<String>, prefix: &str, exclude: &[&str]) {
+    for r in sketch.lines.refs() {
+        let name = &sketch.lines[r].name;
+        if name.starts_with(prefix) && name != prefix && !exclude.contains(&name.as_str()) {
+            results.push(name.clone());
+        }
+    }
+}
+
+fn add_all_entities_excluding(sketch: &Sketch, results: &mut Vec<String>, prefix: &str, exclude: &[&str]) {
+    for r in sketch.lines.refs() {
+        let name = &sketch.lines[r].name;
+        if name.starts_with(prefix) && name != prefix && !exclude.contains(&name.as_str()) {
+            results.push(name.clone());
+        }
+    }
+    for r in sketch.points.refs() {
+        let p = &sketch.points[r];
+        if p.helper { continue; }
+        if p.name.starts_with(prefix) && p.name != prefix && !exclude.contains(&p.name.as_str()) {
+            results.push(p.name.clone());
+        }
+    }
+    for r in sketch.arcs.refs() {
+        let name = &sketch.arcs[r].name;
+        if name.starts_with(prefix) && name != prefix && !exclude.contains(&name.as_str()) {
+            results.push(name.clone());
+        }
+    }
+}
+
+fn add_dimensions(sketch: &Sketch, results: &mut Vec<String>, prefix: &str) {
+    for d in &sketch.dimensions {
+        if d.name.starts_with(prefix) && d.name != prefix {
+            results.push(d.name.clone());
+        }
+    }
+}
+
+fn add_params(sketch: &Sketch, results: &mut Vec<String>, prefix: &str) {
+    for p in &sketch.user_params {
+        if p.name.starts_with(prefix) && p.name != prefix {
+            results.push(p.name.clone());
+        }
+    }
+}
+
+fn add_session_names(session_names: &HashMap<String, String>, results: &mut Vec<String>, prefix: &str) {
+    for (name, _) in session_names {
+        if name == "_" { continue; }
+        if name.starts_with(prefix) && name != prefix {
+            results.push(name.clone());
+        }
+    }
+}
+
+fn add_expression_completions(sketch: &Sketch, session_names: &HashMap<String, String>, results: &mut Vec<String>, prefix: &str) {
+    add_dimensions(sketch, results, prefix);
+    add_params(sketch, results, prefix);
+    add_session_names(session_names, results, prefix);
+    add_matching(results, prefix, GEO_FUNCTIONS);
+    add_matching(results, prefix, MATH_FUNCTIONS);
 }
 
 /// Complete after a dot: "L0." → ["p1", "p2"], "A0." → ["center", "start", "end"], etc.
@@ -4037,5 +4295,276 @@ mod tests {
         run_ok(&mut ctx, "add_line 0,0 3,0; add_line 5,0 8,0");
         run_ok(&mut ctx, "distance L0.p2 L1.p1 2");
         assert!(!has_helper_points(&ctx), "DistanceLL should not create helpers");
+    }
+
+    // -- Autocomplete tests --
+
+    fn setup_complete_ctx() -> CommandContext {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0");   // L0
+        run_ok(&mut ctx, "add_line 5,0 5,5");   // L1
+        run_ok(&mut ctx, "add_point 2,3");       // P0
+        run_ok(&mut ctx, "add_circle 3,3 2");    // A0
+        run_ok(&mut ctx, "length L0 5");         // d0
+        run_ok(&mut ctx, "param width 10");
+        ctx
+    }
+
+    fn completions(ctx: &CommandContext, input: &str) -> Vec<String> {
+        complete(&ctx.sketch, &ctx.session_names, input, input.len())
+    }
+
+    #[test]
+    fn test_complete_empty_input() {
+        let ctx = setup_complete_ctx();
+        assert!(completions(&ctx, "").is_empty());
+    }
+
+    #[test]
+    fn test_complete_first_token_commands() {
+        let ctx = setup_complete_ctx();
+        let c = completions(&ctx, "add_");
+        assert!(c.contains(&"add_line".to_string()));
+        assert!(c.contains(&"add_point".to_string()));
+        assert!(c.contains(&"add_circle".to_string()));
+        // Should NOT contain entity names
+        assert!(!c.iter().any(|s| s.starts_with('L')));
+    }
+
+    #[test]
+    fn test_complete_list_filters_not_entities() {
+        let ctx = setup_complete_ctx();
+        let c = completions(&ctx, "list l");
+        assert!(c.contains(&"lines".to_string()));
+        assert!(!c.iter().any(|s| s.starts_with('L')), "list should not offer entity names: {:?}", c);
+    }
+
+    #[test]
+    fn test_complete_cursor_keywords() {
+        let ctx = setup_complete_ctx();
+        let c = completions(&ctx, "cursor o");
+        assert!(c.contains(&"on".to_string()));
+        assert!(c.contains(&"off".to_string()));
+    }
+
+    #[test]
+    fn test_complete_add_line_cursor() {
+        let ctx = setup_complete_ctx();
+        let c = completions(&ctx, "add_line curs");
+        assert!(c.contains(&"cursor".to_string()));
+    }
+
+    #[test]
+    fn test_complete_horizontal_lines_only() {
+        let ctx = setup_complete_ctx();
+        let c = completions(&ctx, "horizontal L");
+        assert!(c.contains(&"L0".to_string()));
+        assert!(c.contains(&"L1".to_string()));
+        assert!(!c.iter().any(|s| s.starts_with('A')), "horizontal should not offer arcs");
+        assert!(!c.iter().any(|s| s.starts_with('P')), "horizontal should not offer points");
+    }
+
+    #[test]
+    fn test_complete_concentric_arcs_only() {
+        let ctx = setup_complete_ctx();
+        let c = completions(&ctx, "concentric A");
+        assert!(c.contains(&"A0".to_string()));
+        assert!(!c.iter().any(|s| s.starts_with('L')), "concentric should not offer lines");
+    }
+
+    #[test]
+    fn test_complete_style_values() {
+        let ctx = setup_complete_ctx();
+        let c = completions(&ctx, "style L0 d");
+        assert!(c.contains(&"dashed".to_string()));
+        assert!(c.contains(&"dashdot".to_string()));
+        assert!(!c.iter().any(|s| s.starts_with("d0")), "style arg2 should not offer dimensions");
+    }
+
+    #[test]
+    fn test_complete_remove_dim() {
+        let ctx = setup_complete_ctx();
+        let c = completions(&ctx, "remove_dim d");
+        assert!(c.contains(&"d0".to_string()));
+        assert!(!c.iter().any(|s| s.starts_with('L')), "remove_dim should not offer lines");
+    }
+
+    #[test]
+    fn test_complete_length_arg2_derived() {
+        let ctx = setup_complete_ctx();
+        let c = completions(&ctx, "length L0 d");
+        assert!(c.contains(&"derived".to_string()));
+        // Should offer dimension refs in expression context
+        assert!(c.contains(&"d0".to_string()));
+        // Should NOT offer lines
+        assert!(!c.contains(&"L0".to_string()), "length arg2 should not offer L0");
+    }
+
+    #[test]
+    fn test_complete_equal_type_matching() {
+        let ctx = setup_complete_ctx();
+        // After "equal L0", should only offer lines
+        let c = completions(&ctx, "equal L0 L");
+        assert!(c.contains(&"L1".to_string()));
+        assert!(!c.iter().any(|s| s.starts_with('A')), "equal with L0 should not offer arcs");
+    }
+
+    #[test]
+    fn test_complete_dim_pos() {
+        let ctx = setup_complete_ctx();
+        let c = completions(&ctx, "dim_pos d0 o");
+        assert!(c.contains(&"offset".to_string()));
+        let c = completions(&ctx, "dim_pos d0 a");
+        assert!(c.contains(&"along".to_string()));
+    }
+
+    #[test]
+    fn test_complete_no_arg_commands() {
+        let ctx = setup_complete_ctx();
+        assert!(completions(&ctx, "dof x").is_empty());
+        assert!(completions(&ctx, "cost x").is_empty());
+    }
+
+    #[test]
+    fn test_complete_del_param() {
+        let ctx = setup_complete_ctx();
+        let c = completions(&ctx, "del_param w");
+        assert!(c.contains(&"width".to_string()));
+    }
+
+    #[test]
+    fn test_complete_rc_constraint_types() {
+        let ctx = setup_complete_ctx();
+        let c = completions(&ctx, "rc L0 h");
+        assert!(c.contains(&"horizontal".to_string()));
+    }
+
+    #[test]
+    fn test_complete_dot_line() {
+        let ctx = setup_complete_ctx();
+        let c = completions(&ctx, "info L0.");
+        assert!(c.contains(&"L0.p1".to_string()));
+        assert!(c.contains(&"L0.p2".to_string()));
+    }
+
+    #[test]
+    fn test_complete_dot_arc() {
+        let ctx = setup_complete_ctx();
+        let c = completions(&ctx, "info A0.");
+        assert!(c.contains(&"A0.center".to_string()));
+        assert!(c.contains(&"A0.start".to_string()));
+        assert!(c.contains(&"A0.end".to_string()));
+    }
+
+    #[test]
+    fn test_complete_midpoint_arg2_lines_only() {
+        let ctx = setup_complete_ctx();
+        let c = completions(&ctx, "midpoint P0 L");
+        assert!(c.contains(&"L0".to_string()));
+        assert!(!c.iter().any(|s| s.starts_with('A')), "midpoint arg2 should not offer arcs");
+    }
+
+    #[test]
+    fn test_complete_offset_line_arg1() {
+        let ctx = setup_complete_ctx();
+        let c = completions(&ctx, "offset L");
+        assert!(c.contains(&"L0".to_string()));
+        assert!(!c.iter().any(|s| s.starts_with('A')));
+    }
+
+    #[test]
+    fn test_complete_list_space_shows_options() {
+        let ctx = setup_complete_ctx();
+        let c = completions(&ctx, "list ");
+        assert!(c.contains(&"lines".to_string()));
+        assert!(c.contains(&"constraints".to_string()));
+    }
+
+    #[test]
+    fn test_complete_horizontal_space_shows_lines() {
+        let ctx = setup_complete_ctx();
+        let c = completions(&ctx, "horizontal ");
+        assert!(c.contains(&"L0".to_string()));
+        assert!(c.contains(&"L1".to_string()));
+        assert!(!c.iter().any(|s| s.starts_with('A')));
+    }
+
+    #[test]
+    fn test_complete_cursor_space_shows_keywords() {
+        let ctx = setup_complete_ctx();
+        let c = completions(&ctx, "cursor ");
+        assert!(c.contains(&"on".to_string()));
+        assert!(c.contains(&"off".to_string()));
+    }
+
+    #[test]
+    fn test_complete_style_space_shows_entities() {
+        let ctx = setup_complete_ctx();
+        let c = completions(&ctx, "style ");
+        assert!(c.contains(&"L0".to_string()));
+    }
+
+    #[test]
+    fn test_complete_style_entity_space_shows_values() {
+        let ctx = setup_complete_ctx();
+        let c = completions(&ctx, "style L0 ");
+        assert!(c.contains(&"solid".to_string()));
+        assert!(c.contains(&"dashed".to_string()));
+    }
+
+    #[test]
+    fn test_complete_empty_first_token_no_suggestions() {
+        let ctx = setup_complete_ctx();
+        // Just a space or empty — no suggestions
+        assert!(completions(&ctx, "").is_empty());
+    }
+
+    #[test]
+    fn test_complete_help_full() {
+        let ctx = setup_complete_ctx();
+        let c = completions(&ctx, "help f");
+        assert!(c.contains(&"full".to_string()));
+    }
+
+    #[test]
+    fn test_complete_list_all_keyword() {
+        let ctx = setup_complete_ctx();
+        let c = completions(&ctx, "list a");
+        assert!(c.contains(&"all".to_string()));
+        assert!(c.contains(&"arcs".to_string()));
+    }
+
+    #[test]
+    fn test_complete_list_no_second_arg() {
+        let ctx = setup_complete_ctx();
+        assert!(completions(&ctx, "list lines ").is_empty());
+    }
+
+    #[test]
+    fn test_complete_horizontal_excludes_typed() {
+        let ctx = setup_complete_ctx();
+        let c = completions(&ctx, "horizontal L0 L");
+        assert!(c.contains(&"L1".to_string()));
+        assert!(!c.contains(&"L0".to_string()), "Should exclude already-typed L0");
+    }
+
+    #[test]
+    fn test_complete_select_excludes_typed() {
+        let ctx = setup_complete_ctx();
+        let c = completions(&ctx, "select L0 P0 L");
+        assert!(c.contains(&"L1".to_string()));
+        assert!(!c.contains(&"L0".to_string()), "Should exclude already-typed L0");
+    }
+
+    #[test]
+    fn test_complete_cursor_no_second_arg() {
+        let ctx = setup_complete_ctx();
+        assert!(completions(&ctx, "cursor on ").is_empty());
+    }
+
+    #[test]
+    fn test_complete_parallel_no_third_arg() {
+        let ctx = setup_complete_ctx();
+        assert!(completions(&ctx, "parallel L0 L1 ").is_empty());
     }
 }
