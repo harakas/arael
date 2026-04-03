@@ -1698,9 +1698,12 @@ fn cmd_info(ctx: &mut CommandContext, args: &str) -> CommandResult {
     } else if name.starts_with('A') && !name.contains('.') {
         let r = match resolve_arc(&ctx.sketch, name) { Ok(r) => r, Err(e) => return err(e) };
         let a = &ctx.sketch.arcs[r];
-        let mut s = format!("{}: center=({:.4},{:.4}) r={:.4} angles={:.1}..{:.1} {}",
+        let sp = crate::geometry::arc_start_pos(a);
+        let ep = crate::geometry::arc_end_pos(a);
+        let mut s = format!("{}: center=({:.4},{:.4}) r={:.4} angles={:.1}..{:.1} start=({:.4},{:.4}) end=({:.4},{:.4}) {}",
             a.name, a.center.value.x, a.center.value.y, a.radius.value,
             a.start_angle.value.to_degrees(), a.end_angle.value.to_degrees(),
+            sp.x, sp.y, ep.x, ep.y,
             if a.closed { "[circle]" } else { "" });
         let cstrs = constraints_for(&ctx.sketch, name);
         if !cstrs.is_empty() { s += &format!("\n  constraints: {}", cstrs.join(", ")); }
@@ -1755,7 +1758,16 @@ fn cmd_list(ctx: &mut CommandContext, args: &str) -> CommandResult {
     if show_all || filter == "arcs" {
         for r in ctx.sketch.arcs.refs() {
             let a = &ctx.sketch.arcs[r];
-            lines.push(format!("{}: center=({:.2},{:.2}) r={:.2}", a.name, a.center.value.x, a.center.value.y, a.radius.value));
+            if a.closed {
+                lines.push(format!("{}: center=({:.2},{:.2}) r={:.2} [circle]",
+                    a.name, a.center.value.x, a.center.value.y, a.radius.value));
+            } else {
+                let sp = crate::geometry::arc_start_pos(a);
+                let ep = crate::geometry::arc_end_pos(a);
+                lines.push(format!("{}: center=({:.2},{:.2}) r={:.2} start=({:.2},{:.2}) end=({:.2},{:.2})",
+                    a.name, a.center.value.x, a.center.value.y, a.radius.value,
+                    sp.x, sp.y, ep.x, ep.y));
+            }
         }
     }
     if show_all || filter == "dims" {
@@ -2683,34 +2695,25 @@ fn cmd_set_driven(ctx: &mut CommandContext, args: &str) -> CommandResult {
 // DOF analysis
 // ---------------------------------------------------------------------------
 
-fn cmd_dof(ctx: &mut CommandContext, args: &str) -> CommandResult {
-    let arg = args.trim();
-    if arg.is_empty() {
-        return ok(format!("DOF: {}", ctx.dof.map_or("pending".into(), |d| d.to_string())));
-    }
-    if arg != "analyze" {
-        return err("Usage: dof | dof analyze");
-    }
-
-    // Synchronous DOF analysis with free direction identification
+/// Compute DOF synchronously and return (dof_count, free_direction_descriptions).
+fn compute_dof_sync(sketch: &mut Sketch) -> (usize, Vec<String>) {
     use arael::simple_lm::LmProblem;
     use arael_sketch_solver::SymbolBag;
 
-    ctx.sketch.prepare_expr_constraints();
+    sketch.prepare_expr_constraints();
 
-    let saved_drift = ctx.sketch.drift_isigma;
-    ctx.sketch.drift_isigma = 0.0;
+    let saved_drift = sketch.drift_isigma;
+    sketch.drift_isigma = 0.0;
 
     let mut params = Vec::new();
-    ctx.sketch.serialize64(&mut params);
+    sketch.serialize64(&mut params);
     let n = params.len();
     if n == 0 {
-        ctx.sketch.drift_isigma = saved_drift;
-        return ok("DOF: 0 (no geometry)");
+        sketch.drift_isigma = saved_drift;
+        return (0, Vec::new());
     }
 
-    // Build reverse param map: index -> name
-    let bag = SymbolBag::build(&ctx.sketch);
+    let bag = SymbolBag::build(sketch);
     let mut idx_to_name: Vec<String> = vec![String::new(); n];
     for (name, &idx) in &bag.param_indices {
         let i = idx as usize;
@@ -2721,27 +2724,24 @@ fn cmd_dof(ctx: &mut CommandContext, args: &str) -> CommandResult {
 
     let mut grad = vec![0.0f64; n];
     let mut hessian = vec![0.0f64; n * n];
-    ctx.sketch.calc_grad_hessian_dense(&params, &mut grad, &mut hessian);
+    sketch.calc_grad_hessian_dense(&params, &mut grad, &mut hessian);
 
-    ctx.sketch.drift_isigma = saved_drift;
+    sketch.drift_isigma = saved_drift;
 
     let h = nalgebra::DMatrix::from_row_slice(n, n, &hessian);
     let eigen = nalgebra::SymmetricEigen::new(h);
     let max_ev = eigen.eigenvalues.iter().cloned().fold(0.0f64, f64::max);
     let threshold = if max_ev > 0.0 { max_ev * 1e-8 } else { 1e-10 };
 
-    // Collect null-space eigenvectors (free directions)
     let mut free_dirs: Vec<String> = Vec::new();
     for col in 0..n {
         if eigen.eigenvalues[col].abs() > threshold { continue; }
         let ev = eigen.eigenvectors.column(col);
 
-        // Find significant components
         let max_comp = ev.iter().cloned().fold(0.0f64, |a, b| a.max(b.abs()));
         if max_comp < 1e-10 { continue; }
         let comp_threshold = max_comp * 0.1;
 
-        // Collect participating parameters
         let mut parts: Vec<(String, f64)> = Vec::new();
         for i in 0..n {
             if ev[i].abs() > comp_threshold {
@@ -2755,17 +2755,29 @@ fn cmd_dof(ctx: &mut CommandContext, args: &str) -> CommandResult {
         }
         if parts.is_empty() { continue; }
 
-        // Classify the motion
-        let desc = classify_free_direction(&parts);
-        free_dirs.push(desc);
+        free_dirs.push(classify_free_direction(&parts));
     }
 
-    let dof = free_dirs.len();
-    let mut lines = vec![format!("DOF: {}", dof)];
-    for (i, desc) in free_dirs.iter().enumerate() {
-        lines.push(format!("  {}. {}", i + 1, desc));
+    (free_dirs.len(), free_dirs)
+}
+
+fn cmd_dof(ctx: &mut CommandContext, args: &str) -> CommandResult {
+    let arg = args.trim();
+    if !arg.is_empty() && arg != "analyze" {
+        return err("Usage: dof | dof analyze");
     }
-    ok(lines.join("\n"))
+
+    let (dof, free_dirs) = compute_dof_sync(&mut ctx.sketch);
+
+    if arg == "analyze" {
+        let mut lines = vec![format!("DOF: {}", dof)];
+        for (i, desc) in free_dirs.iter().enumerate() {
+            lines.push(format!("  {}. {}", i + 1, desc));
+        }
+        ok(lines.join("\n"))
+    } else {
+        ok(format!("DOF: {}", dof))
+    }
 }
 
 /// Classify a free direction from its eigenvector components.
