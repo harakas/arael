@@ -619,6 +619,7 @@ fn extract_identifiers(s: &str) -> Vec<(usize, usize, &str)> {
 // Endpoint resolution for coincident/constraints
 // ---------------------------------------------------------------------------
 
+#[derive(Clone, Copy, PartialEq)]
 enum EndpointRef {
     Point(Ref<Point>),
     LineP1(Ref<Line>),
@@ -1141,6 +1142,11 @@ fn cmd_horizontal(ctx: &mut CommandContext, args: &str) -> CommandResult {
         }
     }
     if lines.is_empty() { return err("Usage: horizontal L0 [L1 ...]"); }
+    for &r in &lines {
+        if ctx.sketch.lines[r].constraints.horizontal {
+            return err(format!("{} is already horizontal", ctx.sketch.lines[r].name));
+        }
+    }
     ctx.begin_group();
     ctx.exec(Action::ApplyHorizontal { lines });
     ok_or_status(ctx, "Applied horizontal")
@@ -1155,6 +1161,11 @@ fn cmd_vertical(ctx: &mut CommandContext, args: &str) -> CommandResult {
         }
     }
     if lines.is_empty() { return err("Usage: vertical L0 [L1 ...]"); }
+    for &r in &lines {
+        if ctx.sketch.lines[r].constraints.vertical {
+            return err(format!("{} is already vertical", ctx.sketch.lines[r].name));
+        }
+    }
     ctx.begin_group();
     ctx.exec(Action::ApplyVertical { lines });
     ok_or_status(ctx, "Applied vertical")
@@ -1165,6 +1176,10 @@ fn cmd_parallel(ctx: &mut CommandContext, args: &str) -> CommandResult {
     if tokens.len() != 2 { return err("Usage: parallel L0 L1"); }
     let a = match resolve_line(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
     let b = match resolve_line(&ctx.sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
+    if a == b { return err("Cannot constrain a line parallel to itself"); }
+    if ctx.sketch.parallel.iter().any(|c| (c.a == a && c.b == b) || (c.a == b && c.b == a)) {
+        return err("Parallel constraint already exists");
+    }
     ctx.begin_group();
     ctx.exec(Action::ApplyParallel { a, b });
     ok_or_status(ctx, "Applied parallel")
@@ -1175,6 +1190,10 @@ fn cmd_perpendicular(ctx: &mut CommandContext, args: &str) -> CommandResult {
     if tokens.len() != 2 { return err("Usage: perpendicular L0 L1"); }
     let a = match resolve_line(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
     let b = match resolve_line(&ctx.sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
+    if a == b { return err("Cannot constrain a line perpendicular to itself"); }
+    if ctx.sketch.perpendicular.iter().any(|c| (c.a == a && c.b == b) || (c.a == b && c.b == a)) {
+        return err("Perpendicular constraint already exists");
+    }
     ctx.begin_group();
     ctx.exec(Action::ApplyPerpendicular { a, b });
     ok_or_status(ctx, "Applied perpendicular")
@@ -1186,12 +1205,20 @@ fn cmd_equal(ctx: &mut CommandContext, args: &str) -> CommandResult {
     if tokens[0].starts_with('L') && tokens[1].starts_with('L') {
         let a = match resolve_line(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
         let b = match resolve_line(&ctx.sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
+        if a == b { return err("Cannot constrain a line equal to itself"); }
+        let exists = ctx.sketch.equal_length.iter().any(|c|
+            (c.a == a && c.b == b) || (c.a == b && c.b == a));
+        if exists { return err("Equal length constraint already exists"); }
         ctx.begin_group();
         ctx.exec(Action::ApplyEqualLength { a, b });
         ok_or_status(ctx, "Applied equal length")
     } else if tokens[0].starts_with('A') && tokens[1].starts_with('A') {
         let a = match resolve_arc(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
         let b = match resolve_arc(&ctx.sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
+        if a == b { return err("Cannot constrain an arc equal to itself"); }
+        let exists = ctx.sketch.equal_radius.iter().any(|c|
+            (c.a == a && c.b == b) || (c.a == b && c.b == a));
+        if exists { return err("Equal radius constraint already exists"); }
         ctx.begin_group();
         ctx.exec(Action::ApplyEqualRadius { a, b });
         ok_or_status(ctx, "Applied equal radius")
@@ -1205,6 +1232,10 @@ fn cmd_collinear(ctx: &mut CommandContext, args: &str) -> CommandResult {
     if tokens.len() != 2 { return err("Usage: collinear L0 L1"); }
     let a = match resolve_line(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
     let b = match resolve_line(&ctx.sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
+    if a == b { return err("Cannot constrain a line collinear with itself"); }
+    if ctx.sketch.collinear.iter().any(|c| (c.a == a && c.b == b) || (c.a == b && c.b == a)) {
+        return err("Collinear constraint already exists");
+    }
     ctx.begin_group();
     ctx.exec(Action::ApplyCollinear { a, b });
     ok_or_status(ctx, "Applied collinear")
@@ -1216,12 +1247,19 @@ fn cmd_tangent(ctx: &mut CommandContext, args: &str) -> CommandResult {
     if tokens[0].starts_with('L') && tokens[1].starts_with('A') {
         let line = match resolve_line(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
         let arc = match resolve_arc(&ctx.sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
+        if ctx.sketch.tangent_la.iter().any(|c| c.line == line && c.arc == arc) {
+            return err("Tangent constraint already exists");
+        }
         ctx.begin_group();
         ctx.exec(Action::ApplyTangentLA { line, arc });
         ok_or_status(ctx, "Applied tangent")
     } else if tokens[0].starts_with('A') && tokens[1].starts_with('A') {
         let a = match resolve_arc(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
         let b = match resolve_arc(&ctx.sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
+        if a == b { return err("Cannot constrain an arc tangent to itself"); }
+        if ctx.sketch.tangent_aa.iter().any(|c| (c.a == a && c.b == b) || (c.a == b && c.b == a)) {
+            return err("Tangent constraint already exists");
+        }
         ctx.begin_group();
         ctx.exec(Action::ApplyTangentAA { a, b });
         ok_or_status(ctx, "Applied tangent")
@@ -1235,7 +1273,32 @@ fn cmd_coincident(ctx: &mut CommandContext, args: &str) -> CommandResult {
     if tokens.len() != 2 { return err("Usage: coincident L0.p2 L1.p1"); }
     let a = match resolve_endpoint_ref(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
     let b = match resolve_endpoint_ref(&ctx.sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
+    if a == b { return err("Cannot constrain an endpoint coincident with itself"); }
     use EndpointRef::*;
+    let s = &ctx.sketch;
+    // Check for existing equivalent coincident constraint
+    let exists = match (a, b) {
+        (Point(a), Point(b)) => s.coincident_pp.iter().any(|c| (c.a == a && c.b == b) || (c.a == b && c.b == a)),
+        (LineP1(l), Point(p)) | (Point(p), LineP1(l)) => s.coincident_lp1.iter().any(|c| c.line == l && c.point == p),
+        (LineP2(l), Point(p)) | (Point(p), LineP2(l)) => s.coincident_lp2.iter().any(|c| c.line == l && c.point == p),
+        (LineP1(a), LineP1(b)) => s.coincident_ll11.iter().any(|c| (c.a == a && c.b == b) || (c.a == b && c.b == a)),
+        (LineP1(a), LineP2(b)) => s.coincident_ll12.iter().any(|c| c.a == a && c.b == b)
+            || s.coincident_ll21.iter().any(|c| c.a == b && c.b == a),
+        (LineP2(a), LineP1(b)) => s.coincident_ll21.iter().any(|c| c.a == a && c.b == b)
+            || s.coincident_ll12.iter().any(|c| c.a == b && c.b == a),
+        (LineP2(a), LineP2(b)) => s.coincident_ll22.iter().any(|c| (c.a == a && c.b == b) || (c.a == b && c.b == a)),
+        (Point(p), ArcCenter(arc)) | (ArcCenter(arc), Point(p)) => s.coincident_arc_center.iter().any(|c| c.point == p && c.arc == arc),
+        (Point(p), ArcStart(arc)) | (ArcStart(arc), Point(p)) => s.coincident_arc_start.iter().any(|c| c.point == p && c.arc == arc),
+        (Point(p), ArcEnd(arc)) | (ArcEnd(arc), Point(p)) => s.coincident_arc_end.iter().any(|c| c.point == p && c.arc == arc),
+        (LineP1(line), ArcCenter(arc)) | (ArcCenter(arc), LineP1(line)) => s.coincident_lp1_arc_center.iter().any(|c| c.line == line && c.arc == arc),
+        (LineP2(line), ArcCenter(arc)) | (ArcCenter(arc), LineP2(line)) => s.coincident_lp2_arc_center.iter().any(|c| c.line == line && c.arc == arc),
+        (LineP1(line), ArcStart(arc)) | (ArcStart(arc), LineP1(line)) => s.coincident_lp1_arc_start.iter().any(|c| c.line == line && c.arc == arc),
+        (LineP2(line), ArcStart(arc)) | (ArcStart(arc), LineP2(line)) => s.coincident_lp2_arc_start.iter().any(|c| c.line == line && c.arc == arc),
+        (LineP1(line), ArcEnd(arc)) | (ArcEnd(arc), LineP1(line)) => s.coincident_lp1_arc_end.iter().any(|c| c.line == line && c.arc == arc),
+        (LineP2(line), ArcEnd(arc)) | (ArcEnd(arc), LineP2(line)) => s.coincident_lp2_arc_end.iter().any(|c| c.line == line && c.arc == arc),
+        _ => false,
+    };
+    if exists { return err("Coincident constraint already exists"); }
     let action = match (a, b) {
         (Point(a), Point(b)) => Action::ApplyCoincidentPP { a, b },
         (LineP1(l), Point(p)) | (Point(p), LineP1(l)) => Action::ApplyCoincidentLP1 { line: l, point: p },
@@ -1265,6 +1328,10 @@ fn cmd_concentric(ctx: &mut CommandContext, args: &str) -> CommandResult {
     if tokens.len() != 2 { return err("Usage: concentric A0 A1"); }
     let a = match resolve_arc(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
     let b = match resolve_arc(&ctx.sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
+    if a == b { return err("Cannot constrain an arc concentric with itself"); }
+    if ctx.sketch.concentric.iter().any(|c| (c.a == a && c.b == b) || (c.a == b && c.b == a)) {
+        return err("Concentric constraint already exists");
+    }
     ctx.begin_group();
     ctx.exec(Action::ApplyConcentric { a, b });
     ok_or_status(ctx, "Applied concentric")
@@ -1818,6 +1885,16 @@ fn cmd_midpoint(ctx: &mut CommandContext, args: &str) -> CommandResult {
     if tokens.len() != 2 { return err("Usage: midpoint P0 L0  or  midpoint L0.p1 L1"); }
     let ep = match resolve_endpoint_ref(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
     let line = match resolve_line(&ctx.sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
+    let s = &ctx.sketch;
+    let exists = match ep {
+        EndpointRef::Point(p) => s.midpoint.iter().any(|c| c.point == p && c.line == line),
+        EndpointRef::LineP1(l) => s.midpoint_lp1.iter().any(|c| c.line == l && c.target == line),
+        EndpointRef::LineP2(l) => s.midpoint_lp2.iter().any(|c| c.line == l && c.target == line),
+        EndpointRef::ArcStart(a) => s.midpoint_arc_start.iter().any(|c| c.arc == a && c.line == line),
+        EndpointRef::ArcEnd(a) => s.midpoint_arc_end.iter().any(|c| c.arc == a && c.line == line),
+        _ => false,
+    };
+    if exists { return err("Midpoint constraint already exists"); }
     let action = match ep {
         EndpointRef::Point(p) => Action::ApplyMidpoint { point: p, line },
         EndpointRef::LineP1(l) => Action::ApplyMidpointLP1 { line: l, target: line },
@@ -1874,6 +1951,8 @@ fn cmd_symmetry(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let third_is_pointlike = resolve_point(&ctx.sketch, tokens[2]).is_ok()
         || resolve_endpoint_ref(&ctx.sketch, tokens[2]).is_ok();
     if mid_is_line && first_is_pointlike && third_is_pointlike {
+        // Note: duplicate check is hard here because resolve_as_point creates helper points.
+        // We skip duplicate check for symmetry_pp — the solver handles redundancy gracefully.
         ctx.begin_group();
         let a = match resolve_as_point(ctx, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
         let line = resolve_line(&ctx.sketch, tokens[1]).unwrap();
@@ -1885,6 +1964,10 @@ fn cmd_symmetry(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let a = match resolve_line(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
     let b = match resolve_line(&ctx.sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
     let c = match resolve_line(&ctx.sketch, tokens[2]) { Ok(r) => r, Err(e) => return err(e) };
+    if ctx.sketch.symmetry_ll.iter().any(|s|
+        s.b == b && ((s.a == a && s.c == c) || (s.a == c && s.c == a))) {
+        return err("Symmetry constraint already exists");
+    }
     ctx.begin_group();
     ctx.exec(Action::ApplySymmetryLL { a, b, c });
     ok_or_status(ctx, "Applied symmetry")
@@ -1897,6 +1980,14 @@ fn cmd_point_on(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let target = tokens[1];
     if target.starts_with('L') {
         let line = match resolve_line(&ctx.sketch, target) { Ok(r) => r, Err(e) => return err(e) };
+        let s = &ctx.sketch;
+        let exists = match ep {
+            EndpointRef::Point(p) => s.point_on_line.iter().any(|c| c.point == p && c.line == line),
+            EndpointRef::LineP1(l) => s.line_p1_on_line.iter().any(|c| c.a == l && c.b == line),
+            EndpointRef::LineP2(l) => s.line_p2_on_line.iter().any(|c| c.a == l && c.b == line),
+            _ => false,
+        };
+        if exists { return err("Point-on-line constraint already exists"); }
         let action = match ep {
             EndpointRef::Point(p) => Action::ApplyPointOnLine { point: p, line },
             EndpointRef::LineP1(l) => Action::ApplyLineP1OnLine { a: l, b: line },
@@ -1908,6 +1999,14 @@ fn cmd_point_on(ctx: &mut CommandContext, args: &str) -> CommandResult {
         ok_or_status(ctx, "Applied point-on-line")
     } else if target.starts_with('A') {
         let arc = match resolve_arc(&ctx.sketch, target) { Ok(r) => r, Err(e) => return err(e) };
+        let s = &ctx.sketch;
+        let exists = match ep {
+            EndpointRef::Point(p) => s.point_on_arc.iter().any(|c| c.point == p && c.arc == arc),
+            EndpointRef::LineP1(l) => s.line_p1_on_arc.iter().any(|c| c.line == l && c.arc == arc),
+            EndpointRef::LineP2(l) => s.line_p2_on_arc.iter().any(|c| c.line == l && c.arc == arc),
+            _ => false,
+        };
+        if exists { return err("Point-on-arc constraint already exists"); }
         let action = match ep {
             EndpointRef::Point(p) => Action::ApplyPointOnArc { point: p, arc },
             EndpointRef::LineP1(l) => Action::ApplyLineP1OnArc { line: l, arc },
@@ -3139,6 +3238,151 @@ mod tests {
         run_ok(&mut ctx, "add_line 0,0 5,0");
         let out = run_ok(&mut ctx, "add_arc 5,0 5,3 6,1.5 noconnect");
         assert!(!out.contains("connected"), "Should NOT auto-connect: {}", out);
+    }
+
+    // -- Duplicate constraint rejection --
+
+    #[test]
+    fn test_duplicate_horizontal() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0");
+        run_ok(&mut ctx, "horizontal L0");
+        let e = run_err(&mut ctx, "horizontal L0");
+        assert!(e.contains("already horizontal"));
+    }
+
+    #[test]
+    fn test_duplicate_vertical() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 0,5");
+        run_ok(&mut ctx, "vertical L0");
+        let e = run_err(&mut ctx, "vertical L0");
+        assert!(e.contains("already vertical"));
+    }
+
+    #[test]
+    fn test_duplicate_parallel() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,1 5,1");
+        run_ok(&mut ctx, "parallel L0 L1");
+        let e = run_err(&mut ctx, "parallel L0 L1");
+        assert!(e.contains("already exists"));
+        let e = run_err(&mut ctx, "parallel L1 L0");
+        assert!(e.contains("already exists"));
+    }
+
+    #[test]
+    fn test_duplicate_perpendicular() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,0 0,5");
+        run_ok(&mut ctx, "perpendicular L0 L1");
+        let e = run_err(&mut ctx, "perpendicular L1 L0");
+        assert!(e.contains("already exists"));
+    }
+
+    #[test]
+    fn test_duplicate_equal_length() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,1 5,1");
+        run_ok(&mut ctx, "equal L0 L1");
+        let e = run_err(&mut ctx, "equal L1 L0");
+        assert!(e.contains("already exists"));
+    }
+
+    #[test]
+    fn test_duplicate_equal_radius() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_circle 0,0 2; add_circle 5,0 3");
+        run_ok(&mut ctx, "equal A0 A1");
+        let e = run_err(&mut ctx, "equal A1 A0");
+        assert!(e.contains("already exists"));
+    }
+
+    #[test]
+    fn test_duplicate_collinear() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0; add_line 6,0 10,0");
+        run_ok(&mut ctx, "collinear L0 L1");
+        let e = run_err(&mut ctx, "collinear L1 L0");
+        assert!(e.contains("already exists"));
+    }
+
+    #[test]
+    fn test_duplicate_tangent_la() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0; add_circle 2.5,1 1");
+        run_ok(&mut ctx, "tangent L0 A0");
+        let e = run_err(&mut ctx, "tangent L0 A0");
+        assert!(e.contains("already exists"));
+    }
+
+    #[test]
+    fn test_duplicate_tangent_aa() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_circle 0,0 2; add_circle 5,0 2");
+        run_ok(&mut ctx, "tangent A0 A1");
+        let e = run_err(&mut ctx, "tangent A1 A0");
+        assert!(e.contains("already exists"));
+    }
+
+    #[test]
+    fn test_duplicate_coincident_ll() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0; add_line 5,1 10,1");
+        run_ok(&mut ctx, "coincident L0.p2 L1.p1");
+        let e = run_err(&mut ctx, "coincident L0.p2 L1.p1");
+        assert!(e.contains("already exists"));
+        // Cross-type: L0.p2=L1.p1 is same as L1.p1=L0.p2 (swapped order)
+        let e = run_err(&mut ctx, "coincident L1.p1 L0.p2");
+        assert!(e.contains("already exists"));
+    }
+
+    #[test]
+    fn test_duplicate_concentric() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_circle 0,0 2; add_circle 5,0 3");
+        run_ok(&mut ctx, "concentric A0 A1");
+        let e = run_err(&mut ctx, "concentric A1 A0");
+        assert!(e.contains("already exists"));
+    }
+
+    #[test]
+    fn test_duplicate_point_on_line() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_point 2.5,0; add_line 0,0 5,0");
+        run_ok(&mut ctx, "point_on P0 L0");
+        let e = run_err(&mut ctx, "point_on P0 L0");
+        assert!(e.contains("already exists"));
+    }
+
+    #[test]
+    fn test_duplicate_midpoint() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_point 2.5,0; add_line 0,0 5,0");
+        run_ok(&mut ctx, "midpoint P0 L0");
+        let e = run_err(&mut ctx, "midpoint P0 L0");
+        assert!(e.contains("already exists"));
+    }
+
+    #[test]
+    fn test_duplicate_symmetry_ll() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line -2,0 -2,3; add_line 0,0 0,5; add_line 2,0 2,3");
+        run_ok(&mut ctx, "symmetry L0 L1 L2");
+        let e = run_err(&mut ctx, "symmetry L2 L1 L0");
+        assert!(e.contains("already exists"));
+    }
+
+    #[test]
+    fn test_self_reference_rejected() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0; add_circle 0,0 2");
+        let e = run_err(&mut ctx, "parallel L0 L0");
+        assert!(e.contains("itself"));
+        let e = run_err(&mut ctx, "equal L0 L0");
+        assert!(e.contains("itself"));
+        let e = run_err(&mut ctx, "concentric A0 A0");
+        assert!(e.contains("itself"));
     }
 
     // -- Info with constraints --
