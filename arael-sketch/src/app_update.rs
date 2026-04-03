@@ -1203,9 +1203,7 @@ impl eframe::App for EditorApp {
                             }
                             // Auto-coincident for edge (point on circle)
                             if let Some((_, s)) = snap {
-                                // Edge point is "on arc" - use a helper point for PointOnArc
-                                self.exec(Action::AddHelperPoint { pos: edge });
-                                let helper = Ref::new(self.sketch.points.slot_count() as u32 - 1);
+                                let helper = self.sketch.add_helper_point(edge);
                                 self.exec(Action::ApplyPointOnArc { point: helper, arc: new_arc });
                                 self.apply_snap_coincident_point(s, helper);
                             }
@@ -1254,8 +1252,7 @@ impl eframe::App for EditorApp {
                                 }
                                 // Auto-coincident for mid (point on arc) - needs helper point
                                 if let Some(s) = snap_target {
-                                    self.exec(Action::AddHelperPoint { pos });
-                                    let helper = Ref::new(self.sketch.points.slot_count() as u32 - 1);
+                                    let helper = self.sketch.add_helper_point(pos);
                                     self.exec(Action::ApplyPointOnArc { point: helper, arc: new_arc });
                                     self.apply_snap_coincident_point(s, helper);
                                 }

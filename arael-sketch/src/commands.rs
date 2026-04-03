@@ -2078,10 +2078,9 @@ fn cmd_point_on(ctx: &mut CommandContext, args: &str) -> CommandResult {
             EndpointRef::Point(p) => Action::ApplyPointOnLine { point: p, line },
             EndpointRef::LineP1(l) => Action::ApplyLineP1OnLine { a: l, b: line },
             EndpointRef::LineP2(l) => Action::ApplyLineP2OnLine { a: l, b: line },
-            EndpointRef::ArcCenter(_) | EndpointRef::ArcStart(_) | EndpointRef::ArcEnd(_) => {
-                let p = match resolve_as_point(ctx, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
-                Action::ApplyPointOnLine { point: p, line }
-            }
+            EndpointRef::ArcCenter(a) => Action::ApplyEndpointOnLine { endpoint: DimensionEndpoint::ArcCenter(a), line },
+            EndpointRef::ArcStart(a) => Action::ApplyEndpointOnLine { endpoint: DimensionEndpoint::ArcStart(a), line },
+            EndpointRef::ArcEnd(a) => Action::ApplyEndpointOnLine { endpoint: DimensionEndpoint::ArcEnd(a), line },
         };
         ctx.exec(action);
         ok_or_status(ctx, "Applied point-on-line")
@@ -2102,11 +2101,9 @@ fn cmd_point_on(ctx: &mut CommandContext, args: &str) -> CommandResult {
             EndpointRef::Point(p) => Action::ApplyPointOnArc { point: p, arc },
             EndpointRef::LineP1(l) => Action::ApplyLineP1OnArc { line: l, arc },
             EndpointRef::LineP2(l) => Action::ApplyLineP2OnArc { line: l, arc },
-            // Arc endpoints: create helper point, then constrain on arc
-            EndpointRef::ArcCenter(_) | EndpointRef::ArcStart(_) | EndpointRef::ArcEnd(_) => {
-                let p = match resolve_as_point(ctx, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
-                Action::ApplyPointOnArc { point: p, arc }
-            }
+            EndpointRef::ArcCenter(a) => Action::ApplyEndpointOnArc { endpoint: DimensionEndpoint::ArcCenter(a), arc },
+            EndpointRef::ArcStart(a) => Action::ApplyEndpointOnArc { endpoint: DimensionEndpoint::ArcStart(a), arc },
+            EndpointRef::ArcEnd(a) => Action::ApplyEndpointOnArc { endpoint: DimensionEndpoint::ArcEnd(a), arc },
         };
         ctx.exec(action);
         ok_or_status(ctx, "Applied point-on-arc")

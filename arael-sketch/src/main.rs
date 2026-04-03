@@ -1434,26 +1434,20 @@ impl EditorApp {
                 self.exec(Action::ApplyLineP2OnLine { a, b });
                 return;
             }
-            // Arc endpoint on line (delegate to point_on command for duplicate detection)
+            // Arc endpoint on line
             (Selection::ArcCenter(src_arc), Selection::Line(line))
             | (Selection::Line(line), Selection::ArcCenter(src_arc)) => {
-                let arc_name = self.sketch.arcs[src_arc].name.clone();
-                let line_name = self.sketch.lines[line].name.clone();
-                self.run_commands(&format!("point_on {}.center {}", arc_name, line_name));
+                self.exec(Action::ApplyEndpointOnLine { endpoint: DimensionEndpoint::ArcCenter(src_arc), line });
                 return;
             }
             (Selection::ArcStart(src_arc), Selection::Line(line))
             | (Selection::Line(line), Selection::ArcStart(src_arc)) => {
-                let arc_name = self.sketch.arcs[src_arc].name.clone();
-                let line_name = self.sketch.lines[line].name.clone();
-                self.run_commands(&format!("point_on {}.start {}", arc_name, line_name));
+                self.exec(Action::ApplyEndpointOnLine { endpoint: DimensionEndpoint::ArcStart(src_arc), line });
                 return;
             }
             (Selection::ArcEnd(src_arc), Selection::Line(line))
             | (Selection::Line(line), Selection::ArcEnd(src_arc)) => {
-                let arc_name = self.sketch.arcs[src_arc].name.clone();
-                let line_name = self.sketch.lines[line].name.clone();
-                self.run_commands(&format!("point_on {}.end {}", arc_name, line_name));
+                self.exec(Action::ApplyEndpointOnLine { endpoint: DimensionEndpoint::ArcEnd(src_arc), line });
                 return;
             }
             // Point on arc/circle
@@ -1473,26 +1467,20 @@ impl EditorApp {
                 self.exec(Action::ApplyLineP2OnArc { line, arc });
                 return;
             }
-            // Arc endpoint on arc/circle (delegate to point_on command for duplicate detection)
+            // Arc endpoint on arc/circle
             (Selection::ArcCenter(src_arc), Selection::Arc(arc))
             | (Selection::Arc(arc), Selection::ArcCenter(src_arc)) => {
-                let src_name = self.sketch.arcs[src_arc].name.clone();
-                let arc_name = self.sketch.arcs[arc].name.clone();
-                self.run_commands(&format!("point_on {}.center {}", src_name, arc_name));
+                self.exec(Action::ApplyEndpointOnArc { endpoint: DimensionEndpoint::ArcCenter(src_arc), arc });
                 return;
             }
             (Selection::ArcStart(src_arc), Selection::Arc(arc))
             | (Selection::Arc(arc), Selection::ArcStart(src_arc)) => {
-                let src_name = self.sketch.arcs[src_arc].name.clone();
-                let arc_name = self.sketch.arcs[arc].name.clone();
-                self.run_commands(&format!("point_on {}.start {}", src_name, arc_name));
+                self.exec(Action::ApplyEndpointOnArc { endpoint: DimensionEndpoint::ArcStart(src_arc), arc });
                 return;
             }
             (Selection::ArcEnd(src_arc), Selection::Arc(arc))
             | (Selection::Arc(arc), Selection::ArcEnd(src_arc)) => {
-                let src_name = self.sketch.arcs[src_arc].name.clone();
-                let arc_name = self.sketch.arcs[arc].name.clone();
-                self.run_commands(&format!("point_on {}.end {}", src_name, arc_name));
+                self.exec(Action::ApplyEndpointOnArc { endpoint: DimensionEndpoint::ArcEnd(src_arc), arc });
                 return;
             }
             // Line-to-line (default: a.p2 == b.p1)
@@ -1615,8 +1603,7 @@ impl EditorApp {
         }
 
         // General case: create a helper point and constrain both selections to it
-        self.exec(Action::AddHelperPoint { pos });
-        let helper = Ref::new(self.sketch.points.slot_count() as u32 - 1);
+        let helper = self.sketch.add_helper_point(pos);
         if let Some(action) = Self::coincident_action_to_point(s0, helper) {
             self.exec(action);
         }
@@ -2107,33 +2094,29 @@ impl EditorApp {
             (ArcPoint::End, SnapTarget::ArcEnd(other)) => { self.exec(Action::ApplyCoincidentArcEndEnd { a: arc, b: other }); return; }
             _ => {}
         }
-        // Line body or ArcBody: delegate to point_on command (handles duplicate detection)
-        let arc_name = self.sketch.arcs[arc].name.clone();
-        let ep_suffix = match which {
-            ArcPoint::Center => "center",
-            ArcPoint::Start => "start",
-            ArcPoint::End => "end",
+        // Convert ArcPoint to DimensionEndpoint
+        let endpoint = match which {
+            ArcPoint::Center => DimensionEndpoint::ArcCenter(arc),
+            ArcPoint::Start => DimensionEndpoint::ArcStart(arc),
+            ArcPoint::End => DimensionEndpoint::ArcEnd(arc),
         };
         match snap {
             SnapTarget::Line(line) => {
-                let line_name = self.sketch.lines[line].name.clone();
-                self.run_commands(&format!("point_on {}.{} {}", arc_name, ep_suffix, line_name));
+                self.exec(Action::ApplyEndpointOnLine { endpoint, line });
             }
             SnapTarget::ArcBody(target_arc) => {
-                let target_name = self.sketch.arcs[target_arc].name.clone();
-                self.run_commands(&format!("point_on {}.{} {}", arc_name, ep_suffix, target_name));
+                self.exec(Action::ApplyEndpointOnArc { endpoint, arc: target_arc });
             }
             _ => {
-                // Point, LineP1/P2, ArcCenter/Start/End: create helper + bridge
-                let arc_constraint: fn(Ref<Point>, Ref<Arc>) -> Action = match which {
-                    ArcPoint::Center => |p, a| Action::ApplyCoincidentArcCenter { point: p, arc: a },
-                    ArcPoint::Start => |p, a| Action::ApplyCoincidentArcStart { point: p, arc: a },
-                    ArcPoint::End => |p, a| Action::ApplyCoincidentArcEnd { point: p, arc: a },
+                // Point, LineP1/P2, ArcCenter/Start/End: create helper + bridge + coincident
+                let hp_pos = pos;
+                let hp = self.sketch.add_helper_point(hp_pos);
+                match which {
+                    ArcPoint::Center => self.exec(Action::ApplyCoincidentArcCenter { point: hp, arc }),
+                    ArcPoint::Start => self.exec(Action::ApplyCoincidentArcStart { point: hp, arc }),
+                    ArcPoint::End => self.exec(Action::ApplyCoincidentArcEnd { point: hp, arc }),
                 };
-                self.exec(Action::AddHelperPoint { pos });
-                let helper = Ref::new(self.sketch.points.slot_count() as u32 - 1);
-                self.exec(arc_constraint(helper, arc));
-                self.apply_snap_coincident_point(snap, helper);
+                self.apply_snap_coincident_point(snap, hp);
             }
         }
     }

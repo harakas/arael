@@ -12,7 +12,6 @@ use crate::geometry::circumscribed_arc;
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub enum Action {
     AddPoint { pos: vect2d },
-    AddHelperPoint { pos: vect2d },
     AddLine { p1: vect2d, p2: vect2d },
     ApplyHorizontal { lines: Vec<Ref<Line>> },
     ApplyVertical { lines: Vec<Ref<Line>> },
@@ -55,6 +54,12 @@ pub enum Action {
     ApplyTangentAA { a: Ref<Arc>, b: Ref<Arc> },
     ApplyPointOnLine { point: Ref<Point>, line: Ref<Line> },
     ApplyPointOnArc { point: Ref<Point>, arc: Ref<Arc> },
+    /// Constrain any endpoint (including arc center/start/end) on a line.
+    /// Creates helper point + bridge constraint internally if needed.
+    ApplyEndpointOnLine { endpoint: DimensionEndpoint, line: Ref<Line> },
+    /// Constrain any endpoint (including arc center/start/end) on an arc.
+    /// Creates helper point + bridge constraint internally if needed.
+    ApplyEndpointOnArc { endpoint: DimensionEndpoint, arc: Ref<Arc> },
     ApplyCollinear { a: Ref<Line>, b: Ref<Line> },
     ApplySymmetryLL { a: Ref<Line>, b: Ref<Line>, c: Ref<Line> },
     ApplySymmetryPP { a: Ref<Point>, line: Ref<Line>, c: Ref<Point> },
@@ -95,7 +100,6 @@ impl Action {
     pub fn describe(&self) -> String {
         match self {
             Action::AddPoint { .. } => "Add point".into(),
-            Action::AddHelperPoint { .. } => "Add helper point".into(),
             Action::AddLine { .. } => "Add line".into(),
             Action::AddCircle { .. } => "Add circle".into(),
             Action::AddArc { .. } => "Add arc".into(),
@@ -113,8 +117,8 @@ impl Action {
             Action::ApplyMidpoint { .. } | Action::ApplyMidpointLP1 { .. } |
             Action::ApplyMidpointLP2 { .. } | Action::ApplyMidpointArcStart { .. } |
             Action::ApplyMidpointArcEnd { .. } => "Midpoint".into(),
-            Action::ApplyPointOnLine { .. } => "Point on line".into(),
-            Action::ApplyPointOnArc { .. } => "Point on arc".into(),
+            Action::ApplyPointOnLine { .. } | Action::ApplyEndpointOnLine { .. } => "Point on line".into(),
+            Action::ApplyPointOnArc { .. } | Action::ApplyEndpointOnArc { .. } => "Point on arc".into(),
             Action::ApplyLineP1OnLine { .. } | Action::ApplyLineP2OnLine { .. } => "Endpoint on line".into(),
             Action::ApplyLineP1OnArc { .. } | Action::ApplyLineP2OnArc { .. } => "Endpoint on arc".into(),
             Action::ApplyTangentLA { .. } => "Tangent LA".into(),
@@ -190,6 +194,7 @@ impl Action {
             Action::ApplyMidpointLP2 { .. } | Action::ApplyMidpointArcStart { .. } |
             Action::ApplyMidpointArcEnd { .. } |
             Action::ApplyPointOnLine { .. } | Action::ApplyPointOnArc { .. } |
+            Action::ApplyEndpointOnLine { .. } | Action::ApplyEndpointOnArc { .. } |
             Action::ApplyLineP1OnLine { .. } | Action::ApplyLineP2OnLine { .. } |
             Action::AddDimension { .. } | Action::UpdateDimension { .. }
         )
@@ -253,7 +258,6 @@ impl Action {
     pub fn apply(&self, sketch: &mut Sketch) {
         match self {
             Action::AddPoint { pos } => { sketch.add_point(*pos); }
-            Action::AddHelperPoint { pos } => { sketch.add_helper_point(*pos); }
             Action::AddLine { p1, p2 } => { sketch.add_line(*p1, *p2); }
             Action::AddCircle { center, edge } => {
                 let r = ((edge.x - center.x).powi(2) + (edge.y - center.y).powi(2)).sqrt();
@@ -398,6 +402,16 @@ impl Action {
             }
             Action::ApplyPointOnArc { point, arc } => {
                 sketch.point_on_arc.push(PointOnArc { point: *point, arc: *arc, hb: CrossBlock::new() });
+                sketch.solve();
+            }
+            Action::ApplyEndpointOnLine { endpoint, line } => {
+                let point = resolve_dim_endpoint(sketch, endpoint);
+                sketch.point_on_line.push(PointOnLine { point, line: *line, hb: CrossBlock::new() });
+                sketch.solve();
+            }
+            Action::ApplyEndpointOnArc { endpoint, arc } => {
+                let point = resolve_dim_endpoint(sketch, endpoint);
+                sketch.point_on_arc.push(PointOnArc { point, arc: *arc, hb: CrossBlock::new() });
                 sketch.solve();
             }
             Action::ApplyCollinear { a, b } => {
