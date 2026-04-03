@@ -800,7 +800,7 @@ fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
         "info" => cmd_info(ctx, args_str),
         "list" => cmd_list(ctx, args_str),
         "find" => cmd_find(ctx, args_str),
-        "dof" => ok(format!("DOF: {}", ctx.dof.map_or("pending".into(), |d| d.to_string()))),
+        "dof" => cmd_dof(ctx, args_str),
         "cost" => ok(format!("Cost: {:.6}", ctx.last_cost)),
         "undo" => cmd_undo(ctx, args_str),
         "redo" => cmd_redo(ctx, args_str),
@@ -2680,6 +2680,179 @@ fn cmd_set_driven(ctx: &mut CommandContext, args: &str) -> CommandResult {
 }
 
 // ---------------------------------------------------------------------------
+// DOF analysis
+// ---------------------------------------------------------------------------
+
+fn cmd_dof(ctx: &mut CommandContext, args: &str) -> CommandResult {
+    let arg = args.trim();
+    if arg.is_empty() {
+        return ok(format!("DOF: {}", ctx.dof.map_or("pending".into(), |d| d.to_string())));
+    }
+    if arg != "analyze" {
+        return err("Usage: dof | dof analyze");
+    }
+
+    // Synchronous DOF analysis with free direction identification
+    use arael::simple_lm::LmProblem;
+    use arael_sketch_solver::SymbolBag;
+
+    ctx.sketch.prepare_expr_constraints();
+
+    let saved_drift = ctx.sketch.drift_isigma;
+    ctx.sketch.drift_isigma = 0.0;
+
+    let mut params = Vec::new();
+    ctx.sketch.serialize64(&mut params);
+    let n = params.len();
+    if n == 0 {
+        ctx.sketch.drift_isigma = saved_drift;
+        return ok("DOF: 0 (no geometry)");
+    }
+
+    // Build reverse param map: index -> name
+    let bag = SymbolBag::build(&ctx.sketch);
+    let mut idx_to_name: Vec<String> = vec![String::new(); n];
+    for (name, &idx) in &bag.param_indices {
+        let i = idx as usize;
+        if i < n && idx_to_name[i].is_empty() {
+            idx_to_name[i] = name.clone();
+        }
+    }
+
+    let mut grad = vec![0.0f64; n];
+    let mut hessian = vec![0.0f64; n * n];
+    ctx.sketch.calc_grad_hessian_dense(&params, &mut grad, &mut hessian);
+
+    ctx.sketch.drift_isigma = saved_drift;
+
+    let h = nalgebra::DMatrix::from_row_slice(n, n, &hessian);
+    let eigen = nalgebra::SymmetricEigen::new(h);
+    let max_ev = eigen.eigenvalues.iter().cloned().fold(0.0f64, f64::max);
+    let threshold = if max_ev > 0.0 { max_ev * 1e-8 } else { 1e-10 };
+
+    // Collect null-space eigenvectors (free directions)
+    let mut free_dirs: Vec<String> = Vec::new();
+    for col in 0..n {
+        if eigen.eigenvalues[col].abs() > threshold { continue; }
+        let ev = eigen.eigenvectors.column(col);
+
+        // Find significant components
+        let max_comp = ev.iter().cloned().fold(0.0f64, |a, b| a.max(b.abs()));
+        if max_comp < 1e-10 { continue; }
+        let comp_threshold = max_comp * 0.1;
+
+        // Collect participating parameters
+        let mut parts: Vec<(String, f64)> = Vec::new();
+        for i in 0..n {
+            if ev[i].abs() > comp_threshold {
+                let name = if idx_to_name[i].is_empty() {
+                    format!("param[{}]", i)
+                } else {
+                    idx_to_name[i].clone()
+                };
+                parts.push((name, ev[i]));
+            }
+        }
+        if parts.is_empty() { continue; }
+
+        // Classify the motion
+        let desc = classify_free_direction(&parts);
+        free_dirs.push(desc);
+    }
+
+    let dof = free_dirs.len();
+    let mut lines = vec![format!("DOF: {}", dof)];
+    for (i, desc) in free_dirs.iter().enumerate() {
+        lines.push(format!("  {}. {}", i + 1, desc));
+    }
+    ok(lines.join("\n"))
+}
+
+/// Classify a free direction from its eigenvector components.
+fn classify_free_direction(parts: &[(String, f64)]) -> String {
+    // Single parameter free
+    if parts.len() == 1 {
+        return format!("{} is free", parts[0].0);
+    }
+
+    // Collect entity names and check motion patterns
+    let mut entities = std::collections::BTreeSet::new();
+    let mut all_x = true;
+    let mut all_y = true;
+    let mut has_non_xy = false;
+
+    for (name, _val) in parts {
+        // Extract entity name (e.g., "L0" from "L0.p1.x")
+        let entity = name.split('.').next().unwrap_or(name);
+        entities.insert(entity.to_string());
+
+        if name.ends_with(".x") {
+            all_y = false;
+        } else if name.ends_with(".y") {
+            all_x = false;
+        } else {
+            // radius, angle, etc.
+            all_x = false;
+            all_y = false;
+            has_non_xy = false;
+        }
+    }
+
+    let entity_list: Vec<&str> = entities.iter().map(|s| s.as_str()).collect();
+    let entity_str = if entity_list.len() <= 5 {
+        entity_list.join(", ")
+    } else {
+        format!("{} entities", entity_list.len())
+    };
+
+    // Check for pure translation
+    if all_x && !has_non_xy {
+        return format!("translate X: {}", entity_str);
+    }
+    if all_y && !has_non_xy {
+        return format!("translate Y: {}", entity_str);
+    }
+
+    // Check for uniform translation (all x components equal AND all y components equal)
+    let x_vals: Vec<f64> = parts.iter()
+        .filter(|(n, _)| n.ends_with(".x"))
+        .map(|(_, v)| *v).collect();
+    let y_vals: Vec<f64> = parts.iter()
+        .filter(|(n, _)| n.ends_with(".y"))
+        .map(|(_, v)| *v).collect();
+
+    if !x_vals.is_empty() && !y_vals.is_empty() && y_vals.iter().all(|v| v.abs() < 1e-6) {
+        // All Y near zero, only X moves
+        return format!("translate X: {}", entity_str);
+    }
+    if !x_vals.is_empty() && !y_vals.is_empty() && x_vals.iter().all(|v| v.abs() < 1e-6) {
+        return format!("translate Y: {}", entity_str);
+    }
+
+    // Check for rotation: x and y components should follow tangent pattern
+    // For rotation around centroid, dx_i ~ -(y_i - cy), dy_i ~ (x_i - cx)
+    // Simplified: if x and y components are mixed and entities share the motion, call it rotation
+    if !x_vals.is_empty() && !y_vals.is_empty() && x_vals.len() == y_vals.len() && !has_non_xy {
+        // Check if all translation components are equal (pure translation)
+        let all_x_equal = x_vals.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-6);
+        let all_y_equal = y_vals.windows(2).all(|w| (w[0] - w[1]).abs() < 1e-6);
+        if all_x_equal && all_y_equal {
+            return format!("translate: {}", entity_str);
+        }
+        return format!("rotate: {}", entity_str);
+    }
+
+    // Check for single-entity multi-param freedom
+    if entities.len() == 1 {
+        let param_list: Vec<&str> = parts.iter().map(|(n, _)| n.as_str()).collect();
+        return format!("{} free: {}", entity_list[0], param_list.join(", "));
+    }
+
+    // Fallback: list participating entities
+    format!("coupled motion: {}", entity_str)
+}
+
+// ---------------------------------------------------------------------------
 // Help
 // ---------------------------------------------------------------------------
 
@@ -3134,7 +3307,14 @@ pub fn complete(
         }
 
         // No completions for these
-        "undo" | "redo" | "history" | "goto" | "dof" | "cost" | "clear"
+        // dof: single arg
+        "dof" => {
+            if token_index == 1 {
+                add_matching(&mut results, current_word, &["analyze"]);
+            }
+        }
+
+        "undo" | "redo" | "history" | "goto" | "cost" | "clear"
         | "deselect" | "save" | "load" | "msg" | "find" | "zoom" => {}
 
         _ => {}
@@ -4506,6 +4686,42 @@ mod tests {
 
     fn completions(ctx: &CommandContext, input: &str) -> Vec<String> {
         complete(&ctx.sketch, &ctx.session_names, input, input.len())
+    }
+
+    // -- DOF analysis --
+
+    #[test]
+    fn test_dof_analyze_unconstrained_line() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0");
+        let out = run_ok(&mut ctx, "dof analyze");
+        assert!(out.contains("DOF: 4"), "Unconstrained line should have 4 DOF: {}", out);
+    }
+
+    #[test]
+    fn test_dof_analyze_constrained() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0; horizontal L0; length L0 5; lock L0.p1 0,0");
+        let out = run_ok(&mut ctx, "dof analyze");
+        assert!(out.contains("DOF: 0"), "Fully constrained should be DOF 0: {}", out);
+    }
+
+    #[test]
+    fn test_dof_analyze_partial() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0; horizontal L0; length L0 5");
+        let out = run_ok(&mut ctx, "dof analyze");
+        // 4 DOF - 1 (horizontal) - 1 (length) = 2 DOF (translate X, Y)
+        assert!(out.contains("DOF: 2"), "Should have 2 DOF: {}", out);
+        assert!(out.contains("translate"), "Should identify translation: {}", out);
+    }
+
+    #[test]
+    fn test_dof_analyze_empty() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "clear");
+        let out = run_ok(&mut ctx, "dof analyze");
+        assert!(out.contains("DOF: 0"), "Empty sketch should be 0 DOF: {}", out);
     }
 
     // -- point_on with arc endpoints --

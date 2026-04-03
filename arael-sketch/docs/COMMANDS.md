@@ -357,6 +357,7 @@ list params                  List only parameters
 list constraints             List all active constraints
 find x,y [radius]            Find entities near a coordinate
 dof                          Show degrees of freedom (computed in background, may show "pending")
+dof analyze                  Analyze free directions: which entities can move and how
 cost                         Show current solver cost
 ```
 
