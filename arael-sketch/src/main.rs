@@ -81,8 +81,7 @@ fn compute_dof(sketch: &mut Sketch) -> usize {
     // Build nalgebra matrix and compute eigenvalues
     let h = nalgebra::DMatrix::from_row_slice(n, n, &hessian);
     let eigen = nalgebra::SymmetricEigen::new(h);
-    let max_ev = eigen.eigenvalues.iter().cloned().fold(0.0f64, f64::max);
-    let threshold = max_ev * 1e-8;
+    let threshold = 1e-6;
     let rank = eigen.eigenvalues.iter().filter(|&&ev| ev.abs() > threshold).count();
 
     n.saturating_sub(rank)

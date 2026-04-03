@@ -2794,28 +2794,12 @@ fn cmd_set_driven(ctx: &mut CommandContext, args: &str) -> CommandResult {
 // DOF analysis
 // ---------------------------------------------------------------------------
 
-/// Compute DOF synchronously and return (dof_count, free_direction_descriptions).
-/// Compute DOF count only (no free direction analysis). Used for constraint validation.
+/// Compute DOF count only. Delegates to compute_dof_sync and discards descriptions.
 fn compute_dof_count(sketch: &mut Sketch) -> usize {
-    use arael::simple_lm::LmProblem;
-    sketch.prepare_expr_constraints();
-    let saved_drift = sketch.drift_isigma;
-    sketch.drift_isigma = 0.0;
-    let mut params = Vec::new();
-    sketch.serialize64(&mut params);
-    let n = params.len();
-    if n == 0 { sketch.drift_isigma = saved_drift; return 0; }
-    let mut grad = vec![0.0f64; n];
-    let mut hessian = vec![0.0f64; n * n];
-    sketch.calc_grad_hessian_dense(&params, &mut grad, &mut hessian);
-    sketch.drift_isigma = saved_drift;
-    let h = nalgebra::DMatrix::from_row_slice(n, n, &hessian);
-    let eigen = nalgebra::SymmetricEigen::new(h);
-    let max_ev = eigen.eigenvalues.iter().cloned().fold(0.0f64, f64::max);
-    let threshold = if max_ev > 0.0 { max_ev * 1e-8 } else { 1e-10 };
-    eigen.eigenvalues.iter().filter(|&&ev| ev.abs() <= threshold).count()
+    compute_dof_sync(sketch).0
 }
 
+/// Compute DOF synchronously with free direction analysis.
 fn compute_dof_sync(sketch: &mut Sketch) -> (usize, Vec<String>) {
     use arael::simple_lm::LmProblem;
     use arael_sketch_solver::SymbolBag;
@@ -2850,8 +2834,7 @@ fn compute_dof_sync(sketch: &mut Sketch) -> (usize, Vec<String>) {
 
     let h = nalgebra::DMatrix::from_row_slice(n, n, &hessian);
     let eigen = nalgebra::SymmetricEigen::new(h);
-    let max_ev = eigen.eigenvalues.iter().cloned().fold(0.0f64, f64::max);
-    let threshold = if max_ev > 0.0 { max_ev * 1e-8 } else { 1e-10 };
+    let threshold = 1e-6;
 
     let mut free_dirs: Vec<String> = Vec::new();
     for col in 0..n {
