@@ -112,11 +112,13 @@ impl CommandContext {
 
             let cost_jumped = new_cost > old_cost + 1e-3;
             if cost_jumped {
+                let msg = format!(
+                    "Constraint rejected: could not satisfy all constraints (cost {:.4} -> {:.4})",
+                    old_cost, new_cost);
                 if let Some(snap) = snapshot {
                     if let Ok(restored) = bincode::deserialize(&snap) {
                         self.sketch = restored;
-                        self.status_error = Some(
-                            "Constraint rejected: solver failed to satisfy all constraints".into());
+                        self.status_error = Some(msg);
                         return;
                     }
                 }
@@ -148,7 +150,12 @@ fn ok_or_status(ctx: &mut CommandContext, msg: impl Into<String>) -> CommandResu
     if let Some(e) = ctx.status_error.take() {
         CommandResult { output: e, is_error: true, no_echo: false, markdown: false }
     } else {
-        CommandResult { output: msg.into(), is_error: false, no_echo: false, markdown: false }
+        let m = msg.into();
+        if m.is_empty() {
+            CommandResult { output: m, is_error: false, no_echo: true, markdown: false }
+        } else {
+            CommandResult { output: m, is_error: false, no_echo: false, markdown: false }
+        }
     }
 }
 
@@ -692,7 +699,11 @@ pub fn execute(ctx: &mut CommandContext, input: &str) -> Vec<CommandResult> {
     for cmd in input.split(';') {
         let cmd = cmd.trim();
         if cmd.is_empty() { continue; }
-        results.push(execute_one(ctx, cmd));
+        let mut r = execute_one(ctx, cmd);
+        if r.is_error && !r.output.starts_with('>') {
+            r.output = format!("'{}': {}", cmd, r.output);
+        }
+        results.push(r);
     }
     if results.is_empty() {
         results.push(ok(""));
