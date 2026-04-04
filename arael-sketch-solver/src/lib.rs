@@ -88,6 +88,16 @@ pub struct Sketch {
     pub midpoint_lp2: std::vec::Vec<MidpointLP2>,
     pub midpoint_arc_start: std::vec::Vec<MidpointArcStart>,
     pub midpoint_arc_end: std::vec::Vec<MidpointArcEnd>,
+    #[serde(default)]
+    pub midpoint_arc_point: std::vec::Vec<MidpointArcPoint>,
+    #[serde(default)]
+    pub midpoint_lp1_arc: std::vec::Vec<MidpointLP1Arc>,
+    #[serde(default)]
+    pub midpoint_lp2_arc: std::vec::Vec<MidpointLP2Arc>,
+    #[serde(default)]
+    pub midpoint_arc_start_arc: std::vec::Vec<MidpointArcStartArc>,
+    #[serde(default)]
+    pub midpoint_arc_end_arc: std::vec::Vec<MidpointArcEndArc>,
     pub point_on_arc: std::vec::Vec<PointOnArc>,
     pub parallel: std::vec::Vec<Parallel>,
     pub perpendicular: std::vec::Vec<Perpendicular>,
@@ -186,6 +196,11 @@ impl Sketch {
             midpoint_lp2: Vec::new(),
             midpoint_arc_start: Vec::new(),
             midpoint_arc_end: Vec::new(),
+            midpoint_arc_point: Vec::new(),
+            midpoint_lp1_arc: Vec::new(),
+            midpoint_lp2_arc: Vec::new(),
+            midpoint_arc_start_arc: Vec::new(),
+            midpoint_arc_end_arc: Vec::new(),
             point_on_arc: Vec::new(),
             parallel: Vec::new(),
             perpendicular: Vec::new(),
@@ -327,6 +342,7 @@ impl Sketch {
         self.vdistance_pp.retain(|c| c.a != r && c.b != r);
         self.point_on_line.retain(|c| c.point != r);
         self.midpoint.retain(|c| c.point != r);
+        self.midpoint_arc_point.retain(|c| c.point != r);
         self.point_on_arc.retain(|c| c.point != r);
         self.distance_pl.retain(|c| c.point != r);
         self.coincident_arc_center.retain(|c| c.point != r);
@@ -353,6 +369,8 @@ impl Sketch {
         self.midpoint_lp2.retain(|c| c.line != r && c.target != r);
         self.midpoint_arc_start.retain(|c| c.line != r);
         self.midpoint_arc_end.retain(|c| c.line != r);
+        self.midpoint_lp1_arc.retain(|c| c.line != r);
+        self.midpoint_lp2_arc.retain(|c| c.line != r);
         self.parallel.retain(|c| c.a != r && c.b != r);
         self.perpendicular.retain(|c| c.a != r && c.b != r);
         self.collinear.retain(|c| c.a != r && c.b != r);
@@ -394,6 +412,11 @@ impl Sketch {
         self.tangent_aa.retain(|c| c.a != r && c.b != r);
         self.midpoint_arc_start.retain(|c| c.arc != r);
         self.midpoint_arc_end.retain(|c| c.arc != r);
+        self.midpoint_arc_point.retain(|c| c.arc != r);
+        self.midpoint_lp1_arc.retain(|c| c.arc != r);
+        self.midpoint_lp2_arc.retain(|c| c.arc != r);
+        self.midpoint_arc_start_arc.retain(|c| c.a != r && c.b != r);
+        self.midpoint_arc_end_arc.retain(|c| c.a != r && c.b != r);
         self.coincident_arc_center.retain(|c| c.arc != r);
         self.coincident_arc_start.retain(|c| c.arc != r);
         self.coincident_arc_end.retain(|c| c.arc != r);
@@ -617,6 +640,26 @@ impl Sketch {
         {
             let mut seen = std::collections::HashSet::new();
             self.midpoint_arc_end.retain(|c| seen.insert((c.arc.index(), c.line.index())));
+        }
+        {
+            let mut seen = std::collections::HashSet::new();
+            self.midpoint_arc_point.retain(|c| seen.insert((c.point.index(), c.arc.index())));
+        }
+        {
+            let mut seen = std::collections::HashSet::new();
+            self.midpoint_lp1_arc.retain(|c| seen.insert((c.line.index(), c.arc.index())));
+        }
+        {
+            let mut seen = std::collections::HashSet::new();
+            self.midpoint_lp2_arc.retain(|c| seen.insert((c.line.index(), c.arc.index())));
+        }
+        {
+            let mut seen = std::collections::HashSet::new();
+            self.midpoint_arc_start_arc.retain(|c| seen.insert((c.a.index(), c.b.index())));
+        }
+        {
+            let mut seen = std::collections::HashSet::new();
+            self.midpoint_arc_end_arc.retain(|c| seen.insert((c.a.index(), c.b.index())));
         }
         dedup_pa!(self.point_on_arc, "point_on_arc");
         dedup_ab!(self.parallel, "parallel", self.lines, self.lines);
@@ -1080,6 +1123,15 @@ impl Sketch {
         for c in &self.point_on_line { out.push(format!("point_on {} {}", self.point_display_name(c.point), self.lines[c.line].name)); }
         for c in &self.point_on_arc { out.push(format!("point_on {} {}", self.point_display_name(c.point), self.arcs[c.arc].name)); }
         for c in &self.midpoint { out.push(format!("midpoint {} {}", self.point_display_name(c.point), self.lines[c.line].name)); }
+        for c in &self.midpoint_lp1 { out.push(format!("midpoint {}.p1 {}", self.lines[c.line].name, self.lines[c.target].name)); }
+        for c in &self.midpoint_lp2 { out.push(format!("midpoint {}.p2 {}", self.lines[c.line].name, self.lines[c.target].name)); }
+        for c in &self.midpoint_arc_start { out.push(format!("midpoint {}.start {}", self.arcs[c.arc].name, self.lines[c.line].name)); }
+        for c in &self.midpoint_arc_end { out.push(format!("midpoint {}.end {}", self.arcs[c.arc].name, self.lines[c.line].name)); }
+        for c in &self.midpoint_arc_point { out.push(format!("midpoint {} {}", self.point_display_name(c.point), self.arcs[c.arc].name)); }
+        for c in &self.midpoint_lp1_arc { out.push(format!("midpoint {}.p1 {}", self.lines[c.line].name, self.arcs[c.arc].name)); }
+        for c in &self.midpoint_lp2_arc { out.push(format!("midpoint {}.p2 {}", self.lines[c.line].name, self.arcs[c.arc].name)); }
+        for c in &self.midpoint_arc_start_arc { out.push(format!("midpoint {}.start {}", self.arcs[c.a].name, self.arcs[c.b].name)); }
+        for c in &self.midpoint_arc_end_arc { out.push(format!("midpoint {}.end {}", self.arcs[c.a].name, self.arcs[c.b].name)); }
         for c in &self.distance_pp { out.push(format!("distance {} {} = {}", self.point_display_name(c.a), self.point_display_name(c.b), c.distance)); }
         for c in &self.hdistance_pp { out.push(format!("hdistance {} {} = {}", self.point_display_name(c.a), self.point_display_name(c.b), c.distance)); }
         for c in &self.vdistance_pp { out.push(format!("vdistance {} {} = {}", self.point_display_name(c.a), self.point_display_name(c.b), c.distance)); }

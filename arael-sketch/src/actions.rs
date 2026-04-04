@@ -68,6 +68,11 @@ pub enum Action {
     ApplyMidpointLP2 { line: Ref<Line>, target: Ref<Line> },
     ApplyMidpointArcStart { arc: Ref<Arc>, line: Ref<Line> },
     ApplyMidpointArcEnd { arc: Ref<Arc>, line: Ref<Line> },
+    ApplyMidpointArcPoint { point: Ref<Point>, arc: Ref<Arc> },
+    ApplyMidpointLP1Arc { line: Ref<Line>, arc: Ref<Arc> },
+    ApplyMidpointLP2Arc { line: Ref<Line>, arc: Ref<Arc> },
+    ApplyMidpointArcStartArc { a: Ref<Arc>, b: Ref<Arc> },
+    ApplyMidpointArcEndArc { a: Ref<Arc>, b: Ref<Arc> },
     ApplyLineP1OnLine { a: Ref<Line>, b: Ref<Line> },
     ApplyLineP2OnLine { a: Ref<Line>, b: Ref<Line> },
     LockPoint { point: Ref<Point>, pos: vect2d },
@@ -116,7 +121,10 @@ impl Action {
             Action::ApplySymmetryLL { .. } | Action::ApplySymmetryPP { .. } => "Symmetry".into(),
             Action::ApplyMidpoint { .. } | Action::ApplyMidpointLP1 { .. } |
             Action::ApplyMidpointLP2 { .. } | Action::ApplyMidpointArcStart { .. } |
-            Action::ApplyMidpointArcEnd { .. } => "Midpoint".into(),
+            Action::ApplyMidpointArcEnd { .. } |
+            Action::ApplyMidpointArcPoint { .. } | Action::ApplyMidpointLP1Arc { .. } |
+            Action::ApplyMidpointLP2Arc { .. } | Action::ApplyMidpointArcStartArc { .. } |
+            Action::ApplyMidpointArcEndArc { .. } => "Midpoint".into(),
             Action::ApplyPointOnLine { .. } | Action::ApplyEndpointOnLine { .. } => "Point on line".into(),
             Action::ApplyPointOnArc { .. } | Action::ApplyEndpointOnArc { .. } => "Point on arc".into(),
             Action::ApplyLineP1OnLine { .. } | Action::ApplyLineP2OnLine { .. } => "Endpoint on line".into(),
@@ -194,6 +202,9 @@ impl Action {
             Action::ApplyMidpoint { .. } | Action::ApplyMidpointLP1 { .. } |
             Action::ApplyMidpointLP2 { .. } | Action::ApplyMidpointArcStart { .. } |
             Action::ApplyMidpointArcEnd { .. } |
+            Action::ApplyMidpointArcPoint { .. } | Action::ApplyMidpointLP1Arc { .. } |
+            Action::ApplyMidpointLP2Arc { .. } | Action::ApplyMidpointArcStartArc { .. } |
+            Action::ApplyMidpointArcEndArc { .. } |
             Action::ApplyPointOnLine { .. } | Action::ApplyPointOnArc { .. } |
             Action::ApplyEndpointOnLine { .. } | Action::ApplyEndpointOnArc { .. } |
             Action::ApplyLineP1OnLine { .. } | Action::ApplyLineP2OnLine { .. } |
@@ -454,6 +465,26 @@ impl Action {
             }
             Action::ApplyMidpointArcEnd { arc, line } => {
                 sketch.midpoint_arc_end.push(MidpointArcEnd { arc: *arc, line: *line, hb: CrossBlock::new() });
+                sketch.solve();
+            }
+            Action::ApplyMidpointArcPoint { point, arc } => {
+                sketch.midpoint_arc_point.push(MidpointArcPoint { point: *point, arc: *arc, hb: CrossBlock::new() });
+                sketch.solve();
+            }
+            Action::ApplyMidpointLP1Arc { line, arc } => {
+                sketch.midpoint_lp1_arc.push(MidpointLP1Arc { line: *line, arc: *arc, hb: CrossBlock::new() });
+                sketch.solve();
+            }
+            Action::ApplyMidpointLP2Arc { line, arc } => {
+                sketch.midpoint_lp2_arc.push(MidpointLP2Arc { line: *line, arc: *arc, hb: CrossBlock::new() });
+                sketch.solve();
+            }
+            Action::ApplyMidpointArcStartArc { a, b } => {
+                sketch.midpoint_arc_start_arc.push(MidpointArcStartArc { a: *a, b: *b, hb: CrossBlock::new() });
+                sketch.solve();
+            }
+            Action::ApplyMidpointArcEndArc { a, b } => {
+                sketch.midpoint_arc_end_arc.push(MidpointArcEndArc { a: *a, b: *b, hb: CrossBlock::new() });
                 sketch.solve();
             }
             Action::ApplyLineP1OnLine { a, b } => {

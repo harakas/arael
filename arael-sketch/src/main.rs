@@ -691,6 +691,8 @@ impl EditorApp {
                 }
                 _ => {}
             }
+            // Auto-snap errors (e.g. redundant coincident) should not be shown
+            self.status_error = None;
         }
         self.grab = None;
     }
@@ -961,8 +963,9 @@ impl EditorApp {
                         Selection::Point(_) | Selection::LineP1(_) | Selection::LineP2(_)
                         | Selection::ArcStart(_) | Selection::ArcEnd(_));
                     let lines = sel.iter().filter(|s| matches!(s, Selection::Line(_))).count();
+                    let arcs = sel.iter().filter(|s| matches!(s, Selection::Arc(_))).count();
                     let pts = sel.iter().filter(|s| point_like(s)).count();
-                    pts == 1 && lines == 1
+                    (pts == 1 && lines == 1) || (pts == 1 && arcs == 1)
                 }
             }
             ConstraintType::Symmetry => {
@@ -1035,7 +1038,7 @@ impl EditorApp {
             }
             ConstraintType::Midpoint => {
                 matches!(sel, Selection::Point(_) | Selection::LineP1(_) | Selection::LineP2(_)
-                    | Selection::ArcStart(_) | Selection::ArcEnd(_) | Selection::Line(_))
+                    | Selection::ArcStart(_) | Selection::ArcEnd(_) | Selection::Line(_) | Selection::Arc(_))
             }
             ConstraintType::Symmetry => {
                 matches!(sel, Selection::Line(_) | Selection::Point(_)
@@ -1775,6 +1778,17 @@ impl EditorApp {
                 Some(Action::ApplyMidpointArcStart { arc, line: l }),
             (Selection::ArcEnd(arc), Selection::Line(l)) | (Selection::Line(l), Selection::ArcEnd(arc)) =>
                 Some(Action::ApplyMidpointArcEnd { arc, line: l }),
+            // Arc as target (angular midpoint)
+            (Selection::Point(p), Selection::Arc(a)) | (Selection::Arc(a), Selection::Point(p)) =>
+                Some(Action::ApplyMidpointArcPoint { point: p, arc: a }),
+            (Selection::LineP1(l), Selection::Arc(a)) | (Selection::Arc(a), Selection::LineP1(l)) =>
+                Some(Action::ApplyMidpointLP1Arc { line: l, arc: a }),
+            (Selection::LineP2(l), Selection::Arc(a)) | (Selection::Arc(a), Selection::LineP2(l)) =>
+                Some(Action::ApplyMidpointLP2Arc { line: l, arc: a }),
+            (Selection::ArcStart(src), Selection::Arc(tgt)) | (Selection::Arc(tgt), Selection::ArcStart(src)) =>
+                Some(Action::ApplyMidpointArcStartArc { a: src, b: tgt }),
+            (Selection::ArcEnd(src), Selection::Arc(tgt)) | (Selection::Arc(tgt), Selection::ArcEnd(src)) =>
+                Some(Action::ApplyMidpointArcEndArc { a: src, b: tgt }),
             _ => None,
         };
         if let Some(action) = action {
@@ -2195,6 +2209,11 @@ impl EditorApp {
                     MidpointKind::LP2 => { let c = &self.sketch.midpoint_lp2[i]; format!("{}.p2 @ mid({})", ln(c.line), ln(c.target)) }
                     MidpointKind::ArcStart => { let c = &self.sketch.midpoint_arc_start[i]; format!("{}.s @ mid({})", an(c.arc), ln(c.line)) }
                     MidpointKind::ArcEnd => { let c = &self.sketch.midpoint_arc_end[i]; format!("{}.e @ mid({})", an(c.arc), ln(c.line)) }
+                    MidpointKind::ArcPoint => { let c = &self.sketch.midpoint_arc_point[i]; format!("{} @ mid({})", pn(c.point), an(c.arc)) }
+                    MidpointKind::LP1Arc => { let c = &self.sketch.midpoint_lp1_arc[i]; format!("{}.p1 @ mid({})", ln(c.line), an(c.arc)) }
+                    MidpointKind::LP2Arc => { let c = &self.sketch.midpoint_lp2_arc[i]; format!("{}.p2 @ mid({})", ln(c.line), an(c.arc)) }
+                    MidpointKind::ArcStartArc => { let c = &self.sketch.midpoint_arc_start_arc[i]; format!("{}.s @ mid({})", an(c.a), an(c.b)) }
+                    MidpointKind::ArcEndArc => { let c = &self.sketch.midpoint_arc_end_arc[i]; format!("{}.e @ mid({})", an(c.a), an(c.b)) }
                 };
                 format!("Midpoint({})", desc)
             }
@@ -2300,6 +2319,11 @@ impl EditorApp {
                     MidpointKind::LP2 => { let c = &self.sketch.midpoint_lp2[i]; lines.push(c.line); lines.push(c.target); }
                     MidpointKind::ArcStart => { let c = &self.sketch.midpoint_arc_start[i]; arcs.push(c.arc); lines.push(c.line); }
                     MidpointKind::ArcEnd => { let c = &self.sketch.midpoint_arc_end[i]; arcs.push(c.arc); lines.push(c.line); }
+                    MidpointKind::ArcPoint => { let c = &self.sketch.midpoint_arc_point[i]; arcs.push(c.arc); }
+                    MidpointKind::LP1Arc => { let c = &self.sketch.midpoint_lp1_arc[i]; lines.push(c.line); arcs.push(c.arc); }
+                    MidpointKind::LP2Arc => { let c = &self.sketch.midpoint_lp2_arc[i]; lines.push(c.line); arcs.push(c.arc); }
+                    MidpointKind::ArcStartArc => { let c = &self.sketch.midpoint_arc_start_arc[i]; arcs.push(c.a); arcs.push(c.b); }
+                    MidpointKind::ArcEndArc => { let c = &self.sketch.midpoint_arc_end_arc[i]; arcs.push(c.a); arcs.push(c.b); }
                 }
             }
             ConstraintId::Coincident(kind, i) => {
@@ -2404,6 +2428,11 @@ impl EditorApp {
                     MidpointKind::LP2 => { self.sketch.midpoint_lp2.remove(i); }
                     MidpointKind::ArcStart => { self.sketch.midpoint_arc_start.remove(i); }
                     MidpointKind::ArcEnd => { self.sketch.midpoint_arc_end.remove(i); }
+                    MidpointKind::ArcPoint => { self.sketch.midpoint_arc_point.remove(i); }
+                    MidpointKind::LP1Arc => { self.sketch.midpoint_lp1_arc.remove(i); }
+                    MidpointKind::LP2Arc => { self.sketch.midpoint_lp2_arc.remove(i); }
+                    MidpointKind::ArcStartArc => { self.sketch.midpoint_arc_start_arc.remove(i); }
+                    MidpointKind::ArcEndArc => { self.sketch.midpoint_arc_end_arc.remove(i); }
                 }
             }
             ConstraintId::Coincident(kind, i) => {

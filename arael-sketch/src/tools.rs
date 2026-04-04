@@ -126,11 +126,16 @@ pub enum CoincidentKind {
 
 #[derive(Clone, Copy, PartialEq)]
 pub enum MidpointKind {
-    Point,       // Point at midpoint of line
-    LP1,         // Line P1 at midpoint of another line
-    LP2,         // Line P2 at midpoint of another line
-    ArcStart,    // Arc start at midpoint of line
-    ArcEnd,      // Arc end at midpoint of line
+    Point,          // Point at midpoint of line
+    LP1,            // Line P1 at midpoint of another line
+    LP2,            // Line P2 at midpoint of another line
+    ArcStart,       // Arc start at midpoint of line
+    ArcEnd,         // Arc end at midpoint of line
+    ArcPoint,       // Point at angular midpoint of arc
+    LP1Arc,         // Line P1 at angular midpoint of arc
+    LP2Arc,         // Line P2 at angular midpoint of arc
+    ArcStartArc,    // Arc start at angular midpoint of another arc
+    ArcEndArc,      // Arc end at angular midpoint of another arc
 }
 
 #[derive(Clone, Copy, PartialEq)]

@@ -761,6 +761,26 @@ impl EditorApp {
             let id = ConstraintId::Midpoint(MidpointKind::ArcEnd, i);
             add_line_marker(self, &mut markers, c.line, ConstraintSymbol::Midpoint, id, &mut line_marker_count);
         }
+        for (i, c) in self.sketch.midpoint_arc_point.iter().enumerate() {
+            let id = ConstraintId::Midpoint(MidpointKind::ArcPoint, i);
+            add_arc_marker(self, &mut markers, c.arc, ConstraintSymbol::Midpoint, id, &mut arc_marker_count);
+        }
+        for (i, c) in self.sketch.midpoint_lp1_arc.iter().enumerate() {
+            let id = ConstraintId::Midpoint(MidpointKind::LP1Arc, i);
+            add_arc_marker(self, &mut markers, c.arc, ConstraintSymbol::Midpoint, id, &mut arc_marker_count);
+        }
+        for (i, c) in self.sketch.midpoint_lp2_arc.iter().enumerate() {
+            let id = ConstraintId::Midpoint(MidpointKind::LP2Arc, i);
+            add_arc_marker(self, &mut markers, c.arc, ConstraintSymbol::Midpoint, id, &mut arc_marker_count);
+        }
+        for (i, c) in self.sketch.midpoint_arc_start_arc.iter().enumerate() {
+            let id = ConstraintId::Midpoint(MidpointKind::ArcStartArc, i);
+            add_arc_marker(self, &mut markers, c.b, ConstraintSymbol::Midpoint, id, &mut arc_marker_count);
+        }
+        for (i, c) in self.sketch.midpoint_arc_end_arc.iter().enumerate() {
+            let id = ConstraintId::Midpoint(MidpointKind::ArcEndArc, i);
+            add_arc_marker(self, &mut markers, c.b, ConstraintSymbol::Midpoint, id, &mut arc_marker_count);
+        }
         for (i, c) in self.sketch.symmetry_ll.iter().enumerate() {
             let id = ConstraintId::Symmetry(i);
             add_line_marker(self, &mut markers, c.a, ConstraintSymbol::Symmetry, id, &mut line_marker_count);

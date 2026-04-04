@@ -2260,30 +2260,58 @@ fn cmd_offset_line(ctx: &mut CommandContext, args: &str) -> CommandResult {
 
 fn cmd_midpoint(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let tokens: Vec<&str> = args.split_whitespace().collect();
-    if tokens.len() != 2 { return err("Usage: midpoint P0 L0  or  midpoint L0.p1 L1"); }
+    if tokens.len() != 2 { return err("Usage: midpoint P0 L0 | midpoint L0.p1 A0"); }
     let ep = match resolve_endpoint_ref(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
-    let line = match resolve_line(&ctx.sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
-    let s = &ctx.sketch;
-    let exists = match ep {
-        EndpointRef::Point(p) => s.midpoint.iter().any(|c| c.point == p && c.line == line),
-        EndpointRef::LineP1(l) => s.midpoint_lp1.iter().any(|c| c.line == l && c.target == line),
-        EndpointRef::LineP2(l) => s.midpoint_lp2.iter().any(|c| c.line == l && c.target == line),
-        EndpointRef::ArcStart(a) => s.midpoint_arc_start.iter().any(|c| c.arc == a && c.line == line),
-        EndpointRef::ArcEnd(a) => s.midpoint_arc_end.iter().any(|c| c.arc == a && c.line == line),
-        _ => false,
-    };
-    if exists { return err("Midpoint constraint already exists"); }
-    let action = match ep {
-        EndpointRef::Point(p) => Action::ApplyMidpoint { point: p, line },
-        EndpointRef::LineP1(l) => Action::ApplyMidpointLP1 { line: l, target: line },
-        EndpointRef::LineP2(l) => Action::ApplyMidpointLP2 { line: l, target: line },
-        EndpointRef::ArcStart(a) => Action::ApplyMidpointArcStart { arc: a, line },
-        EndpointRef::ArcEnd(a) => Action::ApplyMidpointArcEnd { arc: a, line },
-        _ => return err("First arg must be a point or endpoint"),
-    };
-    ctx.begin_group();
-    ctx.exec(action);
-    ok_or_status(ctx, "Applied midpoint")
+    let target = tokens[1];
+    // Target is a line or arc
+    if let Ok(line) = resolve_line(&ctx.sketch, target) {
+        let s = &ctx.sketch;
+        let exists = match ep {
+            EndpointRef::Point(p) => s.midpoint.iter().any(|c| c.point == p && c.line == line),
+            EndpointRef::LineP1(l) => s.midpoint_lp1.iter().any(|c| c.line == l && c.target == line),
+            EndpointRef::LineP2(l) => s.midpoint_lp2.iter().any(|c| c.line == l && c.target == line),
+            EndpointRef::ArcStart(a) => s.midpoint_arc_start.iter().any(|c| c.arc == a && c.line == line),
+            EndpointRef::ArcEnd(a) => s.midpoint_arc_end.iter().any(|c| c.arc == a && c.line == line),
+            _ => false,
+        };
+        if exists { return err("Midpoint constraint already exists"); }
+        let action = match ep {
+            EndpointRef::Point(p) => Action::ApplyMidpoint { point: p, line },
+            EndpointRef::LineP1(l) => Action::ApplyMidpointLP1 { line: l, target: line },
+            EndpointRef::LineP2(l) => Action::ApplyMidpointLP2 { line: l, target: line },
+            EndpointRef::ArcStart(a) => Action::ApplyMidpointArcStart { arc: a, line },
+            EndpointRef::ArcEnd(a) => Action::ApplyMidpointArcEnd { arc: a, line },
+            _ => return err("First arg must be a point or endpoint"),
+        };
+        ctx.begin_group();
+        ctx.exec(action);
+        ok_or_status(ctx, "Applied midpoint")
+    } else if let Ok(arc) = resolve_arc(&ctx.sketch, target) {
+        if ctx.sketch.arcs[arc].closed { return err("Cannot use midpoint on a full circle"); }
+        let s = &ctx.sketch;
+        let exists = match ep {
+            EndpointRef::Point(p) => s.midpoint_arc_point.iter().any(|c| c.point == p && c.arc == arc),
+            EndpointRef::LineP1(l) => s.midpoint_lp1_arc.iter().any(|c| c.line == l && c.arc == arc),
+            EndpointRef::LineP2(l) => s.midpoint_lp2_arc.iter().any(|c| c.line == l && c.arc == arc),
+            EndpointRef::ArcStart(a) => s.midpoint_arc_start_arc.iter().any(|c| c.a == a && c.b == arc),
+            EndpointRef::ArcEnd(a) => s.midpoint_arc_end_arc.iter().any(|c| c.a == a && c.b == arc),
+            _ => false,
+        };
+        if exists { return err("Midpoint constraint already exists"); }
+        let action = match ep {
+            EndpointRef::Point(p) => Action::ApplyMidpointArcPoint { point: p, arc },
+            EndpointRef::LineP1(l) => Action::ApplyMidpointLP1Arc { line: l, arc },
+            EndpointRef::LineP2(l) => Action::ApplyMidpointLP2Arc { line: l, arc },
+            EndpointRef::ArcStart(a) => Action::ApplyMidpointArcStartArc { a, b: arc },
+            EndpointRef::ArcEnd(a) => Action::ApplyMidpointArcEndArc { a, b: arc },
+            _ => return err("First arg must be a point or endpoint"),
+        };
+        ctx.begin_group();
+        ctx.exec(action);
+        ok_or_status(ctx, "Applied midpoint")
+    } else {
+        err("Second arg must be a line (L0) or arc (A0)")
+    }
 }
 
 /// Resolve a name to a Ref<Point>, creating a helper point + coincident if it's an endpoint ref.
@@ -2840,16 +2868,26 @@ fn cmd_remove_constraint(ctx: &mut CommandContext, args: &str) -> CommandResult 
         }
         "midpoint" if tokens.len() >= 3 => {
             let ep = match resolve_endpoint_ref(sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
-            let line = match resolve_line(sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
             use EndpointRef::*;
-            match ep {
-                Point(p) => { let b = sketch.midpoint.len(); sketch.midpoint.retain(|c| !(c.point == p && c.line == line)); sketch.midpoint.len() < b }
-                LineP1(l) => { let b = sketch.midpoint_lp1.len(); sketch.midpoint_lp1.retain(|c| !(c.line == l && c.target == line)); sketch.midpoint_lp1.len() < b }
-                LineP2(l) => { let b = sketch.midpoint_lp2.len(); sketch.midpoint_lp2.retain(|c| !(c.line == l && c.target == line)); sketch.midpoint_lp2.len() < b }
-                ArcStart(a) => { let b = sketch.midpoint_arc_start.len(); sketch.midpoint_arc_start.retain(|c| !(c.arc == a && c.line == line)); sketch.midpoint_arc_start.len() < b }
-                ArcEnd(a) => { let b = sketch.midpoint_arc_end.len(); sketch.midpoint_arc_end.retain(|c| !(c.arc == a && c.line == line)); sketch.midpoint_arc_end.len() < b }
-                ArcCenter(_) => false,
-            }
+            if let Ok(line) = resolve_line(sketch, tokens[1]) {
+                match ep {
+                    Point(p) => { let b = sketch.midpoint.len(); sketch.midpoint.retain(|c| !(c.point == p && c.line == line)); sketch.midpoint.len() < b }
+                    LineP1(l) => { let b = sketch.midpoint_lp1.len(); sketch.midpoint_lp1.retain(|c| !(c.line == l && c.target == line)); sketch.midpoint_lp1.len() < b }
+                    LineP2(l) => { let b = sketch.midpoint_lp2.len(); sketch.midpoint_lp2.retain(|c| !(c.line == l && c.target == line)); sketch.midpoint_lp2.len() < b }
+                    ArcStart(a) => { let b = sketch.midpoint_arc_start.len(); sketch.midpoint_arc_start.retain(|c| !(c.arc == a && c.line == line)); sketch.midpoint_arc_start.len() < b }
+                    ArcEnd(a) => { let b = sketch.midpoint_arc_end.len(); sketch.midpoint_arc_end.retain(|c| !(c.arc == a && c.line == line)); sketch.midpoint_arc_end.len() < b }
+                    ArcCenter(_) => false,
+                }
+            } else if let Ok(arc) = resolve_arc(sketch, tokens[1]) {
+                match ep {
+                    Point(p) => { let b = sketch.midpoint_arc_point.len(); sketch.midpoint_arc_point.retain(|c| !(c.point == p && c.arc == arc)); sketch.midpoint_arc_point.len() < b }
+                    LineP1(l) => { let b = sketch.midpoint_lp1_arc.len(); sketch.midpoint_lp1_arc.retain(|c| !(c.line == l && c.arc == arc)); sketch.midpoint_lp1_arc.len() < b }
+                    LineP2(l) => { let b = sketch.midpoint_lp2_arc.len(); sketch.midpoint_lp2_arc.retain(|c| !(c.line == l && c.arc == arc)); sketch.midpoint_lp2_arc.len() < b }
+                    ArcStart(a) => { let b = sketch.midpoint_arc_start_arc.len(); sketch.midpoint_arc_start_arc.retain(|c| !(c.a == a && c.b == arc)); sketch.midpoint_arc_start_arc.len() < b }
+                    ArcEnd(a) => { let b = sketch.midpoint_arc_end_arc.len(); sketch.midpoint_arc_end_arc.retain(|c| !(c.a == a && c.b == arc)); sketch.midpoint_arc_end_arc.len() < b }
+                    ArcCenter(_) => false,
+                }
+            } else { false }
         }
         _ => { return err(format!("Unknown constraint type: {}. Use: horizontal, vertical, parallel, perpendicular, equal, equal_radius, collinear, tangent, concentric, coincident, point_on, symmetry, midpoint, lock", ctype)); }
     };
@@ -4768,6 +4806,43 @@ mod tests {
         run_ok(&mut ctx, "midpoint P0 L0");
         let e = run_err(&mut ctx, "midpoint P0 L0");
         assert!(e.contains("already exists"));
+    }
+
+    #[test]
+    fn test_midpoint_arc_point() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_arc -4,0 4,0 0,4; add_point 0,5");
+        run_ok(&mut ctx, "midpoint P0 A0");
+        assert_eq!(ctx.sketch.midpoint_arc_point.len(), 1);
+        // Duplicate check
+        let e = run_err(&mut ctx, "midpoint P0 A0");
+        assert!(e.contains("already exists"), "{}", e);
+    }
+
+    #[test]
+    fn test_midpoint_arc_line_endpoint() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_arc -4,0 4,0 0,4; add_line -1,5 1,5");
+        run_ok(&mut ctx, "midpoint L0.p1 A0");
+        assert_eq!(ctx.sketch.midpoint_lp1_arc.len(), 1);
+    }
+
+    #[test]
+    fn test_midpoint_arc_circle_rejected() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_circle 0,0 5; add_point 0,5");
+        let e = run_err(&mut ctx, "midpoint P0 A0");
+        assert!(e.contains("full circle"), "{}", e);
+    }
+
+    #[test]
+    fn test_remove_constraint_midpoint_arc() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_arc -4,0 4,0 0,4; add_point 0,5");
+        run_ok(&mut ctx, "midpoint P0 A0");
+        assert_eq!(ctx.sketch.midpoint_arc_point.len(), 1);
+        run_ok(&mut ctx, "remove_constraint P0 A0 midpoint");
+        assert_eq!(ctx.sketch.midpoint_arc_point.len(), 0);
     }
 
     #[test]

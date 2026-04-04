@@ -262,6 +262,107 @@ pub struct MidpointArcEnd {
     pub hb: CrossBlock<Arc, Line>,
 }
 
+// -- Midpoint on Arc (angular midpoint) --
+
+// Point at angular midpoint of arc
+#[derive(serde::Serialize, serde::Deserialize)]
+#[arael::model]
+#[arael(constraint(hb, {
+    let mid_angle = (arc.start_angle + arc.end_angle) * 0.5;
+    let mx = arc.center.x + arc.radius * cos(mid_angle);
+    let my = arc.center.y + arc.radius * sin(mid_angle);
+    [(point.pos.x - mx) * sketch.constraint_isigma,
+     (point.pos.y - my) * sketch.constraint_isigma]
+}))]
+pub struct MidpointArcPoint {
+    #[arael(ref = root.points)]
+    pub point: Ref<Point>,
+    #[arael(ref = root.arcs)]
+    pub arc: Ref<Arc>,
+    #[serde(skip)]
+    pub hb: CrossBlock<Point, Arc>,
+}
+
+// Line P1 at angular midpoint of arc
+#[derive(serde::Serialize, serde::Deserialize)]
+#[arael::model]
+#[arael(constraint(hb, {
+    let mid_angle = (arc.start_angle + arc.end_angle) * 0.5;
+    let mx = arc.center.x + arc.radius * cos(mid_angle);
+    let my = arc.center.y + arc.radius * sin(mid_angle);
+    [(line.p1.x - mx) * sketch.constraint_isigma,
+     (line.p1.y - my) * sketch.constraint_isigma]
+}))]
+pub struct MidpointLP1Arc {
+    #[arael(ref = root.lines)]
+    pub line: Ref<Line>,
+    #[arael(ref = root.arcs)]
+    pub arc: Ref<Arc>,
+    #[serde(skip)]
+    pub hb: CrossBlock<Line, Arc>,
+}
+
+// Line P2 at angular midpoint of arc
+#[derive(serde::Serialize, serde::Deserialize)]
+#[arael::model]
+#[arael(constraint(hb, {
+    let mid_angle = (arc.start_angle + arc.end_angle) * 0.5;
+    let mx = arc.center.x + arc.radius * cos(mid_angle);
+    let my = arc.center.y + arc.radius * sin(mid_angle);
+    [(line.p2.x - mx) * sketch.constraint_isigma,
+     (line.p2.y - my) * sketch.constraint_isigma]
+}))]
+pub struct MidpointLP2Arc {
+    #[arael(ref = root.lines)]
+    pub line: Ref<Line>,
+    #[arael(ref = root.arcs)]
+    pub arc: Ref<Arc>,
+    #[serde(skip)]
+    pub hb: CrossBlock<Line, Arc>,
+}
+
+// Arc start at angular midpoint of another arc
+#[derive(serde::Serialize, serde::Deserialize)]
+#[arael::model]
+#[arael(constraint(hb, {
+    let sx = a.center.x + a.radius * cos(a.start_angle);
+    let sy = a.center.y + a.radius * sin(a.start_angle);
+    let mid_angle = (b.start_angle + b.end_angle) * 0.5;
+    let mx = b.center.x + b.radius * cos(mid_angle);
+    let my = b.center.y + b.radius * sin(mid_angle);
+    [(sx - mx) * sketch.constraint_isigma,
+     (sy - my) * sketch.constraint_isigma]
+}))]
+pub struct MidpointArcStartArc {
+    #[arael(ref = root.arcs)]
+    pub a: Ref<Arc>,
+    #[arael(ref = root.arcs)]
+    pub b: Ref<Arc>,
+    #[serde(skip)]
+    pub hb: CrossBlock<Arc, Arc>,
+}
+
+// Arc end at angular midpoint of another arc
+#[derive(serde::Serialize, serde::Deserialize)]
+#[arael::model]
+#[arael(constraint(hb, {
+    let ex = a.center.x + a.radius * cos(a.end_angle);
+    let ey = a.center.y + a.radius * sin(a.end_angle);
+    let mid_angle = (b.start_angle + b.end_angle) * 0.5;
+    let mx = b.center.x + b.radius * cos(mid_angle);
+    let my = b.center.y + b.radius * sin(mid_angle);
+    [(ex - mx) * sketch.constraint_isigma,
+     (ey - my) * sketch.constraint_isigma]
+}))]
+pub struct MidpointArcEndArc {
+    #[arael(ref = root.arcs)]
+    pub a: Ref<Arc>,
+    #[arael(ref = root.arcs)]
+    pub b: Ref<Arc>,
+    #[serde(skip)]
+    pub hb: CrossBlock<Arc, Arc>,
+}
+
 // -- Point-Arc --
 
 // Point lies on circle defined by arc
