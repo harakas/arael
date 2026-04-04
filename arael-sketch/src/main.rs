@@ -166,6 +166,11 @@ pub struct EditorApp {
     pub session_vecs: HashMap<String, vect2d>, // session coordinate variables
     pub session_names: HashMap<String, String>, // entity name aliases
 
+    // Echo command output to stdout (--stdout flag)
+    pub echo_stdout: bool,
+    // Exit requested by the exit command
+    pub exit_requested: bool,
+
     // Constraint conflict error message
     pub status_error: Option<String>,
     pub last_cost: f64,
@@ -291,6 +296,8 @@ impl EditorApp {
             session_names: HashMap::new(),
             dark_mode: cfg!(target_arch = "wasm32"),
             colors: if cfg!(target_arch = "wasm32") { ColorScheme::dark() } else { ColorScheme::light() },
+            echo_stdout: false,
+            exit_requested: false,
             status_error: None,
             last_cost,
             drag_saved_cost: 0.0,
@@ -799,8 +806,22 @@ impl EditorApp {
             blocked_commands: Vec::new(),
             cached_dof: None,
             skip_dof_check: false,
+            exit_requested: false,
         };
         let results = crate::commands::execute(&mut ctx, input);
+        if self.echo_stdout {
+            let cmds: Vec<&str> = input.split(';').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
+            for (i, r) in results.iter().enumerate() {
+                if let Some(cmd) = cmds.get(i) {
+                    if !cmd.starts_with('#') {
+                        println!("> {}", cmd);
+                    }
+                }
+                if !r.output.is_empty() {
+                    println!("{}", r.output);
+                }
+            }
+        }
         // Sync back
         self.sketch = ctx.sketch;
         self.history = ctx.history;
@@ -816,6 +837,7 @@ impl EditorApp {
         self.offset.x = ctx.offset_x;
         self.offset.y = ctx.offset_y;
         self.pending_fit = ctx.pending_fit;
+        if ctx.exit_requested { self.exit_requested = true; }
         self.show_hints = false;
         self.compute_dof_async();
         results
@@ -843,6 +865,7 @@ impl EditorApp {
             blocked_commands: blocked,
             cached_dof: None,
             skip_dof_check: false,
+            exit_requested: false,
         };
         let results = crate::commands::execute(&mut ctx, input);
         self.sketch = ctx.sketch;
@@ -1194,7 +1217,7 @@ impl EditorApp {
             }
             DimensionKind::ArcSweep(r) => {
                 let a = &self.sketch.arcs[*r];
-                rad2deg(a.end_angle.value - a.start_angle.value)
+                rad2deg((a.end_angle.value - a.start_angle.value).abs())
             }
             DimensionKind::Angle(a, b, supplement) => {
                 let la = &self.sketch.lines[*a];
@@ -2653,6 +2676,8 @@ fn main() -> eframe::Result {
     let mut dark = false;
     let mut mcp_addr: Option<std::net::SocketAddr> = None;
     let mut mcp_verbose = false;
+    let mut echo_stdout = false;
+    let mut no_gui = false;
     let mut script_path: Option<String> = None;
 
     let mut i = 0;
@@ -2666,6 +2691,8 @@ fn main() -> eframe::Result {
                 eprintln!("  --empty         Start with empty sketch");
                 eprintln!("  --dark          Start in dark mode");
                 eprintln!("  --script FILE   Execute commands from file at startup");
+                eprintln!("  --stdout        Echo command output to stdout");
+                eprintln!("  --nogui         Run without GUI (use with --script)");
                 eprintln!("  --mcp [addr]    Start MCP server (default 127.0.0.1:8585)");
                 eprintln!("  --mcp-verbose   Log all MCP traffic to stdout");
                 eprintln!("  --help, -h      Show this help");
@@ -2675,6 +2702,8 @@ fn main() -> eframe::Result {
             "--empty" => empty = true,
             "--dark" => dark = true,
             "--mcp-verbose" => mcp_verbose = true,
+            "--stdout" => echo_stdout = true,
+            "--nogui" => no_gui = true,
             "--script" => {
                 if i + 1 < args.len() {
                     i += 1;
@@ -2731,6 +2760,9 @@ fn main() -> eframe::Result {
     if verbose {
         app.sketch.verbose = true;
     }
+    if echo_stdout {
+        app.echo_stdout = true;
+    }
     if dark {
         app.dark_mode = true;
         app.colors = ColorScheme::dark();
@@ -2751,6 +2783,9 @@ fn main() -> eframe::Result {
         app.run_commands(&batch);
         let elapsed = start.elapsed();
         eprintln!("Script {} executed {} commands in {:.3}s", script, line_count, elapsed.as_secs_f64());
+    }
+    if no_gui {
+        return Ok(());
     }
     if let Some(addr) = mcp_addr {
         app.mcp_rx = Some(mcp_server::start(addr, mcp_verbose, std::sync::Arc::clone(&app.egui_ctx)));

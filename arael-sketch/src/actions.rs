@@ -26,7 +26,7 @@ pub enum Action {
     ApplyPerpendicular { a: Ref<Line>, b: Ref<Line> },
     ApplyEqualLength { a: Ref<Line>, b: Ref<Line> },
     AddCircle { center: vect2d, edge: vect2d },
-    AddArc { start: vect2d, end: vect2d, mid: vect2d, swapped: bool },
+    AddArc { start: vect2d, end: vect2d, mid: vect2d },
     ApplyCoincidentArcCenter { point: Ref<Point>, arc: Ref<Arc> },
     ApplyCoincidentArcStart { point: Ref<Point>, arc: Ref<Arc> },
     ApplyCoincidentArcEnd { point: Ref<Point>, arc: Ref<Arc> },
@@ -266,8 +266,8 @@ impl Action {
                 sketch.solve(); // anchor drift before constraints are added
             }
             Action::AddArc { start, end, mid, .. } => {
-                if let Some((c, r, sa, ea, _)) = circumscribed_arc(*start, *end, *mid) {
-                    sketch.add_arc(c, r, sa, ea, false);
+                if let Some((c, r, sa, ea, ccw)) = circumscribed_arc(*start, *end, *mid) {
+                    sketch.add_arc_with_dir(c, r, sa, ea, false, ccw);
                     sketch.solve(); // anchor drift before constraints are added
                 }
             }
@@ -611,6 +611,7 @@ impl Action {
                         sketch.arcs[*arc].constraints.target_radius = *value;
                     }
                     DimensionKind::ArcSweep(arc) => {
+                        sketch.arcs[*arc].constraints.sweep_sign = if sketch.arcs[*arc].ccw { 1.0 } else { -1.0 };
                         sketch.arcs[*arc].constraints.has_target_sweep = true;
                         sketch.arcs[*arc].constraints.target_sweep = deg2rad(*value);
                     }
@@ -730,6 +731,7 @@ impl Action {
                             sketch.arcs[arc].constraints.target_radius = value;
                         }
                         DimensionKind::ArcSweep(arc) => {
+                            sketch.arcs[arc].constraints.sweep_sign = if sketch.arcs[arc].ccw { 1.0 } else { -1.0 };
                             sketch.arcs[arc].constraints.has_target_sweep = true;
                             sketch.arcs[arc].constraints.target_sweep = deg2rad(value);
                         }

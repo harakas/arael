@@ -13,6 +13,11 @@ use crate::{EditorApp, spawn_async};
 
 impl eframe::App for EditorApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Handle exit request
+        if self.exit_requested {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+
         // Poll background DOF computation
         self.poll_dof();
 
@@ -1242,18 +1247,12 @@ impl eframe::App for EditorApp {
                         if let Some(state) = self.arc_draw.take() {
                             if let Some((end, snap_end)) = state.end {
                                 // Third click: mid point on arc, create it
-                                let swapped = circumscribed_arc(state.start, end, pos)
-                                    .map_or(false, |(_, _, _, _, s)| s);
-                                self.exec(Action::AddArc { start: state.start, end, mid: pos, swapped });
+                                self.exec(Action::AddArc { start: state.start, end, mid: pos });
                                 let new_arc = Ref::new(self.sketch.arcs.slot_count() as u32 - 1);
 
-                                // When swapped, arc.start_angle corresponds to `end` click
-                                // and arc.end_angle corresponds to `start` click
-                                let (start_ap, end_ap) = if swapped {
-                                    (ArcPoint::End, ArcPoint::Start)
-                                } else {
-                                    (ArcPoint::Start, ArcPoint::End)
-                                };
+                                // Arc start_angle always corresponds to start click,
+                                // end_angle to end click (direction stored in ccw flag)
+                                let (start_ap, end_ap) = (ArcPoint::Start, ArcPoint::End);
 
                                 // Auto-coincident for start click
                                 if let Some(s) = state.snap_start {
@@ -1513,9 +1512,9 @@ impl eframe::App for EditorApp {
                     let end_screen = self.to_screen(end);
                     painter.circle_filled(end_screen, 4.0, self.colors.endpoint);
                     // Preview arc through start, end, and mouse
-                    if let Some((c, r, sa, ea, _)) = circumscribed_arc(state.start, end, mouse_sketch) {
+                    if let Some((c, r, sa, ea, ccw)) = circumscribed_arc(state.start, end, mouse_sketch) {
                         let norm = |v: f64| -> f64 { let rv = v % std::f64::consts::TAU; if rv < 0.0 { rv + std::f64::consts::TAU } else { rv } };
-                        let span = norm(ea - sa);
+                        let span = if ccw { norm(ea - sa) } else { -norm(sa - ea) };
                         let n_segs = 64usize;
                         let points: Vec<egui::Pos2> = (0..=n_segs).map(|i| {
                             let t = sa + span * (i as f64 / n_segs as f64);

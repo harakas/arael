@@ -287,6 +287,20 @@ impl Sketch {
     /// Add an arc or circle. When `closed` is true, start/end angles are
     /// fixed (not optimized) since they are meaningless for a full circle.
     pub fn add_arc(&mut self, center: vect2d, radius: f64, start: f64, end: f64, closed: bool) -> Ref<Arc> {
+        self.add_arc_with_dir(center, radius, start, end, closed, true)
+    }
+
+    /// Add an arc with explicit direction. ccw=true means CCW from start to end.
+    /// For CW arcs, end_angle is adjusted so that end - start < 0.
+    pub fn add_arc_with_dir(&mut self, center: vect2d, radius: f64, start: f64, end: f64, closed: bool, ccw: bool) -> Ref<Arc> {
+        // Ensure end - start has the correct sign for the arc direction
+        let end = if !closed && !ccw && end > start {
+            end - std::f64::consts::TAU
+        } else if !closed && ccw && end < start {
+            end + std::f64::consts::TAU
+        } else {
+            end
+        };
         let name = format!("A{}", self.next_arc_id);
         self.next_arc_id += 1;
         self.arcs.push(Arc {
@@ -294,9 +308,9 @@ impl Sketch {
             radius: Param::new(radius),
             start_angle: if closed { Param::fixed(start) } else { Param::new(start) },
             end_angle: if closed { Param::fixed(end) } else { Param::new(end) },
-            closed,
+            closed, ccw,
             style: LineStyle::Solid, name,
-            constraints: ArcConstraints { has_target_radius: false, target_radius: 0.0, has_target_sweep: false, target_sweep: 0.0 },
+            constraints: ArcConstraints { has_target_radius: false, target_radius: 0.0, has_target_sweep: false, target_sweep: 0.0, sweep_sign: 1.0 },
             hb: SelfBlock::new(),
         })
     }

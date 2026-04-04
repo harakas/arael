@@ -35,6 +35,8 @@ pub struct CommandContext {
     pub pending_fit: bool,
     /// Commands blocked in this context (e.g. "save", "load" for MCP).
     pub blocked_commands: Vec<&'static str>,
+    /// Set by the `exit` command to signal the app should close.
+    pub exit_requested: bool,
 }
 
 impl CommandContext {
@@ -58,6 +60,7 @@ impl CommandContext {
             offset_y: 300.0,
             pending_fit: false,
             blocked_commands: Vec::new(),
+            exit_requested: false,
         }
     }
 
@@ -80,6 +83,7 @@ impl CommandContext {
             offset_y: 300.0,
             pending_fit: false,
             blocked_commands: Vec::new(),
+            exit_requested: false,
         }
     }
 
@@ -115,7 +119,7 @@ fn dimension_rejection_hint(sketch: &Sketch, action: &Action) -> String {
         DimensionKind::ArcRadius(r) => Some(("radius", sketch.arcs[*r].radius.value)),
         DimensionKind::ArcSweep(r) => {
             let a = &sketch.arcs[*r];
-            Some(("sweep", arael::utils::rad2deg(a.end_angle.value - a.start_angle.value)))
+            Some(("sweep", arael::utils::rad2deg((a.end_angle.value - a.start_angle.value).abs())))
         }
         DimensionKind::Angle(a, b, supplement) => {
             let la = &sketch.lines[*a];
@@ -237,6 +241,22 @@ pub fn validate_and_apply_constraint(
                 return Err(format!(
                     "Constraint rejected: could not satisfy all constraints{}",
                     hint));
+            }
+        }
+    }
+
+    // Negative radius rejection
+    for r in sketch.arcs.refs() {
+        if sketch.arcs[r].radius.value < 0.0 {
+            let name = sketch.arcs[r].name.clone();
+            let bad_radius = sketch.arcs[r].radius.value;
+            if let Some(ref snap) = snapshot {
+                if let Ok(restored) = bincode::deserialize(snap) {
+                    *sketch = restored;
+                    return Err(format!(
+                        "Constraint rejected: {} got negative radius ({:.4}). This is likely a solver bug -- please report it.",
+                        name, bad_radius));
+                }
             }
         }
     }
@@ -422,7 +442,7 @@ fn eval_context(sketch: &Sketch) -> HashMap<String, f64> {
         vars.insert(format!("{}.diameter", a.name), a.radius.value * 2.0);
         vars.insert(format!("{}.start_angle", a.name), a.start_angle.value);
         vars.insert(format!("{}.end_angle", a.name), a.end_angle.value);
-        vars.insert(format!("{}.sweep", a.name), (a.end_angle.value - a.start_angle.value).to_degrees());
+        vars.insert(format!("{}.sweep", a.name), (a.end_angle.value - a.start_angle.value).abs().to_degrees());
         vars.insert(format!("{}.start.x", a.name), a.center.value.x + a.radius.value * a.start_angle.value.cos());
         vars.insert(format!("{}.start.y", a.name), a.center.value.y + a.radius.value * a.start_angle.value.sin());
         vars.insert(format!("{}.end.x", a.name), a.center.value.x + a.radius.value * a.end_angle.value.cos());
@@ -914,8 +934,12 @@ fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
     let (input, force) = strip_force(input);
     ctx.skip_dof_check = force;
 
-    // Comments
-    if input.starts_with('#') {
+    // Strip inline comments (# not inside quotes)
+    let input = strip_inline_comment(input);
+    let input = input.trim();
+
+    // Comments (entire line)
+    if input.is_empty() || input.starts_with('#') {
         return CommandResult { output: String::new(), is_error: false, no_echo: true, markdown: false };
     }
 
@@ -1021,6 +1045,7 @@ fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
         "save" => cmd_save(ctx, args_str),
         "load" => cmd_load(ctx, args_str),
         "help" => cmd_help(args_str),
+        "exit" | "quit" => { ctx.exit_requested = true; ok("Exiting") },
         "ai" => ok("AI assistant not yet configured. Use --mcp to enable MCP server for external AI agents."),
         _ if cmd.starts_with('!') => ok("AI assistant not yet configured. Use --mcp to enable MCP server for external AI agents."),
         _ => err(format!("Unknown command: {}. Type 'help' for commands.", cmd)),
@@ -1356,6 +1381,16 @@ fn cmd_delete(ctx: &mut CommandContext, args: &str) -> CommandResult {
 // ---------------------------------------------------------------------------
 
 /// Strip trailing "force" keyword from args, return (cleaned_args, is_force).
+/// Strip inline comment: everything after `#` that is not inside quotes.
+fn strip_inline_comment(input: &str) -> &str {
+    let mut in_quote = false;
+    for (i, ch) in input.char_indices() {
+        if ch == '"' { in_quote = !in_quote; }
+        else if ch == '#' && !in_quote { return &input[..i]; }
+    }
+    input
+}
+
 fn strip_force(args: &str) -> (&str, bool) {
     if args.trim().ends_with(" force") || args.trim() == "force" {
         let trimmed = args.trim();
@@ -1690,7 +1725,7 @@ fn cmd_sweep(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let kind = DimensionKind::ArcSweep(arc);
     if tokens.len() == 1 && is_derived {
         let a = &ctx.sketch.arcs[arc];
-        let sweep_deg = arael::utils::rad2deg(a.end_angle.value - a.start_angle.value);
+        let sweep_deg = arael::utils::rad2deg((a.end_angle.value - a.start_angle.value).abs());
         ctx.begin_group();
         if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
             let name = ctx.sketch.dimensions[idx].name.clone();
@@ -2170,7 +2205,7 @@ fn cmd_add_arc(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let p2 = match parse_coord(ctx, tokens[1], Some(p1)) { Ok(p) => p, Err(e) => return err(e) };
     let pm = match parse_coord(ctx, tokens[2], None) { Ok(p) => p, Err(e) => return err(e) };
     ctx.begin_group();
-    ctx.exec(Action::AddArc { start: p1, end: p2, mid: pm, swapped: false });
+    ctx.exec(Action::AddArc { start: p1, end: p2, mid: pm });
     let arc_ref = ctx.sketch.arcs.refs().last().unwrap();
     let name = ctx.sketch.arcs[arc_ref].name.clone();
     if !nocursor { ctx.cursor = Some(p2); }
@@ -5690,7 +5725,7 @@ mod tests {
         // Solve and check sweep is close to 180 degrees
         ctx.sketch.solve();
         let r = ctx.sketch.arcs.refs().next().unwrap();
-        let sweep = (ctx.sketch.arcs[r].end_angle.value - ctx.sketch.arcs[r].start_angle.value).to_degrees();
+        let sweep = (ctx.sketch.arcs[r].end_angle.value - ctx.sketch.arcs[r].start_angle.value).abs().to_degrees();
         assert!((sweep - 180.0).abs() < 1.0, "Sweep should be ~180, got {}", sweep);
     }
 
@@ -5777,6 +5812,23 @@ mod tests {
         let out = run_ok(&mut ctx, "print dist(L0.p1,L0.p2)*2");
         let val: f64 = out.trim().parse().expect(&format!("should parse: {}", out));
         assert!((val - 10.0).abs() < 0.1, "dist*2 should be ~10, got {}", val);
+    }
+
+    #[test]
+    fn test_inline_comments() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0  # a horizontal line");
+        assert_eq!(ctx.sketch.lines.len(), 1);
+        run_ok(&mut ctx, "horizontal L0 # make it horizontal");
+        assert!(ctx.sketch.lines[ctx.sketch.lines.refs().next().unwrap()].constraints.horizontal);
+        // Comment-only line
+        let out = run_ok(&mut ctx, "# just a comment");
+        assert!(out.is_empty());
+        // Quoted strings should not be affected
+        run_ok(&mut ctx, "param scale 1");
+        run_ok(&mut ctx, "add_circle 0,0 5");
+        run_ok(&mut ctx, "radius A0 \"5*scale\" # expression dimension");
+        assert_eq!(ctx.sketch.dimensions.len(), 1);
     }
 
     // -- remove_constraint tests --

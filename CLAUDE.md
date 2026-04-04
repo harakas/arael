@@ -11,3 +11,4 @@
  * When leaving things unimplemented in the plan, add them into TODO.md with explanation why they weren't implemented.
  * When adding/modifying arael-sketch commands, also update the documentation in COMMANDS.md.
  * Arael-sketch architecture: commands -> actions -> sketch (solver). Both the GUI and the command interface call actions. Actions mutate the sketch. Never call commands from actions or the GUI -- always go through actions. Helper points (Pc) used internally by constraints are created inside action apply() methods, invisible to callers.
+ * arael-sketch: you can run test scripts inline with stdout and nogui: `cargo run -r -p arael-sketch -- --empty --nogui --stdout --script script.cmd`

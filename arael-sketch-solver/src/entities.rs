@@ -71,7 +71,13 @@ pub struct ArcConstraints {
     #[arael(skip)]
     pub has_target_sweep: bool,
     pub target_sweep: f64,
+    #[arael(skip)]
+    #[serde(default = "default_sweep_sign")]
+    pub sweep_sign: f64,
 }
+
+fn default_sweep_sign() -> f64 { 1.0 }
+fn default_ccw() -> bool { true }
 
 // ---------------------------------------------------------------------------
 // Entities
@@ -162,9 +168,9 @@ pub struct Line {
 #[arael(constraint(hb, guard = self.constraints.has_target_radius, {
     [(arc.radius - arc.constraints.target_radius) * sketch.constraint_isigma]
 }))]
-// Target sweep angle (end_angle - start_angle)
+// Target sweep angle (end_angle - start_angle, sign-matched)
 #[arael(constraint(hb, guard = self.constraints.has_target_sweep, {
-    [(arc.end_angle - arc.start_angle - arc.constraints.target_sweep) * sketch.constraint_isigma]
+    [(arc.end_angle - arc.start_angle - arc.constraints.sweep_sign * arc.constraints.target_sweep) * sketch.constraint_isigma]
 }))]
 pub struct Arc {
     pub center: Param<vect2d>,
@@ -175,6 +181,11 @@ pub struct Arc {
     /// angles are fixed and excluded from optimization.
     #[arael(skip)]
     pub closed: bool,
+    /// Arc direction: true = counter-clockwise from start to end,
+    /// false = clockwise. Determined at creation from the midpoint.
+    #[arael(skip)]
+    #[serde(default = "default_ccw")]
+    pub ccw: bool,
     #[arael(skip)]
     pub style: LineStyle,
     #[arael(skip)]

@@ -19,8 +19,8 @@ pub fn point_to_segment_dist(p: vect2d, a: vect2d, b: vect2d) -> f64 {
 }
 
 // Compute circumscribed circle arc from 3 points (start, end, mid on arc).
-// Returns (center, radius, start_angle, end_angle, swapped) or None if collinear.
-// `swapped` is true if start/end angles were swapped (arc goes the other way).
+// Returns (center, radius, start_angle, end_angle, ccw) or None if collinear.
+// `ccw` is true if the arc from p1 to p2 passing through p3 goes counter-clockwise.
 pub fn circumscribed_arc(p1: vect2d, p2: vect2d, p3: vect2d) -> Option<(vect2d, f64, f64, f64, bool)> {
     let ax = p1.x; let ay = p1.y;
     let bx = p2.x; let by = p2.y;
@@ -40,7 +40,6 @@ pub fn circumscribed_arc(p1: vect2d, p2: vect2d, p3: vect2d) -> Option<(vect2d, 
     let ea = (by - uy).atan2(bx - ux);
 
     // Check if mid point (p3) is on the arc going sa->ea counterclockwise.
-    // If not, swap to go the other way.
     let ma = (cy - uy).atan2(cx - ux);
 
     // Normalize angle difference to [0, 2*PI)
@@ -48,13 +47,9 @@ pub fn circumscribed_arc(p1: vect2d, p2: vect2d, p3: vect2d) -> Option<(vect2d, 
     let span_ccw = norm(ea - sa);
     let mid_ccw = norm(ma - sa);
 
-    if mid_ccw < span_ccw {
-        // Mid is on the CCW arc from sa to ea
-        Some((center, radius, sa, ea, false))
-    } else {
-        // Mid is on the other side; swap start/end
-        Some((center, radius, ea, sa, true))
-    }
+    // Keep start/end as-is (matching user's p1/p2), record direction
+    let ccw = mid_ccw < span_ccw;
+    Some((center, radius, sa, ea, ccw))
 }
 
 // Distance from point to arc curve. Returns (distance, nearest point on arc).
@@ -80,8 +75,11 @@ pub fn point_to_arc_dist(p: vect2d, a: &Arc) -> (f64, vect2d) {
         let sa = a.start_angle.value;
         let ea = a.end_angle.value;
         let norm = |v: f64| -> f64 { let rv = v % std::f64::consts::TAU; if rv < 0.0 { rv + std::f64::consts::TAU } else { rv } };
-        let span = norm(ea - sa);
-        let a_norm = norm(angle - sa);
+        let (span, a_norm) = if a.ccw {
+            (norm(ea - sa), norm(angle - sa))
+        } else {
+            (norm(sa - ea), norm(sa - angle))
+        };
 
         if a_norm <= span {
             // Angle is within arc range

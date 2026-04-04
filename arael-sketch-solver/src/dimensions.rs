@@ -142,7 +142,7 @@ impl Dimension {
                 let name = &sketch.arcs[*r].name;
                 let start = symbol(&format!("{}.start_angle", name));
                 let end = symbol(&format!("{}.end_angle", name));
-                (end - start) * arael_sym::constant(180.0 / std::f64::consts::PI)
+                arael_sym::abs(end - start) * arael_sym::constant(180.0 / std::f64::consts::PI)
             }
             DimensionKind::PointPointDistance(a, b) => {
                 let pa = dim_endpoint_symbol(a, sketch);

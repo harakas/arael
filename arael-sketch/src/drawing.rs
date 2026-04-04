@@ -10,6 +10,19 @@ use crate::tools::*;
 use crate::geometry::*;
 use crate::EditorApp;
 
+/// Compute (start_angle, span) for an arc respecting ccw flag.
+/// CCW arcs have positive span, CW arcs have negative span.
+fn arc_span(a: &Arc) -> (f64, f64) {
+    let sa = a.start_angle.value;
+    let ea = a.end_angle.value;
+    let norm = |v: f64| -> f64 { let r = v % std::f64::consts::TAU; if r < 0.0 { r + std::f64::consts::TAU } else { r } };
+    if a.ccw {
+        (sa, norm(ea - sa))
+    } else {
+        (sa, -norm(sa - ea))
+    }
+}
+
 impl EditorApp {
     // Draw rotated text using egui's native TextShape.angle support.
     // `center` is where text should be centered, `dir_x/dir_y` is the unit direction along the text.
@@ -405,8 +418,7 @@ impl EditorApp {
         let a = &self.sketch.arcs[arc_ref];
         let cx = a.center.value.x;
         let cy = a.center.value.y;
-        let start_angle = a.start_angle.value;
-        let sweep = a.end_angle.value - a.start_angle.value;
+        let (start_angle, sweep) = arc_span(a);
         // Annotation arc radius: arc radius + offset.y (positive = outside, negative = inside)
         let radius = (a.radius.value + offset.y).max(0.1);
         let stroke = egui::Stroke::new(1.0, color);
@@ -532,8 +544,7 @@ impl EditorApp {
             let a = &self.sketch.arcs[r];
             let cx = a.center.value.x;
             let cy = a.center.value.y;
-            let start_angle = a.start_angle.value;
-            let sweep = a.end_angle.value - start_angle;
+            let (start_angle, sweep) = arc_span(a);
             let radius = (a.radius.value + dim.offset.y).max(0.1);
             let text_angle = start_angle + sweep * (0.5 + dim.text_along);
             let text_pt = vect2d::new(cx + radius * text_angle.cos(), cy + radius * text_angle.sin());
@@ -1121,12 +1132,9 @@ impl EditorApp {
             let (sa, span) = if a.closed {
                 (0.0, std::f64::consts::TAU)
             } else {
-                let sa = a.start_angle.value;
-                let ea = a.end_angle.value;
-                let norm = |v: f64| -> f64 { let rv = v % std::f64::consts::TAU; if rv < 0.0 { rv + std::f64::consts::TAU } else { rv } };
-                (sa, norm(ea - sa))
+                arc_span(a)
             };
-            let n_segs = ((span * radius_px as f64 / 4.0).ceil() as usize).clamp(8, 256);
+            let n_segs = ((span.abs() * radius_px as f64 / 4.0).ceil() as usize).clamp(8, 256);
             let points: Vec<egui::Pos2> = (0..=n_segs).map(|i| {
                 let t = sa + span * (i as f64 / n_segs as f64);
                 self.to_screen(vect2d::new(

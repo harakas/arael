@@ -111,7 +111,7 @@ impl SymbolBag {
             let sa_sym = arael_sym::symbol(&format!("{}.start_angle", name));
             let ea_sym = arael_sym::symbol(&format!("{}.end_angle", name));
             derived.insert(format!("{}.sweep", name),
-                (ea_sym.clone() - sa_sym.clone()) * arael_sym::constant(180.0 / std::f64::consts::PI));
+                arael_sym::abs(ea_sym.clone() - sa_sym.clone()) * arael_sym::constant(180.0 / std::f64::consts::PI));
             // Arc endpoint positions: start.x/y, end.x/y
             let cx_sym = arael_sym::symbol(&format!("{}.center.x", name));
             let cy_sym = arael_sym::symbol(&format!("{}.center.y", name));

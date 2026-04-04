@@ -373,7 +373,7 @@ fn handle_resources_read(id: Value, request: &Value) -> Value {
 // Channel communication with GUI
 // ---------------------------------------------------------------------------
 
-const MCP_BLOCKED: &[&str] = &["save", "load"];
+const MCP_BLOCKED: &[&str] = &["save", "load", "exit", "quit"];
 
 async fn send_command_str(tx: &mpsc::Sender<McpRequest>, command: &str, state: &McpState) -> String {
     let (resp_tx, resp_rx) = oneshot::channel();
