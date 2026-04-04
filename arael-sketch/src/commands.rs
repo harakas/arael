@@ -3246,10 +3246,49 @@ fn compute_dof_sync(sketch: &mut Sketch) -> (usize, Vec<String>) {
     (free_dirs.len(), free_dirs)
 }
 
+fn cmd_dof_eigenvalues(ctx: &mut CommandContext) -> CommandResult {
+    use arael::simple_lm::LmProblem;
+    use arael_sketch_solver::SymbolBag;
+    ctx.sketch.prepare_expr_constraints();
+    let saved_drift = ctx.sketch.drift_isigma;
+    ctx.sketch.drift_isigma = 0.0;
+    let mut params = Vec::new();
+    ctx.sketch.serialize64(&mut params);
+    let n = params.len();
+    let bag = SymbolBag::build(&ctx.sketch);
+    let mut idx_to_name: Vec<String> = vec![String::new(); n];
+    for (name, &idx) in &bag.param_indices {
+        let i = idx as usize;
+        if i < n && idx_to_name[i].is_empty() { idx_to_name[i] = name.clone(); }
+    }
+    let mut grad = vec![0.0f64; n];
+    let mut hessian = vec![0.0f64; n * n];
+    ctx.sketch.calc_grad_hessian_dense(&params, &mut grad, &mut hessian);
+    ctx.sketch.drift_isigma = saved_drift;
+    let h = nalgebra::DMatrix::from_row_slice(n, n, &hessian);
+    let eigen = nalgebra::SymmetricEigen::new(h);
+    let mut lines = vec![format!("Params: {} Eigenvalues:", n)];
+    let mut evs: Vec<(f64, usize)> = eigen.eigenvalues.iter().cloned().enumerate().map(|(i,v)| (v, i)).collect();
+    evs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    for (val, col) in &evs {
+        let ev = eigen.eigenvectors.column(*col);
+        let max_comp = ev.iter().cloned().fold(0.0f64, |a, b| a.max(b.abs()));
+        let comp_threshold = max_comp * 0.3;
+        let parts: Vec<String> = (0..n).filter(|&i| ev[i].abs() > comp_threshold)
+            .map(|i| format!("{}={:.3}", if idx_to_name[i].is_empty() { format!("[{}]", i) } else { idx_to_name[i].clone() }, ev[i]))
+            .collect();
+        lines.push(format!("  {:.6e}  {}", val, parts.join(", ")));
+    }
+    ok(lines.join("\n"))
+}
+
 fn cmd_dof(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let arg = args.trim();
+    if arg == "eigenvalues" {
+        return cmd_dof_eigenvalues(ctx);
+    }
     if !arg.is_empty() && arg != "analyze" {
-        return err("Usage: dof | dof analyze");
+        return err("Usage: dof | dof analyze | dof eigenvalues");
     }
 
     let (dof, free_dirs) = compute_dof_sync(&mut ctx.sketch);
