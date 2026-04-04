@@ -353,8 +353,39 @@ fn eval_context(sketch: &Sketch) -> HashMap<String, f64> {
     vars
 }
 
+/// Pre-substitute geometric function calls (angle, dist) in an expression string
+/// with their numeric values, so the symbolic parser can handle them.
+fn presubst_geo_functions(sketch: &Sketch, expr: &str) -> String {
+    let mut result = expr.to_string();
+    for fname in &["angle", "dist"] {
+        loop {
+            let Some(start) = result.find(&format!("{}(", fname)) else { break };
+            let after_paren = start + fname.len() + 1;
+            // Find matching closing paren
+            let mut depth = 1;
+            let mut end = after_paren;
+            for (i, ch) in result[after_paren..].char_indices() {
+                match ch {
+                    '(' => depth += 1,
+                    ')' => { depth -= 1; if depth == 0 { end = after_paren + i; break; } }
+                    _ => {}
+                }
+            }
+            if depth != 0 { break; }
+            let call = &result[start..=end];
+            if let Some(Ok(val)) = eval_geo_scalar(sketch, call) {
+                result = format!("{}{}{}", &result[..start], val, &result[end + 1..]);
+            } else {
+                break; // can't evaluate, leave as-is for the parser to report the error
+            }
+        }
+    }
+    result
+}
+
 fn eval_expr_with(sketch: &Sketch, expr_str: &str, extra: &HashMap<String, f64>) -> Result<f64, String> {
-    let parsed = arael_sym::parse(expr_str).map_err(|e| e.msg)?;
+    let expr_str = presubst_geo_functions(sketch, expr_str);
+    let parsed = arael_sym::parse(&expr_str).map_err(|e| e.msg)?;
     let mut ctx = eval_context(sketch);
     for (k, v) in extra { ctx.insert(k.clone(), *v); }
     let vars: HashMap<&str, f64> = ctx.iter().map(|(k, v)| (k.as_str(), *v)).collect();
@@ -5645,6 +5676,23 @@ mod tests {
         run_ok(&mut ctx, "print A0.end.y");
         run_ok(&mut ctx, "print A0.sweep");
         run_ok(&mut ctx, "print A0.diameter");
+    }
+
+    #[test]
+    fn test_geo_functions_in_expressions() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,0 0,5");
+        // angle() as standalone works
+        let out = run_ok(&mut ctx, "print angle(L0,L1)");
+        assert!(out.trim().parse::<f64>().is_ok(), "angle(L0,L1) should be numeric: {}", out);
+        // angle() inside an expression
+        let out = run_ok(&mut ctx, "print angle(L0,L1)+1");
+        let val: f64 = out.trim().parse().expect(&format!("should parse: {}", out));
+        assert!((val - 91.0).abs() < 1.0, "angle(L0,L1)+1 should be ~91, got {}", val);
+        // dist() inside an expression
+        let out = run_ok(&mut ctx, "print dist(L0.p1,L0.p2)*2");
+        let val: f64 = out.trim().parse().expect(&format!("should parse: {}", out));
+        assert!((val - 10.0).abs() < 0.1, "dist*2 should be ~10, got {}", val);
     }
 
     // -- remove_constraint tests --
