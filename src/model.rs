@@ -1516,6 +1516,16 @@ pub trait ModelSym {
 
 use arael_sym::E;
 
+impl ModelSym for bool {
+    type Sym = E;
+    fn sym(base: &str) -> E { arael_sym::symbol(base) }
+}
+
+impl ModelSym for u32 {
+    type Sym = E;
+    fn sym(base: &str) -> E { arael_sym::symbol(base) }
+}
+
 impl ModelSym for f32 {
     type Sym = E;
     fn sym(base: &str) -> E { arael_sym::symbol(base) }

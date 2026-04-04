@@ -1345,7 +1345,8 @@ pub fn generate_root_methods(
                 let adjusted = if is_self_block {
                     g.replacen("self.", &format!("{}.", self_var_name), 10)
                 } else {
-                    g.clone()
+                    // CrossBlock/TripletBlock: "self." refers to the constraint struct (__frine)
+                    g.replacen("self.", "__frine.", 10)
                 };
                 syn::parse_str(&adjusted)
             })
@@ -1526,11 +1527,22 @@ pub fn generate_root_methods(
             // Flat iteration, no nesting. frines_ident = root collection name of constraint struct.
             let rc_ident = frines_ident.unwrap();
 
+            let guarded_cost = if let Some(ref guard) = guard_expr {
+                quote! { if #guard { #(#cost_stmts)* } }
+            } else {
+                quote! { #(#cost_stmts)* }
+            };
+            let guarded_gh = if let Some(ref guard) = guard_expr {
+                quote! { if #guard { #(#gh_stmts)* } }
+            } else {
+                quote! { { #(#gh_stmts)* } }
+            };
+
             cost_loops.push(quote! {
                 for __frine in self.#rc_ident.iter() {
                     #(#resolve_stmts)*
                     let #root_var_ident = &*__self_ref;
-                    #(#cost_stmts)*
+                    #guarded_cost
                 }
             });
 
@@ -1538,7 +1550,7 @@ pub fn generate_root_methods(
                 for __frine in self.#rc_ident.iter_mut() {
                     #(#resolve_stmts)*
                     let #root_var_ident = &*__self_ref;
-                    { #(#gh_stmts)* }
+                    #guarded_gh
                 }
             });
 
@@ -1546,6 +1558,11 @@ pub fn generate_root_methods(
                 let a_idx_stmts_j = a_idx_stmts.clone();
                 let b_idx_stmts_j = b_idx_stmts.clone();
                 let resolve_stmts_j = resolve_stmts.clone();
+                let guarded_jac = if let Some(ref guard) = guard_expr {
+                    quote! { if #guard { #(#jac_stmts)* } }
+                } else {
+                    quote! { #(#jac_stmts)* }
+                };
                 jacobian_loops.push(quote! {
                     for __frine in self.#rc_ident.iter() {
                         #(#resolve_stmts_j)*
@@ -1560,7 +1577,7 @@ pub fn generate_root_methods(
                             __v.extend_from_slice(&__b_idx);
                             __v
                         };
-                        #(#jac_stmts)*
+                        #guarded_jac
                         __jac_cid += 1;
                     }
                 });
