@@ -818,6 +818,7 @@ pub fn generate_root_methods(
     root_fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
     precision: &str,
     custom: bool,
+    jacobian: bool,
 ) -> syn::Result<TokenStream2> {
     let stashed = crate::registry_take_constraints();
     let root_var_name = root_name.to_string().to_lowercase();
@@ -828,6 +829,7 @@ pub fn generate_root_methods(
     let constraint_impls: Vec<TokenStream2> = Vec::new();
     let mut cost_loops: Vec<TokenStream2> = Vec::new();
     let mut grad_hessian_loops: Vec<TokenStream2> = Vec::new();
+    let mut jacobian_loops: Vec<TokenStream2> = Vec::new();
     let mut set_block_indices_loops: Vec<TokenStream2> = Vec::new();
 
     // Grouping for constraints that iterate the same collection.
@@ -838,12 +840,14 @@ pub fn generate_root_methods(
         a_type_ident: syn::Ident,
         // SelfBlock: index setup + constraint entries
         self_block: Option<SelfBlockInfo>,
-        // Cost/GH entries that go directly in the outer loop (SelfBlock constraints)
+        // Cost/GH/Jacobian entries that go directly in the outer loop (SelfBlock constraints)
         cost_entries: Vec<TokenStream2>,
         gh_entries: Vec<TokenStream2>,
+        jac_entries: Vec<TokenStream2>,
         // Nested CrossBlock: inner loops over frines
         nested_cost_loops: Vec<TokenStream2>,
         nested_gh_loops: Vec<TokenStream2>,
+        nested_jac_loops: Vec<TokenStream2>,
     }
     struct SelfBlockInfo {
         a_param_count: usize,
@@ -1166,6 +1170,41 @@ pub fn generate_root_methods(
             }
         }
 
+        // --- Jacobian code: same intermediates + residuals + derivatives, push rows ---
+        let mut jac_stmts = Vec::new();
+        if jacobian {
+            // Reuse the same CSE'd expressions
+            for (name, expr) in &gh_intermediates {
+                let name_ident = syn::Ident::new(name, proc_macro2::Span::call_site());
+                let code: Expr = parse_sym_code(&expr.to_rust(""))?;
+                jac_stmts.push(quote! { let #name_ident= #code; });
+            }
+            let mut jidx = 0;
+            for ri in 0..n_residuals {
+                let r_ident = syn::Ident::new(&format!("__r_{}", ri), proc_macro2::Span::call_site());
+                let r_expr: Expr = parse_sym_code(&gh_simplified[jidx].to_rust(""))?;
+                jac_stmts.push(quote! { let #r_ident= #r_expr; });
+                jidx += 1;
+
+                let mut dr_idents = Vec::new();
+                for pi in 0..n_params {
+                    let dr_ident = syn::Ident::new(&format!("__dr_{}_{}", ri, pi), proc_macro2::Span::call_site());
+                    let dr_expr: Expr = parse_sym_code(&gh_simplified[jidx].to_rust(""))?;
+                    jac_stmts.push(quote! { let #dr_ident= #dr_expr; });
+                    dr_idents.push(dr_ident);
+                    jidx += 1;
+                }
+                let dr_f64: Vec<TokenStream2> = dr_idents.iter().map(|d| quote! { #d as #cast_type }).collect();
+                jac_stmts.push(quote! {
+                    __jac_rows.push(arael::model::JacobianRow {
+                        constraint: __jac_cid,
+                        residual: #r_ident as #cast_type,
+                        entries: arael::model::jacobian_entries(&__jac_idx, &[#(#dr_f64),*]),
+                    });
+                });
+            }
+        }
+
         // Build index setup code — separate A (parent) and B (ref) indices
         let mut a_idx_stmts = Vec::new();
         let mut b_idx_stmts = Vec::new();
@@ -1413,6 +1452,15 @@ pub fn generate_root_methods(
                 quote! { { #(#gh_stmts)* } }
             };
 
+            let jac_entry = if !jac_stmts.is_empty() {
+                let entry = if let Some(ref guard) = guard_expr {
+                    quote! { if #guard { #(#jac_stmts)* } }
+                } else {
+                    quote! { { #(#jac_stmts)* } }
+                };
+                Some(entry)
+            } else { None };
+
             let group = collection_groups.entry(group_key).or_insert_with(|| CollectionGroup {
                 coll_ident: coll_ident.clone(),
                 self_var: self_var.clone(),
@@ -1420,8 +1468,10 @@ pub fn generate_root_methods(
                 self_block: None,
                 cost_entries: Vec::new(),
                 gh_entries: Vec::new(),
+                jac_entries: Vec::new(),
                 nested_cost_loops: Vec::new(),
                 nested_gh_loops: Vec::new(),
+                nested_jac_loops: Vec::new(),
             });
             if group.self_block.is_none() {
                 group.self_block = Some(SelfBlockInfo {
@@ -1432,6 +1482,7 @@ pub fn generate_root_methods(
             }
             group.cost_entries.push(cost_entry);
             group.gh_entries.push(gh_entry);
+            if let Some(je) = jac_entry { group.jac_entries.push(je); }
         } else if is_triplet {
             // TripletBlock: N-ary constraint, flat iteration on root collection
             let rc_ident = frines_ident.unwrap();
@@ -1454,6 +1505,21 @@ pub fn generate_root_methods(
                     { #(#gh_stmts)* }
                 }
             });
+            if !jac_stmts.is_empty() {
+                jacobian_loops.push(quote! {
+                    for __frine in self.#rc_ident.iter() {
+                        #(#resolve_stmts)*
+                        let #root_var_ident = &*__self_ref;
+                        let __jac_idx: std::vec::Vec<u32> = {
+                            let mut __all_idx = [0u32; #tp];
+                            #(#triplet_idx_stmts)*
+                            __all_idx.to_vec()
+                        };
+                        #(#jac_stmts)*
+                        __jac_cid += 1;
+                    }
+                });
+            }
             // No set_block_indices needed for TripletBlock
         } else if is_root_level_cross {
             // Root-level CrossBlock: constraint struct is directly on root (e.g. PosePair, CoincidentPP)
@@ -1476,16 +1542,49 @@ pub fn generate_root_methods(
                 }
             });
 
-            set_block_indices_loops.push(quote! {
-                for __frine in self.#rc_ident.iter_mut() {
-                    #(#resolve_stmts)*
-                    let mut __a_idx = [0u32; #a_param_count];
-                    #(#a_idx_stmts)*
-                    let mut __b_idx = [0u32; #b_param_count];
-                    #(#b_idx_stmts)*
-                    __frine.#block_ident.set_indices(&__a_idx, &__b_idx);
-                }
-            });
+            if !jac_stmts.is_empty() {
+                let a_idx_stmts_j = a_idx_stmts.clone();
+                let b_idx_stmts_j = b_idx_stmts.clone();
+                let resolve_stmts_j = resolve_stmts.clone();
+                jacobian_loops.push(quote! {
+                    for __frine in self.#rc_ident.iter() {
+                        #(#resolve_stmts_j)*
+                        let #root_var_ident = &*__self_ref;
+                        let __jac_idx: std::vec::Vec<u32> = {
+                            let mut __a_idx = [0u32; #a_param_count];
+                            #(#a_idx_stmts_j)*
+                            let mut __b_idx = [0u32; #b_param_count];
+                            #(#b_idx_stmts_j)*
+                            let mut __v = std::vec::Vec::with_capacity(#a_param_count + #b_param_count);
+                            __v.extend_from_slice(&__a_idx);
+                            __v.extend_from_slice(&__b_idx);
+                            __v
+                        };
+                        #(#jac_stmts)*
+                        __jac_cid += 1;
+                    }
+                });
+            }
+
+            {
+                let ci_set_cross = crate::registry_lookup(&sc.struct_name)
+                    .and_then(|l| l.constraint_index_field.as_ref().map(|f| {
+                        let fi = syn::Ident::new(f, proc_macro2::Span::call_site());
+                        quote! { __frine.#fi = __cid; }
+                    }));
+                set_block_indices_loops.push(quote! {
+                    for __frine in self.#rc_ident.iter_mut() {
+                        #(#resolve_stmts)*
+                        let mut __a_idx = [0u32; #a_param_count];
+                        #(#a_idx_stmts)*
+                        let mut __b_idx = [0u32; #b_param_count];
+                        #(#b_idx_stmts)*
+                        __frine.#block_ident.set_indices(&__a_idx, &__b_idx);
+                        #ci_set_cross
+                        __cid += 1;
+                    }
+                });
+            }
         } else {
             // Nested CrossBlock: add inner loops to the collection group
             let frines_ident = frines_ident.unwrap();
@@ -1516,6 +1615,30 @@ pub fn generate_root_methods(
                 }
             };
 
+            let nested_jac = if !jac_stmts.is_empty() {
+                let resolve_stmts_j = resolve_stmts.clone();
+                let b_idx_stmts_j = b_idx_stmts.clone();
+                Some(quote! {
+                    {
+                        let #parent_ident = __item;
+                        for __frine in &__item.#frines_ident {
+                            #(#resolve_stmts_j)*
+                            let #root_var_ident = &*__self_ref;
+                            let __jac_idx: std::vec::Vec<u32> = {
+                                let mut __b_idx = [0u32; #b_param_count];
+                                #(#b_idx_stmts_j)*
+                                let mut __v = std::vec::Vec::with_capacity(#a_param_count + #b_param_count);
+                                __v.extend_from_slice(&__jac_a_idx);
+                                __v.extend_from_slice(&__b_idx);
+                                __v
+                            };
+                            #(#jac_stmts)*
+                            __jac_cid += 1;
+                        }
+                    }
+                })
+            } else { None };
+
             let group = collection_groups.entry(group_key).or_insert_with(|| CollectionGroup {
                 coll_ident: coll_ident.clone(),
                 self_var: self_var.clone(),
@@ -1523,39 +1646,59 @@ pub fn generate_root_methods(
                 self_block: None,
                 cost_entries: Vec::new(),
                 gh_entries: Vec::new(),
+                jac_entries: Vec::new(),
                 nested_cost_loops: Vec::new(),
                 nested_gh_loops: Vec::new(),
+                nested_jac_loops: Vec::new(),
             });
             group.nested_cost_loops.push(nested_cost);
             group.nested_gh_loops.push(nested_gh);
+            if let Some(nj) = nested_jac { group.nested_jac_loops.push(nj); }
 
-            set_block_indices_loops.push(quote! {
-                for __item in self.#coll_ident.iter_mut() {
-                    let mut __a_idx = [0u32; #a_param_count];
-                    #(#a_idx_stmts)*
-                    for __frine in __item.#frines_ident.iter_mut() {
-                        #(#resolve_stmts)*
-                        let mut __b_idx = [0u32; #b_param_count];
-                        #(#b_idx_stmts)*
-                        __frine.#block_ident.set_indices(&__a_idx, &__b_idx);
+            {
+                let ci_set_nested = crate::registry_lookup(&sc.struct_name)
+                    .and_then(|l| l.constraint_index_field.as_ref().map(|f| {
+                        let fi = syn::Ident::new(f, proc_macro2::Span::call_site());
+                        quote! { __frine.#fi = __cid; }
+                    }));
+                set_block_indices_loops.push(quote! {
+                    for __item in self.#coll_ident.iter_mut() {
+                        let mut __a_idx = [0u32; #a_param_count];
+                        #(#a_idx_stmts)*
+                        for __frine in __item.#frines_ident.iter_mut() {
+                            #(#resolve_stmts)*
+                            let mut __b_idx = [0u32; #b_param_count];
+                            #(#b_idx_stmts)*
+                            __frine.#block_ident.set_indices(&__a_idx, &__b_idx);
+                            #ci_set_nested
+                            __cid += 1;
+                        }
                     }
-                }
-            });
+                });
+            }
         }
     }
 
-    // Emit merged loops for collection groups
+    // Emit merged loops for collection groups FIRST, then append existing
+    // non-merged loops. This ensures SelfBlock entities get lower constraint
+    // IDs than cross-block/triplet constraints.
+    let mut merged_cost: Vec<TokenStream2> = Vec::new();
+    let mut merged_gh: Vec<TokenStream2> = Vec::new();
+    let mut merged_jac: Vec<TokenStream2> = Vec::new();
+    let mut merged_sbi: Vec<TokenStream2> = Vec::new();
     for (_key, group) in &collection_groups {
         let coll = &group.coll_ident;
         let self_var = &group.self_var;
         let a_type = &group.a_type_ident;
         let cost_entries = &group.cost_entries;
         let gh_entries = &group.gh_entries;
+        let jac_entries = &group.jac_entries;
         let nested_cost = &group.nested_cost_loops;
         let nested_gh = &group.nested_gh_loops;
+        let nested_jac = &group.nested_jac_loops;
 
         // Merged cost loop: SelfBlock entries + nested CrossBlock inner loops
-        cost_loops.push(quote! {
+        merged_cost.push(quote! {
             for __item in self.#coll.iter() {
                 let #self_var = __item;
                 let #root_var_ident = &*__self_ref;
@@ -1565,7 +1708,7 @@ pub fn generate_root_methods(
         });
 
         // Merged grad+hessian loop
-        grad_hessian_loops.push(quote! {
+        merged_gh.push(quote! {
             for __item in self.#coll.iter_mut() {
                 let #self_var = unsafe { &*(__item as *const #a_type) };
                 let #root_var_ident = &*__self_ref;
@@ -1574,20 +1717,61 @@ pub fn generate_root_methods(
             }
         });
 
+        // Merged Jacobian loop (only if Jacobian entries/nested exist)
+        if !jac_entries.is_empty() || !nested_jac.is_empty() {
+            let a_count = group.self_block.as_ref().map(|sb| sb.a_param_count).unwrap_or(0);
+            let a_idx_stmts_j: Vec<_> = group.self_block.as_ref()
+                .map(|sb| sb.a_idx_stmts.clone()).unwrap_or_default();
+            merged_jac.push(quote! {
+                for __item in self.#coll.iter() {
+                    let #self_var = __item;
+                    let #root_var_ident = &*__self_ref;
+                    let __jac_idx: std::vec::Vec<u32> = {
+                        let mut __a_idx = [0u32; #a_count];
+                        #(#a_idx_stmts_j)*
+                        __a_idx.to_vec()
+                    };
+                    let __jac_a_idx = __jac_idx.clone();
+                    #(#jac_entries)*
+                    #(#nested_jac)*
+                    __jac_cid += 1;
+                }
+            });
+        }
+
         // set_block_indices loop (only if there's a SelfBlock)
         if let Some(ref sb) = group.self_block {
             let a_count = sb.a_param_count;
             let a_idx = &sb.a_idx_stmts;
             let block = &sb.block_ident;
-            set_block_indices_loops.push(quote! {
+            let a_type_name = a_type.to_string();
+            let ci_set = crate::registry_lookup(&a_type_name)
+                .and_then(|l| l.constraint_index_field.as_ref().map(|f| {
+                    let fi = syn::Ident::new(f, proc_macro2::Span::call_site());
+                    quote! { __item.#fi = __cid; }
+                }));
+            merged_sbi.push(quote! {
                 for __item in self.#coll.iter_mut() {
                     let mut __a_idx = [0u32; #a_count];
                     #(#a_idx)*
                     __item.#block.set_indices(&__a_idx);
+                    #ci_set
+                    __cid += 1;
                 }
             });
         }
     }
+
+    // Prepend merged SelfBlock loops before cross/triplet loops
+    // so entities get lower constraint IDs than cross-block constraints.
+    let mut ordered_cost = merged_cost; ordered_cost.append(&mut cost_loops);
+    let cost_loops = ordered_cost;
+    let mut ordered_gh = merged_gh; ordered_gh.append(&mut grad_hessian_loops);
+    let grad_hessian_loops = ordered_gh;
+    let mut ordered_jac = merged_jac; ordered_jac.append(&mut jacobian_loops);
+    let jacobian_loops = ordered_jac;
+    let mut ordered_sbi = merged_sbi; ordered_sbi.append(&mut set_block_indices_loops);
+    let set_block_indices_loops = ordered_sbi;
 
     // Generate methods on root -- precision-aware
     let prec_type: syn::Type = syn::parse_str(precision)
@@ -1652,6 +1836,16 @@ pub fn generate_root_methods(
          quote! { arael::model::ExtendedModel::extended_compute32(self, params); })
     };
 
+    let extended_jacobian_call = if custom {
+        if precision == "f64" {
+            quote! { arael::model::ExtendedModel::extended_jacobian64(self, params, &mut __jac_rows, &mut __jac_cid); }
+        } else {
+            quote! { arael::model::ExtendedModel::extended_jacobian32(self, params, &mut __jac_rows, &mut __jac_cid); }
+        }
+    } else {
+        quote! {}
+    };
+
     let mut tokens = quote! {
         #(#constraint_impls)*
 
@@ -1672,6 +1866,8 @@ pub fn generate_root_methods(
             }
 
             fn __set_block_indices(&mut self) {
+                let mut __cid: u32 = 0;
+                let _ = &__cid; // suppress unused warning when no constraint_index fields
                 #(#set_block_indices_loops)*
             }
 
@@ -1684,6 +1880,29 @@ pub fn generate_root_methods(
                 #extended_compute_call
             }
         }
+    };
+
+    // Generate calc_jacobian method if requested
+    if jacobian {
+        let ext_update = if custom { extended_update_call.clone() } else { quote! {} };
+        tokens.extend(quote! {
+            impl #root_name {
+                /// Compute the sparse Jacobian matrix at the given parameters.
+                pub fn calc_jacobian(&mut self, params: &[#prec_type]) -> arael::model::Jacobian<#prec_type> {
+                    arael::model::Model::#update_method(self, params);
+                    #ext_update
+                    let __self_ref = unsafe { &*(self as *const Self) };
+                    let mut __jac_rows: std::vec::Vec<arael::model::JacobianRow<#prec_type>> = std::vec::Vec::new();
+                    let mut __jac_cid: u32 = 0;
+                    #(#jacobian_loops)*
+                    #extended_jacobian_call
+                    arael::model::Jacobian { num_params: params.len(), rows: __jac_rows }
+                }
+            }
+        });
+    }
+
+    tokens.extend(quote! {
 
         impl arael::simple_lm::LmProblem<#prec_type> for #root_name {
             fn calc_cost(&mut self, params: &[#prec_type]) -> #prec_type {
@@ -1736,7 +1955,7 @@ pub fn generate_root_methods(
                 #(#advance_stmts)*
             }
         }
-    };
+    });
 
     // Generate default ExtendedModel impl unless `extended` flag is set
     if !custom {

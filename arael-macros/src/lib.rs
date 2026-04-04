@@ -62,6 +62,8 @@ struct SymLayout {
     /// Stored as string pairs for thread-safe registry storage.
     #[allow(dead_code)]
     substitutions: Vec<(String, String)>, // (from_sym_str, to_sym_str)
+    /// Field name of `#[arael(constraint_index)]` u32 field, if present.
+    constraint_index_field: Option<String>,
 }
 
 /// Stashed constraint: struct name + raw attribute tokens, waiting for root to generate code.
@@ -237,12 +239,22 @@ fn model_attribute(input: &mut syn::DeriveInput) -> syn::Result<TokenStream2> {
     let mut ref_paths_for_reg: Vec<(String, String)> = Vec::new();
     let mut euler_angle_fields_reg: Vec<String> = Vec::new();
     let mut universal_euler_angle_fields_reg: Vec<String> = Vec::new();
+    let mut constraint_index_field_reg: Option<String> = None;
     for field in fields {
         let field_name = field.ident.as_ref().unwrap().to_string();
-        // Check for #[arael(ref = ...)] on this field
+        // Check for #[arael(ref = ...)] or #[arael(constraint_index)] on this field
         if let Ok(Some(attr)) = parse_arael_attr(&field.attrs) {
             match attr {
                 AraelAttr::RefResolve(path) => ref_paths_for_reg.push((field_name.clone(), path)),
+                AraelAttr::ConstraintIndex => {
+                    constraint_index_field_reg = Some(field_name.clone());
+                    sym_fields.push((field_name, SymFieldType::Skip));
+                    continue;
+                }
+                AraelAttr::Skip => {
+                    sym_fields.push((field_name, SymFieldType::Skip));
+                    continue;
+                }
                 _ => {}
             }
         }
@@ -317,6 +329,7 @@ fn model_attribute(input: &mut syn::DeriveInput) -> syn::Result<TokenStream2> {
         euler_angle_fields: euler_angle_fields_reg.clone(),
         universal_euler_angle_fields: universal_euler_angle_fields_reg.clone(),
         substitutions: substitutions_reg,
+        constraint_index_field: constraint_index_field_reg,
     });
 
     // No field injection needed — SimpleEulerAngleParam/EulerAngleParam contain their own state.
@@ -582,7 +595,7 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
         let attr = parse_arael_attr(&field.attrs)?;
 
         match attr {
-            Some(AraelAttr::Skip) => continue,
+            Some(AraelAttr::Skip) | Some(AraelAttr::ConstraintIndex) => continue,
             Some(AraelAttr::Compute(expr_tokens)) => {
                 let substituted = substitute_param_idents(expr_tokens, &param_field_names);
                 compute_stmts.push(quote! { self.#ident = #substituted; });
@@ -836,9 +849,10 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
         let tvec: Vec<proc_macro2::TokenTree> = content.into_iter().collect();
         if let Some(proc_macro2::TokenTree::Ident(id)) = tvec.first() {
             if id.to_string() != "root" { return None; }
-            // Parse optional keywords after comma: root, f32, custom
+            // Parse optional keywords after comma: f32/f64, extended, jacobian
             let mut precision = "f64".to_string();
             let mut custom = false;
+            let mut jacobian = false;
             let mut pos = 1;
             while pos < tvec.len() {
                 if let proc_macro2::TokenTree::Punct(p) = &tvec[pos] {
@@ -850,21 +864,24 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                                 precision = kw_str;
                             } else if kw_str == "extended" {
                                 custom = true;
+                            } else if kw_str == "jacobian" {
+                                jacobian = true;
                             }
                         }
                     }
                 }
                 pos += 1;
             }
-            return Some((precision, custom));
+            return Some((precision, custom, jacobian));
         }
         None
     });
-    let root_precision = root_info.as_ref().map(|(p, _)| p.clone());
-    let root_custom = root_info.as_ref().map(|(_, c)| *c).unwrap_or(false);
+    let root_precision = root_info.as_ref().map(|(p, _, _)| p.clone());
+    let root_custom = root_info.as_ref().map(|(_, c, _)| *c).unwrap_or(false);
+    let root_jacobian = root_info.as_ref().map(|(_, _, j)| *j).unwrap_or(false);
 
     let constraint_impls = if let Some(ref precision) = root_precision {
-        constraint::generate_root_methods(name, fields, precision, root_custom)?
+        constraint::generate_root_methods(name, fields, precision, root_custom, root_jacobian)?
     } else {
         quote! {}
     };
@@ -1017,9 +1034,9 @@ fn generate_sym_impl(
         let ident = field.ident.as_ref().unwrap();
         let ty = &field.ty;
 
-        // Skip fields with #[arael(skip)] or #[arael(compute = ...)]
+        // Skip fields with #[arael(skip)], #[arael(compute = ...)], or #[arael(constraint_index)]
         match parse_arael_attr(&field.attrs)? {
-            Some(AraelAttr::Skip) | Some(AraelAttr::Compute(_)) => continue,
+            Some(AraelAttr::Skip) | Some(AraelAttr::Compute(_)) | Some(AraelAttr::ConstraintIndex) => continue,
             _ => {}
         }
 
@@ -1088,6 +1105,7 @@ enum AraelAttr {
     Skip,
     Compute(TokenStream2),
     RefResolve(String),  // resolution path, e.g. "root.poses"
+    ConstraintIndex,     // marks a u32 field as constraint index
 }
 
 /// Parse `#[arael(skip)]` or `#[arael(compute = <expr>)]` from field attributes.
@@ -1105,6 +1123,9 @@ fn parse_arael_attr(attrs: &[syn::Attribute]) -> syn::Result<Option<AraelAttr>> 
                 let kw = ident.to_string();
                 if kw == "skip" {
                     return Ok(Some(AraelAttr::Skip));
+                }
+                if kw == "constraint_index" {
+                    return Ok(Some(AraelAttr::ConstraintIndex));
                 }
                 // #[arael(ref = root.poses)]
                 if kw == "ref" {

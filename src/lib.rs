@@ -289,6 +289,8 @@ pub mod simple_lm;
 /// Camera model and geometric utilities.
 pub mod geometry;
 
+/// Re-export Jacobian types for convenient access.
+pub use model::{Jacobian, JacobianRow, jacobian_entries};
 /// The `sym!` auto-clone macro for symbolic expressions (from `arael-sym`).
 pub use arael_sym::sym;
 /// Derive macro for the `Model` trait.
