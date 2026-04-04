@@ -3081,7 +3081,7 @@ fn classify_free_direction(parts: &[(String, f64)]) -> String {
     }
 
     let entity_list: Vec<&str> = entities.iter().map(|s| s.as_str()).collect();
-    let entity_str = if entity_list.len() <= 5 {
+    let entity_str = if entity_list.len() <= 9 {
         entity_list.join(", ")
     } else {
         format!("{} entities", entity_list.len())
