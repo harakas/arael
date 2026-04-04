@@ -93,6 +93,89 @@ impl CommandContext {
     }
 }
 
+/// Build a hint string for dimension rejection errors showing the current measured value.
+fn dimension_rejection_hint(sketch: &Sketch, action: &Action) -> String {
+    let (kind, requested) = match action {
+        Action::AddDimension { kind, value, .. } => (Some(kind), Some(*value)),
+        Action::UpdateDimension { index, value, .. } => {
+            if let Some(dim) = sketch.dimensions.get(*index) {
+                (Some(&dim.kind), Some(*value))
+            } else { (None, None) }
+        }
+        _ => (None, None),
+    };
+    let (Some(kind), Some(requested)) = (kind, requested) else { return String::new() };
+    let current = match kind {
+        DimensionKind::LineLength(r) => {
+            let l = &sketch.lines[*r];
+            let dx = l.p2.value.x - l.p1.value.x;
+            let dy = l.p2.value.y - l.p1.value.y;
+            Some(("length", (dx * dx + dy * dy).sqrt()))
+        }
+        DimensionKind::ArcRadius(r) => Some(("radius", sketch.arcs[*r].radius.value)),
+        DimensionKind::ArcSweep(r) => {
+            let a = &sketch.arcs[*r];
+            Some(("sweep", arael::utils::rad2deg(a.end_angle.value - a.start_angle.value)))
+        }
+        DimensionKind::Angle(a, b, supplement) => {
+            let la = &sketch.lines[*a];
+            let lb = &sketch.lines[*b];
+            let dx1 = la.p2.value.x - la.p1.value.x;
+            let dy1 = la.p2.value.y - la.p1.value.y;
+            let dx2 = lb.p2.value.x - lb.p1.value.x;
+            let dy2 = lb.p2.value.y - lb.p1.value.y;
+            let cross = dx1 * dy2 - dy1 * dx2;
+            let dot = dx1 * dx2 + dy1 * dy2;
+            let angle_rad = cross.atan2(dot).abs();
+            let angle_deg = if *supplement { 180.0 - arael::utils::rad2deg(angle_rad) } else { arael::utils::rad2deg(angle_rad) };
+            Some(("angle", angle_deg))
+        }
+        DimensionKind::PointPointDistance(a, b) => {
+            let pa = dim_endpoint_pos_from_sketch(sketch, a);
+            let pb = dim_endpoint_pos_from_sketch(sketch, b);
+            let dx = pb.x - pa.x;
+            let dy = pb.y - pa.y;
+            Some(("distance", (dx * dx + dy * dy).sqrt()))
+        }
+        DimensionKind::PointLineDistance(pt, line) => {
+            let p = dim_endpoint_pos_from_sketch(sketch, pt);
+            let l = &sketch.lines[*line];
+            let dx = l.p2.value.x - l.p1.value.x;
+            let dy = l.p2.value.y - l.p1.value.y;
+            let len = (dx * dx + dy * dy).sqrt();
+            if len < 1e-12 { None } else {
+                let dist = ((p.x - l.p1.value.x) * dy - (p.y - l.p1.value.y) * dx).abs() / len;
+                Some(("distance", dist))
+            }
+        }
+    };
+    if let Some((label, current_val)) = current {
+        format!(". Current {} is {:.4}, requested {:.4}", label, current_val, requested)
+    } else {
+        String::new()
+    }
+}
+
+/// Get position of a dimension endpoint from sketch (without EditorApp).
+fn dim_endpoint_pos_from_sketch(sketch: &Sketch, ep: &DimensionEndpoint) -> vect2d {
+    match ep {
+        DimensionEndpoint::Point(r) => sketch.points[*r].pos.value,
+        DimensionEndpoint::LineP1(r) => sketch.lines[*r].p1.value,
+        DimensionEndpoint::LineP2(r) => sketch.lines[*r].p2.value,
+        DimensionEndpoint::ArcCenter(r) => sketch.arcs[*r].center.value,
+        DimensionEndpoint::ArcStart(r) => {
+            let a = &sketch.arcs[*r];
+            vect2d::new(a.center.value.x + a.radius.value * a.start_angle.value.cos(),
+                        a.center.value.y + a.radius.value * a.start_angle.value.sin())
+        }
+        DimensionEndpoint::ArcEnd(r) => {
+            let a = &sketch.arcs[*r];
+            vect2d::new(a.center.value.x + a.radius.value * a.end_angle.value.cos(),
+                        a.center.value.y + a.radius.value * a.end_angle.value.sin())
+        }
+    }
+}
+
 /// Validate and apply a constraint action on a sketch.
 /// Returns Ok(new_cost) on success, Err(message) on rejection.
 /// Handles snapshot/restore, cost checking, and DOF checking.
@@ -150,9 +233,10 @@ pub fn validate_and_apply_constraint(
         if let Some(ref snap) = snapshot {
             if let Ok(restored) = bincode::deserialize(snap) {
                 *sketch = restored;
+                let hint = dimension_rejection_hint(sketch, action);
                 return Err(format!(
-                    "Constraint rejected: could not satisfy all constraints (cost {:.4} -> {:.4})",
-                    old_cost, new_cost));
+                    "Constraint rejected: could not satisfy all constraints{}",
+                    hint));
             }
         }
     }
