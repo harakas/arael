@@ -410,7 +410,7 @@ impl Action {
                 let dist = ((a.center.value.x - l.p1.value.x) * dy
                           - (a.center.value.y - l.p1.value.y) * dx) / len;
                 let sign = if dist >= 0.0 { 1.0 } else { -1.0 };
-                sketch.tangent_la.push(TangentLA { line: *line, arc: *arc, sign, hb: CrossBlock::new() });
+                sketch.tangent_la.push(TangentLA { line: *line, arc: *arc, sign, at_p1: false, at_p2: false, hb: CrossBlock::new() });
                 sketch.solve();
             }
             Action::ApplyTangentAA { a, b } => {

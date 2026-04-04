@@ -3546,12 +3546,13 @@ fn compute_dof_count(sketch: &mut Sketch) -> usize {
     compute_dof_sync(sketch).0
 }
 
-/// Compute DOF synchronously with free direction analysis.
+/// Compute DOF synchronously with free direction analysis using Hessian eigenvalues.
 fn compute_dof_sync(sketch: &mut Sketch) -> (usize, Vec<String>) {
     use arael::simple_lm::LmProblem;
     use arael_sketch_solver::SymbolBag;
 
     sketch.prepare_expr_constraints();
+    sketch.update_tangent_flags();
 
     let saved_drift = sketch.drift_isigma;
     sketch.drift_isigma = 0.0;
@@ -3579,14 +3580,30 @@ fn compute_dof_sync(sketch: &mut Sketch) -> (usize, Vec<String>) {
 
     sketch.drift_isigma = saved_drift;
 
-    let h = nalgebra::DMatrix::from_row_slice(n, n, &hessian);
-    let eigen = nalgebra::SymmetricEigen::new(h);
     let threshold = 1e-6;
+    // eigenvalues[i], eigenvectors column i — extracted uniformly from either backend
+    let (eigenvalues, eigenvectors): (Vec<f64>, Vec<Vec<f64>>) = if n < 32 {
+        // nalgebra for small matrices
+        let h = nalgebra::DMatrix::from_row_slice(n, n, &hessian);
+        let eigen = nalgebra::SymmetricEigen::new(h);
+        let vals: Vec<f64> = eigen.eigenvalues.iter().cloned().collect();
+        let vecs: Vec<Vec<f64>> = (0..n).map(|col| eigen.eigenvectors.column(col).iter().cloned().collect()).collect();
+        (vals, vecs)
+    } else {
+        // faer for large matrices (2.5x faster at 896x896)
+        let faer_h = faer::Mat::from_fn(n, n, |i, k| hessian[i * n + k]);
+        let eigen = faer_h.self_adjoint_eigen(faer::Side::Lower).expect("eigendecomposition failed");
+        let s = eigen.S().column_vector();
+        let u = eigen.U();
+        let vals: Vec<f64> = (0..n).map(|i| s[i]).collect();
+        let vecs: Vec<Vec<f64>> = (0..n).map(|col| (0..n).map(|row| u[(row, col)]).collect()).collect();
+        (vals, vecs)
+    };
 
     let mut free_dirs: Vec<String> = Vec::new();
     for col in 0..n {
-        if eigen.eigenvalues[col].abs() > threshold { continue; }
-        let ev = eigen.eigenvectors.column(col);
+        if eigenvalues[col].abs() > threshold { continue; }
+        let ev = &eigenvectors[col];
 
         let max_comp = ev.iter().cloned().fold(0.0f64, |a, b| a.max(b.abs()));
         if max_comp < 1e-10 { continue; }
@@ -3626,13 +3643,30 @@ fn cmd_dof_eigenvalues(ctx: &mut CommandContext) -> CommandResult {
         let i = idx as usize;
         if i < n && idx_to_name[i].is_empty() { idx_to_name[i] = name.clone(); }
     }
+    if n == 0 {
+        ctx.sketch.drift_isigma = saved_drift;
+        return ok("Hessian: 0x0 (empty)".to_string());
+    }
+    let t0 = std::time::Instant::now();
     let mut grad = vec![0.0f64; n];
     let mut hessian = vec![0.0f64; n * n];
     ctx.sketch.calc_grad_hessian_dense(&params, &mut grad, &mut hessian);
+    let t_hessian = t0.elapsed();
     ctx.sketch.drift_isigma = saved_drift;
+    let t1 = std::time::Instant::now();
     let h = nalgebra::DMatrix::from_row_slice(n, n, &hessian);
     let eigen = nalgebra::SymmetricEigen::new(h);
-    let mut lines = vec![format!("Params: {} Eigenvalues:", n)];
+    let t_eigen = t1.elapsed();
+    // faer eigendecomposition for comparison
+    let t2 = std::time::Instant::now();
+    let faer_h = faer::Mat::from_fn(n, n, |i, k| hessian[i * n + k]);
+    let _faer_eigen = faer_h.self_adjoint_eigen(faer::Side::Lower);
+    let t_faer = t2.elapsed();
+    let mut lines = vec![format!("Hessian: {}x{}", n, n)];
+    lines.push(format!("  build: {:.2}ms, nalgebra_eigen: {:.2}ms, faer_eigen: {:.2}ms",
+        t_hessian.as_secs_f64() * 1000.0, t_eigen.as_secs_f64() * 1000.0,
+        t_faer.as_secs_f64() * 1000.0));
+    // Print nalgebra eigenvalues with eigenvector components
     let mut evs: Vec<(f64, usize)> = eigen.eigenvalues.iter().cloned().enumerate().map(|(i,v)| (v, i)).collect();
     evs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
     for (val, col) in &evs {
@@ -3644,6 +3678,112 @@ fn cmd_dof_eigenvalues(ctx: &mut CommandContext) -> CommandResult {
             .collect();
         lines.push(format!("  {:.6e}  {}", val, parts.join(", ")));
     }
+    // Print faer eigenvalues for comparison (sorted ascending)
+    if let Ok(ref fe) = _faer_eigen {
+        let fs = fe.S();
+        let fs_col = fs.column_vector();
+        let mut faer_evs: Vec<f64> = (0..n).map(|i| fs_col[i]).collect();
+        faer_evs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        lines.push(String::new());
+        lines.push("faer eigenvalues:".to_string());
+        for v in &faer_evs {
+            lines.push(format!("  {:.6e}", v));
+        }
+    }
+    ok(lines.join("\n"))
+}
+
+fn cmd_dof_singular(ctx: &mut CommandContext) -> CommandResult {
+    use arael_sketch_solver::SymbolBag;
+    ctx.sketch.prepare_expr_constraints();
+    let saved_drift = ctx.sketch.drift_isigma;
+    ctx.sketch.drift_isigma = 0.0;
+    let mut params = Vec::new();
+    ctx.sketch.serialize64(&mut params);
+    let n = params.len();
+    let bag = SymbolBag::build(&ctx.sketch);
+    let mut idx_to_name: Vec<String> = vec![String::new(); n];
+    for (name, &idx) in &bag.param_indices {
+        let i = idx as usize;
+        if i < n && idx_to_name[i].is_empty() { idx_to_name[i] = name.clone(); }
+    }
+    let t0 = std::time::Instant::now();
+    let jacobian = ctx.sketch.calc_jacobian(&params);
+    let t_build = t0.elapsed();
+    ctx.sketch.drift_isigma = saved_drift;
+    let m = jacobian.num_residuals();
+    if m == 0 || n == 0 {
+        return ok(format!("Jacobian: {} residuals x {} params (empty)", m, n));
+    }
+    let t1 = std::time::Instant::now();
+    let dense = jacobian.to_dense();
+    let j = nalgebra::DMatrix::from_row_slice(m, n, &dense);
+    let t_dense = t1.elapsed();
+    let t2 = std::time::Instant::now();
+    let svd = j.svd(false, true);
+    let t_svd = t2.elapsed();
+    let vt = svd.v_t.as_ref().expect("V^T should be computed");
+    // Also benchmark faer SVD for comparison
+    let t3 = std::time::Instant::now();
+    let faer_mat = faer::Mat::from_fn(m, n, |i, k| dense[i * n + k]);
+    let _faer_svd = faer_mat.thin_svd().unwrap();
+    let t_faer = t3.elapsed();
+
+    let mut lines = vec![format!("Jacobian: {} residuals x {} params", m, n)];
+    lines.push(format!("  build: {:.2}ms, nalgebra_svd: {:.2}ms, faer_svd: {:.2}ms, hessian_path: see 'dof eigenvalues'",
+        t_build.as_secs_f64() * 1000.0,
+        (t_dense + t_svd).as_secs_f64() * 1000.0,
+        t_faer.as_secs_f64() * 1000.0));
+    let mut svs: Vec<(f64, usize)> = svd.singular_values.iter().cloned().enumerate().map(|(i,v)| (v, i)).collect();
+    svs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
+    for (val, idx) in &svs {
+        let sv = vt.row(*idx);
+        let max_comp = sv.iter().cloned().fold(0.0f64, |a, b| a.max(b.abs()));
+        let comp_threshold = max_comp * 0.3;
+        let parts: Vec<String> = (0..n).filter(|&i| sv[i].abs() > comp_threshold)
+            .map(|i| format!("{}={:.3}", if idx_to_name[i].is_empty() { format!("[{}]", i) } else { idx_to_name[i].clone() }, sv[i]))
+            .collect();
+        lines.push(format!("  {:.6e}  {}", val, parts.join(", ")));
+    }
+    ok(lines.join("\n"))
+}
+
+fn cmd_dof_jacobian(ctx: &mut CommandContext) -> CommandResult {
+    use arael_sketch_solver::SymbolBag;
+    ctx.sketch.prepare_expr_constraints();
+    let saved_drift = ctx.sketch.drift_isigma;
+    ctx.sketch.drift_isigma = 0.0;
+    let mut params = Vec::new();
+    ctx.sketch.serialize64(&mut params);
+    let n = params.len();
+    if n == 0 {
+        ctx.sketch.drift_isigma = saved_drift;
+        return ok("No params".to_string());
+    }
+    let bag = SymbolBag::build(&ctx.sketch);
+    let mut idx_to_name: Vec<String> = vec![String::new(); n];
+    for (name, &idx) in &bag.param_indices {
+        let i = idx as usize;
+        if i < n && idx_to_name[i].is_empty() { idx_to_name[i] = name.clone(); }
+    }
+    let jacobian = ctx.sketch.calc_jacobian(&params);
+    ctx.sketch.drift_isigma = saved_drift;
+    let mut lines = vec![format!("Jacobian: {} rows x {} cols", jacobian.num_residuals(), n)];
+    for (i, row) in jacobian.rows.iter().enumerate() {
+        let entries: Vec<String> = row.entries.iter()
+            .map(|&(idx, val)| {
+                let name = if idx_to_name[idx as usize].is_empty() {
+                    format!("[{}]", idx)
+                } else {
+                    idx_to_name[idx as usize].clone()
+                };
+                format!("{}={:+.6}", name, val)
+            })
+            .collect();
+        let norm: f64 = row.entries.iter().map(|&(_, v)| v * v).sum::<f64>().sqrt();
+        lines.push(format!("  row {:3} cid={:3} r={:+.6e} |dr|={:.6e} [{}]",
+            i, row.constraint, row.residual, norm, entries.join(", ")));
+    }
     ok(lines.join("\n"))
 }
 
@@ -3652,8 +3792,14 @@ fn cmd_dof(ctx: &mut CommandContext, args: &str) -> CommandResult {
     if arg == "eigenvalues" {
         return cmd_dof_eigenvalues(ctx);
     }
+    if arg == "singular" {
+        return cmd_dof_singular(ctx);
+    }
+    if arg == "jacobian" {
+        return cmd_dof_jacobian(ctx);
+    }
     if !arg.is_empty() && arg != "analyze" {
-        return err("Usage: dof | dof analyze | dof eigenvalues");
+        return err("Usage: dof | dof analyze | dof eigenvalues | dof singular | dof jacobian");
     }
 
     let (dof, free_dirs) = compute_dof_sync(&mut ctx.sketch);

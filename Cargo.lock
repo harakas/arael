@@ -263,6 +263,7 @@ dependencies = [
  "eframe",
  "egui_commonmark",
  "egui_extras",
+ "faer",
  "form_urlencoded",
  "nalgebra",
  "pollster",
