@@ -21,6 +21,51 @@ Each entity type has a fixed number of degrees of freedom (DOF) — parameters t
 
 Each constraint removes 1 or more DOF. A fully constrained sketch has DOF 0. Use `dof` to check, `dof analyze` to see which entities can still move.
 
+### Constraint DOF Table
+
+| Constraint | DOF removed |
+|------------|-------------|
+| `horizontal` / `vertical` | 1 |
+| `parallel` | 1 |
+| `perpendicular` | 1 |
+| `equal` (length or radius) | 1 |
+| `collinear` | 2 |
+| `tangent` | 1 |
+| `point_on` (point on line/arc) | 1 |
+| `midpoint` | 2 |
+| `coincident` (point-point, endpoint-endpoint) | 2 |
+| `concentric` | 2 |
+| `symmetry` (point-point about line) | 2 |
+| `symmetry` (line-line about line) | 4 |
+| `lock` (point) | 2 |
+| `lock` (line endpoint) | 2 |
+| Dimension (`length`, `radius`, `sweep`, `angle`, `distance`) | 1 |
+
+### DOF Budgeting Example
+
+Plan your constraints by counting DOF. Example: fully constrained triangle.
+
+```
+# 3 lines: 3 x 4 = 12 DOF
+# Auto-connect adds 3 coincident constraints: -6 DOF (12 - 6 = 6)
+s0 = add_line 0,0 5,0
+s1 = add_line 5,0 3,4
+s2 = add_line 3,4 0,0
+
+# Fix sizes: 2 lengths = -2 DOF, 1 angle = -1 DOF
+length s0 5
+length s1 4
+angle s0 s1 60
+
+# Fix position and orientation: lock = -2, horizontal = -1
+lock s0.p1 0,0
+horizontal s0
+
+# Total: 12 - 6 - 2 - 1 - 2 - 1 = 0 DOF (fully constrained)
+```
+
+Note: when you create lines with matching endpoints (e.g., L1 starts where L0 ends), the editor automatically creates coincident constraints. You don't need to add them manually.
+
 ## Entity References
 
 Entities are referenced by name: `L0`, `L1` (lines), `P0`, `P1` (points), `A0`, `A1` (arcs/circles).
@@ -556,19 +601,120 @@ Use `dof analyze` to see exactly which directions remain free.
 To create a freely movable/rotatable component (DOF=3), use only relative constraints — no `horizontal`, `vertical`, or `lock`:
 
 ```
-# Example: symmetric diamond shape, DOF=3 (can translate + rotate)
-# Construction axis through two arc centers
-add_circle 0,0 2
-add_circle 6,0 2
-add_line 0,0 6,0
-coincident L0.p1 A0.center
-coincident L0.p2 A1.center
-# Add lines and constrain relative to axis
-add_line 0,2 3,3
-add_line 3,3 6,2
-equal L1 L2
-symmetry L1.p2 L0 L2.p1     # midpoint symmetric about axis
-# All constraints are relative — shape can translate and rotate freely
+# Example: rhombus, DOF=3 (translate + rotate)
+# Four sides
+s0 = add_line -3,0 0,2
+s1 = add_line 0,2 3,0
+s2 = add_line 3,0 0,-2
+s3 = add_line 0,-2 -3,0
+equal s0 s1
+equal s1 s2
+equal s2 s3
+# Construction diagonals through opposite vertices
+d_h = add_line s0.p1 s2.p1
+d_v = add_line s1.p1 s3.p1
+style d_h dashdot
+style d_v dashdot
+# Shape is defined by diagonal lengths
+length d_h 6
+length d_v 4
+# DOF=3: shape can translate and rotate freely
 ```
 
-Key pattern: anchor a construction axis by making its endpoints coincident with feature points, then use `symmetry`, `equal`, `perpendicular`, `distance`, and `angle` between entities. Avoid absolute constraints entirely.
+Key pattern: use variable names (`s0`, `top`, `left`) instead of absolute entity names (`L0`, `A0`). Constrain with `equal`, `length`, `perpendicular` between entities. Avoid `horizontal`, `vertical`, and `lock` entirely.
+
+## Common Shape Recipes
+
+### Semicircle (DOF=0)
+
+```
+a = add_arc -5,0 5,0 0,5
+sweep a 180                     # -1 DOF
+radius a 5                     # -1 DOF
+# DOF=3: semicircle shape is fixed, can translate + rotate
+lock a.center 0,0              # -2 DOF
+# Construction line connecting endpoints pins orientation
+base = add_line a.start a.end  # auto-connects to arc endpoints: -4 DOF
+style base dashdot
+horizontal base                # -1 DOF -> DOF=0
+```
+
+### Equilateral Triangle (DOF=0)
+
+```
+# 3 lines, auto-connected: 12 - 6 = 6 DOF
+s0 = add_line 0,0 5,0
+s1 = add_line 5,0 2.5,4.33
+s2 = add_line 2.5,4.33 0,0
+equal s0 s1                    # -1 DOF
+equal s1 s2                    # -1 DOF
+# With all sides equal, all angles are 60 -- no angle constraint needed
+length s0 5                    # -1 DOF -> DOF=3: shape fixed, can translate + rotate
+lock s0.p1 0,0                 # -2 DOF
+horizontal s0                  # -1 DOF -> DOF=0
+```
+
+For a general (non-equilateral) triangle, replace `equal` constraints with `length` for each side, or use 2 lengths + 1 angle.
+
+### Rectangle (DOF=0)
+
+```
+# 4 lines using relative coordinates, auto-connected: 16 - 8 = 8 DOF
+s0 = add_line 0,0 @10,0
+s1 = add_line @0,5
+s2 = add_line @-10,0
+s3 = add_line @0,-5
+perpendicular s0 s1            # -1 DOF
+perpendicular s1 s2            # -1 DOF
+perpendicular s2 s3            # -1 DOF
+length s0 10                   # -1 DOF (width)
+length s1 5                    # -1 DOF (height) -> DOF=3: shape fixed, can translate + rotate
+lock s0.p1 0,0                 # -2 DOF
+horizontal s0                  # -1 DOF -> DOF=0
+```
+
+### Slot / Oblong (DOF=0)
+
+```
+# Two lines (offset bot so tangent constraints are not degenerate)
+top = add_line 0,2 10,2
+bot = add_line 11,-3 1,-3
+# Arcs connecting line endpoints
+right = add_arc top.p2 bot.p1 13,0
+left = add_arc bot.p2 top.p1 -2,0
+# Both lines tangent to both arcs (implies parallel + equal length)
+tangent top right
+tangent bot right
+tangent top left
+tangent bot left
+equal right left
+# Size
+length top 10
+radius right 2
+# DOF=3: slot shape fixed, can translate + rotate
+lock top.p1 0,2
+horizontal top                 # DOF=0
+```
+
+### Regular Polygon (DOF=3, add lock+horizontal for DOF=0)
+
+For an N-sided regular polygon, use N lines with coincident endpoints (auto-connected), all equal length, and (N-3) interior angle constraints. Set the first angle numerically and capture its dimension name with `ia = angle ...`, then reference it for the rest — this creates expression dimensions that track the first angle's value. Interior angle = (N-2)*180/N degrees. Example for a hexagon (N=6, angle=120):
+
+```
+# 6 lines, auto-connected: 24 - 12 = 12 DOF
+s0 = add_line 5,0 2.5,4.33
+s1 = add_line 2.5,4.33 -2.5,4.33
+s2 = add_line -2.5,4.33 -5,0
+s3 = add_line -5,0 -2.5,-4.33
+s4 = add_line -2.5,-4.33 2.5,-4.33
+s5 = add_line 2.5,-4.33 5,0
+# All sides equal: -5 DOF
+equal s0 s1; equal s1 s2; equal s2 s3; equal s3 s4; equal s4 s5
+# Interior angles: first sets the value, rest reference it: -3 DOF
+ia = angle s0 s1 120
+angle s1 s2 ia; angle s2 s3 ia
+length s0 5                    # -1 DOF -> DOF=3: shape fixed, can translate + rotate
+# Fix position and orientation for DOF=0:
+lock s0.p1 5,0                 # -2 DOF
+horizontal s1                  # -1 DOF -> DOF=0
+```
