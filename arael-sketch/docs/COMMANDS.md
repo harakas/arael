@@ -41,6 +41,8 @@ Each constraint removes 1 or more DOF. A fully constrained sketch has DOF 0. Use
 | `lock` (line endpoint) | 2 |
 | Dimension (`length`, `radius`, `sweep`, `angle`, `distance`) | 1 |
 
+These are maximum DOF reductions for independent entities. When entities share endpoints (via coincident constraints), effective removal may be less. For example, line-line symmetry removes 4 DOF for independent lines, but fewer when the lines already share endpoints. Always verify with `dof` after applying constraints.
+
 ### DOF Budgeting Example
 
 Plan your constraints by counting DOF. Example: fully constrained triangle.
@@ -133,6 +135,8 @@ add_circle 5,0 1 noconnect      No auto-coincident
 add_arc 0,0 5,0 2,3 noconnect   No auto-coincident
 ```
 
+When 3+ endpoints meet at the same point, auto-connect creates multiple coincident constraints. Some may be redundant (e.g., if A=B and B=C, then A=C is implied). Redundant constraints are rejected by the DOF check -- this is normal.
+
 ### Line Chaining
 
 When `add_line` is given only one coordinate, it starts from the last created endpoint:
@@ -161,7 +165,8 @@ parallel L0 L1               Make two lines parallel
 perpendicular L0 L1          Make two lines perpendicular (alias: perp)
 equal L0 L1                  Equal length (lines) or equal radius (arcs)
 collinear L0 L1              Make two lines collinear
-tangent L0 A0                Tangent: line-arc or arc-arc
+tangent L0 A0                Tangent: line-arc (line must be first argument)
+tangent A0 A1                Tangent: arc-arc (either order)
 coincident L0.p2 L1.p1       Coincident: any endpoint pair
 concentric A0 A1             Concentric arcs
 midpoint P0 L0               Point at midpoint of line
@@ -171,6 +176,7 @@ midpoint L0.p1 A0            Line endpoint at angular midpoint of arc
 symmetry L0 L1 L2            Lines L0,L2 symmetric about L1
 symmetry P0 L0 P1            Points P0,P1 symmetric about L0
 symmetry L0.p1 L1 L2.p1     Endpoints symmetric about L1
+symmetry A0.center L0 A1.center  Any endpoint ref works (P0, L0.p1, A0.center, A0.start, A0.end)
 point_on P0 L0               Point on line
 point_on L0.p1 A0            Line endpoint on arc
 point_on A0.center L0        Arc center on line (creates helper point internally)
@@ -217,8 +223,10 @@ length L0 {2*scale}          Live expression (alternative syntax)
 radius A0 1.5                Set arc radius
 sweep A0 180                 Set arc sweep angle (degrees)
 angle L0 L1 45               Set angle between lines (degrees, auto-selects sector)
-distance L0.p1 L1.p2 5.0     Point-point distance
-distance P0 L0 3.0            Point-line distance
+distance L0.p1 L1.p2 5.0     Point-point distance (any endpoint refs)
+distance A0.center A1.center 5.0  Arc center to arc center
+distance A0.start L1.p2 4.0  Arc start to line endpoint
+distance P0 L0 3.0            Point-line distance (point/endpoint first, line second)
 remove_dim d0                 Remove dimension by name
 freeze                        Add numeric dimensions for all entities at current values
 freeze L0 A0                  Freeze specific entities only
@@ -332,7 +340,9 @@ Functions that return scalars (usable in expressions):
 |----------|---------|-------------|
 | `dist(P0, P1)` | scalar | Distance between two points |
 | `dist(P0, L0)` | scalar | Perpendicular distance from point to line |
-| `angle(L0, L1)` | scalar | Angle between two lines (degrees) |
+| `angle(L0, L1)` | scalar | Angle between two lines (degrees, signed) |
+
+**Note on `angle()`**: Returns a signed value that may be negative or supplementary. Use `abs(angle(L0, L1))` for a positive value. Feeding `angle()` directly into the `angle` command may fail if the sign/sector doesn't match -- use the "Current angle" value from the rejection error message instead.
 
 ### Vector Arithmetic
 
@@ -552,6 +562,10 @@ add_line L0.p1+normal(L0)*2 L0.p2+normal(L0)*2
 
 Decide on axes of symmetry, which dimensions should be parametric, and your target DOF. DOF 0 means fully constrained (typical for manufacturing drawings). DOF 3 means the shape can translate and rotate freely (good for reusable components).
 
+### Make parameter changes incrementally
+
+Large parameter jumps (e.g., changing a scale variable from 1 to 10) can cause solver convergence issues, potentially losing constraints or producing unexpected geometry. Use incremental changes for robust behavior (e.g., 1 -> 2 -> 5 -> 10). This is especially important for parameters that affect many constraints simultaneously.
+
 ### Use construction lines as reference geometry
 
 Add construction lines with `style L0 dashdot` to define axes of symmetry and reference frames. These constrain like normal lines but are visually distinct. Anchor both endpoints to known geometry (e.g., `coincident L0.p1 A0.center` + `midpoint P0 L0`) rather than using length + angle, which adds unnecessary DOF complexity.
@@ -576,7 +590,7 @@ For symmetric shapes, fully constrain one side and use `symmetry P0 L_axis P1` t
 
 ### Monitor DOF as you build
 
-Check `dof` after each batch of constraints. If DOF doesn't drop as expected, a constraint is redundant. If the solver rejects a constraint, it conflicts with the current system. Use `list constraints` and `get_sketch_state` to verify the current state.
+Check `dof` after each batch of constraints. If DOF doesn't drop as expected, a constraint is redundant. If the solver rejects a constraint, it conflicts with the current system. Use `list constraints` and `list` to verify the current state. (`get_sketch_state` is an MCP tool, not a sketch command -- it calls `list` internally.)
 
 ### Use parameters for scalable dimensions
 
@@ -592,7 +606,7 @@ For closed shapes: fully constrain one chain of segments (lengths + angles betwe
 
 ### Use execute_script for batching
 
-Send multiple commands at once using `execute_script`. Use `#` comments to document sections. Check results with `get_sketch_state` after major operations.
+Send multiple commands at once using `execute_script`. Use `#` comments to document sections. Check results with `list` after major operations (or `get_sketch_state` MCP tool).
 
 ### Coordinate system
 

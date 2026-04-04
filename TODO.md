@@ -23,5 +23,6 @@
 - Way to get the Jacobian for the system with constraints identifiable for more efficient SVD analysis of DOF in arael-sketch -- DONE (`#[arael(root, jacobian)]` + `#[arael(constraint_index)]`)
 - **Document Jacobian feature**: Add documentation for `#[arael(root, jacobian)]`, `#[arael(constraint_index)]`, `calc_jacobian()`, `Jacobian<T>`/`JacobianRow<T>` types, and `ExtendedModel::extended_jacobian64/32` to crate docs and README. Include the `jacobian_demo` example in the docs.
 - **Degenerate tangent at shared endpoint**: DONE -- TangentLA uses dot-product formulation when tangent point is a shared endpoint (detected via coincident scan). The perpendicular-distance formulation has zero Jacobian at shared endpoints; the dot-product does not.
+- **Synchronous DOF calculation**: Replace async DOF computation with synchronous calculation whenever the sketch is altered (add/remove constraint, dimension change, etc.) but NOT during dragging. Currently DOF is computed asynchronously which adds complexity. With faer eigendecomposition the cost is acceptable for interactive use.
 - **arael-sym**: Implement `Mul<E> for f64`, `Mul<E> for i64`, etc. so `2.0 * expr` works (currently only `expr * 2.0` compiles). Same for Add, Sub, Div.
 
