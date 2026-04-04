@@ -68,6 +68,17 @@ impl ExpressionConstraint {
         let r = self.expr.eval(vars)? * constraint_isigma;
         Ok(r * r)
     }
+
+    /// Compute residual and sparse derivative entries for a Jacobian row.
+    pub fn jacobian_row(&self, vars: &HashMap<&str, f64>, constraint_isigma: f64)
+        -> Result<(f64, Vec<(u32, f64)>), String>
+    {
+        let r = self.expr.eval(vars)? * constraint_isigma;
+        let dr: Result<Vec<f64>, String> = self.param_derivs.iter()
+            .map(|(_, deriv)| Ok(deriv.eval(vars)? * constraint_isigma))
+            .collect();
+        Ok((r, arael::model::jacobian_entries(&self.indices, &dr?)))
+    }
 }
 
 /// Expand derived symbols in an expression to their base parameter form.

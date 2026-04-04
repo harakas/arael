@@ -640,17 +640,36 @@ pub struct CoincidentLL22 {
 
 // -- Line-Arc --
 
-// Line tangent to arc: signed perpendicular distance from center to line = sign * radius.
-// sign is +1 or -1, determined at creation time based on which side of the line
-// the arc center is on. Using linear residual (not squared) for good Hessian conditioning.
+// Line tangent to arc. Uses perpendicular-distance residual (always active) plus
+// a dot-product residual when the tangent point is a shared endpoint. The
+// perpendicular-distance formulation has zero Jacobian at shared endpoints
+// (the distance has a critical point there), so the dot-product provides the
+// actual constraint information in that case.
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
-#[arael(constraint(hb, {
+// Perpendicular distance from center to line = sign * radius (when no shared endpoint)
+#[arael(constraint(hb, guard = !self.at_p1 && !self.at_p2, {
     let dx = line.p2.x - line.p1.x;
     let dy = line.p2.y - line.p1.y;
     let len = sqrt(dx * dx + dy * dy);
     let dist = ((arc.center.x - line.p1.x) * dy - (arc.center.y - line.p1.y) * dx) / len;
     [(dist - tangentla.sign * arc.radius) * sketch.constraint_isigma]
+}))]
+// dot(line_dir, p1 - center) = 0: line direction perpendicular to radius at p1
+#[arael(constraint(hb, guard = self.at_p1, {
+    let dx = line.p2.x - line.p1.x;
+    let dy = line.p2.y - line.p1.y;
+    let rx = line.p1.x - arc.center.x;
+    let ry = line.p1.y - arc.center.y;
+    [(dx * rx + dy * ry) * sketch.constraint_isigma]
+}))]
+// dot(line_dir, p2 - center) = 0: line direction perpendicular to radius at p2
+#[arael(constraint(hb, guard = self.at_p2, {
+    let dx = line.p1.x - line.p2.x;
+    let dy = line.p1.y - line.p2.y;
+    let rx = line.p2.x - arc.center.x;
+    let ry = line.p2.y - arc.center.y;
+    [(dx * rx + dy * ry) * sketch.constraint_isigma]
 }))]
 pub struct TangentLA {
     #[arael(ref = root.lines)]
@@ -659,6 +678,10 @@ pub struct TangentLA {
     pub arc: Ref<Arc>,
     #[serde(default = "default_tangent_sign")]
     pub sign: f64,
+    #[serde(skip)]
+    pub at_p1: bool,
+    #[serde(skip)]
+    pub at_p2: bool,
     #[serde(skip)]
     pub hb: CrossBlock<Line, Arc>,
 }

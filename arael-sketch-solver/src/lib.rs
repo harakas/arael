@@ -53,7 +53,7 @@ include!("constraints.rs");
 
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
-#[arael(root, extended)]
+#[arael(root, extended, jacobian)]
 pub struct Sketch {
     pub points: Arena<Point>,
     pub lines: Arena<Line>,
@@ -827,6 +827,22 @@ impl arael::model::ExtendedModel for Sketch {
             }
         }
     }
+
+    fn extended_jacobian64(&mut self, params: &[f64], rows: &mut std::vec::Vec<arael::model::JacobianRow<f64>>, cid: &mut u32) {
+        if self.expr_constraints.is_empty() { return; }
+        let bag = self.symbol_bag.as_ref().expect("symbol_bag not built");
+        let vars = bag.eval_vars(params);
+        let isigma = self.constraint_isigma;
+        for ec in &self.expr_constraints {
+            match ec.jacobian_row(&vars, isigma) {
+                Ok((residual, entries)) => {
+                    rows.push(arael::model::JacobianRow { constraint: *cid, residual, entries });
+                }
+                Err(e) => eprintln!("expr constraint eval error: {}: {}", ec.description, e),
+            }
+            *cid += 1;
+        }
+    }
 }
 
 impl Sketch {
@@ -1193,6 +1209,16 @@ impl Sketch {
         }
     }
 
+    /// Update tangent_la shared-endpoint flags by scanning coincident collections.
+    pub fn update_tangent_flags(&mut self) {
+        for t in &mut self.tangent_la {
+            t.at_p1 = self.coincident_lp1_arc_start.iter().any(|c| c.line == t.line && c.arc == t.arc)
+                    || self.coincident_lp1_arc_end.iter().any(|c| c.line == t.line && c.arc == t.arc);
+            t.at_p2 = self.coincident_lp2_arc_start.iter().any(|c| c.line == t.line && c.arc == t.arc)
+                    || self.coincident_lp2_arc_end.iter().any(|c| c.line == t.line && c.arc == t.arc);
+        }
+    }
+
     /// Solve the sketch constraints using Levenberg-Marquardt.
     /// Uses sparse faer Cholesky for n >= 64 params, dense Cholesky otherwise.
     /// When starting cost is high, uses graduated optimization (1% -> 10% ->
@@ -1203,6 +1229,7 @@ impl Sketch {
         // Rebuild expression constraints from dimensions with expr_str
         // (needed after load/undo since expr_constraints is not serialized)
         self.rebuild_expr_constraints();
+        self.update_tangent_flags();
 
         let mut params64: std::vec::Vec<f64> = std::vec::Vec::new();
         self.serialize64(&mut params64);
@@ -1329,6 +1356,125 @@ impl Sketch {
             .collect();
         for (i, val) in derived_vals {
             self.dimensions[i].value = val;
+        }
+    }
+}
+
+#[cfg(test)]
+mod jacobian_tests {
+    use super::*;
+    use arael::model::Model;
+    use arael::simple_lm::LmProblem;
+    use arael::vect::vect2d;
+
+    /// Build a sketch with lines, coincident constraint, and an expression
+    /// dimension, then validate Jacobian against Hessian and cost.
+    fn make_test_sketch() -> (Sketch, Vec<f64>) {
+        let mut sketch = Sketch::new();
+        let l0 = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(3.0, 0.0));
+        let l1 = sketch.add_line(vect2d::new(3.0, 0.0), vect2d::new(5.0, 2.0));
+        // Coincident: L0.p2 == L1.p1
+        sketch.coincident_ll21.push(CoincidentLL21 {
+            a: l0,
+            b: l1,
+            hb: arael::model::CrossBlock::new(),
+        });
+        // Length dimension on L0 (creates an expression constraint)
+        sketch.lines[l0].constraints.has_length = true;
+        sketch.lines[l0].constraints.length = 5.0;
+        sketch.dimensions.push(Dimension {
+            kind: DimensionKind::LineLength(l0),
+            value: 5.0, offset: vect2d::new(0.0, 1.0), text_along: 0.0,
+            name: "d0".into(), expr_str: None, broken: false, derived: false,
+        });
+
+        sketch.prepare_expr_constraints();
+        let mut params = Vec::new();
+        sketch.serialize64(&mut params);
+        (sketch, params)
+    }
+
+    #[test]
+    fn sketch_jacobian_cost_matches() {
+        let (mut sketch, mut params) = make_test_sketch();
+        // Perturb so residuals are non-zero
+        params[0] += 0.1;
+        params[1] += 0.2;
+        params[4] -= 0.3;
+
+        let j = sketch.calc_jacobian(&params);
+        let cost_j: f64 = j.rows.iter().map(|r| r.residual * r.residual).sum();
+        let cost_c = sketch.calc_cost(&params);
+        assert!(
+            (cost_j - cost_c).abs() < 1e-10,
+            "cost mismatch: jacobian={}, calc_cost={}", cost_j, cost_c
+        );
+    }
+
+    #[test]
+    fn sketch_jacobian_jtj_matches_hessian() {
+        let (mut sketch, mut params) = make_test_sketch();
+        params[0] += 0.1;
+        params[1] += 0.2;
+        params[4] -= 0.3;
+
+        let j = sketch.calc_jacobian(&params);
+        let dense = j.to_dense();
+        let m = j.num_residuals();
+        let n = j.num_params;
+
+        // J^T * J
+        let mut jtj = vec![0.0f64; n * n];
+        for i in 0..n {
+            for k in 0..n {
+                let mut s = 0.0;
+                for r in 0..m { s += dense[r * n + i] * dense[r * n + k]; }
+                jtj[i * n + k] = s;
+            }
+        }
+
+        // Hessian = 2 * J^T * J
+        let mut grad = vec![0.0f64; n];
+        let mut hessian = vec![0.0f64; n * n];
+        sketch.calc_grad_hessian_dense(&params, &mut grad, &mut hessian);
+
+        for i in 0..n {
+            for k in 0..n {
+                let expected = 2.0 * jtj[i * n + k];
+                let actual = hessian[i * n + k];
+                assert!(
+                    (expected - actual).abs() < 1e-8,
+                    "H[{},{}] mismatch: 2*JtJ={}, H={}", i, k, expected, actual
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn sketch_jacobian_gradient_matches() {
+        let (mut sketch, mut params) = make_test_sketch();
+        params[0] += 0.1;
+        params[1] += 0.2;
+
+        let j = sketch.calc_jacobian(&params);
+        let n = j.num_params;
+
+        let mut grad_j = vec![0.0f64; n];
+        for row in &j.rows {
+            for &(idx, d) in &row.entries {
+                grad_j[idx as usize] += 2.0 * row.residual * d;
+            }
+        }
+
+        let mut grad = vec![0.0f64; n];
+        let mut hessian = vec![0.0f64; n * n];
+        sketch.calc_grad_hessian_dense(&params, &mut grad, &mut hessian);
+
+        for i in 0..n {
+            assert!(
+                (grad_j[i] - grad[i]).abs() < 1e-8,
+                "grad[{}] mismatch: J={}, GH={}", i, grad_j[i], grad[i]
+            );
         }
     }
 }

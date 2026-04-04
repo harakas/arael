@@ -373,7 +373,7 @@ fn test_tangent_la() {
               - (sketch.arcs[a].center.value.y - l_ref.p1.value.y) * dx) / len;
     let sign = if dist >= 0.0 { 1.0 } else { -1.0 };
     sketch.tangent_la.push(TangentLA {
-        line: l, arc: a, sign, hb: CrossBlock::new(),
+        line: l, arc: a, sign, at_p1: false, at_p2: false, hb: CrossBlock::new(),
     });
     sketch.solve();
     let lp = &sketch.lines[l];
