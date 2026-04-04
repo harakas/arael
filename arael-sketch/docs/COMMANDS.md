@@ -143,9 +143,18 @@ remove_constraint L0 horizontal
 remove_constraint L0 L1 parallel
 remove_constraint L0 L1 perpendicular
 remove_constraint L0 L1 equal
+remove_constraint A0 A1 equal_radius
 remove_constraint L0 L1 collinear
 remove_constraint L0 A0 tangent
 remove_constraint A0 A1 concentric
+remove_constraint L0.p2 L1.p1 coincident
+remove_constraint P0 L0 point_on
+remove_constraint L0.p1 A0 point_on
+remove_constraint A0.center L0 point_on
+remove_constraint P0 L0 P1 symmetry
+remove_constraint L0 L1 L2 symmetry
+remove_constraint P0 L0 midpoint
+remove_constraint L0.p1 L1 midpoint
 remove_constraint L0.p1 lock
 ```
 
