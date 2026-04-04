@@ -27,6 +27,10 @@ pollster = "0.4"
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 axum = "0.7"
 tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "macros"] }
+sha2 = "0.10"
+base64 = "0.22"
+form_urlencoded = "1"
+rand = "0.9"
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2"

@@ -12,3 +12,5 @@
  * When adding/modifying arael-sketch commands, also update the documentation in COMMANDS.md.
  * Arael-sketch architecture: commands -> actions -> sketch (solver). Both the GUI and the command interface call actions. Actions mutate the sketch. Never call commands from actions or the GUI -- always go through actions. Helper points (Pc) used internally by constraints are created inside action apply() methods, invisible to callers.
  * arael-sketch: you can run test scripts inline with stdout and nogui: `cargo run -r -p arael-sketch -- --empty --nogui --stdout --script script.cmd`
+ * Never hide errors. One bug does not justify another or klunky workarounds -- fix issues at the source or prompt for decision by user.
+ * When something is "impossible" to fix due to limited API, extend the API/refactor the code instead of working around or ignoring problems and creating more bugs and bad code. A small change might cause a big change -- that is fine if the architectural changes needed take us forward.

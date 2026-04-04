@@ -2706,6 +2706,7 @@ fn main() -> eframe::Result {
     let mut dark = false;
     let mut mcp_addr: Option<std::net::SocketAddr> = None;
     let mut mcp_verbose = false;
+    let mut mcp_allow_all = false;
     let mut echo_stdout = false;
     let mut no_gui = false;
     let mut script_path: Option<String> = None;
@@ -2725,6 +2726,7 @@ fn main() -> eframe::Result {
                 eprintln!("  --nogui         Run without GUI (use with --script)");
                 eprintln!("  --mcp [addr]    Start MCP server (default 127.0.0.1:8585)");
                 eprintln!("  --mcp-verbose   Log all MCP traffic to stdout");
+                eprintln!("  --mcp-allow-all Auto-approve MCP OAuth connections");
                 eprintln!("  --help, -h      Show this help");
                 std::process::exit(0);
             }
@@ -2732,6 +2734,7 @@ fn main() -> eframe::Result {
             "--empty" => empty = true,
             "--dark" => dark = true,
             "--mcp-verbose" => mcp_verbose = true,
+            "--mcp-allow-all" => mcp_allow_all = true,
             "--stdout" => echo_stdout = true,
             "--nogui" => no_gui = true,
             "--script" => {
@@ -2818,7 +2821,7 @@ fn main() -> eframe::Result {
         return Ok(());
     }
     if let Some(addr) = mcp_addr {
-        app.mcp_rx = Some(mcp_server::start(addr, mcp_verbose, std::sync::Arc::clone(&app.egui_ctx)));
+        app.mcp_rx = Some(mcp_server::start(addr, mcp_verbose, mcp_allow_all, std::sync::Arc::clone(&app.egui_ctx)));
     }
     app.compute_dof_async();
 

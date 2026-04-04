@@ -346,8 +346,10 @@ The sketch editor embeds an MCP (Model Context Protocol) server, enabling AI age
 
 Start the editor with MCP enabled:
 ```bash
-cargo run -r -p arael-sketch -- --mcp
+cargo run -r -p arael-sketch -- --mcp --mcp-allow-all
 ```
+
+The `--mcp-allow-all` flag auto-approves OAuth connections from AI agents (recommended for local use). Without it, connections require manual approval in the GUI (not yet implemented).
 
 Configure Claude Code (`~/.claude.json`):
 ```json

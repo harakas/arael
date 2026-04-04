@@ -7,19 +7,23 @@
 
 #![cfg(not(target_arch = "wasm32"))]
 
+use std::collections::{HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
 use axum::{
-    extract::State,
+    extract::{Query, State},
     http::{HeaderMap, StatusCode, Method, Uri},
     middleware::{self, Next},
-    response::{IntoResponse, Response},
+    response::{IntoResponse, Response, Redirect},
     routing::{get, post, delete},
     Json, Router,
 };
 use eframe::egui;
 use serde_json::{json, Value};
+use sha2::{Sha256, Digest};
+use base64::engine::{Engine, general_purpose::URL_SAFE_NO_PAD};
+use rand::Rng;
 
 /// A request from the MCP server to the GUI thread.
 pub struct McpRequest {
@@ -34,6 +38,11 @@ struct McpState {
     verbose: bool,
     egui_ctx: Arc<Mutex<Option<egui::Context>>>,
     session_id: Arc<Mutex<Option<String>>>,
+    addr: SocketAddr,
+    allow_all: bool,
+    // OAuth state: auth_code -> (code_challenge, client_id)
+    auth_codes: Arc<Mutex<HashMap<String, (String, String)>>>,
+    valid_tokens: Arc<Mutex<HashSet<String>>>,
 }
 
 /// Start the MCP server on the given address.
@@ -41,6 +50,7 @@ struct McpState {
 pub fn start(
     addr: SocketAddr,
     verbose: bool,
+    allow_all: bool,
     egui_ctx: Arc<Mutex<Option<egui::Context>>>,
 ) -> mpsc::Receiver<McpRequest> {
     let (tx, rx) = mpsc::channel::<McpRequest>(32);
@@ -49,6 +59,10 @@ pub fn start(
         verbose,
         egui_ctx,
         session_id: Arc::new(Mutex::new(None)),
+        addr,
+        allow_all,
+        auth_codes: Arc::new(Mutex::new(HashMap::new())),
+        valid_tokens: Arc::new(Mutex::new(HashSet::new())),
     };
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new()
@@ -58,6 +72,12 @@ pub fn start(
                 .route("/mcp", post(handle_post))
                 .route("/mcp", get(handle_get))
                 .route("/mcp", delete(handle_delete))
+                // OAuth 2.1 endpoints for Claude Code compatibility
+                .route("/.well-known/oauth-authorization-server", get(handle_oauth_metadata))
+                .route("/.well-known/oauth-authorization-server/mcp", get(handle_oauth_metadata))
+                .route("/register", post(handle_register))
+                .route("/authorize", get(handle_authorize))
+                .route("/token", post(handle_token))
                 .fallback(handle_fallback)
                 .layer(middleware::from_fn_with_state(state.clone(), log_middleware))
                 .with_state(state);
@@ -189,6 +209,110 @@ async fn handle_get() -> Response {
 /// DELETE /mcp - session termination (not supported, return 405)
 async fn handle_delete() -> Response {
     StatusCode::METHOD_NOT_ALLOWED.into_response()
+}
+
+// ---------------------------------------------------------------------------
+// OAuth 2.1 endpoints (minimal implementation for Claude Code compatibility)
+// ---------------------------------------------------------------------------
+
+fn random_hex(len: usize) -> String {
+    let mut rng = rand::rng();
+    (0..len).map(|_| format!("{:02x}", rng.random::<u8>())).collect()
+}
+
+/// OAuth authorization server metadata (RFC 8414)
+async fn handle_oauth_metadata(state: State<McpState>) -> Json<Value> {
+    let base = format!("http://{}", state.addr);
+    Json(json!({
+        "issuer": base,
+        "authorization_endpoint": format!("{}/authorize", base),
+        "token_endpoint": format!("{}/token", base),
+        "registration_endpoint": format!("{}/register", base),
+        "response_types_supported": ["code"],
+        "grant_types_supported": ["authorization_code"],
+        "code_challenge_methods_supported": ["S256"]
+    }))
+}
+
+/// Dynamic client registration (RFC 7591) — accept any client
+async fn handle_register(Json(body): Json<Value>) -> Json<Value> {
+    let client_name = body.get("client_name").and_then(|v| v.as_str()).unwrap_or("unknown");
+    let client_id = random_hex(16);
+    Json(json!({
+        "client_id": client_id,
+        "client_name": client_name,
+        "redirect_uris": body.get("redirect_uris").cloned().unwrap_or(json!([])),
+        "grant_types": ["authorization_code"],
+        "response_types": ["code"],
+        "token_endpoint_auth_method": "none"
+    }))
+}
+
+/// Authorization endpoint — auto-approve and redirect back with auth code
+async fn handle_authorize(state: State<McpState>, Query(params): Query<HashMap<String, String>>) -> Response {
+    let redirect_uri = match params.get("redirect_uri") {
+        Some(uri) => uri.clone(),
+        None => return (StatusCode::BAD_REQUEST, Json(json!({"error": "missing redirect_uri"}))).into_response(),
+    };
+    let code_challenge = params.get("code_challenge").cloned().unwrap_or_default();
+    let client_id = params.get("client_id").cloned().unwrap_or_default();
+    let request_state = params.get("state").cloned().unwrap_or_default();
+
+    if !state.allow_all {
+        // Future: GUI approval prompt. For now, reject.
+        return (StatusCode::FORBIDDEN, Json(json!({"error": "access_denied", "error_description": "GUI approval not yet implemented. Use --mcp-allow-all"}))).into_response();
+    }
+
+    // Generate auth code and store with challenge for PKCE verification
+    let code = random_hex(32);
+    state.auth_codes.lock().unwrap().insert(code.clone(), (code_challenge, client_id));
+
+    // Redirect back to client with code
+    let sep = if redirect_uri.contains('?') { '&' } else { '?' };
+    let redirect_url = format!("{}{}code={}&state={}", redirect_uri, sep, code, request_state);
+    Redirect::to(&redirect_url).into_response()
+}
+
+/// Token endpoint — exchange auth code + PKCE verifier for bearer token
+async fn handle_token(state: State<McpState>, body: String) -> Response {
+    let params: HashMap<String, String> = form_urlencoded::parse(body.as_bytes())
+        .map(|(k, v)| (k.into_owned(), v.into_owned()))
+        .collect();
+
+    let code = params.get("code").cloned().unwrap_or_default();
+    let code_verifier = params.get("code_verifier").cloned().unwrap_or_default();
+
+    // Look up the auth code
+    let stored = state.auth_codes.lock().unwrap().remove(&code);
+    let (code_challenge, _client_id) = match stored {
+        Some(v) => v,
+        None => return (StatusCode::BAD_REQUEST, Json(json!({"error": "invalid_grant"}))).into_response(),
+    };
+
+    // PKCE S256 verification: SHA256(code_verifier) base64url-encoded == code_challenge
+    if !code_challenge.is_empty() {
+        let mut hasher = Sha256::new();
+        hasher.update(code_verifier.as_bytes());
+        let hash = hasher.finalize();
+        let computed = base64url_encode(&hash);
+        if computed != code_challenge {
+            return (StatusCode::BAD_REQUEST, Json(json!({"error": "invalid_grant", "error_description": "PKCE verification failed"}))).into_response();
+        }
+    }
+
+    // Issue bearer token
+    let access_token = random_hex(32);
+    state.valid_tokens.lock().unwrap().insert(access_token.clone());
+
+    Json(json!({
+        "access_token": access_token,
+        "token_type": "Bearer",
+        "expires_in": 86400
+    })).into_response()
+}
+
+fn base64url_encode(data: &[u8]) -> String {
+    URL_SAFE_NO_PAD.encode(data)
 }
 
 /// Fallback for unknown paths - return JSON 404 (not empty body)
