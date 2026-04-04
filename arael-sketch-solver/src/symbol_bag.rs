@@ -107,11 +107,22 @@ impl SymbolBag {
             }
             // Derived
             let r_sym = arael_sym::symbol(&format!("{}.radius", name));
-            derived.insert(format!("{}.diameter", name), r_sym * arael_sym::constant(2.0));
+            derived.insert(format!("{}.diameter", name), r_sym.clone() * arael_sym::constant(2.0));
             let sa_sym = arael_sym::symbol(&format!("{}.start_angle", name));
             let ea_sym = arael_sym::symbol(&format!("{}.end_angle", name));
             derived.insert(format!("{}.sweep", name),
-                (ea_sym - sa_sym) * arael_sym::constant(180.0 / std::f64::consts::PI));
+                (ea_sym.clone() - sa_sym.clone()) * arael_sym::constant(180.0 / std::f64::consts::PI));
+            // Arc endpoint positions: start.x/y, end.x/y
+            let cx_sym = arael_sym::symbol(&format!("{}.center.x", name));
+            let cy_sym = arael_sym::symbol(&format!("{}.center.y", name));
+            derived.insert(format!("{}.start.x", name),
+                cx_sym.clone() + r_sym.clone() * arael_sym::cos(sa_sym.clone()));
+            derived.insert(format!("{}.start.y", name),
+                cy_sym.clone() + r_sym.clone() * arael_sym::sin(sa_sym));
+            derived.insert(format!("{}.end.x", name),
+                cx_sym + r_sym.clone() * arael_sym::cos(ea_sym.clone()));
+            derived.insert(format!("{}.end.y", name),
+                cy_sym + r_sym * arael_sym::sin(ea_sym));
         }
 
         // Dimensions: d{n} -> target value or live expression
@@ -259,5 +270,42 @@ mod tests {
 
         // Unknown returns None
         assert!(bag.resolve("L99.p1.x").is_none());
+    }
+
+    #[test]
+    fn test_symbol_bag_arc_endpoints() {
+        let mut sketch = Sketch::new();
+        // Arc centered at (1,2), radius 3, from 0 to PI/2
+        let sa = 0.0f64;
+        let ea = std::f64::consts::FRAC_PI_2;
+        sketch.add_arc(vect2d::new(1.0, 2.0), 3.0, sa, ea, false);
+
+        let mut params = Vec::new();
+        sketch.serialize64(&mut params);
+        let bag = SymbolBag::build(&sketch);
+
+        // Check derived endpoint symbols exist
+        assert!(bag.derived.contains_key("A0.start.x"), "missing A0.start.x");
+        assert!(bag.derived.contains_key("A0.start.y"), "missing A0.start.y");
+        assert!(bag.derived.contains_key("A0.end.x"), "missing A0.end.x");
+        assert!(bag.derived.contains_key("A0.end.y"), "missing A0.end.y");
+
+        // Evaluate and check values
+        let vars = bag.eval_vars(&params);
+        let a = &sketch.arcs[sketch.arcs.refs().next().unwrap()];
+        let expected_sx = a.center.value.x + a.radius.value * a.start_angle.value.cos();
+        let expected_sy = a.center.value.y + a.radius.value * a.start_angle.value.sin();
+        let expected_ex = a.center.value.x + a.radius.value * a.end_angle.value.cos();
+        let expected_ey = a.center.value.y + a.radius.value * a.end_angle.value.sin();
+
+        let sx = bag.derived["A0.start.x"].eval(&vars).unwrap();
+        let sy = bag.derived["A0.start.y"].eval(&vars).unwrap();
+        let ex = bag.derived["A0.end.x"].eval(&vars).unwrap();
+        let ey = bag.derived["A0.end.y"].eval(&vars).unwrap();
+
+        assert!((sx - expected_sx).abs() < 0.01, "start.x: expected {}, got {}", expected_sx, sx);
+        assert!((sy - expected_sy).abs() < 0.01, "start.y: expected {}, got {}", expected_sy, sy);
+        assert!((ex - expected_ex).abs() < 0.01, "end.x: expected {}, got {}", expected_ex, ex);
+        assert!((ey - expected_ey).abs() < 0.01, "end.y: expected {}, got {}", expected_ey, ey);
     }
 }

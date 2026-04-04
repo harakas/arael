@@ -49,7 +49,7 @@ Coordinates can be specified as:
 
 Anywhere a numeric value is expected, an expression can be used. Expressions can reference:
 
-- **Entity properties**: `L0.p1.x`, `L0.p2.y`, `L0.length`, `L0.angle`, `A0.radius`, `A0.diameter`, `A0.sweep`, `A0.center.x`, `P0.x`, `P0.y`
+- **Entity properties**: `L0.p1.x`, `L0.p2.y`, `L0.length`, `L0.angle`, `A0.radius`, `A0.diameter`, `A0.sweep`, `A0.start_angle`, `A0.end_angle`, `A0.center.x`, `A0.start.x`, `A0.end.y`, `P0.x`, `P0.y`
 - **Dimension values**: `d0`, `d1`
 - **User parameters**: `width`, `height`
 - **Session variables**: variables set with `let`

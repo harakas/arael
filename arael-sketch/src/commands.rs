@@ -335,8 +335,14 @@ fn eval_context(sketch: &Sketch) -> HashMap<String, f64> {
         vars.insert(format!("{}.center.x", a.name), a.center.value.x);
         vars.insert(format!("{}.center.y", a.name), a.center.value.y);
         vars.insert(format!("{}.radius", a.name), a.radius.value);
+        vars.insert(format!("{}.diameter", a.name), a.radius.value * 2.0);
         vars.insert(format!("{}.start_angle", a.name), a.start_angle.value);
         vars.insert(format!("{}.end_angle", a.name), a.end_angle.value);
+        vars.insert(format!("{}.sweep", a.name), (a.end_angle.value - a.start_angle.value).to_degrees());
+        vars.insert(format!("{}.start.x", a.name), a.center.value.x + a.radius.value * a.start_angle.value.cos());
+        vars.insert(format!("{}.start.y", a.name), a.center.value.y + a.radius.value * a.start_angle.value.sin());
+        vars.insert(format!("{}.end.x", a.name), a.center.value.x + a.radius.value * a.end_angle.value.cos());
+        vars.insert(format!("{}.end.y", a.name), a.center.value.y + a.radius.value * a.end_angle.value.sin());
     }
     for d in &sketch.dimensions {
         vars.insert(d.name.clone(), d.value);
@@ -5622,6 +5628,23 @@ mod tests {
         assert_eq!(ctx.sketch.dimensions.len(), 0);
         let r = ctx.sketch.arcs.refs().next().unwrap();
         assert!(!ctx.sketch.arcs[r].constraints.has_target_sweep);
+    }
+
+    // -- arc derived properties in expressions --
+
+    #[test]
+    fn test_print_arc_start_end() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_arc -5,0 5,0 0,5");
+        let out = run_ok(&mut ctx, "print A0.start.x");
+        // Should return a number, not an error
+        assert!(out.parse::<f64>().is_ok() || out.trim().parse::<f64>().is_ok(),
+            "A0.start.x should be a number: {}", out);
+        run_ok(&mut ctx, "print A0.start.y");
+        run_ok(&mut ctx, "print A0.end.x");
+        run_ok(&mut ctx, "print A0.end.y");
+        run_ok(&mut ctx, "print A0.sweep");
+        run_ok(&mut ctx, "print A0.diameter");
     }
 
     // -- remove_constraint tests --
