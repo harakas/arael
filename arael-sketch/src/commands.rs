@@ -1052,6 +1052,7 @@ fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
         "dim_pos" => cmd_dim_pos(ctx, args_str),
         "set_derived" => cmd_set_derived(ctx, args_str),
         "set_driven" => cmd_set_driven(ctx, args_str),
+        "freeze" => cmd_freeze(ctx, args_str),
         "clear" => { ctx.sketch = Sketch::new(); ctx.history = crate::history::History::new(&ctx.sketch); ok("Cleared") },
         "let" => cmd_let(ctx, args_str),
         "save" => cmd_save(ctx, args_str),
@@ -1624,6 +1625,35 @@ fn cmd_concentric(ctx: &mut CommandContext, args: &str) -> CommandResult {
 // Dimension commands
 // ---------------------------------------------------------------------------
 
+/// Parse a dimension value string. Returns (numeric_value, expression_string).
+/// - `=expr` or `{expr}` → live expression: (0.0, Some("expr"))
+/// - `"expr"` (quoted) → live expression (backwards compat): (0.0, Some("expr"))
+/// - numeric literal → (value, None)
+/// - anything else → evaluate as expression to number: (value, None)
+fn parse_dim_value(sketch: &Sketch, val_str: &str) -> Result<(f64, Option<String>), String> {
+    let val_str = val_str.trim();
+    // Live expression: =prefix
+    if let Some(expr) = val_str.strip_prefix('=') {
+        return Ok((0.0, Some(expr.to_string())));
+    }
+    // Live expression: {braces}
+    if val_str.starts_with('{') && val_str.ends_with('}') {
+        let expr = &val_str[1..val_str.len()-1];
+        return Ok((0.0, Some(expr.to_string())));
+    }
+    // Strip quotes (just delimiters, not expression markers)
+    let val_str = val_str.trim_matches('"');
+    // Numeric literal
+    if let Ok(value) = val_str.parse::<f64>() {
+        return Ok((value, None));
+    }
+    // Evaluate expression to number
+    match eval_expr(sketch, val_str) {
+        Ok(value) => Ok((value, None)),
+        Err(e) => Err(format!("Cannot parse value '{}': {}", val_str, e)),
+    }
+}
+
 /// Find existing dimension index matching the given kind.
 /// For Angle, matches regardless of supplement flag. For PointPointDistance, matches either order.
 fn find_existing_dimension(sketch: &Sketch, kind: &DimensionKind) -> Option<usize> {
@@ -1659,27 +1689,17 @@ fn cmd_length(ctx: &mut CommandContext, args: &str) -> CommandResult {
     if tokens.len() != 2 { return err("Usage: length L0 5.0 [derived]"); }
     let line = match resolve_line(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
     let kind = DimensionKind::LineLength(line);
-    let val_str = tokens[1].trim().trim_matches('"');
-    if let Ok(value) = val_str.parse::<f64>() {
-        ctx.begin_group();
-        if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
-            let name = ctx.sketch.dimensions[idx].name.clone();
-            ctx.exec(Action::UpdateDimension { index: idx, value, expr: None });
-            return ok_or_status(ctx, format!("Updated {} length = {}", name, value));
-        }
-        ctx.exec(Action::AddDimension { kind, value, expr: None, derived: is_derived });
-        let prefix = if is_derived { "Derived" } else { "Set" };
-        ok_or_status(ctx, format!("{} {} length = {}", prefix, tokens[0], value))
-    } else {
-        ctx.begin_group();
-        if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
-            let name = ctx.sketch.dimensions[idx].name.clone();
-            ctx.exec(Action::UpdateDimension { index: idx, value: 0.0, expr: Some(val_str.to_string()) });
-            return ok_or_status(ctx, format!("Updated {} length = {}", name, val_str));
-        }
-        ctx.exec(Action::AddDimension { kind, value: 0.0, expr: Some(val_str.to_string()), derived: is_derived });
-        ok_or_status(ctx, format!("Set {} length = {}", tokens[0], val_str))
+    let (value, expr) = match parse_dim_value(&ctx.sketch, tokens[1]) { Ok(v) => v, Err(e) => return err(e) };
+    let display = if expr.is_some() { tokens[1].to_string() } else { format!("{}", value) };
+    ctx.begin_group();
+    if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
+        let name = ctx.sketch.dimensions[idx].name.clone();
+        ctx.exec(Action::UpdateDimension { index: idx, value, expr });
+        return ok_or_status(ctx, format!("Updated {} length = {}", name, display));
     }
+    ctx.exec(Action::AddDimension { kind, value, expr, derived: is_derived });
+    let prefix = if is_derived { "Derived" } else { "Set" };
+    ok_or_status(ctx, format!("{} {} length = {}", prefix, tokens[0], display))
 }
 
 fn cmd_radius(ctx: &mut CommandContext, args: &str) -> CommandResult {
@@ -1702,27 +1722,17 @@ fn cmd_radius(ctx: &mut CommandContext, args: &str) -> CommandResult {
     if tokens.len() != 2 { return err("Usage: radius A0 1.5 [derived]"); }
     let arc = match resolve_arc(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
     let kind = DimensionKind::ArcRadius(arc);
-    let val_str = tokens[1].trim().trim_matches('"');
-    if let Ok(value) = val_str.parse::<f64>() {
-        ctx.begin_group();
-        if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
-            let name = ctx.sketch.dimensions[idx].name.clone();
-            ctx.exec(Action::UpdateDimension { index: idx, value, expr: None });
-            return ok_or_status(ctx, format!("Updated {} radius = {}", name, value));
-        }
-        ctx.exec(Action::AddDimension { kind, value, expr: None, derived: is_derived });
-        let prefix = if is_derived { "Derived" } else { "Set" };
-        ok_or_status(ctx, format!("{} {} radius = {}", prefix, tokens[0], value))
-    } else {
-        ctx.begin_group();
-        if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
-            let name = ctx.sketch.dimensions[idx].name.clone();
-            ctx.exec(Action::UpdateDimension { index: idx, value: 0.0, expr: Some(val_str.to_string()) });
-            return ok_or_status(ctx, format!("Updated {} radius = {}", name, val_str));
-        }
-        ctx.exec(Action::AddDimension { kind, value: 0.0, expr: Some(val_str.to_string()), derived: is_derived });
-        ok_or_status(ctx, format!("Set {} radius = {}", tokens[0], val_str))
+    let (value, expr) = match parse_dim_value(&ctx.sketch, tokens[1]) { Ok(v) => v, Err(e) => return err(e) };
+    let display = if expr.is_some() { tokens[1].to_string() } else { format!("{}", value) };
+    ctx.begin_group();
+    if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
+        let name = ctx.sketch.dimensions[idx].name.clone();
+        ctx.exec(Action::UpdateDimension { index: idx, value, expr });
+        return ok_or_status(ctx, format!("Updated {} radius = {}", name, display));
     }
+    ctx.exec(Action::AddDimension { kind, value, expr, derived: is_derived });
+    let prefix = if is_derived { "Derived" } else { "Set" };
+    ok_or_status(ctx, format!("{} {} radius = {}", prefix, tokens[0], display))
 }
 
 fn cmd_sweep(ctx: &mut CommandContext, args: &str) -> CommandResult {
@@ -1748,27 +1758,17 @@ fn cmd_sweep(ctx: &mut CommandContext, args: &str) -> CommandResult {
         return ok_or_status(ctx, format!("Derived {} sweep = ({:.4})", tokens[0], sweep_deg));
     }
     if tokens.len() != 2 { return err("Usage: sweep A0 180 [derived]"); }
-    let val_str = tokens[1].trim().trim_matches('"');
-    if let Ok(value) = val_str.parse::<f64>() {
-        ctx.begin_group();
-        if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
-            let name = ctx.sketch.dimensions[idx].name.clone();
-            ctx.exec(Action::UpdateDimension { index: idx, value, expr: None });
-            return ok_or_status(ctx, format!("Updated {} sweep = {}", name, value));
-        }
-        ctx.exec(Action::AddDimension { kind, value, expr: None, derived: is_derived });
-        let prefix = if is_derived { "Derived" } else { "Set" };
-        ok_or_status(ctx, format!("{} {} sweep = {}", prefix, tokens[0], value))
-    } else {
-        ctx.begin_group();
-        if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
-            let name = ctx.sketch.dimensions[idx].name.clone();
-            ctx.exec(Action::UpdateDimension { index: idx, value: 0.0, expr: Some(val_str.to_string()) });
-            return ok_or_status(ctx, format!("Updated {} sweep = {}", name, val_str));
-        }
-        ctx.exec(Action::AddDimension { kind, value: 0.0, expr: Some(val_str.to_string()), derived: is_derived });
-        ok_or_status(ctx, format!("Set {} sweep = {}", tokens[0], val_str))
+    let (value, expr) = match parse_dim_value(&ctx.sketch, tokens[1]) { Ok(v) => v, Err(e) => return err(e) };
+    let display = if expr.is_some() { tokens[1].to_string() } else { format!("{}", value) };
+    ctx.begin_group();
+    if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
+        let name = ctx.sketch.dimensions[idx].name.clone();
+        ctx.exec(Action::UpdateDimension { index: idx, value, expr });
+        return ok_or_status(ctx, format!("Updated {} sweep = {}", name, display));
     }
+    ctx.exec(Action::AddDimension { kind, value, expr, derived: is_derived });
+    let prefix = if is_derived { "Derived" } else { "Set" };
+    ok_or_status(ctx, format!("{} {} sweep = {}", prefix, tokens[0], display))
 }
 
 // ---------------------------------------------------------------------------
@@ -1893,6 +1893,31 @@ fn cmd_style(ctx: &mut CommandContext, args: &str) -> CommandResult {
 // ---------------------------------------------------------------------------
 
 fn cmd_select(ctx: &mut CommandContext, args: &str) -> CommandResult {
+    let tokens: Vec<&str> = args.split_whitespace().collect();
+
+    // select all
+    if tokens.len() == 1 && tokens[0] == "all" {
+        ctx.selection.clear();
+        for r in ctx.sketch.points.refs() {
+            if !ctx.sketch.points[r].helper { ctx.selection.push(Selection::Point(r)); }
+        }
+        for r in ctx.sketch.lines.refs() { ctx.selection.push(Selection::Line(r)); }
+        for r in ctx.sketch.arcs.refs() { ctx.selection.push(Selection::Arc(r)); }
+        return ok(format!("Selected {} entities", ctx.selection.len()));
+    }
+
+    // select <entity> chain — follow coincident endpoint connections
+    if tokens.len() == 2 && tokens[1] == "chain" {
+        let seed = tokens[0];
+        return cmd_select_chain(ctx, seed);
+    }
+
+    // select <entity> linked — follow all constraint relationships
+    if tokens.len() == 2 && tokens[1] == "linked" {
+        let seed = tokens[0];
+        return cmd_select_linked(ctx, seed);
+    }
+
     for name in args.split_whitespace() {
         if name.contains('.') {
             // Endpoint selection
@@ -1922,9 +1947,200 @@ fn cmd_select(ctx: &mut CommandContext, args: &str) -> CommandResult {
     ok(format!("Selected {} entities", args.split_whitespace().count()))
 }
 
-fn cmd_deselect(ctx: &mut CommandContext, _args: &str) -> CommandResult {
+/// Select all entities connected via coincident endpoint constraints, recursively.
+fn cmd_select_chain(ctx: &mut CommandContext, seed: &str) -> CommandResult {
+    // Resolve seed to a line or arc index
+    let mut line_set: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut arc_set: std::collections::HashSet<u32> = std::collections::HashSet::new();
+
+    if seed.starts_with('L') {
+        let r = match resolve_line(&ctx.sketch, seed) { Ok(r) => r, Err(e) => return err(e) };
+        line_set.insert(r.index());
+    } else if seed.starts_with('A') {
+        let r = match resolve_arc(&ctx.sketch, seed) { Ok(r) => r, Err(e) => return err(e) };
+        arc_set.insert(r.index());
+    } else {
+        return err("chain requires a line or arc");
+    }
+
+    // Flood fill via coincident constraints
+    loop {
+        let before = line_set.len() + arc_set.len();
+        // LL coincident
+        for c in &ctx.sketch.coincident_ll11 { if line_set.contains(&c.a.index()) { line_set.insert(c.b.index()); } if line_set.contains(&c.b.index()) { line_set.insert(c.a.index()); } }
+        for c in &ctx.sketch.coincident_ll12 { if line_set.contains(&c.a.index()) { line_set.insert(c.b.index()); } if line_set.contains(&c.b.index()) { line_set.insert(c.a.index()); } }
+        for c in &ctx.sketch.coincident_ll21 { if line_set.contains(&c.a.index()) { line_set.insert(c.b.index()); } if line_set.contains(&c.b.index()) { line_set.insert(c.a.index()); } }
+        for c in &ctx.sketch.coincident_ll22 { if line_set.contains(&c.a.index()) { line_set.insert(c.b.index()); } if line_set.contains(&c.b.index()) { line_set.insert(c.a.index()); } }
+        // Line-Arc coincident
+        for c in &ctx.sketch.coincident_lp1_arc_start { if line_set.contains(&c.line.index()) { arc_set.insert(c.arc.index()); } if arc_set.contains(&c.arc.index()) { line_set.insert(c.line.index()); } }
+        for c in &ctx.sketch.coincident_lp2_arc_start { if line_set.contains(&c.line.index()) { arc_set.insert(c.arc.index()); } if arc_set.contains(&c.arc.index()) { line_set.insert(c.line.index()); } }
+        for c in &ctx.sketch.coincident_lp1_arc_end { if line_set.contains(&c.line.index()) { arc_set.insert(c.arc.index()); } if arc_set.contains(&c.arc.index()) { line_set.insert(c.line.index()); } }
+        for c in &ctx.sketch.coincident_lp2_arc_end { if line_set.contains(&c.line.index()) { arc_set.insert(c.arc.index()); } if arc_set.contains(&c.arc.index()) { line_set.insert(c.line.index()); } }
+        for c in &ctx.sketch.coincident_lp1_arc_center { if line_set.contains(&c.line.index()) { arc_set.insert(c.arc.index()); } if arc_set.contains(&c.arc.index()) { line_set.insert(c.line.index()); } }
+        for c in &ctx.sketch.coincident_lp2_arc_center { if line_set.contains(&c.line.index()) { arc_set.insert(c.arc.index()); } if arc_set.contains(&c.arc.index()) { line_set.insert(c.line.index()); } }
+        // Arc-Arc coincident
+        for c in &ctx.sketch.coincident_arc_center_start { if arc_set.contains(&c.a.index()) { arc_set.insert(c.b.index()); } if arc_set.contains(&c.b.index()) { arc_set.insert(c.a.index()); } }
+        for c in &ctx.sketch.coincident_arc_center_end { if arc_set.contains(&c.a.index()) { arc_set.insert(c.b.index()); } if arc_set.contains(&c.b.index()) { arc_set.insert(c.a.index()); } }
+        for c in &ctx.sketch.coincident_arc_start_center { if arc_set.contains(&c.a.index()) { arc_set.insert(c.b.index()); } if arc_set.contains(&c.b.index()) { arc_set.insert(c.a.index()); } }
+        for c in &ctx.sketch.coincident_arc_end_center { if arc_set.contains(&c.a.index()) { arc_set.insert(c.b.index()); } if arc_set.contains(&c.b.index()) { arc_set.insert(c.a.index()); } }
+        for c in &ctx.sketch.coincident_arc_start_start { if arc_set.contains(&c.a.index()) { arc_set.insert(c.b.index()); } if arc_set.contains(&c.b.index()) { arc_set.insert(c.a.index()); } }
+        for c in &ctx.sketch.coincident_arc_start_end { if arc_set.contains(&c.a.index()) { arc_set.insert(c.b.index()); } if arc_set.contains(&c.b.index()) { arc_set.insert(c.a.index()); } }
+        for c in &ctx.sketch.coincident_arc_end_start { if arc_set.contains(&c.a.index()) { arc_set.insert(c.b.index()); } if arc_set.contains(&c.b.index()) { arc_set.insert(c.a.index()); } }
+        for c in &ctx.sketch.coincident_arc_end_end { if arc_set.contains(&c.a.index()) { arc_set.insert(c.b.index()); } if arc_set.contains(&c.b.index()) { arc_set.insert(c.a.index()); } }
+        // Concentric
+        for c in &ctx.sketch.concentric { if arc_set.contains(&c.a.index()) { arc_set.insert(c.b.index()); } if arc_set.contains(&c.b.index()) { arc_set.insert(c.a.index()); } }
+        if line_set.len() + arc_set.len() == before { break; }
+    }
+
     ctx.selection.clear();
-    ok("Selection cleared")
+    let mut names = Vec::new();
+    for idx in &line_set {
+        let r = Ref::new(*idx);
+        ctx.selection.push(Selection::Line(r));
+        names.push(ctx.sketch.lines[r].name.clone());
+    }
+    for idx in &arc_set {
+        let r = Ref::new(*idx);
+        ctx.selection.push(Selection::Arc(r));
+        names.push(ctx.sketch.arcs[r].name.clone());
+    }
+    names.sort();
+    ok(format!("Chain: {}", names.join(", ")))
+}
+
+/// Select all entities sharing any constraint relationship, recursively.
+fn cmd_select_linked(ctx: &mut CommandContext, seed: &str) -> CommandResult {
+    // Start with seed entity
+    let mut line_set: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut arc_set: std::collections::HashSet<u32> = std::collections::HashSet::new();
+
+    if seed.starts_with('L') {
+        let r = match resolve_line(&ctx.sketch, seed) { Ok(r) => r, Err(e) => return err(e) };
+        line_set.insert(r.index());
+    } else if seed.starts_with('A') {
+        let r = match resolve_arc(&ctx.sketch, seed) { Ok(r) => r, Err(e) => return err(e) };
+        arc_set.insert(r.index());
+    } else {
+        return err("linked requires a line or arc");
+    }
+
+    // Flood fill: use list_constraints to find all relationships
+    // Simpler approach: iterate all constraint vectors and propagate
+    loop {
+        let before = line_set.len() + arc_set.len();
+
+        // All line-line constraints
+        macro_rules! link_ll {
+            ($vec:expr) => {
+                for c in &$vec {
+                    if line_set.contains(&c.a.index()) { line_set.insert(c.b.index()); }
+                    if line_set.contains(&c.b.index()) { line_set.insert(c.a.index()); }
+                }
+            };
+        }
+        link_ll!(ctx.sketch.parallel);
+        link_ll!(ctx.sketch.perpendicular);
+        link_ll!(ctx.sketch.equal_length);
+        link_ll!(ctx.sketch.collinear);
+        link_ll!(ctx.sketch.coincident_ll11);
+        link_ll!(ctx.sketch.coincident_ll12);
+        link_ll!(ctx.sketch.coincident_ll21);
+        link_ll!(ctx.sketch.coincident_ll22);
+
+        // All arc-arc constraints
+        macro_rules! link_aa {
+            ($vec:expr) => {
+                for c in &$vec {
+                    if arc_set.contains(&c.a.index()) { arc_set.insert(c.b.index()); }
+                    if arc_set.contains(&c.b.index()) { arc_set.insert(c.a.index()); }
+                }
+            };
+        }
+        link_aa!(ctx.sketch.equal_radius);
+        link_aa!(ctx.sketch.tangent_aa);
+        link_aa!(ctx.sketch.concentric);
+        link_aa!(ctx.sketch.coincident_arc_center_start);
+        link_aa!(ctx.sketch.coincident_arc_center_end);
+        link_aa!(ctx.sketch.coincident_arc_start_center);
+        link_aa!(ctx.sketch.coincident_arc_end_center);
+        link_aa!(ctx.sketch.coincident_arc_start_start);
+        link_aa!(ctx.sketch.coincident_arc_start_end);
+        link_aa!(ctx.sketch.coincident_arc_end_start);
+        link_aa!(ctx.sketch.coincident_arc_end_end);
+
+        // Line-Arc constraints
+        for c in &ctx.sketch.tangent_la {
+            if line_set.contains(&c.line.index()) { arc_set.insert(c.arc.index()); }
+            if arc_set.contains(&c.arc.index()) { line_set.insert(c.line.index()); }
+        }
+        macro_rules! link_la {
+            ($vec:expr, $l:ident, $a:ident) => {
+                for c in &$vec {
+                    if line_set.contains(&c.$l.index()) { arc_set.insert(c.$a.index()); }
+                    if arc_set.contains(&c.$a.index()) { line_set.insert(c.$l.index()); }
+                }
+            };
+        }
+        link_la!(ctx.sketch.coincident_lp1_arc_center, line, arc);
+        link_la!(ctx.sketch.coincident_lp2_arc_center, line, arc);
+        link_la!(ctx.sketch.coincident_lp1_arc_start, line, arc);
+        link_la!(ctx.sketch.coincident_lp2_arc_start, line, arc);
+        link_la!(ctx.sketch.coincident_lp1_arc_end, line, arc);
+        link_la!(ctx.sketch.coincident_lp2_arc_end, line, arc);
+
+        // Symmetry
+        for c in &ctx.sketch.symmetry_ll {
+            let has = line_set.contains(&c.a.index()) || line_set.contains(&c.b.index()) || line_set.contains(&c.c.index());
+            if has { line_set.insert(c.a.index()); line_set.insert(c.b.index()); line_set.insert(c.c.index()); }
+        }
+
+        // Angle constraints
+        for c in &ctx.sketch.angle {
+            if line_set.contains(&c.a.index()) { line_set.insert(c.b.index()); }
+            if line_set.contains(&c.b.index()) { line_set.insert(c.a.index()); }
+        }
+
+        if line_set.len() + arc_set.len() == before { break; }
+    }
+
+    ctx.selection.clear();
+    let mut names = Vec::new();
+    for idx in &line_set {
+        let r = Ref::new(*idx);
+        ctx.selection.push(Selection::Line(r));
+        names.push(ctx.sketch.lines[r].name.clone());
+    }
+    for idx in &arc_set {
+        let r = Ref::new(*idx);
+        ctx.selection.push(Selection::Arc(r));
+        names.push(ctx.sketch.arcs[r].name.clone());
+    }
+    names.sort();
+    ok(format!("Linked: {}", names.join(", ")))
+}
+
+fn cmd_deselect(ctx: &mut CommandContext, args: &str) -> CommandResult {
+    if args.trim().is_empty() {
+        ctx.selection.clear();
+        return ok("Selection cleared");
+    }
+    // Deselect specific entities
+    for name in args.split_whitespace() {
+        if name.starts_with('L') {
+            if let Ok(r) = resolve_line(&ctx.sketch, name) {
+                ctx.selection.retain(|s| !matches!(s, Selection::Line(l) if *l == r));
+            }
+        } else if name.starts_with('A') {
+            if let Ok(r) = resolve_arc(&ctx.sketch, name) {
+                ctx.selection.retain(|s| !matches!(s, Selection::Arc(a) if *a == r));
+            }
+        } else if name.starts_with('P') {
+            if let Ok(r) = resolve_point(&ctx.sketch, name) {
+                ctx.selection.retain(|s| !matches!(s, Selection::Point(p) if *p == r));
+            }
+        }
+    }
+    ok(format!("Selection: {} entities", ctx.selection.len()))
 }
 
 // ---------------------------------------------------------------------------
@@ -2048,8 +2264,24 @@ fn cmd_info(ctx: &mut CommandContext, args: &str) -> CommandResult {
 
 fn cmd_list(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let filter = args.trim();
+    if filter == "selection" {
+        if ctx.selection.is_empty() { return ok("(no selection)"); }
+        let names: Vec<String> = ctx.selection.iter().map(|s| match s {
+            Selection::Point(r) => ctx.sketch.points[*r].name.clone(),
+            Selection::Line(r) => ctx.sketch.lines[*r].name.clone(),
+            Selection::Arc(r) => ctx.sketch.arcs[*r].name.clone(),
+            Selection::LineP1(r) => format!("{}.p1", ctx.sketch.lines[*r].name),
+            Selection::LineP2(r) => format!("{}.p2", ctx.sketch.lines[*r].name),
+            Selection::ArcCenter(r) => format!("{}.center", ctx.sketch.arcs[*r].name),
+            Selection::ArcStart(r) => format!("{}.start", ctx.sketch.arcs[*r].name),
+            Selection::ArcEnd(r) => format!("{}.end", ctx.sketch.arcs[*r].name),
+            Selection::Constraint(_) => "constraint".into(),
+            Selection::Dimension(i) => ctx.sketch.dimensions.get(*i).map(|d| d.name.clone()).unwrap_or("dim?".into()),
+        }).collect();
+        return ok(names.join(", "));
+    }
     if !filter.is_empty() && !matches!(filter, "all" | "lines" | "points" | "arcs" | "dims" | "params" | "constraints") {
-        return err(format!("Unknown filter: {}. Use: all, lines, points, arcs, dims, params, constraints", filter));
+        return err(format!("Unknown filter: {}. Use: all, lines, points, arcs, dims, params, constraints, selection", filter));
     }
     let mut lines = Vec::new();
     let show_all = filter.is_empty() || filter == "all";
@@ -2507,38 +2739,24 @@ fn cmd_angle(ctx: &mut CommandContext, args: &str) -> CommandResult {
     if tokens.len() != 3 { return err("Usage: angle L0 L1 45 [derived]"); }
     let a = match resolve_line(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
     let b = match resolve_line(&ctx.sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
-    let val_str = tokens[2].trim().trim_matches('"');
+    let (value, expr) = match parse_dim_value(&ctx.sketch, tokens[2]) { Ok(v) => v, Err(e) => return err(e) };
+    let display = if expr.is_some() { tokens[2].to_string() } else { format!("{}", value) };
     let (current_deg, supplement_deg) = compute_angle(ctx, a, b);
-
-    if let Ok(value) = val_str.parse::<f64>() {
-        let supplement = (value - supplement_deg).abs() < (value - current_deg).abs();
-        let kind = DimensionKind::Angle(a, b, supplement);
-        ctx.begin_group();
-        if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
-            let name = ctx.sketch.dimensions[idx].name.clone();
-            ctx.exec(Action::UpdateDimension { index: idx, value, expr: None });
-            let sector = if supplement { "supplement" } else { "direct" };
-            return ok_or_status(ctx, format!("Updated {} angle = {} ({})", name, value, sector));
-        }
-        ctx.exec(Action::AddDimension { kind, value, expr: None, derived: is_derived });
+    // For expressions, evaluate to determine supplement sector
+    let check_val = if expr.is_some() { eval_expr(&ctx.sketch, expr.as_ref().unwrap()).unwrap_or(value) } else { value };
+    let supplement = (check_val - supplement_deg).abs() < (check_val - current_deg).abs();
+    let kind = DimensionKind::Angle(a, b, supplement);
+    ctx.begin_group();
+    if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
+        let name = ctx.sketch.dimensions[idx].name.clone();
+        ctx.exec(Action::UpdateDimension { index: idx, value, expr });
         let sector = if supplement { "supplement" } else { "direct" };
-        let prefix = if is_derived { "Derived" } else { "Set" };
-        ok_or_status(ctx, format!("{} angle {} {} = {} ({})", prefix, tokens[0], tokens[1], value, sector))
-    } else {
-        let value = eval_expr(&ctx.sketch, val_str).unwrap_or(0.0);
-        let supplement = (value - supplement_deg).abs() < (value - current_deg).abs();
-        let kind = DimensionKind::Angle(a, b, supplement);
-        ctx.begin_group();
-        if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
-            let name = ctx.sketch.dimensions[idx].name.clone();
-            ctx.exec(Action::UpdateDimension { index: idx, value: 0.0, expr: Some(val_str.to_string()) });
-            let sector = if supplement { "supplement" } else { "direct" };
-            return ok_or_status(ctx, format!("Updated {} angle = {} ({})", name, val_str, sector));
-        }
-        ctx.exec(Action::AddDimension { kind, value: 0.0, expr: Some(val_str.to_string()), derived: is_derived });
-        let sector = if supplement { "supplement" } else { "direct" };
-        ok_or_status(ctx, format!("Set angle {} {} = {} ({})", tokens[0], tokens[1], val_str, sector))
+        return ok_or_status(ctx, format!("Updated {} angle = {} ({})", name, display, sector));
     }
+    ctx.exec(Action::AddDimension { kind, value, expr, derived: is_derived });
+    let sector = if supplement { "supplement" } else { "direct" };
+    let prefix = if is_derived { "Derived" } else { "Set" };
+    ok_or_status(ctx, format!("{} angle {} {} = {} ({})", prefix, tokens[0], tokens[1], display, sector))
 }
 
 fn cmd_distance(ctx: &mut CommandContext, args: &str) -> CommandResult {
@@ -2577,10 +2795,7 @@ fn cmd_distance(ctx: &mut CommandContext, args: &str) -> CommandResult {
     }
 
     if tokens.len() != 3 { return err("Usage: distance L0.p1 L1.p2 5.0 [derived]  or  distance P0 L0 3.0 [derived]"); }
-    let val_str = tokens[2].trim().trim_matches('"');
-    let value = val_str.parse::<f64>().ok();
-    let expr = if value.is_none() { Some(val_str.to_string()) } else { None };
-    let val = value.unwrap_or(0.0);
+    let (val, expr) = match parse_dim_value(&ctx.sketch, tokens[2]) { Ok(v) => v, Err(e) => return err(e) };
 
     // Try point-line distance
     if (tokens[0].starts_with('P') || tokens[0].contains('.')) && tokens[1].starts_with('L') && !tokens[1].contains('.') {
@@ -2611,6 +2826,118 @@ fn cmd_distance(ctx: &mut CommandContext, args: &str) -> CommandResult {
     ctx.exec(Action::AddDimension { kind, value: val, expr, derived: is_derived });
     let prefix = if is_derived { "Derived distance" } else { "Set distance" };
     ok_or_status(ctx, format!("{} = {}", prefix, tokens[2]))
+}
+
+fn cmd_freeze(ctx: &mut CommandContext, args: &str) -> CommandResult {
+    let tokens: Vec<&str> = args.split_whitespace().collect();
+
+    // Collect entities to freeze
+    let mut line_refs: Vec<Ref<Line>> = Vec::new();
+    let mut arc_refs: Vec<Ref<Arc>> = Vec::new();
+
+    if tokens.is_empty() {
+        // Freeze all
+        line_refs.extend(ctx.sketch.lines.refs());
+        arc_refs.extend(ctx.sketch.arcs.refs());
+    } else {
+        for name in &tokens {
+            if name.starts_with('L') {
+                match resolve_line(&ctx.sketch, name) {
+                    Ok(r) => line_refs.push(r),
+                    Err(e) => return err(e),
+                }
+            } else if name.starts_with('A') {
+                match resolve_arc(&ctx.sketch, name) {
+                    Ok(r) => arc_refs.push(r),
+                    Err(e) => return err(e),
+                }
+            } else {
+                return err(format!("freeze applies to lines and arcs: {}", name));
+            }
+        }
+    }
+
+    ctx.begin_group();
+    let saved_skip = ctx.skip_dof_check;
+    let mut frozen = Vec::new();
+    let mut skipped = Vec::new();
+
+    for r in &line_refs {
+        let (name, len) = {
+            let l = &ctx.sketch.lines[*r];
+            let dx = l.p2.value.x - l.p1.value.x;
+            let dy = l.p2.value.y - l.p1.value.y;
+            (l.name.clone(), (dx * dx + dy * dy).sqrt())
+        };
+        let kind = DimensionKind::LineLength(*r);
+        if find_existing_dimension(&ctx.sketch, &kind).is_some() {
+            skipped.push(format!("{} length", name));
+            continue;
+        }
+        ctx.skip_dof_check = true;
+        ctx.exec(Action::AddDimension { kind, value: len, expr: None, derived: false });
+        if ctx.status_error.is_some() {
+            ctx.status_error = None;
+            skipped.push(format!("{} length", name));
+        } else {
+            frozen.push(format!("{} length={:.4}", name, len));
+        }
+    }
+
+    for r in &arc_refs {
+        let (name, radius, closed, sweep_deg) = {
+            let a = &ctx.sketch.arcs[*r];
+            (a.name.clone(), a.radius.value, a.closed,
+             arael::utils::rad2deg((a.end_angle.value - a.start_angle.value).abs()))
+        };
+
+        // Radius
+        let kind = DimensionKind::ArcRadius(*r);
+        if find_existing_dimension(&ctx.sketch, &kind).is_none() {
+            ctx.skip_dof_check = true;
+            ctx.exec(Action::AddDimension { kind, value: radius, expr: None, derived: false });
+            if ctx.status_error.is_some() {
+                ctx.status_error = None;
+                skipped.push(format!("{} radius", name));
+            } else {
+                frozen.push(format!("{} radius={:.4}", name, radius));
+            }
+        } else {
+            skipped.push(format!("{} radius", name));
+        }
+
+        // Sweep (only for non-closed arcs)
+        if !closed {
+            let kind = DimensionKind::ArcSweep(*r);
+            if find_existing_dimension(&ctx.sketch, &kind).is_none() {
+                ctx.skip_dof_check = true;
+                ctx.exec(Action::AddDimension { kind, value: sweep_deg, expr: None, derived: false });
+                if ctx.status_error.is_some() {
+                    ctx.status_error = None;
+                    skipped.push(format!("{} sweep", name));
+                } else {
+                    frozen.push(format!("{} sweep={:.4}", name, sweep_deg));
+                }
+            } else {
+                skipped.push(format!("{} sweep", name));
+            }
+        }
+    }
+
+    ctx.skip_dof_check = saved_skip;
+
+    let mut lines = Vec::new();
+    if !frozen.is_empty() {
+        lines.push(format!("Frozen: {}", frozen.join(", ")));
+    }
+    if !skipped.is_empty() {
+        lines.push(format!("Skipped: {}", skipped.join(", ")));
+    }
+    if lines.is_empty() {
+        ok("Nothing to freeze")
+    } else {
+        ok(lines.join("\n"))
+    }
 }
 
 fn cmd_remove_dim(ctx: &mut CommandContext, args: &str) -> CommandResult {
@@ -3440,10 +3767,10 @@ fn cmd_help(args: &str) -> CommandResult {
     if args.is_empty() {
         ok("Commands: add_line add_point add_circle add_arc offset_line delete horizontal vertical \
             parallel perpendicular equal collinear tangent coincident concentric midpoint \
-            symmetry point_on length radius angle distance remove_dim set_derived set_driven \
+            symmetry point_on length radius sweep angle distance freeze remove_dim set_derived set_driven \
             lock unlock param del_param rename_param style select deselect print info list \
             find dof cost undo redo history goto center zoom cursor dim_pos clear let save load \
-            remove_constraint(rc) help\n\
+            remove_constraint(rc) exit help\n\
             Type 'help <command>' for details. 'help full' for complete reference.")
     } else {
         let msg = match args.trim() {
@@ -3460,14 +3787,15 @@ fn cmd_help(args: &str) -> CommandResult {
             "tangent" => "tangent L0 A0 | tangent A0 A1",
             "coincident" => "coincident L0.p2 L1.p1 (any endpoint pair: P0, L0.p1/p2, A0.center/start/end)",
             "concentric" => "concentric A0 A1",
-            "midpoint" => "midpoint P0 L0 | midpoint L0.p1 L1",
+            "midpoint" => "midpoint P0 L0 | midpoint L0.p1 L1 | midpoint P0 A0 (arc angular midpoint)",
             "symmetry" => "symmetry L0 L1 L2 (L0,L2 symmetric about L1)",
             "point_on" => "point_on P0 L0 | point_on L0.p1 A0",
-            "length" => "length L0 5.0 [derived] | length L0 derived | length L0 \"width * 2\"",
-            "radius" => "radius A0 1.5 [derived] | radius A0 derived | radius A0 \"expr\"",
-            "sweep" => "sweep A0 180 [derived] | sweep A0 derived | sweep A0 \"expr\"",
-            "angle" => "angle L0 L1 45 [derived] | angle L0 L1 derived",
-            "distance" => "distance L0.p1 L1.p2 5.0 [derived] | distance P0 L0 3.0 [derived]",
+            "length" => "length L0 5 | length L0 L0.length | length L0 =2*scale | length L0 {expr} [derived]",
+            "radius" => "radius A0 1.5 | radius A0 =5*scale | radius A0 {expr} [derived]",
+            "sweep" => "sweep A0 180 | sweep A0 =90*n | sweep A0 {expr} [derived]",
+            "angle" => "angle L0 L1 45 | angle L0 L1 =d0 | angle L0 L1 {expr} [derived]",
+            "distance" => "distance L0.p1 L1.p2 5 | distance P0 L0 3 | distance L0.p1 L1.p2 =expr [derived]",
+            "freeze" => "freeze [L0 L1 A0 ...] — add numeric dimensions at current values (all if no args)",
             "remove_dim" => "remove_dim d0",
             "set_derived" => "set_derived d0 (make dimension display-only)",
             "set_driven" => "set_driven d0 [value|\"expr\"] (make dimension constraining)",
@@ -3477,11 +3805,11 @@ fn cmd_help(args: &str) -> CommandResult {
             "del_param" => "del_param name",
             "rename_param" => "rename_param old_name new_name",
             "style" => "style L0 [solid|dashed|dashdot]",
-            "select" => "select L0 [L1 P0 ...]",
-            "deselect" => "deselect (clears selection)",
+            "select" => "select L0 [L1 ...] | select all | select L0 chain | select L0 linked",
+            "deselect" => "deselect [L0 L1 ...] (clears all or specific)",
             "print" => "print <expression> (evaluate and display)",
             "info" => "info L0 | info P0 | info A0 | info d0 | info paramname",
-            "list" => "list [all|lines|points|arcs|dims|params|constraints]",
+            "list" => "list [all|lines|points|arcs|dims|params|constraints|selection]",
             "find" => "find x,y [radius] (list nearby entities)",
             "undo" => "undo [n]",
             "redo" => "redo [n]",
@@ -3498,6 +3826,8 @@ fn cmd_help(args: &str) -> CommandResult {
             "let" => "let name = expression (session variable, scalar or coordinate)",
             "save" => "save path.json",
             "load" => "load path.json",
+            "exit" | "quit" => "exit — close the application (blocked for MCP clients)",
+            "dof" => "dof | dof analyze | dof eigenvalues",
             "perp" => "alias for perpendicular",
             other => return err(format!("help: unknown command: {}. Usage: help | help <command> | help full", other)),
         };
@@ -3516,7 +3846,7 @@ const COMMAND_NAMES: &[&str] = &[
     "symmetry", "point_on", "length", "radius", "sweep", "angle", "distance",
     "remove_dim", "remove_constraint", "rc", "set_derived", "set_driven",
     "lock", "unlock", "param", "del_param", "rename_param", "style",
-    "select", "deselect", "print", "info", "list", "find", "let",
+    "select", "deselect", "freeze", "print", "info", "list", "find", "let",
     "dof", "cost", "undo", "redo", "history", "goto", "center", "zoom",
     "cursor", "dim_pos", "clear", "save", "load", "help", "msg",
 ];
@@ -3623,8 +3953,17 @@ pub fn complete(
         }
 
         // Variadic entity commands: exclude already-typed
-        "delete" | "select" => {
+        "delete" => {
             add_all_entities_excluding(sketch, &mut results, current_word, &typed_args);
+        }
+        "select" => {
+            if token_index == 1 {
+                add_matching(&mut results, current_word, &["all"]);
+            }
+            add_all_entities_excluding(sketch, &mut results, current_word, &typed_args);
+            if token_index == 2 {
+                add_matching(&mut results, current_word, &["chain", "linked"]);
+            }
         }
 
         // Single entity arg
@@ -3707,6 +4046,12 @@ pub fn complete(
                 add_matching(&mut results, current_word, &["derived"]);
                 add_expression_completions(sketch, session_names, &mut results, current_word);
             }
+        }
+
+        // Freeze: lines and arcs
+        "freeze" => {
+            add_lines(sketch, &mut results, current_word);
+            add_arcs(sketch, &mut results, current_word);
         }
 
         // Dimension: angle (arg1=line, arg2=line, arg3=value/derived)
@@ -5473,7 +5818,7 @@ mod tests {
         run_ok(&mut ctx, "clear");
         run_ok(&mut ctx, "param scale 1");
         run_ok(&mut ctx, "add_circle 0,0 5");
-        run_ok(&mut ctx, "radius A0 5*scale");
+        run_ok(&mut ctx, "radius A0 =5*scale");
         // Check that expr_constraints were created
         ctx.sketch.solve();
         assert!(!ctx.sketch.expr_constraints.is_empty(),
@@ -5493,7 +5838,7 @@ mod tests {
         run_ok(&mut ctx, "param scale 1");
         run_ok(&mut ctx, "add_circle 0,0 5");
         // No prior "radius A0 5" — go straight to expression
-        run_ok(&mut ctx, "radius A0 5*scale");
+        run_ok(&mut ctx, "radius A0 =5*scale");
         // Check dimension was created with expression
         assert_eq!(ctx.sketch.dimensions.len(), 1);
         assert_eq!(ctx.sketch.dimensions[0].expr_str.as_deref(), Some("5*scale"));
@@ -5515,7 +5860,7 @@ mod tests {
         run_ok(&mut ctx, "add_circle 0,0 5");
         run_ok(&mut ctx, "radius A0 5");
         run_ok(&mut ctx, "param scale 3");
-        run_ok(&mut ctx, "radius A0 \"2*scale\"");
+        run_ok(&mut ctx, "radius A0 {2*scale}");
         ctx.sketch.solve();
         assert!(!ctx.sketch.expr_constraints.is_empty(),
             "Updated expression should create expr_constraint");
@@ -5953,7 +6298,7 @@ mod tests {
         // Quoted strings should not be affected
         run_ok(&mut ctx, "param scale 1");
         run_ok(&mut ctx, "add_circle 0,0 5");
-        run_ok(&mut ctx, "radius A0 \"5*scale\" # expression dimension");
+        run_ok(&mut ctx, "radius A0 =5*scale # expression dimension");
         assert_eq!(ctx.sketch.dimensions.len(), 1);
     }
 

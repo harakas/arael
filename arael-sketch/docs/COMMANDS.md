@@ -210,21 +210,30 @@ Alias: `rc` (e.g., `rc L0 horizontal`)
 ## Dimensions
 
 ```
-length L0 5.0                Set line length (numeric)
-length L0 "width * 2"        Set line length (expression)
+length L0 5                  Set line length (numeric)
+length L0 L0.length          Evaluate expression, use as numeric value
+length L0 =2*scale           Live expression (tracks parameter changes)
+length L0 {2*scale}          Live expression (alternative syntax)
 radius A0 1.5                Set arc radius
 sweep A0 180                 Set arc sweep angle (degrees)
-sweep A0 "90*n"              Set arc sweep angle (expression)
 angle L0 L1 45               Set angle between lines (degrees, auto-selects sector)
-distance L0.p1 L1.p2 5.0     Point-point distance (numeric)
-distance L0.p1 L1.p2 "2*scale"  Point-point distance (expression)
+distance L0.p1 L1.p2 5.0     Point-point distance
 distance P0 L0 3.0            Point-line distance
 remove_dim d0                 Remove dimension by name
+freeze                        Add numeric dimensions for all entities at current values
+freeze L0 A0                  Freeze specific entities only
 ```
+
+### Expression syntax
+
+Dimension values can be:
+- **Numeric**: `5`, `3.14` — constant value
+- **Evaluate-once**: `L0.length`, `2*scale` — expression evaluated to a number at command time
+- **Live expression**: `=2*scale` or `{2*scale}` — re-evaluated when parameters change. Prefix with `=` or wrap in `{}`.
 
 The `angle` command automatically selects the sector (direct or supplementary) that is closest to the given value. For example, if two lines form a 30-degree acute angle, `angle L0 L1 45` targets the direct sector, while `angle L0 L1 150` targets the supplementary sector.
 
-If a dimension of the same type already exists on an entity (e.g., calling `radius A0 7` when a radius dimension already exists on A0), the existing dimension is updated in place rather than creating a duplicate. This also works for converting numeric dimensions to parametric expressions: `radius A0 "5*scale"` updates the existing radius dimension.
+If a dimension of the same type already exists on an entity (e.g., calling `radius A0 7` when a radius dimension already exists on A0), the existing dimension is updated in place rather than creating a duplicate.
 
 ### Derived (Reference) Dimensions
 
@@ -286,12 +295,19 @@ style L0                     Query current style
 
 ## Selection
 
+`select` adds to the current selection. `select all/chain/linked` replaces it. Use `deselect` to remove entities or clear all.
+
 ```
 select L0                    Select whole line
 select L0.p1                 Select line endpoint
 select A0.center             Select arc center
 select L0 L1 P0              Select multiple
+select all                   Select all entities
+select L0 chain              Select all entities connected via coincident endpoints
+select L0 linked             Select all entities sharing any constraint, recursively
 deselect                     Clear selection
+deselect L0                  Remove specific entity from selection
+list selection               Show current selection
 ```
 
 ## Geometric Functions
@@ -714,7 +730,7 @@ s5 = add_line 2.5,-4.33 5,0
 equal s0 s1; equal s1 s2; equal s2 s3; equal s3 s4; equal s4 s5
 # Interior angles: first sets the value, rest reference it: -3 DOF
 ia = angle s0 s1 120
-angle s1 s2 ia; angle s2 s3 ia
+angle s1 s2 {ia}; angle s2 s3 {ia}
 length s0 5                    # -1 DOF -> DOF=3: shape fixed, can translate + rotate
 # Fix position and orientation for DOF=0:
 lock s0.p1 5,0                 # -2 DOF

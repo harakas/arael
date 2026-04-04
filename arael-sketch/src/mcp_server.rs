@@ -435,8 +435,7 @@ async fn handle_tools_call(id: Value, request: &Value, state: &McpState) -> Valu
         }
         "get_sketch_state" => {
             let result = send_command_str(&state.tx, "list", state).await;
-            let constraints = send_command_str(&state.tx, "list constraints", state).await;
-            tool_result(id, &format!("{}\n\nConstraints:\n{}", result, constraints))
+            tool_result(id, &result)
         }
         "get_help" => {
             tool_result(id, include_str!("../docs/COMMANDS.md"))
