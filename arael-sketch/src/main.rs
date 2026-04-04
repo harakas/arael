@@ -2451,6 +2451,7 @@ impl EditorApp {
         let action = Action::Drag { snapshot };
         self.history.push(action, &self.sketch);
         self.selection.clear();
+        self.compute_dof_async();
     }
 
     // Hit test for delete: returns target only if exactly one entity is in range.

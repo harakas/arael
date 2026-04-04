@@ -659,10 +659,7 @@ impl EditorApp {
     // Position a constraint marker inside the arc curve, spread along it by index.
     pub fn arc_marker_pos(&self, arc_ref: Ref<Arc>, idx: i32) -> egui::Pos2 {
         let a = &self.sketch.arcs[arc_ref];
-        let sa = a.start_angle.value;
-        let ea = a.end_angle.value;
-        let norm = |v: f64| -> f64 { let r = v % std::f64::consts::TAU; if r < 0.0 { r + std::f64::consts::TAU } else { r } };
-        let span = if a.closed { std::f64::consts::TAU } else { norm(ea - sa) };
+        let (sa, span) = if a.closed { (0.0, std::f64::consts::TAU) } else { arc_span(a) };
         let mid_angle = sa + span / 2.0;
         // Spread markers along the arc near the midpoint
         let angle_offset = idx as f64 * 12.0 / (a.radius.value * self.scale as f64).max(1.0);
