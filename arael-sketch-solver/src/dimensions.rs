@@ -23,6 +23,8 @@ pub enum DimensionKind {
     PointPointDistance(DimensionEndpoint, DimensionEndpoint),
     PointLineDistance(DimensionEndpoint, Ref<Line>),
     ArcRadius(Ref<Arc>),
+    /// Arc sweep angle (end_angle - start_angle), stored in degrees.
+    ArcSweep(Ref<Arc>),
     /// Angle between two lines. The bool is `supplement`: when true,
     /// constrains the supplementary angle (pi - angle) instead.
     Angle(Ref<Line>, Ref<Line>, bool),
@@ -59,7 +61,7 @@ impl DimensionKind {
     }
     pub fn references_arc(&self, r: Ref<Arc>) -> bool {
         match self {
-            DimensionKind::ArcRadius(a) => *a == r,
+            DimensionKind::ArcRadius(a) | DimensionKind::ArcSweep(a) => *a == r,
             DimensionKind::PointPointDistance(a, b) => a.references_arc(r) || b.references_arc(r),
             DimensionKind::PointLineDistance(a, _) => a.references_arc(r),
             _ => false,
@@ -135,6 +137,12 @@ impl Dimension {
             DimensionKind::ArcRadius(r) => {
                 let name = &sketch.arcs[*r].name;
                 symbol(&format!("{}.radius", name))
+            }
+            DimensionKind::ArcSweep(r) => {
+                let name = &sketch.arcs[*r].name;
+                let start = symbol(&format!("{}.start_angle", name));
+                let end = symbol(&format!("{}.end_angle", name));
+                (end - start) * arael_sym::constant(180.0 / std::f64::consts::PI)
             }
             DimensionKind::PointPointDistance(a, b) => {
                 let pa = dim_endpoint_symbol(a, sketch);

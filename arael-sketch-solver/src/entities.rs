@@ -68,6 +68,9 @@ pub struct ArcConstraints {
     #[arael(skip)]
     pub has_target_radius: bool,
     pub target_radius: f64,
+    #[arael(skip)]
+    pub has_target_sweep: bool,
+    pub target_sweep: f64,
 }
 
 // ---------------------------------------------------------------------------
@@ -158,6 +161,10 @@ pub struct Line {
 // Target radius
 #[arael(constraint(hb, guard = self.constraints.has_target_radius, {
     [(arc.radius - arc.constraints.target_radius) * sketch.constraint_isigma]
+}))]
+// Target sweep angle (end_angle - start_angle)
+#[arael(constraint(hb, guard = self.constraints.has_target_sweep, {
+    [(arc.end_angle - arc.start_angle - arc.constraints.target_sweep) * sketch.constraint_isigma]
 }))]
 pub struct Arc {
     pub center: Param<vect2d>,

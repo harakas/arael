@@ -296,7 +296,7 @@ impl Sketch {
             end_angle: if closed { Param::fixed(end) } else { Param::new(end) },
             closed,
             style: LineStyle::Solid, name,
-            constraints: ArcConstraints { has_target_radius: false, target_radius: 0.0 },
+            constraints: ArcConstraints { has_target_radius: false, target_radius: 0.0, has_target_sweep: false, target_sweep: 0.0 },
             hb: SelfBlock::new(),
         })
     }
@@ -981,6 +981,7 @@ impl Sketch {
         for r in self.arcs.refs() {
             let a = &self.arcs[r];
             if a.constraints.has_target_radius { out.push(format!("radius {} = {}", a.name, a.constraints.target_radius)); }
+            if a.constraints.has_target_sweep { out.push(format!("sweep {} = {:.2} deg", a.name, a.constraints.target_sweep.to_degrees())); }
             if !a.center.optimize { out.push(format!("lock {}.center", a.name)); }
         }
         // Constraint vectors (use macros to reduce repetition)

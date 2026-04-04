@@ -863,6 +863,7 @@ fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
         "point_on" => cmd_point_on(ctx, args_str),
         "length" => cmd_length(ctx, args_str),
         "radius" => cmd_radius(ctx, args_str),
+        "sweep" => cmd_sweep(ctx, args_str),
         "angle" => cmd_angle(ctx, args_str),
         "distance" => cmd_distance(ctx, args_str),
         "remove_dim" => cmd_remove_dim(ctx, args_str),
@@ -1553,6 +1554,52 @@ fn cmd_radius(ctx: &mut CommandContext, args: &str) -> CommandResult {
         }
         ctx.exec(Action::AddDimension { kind, value: 0.0, expr: Some(val_str.to_string()), derived: is_derived });
         ok_or_status(ctx, format!("Set {} radius = {}", tokens[0], val_str))
+    }
+}
+
+fn cmd_sweep(ctx: &mut CommandContext, args: &str) -> CommandResult {
+    let mut tokens: Vec<&str> = args.split_whitespace().collect();
+    let is_derived = tokens.last() == Some(&"derived");
+    if is_derived { tokens.pop(); }
+    if tokens.is_empty() { return err("Usage: sweep A0 180 [derived]"); }
+    let arc = match resolve_arc(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
+    if ctx.sketch.arcs[arc].closed {
+        return err("Cannot set sweep on a full circle (angles are fixed)");
+    }
+    let kind = DimensionKind::ArcSweep(arc);
+    if tokens.len() == 1 && is_derived {
+        let a = &ctx.sketch.arcs[arc];
+        let sweep_deg = arael::utils::rad2deg(a.end_angle.value - a.start_angle.value);
+        ctx.begin_group();
+        if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
+            let name = ctx.sketch.dimensions[idx].name.clone();
+            ctx.exec(Action::UpdateDimension { index: idx, value: sweep_deg, expr: None });
+            return ok_or_status(ctx, format!("Updated {} derived sweep = ({:.4})", name, sweep_deg));
+        }
+        ctx.exec(Action::AddDimension { kind, value: sweep_deg, expr: None, derived: true });
+        return ok_or_status(ctx, format!("Derived {} sweep = ({:.4})", tokens[0], sweep_deg));
+    }
+    if tokens.len() != 2 { return err("Usage: sweep A0 180 [derived]"); }
+    let val_str = tokens[1].trim().trim_matches('"');
+    if let Ok(value) = val_str.parse::<f64>() {
+        ctx.begin_group();
+        if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
+            let name = ctx.sketch.dimensions[idx].name.clone();
+            ctx.exec(Action::UpdateDimension { index: idx, value, expr: None });
+            return ok_or_status(ctx, format!("Updated {} sweep = {}", name, value));
+        }
+        ctx.exec(Action::AddDimension { kind, value, expr: None, derived: is_derived });
+        let prefix = if is_derived { "Derived" } else { "Set" };
+        ok_or_status(ctx, format!("{} {} sweep = {}", prefix, tokens[0], value))
+    } else {
+        ctx.begin_group();
+        if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
+            let name = ctx.sketch.dimensions[idx].name.clone();
+            ctx.exec(Action::UpdateDimension { index: idx, value: 0.0, expr: Some(val_str.to_string()) });
+            return ok_or_status(ctx, format!("Updated {} sweep = {}", name, val_str));
+        }
+        ctx.exec(Action::AddDimension { kind, value: 0.0, expr: Some(val_str.to_string()), derived: is_derived });
+        ok_or_status(ctx, format!("Set {} sweep = {}", tokens[0], val_str))
     }
 }
 
@@ -3173,6 +3220,7 @@ fn cmd_help(args: &str) -> CommandResult {
             "point_on" => "point_on P0 L0 | point_on L0.p1 A0",
             "length" => "length L0 5.0 [derived] | length L0 derived | length L0 \"width * 2\"",
             "radius" => "radius A0 1.5 [derived] | radius A0 derived | radius A0 \"expr\"",
+            "sweep" => "sweep A0 180 [derived] | sweep A0 derived | sweep A0 \"expr\"",
             "angle" => "angle L0 L1 45 [derived] | angle L0 L1 derived",
             "distance" => "distance L0.p1 L1.p2 5.0 [derived] | distance P0 L0 3.0 [derived]",
             "remove_dim" => "remove_dim d0",
@@ -3220,7 +3268,7 @@ const COMMAND_NAMES: &[&str] = &[
     "add_line", "add_point", "add_circle", "add_arc", "offset_line", "offset",
     "delete", "horizontal", "vertical", "parallel", "perpendicular", "perp",
     "equal", "collinear", "tangent", "coincident", "concentric", "midpoint",
-    "symmetry", "point_on", "length", "radius", "angle", "distance",
+    "symmetry", "point_on", "length", "radius", "sweep", "angle", "distance",
     "remove_dim", "remove_constraint", "rc", "set_derived", "set_driven",
     "lock", "unlock", "param", "del_param", "rename_param", "style",
     "select", "deselect", "print", "info", "list", "find", "let",
@@ -3398,6 +3446,16 @@ pub fn complete(
 
         // Dimension: radius (arg1=arc, arg2=value/derived)
         "radius" => {
+            if token_index == 1 {
+                add_arcs(sketch, &mut results, current_word);
+            } else if token_index == 2 {
+                add_matching(&mut results, current_word, &["derived"]);
+                add_expression_completions(sketch, session_names, &mut results, current_word);
+            }
+        }
+
+        // Dimension: sweep (arg1=arc, arg2=value/derived)
+        "sweep" => {
             if token_index == 1 {
                 add_arcs(sketch, &mut results, current_word);
             } else if token_index == 2 {
@@ -5497,6 +5555,73 @@ mod tests {
     fn test_complete_parallel_no_third_arg() {
         let ctx = setup_complete_ctx();
         assert!(completions(&ctx, "parallel L0 L1 ").is_empty());
+    }
+
+    // -- sweep tests --
+
+    #[test]
+    fn test_sweep_basic() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_arc -5,0 5,0 0,5");
+        let out = run_ok(&mut ctx, "sweep A0 180");
+        assert!(out.contains("Set") || out.contains("sweep"), "Should succeed: {}", out);
+        assert!(ctx.sketch.arcs.refs().next().map(|r| ctx.sketch.arcs[r].constraints.has_target_sweep).unwrap_or(false));
+        // Solve and check sweep is close to 180 degrees
+        ctx.sketch.solve();
+        let r = ctx.sketch.arcs.refs().next().unwrap();
+        let sweep = (ctx.sketch.arcs[r].end_angle.value - ctx.sketch.arcs[r].start_angle.value).to_degrees();
+        assert!((sweep - 180.0).abs() < 1.0, "Sweep should be ~180, got {}", sweep);
+    }
+
+    #[test]
+    fn test_sweep_update() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_arc -5,0 5,0 0,5");
+        run_ok(&mut ctx, "sweep A0 180");
+        assert_eq!(ctx.sketch.dimensions.len(), 1);
+        let out = run_ok(&mut ctx, "sweep A0 90");
+        assert!(out.contains("Updated"), "Should update: {}", out);
+        assert_eq!(ctx.sketch.dimensions.len(), 1);
+    }
+
+    #[test]
+    fn test_sweep_derived() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_arc -5,0 5,0 0,5");
+        let out = run_ok(&mut ctx, "sweep A0 derived");
+        assert!(out.contains("Derived"), "Should be derived: {}", out);
+        assert_eq!(ctx.sketch.dimensions.len(), 1);
+        assert!(ctx.sketch.dimensions[0].derived);
+    }
+
+    #[test]
+    fn test_sweep_expression() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_arc -5,0 5,0 0,5");
+        run_ok(&mut ctx, "param n 2");
+        let out = run_ok(&mut ctx, "sweep A0 \"90*n\"");
+        assert!(out.contains("Set") || out.contains("sweep"), "Should succeed: {}", out);
+    }
+
+    #[test]
+    fn test_sweep_full_circle_rejected() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_circle 0,0 5");
+        let e = run_err(&mut ctx, "sweep A0 180");
+        assert!(e.contains("full circle"), "Should reject: {}", e);
+    }
+
+    #[test]
+    fn test_sweep_remove() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_arc -5,0 5,0 0,5");
+        run_ok(&mut ctx, "sweep A0 180");
+        assert_eq!(ctx.sketch.dimensions.len(), 1);
+        let name = ctx.sketch.dimensions[0].name.clone();
+        run_ok(&mut ctx, &format!("remove_dim {}", name));
+        assert_eq!(ctx.sketch.dimensions.len(), 0);
+        let r = ctx.sketch.arcs.refs().next().unwrap();
+        assert!(!ctx.sketch.arcs[r].constraints.has_target_sweep);
     }
 
     // -- remove_constraint tests --

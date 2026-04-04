@@ -101,6 +101,12 @@ impl EditorApp {
                 value, offset, text_along, color, is_expr, is_derived);
         }
 
+        // Sweep dimension: arc annotation from start_angle to end_angle
+        if let DimensionKind::ArcSweep(r) = kind {
+            return self.draw_sweep_dimension(painter, *r, value, offset, text_along,
+                color, is_expr, is_derived);
+        }
+
         let (p1_sketch, p2_sketch) = self.dim_endpoints(kind);
         let dx = p2_sketch.x - p1_sketch.x;
         let dy = p2_sketch.y - p1_sketch.y;
@@ -393,6 +399,93 @@ impl EditorApp {
             egui::FontId::proportional(12.0), color)
     }
 
+    fn draw_sweep_dimension(&self, painter: &egui::Painter, arc_ref: Ref<Arc>,
+                             value: f64, offset: vect2d, text_along: f64,
+                             color: egui::Color32, is_expr: bool, is_derived: bool) -> (egui::Pos2, egui::Pos2) {
+        let a = &self.sketch.arcs[arc_ref];
+        let cx = a.center.value.x;
+        let cy = a.center.value.y;
+        let start_angle = a.start_angle.value;
+        let sweep = a.end_angle.value - a.start_angle.value;
+        // Annotation arc radius: arc radius + offset.y (positive = outside, negative = inside)
+        let radius = (a.radius.value + offset.y).max(0.1);
+        let stroke = egui::Stroke::new(1.0, color);
+        let ext_stroke = egui::Stroke::new(0.5, color);
+        let center = vect2d::new(cx, cy);
+        let sc = self.to_screen(center);
+
+        // Extension lines from arc endpoints to annotation arc
+        let arc_start = vect2d::new(cx + a.radius.value * start_angle.cos(),
+                                    cy + a.radius.value * start_angle.sin());
+        let ann_start = vect2d::new(cx + radius * start_angle.cos(),
+                                    cy + radius * start_angle.sin());
+        let end_angle = start_angle + sweep;
+        let arc_end = vect2d::new(cx + a.radius.value * end_angle.cos(),
+                                  cy + a.radius.value * end_angle.sin());
+        let ann_end = vect2d::new(cx + radius * end_angle.cos(),
+                                  cy + radius * end_angle.sin());
+        painter.line_segment([self.to_screen(arc_start), self.to_screen(ann_start)], ext_stroke);
+        painter.line_segment([self.to_screen(arc_end), self.to_screen(ann_end)], ext_stroke);
+
+        // Main arc polyline
+        let draw_arc = |a_start: f64, a_sweep: f64, s: egui::Stroke| -> Vec<egui::Pos2> {
+            let n = ((a_sweep.abs() * 20.0).ceil() as usize).max(8);
+            let pts: Vec<egui::Pos2> = (0..=n).map(|i| {
+                let t = i as f64 / n as f64;
+                let ang = a_start + a_sweep * t;
+                self.to_screen(vect2d::new(cx + radius * ang.cos(), cy + radius * ang.sin()))
+            }).collect();
+            for w in pts.windows(2) { painter.line_segment([w[0], w[1]], s); }
+            pts
+        };
+        let points = draw_arc(start_angle, sweep, stroke);
+
+        // Arrowheads
+        let asz = 6.0;
+        let draw_arrow = |tip: egui::Pos2, prev: egui::Pos2| {
+            let adx = prev.x - tip.x;
+            let ady = prev.y - tip.y;
+            let alen = (adx * adx + ady * ady).sqrt().max(1.0);
+            let (ax, ay) = (adx / alen, ady / alen);
+            painter.line_segment([tip, egui::Pos2::new(tip.x + ax * asz + ay * asz * 0.4,
+                tip.y + ay * asz - ax * asz * 0.4)], stroke);
+            painter.line_segment([tip, egui::Pos2::new(tip.x + ax * asz - ay * asz * 0.4,
+                tip.y + ay * asz + ax * asz * 0.4)], stroke);
+        };
+        if points.len() >= 2 {
+            draw_arrow(points[0], points[1]);
+            let n = points.len();
+            draw_arrow(points[n - 1], points[n - 2]);
+        }
+
+        // Text along arc
+        let text_angle = start_angle + sweep * (0.5 + text_along);
+        let _ = sc; // center screen pos available if needed
+
+        // Extension arcs for out-of-range text
+        let screen_radius = (self.to_screen(vect2d::new(cx + radius, cy)).x - sc.x).abs().max(1.0);
+        let text_half_angle = 20.0 / screen_radius;
+        let extra = (text_half_angle as f64) * sweep.signum();
+        if text_along < -0.5 {
+            let ext_sweep = sweep * (text_along + 0.5) - extra;
+            draw_arc(start_angle, ext_sweep, ext_stroke);
+        } else if text_along > 0.5 {
+            let ext_sweep = sweep * (text_along - 0.5) + extra;
+            draw_arc(start_angle + sweep, ext_sweep, ext_stroke);
+        }
+
+        let text_pt = vect2d::new(cx + radius * text_angle.cos(), cy + radius * text_angle.sin());
+        let screen_pt = self.to_screen(text_pt);
+        let sign = if sweep >= 0.0 { 1.0f32 } else { -1.0f32 };
+        let tx = -(text_angle.sin() as f32) * sign;
+        let ty = -(text_angle.cos() as f32) * sign;
+        let text = if is_derived { format!("({:.1}\u{00b0})", value) }
+            else if is_expr { format!("fx: {:.1}\u{00b0}", value) }
+            else { format!("{:.1}\u{00b0}", value) };
+        self.draw_rotated_text(painter, screen_pt, tx, ty, &text,
+            egui::FontId::proportional(12.0), color)
+    }
+
     // Compute the screen-space text segment for a dimension (for hit testing without drawing)
     pub fn dim_text_segment(&self, dim: &Dimension) -> (egui::Pos2, egui::Pos2) {
         let is_radius = matches!(dim.kind, DimensionKind::ArcRadius(_));
@@ -432,6 +525,31 @@ impl EditorApp {
                     egui::Pos2::new(mid.x + dx * total_width / 2.0, mid.y + dy * total_width / 2.0),
                 );
             }
+        }
+
+        // Sweep dimension: text along arc
+        if let DimensionKind::ArcSweep(r) = dim.kind {
+            let a = &self.sketch.arcs[r];
+            let cx = a.center.value.x;
+            let cy = a.center.value.y;
+            let start_angle = a.start_angle.value;
+            let sweep = a.end_angle.value - start_angle;
+            let radius = (a.radius.value + dim.offset.y).max(0.1);
+            let text_angle = start_angle + sweep * (0.5 + dim.text_along);
+            let text_pt = vect2d::new(cx + radius * text_angle.cos(), cy + radius * text_angle.sin());
+            let screen_pt = self.to_screen(text_pt);
+            let sign = if sweep >= 0.0 { 1.0f32 } else { -1.0f32 };
+            let tx = -(text_angle.sin() as f32) * sign;
+            let ty = -(text_angle.cos() as f32) * sign;
+            let (dx, dy) = if tx < 0.0 { (-tx, -ty) } else { (tx, ty) };
+            let nx = -dy;
+            let ny = dx;
+            let half_h = 6.0;
+            let mid = egui::Pos2::new(screen_pt.x - nx * (half_h + 2.0), screen_pt.y - ny * (half_h + 2.0));
+            return (
+                egui::Pos2::new(mid.x - dx * total_width / 2.0, mid.y - dy * total_width / 2.0),
+                egui::Pos2::new(mid.x + dx * total_width / 2.0, mid.y + dy * total_width / 2.0),
+            );
         }
 
         // Angle dimension: text along arc -- match draw_rotated_text positioning

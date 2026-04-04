@@ -108,6 +108,10 @@ impl SymbolBag {
             // Derived
             let r_sym = arael_sym::symbol(&format!("{}.radius", name));
             derived.insert(format!("{}.diameter", name), r_sym * arael_sym::constant(2.0));
+            let sa_sym = arael_sym::symbol(&format!("{}.start_angle", name));
+            let ea_sym = arael_sym::symbol(&format!("{}.end_angle", name));
+            derived.insert(format!("{}.sweep", name),
+                (ea_sym - sa_sym) * arael_sym::constant(180.0 / std::f64::consts::PI));
         }
 
         // Dimensions: d{n} -> target value or live expression

@@ -1041,6 +1041,19 @@ impl eframe::App for EditorApp {
                                             .atan2(mouse_sketch.x - a.center.value.x);
                                         self.sketch.dimensions[dim_idx].offset = vect2d::new(angle, 0.0);
                                     }
+                                } else if let DimensionKind::ArcSweep(r) = kind {
+                                    let a = &self.sketch.arcs[r];
+                                    let cx = a.center.value.x;
+                                    let cy = a.center.value.y;
+                                    let dist = ((mouse_sketch.x - cx).powi(2) + (mouse_sketch.y - cy).powi(2)).sqrt();
+                                    let offset_y = dist - a.radius.value;
+                                    let mouse_angle = (mouse_sketch.y - cy).atan2(mouse_sketch.x - cx);
+                                    let sa = a.start_angle.value;
+                                    let sweep = a.end_angle.value - sa;
+                                    let delta = rad2rad(mouse_angle - sa);
+                                    let along = if sweep.abs() > 1e-6 { delta / sweep - 0.5 } else { 0.0 };
+                                    self.sketch.dimensions[dim_idx].offset = vect2d::new(0.0, offset_y);
+                                    self.sketch.dimensions[dim_idx].text_along = along;
                                 } else if let DimensionKind::Angle(a, b, sup) = kind {
                                     // Drag existing: lock to 2 opposing sectors (same supplement)
                                     let la = &self.sketch.lines[a];
@@ -1320,6 +1333,19 @@ impl eframe::App for EditorApp {
                                     self.dim_offset = vect2d::new(angle, 0.0);
                                     self.dim_text_along = 0.0;
                                 }
+                            } else if let DimensionKind::ArcSweep(r) = kind {
+                                let a = &self.sketch.arcs[*r];
+                                let cx = a.center.value.x;
+                                let cy = a.center.value.y;
+                                let dist = ((mouse_sketch.x - cx).powi(2) + (mouse_sketch.y - cy).powi(2)).sqrt();
+                                let offset_y = dist - a.radius.value;
+                                let mouse_angle = (mouse_sketch.y - cy).atan2(mouse_sketch.x - cx);
+                                let sa = a.start_angle.value;
+                                let sweep = a.end_angle.value - sa;
+                                let delta = rad2rad(mouse_angle - sa);
+                                let along = if sweep.abs() > 1e-6 { delta / sweep - 0.5 } else { 0.0 };
+                                self.dim_offset = vect2d::new(0.0, offset_y);
+                                self.dim_text_along = along;
                             } else if let DimensionKind::Angle(a, b, _) = kind {
                                 // Mouse position determines arc radius and which of 4 sectors
                                 let la = &self.sketch.lines[*a];

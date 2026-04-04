@@ -149,6 +149,7 @@ impl Action {
                 let kind_str = match kind {
                     DimensionKind::LineLength(_) => "length",
                     DimensionKind::ArcRadius(_) => "radius",
+                    DimensionKind::ArcSweep(_) => "sweep",
                     DimensionKind::PointPointDistance(_, _) => "distance",
                     DimensionKind::PointLineDistance(_, _) => "distance",
                     DimensionKind::Angle(_, _, _) => "angle",
@@ -609,6 +610,10 @@ impl Action {
                         sketch.arcs[*arc].constraints.has_target_radius = true;
                         sketch.arcs[*arc].constraints.target_radius = *value;
                     }
+                    DimensionKind::ArcSweep(arc) => {
+                        sketch.arcs[*arc].constraints.has_target_sweep = true;
+                        sketch.arcs[*arc].constraints.target_sweep = deg2rad(*value);
+                    }
                     DimensionKind::Angle(a, b, supplement) => {
                         // value is in degrees, constraint uses radians.
                         // Compute target angle closest to current atan2 value
@@ -655,6 +660,11 @@ impl Action {
                             DimensionKind::ArcRadius(arc) => {
                                 if let Some(a) = sketch.arcs.get_mut(arc) {
                                     a.constraints.has_target_radius = false;
+                                }
+                            }
+                            DimensionKind::ArcSweep(arc) => {
+                                if let Some(a) = sketch.arcs.get_mut(arc) {
+                                    a.constraints.has_target_sweep = false;
                                 }
                             }
                             DimensionKind::PointPointDistance(a, b) => {
@@ -718,6 +728,10 @@ impl Action {
                         DimensionKind::ArcRadius(arc) => {
                             sketch.arcs[arc].constraints.has_target_radius = true;
                             sketch.arcs[arc].constraints.target_radius = value;
+                        }
+                        DimensionKind::ArcSweep(arc) => {
+                            sketch.arcs[arc].constraints.has_target_sweep = true;
+                            sketch.arcs[arc].constraints.target_sweep = deg2rad(value);
                         }
                         DimensionKind::PointPointDistance(a, b) => {
                             match (a, b) {
@@ -813,6 +827,11 @@ impl Action {
                         DimensionKind::ArcRadius(arc) => {
                             if let Some(a) = sketch.arcs.get_mut(arc) {
                                 a.constraints.has_target_radius = false;
+                            }
+                        }
+                        DimensionKind::ArcSweep(arc) => {
+                            if let Some(a) = sketch.arcs.get_mut(arc) {
+                                a.constraints.has_target_sweep = false;
                             }
                         }
                         DimensionKind::PointPointDistance(a, b) => {

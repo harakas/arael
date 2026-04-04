@@ -489,7 +489,7 @@ impl EditorApp {
             let (ts, te) = self.dim_text_segment(dim);
             let dt = Self::screen_point_to_segment_dist(screen_pos, ts, te);
             // Arrow line segment (for angle dimensions, use the arc)
-            let da = if matches!(dim.kind, DimensionKind::ArcRadius(_) | DimensionKind::Angle(..)) {
+            let da = if matches!(dim.kind, DimensionKind::ArcRadius(_) | DimensionKind::ArcSweep(_) | DimensionKind::Angle(..)) {
                 dt // for radius and angle, text check is enough
             } else {
                 let (p1, p2) = self.dim_endpoints(&dim.kind);
@@ -1192,6 +1192,10 @@ impl EditorApp {
             DimensionKind::ArcRadius(r) => {
                 self.sketch.arcs[*r].radius.value
             }
+            DimensionKind::ArcSweep(r) => {
+                let a = &self.sketch.arcs[*r];
+                rad2deg(a.end_angle.value - a.start_angle.value)
+            }
             DimensionKind::Angle(a, b, supplement) => {
                 let la = &self.sketch.lines[*a];
                 let lb = &self.sketch.lines[*b];
@@ -1249,6 +1253,33 @@ impl EditorApp {
                 return Some(DimensionKind::PointPointDistance(a, b));
             }
         }
+        if sel.len() == 3 {
+            // ArcCenter + ArcStart + ArcEnd of same arc -> sweep dimension
+            let mut arc_ref = None;
+            let mut has_center = false;
+            let mut has_start = false;
+            let mut has_end = false;
+            for s in sel {
+                match s {
+                    Selection::ArcCenter(r) => { arc_ref = Some(*r); has_center = true; }
+                    Selection::ArcStart(r) => { arc_ref = Some(*r); has_start = true; }
+                    Selection::ArcEnd(r) => { arc_ref = Some(*r); has_end = true; }
+                    _ => {}
+                }
+            }
+            if has_center && has_start && has_end {
+                // Verify all from same arc
+                let all_same = sel.iter().all(|s| match s {
+                    Selection::ArcCenter(r) | Selection::ArcStart(r) | Selection::ArcEnd(r) => Some(*r) == arc_ref,
+                    _ => false,
+                });
+                if all_same {
+                    if let Some(r) = arc_ref {
+                        return Some(DimensionKind::ArcSweep(r));
+                    }
+                }
+            }
+        }
         None
     }
 
@@ -1294,6 +1325,15 @@ impl EditorApp {
                 let a = &self.sketch.arcs[*r];
                 let edge = vect2d::new(a.center.value.x + a.radius.value, a.center.value.y);
                 (a.center.value, edge)
+            }
+            DimensionKind::ArcSweep(r) => {
+                let a = &self.sketch.arcs[*r];
+                let sa = a.start_angle.value;
+                let ea = a.end_angle.value;
+                let rad = a.radius.value;
+                let p1 = vect2d::new(a.center.value.x + rad * sa.cos(), a.center.value.y + rad * sa.sin());
+                let p2 = vect2d::new(a.center.value.x + rad * ea.cos(), a.center.value.y + rad * ea.sin());
+                (p1, p2)
             }
             DimensionKind::Angle(a, b, _) => {
                 // Return midpoints of both lines (for hit testing fallback)

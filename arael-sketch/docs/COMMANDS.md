@@ -49,7 +49,7 @@ Coordinates can be specified as:
 
 Anywhere a numeric value is expected, an expression can be used. Expressions can reference:
 
-- **Entity properties**: `L0.p1.x`, `L0.p2.y`, `L0.length`, `L0.angle`, `A0.radius`, `A0.center.x`, `P0.x`, `P0.y`
+- **Entity properties**: `L0.p1.x`, `L0.p2.y`, `L0.length`, `L0.angle`, `A0.radius`, `A0.diameter`, `A0.sweep`, `A0.center.x`, `P0.x`, `P0.y`
 - **Dimension values**: `d0`, `d1`
 - **User parameters**: `width`, `height`
 - **Session variables**: variables set with `let`
@@ -166,6 +166,8 @@ Alias: `rc` (e.g., `rc L0 horizontal`)
 length L0 5.0                Set line length (numeric)
 length L0 "width * 2"        Set line length (expression)
 radius A0 1.5                Set arc radius
+sweep A0 180                 Set arc sweep angle (degrees)
+sweep A0 "90*n"              Set arc sweep angle (expression)
 angle L0 L1 45               Set angle between lines (degrees, auto-selects sector)
 distance L0.p1 L1.p2 5.0     Point-point distance (numeric)
 distance L0.p1 L1.p2 "2*scale"  Point-point distance (expression)
@@ -186,6 +188,8 @@ length L0 5 derived          Derived length with explicit value
 length L0 derived            Derived length (measures current geometry)
 radius A0 derived            Derived radius
 radius A0 1.5 derived        Derived radius with explicit value
+sweep A0 derived             Derived sweep angle
+sweep A0 90 derived          Derived sweep with explicit value
 angle L0 L1 derived          Derived angle (measures current geometry)
 angle L0 L1 45 derived       Derived angle with explicit value
 distance L0.p1 L1.p2 derived Derived distance (measures current geometry)
