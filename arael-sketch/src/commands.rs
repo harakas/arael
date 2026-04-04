@@ -958,12 +958,24 @@ fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
             // Try as a command first (e.g. "base = add_line 0,0 5,0")
             let first_word = rhs.split_whitespace().next().unwrap_or("");
             let is_command = matches!(first_word,
-                "add_line" | "add_point" | "add_circle" | "add_arc" | "offset_line" | "offset");
+                "add_line" | "add_point" | "add_circle" | "add_arc" | "offset_line" | "offset" |
+                "length" | "radius" | "sweep" | "angle" | "distance");
             if is_command {
+                let dim_count_before = ctx.sketch.dimensions.len();
                 let result = execute_one(ctx, rhs);
                 if !result.is_error {
+                    // Check for new entity name
                     if let Some(entity_name) = ctx.session_names.get("_").cloned() {
                         ctx.session_names.insert(var_name.to_string(), entity_name);
+                    }
+                    // Check for new dimension — dimension commands (length, angle, etc.)
+                    // don't set "_" like geometry commands do, so we detect new dimensions
+                    // by comparing count before/after and capture the dimension name.
+                    // This is a workaround; ideally dimension commands would set "_" directly.
+                    if ctx.sketch.dimensions.len() > dim_count_before {
+                        if let Some(dim) = ctx.sketch.dimensions.last() {
+                            ctx.session_names.insert(var_name.to_string(), dim.name.clone());
+                        }
                     }
                 }
                 return result;
@@ -5829,6 +5841,21 @@ mod tests {
         run_ok(&mut ctx, "add_circle 0,0 5");
         run_ok(&mut ctx, "radius A0 \"5*scale\" # expression dimension");
         assert_eq!(ctx.sketch.dimensions.len(), 1);
+    }
+
+    #[test]
+    fn test_dimension_variable_assignment() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "s0 = add_line 0,0 5,0; s1 = add_line 5,0 3,4");
+        run_ok(&mut ctx, "len = length s0 5");
+        assert!(ctx.session_names.contains_key("len"), "len should be set");
+        assert_eq!(ctx.session_names["len"], "d0");
+        run_ok(&mut ctx, "a = angle s0 s1 60");
+        assert!(ctx.session_names.contains_key("a"), "a should be set");
+        assert_eq!(ctx.session_names["a"], "d1");
+        // Use dimension variable as expression in another dimension
+        let out = run_ok(&mut ctx, "print a");
+        assert!(out.trim().parse::<f64>().is_ok(), "should resolve: {}", out);
     }
 
     // -- remove_constraint tests --
