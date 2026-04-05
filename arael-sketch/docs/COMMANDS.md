@@ -36,12 +36,14 @@ Each constraint removes 1 or more DOF. A fully constrained sketch has DOF 0. Use
 | `coincident` (point-point, endpoint-endpoint) | 2 |
 | `concentric` | 2 |
 | `symmetry` (point-point about line) | 2 |
-| `symmetry` (line-line about line) | 4 |
+| `symmetry` (line-line about line) | 2 |
 | `lock` (point) | 2 |
 | `lock` (line endpoint) | 2 |
 | Dimension (`length`, `radius`, `sweep`, `angle`, `distance`) | 1 |
 
-These are maximum DOF reductions for independent entities. When entities share endpoints (via coincident constraints), effective removal may be less. For example, line-line symmetry removes 4 DOF for independent lines, but fewer when the lines already share endpoints. Always verify with `dof` after applying constraints.
+These are maximum DOF reductions for independent entities. When entities share endpoints (via coincident constraints), effective removal may be less. Always verify with `dof` after applying constraints.
+
+**Line-line symmetry** constrains that two lines are mirror images about an axis, but does not bind their endpoints to specific positions — endpoints can still slide along the lines. To fully constrain symmetric endpoint positions, add coincident or lock constraints on the endpoints separately.
 
 ### DOF Budgeting Example
 
@@ -106,7 +108,8 @@ Anywhere a numeric value is expected, an expression can be used. Expressions can
 
 ```
 add_line x1,y1 x2,y2        Create a line between two points
-add_line x2,y2               Continue from last endpoint (chaining)
+add_line x1,y1 x2,y2 x3,y3  Multi-segment: creates connected lines (any number of points)
+add_line x2,y2               Continue from last endpoint (single-point chaining)
 add_line @dx,dy              Continue with relative offset
 add_point x,y [nocursor]     Create a free point
 add_circle cx,cy radius      Create a circle (full arc)
@@ -139,13 +142,16 @@ When 3+ endpoints meet at the same point, auto-connect creates multiple coincide
 
 ### Line Chaining
 
-When `add_line` is given only one coordinate, it starts from the last created endpoint:
+When `add_line` is given only one coordinate, it starts from the last created endpoint. With 3+ coordinates, it creates multiple connected segments in one command:
 
 ```
 add_line 0,0 5,0             L0: (0,0)-(5,0)
-add_line @0,3                L1: (5,0)-(5,3)   continues from L0.p2
+add_line @0,3                L1: (5,0)-(5,3)   single-point chaining
 add_line @-5,0               L2: (5,3)-(0,3)
 add_line L0.p1               L3: (0,3)-(0,0)   close the rectangle
+
+add_line 0,0 1,0 2,1 3,0    Creates L0, L1, L2 as connected segments
+add_line 0,0 @1,0 @0,1 @-1,0  Relative coords work for multi-segment too
 ```
 
 ## Deletion
@@ -223,7 +229,11 @@ length L0 =2*scale           Live expression (tracks parameter changes)
 length L0 {2*scale}          Live expression (alternative syntax)
 radius A0 1.5                Set arc radius
 sweep A0 180                 Set arc sweep angle (degrees)
-angle L0 L1 45               Set angle between lines (degrees, auto-selects sector)
+angle L0 L1 45               Set angle between direction vectors (p1->p2)
+angle L0 L1 135 supplement   Use the supplementary angle (180 - default)
+angle L0 L1 60 closest       Auto-select sector closest to given value
+angle L0 L1 60 acute         Use the smaller current sector
+angle L0 L1 120 obtuse       Use the larger current sector
 distance L0.p1 L1.p2 5.0     Point-point distance (any endpoint refs)
 distance A0.center A1.center 5.0  Arc center to arc center
 distance A0.start L1.p2 4.0  Arc start to line endpoint
@@ -240,7 +250,15 @@ Dimension values can be:
 - **Evaluate-once**: `L0.length`, `2*scale` — expression evaluated to a number at command time
 - **Live expression**: `=2*scale` or `{2*scale}` — re-evaluated when parameters change. Prefix with `=` or wrap in `{}`.
 
-The `angle` command automatically selects the sector (direct or supplementary) that is closest to the given value. For example, if two lines form a 30-degree acute angle, `angle L0 L1 45` targets the direct sector, while `angle L0 L1 150` targets the supplementary sector.
+The `angle` command by default constrains the angle between the line direction vectors (p1 to p2). Two lines always form two angles that sum to 180. Keywords control which angle is constrained:
+
+- **no keyword**: angle between direction vectors (deterministic, depends on p1->p2 direction)
+- **`supplement`**: the other angle (180 minus default)
+- **`closest`**: auto-select the sector closest to the given value
+- **`acute`**: the smaller of the two current angles
+- **`obtuse`**: the larger of the two current angles
+
+Negative values are accepted and treated as positive (useful with `angle()` function which may return negative).
 
 If a dimension of the same type already exists on an entity (e.g., calling `radius A0 7` when a radius dimension already exists on A0), the existing dimension is updated in place rather than creating a duplicate.
 
@@ -372,6 +390,14 @@ coincident base.p2 side.p1                       Use aliases in endpoint refs
 ```
 
 Both `name = command` and `let name = command` work. The alias is resolved transparently — anywhere you'd write `L0`, you can write `base` instead.
+
+For multi-segment `add_line`, use comma-separated names to capture each segment:
+
+```
+a, b, c = add_line 0,0 @1,0 @0,1 @-1,0    Captures L0->a, L1->b, L2->c
+horizontal a
+perpendicular a b
+```
 
 ## Cursor
 

@@ -936,6 +936,21 @@ fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
     if let Some((lhs, rhs)) = assign_input.1.split_once('=') {
         let var_name = lhs.trim();
         let rhs = rhs.trim();
+        // Multi-assignment: "a, b, c = add_line ..."
+        if var_name.contains(',') {
+            let names: Vec<&str> = var_name.split(',').map(|s| s.trim()).collect();
+            if names.iter().all(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')) {
+                let result = execute_one(ctx, rhs);
+                if !result.is_error {
+                    for (i, name) in names.iter().enumerate() {
+                        if let Some(entity) = ctx.session_names.get(&format!("_{}", i)).cloned() {
+                            ctx.session_names.insert(name.to_string(), entity);
+                        }
+                    }
+                }
+                return result;
+            }
+        }
         // Check if lhs is a simple identifier
         if !var_name.is_empty()
             && !var_name.contains('.')
@@ -1269,42 +1284,60 @@ fn cmd_add_line(ctx: &mut CommandContext, args: &str) -> CommandResult {
     if nocursor { tokens.pop(); }
     let noconnect = tokens.last() == Some(&"noconnect");
     if noconnect { tokens.pop(); }
-    let (p1, p2) = match tokens.len() {
-        2 => {
-            let p1 = match parse_coord(ctx, tokens[0], ctx.cursor) {
+
+    // Parse all coordinate tokens
+    let points: Vec<vect2d> = if tokens.len() >= 2 {
+        let mut pts = Vec::new();
+        let p1 = match parse_coord(ctx, tokens[0], ctx.cursor) {
+            Ok(p) => p, Err(e) => return err(e),
+        };
+        pts.push(p1);
+        for i in 1..tokens.len() {
+            let prev = *pts.last().unwrap();
+            let p = match parse_coord(ctx, tokens[i], Some(prev)) {
                 Ok(p) => p, Err(e) => return err(e),
             };
-            let p2 = match parse_coord(ctx, tokens[1], Some(p1)) {
-                Ok(p) => p, Err(e) => return err(e),
-            };
-            (p1, p2)
+            pts.push(p);
         }
-        1 => {
-            let prev = match ctx.cursor {
-                Some(p) => p,
-                None => return err("No previous point. Use: add_line x1,y1 x2,y2"),
-            };
-            let p2 = match parse_coord(ctx, tokens[0], Some(prev)) {
-                Ok(p) => p, Err(e) => return err(e),
-            };
-            (prev, p2)
-        }
-        _ => return err("Usage: add_line x1,y1 x2,y2  or  add_line x2,y2  or  add_line @dx,dy"),
+        pts
+    } else if tokens.len() == 1 {
+        let prev = match ctx.cursor {
+            Some(p) => p,
+            None => return err("No previous point. Use: add_line x1,y1 x2,y2"),
+        };
+        let p2 = match parse_coord(ctx, tokens[0], Some(prev)) {
+            Ok(p) => p, Err(e) => return err(e),
+        };
+        vec![prev, p2]
+    } else {
+        return err("Usage: add_line x1,y1 x2,y2 [x3,y3 ...]  or  add_line @dx,dy");
     };
+
     ctx.begin_group();
-    ctx.exec(Action::AddLine { p1, p2 });
-    let line_ref = ctx.sketch.lines.refs().last().unwrap();
-    let name = ctx.sketch.lines[line_ref].name.clone();
-    if !nocursor { ctx.cursor = Some(p2); }
-    ctx.session_names.insert("_".into(), name.clone());
-    let mut msg = format!("Added {}: ({:.2},{:.2})-({:.2},{:.2})", name, p1.x, p1.y, p2.x, p2.y);
-    if !noconnect {
-        let connected = auto_coincident_line(ctx, line_ref);
-        if !connected.is_empty() {
-            msg += &format!(" [connected: {}]", connected.join(", "));
+    let mut msgs = Vec::new();
+    let n_segments = points.len() - 1;
+    for i in 0..n_segments {
+        let p1 = points[i];
+        let p2 = points[i + 1];
+        ctx.exec(Action::AddLine { p1, p2 });
+        let line_ref = ctx.sketch.lines.refs().last().unwrap();
+        let name = ctx.sketch.lines[line_ref].name.clone();
+        ctx.session_names.insert("_".into(), name.clone());
+        // For multi-segment, also set _0, _1, _2, ... for multi-assignment
+        if n_segments > 1 {
+            ctx.session_names.insert(format!("_{}", i), name.clone());
         }
+        let mut msg = format!("Added {}: ({:.2},{:.2})-({:.2},{:.2})", name, p1.x, p1.y, p2.x, p2.y);
+        if !noconnect {
+            let connected = auto_coincident_line(ctx, line_ref);
+            if !connected.is_empty() {
+                msg += &format!(" [connected: {}]", connected.join(", "));
+            }
+        }
+        msgs.push(msg);
     }
-    ok(msg)
+    if !nocursor { ctx.cursor = Some(*points.last().unwrap()); }
+    ok(msgs.join("\n"))
 }
 
 fn cmd_add_point(ctx: &mut CommandContext, args: &str) -> CommandResult {
@@ -2694,8 +2727,18 @@ fn cmd_angle(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let mut tokens: Vec<&str> = args.split_whitespace().collect();
     let is_derived = tokens.last() == Some(&"derived");
     if is_derived { tokens.pop(); }
+    // Parse optional sector keyword
+    #[derive(Clone, Copy)]
+    enum SectorMode { Default, Supplement, Closest, Acute, Obtuse }
+    let sector_mode = match tokens.last() {
+        Some(&"supplement") => { tokens.pop(); SectorMode::Supplement }
+        Some(&"closest") => { tokens.pop(); SectorMode::Closest }
+        Some(&"acute") => { tokens.pop(); SectorMode::Acute }
+        Some(&"obtuse") => { tokens.pop(); SectorMode::Obtuse }
+        _ => SectorMode::Default,
+    };
 
-    // Compute current angle to decide which sector (direct or supplement) is closest
+    // Compute current angle between direction vectors (p1->p2)
     let compute_angle = |ctx: &CommandContext, a_ref, b_ref| -> (f64, f64) {
         let la = &ctx.sketch.lines[a_ref];
         let lb = &ctx.sketch.lines[b_ref];
@@ -2712,39 +2755,53 @@ fn cmd_angle(ctx: &mut CommandContext, args: &str) -> CommandResult {
     if tokens.len() == 2 && is_derived {
         let a = match resolve_line(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
         let b = match resolve_line(&ctx.sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
-        let (current_deg, _) = compute_angle(ctx, a, b);
-        let kind = DimensionKind::Angle(a, b, false);
+        let (current_deg, supplement_deg) = compute_angle(ctx, a, b);
+        let supplement = match sector_mode {
+            SectorMode::Supplement => true,
+            SectorMode::Acute => current_deg > supplement_deg,
+            SectorMode::Obtuse => current_deg <= supplement_deg,
+            _ => false,
+        };
+        let val = if supplement { supplement_deg } else { current_deg };
+        let kind = DimensionKind::Angle(a, b, supplement);
         ctx.begin_group();
         if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
             let name = ctx.sketch.dimensions[idx].name.clone();
-            ctx.exec(Action::UpdateDimension { index: idx, value: current_deg, expr: None });
-            return ok_or_status(ctx, format!("Updated {} derived angle = ({:.4})", name, current_deg));
+            ctx.exec(Action::UpdateDimension { index: idx, value: val, expr: None });
+            return ok_or_status(ctx, format!("Updated {} derived angle = ({:.4})", name, val));
         }
-        ctx.exec(Action::AddDimension { kind, value: current_deg, expr: None, derived: true });
-        return ok_or_status(ctx, format!("Derived angle {} {} = ({:.4})", tokens[0], tokens[1], current_deg));
+        ctx.exec(Action::AddDimension { kind, value: val, expr: None, derived: true });
+        return ok_or_status(ctx, format!("Derived angle {} {} = ({:.4})", tokens[0], tokens[1], val));
     }
 
-    if tokens.len() != 3 { return err("Usage: angle L0 L1 45 [derived]"); }
+    if tokens.len() != 3 { return err("Usage: angle L0 L1 45 [supplement|closest|acute|obtuse] [derived]"); }
     let a = match resolve_line(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
     let b = match resolve_line(&ctx.sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
     let (value, expr) = match parse_dim_value(&ctx.sketch, tokens[2]) { Ok(v) => v, Err(e) => return err(e) };
+    // Accept negative values (e.g. from angle() function) by taking absolute value
+    let value = value.abs();
     let display = if expr.is_some() { tokens[2].to_string() } else { format!("{}", value) };
     let (current_deg, supplement_deg) = compute_angle(ctx, a, b);
-    // For expressions, evaluate to determine supplement sector
-    let check_val = if expr.is_some() { eval_expr(&ctx.sketch, expr.as_ref().unwrap()).unwrap_or(value) } else { value };
-    let supplement = (check_val - supplement_deg).abs() < (check_val - current_deg).abs();
+    let check_val = if expr.is_some() { eval_expr(&ctx.sketch, expr.as_ref().unwrap()).unwrap_or(value).abs() } else { value };
+    let supplement = match sector_mode {
+        SectorMode::Default => false,
+        SectorMode::Supplement => true,
+        SectorMode::Closest => (check_val - supplement_deg).abs() < (check_val - current_deg).abs(),
+        SectorMode::Acute => current_deg > supplement_deg,
+        SectorMode::Obtuse => current_deg <= supplement_deg,
+    };
     let kind = DimensionKind::Angle(a, b, supplement);
     ctx.begin_group();
     if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
         let name = ctx.sketch.dimensions[idx].name.clone();
         ctx.exec(Action::UpdateDimension { index: idx, value, expr });
-        let sector = if supplement { "supplement" } else { "direct" };
-        return ok_or_status(ctx, format!("Updated {} angle = {} ({})", name, display, sector));
+        let sector = if supplement { "supplement" } else { "" };
+        return ok_or_status(ctx, format!("Updated {} angle = {} {}", name, display, sector).trim_end().to_string());
     }
     ctx.exec(Action::AddDimension { kind, value, expr, derived: is_derived });
-    let sector = if supplement { "supplement" } else { "direct" };
+    let sector = if supplement { " (supplement)" } else { "" };
     let prefix = if is_derived { "Derived" } else { "Set" };
-    ok_or_status(ctx, format!("{} angle {} {} = {} ({})", prefix, tokens[0], tokens[1], display, sector))
+    ok_or_status(ctx, format!("{} angle {} {} = {}{}", prefix, tokens[0], tokens[1], display, sector))
 }
 
 fn cmd_distance(ctx: &mut CommandContext, args: &str) -> CommandResult {
@@ -3818,7 +3875,7 @@ fn cmd_help(args: &str) -> CommandResult {
             Type 'help <command>' for details. 'help full' for complete reference.")
     } else {
         let msg = match args.trim() {
-            "add_line" => "add_line x1,y1 x2,y2 | add_line @dx,dy (from last point) | add_line x,y (from last point)",
+            "add_line" => "add_line x1,y1 x2,y2 [x3,y3 ...] | add_line @dx,dy (from last point)",
             "add_point" => "add_point x,y [nocursor]",
             "add_circle" => "add_circle cx,cy radius",
             "delete" => "delete L0 | delete P0 | delete A0",
@@ -3837,7 +3894,7 @@ fn cmd_help(args: &str) -> CommandResult {
             "length" => "length L0 5 | length L0 L0.length | length L0 =2*scale | length L0 {expr} [derived]",
             "radius" => "radius A0 1.5 | radius A0 =5*scale | radius A0 {expr} [derived]",
             "sweep" => "sweep A0 180 | sweep A0 =90*n | sweep A0 {expr} [derived]",
-            "angle" => "angle L0 L1 45 | angle L0 L1 =d0 | angle L0 L1 {expr} [derived]",
+            "angle" => "angle L0 L1 45 [supplement|closest|acute|obtuse] [derived]",
             "distance" => "distance L0.p1 L1.p2 5 | distance P0 L0 3 | distance L0.p1 L1.p2 =expr [derived]",
             "freeze" => "freeze [L0 L1 A0 ...] — add numeric dimensions at current values (all if no args)",
             "remove_dim" => "remove_dim d0",
@@ -6598,5 +6655,140 @@ mod tests {
         run_ok(&mut ctx, "remove_constraint L0 L1 parallel");
         let dof_after = ctx.sketch.dof().unwrap();
         assert_eq!(dof_after, dof_before + 1, "removing parallel should increase DOF by 1: {} -> {}", dof_before, dof_after);
+    }
+
+    // -- Multi-segment add_line --
+
+    #[test]
+    fn test_add_line_multi_segment_3_points() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 1,0 2,1");
+        assert_eq!(ctx.sketch.lines.len(), 2);
+        // Auto-coincident between L0.p2 and L1.p1
+        assert!(!ctx.sketch.coincident_ll21.is_empty() || !ctx.sketch.coincident_ll12.is_empty(),
+            "segments should be connected");
+    }
+
+    #[test]
+    fn test_add_line_multi_segment_5_points() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 1,0 2,1 3,0 4,1");
+        assert_eq!(ctx.sketch.lines.len(), 4);
+    }
+
+    #[test]
+    fn test_add_line_multi_segment_relative() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 @1,0 @0,1");
+        assert_eq!(ctx.sketch.lines.len(), 2);
+        let l1 = ctx.sketch.lines[arael::refs::Ref::new(1)].p2.value;
+        assert!((l1.x - 1.0).abs() < 0.01 && (l1.y - 1.0).abs() < 0.01,
+            "L1.p2 should be (1,1), got ({},{})", l1.x, l1.y);
+    }
+
+    #[test]
+    fn test_add_line_multi_assignment() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "a, b, c = add_line 0,0 @1,0 @0,1 @-1,0");
+        assert_eq!(ctx.sketch.lines.len(), 3);
+        assert!(ctx.session_names.contains_key("a"));
+        assert!(ctx.session_names.contains_key("b"));
+        assert!(ctx.session_names.contains_key("c"));
+        // Use alias in constraint
+        run_ok(&mut ctx, "horizontal a");
+        assert!(ctx.sketch.lines[arael::refs::Ref::new(0)].constraints.horizontal);
+    }
+
+    #[test]
+    fn test_add_line_two_points_compat() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0");
+        assert_eq!(ctx.sketch.lines.len(), 1);
+    }
+
+    #[test]
+    fn test_add_line_multi_segment_dof() {
+        let mut ctx = CommandContext::new();
+        // 4 points = 3 lines, 2 coincidents
+        // 3*4 params - 2*2 coincident = 8 DOF
+        run_ok(&mut ctx, "add_line 0,0 1,0 2,1 3,0");
+        let dof = ctx.sketch.dof().unwrap();
+        assert_eq!(dof, 8, "3 connected lines should have 8 DOF, got {}", dof);
+    }
+
+    // -- Angle direct/supplement --
+
+    #[test]
+    fn test_angle_default_is_direction_vectors() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,0 3,3");
+        // Default: constrains the angle between p1->p2 direction vectors
+        run_ok(&mut ctx, "angle L0 L1 45");
+        if let arael_sketch_solver::DimensionKind::Angle(_, _, supplement) = ctx.sketch.dimensions[0].kind {
+            assert!(!supplement, "default should not be supplement");
+        } else {
+            panic!("expected angle dimension");
+        }
+    }
+
+    #[test]
+    fn test_angle_supplement_keyword() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,0 3,3");
+        run_ok(&mut ctx, "angle L0 L1 135 supplement");
+        if let arael_sketch_solver::DimensionKind::Angle(_, _, supplement) = ctx.sketch.dimensions[0].kind {
+            assert!(supplement, "should be supplement sector");
+        } else {
+            panic!("expected angle dimension");
+        }
+    }
+
+    #[test]
+    fn test_angle_closest_keyword() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,0 3,3");
+        // Current angle is ~45. Value 130 is closer to supplement (135) than direct (45).
+        run_ok(&mut ctx, "angle L0 L1 130 closest");
+        if let arael_sketch_solver::DimensionKind::Angle(_, _, supplement) = ctx.sketch.dimensions[0].kind {
+            assert!(supplement, "closest should pick supplement for 130 when direct is ~45");
+        } else {
+            panic!("expected angle dimension");
+        }
+    }
+
+    #[test]
+    fn test_angle_acute_keyword() {
+        let mut ctx = CommandContext::new();
+        // Lines at ~120 degrees (direct angle > 90, so acute picks supplement)
+        run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,0 -2,4");
+        run_ok(&mut ctx, "angle L0 L1 60 acute");
+        if let arael_sketch_solver::DimensionKind::Angle(_, _, supplement) = ctx.sketch.dimensions[0].kind {
+            assert!(supplement, "acute should pick the smaller sector");
+        } else {
+            panic!("expected angle dimension");
+        }
+    }
+
+    #[test]
+    fn test_angle_obtuse_keyword() {
+        let mut ctx = CommandContext::new();
+        // Lines at ~45 degrees (direct is 45, supplement is 135)
+        run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,0 3,3");
+        run_ok(&mut ctx, "angle L0 L1 135 obtuse");
+        if let arael_sketch_solver::DimensionKind::Angle(_, _, supplement) = ctx.sketch.dimensions[0].kind {
+            // Direct is ~45 (acute), so obtuse picks supplement (135)
+            assert!(supplement, "obtuse should pick the larger sector");
+        } else {
+            panic!("expected angle dimension");
+        }
+    }
+
+    #[test]
+    fn test_angle_negative_value_accepted() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,0 3,3");
+        // Negative value should be accepted (taken as absolute value)
+        run_ok(&mut ctx, "angle L0 L1 -45");
+        assert_eq!(ctx.sketch.dimensions.len(), 1);
     }
 }
