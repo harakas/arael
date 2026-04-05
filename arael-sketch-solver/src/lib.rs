@@ -1232,6 +1232,14 @@ impl Sketch {
         }
     }
 
+    fn hessian_error_msg(n: usize, hessian: &[f64], err: &str) -> String {
+        let nan_count = hessian.iter().filter(|v| v.is_nan()).count();
+        let inf_count = hessian.iter().filter(|v| v.is_infinite()).count();
+        format!("DOF computation failed: {} ({}x{} Hessian, {} NaN, {} Inf). \
+                 This likely indicates a solver bug -- please report it.",
+                err, n, n, nan_count, inf_count)
+    }
+
     /// Compute degrees of freedom. When `analyze` is true, also returns
     /// parameter names, eigenvalues, and eigenvectors for free direction
     /// classification. When false, only the DOF count is computed (fast path).
@@ -1241,7 +1249,7 @@ impl Sketch {
     ///   faer full eigen:          95ms
     ///   nalgebra eigenvalues-only: 110ms
     ///   nalgebra full eigen:      220ms
-    pub fn compute_dof(&mut self, analyze: bool) -> DofResult {
+    pub fn compute_dof(&mut self, analyze: bool) -> Result<DofResult, String> {
         use arael::simple_lm::LmProblem;
         let t_total = if TIMING_DEBUG { Some(std::time::Instant::now()) } else { None };
 
@@ -1256,7 +1264,7 @@ impl Sketch {
         let n = params.len();
         if n == 0 {
             self.drift_isigma = saved_drift;
-            return DofResult { dof: 0, param_names: Vec::new(), eigenvalues: Vec::new(), eigenvectors: Vec::new() };
+            return Ok(DofResult { dof: 0, param_names: Vec::new(), eigenvalues: Vec::new(), eigenvectors: Vec::new() });
         }
 
         let param_names = if analyze {
@@ -1298,22 +1306,30 @@ impl Sketch {
             ("nalgebra eigenvalues-only", DofResult { dof, param_names: Vec::new(), eigenvalues: Vec::new(), eigenvectors: Vec::new() })
         } else if analyze {
             let faer_h = faer::Mat::from_fn(n, n, |i, k| hessian[i * n + k]);
-            let eigen = faer_h.self_adjoint_eigen(faer::Side::Lower).expect("eigendecomposition failed");
-            let s = eigen.S().column_vector();
-            let u = eigen.U();
-            let rank = (0..n).filter(|&i| s[i].abs() > threshold).count();
-            let dof = n.saturating_sub(rank);
-            let eigenvalues: Vec<f64> = (0..n).map(|i| s[i]).collect();
-            let eigenvectors: Vec<Vec<f64>> = (0..n)
-                .map(|col| (0..n).map(|row| u[(row, col)]).collect())
-                .collect();
-            ("faer eigen", DofResult { dof, param_names, eigenvalues, eigenvectors })
+            match faer_h.self_adjoint_eigen(faer::Side::Lower) {
+                Ok(eigen) => {
+                    let s = eigen.S().column_vector();
+                    let u = eigen.U();
+                    let rank = (0..n).filter(|&i| s[i].abs() > threshold).count();
+                    let dof = n.saturating_sub(rank);
+                    let eigenvalues: Vec<f64> = (0..n).map(|i| s[i]).collect();
+                    let eigenvectors: Vec<Vec<f64>> = (0..n)
+                        .map(|col| (0..n).map(|row| u[(row, col)]).collect())
+                        .collect();
+                    ("faer eigen", DofResult { dof, param_names, eigenvalues, eigenvectors })
+                }
+                Err(e) => return Err(Self::hessian_error_msg(n, &hessian, &format!("{:?}", e))),
+            }
         } else {
             let faer_h = faer::Mat::from_fn(n, n, |i, k| hessian[i * n + k]);
-            let evs = faer_h.self_adjoint_eigenvalues(faer::Side::Lower).expect("eigenvalues failed");
-            let rank = evs.iter().filter(|&&v| v.abs() > threshold).count();
-            let dof = n.saturating_sub(rank);
-            ("faer eigenvalues-only", DofResult { dof, param_names: Vec::new(), eigenvalues: Vec::new(), eigenvectors: Vec::new() })
+            match faer_h.self_adjoint_eigenvalues(faer::Side::Lower) {
+                Ok(evs) => {
+                    let rank = evs.iter().filter(|&&v| v.abs() > threshold).count();
+                    let dof = n.saturating_sub(rank);
+                    ("faer eigenvalues-only", DofResult { dof, param_names: Vec::new(), eigenvalues: Vec::new(), eigenvectors: Vec::new() })
+                }
+                Err(e) => return Err(Self::hessian_error_msg(n, &hessian, &format!("{:?}", e))),
+            }
         };
         if TIMING_DEBUG {
             let t_h = t_hessian.unwrap().as_secs_f64() * 1000.0;
@@ -1323,13 +1339,14 @@ impl Sketch {
                 n, analyze, method, t_h, t_e, t_t, result.dof);
         }
         self.cached_dof = Some(result.dof);
-        result
+        Ok(result)
     }
 
     /// Return cached DOF or compute it (count only, no eigenvector analysis).
-    pub fn dof(&mut self) -> usize {
-        if let Some(d) = self.cached_dof { return d; }
-        self.compute_dof(false).dof
+    pub fn dof(&mut self) -> Result<usize, String> {
+        if let Some(d) = self.cached_dof { return Ok(d); }
+        let result = self.compute_dof(false)?;
+        Ok(result.dof)
     }
 
     /// Update tangent_la shared-endpoint flags by scanning coincident collections.

@@ -286,7 +286,10 @@ impl Default for EditorApp {
                     let data = input.lock().unwrap().take();
                     if let Some(data) = data {
                         if let Ok(mut sketch) = bincode::deserialize::<Sketch>(&data) {
-                            let dof = sketch.compute_dof(false).dof;
+                            let dof = match sketch.compute_dof(false) {
+                                Ok(r) => r.dof,
+                                Err(_) => { continue; }
+                            };
                             *output.lock().unwrap() = Some(dof);
                         }
                     } else {
@@ -747,7 +750,7 @@ impl EditorApp {
 
     #[cfg(target_arch = "wasm32")]
     pub fn compute_dof_async(&mut self) {
-        self.dof_display = Some(self.sketch.dof());
+        self.dof_display = self.sketch.dof().ok();
     }
 
     /// Create a CommandContext view of this app's state, run commands, sync back.

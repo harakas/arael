@@ -209,7 +209,7 @@ pub fn validate_and_apply_constraint(
     };
 
     let old_dof = if should_check_dof {
-        Some(sketch.dof())
+        Some(sketch.dof()?)
     } else {
         None
     };
@@ -260,7 +260,7 @@ pub fn validate_and_apply_constraint(
 
     // DOF rejection
     if let Some(old_dof) = old_dof {
-        let new_dof = sketch.dof();
+        let new_dof = sketch.dof()?;
         if new_dof >= old_dof {
             if let Some(ref snap) = snapshot {
                 if let Ok(restored) = bincode::deserialize(snap) {
@@ -3561,7 +3561,10 @@ fn classify_dof_directions(result: &arael_sketch_solver::DofResult) -> Vec<Strin
 
 fn cmd_dof_eigenvalues(ctx: &mut CommandContext) -> CommandResult {
     let t0 = std::time::Instant::now();
-    let result = ctx.sketch.compute_dof(true);
+    let result = match ctx.sketch.compute_dof(true) {
+        Ok(r) => r,
+        Err(e) => return err(e),
+    };
     let t_total = t0.elapsed();
     let n = result.eigenvalues.len();
     if n == 0 {
@@ -3693,7 +3696,10 @@ fn cmd_dof(ctx: &mut CommandContext, args: &str) -> CommandResult {
     }
 
     let analyze = arg == "analyze";
-    let result = ctx.sketch.compute_dof(analyze);
+    let result = match ctx.sketch.compute_dof(analyze) {
+        Ok(r) => r,
+        Err(e) => return err(e),
+    };
 
     if analyze {
         let free_dirs = classify_dof_directions(&result);
@@ -6574,12 +6580,12 @@ mod tests {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_line 0,0 5,0");
         run_ok(&mut ctx, "horizontal L0");
-        let dof_with = ctx.sketch.dof();
+        let dof_with = ctx.sketch.dof().unwrap();
         run_ok(&mut ctx, "remove_constraint L0 horizontal");
-        let dof_without = ctx.sketch.dof();
+        let dof_without = ctx.sketch.dof().unwrap();
         assert!(dof_without > dof_with, "DOF should increase after removing constraint: {} vs {}", dof_without, dof_with);
         run_ok(&mut ctx, "undo");
-        let dof_undone = ctx.sketch.dof();
+        let dof_undone = ctx.sketch.dof().unwrap();
         assert_eq!(dof_undone, dof_with, "DOF should restore after undo: {} vs {}", dof_undone, dof_with);
     }
 
@@ -6588,9 +6594,9 @@ mod tests {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,2 5,2");
         run_ok(&mut ctx, "parallel L0 L1");
-        let dof_before = ctx.sketch.dof();
+        let dof_before = ctx.sketch.dof().unwrap();
         run_ok(&mut ctx, "remove_constraint L0 L1 parallel");
-        let dof_after = ctx.sketch.dof();
+        let dof_after = ctx.sketch.dof().unwrap();
         assert_eq!(dof_after, dof_before + 1, "removing parallel should increase DOF by 1: {} -> {}", dof_before, dof_after);
     }
 }
