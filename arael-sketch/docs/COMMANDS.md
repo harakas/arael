@@ -493,6 +493,10 @@ list horizontal              Filter by constraint type (also: vertical, parallel
                              perpendicular, equal, collinear, tangent, coincident,
                              concentric, midpoint, symmetry, point_on, lock,
                              angle, length, radius, sweep, distance)
+measure L0                   Single entity: length, angle, radius, positions
+measure L0 L1                Two entities: angle, distance, parallel/perpendicular
+measure P0 L0                Point-line: perpendicular distance
+measure L0 A0                Line-arc: center distance, gap, tangency
 find x,y [radius]            Find entities near a coordinate
 dof                          Show degrees of freedom (computed in background, may show "pending")
 dof analyze                  Analyze free directions: which entities can move and how

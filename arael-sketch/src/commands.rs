@@ -1038,6 +1038,7 @@ fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
         "deselect" => cmd_deselect(ctx, args_str),
         "print" => cmd_print(ctx, args_str),
         "info" => cmd_info(ctx, args_str),
+        "measure" => cmd_measure(ctx, args_str),
         "list" => cmd_list(ctx, args_str),
         "find" => cmd_find(ctx, args_str),
         "dof" => cmd_dof(ctx, args_str),
@@ -2280,6 +2281,143 @@ fn cmd_info(ctx: &mut CommandContext, args: &str) -> CommandResult {
         } else {
             err(format!("Unknown entity: {}", name))
         }
+    }
+}
+
+fn cmd_measure(ctx: &mut CommandContext, args: &str) -> CommandResult {
+    let tokens: Vec<&str> = args.split_whitespace().collect();
+    if tokens.is_empty() { return err("Usage: measure L0 | measure L0 L1 | measure P0 P1"); }
+
+    enum Entity { Line(Ref<Line>), Arc(Ref<Arc>), Point(vect2d, String) }
+    let resolve = |token: &str| -> Result<Entity, String> {
+        if let Ok(r) = resolve_line(&ctx.sketch, token) { return Ok(Entity::Line(r)); }
+        if let Ok(r) = resolve_arc(&ctx.sketch, token) { return Ok(Entity::Arc(r)); }
+        if let Ok(ep) = resolve_endpoint_ref(&ctx.sketch, token) {
+            let pos = resolve_endpoint_pos_from_ref(&ctx.sketch, &ep);
+            return Ok(Entity::Point(pos, token.to_string()));
+        }
+        if let Ok(r) = resolve_point(&ctx.sketch, token) {
+            return Ok(Entity::Point(ctx.sketch.points[r].pos.value, token.to_string()));
+        }
+        Err(format!("Unknown entity: {}", token))
+    };
+
+    if tokens.len() == 1 {
+        let e = match resolve(tokens[0]) { Ok(e) => e, Err(e) => return err(e) };
+        match e {
+            Entity::Line(r) => {
+                let l = &ctx.sketch.lines[r];
+                let dx = l.p2.value.x - l.p1.value.x;
+                let dy = l.p2.value.y - l.p1.value.y;
+                let len = (dx * dx + dy * dy).sqrt();
+                let angle = dy.atan2(dx).to_degrees();
+                ok(format!("{}: length={:.4}, angle={:.4} deg\n  p1=({:.4},{:.4}) p2=({:.4},{:.4})",
+                    l.name, len, angle, l.p1.value.x, l.p1.value.y, l.p2.value.x, l.p2.value.y))
+            }
+            Entity::Arc(r) => {
+                let a = &ctx.sketch.arcs[r];
+                let sweep_deg = (a.end_angle.value - a.start_angle.value).abs().to_degrees();
+                let arc_len = a.radius.value * (a.end_angle.value - a.start_angle.value).abs();
+                let sp = crate::geometry::arc_start_pos(a);
+                let ep = crate::geometry::arc_end_pos(a);
+                ok(format!("{}: radius={:.4}, sweep={:.4} deg, arc_length={:.4}\n  center=({:.4},{:.4}) start=({:.4},{:.4}) end=({:.4},{:.4})",
+                    a.name, a.radius.value, sweep_deg, arc_len,
+                    a.center.value.x, a.center.value.y, sp.x, sp.y, ep.x, ep.y))
+            }
+            Entity::Point(pos, name) => {
+                ok(format!("{}: ({:.4},{:.4})", name, pos.x, pos.y))
+            }
+        }
+    } else if tokens.len() == 2 {
+        let e1 = match resolve(tokens[0]) { Ok(e) => e, Err(e) => return err(e) };
+        let e2 = match resolve(tokens[1]) { Ok(e) => e, Err(e) => return err(e) };
+        match (e1, e2) {
+            (Entity::Point(a, _), Entity::Point(b, _)) => {
+                let d = ((a.x - b.x).powi(2) + (a.y - b.y).powi(2)).sqrt();
+                ok(format!("distance: {:.4}", d))
+            }
+            (Entity::Line(a), Entity::Line(b)) => {
+                let la = &ctx.sketch.lines[a];
+                let lb = &ctx.sketch.lines[b];
+                let dx1 = la.p2.value.x - la.p1.value.x;
+                let dy1 = la.p2.value.y - la.p1.value.y;
+                let dx2 = lb.p2.value.x - lb.p1.value.x;
+                let dy2 = lb.p2.value.y - lb.p1.value.y;
+                let cross = dx1 * dy2 - dy1 * dx2;
+                let dot = dx1 * dx2 + dy1 * dy2;
+                let angle = cross.atan2(dot).to_degrees().abs();
+                let supplement = 180.0 - angle;
+                let len1 = (dx1 * dx1 + dy1 * dy1).sqrt();
+                // Perpendicular distance from lb.p1 to line la
+                let perp_dist = if len1 > 1e-12 {
+                    ((lb.p1.value.x - la.p1.value.x) * dy1 - (lb.p1.value.y - la.p1.value.y) * dx1).abs() / len1
+                } else { 0.0 };
+                let mut lines = Vec::new();
+                lines.push(format!("angle: {:.4} deg (supplement: {:.4} deg)", angle, supplement));
+                if angle < 0.1 || supplement < 0.1 {
+                    lines.push(format!("parallel, distance: {:.4}", perp_dist));
+                }
+                if (angle - 90.0).abs() < 0.1 || (supplement - 90.0).abs() < 0.1 {
+                    lines.push("perpendicular".to_string());
+                }
+                ok(lines.join("\n"))
+            }
+            (Entity::Point(p, _), Entity::Line(r)) | (Entity::Line(r), Entity::Point(p, _)) => {
+                let l = &ctx.sketch.lines[r];
+                let dx = l.p2.value.x - l.p1.value.x;
+                let dy = l.p2.value.y - l.p1.value.y;
+                let len = (dx * dx + dy * dy).sqrt();
+                let perp_dist = if len > 1e-12 {
+                    ((p.x - l.p1.value.x) * dy - (p.y - l.p1.value.y) * dx).abs() / len
+                } else { 0.0 };
+                ok(format!("perpendicular distance: {:.4}", perp_dist))
+            }
+            (Entity::Point(p, _), Entity::Arc(r)) | (Entity::Arc(r), Entity::Point(p, _)) => {
+                let a = &ctx.sketch.arcs[r];
+                let dc = ((p.x - a.center.value.x).powi(2) + (p.y - a.center.value.y).powi(2)).sqrt();
+                let dist_to_arc = (dc - a.radius.value).abs();
+                ok(format!("distance to center: {:.4}, distance to arc: {:.4}", dc, dist_to_arc))
+            }
+            (Entity::Line(lr), Entity::Arc(ar)) | (Entity::Arc(ar), Entity::Line(lr)) => {
+                let l = &ctx.sketch.lines[lr];
+                let a = &ctx.sketch.arcs[ar];
+                let dx = l.p2.value.x - l.p1.value.x;
+                let dy = l.p2.value.y - l.p1.value.y;
+                let len = (dx * dx + dy * dy).sqrt();
+                let perp_dist = if len > 1e-12 {
+                    ((a.center.value.x - l.p1.value.x) * dy - (a.center.value.y - l.p1.value.y) * dx).abs() / len
+                } else { 0.0 };
+                let gap = perp_dist - a.radius.value;
+                let mut lines = Vec::new();
+                lines.push(format!("center-to-line distance: {:.4}, gap: {:.4}", perp_dist, gap));
+                if gap.abs() < 0.01 { lines.push("tangent".to_string()); }
+                ok(lines.join("\n"))
+            }
+            (Entity::Arc(a), Entity::Arc(b)) => {
+                let aa = &ctx.sketch.arcs[a];
+                let ab = &ctx.sketch.arcs[b];
+                let dc = ((aa.center.value.x - ab.center.value.x).powi(2) +
+                          (aa.center.value.y - ab.center.value.y).powi(2)).sqrt();
+                ok(format!("center-to-center: {:.4}, radii: {:.4} + {:.4} = {:.4}, gap: {:.4}",
+                    dc, aa.radius.value, ab.radius.value,
+                    aa.radius.value + ab.radius.value,
+                    dc - aa.radius.value - ab.radius.value))
+            }
+        }
+    } else {
+        err("Usage: measure L0 | measure L0 L1 | measure P0 P1")
+    }
+}
+
+/// Resolve endpoint ref to position.
+fn resolve_endpoint_pos_from_ref(sketch: &Sketch, ep: &EndpointRef) -> vect2d {
+    match ep {
+        EndpointRef::Point(r) => sketch.points[*r].pos.value,
+        EndpointRef::LineP1(r) => sketch.lines[*r].p1.value,
+        EndpointRef::LineP2(r) => sketch.lines[*r].p2.value,
+        EndpointRef::ArcCenter(r) => sketch.arcs[*r].center.value,
+        EndpointRef::ArcStart(r) => crate::geometry::arc_start_pos(&sketch.arcs[*r]),
+        EndpointRef::ArcEnd(r) => crate::geometry::arc_end_pos(&sketch.arcs[*r]),
     }
 }
 
@@ -3926,6 +4064,7 @@ fn cmd_help(args: &str) -> CommandResult {
             "deselect" => "deselect [L0 L1 ...] (clears all or specific)",
             "print" => "print <expression> (evaluate and display)",
             "info" => "info L0 | info P0 | info A0 | info d0 | info paramname",
+            "measure" => "measure L0 | measure L0 L1 | measure P0 P1 | measure L0 A0",
             "list" => "list [all|lines|points|arcs|dims|params|constraints|selection]",
             "find" => "find x,y [radius] (list nearby entities)",
             "undo" => "undo [n]",
@@ -3963,7 +4102,7 @@ const COMMAND_NAMES: &[&str] = &[
     "symmetry", "point_on", "length", "radius", "sweep", "angle", "distance",
     "remove_dim", "remove_constraint", "rc", "set_derived", "set_driven",
     "lock", "unlock", "param", "del_param", "rename_param", "style",
-    "select", "deselect", "freeze", "print", "info", "list", "find", "let",
+    "select", "deselect", "freeze", "print", "info", "measure", "list", "find", "let",
     "dof", "cost", "undo", "redo", "history", "goto", "center", "zoom",
     "cursor", "dim_pos", "clear", "save", "load", "help", "msg",
 ];
@@ -6809,6 +6948,58 @@ mod tests {
         // Negative value should be accepted (taken as absolute value)
         run_ok(&mut ctx, "angle L0 L1 -45");
         assert_eq!(ctx.sketch.dimensions.len(), 1);
+    }
+
+    // -- Measure --
+
+    #[test]
+    fn test_measure_single_line() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 3,4");
+        let out = run_ok(&mut ctx, "measure L0");
+        assert!(out.contains("length=5.0000"), "should show length: {}", out);
+    }
+
+    #[test]
+    fn test_measure_two_parallel_lines() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,3 5,3");
+        let out = run_ok(&mut ctx, "measure L0 L1");
+        assert!(out.contains("parallel"), "should detect parallel: {}", out);
+        assert!(out.contains("3.0000"), "should show distance: {}", out);
+    }
+
+    #[test]
+    fn test_measure_two_lines_angle() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,0 3,3");
+        let out = run_ok(&mut ctx, "measure L0 L1");
+        assert!(out.contains("45.0000"), "should show 45 deg: {}", out);
+        assert!(out.contains("135.0000"), "should show supplement: {}", out);
+    }
+
+    #[test]
+    fn test_measure_two_points() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 3,4");
+        let out = run_ok(&mut ctx, "measure L0.p1 L0.p2");
+        assert!(out.contains("5.0000"), "should show distance 5: {}", out);
+    }
+
+    #[test]
+    fn test_measure_point_line() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0; add_point 2,3");
+        let out = run_ok(&mut ctx, "measure P0 L0");
+        assert!(out.contains("3.0000"), "should show perp distance 3: {}", out);
+    }
+
+    #[test]
+    fn test_measure_single_arc() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_circle 0,0 5");
+        let out = run_ok(&mut ctx, "measure A0");
+        assert!(out.contains("radius=5.0000"), "should show radius: {}", out);
     }
 
     // -- List constraint filtering --
