@@ -107,7 +107,7 @@ pub struct ArcDrawState {
 }
 
 // Constraint identification (for selection and deletion)
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum CoincidentKind {
     PP, LP1, LP2,
     LL11, LL12, LL21, LL22,
@@ -124,7 +124,7 @@ pub enum CoincidentKind {
     ArcEndStart, ArcEndEnd,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum MidpointKind {
     Point,          // Point at midpoint of line
     LP1,            // Line P1 at midpoint of another line
@@ -138,7 +138,7 @@ pub enum MidpointKind {
     ArcEndArc,      // Arc end at angular midpoint of another arc
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ConstraintId {
     Horizontal(Ref<Line>),
     Vertical(Ref<Line>),

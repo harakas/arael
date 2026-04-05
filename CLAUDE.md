@@ -14,3 +14,5 @@
  * arael-sketch: you can run test scripts inline with stdout and nogui: `cargo run -r -p arael-sketch -- --empty --nogui --stdout --script script.cmd`
  * Never hide errors. One bug does not justify another or klunky workarounds -- fix issues at the source or prompt for decision by user.
  * When something is "impossible" to fix due to limited API, extend the API/refactor the code instead of working around or ignoring problems and creating more bugs and bad code. A small change might cause a big change -- that is fine if the architectural changes needed take us forward.
+ * arael-sketch: having to use the `force` keyword on a constraint to take hold (rejected otherwise for not changing dof) means that either we have a bug or our assumptions about the constraint are invalid and it actually does not constrain anything. So don't go adding force to places and handwaving it away with "degenerate geometry so force needed".
+ * When a test fails then it's probably a bug in changes. First instinct should not be to "fix" the test but to understand why it fails. Hallucinating plausible but unverified reasons from local changes is not acceptable. Causes must be verified.

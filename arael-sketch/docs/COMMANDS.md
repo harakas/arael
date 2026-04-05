@@ -182,12 +182,13 @@ point_on L0.p1 A0            Line endpoint on arc
 point_on A0.center L0        Arc center on line (creates helper point internally)
 ```
 
-All constraint and dimension commands check that DOF decreases after application. If a constraint doesn't reduce DOF (redundant or degenerate), it is rejected. Append `force` to skip this check:
+All constraint and dimension commands check that DOF decreases after application. If a constraint doesn't reduce DOF, it is rejected -- the constraint is either redundant or already implied by existing constraints. Append `force` to skip this check:
 
 ```
-equal L0 L1 force            Skip DOF check (use in scripts for known-valid constraints)
-length L0 5 force            Skip DOF check for dimensions
+equal L0 L1 force            Skip DOF check
 ```
+
+Using `force` results in an overconstrained sketch -- redundant constraints make it harder to modify the sketch later because changing one dimension may conflict with the redundant constraint. Prefer rethinking the constraint strategy over using `force`.
 
 ### Removing Constraints
 
@@ -616,17 +617,9 @@ Y-axis points up (math convention, not screen convention). Plan your geometry ac
 
 `undo` reverses the last operation, including grouped operations (e.g., a constraint that created helper points undoes as one unit). Use `undo` freely when experimenting with constraint strategies.
 
-### Watch out for degenerate constraints
+### DOF check catches redundant constraints
 
-Some constraints are accepted by the solver but don't actually reduce DOF because their Jacobian is zero at the current geometry. This happens when:
-
-- `tangent` between a line and arc at a point where the line is already radial (perpendicular to the arc)
-- `distance` set to the maximum possible value (e.g., chord equal to diameter)
-- Any constraint that is algebraically satisfied by the current configuration but has zero gradient
-
-The solver gives no warning — the constraint appears in `list constraints` but `dof` doesn't change. If a constraint doesn't reduce DOF as expected, try an algebraically equivalent but non-degenerate formulation. For example, use `distance A0.center L1.p2` (center-to-endpoint) instead of `tangent` at the diameter.
-
-Use `dof analyze` to see exactly which directions remain free.
+When you add a constraint, the solver checks that DOF actually decreases. If it doesn't, the constraint is rejected -- it is either redundant (already implied by existing constraints) or the geometry already satisfies it trivially. Check `dof analyze` to see which directions remain free and reconsider your constraint strategy.
 
 ### DOF=3 pattern for reusable components
 

@@ -96,6 +96,7 @@ pub enum Action {
     AddUserParam { name: String, expr_str: String },
     UpdateUserParam { index: usize, name: String, expr_str: String },
     RemoveUserParam { index: usize },
+    DeleteConstraint { id: crate::tools::ConstraintId },
     // Drag is non-deterministic; store full state after drag completes
     Drag { snapshot: Vec<u8> },
 }
@@ -170,6 +171,7 @@ impl Action {
             Action::AddUserParam { name, .. } => format!("Add param {}", name),
             Action::UpdateUserParam { name, .. } => format!("Update param {}", name),
             Action::RemoveUserParam { .. } => "Remove param".into(),
+            Action::DeleteConstraint { .. } => "Delete constraint".into(),
             Action::Drag { .. } => "Drag".into(),
         }
     }
@@ -963,6 +965,75 @@ impl Action {
                     sketch.solve();
                     sketch.update_expr_dim_values();
                 }
+            }
+            Action::DeleteConstraint { id } => {
+                use crate::tools::{ConstraintId, CoincidentKind, MidpointKind};
+                match id {
+                    ConstraintId::Horizontal(r) => { sketch.lines[*r].constraints.horizontal = false; }
+                    ConstraintId::Vertical(r) => { sketch.lines[*r].constraints.vertical = false; }
+                    ConstraintId::Parallel(i) => { sketch.parallel.remove(*i); }
+                    ConstraintId::Perpendicular(i) => { sketch.perpendicular.remove(*i); }
+                    ConstraintId::EqualLength(i) => { sketch.equal_length.remove(*i); }
+                    ConstraintId::EqualRadius(i) => { sketch.equal_radius.remove(*i); }
+                    ConstraintId::TangentLA(i) => { sketch.tangent_la.remove(*i); }
+                    ConstraintId::TangentAA(i) => { sketch.tangent_aa.remove(*i); }
+                    ConstraintId::Collinear(i) => { sketch.collinear.remove(*i); }
+                    ConstraintId::Symmetry(i) => { sketch.symmetry_ll.remove(*i); }
+                    ConstraintId::SymmetryPP(i) => { sketch.symmetry_pp.remove(*i); }
+                    ConstraintId::Midpoint(kind, i) => {
+                        match kind {
+                            MidpointKind::Point => { sketch.midpoint.remove(*i); }
+                            MidpointKind::LP1 => { sketch.midpoint_lp1.remove(*i); }
+                            MidpointKind::LP2 => { sketch.midpoint_lp2.remove(*i); }
+                            MidpointKind::ArcStart => { sketch.midpoint_arc_start.remove(*i); }
+                            MidpointKind::ArcEnd => { sketch.midpoint_arc_end.remove(*i); }
+                            MidpointKind::ArcPoint => { sketch.midpoint_arc_point.remove(*i); }
+                            MidpointKind::LP1Arc => { sketch.midpoint_lp1_arc.remove(*i); }
+                            MidpointKind::LP2Arc => { sketch.midpoint_lp2_arc.remove(*i); }
+                            MidpointKind::ArcStartArc => { sketch.midpoint_arc_start_arc.remove(*i); }
+                            MidpointKind::ArcEndArc => { sketch.midpoint_arc_end_arc.remove(*i); }
+                        }
+                    }
+                    ConstraintId::Coincident(kind, i) => {
+                        match kind {
+                            CoincidentKind::PP => { sketch.coincident_pp.remove(*i); }
+                            CoincidentKind::LP1 => { sketch.coincident_lp1.remove(*i); }
+                            CoincidentKind::LP2 => { sketch.coincident_lp2.remove(*i); }
+                            CoincidentKind::LL11 => { sketch.coincident_ll11.remove(*i); }
+                            CoincidentKind::LL12 => { sketch.coincident_ll12.remove(*i); }
+                            CoincidentKind::LL21 => { sketch.coincident_ll21.remove(*i); }
+                            CoincidentKind::LL22 => { sketch.coincident_ll22.remove(*i); }
+                            CoincidentKind::PointOnLine => { sketch.point_on_line.remove(*i); }
+                            CoincidentKind::PointOnArc => { sketch.point_on_arc.remove(*i); }
+                            CoincidentKind::LP1OnLine => { sketch.line_p1_on_line.remove(*i); }
+                            CoincidentKind::LP2OnLine => { sketch.line_p2_on_line.remove(*i); }
+                            CoincidentKind::LP1OnArc => { sketch.line_p1_on_arc.remove(*i); }
+                            CoincidentKind::LP2OnArc => { sketch.line_p2_on_arc.remove(*i); }
+                            CoincidentKind::ArcCenter => { sketch.coincident_arc_center.remove(*i); }
+                            CoincidentKind::ArcStart => { sketch.coincident_arc_start.remove(*i); }
+                            CoincidentKind::ArcEnd => { sketch.coincident_arc_end.remove(*i); }
+                            CoincidentKind::LP1ArcCenter => { sketch.coincident_lp1_arc_center.remove(*i); }
+                            CoincidentKind::LP2ArcCenter => { sketch.coincident_lp2_arc_center.remove(*i); }
+                            CoincidentKind::LP1ArcStart => { sketch.coincident_lp1_arc_start.remove(*i); }
+                            CoincidentKind::LP2ArcStart => { sketch.coincident_lp2_arc_start.remove(*i); }
+                            CoincidentKind::LP1ArcEnd => { sketch.coincident_lp1_arc_end.remove(*i); }
+                            CoincidentKind::LP2ArcEnd => { sketch.coincident_lp2_arc_end.remove(*i); }
+                            CoincidentKind::ArcCenterStart => { sketch.coincident_arc_center_start.remove(*i); }
+                            CoincidentKind::ArcCenterEnd => { sketch.coincident_arc_center_end.remove(*i); }
+                            CoincidentKind::ArcStartCenter => { sketch.coincident_arc_start_center.remove(*i); }
+                            CoincidentKind::ArcEndCenter => { sketch.coincident_arc_end_center.remove(*i); }
+                            CoincidentKind::ArcStartStart => { sketch.coincident_arc_start_start.remove(*i); }
+                            CoincidentKind::ArcStartEnd => { sketch.coincident_arc_start_end.remove(*i); }
+                            CoincidentKind::ArcEndStart => { sketch.coincident_arc_end_start.remove(*i); }
+                            CoincidentKind::ArcEndEnd => { sketch.coincident_arc_end_end.remove(*i); }
+                        }
+                        sketch.cleanup_helper_points();
+                    }
+                    ConstraintId::HelperBridge(pt) => {
+                        sketch.delete_point(*pt);
+                    }
+                }
+                sketch.solve();
             }
             Action::Drag { snapshot } => {
                 *sketch = bincode::deserialize(snapshot).unwrap();

@@ -1243,7 +1243,7 @@ impl Sketch {
     ///   nalgebra full eigen:      220ms
     pub fn compute_dof(&mut self, analyze: bool) -> DofResult {
         use arael::simple_lm::LmProblem;
-        let t_total = std::time::Instant::now();
+        let t_total = if TIMING_DEBUG { Some(std::time::Instant::now()) } else { None };
 
         self.prepare_expr_constraints();
         self.update_tangent_flags();
@@ -1271,15 +1271,15 @@ impl Sketch {
             Vec::new()
         };
 
-        let t_hessian = std::time::Instant::now();
+        let t_hessian = if TIMING_DEBUG { Some(std::time::Instant::now()) } else { None };
         let mut grad = vec![0.0f64; n];
         let mut hessian = vec![0.0f64; n * n];
         self.calc_grad_hessian_dense(&params, &mut grad, &mut hessian);
         self.drift_isigma = saved_drift;
-        let t_hessian = t_hessian.elapsed();
+        let t_hessian = t_hessian.map(|t| t.elapsed());
 
         let threshold = 1e-6;
-        let t_eigen = std::time::Instant::now();
+        let t_eigen = if TIMING_DEBUG { Some(std::time::Instant::now()) } else { None };
         let (method, result) = if n < 32 && analyze {
             let h = nalgebra::DMatrix::from_row_slice(n, n, &hessian);
             let eigen = nalgebra::SymmetricEigen::new(h);
@@ -1315,11 +1315,12 @@ impl Sketch {
             let dof = n.saturating_sub(rank);
             ("faer eigenvalues-only", DofResult { dof, param_names: Vec::new(), eigenvalues: Vec::new(), eigenvectors: Vec::new() })
         };
-        let t_eigen = t_eigen.elapsed();
         if TIMING_DEBUG {
+            let t_h = t_hessian.unwrap().as_secs_f64() * 1000.0;
+            let t_e = t_eigen.unwrap().elapsed().as_secs_f64() * 1000.0;
+            let t_t = t_total.unwrap().elapsed().as_secs_f64() * 1000.0;
             eprintln!("[DOF] n={} analyze={} method={} hessian={:.3}ms eigen={:.3}ms total={:.3}ms dof={}",
-                n, analyze, method, t_hessian.as_secs_f64() * 1000.0,
-                t_eigen.as_secs_f64() * 1000.0, t_total.elapsed().as_secs_f64() * 1000.0, result.dof);
+                n, analyze, method, t_h, t_e, t_t, result.dof);
         }
         self.cached_dof = Some(result.dof);
         result

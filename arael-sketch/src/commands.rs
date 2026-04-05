@@ -2939,279 +2939,279 @@ fn cmd_remove_dim(ctx: &mut CommandContext, args: &str) -> CommandResult {
     }
 }
 
-/// Remove a coincident constraint between two endpoint refs.
-fn remove_coincident(sketch: &mut Sketch, a: EndpointRef, b: EndpointRef) -> bool {
+/// Find the helper point associated with an arc endpoint ref (center/start/end).
+/// Returns None for non-arc endpoints or if no helper point exists.
+fn resolve_endpoint_as_point(sketch: &Sketch, ep: EndpointRef) -> Option<Ref<Point>> {
+    match ep {
+        EndpointRef::Point(p) => Some(p),
+        EndpointRef::ArcCenter(arc) => sketch.coincident_arc_center.iter().find(|c| c.arc == arc).map(|c| c.point),
+        EndpointRef::ArcStart(arc) => sketch.coincident_arc_start.iter().find(|c| c.arc == arc).map(|c| c.point),
+        EndpointRef::ArcEnd(arc) => sketch.coincident_arc_end.iter().find(|c| c.arc == arc).map(|c| c.point),
+        _ => None,
+    }
+}
+
+fn find_coincident_id(sketch: &Sketch, a: EndpointRef, b: EndpointRef) -> Option<crate::tools::ConstraintId> {
+    use crate::tools::{ConstraintId, CoincidentKind};
     use EndpointRef::*;
-    macro_rules! retain_rm {
-        ($vec:expr, $pred:expr) => {{ let b = $vec.len(); $vec.retain($pred); $vec.len() < b }};
+    macro_rules! find_in {
+        ($coll:expr, $kind:expr, $pred:expr) => {
+            $coll.iter().position($pred).map(|i| ConstraintId::Coincident($kind, i))
+        }
     }
     match (a, b) {
-        (Point(a), Point(b)) => retain_rm!(sketch.coincident_pp, |c| !((c.a == a && c.b == b) || (c.a == b && c.b == a))),
-        (LineP1(l), Point(p)) | (Point(p), LineP1(l)) => retain_rm!(sketch.coincident_lp1, |c| !(c.line == l && c.point == p)),
-        (LineP2(l), Point(p)) | (Point(p), LineP2(l)) => retain_rm!(sketch.coincident_lp2, |c| !(c.line == l && c.point == p)),
-        (LineP1(a), LineP1(b)) => retain_rm!(sketch.coincident_ll11, |c| !((c.a == a && c.b == b) || (c.a == b && c.b == a))),
-        (LineP1(a), LineP2(b)) => {
-            retain_rm!(sketch.coincident_ll12, |c| !(c.a == a && c.b == b))
-            || retain_rm!(sketch.coincident_ll21, |c| !(c.a == b && c.b == a))
-        }
-        (LineP2(a), LineP1(b)) => {
-            retain_rm!(sketch.coincident_ll21, |c| !(c.a == a && c.b == b))
-            || retain_rm!(sketch.coincident_ll12, |c| !(c.a == b && c.b == a))
-        }
-        (LineP2(a), LineP2(b)) => retain_rm!(sketch.coincident_ll22, |c| !((c.a == a && c.b == b) || (c.a == b && c.b == a))),
-        (Point(p), ArcCenter(arc)) | (ArcCenter(arc), Point(p)) => retain_rm!(sketch.coincident_arc_center, |c| !(c.point == p && c.arc == arc)),
-        (Point(p), ArcStart(arc)) | (ArcStart(arc), Point(p)) => retain_rm!(sketch.coincident_arc_start, |c| !(c.point == p && c.arc == arc)),
-        (Point(p), ArcEnd(arc)) | (ArcEnd(arc), Point(p)) => retain_rm!(sketch.coincident_arc_end, |c| !(c.point == p && c.arc == arc)),
-        (LineP1(line), ArcCenter(arc)) | (ArcCenter(arc), LineP1(line)) => retain_rm!(sketch.coincident_lp1_arc_center, |c| !(c.line == line && c.arc == arc)),
-        (LineP2(line), ArcCenter(arc)) | (ArcCenter(arc), LineP2(line)) => retain_rm!(sketch.coincident_lp2_arc_center, |c| !(c.line == line && c.arc == arc)),
-        (LineP1(line), ArcStart(arc)) | (ArcStart(arc), LineP1(line)) => retain_rm!(sketch.coincident_lp1_arc_start, |c| !(c.line == line && c.arc == arc)),
-        (LineP2(line), ArcStart(arc)) | (ArcStart(arc), LineP2(line)) => retain_rm!(sketch.coincident_lp2_arc_start, |c| !(c.line == line && c.arc == arc)),
-        (LineP1(line), ArcEnd(arc)) | (ArcEnd(arc), LineP1(line)) => retain_rm!(sketch.coincident_lp1_arc_end, |c| !(c.line == line && c.arc == arc)),
-        (LineP2(line), ArcEnd(arc)) | (ArcEnd(arc), LineP2(line)) => retain_rm!(sketch.coincident_lp2_arc_end, |c| !(c.line == line && c.arc == arc)),
-        // Arc-arc: check both constraint direction variants
-        (ArcCenter(a), ArcStart(b)) => {
-            retain_rm!(sketch.coincident_arc_center_start, |c| !(c.a == a && c.b == b))
-            || retain_rm!(sketch.coincident_arc_start_center, |c| !(c.a == b && c.b == a))
-        }
-        (ArcStart(a), ArcCenter(b)) => {
-            retain_rm!(sketch.coincident_arc_start_center, |c| !(c.a == a && c.b == b))
-            || retain_rm!(sketch.coincident_arc_center_start, |c| !(c.a == b && c.b == a))
-        }
-        (ArcCenter(a), ArcEnd(b)) => {
-            retain_rm!(sketch.coincident_arc_center_end, |c| !(c.a == a && c.b == b))
-            || retain_rm!(sketch.coincident_arc_end_center, |c| !(c.a == b && c.b == a))
-        }
-        (ArcEnd(a), ArcCenter(b)) => {
-            retain_rm!(sketch.coincident_arc_end_center, |c| !(c.a == a && c.b == b))
-            || retain_rm!(sketch.coincident_arc_center_end, |c| !(c.a == b && c.b == a))
-        }
-        (ArcStart(a), ArcStart(b)) => retain_rm!(sketch.coincident_arc_start_start, |c| !((c.a == a && c.b == b) || (c.a == b && c.b == a))),
-        (ArcStart(a), ArcEnd(b)) => {
-            retain_rm!(sketch.coincident_arc_start_end, |c| !(c.a == a && c.b == b))
-            || retain_rm!(sketch.coincident_arc_end_start, |c| !(c.a == b && c.b == a))
-        }
-        (ArcEnd(a), ArcStart(b)) => {
-            retain_rm!(sketch.coincident_arc_end_start, |c| !(c.a == a && c.b == b))
-            || retain_rm!(sketch.coincident_arc_start_end, |c| !(c.a == b && c.b == a))
-        }
-        (ArcEnd(a), ArcEnd(b)) => retain_rm!(sketch.coincident_arc_end_end, |c| !((c.a == a && c.b == b) || (c.a == b && c.b == a))),
-        _ => false,
+        (Point(a), Point(b)) => find_in!(sketch.coincident_pp, CoincidentKind::PP, |c| (c.a == a && c.b == b) || (c.a == b && c.b == a)),
+        (LineP1(l), Point(p)) | (Point(p), LineP1(l)) => find_in!(sketch.coincident_lp1, CoincidentKind::LP1, |c| c.line == l && c.point == p),
+        (LineP2(l), Point(p)) | (Point(p), LineP2(l)) => find_in!(sketch.coincident_lp2, CoincidentKind::LP2, |c| c.line == l && c.point == p),
+        (LineP1(a), LineP1(b)) => find_in!(sketch.coincident_ll11, CoincidentKind::LL11, |c| (c.a == a && c.b == b) || (c.a == b && c.b == a)),
+        (LineP1(a), LineP2(b)) => find_in!(sketch.coincident_ll12, CoincidentKind::LL12, |c| c.a == a && c.b == b)
+            .or_else(|| find_in!(sketch.coincident_ll21, CoincidentKind::LL21, |c| c.a == b && c.b == a)),
+        (LineP2(a), LineP1(b)) => find_in!(sketch.coincident_ll21, CoincidentKind::LL21, |c| c.a == a && c.b == b)
+            .or_else(|| find_in!(sketch.coincident_ll12, CoincidentKind::LL12, |c| c.a == b && c.b == a)),
+        (LineP2(a), LineP2(b)) => find_in!(sketch.coincident_ll22, CoincidentKind::LL22, |c| (c.a == a && c.b == b) || (c.a == b && c.b == a)),
+        (Point(p), ArcCenter(arc)) | (ArcCenter(arc), Point(p)) => find_in!(sketch.coincident_arc_center, CoincidentKind::ArcCenter, |c| c.point == p && c.arc == arc),
+        (Point(p), ArcStart(arc)) | (ArcStart(arc), Point(p)) => find_in!(sketch.coincident_arc_start, CoincidentKind::ArcStart, |c| c.point == p && c.arc == arc),
+        (Point(p), ArcEnd(arc)) | (ArcEnd(arc), Point(p)) => find_in!(sketch.coincident_arc_end, CoincidentKind::ArcEnd, |c| c.point == p && c.arc == arc),
+        (LineP1(l), ArcCenter(arc)) | (ArcCenter(arc), LineP1(l)) => find_in!(sketch.coincident_lp1_arc_center, CoincidentKind::LP1ArcCenter, |c| c.line == l && c.arc == arc),
+        (LineP2(l), ArcCenter(arc)) | (ArcCenter(arc), LineP2(l)) => find_in!(sketch.coincident_lp2_arc_center, CoincidentKind::LP2ArcCenter, |c| c.line == l && c.arc == arc),
+        (LineP1(l), ArcStart(arc)) | (ArcStart(arc), LineP1(l)) => find_in!(sketch.coincident_lp1_arc_start, CoincidentKind::LP1ArcStart, |c| c.line == l && c.arc == arc),
+        (LineP2(l), ArcStart(arc)) | (ArcStart(arc), LineP2(l)) => find_in!(sketch.coincident_lp2_arc_start, CoincidentKind::LP2ArcStart, |c| c.line == l && c.arc == arc),
+        (LineP1(l), ArcEnd(arc)) | (ArcEnd(arc), LineP1(l)) => find_in!(sketch.coincident_lp1_arc_end, CoincidentKind::LP1ArcEnd, |c| c.line == l && c.arc == arc),
+        (LineP2(l), ArcEnd(arc)) | (ArcEnd(arc), LineP2(l)) => find_in!(sketch.coincident_lp2_arc_end, CoincidentKind::LP2ArcEnd, |c| c.line == l && c.arc == arc),
+        (ArcCenter(a), ArcStart(b)) | (ArcStart(b), ArcCenter(a)) => find_in!(sketch.coincident_arc_center_start, CoincidentKind::ArcCenterStart, |c| c.a == a && c.b == b),
+        (ArcCenter(a), ArcEnd(b)) | (ArcEnd(b), ArcCenter(a)) => find_in!(sketch.coincident_arc_center_end, CoincidentKind::ArcCenterEnd, |c| c.a == a && c.b == b),
+        (ArcStart(a), ArcStart(b)) => find_in!(sketch.coincident_arc_start_start, CoincidentKind::ArcStartStart, |c| (c.a == a && c.b == b) || (c.a == b && c.b == a)),
+        (ArcStart(a), ArcEnd(b)) => find_in!(sketch.coincident_arc_start_end, CoincidentKind::ArcStartEnd, |c| c.a == a && c.b == b)
+            .or_else(|| find_in!(sketch.coincident_arc_end_start, CoincidentKind::ArcEndStart, |c| c.a == b && c.b == a)),
+        (ArcEnd(a), ArcStart(b)) => find_in!(sketch.coincident_arc_end_start, CoincidentKind::ArcEndStart, |c| c.a == a && c.b == b)
+            .or_else(|| find_in!(sketch.coincident_arc_start_end, CoincidentKind::ArcStartEnd, |c| c.a == b && c.b == a)),
+        (ArcEnd(a), ArcEnd(b)) => find_in!(sketch.coincident_arc_end_end, CoincidentKind::ArcEndEnd, |c| (c.a == a && c.b == b) || (c.a == b && c.b == a)),
+        _ => None,
     }
 }
 
-/// Remove a point-on-line constraint. For arc endpoints, removes the helper point's constraint.
-fn remove_point_on_line(sketch: &mut Sketch, ep: EndpointRef, line: Ref<Line>) -> bool {
-    use EndpointRef::*;
+fn find_point_on_line_id(sketch: &Sketch, ep: EndpointRef, line: Ref<Line>) -> Option<crate::tools::ConstraintId> {
+    use crate::tools::{ConstraintId, CoincidentKind};
     match ep {
-        Point(p) => { let b = sketch.point_on_line.len(); sketch.point_on_line.retain(|c| !(c.point == p && c.line == line)); sketch.point_on_line.len() < b }
-        LineP1(l) => { let b = sketch.line_p1_on_line.len(); sketch.line_p1_on_line.retain(|c| !(c.a == l && c.b == line)); sketch.line_p1_on_line.len() < b }
-        LineP2(l) => { let b = sketch.line_p2_on_line.len(); sketch.line_p2_on_line.retain(|c| !(c.a == l && c.b == line)); sketch.line_p2_on_line.len() < b }
-        ArcCenter(arc) => remove_arc_ep_on_line(sketch, arc, ArcEp::Center, line),
-        ArcStart(arc) => remove_arc_ep_on_line(sketch, arc, ArcEp::Start, line),
-        ArcEnd(arc) => remove_arc_ep_on_line(sketch, arc, ArcEp::End, line),
+        EndpointRef::Point(p) => sketch.point_on_line.iter().position(|c| c.point == p && c.line == line)
+            .map(|i| ConstraintId::Coincident(CoincidentKind::PointOnLine, i)),
+        EndpointRef::LineP1(l) => sketch.line_p1_on_line.iter().position(|c| c.a == l && c.b == line)
+            .map(|i| ConstraintId::Coincident(CoincidentKind::LP1OnLine, i)),
+        EndpointRef::LineP2(l) => sketch.line_p2_on_line.iter().position(|c| c.a == l && c.b == line)
+            .map(|i| ConstraintId::Coincident(CoincidentKind::LP2OnLine, i)),
+        _ => None,
     }
 }
 
-/// Remove a point-on-arc constraint. For arc endpoints, removes the helper point's constraint.
-fn remove_point_on_arc(sketch: &mut Sketch, ep: EndpointRef, arc: Ref<Arc>) -> bool {
-    use EndpointRef::*;
+fn find_point_on_arc_id(sketch: &Sketch, ep: EndpointRef, arc: Ref<Arc>) -> Option<crate::tools::ConstraintId> {
+    use crate::tools::{ConstraintId, CoincidentKind};
     match ep {
-        Point(p) => { let b = sketch.point_on_arc.len(); sketch.point_on_arc.retain(|c| !(c.point == p && c.arc == arc)); sketch.point_on_arc.len() < b }
-        LineP1(l) => { let b = sketch.line_p1_on_arc.len(); sketch.line_p1_on_arc.retain(|c| !(c.line == l && c.arc == arc)); sketch.line_p1_on_arc.len() < b }
-        LineP2(l) => { let b = sketch.line_p2_on_arc.len(); sketch.line_p2_on_arc.retain(|c| !(c.line == l && c.arc == arc)); sketch.line_p2_on_arc.len() < b }
-        ArcCenter(src) => remove_arc_ep_on_arc(sketch, src, ArcEp::Center, arc),
-        ArcStart(src) => remove_arc_ep_on_arc(sketch, src, ArcEp::Start, arc),
-        ArcEnd(src) => remove_arc_ep_on_arc(sketch, src, ArcEp::End, arc),
+        EndpointRef::Point(p) => sketch.point_on_arc.iter().position(|c| c.point == p && c.arc == arc)
+            .map(|i| ConstraintId::Coincident(CoincidentKind::PointOnArc, i)),
+        EndpointRef::LineP1(l) => sketch.line_p1_on_arc.iter().position(|c| c.line == l && c.arc == arc)
+            .map(|i| ConstraintId::Coincident(CoincidentKind::LP1OnArc, i)),
+        EndpointRef::LineP2(l) => sketch.line_p2_on_arc.iter().position(|c| c.line == l && c.arc == arc)
+            .map(|i| ConstraintId::Coincident(CoincidentKind::LP2OnArc, i)),
+        _ => None,
     }
 }
 
-/// Remove point_on_line for an arc endpoint that uses a helper point.
-/// Finds bridged helper points, removes the point_on_line constraint on them.
-/// cleanup_helper_points() (called by the caller) will remove orphan helpers.
-fn remove_arc_ep_on_line(sketch: &mut Sketch, arc: Ref<Arc>, ep: ArcEp, line: Ref<Line>) -> bool {
-    let bridged: Vec<Ref<Point>> = match ep {
-        ArcEp::Center => sketch.coincident_arc_center.iter().filter(|c| c.arc == arc).map(|c| c.point).collect(),
-        ArcEp::Start => sketch.coincident_arc_start.iter().filter(|c| c.arc == arc).map(|c| c.point).collect(),
-        ArcEp::End => sketch.coincident_arc_end.iter().filter(|c| c.arc == arc).map(|c| c.point).collect(),
-    };
-    let before = sketch.point_on_line.len();
-    sketch.point_on_line.retain(|c| !(bridged.contains(&c.point) && c.line == line));
-    sketch.point_on_line.len() < before
-}
-
-/// Remove point_on_arc for an arc endpoint that uses a helper point.
-fn remove_arc_ep_on_arc(sketch: &mut Sketch, src: Ref<Arc>, ep: ArcEp, target: Ref<Arc>) -> bool {
-    let bridged: Vec<Ref<Point>> = match ep {
-        ArcEp::Center => sketch.coincident_arc_center.iter().filter(|c| c.arc == src).map(|c| c.point).collect(),
-        ArcEp::Start => sketch.coincident_arc_start.iter().filter(|c| c.arc == src).map(|c| c.point).collect(),
-        ArcEp::End => sketch.coincident_arc_end.iter().filter(|c| c.arc == src).map(|c| c.point).collect(),
-    };
-    let before = sketch.point_on_arc.len();
-    sketch.point_on_arc.retain(|c| !(bridged.contains(&c.point) && c.arc == target));
-    sketch.point_on_arc.len() < before
+fn find_midpoint_id(sketch: &Sketch, ep: EndpointRef, target_name: &str) -> Option<crate::tools::ConstraintId> {
+    use crate::tools::{ConstraintId, MidpointKind};
+    if let Ok(line) = resolve_line(sketch, target_name) {
+        match ep {
+            EndpointRef::Point(p) => sketch.midpoint.iter().position(|c| c.point == p && c.line == line).map(|i| ConstraintId::Midpoint(MidpointKind::Point, i)),
+            EndpointRef::LineP1(l) => sketch.midpoint_lp1.iter().position(|c| c.line == l && c.target == line).map(|i| ConstraintId::Midpoint(MidpointKind::LP1, i)),
+            EndpointRef::LineP2(l) => sketch.midpoint_lp2.iter().position(|c| c.line == l && c.target == line).map(|i| ConstraintId::Midpoint(MidpointKind::LP2, i)),
+            EndpointRef::ArcStart(a) => sketch.midpoint_arc_start.iter().position(|c| c.arc == a && c.line == line).map(|i| ConstraintId::Midpoint(MidpointKind::ArcStart, i)),
+            EndpointRef::ArcEnd(a) => sketch.midpoint_arc_end.iter().position(|c| c.arc == a && c.line == line).map(|i| ConstraintId::Midpoint(MidpointKind::ArcEnd, i)),
+            _ => None,
+        }
+    } else if let Ok(arc) = resolve_arc(sketch, target_name) {
+        match ep {
+            EndpointRef::Point(p) => sketch.midpoint_arc_point.iter().position(|c| c.point == p && c.arc == arc).map(|i| ConstraintId::Midpoint(MidpointKind::ArcPoint, i)),
+            EndpointRef::LineP1(l) => sketch.midpoint_lp1_arc.iter().position(|c| c.line == l && c.arc == arc).map(|i| ConstraintId::Midpoint(MidpointKind::LP1Arc, i)),
+            EndpointRef::LineP2(l) => sketch.midpoint_lp2_arc.iter().position(|c| c.line == l && c.arc == arc).map(|i| ConstraintId::Midpoint(MidpointKind::LP2Arc, i)),
+            EndpointRef::ArcStart(a) => sketch.midpoint_arc_start_arc.iter().position(|c| c.a == a && c.b == arc).map(|i| ConstraintId::Midpoint(MidpointKind::ArcStartArc, i)),
+            EndpointRef::ArcEnd(a) => sketch.midpoint_arc_end_arc.iter().position(|c| c.a == a && c.b == arc).map(|i| ConstraintId::Midpoint(MidpointKind::ArcEndArc, i)),
+            _ => None,
+        }
+    } else { None }
 }
 
 fn cmd_remove_constraint(ctx: &mut CommandContext, args: &str) -> CommandResult {
+    use crate::tools::ConstraintId;
     let tokens: Vec<&str> = args.split_whitespace().collect();
     if tokens.len() < 2 { return err("Usage: remove_constraint L0 horizontal | remove_constraint L0 L1 parallel"); }
 
     let ctype = tokens.last().unwrap();
-    let sketch = &mut ctx.sketch;
-    let removed = match *ctype {
+    let sketch = &ctx.sketch;
+
+    macro_rules! find_ab {
+        ($coll:expr, $a:expr, $b:expr) => {
+            $coll.iter().position(|c| (c.a == $a && c.b == $b) || (c.a == $b && c.b == $a))
+        }
+    }
+
+    let id: Option<ConstraintId> = match *ctype {
         "horizontal" => {
             let r = match resolve_line(sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
-            sketch.lines[r].constraints.horizontal = false;
-            true
+            if sketch.lines[r].constraints.horizontal { Some(ConstraintId::Horizontal(r)) } else { None }
         }
         "vertical" => {
             let r = match resolve_line(sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
-            sketch.lines[r].constraints.vertical = false;
-            true
+            if sketch.lines[r].constraints.vertical { Some(ConstraintId::Vertical(r)) } else { None }
         }
         "parallel" if tokens.len() >= 3 => {
             let a = match resolve_line(sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
             let b = match resolve_line(sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
-            let before = sketch.parallel.len();
-            sketch.parallel.retain(|c| !((c.a == a && c.b == b) || (c.a == b && c.b == a)));
-            sketch.parallel.len() < before
+            find_ab!(sketch.parallel, a, b).map(ConstraintId::Parallel)
         }
         "perpendicular" | "perp" if tokens.len() >= 3 => {
             let a = match resolve_line(sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
             let b = match resolve_line(sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
-            let before = sketch.perpendicular.len();
-            sketch.perpendicular.retain(|c| !((c.a == a && c.b == b) || (c.a == b && c.b == a)));
-            sketch.perpendicular.len() < before
+            find_ab!(sketch.perpendicular, a, b).map(ConstraintId::Perpendicular)
         }
         "equal" | "equal_length" if tokens.len() >= 3 => {
             let a = match resolve_line(sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
             let b = match resolve_line(sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
-            let before = sketch.equal_length.len();
-            sketch.equal_length.retain(|c| !((c.a == a && c.b == b) || (c.a == b && c.b == a)));
-            sketch.equal_length.len() < before
+            find_ab!(sketch.equal_length, a, b).map(ConstraintId::EqualLength)
         }
         "collinear" if tokens.len() >= 3 => {
             let a = match resolve_line(sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
             let b = match resolve_line(sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
-            let before = sketch.collinear.len();
-            sketch.collinear.retain(|c| !((c.a == a && c.b == b) || (c.a == b && c.b == a)));
-            sketch.collinear.len() < before
+            find_ab!(sketch.collinear, a, b).map(ConstraintId::Collinear)
         }
         "tangent" if tokens.len() >= 3 => {
             if tokens[0].starts_with('L') && tokens[1].starts_with('A') {
                 let line = match resolve_line(sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
                 let arc = match resolve_arc(sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
-                let before = sketch.tangent_la.len();
-                sketch.tangent_la.retain(|c| !(c.line == line && c.arc == arc));
-                sketch.tangent_la.len() < before
+                sketch.tangent_la.iter().position(|c| c.line == line && c.arc == arc).map(ConstraintId::TangentLA)
             } else if tokens[0].starts_with('A') && tokens[1].starts_with('A') {
                 let a = match resolve_arc(sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
                 let b = match resolve_arc(sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
-                let before = sketch.tangent_aa.len();
-                sketch.tangent_aa.retain(|c| !((c.a == a && c.b == b) || (c.a == b && c.b == a)));
-                sketch.tangent_aa.len() < before
-            } else { false }
+                find_ab!(sketch.tangent_aa, a, b).map(ConstraintId::TangentAA)
+            } else { None }
         }
         "concentric" if tokens.len() >= 3 => {
+            // Concentric not in ConstraintId -- handle directly
             let a = match resolve_arc(sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
             let b = match resolve_arc(sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
-            let before = sketch.concentric.len();
-            sketch.concentric.retain(|c| !((c.a == a && c.b == b) || (c.a == b && c.b == a)));
-            sketch.concentric.len() < before
+            let before = ctx.sketch.concentric.len();
+            ctx.sketch.concentric.retain(|c| !((c.a == a && c.b == b) || (c.a == b && c.b == a)));
+            if ctx.sketch.concentric.len() < before {
+                ctx.sketch.cleanup_helper_points();
+                ctx.sketch.solve();
+                ctx.sketch.cached_dof = None;
+                return ok(format!("Removed {} constraint", ctype));
+            }
+            return err("Constraint not found".to_string());
         }
         "lock" => {
+            // Lock not in ConstraintId -- handle directly
             let ep = match resolve_endpoint_ref(sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
-            match ep {
+            let removed = match ep {
                 EndpointRef::Point(p) => {
-                    sketch.points[p].constraints.has_fix_x = false;
-                    sketch.points[p].constraints.has_fix_y = false;
+                    ctx.sketch.points[p].constraints.has_fix_x = false;
+                    ctx.sketch.points[p].constraints.has_fix_y = false;
                     true
                 }
                 EndpointRef::LineP1(l) => {
-                    let val = sketch.lines[l].p1.value;
-                    sketch.lines[l].p1 = arael::model::Param::new(val);
+                    let val = ctx.sketch.lines[l].p1.value;
+                    ctx.sketch.lines[l].p1 = arael::model::Param::new(val);
                     true
                 }
                 EndpointRef::LineP2(l) => {
-                    let val = sketch.lines[l].p2.value;
-                    sketch.lines[l].p2 = arael::model::Param::new(val);
+                    let val = ctx.sketch.lines[l].p2.value;
+                    ctx.sketch.lines[l].p2 = arael::model::Param::new(val);
                     true
                 }
                 _ => false,
+            };
+            if removed {
+                ctx.sketch.cleanup_helper_points();
+                ctx.sketch.solve();
+                ctx.sketch.cached_dof = None;
+                return ok(format!("Removed {} constraint", ctype));
             }
+            return err("Constraint not found".to_string());
         }
         "equal_radius" if tokens.len() >= 3 => {
             let a = match resolve_arc(sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
             let b = match resolve_arc(sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
-            let before = sketch.equal_radius.len();
-            sketch.equal_radius.retain(|c| !((c.a == a && c.b == b) || (c.a == b && c.b == a)));
-            sketch.equal_radius.len() < before
+            find_ab!(sketch.equal_radius, a, b).map(ConstraintId::EqualRadius)
         }
         "coincident" if tokens.len() >= 3 => {
             let a = match resolve_endpoint_ref(sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
             let b = match resolve_endpoint_ref(sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
-            remove_coincident(sketch, a, b)
+            find_coincident_id(sketch, a, b)
         }
         "point_on" if tokens.len() >= 3 => {
             let ep = match resolve_endpoint_ref(sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
             let target = tokens[1];
-            if target.starts_with('L') || target.starts_with('l') {
+            let found = if target.starts_with('L') || target.starts_with('l') {
                 let line = match resolve_line(sketch, target) { Ok(r) => r, Err(e) => return err(e) };
-                remove_point_on_line(sketch, ep, line)
+                find_point_on_line_id(sketch, ep, line)
             } else if target.starts_with('A') || target.starts_with('a') {
                 let arc = match resolve_arc(sketch, target) { Ok(r) => r, Err(e) => return err(e) };
-                remove_point_on_arc(sketch, ep, arc)
-            } else { false }
+                find_point_on_arc_id(sketch, ep, arc)
+            } else { None };
+            // Arc endpoints use helper points -- fall back to direct removal if not found
+            if found.is_none() {
+                if let Some(p) = resolve_endpoint_as_point(&ctx.sketch, ep) {
+                    if target.starts_with('L') || target.starts_with('l') {
+                        let line = match resolve_line(&ctx.sketch, target) { Ok(r) => r, Err(e) => return err(e) };
+                        let before = ctx.sketch.point_on_line.len();
+                        ctx.sketch.point_on_line.retain(|c| !(c.point == p && c.line == line));
+                        if ctx.sketch.point_on_line.len() < before {
+                            ctx.sketch.cleanup_helper_points();
+                            ctx.sketch.solve();
+                            ctx.sketch.cached_dof = None;
+                            return ok(format!("Removed {} constraint", ctype));
+                        }
+                    } else if target.starts_with('A') || target.starts_with('a') {
+                        let arc = match resolve_arc(&ctx.sketch, target) { Ok(r) => r, Err(e) => return err(e) };
+                        let before = ctx.sketch.point_on_arc.len();
+                        ctx.sketch.point_on_arc.retain(|c| !(c.point == p && c.arc == arc));
+                        if ctx.sketch.point_on_arc.len() < before {
+                            ctx.sketch.cleanup_helper_points();
+                            ctx.sketch.solve();
+                            ctx.sketch.cached_dof = None;
+                            return ok(format!("Removed {} constraint", ctype));
+                        }
+                    }
+                }
+            }
+            found
         }
         "symmetry" if tokens.len() >= 4 => {
-            // Try point-line-point: symmetry_pp has fields a (point), c (point), line
             let ep_a = resolve_endpoint_ref(sketch, tokens[0]);
             let ep_c = resolve_endpoint_ref(sketch, tokens[2]);
             if let (Ok(EndpointRef::Point(a)), Ok(EndpointRef::Point(c))) = (ep_a, ep_c) {
                 let line = match resolve_line(sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
-                let before = sketch.symmetry_pp.len();
-                sketch.symmetry_pp.retain(|s| !((s.a == a && s.c == c && s.line == line) || (s.a == c && s.c == a && s.line == line)));
-                sketch.symmetry_pp.len() < before
+                sketch.symmetry_pp.iter().position(|s| (s.a == a && s.c == c && s.line == line) || (s.a == c && s.c == a && s.line == line))
+                    .map(ConstraintId::SymmetryPP)
             } else {
-                // 3-line form: a symmetric to c about b
                 let a = match resolve_line(sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
                 let b = match resolve_line(sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
                 let c = match resolve_line(sketch, tokens[2]) { Ok(r) => r, Err(e) => return err(e) };
-                let before = sketch.symmetry_ll.len();
-                sketch.symmetry_ll.retain(|s| !(s.b == b && ((s.a == a && s.c == c) || (s.a == c && s.c == a))));
-                sketch.symmetry_ll.len() < before
+                sketch.symmetry_ll.iter().position(|s| s.b == b && ((s.a == a && s.c == c) || (s.a == c && s.c == a)))
+                    .map(ConstraintId::Symmetry)
             }
         }
         "midpoint" if tokens.len() >= 3 => {
             let ep = match resolve_endpoint_ref(sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
-            use EndpointRef::*;
-            if let Ok(line) = resolve_line(sketch, tokens[1]) {
-                match ep {
-                    Point(p) => { let b = sketch.midpoint.len(); sketch.midpoint.retain(|c| !(c.point == p && c.line == line)); sketch.midpoint.len() < b }
-                    LineP1(l) => { let b = sketch.midpoint_lp1.len(); sketch.midpoint_lp1.retain(|c| !(c.line == l && c.target == line)); sketch.midpoint_lp1.len() < b }
-                    LineP2(l) => { let b = sketch.midpoint_lp2.len(); sketch.midpoint_lp2.retain(|c| !(c.line == l && c.target == line)); sketch.midpoint_lp2.len() < b }
-                    ArcStart(a) => { let b = sketch.midpoint_arc_start.len(); sketch.midpoint_arc_start.retain(|c| !(c.arc == a && c.line == line)); sketch.midpoint_arc_start.len() < b }
-                    ArcEnd(a) => { let b = sketch.midpoint_arc_end.len(); sketch.midpoint_arc_end.retain(|c| !(c.arc == a && c.line == line)); sketch.midpoint_arc_end.len() < b }
-                    ArcCenter(_) => false,
-                }
-            } else if let Ok(arc) = resolve_arc(sketch, tokens[1]) {
-                match ep {
-                    Point(p) => { let b = sketch.midpoint_arc_point.len(); sketch.midpoint_arc_point.retain(|c| !(c.point == p && c.arc == arc)); sketch.midpoint_arc_point.len() < b }
-                    LineP1(l) => { let b = sketch.midpoint_lp1_arc.len(); sketch.midpoint_lp1_arc.retain(|c| !(c.line == l && c.arc == arc)); sketch.midpoint_lp1_arc.len() < b }
-                    LineP2(l) => { let b = sketch.midpoint_lp2_arc.len(); sketch.midpoint_lp2_arc.retain(|c| !(c.line == l && c.arc == arc)); sketch.midpoint_lp2_arc.len() < b }
-                    ArcStart(a) => { let b = sketch.midpoint_arc_start_arc.len(); sketch.midpoint_arc_start_arc.retain(|c| !(c.a == a && c.b == arc)); sketch.midpoint_arc_start_arc.len() < b }
-                    ArcEnd(a) => { let b = sketch.midpoint_arc_end_arc.len(); sketch.midpoint_arc_end_arc.retain(|c| !(c.a == a && c.b == arc)); sketch.midpoint_arc_end_arc.len() < b }
-                    ArcCenter(_) => false,
-                }
-            } else { false }
+            find_midpoint_id(sketch, ep, tokens[1])
         }
         _ => { return err(format!("Unknown constraint type: {}. Use: horizontal, vertical, parallel, perpendicular, equal, equal_radius, collinear, tangent, concentric, coincident, point_on, symmetry, midpoint, lock", ctype)); }
     };
-    if removed {
-        sketch.cleanup_helper_points();
-        sketch.solve();
+
+    if let Some(id) = id {
+        ctx.begin_group();
+        ctx.exec(Action::DeleteConstraint { id });
         ok(format!("Removed {} constraint", ctype))
     } else {
-        err(format!("Constraint not found"))
+        err("Constraint not found".to_string())
     }
 }
 
@@ -5709,14 +5709,10 @@ mod tests {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_line 0,0 5,0");
         run_ok(&mut ctx, "horizontal L0");
-        // Adding a redundant perpendicular to a non-existent L1 won't work,
-        // but we can test force with a degenerate scenario:
-        // Two parallel lines, then add parallel again with force
+        // Two parallel lines, then collinear (removes 1 more DOF beyond parallel)
         run_ok(&mut ctx, "add_line 0,1 5,1");
         run_ok(&mut ctx, "parallel L0 L1");
-        // collinear on already-parallel lines is degenerate — might not reduce DOF
-        // Try with force
-        run_ok(&mut ctx, "collinear L0 L1 force");
+        run_ok(&mut ctx, "collinear L0 L1");
     }
 
     // -- DOF analysis --
@@ -6483,5 +6479,118 @@ mod tests {
         run_ok(&mut ctx, "add_circle 0,0 5; add_circle 10,0 3");
         let e = run_err(&mut ctx, "remove_constraint A0 A1 equal_radius");
         assert!(e.contains("not found"), "{}", e);
+    }
+
+    #[test]
+    fn test_remove_constraint_horizontal() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0");
+        run_ok(&mut ctx, "horizontal L0");
+        run_ok(&mut ctx, "remove_constraint L0 horizontal");
+        assert!(!ctx.sketch.lines[arael::refs::Ref::new(0)].constraints.horizontal);
+    }
+
+    #[test]
+    fn test_remove_constraint_vertical() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 0,5");
+        run_ok(&mut ctx, "vertical L0");
+        run_ok(&mut ctx, "remove_constraint L0 vertical");
+        assert!(!ctx.sketch.lines[arael::refs::Ref::new(0)].constraints.vertical);
+    }
+
+    #[test]
+    fn test_remove_constraint_parallel() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,2 5,2");
+        run_ok(&mut ctx, "parallel L0 L1");
+        assert_eq!(ctx.sketch.parallel.len(), 1);
+        run_ok(&mut ctx, "remove_constraint L0 L1 parallel");
+        assert_eq!(ctx.sketch.parallel.len(), 0);
+    }
+
+    #[test]
+    fn test_remove_constraint_perpendicular() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,0 0,5");
+        run_ok(&mut ctx, "perpendicular L0 L1");
+        assert_eq!(ctx.sketch.perpendicular.len(), 1);
+        run_ok(&mut ctx, "remove_constraint L0 L1 perpendicular");
+        assert_eq!(ctx.sketch.perpendicular.len(), 0);
+    }
+
+    #[test]
+    fn test_remove_constraint_equal_length() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,2 5,2");
+        run_ok(&mut ctx, "equal L0 L1");
+        assert_eq!(ctx.sketch.equal_length.len(), 1);
+        run_ok(&mut ctx, "remove_constraint L0 L1 equal");
+        assert_eq!(ctx.sketch.equal_length.len(), 0);
+    }
+
+    #[test]
+    fn test_remove_constraint_collinear() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0; add_line 6,0 10,0");
+        run_ok(&mut ctx, "collinear L0 L1");
+        assert_eq!(ctx.sketch.collinear.len(), 1);
+        run_ok(&mut ctx, "remove_constraint L0 L1 collinear");
+        assert_eq!(ctx.sketch.collinear.len(), 0);
+    }
+
+    #[test]
+    fn test_remove_constraint_tangent_la() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,4 5,4; add_circle 2,0 4");
+        run_ok(&mut ctx, "tangent L0 A0");
+        assert_eq!(ctx.sketch.tangent_la.len(), 1);
+        run_ok(&mut ctx, "remove_constraint L0 A0 tangent");
+        assert_eq!(ctx.sketch.tangent_la.len(), 0);
+    }
+
+    #[test]
+    fn test_remove_constraint_tangent_aa() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_circle 0,0 3; add_circle 7,0 4");
+        run_ok(&mut ctx, "tangent A0 A1");
+        assert_eq!(ctx.sketch.tangent_aa.len(), 1);
+        run_ok(&mut ctx, "remove_constraint A0 A1 tangent");
+        assert_eq!(ctx.sketch.tangent_aa.len(), 0);
+    }
+
+    #[test]
+    fn test_remove_constraint_concentric() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_circle 0,0 3; add_circle 1,0 5");
+        run_ok(&mut ctx, "concentric A0 A1");
+        assert_eq!(ctx.sketch.concentric.len(), 1);
+        run_ok(&mut ctx, "remove_constraint A0 A1 concentric");
+        assert_eq!(ctx.sketch.concentric.len(), 0);
+    }
+
+    #[test]
+    fn test_remove_constraint_undo() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0");
+        run_ok(&mut ctx, "horizontal L0");
+        let dof_with = ctx.sketch.dof();
+        run_ok(&mut ctx, "remove_constraint L0 horizontal");
+        let dof_without = ctx.sketch.dof();
+        assert!(dof_without > dof_with, "DOF should increase after removing constraint: {} vs {}", dof_without, dof_with);
+        run_ok(&mut ctx, "undo");
+        let dof_undone = ctx.sketch.dof();
+        assert_eq!(dof_undone, dof_with, "DOF should restore after undo: {} vs {}", dof_undone, dof_with);
+    }
+
+    #[test]
+    fn test_remove_constraint_dof_update() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,2 5,2");
+        run_ok(&mut ctx, "parallel L0 L1");
+        let dof_before = ctx.sketch.dof();
+        run_ok(&mut ctx, "remove_constraint L0 L1 parallel");
+        let dof_after = ctx.sketch.dof();
+        assert_eq!(dof_after, dof_before + 1, "removing parallel should increase DOF by 1: {} -> {}", dof_before, dof_after);
     }
 }

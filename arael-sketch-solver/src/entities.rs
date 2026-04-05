@@ -69,7 +69,9 @@ pub struct ArcConstraints {
     pub has_target_radius: bool,
     pub target_radius: f64,
     #[arael(skip)]
+    #[serde(default)]
     pub has_target_sweep: bool,
+    #[serde(default)]
     pub target_sweep: f64,
     #[arael(skip)]
     #[serde(default = "default_sweep_sign")]
