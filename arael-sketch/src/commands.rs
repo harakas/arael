@@ -2301,8 +2301,24 @@ fn cmd_list(ctx: &mut CommandContext, args: &str) -> CommandResult {
         }).collect();
         return ok(names.join(", "));
     }
+    // Constraint/dimension type filters — show only matching entries
+    const CONSTRAINT_FILTERS: &[&str] = &[
+        "horizontal", "vertical", "parallel", "perpendicular", "equal", "collinear",
+        "tangent", "coincident", "concentric", "midpoint", "symmetry", "point_on", "lock",
+    ];
+    const DIMENSION_FILTERS: &[&str] = &["angle", "length", "radius", "sweep", "distance"];
+    if CONSTRAINT_FILTERS.contains(&filter) {
+        let all = ctx.sketch.list_constraints();
+        let filtered: Vec<String> = all.into_iter().filter(|s| s.starts_with(filter)).collect();
+        return if filtered.is_empty() { ok("(empty)") } else { ok(filtered.join("\n")) };
+    }
+    if DIMENSION_FILTERS.contains(&filter) {
+        let all = ctx.sketch.list_constraints();
+        let filtered: Vec<String> = all.into_iter().filter(|s| s.starts_with(filter)).collect();
+        return if filtered.is_empty() { ok("(empty)") } else { ok(filtered.join("\n")) };
+    }
     if !filter.is_empty() && !matches!(filter, "all" | "lines" | "points" | "arcs" | "dims" | "params" | "constraints") {
-        return err(format!("Unknown filter: {}. Use: all, lines, points, arcs, dims, params, constraints, selection", filter));
+        return err(format!("Unknown filter: {}. Use: all, lines, points, arcs, dims, params, constraints, selection, or a constraint type (horizontal, parallel, ...)", filter));
     }
     let mut lines = Vec::new();
     let show_all = filter.is_empty() || filter == "all";
@@ -4205,7 +4221,10 @@ pub fn complete(
         "list" => {
             if token_index == 1 {
                 add_matching(&mut results, current_word,
-                    &["all", "lines", "points", "arcs", "dims", "params", "constraints"]);
+                    &["all", "lines", "points", "arcs", "dims", "params", "constraints",
+                      "horizontal", "vertical", "parallel", "perpendicular", "equal", "collinear",
+                      "tangent", "coincident", "concentric", "midpoint", "symmetry", "point_on", "lock",
+                      "angle", "length", "radius", "sweep", "distance"]);
             }
         }
 
@@ -6790,5 +6809,35 @@ mod tests {
         // Negative value should be accepted (taken as absolute value)
         run_ok(&mut ctx, "angle L0 L1 -45");
         assert_eq!(ctx.sketch.dimensions.len(), 1);
+    }
+
+    // -- List constraint filtering --
+
+    #[test]
+    fn test_list_filter_horizontal() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,2 5,2");
+        run_ok(&mut ctx, "horizontal L0; horizontal L1");
+        let out = run_ok(&mut ctx, "list horizontal");
+        assert!(out.contains("horizontal L0"), "should list L0: {}", out);
+        assert!(out.contains("horizontal L1"), "should list L1: {}", out);
+        assert!(!out.contains("coincident"), "should not include other types: {}", out);
+    }
+
+    #[test]
+    fn test_list_filter_empty() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0");
+        let out = run_ok(&mut ctx, "list parallel");
+        assert_eq!(out, "(empty)");
+    }
+
+    #[test]
+    fn test_list_filter_coincident() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0; add_line @0,3");
+        let out = run_ok(&mut ctx, "list coincident");
+        assert!(out.contains("coincident"), "should show coincident: {}", out);
+        assert!(!out.contains("L0:"), "should not include entity listing: {}", out);
     }
 }

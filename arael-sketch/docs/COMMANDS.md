@@ -489,6 +489,10 @@ list arcs                    List only arcs
 list dims                    List only dimensions (shows "derived" tag)
 list params                  List only parameters
 list constraints             List all active constraints
+list horizontal              Filter by constraint type (also: vertical, parallel,
+                             perpendicular, equal, collinear, tangent, coincident,
+                             concentric, midpoint, symmetry, point_on, lock,
+                             angle, length, radius, sweep, distance)
 find x,y [radius]            Find entities near a coordinate
 dof                          Show degrees of freedom (computed in background, may show "pending")
 dof analyze                  Analyze free directions: which entities can move and how
@@ -673,6 +677,12 @@ length d_v 4
 ```
 
 Key pattern: use variable names (`s0`, `top`, `left`) instead of absolute entity names (`L0`, `A0`). Constrain with `equal`, `length`, `perpendicular` between entities. Avoid `horizontal`, `vertical`, and `lock` entirely.
+
+**Converting DOF=0 to DOF=3**: To make an existing fully-constrained drawing into a reusable component:
+1. Remove all `lock` constraints (`list lock` to find them)
+2. Remove `horizontal` / `vertical` constraints — replace with `parallel` or `perpendicular` to a construction reference line
+3. Remove absolute `distance` constraints — replace with relative distances between entities
+4. The remaining DOF=3 allows free translation (X, Y) and rotation
 
 ## Common Shape Recipes
 
