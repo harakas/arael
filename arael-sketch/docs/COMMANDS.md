@@ -593,6 +593,28 @@ add_line L0.p1+normal(L0)*2 L0.p2+normal(L0)*2
 
 Decide on axes of symmetry, which dimensions should be parametric, and your target DOF. DOF 0 means fully constrained (typical for manufacturing drawings). DOF 3 means the shape can translate and rotate freely (good for reusable components).
 
+### Build a skeleton of construction lines first
+
+Before drawing profile geometry, create a frame of construction reference lines:
+
+1. **Centerline** along the axis of symmetry (or the main axis for asymmetric parts)
+2. **Datum lines** perpendicular to the centerline at key positions (end of part, feature locations, section boundaries)
+3. **Dimension the skeleton**: spacing between datum lines, distances from centerline
+4. **Then build profile geometry** constrained to these references (coincident, distance, symmetric)
+
+Dimension profile features from the nearest datum line, not from other profile edges. This makes the constraint graph hub-and-spoke (all features reference datums) instead of a fragile chain (each feature depends on the previous one). Changing one feature only requires editing its distance from its datum — nothing else shifts.
+
+This applies to both symmetric and asymmetric parts. Even a simple bracket benefits from a horizontal and vertical reference line that everything dimensions against.
+
+### Prefer geometric constraints, then add dimensions
+
+Apply constraints in this order:
+1. **Topology**: `coincident`, `point_on`, `tangent` — what connects to what
+2. **Orientation**: `parallel`, `perpendicular`, `symmetric` — relative directions
+3. **Size**: `length`, `radius`, `distance`, `angle` — magnitudes
+
+Prefer `perpendicular L0 L1` over `angle L0 L1 90` — geometric constraints are exact, more robust, and don't clutter the dimension list.
+
 ### Make parameter changes incrementally
 
 Large parameter jumps (e.g., changing a scale variable from 1 to 10) can cause solver convergence issues, potentially losing constraints or producing unexpected geometry. Use incremental changes for robust behavior (e.g., 1 -> 2 -> 5 -> 10). This is especially important for parameters that affect many constraints simultaneously.
@@ -621,11 +643,11 @@ For symmetric shapes, fully constrain one side and use `symmetry P0 L_axis P1` t
 
 ### Monitor DOF as you build
 
-Check `dof` after each batch of constraints. If DOF doesn't drop as expected, a constraint is redundant. If the solver rejects a constraint, it conflicts with the current system. Use `list constraints` and `list` to verify the current state. (`get_sketch_state` is an MCP tool, not a sketch command -- it calls `list` internally.)
+Check `dof` after each batch of constraints. If DOF doesn't drop as expected, diagnose immediately rather than building on a broken foundation. Use `dof analyze` to see which directions remain free, `list constraints` to verify what's applied.
 
-### Use parameters for scalable dimensions
+### Use named parameters, not magic numbers
 
-Define `param scale 1` (or `param width 10`, `param height 5`, etc.) and write dimensions as expressions: `radius A0 5*scale`, `length L0 width`. This makes the sketch parametric. Angles generally don't need parameters since they are scale-independent.
+Define `param width 10; param height 5` and write dimensions as expressions: `length L0 {width}`, `length L1 {height}`. When the same value appears in multiple dimensions, a named parameter ensures they stay in sync and makes the sketch self-documenting. Use `param scale 1` with `radius A0 {5*scale}` for globally scalable sketches.
 
 ### Constrain one side, then close the loop
 
