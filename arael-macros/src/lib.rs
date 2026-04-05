@@ -177,6 +177,34 @@ fn registry_take_constraints() -> Vec<StashedConstraint> {
 ///
 /// Use `f32` for single-precision optimization.
 ///
+/// Optional keywords (comma-separated after `root`):
+/// - `extended` -- the user implements `ExtendedModel` for runtime
+///   constraints (no default impl generated)
+/// - `jacobian` -- generates `calc_jacobian(&mut self, params) -> Jacobian<T>`
+///   method that returns the sparse Jacobian matrix with constraint provenance.
+///   Intended for debug/instrumentation (DOF analysis, constraint diagnostics).
+///   Uses the same symbolically differentiated expressions as the Hessian path.
+///
+/// ## `#[arael(constraint_index)]`
+///
+/// Field attribute on a `u32` field in a constraint struct. The macro
+/// auto-assigns a sequential global constraint ID during
+/// `__set_block_indices()`. The field is automatically skipped from
+/// `Model` serialization and `ModelSym` companion generation.
+/// `Jacobian` rows carry the same ID for tracing back to constraint objects.
+///
+/// ```ignore
+/// #[arael::model]
+/// #[arael(constraint(hb, { ... }))]
+/// struct MyConstraint {
+///     #[arael(ref = root.points)]
+///     a: Ref<Point>,
+///     #[arael(constraint_index)]
+///     ci: u32,
+///     hb: CrossBlock<Point, Point>,
+/// }
+/// ```
+///
 /// ```ignore
 /// #[arael::model]
 /// #[arael(root)]

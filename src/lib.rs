@@ -35,6 +35,11 @@
 //!   `TripletBlock` (see `examples/runtime_fit_demo.rs`)
 //! - **Hessian blocks** -- `SelfBlock<A>` and `CrossBlock<A, B>` for 1- and
 //!   2-entity constraints (packed dense); `TripletBlock` for 3+ entities (COO sparse)
+//! - **Jacobian computation** -- `#[arael(root, jacobian)]` generates
+//!   `calc_jacobian()` returning a sparse [`Jacobian<T>`](model::Jacobian)
+//!   matrix for DOF analysis via SVD.
+//!   [`#[arael(constraint_index)]`](model::JacobianRow) tracks constraint
+//!   provenance per row. See `examples/jacobian_demo.rs`.
 //! - **Gimbal-lock-free rotations** -- `EulerAngleParam` optimizes a small
 //!   delta around a reference rotation matrix
 //! - **WASM/browser support** -- compiles to WebAssembly; the `arael-sketch`
