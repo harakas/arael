@@ -38,6 +38,7 @@ pub struct CommandContext {
     pub exit_requested: bool,
 }
 
+#[allow(dead_code)]
 impl CommandContext {
     pub fn new() -> Self {
         let sketch = Sketch::new();
@@ -336,10 +337,6 @@ fn err(msg: impl Into<String>) -> CommandResult {
 // ---------------------------------------------------------------------------
 // Entity resolution
 // ---------------------------------------------------------------------------
-
-fn resolve_entity_name<'a>(ctx: &'a CommandContext, name: &'a str) -> &'a str {
-    ctx.session_names.get(name).map(|s| s.as_str()).unwrap_or(name)
-}
 
 fn resolve_line(sketch: &Sketch, name: &str) -> Result<Ref<Line>, String> {
     for r in sketch.lines.refs() {
@@ -2537,7 +2534,7 @@ fn cmd_midpoint(ctx: &mut CommandContext, args: &str) -> CommandResult {
     }
 }
 
-/// Resolve a name to a Ref<Point>, creating a helper point + coincident if it's an endpoint ref.
+/// Resolve a name to a `Ref<Point>`, creating a helper point + coincident if it's an endpoint ref.
 fn resolve_as_point(ctx: &mut CommandContext, name: &str) -> Result<Ref<Point>, String> {
     // Try as a standalone point first
     if let Ok(r) = resolve_point(&ctx.sketch, name) {
