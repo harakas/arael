@@ -268,6 +268,7 @@ pub fn arc_end_pos_sketch(sketch: &Sketch, r: Ref<Arc>) -> vect2d {
 
 impl Action {
     pub fn apply(&self, sketch: &mut Sketch) {
+        sketch.cached_dof = None;
         match self {
             Action::AddPoint { pos } => { sketch.add_point(*pos); }
             Action::AddLine { p1, p2 } => { sketch.add_line(*p1, *p2); }

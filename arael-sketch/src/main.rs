@@ -48,45 +48,6 @@ fn spawn_async<F: std::future::Future<Output = ()> + Send + 'static>(f: F) {
 // DOF computation (Hessian rank analysis)
 // ---------------------------------------------------------------------------
 
-/// Compute degrees of freedom: total_params - rank(J^T J).
-/// Uses eigendecomposition of the dense Hessian.
-fn compute_dof(sketch: &mut Sketch) -> usize {
-    use arael::simple_lm::LmProblem;
-
-    // Rebuild expression constraints — they are #[serde(skip)] so lost
-    // during bincode serialization in the async DOF worker thread.
-    // This sets up expr_constraints and symbol_bag so that
-    // calc_grad_hessian_dense (via extended_compute64) includes them.
-    sketch.prepare_expr_constraints();
-
-    // Disable drift constraints — they regularize every direction and
-    // would make DOF always 0. We want DOF from user constraints only.
-    let saved_drift = sketch.drift_isigma;
-    sketch.drift_isigma = 0.0;
-
-    let mut params = Vec::new();
-    sketch.serialize64(&mut params);
-    let n = params.len();
-    if n == 0 {
-        sketch.drift_isigma = saved_drift;
-        return 0;
-    }
-
-    let mut grad = vec![0.0f64; n];
-    let mut hessian = vec![0.0f64; n * n];
-    sketch.calc_grad_hessian_dense(&params, &mut grad, &mut hessian);
-
-    sketch.drift_isigma = saved_drift;
-
-    // Build nalgebra matrix and compute eigenvalues
-    let h = nalgebra::DMatrix::from_row_slice(n, n, &hessian);
-    let eigen = nalgebra::SymmetricEigen::new(h);
-    let threshold = 1e-6;
-    let rank = eigen.eigenvalues.iter().filter(|&&ev| ev.abs() > threshold).count();
-
-    n.saturating_sub(rank)
-}
-
 // ---------------------------------------------------------------------------
 // Editor state
 // ---------------------------------------------------------------------------
@@ -325,7 +286,7 @@ impl Default for EditorApp {
                     let data = input.lock().unwrap().take();
                     if let Some(data) = data {
                         if let Ok(mut sketch) = bincode::deserialize::<Sketch>(&data) {
-                            let dof = compute_dof(&mut sketch);
+                            let dof = sketch.compute_dof(false).dof;
                             *output.lock().unwrap() = Some(dof);
                         }
                     } else {
@@ -774,6 +735,10 @@ impl EditorApp {
     /// Only the latest sketch state is kept -- intermediate requests are discarded.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn compute_dof_async(&mut self) {
+        if let Some(d) = self.sketch.cached_dof {
+            self.dof_display = Some(d);
+            return;
+        }
         self.dof_display = None;
         if let Some(data) = bincode::serialize(&self.sketch).ok() {
             *self.dof_input.lock().unwrap() = Some(data);
@@ -782,8 +747,7 @@ impl EditorApp {
 
     #[cfg(target_arch = "wasm32")]
     pub fn compute_dof_async(&mut self) {
-        // No threads on WASM — compute synchronously
-        self.dof_display = Some(compute_dof(&mut self.sketch));
+        self.dof_display = Some(self.sketch.dof());
     }
 
     /// Create a CommandContext view of this app's state, run commands, sync back.
@@ -806,7 +770,6 @@ impl EditorApp {
             offset_y: self.offset.y,
             pending_fit: self.pending_fit,
             blocked_commands: Vec::new(),
-            cached_dof: None,
             skip_dof_check: false,
             exit_requested: false,
         };
@@ -865,7 +828,6 @@ impl EditorApp {
             offset_y: self.offset.y,
             pending_fit: self.pending_fit,
             blocked_commands: blocked,
-            cached_dof: None,
             skip_dof_check: false,
             exit_requested: false,
         };
@@ -897,10 +859,8 @@ impl EditorApp {
         self.show_hints = false;
 
         if action.is_constraint_action() {
-            // GUI constraints always check DOF (no force flag)
-            let mut cached_dof: Option<usize> = None;
             match crate::commands::validate_and_apply_constraint(
-                &mut self.sketch, &action, false, &mut cached_dof)
+                &mut self.sketch, &action, false)
             {
                 Ok(new_cost) => {
                     self.last_cost = new_cost;
@@ -2480,7 +2440,6 @@ impl EditorApp {
         let action = Action::Drag { snapshot };
         self.history.push(action, &self.sketch);
         self.selection.clear();
-        self.compute_dof_async();
     }
 
     // Hit test for delete: returns target only if exactly one entity is in range.

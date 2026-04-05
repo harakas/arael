@@ -285,6 +285,8 @@ dependencies = [
  "arael",
  "arael-sym",
  "bincode",
+ "faer",
+ "nalgebra",
  "serde",
  "serde_json",
 ]

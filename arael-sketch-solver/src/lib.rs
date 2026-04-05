@@ -38,6 +38,8 @@ pub mod expr_constraint;
 pub use expr_constraint::ExpressionConstraint;
 
 use arael::model::{Model, Param, SelfBlock, CrossBlock, TripletBlock};
+
+const TIMING_DEBUG: bool = false;
 use arael::vect::vect2d;
 use arael::refs::{Ref, Arena};
 
@@ -46,6 +48,22 @@ use arael::refs::{Ref, Arena};
 // CrossBlock<A, B> expansions need to reference.
 include!("entities.rs");
 include!("constraints.rs");
+
+// ---------------------------------------------------------------------------
+// DOF analysis
+// ---------------------------------------------------------------------------
+
+/// Result of DOF (degrees of freedom) analysis.
+pub struct DofResult {
+    /// Number of unconstrained degrees of freedom.
+    pub dof: usize,
+    /// Parameter names indexed by param index (only filled when analyze=true).
+    pub param_names: Vec<String>,
+    /// Eigenvalues from Hessian decomposition (only filled when analyze=true).
+    pub eigenvalues: Vec<f64>,
+    /// Eigenvectors, one per eigenvalue (only filled when analyze=true).
+    pub eigenvectors: Vec<Vec<f64>>,
+}
 
 // ---------------------------------------------------------------------------
 // Root
@@ -160,6 +178,10 @@ pub struct Sketch {
     // Shared TripletBlock for all expression constraints
     #[serde(skip)]
     pub expr_hb: TripletBlock<f64>,
+    // Cached DOF count — set by compute_dof(), cleared on structural mutation
+    #[arael(skip)]
+    #[serde(skip)]
+    pub cached_dof: Option<usize>,
 }
 
 // ---------------------------------------------------------------------------
@@ -247,6 +269,7 @@ impl Sketch {
             expr_constraints: Vec::new(),
             symbol_bag: None,
             expr_hb: TripletBlock::new(),
+            cached_dof: None,
         }
     }
 
@@ -1209,6 +1232,105 @@ impl Sketch {
         }
     }
 
+    /// Compute degrees of freedom. When `analyze` is true, also returns
+    /// parameter names, eigenvalues, and eigenvectors for free direction
+    /// classification. When false, only the DOF count is computed (fast path).
+    ///
+    /// Uses nalgebra for n<32, faer for n>=32. Benchmark at n=896 (polygon128):
+    ///   faer eigenvalues-only:    45ms
+    ///   faer full eigen:          95ms
+    ///   nalgebra eigenvalues-only: 110ms
+    ///   nalgebra full eigen:      220ms
+    pub fn compute_dof(&mut self, analyze: bool) -> DofResult {
+        use arael::simple_lm::LmProblem;
+        let t_total = std::time::Instant::now();
+
+        self.prepare_expr_constraints();
+        self.update_tangent_flags();
+
+        let saved_drift = self.drift_isigma;
+        self.drift_isigma = 0.0;
+
+        let mut params = Vec::new();
+        self.serialize64(&mut params);
+        let n = params.len();
+        if n == 0 {
+            self.drift_isigma = saved_drift;
+            return DofResult { dof: 0, param_names: Vec::new(), eigenvalues: Vec::new(), eigenvectors: Vec::new() };
+        }
+
+        let param_names = if analyze {
+            let bag = SymbolBag::build(self);
+            let mut names = vec![String::new(); n];
+            for (name, &idx) in &bag.param_indices {
+                let i = idx as usize;
+                if i < n && names[i].is_empty() { names[i] = name.clone(); }
+            }
+            names
+        } else {
+            Vec::new()
+        };
+
+        let t_hessian = std::time::Instant::now();
+        let mut grad = vec![0.0f64; n];
+        let mut hessian = vec![0.0f64; n * n];
+        self.calc_grad_hessian_dense(&params, &mut grad, &mut hessian);
+        self.drift_isigma = saved_drift;
+        let t_hessian = t_hessian.elapsed();
+
+        let threshold = 1e-6;
+        let t_eigen = std::time::Instant::now();
+        let (method, result) = if n < 32 && analyze {
+            let h = nalgebra::DMatrix::from_row_slice(n, n, &hessian);
+            let eigen = nalgebra::SymmetricEigen::new(h);
+            let rank = eigen.eigenvalues.iter().filter(|&&v| v.abs() > threshold).count();
+            let dof = n.saturating_sub(rank);
+            let eigenvalues: Vec<f64> = eigen.eigenvalues.iter().cloned().collect();
+            let eigenvectors: Vec<Vec<f64>> = (0..n)
+                .map(|col| eigen.eigenvectors.column(col).iter().cloned().collect())
+                .collect();
+            ("nalgebra eigen", DofResult { dof, param_names, eigenvalues, eigenvectors })
+        } else if n < 32 {
+            let h = nalgebra::DMatrix::from_row_slice(n, n, &hessian);
+            let evs = h.symmetric_eigenvalues();
+            let rank = evs.iter().filter(|&&v| v.abs() > threshold).count();
+            let dof = n.saturating_sub(rank);
+            ("nalgebra eigenvalues-only", DofResult { dof, param_names: Vec::new(), eigenvalues: Vec::new(), eigenvectors: Vec::new() })
+        } else if analyze {
+            let faer_h = faer::Mat::from_fn(n, n, |i, k| hessian[i * n + k]);
+            let eigen = faer_h.self_adjoint_eigen(faer::Side::Lower).expect("eigendecomposition failed");
+            let s = eigen.S().column_vector();
+            let u = eigen.U();
+            let rank = (0..n).filter(|&i| s[i].abs() > threshold).count();
+            let dof = n.saturating_sub(rank);
+            let eigenvalues: Vec<f64> = (0..n).map(|i| s[i]).collect();
+            let eigenvectors: Vec<Vec<f64>> = (0..n)
+                .map(|col| (0..n).map(|row| u[(row, col)]).collect())
+                .collect();
+            ("faer eigen", DofResult { dof, param_names, eigenvalues, eigenvectors })
+        } else {
+            let faer_h = faer::Mat::from_fn(n, n, |i, k| hessian[i * n + k]);
+            let evs = faer_h.self_adjoint_eigenvalues(faer::Side::Lower).expect("eigenvalues failed");
+            let rank = evs.iter().filter(|&&v| v.abs() > threshold).count();
+            let dof = n.saturating_sub(rank);
+            ("faer eigenvalues-only", DofResult { dof, param_names: Vec::new(), eigenvalues: Vec::new(), eigenvectors: Vec::new() })
+        };
+        let t_eigen = t_eigen.elapsed();
+        if TIMING_DEBUG {
+            eprintln!("[DOF] n={} analyze={} method={} hessian={:.3}ms eigen={:.3}ms total={:.3}ms dof={}",
+                n, analyze, method, t_hessian.as_secs_f64() * 1000.0,
+                t_eigen.as_secs_f64() * 1000.0, t_total.elapsed().as_secs_f64() * 1000.0, result.dof);
+        }
+        self.cached_dof = Some(result.dof);
+        result
+    }
+
+    /// Return cached DOF or compute it (count only, no eigenvector analysis).
+    pub fn dof(&mut self) -> usize {
+        if let Some(d) = self.cached_dof { return d; }
+        self.compute_dof(false).dof
+    }
+
     /// Update tangent_la shared-endpoint flags by scanning coincident collections.
     pub fn update_tangent_flags(&mut self) {
         for t in &mut self.tangent_la {
@@ -1363,7 +1485,6 @@ impl Sketch {
 #[cfg(test)]
 mod jacobian_tests {
     use super::*;
-    use arael::model::Model;
     use arael::simple_lm::LmProblem;
     use arael::vect::vect2d;
 

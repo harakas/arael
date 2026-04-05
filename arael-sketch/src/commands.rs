@@ -26,7 +26,6 @@ pub struct CommandContext {
     pub status_error: Option<String>,
     pub last_cost: f64,
     pub dof: Option<usize>,
-    pub cached_dof: Option<usize>,
     pub skip_dof_check: bool,
     // View state (used by center/zoom commands; GUI overrides with real values)
     pub scale: f32,
@@ -53,7 +52,6 @@ impl CommandContext {
             status_error: None,
             last_cost: 0.0,
             dof: None,
-            cached_dof: None,
             skip_dof_check: false,
             scale: 80.0,
             offset_x: 400.0,
@@ -76,7 +74,6 @@ impl CommandContext {
             status_error: None,
             last_cost: 0.0,
             dof: None,
-            cached_dof: None,
             skip_dof_check: false,
             scale: 80.0,
             offset_x: 400.0,
@@ -187,7 +184,6 @@ pub fn validate_and_apply_constraint(
     sketch: &mut Sketch,
     action: &Action,
     skip_dof_check: bool,
-    cached_dof: &mut Option<usize>,
 ) -> Result<f64, String> {
     use arael::simple_lm::LmProblem;
 
@@ -212,7 +208,7 @@ pub fn validate_and_apply_constraint(
     };
 
     let old_dof = if should_check_dof {
-        Some(cached_dof.unwrap_or_else(|| compute_dof_count(sketch)))
+        Some(sketch.dof())
     } else {
         None
     };
@@ -263,21 +259,17 @@ pub fn validate_and_apply_constraint(
 
     // DOF rejection
     if let Some(old_dof) = old_dof {
-        let new_dof = compute_dof_count(sketch);
+        let new_dof = sketch.dof();
         if new_dof >= old_dof {
             if let Some(ref snap) = snapshot {
                 if let Ok(restored) = bincode::deserialize(snap) {
                     *sketch = restored;
-                    *cached_dof = Some(old_dof);
                     return Err(format!(
                         "Constraint rejected: DOF unchanged at {}. Constraint is redundant or degenerate. Use 'force' to override.",
                         new_dof));
                 }
             }
         }
-        *cached_dof = Some(new_dof);
-    } else {
-        *cached_dof = None;
     }
 
     Ok(new_cost)
@@ -292,7 +284,7 @@ impl CommandContext {
 
         if action.is_constraint_action() {
             match validate_and_apply_constraint(
-                &mut self.sketch, &action, self.skip_dof_check, &mut self.cached_dof)
+                &mut self.sketch, &action, self.skip_dof_check)
             {
                 Ok(new_cost) => {
                     self.last_cost = new_cost;
@@ -305,7 +297,6 @@ impl CommandContext {
         } else {
             action.apply(&mut self.sketch);
             self.sketch.dedup_constraints();
-            self.cached_dof = None; // geometry changed, invalidate
             self.history.push(action, &self.sketch);
         }
     }
@@ -3541,69 +3532,14 @@ fn cmd_set_driven(ctx: &mut CommandContext, args: &str) -> CommandResult {
 // DOF analysis
 // ---------------------------------------------------------------------------
 
-/// Compute DOF count only. Delegates to compute_dof_sync and discards descriptions.
-fn compute_dof_count(sketch: &mut Sketch) -> usize {
-    compute_dof_sync(sketch).0
-}
-
-/// Compute DOF synchronously with free direction analysis using Hessian eigenvalues.
-fn compute_dof_sync(sketch: &mut Sketch) -> (usize, Vec<String>) {
-    use arael::simple_lm::LmProblem;
-    use arael_sketch_solver::SymbolBag;
-
-    sketch.prepare_expr_constraints();
-    sketch.update_tangent_flags();
-
-    let saved_drift = sketch.drift_isigma;
-    sketch.drift_isigma = 0.0;
-
-    let mut params = Vec::new();
-    sketch.serialize64(&mut params);
-    let n = params.len();
-    if n == 0 {
-        sketch.drift_isigma = saved_drift;
-        return (0, Vec::new());
-    }
-
-    let bag = SymbolBag::build(sketch);
-    let mut idx_to_name: Vec<String> = vec![String::new(); n];
-    for (name, &idx) in &bag.param_indices {
-        let i = idx as usize;
-        if i < n && idx_to_name[i].is_empty() {
-            idx_to_name[i] = name.clone();
-        }
-    }
-
-    let mut grad = vec![0.0f64; n];
-    let mut hessian = vec![0.0f64; n * n];
-    sketch.calc_grad_hessian_dense(&params, &mut grad, &mut hessian);
-
-    sketch.drift_isigma = saved_drift;
-
+/// Classify free directions from DofResult eigenvectors.
+fn classify_dof_directions(result: &arael_sketch_solver::DofResult) -> Vec<String> {
     let threshold = 1e-6;
-    // eigenvalues[i], eigenvectors column i — extracted uniformly from either backend
-    let (eigenvalues, eigenvectors): (Vec<f64>, Vec<Vec<f64>>) = if n < 32 {
-        // nalgebra for small matrices
-        let h = nalgebra::DMatrix::from_row_slice(n, n, &hessian);
-        let eigen = nalgebra::SymmetricEigen::new(h);
-        let vals: Vec<f64> = eigen.eigenvalues.iter().cloned().collect();
-        let vecs: Vec<Vec<f64>> = (0..n).map(|col| eigen.eigenvectors.column(col).iter().cloned().collect()).collect();
-        (vals, vecs)
-    } else {
-        // faer for large matrices (2.5x faster at 896x896)
-        let faer_h = faer::Mat::from_fn(n, n, |i, k| hessian[i * n + k]);
-        let eigen = faer_h.self_adjoint_eigen(faer::Side::Lower).expect("eigendecomposition failed");
-        let s = eigen.S().column_vector();
-        let u = eigen.U();
-        let vals: Vec<f64> = (0..n).map(|i| s[i]).collect();
-        let vecs: Vec<Vec<f64>> = (0..n).map(|col| (0..n).map(|row| u[(row, col)]).collect()).collect();
-        (vals, vecs)
-    };
-
-    let mut free_dirs: Vec<String> = Vec::new();
+    let n = result.eigenvalues.len();
+    let mut free_dirs = Vec::new();
     for col in 0..n {
-        if eigenvalues[col].abs() > threshold { continue; }
-        let ev = &eigenvectors[col];
+        if result.eigenvalues[col].abs() > threshold { continue; }
+        let ev = &result.eigenvectors[col];
 
         let max_comp = ev.iter().cloned().fold(0.0f64, |a, b| a.max(b.abs()));
         if max_comp < 1e-10 { continue; }
@@ -3612,83 +3548,40 @@ fn compute_dof_sync(sketch: &mut Sketch) -> (usize, Vec<String>) {
         let mut parts: Vec<(String, f64)> = Vec::new();
         for i in 0..n {
             if ev[i].abs() > comp_threshold {
-                let name = if idx_to_name[i].is_empty() {
+                let name = if result.param_names[i].is_empty() {
                     format!("param[{}]", i)
                 } else {
-                    idx_to_name[i].clone()
+                    result.param_names[i].clone()
                 };
                 parts.push((name, ev[i]));
             }
         }
         if parts.is_empty() { continue; }
-
         free_dirs.push(classify_free_direction(&parts));
     }
-
-    (free_dirs.len(), free_dirs)
+    free_dirs
 }
 
 fn cmd_dof_eigenvalues(ctx: &mut CommandContext) -> CommandResult {
-    use arael::simple_lm::LmProblem;
-    use arael_sketch_solver::SymbolBag;
-    ctx.sketch.prepare_expr_constraints();
-    let saved_drift = ctx.sketch.drift_isigma;
-    ctx.sketch.drift_isigma = 0.0;
-    let mut params = Vec::new();
-    ctx.sketch.serialize64(&mut params);
-    let n = params.len();
-    let bag = SymbolBag::build(&ctx.sketch);
-    let mut idx_to_name: Vec<String> = vec![String::new(); n];
-    for (name, &idx) in &bag.param_indices {
-        let i = idx as usize;
-        if i < n && idx_to_name[i].is_empty() { idx_to_name[i] = name.clone(); }
-    }
+    let t0 = std::time::Instant::now();
+    let result = ctx.sketch.compute_dof(true);
+    let t_total = t0.elapsed();
+    let n = result.eigenvalues.len();
     if n == 0 {
-        ctx.sketch.drift_isigma = saved_drift;
         return ok("Hessian: 0x0 (empty)".to_string());
     }
-    let t0 = std::time::Instant::now();
-    let mut grad = vec![0.0f64; n];
-    let mut hessian = vec![0.0f64; n * n];
-    ctx.sketch.calc_grad_hessian_dense(&params, &mut grad, &mut hessian);
-    let t_hessian = t0.elapsed();
-    ctx.sketch.drift_isigma = saved_drift;
-    let t1 = std::time::Instant::now();
-    let h = nalgebra::DMatrix::from_row_slice(n, n, &hessian);
-    let eigen = nalgebra::SymmetricEigen::new(h);
-    let t_eigen = t1.elapsed();
-    // faer eigendecomposition for comparison
-    let t2 = std::time::Instant::now();
-    let faer_h = faer::Mat::from_fn(n, n, |i, k| hessian[i * n + k]);
-    let _faer_eigen = faer_h.self_adjoint_eigen(faer::Side::Lower);
-    let t_faer = t2.elapsed();
-    let mut lines = vec![format!("Hessian: {}x{}", n, n)];
-    lines.push(format!("  build: {:.2}ms, nalgebra_eigen: {:.2}ms, faer_eigen: {:.2}ms",
-        t_hessian.as_secs_f64() * 1000.0, t_eigen.as_secs_f64() * 1000.0,
-        t_faer.as_secs_f64() * 1000.0));
-    // Print nalgebra eigenvalues with eigenvector components
-    let mut evs: Vec<(f64, usize)> = eigen.eigenvalues.iter().cloned().enumerate().map(|(i,v)| (v, i)).collect();
+    let mut lines = vec![format!("Hessian: {}x{}, DOF: {}, time: {:.2}ms",
+        n, n, result.dof, t_total.as_secs_f64() * 1000.0)];
+    let mut evs: Vec<(f64, usize)> = result.eigenvalues.iter().cloned().enumerate().map(|(i,v)| (v, i)).collect();
     evs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
     for (val, col) in &evs {
-        let ev = eigen.eigenvectors.column(*col);
+        let ev = &result.eigenvectors[*col];
         let max_comp = ev.iter().cloned().fold(0.0f64, |a, b| a.max(b.abs()));
         let comp_threshold = max_comp * 0.3;
         let parts: Vec<String> = (0..n).filter(|&i| ev[i].abs() > comp_threshold)
-            .map(|i| format!("{}={:.3}", if idx_to_name[i].is_empty() { format!("[{}]", i) } else { idx_to_name[i].clone() }, ev[i]))
+            .map(|i| format!("{}={:.3}", if result.param_names[i].is_empty() { format!("[{}]", i) } else { result.param_names[i].clone() }, ev[i]))
             .collect();
         lines.push(format!("  {:.6e}  {}", val, parts.join(", ")));
-    }
-    // Print faer eigenvalues for comparison (sorted ascending)
-    if let Ok(ref fe) = _faer_eigen {
-        let fs = fe.S();
-        let fs_col = fs.column_vector();
-        let mut faer_evs: Vec<f64> = (0..n).map(|i| fs_col[i]).collect();
-        faer_evs.sort_by(|a, b| a.partial_cmp(b).unwrap());
-        lines.push(String::new());
-        lines.push("faer eigenvalues:".to_string());
-        for v in &faer_evs {
-            lines.push(format!("  {:.6e}", v));
-        }
     }
     ok(lines.join("\n"))
 }
@@ -3802,16 +3695,18 @@ fn cmd_dof(ctx: &mut CommandContext, args: &str) -> CommandResult {
         return err("Usage: dof | dof analyze | dof eigenvalues | dof singular | dof jacobian");
     }
 
-    let (dof, free_dirs) = compute_dof_sync(&mut ctx.sketch);
+    let analyze = arg == "analyze";
+    let result = ctx.sketch.compute_dof(analyze);
 
-    if arg == "analyze" {
-        let mut lines = vec![format!("DOF: {}", dof)];
+    if analyze {
+        let free_dirs = classify_dof_directions(&result);
+        let mut lines = vec![format!("DOF: {}", result.dof)];
         for (i, desc) in free_dirs.iter().enumerate() {
             lines.push(format!("  {}. {}", i + 1, desc));
         }
         ok(lines.join("\n"))
     } else {
-        ok(format!("DOF: {}", dof))
+        ok(format!("DOF: {}", result.dof))
     }
 }
 
