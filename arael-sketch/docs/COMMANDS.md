@@ -37,6 +37,7 @@ Each constraint removes 1 or more DOF. A fully constrained sketch has DOF 0. Use
 | `concentric` | 2 |
 | `symmetry` (point-point about line) | 2 |
 | `symmetry` (line-line about line) | 2 |
+| `symmetry` (arc-arc about line) | 3 |
 | `lock` (point) | 2 |
 | `lock` (line endpoint) | 2 |
 | Dimension (`length`, `radius`, `sweep`, `angle`, `distance`) | 1 |
@@ -181,6 +182,7 @@ midpoint P0 A0               Point at angular midpoint of arc
 midpoint L0.p1 A0            Line endpoint at angular midpoint of arc
 symmetry L0 L1 L2            Lines L0,L2 symmetric about L1
 symmetry P0 L0 P1            Points P0,P1 symmetric about L0
+symmetry A0 L0 A1            Arc centers symmetric + equal radius (3 DOF removed)
 symmetry L0.p1 L1 L2.p1     Endpoints symmetric about L1
 symmetry A0.center L0 A1.center  Any endpoint ref works (P0, L0.p1, A0.center, A0.start, A0.end)
 point_on P0 L0               Point on line

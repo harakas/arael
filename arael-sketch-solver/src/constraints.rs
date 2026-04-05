@@ -1155,3 +1155,29 @@ pub struct SymmetryPP {
     #[serde(skip)]
     pub hb: TripletBlock<f64>,
 }
+
+// Symmetry of two arcs about a mirror line: centers symmetric + equal radius.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[arael::model]
+#[arael(constraint(hb, {
+    let dx = line.p2.x - line.p1.x;
+    let dy = line.p2.y - line.p1.y;
+    let len2 = dx * dx + dy * dy;
+    // Reflect a.center across line
+    let da = (a.center.x - line.p1.x) * dy - (a.center.y - line.p1.y) * dx;
+    let rx = a.center.x - 2.0 * da * dy / len2;
+    let ry = a.center.y + 2.0 * da * dx / len2;
+    [(rx - c.center.x) * sketch.constraint_isigma,
+     (ry - c.center.y) * sketch.constraint_isigma,
+     (a.radius - c.radius) * sketch.constraint_isigma]
+}))]
+pub struct SymmetryAA {
+    #[arael(ref = root.arcs)]
+    pub a: Ref<Arc>,
+    #[arael(ref = root.arcs)]
+    pub c: Ref<Arc>,
+    #[arael(ref = root.lines)]
+    pub line: Ref<Line>,
+    #[serde(skip)]
+    pub hb: TripletBlock<f64>,
+}

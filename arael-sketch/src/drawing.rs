@@ -791,6 +791,12 @@ impl EditorApp {
             let id = ConstraintId::SymmetryPP(i);
             add_line_marker(self, &mut markers, c.line, ConstraintSymbol::Symmetry, id, &mut line_marker_count);
         }
+        for (i, c) in self.sketch.symmetry_aa.iter().enumerate() {
+            let id = ConstraintId::SymmetryAA(i);
+            add_line_marker(self, &mut markers, c.line, ConstraintSymbol::Symmetry, id, &mut line_marker_count);
+            add_arc_marker(self, &mut markers, c.a, ConstraintSymbol::Symmetry, id, &mut arc_marker_count);
+            add_arc_marker(self, &mut markers, c.c, ConstraintSymbol::Symmetry, id, &mut arc_marker_count);
+        }
         for (i, c) in self.sketch.tangent_la.iter().enumerate() {
             let id = ConstraintId::TangentLA(i);
             add_line_marker(self, &mut markers, c.line, ConstraintSymbol::Tangent, id, &mut line_marker_count);

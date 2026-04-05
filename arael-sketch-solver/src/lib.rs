@@ -129,6 +129,8 @@ pub struct Sketch {
     pub symmetry_ll: std::vec::Vec<SymmetryLL>,
     #[serde(default)]
     pub symmetry_pp: std::vec::Vec<SymmetryPP>,
+    #[serde(default)]
+    pub symmetry_aa: std::vec::Vec<SymmetryAA>,
     pub distance_pl: std::vec::Vec<DistancePL>,
     pub line_p1_on_line: std::vec::Vec<LineP1OnLine>,
     pub line_p2_on_line: std::vec::Vec<LineP2OnLine>,
@@ -235,6 +237,7 @@ impl Sketch {
             tangent_aa: Vec::new(),
             symmetry_ll: Vec::new(),
             symmetry_pp: Vec::new(),
+            symmetry_aa: Vec::new(),
             distance_pl: Vec::new(),
             line_p1_on_line: Vec::new(),
             line_p2_on_line: Vec::new(),
@@ -402,6 +405,7 @@ impl Sketch {
         self.tangent_la.retain(|c| c.line != r);
         self.symmetry_ll.retain(|c| c.a != r && c.b != r && c.c != r);
         self.symmetry_pp.retain(|c| c.line != r);
+        self.symmetry_aa.retain(|c| c.line != r);
         self.distance_pl.retain(|c| c.line != r);
         self.line_p1_on_line.retain(|c| c.a != r && c.b != r);
         self.line_p2_on_line.retain(|c| c.a != r && c.b != r);
@@ -433,6 +437,7 @@ impl Sketch {
         self.concentric.retain(|c| c.a != r && c.b != r);
         self.equal_radius.retain(|c| c.a != r && c.b != r);
         self.tangent_aa.retain(|c| c.a != r && c.b != r);
+        self.symmetry_aa.retain(|c| c.a != r && c.c != r);
         self.midpoint_arc_start.retain(|c| c.arc != r);
         self.midpoint_arc_end.retain(|c| c.arc != r);
         self.midpoint_arc_point.retain(|c| c.arc != r);
@@ -1158,6 +1163,7 @@ impl Sketch {
         for c in &self.equal_radius { out.push(format!("equal {} {}", self.arcs[c.a].name, self.arcs[c.b].name)); }
         for c in &self.symmetry_ll { out.push(format!("symmetry {} {} {}", self.lines[c.a].name, self.lines[c.b].name, self.lines[c.c].name)); }
         for c in &self.symmetry_pp { out.push(format!("symmetry {} {} {}", self.point_display_name(c.a), self.lines[c.line].name, self.point_display_name(c.c))); }
+        for c in &self.symmetry_aa { out.push(format!("symmetry {} {} {}", self.arcs[c.a].name, self.lines[c.line].name, self.arcs[c.c].name)); }
         // Point-based constraints: use display names to resolve helpers
         for c in &self.point_on_line { out.push(format!("point_on {} {}", self.point_display_name(c.point), self.lines[c.line].name)); }
         for c in &self.point_on_arc { out.push(format!("point_on {} {}", self.point_display_name(c.point), self.arcs[c.arc].name)); }

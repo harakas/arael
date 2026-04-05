@@ -151,6 +151,7 @@ pub enum ConstraintId {
     Collinear(usize),
     Symmetry(usize),
     SymmetryPP(usize),
+    SymmetryAA(usize),
     Coincident(CoincidentKind, usize),
     Midpoint(MidpointKind, usize),
     HelperBridge(Ref<Point>),  // helper point bridging two constraints

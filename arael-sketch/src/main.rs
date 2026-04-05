@@ -935,10 +935,11 @@ impl EditorApp {
                 if sel.len() != 3 { return false; }
                 // 3 lines (LL symmetry) or 2 point-likes + 1 line (PP symmetry)
                 let lines = sel.iter().filter(|s| matches!(s, Selection::Line(_))).count();
+                let arcs = sel.iter().filter(|s| matches!(s, Selection::Arc(_))).count();
                 let point_likes = sel.iter().filter(|s| matches!(s,
                     Selection::Point(_) | Selection::LineP1(_) | Selection::LineP2(_)
                     | Selection::ArcCenter(_) | Selection::ArcStart(_) | Selection::ArcEnd(_))).count();
-                (lines == 3) || (lines == 1 && point_likes == 2)
+                (lines == 3) || (lines == 1 && point_likes == 2) || (lines == 1 && arcs == 2)
             }
             ConstraintType::Lock => {
                 !sel.is_empty() && sel.iter().all(|s| matches!(s,
@@ -1004,7 +1005,7 @@ impl EditorApp {
                     | Selection::ArcStart(_) | Selection::ArcEnd(_) | Selection::Line(_) | Selection::Arc(_))
             }
             ConstraintType::Symmetry => {
-                matches!(sel, Selection::Line(_) | Selection::Point(_)
+                matches!(sel, Selection::Line(_) | Selection::Arc(_) | Selection::Point(_)
                     | Selection::LineP1(_) | Selection::LineP2(_)
                     | Selection::ArcCenter(_) | Selection::ArcStart(_) | Selection::ArcEnd(_))
             }
@@ -1686,6 +1687,22 @@ impl EditorApp {
                 self.exec(action);
                 return;
             }
+            // Arc-Arc symmetry: find the line (mirror axis) and two arcs in any order
+            {
+                let mut aa_arcs = Vec::new();
+                let mut aa_line = None;
+                for s in &self.selection {
+                    match s {
+                        Selection::Arc(r) => aa_arcs.push(*r),
+                        Selection::Line(r) => aa_line = Some(*r),
+                        _ => {}
+                    }
+                }
+                if aa_arcs.len() == 2 && aa_line.is_some() {
+                    self.exec(Action::ApplySymmetryAA { a: aa_arcs[0], line: aa_line.unwrap(), c: aa_arcs[1] });
+                    return;
+                }
+            }
             // Point/endpoint - Line - Point/endpoint symmetry
             let sel = self.selection.clone();
             let to_point = |sketch: &mut Sketch, s: &Selection| -> Option<Ref<Point>> {
@@ -2165,6 +2182,7 @@ impl EditorApp {
             ConstraintId::Collinear(i) => { let c = &self.sketch.collinear[i]; format!("Collinear({}, {})", ln(c.a), ln(c.b)) }
             ConstraintId::Symmetry(i) => { let c = &self.sketch.symmetry_ll[i]; format!("Symmetry({}, {}, {})", ln(c.a), ln(c.b), ln(c.c)) }
             ConstraintId::SymmetryPP(i) => { let c = &self.sketch.symmetry_pp[i]; format!("Symmetry({}, {}, {})", self.sketch.point_display_name(c.a), ln(c.line), self.sketch.point_display_name(c.c)) }
+            ConstraintId::SymmetryAA(i) => { let c = &self.sketch.symmetry_aa[i]; format!("Symmetry({}, {}, {})", an(c.a), ln(c.line), an(c.c)) }
             ConstraintId::Midpoint(kind, i) => {
                 let desc = match kind {
                     MidpointKind::Point => { let c = &self.sketch.midpoint[i]; format!("{} @ mid({})", pn(c.point), ln(c.line)) }
@@ -2274,6 +2292,12 @@ impl EditorApp {
                 lines.push(c.line);
                 points.push(c.a);
                 points.push(c.c);
+            }
+            ConstraintId::SymmetryAA(i) => {
+                let c = &self.sketch.symmetry_aa[i];
+                lines.push(c.line);
+                arcs.push(c.a);
+                arcs.push(c.c);
             }
             ConstraintId::Midpoint(kind, i) => {
                 match kind {

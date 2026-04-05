@@ -2756,7 +2756,23 @@ fn resolve_as_point(ctx: &mut CommandContext, name: &str) -> Result<Ref<Point>, 
 
 fn cmd_symmetry(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let tokens: Vec<&str> = args.split_whitespace().collect();
-    if tokens.len() != 3 { return err("Usage: symmetry L0 L1 L2 | symmetry P0 L0 P1 | symmetry L0.p1 L1 L0.p2"); }
+    if tokens.len() != 3 { return err("Usage: symmetry L0 L1 L2 | symmetry P0 L0 P1 | symmetry A0 L0 A1"); }
+    // Try arc + line + arc symmetry
+    if tokens[0].starts_with('A') && tokens[2].starts_with('A') {
+        if let (Ok(a), Ok(line), Ok(c)) = (resolve_arc(&ctx.sketch, tokens[0]),
+            resolve_line(&ctx.sketch, tokens[1]),
+            resolve_arc(&ctx.sketch, tokens[2]))
+        {
+            if a == c { return err("Cannot constrain an arc symmetric with itself"); }
+            if ctx.sketch.symmetry_aa.iter().any(|s|
+                s.line == line && ((s.a == a && s.c == c) || (s.a == c && s.c == a))) {
+                return err("Symmetry constraint already exists");
+            }
+            ctx.begin_group();
+            ctx.exec(Action::ApplySymmetryAA { a, line, c });
+            return ok_or_status(ctx, "Applied arc symmetry");
+        }
+    }
     // Try point/endpoint + line + point/endpoint symmetry
     let mid_is_line = resolve_line(&ctx.sketch, tokens[1]).is_ok();
     let first_is_pointlike = resolve_point(&ctx.sketch, tokens[0]).is_ok()
@@ -3396,18 +3412,27 @@ fn cmd_remove_constraint(ctx: &mut CommandContext, args: &str) -> CommandResult 
             found
         }
         "symmetry" if tokens.len() >= 4 => {
-            let ep_a = resolve_endpoint_ref(sketch, tokens[0]);
-            let ep_c = resolve_endpoint_ref(sketch, tokens[2]);
-            if let (Ok(EndpointRef::Point(a)), Ok(EndpointRef::Point(c))) = (ep_a, ep_c) {
-                let line = match resolve_line(sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
-                sketch.symmetry_pp.iter().position(|s| (s.a == a && s.c == c && s.line == line) || (s.a == c && s.c == a && s.line == line))
-                    .map(ConstraintId::SymmetryPP)
+            // Try arc-arc symmetry first
+            if let (Ok(a), Ok(line), Ok(c)) = (resolve_arc(sketch, tokens[0]),
+                resolve_line(sketch, tokens[1]),
+                resolve_arc(sketch, tokens[2]))
+            {
+                sketch.symmetry_aa.iter().position(|s| s.line == line && ((s.a == a && s.c == c) || (s.a == c && s.c == a)))
+                    .map(ConstraintId::SymmetryAA)
             } else {
-                let a = match resolve_line(sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
-                let b = match resolve_line(sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
-                let c = match resolve_line(sketch, tokens[2]) { Ok(r) => r, Err(e) => return err(e) };
-                sketch.symmetry_ll.iter().position(|s| s.b == b && ((s.a == a && s.c == c) || (s.a == c && s.c == a)))
-                    .map(ConstraintId::Symmetry)
+                let ep_a = resolve_endpoint_ref(sketch, tokens[0]);
+                let ep_c = resolve_endpoint_ref(sketch, tokens[2]);
+                if let (Ok(EndpointRef::Point(a)), Ok(EndpointRef::Point(c))) = (ep_a, ep_c) {
+                    let line = match resolve_line(sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
+                    sketch.symmetry_pp.iter().position(|s| (s.a == a && s.c == c && s.line == line) || (s.a == c && s.c == a && s.line == line))
+                        .map(ConstraintId::SymmetryPP)
+                } else {
+                    let a = match resolve_line(sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
+                    let b = match resolve_line(sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
+                    let c = match resolve_line(sketch, tokens[2]) { Ok(r) => r, Err(e) => return err(e) };
+                    sketch.symmetry_ll.iter().position(|s| s.b == b && ((s.a == a && s.c == c) || (s.a == c && s.c == a)))
+                        .map(ConstraintId::Symmetry)
+                }
             }
         }
         "midpoint" if tokens.len() >= 3 => {
@@ -4043,7 +4068,7 @@ fn cmd_help(args: &str) -> CommandResult {
             "coincident" => "coincident L0.p2 L1.p1 (any endpoint pair: P0, L0.p1/p2, A0.center/start/end)",
             "concentric" => "concentric A0 A1",
             "midpoint" => "midpoint P0 L0 | midpoint L0.p1 L1 | midpoint P0 A0 (arc angular midpoint)",
-            "symmetry" => "symmetry L0 L1 L2 (L0,L2 symmetric about L1)",
+            "symmetry" => "symmetry L0 L1 L2 | symmetry P0 L0 P1 | symmetry A0 L0 A1",
             "point_on" => "point_on P0 L0 | point_on L0.p1 A0",
             "length" => "length L0 5 | length L0 L0.length | length L0 =2*scale | length L0 {expr} [derived]",
             "radius" => "radius A0 1.5 | radius A0 =5*scale | radius A0 {expr} [derived]",
@@ -4051,6 +4076,7 @@ fn cmd_help(args: &str) -> CommandResult {
             "angle" => "angle L0 L1 45 [supplement|closest|acute|obtuse] [derived]",
             "distance" => "distance L0.p1 L1.p2 5 | distance P0 L0 3 | distance L0.p1 L1.p2 =expr [derived]",
             "freeze" => "freeze [L0 L1 A0 ...] — add numeric dimensions at current values (all if no args)",
+            "remove_constraint" | "rc" => "remove_constraint L0 horizontal | remove_constraint L0 L1 parallel | rc A0 L0 A1 symmetry (type last)",
             "remove_dim" => "remove_dim d0",
             "set_derived" => "set_derived d0 (make dimension display-only)",
             "set_driven" => "set_driven d0 [value|\"expr\"] (make dimension constraining)",
@@ -7000,6 +7026,48 @@ mod tests {
         run_ok(&mut ctx, "add_circle 0,0 5");
         let out = run_ok(&mut ctx, "measure A0");
         assert!(out.contains("radius=5.0000"), "should show radius: {}", out);
+    }
+
+    // -- Arc-arc symmetry --
+
+    #[test]
+    fn test_symmetry_aa_command() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,-5 0,5; add_circle -3,0 1; add_circle 4,1 2");
+        let dof_before = ctx.sketch.dof().unwrap();
+        run_ok(&mut ctx, "symmetry A0 L0 A1");
+        let dof_after = ctx.sketch.dof().unwrap();
+        assert_eq!(dof_after, dof_before - 3, "arc symmetry should remove 3 DOF: {} -> {}", dof_before, dof_after);
+        assert_eq!(ctx.sketch.symmetry_aa.len(), 1);
+    }
+
+    #[test]
+    fn test_symmetry_aa_equal_radius() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,-5 0,5; add_circle -3,0 1; add_circle 3,0 2");
+        run_ok(&mut ctx, "symmetry A0 L0 A1");
+        let r0 = ctx.sketch.arcs[arael::refs::Ref::new(0)].radius.value;
+        let r1 = ctx.sketch.arcs[arael::refs::Ref::new(1)].radius.value;
+        assert!((r0 - r1).abs() < 0.01, "radii should be equal: {} vs {}", r0, r1);
+    }
+
+    #[test]
+    fn test_symmetry_aa_remove() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,-5 0,5; add_circle -3,0 1; add_circle 3,0 1");
+        run_ok(&mut ctx, "symmetry A0 L0 A1");
+        assert_eq!(ctx.sketch.symmetry_aa.len(), 1);
+        run_ok(&mut ctx, "remove_constraint A0 L0 A1 symmetry");
+        assert_eq!(ctx.sketch.symmetry_aa.len(), 0);
+    }
+
+    #[test]
+    fn test_symmetry_aa_duplicate() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,-5 0,5; add_circle -3,0 1; add_circle 3,0 1");
+        run_ok(&mut ctx, "symmetry A0 L0 A1");
+        let e = run_err(&mut ctx, "symmetry A0 L0 A1");
+        assert!(e.contains("already exists"), "{}", e);
     }
 
     // -- List constraint filtering --
