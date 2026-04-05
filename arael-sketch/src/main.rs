@@ -32,6 +32,21 @@ use history::History;
 use geometry::*;
 // drawing module methods are accessed through impl blocks on EditorApp
 
+/// Entities involved in a constraint, for highlighting.
+/// Whole-entity fields highlight the entire line/arc/point.
+/// Endpoint-specific fields highlight just one endpoint.
+#[derive(Default)]
+pub struct ConstraintEntities {
+    pub lines: Vec<Ref<Line>>,
+    pub arcs: Vec<Ref<Arc>>,
+    pub points: Vec<Ref<Point>>,
+    pub line_p1s: Vec<Ref<Line>>,
+    pub line_p2s: Vec<Ref<Line>>,
+    pub arc_starts: Vec<Ref<Arc>>,
+    pub arc_ends: Vec<Ref<Arc>>,
+    pub arc_centers: Vec<Ref<Arc>>,
+}
+
 /// Spawn an async task without blocking the UI thread.
 /// On WASM: uses wasm_bindgen_futures. On native: uses std::thread.
 #[cfg(target_arch = "wasm32")]
@@ -1726,17 +1741,33 @@ impl EditorApp {
                         sketch.coincident_arc_center.push(CoincidentArcCenter { point: hp, arc: *r, hb: CrossBlock::new() });
                         Some(hp)
                     }
+                    Selection::ArcStart(r) => {
+                        let pos = crate::geometry::arc_start_pos(&sketch.arcs[*r]);
+                        let hp = sketch.add_helper_point(pos);
+                        sketch.coincident_arc_start.push(CoincidentArcStart { point: hp, arc: *r, hb: CrossBlock::new() });
+                        Some(hp)
+                    }
+                    Selection::ArcEnd(r) => {
+                        let pos = crate::geometry::arc_end_pos(&sketch.arcs[*r]);
+                        let hp = sketch.add_helper_point(pos);
+                        sketch.coincident_arc_end.push(CoincidentArcEnd { point: hp, arc: *r, hb: CrossBlock::new() });
+                        Some(hp)
+                    }
                     _ => None,
                 }
             };
-            let to_line = |s: &Selection| -> Option<Ref<Line>> {
-                match s { Selection::Line(r) => Some(*r), _ => None }
-            };
-            if let Some(line) = to_line(&sel[1]) {
-                let a = to_point(&mut self.sketch, &sel[0]);
-                let c = to_point(&mut self.sketch, &sel[2]);
-                if let (Some(a), Some(c)) = (a, c) {
-                    self.exec(Action::ApplySymmetryPP { a, line, c });
+            // Find the line (mirror axis) and two point-likes in any order
+            let line_idx = sel.iter().position(|s| matches!(s, Selection::Line(_)));
+            if let Some(li) = line_idx {
+                let line = match sel[li] { Selection::Line(r) => r, _ => unreachable!() };
+                let others: Vec<_> = sel.iter().enumerate()
+                    .filter(|&(i, _)| i != li).map(|(_, s)| s).collect();
+                if others.len() == 2 {
+                    let a = to_point(&mut self.sketch, others[0]);
+                    let c = to_point(&mut self.sketch, others[1]);
+                    if let (Some(a), Some(c)) = (a, c) {
+                        self.exec(Action::ApplySymmetryPP { a, line, c });
+                    }
                 }
             }
         }
@@ -2248,11 +2279,14 @@ impl EditorApp {
         }
     }
 
-    // Get the line/arc/point refs involved in a constraint (for highlighting)
-    pub fn constraint_entities(&self, id: ConstraintId) -> (Vec<Ref<Line>>, Vec<Ref<Arc>>, Vec<Ref<Point>>) {
-        let mut lines = Vec::new();
-        let mut arcs = Vec::new();
-        let mut points = Vec::new();
+    // Get the line/arc/point refs involved in a constraint (for highlighting).
+    // Endpoint-specific fields (line_p1s, arc_starts, etc.) highlight just
+    // the endpoint, not the whole entity.
+    pub fn constraint_entities(&self, id: ConstraintId) -> ConstraintEntities {
+        let mut e = ConstraintEntities::default();
+        let lines = &mut e.lines;
+        let arcs = &mut e.arcs;
+        let points = &mut e.points;
         match id {
             ConstraintId::Horizontal(r) | ConstraintId::Vertical(r) => { lines.push(r); }
             ConstraintId::Parallel(i) => {
@@ -2290,8 +2324,20 @@ impl EditorApp {
             ConstraintId::SymmetryPP(i) => {
                 let c = &self.sketch.symmetry_pp[i];
                 lines.push(c.line);
-                points.push(c.a);
-                points.push(c.c);
+                // Resolve helper points to the specific endpoints they bridge to
+                for pt in [c.a, c.c] {
+                    if self.sketch.points.get(pt).map_or(false, |p| p.helper) {
+                        let mut found = false;
+                        for cc in &self.sketch.coincident_lp1 { if cc.point == pt { e.line_p1s.push(cc.line); found = true; break; } }
+                        if !found { for cc in &self.sketch.coincident_lp2 { if cc.point == pt { e.line_p2s.push(cc.line); found = true; break; } } }
+                        if !found { for cc in &self.sketch.coincident_arc_center { if cc.point == pt { e.arc_centers.push(cc.arc); found = true; break; } } }
+                        if !found { for cc in &self.sketch.coincident_arc_start { if cc.point == pt { e.arc_starts.push(cc.arc); found = true; break; } } }
+                        if !found { for cc in &self.sketch.coincident_arc_end { if cc.point == pt { e.arc_ends.push(cc.arc); found = true; break; } } }
+                        if !found { points.push(pt); }
+                    } else {
+                        points.push(pt);
+                    }
+                }
             }
             ConstraintId::SymmetryAA(i) => {
                 let c = &self.sketch.symmetry_aa[i];
@@ -2384,7 +2430,7 @@ impl EditorApp {
                 for c in &self.sketch.coincident_arc_end { if c.point == pt { arcs.push(c.arc); } }
             }
         }
-        (lines, arcs, points)
+        e
     }
 
     // Delete a constraint by id

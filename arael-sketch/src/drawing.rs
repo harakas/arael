@@ -700,6 +700,14 @@ impl EditorApp {
             markers.push(ConstraintMarker { pos, symbol, id });
         };
 
+        let add_point_marker = |this: &EditorApp, markers: &mut Vec<ConstraintMarker>,
+                                    point: Ref<Point>, symbol: ConstraintSymbol, id: ConstraintId| {
+            let p = this.sketch.points[point].pos.value;
+            let pos = this.to_screen(p);
+            let pos = egui::pos2(pos.x, pos.y - 12.0); // offset above the point
+            markers.push(ConstraintMarker { pos, symbol, id });
+        };
+
         // Collect markers into a temporary vec, then assign
         let mut markers = Vec::new();
 
@@ -790,6 +798,8 @@ impl EditorApp {
         for (i, c) in self.sketch.symmetry_pp.iter().enumerate() {
             let id = ConstraintId::SymmetryPP(i);
             add_line_marker(self, &mut markers, c.line, ConstraintSymbol::Symmetry, id, &mut line_marker_count);
+            add_point_marker(self, &mut markers, c.a, ConstraintSymbol::Symmetry, id);
+            add_point_marker(self, &mut markers, c.c, ConstraintSymbol::Symmetry, id);
         }
         for (i, c) in self.sketch.symmetry_aa.iter().enumerate() {
             let id = ConstraintId::SymmetryAA(i);
@@ -1064,12 +1074,22 @@ impl EditorApp {
         let mut highlight_lines: std::collections::HashSet<u32> = std::collections::HashSet::new();
         let mut highlight_arcs: std::collections::HashSet<u32> = std::collections::HashSet::new();
         let mut highlight_points: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        let mut highlight_line_p1: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        let mut highlight_line_p2: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        let mut highlight_arc_start: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        let mut highlight_arc_end: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        let mut highlight_arc_center: std::collections::HashSet<u32> = std::collections::HashSet::new();
         for sel in &self.selection {
             if let Selection::Constraint(id) = sel {
-                let (lines, arcs, points) = self.constraint_entities(*id);
-                for l in lines { highlight_lines.insert(l.index()); }
-                for a in arcs { highlight_arcs.insert(a.index()); }
-                for p in points { highlight_points.insert(p.index()); }
+                let ce = self.constraint_entities(*id);
+                for l in ce.lines { highlight_lines.insert(l.index()); }
+                for a in ce.arcs { highlight_arcs.insert(a.index()); }
+                for p in ce.points { highlight_points.insert(p.index()); }
+                for l in ce.line_p1s { highlight_line_p1.insert(l.index()); }
+                for l in ce.line_p2s { highlight_line_p2.insert(l.index()); }
+                for a in ce.arc_starts { highlight_arc_start.insert(a.index()); }
+                for a in ce.arc_ends { highlight_arc_end.insert(a.index()); }
+                for a in ce.arc_centers { highlight_arc_center.insert(a.index()); }
             }
         }
         let highlight_color = egui::Color32::from_rgb(255, 120, 180); // pink
@@ -1097,26 +1117,31 @@ impl EditorApp {
             let p1_selected = self.is_endpoint_selected(r, true);
             let p2_selected = self.is_endpoint_selected(r, false);
 
+            let p1_highlighted = highlight_line_p1.contains(&r.index());
+            let p2_highlighted = highlight_line_p2.contains(&r.index());
+
             let ep1_color = if p1_selected { c.endpoint_selected }
+                else if p1_highlighted { highlight_color }
                 else if selected { c.endpoint_line_selected }
                 else if l_p1_locked.contains(&r.index()) { c.point_locked }
                 else { c.endpoint };
             let ep2_color = if p2_selected { c.endpoint_selected }
+                else if p2_highlighted { highlight_color }
                 else if selected { c.endpoint_line_selected }
                 else if l_p2_locked.contains(&r.index()) { c.point_locked }
                 else { c.endpoint };
 
-            let ep1_radius = if p1_selected { 6.0 } else { 4.0 };
-            let ep2_radius = if p2_selected { 6.0 } else { 4.0 };
+            let ep1_radius = if p1_selected || p1_highlighted { 6.0 } else { 4.0 };
+            let ep2_radius = if p2_selected || p2_highlighted { 6.0 } else { 4.0 };
 
-            // Hide endpoint dot if coincident-connected, unless selected or locked
+            // Hide endpoint dot if coincident-connected, unless selected, locked, or highlighted
             let near_p1 = (mouse_screen.x - p1.x).powi(2) + (mouse_screen.y - p1.y).powi(2) < 225.0; // 15px
             let near_p2 = (mouse_screen.x - p2.x).powi(2) + (mouse_screen.y - p2.y).powi(2) < 225.0;
-            let show_p1 = p1_selected || selected
+            let show_p1 = p1_selected || p1_highlighted || selected
                 || l_p1_locked.contains(&r.index())
                 || !connected_lp1.contains(&r.index())
                 || near_p1;
-            let show_p2 = p2_selected || selected
+            let show_p2 = p2_selected || p2_highlighted || selected
                 || l_p2_locked.contains(&r.index())
                 || !connected_lp2.contains(&r.index())
                 || near_p2;
@@ -1168,24 +1193,31 @@ impl EditorApp {
             draw_styled_polyline(painter, &points, stroke, a.style);
 
             if !a.closed {
-                // Draw arc endpoints (hide if coincident-connected, unless selected)
                 let start_sel = self.selection.contains(&Selection::ArcStart(r));
                 let end_sel = self.selection.contains(&Selection::ArcEnd(r));
-                let start_color = if start_sel { c.endpoint_selected } else { c.endpoint };
-                let end_color = if end_sel { c.endpoint_selected } else { c.endpoint };
+                let start_hl = highlight_arc_start.contains(&r.index());
+                let end_hl = highlight_arc_end.contains(&r.index());
+                let start_color = if start_sel { c.endpoint_selected }
+                    else if start_hl { highlight_color }
+                    else { c.endpoint };
+                let end_color = if end_sel { c.endpoint_selected }
+                    else if end_hl { highlight_color }
+                    else { c.endpoint };
                 let sp = points[0];
                 let ep = *points.last().unwrap();
                 let near_start = (mouse_screen.x - sp.x).powi(2) + (mouse_screen.y - sp.y).powi(2) < 225.0;
                 let near_end = (mouse_screen.x - ep.x).powi(2) + (mouse_screen.y - ep.y).powi(2) < 225.0;
-                let show_start = start_sel || arc_selected || !connected_arc_s.contains(&r.index()) || near_start;
-                let show_end = end_sel || arc_selected || !connected_arc_e.contains(&r.index()) || near_end;
-                if show_start { painter.circle_filled(points[0], if start_sel { 6.0 } else { 4.0 }, start_color); }
-                if show_end { painter.circle_filled(*points.last().unwrap(), if end_sel { 6.0 } else { 4.0 }, end_color); }
+                let show_start = start_sel || start_hl || arc_selected || !connected_arc_s.contains(&r.index()) || near_start;
+                let show_end = end_sel || end_hl || arc_selected || !connected_arc_e.contains(&r.index()) || near_end;
+                if show_start { painter.circle_filled(points[0], if start_sel || start_hl { 6.0 } else { 4.0 }, start_color); }
+                if show_end { painter.circle_filled(*points.last().unwrap(), if end_sel || end_hl { 6.0 } else { 4.0 }, end_color); }
             }
             // Center point
             let center_sel = self.selection.contains(&Selection::ArcCenter(r));
+            let center_hl = highlight_arc_center.contains(&r.index());
             let center_locked = arc_c_locked.contains(&r.index());
             let center_color = if center_sel { c.endpoint_selected }
+                else if center_hl { highlight_color }
                 else if center_locked { c.point_locked }
                 else { c.endpoint };
             painter.circle_filled(center, if center_sel { 5.0 } else { 3.0 }, center_color);
