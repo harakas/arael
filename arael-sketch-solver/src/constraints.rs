@@ -117,6 +117,282 @@ pub struct DistanceLP2 {
     #[serde(skip)] pub hb: CrossBlock<Line, Point>,
 }
 
+// -- Arc-Point distance --
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[arael::model]
+#[arael(constraint(hb, {
+    let dx = arc.center.x - point.pos.x; let dy = arc.center.y - point.pos.y;
+    [(sqrt(dx * dx + dy * dy) - distancearccenterp.distance) * sketch.constraint_isigma]
+}))]
+pub struct DistanceArcCenterP {
+    #[arael(ref = root.arcs)] pub arc: Ref<Arc>,
+    #[arael(ref = root.points)] pub point: Ref<Point>,
+    pub distance: f64,
+    #[serde(skip)] pub hb: CrossBlock<Arc, Point>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[arael::model]
+#[arael(constraint(hb, {
+    let sx = arc.center.x + arc.radius * cos(arc.start_angle);
+    let sy = arc.center.y + arc.radius * sin(arc.start_angle);
+    let dx = sx - point.pos.x; let dy = sy - point.pos.y;
+    [(sqrt(dx * dx + dy * dy) - distancearcstartp.distance) * sketch.constraint_isigma]
+}))]
+pub struct DistanceArcStartP {
+    #[arael(ref = root.arcs)] pub arc: Ref<Arc>,
+    #[arael(ref = root.points)] pub point: Ref<Point>,
+    pub distance: f64,
+    #[serde(skip)] pub hb: CrossBlock<Arc, Point>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[arael::model]
+#[arael(constraint(hb, {
+    let ex = arc.center.x + arc.radius * cos(arc.end_angle);
+    let ey = arc.center.y + arc.radius * sin(arc.end_angle);
+    let dx = ex - point.pos.x; let dy = ey - point.pos.y;
+    [(sqrt(dx * dx + dy * dy) - distancearcendp.distance) * sketch.constraint_isigma]
+}))]
+pub struct DistanceArcEndP {
+    #[arael(ref = root.arcs)] pub arc: Ref<Arc>,
+    #[arael(ref = root.points)] pub point: Ref<Point>,
+    pub distance: f64,
+    #[serde(skip)] pub hb: CrossBlock<Arc, Point>,
+}
+
+// -- Arc-Line distance --
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[arael::model]
+#[arael(constraint(hb, {
+    let dx = arc.center.x - line.p1.x; let dy = arc.center.y - line.p1.y;
+    [(sqrt(dx * dx + dy * dy) - distancearccenterl1.distance) * sketch.constraint_isigma]
+}))]
+pub struct DistanceArcCenterL1 {
+    #[arael(ref = root.arcs)] pub arc: Ref<Arc>,
+    #[arael(ref = root.lines)] pub line: Ref<Line>,
+    pub distance: f64,
+    #[serde(skip)] pub hb: CrossBlock<Arc, Line>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[arael::model]
+#[arael(constraint(hb, {
+    let dx = arc.center.x - line.p2.x; let dy = arc.center.y - line.p2.y;
+    [(sqrt(dx * dx + dy * dy) - distancearccenterl2.distance) * sketch.constraint_isigma]
+}))]
+pub struct DistanceArcCenterL2 {
+    #[arael(ref = root.arcs)] pub arc: Ref<Arc>,
+    #[arael(ref = root.lines)] pub line: Ref<Line>,
+    pub distance: f64,
+    #[serde(skip)] pub hb: CrossBlock<Arc, Line>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[arael::model]
+#[arael(constraint(hb, {
+    let sx = arc.center.x + arc.radius * cos(arc.start_angle);
+    let sy = arc.center.y + arc.radius * sin(arc.start_angle);
+    let dx = sx - line.p1.x; let dy = sy - line.p1.y;
+    [(sqrt(dx * dx + dy * dy) - distancearcstartl1.distance) * sketch.constraint_isigma]
+}))]
+pub struct DistanceArcStartL1 {
+    #[arael(ref = root.arcs)] pub arc: Ref<Arc>,
+    #[arael(ref = root.lines)] pub line: Ref<Line>,
+    pub distance: f64,
+    #[serde(skip)] pub hb: CrossBlock<Arc, Line>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[arael::model]
+#[arael(constraint(hb, {
+    let sx = arc.center.x + arc.radius * cos(arc.start_angle);
+    let sy = arc.center.y + arc.radius * sin(arc.start_angle);
+    let dx = sx - line.p2.x; let dy = sy - line.p2.y;
+    [(sqrt(dx * dx + dy * dy) - distancearcstartl2.distance) * sketch.constraint_isigma]
+}))]
+pub struct DistanceArcStartL2 {
+    #[arael(ref = root.arcs)] pub arc: Ref<Arc>,
+    #[arael(ref = root.lines)] pub line: Ref<Line>,
+    pub distance: f64,
+    #[serde(skip)] pub hb: CrossBlock<Arc, Line>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[arael::model]
+#[arael(constraint(hb, {
+    let ex = arc.center.x + arc.radius * cos(arc.end_angle);
+    let ey = arc.center.y + arc.radius * sin(arc.end_angle);
+    let dx = ex - line.p1.x; let dy = ey - line.p1.y;
+    [(sqrt(dx * dx + dy * dy) - distancearcendl1.distance) * sketch.constraint_isigma]
+}))]
+pub struct DistanceArcEndL1 {
+    #[arael(ref = root.arcs)] pub arc: Ref<Arc>,
+    #[arael(ref = root.lines)] pub line: Ref<Line>,
+    pub distance: f64,
+    #[serde(skip)] pub hb: CrossBlock<Arc, Line>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[arael::model]
+#[arael(constraint(hb, {
+    let ex = arc.center.x + arc.radius * cos(arc.end_angle);
+    let ey = arc.center.y + arc.radius * sin(arc.end_angle);
+    let dx = ex - line.p2.x; let dy = ey - line.p2.y;
+    [(sqrt(dx * dx + dy * dy) - distancearcendl2.distance) * sketch.constraint_isigma]
+}))]
+pub struct DistanceArcEndL2 {
+    #[arael(ref = root.arcs)] pub arc: Ref<Arc>,
+    #[arael(ref = root.lines)] pub line: Ref<Line>,
+    pub distance: f64,
+    #[serde(skip)] pub hb: CrossBlock<Arc, Line>,
+}
+
+// -- Arc-Arc distance --
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[arael::model]
+#[arael(constraint(hb, {
+    let dx = a.center.x - b.center.x; let dy = a.center.y - b.center.y;
+    [(sqrt(dx * dx + dy * dy) - distanceaacece.distance) * sketch.constraint_isigma]
+}))]
+pub struct DistanceAACeCe {
+    #[arael(ref = root.arcs)] pub a: Ref<Arc>,
+    #[arael(ref = root.arcs)] pub b: Ref<Arc>,
+    pub distance: f64,
+    #[serde(skip)] pub hb: CrossBlock<Arc, Arc>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[arael::model]
+#[arael(constraint(hb, {
+    let bsx = b.center.x + b.radius * cos(b.start_angle);
+    let bsy = b.center.y + b.radius * sin(b.start_angle);
+    let dx = a.center.x - bsx; let dy = a.center.y - bsy;
+    [(sqrt(dx * dx + dy * dy) - distanceaaces.distance) * sketch.constraint_isigma]
+}))]
+pub struct DistanceAACeS {
+    #[arael(ref = root.arcs)] pub a: Ref<Arc>,
+    #[arael(ref = root.arcs)] pub b: Ref<Arc>,
+    pub distance: f64,
+    #[serde(skip)] pub hb: CrossBlock<Arc, Arc>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[arael::model]
+#[arael(constraint(hb, {
+    let bex = b.center.x + b.radius * cos(b.end_angle);
+    let bey = b.center.y + b.radius * sin(b.end_angle);
+    let dx = a.center.x - bex; let dy = a.center.y - bey;
+    [(sqrt(dx * dx + dy * dy) - distanceaacee.distance) * sketch.constraint_isigma]
+}))]
+pub struct DistanceAACeE {
+    #[arael(ref = root.arcs)] pub a: Ref<Arc>,
+    #[arael(ref = root.arcs)] pub b: Ref<Arc>,
+    pub distance: f64,
+    #[serde(skip)] pub hb: CrossBlock<Arc, Arc>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[arael::model]
+#[arael(constraint(hb, {
+    let asx = a.center.x + a.radius * cos(a.start_angle);
+    let asy = a.center.y + a.radius * sin(a.start_angle);
+    let dx = asx - b.center.x; let dy = asy - b.center.y;
+    [(sqrt(dx * dx + dy * dy) - distanceaasce.distance) * sketch.constraint_isigma]
+}))]
+pub struct DistanceAASCe {
+    #[arael(ref = root.arcs)] pub a: Ref<Arc>,
+    #[arael(ref = root.arcs)] pub b: Ref<Arc>,
+    pub distance: f64,
+    #[serde(skip)] pub hb: CrossBlock<Arc, Arc>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[arael::model]
+#[arael(constraint(hb, {
+    let asx = a.center.x + a.radius * cos(a.start_angle);
+    let asy = a.center.y + a.radius * sin(a.start_angle);
+    let bsx = b.center.x + b.radius * cos(b.start_angle);
+    let bsy = b.center.y + b.radius * sin(b.start_angle);
+    let dx = asx - bsx; let dy = asy - bsy;
+    [(sqrt(dx * dx + dy * dy) - distanceaass.distance) * sketch.constraint_isigma]
+}))]
+pub struct DistanceAASS {
+    #[arael(ref = root.arcs)] pub a: Ref<Arc>,
+    #[arael(ref = root.arcs)] pub b: Ref<Arc>,
+    pub distance: f64,
+    #[serde(skip)] pub hb: CrossBlock<Arc, Arc>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[arael::model]
+#[arael(constraint(hb, {
+    let asx = a.center.x + a.radius * cos(a.start_angle);
+    let asy = a.center.y + a.radius * sin(a.start_angle);
+    let bex = b.center.x + b.radius * cos(b.end_angle);
+    let bey = b.center.y + b.radius * sin(b.end_angle);
+    let dx = asx - bex; let dy = asy - bey;
+    [(sqrt(dx * dx + dy * dy) - distanceaase.distance) * sketch.constraint_isigma]
+}))]
+pub struct DistanceAASE {
+    #[arael(ref = root.arcs)] pub a: Ref<Arc>,
+    #[arael(ref = root.arcs)] pub b: Ref<Arc>,
+    pub distance: f64,
+    #[serde(skip)] pub hb: CrossBlock<Arc, Arc>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[arael::model]
+#[arael(constraint(hb, {
+    let aex = a.center.x + a.radius * cos(a.end_angle);
+    let aey = a.center.y + a.radius * sin(a.end_angle);
+    let dx = aex - b.center.x; let dy = aey - b.center.y;
+    [(sqrt(dx * dx + dy * dy) - distanceaaece.distance) * sketch.constraint_isigma]
+}))]
+pub struct DistanceAAECe {
+    #[arael(ref = root.arcs)] pub a: Ref<Arc>,
+    #[arael(ref = root.arcs)] pub b: Ref<Arc>,
+    pub distance: f64,
+    #[serde(skip)] pub hb: CrossBlock<Arc, Arc>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[arael::model]
+#[arael(constraint(hb, {
+    let aex = a.center.x + a.radius * cos(a.end_angle);
+    let aey = a.center.y + a.radius * sin(a.end_angle);
+    let bsx = b.center.x + b.radius * cos(b.start_angle);
+    let bsy = b.center.y + b.radius * sin(b.start_angle);
+    let dx = aex - bsx; let dy = aey - bsy;
+    [(sqrt(dx * dx + dy * dy) - distanceaaes.distance) * sketch.constraint_isigma]
+}))]
+pub struct DistanceAAES {
+    #[arael(ref = root.arcs)] pub a: Ref<Arc>,
+    #[arael(ref = root.arcs)] pub b: Ref<Arc>,
+    pub distance: f64,
+    #[serde(skip)] pub hb: CrossBlock<Arc, Arc>,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[arael::model]
+#[arael(constraint(hb, {
+    let aex = a.center.x + a.radius * cos(a.end_angle);
+    let aey = a.center.y + a.radius * sin(a.end_angle);
+    let bex = b.center.x + b.radius * cos(b.end_angle);
+    let bey = b.center.y + b.radius * sin(b.end_angle);
+    let dx = aex - bex; let dy = aey - bey;
+    [(sqrt(dx * dx + dy * dy) - distanceaaee.distance) * sketch.constraint_isigma]
+}))]
+pub struct DistanceAAEE {
+    #[arael(ref = root.arcs)] pub a: Ref<Arc>,
+    #[arael(ref = root.arcs)] pub b: Ref<Arc>,
+    pub distance: f64,
+    #[serde(skip)] pub hb: CrossBlock<Arc, Arc>,
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {

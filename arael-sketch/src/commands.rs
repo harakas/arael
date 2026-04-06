@@ -5208,6 +5208,86 @@ mod tests {
     }
 
     #[test]
+    fn test_distance_arc_center_point() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_circle 5,5 2; add_point 10,3");
+        run_ok(&mut ctx, "distance A0.center P0 4");
+        assert!(!has_helper_points(&ctx));
+        assert_eq!(ctx.sketch.distance_arc_center_p.len(), 1);
+        let a = &ctx.sketch.arcs[resolve_arc(&ctx.sketch, "A0").unwrap()];
+        let p = &ctx.sketch.points[resolve_point(&ctx.sketch, "P0").unwrap()];
+        let dx = p.pos.value.x - a.center.value.x;
+        let dy = p.pos.value.y - a.center.value.y;
+        assert!(near((dx * dx + dy * dy).sqrt(), 4.0));
+    }
+
+    #[test]
+    fn test_distance_arc_start_point() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_arc 0,0 5,0 0,5; add_point 10,3");
+        run_ok(&mut ctx, "distance A0.start P0 3");
+        assert!(!has_helper_points(&ctx));
+        assert_eq!(ctx.sketch.distance_arc_start_p.len(), 1);
+    }
+
+    #[test]
+    fn test_distance_arc_end_point() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_arc 0,0 5,0 0,5; add_point 10,3");
+        run_ok(&mut ctx, "distance A0.end P0 4");
+        assert!(!has_helper_points(&ctx));
+        assert_eq!(ctx.sketch.distance_arc_end_p.len(), 1);
+    }
+
+    #[test]
+    fn test_distance_arc_center_line() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_circle 5,5 2; add_line 10,3 15,7");
+        run_ok(&mut ctx, "distance A0.center L0.p1 3");
+        assert!(!has_helper_points(&ctx));
+        assert_eq!(ctx.sketch.distance_arc_center_l1.len(), 1);
+        let a = &ctx.sketch.arcs[resolve_arc(&ctx.sketch, "A0").unwrap()];
+        let l = &ctx.sketch.lines[resolve_line(&ctx.sketch, "L0").unwrap()];
+        let dx = l.p1.value.x - a.center.value.x;
+        let dy = l.p1.value.y - a.center.value.y;
+        assert!(near((dx * dx + dy * dy).sqrt(), 3.0));
+    }
+
+    #[test]
+    fn test_distance_arc_start_line() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_arc 0,0 5,0 0,5; add_line 10,3 15,7");
+        run_ok(&mut ctx, "distance A0.start L0.p2 4");
+        assert!(!has_helper_points(&ctx));
+        assert_eq!(ctx.sketch.distance_arc_start_l2.len(), 1);
+    }
+
+    #[test]
+    fn test_distance_arc_center_arc_center() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_circle 0,0 1; add_circle 8,5 2");
+        run_ok(&mut ctx, "distance A0.center A1.center 5");
+        assert!(!has_helper_points(&ctx));
+        assert_eq!(ctx.sketch.distance_aa_ce_ce.len(), 1);
+        let a0 = &ctx.sketch.arcs[resolve_arc(&ctx.sketch, "A0").unwrap()];
+        let a1 = &ctx.sketch.arcs[resolve_arc(&ctx.sketch, "A1").unwrap()];
+        let dx = a1.center.value.x - a0.center.value.x;
+        let dy = a1.center.value.y - a0.center.value.y;
+        assert!(near((dx * dx + dy * dy).sqrt(), 5.0));
+    }
+
+    #[test]
+    fn test_distance_arc_start_arc_start() {
+        // Use arcs with locked radii so solver can't collapse them
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_arc 0,0 3,0 0,3; add_arc 20,0 23,0 20,3");
+        run_ok(&mut ctx, "radius A0 3; radius A1 3");
+        run_ok(&mut ctx, "distance A0.start A1.start 18");
+        assert!(!has_helper_points(&ctx));
+        assert_eq!(ctx.sketch.distance_aa_s_s.len(), 1);
+    }
+
+    #[test]
     fn test_remove_dim() {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_line 0,0 5,0; length L0 3");
@@ -6164,14 +6244,14 @@ mod tests {
     }
 
     #[test]
-    fn test_cleanup_delete_arc_removes_distance_helpers() {
+    fn test_cleanup_delete_arc_removes_distance() {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_circle 0,0 3; add_circle 10,0 2");
         run_ok(&mut ctx, "distance A0.center A1.center 10");
-        assert!(has_helper_points(&ctx), "should have helpers");
+        assert!(!has_helper_points(&ctx), "direct constraint, no helpers");
+        assert_eq!(ctx.sketch.distance_aa_ce_ce.len(), 1);
         run_ok(&mut ctx, "delete A0");
-        assert!(!has_helper_points(&ctx), "helpers should be cleaned up");
-        assert!(ctx.sketch.distance_pp.is_empty(), "distance_pp should be empty");
+        assert!(ctx.sketch.distance_aa_ce_ce.is_empty(), "constraint should be cleaned up");
     }
 
     #[test]
@@ -6215,9 +6295,9 @@ mod tests {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_circle 0,0 3; add_circle 10,0 2");
         run_ok(&mut ctx, "distance A0.center A1.center 10");
-        assert!(has_helper_points(&ctx));
+        assert_eq!(ctx.sketch.distance_aa_ce_ce.len(), 1);
         run_ok(&mut ctx, "remove_dim d0");
-        assert!(!has_helper_points(&ctx), "helpers cleaned up after remove_dim");
+        assert!(ctx.sketch.distance_aa_ce_ce.is_empty(), "constraint cleaned up after remove_dim");
     }
 
     #[test]
@@ -6245,9 +6325,10 @@ mod tests {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_circle 0,0 3; add_line 10,0 15,0");
         run_ok(&mut ctx, "distance A0.center L0.p1 10");
-        assert!(has_helper_points(&ctx));
+        assert!(!has_helper_points(&ctx), "direct constraint, no helpers");
+        assert_eq!(ctx.sketch.distance_arc_center_l1.len(), 1);
         run_ok(&mut ctx, "remove_dim d0");
-        assert!(!has_helper_points(&ctx), "helpers cleaned up after remove_dim");
+        assert!(ctx.sketch.distance_arc_center_l1.is_empty(), "constraint cleaned up after remove_dim");
     }
 
     // 6D: No Pc in distance constraints that don't need helpers (regression)
