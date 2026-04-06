@@ -983,6 +983,17 @@ impl eframe::App for EditorApp {
             let mouse_sketch = self.to_sketch(mouse_screen);
             let hit_threshold = 15.0 / self.scale as f64;  // screen pixels -> sketch units
 
+            // Hover detection
+            let new_hover = if response.hovered() {
+                self.hit_test_selection(mouse_sketch, hit_threshold)
+            } else {
+                None
+            };
+            if new_hover != self.hovered {
+                self.hovered = new_hover;
+                ctx.request_repaint();
+            }
+
             // Tool-specific input handling
             match self.tool {
                 Tool::Select => {

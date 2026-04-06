@@ -1107,10 +1107,14 @@ impl EditorApp {
             let p2 = self.to_screen(l.p2.value);
 
             let selected = self.selection.contains(&Selection::Line(r));
+            let line_hovered = self.hovered == Some(Selection::Line(r));
             let color = if selected { c.line_selected }
                 else if highlight_lines.contains(&r.index()) { highlight_color }
+                else if line_hovered { c.line_hover }
                 else { c.line };
-            let width = if l.style == LineStyle::Solid { 2.0 } else { 1.0 };
+            let width = if selected { if l.style == LineStyle::Solid { 2.0 } else { 1.0 } }
+                else if line_hovered { if l.style == LineStyle::Solid { 2.0 } else { 1.0 } }
+                else { if l.style == LineStyle::Solid { 1.5 } else { 1.0 } };
             draw_styled_polyline(painter, &[p1, p2], egui::Stroke::new(width, color), l.style);
 
             // Endpoints -- highlight individually if selected
@@ -1119,6 +1123,9 @@ impl EditorApp {
 
             let p1_highlighted = highlight_line_p1.contains(&r.index());
             let p2_highlighted = highlight_line_p2.contains(&r.index());
+
+            let p1_hovered = self.hovered == Some(Selection::LineP1(r));
+            let p2_hovered = self.hovered == Some(Selection::LineP2(r));
 
             let ep1_color = if p1_selected { c.endpoint_selected }
                 else if p1_highlighted { highlight_color }
@@ -1131,17 +1138,17 @@ impl EditorApp {
                 else if l_p2_locked.contains(&r.index()) { c.point_locked }
                 else { c.endpoint };
 
-            let ep1_radius = if p1_selected || p1_highlighted { 6.0 } else { 4.0 };
-            let ep2_radius = if p2_selected || p2_highlighted { 6.0 } else { 4.0 };
+            let ep1_radius = if p1_selected || p1_highlighted { 6.0 } else if p1_hovered { 6.0 } else { 4.0 };
+            let ep2_radius = if p2_selected || p2_highlighted { 6.0 } else if p2_hovered { 6.0 } else { 4.0 };
 
             // Hide endpoint dot if coincident-connected, unless selected, locked, or highlighted
             let near_p1 = (mouse_screen.x - p1.x).powi(2) + (mouse_screen.y - p1.y).powi(2) < 225.0; // 15px
             let near_p2 = (mouse_screen.x - p2.x).powi(2) + (mouse_screen.y - p2.y).powi(2) < 225.0;
-            let show_p1 = p1_selected || p1_highlighted || selected
+            let show_p1 = p1_selected || p1_highlighted || p1_hovered || selected
                 || l_p1_locked.contains(&r.index())
                 || !connected_lp1.contains(&r.index())
                 || near_p1;
-            let show_p2 = p2_selected || p2_highlighted || selected
+            let show_p2 = p2_selected || p2_highlighted || p2_hovered || selected
                 || l_p2_locked.contains(&r.index())
                 || !connected_lp2.contains(&r.index())
                 || near_p2;
@@ -1157,11 +1164,13 @@ impl EditorApp {
             if self.drag_point == Some(r) { continue; }
             let sp = self.to_screen(p.pos.value);
             let selected = self.selection.contains(&Selection::Point(r));
+            let point_hovered = self.hovered == Some(Selection::Point(r));
             let color = if selected { c.point_selected }
                 else if highlight_points.contains(&r.index()) { highlight_color }
                 else if pt_locked.contains(&r.index()) { c.point_locked }
                 else { c.point };
-            painter.circle_filled(sp, 5.0, color);
+            let radius = if selected { 5.0 } else if point_hovered { 7.0 } else { 5.0 };
+            painter.circle_filled(sp, radius, color);
         }
 
         // Arcs
@@ -1170,10 +1179,14 @@ impl EditorApp {
             let center = self.to_screen(a.center.value);
             let radius_px = a.radius.value as f32 * self.scale;
             let arc_selected = self.selection.contains(&Selection::Arc(r));
+            let arc_hovered = self.hovered == Some(Selection::Arc(r));
             let arc_color = if arc_selected { c.line_selected }
                 else if highlight_arcs.contains(&r.index()) { highlight_color }
+                else if arc_hovered { c.line_hover }
                 else { c.arc };
-            let arc_width = if a.style == LineStyle::Solid { 2.0 } else { 1.0 };
+            let arc_width = if arc_selected { if a.style == LineStyle::Solid { 2.0 } else { 1.0 } }
+                else if arc_hovered { if a.style == LineStyle::Solid { 2.0 } else { 1.0 } }
+                else { if a.style == LineStyle::Solid { 1.5 } else { 1.0 } };
             let stroke = egui::Stroke::new(arc_width, arc_color);
 
             // Tessellate arc/circle
@@ -1197,6 +1210,8 @@ impl EditorApp {
                 let end_sel = self.selection.contains(&Selection::ArcEnd(r));
                 let start_hl = highlight_arc_start.contains(&r.index());
                 let end_hl = highlight_arc_end.contains(&r.index());
+                let start_hov = self.hovered == Some(Selection::ArcStart(r));
+                let end_hov = self.hovered == Some(Selection::ArcEnd(r));
                 let start_color = if start_sel { c.endpoint_selected }
                     else if start_hl { highlight_color }
                     else { c.endpoint };
@@ -1207,20 +1222,22 @@ impl EditorApp {
                 let ep = *points.last().unwrap();
                 let near_start = (mouse_screen.x - sp.x).powi(2) + (mouse_screen.y - sp.y).powi(2) < 225.0;
                 let near_end = (mouse_screen.x - ep.x).powi(2) + (mouse_screen.y - ep.y).powi(2) < 225.0;
-                let show_start = start_sel || start_hl || arc_selected || !connected_arc_s.contains(&r.index()) || near_start;
-                let show_end = end_sel || end_hl || arc_selected || !connected_arc_e.contains(&r.index()) || near_end;
-                if show_start { painter.circle_filled(points[0], if start_sel || start_hl { 6.0 } else { 4.0 }, start_color); }
-                if show_end { painter.circle_filled(*points.last().unwrap(), if end_sel || end_hl { 6.0 } else { 4.0 }, end_color); }
+                let show_start = start_sel || start_hl || start_hov || arc_selected || !connected_arc_s.contains(&r.index()) || near_start;
+                let show_end = end_sel || end_hl || end_hov || arc_selected || !connected_arc_e.contains(&r.index()) || near_end;
+                if show_start { painter.circle_filled(points[0], if start_sel || start_hl || start_hov { 6.0 } else { 4.0 }, start_color); }
+                if show_end { painter.circle_filled(*points.last().unwrap(), if end_sel || end_hl || end_hov { 6.0 } else { 4.0 }, end_color); }
             }
             // Center point
             let center_sel = self.selection.contains(&Selection::ArcCenter(r));
             let center_hl = highlight_arc_center.contains(&r.index());
+            let center_hov = self.hovered == Some(Selection::ArcCenter(r));
             let center_locked = arc_c_locked.contains(&r.index());
             let center_color = if center_sel { c.endpoint_selected }
                 else if center_hl { highlight_color }
                 else if center_locked { c.point_locked }
                 else { c.endpoint };
-            painter.circle_filled(center, if center_sel { 5.0 } else { 3.0 }, center_color);
+            let center_radius = if center_sel { 5.0 } else if center_hov { 5.0 } else { 3.0 };
+            painter.circle_filled(center, center_radius, center_color);
         }
 
         // Origin crosshair
@@ -1236,13 +1253,15 @@ impl EditorApp {
         // Constraint markers (drawn with painter lines)
         for marker in &self.constraint_markers {
             let selected = self.selection.contains(&Selection::Constraint(marker.id));
+            let marker_hovered = self.hovered == Some(Selection::Constraint(marker.id));
             let color = if selected {
                 c.constraint_marker_selected
             } else {
                 c.constraint_marker
             };
-            let w = if selected { 2.0 } else { 1.5 };
-            let s = if selected { 7.0 } else { 5.0 }; // half-size
+            let emphasized = selected || marker_hovered;
+            let w = if emphasized { 2.0 } else { 1.5 };
+            let s = if emphasized { 7.0 } else { 5.0 }; // half-size
             let p = marker.pos;
             let stroke = egui::Stroke::new(w, color);
             match marker.symbol {
@@ -1366,10 +1385,13 @@ impl EditorApp {
         let dim_color = c.dimension;
         let dim_sel_color = c.dimension_selected;
         let dim_broken_color = c.dimension_broken;
+        let dim_hover_color = c.dimension_hover;
         for (i, dim) in self.sketch.dimensions.iter().enumerate() {
             let selected = self.selection.contains(&Selection::Dimension(i));
+            let dim_hovered = self.hovered == Some(Selection::Dimension(i));
             let color = if dim.broken { dim_broken_color }
                         else if selected { dim_sel_color }
+                        else if dim_hovered { dim_hover_color }
                         else { dim_color };
             let is_radius = matches!(dim.kind, DimensionKind::ArcRadius(_));
             let is_expr = dim.expr_str.is_some();

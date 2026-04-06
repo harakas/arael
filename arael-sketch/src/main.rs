@@ -79,8 +79,9 @@ pub struct EditorApp {
     pub circle_draw: Option<CircleDrawState>,
     pub arc_draw: Option<ArcDrawState>,
 
-    // Selection
+    // Selection and hover
     pub selection: Vec<Selection>,
+    pub hovered: Option<Selection>,
 
     // Drag state
     pub grab: Option<GrabTarget>,
@@ -230,6 +231,7 @@ impl EditorApp {
             circle_draw: None,
             arc_draw: None,
             selection: Vec::new(),
+            hovered: None,
             grab: None,
             drag_point: None,
             drag_dimension: None,
