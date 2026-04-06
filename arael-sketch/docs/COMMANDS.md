@@ -186,8 +186,9 @@ symmetry A0 L0 A1            Arc centers symmetric + equal radius (3 DOF removed
 symmetry L0.p1 L1 L2.p1     Endpoints symmetric about L1
 symmetry A0.center L0 A1.center  Any endpoint ref works (P0, L0.p1, A0.center, A0.start, A0.end)
 point_on P0 L0               Point on line
+point_on L0.p1 L1            Line endpoint on another line
 point_on L0.p1 A0            Line endpoint on arc
-point_on A0.center L0        Arc center on line (creates helper point internally)
+point_on A0.center L0        Arc center on line
 ```
 
 All constraint and dimension commands check that DOF decreases after application. If a constraint doesn't reduce DOF, it is rejected -- the constraint is either redundant or already implied by existing constraints. Append `force` to skip this check:

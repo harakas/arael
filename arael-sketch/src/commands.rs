@@ -880,7 +880,7 @@ fn substitute_aliases(ctx: &CommandContext, input: &str) -> String {
         let mut new = String::new();
         let mut rest = result.as_str();
         while let Some(pos) = rest.find(alias.as_str()) {
-            let before = pos > 0 && rest.as_bytes()[pos - 1].is_ascii_alphanumeric();
+            let before = pos > 0 && (rest.as_bytes()[pos - 1].is_ascii_alphanumeric() || rest.as_bytes()[pos - 1] == b'_');
             let after_pos = pos + alias.len();
             let after = after_pos < rest.len()
                 && (rest.as_bytes()[after_pos].is_ascii_alphanumeric() || rest.as_bytes()[after_pos] == b'_');
@@ -922,8 +922,8 @@ fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
     let (input, force) = strip_force(input);
     ctx.skip_dof_check = force;
 
-    // Strip inline comments (# not inside quotes)
-    let input = strip_inline_comment(input);
+    // Strip inline comments (# not inside quotes), except for msg command
+    let input = if input.trim_start().starts_with("msg ") { input } else { strip_inline_comment(input) };
     let input = input.trim();
 
     // Comments (entire line)
