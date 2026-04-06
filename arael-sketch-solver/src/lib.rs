@@ -132,6 +132,11 @@ pub struct Sketch {
     #[serde(default)]
     pub symmetry_aa: std::vec::Vec<SymmetryAA>,
     pub distance_pl: std::vec::Vec<DistancePL>,
+    pub distance_lp1l: std::vec::Vec<DistanceLP1L>,
+    pub distance_lp2l: std::vec::Vec<DistanceLP2L>,
+    pub distance_arc_center_l: std::vec::Vec<DistanceArcCenterL>,
+    pub distance_arc_start_l: std::vec::Vec<DistanceArcStartL>,
+    pub distance_arc_end_l: std::vec::Vec<DistanceArcEndL>,
     pub line_p1_on_line: std::vec::Vec<LineP1OnLine>,
     pub line_p2_on_line: std::vec::Vec<LineP2OnLine>,
     pub coincident_arc_center: std::vec::Vec<CoincidentArcCenter>,
@@ -282,6 +287,11 @@ impl Sketch {
             symmetry_pp: Vec::new(),
             symmetry_aa: Vec::new(),
             distance_pl: Vec::new(),
+            distance_lp1l: Vec::new(),
+            distance_lp2l: Vec::new(),
+            distance_arc_center_l: Vec::new(),
+            distance_arc_start_l: Vec::new(),
+            distance_arc_end_l: Vec::new(),
             line_p1_on_line: Vec::new(),
             line_p2_on_line: Vec::new(),
             coincident_arc_center: Vec::new(),
@@ -500,6 +510,11 @@ impl Sketch {
         self.symmetry_pp.retain(|c| c.line != r);
         self.symmetry_aa.retain(|c| c.line != r);
         self.distance_pl.retain(|c| c.line != r);
+        self.distance_lp1l.retain(|c| c.a != r && c.b != r);
+        self.distance_lp2l.retain(|c| c.a != r && c.b != r);
+        self.distance_arc_center_l.retain(|c| c.line != r);
+        self.distance_arc_start_l.retain(|c| c.line != r);
+        self.distance_arc_end_l.retain(|c| c.line != r);
         self.line_p1_on_line.retain(|c| c.a != r && c.b != r);
         self.line_p2_on_line.retain(|c| c.a != r && c.b != r);
         self.coincident_lp1_arc_center.retain(|c| c.line != r);
@@ -576,6 +591,9 @@ impl Sketch {
         self.distance_arc_center_p.retain(|c| c.arc != r);
         self.distance_arc_start_p.retain(|c| c.arc != r);
         self.distance_arc_end_p.retain(|c| c.arc != r);
+        self.distance_arc_center_l.retain(|c| c.arc != r);
+        self.distance_arc_start_l.retain(|c| c.arc != r);
+        self.distance_arc_end_l.retain(|c| c.arc != r);
         self.distance_arc_center_l1.retain(|c| c.arc != r);
         self.distance_arc_center_l2.retain(|c| c.arc != r);
         self.distance_arc_start_l1.retain(|c| c.arc != r);
@@ -1337,6 +1355,11 @@ impl Sketch {
         for c in &self.hdistance_pp { out.push(format!("hdistance {} {} = {}", self.point_display_name(c.a), self.point_display_name(c.b), c.distance)); }
         for c in &self.vdistance_pp { out.push(format!("vdistance {} {} = {}", self.point_display_name(c.a), self.point_display_name(c.b), c.distance)); }
         for c in &self.distance_pl { out.push(format!("distance {} {} = {}", self.point_display_name(c.point), self.lines[c.line].name, c.distance)); }
+        for c in &self.distance_lp1l { out.push(format!("distance {}.p1 {} = {}", self.lines[c.a].name, self.lines[c.b].name, c.distance)); }
+        for c in &self.distance_lp2l { out.push(format!("distance {}.p2 {} = {}", self.lines[c.a].name, self.lines[c.b].name, c.distance)); }
+        for c in &self.distance_arc_center_l { out.push(format!("distance {}.center {} = {}", self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
+        for c in &self.distance_arc_start_l { out.push(format!("distance {}.start {} = {}", self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
+        for c in &self.distance_arc_end_l { out.push(format!("distance {}.end {} = {}", self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
         // Line-endpoint distance constraints
         for c in &self.distance_ll11 { out.push(format!("distance {}.p1 {}.p1 = {}", self.lines[c.a].name, self.lines[c.b].name, c.distance)); }
         for c in &self.distance_ll12 { out.push(format!("distance {}.p1 {}.p2 = {}", self.lines[c.a].name, self.lines[c.b].name, c.distance)); }

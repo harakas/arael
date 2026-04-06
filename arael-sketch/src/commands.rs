@@ -5064,6 +5064,84 @@ mod tests {
     }
 
     #[test]
+    fn test_xangle_update_and_remove() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,3");
+        run_ok(&mut ctx, "xangle L0 45");
+        run_ok(&mut ctx, "xangle L0 60");
+        assert_eq!(ctx.sketch.dimensions.len(), 1); // updated, not duplicated
+        let l = &ctx.sketch.lines[resolve_line(&ctx.sketch, "L0").unwrap()];
+        let angle = (l.p2.value.y - l.p1.value.y).atan2(l.p2.value.x - l.p1.value.x).to_degrees();
+        assert!(near(angle, 60.0));
+        run_ok(&mut ctx, "remove_dim d0");
+        assert_eq!(ctx.sketch.dimensions.len(), 0);
+    }
+
+    #[test]
+    fn test_xangle_derived() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,3");
+        let dof_before = ctx.sketch.dof().unwrap();
+        run_ok(&mut ctx, "xangle L0 derived");
+        assert_eq!(ctx.sketch.dimensions.len(), 1);
+        assert!(ctx.sketch.dimensions[0].derived);
+        let dof_after = ctx.sketch.dof().unwrap();
+        assert_eq!(dof_after, dof_before); // derived does not constrain
+    }
+
+    #[test]
+    fn test_hdistance_derived() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,3");
+        let dof_before = ctx.sketch.dof().unwrap();
+        run_ok(&mut ctx, "hdistance L0.p1 L0.p2 derived");
+        assert_eq!(ctx.sketch.dimensions.len(), 1);
+        assert!(ctx.sketch.dimensions[0].derived);
+        let dof_after = ctx.sketch.dof().unwrap();
+        assert_eq!(dof_after, dof_before);
+    }
+
+    #[test]
+    fn test_vdistance_derived() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,3");
+        let dof_before = ctx.sketch.dof().unwrap();
+        run_ok(&mut ctx, "vdistance L0.p1 L0.p2 derived");
+        assert_eq!(ctx.sketch.dimensions.len(), 1);
+        assert!(ctx.sketch.dimensions[0].derived);
+        let dof_after = ctx.sketch.dof().unwrap();
+        assert_eq!(dof_after, dof_before);
+    }
+
+    #[test]
+    fn test_sweep() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_arc 0,0 5,0 0,5");
+        run_ok(&mut ctx, "sweep A0 120");
+        assert_eq!(ctx.sketch.dimensions.len(), 1);
+        let a = &ctx.sketch.arcs[resolve_arc(&ctx.sketch, "A0").unwrap()];
+        let sweep_deg = arael::utils::rad2deg((a.end_angle.value - a.start_angle.value).abs());
+        assert!(near(sweep_deg, 120.0));
+    }
+
+    #[test]
+    fn test_angle() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,0 3,4");
+        run_ok(&mut ctx, "angle L0 L1 60");
+        assert_eq!(ctx.sketch.dimensions.len(), 1);
+    }
+
+    #[test]
+    fn test_distance_pl_arc_end() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_arc 0,0 3,0 0,3; add_line 0,10 5,10");
+        run_ok(&mut ctx, "distance A0.end L0 7");
+        assert!(!has_helper_points(&ctx));
+        assert_eq!(ctx.sketch.distance_arc_end_l.len(), 1);
+    }
+
+    #[test]
     fn test_axis_distance_dof() {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_line 0,0 5,3");
@@ -6277,15 +6355,14 @@ mod tests {
     }
 
     #[test]
-    fn test_cleanup_delete_line_removes_pl_distance_helpers() {
+    fn test_cleanup_delete_line_removes_pl_distance() {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,3 5,3");
-        // distance from line endpoint to other line creates a helper
         run_ok(&mut ctx, "distance L0.p1 L1 3");
-        assert!(has_helper_points(&ctx), "should have helper for L0.p1");
+        assert!(!has_helper_points(&ctx), "direct constraint, no helpers");
+        assert_eq!(ctx.sketch.distance_lp1l.len(), 1);
         run_ok(&mut ctx, "delete L0");
-        assert!(!has_helper_points(&ctx), "helpers cleaned up");
-        assert!(ctx.sketch.distance_pl.is_empty(), "distance_pl should be empty");
+        assert!(ctx.sketch.distance_lp1l.is_empty(), "constraint cleaned up");
     }
 
     // 6C: Cleanup on dimension removal
@@ -6305,9 +6382,10 @@ mod tests {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,3 5,3");
         run_ok(&mut ctx, "distance L0.p1 L1 3");
-        assert!(has_helper_points(&ctx));
+        assert!(!has_helper_points(&ctx), "direct constraint, no helpers");
+        assert_eq!(ctx.sketch.distance_lp1l.len(), 1);
         run_ok(&mut ctx, "remove_dim d0");
-        assert!(!has_helper_points(&ctx), "helpers cleaned up after remove_dim");
+        assert!(ctx.sketch.distance_lp1l.is_empty(), "constraint cleaned up after remove_dim");
     }
 
     #[test]
@@ -6315,9 +6393,45 @@ mod tests {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_circle 0,0 3; add_line 0,5 5,5");
         run_ok(&mut ctx, "distance A0.center L0 5");
-        assert!(has_helper_points(&ctx));
+        assert!(!has_helper_points(&ctx), "direct constraint, no helpers");
+        assert_eq!(ctx.sketch.distance_arc_center_l.len(), 1);
         run_ok(&mut ctx, "remove_dim d0");
-        assert!(!has_helper_points(&ctx), "helpers cleaned up after remove_dim");
+        assert!(ctx.sketch.distance_arc_center_l.is_empty(), "constraint cleaned up after remove_dim");
+    }
+
+    #[test]
+    fn test_distance_pl_line_endpoint() {
+        // LineP1 to line (perpendicular distance)
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,3 5,3");
+        run_ok(&mut ctx, "distance L0.p1 L1 3");
+        assert!(!has_helper_points(&ctx), "direct constraint, no helpers");
+        assert_eq!(ctx.sketch.distance_lp1l.len(), 1);
+
+        // LineP2 to line
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,3 5,3");
+        run_ok(&mut ctx, "distance L0.p2 L1 3");
+        assert!(!has_helper_points(&ctx));
+        assert_eq!(ctx.sketch.distance_lp2l.len(), 1);
+    }
+
+    #[test]
+    fn test_distance_pl_arc_center() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_circle 0,0 2; add_line 0,5 5,5");
+        run_ok(&mut ctx, "distance A0.center L0 4");
+        assert!(!has_helper_points(&ctx));
+        assert_eq!(ctx.sketch.distance_arc_center_l.len(), 1);
+    }
+
+    #[test]
+    fn test_distance_pl_arc_start() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_arc 0,0 3,0 0,3; add_line 0,10 5,10");
+        run_ok(&mut ctx, "distance A0.start L0 8");
+        assert!(!has_helper_points(&ctx));
+        assert_eq!(ctx.sketch.distance_arc_start_l.len(), 1);
     }
 
     #[test]
