@@ -477,7 +477,7 @@ impl EditorApp {
             let (ts, te) = self.dim_text_segment(dim);
             let dt = Self::screen_point_to_segment_dist(screen_pos, ts, te);
             // Arrow line segment (for angle dimensions, use the arc)
-            let da = if matches!(dim.kind, DimensionKind::ArcRadius(_) | DimensionKind::ArcSweep(_) | DimensionKind::Angle(..)) {
+            let da = if matches!(dim.kind, DimensionKind::ArcRadius(_) | DimensionKind::ArcSweep(_) | DimensionKind::Angle(..) | DimensionKind::LineAngle(_) | DimensionKind::HDistance(..) | DimensionKind::VDistance(..)) {
                 dt // for radius and angle, text check is enough
             } else {
                 let (p1, p2) = self.dim_endpoints(&dim.kind);
@@ -1216,6 +1216,22 @@ impl EditorApp {
                 let angle_deg = if *supplement { 180.0 - rad2deg(angle_rad) } else { rad2deg(angle_rad) };
                 angle_deg
             }
+            DimensionKind::HDistance(a, b) => {
+                let pa = self.dim_endpoint_pos(a);
+                let pb = self.dim_endpoint_pos(b);
+                (pa.x - pb.x).abs()
+            }
+            DimensionKind::VDistance(a, b) => {
+                let pa = self.dim_endpoint_pos(a);
+                let pb = self.dim_endpoint_pos(b);
+                (pa.y - pb.y).abs()
+            }
+            DimensionKind::LineAngle(r) => {
+                let l = &self.sketch.lines[*r];
+                let dx = l.p2.value.x - l.p1.value.x;
+                let dy = l.p2.value.y - l.p1.value.y;
+                rad2deg(dy.atan2(dx))
+            }
         }
     }
 
@@ -1351,6 +1367,13 @@ impl EditorApp {
                 let mb = vect2d::new((lb.p1.value.x + lb.p2.value.x) / 2.0,
                                      (lb.p1.value.y + lb.p2.value.y) / 2.0);
                 (ma, mb)
+            }
+            DimensionKind::HDistance(a, b) | DimensionKind::VDistance(a, b) => {
+                (self.dim_endpoint_pos(a), self.dim_endpoint_pos(b))
+            }
+            DimensionKind::LineAngle(r) => {
+                let l = &self.sketch.lines[*r];
+                (l.p1.value, l.p2.value)
             }
         }
     }

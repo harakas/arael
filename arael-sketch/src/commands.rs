@@ -150,6 +150,22 @@ fn dimension_rejection_hint(sketch: &Sketch, action: &Action) -> String {
                 Some(("distance", dist))
             }
         }
+        DimensionKind::HDistance(a, b) => {
+            let pa = dim_endpoint_pos_from_sketch(sketch, a);
+            let pb = dim_endpoint_pos_from_sketch(sketch, b);
+            Some(("hdistance", (pa.x - pb.x).abs()))
+        }
+        DimensionKind::VDistance(a, b) => {
+            let pa = dim_endpoint_pos_from_sketch(sketch, a);
+            let pb = dim_endpoint_pos_from_sketch(sketch, b);
+            Some(("vdistance", (pa.y - pb.y).abs()))
+        }
+        DimensionKind::LineAngle(r) => {
+            let l = &sketch.lines[*r];
+            let dx = l.p2.value.x - l.p1.value.x;
+            let dy = l.p2.value.y - l.p1.value.y;
+            Some(("xangle", arael::utils::rad2deg(dy.atan2(dx))))
+        }
     };
     if let Some((label, current_val)) = current {
         format!(". Current {} is {:.4}, requested {:.4}", label, current_val, requested)
@@ -1026,6 +1042,9 @@ fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
         "sweep" => cmd_sweep(ctx, args_str),
         "angle" => cmd_angle(ctx, args_str),
         "distance" => cmd_distance(ctx, args_str),
+        "hdistance" => cmd_hdistance(ctx, args_str),
+        "vdistance" => cmd_vdistance(ctx, args_str),
+        "xangle" => cmd_xangle(ctx, args_str),
         "remove_dim" => cmd_remove_dim(ctx, args_str),
         "remove_constraint" | "rc" => cmd_remove_constraint(ctx, args_str),
         "lock" => cmd_lock(ctx, args_str),
@@ -2444,7 +2463,7 @@ fn cmd_list(ctx: &mut CommandContext, args: &str) -> CommandResult {
         "horizontal", "vertical", "parallel", "perpendicular", "equal", "collinear",
         "tangent", "coincident", "concentric", "midpoint", "symmetry", "point_on", "lock",
     ];
-    const DIMENSION_FILTERS: &[&str] = &["angle", "length", "radius", "sweep", "distance"];
+    const DIMENSION_FILTERS: &[&str] = &["angle", "length", "radius", "sweep", "distance", "hdistance", "vdistance", "xangle"];
     if CONSTRAINT_FILTERS.contains(&filter) {
         let all = ctx.sketch.list_constraints();
         let filtered: Vec<String> = all.into_iter().filter(|s| s.starts_with(filter)).collect();
@@ -3041,6 +3060,99 @@ fn cmd_distance(ctx: &mut CommandContext, args: &str) -> CommandResult {
     ctx.exec(Action::AddDimension { kind, value: val, expr, derived: is_derived });
     let prefix = if is_derived { "Derived distance" } else { "Set distance" };
     ok_or_status(ctx, format!("{} = {}", prefix, tokens[2]))
+}
+
+fn cmd_hdistance(ctx: &mut CommandContext, args: &str) -> CommandResult {
+    cmd_axis_distance(ctx, args, true)
+}
+
+fn cmd_vdistance(ctx: &mut CommandContext, args: &str) -> CommandResult {
+    cmd_axis_distance(ctx, args, false)
+}
+
+fn cmd_axis_distance(ctx: &mut CommandContext, args: &str, horizontal: bool) -> CommandResult {
+    let label = if horizontal { "hdistance" } else { "vdistance" };
+    let mut tokens: Vec<&str> = args.split_whitespace().collect();
+    let is_derived = tokens.last() == Some(&"derived");
+    if is_derived { tokens.pop(); }
+
+    fn to_dim_ep(ep: EndpointRef) -> DimensionEndpoint {
+        match ep {
+            EndpointRef::Point(p) => DimensionEndpoint::Point(p),
+            EndpointRef::LineP1(l) => DimensionEndpoint::LineP1(l),
+            EndpointRef::LineP2(l) => DimensionEndpoint::LineP2(l),
+            EndpointRef::ArcCenter(a) => DimensionEndpoint::ArcCenter(a),
+            EndpointRef::ArcStart(a) => DimensionEndpoint::ArcStart(a),
+            EndpointRef::ArcEnd(a) => DimensionEndpoint::ArcEnd(a),
+        }
+    }
+
+    // "hdistance L0.p1 L1.p2 derived" — measure-only
+    if tokens.len() == 2 && is_derived {
+        let ep_a = match resolve_endpoint_ref(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
+        let ep_b = match resolve_endpoint_ref(&ctx.sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
+        let pa = resolve_endpoint_pos(&ctx.sketch, tokens[0]).unwrap();
+        let pb = resolve_endpoint_pos(&ctx.sketch, tokens[1]).unwrap();
+        let measured = if horizontal { (pa.x - pb.x).abs() } else { (pa.y - pb.y).abs() };
+        let kind = if horizontal { DimensionKind::HDistance(to_dim_ep(ep_a), to_dim_ep(ep_b)) }
+                   else { DimensionKind::VDistance(to_dim_ep(ep_a), to_dim_ep(ep_b)) };
+        ctx.begin_group();
+        ctx.exec(Action::AddDimension { kind, value: measured, expr: None, derived: true });
+        return ok_or_status(ctx, format!("Derived {} {} {} = ({:.4})", label, tokens[0], tokens[1], measured));
+    }
+
+    if tokens.len() != 3 {
+        return err(&format!("Usage: {} L0.p1 L1.p2 5 [derived]", label));
+    }
+    let (val, expr) = match parse_dim_value(&ctx.sketch, tokens[2]) { Ok(v) => v, Err(e) => return err(e) };
+    let ep_a = match resolve_endpoint_ref(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
+    let ep_b = match resolve_endpoint_ref(&ctx.sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
+    let kind = if horizontal { DimensionKind::HDistance(to_dim_ep(ep_a), to_dim_ep(ep_b)) }
+               else { DimensionKind::VDistance(to_dim_ep(ep_a), to_dim_ep(ep_b)) };
+    ctx.begin_group();
+    if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
+        let name = ctx.sketch.dimensions[idx].name.clone();
+        ctx.exec(Action::UpdateDimension { index: idx, value: val, expr });
+        return ok_or_status(ctx, format!("Updated {} {} = {}", name, label, tokens[2]));
+    }
+    ctx.exec(Action::AddDimension { kind, value: val, expr, derived: is_derived });
+    let prefix = if is_derived { format!("Derived {}", label) } else { format!("Set {}", label) };
+    ok_or_status(ctx, format!("{} = {}", prefix, tokens[2]))
+}
+
+fn cmd_xangle(ctx: &mut CommandContext, args: &str) -> CommandResult {
+    let mut tokens: Vec<&str> = args.split_whitespace().collect();
+    let is_derived = tokens.last() == Some(&"derived");
+    if is_derived { tokens.pop(); }
+
+    // "xangle L0 derived" — measure-only
+    if tokens.len() == 1 && is_derived {
+        let line = match resolve_line(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
+        let l = &ctx.sketch.lines[line];
+        let dx = l.p2.value.x - l.p1.value.x;
+        let dy = l.p2.value.y - l.p1.value.y;
+        let measured = arael::utils::rad2deg(dy.atan2(dx));
+        let kind = DimensionKind::LineAngle(line);
+        ctx.begin_group();
+        ctx.exec(Action::AddDimension { kind, value: measured, expr: None, derived: true });
+        return ok_or_status(ctx, format!("Derived xangle {} = ({:.4})", tokens[0], measured));
+    }
+
+    if tokens.len() != 2 {
+        return err("Usage: xangle L0 45 [derived]");
+    }
+    let line = match resolve_line(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
+    let (val, expr) = match parse_dim_value(&ctx.sketch, tokens[1]) { Ok(v) => v, Err(e) => return err(e) };
+    let kind = DimensionKind::LineAngle(line);
+    ctx.begin_group();
+    if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
+        let name = ctx.sketch.dimensions[idx].name.clone();
+        ctx.exec(Action::UpdateDimension { index: idx, value: val, expr });
+        return ok_or_status(ctx, format!("Updated {} xangle = {}", name, tokens[1]));
+    }
+    ctx.exec(Action::AddDimension { kind, value: val, expr, derived: is_derived });
+    let prefix = if is_derived { "Derived xangle" } else { "Set xangle" };
+    ok_or_status(ctx, format!("{} = {}", prefix, tokens[1]))
 }
 
 fn cmd_freeze(ctx: &mut CommandContext, args: &str) -> CommandResult {
@@ -4047,7 +4159,7 @@ fn cmd_help(args: &str) -> CommandResult {
     if args.is_empty() {
         ok("Commands: add_line add_point add_circle add_arc offset_line delete horizontal vertical \
             parallel perpendicular equal collinear tangent coincident concentric midpoint \
-            symmetry point_on length radius sweep angle distance freeze remove_dim set_derived set_driven \
+            symmetry point_on length radius sweep angle distance hdistance vdistance xangle freeze remove_dim set_derived set_driven \
             lock unlock param del_param rename_param style select deselect print info list \
             find dof cost undo redo history goto center zoom cursor dim_pos clear let save load \
             remove_constraint(rc) exit help\n\
@@ -4075,6 +4187,9 @@ fn cmd_help(args: &str) -> CommandResult {
             "sweep" => "sweep A0 180 | sweep A0 =90*n | sweep A0 {expr} [derived]",
             "angle" => "angle L0 L1 45 [supplement|closest|acute|obtuse] [derived]",
             "distance" => "distance L0.p1 L1.p2 5 | distance P0 L0 3 | distance L0.p1 L1.p2 =expr [derived]",
+            "hdistance" => "hdistance L0.p1 L1.p2 5 [derived] — horizontal (x-axis) distance",
+            "vdistance" => "vdistance L0.p1 L1.p2 3 [derived] — vertical (y-axis) distance",
+            "xangle" => "xangle L0 45 [derived] — line angle from x-axis in degrees",
             "freeze" => "freeze [L0 L1 A0 ...] — add numeric dimensions at current values (all if no args)",
             "remove_constraint" | "rc" => "remove_constraint L0 horizontal | remove_constraint L0 L1 parallel | rc A0 L0 A1 symmetry (type last)",
             "remove_dim" => "remove_dim d0",
@@ -4125,7 +4240,7 @@ const COMMAND_NAMES: &[&str] = &[
     "add_line", "add_point", "add_circle", "add_arc", "offset_line", "offset",
     "delete", "horizontal", "vertical", "parallel", "perpendicular", "perp",
     "equal", "collinear", "tangent", "coincident", "concentric", "midpoint",
-    "symmetry", "point_on", "length", "radius", "sweep", "angle", "distance",
+    "symmetry", "point_on", "length", "radius", "sweep", "angle", "distance", "hdistance", "vdistance", "xangle",
     "remove_dim", "remove_constraint", "rc", "set_derived", "set_driven",
     "lock", "unlock", "param", "del_param", "rename_param", "style",
     "select", "deselect", "freeze", "print", "info", "measure", "list", "find", "let",
@@ -4351,6 +4466,26 @@ pub fn complete(
             if token_index <= 2 {
                 add_all_entities(sketch, &mut results, current_word);
             } else if token_index == 3 {
+                add_matching(&mut results, current_word, &["derived"]);
+                add_expression_completions(sketch, session_names, &mut results, current_word);
+            }
+        }
+
+        // hdistance/vdistance: arg1=endpoint, arg2=endpoint, arg3=value/derived
+        "hdistance" | "vdistance" => {
+            if token_index <= 2 {
+                add_all_entities(sketch, &mut results, current_word);
+            } else if token_index == 3 {
+                add_matching(&mut results, current_word, &["derived"]);
+                add_expression_completions(sketch, session_names, &mut results, current_word);
+            }
+        }
+
+        // xangle: arg1=line, arg2=value/derived
+        "xangle" => {
+            if token_index == 1 {
+                add_lines(sketch, &mut results, current_word);
+            } else if token_index == 2 {
                 add_matching(&mut results, current_word, &["derived"]);
                 add_expression_completions(sketch, session_names, &mut results, current_word);
             }
@@ -4868,6 +5003,208 @@ mod tests {
         assert_eq!(ctx.sketch.dimensions.len(), 1);
         // Solve happened inside exec
         assert!(near(line_len(&ctx, "L0"), 3.0));
+    }
+
+    #[test]
+    fn test_hdistance() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,3");
+        run_ok(&mut ctx, "hdistance L0.p1 L0.p2 4");
+        assert_eq!(ctx.sketch.dimensions.len(), 1);
+        let l = &ctx.sketch.lines[resolve_line(&ctx.sketch, "L0").unwrap()];
+        assert!(near((l.p2.value.x - l.p1.value.x).abs(), 4.0));
+    }
+
+    #[test]
+    fn test_vdistance() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,3");
+        run_ok(&mut ctx, "vdistance L0.p1 L0.p2 2");
+        assert_eq!(ctx.sketch.dimensions.len(), 1);
+        let l = &ctx.sketch.lines[resolve_line(&ctx.sketch, "L0").unwrap()];
+        assert!(near((l.p2.value.y - l.p1.value.y).abs(), 2.0));
+    }
+
+    #[test]
+    fn test_xangle() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,3");
+        run_ok(&mut ctx, "xangle L0 45");
+        assert_eq!(ctx.sketch.dimensions.len(), 1);
+        let l = &ctx.sketch.lines[resolve_line(&ctx.sketch, "L0").unwrap()];
+        let dx = l.p2.value.x - l.p1.value.x;
+        let dy = l.p2.value.y - l.p1.value.y;
+        let angle = dy.atan2(dx).to_degrees();
+        assert!(near(angle, 45.0));
+    }
+
+    #[test]
+    fn test_hdistance_update_and_remove() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,3");
+        run_ok(&mut ctx, "hdistance L0.p1 L0.p2 4");
+        run_ok(&mut ctx, "hdistance L0.p1 L0.p2 6");
+        assert_eq!(ctx.sketch.dimensions.len(), 1); // updated, not duplicated
+        let l = &ctx.sketch.lines[resolve_line(&ctx.sketch, "L0").unwrap()];
+        assert!(near((l.p2.value.x - l.p1.value.x).abs(), 6.0));
+        run_ok(&mut ctx, "remove_dim d0");
+        assert_eq!(ctx.sketch.dimensions.len(), 0);
+    }
+
+    #[test]
+    fn test_xangle_negative() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,3");
+        run_ok(&mut ctx, "xangle L0 -30");
+        let l = &ctx.sketch.lines[resolve_line(&ctx.sketch, "L0").unwrap()];
+        let dx = l.p2.value.x - l.p1.value.x;
+        let dy = l.p2.value.y - l.p1.value.y;
+        let angle = dy.atan2(dx).to_degrees();
+        assert!(near(angle, -30.0));
+    }
+
+    #[test]
+    fn test_axis_distance_dof() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,3");
+        let dof_before = ctx.sketch.dof().unwrap();
+        run_ok(&mut ctx, "hdistance L0.p1 L0.p2 4");
+        let dof_after = ctx.sketch.dof().unwrap();
+        assert_eq!(dof_after, dof_before - 1);
+        run_ok(&mut ctx, "vdistance L0.p1 L0.p2 2");
+        let dof_after2 = ctx.sketch.dof().unwrap();
+        assert_eq!(dof_after2, dof_after - 1);
+    }
+
+    #[test]
+    fn test_hdistance_preserves_direction() {
+        // hdistance is signed internally: can't swap endpoints to satisfy
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,3");
+        run_ok(&mut ctx, "hdistance L0.p1 L0.p2 4");
+        let l = &ctx.sketch.lines[resolve_line(&ctx.sketch, "L0").unwrap()];
+        // p2.x should be to the right of p1.x (positive direction preserved)
+        assert!(l.p2.value.x > l.p1.value.x);
+    }
+
+    #[test]
+    fn test_axis_distance_ll_combinations() {
+        // LL11: p1-p1
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,3; add_line 8,1 12,4");
+        run_ok(&mut ctx, "hdistance L0.p1 L1.p1 6");
+        let l0 = &ctx.sketch.lines[resolve_line(&ctx.sketch, "L0").unwrap()];
+        let l1 = &ctx.sketch.lines[resolve_line(&ctx.sketch, "L1").unwrap()];
+        assert!(near((l1.p1.value.x - l0.p1.value.x).abs(), 6.0));
+
+        // LL12: p1-p2
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,3; add_line 8,1 12,4");
+        run_ok(&mut ctx, "vdistance L0.p1 L1.p2 3");
+        let l0 = &ctx.sketch.lines[resolve_line(&ctx.sketch, "L0").unwrap()];
+        let l1 = &ctx.sketch.lines[resolve_line(&ctx.sketch, "L1").unwrap()];
+        assert!(near((l1.p2.value.y - l0.p1.value.y).abs(), 3.0));
+
+        // LL21: p2-p1
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,3; add_line 8,1 12,4");
+        run_ok(&mut ctx, "hdistance L0.p2 L1.p1 2");
+        let l0 = &ctx.sketch.lines[resolve_line(&ctx.sketch, "L0").unwrap()];
+        let l1 = &ctx.sketch.lines[resolve_line(&ctx.sketch, "L1").unwrap()];
+        assert!(near((l1.p1.value.x - l0.p2.value.x).abs(), 2.0));
+
+        // LL22: p2-p2
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,3; add_line 8,1 12,4");
+        run_ok(&mut ctx, "vdistance L0.p2 L1.p2 5");
+        let l0 = &ctx.sketch.lines[resolve_line(&ctx.sketch, "L0").unwrap()];
+        let l1 = &ctx.sketch.lines[resolve_line(&ctx.sketch, "L1").unwrap()];
+        assert!(near((l1.p2.value.y - l0.p2.value.y).abs(), 5.0));
+    }
+
+    #[test]
+    fn test_axis_distance_lp_combinations() {
+        // LP1: line.p1 to point
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,3; add_point 8,2");
+        run_ok(&mut ctx, "hdistance L0.p1 P0 7");
+        let l = &ctx.sketch.lines[resolve_line(&ctx.sketch, "L0").unwrap()];
+        let p = &ctx.sketch.points[resolve_point(&ctx.sketch, "P0").unwrap()];
+        assert!(near((p.pos.value.x - l.p1.value.x).abs(), 7.0));
+
+        // LP2: line.p2 to point
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,3; add_point 8,2");
+        run_ok(&mut ctx, "vdistance L0.p2 P0 4");
+        let l = &ctx.sketch.lines[resolve_line(&ctx.sketch, "L0").unwrap()];
+        let p = &ctx.sketch.points[resolve_point(&ctx.sketch, "P0").unwrap()];
+        assert!(near((p.pos.value.y - l.p2.value.y).abs(), 4.0));
+
+        // Reversed: point first
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,3; add_point 8,2");
+        run_ok(&mut ctx, "hdistance P0 L0.p1 7");
+        let l = &ctx.sketch.lines[resolve_line(&ctx.sketch, "L0").unwrap()];
+        let p = &ctx.sketch.points[resolve_point(&ctx.sketch, "P0").unwrap()];
+        assert!(near((p.pos.value.x - l.p1.value.x).abs(), 7.0));
+    }
+
+    #[test]
+    fn test_axis_distance_pp() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_point 0,0; add_point 5,3");
+        run_ok(&mut ctx, "hdistance P0 P1 4");
+        let p0 = &ctx.sketch.points[resolve_point(&ctx.sketch, "P0").unwrap()];
+        let p1 = &ctx.sketch.points[resolve_point(&ctx.sketch, "P1").unwrap()];
+        assert!(near((p1.pos.value.x - p0.pos.value.x).abs(), 4.0));
+
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_point 0,0; add_point 5,3");
+        run_ok(&mut ctx, "vdistance P0 P1 2");
+        let p0 = &ctx.sketch.points[resolve_point(&ctx.sketch, "P0").unwrap()];
+        let p1 = &ctx.sketch.points[resolve_point(&ctx.sketch, "P1").unwrap()];
+        assert!(near((p1.pos.value.y - p0.pos.value.y).abs(), 2.0));
+    }
+
+    #[test]
+    fn test_axis_distance_arc_point() {
+        // Arc center to point
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_circle 5,5 2; add_point 10,3");
+        run_ok(&mut ctx, "hdistance A0.center P0 3");
+        let a = &ctx.sketch.arcs[resolve_arc(&ctx.sketch, "A0").unwrap()];
+        let p = &ctx.sketch.points[resolve_point(&ctx.sketch, "P0").unwrap()];
+        assert!(near((p.pos.value.x - a.center.value.x).abs(), 3.0));
+
+        // Arc center to point, vdistance
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_circle 5,5 2; add_point 10,3");
+        run_ok(&mut ctx, "vdistance A0.center P0 4");
+        let a = &ctx.sketch.arcs[resolve_arc(&ctx.sketch, "A0").unwrap()];
+        let p = &ctx.sketch.points[resolve_point(&ctx.sketch, "P0").unwrap()];
+        assert!(near((p.pos.value.y - a.center.value.y).abs(), 4.0));
+    }
+
+    #[test]
+    fn test_axis_distance_arc_line() {
+        // Arc center to line endpoint
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_circle 5,5 2; add_line 10,3 15,7");
+        run_ok(&mut ctx, "hdistance A0.center L0.p1 4");
+        let a = &ctx.sketch.arcs[resolve_arc(&ctx.sketch, "A0").unwrap()];
+        let l = &ctx.sketch.lines[resolve_line(&ctx.sketch, "L0").unwrap()];
+        assert!(near((l.p1.value.x - a.center.value.x).abs(), 4.0));
+    }
+
+    #[test]
+    fn test_axis_distance_arc_arc() {
+        // Arc center to arc center
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_circle 0,0 1; add_circle 8,5 2");
+        run_ok(&mut ctx, "hdistance A0.center A1.center 6");
+        let a0 = &ctx.sketch.arcs[resolve_arc(&ctx.sketch, "A0").unwrap()];
+        let a1 = &ctx.sketch.arcs[resolve_arc(&ctx.sketch, "A1").unwrap()];
+        assert!(near((a1.center.value.x - a0.center.value.x).abs(), 6.0));
     }
 
     #[test]

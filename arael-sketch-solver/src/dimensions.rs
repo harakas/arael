@@ -28,6 +28,12 @@ pub enum DimensionKind {
     /// Angle between two lines. The bool is `supplement`: when true,
     /// constrains the supplementary angle (pi - angle) instead.
     Angle(Ref<Line>, Ref<Line>, bool),
+    /// Horizontal (x-axis) distance between two endpoints. Displayed unsigned, applied signed.
+    HDistance(DimensionEndpoint, DimensionEndpoint),
+    /// Vertical (y-axis) distance between two endpoints. Displayed unsigned, applied signed.
+    VDistance(DimensionEndpoint, DimensionEndpoint),
+    /// Line angle from x-axis, in degrees.
+    LineAngle(Ref<Line>),
 }
 
 impl DimensionEndpoint {
@@ -47,6 +53,8 @@ impl DimensionKind {
         match self {
             DimensionKind::PointPointDistance(a, b) => a.references_point(r) || b.references_point(r),
             DimensionKind::PointLineDistance(a, _) => a.references_point(r),
+            DimensionKind::HDistance(a, b) | DimensionKind::VDistance(a, b) => a.references_point(r) || b.references_point(r),
+            DimensionKind::LineAngle(_) => false,
             _ => false,
         }
     }
@@ -56,6 +64,8 @@ impl DimensionKind {
             DimensionKind::PointPointDistance(a, b) => a.references_line(r) || b.references_line(r),
             DimensionKind::PointLineDistance(a, l) => a.references_line(r) || *l == r,
             DimensionKind::Angle(a, b, _) => *a == r || *b == r,
+            DimensionKind::HDistance(a, b) | DimensionKind::VDistance(a, b) => a.references_line(r) || b.references_line(r),
+            DimensionKind::LineAngle(l) => *l == r,
             _ => false,
         }
     }
@@ -64,6 +74,8 @@ impl DimensionKind {
             DimensionKind::ArcRadius(a) | DimensionKind::ArcSweep(a) => *a == r,
             DimensionKind::PointPointDistance(a, b) => a.references_arc(r) || b.references_arc(r),
             DimensionKind::PointLineDistance(a, _) => a.references_arc(r),
+            DimensionKind::HDistance(a, b) | DimensionKind::VDistance(a, b) => a.references_arc(r) || b.references_arc(r),
+            DimensionKind::LineAngle(_) => false,
             _ => false,
         }
     }
@@ -171,6 +183,26 @@ impl Dimension {
                 let ldy = l.p2.value.y - l.p1.value.y;
                 let cross = (pt_pos.x - l.p1.value.x) * ldy - (pt_pos.y - l.p1.value.y) * ldx;
                 if cross >= 0.0 { signed } else { -signed }
+            }
+            DimensionKind::HDistance(a, b) => {
+                let pa = dim_endpoint_symbol(a, sketch);
+                let pb = dim_endpoint_symbol(b, sketch);
+                arael_sym::abs(pa.0 - pb.0)
+            }
+            DimensionKind::VDistance(a, b) => {
+                let pa = dim_endpoint_symbol(a, sketch);
+                let pb = dim_endpoint_symbol(b, sketch);
+                arael_sym::abs(pa.1 - pb.1)
+            }
+            DimensionKind::LineAngle(r) => {
+                let name = &sketch.lines[*r].name;
+                let p1x = symbol(&format!("{}.p1.x", name));
+                let p1y = symbol(&format!("{}.p1.y", name));
+                let p2x = symbol(&format!("{}.p2.x", name));
+                let p2y = symbol(&format!("{}.p2.y", name));
+                let dx = p2x - p1x;
+                let dy = p2y - p1y;
+                arael_sym::atan2(dy, dx) * arael_sym::constant(180.0 / std::f64::consts::PI)
             }
             DimensionKind::Angle(a, b, supplement) => {
                 let la = &sketch.lines[*a].name;

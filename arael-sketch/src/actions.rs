@@ -163,6 +163,9 @@ impl Action {
                     DimensionKind::PointPointDistance(_, _) => "distance",
                     DimensionKind::PointLineDistance(_, _) => "distance",
                     DimensionKind::Angle(_, _, _) => "angle",
+                    DimensionKind::HDistance(_, _) => "hdistance",
+                    DimensionKind::VDistance(_, _) => "vdistance",
+                    DimensionKind::LineAngle(_) => "xangle",
                 };
                 if expr.is_some() { format!("Add {} (expr)", kind_str) }
                 else { format!("Add {}", kind_str) }
@@ -267,6 +270,112 @@ pub fn arc_end_pos_sketch(sketch: &Sketch, r: Ref<Arc>) -> vect2d {
         a.center.value.x + a.radius.value * a.end_angle.value.cos(),
         a.center.value.y + a.radius.value * a.end_angle.value.sin(),
     )
+}
+
+/// Get position of a DimensionEndpoint from a Sketch (read-only).
+pub fn dim_endpoint_pos_sketch(sketch: &Sketch, ep: &DimensionEndpoint) -> vect2d {
+    match *ep {
+        DimensionEndpoint::Point(r) => sketch.points[r].pos.value,
+        DimensionEndpoint::LineP1(r) => sketch.lines[r].p1.value,
+        DimensionEndpoint::LineP2(r) => sketch.lines[r].p2.value,
+        DimensionEndpoint::ArcCenter(r) => sketch.arcs[r].center.value,
+        DimensionEndpoint::ArcStart(r) => arc_start_pos_sketch(sketch, r),
+        DimensionEndpoint::ArcEnd(r) => arc_end_pos_sketch(sketch, r),
+    }
+}
+
+/// Push the correct AxisDistance constraint for the given endpoint pair.
+fn push_axis_distance(sketch: &mut Sketch, a: &DimensionEndpoint, b: &DimensionEndpoint, distance: f64, horizontal: bool) {
+    use DimensionEndpoint::*;
+    match (a, b) {
+        (Point(pa), Point(pb)) => {
+            if horizontal {
+                sketch.hdistance_pp.push(HorizontalDistancePP { a: *pa, b: *pb, distance, hb: CrossBlock::new() });
+            } else {
+                sketch.vdistance_pp.push(VerticalDistancePP { a: *pa, b: *pb, distance, hb: CrossBlock::new() });
+            }
+        }
+        // Line-Line
+        (LineP1(la), LineP1(lb)) => { sketch.axis_distance_ll11.push(AxisDistanceLL11 { a: *la, b: *lb, distance, horizontal, hb: CrossBlock::new() }); }
+        (LineP1(la), LineP2(lb)) => { sketch.axis_distance_ll12.push(AxisDistanceLL12 { a: *la, b: *lb, distance, horizontal, hb: CrossBlock::new() }); }
+        (LineP2(la), LineP1(lb)) => { sketch.axis_distance_ll21.push(AxisDistanceLL21 { a: *la, b: *lb, distance, horizontal, hb: CrossBlock::new() }); }
+        (LineP2(la), LineP2(lb)) => { sketch.axis_distance_ll22.push(AxisDistanceLL22 { a: *la, b: *lb, distance, horizontal, hb: CrossBlock::new() }); }
+        // Line-Point (constraint has line first, so negate distance if point is first arg)
+        (LineP1(l), Point(p)) => { sketch.axis_distance_lp1.push(AxisDistanceLP1 { line: *l, point: *p, distance, horizontal, hb: CrossBlock::new() }); }
+        (Point(p), LineP1(l)) => { sketch.axis_distance_lp1.push(AxisDistanceLP1 { line: *l, point: *p, distance: -distance, horizontal, hb: CrossBlock::new() }); }
+        (LineP2(l), Point(p)) => { sketch.axis_distance_lp2.push(AxisDistanceLP2 { line: *l, point: *p, distance, horizontal, hb: CrossBlock::new() }); }
+        (Point(p), LineP2(l)) => { sketch.axis_distance_lp2.push(AxisDistanceLP2 { line: *l, point: *p, distance: -distance, horizontal, hb: CrossBlock::new() }); }
+        // Arc-Point (constraint has arc first)
+        (ArcCenter(ar), Point(p)) => { sketch.axis_distance_arc_center_p.push(AxisDistanceArcCenterP { arc: *ar, point: *p, distance, horizontal, hb: CrossBlock::new() }); }
+        (Point(p), ArcCenter(ar)) => { sketch.axis_distance_arc_center_p.push(AxisDistanceArcCenterP { arc: *ar, point: *p, distance: -distance, horizontal, hb: CrossBlock::new() }); }
+        (ArcStart(ar), Point(p)) => { sketch.axis_distance_arc_start_p.push(AxisDistanceArcStartP { arc: *ar, point: *p, distance, horizontal, hb: CrossBlock::new() }); }
+        (Point(p), ArcStart(ar)) => { sketch.axis_distance_arc_start_p.push(AxisDistanceArcStartP { arc: *ar, point: *p, distance: -distance, horizontal, hb: CrossBlock::new() }); }
+        (ArcEnd(ar), Point(p)) => { sketch.axis_distance_arc_end_p.push(AxisDistanceArcEndP { arc: *ar, point: *p, distance, horizontal, hb: CrossBlock::new() }); }
+        (Point(p), ArcEnd(ar)) => { sketch.axis_distance_arc_end_p.push(AxisDistanceArcEndP { arc: *ar, point: *p, distance: -distance, horizontal, hb: CrossBlock::new() }); }
+        // Arc-Line (constraint has arc first)
+        (ArcCenter(ar), LineP1(l)) => { sketch.axis_distance_arc_center_l1.push(AxisDistanceArcCenterL1 { arc: *ar, line: *l, distance, horizontal, hb: CrossBlock::new() }); }
+        (LineP1(l), ArcCenter(ar)) => { sketch.axis_distance_arc_center_l1.push(AxisDistanceArcCenterL1 { arc: *ar, line: *l, distance: -distance, horizontal, hb: CrossBlock::new() }); }
+        (ArcCenter(ar), LineP2(l)) => { sketch.axis_distance_arc_center_l2.push(AxisDistanceArcCenterL2 { arc: *ar, line: *l, distance, horizontal, hb: CrossBlock::new() }); }
+        (LineP2(l), ArcCenter(ar)) => { sketch.axis_distance_arc_center_l2.push(AxisDistanceArcCenterL2 { arc: *ar, line: *l, distance: -distance, horizontal, hb: CrossBlock::new() }); }
+        (ArcStart(ar), LineP1(l)) => { sketch.axis_distance_arc_start_l1.push(AxisDistanceArcStartL1 { arc: *ar, line: *l, distance, horizontal, hb: CrossBlock::new() }); }
+        (LineP1(l), ArcStart(ar)) => { sketch.axis_distance_arc_start_l1.push(AxisDistanceArcStartL1 { arc: *ar, line: *l, distance: -distance, horizontal, hb: CrossBlock::new() }); }
+        (ArcStart(ar), LineP2(l)) => { sketch.axis_distance_arc_start_l2.push(AxisDistanceArcStartL2 { arc: *ar, line: *l, distance, horizontal, hb: CrossBlock::new() }); }
+        (LineP2(l), ArcStart(ar)) => { sketch.axis_distance_arc_start_l2.push(AxisDistanceArcStartL2 { arc: *ar, line: *l, distance: -distance, horizontal, hb: CrossBlock::new() }); }
+        (ArcEnd(ar), LineP1(l)) => { sketch.axis_distance_arc_end_l1.push(AxisDistanceArcEndL1 { arc: *ar, line: *l, distance, horizontal, hb: CrossBlock::new() }); }
+        (LineP1(l), ArcEnd(ar)) => { sketch.axis_distance_arc_end_l1.push(AxisDistanceArcEndL1 { arc: *ar, line: *l, distance: -distance, horizontal, hb: CrossBlock::new() }); }
+        (ArcEnd(ar), LineP2(l)) => { sketch.axis_distance_arc_end_l2.push(AxisDistanceArcEndL2 { arc: *ar, line: *l, distance, horizontal, hb: CrossBlock::new() }); }
+        (LineP2(l), ArcEnd(ar)) => { sketch.axis_distance_arc_end_l2.push(AxisDistanceArcEndL2 { arc: *ar, line: *l, distance: -distance, horizontal, hb: CrossBlock::new() }); }
+        // Arc-Arc
+        (ArcCenter(a), ArcCenter(b)) => { sketch.axis_distance_aa_ce_ce.push(AxisDistanceAACeCe { a: *a, b: *b, distance, horizontal, hb: CrossBlock::new() }); }
+        (ArcCenter(a), ArcStart(b)) => { sketch.axis_distance_aa_ce_s.push(AxisDistanceAACeS { a: *a, b: *b, distance, horizontal, hb: CrossBlock::new() }); }
+        (ArcCenter(a), ArcEnd(b)) => { sketch.axis_distance_aa_ce_e.push(AxisDistanceAACeE { a: *a, b: *b, distance, horizontal, hb: CrossBlock::new() }); }
+        (ArcStart(a), ArcCenter(b)) => { sketch.axis_distance_aa_s_ce.push(AxisDistanceAASCe { a: *a, b: *b, distance, horizontal, hb: CrossBlock::new() }); }
+        (ArcStart(a), ArcStart(b)) => { sketch.axis_distance_aa_s_s.push(AxisDistanceAASS { a: *a, b: *b, distance, horizontal, hb: CrossBlock::new() }); }
+        (ArcStart(a), ArcEnd(b)) => { sketch.axis_distance_aa_s_e.push(AxisDistanceAASE { a: *a, b: *b, distance, horizontal, hb: CrossBlock::new() }); }
+        (ArcEnd(a), ArcCenter(b)) => { sketch.axis_distance_aa_e_ce.push(AxisDistanceAAECe { a: *a, b: *b, distance, horizontal, hb: CrossBlock::new() }); }
+        (ArcEnd(a), ArcStart(b)) => { sketch.axis_distance_aa_e_s.push(AxisDistanceAAES { a: *a, b: *b, distance, horizontal, hb: CrossBlock::new() }); }
+        (ArcEnd(a), ArcEnd(b)) => { sketch.axis_distance_aa_e_e.push(AxisDistanceAAEE { a: *a, b: *b, distance, horizontal, hb: CrossBlock::new() }); }
+    }
+}
+
+/// Remove all axis distance constraints matching the given endpoint pair.
+fn remove_axis_distance(sketch: &mut Sketch, a: &DimensionEndpoint, b: &DimensionEndpoint, horizontal: bool) {
+    use DimensionEndpoint::*;
+    match (a, b) {
+        (Point(pa), Point(pb)) => {
+            if horizontal {
+                sketch.hdistance_pp.retain(|c| !(c.a == *pa && c.b == *pb));
+            } else {
+                sketch.vdistance_pp.retain(|c| !(c.a == *pa && c.b == *pb));
+            }
+        }
+        (LineP1(la), LineP1(lb)) => { sketch.axis_distance_ll11.retain(|c| !(c.a == *la && c.b == *lb && c.horizontal == horizontal)); }
+        (LineP1(la), LineP2(lb)) => { sketch.axis_distance_ll12.retain(|c| !(c.a == *la && c.b == *lb && c.horizontal == horizontal)); }
+        (LineP2(la), LineP1(lb)) => { sketch.axis_distance_ll21.retain(|c| !(c.a == *la && c.b == *lb && c.horizontal == horizontal)); }
+        (LineP2(la), LineP2(lb)) => { sketch.axis_distance_ll22.retain(|c| !(c.a == *la && c.b == *lb && c.horizontal == horizontal)); }
+        (LineP1(l), Point(p)) => { sketch.axis_distance_lp1.retain(|c| !(c.line == *l && c.point == *p && c.horizontal == horizontal)); }
+        (Point(p), LineP1(l)) => { sketch.axis_distance_lp1.retain(|c| !(c.line == *l && c.point == *p && c.horizontal == horizontal)); }
+        (LineP2(l), Point(p)) => { sketch.axis_distance_lp2.retain(|c| !(c.line == *l && c.point == *p && c.horizontal == horizontal)); }
+        (Point(p), LineP2(l)) => { sketch.axis_distance_lp2.retain(|c| !(c.line == *l && c.point == *p && c.horizontal == horizontal)); }
+        (ArcCenter(ar), Point(p)) | (Point(p), ArcCenter(ar)) => { sketch.axis_distance_arc_center_p.retain(|c| !(c.arc == *ar && c.point == *p && c.horizontal == horizontal)); }
+        (ArcStart(ar), Point(p)) | (Point(p), ArcStart(ar)) => { sketch.axis_distance_arc_start_p.retain(|c| !(c.arc == *ar && c.point == *p && c.horizontal == horizontal)); }
+        (ArcEnd(ar), Point(p)) | (Point(p), ArcEnd(ar)) => { sketch.axis_distance_arc_end_p.retain(|c| !(c.arc == *ar && c.point == *p && c.horizontal == horizontal)); }
+        (ArcCenter(ar), LineP1(l)) | (LineP1(l), ArcCenter(ar)) => { sketch.axis_distance_arc_center_l1.retain(|c| !(c.arc == *ar && c.line == *l && c.horizontal == horizontal)); }
+        (ArcCenter(ar), LineP2(l)) | (LineP2(l), ArcCenter(ar)) => { sketch.axis_distance_arc_center_l2.retain(|c| !(c.arc == *ar && c.line == *l && c.horizontal == horizontal)); }
+        (ArcStart(ar), LineP1(l)) | (LineP1(l), ArcStart(ar)) => { sketch.axis_distance_arc_start_l1.retain(|c| !(c.arc == *ar && c.line == *l && c.horizontal == horizontal)); }
+        (ArcStart(ar), LineP2(l)) | (LineP2(l), ArcStart(ar)) => { sketch.axis_distance_arc_start_l2.retain(|c| !(c.arc == *ar && c.line == *l && c.horizontal == horizontal)); }
+        (ArcEnd(ar), LineP1(l)) | (LineP1(l), ArcEnd(ar)) => { sketch.axis_distance_arc_end_l1.retain(|c| !(c.arc == *ar && c.line == *l && c.horizontal == horizontal)); }
+        (ArcEnd(ar), LineP2(l)) | (LineP2(l), ArcEnd(ar)) => { sketch.axis_distance_arc_end_l2.retain(|c| !(c.arc == *ar && c.line == *l && c.horizontal == horizontal)); }
+        (ArcCenter(a), ArcCenter(b)) => { sketch.axis_distance_aa_ce_ce.retain(|c| !(c.a == *a && c.b == *b && c.horizontal == horizontal)); }
+        (ArcCenter(a), ArcStart(b)) => { sketch.axis_distance_aa_ce_s.retain(|c| !(c.a == *a && c.b == *b && c.horizontal == horizontal)); }
+        (ArcCenter(a), ArcEnd(b)) => { sketch.axis_distance_aa_ce_e.retain(|c| !(c.a == *a && c.b == *b && c.horizontal == horizontal)); }
+        (ArcStart(a), ArcCenter(b)) => { sketch.axis_distance_aa_s_ce.retain(|c| !(c.a == *a && c.b == *b && c.horizontal == horizontal)); }
+        (ArcStart(a), ArcStart(b)) => { sketch.axis_distance_aa_s_s.retain(|c| !(c.a == *a && c.b == *b && c.horizontal == horizontal)); }
+        (ArcStart(a), ArcEnd(b)) => { sketch.axis_distance_aa_s_e.retain(|c| !(c.a == *a && c.b == *b && c.horizontal == horizontal)); }
+        (ArcEnd(a), ArcCenter(b)) => { sketch.axis_distance_aa_e_ce.retain(|c| !(c.a == *a && c.b == *b && c.horizontal == horizontal)); }
+        (ArcEnd(a), ArcStart(b)) => { sketch.axis_distance_aa_e_s.retain(|c| !(c.a == *a && c.b == *b && c.horizontal == horizontal)); }
+        (ArcEnd(a), ArcEnd(b)) => { sketch.axis_distance_aa_e_e.retain(|c| !(c.a == *a && c.b == *b && c.horizontal == horizontal)); }
+    }
 }
 
 impl Action {
@@ -673,6 +782,19 @@ impl Action {
                             a: *a, b: *b, angle: target, hb: CrossBlock::new(),
                         });
                     }
+                    DimensionKind::HDistance(a, b) | DimensionKind::VDistance(a, b) => {
+                        let horizontal = matches!(kind, DimensionKind::HDistance(..));
+                        let pa_pos = dim_endpoint_pos_sketch(sketch, a);
+                        let pb_pos = dim_endpoint_pos_sketch(sketch, b);
+                        let current = if horizontal { pa_pos.x - pb_pos.x } else { pa_pos.y - pb_pos.y };
+                        let signed = if current >= 0.0 { *value } else { -*value };
+                        push_axis_distance(sketch, a, b, signed, horizontal);
+                    }
+                    DimensionKind::LineAngle(line) => {
+                        let target = deg2rad(*value);
+                        sketch.lines[*line].constraints.has_angle = true;
+                        sketch.lines[*line].constraints.target_angle = target;
+                    }
                 }
                 } // end if !derived
                 sketch.dimensions.push(Dimension {
@@ -690,8 +812,11 @@ impl Action {
                 // Remove old underlying constraint (only for numeric, non-derived dims)
                 {
                     let dim = &sketch.dimensions[*index];
-                    if dim.expr_str.is_none() && !dim.derived {
-                        match dim.kind {
+                    let dim_kind = dim.kind;
+                    let dim_value = dim.value;
+                    let is_numeric_non_derived = dim.expr_str.is_none() && !dim.derived;
+                    if is_numeric_non_derived {
+                        match dim_kind {
                             DimensionKind::LineLength(line) => {
                                 if let Some(l) = sketch.lines.get_mut(line) {
                                     l.constraints.has_length = false;
@@ -708,7 +833,7 @@ impl Action {
                                 }
                             }
                             DimensionKind::PointPointDistance(a, b) => {
-                                let val = dim.value;
+                                let val = dim_value;
                                 match (a, b) {
                                     (DimensionEndpoint::Point(pa), DimensionEndpoint::Point(pb)) => {
                                         sketch.distance_pp.retain(|c| !(c.a == pa && c.b == pb && (c.distance - val).abs() < 1e-9));
@@ -741,13 +866,24 @@ impl Action {
                                 }
                             }
                             DimensionKind::PointLineDistance(_, _) => {
-                                let val = dim.value;
+                                let val = dim_value;
                                 if let Some(idx) = sketch.distance_pl.iter().position(|c| (c.distance.abs() - val.abs()).abs() < 1e-9) {
                                     sketch.distance_pl.remove(idx);
                                 }
                             }
                             DimensionKind::Angle(a, b, _) => {
                                 sketch.angle.retain(|c| !(c.a == a && c.b == b));
+                            }
+                            DimensionKind::HDistance(ref a, ref b) => {
+                                remove_axis_distance(sketch, a, b, true);
+                            }
+                            DimensionKind::VDistance(ref a, ref b) => {
+                                remove_axis_distance(sketch, a, b, false);
+                            }
+                            DimensionKind::LineAngle(line) => {
+                                if let Some(l) = sketch.lines.get_mut(line) {
+                                    l.constraints.has_angle = false;
+                                }
                             }
                         }
                     }
@@ -843,6 +979,19 @@ impl Action {
                                 a, b, angle: target, hb: CrossBlock::new(),
                             });
                         }
+                        DimensionKind::HDistance(a, b) | DimensionKind::VDistance(a, b) => {
+                            let horizontal = matches!(kind, DimensionKind::HDistance(..));
+                            let pa_pos = dim_endpoint_pos_sketch(sketch, &a);
+                            let pb_pos = dim_endpoint_pos_sketch(sketch, &b);
+                            let current = if horizontal { pa_pos.x - pb_pos.x } else { pa_pos.y - pb_pos.y };
+                            let signed = if current >= 0.0 { value } else { -value };
+                            push_axis_distance(sketch, &a, &b, signed, horizontal);
+                        }
+                        DimensionKind::LineAngle(line) => {
+                            let target = deg2rad(value);
+                            sketch.lines[line].constraints.has_angle = true;
+                            sketch.lines[line].constraints.target_angle = target;
+                        }
                     }
                 }
                 // Expression dims: rebuild_expr_constraints() in solve() handles it
@@ -916,6 +1065,17 @@ impl Action {
                         }
                         DimensionKind::Angle(a, b, _) => {
                             sketch.angle.retain(|c| !(c.a == a && c.b == b));
+                        }
+                        DimensionKind::HDistance(a, b) => {
+                            remove_axis_distance(sketch, &a, &b, true);
+                        }
+                        DimensionKind::VDistance(a, b) => {
+                            remove_axis_distance(sketch, &a, &b, false);
+                        }
+                        DimensionKind::LineAngle(line) => {
+                            if let Some(l) = sketch.lines.get_mut(line) {
+                                l.constraints.has_angle = false;
+                            }
                         }
                     }
                     sketch.cleanup_helper_points();

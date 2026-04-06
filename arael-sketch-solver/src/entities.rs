@@ -60,6 +60,11 @@ pub struct LineConstraints {
     #[arael(skip)]
     pub has_length: bool,
     pub length: f64,
+    #[arael(skip)]
+    #[serde(default)]
+    pub has_angle: bool,
+    #[serde(default)]
+    pub target_angle: f64,
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -141,6 +146,10 @@ pub struct Point {
     let dx = line.p2.x - line.p1.x;
     let dy = line.p2.y - line.p1.y;
     [(sqrt(dx * dx + dy * dy) - line.constraints.length) * sketch.constraint_isigma]
+}))]
+// Angle from x-axis
+#[arael(constraint(hb, guard = self.constraints.has_angle, {
+    [(atan2(line.p2.y - line.p1.y, line.p2.x - line.p1.x) - line.constraints.target_angle) * sketch.constraint_isigma]
 }))]
 pub struct Line {
     pub p1: Param<vect2d>,

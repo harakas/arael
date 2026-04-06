@@ -161,6 +161,31 @@ pub struct Sketch {
     pub distance_ll22: std::vec::Vec<DistanceLL22>,
     pub distance_lp1: std::vec::Vec<DistanceLP1>,
     pub distance_lp2: std::vec::Vec<DistanceLP2>,
+    // Axis distance (horizontal/vertical unified)
+    #[serde(default)] pub axis_distance_ll11: std::vec::Vec<AxisDistanceLL11>,
+    #[serde(default)] pub axis_distance_ll12: std::vec::Vec<AxisDistanceLL12>,
+    #[serde(default)] pub axis_distance_ll21: std::vec::Vec<AxisDistanceLL21>,
+    #[serde(default)] pub axis_distance_ll22: std::vec::Vec<AxisDistanceLL22>,
+    #[serde(default)] pub axis_distance_lp1: std::vec::Vec<AxisDistanceLP1>,
+    #[serde(default)] pub axis_distance_lp2: std::vec::Vec<AxisDistanceLP2>,
+    #[serde(default)] pub axis_distance_arc_center_p: std::vec::Vec<AxisDistanceArcCenterP>,
+    #[serde(default)] pub axis_distance_arc_start_p: std::vec::Vec<AxisDistanceArcStartP>,
+    #[serde(default)] pub axis_distance_arc_end_p: std::vec::Vec<AxisDistanceArcEndP>,
+    #[serde(default)] pub axis_distance_arc_center_l1: std::vec::Vec<AxisDistanceArcCenterL1>,
+    #[serde(default)] pub axis_distance_arc_center_l2: std::vec::Vec<AxisDistanceArcCenterL2>,
+    #[serde(default)] pub axis_distance_arc_start_l1: std::vec::Vec<AxisDistanceArcStartL1>,
+    #[serde(default)] pub axis_distance_arc_start_l2: std::vec::Vec<AxisDistanceArcStartL2>,
+    #[serde(default)] pub axis_distance_arc_end_l1: std::vec::Vec<AxisDistanceArcEndL1>,
+    #[serde(default)] pub axis_distance_arc_end_l2: std::vec::Vec<AxisDistanceArcEndL2>,
+    #[serde(default)] pub axis_distance_aa_ce_ce: std::vec::Vec<AxisDistanceAACeCe>,
+    #[serde(default)] pub axis_distance_aa_ce_s: std::vec::Vec<AxisDistanceAACeS>,
+    #[serde(default)] pub axis_distance_aa_ce_e: std::vec::Vec<AxisDistanceAACeE>,
+    #[serde(default)] pub axis_distance_aa_s_ce: std::vec::Vec<AxisDistanceAASCe>,
+    #[serde(default)] pub axis_distance_aa_s_s: std::vec::Vec<AxisDistanceAASS>,
+    #[serde(default)] pub axis_distance_aa_s_e: std::vec::Vec<AxisDistanceAASE>,
+    #[serde(default)] pub axis_distance_aa_e_ce: std::vec::Vec<AxisDistanceAAECe>,
+    #[serde(default)] pub axis_distance_aa_e_s: std::vec::Vec<AxisDistanceAAES>,
+    #[serde(default)] pub axis_distance_aa_e_e: std::vec::Vec<AxisDistanceAAEE>,
     // Dimension annotations
     #[arael(skip)]
     pub dimensions: std::vec::Vec<Dimension>,
@@ -266,6 +291,30 @@ impl Sketch {
             distance_ll22: Vec::new(),
             distance_lp1: Vec::new(),
             distance_lp2: Vec::new(),
+            axis_distance_ll11: Vec::new(),
+            axis_distance_ll12: Vec::new(),
+            axis_distance_ll21: Vec::new(),
+            axis_distance_ll22: Vec::new(),
+            axis_distance_lp1: Vec::new(),
+            axis_distance_lp2: Vec::new(),
+            axis_distance_arc_center_p: Vec::new(),
+            axis_distance_arc_start_p: Vec::new(),
+            axis_distance_arc_end_p: Vec::new(),
+            axis_distance_arc_center_l1: Vec::new(),
+            axis_distance_arc_center_l2: Vec::new(),
+            axis_distance_arc_start_l1: Vec::new(),
+            axis_distance_arc_start_l2: Vec::new(),
+            axis_distance_arc_end_l1: Vec::new(),
+            axis_distance_arc_end_l2: Vec::new(),
+            axis_distance_aa_ce_ce: Vec::new(),
+            axis_distance_aa_ce_s: Vec::new(),
+            axis_distance_aa_ce_e: Vec::new(),
+            axis_distance_aa_s_ce: Vec::new(),
+            axis_distance_aa_s_s: Vec::new(),
+            axis_distance_aa_s_e: Vec::new(),
+            axis_distance_aa_e_ce: Vec::new(),
+            axis_distance_aa_e_s: Vec::new(),
+            axis_distance_aa_e_e: Vec::new(),
             dimensions: Vec::new(),
             next_dimension_id: 0,
             user_params: Vec::new(),
@@ -319,7 +368,7 @@ impl Sketch {
         self.lines.push(Line {
             p1: Param::new(p1),
             p2: Param::new(p2),
-            constraints: LineConstraints { horizontal: false, vertical: false, has_length: false, length: 0.0 },
+            constraints: LineConstraints { horizontal: false, vertical: false, has_length: false, length: 0.0, has_angle: false, target_angle: 0.0 },
             style: LineStyle::Solid, name,
             hb: SelfBlock::new(),
         })
@@ -377,6 +426,11 @@ impl Sketch {
         self.distance_lp1.retain(|c| c.point != r);
         self.distance_lp2.retain(|c| c.point != r);
         self.symmetry_pp.retain(|c| c.a != r && c.c != r);
+        self.axis_distance_lp1.retain(|c| c.point != r);
+        self.axis_distance_lp2.retain(|c| c.point != r);
+        self.axis_distance_arc_center_p.retain(|c| c.point != r);
+        self.axis_distance_arc_start_p.retain(|c| c.point != r);
+        self.axis_distance_arc_end_p.retain(|c| c.point != r);
     }
 
     /// Remove a line and all constraints referencing it.
@@ -423,6 +477,18 @@ impl Sketch {
         self.distance_ll22.retain(|c| c.a != r && c.b != r);
         self.distance_lp1.retain(|c| c.line != r);
         self.distance_lp2.retain(|c| c.line != r);
+        self.axis_distance_ll11.retain(|c| c.a != r && c.b != r);
+        self.axis_distance_ll12.retain(|c| c.a != r && c.b != r);
+        self.axis_distance_ll21.retain(|c| c.a != r && c.b != r);
+        self.axis_distance_ll22.retain(|c| c.a != r && c.b != r);
+        self.axis_distance_lp1.retain(|c| c.line != r);
+        self.axis_distance_lp2.retain(|c| c.line != r);
+        self.axis_distance_arc_center_l1.retain(|c| c.line != r);
+        self.axis_distance_arc_center_l2.retain(|c| c.line != r);
+        self.axis_distance_arc_start_l1.retain(|c| c.line != r);
+        self.axis_distance_arc_start_l2.retain(|c| c.line != r);
+        self.axis_distance_arc_end_l1.retain(|c| c.line != r);
+        self.axis_distance_arc_end_l2.retain(|c| c.line != r);
         self.cleanup_helper_points();
     }
 
@@ -462,6 +528,24 @@ impl Sketch {
         self.coincident_arc_start_end.retain(|c| c.a != r && c.b != r);
         self.coincident_arc_end_start.retain(|c| c.a != r && c.b != r);
         self.coincident_arc_end_end.retain(|c| c.a != r && c.b != r);
+        self.axis_distance_arc_center_p.retain(|c| c.arc != r);
+        self.axis_distance_arc_start_p.retain(|c| c.arc != r);
+        self.axis_distance_arc_end_p.retain(|c| c.arc != r);
+        self.axis_distance_arc_center_l1.retain(|c| c.arc != r);
+        self.axis_distance_arc_center_l2.retain(|c| c.arc != r);
+        self.axis_distance_arc_start_l1.retain(|c| c.arc != r);
+        self.axis_distance_arc_start_l2.retain(|c| c.arc != r);
+        self.axis_distance_arc_end_l1.retain(|c| c.arc != r);
+        self.axis_distance_arc_end_l2.retain(|c| c.arc != r);
+        self.axis_distance_aa_ce_ce.retain(|c| c.a != r && c.b != r);
+        self.axis_distance_aa_ce_s.retain(|c| c.a != r && c.b != r);
+        self.axis_distance_aa_ce_e.retain(|c| c.a != r && c.b != r);
+        self.axis_distance_aa_s_ce.retain(|c| c.a != r && c.b != r);
+        self.axis_distance_aa_s_s.retain(|c| c.a != r && c.b != r);
+        self.axis_distance_aa_s_e.retain(|c| c.a != r && c.b != r);
+        self.axis_distance_aa_e_ce.retain(|c| c.a != r && c.b != r);
+        self.axis_distance_aa_e_s.retain(|c| c.a != r && c.b != r);
+        self.axis_distance_aa_e_e.retain(|c| c.a != r && c.b != r);
         self.cleanup_helper_points();
     }
 
@@ -786,6 +870,11 @@ impl Sketch {
             for c in &mut self.coincident_arc_center { remap(&mut c.point); }
             for c in &mut self.coincident_arc_start { remap(&mut c.point); }
             for c in &mut self.coincident_arc_end { remap(&mut c.point); }
+            for c in &mut self.axis_distance_lp1 { remap(&mut c.point); }
+            for c in &mut self.axis_distance_lp2 { remap(&mut c.point); }
+            for c in &mut self.axis_distance_arc_center_p { remap(&mut c.point); }
+            for c in &mut self.axis_distance_arc_start_p { remap(&mut c.point); }
+            for c in &mut self.axis_distance_arc_end_p { remap(&mut c.point); }
             // Remove merged points
             for (old, _) in &merged { self.points.remove(Ref::new(*old)); }
             // Dedup again after remapping
@@ -1070,6 +1159,7 @@ impl Sketch {
             if l.constraints.horizontal { out.push(format!("horizontal {}", l.name)); }
             if l.constraints.vertical { out.push(format!("vertical {}", l.name)); }
             if l.constraints.has_length { out.push(format!("length {} = {}", l.name, l.constraints.length)); }
+            if l.constraints.has_angle { out.push(format!("xangle {} = {:.4}", l.name, l.constraints.target_angle.to_degrees())); }
             if !l.p1.optimize { out.push(format!("lock {}.p1", l.name)); }
             if !l.p2.optimize { out.push(format!("lock {}.p2", l.name)); }
         }
@@ -1193,6 +1283,32 @@ impl Sketch {
         for c in &self.midpoint_lp2 { out.push(format!("midpoint {}.p2 {}", self.lines[c.target].name, self.lines[c.line].name)); }
         for c in &self.midpoint_arc_start { out.push(format!("midpoint {}.start {}", self.arcs[c.arc].name, self.lines[c.line].name)); }
         for c in &self.midpoint_arc_end { out.push(format!("midpoint {}.end {}", self.arcs[c.arc].name, self.lines[c.line].name)); }
+        // Axis distance constraints
+        let axis_label = |h: bool| if h { "hdistance" } else { "vdistance" };
+        for c in &self.axis_distance_ll11 { out.push(format!("{} {}.p1 {}.p1 = {}", axis_label(c.horizontal), self.lines[c.a].name, self.lines[c.b].name, c.distance)); }
+        for c in &self.axis_distance_ll12 { out.push(format!("{} {}.p1 {}.p2 = {}", axis_label(c.horizontal), self.lines[c.a].name, self.lines[c.b].name, c.distance)); }
+        for c in &self.axis_distance_ll21 { out.push(format!("{} {}.p2 {}.p1 = {}", axis_label(c.horizontal), self.lines[c.a].name, self.lines[c.b].name, c.distance)); }
+        for c in &self.axis_distance_ll22 { out.push(format!("{} {}.p2 {}.p2 = {}", axis_label(c.horizontal), self.lines[c.a].name, self.lines[c.b].name, c.distance)); }
+        for c in &self.axis_distance_lp1 { out.push(format!("{} {}.p1 {} = {}", axis_label(c.horizontal), self.lines[c.line].name, self.point_display_name(c.point), c.distance)); }
+        for c in &self.axis_distance_lp2 { out.push(format!("{} {}.p2 {} = {}", axis_label(c.horizontal), self.lines[c.line].name, self.point_display_name(c.point), c.distance)); }
+        for c in &self.axis_distance_arc_center_p { out.push(format!("{} {}.center {} = {}", axis_label(c.horizontal), self.arcs[c.arc].name, self.point_display_name(c.point), c.distance)); }
+        for c in &self.axis_distance_arc_start_p { out.push(format!("{} {}.start {} = {}", axis_label(c.horizontal), self.arcs[c.arc].name, self.point_display_name(c.point), c.distance)); }
+        for c in &self.axis_distance_arc_end_p { out.push(format!("{} {}.end {} = {}", axis_label(c.horizontal), self.arcs[c.arc].name, self.point_display_name(c.point), c.distance)); }
+        for c in &self.axis_distance_arc_center_l1 { out.push(format!("{} {}.center {}.p1 = {}", axis_label(c.horizontal), self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
+        for c in &self.axis_distance_arc_center_l2 { out.push(format!("{} {}.center {}.p2 = {}", axis_label(c.horizontal), self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
+        for c in &self.axis_distance_arc_start_l1 { out.push(format!("{} {}.start {}.p1 = {}", axis_label(c.horizontal), self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
+        for c in &self.axis_distance_arc_start_l2 { out.push(format!("{} {}.start {}.p2 = {}", axis_label(c.horizontal), self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
+        for c in &self.axis_distance_arc_end_l1 { out.push(format!("{} {}.end {}.p1 = {}", axis_label(c.horizontal), self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
+        for c in &self.axis_distance_arc_end_l2 { out.push(format!("{} {}.end {}.p2 = {}", axis_label(c.horizontal), self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
+        for c in &self.axis_distance_aa_ce_ce { out.push(format!("{} {}.center {}.center = {}", axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
+        for c in &self.axis_distance_aa_ce_s { out.push(format!("{} {}.center {}.start = {}", axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
+        for c in &self.axis_distance_aa_ce_e { out.push(format!("{} {}.center {}.end = {}", axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
+        for c in &self.axis_distance_aa_s_ce { out.push(format!("{} {}.start {}.center = {}", axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
+        for c in &self.axis_distance_aa_s_s { out.push(format!("{} {}.start {}.start = {}", axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
+        for c in &self.axis_distance_aa_s_e { out.push(format!("{} {}.start {}.end = {}", axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
+        for c in &self.axis_distance_aa_e_ce { out.push(format!("{} {}.end {}.center = {}", axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
+        for c in &self.axis_distance_aa_e_s { out.push(format!("{} {}.end {}.start = {}", axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
+        for c in &self.axis_distance_aa_e_e { out.push(format!("{} {}.end {}.end = {}", axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
         out
     }
 

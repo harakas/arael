@@ -40,7 +40,7 @@ Each constraint removes 1 or more DOF. A fully constrained sketch has DOF 0. Use
 | `symmetry` (arc-arc about line) | 3 |
 | `lock` (point) | 2 |
 | `lock` (line endpoint) | 2 |
-| Dimension (`length`, `radius`, `sweep`, `angle`, `distance`) | 1 |
+| Dimension (`length`, `radius`, `sweep`, `angle`, `distance`, `hdistance`, `vdistance`, `xangle`) | 1 |
 
 These are maximum DOF reductions for independent entities. When entities share endpoints (via coincident constraints), effective removal may be less. Always verify with `dof` after applying constraints.
 
@@ -241,6 +241,9 @@ distance L0.p1 L1.p2 5.0     Point-point distance (any endpoint refs)
 distance A0.center A1.center 5.0  Arc center to arc center
 distance A0.start L1.p2 4.0  Arc start to line endpoint
 distance P0 L0 3.0            Point-line distance (point/endpoint first, line second)
+hdistance L0.p1 L1.p2 5.0    Horizontal (x-axis) distance between endpoints
+vdistance L0.p1 L1.p2 3.0    Vertical (y-axis) distance between endpoints
+xangle L0 45                  Line angle from x-axis (degrees, CCW positive)
 remove_dim d0                 Remove dimension by name
 freeze                        Add numeric dimensions for all entities at current values
 freeze L0 A0                  Freeze specific entities only
@@ -264,6 +267,33 @@ The `angle` command by default constrains the angle between the line direction v
 Negative values are accepted and treated as positive (useful with `angle()` function which may return negative).
 
 If a dimension of the same type already exists on an entity (e.g., calling `radius A0 7` when a radius dimension already exists on A0), the existing dimension is updated in place rather than creating a duplicate.
+
+### Axis Distance (hdistance, vdistance)
+
+`hdistance` constrains the horizontal (x-axis) distance between two endpoints. `vdistance` constrains the vertical (y-axis) distance. Both accept any endpoint ref (P0, L0.p1, L0.p2, A0.center, A0.start, A0.end).
+
+The value is displayed unsigned but applied as a signed constraint — the solver preserves which endpoint is left/right (or above/below) and cannot swap them to satisfy the constraint. This makes the sketch axis-locked (unrotatable), which is appropriate for axis-aligned dimensioning.
+
+```
+hdistance L0.p1 L0.p2 4       X-distance between line endpoints
+vdistance L0.p1 L1.p2 3       Y-distance between endpoints of different lines
+hdistance A0.center L0.p1 2    X-distance from arc center to line endpoint
+vdistance P0 L0.p2 1.5 derived  Derived vertical distance
+```
+
+### Line Angle from X-Axis (xangle)
+
+`xangle` constrains the angle of a line (measured from p1 to p2) relative to the positive x-axis. The angle is in degrees, counter-clockwise positive. This also makes the sketch axis-locked.
+
+```
+xangle L0 45                   Line at 45 degrees from x-axis
+xangle L0 -30                  Line at -30 degrees (30 degrees below x-axis)
+xangle L0 0                    Force line horizontal (alternative to horizontal command)
+xangle L0 90                   Force line vertical (alternative to vertical command)
+xangle L0 derived              Measure current angle without constraining
+```
+
+In the GUI, the xangle dimension draws a helper x-axis line from p1 and an angle arc. The dimension is draggable and editable like other angle dimensions.
 
 ### Derived (Reference) Dimensions
 

@@ -1087,6 +1087,45 @@ impl eframe::App for EditorApp {
                                     let along = if sweep.abs() > 1e-6 { delta / sweep - 0.5 } else { 0.0 };
                                     self.sketch.dimensions[dim_idx].offset = new_offset;
                                     self.sketch.dimensions[dim_idx].text_along = along;
+                                } else if let DimensionKind::LineAngle(r) = kind {
+                                    let p1 = self.sketch.lines[r].p1.value;
+                                    let line_angle = {
+                                        let l = &self.sketch.lines[r];
+                                        (l.p2.value.y - l.p1.value.y).atan2(l.p2.value.x - l.p1.value.x)
+                                    };
+                                    let dist = ((mouse_sketch.x - p1.x).powi(2)
+                                        + (mouse_sketch.y - p1.y).powi(2)).sqrt();
+                                    let mouse_angle = (mouse_sketch.y - p1.y).atan2(mouse_sketch.x - p1.x);
+                                    let sweep = line_angle;
+                                    let delta = rad2rad(mouse_angle);
+                                    let along = if sweep.abs() > 1e-6 { delta / sweep - 0.5 } else { 0.0 };
+                                    self.sketch.dimensions[dim_idx].offset = vect2d::new(0.0, dist.max(0.3));
+                                    self.sketch.dimensions[dim_idx].text_along = along;
+                                } else if matches!(kind, DimensionKind::HDistance(..) | DimensionKind::VDistance(..)) {
+                                    let horizontal = matches!(kind, DimensionKind::HDistance(..));
+                                    let (p1, p2) = self.dim_endpoints(&kind);
+                                    let mid = vect2d::new((p1.x + p2.x) / 2.0, (p1.y + p2.y) / 2.0);
+                                    let offset_val = if horizontal {
+                                        mouse_sketch.y - mid.y
+                                    } else {
+                                        mouse_sketch.x - mid.x
+                                    };
+                                    // text_along: project mouse onto the dimension line direction
+                                    let (q1, q2) = if horizontal {
+                                        let y = mid.y + offset_val;
+                                        (vect2d::new(p1.x, y), vect2d::new(p2.x, y))
+                                    } else {
+                                        let x = mid.x + offset_val;
+                                        (vect2d::new(x, p1.y), vect2d::new(x, p2.y))
+                                    };
+                                    let ddx = q2.x - q1.x;
+                                    let ddy = q2.y - q1.y;
+                                    let dlen = (ddx * ddx + ddy * ddy).sqrt().max(1e-12);
+                                    let qmx = (q1.x + q2.x) / 2.0;
+                                    let qmy = (q1.y + q2.y) / 2.0;
+                                    let along = ((mouse_sketch.x - qmx) * ddx + (mouse_sketch.y - qmy) * ddy) / (dlen * dlen);
+                                    self.sketch.dimensions[dim_idx].offset = vect2d::new(0.0, offset_val);
+                                    self.sketch.dimensions[dim_idx].text_along = along;
                                 } else {
                                     // Decompose mouse into perpendicular offset and along-line position
                                     let (p1, p2) = self.dim_endpoints(&kind);
@@ -1381,6 +1420,44 @@ impl eframe::App for EditorApp {
                                         self.dim_input = format!("{:.4}", measured);
                                     }
                                 }
+                            } else if let DimensionKind::LineAngle(r) = kind {
+                                let p1 = self.sketch.lines[*r].p1.value;
+                                let line_angle = {
+                                    let l = &self.sketch.lines[*r];
+                                    (l.p2.value.y - l.p1.value.y).atan2(l.p2.value.x - l.p1.value.x)
+                                };
+                                let dist = ((mouse_sketch.x - p1.x).powi(2)
+                                    + (mouse_sketch.y - p1.y).powi(2)).sqrt();
+                                let mouse_angle = (mouse_sketch.y - p1.y).atan2(mouse_sketch.x - p1.x);
+                                let sweep = line_angle;
+                                let delta = rad2rad(mouse_angle);
+                                let along = if sweep.abs() > 1e-6 { delta / sweep - 0.5 } else { 0.0 };
+                                self.dim_offset = vect2d::new(0.0, dist.max(0.3));
+                                self.dim_text_along = along.clamp(-0.5, 0.5);
+                            } else if matches!(kind, DimensionKind::HDistance(..) | DimensionKind::VDistance(..)) {
+                                let horizontal = matches!(kind, DimensionKind::HDistance(..));
+                                let (p1, p2) = self.dim_endpoints(kind);
+                                let mid = vect2d::new((p1.x + p2.x) / 2.0, (p1.y + p2.y) / 2.0);
+                                let offset_val = if horizontal {
+                                    mouse_sketch.y - mid.y
+                                } else {
+                                    mouse_sketch.x - mid.x
+                                };
+                                let (q1, q2) = if horizontal {
+                                    let y = mid.y + offset_val;
+                                    (vect2d::new(p1.x, y), vect2d::new(p2.x, y))
+                                } else {
+                                    let x = mid.x + offset_val;
+                                    (vect2d::new(x, p1.y), vect2d::new(x, p2.y))
+                                };
+                                let ddx = q2.x - q1.x;
+                                let ddy = q2.y - q1.y;
+                                let dlen = (ddx * ddx + ddy * ddy).sqrt().max(1e-12);
+                                let qmx = (q1.x + q2.x) / 2.0;
+                                let qmy = (q1.y + q2.y) / 2.0;
+                                let along = ((mouse_sketch.x - qmx) * ddx + (mouse_sketch.y - qmy) * ddy) / (dlen * dlen);
+                                self.dim_offset = vect2d::new(0.0, offset_val);
+                                self.dim_text_along = along;
                             } else {
                                 // Decompose mouse into perpendicular and along
                                 let (p1, p2) = self.dim_endpoints(kind);

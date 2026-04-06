@@ -120,6 +120,20 @@ impl EditorApp {
                 color, is_expr, is_derived);
         }
 
+        // Line angle from x-axis: draw helper x-axis line and angle arc from p1
+        if let DimensionKind::LineAngle(r) = kind {
+            return self.draw_xangle_dimension(painter, *r, value, offset, text_along,
+                color, is_expr, is_derived);
+        }
+
+        // Horizontal/vertical axis distance
+        if matches!(kind, DimensionKind::HDistance(..) | DimensionKind::VDistance(..)) {
+            let horizontal = matches!(kind, DimensionKind::HDistance(..));
+            let (p1, p2) = self.dim_endpoints(kind);
+            return self.draw_axis_distance_dimension(painter, p1, p2, horizontal, value,
+                offset, text_along, color, is_expr, is_derived);
+        }
+
         let (p1_sketch, p2_sketch) = self.dim_endpoints(kind);
         let dx = p2_sketch.x - p1_sketch.x;
         let dy = p2_sketch.y - p1_sketch.y;
@@ -498,6 +512,185 @@ impl EditorApp {
             egui::FontId::proportional(12.0), color)
     }
 
+    fn draw_xangle_dimension(&self, painter: &egui::Painter, line_ref: Ref<Line>,
+                              value: f64, offset: vect2d, text_along: f64,
+                              color: egui::Color32, is_expr: bool, is_derived: bool) -> (egui::Pos2, egui::Pos2) {
+        let l = &self.sketch.lines[line_ref];
+        let p1 = l.p1.value;
+        let dx = l.p2.value.x - p1.x;
+        let dy = l.p2.value.y - p1.y;
+        let line_angle = dy.atan2(dx);
+        let line_len = (dx * dx + dy * dy).sqrt().max(1e-6);
+
+        let stroke = egui::Stroke::new(1.0, color);
+        let ext_stroke = egui::Stroke::new(0.5, color);
+        let sp1 = self.to_screen(p1);
+
+        // Draw thin helper x-axis line from p1
+        let helper_len = line_len * 1.2;
+        let x_end = vect2d::new(p1.x + helper_len, p1.y);
+        let x_neg = vect2d::new(p1.x - helper_len * 0.2, p1.y);
+        let dash_stroke = egui::Stroke::new(0.5, color);
+        // Simple dashed line
+        let sx_end = self.to_screen(x_end);
+        let sx_neg = self.to_screen(x_neg);
+        painter.line_segment([sx_neg, sx_end], dash_stroke);
+
+        // Extension line from p1 toward line direction
+        let ext_end = vect2d::new(p1.x + helper_len * line_angle.cos(),
+                                  p1.y + helper_len * line_angle.sin());
+        painter.line_segment([sp1, self.to_screen(ext_end)], ext_stroke);
+
+        // Draw angle arc from 0 to line_angle
+        let radius = offset.y.max(0.3);
+        let sweep = line_angle;
+        let start_angle = 0.0;
+
+        let draw_arc = |a_start: f64, a_sweep: f64, s: egui::Stroke| {
+            let n = ((a_sweep.abs() * 20.0).ceil() as usize).max(8);
+            let pts: Vec<egui::Pos2> = (0..=n).map(|i| {
+                let t = i as f64 / n as f64;
+                let ang = a_start + a_sweep * t;
+                self.to_screen(vect2d::new(p1.x + radius * ang.cos(), p1.y + radius * ang.sin()))
+            }).collect();
+            for w in pts.windows(2) { painter.line_segment([w[0], w[1]], s); }
+            pts
+        };
+        let points = draw_arc(start_angle, sweep, stroke);
+
+        // Arrowheads
+        let asz = 6.0;
+        let draw_arrow = |tip: egui::Pos2, prev: egui::Pos2| {
+            let adx = prev.x - tip.x;
+            let ady = prev.y - tip.y;
+            let alen = (adx * adx + ady * ady).sqrt().max(1.0);
+            let (ax, ay) = (adx / alen, ady / alen);
+            painter.line_segment([tip, egui::Pos2::new(tip.x + ax * asz + ay * asz * 0.4,
+                tip.y + ay * asz - ax * asz * 0.4)], stroke);
+            painter.line_segment([tip, egui::Pos2::new(tip.x + ax * asz - ay * asz * 0.4,
+                tip.y + ay * asz + ax * asz * 0.4)], stroke);
+        };
+        if points.len() >= 2 {
+            draw_arrow(points[0], points[1]);
+            let pn = points.len();
+            draw_arrow(points[pn - 1], points[pn - 2]);
+        }
+
+        // If text is outside sector, draw extension arc past the text
+        let screen_radius = (self.to_screen(vect2d::new(p1.x + radius, p1.y)).x - sp1.x).abs().max(1.0);
+        let text_half_angle = 20.0 / screen_radius;
+        let extra = (text_half_angle as f64) * sweep.signum();
+        if text_along < -0.5 {
+            let ext_sweep = sweep * (text_along + 0.5) - extra;
+            draw_arc(start_angle, ext_sweep, ext_stroke);
+        } else if text_along > 0.5 {
+            let ext_sweep = sweep * (text_along - 0.5) + extra;
+            draw_arc(start_angle + sweep, ext_sweep, ext_stroke);
+        }
+
+        // Text
+        let text_angle_pos = start_angle + sweep * (0.5 + text_along);
+        let text_pt = vect2d::new(p1.x + radius * text_angle_pos.cos(),
+                                  p1.y + radius * text_angle_pos.sin());
+        let screen_pt = self.to_screen(text_pt);
+        let sign = if sweep >= 0.0 { 1.0f32 } else { -1.0f32 };
+        let tx = -(text_angle_pos.sin() as f32) * sign;
+        let ty = -(text_angle_pos.cos() as f32) * sign;
+        let text = if is_derived { format!("({:.1}\u{00b0})", value) }
+            else if is_expr { format!("fx: {:.1}\u{00b0}", value) }
+            else { format!("{:.1}\u{00b0}", value) };
+        self.draw_rotated_text(painter, screen_pt, tx, ty, &text,
+            egui::FontId::proportional(12.0), color)
+    }
+
+    fn draw_axis_distance_dimension(&self, painter: &egui::Painter,
+                                     p1: vect2d, p2: vect2d, horizontal: bool,
+                                     value: f64, offset: vect2d, text_along: f64,
+                                     color: egui::Color32, is_expr: bool, is_derived: bool) -> (egui::Pos2, egui::Pos2) {
+        let stroke = egui::Stroke::new(1.0, color);
+        let ext_stroke = egui::Stroke::new(0.5, color);
+
+        // For hdistance: dimension line is horizontal at y = midY + offset.y
+        // For vdistance: dimension line is vertical at x = midX + offset.y
+        let (q1, q2) = if horizontal {
+            let y = (p1.y + p2.y) / 2.0 + offset.y;
+            (vect2d::new(p1.x, y), vect2d::new(p2.x, y))
+        } else {
+            let x = (p1.x + p2.x) / 2.0 + offset.y;
+            (vect2d::new(x, p1.y), vect2d::new(x, p2.y))
+        };
+
+        let sq1 = self.to_screen(q1);
+        let sq2 = self.to_screen(q2);
+        let sp1 = self.to_screen(p1);
+        let sp2 = self.to_screen(p2);
+
+        // Extension lines from points to dimension line
+        if horizontal {
+            painter.line_segment([sp1, egui::Pos2::new(sp1.x, sq1.y)], ext_stroke);
+            painter.line_segment([sp2, egui::Pos2::new(sp2.x, sq2.y)], ext_stroke);
+        } else {
+            painter.line_segment([sp1, egui::Pos2::new(sq1.x, sp1.y)], ext_stroke);
+            painter.line_segment([sp2, egui::Pos2::new(sq2.x, sp2.y)], ext_stroke);
+        }
+
+        // Dimension line
+        let ddx = sq2.x - sq1.x;
+        let ddy = sq2.y - sq1.y;
+        let dlen = (ddx * ddx + ddy * ddy).sqrt().max(1.0);
+        let ux = ddx / dlen;
+        let uy = ddy / dlen;
+
+        // Text position along the dimension line
+        let mid_x = (sq1.x + sq2.x) / 2.0;
+        let mid_y = (sq1.y + sq2.y) / 2.0;
+        let text_x = mid_x + ux * text_along as f32 * dlen;
+        let text_y = mid_y + uy * text_along as f32 * dlen;
+
+        // Determine if text is between arrows or outside
+        let text_frac = 0.5 + text_along as f32;
+        let text_outside = text_frac < 0.0 || text_frac > 1.0;
+
+        // Draw dimension line, extending past arrows if text is outside
+        if text_outside {
+            // Extend the line to cover the text
+            let text_half_w = 30.0; // approximate half-width of text in pixels
+            let ext = text_along.abs() as f32 * dlen + text_half_w;
+            if text_along < 0.0 {
+                painter.line_segment([
+                    egui::Pos2::new(sq1.x - ux * ext, sq1.y - uy * ext), sq2], stroke);
+            } else {
+                painter.line_segment([sq1,
+                    egui::Pos2::new(sq2.x + ux * ext, sq2.y + uy * ext)], stroke);
+            }
+        } else {
+            painter.line_segment([sq1, sq2], stroke);
+        }
+
+        // Arrowheads at sq1 and sq2
+        let asz = 6.0;
+        // Arrow at sq1 pointing toward sq2
+        painter.line_segment([sq1, egui::Pos2::new(sq1.x + ux * asz + uy * asz * 0.4,
+            sq1.y + uy * asz - ux * asz * 0.4)], stroke);
+        painter.line_segment([sq1, egui::Pos2::new(sq1.x + ux * asz - uy * asz * 0.4,
+            sq1.y + uy * asz + ux * asz * 0.4)], stroke);
+        // Arrow at sq2 pointing toward sq1
+        painter.line_segment([sq2, egui::Pos2::new(sq2.x - ux * asz + uy * asz * 0.4,
+            sq2.y - uy * asz - ux * asz * 0.4)], stroke);
+        painter.line_segment([sq2, egui::Pos2::new(sq2.x - ux * asz - uy * asz * 0.4,
+            sq2.y - uy * asz + ux * asz * 0.4)], stroke);
+
+        // Text
+        let screen_pt = egui::Pos2::new(text_x, text_y);
+        let text = if is_derived { format!("({:.2})", value) }
+            else if is_expr { format!("fx: {:.2}", value) }
+            else { format!("{:.2}", value) };
+        // Text direction along the dimension line (ensure left-to-right)
+        let (tx, ty) = if ux < 0.0 { (-ux, -uy) } else { (ux, uy) };
+        self.draw_rotated_text(painter, screen_pt, tx, ty, &text,
+            egui::FontId::proportional(12.0), color)
+    }
+
     // Compute the screen-space text segment for a dimension (for hit testing without drawing)
     pub fn dim_text_segment(&self, dim: &Dimension) -> (egui::Pos2, egui::Pos2) {
         let is_radius = matches!(dim.kind, DimensionKind::ArcRadius(_));
@@ -575,6 +768,61 @@ impl EditorApp {
             let tx = -(text_angle.sin() as f32) * sign;
             let ty = -(text_angle.cos() as f32) * sign;
             // draw_rotated_text ensures left-to-right
+            let (dx, dy) = if tx < 0.0 { (-tx, -ty) } else { (tx, ty) };
+            let nx = -dy;
+            let ny = dx;
+            let half_h = 6.0;
+            let mid = egui::Pos2::new(screen_pt.x - nx * (half_h + 2.0), screen_pt.y - ny * (half_h + 2.0));
+            return (
+                egui::Pos2::new(mid.x - dx * total_width / 2.0, mid.y - dy * total_width / 2.0),
+                egui::Pos2::new(mid.x + dx * total_width / 2.0, mid.y + dy * total_width / 2.0),
+            );
+        }
+
+        // Horizontal/vertical axis distance
+        if matches!(dim.kind, DimensionKind::HDistance(..) | DimensionKind::VDistance(..)) {
+            let horizontal = matches!(dim.kind, DimensionKind::HDistance(..));
+            let (p1, p2) = self.dim_endpoints(&dim.kind);
+            let (q1, q2) = if horizontal {
+                let y = (p1.y + p2.y) / 2.0 + dim.offset.y;
+                (vect2d::new(p1.x, y), vect2d::new(p2.x, y))
+            } else {
+                let x = (p1.x + p2.x) / 2.0 + dim.offset.y;
+                (vect2d::new(x, p1.y), vect2d::new(x, p2.y))
+            };
+            let sq1 = self.to_screen(q1);
+            let sq2 = self.to_screen(q2);
+            let ddx = sq2.x - sq1.x;
+            let ddy = sq2.y - sq1.y;
+            let dlen = (ddx * ddx + ddy * ddy).sqrt().max(1.0);
+            let ux = ddx / dlen;
+            let uy = ddy / dlen;
+            let mid_x = (sq1.x + sq2.x) / 2.0 + ux * dim.text_along as f32 * dlen;
+            let mid_y = (sq1.y + sq2.y) / 2.0 + uy * dim.text_along as f32 * dlen;
+            let (dx, dy) = if ux < 0.0 { (-ux, -uy) } else { (ux, uy) };
+            let nx = -dy;
+            let ny = dx;
+            let half_h = 6.0;
+            let mid = egui::Pos2::new(mid_x - nx * (half_h + 2.0), mid_y - ny * (half_h + 2.0));
+            return (
+                egui::Pos2::new(mid.x - dx * total_width / 2.0, mid.y - dy * total_width / 2.0),
+                egui::Pos2::new(mid.x + dx * total_width / 2.0, mid.y + dy * total_width / 2.0),
+            );
+        }
+
+        // Line angle from x-axis: text along arc from p1
+        if let DimensionKind::LineAngle(r) = dim.kind {
+            let l = &self.sketch.lines[r];
+            let p1 = l.p1.value;
+            let line_angle = (l.p2.value.y - p1.y).atan2(l.p2.value.x - p1.x);
+            let radius = dim.offset.y.max(0.3);
+            let sweep = line_angle;
+            let text_angle = sweep * (0.5 + dim.text_along);
+            let text_pt = vect2d::new(p1.x + radius * text_angle.cos(), p1.y + radius * text_angle.sin());
+            let screen_pt = self.to_screen(text_pt);
+            let sign = if sweep >= 0.0 { 1.0f32 } else { -1.0f32 };
+            let tx = -(text_angle.sin() as f32) * sign;
+            let ty = -(text_angle.cos() as f32) * sign;
             let (dx, dy) = if tx < 0.0 { (-tx, -ty) } else { (tx, ty) };
             let nx = -dy;
             let ny = dx;
