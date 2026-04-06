@@ -1092,7 +1092,7 @@ impl EditorApp {
                 for a in ce.arc_centers { highlight_arc_center.insert(a.index()); }
             }
         }
-        let highlight_color = egui::Color32::from_rgb(255, 120, 180); // pink
+        let highlight_color = c.highlight;
 
         // Background
         painter.rect_filled(rect, 0.0, c.background);
@@ -1237,7 +1237,7 @@ impl EditorApp {
         for marker in &self.constraint_markers {
             let selected = self.selection.contains(&Selection::Constraint(marker.id));
             let color = if selected {
-                egui::Color32::from_rgb(220, 40, 40)
+                c.constraint_marker_selected
             } else {
                 c.constraint_marker
             };
@@ -1363,9 +1363,9 @@ impl EditorApp {
         }
 
         // Dimension annotations
-        let dim_color = egui::Color32::from_rgb(200, 100, 50);
-        let dim_sel_color = egui::Color32::from_rgb(220, 40, 40);
-        let dim_broken_color = egui::Color32::from_rgb(255, 30, 30);
+        let dim_color = c.dimension;
+        let dim_sel_color = c.dimension_selected;
+        let dim_broken_color = c.dimension_broken;
         for (i, dim) in self.sketch.dimensions.iter().enumerate() {
             let selected = self.selection.contains(&Selection::Dimension(i));
             let color = if dim.broken { dim_broken_color }

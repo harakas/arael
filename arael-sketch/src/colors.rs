@@ -20,6 +20,14 @@ pub struct ColorScheme {
     pub preview_line: egui::Color32,
     pub cursor_crosshair: egui::Color32,
     pub status_text: egui::Color32,
+    pub highlight: egui::Color32,
+    pub constraint_marker_selected: egui::Color32,
+    pub dimension: egui::Color32,
+    pub dimension_selected: egui::Color32,
+    pub dimension_broken: egui::Color32,
+    pub dimension_preview: egui::Color32,
+    pub error_text: egui::Color32,
+    pub command_cursor: egui::Color32,
 }
 
 impl ColorScheme {
@@ -41,6 +49,14 @@ impl ColorScheme {
             preview_line: egui::Color32::from_rgba_premultiplied(40, 40, 40, 128),
             cursor_crosshair: egui::Color32::from_rgba_premultiplied(0, 0, 0, 40),
             status_text: egui::Color32::from_gray(80),
+            highlight: egui::Color32::from_rgb(255, 120, 180),
+            constraint_marker_selected: egui::Color32::from_rgb(220, 40, 40),
+            dimension: egui::Color32::from_rgb(200, 100, 50),
+            dimension_selected: egui::Color32::from_rgb(255, 140, 0),
+            dimension_broken: egui::Color32::from_rgb(255, 30, 30),
+            dimension_preview: egui::Color32::from_rgba_premultiplied(200, 100, 50, 180),
+            error_text: egui::Color32::from_rgb(255, 80, 80),
+            command_cursor: egui::Color32::from_rgb(0, 160, 255),
         }
     }
 
@@ -62,6 +78,14 @@ impl ColorScheme {
             preview_line: egui::Color32::from_rgba_premultiplied(200, 200, 200, 128),
             cursor_crosshair: egui::Color32::from_rgba_premultiplied(255, 255, 255, 60),
             status_text: egui::Color32::from_gray(150),
+            highlight: egui::Color32::from_rgb(255, 120, 180),
+            constraint_marker_selected: egui::Color32::from_rgb(255, 80, 80),
+            dimension: egui::Color32::from_rgb(220, 140, 80),
+            dimension_selected: egui::Color32::from_rgb(255, 180, 50),
+            dimension_broken: egui::Color32::from_rgb(255, 60, 60),
+            dimension_preview: egui::Color32::from_rgba_premultiplied(220, 140, 80, 180),
+            error_text: egui::Color32::from_rgb(255, 100, 100),
+            command_cursor: egui::Color32::from_rgb(0, 160, 255),
         }
     }
 }

@@ -379,7 +379,7 @@ impl eframe::App for EditorApp {
             // Constraint conflict error message
             if let Some(ref err) = self.status_error {
                 ui.separator();
-                ui.colored_label(egui::Color32::from_rgb(255, 80, 80), err.as_str());
+                ui.colored_label(self.colors.error_text, err.as_str());
             }
 
         });
@@ -391,7 +391,7 @@ impl eframe::App for EditorApp {
                 ui.horizontal(|ui| {
                     ui.heading("Parameters");
                 });
-                let broken_color = egui::Color32::from_rgb(255, 30, 30);
+                let broken_color = self.colors.dimension_broken;
                 let normal_color = ui.visuals().text_color();
                 let row_height = 20.0;
                 let mut remove_idx = None;
@@ -814,7 +814,7 @@ impl eframe::App for EditorApp {
                                         .show(ui, &mut md_cache, text);
                                 } else {
                                     let color = if *is_err {
-                                        egui::Color32::from_rgb(255, 80, 80)
+                                        self.colors.error_text
                                     } else {
                                         ui.visuals().text_color()
                                     };
@@ -1482,7 +1482,7 @@ impl eframe::App for EditorApp {
                 let kind = self.dim_kind.clone().unwrap();
                 let measured = self.measure_dimension(&kind);
                 let is_radius = matches!(kind, DimensionKind::ArcRadius(_));
-                let preview_color = egui::Color32::from_rgba_premultiplied(200, 100, 50, 180);
+                let preview_color = self.colors.dimension_preview;
                 self.draw_dimension(&painter, &kind, measured, self.dim_offset, self.dim_text_along, preview_color, is_radius, false, false);
             }
 
@@ -1547,7 +1547,7 @@ impl eframe::App for EditorApp {
             // Command cursor crosshair (full canvas lines)
             if let Some(pos) = self.command_cursor {
                 let sp = self.to_screen(pos);
-                let stroke = egui::Stroke::new(0.5, egui::Color32::from_rgb(0, 160, 255));
+                let stroke = egui::Stroke::new(0.5, self.colors.command_cursor);
                 painter.line_segment(
                     [egui::Pos2::new(sp.x, rect.top()), egui::Pos2::new(sp.x, rect.bottom())], stroke);
                 painter.line_segment(
