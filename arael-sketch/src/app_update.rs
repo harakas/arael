@@ -389,6 +389,23 @@ impl eframe::App for EditorApp {
                 ui.colored_label(self.colors.error_text, err.as_str());
             }
 
+            // Help button at the bottom
+            ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
+                if ui.button("Help").clicked() {
+                    self.show_command = true;
+                    self.command_focus = true;
+                    self.help_expand = true;
+                    self.help_scroll_top = true;
+                    self.command_output.clear();
+                    let results = self.run_commands("help full");
+                    for result in &results {
+                        if !result.output.is_empty() {
+                            self.command_output.push((result.output.clone(), result.is_error, result.markdown));
+                        }
+                    }
+                }
+            });
+
         });
 
         // Parameters panel (top, toggled)
@@ -559,10 +576,16 @@ impl eframe::App for EditorApp {
 
         // Command panel (bottom, toggled with /)
         if self.show_command {
+            let default_h = if self.help_expand {
+                self.help_expand = false;
+                ctx.screen_rect().height() * 0.5
+            } else {
+                150.0
+            };
             egui::TopBottomPanel::bottom("command_panel")
                 .resizable(true)
                 .min_height(60.0)
-                .default_height(150.0)
+                .default_height(default_h)
                 .show(ctx, |ui| {
                 // Layout: input pinned to bottom, scroll area fills the rest above
                 ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
@@ -653,6 +676,7 @@ impl eframe::App for EditorApp {
                                 }
                             }
                             self.command_input.clear();
+                            self.command_scroll_to_bottom = true;
                         }
                         self.command_focus = true;
                     }
@@ -807,10 +831,59 @@ impl eframe::App for EditorApp {
                     // Scroll area fills remaining space above input
                     let scroll_h = ui.available_height();
                     ui.with_layout(egui::Layout::top_down(egui::Align::LEFT), |ui| {
-                        egui::ScrollArea::vertical()
+                        let scroll_top = self.help_scroll_top;
+                        if scroll_top { self.help_scroll_top = false; }
+                        let scroll_bottom = self.command_scroll_to_bottom;
+                        if scroll_bottom { self.command_scroll_to_bottom = false; }
+                        // Reset scroll state to force position
+                        if scroll_top || scroll_bottom {
+                            let scroll_id = ui.make_persistent_id(egui::Id::new("scroll_area"));
+                            let mut state = egui::scroll_area::State::default();
+                            if scroll_top {
+                                state.offset.y = 0.0;
+                            }
+                            // scroll_stuck_to_end defaults to TRUE, so stick_to_bottom
+                            // will snap to end on next frame for scroll_bottom case
+                            state.store(ui.ctx(), scroll_id);
+                        }
+                        let scroll_id = ui.make_persistent_id(egui::Id::new("scroll_area"));
+                        // Keyboard scrolling when command input is not focused
+                        let mut kbd_scrolling_up = false;
+                        if !self.command_has_focus {
+                            let line_h = 20.0;
+                            let page_h = scroll_h - line_h;
+                            let mut dy = 0.0;
+                            let mut jump = None;
+                            let mut jump_end = false;
+                            ui.input(|i| {
+                                if i.key_pressed(egui::Key::ArrowUp) { dy -= line_h; }
+                                if i.key_pressed(egui::Key::ArrowDown) { dy += line_h; }
+                                if i.key_pressed(egui::Key::PageUp) { dy -= page_h; }
+                                if i.key_pressed(egui::Key::PageDown) { dy += page_h; }
+                                if i.key_pressed(egui::Key::Home) { jump = Some(0.0_f32); }
+                                if i.key_pressed(egui::Key::End) { jump_end = true; }
+                            });
+                            if jump_end {
+                                let state = egui::scroll_area::State::default();
+                                state.store(ui.ctx(), scroll_id);
+                            } else if dy != 0.0 || jump.is_some() {
+                                if let Some(mut state) = egui::scroll_area::State::load(ui.ctx(), scroll_id) {
+                                    if let Some(target) = jump {
+                                        state.offset.y = target;
+                                    } else {
+                                        state.offset.y = (state.offset.y + dy).max(0.0);
+                                    }
+                                    state.store(ui.ctx(), scroll_id);
+                                }
+                                if dy < 0.0 || jump == Some(0.0) {
+                                    kbd_scrolling_up = true;
+                                }
+                            }
+                        }
+                        let scroll = egui::ScrollArea::vertical()
                             .max_height(scroll_h)
-                            .stick_to_bottom(true)
-                            .show(ui, |ui| {
+                            .stick_to_bottom(!scroll_top && !kbd_scrolling_up);
+                        scroll.show(ui, |ui| {
                             ui.set_min_width(ui.available_width());
                             let mut md_cache = egui_commonmark::CommonMarkCache::default();
                             for (text, is_err, is_md) in self.command_output.iter() {

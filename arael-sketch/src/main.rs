@@ -144,6 +144,9 @@ pub struct EditorApp {
 
     // Command panel
     pub show_command: bool,
+    pub help_expand: bool,
+    pub help_scroll_top: bool,
+    pub command_scroll_to_bottom: bool,
     pub show_hints: bool,
     pub command_input: String,
     pub command_history: Vec<String>,
@@ -280,6 +283,9 @@ impl EditorApp {
             param_focus_new: false,
             param_focus_field: None,
             show_command: false,
+            help_expand: false,
+            help_scroll_top: false,
+            command_scroll_to_bottom: false,
             show_hints: true,
             command_input: String::new(),
             command_history: Vec::new(),
