@@ -60,7 +60,7 @@ s2 = add_line 3,4 0,0
 # Fix sizes: 2 lengths = -2 DOF, 1 angle = -1 DOF
 length s0 5
 length s1 4
-angle s0 s1 60
+angle s0 s1 60 closest
 
 # Fix position and orientation: lock = -2, horizontal = -1
 lock s0.p1 0,0
@@ -831,8 +831,8 @@ s5 = add_line 2.5,-4.33 5,0
 # All sides equal: -5 DOF
 equal s0 s1; equal s1 s2; equal s2 s3; equal s3 s4; equal s4 s5
 # Interior angles: first sets the value, rest reference it: -3 DOF
-ia = angle s0 s1 120
-angle s1 s2 {ia}; angle s2 s3 {ia}
+ia = angle s0 s1 120 closest
+angle s1 s2 {ia} closest; angle s2 s3 {ia} closest
 length s0 5                    # -1 DOF -> DOF=3: shape fixed, can translate + rotate
 # Fix position and orientation for DOF=0:
 lock s0.p1 5,0                 # -2 DOF
