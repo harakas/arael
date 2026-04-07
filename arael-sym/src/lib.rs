@@ -201,6 +201,9 @@ impl E {
                 a.collect_symbols(out);
                 b.collect_symbols(out);
             }
+            Expr::Func { args, .. } => {
+                for arg in args { arg.collect_symbols(out); }
+            }
         }
     }
 
@@ -234,6 +237,10 @@ impl E {
             Expr::Log10(a) => ln(a.substitute(subs)) / ln(constant(10.0)),
             Expr::Sqrt(a) => sqrt(a.substitute(subs)),
             Expr::Abs(a) => abs(a.substitute(subs)),
+            Expr::Func { name, params, body, args } => {
+                let new_args = args.iter().map(|a| a.substitute(subs)).collect();
+                E::new(Expr::Func { name: name.clone(), params: params.clone(), body: body.clone(), args: new_args })
+            }
         }
     }
 }
@@ -305,6 +312,17 @@ pub enum Expr {
     Sqrt(E),
     /// Absolute value.
     Abs(E),
+    /// User-defined function application.
+    Func {
+        /// Function name (for display).
+        name: String,
+        /// Formal parameter names.
+        params: Vec<String>,
+        /// Body expression in terms of params.
+        body: E,
+        /// Actual argument expressions.
+        args: Vec<E>,
+    },
 }
 
 impl Eq for Expr {}
@@ -324,6 +342,12 @@ impl Hash for Expr {
             | Expr::Div(a, b) | Expr::Pow(a, b) | Expr::Atan2(a, b) => {
                 a.hash(state);
                 b.hash(state);
+            }
+            Expr::Func { name, params, body, args } => {
+                name.hash(state);
+                params.hash(state);
+                body.hash(state);
+                args.hash(state);
             }
         }
     }
@@ -464,6 +488,61 @@ impl std::ops::Div<E> for f64 {
     fn div(self, rhs: E) -> E { E::new(Expr::Div(constant(self), rhs)).simplify() }
 }
 
+// --- Custom function support ---
+
+/// Expand a Func node by substituting params -> args in the body.
+pub(crate) fn expand_func(params: &[String], body: &E, args: &[E]) -> E {
+    let mut expanded = body.clone();
+    for (p, a) in params.iter().zip(args.iter()) {
+        expanded = expanded.subs(p, a);
+    }
+    expanded
+}
+
+/// Create a unary custom function. Returns a closure usable as `f(expr)`.
+pub fn custom_func1(name: &str, param: &str, body: E) -> impl Fn(E) -> E + Clone {
+    let name = name.to_string();
+    let param = param.to_string();
+    move |arg: E| {
+        E::new(Expr::Func {
+            name: name.clone(),
+            params: vec![param.clone()],
+            body: body.clone(),
+            args: vec![arg],
+        })
+    }
+}
+
+/// Create a binary custom function. Returns a closure usable as `f(a, b)`.
+pub fn custom_func2(name: &str, params: [&str; 2], body: E) -> impl Fn(E, E) -> E + Clone {
+    let name = name.to_string();
+    let params = [params[0].to_string(), params[1].to_string()];
+    move |a: E, b: E| {
+        E::new(Expr::Func {
+            name: name.clone(),
+            params: vec![params[0].clone(), params[1].clone()],
+            body: body.clone(),
+            args: vec![a, b],
+        })
+    }
+}
+
+/// Create an n-ary custom function. Returns a closure usable as `f(vec![...])`.
+pub fn custom_func(name: &str, params: &[&str], body: E) -> impl Fn(Vec<E>) -> E + Clone {
+    let name = name.to_string();
+    let params: Vec<String> = params.iter().map(|s| s.to_string()).collect();
+    move |args: Vec<E>| {
+        assert_eq!(args.len(), params.len(),
+            "custom function '{}' expects {} args, got {}", name, params.len(), args.len());
+        E::new(Expr::Func {
+            name: name.clone(),
+            params: params.clone(),
+            body: body.clone(),
+            args,
+        })
+    }
+}
+
 // Re-export linalg types
 pub use linalg::{SymVec, SymMat, jacobian};
 pub use diff::DiffVar;
@@ -471,4 +550,216 @@ pub use parse::{parse, ParseError};
 pub use geo::{vect2sym, vect3sym, matrix2sym, matrix3sym, quaternsym};
 pub use cse::cse;
 pub use arael_sym_macros::sym;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::collections::HashMap;
+
+    #[test]
+    fn custom_func_identity_display() {
+        sym! {
+            let t = symbol("t");
+            let identity = custom_func1("identity", "t", t);
+            let x = symbol("x");
+            assert_eq!(format!("{}", identity(x)), "identity(x)");
+        }
+    }
+
+    #[test]
+    fn custom_func_identity_diff() {
+        sym! {
+            let t = symbol("t");
+            let identity = custom_func1("identity", "t", t);
+            let x = symbol("x");
+            let f = identity(x);
+            assert_eq!(format!("{}", f.diff("x")), "1");
+        }
+    }
+
+    #[test]
+    fn custom_func_identity_chain_rule() {
+        sym! {
+            let t = symbol("t");
+            let identity = custom_func1("identity", "t", t);
+            let x = symbol("x");
+            let f = identity(x * x);
+            assert_eq!(format!("{}", f.diff("x")), "2 * x");
+        }
+    }
+
+    #[test]
+    fn custom_func_identity_eval() {
+        sym! {
+            let t = symbol("t");
+            let identity = custom_func1("identity", "t", t);
+            let x = symbol("x");
+            let f = identity(x);
+            let vars = HashMap::from([("x", 5.0)]);
+            assert_eq!(f.eval(&vars).unwrap(), 5.0);
+        }
+    }
+
+    #[test]
+    fn custom_func_square() {
+        sym! {
+            let t = symbol("t");
+            let square = custom_func1("square", "t", t * t);
+            let x = symbol("x");
+            let f = square(x + 1.0);
+            assert_eq!(format!("{}", f), "square(x + 1)");
+            assert_eq!(format!("{}", f.diff("x")), "2 * (x + 1)");
+        }
+    }
+
+    #[test]
+    fn custom_func_square_eval() {
+        sym! {
+            let t = symbol("t");
+            let square = custom_func1("square", "t", t * t);
+            let x = symbol("x");
+            let f = square(x);
+            let vars = HashMap::from([("x", 4.0)]);
+            assert_eq!(f.eval(&vars).unwrap(), 16.0);
+        }
+    }
+
+    #[test]
+    fn custom_func_binary() {
+        sym! {
+            let a = symbol("a");
+            let b = symbol("b");
+            let f = custom_func2("prod", ["a", "b"], a * b);
+            let x = symbol("x");
+            let y = symbol("y");
+            let result = f(x, y);
+            assert_eq!(format!("{}", result), "prod(x, y)");
+            assert_eq!(format!("{}", result.diff("x")), "y");
+            assert_eq!(format!("{}", result.diff("y")), "x");
+        }
+    }
+
+    #[test]
+    fn custom_func_nested() {
+        sym! {
+            let t = symbol("t");
+            let identity = custom_func1("identity", "t", t);
+            let square = custom_func1("square", "t", t * t);
+            let x = symbol("x");
+            let f = identity(square(x));
+            assert_eq!(format!("{}", f), "identity(square(x))");
+            assert_eq!(format!("{}", f.diff("x")), "2 * x");
+        }
+    }
+
+    #[test]
+    fn custom_func_my_sin() {
+        sym! {
+            let t = symbol("t");
+            let my_sin = custom_func1("my_sin", "t", sin(t));
+            let x = symbol("x");
+            let f = my_sin(x);
+            assert_eq!(format!("{}", f), "my_sin(x)");
+            assert_eq!(format!("{}", f.diff("x")), "cos(x)");
+        }
+    }
+
+    #[test]
+    fn custom_func_my_sin_chain_rule() {
+        sym! {
+            let t = symbol("t");
+            let my_sin = custom_func1("my_sin", "t", sin(t));
+            let x = symbol("x");
+            let f = my_sin(x * x);
+            assert_eq!(format!("{}", f.diff("x")), "2 * x * cos(x^2)");
+        }
+    }
+
+    #[test]
+    fn custom_func_to_rust() {
+        sym! {
+            let t = symbol("t");
+            let identity = custom_func1("identity", "t", t);
+            let x = symbol("x");
+            let f = identity(x);
+            assert_eq!(f.to_rust("f64"), "x");
+        }
+    }
+
+    #[test]
+    fn custom_func_latex() {
+        sym! {
+            let t = symbol("t");
+            let identity = custom_func1("identity", "t", t);
+            let x = symbol("x");
+            let f = identity(x);
+            assert_eq!(f.to_latex(), "\\operatorname{identity}\\left(x\\right)");
+        }
+    }
+
+    #[test]
+    fn custom_func_free_vars() {
+        sym! {
+            let t = symbol("t");
+            let identity = custom_func1("identity", "t", t);
+            let x = symbol("x");
+            let f = identity(x + symbol("y"));
+            let vars = f.free_vars();
+            assert!(vars.contains("x"));
+            assert!(vars.contains("y"));
+            assert!(!vars.contains("t"));
+        }
+    }
+
+    #[test]
+    fn custom_func_subs() {
+        sym! {
+            let t = symbol("t");
+            let identity = custom_func1("identity", "t", t);
+            let x = symbol("x");
+            let f = identity(x);
+            let g = f.subs("x", &constant(3.0));
+            assert_eq!(format!("{}", g), "identity(3)");
+        }
+    }
+
+    #[test]
+    fn custom_func_simplify_constants() {
+        sym! {
+            let t = symbol("t");
+            let square = custom_func1("square", "t", t * t);
+            let f = square(constant(3.0));
+            let s = f.simplify();
+            assert_eq!(format!("{}", s), "9");
+        }
+    }
+
+    #[test]
+    fn custom_func_nary() {
+        sym! {
+            let a = symbol("a");
+            let b = symbol("b");
+            let c_sym = symbol("c");
+            let f = custom_func("triple_sum", &["a", "b", "c"], a + b + c_sym);
+            let x = symbol("x");
+            let y = symbol("y");
+            let z = symbol("z");
+            let result = f(vec![x, y, z]);
+            assert_eq!(format!("{}", result), "triple_sum(x, y, z)");
+            assert_eq!(format!("{}", result.diff("x")), "1");
+        }
+    }
+
+    #[test]
+    fn custom_func_expand() {
+        sym! {
+            let t = symbol("t");
+            let square = custom_func1("square", "t", t * t);
+            let x = symbol("x");
+            let f = square(x + 1.0);
+            let expanded = f.expand();
+            assert_eq!(format!("{}", expanded), "x^2 + 2 * x + 1");
+        }
+    }
+}
 

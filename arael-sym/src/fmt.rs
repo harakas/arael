@@ -125,6 +125,14 @@ impl fmt::Display for Expr {
             Expr::Log10(a) => fmt_unary(f, "log10", a),
             Expr::Sqrt(a) => fmt_unary(f, "sqrt", a),
             Expr::Abs(a) => fmt_unary(f, "abs", a),
+            Expr::Func { name, args, .. } => {
+                write!(f, "{name}(")?;
+                for (i, arg) in args.iter().enumerate() {
+                    if i > 0 { write!(f, ", ")?; }
+                    fmt::Display::fmt(arg.as_ref(), f)?;
+                }
+                write!(f, ")")
+            }
         }
     }
 }
@@ -269,6 +277,14 @@ impl Expr {
                 a.write_latex(buf);
                 buf.push_str("\\right|");
             }
+            Expr::Func { name, args, .. } => {
+                buf.push_str(&format!("\\operatorname{{{name}}}\\left("));
+                for (i, arg) in args.iter().enumerate() {
+                    if i > 0 { buf.push_str(", "); }
+                    arg.write_latex(buf);
+                }
+                buf.push_str("\\right)");
+            }
         }
     }
 
@@ -379,6 +395,11 @@ impl Expr {
             Expr::Log10(a) => Self::write_rust_method(buf, ft, a, "log10"),
             Expr::Sqrt(a) => Self::write_rust_method(buf, ft, a, "sqrt"),
             Expr::Abs(a) => Self::write_rust_method(buf, ft, a, "abs"),
+            Expr::Func { params, body, args, .. } => {
+                // Expand body and generate code for the expanded form
+                crate::expand_func(params, body, args).write_rust(buf, ft, parent_prec);
+                return; // already wrote, skip trailing paren logic
+            }
         }
 
         if need_parens { buf.push(')'); }

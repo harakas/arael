@@ -616,6 +616,18 @@ impl Expr {
                 }
                 E::new(Expr::Atan2(y, x))
             }
+            Expr::Func { name, params, body, args } => {
+                let new_args: Vec<E> = args.iter().map(|a| a.simplify_once()).collect();
+                // If all args are constant, expand and evaluate
+                if new_args.iter().all(|a| matches!(a.as_ref(), Expr::Const(_))) {
+                    let expanded = crate::expand_func(params, body, &new_args);
+                    return expanded.simplify_once();
+                }
+                E::new(Expr::Func {
+                    name: name.clone(), params: params.clone(),
+                    body: body.clone(), args: new_args,
+                })
+            }
         }
     }
 
@@ -690,6 +702,11 @@ impl Expr {
             Expr::Log10(a) => E::new(Expr::Log10(a.expand_inner())),
             Expr::Sqrt(a) => E::new(Expr::Sqrt(a.expand_inner())),
             Expr::Abs(a) => E::new(Expr::Abs(a.expand_inner())),
+            Expr::Func { params, body, args, .. } => {
+                let expanded_args: Vec<E> = args.iter().map(|a| a.expand_inner()).collect();
+                let expanded = crate::expand_func(params, body, &expanded_args);
+                expanded.expand_inner()
+            }
         }
     }
 

@@ -20,6 +20,9 @@ fn expr_cost(e: &E) -> usize {
         | Expr::Div(a, b) | Expr::Pow(a, b) | Expr::Atan2(a, b) => {
             1 + expr_cost(a) + expr_cost(b)
         }
+        Expr::Func { args, .. } => {
+            1 + args.iter().map(expr_cost).sum::<usize>()
+        }
     }
 }
 
@@ -35,6 +38,9 @@ fn expr_depth(e: &E) -> usize {
         Expr::Add(a, b) | Expr::Sub(a, b) | Expr::Mul(a, b)
         | Expr::Div(a, b) | Expr::Pow(a, b) | Expr::Atan2(a, b) => {
             1 + expr_depth(a).max(expr_depth(b))
+        }
+        Expr::Func { args, .. } => {
+            1 + args.iter().map(expr_depth).max().unwrap_or(0)
         }
     }
 }
@@ -53,6 +59,9 @@ fn count_subexprs(e: &E, counts: &mut HashMap<E, usize>) {
         | Expr::Div(a, b) | Expr::Pow(a, b) | Expr::Atan2(a, b) => {
             count_subexprs(a, counts);
             count_subexprs(b, counts);
+        }
+        Expr::Func { args, .. } => {
+            for arg in args { count_subexprs(arg, counts); }
         }
     }
 }
@@ -128,6 +137,10 @@ fn replace(e: &E, target: &E, replacement: &E) -> E {
         Expr::Log10(a) => E::new(Expr::Log10(replace(a, target, replacement))),
         Expr::Sqrt(a) => E::new(Expr::Sqrt(replace(a, target, replacement))),
         Expr::Abs(a) => E::new(Expr::Abs(replace(a, target, replacement))),
+        Expr::Func { name, params, body, args } => {
+            let new_args = args.iter().map(|a| replace(a, target, replacement)).collect();
+            E::new(Expr::Func { name: name.clone(), params: params.clone(), body: body.clone(), args: new_args })
+        }
     }
 }
 
@@ -276,6 +289,9 @@ fn count_divisors(e: &E, counts: &mut HashMap<E, usize>) {
             count_divisors(a, counts);
             count_divisors(b, counts);
         }
+        Expr::Func { args, .. } => {
+            for arg in args { count_divisors(arg, counts); }
+        }
     }
 }
 
@@ -309,6 +325,10 @@ fn replace_divisor(e: &E, divisor: &E, replacement: &E) -> E {
         Expr::Log10(a) => E::new(Expr::Log10(replace_divisor(a, divisor, replacement))),
         Expr::Sqrt(a) => E::new(Expr::Sqrt(replace_divisor(a, divisor, replacement))),
         Expr::Abs(a) => E::new(Expr::Abs(replace_divisor(a, divisor, replacement))),
+        Expr::Func { name, params, body, args } => {
+            let new_args = args.iter().map(|a| replace_divisor(a, divisor, replacement)).collect();
+            E::new(Expr::Func { name: name.clone(), params: params.clone(), body: body.clone(), args: new_args })
+        }
     }
 }
 

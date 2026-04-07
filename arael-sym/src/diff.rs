@@ -153,6 +153,10 @@ impl Expr {
                 // a * a' / |a|  (i.e., sign(a) * a')
                 a.clone() * a.diff(var) / abs(a.clone())
             }
+            Expr::Func { params, body, args, .. } => {
+                // Expand body by substituting params -> args, then differentiate
+                super::expand_func(params, body, args).diff(var)
+            }
         }
     }
 }

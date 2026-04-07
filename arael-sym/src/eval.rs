@@ -34,6 +34,9 @@ impl Expr {
             Expr::Log10(a) => Ok(a.eval(vars)?.log10()),
             Expr::Sqrt(a) => Ok(a.eval(vars)?.sqrt()),
             Expr::Abs(a) => Ok(a.eval(vars)?.abs()),
+            Expr::Func { params, body, args, .. } => {
+                super::expand_func(params, body, args).eval(vars)
+            }
         }
     }
 
@@ -66,6 +69,10 @@ impl Expr {
             Expr::Log10(a) => E::new(Expr::Log10(a.subs(var, replacement))),
             Expr::Sqrt(a) => E::new(Expr::Sqrt(a.subs(var, replacement))),
             Expr::Abs(a) => E::new(Expr::Abs(a.subs(var, replacement))),
+            Expr::Func { name, params, body, args } => {
+                let new_args = args.iter().map(|a| a.subs(var, replacement)).collect();
+                E::new(Expr::Func { name: name.clone(), params: params.clone(), body: body.clone(), args: new_args })
+            }
         }
     }
 
@@ -94,6 +101,9 @@ impl Expr {
             | Expr::Exp(a) | Expr::Ln(a) | Expr::Log2(a) | Expr::Log10(a)
             | Expr::Sqrt(a) | Expr::Abs(a) => {
                 a.collect_vars(set);
+            }
+            Expr::Func { args, .. } => {
+                for arg in args { arg.collect_vars(set); }
             }
         }
     }
