@@ -34,6 +34,16 @@ impl Expr {
             Expr::Log10(a) => Ok(a.eval(vars)?.log10()),
             Expr::Sqrt(a) => Ok(a.eval(vars)?.sqrt()),
             Expr::Abs(a) => Ok(a.eval(vars)?.abs()),
+            Expr::Heaviside(a) => {
+                let v = a.eval(vars)?;
+                Ok(if v < 0.0 { 0.0 } else { 1.0 })
+            }
+            Expr::Clamp(val, lo, hi) => {
+                let v = val.eval(vars)?;
+                let l = lo.eval(vars)?;
+                let h = hi.eval(vars)?;
+                Ok(v.clamp(l, h))
+            }
             Expr::Func { params, body, args, .. } => {
                 super::expand_func(params, body, args).eval(vars)
             }
@@ -69,6 +79,8 @@ impl Expr {
             Expr::Log10(a) => E::new(Expr::Log10(a.subs(var, replacement))),
             Expr::Sqrt(a) => E::new(Expr::Sqrt(a.subs(var, replacement))),
             Expr::Abs(a) => E::new(Expr::Abs(a.subs(var, replacement))),
+            Expr::Heaviside(a) => E::new(Expr::Heaviside(a.subs(var, replacement))),
+            Expr::Clamp(a, lo, hi) => E::new(Expr::Clamp(a.subs(var, replacement), lo.subs(var, replacement), hi.subs(var, replacement))),
             Expr::Func { name, params, body, args } => {
                 let new_args = args.iter().map(|a| a.subs(var, replacement)).collect();
                 E::new(Expr::Func { name: name.clone(), params: params.clone(), body: body.clone(), args: new_args })
@@ -99,8 +111,14 @@ impl Expr {
             | Expr::Asin(a) | Expr::Acos(a) | Expr::Atan(a)
             | Expr::Sinh(a) | Expr::Cosh(a) | Expr::Tanh(a)
             | Expr::Exp(a) | Expr::Ln(a) | Expr::Log2(a) | Expr::Log10(a)
-            | Expr::Sqrt(a) | Expr::Abs(a) => {
+            | Expr::Sqrt(a) | Expr::Abs(a)
+            | Expr::Heaviside(a) => {
                 a.collect_vars(set);
+            }
+            Expr::Clamp(a, lo, hi) => {
+                a.collect_vars(set);
+                lo.collect_vars(set);
+                hi.collect_vars(set);
             }
             Expr::Func { args, .. } => {
                 for arg in args { arg.collect_vars(set); }

@@ -608,6 +608,22 @@ impl Expr {
                 E::new(Expr::Sqrt(a))
             }
             Expr::Abs(a) => { let a = a.simplify_once(); if let Expr::Const(v) = a.as_ref() { return constant(v.abs()); } E::new(Expr::Abs(a)) }
+            Expr::Heaviside(a) => {
+                let a = a.simplify_once();
+                if let Expr::Const(v) = a.as_ref() {
+                    return constant(if *v < 0.0 { 0.0 } else { 1.0 });
+                }
+                E::new(Expr::Heaviside(a))
+            }
+            Expr::Clamp(val, lo, hi) => {
+                let val = val.simplify_once();
+                let lo = lo.simplify_once();
+                let hi = hi.simplify_once();
+                if let (Expr::Const(v), Expr::Const(l), Expr::Const(h)) = (val.as_ref(), lo.as_ref(), hi.as_ref()) {
+                    return constant(v.clamp(*l, *h));
+                }
+                E::new(Expr::Clamp(val, lo, hi))
+            }
             Expr::Atan2(y, x) => {
                 let y = y.simplify_once();
                 let x = x.simplify_once();
@@ -702,6 +718,8 @@ impl Expr {
             Expr::Log10(a) => E::new(Expr::Log10(a.expand_inner())),
             Expr::Sqrt(a) => E::new(Expr::Sqrt(a.expand_inner())),
             Expr::Abs(a) => E::new(Expr::Abs(a.expand_inner())),
+            Expr::Heaviside(a) => E::new(Expr::Heaviside(a.expand_inner())),
+            Expr::Clamp(val, lo, hi) => E::new(Expr::Clamp(val.expand_inner(), lo.expand_inner(), hi.expand_inner())),
             Expr::Func { params, body, args, .. } => {
                 let expanded_args: Vec<E> = args.iter().map(|a| a.expand_inner()).collect();
                 let expanded = crate::expand_func(params, body, &expanded_args);

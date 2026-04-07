@@ -153,6 +153,14 @@ impl Expr {
                 // a * a' / |a|  (i.e., sign(a) * a')
                 a.clone() * a.diff(var) / abs(a.clone())
             }
+            Expr::Heaviside(_) => {
+                // Derivative is 0 everywhere (pragmatic, not Dirac delta)
+                zero()
+            }
+            Expr::Clamp(val, _, _) => {
+                // Pass-through: derivative ignores the clamping
+                val.diff(var)
+            }
             Expr::Func { params, body, args, .. } => {
                 // Expand body by substituting params -> args, then differentiate
                 super::expand_func(params, body, args).diff(var)

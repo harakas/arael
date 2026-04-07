@@ -125,6 +125,16 @@ impl fmt::Display for Expr {
             Expr::Log10(a) => fmt_unary(f, "log10", a),
             Expr::Sqrt(a) => fmt_unary(f, "sqrt", a),
             Expr::Abs(a) => fmt_unary(f, "abs", a),
+            Expr::Heaviside(a) => fmt_unary(f, "H", a),
+            Expr::Clamp(val, lo, hi) => {
+                write!(f, "clamp(")?;
+                fmt::Display::fmt(val.as_ref(), f)?;
+                write!(f, ", ")?;
+                fmt::Display::fmt(lo.as_ref(), f)?;
+                write!(f, ", ")?;
+                fmt::Display::fmt(hi.as_ref(), f)?;
+                write!(f, ")")
+            }
             Expr::Func { name, args, .. } => {
                 write!(f, "{name}(")?;
                 for (i, arg) in args.iter().enumerate() {
@@ -277,6 +287,16 @@ impl Expr {
                 a.write_latex(buf);
                 buf.push_str("\\right|");
             }
+            Expr::Heaviside(a) => Self::write_latex_fn(buf, "H", a),
+            Expr::Clamp(val, lo, hi) => {
+                buf.push_str("\\operatorname{clamp}\\left(");
+                val.write_latex(buf);
+                buf.push_str(", ");
+                lo.write_latex(buf);
+                buf.push_str(", ");
+                hi.write_latex(buf);
+                buf.push_str("\\right)");
+            }
             Expr::Func { name, args, .. } => {
                 buf.push_str(&format!("\\operatorname{{{name}}}\\left("));
                 for (i, arg) in args.iter().enumerate() {
@@ -395,6 +415,15 @@ impl Expr {
             Expr::Log10(a) => Self::write_rust_method(buf, ft, a, "log10"),
             Expr::Sqrt(a) => Self::write_rust_method(buf, ft, a, "sqrt"),
             Expr::Abs(a) => Self::write_rust_method(buf, ft, a, "abs"),
+            Expr::Heaviside(a) => Self::write_rust_method(buf, ft, a, "heaviside"),
+            Expr::Clamp(val, lo, hi) => {
+                val.write_rust(buf, ft, 8);
+                buf.push_str(".clamp(");
+                lo.write_rust(buf, ft, 0);
+                buf.push_str(", ");
+                hi.write_rust(buf, ft, 0);
+                buf.push(')');
+            }
             Expr::Func { params, body, args, .. } => {
                 // Expand body and generate code for the expanded form
                 crate::expand_func(params, body, args).write_rust(buf, ft, parent_prec);

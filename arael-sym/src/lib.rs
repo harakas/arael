@@ -150,6 +150,47 @@
 //! let vars = std::collections::HashMap::from([("x", 1.0)]);
 //! assert!((f.eval(&vars).unwrap() - 1.0).abs() < 1e-10);
 //! ```
+//!
+//! ## Custom functions
+//!
+//! Define reusable symbolic functions with automatic differentiation.
+//! The factory functions return closures that can be called like regular
+//! functions.
+//!
+//! ```
+//! use arael_sym::*;
+//! sym! {
+//!     let t = symbol("t");
+//!     let square = custom_func1("square", "t", t * t);
+//!     let x = symbol("x");
+//!     let f = square(x + 1.0);
+//!     assert_eq!(format!("{}", f), "square(x + 1)");
+//!     // Differentiation expands the body and applies the chain rule:
+//!     assert_eq!(format!("{}", f.diff("x")), "2 * (x + 1)");
+//! };
+//! ```
+//!
+//! ## Heaviside and clamp
+//!
+//! Pragmatic functions for optimization near numerical boundaries.
+//! `heaviside` has derivative 0 everywhere (not Dirac delta).
+//! `clamp` has pass-through derivative (as if clamping were not there).
+//!
+//! ```
+//! use arael_sym::*;
+//! sym! {
+//!     let t = symbol("t");
+//!     // safe_asin: evaluates without NaN even outside [-1, 1]
+//!     let safe_asin = custom_func1("safe_asin", "t",
+//!         asin(clamp(t, c(-1.0), c(1.0))));
+//!     let x = symbol("x");
+//!     let f = safe_asin(x);
+//!     let vars = std::collections::HashMap::from([("x", 1.5)]);
+//!     // Clamped to asin(1.0) = pi/2, no NaN
+//!     let val = f.eval(&vars).unwrap();
+//!     assert!((val - std::f64::consts::FRAC_PI_2).abs() < 1e-10);
+//! };
+//! ```
 
 #![allow(clippy::should_implement_trait)]
 
@@ -195,11 +236,17 @@ impl E {
             | Expr::Asin(a) | Expr::Acos(a) | Expr::Atan(a)
             | Expr::Sinh(a) | Expr::Cosh(a) | Expr::Tanh(a)
             | Expr::Exp(a) | Expr::Ln(a) | Expr::Log2(a) | Expr::Log10(a)
-            | Expr::Sqrt(a) | Expr::Abs(a) => { a.collect_symbols(out); }
+            | Expr::Sqrt(a) | Expr::Abs(a)
+            | Expr::Heaviside(a) => { a.collect_symbols(out); }
             Expr::Add(a, b) | Expr::Sub(a, b) | Expr::Mul(a, b)
             | Expr::Div(a, b) | Expr::Pow(a, b) | Expr::Atan2(a, b) => {
                 a.collect_symbols(out);
                 b.collect_symbols(out);
+            }
+            Expr::Clamp(a, b, c) => {
+                a.collect_symbols(out);
+                b.collect_symbols(out);
+                c.collect_symbols(out);
             }
             Expr::Func { args, .. } => {
                 for arg in args { arg.collect_symbols(out); }
@@ -237,6 +284,8 @@ impl E {
             Expr::Log10(a) => ln(a.substitute(subs)) / ln(constant(10.0)),
             Expr::Sqrt(a) => sqrt(a.substitute(subs)),
             Expr::Abs(a) => abs(a.substitute(subs)),
+            Expr::Heaviside(a) => heaviside(a.substitute(subs)),
+            Expr::Clamp(a, lo, hi) => clamp(a.substitute(subs), lo.substitute(subs), hi.substitute(subs)),
             Expr::Func { name, params, body, args } => {
                 let new_args = args.iter().map(|a| a.substitute(subs)).collect();
                 E::new(Expr::Func { name: name.clone(), params: params.clone(), body: body.clone(), args: new_args })
@@ -312,6 +361,10 @@ pub enum Expr {
     Sqrt(E),
     /// Absolute value.
     Abs(E),
+    /// Heaviside step function: 0 if x < 0, 1 if x >= 0. Derivative is 0.
+    Heaviside(E),
+    /// Clamp value to [lo, hi]. Derivative passes through (= d(val)/dvar).
+    Clamp(E, E, E),
     /// User-defined function application.
     Func {
         /// Function name (for display).
@@ -337,11 +390,17 @@ impl Hash for Expr {
             | Expr::Asin(a) | Expr::Acos(a) | Expr::Atan(a)
             | Expr::Sinh(a) | Expr::Cosh(a) | Expr::Tanh(a)
             | Expr::Exp(a) | Expr::Ln(a) | Expr::Log2(a) | Expr::Log10(a)
-            | Expr::Sqrt(a) | Expr::Abs(a) => a.hash(state),
+            | Expr::Sqrt(a) | Expr::Abs(a)
+            | Expr::Heaviside(a) => a.hash(state),
             Expr::Add(a, b) | Expr::Sub(a, b) | Expr::Mul(a, b)
             | Expr::Div(a, b) | Expr::Pow(a, b) | Expr::Atan2(a, b) => {
                 a.hash(state);
                 b.hash(state);
+            }
+            Expr::Clamp(a, b, c) => {
+                a.hash(state);
+                b.hash(state);
+                c.hash(state);
             }
             Expr::Func { name, params, body, args } => {
                 name.hash(state);
@@ -406,6 +465,10 @@ pub fn log10(e: E) -> E { E::new(Expr::Log10(e)) }
 pub fn sqrt(e: E) -> E { E::new(Expr::Sqrt(e)) }
 /// Symbolic absolute value.
 pub fn abs(e: E) -> E { E::new(Expr::Abs(e)) }
+/// Symbolic Heaviside step function: 0 if x < 0, 1 if x >= 0.
+pub fn heaviside(e: E) -> E { E::new(Expr::Heaviside(e)) }
+/// Symbolic clamp: clamp value to [lo, hi]. Derivative passes through.
+pub fn clamp(val: E, lo: E, hi: E) -> E { E::new(Expr::Clamp(val, lo, hi)) }
 /// Symbolic power function. Auto-simplifies (e.g. x^0 = 1, x^1 = x).
 pub fn pow(base: E, exponent: E) -> E { E::new(Expr::Pow(base, exponent)).simplify() }
 
@@ -760,6 +823,161 @@ mod tests {
             let expanded = f.expand();
             assert_eq!(format!("{}", expanded), "x^2 + 2 * x + 1");
         }
+    }
+
+    // --- Heaviside tests ---
+
+    #[test]
+    fn heaviside_eval() {
+        let vars = HashMap::from([("x", 0.0)]);
+        sym! {
+            let x = symbol("x");
+            let h = heaviside(x);
+            assert_eq!(h.eval(&HashMap::from([("x", -1.0)])).unwrap(), 0.0);
+            assert_eq!(h.eval(&vars).unwrap(), 1.0);
+            assert_eq!(h.eval(&HashMap::from([("x", 3.0)])).unwrap(), 1.0);
+        }
+    }
+
+    #[test]
+    fn heaviside_diff() {
+        sym! {
+            let x = symbol("x");
+            assert_eq!(format!("{}", heaviside(x).diff("x")), "0");
+            assert_eq!(format!("{}", heaviside(x * x - 1.0).diff("x")), "0");
+        }
+    }
+
+    #[test]
+    fn heaviside_display() {
+        sym! {
+            let x = symbol("x");
+            assert_eq!(format!("{}", heaviside(x)), "H(x)");
+        }
+    }
+
+    #[test]
+    fn heaviside_composition_diff() {
+        sym! {
+            let x = symbol("x");
+            // d/dx [H(1-x) * x^2] = 2x (H' = 0, product rule kills that term)
+            let f = heaviside(1.0 - x) * x * x;
+            assert_eq!(format!("{}", f.diff("x")), "2 * x * H(-x + 1)");
+        }
+    }
+
+    // --- Clamp tests ---
+
+    #[test]
+    fn clamp_eval() {
+        sym! {
+            let x = symbol("x");
+            let f = clamp(x, c(0.0), c(1.0));
+            assert_eq!(f.eval(&HashMap::from([("x", 0.5)])).unwrap(), 0.5);
+            assert_eq!(f.eval(&HashMap::from([("x", -2.0)])).unwrap(), 0.0);
+            assert_eq!(f.eval(&HashMap::from([("x", 5.0)])).unwrap(), 1.0);
+        }
+    }
+
+    #[test]
+    fn clamp_diff_passthrough() {
+        sym! {
+            let x = symbol("x");
+            // d/dx clamp(x, 0, 1) = 1 (pass-through)
+            assert_eq!(format!("{}", clamp(x, c(0.0), c(1.0)).diff("x")), "1");
+            // d/dx clamp(x^2, 0, 1) = 2x (chain rule on first arg)
+            assert_eq!(format!("{}", clamp(x * x, c(0.0), c(1.0)).diff("x")), "2 * x");
+        }
+    }
+
+    #[test]
+    fn clamp_display() {
+        sym! {
+            let x = symbol("x");
+            assert_eq!(format!("{}", clamp(x, c(0.0), c(1.0))), "clamp(x, 0, 1)");
+        }
+    }
+
+    #[test]
+    fn clamp_simplify_constants() {
+        sym! {
+            let f = clamp(c(5.0), c(0.0), c(1.0));
+            assert_eq!(format!("{}", f.simplify()), "1");
+            let g = clamp(c(-3.0), c(0.0), c(1.0));
+            assert_eq!(format!("{}", g.simplify()), "0");
+            let h = clamp(c(0.5), c(0.0), c(1.0));
+            assert_eq!(format!("{}", h.simplify()), "0.5");
+        }
+    }
+
+    // --- safe_asin tests ---
+
+    #[test]
+    fn safe_asin_eval() {
+        sym! {
+            let t = symbol("t");
+            let safe_asin = custom_func1("safe_asin", "t", asin(clamp(t, c(-1.0), c(1.0))));
+            let x = symbol("x");
+
+            // Normal value
+            let f = safe_asin(x);
+            let val = f.eval(&HashMap::from([("x", 0.5)])).unwrap();
+            assert!((val - 0.5_f64.asin()).abs() < 1e-10);
+
+            // Out of range: no NaN
+            let val_hi = f.eval(&HashMap::from([("x", 1.5)])).unwrap();
+            assert!((val_hi - std::f64::consts::FRAC_PI_2).abs() < 1e-10);
+
+            let val_lo = f.eval(&HashMap::from([("x", -1.5)])).unwrap();
+            assert!((val_lo + std::f64::consts::FRAC_PI_2).abs() < 1e-10);
+        }
+    }
+
+    #[test]
+    fn safe_asin_diff() {
+        sym! {
+            let t = symbol("t");
+            let safe_asin = custom_func1("safe_asin", "t", asin(clamp(t, c(-1.0), c(1.0))));
+            let x = symbol("x");
+            let f = safe_asin(x);
+            // Derivative: 1/sqrt(1 - clamp(x,-1,1)^2) * 1 (clamp pass-through)
+            let df = f.diff("x");
+            // Numerically verify at x=0.5
+            let vars = HashMap::from([("x", 0.5)]);
+            let dval = df.eval(&vars).unwrap();
+            let expected = 1.0 / (1.0 - 0.25_f64).sqrt(); // 1/sqrt(0.75)
+            assert!((dval - expected).abs() < 1e-10);
+        }
+    }
+
+    #[test]
+    fn heaviside_to_rust() {
+        sym! {
+            let x = symbol("x");
+            assert_eq!(heaviside(x).to_rust("f64"), "x.heaviside()");
+        }
+    }
+
+    #[test]
+    fn clamp_to_rust() {
+        sym! {
+            let x = symbol("x");
+            assert_eq!(clamp(x, c(0.0), c(1.0)).to_rust("f64"), "x.clamp(0.0_f64, 1.0_f64)");
+        }
+    }
+
+    #[test]
+    fn parse_heaviside() {
+        let f = parse("H(x)").unwrap();
+        assert_eq!(format!("{}", f), "H(x)");
+        assert_eq!(format!("{}", f.diff("x")), "0");
+    }
+
+    #[test]
+    fn parse_clamp() {
+        let f = parse("clamp(x, 0, 1)").unwrap();
+        assert_eq!(format!("{}", f), "clamp(x, 0, 1)");
+        assert_eq!(format!("{}", f.diff("x")), "1");
     }
 }
 

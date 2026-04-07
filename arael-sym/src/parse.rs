@@ -271,9 +271,12 @@ fn build_function_call(name: &str, args: Vec<E>) -> Result<E, ParseError> {
         "log10" => expect_unary(name, args, log10),
         "sqrt" => expect_unary(name, args, sqrt),
         "abs" => expect_unary(name, args, abs),
+        "H" | "heaviside" => expect_unary(name, args, heaviside),
         // Binary functions
         "atan2" => expect_binary(name, args, atan2),
         "pow" => expect_binary(name, args, pow),
+        // Ternary functions
+        "clamp" => expect_ternary(name, args),
         _ => Err(ParseError {
             pos: 0,
             msg: format!("unknown function: {name}"),
@@ -301,6 +304,18 @@ fn expect_binary(name: &str, args: Vec<E>, f: fn(E, E) -> E) -> Result<E, ParseE
     } else {
         let mut it = args.into_iter();
         Ok(f(it.next().unwrap(), it.next().unwrap()))
+    }
+}
+
+fn expect_ternary(name: &str, args: Vec<E>) -> Result<E, ParseError> {
+    if args.len() != 3 {
+        Err(ParseError {
+            pos: 0,
+            msg: format!("{name} expects 3 arguments, got {}", args.len()),
+        })
+    } else {
+        let mut it = args.into_iter();
+        Ok(clamp(it.next().unwrap(), it.next().unwrap(), it.next().unwrap()))
     }
 }
 

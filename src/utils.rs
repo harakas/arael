@@ -137,6 +137,11 @@ pub trait Float : num::Float + std::fmt::Debug + num::NumCast + std::ops::AddAss
         }
     }
 
+    /// Heaviside step function: 0 if x < 0, 1 if x >= 0.
+    fn heaviside(self) -> Self {
+        if self >= Self::zero() { Self::one() } else { Self::zero() }
+    }
+
     /// Clamp value to the range [low, high].
     fn clamp(self, low: Self, high: Self) -> Self {
         if self < low {
