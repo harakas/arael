@@ -13,6 +13,8 @@ pub enum GrabTarget {
     ArcCenter(Ref<Arc>),
     ArcStart(Ref<Arc>),
     ArcEnd(Ref<Arc>),
+    LineDrag(Ref<Line>),
+    ArcDrag(Ref<Arc>),
 }
 
 // Selection -- what entity is selected for constraint application

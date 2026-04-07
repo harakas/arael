@@ -1409,7 +1409,7 @@ impl EditorApp {
         for r in self.sketch.points.refs() {
             let p = &self.sketch.points[r];
             if p.helper { continue; }
-            if self.drag_point == Some(r) { continue; }
+            if self.drag_point == Some(r) || self.drag_point2 == Some(r) { continue; }
             let sp = self.to_screen(p.pos.value);
             let selected = self.selection.contains(&Selection::Point(r));
             let point_hovered = self.hovered == Some(Selection::Point(r));

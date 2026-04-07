@@ -30,6 +30,16 @@ use tools::*;
 use actions::Action;
 use history::History;
 use geometry::*;
+
+pub struct SavedArcLocks {
+    pub had_radius: bool,
+    pub old_radius: f64,
+    pub had_sweep: bool,
+    pub old_sweep: f64,
+    pub old_sweep_sign: f64,
+    pub start_optimize: bool,
+    pub end_optimize: bool,
+}
 // drawing module methods are accessed through impl blocks on EditorApp
 
 /// Entities involved in a constraint, for highlighting.
@@ -86,6 +96,10 @@ pub struct EditorApp {
     // Drag state
     pub grab: Option<GrabTarget>,
     pub drag_point: Option<Ref<Point>>,  // temporary drag point
+    pub drag_point2: Option<Ref<Point>>, // second drag point (line body drag)
+    pub drag_offset: vect2d,             // offset from mouse to drag point
+    pub drag_offset2: vect2d,            // offset for second drag point
+    pub drag_saved_arc_locks: Option<SavedArcLocks>,
     pub drag_dimension: Option<usize>,   // index of dimension being dragged
 
     // Undo/redo
@@ -234,6 +248,10 @@ impl EditorApp {
             hovered: None,
             grab: None,
             drag_point: None,
+            drag_point2: None,
+            drag_offset: vect2d::new(0.0, 0.0),
+            drag_offset2: vect2d::new(0.0, 0.0),
+            drag_saved_arc_locks: None,
             drag_dimension: None,
             history,
             constraint_markers: Vec::new(),
@@ -387,7 +405,32 @@ impl EditorApp {
             }
         }
 
-        best.map(|(_, t)| t)
+        // If an endpoint was found, return it (priority over body drag)
+        if best.is_some() { return best.map(|(_, t)| t); }
+
+        // Line bodies (lower priority than endpoints)
+        let mut body_best: Option<(f64, GrabTarget)> = None;
+        let mut check_body = |dist: f64, target: GrabTarget| {
+            if dist < threshold {
+                if body_best.is_none() || dist < body_best.unwrap().0 {
+                    body_best = Some((dist, target));
+                }
+            }
+        };
+        for r in self.sketch.lines.refs() {
+            let l = &self.sketch.lines[r];
+            let d = point_to_segment_dist(sketch_pos, l.p1.value, l.p2.value);
+            check_body(d, GrabTarget::LineDrag(r));
+        }
+
+        // Arc/circle curves (lower priority than endpoints)
+        for r in self.sketch.arcs.refs() {
+            let a = &self.sketch.arcs[r];
+            let (d, _) = point_to_arc_dist(sketch_pos, a);
+            check_body(d, GrabTarget::ArcDrag(r));
+        }
+
+        body_best.map(|(_, t)| t)
     }
 
     // Find selection target (entity near mouse)
@@ -558,6 +601,49 @@ impl EditorApp {
                     point: drag_pt, arc: r, hb: CrossBlock::new(),
                 });
             }
+            GrabTarget::LineDrag(r) => {
+                let l = &self.sketch.lines[r];
+                self.drag_offset = vect2d::new(l.p1.value.x - mouse_pos.x, l.p1.value.y - mouse_pos.y);
+                self.drag_offset2 = vect2d::new(l.p2.value.x - mouse_pos.x, l.p2.value.y - mouse_pos.y);
+                // First drag point at p1
+                self.sketch.points[drag_pt].pos = Param::fixed(l.p1.value);
+                self.sketch.coincident_lp1.push(CoincidentLP1 {
+                    line: r, point: drag_pt, hb: CrossBlock::new(),
+                });
+                // Second drag point at p2
+                let drag_pt2 = self.sketch.add_point_fixed(l.p2.value);
+                self.drag_point2 = Some(drag_pt2);
+                self.sketch.coincident_lp2.push(CoincidentLP2 {
+                    line: r, point: drag_pt2, hb: CrossBlock::new(),
+                });
+            }
+            GrabTarget::ArcDrag(r) => {
+                let a = &self.sketch.arcs[r];
+                self.drag_offset = vect2d::new(a.center.value.x - mouse_pos.x, a.center.value.y - mouse_pos.y);
+                // Drag point at center
+                self.sketch.points[drag_pt].pos = Param::fixed(a.center.value);
+                self.sketch.coincident_arc_center.push(CoincidentArcCenter {
+                    point: drag_pt, arc: r, hb: CrossBlock::new(),
+                });
+                // Lock radius and sweep to prevent shape change
+                self.drag_saved_arc_locks = Some(SavedArcLocks {
+                    had_radius: a.constraints.has_target_radius,
+                    old_radius: a.constraints.target_radius,
+                    had_sweep: a.constraints.has_target_sweep,
+                    old_sweep: a.constraints.target_sweep,
+                    old_sweep_sign: a.constraints.sweep_sign,
+                    start_optimize: a.start_angle.optimize,
+                    end_optimize: a.end_angle.optimize,
+                });
+                let a = &mut self.sketch.arcs[r];
+                a.constraints.has_target_radius = true;
+                a.constraints.target_radius = a.radius.value;
+                a.constraints.has_target_sweep = true;
+                a.constraints.target_sweep = a.end_angle.value - a.start_angle.value;
+                a.constraints.sweep_sign = if a.ccw { 1.0 } else { -1.0 };
+                a.start_angle.optimize = false;
+                a.end_angle.optimize = false;
+            }
         }
         self.grab = Some(target);
     }
@@ -566,7 +652,17 @@ impl EditorApp {
     // Track the best (lowest cost) clean state seen during the drag.
     fn update_drag(&mut self, mouse_pos: vect2d) {
         if let Some(drag_pt) = self.drag_point {
-            self.sketch.points[drag_pt].pos = Param::fixed(mouse_pos);
+            let is_body_drag = matches!(self.grab, Some(GrabTarget::LineDrag(_) | GrabTarget::ArcDrag(_)));
+            if is_body_drag {
+                let pos1 = vect2d::new(mouse_pos.x + self.drag_offset.x, mouse_pos.y + self.drag_offset.y);
+                self.sketch.points[drag_pt].pos = Param::fixed(pos1);
+                if let Some(drag_pt2) = self.drag_point2 {
+                    let pos2 = vect2d::new(mouse_pos.x + self.drag_offset2.x, mouse_pos.y + self.drag_offset2.y);
+                    self.sketch.points[drag_pt2].pos = Param::fixed(pos2);
+                }
+            } else {
+                self.sketch.points[drag_pt].pos = Param::fixed(mouse_pos);
+            }
             let result = self.sketch.solve();
             self.last_cost = result.end_cost;
 
@@ -582,6 +678,24 @@ impl EditorApp {
                             Some(GrabTarget::ArcCenter(_)) => { clean.coincident_arc_center.pop(); }
                             Some(GrabTarget::ArcStart(_)) => { clean.coincident_arc_start.pop(); }
                             Some(GrabTarget::ArcEnd(_)) => { clean.coincident_arc_end.pop(); }
+                            Some(GrabTarget::LineDrag(_)) => {
+                                clean.coincident_lp1.pop();
+                                clean.coincident_lp2.pop();
+                                if let Some(dp2) = self.drag_point2 { clean.points.remove(dp2); }
+                            }
+                            Some(GrabTarget::ArcDrag(r)) => {
+                                clean.coincident_arc_center.pop();
+                                if let Some(ref saved) = self.drag_saved_arc_locks {
+                                    let a = &mut clean.arcs[r];
+                                    a.constraints.has_target_radius = saved.had_radius;
+                                    a.constraints.target_radius = saved.old_radius;
+                                    a.constraints.has_target_sweep = saved.had_sweep;
+                                    a.constraints.target_sweep = saved.old_sweep;
+                                    a.constraints.sweep_sign = saved.old_sweep_sign;
+                                    a.start_angle.optimize = saved.start_optimize;
+                                    a.end_angle.optimize = saved.end_optimize;
+                                }
+                            }
                             None => {}
                         }
                         clean.points.remove(drag_pt);
@@ -602,6 +716,26 @@ impl EditorApp {
             Some(GrabTarget::ArcCenter(_)) => { self.sketch.coincident_arc_center.pop(); }
             Some(GrabTarget::ArcStart(_)) => { self.sketch.coincident_arc_start.pop(); }
             Some(GrabTarget::ArcEnd(_)) => { self.sketch.coincident_arc_end.pop(); }
+            Some(GrabTarget::LineDrag(_)) => {
+                self.sketch.coincident_lp1.pop();
+                self.sketch.coincident_lp2.pop();
+                if let Some(dp2) = self.drag_point2.take() {
+                    self.sketch.points.remove(dp2);
+                }
+            }
+            Some(GrabTarget::ArcDrag(r)) => {
+                self.sketch.coincident_arc_center.pop();
+                if let Some(saved) = self.drag_saved_arc_locks.take() {
+                    let a = &mut self.sketch.arcs[r];
+                    a.constraints.has_target_radius = saved.had_radius;
+                    a.constraints.target_radius = saved.old_radius;
+                    a.constraints.has_target_sweep = saved.had_sweep;
+                    a.constraints.target_sweep = saved.old_sweep;
+                    a.constraints.sweep_sign = saved.old_sweep_sign;
+                    a.start_angle.optimize = saved.start_optimize;
+                    a.end_angle.optimize = saved.end_optimize;
+                }
+            }
             None => {}
         }
         self.sketch.points.remove(drag_pt);
