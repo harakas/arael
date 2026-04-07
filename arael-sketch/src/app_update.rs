@@ -657,9 +657,7 @@ impl eframe::App for EditorApp {
                         self.command_focus = true;
                     }
                     // command_has_focus = "user is in command-entry mode".
-                    if r.has_focus() {
-                        self.command_has_focus = true;
-                    }
+                    self.command_has_focus = r.has_focus();
 
                     // History navigation (only for single-line input, not when completions showing)
                     if r.has_focus() && !self.command_input.contains('\n') && self.completions.is_empty() {
