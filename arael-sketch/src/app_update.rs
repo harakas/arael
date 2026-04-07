@@ -1053,9 +1053,10 @@ impl eframe::App for EditorApp {
                                 if is_radius {
                                     if let DimensionKind::ArcRadius(r) = kind {
                                         let a = &self.sketch.arcs[r];
-                                        let angle = (mouse_sketch.y - a.center.value.y)
+                                        let abs_angle = (mouse_sketch.y - a.center.value.y)
                                             .atan2(mouse_sketch.x - a.center.value.x);
-                                        self.sketch.dimensions[dim_idx].offset = vect2d::new(angle, 0.0);
+                                        let rel_angle = abs_angle - a.start_angle.value;
+                                        self.sketch.dimensions[dim_idx].offset = vect2d::new(rel_angle, 0.0);
                                     }
                                 } else if let DimensionKind::ArcSweep(r) = kind {
                                     let a = &self.sketch.arcs[r];
@@ -1377,9 +1378,10 @@ impl eframe::App for EditorApp {
                             if matches!(kind, DimensionKind::ArcRadius(r) if self.sketch.arcs.contains(*r)) {
                                 if let DimensionKind::ArcRadius(r) = kind {
                                     let a = &self.sketch.arcs[*r];
-                                    let angle = (mouse_sketch.y - a.center.value.y)
+                                    let abs_angle = (mouse_sketch.y - a.center.value.y)
                                         .atan2(mouse_sketch.x - a.center.value.x);
-                                    self.dim_offset = vect2d::new(angle, 0.0);
+                                    let rel_angle = abs_angle - a.start_angle.value;
+                                    self.dim_offset = vect2d::new(rel_angle, 0.0);
                                     self.dim_text_along = 0.0;
                                 }
                             } else if let DimensionKind::ArcSweep(r) = kind {

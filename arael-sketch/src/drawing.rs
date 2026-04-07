@@ -75,7 +75,7 @@ impl EditorApp {
         if is_radius {
             if let DimensionKind::ArcRadius(r) = kind {
                 let a = &self.sketch.arcs[*r];
-                let angle = offset.x;
+                let angle = a.start_angle.value + offset.x;
                 let edge = vect2d::new(
                     a.center.value.x + a.radius.value * angle.cos(),
                     a.center.value.y + a.radius.value * angle.sin(),
@@ -701,7 +701,7 @@ impl EditorApp {
         if is_radius {
             if let DimensionKind::ArcRadius(r) = dim.kind {
                 let a = &self.sketch.arcs[r];
-                let angle = dim.offset.x;
+                let angle = a.start_angle.value + dim.offset.x;
                 let edge = vect2d::new(
                     a.center.value.x + a.radius.value * angle.cos(),
                     a.center.value.y + a.radius.value * angle.sin(),
