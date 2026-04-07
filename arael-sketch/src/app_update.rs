@@ -990,8 +990,21 @@ impl eframe::App for EditorApp {
             let mouse_sketch = self.to_sketch(mouse_screen);
             let hit_threshold = 15.0 / self.scale as f64;  // screen pixels -> sketch units
 
-            // Hover detection
-            let new_hover = if response.hovered() {
+            // Hover detection (frozen during geometry drag)
+            let new_hover = if self.grab.is_some() {
+                // During drag, keep hover on the dragged entity
+                match self.grab {
+                    Some(GrabTarget::LineDrag(r)) => Some(Selection::Line(r)),
+                    Some(GrabTarget::ArcDrag(r)) => Some(Selection::Arc(r)),
+                    Some(GrabTarget::LineP1(r)) => Some(Selection::LineP1(r)),
+                    Some(GrabTarget::LineP2(r)) => Some(Selection::LineP2(r)),
+                    Some(GrabTarget::ArcCenter(r)) => Some(Selection::ArcCenter(r)),
+                    Some(GrabTarget::ArcStart(r)) => Some(Selection::ArcStart(r)),
+                    Some(GrabTarget::ArcEnd(r)) => Some(Selection::ArcEnd(r)),
+                    Some(GrabTarget::Point(r)) => Some(Selection::Point(r)),
+                    None => None,
+                }
+            } else if response.hovered() {
                 self.hit_test_selection(mouse_sketch, hit_threshold)
             } else {
                 None
