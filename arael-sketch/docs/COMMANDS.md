@@ -312,6 +312,21 @@ distance L0.p1 L1.p2 derived Derived distance (measures current geometry)
 distance L0.p1 L1.p2 5 derived Derived distance with explicit value
 ```
 
+### Driven (Freeze Current Value)
+
+The `driven` keyword creates a constraining dimension at the current measured value — effectively "freezing" the geometry without having to type the exact value. Unlike `derived`, it reduces DOF.
+
+```
+length L0 driven             Constraining length at current measured value
+radius A0 driven             Constraining radius at current value
+sweep A0 driven              Constraining sweep at current value
+angle L0 L1 driven           Constraining angle at current value
+distance L0.p1 L1.p2 driven  Constraining distance at current value
+hdistance L0.p1 L0.p2 driven Constraining hdistance at current value
+vdistance L0.p1 L0.p2 driven Constraining vdistance at current value
+xangle L0 driven             Constraining xangle at current value
+```
+
 Toggle between derived and driven:
 
 ```
