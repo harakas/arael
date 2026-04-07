@@ -104,7 +104,7 @@ impl eframe::App for EditorApp {
 
         // Side panel: toolbar
         egui::SidePanel::left("toolbar").min_width(50.0).default_width(50.0).show(ctx, |ui| {
-            // Toggle buttons (2x2 grid)
+            // Toggle buttons (2x3 grid)
             egui::Grid::new("toggle_grid").num_columns(2).show(ui, |ui| {
                 if ui.selectable_label(self.dark_mode, "Dark").clicked() {
                     self.dark_mode = !self.dark_mode;
@@ -124,6 +124,13 @@ impl eframe::App for EditorApp {
                     } else {
                         self.command_has_focus = false;
                     }
+                }
+                ui.end_row();
+                if ui.selectable_label(self.show_dimensions, "Dims").clicked() {
+                    self.show_dimensions = !self.show_dimensions;
+                }
+                if ui.selectable_label(self.show_points, "Pts").clicked() {
+                    self.show_points = !self.show_points;
                 }
                 ui.end_row();
             });

@@ -125,6 +125,8 @@ pub struct EditorApp {
 
     // Display
     pub show_constraints: bool,
+    pub show_dimensions: bool,
+    pub show_points: bool,
 
     // Theme
     pub dark_mode: bool,
@@ -267,6 +269,8 @@ impl EditorApp {
             dim_select_all: false,
             dim_derived: false,
             show_constraints: true,
+            show_dimensions: true,
+            show_points: true,
             show_params: false,
             param_new_name: String::new(),
             param_new_expr: String::new(),
@@ -453,13 +457,15 @@ impl EditorApp {
             return Some(Selection::Constraint(id));
         }
 
-        // Then standalone points (skip helpers)
+        // Then standalone points (skip helpers, skip if hidden)
+        if self.show_points {
         for r in self.sketch.points.refs() {
             let p = &self.sketch.points[r];
             if p.helper { continue; }
             let d = ((p.pos.value.x - sketch_pos.x).powi(2)
                    + (p.pos.value.y - sketch_pos.y).powi(2)).sqrt();
             if d < threshold { return Some(Selection::Point(r)); }
+        }
         }
 
         // Then line endpoints (pseudo-points)
@@ -514,6 +520,7 @@ impl EditorApp {
 
         // Dimension annotations (higher priority than line/arc bodies)
         // Check both the text segment AND the dimension arrow line
+        if self.show_dimensions {
         let screen_pos = self.to_screen(sketch_pos);
         for (i, dim) in self.sketch.dimensions.iter().enumerate() {
             // Text segment
@@ -539,6 +546,7 @@ impl EditorApp {
             if dt < 15.0 || da < 8.0 {
                 return Some(Selection::Dimension(i));
             }
+        }
         }
 
         // Then lines (distance to segment)

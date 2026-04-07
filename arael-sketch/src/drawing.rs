@@ -1400,8 +1400,8 @@ impl EditorApp {
                 || l_p2_locked.contains(&r.index())
                 || !connected_lp2.contains(&r.index())
                 || near_p2;
-            if show_p1 { painter.circle_filled(p1, ep1_radius, ep1_color); }
-            if show_p2 { painter.circle_filled(p2, ep2_radius, ep2_color); }
+            if show_p1 && (self.show_points || p1_selected) { painter.circle_filled(p1, ep1_radius, ep1_color); }
+            if show_p2 && (self.show_points || p2_selected) { painter.circle_filled(p2, ep2_radius, ep2_color); }
 
         }
 
@@ -1410,8 +1410,9 @@ impl EditorApp {
             let p = &self.sketch.points[r];
             if p.helper { continue; }
             if self.drag_point == Some(r) || self.drag_point2 == Some(r) { continue; }
-            let sp = self.to_screen(p.pos.value);
             let selected = self.selection.contains(&Selection::Point(r));
+            if !self.show_points && !selected { continue; }
+            let sp = self.to_screen(p.pos.value);
             let point_hovered = self.hovered == Some(Selection::Point(r));
             let color = if selected { c.point_selected }
                 else if highlight_points.contains(&r.index()) { highlight_color }
@@ -1472,11 +1473,12 @@ impl EditorApp {
                 let near_end = (mouse_screen.x - ep.x).powi(2) + (mouse_screen.y - ep.y).powi(2) < 225.0;
                 let show_start = start_sel || start_hl || start_hov || arc_selected || !connected_arc_s.contains(&r.index()) || near_start;
                 let show_end = end_sel || end_hl || end_hov || arc_selected || !connected_arc_e.contains(&r.index()) || near_end;
-                if show_start { painter.circle_filled(points[0], if start_sel || start_hl || start_hov { 6.0 } else { 4.0 }, start_color); }
-                if show_end { painter.circle_filled(*points.last().unwrap(), if end_sel || end_hl || end_hov { 6.0 } else { 4.0 }, end_color); }
+                if show_start && (self.show_points || start_sel) { painter.circle_filled(points[0], if start_sel || start_hl || start_hov { 6.0 } else { 4.0 }, start_color); }
+                if show_end && (self.show_points || end_sel) { painter.circle_filled(*points.last().unwrap(), if end_sel || end_hl || end_hov { 6.0 } else { 4.0 }, end_color); }
             }
             // Center point
             let center_sel = self.selection.contains(&Selection::ArcCenter(r));
+            if self.show_points || center_sel {
             let center_hl = highlight_arc_center.contains(&r.index());
             let center_hov = self.hovered == Some(Selection::ArcCenter(r));
             let center_locked = arc_c_locked.contains(&r.index());
@@ -1486,6 +1488,7 @@ impl EditorApp {
                 else { c.endpoint };
             let center_radius = if center_sel { 5.0 } else if center_hov { 5.0 } else { 3.0 };
             painter.circle_filled(center, center_radius, center_color);
+            }
         }
 
         // Origin crosshair
@@ -1630,6 +1633,7 @@ impl EditorApp {
         }
 
         // Dimension annotations
+        if self.show_dimensions {
         let dim_color = c.dimension;
         let dim_sel_color = c.dimension_selected;
         let dim_broken_color = c.dimension_broken;
@@ -1644,6 +1648,7 @@ impl EditorApp {
             let is_radius = matches!(dim.kind, DimensionKind::ArcRadius(_));
             let is_expr = dim.expr_str.is_some();
             self.draw_dimension(painter, &dim.kind, dim.value, dim.offset, dim.text_along, color, is_radius, is_expr, dim.derived);
+        }
         }
 
         // Redraw selected and locked points/endpoints on top so they're not obscured
