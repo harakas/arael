@@ -263,6 +263,8 @@ symmetry P0 L0 P1            Points P0,P1 symmetric about L0
 symmetry A0 L0 A1            Arc centers symmetric + equal radius (3 DOF removed)
 symmetry L0.p1 L1 L2.p1     Endpoints symmetric about L1
 symmetry A0.center L0 A1.center  Any endpoint ref works (P0, L0.p1, A0.center, A0.start, A0.end)
+mirror L0 L1 about L2        Mirror entities about a line (creates copies + symmetry constraints)
+mirror selection about L0    Mirror selected entities
 point_on P0 L0               Point on line
 point_on L0.p1 L1            Line endpoint on another line
 point_on L0.p1 A0            Line endpoint on arc
@@ -300,6 +302,27 @@ remove_constraint L0.p1 lock
 ```
 
 Alias: `rc` (e.g., `rc L0 horizontal`)
+
+## Mirror
+
+Create mirrored copies of geometry across a mirror line. Endpoint symmetry constraints are added by default. Coincident constraints among source entities are recreated among the mirrored copies.
+
+```
+mirror L0 about L1                        Mirror a line
+mirror L0 L1 A0 about L2                  Mirror multiple entities
+mirror selection about L0                  Mirror selected entities
+mirror L0 L1 about L2 noconstraint         No symmetry/coincident constraints
+mirror L0 L1 about L2 strict               Error if any constraint fails
+```
+
+Keywords: `noconstraint` (skip all constraints), `strict` (error on constraint failure).
+
+Variable capture works with `_0`..`_N`:
+```
+a, b = mirror L0 L1 about L2
+```
+
+When mirroring entities that share endpoints (connected via coincident), the mirrored copies also share endpoints, and only one symmetry constraint is created per unique endpoint position (no duplicates).
 
 ## Dimensions
 
