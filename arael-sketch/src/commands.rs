@@ -978,7 +978,8 @@ fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
             let first_word = rhs.split_whitespace().next().unwrap_or("");
             let is_command = matches!(first_word,
                 "add_line" | "add_rect" | "add_rect3" | "add_rectcenter" |
-                "add_point" | "add_circle" | "add_arc" | "offset_line" | "offset" |
+                "add_point" | "add_circle" | "add_circle2" | "add_circle3" |
+                "add_circle2t" | "add_circle3t" | "add_arc" | "offset_line" | "offset" |
                 "length" | "radius" | "sweep" | "angle" | "distance");
             if is_command {
                 let dim_count_before = ctx.sketch.dimensions.len();
@@ -1026,6 +1027,10 @@ fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
         "add_rectcenter" => cmd_add_rectcenter(ctx, args_str),
         "add_point" => cmd_add_point(ctx, args_str),
         "add_circle" => cmd_add_circle(ctx, args_str),
+        "add_circle2" => cmd_add_circle2(ctx, args_str),
+        "add_circle3" => cmd_add_circle3(ctx, args_str),
+        "add_circle2t" => cmd_add_circle2t(ctx, args_str),
+        "add_circle3t" => cmd_add_circle3t(ctx, args_str),
         "add_arc" => cmd_add_arc(ctx, args_str),
         "offset_line" | "offset" => cmd_offset_line(ctx, args_str),
         "delete" => cmd_delete(ctx, args_str),
@@ -1304,10 +1309,17 @@ fn auto_coincident_arc(ctx: &mut CommandContext, arc_ref: Ref<Arc>, center_only:
 
 fn cmd_add_line(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let mut tokens: Vec<&str> = args.split_whitespace().collect();
-    let nocursor = tokens.last() == Some(&"nocursor");
-    if nocursor { tokens.pop(); }
-    let noconnect = tokens.last() == Some(&"noconnect");
-    if noconnect { tokens.pop(); }
+    let mut nocursor = false;
+    let mut noconnect = false;
+    let mut driven = false;
+    for _ in 0..3 {
+        match tokens.last().copied() {
+            Some("nocursor") => { nocursor = true; tokens.pop(); }
+            Some("noconnect") => { noconnect = true; tokens.pop(); }
+            Some("driven") => { driven = true; tokens.pop(); }
+            _ => break,
+        }
+    }
 
     // Parse all coordinate tokens
     let points: Vec<vect2d> = if tokens.len() >= 2 {
@@ -1334,7 +1346,7 @@ fn cmd_add_line(ctx: &mut CommandContext, args: &str) -> CommandResult {
         };
         vec![prev, p2]
     } else {
-        return err("Usage: add_line x1,y1 x2,y2 [x3,y3 ...]  or  add_line @dx,dy");
+        return err("Usage: add_line x1,y1 x2,y2 [x3,y3 ...] [noconnect] [nocursor] [driven]");
     };
 
     ctx.begin_group();
@@ -1358,21 +1370,34 @@ fn cmd_add_line(ctx: &mut CommandContext, args: &str) -> CommandResult {
                 msg += &format!(" [connected: {}]", connected.join(", "));
             }
         }
+        if driven {
+            let dx = p2.x - p1.x;
+            let dy = p2.y - p1.y;
+            let len = (dx * dx + dy * dy).sqrt();
+            ctx.exec(Action::AddDimension {
+                kind: DimensionKind::LineLength(line_ref),
+                value: len, expr: None, derived: false,
+            });
+            msg += &format!(" [driven length={:.4}]", len);
+        }
         msgs.push(msg);
     }
     if !nocursor { ctx.cursor = Some(*points.last().unwrap()); }
     ok(msgs.join("\n"))
 }
 
-/// Helper: execute a constraint/dimension action inside a rect builder.
-/// In strict mode, returns Err on failure. Otherwise collects warning and continues.
-fn rect_exec(ctx: &mut CommandContext, action: Action, strict: bool, warnings: &mut Vec<String>) -> Result<(), String> {
+/// Helper: execute a constraint/dimension action inside a compound command.
+/// On success, pushes `desc` to `applied`. On failure in strict mode, returns Err.
+/// In non-strict mode, collects warning and continues.
+fn rect_exec(ctx: &mut CommandContext, action: Action, strict: bool, desc: &str, applied: &mut Vec<String>, warnings: &mut Vec<String>) -> Result<(), String> {
     ctx.exec(action);
     if let Some(e) = ctx.status_error.take() {
         if strict {
             return Err(e);
         }
         warnings.push(e);
+    } else {
+        applied.push(desc.to_string());
     }
     Ok(())
 }
@@ -1390,6 +1415,7 @@ fn build_rect(
 ) -> CommandResult {
     ctx.begin_group();
     let mut warnings = Vec::new();
+    let mut applied = Vec::new();
 
     // Create 4 lines: 0-1, 1-2, 2-3, 3-0
     let mut line_refs = Vec::new();
@@ -1409,20 +1435,25 @@ fn build_rect(
 
     if !noconstraint {
         if hv {
-            if let Err(e) = rect_exec(ctx, Action::ApplyHorizontal { lines: vec![line_refs[0], line_refs[2]] }, strict, &mut warnings) {
+            let desc = format!("horizontal {} {}", line_names[0], line_names[2]);
+            if let Err(e) = rect_exec(ctx, Action::ApplyHorizontal { lines: vec![line_refs[0], line_refs[2]] }, strict, &desc, &mut applied, &mut warnings) {
                 return err(e);
             }
-            if let Err(e) = rect_exec(ctx, Action::ApplyVertical { lines: vec![line_refs[1], line_refs[3]] }, strict, &mut warnings) {
+            let desc = format!("vertical {} {}", line_names[1], line_names[3]);
+            if let Err(e) = rect_exec(ctx, Action::ApplyVertical { lines: vec![line_refs[1], line_refs[3]] }, strict, &desc, &mut applied, &mut warnings) {
                 return err(e);
             }
         } else {
-            if let Err(e) = rect_exec(ctx, Action::ApplyPerpendicular { a: line_refs[0], b: line_refs[1] }, strict, &mut warnings) {
+            let desc = format!("perpendicular {} {}", line_names[0], line_names[1]);
+            if let Err(e) = rect_exec(ctx, Action::ApplyPerpendicular { a: line_refs[0], b: line_refs[1] }, strict, &desc, &mut applied, &mut warnings) {
                 return err(e);
             }
-            if let Err(e) = rect_exec(ctx, Action::ApplyParallel { a: line_refs[0], b: line_refs[2] }, strict, &mut warnings) {
+            let desc = format!("parallel {} {}", line_names[0], line_names[2]);
+            if let Err(e) = rect_exec(ctx, Action::ApplyParallel { a: line_refs[0], b: line_refs[2] }, strict, &desc, &mut applied, &mut warnings) {
                 return err(e);
             }
-            if let Err(e) = rect_exec(ctx, Action::ApplyParallel { a: line_refs[1], b: line_refs[3] }, strict, &mut warnings) {
+            let desc = format!("parallel {} {}", line_names[1], line_names[3]);
+            if let Err(e) = rect_exec(ctx, Action::ApplyParallel { a: line_refs[1], b: line_refs[3] }, strict, &desc, &mut applied, &mut warnings) {
                 return err(e);
             }
         }
@@ -1435,7 +1466,8 @@ fn build_rect(
             let dy = l.p2.value.y - l.p1.value.y;
             let len = (dx * dx + dy * dy).sqrt();
             let kind = DimensionKind::LineLength(line_refs[i]);
-            if let Err(e) = rect_exec(ctx, Action::AddDimension { kind, value: len, expr: None, derived: false }, strict, &mut warnings) {
+            let desc = format!("driven length {} = {:.4}", line_names[i], len);
+            if let Err(e) = rect_exec(ctx, Action::AddDimension { kind, value: len, expr: None, derived: false }, strict, &desc, &mut applied, &mut warnings) {
                 return err(e);
             }
         }
@@ -1448,6 +1480,9 @@ fn build_rect(
     }
 
     let mut msg = format!("Added rect: {} {} {} {}", line_names[0], line_names[1], line_names[2], line_names[3]);
+    for a in &applied {
+        msg += &format!("\n  {}", a);
+    }
     for w in &warnings {
         msg += &format!("\n  warning: {}", w);
     }
@@ -1508,6 +1543,11 @@ fn cmd_add_rect3(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let p1 = match parse_coord(ctx, tokens[0], ctx.cursor) { Ok(p) => p, Err(e) => return err(e) };
     let p2 = match parse_coord(ctx, tokens[1], Some(p1)) { Ok(p) => p, Err(e) => return err(e) };
     let p3 = match parse_coord(ctx, tokens[2], Some(p2)) { Ok(p) => p, Err(e) => return err(e) };
+    // Reject collinear points (cross product of p1->p2 and p2->p3 ~ 0)
+    let cross = (p2.x - p1.x) * (p3.y - p2.y) - (p2.y - p1.y) * (p3.x - p2.x);
+    if cross.abs() < 1e-9 {
+        return err("Points are collinear, cannot form a rectangle");
+    }
     // p4 = p1 + (p3 - p2)
     let p4 = vect2d::new(p1.x + (p3.x - p2.x), p1.y + (p3.y - p2.y));
     build_rect(ctx, [p1, p2, p3, p4], kw.noconnect, kw.noconstraint, kw.hv, kw.driven, kw.strict)
@@ -1547,12 +1587,19 @@ fn cmd_add_point(ctx: &mut CommandContext, args: &str) -> CommandResult {
 
 fn cmd_add_circle(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let mut tokens: Vec<&str> = args.split_whitespace().collect();
-    let nocursor = tokens.last() == Some(&"nocursor");
-    if nocursor { tokens.pop(); }
-    let noconnect = tokens.last() == Some(&"noconnect");
-    if noconnect { tokens.pop(); }
+    let mut nocursor = false;
+    let mut noconnect = false;
+    let mut driven = false;
+    for _ in 0..3 {
+        match tokens.last().copied() {
+            Some("nocursor") => { nocursor = true; tokens.pop(); }
+            Some("noconnect") => { noconnect = true; tokens.pop(); }
+            Some("driven") => { driven = true; tokens.pop(); }
+            _ => break,
+        }
+    }
     if tokens.len() != 2 {
-        return err("Usage: add_circle cx,cy radius [noconnect] [nocursor]");
+        return err("Usage: add_circle cx,cy radius [noconnect] [nocursor] [driven]");
     }
     let center = match parse_coord(ctx, tokens[0], ctx.cursor) {
         Ok(p) => p, Err(e) => return err(e),
@@ -1573,6 +1620,374 @@ fn cmd_add_circle(ctx: &mut CommandContext, args: &str) -> CommandResult {
         if !connected.is_empty() {
             msg += &format!(" [connected: {}]", connected.join(", "));
         }
+    }
+    if driven {
+        ctx.exec(Action::AddDimension {
+            kind: DimensionKind::ArcRadius(arc_ref),
+            value: r, expr: None, derived: false,
+        });
+        msg += &format!(" [driven radius={:.4}]", r);
+    }
+    ok(msg)
+}
+
+fn cmd_add_circle2(ctx: &mut CommandContext, args: &str) -> CommandResult {
+    let mut tokens: Vec<&str> = args.split_whitespace().collect();
+    let mut nocursor = false;
+    let mut noconnect = false;
+    let mut driven = false;
+    for _ in 0..3 {
+        match tokens.last().copied() {
+            Some("nocursor") => { nocursor = true; tokens.pop(); }
+            Some("noconnect") => { noconnect = true; tokens.pop(); }
+            Some("driven") => { driven = true; tokens.pop(); }
+            _ => break,
+        }
+    }
+    if tokens.len() != 2 {
+        return err("Usage: add_circle2 p1 p2 [noconnect] [nocursor] [driven]");
+    }
+    let p1 = match parse_coord(ctx, tokens[0], ctx.cursor) { Ok(p) => p, Err(e) => return err(e) };
+    let p2 = match parse_coord(ctx, tokens[1], Some(p1)) { Ok(p) => p, Err(e) => return err(e) };
+    let center = vect2d::new((p1.x + p2.x) / 2.0, (p1.y + p2.y) / 2.0);
+    let r = ((p2.x - p1.x).powi(2) + (p2.y - p1.y).powi(2)).sqrt() / 2.0;
+    let edge = vect2d::new(center.x + r, center.y);
+    ctx.begin_group();
+    ctx.exec(Action::AddCircle { center, edge });
+    let arc_ref = ctx.sketch.arcs.refs().last().unwrap();
+    let name = ctx.sketch.arcs[arc_ref].name.clone();
+    if !nocursor { ctx.cursor = Some(center); }
+    ctx.session_names.insert("_".into(), name.clone());
+    let mut msg = format!("Added {}: center=({:.2},{:.2}) r={:.2}", name, center.x, center.y, r);
+    if !noconnect {
+        let connected = auto_coincident_arc(ctx, arc_ref, true);
+        if !connected.is_empty() {
+            msg += &format!(" [connected: {}]", connected.join(", "));
+        }
+    }
+    if driven {
+        ctx.exec(Action::AddDimension {
+            kind: DimensionKind::ArcRadius(arc_ref),
+            value: r, expr: None, derived: false,
+        });
+        msg += &format!(" [driven radius={:.4}]", r);
+    }
+    ok(msg)
+}
+
+fn cmd_add_circle3(ctx: &mut CommandContext, args: &str) -> CommandResult {
+    let mut tokens: Vec<&str> = args.split_whitespace().collect();
+    let mut nocursor = false;
+    let mut noconnect = false;
+    let mut driven = false;
+    for _ in 0..3 {
+        match tokens.last().copied() {
+            Some("nocursor") => { nocursor = true; tokens.pop(); }
+            Some("noconnect") => { noconnect = true; tokens.pop(); }
+            Some("driven") => { driven = true; tokens.pop(); }
+            _ => break,
+        }
+    }
+    if tokens.len() != 3 {
+        return err("Usage: add_circle3 p1 p2 p3 [noconnect] [nocursor] [driven]");
+    }
+    let p1 = match parse_coord(ctx, tokens[0], ctx.cursor) { Ok(p) => p, Err(e) => return err(e) };
+    let p2 = match parse_coord(ctx, tokens[1], Some(p1)) { Ok(p) => p, Err(e) => return err(e) };
+    let p3 = match parse_coord(ctx, tokens[2], Some(p2)) { Ok(p) => p, Err(e) => return err(e) };
+    let (center, r, _, _, _) = match crate::geometry::circumscribed_arc(p1, p2, p3) {
+        Some(v) => v,
+        None => return err("Points are collinear, cannot define a circle"),
+    };
+    let edge = vect2d::new(center.x + r, center.y);
+    ctx.begin_group();
+    ctx.exec(Action::AddCircle { center, edge });
+    let arc_ref = ctx.sketch.arcs.refs().last().unwrap();
+    let name = ctx.sketch.arcs[arc_ref].name.clone();
+    if !nocursor { ctx.cursor = Some(center); }
+    ctx.session_names.insert("_".into(), name.clone());
+    let mut msg = format!("Added {}: center=({:.2},{:.2}) r={:.2}", name, center.x, center.y, r);
+    if !noconnect {
+        let connected = auto_coincident_arc(ctx, arc_ref, true);
+        if !connected.is_empty() {
+            msg += &format!(" [connected: {}]", connected.join(", "));
+        }
+    }
+    if driven {
+        ctx.exec(Action::AddDimension {
+            kind: DimensionKind::ArcRadius(arc_ref),
+            value: r, expr: None, derived: false,
+        });
+        msg += &format!(" [driven radius={:.4}]", r);
+    }
+    ok(msg)
+}
+
+/// Check if the perpendicular projection of `center` onto the line segment (p1,p2)
+/// falls within the segment (0 <= t <= 1).
+fn tangent_touches_segment(center: vect2d, p1: vect2d, p2: vect2d) -> bool {
+    let dx = p2.x - p1.x;
+    let dy = p2.y - p1.y;
+    let len_sq = dx * dx + dy * dy;
+    if len_sq < 1e-24 { return false; }
+    let t = ((center.x - p1.x) * dx + (center.y - p1.y) * dy) / len_sq;
+    t >= -1e-6 && t <= 1.0 + 1e-6
+}
+
+/// Compute center of circle tangent to two line segments with given radius.
+/// Only considers candidates whose tangent points fall on the actual segments.
+/// Returns Ok(center) if exactly one candidate, Err with message otherwise.
+fn circle_tangent_2lines(sketch: &Sketch, la: Ref<Line>, lb: Ref<Line>, radius: f64) -> Result<vect2d, String> {
+    let a = &sketch.lines[la];
+    let b = &sketch.lines[lb];
+    let a1 = a.p1.value; let a2 = a.p2.value;
+    let b1 = b.p1.value; let b2 = b.p2.value;
+    let da = vect2d::new(a2.x - a1.x, a2.y - a1.y);
+    let db = vect2d::new(b2.x - b1.x, b2.y - b1.y);
+    let la_len = (da.x * da.x + da.y * da.y).sqrt();
+    let lb_len = (db.x * db.x + db.y * db.y).sqrt();
+    if la_len < 1e-12 || lb_len < 1e-12 {
+        return Err("Degenerate line (zero length)".into());
+    }
+    let na = vect2d::new(-da.y / la_len, da.x / la_len);
+    let nb = vect2d::new(-db.y / lb_len, db.x / lb_len);
+    // Try all 4 offset combinations (+/- normal for each line)
+    let mut candidates = Vec::new();
+    for &sa in &[1.0_f64, -1.0] {
+        for &sb in &[1.0_f64, -1.0] {
+            let oa1 = vect2d::new(a1.x + sa * radius * na.x, a1.y + sa * radius * na.y);
+            let ob1 = vect2d::new(b1.x + sb * radius * nb.x, b1.y + sb * radius * nb.y);
+            if let Some(c) = line_line_intersect(oa1, da, ob1, db) {
+                // Check if tangent points fall on actual segments
+                if tangent_touches_segment(c, a1, a2) && tangent_touches_segment(c, b1, b2) {
+                    // Deduplicate (parallel offsets can give same point)
+                    if !candidates.iter().any(|p: &vect2d| (p.x - c.x).abs() < 1e-6 && (p.y - c.y).abs() < 1e-6) {
+                        candidates.push(c);
+                    }
+                }
+            }
+        }
+    }
+    match candidates.len() {
+        0 => Err("No tangent circle touches both line segments at this radius".into()),
+        1 => Ok(candidates[0]),
+        n => Err(format!("Ambiguous: {} possible placements, extend or shorten lines to disambiguate", n)),
+    }
+}
+
+/// Compute circle tangent to 3 line segments (incircle or excircle).
+/// Tries the incircle and 3 excircles, keeps only those whose tangent points
+/// all fall on the actual segments. Returns exactly 1 or errors.
+fn circle_tangent_3lines(sketch: &Sketch, la: Ref<Line>, lb: Ref<Line>, lc: Ref<Line>) -> Result<(vect2d, f64), String> {
+    let a = &sketch.lines[la];
+    let b = &sketch.lines[lb];
+    let c = &sketch.lines[lc];
+    let a1 = a.p1.value; let a2 = a.p2.value;
+    let b1 = b.p1.value; let b2 = b.p2.value;
+    let c1 = c.p1.value; let c2 = c.p2.value;
+    let da = vect2d::new(a2.x - a1.x, a2.y - a1.y);
+    let db = vect2d::new(b2.x - b1.x, b2.y - b1.y);
+    let dc = vect2d::new(c2.x - c1.x, c2.y - c1.y);
+    let la_len = (da.x * da.x + da.y * da.y).sqrt();
+    let lb_len = (db.x * db.x + db.y * db.y).sqrt();
+    let lc_len = (dc.x * dc.x + dc.y * dc.y).sqrt();
+    if la_len < 1e-12 || lb_len < 1e-12 || lc_len < 1e-12 {
+        return Err("Degenerate line (zero length)".into());
+    }
+    let na = vect2d::new(-da.y / la_len, da.x / la_len);
+    let nb = vect2d::new(-db.y / lb_len, db.x / lb_len);
+    let nc = vect2d::new(-dc.y / lc_len, dc.x / lc_len);
+    // Try all 8 sign combinations for offset directions (incircle + 3 excircles + extras)
+    let mut candidates = Vec::new();
+    for &sa in &[1.0_f64, -1.0] {
+        for &sb in &[1.0_f64, -1.0] {
+            for &sc in &[1.0_f64, -1.0] {
+                // Offset each line by sign * r * normal, where r is unknown.
+                // The 3 offset lines must intersect at one point (the center).
+                // Intersect offset-A and offset-B to get center, then check offset-C passes through it.
+                // Since r is unknown, we solve: distance from center to each line = same value.
+                // Use two pairs of lines to find center, then compute r.
+                // Equidistance: sa*(na.(p-a1)) = sb*(nb.(p-b1))
+                let eq_ab_x = sa * na.x - sb * nb.x;
+                let eq_ab_y = sa * na.y - sb * nb.y;
+                let eq_ab_c = sa * (na.x * a1.x + na.y * a1.y) - sb * (nb.x * b1.x + nb.y * b1.y);
+                let eq_bc_x = sb * nb.x - sc * nc.x;
+                let eq_bc_y = sb * nb.y - sc * nc.y;
+                let eq_bc_c = sb * (nb.x * b1.x + nb.y * b1.y) - sc * (nc.x * c1.x + nc.y * c1.y);
+                let det = eq_ab_x * eq_bc_y - eq_ab_y * eq_bc_x;
+                if det.abs() < 1e-12 { continue; }
+                let cx = (eq_ab_c * eq_bc_y - eq_ab_y * eq_bc_c) / det;
+                let cy = (eq_ab_x * eq_bc_c - eq_ab_c * eq_bc_x) / det;
+                let center = vect2d::new(cx, cy);
+                let r = ((center.x - a1.x) * na.x + (center.y - a1.y) * na.y).abs();
+                if r < 1e-12 { continue; }
+                // Check tangent points fall on all 3 segments
+                if tangent_touches_segment(center, a1, a2)
+                    && tangent_touches_segment(center, b1, b2)
+                    && tangent_touches_segment(center, c1, c2)
+                {
+                    if !candidates.iter().any(|(p, _): &(vect2d, f64)|
+                        (p.x - cx).abs() < 1e-6 && (p.y - cy).abs() < 1e-6)
+                    {
+                        candidates.push((center, r));
+                    }
+                }
+            }
+        }
+    }
+    match candidates.len() {
+        0 => Err("No tangent circle touches all 3 line segments".into()),
+        1 => Ok(candidates[0]),
+        n => Err(format!("Ambiguous: {} possible placements, extend or shorten lines to disambiguate", n)),
+    }
+}
+
+/// Intersect two lines given as point+direction. Returns None if parallel.
+fn line_line_intersect(p1: vect2d, d1: vect2d, p2: vect2d, d2: vect2d) -> Option<vect2d> {
+    let cross = d1.x * d2.y - d1.y * d2.x;
+    if cross.abs() < 1e-12 { return None; }
+    let dx = p2.x - p1.x;
+    let dy = p2.y - p1.y;
+    let t = (dx * d2.y - dy * d2.x) / cross;
+    Some(vect2d::new(p1.x + t * d1.x, p1.y + t * d1.y))
+}
+
+fn cmd_add_circle2t(ctx: &mut CommandContext, args: &str) -> CommandResult {
+    let mut tokens: Vec<&str> = args.split_whitespace().collect();
+    let mut noconnect = false;
+    let mut noconstraint = false;
+    let mut driven = false;
+    let mut strict = false;
+    for _ in 0..4 {
+        match tokens.last().copied() {
+            Some("noconnect") => { noconnect = true; tokens.pop(); }
+            Some("noconstraint") => { noconstraint = true; tokens.pop(); }
+            Some("driven") => { driven = true; tokens.pop(); }
+            Some("strict") => { strict = true; tokens.pop(); }
+            _ => break,
+        }
+    }
+    if noconstraint && (driven || strict) {
+        return err("noconstraint conflicts with driven and strict");
+    }
+    if tokens.len() != 3 {
+        return err("Usage: add_circle2t L0 L1 radius [noconnect] [noconstraint] [driven] [strict]");
+    }
+    let la = match resolve_line(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
+    let lb = match resolve_line(&ctx.sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
+    let r = match eval_expr(&ctx.sketch, tokens[2]) { Ok(v) => v, Err(e) => return err(e) };
+    let center = match circle_tangent_2lines(&ctx.sketch, la, lb, r) {
+        Ok(c) => c,
+        Err(e) => return err(e),
+    };
+    let edge = vect2d::new(center.x + r, center.y);
+    ctx.begin_group();
+    let mut warnings = Vec::new();
+    let mut applied = Vec::new();
+    ctx.exec(Action::AddCircle { center, edge });
+    let arc_ref = ctx.sketch.arcs.refs().last().unwrap();
+    let name = ctx.sketch.arcs[arc_ref].name.clone();
+    ctx.session_names.insert("_".into(), name.clone());
+    let mut msg = format!("Added {}: center=({:.2},{:.2}) r={:.2}", name, center.x, center.y, r);
+    if !noconnect {
+        let connected = auto_coincident_arc(ctx, arc_ref, true);
+        if !connected.is_empty() {
+            msg += &format!(" [connected: {}]", connected.join(", "));
+        }
+    }
+    if !noconstraint {
+        let desc = format!("tangent {} {}", tokens[0], name);
+        if let Err(e) = rect_exec(ctx, Action::ApplyTangentLA { line: la, arc: arc_ref }, strict, &desc, &mut applied, &mut warnings) {
+            return err(e);
+        }
+        let desc = format!("tangent {} {}", tokens[1], name);
+        if let Err(e) = rect_exec(ctx, Action::ApplyTangentLA { line: lb, arc: arc_ref }, strict, &desc, &mut applied, &mut warnings) {
+            return err(e);
+        }
+    }
+    if driven {
+        let desc = format!("driven radius {} = {:.4}", name, r);
+        if let Err(e) = rect_exec(ctx, Action::AddDimension {
+            kind: DimensionKind::ArcRadius(arc_ref),
+            value: r, expr: None, derived: false,
+        }, strict, &desc, &mut applied, &mut warnings) {
+            return err(e);
+        }
+    }
+    for a in &applied {
+        msg += &format!("\n  {}", a);
+    }
+    for w in &warnings {
+        msg += &format!("\n  warning: {}", w);
+    }
+    ok(msg)
+}
+
+fn cmd_add_circle3t(ctx: &mut CommandContext, args: &str) -> CommandResult {
+    let mut tokens: Vec<&str> = args.split_whitespace().collect();
+    let mut noconnect = false;
+    let mut noconstraint = false;
+    let mut driven = false;
+    let mut strict = false;
+    for _ in 0..4 {
+        match tokens.last().copied() {
+            Some("noconnect") => { noconnect = true; tokens.pop(); }
+            Some("noconstraint") => { noconstraint = true; tokens.pop(); }
+            Some("driven") => { driven = true; tokens.pop(); }
+            Some("strict") => { strict = true; tokens.pop(); }
+            _ => break,
+        }
+    }
+    if noconstraint && (driven || strict) {
+        return err("noconstraint conflicts with driven and strict");
+    }
+    if tokens.len() != 3 {
+        return err("Usage: add_circle3t L0 L1 L2 [noconnect] [noconstraint] [driven] [strict]");
+    }
+    let la = match resolve_line(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
+    let lb = match resolve_line(&ctx.sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
+    let lc = match resolve_line(&ctx.sketch, tokens[2]) { Ok(r) => r, Err(e) => return err(e) };
+    let (center, r) = match circle_tangent_3lines(&ctx.sketch, la, lb, lc) {
+        Ok(v) => v,
+        Err(e) => return err(e),
+    };
+    let edge = vect2d::new(center.x + r, center.y);
+    ctx.begin_group();
+    let mut warnings = Vec::new();
+    let mut applied_list = Vec::new();
+    ctx.exec(Action::AddCircle { center, edge });
+    let arc_ref = ctx.sketch.arcs.refs().last().unwrap();
+    let name = ctx.sketch.arcs[arc_ref].name.clone();
+    ctx.session_names.insert("_".into(), name.clone());
+    let mut msg = format!("Added {}: center=({:.2},{:.2}) r={:.2}", name, center.x, center.y, r);
+    if !noconnect {
+        let connected = auto_coincident_arc(ctx, arc_ref, true);
+        if !connected.is_empty() {
+            msg += &format!(" [connected: {}]", connected.join(", "));
+        }
+    }
+    if !noconstraint {
+        let line_names = [tokens[0], tokens[1], tokens[2]];
+        for (&line, ln) in [la, lb, lc].iter().zip(line_names.iter()) {
+            let desc = format!("tangent {} {}", ln, name);
+            if let Err(e) = rect_exec(ctx, Action::ApplyTangentLA { line, arc: arc_ref }, strict, &desc, &mut applied_list, &mut warnings) {
+                return err(e);
+            }
+        }
+    }
+    if driven {
+        let desc = format!("driven radius {} = {:.4}", name, r);
+        if let Err(e) = rect_exec(ctx, Action::AddDimension {
+            kind: DimensionKind::ArcRadius(arc_ref),
+            value: r, expr: None, derived: false,
+        }, strict, &desc, &mut applied_list, &mut warnings) {
+            return err(e);
+        }
+    }
+    for a in &applied_list {
+        msg += &format!("\n  {}", a);
+    }
+    for w in &warnings {
+        msg += &format!("\n  warning: {}", w);
     }
     ok(msg)
 }
@@ -4374,12 +4789,16 @@ fn cmd_help(args: &str) -> CommandResult {
             Type 'help <command>' for details. 'help full' for complete reference.")
     } else {
         let msg = match args.trim() {
-            "add_line" => "add_line x1,y1 x2,y2 [x3,y3 ...] | add_line @dx,dy (from last point)",
+            "add_line" => "add_line x1,y1 x2,y2 [x3,y3 ...] [noconnect] [nocursor] [driven]",
             "add_rect" => "add_rect x1,y1 x2,y2 [hv] [noconnect] [noconstraint] [driven] [strict]",
             "add_rect3" => "add_rect3 p1 p2 p3 [noconnect] [noconstraint] [driven] [strict]",
             "add_rectcenter" => "add_rectcenter cx,cy px,py [hv] [noconnect] [noconstraint] [driven] [strict]",
             "add_point" => "add_point x,y [nocursor]",
-            "add_circle" => "add_circle cx,cy radius",
+            "add_circle" => "add_circle cx,cy radius [noconnect] [nocursor] [driven]",
+            "add_circle2" => "add_circle2 p1 p2 [noconnect] [nocursor] [driven] — circle from 2 diametrically opposite points",
+            "add_circle3" => "add_circle3 p1 p2 p3 [noconnect] [nocursor] [driven] — circle from 3 points on circumference",
+            "add_circle2t" => "add_circle2t L0 L1 radius [noconnect] [noconstraint] [driven] [strict] — circle tangent to 2 lines",
+            "add_circle3t" => "add_circle3t L0 L1 L2 [noconnect] [noconstraint] [driven] [strict] — circle tangent to 3 lines",
             "delete" => "delete L0 | delete P0 | delete A0",
             "horizontal" => "horizontal L0 [L1 ...]",
             "vertical" => "vertical L0 [L1 ...]",
@@ -4449,7 +4868,8 @@ fn cmd_help(args: &str) -> CommandResult {
 
 const COMMAND_NAMES: &[&str] = &[
     "add_line", "add_rect", "add_rect3", "add_rectcenter",
-    "add_point", "add_circle", "add_arc", "offset_line", "offset",
+    "add_point", "add_circle", "add_circle2", "add_circle3", "add_circle2t", "add_circle3t",
+    "add_arc", "offset_line", "offset",
     "delete", "horizontal", "vertical", "parallel", "perpendicular", "perp",
     "equal", "collinear", "tangent", "coincident", "concentric", "midpoint",
     "symmetry", "point_on", "length", "radius", "sweep", "angle", "distance", "hdistance", "vdistance", "xangle",
@@ -4791,21 +5211,18 @@ pub fn complete(
         // add_circle: [center] [radius] [noconnect] [nocursor]
         // add_arc: [start] [end] [mid] [noconnect] [nocursor]
         "add_line" => {
-            let max_coords = if typed_args.iter().any(|a| *a == "noconnect" || *a == "nocursor") { 0 } else { 2 };
-            let coord_args = typed_args.iter().filter(|a| **a != "noconnect" && **a != "nocursor").count();
-            if coord_args < max_coords {
-                // Still entering coordinates
+            let line_kws = ["noconnect", "nocursor", "driven"];
+            let coord_args = typed_args.iter().filter(|a| !line_kws.contains(a)).count();
+            if coord_args < 2 {
                 add_matching(&mut results, current_word, &["cursor"]);
                 add_all_entities(sketch, &mut results, current_word);
                 add_session_names(session_names, &mut results, current_word);
             }
-            // Offer flags not already typed (after at least 1 coord)
             if coord_args >= 1 {
-                if !typed_args.contains(&"noconnect") {
-                    add_matching(&mut results, current_word, &["noconnect"]);
-                }
-                if !typed_args.contains(&"nocursor") {
-                    add_matching(&mut results, current_word, &["nocursor"]);
+                for kw in &line_kws {
+                    if !typed_args.contains(kw) {
+                        add_matching(&mut results, current_word, &[kw]);
+                    }
                 }
             }
         }
@@ -4853,24 +5270,69 @@ pub fn complete(
             }
         }
         "add_circle" => {
-            let coord_args = typed_args.iter().filter(|a| **a != "noconnect" && **a != "nocursor").count();
+            let circle_kws = ["noconnect", "nocursor", "driven"];
+            let coord_args = typed_args.iter().filter(|a| !circle_kws.contains(a)).count();
             if coord_args < 2 {
-                // arg1=center coord, arg2=radius (expression)
                 if coord_args == 0 {
                     add_matching(&mut results, current_word, &["cursor"]);
                     add_all_entities(sketch, &mut results, current_word);
                     add_session_names(session_names, &mut results, current_word);
                 } else {
-                    // radius: expression context
                     add_expression_completions(sketch, session_names, &mut results, current_word);
                 }
             }
             if coord_args >= 2 {
-                if !typed_args.contains(&"noconnect") {
-                    add_matching(&mut results, current_word, &["noconnect"]);
+                for kw in &circle_kws {
+                    if !typed_args.contains(kw) {
+                        add_matching(&mut results, current_word, &[kw]);
+                    }
                 }
-                if !typed_args.contains(&"nocursor") {
-                    add_matching(&mut results, current_word, &["nocursor"]);
+            }
+        }
+        "add_circle2" | "add_circle3" => {
+            let circle_kws = ["noconnect", "nocursor", "driven"];
+            let max_coords = if first_cmd == "add_circle2" { 2 } else { 3 };
+            let coord_args = typed_args.iter().filter(|a| !circle_kws.contains(a)).count();
+            if coord_args < max_coords {
+                add_matching(&mut results, current_word, &["cursor"]);
+                add_all_entities(sketch, &mut results, current_word);
+                add_session_names(session_names, &mut results, current_word);
+            }
+            if coord_args >= max_coords {
+                for kw in &circle_kws {
+                    if !typed_args.contains(kw) {
+                        add_matching(&mut results, current_word, &[kw]);
+                    }
+                }
+            }
+        }
+        "add_circle2t" => {
+            let ct_kws = ["noconnect", "noconstraint", "driven", "strict"];
+            let non_kw_args = typed_args.iter().filter(|a| !ct_kws.contains(a)).count();
+            if non_kw_args < 2 {
+                add_lines(sketch, &mut results, current_word);
+            } else if non_kw_args == 2 {
+                add_expression_completions(sketch, session_names, &mut results, current_word);
+            }
+            if non_kw_args >= 3 {
+                for kw in &ct_kws {
+                    if !typed_args.contains(kw) {
+                        add_matching(&mut results, current_word, &[kw]);
+                    }
+                }
+            }
+        }
+        "add_circle3t" => {
+            let ct_kws = ["noconnect", "noconstraint", "driven", "strict"];
+            let non_kw_args = typed_args.iter().filter(|a| !ct_kws.contains(a)).count();
+            if non_kw_args < 3 {
+                add_lines(sketch, &mut results, current_word);
+            }
+            if non_kw_args >= 3 {
+                for kw in &ct_kws {
+                    if !typed_args.contains(kw) {
+                        add_matching(&mut results, current_word, &[kw]);
+                    }
                 }
             }
         }
@@ -7960,10 +8422,12 @@ mod tests {
     #[test]
     fn test_add_rect_basic() {
         let mut ctx = CommandContext::new();
-        run_ok(&mut ctx, "add_rect 0,0 5,3");
+        let out = run_ok(&mut ctx, "add_rect 0,0 5,3");
         assert_eq!(ctx.sketch.lines.refs().count(), 4);
         assert_eq!(ctx.sketch.perpendicular.len(), 1);
         assert_eq!(ctx.sketch.parallel.len(), 2);
+        assert!(out.contains("perpendicular"), "should list perpendicular: {}", out);
+        assert!(out.contains("parallel"), "should list parallel: {}", out);
     }
 
     #[test]
@@ -8081,6 +8545,15 @@ mod tests {
     }
 
     #[test]
+    fn test_add_rect3_collinear_rejected() {
+        let mut ctx = CommandContext::new();
+        let r = execute_one(&mut ctx, "add_rect3 1,1 2,3 3,5");
+        assert!(r.is_error, "collinear points should be rejected: {}", r.output);
+        assert!(r.output.contains("collinear"), "error should mention collinear: {}", r.output);
+        assert_eq!(ctx.sketch.lines.refs().count(), 0, "no geometry should be created");
+    }
+
+    #[test]
     fn test_add_rectcenter_basic() {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_rectcenter 2.5,1.5 0,0");
@@ -8100,6 +8573,160 @@ mod tests {
         run_ok(&mut ctx, "add_rectcenter 2.5,1.5 0,0 driven");
         assert_eq!(ctx.sketch.dimensions.len(), 2);
         assert!(!ctx.sketch.dimensions[0].derived);
+    }
+
+    // -- add_line / add_circle driven + new circle tools --
+
+    #[test]
+    fn test_add_line_driven() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0 driven");
+        assert_eq!(ctx.sketch.dimensions.len(), 1);
+        assert!(!ctx.sketch.dimensions[0].derived);
+        assert!(near(ctx.sketch.dimensions[0].value, 5.0));
+    }
+
+    #[test]
+    fn test_add_line_multi_driven() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0 5,3 driven");
+        assert_eq!(ctx.sketch.dimensions.len(), 2);
+        assert!(near(ctx.sketch.dimensions[0].value, 5.0));
+        assert!(near(ctx.sketch.dimensions[1].value, 3.0));
+    }
+
+    #[test]
+    fn test_add_circle_driven() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_circle 0,0 3 driven");
+        assert_eq!(ctx.sketch.dimensions.len(), 1);
+        assert!(!ctx.sketch.dimensions[0].derived);
+        assert!(near(ctx.sketch.dimensions[0].value, 3.0));
+    }
+
+    #[test]
+    fn test_add_circle2_basic() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_circle2 0,0 10,0");
+        assert_eq!(ctx.sketch.arcs.refs().count(), 1);
+        let arc_ref = ctx.sketch.arcs.refs().next().unwrap();
+        let arc = &ctx.sketch.arcs[arc_ref];
+        assert!(near(arc.center.value.x, 5.0));
+        assert!(near(arc.center.value.y, 0.0));
+        assert!(near(arc.radius.value, 5.0));
+    }
+
+    #[test]
+    fn test_add_circle3_basic() {
+        let mut ctx = CommandContext::new();
+        // Points on a circle of radius 5 centered at origin
+        run_ok(&mut ctx, "add_circle3 5,0 -5,0 0,5");
+        assert_eq!(ctx.sketch.arcs.refs().count(), 1);
+        let arc_ref = ctx.sketch.arcs.refs().next().unwrap();
+        let arc = &ctx.sketch.arcs[arc_ref];
+        assert!(near(arc.center.value.x, 0.0));
+        assert!(near(arc.center.value.y, 0.0));
+        assert!(near(arc.radius.value, 5.0));
+    }
+
+    #[test]
+    fn test_add_circle3_collinear_error() {
+        let mut ctx = CommandContext::new();
+        let r = execute_one(&mut ctx, "add_circle3 0,0 5,0 10,0");
+        assert!(r.is_error);
+    }
+
+    #[test]
+    fn test_add_circle2t_basic() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 10,0; add_line 0,0 0,10");
+        let out = run_ok(&mut ctx, "add_circle2t L0 L1 2");
+        assert!(out.contains("tangent L0"), "should list tangent L0: {}", out);
+        assert!(out.contains("tangent L1"), "should list tangent L1: {}", out);
+        assert_eq!(ctx.sketch.arcs.refs().count(), 1);
+        let arc_ref = ctx.sketch.arcs.refs().next().unwrap();
+        let arc = &ctx.sketch.arcs[arc_ref];
+        assert!(near(arc.center.value.x, 2.0));
+        assert!(near(arc.center.value.y, 2.0));
+        assert!(near(arc.radius.value, 2.0));
+        assert_eq!(ctx.sketch.tangent_la.len(), 2);
+    }
+
+    #[test]
+    fn test_add_circle2t_driven() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 10,0; add_line 0,0 0,10");
+        run_ok(&mut ctx, "add_circle2t L0 L1 2 driven");
+        assert_eq!(ctx.sketch.dimensions.len(), 1);
+        assert!(!ctx.sketch.dimensions[0].derived);
+        assert!(near(ctx.sketch.dimensions[0].value, 2.0));
+    }
+
+    #[test]
+    fn test_add_circle2t_noconstraint() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 10,0; add_line 0,0 0,10");
+        run_ok(&mut ctx, "add_circle2t L0 L1 2 noconstraint");
+        assert_eq!(ctx.sketch.tangent_la.len(), 0);
+    }
+
+    #[test]
+    fn test_add_circle3t_basic() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 10,0; add_line 10,0 5,8; add_line 5,8 0,0");
+        run_ok(&mut ctx, "add_circle3t L0 L1 L2");
+        assert_eq!(ctx.sketch.arcs.refs().count(), 1);
+        assert_eq!(ctx.sketch.tangent_la.len(), 3);
+        let arc_ref = ctx.sketch.arcs.refs().next().unwrap();
+        let arc = &ctx.sketch.arcs[arc_ref];
+        // Incircle should be inside the triangle
+        assert!(arc.center.value.x > 0.0 && arc.center.value.x < 10.0);
+        assert!(arc.center.value.y > 0.0 && arc.center.value.y < 8.0);
+    }
+
+    #[test]
+    fn test_add_circle3t_driven() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 10,0; add_line 10,0 5,8; add_line 5,8 0,0");
+        run_ok(&mut ctx, "add_circle3t L0 L1 L2 driven");
+        assert_eq!(ctx.sketch.dimensions.len(), 1);
+        assert!(!ctx.sketch.dimensions[0].derived);
+    }
+
+    #[test]
+    fn test_add_circle2t_segment_disambiguation() {
+        let mut ctx = CommandContext::new();
+        // Two perpendicular rays from origin: only 1 of 4 sectors has both tangent points on segments
+        run_ok(&mut ctx, "add_line 0,0 10,0; add_line 0,0 0,10");
+        run_ok(&mut ctx, "add_circle2t L0 L1 1");
+        let arc_ref = ctx.sketch.arcs.refs().next().unwrap();
+        let arc = &ctx.sketch.arcs[arc_ref];
+        // Must be in the +x,+y quadrant (interior of the angle)
+        assert!(arc.center.value.x > 0.0, "center.x should be positive: {}", arc.center.value.x);
+        assert!(arc.center.value.y > 0.0, "center.y should be positive: {}", arc.center.value.y);
+    }
+
+    #[test]
+    fn test_add_circle2t_no_touching() {
+        let mut ctx = CommandContext::new();
+        // Two parallel segments far apart: no tangent circle of r=1 touches both
+        run_ok(&mut ctx, "add_line 0,0 10,0; add_line 0,100 10,100");
+        let r = execute_one(&mut ctx, "add_circle2t L0 L1 1");
+        assert!(r.is_error, "should fail: {}", r.output);
+    }
+
+    #[test]
+    fn test_add_circle3t_segment_touches() {
+        let mut ctx = CommandContext::new();
+        // Closed triangle: exactly 1 incircle touches all 3 segments
+        run_ok(&mut ctx, "add_line 0,0 10,0; add_line 10,0 5,8; add_line 5,8 0,0");
+        run_ok(&mut ctx, "add_circle3t L0 L1 L2");
+        let arc_ref = ctx.sketch.arcs.refs().next().unwrap();
+        let arc = &ctx.sketch.arcs[arc_ref];
+        // Incircle center must be inside the triangle
+        assert!(arc.center.value.x > 0.0 && arc.center.value.x < 10.0);
+        assert!(arc.center.value.y > 0.0 && arc.center.value.y < 8.0);
+        assert_eq!(ctx.sketch.tangent_la.len(), 3);
     }
 
     // -- Measure --
