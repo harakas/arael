@@ -195,7 +195,7 @@ async fn handle_post(
     }
 
     if no_body {
-        (StatusCode::OK, resp_headers).into_response()
+        (StatusCode::ACCEPTED, resp_headers).into_response()
     } else {
         (StatusCode::OK, resp_headers, Json(resp_body)).into_response()
     }
