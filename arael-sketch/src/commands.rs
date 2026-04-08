@@ -977,7 +977,8 @@ fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
             // Try as a command first (e.g. "base = add_line 0,0 5,0")
             let first_word = rhs.split_whitespace().next().unwrap_or("");
             let is_command = matches!(first_word,
-                "add_line" | "add_point" | "add_circle" | "add_arc" | "offset_line" | "offset" |
+                "add_line" | "add_rect" | "add_rect3" | "add_rectcenter" |
+                "add_point" | "add_circle" | "add_arc" | "offset_line" | "offset" |
                 "length" | "radius" | "sweep" | "angle" | "distance");
             if is_command {
                 let dim_count_before = ctx.sketch.dimensions.len();
@@ -1020,6 +1021,9 @@ fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
 
     match cmd {
         "add_line" => cmd_add_line(ctx, args_str),
+        "add_rect" => cmd_add_rect(ctx, args_str),
+        "add_rect3" => cmd_add_rect3(ctx, args_str),
+        "add_rectcenter" => cmd_add_rectcenter(ctx, args_str),
         "add_point" => cmd_add_point(ctx, args_str),
         "add_circle" => cmd_add_circle(ctx, args_str),
         "add_arc" => cmd_add_arc(ctx, args_str),
@@ -1358,6 +1362,171 @@ fn cmd_add_line(ctx: &mut CommandContext, args: &str) -> CommandResult {
     }
     if !nocursor { ctx.cursor = Some(*points.last().unwrap()); }
     ok(msgs.join("\n"))
+}
+
+/// Helper: execute a constraint/dimension action inside a rect builder.
+/// In strict mode, returns Err on failure. Otherwise collects warning and continues.
+fn rect_exec(ctx: &mut CommandContext, action: Action, strict: bool, warnings: &mut Vec<String>) -> Result<(), String> {
+    ctx.exec(action);
+    if let Some(e) = ctx.status_error.take() {
+        if strict {
+            return Err(e);
+        }
+        warnings.push(e);
+    }
+    Ok(())
+}
+
+/// Shared logic: create 4 lines from corners, apply constraints and optional driven dims.
+/// corners: [bl, br, tr, tl] (or any 4-corner cycle).
+fn build_rect(
+    ctx: &mut CommandContext,
+    corners: [vect2d; 4],
+    noconnect: bool,
+    noconstraint: bool,
+    hv: bool,
+    driven: bool,
+    strict: bool,
+) -> CommandResult {
+    ctx.begin_group();
+    let mut warnings = Vec::new();
+
+    // Create 4 lines: 0-1, 1-2, 2-3, 3-0
+    let mut line_refs = Vec::new();
+    let mut line_names = Vec::new();
+    for i in 0..4 {
+        let p1 = corners[i];
+        let p2 = corners[(i + 1) % 4];
+        ctx.exec(Action::AddLine { p1, p2 });
+        let r = ctx.sketch.lines.refs().last().unwrap();
+        let name = ctx.sketch.lines[r].name.clone();
+        if !noconnect {
+            auto_coincident_line(ctx, r);
+        }
+        line_refs.push(r);
+        line_names.push(name);
+    }
+
+    if !noconstraint {
+        if hv {
+            if let Err(e) = rect_exec(ctx, Action::ApplyHorizontal { lines: vec![line_refs[0], line_refs[2]] }, strict, &mut warnings) {
+                return err(e);
+            }
+            if let Err(e) = rect_exec(ctx, Action::ApplyVertical { lines: vec![line_refs[1], line_refs[3]] }, strict, &mut warnings) {
+                return err(e);
+            }
+        } else {
+            if let Err(e) = rect_exec(ctx, Action::ApplyPerpendicular { a: line_refs[0], b: line_refs[1] }, strict, &mut warnings) {
+                return err(e);
+            }
+            if let Err(e) = rect_exec(ctx, Action::ApplyParallel { a: line_refs[0], b: line_refs[2] }, strict, &mut warnings) {
+                return err(e);
+            }
+            if let Err(e) = rect_exec(ctx, Action::ApplyParallel { a: line_refs[1], b: line_refs[3] }, strict, &mut warnings) {
+                return err(e);
+            }
+        }
+    }
+
+    if driven {
+        for &i in &[0, 1] {
+            let l = &ctx.sketch.lines[line_refs[i]];
+            let dx = l.p2.value.x - l.p1.value.x;
+            let dy = l.p2.value.y - l.p1.value.y;
+            let len = (dx * dx + dy * dy).sqrt();
+            let kind = DimensionKind::LineLength(line_refs[i]);
+            if let Err(e) = rect_exec(ctx, Action::AddDimension { kind, value: len, expr: None, derived: false }, strict, &mut warnings) {
+                return err(e);
+            }
+        }
+    }
+
+    ctx.cursor = Some(corners[2]);
+    ctx.session_names.insert("_".into(), line_names[0].clone());
+    for (i, name) in line_names.iter().enumerate() {
+        ctx.session_names.insert(format!("_{}", i), name.clone());
+    }
+
+    let mut msg = format!("Added rect: {} {} {} {}", line_names[0], line_names[1], line_names[2], line_names[3]);
+    for w in &warnings {
+        msg += &format!("\n  warning: {}", w);
+    }
+    ok(msg)
+}
+
+struct RectKeywords {
+    noconnect: bool,
+    noconstraint: bool,
+    hv: bool,
+    driven: bool,
+    strict: bool,
+}
+
+/// Parse trailing rect keywords. Returns error string on conflict.
+fn parse_rect_keywords(tokens: &mut Vec<&str>, allow_hv: bool) -> Result<RectKeywords, String> {
+    let mut kw = RectKeywords { noconnect: false, noconstraint: false, hv: false, driven: false, strict: false };
+    for _ in 0..5 {
+        match tokens.last().copied() {
+            Some("noconnect") => { kw.noconnect = true; tokens.pop(); }
+            Some("noconstraint") => { kw.noconstraint = true; tokens.pop(); }
+            Some("hv") => { kw.hv = true; tokens.pop(); }
+            Some("driven") => { kw.driven = true; tokens.pop(); }
+            Some("strict") => { kw.strict = true; tokens.pop(); }
+            _ => break,
+        }
+    }
+    if kw.hv && !allow_hv {
+        return Err("hv keyword is not supported for this command".into());
+    }
+    if kw.noconstraint && (kw.hv || kw.driven || kw.strict) {
+        return Err("noconstraint conflicts with hv, driven, and strict".into());
+    }
+    Ok(kw)
+}
+
+fn cmd_add_rect(ctx: &mut CommandContext, args: &str) -> CommandResult {
+    let mut tokens: Vec<&str> = args.split_whitespace().collect();
+    let kw = match parse_rect_keywords(&mut tokens, true) { Ok(k) => k, Err(e) => return err(e) };
+    if tokens.len() != 2 {
+        return err("Usage: add_rect x1,y1 x2,y2 [hv] [noconnect] [noconstraint] [driven] [strict]");
+    }
+    let p1 = match parse_coord(ctx, tokens[0], ctx.cursor) { Ok(p) => p, Err(e) => return err(e) };
+    let p2 = match parse_coord(ctx, tokens[1], Some(p1)) { Ok(p) => p, Err(e) => return err(e) };
+    let bl = p1;
+    let br = vect2d::new(p2.x, p1.y);
+    let tr = p2;
+    let tl = vect2d::new(p1.x, p2.y);
+    build_rect(ctx, [bl, br, tr, tl], kw.noconnect, kw.noconstraint, kw.hv, kw.driven, kw.strict)
+}
+
+fn cmd_add_rect3(ctx: &mut CommandContext, args: &str) -> CommandResult {
+    let mut tokens: Vec<&str> = args.split_whitespace().collect();
+    let kw = match parse_rect_keywords(&mut tokens, false) { Ok(k) => k, Err(e) => return err(e) };
+    if tokens.len() != 3 {
+        return err("Usage: add_rect3 p1 p2 p3 [noconnect] [noconstraint] [driven] [strict]");
+    }
+    let p1 = match parse_coord(ctx, tokens[0], ctx.cursor) { Ok(p) => p, Err(e) => return err(e) };
+    let p2 = match parse_coord(ctx, tokens[1], Some(p1)) { Ok(p) => p, Err(e) => return err(e) };
+    let p3 = match parse_coord(ctx, tokens[2], Some(p2)) { Ok(p) => p, Err(e) => return err(e) };
+    // p4 = p1 + (p3 - p2)
+    let p4 = vect2d::new(p1.x + (p3.x - p2.x), p1.y + (p3.y - p2.y));
+    build_rect(ctx, [p1, p2, p3, p4], kw.noconnect, kw.noconstraint, kw.hv, kw.driven, kw.strict)
+}
+
+fn cmd_add_rectcenter(ctx: &mut CommandContext, args: &str) -> CommandResult {
+    let mut tokens: Vec<&str> = args.split_whitespace().collect();
+    let kw = match parse_rect_keywords(&mut tokens, true) { Ok(k) => k, Err(e) => return err(e) };
+    if tokens.len() != 2 {
+        return err("Usage: add_rectcenter cx,cy px,py [hv] [noconnect] [noconstraint] [driven] [strict]");
+    }
+    let center = match parse_coord(ctx, tokens[0], ctx.cursor) { Ok(p) => p, Err(e) => return err(e) };
+    let corner = match parse_coord(ctx, tokens[1], Some(center)) { Ok(p) => p, Err(e) => return err(e) };
+    // Axis-aligned: bl=corner, tr=opposite corner (reflected through center)
+    let bl = corner;
+    let tr = vect2d::new(2.0 * center.x - corner.x, 2.0 * center.y - corner.y);
+    let br = vect2d::new(tr.x, bl.y);
+    let tl = vect2d::new(bl.x, tr.y);
+    build_rect(ctx, [bl, br, tr, tl], kw.noconnect, kw.noconstraint, kw.hv, kw.driven, kw.strict)
 }
 
 fn cmd_add_point(ctx: &mut CommandContext, args: &str) -> CommandResult {
@@ -4206,6 +4375,9 @@ fn cmd_help(args: &str) -> CommandResult {
     } else {
         let msg = match args.trim() {
             "add_line" => "add_line x1,y1 x2,y2 [x3,y3 ...] | add_line @dx,dy (from last point)",
+            "add_rect" => "add_rect x1,y1 x2,y2 [hv] [noconnect] [noconstraint] [driven] [strict]",
+            "add_rect3" => "add_rect3 p1 p2 p3 [noconnect] [noconstraint] [driven] [strict]",
+            "add_rectcenter" => "add_rectcenter cx,cy px,py [hv] [noconnect] [noconstraint] [driven] [strict]",
             "add_point" => "add_point x,y [nocursor]",
             "add_circle" => "add_circle cx,cy radius",
             "delete" => "delete L0 | delete P0 | delete A0",
@@ -4276,7 +4448,8 @@ fn cmd_help(args: &str) -> CommandResult {
 // ---------------------------------------------------------------------------
 
 const COMMAND_NAMES: &[&str] = &[
-    "add_line", "add_point", "add_circle", "add_arc", "offset_line", "offset",
+    "add_line", "add_rect", "add_rect3", "add_rectcenter",
+    "add_point", "add_circle", "add_arc", "offset_line", "offset",
     "delete", "horizontal", "vertical", "parallel", "perpendicular", "perp",
     "equal", "collinear", "tangent", "coincident", "concentric", "midpoint",
     "symmetry", "point_on", "length", "radius", "sweep", "angle", "distance", "hdistance", "vdistance", "xangle",
@@ -4633,6 +4806,38 @@ pub fn complete(
                 }
                 if !typed_args.contains(&"nocursor") {
                     add_matching(&mut results, current_word, &["nocursor"]);
+                }
+            }
+        }
+        "add_rect" | "add_rectcenter" => {
+            let rect_kws = ["hv", "noconnect", "noconstraint", "driven", "strict"];
+            let coord_args = typed_args.iter().filter(|a| !rect_kws.contains(a)).count();
+            if coord_args < 2 {
+                add_matching(&mut results, current_word, &["cursor"]);
+                add_all_entities(sketch, &mut results, current_word);
+                add_session_names(session_names, &mut results, current_word);
+            }
+            if coord_args >= 2 {
+                for kw in &rect_kws {
+                    if !typed_args.contains(kw) {
+                        add_matching(&mut results, current_word, &[kw]);
+                    }
+                }
+            }
+        }
+        "add_rect3" => {
+            let rect_kws = ["noconnect", "noconstraint", "driven", "strict"];
+            let coord_args = typed_args.iter().filter(|a| !rect_kws.contains(a)).count();
+            if coord_args < 3 {
+                add_matching(&mut results, current_word, &["cursor"]);
+                add_all_entities(sketch, &mut results, current_word);
+                add_session_names(session_names, &mut results, current_word);
+            }
+            if coord_args >= 3 {
+                for kw in &rect_kws {
+                    if !typed_args.contains(kw) {
+                        add_matching(&mut results, current_word, &[kw]);
+                    }
                 }
             }
         }
@@ -7747,6 +7952,153 @@ mod tests {
         // Reverse order with explicit value
         run_ok(&mut ctx, "angle L0 L1 45 driven closest");
         assert_eq!(ctx.sketch.dimensions.len(), 1);
+        assert!(!ctx.sketch.dimensions[0].derived);
+    }
+
+    // -- add_rect / add_rect3 / add_rectcenter --
+
+    #[test]
+    fn test_add_rect_basic() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_rect 0,0 5,3");
+        assert_eq!(ctx.sketch.lines.refs().count(), 4);
+        assert_eq!(ctx.sketch.perpendicular.len(), 1);
+        assert_eq!(ctx.sketch.parallel.len(), 2);
+    }
+
+    #[test]
+    fn test_add_rect_hv() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_rect 0,0 5,3 hv");
+        assert_eq!(ctx.sketch.lines.refs().count(), 4);
+        // hv: horizontal on 2 lines, vertical on 2 lines
+        let h_count = ctx.sketch.lines.refs().filter(|r| ctx.sketch.lines[*r].constraints.horizontal).count();
+        let v_count = ctx.sketch.lines.refs().filter(|r| ctx.sketch.lines[*r].constraints.vertical).count();
+        assert_eq!(h_count, 2);
+        assert_eq!(v_count, 2);
+        assert_eq!(ctx.sketch.perpendicular.len(), 0);
+        assert_eq!(ctx.sketch.parallel.len(), 0);
+    }
+
+    #[test]
+    fn test_add_rect_noconstraint() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_rect 0,0 5,3 noconstraint");
+        assert_eq!(ctx.sketch.lines.refs().count(), 4);
+        assert_eq!(ctx.sketch.perpendicular.len(), 0);
+        assert_eq!(ctx.sketch.parallel.len(), 0);
+    }
+
+    #[test]
+    fn test_add_rect_driven() {
+        let mut ctx = CommandContext::new();
+        let dof_before = ctx.sketch.dof().unwrap();
+        run_ok(&mut ctx, "add_rect 0,0 5,3 driven");
+        assert_eq!(ctx.sketch.dimensions.len(), 2);
+        assert!(!ctx.sketch.dimensions[0].derived);
+        assert!(!ctx.sketch.dimensions[1].derived);
+        assert!(ctx.sketch.dof().unwrap() < dof_before + 8); // 4 lines = +8 DOF, constraints + dims reduce
+    }
+
+    #[test]
+    fn test_add_rect_noconstraint_conflicts() {
+        let mut ctx = CommandContext::new();
+        let r1 = execute_one(&mut ctx, "add_rect 0,0 5,3 noconstraint hv");
+        assert!(r1.is_error);
+        let r2 = execute_one(&mut ctx, "add_rect 0,0 5,3 noconstraint driven");
+        assert!(r2.is_error);
+        let r3 = execute_one(&mut ctx, "add_rect 0,0 5,3 noconstraint strict");
+        assert!(r3.is_error);
+    }
+
+    #[test]
+    fn test_add_rect_relative_coords() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_rect 0,0 @5,3");
+        assert_eq!(ctx.sketch.lines.refs().count(), 4);
+        let l0 = ctx.sketch.lines.refs().next().unwrap();
+        let l = &ctx.sketch.lines[l0];
+        assert!(near(l.p2.value.x - l.p1.value.x, 5.0));
+    }
+
+    #[test]
+    fn test_add_rect_session_names() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_rect 0,0 5,3");
+        assert_eq!(ctx.session_names.get("_0").map(|s| s.as_str()), Some("L0"));
+        assert_eq!(ctx.session_names.get("_1").map(|s| s.as_str()), Some("L1"));
+        assert_eq!(ctx.session_names.get("_2").map(|s| s.as_str()), Some("L2"));
+        assert_eq!(ctx.session_names.get("_3").map(|s| s.as_str()), Some("L3"));
+    }
+
+    #[test]
+    fn test_add_rect_noconnect() {
+        let mut ctx = CommandContext::new();
+        // Place a line at a rect corner
+        run_ok(&mut ctx, "add_line 0,0 10,0");
+        let coinc_before = ctx.sketch.coincident_ll11.len() + ctx.sketch.coincident_ll12.len()
+            + ctx.sketch.coincident_ll21.len() + ctx.sketch.coincident_ll22.len();
+        run_ok(&mut ctx, "add_rect 0,0 5,3 noconnect");
+        let coinc_after = ctx.sketch.coincident_ll11.len() + ctx.sketch.coincident_ll12.len()
+            + ctx.sketch.coincident_ll21.len() + ctx.sketch.coincident_ll22.len();
+        // No new coincident constraints (not even internal ones)
+        assert_eq!(coinc_after, coinc_before);
+    }
+
+    #[test]
+    fn test_add_rect_non_strict_warns() {
+        let mut ctx = CommandContext::new();
+        // Fully constrain a rect
+        run_ok(&mut ctx, "add_rect 0,0 5,3 hv driven");
+        // Overlapping rect: constraints will be redundant, but non-strict should succeed with warnings
+        let result = run_ok(&mut ctx, "add_rect 0,0 5,3");
+        assert!(result.contains("warning"), "should contain warnings: {}", result);
+    }
+
+    #[test]
+    fn test_add_rect3_basic() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_rect3 0,0 5,0 5,3");
+        assert_eq!(ctx.sketch.lines.refs().count(), 4);
+        assert_eq!(ctx.sketch.perpendicular.len(), 1);
+        assert_eq!(ctx.sketch.parallel.len(), 2);
+    }
+
+    #[test]
+    fn test_add_rect3_driven() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_rect3 0,0 5,0 5,3 driven");
+        assert_eq!(ctx.sketch.dimensions.len(), 2);
+        assert!(!ctx.sketch.dimensions[0].derived);
+        assert!(!ctx.sketch.dimensions[1].derived);
+    }
+
+    #[test]
+    fn test_add_rect3_hv_rejected() {
+        let mut ctx = CommandContext::new();
+        let r = execute_one(&mut ctx, "add_rect3 0,0 5,0 5,3 hv");
+        assert!(r.is_error);
+    }
+
+    #[test]
+    fn test_add_rectcenter_basic() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_rectcenter 2.5,1.5 0,0");
+        assert_eq!(ctx.sketch.lines.refs().count(), 4);
+        assert_eq!(ctx.sketch.perpendicular.len(), 1);
+        assert_eq!(ctx.sketch.parallel.len(), 2);
+        // Verify corners: bl=(0,0), br=(5,0), tr=(5,3), tl=(0,3)
+        let refs: Vec<_> = ctx.sketch.lines.refs().collect();
+        let l0 = &ctx.sketch.lines[refs[0]];
+        assert!(near(l0.p1.value.x, 0.0) && near(l0.p1.value.y, 0.0));
+        assert!(near(l0.p2.value.x, 5.0) && near(l0.p2.value.y, 0.0));
+    }
+
+    #[test]
+    fn test_add_rectcenter_driven() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_rectcenter 2.5,1.5 0,0 driven");
+        assert_eq!(ctx.sketch.dimensions.len(), 2);
         assert!(!ctx.sketch.dimensions[0].derived);
     }
 

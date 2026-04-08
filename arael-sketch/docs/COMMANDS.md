@@ -112,6 +112,9 @@ add_line x1,y1 x2,y2        Create a line between two points
 add_line x1,y1 x2,y2 x3,y3  Multi-segment: creates connected lines (any number of points)
 add_line x2,y2               Continue from last endpoint (single-point chaining)
 add_line @dx,dy              Continue with relative offset
+add_rect x1,y1 x2,y2        Rectangle from two opposite corners (4 lines)
+add_rect3 p1 p2 p3           Rectangle from 3 consecutive corners (4th computed)
+add_rectcenter cx,cy px,py   Rectangle from center and one corner
 add_point x,y [nocursor]     Create a free point
 add_circle cx,cy radius      Create a circle (full arc)
 add_arc x1,y1 x2,y2 xm,ym  Create an arc through start, end, midpoint
@@ -153,6 +156,42 @@ add_line L0.p1               L3: (0,3)-(0,0)   close the rectangle
 
 add_line 0,0 1,0 2,1 3,0    Creates L0, L1, L2 as connected segments
 add_line 0,0 @1,0 @0,1 @-1,0  Relative coords work for multi-segment too
+```
+
+### Rectangles
+
+Create rectangles as 4 connected lines with constraints. All rectangle commands support these optional trailing keywords (in any order):
+
+- `noconnect` — skip auto-coincident with external geometry (internal corners still share coordinates)
+- `noconstraint` — create geometry only, no constraints
+- `hv` — use horizontal/vertical constraints instead of perpendicular/parallel (not available for `add_rect3`)
+- `driven` — add driven length dimensions on two adjacent sides
+- `strict` — error if any constraint/dimension fails to apply (default: warn and continue)
+
+`noconstraint` conflicts with `hv`, `driven`, and `strict`.
+
+Session names `_0`..`_3` are set to the four line names.
+
+```
+# Two-point axis-aligned rectangle (opposite corners)
+add_rect 0,0 5,3                          Default: perpendicular + 2 parallel
+add_rect 0,0 5,3 hv                       Horizontal/vertical constraints
+add_rect 0,0 5,3 driven                   + driven length dimensions on 2 sides
+add_rect 0,0 @5,3                         Relative second corner
+
+# Three-point rectangle (arbitrary orientation)
+add_rect3 0,0 5,0 5,3                     p1-p2 is one side, p2-p3 adjacent side
+add_rect3 0,0 @5,0 @0,3                   Relative coordinates
+
+# Rectangle from center and corner
+add_rectcenter 2.5,1.5 0,0                Center + corner (axis-aligned)
+add_rectcenter 2.5,1.5 0,0 hv driven      With hv + driven dimensions
+```
+
+Example with variable capture:
+```
+bot, right, top, left = add_rect 0,0 5,3 hv driven
+length bot 10                              Update width
 ```
 
 ## Deletion
@@ -423,7 +462,7 @@ add_point rotate(P0, A0.center, 45)   Rotated point
 
 ## Entity Name Capture
 
-Entity creation commands (`add_line`, `add_point`, `add_circle`, `add_arc`, `offset_line`) automatically set the `_` variable to the created entity's name. Use assignment to capture it with a meaningful name:
+Entity creation commands (`add_line`, `add_rect`, `add_rect3`, `add_rectcenter`, `add_point`, `add_circle`, `add_arc`, `offset_line`) automatically set the `_` variable to the created entity's name. Use assignment to capture it with a meaningful name:
 
 ```
 add_line 0,0 5,0; vertical _; length _ 3       Use _ for the last created entity
