@@ -2923,19 +2923,23 @@ fn cmd_point_on(ctx: &mut CommandContext, args: &str) -> CommandResult {
 
 fn cmd_angle(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let mut tokens: Vec<&str> = args.split_whitespace().collect();
-    let is_derived = tokens.last() == Some(&"derived");
-    let is_driven = !is_derived && tokens.last() == Some(&"driven");
-    if is_derived || is_driven { tokens.pop(); }
-    // Parse optional sector keyword
+    // Peel optional trailing keywords in any order (driven/derived + sector)
+    let mut is_derived = false;
+    let mut is_driven = false;
     #[derive(Clone, Copy)]
     enum SectorMode { Default, Supplement, Closest, Acute, Obtuse }
-    let sector_mode = match tokens.last() {
-        Some(&"supplement") => { tokens.pop(); SectorMode::Supplement }
-        Some(&"closest") => { tokens.pop(); SectorMode::Closest }
-        Some(&"acute") => { tokens.pop(); SectorMode::Acute }
-        Some(&"obtuse") => { tokens.pop(); SectorMode::Obtuse }
-        _ => SectorMode::Default,
-    };
+    let mut sector_mode = SectorMode::Default;
+    for _ in 0..2 {
+        match tokens.last().copied() {
+            Some("derived") => { is_derived = true; tokens.pop(); }
+            Some("driven") => { is_driven = true; tokens.pop(); }
+            Some("supplement") => { sector_mode = SectorMode::Supplement; tokens.pop(); }
+            Some("closest") => { sector_mode = SectorMode::Closest; tokens.pop(); }
+            Some("acute") => { sector_mode = SectorMode::Acute; tokens.pop(); }
+            Some("obtuse") => { sector_mode = SectorMode::Obtuse; tokens.pop(); }
+            _ => break,
+        }
+    }
 
     // Compute current angle between direction vectors (p1->p2)
     let compute_angle = |ctx: &CommandContext, a_ref, b_ref| -> (f64, f64) {
@@ -7650,6 +7654,100 @@ mod tests {
         // Negative value should be accepted (taken as absolute value)
         run_ok(&mut ctx, "angle L0 L1 -45");
         assert_eq!(ctx.sketch.dimensions.len(), 1);
+    }
+
+    #[test]
+    fn test_angle_driven_closest() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,0 3,3");
+        let dof_before = ctx.sketch.dof().unwrap();
+        // "driven closest" — driven is before sector keyword
+        run_ok(&mut ctx, "angle L0 L1 driven closest");
+        assert_eq!(ctx.sketch.dimensions.len(), 1);
+        assert!(!ctx.sketch.dimensions[0].derived);
+        assert!(ctx.sketch.dof().unwrap() < dof_before);
+    }
+
+    #[test]
+    fn test_angle_driven_supplement() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,0 3,3");
+        let dof_before = ctx.sketch.dof().unwrap();
+        run_ok(&mut ctx, "angle L0 L1 driven supplement");
+        assert_eq!(ctx.sketch.dimensions.len(), 1);
+        assert!(!ctx.sketch.dimensions[0].derived);
+        if let arael_sketch_solver::DimensionKind::Angle(_, _, supplement) = ctx.sketch.dimensions[0].kind {
+            assert!(supplement, "should be supplement sector");
+        } else {
+            panic!("expected angle dimension");
+        }
+        assert!(ctx.sketch.dof().unwrap() < dof_before);
+    }
+
+    #[test]
+    fn test_angle_driven_acute() {
+        let mut ctx = CommandContext::new();
+        // Lines at ~120 degrees so acute picks supplement
+        run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,0 -2,4");
+        let dof_before = ctx.sketch.dof().unwrap();
+        run_ok(&mut ctx, "angle L0 L1 driven acute");
+        assert_eq!(ctx.sketch.dimensions.len(), 1);
+        assert!(!ctx.sketch.dimensions[0].derived);
+        if let arael_sketch_solver::DimensionKind::Angle(_, _, supplement) = ctx.sketch.dimensions[0].kind {
+            assert!(supplement, "acute should pick the smaller sector");
+        } else {
+            panic!("expected angle dimension");
+        }
+        assert!(ctx.sketch.dof().unwrap() < dof_before);
+    }
+
+    #[test]
+    fn test_angle_driven_obtuse() {
+        let mut ctx = CommandContext::new();
+        // Lines at ~45 degrees, so obtuse picks supplement (135)
+        run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,0 3,3");
+        let dof_before = ctx.sketch.dof().unwrap();
+        run_ok(&mut ctx, "angle L0 L1 driven obtuse");
+        assert_eq!(ctx.sketch.dimensions.len(), 1);
+        assert!(!ctx.sketch.dimensions[0].derived);
+        if let arael_sketch_solver::DimensionKind::Angle(_, _, supplement) = ctx.sketch.dimensions[0].kind {
+            assert!(supplement, "obtuse should pick the larger sector");
+        } else {
+            panic!("expected angle dimension");
+        }
+        assert!(ctx.sketch.dof().unwrap() < dof_before);
+    }
+
+    #[test]
+    fn test_angle_closest_driven() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,0 3,3");
+        let dof_before = ctx.sketch.dof().unwrap();
+        // Reverse order: sector keyword before driven
+        run_ok(&mut ctx, "angle L0 L1 closest driven");
+        assert_eq!(ctx.sketch.dimensions.len(), 1);
+        assert!(!ctx.sketch.dimensions[0].derived);
+        assert!(ctx.sketch.dof().unwrap() < dof_before);
+    }
+
+    #[test]
+    fn test_angle_value_closest_driven() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,0 3,3");
+        // With explicit value + sector + driven
+        run_ok(&mut ctx, "angle L0 L1 45 closest driven");
+        assert_eq!(ctx.sketch.dimensions.len(), 1);
+        assert!(!ctx.sketch.dimensions[0].derived);
+    }
+
+    #[test]
+    fn test_angle_value_driven_closest() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,0 3,3");
+        // Reverse order with explicit value
+        run_ok(&mut ctx, "angle L0 L1 45 driven closest");
+        assert_eq!(ctx.sketch.dimensions.len(), 1);
+        assert!(!ctx.sketch.dimensions[0].derived);
     }
 
     // -- Measure --
