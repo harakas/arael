@@ -1072,15 +1072,28 @@ pub struct EqualRadius {
     pub hb: CrossBlock<Arc, Arc>,
 }
 
-// Tangent arc-arc (external: dist between centers = r1 + r2)
+// Tangent arc-arc (external tangency).
+// Uses effective radii along center-to-center direction.
+// Generalizes circles: when rx=ry=r, r_eff = r.
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
     let dx = a.center.x - b.center.x;
     let dy = a.center.y - b.center.y;
     let dist = sqrt(dx * dx + dy * dy);
-    let target = a.radius + b.radius;
-    [(dist - target) * sketch.constraint_isigma]
+    let nx = dx / dist;
+    let ny = dy / dist;
+    let cra = cos(a.rotation);
+    let sra = sin(a.rotation);
+    let nxa = nx * cra + ny * sra;
+    let nya = 0.0 - nx * sra + ny * cra;
+    let r_eff_a = sqrt(nxa * nxa * a.radius * a.radius + nya * nya * a.radius_b * a.radius_b);
+    let crb = cos(b.rotation);
+    let srb = sin(b.rotation);
+    let nxb = 0.0 - nx * crb - ny * srb;
+    let nyb = nx * srb - ny * crb;
+    let r_eff_b = sqrt(nxb * nxb * b.radius * b.radius + nyb * nyb * b.radius_b * b.radius_b);
+    [(dist - r_eff_a - r_eff_b) * sketch.constraint_isigma]
 }))]
 pub struct TangentAA {
     #[arael(ref = root.arcs)]
@@ -1638,20 +1651,38 @@ pub struct SymmetryPP {
     pub hb: TripletBlock<f64>,
 }
 
-// Symmetry of two arcs about a mirror line: centers symmetric + equal radius.
+// Symmetry of two arcs/ellipses about a mirror line.
+// Guarded: circle path uses 3 residuals (center + radius), ellipse path
+// adds radius_b equality + rotation reflection (5 residuals).
+// Cannot unify because radius_b is a real parameter for circles (equality
+// constraint), so the extra residuals affect DOF counting.
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
-#[arael(constraint(hb, {
+#[arael(constraint(hb, guard = !a.is_ellipse && !c.is_ellipse, {
     let dx = line.p2.x - line.p1.x;
     let dy = line.p2.y - line.p1.y;
     let len2 = dx * dx + dy * dy;
-    // Reflect a.center across line
     let da = (a.center.x - line.p1.x) * dy - (a.center.y - line.p1.y) * dx;
     let rx = a.center.x - 2.0 * da * dy / len2;
     let ry = a.center.y + 2.0 * da * dx / len2;
     [(rx - c.center.x) * sketch.constraint_isigma,
      (ry - c.center.y) * sketch.constraint_isigma,
      (a.radius - c.radius) * sketch.constraint_isigma]
+}))]
+#[arael(constraint(hb, guard = a.is_ellipse || c.is_ellipse, {
+    let dx = line.p2.x - line.p1.x;
+    let dy = line.p2.y - line.p1.y;
+    let len2 = dx * dx + dy * dy;
+    let da = (a.center.x - line.p1.x) * dy - (a.center.y - line.p1.y) * dx;
+    let rx = a.center.x - 2.0 * da * dy / len2;
+    let ry = a.center.y + 2.0 * da * dx / len2;
+    let alpha = atan2(dy, dx);
+    let reflected_rot = 2.0 * alpha - a.rotation;
+    [(rx - c.center.x) * sketch.constraint_isigma,
+     (ry - c.center.y) * sketch.constraint_isigma,
+     (a.radius - c.radius) * sketch.constraint_isigma,
+     (a.radius_b - c.radius_b) * sketch.constraint_isigma,
+     sin(reflected_rot - c.rotation) * sketch.constraint_isigma]
 }))]
 pub struct SymmetryAA {
     #[arael(ref = root.arcs)]

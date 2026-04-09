@@ -9511,6 +9511,53 @@ mod tests {
         assert!(e.contains("already exists"), "{}", e);
     }
 
+    #[test]
+    fn test_symmetry_aa_ellipse() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,-5 0,5; add_ellipse -3,0 2 1 30; add_ellipse 4,1 3 2 0");
+        run_ok(&mut ctx, "symmetry A0 L0 A1");
+        let a0 = ctx.sketch.arcs.refs().nth(0).unwrap();
+        let a1 = ctx.sketch.arcs.refs().nth(1).unwrap();
+        let r0 = ctx.sketch.arcs[a0].radius.value;
+        let r1 = ctx.sketch.arcs[a1].radius.value;
+        assert!((r0 - r1).abs() < 0.01, "radii should be equal: {} vs {}", r0, r1);
+        let rb0 = ctx.sketch.arcs[a0].radius_b.value;
+        let rb1 = ctx.sketch.arcs[a1].radius_b.value;
+        assert!((rb0 - rb1).abs() < 0.01, "radius_b should be equal: {} vs {}", rb0, rb1);
+    }
+
+    #[test]
+    fn test_tangent_aa_ellipse() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_ellipse -5,0 3 2 0; add_ellipse 5,0 3 2 0");
+        run_ok(&mut ctx, "tangent A0 A1");
+        assert_eq!(ctx.sketch.tangent_aa.len(), 1);
+        // Verify constraint is satisfied: dist = r_eff_a + r_eff_b
+        let a0 = ctx.sketch.arcs.refs().nth(0).unwrap();
+        let a1 = ctx.sketch.arcs.refs().nth(1).unwrap();
+        let aa = &ctx.sketch.arcs[a0];
+        let bb = &ctx.sketch.arcs[a1];
+        let dx = aa.center.value.x - bb.center.value.x;
+        let dy = aa.center.value.y - bb.center.value.y;
+        let dist = (dx * dx + dy * dy).sqrt();
+        let nx = dx / dist;
+        let ny = dy / dist;
+        // Effective radius of a
+        let cra = aa.rotation.value.cos();
+        let sra = aa.rotation.value.sin();
+        let nxa = nx * cra + ny * sra;
+        let nya = -nx * sra + ny * cra;
+        let r_eff_a = (nxa * nxa * aa.radius.value * aa.radius.value + nya * nya * aa.radius_b.value * aa.radius_b.value).sqrt();
+        // Effective radius of b
+        let crb = bb.rotation.value.cos();
+        let srb = bb.rotation.value.sin();
+        let nxb = -nx * crb - ny * srb;
+        let nyb = nx * srb - ny * crb;
+        let r_eff_b = (nxb * nxb * bb.radius.value * bb.radius.value + nyb * nyb * bb.radius_b.value * bb.radius_b.value).sqrt();
+        let residual = (dist - r_eff_a - r_eff_b).abs();
+        assert!(residual < 0.01, "tangent should be satisfied: dist={}, r_eff_a={}, r_eff_b={}, residual={}", dist, r_eff_a, r_eff_b, residual);
+    }
+
     // -- List constraint filtering --
 
     #[test]
