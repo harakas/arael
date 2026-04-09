@@ -266,6 +266,11 @@ pub trait Model {
 /// and `arael-sketch-solver` for a production use of this pattern with
 /// parametric expression dimensions.
 pub trait ExtendedModel {
+    /// Called after `deserialize64` writes optimized values back to `Param::value`.
+    /// Use to sync derived persistent state (e.g. copy one param's value to another).
+    fn extended_deserialize64(&mut self) {}
+    /// Called after `deserialize32` writes optimized values back to `Param::value`.
+    fn extended_deserialize32(&mut self) {}
     /// Called after `update64`, before cost/constraint calculations.
     /// Use to compute derived state that constraints depend on.
     fn extended_update64(&mut self, _params: &[f64]) {}

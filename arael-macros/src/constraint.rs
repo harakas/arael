@@ -1873,6 +1873,7 @@ pub fn generate_root_methods(
             }
             pub fn deserialize64(&mut self, data: &[f64]) {
                 arael::model::Model::deserialize_params64(self, data);
+                arael::model::ExtendedModel::extended_deserialize64(self);
             }
             pub fn serialize32(&mut self, data: &mut std::vec::Vec<f32>) {
                 arael::model::Model::serialize_params32(self, data);
@@ -1880,6 +1881,7 @@ pub fn generate_root_methods(
             }
             pub fn deserialize32(&mut self, data: &[f32]) {
                 arael::model::Model::deserialize_params32(self, data);
+                arael::model::ExtendedModel::extended_deserialize32(self);
             }
 
             fn __set_block_indices(&mut self) {
