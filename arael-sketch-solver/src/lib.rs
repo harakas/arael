@@ -442,7 +442,7 @@ impl Sketch {
         self.arcs.push(Arc {
             center: Param::new(center),
             radius: Param::new(radius),
-            radius_b: Param::fixed(radius),
+            radius_b: Param::new(radius),
             rotation: Param::fixed(0.0),
             start_angle: if closed { Param::fixed(start) } else { Param::new(start) },
             end_angle: if closed { Param::fixed(end) } else { Param::new(end) },
@@ -1033,6 +1033,16 @@ impl Sketch {
 }
 
 impl arael::model::ExtendedModel for Sketch {
+    fn extended_deserialize64(&mut self) {
+        // After solver writes back optimized values, sync radius_b.value for non-ellipses
+        let refs: Vec<_> = self.arcs.refs().collect();
+        for r in refs {
+            if !self.arcs[r].is_ellipse {
+                self.arcs[r].radius_b.value = self.arcs[r].radius.value;
+            }
+        }
+    }
+
     fn extended_update64(&mut self, _params: &[f64]) {
         // For non-ellipse arcs, keep radius_b work value in sync with radius
         let refs: Vec<_> = self.arcs.refs().collect();
@@ -1092,13 +1102,13 @@ impl arael::model::ExtendedModel for Sketch {
 impl Sketch {
     /// Fix up arc fields after loading old files that lack radius_b/rotation.
     /// Detects the sentinel default (radius_b == 0.0) and sets radius_b to
-    /// match radius, rotation to 0, both fixed.
+    /// match radius, rotation to 0, as optimizable params.
     pub fn fixup_after_load(&mut self) {
         let refs: Vec<_> = self.arcs.refs().collect();
         for r in refs {
             if self.arcs[r].radius_b.value == 0.0 && !self.arcs[r].is_ellipse {
                 let rv = self.arcs[r].radius.value;
-                self.arcs[r].radius_b = Param::fixed(rv);
+                self.arcs[r].radius_b = Param::new(rv);
                 self.arcs[r].rotation = Param::fixed(0.0);
             }
         }

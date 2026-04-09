@@ -23,6 +23,8 @@ pub enum DimensionKind {
     PointPointDistance(DimensionEndpoint, DimensionEndpoint),
     PointLineDistance(DimensionEndpoint, Ref<Line>),
     ArcRadius(Ref<Arc>),
+    /// Ellipse semi-minor axis radius.
+    ArcRadiusB(Ref<Arc>),
     /// Arc sweep angle (end_angle - start_angle), stored in degrees.
     ArcSweep(Ref<Arc>),
     /// Angle between two lines. The bool is `supplement`: when true,
@@ -71,7 +73,7 @@ impl DimensionKind {
     }
     pub fn references_arc(&self, r: Ref<Arc>) -> bool {
         match self {
-            DimensionKind::ArcRadius(a) | DimensionKind::ArcSweep(a) => *a == r,
+            DimensionKind::ArcRadius(a) | DimensionKind::ArcRadiusB(a) | DimensionKind::ArcSweep(a) => *a == r,
             DimensionKind::PointPointDistance(a, b) => a.references_arc(r) || b.references_arc(r),
             DimensionKind::PointLineDistance(a, _) => a.references_arc(r),
             DimensionKind::HDistance(a, b) | DimensionKind::VDistance(a, b) => a.references_arc(r) || b.references_arc(r),
@@ -149,6 +151,10 @@ impl Dimension {
             DimensionKind::ArcRadius(r) => {
                 let name = &sketch.arcs[*r].name;
                 symbol(&format!("{}.radius", name))
+            }
+            DimensionKind::ArcRadiusB(r) => {
+                let name = &sketch.arcs[*r].name;
+                symbol(&format!("{}.radius_b", name))
             }
             DimensionKind::ArcSweep(r) => {
                 let name = &sketch.arcs[*r].name;

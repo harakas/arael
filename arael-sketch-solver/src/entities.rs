@@ -192,6 +192,10 @@ pub struct Line {
 #[arael(constraint(hb, guard = self.constraints.has_target_radius_b, {
     [(arc.radius_b - arc.constraints.target_radius_b) * sketch.constraint_isigma]
 }))]
+// For non-ellipse arcs: radius_b must equal radius (rotation is Param::fixed so no constraint needed)
+#[arael(constraint(hb, guard = !self.is_ellipse, {
+    [(arc.radius_b - arc.radius) * sketch.constraint_isigma]
+}))]
 // Target sweep angle (end_angle - start_angle, sign-matched)
 #[arael(constraint(hb, guard = self.constraints.has_target_sweep, {
     [(arc.end_angle - arc.start_angle - arc.constraints.sweep_sign * arc.constraints.target_sweep) * sketch.constraint_isigma]

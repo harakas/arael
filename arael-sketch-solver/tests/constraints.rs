@@ -578,25 +578,27 @@ fn test_graduated_optimization_length() {
 }
 
 #[test]
-fn test_circle_has_3_params() {
-    // A circle (closed arc) should have 3 optimizable params: center.x, center.y, radius.
-    // start_angle and end_angle are fixed since they are meaningless for a full circle.
+fn test_circle_has_4_params() {
+    // A circle (closed arc) should have 4 optimizable params: center.x, center.y, radius, radius_b.
+    // start_angle and end_angle are fixed. rotation is fixed. radius_b is optimizable
+    // (with equality constraint radius_b = radius for non-ellipse arcs).
     let mut sketch = Sketch::new();
     sketch.add_arc(vect2d::new(1.0, 2.0), 3.0, 0.0, std::f64::consts::TAU, true);
     let mut params = Vec::new();
     sketch.serialize64(&mut params);
-    assert_eq!(params.len(), 3, "circle should have 3 params (cx, cy, r)");
+    assert_eq!(params.len(), 4, "circle should have 4 params (cx, cy, r, rb)");
 }
 
 #[test]
-fn test_arc_has_5_params() {
-    // An arc (non-closed) should have 5 optimizable params:
-    // center.x, center.y, radius, start_angle, end_angle.
+fn test_arc_has_6_params() {
+    // An arc (non-closed) should have 6 optimizable params:
+    // center.x, center.y, radius, radius_b, start_angle, end_angle.
+    // rotation is fixed.
     let mut sketch = Sketch::new();
     sketch.add_arc(vect2d::new(1.0, 2.0), 3.0, 0.0, 1.5, false);
     let mut params = Vec::new();
     sketch.serialize64(&mut params);
-    assert_eq!(params.len(), 5, "arc should have 5 params (cx, cy, r, sa, ea)");
+    assert_eq!(params.len(), 6, "arc should have 6 params (cx, cy, r, rb, sa, ea)");
 }
 
 #[test]
@@ -1601,4 +1603,35 @@ fn test_derived_to_driven() {
     sketch.solve();
     let len = line_length(&sketch, l);
     assert_near(len, 3.0, 0.01);
+}
+
+// -- Ellipse constraint regression --
+
+/// Verify that arc distance constraints converge with the ellipse formula.
+/// This is a regression test: the ellipse point formula must produce correct
+/// Jacobians so the solver converges even for distant initial configurations.
+#[test]
+fn test_ellipse_arc_distance_convergence() {
+    let mut sketch = Sketch::new();
+    let arc = sketch.add_arc(vect2d::new(2.5, 2.5), 3.5355, -2.356, -2.356 - 4.712, false);
+    let pt = sketch.add_point(vect2d::new(10.0, 3.0));
+    sketch.solve(); // anchor drift
+
+    sketch.distance_arc_start_p.push(DistanceArcStartP {
+        arc, point: pt, distance: 3.0, hb: CrossBlock::new(),
+    });
+
+    let result = sketch.solve();
+    let a = &sketch.arcs[arc];
+    let p = &sketch.points[pt];
+    let ct = a.start_angle.value.cos();
+    let st = a.start_angle.value.sin();
+    let cr = a.rotation.value.cos();
+    let sr = a.rotation.value.sin();
+    let sx = a.center.value.x + a.radius.value * ct * cr - a.radius_b.value * st * sr;
+    let sy = a.center.value.y + a.radius.value * ct * sr + a.radius_b.value * st * cr;
+    let dist = ((sx - p.pos.value.x).powi(2) + (sy - p.pos.value.y).powi(2)).sqrt();
+    assert!(result.end_cost < 0.01, "solver should converge, end_cost = {}", result.end_cost);
+    assert!((dist - 3.0).abs() < 0.01, "distance should be ~3.0, got {}", dist);
+    assert!((a.radius.value - a.radius_b.value).abs() < 1e-6, "radius_b should equal radius");
 }
