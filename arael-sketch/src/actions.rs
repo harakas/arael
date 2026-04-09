@@ -26,6 +26,7 @@ pub enum Action {
     ApplyPerpendicular { a: Ref<Line>, b: Ref<Line> },
     ApplyEqualLength { a: Ref<Line>, b: Ref<Line> },
     AddCircle { center: vect2d, edge: vect2d },
+    AddEllipse { center: vect2d, rx: f64, ry: f64, rotation: f64 },
     AddArc { start: vect2d, end: vect2d, mid: vect2d },
     ApplyCoincidentArcCenter { point: Ref<Point>, arc: Ref<Arc> },
     ApplyCoincidentArcStart { point: Ref<Point>, arc: Ref<Arc> },
@@ -109,6 +110,7 @@ impl Action {
             Action::AddPoint { .. } => "Add point".into(),
             Action::AddLine { .. } => "Add line".into(),
             Action::AddCircle { .. } => "Add circle".into(),
+            Action::AddEllipse { .. } => "Add ellipse".into(),
             Action::AddArc { .. } => "Add arc".into(),
             Action::ApplyHorizontal { lines } => format!("Horizontal ({})", lines.len()),
             Action::ApplyVertical { lines } => format!("Vertical ({})", lines.len()),
@@ -494,6 +496,10 @@ impl Action {
                 let r = ((edge.x - center.x).powi(2) + (edge.y - center.y).powi(2)).sqrt();
                 sketch.add_arc(*center, r, 0.0, std::f64::consts::TAU, true);
                 sketch.solve(); // anchor drift before constraints are added
+            }
+            Action::AddEllipse { center, rx, ry, rotation } => {
+                sketch.add_ellipse(*center, *rx, *ry, *rotation, true);
+                sketch.solve();
             }
             Action::AddArc { start, end, mid, .. } => {
                 if let Some((c, r, sa, ea, ccw)) = circumscribed_arc(*start, *end, *mid) {

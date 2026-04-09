@@ -1444,13 +1444,13 @@ impl EditorApp {
             } else {
                 arc_span(a)
             };
-            let n_segs = ((span.abs() * radius_px as f64 / 4.0).ceil() as usize).clamp(8, 256);
+            let max_r_px = if a.is_ellipse {
+                radius_px.max(a.radius_b.value as f32 * self.scale)
+            } else { radius_px };
+            let n_segs = ((span.abs() * max_r_px as f64 / 4.0).ceil() as usize).clamp(8, 256);
             let points: Vec<egui::Pos2> = (0..=n_segs).map(|i| {
                 let t = sa + span * (i as f64 / n_segs as f64);
-                self.to_screen(vect2d::new(
-                    a.center.value.x + a.radius.value * t.cos(),
-                    a.center.value.y + a.radius.value * t.sin(),
-                ))
+                self.to_screen(crate::geometry::arc_point_at(a, t))
             }).collect();
             draw_styled_polyline(painter, &points, stroke, a.style);
 

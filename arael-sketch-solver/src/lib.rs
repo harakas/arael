@@ -442,11 +442,43 @@ impl Sketch {
         self.arcs.push(Arc {
             center: Param::new(center),
             radius: Param::new(radius),
+            radius_b: Param::fixed(radius),
+            rotation: Param::fixed(0.0),
             start_angle: if closed { Param::fixed(start) } else { Param::new(start) },
             end_angle: if closed { Param::fixed(end) } else { Param::new(end) },
             closed, ccw,
+            is_ellipse: false,
             style: LineStyle::Solid, name,
-            constraints: ArcConstraints { has_target_radius: false, target_radius: 0.0, has_target_sweep: false, target_sweep: 0.0, sweep_sign: 1.0 },
+            constraints: ArcConstraints {
+                has_target_radius: false, target_radius: 0.0,
+                has_target_radius_b: false, target_radius_b: 0.0,
+                has_target_sweep: false, target_sweep: 0.0, sweep_sign: 1.0,
+            },
+            hb: SelfBlock::new(),
+        })
+    }
+
+    /// Add an ellipse (closed) or elliptic arc. rx = semi-major, ry = semi-minor,
+    /// rot = rotation angle of the ellipse axes.
+    pub fn add_ellipse(&mut self, center: vect2d, rx: f64, ry: f64, rot: f64, closed: bool) -> Ref<Arc> {
+        let name = format!("A{}", self.next_arc_id);
+        self.next_arc_id += 1;
+        self.arcs.push(Arc {
+            center: Param::new(center),
+            radius: Param::new(rx),
+            radius_b: Param::new(ry),
+            rotation: Param::new(rot),
+            start_angle: if closed { Param::fixed(0.0) } else { Param::new(0.0) },
+            end_angle: if closed { Param::fixed(std::f64::consts::TAU) } else { Param::new(std::f64::consts::TAU) },
+            closed,
+            is_ellipse: true,
+            ccw: true,
+            style: LineStyle::Solid, name,
+            constraints: ArcConstraints {
+                has_target_radius: false, target_radius: 0.0,
+                has_target_radius_b: false, target_radius_b: 0.0,
+                has_target_sweep: false, target_sweep: 0.0, sweep_sign: 1.0,
+            },
             hb: SelfBlock::new(),
         })
     }
@@ -1001,6 +1033,17 @@ impl Sketch {
 }
 
 impl arael::model::ExtendedModel for Sketch {
+    fn extended_update64(&mut self, _params: &[f64]) {
+        // For non-ellipse arcs, keep radius_b work value in sync with radius
+        let refs: Vec<_> = self.arcs.refs().collect();
+        for r in refs {
+            if !self.arcs[r].is_ellipse {
+                let rv = self.arcs[r].radius.work();
+                *self.arcs[r].radius_b.work_mut() = rv;
+            }
+        }
+    }
+
     fn extended_cost64(&self, params: &[f64]) -> f64 {
         if self.expr_constraints.is_empty() { return 0.0; }
         let bag = self.symbol_bag.as_ref().expect("symbol_bag not built");
@@ -1047,9 +1090,20 @@ impl arael::model::ExtendedModel for Sketch {
 }
 
 impl Sketch {
-    /// Add an expression constraint. The expression should evaluate to 0
-    /// when satisfied. Symbols are resolved against current entity names
-    /// and dimensions.
+    /// Fix up arc fields after loading old files that lack radius_b/rotation.
+    /// Detects the sentinel default (radius_b == 0.0) and sets radius_b to
+    /// match radius, rotation to 0, both fixed.
+    pub fn fixup_after_load(&mut self) {
+        let refs: Vec<_> = self.arcs.refs().collect();
+        for r in refs {
+            if self.arcs[r].radius_b.value == 0.0 && !self.arcs[r].is_ellipse {
+                let rv = self.arcs[r].radius.value;
+                self.arcs[r].radius_b = Param::fixed(rv);
+                self.arcs[r].rotation = Param::fixed(0.0);
+            }
+        }
+    }
+
     /// Add an expression constraint. The expression should evaluate to 0
     /// when satisfied. Symbol resolution and differentiation happen at
     /// solve() time.

@@ -52,8 +52,11 @@ pub fn circumscribed_arc(p1: vect2d, p2: vect2d, p3: vect2d) -> Option<(vect2d, 
     Some((center, radius, sa, ea, ccw))
 }
 
-// Distance from point to arc curve. Returns (distance, nearest point on arc).
+// Distance from point to arc/ellipse curve. Returns (distance, nearest point on curve).
 pub fn point_to_arc_dist(p: vect2d, a: &Arc) -> (f64, vect2d) {
+    if a.is_ellipse {
+        return point_to_ellipse_dist(p, a);
+    }
     let dx = p.x - a.center.value.x;
     let dy = p.y - a.center.value.y;
     let dist_to_center = (dx * dx + dy * dy).sqrt();
@@ -106,18 +109,56 @@ pub fn point_to_arc_dist(p: vect2d, a: &Arc) -> (f64, vect2d) {
     }
 }
 
-pub fn arc_start_pos(a: &Arc) -> vect2d {
+/// Nearest point on an ellipse via tessellation + Newton refinement.
+fn point_to_ellipse_dist(p: vect2d, a: &Arc) -> (f64, vect2d) {
+    let sa = a.start_angle.value;
+    let ea = a.end_angle.value;
+    let span = if a.closed { std::f64::consts::TAU } else { ea - sa };
+    let n = 64;
+    let mut best_t = sa;
+    let mut best_d = f64::MAX;
+    for i in 0..=n {
+        let t = sa + span * (i as f64 / n as f64);
+        let q = arc_point_at(a, t);
+        let d = (p.x - q.x).powi(2) + (p.y - q.y).powi(2);
+        if d < best_d { best_d = d; best_t = t; }
+    }
+    // Newton refinement (minimize squared distance)
+    let dt = 1e-6;
+    for _ in 0..8 {
+        let q = arc_point_at(a, best_t);
+        let qp = arc_point_at(a, best_t + dt);
+        let qm = arc_point_at(a, best_t - dt);
+        let f = (p.x - q.x) * (qp.x - qm.x) / (2.0 * dt) + (p.y - q.y) * (qp.y - qm.y) / (2.0 * dt);
+        let df = -((qp.x - qm.x).powi(2) + (qp.y - qm.y).powi(2)) / (4.0 * dt * dt)
+            + (p.x - q.x) * (qp.x - 2.0 * q.x + qm.x) / (dt * dt)
+            + (p.y - q.y) * (qp.y - 2.0 * q.y + qm.y) / (dt * dt);
+        if df.abs() < 1e-20 { break; }
+        best_t -= f / df;
+    }
+    let nearest = arc_point_at(a, best_t);
+    let dist = ((p.x - nearest.x).powi(2) + (p.y - nearest.y).powi(2)).sqrt();
+    (dist, nearest)
+}
+
+/// Compute a point on the arc/ellipse at parametric angle t.
+pub fn arc_point_at(a: &Arc, t: f64) -> vect2d {
+    let ct = t.cos();
+    let st = t.sin();
+    let cr = a.rotation.value.cos();
+    let sr = a.rotation.value.sin();
     vect2d::new(
-        a.center.value.x + a.radius.value * a.start_angle.value.cos(),
-        a.center.value.y + a.radius.value * a.start_angle.value.sin(),
+        a.center.value.x + a.radius.value * ct * cr - a.radius_b.value * st * sr,
+        a.center.value.y + a.radius.value * ct * sr + a.radius_b.value * st * cr,
     )
 }
 
+pub fn arc_start_pos(a: &Arc) -> vect2d {
+    arc_point_at(a, a.start_angle.value)
+}
+
 pub fn arc_end_pos(a: &Arc) -> vect2d {
-    vect2d::new(
-        a.center.value.x + a.radius.value * a.end_angle.value.cos(),
-        a.center.value.y + a.radius.value * a.end_angle.value.sin(),
-    )
+    arc_point_at(a, a.end_angle.value)
 }
 
 pub fn project_onto_segment(p: vect2d, a: vect2d, b: vect2d) -> vect2d {

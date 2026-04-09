@@ -75,6 +75,11 @@ pub struct ArcConstraints {
     pub target_radius: f64,
     #[arael(skip)]
     #[serde(default)]
+    pub has_target_radius_b: bool,
+    #[serde(default)]
+    pub target_radius_b: f64,
+    #[arael(skip)]
+    #[serde(default)]
     pub has_target_sweep: bool,
     #[serde(default)]
     pub target_sweep: f64,
@@ -85,6 +90,7 @@ pub struct ArcConstraints {
 
 fn default_sweep_sign() -> f64 { 1.0 }
 fn default_ccw() -> bool { true }
+fn default_param_zero() -> arael::model::Param<f64> { arael::model::Param::fixed(0.0) }
 
 // ---------------------------------------------------------------------------
 // Entities
@@ -165,19 +171,26 @@ pub struct Line {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
-// Drift: weak regularizer on center, radius, angles
+// Drift: weak regularizer on center, radii, rotation, angles
 #[arael(constraint(hb, {
     let dc = arc.center - arc.center_value;
     let dr = arc.radius - arc.radius_value;
+    let drb = arc.radius_b - arc.radius_b_value;
+    let drot = arc.rotation - arc.rotation_value;
     let dsa = arc.start_angle - arc.start_angle_value;
     let dea = arc.end_angle - arc.end_angle_value;
     [dc.x * sketch.drift_isigma, dc.y * sketch.drift_isigma,
-     dr * sketch.drift_isigma,
+     dr * sketch.drift_isigma, drb * sketch.drift_isigma,
+     drot * sketch.drift_isigma,
      dsa * sketch.drift_isigma, dea * sketch.drift_isigma]
 }))]
-// Target radius
+// Target radius (semi-major axis)
 #[arael(constraint(hb, guard = self.constraints.has_target_radius, {
     [(arc.radius - arc.constraints.target_radius) * sketch.constraint_isigma]
+}))]
+// Target radius_b (semi-minor axis, for ellipses)
+#[arael(constraint(hb, guard = self.constraints.has_target_radius_b, {
+    [(arc.radius_b - arc.constraints.target_radius_b) * sketch.constraint_isigma]
 }))]
 // Target sweep angle (end_angle - start_angle, sign-matched)
 #[arael(constraint(hb, guard = self.constraints.has_target_sweep, {
@@ -186,12 +199,21 @@ pub struct Line {
 pub struct Arc {
     pub center: Param<vect2d>,
     pub radius: Param<f64>,
+    #[serde(default = "default_param_zero")]
+    pub radius_b: Param<f64>,
+    #[serde(default = "default_param_zero")]
+    pub rotation: Param<f64>,
     pub start_angle: Param<f64>,
     pub end_angle: Param<f64>,
-    /// Full circle (true) vs partial arc (false). When true, start/end
+    /// Full circle/ellipse (true) vs partial arc (false). When true, start/end
     /// angles are fixed and excluded from optimization.
     #[arael(skip)]
     pub closed: bool,
+    /// True for elliptic arcs/ellipses (radius_b and rotation are free params).
+    /// False for circular arcs/circles (radius_b fixed to radius, rotation fixed to 0).
+    #[arael(skip)]
+    #[serde(default)]
+    pub is_ellipse: bool,
     /// Arc direction: true = counter-clockwise from start to end,
     /// false = clockwise. Determined at creation from the midpoint.
     #[arael(skip)]

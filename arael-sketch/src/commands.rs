@@ -979,7 +979,7 @@ fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
             let is_command = matches!(first_word,
                 "add_line" | "add_rect" | "add_rect3" | "add_rectcenter" |
                 "add_point" | "add_circle" | "add_circle2" | "add_circle3" |
-                "add_circle2t" | "add_circle3t" | "add_arc" | "offset_line" | "offset" | "mirror" |
+                "add_circle2t" | "add_circle3t" | "add_ellipse" | "add_arc" | "offset_line" | "offset" | "mirror" |
                 "length" | "radius" | "sweep" | "angle" | "distance");
             if is_command {
                 let dim_count_before = ctx.sketch.dimensions.len();
@@ -1031,6 +1031,7 @@ fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
         "add_circle3" => cmd_add_circle3(ctx, args_str),
         "add_circle2t" => cmd_add_circle2t(ctx, args_str),
         "add_circle3t" => cmd_add_circle3t(ctx, args_str),
+        "add_ellipse" => cmd_add_ellipse(ctx, args_str),
         "add_arc" => cmd_add_arc(ctx, args_str),
         "offset_line" | "offset" => cmd_offset_line(ctx, args_str),
         "delete" => cmd_delete(ctx, args_str),
@@ -1719,6 +1720,53 @@ fn cmd_add_circle3(ctx: &mut CommandContext, args: &str) -> CommandResult {
             value: r, expr: None, derived: false,
         });
         msg += &format!(" [driven radius={:.4}]", r);
+    }
+    ok(msg)
+}
+
+fn cmd_add_ellipse(ctx: &mut CommandContext, args: &str) -> CommandResult {
+    let mut tokens: Vec<&str> = args.split_whitespace().collect();
+    let mut nocursor = false;
+    let mut noconnect = false;
+    let mut driven = false;
+    for _ in 0..3 {
+        match tokens.last().copied() {
+            Some("nocursor") => { nocursor = true; tokens.pop(); }
+            Some("noconnect") => { noconnect = true; tokens.pop(); }
+            Some("driven") => { driven = true; tokens.pop(); }
+            _ => break,
+        }
+    }
+    if tokens.len() != 4 {
+        return err("Usage: add_ellipse cx,cy rx ry rotation [noconnect] [nocursor] [driven]");
+    }
+    let center = match parse_coord(ctx, tokens[0], ctx.cursor) {
+        Ok(p) => p, Err(e) => return err(e),
+    };
+    let rx = match eval_expr(&ctx.sketch, tokens[1]) { Ok(v) => v, Err(e) => return err(e) };
+    let ry = match eval_expr(&ctx.sketch, tokens[2]) { Ok(v) => v, Err(e) => return err(e) };
+    let rot = match eval_expr(&ctx.sketch, tokens[3]) { Ok(v) => v, Err(e) => return err(e) };
+    let rot_rad = arael::utils::deg2rad(rot);
+    ctx.begin_group();
+    ctx.exec(Action::AddEllipse { center, rx, ry, rotation: rot_rad });
+    let arc_ref = ctx.sketch.arcs.refs().last().unwrap();
+    let name = ctx.sketch.arcs[arc_ref].name.clone();
+    if !nocursor { ctx.cursor = Some(center); }
+    ctx.session_names.insert("_".into(), name.clone());
+    let mut msg = format!("Added {}: center=({:.2},{:.2}) rx={:.2} ry={:.2} rot={:.2}deg",
+        name, center.x, center.y, rx, ry, rot);
+    if !noconnect {
+        let connected = auto_coincident_arc(ctx, arc_ref, true);
+        if !connected.is_empty() {
+            msg += &format!(" [connected: {}]", connected.join(", "));
+        }
+    }
+    if driven {
+        ctx.exec(Action::AddDimension {
+            kind: DimensionKind::ArcRadius(arc_ref),
+            value: rx, expr: None, derived: false,
+        });
+        msg += &format!(" [driven rx={:.4}]", rx);
     }
     ok(msg)
 }
@@ -2865,11 +2913,17 @@ fn cmd_info(ctx: &mut CommandContext, args: &str) -> CommandResult {
         let a = &ctx.sketch.arcs[r];
         let sp = crate::geometry::arc_start_pos(a);
         let ep = crate::geometry::arc_end_pos(a);
+        let shape_label = if a.is_ellipse {
+            format!("[ellipse] ry={:.4} rot={:.1}deg", a.radius_b.value, a.rotation.value.to_degrees())
+        } else if a.closed {
+            "[circle]".to_string()
+        } else {
+            String::new()
+        };
         let mut s = format!("{}: center=({:.4},{:.4}) r={:.4} angles={:.1}..{:.1} start=({:.4},{:.4}) end=({:.4},{:.4}) {}",
             a.name, a.center.value.x, a.center.value.y, a.radius.value,
             a.start_angle.value.to_degrees(), a.end_angle.value.to_degrees(),
-            sp.x, sp.y, ep.x, ep.y,
-            if a.closed { "[circle]" } else { "" });
+            sp.x, sp.y, ep.x, ep.y, shape_label);
         let cstrs = constraints_for(&ctx.sketch, name);
         if !cstrs.is_empty() { s += &format!("\n  constraints: {}", cstrs.join(", ")); }
         ok(s)
@@ -3092,7 +3146,20 @@ fn cmd_list(ctx: &mut CommandContext, args: &str) -> CommandResult {
     if show_all || filter == "arcs" {
         for r in ctx.sketch.arcs.refs() {
             let a = &ctx.sketch.arcs[r];
-            if a.closed {
+            if a.is_ellipse {
+                if a.closed {
+                    lines.push(format!("{}: center=({:.2},{:.2}) rx={:.2} ry={:.2} rot={:.1}deg [ellipse]",
+                        a.name, a.center.value.x, a.center.value.y,
+                        a.radius.value, a.radius_b.value, a.rotation.value.to_degrees()));
+                } else {
+                    let sp = crate::geometry::arc_start_pos(a);
+                    let ep = crate::geometry::arc_end_pos(a);
+                    lines.push(format!("{}: center=({:.2},{:.2}) rx={:.2} ry={:.2} rot={:.1}deg start=({:.2},{:.2}) end=({:.2},{:.2}) [elliptic arc]",
+                        a.name, a.center.value.x, a.center.value.y,
+                        a.radius.value, a.radius_b.value, a.rotation.value.to_degrees(),
+                        sp.x, sp.y, ep.x, ep.y));
+                }
+            } else if a.closed {
                 lines.push(format!("{}: center=({:.2},{:.2}) r={:.2} [circle]",
                     a.name, a.center.value.x, a.center.value.y, a.radius.value));
             } else {
@@ -5076,6 +5143,7 @@ fn cmd_help(args: &str) -> CommandResult {
             "add_circle3" => "add_circle3 p1 p2 p3 [noconnect] [nocursor] [driven] — circle from 3 points on circumference",
             "add_circle2t" => "add_circle2t L0 L1 radius [noconnect] [noconstraint] [driven] [strict] — circle tangent to 2 lines",
             "add_circle3t" => "add_circle3t L0 L1 L2 [noconnect] [noconstraint] [driven] [strict] — circle tangent to 3 lines",
+            "add_ellipse" => "add_ellipse cx,cy rx ry rotation_deg [noconnect] [nocursor] [driven]",
             "delete" => "delete L0 | delete P0 | delete A0",
             "horizontal" => "horizontal L0 [L1 ...]",
             "vertical" => "vertical L0 [L1 ...]",
@@ -5146,7 +5214,7 @@ fn cmd_help(args: &str) -> CommandResult {
 
 const COMMAND_NAMES: &[&str] = &[
     "add_line", "add_rect", "add_rect3", "add_rectcenter",
-    "add_point", "add_circle", "add_circle2", "add_circle3", "add_circle2t", "add_circle3t",
+    "add_point", "add_circle", "add_circle2", "add_circle3", "add_circle2t", "add_circle3t", "add_ellipse",
     "add_arc", "offset_line", "offset",
     "delete", "horizontal", "vertical", "parallel", "perpendicular", "perp",
     "equal", "collinear", "tangent", "coincident", "concentric", "midpoint",
@@ -5608,6 +5676,26 @@ pub fn complete(
             }
             if non_kw_args >= 3 {
                 for kw in &ct_kws {
+                    if !typed_args.contains(kw) {
+                        add_matching(&mut results, current_word, &[kw]);
+                    }
+                }
+            }
+        }
+        "add_ellipse" => {
+            let ellipse_kws = ["noconnect", "nocursor", "driven"];
+            let coord_args = typed_args.iter().filter(|a| !ellipse_kws.contains(a)).count();
+            if coord_args < 4 {
+                if coord_args == 0 {
+                    add_matching(&mut results, current_word, &["cursor"]);
+                    add_all_entities(sketch, &mut results, current_word);
+                    add_session_names(session_names, &mut results, current_word);
+                } else {
+                    add_expression_completions(sketch, session_names, &mut results, current_word);
+                }
+            }
+            if coord_args >= 4 {
+                for kw in &ellipse_kws {
                     if !typed_args.contains(kw) {
                         add_matching(&mut results, current_word, &[kw]);
                     }
@@ -9148,6 +9236,74 @@ mod tests {
         let out = run_ok(&mut ctx, "mirror L1 about L0");
         assert!(out.contains("symmetry"), "should list symmetry: {}", out);
         assert!(out.contains("Mirrored L1"), "should list mirrored entity: {}", out);
+    }
+
+    // -- add_ellipse --
+
+    #[test]
+    fn test_add_ellipse_basic() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_ellipse 0,0 5 3 45");
+        assert_eq!(ctx.sketch.arcs.refs().count(), 1);
+        let arc_ref = ctx.sketch.arcs.refs().next().unwrap();
+        let a = &ctx.sketch.arcs[arc_ref];
+        assert!(a.is_ellipse);
+        assert!(a.closed);
+        assert!(near(a.radius.value, 5.0));
+        assert!(near(a.radius_b.value, 3.0));
+        assert!(near(a.rotation.value.to_degrees(), 45.0));
+    }
+
+    #[test]
+    fn test_add_ellipse_dof() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_ellipse 0,0 5 3 0");
+        // DOF: center(2) + rx(1) + ry(1) + rotation(1) = 5
+        assert_eq!(ctx.sketch.dof().unwrap(), 5);
+    }
+
+    #[test]
+    fn test_add_ellipse_list_output() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_ellipse 0,0 5 3 30");
+        let out = run_ok(&mut ctx, "list");
+        assert!(out.contains("[ellipse]"), "should show [ellipse]: {}", out);
+        assert!(out.contains("rx="), "should show rx: {}", out);
+        assert!(out.contains("ry="), "should show ry: {}", out);
+    }
+
+    #[test]
+    fn test_add_ellipse_driven() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_ellipse 0,0 5 3 0 driven");
+        assert_eq!(ctx.sketch.dimensions.len(), 1);
+        assert!(near(ctx.sketch.dimensions[0].value, 5.0));
+    }
+
+    #[test]
+    fn test_arc_unchanged_by_ellipse_fields() {
+        // Verify that existing arcs/circles still work identically
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_circle 0,0 5");
+        let arc_ref = ctx.sketch.arcs.refs().next().unwrap();
+        let a = &ctx.sketch.arcs[arc_ref];
+        assert!(!a.is_ellipse);
+        assert!(near(a.radius_b.value, 5.0)); // radius_b == radius
+        assert!(near(a.rotation.value, 0.0));
+        assert!(!a.radius_b.optimize); // fixed
+        assert!(!a.rotation.optimize); // fixed
+    }
+
+    #[test]
+    fn test_ellipse_start_end_pos() {
+        // Verify ellipse point formula works for arc_start_pos/arc_end_pos
+        let mut ctx = CommandContext::new();
+        // Unrotated ellipse: rx=4, ry=2. At angle 0, point = (cx+4, cy)
+        run_ok(&mut ctx, "add_ellipse 0,0 4 2 0");
+        let arc_ref = ctx.sketch.arcs.refs().next().unwrap();
+        let sp = crate::geometry::arc_start_pos(&ctx.sketch.arcs[arc_ref]);
+        assert!(near(sp.x, 4.0));
+        assert!(near(sp.y, 0.0));
     }
 
     // -- Measure --
