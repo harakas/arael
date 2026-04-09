@@ -253,13 +253,21 @@ fn dim_endpoint_pos(ep: &DimensionEndpoint, sketch: &super::Sketch) -> vect2d {
         DimensionEndpoint::ArcCenter(r) => sketch.arcs[*r].center.value,
         DimensionEndpoint::ArcStart(r) => {
             let a = &sketch.arcs[*r];
-            vect2d::new(a.center.value.x + a.radius.value * a.start_angle.value.cos(),
-                        a.center.value.y + a.radius.value * a.start_angle.value.sin())
+            let ct = a.start_angle.value.cos();
+            let st = a.start_angle.value.sin();
+            let cr = a.rotation.value.cos();
+            let sr = a.rotation.value.sin();
+            vect2d::new(a.center.value.x + a.radius.value * ct * cr - a.radius_b.value * st * sr,
+                        a.center.value.y + a.radius.value * ct * sr + a.radius_b.value * st * cr)
         }
         DimensionEndpoint::ArcEnd(r) => {
             let a = &sketch.arcs[*r];
-            vect2d::new(a.center.value.x + a.radius.value * a.end_angle.value.cos(),
-                        a.center.value.y + a.radius.value * a.end_angle.value.sin())
+            let ct = a.end_angle.value.cos();
+            let st = a.end_angle.value.sin();
+            let cr = a.rotation.value.cos();
+            let sr = a.rotation.value.sin();
+            vect2d::new(a.center.value.x + a.radius.value * ct * cr - a.radius_b.value * st * sr,
+                        a.center.value.y + a.radius.value * ct * sr + a.radius_b.value * st * cr)
         }
     }
 }
@@ -288,17 +296,31 @@ fn dim_endpoint_symbol(ep: &DimensionEndpoint, sketch: &super::Sketch) -> (arael
             let n = &sketch.arcs[*r].name;
             let cx = symbol(&format!("{}.center.x", n));
             let cy = symbol(&format!("{}.center.y", n));
-            let r = symbol(&format!("{}.radius", n));
+            let rx = symbol(&format!("{}.radius", n));
+            let ry = symbol(&format!("{}.radius_b", n));
+            let rot = symbol(&format!("{}.rotation", n));
             let sa = symbol(&format!("{}.start_angle", n));
-            (cx + r.clone() * arael_sym::cos(sa.clone()), cy + r * arael_sym::sin(sa))
+            let ct = arael_sym::cos(sa.clone());
+            let st = arael_sym::sin(sa);
+            let cr = arael_sym::cos(rot.clone());
+            let sr = arael_sym::sin(rot);
+            (cx + rx.clone() * ct.clone() * cr.clone() - ry.clone() * st.clone() * sr.clone(),
+             cy + rx * ct * sr + ry * st * cr)
         }
         DimensionEndpoint::ArcEnd(r) => {
             let n = &sketch.arcs[*r].name;
             let cx = symbol(&format!("{}.center.x", n));
             let cy = symbol(&format!("{}.center.y", n));
-            let r = symbol(&format!("{}.radius", n));
+            let rx = symbol(&format!("{}.radius", n));
+            let ry = symbol(&format!("{}.radius_b", n));
+            let rot = symbol(&format!("{}.rotation", n));
             let ea = symbol(&format!("{}.end_angle", n));
-            (cx + r.clone() * arael_sym::cos(ea.clone()), cy + r * arael_sym::sin(ea))
+            let ct = arael_sym::cos(ea.clone());
+            let st = arael_sym::sin(ea);
+            let cr = arael_sym::cos(rot.clone());
+            let sr = arael_sym::sin(rot);
+            (cx + rx.clone() * ct.clone() * cr.clone() - ry.clone() * st.clone() * sr.clone(),
+             cy + rx * ct * sr + ry * st * cr)
         }
     }
 }

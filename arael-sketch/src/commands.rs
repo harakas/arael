@@ -444,14 +444,18 @@ fn eval_context(sketch: &Sketch) -> HashMap<String, f64> {
         vars.insert(format!("{}.center.x", a.name), a.center.value.x);
         vars.insert(format!("{}.center.y", a.name), a.center.value.y);
         vars.insert(format!("{}.radius", a.name), a.radius.value);
+        vars.insert(format!("{}.radius_b", a.name), a.radius_b.value);
+        vars.insert(format!("{}.rotation", a.name), a.rotation.value);
         vars.insert(format!("{}.diameter", a.name), a.radius.value * 2.0);
         vars.insert(format!("{}.start_angle", a.name), a.start_angle.value);
         vars.insert(format!("{}.end_angle", a.name), a.end_angle.value);
         vars.insert(format!("{}.sweep", a.name), (a.end_angle.value - a.start_angle.value).abs().to_degrees());
-        vars.insert(format!("{}.start.x", a.name), a.center.value.x + a.radius.value * a.start_angle.value.cos());
-        vars.insert(format!("{}.start.y", a.name), a.center.value.y + a.radius.value * a.start_angle.value.sin());
-        vars.insert(format!("{}.end.x", a.name), a.center.value.x + a.radius.value * a.end_angle.value.cos());
-        vars.insert(format!("{}.end.y", a.name), a.center.value.y + a.radius.value * a.end_angle.value.sin());
+        let sp = crate::geometry::arc_start_pos(a);
+        let ep = crate::geometry::arc_end_pos(a);
+        vars.insert(format!("{}.start.x", a.name), sp.x);
+        vars.insert(format!("{}.start.y", a.name), sp.y);
+        vars.insert(format!("{}.end.x", a.name), ep.x);
+        vars.insert(format!("{}.end.y", a.name), ep.y);
     }
     for d in &sketch.dimensions {
         vars.insert(d.name.clone(), d.value);
@@ -9284,6 +9288,18 @@ mod tests {
         assert_eq!(ctx.sketch.dimensions.len(), 2);
         assert!(near(ctx.sketch.dimensions[0].value, 5.0));
         assert!(near(ctx.sketch.dimensions[1].value, 3.0));
+    }
+
+    #[test]
+    fn test_ellipse_print_params() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_ellipse 0,0 5 3 45");
+        let out = run_ok(&mut ctx, "print A0.rotation");
+        let val: f64 = out.trim().parse().unwrap();
+        assert!(near(val, std::f64::consts::PI / 4.0));
+        let out = run_ok(&mut ctx, "print A0.radius_b");
+        let val: f64 = out.trim().parse().unwrap();
+        assert!(near(val, 3.0));
     }
 
     #[test]
