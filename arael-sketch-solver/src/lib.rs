@@ -461,7 +461,7 @@ impl Sketch {
     /// Add an ellipse (closed) or elliptic arc. rx = semi-major, ry = semi-minor,
     /// rot = rotation angle of the ellipse axes.
     pub fn add_ellipse(&mut self, center: vect2d, rx: f64, ry: f64, rot: f64, closed: bool) -> Ref<Arc> {
-        let name = format!("A{}", self.next_arc_id);
+        let name = format!("EA{}", self.next_arc_id);
         self.next_arc_id += 1;
         self.arcs.push(Arc {
             center: Param::new(center),

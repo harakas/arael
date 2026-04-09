@@ -243,14 +243,16 @@ add_ellipse 0,0 5 3 45                        Ellipse rotated 45 degrees
 add_ellipse 0,0 5 3 0 driven                  With driven rx and ry dimensions
 ```
 
+Ellipses are named with the `EA` prefix (e.g. `EA0`, `EA1`) to distinguish them from circular arcs (`A0`, `A1`).
+
 Ellipse-specific dimensions:
 ```
-radius A0 5                  Set semi-major axis (same as circle radius)
-radius_b A0 3                Set semi-minor axis (ellipses only)
-radius_b A0 driven           Driven minor axis dimension
+radius EA0 5                 Set semi-major axis (same as circle radius)
+radius_b EA0 3               Set semi-minor axis (ellipses only)
+radius_b EA0 driven          Driven minor axis dimension
 ```
 
-Ellipse parameters are accessible as `A0.radius`, `A0.radius_b`, `A0.rotation` in expressions and `print`.
+Ellipse parameters are accessible as `EA0.radius`, `EA0.radius_b`, `EA0.rotation` in expressions and `print`.
 
 ## Deletion
 

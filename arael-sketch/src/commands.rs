@@ -369,6 +369,11 @@ fn resolve_point(sketch: &Sketch, name: &str) -> Result<Ref<Point>, String> {
     Err(format!("Unknown point: {}", name))
 }
 
+/// Check if a name looks like an arc/ellipse reference.
+fn is_arc_name(name: &str) -> bool {
+    name.starts_with('A') || name.starts_with("EA")
+}
+
 fn resolve_arc(sketch: &Sketch, name: &str) -> Result<Ref<Arc>, String> {
     for r in sketch.arcs.refs() {
         if sketch.arcs[r].name == name { return Ok(r); }
@@ -390,7 +395,7 @@ fn resolve_endpoint_pos(sketch: &Sketch, name: &str) -> Result<vect2d, String> {
                 }
                 _ => return Err(format!("Unknown field: {}.{}", entity, field)),
             }
-        } else if entity.starts_with('A') {
+        } else if is_arc_name(entity) {
             let r = resolve_arc(sketch, entity)?;
             let a = &sketch.arcs[r];
             match field {
@@ -870,7 +875,7 @@ fn resolve_endpoint_ref(sketch: &Sketch, name: &str) -> Result<EndpointRef, Stri
                 "p2" => return Ok(EndpointRef::LineP2(r)),
                 _ => return Err(format!("Line endpoint must be p1 or p2: {}", name)),
             }
-        } else if entity.starts_with('A') {
+        } else if is_arc_name(entity) {
             let r = resolve_arc(sketch, entity)?;
             match field {
                 "center" => return Ok(EndpointRef::ArcCenter(r)),
@@ -2063,7 +2068,7 @@ fn cmd_delete(ctx: &mut CommandContext, args: &str) -> CommandResult {
         ctx.begin_group();
         ctx.exec(Action::DeletePoint { point: r });
         ok(format!("Deleted {}", name))
-    } else if name.starts_with('A') {
+    } else if is_arc_name(name) {
         let r = match resolve_arc(&ctx.sketch, name) { Ok(r) => r, Err(e) => return err(e) };
         ctx.begin_group();
         ctx.exec(Action::DeleteArc { arc: r });
@@ -2180,7 +2185,7 @@ fn cmd_equal(ctx: &mut CommandContext, args: &str) -> CommandResult {
         ctx.begin_group();
         ctx.exec(Action::ApplyEqualLength { a, b });
         ok_or_status(ctx, "Applied equal length")
-    } else if tokens[0].starts_with('A') && tokens[1].starts_with('A') {
+    } else if is_arc_name(tokens[0]) && is_arc_name(tokens[1]) {
         let a = match resolve_arc(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
         let b = match resolve_arc(&ctx.sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
         if a == b { return err("Cannot constrain an arc equal to itself"); }
@@ -2212,7 +2217,7 @@ fn cmd_collinear(ctx: &mut CommandContext, args: &str) -> CommandResult {
 fn cmd_tangent(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let tokens: Vec<&str> = args.split_whitespace().collect();
     if tokens.len() != 2 { return err("Usage: tangent L0 A0  or  tangent A0 A1"); }
-    if tokens[0].starts_with('L') && tokens[1].starts_with('A') {
+    if tokens[0].starts_with('L') && is_arc_name(tokens[1]) {
         let line = match resolve_line(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
         let arc = match resolve_arc(&ctx.sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
         if ctx.sketch.tangent_la.iter().any(|c| c.line == line && c.arc == arc) {
@@ -2221,7 +2226,7 @@ fn cmd_tangent(ctx: &mut CommandContext, args: &str) -> CommandResult {
         ctx.begin_group();
         ctx.exec(Action::ApplyTangentLA { line, arc });
         ok_or_status(ctx, "Applied tangent")
-    } else if tokens[0].starts_with('A') && tokens[1].starts_with('A') {
+    } else if is_arc_name(tokens[0]) && is_arc_name(tokens[1]) {
         let a = match resolve_arc(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
         let b = match resolve_arc(&ctx.sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
         if a == b { return err("Cannot constrain an arc tangent to itself"); }
@@ -2598,7 +2603,7 @@ fn cmd_style(ctx: &mut CommandContext, args: &str) -> CommandResult {
         if name.starts_with('L') {
             let r = match resolve_line(&ctx.sketch, name) { Ok(r) => r, Err(e) => return err(e) };
             return ok(format!("{}: {}", name, ctx.sketch.lines[r].style.name()));
-        } else if name.starts_with('A') {
+        } else if is_arc_name(name) {
             let r = match resolve_arc(&ctx.sketch, name) { Ok(r) => r, Err(e) => return err(e) };
             return ok(format!("{}: {}", name, ctx.sketch.arcs[r].style.name()));
         }
@@ -2613,7 +2618,7 @@ fn cmd_style(ctx: &mut CommandContext, args: &str) -> CommandResult {
         ctx.begin_group();
         ctx.exec(Action::SetStyleLine { line: r, style });
         ok(format!("{}: {}", name, style.name()))
-    } else if name.starts_with('A') {
+    } else if is_arc_name(name) {
         let r = match resolve_arc(&ctx.sketch, name) { Ok(r) => r, Err(e) => return err(e) };
         ctx.begin_group();
         ctx.exec(Action::SetStyleArc { arc: r, style });
@@ -2672,7 +2677,7 @@ fn cmd_select(ctx: &mut CommandContext, args: &str) -> CommandResult {
         } else if name.starts_with('P') {
             let r = match resolve_point(&ctx.sketch, name) { Ok(r) => r, Err(e) => return err(e) };
             ctx.selection.push(Selection::Point(r));
-        } else if name.starts_with('A') {
+        } else if is_arc_name(name) {
             let r = match resolve_arc(&ctx.sketch, name) { Ok(r) => r, Err(e) => return err(e) };
             ctx.selection.push(Selection::Arc(r));
         } else {
@@ -2691,7 +2696,7 @@ fn cmd_select_chain(ctx: &mut CommandContext, seed: &str) -> CommandResult {
     if seed.starts_with('L') {
         let r = match resolve_line(&ctx.sketch, seed) { Ok(r) => r, Err(e) => return err(e) };
         line_set.insert(r.index());
-    } else if seed.starts_with('A') {
+    } else if is_arc_name(seed) {
         let r = match resolve_arc(&ctx.sketch, seed) { Ok(r) => r, Err(e) => return err(e) };
         arc_set.insert(r.index());
     } else {
@@ -2752,7 +2757,7 @@ fn cmd_select_linked(ctx: &mut CommandContext, seed: &str) -> CommandResult {
     if seed.starts_with('L') {
         let r = match resolve_line(&ctx.sketch, seed) { Ok(r) => r, Err(e) => return err(e) };
         line_set.insert(r.index());
-    } else if seed.starts_with('A') {
+    } else if is_arc_name(seed) {
         let r = match resolve_arc(&ctx.sketch, seed) { Ok(r) => r, Err(e) => return err(e) };
         arc_set.insert(r.index());
     } else {
@@ -2865,7 +2870,7 @@ fn cmd_deselect(ctx: &mut CommandContext, args: &str) -> CommandResult {
             if let Ok(r) = resolve_line(&ctx.sketch, name) {
                 ctx.selection.retain(|s| !matches!(s, Selection::Line(l) if *l == r));
             }
-        } else if name.starts_with('A') {
+        } else if is_arc_name(name) {
             if let Ok(r) = resolve_arc(&ctx.sketch, name) {
                 ctx.selection.retain(|s| !matches!(s, Selection::Arc(a) if *a == r));
             }
@@ -2960,7 +2965,7 @@ fn cmd_info(ctx: &mut CommandContext, args: &str) -> CommandResult {
         let cstrs = constraints_for(&ctx.sketch, name);
         if !cstrs.is_empty() { s += &format!("\n  constraints: {}", cstrs.join(", ")); }
         ok(s)
-    } else if name.starts_with('A') && !name.contains('.') {
+    } else if is_arc_name(name) && !name.contains('.') {
         let r = match resolve_arc(&ctx.sketch, name) { Ok(r) => r, Err(e) => return err(e) };
         let a = &ctx.sketch.arcs[r];
         let sp = crate::geometry::arc_start_pos(a);
@@ -3497,7 +3502,7 @@ fn cmd_symmetry(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let tokens: Vec<&str> = args.split_whitespace().collect();
     if tokens.len() != 3 { return err("Usage: symmetry L0 L1 L2 | symmetry P0 L0 P1 | symmetry A0 L0 A1"); }
     // Try arc + line + arc symmetry
-    if tokens[0].starts_with('A') && tokens[2].starts_with('A') {
+    if is_arc_name(tokens[0]) && is_arc_name(tokens[2]) {
         if let (Ok(a), Ok(line), Ok(c)) = (resolve_arc(&ctx.sketch, tokens[0]),
             resolve_line(&ctx.sketch, tokens[1]),
             resolve_arc(&ctx.sketch, tokens[2]))
@@ -3622,7 +3627,7 @@ fn cmd_mirror(ctx: &mut CommandContext, args: &str) -> CommandResult {
                 let r = match resolve_line(&ctx.sketch, name) { Ok(r) => r, Err(e) => return err(e) };
                 if r == mirror_line { return err(format!("Cannot mirror {} about itself", name)); }
                 sources.push(MirrorSource::Line(r));
-            } else if name.starts_with('A') {
+            } else if is_arc_name(name) {
                 let r = match resolve_arc(&ctx.sketch, name) { Ok(r) => r, Err(e) => return err(e) };
                 sources.push(MirrorSource::Arc(r));
             } else if name.starts_with('P') {
@@ -3876,7 +3881,7 @@ fn cmd_point_on(ctx: &mut CommandContext, args: &str) -> CommandResult {
         };
         ctx.exec(action);
         ok_or_status(ctx, "Applied point-on-line")
-    } else if target.starts_with('A') {
+    } else if is_arc_name(target) {
         let arc = match resolve_arc(&ctx.sketch, target) { Ok(r) => r, Err(e) => return err(e) };
         let s = &ctx.sketch;
         let exists = match ep {
@@ -4199,7 +4204,7 @@ fn cmd_freeze(ctx: &mut CommandContext, args: &str) -> CommandResult {
                     Ok(r) => line_refs.push(r),
                     Err(e) => return err(e),
                 }
-            } else if name.starts_with('A') {
+            } else if is_arc_name(name) {
                 match resolve_arc(&ctx.sketch, name) {
                     Ok(r) => arc_refs.push(r),
                     Err(e) => return err(e),
@@ -4448,11 +4453,11 @@ fn cmd_remove_constraint(ctx: &mut CommandContext, args: &str) -> CommandResult 
             find_ab!(sketch.collinear, a, b).map(ConstraintId::Collinear)
         }
         "tangent" if tokens.len() >= 3 => {
-            if tokens[0].starts_with('L') && tokens[1].starts_with('A') {
+            if tokens[0].starts_with('L') && is_arc_name(tokens[1]) {
                 let line = match resolve_line(sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
                 let arc = match resolve_arc(sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
                 sketch.tangent_la.iter().position(|c| c.line == line && c.arc == arc).map(ConstraintId::TangentLA)
-            } else if tokens[0].starts_with('A') && tokens[1].starts_with('A') {
+            } else if is_arc_name(tokens[0]) && is_arc_name(tokens[1]) {
                 let a = match resolve_arc(sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
                 let b = match resolve_arc(sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
                 find_ab!(sketch.tangent_aa, a, b).map(ConstraintId::TangentAA)
@@ -4517,7 +4522,7 @@ fn cmd_remove_constraint(ctx: &mut CommandContext, args: &str) -> CommandResult 
             let found = if target.starts_with('L') || target.starts_with('l') {
                 let line = match resolve_line(sketch, target) { Ok(r) => r, Err(e) => return err(e) };
                 find_point_on_line_id(sketch, ep, line)
-            } else if target.starts_with('A') || target.starts_with('a') {
+            } else if is_arc_name(target) || target.starts_with('a') {
                 let arc = match resolve_arc(sketch, target) { Ok(r) => r, Err(e) => return err(e) };
                 find_point_on_arc_id(sketch, ep, arc)
             } else { None };
@@ -4534,7 +4539,7 @@ fn cmd_remove_constraint(ctx: &mut CommandContext, args: &str) -> CommandResult 
                             ctx.sketch.cached_dof = None;
                             return ok(format!("Removed {} constraint", ctype));
                         }
-                    } else if target.starts_with('A') || target.starts_with('a') {
+                    } else if is_arc_name(target) || target.starts_with('a') {
                         let arc = match resolve_arc(&ctx.sketch, target) { Ok(r) => r, Err(e) => return err(e) };
                         let before = ctx.sketch.point_on_arc.len();
                         ctx.sketch.point_on_arc.retain(|c| !(c.point == p && c.arc == arc));
@@ -5371,7 +5376,7 @@ pub fn complete(
                 let arg1 = current_line.split_whitespace().nth(1).unwrap_or("");
                 if arg1.starts_with('L') {
                     add_lines(sketch, &mut results, current_word);
-                } else if arg1.starts_with('A') {
+                } else if is_arc_name(arg1) {
                     add_arcs(sketch, &mut results, current_word);
                 }
             }
@@ -5967,7 +5972,7 @@ fn complete_after_dot(sketch: &Sketch, before_dot: &str, after_dot: &str) -> Vec
             }
         }
         // A<N>.center. → x, y
-        if entity.starts_with('A') && prop == "center" {
+        if is_arc_name(entity) && prop == "center" {
             for &s in &["x", "y"] {
                 if s.starts_with(after_dot) {
                     results.push(format!("{}.{}", before_dot, s));
@@ -5985,7 +5990,7 @@ fn complete_after_dot(sketch: &Sketch, before_dot: &str, after_dot: &str) -> Vec
                 results.push(format!("{}.{}", before_dot, s));
             }
         }
-    } else if before_dot.starts_with('A') && sketch.arcs.refs().any(|r| sketch.arcs[r].name == before_dot) {
+    } else if is_arc_name(before_dot) && sketch.arcs.refs().any(|r| sketch.arcs[r].name == before_dot) {
         for &s in &["center", "start", "end", "radius", "start_angle", "end_angle"] {
             if s.starts_with(after_dot) {
                 results.push(format!("{}.{}", before_dot, s));
@@ -8014,7 +8019,7 @@ mod tests {
         let c = completions(&ctx, "horizontal L");
         assert!(c.contains(&"L0".to_string()));
         assert!(c.contains(&"L1".to_string()));
-        assert!(!c.iter().any(|s| s.starts_with('A')), "horizontal should not offer arcs");
+        assert!(!c.iter().any(|s| is_arc_name(s)), "horizontal should not offer arcs");
         assert!(!c.iter().any(|s| s.starts_with('P')), "horizontal should not offer points");
     }
 
@@ -8060,7 +8065,7 @@ mod tests {
         // After "equal L0", should only offer lines
         let c = completions(&ctx, "equal L0 L");
         assert!(c.contains(&"L1".to_string()));
-        assert!(!c.iter().any(|s| s.starts_with('A')), "equal with L0 should not offer arcs");
+        assert!(!c.iter().any(|s| is_arc_name(s)), "equal with L0 should not offer arcs");
     }
 
     #[test]
@@ -8115,7 +8120,7 @@ mod tests {
         let ctx = setup_complete_ctx();
         let c = completions(&ctx, "midpoint P0 L");
         assert!(c.contains(&"L0".to_string()));
-        assert!(!c.iter().any(|s| s.starts_with('A')), "midpoint arg2 should not offer arcs");
+        assert!(!c.iter().any(|s| is_arc_name(s)), "midpoint arg2 should not offer arcs");
     }
 
     #[test]
@@ -8123,7 +8128,7 @@ mod tests {
         let ctx = setup_complete_ctx();
         let c = completions(&ctx, "offset L");
         assert!(c.contains(&"L0".to_string()));
-        assert!(!c.iter().any(|s| s.starts_with('A')));
+        assert!(!c.iter().any(|s| is_arc_name(s)));
     }
 
     #[test]
@@ -8140,7 +8145,7 @@ mod tests {
         let c = completions(&ctx, "horizontal ");
         assert!(c.contains(&"L0".to_string()));
         assert!(c.contains(&"L1".to_string()));
-        assert!(!c.iter().any(|s| s.starts_with('A')));
+        assert!(!c.iter().any(|s| is_arc_name(s)));
     }
 
     #[test]
@@ -9355,10 +9360,10 @@ mod tests {
     fn test_ellipse_print_params() {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_ellipse 0,0 5 3 45");
-        let out = run_ok(&mut ctx, "print A0.rotation");
+        let out = run_ok(&mut ctx, "print EA0.rotation");
         let val: f64 = out.trim().parse().unwrap();
         assert!(near(val, std::f64::consts::PI / 4.0));
-        let out = run_ok(&mut ctx, "print A0.radius_b");
+        let out = run_ok(&mut ctx, "print EA0.radius_b");
         let val: f64 = out.trim().parse().unwrap();
         assert!(near(val, 3.0));
     }
@@ -9367,7 +9372,7 @@ mod tests {
     fn test_ellipse_radius_b_command() {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_ellipse 0,0 5 3 0");
-        run_ok(&mut ctx, "radius_b A0 4");
+        run_ok(&mut ctx, "radius_b EA0 4");
         assert_eq!(ctx.sketch.dimensions.len(), 1);
         assert!(near(ctx.sketch.dimensions[0].value, 4.0));
         assert!(near(ctx.sketch.arcs.refs().next().map(|r| ctx.sketch.arcs[r].radius_b.value).unwrap(), 4.0));
@@ -9385,7 +9390,7 @@ mod tests {
     fn test_ellipse_measure() {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_ellipse 0,0 5 3 30");
-        let out = run_ok(&mut ctx, "measure A0");
+        let out = run_ok(&mut ctx, "measure EA0");
         assert!(out.contains("rx="), "should show rx: {}", out);
         assert!(out.contains("ry="), "should show ry: {}", out);
         assert!(out.contains("rotation="), "should show rotation: {}", out);
@@ -9515,7 +9520,7 @@ mod tests {
     fn test_symmetry_aa_ellipse() {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_line 0,-5 0,5; add_ellipse -3,0 2 1 30; add_ellipse 4,1 3 2 0");
-        run_ok(&mut ctx, "symmetry A0 L0 A1");
+        run_ok(&mut ctx, "symmetry EA0 L0 EA1");
         let a0 = ctx.sketch.arcs.refs().nth(0).unwrap();
         let a1 = ctx.sketch.arcs.refs().nth(1).unwrap();
         let r0 = ctx.sketch.arcs[a0].radius.value;
@@ -9530,7 +9535,7 @@ mod tests {
     fn test_tangent_aa_ellipse() {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_ellipse -5,0 3 2 0; add_ellipse 5,0 3 2 0");
-        run_ok(&mut ctx, "tangent A0 A1");
+        run_ok(&mut ctx, "tangent EA0 EA1");
         assert_eq!(ctx.sketch.tangent_aa.len(), 1);
         // Verify constraint is satisfied: dist = r_eff_a + r_eff_b
         let a0 = ctx.sketch.arcs.refs().nth(0).unwrap();
