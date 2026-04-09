@@ -1489,24 +1489,39 @@ pub fn generate_root_methods(
             let rc_ident = frines_ident.unwrap();
             let tp = triplet_param_count;
 
+            let guarded_cost = if let Some(ref guard) = guard_expr {
+                quote! { if #guard { #(#cost_stmts)* } }
+            } else {
+                quote! { #(#cost_stmts)* }
+            };
             cost_loops.push(quote! {
                 for __frine in self.#rc_ident.iter() {
                     #(#resolve_stmts)*
                     let #root_var_ident = &*__self_ref;
-                    #(#cost_stmts)*
+                    #guarded_cost
                 }
             });
 
+            let guarded_gh = if let Some(ref guard) = guard_expr {
+                quote! { if #guard { #(#gh_stmts)* } }
+            } else {
+                quote! { { #(#gh_stmts)* } }
+            };
             grad_hessian_loops.push(quote! {
                 for __frine in self.#rc_ident.iter_mut() {
                     #(#resolve_stmts)*
                     let #root_var_ident = &*__self_ref;
                     let mut __all_idx = [0u32; #tp];
                     #(#triplet_idx_stmts)*
-                    { #(#gh_stmts)* }
+                    #guarded_gh
                 }
             });
             if !jac_stmts.is_empty() {
+                let guarded_jac = if let Some(ref guard) = guard_expr {
+                    quote! { if #guard { #(#jac_stmts)* __jac_cid += 1; } }
+                } else {
+                    quote! { #(#jac_stmts)* __jac_cid += 1; }
+                };
                 jacobian_loops.push(quote! {
                     for __frine in self.#rc_ident.iter() {
                         #(#resolve_stmts)*
@@ -1516,8 +1531,7 @@ pub fn generate_root_methods(
                             #(#triplet_idx_stmts)*
                             __all_idx.to_vec()
                         };
-                        #(#jac_stmts)*
-                        __jac_cid += 1;
+                        #guarded_jac
                     }
                 });
             }
