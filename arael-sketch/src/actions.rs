@@ -161,6 +161,7 @@ impl Action {
                 let kind_str = match kind {
                     DimensionKind::LineLength(_) => "length",
                     DimensionKind::ArcRadius(_) => "radius",
+                    DimensionKind::ArcRadiusB(_) => "radius_b",
                     DimensionKind::ArcSweep(_) => "sweep",
                     DimensionKind::PointPointDistance(_, _) => "distance",
                     DimensionKind::PointLineDistance(_, _) => "distance",
@@ -820,6 +821,10 @@ impl Action {
                         sketch.arcs[*arc].constraints.has_target_radius = true;
                         sketch.arcs[*arc].constraints.target_radius = *value;
                     }
+                    DimensionKind::ArcRadiusB(arc) => {
+                        sketch.arcs[*arc].constraints.has_target_radius_b = true;
+                        sketch.arcs[*arc].constraints.target_radius_b = *value;
+                    }
                     DimensionKind::ArcSweep(arc) => {
                         sketch.arcs[*arc].constraints.sweep_sign = if sketch.arcs[*arc].ccw { 1.0 } else { -1.0 };
                         sketch.arcs[*arc].constraints.has_target_sweep = true;
@@ -889,6 +894,11 @@ impl Action {
                                     a.constraints.has_target_radius = false;
                                 }
                             }
+                            DimensionKind::ArcRadiusB(arc) => {
+                                if let Some(a) = sketch.arcs.get_mut(arc) {
+                                    a.constraints.has_target_radius_b = false;
+                                }
+                            }
                             DimensionKind::ArcSweep(arc) => {
                                 if let Some(a) = sketch.arcs.get_mut(arc) {
                                     a.constraints.has_target_sweep = false;
@@ -933,6 +943,10 @@ impl Action {
                         DimensionKind::ArcRadius(arc) => {
                             sketch.arcs[arc].constraints.has_target_radius = true;
                             sketch.arcs[arc].constraints.target_radius = value;
+                        }
+                        DimensionKind::ArcRadiusB(arc) => {
+                            sketch.arcs[arc].constraints.has_target_radius_b = true;
+                            sketch.arcs[arc].constraints.target_radius_b = value;
                         }
                         DimensionKind::ArcSweep(arc) => {
                             sketch.arcs[arc].constraints.sweep_sign = if sketch.arcs[arc].ccw { 1.0 } else { -1.0 };
@@ -1000,6 +1014,11 @@ impl Action {
                         DimensionKind::ArcRadius(arc) => {
                             if let Some(a) = sketch.arcs.get_mut(arc) {
                                 a.constraints.has_target_radius = false;
+                            }
+                        }
+                        DimensionKind::ArcRadiusB(arc) => {
+                            if let Some(a) = sketch.arcs.get_mut(arc) {
+                                a.constraints.has_target_radius_b = false;
                             }
                         }
                         DimensionKind::ArcSweep(arc) => {

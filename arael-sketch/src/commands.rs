@@ -115,6 +115,7 @@ fn dimension_rejection_hint(sketch: &Sketch, action: &Action) -> String {
             Some(("length", (dx * dx + dy * dy).sqrt()))
         }
         DimensionKind::ArcRadius(r) => Some(("radius", sketch.arcs[*r].radius.value)),
+        DimensionKind::ArcRadiusB(r) => Some(("radius_b", sketch.arcs[*r].radius_b.value)),
         DimensionKind::ArcSweep(r) => {
             let a = &sketch.arcs[*r];
             Some(("sweep", arael::utils::rad2deg((a.end_angle.value - a.start_angle.value).abs())))
@@ -1766,7 +1767,11 @@ fn cmd_add_ellipse(ctx: &mut CommandContext, args: &str) -> CommandResult {
             kind: DimensionKind::ArcRadius(arc_ref),
             value: rx, expr: None, derived: false,
         });
-        msg += &format!(" [driven rx={:.4}]", rx);
+        ctx.exec(Action::AddDimension {
+            kind: DimensionKind::ArcRadiusB(arc_ref),
+            value: ry, expr: None, derived: false,
+        });
+        msg += &format!(" [driven rx={:.4} ry={:.4}]", rx, ry);
     }
     ok(msg)
 }
@@ -9276,8 +9281,9 @@ mod tests {
     fn test_add_ellipse_driven() {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_ellipse 0,0 5 3 0 driven");
-        assert_eq!(ctx.sketch.dimensions.len(), 1);
+        assert_eq!(ctx.sketch.dimensions.len(), 2);
         assert!(near(ctx.sketch.dimensions[0].value, 5.0));
+        assert!(near(ctx.sketch.dimensions[1].value, 3.0));
     }
 
     #[test]
@@ -9290,7 +9296,7 @@ mod tests {
         assert!(!a.is_ellipse);
         assert!(near(a.radius_b.value, 5.0)); // radius_b == radius
         assert!(near(a.rotation.value, 0.0));
-        assert!(!a.radius_b.optimize); // fixed
+        assert!(a.radius_b.optimize); // optimizable (equality constraint keeps it = radius)
         assert!(!a.rotation.optimize); // fixed
     }
 

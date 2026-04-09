@@ -1347,6 +1347,9 @@ impl EditorApp {
             DimensionKind::ArcRadius(r) => {
                 self.sketch.arcs[*r].radius.value
             }
+            DimensionKind::ArcRadiusB(r) => {
+                self.sketch.arcs[*r].radius_b.value
+            }
             DimensionKind::ArcSweep(r) => {
                 let a = &self.sketch.arcs[*r];
                 rad2deg((a.end_angle.value - a.start_angle.value).abs())
@@ -1492,9 +1495,10 @@ impl EditorApp {
                 };
                 (p, foot)
             }
-            DimensionKind::ArcRadius(r) => {
+            DimensionKind::ArcRadius(r) | DimensionKind::ArcRadiusB(r) => {
                 let a = &self.sketch.arcs[*r];
-                let edge = vect2d::new(a.center.value.x + a.radius.value, a.center.value.y);
+                let rv = if matches!(kind, DimensionKind::ArcRadiusB(_)) { a.radius_b.value } else { a.radius.value };
+                let edge = vect2d::new(a.center.value.x + rv, a.center.value.y);
                 (a.center.value, edge)
             }
             DimensionKind::ArcSweep(r) => {
