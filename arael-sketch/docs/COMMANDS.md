@@ -233,6 +233,25 @@ add_circle3t L0 L1 L2 driven              With driven radius dimension
 
 **Placement rule for `add_circle2t` / `add_circle3t`:** The tangent circle is placed so its tangent points fall on the actual line segments (not their infinite extensions). If no placement touches all segments, or if multiple placements do, the command errors out. Control which sector the circle goes into by adjusting line segment lengths.
 
+### Ellipses
+
+Create ellipses with `add_ellipse`. Ellipses have two radii (semi-major `rx`, semi-minor `ry`) and a rotation angle.
+
+```
+add_ellipse cx,cy rx ry rotation_deg [noconnect] [nocursor] [driven]
+add_ellipse 0,0 5 3 45                        Ellipse rotated 45 degrees
+add_ellipse 0,0 5 3 0 driven                  With driven rx and ry dimensions
+```
+
+Ellipse-specific dimensions:
+```
+radius A0 5                  Set semi-major axis (same as circle radius)
+radius_b A0 3                Set semi-minor axis (ellipses only)
+radius_b A0 driven           Driven minor axis dimension
+```
+
+Ellipse parameters are accessible as `A0.radius`, `A0.radius_b`, `A0.rotation` in expressions and `print`.
+
 ## Deletion
 
 ```

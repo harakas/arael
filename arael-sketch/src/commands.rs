@@ -985,7 +985,7 @@ fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
                 "add_line" | "add_rect" | "add_rect3" | "add_rectcenter" |
                 "add_point" | "add_circle" | "add_circle2" | "add_circle3" |
                 "add_circle2t" | "add_circle3t" | "add_ellipse" | "add_arc" | "offset_line" | "offset" | "mirror" |
-                "length" | "radius" | "sweep" | "angle" | "distance");
+                "length" | "radius" | "radius_b" | "sweep" | "angle" | "distance");
             if is_command {
                 let dim_count_before = ctx.sketch.dimensions.len();
                 let result = execute_one(ctx, rhs);
@@ -1055,6 +1055,7 @@ fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
         "point_on" => cmd_point_on(ctx, args_str),
         "length" => cmd_length(ctx, args_str),
         "radius" => cmd_radius(ctx, args_str),
+        "radius_b" => cmd_radius_b(ctx, args_str),
         "sweep" => cmd_sweep(ctx, args_str),
         "angle" => cmd_angle(ctx, args_str),
         "distance" => cmd_distance(ctx, args_str),
@@ -2424,6 +2425,48 @@ fn cmd_radius(ctx: &mut CommandContext, args: &str) -> CommandResult {
     ok_or_status(ctx, format!("{} {} radius = {}", prefix, tokens[0], display))
 }
 
+fn cmd_radius_b(ctx: &mut CommandContext, args: &str) -> CommandResult {
+    let mut tokens: Vec<&str> = args.split_whitespace().collect();
+    let is_derived = tokens.last() == Some(&"derived");
+    let is_driven = !is_derived && tokens.last() == Some(&"driven");
+    if is_derived || is_driven { tokens.pop(); }
+    if tokens.len() == 1 && (is_derived || is_driven) {
+        let arc = match resolve_arc(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
+        if !ctx.sketch.arcs[arc].is_ellipse {
+            return err("radius_b only applies to ellipses (use add_ellipse to create one)");
+        }
+        let r = ctx.sketch.arcs[arc].radius_b.value;
+        let kind = DimensionKind::ArcRadiusB(arc);
+        ctx.begin_group();
+        if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
+            let name = ctx.sketch.dimensions[idx].name.clone();
+            ctx.exec(Action::UpdateDimension { index: idx, value: r, expr: None });
+            let label = if is_derived { "derived" } else { "driven" };
+            return ok_or_status(ctx, format!("Updated {} {} radius_b = ({:.4})", label, name, r));
+        }
+        ctx.exec(Action::AddDimension { kind, value: r, expr: None, derived: is_derived });
+        let label = if is_derived { "Derived" } else { "Driven" };
+        return ok_or_status(ctx, format!("{} {} radius_b = ({:.4})", label, tokens[0], r));
+    }
+    if tokens.len() != 2 { return err("Usage: radius_b A0 1.5 [derived|driven]"); }
+    let arc = match resolve_arc(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
+    if !ctx.sketch.arcs[arc].is_ellipse {
+        return err("radius_b only applies to ellipses (use add_ellipse to create one)");
+    }
+    let kind = DimensionKind::ArcRadiusB(arc);
+    let (value, expr) = match parse_dim_value(&ctx.sketch, tokens[1]) { Ok(v) => v, Err(e) => return err(e) };
+    let display = if expr.is_some() { tokens[1].to_string() } else { format!("{}", value) };
+    ctx.begin_group();
+    if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
+        let name = ctx.sketch.dimensions[idx].name.clone();
+        ctx.exec(Action::UpdateDimension { index: idx, value, expr });
+        return ok_or_status(ctx, format!("Updated {} radius_b = {}", name, display));
+    }
+    ctx.exec(Action::AddDimension { kind, value, expr, derived: is_derived });
+    let prefix = if is_derived { "Derived" } else { "Set" };
+    ok_or_status(ctx, format!("{} {} radius_b = {}", prefix, tokens[0], display))
+}
+
 fn cmd_sweep(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let mut tokens: Vec<&str> = args.split_whitespace().collect();
     let is_derived = tokens.last() == Some(&"derived");
@@ -2996,9 +3039,16 @@ fn cmd_measure(ctx: &mut CommandContext, args: &str) -> CommandResult {
                 let arc_len = a.radius.value * (a.end_angle.value - a.start_angle.value).abs();
                 let sp = crate::geometry::arc_start_pos(a);
                 let ep = crate::geometry::arc_end_pos(a);
-                ok(format!("{}: radius={:.4}, sweep={:.4} deg, arc_length={:.4}\n  center=({:.4},{:.4}) start=({:.4},{:.4}) end=({:.4},{:.4})",
-                    a.name, a.radius.value, sweep_deg, arc_len,
-                    a.center.value.x, a.center.value.y, sp.x, sp.y, ep.x, ep.y))
+                let s = if a.is_ellipse {
+                    format!("{}: rx={:.4}, ry={:.4}, rotation={:.4} deg, sweep={:.4} deg\n  center=({:.4},{:.4}) start=({:.4},{:.4}) end=({:.4},{:.4})",
+                        a.name, a.radius.value, a.radius_b.value, a.rotation.value.to_degrees(),
+                        sweep_deg, a.center.value.x, a.center.value.y, sp.x, sp.y, ep.x, ep.y)
+                } else {
+                    format!("{}: radius={:.4}, sweep={:.4} deg, arc_length={:.4}\n  center=({:.4},{:.4}) start=({:.4},{:.4}) end=({:.4},{:.4})",
+                        a.name, a.radius.value, sweep_deg, arc_len,
+                        a.center.value.x, a.center.value.y, sp.x, sp.y, ep.x, ep.y)
+                };
+                ok(s)
             }
             Entity::Point(pos, name) => {
                 ok(format!("{}: ({:.4},{:.4})", name, pos.x, pos.y))
@@ -5169,6 +5219,7 @@ fn cmd_help(args: &str) -> CommandResult {
             "point_on" => "point_on P0 L0 | point_on L0.p1 A0",
             "length" => "length L0 5 | length L0 L0.length | length L0 =2*scale | length L0 {expr} [derived|driven]",
             "radius" => "radius A0 1.5 | radius A0 =5*scale | radius A0 {expr} [derived|driven]",
+            "radius_b" => "radius_b A0 1.5 [derived|driven] -- ellipse semi-minor axis",
             "sweep" => "sweep A0 180 | sweep A0 =90*n | sweep A0 {expr} [derived|driven]",
             "angle" => "angle L0 L1 45 [supplement|closest|acute|obtuse] [derived|driven]",
             "distance" => "distance L0.p1 L1.p2 5 | distance P0 L0 3 | distance L0.p1 L1.p2 =expr [derived|driven]",
@@ -5227,7 +5278,7 @@ const COMMAND_NAMES: &[&str] = &[
     "add_arc", "offset_line", "offset",
     "delete", "horizontal", "vertical", "parallel", "perpendicular", "perp",
     "equal", "collinear", "tangent", "coincident", "concentric", "midpoint",
-    "symmetry", "mirror", "point_on", "length", "radius", "sweep", "angle", "distance", "hdistance", "vdistance", "xangle",
+    "symmetry", "mirror", "point_on", "length", "radius", "radius_b", "sweep", "angle", "distance", "hdistance", "vdistance", "xangle",
     "remove_dim", "remove_constraint", "rc", "set_derived", "set_driven",
     "lock", "unlock", "param", "del_param", "rename_param", "style",
     "select", "deselect", "freeze", "print", "info", "measure", "list", "find", "let",
@@ -5414,6 +5465,16 @@ pub fn complete(
 
         // Dimension: radius (arg1=arc, arg2=value/derived)
         "radius" => {
+            if token_index == 1 {
+                add_arcs(sketch, &mut results, current_word);
+            } else if token_index == 2 {
+                add_matching(&mut results, current_word, &["derived", "driven"]);
+                add_expression_completions(sketch, session_names, &mut results, current_word);
+            }
+        }
+
+        // Dimension: radius_b (arg1=arc, arg2=value/derived) -- ellipse minor axis
+        "radius_b" => {
             if token_index == 1 {
                 add_arcs(sketch, &mut results, current_word);
             } else if token_index == 2 {
@@ -9300,6 +9361,34 @@ mod tests {
         let out = run_ok(&mut ctx, "print A0.radius_b");
         let val: f64 = out.trim().parse().unwrap();
         assert!(near(val, 3.0));
+    }
+
+    #[test]
+    fn test_ellipse_radius_b_command() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_ellipse 0,0 5 3 0");
+        run_ok(&mut ctx, "radius_b A0 4");
+        assert_eq!(ctx.sketch.dimensions.len(), 1);
+        assert!(near(ctx.sketch.dimensions[0].value, 4.0));
+        assert!(near(ctx.sketch.arcs.refs().next().map(|r| ctx.sketch.arcs[r].radius_b.value).unwrap(), 4.0));
+    }
+
+    #[test]
+    fn test_radius_b_rejects_non_ellipse() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_circle 0,0 5");
+        let r = execute_one(&mut ctx, "radius_b A0 3");
+        assert!(r.is_error, "radius_b should reject non-ellipse: {}", r.output);
+    }
+
+    #[test]
+    fn test_ellipse_measure() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_ellipse 0,0 5 3 30");
+        let out = run_ok(&mut ctx, "measure A0");
+        assert!(out.contains("rx="), "should show rx: {}", out);
+        assert!(out.contains("ry="), "should show ry: {}", out);
+        assert!(out.contains("rotation="), "should show rotation: {}", out);
     }
 
     #[test]
