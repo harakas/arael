@@ -54,6 +54,23 @@ pub trait Float : num::Float + std::fmt::Debug + num::NumCast + std::ops::AddAss
         (self + other).rad2rad()
     }
 
+    /// Safe asin that does not diverge on numerical noise across applicable range
+    fn safe_asin(self) -> Self {
+        if self >= Self::one() {
+            if self > Self::from(1.01).unwrap() {
+                warn!("safe_asin: applied on divergent argument {:?}", self);
+            }
+            Self::half_pi()
+        } else if self <= -Self::one() {
+            if self < Self::from(-1.01).unwrap() {
+                warn!("safe_asin: applied on divergent argument {:?}", self)
+            }
+            -Self::half_pi()
+        } else {
+            self.asin()
+        }
+    }
+
     /// Safe acos that does not diverge on numerical noise across applicable range
     fn safe_acos(self) -> Self {
         if self >= Self::one() {
@@ -179,6 +196,11 @@ pub fn rad_diff<T: Float>(a: T, b: T) -> T { a.rad_diff(b) }
 /// Rollover-safe sum of two radian angles, result in [-pi, pi].
 pub fn rad_sum<T: Float>(a: T, b: T) -> T { a.rad_sum(b) }
 
+/// Safe asin that clamps input to [-1, 1].
+pub fn safe_asin<T: Float>(v: T) -> T { v.safe_asin() }
+/// Safe acos that clamps input to [-1, 1].
+pub fn safe_acos<T: Float>(v: T) -> T { v.safe_acos() }
+
 /// Standard atan2(y, x).
 pub fn atan2<T: Float>(y: T, x: T) -> T { y.atan2(x) }
 
@@ -260,6 +282,10 @@ mod tests {
         assert_eq!(1.1.safe_acos(), 0.0);
         assert_eq!(0.0.safe_acos(), f64::half_pi());
         assert_eq!((-1.1).safe_acos(), f64::pi());
+        // safe_asin
+        assert_eq!(1.1.safe_asin(), f64::half_pi());
+        assert!(equal(0.5.safe_asin(), 0.5_f64.asin()));
+        assert_eq!((-1.1).safe_asin(), -f64::half_pi());
     }
 
     #[test]
