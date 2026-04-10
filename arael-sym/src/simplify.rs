@@ -632,16 +632,18 @@ impl Expr {
                 }
                 E::new(Expr::Atan2(y, x))
             }
-            Expr::Func { name, params, body, args } => {
+            Expr::Func { name, params, kind, args } => {
                 let new_args: Vec<E> = args.iter().map(|a| a.simplify_once()).collect();
-                // If all args are constant, expand and evaluate
-                if new_args.iter().all(|a| matches!(a.as_ref(), Expr::Const(_))) {
-                    let expanded = crate::expand_func(params, body, &new_args);
-                    return expanded.simplify_once();
+                // Constant-fold functions with a symbolic body; Extern stays opaque
+                if let Some(body) = kind.body() {
+                    if new_args.iter().all(|a| matches!(a.as_ref(), Expr::Const(_))) {
+                        let expanded = crate::expand_func(params, body, &new_args);
+                        return expanded.simplify_once();
+                    }
                 }
                 E::new(Expr::Func {
                     name: name.clone(), params: params.clone(),
-                    body: body.clone(), args: new_args,
+                    kind: kind.clone(), args: new_args,
                 })
             }
         }
@@ -720,10 +722,16 @@ impl Expr {
             Expr::Abs(a) => E::new(Expr::Abs(a.expand_inner())),
             Expr::Heaviside(a) => E::new(Expr::Heaviside(a.expand_inner())),
             Expr::Clamp(val, lo, hi) => E::new(Expr::Clamp(val.expand_inner(), lo.expand_inner(), hi.expand_inner())),
-            Expr::Func { params, body, args, .. } => {
+            Expr::Func { name, params, kind, args } => {
                 let expanded_args: Vec<E> = args.iter().map(|a| a.expand_inner()).collect();
-                let expanded = crate::expand_func(params, body, &expanded_args);
-                expanded.expand_inner()
+                if let Some(body) = kind.body() {
+                    crate::expand_func(params, body, &expanded_args).expand_inner()
+                } else {
+                    E::new(Expr::Func {
+                        name: name.clone(), params: params.clone(),
+                        kind: kind.clone(), args: expanded_args,
+                    })
+                }
             }
         }
     }

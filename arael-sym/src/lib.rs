@@ -161,14 +161,48 @@
 //! use arael_sym::*;
 //! sym! {
 //!     let t = symbol("t");
-//!     let square = custom_func1("square", "t", t * t);
+//!     let square = simple_func1("square", |t| t * t);
 //!     let x = symbol("x");
 //!     let f = square(x + 1.0);
 //!     assert_eq!(format!("{}", f), "square(x + 1)");
-//!     // Differentiation expands the body and applies the chain rule:
 //!     assert_eq!(format!("{}", f.diff("x")), "2 * (x + 1)");
+//!     // Codegen inlines the expanded body:
+//!     assert_eq!(f.to_rust("f64"), "(x + 1.0_f64).powf(2.0_f64)");
 //! };
 //! ```
+//!
+//! ## Extern functions
+//!
+//! When a function's runtime behavior differs from its derivative (e.g.
+//! angle normalization), use extern functions. They generate a function
+//! call in codegen while differentiating through a separate symbolic body.
+//!
+//! ```
+//! use arael_sym::*;
+//! fn my_angle_diff(args: &[f64]) -> f64 {
+//!     let d = args[0] - args[1];
+//!     d - (2.0 * std::f64::consts::PI)
+//!       * (d / (2.0 * std::f64::consts::PI) + 0.5).floor()
+//! }
+//! sym! {
+//!     // codegen emits my_mod::angle_diff(a, b)
+//!     // differentiation uses gradient of (a - b)
+//!     // eval uses my_angle_diff
+//!     let angle_diff = extern_func2("angle_diff", "my_mod::angle_diff",
+//!         grad2(|a, b| a - b), my_angle_diff);
+//!     let x = symbol("x");
+//!     let y = symbol("y");
+//!     let f = angle_diff(x * x, y);
+//!     assert_eq!(format!("{}", f.diff("x")), "2 * x");
+//!     assert_eq!(f.to_rust("f64"), "my_mod::angle_diff(x.powf(2.0_f64), y)");
+//!     // eval uses the native eval_fn:
+//!     let vars = std::collections::HashMap::from([("x", 0.0), ("y", 6.283185307179586)]);
+//!     assert!(f.eval(&vars).unwrap().abs() < 1e-10); // 0 - 2pi wraps to 0
+//! };
+//! ```
+//!
+//! Built-in [`rad_diff`] and [`rad_sum`] are extern functions with
+//! rollover-safe angle normalization to \[-pi, pi\].
 //!
 //! ## Heaviside and clamp
 //!
@@ -181,8 +215,8 @@
 //! sym! {
 //!     let t = symbol("t");
 //!     // safe_asin: evaluates without NaN even outside [-1, 1]
-//!     let safe_asin = custom_func1("safe_asin", "t",
-//!         asin(clamp(t, c(-1.0), c(1.0))));
+//!     let safe_asin = simple_func1("safe_asin",
+//!         |t| asin(clamp(t, c(-1.0), c(1.0))));
 //!     let x = symbol("x");
 //!     let f = safe_asin(x);
 //!     let vars = std::collections::HashMap::from([("x", 1.5)]);
@@ -286,9 +320,9 @@ impl E {
             Expr::Abs(a) => abs(a.substitute(subs)),
             Expr::Heaviside(a) => heaviside(a.substitute(subs)),
             Expr::Clamp(a, lo, hi) => clamp(a.substitute(subs), lo.substitute(subs), hi.substitute(subs)),
-            Expr::Func { name, params, body, args } => {
+            Expr::Func { name, params, kind, args } => {
                 let new_args = args.iter().map(|a| a.substitute(subs)).collect();
-                E::new(Expr::Func { name: name.clone(), params: params.clone(), body: body.clone(), args: new_args })
+                E::new(Expr::Func { name: name.clone(), params: params.clone(), kind: kind.clone(), args: new_args })
             }
         }
     }
@@ -371,11 +405,77 @@ pub enum Expr {
         name: String,
         /// Formal parameter names.
         params: Vec<String>,
-        /// Body expression in terms of params.
-        body: E,
+        /// Function behavior (differentiation, codegen, eval).
+        kind: FuncKind,
         /// Actual argument expressions.
         args: Vec<E>,
     },
+}
+
+/// Describes what kind of function behavior to use for differentiation,
+/// evaluation, and code generation.
+#[derive(Debug, Clone, PartialEq)]
+#[allow(unpredictable_function_pointer_comparisons)]
+pub enum FuncKind {
+    /// Body auto-differentiated. Body used for eval and codegen (inlined).
+    Symbolic { body: E },
+    /// Explicit per-argument derivatives. Body used for eval and codegen (inlined).
+    SymbolicDerivs { body: E, derivs: Vec<E> },
+    /// Explicit per-argument derivatives. Codegen emits `call_path(args...)`.
+    /// `eval_fn` used for eval (required).
+    Extern { derivs: Vec<E>, eval_fn: fn(&[f64]) -> f64, call_path: String },
+}
+
+impl FuncKind {
+    /// Body for auto-differentiation (Symbolic only).
+    pub fn auto_diff_body(&self) -> Option<&E> {
+        match self {
+            FuncKind::Symbolic { body } => Some(body),
+            _ => None,
+        }
+    }
+
+    /// Explicit per-argument derivatives (SymbolicDerivs and Extern).
+    pub fn derivs(&self) -> Option<&[E]> {
+        match self {
+            FuncKind::SymbolicDerivs { derivs, .. } | FuncKind::Extern { derivs, .. } => Some(derivs),
+            FuncKind::Symbolic { .. } => None,
+        }
+    }
+
+    /// Body for symbolic eval and codegen inlining (Symbolic variants).
+    pub fn body(&self) -> Option<&E> {
+        match self {
+            FuncKind::Symbolic { body } | FuncKind::SymbolicDerivs { body, .. } => Some(body),
+            FuncKind::Extern { .. } => None,
+        }
+    }
+
+    /// Native eval function (Extern only).
+    pub fn eval_fn(&self) -> Option<fn(&[f64]) -> f64> {
+        match self {
+            FuncKind::Extern { eval_fn, .. } => Some(*eval_fn),
+            _ => None,
+        }
+    }
+}
+
+impl Hash for FuncKind {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        std::mem::discriminant(self).hash(state);
+        match self {
+            FuncKind::Symbolic { body } => body.hash(state),
+            FuncKind::SymbolicDerivs { body, derivs } => {
+                body.hash(state);
+                derivs.hash(state);
+            }
+            FuncKind::Extern { derivs, eval_fn, call_path } => {
+                derivs.hash(state);
+                (*eval_fn as usize).hash(state);
+                call_path.hash(state);
+            }
+        }
+    }
 }
 
 impl Eq for Expr {}
@@ -402,10 +502,10 @@ impl Hash for Expr {
                 b.hash(state);
                 c.hash(state);
             }
-            Expr::Func { name, params, body, args } => {
+            Expr::Func { name, params, kind, args } => {
                 name.hash(state);
                 params.hash(state);
-                body.hash(state);
+                kind.hash(state);
                 args.hash(state);
             }
         }
@@ -563,47 +663,277 @@ pub(crate) fn expand_func(params: &[String], body: &E, args: &[E]) -> E {
 }
 
 /// Create a unary custom function. Returns a closure usable as `f(expr)`.
-pub fn custom_func1(name: &str, param: &str, body: E) -> impl Fn(E) -> E + Clone {
+/// Codegen inlines the expanded body.
+///
+/// # Example
+/// ```
+/// use arael_sym::*;
+/// sym! {
+///     let square = simple_func1("square", |t| t * t);
+///     let x = symbol("x");
+///     assert_eq!(format!("{}", square(x + 1.0)), "square(x + 1)");
+///     assert_eq!(format!("{}", square(x).diff("x")), "2 * x");
+/// };
+/// ```
+pub fn simple_func1(name: &str, body: impl Fn(E) -> E) -> impl Fn(E) -> E + Clone {
     let name = name.to_string();
-    let param = param.to_string();
+    let body = body(symbol("__p0"));
     move |arg: E| {
         E::new(Expr::Func {
             name: name.clone(),
-            params: vec![param.clone()],
-            body: body.clone(),
+            params: vec!["__p0".to_string()],
+            kind: FuncKind::Symbolic { body: body.clone() },
             args: vec![arg],
         })
     }
 }
 
 /// Create a binary custom function. Returns a closure usable as `f(a, b)`.
-pub fn custom_func2(name: &str, params: [&str; 2], body: E) -> impl Fn(E, E) -> E + Clone {
+/// Codegen inlines the expanded body.
+pub fn simple_func2(name: &str, body: impl Fn(E, E) -> E) -> impl Fn(E, E) -> E + Clone {
     let name = name.to_string();
-    let params = [params[0].to_string(), params[1].to_string()];
+    let body = body(symbol("__p0"), symbol("__p1"));
     move |a: E, b: E| {
         E::new(Expr::Func {
             name: name.clone(),
-            params: vec![params[0].clone(), params[1].clone()],
-            body: body.clone(),
+            params: vec!["__p0".to_string(), "__p1".to_string()],
+            kind: FuncKind::Symbolic { body: body.clone() },
             args: vec![a, b],
         })
     }
 }
 
 /// Create an n-ary custom function. Returns a closure usable as `f(vec![...])`.
-pub fn custom_func(name: &str, params: &[&str], body: E) -> impl Fn(Vec<E>) -> E + Clone {
+/// Codegen inlines the expanded body.
+pub fn simple_func(name: &str, arity: usize, body: impl Fn(Vec<E>) -> E) -> impl Fn(Vec<E>) -> E + Clone {
     let name = name.to_string();
-    let params: Vec<String> = params.iter().map(|s| s.to_string()).collect();
+    let params: Vec<String> = (0..arity).map(|i| format!("__p{}", i)).collect();
+    let syms: Vec<E> = params.iter().map(|p| symbol(p)).collect();
+    let body = body(syms);
     move |args: Vec<E>| {
-        assert_eq!(args.len(), params.len(),
-            "custom function '{}' expects {} args, got {}", name, params.len(), args.len());
+        assert_eq!(args.len(), arity,
+            "custom function '{}' expects {} args, got {}", name, arity, args.len());
         E::new(Expr::Func {
             name: name.clone(),
             params: params.clone(),
-            body: body.clone(),
+            kind: FuncKind::Symbolic { body: body.clone() },
             args,
         })
     }
+}
+
+/// Create a unary function with explicit derivatives. Body used for eval
+/// and codegen (inlined).
+pub fn simple_func1_derivs(
+    name: &str, body: impl Fn(E) -> E, derivs: impl Fn(E) -> [E; 1],
+) -> impl Fn(E) -> E + Clone {
+    let name = name.to_string();
+    let p0 = symbol("__p0");
+    let body = body(p0.clone());
+    let d = derivs(p0);
+    move |a: E| {
+        E::new(Expr::Func {
+            name: name.clone(),
+            params: vec!["__p0".to_string()],
+            kind: FuncKind::SymbolicDerivs { body: body.clone(), derivs: vec![d[0].clone()] },
+            args: vec![a],
+        })
+    }
+}
+
+/// Create a binary function with explicit derivatives. Body used for eval
+/// and codegen (inlined).
+///
+/// # Example
+/// ```
+/// use arael_sym::*;
+/// sym! {
+///     let safe_atan2 = simple_func2_derivs("safe_atan2",
+///         |y, x| atan2(y, x),
+///         |y, x| [x / (x*x + y*y + 1e-10), -y / (x*x + y*y + 1e-10)]);
+///     let a = symbol("a");
+///     let f = safe_atan2(sin(a), cos(a));
+///     assert_eq!(format!("{}", f), "safe_atan2(sin(a), cos(a))");
+/// };
+/// ```
+pub fn simple_func2_derivs(
+    name: &str, body: impl Fn(E, E) -> E, derivs: impl Fn(E, E) -> [E; 2],
+) -> impl Fn(E, E) -> E + Clone {
+    let name = name.to_string();
+    let p0 = symbol("__p0");
+    let p1 = symbol("__p1");
+    let body = body(p0.clone(), p1.clone());
+    let d = derivs(p0, p1);
+    move |a: E, b: E| {
+        E::new(Expr::Func {
+            name: name.clone(),
+            params: vec!["__p0".to_string(), "__p1".to_string()],
+            kind: FuncKind::SymbolicDerivs { body: body.clone(), derivs: vec![d[0].clone(), d[1].clone()] },
+            args: vec![a, b],
+        })
+    }
+}
+
+/// Create an n-ary function with explicit derivatives. Body used for eval
+/// and codegen (inlined).
+pub fn simple_func_derivs(
+    name: &str, arity: usize, body: impl Fn(Vec<E>) -> E, derivs: impl Fn(Vec<E>) -> Vec<E>,
+) -> impl Fn(Vec<E>) -> E + Clone {
+    let name = name.to_string();
+    let params: Vec<String> = (0..arity).map(|i| format!("__p{}", i)).collect();
+    let syms: Vec<E> = params.iter().map(|p| symbol(p)).collect();
+    let body = body(syms.clone());
+    let d = derivs(syms);
+    assert_eq!(d.len(), arity, "derivs must return {} elements", arity);
+    move |args: Vec<E>| {
+        assert_eq!(args.len(), arity,
+            "function '{}' expects {} args, got {}", name, arity, args.len());
+        E::new(Expr::Func {
+            name: name.clone(),
+            params: params.clone(),
+            kind: FuncKind::SymbolicDerivs { body: body.clone(), derivs: d.clone() },
+            args,
+        })
+    }
+}
+
+/// Create a unary extern function: codegen emits `call_path(arg)`,
+/// explicit derivatives for differentiation, `eval_fn` for eval.
+pub fn extern_func1(
+    name: &str, call_path: &str,
+    derivs: impl Fn(E) -> [E; 1],
+    eval_fn: fn(&[f64]) -> f64,
+) -> impl Fn(E) -> E + Clone {
+    let name = name.to_string();
+    let call_path = call_path.to_string();
+    let d = derivs(symbol("__p0"));
+    move |a: E| {
+        E::new(Expr::Func {
+            name: name.clone(),
+            params: vec!["__p0".to_string()],
+            kind: FuncKind::Extern {
+                derivs: vec![d[0].clone()],
+                eval_fn,
+                call_path: call_path.clone(),
+            },
+            args: vec![a],
+        })
+    }
+}
+
+/// Create a binary extern function: codegen emits `call_path(a, b)`,
+/// explicit derivatives for differentiation, `eval_fn` for eval.
+///
+/// Use [`grad2`] to auto-compute derivatives from a body expression.
+///
+/// # Example
+/// ```
+/// use arael_sym::*;
+/// sym! {
+///     let f = extern_func2("rad_diff", "arael::utils::rad_diff",
+///         grad2(|a, b| a - b),
+///         |args: &[f64]| args[0] - args[1]);
+///     let x = symbol("x");
+///     let y = symbol("y");
+///     assert_eq!(format!("{}", f(x, y).diff("x")), "1");
+///     assert_eq!(f(x, y).to_rust("f64"), "arael::utils::rad_diff(x, y)");
+/// };
+/// ```
+pub fn extern_func2(
+    name: &str, call_path: &str,
+    derivs: impl Fn(E, E) -> [E; 2],
+    eval_fn: fn(&[f64]) -> f64,
+) -> impl Fn(E, E) -> E + Clone {
+    let name = name.to_string();
+    let call_path = call_path.to_string();
+    let d = derivs(symbol("__p0"), symbol("__p1"));
+    move |a: E, b: E| {
+        E::new(Expr::Func {
+            name: name.clone(),
+            params: vec!["__p0".to_string(), "__p1".to_string()],
+            kind: FuncKind::Extern {
+                derivs: vec![d[0].clone(), d[1].clone()],
+                eval_fn,
+                call_path: call_path.clone(),
+            },
+            args: vec![a, b],
+        })
+    }
+}
+
+/// Create an n-ary extern function: codegen emits `call_path(args...)`,
+/// explicit derivatives for differentiation, `eval_fn` for eval.
+pub fn extern_func(
+    name: &str, arity: usize, call_path: &str,
+    derivs: impl Fn(Vec<E>) -> Vec<E>,
+    eval_fn: fn(&[f64]) -> f64,
+) -> impl Fn(Vec<E>) -> E + Clone {
+    let name = name.to_string();
+    let call_path = call_path.to_string();
+    let params: Vec<String> = (0..arity).map(|i| format!("__p{}", i)).collect();
+    let syms: Vec<E> = params.iter().map(|p| symbol(p)).collect();
+    let d = derivs(syms);
+    assert_eq!(d.len(), arity, "derivs must return {} elements", arity);
+    move |args: Vec<E>| {
+        assert_eq!(args.len(), arity,
+            "extern function '{}' expects {} args, got {}", name, arity, args.len());
+        E::new(Expr::Func {
+            name: name.clone(),
+            params: params.clone(),
+            kind: FuncKind::Extern {
+                derivs: d.clone(),
+                eval_fn,
+                call_path: call_path.clone(),
+            },
+            args,
+        })
+    }
+}
+
+/// Compute the gradient of a unary function symbolically.
+/// Returns a closure suitable for `simple_func1_derivs` or `extern_func1`.
+pub fn grad1(body: impl Fn(E) -> E) -> impl Fn(E) -> [E; 1] + Clone {
+    let p = symbol("__g0");
+    let d = body(p).diff("__g0");
+    move |a: E| { [d.subs("__g0", &a)] }
+}
+
+/// Compute the gradient of a binary function symbolically.
+/// Returns a closure suitable for `simple_func2_derivs` or `extern_func2`.
+pub fn grad2(body: impl Fn(E, E) -> E) -> impl Fn(E, E) -> [E; 2] + Clone {
+    let p0 = symbol("__g0");
+    let p1 = symbol("__g1");
+    let expr = body(p0, p1);
+    let d0 = expr.diff("__g0");
+    let d1 = expr.diff("__g1");
+    move |a: E, b: E| {
+        [d0.subs("__g0", &a).subs("__g1", &b),
+         d1.subs("__g0", &a).subs("__g1", &b)]
+    }
+}
+
+/// Normalize radians to [-pi, pi].
+fn rad2rad(v: f64) -> f64 {
+    use std::f64::consts::PI;
+    if v < -PI || v > PI {
+        v - (2.0 * PI) * (v / (2.0 * PI) + 0.5).floor()
+    } else {
+        v
+    }
+}
+
+/// Rollover-safe radian difference: `(a - b)` normalized to [-pi, pi].
+pub fn rad_diff(a: E, b: E) -> E {
+    extern_func2("rad_diff", "arael::utils::rad_diff",
+        grad2(|a, b| a - b),
+        |args: &[f64]| rad2rad(args[0] - args[1]))(a, b)
+}
+
+/// Rollover-safe radian sum: `(a + b)` normalized to [-pi, pi].
+pub fn rad_sum(a: E, b: E) -> E {
+    extern_func2("rad_sum", "arael::utils::rad_sum",
+        grad2(|a, b| a + b),
+        |args: &[f64]| rad2rad(args[0] + args[1]))(a, b)
 }
 
 // Re-export linalg types
@@ -620,20 +950,18 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
-    fn custom_func_identity_display() {
+    fn simple_func_identity_display() {
         sym! {
-            let t = symbol("t");
-            let identity = custom_func1("identity", "t", t);
+            let identity = simple_func1("identity", |t| t);
             let x = symbol("x");
             assert_eq!(format!("{}", identity(x)), "identity(x)");
         }
     }
 
     #[test]
-    fn custom_func_identity_diff() {
+    fn simple_func_identity_diff() {
         sym! {
-            let t = symbol("t");
-            let identity = custom_func1("identity", "t", t);
+            let identity = simple_func1("identity", |t| t);
             let x = symbol("x");
             let f = identity(x);
             assert_eq!(format!("{}", f.diff("x")), "1");
@@ -641,10 +969,9 @@ mod tests {
     }
 
     #[test]
-    fn custom_func_identity_chain_rule() {
+    fn simple_func_identity_chain_rule() {
         sym! {
-            let t = symbol("t");
-            let identity = custom_func1("identity", "t", t);
+            let identity = simple_func1("identity", |t| t);
             let x = symbol("x");
             let f = identity(x * x);
             assert_eq!(format!("{}", f.diff("x")), "2 * x");
@@ -652,10 +979,9 @@ mod tests {
     }
 
     #[test]
-    fn custom_func_identity_eval() {
+    fn simple_func_identity_eval() {
         sym! {
-            let t = symbol("t");
-            let identity = custom_func1("identity", "t", t);
+            let identity = simple_func1("identity", |t| t);
             let x = symbol("x");
             let f = identity(x);
             let vars = HashMap::from([("x", 5.0)]);
@@ -664,10 +990,9 @@ mod tests {
     }
 
     #[test]
-    fn custom_func_square() {
+    fn simple_func_square() {
         sym! {
-            let t = symbol("t");
-            let square = custom_func1("square", "t", t * t);
+            let square = simple_func1("square", |t| t * t);
             let x = symbol("x");
             let f = square(x + 1.0);
             assert_eq!(format!("{}", f), "square(x + 1)");
@@ -676,10 +1001,9 @@ mod tests {
     }
 
     #[test]
-    fn custom_func_square_eval() {
+    fn simple_func_square_eval() {
         sym! {
-            let t = symbol("t");
-            let square = custom_func1("square", "t", t * t);
+            let square = simple_func1("square", |t| t * t);
             let x = symbol("x");
             let f = square(x);
             let vars = HashMap::from([("x", 4.0)]);
@@ -688,11 +1012,9 @@ mod tests {
     }
 
     #[test]
-    fn custom_func_binary() {
+    fn simple_func_binary() {
         sym! {
-            let a = symbol("a");
-            let b = symbol("b");
-            let f = custom_func2("prod", ["a", "b"], a * b);
+            let f = simple_func2("prod", |a, b| a * b);
             let x = symbol("x");
             let y = symbol("y");
             let result = f(x, y);
@@ -703,11 +1025,10 @@ mod tests {
     }
 
     #[test]
-    fn custom_func_nested() {
+    fn simple_func_nested() {
         sym! {
-            let t = symbol("t");
-            let identity = custom_func1("identity", "t", t);
-            let square = custom_func1("square", "t", t * t);
+            let identity = simple_func1("identity", |t| t);
+            let square = simple_func1("square", |t| t * t);
             let x = symbol("x");
             let f = identity(square(x));
             assert_eq!(format!("{}", f), "identity(square(x))");
@@ -716,10 +1037,9 @@ mod tests {
     }
 
     #[test]
-    fn custom_func_my_sin() {
+    fn simple_func_my_sin() {
         sym! {
-            let t = symbol("t");
-            let my_sin = custom_func1("my_sin", "t", sin(t));
+            let my_sin = simple_func1("my_sin", |t| sin(t));
             let x = symbol("x");
             let f = my_sin(x);
             assert_eq!(format!("{}", f), "my_sin(x)");
@@ -728,10 +1048,9 @@ mod tests {
     }
 
     #[test]
-    fn custom_func_my_sin_chain_rule() {
+    fn simple_func_my_sin_chain_rule() {
         sym! {
-            let t = symbol("t");
-            let my_sin = custom_func1("my_sin", "t", sin(t));
+            let my_sin = simple_func1("my_sin", |t| sin(t));
             let x = symbol("x");
             let f = my_sin(x * x);
             assert_eq!(format!("{}", f.diff("x")), "2 * x * cos(x^2)");
@@ -739,10 +1058,9 @@ mod tests {
     }
 
     #[test]
-    fn custom_func_to_rust() {
+    fn simple_func_to_rust() {
         sym! {
-            let t = symbol("t");
-            let identity = custom_func1("identity", "t", t);
+            let identity = simple_func1("identity", |t| t);
             let x = symbol("x");
             let f = identity(x);
             assert_eq!(f.to_rust("f64"), "x");
@@ -750,10 +1068,9 @@ mod tests {
     }
 
     #[test]
-    fn custom_func_latex() {
+    fn simple_func_latex() {
         sym! {
-            let t = symbol("t");
-            let identity = custom_func1("identity", "t", t);
+            let identity = simple_func1("identity", |t| t);
             let x = symbol("x");
             let f = identity(x);
             assert_eq!(f.to_latex(), "\\operatorname{identity}\\left(x\\right)");
@@ -761,10 +1078,9 @@ mod tests {
     }
 
     #[test]
-    fn custom_func_free_vars() {
+    fn simple_func_free_vars() {
         sym! {
-            let t = symbol("t");
-            let identity = custom_func1("identity", "t", t);
+            let identity = simple_func1("identity", |t| t);
             let x = symbol("x");
             let f = identity(x + symbol("y"));
             let vars = f.free_vars();
@@ -775,10 +1091,9 @@ mod tests {
     }
 
     #[test]
-    fn custom_func_subs() {
+    fn simple_func_subs() {
         sym! {
-            let t = symbol("t");
-            let identity = custom_func1("identity", "t", t);
+            let identity = simple_func1("identity", |t| t);
             let x = symbol("x");
             let f = identity(x);
             let g = f.subs("x", &constant(3.0));
@@ -787,10 +1102,9 @@ mod tests {
     }
 
     #[test]
-    fn custom_func_simplify_constants() {
+    fn simple_func_simplify_constants() {
         sym! {
-            let t = symbol("t");
-            let square = custom_func1("square", "t", t * t);
+            let square = simple_func1("square", |t| t * t);
             let f = square(constant(3.0));
             let s = f.simplify();
             assert_eq!(format!("{}", s), "9");
@@ -798,12 +1112,9 @@ mod tests {
     }
 
     #[test]
-    fn custom_func_nary() {
+    fn simple_func_nary() {
         sym! {
-            let a = symbol("a");
-            let b = symbol("b");
-            let c_sym = symbol("c");
-            let f = custom_func("triple_sum", &["a", "b", "c"], a + b + c_sym);
+            let f = simple_func("triple_sum", 3, |v| v[0].clone() + v[1].clone() + v[2].clone());
             let x = symbol("x");
             let y = symbol("y");
             let z = symbol("z");
@@ -814,14 +1125,280 @@ mod tests {
     }
 
     #[test]
-    fn custom_func_expand() {
+    fn simple_func_expand() {
         sym! {
-            let t = symbol("t");
-            let square = custom_func1("square", "t", t * t);
+            let square = simple_func1("square", |t| t * t);
             let x = symbol("x");
             let f = square(x + 1.0);
             let expanded = f.expand();
             assert_eq!(format!("{}", expanded), "x^2 + 2 * x + 1");
+        }
+    }
+
+    // --- Simple func derivs tests ---
+
+    #[test]
+    fn simple_func_derivs_diff() {
+        // safe_atan2 with epsilon in denominator
+        sym! {
+            let safe_atan2 = simple_func2_derivs("safe_atan2",
+                |y, x| atan2(y, x),
+                |y, x| [x / (x*x + y*y + 1e-10), -y / (x*x + y*y + 1e-10)]);
+            let a = symbol("a");
+            let b = symbol("b");
+            let f = safe_atan2(a, b);
+            // d/da: uses explicit deriv, not auto-diff of atan2
+            let da = f.diff("a");
+            let vars = std::collections::HashMap::from([("a", 1.0), ("b", 1.0)]);
+            let v = da.eval(&vars).unwrap();
+            assert!((v - 0.5).abs() < 1e-10, "d/da at (1,1) = {}, expected 0.5", v);
+        }
+    }
+
+    #[test]
+    fn simple_func_derivs_eval() {
+        // eval uses the body, not the derivs
+        sym! {
+            let safe_atan2 = simple_func2_derivs("safe_atan2",
+                |y, x| atan2(y, x),
+                |y, x| [x / (x*x + y*y + 1e-10), -y / (x*x + y*y + 1e-10)]);
+            let a = symbol("a");
+            let b = symbol("b");
+            let f = safe_atan2(a, b);
+            let vars = std::collections::HashMap::from([("a", 1.0), ("b", 1.0)]);
+            let v = f.eval(&vars).unwrap();
+            assert!((v - std::f64::consts::FRAC_PI_4).abs() < 1e-10);
+        }
+    }
+
+    #[test]
+    fn simple_func_derivs_chain_rule() {
+        sym! {
+            let safe_atan2 = simple_func2_derivs("safe_atan2",
+                |y, x| atan2(y, x),
+                |y, x| [x / (x*x + y*y + 1e-10), -y / (x*x + y*y + 1e-10)]);
+            let t = symbol("t");
+            // f = safe_atan2(sin(t), cos(t)) = t (near 0)
+            let f = safe_atan2(sin(t), cos(t));
+            // df/dt = cos(t)*cos(t)/(1+eps) + sin(t)*sin(t)/(1+eps) ~ 1
+            let df = f.diff("t");
+            let vars = std::collections::HashMap::from([("t", 0.5)]);
+            let v = df.eval(&vars).unwrap();
+            assert!((v - 1.0).abs() < 1e-8, "df/dt at t=0.5 = {}, expected 1", v);
+        }
+    }
+
+    #[test]
+    fn simple_func_derivs_codegen() {
+        // codegen should inline the body, not the derivs
+        sym! {
+            let f = simple_func1_derivs("inv", |t| 1.0 / t, |t| [-1.0 / (t * t)]);
+            let x = symbol("x");
+            assert_eq!(f(x).to_rust("f64"), "1.0_f64 / x");
+        }
+    }
+
+    #[test]
+    fn simple_func_derivs_at_zero() {
+        // safe_atan2(0, 0) should not produce NaN in derivative
+        sym! {
+            let safe_atan2 = simple_func2_derivs("safe_atan2",
+                |y, x| atan2(y, x),
+                |y, x| [x / (x*x + y*y + 1e-10), -y / (x*x + y*y + 1e-10)]);
+            let a = symbol("a");
+            let b = symbol("b");
+            let f = safe_atan2(a, b);
+            let da = f.diff("a");
+            let vars = std::collections::HashMap::from([("a", 0.0), ("b", 0.0)]);
+            let v = da.eval(&vars).unwrap();
+            assert!(v.is_finite(), "derivative at (0,0) should be finite, got {}", v);
+        }
+    }
+
+    // --- Grad helper tests ---
+
+    #[test]
+    fn grad2_basic() {
+        sym! {
+            let g = grad2(|a, b| a * b);
+            let x = symbol("x");
+            let y = symbol("y");
+            let [da, db] = g(x, y);
+            assert_eq!(format!("{}", da), "y");
+            assert_eq!(format!("{}", db), "x");
+        }
+    }
+
+    #[test]
+    fn grad1_basic() {
+        sym! {
+            let g = grad1(|t| t * t);
+            let x = symbol("x");
+            let [dt] = g(x);
+            assert_eq!(format!("{}", dt), "2 * x");
+        }
+    }
+
+    // --- Extern function tests ---
+
+    #[test]
+    fn extern_func_display() {
+        sym! {
+            let x = symbol("x");
+            let y = symbol("y");
+            let f = rad_diff(x, y);
+            assert_eq!(format!("{}", f), "rad_diff(x, y)");
+        }
+    }
+
+    #[test]
+    fn extern_func_diff() {
+        sym! {
+            let x = symbol("x");
+            let y = symbol("y");
+            let f = rad_diff(x, y);
+            assert_eq!(format!("{}", f.diff("x")), "1");
+            assert_eq!(format!("{}", f.diff("y")), "-1");
+        }
+    }
+
+    #[test]
+    fn extern_func_chain_rule() {
+        sym! {
+            let x = symbol("x");
+            let y = symbol("y");
+            let f = rad_diff(x * x, y);
+            assert_eq!(format!("{}", f.diff("x")), "2 * x");
+        }
+    }
+
+    #[test]
+    fn extern_func_eval() {
+        // For small angles, rad_diff(a,b) = a - b (no wrapping needed)
+        sym! {
+            let x = symbol("x");
+            let y = symbol("y");
+            let f = rad_diff(x, y);
+            let vars = HashMap::from([("x", 0.3), ("y", 0.1)]);
+            let v = f.eval(&vars).unwrap();
+            assert!((v - 0.2).abs() < 1e-10);
+        }
+    }
+
+    #[test]
+    fn extern_func_eval_wrapping() {
+        // rad_diff(0, 2*pi) should be 0 (wrapping)
+        sym! {
+            let x = symbol("x");
+            let f = rad_diff(constant(0.0), x);
+            let vars = HashMap::from([("x", 2.0 * std::f64::consts::PI)]);
+            let v = f.eval(&vars).unwrap();
+            assert!(v.abs() < 1e-10, "rad_diff(0, 2*pi) = {}, expected 0", v);
+        }
+    }
+
+    #[test]
+    fn extern_func_to_rust() {
+        sym! {
+            let x = symbol("x");
+            let y = symbol("y");
+            let f = rad_diff(x, y);
+            let code = f.to_rust("f64");
+            assert_eq!(code, "arael::utils::rad_diff(x, y)");
+        }
+    }
+
+    #[test]
+    fn extern_func_latex() {
+        sym! {
+            let x = symbol("x");
+            let y = symbol("y");
+            let f = rad_diff(x, y);
+            assert_eq!(f.to_latex(), "\\operatorname{rad_diff}\\left(x, y\\right)");
+        }
+    }
+
+    #[test]
+    fn extern_func_subs() {
+        sym! {
+            let x = symbol("x");
+            let y = symbol("y");
+            let f = rad_diff(x, y);
+            let g = f.subs("x", &constant(1.0));
+            assert_eq!(format!("{}", g), "rad_diff(1, y)");
+        }
+    }
+
+    #[test]
+    fn extern_func_no_const_fold() {
+        // Extern functions should not be constant-folded in simplify
+        sym! {
+            let f = rad_diff(constant(1.0), constant(2.0));
+            let s = f.simplify();
+            assert_eq!(format!("{}", s), "rad_diff(1, 2)");
+        }
+    }
+
+    #[test]
+    fn extern_func_no_expand() {
+        // Extern functions should stay opaque on expand
+        sym! {
+            let x = symbol("x");
+            let y = symbol("y");
+            let f = rad_diff(x + 1.0, y);
+            let expanded = f.expand();
+            assert_eq!(format!("{}", expanded), "rad_diff(x + 1, y)");
+        }
+    }
+
+    #[test]
+    fn extern_func_free_vars() {
+        sym! {
+            let x = symbol("x");
+            let y = symbol("y");
+            let f = rad_diff(x, y);
+            let vars = f.free_vars();
+            assert!(vars.contains("x"));
+            assert!(vars.contains("y"));
+            assert!(!vars.contains("__a"));
+            assert!(!vars.contains("__b"));
+        }
+    }
+
+    #[test]
+    fn rad_sum_diff() {
+        sym! {
+            let x = symbol("x");
+            let y = symbol("y");
+            let f = rad_sum(x, y);
+            assert_eq!(format!("{}", f.diff("x")), "1");
+            assert_eq!(format!("{}", f.diff("y")), "1");
+        }
+    }
+
+    #[test]
+    fn rad_sum_to_rust() {
+        sym! {
+            let x = symbol("x");
+            let y = symbol("y");
+            let f = rad_sum(x, y);
+            assert_eq!(f.to_rust("f64"), "arael::utils::rad_sum(x, y)");
+        }
+    }
+
+    #[test]
+    fn extern_func_def() {
+        sym! {
+            fn my_eval(args: &[f64]) -> f64 { args[0] - args[1] }
+            let my_diff = extern_func2("my_diff", "my_mod::diff",
+                grad2(|a, b| a - b), my_eval);
+            let x = symbol("x");
+            let y = symbol("y");
+            let f = my_diff(x, y);
+            assert_eq!(format!("{}", f), "my_diff(x, y)");
+            assert_eq!(format!("{}", f.diff("x")), "1");
+            assert_eq!(format!("{}", f.diff("y")), "-1");
+            assert_eq!(f.to_rust("f64"), "my_mod::diff(x, y)");
         }
     }
 
@@ -915,8 +1492,7 @@ mod tests {
     #[test]
     fn safe_asin_eval() {
         sym! {
-            let t = symbol("t");
-            let safe_asin = custom_func1("safe_asin", "t", asin(clamp(t, c(-1.0), c(1.0))));
+            let safe_asin = simple_func1("safe_asin", |t| asin(clamp(t, c(-1.0), c(1.0))));
             let x = symbol("x");
 
             // Normal value
@@ -936,8 +1512,7 @@ mod tests {
     #[test]
     fn safe_asin_diff() {
         sym! {
-            let t = symbol("t");
-            let safe_asin = custom_func1("safe_asin", "t", asin(clamp(t, c(-1.0), c(1.0))));
+            let safe_asin = simple_func1("safe_asin", |t| asin(clamp(t, c(-1.0), c(1.0))));
             let x = symbol("x");
             let f = safe_asin(x);
             // Derivative: 1/sqrt(1 - clamp(x,-1,1)^2) * 1 (clamp pass-through)

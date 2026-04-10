@@ -149,9 +149,9 @@ fn replace(e: &E, target: &E, replacement: &E) -> E {
         Expr::Abs(a) => E::new(Expr::Abs(replace(a, target, replacement))),
         Expr::Heaviside(a) => E::new(Expr::Heaviside(replace(a, target, replacement))),
         Expr::Clamp(a, b, c) => E::new(Expr::Clamp(replace(a, target, replacement), replace(b, target, replacement), replace(c, target, replacement))),
-        Expr::Func { name, params, body, args } => {
+        Expr::Func { name, params, kind, args } => {
             let new_args = args.iter().map(|a| replace(a, target, replacement)).collect();
-            E::new(Expr::Func { name: name.clone(), params: params.clone(), body: body.clone(), args: new_args })
+            E::new(Expr::Func { name: name.clone(), params: params.clone(), kind: kind.clone(), args: new_args })
         }
     }
 }
@@ -345,9 +345,9 @@ fn replace_divisor(e: &E, divisor: &E, replacement: &E) -> E {
         Expr::Abs(a) => E::new(Expr::Abs(replace_divisor(a, divisor, replacement))),
         Expr::Heaviside(a) => E::new(Expr::Heaviside(replace_divisor(a, divisor, replacement))),
         Expr::Clamp(a, b, c) => E::new(Expr::Clamp(replace_divisor(a, divisor, replacement), replace_divisor(b, divisor, replacement), replace_divisor(c, divisor, replacement))),
-        Expr::Func { name, params, body, args } => {
+        Expr::Func { name, params, kind, args } => {
             let new_args = args.iter().map(|a| replace_divisor(a, divisor, replacement)).collect();
-            E::new(Expr::Func { name: name.clone(), params: params.clone(), body: body.clone(), args: new_args })
+            E::new(Expr::Func { name: name.clone(), params: params.clone(), kind: kind.clone(), args: new_args })
         }
     }
 }

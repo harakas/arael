@@ -161,9 +161,22 @@ impl Expr {
                 // Pass-through: derivative ignores the clamping
                 val.diff(var)
             }
-            Expr::Func { params, body, args, .. } => {
-                // Expand body by substituting params -> args, then differentiate
-                super::expand_func(params, body, args).diff(var)
+            Expr::Func { params, kind, args, .. } => {
+                if let Some(body) = kind.auto_diff_body() {
+                    // Auto-diff: expand body, differentiate
+                    super::expand_func(params, body, args).diff(var)
+                } else {
+                    // Explicit derivs: chain rule df/dvar = sum_i(df/dp_i * dp_i/dvar)
+                    let derivs = kind.derivs().unwrap();
+                    let mut result = zero();
+                    for (d, a) in derivs.iter().zip(args.iter()) {
+                        let da = a.diff(var);
+                        if !matches!(da.as_ref(), Expr::Const(v) if *v == 0.0) {
+                            result = result + super::expand_func(params, d, args) * da;
+                        }
+                    }
+                    result
+                }
             }
         }
     }

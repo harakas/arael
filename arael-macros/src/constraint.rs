@@ -317,6 +317,16 @@ fn eval_function(name: &str, args: Vec<SymVal>, span: &Expr) -> Result<SymVal, s
                 }
             }
         }
+        "rad_diff" | "rad_sum" => {
+            if args.len() != 2 { return Err(syn::Error::new_spanned(span, format!("{} expects 2 args", name))); }
+            match (&args[0], &args[1]) {
+                (SymVal::Scalar(a), SymVal::Scalar(b)) => {
+                    let f = if name == "rad_diff" { arael_sym::rad_diff } else { arael_sym::rad_sum };
+                    Ok(SymVal::Scalar(f(a.clone(), b.clone())))
+                }
+                _ => Err(syn::Error::new_spanned(span, format!("{} expects scalar arguments", name))),
+            }
+        }
         _ => Err(syn::Error::new_spanned(span, format!("unknown function '{}' in constraint", name))),
     }
 }

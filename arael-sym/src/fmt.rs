@@ -424,9 +424,20 @@ impl Expr {
                 hi.write_rust(buf, ft, 0);
                 buf.push(')');
             }
-            Expr::Func { params, body, args, .. } => {
-                // Expand body and generate code for the expanded form
-                crate::expand_func(params, body, args).write_rust(buf, ft, parent_prec);
+            Expr::Func { params, kind, args, .. } => {
+                if let Some(body) = kind.body() {
+                    // Symbolic: inline the expanded body
+                    crate::expand_func(params, body, args).write_rust(buf, ft, parent_prec);
+                } else if let crate::FuncKind::Extern { call_path, .. } = kind {
+                    // Extern: emit function call
+                    buf.push_str(call_path);
+                    buf.push('(');
+                    for (i, arg) in args.iter().enumerate() {
+                        if i > 0 { buf.push_str(", "); }
+                        arg.write_rust(buf, ft, 0);
+                    }
+                    buf.push(')');
+                }
                 return; // already wrote, skip trailing paren logic
             }
         }

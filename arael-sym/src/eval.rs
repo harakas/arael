@@ -44,8 +44,14 @@ impl Expr {
                 let h = hi.eval(vars)?;
                 Ok(v.clamp(l, h))
             }
-            Expr::Func { params, body, args, .. } => {
-                super::expand_func(params, body, args).eval(vars)
+            Expr::Func { params, kind, args, .. } => {
+                if let Some(f) = kind.eval_fn() {
+                    let vals: Result<Vec<f64>, _> = args.iter().map(|a| a.eval(vars)).collect();
+                    Ok(f(&vals?))
+                } else {
+                    let body = kind.body().expect("FuncKind must have body or eval_fn");
+                    super::expand_func(params, body, args).eval(vars)
+                }
             }
         }
     }
@@ -81,9 +87,9 @@ impl Expr {
             Expr::Abs(a) => E::new(Expr::Abs(a.subs(var, replacement))),
             Expr::Heaviside(a) => E::new(Expr::Heaviside(a.subs(var, replacement))),
             Expr::Clamp(a, lo, hi) => E::new(Expr::Clamp(a.subs(var, replacement), lo.subs(var, replacement), hi.subs(var, replacement))),
-            Expr::Func { name, params, body, args } => {
+            Expr::Func { name, params, kind, args } => {
                 let new_args = args.iter().map(|a| a.subs(var, replacement)).collect();
-                E::new(Expr::Func { name: name.clone(), params: params.clone(), body: body.clone(), args: new_args })
+                E::new(Expr::Func { name: name.clone(), params: params.clone(), kind: kind.clone(), args: new_args })
             }
         }
     }
