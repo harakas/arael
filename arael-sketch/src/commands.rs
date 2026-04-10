@@ -261,15 +261,22 @@ pub fn validate_and_apply_constraint(
 
     // Negative radius rejection
     for r in sketch.arcs.refs() {
-        if sketch.arcs[r].radius.value < 0.0 {
-            let name = sketch.arcs[r].name.clone();
-            let bad_radius = sketch.arcs[r].radius.value;
+        let a = &sketch.arcs[r];
+        let bad = if a.radius.value < 0.0 {
+            Some(("radius", a.radius.value))
+        } else if a.is_ellipse && a.radius_b.value < 0.0 {
+            Some(("radius_b", a.radius_b.value))
+        } else {
+            None
+        };
+        if let Some((which, val)) = bad {
+            let name = a.name.clone();
             if let Some(ref snap) = snapshot {
                 if let Ok(restored) = bincode::deserialize(snap) {
                     *sketch = restored;
                     return Err(format!(
-                        "Constraint rejected: {} got negative radius ({:.4}). This is likely a solver bug -- please report it.",
-                        name, bad_radius));
+                        "Constraint rejected: {} got negative {} ({:.4}). This is likely a solver bug -- please report it.",
+                        name, which, val));
                 }
             }
         }

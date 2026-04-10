@@ -293,7 +293,7 @@ fn eval_function(name: &str, args: Vec<SymVal>, span: &Expr) -> Result<SymVal, s
                 _ => Err(syn::Error::new_spanned(span, "atan expects a scalar argument")),
             }
         }
-        "sin" | "cos" | "tan" | "exp" | "ln" | "sqrt" | "abs" => {
+        "sin" | "cos" | "tan" | "exp" | "ln" | "sqrt" | "abs" | "heaviside" => {
             if args.len() != 1 { return Err(syn::Error::new_spanned(span, format!("{} expects 1 arg", name))); }
             match &args[0] {
                 SymVal::Scalar(e) => {
@@ -305,11 +305,20 @@ fn eval_function(name: &str, args: Vec<SymVal>, span: &Expr) -> Result<SymVal, s
                         "ln" => arael_sym::ln,
                         "sqrt" => arael_sym::sqrt,
                         "abs" => arael_sym::abs,
+                        "heaviside" => arael_sym::heaviside,
                         _ => unreachable!(),
                     };
                     Ok(SymVal::Scalar(f(e.clone())))
                 }
                 _ => Err(syn::Error::new_spanned(span, format!("{} expects a scalar argument", name))),
+            }
+        }
+        "clamp" => {
+            if args.len() != 3 { return Err(syn::Error::new_spanned(span, "clamp expects 3 args")); }
+            match (&args[0], &args[1], &args[2]) {
+                (SymVal::Scalar(val), SymVal::Scalar(lo), SymVal::Scalar(hi)) =>
+                    Ok(SymVal::Scalar(arael_sym::clamp(val.clone(), lo.clone(), hi.clone()))),
+                _ => Err(syn::Error::new_spanned(span, "clamp expects scalar arguments")),
             }
         }
         "dot" | "cross2" => {

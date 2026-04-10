@@ -34,6 +34,9 @@ use geometry::*;
 pub struct SavedArcLocks {
     pub had_radius: bool,
     pub old_radius: f64,
+    pub had_radius_b: bool,
+    pub old_radius_b: f64,
+    pub rotation_optimize: bool,
     pub had_sweep: bool,
     pub old_sweep: f64,
     pub old_sweep_sign: f64,
@@ -643,6 +646,9 @@ impl EditorApp {
                 self.drag_saved_arc_locks = Some(SavedArcLocks {
                     had_radius: a.constraints.has_target_radius,
                     old_radius: a.constraints.target_radius,
+                    had_radius_b: a.constraints.has_target_radius_b,
+                    old_radius_b: a.constraints.target_radius_b,
+                    rotation_optimize: a.rotation.optimize,
                     had_sweep: a.constraints.has_target_sweep,
                     old_sweep: a.constraints.target_sweep,
                     old_sweep_sign: a.constraints.sweep_sign,
@@ -652,6 +658,11 @@ impl EditorApp {
                 let a = &mut self.sketch.arcs[r];
                 a.constraints.has_target_radius = true;
                 a.constraints.target_radius = a.radius.value;
+                if a.is_ellipse {
+                    a.constraints.has_target_radius_b = true;
+                    a.constraints.target_radius_b = a.radius_b.value;
+                    a.rotation.optimize = false;
+                }
                 a.constraints.has_target_sweep = true;
                 a.constraints.target_sweep = a.end_angle.value - a.start_angle.value;
                 a.constraints.sweep_sign = if a.ccw { 1.0 } else { -1.0 };
@@ -703,6 +714,9 @@ impl EditorApp {
                                     let a = &mut clean.arcs[r];
                                     a.constraints.has_target_radius = saved.had_radius;
                                     a.constraints.target_radius = saved.old_radius;
+                                    a.constraints.has_target_radius_b = saved.had_radius_b;
+                                    a.constraints.target_radius_b = saved.old_radius_b;
+                                    a.rotation.optimize = saved.rotation_optimize;
                                     a.constraints.has_target_sweep = saved.had_sweep;
                                     a.constraints.target_sweep = saved.old_sweep;
                                     a.constraints.sweep_sign = saved.old_sweep_sign;
@@ -743,6 +757,9 @@ impl EditorApp {
                     let a = &mut self.sketch.arcs[r];
                     a.constraints.has_target_radius = saved.had_radius;
                     a.constraints.target_radius = saved.old_radius;
+                    a.constraints.has_target_radius_b = saved.had_radius_b;
+                    a.constraints.target_radius_b = saved.old_radius_b;
+                    a.rotation.optimize = saved.rotation_optimize;
                     a.constraints.has_target_sweep = saved.had_sweep;
                     a.constraints.target_sweep = saved.old_sweep;
                     a.constraints.sweep_sign = saved.old_sweep_sign;

@@ -1,3 +1,5 @@
+use arael::utils::Float as _;
+
 // ---------------------------------------------------------------------------
 // Line/arc visual style
 // ---------------------------------------------------------------------------
@@ -201,6 +203,19 @@ pub struct Line {
 // For non-ellipse arcs: radius_b must equal radius (rotation is Param::fixed so no constraint needed)
 #[arael(constraint(hb, guard = !self.is_ellipse, {
     [(arc.radius_b - arc.radius) * sketch.constraint_isigma]
+}))]
+// EXPERIMENTAL: soft minimum radius via squared heaviside penalty.
+// Prevents radius from going below 0.001. The squared penalty is smooth
+// at the transition (value and gradient both zero at threshold).
+// A proper solution would be bound-constrained optimization in the framework.
+#[arael(constraint(hb, {
+    let d = 0.001 - arc.radius;
+    [heaviside(d) * d * d * sketch.constraint_isigma * sketch.constraint_isigma]
+}))]
+// EXPERIMENTAL: same for radius_b on ellipses.
+#[arael(constraint(hb, guard = self.is_ellipse, {
+    let d = 0.001 - arc.radius_b;
+    [heaviside(d) * d * d * sketch.constraint_isigma * sketch.constraint_isigma]
 }))]
 // Target sweep angle (end_angle - start_angle, sign-matched)
 #[arael(constraint(hb, guard = self.constraints.has_target_sweep, {
