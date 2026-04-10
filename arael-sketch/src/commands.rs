@@ -1086,6 +1086,7 @@ fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
         "del_param" => cmd_del_param(ctx, args_str),
         "rename_param" => cmd_rename_param(ctx, args_str),
         "style" => cmd_style(ctx, args_str),
+        "quiet" => cmd_quiet(ctx, args_str),
         "select" => cmd_select(ctx, args_str),
         "deselect" => cmd_deselect(ctx, args_str),
         "print" => cmd_print(ctx, args_str),
@@ -1530,12 +1531,14 @@ fn cmd_add_line(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let mut noconnect = false;
     let mut notangent = false;
     let mut driven = false;
+    let mut quiet = false;
     loop {
         match tokens.last().copied() {
             Some("nocursor") => { nocursor = true; tokens.pop(); }
             Some("noconnect") => { noconnect = true; tokens.pop(); }
             Some("notangent") => { notangent = true; tokens.pop(); }
             Some("driven") => { driven = true; tokens.pop(); }
+            Some("quiet") => { quiet = true; tokens.pop(); }
             _ => break,
         }
     }
@@ -1576,6 +1579,7 @@ fn cmd_add_line(ctx: &mut CommandContext, args: &str) -> CommandResult {
         let p2 = points[i + 1];
         ctx.exec(Action::AddLine { p1, p2 });
         let line_ref = ctx.sketch.lines.refs().last().unwrap();
+        if quiet { ctx.sketch.lines[line_ref].quiet = true; }
         let name = ctx.sketch.lines[line_ref].name.clone();
         ctx.session_names.insert("_".into(), name.clone());
         // For multi-segment, also set _0, _1, _2, ... for multi-assignment
@@ -1814,11 +1818,13 @@ fn cmd_add_circle(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let mut tokens: Vec<&str> = args.split_whitespace().collect();
     let mut nocursor = false;
     let mut noconnect = false;
+    let mut quiet = false;
     let mut driven = false;
     for _ in 0..3 {
         match tokens.last().copied() {
             Some("nocursor") => { nocursor = true; tokens.pop(); }
             Some("noconnect") => { noconnect = true; tokens.pop(); }
+            Some("quiet") => { quiet = true; tokens.pop(); }
             Some("driven") => { driven = true; tokens.pop(); }
             _ => break,
         }
@@ -1836,6 +1842,7 @@ fn cmd_add_circle(ctx: &mut CommandContext, args: &str) -> CommandResult {
     ctx.begin_group();
     ctx.exec(Action::AddCircle { center, edge });
     let arc_ref = ctx.sketch.arcs.refs().last().unwrap();
+    if quiet { ctx.sketch.arcs[arc_ref].quiet = true; }
     let name = ctx.sketch.arcs[arc_ref].name.clone();
     if !nocursor { ctx.cursor = Some(center); }
     ctx.session_names.insert("_".into(), name.clone());
@@ -1853,6 +1860,7 @@ fn cmd_add_circle(ctx: &mut CommandContext, args: &str) -> CommandResult {
         });
         msg += &format!(" [driven radius={:.4}]", r);
     }
+    if quiet { msg += " [quiet]"; }
     ok(msg)
 }
 
@@ -1860,11 +1868,13 @@ fn cmd_add_circle2(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let mut tokens: Vec<&str> = args.split_whitespace().collect();
     let mut nocursor = false;
     let mut noconnect = false;
+    let mut quiet = false;
     let mut driven = false;
     for _ in 0..3 {
         match tokens.last().copied() {
             Some("nocursor") => { nocursor = true; tokens.pop(); }
             Some("noconnect") => { noconnect = true; tokens.pop(); }
+            Some("quiet") => { quiet = true; tokens.pop(); }
             Some("driven") => { driven = true; tokens.pop(); }
             _ => break,
         }
@@ -1880,6 +1890,7 @@ fn cmd_add_circle2(ctx: &mut CommandContext, args: &str) -> CommandResult {
     ctx.begin_group();
     ctx.exec(Action::AddCircle { center, edge });
     let arc_ref = ctx.sketch.arcs.refs().last().unwrap();
+    if quiet { ctx.sketch.arcs[arc_ref].quiet = true; }
     let name = ctx.sketch.arcs[arc_ref].name.clone();
     if !nocursor { ctx.cursor = Some(center); }
     ctx.session_names.insert("_".into(), name.clone());
@@ -1897,6 +1908,7 @@ fn cmd_add_circle2(ctx: &mut CommandContext, args: &str) -> CommandResult {
         });
         msg += &format!(" [driven radius={:.4}]", r);
     }
+    if quiet { msg += " [quiet]"; }
     ok(msg)
 }
 
@@ -1904,11 +1916,13 @@ fn cmd_add_circle3(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let mut tokens: Vec<&str> = args.split_whitespace().collect();
     let mut nocursor = false;
     let mut noconnect = false;
+    let mut quiet = false;
     let mut driven = false;
     for _ in 0..3 {
         match tokens.last().copied() {
             Some("nocursor") => { nocursor = true; tokens.pop(); }
             Some("noconnect") => { noconnect = true; tokens.pop(); }
+            Some("quiet") => { quiet = true; tokens.pop(); }
             Some("driven") => { driven = true; tokens.pop(); }
             _ => break,
         }
@@ -1927,6 +1941,7 @@ fn cmd_add_circle3(ctx: &mut CommandContext, args: &str) -> CommandResult {
     ctx.begin_group();
     ctx.exec(Action::AddCircle { center, edge });
     let arc_ref = ctx.sketch.arcs.refs().last().unwrap();
+    if quiet { ctx.sketch.arcs[arc_ref].quiet = true; }
     let name = ctx.sketch.arcs[arc_ref].name.clone();
     if !nocursor { ctx.cursor = Some(center); }
     ctx.session_names.insert("_".into(), name.clone());
@@ -1944,6 +1959,7 @@ fn cmd_add_circle3(ctx: &mut CommandContext, args: &str) -> CommandResult {
         });
         msg += &format!(" [driven radius={:.4}]", r);
     }
+    if quiet { msg += " [quiet]"; }
     ok(msg)
 }
 
@@ -1951,11 +1967,13 @@ fn cmd_add_ellipse(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let mut tokens: Vec<&str> = args.split_whitespace().collect();
     let mut nocursor = false;
     let mut noconnect = false;
+    let mut quiet = false;
     let mut driven = false;
     for _ in 0..3 {
         match tokens.last().copied() {
             Some("nocursor") => { nocursor = true; tokens.pop(); }
             Some("noconnect") => { noconnect = true; tokens.pop(); }
+            Some("quiet") => { quiet = true; tokens.pop(); }
             Some("driven") => { driven = true; tokens.pop(); }
             _ => break,
         }
@@ -1973,6 +1991,7 @@ fn cmd_add_ellipse(ctx: &mut CommandContext, args: &str) -> CommandResult {
     ctx.begin_group();
     ctx.exec(Action::AddEllipse { center, rx, ry, rotation: rot_rad });
     let arc_ref = ctx.sketch.arcs.refs().last().unwrap();
+    if quiet { ctx.sketch.arcs[arc_ref].quiet = true; }
     let name = ctx.sketch.arcs[arc_ref].name.clone();
     if !nocursor { ctx.cursor = Some(center); }
     ctx.session_names.insert("_".into(), name.clone());
@@ -1995,6 +2014,7 @@ fn cmd_add_ellipse(ctx: &mut CommandContext, args: &str) -> CommandResult {
         });
         msg += &format!(" [driven rx={:.4} ry={:.4}]", rx, ry);
     }
+    if quiet { msg += " [quiet]"; }
     ok(msg)
 }
 
@@ -2002,6 +2022,7 @@ fn cmd_add_earc(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let mut tokens: Vec<&str> = args.split_whitespace().collect();
     let mut nocursor = false;
     let mut noconnect = false;
+    let mut quiet = false;
     let mut notangent = false;
     let mut driven = false;
     let mut large = false;
@@ -2010,6 +2031,7 @@ fn cmd_add_earc(ctx: &mut CommandContext, args: &str) -> CommandResult {
         match tokens.last().copied() {
             Some("nocursor") => { nocursor = true; tokens.pop(); }
             Some("noconnect") => { noconnect = true; tokens.pop(); }
+            Some("quiet") => { quiet = true; tokens.pop(); }
             Some("notangent") => { notangent = true; tokens.pop(); }
             Some("driven") => { driven = true; tokens.pop(); }
             Some("large") => { large = true; tokens.pop(); }
@@ -2036,6 +2058,7 @@ fn cmd_add_earc(ctx: &mut CommandContext, args: &str) -> CommandResult {
     ctx.begin_group();
     ctx.exec(Action::AddEllipticArc { center, rx, ry, rotation: rot, start: sa, end: ea, ccw });
     let arc_ref = ctx.sketch.arcs.refs().last().unwrap();
+    if quiet { ctx.sketch.arcs[arc_ref].quiet = true; }
     let name = ctx.sketch.arcs[arc_ref].name.clone();
     if !nocursor { ctx.cursor = Some(p2); }
     ctx.session_names.insert("_".into(), name.clone());
@@ -2053,6 +2076,7 @@ fn cmd_add_earc(ctx: &mut CommandContext, args: &str) -> CommandResult {
         ctx.exec(Action::AddDimension { kind: DimensionKind::ArcRadiusB(arc_ref), value: ry, expr: None, derived: false });
         msg += &format!(" [driven rx={:.4} ry={:.4}]", rx, ry);
     }
+    if quiet { msg += " [quiet]"; }
     ok(msg)
 }
 
@@ -2060,12 +2084,14 @@ fn cmd_add_earc3(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let mut tokens: Vec<&str> = args.split_whitespace().collect();
     let mut nocursor = false;
     let mut noconnect = false;
+    let mut quiet = false;
     let mut notangent = false;
     let mut driven = false;
     loop {
         match tokens.last().copied() {
             Some("nocursor") => { nocursor = true; tokens.pop(); }
             Some("noconnect") => { noconnect = true; tokens.pop(); }
+            Some("quiet") => { quiet = true; tokens.pop(); }
             Some("notangent") => { notangent = true; tokens.pop(); }
             Some("driven") => { driven = true; tokens.pop(); }
             _ => break,
@@ -2115,6 +2141,7 @@ fn cmd_add_earc3(ctx: &mut CommandContext, args: &str) -> CommandResult {
     ctx.begin_group();
     ctx.exec(Action::AddEllipticArc { center, rx, ry, rotation: rot, start: sa, end: ea, ccw });
     let arc_ref = ctx.sketch.arcs.refs().last().unwrap();
+    if quiet { ctx.sketch.arcs[arc_ref].quiet = true; }
     let name = ctx.sketch.arcs[arc_ref].name.clone();
     if !nocursor { ctx.cursor = Some(p2); }
     ctx.session_names.insert("_".into(), name.clone());
@@ -2132,6 +2159,7 @@ fn cmd_add_earc3(ctx: &mut CommandContext, args: &str) -> CommandResult {
         ctx.exec(Action::AddDimension { kind: DimensionKind::ArcRadiusB(arc_ref), value: ry, expr: None, derived: false });
         msg += &format!(" [driven rx={:.4} ry={:.4}]", rx, ry);
     }
+    if quiet { msg += " [quiet]"; }
     ok(msg)
 }
 
@@ -2139,6 +2167,7 @@ fn cmd_add_earc_center(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let mut tokens: Vec<&str> = args.split_whitespace().collect();
     let mut nocursor = false;
     let mut noconnect = false;
+    let mut quiet = false;
     let mut notangent = false;
     let mut driven = false;
     let mut cw = false;
@@ -2146,6 +2175,7 @@ fn cmd_add_earc_center(ctx: &mut CommandContext, args: &str) -> CommandResult {
         match tokens.last().copied() {
             Some("nocursor") => { nocursor = true; tokens.pop(); }
             Some("noconnect") => { noconnect = true; tokens.pop(); }
+            Some("quiet") => { quiet = true; tokens.pop(); }
             Some("notangent") => { notangent = true; tokens.pop(); }
             Some("driven") => { driven = true; tokens.pop(); }
             Some("cw") => { cw = true; tokens.pop(); }
@@ -2168,6 +2198,7 @@ fn cmd_add_earc_center(ctx: &mut CommandContext, args: &str) -> CommandResult {
     ctx.begin_group();
     ctx.exec(Action::AddEllipticArc { center, rx, ry, rotation: rot, start, end, ccw });
     let arc_ref = ctx.sketch.arcs.refs().last().unwrap();
+    if quiet { ctx.sketch.arcs[arc_ref].quiet = true; }
     let name = ctx.sketch.arcs[arc_ref].name.clone();
     if !nocursor { ctx.cursor = Some(center); }
     ctx.session_names.insert("_".into(), name.clone());
@@ -2186,6 +2217,7 @@ fn cmd_add_earc_center(ctx: &mut CommandContext, args: &str) -> CommandResult {
         ctx.exec(Action::AddDimension { kind: DimensionKind::ArcRadiusB(arc_ref), value: ry, expr: None, derived: false });
         msg += &format!(" [driven rx={:.4} ry={:.4}]", rx, ry);
     }
+    if quiet { msg += " [quiet]"; }
     ok(msg)
 }
 
@@ -2321,12 +2353,14 @@ fn line_line_intersect(p1: vect2d, d1: vect2d, p2: vect2d, d2: vect2d) -> Option
 fn cmd_add_circle2t(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let mut tokens: Vec<&str> = args.split_whitespace().collect();
     let mut noconnect = false;
+    let mut quiet = false;
     let mut noconstraint = false;
     let mut driven = false;
     let mut strict = false;
     for _ in 0..4 {
         match tokens.last().copied() {
             Some("noconnect") => { noconnect = true; tokens.pop(); }
+            Some("quiet") => { quiet = true; tokens.pop(); }
             Some("noconstraint") => { noconstraint = true; tokens.pop(); }
             Some("driven") => { driven = true; tokens.pop(); }
             Some("strict") => { strict = true; tokens.pop(); }
@@ -2352,6 +2386,7 @@ fn cmd_add_circle2t(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let mut applied = Vec::new();
     ctx.exec(Action::AddCircle { center, edge });
     let arc_ref = ctx.sketch.arcs.refs().last().unwrap();
+    if quiet { ctx.sketch.arcs[arc_ref].quiet = true; }
     let name = ctx.sketch.arcs[arc_ref].name.clone();
     ctx.session_names.insert("_".into(), name.clone());
     let mut msg = format!("Added {}: center=({:.2},{:.2}) r={:.2}", name, center.x, center.y, r);
@@ -2392,12 +2427,14 @@ fn cmd_add_circle2t(ctx: &mut CommandContext, args: &str) -> CommandResult {
 fn cmd_add_circle3t(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let mut tokens: Vec<&str> = args.split_whitespace().collect();
     let mut noconnect = false;
+    let mut quiet = false;
     let mut noconstraint = false;
     let mut driven = false;
     let mut strict = false;
     for _ in 0..4 {
         match tokens.last().copied() {
             Some("noconnect") => { noconnect = true; tokens.pop(); }
+            Some("quiet") => { quiet = true; tokens.pop(); }
             Some("noconstraint") => { noconstraint = true; tokens.pop(); }
             Some("driven") => { driven = true; tokens.pop(); }
             Some("strict") => { strict = true; tokens.pop(); }
@@ -2423,6 +2460,7 @@ fn cmd_add_circle3t(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let mut applied_list = Vec::new();
     ctx.exec(Action::AddCircle { center, edge });
     let arc_ref = ctx.sketch.arcs.refs().last().unwrap();
+    if quiet { ctx.sketch.arcs[arc_ref].quiet = true; }
     let name = ctx.sketch.arcs[arc_ref].name.clone();
     ctx.session_names.insert("_".into(), name.clone());
     let mut msg = format!("Added {}: center=({:.2},{:.2}) r={:.2}", name, center.x, center.y, r);
@@ -3031,6 +3069,38 @@ fn cmd_style(ctx: &mut CommandContext, args: &str) -> CommandResult {
     }
 }
 
+fn cmd_quiet(ctx: &mut CommandContext, args: &str) -> CommandResult {
+    let tokens: Vec<&str> = args.split_whitespace().collect();
+    if tokens.is_empty() { return err("Usage: quiet L0 [on|off] | quiet A0 EA0 ..."); }
+    // Check for explicit on/off
+    let explicit = if tokens.last() == Some(&"on") { Some(true) }
+        else if tokens.last() == Some(&"off") { Some(false) }
+        else { None };
+    let names = if explicit.is_some() { &tokens[..tokens.len()-1] } else { &tokens[..] };
+    let mut msgs = Vec::new();
+    for name in names {
+        if name.starts_with('P') {
+            let r = match resolve_point(&ctx.sketch, name) { Ok(r) => r, Err(e) => return err(e) };
+            let q = explicit.unwrap_or(!ctx.sketch.points[r].quiet);
+            ctx.sketch.points[r].quiet = q;
+            msgs.push(format!("{}: quiet={}", name, q));
+        } else if name.starts_with('L') {
+            let r = match resolve_line(&ctx.sketch, name) { Ok(r) => r, Err(e) => return err(e) };
+            let q = explicit.unwrap_or(!ctx.sketch.lines[r].quiet);
+            ctx.sketch.lines[r].quiet = q;
+            msgs.push(format!("{}: quiet={}", name, q));
+        } else if is_arc_name(name) {
+            let r = match resolve_arc(&ctx.sketch, name) { Ok(r) => r, Err(e) => return err(e) };
+            let q = explicit.unwrap_or(!ctx.sketch.arcs[r].quiet);
+            ctx.sketch.arcs[r].quiet = q;
+            msgs.push(format!("{}: quiet={}", name, q));
+        } else {
+            return err(format!("Unknown entity '{}'", name));
+        }
+    }
+    ok(msgs.join(", "))
+}
+
 // ---------------------------------------------------------------------------
 // Selection
 // ---------------------------------------------------------------------------
@@ -3354,6 +3424,7 @@ fn cmd_info(ctx: &mut CommandContext, args: &str) -> CommandResult {
         let len = ((l.p2.value.x - l.p1.value.x).powi(2) + (l.p2.value.y - l.p1.value.y).powi(2)).sqrt();
         let mut s = format!("{}: ({:.4},{:.4})-({:.4},{:.4}) len={:.4} style={}",
             l.name, l.p1.value.x, l.p1.value.y, l.p2.value.x, l.p2.value.y, len, l.style.name());
+        if l.quiet { s += " [quiet]"; }
         if !l.p1.optimize { s += " [p1 locked]"; }
         if !l.p2.optimize { s += " [p2 locked]"; }
         let cstrs = constraints_for(&ctx.sketch, name);
@@ -3363,8 +3434,9 @@ fn cmd_info(ctx: &mut CommandContext, args: &str) -> CommandResult {
         let r = match resolve_point(&ctx.sketch, name) { Ok(r) => r, Err(e) => return err(e) };
         let p = &ctx.sketch.points[r];
         let locked = p.constraints.has_fix_x || p.constraints.has_fix_y;
-        let mut s = format!("{}: ({:.4},{:.4}){}", p.name, p.pos.value.x, p.pos.value.y,
-            if locked { " [locked]" } else { "" });
+        let mut s = format!("{}: ({:.4},{:.4}){}{}", p.name, p.pos.value.x, p.pos.value.y,
+            if locked { " [locked]" } else { "" },
+            if p.quiet { " [quiet]" } else { "" });
         let cstrs = constraints_for(&ctx.sketch, name);
         if !cstrs.is_empty() { s += &format!("\n  constraints: {}", cstrs.join(", ")); }
         ok(s)
@@ -3384,6 +3456,7 @@ fn cmd_info(ctx: &mut CommandContext, args: &str) -> CommandResult {
             a.name, a.center.value.x, a.center.value.y, a.radius.value,
             a.start_angle.value.to_degrees(), a.end_angle.value.to_degrees(),
             sp.x, sp.y, ep.x, ep.y, shape_label);
+        if a.quiet { s += " [quiet]"; }
         let cstrs = constraints_for(&ctx.sketch, name);
         if !cstrs.is_empty() { s += &format!("\n  constraints: {}", cstrs.join(", ")); }
         ok(s)
@@ -3599,7 +3672,8 @@ fn cmd_list(ctx: &mut CommandContext, args: &str) -> CommandResult {
         for r in ctx.sketch.lines.refs() {
             let l = &ctx.sketch.lines[r];
             let len = ((l.p2.value.x - l.p1.value.x).powi(2) + (l.p2.value.y - l.p1.value.y).powi(2)).sqrt();
-            lines.push(format!("{}: ({:.2},{:.2})-({:.2},{:.2}) len={:.2}",
+            let q = if l.quiet { " [quiet]" } else { "" };
+            lines.push(format!("{}: ({:.2},{:.2})-({:.2},{:.2}) len={:.2}{q}",
                 l.name, l.p1.value.x, l.p1.value.y, l.p2.value.x, l.p2.value.y, len));
         }
     }
@@ -3607,32 +3681,34 @@ fn cmd_list(ctx: &mut CommandContext, args: &str) -> CommandResult {
         for r in ctx.sketch.points.refs() {
             let p = &ctx.sketch.points[r];
             if p.helper { continue; }
-            lines.push(format!("{}: ({:.2},{:.2})", p.name, p.pos.value.x, p.pos.value.y));
+            let q = if p.quiet { " [quiet]" } else { "" };
+            lines.push(format!("{}: ({:.2},{:.2}){q}", p.name, p.pos.value.x, p.pos.value.y));
         }
     }
     if show_all || filter == "arcs" {
         for r in ctx.sketch.arcs.refs() {
             let a = &ctx.sketch.arcs[r];
+            let q = if a.quiet { " [quiet]" } else { "" };
             if a.is_ellipse {
                 if a.closed {
-                    lines.push(format!("{}: center=({:.2},{:.2}) rx={:.2} ry={:.2} rot={:.1}deg [ellipse]",
+                    lines.push(format!("{}: center=({:.2},{:.2}) rx={:.2} ry={:.2} rot={:.1}deg [ellipse]{q}",
                         a.name, a.center.value.x, a.center.value.y,
                         a.radius.value, a.radius_b.value, a.rotation.value.to_degrees()));
                 } else {
                     let sp = crate::geometry::arc_start_pos(a);
                     let ep = crate::geometry::arc_end_pos(a);
-                    lines.push(format!("{}: center=({:.2},{:.2}) rx={:.2} ry={:.2} rot={:.1}deg start=({:.2},{:.2}) end=({:.2},{:.2}) [elliptic arc]",
+                    lines.push(format!("{}: center=({:.2},{:.2}) rx={:.2} ry={:.2} rot={:.1}deg start=({:.2},{:.2}) end=({:.2},{:.2}) [elliptic arc]{q}",
                         a.name, a.center.value.x, a.center.value.y,
                         a.radius.value, a.radius_b.value, a.rotation.value.to_degrees(),
                         sp.x, sp.y, ep.x, ep.y));
                 }
             } else if a.closed {
-                lines.push(format!("{}: center=({:.2},{:.2}) r={:.2} [circle]",
+                lines.push(format!("{}: center=({:.2},{:.2}) r={:.2} [circle]{q}",
                     a.name, a.center.value.x, a.center.value.y, a.radius.value));
             } else {
                 let sp = crate::geometry::arc_start_pos(a);
                 let ep = crate::geometry::arc_end_pos(a);
-                lines.push(format!("{}: center=({:.2},{:.2}) r={:.2} start=({:.2},{:.2}) end=({:.2},{:.2})",
+                lines.push(format!("{}: center=({:.2},{:.2}) r={:.2} start=({:.2},{:.2}) end=({:.2},{:.2}){q}",
                     a.name, a.center.value.x, a.center.value.y, a.radius.value,
                     sp.x, sp.y, ep.x, ep.y));
             }
@@ -3764,11 +3840,13 @@ fn cmd_add_arc(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let mut tokens: Vec<&str> = args.split_whitespace().collect();
     let mut nocursor = false;
     let mut noconnect = false;
+    let mut quiet = false;
     let mut notangent = false;
     loop {
         match tokens.last().copied() {
             Some("nocursor") => { nocursor = true; tokens.pop(); }
             Some("noconnect") => { noconnect = true; tokens.pop(); }
+            Some("quiet") => { quiet = true; tokens.pop(); }
             Some("notangent") => { notangent = true; tokens.pop(); }
             _ => break,
         }
@@ -3780,6 +3858,7 @@ fn cmd_add_arc(ctx: &mut CommandContext, args: &str) -> CommandResult {
     ctx.begin_group();
     ctx.exec(Action::AddArc { start: p1, end: p2, mid: pm });
     let arc_ref = ctx.sketch.arcs.refs().last().unwrap();
+    if quiet { ctx.sketch.arcs[arc_ref].quiet = true; }
     let name = ctx.sketch.arcs[arc_ref].name.clone();
     if !nocursor { ctx.cursor = Some(p2); }
     ctx.session_names.insert("_".into(), name.clone());
@@ -3796,6 +3875,7 @@ fn cmd_add_arc(ctx: &mut CommandContext, args: &str) -> CommandResult {
             }
         }
     }
+    if quiet { msg += " [quiet]"; }
     ok(msg)
 }
 
@@ -5658,6 +5738,7 @@ fn cmd_help(args: &str) -> CommandResult {
             "del_param" => "del_param name",
             "rename_param" => "rename_param old_name new_name",
             "style" => "style L0 [solid|dashed|dashdot]",
+            "quiet" => "quiet L0 [on|off] — toggle/set quiet mode (hides dimensions and center)",
             "select" => "select L0 [L1 ...] | select all | select L0 chain | select L0 linked",
             "deselect" => "deselect [L0 L1 ...] (clears all or specific)",
             "print" => "print <expression> (evaluate and display)",
@@ -5704,7 +5785,7 @@ const COMMAND_NAMES: &[&str] = &[
     "equal", "collinear", "tangent", "coincident", "concentric", "midpoint",
     "symmetry", "mirror", "point_on", "length", "radius", "radius_b", "sweep", "angle", "distance", "hdistance", "vdistance", "xangle",
     "remove_dim", "remove_constraint", "rc", "set_derived", "set_driven",
-    "lock", "unlock", "param", "del_param", "rename_param", "style",
+    "lock", "unlock", "param", "del_param", "rename_param", "style", "quiet",
     "select", "deselect", "freeze", "print", "info", "measure", "list", "find", "let",
     "dof", "cost", "undo", "redo", "history", "goto", "center", "zoom",
     "cursor", "dim_pos", "clear", "save", "load", "help", "msg",
@@ -6051,7 +6132,7 @@ pub fn complete(
         // add_circle: [center] [radius] [noconnect] [nocursor]
         // add_arc: [start] [end] [mid] [noconnect] [nocursor]
         "add_line" => {
-            let line_kws = ["noconnect", "nocursor", "driven"];
+            let line_kws = ["noconnect", "nocursor", "notangent", "driven", "quiet"];
             let coord_args = typed_args.iter().filter(|a| !line_kws.contains(a)).count();
             if coord_args < 2 {
                 add_matching(&mut results, current_word, &["cursor"]);
@@ -6110,7 +6191,7 @@ pub fn complete(
             }
         }
         "add_circle" => {
-            let circle_kws = ["noconnect", "nocursor", "driven"];
+            let circle_kws = ["noconnect", "nocursor", "driven", "quiet"];
             let coord_args = typed_args.iter().filter(|a| !circle_kws.contains(a)).count();
             if coord_args < 2 {
                 if coord_args == 0 {
@@ -6130,7 +6211,7 @@ pub fn complete(
             }
         }
         "add_circle2" | "add_circle3" => {
-            let circle_kws = ["noconnect", "nocursor", "driven"];
+            let circle_kws = ["noconnect", "nocursor", "driven", "quiet"];
             let max_coords = if first_cmd == "add_circle2" { 2 } else { 3 };
             let coord_args = typed_args.iter().filter(|a| !circle_kws.contains(a)).count();
             if coord_args < max_coords {
@@ -6177,7 +6258,7 @@ pub fn complete(
             }
         }
         "add_ellipse" => {
-            let ellipse_kws = ["noconnect", "nocursor", "driven"];
+            let ellipse_kws = ["noconnect", "nocursor", "driven", "quiet"];
             let coord_args = typed_args.iter().filter(|a| !ellipse_kws.contains(a)).count();
             if coord_args < 4 {
                 if coord_args == 0 {
@@ -6220,18 +6301,18 @@ pub fn complete(
             }
         }
         "add_arc" => {
-            let coord_args = typed_args.iter().filter(|a| **a != "noconnect" && **a != "nocursor").count();
+            let arc_kws = ["noconnect", "nocursor", "notangent", "quiet"];
+            let coord_args = typed_args.iter().filter(|a| !arc_kws.contains(a)).count();
             if coord_args < 3 {
                 add_matching(&mut results, current_word, &["cursor"]);
                 add_all_entities(sketch, &mut results, current_word);
                 add_session_names(session_names, &mut results, current_word);
             }
             if coord_args >= 3 {
-                if !typed_args.contains(&"noconnect") {
-                    add_matching(&mut results, current_word, &["noconnect"]);
-                }
-                if !typed_args.contains(&"nocursor") {
-                    add_matching(&mut results, current_word, &["nocursor"]);
+                for kw in &arc_kws {
+                    if !typed_args.contains(kw) {
+                        add_matching(&mut results, current_word, &[kw]);
+                    }
                 }
             }
         }
@@ -10146,5 +10227,54 @@ mod tests {
         run_ok(&mut ctx, "tangent EA0 EA1");
         assert_eq!(ctx.sketch.tangent_aa.len(), 1);
         assert_ne!(ctx.sketch.tangent_aa[0].shared, SharedEndpoint::None);
+    }
+
+    // --- Quiet mode tests ---
+
+    #[test]
+    fn test_quiet_keyword_line() {
+        let mut ctx = CommandContext::new();
+        run(&mut ctx, "add_line 0,0 5,0 quiet noconnect");
+        let r = ctx.sketch.lines.refs().next().unwrap();
+        assert!(ctx.sketch.lines[r].quiet);
+    }
+
+    #[test]
+    fn test_quiet_keyword_arc() {
+        let mut ctx = CommandContext::new();
+        run(&mut ctx, "add_circle 0,0 5 quiet noconnect");
+        let r = ctx.sketch.arcs.refs().next().unwrap();
+        assert!(ctx.sketch.arcs[r].quiet);
+    }
+
+    #[test]
+    fn test_quiet_toggle() {
+        let mut ctx = CommandContext::new();
+        run(&mut ctx, "add_line 0,0 5,0 noconnect");
+        let r = ctx.sketch.lines.refs().next().unwrap();
+        assert!(!ctx.sketch.lines[r].quiet);
+        run_ok(&mut ctx, "quiet L0");
+        assert!(ctx.sketch.lines[r].quiet);
+        run_ok(&mut ctx, "quiet L0");
+        assert!(!ctx.sketch.lines[r].quiet);
+    }
+
+    #[test]
+    fn test_quiet_on_off() {
+        let mut ctx = CommandContext::new();
+        run(&mut ctx, "add_line 0,0 5,0 noconnect");
+        let r = ctx.sketch.lines.refs().next().unwrap();
+        run_ok(&mut ctx, "quiet L0 on");
+        assert!(ctx.sketch.lines[r].quiet);
+        run_ok(&mut ctx, "quiet L0 off");
+        assert!(!ctx.sketch.lines[r].quiet);
+    }
+
+    #[test]
+    fn test_quiet_info() {
+        let mut ctx = CommandContext::new();
+        run(&mut ctx, "add_line 0,0 5,0 quiet noconnect");
+        let out = run_ok(&mut ctx, "info L0");
+        assert!(out.contains("[quiet]"), "info should show [quiet]: {}", out);
     }
 }

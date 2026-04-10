@@ -168,6 +168,29 @@ add_arc 5,0 5,5 7.5,2.5 notangent
 
 `noconnect` implies `notangent` (no connections means no tangent either).
 
+### Quiet Mode
+
+Entities marked as `quiet` suppress visual clutter:
+- Intrinsic dimensions (radius, length, sweep) are hidden unless the entity or dimension is selected
+- Arc/circle/ellipse center points are hidden unless a constraint references the center or it is selected
+
+Append `quiet` during creation:
+```
+add_line 0,0 5,0 quiet
+add_circle 0,0 5 quiet
+add_earc 0,0 5,0 3 1 0 quiet
+```
+
+Toggle quiet on existing entities:
+```
+quiet L0                     Toggle quiet on/off
+quiet L0 on                  Set quiet
+quiet L0 off                 Remove quiet
+quiet EA0 EA1 L0             Multiple entities
+```
+
+`info` and `list` show `[quiet]` marker.
+
 ### Line Chaining
 
 When `add_line` is given only one coordinate, it starts from the last created endpoint. With 3+ coordinates, it creates multiple connected segments in one command:

@@ -378,7 +378,7 @@ impl Sketch {
         self.points.push(Point {
             pos: Param::new(pos),
             constraints: PointConstraints { has_fix_x: false, fix_x: 0.0, has_fix_y: false, fix_y: 0.0 },
-            helper: false, name,
+            helper: false, quiet: false, name,
             hb: SelfBlock::new(),
         })
     }
@@ -390,7 +390,7 @@ impl Sketch {
         self.points.push(Point {
             pos: Param::fixed(pos),
             constraints: PointConstraints { has_fix_x: false, fix_x: 0.0, has_fix_y: false, fix_y: 0.0 },
-            helper: false, name,
+            helper: false, quiet: false, name,
             hb: SelfBlock::new(),
         })
     }
@@ -402,7 +402,7 @@ impl Sketch {
         self.points.push(Point {
             pos: Param::new(pos),
             constraints: PointConstraints { has_fix_x: false, fix_x: 0.0, has_fix_y: false, fix_y: 0.0 },
-            helper: true, name,
+            helper: true, quiet: false, name,
             hb: SelfBlock::new(),
         })
     }
@@ -415,7 +415,7 @@ impl Sketch {
             p1: Param::new(p1),
             p2: Param::new(p2),
             constraints: LineConstraints { horizontal: false, vertical: false, has_length: false, length: 0.0, has_angle: false, target_angle: 0.0 },
-            style: LineStyle::Solid, name,
+            style: LineStyle::Solid, quiet: false, name,
             hb: SelfBlock::new(),
         })
     }
@@ -448,7 +448,7 @@ impl Sketch {
             end_angle: if closed { Param::fixed(end) } else { Param::new(end) },
             closed, ccw,
             is_ellipse: false,
-            style: LineStyle::Solid, name,
+            style: LineStyle::Solid, quiet: false, name,
             constraints: ArcConstraints {
                 has_target_radius: false, target_radius: 0.0,
                 has_target_radius_b: false, target_radius_b: 0.0,
@@ -473,7 +473,7 @@ impl Sketch {
             closed,
             is_ellipse: true,
             ccw: true,
-            style: LineStyle::Solid, name,
+            style: LineStyle::Solid, quiet: false, name,
             constraints: ArcConstraints {
                 has_target_radius: false, target_radius: 0.0,
                 has_target_radius_b: false, target_radius_b: 0.0,
@@ -506,7 +506,7 @@ impl Sketch {
             closed: false,
             is_ellipse: true,
             ccw,
-            style: LineStyle::Solid, name,
+            style: LineStyle::Solid, quiet: false, name,
             constraints: ArcConstraints {
                 has_target_radius: false, target_radius: 0.0,
                 has_target_radius_b: false, target_radius_b: 0.0,

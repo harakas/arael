@@ -1507,11 +1507,25 @@ impl EditorApp {
                 if show_start && (self.show_points || start_sel) { painter.circle_filled(points[0], if start_sel || start_hl || start_hov { 6.0 } else { 4.0 }, start_color); }
                 if show_end && (self.show_points || end_sel) { painter.circle_filled(*points.last().unwrap(), if end_sel || end_hl || end_hov { 6.0 } else { 4.0 }, end_color); }
             }
-            // Center point
+            // Center point — skip for quiet arcs unless selected/hovered or has center constraints
             let center_sel = self.selection.contains(&Selection::ArcCenter(r));
-            if self.show_points || center_sel {
-            let center_hl = highlight_arc_center.contains(&r.index());
+            let arc_sel = self.selection.contains(&Selection::Arc(r));
             let center_hov = self.hovered == Some(Selection::ArcCenter(r));
+            let show_center = if a.quiet && !center_sel && !arc_sel && !center_hov {
+                // Check if any constraint references this arc's center
+                self.sketch.coincident_arc_center.iter().any(|c| c.arc == r)
+                || self.sketch.concentric.iter().any(|c| c.a == r || c.b == r)
+                || self.sketch.coincident_lp1_arc_center.iter().any(|c| c.arc == r)
+                || self.sketch.coincident_lp2_arc_center.iter().any(|c| c.arc == r)
+                || self.sketch.coincident_arc_center_start.iter().any(|c| c.a == r)
+                || self.sketch.coincident_arc_center_end.iter().any(|c| c.a == r)
+                || self.sketch.coincident_arc_start_center.iter().any(|c| c.b == r)
+                || self.sketch.coincident_arc_end_center.iter().any(|c| c.b == r)
+            } else {
+                self.show_points || center_sel || arc_sel || center_hov
+            };
+            if show_center {
+            let center_hl = highlight_arc_center.contains(&r.index());
             let center_locked = arc_c_locked.contains(&r.index());
             let center_color = if center_sel { c.endpoint_selected }
                 else if center_hl { highlight_color }
@@ -1672,6 +1686,23 @@ impl EditorApp {
         for (i, dim) in self.sketch.dimensions.iter().enumerate() {
             let selected = self.selection.contains(&Selection::Dimension(i));
             let dim_hovered = self.hovered == Some(Selection::Dimension(i));
+            let dim_editing = self.dim_edit_index == Some(i);
+            // Skip dimensions of quiet entities unless selected/hovered/editing
+            if !selected && !dim_hovered && !dim_editing {
+                let entity_quiet = match &dim.kind {
+                    DimensionKind::LineLength(r) => self.sketch.lines.get(*r).map_or(false, |l| l.quiet),
+                    DimensionKind::ArcRadius(r) | DimensionKind::ArcRadiusB(r) | DimensionKind::ArcSweep(r) =>
+                        self.sketch.arcs.get(*r).map_or(false, |a| a.quiet),
+                    _ => false,
+                };
+                let entity_selected = match &dim.kind {
+                    DimensionKind::LineLength(r) => self.selection.contains(&Selection::Line(*r)),
+                    DimensionKind::ArcRadius(r) | DimensionKind::ArcRadiusB(r) | DimensionKind::ArcSweep(r) =>
+                        self.selection.contains(&Selection::Arc(*r)),
+                    _ => false,
+                };
+                if entity_quiet && !entity_selected { continue; }
+            }
             let color = if dim.broken { dim_broken_color }
                         else if selected { dim_sel_color }
                         else if dim_hovered { dim_hover_color }

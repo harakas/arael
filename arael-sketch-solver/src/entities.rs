@@ -119,6 +119,9 @@ pub struct Point {
     #[arael(skip)]
     pub helper: bool,
     #[arael(skip)]
+    #[serde(default)]
+    pub quiet: bool,
+    #[arael(skip)]
     pub name: String,
     #[serde(skip)]
     pub hb: SelfBlock<Point>,
@@ -171,6 +174,9 @@ pub struct Line {
     pub constraints: LineConstraints,
     #[arael(skip)]
     pub style: LineStyle,
+    #[arael(skip)]
+    #[serde(default)]
+    pub quiet: bool,
     #[arael(skip)]
     pub name: String,
     #[serde(skip)]
@@ -246,6 +252,9 @@ pub struct Arc {
     pub ccw: bool,
     #[arael(skip)]
     pub style: LineStyle,
+    #[arael(skip)]
+    #[serde(default)]
+    pub quiet: bool,
     #[arael(skip)]
     pub name: String,
     pub constraints: ArcConstraints,
