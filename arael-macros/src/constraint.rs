@@ -276,12 +276,14 @@ fn build_dotted_path(expr: &Expr) -> Option<String> {
 
 fn eval_function(name: &str, args: Vec<SymVal>, span: &Expr) -> Result<SymVal, syn::Error> {
     match name {
-        "atan2" => {
-            if args.len() != 2 { return Err(syn::Error::new_spanned(span, "atan2 expects 2 args")); }
+        "atan2" | "atan2_safe" => {
+            if args.len() != 2 { return Err(syn::Error::new_spanned(span, format!("{} expects 2 args", name))); }
             match (&args[0], &args[1]) {
-                (SymVal::Scalar(y), SymVal::Scalar(x)) =>
-                    Ok(SymVal::Scalar(arael_sym::atan2(y.clone(), x.clone()))),
-                _ => Err(syn::Error::new_spanned(span, "atan2 expects scalar arguments")),
+                (SymVal::Scalar(y), SymVal::Scalar(x)) => {
+                    let f = if name == "atan2" { arael_sym::atan2 } else { arael_sym::atan2_safe };
+                    Ok(SymVal::Scalar(f(y.clone(), x.clone())))
+                }
+                _ => Err(syn::Error::new_spanned(span, format!("{} expects scalar arguments", name))),
             }
         }
         "atan" => {
