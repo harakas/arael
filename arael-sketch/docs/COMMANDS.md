@@ -127,7 +127,7 @@ offset_line L0 distance      Create a parallel line offset by distance (alias: o
 
 ### Auto-Coincident
 
-When creating geometry (`add_line`, `add_circle`, `add_arc`), endpoints that are within 1e-3 distance of existing endpoints are automatically connected with coincident constraints. Lines snap to line endpoints, points, and arc endpoints. Circles and arcs snap their center (and start/end for arcs) to line endpoints, other arc endpoints, and points.
+When creating geometry (`add_line`, `add_circle`, `add_arc`, `add_earc`, `add_earc3`, `add_earc_center`), endpoints that are within 1e-3 distance of existing endpoints are automatically connected with coincident constraints. Lines snap to line endpoints, points, and arc endpoints. Circles and arcs snap their center (and start/end for arcs) to line endpoints, other arc endpoints, and points.
 
 ```
 add_line 0,0 5,0              L0
@@ -253,6 +253,33 @@ radius_b EA0 driven          Driven minor axis dimension
 ```
 
 Ellipse parameters are accessible as `EA0.radius`, `EA0.radius_b`, `EA0.rotation` in expressions and `print`.
+
+### Elliptic arcs
+
+Partial elliptic arcs (open ellipse segments). Three creation styles:
+
+**SVG endpoint-based** (inspired by SVG arc commands):
+```
+add_earc p1 p2 rx ry rot_deg [large] [cw] [noconnect] [nocursor] [driven]
+add_earc 0,0 5,0 3 1 0                   Small CCW arc from (0,0) to (5,0)
+add_earc 0,0 5,0 3 1 0 large             Large arc variant
+add_earc 0,0 5,0 3 1 0 cw                Clockwise arc
+add_earc 0,0 5,0 3 1 45 large cw driven  All options combined
+```
+
+**Three-point with radii** (midpoint determines which arc):
+```
+add_earc3 p1 p2 pmid rx ry [noconnect] [nocursor] [driven]
+add_earc3 0,0 5,0 2,2 3 1                Arc passing near (2,2)
+```
+
+**Center-based** (direct parameterization, angles in degrees):
+```
+add_earc_center cx,cy rx ry rot_deg start_deg end_deg [cw] [noconnect] [nocursor] [driven]
+add_earc_center 0,0 3 1 45 0 90          Quarter elliptic arc
+```
+
+All elliptic arc commands return the arc reference (e.g. `EA0`). With `driven`, both `rx` and `ry` dimensions are added.
 
 ## Deletion
 
@@ -545,7 +572,7 @@ add_point rotate(P0, A0.center, 45)   Rotated point
 
 ## Entity Name Capture
 
-Entity creation commands (`add_line`, `add_rect`, `add_rect3`, `add_rectcenter`, `add_point`, `add_circle`, `add_circle2`, `add_circle3`, `add_circle2t`, `add_circle3t`, `add_arc`, `offset_line`) automatically set the `_` variable to the created entity's name. Use assignment to capture it with a meaningful name:
+Entity creation commands (`add_line`, `add_rect`, `add_rect3`, `add_rectcenter`, `add_point`, `add_circle`, `add_circle2`, `add_circle3`, `add_circle2t`, `add_circle3t`, `add_arc`, `add_earc`, `add_earc3`, `add_earc_center`, `offset_line`) automatically set the `_` variable to the created entity's name. Use assignment to capture it with a meaningful name:
 
 ```
 add_line 0,0 5,0; vertical _; length _ 3       Use _ for the last created entity

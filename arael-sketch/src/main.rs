@@ -565,12 +565,18 @@ impl EditorApp {
             if d < threshold { return Some(Selection::Line(r)); }
         }
 
-        // Then arc/circle curves
+        // Then arc/circle curves (find closest, not first)
+        let mut best_arc: Option<(f64, arael::refs::Ref<arael_sketch_solver::Arc>)> = None;
         for r in self.sketch.arcs.refs() {
             let a = &self.sketch.arcs[r];
             let (d, _) = point_to_arc_dist(sketch_pos, a);
-            if d < threshold { return Some(Selection::Arc(r)); }
+            if d < threshold {
+                if best_arc.is_none() || d < best_arc.unwrap().0 {
+                    best_arc = Some((d, r));
+                }
+            }
         }
+        if let Some((_, r)) = best_arc { return Some(Selection::Arc(r)); }
 
         None
     }
@@ -2715,9 +2721,40 @@ impl EditorApp {
         }
         for r in self.sketch.arcs.refs() {
             let a = &self.sketch.arcs[r];
-            let r_val = a.radius.value;
-            extend(a.center.value.x - r_val, a.center.value.y - r_val);
-            extend(a.center.value.x + r_val, a.center.value.y + r_val);
+            // Include start and end points
+            let sp = crate::geometry::arc_start_pos(a);
+            let ep = crate::geometry::arc_end_pos(a);
+            extend(sp.x, sp.y);
+            extend(ep.x, ep.y);
+            // Include axis points (0, 90, 180, 270 deg) if within sweep range
+            let sa = a.start_angle.value;
+            let ea = a.end_angle.value;
+            let sweep = ea - sa;
+            let norm_in_sweep = |angle: f64| -> bool {
+                if sweep.abs() >= std::f64::consts::TAU - 1e-9 { return true; }
+                let d = (angle - sa) % std::f64::consts::TAU;
+                let d = if sweep > 0.0 {
+                    if d < 0.0 { d + std::f64::consts::TAU } else { d }
+                } else {
+                    if d > 0.0 { d - std::f64::consts::TAU } else { d }
+                };
+                if sweep > 0.0 { d >= 0.0 && d <= sweep }
+                else { d <= 0.0 && d >= sweep }
+            };
+            for k in 0..4 {
+                let axis_angle = k as f64 * std::f64::consts::FRAC_PI_2;
+                if norm_in_sweep(axis_angle) {
+                    let pt = crate::geometry::arc_point_at(a, axis_angle);
+                    extend(pt.x, pt.y);
+                }
+            }
+            // Sample every 16 degrees along the arc
+            let steps = ((sweep.abs().to_degrees() / 16.0).ceil() as usize).max(1);
+            for i in 1..steps {
+                let t = sa + sweep * (i as f64 / steps as f64);
+                let pt = crate::geometry::arc_point_at(a, t);
+                extend(pt.x, pt.y);
+            }
         }
 
         if !has_any { return; }

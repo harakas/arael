@@ -18,6 +18,86 @@ pub fn point_to_segment_dist(p: vect2d, a: vect2d, b: vect2d) -> f64 {
     ((p.x - proj_x).powi(2) + (p.y - proj_y).powi(2)).sqrt()
 }
 
+/// SVG endpoint-to-center parameterization for elliptic arcs.
+/// Given start/end points, radii, rotation, and arc selection flags,
+/// returns (center, start_angle, end_angle, rx, ry) or None if degenerate.
+///
+/// Implements the algorithm from SVG spec F.6.5-F.6.6:
+/// https://www.w3.org/TR/SVG2/implnote.html#ArcConversionEndpointToCenter
+pub fn svg_arc_to_center(
+    p1: vect2d, p2: vect2d, mut rx: f64, mut ry: f64,
+    rotation: f64, large_arc: bool, sweep: bool,
+) -> Option<(vect2d, f64, f64, f64, f64)> {
+
+    // F.6.2: if endpoints are identical, skip
+    if (p1.x - p2.x).abs() < 1e-12 && (p1.y - p2.y).abs() < 1e-12 { return None; }
+
+    rx = rx.abs();
+    ry = ry.abs();
+    if rx < 1e-12 || ry < 1e-12 { return None; }
+
+    let cos_r = rotation.cos();
+    let sin_r = rotation.sin();
+
+    // F.6.5.1: compute (x1', y1')
+    let dx = (p1.x - p2.x) / 2.0;
+    let dy = (p1.y - p2.y) / 2.0;
+    let x1p = cos_r * dx + sin_r * dy;
+    let y1p = -sin_r * dx + cos_r * dy;
+
+    // F.6.6.2: ensure radii are large enough
+    let lambda = (x1p * x1p) / (rx * rx) + (y1p * y1p) / (ry * ry);
+    if lambda > 1.0 {
+        let s = lambda.sqrt();
+        rx *= s;
+        ry *= s;
+    }
+
+    // F.6.5.2: compute (cx', cy')
+    let rx2 = rx * rx;
+    let ry2 = ry * ry;
+    let x1p2 = x1p * x1p;
+    let y1p2 = y1p * y1p;
+    let num = (rx2 * ry2 - rx2 * y1p2 - ry2 * x1p2).max(0.0);
+    let den = rx2 * y1p2 + ry2 * x1p2;
+    let sq = if den.abs() < 1e-30 { 0.0 } else { (num / den).sqrt() };
+    let sign = if large_arc == sweep { -1.0 } else { 1.0 };
+    let cxp = sign * sq * rx * y1p / ry;
+    let cyp = sign * sq * -ry * x1p / rx;
+
+    // F.6.5.3: compute center (cx, cy)
+    let mx = (p1.x + p2.x) / 2.0;
+    let my = (p1.y + p2.y) / 2.0;
+    let cx = cos_r * cxp - sin_r * cyp + mx;
+    let cy = sin_r * cxp + cos_r * cyp + my;
+
+    // F.6.5.5-6: compute start angle and sweep
+    let ux = (x1p - cxp) / rx;
+    let uy = (y1p - cyp) / ry;
+    let vx = (-x1p - cxp) / rx;
+    let vy = (-y1p - cyp) / ry;
+
+    let start_angle = uy.atan2(ux);
+    let mut sweep_angle = {
+        let dot = ux * vx + uy * vy;
+        let len = (ux * ux + uy * uy).sqrt() * (vx * vx + vy * vy).sqrt();
+        let cos_a = (dot / len).clamp(-1.0, 1.0);
+        let cross = ux * vy - uy * vx;
+        let a = cos_a.acos();
+        if cross < 0.0 { -a } else { a }
+    };
+
+    // Adjust sweep for sweep flag
+    if !sweep && sweep_angle > 0.0 {
+        sweep_angle -= std::f64::consts::TAU;
+    } else if sweep && sweep_angle < 0.0 {
+        sweep_angle += std::f64::consts::TAU;
+    }
+
+    let end_angle = start_angle + sweep_angle;
+    Some((vect2d::new(cx, cy), start_angle, end_angle, rx, ry))
+}
+
 // Compute circumscribed circle arc from 3 points (start, end, mid on arc).
 // Returns (center, radius, start_angle, end_angle, ccw) or None if collinear.
 // `ccw` is true if the arc from p1 to p2 passing through p3 goes counter-clockwise.
@@ -114,6 +194,8 @@ fn point_to_ellipse_dist(p: vect2d, a: &Arc) -> (f64, vect2d) {
     let sa = a.start_angle.value;
     let ea = a.end_angle.value;
     let span = if a.closed { std::f64::consts::TAU } else { ea - sa };
+    let t_min = sa.min(sa + span);
+    let t_max = sa.max(sa + span);
     let n = 64;
     let mut best_t = sa;
     let mut best_d = f64::MAX;
@@ -123,7 +205,7 @@ fn point_to_ellipse_dist(p: vect2d, a: &Arc) -> (f64, vect2d) {
         let d = (p.x - q.x).powi(2) + (p.y - q.y).powi(2);
         if d < best_d { best_d = d; best_t = t; }
     }
-    // Newton refinement (minimize squared distance)
+    // Newton refinement (minimize squared distance), clamped to arc range
     let dt = 1e-6;
     for _ in 0..8 {
         let q = arc_point_at(a, best_t);
@@ -134,11 +216,18 @@ fn point_to_ellipse_dist(p: vect2d, a: &Arc) -> (f64, vect2d) {
             + (p.x - q.x) * (qp.x - 2.0 * q.x + qm.x) / (dt * dt)
             + (p.y - q.y) * (qp.y - 2.0 * q.y + qm.y) / (dt * dt);
         if df.abs() < 1e-20 { break; }
-        best_t -= f / df;
+        best_t = (best_t - f / df).clamp(t_min, t_max);
     }
+    // Also check endpoints explicitly
+    let sp = arc_start_pos(a);
+    let ep = arc_end_pos(a);
     let nearest = arc_point_at(a, best_t);
     let dist = ((p.x - nearest.x).powi(2) + (p.y - nearest.y).powi(2)).sqrt();
-    (dist, nearest)
+    let ds = ((p.x - sp.x).powi(2) + (p.y - sp.y).powi(2)).sqrt();
+    let de = ((p.x - ep.x).powi(2) + (p.y - ep.y).powi(2)).sqrt();
+    if ds < dist && ds < de { (ds, sp) }
+    else if de < dist { (de, ep) }
+    else { (dist, nearest) }
 }
 
 /// Compute a point on the arc/ellipse at parametric angle t.

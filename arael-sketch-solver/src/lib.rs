@@ -483,6 +483,39 @@ impl Sketch {
         })
     }
 
+    /// Add a partial elliptic arc with explicit center parameterization.
+    pub fn add_elliptic_arc(&mut self, center: vect2d, rx: f64, ry: f64,
+        rot: f64, start: f64, end: f64, ccw: bool) -> Ref<Arc>
+    {
+        let end = if !ccw && end > start {
+            end - std::f64::consts::TAU
+        } else if ccw && end < start {
+            end + std::f64::consts::TAU
+        } else {
+            end
+        };
+        let name = format!("EA{}", self.next_arc_id);
+        self.next_arc_id += 1;
+        self.arcs.push(Arc {
+            center: Param::new(center),
+            radius: Param::new(rx),
+            radius_b: Param::new(ry),
+            rotation: Param::new(rot),
+            start_angle: Param::new(start),
+            end_angle: Param::new(end),
+            closed: false,
+            is_ellipse: true,
+            ccw,
+            style: LineStyle::Solid, name,
+            constraints: ArcConstraints {
+                has_target_radius: false, target_radius: 0.0,
+                has_target_radius_b: false, target_radius_b: 0.0,
+                has_target_sweep: false, target_sweep: 0.0, sweep_sign: 1.0,
+            },
+            hb: SelfBlock::new(),
+        })
+    }
+
     /// Remove a point and all constraints referencing it.
     pub fn delete_point(&mut self, r: Ref<Point>) {
         self.dimensions.retain(|d| !d.kind.references_point(r));

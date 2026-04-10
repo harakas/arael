@@ -996,7 +996,8 @@ fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
             let is_command = matches!(first_word,
                 "add_line" | "add_rect" | "add_rect3" | "add_rectcenter" |
                 "add_point" | "add_circle" | "add_circle2" | "add_circle3" |
-                "add_circle2t" | "add_circle3t" | "add_ellipse" | "add_arc" | "offset_line" | "offset" | "mirror" |
+                "add_circle2t" | "add_circle3t" | "add_ellipse" | "add_arc" |
+                "add_earc" | "add_earc3" | "add_earc_center" | "offset_line" | "offset" | "mirror" |
                 "length" | "radius" | "radius_b" | "sweep" | "angle" | "distance");
             if is_command {
                 let dim_count_before = ctx.sketch.dimensions.len();
@@ -1050,6 +1051,9 @@ fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
         "add_circle3t" => cmd_add_circle3t(ctx, args_str),
         "add_ellipse" => cmd_add_ellipse(ctx, args_str),
         "add_arc" => cmd_add_arc(ctx, args_str),
+        "add_earc" => cmd_add_earc(ctx, args_str),
+        "add_earc3" => cmd_add_earc3(ctx, args_str),
+        "add_earc_center" => cmd_add_earc_center(ctx, args_str),
         "offset_line" | "offset" => cmd_offset_line(ctx, args_str),
         "delete" => cmd_delete(ctx, args_str),
         "horizontal" => cmd_horizontal(ctx, args_str),
@@ -1788,6 +1792,179 @@ fn cmd_add_ellipse(ctx: &mut CommandContext, args: &str) -> CommandResult {
             kind: DimensionKind::ArcRadiusB(arc_ref),
             value: ry, expr: None, derived: false,
         });
+        msg += &format!(" [driven rx={:.4} ry={:.4}]", rx, ry);
+    }
+    ok(msg)
+}
+
+fn cmd_add_earc(ctx: &mut CommandContext, args: &str) -> CommandResult {
+    let mut tokens: Vec<&str> = args.split_whitespace().collect();
+    let mut nocursor = false;
+    let mut noconnect = false;
+    let mut driven = false;
+    let mut large = false;
+    let mut cw = false;
+    loop {
+        match tokens.last().copied() {
+            Some("nocursor") => { nocursor = true; tokens.pop(); }
+            Some("noconnect") => { noconnect = true; tokens.pop(); }
+            Some("driven") => { driven = true; tokens.pop(); }
+            Some("large") => { large = true; tokens.pop(); }
+            Some("cw") => { cw = true; tokens.pop(); }
+            _ => break,
+        }
+    }
+    if tokens.len() != 5 {
+        return err("Usage: add_earc p1 p2 rx ry rot_deg [large] [cw] [noconnect] [nocursor] [driven]");
+    }
+    let p1 = match parse_coord(ctx, tokens[0], ctx.cursor) { Ok(p) => p, Err(e) => return err(e) };
+    let p2 = match parse_coord(ctx, tokens[1], ctx.cursor) { Ok(p) => p, Err(e) => return err(e) };
+    let rx = match eval_expr(&ctx.sketch, tokens[2]) { Ok(v) => v, Err(e) => return err(e) };
+    let ry = match eval_expr(&ctx.sketch, tokens[3]) { Ok(v) => v, Err(e) => return err(e) };
+    let rot_deg = match eval_expr(&ctx.sketch, tokens[4]) { Ok(v) => v, Err(e) => return err(e) };
+    let rot = arael::utils::deg2rad(rot_deg);
+    let sweep = !cw; // SVG sweep-flag: true = CCW
+    let result = crate::geometry::svg_arc_to_center(p1, p2, rx, ry, rot, large, sweep);
+    let (center, sa, ea, rx, ry) = match result {
+        Some(v) => v,
+        None => return err("Cannot compute elliptic arc (degenerate or zero radii)"),
+    };
+    let ccw = !cw;
+    ctx.begin_group();
+    ctx.exec(Action::AddEllipticArc { center, rx, ry, rotation: rot, start: sa, end: ea, ccw });
+    let arc_ref = ctx.sketch.arcs.refs().last().unwrap();
+    let name = ctx.sketch.arcs[arc_ref].name.clone();
+    if !nocursor { ctx.cursor = Some(p2); }
+    ctx.session_names.insert("_".into(), name.clone());
+    let mut msg = format!("Added {}: rx={:.2} ry={:.2} rot={:.2}deg", name, rx, ry, rot_deg);
+    if !noconnect {
+        let connected = auto_coincident_arc(ctx, arc_ref, false);
+        if !connected.is_empty() { msg += &format!(" [connected: {}]", connected.join(", ")); }
+    }
+    if driven {
+        ctx.exec(Action::AddDimension { kind: DimensionKind::ArcRadius(arc_ref), value: rx, expr: None, derived: false });
+        ctx.exec(Action::AddDimension { kind: DimensionKind::ArcRadiusB(arc_ref), value: ry, expr: None, derived: false });
+        msg += &format!(" [driven rx={:.4} ry={:.4}]", rx, ry);
+    }
+    ok(msg)
+}
+
+fn cmd_add_earc3(ctx: &mut CommandContext, args: &str) -> CommandResult {
+    let mut tokens: Vec<&str> = args.split_whitespace().collect();
+    let mut nocursor = false;
+    let mut noconnect = false;
+    let mut driven = false;
+    loop {
+        match tokens.last().copied() {
+            Some("nocursor") => { nocursor = true; tokens.pop(); }
+            Some("noconnect") => { noconnect = true; tokens.pop(); }
+            Some("driven") => { driven = true; tokens.pop(); }
+            _ => break,
+        }
+    }
+    if tokens.len() != 5 {
+        return err("Usage: add_earc3 p1 p2 pmid rx ry [noconnect] [nocursor] [driven]");
+    }
+    let p1 = match parse_coord(ctx, tokens[0], ctx.cursor) { Ok(p) => p, Err(e) => return err(e) };
+    let p2 = match parse_coord(ctx, tokens[1], ctx.cursor) { Ok(p) => p, Err(e) => return err(e) };
+    let pmid = match parse_coord(ctx, tokens[2], ctx.cursor) { Ok(p) => p, Err(e) => return err(e) };
+    let rx = match eval_expr(&ctx.sketch, tokens[3]) { Ok(v) => v, Err(e) => return err(e) };
+    let ry = match eval_expr(&ctx.sketch, tokens[4]) { Ok(v) => v, Err(e) => return err(e) };
+    // Estimate rotation from midpoint geometry
+    let rot = (p2.y - p1.y).atan2(p2.x - p1.x);
+    // Determine ccw from midpoint: same logic as circumscribed_arc
+    // Use SVG conversion with rotation=estimated, find which arc passes near pmid
+    let mut best = None;
+    let mut best_dist = f64::MAX;
+    for &large in &[false, true] {
+        for &sweep in &[true, false] {
+            if let Some((center, sa, ea, rx_out, ry_out)) =
+                crate::geometry::svg_arc_to_center(p1, p2, rx, ry, rot, large, sweep)
+            {
+                // Check how close the midpoint of this arc is to pmid
+                let mid_angle = (sa + ea) / 2.0;
+                let cr = rot.cos();
+                let sr = rot.sin();
+                let ct = mid_angle.cos();
+                let st = mid_angle.sin();
+                let mid_pt = vect2d::new(
+                    center.x + rx_out * ct * cr - ry_out * st * sr,
+                    center.y + rx_out * ct * sr + ry_out * st * cr,
+                );
+                let dist = ((mid_pt.x - pmid.x).powi(2) + (mid_pt.y - pmid.y).powi(2)).sqrt();
+                if dist < best_dist {
+                    best_dist = dist;
+                    best = Some((center, sa, ea, rx_out, ry_out, sweep));
+                }
+            }
+        }
+    }
+    let (center, sa, ea, rx, ry, ccw) = match best {
+        Some((c, sa, ea, rx, ry, sweep)) => (c, sa, ea, rx, ry, sweep),
+        None => return err("Cannot compute elliptic arc from given points and radii"),
+    };
+    ctx.begin_group();
+    ctx.exec(Action::AddEllipticArc { center, rx, ry, rotation: rot, start: sa, end: ea, ccw });
+    let arc_ref = ctx.sketch.arcs.refs().last().unwrap();
+    let name = ctx.sketch.arcs[arc_ref].name.clone();
+    if !nocursor { ctx.cursor = Some(p2); }
+    ctx.session_names.insert("_".into(), name.clone());
+    let mut msg = format!("Added {}: rx={:.2} ry={:.2}", name, rx, ry);
+    if !noconnect {
+        let connected = auto_coincident_arc(ctx, arc_ref, false);
+        if !connected.is_empty() { msg += &format!(" [connected: {}]", connected.join(", ")); }
+    }
+    if driven {
+        ctx.exec(Action::AddDimension { kind: DimensionKind::ArcRadius(arc_ref), value: rx, expr: None, derived: false });
+        ctx.exec(Action::AddDimension { kind: DimensionKind::ArcRadiusB(arc_ref), value: ry, expr: None, derived: false });
+        msg += &format!(" [driven rx={:.4} ry={:.4}]", rx, ry);
+    }
+    ok(msg)
+}
+
+fn cmd_add_earc_center(ctx: &mut CommandContext, args: &str) -> CommandResult {
+    let mut tokens: Vec<&str> = args.split_whitespace().collect();
+    let mut nocursor = false;
+    let mut noconnect = false;
+    let mut driven = false;
+    let mut cw = false;
+    loop {
+        match tokens.last().copied() {
+            Some("nocursor") => { nocursor = true; tokens.pop(); }
+            Some("noconnect") => { noconnect = true; tokens.pop(); }
+            Some("driven") => { driven = true; tokens.pop(); }
+            Some("cw") => { cw = true; tokens.pop(); }
+            _ => break,
+        }
+    }
+    if tokens.len() != 6 {
+        return err("Usage: add_earc_center cx,cy rx ry rot_deg start_deg end_deg [cw] [noconnect] [nocursor] [driven]");
+    }
+    let center = match parse_coord(ctx, tokens[0], ctx.cursor) { Ok(p) => p, Err(e) => return err(e) };
+    let rx = match eval_expr(&ctx.sketch, tokens[1]) { Ok(v) => v, Err(e) => return err(e) };
+    let ry = match eval_expr(&ctx.sketch, tokens[2]) { Ok(v) => v, Err(e) => return err(e) };
+    let rot_deg = match eval_expr(&ctx.sketch, tokens[3]) { Ok(v) => v, Err(e) => return err(e) };
+    let start_deg = match eval_expr(&ctx.sketch, tokens[4]) { Ok(v) => v, Err(e) => return err(e) };
+    let end_deg = match eval_expr(&ctx.sketch, tokens[5]) { Ok(v) => v, Err(e) => return err(e) };
+    let rot = arael::utils::deg2rad(rot_deg);
+    let start = arael::utils::deg2rad(start_deg);
+    let end = arael::utils::deg2rad(end_deg);
+    let ccw = !cw;
+    ctx.begin_group();
+    ctx.exec(Action::AddEllipticArc { center, rx, ry, rotation: rot, start, end, ccw });
+    let arc_ref = ctx.sketch.arcs.refs().last().unwrap();
+    let name = ctx.sketch.arcs[arc_ref].name.clone();
+    if !nocursor { ctx.cursor = Some(center); }
+    ctx.session_names.insert("_".into(), name.clone());
+    let mut msg = format!("Added {}: rx={:.2} ry={:.2} rot={:.2}deg start={:.2}deg end={:.2}deg",
+        name, rx, ry, rot_deg, start_deg, end_deg);
+    if !noconnect {
+        let connected = auto_coincident_arc(ctx, arc_ref, true);
+        if !connected.is_empty() { msg += &format!(" [connected: {}]", connected.join(", ")); }
+    }
+    if driven {
+        ctx.exec(Action::AddDimension { kind: DimensionKind::ArcRadius(arc_ref), value: rx, expr: None, derived: false });
+        ctx.exec(Action::AddDimension { kind: DimensionKind::ArcRadiusB(arc_ref), value: ry, expr: None, derived: false });
         msg += &format!(" [driven rx={:.4} ry={:.4}]", rx, ry);
     }
     ok(msg)
@@ -5267,6 +5444,9 @@ fn cmd_help(args: &str) -> CommandResult {
             "dim_pos" => "dim_pos d0 offset 1.5 | dim_pos d0 along 0.3 (@ for relative)",
             "clear" => "clear (new empty sketch)",
             "add_arc" => "add_arc x1,y1 x2,y2 xm,ym (start, end, midpoint)",
+            "add_earc" => "add_earc p1 p2 rx ry rot_deg [large] [cw]",
+            "add_earc3" => "add_earc3 p1 p2 pmid rx ry",
+            "add_earc_center" => "add_earc_center cx,cy rx ry rot_deg start_deg end_deg [cw]",
             "offset_line" | "offset" => "offset_line L0 distance (create parallel line offset by distance)",
             "let" => "let name = expression (session variable, scalar or coordinate)",
             "save" => "save path.json",
@@ -5287,7 +5467,7 @@ fn cmd_help(args: &str) -> CommandResult {
 const COMMAND_NAMES: &[&str] = &[
     "add_line", "add_rect", "add_rect3", "add_rectcenter",
     "add_point", "add_circle", "add_circle2", "add_circle3", "add_circle2t", "add_circle3t", "add_ellipse",
-    "add_arc", "offset_line", "offset",
+    "add_arc", "add_earc", "add_earc3", "add_earc_center", "offset_line", "offset",
     "delete", "horizontal", "vertical", "parallel", "perpendicular", "perp",
     "equal", "collinear", "tangent", "coincident", "concentric", "midpoint",
     "symmetry", "mirror", "point_on", "length", "radius", "radius_b", "sweep", "angle", "distance", "hdistance", "vdistance", "xangle",
@@ -9609,5 +9789,69 @@ mod tests {
         let out = run_ok(&mut ctx, "list coincident");
         assert!(out.contains("coincident"), "should show coincident: {}", out);
         assert!(!out.contains("L0:"), "should not include entity listing: {}", out);
+    }
+
+    #[test]
+    fn test_add_earc() {
+        let mut ctx = CommandContext::new();
+        run(&mut ctx, "add_earc 0,0 5,0 3 1 0 noconnect");
+        assert_eq!(ctx.sketch.arcs.len(), 1);
+        let a = &ctx.sketch.arcs[ctx.sketch.arcs.refs().next().unwrap()];
+        assert!(a.is_ellipse);
+        assert!(!a.closed);
+        let sp = crate::geometry::arc_start_pos(a);
+        let ep = crate::geometry::arc_end_pos(a);
+        assert!((sp.x - 0.0).abs() < 0.1, "start x: {}", sp.x);
+        assert!((sp.y - 0.0).abs() < 0.1, "start y: {}", sp.y);
+        assert!((ep.x - 5.0).abs() < 0.1, "end x: {}", ep.x);
+        assert!((ep.y - 0.0).abs() < 0.1, "end y: {}", ep.y);
+    }
+
+    #[test]
+    fn test_add_earc_large() {
+        let mut ctx = CommandContext::new();
+        run(&mut ctx, "add_earc 0,0 5,0 3 1 0 large noconnect");
+        let a = &ctx.sketch.arcs[ctx.sketch.arcs.refs().next().unwrap()];
+        assert!(a.is_ellipse);
+        let sweep = (a.end_angle.value - a.start_angle.value).abs();
+        assert!(sweep > std::f64::consts::PI, "sweep {:.2} should be > pi for large arc", sweep);
+    }
+
+    #[test]
+    fn test_add_earc_cw() {
+        let mut ctx = CommandContext::new();
+        run(&mut ctx, "add_earc 0,0 5,0 3 1 0 cw noconnect");
+        let a = &ctx.sketch.arcs[ctx.sketch.arcs.refs().next().unwrap()];
+        assert!(!a.ccw, "should be clockwise");
+    }
+
+    #[test]
+    fn test_add_earc_center() {
+        let mut ctx = CommandContext::new();
+        run(&mut ctx, "add_earc_center 0,0 3 1 45 0 90 noconnect");
+        let a = &ctx.sketch.arcs[ctx.sketch.arcs.refs().next().unwrap()];
+        assert!(a.is_ellipse);
+        assert!(!a.closed);
+        assert!((a.center.value.x).abs() < 0.01);
+        assert!((a.center.value.y).abs() < 0.01);
+        assert!((a.radius.value - 3.0).abs() < 0.01);
+        assert!((a.radius_b.value - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_add_earc3() {
+        let mut ctx = CommandContext::new();
+        run(&mut ctx, "add_earc3 0,0 5,0 2,2 3 1 noconnect");
+        assert_eq!(ctx.sketch.arcs.len(), 1);
+        let a = &ctx.sketch.arcs[ctx.sketch.arcs.refs().next().unwrap()];
+        assert!(a.is_ellipse);
+        assert!(!a.closed);
+    }
+
+    #[test]
+    fn test_add_earc_driven() {
+        let mut ctx = CommandContext::new();
+        run(&mut ctx, "add_earc 0,0 5,0 3 1 0 driven noconnect");
+        assert_eq!(ctx.sketch.dimensions.len(), 2);
     }
 }

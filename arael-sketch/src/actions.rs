@@ -28,6 +28,8 @@ pub enum Action {
     AddCircle { center: vect2d, edge: vect2d },
     AddEllipse { center: vect2d, rx: f64, ry: f64, rotation: f64 },
     AddArc { start: vect2d, end: vect2d, mid: vect2d },
+    AddEllipticArc { center: vect2d, rx: f64, ry: f64, rotation: f64,
+        start: f64, end: f64, ccw: bool },
     ApplyCoincidentArcCenter { point: Ref<Point>, arc: Ref<Arc> },
     ApplyCoincidentArcStart { point: Ref<Point>, arc: Ref<Arc> },
     ApplyCoincidentArcEnd { point: Ref<Point>, arc: Ref<Arc> },
@@ -112,6 +114,7 @@ impl Action {
             Action::AddCircle { .. } => "Add circle".into(),
             Action::AddEllipse { .. } => "Add ellipse".into(),
             Action::AddArc { .. } => "Add arc".into(),
+            Action::AddEllipticArc { .. } => "Add elliptic arc".into(),
             Action::ApplyHorizontal { lines } => format!("Horizontal ({})", lines.len()),
             Action::ApplyVertical { lines } => format!("Vertical ({})", lines.len()),
             Action::ApplyCoincidentPP { .. } => "Coincident PP".into(),
@@ -505,8 +508,12 @@ impl Action {
             Action::AddArc { start, end, mid, .. } => {
                 if let Some((c, r, sa, ea, ccw)) = circumscribed_arc(*start, *end, *mid) {
                     sketch.add_arc_with_dir(c, r, sa, ea, false, ccw);
-                    sketch.solve(); // anchor drift before constraints are added
+                    sketch.solve();
                 }
+            }
+            Action::AddEllipticArc { center, rx, ry, rotation, start, end, ccw } => {
+                sketch.add_elliptic_arc(*center, *rx, *ry, *rotation, *start, *end, *ccw);
+                sketch.solve();
             }
             Action::ApplyHorizontal { lines } => {
                 for r in lines { sketch.lines[*r].constraints.horizontal = true; }
