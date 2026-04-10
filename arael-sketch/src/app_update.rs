@@ -35,9 +35,10 @@ impl eframe::App for EditorApp {
 
         // Global key handling (before any widgets process input)
         // Escape: if completions showing, consume the event, close popup, suppress until space/dot.
-        // If no completions but command focused, exit command mode.
-        if !self.completions.is_empty() || self.completion_suppressed {
-            // Consume Escape so TextEdit doesn't unfocus
+        // If completions are showing, Escape dismisses them (but keeps focus).
+        // If completions were just dismissed (suppressed), next Escape exits command mode.
+        if !self.completions.is_empty() {
+            // Consume Escape so TextEdit doesn't unfocus — just dismiss completions
             let esc = ctx.input_mut(|i| {
                 let mut found = false;
                 i.events.retain(|e| {
@@ -54,6 +55,7 @@ impl eframe::App for EditorApp {
             }
         } else if self.command_has_focus && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.command_has_focus = false;
+            self.completion_suppressed = false;
         }
         // Reset suppression when user types a separator (space, dot, semicolon, #, newline)
         if self.completion_suppressed {
@@ -389,21 +391,33 @@ impl eframe::App for EditorApp {
                 ui.colored_label(self.colors.error_text, err.as_str());
             }
 
-            // Help button at the bottom
+            // Help button + debug flags at the bottom
             ui.with_layout(egui::Layout::bottom_up(egui::Align::LEFT), |ui| {
-                if ui.button("Help").clicked() {
-                    self.show_command = true;
-                    self.command_focus = true;
-                    self.help_expand = true;
-                    self.help_scroll_top = true;
-                    self.command_output.clear();
-                    let results = self.run_commands("help full");
-                    for result in &results {
-                        if !result.output.is_empty() {
-                            self.command_output.push((result.output.clone(), result.is_error, result.markdown));
+                ui.horizontal(|ui| {
+                    if ui.button("Help").clicked() {
+                        self.show_command = true;
+                        self.command_focus = true;
+                        self.help_expand = true;
+                        self.help_scroll_top = true;
+                        self.command_output.clear();
+                        let results = self.run_commands("help full");
+                        for result in &results {
+                            if !result.output.is_empty() {
+                                self.command_output.push((result.output.clone(), result.is_error, result.markdown));
+                            }
                         }
                     }
-                }
+                    // Debug: command input state flags
+                    let flags = format!("[{}{}{}{}]",
+                        if self.command_has_focus { "F" } else { "." },
+                        if self.command_focus { "R" } else { "." },
+                        if !self.completions.is_empty() { "C" } else { "." },
+                        if self.completion_suppressed { "S" } else { "." },
+                    );
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(egui::RichText::new(flags).monospace().small().weak());
+                    });
+                });
             });
 
         });
@@ -1319,6 +1333,14 @@ impl eframe::App for EditorApp {
                             let end_snap = self.find_snap_target(mouse_sketch, hit_threshold);
                             let end_pos = end_snap.map_or(mouse_sketch, |(pos, _)| pos);
 
+                            // Reject zero-length lines
+                            let dx = end_pos.x - state.start.x;
+                            let dy = end_pos.y - state.start.y;
+                            if dx * dx + dy * dy < 1e-6 {
+                                // Put state back, ignore this click
+                                self.line_draw = Some(state);
+                            } else {
+
                             let action = Action::AddLine { p1: state.start, p2: end_pos };
                             self.exec(action);
                             let new_line = Ref::new(self.sketch.lines.slot_count() as u32 - 1);
@@ -1337,6 +1359,7 @@ impl eframe::App for EditorApp {
                                 start: end_pos,
                                 snap_start: Some(SnapTarget::LineP2(new_line)),
                             });
+                            } // end else (non-zero length)
                         } else {
                             // First click: start line, snap to nearby entity
                             let snap = self.find_snap_target(mouse_sketch, hit_threshold);

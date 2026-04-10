@@ -131,13 +131,13 @@ pub struct Point {
     [d1.x * sketch.drift_isigma, d1.y * sketch.drift_isigma,
      d2.x * sketch.drift_isigma, d2.y * sketch.drift_isigma]
 }))]
-// Drift: weak regularizer on length
+// Drift: weak regularizer on length (epsilon avoids sqrt singularity at zero length)
 #[arael(constraint(hb, {
     let dx = line.p2.x - line.p1.x;
     let dy = line.p2.y - line.p1.y;
     let dx0 = line.p2_value.x - line.p1_value.x;
     let dy0 = line.p2_value.y - line.p1_value.y;
-    [(sqrt(dx * dx + dy * dy) - sqrt(dx0 * dx0 + dy0 * dy0)) * sketch.drift_isigma]
+    [(sqrt(dx * dx + dy * dy + 1e-6) - sqrt(dx0 * dx0 + dy0 * dy0 + 1e-6)) * sketch.drift_isigma]
 }))]
 // Horizontal: p1.y == p2.y
 #[arael(constraint(hb, guard = self.constraints.horizontal, {
