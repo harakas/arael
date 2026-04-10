@@ -73,14 +73,29 @@ impl EditorApp {
                        offset: vect2d, text_along: f64, color: egui::Color32, is_radius: bool,
                        is_expr: bool, is_derived: bool) -> (egui::Pos2, egui::Pos2) {
         if is_radius {
-            if let DimensionKind::ArcRadius(r) = kind {
-                let a = &self.sketch.arcs[*r];
-                let angle = a.start_angle.value + offset.x;
+            let (arc_ref, is_b) = match kind {
+                DimensionKind::ArcRadius(r) => (Some(*r), false),
+                DimensionKind::ArcRadiusB(r) => (Some(*r), true),
+                _ => (None, false),
+            };
+            if let Some(r) = arc_ref {
+                let a = &self.sketch.arcs[r];
+                let (angle, rv) = if a.is_ellipse {
+                    // Ellipse: lock to major/minor axis, offset.x sign picks side
+                    let base = if is_b { a.rotation.value + std::f64::consts::FRAC_PI_2 }
+                               else { a.rotation.value };
+                    let angle = if offset.x < 0.0 { base + std::f64::consts::PI } else { base };
+                    let rv = if is_b { a.radius_b.value } else { a.radius.value };
+                    (angle, rv)
+                } else {
+                    // Circle: free angle from offset
+                    (a.start_angle.value + offset.x, a.radius.value)
+                };
                 let edge = vect2d::new(
-                    a.center.value.x + a.radius.value * angle.cos(),
-                    a.center.value.y + a.radius.value * angle.sin(),
+                    a.center.value.x + rv * angle.cos(),
+                    a.center.value.y + rv * angle.sin(),
                 );
-                let arrow_len = a.radius.value * 0.6;
+                let arrow_len = rv * 0.6;
                 let inner = vect2d::new(
                     edge.x - arrow_len * angle.cos(),
                     edge.y - arrow_len * angle.sin(),
@@ -100,9 +115,10 @@ impl EditorApp {
                 painter.line_segment([se, egui::Pos2::new(se.x + ax * asz - ay * asz * 0.4, se.y + ay * asz + ax * asz * 0.4)], stroke);
                 // Text along arrow
                 let mid = egui::Pos2::new((se.x + si.x) / 2.0, (se.y + si.y) / 2.0);
-                let text = if is_derived { format!("(R{:.2})", value) }
-                    else if is_expr { format!("fx: R{:.2}", value) }
-                    else { format!("R{:.2}", value) };
+                let label = if is_b { "Rb" } else { "R" };
+                let text = if is_derived { format!("({label}{:.2})", value) }
+                    else if is_expr { format!("fx: {label}{:.2}", value) }
+                    else { format!("{label}{:.2}", value) };
                 return self.draw_rotated_text(painter, mid, ax, ay, &text,
                     egui::FontId::proportional(12.0), color);
             }
@@ -693,20 +709,35 @@ impl EditorApp {
 
     // Compute the screen-space text segment for a dimension (for hit testing without drawing)
     pub fn dim_text_segment(&self, dim: &Dimension) -> (egui::Pos2, egui::Pos2) {
-        let is_radius = matches!(dim.kind, DimensionKind::ArcRadius(_));
-        let text = if is_radius { format!("R{:.2}", dim.value) } else { format!("{:.2}", dim.value) };
+        let is_radius = matches!(dim.kind, DimensionKind::ArcRadius(_) | DimensionKind::ArcRadiusB(_));
+        let text = if matches!(dim.kind, DimensionKind::ArcRadiusB(_)) { format!("Rb{:.2}", dim.value) }
+            else if is_radius { format!("R{:.2}", dim.value) }
+            else { format!("{:.2}", dim.value) };
         let char_width = 12.0 * 0.6;
         let total_width = text.len() as f32 * char_width;
 
         if is_radius {
-            if let DimensionKind::ArcRadius(r) = dim.kind {
+            let (arc_ref, is_b) = match dim.kind {
+                DimensionKind::ArcRadius(r) => (Some(r), false),
+                DimensionKind::ArcRadiusB(r) => (Some(r), true),
+                _ => (None, false),
+            };
+            if let Some(r) = arc_ref {
                 let a = &self.sketch.arcs[r];
-                let angle = a.start_angle.value + dim.offset.x;
+                let (angle, rv) = if a.is_ellipse {
+                    let base = if is_b { a.rotation.value + std::f64::consts::FRAC_PI_2 }
+                               else { a.rotation.value };
+                    let angle = if dim.offset.x < 0.0 { base + std::f64::consts::PI } else { base };
+                    let rv = if is_b { a.radius_b.value } else { a.radius.value };
+                    (angle, rv)
+                } else {
+                    (a.start_angle.value + dim.offset.x, a.radius.value)
+                };
                 let edge = vect2d::new(
-                    a.center.value.x + a.radius.value * angle.cos(),
-                    a.center.value.y + a.radius.value * angle.sin(),
+                    a.center.value.x + rv * angle.cos(),
+                    a.center.value.y + rv * angle.sin(),
                 );
-                let arrow_len = a.radius.value * 0.6;
+                let arrow_len = rv * 0.6;
                 let inner = vect2d::new(
                     edge.x - arrow_len * angle.cos(),
                     edge.y - arrow_len * angle.sin(),
@@ -1645,7 +1676,7 @@ impl EditorApp {
                         else if selected { dim_sel_color }
                         else if dim_hovered { dim_hover_color }
                         else { dim_color };
-            let is_radius = matches!(dim.kind, DimensionKind::ArcRadius(_));
+            let is_radius = matches!(dim.kind, DimensionKind::ArcRadius(_) | DimensionKind::ArcRadiusB(_));
             let is_expr = dim.expr_str.is_some();
             self.draw_dimension(painter, &dim.kind, dim.value, dim.offset, dim.text_along, color, is_radius, is_expr, dim.derived);
         }

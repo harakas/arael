@@ -1156,14 +1156,35 @@ impl eframe::App for EditorApp {
                             // Update dimension offset and text_along from mouse
                             if dim_idx < self.sketch.dimensions.len() {
                                 let kind = self.sketch.dimensions[dim_idx].kind.clone();
-                                let is_radius = matches!(kind, DimensionKind::ArcRadius(_));
+                                let is_radius = matches!(kind, DimensionKind::ArcRadius(_) | DimensionKind::ArcRadiusB(_));
                                 if is_radius {
-                                    if let DimensionKind::ArcRadius(r) = kind {
+                                    let (arc_ref, is_b) = match kind {
+                                        DimensionKind::ArcRadius(r) => (Some(r), false),
+                                        DimensionKind::ArcRadiusB(r) => (Some(r), true),
+                                        _ => (None, false),
+                                    };
+                                    if let Some(r) = arc_ref {
                                         let a = &self.sketch.arcs[r];
-                                        let abs_angle = (mouse_sketch.y - a.center.value.y)
-                                            .atan2(mouse_sketch.x - a.center.value.x);
-                                        let rel_angle = abs_angle - a.start_angle.value;
-                                        self.sketch.dimensions[dim_idx].offset = vect2d::new(rel_angle, 0.0);
+                                        if a.is_ellipse {
+                                            // Project mouse onto the relevant axis to determine side
+                                            let dx = mouse_sketch.x - a.center.value.x;
+                                            let dy = mouse_sketch.y - a.center.value.y;
+                                            let axis_angle = if is_b {
+                                                a.rotation.value + std::f64::consts::FRAC_PI_2
+                                            } else {
+                                                a.rotation.value
+                                            };
+                                            // Dot product with axis direction gives sign
+                                            let proj = dx * axis_angle.cos() + dy * axis_angle.sin();
+                                            let sign = if proj >= 0.0 { 1.0 } else { -1.0 };
+                                            self.sketch.dimensions[dim_idx].offset = vect2d::new(sign, 0.0);
+                                        } else {
+                                            // Circle: free angle
+                                            let abs_angle = (mouse_sketch.y - a.center.value.y)
+                                                .atan2(mouse_sketch.x - a.center.value.x);
+                                            let rel_angle = abs_angle - a.start_angle.value;
+                                            self.sketch.dimensions[dim_idx].offset = vect2d::new(rel_angle, 0.0);
+                                        }
                                     }
                                 } else if let DimensionKind::ArcSweep(r) = kind {
                                     let a = &self.sketch.arcs[r];
@@ -1491,14 +1512,41 @@ impl eframe::App for EditorApp {
                     if self.dim_placing {
                         // Phase 2: positioning with mouse, click to confirm
                         if let Some(ref kind) = self.dim_kind {
-                            if matches!(kind, DimensionKind::ArcRadius(r) if self.sketch.arcs.contains(*r)) {
-                                if let DimensionKind::ArcRadius(r) = kind {
-                                    let a = &self.sketch.arcs[*r];
-                                    let abs_angle = (mouse_sketch.y - a.center.value.y)
-                                        .atan2(mouse_sketch.x - a.center.value.x);
-                                    let rel_angle = abs_angle - a.start_angle.value;
-                                    self.dim_offset = vect2d::new(rel_angle, 0.0);
-                                    self.dim_text_along = 0.0;
+                            if matches!(kind, DimensionKind::ArcRadius(_) | DimensionKind::ArcRadiusB(_)) {
+                                let arc_ref = match kind {
+                                    DimensionKind::ArcRadius(r) | DimensionKind::ArcRadiusB(r) => Some(*r),
+                                    _ => None,
+                                };
+                                if let Some(r) = arc_ref {
+                                    if self.sketch.arcs.contains(r) {
+                                        let a = &self.sketch.arcs[r];
+                                        if a.is_ellipse {
+                                            let dx = mouse_sketch.x - a.center.value.x;
+                                            let dy = mouse_sketch.y - a.center.value.y;
+                                            let rot = a.rotation.value;
+                                            let major = (dx * rot.cos() + dy * rot.sin()).abs();
+                                            let minor = (-dx * rot.sin() + dy * rot.cos()).abs();
+                                            let is_b = minor > major;
+                                            // Switch dimension kind dynamically
+                                            self.dim_kind = Some(if is_b {
+                                                DimensionKind::ArcRadiusB(r)
+                                            } else {
+                                                DimensionKind::ArcRadius(r)
+                                            });
+                                            let measured = self.measure_dimension(self.dim_kind.as_ref().unwrap());
+                                            self.dim_input = format!("{:.4}", measured);
+                                            // Pick side based on projection onto the chosen axis
+                                            let axis_angle = if is_b { rot + std::f64::consts::FRAC_PI_2 } else { rot };
+                                            let proj = dx * axis_angle.cos() + dy * axis_angle.sin();
+                                            self.dim_offset = vect2d::new(if proj >= 0.0 { 1.0 } else { -1.0 }, 0.0);
+                                        } else {
+                                            let abs_angle = (mouse_sketch.y - a.center.value.y)
+                                                .atan2(mouse_sketch.x - a.center.value.x);
+                                            let rel_angle = abs_angle - a.start_angle.value;
+                                            self.dim_offset = vect2d::new(rel_angle, 0.0);
+                                        }
+                                        self.dim_text_along = 0.0;
+                                    }
                                 }
                             } else if let DimensionKind::ArcSweep(r) = kind {
                                 let a = &self.sketch.arcs[*r];
@@ -1607,7 +1655,7 @@ impl eframe::App for EditorApp {
                             if hit_geometry {
                                 self.dim_placing = false;
                                 self.toggle_selection(hit.unwrap());
-                                if let Some(kind) = self.selection_to_dim_kind() {
+                                if let Some(kind) = self.selection_to_dim_kind(Some(mouse_sketch)) {
                                     let measured = self.measure_dimension(&kind);
                                     self.dim_input = format!("{:.4}", measured);
                                     self.dim_kind = Some(kind);
@@ -1636,7 +1684,7 @@ impl eframe::App for EditorApp {
                                     _ => {}
                                 }
                                 // Check if we can form a dimension
-                                if let Some(kind) = self.selection_to_dim_kind() {
+                                if let Some(kind) = self.selection_to_dim_kind(Some(mouse_sketch)) {
                                     let measured = self.measure_dimension(&kind);
                                     self.dim_input = format!("{:.4}", measured);
                                     self.dim_kind = Some(kind);
@@ -1687,7 +1735,7 @@ impl eframe::App for EditorApp {
             if (self.dim_placing || (self.dim_editing && self.dim_edit_index.is_none())) && self.dim_kind.is_some() {
                 let kind = self.dim_kind.clone().unwrap();
                 let measured = self.measure_dimension(&kind);
-                let is_radius = matches!(kind, DimensionKind::ArcRadius(_));
+                let is_radius = matches!(kind, DimensionKind::ArcRadius(_) | DimensionKind::ArcRadiusB(_));
                 let preview_color = self.colors.dimension_preview;
                 self.draw_dimension(&painter, &kind, measured, self.dim_offset, self.dim_text_along, preview_color, is_radius, false, false);
             }

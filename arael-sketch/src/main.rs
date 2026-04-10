@@ -1417,12 +1417,29 @@ impl EditorApp {
     }
 
     // Try to determine DimensionKind from current selection
-    fn selection_to_dim_kind(&self) -> Option<DimensionKind> {
+    fn selection_to_dim_kind(&self, mouse: Option<vect2d>) -> Option<DimensionKind> {
         let sel = &self.selection;
         if sel.len() == 1 {
             match sel[0] {
                 Selection::Line(r) => return Some(DimensionKind::LineLength(r)),
-                Selection::Arc(r) => return Some(DimensionKind::ArcRadius(r)),
+                Selection::Arc(r) => {
+                    let a = &self.sketch.arcs[r];
+                    if a.is_ellipse {
+                        if let Some(m) = mouse {
+                            // Project mouse onto major/minor axes to pick radius or radius_b
+                            let dx = m.x - a.center.value.x;
+                            let dy = m.y - a.center.value.y;
+                            let rot = a.rotation.value;
+                            // Component along major axis vs minor axis
+                            let major = (dx * rot.cos() + dy * rot.sin()).abs();
+                            let minor = (-dx * rot.sin() + dy * rot.cos()).abs();
+                            if minor > major {
+                                return Some(DimensionKind::ArcRadiusB(r));
+                            }
+                        }
+                    }
+                    return Some(DimensionKind::ArcRadius(r));
+                }
                 _ => {}
             }
         }
@@ -1514,8 +1531,16 @@ impl EditorApp {
             }
             DimensionKind::ArcRadius(r) | DimensionKind::ArcRadiusB(r) => {
                 let a = &self.sketch.arcs[*r];
-                let rv = if matches!(kind, DimensionKind::ArcRadiusB(_)) { a.radius_b.value } else { a.radius.value };
-                let edge = vect2d::new(a.center.value.x + rv, a.center.value.y);
+                let is_b = matches!(kind, DimensionKind::ArcRadiusB(_));
+                let rv = if is_b { a.radius_b.value } else { a.radius.value };
+                let angle = if a.is_ellipse {
+                    if is_b { a.rotation.value + std::f64::consts::FRAC_PI_2 }
+                    else { a.rotation.value }
+                } else { 0.0 };
+                let edge = vect2d::new(
+                    a.center.value.x + rv * angle.cos(),
+                    a.center.value.y + rv * angle.sin(),
+                );
                 (a.center.value, edge)
             }
             DimensionKind::ArcSweep(r) => {
