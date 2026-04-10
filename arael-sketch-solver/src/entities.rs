@@ -139,6 +139,12 @@ pub struct Point {
     let dy0 = line.p2_value.y - line.p1_value.y;
     [(sqrt(dx * dx + dy * dy + 1e-6) - sqrt(dx0 * dx0 + dy0 * dy0 + 1e-6)) * sketch.drift_isigma]
 }))]
+// Drift: weak regularizer on angle (rad_diff handles wraparound)
+#[arael(constraint(hb, guard = (self.p1.value.x != self.p2.value.x || self.p1.value.y != self.p2.value.y), {
+    let angle = atan2(line.p2.y - line.p1.y, line.p2.x - line.p1.x);
+    let angle0 = atan2(line.p2_value.y - line.p1_value.y, line.p2_value.x - line.p1_value.x);
+    [rad_diff(angle, angle0) * sketch.drift_isigma]
+}))]
 // Horizontal: p1.y == p2.y
 #[arael(constraint(hb, guard = self.constraints.horizontal, {
     [(line.p1.y - line.p2.y) * sketch.constraint_isigma]
