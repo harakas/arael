@@ -12,6 +12,7 @@ impl Expr {
                     .ok_or_else(|| format!("unbound symbol: {name}"))
             }
             Expr::Const(v) => Ok(*v),
+            Expr::NamedConst { value, .. } => Ok(*value),
             Expr::Neg(a) => Ok(-a.eval(vars)?),
             Expr::Add(a, b) => Ok(a.eval(vars)? + b.eval(vars)?),
             Expr::Sub(a, b) => Ok(a.eval(vars)? - b.eval(vars)?),
@@ -62,7 +63,7 @@ impl Expr {
     pub fn subs(&self, var: &str, replacement: &E) -> E {
         match self {
             Expr::Sym(name) if name == var => replacement.clone(),
-            Expr::Sym(_) | Expr::Const(_) => E::new(self.clone()),
+            Expr::Sym(_) | Expr::Const(_) | Expr::NamedConst { .. } => E::new(self.clone()),
             Expr::Neg(a) => -a.subs(var, replacement),
             Expr::Add(a, b) => a.subs(var, replacement) + b.subs(var, replacement),
             Expr::Sub(a, b) => a.subs(var, replacement) - b.subs(var, replacement),
@@ -106,7 +107,7 @@ impl Expr {
     fn collect_vars(&self, set: &mut BTreeSet<String>) {
         match self {
             Expr::Sym(name) => { set.insert(name.clone()); }
-            Expr::Const(_) => {}
+            Expr::Const(_) | Expr::NamedConst { .. } => {}
             Expr::Neg(a) => a.collect_vars(set),
             Expr::Add(a, b) | Expr::Sub(a, b) | Expr::Mul(a, b)
             | Expr::Div(a, b) | Expr::Pow(a, b) | Expr::Atan2(a, b) => {

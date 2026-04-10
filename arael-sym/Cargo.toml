@@ -10,5 +10,8 @@ repository = "https://github.com/harakas/arael"
 keywords = ["symbolic-math", "differentiation", "computer-algebra", "code-generation", "cse"]
 categories = ["mathematics", "science"]
 
+[package.metadata.docs.rs]
+rustdoc-args = ["--html-in-header", "docs-header.html"]
+
 [dependencies]
 arael-sym-macros = { version = "0.3.1", path = "../arael-sym-macros" }

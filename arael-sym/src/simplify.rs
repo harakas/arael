@@ -520,8 +520,64 @@ impl Expr {
     }
 
     fn simplify_once(&self) -> E {
+        /// Check if expression is the named constant "pi".
+        fn is_pi(e: &E) -> bool {
+            matches!(e.as_ref(), Expr::NamedConst { name, .. } if name == "pi")
+        }
+
+        /// Check if expression is the named constant "e" (Euler's number).
+        fn is_euler(e: &E) -> bool {
+            matches!(e.as_ref(), Expr::NamedConst { name, .. } if name == "e")
+        }
+
+        /// Extract coefficient k if expression is of the form k*pi.
+        /// Returns Some(k) for: pi->1, 2*pi->2, pi/2->0.5, -pi->-1, etc.
+        fn pi_coeff(e: &E) -> Option<f64> {
+            if is_pi(e) { return Some(1.0); }
+            match e.as_ref() {
+                Expr::Neg(inner) => pi_coeff(inner).map(|c| -c),
+                Expr::Mul(a, b) => {
+                    if let Expr::Const(c) = a.as_ref() { if is_pi(b) { return Some(*c); } }
+                    if let Expr::Const(c) = b.as_ref() { if is_pi(a) { return Some(*c); } }
+                    None
+                }
+                Expr::Div(a, b) => {
+                    if let Expr::Const(d) = b.as_ref() { return pi_coeff(a).map(|c| c / d); }
+                    None
+                }
+                _ => None,
+            }
+        }
+
+        /// Try to simplify sin(k*pi) for special values of k.
+        /// Uses twelfths: k*12 mod 24 to cover pi/6, pi/4, pi/3, pi/2, etc.
+        fn sin_pi(k: f64) -> Option<E> {
+            let twelfths = k * 12.0;
+            if (twelfths - twelfths.round()).abs() > 1e-9 { return None; }
+            let idx = ((twelfths.round() as i64) % 24 + 24) % 24;
+            // sin at 0, pi/12, pi/6, pi/4, pi/3, 5pi/12, pi/2, ...
+            match idx {
+                0 | 12 => Some(constant(0.0)),                          // sin(0), sin(pi)
+                6 | 18 => Some(if idx == 6 { constant(1.0) } else { constant(-1.0) }), // sin(pi/2), sin(3pi/2)
+                2 | 10 => Some(constant(0.5)),                          // sin(pi/6), sin(5pi/6)
+                14 | 22 => Some(constant(-0.5)),                        // sin(7pi/6), sin(11pi/6)
+                3 | 9 => Some(crate::sqrt(constant(2.0)) / 2.0),              // sin(pi/4), sin(3pi/4)
+                15 | 21 => Some(-crate::sqrt(constant(2.0)) / 2.0),           // sin(5pi/4), sin(7pi/4)
+                4 | 8 => Some(crate::sqrt(constant(3.0)) / 2.0),              // sin(pi/3), sin(2pi/3)
+                16 | 20 => Some(-crate::sqrt(constant(3.0)) / 2.0),           // sin(4pi/3), sin(5pi/3)
+                _ => None,
+            }
+        }
+
+        /// Try to simplify cos(k*pi) for special values of k.
+        fn cos_pi(k: f64) -> Option<E> {
+            // cos(k*pi) = sin((k + 0.5)*pi)
+            sin_pi(k + 0.5)
+        }
+
+
         match self {
-            Expr::Sym(_) | Expr::Const(_) => E::new(self.clone()),
+            Expr::Sym(_) | Expr::Const(_) | Expr::NamedConst { .. } => E::new(self.clone()),
 
             Expr::Neg(a) => {
                 let a = a.simplify_once();
@@ -576,6 +632,11 @@ impl Expr {
                 let a = a.simplify_once();
                 if let Expr::Exp(inner) = a.as_ref() { return inner.clone(); }
                 if let Expr::Const(v) = a.as_ref() { return constant(v.ln()); }
+                if is_euler(&a) { return constant(1.0); }
+                // ln(e^n) -> n
+                if let Expr::Pow(base, exp) = a.as_ref() {
+                    if is_euler(base) { return exp.clone(); }
+                }
                 E::new(Expr::Ln(a))
             }
             Expr::Exp(a) => {
@@ -585,10 +646,28 @@ impl Expr {
                 E::new(Expr::Exp(a))
             }
 
-            // Unary functions: constant-fold
-            Expr::Sin(a) => { let a = a.simplify_once(); if let Expr::Const(v) = a.as_ref() { return constant(v.sin()); } E::new(Expr::Sin(a)) }
-            Expr::Cos(a) => { let a = a.simplify_once(); if let Expr::Const(v) = a.as_ref() { return constant(v.cos()); } E::new(Expr::Cos(a)) }
-            Expr::Tan(a) => { let a = a.simplify_once(); if let Expr::Const(v) = a.as_ref() { return constant(v.tan()); } E::new(Expr::Tan(a)) }
+            // Trig functions: constant-fold + pi rules
+            Expr::Sin(a) => {
+                let a = a.simplify_once();
+                if let Expr::Const(v) = a.as_ref() { return constant(v.sin()); }
+                if let Some(k) = pi_coeff(&a) { if let Some(v) = sin_pi(k) { return v; } }
+                E::new(Expr::Sin(a))
+            }
+            Expr::Cos(a) => {
+                let a = a.simplify_once();
+                if let Expr::Const(v) = a.as_ref() { return constant(v.cos()); }
+                if let Some(k) = pi_coeff(&a) { if let Some(v) = cos_pi(k) { return v; } }
+                E::new(Expr::Cos(a))
+            }
+            Expr::Tan(a) => {
+                let a = a.simplify_once();
+                if let Expr::Const(v) = a.as_ref() { return constant(v.tan()); }
+                // tan(n*pi) = 0 for integer n
+                if let Some(k) = pi_coeff(&a) {
+                    if (k - k.round()).abs() < 1e-9 { return constant(0.0); }
+                }
+                E::new(Expr::Tan(a))
+            }
             Expr::Asin(a) => { let a = a.simplify_once(); if let Expr::Const(v) = a.as_ref() { return constant(v.asin()); } E::new(Expr::Asin(a)) }
             Expr::Acos(a) => { let a = a.simplify_once(); if let Expr::Const(v) = a.as_ref() { return constant(v.acos()); } E::new(Expr::Acos(a)) }
             Expr::Atan(a) => { let a = a.simplify_once(); if let Expr::Const(v) = a.as_ref() { return constant(v.atan()); } E::new(Expr::Atan(a)) }
@@ -660,7 +739,7 @@ impl Expr {
 
     fn expand_inner(&self) -> E {
         match self {
-            Expr::Sym(_) | Expr::Const(_) => E::new(self.clone()),
+            Expr::Sym(_) | Expr::Const(_) | Expr::NamedConst { .. } => E::new(self.clone()),
             Expr::Neg(a) => E::new(Expr::Neg(a.expand_inner())),
             Expr::Add(a, b) => E::new(Expr::Add(a.expand_inner(), b.expand_inner())),
             Expr::Sub(a, b) => E::new(Expr::Sub(a.expand_inner(), b.expand_inner())),

@@ -151,6 +151,55 @@
 //! assert!((f.eval(&vars).unwrap() - 1.0).abs() < 1e-10);
 //! ```
 //!
+//! ## Named constants
+//!
+//! Named constants survive simplification (unlike numeric `Const` which may
+//! be folded away). Built-in: [`pi`], [`epsilon`], [`euler`]. Custom
+//! constants via [`named_const`]. The [`sym!`] macro accepts `pi` and
+//! `epsilon` as bare identifiers.
+//!
+//! ```
+//! use arael_sym::*;
+//! sym! {
+//!     let x = symbol("x");
+//!     let f = x * x + epsilon;           // bare identifier, no parens needed
+//!     assert_eq!(format!("{}", f), "x^2 + epsilon");
+//!     assert_eq!(format!("{}", sin(pi).simplify()), "0");
+//!     assert_eq!(format!("{}", cos(pi).simplify()), "-1");
+//!     assert_eq!(format!("{}", ln(euler()).simplify()), "1");
+//! };
+//! ```
+//!
+//! ## Identity and evaluation order
+//!
+//! The simplifier flattens and reorders additive terms, which can cause
+//! floating-point cancellation in generated code. For example,
+//! `1 - x^2 + epsilon^2` might be reordered to `-x^2 + epsilon^2 + 1`,
+//! and at `x=1` the tiny `epsilon^2` gets absorbed into `-1 + 1` before
+//! it can contribute.
+//!
+//! The [`identity`] function acts as a barrier: `identity(expr)` evaluates
+//! to `expr` and differentiates as `1`, but the simplifier cannot reorder
+//! terms across it. Codegen wraps the body in parentheses to preserve
+//! evaluation order in the generated Rust code.
+//!
+//! ```
+//! use arael_sym::*;
+//! sym! {
+//!     let x = symbol("x");
+//!     // Without identity: terms may reorder, epsilon^2 lost at x=1
+//!     // With identity: (1 - x^2) evaluates first, then epsilon^2 is added
+//!     let safe = identity(c(1.0) - x * x) + epsilon * epsilon;
+//!     let code = safe.to_rust("f64");
+//!     // Body is wrapped in parens in generated code
+//!     assert!(code.contains("(-x.powf(2.0_f64) + 1.0_f64)"));
+//! };
+//! ```
+//!
+//! This pattern is used internally by [`asin_safe`] and [`acos_safe`] to
+//! keep `epsilon^2` from being lost to floating-point cancellation in the
+//! derivative `1/sqrt(1 - x^2 + epsilon^2)`.
+//!
 //! ## Custom functions
 //!
 //! Define reusable symbolic functions with automatic differentiation.
@@ -265,7 +314,7 @@ impl E {
     fn collect_symbols(&self, out: &mut std::collections::HashSet<String>) {
         match &*self.0 {
             Expr::Sym(s) => { out.insert(s.clone()); }
-            Expr::Const(_) => {}
+            Expr::Const(_) | Expr::NamedConst { .. } => {}
             Expr::Neg(a) | Expr::Sin(a) | Expr::Cos(a) | Expr::Tan(a)
             | Expr::Asin(a) | Expr::Acos(a) | Expr::Atan(a)
             | Expr::Sinh(a) | Expr::Cosh(a) | Expr::Tanh(a)
@@ -295,7 +344,7 @@ impl E {
             if self == from { return to.clone(); }
         }
         match &*self.0 {
-            Expr::Sym(_) | Expr::Const(_) => self.clone(),
+            Expr::Sym(_) | Expr::Const(_) | Expr::NamedConst { .. } => self.clone(),
             Expr::Neg(a) => -a.substitute(subs),
             Expr::Add(a, b) => a.substitute(subs) + b.substitute(subs),
             Expr::Sub(a, b) => a.substitute(subs) - b.substitute(subs),
@@ -399,6 +448,15 @@ pub enum Expr {
     Heaviside(E),
     /// Clamp value to [lo, hi]. Derivative passes through (= d(val)/dvar).
     Clamp(E, E, E),
+    /// Named constant (pi, epsilon, e, or user-defined).
+    /// Survives simplification (unlike Const which may be folded away).
+    NamedConst {
+        name: String,
+        value: f64,
+        rust_f32: String,
+        rust_f64: String,
+        latex: String,
+    },
     /// User-defined function application.
     Func {
         /// Function name (for display).
@@ -502,6 +560,10 @@ impl Hash for Expr {
                 b.hash(state);
                 c.hash(state);
             }
+            Expr::NamedConst { name, value, .. } => {
+                name.hash(state);
+                value.to_bits().hash(state);
+            }
             Expr::Func { name, params, kind, args } => {
                 name.hash(state);
                 params.hash(state);
@@ -528,6 +590,33 @@ pub fn symbol(name: &str) -> E {
 /// Create a numeric constant.
 pub fn constant(val: f64) -> E {
     E::new(Expr::Const(val))
+}
+
+/// Create a named constant with explicit display, eval, codegen, and LaTeX representations.
+pub fn named_const(name: &str, value: f64, rust_f32: &str, rust_f64: &str, latex: &str) -> E {
+    E::new(Expr::NamedConst {
+        name: name.to_string(), value,
+        rust_f32: rust_f32.to_string(), rust_f64: rust_f64.to_string(),
+        latex: latex.to_string(),
+    })
+}
+
+/// $\pi = 3.14159\ldots$
+pub fn pi() -> E {
+    named_const("pi", std::f64::consts::PI,
+        "std::f32::consts::PI", "std::f64::consts::PI", "\\pi")
+}
+
+/// Machine epsilon $\epsilon$ (`f64::EPSILON` $\approx 2.22 \times 10^{-16}$).
+pub fn epsilon() -> E {
+    named_const("epsilon", f64::EPSILON,
+        "f32::EPSILON", "f64::EPSILON", "\\epsilon")
+}
+
+/// Euler's number $e = 2.71828\ldots$
+pub fn euler() -> E {
+    named_const("e", std::f64::consts::E,
+        "std::f32::consts::E", "std::f64::consts::E", "e")
 }
 
 /// Short alias for [`constant`]. Common in math notation.
@@ -748,12 +837,10 @@ pub fn simple_func1_derivs(
 /// ```
 /// use arael_sym::*;
 /// sym! {
-///     let safe_atan2 = simple_func2_derivs("safe_atan2",
-///         |y, x| atan2(y, x),
-///         |y, x| [x / (x*x + y*y + 1e-10), -y / (x*x + y*y + 1e-10)]);
+///     // Or use the built-in atan2_safe():
 ///     let a = symbol("a");
-///     let f = safe_atan2(sin(a), cos(a));
-///     assert_eq!(format!("{}", f), "safe_atan2(sin(a), cos(a))");
+///     let f = atan2_safe(sin(a), cos(a));
+///     assert_eq!(format!("{}", f), "atan2_safe(sin(a), cos(a))");
 /// };
 /// ```
 pub fn simple_func2_derivs(
@@ -922,18 +1009,80 @@ fn rad2rad(v: f64) -> f64 {
     }
 }
 
-/// Rollover-safe radian difference: `(a - b)` normalized to [-pi, pi].
+/// Rollover-safe radian difference: $(a - b)$ normalized to $[-\pi, \pi]$.
+///
+/// Differentiation treats it as $a - b$: $\frac{\partial}{\partial a} = 1$, $\frac{\partial}{\partial b} = -1$.
 pub fn rad_diff(a: E, b: E) -> E {
     extern_func2("rad_diff", "arael::utils::rad_diff",
         grad2(|a, b| a - b),
         |args: &[f64]| rad2rad(args[0] - args[1]))(a, b)
 }
 
-/// Rollover-safe radian sum: `(a + b)` normalized to [-pi, pi].
+/// Rollover-safe radian sum: $(a + b)$ normalized to $[-\pi, \pi]$.
+///
+/// Differentiation treats it as $a + b$: $\frac{\partial}{\partial a} = 1$, $\frac{\partial}{\partial b} = 1$.
 pub fn rad_sum(a: E, b: E) -> E {
     extern_func2("rad_sum", "arael::utils::rad_sum",
         grad2(|a, b| a + b),
         |args: &[f64]| rad2rad(args[0] + args[1]))(a, b)
+}
+
+/// Identity function: $\text{identity}(x) = x$, $\frac{d}{dx} = 1$.
+///
+/// The simplifier does not look inside Func nodes, so `identity(a - b)`
+/// prevents term reordering across the boundary. Codegen wraps the inlined
+/// body in parentheses to preserve evaluation order.
+///
+/// Use this to guard expressions against floating-point cancellation.
+/// For example, $\text{identity}(1 - x^2) + \epsilon^2$ ensures
+/// the subtraction evaluates first, then $\epsilon^2$ is added to the result.
+pub fn identity(x: E) -> E {
+    simple_func1("identity", |t| t)(x)
+}
+
+/// Safe atan2 with non-diverging derivatives.
+///
+/// $$\text{atan2\\_safe}(y, x) = \text{atan2}(y, x)$$
+///
+/// $$\frac{\partial}{\partial y} = \frac{x}{x^2 + y^2 + \epsilon^2}, \quad
+///   \frac{\partial}{\partial x} = \frac{-y}{x^2 + y^2 + \epsilon^2}$$
+///
+/// The $\epsilon^2$ term prevents division by zero at $(0, 0)$.
+pub fn atan2_safe(y: E, x: E) -> E {
+    simple_func2_derivs("atan2_safe",
+        |y, x| atan2(y, x),
+        |y, x| {
+            let eps2 = epsilon() * epsilon();
+            let d = x.clone()*x.clone() + y.clone()*y.clone() + eps2;
+            [x / d.clone(), -y / d]
+        })(y, x)
+}
+
+/// Safe asin with clamped domain and non-diverging derivative.
+///
+/// $$\text{asin\\_safe}(x) = \arcsin(\text{clamp}(x, -1, 1))$$
+///
+/// $$\frac{d}{dx} = \frac{1}{\sqrt{\text{identity}(1 - x^2) + \epsilon^2}}$$
+///
+/// The [`identity`] guard prevents the simplifier from reordering
+/// $1 - x^2$ and $\epsilon^2$, avoiding floating-point cancellation.
+pub fn asin_safe(x: E) -> E {
+    simple_func1_derivs("asin_safe",
+        |x| asin(clamp(x, c(-1.0), c(1.0))),
+        |x| [c(1.0) / sqrt(identity(c(1.0) - x.clone()*x) + epsilon()*epsilon())]
+    )(x)
+}
+
+/// Safe acos with clamped domain and non-diverging derivative.
+///
+/// $$\text{acos\\_safe}(x) = \arccos(\text{clamp}(x, -1, 1))$$
+///
+/// $$\frac{d}{dx} = \frac{-1}{\sqrt{\text{identity}(1 - x^2) + \epsilon^2}}$$
+pub fn acos_safe(x: E) -> E {
+    simple_func1_derivs("acos_safe",
+        |x| acos(clamp(x, c(-1.0), c(1.0))),
+        |x| [-c(1.0) / sqrt(identity(c(1.0) - x.clone()*x) + epsilon()*epsilon())]
+    )(x)
 }
 
 // Re-export linalg types
@@ -1138,57 +1287,6 @@ mod tests {
     // --- Simple func derivs tests ---
 
     #[test]
-    fn simple_func_derivs_diff() {
-        // safe_atan2 with epsilon in denominator
-        sym! {
-            let safe_atan2 = simple_func2_derivs("safe_atan2",
-                |y, x| atan2(y, x),
-                |y, x| [x / (x*x + y*y + 1e-10), -y / (x*x + y*y + 1e-10)]);
-            let a = symbol("a");
-            let b = symbol("b");
-            let f = safe_atan2(a, b);
-            // d/da: uses explicit deriv, not auto-diff of atan2
-            let da = f.diff("a");
-            let vars = std::collections::HashMap::from([("a", 1.0), ("b", 1.0)]);
-            let v = da.eval(&vars).unwrap();
-            assert!((v - 0.5).abs() < 1e-10, "d/da at (1,1) = {}, expected 0.5", v);
-        }
-    }
-
-    #[test]
-    fn simple_func_derivs_eval() {
-        // eval uses the body, not the derivs
-        sym! {
-            let safe_atan2 = simple_func2_derivs("safe_atan2",
-                |y, x| atan2(y, x),
-                |y, x| [x / (x*x + y*y + 1e-10), -y / (x*x + y*y + 1e-10)]);
-            let a = symbol("a");
-            let b = symbol("b");
-            let f = safe_atan2(a, b);
-            let vars = std::collections::HashMap::from([("a", 1.0), ("b", 1.0)]);
-            let v = f.eval(&vars).unwrap();
-            assert!((v - std::f64::consts::FRAC_PI_4).abs() < 1e-10);
-        }
-    }
-
-    #[test]
-    fn simple_func_derivs_chain_rule() {
-        sym! {
-            let safe_atan2 = simple_func2_derivs("safe_atan2",
-                |y, x| atan2(y, x),
-                |y, x| [x / (x*x + y*y + 1e-10), -y / (x*x + y*y + 1e-10)]);
-            let t = symbol("t");
-            // f = safe_atan2(sin(t), cos(t)) = t (near 0)
-            let f = safe_atan2(sin(t), cos(t));
-            // df/dt = cos(t)*cos(t)/(1+eps) + sin(t)*sin(t)/(1+eps) ~ 1
-            let df = f.diff("t");
-            let vars = std::collections::HashMap::from([("t", 0.5)]);
-            let v = df.eval(&vars).unwrap();
-            assert!((v - 1.0).abs() < 1e-8, "df/dt at t=0.5 = {}, expected 1", v);
-        }
-    }
-
-    #[test]
     fn simple_func_derivs_codegen() {
         // codegen should inline the body, not the derivs
         sym! {
@@ -1198,20 +1296,125 @@ mod tests {
         }
     }
 
+    // --- Safe function tests ---
+
     #[test]
-    fn simple_func_derivs_at_zero() {
-        // safe_atan2(0, 0) should not produce NaN in derivative
+    fn atan2_safe_diff() {
         sym! {
-            let safe_atan2 = simple_func2_derivs("safe_atan2",
-                |y, x| atan2(y, x),
-                |y, x| [x / (x*x + y*y + 1e-10), -y / (x*x + y*y + 1e-10)]);
             let a = symbol("a");
             let b = symbol("b");
-            let f = safe_atan2(a, b);
+            let f = atan2_safe(a, b);
             let da = f.diff("a");
-            let vars = std::collections::HashMap::from([("a", 0.0), ("b", 0.0)]);
+            let vars = HashMap::from([("a", 1.0), ("b", 1.0)]);
+            let v = da.eval(&vars).unwrap();
+            assert!((v - 0.5).abs() < 1e-10, "d/da at (1,1) = {}, expected 0.5", v);
+        }
+    }
+
+    #[test]
+    fn atan2_safe_eval() {
+        sym! {
+            let a = symbol("a");
+            let b = symbol("b");
+            let f = atan2_safe(a, b);
+            let vars = HashMap::from([("a", 1.0), ("b", 1.0)]);
+            let v = f.eval(&vars).unwrap();
+            assert!((v - std::f64::consts::FRAC_PI_4).abs() < 1e-10);
+        }
+    }
+
+    #[test]
+    fn atan2_safe_chain_rule() {
+        sym! {
+            let t = symbol("t");
+            let f = atan2_safe(sin(t), cos(t));
+            let df = f.diff("t");
+            let vars = HashMap::from([("t", 0.5)]);
+            let v = df.eval(&vars).unwrap();
+            assert!((v - 1.0).abs() < 1e-8, "df/dt at t=0.5 = {}, expected 1", v);
+        }
+    }
+
+    #[test]
+    fn atan2_safe_at_zero() {
+        sym! {
+            let a = symbol("a");
+            let b = symbol("b");
+            let da = atan2_safe(a, b).diff("a");
+            let vars = HashMap::from([("a", 0.0), ("b", 0.0)]);
             let v = da.eval(&vars).unwrap();
             assert!(v.is_finite(), "derivative at (0,0) should be finite, got {}", v);
+        }
+    }
+
+    #[test]
+    fn asin_safe_eval() {
+        sym! {
+            let x = symbol("x");
+            let f = asin_safe(x);
+            // Normal value
+            let vars = HashMap::from([("x", 0.5)]);
+            assert!((f.eval(&vars).unwrap() - 0.5_f64.asin()).abs() < 1e-10);
+            // Clamped: asin_safe(1.5) = asin(1.0) = pi/2
+            let vars = HashMap::from([("x", 1.5)]);
+            assert!((f.eval(&vars).unwrap() - std::f64::consts::FRAC_PI_2).abs() < 1e-10);
+        }
+    }
+
+    #[test]
+    fn asin_safe_deriv_finite() {
+        sym! {
+            let x = symbol("x");
+            let da = asin_safe(x).diff("x");
+            // At x=1.0, vanilla asin derivative diverges; safe version stays finite
+            let vars = HashMap::from([("x", 1.0)]);
+            let v = da.eval(&vars).unwrap();
+            assert!(v.is_finite(), "asin_safe derivative at 1.0 should be finite, got {}", v);
+        }
+    }
+
+    #[test]
+    fn acos_safe_eval() {
+        sym! {
+            let x = symbol("x");
+            let f = acos_safe(x);
+            let vars = HashMap::from([("x", 0.5)]);
+            assert!((f.eval(&vars).unwrap() - 0.5_f64.acos()).abs() < 1e-10);
+            // Clamped: acos_safe(-1.5) = acos(-1.0) = pi
+            let vars = HashMap::from([("x", -1.5)]);
+            assert!((f.eval(&vars).unwrap() - std::f64::consts::PI).abs() < 1e-10);
+        }
+    }
+
+    #[test]
+    fn identity_codegen_parens() {
+        sym! {
+            let x = symbol("x");
+            let f = identity(c(1.0) - x * x) + epsilon * epsilon;
+            let code = f.to_rust("f64");
+            // identity forces parens around its body
+            assert!(code.contains("(-x.powf(2.0_f64) + 1.0_f64)"),
+                "expected parens around identity body, got: {}", code);
+        }
+    }
+
+    #[test]
+    fn identity_diff() {
+        sym! {
+            let x = symbol("x");
+            let f = identity(x * x);
+            assert_eq!(format!("{}", f.diff("x")), "2 * x");
+        }
+    }
+
+    #[test]
+    fn acos_safe_deriv_finite() {
+        sym! {
+            let x = symbol("x");
+            let da = acos_safe(x).diff("x");
+            let vars = HashMap::from([("x", 1.0)]);
+            let v = da.eval(&vars).unwrap();
+            assert!(v.is_finite(), "acos_safe derivative at 1.0 should be finite, got {}", v);
         }
     }
 
@@ -1314,7 +1517,7 @@ mod tests {
             let x = symbol("x");
             let y = symbol("y");
             let f = rad_diff(x, y);
-            assert_eq!(f.to_latex(), "\\operatorname{rad_diff}\\left(x, y\\right)");
+            assert_eq!(f.to_latex(), "\\operatorname{rad\\_diff}\\left(x, y\\right)");
         }
     }
 
@@ -1553,6 +1756,239 @@ mod tests {
         let f = parse("clamp(x, 0, 1)").unwrap();
         assert_eq!(format!("{}", f), "clamp(x, 0, 1)");
         assert_eq!(format!("{}", f.diff("x")), "1");
+    }
+
+    // --- Named constant tests ---
+
+    #[test]
+    fn named_const_pi_display() {
+        assert_eq!(format!("{}", pi()), "pi");
+    }
+
+    #[test]
+    fn named_const_pi_eval() {
+        let vars = HashMap::new();
+        assert_eq!(pi().eval(&vars).unwrap(), std::f64::consts::PI);
+    }
+
+    #[test]
+    fn named_const_pi_diff() {
+        assert_eq!(format!("{}", pi().diff("x")), "0");
+    }
+
+    #[test]
+    fn named_const_pi_codegen() {
+        assert_eq!(pi().to_rust("f64"), "std::f64::consts::PI");
+        assert_eq!(pi().to_rust("f32"), "std::f32::consts::PI");
+    }
+
+    #[test]
+    fn named_const_pi_latex() {
+        assert_eq!(pi().to_latex(), "\\pi");
+    }
+
+    #[test]
+    fn named_const_epsilon_display() {
+        assert_eq!(format!("{}", epsilon()), "epsilon");
+    }
+
+    #[test]
+    fn named_const_epsilon_eval() {
+        let vars = HashMap::new();
+        assert_eq!(epsilon().eval(&vars).unwrap(), f64::EPSILON);
+    }
+
+    #[test]
+    fn named_const_epsilon_codegen() {
+        assert_eq!(epsilon().to_rust("f64"), "f64::EPSILON");
+        assert_eq!(epsilon().to_rust("f32"), "f32::EPSILON");
+    }
+
+    #[test]
+    fn named_const_euler_display() {
+        assert_eq!(format!("{}", euler()), "e");
+    }
+
+    #[test]
+    fn named_const_euler_eval() {
+        let vars = HashMap::new();
+        assert_eq!(euler().eval(&vars).unwrap(), std::f64::consts::E);
+    }
+
+    #[test]
+    fn named_const_euler_codegen() {
+        assert_eq!(euler().to_rust("f64"), "std::f64::consts::E");
+    }
+
+    #[test]
+    fn named_const_epsilon_survives_simplification() {
+        sym! {
+            let x = symbol("x");
+            let f = (x + epsilon()).simplify();
+            assert_eq!(format!("{}", f), "x + epsilon");
+        }
+    }
+
+    #[test]
+    fn named_const_not_free_var() {
+        sym! {
+            let x = symbol("x");
+            let f = x + pi();
+            let vars = f.free_vars();
+            assert!(vars.contains("x"));
+            assert!(!vars.contains("pi"));
+        }
+    }
+
+    #[test]
+    fn named_const_custom() {
+        let tau = named_const("tau", std::f64::consts::TAU,
+            "std::f32::consts::TAU", "std::f64::consts::TAU", "\\tau");
+        assert_eq!(format!("{}", tau), "tau");
+        let vars = HashMap::new();
+        assert_eq!(tau.eval(&vars).unwrap(), std::f64::consts::TAU);
+        assert_eq!(tau.to_rust("f64"), "std::f64::consts::TAU");
+        assert_eq!(tau.to_latex(), "\\tau");
+    }
+
+    // --- Algebraic simplification of named constants ---
+
+    #[test]
+    fn named_const_pi_add_pi() {
+        sym! {
+            let f = (pi() + pi()).simplify();
+            assert_eq!(format!("{}", f), "2 * pi");
+        }
+    }
+
+    #[test]
+    fn named_const_pi_sub_pi() {
+        sym! {
+            let f = (pi() - pi()).simplify();
+            assert_eq!(format!("{}", f), "0");
+        }
+    }
+
+    #[test]
+    fn named_const_pi_mul_pi() {
+        sym! {
+            let f = (pi() * pi()).simplify();
+            assert_eq!(format!("{}", f), "pi^2");
+        }
+    }
+
+    #[test]
+    fn named_const_epsilon_add() {
+        sym! {
+            let x = symbol("x");
+            let f = (x + epsilon() + epsilon()).simplify();
+            assert_eq!(format!("{}", f), "x + 2 * epsilon");
+        }
+    }
+
+    // --- Trig-pi simplification ---
+
+    #[test]
+    fn trig_sin_pi() {
+        sym! { assert_eq!(format!("{}", sin(pi()).simplify()), "0"); }
+    }
+
+    #[test]
+    fn trig_cos_pi() {
+        sym! { assert_eq!(format!("{}", cos(pi()).simplify()), "-1"); }
+    }
+
+    #[test]
+    fn trig_sin_pi_half() {
+        sym! { assert_eq!(format!("{}", sin(pi() / 2.0).simplify()), "1"); }
+    }
+
+    #[test]
+    fn trig_cos_pi_half() {
+        sym! { assert_eq!(format!("{}", cos(pi() / 2.0).simplify()), "0"); }
+    }
+
+    #[test]
+    fn trig_sin_pi_quarter() {
+        sym! {
+            let f = sin(pi() / 4.0).simplify();
+            let vars = HashMap::new();
+            let v = f.eval(&vars).unwrap();
+            assert!((v - std::f64::consts::FRAC_1_SQRT_2).abs() < 1e-10);
+        }
+    }
+
+    #[test]
+    fn trig_cos_pi_third() {
+        sym! {
+            let f = cos(pi() / 3.0).simplify();
+            assert_eq!(format!("{}", f), "0.5");
+        }
+    }
+
+    #[test]
+    fn trig_sin_2pi() {
+        sym! { assert_eq!(format!("{}", sin(2.0 * pi()).simplify()), "0"); }
+    }
+
+    #[test]
+    fn trig_cos_2pi() {
+        sym! { assert_eq!(format!("{}", cos(2.0 * pi()).simplify()), "1"); }
+    }
+
+    #[test]
+    fn trig_tan_pi() {
+        sym! { assert_eq!(format!("{}", tan(pi()).simplify()), "0"); }
+    }
+
+    #[test]
+    fn trig_sin_pi_sixth() {
+        sym! { assert_eq!(format!("{}", sin(pi() / 6.0).simplify()), "0.5"); }
+    }
+
+    // --- Log/exp-e simplification ---
+
+    #[test]
+    fn ln_e() {
+        sym! { assert_eq!(format!("{}", ln(euler()).simplify()), "1"); }
+    }
+
+    // --- sym! macro bare identifier tests ---
+
+    #[test]
+    fn sym_macro_bare_pi() {
+        sym! {
+            let x = symbol("x");
+            let f = 2.0 * pi * x;
+            assert_eq!(format!("{}", f), "2 * x * pi");
+        }
+    }
+
+    #[test]
+    fn sym_macro_bare_epsilon() {
+        sym! {
+            let x = symbol("x");
+            let f = x * x + epsilon;
+            assert_eq!(format!("{}", f), "x^2 + epsilon");
+        }
+    }
+
+    #[test]
+    fn sym_macro_pi_call_still_works() {
+        // pi() with parens should also work (not double-rewritten)
+        sym! {
+            let f = pi();
+            assert_eq!(format!("{}", f), "pi");
+        }
+    }
+
+    #[test]
+    fn ln_e_pow_x() {
+        sym! {
+            let x = symbol("x");
+            let f = ln(pow(euler(), x)).simplify();
+            assert_eq!(format!("{}", f), "x");
+        }
     }
 }
 

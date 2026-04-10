@@ -10,7 +10,7 @@ use crate::{E, Expr, symbol};
 /// Cost of evaluating an expression (number of operations).
 fn expr_cost(e: &E) -> usize {
     match e.as_ref() {
-        Expr::Sym(_) | Expr::Const(_) => 0,
+        Expr::Sym(_) | Expr::Const(_) | Expr::NamedConst { .. } => 0,
         Expr::Neg(a) | Expr::Sin(a) | Expr::Cos(a) | Expr::Tan(a)
         | Expr::Asin(a) | Expr::Acos(a) | Expr::Atan(a)
         | Expr::Sinh(a) | Expr::Cosh(a) | Expr::Tanh(a)
@@ -31,7 +31,7 @@ fn expr_cost(e: &E) -> usize {
 /// Depth of an expression tree.
 fn expr_depth(e: &E) -> usize {
     match e.as_ref() {
-        Expr::Sym(_) | Expr::Const(_) => 0,
+        Expr::Sym(_) | Expr::Const(_) | Expr::NamedConst { .. } => 0,
         Expr::Neg(a) | Expr::Sin(a) | Expr::Cos(a) | Expr::Tan(a)
         | Expr::Asin(a) | Expr::Acos(a) | Expr::Atan(a)
         | Expr::Sinh(a) | Expr::Cosh(a) | Expr::Tanh(a)
@@ -53,7 +53,7 @@ fn expr_depth(e: &E) -> usize {
 fn count_subexprs(e: &E, counts: &mut HashMap<E, usize>) {
     *counts.entry(e.clone()).or_insert(0) += 1;
     match e.as_ref() {
-        Expr::Sym(_) | Expr::Const(_) => {}
+        Expr::Sym(_) | Expr::Const(_) | Expr::NamedConst { .. } => {}
         Expr::Neg(a) | Expr::Sin(a) | Expr::Cos(a) | Expr::Tan(a)
         | Expr::Asin(a) | Expr::Acos(a) | Expr::Atan(a)
         | Expr::Sinh(a) | Expr::Cosh(a) | Expr::Tanh(a)
@@ -91,7 +91,7 @@ fn replace(e: &E, target: &E, replacement: &E) -> E {
         return replacement.clone();
     }
     match e.as_ref() {
-        Expr::Sym(_) | Expr::Const(_) => e.clone(),
+        Expr::Sym(_) | Expr::Const(_) | Expr::NamedConst { .. } => e.clone(),
         Expr::Neg(a) => E::new(Expr::Neg(replace(a, target, replacement))),
         Expr::Add(a, b) => E::new(Expr::Add(replace(a, target, replacement), replace(b, target, replacement))),
         Expr::Sub(a, b) => E::new(Expr::Sub(replace(a, target, replacement), replace(b, target, replacement))),
@@ -285,7 +285,7 @@ pub fn cse(exprs: &[E]) -> (Vec<(String, E)>, Vec<E>) {
 /// Count how many times each expression appears as a divisor (right side of Div).
 fn count_divisors(e: &E, counts: &mut HashMap<E, usize>) {
     match e.as_ref() {
-        Expr::Sym(_) | Expr::Const(_) => {}
+        Expr::Sym(_) | Expr::Const(_) | Expr::NamedConst { .. } => {}
         Expr::Div(a, b) => {
             *counts.entry(b.clone()).or_insert(0) += 1;
             count_divisors(a, counts);
@@ -320,7 +320,7 @@ fn replace_divisor(e: &E, divisor: &E, replacement: &E) -> E {
             let a2 = replace_divisor(a, divisor, replacement);
             E::new(Expr::Mul(a2, replacement.clone()))
         }
-        Expr::Sym(_) | Expr::Const(_) => e.clone(),
+        Expr::Sym(_) | Expr::Const(_) | Expr::NamedConst { .. } => e.clone(),
         Expr::Neg(a) => E::new(Expr::Neg(replace_divisor(a, divisor, replacement))),
         Expr::Add(a, b) => E::new(Expr::Add(replace_divisor(a, divisor, replacement), replace_divisor(b, divisor, replacement))),
         Expr::Sub(a, b) => E::new(Expr::Sub(replace_divisor(a, divisor, replacement), replace_divisor(b, divisor, replacement))),

@@ -55,7 +55,7 @@ impl Expr {
             Expr::Sym(name) => {
                 if name == var { one() } else { zero() }
             }
-            Expr::Const(_) => zero(),
+            Expr::Const(_) | Expr::NamedConst { .. } => zero(),
             Expr::Neg(a) => {
                 -a.diff(var)
             }

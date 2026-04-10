@@ -80,6 +80,13 @@ fn eval_expr(expr: &Expr, ctx: &mut ConstraintCtx) -> Result<SymVal, syn::Error>
         Expr::Path(ep) if ep.qself.is_none() => {
             if let Some(ident) = ep.path.get_ident() {
                 let name = ident.to_string();
+                // Named constants
+                match name.as_str() {
+                    "pi" => return Ok(SymVal::Scalar(arael_sym::pi())),
+                    "epsilon" => return Ok(SymVal::Scalar(arael_sym::epsilon())),
+                    "e" => return Ok(SymVal::Scalar(arael_sym::euler())),
+                    _ => {}
+                }
                 if let Some(val) = ctx.bindings.get(&name) {
                     return Ok(val.clone());
                 }

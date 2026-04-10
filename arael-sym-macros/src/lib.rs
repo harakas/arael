@@ -92,12 +92,46 @@ impl SymVisitor {
         names
     }
 
-    /// Clone-wrap an expression if it's a tracked variable path.
+    /// Named constants that get rewritten from bare identifiers to function calls.
+    /// Named constants rewritten from bare identifiers to function calls.
+    /// Note: "e" is NOT included because it's too common as a variable name.
+    /// Use euler() explicitly for Euler's number in sym! blocks.
+    const NAMED_CONSTS: &'static [(&'static str, &'static str)] = &[
+        ("pi", "pi"), ("epsilon", "epsilon"),
+    ];
+
+    /// Check if an expression is a path to a named constant (to avoid double-rewriting in calls).
+    fn is_named_const_path(expr: &Expr) -> bool {
+        if let Expr::Path(ExprPath { path, qself: None, attrs }) = expr {
+            if attrs.is_empty() {
+                if let Some(ident) = path.get_ident() {
+                    let name = ident.to_string();
+                    return Self::NAMED_CONSTS.iter().any(|&(n, f)| name == n || name == f);
+                }
+            }
+        }
+        false
+    }
+
+    /// Clone-wrap an expression if it's a tracked variable path,
+    /// or rewrite named constants (pi, epsilon, e) to function calls.
     fn maybe_clone_expr(&self, expr: &mut Expr) {
         if let Expr::Path(ExprPath { path, qself: None, attrs }) = expr {
             if attrs.is_empty() {
                 if let Some(ident) = path.get_ident() {
                     let name = ident.to_string();
+                    // Rewrite named constants: pi -> pi(), e -> euler(), etc.
+                    for &(const_name, func_name) in Self::NAMED_CONSTS {
+                        if name == const_name {
+                            let span = ident.span();
+                            let func_ident = proc_macro2::Ident::new(func_name, span);
+                            let call_expr: Expr = syn::parse_quote_spanned! { span =>
+                                #func_ident()
+                            };
+                            *expr = call_expr;
+                            return;
+                        }
+                    }
                     if self.is_tracked(&name) {
                         let span = ident.span();
                         let clone_expr: Expr = syn::parse_quote_spanned! { span =>
@@ -178,7 +212,27 @@ impl SymVisitor {
                         "where" | "unsafe"
                     );
 
-                    if !is_keyword && !next_is_bang && !next_is_colon && self.is_tracked(&name) {
+                    // Rewrite named constants in macro tokens (skip if already called)
+                    let next_is_paren = i + 1 < len && matches!(&token_vec[i + 1], TokenTree::Group(g) if g.delimiter() == Delimiter::Parenthesis);
+                    let mut is_named_const = false;
+                    if !is_keyword && !next_is_bang && !next_is_colon && !next_is_paren {
+                        for &(const_name, func_name) in Self::NAMED_CONSTS {
+                            if name == const_name {
+                                let span = ident.span();
+                                let func_ident = proc_macro2::Ident::new(func_name, span);
+                                result.extend(std::iter::once(TokenTree::Ident(func_ident)));
+                                result.extend(std::iter::once(TokenTree::Group(proc_macro2::Group::new(
+                                    Delimiter::Parenthesis,
+                                    TokenStream2::new(),
+                                ))));
+                                is_named_const = true;
+                                break;
+                            }
+                        }
+                    }
+                    if is_named_const {
+                        // already handled
+                    } else if !is_keyword && !next_is_bang && !next_is_colon && self.is_tracked(&name) {
                         let span = ident.span();
                         let clone_ident = proc_macro2::Ident::new("clone", span);
                         result.extend(std::iter::once(TokenTree::Ident(ident.clone())));
@@ -283,7 +337,10 @@ impl VisitMut for SymVisitor {
                 for arg in &mut mc.args { self.visit_expr_mut(arg); }
             }
             Expr::Call(call) => {
-                self.visit_expr_mut(&mut call.func);
+                // Don't rewrite named constants in function position (they're already being called)
+                if !SymVisitor::is_named_const_path(&call.func) {
+                    self.visit_expr_mut(&mut call.func);
+                }
                 for arg in &mut call.args { self.visit_expr_mut(arg); }
             }
             Expr::Binary(bin) => {

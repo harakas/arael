@@ -55,6 +55,7 @@ impl fmt::Display for Expr {
         match self {
             Expr::Sym(name) => write!(f, "{name}"),
             Expr::Const(v) => fmt_const(f, *v),
+            Expr::NamedConst { name, .. } => write!(f, "{name}"),
             Expr::Neg(a) => {
                 write!(f, "-")?;
                 let needs_parens = matches!(a.as_ref(), Expr::Add(..) | Expr::Sub(..) | Expr::Neg(_));
@@ -183,6 +184,7 @@ impl Expr {
                     buf.push_str(&format!("{v}"));
                 }
             }
+            Expr::NamedConst { latex, .. } => buf.push_str(latex),
             Expr::Neg(a) => {
                 buf.push('-');
                 let needs_parens = matches!(a.as_ref(), Expr::Add(..) | Expr::Sub(..));
@@ -298,7 +300,8 @@ impl Expr {
                 buf.push_str("\\right)");
             }
             Expr::Func { name, args, .. } => {
-                buf.push_str(&format!("\\operatorname{{{name}}}\\left("));
+                let escaped = name.replace('_', "\\_");
+                buf.push_str(&format!("\\operatorname{{{escaped}}}\\left("));
                 for (i, arg) in args.iter().enumerate() {
                     if i > 0 { buf.push_str(", "); }
                     arg.write_latex(buf);
@@ -364,6 +367,9 @@ impl Expr {
                     buf.push_str(&format!("{v}_{ft}"));
                 }
             }
+            Expr::NamedConst { rust_f32, rust_f64, .. } => {
+                buf.push_str(if ft == "f32" { rust_f32 } else { rust_f64 });
+            }
             Expr::Neg(a) => {
                 buf.push('-');
                 a.write_rust(buf, ft, 7);
@@ -424,10 +430,12 @@ impl Expr {
                 hi.write_rust(buf, ft, 0);
                 buf.push(')');
             }
-            Expr::Func { params, kind, args, .. } => {
+            Expr::Func { name, params, kind, args } => {
                 if let Some(body) = kind.body() {
-                    // Symbolic: inline the expanded body
-                    crate::expand_func(params, body, args).write_rust(buf, ft, parent_prec);
+                    // Symbolic: inline the expanded body.
+                    // Identity functions force parentheses to preserve eval order.
+                    let prec = if name == "identity" { 8 } else { parent_prec };
+                    crate::expand_func(params, body, args).write_rust(buf, ft, prec);
                 } else if let crate::FuncKind::Extern { call_path, .. } = kind {
                     // Extern: emit function call
                     buf.push_str(call_path);
