@@ -196,7 +196,7 @@
 //! };
 //! ```
 //!
-//! This pattern is used internally by [`asin_safe`] and [`acos_safe`] to
+//! This pattern is used internally by [`safe_asin`] and [`safe_acos`] to
 //! keep `epsilon^2` from being lost to floating-point cancellation in the
 //! derivative `1/sqrt(1 - x^2 + epsilon^2)`.
 //!
@@ -262,12 +262,14 @@
 //! ```
 //! use arael_sym::*;
 //! sym! {
-//!     let t = symbol("t");
-//!     // safe_asin: evaluates without NaN even outside [-1, 1]
-//!     let safe_asin = simple_func1("safe_asin",
+//!     // clamp prevents NaN from asin outside [-1, 1]
+//!     // Note: derivative still diverges at +/-1. One can prevent it
+//!     // by providing custom derivatives with simple_func1_derivs as
+//!     // is done in the built-in safe_asin().
+//!     let my_asin = simple_func1("my_asin",
 //!         |t| asin(clamp(t, c(-1.0), c(1.0))));
 //!     let x = symbol("x");
-//!     let f = safe_asin(x);
+//!     let f = my_asin(x);
 //!     let vars = std::collections::HashMap::from([("x", 1.5)]);
 //!     // Clamped to asin(1.0) = pi/2, no NaN
 //!     let val = f.eval(&vars).unwrap();
@@ -837,10 +839,10 @@ pub fn simple_func1_derivs(
 /// ```
 /// use arael_sym::*;
 /// sym! {
-///     // Or use the built-in atan2_safe():
+///     // Or use the built-in safe_atan2():
 ///     let a = symbol("a");
-///     let f = atan2_safe(sin(a), cos(a));
-///     assert_eq!(format!("{}", f), "atan2_safe(sin(a), cos(a))");
+///     let f = safe_atan2(sin(a), cos(a));
+///     assert_eq!(format!("{}", f), "safe_atan2(sin(a), cos(a))");
 /// };
 /// ```
 pub fn simple_func2_derivs(
@@ -1048,8 +1050,8 @@ pub fn identity(x: E) -> E {
 ///   \frac{\partial}{\partial x} = \frac{-y}{x^2 + y^2 + \epsilon^2}$$
 ///
 /// The $\epsilon^2$ term prevents division by zero at $(0, 0)$.
-pub fn atan2_safe(y: E, x: E) -> E {
-    simple_func2_derivs("atan2_safe",
+pub fn safe_atan2(y: E, x: E) -> E {
+    simple_func2_derivs("safe_atan2",
         |y, x| atan2(y, x),
         |y, x| {
             let eps2 = epsilon() * epsilon();
@@ -1066,8 +1068,8 @@ pub fn atan2_safe(y: E, x: E) -> E {
 ///
 /// The [`identity`] guard prevents the simplifier from reordering
 /// $1 - x^2$ and $\epsilon^2$, avoiding floating-point cancellation.
-pub fn asin_safe(x: E) -> E {
-    simple_func1_derivs("asin_safe",
+pub fn safe_asin(x: E) -> E {
+    simple_func1_derivs("safe_asin",
         |x| asin(clamp(x, c(-1.0), c(1.0))),
         |x| [c(1.0) / sqrt(identity(c(1.0) - x.clone()*x) + epsilon()*epsilon())]
     )(x)
@@ -1078,8 +1080,8 @@ pub fn asin_safe(x: E) -> E {
 /// $$\text{acos\\_safe}(x) = \arccos(\text{clamp}(x, -1, 1))$$
 ///
 /// $$\frac{d}{dx} = \frac{-1}{\sqrt{\text{identity}(1 - x^2) + \epsilon^2}}$$
-pub fn acos_safe(x: E) -> E {
-    simple_func1_derivs("acos_safe",
+pub fn safe_acos(x: E) -> E {
+    simple_func1_derivs("safe_acos",
         |x| acos(clamp(x, c(-1.0), c(1.0))),
         |x| [-c(1.0) / sqrt(identity(c(1.0) - x.clone()*x) + epsilon()*epsilon())]
     )(x)
@@ -1299,11 +1301,11 @@ mod tests {
     // --- Safe function tests ---
 
     #[test]
-    fn atan2_safe_diff() {
+    fn safe_atan2_diff() {
         sym! {
             let a = symbol("a");
             let b = symbol("b");
-            let f = atan2_safe(a, b);
+            let f = safe_atan2(a, b);
             let da = f.diff("a");
             let vars = HashMap::from([("a", 1.0), ("b", 1.0)]);
             let v = da.eval(&vars).unwrap();
@@ -1312,11 +1314,11 @@ mod tests {
     }
 
     #[test]
-    fn atan2_safe_eval() {
+    fn safe_atan2_eval() {
         sym! {
             let a = symbol("a");
             let b = symbol("b");
-            let f = atan2_safe(a, b);
+            let f = safe_atan2(a, b);
             let vars = HashMap::from([("a", 1.0), ("b", 1.0)]);
             let v = f.eval(&vars).unwrap();
             assert!((v - std::f64::consts::FRAC_PI_4).abs() < 1e-10);
@@ -1324,10 +1326,10 @@ mod tests {
     }
 
     #[test]
-    fn atan2_safe_chain_rule() {
+    fn safe_atan2_chain_rule() {
         sym! {
             let t = symbol("t");
-            let f = atan2_safe(sin(t), cos(t));
+            let f = safe_atan2(sin(t), cos(t));
             let df = f.diff("t");
             let vars = HashMap::from([("t", 0.5)]);
             let v = df.eval(&vars).unwrap();
@@ -1336,11 +1338,11 @@ mod tests {
     }
 
     #[test]
-    fn atan2_safe_at_zero() {
+    fn safe_atan2_at_zero() {
         sym! {
             let a = symbol("a");
             let b = symbol("b");
-            let da = atan2_safe(a, b).diff("a");
+            let da = safe_atan2(a, b).diff("a");
             let vars = HashMap::from([("a", 0.0), ("b", 0.0)]);
             let v = da.eval(&vars).unwrap();
             assert!(v.is_finite(), "derivative at (0,0) should be finite, got {}", v);
@@ -1348,39 +1350,39 @@ mod tests {
     }
 
     #[test]
-    fn asin_safe_eval() {
+    fn safe_asin_eval() {
         sym! {
             let x = symbol("x");
-            let f = asin_safe(x);
+            let f = safe_asin(x);
             // Normal value
             let vars = HashMap::from([("x", 0.5)]);
             assert!((f.eval(&vars).unwrap() - 0.5_f64.asin()).abs() < 1e-10);
-            // Clamped: asin_safe(1.5) = asin(1.0) = pi/2
+            // Clamped: safe_asin(1.5) = asin(1.0) = pi/2
             let vars = HashMap::from([("x", 1.5)]);
             assert!((f.eval(&vars).unwrap() - std::f64::consts::FRAC_PI_2).abs() < 1e-10);
         }
     }
 
     #[test]
-    fn asin_safe_deriv_finite() {
+    fn safe_asin_deriv_finite() {
         sym! {
             let x = symbol("x");
-            let da = asin_safe(x).diff("x");
+            let da = safe_asin(x).diff("x");
             // At x=1.0, vanilla asin derivative diverges; safe version stays finite
             let vars = HashMap::from([("x", 1.0)]);
             let v = da.eval(&vars).unwrap();
-            assert!(v.is_finite(), "asin_safe derivative at 1.0 should be finite, got {}", v);
+            assert!(v.is_finite(), "safe_asin derivative at 1.0 should be finite, got {}", v);
         }
     }
 
     #[test]
-    fn acos_safe_eval() {
+    fn safe_acos_eval() {
         sym! {
             let x = symbol("x");
-            let f = acos_safe(x);
+            let f = safe_acos(x);
             let vars = HashMap::from([("x", 0.5)]);
             assert!((f.eval(&vars).unwrap() - 0.5_f64.acos()).abs() < 1e-10);
-            // Clamped: acos_safe(-1.5) = acos(-1.0) = pi
+            // Clamped: safe_acos(-1.5) = acos(-1.0) = pi
             let vars = HashMap::from([("x", -1.5)]);
             assert!((f.eval(&vars).unwrap() - std::f64::consts::PI).abs() < 1e-10);
         }
@@ -1408,13 +1410,13 @@ mod tests {
     }
 
     #[test]
-    fn acos_safe_deriv_finite() {
+    fn safe_acos_deriv_finite() {
         sym! {
             let x = symbol("x");
-            let da = acos_safe(x).diff("x");
+            let da = safe_acos(x).diff("x");
             let vars = HashMap::from([("x", 1.0)]);
             let v = da.eval(&vars).unwrap();
-            assert!(v.is_finite(), "acos_safe derivative at 1.0 should be finite, got {}", v);
+            assert!(v.is_finite(), "safe_acos derivative at 1.0 should be finite, got {}", v);
         }
     }
 
@@ -1690,16 +1692,16 @@ mod tests {
         }
     }
 
-    // --- safe_asin tests ---
+    // --- clamp-based safe_asin tests (simple_func1 version) ---
 
     #[test]
-    fn safe_asin_eval() {
+    fn clamp_asin_eval() {
         sym! {
-            let safe_asin = simple_func1("safe_asin", |t| asin(clamp(t, c(-1.0), c(1.0))));
+            let my_asin = simple_func1("my_asin", |t| asin(clamp(t, c(-1.0), c(1.0))));
             let x = symbol("x");
 
             // Normal value
-            let f = safe_asin(x);
+            let f = my_asin(x);
             let val = f.eval(&HashMap::from([("x", 0.5)])).unwrap();
             assert!((val - 0.5_f64.asin()).abs() < 1e-10);
 
@@ -1713,11 +1715,11 @@ mod tests {
     }
 
     #[test]
-    fn safe_asin_diff() {
+    fn clamp_asin_diff() {
         sym! {
-            let safe_asin = simple_func1("safe_asin", |t| asin(clamp(t, c(-1.0), c(1.0))));
+            let my_asin = simple_func1("my_asin", |t| asin(clamp(t, c(-1.0), c(1.0))));
             let x = symbol("x");
-            let f = safe_asin(x);
+            let f = my_asin(x);
             // Derivative: 1/sqrt(1 - clamp(x,-1,1)^2) * 1 (clamp pass-through)
             let df = f.diff("x");
             // Numerically verify at x=0.5
