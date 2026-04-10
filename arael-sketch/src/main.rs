@@ -2433,6 +2433,7 @@ impl EditorApp {
             ConstraintId::Perpendicular(i) => { let c = &self.sketch.perpendicular[i]; format!("Perp({}, {})", ln(c.a), ln(c.b)) }
             ConstraintId::EqualLength(i) => { let c = &self.sketch.equal_length[i]; format!("Equal({}, {})", ln(c.a), ln(c.b)) }
             ConstraintId::EqualRadius(i) => { let c = &self.sketch.equal_radius[i]; format!("EqualR({}, {})", an(c.a), an(c.b)) }
+            ConstraintId::Concentric(i) => { let c = &self.sketch.concentric[i]; format!("Concentric({}, {})", an(c.a), an(c.b)) }
             ConstraintId::TangentLA(i) => { let c = &self.sketch.tangent_la[i]; format!("Tangent({}, {})", ln(c.line), an(c.arc)) }
             ConstraintId::TangentAA(i) => { let c = &self.sketch.tangent_aa[i]; format!("Tangent({}, {})", an(c.a), an(c.b)) }
             ConstraintId::Collinear(i) => { let c = &self.sketch.collinear[i]; format!("Collinear({}, {})", ln(c.a), ln(c.b)) }
@@ -2528,6 +2529,10 @@ impl EditorApp {
             }
             ConstraintId::EqualRadius(i) => {
                 let c = &self.sketch.equal_radius[i];
+                arcs.push(c.a); arcs.push(c.b);
+            }
+            ConstraintId::Concentric(i) => {
+                let c = &self.sketch.concentric[i];
                 arcs.push(c.a); arcs.push(c.b);
             }
             ConstraintId::TangentLA(i) => {

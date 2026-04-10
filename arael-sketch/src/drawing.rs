@@ -1259,9 +1259,13 @@ impl EditorApp {
             |c: &CoincidentLP2ArcEnd| self.to_screen(self.sketch.lines[c.line].p2.value),
             |c: &CoincidentLP2ArcEnd| lp2_sel(c.line) || ae_sel(c.arc));
         // Arc-Arc
-        coinc!(markers, self.sketch.concentric, CoincidentKind::ArcCenterStart, // reuse for concentric
-            |c: &Concentric| self.to_screen(self.sketch.arcs[c.a].center.value),
-            |c: &Concentric| ac_sel(c.a) || ac_sel(c.b));
+        // Concentric: own ConstraintId
+        for (i, c) in self.sketch.concentric.iter().enumerate() {
+            if !self.sketch.arcs.contains(c.a) || !self.sketch.arcs.contains(c.b) { continue; }
+            let pos = self.to_screen(self.sketch.arcs[c.a].center.value);
+            let vis = ac_sel(c.a) || ac_sel(c.b);
+            add_coinc_entry(&mut markers, pos, ConstraintId::Concentric(i), vis);
+        }
         coinc!(markers, self.sketch.coincident_arc_center_start, CoincidentKind::ArcCenterStart,
             |c: &CoincidentArcCenterStart| self.to_screen(self.sketch.arcs[c.a].center.value),
             |c: &CoincidentArcCenterStart| ac_sel(c.a) || as_sel(c.b));

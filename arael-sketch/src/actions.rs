@@ -1084,6 +1084,7 @@ impl Action {
                     ConstraintId::Perpendicular(i) => { sketch.perpendicular.remove(*i); }
                     ConstraintId::EqualLength(i) => { sketch.equal_length.remove(*i); }
                     ConstraintId::EqualRadius(i) => { sketch.equal_radius.remove(*i); }
+                    ConstraintId::Concentric(i) => { sketch.concentric.remove(*i); }
                     ConstraintId::TangentLA(i) => { sketch.tangent_la.remove(*i); }
                     ConstraintId::TangentAA(i) => { sketch.tangent_aa.remove(*i); }
                     ConstraintId::Collinear(i) => { sketch.collinear.remove(*i); }
