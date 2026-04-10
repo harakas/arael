@@ -626,7 +626,7 @@ mod tests {
     #[test]
     fn duplicate_tangent_aa() {
         let (mut s, a0, a1) = two_arcs();
-        s.tangent_aa.push(TangentAA { a: a0, b: a1, hb: CrossBlock::new() });
+        s.tangent_aa.push(TangentAA { a: a0, b: a1, shared: SharedEndpoint::None, hb: CrossBlock::new() });
         let r = check_constraint_conflict(&s, &Action::ApplyTangentAA { a: a0, b: a1 });
         assert!(r.is_some());
         assert!(r.unwrap().contains("already tangent"));

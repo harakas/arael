@@ -230,6 +230,22 @@ fn point_to_ellipse_dist(p: vect2d, a: &Arc) -> (f64, vect2d) {
     else { (dist, nearest) }
 }
 
+/// Compute the tangent direction of an arc/ellipse at parametric angle t.
+/// This is the derivative of arc_point_at with respect to t.
+pub fn arc_tangent_at(a: &Arc, t: f64) -> vect2d {
+    let ct = t.cos();
+    let st = t.sin();
+    let cr = a.rotation.value.cos();
+    let sr = a.rotation.value.sin();
+    let rx = a.radius.value;
+    let ry = a.radius_b.value;
+    // d/dt of arc_point_at:
+    vect2d::new(
+        -rx * st * cr - ry * ct * sr,
+        -rx * st * sr + ry * ct * cr,
+    )
+}
+
 /// Compute a point on the arc/ellipse at parametric angle t.
 pub fn arc_point_at(a: &Arc, t: f64) -> vect2d {
     let ct = t.cos();

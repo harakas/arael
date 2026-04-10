@@ -2,6 +2,17 @@
 // Cross-constraints (stored in root collections)
 // ---------------------------------------------------------------------------
 
+/// Which endpoints are shared between two arcs for tangent constraints.
+#[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum SharedEndpoint {
+    #[default]
+    None,
+    StartStart,
+    StartEnd,
+    EndStart,
+    EndEnd,
+}
+
 // -- Point-Point --
 
 #[derive(serde::Serialize, serde::Deserialize)]
@@ -1077,7 +1088,8 @@ pub struct EqualRadius {
 // Generalizes circles: when rx=ry=r, r_eff = r.
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
-#[arael(constraint(hb, {
+// No shared endpoint: center-distance = sum of effective radii
+#[arael(constraint(hb, guard = self.shared == SharedEndpoint::None, {
     let dx = a.center.x - b.center.x;
     let dy = a.center.y - b.center.y;
     let dist = sqrt(dx * dx + dy * dy);
@@ -1095,11 +1107,46 @@ pub struct EqualRadius {
     let r_eff_b = sqrt(nxb * nxb * b.radius * b.radius + nyb * nyb * b.radius_b * b.radius_b);
     [(dist - r_eff_a - r_eff_b) * sketch.constraint_isigma]
 }))]
+// Shared endpoint a.start = b.start: cross(tangent_a, tangent_b) = 0
+#[arael(constraint(hb, guard = self.shared == SharedEndpoint::StartStart, {
+    let tax = 0.0 - a.radius * sin(a.start_angle) * cos(a.rotation) - a.radius_b * cos(a.start_angle) * sin(a.rotation);
+    let tay = 0.0 - a.radius * sin(a.start_angle) * sin(a.rotation) + a.radius_b * cos(a.start_angle) * cos(a.rotation);
+    let tbx = 0.0 - b.radius * sin(b.start_angle) * cos(b.rotation) - b.radius_b * cos(b.start_angle) * sin(b.rotation);
+    let tby = 0.0 - b.radius * sin(b.start_angle) * sin(b.rotation) + b.radius_b * cos(b.start_angle) * cos(b.rotation);
+    [(tax * tby - tay * tbx) * sketch.constraint_isigma]
+}))]
+// Shared endpoint a.start = b.end
+#[arael(constraint(hb, guard = self.shared == SharedEndpoint::StartEnd, {
+    let tax = 0.0 - a.radius * sin(a.start_angle) * cos(a.rotation) - a.radius_b * cos(a.start_angle) * sin(a.rotation);
+    let tay = 0.0 - a.radius * sin(a.start_angle) * sin(a.rotation) + a.radius_b * cos(a.start_angle) * cos(a.rotation);
+    let tbx = 0.0 - b.radius * sin(b.end_angle) * cos(b.rotation) - b.radius_b * cos(b.end_angle) * sin(b.rotation);
+    let tby = 0.0 - b.radius * sin(b.end_angle) * sin(b.rotation) + b.radius_b * cos(b.end_angle) * cos(b.rotation);
+    [(tax * tby - tay * tbx) * sketch.constraint_isigma]
+}))]
+// Shared endpoint a.end = b.start
+#[arael(constraint(hb, guard = self.shared == SharedEndpoint::EndStart, {
+    let tax = 0.0 - a.radius * sin(a.end_angle) * cos(a.rotation) - a.radius_b * cos(a.end_angle) * sin(a.rotation);
+    let tay = 0.0 - a.radius * sin(a.end_angle) * sin(a.rotation) + a.radius_b * cos(a.end_angle) * cos(a.rotation);
+    let tbx = 0.0 - b.radius * sin(b.start_angle) * cos(b.rotation) - b.radius_b * cos(b.start_angle) * sin(b.rotation);
+    let tby = 0.0 - b.radius * sin(b.start_angle) * sin(b.rotation) + b.radius_b * cos(b.start_angle) * cos(b.rotation);
+    [(tax * tby - tay * tbx) * sketch.constraint_isigma]
+}))]
+// Shared endpoint a.end = b.end
+#[arael(constraint(hb, guard = self.shared == SharedEndpoint::EndEnd, {
+    let tax = 0.0 - a.radius * sin(a.end_angle) * cos(a.rotation) - a.radius_b * cos(a.end_angle) * sin(a.rotation);
+    let tay = 0.0 - a.radius * sin(a.end_angle) * sin(a.rotation) + a.radius_b * cos(a.end_angle) * cos(a.rotation);
+    let tbx = 0.0 - b.radius * sin(b.end_angle) * cos(b.rotation) - b.radius_b * cos(b.end_angle) * sin(b.rotation);
+    let tby = 0.0 - b.radius * sin(b.end_angle) * sin(b.rotation) + b.radius_b * cos(b.end_angle) * cos(b.rotation);
+    [(tax * tby - tay * tbx) * sketch.constraint_isigma]
+}))]
 pub struct TangentAA {
     #[arael(ref = root.arcs)]
     pub a: Ref<Arc>,
     #[arael(ref = root.arcs)]
     pub b: Ref<Arc>,
+    #[arael(skip)]
+    #[serde(default)]
+    pub shared: SharedEndpoint,
     #[serde(skip)]
     pub hb: CrossBlock<Arc, Arc>,
 }

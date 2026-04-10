@@ -148,6 +148,26 @@ add_arc 0,0 5,0 2,3 noconnect   No auto-coincident
 
 When 3+ endpoints meet at the same point, auto-connect creates multiple coincident constraints. Some may be redundant (e.g., if A=B and B=C, then A=C is implied). Redundant constraints are rejected by the DOF check -- this is normal.
 
+### Auto-Tangent
+
+When a new line or arc shares an endpoint with an existing arc (via auto-coincident), the system checks if the geometry is already tangent at that point. If the tangent directions are within 1 degree and the constraint cost increase is below 1e-6, a tangent constraint is automatically applied.
+
+```
+add_line 0,0 5,0
+add_arc 5,0 5,5 7.5,2.5     A0 — auto-tangent with L0 if directions match
+```
+
+The output shows: `Added A0 [connected: A0.start=L0.p2] [tangent: L0.tangent.A0]`
+
+Auto-tangent works for line-arc and arc-arc connections at shared endpoints.
+
+Append `notangent` to suppress auto-tangent (auto-coincident still applies):
+```
+add_arc 5,0 5,5 7.5,2.5 notangent
+```
+
+`noconnect` implies `notangent` (no connections means no tangent either).
+
 ### Line Chaining
 
 When `add_line` is given only one coordinate, it starts from the last created endpoint. With 3+ coordinates, it creates multiple connected segments in one command:

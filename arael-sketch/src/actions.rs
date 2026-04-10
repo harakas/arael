@@ -491,7 +491,18 @@ fn remove_axis_distance(sketch: &mut Sketch, a: &DimensionEndpoint, b: &Dimensio
 }
 
 impl Action {
+    /// Apply the action, then solve.
     pub fn apply(&self, sketch: &mut Sketch) {
+        let needs_expr_update = self.apply_without_solve(sketch);
+        sketch.solve();
+        if needs_expr_update {
+            sketch.update_expr_dim_values();
+        }
+    }
+
+    /// Apply the action's mutation without solving.
+    /// Returns true if `update_expr_dim_values` should be called after solving.
+    pub fn apply_without_solve(&self, sketch: &mut Sketch) -> bool {
         sketch.cached_dof = None;
         match self {
             Action::AddPoint { pos } => { sketch.add_point(*pos); }
@@ -499,238 +510,214 @@ impl Action {
             Action::AddCircle { center, edge } => {
                 let r = ((edge.x - center.x).powi(2) + (edge.y - center.y).powi(2)).sqrt();
                 sketch.add_arc(*center, r, 0.0, std::f64::consts::TAU, true);
-                sketch.solve(); // anchor drift before constraints are added
             }
             Action::AddEllipse { center, rx, ry, rotation } => {
                 sketch.add_ellipse(*center, *rx, *ry, *rotation, true);
-                sketch.solve();
             }
             Action::AddArc { start, end, mid, .. } => {
                 if let Some((c, r, sa, ea, ccw)) = circumscribed_arc(*start, *end, *mid) {
                     sketch.add_arc_with_dir(c, r, sa, ea, false, ccw);
-                    sketch.solve();
                 }
             }
             Action::AddEllipticArc { center, rx, ry, rotation, start, end, ccw } => {
                 sketch.add_elliptic_arc(*center, *rx, *ry, *rotation, *start, *end, *ccw);
-                sketch.solve();
             }
             Action::ApplyHorizontal { lines } => {
                 for r in lines { sketch.lines[*r].constraints.horizontal = true; }
-                sketch.solve();
             }
             Action::ApplyVertical { lines } => {
                 for r in lines { sketch.lines[*r].constraints.vertical = true; }
-                sketch.solve();
             }
             Action::ApplyCoincidentPP { a, b } => {
                 sketch.coincident_pp.push(CoincidentPP { a: *a, b: *b, hb: CrossBlock::new() });
-                sketch.solve();
             }
             Action::ApplyCoincidentLL11 { a, b } => {
                 sketch.coincident_ll11.push(CoincidentLL11 { a: *a, b: *b, hb: CrossBlock::new() });
-                sketch.solve();
             }
             Action::ApplyCoincidentLL12 { a, b } => {
                 sketch.coincident_ll12.push(CoincidentLL12 { a: *a, b: *b, hb: CrossBlock::new() });
-                sketch.solve();
             }
             Action::ApplyCoincidentLL21 { a, b } => {
                 sketch.coincident_ll21.push(CoincidentLL21 { a: *a, b: *b, hb: CrossBlock::new() });
-                sketch.solve();
             }
             Action::ApplyCoincidentLL22 { a, b } => {
                 sketch.coincident_ll22.push(CoincidentLL22 { a: *a, b: *b, hb: CrossBlock::new() });
-                sketch.solve();
             }
             Action::ApplyCoincidentLP1 { line, point } => {
                 sketch.coincident_lp1.push(CoincidentLP1 { line: *line, point: *point, hb: CrossBlock::new() });
-                sketch.solve();
             }
             Action::ApplyCoincidentLP2 { line, point } => {
                 sketch.coincident_lp2.push(CoincidentLP2 { line: *line, point: *point, hb: CrossBlock::new() });
-                sketch.solve();
             }
             Action::ApplyParallel { a, b } => {
                 sketch.parallel.push(Parallel { a: *a, b: *b, hb: CrossBlock::new() });
-                sketch.solve();
             }
             Action::ApplyPerpendicular { a, b } => {
                 sketch.perpendicular.push(Perpendicular { a: *a, b: *b, hb: CrossBlock::new() });
-                sketch.solve();
             }
             Action::ApplyEqualLength { a, b } => {
                 sketch.equal_length.push(EqualLength { a: *a, b: *b, hb: CrossBlock::new() });
-                sketch.solve();
             }
             Action::ApplyCoincidentArcCenter { point, arc } => {
                 sketch.coincident_arc_center.push(CoincidentArcCenter { point: *point, arc: *arc, hb: CrossBlock::new() });
-                sketch.solve();
             }
             Action::ApplyCoincidentArcStart { point, arc } => {
                 sketch.coincident_arc_start.push(CoincidentArcStart { point: *point, arc: *arc, hb: CrossBlock::new() });
-                sketch.solve();
             }
             Action::ApplyCoincidentArcEnd { point, arc } => {
                 sketch.coincident_arc_end.push(CoincidentArcEnd { point: *point, arc: *arc, hb: CrossBlock::new() });
-                sketch.solve();
             }
             Action::ApplyConcentric { a, b } => {
                 sketch.concentric.push(Concentric { a: *a, b: *b, hb: CrossBlock::new() });
-                sketch.solve();
             }
             Action::ApplyCoincidentLP1ArcCenter { line, arc } => {
-                sketch.coincident_lp1_arc_center.push(CoincidentLP1ArcCenter { line: *line, arc: *arc, hb: CrossBlock::new() }); sketch.solve();
+                sketch.coincident_lp1_arc_center.push(CoincidentLP1ArcCenter { line: *line, arc: *arc, hb: CrossBlock::new() });
             }
             Action::ApplyCoincidentLP2ArcCenter { line, arc } => {
-                sketch.coincident_lp2_arc_center.push(CoincidentLP2ArcCenter { line: *line, arc: *arc, hb: CrossBlock::new() }); sketch.solve();
+                sketch.coincident_lp2_arc_center.push(CoincidentLP2ArcCenter { line: *line, arc: *arc, hb: CrossBlock::new() });
             }
             Action::ApplyCoincidentLP1ArcStart { line, arc } => {
-                sketch.coincident_lp1_arc_start.push(CoincidentLP1ArcStart { line: *line, arc: *arc, hb: CrossBlock::new() }); sketch.solve();
+                sketch.coincident_lp1_arc_start.push(CoincidentLP1ArcStart { line: *line, arc: *arc, hb: CrossBlock::new() });
             }
             Action::ApplyCoincidentLP2ArcStart { line, arc } => {
-                sketch.coincident_lp2_arc_start.push(CoincidentLP2ArcStart { line: *line, arc: *arc, hb: CrossBlock::new() }); sketch.solve();
+                sketch.coincident_lp2_arc_start.push(CoincidentLP2ArcStart { line: *line, arc: *arc, hb: CrossBlock::new() });
             }
             Action::ApplyCoincidentLP1ArcEnd { line, arc } => {
-                sketch.coincident_lp1_arc_end.push(CoincidentLP1ArcEnd { line: *line, arc: *arc, hb: CrossBlock::new() }); sketch.solve();
+                sketch.coincident_lp1_arc_end.push(CoincidentLP1ArcEnd { line: *line, arc: *arc, hb: CrossBlock::new() });
             }
             Action::ApplyCoincidentLP2ArcEnd { line, arc } => {
-                sketch.coincident_lp2_arc_end.push(CoincidentLP2ArcEnd { line: *line, arc: *arc, hb: CrossBlock::new() }); sketch.solve();
+                sketch.coincident_lp2_arc_end.push(CoincidentLP2ArcEnd { line: *line, arc: *arc, hb: CrossBlock::new() });
             }
             Action::ApplyCoincidentArcCenterStart { a, b } => {
-                sketch.coincident_arc_center_start.push(CoincidentArcCenterStart { a: *a, b: *b, hb: CrossBlock::new() }); sketch.solve();
+                sketch.coincident_arc_center_start.push(CoincidentArcCenterStart { a: *a, b: *b, hb: CrossBlock::new() });
             }
             Action::ApplyCoincidentArcCenterEnd { a, b } => {
-                sketch.coincident_arc_center_end.push(CoincidentArcCenterEnd { a: *a, b: *b, hb: CrossBlock::new() }); sketch.solve();
+                sketch.coincident_arc_center_end.push(CoincidentArcCenterEnd { a: *a, b: *b, hb: CrossBlock::new() });
             }
             Action::ApplyCoincidentArcStartCenter { a, b } => {
-                sketch.coincident_arc_start_center.push(CoincidentArcStartCenter { a: *a, b: *b, hb: CrossBlock::new() }); sketch.solve();
+                sketch.coincident_arc_start_center.push(CoincidentArcStartCenter { a: *a, b: *b, hb: CrossBlock::new() });
             }
             Action::ApplyCoincidentArcEndCenter { a, b } => {
-                sketch.coincident_arc_end_center.push(CoincidentArcEndCenter { a: *a, b: *b, hb: CrossBlock::new() }); sketch.solve();
+                sketch.coincident_arc_end_center.push(CoincidentArcEndCenter { a: *a, b: *b, hb: CrossBlock::new() });
             }
             Action::ApplyCoincidentArcStartStart { a, b } => {
-                sketch.coincident_arc_start_start.push(CoincidentArcStartStart { a: *a, b: *b, hb: CrossBlock::new() }); sketch.solve();
+                sketch.coincident_arc_start_start.push(CoincidentArcStartStart { a: *a, b: *b, hb: CrossBlock::new() });
             }
             Action::ApplyCoincidentArcStartEnd { a, b } => {
-                sketch.coincident_arc_start_end.push(CoincidentArcStartEnd { a: *a, b: *b, hb: CrossBlock::new() }); sketch.solve();
+                sketch.coincident_arc_start_end.push(CoincidentArcStartEnd { a: *a, b: *b, hb: CrossBlock::new() });
             }
             Action::ApplyCoincidentArcEndStart { a, b } => {
-                sketch.coincident_arc_end_start.push(CoincidentArcEndStart { a: *a, b: *b, hb: CrossBlock::new() }); sketch.solve();
+                sketch.coincident_arc_end_start.push(CoincidentArcEndStart { a: *a, b: *b, hb: CrossBlock::new() });
             }
             Action::ApplyCoincidentArcEndEnd { a, b } => {
-                sketch.coincident_arc_end_end.push(CoincidentArcEndEnd { a: *a, b: *b, hb: CrossBlock::new() }); sketch.solve();
+                sketch.coincident_arc_end_end.push(CoincidentArcEndEnd { a: *a, b: *b, hb: CrossBlock::new() });
             }
             Action::ApplyLineP1OnArc { line, arc } => {
                 sketch.line_p1_on_arc.push(LineP1OnArc { line: *line, arc: *arc, hb: CrossBlock::new() });
-                sketch.solve();
             }
             Action::ApplyLineP2OnArc { line, arc } => {
                 sketch.line_p2_on_arc.push(LineP2OnArc { line: *line, arc: *arc, hb: CrossBlock::new() });
-                sketch.solve();
             }
             Action::ApplyEqualRadius { a, b } => {
                 sketch.equal_radius.push(EqualRadius { a: *a, b: *b, hb: CrossBlock::new() });
-                sketch.solve();
             }
             Action::ApplyTangentLA { line, arc } => {
-                // Compute sign: which side of the line the arc center is on
                 let l = &sketch.lines[*line];
                 let a = &sketch.arcs[*arc];
+                // Detect shared endpoints for ellipse-aware tangent formula
+                let snap = 1e-3;
+                let sp = crate::geometry::arc_start_pos(a);
+                let ep = crate::geometry::arc_end_pos(a);
+                let at_p1 = (l.p1.value.x - sp.x).abs() < snap && (l.p1.value.y - sp.y).abs() < snap
+                         || (l.p1.value.x - ep.x).abs() < snap && (l.p1.value.y - ep.y).abs() < snap;
+                let at_p2 = (l.p2.value.x - sp.x).abs() < snap && (l.p2.value.y - sp.y).abs() < snap
+                         || (l.p2.value.x - ep.x).abs() < snap && (l.p2.value.y - ep.y).abs() < snap;
+                // Compute sign for no-shared-endpoint formula
                 let dx = l.p2.value.x - l.p1.value.x;
                 let dy = l.p2.value.y - l.p1.value.y;
                 let len = (dx * dx + dy * dy).sqrt();
                 let dist = ((a.center.value.x - l.p1.value.x) * dy
                           - (a.center.value.y - l.p1.value.y) * dx) / len;
                 let sign = if dist >= 0.0 { 1.0 } else { -1.0 };
-                sketch.tangent_la.push(TangentLA { line: *line, arc: *arc, sign, at_p1: false, at_p2: false, hb: CrossBlock::new() });
-                sketch.solve();
+                sketch.tangent_la.push(TangentLA { line: *line, arc: *arc, sign, at_p1, at_p2, hb: CrossBlock::new() });
             }
             Action::ApplyTangentAA { a, b } => {
-                sketch.tangent_aa.push(TangentAA { a: *a, b: *b, hb: CrossBlock::new() });
-                sketch.solve();
+                let snap = 1e-3;
+                let arc_a = &sketch.arcs[*a];
+                let arc_b = &sketch.arcs[*b];
+                let a_sp = crate::geometry::arc_start_pos(arc_a);
+                let a_ep = crate::geometry::arc_end_pos(arc_a);
+                let b_sp = crate::geometry::arc_start_pos(arc_b);
+                let b_ep = crate::geometry::arc_end_pos(arc_b);
+                let near = |p: vect2d, q: vect2d| (p.x - q.x).abs() < snap && (p.y - q.y).abs() < snap;
+                let shared = if near(a_sp, b_sp) { SharedEndpoint::StartStart }
+                    else if near(a_sp, b_ep) { SharedEndpoint::StartEnd }
+                    else if near(a_ep, b_sp) { SharedEndpoint::EndStart }
+                    else if near(a_ep, b_ep) { SharedEndpoint::EndEnd }
+                    else { SharedEndpoint::None };
+                sketch.tangent_aa.push(TangentAA { a: *a, b: *b, shared, hb: CrossBlock::new() });
             }
             Action::ApplyPointOnLine { point, line } => {
                 sketch.point_on_line.push(PointOnLine { point: *point, line: *line, hb: CrossBlock::new() });
-                sketch.solve();
             }
             Action::ApplyPointOnArc { point, arc } => {
                 sketch.point_on_arc.push(PointOnArc { point: *point, arc: *arc, hb: CrossBlock::new() });
-                sketch.solve();
             }
             Action::ApplyEndpointOnLine { endpoint, line } => {
                 let point = resolve_dim_endpoint(sketch, endpoint);
                 sketch.point_on_line.push(PointOnLine { point, line: *line, hb: CrossBlock::new() });
-                sketch.solve();
             }
             Action::ApplyEndpointOnArc { endpoint, arc } => {
                 let point = resolve_dim_endpoint(sketch, endpoint);
                 sketch.point_on_arc.push(PointOnArc { point, arc: *arc, hb: CrossBlock::new() });
-                sketch.solve();
             }
             Action::ApplyCollinear { a, b } => {
                 sketch.collinear.push(Collinear { a: *a, b: *b, hb: CrossBlock::new() });
-                sketch.solve();
             }
             Action::ApplySymmetryLL { a, b, c } => {
                 sketch.symmetry_ll.push(SymmetryLL { a: *a, b: *b, c: *c, hb: TripletBlock::new() });
-                sketch.solve();
             }
             Action::ApplySymmetryPP { a, line, c } => {
                 sketch.symmetry_pp.push(SymmetryPP { a: *a, c: *c, line: *line, hb: TripletBlock::new() });
-                sketch.solve();
             }
             Action::ApplySymmetryAA { a, line, c } => {
                 sketch.symmetry_aa.push(SymmetryAA { a: *a, c: *c, line: *line, hb: TripletBlock::new() });
-                sketch.solve();
             }
             Action::ApplyMidpoint { point, line } => {
                 sketch.midpoint.push(MidpointConstraint { point: *point, line: *line, hb: CrossBlock::new() });
-                sketch.solve();
             }
             Action::ApplyMidpointLP1 { line, target } => {
                 sketch.midpoint_lp1.push(MidpointLP1 { line: *line, target: *target, hb: CrossBlock::new() });
-                sketch.solve();
             }
             Action::ApplyMidpointLP2 { line, target } => {
                 sketch.midpoint_lp2.push(MidpointLP2 { line: *line, target: *target, hb: CrossBlock::new() });
-                sketch.solve();
             }
             Action::ApplyMidpointArcStart { arc, line } => {
                 sketch.midpoint_arc_start.push(MidpointArcStart { arc: *arc, line: *line, hb: CrossBlock::new() });
-                sketch.solve();
             }
             Action::ApplyMidpointArcEnd { arc, line } => {
                 sketch.midpoint_arc_end.push(MidpointArcEnd { arc: *arc, line: *line, hb: CrossBlock::new() });
-                sketch.solve();
             }
             Action::ApplyMidpointArcPoint { point, arc } => {
                 sketch.midpoint_arc_point.push(MidpointArcPoint { point: *point, arc: *arc, hb: CrossBlock::new() });
-                sketch.solve();
             }
             Action::ApplyMidpointLP1Arc { line, arc } => {
                 sketch.midpoint_lp1_arc.push(MidpointLP1Arc { line: *line, arc: *arc, hb: CrossBlock::new() });
-                sketch.solve();
             }
             Action::ApplyMidpointLP2Arc { line, arc } => {
                 sketch.midpoint_lp2_arc.push(MidpointLP2Arc { line: *line, arc: *arc, hb: CrossBlock::new() });
-                sketch.solve();
             }
             Action::ApplyMidpointArcStartArc { a, b } => {
                 sketch.midpoint_arc_start_arc.push(MidpointArcStartArc { a: *a, b: *b, hb: CrossBlock::new() });
-                sketch.solve();
             }
             Action::ApplyMidpointArcEndArc { a, b } => {
                 sketch.midpoint_arc_end_arc.push(MidpointArcEndArc { a: *a, b: *b, hb: CrossBlock::new() });
-                sketch.solve();
             }
             Action::ApplyLineP1OnLine { a, b } => {
                 sketch.line_p1_on_line.push(LineP1OnLine { a: *a, b: *b, hb: CrossBlock::new() });
-                sketch.solve();
             }
             Action::ApplyLineP2OnLine { a, b } => {
                 sketch.line_p2_on_line.push(LineP2OnLine { a: *a, b: *b, hb: CrossBlock::new() });
-                sketch.solve();
             }
             Action::LockPoint { point, pos } => {
                 let p = &mut sketch.points[*point];
@@ -738,48 +725,38 @@ impl Action {
                 p.constraints.fix_x = pos.x;
                 p.constraints.has_fix_y = true;
                 p.constraints.fix_y = pos.y;
-                sketch.solve();
             }
             Action::UnlockPoint { point } => {
                 let p = &mut sketch.points[*point];
                 p.constraints.has_fix_x = false;
                 p.constraints.has_fix_y = false;
-                sketch.solve();
             }
             Action::LockLineP1 { line, pos } => {
                 sketch.lines[*line].p1 = Param::fixed(*pos);
-                sketch.solve();
             }
             Action::UnlockLineP1 { line } => {
                 let val = sketch.lines[*line].p1.value;
                 sketch.lines[*line].p1 = Param::new(val);
-                sketch.solve();
             }
             Action::LockLineP2 { line, pos } => {
                 sketch.lines[*line].p2 = Param::fixed(*pos);
-                sketch.solve();
             }
             Action::UnlockLineP2 { line } => {
                 let val = sketch.lines[*line].p2.value;
                 sketch.lines[*line].p2 = Param::new(val);
-                sketch.solve();
             }
             Action::LockArcCenter { arc, pos } => {
                 sketch.arcs[*arc].center = Param::fixed(*pos);
-                sketch.solve();
             }
             Action::UnlockArcCenter { arc } => {
                 let val = sketch.arcs[*arc].center.value;
                 sketch.arcs[*arc].center = Param::new(val);
-                sketch.solve();
             }
             Action::DeletePoint { point } => {
                 sketch.delete_point(*point);
-                sketch.solve();
             }
             Action::DeleteLine { line } => {
                 sketch.delete_line(*line);
-                sketch.solve();
             }
             Action::ToggleStyleLine { line } => {
                 sketch.lines[*line].style = sketch.lines[*line].style.next();
@@ -795,7 +772,6 @@ impl Action {
             }
             Action::DeleteArc { arc } => {
                 sketch.delete_arc(*arc);
-                sketch.solve();
             }
             Action::AddDimension { kind, value, expr, derived } => {
                 // Expression dimension: delegate to add_expr_dimension
@@ -805,8 +781,7 @@ impl Action {
                     if *derived {
                         if let Some(d) = sketch.dimensions.last_mut() { d.derived = true; }
                     }
-                    sketch.solve();
-                    return;
+                    return false;
                 }
                 let name = format!("d{}", sketch.next_dimension_id);
                 sketch.next_dimension_id += 1;
@@ -879,10 +854,9 @@ impl Action {
                     expr_str: None,
                     broken: false, derived: *derived,
                 });
-                sketch.solve();
             }
             Action::UpdateDimension { index, value, expr } => {
-                if *index >= sketch.dimensions.len() { return; }
+                if *index >= sketch.dimensions.len() { return false; }
                 // Remove old underlying constraint (only for numeric, non-derived dims)
                 {
                     let dim = &sketch.dimensions[*index];
@@ -999,7 +973,6 @@ impl Action {
                     }
                 }
                 // Expression dims: rebuild_expr_constraints() in solve() handles it
-                sketch.solve();
             }
             Action::RemoveDimension { index } => {
                 if *index < sketch.dimensions.len() {
@@ -1008,8 +981,7 @@ impl Action {
                     if dim.expr_str.is_some() {
                         let desc_prefix = format!("{} = ", dim.name);
                         sketch.expr_constraints.retain(|ec| !ec.description.starts_with(&desc_prefix));
-                        sketch.solve();
-                        return;  // skip normal constraint removal
+                        return false;  // skip normal constraint removal
                     }
                     // Remove the underlying constraint
                     match dim.kind {
@@ -1055,7 +1027,6 @@ impl Action {
                         }
                     }
                     sketch.cleanup_helper_points();
-                    sketch.solve();
                 }
             }
             Action::AddUserParam { name, expr_str } => {
@@ -1064,8 +1035,7 @@ impl Action {
                     name: name.clone(), expr_str: expr_str.clone(),
                     value, broken: false,
                 });
-                sketch.solve();
-                sketch.update_expr_dim_values();
+                return true;
             }
             Action::UpdateUserParam { index, name, expr_str } => {
                 if *index < sketch.user_params.len() {
@@ -1096,15 +1066,13 @@ impl Action {
                             }
                         }
                     }
-                    sketch.solve();
-                    sketch.update_expr_dim_values();
+                    return true;
                 }
             }
             Action::RemoveUserParam { index } => {
                 if *index < sketch.user_params.len() {
                     sketch.user_params.remove(*index);
-                    sketch.solve();
-                    sketch.update_expr_dim_values();
+                    return true;
                 }
             }
             Action::DeleteConstraint { id } => {
@@ -1175,12 +1143,11 @@ impl Action {
                         sketch.delete_point(*pt);
                     }
                 }
-                sketch.solve();
             }
             Action::Drag { snapshot } => {
                 *sketch = bincode::deserialize(snapshot).unwrap();
-                sketch.solve();
             }
         }
+        false
     }
 }

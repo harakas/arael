@@ -1331,15 +1331,210 @@ fn auto_coincident_arc(ctx: &mut CommandContext, arc_ref: Ref<Arc>, center_only:
     connected
 }
 
+/// Pop the last tangent constraint matching the action type.
+fn pop_tangent(sketch: &mut Sketch, action: &Action) {
+    match action {
+        Action::ApplyTangentLA { .. } => { sketch.tangent_la.pop(); }
+        Action::ApplyTangentAA { .. } => { sketch.tangent_aa.pop(); }
+        _ => {}
+    }
+}
+
+/// Check if two direction vectors are nearly parallel (within ~1 degree).
+fn nearly_tangent(d1: vect2d, d2: vect2d) -> bool {
+    let len1 = (d1.x * d1.x + d1.y * d1.y).sqrt();
+    let len2 = (d2.x * d2.x + d2.y * d2.y).sqrt();
+    if len1 < 1e-12 || len2 < 1e-12 { return false; }
+    let cross = (d1.x * d2.y - d1.y * d2.x).abs() / (len1 * len2);
+    cross < 0.018 // sin(1 deg) ~ 0.01745
+}
+
+/// Try to apply auto-tangent constraints for a newly created line.
+/// Checks if the line's endpoints are coincident with arc endpoints
+/// and the geometry is already tangent.
+fn auto_tangent_line(ctx: &mut CommandContext, line_ref: Ref<Line>) -> Vec<String> {
+    use arael::simple_lm::LmProblem;
+    let snap_threshold = 1e-3;
+    let cost_threshold = 1e-6;
+    let l = &ctx.sketch.lines[line_ref];
+    let lp1 = l.p1.value;
+    let lp2 = l.p2.value;
+    let ld = vect2d::new(lp2.x - lp1.x, lp2.y - lp1.y);
+
+    let mut candidates: Vec<(Action, String)> = Vec::new();
+
+    for r in ctx.sketch.arcs.refs() {
+        let a = &ctx.sketch.arcs[r];
+        // Line p1 near arc start
+        let sp = crate::geometry::arc_start_pos(a);
+        if (lp1.x - sp.x).abs() < snap_threshold && (lp1.y - sp.y).abs() < snap_threshold {
+            let at = crate::geometry::arc_tangent_at(a, a.start_angle.value);
+            if nearly_tangent(ld, at) {
+                candidates.push((Action::ApplyTangentLA { line: line_ref, arc: r },
+                    format!("{}.tangent.{}", ctx.sketch.lines[line_ref].name, a.name)));
+            }
+        }
+        // Line p1 near arc end
+        let ep = crate::geometry::arc_end_pos(a);
+        if (lp1.x - ep.x).abs() < snap_threshold && (lp1.y - ep.y).abs() < snap_threshold {
+            let at = crate::geometry::arc_tangent_at(a, a.end_angle.value);
+            if nearly_tangent(ld, at) {
+                candidates.push((Action::ApplyTangentLA { line: line_ref, arc: r },
+                    format!("{}.tangent.{}", ctx.sketch.lines[line_ref].name, a.name)));
+            }
+        }
+        // Line p2 near arc start
+        if (lp2.x - sp.x).abs() < snap_threshold && (lp2.y - sp.y).abs() < snap_threshold {
+            let at = crate::geometry::arc_tangent_at(a, a.start_angle.value);
+            if nearly_tangent(ld, at) {
+                candidates.push((Action::ApplyTangentLA { line: line_ref, arc: r },
+                    format!("{}.tangent.{}", ctx.sketch.lines[line_ref].name, a.name)));
+            }
+        }
+        // Line p2 near arc end
+        if (lp2.x - ep.x).abs() < snap_threshold && (lp2.y - ep.y).abs() < snap_threshold {
+            let at = crate::geometry::arc_tangent_at(a, a.end_angle.value);
+            if nearly_tangent(ld, at) {
+                candidates.push((Action::ApplyTangentLA { line: line_ref, arc: r },
+                    format!("{}.tangent.{}", ctx.sketch.lines[line_ref].name, a.name)));
+            }
+        }
+    }
+
+    // Stage 2: cost check — push constraint without solving, check cost, pop if bad
+    let mut applied = Vec::new();
+    for (action, desc) in candidates {
+        let old_cost = {
+            let mut params = Vec::new();
+            ctx.sketch.serialize64(&mut params);
+            ctx.sketch.calc_cost(&params)
+        };
+        // Push constraint directly (no solve)
+        action.apply_without_solve(&mut ctx.sketch);
+        let new_cost = {
+            let mut params = Vec::new();
+            ctx.sketch.serialize64(&mut params);
+            ctx.sketch.calc_cost(&params)
+        };
+        if new_cost <= old_cost + cost_threshold {
+            applied.push(desc);
+        } else {
+            // Pop the constraint we just pushed
+            pop_tangent(&mut ctx.sketch, &action);
+        }
+    }
+    applied
+}
+
+/// Try to apply auto-tangent constraints for a newly created arc.
+/// Checks against lines and other arcs at shared endpoints.
+fn auto_tangent_arc(ctx: &mut CommandContext, arc_ref: Ref<Arc>) -> Vec<String> {
+    use arael::simple_lm::LmProblem;
+    let snap_threshold = 1e-3;
+    let cost_threshold = 1e-6;
+    let a = &ctx.sketch.arcs[arc_ref];
+    let a_sp = crate::geometry::arc_start_pos(a);
+    let a_ep = crate::geometry::arc_end_pos(a);
+    let a_st = crate::geometry::arc_tangent_at(a, a.start_angle.value);
+    let a_et = crate::geometry::arc_tangent_at(a, a.end_angle.value);
+    let a_name = a.name.clone();
+
+    let mut candidates: Vec<(Action, String)> = Vec::new();
+
+    // Against lines
+    for r in ctx.sketch.lines.refs() {
+        let l = &ctx.sketch.lines[r];
+        let ld = vect2d::new(l.p2.value.x - l.p1.value.x, l.p2.value.y - l.p1.value.y);
+        // Arc start near line p1 or p2
+        if (a_sp.x - l.p1.value.x).abs() < snap_threshold && (a_sp.y - l.p1.value.y).abs() < snap_threshold
+            || (a_sp.x - l.p2.value.x).abs() < snap_threshold && (a_sp.y - l.p2.value.y).abs() < snap_threshold
+        {
+            if nearly_tangent(a_st, ld) {
+                candidates.push((Action::ApplyTangentLA { line: r, arc: arc_ref },
+                    format!("{}.tangent.{}", l.name, a_name)));
+            }
+        }
+        // Arc end near line p1 or p2
+        if (a_ep.x - l.p1.value.x).abs() < snap_threshold && (a_ep.y - l.p1.value.y).abs() < snap_threshold
+            || (a_ep.x - l.p2.value.x).abs() < snap_threshold && (a_ep.y - l.p2.value.y).abs() < snap_threshold
+        {
+            if nearly_tangent(a_et, ld) {
+                candidates.push((Action::ApplyTangentLA { line: r, arc: arc_ref },
+                    format!("{}.tangent.{}", l.name, a_name)));
+            }
+        }
+    }
+
+    // Against other arcs
+    for r in ctx.sketch.arcs.refs() {
+        if r == arc_ref { continue; }
+        let b = &ctx.sketch.arcs[r];
+        let b_sp = crate::geometry::arc_start_pos(b);
+        let b_ep = crate::geometry::arc_end_pos(b);
+        let b_st = crate::geometry::arc_tangent_at(b, b.start_angle.value);
+        let b_et = crate::geometry::arc_tangent_at(b, b.end_angle.value);
+        // Arc start near other arc start/end
+        if (a_sp.x - b_sp.x).abs() < snap_threshold && (a_sp.y - b_sp.y).abs() < snap_threshold {
+            if nearly_tangent(a_st, b_st) {
+                candidates.push((Action::ApplyTangentAA { a: arc_ref, b: r },
+                    format!("{}.tangent.{}", a_name, b.name)));
+            }
+        }
+        if (a_sp.x - b_ep.x).abs() < snap_threshold && (a_sp.y - b_ep.y).abs() < snap_threshold {
+            if nearly_tangent(a_st, b_et) {
+                candidates.push((Action::ApplyTangentAA { a: arc_ref, b: r },
+                    format!("{}.tangent.{}", a_name, b.name)));
+            }
+        }
+        // Arc end near other arc start/end
+        if (a_ep.x - b_sp.x).abs() < snap_threshold && (a_ep.y - b_sp.y).abs() < snap_threshold {
+            if nearly_tangent(a_et, b_st) {
+                candidates.push((Action::ApplyTangentAA { a: arc_ref, b: r },
+                    format!("{}.tangent.{}", a_name, b.name)));
+            }
+        }
+        if (a_ep.x - b_ep.x).abs() < snap_threshold && (a_ep.y - b_ep.y).abs() < snap_threshold {
+            if nearly_tangent(a_et, b_et) {
+                candidates.push((Action::ApplyTangentAA { a: arc_ref, b: r },
+                    format!("{}.tangent.{}", a_name, b.name)));
+            }
+        }
+    }
+
+    // Stage 2: cost check
+    let mut applied = Vec::new();
+    for (action, desc) in candidates {
+        let old_cost = {
+            let mut params = Vec::new();
+            ctx.sketch.serialize64(&mut params);
+            ctx.sketch.calc_cost(&params)
+        };
+        action.apply_without_solve(&mut ctx.sketch);
+        let new_cost = {
+            let mut params = Vec::new();
+            ctx.sketch.serialize64(&mut params);
+            ctx.sketch.calc_cost(&params)
+        };
+        if new_cost <= old_cost + cost_threshold {
+            applied.push(desc);
+        } else {
+            pop_tangent(&mut ctx.sketch, &action);
+        }
+    }
+    applied
+}
+
 fn cmd_add_line(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let mut tokens: Vec<&str> = args.split_whitespace().collect();
     let mut nocursor = false;
     let mut noconnect = false;
+    let mut notangent = false;
     let mut driven = false;
-    for _ in 0..3 {
+    loop {
         match tokens.last().copied() {
             Some("nocursor") => { nocursor = true; tokens.pop(); }
             Some("noconnect") => { noconnect = true; tokens.pop(); }
+            Some("notangent") => { notangent = true; tokens.pop(); }
             Some("driven") => { driven = true; tokens.pop(); }
             _ => break,
         }
@@ -1392,6 +1587,12 @@ fn cmd_add_line(ctx: &mut CommandContext, args: &str) -> CommandResult {
             let connected = auto_coincident_line(ctx, line_ref);
             if !connected.is_empty() {
                 msg += &format!(" [connected: {}]", connected.join(", "));
+            }
+            if !notangent {
+                let tangents = auto_tangent_line(ctx, line_ref);
+                if !tangents.is_empty() {
+                    msg += &format!(" [tangent: {}]", tangents.join(", "));
+                }
             }
         }
         if driven {
@@ -1801,6 +2002,7 @@ fn cmd_add_earc(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let mut tokens: Vec<&str> = args.split_whitespace().collect();
     let mut nocursor = false;
     let mut noconnect = false;
+    let mut notangent = false;
     let mut driven = false;
     let mut large = false;
     let mut cw = false;
@@ -1808,6 +2010,7 @@ fn cmd_add_earc(ctx: &mut CommandContext, args: &str) -> CommandResult {
         match tokens.last().copied() {
             Some("nocursor") => { nocursor = true; tokens.pop(); }
             Some("noconnect") => { noconnect = true; tokens.pop(); }
+            Some("notangent") => { notangent = true; tokens.pop(); }
             Some("driven") => { driven = true; tokens.pop(); }
             Some("large") => { large = true; tokens.pop(); }
             Some("cw") => { cw = true; tokens.pop(); }
@@ -1840,6 +2043,10 @@ fn cmd_add_earc(ctx: &mut CommandContext, args: &str) -> CommandResult {
     if !noconnect {
         let connected = auto_coincident_arc(ctx, arc_ref, false);
         if !connected.is_empty() { msg += &format!(" [connected: {}]", connected.join(", ")); }
+        if !notangent {
+            let tangents = auto_tangent_arc(ctx, arc_ref);
+            if !tangents.is_empty() { msg += &format!(" [tangent: {}]", tangents.join(", ")); }
+        }
     }
     if driven {
         ctx.exec(Action::AddDimension { kind: DimensionKind::ArcRadius(arc_ref), value: rx, expr: None, derived: false });
@@ -1853,17 +2060,19 @@ fn cmd_add_earc3(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let mut tokens: Vec<&str> = args.split_whitespace().collect();
     let mut nocursor = false;
     let mut noconnect = false;
+    let mut notangent = false;
     let mut driven = false;
     loop {
         match tokens.last().copied() {
             Some("nocursor") => { nocursor = true; tokens.pop(); }
             Some("noconnect") => { noconnect = true; tokens.pop(); }
+            Some("notangent") => { notangent = true; tokens.pop(); }
             Some("driven") => { driven = true; tokens.pop(); }
             _ => break,
         }
     }
     if tokens.len() != 5 {
-        return err("Usage: add_earc3 p1 p2 pmid rx ry [noconnect] [nocursor] [driven]");
+        return err("Usage: add_earc3 p1 p2 pmid rx ry [noconnect] [notangent] [nocursor] [driven]");
     }
     let p1 = match parse_coord(ctx, tokens[0], ctx.cursor) { Ok(p) => p, Err(e) => return err(e) };
     let p2 = match parse_coord(ctx, tokens[1], ctx.cursor) { Ok(p) => p, Err(e) => return err(e) };
@@ -1913,6 +2122,10 @@ fn cmd_add_earc3(ctx: &mut CommandContext, args: &str) -> CommandResult {
     if !noconnect {
         let connected = auto_coincident_arc(ctx, arc_ref, false);
         if !connected.is_empty() { msg += &format!(" [connected: {}]", connected.join(", ")); }
+        if !notangent {
+            let tangents = auto_tangent_arc(ctx, arc_ref);
+            if !tangents.is_empty() { msg += &format!(" [tangent: {}]", tangents.join(", ")); }
+        }
     }
     if driven {
         ctx.exec(Action::AddDimension { kind: DimensionKind::ArcRadius(arc_ref), value: rx, expr: None, derived: false });
@@ -1926,12 +2139,14 @@ fn cmd_add_earc_center(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let mut tokens: Vec<&str> = args.split_whitespace().collect();
     let mut nocursor = false;
     let mut noconnect = false;
+    let mut notangent = false;
     let mut driven = false;
     let mut cw = false;
     loop {
         match tokens.last().copied() {
             Some("nocursor") => { nocursor = true; tokens.pop(); }
             Some("noconnect") => { noconnect = true; tokens.pop(); }
+            Some("notangent") => { notangent = true; tokens.pop(); }
             Some("driven") => { driven = true; tokens.pop(); }
             Some("cw") => { cw = true; tokens.pop(); }
             _ => break,
@@ -1961,6 +2176,10 @@ fn cmd_add_earc_center(ctx: &mut CommandContext, args: &str) -> CommandResult {
     if !noconnect {
         let connected = auto_coincident_arc(ctx, arc_ref, true);
         if !connected.is_empty() { msg += &format!(" [connected: {}]", connected.join(", ")); }
+        if !notangent {
+            let tangents = auto_tangent_arc(ctx, arc_ref);
+            if !tangents.is_empty() { msg += &format!(" [tangent: {}]", tangents.join(", ")); }
+        }
     }
     if driven {
         ctx.exec(Action::AddDimension { kind: DimensionKind::ArcRadius(arc_ref), value: rx, expr: None, derived: false });
@@ -3543,11 +3762,18 @@ fn cmd_zoom(ctx: &mut CommandContext, args: &str) -> CommandResult {
 
 fn cmd_add_arc(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let mut tokens: Vec<&str> = args.split_whitespace().collect();
-    let nocursor = tokens.last() == Some(&"nocursor");
-    if nocursor { tokens.pop(); }
-    let noconnect = tokens.last() == Some(&"noconnect");
-    if noconnect { tokens.pop(); }
-    if tokens.len() != 3 { return err("Usage: add_arc x1,y1 x2,y2 xm,ym [noconnect] [nocursor]"); }
+    let mut nocursor = false;
+    let mut noconnect = false;
+    let mut notangent = false;
+    loop {
+        match tokens.last().copied() {
+            Some("nocursor") => { nocursor = true; tokens.pop(); }
+            Some("noconnect") => { noconnect = true; tokens.pop(); }
+            Some("notangent") => { notangent = true; tokens.pop(); }
+            _ => break,
+        }
+    }
+    if tokens.len() != 3 { return err("Usage: add_arc x1,y1 x2,y2 xm,ym [noconnect] [notangent] [nocursor]"); }
     let p1 = match parse_coord(ctx, tokens[0], ctx.cursor) { Ok(p) => p, Err(e) => return err(e) };
     let p2 = match parse_coord(ctx, tokens[1], Some(p1)) { Ok(p) => p, Err(e) => return err(e) };
     let pm = match parse_coord(ctx, tokens[2], None) { Ok(p) => p, Err(e) => return err(e) };
@@ -3562,6 +3788,12 @@ fn cmd_add_arc(ctx: &mut CommandContext, args: &str) -> CommandResult {
         let connected = auto_coincident_arc(ctx, arc_ref, false);
         if !connected.is_empty() {
             msg += &format!(" [connected: {}]", connected.join(", "));
+        }
+        if !notangent {
+            let tangents = auto_tangent_arc(ctx, arc_ref);
+            if !tangents.is_empty() {
+                msg += &format!(" [tangent: {}]", tangents.join(", "));
+            }
         }
     }
     ok(msg)
@@ -9853,5 +10085,66 @@ mod tests {
         let mut ctx = CommandContext::new();
         run(&mut ctx, "add_earc 0,0 5,0 3 1 0 driven noconnect");
         assert_eq!(ctx.sketch.dimensions.len(), 2);
+    }
+
+    // --- Auto-tangent tests ---
+
+    #[test]
+    fn test_auto_tangent_line_arc() {
+        let mut ctx = CommandContext::new();
+        // Horizontal line, then arc tangent at p2
+        run(&mut ctx, "add_line 0,0 5,0");
+        let out = run_ok(&mut ctx, "add_arc 5,0 5,5 7.5,2.5");
+        assert!(out.contains("tangent"), "expected auto-tangent: {}", out);
+        assert_eq!(ctx.sketch.tangent_la.len(), 1);
+    }
+
+    #[test]
+    fn test_auto_tangent_not_applied_when_not_tangent() {
+        let mut ctx = CommandContext::new();
+        // Horizontal line, then arc clearly not tangent (goes straight up)
+        run(&mut ctx, "add_line 0,0 5,0");
+        run(&mut ctx, "add_arc 5,0 5,5 4,2.5");
+        assert_eq!(ctx.sketch.tangent_la.len(), 0, "should not auto-tangent non-tangent geometry");
+    }
+
+    #[test]
+    fn test_auto_tangent_notangent_keyword() {
+        let mut ctx = CommandContext::new();
+        run(&mut ctx, "add_line 0,0 5,0");
+        let out = run_ok(&mut ctx, "add_arc 5,0 5,5 7.5,2.5 notangent");
+        assert!(!out.contains("tangent"), "notangent should suppress: {}", out);
+        assert_eq!(ctx.sketch.tangent_la.len(), 0);
+    }
+
+    #[test]
+    fn test_auto_tangent_noconnect_implies_notangent() {
+        let mut ctx = CommandContext::new();
+        run(&mut ctx, "add_line 0,0 5,0");
+        run(&mut ctx, "add_arc 5,0 5,5 7.5,2.5 noconnect");
+        assert_eq!(ctx.sketch.tangent_la.len(), 0);
+    }
+
+    #[test]
+    fn test_auto_tangent_arc_arc() {
+        let mut ctx = CommandContext::new();
+        // Two arcs sharing an endpoint, tangent at the junction
+        // First arc: semicircle from (0,0) to (2,0) with center (1,1)
+        run(&mut ctx, "add_arc 0,0 2,0 1,1 noconnect");
+        // Second arc: continues tangent from (2,0)
+        let out = run_ok(&mut ctx, "add_arc 2,0 4,0 3,1");
+        assert!(out.contains("tangent"), "expected arc-arc auto-tangent: {}", out);
+        assert_eq!(ctx.sketch.tangent_aa.len(), 1);
+    }
+
+    #[test]
+    fn test_tangent_aa_shared_endpoint() {
+        // Manual tangent command with shared endpoint should use cross-product formula
+        let mut ctx = CommandContext::new();
+        run(&mut ctx, "add_earc 377.953,0 204.989,2.559 2017.12 2017.12 0 noconnect");
+        run(&mut ctx, "add_earc 204.989,2.559 142.625,0.378 4123.85 4123.85 0 noconnect notangent");
+        run_ok(&mut ctx, "tangent EA0 EA1");
+        assert_eq!(ctx.sketch.tangent_aa.len(), 1);
+        assert_ne!(ctx.sketch.tangent_aa[0].shared, SharedEndpoint::None);
     }
 }
