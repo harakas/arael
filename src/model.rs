@@ -743,7 +743,7 @@ macro_rules! impl_model_noop {
     };
 }
 
-impl_model_noop!(f32, f64, u32, i32, bool, usize);
+impl_model_noop!(f32, f64, u32, i32, bool, usize, String);
 
 macro_rules! impl_model_noop_generic {
     ($($ty:ty),* $(,)?) => {
@@ -1537,6 +1537,11 @@ impl ModelSym for f32 {
 }
 
 impl ModelSym for f64 {
+    type Sym = E;
+    fn sym(base: &str) -> E { arael_sym::symbol(base) }
+}
+
+impl ModelSym for String {
     type Sym = E;
     fn sym(base: &str) -> E { arael_sym::symbol(base) }
 }

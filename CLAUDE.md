@@ -16,3 +16,4 @@
  * arael-sketch: having to use the `force` keyword on a constraint to take hold (rejected otherwise for not changing dof) means that either we have a bug or our assumptions about the constraint are invalid and it actually does not constrain anything. So don't go adding force to places and handwaving it away with "degenerate geometry so force needed".
  * When a test fails then it's probably a bug in changes. First instinct should not be to "fix" the test but to understand why it fails. Hallucinating plausible but unverified reasons from local changes is not acceptable. Causes must be verified.
  * arael-sketch: We have color scheme in colors.rs -- so don't hardcode colors but add/reuse entries.
+ * There is no need to add #[arael(skip)] on every non-parameter bool, f32/f64, String, etc. They just clutter the code and reduce readability.
