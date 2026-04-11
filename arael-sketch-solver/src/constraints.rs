@@ -1007,7 +1007,9 @@ pub struct CoincidentLL22 {
     let r_eff = sqrt(nlx * nlx * arc.radius * arc.radius + nly * nly * arc.radius_b * arc.radius_b);
     [(dist - tangentla.sign * r_eff) * sketch.constraint_isigma]
 }))]
-// Ellipse gradient dot line_dir = 0 at shared endpoint p1
+// Directed tangent at shared endpoint p1: constrain the angle between line_dir
+// and ellipse gradient to be exactly dir_sign*PI/2.  Unlike the undirected
+// dot-product formulation this has a unique zero, preventing line direction reversal.
 #[arael(constraint(hb, guard = self.at_p1, {
     let px = line.p1.x - arc.center.x;
     let py = line.p1.y - arc.center.y;
@@ -1018,9 +1020,11 @@ pub struct CoincidentLL22 {
     let gy = u / (arc.radius * arc.radius) * sr + v / (arc.radius_b * arc.radius_b) * cr;
     let dx = line.p2.x - line.p1.x;
     let dy = line.p2.y - line.p1.y;
-    [(dx * gx + dy * gy) * sketch.constraint_isigma]
+    let cross = dx * gy - dy * gx;
+    let dot = dx * gx + dy * gy;
+    [rad_diff(safe_atan2(cross, dot), tangentla.dir_sign * pi / 2.0) * sketch.constraint_isigma]
 }))]
-// Ellipse gradient dot line_dir = 0 at shared endpoint p2
+// Directed tangent at shared endpoint p2 (line direction reversed).
 #[arael(constraint(hb, guard = self.at_p2, {
     let px = line.p2.x - arc.center.x;
     let py = line.p2.y - arc.center.y;
@@ -1031,7 +1035,9 @@ pub struct CoincidentLL22 {
     let gy = u / (arc.radius * arc.radius) * sr + v / (arc.radius_b * arc.radius_b) * cr;
     let dx = line.p1.x - line.p2.x;
     let dy = line.p1.y - line.p2.y;
-    [(dx * gx + dy * gy) * sketch.constraint_isigma]
+    let cross = dx * gy - dy * gx;
+    let dot = dx * gx + dy * gy;
+    [rad_diff(safe_atan2(cross, dot), tangentla.dir_sign * pi / 2.0) * sketch.constraint_isigma]
 }))]
 pub struct TangentLA {
     #[arael(ref = root.lines)]
@@ -1044,6 +1050,8 @@ pub struct TangentLA {
     pub at_p1: bool,
     #[serde(skip)]
     pub at_p2: bool,
+    #[serde(skip)]
+    pub dir_sign: f64,
     #[serde(skip)]
     pub hb: CrossBlock<Line, Arc>,
 }

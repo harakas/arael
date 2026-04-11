@@ -1682,6 +1682,30 @@ impl Sketch {
                     || self.coincident_lp1_arc_end.iter().any(|c| c.line == t.line && c.arc == t.arc);
             t.at_p2 = self.coincident_lp2_arc_start.iter().any(|c| c.line == t.line && c.arc == t.arc)
                     || self.coincident_lp2_arc_end.iter().any(|c| c.line == t.line && c.arc == t.arc);
+            // Compute dir_sign for shared-endpoint directed tangent constraint.
+            // Only set once (when 0.0) to remember the initial tangent direction;
+            // recomputing each time would follow perturbations instead of preventing flips.
+            if (t.at_p1 || t.at_p2) && t.dir_sign == 0.0 {
+                let l = &self.lines[t.line];
+                let a = &self.arcs[t.arc];
+                let (px, py, dx, dy) = if t.at_p1 {
+                    (l.p1.value.x - a.center.value.x, l.p1.value.y - a.center.value.y,
+                     l.p2.value.x - l.p1.value.x, l.p2.value.y - l.p1.value.y)
+                } else {
+                    (l.p2.value.x - a.center.value.x, l.p2.value.y - a.center.value.y,
+                     l.p1.value.x - l.p2.value.x, l.p1.value.y - l.p2.value.y)
+                };
+                let cr = a.rotation.value.cos();
+                let sr = a.rotation.value.sin();
+                let u = px * cr + py * sr;
+                let v = -px * sr + py * cr;
+                let ra2 = a.radius.value * a.radius.value;
+                let rb2 = a.radius_b.value * a.radius_b.value;
+                let gx = u / ra2 * cr - v / rb2 * sr;
+                let gy = u / ra2 * sr + v / rb2 * cr;
+                let cross = dx * gy - dy * gx;
+                t.dir_sign = if cross >= 0.0 { 1.0 } else { -1.0 };
+            }
         }
     }
 

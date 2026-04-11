@@ -373,7 +373,7 @@ fn test_tangent_la() {
               - (sketch.arcs[a].center.value.y - l_ref.p1.value.y) * dx) / len;
     let sign = if dist >= 0.0 { 1.0 } else { -1.0 };
     sketch.tangent_la.push(TangentLA {
-        line: l, arc: a, sign, at_p1: false, at_p2: false, hb: CrossBlock::new(),
+        line: l, arc: a, sign, at_p1: false, at_p2: false, dir_sign: 0.0, hb: CrossBlock::new(),
     });
     sketch.solve();
     let lp = &sketch.lines[l];
@@ -384,6 +384,38 @@ fn test_tangent_la() {
     let len = (dx * dx + dy * dy).sqrt();
     let dist = ((ac.x - lp.p1.value.x) * dy - (ac.y - lp.p1.value.y) * dx) / len;
     assert_near(dist.abs(), ar, 0.01);
+}
+
+#[test]
+fn test_tangent_la_shared_endpoint_no_flip() {
+    use std::f64::consts::PI;
+    let mut sketch = Sketch::new();
+    // Arc centered at origin, radius 2, from 0 to PI (semicircle)
+    let a = sketch.add_arc(vect2d::new(0.0, 0.0), 2.0, 0.0, PI, false);
+    // Arc start is at (2, 0). Line from (2, 0) going upward.
+    let l = sketch.add_line(vect2d::new(2.0, 0.0), vect2d::new(2.0, 3.0));
+    // Coincident: line.p1 == arc start
+    sketch.coincident_lp1_arc_start.push(CoincidentLP1ArcStart {
+        line: l, arc: a, hb: CrossBlock::new(),
+    });
+    // Tangent with at_p1=true (dir_sign will be computed by update_tangent_flags)
+    sketch.tangent_la.push(TangentLA {
+        line: l, arc: a, sign: 1.0, at_p1: true, at_p2: false, dir_sign: 0.0, hb: CrossBlock::new(),
+    });
+    sketch.solve();
+    // After solve, line should be tangent at arc start (angle=0).
+    // Tangent at angle=0 on a circle at origin is vertical: (0, 1).
+    // Line p1=(2,0), so p2 should be above: angle near PI/2.
+    let lp = &sketch.lines[l];
+    let angle1 = (lp.p2.value.y - lp.p1.value.y).atan2(lp.p2.value.x - lp.p1.value.x);
+    assert!(angle1 > 0.0, "line should point upward, got angle {}", angle1);
+    // Now perturb p2 to below the x-axis (would tempt the solver to flip)
+    sketch.lines[l].p2.value = vect2d::new(2.0, -3.0);
+    sketch.solve();
+    // Direction should NOT have flipped -- directed tangent constraint prevents it
+    let lp2 = &sketch.lines[l];
+    let angle2 = (lp2.p2.value.y - lp2.p1.value.y).atan2(lp2.p2.value.x - lp2.p1.value.x);
+    assert!(angle2 > 0.0, "line direction flipped after perturbation! angle = {}", angle2);
 }
 
 // -- Arc-Arc --
@@ -421,7 +453,7 @@ fn test_tangent_aa() {
     let a = sketch.add_arc(vect2d::new(0.0, 0.0), 2.0, 0.0, std::f64::consts::PI, false);
     let b = sketch.add_arc(vect2d::new(4.5, 0.0), 3.0, 0.0, std::f64::consts::PI, false);
     sketch.tangent_aa.push(TangentAA {
-        a, b, hb: CrossBlock::new(),
+        a, b, shared: SharedEndpoint::None, hb: CrossBlock::new(),
     });
     sketch.solve();
     let ca = sketch.arcs[a].center.value;

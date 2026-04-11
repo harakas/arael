@@ -639,7 +639,28 @@ impl Action {
                 let dist = ((a.center.value.x - l.p1.value.x) * dy
                           - (a.center.value.y - l.p1.value.y) * dx) / len;
                 let sign = if dist >= 0.0 { 1.0 } else { -1.0 };
-                sketch.tangent_la.push(TangentLA { line: *line, arc: *arc, sign, at_p1, at_p2, hb: CrossBlock::new() });
+                // Compute dir_sign for shared-endpoint direction enforcement
+                let dir_sign = if at_p1 || at_p2 {
+                    let (px, py, ldx, ldy) = if at_p1 {
+                        (l.p1.value.x - a.center.value.x, l.p1.value.y - a.center.value.y, dx, dy)
+                    } else {
+                        (l.p2.value.x - a.center.value.x, l.p2.value.y - a.center.value.y,
+                         l.p1.value.x - l.p2.value.x, l.p1.value.y - l.p2.value.y)
+                    };
+                    let cr = a.rotation.value.cos();
+                    let sr = a.rotation.value.sin();
+                    let u = px * cr + py * sr;
+                    let v = -px * sr + py * cr;
+                    let ra2 = a.radius.value * a.radius.value;
+                    let rb2 = a.radius_b.value * a.radius_b.value;
+                    let gx = u / ra2 * cr - v / rb2 * sr;
+                    let gy = u / ra2 * sr + v / rb2 * cr;
+                    let cross = ldx * gy - ldy * gx;
+                    if cross >= 0.0 { 1.0 } else { -1.0 }
+                } else {
+                    0.0
+                };
+                sketch.tangent_la.push(TangentLA { line: *line, arc: *arc, sign, at_p1, at_p2, dir_sign, hb: CrossBlock::new() });
             }
             Action::ApplyTangentAA { a, b } => {
                 let snap = 1e-3;
