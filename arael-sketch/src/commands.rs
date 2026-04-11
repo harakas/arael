@@ -1016,17 +1016,25 @@ fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
                 "length" | "radius" | "radius_b" | "sweep" | "angle" | "distance");
             if is_command {
                 let dim_count_before = ctx.sketch.dimensions.len();
+                let prev_entity = ctx.session_names.get("_").cloned();
                 let result = execute_one(ctx, rhs);
                 if !result.is_error {
-                    // Check for new entity name
-                    if let Some(entity_name) = ctx.session_names.get("_").cloned() {
-                        ctx.session_names.insert(var_name.to_string(), entity_name);
-                    }
+                    // Check for new entity name (only if "_" was updated by this command)
+                    let cur_entity = ctx.session_names.get("_").cloned();
+                    let entity_captured = if cur_entity != prev_entity {
+                        if let Some(entity_name) = cur_entity {
+                            ctx.session_names.insert(var_name.to_string(), entity_name);
+                            true
+                        } else { false }
+                    } else {
+                        false
+                    };
                     // Check for new dimension — dimension commands (length, angle, etc.)
                     // don't set "_" like geometry commands do, so we detect new dimensions
                     // by comparing count before/after and capture the dimension name.
-                    // This is a workaround; ideally dimension commands would set "_" directly.
-                    if ctx.sketch.dimensions.len() > dim_count_before {
+                    // Only when the command didn't already produce an entity (e.g. "driven"
+                    // on geometry commands creates dimensions as a side effect).
+                    if !entity_captured && ctx.sketch.dimensions.len() > dim_count_before {
                         if let Some(dim) = ctx.sketch.dimensions.last() {
                             ctx.session_names.insert(var_name.to_string(), dim.name.clone());
                         }
@@ -4271,6 +4279,7 @@ fn cmd_add_arc(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let mut quiet = false;
     let mut constr = false;
     let mut notangent = false;
+    let mut driven = false;
     loop {
         match tokens.last().copied() {
             Some("nocursor") => { nocursor = true; tokens.pop(); }
@@ -4278,10 +4287,11 @@ fn cmd_add_arc(ctx: &mut CommandContext, args: &str) -> CommandResult {
             Some("quiet") => { quiet = true; tokens.pop(); }
             Some("constr") => { constr = true; tokens.pop(); }
             Some("notangent") => { notangent = true; tokens.pop(); }
+            Some("driven") => { driven = true; tokens.pop(); }
             _ => break,
         }
     }
-    if tokens.len() != 3 { return err("Usage: add_arc x1,y1 x2,y2 xm,ym [noconnect] [notangent] [nocursor]"); }
+    if tokens.len() != 3 { return err("Usage: add_arc x1,y1 x2,y2 xm,ym [noconnect] [notangent] [nocursor] [driven]"); }
     let p1 = match parse_coord(ctx, tokens[0], ctx.cursor) { Ok(p) => p, Err(e) => return err(e) };
     let p2 = match parse_coord(ctx, tokens[1], Some(p1)) { Ok(p) => p, Err(e) => return err(e) };
     let pm = match parse_coord(ctx, tokens[2], None) { Ok(p) => p, Err(e) => return err(e) };
@@ -4308,6 +4318,20 @@ fn cmd_add_arc(ctx: &mut CommandContext, args: &str) -> CommandResult {
                 msg += &format!(" [tangent: {}]", tangents.join(", "));
             }
         }
+    }
+    if driven {
+        let radius = ctx.sketch.arcs[arc_ref].radius.value;
+        ctx.exec(Action::AddDimension {
+            kind: DimensionKind::ArcRadius(arc_ref),
+            value: radius, expr: None, derived: false,
+        });
+        let a = &ctx.sketch.arcs[arc_ref];
+        let sweep = (a.end_angle.value - a.start_angle.value).abs().to_degrees();
+        ctx.exec(Action::AddDimension {
+            kind: DimensionKind::ArcSweep(arc_ref),
+            value: sweep, expr: None, derived: false,
+        });
+        msg += &format!(" [driven radius={:.4} sweep={:.4}]", radius, sweep);
     }
     if quiet { msg += " [quiet]"; }
     ok(msg)
@@ -6746,7 +6770,7 @@ pub fn complete(
             }
         }
         "add_arc" => {
-            let arc_kws = ["noconnect", "nocursor", "notangent", "quiet"];
+            let arc_kws = ["noconnect", "nocursor", "notangent", "quiet", "driven"];
             let coord_args = typed_args.iter().filter(|a| !arc_kws.contains(a)).count();
             if coord_args < 3 {
                 add_matching(&mut results, current_word, &["cursor"]);
@@ -10022,6 +10046,30 @@ mod tests {
         assert_eq!(ctx.sketch.dimensions.len(), 1);
         assert!(!ctx.sketch.dimensions[0].derived);
         assert!(near(ctx.sketch.dimensions[0].value, 3.0));
+    }
+
+    #[test]
+    fn test_add_arc_driven() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_arc 0,0 5,0 2.5,2.5 driven noconnect");
+        // Should have 2 dimensions: radius and sweep
+        assert_eq!(ctx.sketch.dimensions.len(), 2);
+        assert!(!ctx.sketch.dimensions[0].derived);
+        assert!(!ctx.sketch.dimensions[1].derived);
+        // Radius > 0
+        assert!(ctx.sketch.dimensions[0].value > 0.0);
+        // Sweep > 0
+        assert!(ctx.sketch.dimensions[1].value > 0.0);
+    }
+
+    #[test]
+    fn test_add_arc_driven_variable_assignment() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "l = add_line 0,0 1,0");
+        run_ok(&mut ctx, "a = add_arc 1,0 3,1 2,0 driven noconnect");
+        // Variable 'a' should resolve to the arc, not the dimension
+        run_ok(&mut ctx, "tangent l a");
+        assert_eq!(ctx.sketch.tangent_la.len(), 1);
     }
 
     #[test]

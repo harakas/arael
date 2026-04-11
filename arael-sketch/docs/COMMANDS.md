@@ -121,7 +121,7 @@ add_circle2 p1 p2            Circle from 2 diametrically opposite points
 add_circle3 p1 p2 p3         Circle from 3 points on circumference
 add_circle2t L0 L1 radius    Circle tangent to 2 lines with given radius
 add_circle3t L0 L1 L2        Circle tangent to 3 lines (incircle)
-add_arc x1,y1 x2,y2 xm,ym  Create an arc through start, end, midpoint
+add_arc x1,y1 x2,y2 xm,ym  Create an arc through start, end, midpoint [driven]
 offset_line L0 distance      Create a parallel line offset by distance (alias: offset)
 ```
 
@@ -280,12 +280,13 @@ length bot 10                              Update width
 
 ### Driven Dimensions on Lines and Circles
 
-`add_line` and `add_circle` support the `driven` keyword to automatically create driven length/radius dimensions:
+`add_line`, `add_circle`, and `add_arc` support the `driven` keyword to automatically create driven length/radius dimensions:
 
 ```
 add_line 0,0 5,0 driven                   Line with driven length dimension
 add_line 0,0 5,0 5,3 driven               Multi-segment: each segment gets a dimension
 add_circle 0,0 3 driven                   Circle with driven radius dimension
+add_arc 0,0 5,0 2.5,2 driven             Arc with driven radius + sweep dimensions
 ```
 
 ### Circle Construction Tools
