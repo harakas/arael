@@ -950,7 +950,9 @@ pub fn execute(ctx: &mut CommandContext, input: &str) -> Vec<CommandResult> {
         if r.is_error && !r.output.starts_with('>') {
             r.output = format!("'{}': {}", cmd, r.output);
         }
+        let is_err = r.is_error;
         results.push(r);
+        if is_err { break; }
     }
     if results.is_empty() {
         results.push(ok(""));
