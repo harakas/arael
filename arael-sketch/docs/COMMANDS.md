@@ -191,6 +191,22 @@ quiet EA0 EA1 L0             Multiple entities
 
 `info` and `list` show `[quiet]` marker.
 
+### Drag
+
+Drag entities or endpoints to a new position. The sketch relaxes under constraints after the drag.
+
+```
+drag L0.p1 5,3               Drag line endpoint to absolute position
+drag L0.p2 @0,3              Drag line endpoint by relative offset
+drag L0 @2,0                 Drag entire line body
+drag A0.center 0,0           Drag arc center
+drag A0.start @-1,2          Drag arc start point
+drag A0 @0,1                 Drag entire arc body (locks shape)
+drag P0 3,3                  Drag standalone point
+```
+
+If the drag results in unsatisfiable constraints, the sketch reverts to its pre-drag state and an error is reported.
+
 ### Construction Lines
 
 Entities marked as construction are reference geometry — drawn in a distinct color with dashdot style.

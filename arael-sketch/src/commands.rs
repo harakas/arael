@@ -1102,6 +1102,7 @@ fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
         "style" => cmd_style(ctx, args_str),
         "quiet" => cmd_quiet(ctx, args_str),
         "constr" => cmd_constr(ctx, args_str),
+        "drag" => cmd_drag(ctx, args_str),
         "select" => cmd_select(ctx, args_str),
         "deselect" => cmd_deselect(ctx, args_str),
         "print" => cmd_print(ctx, args_str),
@@ -3281,6 +3282,223 @@ fn cmd_constr(ctx: &mut CommandContext, args: &str) -> CommandResult {
         }
     }
     ok(msgs.join(", "))
+}
+
+fn cmd_drag(ctx: &mut CommandContext, args: &str) -> CommandResult {
+    use arael::model::{Param, CrossBlock};
+    use arael::simple_lm::LmProblem;
+
+    let tokens: Vec<&str> = args.split_whitespace().collect();
+    if tokens.len() != 2 {
+        return err("Usage: drag L0.p1 x,y | drag L0 @dx,dy | drag P0 x,y | drag A0.center x,y");
+    }
+    let entity_spec = tokens[0];
+
+    // Resolve current position of the drag target
+    enum DragTarget {
+        Point(arael::refs::Ref<Point>),
+        LineP1(arael::refs::Ref<Line>),
+        LineP2(arael::refs::Ref<Line>),
+        LineBody(arael::refs::Ref<Line>),
+        ArcCenter(arael::refs::Ref<arael_sketch_solver::Arc>),
+        ArcStart(arael::refs::Ref<arael_sketch_solver::Arc>),
+        ArcEnd(arael::refs::Ref<arael_sketch_solver::Arc>),
+        ArcBody(arael::refs::Ref<arael_sketch_solver::Arc>),
+    }
+
+    let (target, current_pos) = if let Some((ent, field)) = entity_spec.split_once('.') {
+        if ent.starts_with('L') {
+            let r = match resolve_line(&ctx.sketch, ent) { Ok(r) => r, Err(e) => return err(e) };
+            match field {
+                "p1" => (DragTarget::LineP1(r), ctx.sketch.lines[r].p1.value),
+                "p2" => (DragTarget::LineP2(r), ctx.sketch.lines[r].p2.value),
+                _ => return err(format!("Unknown line field '{}'. Use p1 or p2", field)),
+            }
+        } else if is_arc_name(ent) {
+            let r = match resolve_arc(&ctx.sketch, ent) { Ok(r) => r, Err(e) => return err(e) };
+            match field {
+                "center" => (DragTarget::ArcCenter(r), ctx.sketch.arcs[r].center.value),
+                "start" => (DragTarget::ArcStart(r), crate::geometry::arc_start_pos(&ctx.sketch.arcs[r])),
+                "end" => (DragTarget::ArcEnd(r), crate::geometry::arc_end_pos(&ctx.sketch.arcs[r])),
+                _ => return err(format!("Unknown arc field '{}'. Use center, start, or end", field)),
+            }
+        } else {
+            return err(format!("Unknown entity '{}' in drag target", ent));
+        }
+    } else if entity_spec.starts_with('P') {
+        let r = match resolve_point(&ctx.sketch, entity_spec) { Ok(r) => r, Err(e) => return err(e) };
+        (DragTarget::Point(r), ctx.sketch.points[r].pos.value)
+    } else if entity_spec.starts_with('L') {
+        let r = match resolve_line(&ctx.sketch, entity_spec) { Ok(r) => r, Err(e) => return err(e) };
+        let mid = vect2d::new(
+            (ctx.sketch.lines[r].p1.value.x + ctx.sketch.lines[r].p2.value.x) / 2.0,
+            (ctx.sketch.lines[r].p1.value.y + ctx.sketch.lines[r].p2.value.y) / 2.0,
+        );
+        (DragTarget::LineBody(r), mid)
+    } else if is_arc_name(entity_spec) {
+        let r = match resolve_arc(&ctx.sketch, entity_spec) { Ok(r) => r, Err(e) => return err(e) };
+        (DragTarget::ArcBody(r), ctx.sketch.arcs[r].center.value)
+    } else {
+        return err(format!("Unknown entity '{}'. Use P0, L0, L0.p1, A0.center, etc.", entity_spec));
+    };
+
+    // Parse target coordinate (absolute or relative)
+    let target_pos = match parse_coord(ctx, tokens[1], Some(current_pos)) {
+        Ok(p) => p, Err(e) => return err(e),
+    };
+
+    // Snapshot
+    let snapshot = bincode::serialize(&ctx.sketch).ok();
+    let old_cost = {
+        let mut params = Vec::new();
+        ctx.sketch.serialize64(&mut params);
+        ctx.sketch.calc_cost(&params)
+    };
+
+    // Create drag apparatus: temp fixed point + coincident constraint
+    let drag_pt = ctx.sketch.add_point_fixed(target_pos);
+
+    // For body drags, we need a second point or to drag center
+    let drag_pt2: Option<arael::refs::Ref<Point>>;
+    let saved_arc_locks: Option<(bool, f64, bool, f64, bool, f64, f64, bool, bool)>;
+
+    match &target {
+        DragTarget::Point(r) => {
+            ctx.sketch.coincident_pp.push(CoincidentPP { a: drag_pt, b: *r, hb: CrossBlock::new() });
+            drag_pt2 = None;
+            saved_arc_locks = None;
+        }
+        DragTarget::LineP1(r) => {
+            ctx.sketch.coincident_lp1.push(CoincidentLP1 { line: *r, point: drag_pt, hb: CrossBlock::new() });
+            drag_pt2 = None;
+            saved_arc_locks = None;
+        }
+        DragTarget::LineP2(r) => {
+            ctx.sketch.coincident_lp2.push(CoincidentLP2 { line: *r, point: drag_pt, hb: CrossBlock::new() });
+            drag_pt2 = None;
+            saved_arc_locks = None;
+        }
+        DragTarget::LineBody(r) => {
+            let offset = vect2d::new(target_pos.x - current_pos.x, target_pos.y - current_pos.y);
+            let p1_target = vect2d::new(ctx.sketch.lines[*r].p1.value.x + offset.x, ctx.sketch.lines[*r].p1.value.y + offset.y);
+            let p2_target = vect2d::new(ctx.sketch.lines[*r].p2.value.x + offset.x, ctx.sketch.lines[*r].p2.value.y + offset.y);
+            ctx.sketch.points[drag_pt].pos = Param::fixed(p1_target);
+            ctx.sketch.coincident_lp1.push(CoincidentLP1 { line: *r, point: drag_pt, hb: CrossBlock::new() });
+            let dp2 = ctx.sketch.add_point_fixed(p2_target);
+            ctx.sketch.coincident_lp2.push(CoincidentLP2 { line: *r, point: dp2, hb: CrossBlock::new() });
+            drag_pt2 = Some(dp2);
+            saved_arc_locks = None;
+        }
+        DragTarget::ArcCenter(r) => {
+            ctx.sketch.coincident_arc_center.push(CoincidentArcCenter { point: drag_pt, arc: *r, hb: CrossBlock::new() });
+            drag_pt2 = None;
+            saved_arc_locks = None;
+        }
+        DragTarget::ArcStart(r) => {
+            ctx.sketch.coincident_arc_start.push(CoincidentArcStart { point: drag_pt, arc: *r, hb: CrossBlock::new() });
+            drag_pt2 = None;
+            saved_arc_locks = None;
+        }
+        DragTarget::ArcEnd(r) => {
+            ctx.sketch.coincident_arc_end.push(CoincidentArcEnd { point: drag_pt, arc: *r, hb: CrossBlock::new() });
+            drag_pt2 = None;
+            saved_arc_locks = None;
+        }
+        DragTarget::ArcBody(r) => {
+            ctx.sketch.coincident_arc_center.push(CoincidentArcCenter { point: drag_pt, arc: *r, hb: CrossBlock::new() });
+            // Lock radius and sweep
+            let a = &ctx.sketch.arcs[*r];
+            let locks = (
+                a.constraints.has_target_radius, a.constraints.target_radius,
+                a.constraints.has_target_radius_b, a.constraints.target_radius_b,
+                a.constraints.has_target_sweep, a.constraints.target_sweep, a.constraints.sweep_sign,
+                a.start_angle.optimize, a.end_angle.optimize,
+            );
+            let a = &mut ctx.sketch.arcs[*r];
+            a.constraints.has_target_radius = true;
+            a.constraints.target_radius = a.radius.value;
+            if a.is_ellipse {
+                a.constraints.has_target_radius_b = true;
+                a.constraints.target_radius_b = a.radius_b.value;
+                a.rotation.optimize = false;
+            }
+            a.constraints.has_target_sweep = true;
+            a.constraints.target_sweep = a.end_angle.value - a.start_angle.value;
+            a.constraints.sweep_sign = if a.ccw { 1.0 } else { -1.0 };
+            a.start_angle.optimize = false;
+            a.end_angle.optimize = false;
+            drag_pt2 = None;
+            saved_arc_locks = Some(locks);
+        }
+    }
+
+    // Solve (drag)
+    ctx.sketch.solve();
+
+    // Remove apparatus
+    match &target {
+        DragTarget::Point(_) => { ctx.sketch.coincident_pp.pop(); }
+        DragTarget::LineP1(_) => { ctx.sketch.coincident_lp1.pop(); }
+        DragTarget::LineP2(_) => { ctx.sketch.coincident_lp2.pop(); }
+        DragTarget::LineBody(_) => {
+            ctx.sketch.coincident_lp1.pop();
+            ctx.sketch.coincident_lp2.pop();
+            if let Some(dp2) = drag_pt2 { ctx.sketch.points.remove(dp2); }
+        }
+        DragTarget::ArcCenter(_) | DragTarget::ArcBody(_) => {
+            ctx.sketch.coincident_arc_center.pop();
+        }
+        DragTarget::ArcStart(_) => { ctx.sketch.coincident_arc_start.pop(); }
+        DragTarget::ArcEnd(_) => { ctx.sketch.coincident_arc_end.pop(); }
+    }
+    ctx.sketch.points.remove(drag_pt);
+
+    // Restore arc locks
+    if let (DragTarget::ArcBody(r), Some(locks)) = (&target, saved_arc_locks) {
+        let a = &mut ctx.sketch.arcs[*r];
+        a.constraints.has_target_radius = locks.0;
+        a.constraints.target_radius = locks.1;
+        a.constraints.has_target_radius_b = locks.2;
+        a.constraints.target_radius_b = locks.3;
+        a.constraints.has_target_sweep = locks.4;
+        a.constraints.target_sweep = locks.5;
+        a.constraints.sweep_sign = locks.6;
+        a.start_angle.optimize = locks.7;
+        a.end_angle.optimize = locks.8;
+    }
+
+    // Solve (relax)
+    ctx.sketch.solve();
+
+    // Check cost
+    let new_cost = {
+        let mut params = Vec::new();
+        ctx.sketch.serialize64(&mut params);
+        ctx.sketch.calc_cost(&params)
+    };
+    if new_cost > old_cost + 1e-3 {
+        if let Some(ref snap) = snapshot {
+            if let Ok(restored) = bincode::deserialize(snap) {
+                ctx.sketch = restored;
+                return err("Drag failed: could not satisfy constraints");
+            }
+        }
+    }
+
+    // Report new position
+    let new_pos = match &target {
+        DragTarget::Point(r) => ctx.sketch.points[*r].pos.value,
+        DragTarget::LineP1(r) => ctx.sketch.lines[*r].p1.value,
+        DragTarget::LineP2(r) => ctx.sketch.lines[*r].p2.value,
+        DragTarget::LineBody(r) => vect2d::new(
+            (ctx.sketch.lines[*r].p1.value.x + ctx.sketch.lines[*r].p2.value.x) / 2.0,
+            (ctx.sketch.lines[*r].p1.value.y + ctx.sketch.lines[*r].p2.value.y) / 2.0,
+        ),
+        DragTarget::ArcCenter(r) | DragTarget::ArcBody(r) => ctx.sketch.arcs[*r].center.value,
+        DragTarget::ArcStart(r) => crate::geometry::arc_start_pos(&ctx.sketch.arcs[*r]),
+        DragTarget::ArcEnd(r) => crate::geometry::arc_end_pos(&ctx.sketch.arcs[*r]),
+    };
+    ok(format!("Dragged {} to ({:.4}, {:.4})", entity_spec, new_pos.x, new_pos.y))
 }
 
 // ---------------------------------------------------------------------------
@@ -5949,6 +6167,7 @@ fn cmd_help(args: &str) -> CommandResult {
             "style" => "style L0 [solid|dashed|dashdot]",
             "quiet" => "quiet L0 [on|off] — toggle/set quiet mode (hides dimensions and center)",
             "constr" => "constr L0 [on|off] — toggle/set construction line (dashdot, different color)",
+            "drag" => "drag L0.p1 x,y | drag L0 @dx,dy — drag entity/endpoint to position",
             "select" => "select L0 [L1 ...] | select all | select L0 chain | select L0 linked",
             "deselect" => "deselect [L0 L1 ...] (clears all or specific)",
             "print" => "print <expression> (evaluate and display)",
@@ -5997,7 +6216,7 @@ const COMMAND_NAMES: &[&str] = &[
     "equal", "collinear", "tangent", "coincident", "concentric", "midpoint",
     "symmetry", "mirror", "point_on", "length", "radius", "radius_b", "sweep", "angle", "distance", "hdistance", "vdistance", "xangle",
     "remove_dim", "remove_constraint", "rc", "set_derived", "set_driven",
-    "lock", "unlock", "param", "del_param", "rename_param", "style", "quiet", "constr",
+    "lock", "unlock", "param", "del_param", "rename_param", "style", "quiet", "constr", "drag",
     "select", "deselect", "freeze", "print", "info", "measure", "list", "find", "let",
     "dof", "cost", "undo", "redo", "history", "goto", "center", "zoom",
     "cursor", "dim_pos", "clear", "save", "load", "help", "msg",
@@ -10634,5 +10853,49 @@ mod tests {
         let out = run_ok(&mut ctx, "list constr");
         assert!(out.contains("L0"), "should list L0: {}", out);
         assert!(!out.contains("L1"), "should not list L1: {}", out);
+    }
+
+    // --- Drag tests ---
+
+    #[test]
+    fn test_drag_line_endpoint() {
+        let mut ctx = CommandContext::new();
+        run(&mut ctx, "add_line 0,0 5,0 noconnect");
+        let out = run_ok(&mut ctx, "drag L0.p2 5,3");
+        assert!(out.contains("Dragged"), "{}", out);
+        let p2 = ctx.sketch.lines[ctx.sketch.lines.refs().next().unwrap()].p2.value;
+        assert!((p2.x - 5.0).abs() < 0.1, "p2.x={:.4}", p2.x);
+        assert!((p2.y - 3.0).abs() < 0.1, "p2.y={:.4}", p2.y);
+    }
+
+    #[test]
+    fn test_drag_relative() {
+        let mut ctx = CommandContext::new();
+        run(&mut ctx, "add_line 0,0 5,0 noconnect");
+        run_ok(&mut ctx, "drag L0.p2 @0,3");
+        let p2 = ctx.sketch.lines[ctx.sketch.lines.refs().next().unwrap()].p2.value;
+        assert!((p2.x - 5.0).abs() < 0.1, "p2.x={:.4}", p2.x);
+        assert!((p2.y - 3.0).abs() < 0.1, "p2.y={:.4}", p2.y);
+    }
+
+    #[test]
+    fn test_drag_point() {
+        let mut ctx = CommandContext::new();
+        run(&mut ctx, "add_point 0,0");
+        run_ok(&mut ctx, "drag P0 3,3");
+        let p = ctx.sketch.points[ctx.sketch.points.refs().next().unwrap()].pos.value;
+        assert!((p.x - 3.0).abs() < 0.1, "x={:.4}", p.x);
+        assert!((p.y - 3.0).abs() < 0.1, "y={:.4}", p.y);
+    }
+
+    #[test]
+    fn test_drag_constrained() {
+        let mut ctx = CommandContext::new();
+        run(&mut ctx, "add_line 0,0 5,0 noconnect");
+        run_ok(&mut ctx, "horizontal L0");
+        // Drag p2 to (5,3) — horizontal should keep y equal
+        run_ok(&mut ctx, "drag L0.p2 5,3");
+        let l = &ctx.sketch.lines[ctx.sketch.lines.refs().next().unwrap()];
+        assert!((l.p1.value.y - l.p2.value.y).abs() < 0.1, "should stay horizontal: p1.y={:.4} p2.y={:.4}", l.p1.value.y, l.p2.value.y);
     }
 }
