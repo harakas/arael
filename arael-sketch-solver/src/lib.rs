@@ -1031,40 +1031,47 @@ impl Sketch {
             for c in &mut self.axis_distance_arc_center_p { remap(&mut c.point); }
             for c in &mut self.axis_distance_arc_start_p { remap(&mut c.point); }
             for c in &mut self.axis_distance_arc_end_p { remap(&mut c.point); }
+            for c in &mut self.symmetry_pp { remap(&mut c.a); remap(&mut c.c); }
+            for c in &mut self.distance_lp1 { remap(&mut c.point); }
+            for c in &mut self.distance_lp2 { remap(&mut c.point); }
             // Remove merged points
             for (old, _) in &merged { self.points.remove(Ref::new(*old)); }
             // Dedup again after remapping
             self.dedup_constraints();
         }
 
-        // Phase 2: Replace helper-point bridges with direct constraints
+        // Phase 2: Replace helper-point bridges with direct constraints.
+        // Collect ALL matching arcs (not just the first) since point merging
+        // in Phase 1 can create multiple arc constraints per helper point.
         let helper_refs: std::vec::Vec<Ref<Point>> = self.points.refs()
             .filter(|r| self.points[*r].helper)
             .collect();
         for hr in &helper_refs {
             let hr = *hr;
-            let lp1: Option<Ref<Line>> = self.coincident_lp1.iter().find(|c| c.point == hr).map(|c| c.line);
-            let lp2: Option<Ref<Line>> = self.coincident_lp2.iter().find(|c| c.point == hr).map(|c| c.line);
-            let ac: Option<Ref<Arc>> = self.coincident_arc_center.iter().find(|c| c.point == hr).map(|c| c.arc);
-            let a_start: Option<Ref<Arc>> = self.coincident_arc_start.iter().find(|c| c.point == hr).map(|c| c.arc);
-            let a_end: Option<Ref<Arc>> = self.coincident_arc_end.iter().find(|c| c.point == hr).map(|c| c.arc);
+            let lp1s: std::vec::Vec<Ref<Line>> = self.coincident_lp1.iter().filter(|c| c.point == hr).map(|c| c.line).collect();
+            let lp2s: std::vec::Vec<Ref<Line>> = self.coincident_lp2.iter().filter(|c| c.point == hr).map(|c| c.line).collect();
+            let acs: std::vec::Vec<Ref<Arc>> = self.coincident_arc_center.iter().filter(|c| c.point == hr).map(|c| c.arc).collect();
+            let a_starts: std::vec::Vec<Ref<Arc>> = self.coincident_arc_start.iter().filter(|c| c.point == hr).map(|c| c.arc).collect();
+            let a_ends: std::vec::Vec<Ref<Arc>> = self.coincident_arc_end.iter().filter(|c| c.point == hr).map(|c| c.arc).collect();
 
             macro_rules! consolidate {
-                ($line_opt:expr, $arc_opt:expr, $lp_coll:ident, $arc_coll:ident, $direct_coll:ident, $DirectType:ident, $label:expr) => {
-                    if let (Some(line), Some(arc)) = ($line_opt, $arc_opt) {
-                        self.$direct_coll.push($DirectType { line, arc, hb: CrossBlock::new() });
-                        self.$lp_coll.retain(|c| !(c.line == line && c.point == hr));
-                        self.$arc_coll.retain(|c| !(c.point == hr && c.arc == arc));
-                        eprintln!("INFO: consolidated helper {} -> {}", hr.index(), $label);
+                ($lines:expr, $arcs:expr, $lp_coll:ident, $arc_coll:ident, $direct_coll:ident, $DirectType:ident, $label:expr) => {
+                    for &line in &$lines {
+                        for &arc in &$arcs {
+                            self.$direct_coll.push($DirectType { line, arc, hb: CrossBlock::new() });
+                            self.$lp_coll.retain(|c| !(c.line == line && c.point == hr));
+                            self.$arc_coll.retain(|c| !(c.point == hr && c.arc == arc));
+                            eprintln!("INFO: consolidated helper {} -> {}", hr.index(), $label);
+                        }
                     }
                 };
             }
-            consolidate!(lp1, ac, coincident_lp1, coincident_arc_center, coincident_lp1_arc_center, CoincidentLP1ArcCenter, "LP1ArcCenter");
-            consolidate!(lp2, ac, coincident_lp2, coincident_arc_center, coincident_lp2_arc_center, CoincidentLP2ArcCenter, "LP2ArcCenter");
-            consolidate!(lp1, a_start, coincident_lp1, coincident_arc_start, coincident_lp1_arc_start, CoincidentLP1ArcStart, "LP1ArcStart");
-            consolidate!(lp2, a_start, coincident_lp2, coincident_arc_start, coincident_lp2_arc_start, CoincidentLP2ArcStart, "LP2ArcStart");
-            consolidate!(lp1, a_end, coincident_lp1, coincident_arc_end, coincident_lp1_arc_end, CoincidentLP1ArcEnd, "LP1ArcEnd");
-            consolidate!(lp2, a_end, coincident_lp2, coincident_arc_end, coincident_lp2_arc_end, CoincidentLP2ArcEnd, "LP2ArcEnd");
+            consolidate!(lp1s, acs, coincident_lp1, coincident_arc_center, coincident_lp1_arc_center, CoincidentLP1ArcCenter, "LP1ArcCenter");
+            consolidate!(lp2s, acs, coincident_lp2, coincident_arc_center, coincident_lp2_arc_center, CoincidentLP2ArcCenter, "LP2ArcCenter");
+            consolidate!(lp1s, a_starts, coincident_lp1, coincident_arc_start, coincident_lp1_arc_start, CoincidentLP1ArcStart, "LP1ArcStart");
+            consolidate!(lp2s, a_starts, coincident_lp2, coincident_arc_start, coincident_lp2_arc_start, CoincidentLP2ArcStart, "LP2ArcStart");
+            consolidate!(lp1s, a_ends, coincident_lp1, coincident_arc_end, coincident_lp1_arc_end, CoincidentLP1ArcEnd, "LP1ArcEnd");
+            consolidate!(lp2s, a_ends, coincident_lp2, coincident_arc_end, coincident_lp2_arc_end, CoincidentLP2ArcEnd, "LP2ArcEnd");
         }
         self.cleanup_helper_points();
         self.dedup_constraints();
