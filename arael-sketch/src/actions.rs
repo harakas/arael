@@ -225,35 +225,51 @@ impl Action {
     }
 }
 
-// Resolve a DimensionEndpoint to a Ref<Point>, creating helper point + constraint if needed.
+// Resolve a DimensionEndpoint to a Ref<Point>, reusing an existing helper point
+// if one is already constrained to the same entity endpoint, otherwise creating one.
 pub fn resolve_dim_endpoint(sketch: &mut Sketch, ep: &DimensionEndpoint) -> Ref<Point> {
     match *ep {
         DimensionEndpoint::Point(r) => r,
         DimensionEndpoint::LineP1(r) => {
+            if let Some(hp) = sketch.coincident_lp1.iter().find(|c| c.line == r).map(|c| c.point) {
+                return hp;
+            }
             let pos = sketch.lines[r].p1.value;
             let hp = sketch.add_helper_point(pos);
             sketch.coincident_lp1.push(CoincidentLP1 { line: r, point: hp, hb: CrossBlock::new() });
             hp
         }
         DimensionEndpoint::LineP2(r) => {
+            if let Some(hp) = sketch.coincident_lp2.iter().find(|c| c.line == r).map(|c| c.point) {
+                return hp;
+            }
             let pos = sketch.lines[r].p2.value;
             let hp = sketch.add_helper_point(pos);
             sketch.coincident_lp2.push(CoincidentLP2 { line: r, point: hp, hb: CrossBlock::new() });
             hp
         }
         DimensionEndpoint::ArcCenter(r) => {
+            if let Some(hp) = sketch.coincident_arc_center.iter().find(|c| c.arc == r).map(|c| c.point) {
+                return hp;
+            }
             let pos = sketch.arcs[r].center.value;
             let hp = sketch.add_helper_point(pos);
             sketch.coincident_arc_center.push(CoincidentArcCenter { point: hp, arc: r, hb: CrossBlock::new() });
             hp
         }
         DimensionEndpoint::ArcStart(r) => {
+            if let Some(hp) = sketch.coincident_arc_start.iter().find(|c| c.arc == r).map(|c| c.point) {
+                return hp;
+            }
             let pos = arc_start_pos_sketch(sketch, r);
             let hp = sketch.add_helper_point(pos);
             sketch.coincident_arc_start.push(CoincidentArcStart { point: hp, arc: r, hb: CrossBlock::new() });
             hp
         }
         DimensionEndpoint::ArcEnd(r) => {
+            if let Some(hp) = sketch.coincident_arc_end.iter().find(|c| c.arc == r).map(|c| c.point) {
+                return hp;
+            }
             let pos = arc_end_pos_sketch(sketch, r);
             let hp = sketch.add_helper_point(pos);
             sketch.coincident_arc_end.push(CoincidentArcEnd { point: hp, arc: r, hb: CrossBlock::new() });

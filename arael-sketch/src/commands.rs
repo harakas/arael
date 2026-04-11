@@ -1122,7 +1122,13 @@ fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
         "list" => cmd_list(ctx, args_str),
         "find" => cmd_find(ctx, args_str),
         "dof" => cmd_dof(ctx, args_str),
-        "cost" => ok(format!("Cost: {:.6}", ctx.last_cost)),
+        "cost" => {
+            use arael::simple_lm::LmProblem;
+            let mut params = Vec::new();
+            ctx.sketch.serialize64(&mut params);
+            let cost = ctx.sketch.calc_cost(&params);
+            ok(format!("Cost: {:.6}", cost))
+        }
         "undo" => cmd_undo(ctx, args_str),
         "redo" => cmd_redo(ctx, args_str),
         "history" => cmd_history(ctx, args_str),
@@ -3163,27 +3169,45 @@ fn cmd_unlock(ctx: &mut CommandContext, args: &str) -> CommandResult {
 // ---------------------------------------------------------------------------
 
 fn cmd_param(ctx: &mut CommandContext, args: &str) -> CommandResult {
+    use arael::simple_lm::LmProblem;
     let tokens: Vec<&str> = args.splitn(2, char::is_whitespace).collect();
     if tokens.len() != 2 { return err("Usage: param name value"); }
     let name = tokens[0].trim();
     let expr = tokens[1].trim();
+    // Snapshot for rollback
+    let snapshot = bincode::serialize(&ctx.sketch).ok();
+    let old_cost = {
+        let mut params = Vec::new();
+        ctx.sketch.serialize64(&mut params);
+        ctx.sketch.calc_cost(&params)
+    };
     // Check if param exists -> update
-    if let Some(idx) = ctx.sketch.user_params.iter().position(|p| p.name == name) {
+    let is_update = ctx.sketch.user_params.iter().any(|p| p.name == name);
+    if is_update {
+        let idx = ctx.sketch.user_params.iter().position(|p| p.name == name).unwrap();
         ctx.begin_group();
         ctx.exec(Action::UpdateUserParam { index: idx, name: name.to_string(), expr_str: expr.to_string() });
-        ctx.sketch.update_expr_dim_values();
-        let val = ctx.sketch.user_params.iter().find(|p| p.name == name).map(|p| p.value).unwrap_or(0.0);
-        ok(format!("Updated {} = {} ({:.4})", name, expr, val))
     } else {
         if let Err(e) = ctx.sketch.validate_param_name(name, None) {
             return err(e);
         }
         ctx.begin_group();
         ctx.exec(Action::AddUserParam { name: name.to_string(), expr_str: expr.to_string() });
-        ctx.sketch.update_expr_dim_values();
-        let val = ctx.sketch.user_params.iter().find(|p| p.name == name).map(|p| p.value).unwrap_or(0.0);
-        ok(format!("Added {} = {} ({:.4})", name, expr, val))
     }
+    ctx.sketch.update_expr_dim_values();
+    let new_cost = ctx.sketch.solve().end_cost;
+    ctx.last_cost = new_cost;
+    // Reject if cost increased significantly
+    if new_cost > old_cost + 1e-3 {
+        if let Some(ref snap) = snapshot {
+            if let Ok(restored) = bincode::deserialize(snap) {
+                ctx.sketch = restored;
+                return err("Parameter change rejected: could not satisfy all constraints");
+            }
+        }
+    }
+    let val = ctx.sketch.user_params.iter().find(|p| p.name == name).map(|p| p.value).unwrap_or(0.0);
+    ok(format!("{} {} = {} ({:.4})", if is_update { "Updated" } else { "Added" }, name, expr, val))
 }
 
 fn cmd_del_param(ctx: &mut CommandContext, args: &str) -> CommandResult {
@@ -4425,14 +4449,24 @@ fn resolve_as_point(ctx: &mut CommandContext, name: &str) -> Result<Ref<Point>, 
     if let Ok(r) = resolve_point(&ctx.sketch, name) {
         return Ok(r);
     }
-    // Try as endpoint ref — create helper point + coincident constraint
+    // Try as endpoint ref — reuse existing helper point or create one
     let ep = resolve_endpoint_ref(&ctx.sketch, name)?;
+    // Check if a helper point already exists for this endpoint
+    let existing = match ep {
+        EndpointRef::Point(p) => Some(p),
+        EndpointRef::LineP1(l) => ctx.sketch.coincident_lp1.iter().find(|c| c.line == l).map(|c| c.point),
+        EndpointRef::LineP2(l) => ctx.sketch.coincident_lp2.iter().find(|c| c.line == l).map(|c| c.point),
+        EndpointRef::ArcCenter(a) => ctx.sketch.coincident_arc_center.iter().find(|c| c.arc == a).map(|c| c.point),
+        EndpointRef::ArcStart(a) => ctx.sketch.coincident_arc_start.iter().find(|c| c.arc == a).map(|c| c.point),
+        EndpointRef::ArcEnd(a) => ctx.sketch.coincident_arc_end.iter().find(|c| c.arc == a).map(|c| c.point),
+    };
+    if let Some(hp) = existing {
+        return Ok(hp);
+    }
     let pos = resolve_endpoint_pos(&ctx.sketch, name)?;
     let hp = ctx.sketch.add_helper_point(pos);
     match ep {
-        EndpointRef::Point(p) => {
-            ctx.exec(Action::ApplyCoincidentPP { a: hp, b: p });
-        }
+        EndpointRef::Point(_) => unreachable!(),
         EndpointRef::LineP1(l) => {
             ctx.exec(Action::ApplyCoincidentLP1 { line: l, point: hp });
         }
