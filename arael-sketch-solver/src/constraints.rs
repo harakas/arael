@@ -994,7 +994,7 @@ pub struct CoincidentLL22 {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 // Perpendicular distance from center to line = sign * effective_radius (no shared endpoint)
-#[arael(constraint(hb, guard = !self.at_p1 && !self.at_p2, {
+#[arael(constraint(hb, guard = !self.p1_arc_start && !self.p1_arc_end && !self.p2_arc_start && !self.p2_arc_end, {
     let dx = line.p2.x - line.p1.x;
     let dy = line.p2.y - line.p1.y;
     let len = sqrt(dx * dx + dy * dy);
@@ -1007,37 +1007,81 @@ pub struct CoincidentLL22 {
     let r_eff = sqrt(nlx * nlx * arc.radius * arc.radius + nly * nly * arc.radius_b * arc.radius_b);
     [(dist - tangentla.sign * r_eff) * sketch.constraint_isigma]
 }))]
-// Directed tangent at shared endpoint p1: constrain the angle between line_dir
-// and ellipse gradient to be exactly dir_sign*PI/2.  Unlike the undirected
-// dot-product formulation this has a unique zero, preventing line direction reversal.
-#[arael(constraint(hb, guard = self.at_p1, {
-    let px = line.p1.x - arc.center.x;
-    let py = line.p1.y - arc.center.y;
+// Directed tangent at shared endpoint: uses arc parametric endpoint position
+// instead of the line endpoint for the direction vector, so the constraint
+// stays well-defined even for zero-length lines.  Four variants for which
+// line endpoint (p1/p2) meets which arc endpoint (start/end).
+#[arael(constraint(hb, guard = self.p1_arc_start, {
     let cr = cos(arc.rotation); let sr = sin(arc.rotation);
-    let u = px * cr + py * sr;
-    let v = 0.0 - px * sr + py * cr;
-    let gx = u / (arc.radius * arc.radius) * cr - v / (arc.radius_b * arc.radius_b) * sr;
-    let gy = u / (arc.radius * arc.radius) * sr + v / (arc.radius_b * arc.radius_b) * cr;
-    let dx = line.p2.x - line.p1.x;
-    let dy = line.p2.y - line.p1.y;
-    let cross = dx * gy - dy * gx;
-    let dot = dx * gx + dy * gy;
-    [rad_diff(safe_atan2(cross, dot), tangentla.dir_sign * pi / 2.0) * sketch.constraint_isigma]
+    let ct = cos(arc.start_angle); let st = sin(arc.start_angle);
+    let ax = arc.center.x + arc.radius * ct * cr - arc.radius_b * st * sr;
+    let ay = arc.center.y + arc.radius * ct * sr + arc.radius_b * st * cr;
+    let tx = 0.0 - arc.radius * st * cr - arc.radius_b * ct * sr;
+    let ty = 0.0 - arc.radius * st * sr + arc.radius_b * ct * cr;
+    let tlen = sqrt(tx * tx + ty * ty);
+    let dx = line.p2.x - ax;
+    let dy = line.p2.y - ay;
+    let projx = tangentla.dir_sign * (dx * tx + dy * ty) / tlen;
+    let projy = (0.0 - dx * ty + dy * tx) / tlen;
+    let d = sketch.min_length - projx;
+    [
+        heaviside(d) * d * sketch.constraint_isigma,
+        projy * sketch.constraint_isigma
+    ]
 }))]
-// Directed tangent at shared endpoint p2 (line direction reversed).
-#[arael(constraint(hb, guard = self.at_p2, {
-    let px = line.p2.x - arc.center.x;
-    let py = line.p2.y - arc.center.y;
+#[arael(constraint(hb, guard = self.p1_arc_end, {
     let cr = cos(arc.rotation); let sr = sin(arc.rotation);
-    let u = px * cr + py * sr;
-    let v = 0.0 - px * sr + py * cr;
-    let gx = u / (arc.radius * arc.radius) * cr - v / (arc.radius_b * arc.radius_b) * sr;
-    let gy = u / (arc.radius * arc.radius) * sr + v / (arc.radius_b * arc.radius_b) * cr;
-    let dx = line.p1.x - line.p2.x;
-    let dy = line.p1.y - line.p2.y;
-    let cross = dx * gy - dy * gx;
-    let dot = dx * gx + dy * gy;
-    [rad_diff(safe_atan2(cross, dot), tangentla.dir_sign * pi / 2.0) * sketch.constraint_isigma]
+    let ct = cos(arc.end_angle); let st = sin(arc.end_angle);
+    let ax = arc.center.x + arc.radius * ct * cr - arc.radius_b * st * sr;
+    let ay = arc.center.y + arc.radius * ct * sr + arc.radius_b * st * cr;
+    let tx = 0.0 - arc.radius * st * cr - arc.radius_b * ct * sr;
+    let ty = 0.0 - arc.radius * st * sr + arc.radius_b * ct * cr;
+    let tlen = sqrt(tx * tx + ty * ty);
+    let dx = line.p2.x - ax;
+    let dy = line.p2.y - ay;
+    let projx = tangentla.dir_sign * (dx * tx + dy * ty) / tlen;
+    let projy = (0.0 - dx * ty + dy * tx) / tlen;
+    let d = sketch.min_length - projx;
+    [
+        heaviside(d) * d * sketch.constraint_isigma,
+        projy * sketch.constraint_isigma
+    ]
+}))]
+#[arael(constraint(hb, guard = self.p2_arc_start, {
+    let cr = cos(arc.rotation); let sr = sin(arc.rotation);
+    let ct = cos(arc.start_angle); let st = sin(arc.start_angle);
+    let ax = arc.center.x + arc.radius * ct * cr - arc.radius_b * st * sr;
+    let ay = arc.center.y + arc.radius * ct * sr + arc.radius_b * st * cr;
+    let tx = 0.0 - arc.radius * st * cr - arc.radius_b * ct * sr;
+    let ty = 0.0 - arc.radius * st * sr + arc.radius_b * ct * cr;
+    let tlen = sqrt(tx * tx + ty * ty);
+    let dx = line.p1.x - ax;
+    let dy = line.p1.y - ay;
+    let projx = tangentla.dir_sign * (dx * tx + dy * ty) / tlen;
+    let projy = (0.0 - dx * ty + dy * tx) / tlen;
+    let d = sketch.min_length - projx;
+    [
+        heaviside(d) * d * sketch.constraint_isigma,
+        projy * sketch.constraint_isigma
+    ]
+}))]
+#[arael(constraint(hb, guard = self.p2_arc_end, {
+    let cr = cos(arc.rotation); let sr = sin(arc.rotation);
+    let ct = cos(arc.end_angle); let st = sin(arc.end_angle);
+    let ax = arc.center.x + arc.radius * ct * cr - arc.radius_b * st * sr;
+    let ay = arc.center.y + arc.radius * ct * sr + arc.radius_b * st * cr;
+    let tx = 0.0 - arc.radius * st * cr - arc.radius_b * ct * sr;
+    let ty = 0.0 - arc.radius * st * sr + arc.radius_b * ct * cr;
+    let tlen = sqrt(tx * tx + ty * ty);
+    let dx = line.p1.x - ax;
+    let dy = line.p1.y - ay;
+    let projx = tangentla.dir_sign * (dx * tx + dy * ty) / tlen;
+    let projy = (0.0 - dx * ty + dy * tx) / tlen;
+    let d = sketch.min_length - projx;
+    [
+        heaviside(d) * d * sketch.constraint_isigma,
+        projy * sketch.constraint_isigma
+    ]
 }))]
 pub struct TangentLA {
     #[arael(ref = root.lines)]
@@ -1047,14 +1091,20 @@ pub struct TangentLA {
     #[serde(default = "default_tangent_sign")]
     pub sign: f64,
     #[serde(skip)]
-    pub at_p1: bool,
+    pub p1_arc_start: bool,
     #[serde(skip)]
-    pub at_p2: bool,
+    pub p1_arc_end: bool,
     #[serde(skip)]
+    pub p2_arc_start: bool,
+    #[serde(skip)]
+    pub p2_arc_end: bool,
+    #[serde(skip, default = "default_dir_sign")]
     pub dir_sign: f64,
     #[serde(skip)]
     pub hb: CrossBlock<Line, Arc>,
 }
+
+fn default_dir_sign() -> f64 { f64::NAN }
 
 fn default_tangent_sign() -> f64 { 1.0 }
 

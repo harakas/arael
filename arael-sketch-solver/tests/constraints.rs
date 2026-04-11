@@ -373,7 +373,7 @@ fn test_tangent_la() {
               - (sketch.arcs[a].center.value.y - l_ref.p1.value.y) * dx) / len;
     let sign = if dist >= 0.0 { 1.0 } else { -1.0 };
     sketch.tangent_la.push(TangentLA {
-        line: l, arc: a, sign, at_p1: false, at_p2: false, dir_sign: 0.0, hb: CrossBlock::new(),
+        line: l, arc: a, sign, p1_arc_start: false, p1_arc_end: false, p2_arc_start: false, p2_arc_end: false, dir_sign: 0.0, hb: CrossBlock::new(),
     });
     sketch.solve();
     let lp = &sketch.lines[l];
@@ -398,9 +398,9 @@ fn test_tangent_la_shared_endpoint_no_flip() {
     sketch.coincident_lp1_arc_start.push(CoincidentLP1ArcStart {
         line: l, arc: a, hb: CrossBlock::new(),
     });
-    // Tangent with at_p1=true (dir_sign will be computed by update_tangent_flags)
+    // Tangent with p1_arc_start=true (dir_sign will be computed by update_tangent_flags)
     sketch.tangent_la.push(TangentLA {
-        line: l, arc: a, sign: 1.0, at_p1: true, at_p2: false, dir_sign: 0.0, hb: CrossBlock::new(),
+        line: l, arc: a, sign: 1.0, p1_arc_start: true, p1_arc_end: false, p2_arc_start: false, p2_arc_end: false, dir_sign: f64::NAN, hb: CrossBlock::new(),
     });
     sketch.solve();
     // After solve, line should be tangent at arc start (angle=0).

@@ -168,6 +168,16 @@ pub struct Point {
 #[arael(constraint(hb, guard = self.constraints.has_angle, {
     [(atan2(line.p2.y - line.p1.y, line.p2.x - line.p1.x) - line.constraints.target_angle) * sketch.constraint_isigma]
 }))]
+// Soft minimum length via squared heaviside penalty.
+// Prevents line from collapsing to zero length (which makes direction undefined
+// and breaks tangent/angle constraints). Same pattern as arc minimum radius.
+// Uses length^2 directly to avoid sqrt singularity at zero.
+#[arael(constraint(hb, {
+    let dx = line.p2.x - line.p1.x;
+    let dy = line.p2.y - line.p1.y;
+    let d = sketch.min_length * sketch.min_length - (dx * dx + dy * dy);
+    [heaviside(d) * d * sketch.constraint_isigma * sketch.constraint_isigma]
+}))]
 pub struct Line {
     pub p1: Param<vect2d>,
     pub p2: Param<vect2d>,
@@ -218,12 +228,12 @@ pub struct Line {
 // at the transition (value and gradient both zero at threshold).
 // A proper solution would be bound-constrained optimization in the framework.
 #[arael(constraint(hb, {
-    let d = 0.001 - arc.radius;
+    let d = sketch.min_length - arc.radius;
     [heaviside(d) * d * d * sketch.constraint_isigma * sketch.constraint_isigma]
 }))]
 // EXPERIMENTAL: same for radius_b on ellipses.
 #[arael(constraint(hb, guard = self.is_ellipse, {
-    let d = 0.001 - arc.radius_b;
+    let d = sketch.min_length - arc.radius_b;
     [heaviside(d) * d * d * sketch.constraint_isigma * sketch.constraint_isigma]
 }))]
 // Target sweep angle (end_angle - start_angle, sign-matched)

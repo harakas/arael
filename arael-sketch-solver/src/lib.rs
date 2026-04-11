@@ -79,6 +79,10 @@ pub struct Sketch {
     // Solver parameters
     pub drift_isigma: f64,
     pub constraint_isigma: f64,
+    /// Minimum length threshold for soft Heaviside penalties on line length,
+    /// arc radius, and tangent projection.
+    #[serde(default = "default_min_length")]
+    pub min_length: f64,
     #[arael(skip)]
     #[serde(default)]
     pub verbose: bool,
@@ -234,6 +238,8 @@ pub struct Sketch {
     pub cached_dof: Option<usize>,
 }
 
+fn default_min_length() -> f64 { 0.0001 }
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -248,6 +254,7 @@ impl Sketch {
             arcs: Arena::new(),
             drift_isigma: 1.0 / drift_sigma,
             constraint_isigma: 1000.0, // tight constraints
+            min_length: 0.0001,
             verbose: false,
             next_point_id: 0,
             next_line_id: 0,
@@ -1678,33 +1685,35 @@ impl Sketch {
     /// Update tangent_la shared-endpoint flags by scanning coincident collections.
     pub fn update_tangent_flags(&mut self) {
         for t in &mut self.tangent_la {
-            t.at_p1 = self.coincident_lp1_arc_start.iter().any(|c| c.line == t.line && c.arc == t.arc)
-                    || self.coincident_lp1_arc_end.iter().any(|c| c.line == t.line && c.arc == t.arc);
-            t.at_p2 = self.coincident_lp2_arc_start.iter().any(|c| c.line == t.line && c.arc == t.arc)
-                    || self.coincident_lp2_arc_end.iter().any(|c| c.line == t.line && c.arc == t.arc);
+            t.p1_arc_start = self.coincident_lp1_arc_start.iter().any(|c| c.line == t.line && c.arc == t.arc);
+            t.p1_arc_end = self.coincident_lp1_arc_end.iter().any(|c| c.line == t.line && c.arc == t.arc);
+            t.p2_arc_start = self.coincident_lp2_arc_start.iter().any(|c| c.line == t.line && c.arc == t.arc);
+            t.p2_arc_end = self.coincident_lp2_arc_end.iter().any(|c| c.line == t.line && c.arc == t.arc);
             // Compute dir_sign for shared-endpoint directed tangent constraint.
             // Only set once (when 0.0) to remember the initial tangent direction;
             // recomputing each time would follow perturbations instead of preventing flips.
-            if (t.at_p1 || t.at_p2) && t.dir_sign == 0.0 {
+            let shared = t.p1_arc_start || t.p1_arc_end || t.p2_arc_start || t.p2_arc_end;
+            if shared && t.dir_sign.is_nan() {
                 let l = &self.lines[t.line];
                 let a = &self.arcs[t.arc];
-                let (px, py, dx, dy) = if t.at_p1 {
-                    (l.p1.value.x - a.center.value.x, l.p1.value.y - a.center.value.y,
-                     l.p2.value.x - l.p1.value.x, l.p2.value.y - l.p1.value.y)
-                } else {
-                    (l.p2.value.x - a.center.value.x, l.p2.value.y - a.center.value.y,
-                     l.p1.value.x - l.p2.value.x, l.p1.value.y - l.p2.value.y)
-                };
+                // Compute arc endpoint and tangent from arc parameters
+                let angle = if t.p1_arc_start || t.p2_arc_start { a.start_angle.value } else { a.end_angle.value };
                 let cr = a.rotation.value.cos();
                 let sr = a.rotation.value.sin();
-                let u = px * cr + py * sr;
-                let v = -px * sr + py * cr;
-                let ra2 = a.radius.value * a.radius.value;
-                let rb2 = a.radius_b.value * a.radius_b.value;
-                let gx = u / ra2 * cr - v / rb2 * sr;
-                let gy = u / ra2 * sr + v / rb2 * cr;
-                let cross = dx * gy - dy * gx;
-                t.dir_sign = if cross >= 0.0 { 1.0 } else { -1.0 };
+                let ct = angle.cos();
+                let st = angle.sin();
+                let ax = a.center.value.x + a.radius.value * ct * cr - a.radius_b.value * st * sr;
+                let ay = a.center.value.y + a.radius.value * ct * sr + a.radius_b.value * st * cr;
+                let tx = -a.radius.value * st * cr - a.radius_b.value * ct * sr;
+                let ty = -a.radius.value * st * sr + a.radius_b.value * ct * cr;
+                // Direction from arc endpoint to the line's other end
+                let (dx, dy) = if t.p1_arc_start || t.p1_arc_end {
+                    (l.p2.value.x - ax, l.p2.value.y - ay)
+                } else {
+                    (l.p1.value.x - ax, l.p1.value.y - ay)
+                };
+                let dot = dx * tx + dy * ty;
+                t.dir_sign = if dot >= 0.0 { 1.0 } else { -1.0 };
             }
         }
     }
