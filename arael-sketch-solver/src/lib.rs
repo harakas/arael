@@ -1588,6 +1588,7 @@ impl Sketch {
 
         self.prepare_expr_constraints();
         self.update_tangent_flags();
+        self.update_perpendicular_flags();
 
         let saved_drift = self.drift_isigma;
         self.drift_isigma = 0.0;
@@ -1718,6 +1719,19 @@ impl Sketch {
         }
     }
 
+    /// Compute dir_sign for perpendicular constraints on first use.
+    pub fn update_perpendicular_flags(&mut self) {
+        for p in &mut self.perpendicular {
+            if p.dir_sign.is_nan() {
+                let la = &self.lines[p.a];
+                let lb = &self.lines[p.b];
+                let cross = (la.p2.value.x - la.p1.value.x) * (lb.p2.value.y - lb.p1.value.y)
+                          - (la.p2.value.y - la.p1.value.y) * (lb.p2.value.x - lb.p1.value.x);
+                p.dir_sign = if cross >= 0.0 { 1.0 } else { -1.0 };
+            }
+        }
+    }
+
     /// Solve the sketch constraints using Levenberg-Marquardt.
     /// Uses sparse faer Cholesky for n >= 64 params, dense Cholesky otherwise.
     /// When starting cost is high, uses graduated optimization (1% -> 10% ->
@@ -1729,6 +1743,7 @@ impl Sketch {
         // (needed after load/undo since expr_constraints is not serialized)
         self.rebuild_expr_constraints();
         self.update_tangent_flags();
+        self.update_perpendicular_flags();
 
         let mut params64: std::vec::Vec<f64> = std::vec::Vec::new();
         self.serialize64(&mut params64);

@@ -590,7 +590,7 @@ mod tests {
     #[test]
     fn duplicate_perpendicular() {
         let (mut s, l0, l1) = two_lines();
-        s.perpendicular.push(Perpendicular { a: l0, b: l1, hb: CrossBlock::new() });
+        s.perpendicular.push(Perpendicular { a: l0, b: l1, dir_sign: f64::NAN, hb: CrossBlock::new() });
         let r = check_constraint_conflict(&s, &Action::ApplyPerpendicular { a: l0, b: l1 });
         assert!(r.is_some());
         assert!(r.unwrap().contains("already perpendicular"));
@@ -637,7 +637,7 @@ mod tests {
     #[test]
     fn parallel_on_perpendicular_pair() {
         let (mut s, l0, l1) = two_lines();
-        s.perpendicular.push(Perpendicular { a: l0, b: l1, hb: CrossBlock::new() });
+        s.perpendicular.push(Perpendicular { a: l0, b: l1, dir_sign: f64::NAN, hb: CrossBlock::new() });
         let r = check_constraint_conflict(&s, &Action::ApplyParallel { a: l0, b: l1 });
         assert!(r.is_some());
         assert!(r.unwrap().contains("already perpendicular"));
@@ -682,7 +682,7 @@ mod tests {
         // L2 is in the same group as L1 (parallel). Making L2 horizontal should conflict.
         let (mut s, l0, l1, l2) = three_lines();
         s.lines[l0].constraints.horizontal = true;
-        s.perpendicular.push(Perpendicular { a: l0, b: l1, hb: CrossBlock::new() });
+        s.perpendicular.push(Perpendicular { a: l0, b: l1, dir_sign: f64::NAN, hb: CrossBlock::new() });
         // L1 should be implicitly vertical now. Make L2 parallel to L1.
         s.parallel.push(Parallel { a: l1, b: l2, hb: CrossBlock::new() });
         let r = check_constraint_conflict(&s, &Action::ApplyHorizontal { lines: vec![l2] });
@@ -808,7 +808,7 @@ mod tests {
         // Making L2 horizontal is fine since L2 is not in any related group.
         let (mut s, l0, l1, l2) = three_lines();
         s.lines[l0].constraints.horizontal = true;
-        s.perpendicular.push(Perpendicular { a: l0, b: l1, hb: CrossBlock::new() });
+        s.perpendicular.push(Perpendicular { a: l0, b: l1, dir_sign: f64::NAN, hb: CrossBlock::new() });
         let r = check_constraint_conflict(&s, &Action::ApplyHorizontal { lines: vec![l2] });
         assert!(r.is_none());
     }
@@ -817,7 +817,7 @@ mod tests {
     fn parallel_perp_linked_conflict() {
         // L0 perp L1. Making them parallel should conflict.
         let (mut s, l0, l1) = two_lines();
-        s.perpendicular.push(Perpendicular { a: l0, b: l1, hb: CrossBlock::new() });
+        s.perpendicular.push(Perpendicular { a: l0, b: l1, dir_sign: f64::NAN, hb: CrossBlock::new() });
         let r = check_constraint_conflict(&s, &Action::ApplyParallel { a: l0, b: l1 });
         assert!(r.is_some());
         assert!(r.unwrap().contains("perpendicular"));

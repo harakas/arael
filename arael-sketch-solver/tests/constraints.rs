@@ -90,8 +90,13 @@ fn test_perpendicular_lines() {
     let mut sketch = Sketch::new();
     let a = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(3.0, 0.0));
     let b = sketch.add_line(vect2d::new(1.0, -1.0), vect2d::new(1.5, 2.0));
+    let la = &sketch.lines[a];
+    let lb = &sketch.lines[b];
+    let cross = (la.p2.value.x - la.p1.value.x) * (lb.p2.value.y - lb.p1.value.y)
+              - (la.p2.value.y - la.p1.value.y) * (lb.p2.value.x - lb.p1.value.x);
+    let dir_sign = if cross >= 0.0 { 1.0 } else { -1.0 };
     sketch.perpendicular.push(Perpendicular {
-        a, b, hb: CrossBlock::new(),
+        a, b, dir_sign, hb: CrossBlock::new(),
     });
     sketch.solve();
     let la = &sketch.lines[a];
@@ -104,6 +109,34 @@ fn test_perpendicular_lines() {
     let len1 = (dx1 * dx1 + dy1 * dy1).sqrt();
     let len2 = (dx2 * dx2 + dy2 * dy2).sqrt();
     assert_near(dot / (len1 * len2), 0.0, 0.001);
+}
+
+#[test]
+fn test_perpendicular_no_flip() {
+    let mut sketch = Sketch::new();
+    // Horizontal line and vertical line
+    let a = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(3.0, 0.0));
+    let b = sketch.add_line(vect2d::new(1.0, 0.0), vect2d::new(1.0, 2.0));
+    // cross = 3*2 - 0*0 = 6 > 0, dir_sign = 1
+    sketch.perpendicular.push(Perpendicular {
+        a, b, dir_sign: 1.0, hb: CrossBlock::new(),
+    });
+    sketch.solve();
+    // Record initial cross product sign
+    let la = &sketch.lines[a];
+    let lb = &sketch.lines[b];
+    let cross1 = (la.p2.value.x - la.p1.value.x) * (lb.p2.value.y - lb.p1.value.y)
+               - (la.p2.value.y - la.p1.value.y) * (lb.p2.value.x - lb.p1.value.x);
+    assert!(cross1 > 0.0, "initial cross should be positive, got {}", cross1);
+    // Flip line b's direction
+    sketch.lines[b].p2.value = vect2d::new(1.0, -2.0);
+    sketch.solve();
+    // Cross product should still be positive (Heaviside prevents flip)
+    let la = &sketch.lines[a];
+    let lb = &sketch.lines[b];
+    let cross2 = (la.p2.value.x - la.p1.value.x) * (lb.p2.value.y - lb.p1.value.y)
+               - (la.p2.value.y - la.p1.value.y) * (lb.p2.value.x - lb.p1.value.x);
+    assert!(cross2 > 0.0, "cross product flipped after perturbation! cross = {}", cross2);
 }
 
 #[test]

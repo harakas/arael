@@ -553,7 +553,15 @@ impl Action {
                 sketch.parallel.push(Parallel { a: *a, b: *b, hb: CrossBlock::new() });
             }
             Action::ApplyPerpendicular { a, b } => {
-                sketch.perpendicular.push(Perpendicular { a: *a, b: *b, hb: CrossBlock::new() });
+                let la = &sketch.lines[*a];
+                let lb = &sketch.lines[*b];
+                let dx1 = la.p2.value.x - la.p1.value.x;
+                let dy1 = la.p2.value.y - la.p1.value.y;
+                let dx2 = lb.p2.value.x - lb.p1.value.x;
+                let dy2 = lb.p2.value.y - lb.p1.value.y;
+                let cross = dx1 * dy2 - dy1 * dx2;
+                let dir_sign = if cross >= 0.0 { 1.0 } else { -1.0 };
+                sketch.perpendicular.push(Perpendicular { a: *a, b: *b, dir_sign, hb: CrossBlock::new() });
             }
             Action::ApplyEqualLength { a, b } => {
                 sketch.equal_length.push(EqualLength { a: *a, b: *b, hb: CrossBlock::new() });

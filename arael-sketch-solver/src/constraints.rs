@@ -805,7 +805,9 @@ pub struct Parallel {
     pub hb: CrossBlock<Line, Line>,
 }
 
-// Perpendicular: dot product of direction vectors = 0
+// Perpendicular: dot product of direction vectors = 0, with direction enforcement.
+// The Heaviside on the unnormalized cross product prevents direction reversal.
+// Its gradient at zero line length is the other line's direction -- always well-defined.
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, {
@@ -815,13 +817,20 @@ pub struct Parallel {
     let dy2 = b.p2.y - b.p1.y;
     let len1 = sqrt(dx1 * dx1 + dy1 * dy1);
     let len2 = sqrt(dx2 * dx2 + dy2 * dy2);
-    [(dx1 * dx2 + dy1 * dy2) / (len1 * len2) * sketch.constraint_isigma]
+    let cross = dx1 * dy2 - dy1 * dx2;
+    let d = sketch.min_length - perpendicular.dir_sign * cross;
+    [
+        (dx1 * dx2 + dy1 * dy2) / (len1 * len2) * sketch.constraint_isigma,
+        heaviside(d) * d * sketch.constraint_isigma
+    ]
 }))]
 pub struct Perpendicular {
     #[arael(ref = root.lines)]
     pub a: Ref<Line>,
     #[arael(ref = root.lines)]
     pub b: Ref<Line>,
+    #[serde(default = "default_dir_sign")]
+    pub dir_sign: f64,
     #[serde(skip)]
     pub hb: CrossBlock<Line, Line>,
 }
