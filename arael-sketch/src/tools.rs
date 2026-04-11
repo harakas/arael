@@ -46,7 +46,7 @@ pub enum ConstraintType {
     Midpoint,
     Symmetry,
     Lock,
-    ToggleStyle,
+    ToggleConstruction,
 }
 
 impl ConstraintType {
@@ -64,7 +64,7 @@ impl ConstraintType {
             ConstraintType::Midpoint => "Midpoint",
             ConstraintType::Symmetry => "Symmetry",
             ConstraintType::Lock => "Lock",
-            ConstraintType::ToggleStyle => "Style",
+            ConstraintType::ToggleConstruction => "Construction",
         }
     }
 }

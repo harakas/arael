@@ -176,6 +176,9 @@ pub struct Line {
     pub style: LineStyle,
     #[arael(skip)]
     #[serde(default)]
+    pub construction: bool,
+    #[arael(skip)]
+    #[serde(default)]
     pub quiet: bool,
     #[arael(skip)]
     pub name: String,
@@ -252,6 +255,9 @@ pub struct Arc {
     pub ccw: bool,
     #[arael(skip)]
     pub style: LineStyle,
+    #[arael(skip)]
+    #[serde(default)]
+    pub construction: bool,
     #[arael(skip)]
     #[serde(default)]
     pub quiet: bool,

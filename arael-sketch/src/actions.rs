@@ -89,8 +89,8 @@ pub enum Action {
     UnlockArcCenter { arc: Ref<Arc> },
     DeletePoint { point: Ref<Point> },
     DeleteLine { line: Ref<Line> },
-    ToggleStyleLine { line: Ref<Line> },
-    ToggleStyleArc { arc: Ref<Arc> },
+    ToggleConstructionLine { line: Ref<Line> },
+    ToggleConstructionArc { arc: Ref<Arc> },
     SetStyleLine { line: Ref<Line>, style: LineStyle },
     SetStyleArc { arc: Ref<Arc>, style: LineStyle },
     DeleteArc { arc: Ref<Arc> },
@@ -158,7 +158,7 @@ impl Action {
             Action::DeletePoint { .. } => "Delete point".into(),
             Action::DeleteLine { .. } => "Delete line".into(),
             Action::DeleteArc { .. } => "Delete arc".into(),
-            Action::ToggleStyleLine { .. } | Action::ToggleStyleArc { .. } => "Toggle style".into(),
+            Action::ToggleConstructionLine { .. } | Action::ToggleConstructionArc { .. } => "Toggle construction".into(),
             Action::SetStyleLine { .. } | Action::SetStyleArc { .. } => "Set style".into(),
             Action::AddDimension { kind, expr, .. } => {
                 let kind_str = match kind {
@@ -758,11 +758,15 @@ impl Action {
             Action::DeleteLine { line } => {
                 sketch.delete_line(*line);
             }
-            Action::ToggleStyleLine { line } => {
-                sketch.lines[*line].style = sketch.lines[*line].style.next();
+            Action::ToggleConstructionLine { line } => {
+                let l = &mut sketch.lines[*line];
+                l.construction = !l.construction;
+                l.style = if l.construction { LineStyle::DashDot } else { LineStyle::Solid };
             }
-            Action::ToggleStyleArc { arc } => {
-                sketch.arcs[*arc].style = sketch.arcs[*arc].style.next();
+            Action::ToggleConstructionArc { arc } => {
+                let a = &mut sketch.arcs[*arc];
+                a.construction = !a.construction;
+                a.style = if a.construction { LineStyle::DashDot } else { LineStyle::Solid };
             }
             Action::SetStyleLine { line, style } => {
                 sketch.lines[*line].style = *style;

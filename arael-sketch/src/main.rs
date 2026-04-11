@@ -1141,7 +1141,7 @@ impl EditorApp {
                     Selection::Point(_) | Selection::LineP1(_) | Selection::LineP2(_)
                     | Selection::ArcCenter(_) | Selection::ArcStart(_) | Selection::ArcEnd(_)))
             }
-            ConstraintType::ToggleStyle => {
+            ConstraintType::ToggleConstruction => {
                 !sel.is_empty() && sel.iter().all(|s| matches!(s, Selection::Line(_) | Selection::Arc(_)))
             }
         }
@@ -1159,7 +1159,7 @@ impl EditorApp {
 
         let needed = match ct {
             ConstraintType::Horizontal | ConstraintType::Vertical
-            | ConstraintType::Lock | ConstraintType::ToggleStyle => 1,
+            | ConstraintType::Lock | ConstraintType::ToggleConstruction => 1,
             _ => 2,
         };
 
@@ -1208,7 +1208,7 @@ impl EditorApp {
                 matches!(sel, Selection::Point(_) | Selection::LineP1(_) | Selection::LineP2(_)
                     | Selection::ArcCenter(_) | Selection::ArcStart(_) | Selection::ArcEnd(_))
             }
-            ConstraintType::ToggleStyle => {
+            ConstraintType::ToggleConstruction => {
                 matches!(sel, Selection::Line(_) | Selection::Arc(_))
             }
         }
@@ -1230,7 +1230,7 @@ impl EditorApp {
                 ConstraintType::Midpoint => self.apply_midpoint(),
                 ConstraintType::Symmetry => self.apply_symmetry(),
                 ConstraintType::Lock => self.apply_lock(),
-                ConstraintType::ToggleStyle => self.apply_toggle_style(),
+                ConstraintType::ToggleConstruction => self.apply_toggle_construction(),
             }
         } else {
             // Enter constraint mode, keep current selection (filter invalid ones)
@@ -2043,12 +2043,12 @@ impl EditorApp {
         }
     }
 
-    fn apply_toggle_style(&mut self) {
+    fn apply_toggle_construction(&mut self) {
         self.begin_group();
         for sel in &self.selection.clone() {
             match *sel {
-                Selection::Line(r) => { self.exec(Action::ToggleStyleLine { line: r }); }
-                Selection::Arc(r) => { self.exec(Action::ToggleStyleArc { arc: r }); }
+                Selection::Line(r) => { self.exec(Action::ToggleConstructionLine { line: r }); }
+                Selection::Arc(r) => { self.exec(Action::ToggleConstructionArc { arc: r }); }
                 _ => {}
             }
         }

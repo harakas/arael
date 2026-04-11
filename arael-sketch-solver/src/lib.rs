@@ -415,7 +415,7 @@ impl Sketch {
             p1: Param::new(p1),
             p2: Param::new(p2),
             constraints: LineConstraints { horizontal: false, vertical: false, has_length: false, length: 0.0, has_angle: false, target_angle: 0.0 },
-            style: LineStyle::Solid, quiet: false, name,
+            style: LineStyle::Solid, construction: false, quiet: false, name,
             hb: SelfBlock::new(),
         })
     }
@@ -448,7 +448,7 @@ impl Sketch {
             end_angle: if closed { Param::fixed(end) } else { Param::new(end) },
             closed, ccw,
             is_ellipse: false,
-            style: LineStyle::Solid, quiet: false, name,
+            style: LineStyle::Solid, construction: false, quiet: false, name,
             constraints: ArcConstraints {
                 has_target_radius: false, target_radius: 0.0,
                 has_target_radius_b: false, target_radius_b: 0.0,
@@ -473,7 +473,7 @@ impl Sketch {
             closed,
             is_ellipse: true,
             ccw: true,
-            style: LineStyle::Solid, quiet: false, name,
+            style: LineStyle::Solid, construction: false, quiet: false, name,
             constraints: ArcConstraints {
                 has_target_radius: false, target_radius: 0.0,
                 has_target_radius_b: false, target_radius_b: 0.0,
@@ -506,7 +506,7 @@ impl Sketch {
             closed: false,
             is_ellipse: true,
             ccw,
-            style: LineStyle::Solid, quiet: false, name,
+            style: LineStyle::Solid, construction: false, quiet: false, name,
             constraints: ArcConstraints {
                 has_target_radius: false, target_radius: 0.0,
                 has_target_radius_b: false, target_radius_b: 0.0,

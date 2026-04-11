@@ -1391,10 +1391,11 @@ impl EditorApp {
 
             let selected = self.selection.contains(&Selection::Line(r));
             let line_hovered = self.hovered == Some(Selection::Line(r));
+            let base_color = if l.construction { c.construction } else { c.line };
             let color = if selected { c.line_selected }
                 else if highlight_lines.contains(&r.index()) { highlight_color }
                 else if line_hovered { c.line_hover }
-                else { c.line };
+                else { base_color };
             let width = if selected { if l.style == LineStyle::Solid { 2.0 } else { 1.0 } }
                 else if line_hovered { if l.style == LineStyle::Solid { 2.0 } else { 1.0 } }
                 else { if l.style == LineStyle::Solid { 1.5 } else { 1.0 } };
@@ -1464,10 +1465,11 @@ impl EditorApp {
             let radius_px = a.radius.value as f32 * self.scale;
             let arc_selected = self.selection.contains(&Selection::Arc(r));
             let arc_hovered = self.hovered == Some(Selection::Arc(r));
+            let base_arc_color = if a.construction { c.construction } else { c.arc };
             let arc_color = if arc_selected { c.line_selected }
                 else if highlight_arcs.contains(&r.index()) { highlight_color }
                 else if arc_hovered { c.line_hover }
-                else { c.arc };
+                else { base_arc_color };
             let arc_width = if arc_selected { if a.style == LineStyle::Solid { 2.0 } else { 1.0 } }
                 else if arc_hovered { if a.style == LineStyle::Solid { 2.0 } else { 1.0 } }
                 else { if a.style == LineStyle::Solid { 1.5 } else { 1.0 } };

@@ -191,6 +191,27 @@ quiet EA0 EA1 L0             Multiple entities
 
 `info` and `list` show `[quiet]` marker.
 
+### Construction Lines
+
+Entities marked as construction are reference geometry — drawn in a distinct color with dashdot style.
+
+Append `constr` during creation:
+```
+add_line 0,0 5,0 constr
+add_circle 0,0 5 constr
+```
+
+Toggle construction on existing entities:
+```
+constr L0                     Toggle construction on/off
+constr L0 on                  Set construction
+constr L0 off                 Remove construction
+```
+
+The X key in the GUI toggles construction state on selected entities.
+
+`info` shows `[constr]` flag. `list` shows `[constr]` marker. `list constr` shows only construction entities.
+
 ### Line Chaining
 
 When `add_line` is given only one coordinate, it starts from the last created endpoint. With 3+ coordinates, it creates multiple connected segments in one command:

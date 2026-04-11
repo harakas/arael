@@ -190,7 +190,7 @@ impl eframe::App for EditorApp {
             constraint_btn(ui, self, ConstraintType::Midpoint, "Midpoint (M)");
             constraint_btn(ui, self, ConstraintType::Symmetry, "Symmetry (S)");
             constraint_btn(ui, self, ConstraintType::Lock, "Lock (K)");
-            constraint_btn(ui, self, ConstraintType::ToggleStyle, "Style (X)");
+            constraint_btn(ui, self, ConstraintType::ToggleConstruction, "Constr (X)");
 
             ui.separator();
             let dim_active = matches!(self.tool, Tool::Dimension);
@@ -960,7 +960,7 @@ impl eframe::App for EditorApp {
             if ui.input(|i| i.key_pressed(egui::Key::T)) { self.try_apply_or_enter_mode(ConstraintType::Tangent); }
             if ui.input(|i| i.key_pressed(egui::Key::M)) { self.try_apply_or_enter_mode(ConstraintType::Midpoint); }
             if ui.input(|i| i.key_pressed(egui::Key::S)) { self.try_apply_or_enter_mode(ConstraintType::Symmetry); }
-            if ui.input(|i| i.key_pressed(egui::Key::X)) { self.try_apply_or_enter_mode(ConstraintType::ToggleStyle); }
+            if ui.input(|i| i.key_pressed(egui::Key::X)) { self.try_apply_or_enter_mode(ConstraintType::ToggleConstruction); }
             if ui.input(|i| i.key_pressed(egui::Key::D) && !i.modifiers.ctrl && !i.modifiers.mac_cmd) {
                 self.tool = Tool::Dimension;
                 self.dim_editing = false;
@@ -1496,7 +1496,7 @@ impl eframe::App for EditorApp {
                                         ConstraintType::Midpoint => self.apply_midpoint(),
                                         ConstraintType::Symmetry => self.apply_symmetry(),
                                         ConstraintType::Lock => self.apply_lock(),
-                                        ConstraintType::ToggleStyle => self.apply_toggle_style(),
+                                        ConstraintType::ToggleConstruction => self.apply_toggle_construction(),
                                     }
                                     self.selection.clear();
                                     // Stay in constraint mode for more
