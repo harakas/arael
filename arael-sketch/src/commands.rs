@@ -8,7 +8,7 @@ use arael_sketch_solver::*;
 
 use crate::actions::Action;
 use crate::geometry::{arc_start_pos, arc_end_pos};
-use crate::history::History;
+use crate::history::{History, CursorState};
 use crate::tools::Selection;
 
 // ---------------------------------------------------------------------------
@@ -24,6 +24,7 @@ pub struct CommandContext {
     pub session_names: HashMap<String, String>, // variable -> entity name aliases
     pub cursor: Option<vect2d>,
     pub cursor_tangent: Option<vect2d>,
+    pub saved_cursor: CursorState,
     pub status_error: Option<String>,
     pub last_cost: f64,
     pub dof: Option<usize>,
@@ -52,6 +53,7 @@ impl CommandContext {
             session_names: HashMap::new(),
             cursor: None,
             cursor_tangent: None,
+            saved_cursor: CursorState::default(),
             status_error: None,
             last_cost: 0.0,
             dof: None,
@@ -75,6 +77,7 @@ impl CommandContext {
             session_names: HashMap::new(),
             cursor: None,
             cursor_tangent: None,
+            saved_cursor: CursorState::default(),
             status_error: None,
             last_cost: 0.0,
             dof: None,
@@ -94,6 +97,7 @@ impl CommandContext {
     }
 
     pub fn begin_group(&mut self) {
+        self.saved_cursor = CursorState { pos: self.cursor, tangent: self.cursor_tangent };
         self.history.begin_group();
     }
 }
@@ -304,7 +308,6 @@ pub fn validate_and_apply_constraint(
 }
 
 impl CommandContext {
-
     /// Execute an action: apply to sketch and record in history.
     /// For constraint actions: validates by solving, checking cost, and optionally checking DOF.
     pub fn exec(&mut self, action: Action) {
@@ -316,7 +319,7 @@ impl CommandContext {
             {
                 Ok(new_cost) => {
                     self.last_cost = new_cost;
-                    self.history.push(action, &self.sketch);
+                    self.history.push(action, &self.sketch, self.saved_cursor.clone());
                 }
                 Err(msg) => {
                     self.status_error = Some(msg);
@@ -325,7 +328,7 @@ impl CommandContext {
         } else {
             action.apply(&mut self.sketch);
             self.sketch.dedup_constraints();
-            self.history.push(action, &self.sketch);
+            self.history.push(action, &self.sketch, CursorState { pos: self.cursor, tangent: self.cursor_tangent });
         }
     }
 }
@@ -4165,8 +4168,10 @@ fn cmd_list(ctx: &mut CommandContext, args: &str) -> CommandResult {
 fn cmd_undo(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let n: usize = args.trim().parse().unwrap_or(1);
     for _ in 0..n {
-        if let Some(s) = ctx.history.undo() {
+        if let Some((s, c)) = ctx.history.undo() {
             ctx.sketch = s;
+            ctx.cursor = c.pos;
+            ctx.cursor_tangent = c.tangent;
         } else {
             return ok("Nothing to undo");
         }
@@ -4178,8 +4183,10 @@ fn cmd_undo(ctx: &mut CommandContext, args: &str) -> CommandResult {
 fn cmd_redo(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let n: usize = args.trim().parse().unwrap_or(1);
     for _ in 0..n {
-        if let Some(s) = ctx.history.redo() {
+        if let Some((s, c)) = ctx.history.redo() {
             ctx.sketch = s;
+            ctx.cursor = c.pos;
+            ctx.cursor_tangent = c.tangent;
         } else {
             return ok("Nothing to redo");
         }
@@ -5606,8 +5613,10 @@ fn cmd_goto(ctx: &mut CommandContext, args: &str) -> CommandResult {
     } else {
         return err(format!("Group {} does not exist (max {})", target_group, groups.len()));
     };
-    if let Some(s) = ctx.history.goto(target_pos) {
+    if let Some((s, c)) = ctx.history.goto(target_pos) {
         ctx.sketch = s;
+        ctx.cursor = c.pos;
+        ctx.cursor_tangent = c.tangent;
     }
     ok(format!("Moved to group {} (position {})", target_group, ctx.history.cursor))
 }
@@ -5694,12 +5703,17 @@ fn cmd_load(ctx: &mut CommandContext, args: &str) -> CommandResult {
 
 fn cmd_cursor(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let args = args.trim();
-    if args.is_empty() {
-        // Show cursor position
-        return match ctx.cursor {
-            Some(p) => ok(format!("Cursor: ({:.4}, {:.4})", p.x, p.y)),
-            None => ok("Cursor: off"),
+    if args.is_empty() || args == "info" {
+        // Show cursor position and tangent
+        let pos_str = match ctx.cursor {
+            Some(p) => format!("({:.4}, {:.4})", p.x, p.y),
+            None => "off".into(),
         };
+        let tan_str = match ctx.cursor_tangent {
+            Some(t) => format!("({:.4}, {:.4})", t.x, t.y),
+            None => "none".into(),
+        };
+        return ok(format!("Cursor: {} tangent: {}", pos_str, tan_str));
     }
     match args {
         "off" | "hide" => { ctx.cursor = None; return ok("Cursor hidden"); }

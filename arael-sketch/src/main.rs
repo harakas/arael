@@ -810,7 +810,7 @@ impl EditorApp {
             // Record drag as a non-deterministic action with full state snapshot
             let snapshot = bincode::serialize(&self.sketch).unwrap();
             let action = Action::Drag { snapshot };
-            self.history.push(action, &self.sketch);
+            self.history.push(action, &self.sketch, crate::history::CursorState { pos: self.command_cursor, tangent: self.command_cursor_tangent });
 
             // Auto-snap: if a point-like entity was dragged near another,
             // create a coincident constraint
@@ -957,6 +957,7 @@ impl EditorApp {
             session_names: std::mem::replace(&mut self.session_names, HashMap::new()),
             cursor: self.command_cursor,
             cursor_tangent: self.command_cursor_tangent,
+            saved_cursor: crate::history::CursorState::default(),
             status_error: self.status_error.take(),
             last_cost: self.last_cost,
             dof: self.dof_display,
@@ -1017,6 +1018,7 @@ impl EditorApp {
             session_names: std::mem::replace(&mut self.session_names, HashMap::new()),
             cursor: self.command_cursor,
             cursor_tangent: self.command_cursor_tangent,
+            saved_cursor: crate::history::CursorState::default(),
             status_error: self.status_error.take(),
             last_cost: self.last_cost,
             dof: self.dof_display,
@@ -1062,7 +1064,7 @@ impl EditorApp {
             {
                 Ok(new_cost) => {
                     self.last_cost = new_cost;
-                    self.history.push(action, &self.sketch);
+                    self.history.push(action, &self.sketch, crate::history::CursorState { pos: self.command_cursor, tangent: self.command_cursor_tangent });
                 }
                 Err(msg) => {
                     self.status_error = Some(msg);
@@ -1071,7 +1073,7 @@ impl EditorApp {
         } else {
             action.apply(&mut self.sketch);
             self.sketch.dedup_constraints();
-            self.history.push(action, &self.sketch);
+            self.history.push(action, &self.sketch, crate::history::CursorState { pos: self.command_cursor, tangent: self.command_cursor_tangent });
         }
         self.compute_dof_async();
     }

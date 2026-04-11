@@ -341,16 +341,20 @@ impl eframe::App for EditorApp {
 
             ui.horizontal(|ui| {
                 if ui.add_enabled(self.history.can_undo(), egui::Button::new("Undo")).clicked() {
-                    if let Some(restored) = self.history.undo() {
+                    if let Some((restored, cur)) = self.history.undo() {
                         self.sketch = restored;
+                        self.command_cursor = cur.pos;
+                        self.command_cursor_tangent = cur.tangent;
                         self.selection.clear();
                         self.update_cost();
                         self.compute_dof_async();
                     }
                 }
                 if ui.add_enabled(self.history.can_redo(), egui::Button::new("Redo")).clicked() {
-                    if let Some(restored) = self.history.redo() {
+                    if let Some((restored, cur)) = self.history.redo() {
                         self.sketch = restored;
+                        self.command_cursor = cur.pos;
+                        self.command_cursor_tangent = cur.tangent;
                         self.selection.clear();
                         self.update_cost();
                         self.compute_dof_async();
@@ -1008,15 +1012,19 @@ impl eframe::App for EditorApp {
             let ctrl = ui.input(|i| i.modifiers.ctrl || i.modifiers.mac_cmd);
             let shift = ui.input(|i| i.modifiers.shift);
             if ctrl && shift && ui.input(|i| i.key_pressed(egui::Key::Z)) {
-                if let Some(restored) = self.history.redo() {
+                if let Some((restored, cur)) = self.history.redo() {
                     self.sketch = restored;
+                    self.command_cursor = cur.pos;
+                    self.command_cursor_tangent = cur.tangent;
                     self.selection.clear();
                     self.update_cost();
                     self.compute_dof_async();
                 }
             } else if ctrl && ui.input(|i| i.key_pressed(egui::Key::Z)) {
-                if let Some(restored) = self.history.undo() {
+                if let Some((restored, cur)) = self.history.undo() {
                     self.sketch = restored;
+                    self.command_cursor = cur.pos;
+                    self.command_cursor_tangent = cur.tangent;
                     self.selection.clear();
                     self.update_cost();
                     self.compute_dof_async();

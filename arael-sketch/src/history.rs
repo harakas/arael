@@ -1,11 +1,20 @@
 // History for undo/redo in the sketch editor.
 
+use arael::vect::vect2d;
 use arael_sketch_solver::Sketch;
 use crate::actions::Action;
+
+/// Cursor state saved alongside each history snapshot.
+#[derive(Clone, Default)]
+pub struct CursorState {
+    pub pos: Option<vect2d>,
+    pub tangent: Option<vect2d>,
+}
 
 pub struct History {
     pub actions: Vec<Action>,
     pub snapshots: Vec<Vec<u8>>,  // bincode-serialized Sketch after each action
+    pub cursors: Vec<CursorState>,
     pub groups: Vec<u32>,         // group id for each action
     pub cursor: usize,            // number of applied actions (0 = initial state)
     pub next_group: u32,
@@ -16,7 +25,7 @@ pub struct History {
 impl History {
     pub fn new(sketch: &Sketch) -> Self {
         History {
-            actions: Vec::new(), snapshots: Vec::new(), groups: Vec::new(),
+            actions: Vec::new(), snapshots: Vec::new(), cursors: Vec::new(), groups: Vec::new(),
             cursor: 0, next_group: 0, current_group: 0,
             initial_snapshot: bincode::serialize(sketch).unwrap(),
         }
@@ -27,14 +36,16 @@ impl History {
         self.next_group += 1;
     }
 
-    pub fn push(&mut self, action: Action, sketch: &Sketch) {
+    pub fn push(&mut self, action: Action, sketch: &Sketch, cursor: CursorState) {
         // Truncate any redo tail
         self.actions.truncate(self.cursor);
         self.snapshots.truncate(self.cursor);
+        self.cursors.truncate(self.cursor);
         self.groups.truncate(self.cursor);
         // Push new
         self.actions.push(action);
         self.snapshots.push(bincode::serialize(sketch).unwrap());
+        self.cursors.push(cursor);
         self.groups.push(self.current_group);
         self.cursor += 1;
     }
@@ -42,25 +53,32 @@ impl History {
     pub fn can_undo(&self) -> bool { self.cursor > 0 }
     pub fn can_redo(&self) -> bool { self.cursor < self.actions.len() }
 
-    pub fn undo(&mut self) -> Option<Sketch> {
+    pub fn undo(&mut self) -> Option<(Sketch, CursorState)> {
         if self.cursor == 0 { return None; }
-        // Find the start of the current group
+        // The cursor state to restore is saved at the start of the group being undone
         let group = self.groups[self.cursor - 1];
+        // Find the first action of this group to get the pre-group cursor
+        let mut group_start = self.cursor - 1;
+        while group_start > 0 && self.groups[group_start - 1] == group {
+            group_start -= 1;
+        }
+        let restored_cursor = self.cursors[group_start].clone();
+        // Rewind cursor to before the group
         while self.cursor > 0 && self.groups[self.cursor - 1] == group {
             self.cursor -= 1;
         }
         if self.cursor == 0 {
             let mut sketch: Sketch = bincode::deserialize(&self.initial_snapshot).unwrap();
             sketch.solve();
-            Some(sketch)
+            Some((sketch, restored_cursor))
         } else {
             let mut sketch: Sketch = bincode::deserialize(&self.snapshots[self.cursor - 1]).unwrap();
             sketch.solve();
-            Some(sketch)
+            Some((sketch, restored_cursor))
         }
     }
 
-    pub fn redo(&mut self) -> Option<Sketch> {
+    pub fn redo(&mut self) -> Option<(Sketch, CursorState)> {
         if self.cursor >= self.actions.len() { return None; }
         // Find the end of the next group
         let group = self.groups[self.cursor];
@@ -69,7 +87,7 @@ impl History {
         }
         let mut sketch: Sketch = bincode::deserialize(&self.snapshots[self.cursor - 1]).unwrap();
         sketch.solve();
-        Some(sketch)
+        Some((sketch, self.cursors[self.cursor - 1].clone()))
     }
 
     /// Return a list of (group_id, end_position, first_action_description) for
@@ -92,8 +110,8 @@ impl History {
     }
 
     /// Undo/redo to reach the given cursor position.
-    /// Returns the resulting sketch, or None if position is invalid.
-    pub fn goto(&mut self, target: usize) -> Option<Sketch> {
+    /// Returns the resulting sketch + cursor, or None if position is invalid.
+    pub fn goto(&mut self, target: usize) -> Option<(Sketch, CursorState)> {
         let mut result = None;
         while self.cursor > target {
             result = self.undo();
