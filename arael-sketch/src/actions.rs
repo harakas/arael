@@ -624,14 +624,16 @@ impl Action {
             Action::ApplyTangentLA { line, arc } => {
                 let l = &sketch.lines[*line];
                 let a = &sketch.arcs[*arc];
-                // Detect shared endpoints for ellipse-aware tangent formula
+                // Detect which line endpoint meets which arc endpoint
                 let snap = 1e-3;
                 let sp = crate::geometry::arc_start_pos(a);
                 let ep = crate::geometry::arc_end_pos(a);
-                let at_p1 = (l.p1.value.x - sp.x).abs() < snap && (l.p1.value.y - sp.y).abs() < snap
-                         || (l.p1.value.x - ep.x).abs() < snap && (l.p1.value.y - ep.y).abs() < snap;
-                let at_p2 = (l.p2.value.x - sp.x).abs() < snap && (l.p2.value.y - sp.y).abs() < snap
-                         || (l.p2.value.x - ep.x).abs() < snap && (l.p2.value.y - ep.y).abs() < snap;
+                let near = |p: arael::vect::vect2d, q: arael::vect::vect2d|
+                    (p.x - q.x).abs() < snap && (p.y - q.y).abs() < snap;
+                let p1_arc_start = near(l.p1.value, sp);
+                let p1_arc_end = near(l.p1.value, ep);
+                let p2_arc_start = near(l.p2.value, sp);
+                let p2_arc_end = near(l.p2.value, ep);
                 // Compute sign for no-shared-endpoint formula
                 let dx = l.p2.value.x - l.p1.value.x;
                 let dy = l.p2.value.y - l.p1.value.y;
@@ -639,28 +641,33 @@ impl Action {
                 let dist = ((a.center.value.x - l.p1.value.x) * dy
                           - (a.center.value.y - l.p1.value.y) * dx) / len;
                 let sign = if dist >= 0.0 { 1.0 } else { -1.0 };
-                // Compute dir_sign for shared-endpoint direction enforcement
-                let dir_sign = if at_p1 || at_p2 {
-                    let (px, py, ldx, ldy) = if at_p1 {
-                        (l.p1.value.x - a.center.value.x, l.p1.value.y - a.center.value.y, dx, dy)
-                    } else {
-                        (l.p2.value.x - a.center.value.x, l.p2.value.y - a.center.value.y,
-                         l.p1.value.x - l.p2.value.x, l.p1.value.y - l.p2.value.y)
-                    };
+                // Compute dir_sign from arc tangent vector at shared endpoint
+                let shared = p1_arc_start || p1_arc_end || p2_arc_start || p2_arc_end;
+                let dir_sign = if shared {
+                    let angle = if p1_arc_start || p2_arc_start { a.start_angle.value } else { a.end_angle.value };
                     let cr = a.rotation.value.cos();
                     let sr = a.rotation.value.sin();
-                    let u = px * cr + py * sr;
-                    let v = -px * sr + py * cr;
-                    let ra2 = a.radius.value * a.radius.value;
-                    let rb2 = a.radius_b.value * a.radius_b.value;
-                    let gx = u / ra2 * cr - v / rb2 * sr;
-                    let gy = u / ra2 * sr + v / rb2 * cr;
-                    let cross = ldx * gy - ldy * gx;
-                    if cross >= 0.0 { 1.0 } else { -1.0 }
+                    let ct = angle.cos();
+                    let st = angle.sin();
+                    let ax = a.center.value.x + a.radius.value * ct * cr - a.radius_b.value * st * sr;
+                    let ay = a.center.value.y + a.radius.value * ct * sr + a.radius_b.value * st * cr;
+                    let tx = -a.radius.value * st * cr - a.radius_b.value * ct * sr;
+                    let ty = -a.radius.value * st * sr + a.radius_b.value * ct * cr;
+                    let (ldx, ldy) = if p1_arc_start || p1_arc_end {
+                        (l.p2.value.x - ax, l.p2.value.y - ay)
+                    } else {
+                        (l.p1.value.x - ax, l.p1.value.y - ay)
+                    };
+                    let dot = ldx * tx + ldy * ty;
+                    if dot >= 0.0 { 1.0 } else { -1.0 }
                 } else {
-                    0.0
+                    f64::NAN
                 };
-                sketch.tangent_la.push(TangentLA { line: *line, arc: *arc, sign, at_p1, at_p2, dir_sign, hb: CrossBlock::new() });
+                sketch.tangent_la.push(TangentLA {
+                    line: *line, arc: *arc, sign,
+                    p1_arc_start, p1_arc_end, p2_arc_start, p2_arc_end,
+                    dir_sign, hb: CrossBlock::new(),
+                });
             }
             Action::ApplyTangentAA { a, b } => {
                 let snap = 1e-3;

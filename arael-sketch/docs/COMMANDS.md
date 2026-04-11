@@ -902,6 +902,16 @@ add_line 0,0 10,0
 add_line L0.p1+normal(L0)*2 L0.p2+normal(L0)*2
 ```
 
+## Solver Parameters
+
+The solver uses soft Heaviside penalties to prevent degenerate geometry. The `min_length` parameter (default `0.0001`) sets the minimum threshold for:
+
+- **Line length**: lines shorter than `min_length` are penalized to prevent collapse to zero length (which makes direction undefined and breaks tangent/angle constraints).
+- **Arc radius**: arcs with radius below `min_length` are penalized.
+- **Tangent projection**: when a line-arc tangent constraint has a shared endpoint, the line's free end must project at least `min_length` along the arc tangent direction.
+
+This value is saved with the sketch file. It should not normally need adjustment.
+
 ## Best Practices for Parametric Sketches
 
 ### Plan the constraint strategy before drawing

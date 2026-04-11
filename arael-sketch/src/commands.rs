@@ -10011,11 +10011,13 @@ mod tests {
     // -- add_line / add_circle driven + new circle tools --
 
     #[test]
-    fn test_zero_length_line_does_not_break_solver() {
-        // A zero-length line should not prevent constraints on other entities.
+    fn test_short_line_does_not_break_solver() {
+        // A very short line should not prevent constraints on other entities.
         // Previously, the length drift's sqrt had a singularity at zero length.
+        // Note: truly zero-length lines are now softly penalized (Heaviside minimum
+        // length), so we use a short-but-nonzero line instead.
         let mut ctx = CommandContext::new();
-        run_ok(&mut ctx, "add_line 0,0 1,0.1; add_line 3,3 @0,0");
+        run_ok(&mut ctx, "add_line 0,0 1,0.1; add_line 3,3 @0.02,0");
         run_ok(&mut ctx, "horizontal L0");
         let l = &ctx.sketch.lines[resolve_line(&ctx.sketch, "L0").unwrap()];
         assert!((l.p1.value.y - l.p2.value.y).abs() < 0.01);
