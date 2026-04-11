@@ -293,7 +293,7 @@ fn eval_function(name: &str, args: Vec<SymVal>, span: &Expr) -> Result<SymVal, s
                 _ => Err(syn::Error::new_spanned(span, "atan expects a scalar argument")),
             }
         }
-        "sin" | "cos" | "tan" | "exp" | "ln" | "sqrt" | "abs" | "heaviside" => {
+        "sin" | "cos" | "tan" | "exp" | "ln" | "sqrt" | "abs" | "heaviside" | "identity" | "safe_sqrt" => {
             if args.len() != 1 { return Err(syn::Error::new_spanned(span, format!("{} expects 1 arg", name))); }
             match &args[0] {
                 SymVal::Scalar(e) => {
@@ -306,6 +306,8 @@ fn eval_function(name: &str, args: Vec<SymVal>, span: &Expr) -> Result<SymVal, s
                         "sqrt" => arael_sym::sqrt,
                         "abs" => arael_sym::abs,
                         "heaviside" => arael_sym::heaviside,
+                        "identity" => arael_sym::identity,
+                        "safe_sqrt" => arael_sym::safe_sqrt,
                         _ => unreachable!(),
                     };
                     Ok(SymVal::Scalar(f(e.clone())))

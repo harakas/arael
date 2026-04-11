@@ -1087,6 +1087,25 @@ pub fn safe_acos(x: E) -> E {
     )(x)
 }
 
+/// Safe square root: clamps negative inputs to zero, non-diverging derivative.
+///
+/// $$\text{safe\_sqrt}(x) = \sqrt{\max(x, 0)}$$
+///
+/// $$\frac{d}{dx} = \frac{1}{2\sqrt{x + \epsilon^2}}$$
+///
+/// Negative inputs evaluate as zero. The runtime function asserts if the input
+/// is more than noise-level negative. The $\epsilon^2$ term prevents the
+/// derivative from diverging at $x = 0$.
+pub fn safe_sqrt(x: E) -> E {
+    extern_func1("safe_sqrt", "arael::utils::safe_sqrt",
+        |x| [c(0.5) / sqrt(identity(x) + epsilon()*epsilon())],
+        |args| {
+            let v = args[0];
+            if v <= 0.0 { 0.0 } else { v.sqrt() }
+        }
+    )(x)
+}
+
 // Re-export linalg types
 pub use linalg::{SymVec, SymMat, jacobian};
 pub use diff::DiffVar;
@@ -1417,6 +1436,34 @@ mod tests {
             let vars = HashMap::from([("x", 1.0)]);
             let v = da.eval(&vars).unwrap();
             assert!(v.is_finite(), "safe_acos derivative at 1.0 should be finite, got {}", v);
+        }
+    }
+
+    #[test]
+    fn safe_sqrt_eval() {
+        sym! {
+            let x = symbol("x");
+            let f = safe_sqrt(x);
+            let vars = HashMap::from([("x", 4.0)]);
+            assert!((f.eval(&vars).unwrap() - 2.0).abs() < 1e-10);
+            // Negative input: safe_sqrt(-1e-10) = 0 (clamped)
+            let vars = HashMap::from([("x", -1e-10)]);
+            assert!(f.eval(&vars).unwrap().abs() < 1e-10);
+            // Zero: safe_sqrt(0) = 0
+            let vars = HashMap::from([("x", 0.0)]);
+            assert!(f.eval(&vars).unwrap().abs() < 1e-10);
+        }
+    }
+
+    #[test]
+    fn safe_sqrt_deriv_at_zero() {
+        sym! {
+            let x = symbol("x");
+            let df = safe_sqrt(x).diff("x");
+            // At x=0, vanilla sqrt derivative diverges; safe version stays finite
+            let vars = HashMap::from([("x", 0.0)]);
+            let v = df.eval(&vars).unwrap();
+            assert!(v.is_finite(), "safe_sqrt derivative at 0 should be finite, got {}", v);
         }
     }
 

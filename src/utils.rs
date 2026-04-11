@@ -201,6 +201,14 @@ pub fn safe_asin<T: Float>(v: T) -> T { v.safe_asin() }
 /// Safe acos that clamps input to [-1, 1].
 pub fn safe_acos<T: Float>(v: T) -> T { v.safe_acos() }
 
+/// Safe square root: asserts the input is not significantly negative, clamps
+/// noise-level negatives to zero.
+pub fn safe_sqrt<T: Float>(v: T) -> T {
+    debug_assert!(v >= T::from(-1e-6).unwrap(),
+        "safe_sqrt called with significantly negative value: {:?}", v);
+    if v <= T::zero() { T::zero() } else { v.sqrt() }
+}
+
 /// Standard atan2(y, x).
 pub fn atan2<T: Float>(y: T, x: T) -> T { y.atan2(x) }
 
