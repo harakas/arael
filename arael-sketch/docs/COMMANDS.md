@@ -322,7 +322,40 @@ add_earc_center cx,cy rx ry rot_deg start_deg end_deg [cw] [noconnect] [nocursor
 add_earc_center 0,0 3 1 45 0 90          Quarter elliptic arc
 ```
 
+**Tangent-defined** (endpoints + tangent directions + curvature weight):
+```
+add_earc_tangent p1 t1 p2 t2 [w] [noconnect] [notangent] [nocursor] [quiet] [driven]
+add_earc_tangent 0,0 1,0 5,3 0,1          Horizontal start, vertical end (w=1, circular)
+add_earc_tangent 0,0 1,0 5,3 0,1 2        Tighter curve at start (w=2, elliptic)
+add_earc_tangent @cursor @tangent 10,3 0,1  Chain from previous entity
+```
+
+The `w` parameter (default 1.0) controls curvature at the start point relative to the circular baseline:
+- `w=1`: circular arc
+- `w>1`: tighter curve at start (higher curvature, more elliptic)
+- `w<1`: gentler curve at start
+
+**Tangent-chaining** (continues from previous entity's cursor and tangent):
+```
+add_earc_rtangent p2 t2 [bulge] [noconnect] [notangent] [nocursor] [quiet] [driven]
+add_line 0,0 5,0
+add_earc_rtangent 10,3 0,1 0.5            Continues smoothly from line
+add_earc_rtangent 15,0 1,0 0.5            Chains from previous arc
+```
+
+Shorthand for `add_earc_tangent @cursor @tangent p2 t2 [bulge]`. Requires a previous line or arc to provide cursor and tangent direction.
+
 All elliptic arc commands return the arc reference (e.g. `EA0`). With `driven`, both `rx` and `ry` dimensions are added.
+
+### @cursor and @tangent
+
+`@cursor` returns the current cursor position (same as `cursor`). `@tangent` returns the tangent direction vector at the cursor point from the last created line or arc. These enable smooth curve chaining:
+
+```
+add_line 0,0 5,0                               L0, cursor at (5,0), tangent (1,0)
+add_earc_tangent @cursor @tangent 10,3 0,1     Continues smoothly from L0
+add_earc_tangent @cursor @tangent 15,0 1,0     Continues from previous arc
+```
 
 ## Deletion
 

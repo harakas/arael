@@ -23,6 +23,7 @@ pub struct CommandContext {
     pub session_vecs: HashMap<String, vect2d>,
     pub session_names: HashMap<String, String>, // variable -> entity name aliases
     pub cursor: Option<vect2d>,
+    pub cursor_tangent: Option<vect2d>,
     pub status_error: Option<String>,
     pub last_cost: f64,
     pub dof: Option<usize>,
@@ -50,6 +51,7 @@ impl CommandContext {
             session_vecs: HashMap::new(),
             session_names: HashMap::new(),
             cursor: None,
+            cursor_tangent: None,
             status_error: None,
             last_cost: 0.0,
             dof: None,
@@ -72,6 +74,7 @@ impl CommandContext {
             session_vecs: HashMap::new(),
             session_names: HashMap::new(),
             cursor: None,
+            cursor_tangent: None,
             status_error: None,
             last_cost: 0.0,
             dof: None,
@@ -685,6 +688,13 @@ fn eval_geo_scalar(sketch: &Sketch, call: &str) -> Option<Result<f64, String>> {
 fn parse_coord(ctx: &CommandContext, arg: &str, cursor: Option<vect2d>) -> Result<vect2d, String> {
     let sketch = &ctx.sketch;
     let arg = arg.trim();
+    // Special @-keywords
+    if arg == "@tangent" {
+        return ctx.cursor_tangent.ok_or("No tangent direction available (set by add_line/add_arc/add_earc)".into());
+    }
+    if arg == "@cursor" || arg == "cursor" {
+        return cursor.ok_or("No cursor position available".into());
+    }
     // Relative coordinate: @dx,dy
     if let Some(rest) = arg.strip_prefix('@') {
         let prev = cursor.ok_or("No previous point for relative coordinate")?;
@@ -695,7 +705,7 @@ fn parse_coord(ctx: &CommandContext, arg: &str, cursor: Option<vect2d>) -> Resul
         }
         return Err(format!("Relative coordinate needs @dx,dy format: {}", arg));
     }
-    // Cursor keyword
+    // Cursor keyword (kept for backward compatibility)
     if arg == "cursor" {
         return ctx.cursor.ok_or("Cursor not set".into());
     }
@@ -997,7 +1007,7 @@ fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
                 "add_line" | "add_rect" | "add_rect3" | "add_rectcenter" |
                 "add_point" | "add_circle" | "add_circle2" | "add_circle3" |
                 "add_circle2t" | "add_circle3t" | "add_ellipse" | "add_arc" |
-                "add_earc" | "add_earc3" | "add_earc_center" | "offset_line" | "offset" | "mirror" |
+                "add_earc" | "add_earc3" | "add_earc_center" | "add_earc_tangent" | "add_earc_rtangent" | "offset_line" | "offset" | "mirror" |
                 "length" | "radius" | "radius_b" | "sweep" | "angle" | "distance");
             if is_command {
                 let dim_count_before = ctx.sketch.dimensions.len();
@@ -1054,6 +1064,8 @@ fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
         "add_earc" => cmd_add_earc(ctx, args_str),
         "add_earc3" => cmd_add_earc3(ctx, args_str),
         "add_earc_center" => cmd_add_earc_center(ctx, args_str),
+        "add_earc_tangent" => cmd_add_earc_tangent(ctx, args_str),
+        "add_earc_rtangent" => cmd_add_earc_rtangent(ctx, args_str),
         "offset_line" | "offset" => cmd_offset_line(ctx, args_str),
         "delete" => cmd_delete(ctx, args_str),
         "horizontal" => cmd_horizontal(ctx, args_str),
@@ -1611,8 +1623,30 @@ fn cmd_add_line(ctx: &mut CommandContext, args: &str) -> CommandResult {
         }
         msgs.push(msg);
     }
-    if !nocursor { ctx.cursor = Some(*points.last().unwrap()); }
+    if !nocursor {
+        ctx.cursor = Some(*points.last().unwrap());
+        if points.len() >= 2 {
+            let p1 = points[points.len() - 2];
+            let p2 = points[points.len() - 1];
+            let dx = p2.x - p1.x;
+            let dy = p2.y - p1.y;
+            let len = (dx * dx + dy * dy).sqrt();
+            if len > 1e-12 {
+                ctx.cursor_tangent = Some(vect2d::new(dx / len, dy / len));
+            }
+        }
+    }
     ok(msgs.join("\n"))
+}
+
+/// Set cursor_tangent from an arc's end angle.
+fn set_cursor_tangent_from_arc(ctx: &mut CommandContext, arc_ref: arael::refs::Ref<arael_sketch_solver::Arc>) {
+    let a = &ctx.sketch.arcs[arc_ref];
+    let t = crate::geometry::arc_tangent_at(a, a.end_angle.value);
+    let len = (t.x * t.x + t.y * t.y).sqrt();
+    if len > 1e-12 {
+        ctx.cursor_tangent = Some(vect2d::new(t.x / len, t.y / len));
+    }
 }
 
 /// Helper: execute a constraint/dimension action inside a compound command.
@@ -2060,7 +2094,10 @@ fn cmd_add_earc(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let arc_ref = ctx.sketch.arcs.refs().last().unwrap();
     if quiet { ctx.sketch.arcs[arc_ref].quiet = true; }
     let name = ctx.sketch.arcs[arc_ref].name.clone();
-    if !nocursor { ctx.cursor = Some(p2); }
+    if !nocursor {
+        ctx.cursor = Some(p2);
+        set_cursor_tangent_from_arc(ctx, arc_ref);
+    }
     ctx.session_names.insert("_".into(), name.clone());
     let mut msg = format!("Added {}: rx={:.2} ry={:.2} rot={:.2}deg", name, rx, ry, rot_deg);
     if !noconnect {
@@ -2143,7 +2180,10 @@ fn cmd_add_earc3(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let arc_ref = ctx.sketch.arcs.refs().last().unwrap();
     if quiet { ctx.sketch.arcs[arc_ref].quiet = true; }
     let name = ctx.sketch.arcs[arc_ref].name.clone();
-    if !nocursor { ctx.cursor = Some(p2); }
+    if !nocursor {
+        ctx.cursor = Some(p2);
+        set_cursor_tangent_from_arc(ctx, arc_ref);
+    }
     ctx.session_names.insert("_".into(), name.clone());
     let mut msg = format!("Added {}: rx={:.2} ry={:.2}", name, rx, ry);
     if !noconnect {
@@ -2219,6 +2259,84 @@ fn cmd_add_earc_center(ctx: &mut CommandContext, args: &str) -> CommandResult {
     }
     if quiet { msg += " [quiet]"; }
     ok(msg)
+}
+
+fn cmd_add_earc_tangent(ctx: &mut CommandContext, args: &str) -> CommandResult {
+    let mut tokens: Vec<&str> = args.split_whitespace().collect();
+    let mut nocursor = false;
+    let mut noconnect = false;
+    let mut notangent = false;
+    let mut driven = false;
+    let mut quiet = false;
+    loop {
+        match tokens.last().copied() {
+            Some("nocursor") => { nocursor = true; tokens.pop(); }
+            Some("noconnect") => { noconnect = true; tokens.pop(); }
+            Some("notangent") => { notangent = true; tokens.pop(); }
+            Some("driven") => { driven = true; tokens.pop(); }
+            Some("quiet") => { quiet = true; tokens.pop(); }
+            _ => break,
+        }
+    }
+    // Syntax: add_earc_tangent p1 t1 p2 t2 [w]
+    if tokens.len() < 4 || tokens.len() > 5 {
+        return err("Usage: add_earc_tangent p1 t1 p2 t2 [w] [noconnect] [notangent] [nocursor] [quiet] [driven]");
+    }
+    let p1 = match parse_coord(ctx, tokens[0], ctx.cursor) { Ok(p) => p, Err(e) => return err(e) };
+    let t1 = match parse_coord(ctx, tokens[1], None) { Ok(p) => p, Err(e) => return err(e) };
+    let p2 = match parse_coord(ctx, tokens[2], Some(p1)) { Ok(p) => p, Err(e) => return err(e) };
+    let t2 = match parse_coord(ctx, tokens[3], None) { Ok(p) => p, Err(e) => return err(e) };
+    let w = if tokens.len() == 5 {
+        match eval_expr(&ctx.sketch, tokens[4]) { Ok(v) => v, Err(e) => return err(e) }
+    } else { 1.0 };
+
+    let result = crate::earc_fit::fit_earc_tangent(p1, t1, p2, t2, w);
+    let (center, rx, ry, rot, sa, ea, ccw) = match result {
+        Some(v) => v,
+        None => return err("Cannot fit elliptic arc (degenerate tangent configuration)"),
+    };
+    ctx.begin_group();
+    ctx.exec(Action::AddEllipticArc { center, rx, ry, rotation: rot, start: sa, end: ea, ccw });
+    let arc_ref = ctx.sketch.arcs.refs().last().unwrap();
+    if quiet { ctx.sketch.arcs[arc_ref].quiet = true; }
+    let name = ctx.sketch.arcs[arc_ref].name.clone();
+    if !nocursor {
+        ctx.cursor = Some(p2);
+        set_cursor_tangent_from_arc(ctx, arc_ref);
+    }
+    ctx.session_names.insert("_".into(), name.clone());
+    let mut msg = format!("Added {}: rx={:.2} ry={:.2} bulge={:.2}", name, rx, ry, w);
+    if !noconnect {
+        let connected = auto_coincident_arc(ctx, arc_ref, false);
+        if !connected.is_empty() { msg += &format!(" [connected: {}]", connected.join(", ")); }
+        if !notangent {
+            let tangents = auto_tangent_arc(ctx, arc_ref);
+            if !tangents.is_empty() { msg += &format!(" [tangent: {}]", tangents.join(", ")); }
+        }
+    }
+    if driven {
+        ctx.exec(Action::AddDimension { kind: DimensionKind::ArcRadius(arc_ref), value: rx, expr: None, derived: false });
+        ctx.exec(Action::AddDimension { kind: DimensionKind::ArcRadiusB(arc_ref), value: ry, expr: None, derived: false });
+        msg += &format!(" [driven rx={:.4} ry={:.4}]", rx, ry);
+    }
+    if quiet { msg += " [quiet]"; }
+    ok(msg)
+}
+
+fn cmd_add_earc_rtangent(ctx: &mut CommandContext, args: &str) -> CommandResult {
+    let p1 = match ctx.cursor {
+        Some(p) => p,
+        None => return err("No cursor position (add a line or arc first)"),
+    };
+    let t1 = match ctx.cursor_tangent {
+        Some(t) => t,
+        None => return err("No tangent direction (add a line or arc first)"),
+    };
+    // Prepend p1 and t1 as coordinate strings and delegate
+    let p1_str = format!("{},{}", p1.x, p1.y);
+    let t1_str = format!("{},{}", t1.x, t1.y);
+    let new_args = format!("{} {} {}", p1_str, t1_str, args);
+    cmd_add_earc_tangent(ctx, &new_args)
 }
 
 /// Check if the perpendicular projection of `center` onto the line segment (p1,p2)
@@ -3860,7 +3978,10 @@ fn cmd_add_arc(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let arc_ref = ctx.sketch.arcs.refs().last().unwrap();
     if quiet { ctx.sketch.arcs[arc_ref].quiet = true; }
     let name = ctx.sketch.arcs[arc_ref].name.clone();
-    if !nocursor { ctx.cursor = Some(p2); }
+    if !nocursor {
+        ctx.cursor = Some(p2);
+        set_cursor_tangent_from_arc(ctx, arc_ref);
+    }
     ctx.session_names.insert("_".into(), name.clone());
     let mut msg = format!("Added {}", name);
     if !noconnect {
@@ -5760,6 +5881,8 @@ fn cmd_help(args: &str) -> CommandResult {
             "add_earc" => "add_earc p1 p2 rx ry rot_deg [large] [cw]",
             "add_earc3" => "add_earc3 p1 p2 pmid rx ry",
             "add_earc_center" => "add_earc_center cx,cy rx ry rot_deg start_deg end_deg [cw]",
+            "add_earc_tangent" => "add_earc_tangent p1 t1 p2 t2 [bulge] (tangent-defined, bulge=perp_dist/half_chord)",
+            "add_earc_rtangent" => "add_earc_rtangent p2 t2 [bulge] (chain from cursor+tangent)",
             "offset_line" | "offset" => "offset_line L0 distance (create parallel line offset by distance)",
             "let" => "let name = expression (session variable, scalar or coordinate)",
             "save" => "save path.json",
@@ -5780,7 +5903,7 @@ fn cmd_help(args: &str) -> CommandResult {
 const COMMAND_NAMES: &[&str] = &[
     "add_line", "add_rect", "add_rect3", "add_rectcenter",
     "add_point", "add_circle", "add_circle2", "add_circle3", "add_circle2t", "add_circle3t", "add_ellipse",
-    "add_arc", "add_earc", "add_earc3", "add_earc_center", "offset_line", "offset",
+    "add_arc", "add_earc", "add_earc3", "add_earc_center", "add_earc_tangent", "add_earc_rtangent", "offset_line", "offset",
     "delete", "horizontal", "vertical", "parallel", "perpendicular", "perp",
     "equal", "collinear", "tangent", "coincident", "concentric", "midpoint",
     "symmetry", "mirror", "point_on", "length", "radius", "radius_b", "sweep", "angle", "distance", "hdistance", "vdistance", "xangle",
@@ -10276,5 +10399,99 @@ mod tests {
         run(&mut ctx, "add_line 0,0 5,0 quiet noconnect");
         let out = run_ok(&mut ctx, "info L0");
         assert!(out.contains("[quiet]"), "info should show [quiet]: {}", out);
+    }
+
+    // --- add_earc_tangent tests ---
+
+    #[test]
+    fn test_add_earc_tangent_basic() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_earc_tangent 0,0 1,0 5,5 0,1 noconnect");
+        assert_eq!(ctx.sketch.arcs.len(), 1);
+        let a = &ctx.sketch.arcs[ctx.sketch.arcs.refs().next().unwrap()];
+        assert!(a.is_ellipse);
+        assert!(!a.closed);
+    }
+
+    #[test]
+    fn test_add_earc_tangent_bulge() {
+        let mut ctx = CommandContext::new();
+        // Semicircle-like: opposing tangents, bulge=1
+        run_ok(&mut ctx, "add_earc_tangent 0,0 0,1 10,0 0,-1 1 noconnect");
+        let a = &ctx.sketch.arcs[ctx.sketch.arcs.refs().next().unwrap()];
+        assert!(a.is_ellipse);
+        // bulge=1 with symmetric tangents should be near-circular
+        assert!((a.radius.value - a.radius_b.value).abs() < 0.5,
+            "expected near-circular: rx={:.3} ry={:.3}", a.radius.value, a.radius_b.value);
+    }
+
+    #[test]
+    fn test_cursor_tangent_from_line() {
+        let mut ctx = CommandContext::new();
+        run(&mut ctx, "add_line 0,0 5,0 noconnect");
+        assert!(ctx.cursor_tangent.is_some(), "tangent should be set after add_line");
+        let t = ctx.cursor_tangent.unwrap();
+        assert!((t.x - 1.0).abs() < 0.01, "tangent x: {}", t.x);
+        assert!(t.y.abs() < 0.01, "tangent y: {}", t.y);
+    }
+
+    #[test]
+    fn test_cursor_tangent_chaining() {
+        let mut ctx = CommandContext::new();
+        run(&mut ctx, "add_line 0,0 5,0 noconnect");
+        run_ok(&mut ctx, "add_earc_tangent @cursor @tangent 10,3 0,1 noconnect");
+        // Cursor should now be at (10,3)
+        assert!(ctx.cursor.is_some());
+        let c = ctx.cursor.unwrap();
+        assert!((c.x - 10.0).abs() < 0.1, "cursor x: {}", c.x);
+        assert!((c.y - 3.0).abs() < 0.1, "cursor y: {}", c.y);
+        // Tangent should be set from arc end
+        assert!(ctx.cursor_tangent.is_some(), "tangent should be set after earc_tangent");
+    }
+
+    #[test]
+    fn test_cursor_tangent_from_arc() {
+        let mut ctx = CommandContext::new();
+        run(&mut ctx, "add_arc 0,0 5,0 2.5,2.5 noconnect");
+        assert!(ctx.cursor_tangent.is_some(), "tangent should be set after add_arc");
+    }
+
+    // --- add_earc_rtangent tests ---
+
+    #[test]
+    fn test_add_earc_rtangent_basic() {
+        let mut ctx = CommandContext::new();
+        run(&mut ctx, "add_line 0,0 5,0 noconnect");
+        run_ok(&mut ctx, "add_earc_rtangent 10,3 0,1 0.5 noconnect");
+        assert_eq!(ctx.sketch.arcs.len(), 1);
+        let a = &ctx.sketch.arcs[ctx.sketch.arcs.refs().next().unwrap()];
+        assert!(a.is_ellipse);
+        // Start should be at cursor (5,0)
+        let sp = crate::geometry::arc_start_pos(a);
+        assert!((sp.x - 5.0).abs() < 0.01, "start x: {:.4}", sp.x);
+        assert!((sp.y - 0.0).abs() < 0.01, "start y: {:.4}", sp.y);
+    }
+
+    #[test]
+    fn test_add_earc_rtangent_chaining() {
+        let mut ctx = CommandContext::new();
+        run(&mut ctx, "add_line 0,0 5,0 noconnect");
+        run_ok(&mut ctx, "add_earc_rtangent 10,3 0,1 0.5 noconnect");
+        // Cursor should now be at (10,3) and tangent set
+        let c = ctx.cursor.unwrap();
+        assert!((c.x - 10.0).abs() < 0.1, "cursor x: {:.4}", c.x);
+        assert!((c.y - 3.0).abs() < 0.1, "cursor y: {:.4}", c.y);
+        assert!(ctx.cursor_tangent.is_some());
+        // Chain another
+        run_ok(&mut ctx, "add_earc_rtangent 15,0 1,0 0.5 noconnect");
+        assert_eq!(ctx.sketch.arcs.len(), 2);
+    }
+
+    #[test]
+    fn test_add_earc_rtangent_no_cursor() {
+        let mut ctx = CommandContext::new();
+        // No line/arc created yet — should fail
+        let results = crate::commands::execute(&mut ctx, "add_earc_rtangent 10,3 0,1 0.5");
+        assert!(results[0].is_error, "should fail without cursor");
     }
 }

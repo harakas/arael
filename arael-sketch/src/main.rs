@@ -9,6 +9,7 @@ mod tools;
 mod actions;
 mod history;
 mod geometry;
+mod earc_fit;
 mod drawing;
 mod app_update;
 mod conflicts;
@@ -161,6 +162,7 @@ pub struct EditorApp {
     pub completion_idx: usize,                // selected suggestion index
     pub completion_suppressed: bool,          // true after Escape dismisses popup; reset on space/dot
     pub command_cursor: Option<vect2d>,   // for chaining add_line
+    pub command_cursor_tangent: Option<vect2d>,
     pub session_vars: HashMap<String, f64>,  // session variables from 'let' commands
     pub session_vecs: HashMap<String, vect2d>, // session coordinate variables
     pub session_names: HashMap<String, String>, // entity name aliases
@@ -300,6 +302,7 @@ impl EditorApp {
             completion_idx: 0,
             completion_suppressed: false,
             command_cursor: None,
+            command_cursor_tangent: None,
             session_vars: HashMap::new(),
             session_vecs: HashMap::new(),
             session_names: HashMap::new(),
@@ -953,6 +956,7 @@ impl EditorApp {
             session_vecs: std::mem::replace(&mut self.session_vecs, HashMap::new()),
             session_names: std::mem::replace(&mut self.session_names, HashMap::new()),
             cursor: self.command_cursor,
+            cursor_tangent: self.command_cursor_tangent,
             status_error: self.status_error.take(),
             last_cost: self.last_cost,
             dof: self.dof_display,
@@ -986,6 +990,7 @@ impl EditorApp {
         self.session_vecs = ctx.session_vecs;
         self.session_names = ctx.session_names;
         self.command_cursor = ctx.cursor;
+        self.command_cursor_tangent = ctx.cursor_tangent;
         self.status_error = ctx.status_error;
         self.last_cost = ctx.last_cost;
         self.dof_display = ctx.dof;
@@ -1011,6 +1016,7 @@ impl EditorApp {
             session_vecs: std::mem::replace(&mut self.session_vecs, HashMap::new()),
             session_names: std::mem::replace(&mut self.session_names, HashMap::new()),
             cursor: self.command_cursor,
+            cursor_tangent: self.command_cursor_tangent,
             status_error: self.status_error.take(),
             last_cost: self.last_cost,
             dof: self.dof_display,
@@ -1030,6 +1036,7 @@ impl EditorApp {
         self.session_vecs = ctx.session_vecs;
         self.session_names = ctx.session_names;
         self.command_cursor = ctx.cursor;
+        self.command_cursor_tangent = ctx.cursor_tangent;
         self.status_error = ctx.status_error;
         self.last_cost = ctx.last_cost;
         self.dof_display = ctx.dof;
