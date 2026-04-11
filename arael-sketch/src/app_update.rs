@@ -566,8 +566,7 @@ impl eframe::App for EditorApp {
                     if let Err(e) = self.sketch.validate_param_name(&new_name, Some(idx)) {
                         self.status_error = Some(e);
                     } else {
-                        self.begin_group();
-                        self.exec(Action::UpdateUserParam { index: idx, name: new_name, expr_str: new_expr });
+                        self.apply_param_change(Action::UpdateUserParam { index: idx, name: new_name, expr_str: new_expr });
                     }
                 }
                 if let Some(idx) = remove_idx {
@@ -581,8 +580,7 @@ impl eframe::App for EditorApp {
                         if let Err(e) = self.sketch.validate_param_name(&name, None) {
                             self.status_error = Some(e);
                         } else {
-                            self.begin_group();
-                            self.exec(Action::AddUserParam { name, expr_str: expr });
+                            self.apply_param_change(Action::AddUserParam { name, expr_str: expr });
                             self.param_new_name.clear();
                             self.param_new_expr.clear();
                             self.param_focus_new = true;

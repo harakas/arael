@@ -1078,6 +1078,31 @@ impl EditorApp {
         self.compute_dof_async();
     }
 
+    /// Apply a user parameter change with solve and cost check.
+    /// Rolls back if the change causes constraints to break.
+    pub fn apply_param_change(&mut self, action: Action) {
+        use arael::simple_lm::LmProblem;
+        let snapshot = bincode::serialize(&self.sketch).ok();
+        let old_cost = {
+            let mut params = Vec::new();
+            self.sketch.serialize64(&mut params);
+            self.sketch.calc_cost(&params)
+        };
+        self.begin_group();
+        self.exec(action);
+        self.sketch.update_expr_dim_values();
+        let new_cost = self.sketch.solve().end_cost;
+        self.last_cost = new_cost;
+        if new_cost > old_cost + 1e-3 {
+            if let Some(ref snap) = snapshot {
+                if let Ok(restored) = bincode::deserialize(snap) {
+                    self.sketch = restored;
+                    self.status_error = Some("Parameter change rejected: could not satisfy all constraints".into());
+                }
+            }
+        }
+    }
+
     // Apply constraint to current selection
     // Check if the current selection exactly satisfies a constraint for immediate application
     fn can_apply_constraint(&self, ct: ConstraintType) -> bool {
