@@ -943,11 +943,20 @@ impl EditorApp {
         // Spread markers along the arc near the midpoint
         let angle_offset = idx as f64 * 12.0 / (a.radius.value * self.scale as f64).max(1.0);
         let angle = mid_angle + angle_offset;
-        // Place inside the curve (negative offset from radius)
-        let r = a.radius.value - 10.0 / self.scale as f64;
+        // Place inside the curve by shrinking both semi-axes by the
+        // pixel offset. For a circle this is the exact inward-radial
+        // placement; for an ellipse it's a close approximation that
+        // stays inside the curve (the true inward normal isn't radial).
+        let offset_world = 10.0 / self.scale as f64;
+        let r = (a.radius.value - offset_world).max(1e-6);
+        let rb = (a.radius_b.value - offset_world).max(1e-6);
+        let ct = angle.cos();
+        let st = angle.sin();
+        let cr = a.rotation.value.cos();
+        let sr = a.rotation.value.sin();
         let pos = vect2d::new(
-            a.center.value.x + r * angle.cos(),
-            a.center.value.y + r * angle.sin(),
+            a.center.value.x + r * ct * cr - rb * st * sr,
+            a.center.value.y + r * ct * sr + rb * st * cr,
         );
         self.to_screen(pos)
     }
