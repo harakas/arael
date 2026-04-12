@@ -83,15 +83,11 @@ pub struct Sketch {
     /// arc radius, and tangent projection.
     #[serde(default = "default_min_length")]
     pub min_length: f64,
-    #[arael(skip)]
     #[serde(default)]
     pub verbose: bool,
     // Auto-naming counters
-    #[arael(skip)]
     pub next_point_id: u32,
-    #[arael(skip)]
     pub next_line_id: u32,
-    #[arael(skip)]
     pub next_arc_id: u32,
     // Cross-constraint collections
     pub coincident_pp: std::vec::Vec<CoincidentPP>,
@@ -216,7 +212,6 @@ pub struct Sketch {
     // Dimension annotations
     #[arael(skip)]
     pub dimensions: std::vec::Vec<Dimension>,
-    #[arael(skip)]
     pub next_dimension_id: u32,
     // User-defined parameters
     #[arael(skip)]

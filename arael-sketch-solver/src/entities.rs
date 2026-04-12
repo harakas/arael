@@ -5,6 +5,7 @@ use arael::utils::Float as _;
 // ---------------------------------------------------------------------------
 
 #[derive(Clone, Copy, Debug, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+#[arael::model]
 pub enum LineStyle {
     #[default]
     Solid,
@@ -44,10 +45,8 @@ impl LineStyle {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 pub struct PointConstraints {
-    #[arael(skip)]
     pub has_fix_x: bool,
     pub fix_x: f64,
-    #[arael(skip)]
     pub has_fix_y: bool,
     pub fix_y: f64,
 }
@@ -55,14 +54,10 @@ pub struct PointConstraints {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 pub struct LineConstraints {
-    #[arael(skip)]
     pub horizontal: bool,
-    #[arael(skip)]
     pub vertical: bool,
-    #[arael(skip)]
     pub has_length: bool,
     pub length: f64,
-    #[arael(skip)]
     #[serde(default)]
     pub has_angle: bool,
     #[serde(default)]
@@ -72,20 +67,16 @@ pub struct LineConstraints {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 pub struct ArcConstraints {
-    #[arael(skip)]
     pub has_target_radius: bool,
     pub target_radius: f64,
-    #[arael(skip)]
     #[serde(default)]
     pub has_target_radius_b: bool,
     #[serde(default)]
     pub target_radius_b: f64,
-    #[arael(skip)]
     #[serde(default)]
     pub has_target_sweep: bool,
     #[serde(default)]
     pub target_sweep: f64,
-    #[arael(skip)]
     #[serde(default = "default_sweep_sign")]
     pub sweep_sign: f64,
 }
@@ -116,12 +107,9 @@ fn default_param_zero() -> arael::model::Param<f64> { arael::model::Param::fixed
 pub struct Point {
     pub pos: Param<vect2d>,
     pub constraints: PointConstraints,
-    #[arael(skip)]
     pub helper: bool,
-    #[arael(skip)]
     #[serde(default)]
     pub quiet: bool,
-    #[arael(skip)]
     pub name: String,
     #[arael(constraint_index)]
     #[serde(skip)]
@@ -185,7 +173,6 @@ pub struct Line {
     pub p1: Param<vect2d>,
     pub p2: Param<vect2d>,
     pub constraints: LineConstraints,
-    #[arael(skip)]
     pub style: LineStyle,
     #[serde(default)]
     pub construction: bool,
@@ -254,27 +241,20 @@ pub struct Arc {
     pub end_angle: Param<f64>,
     /// Full circle/ellipse (true) vs partial arc (false). When true, start/end
     /// angles are fixed and excluded from optimization.
-    #[arael(skip)]
     pub closed: bool,
     /// True for elliptic arcs/ellipses (radius_b and rotation are free params).
     /// False for circular arcs/circles (radius_b fixed to radius, rotation fixed to 0).
-    #[arael(skip)]
     #[serde(default)]
     pub is_ellipse: bool,
     /// Arc direction: true = counter-clockwise from start to end,
     /// false = clockwise. Determined at creation from the midpoint.
-    #[arael(skip)]
     #[serde(default = "default_ccw")]
     pub ccw: bool,
-    #[arael(skip)]
     pub style: LineStyle,
-    #[arael(skip)]
     #[serde(default)]
     pub construction: bool,
-    #[arael(skip)]
     #[serde(default)]
     pub quiet: bool,
-    #[arael(skip)]
     pub name: String,
     pub constraints: ArcConstraints,
     #[arael(constraint_index)]

@@ -4,6 +4,7 @@
 
 /// Which endpoints are shared between two arcs for tangent constraints.
 #[derive(Clone, Copy, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[arael::model]
 pub enum SharedEndpoint {
     #[default]
     None,
@@ -1360,7 +1361,6 @@ pub struct TangentAA {
     pub a: Ref<Arc>,
     #[arael(ref = root.arcs)]
     pub b: Ref<Arc>,
-    #[arael(skip)]
     #[serde(default)]
     pub shared: SharedEndpoint,
     #[arael(constraint_index)]
