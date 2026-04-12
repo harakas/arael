@@ -252,13 +252,21 @@ pub fn model(_attr: TokenStream, item: TokenStream) -> TokenStream {
 fn model_attribute(input: &mut syn::DeriveInput) -> syn::Result<TokenStream2> {
     let name = &input.ident;
 
+    // Enums are treated as NOP leaves: zero params, trivial Model + ModelSym
+    // impls. Lets callers put #[arael::model] on data-less enums used as
+    // metadata fields (e.g. style, direction, mode) so those fields don't
+    // need #[arael(skip)] at every use site.
+    if matches!(input.data, syn::Data::Enum(_)) {
+        return Ok(emit_trivial_model_for_enum(input));
+    }
+
     // Compute PARAM_COUNT from Param<T> fields
     let fields = match &input.data {
         syn::Data::Struct(data) => match &data.fields {
             syn::Fields::Named(named) => &named.named,
             _ => return Err(syn::Error::new_spanned(input, "arael::model requires named fields")),
         },
-        _ => return Err(syn::Error::new_spanned(input, "arael::model requires a struct")),
+        _ => return Err(syn::Error::new_spanned(input, "arael::model requires a struct or enum")),
     };
 
     let mut param_count: u32 = 0;
@@ -404,6 +412,70 @@ fn model_attribute(input: &mut syn::DeriveInput) -> syn::Result<TokenStream2> {
         const #const_name: usize = #param_count_lit;
         #model_impl
     })
+}
+
+/// Emit a trivial Model + ModelSym impl for a data-less enum. All Model
+/// methods are no-ops, PARAM_COUNT is 0, and the ModelSym companion is an
+/// empty struct. The enum itself is emitted unchanged (attributes stripped).
+fn emit_trivial_model_for_enum(input: &mut syn::DeriveInput) -> TokenStream2 {
+    let name = &input.ident;
+    let sym_name = syn::Ident::new(&format!("{}Sym", name), name.span());
+    let const_name = syn::Ident::new(&format!("{}_PARAM_COUNT", name), name.span());
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+
+    // Register a zero-field sym layout so constraint macros that look up
+    // this type find an entry (important if the enum is ever used as a
+    // nested struct field type in constraint bodies).
+    registry_store(&name.to_string(), SymLayout {
+        fields: Vec::new(),
+        param_fields: Vec::new(),
+        ref_paths: Vec::new(),
+        euler_angle_fields: Vec::new(),
+        universal_euler_angle_fields: Vec::new(),
+        substitutions: Vec::new(),
+        constraint_index_field: None,
+    });
+
+    // Strip any #[arael(...)] attributes from the emitted item.
+    input.attrs.retain(|attr| !attr.path().is_ident("arael"));
+
+    quote! {
+        #input
+        #[allow(non_upper_case_globals)]
+        const #const_name: usize = 0;
+
+        #[derive(Clone)]
+        pub struct #sym_name;
+
+        impl arael::model::ModelSym for #name {
+            type Sym = #sym_name;
+            fn sym(_base: &str) -> #sym_name { #sym_name }
+        }
+
+        impl #impl_generics arael::model::Model for #name #ty_generics #where_clause {
+            fn serialize_params32(&mut self, _data: &mut std::vec::Vec<f32>) {}
+            fn deserialize_params32(&mut self, _data: &[f32]) {}
+            fn update32(&mut self, _data: &[f32]) {}
+            fn update_self(&mut self) {}
+            fn serialize_params64(&mut self, _data: &mut std::vec::Vec<f64>) {}
+            fn deserialize_params64(&mut self, _data: &[f64]) {}
+            fn update64(&mut self, _data: &[f64]) {}
+            const PARAM_COUNT: u32 = 0;
+            fn serialize_size(&self) -> u32 { 0 }
+            fn param_symbols(_base: &str, _out: &mut std::vec::Vec<String>) {}
+            fn zero_blocks(&mut self) {}
+            fn accumulate_blocks32(&self, _grad: &mut [f32], _hessian: &mut [f32]) {}
+            fn accumulate_blocks64(&self, _grad: &mut [f64], _hessian: &mut [f64]) {}
+            fn accumulate_blocks_band32(&self, _grad: &mut [f32], _band: &mut [f32], _kd: usize) -> Result<(), arael::simple_lm::BandError> { Ok(()) }
+            fn accumulate_blocks_band64(&self, _grad: &mut [f64], _band: &mut [f64], _kd: usize) -> Result<(), arael::simple_lm::BandError> { Ok(()) }
+            fn accumulate_blocks_sparse32(&self, _grad: &mut [f32], _coo: &mut arael::simple_lm::CooMatrix<f32>) {}
+            fn accumulate_blocks_sparse64(&self, _grad: &mut [f64], _coo: &mut arael::simple_lm::CooMatrix<f64>) {}
+            fn accumulate_blocks_sparse_direct32(&self, _grad: &mut [f32], _csc: &mut arael::simple_lm::CscMatrix<f32>) {}
+            fn accumulate_blocks_sparse_direct64(&self, _grad: &mut [f64], _csc: &mut arael::simple_lm::CscMatrix<f64>) {}
+            fn accumulate_blocks_sparse_indexed32(&self, _grad: &mut [f32], _vals: &mut [f32], _positions: &[usize], _cursor: &mut usize) {}
+            fn accumulate_blocks_sparse_indexed64(&self, _grad: &mut [f64], _vals: &mut [f64], _positions: &[usize], _cursor: &mut usize) {}
+        }
+    }
 }
 
 /// Classify a non-Param field's sym type from its type path.
