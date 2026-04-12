@@ -5935,7 +5935,11 @@ fn classify_dof_directions(result: &arael_sketch_solver::DofResult) -> Vec<Strin
 
 fn cmd_dof_eigenvalues(ctx: &mut CommandContext) -> CommandResult {
     let t0 = std::time::Instant::now();
-    let result = match ctx.sketch.compute_dof(true) {
+    // Use the legacy Hessian-based path so this command genuinely reports
+    // eigenvalues of J^T J (the `dof` count itself uses SVD for robustness
+    // at high scale, but this diagnostic shows the older eigendecomposition
+    // for comparison).
+    let result = match ctx.sketch.compute_dof_eigenvalues(true) {
         Ok(r) => r,
         Err(e) => return err(e),
     };

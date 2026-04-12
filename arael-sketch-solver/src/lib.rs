@@ -1635,7 +1635,7 @@ impl Sketch {
     }
 
     /// Rebuild expression constraints and resolve them so they contribute
-    /// to Hessian assembly (via extended_compute64). Needed before calling
+    /// to Jacobian / cost assembly. Needed before calling calc_jacobian or
     /// calc_grad_hessian_dense directly (outside of solve()), e.g. for DOF.
     pub fn prepare_expr_constraints(&mut self) {
         self.rebuild_expr_constraints();
@@ -1650,6 +1650,8 @@ impl Sketch {
         }
     }
 
+
+    /// Format an informative error message when Hessian decomposition fails.
     fn hessian_error_msg(n: usize, hessian: &[f64], err: &str) -> String {
         let nan_count = hessian.iter().filter(|v| v.is_nan()).count();
         let inf_count = hessian.iter().filter(|v| v.is_infinite()).count();
@@ -1658,16 +1660,20 @@ impl Sketch {
                 err, n, n, nan_count, inf_count)
     }
 
-    /// Compute degrees of freedom. When `analyze` is true, also returns
-    /// parameter names, eigenvalues, and eigenvectors for free direction
-    /// classification. When false, only the DOF count is computed (fast path).
+    /// Legacy DOF computation via eigendecomposition of the Hessian J^T J.
+    ///
+    /// Kept for comparison and for the `dof eigenvalues` diagnostic. Rank
+    /// detection from Hessian eigenvalues is numerically unstable at high
+    /// constraint scales because forming J^T J squares the condition
+    /// number. For routine DOF counting, prefer [`compute_dof`] which uses
+    /// SVD of the Jacobian directly.
     ///
     /// Uses nalgebra for n<32, faer for n>=32. Benchmark at n=896 (polygon128):
     ///   faer eigenvalues-only:    45ms
     ///   faer full eigen:          95ms
     ///   nalgebra eigenvalues-only: 110ms
     ///   nalgebra full eigen:      220ms
-    pub fn compute_dof(&mut self, analyze: bool) -> Result<DofResult, String> {
+    pub fn compute_dof_eigenvalues(&mut self, analyze: bool) -> Result<DofResult, String> {
         use arael::simple_lm::LmProblem;
         let t_total = if TIMING_DEBUG { Some(std::time::Instant::now()) } else { None };
 
@@ -1711,25 +1717,20 @@ impl Sketch {
             let mut sorted: Vec<f64> = evs.iter().map(|v| v.abs()).collect();
             sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
             let max_ev = sorted.last().copied().unwrap_or(0.0);
-            // Find the largest gap ratio between consecutive eigenvalues,
-            // but only in the lower portion of the spectrum (below 1% of max).
-            // This prevents gaps between large constrained eigenvalues from
-            // being selected over the meaningful free/constrained boundary.
             let upper_bound = max_ev * 0.01;
             let mut best_gap = 0.0f64;
-            let mut best_cut = 0; // number of eigenvalues below the gap
+            let mut best_cut = 0;
             for i in 0..sorted.len().saturating_sub(1) {
                 let lo = sorted[i];
                 let hi = sorted[i + 1];
-                if lo < 1e-20 { continue; } // skip exact/near-zero eigenvalues
-                if lo > upper_bound { break; } // only search in lower spectrum
+                if lo < 1e-20 { continue; }
+                if lo > upper_bound { break; }
                 let gap = hi / lo;
                 if gap > best_gap {
                     best_gap = gap;
                     best_cut = i + 1;
                 }
             }
-            // If no significant gap found, count near-zeros as free
             if best_gap < 1e3 {
                 best_cut = sorted.iter().filter(|&&v| v < 1e-15).count();
             }
@@ -1785,8 +1786,189 @@ impl Sketch {
             let t_h = t_hessian.unwrap().as_secs_f64() * 1000.0;
             let t_e = t_eigen.unwrap().elapsed().as_secs_f64() * 1000.0;
             let t_t = t_total.unwrap().elapsed().as_secs_f64() * 1000.0;
-            eprintln!("[DOF] n={} analyze={} method={} hessian={:.3}ms eigen={:.3}ms total={:.3}ms dof={}",
+            eprintln!("[DOF-EIG] n={} analyze={} method={} hessian={:.3}ms eigen={:.3}ms total={:.3}ms dof={}",
                 n, analyze, method, t_h, t_e, t_t, result.dof);
+        }
+        Ok(result)
+    }
+
+    /// Compute degrees of freedom. When `analyze` is true, also returns
+    /// parameter names, eigenvalues, and eigenvectors for free direction
+    /// classification. When false, only the DOF count is computed (fast path).
+    ///
+    /// Rank is determined from the singular values of the Jacobian J.
+    /// The returned `eigenvalues` field holds sigma_i^2 (mathematically
+    /// equivalent to eigenvalues of J^T J) and `eigenvectors` holds the
+    /// right singular vectors of J (columns of V, equivalent to
+    /// eigenvectors of J^T J). SVD is used because forming J^T J squares
+    /// the condition number and destroys rank-detection precision at
+    /// high constraint scales (observed: scale=10000 misreports DOF).
+    ///
+    /// Uses nalgebra SVD for n<32, faer SVD for n>=32.
+    pub fn compute_dof(&mut self, analyze: bool) -> Result<DofResult, String> {
+        let t_total = if TIMING_DEBUG { Some(std::time::Instant::now()) } else { None };
+
+        self.prepare_expr_constraints();
+        self.update_tangent_flags();
+        self.update_perpendicular_flags();
+
+        let saved_drift = self.drift_isigma;
+        self.drift_isigma = 0.0;
+
+        let mut params = Vec::new();
+        self.serialize64(&mut params);
+        let n = params.len();
+        if n == 0 {
+            self.drift_isigma = saved_drift;
+            return Ok(DofResult { dof: 0, param_names: Vec::new(), eigenvalues: Vec::new(), eigenvectors: Vec::new() });
+        }
+
+        let param_names = if analyze {
+            let bag = SymbolBag::build(self);
+            let mut names = vec![String::new(); n];
+            for (name, &idx) in &bag.param_indices {
+                let i = idx as usize;
+                if i < n && names[i].is_empty() { names[i] = name.clone(); }
+            }
+            names
+        } else {
+            Vec::new()
+        };
+
+        let t_jac = if TIMING_DEBUG { Some(std::time::Instant::now()) } else { None };
+        let jacobian = self.calc_jacobian(&params);
+        self.drift_isigma = saved_drift;
+        let m = jacobian.num_residuals();
+        let t_jac = t_jac.map(|t| t.elapsed());
+
+        if m == 0 {
+            // No residuals: every parameter is free.
+            let result = DofResult {
+                dof: n,
+                param_names,
+                eigenvalues: vec![0.0; n],
+                eigenvectors: (0..n).map(|i| {
+                    let mut v = vec![0.0; n];
+                    v[i] = 1.0;
+                    v
+                }).collect(),
+            };
+            self.cached_dof = Some(result.dof);
+            return Ok(result);
+        }
+
+        let dense = jacobian.to_dense();
+
+        // Determine rank from the singular value spectrum. The gap algorithm
+        // mirrors the old eigenvalue version but operates on sigma directly:
+        // a sharp jump between "near zero" and "constrained" still shows up
+        // as a large gap ratio, but without the condition-number squaring
+        // that killed precision in the J^T J approach.
+        let rank_from_svs = |svs: &[f64]| -> usize {
+            let mut sorted: Vec<f64> = svs.iter().map(|v| v.abs()).collect();
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let max_sv = sorted.last().copied().unwrap_or(0.0);
+            // Only search for the gap in the lower portion of the spectrum
+            // (below 1% of max). Prevents gaps between large constrained
+            // singular values from being mistaken for the free/constrained
+            // boundary.
+            let upper_bound = max_sv * 0.01;
+            let mut best_gap = 0.0f64;
+            let mut best_cut = 0;
+            for i in 0..sorted.len().saturating_sub(1) {
+                let lo = sorted[i];
+                let hi = sorted[i + 1];
+                if lo < 1e-20 { continue; }
+                if lo > upper_bound { break; }
+                let gap = hi / lo;
+                if gap > best_gap {
+                    best_gap = gap;
+                    best_cut = i + 1;
+                }
+            }
+            if best_gap < 1e3 {
+                best_cut = sorted.iter().filter(|&&v| v < 1e-15).count();
+            }
+            let rank = svs.len() - best_cut;
+            rank
+        };
+
+        let t_svd = if TIMING_DEBUG { Some(std::time::Instant::now()) } else { None };
+        let (method, result) = if n < 32 {
+            let j = nalgebra::DMatrix::from_row_slice(m, n, &dense);
+            if analyze {
+                let svd = j.svd(false, true);
+                let svs: Vec<f64> = svd.singular_values.iter().cloned().collect();
+                let rank = rank_from_svs(&svs);
+                let dof = n.saturating_sub(rank);
+                let vt = svd.v_t.as_ref().expect("V^T should be computed");
+                // nalgebra returns singular values in descending order; rank_from_svs
+                // sorts internally so it does not depend on input order. Here we
+                // keep the native (descending) order for eigenvalues/eigenvectors.
+                // Pad with zeros if m < n (SVD only returns min(m, n) singular values).
+                let k = svs.len();
+                let mut eigenvalues = vec![0.0; n];
+                let mut eigenvectors: Vec<Vec<f64>> = (0..n).map(|_| vec![0.0; n]).collect();
+                for i in 0..k {
+                    eigenvalues[i] = svs[i] * svs[i];
+                    for row in 0..n {
+                        eigenvectors[i][row] = vt[(i, row)];
+                    }
+                }
+                // Fill any remaining slots with orthogonal basis vectors (not
+                // mathematically meaningful beyond rank, but keeps dimensions
+                // consistent for callers that iterate).
+                for i in k..n {
+                    eigenvectors[i][i] = 1.0;
+                }
+                ("nalgebra SVD", DofResult { dof, param_names, eigenvalues, eigenvectors })
+            } else {
+                let svs: Vec<f64> = j.singular_values().iter().cloned().collect();
+                let rank = rank_from_svs(&svs);
+                let dof = n.saturating_sub(rank);
+                ("nalgebra SVD values-only", DofResult { dof, param_names: Vec::new(), eigenvalues: Vec::new(), eigenvectors: Vec::new() })
+            }
+        } else {
+            let faer_j = faer::Mat::from_fn(m, n, |i, k| dense[i * n + k]);
+            if analyze {
+                let svd = faer_j.thin_svd()
+                    .map_err(|e| format!("faer SVD failed at n={}: {:?}", n, e))?;
+                let s = svd.S().column_vector();
+                let vt = svd.V().transpose();
+                let k = s.nrows().min(n);
+                let svs: Vec<f64> = (0..k).map(|i| s[i]).collect();
+                let rank = rank_from_svs(&svs);
+                let dof = n.saturating_sub(rank);
+                let mut eigenvalues = vec![0.0; n];
+                let mut eigenvectors: Vec<Vec<f64>> = (0..n).map(|_| vec![0.0; n]).collect();
+                for i in 0..k {
+                    eigenvalues[i] = svs[i] * svs[i];
+                    for row in 0..n {
+                        eigenvectors[i][row] = vt[(i, row)];
+                    }
+                }
+                for i in k..n {
+                    eigenvectors[i][i] = 1.0;
+                }
+                ("faer SVD", DofResult { dof, param_names, eigenvalues, eigenvectors })
+            } else {
+                let svd = faer_j.thin_svd()
+                    .map_err(|e| format!("faer SVD failed at n={}: {:?}", n, e))?;
+                let s = svd.S().column_vector();
+                let k = s.nrows().min(n);
+                let svs: Vec<f64> = (0..k).map(|i| s[i]).collect();
+                let rank = rank_from_svs(&svs);
+                let dof = n.saturating_sub(rank);
+                ("faer SVD values-only", DofResult { dof, param_names: Vec::new(), eigenvalues: Vec::new(), eigenvectors: Vec::new() })
+            }
+        };
+
+        if TIMING_DEBUG {
+            let t_j = t_jac.unwrap().as_secs_f64() * 1000.0;
+            let t_s = t_svd.unwrap().elapsed().as_secs_f64() * 1000.0;
+            let t_t = t_total.unwrap().elapsed().as_secs_f64() * 1000.0;
+            eprintln!("[DOF] m={} n={} analyze={} method={} jacobian={:.3}ms svd={:.3}ms total={:.3}ms dof={}",
+                m, n, analyze, method, t_j, t_s, t_t, result.dof);
         }
         self.cached_dof = Some(result.dof);
         Ok(result)

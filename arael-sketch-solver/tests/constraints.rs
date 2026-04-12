@@ -1700,3 +1700,72 @@ fn test_ellipse_arc_distance_convergence() {
     assert!((dist - 3.0).abs() < 0.01, "distance should be ~3.0, got {}", dist);
     assert!((a.radius.value - a.radius_b.value).abs() < 1e-6, "radius_b should equal radius");
 }
+
+// -- DOF rank detection at large geometric scale --
+//
+// Regression: at large geometric scale, Hessian-based rank detection
+// misreports DOF because forming J^T J squares the condition number and
+// drowns the true near-zero eigenvalues in roundoff noise. SVD of J
+// preserves the gap.
+//
+// Reproducer: two arcs sharing both endpoints via coincident-start/end and
+// each tangent to a line. This mirrors the pattern in robot.cmd that
+// reported DOF=60 instead of 3 at scale=10000 with the eigenvalue path.
+#[test]
+fn test_dof_at_large_scale() {
+    fn build_sketch(s: f64) -> Sketch {
+        let mut sketch = Sketch::new();
+        let l1 = sketch.add_line(vect2d::new(-s, 0.0), vect2d::new(s, 0.0));
+        let l2 = sketch.add_line(vect2d::new(s, 0.0), vect2d::new(-s, 0.0));
+        // Upper arc, bulging upward.
+        let a_top = sketch.add_arc(
+            vect2d::new(0.0, 0.0),
+            s,
+            0.0,
+            std::f64::consts::PI,
+            false,
+        );
+        // Lower arc, bulging downward, sharing both endpoints with top.
+        let a_bot = sketch.add_arc(
+            vect2d::new(0.0, 0.0),
+            s,
+            std::f64::consts::PI,
+            std::f64::consts::TAU,
+            false,
+        );
+        // Couple: arcs share start/end endpoints with the line endpoints.
+        sketch.coincident_lp1_arc_start.push(CoincidentLP1ArcStart {
+            line: l1, arc: a_top, cid: 0, hb: CrossBlock::new(),
+        });
+        sketch.coincident_lp2_arc_end.push(CoincidentLP2ArcEnd {
+            line: l1, arc: a_top, cid: 0, hb: CrossBlock::new(),
+        });
+        sketch.coincident_lp1_arc_start.push(CoincidentLP1ArcStart {
+            line: l2, arc: a_bot, cid: 0, hb: CrossBlock::new(),
+        });
+        sketch.coincident_lp2_arc_end.push(CoincidentLP2ArcEnd {
+            line: l2, arc: a_bot, cid: 0, hb: CrossBlock::new(),
+        });
+        // Equal-radius between the two arcs (redundant with the shared
+        // endpoints but introduces the kind of scale-dependent coupling
+        // that breaks the J^T J eigenvalue path).
+        sketch.equal_radius.push(EqualRadius {
+            a: a_top, b: a_bot, cid: 0, hb: CrossBlock::new(),
+        });
+        // Dimensions that scale with s.
+        sketch.lines[l1].constraints.has_length = true;
+        sketch.lines[l1].constraints.length = 2.0 * s;
+        sketch.arcs[a_top].constraints.has_target_radius = true;
+        sketch.arcs[a_top].constraints.target_radius = s;
+        sketch.solve();
+        sketch
+    }
+
+    let mut small = build_sketch(1.0);
+    let mut large = build_sketch(100000.0);
+    let dof_small = small.dof().expect("small-scale DOF");
+    let dof_large = large.dof().expect("large-scale DOF");
+    assert_eq!(dof_small, dof_large,
+        "DOF should not depend on geometric scale (got {} at s=1, {} at s=100000)",
+        dof_small, dof_large);
+}
