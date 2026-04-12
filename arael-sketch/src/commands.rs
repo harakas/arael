@@ -6037,26 +6037,29 @@ fn cmd_dof_singular(ctx: &mut CommandContext) -> CommandResult {
         lines.push(format!("  {:.6e}  {}", val, parts.join(" ")));
 
         // Left singular vector: which constraints project onto this direction.
-        // Aggregate |u[row]| per constraint (summing rows with the same cid).
+        // Aggregate u[row]^2 by (cid, label) — the label gives attribute-level
+        // granularity (e.g. Arc:0 vs Arc:4) while cid gives the instance.
         let uv = u.column(*idx);
-        let mut cid_weight: std::collections::HashMap<u32, f64> = std::collections::HashMap::new();
+        let mut weight: std::collections::HashMap<(u32, &'static str), f64> = std::collections::HashMap::new();
         for (row_idx, row) in jacobian.rows.iter().enumerate() {
             if row_idx >= uv.len() { break; }
             let w = uv[row_idx];
-            *cid_weight.entry(row.constraint).or_insert(0.0) += w * w;
+            *weight.entry((row.constraint, row.label)).or_insert(0.0) += w * w;
         }
-        // Each constraint's contribution = sum(u[row]^2) across its rows.
-        // Sum over all constraints = 1 (since u is unit). Report as percentages.
-        let mut contribs: Vec<(u32, f64)> = cid_weight.into_iter().collect();
+        // Sum over all constraints = 1 (u is a unit vector). Report as percentages.
+        let mut contribs: Vec<((u32, &'static str), f64)> = weight.into_iter().collect();
         contribs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
         let top_max = contribs.first().map(|(_, w)| *w).unwrap_or(0.0);
         let top_threshold = top_max * 0.1; // show anything >= 10% of dominant
         contribs.retain(|(_, w)| *w > top_threshold);
         contribs.truncate(6);
         if !contribs.is_empty() {
-            let parts: Vec<String> = contribs.iter().map(|(cid, w)| {
-                let label = labels.get(cid).cloned().unwrap_or_else(|| format!("cid={}", cid));
-                format!("{:.0}% {}", w * 100.0, label)
+            let parts: Vec<String> = contribs.iter().map(|((cid, label), w)| {
+                // Instance label like "arc:A0" or "parallel:L3,L0"; take the part after ":"
+                // for compactness since it already identifies the entity.
+                let instance = labels.get(cid).cloned().unwrap_or_else(|| format!("cid={}", cid));
+                let instance_short = instance.splitn(2, ':').nth(1).unwrap_or(&instance).to_string();
+                format!("{:.0}% {}/{}", w * 100.0, instance_short, label)
             }).collect();
             lines.push(format!("           {}", parts.join(", ")));
         }
@@ -6094,13 +6097,24 @@ fn cmd_dof_jacobian(ctx: &mut CommandContext) -> CommandResult {
                 } else {
                     idx_to_name[idx as usize].clone()
                 };
-                format!("{}={:+.6}", name, val)
+                // Collapse exact zeros to "<name>=0" to cut noise while keeping
+                // the parameter visible as part of the constraint.
+                if val == 0.0 {
+                    format!("{}=0", name)
+                } else {
+                    format!("{}={:+.6}", name, val)
+                }
             })
             .collect();
         let norm: f64 = row.entries.iter().map(|&(_, v)| v * v).sum::<f64>().sqrt();
-        let label = labels.get(&row.constraint).cloned().unwrap_or_else(|| "?".to_string());
-        lines.push(format!("  row {:3} cid={:3} {:28} r={:+.6e} |dr|={:.6e} [{}]",
-            i, row.constraint, label, row.residual, norm, entries.join(", ")));
+        // Combine instance (from cid->label map) with attribute label (from row.label).
+        let instance = labels.get(&row.constraint).cloned().unwrap_or_else(|| format!("cid={}", row.constraint));
+        let instance_short = instance.splitn(2, ':').nth(1).unwrap_or(&instance).to_string();
+        let combined = format!("{}/{}", instance_short, row.label);
+        let r_str = if row.residual == 0.0 { "r=0".to_string() } else { format!("r={:+.6e}", row.residual) };
+        let norm_str = if norm == 0.0 { "|dr|=0".to_string() } else { format!("|dr|={:.6e}", norm) };
+        lines.push(format!("  row {:3} cid={:3} {:30} {:16} {:16} dr/d[{}]",
+            i, row.constraint, combined, r_str, norm_str, entries.join(", ")));
     }
     ok(lines.join("\n"))
 }

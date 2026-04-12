@@ -432,6 +432,7 @@ pub struct ConstraintAttr {
     pub block_field: String,
     pub parent_name: Option<String>,  // e.g. "lm" for parent=lm
     pub guard: Option<String>,        // runtime guard expression, e.g. "self.info.gps.is_some()"
+    pub name: Option<String>,         // optional label for Jacobian rows, e.g. name = "sweep"
     pub vars: Vec<ConstraintVar>,     // explicit variables (legacy, may be empty)
     pub body_stmts: Vec<Stmt>,
 }
@@ -475,6 +476,7 @@ fn parse_constraint_inner_impl(
     let mut block_field: Option<String> = None;
     let mut parent_name: Option<String> = None;
     let mut guard: Option<String> = None;
+    let mut name_label: Option<String> = None;
     let mut vars: Vec<ConstraintVar> = Vec::new();
 
     loop {
@@ -503,6 +505,22 @@ fn parse_constraint_inner_impl(
                             }
                             let guard_ts: proc_macro2::TokenStream = guard_tokens.into_iter().collect();
                             guard = Some(guard_ts.to_string());
+                        } else if name == "name" {
+                            // Expect a string literal
+                            if let Some(proc_macro2::TokenTree::Literal(lit)) = tokens.get(pos) {
+                                let s = lit.to_string();
+                                // Strip surrounding quotes
+                                if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
+                                    name_label = Some(s[1..s.len()-1].to_string());
+                                } else {
+                                    return Err(syn::Error::new_spanned(err_span,
+                                        "name = \"...\" expects a string literal"));
+                                }
+                                pos += 1;
+                            } else {
+                                return Err(syn::Error::new_spanned(err_span,
+                                    "name = \"...\" expects a string literal"));
+                            }
                         }
                     }
                     Some(proc_macro2::TokenTree::Punct(p)) if p.as_char() == ':' => {
@@ -576,6 +594,7 @@ fn parse_constraint_inner_impl(
         block_field,
         parent_name,
         guard,
+        name: name_label,
         vars,
         body_stmts: block.stmts,
     }))
@@ -957,9 +976,25 @@ pub fn generate_root_methods(
         set
     };
 
+    // Count constraint attributes per struct (for default label naming).
+    let mut attr_count_per_struct: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+    for sc in &stashed {
+        if !reachable.contains(&sc.struct_name) { continue; }
+        *attr_count_per_struct.entry(sc.struct_name.clone()).or_insert(0) += 1;
+    }
+    let mut attr_idx_per_struct: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
+
     for sc in &stashed {
         // Skip constraints for types not reachable from this root
         if !reachable.contains(&sc.struct_name) { continue; }
+        // Determine this attribute's index within the struct (for default label).
+        let this_idx = {
+            let slot = attr_idx_per_struct.entry(sc.struct_name.clone()).or_insert(0);
+            let idx = *slot;
+            *slot += 1;
+            idx
+        };
+        let total_attrs = *attr_count_per_struct.get(&sc.struct_name).unwrap_or(&1);
         // Re-parse constraint
         let attr_ts: proc_macro2::TokenStream = sc.attr_tokens.parse()
             .map_err(|e| syn::Error::new(proc_macro2::Span::call_site(),
@@ -977,6 +1012,18 @@ pub fn generate_root_methods(
             _ => None,
         };
         let constraint = match constraint { Some(c) => c, None => continue };
+
+        // Compute the JacobianRow label for this constraint attribute:
+        // - If user provided `name = "..."`, use it verbatim
+        // - Otherwise use the struct name, suffixed with ":<idx>" if multi-attribute
+        let label_str: String = if let Some(ref n) = constraint.name {
+            n.clone()
+        } else if total_attrs <= 1 {
+            sc.struct_name.clone()
+        } else {
+            format!("{}:{}", sc.struct_name, this_idx)
+        };
+        let label_literal = syn::LitStr::new(&label_str, proc_macro2::Span::call_site());
 
         // Re-parse fields
         let fields_ts: proc_macro2::TokenStream = sc.fields_tokens.parse()
@@ -1263,6 +1310,7 @@ pub fn generate_root_methods(
                 jac_stmts.push(quote! {
                     __jac_rows.push(arael::model::JacobianRow {
                         constraint: __jac_cid,
+                        label: #label_literal,
                         residual: #r_ident as #cast_type,
                         entries: arael::model::jacobian_entries(&__jac_idx, &[#(#dr_f64),*]),
                     });

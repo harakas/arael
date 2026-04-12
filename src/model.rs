@@ -1464,6 +1464,11 @@ pub struct JacobianRow<T> {
     /// on the source constraint struct. All residuals from the same
     /// constraint object share this value.
     pub constraint: u32,
+    /// Human-readable label for this constraint attribute. Defaults to the
+    /// constraint struct's type name; for structs with multiple constraint
+    /// attributes, suffixed with ":<index>". Can be overridden via
+    /// `#[arael(constraint(hb, name = "custom", ...))]`.
+    pub label: &'static str,
     /// Residual value.
     pub residual: T,
     /// Sparse partial derivatives: (global_param_index, dr/dp).

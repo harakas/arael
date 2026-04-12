@@ -202,7 +202,7 @@ pub struct Line {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 // Drift: weak regularizer on center, radii, rotation, angles
-#[arael(constraint(hb, {
+#[arael(constraint(hb, name = "drift", {
     let dc = arc.center - arc.center_value;
     let dr = arc.radius - arc.radius_value;
     let drb = arc.radius_b - arc.radius_b_value;
@@ -215,32 +215,32 @@ pub struct Line {
      dsa * sketch.drift_isigma, dea * sketch.drift_isigma]
 }))]
 // Target radius (semi-major axis)
-#[arael(constraint(hb, guard = self.constraints.has_target_radius, {
+#[arael(constraint(hb, guard = self.constraints.has_target_radius, name = "radius_target", {
     [(arc.radius - arc.constraints.target_radius) * sketch.constraint_isigma]
 }))]
 // Target radius_b (semi-minor axis, for ellipses)
-#[arael(constraint(hb, guard = self.constraints.has_target_radius_b, {
+#[arael(constraint(hb, guard = self.constraints.has_target_radius_b, name = "radius_b_target", {
     [(arc.radius_b - arc.constraints.target_radius_b) * sketch.constraint_isigma]
 }))]
 // For non-ellipse arcs: radius_b must equal radius (rotation is Param::fixed so no constraint needed)
-#[arael(constraint(hb, guard = !self.is_ellipse, {
+#[arael(constraint(hb, guard = !self.is_ellipse, name = "radius_b_eq_radius", {
     [(arc.radius_b - arc.radius) * sketch.constraint_isigma]
 }))]
 // EXPERIMENTAL: soft minimum radius via squared heaviside penalty.
 // Prevents radius from going below 0.001. The squared penalty is smooth
 // at the transition (value and gradient both zero at threshold).
 // A proper solution would be bound-constrained optimization in the framework.
-#[arael(constraint(hb, {
+#[arael(constraint(hb, name = "min_radius", {
     let d = sketch.min_length - arc.radius;
     [heaviside(d) * d * d * sketch.constraint_isigma * sketch.constraint_isigma]
 }))]
 // EXPERIMENTAL: same for radius_b on ellipses.
-#[arael(constraint(hb, guard = self.is_ellipse, {
+#[arael(constraint(hb, guard = self.is_ellipse, name = "min_radius_b", {
     let d = sketch.min_length - arc.radius_b;
     [heaviside(d) * d * d * sketch.constraint_isigma * sketch.constraint_isigma]
 }))]
 // Target sweep angle (multiplied by radius for position-equivalent scaling)
-#[arael(constraint(hb, guard = self.constraints.has_target_sweep, {
+#[arael(constraint(hb, guard = self.constraints.has_target_sweep, name = "sweep", {
     [(arc.end_angle - arc.start_angle - arc.constraints.sweep_sign * arc.constraints.target_sweep) * arc.radius * sketch.constraint_isigma]
 }))]
 pub struct Arc {

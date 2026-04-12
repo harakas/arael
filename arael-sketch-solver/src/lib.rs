@@ -1138,7 +1138,7 @@ impl arael::model::ExtendedModel for Sketch {
             ec.cid = *cid;
             match ec.jacobian_row(&vars, isigma) {
                 Ok((residual, entries)) => {
-                    rows.push(arael::model::JacobianRow { constraint: *cid, residual, entries });
+                    rows.push(arael::model::JacobianRow { constraint: *cid, label: ec.label, residual, entries });
                 }
                 Err(e) => eprintln!("expr constraint eval error: {}: {}", ec.description, e),
             }
