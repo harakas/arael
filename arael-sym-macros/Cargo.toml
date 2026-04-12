@@ -1,6 +1,6 @@
 [package]
 name = "arael-sym-macros"
-version = "0.3.1"
+version = "0.4.0"
 edition = "2024"
 authors = ["Indrek Mandre <indrek@mare.ee>"]
 readme = "../README.md"
