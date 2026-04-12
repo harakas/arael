@@ -1576,25 +1576,11 @@ fn syn_expr_to_sym(expr: &Expr, ctx: &mut SymContext) -> syn::Result<arael_sym::
                         .collect::<Result<_, _>>()?;
 
                     let fname = func_name.to_string();
-                    return match fname.as_str() {
-                        "sin" => expect_sym_unary(func_name, args, arael_sym::sin),
-                        "cos" => expect_sym_unary(func_name, args, arael_sym::cos),
-                        "tan" => expect_sym_unary(func_name, args, arael_sym::tan),
-                        "asin" => expect_sym_unary(func_name, args, arael_sym::asin),
-                        "acos" => expect_sym_unary(func_name, args, arael_sym::acos),
-                        "atan" => expect_sym_unary(func_name, args, arael_sym::atan),
-                        "sinh" => expect_sym_unary(func_name, args, arael_sym::sinh),
-                        "cosh" => expect_sym_unary(func_name, args, arael_sym::cosh),
-                        "tanh" => expect_sym_unary(func_name, args, arael_sym::tanh),
-                        "exp" => expect_sym_unary(func_name, args, arael_sym::exp),
-                        "ln" => expect_sym_unary(func_name, args, arael_sym::ln),
-                        "log2" => expect_sym_unary(func_name, args, arael_sym::log2),
-                        "log10" => expect_sym_unary(func_name, args, arael_sym::log10),
-                        "sqrt" => expect_sym_unary(func_name, args, arael_sym::sqrt),
-                        "abs" => expect_sym_unary(func_name, args, arael_sym::abs),
-                        "atan2" => expect_sym_binary(func_name, args, arael_sym::atan2),
-                        "pow" => expect_sym_binary(func_name, args, arael_sym::pow),
-                        _ => Err(syn::Error::new_spanned(
+                    return match arael_sym::function_by_name(&fname) {
+                        Some(arael_sym::FunctionRef::Unary(f)) => expect_sym_unary(func_name, args, f),
+                        Some(arael_sym::FunctionRef::Binary(f)) => expect_sym_binary(func_name, args, f),
+                        Some(arael_sym::FunctionRef::Ternary(f)) => expect_sym_ternary(func_name, args, f),
+                        None => Err(syn::Error::new_spanned(
                             func_name,
                             format!("unknown function '{fname}' in fit expression"),
                         )),
@@ -1645,6 +1631,21 @@ fn expect_sym_binary(
     }
     let mut it = args.into_iter();
     Ok(f(it.next().unwrap(), it.next().unwrap()))
+}
+
+fn expect_sym_ternary(
+    name: &syn::Ident,
+    args: Vec<arael_sym::E>,
+    f: fn(arael_sym::E, arael_sym::E, arael_sym::E) -> arael_sym::E,
+) -> syn::Result<arael_sym::E> {
+    if args.len() != 3 {
+        return Err(syn::Error::new_spanned(
+            name,
+            format!("{} expects 3 arguments, got {}", name, args.len()),
+        ));
+    }
+    let mut it = args.into_iter();
+    Ok(f(it.next().unwrap(), it.next().unwrap(), it.next().unwrap()))
 }
 
 // ---------------------------------------------------------------------------

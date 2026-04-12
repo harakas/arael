@@ -6368,11 +6368,8 @@ const GEO_FUNCTIONS: &[&str] = &[
     "rotate", "mirror", "tangent", "normal", "dist", "angle",
 ];
 
-const MATH_FUNCTIONS: &[&str] = &[
-    "sin", "cos", "tan", "asin", "acos", "atan", "atan2",
-    "sinh", "cosh", "tanh", "exp", "ln", "log2", "log10",
-    "sqrt", "abs", "pow", "pi",
-];
+// Named constants recognized by the expression parser (not functions).
+const MATH_CONSTANTS: &[&str] = &["pi", "e"];
 
 /// Generate autocomplete suggestions for the command input.
 /// Returns completions for the word at `cursor_pos` in `input`.
@@ -7024,7 +7021,13 @@ fn add_expression_completions(sketch: &Sketch, session_names: &HashMap<String, S
     add_params(sketch, results, prefix);
     add_session_names(session_names, results, prefix);
     add_matching(results, prefix, GEO_FUNCTIONS);
-    add_matching(results, prefix, MATH_FUNCTIONS);
+    // Math functions come from arael-sym's authoritative table.
+    for name in arael_sym::function_names() {
+        if name.starts_with(prefix) && name != prefix {
+            results.push(name.to_string());
+        }
+    }
+    add_matching(results, prefix, MATH_CONSTANTS);
 }
 
 /// Complete after a dot: "L0." → ["p1", "p2"], "A0." → ["center", "start", "end"], etc.

@@ -275,54 +275,43 @@ fn build_dotted_path(expr: &Expr) -> Option<String> {
 }
 
 fn eval_function(name: &str, args: Vec<SymVal>, span: &Expr) -> Result<SymVal, syn::Error> {
+    // Delegate scalar functions to arael-sym's name-based lookup. Arity and
+    // scalar-ness are validated here since SymVal is a macro-local type.
+    if let Some(fnref) = arael_sym::function_by_name(name) {
+        return match fnref {
+            arael_sym::FunctionRef::Unary(f) => {
+                if args.len() != 1 {
+                    return Err(syn::Error::new_spanned(span, format!("{} expects 1 arg", name)));
+                }
+                match &args[0] {
+                    SymVal::Scalar(e) => Ok(SymVal::Scalar(f(e.clone()))),
+                    _ => Err(syn::Error::new_spanned(span, format!("{} expects a scalar argument", name))),
+                }
+            }
+            arael_sym::FunctionRef::Binary(f) => {
+                if args.len() != 2 {
+                    return Err(syn::Error::new_spanned(span, format!("{} expects 2 args", name)));
+                }
+                match (&args[0], &args[1]) {
+                    (SymVal::Scalar(a), SymVal::Scalar(b)) => Ok(SymVal::Scalar(f(a.clone(), b.clone()))),
+                    _ => Err(syn::Error::new_spanned(span, format!("{} expects scalar arguments", name))),
+                }
+            }
+            arael_sym::FunctionRef::Ternary(f) => {
+                if args.len() != 3 {
+                    return Err(syn::Error::new_spanned(span, format!("{} expects 3 args", name)));
+                }
+                match (&args[0], &args[1], &args[2]) {
+                    (SymVal::Scalar(a), SymVal::Scalar(b), SymVal::Scalar(c)) =>
+                        Ok(SymVal::Scalar(f(a.clone(), b.clone(), c.clone()))),
+                    _ => Err(syn::Error::new_spanned(span, format!("{} expects scalar arguments", name))),
+                }
+            }
+        };
+    }
+    // Vector-typed functions stay local: they operate on the macro's
+    // SymVal::Vec2 type, which arael-sym doesn't know about.
     match name {
-        "atan2" | "safe_atan2" => {
-            if args.len() != 2 { return Err(syn::Error::new_spanned(span, format!("{} expects 2 args", name))); }
-            match (&args[0], &args[1]) {
-                (SymVal::Scalar(y), SymVal::Scalar(x)) => {
-                    let f = if name == "atan2" { arael_sym::atan2 } else { arael_sym::safe_atan2 };
-                    Ok(SymVal::Scalar(f(y.clone(), x.clone())))
-                }
-                _ => Err(syn::Error::new_spanned(span, format!("{} expects scalar arguments", name))),
-            }
-        }
-        "atan" => {
-            if args.len() != 1 { return Err(syn::Error::new_spanned(span, "atan expects 1 arg")); }
-            match &args[0] {
-                SymVal::Scalar(e) => Ok(SymVal::Scalar(arael_sym::atan(e.clone()))),
-                _ => Err(syn::Error::new_spanned(span, "atan expects a scalar argument")),
-            }
-        }
-        "sin" | "cos" | "tan" | "exp" | "ln" | "sqrt" | "abs" | "heaviside" | "identity" | "safe_sqrt" => {
-            if args.len() != 1 { return Err(syn::Error::new_spanned(span, format!("{} expects 1 arg", name))); }
-            match &args[0] {
-                SymVal::Scalar(e) => {
-                    let f = match name {
-                        "sin" => arael_sym::sin,
-                        "cos" => arael_sym::cos,
-                        "tan" => arael_sym::tan,
-                        "exp" => arael_sym::exp,
-                        "ln" => arael_sym::ln,
-                        "sqrt" => arael_sym::sqrt,
-                        "abs" => arael_sym::abs,
-                        "heaviside" => arael_sym::heaviside,
-                        "identity" => arael_sym::identity,
-                        "safe_sqrt" => arael_sym::safe_sqrt,
-                        _ => unreachable!(),
-                    };
-                    Ok(SymVal::Scalar(f(e.clone())))
-                }
-                _ => Err(syn::Error::new_spanned(span, format!("{} expects a scalar argument", name))),
-            }
-        }
-        "clamp" => {
-            if args.len() != 3 { return Err(syn::Error::new_spanned(span, "clamp expects 3 args")); }
-            match (&args[0], &args[1], &args[2]) {
-                (SymVal::Scalar(val), SymVal::Scalar(lo), SymVal::Scalar(hi)) =>
-                    Ok(SymVal::Scalar(arael_sym::clamp(val.clone(), lo.clone(), hi.clone()))),
-                _ => Err(syn::Error::new_spanned(span, "clamp expects scalar arguments")),
-            }
-        }
         "dot" | "cross2" => {
             if args.len() != 2 { return Err(syn::Error::new_spanned(span, format!("{} expects 2 args", name))); }
             let mut it = args.into_iter();
@@ -335,16 +324,6 @@ fn eval_function(name: &str, args: Vec<SymVal>, span: &Expr) -> Result<SymVal, s
                     (SymVal::Vec2(va), SymVal::Vec2(vb)) => Ok(SymVal::Scalar(va.cross(&vb))),
                     _ => Err(syn::Error::new_spanned(span, "cross2 expects Vec2 arguments")),
                 }
-            }
-        }
-        "rad_diff" | "rad_sum" => {
-            if args.len() != 2 { return Err(syn::Error::new_spanned(span, format!("{} expects 2 args", name))); }
-            match (&args[0], &args[1]) {
-                (SymVal::Scalar(a), SymVal::Scalar(b)) => {
-                    let f = if name == "rad_diff" { arael_sym::rad_diff } else { arael_sym::rad_sum };
-                    Ok(SymVal::Scalar(f(a.clone(), b.clone())))
-                }
-                _ => Err(syn::Error::new_spanned(span, format!("{} expects scalar arguments", name))),
             }
         }
         _ => Err(syn::Error::new_spanned(span, format!("unknown function '{}' in constraint", name))),

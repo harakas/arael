@@ -663,6 +663,77 @@ pub fn clamp(val: E, lo: E, hi: E) -> E { E::new(Expr::Clamp(val, lo, hi)) }
 /// Symbolic power function. Auto-simplifies (e.g. x^0 = 1, x^1 = x).
 pub fn pow(base: E, exponent: E) -> E { E::new(Expr::Pow(base, exponent)).simplify() }
 
+// ---------------------------------------------------------------------------
+// Name-based function lookup
+//
+// Users that parse an expression tree (for example arael-macros turning a
+// constraint body or a fit expression into an arael_sym::E) need to map
+// function-name tokens like "sin", "atan2", "clamp" to the actual arael-sym
+// function. Keeping the authoritative list here (next to the functions
+// themselves) means external dispatchers don't have to duplicate it and
+// new functions land everywhere for free.
+// ---------------------------------------------------------------------------
+
+/// A scalar function exported by arael-sym, discovered by name. Tagged by
+/// arity so callers can validate the argument count without a second table.
+#[derive(Clone, Copy)]
+pub enum FunctionRef {
+    Unary(fn(E) -> E),
+    Binary(fn(E, E) -> E),
+    Ternary(fn(E, E, E) -> E),
+}
+
+/// The authoritative table of scalar functions arael-sym exposes by name.
+/// Adding a new `pub fn foo` above should add an entry here as well; every
+/// string-based dispatcher (the parser, the macro's constraint/fit
+/// dispatchers, user-facing autocompleters) reads from this one table.
+pub const FUNCTIONS: &[(&str, FunctionRef)] = &[
+    // Unary trig
+    ("sin", FunctionRef::Unary(sin)),
+    ("cos", FunctionRef::Unary(cos)),
+    ("tan", FunctionRef::Unary(tan)),
+    ("asin", FunctionRef::Unary(asin)),
+    ("acos", FunctionRef::Unary(acos)),
+    ("atan", FunctionRef::Unary(atan)),
+    ("sinh", FunctionRef::Unary(sinh)),
+    ("cosh", FunctionRef::Unary(cosh)),
+    ("tanh", FunctionRef::Unary(tanh)),
+    // Unary exp / log / pow-ish
+    ("exp", FunctionRef::Unary(exp)),
+    ("ln", FunctionRef::Unary(ln)),
+    ("log2", FunctionRef::Unary(log2)),
+    ("log10", FunctionRef::Unary(log10)),
+    ("sqrt", FunctionRef::Unary(sqrt)),
+    ("abs", FunctionRef::Unary(abs)),
+    ("heaviside", FunctionRef::Unary(heaviside)),
+    // Unary "safe" variants
+    ("identity", FunctionRef::Unary(identity)),
+    ("safe_sqrt", FunctionRef::Unary(safe_sqrt)),
+    ("safe_asin", FunctionRef::Unary(safe_asin)),
+    ("safe_acos", FunctionRef::Unary(safe_acos)),
+    // Binary
+    ("atan2", FunctionRef::Binary(atan2)),
+    ("pow", FunctionRef::Binary(pow)),
+    ("safe_atan2", FunctionRef::Binary(safe_atan2)),
+    ("rad_diff", FunctionRef::Binary(rad_diff)),
+    ("rad_sum", FunctionRef::Binary(rad_sum)),
+    // Ternary
+    ("clamp", FunctionRef::Ternary(clamp)),
+];
+
+/// Look up a scalar function by its conventional name. Returns `None` for
+/// unrecognized names -- callers typically emit a user-facing error in that
+/// case.
+pub fn function_by_name(name: &str) -> Option<FunctionRef> {
+    FUNCTIONS.iter().find(|(n, _)| *n == name).map(|(_, f)| *f)
+}
+
+/// Iterate over the names of every scalar function arael-sym exposes.
+/// Useful for autocomplete and "what functions are available?" queries.
+pub fn function_names() -> impl Iterator<Item = &'static str> {
+    FUNCTIONS.iter().map(|(n, _)| *n)
+}
+
 // --- Operator overloads for E (auto-simplify like SymPy) ---
 
 impl std::ops::Add for E {

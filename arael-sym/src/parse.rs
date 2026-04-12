@@ -254,68 +254,42 @@ impl Parser {
 }
 
 fn build_function_call(name: &str, args: Vec<E>) -> Result<E, ParseError> {
-    match name {
-        // Unary functions
-        "sin" => expect_unary(name, args, sin),
-        "cos" => expect_unary(name, args, cos),
-        "tan" => expect_unary(name, args, tan),
-        "asin" => expect_unary(name, args, asin),
-        "acos" => expect_unary(name, args, acos),
-        "atan" => expect_unary(name, args, atan),
-        "sinh" => expect_unary(name, args, sinh),
-        "cosh" => expect_unary(name, args, cosh),
-        "tanh" => expect_unary(name, args, tanh),
-        "exp" => expect_unary(name, args, exp),
-        "ln" => expect_unary(name, args, ln),
-        "log2" => expect_unary(name, args, log2),
-        "log10" => expect_unary(name, args, log10),
-        "sqrt" => expect_unary(name, args, sqrt),
-        "abs" => expect_unary(name, args, abs),
-        "H" | "heaviside" => expect_unary(name, args, heaviside),
-        // Binary functions
-        "atan2" => expect_binary(name, args, atan2),
-        "pow" => expect_binary(name, args, pow),
-        // Ternary functions
-        "clamp" => expect_ternary(name, args),
-        _ => Err(ParseError {
-            pos: 0,
-            msg: format!("unknown function: {name}"),
-        }),
-    }
-}
-
-fn expect_unary(name: &str, args: Vec<E>, f: fn(E) -> E) -> Result<E, ParseError> {
-    if args.len() != 1 {
-        Err(ParseError {
-            pos: 0,
-            msg: format!("{name} expects 1 argument, got {}", args.len()),
-        })
-    } else {
-        Ok(f(args.into_iter().next().unwrap()))
-    }
-}
-
-fn expect_binary(name: &str, args: Vec<E>, f: fn(E, E) -> E) -> Result<E, ParseError> {
-    if args.len() != 2 {
-        Err(ParseError {
-            pos: 0,
-            msg: format!("{name} expects 2 arguments, got {}", args.len()),
-        })
-    } else {
-        let mut it = args.into_iter();
-        Ok(f(it.next().unwrap(), it.next().unwrap()))
-    }
-}
-
-fn expect_ternary(name: &str, args: Vec<E>) -> Result<E, ParseError> {
-    if args.len() != 3 {
-        Err(ParseError {
-            pos: 0,
-            msg: format!("{name} expects 3 arguments, got {}", args.len()),
-        })
-    } else {
-        let mut it = args.into_iter();
-        Ok(clamp(it.next().unwrap(), it.next().unwrap(), it.next().unwrap()))
+    // "H" is a parser-only alias for heaviside; normalize before lookup.
+    let lookup_name = if name == "H" { "heaviside" } else { name };
+    let fnref = crate::function_by_name(lookup_name).ok_or_else(|| ParseError {
+        pos: 0,
+        msg: format!("unknown function: {name}"),
+    })?;
+    match fnref {
+        crate::FunctionRef::Unary(f) => {
+            if args.len() != 1 {
+                return Err(ParseError {
+                    pos: 0,
+                    msg: format!("{name} expects 1 argument, got {}", args.len()),
+                });
+            }
+            Ok(f(args.into_iter().next().unwrap()))
+        }
+        crate::FunctionRef::Binary(f) => {
+            if args.len() != 2 {
+                return Err(ParseError {
+                    pos: 0,
+                    msg: format!("{name} expects 2 arguments, got {}", args.len()),
+                });
+            }
+            let mut it = args.into_iter();
+            Ok(f(it.next().unwrap(), it.next().unwrap()))
+        }
+        crate::FunctionRef::Ternary(f) => {
+            if args.len() != 3 {
+                return Err(ParseError {
+                    pos: 0,
+                    msg: format!("{name} expects 3 arguments, got {}", args.len()),
+                });
+            }
+            let mut it = args.into_iter();
+            Ok(f(it.next().unwrap(), it.next().unwrap(), it.next().unwrap()))
+        }
     }
 }
 
