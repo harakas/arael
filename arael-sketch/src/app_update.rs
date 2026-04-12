@@ -1133,16 +1133,26 @@ impl eframe::App for EditorApp {
                     // Drag: geometry or dimension
                     if response.dragged_by(egui::PointerButton::Primary) {
                         if self.grab.is_none() && self.drag_dimension.is_none() {
-                            // First drag frame: try to grab a dimension first, then geometry
+                            // First drag frame: hit-test against the PRESS ORIGIN,
+                            // not the current cursor. egui's dragged_by only fires
+                            // after the pointer has moved past its internal
+                            // drag-start threshold (max_click_dist, a few px), so
+                            // the cursor has drifted outside the hover zone by the
+                            // time we get here. pointer.press_origin() returns the
+                            // screen position where the mouse button actually went
+                            // down -- what the user aimed at.
+                            let press_sketch = ui.ctx().input(|i| i.pointer.press_origin())
+                                .map(|p| self.to_sketch(p))
+                                .unwrap_or(mouse_sketch);
                             let mut grabbed_dim = false;
-                            if let Some(sel) = self.hit_test_selection(mouse_sketch, hit_threshold)
+                            if let Some(sel) = self.hit_test_selection(press_sketch, hit_threshold)
                                 && let Selection::Dimension(i) = sel {
                                     self.drag_dimension = Some(i);
                                     grabbed_dim = true;
                                 }
                             if !grabbed_dim
-                                && let Some(target) = self.hit_test(mouse_sketch, hit_threshold) {
-                                    self.start_drag(target, mouse_sketch);
+                                && let Some(target) = self.hit_test(press_sketch, hit_threshold) {
+                                    self.start_drag(target, press_sketch);
                                 }
                         }
                         if let Some(dim_idx) = self.drag_dimension {
