@@ -1742,6 +1742,70 @@ impl eframe::App for EditorApp {
             }
 
             // Draw overlays ON TOP of canvas: preview line and cursor crosshair
+            // Midpoint-snap visual: a filled "hover-point" dot with the
+            // triangle-up glyph in the selected-constraint color, offset
+            // perpendicular to the host entity so it sits on the OPPOSITE
+            // side from where normal constraint markers live (keeps them
+            // from stacking). Sized "hover / emphasized" (s=7, w=2) so
+            // it's clearly a live UI hint vs. a permanent marker.
+            //
+            // `pt` is the actual snap point (constraint anchor); the
+            // triangle draws at `pt + offset` on the opposite side from
+            // where normal constraint markers live.
+            let draw_midpoint_marker = |pt: egui::Pos2, offset: egui::Vec2| {
+                let p = pt + offset;
+                painter.circle_filled(pt, 4.0, self.colors.endpoint);
+                let color = self.colors.constraint_marker_selected;
+                let stroke = egui::Stroke::new(2.0, color);
+                let s = 7.0_f32;
+                let h = s * 1.56;
+                let half_w = s * 1.04;
+                let top = egui::Pos2::new(p.x, p.y - h * 0.5);
+                let bl = egui::Pos2::new(p.x - half_w, p.y + h * 0.5);
+                let br = egui::Pos2::new(p.x + half_w, p.y + h * 0.5);
+                painter.line_segment([top, bl], stroke);
+                painter.line_segment([bl, br], stroke);
+                painter.line_segment([br, top], stroke);
+            };
+
+            // Compute the screen-space offset vector for the midpoint hint,
+            // pointing to the OPPOSITE side from where line_marker_pos /
+            // arc_marker_pos put normal constraint markers. Returns None if
+            // the target isn't a midpoint variant.
+            let midpoint_hint_offset = |t: &SnapTarget| -> Option<egui::Vec2> {
+                const OFFSET_PX: f32 = 12.0;
+                match t {
+                    SnapTarget::LineMidpoint(r) => {
+                        let l = &self.sketch.lines[*r];
+                        let p1 = self.to_screen(l.p1.value);
+                        let p2 = self.to_screen(l.p2.value);
+                        let dx = p2.x - p1.x;
+                        let dy = p2.y - p1.y;
+                        let len = (dx * dx + dy * dy).sqrt().max(1.0);
+                        let nx = -dy / len;
+                        let ny = dx / len;
+                        // Normal markers use sign that forces "up" (ny < 0);
+                        // we want the opposite -> force "down" (ny > 0).
+                        let sign = if ny > 0.0 { 1.0 } else { -1.0 };
+                        Some(egui::vec2(nx * OFFSET_PX * sign, ny * OFFSET_PX * sign))
+                    }
+                    SnapTarget::ArcMidpoint(r) => {
+                        let a = &self.sketch.arcs[*r];
+                        let mid_t = (a.start_angle.value + a.end_angle.value) * 0.5;
+                        let mp = arc_point_at(a, mid_t);
+                        let center = self.to_screen(a.center.value);
+                        let mps = self.to_screen(mp);
+                        // Radial outward in screen space (normal markers sit
+                        // INSIDE the curve; hint goes OUTSIDE).
+                        let dx = mps.x - center.x;
+                        let dy = mps.y - center.y;
+                        let len = (dx * dx + dy * dy).sqrt().max(1.0);
+                        Some(egui::vec2(dx / len * OFFSET_PX, dy / len * OFFSET_PX))
+                    }
+                    _ => None,
+                }
+            };
+
             if let Some(ref state) = self.line_draw {
                 let p1 = self.to_screen(state.start);
                 // Honor end-point snap in the preview so the user sees
@@ -1752,30 +1816,19 @@ impl eframe::App for EditorApp {
                     egui::Stroke::new(1.5, self.colors.preview_line));
                 painter.circle_filled(p1, 4.0, self.colors.endpoint);
 
-                // Show an "about to be constrained" glyph in the selected-
-                // constraint color at either endpoint when a midpoint snap
-                // is active. Triangle-up matches the existing
-                // ConstraintSymbol::Midpoint rendering in drawing.rs.
-                let draw_midpoint_glyph = |p: egui::Pos2| {
-                    let color = self.colors.constraint_marker_selected;
-                    let stroke = egui::Stroke::new(1.5, color);
-                    let s = 5.0_f32;
-                    let h = s * 1.56;
-                    let half_w = s * 1.04;
-                    let top = egui::Pos2::new(p.x, p.y - h * 0.5);
-                    let bl = egui::Pos2::new(p.x - half_w, p.y + h * 0.5);
-                    let br = egui::Pos2::new(p.x + half_w, p.y + h * 0.5);
-                    painter.line_segment([top, bl], stroke);
-                    painter.line_segment([bl, br], stroke);
-                    painter.line_segment([br, top], stroke);
-                };
-                let is_mid_snap = |s: &Option<SnapTarget>| {
-                    matches!(s, Some(SnapTarget::LineMidpoint(_)) | Some(SnapTarget::ArcMidpoint(_)))
-                };
-                if is_mid_snap(&state.snap_start) { draw_midpoint_glyph(p1); }
-                if let Some((_, t)) = end_snap {
-                    if matches!(t, SnapTarget::LineMidpoint(_) | SnapTarget::ArcMidpoint(_)) {
-                        draw_midpoint_glyph(end_pt);
+                if let Some(ref t) = state.snap_start {
+                    if let Some(off) = midpoint_hint_offset(t) { draw_midpoint_marker(p1, off); }
+                }
+                if let Some((_, t)) = &end_snap {
+                    if let Some(off) = midpoint_hint_offset(t) { draw_midpoint_marker(end_pt, off); }
+                }
+            } else if matches!(self.tool, Tool::DrawLine) {
+                // Pre-first-click midpoint hint: cursor hovering near a
+                // line/arc midpoint gets the marker as a discoverability
+                // cue that "clicking here starts a midpoint-bound line".
+                if let Some((pos, t)) = self.find_snap_target(mouse_sketch, hit_threshold) {
+                    if let Some(off) = midpoint_hint_offset(&t) {
+                        draw_midpoint_marker(self.to_screen(pos), off);
                     }
                 }
             }
