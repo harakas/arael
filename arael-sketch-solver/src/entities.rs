@@ -92,16 +92,16 @@ fn default_param_zero() -> arael::model::Param<f64> { arael::model::Param::fixed
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 // Drift: weak regularizer
-#[arael(constraint(hb, {
+#[arael(constraint(hb, name = "drift", {
     let d = point.pos - point.pos_value;
     [d.x * sketch.drift_isigma, d.y * sketch.drift_isigma]
 }))]
 // Fix X coordinate
-#[arael(constraint(hb, guard = self.constraints.has_fix_x, {
+#[arael(constraint(hb, guard = self.constraints.has_fix_x, name = "fix_x", {
     [(point.pos.x - point.constraints.fix_x) * sketch.constraint_isigma]
 }))]
 // Fix Y coordinate
-#[arael(constraint(hb, guard = self.constraints.has_fix_y, {
+#[arael(constraint(hb, guard = self.constraints.has_fix_y, name = "fix_y", {
     [(point.pos.y - point.constraints.fix_y) * sketch.constraint_isigma]
 }))]
 pub struct Point {
@@ -121,14 +121,14 @@ pub struct Point {
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 // Drift: weak regularizer on both endpoints
-#[arael(constraint(hb, {
+#[arael(constraint(hb, name = "drift", {
     let d1 = line.p1 - line.p1_value;
     let d2 = line.p2 - line.p2_value;
     [d1.x * sketch.drift_isigma, d1.y * sketch.drift_isigma,
      d2.x * sketch.drift_isigma, d2.y * sketch.drift_isigma]
 }))]
 // Drift: weak regularizer on length (epsilon avoids sqrt singularity at zero length)
-#[arael(constraint(hb, {
+#[arael(constraint(hb, name = "drift_length", {
     let dx = line.p2.x - line.p1.x;
     let dy = line.p2.y - line.p1.y;
     let dx0 = line.p2_value.x - line.p1_value.x;
@@ -136,34 +136,34 @@ pub struct Point {
     [(sqrt(dx * dx + dy * dy + 1e-6) - sqrt(dx0 * dx0 + dy0 * dy0 + 1e-6)) * sketch.drift_isigma]
 }))]
 // Drift: weak regularizer on angle (safe_atan2 avoids NaN at zero length)
-#[arael(constraint(hb, {
+#[arael(constraint(hb, name = "drift_angle", {
     let angle = safe_atan2(line.p2.y - line.p1.y, line.p2.x - line.p1.x);
     let angle0 = safe_atan2(line.p2_value.y - line.p1_value.y, line.p2_value.x - line.p1_value.x);
     [rad_diff(angle, angle0) * sketch.drift_isigma]
 }))]
 // Horizontal: p1.y == p2.y
-#[arael(constraint(hb, guard = self.constraints.horizontal, {
+#[arael(constraint(hb, guard = self.constraints.horizontal, name = "horizontal", {
     [(line.p1.y - line.p2.y) * sketch.constraint_isigma]
 }))]
 // Vertical: p1.x == p2.x
-#[arael(constraint(hb, guard = self.constraints.vertical, {
+#[arael(constraint(hb, guard = self.constraints.vertical, name = "vertical", {
     [(line.p1.x - line.p2.x) * sketch.constraint_isigma]
 }))]
 // Length
-#[arael(constraint(hb, guard = self.constraints.has_length, {
+#[arael(constraint(hb, guard = self.constraints.has_length, name = "length_target", {
     let dx = line.p2.x - line.p1.x;
     let dy = line.p2.y - line.p1.y;
     [(sqrt(dx * dx + dy * dy) - line.constraints.length) * sketch.constraint_isigma]
 }))]
 // Angle from x-axis
-#[arael(constraint(hb, guard = self.constraints.has_angle, {
+#[arael(constraint(hb, guard = self.constraints.has_angle, name = "angle_target", {
     [(atan2(line.p2.y - line.p1.y, line.p2.x - line.p1.x) - line.constraints.target_angle) * sketch.constraint_isigma]
 }))]
 // Soft minimum length via squared heaviside penalty.
 // Prevents line from collapsing to zero length (which makes direction undefined
 // and breaks tangent/angle constraints). Same pattern as arc minimum radius.
 // Uses length^2 directly to avoid sqrt singularity at zero.
-#[arael(constraint(hb, {
+#[arael(constraint(hb, name = "min_length", {
     let dx = line.p2.x - line.p1.x;
     let dy = line.p2.y - line.p1.y;
     let d = sketch.min_length * sketch.min_length - (dx * dx + dy * dy);
