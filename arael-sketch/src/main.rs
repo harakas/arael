@@ -3043,7 +3043,7 @@ fn main() -> eframe::Result {
             .collect();
         let line_count = commands.len();
         let batch = commands.join(";");
-        let start = std::time::Instant::now();
+        let start = web_time::Instant::now();
         app.run_commands(&batch);
         let elapsed = start.elapsed();
         eprintln!("Script {} executed {} commands in {:.3}s", script, line_count, elapsed.as_secs_f64());

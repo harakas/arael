@@ -5913,7 +5913,7 @@ fn classify_dof_directions(result: &arael_sketch_solver::DofResult) -> Vec<Strin
 }
 
 fn cmd_dof_eigenvalues(ctx: &mut CommandContext) -> CommandResult {
-    let t0 = std::time::Instant::now();
+    let t0 = web_time::Instant::now();
     // Use the legacy Hessian-based path so this command genuinely reports
     // eigenvalues of J^T J (the `dof` count itself uses SVD for robustness
     // at high scale, but this diagnostic shows the older eigendecomposition
@@ -5967,7 +5967,7 @@ fn cmd_dof_singular(ctx: &mut CommandContext) -> CommandResult {
         let i = idx as usize;
         if i < n && idx_to_name[i].is_empty() { idx_to_name[i] = name.clone(); }
     }
-    let t0 = std::time::Instant::now();
+    let t0 = web_time::Instant::now();
     let jacobian = ctx.sketch.calc_jacobian(&params);
     let t_build = t0.elapsed();
     ctx.sketch.drift_isigma = saved_drift;
@@ -5975,18 +5975,18 @@ fn cmd_dof_singular(ctx: &mut CommandContext) -> CommandResult {
     if m == 0 || n == 0 {
         return ok(format!("Jacobian: {} residuals x {} params (empty)", m, n));
     }
-    let t1 = std::time::Instant::now();
+    let t1 = web_time::Instant::now();
     let dense = jacobian.to_dense();
     let j = nalgebra::DMatrix::from_row_slice(m, n, &dense);
     let t_dense = t1.elapsed();
-    let t2 = std::time::Instant::now();
+    let t2 = web_time::Instant::now();
     // Compute both U and V^T so we can show which constraints contribute
     let svd = j.svd(true, true);
     let t_svd = t2.elapsed();
     let vt = svd.v_t.as_ref().expect("V^T should be computed");
     let u = svd.u.as_ref().expect("U should be computed");
     // Also benchmark faer SVD for comparison
-    let t3 = std::time::Instant::now();
+    let t3 = web_time::Instant::now();
     let faer_mat = faer::Mat::from_fn(m, n, |i, k| dense[i * n + k]);
     let _faer_svd = faer_mat.thin_svd().unwrap();
     let t_faer = t3.elapsed();

@@ -24,6 +24,7 @@ egui_commonmark = "0.20"
 bincode = "1"
 rfd = "0.15"
 pollster = "0.4"
+web-time = "1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 axum = "0.7"
