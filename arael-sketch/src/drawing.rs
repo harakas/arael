@@ -449,33 +449,43 @@ impl EditorApp {
         let cx = a.center.value.x;
         let cy = a.center.value.y;
         let (start_angle, sweep) = arc_span(a);
-        // Annotation arc radius: arc radius + offset.y (positive = outside, negative = inside)
-        let radius = (a.radius.value + offset.y).max(0.1);
+        // Annotation arc: expand both semi-axes by offset.y (positive =
+        // outside, negative = inside). For a circle this is just radius+offset;
+        // for an ellipse both axes scale, keeping the annotation curve
+        // similar to the arc (not a distorted offset curve, but close enough
+        // for a dimension reading and uniform visually).
+        let ann_rx = (a.radius.value + offset.y).max(0.1);
+        let ann_ry = (a.radius_b.value + offset.y).max(0.1);
+        let cr = a.rotation.value.cos();
+        let sr = a.rotation.value.sin();
+        // Ellipse point at parametric angle t, with custom rx/ry.
+        let ellipse_pt = |t: f64, rx: f64, ry: f64| -> vect2d {
+            let ct = t.cos();
+            let st = t.sin();
+            vect2d::new(cx + rx * ct * cr - ry * st * sr,
+                        cy + rx * ct * sr + ry * st * cr)
+        };
         let stroke = egui::Stroke::new(1.0, color);
         let ext_stroke = egui::Stroke::new(0.5, color);
         let center = vect2d::new(cx, cy);
         let sc = self.to_screen(center);
 
         // Extension lines from arc endpoints to annotation arc
-        let arc_start = vect2d::new(cx + a.radius.value * start_angle.cos(),
-                                    cy + a.radius.value * start_angle.sin());
-        let ann_start = vect2d::new(cx + radius * start_angle.cos(),
-                                    cy + radius * start_angle.sin());
+        let arc_start = ellipse_pt(start_angle, a.radius.value, a.radius_b.value);
+        let ann_start = ellipse_pt(start_angle, ann_rx, ann_ry);
         let end_angle = start_angle + sweep;
-        let arc_end = vect2d::new(cx + a.radius.value * end_angle.cos(),
-                                  cy + a.radius.value * end_angle.sin());
-        let ann_end = vect2d::new(cx + radius * end_angle.cos(),
-                                  cy + radius * end_angle.sin());
+        let arc_end = ellipse_pt(end_angle, a.radius.value, a.radius_b.value);
+        let ann_end = ellipse_pt(end_angle, ann_rx, ann_ry);
         painter.line_segment([self.to_screen(arc_start), self.to_screen(ann_start)], ext_stroke);
         painter.line_segment([self.to_screen(arc_end), self.to_screen(ann_end)], ext_stroke);
 
-        // Main arc polyline
+        // Main arc polyline (annotation, on the scaled ellipse)
         let draw_arc = |a_start: f64, a_sweep: f64, s: egui::Stroke| -> Vec<egui::Pos2> {
             let n = ((a_sweep.abs() * 20.0).ceil() as usize).max(8);
             let pts: Vec<egui::Pos2> = (0..=n).map(|i| {
                 let t = i as f64 / n as f64;
                 let ang = a_start + a_sweep * t;
-                self.to_screen(vect2d::new(cx + radius * ang.cos(), cy + radius * ang.sin()))
+                self.to_screen(ellipse_pt(ang, ann_rx, ann_ry))
             }).collect();
             for w in pts.windows(2) { painter.line_segment([w[0], w[1]], s); }
             pts
@@ -504,8 +514,11 @@ impl EditorApp {
         let text_angle = start_angle + sweep * (0.5 + text_along);
         let _ = sc; // center screen pos available if needed
 
-        // Extension arcs for out-of-range text
-        let screen_radius = (self.to_screen(vect2d::new(cx + radius, cy)).x - sc.x).abs().max(1.0);
+        // Extension arcs for out-of-range text. Use the larger semi-axis
+        // for the screen-pixel conversion so the text-half-angle estimate
+        // is conservative (text ends up with at least the intended gap).
+        let ann_max = ann_rx.max(ann_ry);
+        let screen_radius = (self.to_screen(vect2d::new(cx + ann_max, cy)).x - sc.x).abs().max(1.0);
         let text_half_angle = 20.0 / screen_radius;
         let extra = (text_half_angle as f64) * sweep.signum();
         if text_along < -0.5 {
@@ -516,7 +529,7 @@ impl EditorApp {
             draw_arc(start_angle + sweep, ext_sweep, ext_stroke);
         }
 
-        let text_pt = vect2d::new(cx + radius * text_angle.cos(), cy + radius * text_angle.sin());
+        let text_pt = ellipse_pt(text_angle, ann_rx, ann_ry);
         let screen_pt = self.to_screen(text_pt);
         let sign = if sweep >= 0.0 { 1.0f32 } else { -1.0f32 };
         let tx = -(text_angle.sin() as f32) * sign;
