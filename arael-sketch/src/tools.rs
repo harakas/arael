@@ -192,9 +192,11 @@ pub enum SnapTarget {
     Point(Ref<Point>),
     LineP1(Ref<Line>),
     LineP2(Ref<Line>),
+    LineMidpoint(Ref<Line>),  // midpoint of line body; applies a MidpointLP1/LP2 constraint
     Line(Ref<Line>),  // on line body (not endpoint)
     ArcCenter(Ref<Arc>),
     ArcStart(Ref<Arc>),
     ArcEnd(Ref<Arc>),
+    ArcMidpoint(Ref<Arc>),  // midpoint of arc curve; applies a MidpointLP1/LP2Arc constraint
     ArcBody(Ref<Arc>),  // on arc/circle curve
 }

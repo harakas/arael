@@ -1744,9 +1744,40 @@ impl eframe::App for EditorApp {
             // Draw overlays ON TOP of canvas: preview line and cursor crosshair
             if let Some(ref state) = self.line_draw {
                 let p1 = self.to_screen(state.start);
-                painter.line_segment([p1, mouse_screen],
+                // Honor end-point snap in the preview so the user sees
+                // exactly where the endpoint will land.
+                let end_snap = self.find_snap_target(mouse_sketch, hit_threshold);
+                let end_pt = end_snap.map_or(mouse_screen, |(p, _)| self.to_screen(p));
+                painter.line_segment([p1, end_pt],
                     egui::Stroke::new(1.5, self.colors.preview_line));
                 painter.circle_filled(p1, 4.0, self.colors.endpoint);
+
+                // Show an "about to be constrained" glyph in the selected-
+                // constraint color at either endpoint when a midpoint snap
+                // is active. Triangle-up matches the existing
+                // ConstraintSymbol::Midpoint rendering in drawing.rs.
+                let draw_midpoint_glyph = |p: egui::Pos2| {
+                    let color = self.colors.constraint_marker_selected;
+                    let stroke = egui::Stroke::new(1.5, color);
+                    let s = 5.0_f32;
+                    let h = s * 1.56;
+                    let half_w = s * 1.04;
+                    let top = egui::Pos2::new(p.x, p.y - h * 0.5);
+                    let bl = egui::Pos2::new(p.x - half_w, p.y + h * 0.5);
+                    let br = egui::Pos2::new(p.x + half_w, p.y + h * 0.5);
+                    painter.line_segment([top, bl], stroke);
+                    painter.line_segment([bl, br], stroke);
+                    painter.line_segment([br, top], stroke);
+                };
+                let is_mid_snap = |s: &Option<SnapTarget>| {
+                    matches!(s, Some(SnapTarget::LineMidpoint(_)) | Some(SnapTarget::ArcMidpoint(_)))
+                };
+                if is_mid_snap(&state.snap_start) { draw_midpoint_glyph(p1); }
+                if let Some((_, t)) = end_snap {
+                    if matches!(t, SnapTarget::LineMidpoint(_) | SnapTarget::ArcMidpoint(_)) {
+                        draw_midpoint_glyph(end_pt);
+                    }
+                }
             }
 
             // Circle preview

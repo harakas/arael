@@ -1331,7 +1331,10 @@ impl EditorApp {
             SnapTarget::ArcCenter(r) => Some(Selection::ArcCenter(r)),
             SnapTarget::ArcStart(r) => Some(Selection::ArcStart(r)),
             SnapTarget::ArcEnd(r) => Some(Selection::ArcEnd(r)),
-            SnapTarget::Line(_) | SnapTarget::ArcBody(_) => None,
+            SnapTarget::Line(_)
+            | SnapTarget::ArcBody(_)
+            | SnapTarget::LineMidpoint(_)
+            | SnapTarget::ArcMidpoint(_) => None,
         }
     }
 
@@ -2260,7 +2263,7 @@ impl EditorApp {
             check(d, p.pos.value, SnapTarget::Point(r));
         }
 
-        // Line endpoints
+        // Line endpoints + midpoint
         for r in self.sketch.lines.refs() {
             if exclude_line == Some(r) { continue; }
             let l = &self.sketch.lines[r];
@@ -2271,6 +2274,12 @@ impl EditorApp {
                     + (l.p2.value.y - sketch_pos.y).powi(2)).sqrt();
             check(d1, l.p1.value, SnapTarget::LineP1(r));
             check(d2, l.p2.value, SnapTarget::LineP2(r));
+
+            let mid = vect2d::new((l.p1.value.x + l.p2.value.x) * 0.5,
+                                  (l.p1.value.y + l.p2.value.y) * 0.5);
+            let dm = ((mid.x - sketch_pos.x).powi(2)
+                    + (mid.y - sketch_pos.y).powi(2)).sqrt();
+            check(dm, mid, SnapTarget::LineMidpoint(r));
         }
 
         // Arc centers and endpoints (same priority as points/line endpoints)
@@ -2287,6 +2296,12 @@ impl EditorApp {
                 let de = ((ep.x - sketch_pos.x).powi(2) + (ep.y - sketch_pos.y).powi(2)).sqrt();
                 check(ds, sp, SnapTarget::ArcStart(r));
                 check(de, ep, SnapTarget::ArcEnd(r));
+                // Arc midpoint (parametric): half-way between start and end
+                // angles along the sweep direction.
+                let mid_t = (a.start_angle.value + a.end_angle.value) * 0.5;
+                let mp = arc_point_at(a, mid_t);
+                let dmp = ((mp.x - sketch_pos.x).powi(2) + (mp.y - sketch_pos.y).powi(2)).sqrt();
+                check(dmp, mp, SnapTarget::ArcMidpoint(r));
             }
         }
 
@@ -2343,6 +2358,12 @@ impl EditorApp {
             // Line endpoint on arc body (direct constraint)
             (SnapTarget::ArcBody(arc), true) => { self.exec(Action::ApplyLineP1OnArc { line, arc }); }
             (SnapTarget::ArcBody(arc), false) => { self.exec(Action::ApplyLineP2OnArc { line, arc }); }
+            // Line endpoint at another line's midpoint
+            (SnapTarget::LineMidpoint(target), true) => { self.exec(Action::ApplyMidpointLP1 { line, target }); }
+            (SnapTarget::LineMidpoint(target), false) => { self.exec(Action::ApplyMidpointLP2 { line, target }); }
+            // Line endpoint at an arc's midpoint
+            (SnapTarget::ArcMidpoint(arc), true) => { self.exec(Action::ApplyMidpointLP1Arc { line, arc }); }
+            (SnapTarget::ArcMidpoint(arc), false) => { self.exec(Action::ApplyMidpointLP2Arc { line, arc }); }
         }
     }
 
@@ -2355,9 +2376,11 @@ impl EditorApp {
             SnapTarget::LineP1(line) => Action::ApplyCoincidentLP1 { line, point },
             SnapTarget::LineP2(line) => Action::ApplyCoincidentLP2 { line, point },
             SnapTarget::Line(line) => Action::ApplyPointOnLine { point, line },
+            SnapTarget::LineMidpoint(line) => Action::ApplyMidpoint { point, line },
             SnapTarget::ArcCenter(arc) => Action::ApplyCoincidentArcCenter { point, arc },
             SnapTarget::ArcStart(arc) => Action::ApplyCoincidentArcStart { point, arc },
             SnapTarget::ArcEnd(arc) => Action::ApplyCoincidentArcEnd { point, arc },
+            SnapTarget::ArcMidpoint(arc) => Action::ApplyMidpointArcPoint { point, arc },
             SnapTarget::ArcBody(arc) => Action::ApplyPointOnArc { point, arc },
         };
         self.exec(action);
