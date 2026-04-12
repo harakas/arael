@@ -1780,7 +1780,7 @@ fn test_dof_at_large_scale() {
 // side of the anchor.
 #[test]
 fn test_pp_distance_signed_along_line() {
-    use arael_sketch_solver::{Dimension, DimensionEndpoint, DimensionKind};
+    use arael_sketch_solver::{DimensionEndpoint, DimensionKind};
 
     let mut sketch = Sketch::new();
     // Line from origin along +x.

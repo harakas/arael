@@ -23,7 +23,7 @@ pub fn point_to_segment_dist(p: vect2d, a: vect2d, b: vect2d) -> f64 {
 /// returns (center, start_angle, end_angle, rx, ry) or None if degenerate.
 ///
 /// Implements the algorithm from SVG spec F.6.5-F.6.6:
-/// https://www.w3.org/TR/SVG2/implnote.html#ArcConversionEndpointToCenter
+/// <https://www.w3.org/TR/SVG2/implnote.html#ArcConversionEndpointToCenter>
 pub fn svg_arc_to_center(
     p1: vect2d, p2: vect2d, mut rx: f64, mut ry: f64,
     rotation: f64, large_arc: bool, sweep: bool,

@@ -1660,8 +1660,8 @@ impl Sketch {
     /// Kept for comparison and for the `dof eigenvalues` diagnostic. Rank
     /// detection from Hessian eigenvalues is numerically unstable at high
     /// constraint scales because forming J^T J squares the condition
-    /// number. For routine DOF counting, prefer [`compute_dof`] which uses
-    /// SVD of the Jacobian directly.
+    /// number. For routine DOF counting, prefer [`Sketch::compute_dof`]
+    /// which uses SVD of the Jacobian directly.
     ///
     /// Uses nalgebra for n<32, faer for n>=32. Benchmark at n=896 (polygon128):
     ///   faer eigenvalues-only:    45ms

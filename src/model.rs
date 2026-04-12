@@ -1466,8 +1466,8 @@ pub struct JacobianRow<T> {
     pub constraint: u32,
     /// Human-readable label for this constraint attribute. Defaults to the
     /// constraint struct's type name; for structs with multiple constraint
-    /// attributes, suffixed with ":<index>". Can be overridden via
-    /// `#[arael(constraint(hb, name = "custom", ...))]`.
+    /// attributes, suffixed with `:N` where N is the attribute index. Can
+    /// be overridden via `#[arael(constraint(hb, name = "custom", ...))]`.
     pub label: &'static str,
     /// Residual value.
     pub residual: T,

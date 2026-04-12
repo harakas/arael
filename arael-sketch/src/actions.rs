@@ -917,7 +917,6 @@ impl Action {
                 {
                     let dim = &sketch.dimensions[*index];
                     let dim_kind = dim.kind;
-                    let dim_value = dim.value;
                     let is_numeric_non_derived = dim.expr_str.is_none() && !dim.derived;
                     if is_numeric_non_derived {
                         match dim_kind {

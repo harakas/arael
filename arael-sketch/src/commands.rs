@@ -8978,7 +8978,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn test_dimension_expr_constrains() {
         // Exact reproduction from bug report
         let mut ctx = CommandContext::new();
