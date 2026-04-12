@@ -664,7 +664,11 @@ impl EditorApp {
                     a.rotation.optimize = false;
                 }
                 a.constraints.has_target_sweep = true;
-                a.constraints.target_sweep = a.end_angle.value - a.start_angle.value;
+                // target_sweep is the positive sweep magnitude; sweep_sign
+                // carries the direction. Signed delta here would mismatch
+                // sweep_sign on CW arcs and force radius to 0 to zero the
+                // residual.
+                a.constraints.target_sweep = (a.end_angle.value - a.start_angle.value).abs();
                 a.constraints.sweep_sign = if a.ccw { 1.0 } else { -1.0 };
                 a.start_angle.optimize = false;
                 a.end_angle.optimize = false;
