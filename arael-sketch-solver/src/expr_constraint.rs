@@ -17,6 +17,8 @@ pub struct ExpressionConstraint {
     pub param_derivs: Vec<(String, E)>,
     pub indices: Vec<u32>,
     pub description: String,
+    /// Set by extended_jacobian64 to match the Jacobian row's constraint field.
+    pub cid: u32,
 }
 
 impl ExpressionConstraint {
@@ -28,6 +30,7 @@ impl ExpressionConstraint {
             param_derivs: Vec::new(),
             indices: Vec::new(),
             description,
+            cid: 0,
         }
     }
 

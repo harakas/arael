@@ -123,6 +123,9 @@ pub struct Point {
     pub quiet: bool,
     #[arael(skip)]
     pub name: String,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: SelfBlock<Point>,
 }
@@ -189,6 +192,9 @@ pub struct Line {
     #[serde(default)]
     pub quiet: bool,
     pub name: String,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: SelfBlock<Line>,
 }
@@ -233,9 +239,9 @@ pub struct Line {
     let d = sketch.min_length - arc.radius_b;
     [heaviside(d) * d * d * sketch.constraint_isigma * sketch.constraint_isigma]
 }))]
-// Target sweep angle (end_angle - start_angle, sign-matched)
+// Target sweep angle (multiplied by radius for position-equivalent scaling)
 #[arael(constraint(hb, guard = self.constraints.has_target_sweep, {
-    [(arc.end_angle - arc.start_angle - arc.constraints.sweep_sign * arc.constraints.target_sweep) * sketch.constraint_isigma]
+    [(arc.end_angle - arc.start_angle - arc.constraints.sweep_sign * arc.constraints.target_sweep) * arc.radius * sketch.constraint_isigma]
 }))]
 pub struct Arc {
     pub center: Param<vect2d>,
@@ -271,6 +277,9 @@ pub struct Arc {
     #[arael(skip)]
     pub name: String,
     pub constraints: ArcConstraints,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: SelfBlock<Arc>,
 }

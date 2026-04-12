@@ -386,7 +386,7 @@ impl Sketch {
             pos: Param::new(pos),
             constraints: PointConstraints { has_fix_x: false, fix_x: 0.0, has_fix_y: false, fix_y: 0.0 },
             helper: false, quiet: false, name,
-            hb: SelfBlock::new(),
+            cid: 0, hb: SelfBlock::new(),
         })
     }
 
@@ -398,7 +398,7 @@ impl Sketch {
             pos: Param::fixed(pos),
             constraints: PointConstraints { has_fix_x: false, fix_x: 0.0, has_fix_y: false, fix_y: 0.0 },
             helper: false, quiet: false, name,
-            hb: SelfBlock::new(),
+            cid: 0, hb: SelfBlock::new(),
         })
     }
 
@@ -410,7 +410,7 @@ impl Sketch {
             pos: Param::new(pos),
             constraints: PointConstraints { has_fix_x: false, fix_x: 0.0, has_fix_y: false, fix_y: 0.0 },
             helper: true, quiet: false, name,
-            hb: SelfBlock::new(),
+            cid: 0, hb: SelfBlock::new(),
         })
     }
 
@@ -423,7 +423,7 @@ impl Sketch {
             p2: Param::new(p2),
             constraints: LineConstraints { horizontal: false, vertical: false, has_length: false, length: 0.0, has_angle: false, target_angle: 0.0 },
             style: LineStyle::Solid, construction: false, quiet: false, name,
-            hb: SelfBlock::new(),
+            cid: 0, hb: SelfBlock::new(),
         })
     }
 
@@ -461,7 +461,7 @@ impl Sketch {
                 has_target_radius_b: false, target_radius_b: 0.0,
                 has_target_sweep: false, target_sweep: 0.0, sweep_sign: 1.0,
             },
-            hb: SelfBlock::new(),
+            cid: 0, hb: SelfBlock::new(),
         })
     }
 
@@ -486,7 +486,7 @@ impl Sketch {
                 has_target_radius_b: false, target_radius_b: 0.0,
                 has_target_sweep: false, target_sweep: 0.0, sweep_sign: 1.0,
             },
-            hb: SelfBlock::new(),
+            cid: 0, hb: SelfBlock::new(),
         })
     }
 
@@ -519,7 +519,7 @@ impl Sketch {
                 has_target_radius_b: false, target_radius_b: 0.0,
                 has_target_sweep: false, target_sweep: 0.0, sweep_sign: 1.0,
             },
-            hb: SelfBlock::new(),
+            cid: 0, hb: SelfBlock::new(),
         })
     }
 
@@ -1058,7 +1058,7 @@ impl Sketch {
                 ($lines:expr, $arcs:expr, $lp_coll:ident, $arc_coll:ident, $direct_coll:ident, $DirectType:ident, $label:expr) => {
                     for &line in &$lines {
                         for &arc in &$arcs {
-                            self.$direct_coll.push($DirectType { line, arc, hb: CrossBlock::new() });
+                            self.$direct_coll.push($DirectType { line, arc, cid: 0, hb: CrossBlock::new() });
                             self.$lp_coll.retain(|c| !(c.line == line && c.point == hr));
                             self.$arc_coll.retain(|c| !(c.point == hr && c.arc == arc));
                             eprintln!("INFO: consolidated helper {} -> {}", hr.index(), $label);
@@ -1134,7 +1134,8 @@ impl arael::model::ExtendedModel for Sketch {
         let bag = self.symbol_bag.as_ref().expect("symbol_bag not built");
         let vars = bag.eval_vars(params);
         let isigma = self.constraint_isigma;
-        for ec in &self.expr_constraints {
+        for ec in &mut self.expr_constraints {
+            ec.cid = *cid;
             match ec.jacobian_row(&vars, isigma) {
                 Ok((residual, entries)) => {
                     rows.push(arael::model::JacobianRow { constraint: *cid, residual, entries });
@@ -1147,6 +1148,83 @@ impl arael::model::ExtendedModel for Sketch {
 }
 
 impl Sketch {
+    /// Build a map from CID to human-readable constraint description.
+    /// Must be called AFTER calc_jacobian/solve/compute_dof, which populates
+    /// the `cid` field on each constraint instance.
+    pub fn constraint_labels(&self) -> std::collections::HashMap<u32, String> {
+        let mut m = std::collections::HashMap::new();
+        for r in self.points.refs() { let p = &self.points[r]; m.insert(p.cid, format!("point:{}", p.name)); }
+        for r in self.lines.refs() { let l = &self.lines[r]; m.insert(l.cid, format!("line:{}", l.name)); }
+        for r in self.arcs.refs() { let a = &self.arcs[r]; m.insert(a.cid, format!("arc:{}", a.name)); }
+        // Helper to get entity names
+        let pn = |r: Ref<Point>| self.points.get(r).map(|p| p.name.as_str()).unwrap_or("?").to_string();
+        let ln = |r: Ref<Line>| self.lines.get(r).map(|l| l.name.as_str()).unwrap_or("?").to_string();
+        let an = |r: Ref<Arc>| self.arcs.get(r).map(|a| a.name.as_str()).unwrap_or("?").to_string();
+        for c in &self.coincident_pp { m.insert(c.cid, format!("coinc_pp:{},{}", pn(c.a), pn(c.b))); }
+        for c in &self.coincident_lp1 { m.insert(c.cid, format!("coinc_lp1:{},{}", ln(c.line), pn(c.point))); }
+        for c in &self.coincident_lp2 { m.insert(c.cid, format!("coinc_lp2:{},{}", ln(c.line), pn(c.point))); }
+        for c in &self.coincident_ll11 { m.insert(c.cid, format!("coinc_ll11:{},{}", ln(c.a), ln(c.b))); }
+        for c in &self.coincident_ll12 { m.insert(c.cid, format!("coinc_ll12:{},{}", ln(c.a), ln(c.b))); }
+        for c in &self.coincident_ll21 { m.insert(c.cid, format!("coinc_ll21:{},{}", ln(c.a), ln(c.b))); }
+        for c in &self.coincident_ll22 { m.insert(c.cid, format!("coinc_ll22:{},{}", ln(c.a), ln(c.b))); }
+        for c in &self.distance_pp { m.insert(c.cid, format!("dist_pp:{},{}", pn(c.a), pn(c.b))); }
+        for c in &self.hdistance_pp { m.insert(c.cid, format!("hdist_pp:{},{}", pn(c.a), pn(c.b))); }
+        for c in &self.vdistance_pp { m.insert(c.cid, format!("vdist_pp:{},{}", pn(c.a), pn(c.b))); }
+        for c in &self.point_on_line { m.insert(c.cid, format!("on_line:{},{}", pn(c.point), ln(c.line))); }
+        for c in &self.midpoint { m.insert(c.cid, format!("midpoint:{},{}", pn(c.point), ln(c.line))); }
+        for c in &self.point_on_arc { m.insert(c.cid, format!("on_arc:{},{}", pn(c.point), an(c.arc))); }
+        for c in &self.parallel { m.insert(c.cid, format!("parallel:{},{}", ln(c.a), ln(c.b))); }
+        for c in &self.perpendicular { m.insert(c.cid, format!("perp:{},{}", ln(c.a), ln(c.b))); }
+        for c in &self.collinear { m.insert(c.cid, format!("collinear:{},{}", ln(c.a), ln(c.b))); }
+        for c in &self.equal_length { m.insert(c.cid, format!("eq_len:{},{}", ln(c.a), ln(c.b))); }
+        for c in &self.angle { m.insert(c.cid, format!("angle:{},{}", ln(c.a), ln(c.b))); }
+        for c in &self.tangent_la { m.insert(c.cid, format!("tangent_la:{},{}", ln(c.line), an(c.arc))); }
+        for c in &self.coincident_lp2_arc_start { m.insert(c.cid, format!("coinc_lp2_as:{},{}", ln(c.line), an(c.arc))); }
+        for c in &self.tangent_aa { m.insert(c.cid, format!("tangent_aa:{},{}", an(c.a), an(c.b))); }
+        for c in &self.concentric { m.insert(c.cid, format!("concentric:{},{}", an(c.a), an(c.b))); }
+        for c in &self.equal_radius { m.insert(c.cid, format!("eq_radius:{},{}", an(c.a), an(c.b))); }
+        for c in &self.coincident_arc_center { m.insert(c.cid, format!("coinc_arc_center:{},{}", pn(c.point), an(c.arc))); }
+        for c in &self.coincident_arc_start { m.insert(c.cid, format!("coinc_arc_start:{},{}", pn(c.point), an(c.arc))); }
+        for c in &self.coincident_arc_end { m.insert(c.cid, format!("coinc_arc_end:{},{}", pn(c.point), an(c.arc))); }
+        for c in &self.coincident_lp1_arc_center { m.insert(c.cid, format!("coinc_lp1_ac:{},{}", ln(c.line), an(c.arc))); }
+        for c in &self.coincident_lp2_arc_center { m.insert(c.cid, format!("coinc_lp2_ac:{},{}", ln(c.line), an(c.arc))); }
+        for c in &self.coincident_lp1_arc_start { m.insert(c.cid, format!("coinc_lp1_as:{},{}", ln(c.line), an(c.arc))); }
+        for c in &self.coincident_lp2_arc_start { m.insert(c.cid, format!("coinc_lp2_as:{},{}", ln(c.line), an(c.arc))); }
+        for c in &self.coincident_lp1_arc_end { m.insert(c.cid, format!("coinc_lp1_ae:{},{}", ln(c.line), an(c.arc))); }
+        for c in &self.coincident_lp2_arc_end { m.insert(c.cid, format!("coinc_lp2_ae:{},{}", ln(c.line), an(c.arc))); }
+        for c in &self.coincident_arc_center_start { m.insert(c.cid, format!("coinc_ac_as:{},{}", an(c.a), an(c.b))); }
+        for c in &self.coincident_arc_center_end { m.insert(c.cid, format!("coinc_ac_ae:{},{}", an(c.a), an(c.b))); }
+        for c in &self.coincident_arc_start_center { m.insert(c.cid, format!("coinc_as_ac:{},{}", an(c.a), an(c.b))); }
+        for c in &self.coincident_arc_end_center { m.insert(c.cid, format!("coinc_ae_ac:{},{}", an(c.a), an(c.b))); }
+        for c in &self.coincident_arc_start_start { m.insert(c.cid, format!("coinc_as_as:{},{}", an(c.a), an(c.b))); }
+        for c in &self.coincident_arc_start_end { m.insert(c.cid, format!("coinc_as_ae:{},{}", an(c.a), an(c.b))); }
+        for c in &self.coincident_arc_end_start { m.insert(c.cid, format!("coinc_ae_as:{},{}", an(c.a), an(c.b))); }
+        for c in &self.coincident_arc_end_end { m.insert(c.cid, format!("coinc_ae_ae:{},{}", an(c.a), an(c.b))); }
+        for c in &self.line_p1_on_line { m.insert(c.cid, format!("lp1_on_l:{},{}", ln(c.a), ln(c.b))); }
+        for c in &self.line_p2_on_line { m.insert(c.cid, format!("lp2_on_l:{},{}", ln(c.a), ln(c.b))); }
+        for c in &self.line_p1_on_arc { m.insert(c.cid, format!("lp1_on_a:{},{}", ln(c.line), an(c.arc))); }
+        for c in &self.line_p2_on_arc { m.insert(c.cid, format!("lp2_on_a:{},{}", ln(c.line), an(c.arc))); }
+        for c in &self.distance_pl { m.insert(c.cid, format!("dist_pl:{},{}", pn(c.point), ln(c.line))); }
+        for c in &self.distance_lp1l { m.insert(c.cid, format!("dist_lp1l:{},{}", ln(c.a), ln(c.b))); }
+        for c in &self.distance_lp2l { m.insert(c.cid, format!("dist_lp2l:{},{}", ln(c.a), ln(c.b))); }
+        for c in &self.distance_arc_center_l { m.insert(c.cid, format!("dist_ac_l:{},{}", an(c.arc), ln(c.line))); }
+        for c in &self.distance_arc_start_l { m.insert(c.cid, format!("dist_as_l:{},{}", an(c.arc), ln(c.line))); }
+        for c in &self.distance_arc_end_l { m.insert(c.cid, format!("dist_ae_l:{},{}", an(c.arc), ln(c.line))); }
+        for c in &self.symmetry_ll { m.insert(c.cid, format!("sym_ll:{},{},{}", ln(c.a), ln(c.b), ln(c.c))); }
+        for c in &self.symmetry_pp { m.insert(c.cid, format!("sym_pp:{},{},{}", pn(c.a), ln(c.line), pn(c.c))); }
+        for c in &self.symmetry_aa { m.insert(c.cid, format!("sym_aa:{},{},{}", an(c.a), ln(c.line), an(c.c))); }
+        for ec in &self.expr_constraints { m.insert(ec.cid, format!("expr:{}", ec.description)); }
+        for (i, ec) in self.expr_constraints.iter().enumerate() {
+            // expr_constraints are assigned CIDs starting after all macro-generated ones
+            // but we don't have easy access to that base — approximate with description
+            let _ = i;
+            let label = format!("expr:{}", ec.description);
+            // We don't know the CID here — it would need to be tracked. Skip for now.
+            let _ = label;
+        }
+        m
+    }
+
     /// Fix up arc fields after loading old files that lack radius_b/rotation.
     /// Detects the sentinel default (radius_b == 0.0) and sets radius_b to
     /// match radius, rotation to 0, as optimizable params.
@@ -1627,14 +1705,43 @@ impl Sketch {
         self.drift_isigma = saved_drift;
         let t_hessian = t_hessian.map(|t| t.elapsed());
 
-        let threshold = 1e-6;
+        // Determine rank via spectral gap in the lower portion of the spectrum.
         let t_eigen = if TIMING_DEBUG { Some(std::time::Instant::now()) } else { None };
+        let rank_from_evs = |evs: &[f64]| -> usize {
+            let mut sorted: Vec<f64> = evs.iter().map(|v| v.abs()).collect();
+            sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let max_ev = sorted.last().copied().unwrap_or(0.0);
+            // Find the largest gap ratio between consecutive eigenvalues,
+            // but only in the lower portion of the spectrum (below 1% of max).
+            // This prevents gaps between large constrained eigenvalues from
+            // being selected over the meaningful free/constrained boundary.
+            let upper_bound = max_ev * 0.01;
+            let mut best_gap = 0.0f64;
+            let mut best_cut = 0; // number of eigenvalues below the gap
+            for i in 0..sorted.len().saturating_sub(1) {
+                let lo = sorted[i];
+                let hi = sorted[i + 1];
+                if lo < 1e-20 { continue; } // skip exact/near-zero eigenvalues
+                if lo > upper_bound { break; } // only search in lower spectrum
+                let gap = hi / lo;
+                if gap > best_gap {
+                    best_gap = gap;
+                    best_cut = i + 1;
+                }
+            }
+            // If no significant gap found, count near-zeros as free
+            if best_gap < 1e3 {
+                best_cut = sorted.iter().filter(|&&v| v < 1e-15).count();
+            }
+            let rank = evs.len() - best_cut;
+            rank
+        };
         let (method, result) = if n < 32 && analyze {
             let h = nalgebra::DMatrix::from_row_slice(n, n, &hessian);
             let eigen = nalgebra::SymmetricEigen::new(h);
-            let rank = eigen.eigenvalues.iter().filter(|&&v| v.abs() > threshold).count();
-            let dof = n.saturating_sub(rank);
             let eigenvalues: Vec<f64> = eigen.eigenvalues.iter().cloned().collect();
+            let rank = rank_from_evs(&eigenvalues);
+            let dof = n.saturating_sub(rank);
             let eigenvectors: Vec<Vec<f64>> = (0..n)
                 .map(|col| eigen.eigenvectors.column(col).iter().cloned().collect())
                 .collect();
@@ -1642,7 +1749,8 @@ impl Sketch {
         } else if n < 32 {
             let h = nalgebra::DMatrix::from_row_slice(n, n, &hessian);
             let evs = h.symmetric_eigenvalues();
-            let rank = evs.iter().filter(|&&v| v.abs() > threshold).count();
+            let evs_vec: Vec<f64> = evs.iter().cloned().collect();
+            let rank = rank_from_evs(&evs_vec);
             let dof = n.saturating_sub(rank);
             ("nalgebra eigenvalues-only", DofResult { dof, param_names: Vec::new(), eigenvalues: Vec::new(), eigenvectors: Vec::new() })
         } else if analyze {
@@ -1651,9 +1759,9 @@ impl Sketch {
                 Ok(eigen) => {
                     let s = eigen.S().column_vector();
                     let u = eigen.U();
-                    let rank = (0..n).filter(|&i| s[i].abs() > threshold).count();
-                    let dof = n.saturating_sub(rank);
                     let eigenvalues: Vec<f64> = (0..n).map(|i| s[i]).collect();
+                    let rank = rank_from_evs(&eigenvalues);
+                    let dof = n.saturating_sub(rank);
                     let eigenvectors: Vec<Vec<f64>> = (0..n)
                         .map(|col| (0..n).map(|row| u[(row, col)]).collect())
                         .collect();
@@ -1665,7 +1773,8 @@ impl Sketch {
             let faer_h = faer::Mat::from_fn(n, n, |i, k| hessian[i * n + k]);
             match faer_h.self_adjoint_eigenvalues(faer::Side::Lower) {
                 Ok(evs) => {
-                    let rank = evs.iter().filter(|&&v| v.abs() > threshold).count();
+                    let evs_vec: Vec<f64> = evs.iter().cloned().collect();
+                    let rank = rank_from_evs(&evs_vec);
                     let dof = n.saturating_sub(rank);
                     ("faer eigenvalues-only", DofResult { dof, param_names: Vec::new(), eigenvalues: Vec::new(), eigenvectors: Vec::new() })
                 }
@@ -1897,6 +2006,7 @@ mod jacobian_tests {
         sketch.coincident_ll21.push(CoincidentLL21 {
             a: l0,
             b: l1,
+            cid: 0,
             hb: arael::model::CrossBlock::new(),
         });
         // Length dimension on L0 (creates an expression constraint)

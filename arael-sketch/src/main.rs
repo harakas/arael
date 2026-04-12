@@ -207,9 +207,9 @@ impl EditorApp {
         let l2 = sketch.add_line(vect2d::new(1.5, -5.0), vect2d::new(0.0, 0.0));
 
         // Connect corners: L0.p2=L1.p1, L1.p2=L2.p1, L2.p2=L0.p1
-        sketch.coincident_ll21.push(CoincidentLL21 { a: l0, b: l1, hb: CrossBlock::new() });
-        sketch.coincident_ll21.push(CoincidentLL21 { a: l1, b: l2, hb: CrossBlock::new() });
-        sketch.coincident_ll21.push(CoincidentLL21 { a: l2, b: l0, hb: CrossBlock::new() });
+        sketch.coincident_ll21.push(CoincidentLL21 { a: l0, b: l1, cid: 0, hb: CrossBlock::new() });
+        sketch.coincident_ll21.push(CoincidentLL21 { a: l1, b: l2, cid: 0, hb: CrossBlock::new() });
+        sketch.coincident_ll21.push(CoincidentLL21 { a: l2, b: l0, cid: 0, hb: CrossBlock::new() });
 
 
 
@@ -217,10 +217,10 @@ impl EditorApp {
         let a0 = sketch.add_arc(vect2d::new(0.0, 0.0), 1.5, 0.0, std::f64::consts::TAU, true);
 
         // Equal length: L0 = L2 (isoceles)
-        sketch.equal_length.push(EqualLength { a: l2, b: l0, hb: CrossBlock::new() });
+        sketch.equal_length.push(EqualLength { a: l2, b: l0, cid: 0, hb: CrossBlock::new() });
 
         // Arc center = L0.p1 (apex)
-        sketch.coincident_lp1_arc_center.push(CoincidentLP1ArcCenter { line: l0, arc: a0, hb: CrossBlock::new() });
+        sketch.coincident_lp1_arc_center.push(CoincidentLP1ArcCenter { line: l0, arc: a0, cid: 0, hb: CrossBlock::new() });
 
         // User parameter for the base length
         sketch.user_params.push(UserParam {
@@ -599,32 +599,32 @@ impl EditorApp {
         match target {
             GrabTarget::Point(r) => {
                 self.sketch.coincident_pp.push(CoincidentPP {
-                    a: drag_pt, b: r, hb: CrossBlock::new(),
+                    a: drag_pt, b: r, cid: 0, hb: CrossBlock::new(),
                 });
             }
             GrabTarget::LineP1(r) => {
                 self.sketch.coincident_lp1.push(CoincidentLP1 {
-                    line: r, point: drag_pt, hb: CrossBlock::new(),
+                    line: r, point: drag_pt, cid: 0, hb: CrossBlock::new(),
                 });
             }
             GrabTarget::LineP2(r) => {
                 self.sketch.coincident_lp2.push(CoincidentLP2 {
-                    line: r, point: drag_pt, hb: CrossBlock::new(),
+                    line: r, point: drag_pt, cid: 0, hb: CrossBlock::new(),
                 });
             }
             GrabTarget::ArcCenter(r) => {
                 self.sketch.coincident_arc_center.push(CoincidentArcCenter {
-                    point: drag_pt, arc: r, hb: CrossBlock::new(),
+                    point: drag_pt, arc: r, cid: 0, hb: CrossBlock::new(),
                 });
             }
             GrabTarget::ArcStart(r) => {
                 self.sketch.coincident_arc_start.push(CoincidentArcStart {
-                    point: drag_pt, arc: r, hb: CrossBlock::new(),
+                    point: drag_pt, arc: r, cid: 0, hb: CrossBlock::new(),
                 });
             }
             GrabTarget::ArcEnd(r) => {
                 self.sketch.coincident_arc_end.push(CoincidentArcEnd {
-                    point: drag_pt, arc: r, hb: CrossBlock::new(),
+                    point: drag_pt, arc: r, cid: 0, hb: CrossBlock::new(),
                 });
             }
             GrabTarget::LineDrag(r) => {
@@ -634,13 +634,13 @@ impl EditorApp {
                 // First drag point at p1
                 self.sketch.points[drag_pt].pos = Param::fixed(l.p1.value);
                 self.sketch.coincident_lp1.push(CoincidentLP1 {
-                    line: r, point: drag_pt, hb: CrossBlock::new(),
+                    line: r, point: drag_pt, cid: 0, hb: CrossBlock::new(),
                 });
                 // Second drag point at p2
                 let drag_pt2 = self.sketch.add_point_fixed(l.p2.value);
                 self.drag_point2 = Some(drag_pt2);
                 self.sketch.coincident_lp2.push(CoincidentLP2 {
-                    line: r, point: drag_pt2, hb: CrossBlock::new(),
+                    line: r, point: drag_pt2, cid: 0, hb: CrossBlock::new(),
                 });
             }
             GrabTarget::ArcDrag(r) => {
@@ -649,7 +649,7 @@ impl EditorApp {
                 // Drag point at center
                 self.sketch.points[drag_pt].pos = Param::fixed(a.center.value);
                 self.sketch.coincident_arc_center.push(CoincidentArcCenter {
-                    point: drag_pt, arc: r, hb: CrossBlock::new(),
+                    point: drag_pt, arc: r, cid: 0, hb: CrossBlock::new(),
                 });
                 // Lock radius and sweep to prevent shape change
                 self.drag_saved_arc_locks = Some(SavedArcLocks {
@@ -1985,31 +1985,31 @@ impl EditorApp {
                     Selection::LineP1(r) => {
                         let pos = sketch.lines[*r].p1.value;
                         let hp = sketch.add_helper_point(pos);
-                        sketch.coincident_lp1.push(CoincidentLP1 { line: *r, point: hp, hb: CrossBlock::new() });
+                        sketch.coincident_lp1.push(CoincidentLP1 { line: *r, point: hp, cid: 0, hb: CrossBlock::new() });
                         Some(hp)
                     }
                     Selection::LineP2(r) => {
                         let pos = sketch.lines[*r].p2.value;
                         let hp = sketch.add_helper_point(pos);
-                        sketch.coincident_lp2.push(CoincidentLP2 { line: *r, point: hp, hb: CrossBlock::new() });
+                        sketch.coincident_lp2.push(CoincidentLP2 { line: *r, point: hp, cid: 0, hb: CrossBlock::new() });
                         Some(hp)
                     }
                     Selection::ArcCenter(r) => {
                         let pos = sketch.arcs[*r].center.value;
                         let hp = sketch.add_helper_point(pos);
-                        sketch.coincident_arc_center.push(CoincidentArcCenter { point: hp, arc: *r, hb: CrossBlock::new() });
+                        sketch.coincident_arc_center.push(CoincidentArcCenter { point: hp, arc: *r, cid: 0, hb: CrossBlock::new() });
                         Some(hp)
                     }
                     Selection::ArcStart(r) => {
                         let pos = crate::geometry::arc_start_pos(&sketch.arcs[*r]);
                         let hp = sketch.add_helper_point(pos);
-                        sketch.coincident_arc_start.push(CoincidentArcStart { point: hp, arc: *r, hb: CrossBlock::new() });
+                        sketch.coincident_arc_start.push(CoincidentArcStart { point: hp, arc: *r, cid: 0, hb: CrossBlock::new() });
                         Some(hp)
                     }
                     Selection::ArcEnd(r) => {
                         let pos = crate::geometry::arc_end_pos(&sketch.arcs[*r]);
                         let hp = sketch.add_helper_point(pos);
-                        sketch.coincident_arc_end.push(CoincidentArcEnd { point: hp, arc: *r, hb: CrossBlock::new() });
+                        sketch.coincident_arc_end.push(CoincidentArcEnd { point: hp, arc: *r, cid: 0, hb: CrossBlock::new() });
                         Some(hp)
                     }
                     _ => None,

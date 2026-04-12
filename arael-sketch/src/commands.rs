@@ -3399,17 +3399,17 @@ fn cmd_drag(ctx: &mut CommandContext, args: &str) -> CommandResult {
 
     match &target {
         DragTarget::Point(r) => {
-            ctx.sketch.coincident_pp.push(CoincidentPP { a: drag_pt, b: *r, hb: CrossBlock::new() });
+            ctx.sketch.coincident_pp.push(CoincidentPP { a: drag_pt, b: *r, cid: 0, hb: CrossBlock::new() });
             drag_pt2 = None;
             saved_arc_locks = None;
         }
         DragTarget::LineP1(r) => {
-            ctx.sketch.coincident_lp1.push(CoincidentLP1 { line: *r, point: drag_pt, hb: CrossBlock::new() });
+            ctx.sketch.coincident_lp1.push(CoincidentLP1 { line: *r, point: drag_pt, cid: 0, hb: CrossBlock::new() });
             drag_pt2 = None;
             saved_arc_locks = None;
         }
         DragTarget::LineP2(r) => {
-            ctx.sketch.coincident_lp2.push(CoincidentLP2 { line: *r, point: drag_pt, hb: CrossBlock::new() });
+            ctx.sketch.coincident_lp2.push(CoincidentLP2 { line: *r, point: drag_pt, cid: 0, hb: CrossBlock::new() });
             drag_pt2 = None;
             saved_arc_locks = None;
         }
@@ -3418,29 +3418,29 @@ fn cmd_drag(ctx: &mut CommandContext, args: &str) -> CommandResult {
             let p1_target = vect2d::new(ctx.sketch.lines[*r].p1.value.x + offset.x, ctx.sketch.lines[*r].p1.value.y + offset.y);
             let p2_target = vect2d::new(ctx.sketch.lines[*r].p2.value.x + offset.x, ctx.sketch.lines[*r].p2.value.y + offset.y);
             ctx.sketch.points[drag_pt].pos = Param::fixed(p1_target);
-            ctx.sketch.coincident_lp1.push(CoincidentLP1 { line: *r, point: drag_pt, hb: CrossBlock::new() });
+            ctx.sketch.coincident_lp1.push(CoincidentLP1 { line: *r, point: drag_pt, cid: 0, hb: CrossBlock::new() });
             let dp2 = ctx.sketch.add_point_fixed(p2_target);
-            ctx.sketch.coincident_lp2.push(CoincidentLP2 { line: *r, point: dp2, hb: CrossBlock::new() });
+            ctx.sketch.coincident_lp2.push(CoincidentLP2 { line: *r, point: dp2, cid: 0, hb: CrossBlock::new() });
             drag_pt2 = Some(dp2);
             saved_arc_locks = None;
         }
         DragTarget::ArcCenter(r) => {
-            ctx.sketch.coincident_arc_center.push(CoincidentArcCenter { point: drag_pt, arc: *r, hb: CrossBlock::new() });
+            ctx.sketch.coincident_arc_center.push(CoincidentArcCenter { point: drag_pt, arc: *r, cid: 0, hb: CrossBlock::new() });
             drag_pt2 = None;
             saved_arc_locks = None;
         }
         DragTarget::ArcStart(r) => {
-            ctx.sketch.coincident_arc_start.push(CoincidentArcStart { point: drag_pt, arc: *r, hb: CrossBlock::new() });
+            ctx.sketch.coincident_arc_start.push(CoincidentArcStart { point: drag_pt, arc: *r, cid: 0, hb: CrossBlock::new() });
             drag_pt2 = None;
             saved_arc_locks = None;
         }
         DragTarget::ArcEnd(r) => {
-            ctx.sketch.coincident_arc_end.push(CoincidentArcEnd { point: drag_pt, arc: *r, hb: CrossBlock::new() });
+            ctx.sketch.coincident_arc_end.push(CoincidentArcEnd { point: drag_pt, arc: *r, cid: 0, hb: CrossBlock::new() });
             drag_pt2 = None;
             saved_arc_locks = None;
         }
         DragTarget::ArcBody(r) => {
-            ctx.sketch.coincident_arc_center.push(CoincidentArcCenter { point: drag_pt, arc: *r, hb: CrossBlock::new() });
+            ctx.sketch.coincident_arc_center.push(CoincidentArcCenter { point: drag_pt, arc: *r, cid: 0, hb: CrossBlock::new() });
             // Lock radius and sweep
             let a = &ctx.sketch.arcs[*r];
             let locks = (
@@ -6034,6 +6034,7 @@ fn cmd_dof_jacobian(ctx: &mut CommandContext) -> CommandResult {
         if i < n && idx_to_name[i].is_empty() { idx_to_name[i] = name.clone(); }
     }
     let jacobian = ctx.sketch.calc_jacobian(&params);
+    let labels = ctx.sketch.constraint_labels();
     ctx.sketch.drift_isigma = saved_drift;
     let mut lines = vec![format!("Jacobian: {} rows x {} cols", jacobian.num_residuals(), n)];
     for (i, row) in jacobian.rows.iter().enumerate() {
@@ -6048,8 +6049,9 @@ fn cmd_dof_jacobian(ctx: &mut CommandContext) -> CommandResult {
             })
             .collect();
         let norm: f64 = row.entries.iter().map(|&(_, v)| v * v).sum::<f64>().sqrt();
-        lines.push(format!("  row {:3} cid={:3} r={:+.6e} |dr|={:.6e} [{}]",
-            i, row.constraint, row.residual, norm, entries.join(", ")));
+        let label = labels.get(&row.constraint).cloned().unwrap_or_else(|| "?".to_string());
+        lines.push(format!("  row {:3} cid={:3} {:28} r={:+.6e} |dr|={:.6e} [{}]",
+            i, row.constraint, label, row.residual, norm, entries.join(", ")));
     }
     ok(lines.join("\n"))
 }

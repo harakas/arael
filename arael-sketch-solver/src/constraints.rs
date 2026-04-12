@@ -25,6 +25,9 @@ pub struct CoincidentPP {
     pub a: Ref<Point>,
     #[arael(ref = root.points)]
     pub b: Ref<Point>,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: CrossBlock<Point, Point>,
 }
@@ -42,6 +45,9 @@ pub struct DistancePP {
     #[arael(ref = root.points)]
     pub b: Ref<Point>,
     pub distance: f64,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: CrossBlock<Point, Point>,
 }
@@ -57,7 +63,9 @@ pub struct DistancePP {
 pub struct DistanceLL11 {
     #[arael(ref = root.lines)] pub a: Ref<Line>,
     #[arael(ref = root.lines)] pub b: Ref<Line>,
-    pub distance: f64,
+    pub distance: f64,    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Line, Line>,
 }
 
@@ -70,7 +78,9 @@ pub struct DistanceLL11 {
 pub struct DistanceLL12 {
     #[arael(ref = root.lines)] pub a: Ref<Line>,
     #[arael(ref = root.lines)] pub b: Ref<Line>,
-    pub distance: f64,
+    pub distance: f64,    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Line, Line>,
 }
 
@@ -83,7 +93,9 @@ pub struct DistanceLL12 {
 pub struct DistanceLL21 {
     #[arael(ref = root.lines)] pub a: Ref<Line>,
     #[arael(ref = root.lines)] pub b: Ref<Line>,
-    pub distance: f64,
+    pub distance: f64,    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Line, Line>,
 }
 
@@ -96,7 +108,9 @@ pub struct DistanceLL21 {
 pub struct DistanceLL22 {
     #[arael(ref = root.lines)] pub a: Ref<Line>,
     #[arael(ref = root.lines)] pub b: Ref<Line>,
-    pub distance: f64,
+    pub distance: f64,    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Line, Line>,
 }
 
@@ -111,7 +125,9 @@ pub struct DistanceLL22 {
 pub struct DistanceLP1 {
     #[arael(ref = root.lines)] pub line: Ref<Line>,
     #[arael(ref = root.points)] pub point: Ref<Point>,
-    pub distance: f64,
+    pub distance: f64,    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Line, Point>,
 }
 
@@ -124,7 +140,9 @@ pub struct DistanceLP1 {
 pub struct DistanceLP2 {
     #[arael(ref = root.lines)] pub line: Ref<Line>,
     #[arael(ref = root.points)] pub point: Ref<Point>,
-    pub distance: f64,
+    pub distance: f64,    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Line, Point>,
 }
 
@@ -139,7 +157,9 @@ pub struct DistanceLP2 {
 pub struct DistanceArcCenterP {
     #[arael(ref = root.arcs)] pub arc: Ref<Arc>,
     #[arael(ref = root.points)] pub point: Ref<Point>,
-    pub distance: f64,
+    pub distance: f64,    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Arc, Point>,
 }
 
@@ -156,7 +176,9 @@ pub struct DistanceArcCenterP {
 pub struct DistanceArcStartP {
     #[arael(ref = root.arcs)] pub arc: Ref<Arc>,
     #[arael(ref = root.points)] pub point: Ref<Point>,
-    pub distance: f64,
+    pub distance: f64,    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Arc, Point>,
 }
 
@@ -173,7 +195,9 @@ pub struct DistanceArcStartP {
 pub struct DistanceArcEndP {
     #[arael(ref = root.arcs)] pub arc: Ref<Arc>,
     #[arael(ref = root.points)] pub point: Ref<Point>,
-    pub distance: f64,
+    pub distance: f64,    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Arc, Point>,
 }
 
@@ -188,7 +212,9 @@ pub struct DistanceArcEndP {
 pub struct DistanceArcCenterL1 {
     #[arael(ref = root.arcs)] pub arc: Ref<Arc>,
     #[arael(ref = root.lines)] pub line: Ref<Line>,
-    pub distance: f64,
+    pub distance: f64,    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Arc, Line>,
 }
 
@@ -201,7 +227,9 @@ pub struct DistanceArcCenterL1 {
 pub struct DistanceArcCenterL2 {
     #[arael(ref = root.arcs)] pub arc: Ref<Arc>,
     #[arael(ref = root.lines)] pub line: Ref<Line>,
-    pub distance: f64,
+    pub distance: f64,    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Arc, Line>,
 }
 
@@ -218,7 +246,9 @@ pub struct DistanceArcCenterL2 {
 pub struct DistanceArcStartL1 {
     #[arael(ref = root.arcs)] pub arc: Ref<Arc>,
     #[arael(ref = root.lines)] pub line: Ref<Line>,
-    pub distance: f64,
+    pub distance: f64,    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Arc, Line>,
 }
 
@@ -235,7 +265,9 @@ pub struct DistanceArcStartL1 {
 pub struct DistanceArcStartL2 {
     #[arael(ref = root.arcs)] pub arc: Ref<Arc>,
     #[arael(ref = root.lines)] pub line: Ref<Line>,
-    pub distance: f64,
+    pub distance: f64,    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Arc, Line>,
 }
 
@@ -252,7 +284,9 @@ pub struct DistanceArcStartL2 {
 pub struct DistanceArcEndL1 {
     #[arael(ref = root.arcs)] pub arc: Ref<Arc>,
     #[arael(ref = root.lines)] pub line: Ref<Line>,
-    pub distance: f64,
+    pub distance: f64,    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Arc, Line>,
 }
 
@@ -269,7 +303,9 @@ pub struct DistanceArcEndL1 {
 pub struct DistanceArcEndL2 {
     #[arael(ref = root.arcs)] pub arc: Ref<Arc>,
     #[arael(ref = root.lines)] pub line: Ref<Line>,
-    pub distance: f64,
+    pub distance: f64,    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Arc, Line>,
 }
 
@@ -284,7 +320,9 @@ pub struct DistanceArcEndL2 {
 pub struct DistanceAACeCe {
     #[arael(ref = root.arcs)] pub a: Ref<Arc>,
     #[arael(ref = root.arcs)] pub b: Ref<Arc>,
-    pub distance: f64,
+    pub distance: f64,    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Arc, Arc>,
 }
 
@@ -301,7 +339,9 @@ pub struct DistanceAACeCe {
 pub struct DistanceAACeS {
     #[arael(ref = root.arcs)] pub a: Ref<Arc>,
     #[arael(ref = root.arcs)] pub b: Ref<Arc>,
-    pub distance: f64,
+    pub distance: f64,    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Arc, Arc>,
 }
 
@@ -318,7 +358,9 @@ pub struct DistanceAACeS {
 pub struct DistanceAACeE {
     #[arael(ref = root.arcs)] pub a: Ref<Arc>,
     #[arael(ref = root.arcs)] pub b: Ref<Arc>,
-    pub distance: f64,
+    pub distance: f64,    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Arc, Arc>,
 }
 
@@ -335,7 +377,9 @@ pub struct DistanceAACeE {
 pub struct DistanceAASCe {
     #[arael(ref = root.arcs)] pub a: Ref<Arc>,
     #[arael(ref = root.arcs)] pub b: Ref<Arc>,
-    pub distance: f64,
+    pub distance: f64,    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Arc, Arc>,
 }
 
@@ -356,7 +400,9 @@ pub struct DistanceAASCe {
 pub struct DistanceAASS {
     #[arael(ref = root.arcs)] pub a: Ref<Arc>,
     #[arael(ref = root.arcs)] pub b: Ref<Arc>,
-    pub distance: f64,
+    pub distance: f64,    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Arc, Arc>,
 }
 
@@ -377,7 +423,9 @@ pub struct DistanceAASS {
 pub struct DistanceAASE {
     #[arael(ref = root.arcs)] pub a: Ref<Arc>,
     #[arael(ref = root.arcs)] pub b: Ref<Arc>,
-    pub distance: f64,
+    pub distance: f64,    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Arc, Arc>,
 }
 
@@ -394,7 +442,9 @@ pub struct DistanceAASE {
 pub struct DistanceAAECe {
     #[arael(ref = root.arcs)] pub a: Ref<Arc>,
     #[arael(ref = root.arcs)] pub b: Ref<Arc>,
-    pub distance: f64,
+    pub distance: f64,    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Arc, Arc>,
 }
 
@@ -415,7 +465,9 @@ pub struct DistanceAAECe {
 pub struct DistanceAAES {
     #[arael(ref = root.arcs)] pub a: Ref<Arc>,
     #[arael(ref = root.arcs)] pub b: Ref<Arc>,
-    pub distance: f64,
+    pub distance: f64,    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Arc, Arc>,
 }
 
@@ -436,7 +488,9 @@ pub struct DistanceAAES {
 pub struct DistanceAAEE {
     #[arael(ref = root.arcs)] pub a: Ref<Arc>,
     #[arael(ref = root.arcs)] pub b: Ref<Arc>,
-    pub distance: f64,
+    pub distance: f64,    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Arc, Arc>,
 }
 
@@ -451,6 +505,9 @@ pub struct HorizontalDistancePP {
     #[arael(ref = root.points)]
     pub b: Ref<Point>,
     pub distance: f64,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: CrossBlock<Point, Point>,
 }
@@ -466,6 +523,9 @@ pub struct VerticalDistancePP {
     #[arael(ref = root.points)]
     pub b: Ref<Point>,
     pub distance: f64,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: CrossBlock<Point, Point>,
 }
@@ -487,6 +547,9 @@ pub struct PointOnLine {
     pub point: Ref<Point>,
     #[arael(ref = root.lines)]
     pub line: Ref<Line>,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: CrossBlock<Point, Line>,
 }
@@ -505,6 +568,9 @@ pub struct MidpointConstraint {
     pub point: Ref<Point>,
     #[arael(ref = root.lines)]
     pub line: Ref<Line>,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: CrossBlock<Point, Line>,
 }
@@ -523,6 +589,9 @@ pub struct MidpointLP1 {
     pub line: Ref<Line>,
     #[arael(ref = root.lines)]
     pub target: Ref<Line>,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: CrossBlock<Line, Line>,
 }
@@ -541,6 +610,9 @@ pub struct MidpointLP2 {
     pub line: Ref<Line>,
     #[arael(ref = root.lines)]
     pub target: Ref<Line>,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: CrossBlock<Line, Line>,
 }
@@ -563,6 +635,9 @@ pub struct MidpointArcStart {
     pub arc: Ref<Arc>,
     #[arael(ref = root.lines)]
     pub line: Ref<Line>,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: CrossBlock<Arc, Line>,
 }
@@ -585,6 +660,9 @@ pub struct MidpointArcEnd {
     pub arc: Ref<Arc>,
     #[arael(ref = root.lines)]
     pub line: Ref<Line>,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: CrossBlock<Arc, Line>,
 }
@@ -608,6 +686,9 @@ pub struct MidpointArcPoint {
     pub point: Ref<Point>,
     #[arael(ref = root.arcs)]
     pub arc: Ref<Arc>,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: CrossBlock<Point, Arc>,
 }
@@ -629,6 +710,9 @@ pub struct MidpointLP1Arc {
     pub line: Ref<Line>,
     #[arael(ref = root.arcs)]
     pub arc: Ref<Arc>,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: CrossBlock<Line, Arc>,
 }
@@ -650,6 +734,9 @@ pub struct MidpointLP2Arc {
     pub line: Ref<Line>,
     #[arael(ref = root.arcs)]
     pub arc: Ref<Arc>,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: CrossBlock<Line, Arc>,
 }
@@ -675,6 +762,9 @@ pub struct MidpointArcStartArc {
     pub a: Ref<Arc>,
     #[arael(ref = root.arcs)]
     pub b: Ref<Arc>,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: CrossBlock<Arc, Arc>,
 }
@@ -700,6 +790,9 @@ pub struct MidpointArcEndArc {
     pub a: Ref<Arc>,
     #[arael(ref = root.arcs)]
     pub b: Ref<Arc>,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: CrossBlock<Arc, Arc>,
 }
@@ -722,6 +815,9 @@ pub struct PointOnArc {
     pub point: Ref<Point>,
     #[arael(ref = root.arcs)]
     pub arc: Ref<Arc>,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: CrossBlock<Point, Arc>,
 }
@@ -738,6 +834,9 @@ pub struct CoincidentArcCenter {
     pub point: Ref<Point>,
     #[arael(ref = root.arcs)]
     pub arc: Ref<Arc>,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: CrossBlock<Point, Arc>,
 }
@@ -758,6 +857,9 @@ pub struct CoincidentArcStart {
     pub point: Ref<Point>,
     #[arael(ref = root.arcs)]
     pub arc: Ref<Arc>,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: CrossBlock<Point, Arc>,
 }
@@ -778,6 +880,9 @@ pub struct CoincidentArcEnd {
     pub point: Ref<Point>,
     #[arael(ref = root.arcs)]
     pub arc: Ref<Arc>,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: CrossBlock<Point, Arc>,
 }
@@ -794,13 +899,17 @@ pub struct CoincidentArcEnd {
     let dy2 = b.p2.y - b.p1.y;
     let len1 = sqrt(dx1 * dx1 + dy1 * dy1);
     let len2 = sqrt(dx2 * dx2 + dy2 * dy2);
-    [(dx1 * dy2 - dy1 * dx2) / (len1 * len2) * sketch.constraint_isigma]
+    let mlen = (len1 + len2) / 2.0;
+    [(dx1 * dy2 - dy1 * dx2) / mlen * sketch.constraint_isigma]
 }))]
 pub struct Parallel {
     #[arael(ref = root.lines)]
     pub a: Ref<Line>,
     #[arael(ref = root.lines)]
     pub b: Ref<Line>,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: CrossBlock<Line, Line>,
 }
@@ -817,10 +926,11 @@ pub struct Parallel {
     let dy2 = b.p2.y - b.p1.y;
     let len1 = sqrt(dx1 * dx1 + dy1 * dy1);
     let len2 = sqrt(dx2 * dx2 + dy2 * dy2);
+    let mlen = (len1 + len2) / 2.0;
     let cross = dx1 * dy2 - dy1 * dx2;
     let d = sketch.min_length - perpendicular.dir_sign * cross;
     [
-        (dx1 * dx2 + dy1 * dy2) / (len1 * len2) * sketch.constraint_isigma,
+        (dx1 * dx2 + dy1 * dy2) / mlen * sketch.constraint_isigma,
         heaviside(d) * d * sketch.constraint_isigma
     ]
 }))]
@@ -831,6 +941,9 @@ pub struct Perpendicular {
     pub b: Ref<Line>,
     #[serde(default = "default_dir_sign")]
     pub dir_sign: f64,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: CrossBlock<Line, Line>,
 }
@@ -851,6 +964,9 @@ pub struct Collinear {
     pub a: Ref<Line>,
     #[arael(ref = root.lines)]
     pub b: Ref<Line>,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: CrossBlock<Line, Line>,
 }
@@ -870,6 +986,9 @@ pub struct EqualLength {
     pub a: Ref<Line>,
     #[arael(ref = root.lines)]
     pub b: Ref<Line>,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: CrossBlock<Line, Line>,
 }
@@ -891,6 +1010,9 @@ pub struct AngleConstraint {
     #[arael(ref = root.lines)]
     pub b: Ref<Line>,
     pub angle: f64,  // target angle in radians
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: CrossBlock<Line, Line>,
 }
@@ -909,6 +1031,9 @@ pub struct CoincidentLP1 {
     pub line: Ref<Line>,
     #[arael(ref = root.points)]
     pub point: Ref<Point>,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: CrossBlock<Line, Point>,
 }
@@ -925,6 +1050,9 @@ pub struct CoincidentLP2 {
     pub line: Ref<Line>,
     #[arael(ref = root.points)]
     pub point: Ref<Point>,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: CrossBlock<Line, Point>,
 }
@@ -943,6 +1071,9 @@ pub struct CoincidentLL11 {
     pub a: Ref<Line>,
     #[arael(ref = root.lines)]
     pub b: Ref<Line>,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: CrossBlock<Line, Line>,
 }
@@ -959,6 +1090,9 @@ pub struct CoincidentLL12 {
     pub a: Ref<Line>,
     #[arael(ref = root.lines)]
     pub b: Ref<Line>,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: CrossBlock<Line, Line>,
 }
@@ -975,6 +1109,9 @@ pub struct CoincidentLL21 {
     pub a: Ref<Line>,
     #[arael(ref = root.lines)]
     pub b: Ref<Line>,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: CrossBlock<Line, Line>,
 }
@@ -991,6 +1128,9 @@ pub struct CoincidentLL22 {
     pub a: Ref<Line>,
     #[arael(ref = root.lines)]
     pub b: Ref<Line>,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: CrossBlock<Line, Line>,
 }
@@ -1109,6 +1249,9 @@ pub struct TangentLA {
     pub p2_arc_end: bool,
     #[serde(skip, default = "default_dir_sign")]
     pub dir_sign: f64,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: CrossBlock<Line, Arc>,
 }
@@ -1131,6 +1274,9 @@ pub struct Concentric {
     pub a: Ref<Arc>,
     #[arael(ref = root.arcs)]
     pub b: Ref<Arc>,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: CrossBlock<Arc, Arc>,
 }
@@ -1146,6 +1292,9 @@ pub struct EqualRadius {
     pub a: Ref<Arc>,
     #[arael(ref = root.arcs)]
     pub b: Ref<Arc>,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: CrossBlock<Arc, Arc>,
 }
@@ -1214,6 +1363,9 @@ pub struct TangentAA {
     #[arael(skip)]
     #[serde(default)]
     pub shared: SharedEndpoint,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: CrossBlock<Arc, Arc>,
 }
@@ -1231,6 +1383,9 @@ pub struct CoincidentLP1ArcCenter {
     pub line: Ref<Line>,
     #[arael(ref = root.arcs)]
     pub arc: Ref<Arc>,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: CrossBlock<Line, Arc>,
 }
@@ -1246,6 +1401,9 @@ pub struct CoincidentLP2ArcCenter {
     pub line: Ref<Line>,
     #[arael(ref = root.arcs)]
     pub arc: Ref<Arc>,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: CrossBlock<Line, Arc>,
 }
@@ -1265,6 +1423,9 @@ pub struct CoincidentLP1ArcStart {
     pub line: Ref<Line>,
     #[arael(ref = root.arcs)]
     pub arc: Ref<Arc>,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: CrossBlock<Line, Arc>,
 }
@@ -1284,6 +1445,9 @@ pub struct CoincidentLP2ArcStart {
     pub line: Ref<Line>,
     #[arael(ref = root.arcs)]
     pub arc: Ref<Arc>,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: CrossBlock<Line, Arc>,
 }
@@ -1303,6 +1467,9 @@ pub struct CoincidentLP1ArcEnd {
     pub line: Ref<Line>,
     #[arael(ref = root.arcs)]
     pub arc: Ref<Arc>,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: CrossBlock<Line, Arc>,
 }
@@ -1322,6 +1489,9 @@ pub struct CoincidentLP2ArcEnd {
     pub line: Ref<Line>,
     #[arael(ref = root.arcs)]
     pub arc: Ref<Arc>,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: CrossBlock<Line, Arc>,
 }
@@ -1343,6 +1513,9 @@ pub struct CoincidentArcCenterStart {
     pub a: Ref<Arc>,
     #[arael(ref = root.arcs)]
     pub b: Ref<Arc>,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: CrossBlock<Arc, Arc>,
 }
@@ -1362,6 +1535,9 @@ pub struct CoincidentArcCenterEnd {
     pub a: Ref<Arc>,
     #[arael(ref = root.arcs)]
     pub b: Ref<Arc>,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: CrossBlock<Arc, Arc>,
 }
@@ -1381,6 +1557,9 @@ pub struct CoincidentArcStartCenter {
     pub a: Ref<Arc>,
     #[arael(ref = root.arcs)]
     pub b: Ref<Arc>,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: CrossBlock<Arc, Arc>,
 }
@@ -1400,6 +1579,9 @@ pub struct CoincidentArcEndCenter {
     pub a: Ref<Arc>,
     #[arael(ref = root.arcs)]
     pub b: Ref<Arc>,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: CrossBlock<Arc, Arc>,
 }
@@ -1423,6 +1605,9 @@ pub struct CoincidentArcStartStart {
     pub a: Ref<Arc>,
     #[arael(ref = root.arcs)]
     pub b: Ref<Arc>,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: CrossBlock<Arc, Arc>,
 }
@@ -1446,6 +1631,9 @@ pub struct CoincidentArcStartEnd {
     pub a: Ref<Arc>,
     #[arael(ref = root.arcs)]
     pub b: Ref<Arc>,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: CrossBlock<Arc, Arc>,
 }
@@ -1469,6 +1657,9 @@ pub struct CoincidentArcEndStart {
     pub a: Ref<Arc>,
     #[arael(ref = root.arcs)]
     pub b: Ref<Arc>,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: CrossBlock<Arc, Arc>,
 }
@@ -1492,6 +1683,9 @@ pub struct CoincidentArcEndEnd {
     pub a: Ref<Arc>,
     #[arael(ref = root.arcs)]
     pub b: Ref<Arc>,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: CrossBlock<Arc, Arc>,
 }
@@ -1513,6 +1707,9 @@ pub struct LineP1OnLine {
     pub a: Ref<Line>,
     #[arael(ref = root.lines)]
     pub b: Ref<Line>,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: CrossBlock<Line, Line>,
 }
@@ -1532,6 +1729,9 @@ pub struct LineP2OnLine {
     pub a: Ref<Line>,
     #[arael(ref = root.lines)]
     pub b: Ref<Line>,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: CrossBlock<Line, Line>,
 }
@@ -1554,6 +1754,9 @@ pub struct LineP1OnArc {
     pub line: Ref<Line>,
     #[arael(ref = root.arcs)]
     pub arc: Ref<Arc>,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: CrossBlock<Line, Arc>,
 }
@@ -1574,6 +1777,9 @@ pub struct LineP2OnArc {
     pub line: Ref<Line>,
     #[arael(ref = root.arcs)]
     pub arc: Ref<Arc>,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: CrossBlock<Line, Arc>,
 }
@@ -1616,6 +1822,9 @@ pub struct SymmetryLL {
     pub b: Ref<Line>,
     #[arael(ref = root.lines)]
     pub c: Ref<Line>,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: TripletBlock<f64>,
 }
@@ -1637,6 +1846,9 @@ pub struct DistancePL {
     #[arael(ref = root.lines)]
     pub line: Ref<Line>,
     pub distance: f64,  // signed distance (positive = left of line direction)
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: CrossBlock<Point, Line>,
 }
@@ -1654,7 +1866,9 @@ pub struct DistancePL {
 pub struct DistanceLP1L {
     #[arael(ref = root.lines)] pub a: Ref<Line>,
     #[arael(ref = root.lines)] pub b: Ref<Line>,
-    pub distance: f64,
+    pub distance: f64,    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Line, Line>,
 }
 
@@ -1671,7 +1885,9 @@ pub struct DistanceLP1L {
 pub struct DistanceLP2L {
     #[arael(ref = root.lines)] pub a: Ref<Line>,
     #[arael(ref = root.lines)] pub b: Ref<Line>,
-    pub distance: f64,
+    pub distance: f64,    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Line, Line>,
 }
 
@@ -1688,7 +1904,9 @@ pub struct DistanceLP2L {
 pub struct DistanceArcCenterL {
     #[arael(ref = root.arcs)] pub arc: Ref<Arc>,
     #[arael(ref = root.lines)] pub line: Ref<Line>,
-    pub distance: f64,
+    pub distance: f64,    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Arc, Line>,
 }
 
@@ -1709,7 +1927,9 @@ pub struct DistanceArcCenterL {
 pub struct DistanceArcStartL {
     #[arael(ref = root.arcs)] pub arc: Ref<Arc>,
     #[arael(ref = root.lines)] pub line: Ref<Line>,
-    pub distance: f64,
+    pub distance: f64,    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Arc, Line>,
 }
 
@@ -1730,7 +1950,9 @@ pub struct DistanceArcStartL {
 pub struct DistanceArcEndL {
     #[arael(ref = root.arcs)] pub arc: Ref<Arc>,
     #[arael(ref = root.lines)] pub line: Ref<Line>,
-    pub distance: f64,
+    pub distance: f64,    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Arc, Line>,
 }
 
@@ -1761,6 +1983,9 @@ pub struct SymmetryPP {
     pub c: Ref<Point>,
     #[arael(ref = root.lines)]
     pub line: Ref<Line>,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: TripletBlock<f64>,
 }
@@ -1805,6 +2030,9 @@ pub struct SymmetryAA {
     pub c: Ref<Arc>,
     #[arael(ref = root.lines)]
     pub line: Ref<Line>,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)]
     pub hb: TripletBlock<f64>,
 }
@@ -1827,7 +2055,9 @@ pub struct AxisDistanceLL11 {
     #[arael(ref = root.lines)] pub a: Ref<Line>,
     #[arael(ref = root.lines)] pub b: Ref<Line>,
     pub distance: f64,
-    pub horizontal: bool,
+    pub horizontal: bool,    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Line, Line>,
 }
 
@@ -1843,7 +2073,9 @@ pub struct AxisDistanceLL12 {
     #[arael(ref = root.lines)] pub a: Ref<Line>,
     #[arael(ref = root.lines)] pub b: Ref<Line>,
     pub distance: f64,
-    pub horizontal: bool,
+    pub horizontal: bool,    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Line, Line>,
 }
 
@@ -1859,7 +2091,9 @@ pub struct AxisDistanceLL21 {
     #[arael(ref = root.lines)] pub a: Ref<Line>,
     #[arael(ref = root.lines)] pub b: Ref<Line>,
     pub distance: f64,
-    pub horizontal: bool,
+    pub horizontal: bool,    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Line, Line>,
 }
 
@@ -1875,7 +2109,9 @@ pub struct AxisDistanceLL22 {
     #[arael(ref = root.lines)] pub a: Ref<Line>,
     #[arael(ref = root.lines)] pub b: Ref<Line>,
     pub distance: f64,
-    pub horizontal: bool,
+    pub horizontal: bool,    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Line, Line>,
 }
 
@@ -1893,7 +2129,9 @@ pub struct AxisDistanceLP1 {
     #[arael(ref = root.lines)] pub line: Ref<Line>,
     #[arael(ref = root.points)] pub point: Ref<Point>,
     pub distance: f64,
-    pub horizontal: bool,
+    pub horizontal: bool,    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Line, Point>,
 }
 
@@ -1909,7 +2147,9 @@ pub struct AxisDistanceLP2 {
     #[arael(ref = root.lines)] pub line: Ref<Line>,
     #[arael(ref = root.points)] pub point: Ref<Point>,
     pub distance: f64,
-    pub horizontal: bool,
+    pub horizontal: bool,    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Line, Point>,
 }
 
@@ -1927,7 +2167,9 @@ pub struct AxisDistanceArcCenterP {
     #[arael(ref = root.arcs)] pub arc: Ref<Arc>,
     #[arael(ref = root.points)] pub point: Ref<Point>,
     pub distance: f64,
-    pub horizontal: bool,
+    pub horizontal: bool,    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Arc, Point>,
 }
 
@@ -1949,7 +2191,9 @@ pub struct AxisDistanceArcStartP {
     #[arael(ref = root.arcs)] pub arc: Ref<Arc>,
     #[arael(ref = root.points)] pub point: Ref<Point>,
     pub distance: f64,
-    pub horizontal: bool,
+    pub horizontal: bool,    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Arc, Point>,
 }
 
@@ -1971,7 +2215,9 @@ pub struct AxisDistanceArcEndP {
     #[arael(ref = root.arcs)] pub arc: Ref<Arc>,
     #[arael(ref = root.points)] pub point: Ref<Point>,
     pub distance: f64,
-    pub horizontal: bool,
+    pub horizontal: bool,    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Arc, Point>,
 }
 
@@ -1989,7 +2235,9 @@ pub struct AxisDistanceArcCenterL1 {
     #[arael(ref = root.arcs)] pub arc: Ref<Arc>,
     #[arael(ref = root.lines)] pub line: Ref<Line>,
     pub distance: f64,
-    pub horizontal: bool,
+    pub horizontal: bool,    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Arc, Line>,
 }
 
@@ -2005,7 +2253,9 @@ pub struct AxisDistanceArcCenterL2 {
     #[arael(ref = root.arcs)] pub arc: Ref<Arc>,
     #[arael(ref = root.lines)] pub line: Ref<Line>,
     pub distance: f64,
-    pub horizontal: bool,
+    pub horizontal: bool,    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Arc, Line>,
 }
 
@@ -2027,7 +2277,9 @@ pub struct AxisDistanceArcStartL1 {
     #[arael(ref = root.arcs)] pub arc: Ref<Arc>,
     #[arael(ref = root.lines)] pub line: Ref<Line>,
     pub distance: f64,
-    pub horizontal: bool,
+    pub horizontal: bool,    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Arc, Line>,
 }
 
@@ -2049,7 +2301,9 @@ pub struct AxisDistanceArcStartL2 {
     #[arael(ref = root.arcs)] pub arc: Ref<Arc>,
     #[arael(ref = root.lines)] pub line: Ref<Line>,
     pub distance: f64,
-    pub horizontal: bool,
+    pub horizontal: bool,    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Arc, Line>,
 }
 
@@ -2071,7 +2325,9 @@ pub struct AxisDistanceArcEndL1 {
     #[arael(ref = root.arcs)] pub arc: Ref<Arc>,
     #[arael(ref = root.lines)] pub line: Ref<Line>,
     pub distance: f64,
-    pub horizontal: bool,
+    pub horizontal: bool,    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Arc, Line>,
 }
 
@@ -2093,7 +2349,9 @@ pub struct AxisDistanceArcEndL2 {
     #[arael(ref = root.arcs)] pub arc: Ref<Arc>,
     #[arael(ref = root.lines)] pub line: Ref<Line>,
     pub distance: f64,
-    pub horizontal: bool,
+    pub horizontal: bool,    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Arc, Line>,
 }
 
@@ -2111,7 +2369,9 @@ pub struct AxisDistanceAACeCe {
     #[arael(ref = root.arcs)] pub a: Ref<Arc>,
     #[arael(ref = root.arcs)] pub b: Ref<Arc>,
     pub distance: f64,
-    pub horizontal: bool,
+    pub horizontal: bool,    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Arc, Arc>,
 }
 
@@ -2133,7 +2393,9 @@ pub struct AxisDistanceAACeS {
     #[arael(ref = root.arcs)] pub a: Ref<Arc>,
     #[arael(ref = root.arcs)] pub b: Ref<Arc>,
     pub distance: f64,
-    pub horizontal: bool,
+    pub horizontal: bool,    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Arc, Arc>,
 }
 
@@ -2155,7 +2417,9 @@ pub struct AxisDistanceAACeE {
     #[arael(ref = root.arcs)] pub a: Ref<Arc>,
     #[arael(ref = root.arcs)] pub b: Ref<Arc>,
     pub distance: f64,
-    pub horizontal: bool,
+    pub horizontal: bool,    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Arc, Arc>,
 }
 
@@ -2177,7 +2441,9 @@ pub struct AxisDistanceAASCe {
     #[arael(ref = root.arcs)] pub a: Ref<Arc>,
     #[arael(ref = root.arcs)] pub b: Ref<Arc>,
     pub distance: f64,
-    pub horizontal: bool,
+    pub horizontal: bool,    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Arc, Arc>,
 }
 
@@ -2205,7 +2471,9 @@ pub struct AxisDistanceAASS {
     #[arael(ref = root.arcs)] pub a: Ref<Arc>,
     #[arael(ref = root.arcs)] pub b: Ref<Arc>,
     pub distance: f64,
-    pub horizontal: bool,
+    pub horizontal: bool,    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Arc, Arc>,
 }
 
@@ -2233,7 +2501,9 @@ pub struct AxisDistanceAASE {
     #[arael(ref = root.arcs)] pub a: Ref<Arc>,
     #[arael(ref = root.arcs)] pub b: Ref<Arc>,
     pub distance: f64,
-    pub horizontal: bool,
+    pub horizontal: bool,    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Arc, Arc>,
 }
 
@@ -2255,7 +2525,9 @@ pub struct AxisDistanceAAECe {
     #[arael(ref = root.arcs)] pub a: Ref<Arc>,
     #[arael(ref = root.arcs)] pub b: Ref<Arc>,
     pub distance: f64,
-    pub horizontal: bool,
+    pub horizontal: bool,    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Arc, Arc>,
 }
 
@@ -2283,7 +2555,9 @@ pub struct AxisDistanceAAES {
     #[arael(ref = root.arcs)] pub a: Ref<Arc>,
     #[arael(ref = root.arcs)] pub b: Ref<Arc>,
     pub distance: f64,
-    pub horizontal: bool,
+    pub horizontal: bool,    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Arc, Arc>,
 }
 
@@ -2311,7 +2585,9 @@ pub struct AxisDistanceAAEE {
     #[arael(ref = root.arcs)] pub a: Ref<Arc>,
     #[arael(ref = root.arcs)] pub b: Ref<Arc>,
     pub distance: f64,
-    pub horizontal: bool,
+    pub horizontal: bool,    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
     #[serde(skip)] pub hb: CrossBlock<Arc, Arc>,
 }
 
