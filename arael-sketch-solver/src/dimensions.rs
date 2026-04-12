@@ -408,9 +408,8 @@ fn endpoint_is_on_line(
     ep: &DimensionEndpoint,
     line: Ref<Line>,
 ) -> bool {
-    if let Some((l, _)) = endpoint_is_line_endpoint(sketch, ep) {
-        if l == line { return true; }
-    }
+    if let Some((l, _)) = endpoint_is_line_endpoint(sketch, ep)
+        && l == line { return true; }
     match ep {
         DimensionEndpoint::Point(p) => {
             sketch.point_on_line.iter().any(|c| c.point == *p && c.line == line)

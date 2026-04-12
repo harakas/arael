@@ -72,7 +72,7 @@ impl<T: Float> ops::Mul<quatern<T>> for quatern<T> {
 impl<T: Float> quatern<T> {
     /// Constructs a quaternion from a scalar part and a vector part.
     pub fn new(t: T, v: vect3<T>) -> quatern<T> {
-        quatern::<T> { t: t, v: v }
+        quatern::<T> { t, v }
     }
 
     /// Returns the identity quaternion (1 + 0i + 0j + 0k), representing no rotation.
@@ -229,7 +229,7 @@ impl<T: Float> quatern<T> {
         // normalize the mid vector
         mid = mid * mid_len2.sqrt().recip();
 
-        return Self::new(mid * to, mid % to);
+        Self::new(mid * to, mid % to)
     }
 
     /// Spherical linear interpolation between two unit quaternions. `f=0` returns

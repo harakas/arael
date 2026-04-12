@@ -91,9 +91,9 @@ pub trait Float : num::Float + std::fmt::Debug + num::NumCast + std::ops::AddAss
     /// Fast polynomial approximation of atan. Max error < 1e-6 radians.
     fn fast_atan(self) -> Self {
       let half_pi = Self::from(1.5707963267948966e+00).unwrap();
-      let sixth_pi = Self::from(5.2359877559829882e-01).unwrap();
-      let tan_sixth_pi = Self::from(5.7735026918962573e-01).unwrap();
-      let tan_twelfth_pi = Self::from(2.6794919243112270e-01).unwrap();
+      let sixth_pi = Self::from(5.235_987_755_982_988e-1).unwrap();
+      let tan_sixth_pi = Self::from(5.773_502_691_896_257e-1).unwrap();
+      let tan_twelfth_pi = Self::from(2.679_491_924_311_227e-1).unwrap();
       let c1 = Self::from(1.6867629106).unwrap();
       let c2 = Self::from(0.4378497304).unwrap();
       let c3 = Self::from(1.6867633134).unwrap();
@@ -108,7 +108,7 @@ pub trait Float : num::Float + std::fmt::Debug + num::NumCast + std::ops::AddAss
                   x = (x - tan_sixth_pi) / (Self::one() + tan_sixth_pi * x);
                   let x2 = x * x;
                   y = x * (c1 + x2 * c2) / (c3 + x2);
-                  y = y + sixth_pi;
+                  y += sixth_pi;
               } else {
                   let x2 = x * x;
                   y = x * (c1 + x2 * c2) / (c3 + x2);
@@ -119,13 +119,13 @@ pub trait Float : num::Float + std::fmt::Debug + num::NumCast + std::ops::AddAss
                   x = (x - tan_sixth_pi) / (Self::one() + tan_sixth_pi * x);
                   let x2 = x * x;
                   y = x * (c1 + x2 * c2) / (c3 + x2);
-                  y = y + sixth_pi;
+                  y += sixth_pi;
               } else {
                   let x2 = x * x;
                   y = x * (c1 + x2 * c2) / (c3 + x2);
                 }
             }
-          return -y;
+          -y
       } else {
           if x > Self::one() {
               x = x.recip();
@@ -133,7 +133,7 @@ pub trait Float : num::Float + std::fmt::Debug + num::NumCast + std::ops::AddAss
                   x = (x - tan_sixth_pi) / (Self::one() + tan_sixth_pi * x);
                   let x2 = x * x;
                   y = x * (c1 + x2 * c2) / (c3 + x2);
-                  y = y + sixth_pi;
+                  y += sixth_pi;
               } else {
                   let x2 = x * x;
                   y = x * (c1 + x2 * c2) / (c3 + x2);
@@ -144,13 +144,13 @@ pub trait Float : num::Float + std::fmt::Debug + num::NumCast + std::ops::AddAss
                   x = (x - tan_sixth_pi) / (Self::one() + tan_sixth_pi * x);
                   let x2 = x * x;
                   y = x * (c1 + x2 * c2) / (c3 + x2);
-                  y = y + sixth_pi;
+                  y += sixth_pi;
               } else {
                   let x2 = x * x;
                   y = x * (c1 + x2 * c2) / (c3 + x2);
               }
           }
-          return y;
+          y
         }
     }
 
@@ -162,11 +162,11 @@ pub trait Float : num::Float + std::fmt::Debug + num::NumCast + std::ops::AddAss
     /// Clamp value to the range [low, high].
     fn clamp(self, low: Self, high: Self) -> Self {
         if self < low {
-            return low;
+            low
         } else if self > high {
-            return high;
+            high
         } else {
-            return self;
+            self
         }
     }
 }
@@ -215,17 +215,17 @@ pub fn atan2<T: Float>(y: T, x: T) -> T { y.atan2(x) }
 /// Fast approximate atan2. Max error < 1e-6 radians. Does not handle atan2(+-inf, +-inf).
 pub fn fast_atan2<T: Float>(y: T, x: T) -> T {
     if x > T::zero() {
-        return (y / x).fast_atan();
+        (y / x).fast_atan()
     } else if x == T::zero() {
         if y == T::zero() {
             return T::zero();
         }
-        return T::half_pi().copysign(y);
+        T::half_pi().copysign(y)
     } else { // x < 0
         if y >= T::zero() {
-            return (y / x).fast_atan() + T::pi();
+            (y / x).fast_atan() + T::pi()
         } else {
-            return (y / x).fast_atan() - T::pi();
+            (y / x).fast_atan() - T::pi()
         }
     }
 }

@@ -57,7 +57,7 @@ impl fmt::Display for G<f64> {
         }
         // C's %g: use %e when exponent < -4 or >= precision (6)
         let exp = v.abs().log10().floor() as i32;
-        if exp < -4 || exp >= 6 {
+        if !(-4..6).contains(&exp) {
             // Scientific: 6 significant digits means precision = 5 after the leading digit
             let s = format!("{:.5e}", v);
             // Trim trailing zeros in mantissa
@@ -567,7 +567,7 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
             iter += 1;
 
             if !solver.solve_damped(n, &mut matrix, &diagonal, lambda, &grad, &mut delta) {
-                lambda = lambda * lambda_up;
+                lambda *= lambda_up;
                 inner += 1;
                 continue;
             }
@@ -594,7 +594,7 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
 
             if new_cost.is_finite() && new_cost < end_cost {
                 if lambda > lambda_floor {
-                    lambda = lambda * lambda_down;
+                    lambda *= lambda_down;
                 }
                 lambda = lambda.max(T::epsilon());
                 cur_x.copy_from_slice(&try_x);
@@ -637,7 +637,7 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
                 break;
             }
 
-            lambda = lambda * lambda_up;
+            lambda *= lambda_up;
 
             if lambda > lambda_ceiling {
                 inner = INNER_LOOPS;
@@ -701,6 +701,12 @@ pub fn solve_band_lapack_f32(x0: &[f32], kd: usize, problem: &mut impl LmProblem
 /// Use SparseFaer for actual sparse Cholesky.
 pub struct Sparse;
 
+impl Default for Sparse {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Sparse {
     pub fn new() -> Self {
         Sparse
@@ -760,6 +766,12 @@ pub fn solve_sparse(x0: &[f64], problem: &mut impl LmProblem<f64>, config: &LmCo
 /// Subsequent iterations: direct accumulate into CSC vals (with binary search lookup).
 pub struct SparseDirect {
     pattern_built: bool,
+}
+
+impl Default for SparseDirect {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SparseDirect {
@@ -823,6 +835,12 @@ pub fn solve_sparse_direct(x0: &[f64], problem: &mut impl LmProblem<f64>, config
 pub struct SparseFaer {
     symbolic: Option<faer::sparse::linalg::cholesky::SymbolicCholesky<usize>>,
     positions: std::cell::RefCell<Option<Vec<usize>>>,
+}
+
+impl Default for SparseFaer {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SparseFaer {
@@ -898,7 +916,7 @@ impl LmSolver<f64> for SparseFaer {
             faer::Spec::default(),
         );
         let mut scratch_mem: Vec<std::mem::MaybeUninit<u8>> = vec![std::mem::MaybeUninit::uninit(); scratch_size.unaligned_bytes_required()];
-        let mut stack = faer::dyn_stack::MemStack::new(&mut scratch_mem);
+        let stack = faer::dyn_stack::MemStack::new(&mut scratch_mem);
 
         let llt = symbolic.factorize_numeric_llt(
             &mut l_vals,
@@ -906,7 +924,7 @@ impl LmSolver<f64> for SparseFaer {
             faer::Side::Upper,
             faer::linalg::cholesky::llt::factor::LltRegularization::default(),
             faer::Par::Seq,
-            &mut stack,
+            stack,
             faer::Spec::default(),
         );
 
@@ -920,13 +938,13 @@ impl LmSolver<f64> for SparseFaer {
         let rhs = faer::col::ColMut::from_slice_mut(delta);
         let solve_scratch_size = symbolic.solve_in_place_scratch::<f64>(1, faer::Par::Seq);
         let mut solve_mem: Vec<std::mem::MaybeUninit<u8>> = vec![std::mem::MaybeUninit::uninit(); solve_scratch_size.unaligned_bytes_required()];
-        let mut solve_stack = faer::dyn_stack::MemStack::new(&mut solve_mem);
+        let solve_stack = faer::dyn_stack::MemStack::new(&mut solve_mem);
 
         llt.solve_in_place_with_conj(
             faer::Conj::No,
             rhs.as_mat_mut(),
             faer::Par::Seq,
-            &mut solve_stack,
+            solve_stack,
         );
 
         true
@@ -942,6 +960,12 @@ pub fn solve_sparse_faer(x0: &[f64], problem: &mut impl LmProblem<f64>, config: 
 pub struct SparseFaerF32 {
     symbolic: Option<faer::sparse::linalg::cholesky::SymbolicCholesky<usize>>,
     positions: std::cell::RefCell<Option<Vec<usize>>>,
+}
+
+impl Default for SparseFaerF32 {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SparseFaerF32 {
@@ -1013,7 +1037,7 @@ impl LmSolver<f32> for SparseFaerF32 {
             faer::Spec::default(),
         );
         let mut scratch_mem: Vec<std::mem::MaybeUninit<u8>> = vec![std::mem::MaybeUninit::uninit(); scratch_size.unaligned_bytes_required()];
-        let mut stack = faer::dyn_stack::MemStack::new(&mut scratch_mem);
+        let stack = faer::dyn_stack::MemStack::new(&mut scratch_mem);
 
         let llt = symbolic.factorize_numeric_llt(
             &mut l_vals,
@@ -1021,7 +1045,7 @@ impl LmSolver<f32> for SparseFaerF32 {
             faer::Side::Upper,
             faer::linalg::cholesky::llt::factor::LltRegularization::default(),
             faer::Par::Seq,
-            &mut stack,
+            stack,
             faer::Spec::default(),
         );
 
@@ -1034,13 +1058,13 @@ impl LmSolver<f32> for SparseFaerF32 {
         let rhs = faer::col::ColMut::from_slice_mut(delta);
         let solve_scratch_size = symbolic.solve_in_place_scratch::<f32>(1, faer::Par::Seq);
         let mut solve_mem: Vec<std::mem::MaybeUninit<u8>> = vec![std::mem::MaybeUninit::uninit(); solve_scratch_size.unaligned_bytes_required()];
-        let mut solve_stack = faer::dyn_stack::MemStack::new(&mut solve_mem);
+        let solve_stack = faer::dyn_stack::MemStack::new(&mut solve_mem);
 
         llt.solve_in_place_with_conj(
             faer::Conj::No,
             rhs.as_mat_mut(),
             faer::Par::Seq,
-            &mut solve_stack,
+            solve_stack,
         );
 
         true
@@ -1643,7 +1667,7 @@ impl<T: Float> CooMatrix<T> {
     pub fn scatter_into(&self, csc: &mut CscMatrix<T>, coo_to_csc: &[usize]) {
         csc.vals.iter_mut().for_each(|v| *v = T::zero());
         for (i, &csc_idx) in coo_to_csc.iter().enumerate() {
-            csc.vals[csc_idx] = csc.vals[csc_idx] + self.vals[i];
+            csc.vals[csc_idx] += self.vals[i];
         }
     }
 
@@ -1819,9 +1843,9 @@ impl<T: Float> CscMatrix<T> {
             for k in self.col_ptr[j]..self.col_ptr[j + 1] {
                 let i = self.row_idx[k] as usize;
                 let a = self.vals[k];
-                y[i] = y[i] + a * x[j];
+                y[i] += a * x[j];
                 if i != j {
-                    y[j] = y[j] + a * x[i];
+                    y[j] += a * x[i];
                 }
             }
         }
@@ -1890,7 +1914,7 @@ pub fn solve_spd_band(n: usize, kd: usize, band: &mut [f64], b: &mut [f64]) -> b
     for j in 0..n {
         // Diagonal: R[j,j]^2 = A[j,j] - sum_{k} R[k,j]^2
         let mut s = band[kd + j * ldab]; // A[j,j]
-        let k_start = if j > kd { j - kd } else { 0 };
+        let k_start = j.saturating_sub(kd);
         for k in k_start..j {
             let rkj = band[(kd + k - j) + j * ldab]; // R[k,j]
             s -= rkj * rkj;
@@ -1903,7 +1927,7 @@ pub fn solve_spd_band(n: usize, kd: usize, band: &mut [f64], b: &mut [f64]) -> b
         let i_end = (j + kd + 1).min(n);
         for i in (j + 1)..i_end {
             let mut s = band[(kd + j - i) + i * ldab]; // A[j,i]
-            let k_start2 = if i > kd { i - kd } else { 0 };
+            let k_start2 = i.saturating_sub(kd);
             let k_lo = k_start.max(k_start2);
             for k in k_lo..j {
                 let rkj = band[(kd + k - j) + j * ldab];
@@ -1917,7 +1941,7 @@ pub fn solve_spd_band(n: usize, kd: usize, band: &mut [f64], b: &mut [f64]) -> b
     // Forward substitution: R^T * y = b
     for i in 0..n {
         let mut s = b[i];
-        let k_start = if i > kd { i - kd } else { 0 };
+        let k_start = i.saturating_sub(kd);
         for k in k_start..i {
             s -= band[(kd + k - i) + i * ldab] * b[k]; // R[k,i]
         }
@@ -1944,7 +1968,7 @@ pub fn solve_spd_band_f32(n: usize, kd: usize, band: &mut [f32], b: &mut [f32]) 
 
     for j in 0..n {
         let mut s = band[kd + j * ldab];
-        let k_start = if j > kd { j - kd } else { 0 };
+        let k_start = j.saturating_sub(kd);
         for k in k_start..j {
             let rkj = band[(kd + k - j) + j * ldab];
             s -= rkj * rkj;
@@ -1956,7 +1980,7 @@ pub fn solve_spd_band_f32(n: usize, kd: usize, band: &mut [f32], b: &mut [f32]) 
         let i_end = (j + kd + 1).min(n);
         for i in (j + 1)..i_end {
             let mut s = band[(kd + j - i) + i * ldab];
-            let k_start2 = if i > kd { i - kd } else { 0 };
+            let k_start2 = i.saturating_sub(kd);
             let k_lo = k_start.max(k_start2);
             for k in k_lo..j {
                 let rkj = band[(kd + k - j) + j * ldab];
@@ -1969,7 +1993,7 @@ pub fn solve_spd_band_f32(n: usize, kd: usize, band: &mut [f32], b: &mut [f32]) 
 
     for i in 0..n {
         let mut s = b[i];
-        let k_start = if i > kd { i - kd } else { 0 };
+        let k_start = i.saturating_sub(kd);
         for k in k_start..i {
             s -= band[(kd + k - i) + i * ldab] * b[k];
         }

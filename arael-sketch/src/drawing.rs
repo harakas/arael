@@ -204,8 +204,8 @@ impl EditorApp {
         );
 
         // Dimension line: extend beyond endpoints if text is outside
-        let line_start;
-        let line_end;
+        
+        
         let text_left = text_center.x - ax * text_half_w;
         let text_left_y = text_center.y - ay * text_half_w;
         let text_right = text_center.x + ax * text_half_w;
@@ -219,10 +219,10 @@ impl EditorApp {
         let min_proj = proj_left.min(proj_right) - margin;
         let max_proj = proj_right.max(proj_left) + margin;
 
-        line_start = if min_proj < 0.0 {
+        let line_start = if min_proj < 0.0 {
             egui::Pos2::new(sq1.x + ax * min_proj, sq1.y + ay * min_proj)
         } else { sq1 };
-        line_end = if max_proj > alen {
+        let line_end = if max_proj > alen {
             egui::Pos2::new(sq1.x + ax * max_proj, sq1.y + ay * max_proj)
         } else { sq2 };
 
@@ -665,7 +665,7 @@ impl EditorApp {
 
         // Determine if text is between arrows or outside
         let text_frac = 0.5 + text_along as f32;
-        let text_outside = text_frac < 0.0 || text_frac > 1.0;
+        let text_outside = !(0.0..=1.0).contains(&text_frac);
 
         // Draw dimension line, extending past arrows if text is outside
         if text_outside {
@@ -1645,8 +1645,8 @@ impl EditorApp {
                     // Outer lines (solid)
                     for dx in [-gap, gap] {
                         painter.line_segment([
-                            egui::Pos2::new(p.x + dx as f32, p.y - h),
-                            egui::Pos2::new(p.x + dx as f32, p.y + h),
+                            egui::Pos2::new(p.x + dx, p.y - h),
+                            egui::Pos2::new(p.x + dx, p.y + h),
                         ], thin);
                     }
                     // Middle line (dashed)
@@ -1696,9 +1696,9 @@ impl EditorApp {
             // Skip dimensions of quiet entities unless selected/hovered/editing
             if !selected && !dim_hovered && !dim_editing {
                 let entity_quiet = match &dim.kind {
-                    DimensionKind::LineLength(r) => self.sketch.lines.get(*r).map_or(false, |l| l.quiet),
+                    DimensionKind::LineLength(r) => self.sketch.lines.get(*r).is_some_and(|l| l.quiet),
                     DimensionKind::ArcRadius(r) | DimensionKind::ArcRadiusB(r) | DimensionKind::ArcSweep(r) =>
-                        self.sketch.arcs.get(*r).map_or(false, |a| a.quiet),
+                        self.sketch.arcs.get(*r).is_some_and(|a| a.quiet),
                     _ => false,
                 };
                 let entity_selected = match &dim.kind {

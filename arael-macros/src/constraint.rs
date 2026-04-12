@@ -105,11 +105,10 @@ fn eval_expr(expr: &Expr, ctx: &mut ConstraintCtx) -> Result<SymVal, syn::Error>
 
             // Try to resolve as a dotted path first (e.g., "pose.ea" as a binding key)
             let dotted = build_dotted_path(expr);
-            if let Some(ref path) = dotted {
-                if let Some(val) = ctx.bindings.get(path) {
+            if let Some(ref path) = dotted
+                && let Some(val) = ctx.bindings.get(path) {
                     return Ok(val.clone());
                 }
-            }
 
             // Try evaluating the base for component access on known types
             if let Ok(base) = eval_expr(&ef.base, ctx) {
@@ -202,14 +201,13 @@ fn eval_expr(expr: &Expr, ctx: &mut ConstraintCtx) -> Result<SymVal, syn::Error>
 
         // Function calls: atan2, atan, sin, cos, etc.
         Expr::Call(ec) => {
-            if let Expr::Path(func_path) = ec.func.as_ref() {
-                if let Some(func_name) = func_path.path.get_ident() {
+            if let Expr::Path(func_path) = ec.func.as_ref()
+                && let Some(func_name) = func_path.path.get_ident() {
                     let args: Vec<SymVal> = ec.args.iter()
                         .map(|a| eval_expr(a, ctx))
                         .collect::<Result<_, _>>()?;
                     return eval_function(&func_name.to_string(), args, expr);
                 }
-            }
             Err(syn::Error::new_spanned(expr, "unsupported function call in constraint"))
         }
 
@@ -239,12 +237,11 @@ fn eval_expr(expr: &Expr, ctx: &mut ConstraintCtx) -> Result<SymVal, syn::Error>
             let index_expr = &idx.index;
             match &base {
                 SymVal::Mat3(m) => {
-                    if let Expr::Lit(lit) = index_expr.as_ref() {
-                        if let syn::Lit::Int(li) = &lit.lit {
+                    if let Expr::Lit(lit) = index_expr.as_ref()
+                        && let syn::Lit::Int(li) = &lit.lit {
                             let i: usize = li.base10_parse()?;
                             return Ok(SymVal::Vec3(m.rows[i].clone()));
                         }
-                    }
                     Err(syn::Error::new_spanned(index_expr, "matrix index must be a literal integer"))
                 }
                 _ => Err(syn::Error::new_spanned(expr,
@@ -427,7 +424,7 @@ pub fn parse_constraint_attrs(attrs: &[syn::Attribute]) -> syn::Result<Vec<Const
         if tokens.is_empty() { continue; }
 
         if let proc_macro2::TokenTree::Ident(ref ident) = tokens[0] {
-            if ident.to_string() != "constraint" { continue; }
+            if *ident != "constraint" { continue; }
 
             if tokens.len() < 2 {
                 return Err(syn::Error::new_spanned(ident, "expected constraint(...)"));
@@ -605,14 +602,13 @@ pub fn generate_constraint_impl(
 
     // Ref fields
     for (field_name, _) in ref_paths {
-        if let Some(field) = fields.iter().find(|f| f.ident.as_ref().map(|i| i.to_string()) == Some(field_name.clone())) {
-            if let Some((_, inner_ident)) = extract_wrapper_inner(&field.ty, "Ref") {
+        if let Some(field) = fields.iter().find(|f| f.ident.as_ref().map(|i| i.to_string()) == Some(field_name.clone()))
+            && let Some((_, inner_ident)) = extract_wrapper_inner(&field.ty, "Ref") {
                 let var_ident = syn::Ident::new(field_name, proc_macro2::Span::call_site());
                 let type_ident = syn::Ident::new(&inner_ident.to_string(), inner_ident.span());
                 let name_str = field_name.as_str();
                 var_setup.push(quote! { let #var_ident = #type_ident::sym(#name_str); });
             }
-        }
     }
     // Parent
     let parent_ident = syn::Ident::new(&parent_name, proc_macro2::Span::call_site());
@@ -789,8 +785,8 @@ fn parse_sym_code(code: &str) -> syn::Result<Expr> {
 }
 
 fn extract_block_type_args(ty: &syn::Type) -> syn::Result<(String, Option<String>)> {
-    if let syn::Type::Path(tp) = ty {
-        if let Some(seg) = tp.path.segments.last() {
+    if let syn::Type::Path(tp) = ty
+        && let Some(seg) = tp.path.segments.last() {
             // TripletBlock has no entity type args — all entities come from Ref fields
             if seg.ident == "TripletBlock" {
                 return Ok(("__triplet__".to_string(), None));
@@ -810,16 +806,14 @@ fn extract_block_type_args(ty: &syn::Type) -> syn::Result<(String, Option<String
                 }
             }
         }
-    }
     Err(syn::Error::new_spanned(ty, "expected SelfBlock<A>, CrossBlock<A, B>, or TripletBlock"))
 }
 
 fn type_ident_name(ty: &syn::Type) -> syn::Result<String> {
-    if let syn::Type::Path(tp) = ty {
-        if let Some(seg) = tp.path.segments.last() {
+    if let syn::Type::Path(tp) = ty
+        && let Some(seg) = tp.path.segments.last() {
             return Ok(seg.ident.to_string());
         }
-    }
     Err(syn::Error::new_spanned(ty, "expected a simple type name"))
 }
 
@@ -928,18 +922,15 @@ pub fn generate_root_methods(
         // Seed with types directly in root fields
         let root_fields_parsed: syn::FieldsNamed = syn::parse2(quote! { { #root_fields } })?;
         for field in &root_fields_parsed.named {
-            if let syn::Type::Path(tp) = &field.ty {
-                if let Some(seg) = tp.path.segments.last() {
+            if let syn::Type::Path(tp) = &field.ty
+                && let Some(seg) = tp.path.segments.last() {
                     // Extract inner type from Vec<T>, Deque<T>, etc.
-                    if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
-                        if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
-                            if let Ok(name) = type_ident_name(inner) {
+                    if let syn::PathArguments::AngleBracketed(args) = &seg.arguments
+                        && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
+                            && let Ok(name) = type_ident_name(inner) {
                                 queue.push(name);
                             }
-                        }
-                    }
                 }
-            }
         }
         // BFS through type registry
         while let Some(type_name) = queue.pop() {
@@ -982,7 +973,7 @@ pub fn generate_root_methods(
         let err_ident = syn::Ident::new(&sc.struct_name, proc_macro2::Span::call_site());
 
         let constraint = match &attr_tokens[0] {
-            proc_macro2::TokenTree::Ident(id) if id.to_string() == "constraint" => {
+            proc_macro2::TokenTree::Ident(id) if *id == "constraint" => {
                 if let Some(proc_macro2::TokenTree::Group(g)) = attr_tokens.get(1) {
                     parse_constraint_inner_impl(
                         &g.stream().into_iter().collect::<Vec<_>>(), &err_ident)?
@@ -1142,8 +1133,8 @@ pub fn generate_root_methods(
         // Check each variable's type for euler_angle_fields
         for (field_name, _) in &ref_paths_for_subs {
             if let Some(field) = fields.named.iter().find(|f|
-                f.ident.as_ref().map(|i| i.to_string()) == Some(field_name.clone())) {
-                if let Some((_, inner_ident)) = extract_wrapper_inner(&field.ty, "Ref") {
+                f.ident.as_ref().map(|i| i.to_string()) == Some(field_name.clone()))
+                && let Some((_, inner_ident)) = extract_wrapper_inner(&field.ty, "Ref") {
                     let type_name = inner_ident.to_string();
                     if let Some(layout) = registry_lookup(&type_name) {
                         for ea in &layout.euler_angle_fields {
@@ -1154,7 +1145,6 @@ pub fn generate_root_methods(
                         }
                     }
                 }
-            }
         }
         // Check the self/parent type for euler_angles
         if let Some(a_layout) = registry_lookup(&a_type) {
@@ -1166,13 +1156,12 @@ pub fn generate_root_methods(
             }
         }
         // For SelfBlock, also check the struct itself (it IS the A type)
-        if is_self_block {
-            if let Some(self_layout) = registry_lookup(&sc.struct_name) {
+        if is_self_block
+            && let Some(self_layout) = registry_lookup(&sc.struct_name) {
                 for ea in &self_layout.euler_angle_fields {
                     all_subs.extend(build_euler_substitutions(&self_var_name, ea));
                 }
             }
-        }
 
         let block_ident = if is_remote_block {
             // For remote blocks, the actual block field name is the last segment
@@ -1323,7 +1312,7 @@ pub fn generate_root_methods(
                             fields.named.iter().any(|f| {
                                 f.ident.as_ref().map(|i| i.to_string()) == Some(field_name.clone())
                                     && extract_wrapper_inner(&f.ty, "Ref")
-                                        .map(|(_, id)| id.to_string() == a_type)
+                                        .map(|(_, id)| *id == a_type)
                                         .unwrap_or(false)
                             })
                         }).map(|(name, _)| name.clone())
@@ -1338,8 +1327,8 @@ pub fn generate_root_methods(
                 offset = end;
             }
         }
-        if let Some(ref b_type_name) = b_type {
-            if let Some(b_layout) = registry_lookup(b_type_name) {
+        if let Some(ref b_type_name) = b_type
+            && let Some(b_layout) = registry_lookup(b_type_name) {
                 // Find ref field matching B type
                 let struct_layout_b = registry_lookup(&sc.struct_name);
                 let ref_paths_b = struct_layout_b.as_ref().map(|l| l.ref_paths.clone()).unwrap_or_default();
@@ -1380,7 +1369,6 @@ pub fn generate_root_methods(
                     }
                 }
             }
-        }
 
         let a_param_count = registry_lookup(&a_type).map(|l| l.param_fields.iter().map(|pf| {
             l.fields.iter().find(|(n, _)| n == pf).map(|(_, sft)| match sft {
@@ -1403,8 +1391,8 @@ pub fn generate_root_methods(
             for (field_name, _) in &ref_paths {
                 if !used.insert(field_name.clone()) { continue; }
                 if let Some(field) = fields.named.iter().find(|f|
-                    f.ident.as_ref().map(|i| i.to_string()) == Some(field_name.clone())) {
-                    if let Some((_, inner_ident)) = extract_wrapper_inner(&field.ty, "Ref") {
+                    f.ident.as_ref().map(|i| i.to_string()) == Some(field_name.clone()))
+                    && let Some((_, inner_ident)) = extract_wrapper_inner(&field.ty, "Ref") {
                         let type_name = inner_ident.to_string();
                         if let Some(layout) = registry_lookup(&type_name) {
                             let var_ident = syn::Ident::new(field_name, proc_macro2::Span::call_site());
@@ -1427,7 +1415,6 @@ pub fn generate_root_methods(
                             }
                         }
                     }
-                }
             }
         }
 
@@ -1770,7 +1757,7 @@ pub fn generate_root_methods(
     let mut merged_gh: Vec<TokenStream2> = Vec::new();
     let mut merged_jac: Vec<TokenStream2> = Vec::new();
     let mut merged_sbi: Vec<TokenStream2> = Vec::new();
-    for (_key, group) in &collection_groups {
+    for group in collection_groups.values() {
         let coll = &group.coll_ident;
         let self_var = &group.self_var;
         let a_type = &group.a_type_ident;
@@ -1847,7 +1834,7 @@ pub fn generate_root_methods(
     }
 
     // Emit merged cross-constraint loops (one per collection, all attributes inside)
-    for (_key, group) in &cross_groups {
+    for group in cross_groups.values() {
         let rc_ident = &group.rc_ident;
         let a_param_count = group.a_param_count;
         let b_param_count = group.b_param_count;
@@ -1915,7 +1902,7 @@ pub fn generate_root_methods(
     }
 
     // Emit merged TripletBlock loops (one per collection, with set_block_indices)
-    for (_key, group) in &triplet_groups {
+    for group in triplet_groups.values() {
         let rc_ident = &group.rc_ident;
         let tp = group.triplet_param_count;
         let block_ident = &group.block_ident;
@@ -2231,11 +2218,10 @@ fn interpret_constraint_body(
         }
     } else {
         for (field_name, _) in ref_paths {
-            if let Some(field) = fields.iter().find(|f| f.ident.as_ref().map(|i| i.to_string()) == Some(field_name.clone())) {
-                if let Some((_, inner_ident)) = extract_wrapper_inner(&field.ty, "Ref") {
+            if let Some(field) = fields.iter().find(|f| f.ident.as_ref().map(|i| i.to_string()) == Some(field_name.clone()))
+                && let Some((_, inner_ident)) = extract_wrapper_inner(&field.ty, "Ref") {
                     var_infos.push((field_name.clone(), inner_ident.to_string()));
                 }
-            }
         }
         if a_type != "__triplet__" {
             var_infos.push((parent_name.clone(), a_type.clone()));
@@ -2302,8 +2288,8 @@ fn interpret_constraint_body(
                     &mut param_symbols);
             }
         }
-        if let Some(ref b_type_name) = b_type {
-            if let Some(b_layout) = registry_lookup(b_type_name) {
+        if let Some(ref b_type_name) = b_type
+            && let Some(b_layout) = registry_lookup(b_type_name) {
                 let b_var = var_infos.iter().find(|(vn, tn)| {
                     tn == b_type_name && *vn != a_var_name
                 }).or_else(|| var_infos.iter().find(|(_, tn)| tn == b_type_name))
@@ -2319,7 +2305,6 @@ fn interpret_constraint_body(
                         &mut param_symbols);
                 }
             }
-        }
     }
 
     // Interpret body
@@ -2376,22 +2361,17 @@ fn find_root_collection(
     // Find a field in root that is a collection (Vec/Deque) of the given type
     for field in root_fields {
         let field_name = field.ident.as_ref()?.to_string();
-        if let syn::Type::Path(tp) = &field.ty {
-            if let Some(seg) = tp.path.segments.last() {
+        if let syn::Type::Path(tp) = &field.ty
+            && let Some(seg) = tp.path.segments.last() {
                 let container = seg.ident.to_string();
-                if container == "Vec" || container == "Deque" || container == "Arena" {
-                    if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
-                        if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
-                            if let Ok(inner_name) = type_ident_name(inner) {
-                                if inner_name == type_name {
+                if (container == "Vec" || container == "Deque" || container == "Arena")
+                    && let syn::PathArguments::AngleBracketed(args) = &seg.arguments
+                        && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
+                            && let Ok(inner_name) = type_ident_name(inner)
+                                && inner_name == type_name {
                                     return Some((field_name, container));
                                 }
-                            }
-                        }
-                    }
-                }
             }
-        }
     }
     None
 }
@@ -2400,11 +2380,10 @@ fn find_root_collection(
 fn find_var_for_type_annotated(vars: &[ConstraintVar], type_name: &str) -> syn::Result<String> {
     // First check explicit type annotations
     for v in vars {
-        if let Some(ref tn) = v.type_name {
-            if tn == type_name {
+        if let Some(ref tn) = v.type_name
+            && tn == type_name {
                 return Ok(v.name.clone());
             }
-        }
     }
     // Fall back to name matching
     let var_names: Vec<String> = vars.iter().map(|v| v.name.clone()).collect();
@@ -2432,16 +2411,14 @@ fn find_var_for_type(var_names: &[String], type_name: &str) -> syn::Result<Strin
     }
     // Fallback: try matching variable name to type name by checking if the registry
     // entry for the type was stored. Then find a variable that has a matching layout.
-    if let Some(_) = registry_lookup(type_name) {
+    if registry_lookup(type_name).is_some() {
         // The type is registered. Find which variable has a layout that matches.
         for v in var_names {
-            if let Some(var_layout) = find_layout_for_var(v) {
-                if let Some(type_layout) = registry_lookup(type_name) {
-                    if var_layout.param_fields == type_layout.param_fields {
+            if let Some(var_layout) = find_layout_for_var(v)
+                && let Some(type_layout) = registry_lookup(type_name)
+                    && var_layout.param_fields == type_layout.param_fields {
                         return Ok(v.clone());
                     }
-                }
-            }
         }
     }
     // Last resort: if there's only one unmatched variable, use it
@@ -2496,7 +2473,7 @@ pub fn generate_all_stashed_constraints() -> syn::Result<TokenStream2> {
         // Parse as constraint attribute
         let err_ident = syn::Ident::new(&sc.struct_name, proc_macro2::Span::call_site());
         let constraint = match &attr_tokens[0] {
-            proc_macro2::TokenTree::Ident(id) if id.to_string() == "constraint" => {
+            proc_macro2::TokenTree::Ident(id) if *id == "constraint" => {
                 if let Some(proc_macro2::TokenTree::Group(g)) = attr_tokens.get(1) {
                     let inner: Vec<proc_macro2::TokenTree> = g.stream().into_iter().collect();
                     parse_constraint_inner_impl(&inner, &err_ident)?

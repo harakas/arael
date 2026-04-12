@@ -6,11 +6,10 @@ fn is_const(e: &Expr, v: f64) -> bool {
 }
 
 fn is_const_int(e: &Expr) -> Option<i64> {
-    if let Expr::Const(v) = e {
-        if *v == v.floor() && v.abs() < 1e15 {
+    if let Expr::Const(v) = e
+        && *v == v.floor() && v.abs() < 1e15 {
             return Some(*v as i64);
         }
-    }
     None
 }
 
@@ -122,11 +121,10 @@ fn add_term_cmp(a: &E, b: &E) -> Ordering {
 
 /// Extract (base, const_exponent) from a factor.
 fn base_and_exp(e: &E) -> (E, f64) {
-    if let Expr::Pow(base, exp) = e.as_ref() {
-        if let Expr::Const(n) = exp.as_ref() {
+    if let Expr::Pow(base, exp) = e.as_ref()
+        && let Expr::Const(n) = exp.as_ref() {
             return (base.clone(), *n);
         }
-    }
     (e.clone(), 1.0)
 }
 
@@ -183,7 +181,7 @@ fn build_product(coeff: f64, mut factors: Vec<E>) -> E {
     if coeff == 0.0 { return constant(0.0); }
 
     // Sort factors canonically
-    factors.sort_by(|a, b| mul_factor_cmp(a, b));
+    factors.sort_by(mul_factor_cmp);
 
     // Build factor chain
     let factors_expr = if factors.is_empty() {
@@ -256,7 +254,7 @@ fn simplify_product(a: E, b: E) -> E {
     }
 
     // Sort factors into canonical order so a*b == b*a structurally
-    factors.sort_by(|a, b| mul_factor_cmp(a, b));
+    factors.sort_by(mul_factor_cmp);
 
     build_product(coeff, factors)
 }
@@ -460,11 +458,10 @@ fn build_product_from_groups(coeff: f64, groups: Vec<(E, f64)>) -> E {
 
 fn simplify_div(a: E, b: E) -> E {
     // Quick constant cases
-    if let (Expr::Const(va), Expr::Const(vb)) = (a.as_ref(), b.as_ref()) {
-        if *vb != 0.0 {
+    if let (Expr::Const(va), Expr::Const(vb)) = (a.as_ref(), b.as_ref())
+        && *vb != 0.0 {
             return constant(va / vb);
         }
-    }
     if is_const(&a, 0.0) { return constant(0.0); }
     if is_const(&b, 1.0) { return a; }
     if a == b { return constant(1.0); }
@@ -537,8 +534,8 @@ impl Expr {
             match e.as_ref() {
                 Expr::Neg(inner) => pi_coeff(inner).map(|c| -c),
                 Expr::Mul(a, b) => {
-                    if let Expr::Const(c) = a.as_ref() { if is_pi(b) { return Some(*c); } }
-                    if let Expr::Const(c) = b.as_ref() { if is_pi(a) { return Some(*c); } }
+                    if let Expr::Const(c) = a.as_ref() && is_pi(b) { return Some(*c); }
+                    if let Expr::Const(c) = b.as_ref() && is_pi(a) { return Some(*c); }
                     None
                 }
                 Expr::Div(a, b) => {
@@ -634,9 +631,8 @@ impl Expr {
                 if let Expr::Const(v) = a.as_ref() { return constant(v.ln()); }
                 if is_euler(&a) { return constant(1.0); }
                 // ln(e^n) -> n
-                if let Expr::Pow(base, exp) = a.as_ref() {
-                    if is_euler(base) { return exp.clone(); }
-                }
+                if let Expr::Pow(base, exp) = a.as_ref()
+                    && is_euler(base) { return exp.clone(); }
                 E::new(Expr::Ln(a))
             }
             Expr::Exp(a) => {
@@ -650,22 +646,21 @@ impl Expr {
             Expr::Sin(a) => {
                 let a = a.simplify_once();
                 if let Expr::Const(v) = a.as_ref() { return constant(v.sin()); }
-                if let Some(k) = pi_coeff(&a) { if let Some(v) = sin_pi(k) { return v; } }
+                if let Some(k) = pi_coeff(&a) && let Some(v) = sin_pi(k) { return v; }
                 E::new(Expr::Sin(a))
             }
             Expr::Cos(a) => {
                 let a = a.simplify_once();
                 if let Expr::Const(v) = a.as_ref() { return constant(v.cos()); }
-                if let Some(k) = pi_coeff(&a) { if let Some(v) = cos_pi(k) { return v; } }
+                if let Some(k) = pi_coeff(&a) && let Some(v) = cos_pi(k) { return v; }
                 E::new(Expr::Cos(a))
             }
             Expr::Tan(a) => {
                 let a = a.simplify_once();
                 if let Expr::Const(v) = a.as_ref() { return constant(v.tan()); }
                 // tan(n*pi) = 0 for integer n
-                if let Some(k) = pi_coeff(&a) {
-                    if (k - k.round()).abs() < 1e-9 { return constant(0.0); }
-                }
+                if let Some(k) = pi_coeff(&a)
+                    && (k - k.round()).abs() < 1e-9 { return constant(0.0); }
                 E::new(Expr::Tan(a))
             }
             Expr::Asin(a) => { let a = a.simplify_once(); if let Expr::Const(v) = a.as_ref() { return constant(v.asin()); } E::new(Expr::Asin(a)) }
@@ -679,11 +674,10 @@ impl Expr {
             Expr::Sqrt(a) => {
                 let a = a.simplify_once();
                 if let Expr::Const(v) = a.as_ref() { return constant(v.sqrt()); }
-                if let Expr::Pow(base, exp) = a.as_ref() {
-                    if is_const(exp, 2.0) {
+                if let Expr::Pow(base, exp) = a.as_ref()
+                    && is_const(exp, 2.0) {
                         return E::new(Expr::Abs(base.clone()));
                     }
-                }
                 E::new(Expr::Sqrt(a))
             }
             Expr::Abs(a) => { let a = a.simplify_once(); if let Expr::Const(v) = a.as_ref() { return constant(v.abs()); } E::new(Expr::Abs(a)) }
@@ -714,12 +708,11 @@ impl Expr {
             Expr::Func { name, params, kind, args } => {
                 let new_args: Vec<E> = args.iter().map(|a| a.simplify_once()).collect();
                 // Constant-fold functions with a symbolic body; Extern stays opaque
-                if let Some(body) = kind.body() {
-                    if new_args.iter().all(|a| matches!(a.as_ref(), Expr::Const(_))) {
+                if let Some(body) = kind.body()
+                    && new_args.iter().all(|a| matches!(a.as_ref(), Expr::Const(_))) {
                         let expanded = crate::expand_func(params, body, &new_args);
                         return expanded.simplify_once();
                     }
-                }
                 E::new(Expr::Func {
                     name: name.clone(), params: params.clone(),
                     kind: kind.clone(), args: new_args,
@@ -772,15 +765,14 @@ impl Expr {
             Expr::Pow(base, exp) => {
                 let base = base.expand_inner();
                 let exp = exp.expand_inner();
-                if let Some(n) = is_const_int(&exp) {
-                    if n >= 2 && n <= 8 {
+                if let Some(n) = is_const_int(&exp)
+                    && (2..=8).contains(&n) {
                         let mut result = base.clone();
                         for _ in 1..n {
                             result = E::new(Expr::Mul(result, base.clone()));
                         }
                         return result.expand_inner();
                     }
-                }
                 E::new(Expr::Pow(base, exp))
             }
             Expr::Sin(a) => E::new(Expr::Sin(a.expand_inner())),

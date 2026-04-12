@@ -223,12 +223,12 @@ pub fn validate_and_apply_constraint(
     let should_check_dof = !skip_dof_check && match action {
         Action::UpdateDimension { .. } => false,
         Action::AddDimension { derived: true, .. } => false,
-        Action::ApplyCoincidentPP { a, .. } => !sketch.points.get(*a).map_or(false, |p| p.helper),
+        Action::ApplyCoincidentPP { a, .. } => !sketch.points.get(*a).is_some_and(|p| p.helper),
         Action::ApplyCoincidentLP1 { point, .. } | Action::ApplyCoincidentLP2 { point, .. } =>
-            !sketch.points.get(*point).map_or(false, |p| p.helper),
+            !sketch.points.get(*point).is_some_and(|p| p.helper),
         Action::ApplyCoincidentArcCenter { point, .. } | Action::ApplyCoincidentArcStart { point, .. } |
         Action::ApplyCoincidentArcEnd { point, .. } =>
-            !sketch.points.get(*point).map_or(false, |p| p.helper),
+            !sketch.points.get(*point).is_some_and(|p| p.helper),
         _ => true,
     };
 
@@ -254,17 +254,15 @@ pub fn validate_and_apply_constraint(
     };
 
     // Cost rejection
-    if new_cost > old_cost + 1e-3 {
-        if let Some(ref snap) = snapshot {
-            if let Ok(restored) = bincode::deserialize(snap) {
+    if new_cost > old_cost + 1e-3
+        && let Some(ref snap) = snapshot
+            && let Ok(restored) = bincode::deserialize(snap) {
                 *sketch = restored;
                 let hint = dimension_rejection_hint(sketch, action);
                 return Err(format!(
                     "Constraint rejected: could not satisfy all constraints{}",
                     hint));
             }
-        }
-    }
 
     // Negative radius rejection
     for r in sketch.arcs.refs() {
@@ -278,30 +276,27 @@ pub fn validate_and_apply_constraint(
         };
         if let Some((which, val)) = bad {
             let name = a.name.clone();
-            if let Some(ref snap) = snapshot {
-                if let Ok(restored) = bincode::deserialize(snap) {
+            if let Some(ref snap) = snapshot
+                && let Ok(restored) = bincode::deserialize(snap) {
                     *sketch = restored;
                     return Err(format!(
                         "Constraint rejected: {} got negative {} ({:.4}). This is likely a solver bug -- please report it.",
                         name, which, val));
                 }
-            }
         }
     }
 
     // DOF rejection
     if let Some(old_dof) = old_dof {
         let new_dof = sketch.dof()?;
-        if new_dof >= old_dof {
-            if let Some(ref snap) = snapshot {
-                if let Ok(restored) = bincode::deserialize(snap) {
+        if new_dof >= old_dof
+            && let Some(ref snap) = snapshot
+                && let Ok(restored) = bincode::deserialize(snap) {
                     *sketch = restored;
                     return Err(format!(
                         "Constraint rejected: DOF unchanged at {}. Constraint is redundant or degenerate. Use 'force' to override.",
                         new_dof));
                 }
-            }
-        }
     }
 
     Ok(new_cost)
@@ -1034,11 +1029,10 @@ fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
                     // by comparing count before/after and capture the dimension name.
                     // Only when the command didn't already produce an entity (e.g. "driven"
                     // on geometry commands creates dimensions as a side effect).
-                    if !entity_captured && ctx.sketch.dimensions.len() > dim_count_before {
-                        if let Some(dim) = ctx.sketch.dimensions.last() {
+                    if !entity_captured && ctx.sketch.dimensions.len() > dim_count_before
+                        && let Some(dim) = ctx.sketch.dimensions.last() {
                             ctx.session_names.insert(var_name.to_string(), dim.name.clone());
                         }
-                    }
                 }
                 return result;
             }
@@ -1052,7 +1046,7 @@ fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
     let cmd = parts[0];
 
     // Check if command is blocked in this context
-    if ctx.blocked_commands.iter().any(|&b| b == cmd) {
+    if ctx.blocked_commands.contains(&cmd) {
         return err(format!("'{}' is not allowed in this context", cmd));
     }
     let raw_args = if parts.len() > 1 { parts[1].trim() } else { "" };
@@ -1480,23 +1474,19 @@ fn auto_tangent_arc(ctx: &mut CommandContext, arc_ref: Ref<Arc>) -> Vec<String> 
         let l = &ctx.sketch.lines[r];
         let ld = vect2d::new(l.p2.value.x - l.p1.value.x, l.p2.value.y - l.p1.value.y);
         // Arc start near line p1 or p2
-        if (a_sp.x - l.p1.value.x).abs() < snap_threshold && (a_sp.y - l.p1.value.y).abs() < snap_threshold
-            || (a_sp.x - l.p2.value.x).abs() < snap_threshold && (a_sp.y - l.p2.value.y).abs() < snap_threshold
-        {
-            if nearly_tangent(a_st, ld) {
+        if ((a_sp.x - l.p1.value.x).abs() < snap_threshold && (a_sp.y - l.p1.value.y).abs() < snap_threshold
+            || (a_sp.x - l.p2.value.x).abs() < snap_threshold && (a_sp.y - l.p2.value.y).abs() < snap_threshold)
+            && nearly_tangent(a_st, ld) {
                 candidates.push((Action::ApplyTangentLA { line: r, arc: arc_ref },
                     format!("{}.tangent.{}", l.name, a_name)));
             }
-        }
         // Arc end near line p1 or p2
-        if (a_ep.x - l.p1.value.x).abs() < snap_threshold && (a_ep.y - l.p1.value.y).abs() < snap_threshold
-            || (a_ep.x - l.p2.value.x).abs() < snap_threshold && (a_ep.y - l.p2.value.y).abs() < snap_threshold
-        {
-            if nearly_tangent(a_et, ld) {
+        if ((a_ep.x - l.p1.value.x).abs() < snap_threshold && (a_ep.y - l.p1.value.y).abs() < snap_threshold
+            || (a_ep.x - l.p2.value.x).abs() < snap_threshold && (a_ep.y - l.p2.value.y).abs() < snap_threshold)
+            && nearly_tangent(a_et, ld) {
                 candidates.push((Action::ApplyTangentLA { line: r, arc: arc_ref },
                     format!("{}.tangent.{}", l.name, a_name)));
             }
-        }
     }
 
     // Against other arcs
@@ -1508,31 +1498,27 @@ fn auto_tangent_arc(ctx: &mut CommandContext, arc_ref: Ref<Arc>) -> Vec<String> 
         let b_st = crate::geometry::arc_tangent_at(b, b.start_angle.value);
         let b_et = crate::geometry::arc_tangent_at(b, b.end_angle.value);
         // Arc start near other arc start/end
-        if (a_sp.x - b_sp.x).abs() < snap_threshold && (a_sp.y - b_sp.y).abs() < snap_threshold {
-            if nearly_tangent(a_st, b_st) {
+        if (a_sp.x - b_sp.x).abs() < snap_threshold && (a_sp.y - b_sp.y).abs() < snap_threshold
+            && nearly_tangent(a_st, b_st) {
                 candidates.push((Action::ApplyTangentAA { a: arc_ref, b: r },
                     format!("{}.tangent.{}", a_name, b.name)));
             }
-        }
-        if (a_sp.x - b_ep.x).abs() < snap_threshold && (a_sp.y - b_ep.y).abs() < snap_threshold {
-            if nearly_tangent(a_st, b_et) {
+        if (a_sp.x - b_ep.x).abs() < snap_threshold && (a_sp.y - b_ep.y).abs() < snap_threshold
+            && nearly_tangent(a_st, b_et) {
                 candidates.push((Action::ApplyTangentAA { a: arc_ref, b: r },
                     format!("{}.tangent.{}", a_name, b.name)));
             }
-        }
         // Arc end near other arc start/end
-        if (a_ep.x - b_sp.x).abs() < snap_threshold && (a_ep.y - b_sp.y).abs() < snap_threshold {
-            if nearly_tangent(a_et, b_st) {
+        if (a_ep.x - b_sp.x).abs() < snap_threshold && (a_ep.y - b_sp.y).abs() < snap_threshold
+            && nearly_tangent(a_et, b_st) {
                 candidates.push((Action::ApplyTangentAA { a: arc_ref, b: r },
                     format!("{}.tangent.{}", a_name, b.name)));
             }
-        }
-        if (a_ep.x - b_ep.x).abs() < snap_threshold && (a_ep.y - b_ep.y).abs() < snap_threshold {
-            if nearly_tangent(a_et, b_et) {
+        if (a_ep.x - b_ep.x).abs() < snap_threshold && (a_ep.y - b_ep.y).abs() < snap_threshold
+            && nearly_tangent(a_et, b_et) {
                 candidates.push((Action::ApplyTangentAA { a: arc_ref, b: r },
                     format!("{}.tangent.{}", a_name, b.name)));
             }
-        }
     }
 
     // Stage 2: cost check
@@ -2395,7 +2381,7 @@ fn tangent_touches_segment(center: vect2d, p1: vect2d, p2: vect2d) -> bool {
     let len_sq = dx * dx + dy * dy;
     if len_sq < 1e-24 { return false; }
     let t = ((center.x - p1.x) * dx + (center.y - p1.y) * dy) / len_sq;
-    t >= -1e-6 && t <= 1.0 + 1e-6
+    (-1e-6..=1.0 + 1e-6).contains(&t)
 }
 
 /// Compute center of circle tangent to two line segments with given radius.
@@ -2489,13 +2475,11 @@ fn circle_tangent_3lines(sketch: &Sketch, la: Ref<Line>, lb: Ref<Line>, lc: Ref<
                 if tangent_touches_segment(center, a1, a2)
                     && tangent_touches_segment(center, b1, b2)
                     && tangent_touches_segment(center, c1, c2)
-                {
-                    if !candidates.iter().any(|(p, _): &(vect2d, f64)|
+                    && !candidates.iter().any(|(p, _): &(vect2d, f64)|
                         (p.x - cx).abs() < 1e-6 && (p.y - cy).abs() < 1e-6)
                     {
                         candidates.push((center, r));
                     }
-                }
             }
         }
     }
@@ -3198,14 +3182,12 @@ fn cmd_param(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let new_cost = ctx.sketch.solve().end_cost;
     ctx.last_cost = new_cost;
     // Reject if cost increased significantly
-    if new_cost > old_cost + 1e-3 {
-        if let Some(ref snap) = snapshot {
-            if let Ok(restored) = bincode::deserialize(snap) {
+    if new_cost > old_cost + 1e-3
+        && let Some(ref snap) = snapshot
+            && let Ok(restored) = bincode::deserialize(snap) {
                 ctx.sketch = restored;
                 return err("Parameter change rejected: could not satisfy all constraints");
             }
-        }
-    }
     let val = ctx.sketch.user_params.iter().find(|p| p.name == name).map(|p| p.value).unwrap_or(0.0);
     ok(format!("{} {} = {} ({:.4})", if is_update { "Updated" } else { "Added" }, name, expr, val))
 }
@@ -3511,14 +3493,12 @@ fn cmd_drag(ctx: &mut CommandContext, args: &str) -> CommandResult {
         ctx.sketch.serialize64(&mut params);
         ctx.sketch.calc_cost(&params)
     };
-    if new_cost > old_cost + 1e-3 {
-        if let Some(ref snap) = snapshot {
-            if let Ok(restored) = bincode::deserialize(snap) {
+    if new_cost > old_cost + 1e-3
+        && let Some(ref snap) = snapshot
+            && let Ok(restored) = bincode::deserialize(snap) {
                 ctx.sketch = restored;
                 return err("Drag failed: could not satisfy constraints");
             }
-        }
-    }
 
     // Report new position
     let new_pos = match &target {
@@ -3782,11 +3762,10 @@ fn cmd_deselect(ctx: &mut CommandContext, args: &str) -> CommandResult {
             if let Ok(r) = resolve_arc(&ctx.sketch, name) {
                 ctx.selection.retain(|s| !matches!(s, Selection::Arc(a) if *a == r));
             }
-        } else if name.starts_with('P') {
-            if let Ok(r) = resolve_point(&ctx.sketch, name) {
+        } else if name.starts_with('P')
+            && let Ok(r) = resolve_point(&ctx.sketch, name) {
                 ctx.selection.retain(|s| !matches!(s, Selection::Point(p) if *p == r));
             }
-        }
     }
     ok(format!("Selection: {} entities", ctx.selection.len()))
 }
@@ -3835,24 +3814,21 @@ fn constraints_for(sketch: &Sketch, name: &str) -> Vec<String> {
 fn cmd_info(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let name = args.trim();
     // Endpoint info: L0.p1, L0.p2, A0.center, etc.
-    if name.contains('.') {
-        if let Ok(pos) = resolve_endpoint_pos(&ctx.sketch, name) {
+    if name.contains('.')
+        && let Ok(pos) = resolve_endpoint_pos(&ctx.sketch, name) {
             let mut s = format!("{}: ({:.4}, {:.4})", name, pos.x, pos.y);
             // Check lock status
-            if let Some((entity, field)) = name.split_once('.') {
-                if entity.starts_with('L') {
-                    if let Ok(r) = resolve_line(&ctx.sketch, entity) {
+            if let Some((entity, field)) = name.split_once('.')
+                && entity.starts_with('L')
+                    && let Ok(r) = resolve_line(&ctx.sketch, entity) {
                         let l = &ctx.sketch.lines[r];
                         if field == "p1" && !l.p1.optimize { s += " [locked]"; }
                         if field == "p2" && !l.p2.optimize { s += " [locked]"; }
                     }
-                }
-            }
             let cstrs = constraints_for(&ctx.sketch, name);
             if !cstrs.is_empty() { s += &format!("\n  constraints: {}", cstrs.join(", ")); }
             return ok(s);
         }
-    }
     if name.starts_with('L') && !name.contains('.') {
         let r = match resolve_line(&ctx.sketch, name) { Ok(r) => r, Err(e) => return err(e) };
         let l = &ctx.sketch.lines[r];
@@ -4231,7 +4207,7 @@ fn cmd_history(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let n: usize = args.trim().parse().unwrap_or(usize::MAX);
     let groups = ctx.history.group_list();
     let total = groups.len();
-    let start = if n < total { total - n } else { 0 };
+    let start = total.saturating_sub(n);
     let cursor = ctx.history.cursor;
     let mut lines = Vec::new();
     for (i, (_, end_pos, desc)) in groups.iter().enumerate().skip(start) {
@@ -4490,8 +4466,8 @@ fn cmd_symmetry(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let tokens: Vec<&str> = args.split_whitespace().collect();
     if tokens.len() != 3 { return err("Usage: symmetry L0 L1 L2 | symmetry P0 L0 P1 | symmetry A0 L0 A1"); }
     // Try arc + line + arc symmetry
-    if is_arc_name(tokens[0]) && is_arc_name(tokens[2]) {
-        if let (Ok(a), Ok(line), Ok(c)) = (resolve_arc(&ctx.sketch, tokens[0]),
+    if is_arc_name(tokens[0]) && is_arc_name(tokens[2])
+        && let (Ok(a), Ok(line), Ok(c)) = (resolve_arc(&ctx.sketch, tokens[0]),
             resolve_line(&ctx.sketch, tokens[1]),
             resolve_arc(&ctx.sketch, tokens[2]))
         {
@@ -4504,7 +4480,6 @@ fn cmd_symmetry(ctx: &mut CommandContext, args: &str) -> CommandResult {
             ctx.exec(Action::ApplySymmetryAA { a, line, c });
             return ok_or_status(ctx, "Applied arc symmetry");
         }
-    }
     // Try point/endpoint + line + point/endpoint symmetry
     let mid_is_line = resolve_line(&ctx.sketch, tokens[1]).is_ok();
     let first_is_pointlike = resolve_point(&ctx.sketch, tokens[0]).is_ok()
@@ -4786,9 +4761,8 @@ fn cmd_mirror(ctx: &mut CommandContext, args: &str) -> CommandResult {
             let a = match resolve_as_point(ctx, &entry.src_ep) { Ok(r) => r, Err(_) => continue };
             let c = match resolve_as_point(ctx, &entry.dst_ep) { Ok(r) => r, Err(_) => continue };
             let desc = format!("symmetry {} {} {}", entry.src_ep, after_about[0], entry.dst_ep);
-            if let Err(e) = rect_exec(ctx, Action::ApplySymmetryPP { a, line: mirror_line, c }, strict, &desc, &mut applied, &mut warnings) {
-                if strict { return err(e); }
-            }
+            if let Err(e) = rect_exec(ctx, Action::ApplySymmetryPP { a, line: mirror_line, c }, strict, &desc, &mut applied, &mut warnings)
+                && strict { return err(e); }
         }
     }
 
@@ -5119,7 +5093,7 @@ fn cmd_axis_distance(ctx: &mut CommandContext, args: &str, horizontal: bool) -> 
     }
 
     if tokens.len() != 3 {
-        return err(&format!("Usage: {} L0.p1 L1.p2 5 [derived|driven]", label));
+        return err(format!("Usage: {} L0.p1 L1.p2 5 [derived|driven]", label));
     }
     let (val, expr) = match parse_dim_value(&ctx.sketch, tokens[2]) { Ok(v) => v, Err(e) => return err(e) };
     let ep_a = match resolve_endpoint_ref(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
@@ -5515,8 +5489,8 @@ fn cmd_remove_constraint(ctx: &mut CommandContext, args: &str) -> CommandResult 
                 find_point_on_arc_id(sketch, ep, arc)
             } else { None };
             // Arc endpoints use helper points -- fall back to direct removal if not found
-            if found.is_none() {
-                if let Some(p) = resolve_endpoint_as_point(&ctx.sketch, ep) {
+            if found.is_none()
+                && let Some(p) = resolve_endpoint_as_point(&ctx.sketch, ep) {
                     if target.starts_with('L') || target.starts_with('l') {
                         let line = match resolve_line(&ctx.sketch, target) { Ok(r) => r, Err(e) => return err(e) };
                         let before = ctx.sketch.point_on_line.len();
@@ -5539,7 +5513,6 @@ fn cmd_remove_constraint(ctx: &mut CommandContext, args: &str) -> CommandResult 
                         }
                     }
                 }
-            }
             found
         }
         "symmetry" if tokens.len() >= 4 => {
@@ -6062,7 +6035,7 @@ fn cmd_dof_singular(ctx: &mut CommandContext) -> CommandResult {
                 // Instance label like "arc:A0" or "parallel:L3,L0"; take the part after ":"
                 // for compactness since it already identifies the entity.
                 let instance = labels.get(cid).cloned().unwrap_or_else(|| format!("cid={}", cid));
-                let instance_short = instance.splitn(2, ':').nth(1).unwrap_or(&instance).to_string();
+                let instance_short = instance.split_once(':').map(|x| x.1).unwrap_or(&instance).to_string();
                 format!("{:.0}% {}/{}", w * 100.0, instance_short, label)
             }).collect();
             lines.push(format!("           {}", parts.join(", ")));
@@ -6113,7 +6086,7 @@ fn cmd_dof_jacobian(ctx: &mut CommandContext) -> CommandResult {
         let norm: f64 = row.entries.iter().map(|&(_, v)| v * v).sum::<f64>().sqrt();
         // Combine instance (from cid->label map) with attribute label (from row.label).
         let instance = labels.get(&row.constraint).cloned().unwrap_or_else(|| format!("cid={}", row.constraint));
-        let instance_short = instance.splitn(2, ':').nth(1).unwrap_or(&instance).to_string();
+        let instance_short = instance.split_once(':').map(|x| x.1).unwrap_or(&instance).to_string();
         let combined = format!("{}/{}", instance_short, row.label);
         let r_str = if row.residual == 0.0 { "r=0".to_string() } else { format!("r={:+.6e}", row.residual) };
         let norm_str = if norm == 0.0 { "|dr|=0".to_string() } else { format!("|dr|={:.6e}", norm) };
@@ -7008,7 +6981,7 @@ fn add_params(sketch: &Sketch, results: &mut Vec<String>, prefix: &str) {
 }
 
 fn add_session_names(session_names: &HashMap<String, String>, results: &mut Vec<String>, prefix: &str) {
-    for (name, _) in session_names {
+    for name in session_names.keys() {
         if name == "_" { continue; }
         if name.starts_with(prefix) && name != prefix {
             results.push(name.clone());

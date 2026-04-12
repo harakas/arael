@@ -1119,7 +1119,7 @@ impl<A: Model, const N: usize, T: crate::utils::Float> SelfBlock<A, N, T> {
                 let (lo, hi) = if gi <= gj { (gi, gj) } else { (gj, gi) };
                 let val = self.hessian[tri_idx(N, i, j)];
                 if let Some(pos) = csc.find_pos(lo as usize, hi as usize) {
-                    csc.vals[pos] = csc.vals[pos] + val;
+                    csc.vals[pos] += val;
                 }
             }
         }
@@ -1284,7 +1284,7 @@ impl<A: Model, B: Model, const N: usize, T: crate::utils::Float> CrossBlock<A, B
                 let (lo, hi) = if gi <= gj { (gi, gj) } else { (gj, gi) };
                 let val = self.hessian[tri_idx(N, i, j)];
                 if let Some(pos) = csc.find_pos(lo as usize, hi as usize) {
-                    csc.vals[pos] = csc.vals[pos] + val;
+                    csc.vals[pos] += val;
                 }
             }
         }
@@ -1417,7 +1417,7 @@ impl<T: crate::utils::Float> TripletBlock<T> {
         }
         for &(row, col, v) in &self.hessian {
             if let Some(pos) = csc.find_pos(row as usize, col as usize) {
-                csc.vals[pos] = csc.vals[pos] + v;
+                csc.vals[pos] += v;
             }
         }
     }

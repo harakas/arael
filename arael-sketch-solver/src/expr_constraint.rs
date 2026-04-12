@@ -45,12 +45,11 @@ impl ExpressionConstraint {
         let mut param_derivs = Vec::new();
         let mut seen = std::collections::HashSet::new();
         for sym in &all_symbols {
-            if bag.param_indices.contains_key(sym.as_str()) {
-                if seen.insert(sym.clone()) {
+            if bag.param_indices.contains_key(sym.as_str())
+                && seen.insert(sym.clone()) {
                     let deriv = expanded.diff(sym.clone());
                     param_derivs.push((sym.clone(), deriv));
                 }
-            }
         }
         self.expr = expanded;
         self.param_derivs = param_derivs;

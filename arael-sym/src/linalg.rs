@@ -107,7 +107,7 @@ impl ops::Add for SymVec {
     fn add(self, rhs: SymVec) -> SymVec {
         assert_eq!(self.len(), rhs.len(), "SymVec add: length mismatch");
         SymVec(
-            self.0.into_iter().zip(rhs.0.into_iter())
+            self.0.into_iter().zip(rhs.0)
                 .map(|(a, b)| a + b)
                 .collect()
         )
@@ -292,7 +292,7 @@ impl ops::Add for SymMat {
         SymMat {
             rows: self.rows,
             cols: self.cols,
-            data: self.data.into_iter().zip(rhs.data.into_iter())
+            data: self.data.into_iter().zip(rhs.data)
                 .map(|(a, b)| a + b)
                 .collect(),
         }

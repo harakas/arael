@@ -94,7 +94,7 @@ impl<T: Float> ops::Rem for vect3<T>
 impl<T: Float> vect3<T> {
     /// Constructs a 3D vector from components.
     pub fn new(x: T, y: T, z: T) -> vect3<T> {
-        vect3::<T> { x: x, y: y, z: z}
+        vect3::<T> { x, y, z}
     }
 
     /// Returns the squared magnitude (dot product with itself).
@@ -269,7 +269,7 @@ impl<T: Float> ops::Neg for vect2<T>
 impl<T: Float> vect2<T> {
     /// Constructs a 2D vector from components.
     pub fn new(x: T, y: T) -> vect2<T> {
-        vect2::<T> { x: x, y: y}
+        vect2::<T> { x, y}
     }
 
     /// Returns the squared magnitude (dot product with itself).

@@ -380,13 +380,12 @@ fn model_attribute(input: &mut syn::DeriveInput) -> syn::Result<TokenStream2> {
     };
 
     // Rewrite SelfBlock<A> and CrossBlock<A, B> field types
-    if let syn::Data::Struct(ref mut data) = input.data {
-        if let syn::Fields::Named(ref mut named) = data.fields {
+    if let syn::Data::Struct(ref mut data) = input.data
+        && let syn::Fields::Named(ref mut named) = data.fields {
             for field in named.named.iter_mut() {
                 rewrite_block_type(&mut field.ty);
             }
         }
-    }
 
     // Emit const
     let const_name = syn::Ident::new(&format!("{}_PARAM_COUNT", name), name.span());
@@ -398,13 +397,12 @@ fn model_attribute(input: &mut syn::DeriveInput) -> syn::Result<TokenStream2> {
     // Strip #[arael(...)] attributes from the emitted struct so they don't
     // get re-interpreted as attribute macro invocations
     input.attrs.retain(|attr| !attr.path().is_ident("arael"));
-    if let syn::Data::Struct(ref mut data) = input.data {
-        if let syn::Fields::Named(ref mut named) = data.fields {
+    if let syn::Data::Struct(ref mut data) = input.data
+        && let syn::Fields::Named(ref mut named) = data.fields {
             for field in named.named.iter_mut() {
                 field.attrs.retain(|attr| !attr.path().is_ident("arael"));
             }
         }
-    }
 
     Ok(quote! {
         #input
@@ -480,8 +478,8 @@ fn emit_trivial_model_for_enum(input: &mut syn::DeriveInput) -> TokenStream2 {
 
 /// Classify a non-Param field's sym type from its type path.
 fn classify_field_sym_type(ty: &syn::Type) -> SymFieldType {
-    if let syn::Type::Path(tp) = ty {
-        if let Some(seg) = tp.path.segments.last() {
+    if let syn::Type::Path(tp) = ty
+        && let Some(seg) = tp.path.segments.last() {
             let name = seg.ident.to_string();
             return match name.as_str() {
                 "f32" | "f64" | "bool" | "u32" | "i32" | "usize" => SymFieldType::Scalar,
@@ -502,34 +500,30 @@ fn classify_field_sym_type(ty: &syn::Type) -> SymFieldType {
                 }
             };
         }
-    }
     SymFieldType::Skip
 }
 
 /// Extract the SIZE of a Param<T> field's inner type.
 fn param_type_size(ty: &syn::Type) -> u32 {
-    if let syn::Type::Path(tp) = ty {
-        if let Some(seg) = tp.path.segments.last() {
+    if let syn::Type::Path(tp) = ty
+        && let Some(seg) = tp.path.segments.last() {
             let name = seg.ident.to_string();
-            if name == "Param" {
-                if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
-                    if let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
+            if name == "Param"
+                && let syn::PathArguments::AngleBracketed(args) = &seg.arguments
+                    && let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
                         return inner_type_size(inner);
                     }
-                }
-            }
             if name == "SimpleEulerAngleParam" || name == "EulerAngleParam" {
                 return 3; // always vect3 = 3 params
             }
         }
-    }
     0
 }
 
 /// Return the ParamType::SIZE for known types.
 fn inner_type_size(ty: &syn::Type) -> u32 {
-    if let syn::Type::Path(tp) = ty {
-        if let Some(seg) = tp.path.segments.last() {
+    if let syn::Type::Path(tp) = ty
+        && let Some(seg) = tp.path.segments.last() {
             return match seg.ident.to_string().as_str() {
                 "f32" | "f64" => 1,
                 "vect2f" | "vect2d" => 2,
@@ -537,7 +531,6 @@ fn inner_type_size(ty: &syn::Type) -> u32 {
                 _ => 0,
             };
         }
-    }
     0
 }
 
@@ -546,8 +539,8 @@ fn inner_type_size(ty: &syn::Type) -> u32 {
 /// CrossBlock<A, B> to CrossBlock<A, B, {A_PARAM_COUNT + B_PARAM_COUNT}> and
 /// CrossBlock<A, B, f32> to CrossBlock<A, B, {A_PARAM_COUNT + B_PARAM_COUNT}, f32>.
 fn rewrite_block_type(ty: &mut syn::Type) {
-    if let syn::Type::Path(tp) = ty {
-        if let Some(seg) = tp.path.segments.last_mut() {
+    if let syn::Type::Path(tp) = ty
+        && let Some(seg) = tp.path.segments.last_mut() {
             let type_name = seg.ident.to_string();
             if type_name == "SelfBlock" {
                 if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
@@ -556,8 +549,8 @@ fn rewrite_block_type(ty: &mut syn::Type) {
                         .collect();
                     if type_args.len() == 1 || type_args.len() == 2 {
                         // First arg is the model type A
-                        if let syn::Type::Path(a_path) = type_args[0] {
-                            if let Some(a_seg) = a_path.path.segments.last() {
+                        if let syn::Type::Path(a_path) = type_args[0]
+                            && let Some(a_seg) = a_path.path.segments.last() {
                                 let const_name = syn::Ident::new(
                                     &format!("{}_PARAM_COUNT", a_seg.ident),
                                     a_seg.ident.span(),
@@ -578,19 +571,17 @@ fn rewrite_block_type(ty: &mut syn::Type) {
                                     *ty = new_ty;
                                 }
                             }
-                        }
                     }
                 }
-            } else if type_name == "CrossBlock" {
-                if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+            } else if type_name == "CrossBlock"
+                && let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
                     let type_args: Vec<&syn::Type> = args.args.iter()
                         .filter_map(|a| if let syn::GenericArgument::Type(t) = a { Some(t) } else { None })
                         .collect();
-                    if type_args.len() == 2 || type_args.len() == 3 {
-                        if let (syn::Type::Path(a_path), syn::Type::Path(b_path)) =
+                    if (type_args.len() == 2 || type_args.len() == 3)
+                        && let (syn::Type::Path(a_path), syn::Type::Path(b_path)) =
                             (type_args[0], type_args[1])
-                        {
-                            if let (Some(a_seg), Some(b_seg)) = (a_path.path.segments.last(), b_path.path.segments.last()) {
+                            && let (Some(a_seg), Some(b_seg)) = (a_path.path.segments.last(), b_path.path.segments.last()) {
                                 let a_const = syn::Ident::new(
                                     &format!("{}_PARAM_COUNT", a_seg.ident),
                                     a_seg.ident.span(),
@@ -616,12 +607,8 @@ fn rewrite_block_type(ty: &mut syn::Type) {
                                     *ty = new_ty;
                                 }
                             }
-                        }
-                    }
                 }
-            }
         }
-    }
 }
 
 #[proc_macro_derive(Model, attributes(arael))]
@@ -648,11 +635,10 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
     // Pass 1: identify Param<T> fields
     let mut param_field_names: HashSet<String> = HashSet::new();
     for field in fields {
-        if is_param_type(&field.ty) {
-            if let Some(ident) = &field.ident {
+        if is_param_type(&field.ty)
+            && let Some(ident) = &field.ident {
                 param_field_names.insert(ident.to_string());
             }
-        }
     }
 
     // Detect euler angle param types and generate precompute calls
@@ -929,8 +915,8 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
             let content: TokenStream2 = attr.parse_args().unwrap_or_default();
             let tvec: Vec<proc_macro2::TokenTree> = content.into_iter().collect();
             if tvec.is_empty() { continue; }
-            if let proc_macro2::TokenTree::Ident(ref id) = tvec[0] {
-                if id.to_string() == "constraint" {
+            if let proc_macro2::TokenTree::Ident(ref id) = tvec[0]
+                && *id == "constraint" {
                     let tokens: TokenStream2 = tvec.into_iter().collect();
                     registry_stash_constraint(StashedConstraint {
                         struct_name: name.to_string(),
@@ -938,7 +924,6 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                         fields_tokens: fields_ts.to_string(),
                     });
                 }
-            }
         }
     }
 
@@ -948,15 +933,15 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
         let content: TokenStream2 = attr.parse_args().ok()?;
         let tvec: Vec<proc_macro2::TokenTree> = content.into_iter().collect();
         if let Some(proc_macro2::TokenTree::Ident(id)) = tvec.first() {
-            if id.to_string() != "root" { return None; }
+            if *id != "root" { return None; }
             // Parse optional keywords after comma: f32/f64, extended, jacobian
             let mut precision = "f64".to_string();
             let mut custom = false;
             let mut jacobian = false;
             let mut pos = 1;
             while pos < tvec.len() {
-                if let proc_macro2::TokenTree::Punct(p) = &tvec[pos] {
-                    if p.as_char() == ',' {
+                if let proc_macro2::TokenTree::Punct(p) = &tvec[pos]
+                    && p.as_char() == ',' {
                         pos += 1;
                         if let Some(proc_macro2::TokenTree::Ident(kw)) = tvec.get(pos) {
                             let kw_str = kw.to_string();
@@ -969,7 +954,6 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                             }
                         }
                     }
-                }
                 pos += 1;
             }
             return Some((precision, custom, jacobian));
@@ -996,23 +980,21 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
 
 /// Check if a type is `Param<...>` by looking at the last path segment.
 fn is_param_type(ty: &syn::Type) -> bool {
-    if let syn::Type::Path(tp) = ty {
-        if let Some(seg) = tp.path.segments.last() {
+    if let syn::Type::Path(tp) = ty
+        && let Some(seg) = tp.path.segments.last() {
             let name = seg.ident.to_string();
             return name == "Param" || name == "SimpleEulerAngleParam" || name == "EulerAngleParam";
         }
-    }
     false
 }
 
 fn is_euler_angle_param_type(ty: &syn::Type) -> Option<&'static str> {
-    if let syn::Type::Path(tp) = ty {
-        if let Some(seg) = tp.path.segments.last() {
+    if let syn::Type::Path(tp) = ty
+        && let Some(seg) = tp.path.segments.last() {
             let name = seg.ident.to_string();
             if name == "SimpleEulerAngleParam" { return Some("simple"); }
             if name == "EulerAngleParam" { return Some("universal"); }
         }
-    }
     None
 }
 
@@ -1020,54 +1002,45 @@ fn is_euler_angle_param_type(ty: &syn::Type) -> Option<&'static str> {
 /// SelfBlock<A, f32> or CrossBlock<A, B, f32> -> true. Default (no float arg) -> false.
 /// Also handles Option<SelfBlock<..., f32>>.
 fn block_is_f32(ty: &syn::Type) -> bool {
-    if let syn::Type::Path(tp) = ty {
-        if let Some(seg) = tp.path.segments.last() {
+    if let syn::Type::Path(tp) = ty
+        && let Some(seg) = tp.path.segments.last() {
             // Unwrap Option<...> if needed
             if seg.ident == "Option" {
-                if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
-                    if let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
+                if let syn::PathArguments::AngleBracketed(args) = &seg.arguments
+                    && let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
                         return block_is_f32(inner_ty);
                     }
-                }
                 return false;
             }
             // SelfBlock or CrossBlock: check if last type arg is f32
-            if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
-                if let Some(syn::GenericArgument::Type(syn::Type::Path(last))) = args.args.last() {
-                    if let Some(last_seg) = last.path.segments.last() {
+            if let syn::PathArguments::AngleBracketed(args) = &seg.arguments
+                && let Some(syn::GenericArgument::Type(syn::Type::Path(last))) = args.args.last()
+                    && let Some(last_seg) = last.path.segments.last() {
                         return last_seg.ident == "f32";
                     }
-                }
-            }
         }
-    }
     false
 }
 
 /// Check if a type is `SelfBlock<...>` or `CrossBlock<...>`.
 fn is_hessian_block_type(ty: &syn::Type) -> bool {
-    if let syn::Type::Path(tp) = ty {
-        if let Some(seg) = tp.path.segments.last() {
+    if let syn::Type::Path(tp) = ty
+        && let Some(seg) = tp.path.segments.last() {
             let name = seg.ident.to_string();
             return matches!(name.as_str(), "SelfBlock" | "CrossBlock" | "TripletBlock");
         }
-    }
     false
 }
 
 /// Check if a type is `Option<SelfBlock<...>>` or `Option<CrossBlock<...>>`.
 fn is_option_hessian_block(ty: &syn::Type) -> bool {
-    if let syn::Type::Path(tp) = ty {
-        if let Some(seg) = tp.path.segments.last() {
-            if seg.ident == "Option" {
-                if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
-                    if let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
+    if let syn::Type::Path(tp) = ty
+        && let Some(seg) = tp.path.segments.last()
+            && seg.ident == "Option"
+                && let syn::PathArguments::AngleBracketed(args) = &seg.arguments
+                    && let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
                         return is_hessian_block_type(inner_ty);
                     }
-                }
-            }
-        }
-    }
     false
 }
 
@@ -1076,33 +1049,26 @@ fn is_sym_skip_type(ty: &syn::Type) -> bool {
     if is_hessian_block_type(ty) || is_option_hessian_block(ty) {
         return true;
     }
-    if let syn::Type::Path(tp) = ty {
-        if let Some(seg) = tp.path.segments.last() {
+    if let syn::Type::Path(tp) = ty
+        && let Some(seg) = tp.path.segments.last() {
             let name = seg.ident.to_string();
             return matches!(name.as_str(), "Vec" | "Deque" | "Arena");
         }
-    }
     false
 }
 
 /// Extract the inner type T from a generic wrapper like Ref<T> or Option<T>.
 /// Returns the inner type and the last ident of T's path (e.g. "Pose").
 fn extract_wrapper_inner<'a>(ty: &'a syn::Type, wrapper: &str) -> Option<(&'a syn::Type, &'a syn::Ident)> {
-    if let syn::Type::Path(tp) = ty {
-        if let Some(seg) = tp.path.segments.last() {
-            if seg.ident == wrapper {
-                if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
-                    if let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
-                        if let syn::Type::Path(inner_tp) = inner_ty {
-                            if let Some(inner_seg) = inner_tp.path.segments.last() {
+    if let syn::Type::Path(tp) = ty
+        && let Some(seg) = tp.path.segments.last()
+            && seg.ident == wrapper
+                && let syn::PathArguments::AngleBracketed(args) = &seg.arguments
+                    && let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first()
+                        && let syn::Type::Path(inner_tp) = inner_ty
+                            && let Some(inner_seg) = inner_tp.path.segments.last() {
                                 return Some((inner_ty, &inner_seg.ident));
                             }
-                        }
-                    }
-                }
-            }
-        }
-    }
     None
 }
 
@@ -1229,30 +1195,26 @@ fn parse_arael_attr(attrs: &[syn::Attribute]) -> syn::Result<Option<AraelAttr>> 
                 }
                 // #[arael(ref = root.poses)]
                 if kw == "ref" {
-                    if tokens.len() >= 3 {
-                        if let proc_macro2::TokenTree::Punct(ref p) = tokens[1] {
-                            if p.as_char() == '=' {
+                    if tokens.len() >= 3
+                        && let proc_macro2::TokenTree::Punct(ref p) = tokens[1]
+                            && p.as_char() == '=' {
                                 let path_tokens: TokenStream2 =
                                     tokens[2..].iter().cloned().collect();
                                 return Ok(Some(AraelAttr::RefResolve(path_tokens.to_string())));
                             }
-                        }
-                    }
                     return Err(syn::Error::new_spanned(
                         &tokens[0],
                         "expected `ref = <path>`",
                     ));
                 }
                 if kw == "compute" {
-                    if tokens.len() >= 3 {
-                        if let proc_macro2::TokenTree::Punct(ref p) = tokens[1] {
-                            if p.as_char() == '=' {
+                    if tokens.len() >= 3
+                        && let proc_macro2::TokenTree::Punct(ref p) = tokens[1]
+                            && p.as_char() == '=' {
                                 let expr_tokens: TokenStream2 =
                                     tokens[2..].iter().cloned().collect();
                                 return Ok(Some(AraelAttr::Compute(expr_tokens)));
                             }
-                        }
-                    }
                     return Err(syn::Error::new_spanned(
                         &tokens[0],
                         "expected `compute = <expression>`",
@@ -1341,7 +1303,7 @@ fn parse_fit_attr(attrs: &[syn::Attribute]) -> syn::Result<Option<FitAttr>> {
         }
 
         if let proc_macro2::TokenTree::Ident(ref ident) = tokens[0] {
-            if ident.to_string() != "fit" {
+            if *ident != "fit" {
                 continue;
             }
 
@@ -1507,18 +1469,15 @@ fn syn_expr_to_sym(expr: &Expr, ctx: &mut SymContext) -> syn::Result<arael_sym::
 
         Expr::Field(ef) => {
             // e.x where e is the loop variable
-            if let Expr::Path(base_path) = ef.base.as_ref() {
-                if let Some(base_ident) = base_path.path.get_ident() {
-                    if base_ident.to_string() == ctx.loop_var {
-                        if let syn::Member::Named(field_name) = &ef.member {
+            if let Expr::Path(base_path) = ef.base.as_ref()
+                && let Some(base_ident) = base_path.path.get_ident()
+                    && *base_ident == ctx.loop_var
+                        && let syn::Member::Named(field_name) = &ef.member {
                             let sym_name =
                                 format!("{}_{}", ctx.loop_var, field_name);
                             ctx.data_fields.insert(field_name.to_string());
                             return Ok(arael_sym::symbol(&sym_name));
                         }
-                    }
-                }
-            }
             Err(syn::Error::new_spanned(
                 expr,
                 "only loop_variable.field access is supported in fit expressions",
@@ -1534,7 +1493,7 @@ fn syn_expr_to_sym(expr: &Expr, ctx: &mut SymContext) -> syn::Result<arael_sym::
                 syn::BinOp::Mul(_) => Ok(left * right),
                 syn::BinOp::Div(_) => Ok(left / right),
                 _ => Err(syn::Error::new_spanned(
-                    &eb.op,
+                    eb.op,
                     "only +, -, *, / operators are supported in fit expressions",
                 )),
             }
@@ -1567,8 +1526,8 @@ fn syn_expr_to_sym(expr: &Expr, ctx: &mut SymContext) -> syn::Result<arael_sym::
         },
 
         Expr::Call(ec) => {
-            if let Expr::Path(func_path) = ec.func.as_ref() {
-                if let Some(func_name) = func_path.path.get_ident() {
+            if let Expr::Path(func_path) = ec.func.as_ref()
+                && let Some(func_name) = func_path.path.get_ident() {
                     let args: Vec<arael_sym::E> = ec
                         .args
                         .iter()
@@ -1586,7 +1545,6 @@ fn syn_expr_to_sym(expr: &Expr, ctx: &mut SymContext) -> syn::Result<arael_sym::
                         )),
                     };
                 }
-            }
             Err(syn::Error::new_spanned(
                 expr,
                 "unsupported function call in fit expression",
@@ -1711,7 +1669,7 @@ fn generate_fit_impl(
             }
             _ => {
                 return Err(syn::Error::new_spanned(
-                    &fit.body_stmts.first(),
+                    fit.body_stmts.first(),
                     "only let bindings and expressions are supported in fit body",
                 ))
             }

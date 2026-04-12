@@ -253,7 +253,7 @@ impl eframe::App for EditorApp {
                                 });
                                 success = true;
                             }
-                        } else if let Some(kind) = self.dim_kind.clone() {
+                        } else if let Some(kind) = self.dim_kind {
                             let is_dup = self.sketch.dimensions.iter().any(|d| d.kind == kind);
                             if is_dup {
                                 self.status_error = Some("Dimension already exists".into());
@@ -261,12 +261,11 @@ impl eframe::App for EditorApp {
                                 let value = input.parse::<f64>().unwrap_or(0.0);
                                 let n_dims_before = self.sketch.dimensions.len();
                                 self.exec(Action::AddDimension { kind, value, expr: None, derived: self.dim_derived });
-                                if self.sketch.dimensions.len() > n_dims_before {
-                                    if let Some(d) = self.sketch.dimensions.last_mut() {
+                                if self.sketch.dimensions.len() > n_dims_before
+                                    && let Some(d) = self.sketch.dimensions.last_mut() {
                                         d.offset = self.dim_offset;
                                         d.text_along = self.dim_text_along;
                                     }
-                                }
                                 success = true;
                             } else {
                                 if let Err(e) = self.sketch.validate_expr(&input) {
@@ -276,12 +275,11 @@ impl eframe::App for EditorApp {
                                     self.exec(Action::AddDimension {
                                         kind, value: 0.0, expr: Some(input.clone()), derived: self.dim_derived,
                                     });
-                                    if self.sketch.dimensions.len() > n_dims_before {
-                                        if let Some(d) = self.sketch.dimensions.last_mut() {
+                                    if self.sketch.dimensions.len() > n_dims_before
+                                        && let Some(d) = self.sketch.dimensions.last_mut() {
                                             d.offset = self.dim_offset;
                                             d.text_along = self.dim_text_along;
                                         }
-                                    }
                                     success = true;
                                 }
                             }
@@ -305,8 +303,8 @@ impl eframe::App for EditorApp {
             ui.heading("File");
             ui.separator();
             ui.horizontal(|ui| {
-                if ui.button("Save").clicked() {
-                    if let Ok(json) = serde_json::to_string_pretty(&self.sketch) {
+                if ui.button("Save").clicked()
+                    && let Ok(json) = serde_json::to_string_pretty(&self.sketch) {
                         let json_bytes = json.into_bytes();
                         spawn_async(async move {
                             if let Some(handle) = rfd::AsyncFileDialog::new()
@@ -318,7 +316,6 @@ impl eframe::App for EditorApp {
                             }
                         });
                     }
-                }
                 if ui.button("Open").clicked() {
                     let pending = self.pending_load.clone();
                     spawn_async(async move {
@@ -340,8 +337,8 @@ impl eframe::App for EditorApp {
             ui.separator();
 
             ui.horizontal(|ui| {
-                if ui.add_enabled(self.history.can_undo(), egui::Button::new("Undo")).clicked() {
-                    if let Some((restored, cur)) = self.history.undo() {
+                if ui.add_enabled(self.history.can_undo(), egui::Button::new("Undo")).clicked()
+                    && let Some((restored, cur)) = self.history.undo() {
                         self.sketch = restored;
                         self.command_cursor = cur.pos;
                         self.command_cursor_tangent = cur.tangent;
@@ -349,9 +346,8 @@ impl eframe::App for EditorApp {
                         self.update_cost();
                         self.compute_dof_async();
                     }
-                }
-                if ui.add_enabled(self.history.can_redo(), egui::Button::new("Redo")).clicked() {
-                    if let Some((restored, cur)) = self.history.redo() {
+                if ui.add_enabled(self.history.can_redo(), egui::Button::new("Redo")).clicked()
+                    && let Some((restored, cur)) = self.history.redo() {
                         self.sketch = restored;
                         self.command_cursor = cur.pos;
                         self.command_cursor_tangent = cur.tangent;
@@ -359,7 +355,6 @@ impl eframe::App for EditorApp {
                         self.update_cost();
                         self.compute_dof_async();
                     }
-                }
             });
             ui.label(format!("Actions: {}/{}", self.history.cursor, self.history.actions.len()));
 
@@ -546,15 +541,14 @@ impl eframe::App for EditorApp {
                 // Deferred actions (must be outside table closure)
                 if let Some((i, focus_expr)) = start_edit {
                     // If already editing a different row, save it first
-                    if let Some(prev) = self.param_edit_index {
-                        if prev != i {
+                    if let Some(prev) = self.param_edit_index
+                        && prev != i {
                             let n = self.param_edit_name.trim().to_string();
                             let e = self.param_edit_expr.trim().to_string();
                             if !n.is_empty() && !e.is_empty() && prev < self.sketch.user_params.len() {
                                 update_action = Some((prev, n, e));
                             }
                         }
-                    }
                     if i < self.sketch.user_params.len() {
                         self.param_edit_index = Some(i);
                         self.param_edit_name = self.sketch.user_params[i].name.clone();
@@ -704,15 +698,14 @@ impl eframe::App for EditorApp {
                     // History navigation (only for single-line input, not when completions showing)
                     if r.has_focus() && !self.command_input.contains('\n') && self.completions.is_empty() {
                         let mut history_changed = false;
-                        if ui.input(|i| i.key_pressed(egui::Key::ArrowUp)) && !ui.input(|i| i.modifiers.shift) {
-                            if self.command_history_pos > 0 {
+                        if ui.input(|i| i.key_pressed(egui::Key::ArrowUp)) && !ui.input(|i| i.modifiers.shift)
+                            && self.command_history_pos > 0 {
                                 self.command_history_pos -= 1;
                                 self.command_input = self.command_history[self.command_history_pos].clone();
                                 history_changed = true;
                             }
-                        }
-                        if ui.input(|i| i.key_pressed(egui::Key::ArrowDown)) && !ui.input(|i| i.modifiers.shift) {
-                            if self.command_history_pos < self.command_history.len() {
+                        if ui.input(|i| i.key_pressed(egui::Key::ArrowDown)) && !ui.input(|i| i.modifiers.shift)
+                            && self.command_history_pos < self.command_history.len() {
                                 self.command_history_pos += 1;
                                 if self.command_history_pos < self.command_history.len() {
                                     self.command_input = self.command_history[self.command_history_pos].clone();
@@ -721,14 +714,12 @@ impl eframe::App for EditorApp {
                                 }
                                 history_changed = true;
                             }
-                        }
-                        if history_changed {
-                            if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), cmd_id) {
+                        if history_changed
+                            && let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), cmd_id) {
                                 let end = egui::text::CCursor::new(self.command_input.len());
                                 state.cursor.set_char_range(Some(egui::text::CCursorRange::one(end)));
                                 egui::TextEdit::store_state(ui.ctx(), cmd_id, state);
                             }
-                        }
                     }
 
                     // Autocomplete (skip when suppressed by Escape)
@@ -1018,8 +1009,8 @@ impl eframe::App for EditorApp {
                     self.update_cost();
                     self.compute_dof_async();
                 }
-            } else if ctrl && ui.input(|i| i.key_pressed(egui::Key::Z)) {
-                if let Some((restored, cur)) = self.history.undo() {
+            } else if ctrl && ui.input(|i| i.key_pressed(egui::Key::Z))
+                && let Some((restored, cur)) = self.history.undo() {
                     self.sketch = restored;
                     self.command_cursor = cur.pos;
                     self.command_cursor_tangent = cur.tangent;
@@ -1027,9 +1018,8 @@ impl eframe::App for EditorApp {
                     self.update_cost();
                     self.compute_dof_async();
                 }
-            }
-            if ctrl && ui.input(|i| i.key_pressed(egui::Key::S)) {
-                if let Ok(json) = serde_json::to_string_pretty(&self.sketch) {
+            if ctrl && ui.input(|i| i.key_pressed(egui::Key::S))
+                && let Ok(json) = serde_json::to_string_pretty(&self.sketch) {
                     let json_bytes = json.into_bytes();
                     spawn_async(async move {
                         if let Some(handle) = rfd::AsyncFileDialog::new()
@@ -1041,7 +1031,6 @@ impl eframe::App for EditorApp {
                         }
                     });
                 }
-            }
             if ctrl && ui.input(|i| i.key_pressed(egui::Key::O)) {
                 let pending = self.pending_load.clone();
                 spawn_async(async move {
@@ -1122,7 +1111,7 @@ impl eframe::App for EditorApp {
                                 } else {
                                     format!("{:.4}", dim.value)
                                 };
-                                self.dim_kind = Some(dim.kind.clone());
+                                self.dim_kind = Some(dim.kind);
                                 self.dim_offset = dim.offset;
                                 self.dim_edit_index = Some(i);
                                 self.dim_editing = true;
@@ -1146,22 +1135,20 @@ impl eframe::App for EditorApp {
                         if self.grab.is_none() && self.drag_dimension.is_none() {
                             // First drag frame: try to grab a dimension first, then geometry
                             let mut grabbed_dim = false;
-                            if let Some(sel) = self.hit_test_selection(mouse_sketch, hit_threshold) {
-                                if let Selection::Dimension(i) = sel {
+                            if let Some(sel) = self.hit_test_selection(mouse_sketch, hit_threshold)
+                                && let Selection::Dimension(i) = sel {
                                     self.drag_dimension = Some(i);
                                     grabbed_dim = true;
                                 }
-                            }
-                            if !grabbed_dim {
-                                if let Some(target) = self.hit_test(mouse_sketch, hit_threshold) {
+                            if !grabbed_dim
+                                && let Some(target) = self.hit_test(mouse_sketch, hit_threshold) {
                                     self.start_drag(target, mouse_sketch);
                                 }
-                            }
                         }
                         if let Some(dim_idx) = self.drag_dimension {
                             // Update dimension offset and text_along from mouse
                             if dim_idx < self.sketch.dimensions.len() {
-                                let kind = self.sketch.dimensions[dim_idx].kind.clone();
+                                let kind = self.sketch.dimensions[dim_idx].kind;
                                 let is_radius = matches!(kind, DimensionKind::ArcRadius(_) | DimensionKind::ArcRadiusB(_));
                                 if is_radius {
                                     let (arc_ref, is_b) = match kind {
@@ -1523,8 +1510,8 @@ impl eframe::App for EditorApp {
                                     DimensionKind::ArcRadius(r) | DimensionKind::ArcRadiusB(r) => Some(*r),
                                     _ => None,
                                 };
-                                if let Some(r) = arc_ref {
-                                    if self.sketch.arcs.contains(r) {
+                                if let Some(r) = arc_ref
+                                    && self.sketch.arcs.contains(r) {
                                         let a = &self.sketch.arcs[r];
                                         if a.is_ellipse {
                                             let dx = mouse_sketch.x - a.center.value.x;
@@ -1553,7 +1540,6 @@ impl eframe::App for EditorApp {
                                         }
                                         self.dim_text_along = 0.0;
                                     }
-                                }
                             } else if let DimensionKind::ArcSweep(r) = kind {
                                 let a = &self.sketch.arcs[*r];
                                 let cx = a.center.value.x;
@@ -1585,13 +1571,12 @@ impl eframe::App for EditorApp {
                                 self.dim_offset = new_offset;
                                 self.dim_text_along = along.clamp(-0.5, 0.5); // During creation, clamp to sector
                                 // Update supplement flag and measured value
-                                if let Some(DimensionKind::Angle(_, _, ref mut s)) = self.dim_kind {
-                                    if *s != sup {
+                                if let Some(DimensionKind::Angle(_, _, ref mut s)) = self.dim_kind
+                                    && *s != sup {
                                         *s = sup;
-                                        let measured = self.measure_dimension(&self.dim_kind.clone().unwrap());
+                                        let measured = self.measure_dimension(&self.dim_kind.unwrap());
                                         self.dim_input = format!("{:.4}", measured);
                                     }
-                                }
                             } else if let DimensionKind::LineAngle(r) = kind {
                                 let p1 = self.sketch.lines[*r].p1.value;
                                 let line_angle = {
@@ -1715,7 +1700,7 @@ impl eframe::App for EditorApp {
                                 } else {
                                     format!("{:.4}", dim.value)
                                 };
-                                self.dim_kind = Some(dim.kind.clone());
+                                self.dim_kind = Some(dim.kind);
                                 self.dim_offset = dim.offset;
                                 self.dim_edit_index = Some(i);
                                 self.dim_editing = true;
@@ -1739,7 +1724,7 @@ impl eframe::App for EditorApp {
 
             // Dimension preview while placing (not when editing an existing dimension)
             if (self.dim_placing || (self.dim_editing && self.dim_edit_index.is_none())) && self.dim_kind.is_some() {
-                let kind = self.dim_kind.clone().unwrap();
+                let kind = self.dim_kind.unwrap();
                 let measured = self.measure_dimension(&kind);
                 let is_radius = matches!(kind, DimensionKind::ArcRadius(_) | DimensionKind::ArcRadiusB(_));
                 let preview_color = self.colors.dimension_preview;

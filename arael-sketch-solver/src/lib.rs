@@ -704,14 +704,14 @@ impl Sketch {
         loop {
             // Find which helpers have a bridge (know what they represent)
             let mut has_bridge: std::collections::HashSet<u32> = std::collections::HashSet::new();
-            for c in &self.coincident_lp1 { if self.points.get(c.point).map_or(false, |p| p.helper) { has_bridge.insert(c.point.index()); } }
-            for c in &self.coincident_lp2 { if self.points.get(c.point).map_or(false, |p| p.helper) { has_bridge.insert(c.point.index()); } }
-            for c in &self.coincident_arc_center { if self.points.get(c.point).map_or(false, |p| p.helper) { has_bridge.insert(c.point.index()); } }
-            for c in &self.coincident_arc_start { if self.points.get(c.point).map_or(false, |p| p.helper) { has_bridge.insert(c.point.index()); } }
-            for c in &self.coincident_arc_end { if self.points.get(c.point).map_or(false, |p| p.helper) { has_bridge.insert(c.point.index()); } }
+            for c in &self.coincident_lp1 { if self.points.get(c.point).is_some_and(|p| p.helper) { has_bridge.insert(c.point.index()); } }
+            for c in &self.coincident_lp2 { if self.points.get(c.point).is_some_and(|p| p.helper) { has_bridge.insert(c.point.index()); } }
+            for c in &self.coincident_arc_center { if self.points.get(c.point).is_some_and(|p| p.helper) { has_bridge.insert(c.point.index()); } }
+            for c in &self.coincident_arc_start { if self.points.get(c.point).is_some_and(|p| p.helper) { has_bridge.insert(c.point.index()); } }
+            for c in &self.coincident_arc_end { if self.points.get(c.point).is_some_and(|p| p.helper) { has_bridge.insert(c.point.index()); } }
             for c in &self.coincident_pp {
-                if self.points.get(c.a).map_or(false, |p| p.helper) { has_bridge.insert(c.a.index()); }
-                if self.points.get(c.b).map_or(false, |p| p.helper) { has_bridge.insert(c.b.index()); }
+                if self.points.get(c.a).is_some_and(|p| p.helper) { has_bridge.insert(c.a.index()); }
+                if self.points.get(c.b).is_some_and(|p| p.helper) { has_bridge.insert(c.b.index()); }
             }
 
             // Find which helpers have a purpose constraint
@@ -1030,7 +1030,7 @@ impl Sketch {
             for c in &mut self.distance_lp1 { remap(&mut c.point); }
             for c in &mut self.distance_lp2 { remap(&mut c.point); }
             // Remove merged points
-            for (old, _) in &merged { self.points.remove(Ref::new(*old)); }
+            for old in merged.keys() { self.points.remove(Ref::new(*old)); }
             // Dedup again after remapping
             self.dedup_constraints();
         }
@@ -1368,7 +1368,7 @@ impl Sketch {
             return Err("Name cannot be empty".into());
         }
         // Must be a valid identifier: alphanumeric + underscore, not starting with digit
-        if name.bytes().next().map_or(true, |b| b.is_ascii_digit()) {
+        if name.bytes().next().is_none_or(|b| b.is_ascii_digit()) {
             return Err("Name cannot start with a digit".into());
         }
         if !name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_') {
@@ -1729,8 +1729,8 @@ impl Sketch {
             if best_gap < 1e3 {
                 best_cut = sorted.iter().filter(|&&v| v < 1e-15).count();
             }
-            let rank = evs.len() - best_cut;
-            rank
+            
+            evs.len() - best_cut
         };
         let (method, result) = if n < 32 && analyze {
             let h = nalgebra::DMatrix::from_row_slice(n, n, &hessian);
@@ -1769,7 +1769,7 @@ impl Sketch {
             let faer_h = faer::Mat::from_fn(n, n, |i, k| hessian[i * n + k]);
             match faer_h.self_adjoint_eigenvalues(faer::Side::Lower) {
                 Ok(evs) => {
-                    let evs_vec: Vec<f64> = evs.iter().cloned().collect();
+                    let evs_vec: Vec<f64> = evs.to_vec();
                     let rank = rank_from_evs(&evs_vec);
                     let dof = n.saturating_sub(rank);
                     ("faer eigenvalues-only", DofResult { dof, param_names: Vec::new(), eigenvalues: Vec::new(), eigenvectors: Vec::new() })
@@ -1884,8 +1884,8 @@ impl Sketch {
             if best_gap < 1e3 {
                 best_cut = sorted.iter().filter(|&&v| v < 1e-15).count();
             }
-            let rank = svs.len() - best_cut;
-            rank
+            
+            svs.len() - best_cut
         };
 
         let t_svd = if TIMING_DEBUG { Some(std::time::Instant::now()) } else { None };
@@ -2142,15 +2142,14 @@ impl Sketch {
         }
         for dim in &mut self.dimensions {
             if dim.broken { continue; }
-            if let Some(ref expr_str) = dim.expr_str {
-                if let Ok(parsed) = arael_sym::parse(expr_str) {
+            if let Some(ref expr_str) = dim.expr_str
+                && let Ok(parsed) = arael_sym::parse(expr_str) {
                     let expanded = expr_constraint::expand_derived(&parsed, &bag);
                     match expanded.eval(&vars) {
                         Ok(val) => dim.value = val,
                         Err(_) => dim.broken = true,
                     }
                 }
-            }
         }
         // Update derived numeric dims from measured geometry
         let derived_vals: Vec<(usize, f64)> = (0..self.dimensions.len())

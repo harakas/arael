@@ -102,23 +102,21 @@ impl SymVisitor {
 
     /// Check if an expression is a path to a named constant (to avoid double-rewriting in calls).
     fn is_named_const_path(expr: &Expr) -> bool {
-        if let Expr::Path(ExprPath { path, qself: None, attrs }) = expr {
-            if attrs.is_empty() {
-                if let Some(ident) = path.get_ident() {
+        if let Expr::Path(ExprPath { path, qself: None, attrs }) = expr
+            && attrs.is_empty()
+                && let Some(ident) = path.get_ident() {
                     let name = ident.to_string();
                     return Self::NAMED_CONSTS.iter().any(|&(n, f)| name == n || name == f);
                 }
-            }
-        }
         false
     }
 
     /// Clone-wrap an expression if it's a tracked variable path,
     /// or rewrite named constants (pi, epsilon, e) to function calls.
     fn maybe_clone_expr(&self, expr: &mut Expr) {
-        if let Expr::Path(ExprPath { path, qself: None, attrs }) = expr {
-            if attrs.is_empty() {
-                if let Some(ident) = path.get_ident() {
+        if let Expr::Path(ExprPath { path, qself: None, attrs }) = expr
+            && attrs.is_empty()
+                && let Some(ident) = path.get_ident() {
                     let name = ident.to_string();
                     // Rewrite named constants: pi -> pi(), e -> euler(), etc.
                     for &(const_name, func_name) in Self::NAMED_CONSTS {
@@ -138,11 +136,8 @@ impl SymVisitor {
                             #ident.clone()
                         };
                         *expr = clone_expr;
-                        return;
                     }
                 }
-            }
-        }
     }
 
     /// Process statements in order: for each `let`, visit the init expr first

@@ -834,9 +834,8 @@ impl Action {
                 if let Some(expr_str) = expr {
                     let _ = sketch.add_expr_dimension(*kind, expr_str,
                         vect2d::new(0.0, 1.0), 0.0);
-                    if *derived {
-                        if let Some(d) = sketch.dimensions.last_mut() { d.derived = true; }
-                    }
+                    if *derived
+                        && let Some(d) = sketch.dimensions.last_mut() { d.derived = true; }
                     return false;
                 }
                 let name = format!("d{}", sketch.next_dimension_id);
@@ -1103,22 +1102,19 @@ impl Action {
                     // Propagate name change to expressions that reference the old name
                     if old_name != *name {
                         for p in &mut sketch.user_params {
-                            if let Ok(parsed) = arael_sym::parse(&p.expr_str) {
-                                if parsed.symbols().contains(&old_name) {
+                            if let Ok(parsed) = arael_sym::parse(&p.expr_str)
+                                && parsed.symbols().contains(&old_name) {
                                     let replaced = parsed.subs(&old_name, &arael_sym::symbol(name));
                                     p.expr_str = format!("{}", replaced);
                                 }
-                            }
                         }
                         for d in &mut sketch.dimensions {
-                            if let Some(ref es) = d.expr_str {
-                                if let Ok(parsed) = arael_sym::parse(es) {
-                                    if parsed.symbols().contains(&old_name) {
+                            if let Some(ref es) = d.expr_str
+                                && let Ok(parsed) = arael_sym::parse(es)
+                                    && parsed.symbols().contains(&old_name) {
                                         let replaced = parsed.subs(&old_name, &arael_sym::symbol(name));
                                         d.expr_str = Some(format!("{}", replaced));
                                     }
-                                }
-                            }
                         }
                     }
                     return true;

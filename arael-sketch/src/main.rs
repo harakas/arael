@@ -376,11 +376,10 @@ impl EditorApp {
         let mut best: Option<(f64, GrabTarget)> = None;
 
         let mut check = |dist: f64, target: GrabTarget| {
-            if dist < threshold {
-                if best.is_none() || dist < best.unwrap().0 {
+            if dist < threshold
+                && (best.is_none() || dist < best.unwrap().0) {
                     best = Some((dist, target));
                 }
-            }
         };
 
         // Points (skip helpers)
@@ -427,11 +426,10 @@ impl EditorApp {
         // Line bodies (lower priority than endpoints)
         let mut body_best: Option<(f64, GrabTarget)> = None;
         let mut check_body = |dist: f64, target: GrabTarget| {
-            if dist < threshold {
-                if body_best.is_none() || dist < body_best.unwrap().0 {
+            if dist < threshold
+                && (body_best.is_none() || dist < body_best.unwrap().0) {
                     body_best = Some((dist, target));
                 }
-            }
         };
         for r in self.sketch.lines.refs() {
             let l = &self.sketch.lines[r];
@@ -459,11 +457,10 @@ impl EditorApp {
             let dx = screen_pos.x - marker.pos.x;
             let dy = screen_pos.y - marker.pos.y;
             let d = (dx * dx + dy * dy).sqrt();
-            if d < 10.0 {
-                if best_constraint.is_none() || d < best_constraint.unwrap().0 {
+            if d < 10.0
+                && (best_constraint.is_none() || d < best_constraint.unwrap().0) {
                     best_constraint = Some((d, marker.id));
                 }
-            }
         }
         if let Some((_, id)) = best_constraint {
             return Some(Selection::Constraint(id));
@@ -489,42 +486,37 @@ impl EditorApp {
                     + (l.p1.value.y - sketch_pos.y).powi(2)).sqrt();
             let d2 = ((l.p2.value.x - sketch_pos.x).powi(2)
                     + (l.p2.value.y - sketch_pos.y).powi(2)).sqrt();
-            if d1 < threshold {
-                if best_ep.is_none() || d1 < best_ep.unwrap().0 {
+            if d1 < threshold
+                && (best_ep.is_none() || d1 < best_ep.unwrap().0) {
                     best_ep = Some((d1, Selection::LineP1(r)));
                 }
-            }
-            if d2 < threshold {
-                if best_ep.is_none() || d2 < best_ep.unwrap().0 {
+            if d2 < threshold
+                && (best_ep.is_none() || d2 < best_ep.unwrap().0) {
                     best_ep = Some((d2, Selection::LineP2(r)));
                 }
-            }
         }
         // Arc centers and endpoints (same priority as line endpoints)
         for r in self.sketch.arcs.refs() {
             let a = &self.sketch.arcs[r];
             let dc = ((a.center.value.x - sketch_pos.x).powi(2)
                     + (a.center.value.y - sketch_pos.y).powi(2)).sqrt();
-            if dc < threshold {
-                if best_ep.is_none() || dc < best_ep.unwrap().0 {
+            if dc < threshold
+                && (best_ep.is_none() || dc < best_ep.unwrap().0) {
                     best_ep = Some((dc, Selection::ArcCenter(r)));
                 }
-            }
             if !a.closed {
                 let sp = arc_start_pos(a);
                 let ep = arc_end_pos(a);
                 let ds = ((sp.x - sketch_pos.x).powi(2) + (sp.y - sketch_pos.y).powi(2)).sqrt();
                 let de = ((ep.x - sketch_pos.x).powi(2) + (ep.y - sketch_pos.y).powi(2)).sqrt();
-                if ds < threshold {
-                    if best_ep.is_none() || ds < best_ep.unwrap().0 {
+                if ds < threshold
+                    && (best_ep.is_none() || ds < best_ep.unwrap().0) {
                         best_ep = Some((ds, Selection::ArcStart(r)));
                     }
-                }
-                if de < threshold {
-                    if best_ep.is_none() || de < best_ep.unwrap().0 {
+                if de < threshold
+                    && (best_ep.is_none() || de < best_ep.unwrap().0) {
                         best_ep = Some((de, Selection::ArcEnd(r)));
                     }
-                }
             }
         }
 
@@ -573,11 +565,10 @@ impl EditorApp {
         for r in self.sketch.arcs.refs() {
             let a = &self.sketch.arcs[r];
             let (d, _) = point_to_arc_dist(sketch_pos, a);
-            if d < threshold {
-                if best_arc.is_none() || d < best_arc.unwrap().0 {
+            if d < threshold
+                && (best_arc.is_none() || d < best_arc.unwrap().0) {
                     best_arc = Some((d, r));
                 }
-            }
         }
         if let Some((_, r)) = best_arc { return Some(Selection::Arc(r)); }
 
@@ -701,9 +692,9 @@ impl EditorApp {
             self.last_cost = result.end_cost;
 
             // If cost is good, save a clean snapshot (without drag apparatus)
-            if self.last_cost < self.drag_saved_cost + 1e-3 {
-                if let Ok(snap) = bincode::serialize(&self.sketch) {
-                    if let Ok(mut clean) = bincode::deserialize::<Sketch>(&snap) {
+            if self.last_cost < self.drag_saved_cost + 1e-3
+                && let Ok(snap) = bincode::serialize(&self.sketch)
+                    && let Ok(mut clean) = bincode::deserialize::<Sketch>(&snap) {
                         // Remove drag constraint from clone
                         match self.grab {
                             Some(GrabTarget::Point(_)) => { clean.coincident_pp.pop(); }
@@ -739,8 +730,6 @@ impl EditorApp {
                         self.drag_saved_cost = self.last_cost;
                         self.drag_saved_snapshot = bincode::serialize(&clean).ok();
                     }
-                }
-            }
         }
     }
 
@@ -796,15 +785,13 @@ impl EditorApp {
             self.last_cost = result.end_cost;
 
             // If cost is much worse than pre-drag, revert to pre-drag state
-            if self.last_cost > self.drag_saved_cost + 1e-3 {
-                if let Some(snap) = self.drag_saved_snapshot.take() {
-                    if let Ok(restored) = bincode::deserialize::<Sketch>(&snap) {
+            if self.last_cost > self.drag_saved_cost + 1e-3
+                && let Some(snap) = self.drag_saved_snapshot.take()
+                    && let Ok(restored) = bincode::deserialize::<Sketch>(&snap) {
                         self.sketch = restored;
                         let result = self.sketch.solve();
                         self.last_cost = result.end_cost;
                     }
-                }
-            }
             self.drag_saved_snapshot = None;
 
             // Record drag as a non-deterministic action with full state snapshot
@@ -934,7 +921,7 @@ impl EditorApp {
             return;
         }
         self.dof_display = None;
-        if let Some(data) = bincode::serialize(&self.sketch).ok() {
+        if let Ok(data) = bincode::serialize(&self.sketch) {
             *self.dof_input.lock().unwrap() = Some(data);
         }
     }
@@ -951,10 +938,10 @@ impl EditorApp {
         let mut ctx = crate::commands::CommandContext {
             sketch: std::mem::replace(&mut self.sketch, empty_sketch),
             history: std::mem::replace(&mut self.history, empty_history),
-            selection: std::mem::replace(&mut self.selection, Vec::new()),
-            session_vars: std::mem::replace(&mut self.session_vars, HashMap::new()),
-            session_vecs: std::mem::replace(&mut self.session_vecs, HashMap::new()),
-            session_names: std::mem::replace(&mut self.session_names, HashMap::new()),
+            selection: std::mem::take(&mut self.selection),
+            session_vars: std::mem::take(&mut self.session_vars),
+            session_vecs: std::mem::take(&mut self.session_vecs),
+            session_names: std::mem::take(&mut self.session_names),
             cursor: self.command_cursor,
             cursor_tangent: self.command_cursor_tangent,
             saved_cursor: crate::history::CursorState::default(),
@@ -973,11 +960,10 @@ impl EditorApp {
         if self.echo_stdout {
             let cmds: Vec<&str> = input.split(';').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
             for (i, r) in results.iter().enumerate() {
-                if let Some(cmd) = cmds.get(i) {
-                    if !cmd.starts_with('#') {
+                if let Some(cmd) = cmds.get(i)
+                    && !cmd.starts_with('#') {
                         println!("> {}", cmd);
                     }
-                }
                 if !r.output.is_empty() {
                     println!("{}", r.output);
                 }
@@ -1012,10 +998,10 @@ impl EditorApp {
         let mut ctx = crate::commands::CommandContext {
             sketch: std::mem::replace(&mut self.sketch, empty_sketch),
             history: std::mem::replace(&mut self.history, empty_history),
-            selection: std::mem::replace(&mut self.selection, Vec::new()),
-            session_vars: std::mem::replace(&mut self.session_vars, HashMap::new()),
-            session_vecs: std::mem::replace(&mut self.session_vecs, HashMap::new()),
-            session_names: std::mem::replace(&mut self.session_names, HashMap::new()),
+            selection: std::mem::take(&mut self.selection),
+            session_vars: std::mem::take(&mut self.session_vars),
+            session_vecs: std::mem::take(&mut self.session_vecs),
+            session_names: std::mem::take(&mut self.session_names),
             cursor: self.command_cursor,
             cursor_tangent: self.command_cursor_tangent,
             saved_cursor: crate::history::CursorState::default(),
@@ -1093,14 +1079,12 @@ impl EditorApp {
         self.sketch.update_expr_dim_values();
         let new_cost = self.sketch.solve().end_cost;
         self.last_cost = new_cost;
-        if new_cost > old_cost + 1e-3 {
-            if let Some(ref snap) = snapshot {
-                if let Ok(restored) = bincode::deserialize(snap) {
+        if new_cost > old_cost + 1e-3
+            && let Some(ref snap) = snapshot
+                && let Ok(restored) = bincode::deserialize(snap) {
                     self.sketch = restored;
                     self.status_error = Some("Parameter change rejected: could not satisfy all constraints".into());
                 }
-            }
-        }
     }
 
     // Apply constraint to current selection
@@ -1134,7 +1118,7 @@ impl EditorApp {
                         | Selection::ArcCenter(_) | Selection::ArcStart(_) | Selection::ArcEnd(_));
                     let body = |s: &Selection| matches!(s, Selection::Line(_) | Selection::Arc(_));
                     // Two point-like, or one point-like + one body, or two bodies
-                    (sel.iter().all(|s| point_like(s)))
+                    (sel.iter().all(&point_like))
                     || (sel.iter().filter(|s| point_like(s)).count() == 1 && sel.iter().filter(|s| body(s)).count() == 1)
                     || (sel.iter().all(|s| matches!(s, Selection::Line(_))))
                 }
@@ -1421,8 +1405,8 @@ impl EditorApp {
                 let cross = dx1 * dy2 - dy1 * dx2;
                 let dot = dx1 * dx2 + dy1 * dy2;
                 let angle_rad = cross.atan2(dot).abs();
-                let angle_deg = if *supplement { 180.0 - rad2deg(angle_rad) } else { rad2deg(angle_rad) };
-                angle_deg
+                
+                if *supplement { 180.0 - rad2deg(angle_rad) } else { rad2deg(angle_rad) }
             }
             DimensionKind::HDistance(a, b) => {
                 let pa = self.dim_endpoint_pos(a);
@@ -1464,8 +1448,8 @@ impl EditorApp {
                 Selection::Line(r) => return Some(DimensionKind::LineLength(r)),
                 Selection::Arc(r) => {
                     let a = &self.sketch.arcs[r];
-                    if a.is_ellipse {
-                        if let Some(m) = mouse {
+                    if a.is_ellipse
+                        && let Some(m) = mouse {
                             // Project mouse onto major/minor axes to pick radius or radius_b
                             let dx = m.x - a.center.value.x;
                             let dy = m.y - a.center.value.y;
@@ -1477,7 +1461,6 @@ impl EditorApp {
                                 return Some(DimensionKind::ArcRadiusB(r));
                             }
                         }
-                    }
                     return Some(DimensionKind::ArcRadius(r));
                 }
                 _ => {}
@@ -1489,7 +1472,7 @@ impl EditorApp {
                 return Some(DimensionKind::Angle(a, b, false));
             }
             // Point + Line -> point-line distance
-            let point_ep = sel.iter().find_map(|s| Self::selection_to_dim_endpoint(s));
+            let point_ep = sel.iter().find_map(Self::selection_to_dim_endpoint);
             let line_ref = sel.iter().find_map(|s| if let Selection::Line(r) = s { Some(*r) } else { None });
             if let (Some(ep), Some(line)) = (point_ep, line_ref) {
                 return Some(DimensionKind::PointLineDistance(ep, line));
@@ -1521,11 +1504,10 @@ impl EditorApp {
                     Selection::ArcCenter(r) | Selection::ArcStart(r) | Selection::ArcEnd(r) => Some(*r) == arc_ref,
                     _ => false,
                 });
-                if all_same {
-                    if let Some(r) = arc_ref {
+                if all_same
+                    && let Some(r) = arc_ref {
                         return Some(DimensionKind::ArcSweep(r));
                     }
-                }
             }
         }
         None
@@ -1906,8 +1888,8 @@ impl EditorApp {
 
     fn apply_parallel(&mut self) {
         self.begin_group();
-        if self.selection.len() == 2 {
-            if let (Selection::Line(a), Selection::Line(b)) = (self.selection[0], self.selection[1]) {
+        if self.selection.len() == 2
+            && let (Selection::Line(a), Selection::Line(b)) = (self.selection[0], self.selection[1]) {
                 let action = Action::ApplyParallel { a, b };
                 if let Some(err) = conflicts::check_constraint_conflict(&self.sketch, &action) {
                     self.status_error = Some(err);
@@ -1915,13 +1897,12 @@ impl EditorApp {
                 }
                 self.exec(action);
             }
-        }
     }
 
     fn apply_perpendicular(&mut self) {
         self.begin_group();
-        if self.selection.len() == 2 {
-            if let (Selection::Line(a), Selection::Line(b)) = (self.selection[0], self.selection[1]) {
+        if self.selection.len() == 2
+            && let (Selection::Line(a), Selection::Line(b)) = (self.selection[0], self.selection[1]) {
                 let action = Action::ApplyPerpendicular { a, b };
                 if let Some(err) = conflicts::check_constraint_conflict(&self.sketch, &action) {
                     self.status_error = Some(err);
@@ -1929,13 +1910,12 @@ impl EditorApp {
                 }
                 self.exec(action);
             }
-        }
     }
 
     fn apply_collinear(&mut self) {
         self.begin_group();
-        if self.selection.len() == 2 {
-            if let (Selection::Line(a), Selection::Line(b)) = (self.selection[0], self.selection[1]) {
+        if self.selection.len() == 2
+            && let (Selection::Line(a), Selection::Line(b)) = (self.selection[0], self.selection[1]) {
                 let action = Action::ApplyCollinear { a, b };
                 if let Some(err) = conflicts::check_constraint_conflict(&self.sketch, &action) {
                     self.status_error = Some(err);
@@ -1943,7 +1923,6 @@ impl EditorApp {
                 }
                 self.exec(action);
             }
-        }
     }
 
     fn apply_symmetry(&mut self) {
@@ -2261,11 +2240,10 @@ impl EditorApp {
         let mut best: Option<(f64, vect2d, SnapTarget)> = None;
 
         let mut check = |dist: f64, pos: vect2d, target: SnapTarget| {
-            if dist < threshold {
-                if best.is_none() || dist < best.unwrap().0 {
+            if dist < threshold
+                && (best.is_none() || dist < best.unwrap().0) {
                     best = Some((dist, pos, target));
                 }
-            }
         };
 
         // Standalone points (skip helpers)
@@ -2318,23 +2296,21 @@ impl EditorApp {
             if exclude_line == Some(r) { continue; }
             let l = &self.sketch.lines[r];
             let d = point_to_segment_dist(sketch_pos, l.p1.value, l.p2.value);
-            if d < threshold {
-                if best.is_none() || d < best.unwrap().0 {
+            if d < threshold
+                && (best.is_none() || d < best.unwrap().0) {
                     let proj = project_onto_segment(sketch_pos, l.p1.value, l.p2.value);
                     best = Some((d, proj, SnapTarget::Line(r)));
                 }
-            }
         }
 
         for r in self.sketch.arcs.refs() {
             if exclude_arc == Some(r) { continue; }
             let a = &self.sketch.arcs[r];
             let (d, proj) = point_to_arc_dist(sketch_pos, a);
-            if d < threshold {
-                if best.is_none() || d < best.unwrap().0 {
+            if d < threshold
+                && (best.is_none() || d < best.unwrap().0) {
                     best = Some((d, proj, SnapTarget::ArcBody(r)));
                 }
-            }
         }
 
         best.map(|(_, pos, target)| (pos, target))
@@ -2368,9 +2344,8 @@ impl EditorApp {
 
     // Apply a coincident/on-line constraint between a snap target and a standalone point
     fn apply_snap_coincident_point(&mut self, snap: SnapTarget, point: Ref<Point>) {
-        if let Some(snap_sel) = Self::snap_to_selection(snap) {
-            if self.are_transitively_coincident(Selection::Point(point), snap_sel) { return; }
-        }
+        if let Some(snap_sel) = Self::snap_to_selection(snap)
+            && self.are_transitively_coincident(Selection::Point(point), snap_sel) { return; }
         let action = match snap {
             SnapTarget::Point(other) => Action::ApplyCoincidentPP { a: point, b: other },
             SnapTarget::LineP1(line) => Action::ApplyCoincidentLP1 { line, point },
@@ -2590,7 +2565,7 @@ impl EditorApp {
                 lines.push(c.line);
                 // Resolve helper points to the specific endpoints they bridge to
                 for pt in [c.a, c.c] {
-                    if self.sketch.points.get(pt).map_or(false, |p| p.helper) {
+                    if self.sketch.points.get(pt).is_some_and(|p| p.helper) {
                         let mut found = false;
                         for cc in &self.sketch.coincident_lp1 { if cc.point == pt { e.line_p1s.push(cc.line); found = true; break; } }
                         if !found { for cc in &self.sketch.coincident_lp2 { if cc.point == pt { e.line_p2s.push(cc.line); found = true; break; } } }

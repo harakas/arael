@@ -1075,7 +1075,7 @@ pub fn grad2(body: impl Fn(E, E) -> E) -> impl Fn(E, E) -> [E; 2] + Clone {
 /// Normalize radians to [-pi, pi].
 fn rad2rad(v: f64) -> f64 {
     use std::f64::consts::PI;
-    if v < -PI || v > PI {
+    if !(-PI..=PI).contains(&v) {
         v - (2.0 * PI) * (v / (2.0 * PI) + 0.5).floor()
     } else {
         v
@@ -1123,7 +1123,7 @@ pub fn identity(x: E) -> E {
 /// The $\epsilon^2$ term prevents division by zero at $(0, 0)$.
 pub fn safe_atan2(y: E, x: E) -> E {
     simple_func2_derivs("safe_atan2",
-        |y, x| atan2(y, x),
+        atan2,
         |y, x| {
             let eps2 = epsilon() * epsilon();
             let d = x.clone()*x.clone() + y.clone()*y.clone() + eps2;
