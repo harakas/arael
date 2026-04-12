@@ -163,6 +163,14 @@ impl Dimension {
                 arael_sym::abs(end - start) * arael_sym::constant(180.0 / std::f64::consts::PI)
             }
             DimensionKind::PointPointDistance(a, b) => {
+                // When one endpoint anchors to a line endpoint and the other
+                // is on the same line, both are collinear with the line.
+                // Use a signed along-line projection so the residual has a
+                // preferred direction -- prevents the solver from flipping
+                // the point to the mirror solution under large scale changes.
+                if let Some(expr) = try_along_line_symbol(a, b, sketch) {
+                    return expr;
+                }
                 let pa = dim_endpoint_symbol(a, sketch);
                 let pb = dim_endpoint_symbol(b, sketch);
                 let dx = pa.0 - pb.0;
@@ -323,4 +331,178 @@ fn dim_endpoint_symbol(ep: &DimensionEndpoint, sketch: &super::Sketch) -> (arael
              cy + rx * ct * sr + ry * st * cr)
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Along-line detection for signed PointPointDistance
+//
+// When a PointPointDistance dimension has one endpoint anchored to a line
+// endpoint (via CoincidentLP1/LP2 or the arc-specific variants) and the
+// other endpoint is on that same line (either itself a line endpoint, or
+// via PointOnLine / helper-point bindings), both points are collinear with
+// the line. In that case the Euclidean sqrt residual admits a mirror
+// solution: the point can satisfy |distance| on either side of the anchor.
+// Under dynamic scale changes this lets the solver drift into the mirrored
+// geometry.
+//
+// The helpers below detect the pattern and let measured_symbol emit a
+// signed along-line projection instead of sqrt, with the sign captured
+// from the current geometry. Matches the idiom already used by
+// DimensionKind::PointLineDistance above.
+// ---------------------------------------------------------------------------
+
+/// If `ep` is bound to a specific line endpoint, return that line and
+/// whether the endpoint is p1 (true) or p2 (false).
+fn endpoint_is_line_endpoint(
+    sketch: &super::Sketch,
+    ep: &DimensionEndpoint,
+) -> Option<(Ref<Line>, bool)> {
+    match ep {
+        DimensionEndpoint::LineP1(l) => Some((*l, true)),
+        DimensionEndpoint::LineP2(l) => Some((*l, false)),
+        DimensionEndpoint::Point(p) => {
+            if let Some(c) = sketch.coincident_lp1.iter().find(|c| c.point == *p) {
+                return Some((c.line, true));
+            }
+            if let Some(c) = sketch.coincident_lp2.iter().find(|c| c.point == *p) {
+                return Some((c.line, false));
+            }
+            None
+        }
+        DimensionEndpoint::ArcCenter(a) => {
+            if let Some(c) = sketch.coincident_lp1_arc_center.iter().find(|c| c.arc == *a) {
+                return Some((c.line, true));
+            }
+            if let Some(c) = sketch.coincident_lp2_arc_center.iter().find(|c| c.arc == *a) {
+                return Some((c.line, false));
+            }
+            None
+        }
+        DimensionEndpoint::ArcStart(a) => {
+            if let Some(c) = sketch.coincident_lp1_arc_start.iter().find(|c| c.arc == *a) {
+                return Some((c.line, true));
+            }
+            if let Some(c) = sketch.coincident_lp2_arc_start.iter().find(|c| c.arc == *a) {
+                return Some((c.line, false));
+            }
+            None
+        }
+        DimensionEndpoint::ArcEnd(a) => {
+            if let Some(c) = sketch.coincident_lp1_arc_end.iter().find(|c| c.arc == *a) {
+                return Some((c.line, true));
+            }
+            if let Some(c) = sketch.coincident_lp2_arc_end.iter().find(|c| c.arc == *a) {
+                return Some((c.line, false));
+            }
+            None
+        }
+    }
+}
+
+/// Is `ep` constrained to lie on `line` (anywhere along it)? Considers both
+/// direct line-endpoint bindings and helper-point bindings (for arc
+/// endpoints that have a helper Point bound via coincident_arc_center /
+/// coincident_arc_start / coincident_arc_end, with that helper on the line).
+fn endpoint_is_on_line(
+    sketch: &super::Sketch,
+    ep: &DimensionEndpoint,
+    line: Ref<Line>,
+) -> bool {
+    if let Some((l, _)) = endpoint_is_line_endpoint(sketch, ep) {
+        if l == line { return true; }
+    }
+    match ep {
+        DimensionEndpoint::Point(p) => {
+            sketch.point_on_line.iter().any(|c| c.point == *p && c.line == line)
+        }
+        DimensionEndpoint::ArcCenter(a) => {
+            sketch.coincident_arc_center.iter()
+                .filter(|c| c.arc == *a)
+                .any(|c| sketch.point_on_line.iter().any(|p| p.point == c.point && p.line == line))
+        }
+        DimensionEndpoint::ArcStart(a) => {
+            sketch.coincident_arc_start.iter()
+                .filter(|c| c.arc == *a)
+                .any(|c| sketch.point_on_line.iter().any(|p| p.point == c.point && p.line == line))
+        }
+        DimensionEndpoint::ArcEnd(a) => {
+            sketch.coincident_arc_end.iter()
+                .filter(|c| c.arc == *a)
+                .any(|c| sketch.point_on_line.iter().any(|p| p.point == c.point && p.line == line))
+        }
+        DimensionEndpoint::LineP1(_) | DimensionEndpoint::LineP2(_) => false,
+    }
+}
+
+/// If the PointPointDistance between `a` and `b` matches the
+/// along-line pattern (one is a line endpoint, other is on the same line,
+/// and they aren't both endpoints of that line), return a signed along-line
+/// symbolic expression. Otherwise return None and the caller falls back to
+/// the unsigned sqrt form.
+fn try_along_line_symbol(
+    a: &DimensionEndpoint,
+    b: &DimensionEndpoint,
+    sketch: &super::Sketch,
+) -> Option<arael_sym::E> {
+    use arael_sym::symbol;
+
+    let ba = endpoint_is_line_endpoint(sketch, a);
+    let bb = endpoint_is_line_endpoint(sketch, b);
+
+    // Decide which endpoint is the anchor. Reject if both are line endpoints
+    // of the same line (that case is just the line length and the sqrt form
+    // is fine).
+    let (anchor_ep, point_ep, line, anchor_is_p1) =
+        if let Some((l, is_p1)) = ba {
+            // Reject both-endpoints-of-same-line
+            let both_same_line = matches!(bb, Some((lb, _)) if lb == l);
+            if !both_same_line && endpoint_is_on_line(sketch, b, l) {
+                (a, b, l, is_p1)
+            } else if let Some((lb, is_p1_b)) = bb {
+                if !matches!(ba, Some((la, _)) if la == lb) && endpoint_is_on_line(sketch, a, lb) {
+                    (b, a, lb, is_p1_b)
+                } else {
+                    return None;
+                }
+            } else {
+                return None;
+            }
+        } else if let Some((l, is_p1)) = bb {
+            if endpoint_is_on_line(sketch, a, l) {
+                (b, a, l, is_p1)
+            } else {
+                return None;
+            }
+        } else {
+            return None;
+        };
+
+    // Capture sign from current geometry.
+    let anchor_pos = dim_endpoint_pos(anchor_ep, sketch);
+    let point_pos = dim_endpoint_pos(point_ep, sketch);
+    let ln_data = &sketch.lines[line];
+    let ldx = ln_data.p2.value.x - ln_data.p1.value.x;
+    let ldy = ln_data.p2.value.y - ln_data.p1.value.y;
+    let (fx0, fy0) = if anchor_is_p1 { (ldx, ldy) } else { (-ldx, -ldy) };
+    let proj = (point_pos.x - anchor_pos.x) * fx0 + (point_pos.y - anchor_pos.y) * fy0;
+    let sign_positive = proj >= 0.0;
+
+    // Build signed along-line expression.
+    let name = &sketch.lines[line].name;
+    let p1x = symbol(&format!("{}.p1.x", name));
+    let p1y = symbol(&format!("{}.p1.y", name));
+    let p2x = symbol(&format!("{}.p2.x", name));
+    let p2y = symbol(&format!("{}.p2.y", name));
+    let dx = p2x.clone() - p1x.clone();
+    let dy = p2y.clone() - p1y.clone();
+    let len = arael_sym::sqrt(dx.clone() * dx.clone() + dy.clone() * dy.clone());
+    let (ax, ay) = if anchor_is_p1 {
+        (p1x, p1y)
+    } else {
+        (p2x.clone(), p2y.clone())
+    };
+    let (fx, fy) = if anchor_is_p1 { (dx.clone(), dy.clone()) } else { (-dx.clone(), -dy.clone()) };
+    let (ox, oy) = dim_endpoint_symbol(point_ep, sketch);
+    let signed = ((ox - ax) * fx + (oy - ay) * fy) / len;
+    Some(if sign_positive { signed } else { -signed })
 }

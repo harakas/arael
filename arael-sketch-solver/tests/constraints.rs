@@ -1769,3 +1769,42 @@ fn test_dof_at_large_scale() {
         "DOF should not depend on geometric scale (got {} at s=1, {} at s=100000)",
         dof_small, dof_large);
 }
+
+// -- Signed along-line PointPointDistance (measured_symbol) --
+//
+// When a PointPointDistance expression dimension has one endpoint anchored
+// to a line endpoint and the other endpoint on the same line, the
+// measured_symbol should emit a signed along-line projection rather than
+// the unsigned sqrt. Otherwise the solver can settle into a mirror
+// solution under value changes -- e.g. the point ending up on the wrong
+// side of the anchor.
+#[test]
+fn test_pp_distance_signed_along_line() {
+    use arael_sketch_solver::{Dimension, DimensionEndpoint, DimensionKind};
+
+    let mut sketch = Sketch::new();
+    // Line from origin along +x.
+    let l = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(10.0, 0.0));
+    // Point on the line at x=3 (on the negative-x side if we later anchor to p2).
+    let p = sketch.add_point(vect2d::new(3.0, 0.0));
+    sketch.point_on_line.push(PointOnLine {
+        point: p, line: l, cid: 0, hb: CrossBlock::new(),
+    });
+
+    // Expression dimension: distance LineP1(l) -- Point(p) = "2".
+    // Pattern should match: a is LineP1 (endpoint), b is Point on same line.
+    sketch.add_expr_dimension(
+        DimensionKind::PointPointDistance(DimensionEndpoint::LineP1(l), DimensionEndpoint::Point(p)),
+        "2.0",
+        vect2d::new(0.0, 1.0), 0.0,
+    ).expect("add_expr_dimension");
+
+    sketch.solve();
+    // Point must stay on the +x side of the anchor (l.p1). Drift regularizer
+    // holds the point near its initial value so the solver lands on a
+    // compromise, but the sign must match the initial geometry -- not mirror.
+    let px = sketch.points[p].pos.value.x;
+    assert!(px > 0.0, "p should stay on +x side (no mirror), got {}", px);
+    assert!((px - 2.0).abs() < 1.5,
+        "p should be near x=2 (drift-softened), got {}", px);
+}
