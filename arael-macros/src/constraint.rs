@@ -862,6 +862,41 @@ pub fn generate_root_methods(
     let mut jacobian_loops: Vec<TokenStream2> = Vec::new();
     let mut set_block_indices_loops: Vec<TokenStream2> = Vec::new();
 
+    // Grouping for root-level cross-constraints on the same collection.
+    // Merges multiple #[arael(constraint(...))] attributes into one loop per collection.
+    struct CrossCollectionGroup {
+        rc_ident: syn::Ident,
+        a_param_count: usize,
+        b_param_count: usize,
+        block_ident: syn::Ident,
+        constraint_index_field: Option<syn::Ident>,
+        // Shared across all attributes on this struct (recomputed from the first attribute)
+        a_idx_stmts: Vec<TokenStream2>,
+        b_idx_stmts: Vec<TokenStream2>,
+        resolve_stmts: Vec<TokenStream2>,
+        root_var_ident: syn::Ident,
+        // Per-attribute entries (with guards baked in, matching SelfBlock pattern)
+        cost_entries: Vec<TokenStream2>,
+        gh_entries: Vec<TokenStream2>,
+        jac_entries: Vec<TokenStream2>,
+    }
+    let mut cross_groups: std::collections::HashMap<String, CrossCollectionGroup> = std::collections::HashMap::new();
+
+    // Grouping for TripletBlock constraints on the same collection.
+    struct TripletCollectionGroup {
+        rc_ident: syn::Ident,
+        triplet_param_count: usize,
+        block_ident: syn::Ident,
+        constraint_index_field: Option<syn::Ident>,
+        triplet_idx_stmts: Vec<TokenStream2>,
+        resolve_stmts: Vec<TokenStream2>,
+        root_var_ident: syn::Ident,
+        cost_entries: Vec<TokenStream2>,
+        gh_entries: Vec<TokenStream2>,
+        jac_entries: Vec<TokenStream2>,
+    }
+    let mut triplet_groups: std::collections::HashMap<String, TripletCollectionGroup> = std::collections::HashMap::new();
+
     // Grouping for constraints that iterate the same collection.
     // Merges SelfBlock + nested CrossBlock into a single loop per collection.
     struct CollectionGroup {
@@ -1515,137 +1550,98 @@ pub fn generate_root_methods(
             group.gh_entries.push(gh_entry);
             if let Some(je) = jac_entry { group.jac_entries.push(je); }
         } else if is_triplet {
-            // TripletBlock: N-ary constraint, flat iteration on root collection
+            // TripletBlock: N-ary constraint, flat iteration on root collection.
+            // Multiple attributes on the same struct are merged into one loop per collection.
             let rc_ident = frines_ident.unwrap();
-            let tp = triplet_param_count;
+            let group_key = rc_ident.to_string();
 
-            let guarded_cost = if let Some(ref guard) = guard_expr {
+            let cost_entry = if let Some(ref guard) = guard_expr {
                 quote! { if #guard { #(#cost_stmts)* } }
             } else {
-                quote! { #(#cost_stmts)* }
+                quote! { { #(#cost_stmts)* } }
             };
-            cost_loops.push(quote! {
-                for __frine in self.#rc_ident.iter() {
-                    #(#resolve_stmts)*
-                    let #root_var_ident = &*__self_ref;
-                    #guarded_cost
-                }
-            });
-
-            let guarded_gh = if let Some(ref guard) = guard_expr {
+            let gh_entry = if let Some(ref guard) = guard_expr {
                 quote! { if #guard { #(#gh_stmts)* } }
             } else {
                 quote! { { #(#gh_stmts)* } }
             };
-            grad_hessian_loops.push(quote! {
-                for __frine in self.#rc_ident.iter_mut() {
-                    #(#resolve_stmts)*
-                    let #root_var_ident = &*__self_ref;
-                    let mut __all_idx = [0u32; #tp];
-                    #(#triplet_idx_stmts)*
-                    #guarded_gh
+            let jac_entry = if !jac_stmts.is_empty() {
+                if let Some(ref guard) = guard_expr {
+                    Some(quote! { if #guard { #(#jac_stmts)* } })
+                } else {
+                    Some(quote! { { #(#jac_stmts)* } })
+                }
+            } else { None };
+
+            let group = triplet_groups.entry(group_key).or_insert_with(|| {
+                let ci_field = crate::registry_lookup(&sc.struct_name)
+                    .and_then(|l| l.constraint_index_field.as_ref().map(|f| {
+                        syn::Ident::new(f, proc_macro2::Span::call_site())
+                    }));
+                TripletCollectionGroup {
+                    rc_ident: rc_ident.clone(),
+                    triplet_param_count,
+                    block_ident: block_ident.clone(),
+                    constraint_index_field: ci_field,
+                    triplet_idx_stmts: triplet_idx_stmts.clone(),
+                    resolve_stmts: resolve_stmts.clone(),
+                    root_var_ident: root_var_ident.clone(),
+                    cost_entries: Vec::new(),
+                    gh_entries: Vec::new(),
+                    jac_entries: Vec::new(),
                 }
             });
-            if !jac_stmts.is_empty() {
-                let guarded_jac = if let Some(ref guard) = guard_expr {
-                    quote! { if #guard { #(#jac_stmts)* __jac_cid += 1; } }
-                } else {
-                    quote! { #(#jac_stmts)* __jac_cid += 1; }
-                };
-                jacobian_loops.push(quote! {
-                    for __frine in self.#rc_ident.iter() {
-                        #(#resolve_stmts)*
-                        let #root_var_ident = &*__self_ref;
-                        let __jac_idx: std::vec::Vec<u32> = {
-                            let mut __all_idx = [0u32; #tp];
-                            #(#triplet_idx_stmts)*
-                            __all_idx.to_vec()
-                        };
-                        #guarded_jac
-                    }
-                });
-            }
-            // No set_block_indices needed for TripletBlock
+            group.cost_entries.push(cost_entry);
+            group.gh_entries.push(gh_entry);
+            if let Some(je) = jac_entry { group.jac_entries.push(je); }
         } else if is_root_level_cross {
             // Root-level CrossBlock: constraint struct is directly on root (e.g. PosePair, CoincidentPP)
-            // Flat iteration, no nesting. frines_ident = root collection name of constraint struct.
+            // Flat iteration, no nesting. Multiple #[arael(constraint(...))] attributes on the
+            // same struct are merged into a single loop per collection via cross_groups.
             let rc_ident = frines_ident.unwrap();
+            let group_key = rc_ident.to_string();
 
-            let guarded_cost = if let Some(ref guard) = guard_expr {
+            let cost_entry = if let Some(ref guard) = guard_expr {
                 quote! { if #guard { #(#cost_stmts)* } }
             } else {
-                quote! { #(#cost_stmts)* }
+                quote! { { #(#cost_stmts)* } }
             };
-            let guarded_gh = if let Some(ref guard) = guard_expr {
+            let gh_entry = if let Some(ref guard) = guard_expr {
                 quote! { if #guard { #(#gh_stmts)* } }
             } else {
                 quote! { { #(#gh_stmts)* } }
             };
-
-            cost_loops.push(quote! {
-                for __frine in self.#rc_ident.iter() {
-                    #(#resolve_stmts)*
-                    let #root_var_ident = &*__self_ref;
-                    #guarded_cost
-                }
-            });
-
-            grad_hessian_loops.push(quote! {
-                for __frine in self.#rc_ident.iter_mut() {
-                    #(#resolve_stmts)*
-                    let #root_var_ident = &*__self_ref;
-                    #guarded_gh
-                }
-            });
-
-            if !jac_stmts.is_empty() {
-                let a_idx_stmts_j = a_idx_stmts.clone();
-                let b_idx_stmts_j = b_idx_stmts.clone();
-                let resolve_stmts_j = resolve_stmts.clone();
-                let guarded_jac = if let Some(ref guard) = guard_expr {
-                    quote! { if #guard { #(#jac_stmts)* } }
+            let jac_entry = if !jac_stmts.is_empty() {
+                if let Some(ref guard) = guard_expr {
+                    Some(quote! { if #guard { #(#jac_stmts)* } })
                 } else {
-                    quote! { #(#jac_stmts)* }
-                };
-                jacobian_loops.push(quote! {
-                    for __frine in self.#rc_ident.iter() {
-                        #(#resolve_stmts_j)*
-                        let #root_var_ident = &*__self_ref;
-                        let __jac_idx: std::vec::Vec<u32> = {
-                            let mut __a_idx = [0u32; #a_param_count];
-                            #(#a_idx_stmts_j)*
-                            let mut __b_idx = [0u32; #b_param_count];
-                            #(#b_idx_stmts_j)*
-                            let mut __v = std::vec::Vec::with_capacity(#a_param_count + #b_param_count);
-                            __v.extend_from_slice(&__a_idx);
-                            __v.extend_from_slice(&__b_idx);
-                            __v
-                        };
-                        #guarded_jac
-                        __jac_cid += 1;
-                    }
-                });
-            }
+                    Some(quote! { { #(#jac_stmts)* } })
+                }
+            } else { None };
 
-            {
-                let ci_set_cross = crate::registry_lookup(&sc.struct_name)
+            let group = cross_groups.entry(group_key).or_insert_with(|| {
+                let ci_field = crate::registry_lookup(&sc.struct_name)
                     .and_then(|l| l.constraint_index_field.as_ref().map(|f| {
-                        let fi = syn::Ident::new(f, proc_macro2::Span::call_site());
-                        quote! { __frine.#fi = __cid; }
+                        syn::Ident::new(f, proc_macro2::Span::call_site())
                     }));
-                set_block_indices_loops.push(quote! {
-                    for __frine in self.#rc_ident.iter_mut() {
-                        #(#resolve_stmts)*
-                        let mut __a_idx = [0u32; #a_param_count];
-                        #(#a_idx_stmts)*
-                        let mut __b_idx = [0u32; #b_param_count];
-                        #(#b_idx_stmts)*
-                        __frine.#block_ident.set_indices(&__a_idx, &__b_idx);
-                        #ci_set_cross
-                        __cid += 1;
-                    }
-                });
-            }
+                CrossCollectionGroup {
+                    rc_ident: rc_ident.clone(),
+                    a_param_count,
+                    b_param_count,
+                    block_ident: block_ident.clone(),
+                    constraint_index_field: ci_field,
+                    a_idx_stmts: a_idx_stmts.clone(),
+                    b_idx_stmts: b_idx_stmts.clone(),
+                    resolve_stmts: resolve_stmts.clone(),
+                    root_var_ident: root_var_ident.clone(),
+                    cost_entries: Vec::new(),
+                    gh_entries: Vec::new(),
+                    jac_entries: Vec::new(),
+                }
+            });
+            group.cost_entries.push(cost_entry);
+            group.gh_entries.push(gh_entry);
+            if let Some(je) = jac_entry { group.jac_entries.push(je); }
         } else {
             // Nested CrossBlock: add inner loops to the collection group
             let frines_ident = frines_ident.unwrap();
@@ -1821,6 +1817,133 @@ pub fn generate_root_methods(
                 }
             });
         }
+    }
+
+    // Emit merged cross-constraint loops (one per collection, all attributes inside)
+    for (_key, group) in &cross_groups {
+        let rc_ident = &group.rc_ident;
+        let a_param_count = group.a_param_count;
+        let b_param_count = group.b_param_count;
+        let block_ident = &group.block_ident;
+        let a_idx_stmts = &group.a_idx_stmts;
+        let b_idx_stmts = &group.b_idx_stmts;
+        let resolve_stmts = &group.resolve_stmts;
+        let root_var = &group.root_var_ident;
+        let cost_entries = &group.cost_entries;
+        let gh_entries = &group.gh_entries;
+        let jac_entries = &group.jac_entries;
+        let ci_set = group.constraint_index_field.as_ref().map(|fi| {
+            quote! { __frine.#fi = __cid; }
+        });
+
+        cost_loops.push(quote! {
+            for __frine in self.#rc_ident.iter() {
+                #(#resolve_stmts)*
+                let #root_var = &*__self_ref;
+                #(#cost_entries)*
+            }
+        });
+
+        grad_hessian_loops.push(quote! {
+            for __frine in self.#rc_ident.iter_mut() {
+                #(#resolve_stmts)*
+                let #root_var = &*__self_ref;
+                #(#gh_entries)*
+            }
+        });
+
+        if !jac_entries.is_empty() {
+            jacobian_loops.push(quote! {
+                for __frine in self.#rc_ident.iter() {
+                    #(#resolve_stmts)*
+                    let #root_var = &*__self_ref;
+                    let __jac_idx: std::vec::Vec<u32> = {
+                        let mut __a_idx = [0u32; #a_param_count];
+                        #(#a_idx_stmts)*
+                        let mut __b_idx = [0u32; #b_param_count];
+                        #(#b_idx_stmts)*
+                        let mut __v = std::vec::Vec::with_capacity(#a_param_count + #b_param_count);
+                        __v.extend_from_slice(&__a_idx);
+                        __v.extend_from_slice(&__b_idx);
+                        __v
+                    };
+                    #(#jac_entries)*
+                    __jac_cid += 1;
+                }
+            });
+        }
+
+        set_block_indices_loops.push(quote! {
+            for __frine in self.#rc_ident.iter_mut() {
+                #(#resolve_stmts)*
+                let mut __a_idx = [0u32; #a_param_count];
+                #(#a_idx_stmts)*
+                let mut __b_idx = [0u32; #b_param_count];
+                #(#b_idx_stmts)*
+                __frine.#block_ident.set_indices(&__a_idx, &__b_idx);
+                #ci_set
+                __cid += 1;
+            }
+        });
+    }
+
+    // Emit merged TripletBlock loops (one per collection, with set_block_indices)
+    for (_key, group) in &triplet_groups {
+        let rc_ident = &group.rc_ident;
+        let tp = group.triplet_param_count;
+        let block_ident = &group.block_ident;
+        let triplet_idx_stmts = &group.triplet_idx_stmts;
+        let resolve_stmts = &group.resolve_stmts;
+        let root_var = &group.root_var_ident;
+        let cost_entries = &group.cost_entries;
+        let gh_entries = &group.gh_entries;
+        let jac_entries = &group.jac_entries;
+        let ci_set = group.constraint_index_field.as_ref().map(|fi| {
+            quote! { __frine.#fi = __cid; }
+        });
+
+        cost_loops.push(quote! {
+            for __frine in self.#rc_ident.iter() {
+                #(#resolve_stmts)*
+                let #root_var = &*__self_ref;
+                #(#cost_entries)*
+            }
+        });
+
+        grad_hessian_loops.push(quote! {
+            for __frine in self.#rc_ident.iter_mut() {
+                #(#resolve_stmts)*
+                let #root_var = &*__self_ref;
+                let mut __all_idx = [0u32; #tp];
+                #(#triplet_idx_stmts)*
+                #(#gh_entries)*
+            }
+        });
+
+        if !jac_entries.is_empty() {
+            jacobian_loops.push(quote! {
+                for __frine in self.#rc_ident.iter() {
+                    #(#resolve_stmts)*
+                    let #root_var = &*__self_ref;
+                    let __jac_idx: std::vec::Vec<u32> = {
+                        let mut __all_idx = [0u32; #tp];
+                        #(#triplet_idx_stmts)*
+                        __all_idx.to_vec()
+                    };
+                    #(#jac_entries)*
+                    __jac_cid += 1;
+                }
+            });
+        }
+
+        // TripletBlock doesn't need set_indices, but we still need __cid assignment
+        set_block_indices_loops.push(quote! {
+            for __frine in self.#rc_ident.iter_mut() {
+                #ci_set
+                __cid += 1;
+            }
+        });
+        let _ = (block_ident, triplet_idx_stmts, resolve_stmts); // silence unused warnings
     }
 
     // Prepend merged SelfBlock loops before cross/triplet loops
