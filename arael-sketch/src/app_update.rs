@@ -1281,7 +1281,7 @@ impl eframe::App for EditorApp {
                             ctx.request_repaint();
                         }
                         if self.grab.is_some() {
-                            self.update_drag(mouse_sketch);
+                            self.update_drag(mouse_sketch, hit_threshold);
                             ctx.request_repaint();
                         }
                     }
@@ -1830,6 +1830,15 @@ impl eframe::App for EditorApp {
                     if let Some(off) = midpoint_hint_offset(&t) {
                         draw_midpoint_marker(self.to_screen(pos), off);
                     }
+                }
+            }
+
+            // Live midpoint-snap preview during endpoint drag. update_drag
+            // has already overridden drag_pt.pos to the snapped location;
+            // this just paints the visual marker so the user sees why.
+            if let Some((pos, ref t)) = self.drag_snap_preview {
+                if let Some(off) = midpoint_hint_offset(t) {
+                    draw_midpoint_marker(self.to_screen(pos), off);
                 }
             }
 

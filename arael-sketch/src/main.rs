@@ -105,6 +105,11 @@ pub struct EditorApp {
     pub drag_offset2: vect2d,            // offset for second drag point
     pub drag_saved_arc_locks: Option<SavedArcLocks>,
     pub drag_dimension: Option<usize>,   // index of dimension being dragged
+    /// Live midpoint snap during endpoint drag: (snap position in sketch
+    /// coords, snap target). Populated every `update_drag`, cleared by
+    /// `end_drag`. Used so the preview render can show the midpoint
+    /// marker without re-running find_snap_target.
+    pub drag_snap_preview: Option<(vect2d, SnapTarget)>,
 
     // Undo/redo
     pub history: History,
@@ -263,6 +268,7 @@ impl EditorApp {
             drag_offset2: vect2d::new(0.0, 0.0),
             drag_saved_arc_locks: None,
             drag_dimension: None,
+            drag_snap_preview: None,
             history,
             constraint_markers: Vec::new(),
             pending_load: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -679,9 +685,24 @@ impl EditorApp {
 
     // Update drag position and re-solve.
     // Track the best (lowest cost) clean state seen during the drag.
-    fn update_drag(&mut self, mouse_pos: vect2d) {
+    fn update_drag(&mut self, mouse_pos: vect2d, hit_threshold: f64) {
         if let Some(drag_pt) = self.drag_point {
             let is_body_drag = matches!(self.grab, Some(GrabTarget::LineDrag(_) | GrabTarget::ArcDrag(_)));
+            // Live snap preview for LineP1/LineP2 endpoint drags: if the
+            // cursor is within snap range of another entity (excluding the
+            // dragged line itself), pull the drag point to the snap
+            // location so the user sees where the constraint will land on
+            // release -- same behavior as during line creation.
+            let (effective_pos, snap_preview) = match self.grab {
+                Some(GrabTarget::LineP1(r)) | Some(GrabTarget::LineP2(r)) => {
+                    match self.find_snap_target_excluding(mouse_pos, hit_threshold, Some(r)) {
+                        Some((p, t)) => (p, Some((p, t))),
+                        None => (mouse_pos, None),
+                    }
+                }
+                _ => (mouse_pos, None),
+            };
+            self.drag_snap_preview = snap_preview;
             if is_body_drag {
                 let pos1 = vect2d::new(mouse_pos.x + self.drag_offset.x, mouse_pos.y + self.drag_offset.y);
                 self.sketch.points[drag_pt].pos = Param::fixed(pos1);
@@ -690,7 +711,7 @@ impl EditorApp {
                     self.sketch.points[drag_pt2].pos = Param::fixed(pos2);
                 }
             } else {
-                self.sketch.points[drag_pt].pos = Param::fixed(mouse_pos);
+                self.sketch.points[drag_pt].pos = Param::fixed(effective_pos);
             }
             let result = self.sketch.solve();
             self.last_cost = result.end_cost;
@@ -779,6 +800,7 @@ impl EditorApp {
     // If the final cost is much worse than pre-drag, revert to pre-drag state.
     fn end_drag(&mut self, hit_threshold: f64) {
         self.begin_group();
+        self.drag_snap_preview = None;
         if let Some(drag_pt) = self.drag_point.take() {
             let _drag_pos = self.sketch.points[drag_pt].pos.value;
             let grab = self.grab;
@@ -2246,6 +2268,10 @@ impl EditorApp {
         // First pass: check points and line endpoints (high priority)
         let mut best: Option<(f64, vect2d, SnapTarget)> = None;
 
+        // Snap zone is tighter than the hit-test threshold. Snap pulls the
+        // drawn/dragged geometry around; aggressive snap zones feel sticky.
+        // Hit-test (clicking) keeps the full threshold elsewhere.
+        let threshold = threshold * 0.5;
         let mut check = |dist: f64, pos: vect2d, target: SnapTarget| {
             if dist < threshold
                 && (best.is_none() || dist < best.unwrap().0) {
