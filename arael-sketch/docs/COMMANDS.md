@@ -811,8 +811,64 @@ measure L0 A0                Line-arc: center distance, gap, tangency
 find x,y [radius]            Find entities near a coordinate
 dof                          Show degrees of freedom (computed in background, may show "pending")
 dof analyze                  Analyze free directions: which entities can move and how
+dof eigenvalues              Show Hessian eigenvalue spectrum (one per parameter)
+dof singular                 Show Jacobian singular values with their parameter directions
+dof jacobian                 Show full Jacobian rows (residual + partial derivatives)
 cost                         Show current solver cost
 ```
+
+### Interpreting `dof singular`
+
+`dof singular` runs SVD on the constraint Jacobian. Each singular triplet
+is shown on two lines:
+
+```
+  1.322876e8  -0.707 A0.start_angle + 0.707 A0.end_angle
+           53% tangent_la:L0,A0, 53% tangent_la:L1,A0, 27% coinc_lp1_ae:L0,A0
+```
+
+**Line 1** — singular value σ followed by the right-singular-vector as a
+linear combination of parameters. Moving along this direction in parameter
+space changes the constraint residuals by σ times the step size.
+
+- **σ = 0**: free direction — a true degree of freedom.
+- **Small σ**: weakly constrained, near-free direction. Indicates
+  near-symmetries or poor conditioning.
+- **Large σ**: strongly constrained direction.
+
+Entries are weights (not current values) summing to unit norm. Only
+components above 30% of the max weight are shown.
+
+Common vector patterns:
+- `1.0 A0.start_angle` — pure motion of a single parameter
+- `0.707 A0.start_angle + 0.707 A0.end_angle` — both parameters shift
+  together (arc rotates around its center)
+- `-0.707 A0.start_angle + 0.707 A0.end_angle` — parameters shift
+  oppositely (arc sweep expands)
+
+**Line 2** — constraints contributing to this direction as percentages.
+Sums to 100% across all constraints. Tells you *which constraints care
+about this direction*:
+
+- For **small σ**: these constraints barely hold this direction. If
+  they're cancelling out or weak at the current scale, that's why the
+  direction is near-free.
+- For **large σ**: these constraints strongly resist motion. For a
+  dome-angle direction you'd expect tangent and coincident constraints
+  attached to the dome.
+
+### Interpreting `dof jacobian`
+
+Each row shows one constraint residual with its partial derivatives.
+Format: `row N cid=K label  r=<residual> |dr|=<row_norm>  [params]`
+
+- `cid` is the internal constraint ID (unique per constraint instance)
+- `label` names the constraint (e.g. `parallel:L3,L0`, `tangent_la:L0,A0`)
+- `|dr|` is the Euclidean norm of the partial derivatives
+
+Rows with the same `cid` belong to the same constraint instance (e.g. a
+coincident constraint produces 2 rows — one for x, one for y — sharing
+one cid).
 
 ## Undo / Redo / History
 

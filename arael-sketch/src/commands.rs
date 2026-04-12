@@ -5952,10 +5952,20 @@ fn cmd_dof_eigenvalues(ctx: &mut CommandContext) -> CommandResult {
         let ev = &result.eigenvectors[*col];
         let max_comp = ev.iter().cloned().fold(0.0f64, |a, b| a.max(b.abs()));
         let comp_threshold = max_comp * 0.3;
+        // Render as linear combination: "+0.707 A0.start_angle -0.707 A0.end_angle"
         let parts: Vec<String> = (0..n).filter(|&i| ev[i].abs() > comp_threshold)
-            .map(|i| format!("{}={:.3}", if result.param_names[i].is_empty() { format!("[{}]", i) } else { result.param_names[i].clone() }, ev[i]))
+            .enumerate()
+            .map(|(k, i)| {
+                let name = if result.param_names[i].is_empty() { format!("[{}]", i) } else { result.param_names[i].clone() };
+                let v = ev[i];
+                if k == 0 {
+                    if v < 0.0 { format!("-{:.3} {}", -v, name) } else { format!("{:.3} {}", v, name) }
+                } else {
+                    if v < 0.0 { format!("- {:.3} {}", -v, name) } else { format!("+ {:.3} {}", v, name) }
+                }
+            })
             .collect();
-        lines.push(format!("  {:.6e}  {}", val, parts.join(", ")));
+        lines.push(format!("  {:.6e}  {}", val, parts.join(" ")));
     }
     ok(lines.join("\n"))
 }
@@ -5987,30 +5997,69 @@ fn cmd_dof_singular(ctx: &mut CommandContext) -> CommandResult {
     let j = nalgebra::DMatrix::from_row_slice(m, n, &dense);
     let t_dense = t1.elapsed();
     let t2 = std::time::Instant::now();
-    let svd = j.svd(false, true);
+    // Compute both U and V^T so we can show which constraints contribute
+    let svd = j.svd(true, true);
     let t_svd = t2.elapsed();
     let vt = svd.v_t.as_ref().expect("V^T should be computed");
+    let u = svd.u.as_ref().expect("U should be computed");
     // Also benchmark faer SVD for comparison
     let t3 = std::time::Instant::now();
     let faer_mat = faer::Mat::from_fn(m, n, |i, k| dense[i * n + k]);
     let _faer_svd = faer_mat.thin_svd().unwrap();
     let t_faer = t3.elapsed();
 
+    let labels = ctx.sketch.constraint_labels();
+
     let mut lines = vec![format!("Jacobian: {} residuals x {} params", m, n)];
-    lines.push(format!("  build: {:.2}ms, nalgebra_svd: {:.2}ms, faer_svd: {:.2}ms, hessian_path: see 'dof eigenvalues'",
+    lines.push(format!("  build: {:.2}ms, nalgebra_svd: {:.2}ms, faer_svd: {:.2}ms",
         t_build.as_secs_f64() * 1000.0,
         (t_dense + t_svd).as_secs_f64() * 1000.0,
         t_faer.as_secs_f64() * 1000.0));
     let mut svs: Vec<(f64, usize)> = svd.singular_values.iter().cloned().enumerate().map(|(i,v)| (v, i)).collect();
     svs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
     for (val, idx) in &svs {
+        // Right singular vector: direction in parameter space
         let sv = vt.row(*idx);
         let max_comp = sv.iter().cloned().fold(0.0f64, |a, b| a.max(b.abs()));
         let comp_threshold = max_comp * 0.3;
         let parts: Vec<String> = (0..n).filter(|&i| sv[i].abs() > comp_threshold)
-            .map(|i| format!("{}={:.3}", if idx_to_name[i].is_empty() { format!("[{}]", i) } else { idx_to_name[i].clone() }, sv[i]))
+            .enumerate()
+            .map(|(k, i)| {
+                let name = if idx_to_name[i].is_empty() { format!("[{}]", i) } else { idx_to_name[i].clone() };
+                let v = sv[i];
+                if k == 0 {
+                    if v < 0.0 { format!("-{:.3} {}", -v, name) } else { format!("{:.3} {}", v, name) }
+                } else {
+                    if v < 0.0 { format!("- {:.3} {}", -v, name) } else { format!("+ {:.3} {}", v, name) }
+                }
+            })
             .collect();
-        lines.push(format!("  {:.6e}  {}", val, parts.join(", ")));
+        lines.push(format!("  {:.6e}  {}", val, parts.join(" ")));
+
+        // Left singular vector: which constraints project onto this direction.
+        // Aggregate |u[row]| per constraint (summing rows with the same cid).
+        let uv = u.column(*idx);
+        let mut cid_weight: std::collections::HashMap<u32, f64> = std::collections::HashMap::new();
+        for (row_idx, row) in jacobian.rows.iter().enumerate() {
+            if row_idx >= uv.len() { break; }
+            let w = uv[row_idx];
+            *cid_weight.entry(row.constraint).or_insert(0.0) += w * w;
+        }
+        // Each constraint's contribution = sum(u[row]^2) across its rows.
+        // Sum over all constraints = 1 (since u is unit). Report as percentages.
+        let mut contribs: Vec<(u32, f64)> = cid_weight.into_iter().collect();
+        contribs.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap());
+        let top_max = contribs.first().map(|(_, w)| *w).unwrap_or(0.0);
+        let top_threshold = top_max * 0.1; // show anything >= 10% of dominant
+        contribs.retain(|(_, w)| *w > top_threshold);
+        contribs.truncate(6);
+        if !contribs.is_empty() {
+            let parts: Vec<String> = contribs.iter().map(|(cid, w)| {
+                let label = labels.get(cid).cloned().unwrap_or_else(|| format!("cid={}", cid));
+                format!("{:.0}% {}", w * 100.0, label)
+            }).collect();
+            lines.push(format!("           {}", parts.join(", ")));
+        }
     }
     ok(lines.join("\n"))
 }
