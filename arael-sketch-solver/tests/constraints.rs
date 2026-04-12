@@ -1808,3 +1808,70 @@ fn test_pp_distance_signed_along_line() {
     assert!((px - 2.0).abs() < 1.5,
         "p should be near x=2 (drift-softened), got {}", px);
 }
+
+// -- Horizontal/Vertical direction preservation --
+//
+// A horizontal line with h_dir_sign captured at creation should not be
+// allowed to flip p1/p2 along x. The heaviside barrier engages when
+// (p2.x - p1.x) has the wrong sign and pushes back.
+#[test]
+fn test_horizontal_direction_preserved() {
+    let mut sketch = Sketch::new();
+    // Horizontal line length 3, p2 to the right of p1 initially.
+    let l = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(3.0, 0.0));
+    sketch.lines[l].constraints.horizontal = true;
+    sketch.lines[l].constraints.h_dir_sign = 1.0;
+    sketch.lines[l].constraints.has_length = true;
+    sketch.lines[l].constraints.length = 3.0;
+    // Pin p2 to the left of its starting position via a fix_x on a
+    // separate anchor point coincident with p2, effectively "dragging"
+    // p2 without displacing it past p1 abruptly. With length=3 locked,
+    // the solver must choose between p1 to the right or left of p2.
+    // Without the barrier it might pick either; with the barrier
+    // (h_dir_sign=+1) it must choose p1.x < p2.x.
+    let anchor = sketch.add_point_fixed(vect2d::new(2.0, 0.0));
+    sketch.coincident_lp2.push(CoincidentLP2 { line: l, point: anchor, cid: 0, hb: CrossBlock::new() });
+    sketch.solve();
+    let line = &sketch.lines[l];
+    assert!(line.p2.value.x > line.p1.value.x,
+        "horizontal line must not flip; got p1.x={}, p2.x={}",
+        line.p1.value.x, line.p2.value.x);
+    // p2 anchored at x=2, so p1 should be at ~x=-1 (length 3, unflipped).
+    assert!((line.p1.value.x - (-1.0)).abs() < 0.1,
+        "expected p1.x ~= -1 (p2 anchored at 2, length 3, unflipped), got p1.x={}",
+        line.p1.value.x);
+}
+
+#[test]
+fn test_vertical_direction_preserved() {
+    let mut sketch = Sketch::new();
+    let l = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(0.0, 3.0));
+    sketch.lines[l].constraints.vertical = true;
+    sketch.lines[l].constraints.v_dir_sign = 1.0;
+    sketch.lines[l].constraints.has_length = true;
+    sketch.lines[l].constraints.length = 3.0;
+    let anchor = sketch.add_point_fixed(vect2d::new(0.0, 2.0));
+    sketch.coincident_lp2.push(CoincidentLP2 { line: l, point: anchor, cid: 0, hb: CrossBlock::new() });
+    sketch.solve();
+    let line = &sketch.lines[l];
+    assert!(line.p2.value.y > line.p1.value.y,
+        "vertical line must not flip; got p1.y={}, p2.y={}",
+        line.p1.value.y, line.p2.value.y);
+    assert!((line.p1.value.y - (-1.0)).abs() < 0.1,
+        "expected p1.y ~= -1, got p1.y={}", line.p1.value.y);
+}
+
+// A loaded sketch (or any sketch where the user set `horizontal = true`
+// directly) with h_dir_sign = NaN should get it initialized on first
+// solve from current geometry.
+#[test]
+fn test_horizontal_dir_sign_lazy_init() {
+    let mut sketch = Sketch::new();
+    let l = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(3.0, 0.1));
+    sketch.lines[l].constraints.horizontal = true;
+    // Simulate loaded-sketch state: flag set, dir_sign NaN.
+    assert!(sketch.lines[l].constraints.h_dir_sign.is_nan());
+    sketch.solve();
+    // After solve, dir_sign should be initialized (from p2.x=3 > p1.x=0 → +1).
+    assert_eq!(sketch.lines[l].constraints.h_dir_sign, 1.0);
+}

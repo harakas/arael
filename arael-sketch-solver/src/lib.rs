@@ -416,7 +416,7 @@ impl Sketch {
         self.lines.push(Line {
             p1: Param::new(p1),
             p2: Param::new(p2),
-            constraints: LineConstraints { horizontal: false, vertical: false, has_length: false, length: 0.0, has_angle: false, target_angle: 0.0 },
+            constraints: LineConstraints { horizontal: false, vertical: false, has_length: false, length: 0.0, has_angle: false, target_angle: 0.0, h_dir_sign: f64::NAN, v_dir_sign: f64::NAN },
             style: LineStyle::Solid, construction: false, quiet: false, name,
             cid: 0, hb: SelfBlock::new(),
         })
@@ -1675,6 +1675,7 @@ impl Sketch {
         self.prepare_expr_constraints();
         self.update_tangent_flags();
         self.update_perpendicular_flags();
+        self.update_line_dir_flags();
 
         let saved_drift = self.drift_isigma;
         self.drift_isigma = 0.0;
@@ -1806,6 +1807,7 @@ impl Sketch {
         self.prepare_expr_constraints();
         self.update_tangent_flags();
         self.update_perpendicular_flags();
+        self.update_line_dir_flags();
 
         let saved_drift = self.drift_isigma;
         self.drift_isigma = 0.0;
@@ -2025,6 +2027,23 @@ impl Sketch {
         }
     }
 
+    /// Initialize h_dir_sign / v_dir_sign on lines with horizontal/vertical
+    /// constraints the first time they're seen. Sketches loaded from JSON
+    /// that predate the dir_sign fields deserialize with NaN; this backfills
+    /// them from whatever orientation the loaded geometry has.
+    pub fn update_line_dir_flags(&mut self) {
+        for l in self.lines.iter_mut() {
+            if l.constraints.horizontal && l.constraints.h_dir_sign.is_nan() {
+                let dx = l.p2.value.x - l.p1.value.x;
+                l.constraints.h_dir_sign = if dx >= 0.0 { 1.0 } else { -1.0 };
+            }
+            if l.constraints.vertical && l.constraints.v_dir_sign.is_nan() {
+                let dy = l.p2.value.y - l.p1.value.y;
+                l.constraints.v_dir_sign = if dy >= 0.0 { 1.0 } else { -1.0 };
+            }
+        }
+    }
+
     /// Solve the sketch constraints using Levenberg-Marquardt.
     /// Uses sparse faer Cholesky for n >= 64 params, dense Cholesky otherwise.
     /// When starting cost is high, uses graduated optimization (1% -> 10% ->
@@ -2037,6 +2056,7 @@ impl Sketch {
         self.rebuild_expr_constraints();
         self.update_tangent_flags();
         self.update_perpendicular_flags();
+        self.update_line_dir_flags();
 
         let mut params64: std::vec::Vec<f64> = std::vec::Vec::new();
         self.serialize64(&mut params64);

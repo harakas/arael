@@ -62,7 +62,20 @@ pub struct LineConstraints {
     pub has_angle: bool,
     #[serde(default)]
     pub target_angle: f64,
+    /// Captured sign of (p2.x - p1.x) at the moment `horizontal` was
+    /// applied. Used by the direction-preserving heaviside barrier to
+    /// prevent p1/p2 from swapping along x. NaN means "not yet
+    /// initialized -- derive from current geometry on next solve".
+    /// Skipped on serialize because NaN doesn't survive JSON round-trips;
+    /// derived fresh on load via `update_line_dir_flags`.
+    #[serde(skip, default = "default_dir_sign_nan")]
+    pub h_dir_sign: f64,
+    /// Same as h_dir_sign but for `vertical` and (p2.y - p1.y).
+    #[serde(skip, default = "default_dir_sign_nan")]
+    pub v_dir_sign: f64,
 }
+
+fn default_dir_sign_nan() -> f64 { f64::NAN }
 
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
@@ -145,9 +158,25 @@ pub struct Point {
 #[arael(constraint(hb, guard = self.constraints.horizontal, name = "horizontal", {
     [(line.p1.y - line.p2.y) * sketch.constraint_isigma]
 }))]
+// Horizontal direction preserver. Linear one-sided barrier: when
+// (p2.x - p1.x) has flipped sign from the value captured at the time
+// `horizontal` was applied, d > 0 and the residual pushes back.
+// Linear form (heaviside*d) gives full restoring gradient at d=0+ so
+// it resists active flip drivers (drags, competing constraints)
+// immediately -- the quadratic form used by min_length would let the
+// line slip through the boundary before engaging.
+#[arael(constraint(hb, guard = self.constraints.horizontal, name = "horizontal_dir", {
+    let d = -line.constraints.h_dir_sign * (line.p2.x - line.p1.x);
+    [heaviside(d) * d * sketch.constraint_isigma]
+}))]
 // Vertical: p1.x == p2.x
 #[arael(constraint(hb, guard = self.constraints.vertical, name = "vertical", {
     [(line.p1.x - line.p2.x) * sketch.constraint_isigma]
+}))]
+// Vertical direction preserver (see horizontal_dir for the reasoning).
+#[arael(constraint(hb, guard = self.constraints.vertical, name = "vertical_dir", {
+    let d = -line.constraints.v_dir_sign * (line.p2.y - line.p1.y);
+    [heaviside(d) * d * sketch.constraint_isigma]
 }))]
 // Length
 #[arael(constraint(hb, guard = self.constraints.has_length, name = "length_target", {

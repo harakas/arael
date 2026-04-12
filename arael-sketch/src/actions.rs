@@ -539,10 +539,22 @@ impl Action {
                 sketch.add_elliptic_arc(*center, *rx, *ry, *rotation, *start, *end, *ccw);
             }
             Action::ApplyHorizontal { lines } => {
-                for r in lines { sketch.lines[*r].constraints.horizontal = true; }
+                for r in lines {
+                    // Capture current (p2.x - p1.x) sign so the
+                    // direction-preserving heaviside barrier knows which
+                    // way the user oriented the line. See horizontal_dir
+                    // on Line in arael-sketch-solver/src/entities.rs.
+                    let dx = sketch.lines[*r].p2.value.x - sketch.lines[*r].p1.value.x;
+                    sketch.lines[*r].constraints.h_dir_sign = if dx >= 0.0 { 1.0 } else { -1.0 };
+                    sketch.lines[*r].constraints.horizontal = true;
+                }
             }
             Action::ApplyVertical { lines } => {
-                for r in lines { sketch.lines[*r].constraints.vertical = true; }
+                for r in lines {
+                    let dy = sketch.lines[*r].p2.value.y - sketch.lines[*r].p1.value.y;
+                    sketch.lines[*r].constraints.v_dir_sign = if dy >= 0.0 { 1.0 } else { -1.0 };
+                    sketch.lines[*r].constraints.vertical = true;
+                }
             }
             Action::ApplyCoincidentPP { a, b } => {
                 sketch.coincident_pp.push(CoincidentPP { a: *a, b: *b, cid: 0, hb: CrossBlock::new() });
