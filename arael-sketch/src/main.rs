@@ -537,8 +537,8 @@ impl EditorApp {
             let (ts, te) = self.dim_text_segment(dim);
             let dt = Self::screen_point_to_segment_dist(screen_pos, ts, te);
             // Arrow line segment (for angle dimensions, use the arc)
-            let da = if matches!(dim.kind, DimensionKind::ArcRadius(_) | DimensionKind::ArcSweep(_) | DimensionKind::Angle(..) | DimensionKind::LineAngle(_) | DimensionKind::HDistance(..) | DimensionKind::VDistance(..)) {
-                dt // for radius and angle, text check is enough
+            let da = if matches!(dim.kind, DimensionKind::ArcRadius(_) | DimensionKind::ArcSweep(_) | DimensionKind::Angle(..) | DimensionKind::LineAngle(_) | DimensionKind::HDistance(..) | DimensionKind::VDistance(..) | DimensionKind::ConcentricDistance(..)) {
+                dt // for radius/angle/concentric, text check is enough
             } else {
                 let (p1, p2) = self.dim_endpoints(&dim.kind);
                 let dx = p2.x - p1.x;
@@ -1453,6 +1453,11 @@ impl EditorApp {
                 let dy = l.p2.value.y - l.p1.value.y;
                 rad2deg(dy.atan2(dx))
             }
+            DimensionKind::ConcentricDistance(a, b) => {
+                let ra = self.sketch.arcs[*a].radius.value;
+                let rb = self.sketch.arcs[*b].radius.value;
+                (rb - ra).abs()
+            }
         }
     }
 
@@ -1499,6 +1504,16 @@ impl EditorApp {
             // Two lines -> angle dimension
             if let (Selection::Line(a), Selection::Line(b)) = (sel[0], sel[1]) {
                 return Some(DimensionKind::Angle(a, b, false));
+            }
+            // Two arcs -> radial distance, but only when concentric and
+            // both circular. Falls through silently otherwise.
+            if let (Selection::Arc(a), Selection::Arc(b)) = (sel[0], sel[1])
+                && !self.sketch.arcs[a].is_ellipse
+                && !self.sketch.arcs[b].is_ellipse
+                && self.sketch.concentric.iter().any(|c|
+                    (c.a == a && c.b == b) || (c.a == b && c.b == a))
+            {
+                return Some(DimensionKind::ConcentricDistance(a, b));
             }
             // Point + Line -> point-line distance
             let point_ep = sel.iter().find_map(Self::selection_to_dim_endpoint);
@@ -1619,6 +1634,17 @@ impl EditorApp {
             DimensionKind::LineAngle(r) => {
                 let l = &self.sketch.lines[*r];
                 (l.p1.value, l.p2.value)
+            }
+            DimensionKind::ConcentricDistance(a, b) => {
+                // Two endpoints on the line from the shared center along
+                // the leader direction (offset), one at each radius.
+                let center = self.sketch.arcs[*a].center.value;
+                let ra = self.sketch.arcs[*a].radius.value;
+                let rb = self.sketch.arcs[*b].radius.value;
+                // Direction comes from the offset; default to +x if zero.
+                let p1 = vect2d::new(center.x + ra, center.y);
+                let p2 = vect2d::new(center.x + rb, center.y);
+                (p1, p2)
             }
         }
     }

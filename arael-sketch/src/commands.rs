@@ -175,6 +175,11 @@ fn dimension_rejection_hint(sketch: &Sketch, action: &Action) -> String {
             let dy = l.p2.value.y - l.p1.value.y;
             Some(("xangle", arael::utils::rad2deg(dy.atan2(dx))))
         }
+        DimensionKind::ConcentricDistance(a, b) => {
+            let ra = sketch.arcs[*a].radius.value;
+            let rb = sketch.arcs[*b].radius.value;
+            Some(("distance", (rb - ra).abs()))
+        }
     };
     if let Some((label, current_val)) = current {
         format!(". Current {} is {:.4}, requested {:.4}", label, current_val, requested)
@@ -5024,8 +5029,33 @@ fn cmd_distance(ctx: &mut CommandContext, args: &str) -> CommandResult {
         return ok_or_status(ctx, format!("{} distance {} {} = ({:.4})", label, tokens[0], tokens[1], dist));
     }
 
-    if tokens.len() != 3 { return err("Usage: distance L0.p1 L1.p2 5.0 [derived|driven]  or  distance P0 L0 3.0 [derived|driven]"); }
+    if tokens.len() != 3 { return err("Usage: distance L0.p1 L1.p2 5.0 [derived|driven]  or  distance P0 L0 3.0 [derived|driven]  or  distance A0 A1 5.0 (concentric circles)"); }
     let (val, expr) = match parse_dim_value(&ctx.sketch, tokens[2]) { Ok(v) => v, Err(e) => return err(e) };
+
+    // Concentric-arcs radial distance: `distance A0 A1 v` for two
+    // non-ellipse arcs that are already concentric. Falls through if
+    // either token isn't a bare arc name, the arcs are ellipses, or
+    // the Concentric prerequisite isn't present.
+    if !tokens[0].contains('.') && !tokens[1].contains('.')
+        && tokens[0].starts_with('A') && tokens[1].starts_with('A')
+        && let Ok(arc_a) = resolve_arc(&ctx.sketch, tokens[0])
+        && let Ok(arc_b) = resolve_arc(&ctx.sketch, tokens[1])
+        && !ctx.sketch.arcs[arc_a].is_ellipse
+        && !ctx.sketch.arcs[arc_b].is_ellipse
+        && ctx.sketch.concentric.iter().any(|c|
+            (c.a == arc_a && c.b == arc_b) || (c.a == arc_b && c.b == arc_a))
+    {
+        let kind = DimensionKind::ConcentricDistance(arc_a, arc_b);
+        ctx.begin_group();
+        if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
+            let name = ctx.sketch.dimensions[idx].name.clone();
+            ctx.exec(Action::UpdateDimension { index: idx, value: val, expr });
+            return ok_or_status(ctx, format!("Updated {} concentric distance = {}", name, tokens[2]));
+        }
+        ctx.exec(Action::AddDimension { kind, value: val, expr, derived: is_derived });
+        let prefix = if is_derived { "Derived concentric distance" } else { "Set concentric distance" };
+        return ok_or_status(ctx, format!("{} = {}", prefix, tokens[2]));
+    }
 
     // Try point-line distance
     if (tokens[0].starts_with('P') || tokens[0].contains('.')) && tokens[1].starts_with('L') && !tokens[1].contains('.') {

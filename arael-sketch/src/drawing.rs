@@ -150,6 +150,14 @@ impl EditorApp {
                 offset, text_along, color, is_expr, is_derived);
         }
 
+        // Concentric distance: leader spanning from inner radius to outer
+        // radius along the direction picked by `offset.x` (angle), with
+        // `offset.y` as perpendicular offset and `text_along` along the leader.
+        if let DimensionKind::ConcentricDistance(a_ref, b_ref) = kind {
+            return self.draw_concentric_distance(painter, *a_ref, *b_ref, value,
+                offset, text_along, color, is_expr, is_derived);
+        }
+
         let (p1_sketch, p2_sketch) = self.dim_endpoints(kind);
         let dx = p2_sketch.x - p1_sketch.x;
         let dy = p2_sketch.y - p1_sketch.y;
@@ -541,6 +549,160 @@ impl EditorApp {
             egui::FontId::proportional(12.0), color)
     }
 
+    /// Concentric-arcs radial-distance dimension. The 2D `offset` is
+    /// the text anchor in world coords relative to the shared center.
+    /// The leader runs from the inner radius to the outer radius along
+    /// the offset direction; text sits at `center + offset` and is
+    /// rendered parallel to the leader. When the text is dragged
+    /// beyond the outer arc, a thin extension line connects the outer
+    /// arrow tip to the text.
+    fn draw_concentric_distance(&self, painter: &egui::Painter,
+                                a_ref: Ref<Arc>, b_ref: Ref<Arc>,
+                                value: f64, offset: vect2d, _text_along: f64,
+                                color: egui::Color32, is_expr: bool, is_derived: bool)
+        -> (egui::Pos2, egui::Pos2)
+    {
+        let a = &self.sketch.arcs[a_ref];
+        let b = &self.sketch.arcs[b_ref];
+        let center = a.center.value;
+        let r_inner = a.radius.value.min(b.radius.value);
+        let r_outer = a.radius.value.max(b.radius.value);
+
+        // Direction from center to text anchor; default to +x if zero.
+        let off_len = (offset.x * offset.x + offset.y * offset.y).sqrt();
+        let (dir_x, dir_y) = if off_len > 1e-9 {
+            (offset.x / off_len, offset.y / off_len)
+        } else {
+            (1.0, 0.0)
+        };
+
+        // Leader spans inner to outer radius along `dir`.
+        let inner_pt = vect2d::new(center.x + r_inner * dir_x, center.y + r_inner * dir_y);
+        let outer_pt = vect2d::new(center.x + r_outer * dir_x, center.y + r_outer * dir_y);
+        let s_inner = self.to_screen(inner_pt);
+        let s_outer = self.to_screen(outer_pt);
+
+        let stroke = egui::Stroke::new(1.0, color);
+        painter.line_segment([s_inner, s_outer], stroke);
+
+        // Arc-shaped extension lines when the leader direction falls
+        // outside either arc's angular sector. The extension follows
+        // the arc's circumference from its nearest end (start or end
+        // angle) around to the leader's angle.
+        let leader_angle = dir_y.atan2(dir_x);
+        let ext_arc_stroke = egui::Stroke::new(0.5, color);
+        for arc_obj in [a, b] {
+            if arc_obj.closed { continue; }   // full circle covers all angles
+            let (sa, sweep) = arc_span(arc_obj);
+            // Signed angular distance from `sa` to `leader_angle`,
+            // measured in the arc's sweep direction.
+            let mut t = leader_angle - sa;
+            // Normalise t so its sign matches sweep.
+            let two_pi = std::f64::consts::TAU;
+            if sweep >= 0.0 {
+                while t < 0.0 { t += two_pi; }
+                while t > two_pi { t -= two_pi; }
+            } else {
+                while t > 0.0 { t -= two_pi; }
+                while t < -two_pi { t += two_pi; }
+            }
+            // Inside sector: nothing to extend.
+            if (sweep >= 0.0 && t <= sweep) || (sweep < 0.0 && t >= sweep) {
+                continue;
+            }
+            // Outside: choose nearer sector endpoint and step from there
+            // to leader_angle along the arc's radius.
+            let from_angle = if t.abs() < (t - sweep).abs() { sa } else { sa + sweep };
+            let r = arc_obj.radius.value;
+            // Approximate the arc with short segments (~8px each).
+            let rscreen = (self.to_screen(vect2d::new(arc_obj.center.value.x + r,
+                                                     arc_obj.center.value.y)).x
+                         - self.to_screen(arc_obj.center.value).x).abs().max(1.0);
+            let total = (leader_angle - from_angle).abs().max(1e-6);
+            let segs = ((total * rscreen as f64) / 8.0).ceil().max(2.0) as usize;
+            let step = (leader_angle - from_angle) / segs as f64;
+            let mut prev = self.to_screen(vect2d::new(
+                arc_obj.center.value.x + r * from_angle.cos(),
+                arc_obj.center.value.y + r * from_angle.sin()));
+            for i in 1..=segs {
+                let ang = from_angle + step * i as f64;
+                let pt = self.to_screen(vect2d::new(
+                    arc_obj.center.value.x + r * ang.cos(),
+                    arc_obj.center.value.y + r * ang.sin()));
+                painter.line_segment([prev, pt], ext_arc_stroke);
+                prev = pt;
+            }
+        }
+
+        // Arrowheads pointing outward at each radius.
+        let asz = 6.0;
+        let draw_arrow = |tip: egui::Pos2, tail: egui::Pos2| {
+            let dx = tail.x - tip.x;
+            let dy = tail.y - tip.y;
+            let len = (dx * dx + dy * dy).sqrt().max(1.0);
+            let (ax, ay) = (dx / len, dy / len);
+            painter.line_segment([tip, egui::Pos2::new(tip.x + ax * asz + ay * asz * 0.4,
+                tip.y + ay * asz - ax * asz * 0.4)], stroke);
+            painter.line_segment([tip, egui::Pos2::new(tip.x + ax * asz - ay * asz * 0.4,
+                tip.y + ay * asz + ax * asz * 0.4)], stroke);
+        };
+        draw_arrow(s_inner, s_outer);
+        draw_arrow(s_outer, s_inner);
+
+        // Default text placement when offset is too short to be meaningful:
+        // just past the outer arrow tip on the leader.
+        let text_anchor_world = if off_len > 1e-6 {
+            vect2d::new(center.x + offset.x, center.y + offset.y)
+        } else {
+            vect2d::new(center.x + (r_outer + r_outer * 0.15) * dir_x,
+                        center.y + (r_outer + r_outer * 0.15) * dir_y)
+        };
+        let s_text = self.to_screen(text_anchor_world);
+
+        // Leader direction in SCREEN space (y is flipped from world).
+        // Keep this UNFLIPPED -- it's what the extension line follows.
+        let dx_s = s_outer.x - s_inner.x;
+        let dy_s = s_outer.y - s_inner.y;
+        let len_s = (dx_s * dx_s + dy_s * dy_s).sqrt().max(1.0);
+        let (lx, ly) = (dx_s / len_s, dy_s / len_s);
+
+        // Text-reading direction: flip to keep left-to-right.
+        let (mut tdx, mut tdy) = (lx, ly);
+        if tdx < 0.0 { tdx = -tdx; tdy = -tdy; }
+
+        let display = value.abs();
+        let text = if is_derived { format!("({:.2})", display) }
+            else if is_expr { format!("fx: {:.2}", display) }
+            else { format!("{:.2}", display) };
+        let char_width = 12.0_f32 * 0.6;
+        let total_width = text.len() as f32 * char_width;
+
+        // Extension line: when text is past outer radius, leader runs
+        // from outer arrow tip THROUGH the text to a small margin past
+        // it. When text is inside the inner radius (text dragged toward
+        // center), mirror it from the inner arrow tip in the opposite
+        // direction. Use the UNFLIPPED leader direction so the extension
+        // points outward regardless of which sector the text is in.
+        let ext_stroke = egui::Stroke::new(0.5, color);
+        let ext_pad = total_width / 2.0 + 4.0;
+        if off_len > r_outer {
+            let ext_end = egui::Pos2::new(s_text.x + lx * ext_pad,
+                                          s_text.y + ly * ext_pad);
+            painter.line_segment([s_outer, ext_end], ext_stroke);
+        } else if off_len < r_inner {
+            let ext_end = egui::Pos2::new(s_text.x - lx * ext_pad,
+                                          s_text.y - ly * ext_pad);
+            painter.line_segment([s_inner, ext_end], ext_stroke);
+        }
+
+        // Position text right at the anchor; draw_rotated_text adds its
+        // own (half_h + 2) ≈ 8px perpendicular bump for visual gap, so
+        // no extra text_offset needed here. Net text-to-leader distance
+        // matches what radius/sweep dims use.
+        self.draw_rotated_text(painter, s_text, tdx, tdy, &text,
+            egui::FontId::proportional(12.0), color)
+    }
+
     fn draw_xangle_dimension(&self, painter: &egui::Painter, line_ref: Ref<Line>,
                               value: f64, offset: vect2d, text_along: f64,
                               color: egui::Color32, is_expr: bool, is_derived: bool) -> (egui::Pos2, egui::Pos2) {
@@ -851,6 +1013,55 @@ impl EditorApp {
             return (
                 egui::Pos2::new(mid.x - dx * total_width / 2.0, mid.y - dy * total_width / 2.0),
                 egui::Pos2::new(mid.x + dx * total_width / 2.0, mid.y + dy * total_width / 2.0),
+            );
+        }
+
+        // Concentric-arcs radial distance: mirror draw_concentric_distance
+        // so the hit-test text region matches what's actually rendered.
+        if let DimensionKind::ConcentricDistance(a_ref, b_ref) = dim.kind {
+            let a = &self.sketch.arcs[a_ref];
+            let b = &self.sketch.arcs[b_ref];
+            let center = a.center.value;
+            let r_inner = a.radius.value.min(b.radius.value);
+            let r_outer = a.radius.value.max(b.radius.value);
+            let off_len = (dim.offset.x * dim.offset.x
+                          + dim.offset.y * dim.offset.y).sqrt();
+            let (dir_x, dir_y) = if off_len > 1e-9 {
+                (dim.offset.x / off_len, dim.offset.y / off_len)
+            } else {
+                (1.0, 0.0)
+            };
+            let text_anchor = if off_len > 1e-6 {
+                vect2d::new(center.x + dim.offset.x, center.y + dim.offset.y)
+            } else {
+                vect2d::new(center.x + (r_outer + r_outer * 0.15) * dir_x,
+                            center.y + (r_outer + r_outer * 0.15) * dir_y)
+            };
+            let s_text = self.to_screen(text_anchor);
+            // Screen-space leader direction.
+            let inner_pt = vect2d::new(center.x + r_inner * dir_x,
+                                       center.y + r_inner * dir_y);
+            let outer_pt = vect2d::new(center.x + r_outer * dir_x,
+                                       center.y + r_outer * dir_y);
+            let s_inner = self.to_screen(inner_pt);
+            let s_outer = self.to_screen(outer_pt);
+            let dx_s = s_outer.x - s_inner.x;
+            let dy_s = s_outer.y - s_inner.y;
+            let len_s = (dx_s * dx_s + dy_s * dy_s).sqrt().max(1.0);
+            let (mut tdx, mut tdy) = (dx_s / len_s, dy_s / len_s);
+            if tdx < 0.0 { tdx = -tdx; tdy = -tdy; }
+            // No extra text_offset; draw_rotated_text already shifts
+            // perpendicular by (half_h + 2). Match here for hit-test.
+            let tnx = -tdy;
+            let tny = tdx;
+            let half_h = 7.0_f32;  // 12pt / 2 + 1
+            let mid = egui::Pos2::new(s_text.x - tnx * (half_h + 2.0),
+                                       s_text.y - tny * (half_h + 2.0));
+            return (
+                egui::Pos2::new(mid.x - tdx * total_width / 2.0,
+                                mid.y - tdy * total_width / 2.0),
+                egui::Pos2::new(mid.x + tdx * total_width / 2.0,
+                                mid.y + tdy * total_width / 2.0),
             );
         }
 

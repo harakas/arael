@@ -184,6 +184,8 @@ pub struct Sketch {
     pub distance_aa_e_ce: std::vec::Vec<DistanceAAECe>,
     pub distance_aa_e_s: std::vec::Vec<DistanceAAES>,
     pub distance_aa_e_e: std::vec::Vec<DistanceAAEE>,
+    /// Radial distance between two concentric arcs/circles.
+    #[serde(default)] pub distance_concentric: std::vec::Vec<DistanceConcentric>,
     // Axis distance (horizontal/vertical unified)
     #[serde(default)] pub axis_distance_ll11: std::vec::Vec<AxisDistanceLL11>,
     #[serde(default)] pub axis_distance_ll12: std::vec::Vec<AxisDistanceLL12>,
@@ -339,6 +341,7 @@ impl Sketch {
             distance_aa_e_ce: Vec::new(),
             distance_aa_e_s: Vec::new(),
             distance_aa_e_e: Vec::new(),
+            distance_concentric: Vec::new(),
             axis_distance_ll11: Vec::new(),
             axis_distance_ll12: Vec::new(),
             axis_distance_ll21: Vec::new(),
@@ -676,6 +679,7 @@ impl Sketch {
         self.distance_aa_e_ce.retain(|c| c.a != r && c.b != r);
         self.distance_aa_e_s.retain(|c| c.a != r && c.b != r);
         self.distance_aa_e_e.retain(|c| c.a != r && c.b != r);
+        self.distance_concentric.retain(|c| c.a != r && c.b != r);
         self.axis_distance_arc_center_p.retain(|c| c.arc != r);
         self.axis_distance_arc_start_p.retain(|c| c.arc != r);
         self.axis_distance_arc_end_p.retain(|c| c.arc != r);
@@ -1205,6 +1209,7 @@ impl Sketch {
         for c in &self.distance_arc_center_l { m.insert(c.cid, format!("dist_ac_l:{},{}", an(c.arc), ln(c.line))); }
         for c in &self.distance_arc_start_l { m.insert(c.cid, format!("dist_as_l:{},{}", an(c.arc), ln(c.line))); }
         for c in &self.distance_arc_end_l { m.insert(c.cid, format!("dist_ae_l:{},{}", an(c.arc), ln(c.line))); }
+        for c in &self.distance_concentric { m.insert(c.cid, format!("dist_concentric:{},{}", an(c.a), an(c.b))); }
         for c in &self.symmetry_ll { m.insert(c.cid, format!("sym_ll:{},{},{}", ln(c.a), ln(c.b), ln(c.c))); }
         for c in &self.symmetry_pp { m.insert(c.cid, format!("sym_pp:{},{},{}", pn(c.a), ln(c.line), pn(c.c))); }
         for c in &self.symmetry_aa { m.insert(c.cid, format!("sym_aa:{},{},{}", an(c.a), ln(c.line), an(c.c))); }
@@ -1569,6 +1574,10 @@ impl Sketch {
         for c in &self.distance_aa_e_ce { out.push(format!("distance {}.end {}.center = {}", self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
         for c in &self.distance_aa_e_s { out.push(format!("distance {}.end {}.start = {}", self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
         for c in &self.distance_aa_e_e { out.push(format!("distance {}.end {}.end = {}", self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
+        for c in &self.distance_concentric {
+            let signed = if c.sign >= 0.0 { c.distance } else { -c.distance };
+            out.push(format!("distance {} {} = {} (concentric)", self.arcs[c.a].name, self.arcs[c.b].name, signed));
+        }
         // Midpoint variants
         for c in &self.midpoint_lp1 { out.push(format!("midpoint {}.p1 {}", self.lines[c.target].name, self.lines[c.line].name)); }
         for c in &self.midpoint_lp2 { out.push(format!("midpoint {}.p2 {}", self.lines[c.target].name, self.lines[c.line].name)); }

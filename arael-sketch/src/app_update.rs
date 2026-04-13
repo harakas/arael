@@ -1258,6 +1258,17 @@ impl eframe::App for EditorApp {
                                     let along = ((mouse_sketch.x - qmx) * ddx + (mouse_sketch.y - qmy) * ddy) / (dlen * dlen);
                                     self.sketch.dimensions[dim_idx].offset = vect2d::new(0.0, offset_val);
                                     self.sketch.dimensions[dim_idx].text_along = along;
+                                } else if let DimensionKind::ConcentricDistance(a_ref, _b_ref) = kind {
+                                    // 2D text anchor in world coords relative
+                                    // to the shared center. The leader rotates
+                                    // to follow the text; text renders parallel
+                                    // to the leader; an extension line connects
+                                    // the outer arrow tip to the text when the
+                                    // anchor sits past the outer radius.
+                                    let center = self.sketch.arcs[a_ref].center.value;
+                                    self.sketch.dimensions[dim_idx].offset =
+                                        vect2d::new(mouse_sketch.x - center.x,
+                                                    mouse_sketch.y - center.y);
                                 } else {
                                     // Decompose mouse into perpendicular offset and along-line position
                                     let (p1, p2) = self.dim_endpoints(&kind);
@@ -1601,6 +1612,15 @@ impl eframe::App for EditorApp {
                                 let along = if sweep.abs() > 1e-6 { delta / sweep - 0.5 } else { 0.0 };
                                 self.dim_offset = vect2d::new(0.0, dist.max(0.3));
                                 self.dim_text_along = along.clamp(-0.5, 0.5);
+                            } else if let DimensionKind::ConcentricDistance(a_ref, _b_ref) = kind {
+                                // Same encoding as the drag path: 2D text
+                                // anchor in world coords relative to the
+                                // shared center. Lets the user position the
+                                // text anywhere before clicking to commit.
+                                let center = self.sketch.arcs[*a_ref].center.value;
+                                self.dim_offset = vect2d::new(mouse_sketch.x - center.x,
+                                                               mouse_sketch.y - center.y);
+                                self.dim_text_along = 0.0;
                             } else if matches!(kind, DimensionKind::HDistance(..) | DimensionKind::VDistance(..)) {
                                 let horizontal = matches!(kind, DimensionKind::HDistance(..));
                                 let (p1, p2) = self.dim_endpoints(kind);

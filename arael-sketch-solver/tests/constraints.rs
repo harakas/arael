@@ -1875,3 +1875,52 @@ fn test_horizontal_dir_sign_lazy_init() {
     // After solve, dir_sign should be initialized (from p2.x=3 > p1.x=0 → +1).
     assert_eq!(sketch.lines[l].constraints.h_dir_sign, 1.0);
 }
+
+// -- Concentric distance --
+
+#[test]
+fn distance_concentric_basic() {
+    let mut sketch = Sketch::new();
+    let a = sketch.add_arc(vect2d::new(0.0, 0.0), 5.0, 0.0, std::f64::consts::TAU, true);
+    let b = sketch.add_arc(vect2d::new(0.0, 0.0), 8.0, 0.0, std::f64::consts::TAU, true);
+    sketch.concentric.push(Concentric { a, b, cid: 0, hb: CrossBlock::new() });
+    sketch.distance_concentric.push(DistanceConcentric {
+        a, b, sign: 1.0, distance: 2.0, cid: 0, hb: CrossBlock::new(),
+    });
+    sketch.solve();
+    let diff = sketch.arcs[b].radius.value - sketch.arcs[a].radius.value;
+    assert!((diff - 2.0).abs() < 0.01, "expected b-a ≈ 2.0, got {}", diff);
+}
+
+#[test]
+fn distance_concentric_negative_sign_preserved() {
+    // b smaller than a (init_diff = -3): captured sign = -1; the
+    // residual then enforces b-a = -3, NOT a flip to +3.
+    let mut sketch = Sketch::new();
+    let a = sketch.add_arc(vect2d::new(0.0, 0.0), 8.0, 0.0, std::f64::consts::TAU, true);
+    let b = sketch.add_arc(vect2d::new(0.0, 0.0), 5.0, 0.0, std::f64::consts::TAU, true);
+    sketch.concentric.push(Concentric { a, b, cid: 0, hb: CrossBlock::new() });
+    sketch.distance_concentric.push(DistanceConcentric {
+        a, b, sign: -1.0, distance: 3.0, cid: 0, hb: CrossBlock::new(),
+    });
+    sketch.solve();
+    let diff = sketch.arcs[b].radius.value - sketch.arcs[a].radius.value;
+    assert!((diff - (-3.0)).abs() < 0.01, "expected b-a ≈ -3.0 (sign preserved), got {}", diff);
+}
+
+#[test]
+fn distance_concentric_arc_delete_cascade() {
+    // Deleting an arc removes the DistanceConcentric constraint and
+    // any dimension that referenced it (existing arc-delete cascade).
+    let mut sketch = Sketch::new();
+    let a = sketch.add_arc(vect2d::new(0.0, 0.0), 5.0, 0.0, std::f64::consts::TAU, true);
+    let b = sketch.add_arc(vect2d::new(0.0, 0.0), 8.0, 0.0, std::f64::consts::TAU, true);
+    sketch.concentric.push(Concentric { a, b, cid: 0, hb: CrossBlock::new() });
+    sketch.distance_concentric.push(DistanceConcentric {
+        a, b, sign: 1.0, distance: 3.0, cid: 0, hb: CrossBlock::new(),
+    });
+    assert_eq!(sketch.distance_concentric.len(), 1);
+    sketch.delete_arc(a);
+    assert!(sketch.distance_concentric.is_empty(),
+        "DistanceConcentric should be removed when arc is deleted");
+}

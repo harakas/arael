@@ -1282,6 +1282,31 @@ pub struct Concentric {
     pub hb: CrossBlock<Arc, Arc>,
 }
 
+// Radial distance between two concentric arcs/circles. Enforces
+// `b.radius - a.radius = sign * distance`, where `sign` is captured at
+// dimension creation time so the residual stays sign-stable under
+// big value updates (no mirror flip on which arc is outer).
+#[derive(serde::Serialize, serde::Deserialize)]
+#[arael::model]
+#[arael(constraint(hb, name = "concentric_distance", {
+    [(b.radius - a.radius - distanceconcentric.distance * distanceconcentric.sign)
+     * sketch.constraint_isigma]
+}))]
+pub struct DistanceConcentric {
+    #[arael(ref = root.arcs)]
+    pub a: Ref<Arc>,
+    #[arael(ref = root.arcs)]
+    pub b: Ref<Arc>,
+    #[serde(default = "default_tangent_sign")]
+    pub sign: f64,
+    pub distance: f64,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
+    #[serde(skip)]
+    pub hb: CrossBlock<Arc, Arc>,
+}
+
 // Equal radius
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]

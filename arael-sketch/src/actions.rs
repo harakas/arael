@@ -172,6 +172,7 @@ impl Action {
                     DimensionKind::HDistance(_, _) => "hdistance",
                     DimensionKind::VDistance(_, _) => "vdistance",
                     DimensionKind::LineAngle(_) => "xangle",
+                    DimensionKind::ConcentricDistance(_, _) => "concentric_distance",
                 };
                 if expr.is_some() { format!("Add {} (expr)", kind_str) }
                 else { format!("Add {}", kind_str) }
@@ -911,6 +912,29 @@ impl Action {
                         sketch.lines[*line].constraints.has_angle = true;
                         sketch.lines[*line].constraints.target_angle = target;
                     }
+                    DimensionKind::ConcentricDistance(a, b) => {
+                        // Validate prerequisites: both arcs are circular,
+                        // and a Concentric constraint already couples them.
+                        let valid_arcs = sketch.arcs.get(*a).is_some()
+                            && sketch.arcs.get(*b).is_some()
+                            && !sketch.arcs[*a].is_ellipse
+                            && !sketch.arcs[*b].is_ellipse;
+                        let concentric_present = sketch.concentric.iter().any(|c|
+                            (c.a == *a && c.b == *b) || (c.a == *b && c.b == *a));
+                        if !valid_arcs || !concentric_present {
+                            return false;
+                        }
+                        let init_diff = sketch.arcs[*b].radius.value
+                                      - sketch.arcs[*a].radius.value;
+                        let sign = if init_diff >= 0.0 { 1.0 } else { -1.0 };
+                        sketch.distance_concentric.push(DistanceConcentric {
+                            a: *a, b: *b,
+                            sign,
+                            distance: value.abs(),
+                            cid: 0,
+                            hb: CrossBlock::new(),
+                        });
+                    }
                 }
                 } // end if !derived
                 sketch.dimensions.push(Dimension {
@@ -970,6 +994,10 @@ impl Action {
                                 if let Some(l) = sketch.lines.get_mut(line) {
                                     l.constraints.has_angle = false;
                                 }
+                            }
+                            DimensionKind::ConcentricDistance(a, b) => {
+                                sketch.distance_concentric.retain(|c|
+                                    !((c.a == a && c.b == b) || (c.a == b && c.b == a)));
                             }
                         }
                     }
@@ -1036,6 +1064,21 @@ impl Action {
                             sketch.lines[line].constraints.has_angle = true;
                             sketch.lines[line].constraints.target_angle = target;
                         }
+                        DimensionKind::ConcentricDistance(a, b) => {
+                            // Re-create with sign captured from current geometry
+                            // (UpdateDimension is the user-visible "set new value"
+                            // path; the sign tracks whichever arc is currently outer).
+                            let init_diff = sketch.arcs[b].radius.value
+                                          - sketch.arcs[a].radius.value;
+                            let sign = if init_diff >= 0.0 { 1.0 } else { -1.0 };
+                            sketch.distance_concentric.push(DistanceConcentric {
+                                a, b,
+                                sign,
+                                distance: value.abs(),
+                                cid: 0,
+                                hb: CrossBlock::new(),
+                            });
+                        }
                     }
                 }
                 // Expression dims: rebuild_expr_constraints() in solve() handles it
@@ -1090,6 +1133,10 @@ impl Action {
                             if let Some(l) = sketch.lines.get_mut(line) {
                                 l.constraints.has_angle = false;
                             }
+                        }
+                        DimensionKind::ConcentricDistance(a, b) => {
+                            sketch.distance_concentric.retain(|c|
+                                !((c.a == a && c.b == b) || (c.a == b && c.b == a)));
                         }
                     }
                     sketch.cleanup_helper_points();
@@ -1147,7 +1194,22 @@ impl Action {
                     ConstraintId::Perpendicular(i) => { sketch.perpendicular.remove(*i); }
                     ConstraintId::EqualLength(i) => { sketch.equal_length.remove(*i); }
                     ConstraintId::EqualRadius(i) => { sketch.equal_radius.remove(*i); }
-                    ConstraintId::Concentric(i) => { sketch.concentric.remove(*i); }
+                    ConstraintId::Concentric(i) => {
+                        let (a, b) = {
+                            let c = &sketch.concentric[*i];
+                            (c.a, c.b)
+                        };
+                        sketch.concentric.remove(*i);
+                        // Cascade: any ConcentricDistance dimension and its
+                        // backing constraint that referenced this same arc
+                        // pair go too. Expression-dim cleanup falls out of
+                        // removing the dimension -- the corresponding
+                        // expr_constraints entry is rebuilt on the next
+                        // prepare_expr_constraints / solve.
+                        sketch.distance_concentric.retain(|c|
+                            !((c.a == a && c.b == b) || (c.a == b && c.b == a)));
+                        sketch.dimensions.retain(|d| !d.kind.references_concentric_pair(a, b));
+                    }
                     ConstraintId::TangentLA(i) => { sketch.tangent_la.remove(*i); }
                     ConstraintId::TangentAA(i) => { sketch.tangent_aa.remove(*i); }
                     ConstraintId::Collinear(i) => { sketch.collinear.remove(*i); }

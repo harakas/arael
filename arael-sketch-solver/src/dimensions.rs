@@ -36,6 +36,14 @@ pub enum DimensionKind {
     VDistance(DimensionEndpoint, DimensionEndpoint),
     /// Line angle from x-axis, in degrees.
     LineAngle(Ref<Line>),
+    /// Radial distance between two concentric arcs/circles. Stored as
+    /// the magnitude `|b.radius - a.radius|`; the sign is captured in
+    /// the underlying constraint at creation so the solver can't flip
+    /// which arc is outer under value updates. Requires a
+    /// `Concentric` constraint coupling the same arcs to be
+    /// meaningful; the dimension is auto-removed when that constraint
+    /// is deleted.
+    ConcentricDistance(Ref<Arc>, Ref<Arc>),
 }
 
 impl DimensionEndpoint {
@@ -77,9 +85,21 @@ impl DimensionKind {
             DimensionKind::PointPointDistance(a, b) => a.references_arc(r) || b.references_arc(r),
             DimensionKind::PointLineDistance(a, _) => a.references_arc(r),
             DimensionKind::HDistance(a, b) | DimensionKind::VDistance(a, b) => a.references_arc(r) || b.references_arc(r),
+            DimensionKind::ConcentricDistance(a, b) => *a == r || *b == r,
             DimensionKind::LineAngle(_) => false,
             _ => false,
         }
+    }
+
+    /// True when this is a `ConcentricDistance` referencing the
+    /// (unordered) arc pair `(a, b)`. Used by the cascade that
+    /// removes such dimensions when their backing `Concentric`
+    /// constraint is deleted.
+    pub fn references_concentric_pair(&self, a: Ref<Arc>, b: Ref<Arc>) -> bool {
+        matches!(self,
+            DimensionKind::ConcentricDistance(x, y)
+            if (*x == a && *y == b) || (*x == b && *y == a)
+        )
     }
 }
 
@@ -247,6 +267,17 @@ impl Dimension {
                 } else {
                     if cur_angle >= 0.0 { signed_deg } else { -signed_deg }
                 }
+            }
+            DimensionKind::ConcentricDistance(a, b) => {
+                // Signed along-radius difference, with sign captured at
+                // build time so the residual stays sign-stable under big
+                // value changes (no flip on which arc is outer).
+                let na = &sketch.arcs[*a].name;
+                let nb = &sketch.arcs[*b].name;
+                let signed = symbol(&format!("{}.radius", nb))
+                           - symbol(&format!("{}.radius", na));
+                let init_diff = sketch.arcs[*b].radius.value - sketch.arcs[*a].radius.value;
+                if init_diff >= 0.0 { signed } else { -signed }
             }
         }
     }
