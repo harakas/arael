@@ -182,6 +182,100 @@
 //! for a complete example that accepts an arbitrary equation from the
 //! command line and fits it to data with robust error suppression.
 //!
+//! # Instrumentation & Debugging
+//!
+//! When a model fails to converge or the solution is wrong, the usual
+//! chain of inspection is: look at the *cost distribution*, check the
+//! *gradient and Hessian* for bad values, then look at the *rank of the
+//! Jacobian*. Each step corresponds to a specific arael API.
+//!
+//! Enable instrumentation by adding the `jacobian` flag on the root:
+//!
+//! ```ignore
+//! #[arael::model]
+//! #[arael(root, jacobian)]
+//! struct MyModel { /* ... */ }
+//! ```
+//!
+//! This generates an impl of [`model::JacobianModel`] with two methods:
+//! `calc_jacobian` and `calc_cost_table`.
+//!
+//! ## My solve doesn't converge. What do I check?
+//!
+//! 1. **Cost breakdown by label.** Name your constraint attributes with
+//!    `#[arael(constraint(hb, name = "drift", { ... }))]` so each group
+//!    shows up under its own label in the sum-of-squares. Call
+//!    `model.calc_cost_table(&params)` to get `HashMap<&'static str, T>`:
+//!
+//!    ```ignore
+//!    use arael::model::JacobianModel;
+//!    let table = model.calc_cost_table(&params);
+//!    for (label, cost) in &table { println!("{:<20} {:.6}", label, cost); }
+//!    ```
+//!
+//!    A single label dominating the total is usually the culprit --
+//!    either an overly tight sigma, bad initial values for its inputs,
+//!    or a constraint that's mathematically unsatisfiable.
+//!
+//! 2. **NaN or Inf residuals / derivatives.** Walk the Jacobian rows:
+//!
+//!    ```ignore
+//!    let j = model.calc_jacobian(&params);
+//!    for row in &j.rows {
+//!        if !row.residual.is_finite()
+//!            || !row.entries.iter().all(|(_, v)| v.is_finite())
+//!        {
+//!            eprintln!("bad row cid={} label={}", row.constraint, row.label);
+//!        }
+//!    }
+//!    ```
+//!
+//!    A NaN residual or partial derivative usually means a `sqrt` or
+//!    `atan2` saw a degenerate input (zero-length vector, both-zero
+//!    arguments). Use `arael_sym::safe_sqrt` / `safe_atan2` in the
+//!    constraint body -- they return finite values and non-diverging
+//!    derivatives at the singular point.
+//!
+//! 3. **Gradient magnitude.** After
+//!    [`simple_lm::LmProblem::calc_grad_hessian_dense`], the maximum
+//!    absolute gradient component should be small relative
+//!    to the cost scale at a local minimum. A huge gradient with tiny
+//!    cost means the parameter scaling is off -- one parameter moves
+//!    cost several orders of magnitude more than another, which
+//!    destabilises Levenberg-Marquardt.
+//!
+//! 4. **Hessian health.** The same `hessian` array should be finite and
+//!    positive-semi-definite at a minimum (smallest eigenvalue ≥ 0
+//!    modulo roundoff). A significantly-negative smallest eigenvalue
+//!    means the Gauss-Newton approximation J^T J is a poor local fit
+//!    -- often because constraints are ill-conditioned or cancel.
+//!
+//! 5. **Rank / DOF.** Call [`model::Jacobian::singular_values`] (or the
+//!    full [`Jacobian::svd`](model::Jacobian::svd) for directions):
+//!
+//!    ```ignore
+//!    let j = model.calc_jacobian(&params);
+//!    let svs = j.singular_values();
+//!    println!("{:?}", svs); // descending; near-zero entries count free DOF
+//!    ```
+//!
+//!    Near-zero singular values count the degrees of freedom. If this
+//!    is higher than you expect, the model is under-constrained. The
+//!    right singular vectors (columns of [`SvdResult::v`](model::SvdResult))
+//!    corresponding to σ ≈ 0 name the unconstrained parameter
+//!    directions -- useful for identifying *which* parameters are free.
+//!    SVD is always performed in f64 regardless of the model's element
+//!    type, so rank detection stays reliable even for f32 models.
+//!
+//! ## How do I know my new constraint is actually doing anything?
+//!
+//! Name the attribute, run the solve before and after adding it, and
+//! compare `calc_cost_table` entries and row counts. If the new label
+//! appears with a non-trivial cost contribution, it's participating.
+//! If its row count is zero, a `guard` is excluding it. See
+//! [examples/jacobian_demo.rs](https://github.com/harakas/arael/blob/master/examples/jacobian_demo.rs)
+//! for an end-to-end walkthrough.
+//!
 //! # 2D Sketch Editor
 //!
 //! The `arael-sketch` crate provides an interactive constraint-based 2D sketch

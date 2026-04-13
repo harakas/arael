@@ -2082,13 +2082,12 @@ pub fn generate_root_methods(
         }
     };
 
-    // Generate calc_jacobian method if requested
+    // Generate JacobianModel impl if requested
     if jacobian {
         let ext_update = if custom { extended_update_call.clone() } else { quote! {} };
         tokens.extend(quote! {
-            impl #root_name {
-                /// Compute the sparse Jacobian matrix at the given parameters.
-                pub fn calc_jacobian(&mut self, params: &[#prec_type]) -> arael::model::Jacobian<#prec_type> {
+            impl arael::model::JacobianModel<#prec_type> for #root_name {
+                fn calc_jacobian(&mut self, params: &[#prec_type]) -> arael::model::Jacobian<#prec_type> {
                     arael::model::Model::#update_method(self, params);
                     #ext_update
                     let __self_ref = unsafe { &*(self as *const Self) };

@@ -1,6 +1,6 @@
 // Integration tests for Jacobian computation via #[arael(root, jacobian)].
 
-use arael::model::{Param, SelfBlock, CrossBlock, Model};
+use arael::model::{CrossBlock, JacobianModel, Model, Param, SelfBlock};
 use arael::simple_lm::LmProblem;
 use arael::vect::vect2d;
 

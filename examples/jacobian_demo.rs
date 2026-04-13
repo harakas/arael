@@ -1,25 +1,39 @@
 /// Jacobian computation demo.
 ///
-/// Shows `#[arael(root, jacobian)]` and `#[arael(constraint_index)]`.
+/// Shows `#[arael(root, jacobian)]`, `#[arael(constraint_index)]`, and the
+/// optional `name = "..."` on individual constraint attributes. The label
+/// shows up on each emitted `JacobianRow`, which is handy for DOF /
+/// sparsity analyses where you want to know which of a struct's several
+/// residual groups produced a given row.
+///
 /// Use `cargo expand --example jacobian_demo` to inspect generated code.
 
-use arael::model::{Param, SelfBlock, CrossBlock, Model};
+use arael::model::{CrossBlock, JacobianModel, Model, Param, SelfBlock};
 use arael::simple_lm::LmProblem;
 use arael::vect::vect2d;
 
+// Point has TWO constraint attributes, both given explicit names. Without
+// the names the labels would default to "Point:0" and "Point:1".
 #[arael::model]
-#[arael(constraint(hb, {
+#[arael(constraint(hb, name = "drift", {
     let d = point.pos - point.pos_value;
     [d.x * jacmodel.isigma, d.y * jacmodel.isigma]
+}))]
+#[arael(constraint(hb, name = "fix_x", guard = self.has_fix_x, {
+    [(point.pos.x - point.fix_x) * jacmodel.isigma]
 }))]
 struct Point {
     pos: Param<vect2d>,
     pos_value: vect2d,
+    has_fix_x: bool,
+    fix_x: f64,
     #[arael(constraint_index)]
     ci: u32,
     hb: SelfBlock<Point>,
 }
 
+// Coincident has a single constraint attribute and no `name`, so the
+// default label is just the struct name: "Coincident".
 #[arael::model]
 #[arael(constraint(hb, {
     [(a.pos.x - b.pos.x) * jacmodel.isigma,
@@ -52,11 +66,15 @@ fn main() {
     m.points.push(Point {
         pos: Param::new(vect2d::new(0.0, 0.0)),
         pos_value: vect2d::new(0.0, 0.0),
+        has_fix_x: true,          // exercises the guarded "fix_x" attribute
+        fix_x: 0.0,
         ci: 0, hb: SelfBlock::new(),
     });
     m.points.push(Point {
         pos: Param::new(vect2d::new(1.0, 0.0)),
         pos_value: vect2d::new(1.0, 0.0),
+        has_fix_x: false,         // "fix_x" attribute is inactive for this point
+        fix_x: 0.0,
         ci: 0, hb: SelfBlock::new(),
     });
     m.coincidents.push(Coincident {
@@ -78,8 +96,10 @@ fn main() {
         let entries: Vec<String> = row.entries.iter()
             .map(|(idx, val)| format!("p{}={:.4}", idx, val))
             .collect();
-        println!("  row {:2}: cid={} r={:+.6} [{}]",
-            i, row.constraint, row.residual, entries.join(", "));
+        // row.label is the static string set by `name = "..."` (or
+        // defaulted to the struct name / "<Struct>:<idx>" suffix).
+        println!("  row {:2}: cid={} label={:<12} r={:+.6} [{}]",
+            i, row.constraint, row.label, row.residual, entries.join(", "));
     }
 
     // --- Cost comparison ---
@@ -148,6 +168,35 @@ fn main() {
     }
     for (i, c) in m.coincidents.iter().enumerate() {
         println!("  coincident[{}].ci = {}", i, c.ci);
+    }
+
+    // --- Per-label cost breakdown ---
+    // JacobianModel::calc_cost_table returns the squared-residual sum
+    // grouped by each row's label. Row counts come from the Jacobian
+    // we already have.
+    use std::collections::BTreeMap;
+    let mut rows_per_label: BTreeMap<&'static str, usize> = BTreeMap::new();
+    for row in &j.rows { *rows_per_label.entry(row.label).or_insert(0) += 1; }
+    let cost_table = m.calc_cost_table(&params);
+    // BTreeMap the cost table so output order is deterministic.
+    let cost_table: BTreeMap<_, _> = cost_table.into_iter().collect();
+    println!("\nPer-label breakdown (rows, cost):");
+    for (label, count) in &rows_per_label {
+        let cost = cost_table.get(label).copied().unwrap_or(0.0);
+        println!("  {:<12} rows={} cost={:.6}", label, count, cost);
+    }
+    let total: f64 = cost_table.values().sum();
+    println!("  {:<12}          total={:.6}", "", total);
+
+    // --- Singular value spectrum ---
+    // Jacobian::singular_values returns sigma in descending order; small
+    // sigma near zero indicates degrees of freedom (unconstrained
+    // parameter-space directions). Always computed in f64 regardless of
+    // the Jacobian's element type.
+    let svs = j.singular_values();
+    println!("\nSingular values (descending):");
+    for (i, s) in svs.iter().enumerate() {
+        println!("  sigma[{}] = {:.6e}", i, s);
     }
 
     println!("\nAll checks passed.");

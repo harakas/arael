@@ -2,6 +2,7 @@
 // Decoupled from GUI -- operates on CommandContext which holds sketch state.
 
 use std::collections::HashMap;
+use arael::model::JacobianModel;
 use arael::refs::Ref;
 use arael::vect::vect2d;
 use arael_sketch_solver::*;
@@ -5976,33 +5977,35 @@ fn cmd_dof_singular(ctx: &mut CommandContext) -> CommandResult {
         return ok(format!("Jacobian: {} residuals x {} params (empty)", m, n));
     }
     let t1 = web_time::Instant::now();
-    let dense = jacobian.to_dense();
-    let j = nalgebra::DMatrix::from_row_slice(m, n, &dense);
-    let t_dense = t1.elapsed();
-    let t2 = web_time::Instant::now();
-    // Compute both U and V^T so we can show which constraints contribute
-    let svd = j.svd(true, true);
-    let t_svd = t2.elapsed();
-    let vt = svd.v_t.as_ref().expect("V^T should be computed");
-    let u = svd.u.as_ref().expect("U should be computed");
-    // Also benchmark faer SVD for comparison
-    let t3 = web_time::Instant::now();
-    let faer_mat = faer::Mat::from_fn(m, n, |i, k| dense[i * n + k]);
-    let _faer_svd = faer_mat.thin_svd().unwrap();
-    let t_faer = t3.elapsed();
+    let svd = jacobian.svd();
+    let t_svd = t1.elapsed();
+    let svs_vec = &svd.singular_values;
+    let k_dim = svs_vec.len();
+    // Re-pack V (n x k row-major) and U (m x k row-major) into accessors
+    // that mirror the legacy nalgebra/faer API (sv at singular-value index
+    // -> direction in parameter space for V, contribution per row for U).
+    let v_row = |idx: usize| -> Vec<f64> {
+        let mut row = vec![0.0f64; n];
+        for i in 0..n { row[i] = svd.v[i * k_dim + idx]; }
+        row
+    };
+    let u_col = |idx: usize| -> Vec<f64> {
+        let mut col = vec![0.0f64; m];
+        for i in 0..m { col[i] = svd.u[i * k_dim + idx]; }
+        col
+    };
 
     let labels = ctx.sketch.constraint_labels();
 
     let mut lines = vec![format!("Jacobian: {} residuals x {} params", m, n)];
-    lines.push(format!("  build: {:.2}ms, nalgebra_svd: {:.2}ms, faer_svd: {:.2}ms",
+    lines.push(format!("  build: {:.2}ms, svd: {:.2}ms",
         t_build.as_secs_f64() * 1000.0,
-        (t_dense + t_svd).as_secs_f64() * 1000.0,
-        t_faer.as_secs_f64() * 1000.0));
-    let mut svs: Vec<(f64, usize)> = svd.singular_values.iter().cloned().enumerate().map(|(i,v)| (v, i)).collect();
+        t_svd.as_secs_f64() * 1000.0));
+    let mut svs: Vec<(f64, usize)> = svs_vec.iter().cloned().enumerate().map(|(i,v)| (v, i)).collect();
     svs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
     for (val, idx) in &svs {
         // Right singular vector: direction in parameter space
-        let sv = vt.row(*idx);
+        let sv = v_row(*idx);
         let max_comp = sv.iter().cloned().fold(0.0f64, |a, b| a.max(b.abs()));
         let comp_threshold = max_comp * 0.3;
         let parts: Vec<String> = (0..n).filter(|&i| sv[i].abs() > comp_threshold)
@@ -6022,7 +6025,7 @@ fn cmd_dof_singular(ctx: &mut CommandContext) -> CommandResult {
         // Left singular vector: which constraints project onto this direction.
         // Aggregate u[row]^2 by (cid, label) — the label gives attribute-level
         // granularity (e.g. Arc:0 vs Arc:4) while cid gives the instance.
-        let uv = u.column(*idx);
+        let uv = u_col(*idx);
         let mut weight: std::collections::HashMap<(u32, &'static str), f64> = std::collections::HashMap::new();
         for (row_idx, row) in jacobian.rows.iter().enumerate() {
             if row_idx >= uv.len() { break; }

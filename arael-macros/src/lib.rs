@@ -139,8 +139,29 @@ fn registry_take_constraints() -> Vec<StashedConstraint> {
 /// struct Pose { /* ... */ }
 /// ```
 ///
-/// Options: `guard = expr` for conditional evaluation, `parent = name` to
-/// name the parent variable in nested constraints.
+/// Options:
+/// - `guard = expr` -- conditional evaluation; the constraint contributes
+///   only when `expr` evaluates to `true` at runtime.
+/// - `parent = name` -- name the parent variable in nested constraints.
+/// - `name = "label"` -- override the `JacobianRow::label` for rows emitted
+///   by this attribute. Defaults to the struct's type name; for structs
+///   with multiple `constraint` attributes, the default is
+///   `<StructName>:N` where N is the attribute's 0-based index. Useful
+///   when a single struct has several residual groups (drift, target,
+///   min-soft, etc.) and you want each group identifiable in
+///   DOF / sparsity analyses.
+///
+/// ```ignore
+/// #[arael::model]
+/// #[arael(constraint(hb, name = "drift", {
+///     let d = point.pos - point.pos_value;
+///     [d.x * sketch.drift_isigma, d.y * sketch.drift_isigma]
+/// }))]
+/// #[arael(constraint(hb, guard = self.has_fix_x, name = "fix_x", {
+///     [(point.pos.x - point.fix_x) * sketch.constraint_isigma]
+/// }))]
+/// struct Point { /* ... */ }
+/// ```
 ///
 /// ## `#[arael(fit(data, |e| expr))]`
 ///
@@ -180,10 +201,14 @@ fn registry_take_constraints() -> Vec<StashedConstraint> {
 /// Optional keywords (comma-separated after `root`):
 /// - `extended` -- the user implements `ExtendedModel` for runtime
 ///   constraints (no default impl generated)
-/// - `jacobian` -- generates `calc_jacobian(&mut self, params) -> Jacobian<T>`
-///   method that returns the sparse Jacobian matrix with constraint provenance.
-///   Intended for debug/instrumentation (DOF analysis, constraint diagnostics).
-///   Uses the same symbolically differentiated expressions as the Hessian path.
+/// - `jacobian` -- generates an impl of
+///   [`arael::model::JacobianModel<T>`](../arael/model/trait.JacobianModel.html)
+///   providing `calc_jacobian(&mut self, params) -> Jacobian<T>` and the
+///   default-method `calc_cost_table(&mut self, params) -> HashMap<&'static str, T>`
+///   (squared-residual sum grouped by attribute label). Intended for
+///   debug/instrumentation (DOF analysis, constraint diagnostics,
+///   per-label cost breakdown). Uses the same symbolically differentiated
+///   expressions as the Hessian path.
 ///
 /// ## `#[arael(constraint_index)]`
 ///

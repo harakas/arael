@@ -1497,6 +1497,180 @@ impl<T: crate::utils::Float> Jacobian<T> {
         }
         data
     }
+
+    /// Build an f64 dense row-major m x n matrix. Casts each entry from
+    /// `T` via `num::NumCast`. Used by the SVD methods, which always
+    /// operate in f64 regardless of `T` for rank-detection precision.
+    fn to_dense_f64(&self) -> std::vec::Vec<f64> {
+        let m = self.rows.len();
+        let n = self.num_params;
+        let mut data = vec![0.0f64; m * n];
+        for (i, row) in self.rows.iter().enumerate() {
+            for &(j, v) in &row.entries {
+                data[i * n + j as usize] = <f64 as num::NumCast>::from(v).unwrap_or(0.0);
+            }
+        }
+        data
+    }
+
+    /// Singular values of this Jacobian, sorted descending. Always
+    /// computed in f64 regardless of `T`.
+    ///
+    /// Near-zero singular values count the degrees of freedom of the
+    /// underlying constraint system. Backend choice mirrors the solver:
+    /// nalgebra for small problems (n < 32), faer for larger.
+    pub fn singular_values(&self) -> std::vec::Vec<f64> {
+        let m = self.num_residuals();
+        let n = self.num_params;
+        if m == 0 || n == 0 { return std::vec::Vec::new(); }
+        let dense = self.to_dense_f64();
+        if n < 32 {
+            let j = nalgebra::DMatrix::from_row_slice(m, n, &dense);
+            j.singular_values().iter().cloned().collect()
+        } else {
+            let faer_j = faer::Mat::from_fn(m, n, |i, k| dense[i * n + k]);
+            match faer_j.thin_svd() {
+                Ok(svd) => {
+                    let s = svd.S().column_vector();
+                    (0..s.nrows()).map(|i| s[i]).collect()
+                }
+                Err(_) => std::vec::Vec::new(),
+            }
+        }
+    }
+
+    /// Full thin SVD: σ, U, V. Use this when you need the directions of
+    /// rank deficiency; right singular vectors (columns of `V`) with
+    /// σ ≈ 0 name the free-parameter directions in a DOF analysis.
+    ///
+    /// Thin dimensions: U is m×k, V is n×k, σ has k entries where
+    /// k = min(m, n). Matrices stored row-major. Always in f64.
+    pub fn svd(&self) -> SvdResult {
+        let m = self.num_residuals();
+        let n = self.num_params;
+        if m == 0 || n == 0 {
+            return SvdResult {
+                singular_values: std::vec::Vec::new(),
+                u: std::vec::Vec::new(),
+                v: std::vec::Vec::new(),
+                m, n,
+            };
+        }
+        let dense = self.to_dense_f64();
+        let k = m.min(n);
+        if n < 32 {
+            let j = nalgebra::DMatrix::from_row_slice(m, n, &dense);
+            let svd = j.svd(true, true);
+            let singular_values: std::vec::Vec<f64> = svd.singular_values.iter().cloned().collect();
+            // nalgebra SVD returns U (m x k_actual) and V^t (k_actual x n);
+            // pad/truncate to our declared k.
+            let u_mat = svd.u.as_ref().expect("U requested");
+            let vt_mat = svd.v_t.as_ref().expect("V^t requested");
+            let mut u = vec![0.0f64; m * k];
+            let mut v = vec![0.0f64; n * k];
+            let kk = singular_values.len().min(k);
+            for i in 0..m {
+                for j in 0..kk {
+                    u[i * k + j] = u_mat[(i, j)];
+                }
+            }
+            for i in 0..n {
+                for j in 0..kk {
+                    // V = (V^t)^t, so V[i][j] = V^t[j][i].
+                    v[i * k + j] = vt_mat[(j, i)];
+                }
+            }
+            SvdResult { singular_values, u, v, m, n }
+        } else {
+            let faer_j = faer::Mat::from_fn(m, n, |i, k| dense[i * n + k]);
+            match faer_j.thin_svd() {
+                Ok(svd) => {
+                    let s = svd.S().column_vector();
+                    let singular_values: std::vec::Vec<f64> = (0..s.nrows()).map(|i| s[i]).collect();
+                    let u_mat = svd.U();
+                    let v_mat = svd.V();
+                    let mut u = vec![0.0f64; m * k];
+                    let mut v = vec![0.0f64; n * k];
+                    let kk = singular_values.len().min(k);
+                    for i in 0..m {
+                        for j in 0..kk {
+                            u[i * k + j] = u_mat[(i, j)];
+                        }
+                    }
+                    for i in 0..n {
+                        for j in 0..kk {
+                            v[i * k + j] = v_mat[(i, j)];
+                        }
+                    }
+                    SvdResult { singular_values, u, v, m, n }
+                }
+                Err(_) => SvdResult {
+                    singular_values: std::vec::Vec::new(),
+                    u: std::vec::Vec::new(),
+                    v: std::vec::Vec::new(),
+                    m, n,
+                },
+            }
+        }
+    }
+}
+
+/// Result of an SVD decomposition of a [`Jacobian`]. Thin SVD: U is m×k,
+/// V is n×k, σ has k = min(m, n) entries. Matrices are stored row-major.
+/// Always in f64 regardless of the source Jacobian's element type.
+pub struct SvdResult {
+    /// Singular values, descending order.
+    pub singular_values: std::vec::Vec<f64>,
+    /// Left singular vectors, m×k row-major.
+    pub u: std::vec::Vec<f64>,
+    /// Right singular vectors, n×k row-major. Column `i` corresponds to
+    /// `singular_values[i]`.
+    pub v: std::vec::Vec<f64>,
+    /// Number of residuals (rows of the original Jacobian).
+    pub m: usize,
+    /// Number of parameters (columns of the original Jacobian).
+    pub n: usize,
+}
+
+// ---------------------------------------------------------------------------
+// JacobianModel trait -- emitted by `#[arael(root, jacobian)]`
+// ---------------------------------------------------------------------------
+
+/// Instrumentation API emitted for root structs declared with
+/// `#[arael(root, jacobian)]`.
+///
+/// Gives access to the sparse Jacobian matrix and a per-label cost table
+/// for DOF analysis, constraint diagnostics, and sparsity inspection.
+/// The methods mirror what the solver computes during `calc_cost` /
+/// `calc_grad_hessian_*`, but retain constraint provenance
+/// ([`JacobianRow::constraint`] and [`JacobianRow::label`]).
+///
+/// Intended for debugging and observability -- call sites on the hot
+/// path should prefer the solver's `calc_cost` / `calc_grad_hessian_*`
+/// methods, which are faster.
+pub trait JacobianModel<T: crate::utils::Float> {
+    /// Compute the sparse Jacobian at the given parameter vector. Each
+    /// emitted row carries its source constraint ID
+    /// ([`JacobianRow::constraint`]) and static label
+    /// ([`JacobianRow::label`]).
+    fn calc_jacobian(&mut self, params: &[T]) -> Jacobian<T>;
+
+    /// Return the per-label squared-residual total (`sum r^2` grouped
+    /// by [`JacobianRow::label`]). Useful for seeing which constraint
+    /// group is contributing how much cost at a given parameter point.
+    ///
+    /// Default implementation derives from `calc_jacobian`. Roots can
+    /// override to skip derivative computation if they only need the
+    /// cost split, but the default is usually fine.
+    fn calc_cost_table(&mut self, params: &[T]) -> std::collections::HashMap<&'static str, T> {
+        let j = self.calc_jacobian(params);
+        let mut out = std::collections::HashMap::new();
+        for row in &j.rows {
+            let e = out.entry(row.label).or_insert(T::zero());
+            *e += row.residual * row.residual;
+        }
+        out
+    }
 }
 
 /// Build sparse Jacobian entries from index array and derivatives.
