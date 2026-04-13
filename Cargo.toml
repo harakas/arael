@@ -38,6 +38,8 @@ cc = { version = "1", optional = true }
 [dev-dependencies]
 criterion = "0.5"
 image = "0.25"
+rustyline = "15"
+dirs = "5"
 
 [[bench]]
 name = "benchmarks"

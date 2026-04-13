@@ -174,6 +174,130 @@ arael::sym! {
 }
 ```
 
+## Custom Functions
+
+The library can build named function nodes (`Expr::Func`) that carry a body, formal parameters, and a behavioural kind. Use these when you want a function that participates in differentiation and code generation but stays distinct in the expression tree (e.g., to avoid CSE across the call boundary, or to call out to an extern Rust function at eval time).
+
+Three families exist, picked based on how derivatives and numeric eval are produced:
+
+| constructor                | body for diff / codegen | numeric eval                      | per-arg derivs |
+| -------------------------- | ----------------------- | --------------------------------- | -------------- |
+| `simple_func1` / `2` / `func`     | symbolic body inlined  | inlined body                      | auto-diffed    |
+| `simple_func1_derivs` / `2_derivs` / `_derivs` | symbolic body inlined | inlined body | explicit       |
+| `extern_func1` / `2` / `func`     | (none -- external)      | `eval_fn: fn(&[f64]) -> f64`      | explicit       |
+
+Each constructor returns a *closure* that, when applied to actual argument expressions, produces an `Expr::Func` E.
+
+### Symbolic with auto-diff
+
+```rust
+arael::sym! {
+    let sq = simple_func1("sq", |t| t * t);
+    let f = sq(symbol("x")) + sq(symbol("y"));
+    println!("f = {}", f);                  // sq(x) + sq(y)
+    println!("df/dx = {}", f.diff("x"));    // 2 * x
+}
+```
+
+The body lambda runs once with placeholder symbols to capture the body expression; auto-differentiation operates on that body when the resulting Func is differentiated.
+
+### Symbolic with explicit derivatives
+
+When auto-diff would yield brittle or expensive derivatives, supply them explicitly:
+
+```rust
+arael::sym! {
+    let safe_sq = simple_func1_derivs(
+        "safe_sq",
+        |t| t * t,
+        |t| [c(2.0) * t],   // d/dt
+    );
+    let f = safe_sq(symbol("x"));
+    println!("df/dx = {}", f.diff("x"));    // 2 * x
+}
+```
+
+The arael-sym built-ins `safe_sqrt`, `safe_atan2`, `safe_asin`, `safe_acos`, `rad_diff`, and `rad_sum` are themselves built using these `simple_func*_derivs` / `extern_func*` constructors -- their source is a useful reference for non-trivial derivative wiring.
+
+### Extern (call out to a Rust function at eval)
+
+When the body is implemented natively (not as a symbolic expression), use `extern_func1/2/func`. The function is generated as a normal Rust call (`call_path(args...)`) in `to_rust_*` codegen, and uses `eval_fn` for numeric evaluation.
+
+```rust
+arael::sym! {
+    // extern_func ties differentiation, codegen, and runtime eval together.
+    let lerp = extern_func2(
+        "lerp",
+        "my_crate::lerp",
+        |a, b| [c(1.0) - symbol("__t"), symbol("__t")], // dummy derivs sketch
+        |args: &[f64]| args[0] * (1.0 - args[2]) + args[1] * args[2],
+    );
+    // ...
+}
+```
+
+### `FuncKind`: the underlying enum
+
+Every `Expr::Func` carries one of three `FuncKind` variants:
+
+- `FuncKind::Symbolic { body }` -- the simplest case; the body is auto-differentiated and inlined for evaluation and codegen.
+- `FuncKind::SymbolicDerivs { body, derivs }` -- body for evaluation/codegen, explicit per-argument derivatives.
+- `FuncKind::Extern { derivs, eval_fn, call_path }` -- explicit derivatives, native eval function, codegen emits `call_path(args...)`.
+
+You can construct `Expr::Func` values directly via `FuncKind` if you need to bypass the constructors above; usually the constructors are easier.
+
+## Switching and Clamping: `heaviside`, `clamp`
+
+Two built-ins act as conditional building blocks. Both are continuous in value but produce discontinuous (or zero) derivatives at their boundaries, so they're typically used inside larger expressions where the discontinuity is either intentional (a threshold penalty) or guarded by a clamp on the input domain.
+
+### `heaviside(x)`
+
+The Heaviside step function: 0 for `x < 0`, 1 for `x >= 0`. Auto-differentiates to 0 everywhere. `H` is a parser-level alias: `parse("H(x)")` is the same as `parse("heaviside(x)")`.
+
+### `clamp(value, lo, hi)`
+
+Clamps the value to `[lo, hi]`. Differentiation passes through `value` (the limits are treated as constant from the perspective of the derivative). Useful to *bound the input* of an inner function whose math is undefined or numerically unstable outside that range.
+
+```rust
+arael::sym! {
+    let x = symbol("x");
+    let safe = asin(clamp(x, c(-1.0), c(1.0)));
+    // safe is well-defined for any x; derivative at |x| > 1 is 0 (clamp's
+    // derivative is the indicator of the interior).
+    println!("{}", safe);                      // asin(clamp(x, -1, 1))
+    println!("d/dx = {}", safe.diff("x"));      // 1 / sqrt(-clamp(x, -1, 1)^2 + 1)
+}
+```
+
+The catch: when `x` sits exactly at `-1` or `+1`, `asin`'s derivative is `1 / sqrt(1 - x^2)` which diverges. The next subsection shows the standard fix.
+
+### Example: building `safe_asin` from scratch
+
+The arael-sym built-in `safe_asin` combines `clamp` for the body with an `epsilon`-regularised derivative supplied via `simple_func1_derivs`:
+
+```rust
+arael::sym! {
+    let safe_asin = simple_func1_derivs(
+        "safe_asin",
+        // Body: clamp the input, then asin. Used for both numeric
+        // evaluation and codegen.
+        |x| asin(clamp(x, c(-1.0), c(1.0))),
+        // Derivative: 1 / sqrt(1 - x^2 + eps^2). The `identity` guard
+        // around `1 - x^2` prevents the simplifier from reordering the
+        // subtraction relative to the `+eps^2`, which would otherwise
+        // cancel in floating point near |x| = 1.
+        |x| [c(1.0) / sqrt(identity(c(1.0) - x.clone() * x) + epsilon() * epsilon())],
+    );
+    let f = safe_asin(symbol("x"));
+    println!("{}",       f);             // safe_asin(x)
+    println!("d/dx = {}", f.diff("x"));  // 1 / sqrt(identity(1 - x^2) + epsilon^2)
+}
+```
+
+Why explicit derivatives? Auto-differentiating `asin(clamp(x, -1, 1))` would produce `(d/dx clamp) / sqrt(1 - clamp(x, -1, 1)^2)`, which still diverges at the boundary. The regularised version replaces `sqrt(1 - x^2)` with `sqrt(1 - x^2 + eps^2)` and uses `identity` to defend the `1 - x^2` subtraction from simplifier reordering.
+
+The same pattern -- `simple_func*_derivs` plus `clamp` and/or `epsilon`-regularisation in the derivative -- is how `safe_acos`, `safe_sqrt`, `safe_atan2`, and similar are implemented. Their source is short and worth reading when you need a domain-safe primitive of your own.
+
 ## Common Subexpression Elimination
 
 ```rust
@@ -194,9 +318,61 @@ CSE is applied automatically in the constraint code generation macro, reducing g
 
 ## Parsing
 
+`parse(input)` reads an expression in standard infix notation: arithmetic, parentheses, function calls, the `^` operator for power, and the named constants `pi` and `e`. Anything else becomes a free symbol.
+
 ```rust
 let e: E = "x^2 + 3*x + 1".parse().unwrap();
 let f = parse("sqrt(atan2(y, x) + pi)").unwrap();
 let g = parse("exp(sin(x)) * cos(x)").unwrap();
 println!("d/dx = {}", g.diff("x")); // cos(x)^2 * exp(sin(x)) - exp(sin(x)) * sin(x)
 ```
+
+Built-in functions recognised: `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `sinh`, `cosh`, `tanh`, `exp`, `ln`, `log2`, `log10`, `sqrt`, `abs`, `heaviside` (alias `H`), `clamp`, `pow`, `rad_diff`, `rad_sum`, `safe_atan2`, `safe_sqrt`, `safe_asin`, `safe_acos`, `identity`. The full list is also enumerable at runtime via `function_names()` / `FUNCTIONS`.
+
+### User-defined functions: `parse_with_functions` + `FunctionBag`
+
+The plain `parse` only knows the built-in function set. To recognise additional functions defined at runtime, pass a `FunctionBag` to `parse_with_functions`:
+
+```rust
+let mut bag = FunctionBag::new();
+bag.add_symbolic("sq", vec!["t".into()], parse("t*t").unwrap());
+
+let e = parse_with_functions("sq(3) + 1", &bag).unwrap();
+assert_eq!(e.eval(&HashMap::new()).unwrap(), 10.0);
+```
+
+The parser checks the bag first then falls back to built-ins, so:
+- An empty `FunctionBag` behaves exactly like plain `parse` (built-ins always available).
+- Adding a name that matches a built-in shadows it for the duration of the parse.
+- `parse(s)` is shorthand for `parse_with_functions(s, &FunctionBag::new())`.
+
+Three ways to register a function in the bag:
+
+```rust
+// (a) Symbolic body (auto-differentiated, inlined at eval and codegen).
+bag.add_symbolic("sq", vec!["t".into()], parse("t*t").unwrap());
+
+// (b) General form with explicit FuncKind.
+bag.add("double", vec!["x".into()],
+    FuncKind::Symbolic { body: parse("2*x").unwrap() });
+
+// (c) Lift an already-formed Expr::Func value (e.g. from simple_func1).
+let cube_e = simple_func1("cube", |t| t.clone() * t.clone() * t)(symbol("x"));
+bag.add_func(cube_e).unwrap();
+```
+
+Plus `remove(name) -> bool`, `contains(name)`, `names() -> Vec<String>`, `entries() -> impl Iterator<Item=(&str, usize)>` for management, and `get_info(name) -> Option<(&[String], &FuncKind)>` for read-only inspection.
+
+#### Parameter shadowing
+
+Formal parameters always shadow outer variables of the same name during the function body's evaluation. This is what you want for an interactive REPL: defining `sq(x) = x*x` after `x = 5` should still yield 9 when you call `sq(3)`, not 25.
+
+```rust
+let mut bag = FunctionBag::new();
+bag.add_symbolic("sq", vec!["x".into()], parse("x*x").unwrap());
+let e = parse_with_functions("sq(3)", &bag).unwrap();
+let vars: HashMap<&str, f64> = [("x", 5.0)].into_iter().collect();
+assert_eq!(e.eval(&vars).unwrap(), 9.0); // 3*3, not 5*5
+```
+
+See [`examples/calc_demo.rs`](https://github.com/harakas/arael/blob/master/examples/calc_demo.rs) for a complete bc-style REPL built on `FunctionBag` + `parse_with_functions`, with readline-style history.

@@ -734,6 +734,169 @@ pub fn function_names() -> impl Iterator<Item = &'static str> {
     FUNCTIONS.iter().map(|(n, _)| *n)
 }
 
+// ---------------------------------------------------------------------------
+// FunctionBag -- extensible registry of user-defined functions
+// ---------------------------------------------------------------------------
+
+/// An extensible registry of user-defined symbolic functions, used by
+/// [`parse::parse_with_functions`] to make runtime-constructed
+/// functions recognisable by the string parser.
+///
+/// Built-in functions (`sin`, `cos`, `clamp`, etc.) are *not* stored in
+/// the bag -- the parser falls back to [`function_by_name`] for any
+/// name the bag doesn't carry, so built-ins are always available
+/// regardless of what's in the bag. An empty bag means "built-ins
+/// only", which is what [`parse::parse`] uses.
+///
+/// Names registered in the bag shadow built-ins with the same name.
+///
+/// ## Registering a function
+///
+/// Three entry points cover the common cases:
+///
+/// - [`add`](Self::add) -- the general form. Supply a name, a list of
+///   formal parameter names, and a [`FuncKind`] (Symbolic,
+///   SymbolicDerivs, or Extern).
+/// - [`add_symbolic`](Self::add_symbolic) -- convenience for the most
+///   common case: a symbolic function where the body `E` references
+///   the parameter names as free symbols. The body is auto-differentiated.
+/// - [`add_func`](Self::add_func) -- lift an already-formed
+///   `Expr::Func` value (for example the output of
+///   [`simple_func1`]`("sq", |t| t*t)(symbol("x"))`) directly into the
+///   bag. Handy when the caller already built the function value by
+///   other means.
+///
+/// ## Variable / parameter shadowing
+///
+/// Parameters declared when the function is registered always shadow
+/// variables of the same name in the caller's eval context. For
+/// example, after:
+///
+/// ```ignore
+/// let mut bag = FunctionBag::new();
+/// bag.add_symbolic("sq", vec!["x".into()], parse("x*x").unwrap());
+/// let e = parse_with_functions("sq(3)", &bag).unwrap();
+/// let vars = [("x", 5.0)].into_iter().collect();
+/// let r = e.eval(&vars).unwrap(); // 9.0, not 25.0
+/// ```
+///
+/// the outer `x = 5.0` is shadowed inside the function body by the
+/// formal parameter `x = 3.0` for the duration of the call.
+///
+/// ## See also
+///
+/// [`examples/calc_demo.rs`](https://github.com/harakas/arael/blob/master/examples/calc_demo.rs)
+/// is a bc-style REPL calculator built on top of `FunctionBag` +
+/// [`parse::parse_with_functions`]: variables, runtime function
+/// definitions (`name(args) = expr`), `vars` / `funcs` listings, and
+/// readline-style history.
+pub struct FunctionBag {
+    // Name -> (params, kind). Args are filled in at call time to build
+    // a fresh Expr::Func per invocation. Mirrors Expr::Func directly.
+    table: std::collections::HashMap<String, BagFunction>,
+}
+
+struct BagFunction {
+    params: std::vec::Vec<String>,
+    kind: FuncKind,
+}
+
+impl Default for FunctionBag {
+    fn default() -> Self { Self::new() }
+}
+
+impl FunctionBag {
+    /// Empty bag. Built-in functions remain available via the parser's
+    /// fallback lookup; only user-added functions go here.
+    pub fn new() -> Self {
+        Self { table: std::collections::HashMap::new() }
+    }
+
+    /// Register a function by name + formal parameter list + kind.
+    /// The general form that mirrors [`Expr::Func`]. Overrides any
+    /// existing entry with the same name (including shadowing a
+    /// built-in).
+    pub fn add(&mut self, name: impl Into<String>, params: std::vec::Vec<String>, kind: FuncKind) {
+        self.table.insert(name.into(), BagFunction { params, kind });
+    }
+
+    /// Convenience: register a symbolic function from a parameter list
+    /// and a body `E` whose free symbols match the params. Equivalent
+    /// to `add(name, params, FuncKind::Symbolic { body })`.
+    pub fn add_symbolic(&mut self, name: impl Into<String>, params: std::vec::Vec<String>, body: E) {
+        self.add(name, params, FuncKind::Symbolic { body });
+    }
+
+    /// Lift an existing `Expr::Func` value into the bag. Extracts
+    /// `name`, `params`, and `kind` from the passed `E`. Returns an
+    /// error string if `e` is not an `Expr::Func`.
+    pub fn add_func(&mut self, e: E) -> Result<(), String> {
+        match &*e.0 {
+            Expr::Func { name, params, kind, .. } => {
+                self.table.insert(
+                    name.clone(),
+                    BagFunction { params: params.clone(), kind: kind.clone() },
+                );
+                Ok(())
+            }
+            _ => Err("add_func: expected Expr::Func, got a different expression".to_string()),
+        }
+    }
+
+    /// Remove a function by name. Returns `true` if it was present.
+    /// Does not affect built-ins.
+    pub fn remove(&mut self, name: &str) -> bool {
+        self.table.remove(name).is_some()
+    }
+
+    /// Is this name registered in the bag? Does *not* consider
+    /// built-ins.
+    pub fn contains(&self, name: &str) -> bool {
+        self.table.contains_key(name)
+    }
+
+    /// Collect all names registered in the bag. Order is unspecified.
+    pub fn names(&self) -> std::vec::Vec<String> {
+        self.table.keys().cloned().collect()
+    }
+
+    /// Iterate over `(name, arity)` pairs for every function in the
+    /// bag. Same data as [`names`](Self::names) with arity attached.
+    pub fn entries(&self) -> impl Iterator<Item = (&str, usize)> {
+        self.table.iter().map(|(k, v)| (k.as_str(), v.params.len()))
+    }
+
+    /// Look up a function's parameter names and kind. Returns `None`
+    /// if `name` isn't in the bag. Useful for pretty-printing or
+    /// re-creating an `Expr::Func` outside the parser.
+    pub fn get_info(&self, name: &str) -> Option<(&[String], &FuncKind)> {
+        let f = self.table.get(name)?;
+        Some((&f.params, &f.kind))
+    }
+
+    /// Internal dispatch used by the parser. Looks up `name`,
+    /// validates arity against the registered parameter list, and
+    /// returns an `Expr::Func` with the caller's actual arguments.
+    /// `None` means the name isn't in the bag -- caller should fall
+    /// through to [`function_by_name`] for built-ins.
+    pub(crate) fn call(&self, name: &str, args: &[E]) -> Option<Result<E, String>> {
+        let f = self.table.get(name)?;
+        if args.len() != f.params.len() {
+            return Some(Err(format!(
+                "{} expects {} argument(s), got {}",
+                name, f.params.len(), args.len()
+            )));
+        }
+        let func = E::new(Expr::Func {
+            name: name.to_string(),
+            params: f.params.clone(),
+            kind: f.kind.clone(),
+            args: args.to_vec(),
+        });
+        Some(Ok(func))
+    }
+}
+
 // --- Operator overloads for E (auto-simplify like SymPy) ---
 
 impl std::ops::Add for E {
@@ -1180,7 +1343,7 @@ pub fn safe_sqrt(x: E) -> E {
 // Re-export linalg types
 pub use linalg::{SymVec, SymMat, jacobian};
 pub use diff::DiffVar;
-pub use parse::{parse, ParseError};
+pub use parse::{parse, parse_with_functions, ParseError};
 pub use geo::{vect2sym, vect3sym, matrix2sym, matrix3sym, quaternsym};
 pub use cse::cse;
 pub use arael_sym_macros::sym;

@@ -17,3 +17,4 @@
  * When a test fails then it's probably a bug in changes. First instinct should not be to "fix" the test but to understand why it fails. Hallucinating plausible but unverified reasons from local changes is not acceptable. Causes must be verified.
  * arael-sketch: We have color scheme in colors.rs -- so don't hardcode colors but add/reuse entries.
  * There is no need to add #[arael(skip)] on every non-parameter bool, f32/f64, String, etc. They just clutter the code and reduce readability.
+ * When modifying arael-sym with new features and docs -- also update docs/SYM.md
