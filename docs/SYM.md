@@ -346,20 +346,35 @@ The parser checks the bag first then falls back to built-ins, so:
 - Adding a name that matches a built-in shadows it for the duration of the parse.
 - `parse(s)` is shorthand for `parse_with_functions(s, &FunctionBag::new())`.
 
-Three ways to register a function in the bag:
+Ways to register a function in the bag:
 
 ```rust
-// (a) Symbolic body (auto-differentiated, inlined at eval and codegen).
-bag.add_symbolic("sq", vec!["t".into()], parse("t*t").unwrap());
+// add1 / add2: pass the closure returned by simple_func1 / simple_func2
+//              (or extern_func1 / extern_func2). The bag invokes it
+//              once with placeholder symbols to extract name, params,
+//              and kind.
+bag.add1(simple_func1("sq", |t| t.clone() * t)).unwrap();
+bag.add2(simple_func2("hypot",
+    |a, b| sqrt(a.clone() * a + b.clone() * b))).unwrap();
 
-// (b) General form with explicit FuncKind.
-bag.add("double", vec!["x".into()],
-    FuncKind::Symbolic { body: parse("2*x").unwrap() });
+// addN: n-ary closure. Takes `Vec<E>`, matching the shape of
+//       `simple_func` / `simple_func_derivs` / `extern_func`. No
+//       upper arity bound.
+bag.addN(4, simple_func("blend", 4, |args: Vec<E>|
+    args[0].clone() + args[1].clone() + args[2].clone() + args[3].clone()
+)).unwrap();
 
-// (c) Lift an already-formed Expr::Func value (e.g. from simple_func1).
-let cube_e = simple_func1("cube", |t| t.clone() * t.clone() * t)(symbol("x"));
-bag.add_func(cube_e).unwrap();
+// add: register an already-formed Expr::Func E directly (e.g. after
+//      pre-applying a constructor to placeholder symbols).
+let cube = simple_func1("cube", |t| t.clone() * t.clone() * t)(symbol("x"));
+bag.add(cube).unwrap();
+
+// add_symbolic: explicit name + parameter list + body. Use when the
+//               body is an already-built E (e.g. from parse).
+bag.add_symbolic("doublex", vec!["x".into()], parse("2*x").unwrap());
 ```
+
+For escape-hatch cases there's also `add_with_kind(name, params, FuncKind)` that takes the parts directly.
 
 Plus `remove(name) -> bool`, `contains(name)`, `names() -> Vec<String>`, `entries() -> impl Iterator<Item=(&str, usize)>` for management, and `get_info(name) -> Option<(&[String], &FuncKind)>` for read-only inspection.
 

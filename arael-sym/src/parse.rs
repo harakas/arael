@@ -485,19 +485,50 @@ mod tests {
     }
 
     #[test]
-    fn bag_add_func_round_trip() {
-        // Build an Expr::Func E via simple_func1 and register via add_func.
+    fn bag_add_e_func_round_trip() {
+        // Pass an already-formed Expr::Func E directly.
         let sq_e = simple_func1("sq", |t| t.clone() * t)(symbol("t"));
         let mut bag = FunctionBag::new();
-        bag.add_func(sq_e).unwrap();
+        bag.add(sq_e).unwrap();
         let e = parse_with_functions("sq(3)", &bag).unwrap();
         approx(e.eval(&noenv()).unwrap(), 9.0, 1e-12);
     }
 
     #[test]
-    fn bag_add_func_rejects_non_func() {
+    fn bag_add1_unary_closure() {
+        // Pass the simple_func1 closure directly; bag invokes it with
+        // a placeholder symbol to derive the function template.
         let mut bag = FunctionBag::new();
-        let err = bag.add_func(constant(1.0)).unwrap_err();
+        bag.add1(simple_func1("sq", |t| t.clone() * t)).unwrap();
+        let e = parse_with_functions("sq(4)", &bag).unwrap();
+        approx(e.eval(&noenv()).unwrap(), 16.0, 1e-12);
+    }
+
+    #[test]
+    fn bag_add2_binary_closure() {
+        let mut bag = FunctionBag::new();
+        bag.add2(simple_func2("hypot",
+            |a, b| crate::sqrt(a.clone()*a + b.clone()*b))).unwrap();
+        let e = parse_with_functions("hypot(3, 4)", &bag).unwrap();
+        approx(e.eval(&noenv()).unwrap(), 5.0, 1e-10);
+    }
+
+    #[test]
+    #[allow(non_snake_case)]
+    fn bag_addN_quaternary_closure() {
+        // Arity 4: something the old API could not express.
+        let mut bag = FunctionBag::new();
+        bag.addN(4, crate::simple_func("blend", 4, |args: Vec<E>|
+            args[0].clone() + args[1].clone() + args[2].clone() + args[3].clone()
+        )).unwrap();
+        let e = parse_with_functions("blend(1, 2, 3, 4)", &bag).unwrap();
+        approx(e.eval(&noenv()).unwrap(), 10.0, 1e-12);
+    }
+
+    #[test]
+    fn bag_add_rejects_non_func() {
+        let mut bag = FunctionBag::new();
+        let err = bag.add(constant(1.0)).unwrap_err();
         assert!(err.contains("expected Expr::Func"), "{err}");
     }
 

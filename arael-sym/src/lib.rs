@@ -752,19 +752,24 @@ pub fn function_names() -> impl Iterator<Item = &'static str> {
 ///
 /// ## Registering a function
 ///
-/// Three entry points cover the common cases:
+/// Pick the entry point that fits how you have the function in hand:
 ///
-/// - [`add`](Self::add) -- the general form. Supply a name, a list of
-///   formal parameter names, and a [`FuncKind`] (Symbolic,
-///   SymbolicDerivs, or Extern).
-/// - [`add_symbolic`](Self::add_symbolic) -- convenience for the most
-///   common case: a symbolic function where the body `E` references
-///   the parameter names as free symbols. The body is auto-differentiated.
-/// - [`add_func`](Self::add_func) -- lift an already-formed
-///   `Expr::Func` value (for example the output of
-///   [`simple_func1`]`("sq", |t| t*t)(symbol("x"))`) directly into the
-///   bag. Handy when the caller already built the function value by
-///   other means.
+/// - [`add1`](Self::add1) / [`add2`](Self::add2) -- register a closure
+///   of arity 1 / 2, typically one produced by [`simple_func1`] /
+///   [`simple_func2`] / [`extern_func1`] / [`extern_func2`]. The bag
+///   invokes it once with placeholder symbols to extract name, params,
+///   and kind.
+/// - [`addN`](Self::addN) -- register an n-ary closure over `Vec<E>`.
+///   Pairs with [`simple_func`] / [`simple_func_derivs`] /
+///   [`extern_func`]. No upper arity bound.
+/// - [`add`](Self::add) -- register an already-formed `Expr::Func`
+///   value (for example, the output of
+///   [`simple_func1`]`("sq", |t| t*t)(symbol("x"))`).
+/// - [`add_symbolic`](Self::add_symbolic) -- when the body is an
+///   already-built `E` (e.g. from [`parse::parse`]) and you don't want
+///   to wrap it in a closure. Body is auto-differentiated.
+/// - [`add_with_kind`](Self::add_with_kind) -- escape hatch: name,
+///   parameter list, and a hand-built [`FuncKind`] directly.
 ///
 /// ## Variable / parameter shadowing
 ///
@@ -805,6 +810,13 @@ impl Default for FunctionBag {
     fn default() -> Self { Self::new() }
 }
 
+fn extract_func_template(e: E, source: &str) -> Result<(String, std::vec::Vec<String>, FuncKind), String> {
+    match (*e.0).clone() {
+        Expr::Func { name, params, kind, .. } => Ok((name, params, kind)),
+        _ => Err(format!("{source}: expected Expr::Func, got a different expression")),
+    }
+}
+
 impl FunctionBag {
     /// Empty bag. Built-in functions remain available via the parser's
     /// fallback lookup; only user-added functions go here.
@@ -812,35 +824,97 @@ impl FunctionBag {
         Self { table: std::collections::HashMap::new() }
     }
 
-    /// Register a function by name + formal parameter list + kind.
-    /// The general form that mirrors [`Expr::Func`]. Overrides any
-    /// existing entry with the same name (including shadowing a
-    /// built-in).
-    pub fn add(&mut self, name: impl Into<String>, params: std::vec::Vec<String>, kind: FuncKind) {
-        self.table.insert(name.into(), BagFunction { params, kind });
+    /// Register a pre-built `Expr::Func` value. Use when you already
+    /// have an `E` (for example by calling one of the
+    /// [`simple_func1`] / [`simple_func2`] / [`simple_func`] /
+    /// [`extern_func1`] / [`extern_func2`] / [`extern_func`]
+    /// constructors on placeholder args).
+    ///
+    /// For registering closures directly, use [`add1`](Self::add1) /
+    /// [`add2`](Self::add2) / [`addN`](Self::addN).
+    ///
+    /// Returns `Err` if `e` is not an `Expr::Func`.
+    pub fn add(&mut self, e: E) -> Result<(), String> {
+        let (name, params, kind) = extract_func_template(e, "FunctionBag::add")?;
+        self.table.insert(name, BagFunction { params, kind });
+        Ok(())
     }
 
-    /// Convenience: register a symbolic function from a parameter list
-    /// and a body `E` whose free symbols match the params. Equivalent
-    /// to `add(name, params, FuncKind::Symbolic { body })`.
+    /// Register a unary closure. The bag invokes it once with a
+    /// placeholder symbol to extract `(name, params, kind)`.
+    ///
+    /// ```ignore
+    /// bag.add1(simple_func1("sq", |t| t.clone() * t)).unwrap();
+    /// ```
+    pub fn add1<F>(&mut self, f: F) -> Result<(), String>
+    where F: FnOnce(E) -> E
+    {
+        let e = f(symbol("__a0"));
+        let (name, params, kind) = extract_func_template(e, "FunctionBag::add1")?;
+        self.table.insert(name, BagFunction { params, kind });
+        Ok(())
+    }
+
+    /// Register a binary closure.
+    ///
+    /// ```ignore
+    /// bag.add2(simple_func2("hypot",
+    ///     |a, b| sqrt(a.clone()*a + b.clone()*b))).unwrap();
+    /// ```
+    pub fn add2<F>(&mut self, f: F) -> Result<(), String>
+    where F: FnOnce(E, E) -> E
+    {
+        let e = f(symbol("__a0"), symbol("__a1"));
+        let (name, params, kind) = extract_func_template(e, "FunctionBag::add2")?;
+        self.table.insert(name, BagFunction { params, kind });
+        Ok(())
+    }
+
+    /// Register an n-ary closure. Pairs with [`simple_func`] /
+    /// [`simple_func_derivs`] / [`extern_func`] for arities >= 3 and
+    /// for functions whose arity is known only at runtime. The
+    /// closure takes `Vec<E>` to match the shape those constructors
+    /// return (`impl Fn(Vec<E>) -> E`).
+    ///
+    /// ```ignore
+    /// bag.addN(4, simple_func("blend", 4, |args: Vec<E>|
+    ///     args[0].clone() + args[1].clone() + args[2].clone() + args[3].clone()
+    /// )).unwrap();
+    /// ```
+    #[allow(non_snake_case)]
+    pub fn addN<F>(&mut self, arity: usize, f: F) -> Result<(), String>
+    where F: FnOnce(std::vec::Vec<E>) -> E
+    {
+        let placeholders: std::vec::Vec<E> =
+            (0..arity).map(|i| symbol(&format!("__a{i}"))).collect();
+        let e = f(placeholders);
+        let (name, params, kind) = extract_func_template(e, "FunctionBag::addN")?;
+        self.table.insert(name, BagFunction { params, kind });
+        Ok(())
+    }
+
+    /// Convenience: register a symbolic function from an explicit
+    /// `name`, parameter list, and body `E` whose free symbols match
+    /// the params. Use this when you have the body as an already-built
+    /// expression (e.g. from [`parse`]) rather than as a closure.
     pub fn add_symbolic(&mut self, name: impl Into<String>, params: std::vec::Vec<String>, body: E) {
-        self.add(name, params, FuncKind::Symbolic { body });
+        self.table.insert(
+            name.into(),
+            BagFunction { params, kind: FuncKind::Symbolic { body } },
+        );
     }
 
-    /// Lift an existing `Expr::Func` value into the bag. Extracts
-    /// `name`, `params`, and `kind` from the passed `E`. Returns an
-    /// error string if `e` is not an `Expr::Func`.
-    pub fn add_func(&mut self, e: E) -> Result<(), String> {
-        match &*e.0 {
-            Expr::Func { name, params, kind, .. } => {
-                self.table.insert(
-                    name.clone(),
-                    BagFunction { params: params.clone(), kind: kind.clone() },
-                );
-                Ok(())
-            }
-            _ => Err("add_func: expected Expr::Func, got a different expression".to_string()),
-        }
+    /// Direct form: register a function from name + parameters + kind.
+    /// Most callers should prefer [`add`](Self::add) (closures / E)
+    /// or [`add_symbolic`](Self::add_symbolic) (parsed body) -- this
+    /// is the escape hatch for building an unusual `FuncKind` by hand.
+    pub fn add_with_kind(
+        &mut self,
+        name: impl Into<String>,
+        params: std::vec::Vec<String>,
+        kind: FuncKind,
+    ) {
+        self.table.insert(name.into(), BagFunction { params, kind });
     }
 
     /// Remove a function by name. Returns `true` if it was present.
