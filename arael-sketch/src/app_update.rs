@@ -11,6 +11,60 @@ use crate::actions::Action;
 use crate::geometry::*;
 use crate::{EditorApp, spawn_async};
 
+// Small right-angle corner marker placed at the corner where the drawn
+// line meets the host line. Two short segments form the open "L".
+//
+// The host-arm direction is chosen to lie along the portion of the host
+// line that actually exists: if the corner sits at host.P1, the arm
+// points toward P2; if at host.P2, toward P1. For a mid-body corner both
+// sides are valid, so we fall back to the quadrant that also sits along
+// the drawn-line direction -- keeping the marker visually "hugging" the
+// drawn line's side.
+fn draw_perp_corner_marker(
+    painter: &egui::Painter,
+    corner_screen: egui::Pos2,
+    host_p1: vect2d,
+    host_p2: vect2d,
+    corner_sketch: vect2d,
+    drawn_free: vect2d,
+    _scale: f32,
+    color: egui::Color32,
+) {
+    let dir_screen = |from: vect2d, to: vect2d| -> Option<(f32, f32)> {
+        let dx = (to.x - from.x) as f32;
+        // Screen y is flipped vs sketch y.
+        let dy = -(to.y - from.y) as f32;
+        let len = (dx * dx + dy * dy).sqrt();
+        if len < 1e-6 { None } else { Some((dx / len, dy / len)) }
+    };
+    let Some((dx, dy)) = dir_screen(corner_sketch, drawn_free) else { return; };
+
+    // Host-arm direction: prefer "into the existing host line".
+    let d1_sq = (corner_sketch.x - host_p1.x).powi(2) + (corner_sketch.y - host_p1.y).powi(2);
+    let d2_sq = (corner_sketch.x - host_p2.x).powi(2) + (corner_sketch.y - host_p2.y).powi(2);
+    let host_dir_target = if d1_sq < d2_sq * 0.01 {
+        host_p2   // corner ~ host.P1; point toward P2
+    } else if d2_sq < d1_sq * 0.01 {
+        host_p1   // corner ~ host.P2; point toward P1
+    } else {
+        // Mid-body: neither endpoint clearly closer. Use the host-parallel
+        // direction whose dot with the drawn direction is positive (marker
+        // hugs the drawn line).
+        let hdx = (host_p2.x - host_p1.x) as f32;
+        let hdy = -(host_p2.y - host_p1.y) as f32;
+        if hdx * dx + hdy * dy >= 0.0 { host_p2 } else { host_p1 }
+    };
+    let Some((hx, hy)) = dir_screen(corner_sketch, host_dir_target) else { return; };
+
+    let s = 10.0_f32;
+    let a = egui::Pos2::new(corner_screen.x + hx * s, corner_screen.y + hy * s);
+    let b = egui::Pos2::new(corner_screen.x + dx * s, corner_screen.y + dy * s);
+    let c = egui::Pos2::new(corner_screen.x + (hx + dx) * s, corner_screen.y + (hy + dy) * s);
+    let stroke = egui::Stroke::new(1.5, color);
+    painter.line_segment([a, c], stroke);
+    painter.line_segment([b, c], stroke);
+}
+
 impl eframe::App for EditorApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         // Handle exit request
@@ -20,6 +74,18 @@ impl eframe::App for EditorApp {
 
         // Poll background DOF computation
         self.poll_dof();
+
+        // Hold-to-disable snapping and auto-constraints. Modifier keys
+        // (Shift / Ctrl / Alt / Command) are unusable under Parallels +
+        // GNOME: the host captures the hold and only leaks a brief
+        // release event to the guest, so `i.modifiers.*` is effectively
+        // always false while held. A regular letter key goes through
+        // egui's `keys_down` set, which is maintained from full press
+        // and release events -- reliable on every platform.
+        // `modifiers.command` = Cmd on macOS, Ctrl on Windows/Linux.
+        // Either works natively; Q is the Parallels-safe fallback since
+        // modifier events don't leak cleanly through the VM layer.
+        self.snap_disabled = ctx.input(|i| i.key_down(egui::Key::Q) || i.modifiers.command);
 
         // Give MCP server access to egui context for waking the GUI
         #[cfg(not(target_arch = "wasm32"))]
@@ -1366,7 +1432,56 @@ impl eframe::App for EditorApp {
                             // Second click: finish line
                             // Snap end point to nearby entity
                             let end_snap = self.find_snap_target(mouse_sketch, hit_threshold);
-                            let end_pos = end_snap.map_or(mouse_sketch, |(pos, _)| pos);
+                            let mut end_pos = end_snap.map_or(mouse_sketch, |(pos, _)| pos);
+
+                            // Auto-perpendicular. Allowed alongside an
+                            // end-line-body snap (both project to lines,
+                            // so the unique intersection determines the
+                            // endpoint and BOTH constraints fire).
+                            // Suppressed when the end snap is point-like
+                            // or arc-like (position already fixed).
+                            let perp_eligible = matches!(end_snap, None | Some((_, SnapTarget::Line(_))));
+                            let perp_host = if perp_eligible {
+                                self.find_best_perp_host_at(state.start, mouse_sketch, crate::PERP_SNAP_PX, None)
+                            } else { None };
+                            // If both end-line snap and start-perp fire, place
+                            // the endpoint at their intersection.
+                            let mut combined_used = false;
+                            if let (Some((_, SnapTarget::Line(other))), Some((host, _))) = (end_snap, perp_host) {
+                                let hl = &self.sketch.lines[host];
+                                let hdx = hl.p2.value.x - hl.p1.value.x;
+                                let hdy = hl.p2.value.y - hl.p1.value.y;
+                                let ol = &self.sketch.lines[other];
+                                let odx = ol.p2.value.x - ol.p1.value.x;
+                                let ody = ol.p2.value.y - ol.p1.value.y;
+                                let cross = (-hdy) * ody - hdx * odx;
+                                if cross.abs() >= 1e-9 {
+                                    let perp_p2 = vect2d::new(state.start.x - hdy, state.start.y + hdx);
+                                    end_pos = line_line_intersection(state.start, perp_p2, ol.p1.value, ol.p2.value);
+                                    combined_used = true;
+                                }
+                            } else if let Some((_, p)) = perp_host {
+                                end_pos = p;
+                            }
+                            // End-side perpendicular: snap end onto the
+                            // foot-of-perpendicular from start onto the
+                            // target line. Skipped when start-perp combine
+                            // already decided the position.
+                            let end_perp_target: Option<Ref<Line>> = if !combined_used {
+                                match end_snap {
+                                    Some((p_on_target, SnapTarget::Line(target))) => {
+                                        let host_ref = state.snap_start.and_then(EditorApp::perp_host_from_snap);
+                                        if host_ref == Some(target) {
+                                            None
+                                        } else {
+                                            let tl = &self.sketch.lines[target];
+                                            self.try_perp_end_snap(state.start, tl.p1.value, tl.p2.value, p_on_target, crate::PERP_SNAP_PX)
+                                                .map(|foot| { end_pos = foot; target })
+                                        }
+                                    }
+                                    _ => None,
+                                }
+                            } else { None };
 
                             // Reject zero-length lines
                             let dx = end_pos.x - state.start.x;
@@ -1388,11 +1503,23 @@ impl eframe::App for EditorApp {
                             if let Some((_, snap)) = end_snap {
                                 self.apply_snap_coincident(snap, new_line, false);
                             }
+                            // Auto-perpendicular constraint, same undo group.
+                            if let Some((host, _)) = perp_host {
+                                if !self.has_perp_conflict(new_line, host) {
+                                    self.exec(Action::ApplyPerpendicular { a: new_line, b: host });
+                                }
+                            }
+                            if let Some(target) = end_perp_target {
+                                if !self.has_perp_conflict(new_line, target) {
+                                    self.exec(Action::ApplyPerpendicular { a: new_line, b: target });
+                                }
+                            }
 
                             // Chain: start next line from end of this one
                             self.line_draw = Some(LineDrawState {
                                 start: end_pos,
                                 snap_start: Some(SnapTarget::LineP2(new_line)),
+                                chained: true,
                             });
                             } // end else (non-zero length)
                         } else {
@@ -1402,6 +1529,7 @@ impl eframe::App for EditorApp {
                             self.line_draw = Some(LineDrawState {
                                 start: start_pos,
                                 snap_start: snap.map(|(_, t)| t),
+                                chained: false,
                             });
                         }
                     }
@@ -1792,6 +1920,46 @@ impl eframe::App for EditorApp {
             // pointing to the OPPOSITE side from where line_marker_pos /
             // arc_marker_pos put normal constraint markers. Returns None if
             // the target isn't a midpoint variant.
+            // Snap hint primitives. The X marks WHERE the endpoint will
+            // land. The box signals "this is a specific point" -- drawn
+            // alongside any marker whose snap target is a discrete point
+            // (standalone point, line/arc endpoint, arc center, or a
+            // line/arc midpoint). Body snaps skip the box.
+            const SNAP_S: f32 = 9.75;
+            let draw_snap_x = |pt: egui::Pos2| {
+                let stroke = egui::Stroke::new(1.0, self.colors.constraint_marker_selected);
+                painter.line_segment(
+                    [egui::Pos2::new(pt.x - SNAP_S, pt.y - SNAP_S),
+                     egui::Pos2::new(pt.x + SNAP_S, pt.y + SNAP_S)], stroke);
+                painter.line_segment(
+                    [egui::Pos2::new(pt.x - SNAP_S, pt.y + SNAP_S),
+                     egui::Pos2::new(pt.x + SNAP_S, pt.y - SNAP_S)], stroke);
+            };
+            // Plain horizontal/vertical "+" cursor cross. Drawn during
+            // tool mode at the live cursor location to make the active
+            // placement point visible. Replaced by the snap-specific
+            // marker (X / box / triangle / corner) whenever a snap fires.
+            let draw_cursor_cross = |pt: egui::Pos2| {
+                let stroke = egui::Stroke::new(1.0, self.colors.constraint_marker_selected);
+                painter.line_segment(
+                    [egui::Pos2::new(pt.x - SNAP_S, pt.y),
+                     egui::Pos2::new(pt.x + SNAP_S, pt.y)], stroke);
+                painter.line_segment(
+                    [egui::Pos2::new(pt.x, pt.y - SNAP_S),
+                     egui::Pos2::new(pt.x, pt.y + SNAP_S)], stroke);
+            };
+            let draw_snap_box = |pt: egui::Pos2| {
+                let stroke = egui::Stroke::new(1.0, self.colors.constraint_marker_selected);
+                let tl = egui::Pos2::new(pt.x - SNAP_S, pt.y - SNAP_S);
+                let tr = egui::Pos2::new(pt.x + SNAP_S, pt.y - SNAP_S);
+                let bl = egui::Pos2::new(pt.x - SNAP_S, pt.y + SNAP_S);
+                let br = egui::Pos2::new(pt.x + SNAP_S, pt.y + SNAP_S);
+                painter.line_segment([tl, tr], stroke);
+                painter.line_segment([tr, br], stroke);
+                painter.line_segment([br, bl], stroke);
+                painter.line_segment([bl, tl], stroke);
+            };
+
             let midpoint_hint_offset = |t: &SnapTarget| -> Option<egui::Vec2> {
                 const OFFSET_PX: f32 = 12.0;
                 match t {
@@ -1826,61 +1994,221 @@ impl eframe::App for EditorApp {
                 }
             };
 
+            // Dispatch a snap hint by target kind: midpoint variants get
+            // the triangle marker (existing), body snaps get a thin X,
+            // point-like snaps get an X framed by a square.
+            let draw_snap_hint = |screen_pt: egui::Pos2, t: &SnapTarget| {
+                match t {
+                    SnapTarget::LineMidpoint(_) | SnapTarget::ArcMidpoint(_) => {
+                        if let Some(off) = midpoint_hint_offset(t) {
+                            draw_midpoint_marker(screen_pt, off);
+                        }
+                        draw_snap_box(screen_pt);
+                    }
+                    SnapTarget::Line(_) | SnapTarget::ArcBody(_) => {
+                        draw_snap_x(screen_pt);
+                    }
+                    SnapTarget::Point(_) | SnapTarget::LineP1(_) | SnapTarget::LineP2(_)
+                    | SnapTarget::ArcCenter(_) | SnapTarget::ArcStart(_) | SnapTarget::ArcEnd(_) => {
+                        draw_snap_box(screen_pt);
+                    }
+                }
+            };
+
             if let Some(ref state) = self.line_draw {
                 let p1 = self.to_screen(state.start);
                 // Honor end-point snap in the preview so the user sees
-                // exactly where the endpoint will land.
-                let end_snap = self.find_snap_target(mouse_sketch, hit_threshold);
-                let end_pt = end_snap.map_or(mouse_screen, |(p, _)| self.to_screen(p));
+                // exactly where the endpoint will land. Suppress any snap
+                // whose target position coincides with the segment's start
+                // -- a zero-length line is rejected anyway, and snapping
+                // the end back to the start just paints a misleading box.
+                let end_snap = self.find_snap_target(mouse_sketch, hit_threshold)
+                    .filter(|(p, _)| {
+                        let dx = p.x - state.start.x;
+                        let dy = p.y - state.start.y;
+                        dx * dx + dy * dy > 1e-12
+                    });
+                // Perp snap is allowed alongside an end-line-body snap:
+                // both project to lines, so combining them yields the
+                // unique intersection of the perp axis and the snapped
+                // line, and BOTH constraints fire at commit. For other
+                // end snaps (point / endpoint / midpoint / arc) the
+                // position is already fixed, so perp is suppressed.
+                let perp_eligible = match end_snap {
+                    None => true,
+                    Some((_, SnapTarget::Line(_))) => true,
+                    _ => false,
+                };
+                // Any line passing through state.start is a candidate --
+                // the chained previous segment, a line whose body the
+                // start was placed on, a coincident endpoint elsewhere.
+                // Pick the host that gives the closest-to-exact 90.
+                let perp = if perp_eligible {
+                    self.find_best_perp_host_at(state.start, mouse_sketch, crate::PERP_SNAP_PX, None)
+                } else { None };
+                // When both end-line-body snap AND start-perp fire, the
+                // endpoint sits at their intersection.
+                let combined: Option<vect2d> = match (&end_snap, &perp) {
+                    (Some((_, SnapTarget::Line(other))), Some((host, _))) => {
+                        let hl = &self.sketch.lines[*host];
+                        let hdx = hl.p2.value.x - hl.p1.value.x;
+                        let hdy = hl.p2.value.y - hl.p1.value.y;
+                        // Skip if perp axis is parallel to the snapped
+                        // line (no unique intersection -- the helper
+                        // returns a midpoint fallback that misleads).
+                        let ol = &self.sketch.lines[*other];
+                        let odx = ol.p2.value.x - ol.p1.value.x;
+                        let ody = ol.p2.value.y - ol.p1.value.y;
+                        let cross = (-hdy) * ody - hdx * odx;
+                        if cross.abs() < 1e-9 {
+                            None
+                        } else {
+                            let perp_p2 = vect2d::new(state.start.x - hdy, state.start.y + hdx);
+                            Some(line_line_intersection(state.start, perp_p2, ol.p1.value, ol.p2.value))
+                        }
+                    }
+                    _ => None,
+                };
+                // End-side perpendicular: when start-perp didn't decide
+                // the position and the end snaps to a line whose angle
+                // to the drawn direction is near 90, snap end to the
+                // foot of the perpendicular dropped from start onto the
+                // target line. Skip self-pairing (host == target).
+                let end_perp: Option<(Ref<Line>, vect2d)> = if combined.is_none() {
+                    match end_snap {
+                        Some((p_on_target, SnapTarget::Line(target))) => {
+                            let host_ref = state.snap_start.and_then(EditorApp::perp_host_from_snap);
+                            if host_ref == Some(target) {
+                                None
+                            } else if self.has_perp_conflict(target, target) {
+                                None
+                            } else {
+                                let tl = &self.sketch.lines[target];
+                                self.try_perp_end_snap(state.start, tl.p1.value, tl.p2.value, p_on_target, crate::PERP_SNAP_PX)
+                                    .map(|foot| (target, foot))
+                            }
+                        }
+                        _ => None,
+                    }
+                } else { None };
+                let end_pt = match (combined, &end_perp, &end_snap, &perp) {
+                    (Some(p), _, _, _) => self.to_screen(p),
+                    (_, Some((_, p)), _, _) => self.to_screen(*p),
+                    (_, _, Some((p, _)), _) => self.to_screen(*p),
+                    (_, _, None, Some((_, p))) => self.to_screen(*p),
+                    _ => mouse_screen,
+                };
                 painter.line_segment([p1, end_pt],
                     egui::Stroke::new(1.5, self.colors.preview_line));
                 painter.circle_filled(p1, 4.0, self.colors.endpoint);
 
-                if let Some(ref t) = state.snap_start {
-                    if let Some(off) = midpoint_hint_offset(t) { draw_midpoint_marker(p1, off); }
+                // No start-snap marker during 2nd-click placement: the
+                // user just placed it, and a marker that persists for
+                // the entire move-to-end-point phase is noise. The perp
+                // corner marker below still draws because it conveys
+                // an actively-firing constraint at the moving endpoint.
+                if let Some((_, t)) = &end_snap { draw_snap_hint(end_pt, t); }
+                if end_snap.is_none() && perp.is_none() && end_perp.is_none() { draw_cursor_cross(end_pt); }
+                if let Some((host, snapped)) = perp {
+                    let hl = &self.sketch.lines[host];
+                    let drawn_free = combined.unwrap_or(snapped);
+                    draw_perp_corner_marker(
+                        &painter, p1,
+                        hl.p1.value, hl.p2.value,
+                        state.start, drawn_free,
+                        self.scale, self.colors.constraint_marker_selected,
+                    );
                 }
-                if let Some((_, t)) = &end_snap {
-                    if let Some(off) = midpoint_hint_offset(t) { draw_midpoint_marker(end_pt, off); }
+                if let Some((target, foot)) = end_perp {
+                    let tl = &self.sketch.lines[target];
+                    draw_perp_corner_marker(
+                        &painter, self.to_screen(foot),
+                        tl.p1.value, tl.p2.value,
+                        foot, state.start,
+                        self.scale, self.colors.constraint_marker_selected,
+                    );
                 }
-            } else if matches!(self.tool, Tool::DrawLine) {
-                // Pre-first-click midpoint hint: cursor hovering near a
-                // line/arc midpoint gets the marker as a discoverability
-                // cue that "clicking here starts a midpoint-bound line".
-                if let Some((pos, t)) = self.find_snap_target(mouse_sketch, hit_threshold) {
-                    if let Some(off) = midpoint_hint_offset(&t) {
-                        draw_midpoint_marker(self.to_screen(pos), off);
-                    }
+            } else if matches!(self.tool,
+                Tool::DrawLine | Tool::DrawPoint
+                | Tool::DrawCircle | Tool::DrawArc)
+                && self.circle_draw.is_none() && self.arc_draw.is_none()
+            {
+                // Pre-first-click hint: snap marker if a target is in
+                // range, otherwise the plain "+" cursor cross so the
+                // user can still see the live placement point.
+                match self.find_snap_target(mouse_sketch, hit_threshold) {
+                    Some((pos, t)) => draw_snap_hint(self.to_screen(pos), &t),
+                    None => draw_cursor_cross(mouse_screen),
                 }
             }
 
-            // Live midpoint-snap preview during endpoint drag. update_drag
-            // has already overridden drag_pt.pos to the snapped location;
-            // this just paints the visual marker so the user sees why.
+            // Live snap preview during endpoint drag. update_drag has
+            // already overridden drag_pt.pos to the snapped location;
+            // this paints the visual marker so the user sees why.
             if let Some((pos, ref t)) = self.drag_snap_preview {
-                if let Some(off) = midpoint_hint_offset(t) {
-                    draw_midpoint_marker(self.to_screen(pos), off);
-                }
+                draw_snap_hint(self.to_screen(pos), t);
+            }
+            // Auto-perpendicular hint during drag: corner marker at the
+            // opposite (anchored) endpoint of the dragged line.
+            if let Some((host, anchor)) = self.drag_perp_snap {
+                // The dragged endpoint current position is already pulled
+                // to the perpendicular projection by update_drag.
+                let drag_pos = match self.grab {
+                    Some(GrabTarget::LineP1(r)) => self.sketch.lines[r].p1.value,
+                    Some(GrabTarget::LineP2(r)) => self.sketch.lines[r].p2.value,
+                    _ => anchor,
+                };
+                let hl = &self.sketch.lines[host];
+                draw_perp_corner_marker(
+                    &painter, self.to_screen(anchor),
+                    hl.p1.value, hl.p2.value,
+                    anchor, drag_pos,
+                    self.scale, self.colors.constraint_marker_selected,
+                );
             }
 
             // Circle preview
             if let Some(ref state) = self.circle_draw {
                 let center = self.to_screen(state.center);
-                let radius_px = ((mouse_sketch.x - state.center.x).powi(2)
-                    + (mouse_sketch.y - state.center.y).powi(2)).sqrt() as f32 * self.scale;
+                // Live snap lookup on the edge-point click.
+                let edge_snap = self.find_snap_target(mouse_sketch, hit_threshold)
+                    .filter(|(p, _)| {
+                        let dx = p.x - state.center.x;
+                        let dy = p.y - state.center.y;
+                        dx * dx + dy * dy > 1e-12
+                    });
+                let edge_sketch = edge_snap.map_or(mouse_sketch, |(p, _)| p);
+                let edge_pt = self.to_screen(edge_sketch);
+                let radius_px = ((edge_sketch.x - state.center.x).powi(2)
+                    + (edge_sketch.y - state.center.y).powi(2)).sqrt() as f32 * self.scale;
                 painter.circle_stroke(center, radius_px,
                     egui::Stroke::new(1.5, self.colors.preview_line));
                 painter.circle_filled(center, 4.0, self.colors.endpoint);
+
+                if let Some(ref t) = state.snap_center { draw_snap_hint(center, t); }
+                if let Some((_, t)) = &edge_snap { draw_snap_hint(edge_pt, t); }
+                if edge_snap.is_none() { draw_cursor_cross(edge_pt); }
             }
 
             // Arc preview
             if let Some(ref state) = self.arc_draw {
                 let start_screen = self.to_screen(state.start);
                 painter.circle_filled(start_screen, 4.0, self.colors.endpoint);
-                if let Some((end, _)) = state.end {
+                if let Some(ref t) = state.snap_start { draw_snap_hint(start_screen, t); }
+                if let Some((end, ref snap_end)) = state.end {
                     let end_screen = self.to_screen(end);
                     painter.circle_filled(end_screen, 4.0, self.colors.endpoint);
-                    // Preview arc through start, end, and mouse
-                    if let Some((c, r, sa, ea, ccw)) = circumscribed_arc(state.start, end, mouse_sketch) {
+                    if let Some(t) = snap_end { draw_snap_hint(end_screen, t); }
+                    // Live snap for the mid-point click.
+                    let mid_snap = self.find_snap_target(mouse_sketch, hit_threshold)
+                        .filter(|(p, _)| {
+                            let d_s = (p.x - state.start.x).powi(2) + (p.y - state.start.y).powi(2);
+                            let d_e = (p.x - end.x).powi(2) + (p.y - end.y).powi(2);
+                            d_s > 1e-12 && d_e > 1e-12
+                        });
+                    let mid_sketch = mid_snap.map_or(mouse_sketch, |(p, _)| p);
+                    // Preview arc through start, end, and mid (or mouse).
+                    if let Some((c, r, sa, ea, ccw)) = circumscribed_arc(state.start, end, mid_sketch) {
                         let norm = |v: f64| -> f64 { let rv = v % std::f64::consts::TAU; if rv < 0.0 { rv + std::f64::consts::TAU } else { rv } };
                         let span = if ccw { norm(ea - sa) } else { -norm(sa - ea) };
                         let n_segs = 64usize;
@@ -1893,23 +2221,33 @@ impl eframe::App for EditorApp {
                                 egui::Stroke::new(1.5, self.colors.preview_line));
                         }
                     }
+                    if let Some((_, t)) = &mid_snap { draw_snap_hint(self.to_screen(mid_sketch), t); }
+                    if mid_snap.is_none() { draw_cursor_cross(self.to_screen(mid_sketch)); }
                 } else {
-                    // Only start placed; draw line to mouse as hint
-                    painter.line_segment([start_screen, mouse_screen],
+                    // Only start placed; draw line to mouse as hint.
+                    let end_snap = self.find_snap_target(mouse_sketch, hit_threshold)
+                        .filter(|(p, _)| {
+                            let dx = p.x - state.start.x;
+                            let dy = p.y - state.start.y;
+                            dx * dx + dy * dy > 1e-12
+                        });
+                    let end_sketch = end_snap.map_or(mouse_sketch, |(p, _)| p);
+                    let end_pt = self.to_screen(end_sketch);
+                    painter.line_segment([start_screen, end_pt],
                         egui::Stroke::new(1.0, self.colors.preview_line));
+                    if let Some((_, t)) = &end_snap { draw_snap_hint(end_pt, t); }
+                    if end_snap.is_none() { draw_cursor_cross(end_pt); }
                 }
             }
 
-            // Draw cursor crosshair when drawing
-            if self.tool != Tool::Select {
-                painter.line_segment(
-                    [egui::Pos2::new(mouse_screen.x, rect.top()),
-                     egui::Pos2::new(mouse_screen.x, rect.bottom())],
-                    egui::Stroke::new(0.5, self.colors.cursor_crosshair));
-                painter.line_segment(
-                    [egui::Pos2::new(rect.left(), mouse_screen.y),
-                     egui::Pos2::new(rect.right(), mouse_screen.y)],
-                    egui::Stroke::new(0.5, self.colors.cursor_crosshair));
+            if self.snap_disabled {
+                painter.text(
+                    egui::Pos2::new(rect.right() - 10.0, rect.top() + 10.0),
+                    egui::Align2::RIGHT_TOP,
+                    "SNAP OFF (Q / Cmd / Ctrl)",
+                    egui::FontId::proportional(14.0),
+                    self.colors.constraint_marker_selected,
+                );
             }
 
             // Command cursor crosshair (full canvas lines)

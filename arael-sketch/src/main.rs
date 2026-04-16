@@ -81,6 +81,11 @@ fn spawn_async<F: std::future::Future<Output = ()> + Send + 'static>(f: F) {
 // Editor state
 // ---------------------------------------------------------------------------
 
+// Auto-perpendicular snap tolerance: perpendicular distance in screen
+// pixels from the cursor to the virtual 90-degree axis before the cursor
+// is pulled onto that axis.
+const PERP_SNAP_PX: f32 = 10.0;
+
 pub struct EditorApp {
     pub sketch: Sketch,
     // View transform
@@ -110,6 +115,18 @@ pub struct EditorApp {
     /// `end_drag`. Used so the preview render can show the midpoint
     /// marker without re-running find_snap_target.
     pub drag_snap_preview: Option<(vect2d, SnapTarget)>,
+    /// Auto-perpendicular hint during line-endpoint drag: the host line
+    /// the drawn line will be made perpendicular to, plus the anchor
+    /// (opposite endpoint) position for drawing the corner marker.
+    /// Populated only when the cursor has no stronger snap and the
+    /// drawn-line direction is near 90 degrees to the host.
+    pub drag_perp_snap: Option<(Ref<Line>, vect2d)>,
+    /// While true, all snap detection and auto-constraint emission is
+    /// suppressed -- creation tools place their clicks at the raw cursor
+    /// position, drag lets the endpoint land anywhere, and no coincident
+    /// or perpendicular constraints are added. Refreshed per frame from
+    /// the Shift key state.
+    pub snap_disabled: bool,
 
     // Undo/redo
     pub history: History,
@@ -269,6 +286,8 @@ impl EditorApp {
             drag_saved_arc_locks: None,
             drag_dimension: None,
             drag_snap_preview: None,
+            drag_perp_snap: None,
+            snap_disabled: false,
             history,
             constraint_markers: Vec::new(),
             pending_load: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -688,14 +707,31 @@ impl EditorApp {
     fn update_drag(&mut self, mouse_pos: vect2d, hit_threshold: f64) {
         if let Some(drag_pt) = self.drag_point {
             let is_body_drag = matches!(self.grab, Some(GrabTarget::LineDrag(_) | GrabTarget::ArcDrag(_)));
-            // Live snap preview for LineP1/LineP2 endpoint drags: if the
-            // cursor is within snap range of another entity (excluding the
-            // dragged line itself), pull the drag point to the snap
-            // location so the user sees where the constraint will land on
-            // release -- same behavior as during line creation.
+            // Live snap preview for point-like drags: if the cursor is
+            // within snap range of another entity (excluding the dragged
+            // entity itself), pull the drag point to the snap location so
+            // the user sees where the constraint will land on release --
+            // same behavior as during line creation. Body drags
+            // (LineDrag/ArcDrag) are excluded.
+            let (exclude_line, exclude_arc) = match self.grab {
+                Some(GrabTarget::LineP1(r)) | Some(GrabTarget::LineP2(r)) => (Some(r), None),
+                Some(GrabTarget::ArcCenter(r)) | Some(GrabTarget::ArcStart(r)) | Some(GrabTarget::ArcEnd(r)) => (None, Some(r)),
+                _ => (None, None),
+            };
             let (effective_pos, snap_preview) = match self.grab {
-                Some(GrabTarget::LineP1(r)) | Some(GrabTarget::LineP2(r)) => {
-                    match self.find_snap_target_excluding(mouse_pos, hit_threshold, Some(r)) {
+                Some(grab @ (GrabTarget::Point(_)
+                    | GrabTarget::LineP1(_) | GrabTarget::LineP2(_)
+                    | GrabTarget::ArcCenter(_) | GrabTarget::ArcStart(_) | GrabTarget::ArcEnd(_))) => {
+                    // Filter in-loop so candidates already attached to the
+                    // dragged entity don't hide second-best unattached ones.
+                    // This matters when the dragged endpoint is coincident
+                    // with a twin: the twin sits at the cursor (dist ~= 0)
+                    // and without in-loop filtering would shadow any real
+                    // new target within threshold.
+                    match self.find_snap_target_filter(
+                        mouse_pos, hit_threshold, exclude_line, exclude_arc,
+                        |t| !self.has_existing_snap_attachment(grab, *t),
+                    ) {
                         Some((p, t)) => (p, Some((p, t))),
                         None => (mouse_pos, None),
                     }
@@ -703,6 +739,57 @@ impl EditorApp {
                 _ => (mouse_pos, None),
             };
             self.drag_snap_preview = snap_preview;
+
+            // Auto-perpendicular. Allowed alongside an end-line-body
+            // snap (both project to lines, so the unique intersection
+            // determines the position and BOTH constraints fire on
+            // release). Suppressed for point-like / arc-like snaps that
+            // already pin the position.
+            let mut effective_pos = effective_pos;
+            self.drag_perp_snap = None;
+            let perp_eligible = match snap_preview {
+                None => true,
+                Some((_, SnapTarget::Line(_))) => true,
+                _ => false,
+            };
+            if perp_eligible {
+                if let Some(grab) = self.grab {
+                    if let GrabTarget::LineP1(line) | GrabTarget::LineP2(line) = grab {
+                        let is_p1 = matches!(grab, GrabTarget::LineP1(_));
+                        if let Some(host) = self.find_anchor_host_line_for_drag(line, is_p1) {
+                            if !self.has_perp_conflict(line, host) {
+                                let opp = if is_p1 {
+                                    self.sketch.lines[line].p2.value
+                                } else {
+                                    self.sketch.lines[line].p1.value
+                                };
+                                let hl = &self.sketch.lines[host];
+                                if let Some(p) = self.try_perp_snap(
+                                    opp, hl.p1.value, hl.p2.value, mouse_pos, PERP_SNAP_PX,
+                                ) {
+                                    self.drag_perp_snap = Some((host, opp));
+                                    if let Some((_, SnapTarget::Line(other))) = snap_preview {
+                                        let hdx = hl.p2.value.x - hl.p1.value.x;
+                                        let hdy = hl.p2.value.y - hl.p1.value.y;
+                                        let ol = &self.sketch.lines[other];
+                                        let odx = ol.p2.value.x - ol.p1.value.x;
+                                        let ody = ol.p2.value.y - ol.p1.value.y;
+                                        let cross = (-hdy) * ody - hdx * odx;
+                                        if cross.abs() >= 1e-9 {
+                                            let perp_p2 = vect2d::new(opp.x - hdy, opp.y + hdx);
+                                            effective_pos = crate::geometry::line_line_intersection(
+                                                opp, perp_p2, ol.p1.value, ol.p2.value);
+                                        }
+                                    } else {
+                                        effective_pos = p;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             if is_body_drag {
                 let pos1 = vect2d::new(mouse_pos.x + self.drag_offset.x, mouse_pos.y + self.drag_offset.y);
                 self.sketch.points[drag_pt].pos = Param::fixed(pos1);
@@ -827,34 +914,79 @@ impl EditorApp {
 
             // Auto-snap: if a point-like entity was dragged near another,
             // create a coincident constraint
+            // Use the same in-loop "skip already-attached" filter as
+            // update_drag so a twin sitting at the just-released position
+            // cannot shadow the real new target.
+            // Snapshot auto-perp hint before it's cleared -- it may still
+            // apply even when no snap target wins, and it must be emitted
+            // inside the same undo group as the drag itself.
+            let perp_hint = self.drag_perp_snap.take();
             match grab {
-                Some(GrabTarget::LineP1(line) | GrabTarget::LineP2(line)) => {
-                    let is_p1 = matches!(grab, Some(GrabTarget::LineP1(_)));
+                Some(g @ (GrabTarget::LineP1(line) | GrabTarget::LineP2(line))) => {
+                    let is_p1 = matches!(g, GrabTarget::LineP1(_));
                     let ep_pos = if is_p1 {
                         self.sketch.lines[line].p1.value
                     } else {
                         self.sketch.lines[line].p2.value
                     };
-                    if let Some((_, snap)) = self.find_snap_target_excluding(ep_pos, hit_threshold, Some(line)) {
-                        self.apply_snap_coincident(snap, line, is_p1);
+                    let snap_kind = match self.find_snap_target_filter(
+                        ep_pos, hit_threshold, Some(line), None,
+                        |t| !self.has_existing_snap_attachment(g, *t),
+                    ) {
+                        Some((_, snap)) => {
+                            self.apply_snap_coincident(snap, line, is_p1);
+                            Some(snap)
+                        }
+                        None => None,
+                    };
+                    // Perpendicular fires when the perp hint was active
+                    // AND the snap (if any) is a line body -- both
+                    // constraints can geometrically coexist at the
+                    // intersection. Other snap kinds pin the position
+                    // and would conflict.
+                    let perp_compatible = matches!(snap_kind, None | Some(SnapTarget::Line(_)));
+                    if perp_compatible {
+                        if let Some((host, _)) = perp_hint {
+                            if !self.has_perp_conflict(line, host) {
+                                self.exec(Action::ApplyPerpendicular { a: line, b: host });
+                            }
+                        }
                     }
                 }
-                Some(GrabTarget::ArcCenter(arc)) => {
+                Some(g @ GrabTarget::ArcCenter(arc)) => {
                     let pos = self.sketch.arcs[arc].center.value;
-                    if let Some((_, snap)) = self.find_snap_target_ex(pos, hit_threshold, None, Some(arc)) {
+                    if let Some((_, snap)) = self.find_snap_target_filter(
+                        pos, hit_threshold, None, Some(arc),
+                        |t| !self.has_existing_snap_attachment(g, *t),
+                    ) {
                         self.apply_snap_coincident_arc(snap, arc, ArcPoint::Center, pos);
                     }
                 }
-                Some(GrabTarget::ArcStart(arc)) => {
+                Some(g @ GrabTarget::ArcStart(arc)) => {
                     let pos = arc_start_pos(&self.sketch.arcs[arc]);
-                    if let Some((_, snap)) = self.find_snap_target_ex(pos, hit_threshold, None, Some(arc)) {
+                    if let Some((_, snap)) = self.find_snap_target_filter(
+                        pos, hit_threshold, None, Some(arc),
+                        |t| !self.has_existing_snap_attachment(g, *t),
+                    ) {
                         self.apply_snap_coincident_arc(snap, arc, ArcPoint::Start, pos);
                     }
                 }
-                Some(GrabTarget::ArcEnd(arc)) => {
+                Some(g @ GrabTarget::ArcEnd(arc)) => {
                     let pos = arc_end_pos(&self.sketch.arcs[arc]);
-                    if let Some((_, snap)) = self.find_snap_target_ex(pos, hit_threshold, None, Some(arc)) {
+                    if let Some((_, snap)) = self.find_snap_target_filter(
+                        pos, hit_threshold, None, Some(arc),
+                        |t| !self.has_existing_snap_attachment(g, *t),
+                    ) {
                         self.apply_snap_coincident_arc(snap, arc, ArcPoint::End, pos);
+                    }
+                }
+                Some(g @ GrabTarget::Point(point)) => {
+                    let pos = self.sketch.points[point].pos.value;
+                    if let Some((_, snap)) = self.find_snap_target_filter(
+                        pos, hit_threshold, None, None,
+                        |t| !self.has_existing_snap_attachment(g, *t),
+                    ) {
+                        self.apply_snap_coincident_point(snap, point);
                     }
                 }
                 _ => {}
@@ -1360,18 +1492,124 @@ impl EditorApp {
         }
     }
 
+    // Map a point-like GrabTarget to the Selection identifying that
+    // same entity, for use with `are_transitively_coincident`. Body
+    // drags have no single-point Selection equivalent -> None.
+    fn grab_to_selection(grab: GrabTarget) -> Option<Selection> {
+        match grab {
+            GrabTarget::Point(r) => Some(Selection::Point(r)),
+            GrabTarget::LineP1(r) => Some(Selection::LineP1(r)),
+            GrabTarget::LineP2(r) => Some(Selection::LineP2(r)),
+            GrabTarget::ArcCenter(r) => Some(Selection::ArcCenter(r)),
+            GrabTarget::ArcStart(r) => Some(Selection::ArcStart(r)),
+            GrabTarget::ArcEnd(r) => Some(Selection::ArcEnd(r)),
+            GrabTarget::LineDrag(_) | GrabTarget::ArcDrag(_) => None,
+        }
+    }
+
+    // Selections currently anchored at `l`'s midpoint via any of the
+    // midpoint-* constraint tables. Used to recognize transitive
+    // attachment: if the dragged entity is coincident with any of
+    // these, it's also at `l`'s midpoint (and on `l`'s body).
+    fn selections_at_line_midpoint(&self, l: Ref<Line>) -> Vec<Selection> {
+        let mut v = Vec::new();
+        for c in &self.sketch.midpoint { if c.line == l { v.push(Selection::Point(c.point)); } }
+        for c in &self.sketch.midpoint_lp1 { if c.target == l { v.push(Selection::LineP1(c.line)); } }
+        for c in &self.sketch.midpoint_lp2 { if c.target == l { v.push(Selection::LineP2(c.line)); } }
+        for c in &self.sketch.midpoint_arc_start { if c.line == l { v.push(Selection::ArcStart(c.arc)); } }
+        for c in &self.sketch.midpoint_arc_end { if c.line == l { v.push(Selection::ArcEnd(c.arc)); } }
+        v
+    }
+
+    fn selections_at_arc_midpoint(&self, a: Ref<Arc>) -> Vec<Selection> {
+        let mut v = Vec::new();
+        for c in &self.sketch.midpoint_arc_point { if c.arc == a { v.push(Selection::Point(c.point)); } }
+        for c in &self.sketch.midpoint_lp1_arc { if c.arc == a { v.push(Selection::LineP1(c.line)); } }
+        for c in &self.sketch.midpoint_lp2_arc { if c.arc == a { v.push(Selection::LineP2(c.line)); } }
+        for c in &self.sketch.midpoint_arc_start_arc { if c.b == a { v.push(Selection::ArcStart(c.a)); } }
+        for c in &self.sketch.midpoint_arc_end_arc { if c.b == a { v.push(Selection::ArcEnd(c.a)); } }
+        v
+    }
+
+    // Whether the dragged entity is already attached to `snap`, so the
+    // snap hint and pull should be suppressed during drag.
+    //
+    // Beyond direct constraint-table checks, a body/midpoint target is
+    // also considered "attached" when the dragged entity is transitively
+    // coincident with any endpoint of that body. Without this, dragging
+    // a line endpoint that is coincident with another line's endpoint
+    // would forever snap to that other line's body (cursor sits on it
+    // by construction), shadowing real snap candidates.
+    fn has_existing_snap_attachment(&self, grab: GrabTarget, snap: SnapTarget) -> bool {
+        let Some(grab_sel) = Self::grab_to_selection(grab) else { return false; };
+
+        if let Some(snap_sel) = Self::snap_to_selection(snap) {
+            return self.are_transitively_coincident(grab_sel, snap_sel);
+        }
+
+        // Body / midpoint snap targets.
+        match snap {
+            SnapTarget::Line(l) => {
+                // Attached to `l`'s body iff: transitively coincident
+                // with either endpoint of `l`, OR transitively coincident
+                // with ANY entity currently anchored at `l`'s midpoint
+                // (midpoints sit on the body), OR a direct *_on_line
+                // entry between the dragged entity and `l` exists.
+                let direct = match grab {
+                    GrabTarget::Point(r) => self.sketch.point_on_line.iter().any(|c| c.point == r && c.line == l),
+                    GrabTarget::LineP1(r) => self.sketch.line_p1_on_line.iter().any(|c| c.a == r && c.b == l),
+                    GrabTarget::LineP2(r) => self.sketch.line_p2_on_line.iter().any(|c| c.a == r && c.b == l),
+                    _ => false,
+                };
+                direct
+                    || self.are_transitively_coincident(grab_sel, Selection::LineP1(l))
+                    || self.are_transitively_coincident(grab_sel, Selection::LineP2(l))
+                    || self.selections_at_line_midpoint(l).iter()
+                        .any(|s| self.are_transitively_coincident(grab_sel, *s))
+            }
+            SnapTarget::ArcBody(a) => {
+                let direct = match grab {
+                    GrabTarget::Point(r) => self.sketch.point_on_arc.iter().any(|c| c.point == r && c.arc == a),
+                    GrabTarget::LineP1(r) => self.sketch.line_p1_on_arc.iter().any(|c| c.line == r && c.arc == a),
+                    GrabTarget::LineP2(r) => self.sketch.line_p2_on_arc.iter().any(|c| c.line == r && c.arc == a),
+                    _ => false,
+                };
+                direct
+                    || self.are_transitively_coincident(grab_sel, Selection::ArcStart(a))
+                    || self.are_transitively_coincident(grab_sel, Selection::ArcEnd(a))
+                    || self.selections_at_arc_midpoint(a).iter()
+                        .any(|s| self.are_transitively_coincident(grab_sel, *s))
+            }
+            SnapTarget::LineMidpoint(l) => {
+                // Anchored to `l`'s midpoint iff transitively coincident
+                // with any entity directly constrained there.
+                self.selections_at_line_midpoint(l).iter()
+                    .any(|s| self.are_transitively_coincident(grab_sel, *s))
+            }
+            SnapTarget::ArcMidpoint(a) => {
+                self.selections_at_arc_midpoint(a).iter()
+                    .any(|s| self.are_transitively_coincident(grab_sel, *s))
+            }
+            _ => false,
+        }
+    }
+
     // Check if a coincident constraint already exists (direct or transitive)
     fn has_existing_coincident_line(&self, line: Ref<Line>, is_p1: bool, snap: SnapTarget) -> bool {
         if let Some(snap_sel) = Self::snap_to_selection(snap) {
             let line_sel = if is_p1 { Selection::LineP1(line) } else { Selection::LineP2(line) };
             self.are_transitively_coincident(line_sel, snap_sel)
         } else {
-            // Check direct constraints for Line/ArcBody snap targets
+            // Check direct constraints for Line/ArcBody/midpoint snap targets
             match (snap, is_p1) {
                 (SnapTarget::ArcBody(arc), true) => self.sketch.line_p1_on_arc.iter().any(|c| c.line == line && c.arc == arc),
                 (SnapTarget::ArcBody(arc), false) => self.sketch.line_p2_on_arc.iter().any(|c| c.line == line && c.arc == arc),
                 (SnapTarget::Line(other), true) => self.sketch.line_p1_on_line.iter().any(|c| c.a == line && c.b == other),
                 (SnapTarget::Line(other), false) => self.sketch.line_p2_on_line.iter().any(|c| c.a == line && c.b == other),
+                (SnapTarget::LineMidpoint(other), true) => self.sketch.midpoint_lp1.iter().any(|c| c.line == line && c.target == other),
+                (SnapTarget::LineMidpoint(other), false) => self.sketch.midpoint_lp2.iter().any(|c| c.line == line && c.target == other),
+                (SnapTarget::ArcMidpoint(arc), true) => self.sketch.midpoint_lp1_arc.iter().any(|c| c.line == line && c.arc == arc),
+                (SnapTarget::ArcMidpoint(arc), false) => self.sketch.midpoint_lp2_arc.iter().any(|c| c.line == line && c.arc == arc),
                 _ => false,
             }
         }
@@ -2286,11 +2524,177 @@ impl EditorApp {
         self.find_snap_target_ex(sketch_pos, threshold, None, None)
     }
 
-    fn find_snap_target_excluding(&self, sketch_pos: vect2d, threshold: f64, exclude_line: Option<Ref<Line>>) -> Option<(vect2d, SnapTarget)> {
-        self.find_snap_target_ex(sketch_pos, threshold, exclude_line, None)
+    // When dragging line `line`'s endpoint (is_p1 = which end is being
+    // dragged), find the host line the OPPOSITE endpoint is anchored to.
+    // Used by the auto-perpendicular-snap feature.
+    //
+    // v1 scope: shared-endpoint coincidence and endpoint-on-line body.
+    // Returns the first match found; if the opposite endpoint is
+    // coincident with several lines, picks one deterministically.
+    fn find_anchor_host_line_for_drag(&self, line: Ref<Line>, is_p1_dragged: bool) -> Option<Ref<Line>> {
+        let opposite_is_p1 = !is_p1_dragged;
+        for c in &self.sketch.coincident_ll11 {
+            if opposite_is_p1 && c.a == line { return Some(c.b); }
+            if opposite_is_p1 && c.b == line { return Some(c.a); }
+        }
+        for c in &self.sketch.coincident_ll12 {
+            if opposite_is_p1 && c.a == line { return Some(c.b); }
+            if !opposite_is_p1 && c.b == line { return Some(c.a); }
+        }
+        for c in &self.sketch.coincident_ll21 {
+            if !opposite_is_p1 && c.a == line { return Some(c.b); }
+            if opposite_is_p1 && c.b == line { return Some(c.a); }
+        }
+        for c in &self.sketch.coincident_ll22 {
+            if !opposite_is_p1 && c.a == line { return Some(c.b); }
+            if !opposite_is_p1 && c.b == line { return Some(c.a); }
+        }
+        for c in &self.sketch.line_p1_on_line {
+            if opposite_is_p1 && c.a == line { return Some(c.b); }
+        }
+        for c in &self.sketch.line_p2_on_line {
+            if !opposite_is_p1 && c.a == line { return Some(c.b); }
+        }
+        None
+    }
+
+    // If the cursor sits within `threshold_px` of the virtual line that
+    // is perpendicular to `host` at `anchor`, returns the cursor projected
+    // onto that virtual line. None otherwise. Threshold is a perpendicular
+    // distance from the virtual axis, measured in screen pixels.
+    fn try_perp_snap(
+        &self,
+        anchor: vect2d,
+        host_p1: vect2d,
+        host_p2: vect2d,
+        cursor: vect2d,
+        threshold_px: f32,
+    ) -> Option<vect2d> {
+        if self.snap_disabled { return None; }
+        let hdx = host_p2.x - host_p1.x;
+        let hdy = host_p2.y - host_p1.y;
+        let hlen = (hdx * hdx + hdy * hdy).sqrt();
+        if hlen < 1e-9 { return None; }
+        let hd_x = hdx / hlen;
+        let hd_y = hdy / hlen;
+        let hp_x = -hd_y;
+        let hp_y = hd_x;
+        let cx = cursor.x - anchor.x;
+        let cy = cursor.y - anchor.y;
+        // Deviation from the perpendicular axis = signed component along host.
+        let along = cx * hd_x + cy * hd_y;
+        let along_px = (along.abs() as f32) * self.scale;
+        if along_px >= threshold_px { return None; }
+        let t = cx * hp_x + cy * hp_y;
+        Some(vect2d::new(anchor.x + t * hp_x, anchor.y + t * hp_y))
+    }
+
+    // Host line referenced by a `SnapTarget` for purposes of
+    // auto-perpendicular-snap -- the line whose orientation defines the
+    // virtual 90-degree axis. Only makes sense for line-endpoint and
+    // line-body snaps; other targets return None.
+    pub fn perp_host_from_snap(snap: SnapTarget) -> Option<Ref<Line>> {
+        match snap {
+            SnapTarget::LineP1(h) | SnapTarget::LineP2(h) | SnapTarget::Line(h) => Some(h),
+            _ => None,
+        }
+    }
+
+    // Find the host line that best fits an auto-perpendicular snap
+    // between `anchor` and the cursor. A host is any line whose
+    // endpoint or body passes through `anchor`: the "last point may
+    // lie on several lines at once" case. Returns the match with the
+    // smallest along-host deviation (closest to a perfect 90).
+    // Excludes `exclude` (typically the line being dragged).
+    pub fn find_best_perp_host_at(
+        &self,
+        anchor: vect2d,
+        cursor: vect2d,
+        threshold_px: f32,
+        exclude: Option<Ref<Line>>,
+    ) -> Option<(Ref<Line>, vect2d)> {
+        if self.snap_disabled { return None; }
+        const HOST_EPS: f64 = 1e-4;
+        let mut best: Option<(f32, Ref<Line>, vect2d)> = None;
+        for r in self.sketch.lines.refs() {
+            if Some(r) == exclude { continue; }
+            let l = &self.sketch.lines[r];
+            let d1 = ((l.p1.value.x - anchor.x).powi(2) + (l.p1.value.y - anchor.y).powi(2)).sqrt();
+            let d2 = ((l.p2.value.x - anchor.x).powi(2) + (l.p2.value.y - anchor.y).powi(2)).sqrt();
+            let db = crate::geometry::point_to_segment_dist(anchor, l.p1.value, l.p2.value);
+            if !(d1 < HOST_EPS || d2 < HOST_EPS || db < HOST_EPS) { continue; }
+            if let Some(p) = self.try_perp_snap(anchor, l.p1.value, l.p2.value, cursor, threshold_px) {
+                let hdx = l.p2.value.x - l.p1.value.x;
+                let hdy = l.p2.value.y - l.p1.value.y;
+                let hlen = (hdx * hdx + hdy * hdy).sqrt().max(1e-12);
+                let hd_x = hdx / hlen;
+                let hd_y = hdy / hlen;
+                let along = ((cursor.x - anchor.x) * hd_x + (cursor.y - anchor.y) * hd_y).abs() as f32
+                    * self.scale;
+                if best.as_ref().map_or(true, |b| along < b.0) {
+                    best = Some((along, r, p));
+                }
+            }
+        }
+        best.map(|(_, r, p)| (r, p))
+    }
+
+    // End-side perpendicular snap. The drawn line goes from `start` to
+    // a point on the snapped target line; if that target's direction is
+    // near perpendicular to the drawn direction, snap the end to the
+    // foot-of-perpendicular from `start` onto the target. Threshold is
+    // measured in screen pixels along the target.
+    pub fn try_perp_end_snap(
+        &self,
+        start: vect2d,
+        target_p1: vect2d,
+        target_p2: vect2d,
+        cursor_on_target: vect2d,
+        threshold_px: f32,
+    ) -> Option<vect2d> {
+        if self.snap_disabled { return None; }
+        let tdx = target_p2.x - target_p1.x;
+        let tdy = target_p2.y - target_p1.y;
+        let tlen2 = tdx * tdx + tdy * tdy;
+        if tlen2 < 1e-18 { return None; }
+        let s = ((start.x - target_p1.x) * tdx + (start.y - target_p1.y) * tdy) / tlen2;
+        let foot = vect2d::new(target_p1.x + s * tdx, target_p1.y + s * tdy);
+        let dx = cursor_on_target.x - foot.x;
+        let dy = cursor_on_target.y - foot.y;
+        let d_px = ((dx * dx + dy * dy).sqrt() as f32) * self.scale;
+        if d_px >= threshold_px { return None; }
+        Some(foot)
+    }
+
+    // True if a Perpendicular constraint between `a` and `b` already
+    // exists (either order), or a Parallel constraint between them would
+    // make perpendicular a conflict. Used to skip auto-perp.
+    fn has_perp_conflict(&self, a: Ref<Line>, b: Ref<Line>) -> bool {
+        self.sketch.perpendicular.iter().any(|c| (c.a == a && c.b == b) || (c.a == b && c.b == a))
+            || self.sketch.parallel.iter().any(|c| (c.a == a && c.b == b) || (c.a == b && c.b == a))
     }
 
     fn find_snap_target_ex(&self, sketch_pos: vect2d, threshold: f64, exclude_line: Option<Ref<Line>>, exclude_arc: Option<Ref<Arc>>) -> Option<(vect2d, SnapTarget)> {
+        self.find_snap_target_filter(sketch_pos, threshold, exclude_line, exclude_arc, |_| true)
+    }
+
+    // Like find_snap_target_ex but skips any candidate for which `keep`
+    // returns false. Used by update_drag to skip targets already attached
+    // to the dragged entity, so a second-closest unattached candidate can
+    // still win (e.g. dragging a coincident-paired endpoint: the paired
+    // twin sits at the cursor with distance ~= 0 and must not block
+    // farther candidates within threshold).
+    fn find_snap_target_filter(
+        &self,
+        sketch_pos: vect2d,
+        threshold: f64,
+        exclude_line: Option<Ref<Line>>,
+        exclude_arc: Option<Ref<Arc>>,
+        keep: impl Fn(&SnapTarget) -> bool,
+    ) -> Option<(vect2d, SnapTarget)> {
+        // Hold-to-disable modifier: Shift. See EditorApp::snap_disabled.
+        if self.snap_disabled { return None; }
+
         // First pass: check points and line endpoints (high priority)
         let mut best: Option<(f64, vect2d, SnapTarget)> = None;
 
@@ -2300,7 +2704,8 @@ impl EditorApp {
         let threshold = threshold * 0.5;
         let mut check = |dist: f64, pos: vect2d, target: SnapTarget| {
             if dist < threshold
-                && (best.is_none() || dist < best.unwrap().0) {
+                && (best.is_none() || dist < best.unwrap().0)
+                && keep(&target) {
                     best = Some((dist, pos, target));
                 }
         };
@@ -2365,22 +2770,26 @@ impl EditorApp {
         // Second pass: check line bodies and arc/circle curves (lower priority)
         for r in self.sketch.lines.refs() {
             if exclude_line == Some(r) { continue; }
+            let t = SnapTarget::Line(r);
+            if !keep(&t) { continue; }
             let l = &self.sketch.lines[r];
             let d = point_to_segment_dist(sketch_pos, l.p1.value, l.p2.value);
             if d < threshold
                 && (best.is_none() || d < best.unwrap().0) {
                     let proj = project_onto_segment(sketch_pos, l.p1.value, l.p2.value);
-                    best = Some((d, proj, SnapTarget::Line(r)));
+                    best = Some((d, proj, t));
                 }
         }
 
         for r in self.sketch.arcs.refs() {
             if exclude_arc == Some(r) { continue; }
+            let t = SnapTarget::ArcBody(r);
+            if !keep(&t) { continue; }
             let a = &self.sketch.arcs[r];
             let (d, proj) = point_to_arc_dist(sketch_pos, a);
             if d < threshold
                 && (best.is_none() || d < best.unwrap().0) {
-                    best = Some((d, proj, SnapTarget::ArcBody(r)));
+                    best = Some((d, proj, t));
                 }
         }
 

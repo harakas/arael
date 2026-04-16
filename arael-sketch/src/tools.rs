@@ -95,6 +95,10 @@ pub struct LineDrawState {
     pub start: vect2d,
     // What the start point snapped to (for auto-coincident on completion)
     pub snap_start: Option<SnapTarget>,
+    // True when this segment starts from the end of a just-placed segment
+    // (line-tool chaining). Suppresses the start-snap marker in the preview
+    // since that endpoint was just confirmed by the user's last click.
+    pub chained: bool,
 }
 
 pub struct CircleDrawState {

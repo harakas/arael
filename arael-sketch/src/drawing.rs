@@ -1585,6 +1585,17 @@ impl EditorApp {
         for c in &self.sketch.coincident_arc_start_end { connected_arc_s.insert(c.a.index()); connected_arc_e.insert(c.b.index()); }
         for c in &self.sketch.coincident_arc_end_start { connected_arc_e.insert(c.a.index()); connected_arc_s.insert(c.b.index()); }
         for c in &self.sketch.coincident_arc_end_end { connected_arc_e.insert(c.a.index()); connected_arc_e.insert(c.b.index()); }
+        // Midpoint: the constrained endpoint is snapped to the midpoint
+        // of the target line/arc. Hide only that endpoint; the target's
+        // own endpoints are untouched.
+        for c in &self.sketch.midpoint_lp1 { connected_lp1.insert(c.line.index()); }
+        for c in &self.sketch.midpoint_lp2 { connected_lp2.insert(c.line.index()); }
+        for c in &self.sketch.midpoint_arc_start { connected_arc_s.insert(c.arc.index()); }
+        for c in &self.sketch.midpoint_arc_end { connected_arc_e.insert(c.arc.index()); }
+        for c in &self.sketch.midpoint_lp1_arc { connected_lp1.insert(c.line.index()); }
+        for c in &self.sketch.midpoint_lp2_arc { connected_lp2.insert(c.line.index()); }
+        for c in &self.sketch.midpoint_arc_start_arc { connected_arc_s.insert(c.a.index()); }
+        for c in &self.sketch.midpoint_arc_end_arc { connected_arc_e.insert(c.a.index()); }
 
         // Compute constraint-highlighted entities
         let mut highlight_lines: std::collections::HashSet<u32> = std::collections::HashSet::new();
@@ -1648,15 +1659,17 @@ impl EditorApp {
                 else if p1_highlighted { highlight_color }
                 else if selected { c.endpoint_line_selected }
                 else if l_p1_locked.contains(&r.index()) { c.point_locked }
+                else if p1_hovered { c.line_hover }
                 else { c.endpoint };
             let ep2_color = if p2_selected { c.endpoint_selected }
                 else if p2_highlighted { highlight_color }
                 else if selected { c.endpoint_line_selected }
                 else if l_p2_locked.contains(&r.index()) { c.point_locked }
+                else if p2_hovered { c.line_hover }
                 else { c.endpoint };
 
-            let ep1_radius = if p1_selected || p1_highlighted { 6.0 } else if p1_hovered { 6.0 } else { 4.0 };
-            let ep2_radius = if p2_selected || p2_highlighted { 6.0 } else if p2_hovered { 6.0 } else { 4.0 };
+            let ep1_radius = 4.0;
+            let ep2_radius = 4.0;
 
             // Hide endpoint dot if coincident-connected, unless selected, locked, or highlighted
             let near_p1 = (mouse_screen.x - p1.x).powi(2) + (mouse_screen.y - p1.y).powi(2) < 225.0; // 15px
@@ -1686,9 +1699,9 @@ impl EditorApp {
             let color = if selected { c.point_selected }
                 else if highlight_points.contains(&r.index()) { highlight_color }
                 else if pt_locked.contains(&r.index()) { c.point_locked }
+                else if point_hovered { c.line_hover }
                 else { c.point };
-            let radius = if selected { 5.0 } else if point_hovered { 7.0 } else { 5.0 };
-            painter.circle_filled(sp, radius, color);
+            painter.circle_filled(sp, 4.0, color);
         }
 
         // Arcs
@@ -1733,9 +1746,11 @@ impl EditorApp {
                 let end_hov = self.hovered == Some(Selection::ArcEnd(r));
                 let start_color = if start_sel { c.endpoint_selected }
                     else if start_hl { highlight_color }
+                    else if start_hov { c.line_hover }
                     else { c.endpoint };
                 let end_color = if end_sel { c.endpoint_selected }
                     else if end_hl { highlight_color }
+                    else if end_hov { c.line_hover }
                     else { c.endpoint };
                 let sp = points[0];
                 let ep = *points.last().unwrap();
@@ -1743,8 +1758,8 @@ impl EditorApp {
                 let near_end = (mouse_screen.x - ep.x).powi(2) + (mouse_screen.y - ep.y).powi(2) < 225.0;
                 let show_start = start_sel || start_hl || start_hov || arc_selected || !connected_arc_s.contains(&r.index()) || near_start;
                 let show_end = end_sel || end_hl || end_hov || arc_selected || !connected_arc_e.contains(&r.index()) || near_end;
-                if show_start && (self.show_points || start_sel) { painter.circle_filled(points[0], if start_sel || start_hl || start_hov { 6.0 } else { 4.0 }, start_color); }
-                if show_end && (self.show_points || end_sel) { painter.circle_filled(*points.last().unwrap(), if end_sel || end_hl || end_hov { 6.0 } else { 4.0 }, end_color); }
+                if show_start && (self.show_points || start_sel) { painter.circle_filled(points[0], 4.0, start_color); }
+                if show_end && (self.show_points || end_sel) { painter.circle_filled(*points.last().unwrap(), 4.0, end_color); }
             }
             // Center point — skip for quiet arcs unless selected/hovered or has center constraints
             let center_sel = self.selection.contains(&Selection::ArcCenter(r));
@@ -1769,9 +1784,9 @@ impl EditorApp {
             let center_color = if center_sel { c.endpoint_selected }
                 else if center_hl { highlight_color }
                 else if center_locked { c.point_locked }
+                else if center_hov { c.line_hover }
                 else { c.endpoint };
-            let center_radius = if center_sel { 5.0 } else if center_hov { 5.0 } else { 3.0 };
-            painter.circle_filled(center, center_radius, center_color);
+            painter.circle_filled(center, 4.0, center_color);
             }
         }
 
@@ -1952,7 +1967,11 @@ impl EditorApp {
         }
         }
 
-        // Redraw selected and locked points/endpoints on top so they're not obscured
+        // Redraw selected and locked points/endpoints on top so they're
+        // not obscured by lines/arcs drawn later. Size stays uniform with
+        // the base pass; selection/locked are signaled by color only. A
+        // selected+locked endpoint shows the selected color outside with
+        // a tiny locked-color inner dot as a combined-state badge.
         for r in self.sketch.points.refs() {
             let p = &self.sketch.points[r];
             if p.helper { continue; }
@@ -1961,7 +1980,8 @@ impl EditorApp {
             if selected || locked {
                 let sp = self.to_screen(p.pos.value);
                 let color = if selected { c.point_selected } else { c.point_locked };
-                painter.circle_filled(sp, if selected { 6.0 } else { 5.0 }, color);
+                painter.circle_filled(sp, 4.0, color);
+                if selected && locked { painter.circle_filled(sp, 1.5, c.point_locked); }
             }
         }
         for r in self.sketch.lines.refs() {
@@ -1972,17 +1992,15 @@ impl EditorApp {
             let p2l = l_p2_locked.contains(&r.index());
             if p1s || p1l {
                 let p1 = self.to_screen(l.p1.value);
-                // Selected on top of locked: draw locked first, then selected ring
-                if p1l { painter.circle_filled(p1, 5.0, c.point_locked); }
-                if p1s { painter.circle_filled(p1, 6.0, c.endpoint_selected); }
-                // If both, draw a green dot inside the orange
-                if p1s && p1l { painter.circle_filled(p1, 3.0, c.point_locked); }
+                let color = if p1s { c.endpoint_selected } else { c.point_locked };
+                painter.circle_filled(p1, 4.0, color);
+                if p1s && p1l { painter.circle_filled(p1, 1.5, c.point_locked); }
             }
             if p2s || p2l {
                 let p2 = self.to_screen(l.p2.value);
-                if p2l { painter.circle_filled(p2, 5.0, c.point_locked); }
-                if p2s { painter.circle_filled(p2, 6.0, c.endpoint_selected); }
-                if p2s && p2l { painter.circle_filled(p2, 3.0, c.point_locked); }
+                let color = if p2s { c.endpoint_selected } else { c.point_locked };
+                painter.circle_filled(p2, 4.0, color);
+                if p2s && p2l { painter.circle_filled(p2, 1.5, c.point_locked); }
             }
         }
         for r in self.sketch.arcs.refs() {
@@ -1991,18 +2009,18 @@ impl EditorApp {
             let cl = arc_c_locked.contains(&r.index());
             if cs || cl {
                 let center = self.to_screen(a.center.value);
-                if cl { painter.circle_filled(center, 4.0, c.point_locked); }
-                if cs { painter.circle_filled(center, 5.0, c.endpoint_selected); }
-                if cs && cl { painter.circle_filled(center, 2.5, c.point_locked); }
+                let color = if cs { c.endpoint_selected } else { c.point_locked };
+                painter.circle_filled(center, 4.0, color);
+                if cs && cl { painter.circle_filled(center, 1.5, c.point_locked); }
             }
             if !a.closed {
                 if self.selection.contains(&Selection::ArcStart(r)) {
                     let sp = self.to_screen(arc_start_pos(a));
-                    painter.circle_filled(sp, 6.0, c.endpoint_selected);
+                    painter.circle_filled(sp, 4.0, c.endpoint_selected);
                 }
                 if self.selection.contains(&Selection::ArcEnd(r)) {
                     let ep = self.to_screen(arc_end_pos(a));
-                    painter.circle_filled(ep, 6.0, c.endpoint_selected);
+                    painter.circle_filled(ep, 4.0, c.endpoint_selected);
                 }
             }
         }
