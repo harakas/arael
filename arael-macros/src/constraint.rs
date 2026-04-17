@@ -901,6 +901,11 @@ pub fn build_multi_cross_routing(
         .map(|(v, _, _, _)| v.to_string()).collect::<Vec<_>>().join(", ");
 
     for block_name in block_fields {
+        // Dotted-path entries (e.g. `pose.hb_pose`) are remote-block
+        // references resolved by the remote-block emission path, not
+        // local CrossBlock fields on this struct. Skip them here --
+        // they don't participate in per-pair routing.
+        if block_name.contains('.') { continue; }
         let field = fields.named.iter().find(|f|
             f.ident.as_ref().map(|i| i.to_string()) == Some(block_name.clone())
         ).ok_or_else(|| syn::Error::new_spanned(struct_ident,
@@ -1061,6 +1066,56 @@ pub fn generate_root_methods(
     let cast_type: syn::Type = syn::parse_str(precision)
         .map_err(|e| syn::Error::new(proc_macro2::Span::call_site(),
             format!("invalid precision type '{}': {}", precision, e)))?;
+
+    // Root SelfBlock index setup: when the root struct has its own
+    // Params + a SelfBlock<Self>, its set_indices must be called at
+    // __set_block_indices time so any constraint that touches root
+    // params (including nested multi-cross constraints referencing
+    // the root) finds valid global indices on the root's self-block.
+    // The existing per-constraint set_block_indices_loops only fires
+    // when a constraint is attached to the root itself; this prelude
+    // runs unconditionally whenever the root has Params and the
+    // mandatory SelfBlock<Self> field.
+    let root_self_block_prelude: TokenStream2 = {
+        let root_layout = registry_lookup(&root_name.to_string());
+        let root_hb_field = root_layout.as_ref().and_then(|l| l.self_block_field.clone());
+        let root_param_fields = root_layout.as_ref().map(|l| l.param_fields.clone()).unwrap_or_default();
+        if let Some(hb) = root_hb_field.as_ref().filter(|_| !root_param_fields.is_empty()) {
+            let hb_ident = syn::Ident::new(hb, proc_macro2::Span::call_site());
+            let layout = root_layout.as_ref().unwrap();
+            let mut count: usize = 0;
+            let mut idx_stmts: Vec<TokenStream2> = Vec::new();
+            for pf in &root_param_fields {
+                let pf_ident = syn::Ident::new(pf, proc_macro2::Span::call_site());
+                let size = layout.fields.iter()
+                    .find(|(n, _)| n == pf)
+                    .map(|(_, sft)| match sft {
+                        SymFieldType::Scalar => 1usize,
+                        SymFieldType::Vec2 => 2,
+                        SymFieldType::Vec3 => 3,
+                        _ => 0,
+                    }).unwrap_or(0);
+                let offset = count;
+                let end = offset + size;
+                idx_stmts.push(quote! {
+                    self.#pf_ident.write_indices(&mut __root_self_idx[#offset..#end]);
+                });
+                count += size;
+            }
+            if count == 0 {
+                quote! {}
+            } else {
+                quote! {
+                    let mut __root_self_idx = [0u32; #count];
+                    #(#idx_stmts)*
+                    self.#hb_ident.set_indices(&__root_self_idx);
+                }
+            }
+        } else {
+            quote! {}
+        }
+    };
+
     let constraint_impls: Vec<TokenStream2> = Vec::new();
     let mut cost_loops: Vec<TokenStream2> = Vec::new();
     let mut grad_hessian_loops: Vec<TokenStream2> = Vec::new();
@@ -1130,6 +1185,13 @@ pub fn generate_root_methods(
         /// set_block_indices emits per-CrossBlock set_indices calls
         /// instead of the trivial TripletBlock no-op.
         multi_cross_blocks: Vec<MultiCrossBlockInfo>,
+        /// Per-entity SelfBlock.set_indices calls. Needed when the
+        /// participating entity has no other constraint of its own that
+        /// would set its SelfBlock indices (which would leave indices at
+        /// the u32::MAX sentinel, silently skipping every add_residual).
+        /// Skipped for the root entity — its indices are set by the
+        /// unconditional root_self_block_prelude at method entry.
+        entity_self_indices: Vec<TokenStream2>,
     }
     let mut triplet_groups: std::collections::HashMap<String, TripletCollectionGroup> = std::collections::HashMap::new();
 
@@ -1329,14 +1391,30 @@ pub fn generate_root_methods(
         let is_triplet = a_type == "__triplet__";
 
         // Multi-cross: constraint declares multiple block fields. Valid
-        // only when all are CrossBlock (for now — mixing TripletBlock in
-        // a multi-block list is out of scope for this pass). Overrides
-        // the primary-block-driven flags: in multi-cross mode, cross
-        // pairs are routed per-block, not to a single CrossBlock or
+        // only when the non-remote block fields are all CrossBlock (mixing
+        // TripletBlock in a multi-block list is out of scope). Overrides
+        // the primary-block-driven flags: in multi-cross mode, cross pairs
+        // are routed per-block, not to a single CrossBlock or
         // TripletBlock. The entity-span setup (__all_idx +
-        // triplet_entities) is shared with is_triplet.
+        // triplet_entities) is shared with is_triplet. Multi-cross may
+        // coexist with is_remote_block when the *primary* block is a
+        // dotted-path remote reference (e.g. `pose.hb_pose`) and the
+        // additional block fields are local CrossBlocks.
         let is_multi_cross = constraint.block_fields.len() > 1
-            && !is_remote_block && !is_self_block && !is_triplet;
+            && !is_self_block && !is_triplet;
+
+        // Does any declared local CrossBlock field reference the root
+        // type? If so, root joins the constraint's entity list as an
+        // implicit participant (no Ref<T> field needed; root accessed
+        // via `&*__self_ref` / `&mut *self`).
+        let root_type_str = root_name.to_string();
+        let has_root_entity = is_multi_cross && constraint.block_fields.iter().any(|bf| {
+            if bf.contains('.') { return false; }
+            let Some(field) = fields.named.iter().find(|f|
+                f.ident.as_ref().map(|i| i.to_string()) == Some(bf.clone())) else { return false; };
+            let Ok((a, b_opt)) = extract_block_type_args(&field.ty) else { return false; };
+            a == root_type_str || b_opt.as_deref() == Some(root_type_str.as_str())
+        });
 
         // For SelfBlock: the struct itself is in a root collection
         // For CrossBlock: find parent collection + frines field
@@ -1349,7 +1427,16 @@ pub fn generate_root_methods(
         // Resolve where the constrained entity lives on the root — a Vec/Deque/Arena
         // collection, a plain struct-typed field (direct composition), or the root
         // itself. Non-SelfBlock constraints still require a Collection (see below).
-        let coll_type = if is_triplet || is_multi_cross || is_self_block { &sc.struct_name } else { &a_type };
+        // When the primary block is a dotted-path remote reference, the
+        // iteration structure follows the remote path (iterate parent
+        // collection -> frines) regardless of whether extra local
+        // CrossBlock fields are declared for multi-cross routing.
+        // Otherwise is_triplet / is_multi_cross / is_self_block all
+        // iterate on the constraint struct itself (or its parent for
+        // nested cross), so the struct name is the right coll_type.
+        let coll_type = if is_remote_block { &a_type }
+            else if is_triplet || is_multi_cross || is_self_block { &sc.struct_name }
+            else { &a_type };
         let entity_location = match resolve_entity_location(root_fields, &root_name.to_string(), coll_type) {
             Some(loc) => loc,
             None => continue,
@@ -1513,6 +1600,33 @@ pub fn generate_root_methods(
                             }
                         }
                     }
+            }
+            // Append root as an implicit entity when any declared
+            // CrossBlock references the root type. The var_ident is the
+            // root's lowercased name (already bound in emitted scope as
+            // `let <root_lc> = &*__self_ref;`).
+            if has_root_entity
+                && let Some(root_layout) = registry_lookup(&root_type_str)
+            {
+                let entity_start = offset;
+                for pf in &root_layout.param_fields {
+                    let size = root_layout.fields.iter()
+                        .find(|(n, _)| n == pf)
+                        .map(|(_, sft)| match sft {
+                            SymFieldType::Scalar => 1usize,
+                            SymFieldType::Vec2 => 2,
+                            SymFieldType::Vec3 => 3,
+                            _ => 0,
+                        }).unwrap_or(0);
+                    offset += size;
+                }
+                let entity_count = offset - entity_start;
+                if entity_count > 0 {
+                    let var_ident = syn::Ident::new(
+                        &root_type_str.to_lowercase(), proc_macro2::Span::call_site());
+                    let type_ident = root_name.clone();
+                    triplet_entities.push((var_ident, type_ident, entity_start, entity_count));
+                }
             }
         }
 
@@ -1724,14 +1838,53 @@ pub fn generate_root_methods(
                 // + one CrossBlock.add_residual_cross per declared CrossBlock
                 // field. Every unordered pair of entities is covered by
                 // exactly one CrossBlock (verified by routing build).
+                //
+                // Three per-entity emission modes:
+                //   - Root entity (type matches root_name): write via
+                //     (&mut *self).<root_hb>.add_residual — no Ref cast.
+                //   - Remote-block primary (is_remote_block && type matches
+                //     the remote target type): skip the per-entity call;
+                //     the __target_block.add_residual below (inside is_remote
+                //     branch) handles pose's SelfBlock.
+                //   - Regular Ref entity: unsafe *const→*mut cast pattern.
+                let root_ident_str = root_name.to_string();
+                let remote_target_type: Option<String> = if is_remote_block {
+                    remote_block_info.as_ref().map(|(_, _, t)| t.clone())
+                } else { None };
                 let mut self_block_calls: Vec<TokenStream2> = Vec::new();
+                let mut remote_self_block_call: Option<TokenStream2> = None;
                 for (var_id, type_id, start, count) in &triplet_entities {
-                    let hb = registry_lookup(&type_id.to_string())
+                    let entity_dr: Vec<TokenStream2> = dr_f64.iter().skip(*start).take(*count).cloned().collect();
+                    let type_id_str = type_id.to_string();
+                    if type_id_str == root_ident_str {
+                        // Root: access via `__self_ref` with *const→*mut cast to
+                        // the root struct type. Look up root's SelfBlock field
+                        // name from the registry.
+                        let hb = registry_lookup(&type_id_str)
+                            .and_then(|l| l.self_block_field.clone())
+                            .ok_or_else(|| syn::Error::new_spanned(&struct_ident,
+                                format!("root type `{}` must declare a `SelfBlock<Self>` field (required as implicit multi-cross participant)", type_id)))?;
+                        let hb_ident = syn::Ident::new(&hb, proc_macro2::Span::call_site());
+                        self_block_calls.push(quote! {
+                            unsafe {
+                                (*(__self_ref as *const #type_id as *mut #type_id)).#hb_ident
+                                    .add_residual(#r_ident as #cast_type, &[#(#entity_dr),*], grad);
+                            }
+                        });
+                        continue;
+                    }
+                    if remote_target_type.as_deref() == Some(type_id_str.as_str()) {
+                        // Remote primary: defer to __target_block call.
+                        remote_self_block_call = Some(quote! {
+                            __target_block.add_residual(#r_ident as #cast_type, &[#(#entity_dr),*], grad);
+                        });
+                        continue;
+                    }
+                    let hb = registry_lookup(&type_id_str)
                         .and_then(|l| l.self_block_field.clone())
                         .ok_or_else(|| syn::Error::new_spanned(&struct_ident,
                             format!("type `{}` must declare a `SelfBlock<Self>` field (required as multi-cross participant)", type_id)))?;
                     let hb_ident = syn::Ident::new(&hb, proc_macro2::Span::call_site());
-                    let entity_dr: Vec<TokenStream2> = dr_f64.iter().skip(*start).take(*count).cloned().collect();
                     self_block_calls.push(quote! {
                         unsafe {
                             (*(#var_id as *const #type_id as *mut #type_id)).#hb_ident
@@ -1756,6 +1909,7 @@ pub fn generate_root_methods(
                 }
                 gh_stmts.push(quote! {
                     #(#self_block_calls)*
+                    #remote_self_block_call
                     #(#cross_block_calls)*
                 });
             } else if is_remote_block {
@@ -1950,6 +2104,30 @@ pub fn generate_root_methods(
                         }
                     }
             }
+            // Append root's write_indices calls when root is an implicit
+            // entity. Accessed via (*__self_ref).<param> since root is the
+            // enclosing `Self`.
+            if has_root_entity
+                && let Some(root_layout) = registry_lookup(&root_type_str)
+            {
+                for pf in &root_layout.param_fields {
+                    let pf_ident = syn::Ident::new(pf, proc_macro2::Span::call_site());
+                    let size = root_layout.fields.iter()
+                        .find(|(n, _)| n == pf)
+                        .map(|(_, sft)| match sft {
+                            SymFieldType::Scalar => 1usize,
+                            SymFieldType::Vec2 => 2,
+                            SymFieldType::Vec3 => 3,
+                            _ => 0,
+                        }).unwrap_or(0);
+                    let offset = triplet_param_count;
+                    let end = offset + size;
+                    triplet_idx_stmts.push(quote! {
+                        (*__self_ref).#pf_ident.write_indices(&mut __all_idx[#offset..#end]);
+                    });
+                    triplet_param_count += size;
+                }
+            }
         }
         // Cumulative entity offsets derived from triplet_entities (for the
         // add_residual span boundaries).
@@ -2032,42 +2210,136 @@ pub fn generate_root_methods(
                 }
             });
 
-            // Grad+hessian loop: same traversal but get mutable access to target block
+            // Grad+hessian loop: same traversal but get mutable access
+            // to target block. When is_multi_cross also holds (primary
+            // remote block + extra local CrossBlocks), switch to
+            // iter_mut so __frine.<local_cross>.add_residual_cross and
+            // set_indices see a &mut Frine.
             let _target_coll_id = target_coll_ident.unwrap();
             let marker_gh = marker.clone();
-            grad_hessian_loops.push(quote! {
-                {
-                    #marker_gh
-                    for __lm in self.#coll_ident.iter() {
-                        let #parent_ident = __lm;
-                        for __frine in &__lm.#frines_ident {
+            let entity_self_indices: Vec<TokenStream2> = {
+                // Per-entity SelfBlock set_indices + __all_idx setup,
+                // needed when any Ref entity (other than the remote
+                // target) participates in a local CrossBlock and so
+                // needs its hb.indices set. Only populated when
+                // is_multi_cross.
+                if is_multi_cross {
+                    let root_ident_str_local = root_name.to_string();
+                    let mut v: Vec<TokenStream2> = Vec::new();
+                    for (var_id, type_id, start, count) in &triplet_entities {
+                        if type_id.to_string() == root_ident_str_local { continue; }
+                        if *count == 0 { continue; }
+                        // Remote target's SelfBlock is set via __target_block below; skip.
+                        if type_id.to_string() == *target_type { continue; }
+                        let hb = registry_lookup(&type_id.to_string())
+                            .and_then(|l| l.self_block_field.clone())
+                            .ok_or_else(|| syn::Error::new_spanned(&struct_ident,
+                                format!("type `{}` must declare a `SelfBlock<Self>` field (required as multi-cross/remote participant for set_indices)", type_id)))?;
+                        let hb_ident = syn::Ident::new(&hb, proc_macro2::Span::call_site());
+                        let end = start + count;
+                        let cnt = *count;
+                        v.push(quote! {
+                            unsafe {
+                                (*(#var_id as *const #type_id as *mut #type_id)).#hb_ident.set_indices(
+                                    <&[u32; #cnt]>::try_from(&__all_idx[#start..#end]).unwrap()
+                                );
+                            }
+                        });
+                    }
+                    v
+                } else { Vec::new() }
+            };
+            let tp_remote = triplet_param_count;
+            let triplet_idx_stmts_remote = triplet_idx_stmts.clone();
+            if is_multi_cross {
+                grad_hessian_loops.push(quote! {
+                    {
+                        #marker_gh
+                        for __lm in self.#coll_ident.iter_mut() {
+                            let #parent_ident = unsafe { &*(__lm as *const #a_type_ident) };
+                            for __frine in __lm.#frines_ident.iter_mut() {
+                                #(#resolve_stmts)*
+                                let #root_var_ident = &*__self_ref;
+                                let __target_block = unsafe {
+                                    &mut (*(#ref_field_ident
+                                        as *const #target_type_ident as *mut #target_type_ident)).#block_ident
+                                };
+                                { #(#gh_stmts)* }
+                            }
+                        }
+                    }
+                });
+            } else {
+                grad_hessian_loops.push(quote! {
+                    {
+                        #marker_gh
+                        for __lm in self.#coll_ident.iter() {
+                            let #parent_ident = __lm;
+                            for __frine in &__lm.#frines_ident {
+                                #(#resolve_stmts)*
+                                let #root_var_ident = &*__self_ref;
+                                let __target_block = unsafe {
+                                    &mut (*(#ref_field_ident
+                                        as *const #target_type_ident as *mut #target_type_ident)).#block_ident
+                                };
+                                { #(#gh_stmts)* }
+                            }
+                        }
+                    }
+                });
+            }
+
+            if is_multi_cross {
+                // Multi-cross remote: emit per-CrossBlock set_indices on
+                // each frine alongside the target (remote) set_indices.
+                let mcb_calls: Vec<TokenStream2> = multi_cross_routing.iter().map(|r| {
+                    let block = &r.block_ident;
+                    let a_start = r.a_start; let a_end = r.a_start + r.a_count;
+                    let b_start = r.b_start; let b_end = r.b_start + r.b_count;
+                    quote! {
+                        __frine.#block.set_indices(
+                            &__all_idx[#a_start..#a_end],
+                            &__all_idx[#b_start..#b_end],
+                        );
+                    }
+                }).collect();
+                set_block_indices_loops.push(quote! {
+                    for __lm in self.#coll_ident.iter_mut() {
+                        let #parent_ident = unsafe { &*(__lm as *const #a_type_ident) };
+                        for __frine in __lm.#frines_ident.iter_mut() {
                             #(#resolve_stmts)*
-                            let #root_var_ident = &*__self_ref;
+                            let __target_ref = #ref_field_ident;
                             let __target_block = unsafe {
                                 &mut (*(#ref_field_ident
                                     as *const #target_type_ident as *mut #target_type_ident)).#block_ident
                             };
-                            { #(#gh_stmts)* }
+                            let mut __a_idx = [0u32; #target_param_count];
+                            #(#target_idx_stmts)*
+                            __target_block.set_indices(&__a_idx);
+                            let mut __all_idx = [0u32; #tp_remote];
+                            #(#triplet_idx_stmts_remote)*
+                            #(#entity_self_indices)*
+                            #(#mcb_calls)*
                         }
                     }
-                }
-            });
-
-            set_block_indices_loops.push(quote! {
-                for __lm in self.#coll_ident.iter() {
-                    for __frine in &__lm.#frines_ident {
-                        #(#resolve_stmts)*
-                        let __target_ref = #ref_field_ident;
-                        let __target_block = unsafe {
-                            &mut (*(#ref_field_ident
-                                as *const #target_type_ident as *mut #target_type_ident)).#block_ident
-                        };
-                        let mut __a_idx = [0u32; #target_param_count];
-                        #(#target_idx_stmts)*
-                        __target_block.set_indices(&__a_idx);
+                });
+            } else {
+                set_block_indices_loops.push(quote! {
+                    for __lm in self.#coll_ident.iter() {
+                        for __frine in &__lm.#frines_ident {
+                            #(#resolve_stmts)*
+                            let __target_ref = #ref_field_ident;
+                            let __target_block = unsafe {
+                                &mut (*(#ref_field_ident
+                                    as *const #target_type_ident as *mut #target_type_ident)).#block_ident
+                            };
+                            let mut __a_idx = [0u32; #target_param_count];
+                            #(#target_idx_stmts)*
+                            __target_block.set_indices(&__a_idx);
+                        }
                     }
-                }
-            });
+                });
+            }
         } else if is_self_block {
             let self_var = syn::Ident::new(&self_var_name, proc_macro2::Span::call_site());
             let marker = source_marker(sc);
@@ -2202,6 +2474,32 @@ pub fn generate_root_methods(
                 }
             }).collect();
 
+            // Build per-entity SelfBlock.set_indices calls for this group.
+            // Skipped entirely for the root entity (handled globally by
+            // root_self_block_prelude). Each call uses a slice of
+            // __all_idx and converts it to a fixed-size array via
+            // TryFrom so SelfBlock's `&[u32; N]` signature is satisfied.
+            let root_ident_str = root_name.to_string();
+            let mut entity_set_indices: Vec<TokenStream2> = Vec::new();
+            for (var_id, type_id, start, count) in &triplet_entities {
+                if type_id.to_string() == root_ident_str { continue; }
+                if *count == 0 { continue; }
+                let hb = registry_lookup(&type_id.to_string())
+                    .and_then(|l| l.self_block_field.clone())
+                    .ok_or_else(|| syn::Error::new_spanned(&struct_ident,
+                        format!("type `{}` must declare a `SelfBlock<Self>` field (required as multi-cross/triplet participant for set_indices)", type_id)))?;
+                let hb_ident = syn::Ident::new(&hb, proc_macro2::Span::call_site());
+                let end = start + count;
+                let cnt = *count;
+                entity_set_indices.push(quote! {
+                    unsafe {
+                        (*(#var_id as *const #type_id as *mut #type_id)).#hb_ident.set_indices(
+                            <&[u32; #cnt]>::try_from(&__all_idx[#start..#end]).unwrap()
+                        );
+                    }
+                });
+            }
+
             let group = triplet_groups.entry(group_key).or_insert_with(|| {
                 let ci_field = crate::registry_lookup(&sc.struct_name)
                     .and_then(|l| l.constraint_index_field.as_ref().map(|f| {
@@ -2220,6 +2518,7 @@ pub fn generate_root_methods(
                     gh_entries: Vec::new(),
                     jac_entries: Vec::new(),
                     multi_cross_blocks: mcb.clone(),
+                    entity_self_indices: entity_set_indices.clone(),
                 }
             });
             // If multi_cross_blocks was empty at group creation (first
@@ -2656,10 +2955,13 @@ pub fn generate_root_methods(
         }
 
         // Multi-cross: emit a set_indices call per declared CrossBlock
-        // field. Each CrossBlock's a/b slices are cut from __all_idx using
-        // the entity-span (start, count) pairs recorded in routing.
-        // Single-TripletBlock groups fall through to the trivial __cid
-        // assignment (TripletBlock has no set_indices).
+        // field plus per-entity SelfBlock set_indices so the entities'
+        // hb.indices leave their u32::MAX sentinel (otherwise every
+        // add_residual on them would silently skip). Each CrossBlock's
+        // a/b slices are cut from __all_idx using the entity-span
+        // (start, count) pairs recorded in routing. Single-TripletBlock
+        // groups also need per-entity set_indices for the same reason.
+        let entity_self_indices = &group.entity_self_indices;
         if !group.multi_cross_blocks.is_empty() {
             let mcb_calls: Vec<TokenStream2> = group.multi_cross_blocks.iter().map(|mcb| {
                 let block = &mcb.block_ident;
@@ -2677,15 +2979,22 @@ pub fn generate_root_methods(
                     #(#resolve_stmts)*
                     let mut __all_idx = [0u32; #tp];
                     #(#triplet_idx_stmts)*
+                    #(#entity_self_indices)*
                     #(#mcb_calls)*
                     #ci_set
                     __cid += 1;
                 }
             });
         } else {
-            // TripletBlock doesn't need set_indices, but we still need __cid assignment
+            // TripletBlock: set per-entity SelfBlock indices (needed so
+            // the per-entity add_residual writes don't silently skip),
+            // plus __cid assignment.
             set_block_indices_loops.push(quote! {
                 for __frine in self.#rc_ident.iter_mut() {
+                    #(#resolve_stmts)*
+                    let mut __all_idx = [0u32; #tp];
+                    #(#triplet_idx_stmts)*
+                    #(#entity_self_indices)*
                     #ci_set
                     __cid += 1;
                 }
@@ -2804,6 +3113,9 @@ pub fn generate_root_methods(
             fn __set_block_indices(&mut self) {
                 let mut __cid: u32 = 0;
                 let _ = &__cid; // suppress unused warning when no constraint_index fields
+                let __self_ref = unsafe { &*(self as *const Self) };
+                let _ = __self_ref; // consumed only when root params participate
+                #root_self_block_prelude
                 #(#set_block_indices_loops)*
             }
 
@@ -2969,6 +3281,13 @@ fn interpret_constraint_body(
     let ref_paths = struct_layout.as_ref().map(|l| &l.ref_paths[..]).unwrap_or(&[]);
     let parent_name = constraint.parent_name.clone().unwrap_or_else(|| a_type.to_lowercase());
 
+    // Multi-cross vs single-cross discriminator — needed before building
+    // var_infos so we can skip the parent_name entry in multi-cross
+    // (where the primary A is already covered by a Ref field and adding a
+    // parent_name alias would pollute param_symbols with duplicate params
+    // under a second var name).
+    let is_multi_cross_early = constraint.block_fields.len() > 1;
+
     // Build var_infos
     let mut var_infos: Vec<(String, String)> = Vec::new();
     if !constraint.vars.is_empty() {
@@ -2982,7 +3301,13 @@ fn interpret_constraint_body(
                     var_infos.push((field_name.clone(), inner_ident.to_string()));
                 }
         }
-        if a_type != "__triplet__" {
+        // Skip the parent_name alias only for pure multi-cross (not
+        // remote-block). In the pure case, parent_name = a_type.lower()
+        // is always a duplicate of a ref field on the struct. For
+        // remote-block + multi-cross, parent_name names the parent
+        // *type* (e.g. `lm` -> PointLandmark) which is distinct from the
+        // refs and required by the body for `lm.pos` etc.
+        if a_type != "__triplet__" && !(is_multi_cross_early && !is_remote) {
             var_infos.push((parent_name.clone(), a_type.clone()));
         }
         let root_var = root_type_name.to_lowercase();
@@ -3008,18 +3333,33 @@ fn interpret_constraint_body(
     // Collect param symbols
     let mut param_symbols: Vec<String> = Vec::new();
     let is_triplet = a_type == "__triplet__";
-    // Multi-cross: multiple block fields, all CrossBlocks. Treat like
-    // triplet for param-symbol collection (gather params from ALL ref
-    // fields, not just the primary block's A/B). Routing in the
-    // emission path ensures every cross pair is covered by a declared
-    // CrossBlock.
-    let is_multi_cross = !is_remote && constraint.block_fields.len() > 1;
+    // Multi-cross: multiple block fields. Treat like triplet for
+    // param-symbol collection (gather params from ALL ref fields, not
+    // just the primary block's A/B). Routing in the emission path
+    // ensures every cross pair is covered by a declared CrossBlock.
+    // Multi-cross may coexist with a remote primary block (e.g. the
+    // first block is `pose.hb_pose`, the rest are local CrossBlocks).
+    let is_multi_cross = constraint.block_fields.len() > 1;
+
+    // Root-as-entity: if any declared local CrossBlock references the
+    // root type, include root's Params in the symbol set too.
+    let has_root_entity = is_multi_cross && constraint.block_fields.iter().any(|bf| {
+        if bf.contains('.') { return false; }
+        let Some(field) = fields.iter().find(|f|
+            f.ident.as_ref().map(|i| i.to_string()) == Some(bf.clone())) else { return false; };
+        let Ok((a, b_opt)) = extract_block_type_args(&field.ty) else { return false; };
+        a == root_type_name || b_opt.as_deref() == Some(root_type_name)
+    });
 
     if is_triplet || is_multi_cross {
-        // TripletBlock: collect params from ALL ref fields (no A/B distinction)
+        // TripletBlock / multi-cross: collect params from ALL ref fields
+        // (no A/B distinction). Root's Params are included when a
+        // declared CrossBlock<X, Root> opts the root into the constraint
+        // (has_root_entity) — the root is bound as `<root_lc>` in the
+        // emission scope.
         let mut used_vars = std::collections::HashSet::new();
         for (var_name, type_name) in &var_infos {
-            if type_name == root_type_name { continue; } // skip root
+            if type_name == root_type_name && !has_root_entity { continue; } // skip root unless opted in
             if !used_vars.insert(var_name.clone()) { continue; }
             if let Some(layout) = registry_lookup(type_name) {
                 for pf in &layout.param_fields {

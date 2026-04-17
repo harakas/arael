@@ -1,0 +1,816 @@
+// Localization demo with ROOT-LEVEL PARAMETERS -- copy of loc_demo.rs that
+// adds a global rigid transform (translation + yaw) as parameters on the
+// root struct itself. The idea is that the entire path can be shifted and
+// rotated as a rigid body, instead of letting every pose drift individually.
+//
+//   robot_pos = root.center + root.global_delta + R_z(root.global_rot) * (pose.pos - root.center)
+//
+// is substituted into the landmark observation (frine) constraint wherever
+// `pose.pos` is used. Other constraints (drift, tilt, odometry) are left
+// unchanged: drift is on raw params by design, tilt only reads orientation,
+// and odometry is invariant under a rigid transform.
+//
+// This file is deliberately the same shape as loc_demo.rs aside from the
+// three additions to Path and the frine body rewrite, so the delta is easy
+// to review. It's expected to NOT work yet -- the macro system has no
+// concept of root-level parameters entering constraints, and the goal here
+// is to see exactly how it fails.
+
+use arael::model::{Model, Param, SelfBlock, CrossBlock, SimpleEulerAngleParam};
+use arael::simple_lm::LmProblem;
+use arael::vect::{vect3f, vect2f};
+use arael::matrix::matrix3f;
+use arael::refs::{self, Ref};
+use arael::geometry::Camera;
+
+use rand::prelude::*;
+use rand::rngs::StdRng;
+use rand_distr::Normal;
+
+// ---------------------------------------------------------------------------
+// Model structs
+// ---------------------------------------------------------------------------
+
+// A detected point feature in camera frame.
+// The constraint uses mf2r/camera_pos/isigma; pixel and camera are for debugging.
+#[arael::model]
+#[allow(dead_code)]
+struct PointFeature {
+    pixel: vect2f,
+    mf2r: matrix3f,       // feature-to-robot rotation: col0=view dir, col1/col2=perp axes
+    #[arael(skip)]
+    camera: Ref<Camera>,
+    camera_pos: vect3f,    // camera position in robot frame
+    isigma: vect2f,        // 1/sigma for angular residuals (rad^-1)
+}
+
+#[arael::model]
+struct PoseInfo {
+    delta_pos: vect3f,
+    delta_ea: vect3f,
+    delta_pos_cov_r: matrix3f,
+    delta_pos_cov_isigma: vect3f,
+    delta_ea_cov_r: matrix3f,
+    delta_ea_cov_isigma: vect3f,
+    tilt_roll: f32,
+    tilt_pitch: f32,
+    features: refs::Vec<PointFeature>,
+}
+
+fn decompose_cov(cov: matrix3f) -> (matrix3f, vect3f) {
+    let (r, d) = cov.symmetric_eigen();
+    let isigma = vect3f::new(
+        1.0 / d.x.sqrt(),
+        1.0 / d.y.sqrt(),
+        1.0 / d.z.sqrt(),
+    );
+    (r, isigma)
+}
+
+// Robot pose -- no GPS, landmarks provide absolute reference
+#[arael::model]
+#[arael(constraint(hb_pose, {
+    let pos_drift = pose.pos - pose.pos_value;
+    let ea_drift = pose.ea - pose.ea_value;
+    [pos_drift.x * path.drift_pos_isigma,
+     pos_drift.y * path.drift_pos_isigma,
+     pos_drift.z * path.drift_pos_isigma,
+     ea_drift.x * path.drift_ea_isigma,
+     ea_drift.y * path.drift_ea_isigma,
+     ea_drift.z * path.drift_ea_isigma]
+}))]
+#[arael(constraint(hb_pose, {
+    [(pose.ea.x - pose.info.tilt_roll) * path.tilt_isigma,
+     (pose.ea.y - pose.info.tilt_pitch) * path.tilt_isigma]
+}))]
+struct Pose {
+    pos: Param<vect3f>,
+    ea: SimpleEulerAngleParam<f32>,
+    info: PoseInfo,
+    hb_pose: SelfBlock<Pose, f32>,
+}
+
+// A known 3D landmark (fixed, not optimized)
+#[arael::model]
+struct PointLandmark {
+    pos: vect3f,
+    frines: std::vec::Vec<PointFrine>,
+}
+
+// Observation linking a known landmark to a pose. Remote block on Pose
+// (for pose's SelfBlock grad + diagonal) plus a local CrossBlock<Pose,
+// Path> for the pose-root cross Hessian pairs that arise from the
+// residual touching both pose params and root params
+// (path.global_delta / path.global_rot). The root's own SelfBlock
+// (path.hb) absorbs root's grad + within-root diagonal; the macro
+// auto-infers the (pose, root) pair on hb_root since there's exactly
+// one Ref<Pose> on the struct.
+//
+// Robot position is the pose param transformed by the root's global
+// rigid transform:
+//   robot_pos = center + global_delta + R_global * (pose.pos - center).
+#[arael::model]
+#[arael(constraint([pose.hb_pose, hb_root], parent=lm, {
+    let gamma = path.gamma;
+    let mr2w = pose.ea.rotation_matrix();
+    let mr_global = path.global_rot.rotation_matrix();
+    let robot_pos = path.center + path.global_delta + mr_global * (pose.pos - path.center);
+    let lm_r = mr2w.transpose() * (lm.pos - robot_pos);
+    let r_r = lm_r - feature.camera_pos;
+    let r_f = feature.mf2r.transpose() * r_r;
+    let plain1 = atan2(r_f.y, r_f.x) * feature.isigma.x * path.frine_isigma_scale;
+    let plain2 = atan2(r_f.z, r_f.x) * feature.isigma.y * path.frine_isigma_scale;
+    let err1 = gamma * atan(plain1 / gamma);
+    let err2 = gamma * atan(plain2 / gamma);
+    [err1, err2]
+}))]
+struct PointFrine {
+    #[arael(ref = root.poses)]
+    pose: Ref<Pose>,
+    #[arael(ref = pose.info.features)]
+    feature: Ref<PointFeature>,
+    hb_root: CrossBlock<Pose, Path, f32>,
+}
+
+// Odometry constraint between consecutive poses
+#[arael::model]
+#[arael(constraint(hb, {
+    let mr2w_prev = prev.ea.rotation_matrix();
+    let pos_diff = mr2w_prev.transpose() * (cur.pos - prev.pos);
+    let pos_err = pos_diff - cur.info.delta_pos;
+    let pos_w = cur.info.delta_pos_cov_r.transpose() * pos_err;
+    let mr2w_cur = cur.ea.rotation_matrix();
+    let expected = mr2w_prev * cur.info.delta_ea.rotation_matrix();
+    let error_rot = expected.transpose() * mr2w_cur;
+    let ea_err = error_rot.get_euler_angles();
+    let ea_w = cur.info.delta_ea_cov_r.transpose() * ea_err;
+    [pos_w.x * cur.info.delta_pos_cov_isigma.x,
+     pos_w.y * cur.info.delta_pos_cov_isigma.y,
+     pos_w.z * cur.info.delta_pos_cov_isigma.z,
+     ea_w.x * cur.info.delta_ea_cov_isigma.x,
+     ea_w.y * cur.info.delta_ea_cov_isigma.y,
+     ea_w.z * cur.info.delta_ea_cov_isigma.z]
+}))]
+struct PosePair {
+    #[arael(ref = root.poses)]
+    prev: Ref<Pose>,
+    #[arael(ref = root.poses)]
+    cur: Ref<Pose>,
+    hb: CrossBlock<Pose, Pose, f32>,
+}
+
+// Root -- with a global rigid-transform parameter pair (translation + full rotation).
+//   * global_delta: world-space translation applied to every pose.
+//   * global_rot  : 3-axis euler-angle rotation applied to every pose around `center`.
+//   * center      : non-parameter fixed pivot in world frame (path centroid).
+// Root-self SelfBlock plus two drift constraints keep global_delta / global_rot
+// near their initial values (weak regularizers, same sigma scale as pose drift).
+#[arael::model]
+#[arael(root, f32, jacobian)]
+#[arael(constraint(hb, name = "global_delta_drift", {
+    let d = path.global_delta - path.global_delta_value;
+    [d.x * path.drift_pos_isigma,
+     d.y * path.drift_pos_isigma,
+     d.z * path.drift_pos_isigma]
+}))]
+#[arael(constraint(hb, name = "global_rot_drift", {
+    let d = path.global_rot - path.global_rot_value;
+    [d.x * path.drift_ea_isigma,
+     d.y * path.drift_ea_isigma,
+     d.z * path.drift_ea_isigma]
+}))]
+struct Path {
+    poses: refs::Deque<Pose>,
+    landmarks: refs::Vec<PointLandmark>,
+    pose_pairs: std::vec::Vec<PosePair>,
+    global_delta: Param<vect3f>,
+    global_rot: SimpleEulerAngleParam<f32>,
+    center: vect3f,
+    gamma: f32,
+    drift_pos_isigma: f32,
+    drift_ea_isigma: f32,
+    tilt_isigma: f32,
+    frine_isigma_scale: f32,
+    hb: SelfBlock<Path, f32>,
+}
+
+// ---------------------------------------------------------------------------
+// Synthetic data generation
+// ---------------------------------------------------------------------------
+
+struct SceneConfig {
+    num_poses: usize,
+    num_landmarks: usize,
+    seed: u64,
+    outlier_fraction: f32,
+    outlier_scale: f32,
+    // S-curve parameters
+    s_amplitude: f32,
+    s_frequency: f32,
+    step_size: f32,
+    // Noise parameters
+    odo_pos_k: f32,    // position noise as fraction of distance
+    odo_pos_base: f32, // base position noise (meters)
+    odo_ea_k: f32,     // ea noise as fraction of rotation
+    odo_ea_base: f32,  // base ea noise (radians)
+}
+
+impl Default for SceneConfig {
+    fn default() -> Self {
+        SceneConfig {
+            num_poses: 20,
+            num_landmarks: 40,
+            seed: 42,
+            outlier_fraction: 0.5,  // 50% of feature associations are invalid/outliers
+            outlier_scale: 30.0,    // outlier pixel noise is 30x normal (+-30 pixels)
+            s_amplitude: 1.5,       // S-curve lateral amplitude (meters)
+            s_frequency: 0.8,       // S-curve angular frequency
+            step_size: 0.25,        // distance between poses (meters)
+            odo_pos_k: 0.10,        // 10% of distance
+            odo_pos_base: 0.03,     // 3cm base noise
+            odo_ea_k: 0.01,
+            odo_ea_base: 0.001,
+        }
+    }
+}
+
+fn create_cameras() -> refs::Vec<Camera> {
+    let mut cameras = refs::Vec::new();
+    // 5 cameras at 72-degree intervals around the robot, looking toward horizon
+    let w = 1024;
+    let h = 768;
+    let fov_deg = 80.0_f32;
+    let fx = (w as f32 / 2.0) / (fov_deg / 2.0).to_radians().tan();
+    let fy = fx;
+
+    let n = 5;
+    for i in 0..n {
+        let yaw = (i as f32) * (360.0_f32 / n as f32).to_radians();
+        let sy = yaw.sin();
+        let cy = yaw.cos();
+        // Camera looks outward from robot center, Z forward in camera = outward direction
+        // mc2r rotates camera frame to robot frame: camera Z -> robot (cy, sy, 0)
+        let mc2r = matrix3f::from_cols(
+            vect3f::new(-sy, cy, 0.0),  // camera X -> robot left (perpendicular to view)
+            vect3f::new(0.0, 0.0, -1.0), // camera Y -> robot down (image Y down)
+            vect3f::new(cy, sy, 0.0),    // camera Z -> robot forward direction
+        );
+        cameras.push(Camera {
+            fx, fy,
+            cx: w as f32 / 2.0,
+            cy: h as f32 / 2.0,
+            width: w,
+            height: h,
+            camera_pos: vect3f::new(cy * 0.1, sy * 0.1, 0.3), // slight offset, 30cm high
+            mc2r,
+        });
+    }
+    cameras
+}
+
+fn generate_ground_truth_poses(cfg: &SceneConfig) -> Vec<(vect3f, vect3f)> {
+    let mut poses = Vec::new();
+    let mut t = 0.0_f32;
+    for _ in 0..cfg.num_poses {
+        let x = t;
+        let y = cfg.s_amplitude * (cfg.s_frequency * t).sin();
+        let pos = vect3f::new(x, y, 0.0);
+
+        // Yaw follows tangent direction
+        let dx = 1.0;
+        let dy = cfg.s_amplitude * cfg.s_frequency * (cfg.s_frequency * t).cos();
+        let yaw = dy.atan2(dx);
+        let ea = vect3f::new(0.0, 0.0, yaw);
+
+        poses.push((pos, ea));
+        t += cfg.step_size;
+    }
+    poses
+}
+
+fn generate_ground_truth_landmarks(cfg: &SceneConfig, rng: &mut StdRng, poses: &[(vect3f, vect3f)]) -> Vec<vect3f> {
+    let mut landmarks = Vec::new();
+    // Place landmarks 5-30m from the closest pose
+    for _ in 0..cfg.num_landmarks {
+        loop {
+            // Pick a random pose as anchor
+            let anchor = &poses[rng.random_range(0..poses.len())].0;
+            // Random direction (horizontal angle)
+            let angle = rng.random::<f32>() * 2.0 * std::f32::consts::PI;
+            // Random distance 5-30m
+            let dist = 5.0 + rng.random::<f32>() * 25.0;
+            let x = anchor.x + dist * angle.cos();
+            let y = anchor.y + dist * angle.sin();
+            let z = rng.random::<f32>() * 2.0; // 0-2m height
+            let lm = vect3f::new(x, y, z);
+            // Verify distance to closest pose is 5-30m
+            let min_dist = poses.iter()
+                .map(|(p, _)| (lm - *p).norm())
+                .fold(f32::MAX, f32::min);
+            if min_dist >= 5.0 && min_dist <= 30.0 {
+                landmarks.push(lm);
+                break;
+            }
+        }
+    }
+    landmarks
+}
+
+impl Path {
+    /// Bake `global_delta` + `global_rot` into every pose's pos/ea, then
+    /// reset the global rigid-transform params to identity and shift the
+    /// pivot `center` to the new pose centroid. Call this after
+    /// optimization to absorb the soft-regularized global offset back
+    /// into the poses so absolute-pose metrics are meaningful.
+    ///
+    /// Math:
+    ///   new_pos = center + global_delta + R_global * (pos - center)
+    ///   new_mr2w = R_global * mr2w(ea)
+    /// After recentering:
+    ///   global_delta = 0, global_rot = 0 (identity), center = centroid(new positions)
+    fn recenter(&mut self) {
+        let mr_global = matrix3f::rotation_from_euler_angles(self.global_rot.value);
+        let delta = self.global_delta.value;
+        let center = self.center;
+        for pose in self.poses.iter_mut() {
+            let new_pos = center + delta + mr_global * (pose.pos.value - center);
+            let mr2w = matrix3f::rotation_from_euler_angles(pose.ea.value);
+            let new_mr2w = mr_global * mr2w;
+            let new_ea = new_mr2w.get_euler_angles();
+            pose.pos = Param::new(new_pos);
+            pose.ea = SimpleEulerAngleParam::new(new_ea);
+        }
+        // Reset global transform to identity and pivot to new centroid.
+        self.global_delta = Param::new(vect3f::new(0.0, 0.0, 0.0));
+        self.global_rot = SimpleEulerAngleParam::new(vect3f::new(0.0, 0.0, 0.0));
+        let mut acc = vect3f::new(0.0, 0.0, 0.0);
+        for pose in self.poses.iter() { acc = acc + pose.pos.value; }
+        if self.poses.len() > 0 {
+            self.center = acc * (1.0 / self.poses.len() as f32);
+        }
+    }
+}
+
+fn build_path(cfg: &SceneConfig) -> (Path, Vec<(vect3f, vect3f)>, Vec<vect3f>) {
+    let mut rng = StdRng::seed_from_u64(cfg.seed);
+    let normal01 = Normal::new(0.0, 1.0).unwrap();
+
+    let gt_poses = generate_ground_truth_poses(cfg);
+    let gt_landmarks = generate_ground_truth_landmarks(cfg, &mut rng, &gt_poses);
+    let cameras = create_cameras();
+
+    let drift_pos_sigma: f32 = 1000.0;    // meters
+    let drift_ea_sigma_deg: f32 = 1800.0;  // degrees
+    let tilt_sigma_deg: f32 = 0.25;         // accelerometer accuracy in degrees
+    let tilt_sigma_rad = tilt_sigma_deg.to_radians();
+
+    // Pivot: centroid of the ground-truth poses. This keeps the global
+    // rotation's effect on pos_drift small near zero-rot.
+    let center = {
+        let mut acc = vect3f::new(0.0, 0.0, 0.0);
+        for (p, _) in &gt_poses { acc = acc + *p; }
+        acc * (1.0 / gt_poses.len() as f32)
+    };
+
+    let mut path = Path {
+        poses: refs::Deque::new(),
+        landmarks: refs::Vec::new(),
+        pose_pairs: std::vec::Vec::new(),
+        global_delta: Param::new(vect3f::new(0.0, 0.0, 0.0)),
+        global_rot: SimpleEulerAngleParam::new(vect3f::new(0.0, 0.0, 0.0)),
+        center,
+        gamma: 2.0 * (25.0_f32).sqrt() / std::f32::consts::PI,
+        drift_pos_isigma: 1.0 / drift_pos_sigma,
+        drift_ea_isigma: 1.0 / drift_ea_sigma_deg.to_radians(),
+        tilt_isigma: 1.0 / tilt_sigma_rad,
+        frine_isigma_scale: 1.0,
+        hb: SelfBlock::new(),
+    };
+
+    let mut frine_data: std::vec::Vec<(usize, Ref<Pose>, Ref<PointFeature>)> = std::vec::Vec::new();
+
+    for (pi, &(pos, ea)) in gt_poses.iter().enumerate() {
+        let mr2w = matrix3f::rotation_from_euler_angles(ea);
+
+        // Compute odometry deltas
+        let (delta_pos, delta_ea) = if pi == 0 {
+            (vect3f::new(0.0, 0.0, 0.0), vect3f::new(0.0, 0.0, 0.0))
+        } else {
+            let (prev_pos, prev_ea) = gt_poses[pi - 1];
+            let prev_mr2w = matrix3f::rotation_from_euler_angles(prev_ea);
+            let prev_mw2r = prev_mr2w.transpose();
+            let dp = prev_mw2r * (pos - prev_pos);
+            let de = (prev_mw2r * mr2w).get_euler_angles();
+            (dp, de)
+        };
+
+        // Odometry covariance proportional to motion
+        let dp_norm = delta_pos.norm().max(0.01);
+        let de_norm = delta_ea.norm().max(0.001);
+        let pos_sigma = vect3f::new(
+            cfg.odo_pos_k * dp_norm + cfg.odo_pos_base,
+            (cfg.odo_pos_k * dp_norm + cfg.odo_pos_base) * 0.5, // lateral less noisy than forward
+            (cfg.odo_pos_k * dp_norm + cfg.odo_pos_base) * 0.5,
+        );
+        let ea_sigma = vect3f::new(
+            cfg.odo_ea_k * de_norm + cfg.odo_ea_base,
+            cfg.odo_ea_k * de_norm + cfg.odo_ea_base,
+            cfg.odo_ea_k * de_norm + cfg.odo_ea_base,
+        );
+
+        let delta_pos_cov = matrix3f::from_elements(
+            pos_sigma.x * pos_sigma.x, 0.0, 0.0,
+            0.0, pos_sigma.y * pos_sigma.y, 0.0,
+            0.0, 0.0, pos_sigma.z * pos_sigma.z,
+        );
+        let delta_ea_cov = matrix3f::from_elements(
+            ea_sigma.x * ea_sigma.x, 0.0, 0.0,
+            0.0, ea_sigma.y * ea_sigma.y, 0.0,
+            0.0, 0.0, ea_sigma.z * ea_sigma.z,
+        );
+
+        // Generate features
+        let mut features: refs::Vec<PointFeature> = refs::Vec::new();
+        for (li, &lm_pos) in gt_landmarks.iter().enumerate() {
+            for cam_ref in cameras.refs() {
+                let cam = &cameras[cam_ref];
+                let p_cam = cam.world_to_camera(lm_pos, pos, mr2w);
+                if p_cam.z < 0.5 { continue; } // behind camera or too close
+                let pixel = cam.project(p_cam);
+                if !cam.is_visible(pixel) { continue; }
+
+                // Add pixel noise (uniform +-1 pixel, outliers get scaled up)
+                let is_outlier = rng.random::<f32>() < cfg.outlier_fraction;
+                let noise_scale = if is_outlier { cfg.outlier_scale } else { 1.0 };
+                let noisy_pixel = vect2f::new(
+                    pixel.x + noise_scale * (rng.random::<f32>() * 2.0 - 1.0),
+                    pixel.y + noise_scale * (rng.random::<f32>() * 2.0 - 1.0),
+                );
+                // Build feature-to-robot frame (mf2r): col0 = view direction from
+                // pose toward feature, col1/col2 = perpendicular axes for measuring
+                // horizontal and vertical angular error via atan2.
+                let dir = cam.unproject_to_robot(noisy_pixel);
+                let cam_up = -(cam.mc2r.col(1));
+                let up_proj = cam_up - dir * (cam_up * dir);
+                let up_norm = up_proj.norm();
+                if up_norm < 1e-6 { continue; }
+                let col2 = up_proj * (1.0 / up_norm);
+                let col1 = col2 % dir;
+                let mf2r = matrix3f::from_cols(dir, col1, col2);
+
+                let sigma = cam.pixel_angular_size(noisy_pixel);
+                let isigma = vect2f::new(1.0 / sigma.x, 1.0 / sigma.y);
+
+                let feat_ref = features.push(PointFeature {
+                    pixel: noisy_pixel,
+                    mf2r,
+                    camera: cam_ref,
+                    camera_pos: cam.camera_pos,
+                    isigma,
+                });
+                frine_data.push((li, Ref::new(path.poses.len() as u32), feat_ref));
+            }
+        }
+
+        // Noisy initial pose estimate
+        let init_noise_pos = 0.1_f32;   // meters
+        let init_noise_ea = 0.02_f32;   // radians (~1.1 degrees)
+        let noisy_pos = vect3f::new(
+            pos.x + init_noise_pos * rng.sample(normal01) as f32,
+            pos.y + init_noise_pos * rng.sample(normal01) as f32,
+            pos.z + init_noise_pos * rng.sample(normal01) as f32,
+        );
+        let noisy_ea = vect3f::new(
+            ea.x + init_noise_ea * rng.sample(normal01) as f32,
+            ea.y + init_noise_ea * rng.sample(normal01) as f32,
+            ea.z + init_noise_ea * rng.sample(normal01) as f32,
+        );
+
+        let (delta_pos_cov_r, delta_pos_cov_isigma) = decompose_cov(delta_pos_cov);
+        let (delta_ea_cov_r, delta_ea_cov_isigma) = decompose_cov(delta_ea_cov);
+
+        path.poses.push_back(Pose {
+            pos: Param::new(noisy_pos),
+            ea: SimpleEulerAngleParam::new(noisy_ea),
+            info: PoseInfo {
+                delta_pos, delta_ea,
+                delta_pos_cov_r, delta_pos_cov_isigma,
+                delta_ea_cov_r, delta_ea_cov_isigma,
+                tilt_roll: ea.x + tilt_sigma_rad * rng.sample(normal01) as f32,
+                tilt_pitch: ea.y + tilt_sigma_rad * rng.sample(normal01) as f32,
+                features,
+            },
+            hb_pose: SelfBlock::new(),
+        });
+    }
+
+    // Build landmarks with frines (landmarks are fixed at GT positions)
+    for (li, &lm_pos) in gt_landmarks.iter().enumerate() {
+        let frines: std::vec::Vec<PointFrine> = frine_data.iter()
+            .filter(|(lmi, _, _)| *lmi == li)
+            .map(|(_, pose, feature)| PointFrine {
+                pose: *pose, feature: *feature, hb_root: CrossBlock::new(),
+            })
+            .collect();
+        if frines.is_empty() { continue; }
+        path.landmarks.push(PointLandmark {
+            pos: lm_pos,
+            frines,
+        });
+    }
+
+    // Build pose pairs for odometry
+    let pose_refs: std::vec::Vec<Ref<Pose>> = path.poses.refs().collect();
+    for i in 1..pose_refs.len() {
+        path.pose_pairs.push(PosePair {
+            prev: pose_refs[i - 1],
+            cur: pose_refs[i],
+            hb: CrossBlock::new(),
+        });
+    }
+
+    (path, gt_poses, gt_landmarks)
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
+fn main() {
+    let cfg = SceneConfig::default();
+    let (mut path, gt_poses, _gt_landmarks) = build_path(&cfg);
+
+    let mut params = std::vec::Vec::new();
+    path.serialize32(&mut params);
+
+    let n_frines: usize = path.landmarks.iter().map(|lm| lm.frines.len()).sum();
+    println!("Path: {} poses, {} landmarks, {} frines, {} pose_pairs",
+        path.poses.len(), path.landmarks.len(), n_frines, path.pose_pairs.len());
+    println!("Parameters: {} (Pose={}, Landmark={})",
+        params.len(), Pose::PARAM_COUNT, PointLandmark::PARAM_COUNT);
+    println!();
+
+    // Print a few poses
+    for i in [0, cfg.num_poses / 2, cfg.num_poses - 1] {
+        if i >= path.poses.len() { continue; }
+        let pose = &path.poses[Ref::new(i as u32)];
+        let (gt_p, gt_e) = gt_poses[i];
+        println!("Pose {:2}: pos=({:7.3}, {:7.3}, {:7.3}) ea=({:7.4}, {:7.4}, {:7.4})",
+            i, pose.pos.value.x, pose.pos.value.y, pose.pos.value.z,
+            pose.ea.value.x, pose.ea.value.y, pose.ea.value.z);
+        println!("      gt: pos=({:7.3}, {:7.3}, {:7.3}) ea=({:7.4}, {:7.4}, {:7.4})",
+            gt_p.x, gt_p.y, gt_p.z, gt_e.x, gt_e.y, gt_e.z);
+    }
+    println!();
+
+    // Jacobian-based residual diagnostic at initial state. Groups
+    // residuals by constraint label and reports count, sum_abs, and
+    // sum_sq per group so we can see directly whether all ~872*2
+    // observation residuals are being evaluated.
+    {
+        use arael::model::JacobianModel;
+        let mut params: std::vec::Vec<f32> = std::vec::Vec::new();
+        path.serialize32(&mut params);
+        let jac = path.calc_jacobian(&params);
+        use std::collections::HashMap;
+        let mut per_label: HashMap<&'static str, (usize, f32, f32)> = HashMap::new();
+        for row in &jac.rows {
+            let e = per_label.entry(row.label).or_insert((0, 0.0, 0.0));
+            e.0 += 1;
+            e.1 += row.residual.abs();
+            e.2 += row.residual * row.residual;
+        }
+        println!("\n--- Jacobian residual diagnostic (initial, scale=1.0) ---");
+        println!("  total rows = {}, total cost = {:.4}", jac.rows.len(),
+            per_label.values().map(|(_, _, s)| s).sum::<f32>());
+        let mut keys: Vec<_> = per_label.keys().collect();
+        keys.sort();
+        for k in keys {
+            let (n, sa, ss) = per_label[k];
+            println!("  {:>24} : n={:4}  sum|r|={:12.4}  sum r^2={:12.4}  avg |r|={:.4}",
+                k, n, sa, ss, sa / n as f32);
+        }
+    }
+
+    // Numerical grad sanity check on the actual demo model: compute
+    // analytic + numerical gradient at the initial state, and compare
+    // the global_delta / global_rot entries. If the solver can't move
+    // these params it's either because the analytic grad is (wrongly)
+    // zero or mis-routed.
+    {
+        let mut params: std::vec::Vec<f32> = std::vec::Vec::new();
+        path.serialize32(&mut params);
+        let n = params.len();
+        let mut ag = vec![0.0f32; n];
+        let mut ah = vec![0.0f32; n * n];
+        path.calc_grad_hessian_dense(&params, &mut ag, &mut ah);
+        let eps = 1e-3_f32;
+        let mut ng = vec![0.0f32; n];
+        for i in 0..n {
+            let mut pp = params.clone();
+            pp[i] += eps;
+            let cp = path.calc_cost(&pp);
+            pp[i] -= 2.0 * eps;
+            let cm = path.calc_cost(&pp);
+            ng[i] = (cp - cm) / (2.0 * eps);
+        }
+        let gd_idx = path.global_delta.index();
+        let gr_idx = path.global_rot.index();
+        println!("\n--- Initial-state grad diagnostic ---");
+        println!("  total params={}, cost={:.4}", n, path.calc_cost(&params));
+        if gd_idx != u32::MAX {
+            let start = gd_idx as usize;
+            for k in 0..3 {
+                println!("  global_delta[{}]  analytic={:+.3e}  numerical={:+.3e}",
+                    k, ag[start + k], ng[start + k]);
+            }
+        } else {
+            println!("  global_delta is fixed (u32::MAX index)");
+        }
+        if gr_idx != u32::MAX {
+            let start = gr_idx as usize;
+            for k in 0..3 {
+                println!("  global_rot[{}]  analytic={:+.3e}  numerical={:+.3e}",
+                    k, ag[start + k], ng[start + k]);
+            }
+        } else {
+            println!("  global_rot is fixed (u32::MAX index)");
+        }
+    }
+
+    // Graduated optimization: start with loose feature constraints, tighten
+    println!("--- Optimization ---");
+    let isigma_scales = [0.01, 0.1, 1.0];
+
+    for (pass, &scale) in isigma_scales.iter().enumerate() {
+        path.frine_isigma_scale = scale;
+
+        let mut params: std::vec::Vec<f32> = std::vec::Vec::new();
+        path.serialize32(&mut params);
+
+        println!("\nPass {} (isigma scale={}):", pass + 1, scale);
+        let config = arael::simple_lm::LmConfig::<f32> {
+            verbose: true,
+            ..Default::default()
+        };
+        let result = arael::simple_lm::solve_sparse_faer_f32(&params, &mut path, &config);
+        // Read the optimized global values from result.x when they are live
+        // params. If they are fixed (Param::fixed), their index is u32::MAX
+        // and they weren't in the param vector at all -- report that.
+        let gd_idx = path.global_delta.index();
+        let gr_idx = path.global_rot.index();
+        let fmt_triple = |idx: u32| -> String {
+            if idx == u32::MAX {
+                "<fixed>".to_string()
+            } else {
+                let s = idx as usize;
+                format!("[{}, {}, {}]", result.x[s], result.x[s + 1], result.x[s + 2])
+            }
+        };
+        let gd_str = fmt_triple(gd_idx);
+        let gr_str = fmt_triple(gr_idx);
+        path.deserialize32(&result.x);
+        println!("  {} iterations, cost {:.4} -> {:.4}", result.iterations, result.start_cost, result.end_cost);
+        println!("  optimized (in result.x): global_delta={} global_rot={}", gd_str, gr_str);
+        println!("  after deserialize: global_delta={:?} global_rot={:?}",
+            path.global_delta.value, path.global_rot.value);
+    }
+
+    // Post-optimization grad diagnostic: at convergence, is there any
+    // gradient signal left on global_delta / global_rot? If yes, the
+    // solver got stuck; if no, the current state is a true local min
+    // and the systematic pose offset is NOT attributable to globals.
+    {
+        let mut params: std::vec::Vec<f32> = std::vec::Vec::new();
+        path.serialize32(&mut params);
+        let n = params.len();
+        let mut ag = vec![0.0f32; n];
+        let mut ah = vec![0.0f32; n * n];
+        path.calc_grad_hessian_dense(&params, &mut ag, &mut ah);
+        let gd_idx = path.global_delta.index();
+        let gr_idx = path.global_rot.index();
+        println!("\n--- Post-optimization grad on globals ---");
+        for (label, idx) in [("global_delta", gd_idx), ("global_rot", gr_idx)] {
+            if idx == u32::MAX {
+                println!("  {} is fixed (no grad/hess)", label);
+                continue;
+            }
+            let start = idx as usize;
+            for k in 0..3 {
+                println!("  {}[{}]  grad={:+.3e}  hess_diag={:+.3e}",
+                    label, k, ag[start + k], ah[(start + k) * n + (start + k)]);
+            }
+        }
+    }
+
+    // Bake the soft-regularized global transform back into each pose,
+    // reset global_delta/global_rot to identity, and move the pivot to
+    // the new centroid. Makes the absolute-pose metrics reflect the
+    // actual optimized trajectory rather than a constant offset living
+    // in the root params.
+    println!("\n--- Recentering: baking global_delta={:?}, global_rot={:?} into poses ---",
+        path.global_delta.value, path.global_rot.value);
+    path.recenter();
+
+    // Absolute pose errors vs GT (meaningful -- no gauge freedom)
+    {
+        let mut params: std::vec::Vec<f32> = std::vec::Vec::new();
+        path.serialize32(&mut params);
+        let cost = path.calc_cost(&params);
+        println!("\nFinal cost: {:.4}", cost);
+
+        println!("\n--- Absolute pose errors ---");
+        let mut pos_errs: std::vec::Vec<f32> = std::vec::Vec::new();
+        let mut ea_errs_deg: std::vec::Vec<f32> = std::vec::Vec::new();
+        let n = gt_poses.len().min(path.poses.len());
+        for i in 0..n {
+            let pose = &path.poses[Ref::new(i as u32)];
+            let (gt_p, gt_e) = gt_poses[i];
+            let pd = pose.pos.value - gt_p;
+            let ed = pose.ea.value - gt_e;
+            let pos_err = pd.norm();
+            let ea_err_deg = ed.norm().to_degrees();
+            println!("Pose {:2}: |d|={:.4}m  ea={:.3}deg  pos=({:.3}, {:.3}, {:.3})",
+                i, pos_err, ea_err_deg,
+                pose.pos.value.x, pose.pos.value.y, pose.pos.value.z);
+            pos_errs.push(pos_err);
+            ea_errs_deg.push(ea_err_deg);
+        }
+        pos_errs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        ea_errs_deg.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        if !pos_errs.is_empty() {
+            let n = pos_errs.len();
+            let mean_pos: f32 = pos_errs.iter().sum::<f32>() / n as f32;
+            let mean_ea: f32 = ea_errs_deg.iter().sum::<f32>() / n as f32;
+            println!("Pos: mean={:.4}m  median={:.4}m  min={:.4}m  max={:.4}m",
+                mean_pos, pos_errs[n / 2], pos_errs[0], pos_errs[n - 1]);
+            println!("EA:  mean={:.3}deg  median={:.3}deg  min={:.3}deg  max={:.3}deg",
+                mean_ea, ea_errs_deg[n / 2], ea_errs_deg[0], ea_errs_deg[n - 1]);
+        }
+    }
+
+    // Relative pose errors: compare consecutive delta_pos in local frame
+    println!("\n--- Relative pose errors ---");
+    let mut dpos_errs: std::vec::Vec<f32> = std::vec::Vec::new();
+    let mut dpos_rel_errs: std::vec::Vec<f32> = std::vec::Vec::new();
+    let mut dea_errs_deg: std::vec::Vec<f32> = std::vec::Vec::new();
+    let mut dea_rel_errs: std::vec::Vec<f32> = std::vec::Vec::new();
+    for i in 1..gt_poses.len().min(path.poses.len()) {
+        let prev = &path.poses[Ref::new((i - 1) as u32)];
+        let pose = &path.poses[Ref::new(i as u32)];
+        let (gt_prev_pos, gt_prev_ea) = gt_poses[i - 1];
+        let (gt_cur_pos, gt_cur_ea) = gt_poses[i];
+
+        // GT delta_pos in previous pose's local frame
+        let gt_mr2w = matrix3f::rotation_from_euler_angles(gt_prev_ea);
+        let gt_delta_pos = gt_mr2w.transpose() * (gt_cur_pos - gt_prev_pos);
+
+        // Optimized delta_pos in previous pose's local frame
+        let opt_mr2w_prev = matrix3f::rotation_from_euler_angles(prev.ea.value);
+        let opt_delta_pos = opt_mr2w_prev.transpose() * (pose.pos.value - prev.pos.value);
+
+        let dpos_err = (opt_delta_pos - gt_delta_pos).norm();
+        let gt_step = gt_delta_pos.norm();
+        let dpos_rel = if gt_step > 1e-6 { 100.0 * dpos_err / gt_step } else { 0.0 };
+
+        // GT delta_ea: relative rotation from prev to cur
+        let gt_mr2w_cur = matrix3f::rotation_from_euler_angles(gt_cur_ea);
+        let gt_delta_ea = (gt_mr2w.transpose() * gt_mr2w_cur).get_euler_angles();
+
+        // Optimized delta_ea
+        let opt_mr2w_cur = matrix3f::rotation_from_euler_angles(pose.ea.value);
+        let opt_delta_ea = (opt_mr2w_prev.transpose() * opt_mr2w_cur).get_euler_angles();
+
+        let dea_err = (opt_delta_ea - gt_delta_ea).norm();
+        let dea_err_deg = dea_err.to_degrees();
+        let gt_rot = gt_delta_ea.norm();
+        let dea_rel = if gt_rot > 1e-6 { 100.0 * dea_err / gt_rot } else { 0.0 };
+
+        println!("Pair {:2}-{:2}: dpos={:.4}m ({:.1}%)  dea={:.3}deg ({:.1}%)",
+            i - 1, i, dpos_err, dpos_rel, dea_err_deg, dea_rel);
+        dpos_errs.push(dpos_err);
+        dpos_rel_errs.push(dpos_rel);
+        dea_errs_deg.push(dea_err_deg);
+        dea_rel_errs.push(dea_rel);
+    }
+    dpos_errs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    dpos_rel_errs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    dea_errs_deg.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    dea_rel_errs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    if !dpos_errs.is_empty() {
+        let n = dpos_errs.len();
+        let mean: f32 = dpos_errs.iter().sum::<f32>() / n as f32;
+        println!("Delta pos: mean={:.4}m  median={:.4}m  min={:.4}m  max={:.4}m",
+            mean, dpos_errs[n / 2], dpos_errs[0], dpos_errs[n - 1]);
+        let mean: f32 = dpos_rel_errs.iter().sum::<f32>() / n as f32;
+        println!("Delta pos: mean={:.2}%  median={:.2}%  min={:.2}%  max={:.2}%",
+            mean, dpos_rel_errs[n / 2], dpos_rel_errs[0], dpos_rel_errs[n - 1]);
+        let mean: f32 = dea_errs_deg.iter().sum::<f32>() / n as f32;
+        println!("Delta ea:  mean={:.3}deg  median={:.3}deg  min={:.3}deg  max={:.3}deg",
+            mean, dea_errs_deg[n / 2], dea_errs_deg[0], dea_errs_deg[n - 1]);
+        let mean: f32 = dea_rel_errs.iter().sum::<f32>() / n as f32;
+        println!("Delta ea:  mean={:.2}%  median={:.2}%  min={:.2}%  max={:.2}%",
+            mean, dea_rel_errs[n / 2], dea_rel_errs[0], dea_rel_errs[n - 1]);
+    }
+
+}
