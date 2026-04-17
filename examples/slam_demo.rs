@@ -151,8 +151,8 @@ struct PointLandmark {
     let lm_r = mr2w.transpose() * (lm.pos - pose.pos);
     let r_r = lm_r - feature.camera_pos;
     let r_f = feature.mf2r.transpose() * r_r;
-    let plain1 = atan2(r_f.y, r_f.x) * feature.isigma.x;
-    let plain2 = atan2(r_f.z, r_f.x) * feature.isigma.y;
+    let plain1 = atan2(r_f.y, r_f.x) * feature.isigma.x * path.frine_isigma_scale;
+    let plain2 = atan2(r_f.z, r_f.x) * feature.isigma.y * path.frine_isigma_scale;
     let err1 = gamma * atan(plain1 / gamma);
     let err2 = gamma * atan(plain2 / gamma);
     [err1, err2]
@@ -204,6 +204,7 @@ struct Path {
     drift_ea_isigma: f32,
     drift_lm_isigma: f32,
     tilt_isigma: f32,
+    frine_isigma_scale: f32,
 }
 
 // ---------------------------------------------------------------------------
@@ -363,6 +364,7 @@ fn build_path(cfg: &SceneConfig) -> (Path, Vec<(vect3f, vect3f)>, Vec<(vect3f, u
         drift_ea_isigma: 1.0 / drift_ea_sigma_deg.to_radians(),
         drift_lm_isigma: 1.0 / drift_lm_sigma,
         tilt_isigma: 1.0 / tilt_sigma_rad,
+        frine_isigma_scale: 1.0,
     };
 
     let mut frine_data: std::vec::Vec<(usize, Ref<Pose>, Ref<PointFeature>)> = std::vec::Vec::new();
@@ -593,26 +595,12 @@ fn main() {
     }
     println!();
 
-    // Helper: scale all feature isigma values
-    fn scale_isigma(path: &mut Path, scale: f32) {
-        for pose in path.poses.iter_mut() {
-            for feat in pose.info.features.iter_mut() {
-                feat.isigma = feat.isigma * scale;
-            }
-        }
-    }
-
     // Graduated optimization: start with loose feature constraints, tighten
     println!("--- Optimization ---");
     let isigma_scales = [0.01, 0.1, 1.0];
 
     for (pass, &scale) in isigma_scales.iter().enumerate() {
-        // Scale isigma for this pass (undo previous, apply new)
-        if pass > 0 {
-            scale_isigma(&mut path, scale / isigma_scales[pass - 1]);
-        } else {
-            scale_isigma(&mut path, scale);
-        }
+        path.frine_isigma_scale = scale;
 
         let mut params64: std::vec::Vec<f64> = std::vec::Vec::new();
         path.serialize64(&mut params64);
