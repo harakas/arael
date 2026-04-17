@@ -913,18 +913,41 @@ pub fn generate_root_methods(
     }
     let mut collection_groups: std::collections::HashMap<String, CollectionGroup> = std::collections::HashMap::new();
 
+    // Grouping for SelfBlock constraints that live on a single-instance entity
+    // (the root itself, or a direct-composed sub-model field). Keyed by the
+    // access path ("self" for RootSelf, "self.<field>" for DirectField).
+    // Multiple #[arael(constraint(...))] attributes on the same entity merge
+    // into one emitted block per path.
+    struct SingleInstanceGroup {
+        accessor_read: TokenStream2,
+        accessor_write: TokenStream2,
+        self_var: syn::Ident,
+        root_var_ident: syn::Ident,
+        a_type_ident: syn::Ident,
+        a_param_count: usize,
+        a_idx_stmts: Vec<TokenStream2>,
+        block_ident: syn::Ident,
+        constraint_index_field: Option<syn::Ident>,
+        cost_entries: Vec<TokenStream2>,
+        gh_entries: Vec<TokenStream2>,
+        jac_entries: Vec<TokenStream2>,
+    }
+    let mut single_instance_groups: std::collections::HashMap<String, SingleInstanceGroup> = std::collections::HashMap::new();
+
     let mut _generated_constraints_fn: std::collections::HashSet<String> = std::collections::HashSet::new();
 
     // Collect all types reachable from this root (for multi-root support)
     let reachable = {
         let mut set = std::collections::HashSet::new();
         let mut queue = Vec::new();
-        // Seed with types directly in root fields
+        // Seed with the root itself — lets RootSelf constraints and direct-composed
+        // sub-models resolve through the BFS (root's layout Struct fields expand).
+        queue.push(root_name.to_string());
+        // Seed with types directly in root fields (inner of Vec<T>, Deque<T>, etc.)
         let root_fields_parsed: syn::FieldsNamed = syn::parse2(quote! { { #root_fields } })?;
         for field in &root_fields_parsed.named {
             if let syn::Type::Path(tp) = &field.ty
                 && let Some(seg) = tp.path.segments.last() {
-                    // Extract inner type from Vec<T>, Deque<T>, etc.
                     if let syn::PathArguments::AngleBracketed(args) = &seg.arguments
                         && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
                             && let Ok(name) = type_ident_name(inner) {
@@ -1069,12 +1092,34 @@ pub fn generate_root_methods(
             parent_name.clone()
         };
 
-        // Find root collection containing the constrained type
+        // Resolve where the constrained entity lives on the root — a Vec/Deque/Arena
+        // collection, a plain struct-typed field (direct composition), or the root
+        // itself. Non-SelfBlock constraints still require a Collection (see below).
         let coll_type = if is_triplet || is_self_block { &sc.struct_name } else { &a_type };
-        let root_collection = find_root_collection(root_fields, coll_type);
-        if root_collection.is_none() { continue; }
-        let (coll_ident_str, _) = root_collection.unwrap();
-        let coll_ident = syn::Ident::new(&coll_ident_str, proc_macro2::Span::call_site());
+        let entity_location = match resolve_entity_location(root_fields, &root_name.to_string(), coll_type) {
+            Some(loc) => loc,
+            None => continue,
+        };
+        if !is_self_block && !matches!(entity_location, EntityLocation::Collection { .. }) {
+            // TripletBlock / CrossBlock constraints without a root collection for
+            // their A-type / constraint struct fall through — direct-composed
+            // sub-models with cross-block constraints are not yet supported.
+            continue;
+        }
+        // `coll_ident(_str)` is only consumed by the Collection SelfBlock path and the
+        // nested CrossBlock path (both of which require a Collection). For DirectField
+        // / RootSelf we divert below and these placeholders are never read.
+        let (coll_ident_str, coll_ident) = match &entity_location {
+            EntityLocation::Collection { field, .. } => {
+                (field.clone(), syn::Ident::new(field, proc_macro2::Span::call_site()))
+            }
+            EntityLocation::DirectField { field } => {
+                (String::new(), syn::Ident::new(field, proc_macro2::Span::call_site()))
+            }
+            EntityLocation::RootSelf => {
+                (String::new(), root_name.clone())
+            }
+        };
 
         // CrossBlock/remote: find frines field and build ref resolution
         let mut frines_ident = None;
@@ -1516,9 +1561,7 @@ pub fn generate_root_methods(
                 }
             });
         } else if is_self_block {
-            // SelfBlock: group by collection for merged loop generation
             let self_var = syn::Ident::new(&self_var_name, proc_macro2::Span::call_site());
-            let group_key = coll_ident_str.clone();
 
             let cost_entry = if let Some(ref guard) = guard_expr {
                 quote! { if #guard { #(#cost_stmts)* } }
@@ -1541,28 +1584,76 @@ pub fn generate_root_methods(
                 Some(entry)
             } else { None };
 
-            let group = collection_groups.entry(group_key).or_insert_with(|| CollectionGroup {
-                coll_ident: coll_ident.clone(),
-                self_var: self_var.clone(),
-                a_type_ident: a_type_ident.clone(),
-                self_block: None,
-                cost_entries: Vec::new(),
-                gh_entries: Vec::new(),
-                jac_entries: Vec::new(),
-                nested_cost_loops: Vec::new(),
-                nested_gh_loops: Vec::new(),
-                nested_jac_loops: Vec::new(),
-            });
-            if group.self_block.is_none() {
-                group.self_block = Some(SelfBlockInfo {
-                    a_param_count,
-                    a_idx_stmts: a_idx_stmts.clone(),
-                    block_ident: block_ident.clone(),
-                });
+            match &entity_location {
+                EntityLocation::Collection { .. } => {
+                    // SelfBlock on a Vec/Deque/Arena: group by collection name for merged-loop emission.
+                    let group_key = coll_ident_str.clone();
+                    let group = collection_groups.entry(group_key).or_insert_with(|| CollectionGroup {
+                        coll_ident: coll_ident.clone(),
+                        self_var: self_var.clone(),
+                        a_type_ident: a_type_ident.clone(),
+                        self_block: None,
+                        cost_entries: Vec::new(),
+                        gh_entries: Vec::new(),
+                        jac_entries: Vec::new(),
+                        nested_cost_loops: Vec::new(),
+                        nested_gh_loops: Vec::new(),
+                        nested_jac_loops: Vec::new(),
+                    });
+                    if group.self_block.is_none() {
+                        group.self_block = Some(SelfBlockInfo {
+                            a_param_count,
+                            a_idx_stmts: a_idx_stmts.clone(),
+                            block_ident: block_ident.clone(),
+                        });
+                    }
+                    group.cost_entries.push(cost_entry);
+                    group.gh_entries.push(gh_entry);
+                    if let Some(je) = jac_entry { group.jac_entries.push(je); }
+                }
+                EntityLocation::RootSelf | EntityLocation::DirectField { .. } => {
+                    // SelfBlock on the root itself or on a direct-composed sub-model:
+                    // emit a single evaluation (no loop). Group by access path so
+                    // multiple constraints on the same entity merge into one block.
+                    let (group_key, accessor_read, accessor_write) = match &entity_location {
+                        EntityLocation::RootSelf => (
+                            "self".to_string(),
+                            quote! { &*__self_ref },
+                            quote! { &mut *self },
+                        ),
+                        EntityLocation::DirectField { field } => {
+                            let fi = syn::Ident::new(field, proc_macro2::Span::call_site());
+                            (
+                                format!("self.{}", field),
+                                quote! { &self.#fi },
+                                quote! { &mut self.#fi },
+                            )
+                        }
+                        _ => unreachable!(),
+                    };
+                    let ci_field = registry_lookup(&sc.struct_name)
+                        .and_then(|l| l.constraint_index_field.as_ref().map(|f| {
+                            syn::Ident::new(f, proc_macro2::Span::call_site())
+                        }));
+                    let group = single_instance_groups.entry(group_key).or_insert_with(|| SingleInstanceGroup {
+                        accessor_read,
+                        accessor_write,
+                        self_var: self_var.clone(),
+                        root_var_ident: root_var_ident.clone(),
+                        a_type_ident: a_type_ident.clone(),
+                        a_param_count,
+                        a_idx_stmts: a_idx_stmts.clone(),
+                        block_ident: block_ident.clone(),
+                        constraint_index_field: ci_field,
+                        cost_entries: Vec::new(),
+                        gh_entries: Vec::new(),
+                        jac_entries: Vec::new(),
+                    });
+                    group.cost_entries.push(cost_entry);
+                    group.gh_entries.push(gh_entry);
+                    if let Some(je) = jac_entry { group.jac_entries.push(je); }
+                }
             }
-            group.cost_entries.push(cost_entry);
-            group.gh_entries.push(gh_entry);
-            if let Some(je) = jac_entry { group.jac_entries.push(je); }
         } else if is_triplet {
             // TripletBlock: N-ary constraint, flat iteration on root collection.
             // Multiple attributes on the same struct are merged into one loop per collection.
@@ -1831,6 +1922,78 @@ pub fn generate_root_methods(
                 }
             });
         }
+    }
+
+    // Emit single-instance entity groups (RootSelf + DirectField). No loops —
+    // each block evaluates its constraint(s) exactly once, with __item bound to
+    // the entity (or a reborrow of self for RootSelf). Still advances __cid /
+    // __jac_cid by one per constraint, matching the count=1 case of the
+    // collection path. Emitted after the collection groups so entity IDs
+    // remain deterministic, and before cross/triplet loops so self-entities
+    // continue to get lower IDs than cross constraints.
+    for group in single_instance_groups.values() {
+        let accessor_read = &group.accessor_read;
+        let accessor_write = &group.accessor_write;
+        let self_var = &group.self_var;
+        let root_var = &group.root_var_ident;
+        let a_type = &group.a_type_ident;
+        let a_count = group.a_param_count;
+        let a_idx_stmts = &group.a_idx_stmts;
+        let block_ident = &group.block_ident;
+        let cost_entries = &group.cost_entries;
+        let gh_entries = &group.gh_entries;
+        let jac_entries = &group.jac_entries;
+        let ci_set = group.constraint_index_field.as_ref().map(|fi| {
+            quote! { __item.#fi = __cid; }
+        });
+
+        merged_cost.push(quote! {
+            {
+                let __item = #accessor_read;
+                let #self_var = __item;
+                let #root_var = &*__self_ref;
+                #(#cost_entries)*
+            }
+        });
+
+        merged_gh.push(quote! {
+            {
+                let __item = #accessor_write;
+                let #self_var = unsafe { &*(__item as *const #a_type) };
+                let #root_var = &*__self_ref;
+                #(#gh_entries)*
+            }
+        });
+
+        if !jac_entries.is_empty() {
+            merged_jac.push(quote! {
+                {
+                    let __item = #accessor_read;
+                    let #self_var = __item;
+                    let #root_var = &*__self_ref;
+                    let __jac_idx: std::vec::Vec<u32> = {
+                        let mut __a_idx = [0u32; #a_count];
+                        #(#a_idx_stmts)*
+                        __a_idx.to_vec()
+                    };
+                    let __jac_a_idx = __jac_idx.clone();
+                    let _ = &__jac_a_idx;
+                    #(#jac_entries)*
+                    __jac_cid += 1;
+                }
+            });
+        }
+
+        merged_sbi.push(quote! {
+            {
+                let __item = #accessor_write;
+                let mut __a_idx = [0u32; #a_count];
+                #(#a_idx_stmts)*
+                __item.#block_ident.set_indices(&__a_idx);
+                #ci_set
+                __cid += 1;
+            }
+        });
     }
 
     // Emit merged cross-constraint loops (one per collection, all attributes inside)
@@ -2371,6 +2534,41 @@ fn find_root_collection(
                                     return Some((field_name, container));
                                 }
             }
+    }
+    None
+}
+
+/// Where on the root struct an entity of a given type lives.
+#[derive(Clone)]
+enum EntityLocation {
+    /// Vec<T> / Deque<T> / Arena<T> field on root. Multi-instance, iterated.
+    Collection { field: String },
+    /// Plain struct-typed field on root (e.g. `sub: Sub`). Single instance.
+    DirectField { field: String },
+    /// The constraint's entity type is the root struct itself. Single instance, accessor is `self`.
+    RootSelf,
+}
+
+fn resolve_entity_location(
+    root_fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
+    root_name: &str,
+    type_name: &str,
+) -> Option<EntityLocation> {
+    if type_name == root_name {
+        return Some(EntityLocation::RootSelf);
+    }
+    if let Some((field, _container)) = find_root_collection(root_fields, type_name) {
+        return Some(EntityLocation::Collection { field });
+    }
+    // Look for a plain struct-typed field whose type name matches.
+    for field in root_fields {
+        let field_name = field.ident.as_ref()?.to_string();
+        if let syn::Type::Path(tp) = &field.ty
+            && let Some(seg) = tp.path.segments.last()
+                && matches!(seg.arguments, syn::PathArguments::None)
+                && seg.ident == type_name {
+                    return Some(EntityLocation::DirectField { field: field_name });
+                }
     }
     None
 }
