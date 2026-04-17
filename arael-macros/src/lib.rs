@@ -67,6 +67,11 @@ struct SymLayout {
 }
 
 /// Stashed constraint: struct name + raw attribute tokens, waiting for root to generate code.
+/// Spans are intentionally not stashed: `proc_macro2::Span` is backed by an
+/// Rc into the proc-macro bridge's handle table that is invalidated once the
+/// originating macro invocation returns (tried; rustc panics). Errors about
+/// stashed constraints therefore surface at the root's `#[arael::model]`
+/// site and must name the offending struct in the message.
 #[derive(Clone)]
 struct StashedConstraint {
     struct_name: String,
@@ -932,7 +937,7 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
         None => quote! {},
     };
 
-    // Check for #[arael(constraint(...))] — stash ALL constraints for later generation
+    // Check for #[arael(constraint(...))] — stash ALL constraints for later generation.
     {
         let fields_ts = quote! { #fields };
         for attr in &input.attrs {

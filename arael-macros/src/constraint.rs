@@ -2509,6 +2509,40 @@ fn interpret_constraint_body(
         }
     }
 
+    // Every `.work()` symbol reached by the residuals must be in
+    // `param_symbols` — otherwise the generated `add_residual` call will
+    // emit a gradient vector of the wrong arity or, worse, silently drop
+    // the derivative w.r.t. that parameter. Both yield an optimizer that
+    // compiles but fails to move the offending parameter. Error loudly
+    // instead. Common trigger: referencing a Param on the root struct from
+    // a non-root constraint (root-level parameters need their own block
+    // machinery; not supported yet).
+    {
+        let param_set: std::collections::HashSet<&str> =
+            param_symbols.iter().map(|s| s.as_str()).collect();
+        let mut missing: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for r in &residuals {
+            for v in r.free_vars() {
+                if v.contains(".work()") && !param_set.contains(v.as_str()) {
+                    missing.insert(v);
+                }
+            }
+        }
+        if !missing.is_empty() {
+            let list: Vec<String> = missing.into_iter().collect();
+            // Span points at the root's `#[arael::model]` (constraints are
+            // collected & checked at root expansion); message names the
+            // actual offending struct so the user knows where to look.
+            let msg = format!(
+                "constraint on `struct {0}` references param(s) outside its hessian block: [{1}] \
+                 (SelfBlock<A> covers A; CrossBlock<A, B> covers A and B; root-level params have no block slot yet)",
+                struct_name,
+                list.join(", ")
+            );
+            return Err(syn::Error::new_spanned(struct_name, msg));
+        }
+    }
+
     Ok((residuals, param_symbols))
 }
 
