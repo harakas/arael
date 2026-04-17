@@ -12,6 +12,7 @@ struct DataEntry {
 
 // Linear model y = a*x + b with two optimizable parameters
 #[arael::model]
+#[arael(skip_self_block)]
 struct LinearModel {
     a: Param<f32>,
     b: Param<f32>,
@@ -97,6 +98,7 @@ fn main() {
     info!("");
 
     #[arael::model]
+    #[arael(skip_self_block)]
     struct Pose {
         pos: Param<vect3f>,
         ea: Param<vect3f>,

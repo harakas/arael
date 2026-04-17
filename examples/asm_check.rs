@@ -7,6 +7,7 @@ struct DataEntry {
 }
 
 #[arael::model]
+#[arael(skip_self_block)]
 pub struct LinearModel {
     a: Param<f32>,
     b: Param<f32>,

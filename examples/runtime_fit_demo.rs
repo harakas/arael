@@ -27,9 +27,12 @@ use arael_sym::E;
 // Model
 // ---------------------------------------------------------------------------
 
-/// One optimizable coefficient.
+/// One optimizable coefficient. Params are written by RegressionModel's
+/// ExtendedModel::extended_compute64 directly into the global grad/hessian
+/// via a TripletBlock, so Coefficient itself has no grad+diag to store.
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
+#[arael(skip_self_block)]
 struct Coefficient {
     value: Param<f64>,
 }

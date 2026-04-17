@@ -418,6 +418,31 @@ fn model_attribute(input: &mut syn::DeriveInput) -> syn::Result<TokenStream2> {
             sym_fields.push((field_name, sft));
         }
     }
+    // Every params-having Model must declare exactly one `SelfBlock<Self>`
+    // field. It is the canonical home for this entity's gradient +
+    // within-entity Hessian diagonal — both macro-emitted constraints and
+    // cross/triplet constraints writing to one of this type's params route
+    // through it. A params-having struct with no SelfBlock would silently
+    // drop those contributions.
+    //
+    // Exemptions:
+    // - `#[arael(fit(...))]` structs generate their own LmProblem impl and
+    //   do not route through Model blocks at all.
+    // - `#[arael(skip_self_block)]` is an explicit opt-out for bag-of-params
+    //   structs whose params are only written by ExtendedModel or a parent
+    //   via direct path (no self-constraints, no cross/triplet usage).
+    let has_fit = parse_fit_attr(&input.attrs)?.is_some();
+    let has_skip_self_block = has_struct_attr_ident(&input.attrs, "skip_self_block");
+    if param_count > 0 && self_block_field_reg.is_none() && !has_fit && !has_skip_self_block {
+        return Err(syn::Error::new_spanned(name,
+            format!("`{}` has {} parameter{} but no `SelfBlock<Self>` field — \
+                     add e.g. `hb: arael::model::SelfBlock<Self>` so its grad \
+                     and Hessian diagonal have a home, or annotate the struct \
+                     with `#[arael(skip_self_block)]` if its params are \
+                     written exclusively by a parent's ExtendedModel",
+                    name, param_count, if param_count == 1 { "" } else { "s" })));
+    }
+
     // Build symbolic substitutions for euler_angles fields
     let mut substitutions_reg: Vec<(String, String)> = Vec::new();
     for ea_field in &euler_angle_fields_reg {
@@ -609,6 +634,23 @@ fn param_type_size(ty: &syn::Type) -> u32 {
             }
         }
     0
+}
+
+/// True iff any `#[arael(...)]` struct-level attribute carries the given
+/// bare identifier (e.g. `#[arael(skip_self_block)]`, `#[arael(root,
+/// extended)]`). Accepts the ident anywhere in the top-level token list.
+fn has_struct_attr_ident(attrs: &[syn::Attribute], ident: &str) -> bool {
+    for attr in attrs {
+        if !attr.path().is_ident("arael") { continue; }
+        let Ok(content) = attr.parse_args::<TokenStream2>() else { continue; };
+        for tok in content {
+            if let proc_macro2::TokenTree::Ident(id) = tok
+                && id == ident {
+                    return true;
+                }
+        }
+    }
+    false
 }
 
 /// Return the ParamType::SIZE for known types.
