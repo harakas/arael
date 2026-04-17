@@ -567,6 +567,15 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
             iter += 1;
 
             if !solver.solve_damped(n, &mut matrix, &diagonal, lambda, &grad, &mut delta) {
+                if config.verbose {
+                    let step_us = timer.elapsed().as_micros();
+                    timer = Instant::now();
+                    eprintln!("{}/{}: Cholesky failed (damped matrix not positive-definite), lambda={} -> {} (step={})",
+                        iter, inner,
+                        G(lambda.to_f64().unwrap()),
+                        G((lambda * lambda_up).to_f64().unwrap()),
+                        step_us);
+                }
                 lambda *= lambda_up;
                 inner += 1;
                 continue;
@@ -647,6 +656,12 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
             inner += 1;
         }
         if inner >= INNER_LOOPS && !done {
+            if config.verbose {
+                eprintln!("LM terminated: {} consecutive inner steps without improvement (lambda={}, cost={})",
+                    INNER_LOOPS,
+                    G(lambda.to_f64().unwrap()),
+                    G(end_cost.to_f64().unwrap()));
+            }
             break;
         }
     }
