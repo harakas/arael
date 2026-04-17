@@ -1220,6 +1220,62 @@ pub fn generate_root_methods(
         let n_params = param_symbols.len();
         let n_residuals = residual_exprs.len();
 
+        // A- and B-entity param counts (scalar width). Hoisted up here so
+        // both the gh_stmts cross-emission and the index-building code can
+        // use them. `param_symbols` is ordered A-first then B for cross
+        // blocks; the first a_param_count derivatives correspond to A's
+        // params, the next b_param_count to B's.
+        let a_param_count = registry_lookup(&a_type).map(|l| l.param_fields.iter().map(|pf| {
+            l.fields.iter().find(|(n, _)| n == pf).map(|(_, sft)| match sft {
+                SymFieldType::Scalar => 1usize, SymFieldType::Vec2 => 2, SymFieldType::Vec3 => 3, _ => 0,
+            }).unwrap_or(0)
+        }).sum::<usize>()).unwrap_or(0);
+        let b_param_count = b_type.as_ref().and_then(|b| registry_lookup(b)).map(|l| l.param_fields.iter().map(|pf| {
+            l.fields.iter().find(|(n, _)| n == pf).map(|(_, sft)| match sft {
+                SymFieldType::Scalar => 1usize, SymFieldType::Vec2 => 2, SymFieldType::Vec3 => 3, _ => 0,
+            }).unwrap_or(0)
+        }).sum::<usize>()).unwrap_or(0);
+
+        // Resolve the A- and B-var idents for CrossBlock's 3-call emission.
+        let a_var_ident_for_block: Option<syn::Ident> = if is_self_block {
+            Some(syn::Ident::new("__item", proc_macro2::Span::call_site()))
+        } else if is_root_level_cross {
+            let struct_layout = registry_lookup(&sc.struct_name);
+            let a_ref_field = struct_layout.as_ref().and_then(|l| {
+                l.ref_paths.iter().find(|(field_name, _)| {
+                    fields.named.iter().any(|f| {
+                        f.ident.as_ref().map(|i| i.to_string()) == Some(field_name.clone())
+                            && extract_wrapper_inner(&f.ty, "Ref")
+                                .map(|(_, id)| *id == a_type)
+                                .unwrap_or(false)
+                    })
+                }).map(|(name, _)| name.clone())
+            }).unwrap_or_else(|| a_type.to_lowercase());
+            Some(syn::Ident::new(&a_ref_field, proc_macro2::Span::call_site()))
+        } else {
+            Some(syn::Ident::new("__item", proc_macro2::Span::call_site()))
+        };
+        let b_var_ident_for_block: Option<syn::Ident> = if let Some(ref b_type_name) = b_type {
+            let struct_layout_b = registry_lookup(&sc.struct_name);
+            let ref_paths_b = struct_layout_b.as_ref().map(|l| l.ref_paths.clone()).unwrap_or_default();
+            let mut skip_first_match = is_root_level_cross && a_type == *b_type_name;
+            ref_paths_b.iter().find(|(field_name, _)| {
+                let matches = fields.named.iter().any(|f| {
+                    f.ident.as_ref().map(|i| i.to_string()) == Some(field_name.clone())
+                        && extract_wrapper_inner(&f.ty, "Ref")
+                            .map(|(_, id)| id.to_string() == *b_type_name)
+                            .unwrap_or(false)
+                });
+                if matches && skip_first_match {
+                    skip_first_match = false;
+                    return false;
+                }
+                matches
+            }).map(|(name, _)| syn::Ident::new(name, proc_macro2::Span::call_site()))
+        } else {
+            None
+        };
+
         // --- Cost-only code: differentiate FIRST, then apply substitutions, then CSE ---
         // Apply substitutions to residuals (cost-only, no derivatives)
         let mut cost_exprs = residual_exprs.clone();
@@ -1254,6 +1310,58 @@ pub fn generate_root_methods(
         let (gh_intermediates, gh_simplified) = arael_sym::cse(&all_gh_exprs);
 
         let mut gh_stmts = Vec::new();
+
+        // Cross-block prelude: cache mutable refs to A's and B's SelfBlocks
+        // via unsafe raw-pointer cast. One-time, reused across all residuals.
+        // Mirrors the remote-block pattern (`__target_block`) which coexists
+        // fine with the body's immutable reads. The per-call unsafe{} form
+        // tripped borrow-checker in multi-residual bodies.
+        let is_cross_block = !is_self_block && !is_triplet && !is_remote_block;
+        if is_cross_block {
+            let b_type_name = b_type.as_ref().expect("cross block requires B");
+            let b_type_ident = syn::Ident::new(b_type_name, proc_macro2::Span::call_site());
+            let a_hb = registry_lookup(&a_type)
+                .and_then(|l| l.self_block_field.clone())
+                .ok_or_else(|| syn::Error::new_spanned(&struct_ident,
+                    format!("type `{}` must declare a `SelfBlock<Self>` field (cross-block participants need a self-block)", a_type)))?;
+            let b_hb = registry_lookup(b_type_name)
+                .and_then(|l| l.self_block_field.clone())
+                .ok_or_else(|| syn::Error::new_spanned(&struct_ident,
+                    format!("type `{}` must declare a `SelfBlock<Self>` field (cross-block participants need a self-block)", b_type_name)))?;
+            let a_hb_ident = syn::Ident::new(&a_hb, proc_macro2::Span::call_site());
+            let b_hb_ident = syn::Ident::new(&b_hb, proc_macro2::Span::call_site());
+            let a_var_id = a_var_ident_for_block.as_ref()
+                .ok_or_else(|| syn::Error::new_spanned(&struct_ident,
+                    "cross-block constraint missing A-var binding"))?;
+            let b_var_id = b_var_ident_for_block.as_ref()
+                .ok_or_else(|| syn::Error::new_spanned(&struct_ident,
+                    "cross-block constraint missing B-var binding"))?;
+            // `&raw mut` → *mut, bypassing borrow checker's &mut tracking.
+            // For nested cross (a_var = __item, already &mut Parent) taking the
+            // whole __item via raw pointer conflicts with `__item.frines.iter_mut()`
+            // in the surrounding loop. The narrow-field form is accepted
+            // because hb_drift/hb_pose are disjoint from frines.
+            // For root-level cross where a_var is bound immutably (e.g. `prev =
+            // &self.poses[...]`), we must cast through *const→*mut to re-
+            // acquire mutability; the macro chose this binding.
+            let a_raw_expr: TokenStream2 = if is_root_level_cross {
+                quote! { &raw mut (*(#a_var_id as *const #a_type_ident as *mut #a_type_ident)).#a_hb_ident }
+            } else {
+                // nested cross: a_var is already &mut (outer __item)
+                quote! { &raw mut #a_var_id.#a_hb_ident }
+            };
+            let b_raw_expr: TokenStream2 = if is_root_level_cross {
+                quote! { &raw mut (*(#b_var_id as *const #b_type_ident as *mut #b_type_ident)).#b_hb_ident }
+            } else {
+                // For nested cross B is the ref-resolved &mut Pose via resolve_stmts
+                quote! { &raw mut (*(#b_var_id as *const #b_type_ident as *mut #b_type_ident)).#b_hb_ident }
+            };
+            gh_stmts.push(quote! {
+                let __a_self_block_ptr: *mut _ = unsafe { #a_raw_expr };
+                let __b_self_block_ptr: *mut _ = unsafe { #b_raw_expr };
+            });
+        }
+
         for (name, expr) in &gh_intermediates {
             let name_ident = syn::Ident::new(name, proc_macro2::Span::call_site());
             let code: Expr = parse_sym_code(&expr.to_rust(""))?;
@@ -1284,14 +1392,22 @@ pub fn generate_root_methods(
                 gh_stmts.push(quote! {
                     __target_block.add_residual(#r_ident as #cast_type, &[#(#dr_f64),*]);
                 });
-            } else {
-                let block_owner = if is_self_block {
-                    syn::Ident::new("__item", proc_macro2::Span::call_site())
-                } else {
-                    syn::Ident::new("__frine", proc_macro2::Span::call_site())
-                };
+            } else if is_self_block {
                 gh_stmts.push(quote! {
-                    #block_owner.#block_ident.add_residual(#r_ident as #cast_type, &[#(#dr_f64),*]);
+                    __item.#block_ident.add_residual(#r_ident as #cast_type, &[#(#dr_f64),*]);
+                });
+            } else {
+                // CrossBlock: split dr into dr_a (first a_param_count) + dr_b
+                // (next b_param_count). Three calls: A's SelfBlock gets
+                // grad[A] + H[A,A] diagonal; B's SelfBlock same for B; the
+                // cross block holds only the A-B rectangular cross Hessian.
+                // __a_self_block / __b_self_block cached at top of gh_stmts.
+                let dr_a: Vec<TokenStream2> = dr_f64.iter().take(a_param_count).cloned().collect();
+                let dr_b: Vec<TokenStream2> = dr_f64.iter().skip(a_param_count).take(b_param_count).cloned().collect();
+                gh_stmts.push(quote! {
+                    unsafe { (*__a_self_block_ptr).add_residual(#r_ident as #cast_type, &[#(#dr_a),*]); }
+                    unsafe { (*__b_self_block_ptr).add_residual(#r_ident as #cast_type, &[#(#dr_b),*]); }
+                    __frine.#block_ident.add_residual_cross(#r_ident as #cast_type, &[#(#dr_a),*], &[#(#dr_b),*]);
                 });
             }
         }

@@ -64,6 +64,12 @@ struct SymLayout {
     substitutions: Vec<(String, String)>, // (from_sym_str, to_sym_str)
     /// Field name of `#[arael(constraint_index)]` u32 field, if present.
     constraint_index_field: Option<String>,
+    /// Field name of the struct's `SelfBlock<Self>` — detected automatically
+    /// during `#[arael::model]` expansion. Required for every params-having
+    /// Model after the CrossBlock/TripletBlock refactor: the self-block is
+    /// the single home for that entity's gradient + A-A Hessian diagonal,
+    /// so cross constraints need to know the field name to write to it.
+    self_block_field: Option<String>,
 }
 
 /// Stashed constraint: struct name + raw attribute tokens + source-location
@@ -347,6 +353,18 @@ fn model_attribute(input: &mut syn::DeriveInput) -> syn::Result<TokenStream2> {
     let mut euler_angle_fields_reg: Vec<String> = Vec::new();
     let mut universal_euler_angle_fields_reg: Vec<String> = Vec::new();
     let mut constraint_index_field_reg: Option<String> = None;
+    // Detect SelfBlock<Self> field — this struct's canonical grad+diag home.
+    let mut self_block_field_reg: Option<String> = None;
+    for field in fields {
+        let field_name = field.ident.as_ref().unwrap().to_string();
+        if is_self_block_for(&field.ty, &name.to_string()) {
+            if self_block_field_reg.is_some() {
+                return Err(syn::Error::new_spanned(field,
+                    format!("`{}` already has a SelfBlock<Self> field; at most one is allowed", name)));
+            }
+            self_block_field_reg = Some(field_name);
+        }
+    }
     for field in fields {
         let field_name = field.ident.as_ref().unwrap().to_string();
         // Check for #[arael(ref = ...)] or #[arael(constraint_index)] on this field
@@ -437,6 +455,7 @@ fn model_attribute(input: &mut syn::DeriveInput) -> syn::Result<TokenStream2> {
         universal_euler_angle_fields: universal_euler_angle_fields_reg.clone(),
         substitutions: substitutions_reg,
         constraint_index_field: constraint_index_field_reg,
+        self_block_field: self_block_field_reg,
     });
 
     // No field injection needed — SimpleEulerAngleParam/EulerAngleParam contain their own state.
@@ -503,6 +522,7 @@ fn emit_trivial_model_for_enum(input: &mut syn::DeriveInput) -> TokenStream2 {
         universal_euler_angle_fields: Vec::new(),
         substitutions: Vec::new(),
         constraint_index_field: None,
+        self_block_field: None,
     });
 
     // Strip any #[arael(...)] attributes from the emitted item.
@@ -605,10 +625,34 @@ fn inner_type_size(ty: &syn::Type) -> u32 {
     0
 }
 
+/// Detect whether `ty` is `SelfBlock<SelfName, ...>` (possibly wrapped in
+/// Option<>) — used by `#[arael::model]` to find the struct's canonical
+/// self-block field for grad + A-A Hessian accumulation.
+fn is_self_block_for(ty: &syn::Type, self_name: &str) -> bool {
+    if let syn::Type::Path(tp) = ty
+        && let Some(seg) = tp.path.segments.last() {
+            if seg.ident == "Option" {
+                if let syn::PathArguments::AngleBracketed(args) = &seg.arguments
+                    && let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
+                        return is_self_block_for(inner_ty, self_name);
+                    }
+                return false;
+            }
+            if seg.ident == "SelfBlock"
+                && let syn::PathArguments::AngleBracketed(args) = &seg.arguments
+                && let Some(syn::GenericArgument::Type(syn::Type::Path(inner_tp))) = args.args.first()
+                && let Some(inner_seg) = inner_tp.path.segments.last()
+            {
+                return inner_seg.ident == self_name;
+            }
+        }
+    false
+}
+
 /// Rewrite SelfBlock<A> to SelfBlock<A, {A_PARAM_COUNT}> and
 /// SelfBlock<A, f32> to SelfBlock<A, {A_PARAM_COUNT}, f32> and
-/// CrossBlock<A, B> to CrossBlock<A, B, {A_PARAM_COUNT + B_PARAM_COUNT}> and
-/// CrossBlock<A, B, f32> to CrossBlock<A, B, {A_PARAM_COUNT + B_PARAM_COUNT}, f32>.
+/// CrossBlock<A, B> to CrossBlock<A, B, {A_PARAM_COUNT}, {B_PARAM_COUNT}> and
+/// CrossBlock<A, B, f32> to CrossBlock<A, B, {A_PARAM_COUNT}, {B_PARAM_COUNT}, f32>.
 fn rewrite_block_type(ty: &mut syn::Type) {
     if let syn::Type::Path(tp) = ty
         && let Some(seg) = tp.path.segments.last_mut() {
@@ -664,16 +708,16 @@ fn rewrite_block_type(ty: &mut syn::Type) {
                                 let a_ty = type_args[0];
                                 let b_ty = type_args[1];
                                 if type_args.len() == 3 {
-                                    // CrossBlock<A, B, f32> -> CrossBlock<A, B, {N}, f32>
+                                    // CrossBlock<A, B, f32> -> CrossBlock<A, B, {NA}, {NB}, f32>
                                     let float_ty = type_args[2];
                                     let new_ty: syn::Type = syn::parse_quote! {
-                                        CrossBlock<#a_ty, #b_ty, { #a_const + #b_const }, #float_ty>
+                                        CrossBlock<#a_ty, #b_ty, { #a_const }, { #b_const }, #float_ty>
                                     };
                                     *ty = new_ty;
                                 } else {
-                                    // CrossBlock<A, B> -> CrossBlock<A, B, {N}>
+                                    // CrossBlock<A, B> -> CrossBlock<A, B, {NA}, {NB}>
                                     let new_ty: syn::Type = syn::parse_quote! {
-                                        CrossBlock<#a_ty, #b_ty, { #a_const + #b_const }>
+                                        CrossBlock<#a_ty, #b_ty, { #a_const }, { #b_const }>
                                     };
                                     *ty = new_ty;
                                 }

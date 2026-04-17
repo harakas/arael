@@ -1143,113 +1143,118 @@ impl<A: Model, const N: usize, T: crate::utils::Float> SelfBlock<A, N, T> {
     }
 }
 
-/// Hessian block coupling two model types.
+/// Hessian block coupling two model types — stores ONLY the rectangular A×B
+/// cross Hessian pairs. A's gradient and A-A diagonal live in A's own
+/// [`SelfBlock`]; same for B. This matches the refactor where every
+/// params-having Model owns a SelfBlock<Self>, and cross blocks carry only
+/// the pieces that don't fit in a per-entity block.
 ///
-/// Accumulates gradient and the upper triangle of the Gauss-Newton Hessian
-/// from constraint residuals that reference parameters from two different
-/// models A and B. `N = A::PARAM_COUNT + B::PARAM_COUNT`. The first `na`
-/// indices in the block belong to A, the rest to B.
+/// `NA = A::PARAM_COUNT`, `NB = B::PARAM_COUNT`. Internal Hessian storage
+/// is NA×NB row-major (one entry per cross pair). No grad, no A-A, no B-B.
 /// `T` is the float type (f32 or f64, default f64).
-pub struct CrossBlock<A: Model, B: Model, const N: usize, T: crate::utils::Float = f64> {
-    indices: [u32; N],
-    na: usize,
-    grad: [T; N],
-    hessian: std::vec::Vec<T>,
+pub struct CrossBlock<A: Model, B: Model, const NA: usize, const NB: usize, T: crate::utils::Float = f64> {
+    indices_a: [u32; NA],
+    indices_b: [u32; NB],
+    cross_hessian: std::vec::Vec<T>,    // NA*NB row-major
     _marker: std::marker::PhantomData<(A, B, T)>,
 }
 
-impl<A: Model, B: Model, const N: usize, T: crate::utils::Float> Default for CrossBlock<A, B, N, T> {
+impl<A: Model, B: Model, const NA: usize, const NB: usize, T: crate::utils::Float> Default for CrossBlock<A, B, NA, NB, T> {
     fn default() -> Self { Self::new() }
 }
 
-impl<A: Model, B: Model, const N: usize, T: crate::utils::Float> CrossBlock<A, B, N, T> {
+impl<A: Model, B: Model, const NA: usize, const NB: usize, T: crate::utils::Float> CrossBlock<A, B, NA, NB, T> {
     /// Create a new zeroed cross-block.
     pub fn new() -> Self {
-        let na = A::PARAM_COUNT as usize;
         CrossBlock {
-            indices: [u32::MAX; N],
-            na,
-            grad: std::array::from_fn(|_| T::zero()),
-            hessian: vec![T::zero(); N * (N + 1) / 2],
+            indices_a: [u32::MAX; NA],
+            indices_b: [u32::MAX; NB],
+            cross_hessian: vec![T::zero(); NA * NB],
             _marker: std::marker::PhantomData,
         }
     }
 
     /// Return the number of parameters belonging to model A.
-    pub fn na(&self) -> usize { self.na }
+    pub fn na(&self) -> usize { NA }
     /// Return the number of parameters belonging to model B.
-    pub fn nb(&self) -> usize { N - self.na }
+    pub fn nb(&self) -> usize { NB }
 
-    /// Set the global parameter indices: A's indices first, then B's.
+    /// Set the global parameter indices.
     pub fn set_indices(&mut self, a_indices: &[u32], b_indices: &[u32]) {
-        debug_assert_eq!(a_indices.len(), self.na);
-        debug_assert_eq!(b_indices.len(), self.nb());
-        self.indices[..self.na].copy_from_slice(a_indices);
-        self.indices[self.na..].copy_from_slice(b_indices);
+        debug_assert_eq!(a_indices.len(), NA);
+        debug_assert_eq!(b_indices.len(), NB);
+        self.indices_a.copy_from_slice(a_indices);
+        self.indices_b.copy_from_slice(b_indices);
     }
 
-    /// Reset gradient and hessian to zero.
+    /// Reset cross hessian to zero.
     pub fn zero(&mut self) {
-        self.grad = std::array::from_fn(|_| T::zero());
-        self.hessian.fill(T::zero());
+        self.cross_hessian.fill(T::zero());
     }
 
     /// Return true if any parameter in this block is being optimized.
     pub fn is_active(&self) -> bool {
-        self.indices.iter().any(|&i| i != u32::MAX)
+        self.indices_a.iter().any(|&i| i != u32::MAX)
+            || self.indices_b.iter().any(|&i| i != u32::MAX)
     }
 
-    /// Add one residual's contribution: accumulates 2*r*dr into gradient and 2*dr*dr^T into hessian.
-    pub fn add_residual(&mut self, r: T, dr: &[T; N]) {
+    /// Add one residual's cross contribution: accumulates `2 * dr_a[i] * dr_b[j]`
+    /// into the A×B rectangular Hessian. Gradient and A-A / B-B pairs must be
+    /// added separately to A's and B's SelfBlocks.
+    pub fn add_residual_cross(&mut self, _r: T, dr_a: &[T; NA], dr_b: &[T; NB]) {
         let two = T::two();
-        for i in 0..N {
-            self.grad[i] += two * r * dr[i];
-            for j in i..N {
-                self.hessian[tri_idx(N, i, j)] += two * dr[i] * dr[j];
+        for i in 0..NA {
+            let dai = dr_a[i];
+            if dai == T::zero() { continue; }
+            let row = i * NB;
+            for j in 0..NB {
+                self.cross_hessian[row + j] += two * dai * dr_b[j];
             }
         }
     }
 
-    /// Accumulate this block into the full dense gradient and symmetric hessian.
-    pub fn accumulate(&self, grad: &mut [T], hessian: &mut [T]) {
-        let n_total = grad.len();
-        for i in 0..N {
-            let gi = self.indices[i];
+    /// Accumulate cross pairs into the full dense symmetric hessian.
+    /// Writes to `H[a, b]` and `H[b, a]` (the transpose) only; A-A / B-B
+    /// pairs are NOT written here (they live in the SelfBlocks).
+    pub fn accumulate(&self, _grad: &mut [T], hessian: &mut [T]) {
+        let n_total = _grad.len();
+        for i in 0..NA {
+            let gi = self.indices_a[i];
             if gi == u32::MAX { continue; }
             let gi = gi as usize;
-            grad[gi] += self.grad[i];
-            for j in i..N {
-                let gj = self.indices[j];
+            let row = i * NB;
+            for j in 0..NB {
+                let gj = self.indices_b[j];
                 if gj == u32::MAX { continue; }
                 let gj = gj as usize;
-                let val = self.hessian[tri_idx(N, i, j)];
+                let val = self.cross_hessian[row + j];
+                if gi == gj { continue; }    // diagonal belongs to a SelfBlock
                 hessian[gi * n_total + gj] += val;
-                if gi != gj {
-                    hessian[gj * n_total + gi] += val;
-                }
+                hessian[gj * n_total + gi] += val;
             }
         }
     }
 
     /// Accumulate into upper-band format (column-major, (kd+1)*n).
-    pub fn accumulate_band(&self, grad: &mut [T], band: &mut [T], kd: usize)
+    pub fn accumulate_band(&self, _grad: &mut [T], band: &mut [T], kd: usize)
         -> Result<(), crate::simple_lm::BandError>
     {
         let ldab = kd + 1;
-        for i in 0..N {
-            let gi = self.indices[i];
+        for i in 0..NA {
+            let gi = self.indices_a[i];
             if gi == u32::MAX { continue; }
             let gi = gi as usize;
-            grad[gi] += self.grad[i];
-            for j in i..N {
-                let gj = self.indices[j];
+            let row = i * NB;
+            for j in 0..NB {
+                let gj = self.indices_b[j];
                 if gj == u32::MAX { continue; }
                 let gj = gj as usize;
+                if gi == gj { continue; }
                 let (lo, hi) = if gi <= gj { (gi, gj) } else { (gj, gi) };
                 if hi - lo > kd {
                     return Err(crate::simple_lm::BandError { row: lo, col: hi, kd });
                 }
-                let val = self.hessian[tri_idx(N, i, j)];
+                let val = self.cross_hessian[row + j];
                 band[(kd + lo - hi) + hi * ldab] += val;
             }
         }
@@ -1257,32 +1262,34 @@ impl<A: Model, B: Model, const N: usize, T: crate::utils::Float> CrossBlock<A, B
     }
 
     /// Accumulate into COO (triplet) sparse format. Upper triangle only.
-    pub fn accumulate_sparse(&self, grad: &mut [T], coo: &mut crate::simple_lm::CooMatrix<T>) {
-        for i in 0..N {
-            let gi = self.indices[i];
+    pub fn accumulate_sparse(&self, _grad: &mut [T], coo: &mut crate::simple_lm::CooMatrix<T>) {
+        for i in 0..NA {
+            let gi = self.indices_a[i];
             if gi == u32::MAX { continue; }
-            grad[gi as usize] += self.grad[i];
-            for j in i..N {
-                let gj = self.indices[j];
+            let row = i * NB;
+            for j in 0..NB {
+                let gj = self.indices_b[j];
                 if gj == u32::MAX { continue; }
+                if gi == gj { continue; }
                 let (lo, hi) = if gi <= gj { (gi, gj) } else { (gj, gi) };
-                let val = self.hessian[tri_idx(N, i, j)];
+                let val = self.cross_hessian[row + j];
                 coo.push(lo, hi, val);
             }
         }
     }
 
     /// Accumulate directly into CSC vals array using position lookup.
-    pub fn accumulate_sparse_direct(&self, grad: &mut [T], csc: &mut crate::simple_lm::CscMatrix<T>) {
-        for i in 0..N {
-            let gi = self.indices[i];
+    pub fn accumulate_sparse_direct(&self, _grad: &mut [T], csc: &mut crate::simple_lm::CscMatrix<T>) {
+        for i in 0..NA {
+            let gi = self.indices_a[i];
             if gi == u32::MAX { continue; }
-            grad[gi as usize] += self.grad[i];
-            for j in i..N {
-                let gj = self.indices[j];
+            let row = i * NB;
+            for j in 0..NB {
+                let gj = self.indices_b[j];
                 if gj == u32::MAX { continue; }
+                if gi == gj { continue; }
                 let (lo, hi) = if gi <= gj { (gi, gj) } else { (gj, gi) };
-                let val = self.hessian[tri_idx(N, i, j)];
+                let val = self.cross_hessian[row + j];
                 if let Some(pos) = csc.find_pos(lo as usize, hi as usize) {
                     csc.vals[pos] += val;
                 }
@@ -1291,15 +1298,16 @@ impl<A: Model, B: Model, const N: usize, T: crate::utils::Float> CrossBlock<A, B
     }
 
     /// Accumulate into CSC vals using precomputed position list.
-    pub fn accumulate_sparse_indexed(&self, grad: &mut [T], vals: &mut [T], positions: &[usize], cursor: &mut usize) {
-        for i in 0..N {
-            let gi = self.indices[i];
+    pub fn accumulate_sparse_indexed(&self, _grad: &mut [T], vals: &mut [T], positions: &[usize], cursor: &mut usize) {
+        for i in 0..NA {
+            let gi = self.indices_a[i];
             if gi == u32::MAX { continue; }
-            grad[gi as usize] += self.grad[i];
-            for j in i..N {
-                let gj = self.indices[j];
+            let row = i * NB;
+            for j in 0..NB {
+                let gj = self.indices_b[j];
                 if gj == u32::MAX { continue; }
-                let val = self.hessian[tri_idx(N, i, j)];
+                if gi == gj { continue; }
+                let val = self.cross_hessian[row + j];
                 vals[positions[*cursor]] += val;
                 *cursor += 1;
             }
