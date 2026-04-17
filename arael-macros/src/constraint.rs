@@ -2602,10 +2602,33 @@ pub(crate) fn check_residual_coverage(
     }
     if missing.is_empty() { return Ok(()); }
     let list: Vec<String> = missing.into_iter().collect();
+
+    // Tailor the hint to the shape of the mismatch. Three cases:
+    //  (1) Every missing param's top-level binding is a `Ref<T>` field on the
+    //      constraint struct itself — so the user HAS enough refs declared,
+    //      just too many of them for a CrossBlock. Switching the block to
+    //      `TripletBlock<T>` covers all ref-referenced entities at once.
+    //  (2) Some missing param references something not in the struct's refs
+    //      (typically a root-level ident like `path.foo`) — root-level params
+    //      don't have a block slot yet.
+    //  (3) Mix of the two.
+    let ref_field_names: std::collections::HashSet<String> = registry_lookup(&struct_name.to_string())
+        .map(|l| l.ref_paths.iter().map(|(n, _)| n.clone()).collect())
+        .unwrap_or_default();
+    let head_of = |s: &str| -> String {
+        s.split_once('.').map(|(h, _)| h.to_string()).unwrap_or_else(|| s.to_string())
+    };
+    let all_via_struct_refs = !ref_field_names.is_empty()
+        && list.iter().all(|m| ref_field_names.contains(&head_of(m)));
+    let hint = if all_via_struct_refs {
+        " — all missing params resolve through this struct's own `Ref<T>` fields, but there are more than CrossBlock<A, B> can cover. Switch the block to `TripletBlock<T>` to include every ref-referenced entity.".to_string()
+    } else {
+        " (SelfBlock<A> covers A; CrossBlock<A, B> covers A and B; TripletBlock<T> covers every Ref<T> field on the constraint struct; root-level params have no block slot yet)".to_string()
+    };
+
     let msg = format!(
-        "{0}:{1}: constraint on `struct {2}` references param(s) outside its hessian block: [{3}] \
-         (SelfBlock<A> covers A; CrossBlock<A, B> covers A and B; root-level params have no block slot yet)",
-        sc.attr_file, sc.attr_line, struct_name, list.join(", ")
+        "{}:{}: constraint on `struct {}` references param(s) outside its hessian block: [{}]{}",
+        sc.attr_file, sc.attr_line, struct_name, list.join(", "), hint
     );
     Err(syn::Error::new_spanned(struct_name, msg))
 }
