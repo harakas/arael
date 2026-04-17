@@ -125,13 +125,15 @@ let residual = expr - arael_sym::symbol("y");
 let dr_da = residual.diff("a");  // symbolic derivative w.r.t. a
 let dr_db = residual.diff("b");  // symbolic derivative w.r.t. b
 
-// In ExtendedModel::extended_compute64 -- each solver iteration:
+// In ExtendedModel::extended_compute64(params, grad) -- each solver iteration:
 for &(x, y) in &data {
     vars.insert("x", x);
     vars.insert("y", y);
     let r = residual.eval(&vars)?;
     let dr = vec![dr_da.eval(&vars)?, dr_db.eval(&vars)?];
-    hb.add_residual(r, &param_indices, &dr);
+    // writes 2*r*dr into `grad` AND pushes upper-triangle Hessian
+    // into the TripletBlock -- one call, both done
+    hb.add_residual(r, &param_indices, &dr, grad);
 }
 ```
 

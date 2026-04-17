@@ -8,12 +8,20 @@
 //! Applied to a struct, this attribute macro:
 //!
 //! - Generates the `Model` trait implementation (serialize, deserialize, update,
-//!   block accumulation) by inspecting `Param<T>`, `SimpleEulerAngleParam`,
+//!   Hessian-block accumulation) by inspecting `Param<T>`, `SimpleEulerAngleParam`,
 //!   and `EulerAngleParam` fields.
 //! - Rewrites shorthand block types: `SelfBlock<A>` becomes
 //!   `SelfBlock<A, {A_PARAM_COUNT}>`, and `CrossBlock<A, B>` becomes
-//!   `CrossBlock<A, B, {A_PARAM_COUNT + B_PARAM_COUNT}>`.
+//!   `CrossBlock<A, B, {A_PARAM_COUNT}, {B_PARAM_COUNT}>` (two const
+//!   generics — NA and NB are stored separately so the cross Hessian is
+//!   a rectangular NA*NB block).
 //!   `TripletBlock` is passed through as-is (COO sparse, for 3+ entity constraints).
+//! - Requires every params-having struct to declare exactly one
+//!   `SelfBlock<Self>` field (the canonical home for its gradient +
+//!   within-entity Hessian diagonal). Exemptions: `#[arael(fit(...))]`
+//!   (auto-skipped — fit generates its own LmProblem) and
+//!   `#[arael(skip_self_block)]` (explicit opt-out for bag-of-params
+//!   structs whose params are written only by a parent's ExtendedModel).
 //! - Detects `SimpleEulerAngleParam` and `EulerAngleParam` fields by type
 //!   name and generates appropriate precompute calls for rotation matrices.
 //! - Generates the symbolic companion struct (`FooSym`) and `ModelSym` impl.
@@ -170,8 +178,9 @@ fn extract_constraint_label(tokens: &[proc_macro2::TokenTree]) -> Option<String>
 ///
 /// Generates the `Model` trait implementation, rewrites `SelfBlock<A>` to
 /// `SelfBlock<A, {A_PARAM_COUNT}>` and `CrossBlock<A, B>` to
-/// `CrossBlock<A, B, {A_PARAM_COUNT + B_PARAM_COUNT}>` (TripletBlock
-/// is recognized but not rewritten), emits a
+/// `CrossBlock<A, B, {A_PARAM_COUNT}, {B_PARAM_COUNT}>` (two separate
+/// const generics so the cross Hessian is a rectangular NA*NB block;
+/// TripletBlock is recognized but not rewritten), emits a
 /// `const StructName_PARAM_COUNT: usize = ...;`, and produces the symbolic
 /// companion struct with `ModelSym` impl.
 ///
@@ -261,6 +270,29 @@ fn extract_constraint_label(tokens: &[proc_macro2::TokenTree]) -> Option<String>
 ///   debug/instrumentation (DOF analysis, constraint diagnostics,
 ///   per-label cost breakdown). Uses the same symbolically differentiated
 ///   expressions as the Hessian path.
+///
+/// ## `#[arael(skip_self_block)]`
+///
+/// Opt-out from the "every params-having struct must declare a
+/// `SelfBlock<Self>`" requirement. Use for bag-of-params structs whose
+/// params are never touched by their own constraints or by cross/triplet
+/// constraints -- e.g. a coefficient wrapper whose gradient is written
+/// exclusively by a parent's `ExtendedModel`, or a struct that only
+/// exercises `serialize_params32`/`update32` without ever going through
+/// the LM solver.
+///
+/// ```ignore
+/// #[arael::model]
+/// #[arael(skip_self_block)]
+/// struct Coefficient {
+///     value: Param<f64>,   // written by RegressionModel::extended_compute64
+/// }
+/// ```
+///
+/// Safety net: if a `skip_self_block` struct is later pulled into a
+/// `CrossBlock<A, B>` or `TripletBlock` constraint, the cross-block
+/// emitter still errors ("type `X` must declare a `SelfBlock<Self>`
+/// field"). The opt-out cannot silently break cross/triplet usage.
 ///
 /// ## `#[arael(constraint_index)]`
 ///

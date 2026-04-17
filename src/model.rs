@@ -140,8 +140,10 @@ impl<T: ParamType + std::fmt::Debug> std::fmt::Debug for Param<T> {
 /// - `update{32,64}` -- copy a candidate parameter vector into working copies.
 /// - `update_self` -- reset working copies to current `value` (and precompute
 ///   derived quantities like rotation matrices).
-/// - `zero_blocks` / `accumulate_blocks*` -- zero and accumulate Hessian blocks
-///   into dense, banded, COO, CSC, or indexed sparse formats.
+/// - `zero_blocks` / `accumulate_hessian*` -- zero and accumulate Hessian
+///   blocks into dense, banded, COO, CSC, or indexed sparse formats.
+///   Gradient is written directly into a global slice by each constraint,
+///   not routed through these methods.
 pub trait Model {
     fn serialize_params32(&mut self, data: &mut std::vec::Vec<f32>);
     fn deserialize_params32(&mut self, data: &[f32]);
@@ -210,7 +212,8 @@ pub trait Model {
 /// 3. `zero_blocks` — zeros all Hessian blocks (including TripletBlocks)
 /// 4. Macro-generated constraint loops — fill SelfBlock/CrossBlock
 /// 5. **`extended_compute`** — fill TripletBlocks with custom residuals
-/// 6. `accumulate_blocks` — reads all blocks into global grad/Hessian
+///    (writes grad entries directly into the LM-provided global slice)
+/// 6. `accumulate_hessian*` — reads all Hessian blocks into global Hessian
 ///
 /// For cost evaluation: `Model::update` → `extended_update` →
 /// macro-generated cost loop → **`extended_cost`**.
@@ -240,7 +243,7 @@ pub trait Model {
 /// let dr_db = residual.diff("b");
 ///
 /// impl ExtendedModel for RegressionModel {
-///     fn extended_compute64(&mut self, params: &[f64]) {
+///     fn extended_compute64(&mut self, params: &[f64], grad: &mut [f64]) {
 ///         // Evaluate symbolically-differentiated expressions numerically
 ///         for &(x, y) in &self.data {
 ///             vars.insert("x", x);
@@ -250,7 +253,9 @@ pub trait Model {
 ///                 .map(|(_, _, d)| d.eval(&vars).unwrap()).collect();
 ///             let indices: Vec<u32> = self.derivs.iter()
 ///                 .map(|(_, idx, _)| *idx).collect();
-///             self.hb.add_residual(r, &indices, &dr);
+///             // add_residual writes 2*r*dr into `grad` AND pushes the
+///             // full upper-triangle Hessian into the TripletBlock
+///             self.hb.add_residual(r, &indices, &dr, grad);
 ///         }
 ///     }
 ///

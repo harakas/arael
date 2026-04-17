@@ -164,14 +164,16 @@
 //! }
 //!
 //! impl ExtendedModel for RegressionModel {
-//!     fn extended_compute64(&mut self, params: &[f64]) {
+//!     fn extended_compute64(&mut self, params: &[f64], grad: &mut [f64]) {
 //!         for &(x, y) in &self.data {
 //!             vars.insert("x", x);
 //!             vars.insert("y", y);
 //!             let r = residual.eval(&vars).unwrap();
 //!             let dr: Vec<f64> = self.derivs.iter()
 //!                 .map(|(_, _, d)| d.eval(&vars).unwrap()).collect();
-//!             self.hb.add_residual(r, &indices, &dr);
+//!             // writes 2*r*dr into grad AND pushes full upper-triangle
+//!             // Hessian into the TripletBlock (one call, both done)
+//!             self.hb.add_residual(r, &indices, &dr, grad);
 //!         }
 //!     }
 //! }
