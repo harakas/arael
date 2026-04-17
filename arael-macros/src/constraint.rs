@@ -862,6 +862,162 @@ fn extract_block_type_args(ty: &syn::Type) -> syn::Result<(String, Option<String
     Err(syn::Error::new_spanned(ty, "expected SelfBlock<A>, CrossBlock<A, B>, or TripletBlock"))
 }
 
+/// Per-pair routing info for a multi-CrossBlock constraint. Built by
+/// `build_multi_cross_routing` from the declared block-field list and the
+/// struct's ref-field layout.
+#[derive(Clone)]
+#[allow(dead_code)]  // a_idx/b_idx kept for diagnostics; emission reads starts/counts
+pub struct MultiCrossRouting {
+    pub block_ident: syn::Ident,
+    /// Index of A-side ref in triplet_entities.
+    pub a_idx: usize,
+    /// Index of B-side ref in triplet_entities.
+    pub b_idx: usize,
+    /// Starting offset in __all_idx of entity A's params.
+    pub a_start: usize,
+    pub a_count: usize,
+    pub b_start: usize,
+    pub b_count: usize,
+}
+
+/// Build the multi-cross routing table for a constraint struct that
+/// declares multiple block fields (all CrossBlocks). For each declared
+/// CrossBlock field, resolves which (ordered) ref pair it serves, using
+/// `#[arael(cross = (refA, refB))]` when present and type-based
+/// auto-resolution otherwise. Every unordered entity pair must be covered
+/// by exactly one CrossBlock; uncovered pairs and ambiguous auto-resolution
+/// produce compile-time errors.
+pub fn build_multi_cross_routing(
+    fields: &syn::FieldsNamed,
+    block_fields: &[String],
+    triplet_entities: &[(syn::Ident, syn::Ident, usize, usize)],
+    struct_ident: &syn::Ident,
+) -> syn::Result<Vec<MultiCrossRouting>> {
+    let mut out: Vec<MultiCrossRouting> = Vec::new();
+    // Normalized unordered pairs already claimed (prevents two CrossBlocks
+    // on the same Hessian pair).
+    let mut claimed: std::collections::HashSet<(usize, usize)> = std::collections::HashSet::new();
+    let candidates_desc = || triplet_entities.iter()
+        .map(|(v, _, _, _)| v.to_string()).collect::<Vec<_>>().join(", ");
+
+    for block_name in block_fields {
+        let field = fields.named.iter().find(|f|
+            f.ident.as_ref().map(|i| i.to_string()) == Some(block_name.clone())
+        ).ok_or_else(|| syn::Error::new_spanned(struct_ident,
+            format!("constraint declares block field `{}` but no such field found on `{}`",
+                    block_name, struct_ident)))?;
+
+        let (a_type, b_type_opt) = extract_block_type_args(&field.ty)?;
+        if a_type == "__triplet__" {
+            return Err(syn::Error::new_spanned(struct_ident,
+                format!("field `{}` is a TripletBlock -- multi-block constraints currently require CrossBlock fields only", block_name)));
+        }
+        let b_type = b_type_opt.ok_or_else(|| syn::Error::new_spanned(struct_ident,
+            format!("field `{}` must be CrossBlock<A, B>, not SelfBlock (SelfBlock<Self> lives on the entity struct, not here)", block_name)))?;
+
+        // Parse #[arael(cross = (refA, refB))] on this field, if present.
+        let cross_attr = crate::parse_arael_attr(&field.attrs)?;
+        let cross_refs: Option<(String, String)> = match cross_attr {
+            Some(crate::AraelAttr::Cross(refs)) if refs.len() == 2 =>
+                Some((refs[0].clone(), refs[1].clone())),
+            _ => None,
+        };
+
+        // Resolve entity indices (A-side, B-side).
+        let (a_idx, b_idx) = if let Some((ra, rb)) = cross_refs {
+            let a_idx = triplet_entities.iter().position(|(v, _, _, _)| v == &ra)
+                .ok_or_else(|| syn::Error::new_spanned(struct_ident,
+                    format!("on field `{}`: cross = ({}, {}) references unknown ref field `{}` (candidates: {})",
+                        block_name, ra, rb, ra, candidates_desc())))?;
+            let b_idx = triplet_entities.iter().position(|(v, _, _, _)| v == &rb)
+                .ok_or_else(|| syn::Error::new_spanned(struct_ident,
+                    format!("on field `{}`: cross = ({}, {}) references unknown ref field `{}` (candidates: {})",
+                        block_name, ra, rb, rb, candidates_desc())))?;
+            if a_idx == b_idx {
+                return Err(syn::Error::new_spanned(struct_ident,
+                    format!("on field `{}`: cross = ({}, {}) names the same ref field twice", block_name, ra, rb)));
+            }
+            // Types must match the CrossBlock's A and B exactly (order-sensitive).
+            let a_ty = triplet_entities[a_idx].1.to_string();
+            let b_ty = triplet_entities[b_idx].1.to_string();
+            if a_ty != a_type {
+                return Err(syn::Error::new_spanned(struct_ident,
+                    format!("on field `{}: CrossBlock<{}, {}>`: cross = ({}, {}) -- `{}` is Ref<{}>, expected Ref<{}>",
+                        block_name, a_type, b_type, ra, rb, ra, a_ty, a_type)));
+            }
+            if b_ty != b_type {
+                return Err(syn::Error::new_spanned(struct_ident,
+                    format!("on field `{}: CrossBlock<{}, {}>`: cross = ({}, {}) -- `{}` is Ref<{}>, expected Ref<{}>",
+                        block_name, a_type, b_type, ra, rb, rb, b_ty, b_type)));
+            }
+            (a_idx, b_idx)
+        } else {
+            // Type-based auto-resolution. Collect ordered (a_idx, b_idx)
+            // pairs where a_idx != b_idx and types match.
+            let mut pairs: Vec<(usize, usize)> = Vec::new();
+            for ai in 0..triplet_entities.len() {
+                for bi in 0..triplet_entities.len() {
+                    if ai != bi
+                        && triplet_entities[ai].1 == a_type
+                        && triplet_entities[bi].1 == b_type
+                    {
+                        pairs.push((ai, bi));
+                    }
+                }
+            }
+            match pairs.len() {
+                0 => return Err(syn::Error::new_spanned(struct_ident,
+                    format!("on field `{}: CrossBlock<{}, {}>`: no Ref<{}> + Ref<{}> pair found on the struct",
+                        block_name, a_type, b_type, a_type, b_type))),
+                1 => pairs[0],
+                _ => {
+                    let listed = pairs.iter().map(|(a,b)|
+                        format!("({}, {})", triplet_entities[*a].0, triplet_entities[*b].0)
+                    ).collect::<Vec<_>>().join(", ");
+                    return Err(syn::Error::new_spanned(struct_ident,
+                        format!("on field `{}: CrossBlock<{}, {}>` is ambiguous -- matches multiple ref pairs: {}. Add `#[arael(cross = (refA, refB))]` to disambiguate",
+                            block_name, a_type, b_type, listed)));
+                }
+            }
+        };
+
+        // Unordered-pair uniqueness: (a, b) and (b, a) are the same Hessian
+        // pair and must not be claimed twice.
+        let norm = if a_idx < b_idx { (a_idx, b_idx) } else { (b_idx, a_idx) };
+        if !claimed.insert(norm) {
+            return Err(syn::Error::new_spanned(struct_ident,
+                format!("on field `{}`: ref pair ({}, {}) is already claimed by another CrossBlock on this constraint",
+                    block_name, triplet_entities[a_idx].0, triplet_entities[b_idx].0)));
+        }
+
+        let (_, _, a_start, a_count) = &triplet_entities[a_idx];
+        let (_, _, b_start, b_count) = &triplet_entities[b_idx];
+        out.push(MultiCrossRouting {
+            block_ident: syn::Ident::new(block_name, proc_macro2::Span::call_site()),
+            a_idx, b_idx,
+            a_start: *a_start, a_count: *a_count,
+            b_start: *b_start, b_count: *b_count,
+        });
+    }
+
+    // Every unordered entity pair must be covered. Dropping any pair
+    // would violate the "never drop cross-Hessian" invariant.
+    for i in 0..triplet_entities.len() {
+        for j in (i + 1)..triplet_entities.len() {
+            if !claimed.contains(&(i, j)) {
+                return Err(syn::Error::new_spanned(struct_ident,
+                    format!("residual on `{}` references entity pair ({}, {}) but no declared CrossBlock covers it -- add `CrossBlock<{}, {}>` with `#[arael(cross = ({}, {}))]` to the struct and list it in `#[arael(constraint([...], ...))]`",
+                        struct_ident,
+                        triplet_entities[i].0, triplet_entities[j].0,
+                        triplet_entities[i].1, triplet_entities[j].1,
+                        triplet_entities[i].0, triplet_entities[j].0)));
+            }
+        }
+    }
+
+    Ok(out)
+}
+
 fn type_ident_name(ty: &syn::Type) -> syn::Result<String> {
     if let syn::Type::Path(tp) = ty
         && let Some(seg) = tp.path.segments.last() {
@@ -927,7 +1083,33 @@ pub fn generate_root_methods(
     }
     let mut cross_groups: std::collections::HashMap<String, CrossCollectionGroup> = std::collections::HashMap::new();
 
+    // Per-CrossBlock info for a multi-cross constraint (one entry per
+    // declared CrossBlock field). The entity-span setup (__all_idx via
+    // triplet_idx_stmts) is shared across all CrossBlocks on the same
+    // struct; each entry just knows which slice of __all_idx to pass to
+    // its own set_indices call and which dr sub-slices to write.
+    #[derive(Clone)]
+    struct MultiCrossBlockInfo {
+        block_ident: syn::Ident,
+        /// Starting offset in __all_idx of entity A's params.
+        a_start: usize,
+        /// Number of scalar params for entity A.
+        a_count: usize,
+        /// Starting offset in __all_idx of entity B's params.
+        b_start: usize,
+        /// Number of scalar params for entity B.
+        b_count: usize,
+    }
+
     // Grouping for TripletBlock constraints on the same collection.
+    //
+    // Also used for multi-cross constraints (N-entity constraint declared
+    // with multiple CrossBlock fields instead of a single TripletBlock):
+    // when `multi_cross_blocks` is non-empty, the final
+    // TripletBlock.add_residual_cross call in the gh loop is replaced by
+    // per-pair CrossBlock.add_residual_cross calls (emitted into
+    // gh_entries), and the set_block_indices loop emits one set_indices
+    // per declared CrossBlock over slices of __all_idx.
     struct TripletCollectionGroup {
         rc_ident: syn::Ident,
         triplet_param_count: usize,
@@ -940,6 +1122,10 @@ pub fn generate_root_methods(
         cost_entries: Vec<TokenStream2>,
         gh_entries: Vec<TokenStream2>,
         jac_entries: Vec<TokenStream2>,
+        /// Non-empty only for multi-cross constraints. When populated,
+        /// set_block_indices emits per-CrossBlock set_indices calls
+        /// instead of the trivial TripletBlock no-op.
+        multi_cross_blocks: Vec<MultiCrossBlockInfo>,
     }
     let mut triplet_groups: std::collections::HashMap<String, TripletCollectionGroup> = std::collections::HashMap::new();
 
@@ -1138,6 +1324,16 @@ pub fn generate_root_methods(
         let is_self_block = b_type.is_none() && !is_remote_block && a_type != "__triplet__";
         let is_triplet = a_type == "__triplet__";
 
+        // Multi-cross: constraint declares multiple block fields. Valid
+        // only when all are CrossBlock (for now — mixing TripletBlock in
+        // a multi-block list is out of scope for this pass). Overrides
+        // the primary-block-driven flags: in multi-cross mode, cross
+        // pairs are routed per-block, not to a single CrossBlock or
+        // TripletBlock. The entity-span setup (__all_idx +
+        // triplet_entities) is shared with is_triplet.
+        let is_multi_cross = constraint.block_fields.len() > 1
+            && !is_remote_block && !is_self_block && !is_triplet;
+
         // For SelfBlock: the struct itself is in a root collection
         // For CrossBlock: find parent collection + frines field
         let self_var_name = if is_self_block {
@@ -1149,7 +1345,7 @@ pub fn generate_root_methods(
         // Resolve where the constrained entity lives on the root — a Vec/Deque/Arena
         // collection, a plain struct-typed field (direct composition), or the root
         // itself. Non-SelfBlock constraints still require a Collection (see below).
-        let coll_type = if is_triplet || is_self_block { &sc.struct_name } else { &a_type };
+        let coll_type = if is_triplet || is_multi_cross || is_self_block { &sc.struct_name } else { &a_type };
         let entity_location = match resolve_entity_location(root_fields, &root_name.to_string(), coll_type) {
             Some(loc) => loc,
             None => continue,
@@ -1181,7 +1377,7 @@ pub fn generate_root_methods(
         let mut parent_ident = None;
         let mut is_root_level_cross = false;  // constraint struct lives directly on root
 
-        if is_triplet || (!is_self_block || is_remote_block) {
+        if is_triplet || is_multi_cross || (!is_self_block || is_remote_block) {
             // First try: constraint struct nested under A-type (e.g. PointFrine under PointLandmark)
             let parent_layout = registry_lookup(&a_type);
             let frines_field = parent_layout.as_ref().and_then(|l| {
@@ -1280,7 +1476,8 @@ pub fn generate_root_methods(
         // (ref-field ident bound in scope, entity type ident, dr-slice start,
         //  entity param count).
         let mut triplet_entities: Vec<(syn::Ident, syn::Ident, usize, usize)> = Vec::new();
-        if is_triplet {
+        let multi_cross_routing: Vec<MultiCrossRouting>;
+        if is_triplet || is_multi_cross {
             let struct_layout = registry_lookup(&sc.struct_name);
             let ref_paths = struct_layout.as_ref().map(|l| l.ref_paths.clone()).unwrap_or_default();
             let mut used = std::collections::HashSet::new();
@@ -1314,6 +1511,18 @@ pub fn generate_root_methods(
                     }
             }
         }
+
+        // Multi-cross routing: one entry per declared CrossBlock on the
+        // constraint struct. Every unordered ref pair in triplet_entities
+        // must be claimed; ambiguous type matches without
+        // `#[arael(cross = (refA, refB))]` are rejected. Empty Vec for
+        // non-multi-cross constraints.
+        multi_cross_routing = if is_multi_cross {
+            build_multi_cross_routing(
+                &fields, &constraint.block_fields, &triplet_entities, &struct_ident)?
+        } else {
+            Vec::new()
+        };
 
         // A- and B-entity param counts (scalar width). Hoisted up here so
         // both the gh_stmts cross-emission and the index-building code can
@@ -1411,7 +1620,7 @@ pub fn generate_root_methods(
         // Mirrors the remote-block pattern (`__target_block`) which coexists
         // fine with the body's immutable reads. The per-call unsafe{} form
         // tripped borrow-checker in multi-residual bodies.
-        let is_cross_block = !is_self_block && !is_triplet && !is_remote_block;
+        let is_cross_block = !is_self_block && !is_triplet && !is_remote_block && !is_multi_cross;
         if is_cross_block {
             let b_type_name = b_type.as_ref().expect("cross block requires B");
             let b_type_ident = syn::Ident::new(b_type_name, proc_macro2::Span::call_site());
@@ -1505,6 +1714,45 @@ pub fn generate_root_methods(
                         &[#(#dr_f64),*],
                         &__entity_offsets,
                     );
+                });
+            } else if is_multi_cross {
+                // Multi-cross: per-entity SelfBlock writes (same as triplet)
+                // + one CrossBlock.add_residual_cross per declared CrossBlock
+                // field. Every unordered pair of entities is covered by
+                // exactly one CrossBlock (verified by routing build).
+                let mut self_block_calls: Vec<TokenStream2> = Vec::new();
+                for (var_id, type_id, start, count) in &triplet_entities {
+                    let hb = registry_lookup(&type_id.to_string())
+                        .and_then(|l| l.self_block_field.clone())
+                        .ok_or_else(|| syn::Error::new_spanned(&struct_ident,
+                            format!("type `{}` must declare a `SelfBlock<Self>` field (required as multi-cross participant)", type_id)))?;
+                    let hb_ident = syn::Ident::new(&hb, proc_macro2::Span::call_site());
+                    let entity_dr: Vec<TokenStream2> = dr_f64.iter().skip(*start).take(*count).cloned().collect();
+                    self_block_calls.push(quote! {
+                        unsafe {
+                            (*(#var_id as *const #type_id as *mut #type_id)).#hb_ident
+                                .add_residual(#r_ident as #cast_type, &[#(#entity_dr),*], grad);
+                        }
+                    });
+                }
+                let mut cross_block_calls: Vec<TokenStream2> = Vec::new();
+                for route in &multi_cross_routing {
+                    let block = &route.block_ident;
+                    let dr_a: Vec<TokenStream2> = dr_f64.iter()
+                        .skip(route.a_start).take(route.a_count).cloned().collect();
+                    let dr_b: Vec<TokenStream2> = dr_f64.iter()
+                        .skip(route.b_start).take(route.b_count).cloned().collect();
+                    cross_block_calls.push(quote! {
+                        __frine.#block.add_residual_cross(
+                            #r_ident as #cast_type,
+                            &[#(#dr_a),*],
+                            &[#(#dr_b),*],
+                        );
+                    });
+                }
+                gh_stmts.push(quote! {
+                    #(#self_block_calls)*
+                    #(#cross_block_calls)*
                 });
             } else if is_remote_block {
                 gh_stmts.push(quote! {
@@ -1666,7 +1914,7 @@ pub fn generate_root_methods(
         // write_indices() calls per-param-field.
         let mut triplet_idx_stmts: Vec<TokenStream2> = Vec::new();
         let mut triplet_param_count = 0usize;
-        if is_triplet {
+        if is_triplet || is_multi_cross {
             let struct_layout = registry_lookup(&sc.struct_name);
             let ref_paths = struct_layout.as_ref().map(|l| l.ref_paths.clone()).unwrap_or_default();
             let mut used = std::collections::HashSet::new();
@@ -1911,9 +2159,13 @@ pub fn generate_root_methods(
                     if let Some(je) = jac_entry { group.jac_entries.push(je); }
                 }
             }
-        } else if is_triplet {
-            // TripletBlock: N-ary constraint, flat iteration on root collection.
-            // Multiple attributes on the same struct are merged into one loop per collection.
+        } else if is_triplet || is_multi_cross {
+            // TripletBlock or multi-CrossBlock: N-ary constraint, flat
+            // iteration on root collection. Both share the outer loop +
+            // __all_idx setup; emission differs only in the gh_stmts
+            // contents (single TripletBlock call vs. per-pair CrossBlock
+            // calls). set_block_indices is populated with per-CrossBlock
+            // set_indices when multi_cross_blocks is non-empty.
             let rc_ident = frines_ident.unwrap();
             let group_key = rc_ident.to_string();
             let marker = source_marker(sc);
@@ -1936,6 +2188,16 @@ pub fn generate_root_methods(
                 }
             } else { None };
 
+            // Convert multi_cross_routing entries into MultiCrossBlockInfo
+            // for the group. Empty for single-TripletBlock constraints.
+            let mcb: Vec<MultiCrossBlockInfo> = multi_cross_routing.iter().map(|r| {
+                MultiCrossBlockInfo {
+                    block_ident: r.block_ident.clone(),
+                    a_start: r.a_start, a_count: r.a_count,
+                    b_start: r.b_start, b_count: r.b_count,
+                }
+            }).collect();
+
             let group = triplet_groups.entry(group_key).or_insert_with(|| {
                 let ci_field = crate::registry_lookup(&sc.struct_name)
                     .and_then(|l| l.constraint_index_field.as_ref().map(|f| {
@@ -1953,8 +2215,16 @@ pub fn generate_root_methods(
                     cost_entries: Vec::new(),
                     gh_entries: Vec::new(),
                     jac_entries: Vec::new(),
+                    multi_cross_blocks: mcb.clone(),
                 }
             });
+            // If multi_cross_blocks was empty at group creation (first
+            // attribute was a TripletBlock) but a subsequent attribute is
+            // multi-cross -- error. For now we reject mixed.
+            if group.multi_cross_blocks.is_empty() != mcb.is_empty() {
+                return Err(syn::Error::new_spanned(&struct_ident,
+                    format!("on `{}`: cannot mix TripletBlock and multi-CrossBlock constraint attributes on the same struct", struct_ident)));
+            }
             group.cost_entries.push(cost_entry);
             group.gh_entries.push(gh_entry);
             if let Some(je) = jac_entry { group.jac_entries.push(je); }
@@ -2381,14 +2651,43 @@ pub fn generate_root_methods(
             });
         }
 
-        // TripletBlock doesn't need set_indices, but we still need __cid assignment
-        set_block_indices_loops.push(quote! {
-            for __frine in self.#rc_ident.iter_mut() {
-                #ci_set
-                __cid += 1;
-            }
-        });
-        let _ = (block_ident, triplet_idx_stmts, resolve_stmts); // silence unused warnings
+        // Multi-cross: emit a set_indices call per declared CrossBlock
+        // field. Each CrossBlock's a/b slices are cut from __all_idx using
+        // the entity-span (start, count) pairs recorded in routing.
+        // Single-TripletBlock groups fall through to the trivial __cid
+        // assignment (TripletBlock has no set_indices).
+        if !group.multi_cross_blocks.is_empty() {
+            let mcb_calls: Vec<TokenStream2> = group.multi_cross_blocks.iter().map(|mcb| {
+                let block = &mcb.block_ident;
+                let a_start = mcb.a_start; let a_end = mcb.a_start + mcb.a_count;
+                let b_start = mcb.b_start; let b_end = mcb.b_start + mcb.b_count;
+                quote! {
+                    __frine.#block.set_indices(
+                        &__all_idx[#a_start..#a_end],
+                        &__all_idx[#b_start..#b_end],
+                    );
+                }
+            }).collect();
+            set_block_indices_loops.push(quote! {
+                for __frine in self.#rc_ident.iter_mut() {
+                    #(#resolve_stmts)*
+                    let mut __all_idx = [0u32; #tp];
+                    #(#triplet_idx_stmts)*
+                    #(#mcb_calls)*
+                    #ci_set
+                    __cid += 1;
+                }
+            });
+        } else {
+            // TripletBlock doesn't need set_indices, but we still need __cid assignment
+            set_block_indices_loops.push(quote! {
+                for __frine in self.#rc_ident.iter_mut() {
+                    #ci_set
+                    __cid += 1;
+                }
+            });
+            let _ = (block_ident, triplet_idx_stmts, resolve_stmts); // silence unused warnings
+        }
     }
 
     // Prepend merged SelfBlock loops before cross/triplet loops
@@ -2705,8 +3004,14 @@ fn interpret_constraint_body(
     // Collect param symbols
     let mut param_symbols: Vec<String> = Vec::new();
     let is_triplet = a_type == "__triplet__";
+    // Multi-cross: multiple block fields, all CrossBlocks. Treat like
+    // triplet for param-symbol collection (gather params from ALL ref
+    // fields, not just the primary block's A/B). Routing in the
+    // emission path ensures every cross pair is covered by a declared
+    // CrossBlock.
+    let is_multi_cross = !is_remote && constraint.block_fields.len() > 1;
 
-    if is_triplet {
+    if is_triplet || is_multi_cross {
         // TripletBlock: collect params from ALL ref fields (no A/B distinction)
         let mut used_vars = std::collections::HashSet::new();
         for (var_name, type_name) in &var_infos {
