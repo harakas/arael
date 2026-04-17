@@ -405,12 +405,25 @@ pub struct ConstraintVar {
 }
 
 pub struct ConstraintAttr {
-    pub block_field: String,
+    /// Declared block-field names on the constraint struct. Single-ident
+    /// form `constraint(hb, ...)` parses to a 1-element Vec; bracketed form
+    /// `constraint([hb_ab, hb_ac, hb_bc], ...)` parses to N elements. Each
+    /// element may be a dotted path (e.g. `pose.hb_pose`) for remote-block
+    /// references.
+    pub block_fields: Vec<String>,
     pub parent_name: Option<String>,  // e.g. "lm" for parent=lm
     pub guard: Option<String>,        // runtime guard expression, e.g. "self.info.gps.is_some()"
     pub name: Option<String>,         // optional label for Jacobian rows, e.g. name = "sweep"
     pub vars: Vec<ConstraintVar>,     // explicit variables (legacy, may be empty)
     pub body_stmts: Vec<Stmt>,
+}
+
+impl ConstraintAttr {
+    /// The first (and for single-block constraints, only) block-field name.
+    /// Shorthand for `&self.block_fields[0]`; callers that currently handle
+    /// only one block continue to use this. Multi-block routing uses
+    /// `block_fields` directly.
+    pub fn primary_block_field(&self) -> &str { &self.block_fields[0] }
 }
 
 /// Parse all `#[arael(constraint(...))]` attributes (supports multiple per struct).
@@ -448,12 +461,51 @@ fn parse_constraint_inner_impl(
     err_span: &proc_macro2::Ident,
 ) -> syn::Result<Option<ConstraintAttr>> {
     // Syntax: constraint(hb, [parent=name,] [var: Type, ...], { body })
+    // Multi-block form: constraint([hb_ab, hb_ac, hb_bc], [parent=...,] { body })
     let mut pos = 0;
-    let mut block_field: Option<String> = None;
+    let mut block_fields: Vec<String> = Vec::new();
     let mut parent_name: Option<String> = None;
     let mut guard: Option<String> = None;
     let mut name_label: Option<String> = None;
     let mut vars: Vec<ConstraintVar> = Vec::new();
+
+    // Bracketed list form: first token is [ ... ]. Walk its stream as a
+    // comma-separated list of (dotted) idents to populate block_fields.
+    if let Some(proc_macro2::TokenTree::Group(g)) = tokens.first()
+        && g.delimiter() == proc_macro2::Delimiter::Bracket {
+            let inner: Vec<proc_macro2::TokenTree> = g.stream().into_iter().collect();
+            let mut ipos = 0;
+            while ipos < inner.len() {
+                match &inner[ipos] {
+                    proc_macro2::TokenTree::Ident(id) => {
+                        let mut full_name = id.to_string();
+                        ipos += 1;
+                        // Collect dotted segments: ident.ident.ident
+                        while let Some(proc_macro2::TokenTree::Punct(p)) = inner.get(ipos) {
+                            if p.as_char() == '.' {
+                                ipos += 1;
+                                if let Some(proc_macro2::TokenTree::Ident(next_id)) = inner.get(ipos) {
+                                    full_name = format!("{}.{}", full_name, next_id);
+                                    ipos += 1;
+                                } else { break; }
+                            } else { break; }
+                        }
+                        block_fields.push(full_name);
+                    }
+                    proc_macro2::TokenTree::Punct(p) if p.as_char() == ',' => { ipos += 1; }
+                    tt => return Err(syn::Error::new_spanned(err_span,
+                        format!("expected ident or ',' in constraint block list, got `{}`", tt))),
+                }
+            }
+            if block_fields.is_empty() {
+                return Err(syn::Error::new_spanned(err_span,
+                    "constraint block list must name at least one field"));
+            }
+            pos += 1;
+            // Skip optional trailing comma between list and next arg
+            if let Some(proc_macro2::TokenTree::Punct(p)) = tokens.get(pos)
+                && p.as_char() == ',' { pos += 1; }
+        }
 
     loop {
         match tokens.get(pos) {
@@ -508,8 +560,8 @@ fn parse_constraint_inner_impl(
                             }
                             _ => return Err(syn::Error::new_spanned(err_span, "expected type after :")),
                         };
-                        if block_field.is_none() {
-                            block_field = Some(name);
+                        if block_fields.is_empty() {
+                            block_fields.push(name);
                         } else {
                             vars.push(ConstraintVar { name, type_name });
                         }
@@ -530,8 +582,8 @@ fn parse_constraint_inner_impl(
                                 break;
                             }
                         }
-                        if block_field.is_none() {
-                            block_field = Some(full_name);
+                        if block_fields.is_empty() {
+                            block_fields.push(full_name);
                         } else {
                             vars.push(ConstraintVar { name: full_name, type_name: None });
                         }
@@ -552,9 +604,10 @@ fn parse_constraint_inner_impl(
         }
     }
 
-    let block_field = block_field.ok_or_else(|| {
-        syn::Error::new_spanned(err_span, "constraint needs at least the block field name")
-    })?;
+    if block_fields.is_empty() {
+        return Err(syn::Error::new_spanned(err_span,
+            "constraint needs at least the block field name"));
+    }
 
     // Parse the body block
     let body_group = match tokens.get(pos) {
@@ -567,7 +620,7 @@ fn parse_constraint_inner_impl(
     let block: syn::Block = syn::parse2(block_tokens)?;
 
     Ok(Some(ConstraintAttr {
-        block_field,
+        block_fields,
         parent_name,
         guard,
         name: name_label,
@@ -588,10 +641,10 @@ pub fn generate_constraint_impl(
     let ref_paths = struct_layout.as_ref().map(|l| &l.ref_paths[..]).unwrap_or(&[]);
 
     let block_field = fields.iter().find(|f| {
-        f.ident.as_ref().map(|i| i.to_string()) == Some(constraint.block_field.clone())
+        f.ident.as_ref().map(|i| i.to_string()) == Some(constraint.primary_block_field().to_string())
     }).ok_or_else(|| {
         syn::Error::new_spanned(struct_name,
-            format!("constraint block field '{}' not found", constraint.block_field))
+            format!("constraint block field '{}' not found", constraint.primary_block_field()))
     })?;
     let (a_type, _b_type) = extract_block_type_args(&block_field.ty)?;
     let parent_name = constraint.parent_name.clone()
@@ -1036,11 +1089,11 @@ pub fn generate_root_methods(
 
         // Now generate the traversal code for root methods
         // Check if block_field is a dotted path (remote block, e.g. pose.hb_pose)
-        let is_remote_block = constraint.block_field.contains('.');
+        let is_remote_block = constraint.primary_block_field().contains('.');
 
         let (a_type, b_type, remote_block_info) = if is_remote_block {
             // Remote block: e.g. "pose.hb_pose" means the block lives on a Ref<Pose>'s field
-            let parts: Vec<&str> = constraint.block_field.split('.').collect();
+            let parts: Vec<&str> = constraint.primary_block_field().split('.').collect();
             let ref_field_name = parts[0];
             let target_block_field = parts[1];
 
@@ -1071,7 +1124,7 @@ pub fn generate_root_methods(
         } else {
             // Local block field on this struct
             let block_field_obj = fields.named.iter().find(|f|
-                f.ident.as_ref().map(|i| i.to_string()) == Some(constraint.block_field.clone())
+                f.ident.as_ref().map(|i| i.to_string()) == Some(constraint.primary_block_field().to_string())
             );
             if block_field_obj.is_none() { continue; }
             let (a, b) = extract_block_type_args(&block_field_obj.unwrap().ty)?;
@@ -1212,10 +1265,10 @@ pub fn generate_root_methods(
 
         let block_ident = if is_remote_block {
             // For remote blocks, the actual block field name is the last segment
-            let parts: Vec<&str> = constraint.block_field.split('.').collect();
+            let parts: Vec<&str> = constraint.primary_block_field().split('.').collect();
             syn::Ident::new(parts.last().unwrap(), proc_macro2::Span::call_site())
         } else {
-            syn::Ident::new(&constraint.block_field, proc_macro2::Span::call_site())
+            syn::Ident::new(constraint.primary_block_field(), proc_macro2::Span::call_site())
         };
         let param_strs: Vec<&str> = param_symbols.iter().map(|s| s.as_str()).collect();
         let n_params = param_symbols.len();
@@ -2577,10 +2630,10 @@ fn interpret_constraint_body(
     constraint: &ConstraintAttr,
     root_type_name: &str,
 ) -> syn::Result<(Vec<E>, Vec<String>)> {
-    let is_remote = constraint.block_field.contains('.');
+    let is_remote = constraint.primary_block_field().contains('.');
     let (a_type, b_type) = if is_remote {
         // Remote block: e.g. "pose.hb_pose" — target type from Ref field
-        let parts: Vec<&str> = constraint.block_field.split('.').collect();
+        let parts: Vec<&str> = constraint.primary_block_field().split('.').collect();
         let ref_field_name = parts[0];
         let ref_field = fields.iter().find(|f|
             f.ident.as_ref().map(|i| i.to_string()) == Some(ref_field_name.to_string())
@@ -2603,9 +2656,9 @@ fn interpret_constraint_body(
         (parent_type, Some(inner.to_string()))
     } else {
         let block_field = fields.iter().find(|f| {
-            f.ident.as_ref().map(|i| i.to_string()) == Some(constraint.block_field.clone())
+            f.ident.as_ref().map(|i| i.to_string()) == Some(constraint.primary_block_field().to_string())
         }).ok_or_else(|| {
-            syn::Error::new_spanned(struct_name, format!("block field '{}' not found", constraint.block_field))
+            syn::Error::new_spanned(struct_name, format!("block field '{}' not found", constraint.primary_block_field()))
         })?;
         extract_block_type_args(&block_field.ty)?
     };

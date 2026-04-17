@@ -870,12 +870,15 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
         let attr = parse_arael_attr(&field.attrs)?;
 
         match attr {
+            // Cross is a constraint-struct-only attribute for CrossBlock
+            // fields; treated like the default path here (no param, no
+            // compute, just a block field).
             Some(AraelAttr::Skip) | Some(AraelAttr::ConstraintIndex) => continue,
             Some(AraelAttr::Compute(expr_tokens)) => {
                 let substituted = substitute_param_idents(expr_tokens, &param_field_names);
                 compute_stmts.push(quote! { self.#ident = #substituted; });
             }
-            Some(AraelAttr::RefResolve(_)) | None => {
+            Some(AraelAttr::RefResolve(_)) | Some(AraelAttr::Cross(_)) | None => {
                 // HessianBlock fields: skip serialize, handle in zero/accumulate
                 if is_hessian_block_type(&field.ty) {
                     zero_blocks_stmts.push(quote! { self.#ident.zero(); });
@@ -1366,15 +1369,24 @@ fn generate_sym_impl(
     })
 }
 
-enum AraelAttr {
+pub(crate) enum AraelAttr {
     Skip,
     Compute(TokenStream2),
     RefResolve(String),  // resolution path, e.g. "root.poses"
     ConstraintIndex,     // marks a u32 field as constraint index
+    /// Ref-pair binding for a CrossBlock field on a constraint struct:
+    /// `#[arael(cross = (refA, refB))]`. The two idents must name `Ref<X>`
+    /// / `Ref<Y>` fields on the same struct whose types match the
+    /// CrossBlock's `<A, B>` type parameters. Used by the routing table to
+    /// disambiguate multiple CrossBlocks with the same type signature.
+    #[allow(dead_code)]  // read by routing-table construction in constraint.rs
+    Cross(Vec<String>),
 }
 
-/// Parse `#[arael(skip)]` or `#[arael(compute = <expr>)]` from field attributes.
-fn parse_arael_attr(attrs: &[syn::Attribute]) -> syn::Result<Option<AraelAttr>> {
+/// Parse `#[arael(skip)]`, `#[arael(compute = <expr>)]`,
+/// `#[arael(ref = <path>)]`, `#[arael(constraint_index)]`, or
+/// `#[arael(cross = (refA, refB))]` from field attributes.
+pub(crate) fn parse_arael_attr(attrs: &[syn::Attribute]) -> syn::Result<Option<AraelAttr>> {
     for attr in attrs {
         if attr.path().is_ident("arael") {
             let content: TokenStream2 = attr.parse_args()?;
@@ -1419,11 +1431,38 @@ fn parse_arael_attr(attrs: &[syn::Attribute]) -> syn::Result<Option<AraelAttr>> 
                         "expected `compute = <expression>`",
                     ));
                 }
+                // #[arael(cross = (refA, refB))]
+                if kw == "cross" {
+                    if tokens.len() >= 3
+                        && let proc_macro2::TokenTree::Punct(ref p) = tokens[1]
+                        && p.as_char() == '='
+                        && let proc_macro2::TokenTree::Group(ref g) = tokens[2]
+                        && g.delimiter() == proc_macro2::Delimiter::Parenthesis {
+                            let mut refs: Vec<String> = Vec::new();
+                            for tt in g.stream() {
+                                match tt {
+                                    proc_macro2::TokenTree::Ident(id) => refs.push(id.to_string()),
+                                    proc_macro2::TokenTree::Punct(p) if p.as_char() == ',' => {}
+                                    other => return Err(syn::Error::new_spanned(&tokens[0],
+                                        format!("expected ref field name or ',' in cross = (...), got `{}`", other))),
+                                }
+                            }
+                            if refs.len() != 2 {
+                                return Err(syn::Error::new_spanned(&tokens[0],
+                                    format!("cross = (...) expects exactly two ref field names, got {}", refs.len())));
+                            }
+                            return Ok(Some(AraelAttr::Cross(refs)));
+                        }
+                    return Err(syn::Error::new_spanned(
+                        &tokens[0],
+                        "expected `cross = (refA, refB)`",
+                    ));
+                }
             }
 
             return Err(syn::Error::new_spanned(
                 attr,
-                "unknown arael attribute, expected `skip` or `compute = <expr>`",
+                "unknown arael attribute, expected `skip`, `compute = <expr>`, `ref = <path>`, `constraint_index`, or `cross = (refA, refB)`",
             ));
         }
     }
