@@ -1,22 +1,29 @@
-// Localization demo with ROOT-LEVEL PARAMETERS -- copy of loc_demo.rs that
-// adds a global rigid transform (translation + yaw) as parameters on the
-// root struct itself. The idea is that the entire path can be shifted and
-// rotated as a rigid body, instead of letting every pose drift individually.
+// Localization demo with ROOT-LEVEL PARAMETERS -- loc_demo.rs plus a
+// global rigid transform (translation + 3-axis rotation) as params on
+// the root struct itself. The entire path can be shifted and rotated
+// as a rigid body instead of letting every pose drift individually.
 //
-//   robot_pos = root.center + root.global_delta + R_z(root.global_rot) * (pose.pos - root.center)
+// Robot's world pose under the global transform:
+//   robot_pos = root.center + root.global_delta + R_global * (pose.pos - root.center)
+//   robot_R   = R_global * R_pose
 //
-// is substituted into the landmark observation (frine) constraint wherever
-// `pose.pos` is used. Other constraints (drift, tilt, odometry) are left
-// unchanged: drift is on raw params by design, tilt only reads orientation,
-// and odometry is invariant under a rigid transform.
+// Both substitutions appear in the landmark observation (PointFrine)
+// and in the tilt constraint -- any residual that reads the robot's
+// world-frame pose must apply the full transform, otherwise recenter()
+// is not cost-invariant and features effectively gauge-couple to
+// globals through orientation-only motion.
 //
-// This file is deliberately the same shape as loc_demo.rs aside from the
-// three additions to Path and the frine body rewrite, so the delta is easy
-// to review. It's expected to NOT work yet -- the macro system has no
-// concept of root-level parameters entering constraints, and the goal here
-// is to see exactly how it fails.
+// Constraint wiring that's new versus loc_demo.rs:
+//   * PointFrine uses multi-cross [pose.hb_pose, hb_root] with
+//     hb_root: CrossBlock<Pose, Path> -- routes the pose<->root cross
+//     Hessian pair arising from globals in robot_pos.
+//   * Tilt uses self-primary + root-owned TripletBlock spec
+//     `(hb_pose, root.hbt)` so it can couple pose.ea with
+//     path.global_rot without needing a dedicated CrossBlock field on
+//     Pose. Cross pairs land in path.hbt (COO).
+// The rest (drift on raw params, odometry) is unchanged from loc_demo.
 
-use arael::model::{Model, Param, SelfBlock, CrossBlock, SimpleEulerAngleParam};
+use arael::model::{Model, Param, SelfBlock, CrossBlock, TripletBlock, SimpleEulerAngleParam};
 use arael::simple_lm::LmProblem;
 use arael::vect::{vect3f, vect2f};
 use arael::matrix::matrix3f;
@@ -79,9 +86,19 @@ fn decompose_cov(cov: matrix3f) -> (matrix3f, vect3f) {
      ea_drift.y * path.drift_ea_isigma,
      ea_drift.z * path.drift_ea_isigma]
 }))]
-#[arael(constraint(hb_pose, {
-    [(pose.ea.x - pose.info.tilt_roll) * path.tilt_isigma,
-     (pose.ea.y - pose.info.tilt_pitch) * path.tilt_isigma]
+// Tilt: accelerometer-measured roll/pitch is absolute world-frame
+// (gravity). Compare against the effective world-frame orientation
+// R_global * R_pose, not raw pose.ea. The residual touches both
+// pose.ea and path.global_rot; the (pose, path) cross-Hessian pair
+// routes through the root-owned `hbt: TripletBlock` (COO). No
+// dedicated CrossBlock<Pose, Path> field on Pose needed; diagonal
+// writes still land on each entity's own SelfBlock<Self>.
+#[arael(constraint(hb_pose, root.hbt, {
+    let mr_global = path.global_rot.rotation_matrix();
+    let mr2w_eff = mr_global * pose.ea.rotation_matrix();
+    let ea_eff = mr2w_eff.get_euler_angles();
+    [(ea_eff.x - pose.info.tilt_roll) * path.tilt_isigma,
+     (ea_eff.y - pose.info.tilt_pitch) * path.tilt_isigma]
 }))]
 struct Pose {
     pos: Param<vect3f>,
@@ -97,23 +114,25 @@ struct PointLandmark {
     frines: std::vec::Vec<PointFrine>,
 }
 
-// Observation linking a known landmark to a pose. Remote block on Pose
-// (for pose's SelfBlock grad + diagonal) plus a local CrossBlock<Pose,
-// Path> for the pose-root cross Hessian pairs that arise from the
-// residual touching both pose params and root params
-// (path.global_delta / path.global_rot). The root's own SelfBlock
-// (path.hb) absorbs root's grad + within-root diagonal; the macro
-// auto-infers the (pose, root) pair on hb_root since there's exactly
-// one Ref<Pose> on the struct.
+// Landmark observation: remote block on Pose's SelfBlock plus a
+// local CrossBlock<Pose, Path> for the pose<->root cross pair that
+// arises because the residual touches both pose params and root
+// params (path.global_delta / path.global_rot). Root's own SelfBlock
+// absorbs root's grad + within-root diagonal; the macro auto-infers
+// the (pose, root) pair on hb_root since there's exactly one Ref<Pose>
+// on the struct.
 //
-// Robot position is the pose param transformed by the root's global
-// rigid transform:
-//   robot_pos = center + global_delta + R_global * (pose.pos - center).
+// Robot world pose under the global transform:
+//   robot_pos = center + global_delta + R_global * (pose.pos - center)
+//   robot_R   = R_global * R_pose
+// Both must appear in the residual -- applying R_global to position
+// but not orientation would make recenter() non-invariant on the cost
+// and create a quasi-gauge direction between pose.ea and global_rot.
 #[arael::model]
 #[arael(constraint([pose.hb_pose, hb_root], parent=lm, {
     let gamma = path.gamma;
-    let mr2w = pose.ea.rotation_matrix();
     let mr_global = path.global_rot.rotation_matrix();
+    let mr2w = mr_global * pose.ea.rotation_matrix();
     let robot_pos = path.center + path.global_delta + mr_global * (pose.pos - path.center);
     let lm_r = mr2w.transpose() * (lm.pos - robot_pos);
     let r_r = lm_r - feature.camera_pos;
@@ -192,6 +211,7 @@ struct Path {
     tilt_isigma: f32,
     frine_isigma_scale: f32,
     hb: SelfBlock<Path, f32>,
+    hbt: TripletBlock<f32>,
 }
 
 // ---------------------------------------------------------------------------
@@ -349,6 +369,37 @@ impl Path {
             self.center = acc * (1.0 / self.poses.len() as f32);
         }
     }
+
+    /// Coarse centering pass: freeze all pose params, optimise only the
+    /// global rigid transform (`global_delta` + `global_rot`), then
+    /// bake the result into every pose via `recenter()`. Restores
+    /// pose.optimize = true as a side effect (recenter's
+    /// Param::new / SimpleEulerAngleParam::new constructors default to
+    /// optimisable). Run once before the graduated optimisation to
+    /// absorb systematic offset in the initial pose estimates without
+    /// letting per-pose params move yet.
+    fn optimise_center(&mut self) {
+        for pose in self.poses.iter_mut() {
+            pose.pos.optimize = false;
+            pose.ea.optimize = false;
+        }
+        self.global_delta.optimize = true;
+        self.global_rot.optimize = true;
+
+        let mut params: std::vec::Vec<f32> = std::vec::Vec::new();
+        self.serialize32(&mut params);
+        let config = arael::simple_lm::LmConfig::<f32> {
+            verbose: true,
+            ..Default::default()
+        };
+        let result = arael::simple_lm::solve_sparse_faer_f32(&params, self, &config);
+        self.deserialize32(&result.x);
+        println!("optimise_center: {} iterations, cost {:.4} -> {:.4}  globals: delta={:?} rot={:?}",
+            result.iterations, result.start_cost, result.end_cost,
+            self.global_delta.value, self.global_rot.value);
+
+        self.recenter();
+    }
 }
 
 fn build_path(cfg: &SceneConfig) -> (Path, Vec<(vect3f, vect3f)>, Vec<vect3f>) {
@@ -385,6 +436,7 @@ fn build_path(cfg: &SceneConfig) -> (Path, Vec<(vect3f, vect3f)>, Vec<vect3f>) {
         tilt_isigma: 1.0 / tilt_sigma_rad,
         frine_isigma_scale: 1.0,
         hb: SelfBlock::new(),
+        hbt: TripletBlock::new(),
     };
 
     let mut frine_data: std::vec::Vec<(usize, Ref<Pose>, Ref<PointFeature>)> = std::vec::Vec::new();
@@ -592,11 +644,11 @@ fn main() {
         }
     }
 
-    // Numerical grad sanity check on the actual demo model: compute
-    // analytic + numerical gradient at the initial state, and compare
-    // the global_delta / global_rot entries. If the solver can't move
-    // these params it's either because the analytic grad is (wrongly)
-    // zero or mis-routed.
+    // Numerical grad sanity check on the globals: analytic gradient
+    // on `global_delta` / `global_rot` must match a central-difference
+    // numerical gradient at the initial state. If these disagree the
+    // root-triplet / CrossBlock<Pose, Path> wiring isn't routing the
+    // pose<->root cross pair correctly.
     {
         let mut params: std::vec::Vec<f32> = std::vec::Vec::new();
         path.serialize32(&mut params);
@@ -614,32 +666,27 @@ fn main() {
             let cm = path.calc_cost(&pp);
             ng[i] = (cp - cm) / (2.0 * eps);
         }
-        let gd_idx = path.global_delta.index();
-        let gr_idx = path.global_rot.index();
         println!("\n--- Initial-state grad diagnostic ---");
         println!("  total params={}, cost={:.4}", n, path.calc_cost(&params));
-        if gd_idx != u32::MAX {
-            let start = gd_idx as usize;
+        for (label, idx) in [("global_delta", path.global_delta.index()),
+                             ("global_rot",   path.global_rot.index())] {
+            let start = idx as usize;
             for k in 0..3 {
-                println!("  global_delta[{}]  analytic={:+.3e}  numerical={:+.3e}",
-                    k, ag[start + k], ng[start + k]);
+                println!("  {}[{}]  analytic={:+.3e}  numerical={:+.3e}",
+                    label, k, ag[start + k], ng[start + k]);
             }
-        } else {
-            println!("  global_delta is fixed (u32::MAX index)");
-        }
-        if gr_idx != u32::MAX {
-            let start = gr_idx as usize;
-            for k in 0..3 {
-                println!("  global_rot[{}]  analytic={:+.3e}  numerical={:+.3e}",
-                    k, ag[start + k], ng[start + k]);
-            }
-        } else {
-            println!("  global_rot is fixed (u32::MAX index)");
         }
     }
 
+    // Coarse centering pass: solve for global_delta / global_rot alone
+    // (poses frozen), bake the result into the poses, reset globals.
+    // Absorbs systematic initial-pose offset before per-pose params
+    // are allowed to move.
+    println!("\n--- Centering pass ---");
+    path.optimise_center();
+
     // Graduated optimization: start with loose feature constraints, tighten
-    println!("--- Optimization ---");
+    println!("\n--- Optimization ---");
     let isigma_scales = [0.01, 0.1, 1.0];
 
     for (pass, &scale) in isigma_scales.iter().enumerate() {
@@ -654,32 +701,16 @@ fn main() {
             ..Default::default()
         };
         let result = arael::simple_lm::solve_sparse_faer_f32(&params, &mut path, &config);
-        // Read the optimized global values from result.x when they are live
-        // params. If they are fixed (Param::fixed), their index is u32::MAX
-        // and they weren't in the param vector at all -- report that.
-        let gd_idx = path.global_delta.index();
-        let gr_idx = path.global_rot.index();
-        let fmt_triple = |idx: u32| -> String {
-            if idx == u32::MAX {
-                "<fixed>".to_string()
-            } else {
-                let s = idx as usize;
-                format!("[{}, {}, {}]", result.x[s], result.x[s + 1], result.x[s + 2])
-            }
-        };
-        let gd_str = fmt_triple(gd_idx);
-        let gr_str = fmt_triple(gr_idx);
         path.deserialize32(&result.x);
-        println!("  {} iterations, cost {:.4} -> {:.4}", result.iterations, result.start_cost, result.end_cost);
-        println!("  optimized (in result.x): global_delta={} global_rot={}", gd_str, gr_str);
-        println!("  after deserialize: global_delta={:?} global_rot={:?}",
+        println!("  {} iterations, cost {:.4} -> {:.4}  globals: delta={:?} rot={:?}",
+            result.iterations, result.start_cost, result.end_cost,
             path.global_delta.value, path.global_rot.value);
     }
 
-    // Post-optimization grad diagnostic: at convergence, is there any
-    // gradient signal left on global_delta / global_rot? If yes, the
-    // solver got stuck; if no, the current state is a true local min
-    // and the systematic pose offset is NOT attributable to globals.
+    // Post-optimization grad/hess diagnostic on the globals: confirms
+    // the solver drove them to a true local minimum (grad ~ 0) and
+    // shows the Hessian diagonal so the strength of each direction is
+    // visible alongside the converged value.
     {
         let mut params: std::vec::Vec<f32> = std::vec::Vec::new();
         path.serialize32(&mut params);
@@ -687,14 +718,9 @@ fn main() {
         let mut ag = vec![0.0f32; n];
         let mut ah = vec![0.0f32; n * n];
         path.calc_grad_hessian_dense(&params, &mut ag, &mut ah);
-        let gd_idx = path.global_delta.index();
-        let gr_idx = path.global_rot.index();
         println!("\n--- Post-optimization grad on globals ---");
-        for (label, idx) in [("global_delta", gd_idx), ("global_rot", gr_idx)] {
-            if idx == u32::MAX {
-                println!("  {} is fixed (no grad/hess)", label);
-                continue;
-            }
+        for (label, idx) in [("global_delta", path.global_delta.index()),
+                             ("global_rot",   path.global_rot.index())] {
             let start = idx as usize;
             for k in 0..3 {
                 println!("  {}[{}]  grad={:+.3e}  hess_diag={:+.3e}",

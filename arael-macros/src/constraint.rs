@@ -582,11 +582,14 @@ fn parse_constraint_inner_impl(
                                 break;
                             }
                         }
-                        if block_fields.is_empty() {
-                            block_fields.push(full_name);
-                        } else {
-                            vars.push(ConstraintVar { name: full_name, type_name: None });
-                        }
+                        // Any bare ident / dotted path at a positional
+                        // slot (not `name=val`, not `name: Type`) is a
+                        // block-field reference -- the positional form
+                        // of the bracketed list, so
+                        //   constraint(hb_pose, root.hbt, { body })
+                        // parses identically to
+                        //   constraint([hb_pose, root.hbt], { body }).
+                        block_fields.push(full_name);
                     }
                 }
             }
@@ -1416,6 +1419,33 @@ pub fn generate_root_methods(
             a == root_type_str || b_opt.as_deref() == Some(root_type_str.as_str())
         });
 
+        // Self-primary + root-owned TripletBlock shape:
+        //   #[arael(constraint(<local_self_block>, root.<triplet>, {...}))]
+        // Primary block is the entity's own SelfBlock<Self>, secondary
+        // is `root.<field>` naming a TripletBlock<T> on root. Body
+        // touches both self params and root params; diagonal writes
+        // land on each entity's SelfBlock<Self>, cross pairs go to the
+        // root's TripletBlock (COO). Self is treated like an implicit
+        // entity — parallel to `has_root_entity` for CrossBlock-backed
+        // multi-cross, but with COO storage and no per-pair routing.
+        let root_triplet_field: Option<syn::Ident> = if is_self_block {
+            constraint.block_fields.iter()
+                .filter_map(|bf| bf.strip_prefix("root.").map(|s| s.to_string()))
+                .find_map(|rest| {
+                    root_fields.iter().find(|f|
+                        f.ident.as_ref().map(|i| i.to_string()) == Some(rest.clone()))
+                        .and_then(|f| {
+                            if let syn::Type::Path(tp) = &f.ty
+                                && let Some(seg) = tp.path.segments.last()
+                                && seg.ident == "TripletBlock" {
+                                    return Some(syn::Ident::new(&rest, proc_macro2::Span::call_site()));
+                                }
+                            None
+                        })
+                })
+        } else { None };
+        let is_root_triplet_self = root_triplet_field.is_some();
+
         // For SelfBlock: the struct itself is in a root collection
         // For CrossBlock: find parent collection + frines field
         let self_var_name = if is_self_block {
@@ -1568,7 +1598,55 @@ pub fn generate_root_methods(
         //  entity param count).
         let mut triplet_entities: Vec<(syn::Ident, syn::Ident, usize, usize)> = Vec::new();
         let multi_cross_routing: Vec<MultiCrossRouting>;
-        if is_triplet || is_multi_cross {
+        if is_root_triplet_self {
+            // Entities are [self, root] in that order. Self is accessed
+            // via `__item` (iter_mut item on the struct's collection);
+            // root is bound as `<root_lc>` from `let <root_lc> = &*__self_ref;`
+            // in the surrounding emission loop.
+            let self_layout = registry_lookup(&sc.struct_name);
+            if let Some(layout) = self_layout {
+                let mut self_count = 0usize;
+                for pf in &layout.param_fields {
+                    let size = layout.fields.iter()
+                        .find(|(n, _)| n == pf)
+                        .map(|(_, sft)| match sft {
+                            SymFieldType::Scalar => 1usize,
+                            SymFieldType::Vec2 => 2,
+                            SymFieldType::Vec3 => 3,
+                            _ => 0,
+                        }).unwrap_or(0);
+                    self_count += size;
+                }
+                if self_count > 0 {
+                    triplet_entities.push((
+                        syn::Ident::new("__item", proc_macro2::Span::call_site()),
+                        syn::Ident::new(&sc.struct_name, proc_macro2::Span::call_site()),
+                        0, self_count,
+                    ));
+                }
+                if let Some(root_layout) = registry_lookup(&root_type_str) {
+                    let mut root_count = 0usize;
+                    for pf in &root_layout.param_fields {
+                        let size = root_layout.fields.iter()
+                            .find(|(n, _)| n == pf)
+                            .map(|(_, sft)| match sft {
+                                SymFieldType::Scalar => 1usize,
+                                SymFieldType::Vec2 => 2,
+                                SymFieldType::Vec3 => 3,
+                                _ => 0,
+                            }).unwrap_or(0);
+                        root_count += size;
+                    }
+                    if root_count > 0 {
+                        triplet_entities.push((
+                            syn::Ident::new(&root_type_str.to_lowercase(), proc_macro2::Span::call_site()),
+                            root_name.clone(),
+                            self_count, root_count,
+                        ));
+                    }
+                }
+            }
+        } else if is_triplet || is_multi_cross {
             let struct_layout = registry_lookup(&sc.struct_name);
             let ref_paths = struct_layout.as_ref().map(|l| l.ref_paths.clone()).unwrap_or_default();
             let mut used = std::collections::HashSet::new();
@@ -1789,6 +1867,62 @@ pub fn generate_root_methods(
             let code: Expr = parse_sym_code(&expr.to_rust(""))?;
             gh_stmts.push(quote! { let #name_ident= #code; });
         }
+
+        // Pre-residual setup for is_root_triplet_self: build __all_idx
+        // (concatenation of entity param indices, self-first) and
+        // __entity_offsets once per __item iteration, so per-residual
+        // TripletBlock.add_residual_cross calls can pass them directly.
+        if is_root_triplet_self {
+            let self_layout = registry_lookup(&sc.struct_name)
+                .ok_or_else(|| syn::Error::new_spanned(&struct_ident,
+                    format!("type `{}` not in registry", sc.struct_name)))?;
+            let root_layout = registry_lookup(&root_type_str)
+                .ok_or_else(|| syn::Error::new_spanned(&struct_ident,
+                    format!("root type `{}` not in registry", root_type_str)))?;
+            let param_size = |layout: &crate::SymLayout, pf: &str| -> usize {
+                layout.fields.iter().find(|(n, _)| n == pf)
+                    .map(|(_, sft)| match sft {
+                        SymFieldType::Scalar => 1usize,
+                        SymFieldType::Vec2 => 2,
+                        SymFieldType::Vec3 => 3,
+                        _ => 0,
+                    }).unwrap_or(0)
+            };
+            let mut self_count = 0usize;
+            let mut self_idx_stmts: Vec<TokenStream2> = Vec::new();
+            for pf in &self_layout.param_fields {
+                let pf_ident = syn::Ident::new(pf, proc_macro2::Span::call_site());
+                let size = param_size(&self_layout, pf);
+                let offset = self_count;
+                let end = offset + size;
+                self_idx_stmts.push(quote! {
+                    __item.#pf_ident.write_indices(&mut __all_idx[#offset..#end]);
+                });
+                self_count += size;
+            }
+            let mut root_count = 0usize;
+            let mut root_idx_stmts: Vec<TokenStream2> = Vec::new();
+            for pf in &root_layout.param_fields {
+                let pf_ident = syn::Ident::new(pf, proc_macro2::Span::call_site());
+                let size = param_size(&root_layout, pf);
+                let offset = self_count + root_count;
+                let end = offset + size;
+                root_idx_stmts.push(quote! {
+                    (*__self_ref).#pf_ident.write_indices(&mut __all_idx[#offset..#end]);
+                });
+                root_count += size;
+            }
+            let total = self_count + root_count;
+            let sc_u32 = self_count as u32;
+            let total_u32 = total as u32;
+            gh_stmts.push(quote! {
+                let mut __all_idx = [0u32; #total];
+                #(#self_idx_stmts)*
+                #(#root_idx_stmts)*
+                let __entity_offsets: [u32; 3] = [0u32, #sc_u32, #total_u32];
+            });
+        }
+
         let mut idx = 0;
         for ri in 0..n_residuals {
             let r_ident = syn::Ident::new(&format!("__r_{}", ri), proc_macro2::Span::call_site());
@@ -1917,9 +2051,49 @@ pub fn generate_root_methods(
                     __target_block.add_residual(#r_ident as #cast_type, &[#(#dr_f64),*], grad);
                 });
             } else if is_self_block {
-                gh_stmts.push(quote! {
-                    __item.#block_ident.add_residual(#r_ident as #cast_type, &[#(#dr_f64),*], grad);
-                });
+                if is_root_triplet_self {
+                    // Self-primary + root-owned TripletBlock. dr_f64 is
+                    // [dr_self..., dr_root...]. Three writes preserve
+                    // every J^T J pair:
+                    //   1. __item.<hb_self>.add_residual  -- (self, self)
+                    //      diagonal + grad.
+                    //   2. (*__self_ref).<hb_root>.add_residual -- (root,
+                    //      root) diagonal + grad.
+                    //   3. (*__self_ref).<hbt>.add_residual_cross -- the
+                    //      (self, root) across-entity block, COO storage.
+                    let (_, _, _, self_count) = triplet_entities[0];
+                    let (_, _, root_start, root_count) = triplet_entities[1];
+                    let dr_self: Vec<TokenStream2> =
+                        dr_f64.iter().take(self_count).cloned().collect();
+                    let dr_root: Vec<TokenStream2> =
+                        dr_f64.iter().skip(root_start).take(root_count).cloned().collect();
+                    let root_hb = registry_lookup(&root_type_str)
+                        .and_then(|l| l.self_block_field.clone())
+                        .ok_or_else(|| syn::Error::new_spanned(&struct_ident,
+                            format!("root type `{}` must declare a `SelfBlock<Self>` field (required as root-triplet participant)", root_type_str)))?;
+                    let root_hb_ident = syn::Ident::new(&root_hb, proc_macro2::Span::call_site());
+                    let triplet_ident = root_triplet_field.as_ref().unwrap();
+                    gh_stmts.push(quote! {
+                        __item.#block_ident.add_residual(#r_ident as #cast_type, &[#(#dr_self),*], grad);
+                        unsafe {
+                            (*(__self_ref as *const #root_name as *mut #root_name)).#root_hb_ident
+                                .add_residual(#r_ident as #cast_type, &[#(#dr_root),*], grad);
+                        }
+                        unsafe {
+                            (*(__self_ref as *const #root_name as *mut #root_name)).#triplet_ident
+                                .add_residual_cross(
+                                    #r_ident as #cast_type,
+                                    &__all_idx,
+                                    &[#(#dr_f64),*],
+                                    &__entity_offsets,
+                                );
+                        }
+                    });
+                } else {
+                    gh_stmts.push(quote! {
+                        __item.#block_ident.add_residual(#r_ident as #cast_type, &[#(#dr_f64),*], grad);
+                    });
+                }
             } else {
                 // CrossBlock: split dr into dr_a (first a_param_count) + dr_b
                 // (next b_param_count). Three calls: A's SelfBlock gets
@@ -3302,12 +3476,18 @@ fn interpret_constraint_body(
                 }
         }
         // Skip the parent_name alias only for pure multi-cross (not
-        // remote-block). In the pure case, parent_name = a_type.lower()
-        // is always a duplicate of a ref field on the struct. For
-        // remote-block + multi-cross, parent_name names the parent
-        // *type* (e.g. `lm` -> PointLandmark) which is distinct from the
-        // refs and required by the body for `lm.pos` etc.
-        if a_type != "__triplet__" && !(is_multi_cross_early && !is_remote) {
+        // remote-block, no root-triplet). In the pure case, parent_name
+        // = a_type.lower() is always a duplicate of a ref field on the
+        // struct. For remote-block + multi-cross, parent_name names the
+        // parent *type* (e.g. `lm` -> PointLandmark) which is distinct
+        // from the refs. For self-primary + `root.<triplet>`, there is
+        // no Ref<Self> field and parent_name is the only path that
+        // resolves `<self_lc>.*` in the body.
+        let has_root_triplet_block = constraint.block_fields.iter()
+            .any(|bf| bf.starts_with("root."));
+        let is_pure_multi_cross =
+            is_multi_cross_early && !is_remote && !has_root_triplet_block;
+        if a_type != "__triplet__" && !is_pure_multi_cross {
             var_infos.push((parent_name.clone(), a_type.clone()));
         }
         let root_var = root_type_name.to_lowercase();
@@ -3342,8 +3522,10 @@ fn interpret_constraint_body(
     let is_multi_cross = constraint.block_fields.len() > 1;
 
     // Root-as-entity: if any declared local CrossBlock references the
-    // root type, include root's Params in the symbol set too.
+    // root type, OR any block is `root.<triplet>`, include root's
+    // Params in the symbol set too.
     let has_root_entity = is_multi_cross && constraint.block_fields.iter().any(|bf| {
+        if bf.starts_with("root.") { return true; }
         if bf.contains('.') { return false; }
         let Some(field) = fields.iter().find(|f|
             f.ident.as_ref().map(|i| i.to_string()) == Some(bf.clone())) else { return false; };
