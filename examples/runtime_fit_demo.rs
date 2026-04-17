@@ -70,7 +70,7 @@ impl ExtendedModel for RegressionModel {
         cost
     }
 
-    fn extended_compute64(&mut self, params: &[f64]) {
+    fn extended_compute64(&mut self, params: &[f64], grad: &mut [f64]) {
         let residual = match self.residual_expr { Some(ref e) => e.clone(), None => return };
         let derivs: Vec<(u32, E)> = self.derivs.iter().map(|(_, idx, d)| (*idx, d.clone())).collect();
         let mut vars: HashMap<&str, f64> = HashMap::new();
@@ -88,7 +88,7 @@ impl ExtendedModel for RegressionModel {
                 .filter_map(|(_, d)| d.eval(&vars).ok())
                 .collect();
             if dr.len() == indices.len() {
-                self.hb.add_residual(r, &indices, &dr);
+                self.hb.add_residual(r, &indices, &dr, grad);
             }
         }
     }

@@ -1115,14 +1115,14 @@ impl arael::model::ExtendedModel for Sketch {
         total
     }
 
-    fn extended_compute64(&mut self, params: &[f64]) {
+    fn extended_compute64(&mut self, params: &[f64], grad: &mut [f64]) {
         if self.expr_constraints.is_empty() { return; }
         let bag = self.symbol_bag.as_ref().expect("symbol_bag not built");
         let vars = bag.eval_vars(params);
         let isigma = self.constraint_isigma;
         let hb = &mut self.expr_hb as *mut TripletBlock<f64>;
         for ec in &self.expr_constraints {
-            if let Err(e) = ec.compute(&vars, isigma, unsafe { &mut *hb }) {
+            if let Err(e) = ec.compute(&vars, isigma, unsafe { &mut *hb }, grad) {
                 eprintln!("expr constraint eval error: {}: {}", ec.description, e);
             }
         }

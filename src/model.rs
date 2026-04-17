@@ -157,16 +157,20 @@ pub trait Model {
     fn param_symbols(_base: &str, _out: &mut std::vec::Vec<String>) {}
 
     fn zero_blocks(&mut self) {}
-    fn accumulate_blocks32(&self, _grad: &mut [f32], _hessian: &mut [f32]) {}
-    fn accumulate_blocks64(&self, _grad: &mut [f64], _hessian: &mut [f64]) {}
-    fn accumulate_blocks_band32(&self, _grad: &mut [f32], _band: &mut [f32], _kd: usize) -> Result<(), crate::simple_lm::BandError> { Ok(()) }
-    fn accumulate_blocks_band64(&self, _grad: &mut [f64], _band: &mut [f64], _kd: usize) -> Result<(), crate::simple_lm::BandError> { Ok(()) }
-    fn accumulate_blocks_sparse32(&self, _grad: &mut [f32], _coo: &mut crate::simple_lm::CooMatrix<f32>) {}
-    fn accumulate_blocks_sparse64(&self, _grad: &mut [f64], _coo: &mut crate::simple_lm::CooMatrix<f64>) {}
-    fn accumulate_blocks_sparse_direct32(&self, _grad: &mut [f32], _csc: &mut crate::simple_lm::CscMatrix<f32>) {}
-    fn accumulate_blocks_sparse_direct64(&self, _grad: &mut [f64], _csc: &mut crate::simple_lm::CscMatrix<f64>) {}
-    fn accumulate_blocks_sparse_indexed32(&self, _grad: &mut [f32], _vals: &mut [f32], _positions: &[usize], _cursor: &mut usize) {}
-    fn accumulate_blocks_sparse_indexed64(&self, _grad: &mut [f64], _vals: &mut [f64], _positions: &[usize], _cursor: &mut usize) {}
+    // Hessian-only accumulation: blocks hold only Hessian entries after the
+    // refactor; the gradient is written directly by constraint evaluation
+    // into the LM-provided `grad` slice, so there is nothing for these
+    // methods to do with grad.
+    fn accumulate_hessian32(&self, _hessian: &mut [f32]) {}
+    fn accumulate_hessian64(&self, _hessian: &mut [f64]) {}
+    fn accumulate_hessian_band32(&self, _band: &mut [f32], _kd: usize) -> Result<(), crate::simple_lm::BandError> { Ok(()) }
+    fn accumulate_hessian_band64(&self, _band: &mut [f64], _kd: usize) -> Result<(), crate::simple_lm::BandError> { Ok(()) }
+    fn accumulate_hessian_sparse32(&self, _coo: &mut crate::simple_lm::CooMatrix<f32>) {}
+    fn accumulate_hessian_sparse64(&self, _coo: &mut crate::simple_lm::CooMatrix<f64>) {}
+    fn accumulate_hessian_sparse_direct32(&self, _csc: &mut crate::simple_lm::CscMatrix<f32>) {}
+    fn accumulate_hessian_sparse_direct64(&self, _csc: &mut crate::simple_lm::CscMatrix<f64>) {}
+    fn accumulate_hessian_sparse_indexed32(&self, _vals: &mut [f32], _positions: &[usize], _cursor: &mut usize) {}
+    fn accumulate_hessian_sparse_indexed64(&self, _vals: &mut [f64], _positions: &[usize], _cursor: &mut usize) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -282,11 +286,12 @@ pub trait ExtendedModel {
     /// Additional cost contribution (f32).
     fn extended_cost32(&self, _params: &[f32]) -> f32 { 0.0 }
     /// Compute custom constraint residuals (f64). Called after
-    /// macro-generated constraints and before accumulation. Push
-    /// gradient/Hessian contributions into a [`TripletBlock`] field.
-    fn extended_compute64(&mut self, _params: &[f64]) {}
+    /// macro-generated constraints. Writes gradient contributions directly
+    /// into `grad` and cross-entity Hessian pairs into a
+    /// [`TripletBlock`] field.
+    fn extended_compute64(&mut self, _params: &[f64], _grad: &mut [f64]) {}
     /// Compute custom constraint residuals (f32).
-    fn extended_compute32(&mut self, _params: &[f32]) {}
+    fn extended_compute32(&mut self, _params: &[f32], _grad: &mut [f32]) {}
     /// Append Jacobian rows for runtime constraints (f64).
     /// `cid` is the constraint counter -- increment per constraint object.
     fn extended_jacobian64(&mut self, _params: &[f64], _rows: &mut std::vec::Vec<JacobianRow<f64>>, _cid: &mut u32) {}
@@ -813,37 +818,37 @@ macro_rules! impl_model_collection {
             fn serialize_size(&self) -> u32 {
                 self.iter().map(|item| item.serialize_size()).sum()
             }
-            fn accumulate_blocks32(&self, grad: &mut [f32], hessian: &mut [f32]) {
-                for item in self.iter() { item.accumulate_blocks32(grad, hessian); }
+            fn accumulate_hessian32(&self, hessian: &mut [f32]) {
+                for item in self.iter() { item.accumulate_hessian32(hessian); }
             }
-            fn accumulate_blocks64(&self, grad: &mut [f64], hessian: &mut [f64]) {
-                for item in self.iter() { item.accumulate_blocks64(grad, hessian); }
+            fn accumulate_hessian64(&self, hessian: &mut [f64]) {
+                for item in self.iter() { item.accumulate_hessian64(hessian); }
             }
-            fn accumulate_blocks_band32(&self, grad: &mut [f32], band: &mut [f32], kd: usize) -> Result<(), crate::simple_lm::BandError> {
-                for item in self.iter() { item.accumulate_blocks_band32(grad, band, kd)?; }
+            fn accumulate_hessian_band32(&self, band: &mut [f32], kd: usize) -> Result<(), crate::simple_lm::BandError> {
+                for item in self.iter() { item.accumulate_hessian_band32(band, kd)?; }
                 Ok(())
             }
-            fn accumulate_blocks_band64(&self, grad: &mut [f64], band: &mut [f64], kd: usize) -> Result<(), crate::simple_lm::BandError> {
-                for item in self.iter() { item.accumulate_blocks_band64(grad, band, kd)?; }
+            fn accumulate_hessian_band64(&self, band: &mut [f64], kd: usize) -> Result<(), crate::simple_lm::BandError> {
+                for item in self.iter() { item.accumulate_hessian_band64(band, kd)?; }
                 Ok(())
             }
-            fn accumulate_blocks_sparse32(&self, grad: &mut [f32], coo: &mut crate::simple_lm::CooMatrix<f32>) {
-                for item in self.iter() { item.accumulate_blocks_sparse32(grad, coo); }
+            fn accumulate_hessian_sparse32(&self, coo: &mut crate::simple_lm::CooMatrix<f32>) {
+                for item in self.iter() { item.accumulate_hessian_sparse32(coo); }
             }
-            fn accumulate_blocks_sparse64(&self, grad: &mut [f64], coo: &mut crate::simple_lm::CooMatrix<f64>) {
-                for item in self.iter() { item.accumulate_blocks_sparse64(grad, coo); }
+            fn accumulate_hessian_sparse64(&self, coo: &mut crate::simple_lm::CooMatrix<f64>) {
+                for item in self.iter() { item.accumulate_hessian_sparse64(coo); }
             }
-            fn accumulate_blocks_sparse_direct32(&self, grad: &mut [f32], csc: &mut crate::simple_lm::CscMatrix<f32>) {
-                for item in self.iter() { item.accumulate_blocks_sparse_direct32(grad, csc); }
+            fn accumulate_hessian_sparse_direct32(&self, csc: &mut crate::simple_lm::CscMatrix<f32>) {
+                for item in self.iter() { item.accumulate_hessian_sparse_direct32(csc); }
             }
-            fn accumulate_blocks_sparse_direct64(&self, grad: &mut [f64], csc: &mut crate::simple_lm::CscMatrix<f64>) {
-                for item in self.iter() { item.accumulate_blocks_sparse_direct64(grad, csc); }
+            fn accumulate_hessian_sparse_direct64(&self, csc: &mut crate::simple_lm::CscMatrix<f64>) {
+                for item in self.iter() { item.accumulate_hessian_sparse_direct64(csc); }
             }
-            fn accumulate_blocks_sparse_indexed32(&self, grad: &mut [f32], vals: &mut [f32], positions: &[usize], cursor: &mut usize) {
-                for item in self.iter() { item.accumulate_blocks_sparse_indexed32(grad, vals, positions, cursor); }
+            fn accumulate_hessian_sparse_indexed32(&self, vals: &mut [f32], positions: &[usize], cursor: &mut usize) {
+                for item in self.iter() { item.accumulate_hessian_sparse_indexed32(vals, positions, cursor); }
             }
-            fn accumulate_blocks_sparse_indexed64(&self, grad: &mut [f64], vals: &mut [f64], positions: &[usize], cursor: &mut usize) {
-                for item in self.iter() { item.accumulate_blocks_sparse_indexed64(grad, vals, positions, cursor); }
+            fn accumulate_hessian_sparse_indexed64(&self, vals: &mut [f64], positions: &[usize], cursor: &mut usize) {
+                for item in self.iter() { item.accumulate_hessian_sparse_indexed64(vals, positions, cursor); }
             }
         }
     };
@@ -882,37 +887,37 @@ impl<T: Model> Model for crate::refs::Arena<T> {
     fn serialize_size(&self) -> u32 {
         self.iter().map(|item| item.serialize_size()).sum()
     }
-    fn accumulate_blocks32(&self, grad: &mut [f32], hessian: &mut [f32]) {
-        for item in self.iter() { item.accumulate_blocks32(grad, hessian); }
+    fn accumulate_hessian32(&self, hessian: &mut [f32]) {
+        for item in self.iter() { item.accumulate_hessian32(hessian); }
     }
-    fn accumulate_blocks64(&self, grad: &mut [f64], hessian: &mut [f64]) {
-        for item in self.iter() { item.accumulate_blocks64(grad, hessian); }
+    fn accumulate_hessian64(&self, hessian: &mut [f64]) {
+        for item in self.iter() { item.accumulate_hessian64(hessian); }
     }
-    fn accumulate_blocks_band32(&self, grad: &mut [f32], band: &mut [f32], kd: usize) -> Result<(), crate::simple_lm::BandError> {
-        for item in self.iter() { item.accumulate_blocks_band32(grad, band, kd)?; }
+    fn accumulate_hessian_band32(&self, band: &mut [f32], kd: usize) -> Result<(), crate::simple_lm::BandError> {
+        for item in self.iter() { item.accumulate_hessian_band32(band, kd)?; }
         Ok(())
     }
-    fn accumulate_blocks_band64(&self, grad: &mut [f64], band: &mut [f64], kd: usize) -> Result<(), crate::simple_lm::BandError> {
-        for item in self.iter() { item.accumulate_blocks_band64(grad, band, kd)?; }
+    fn accumulate_hessian_band64(&self, band: &mut [f64], kd: usize) -> Result<(), crate::simple_lm::BandError> {
+        for item in self.iter() { item.accumulate_hessian_band64(band, kd)?; }
         Ok(())
     }
-    fn accumulate_blocks_sparse32(&self, grad: &mut [f32], coo: &mut crate::simple_lm::CooMatrix<f32>) {
-        for item in self.iter() { item.accumulate_blocks_sparse32(grad, coo); }
+    fn accumulate_hessian_sparse32(&self, coo: &mut crate::simple_lm::CooMatrix<f32>) {
+        for item in self.iter() { item.accumulate_hessian_sparse32(coo); }
     }
-    fn accumulate_blocks_sparse64(&self, grad: &mut [f64], coo: &mut crate::simple_lm::CooMatrix<f64>) {
-        for item in self.iter() { item.accumulate_blocks_sparse64(grad, coo); }
+    fn accumulate_hessian_sparse64(&self, coo: &mut crate::simple_lm::CooMatrix<f64>) {
+        for item in self.iter() { item.accumulate_hessian_sparse64(coo); }
     }
-    fn accumulate_blocks_sparse_direct32(&self, grad: &mut [f32], csc: &mut crate::simple_lm::CscMatrix<f32>) {
-        for item in self.iter() { item.accumulate_blocks_sparse_direct32(grad, csc); }
+    fn accumulate_hessian_sparse_direct32(&self, csc: &mut crate::simple_lm::CscMatrix<f32>) {
+        for item in self.iter() { item.accumulate_hessian_sparse_direct32(csc); }
     }
-    fn accumulate_blocks_sparse_direct64(&self, grad: &mut [f64], csc: &mut crate::simple_lm::CscMatrix<f64>) {
-        for item in self.iter() { item.accumulate_blocks_sparse_direct64(grad, csc); }
+    fn accumulate_hessian_sparse_direct64(&self, csc: &mut crate::simple_lm::CscMatrix<f64>) {
+        for item in self.iter() { item.accumulate_hessian_sparse_direct64(csc); }
     }
-    fn accumulate_blocks_sparse_indexed32(&self, grad: &mut [f32], vals: &mut [f32], positions: &[usize], cursor: &mut usize) {
-        for item in self.iter() { item.accumulate_blocks_sparse_indexed32(grad, vals, positions, cursor); }
+    fn accumulate_hessian_sparse_indexed32(&self, vals: &mut [f32], positions: &[usize], cursor: &mut usize) {
+        for item in self.iter() { item.accumulate_hessian_sparse_indexed32(vals, positions, cursor); }
     }
-    fn accumulate_blocks_sparse_indexed64(&self, grad: &mut [f64], vals: &mut [f64], positions: &[usize], cursor: &mut usize) {
-        for item in self.iter() { item.accumulate_blocks_sparse_indexed64(grad, vals, positions, cursor); }
+    fn accumulate_hessian_sparse_indexed64(&self, vals: &mut [f64], positions: &[usize], cursor: &mut usize) {
+        for item in self.iter() { item.accumulate_hessian_sparse_indexed64(vals, positions, cursor); }
     }
 }
 
@@ -944,37 +949,37 @@ impl<T: Model> Model for Option<T> {
     fn zero_blocks(&mut self) {
         if let Some(inner) = self { inner.zero_blocks(); }
     }
-    fn accumulate_blocks32(&self, grad: &mut [f32], hessian: &mut [f32]) {
-        if let Some(inner) = self { inner.accumulate_blocks32(grad, hessian); }
+    fn accumulate_hessian32(&self, hessian: &mut [f32]) {
+        if let Some(inner) = self { inner.accumulate_hessian32(hessian); }
     }
-    fn accumulate_blocks64(&self, grad: &mut [f64], hessian: &mut [f64]) {
-        if let Some(inner) = self { inner.accumulate_blocks64(grad, hessian); }
+    fn accumulate_hessian64(&self, hessian: &mut [f64]) {
+        if let Some(inner) = self { inner.accumulate_hessian64(hessian); }
     }
-    fn accumulate_blocks_band32(&self, grad: &mut [f32], band: &mut [f32], kd: usize) -> Result<(), crate::simple_lm::BandError> {
-        if let Some(inner) = self { inner.accumulate_blocks_band32(grad, band, kd)?; }
+    fn accumulate_hessian_band32(&self, band: &mut [f32], kd: usize) -> Result<(), crate::simple_lm::BandError> {
+        if let Some(inner) = self { inner.accumulate_hessian_band32(band, kd)?; }
         Ok(())
     }
-    fn accumulate_blocks_band64(&self, grad: &mut [f64], band: &mut [f64], kd: usize) -> Result<(), crate::simple_lm::BandError> {
-        if let Some(inner) = self { inner.accumulate_blocks_band64(grad, band, kd)?; }
+    fn accumulate_hessian_band64(&self, band: &mut [f64], kd: usize) -> Result<(), crate::simple_lm::BandError> {
+        if let Some(inner) = self { inner.accumulate_hessian_band64(band, kd)?; }
         Ok(())
     }
-    fn accumulate_blocks_sparse32(&self, grad: &mut [f32], coo: &mut crate::simple_lm::CooMatrix<f32>) {
-        if let Some(inner) = self { inner.accumulate_blocks_sparse32(grad, coo); }
+    fn accumulate_hessian_sparse32(&self, coo: &mut crate::simple_lm::CooMatrix<f32>) {
+        if let Some(inner) = self { inner.accumulate_hessian_sparse32(coo); }
     }
-    fn accumulate_blocks_sparse64(&self, grad: &mut [f64], coo: &mut crate::simple_lm::CooMatrix<f64>) {
-        if let Some(inner) = self { inner.accumulate_blocks_sparse64(grad, coo); }
+    fn accumulate_hessian_sparse64(&self, coo: &mut crate::simple_lm::CooMatrix<f64>) {
+        if let Some(inner) = self { inner.accumulate_hessian_sparse64(coo); }
     }
-    fn accumulate_blocks_sparse_direct32(&self, grad: &mut [f32], csc: &mut crate::simple_lm::CscMatrix<f32>) {
-        if let Some(inner) = self { inner.accumulate_blocks_sparse_direct32(grad, csc); }
+    fn accumulate_hessian_sparse_direct32(&self, csc: &mut crate::simple_lm::CscMatrix<f32>) {
+        if let Some(inner) = self { inner.accumulate_hessian_sparse_direct32(csc); }
     }
-    fn accumulate_blocks_sparse_direct64(&self, grad: &mut [f64], csc: &mut crate::simple_lm::CscMatrix<f64>) {
-        if let Some(inner) = self { inner.accumulate_blocks_sparse_direct64(grad, csc); }
+    fn accumulate_hessian_sparse_direct64(&self, csc: &mut crate::simple_lm::CscMatrix<f64>) {
+        if let Some(inner) = self { inner.accumulate_hessian_sparse_direct64(csc); }
     }
-    fn accumulate_blocks_sparse_indexed32(&self, grad: &mut [f32], vals: &mut [f32], positions: &[usize], cursor: &mut usize) {
-        if let Some(inner) = self { inner.accumulate_blocks_sparse_indexed32(grad, vals, positions, cursor); }
+    fn accumulate_hessian_sparse_indexed32(&self, vals: &mut [f32], positions: &[usize], cursor: &mut usize) {
+        if let Some(inner) = self { inner.accumulate_hessian_sparse_indexed32(vals, positions, cursor); }
     }
-    fn accumulate_blocks_sparse_indexed64(&self, grad: &mut [f64], vals: &mut [f64], positions: &[usize], cursor: &mut usize) {
-        if let Some(inner) = self { inner.accumulate_blocks_sparse_indexed64(grad, vals, positions, cursor); }
+    fn accumulate_hessian_sparse_indexed64(&self, vals: &mut [f64], positions: &[usize], cursor: &mut usize) {
+        if let Some(inner) = self { inner.accumulate_hessian_sparse_indexed64(vals, positions, cursor); }
     }
 }
 
@@ -988,16 +993,18 @@ fn tri_idx(n: usize, i: usize, j: usize) -> usize {
     i * (2 * n - i - 1) / 2 + j
 }
 
+
 /// Hessian block for a single model type.
 ///
-/// Accumulates gradient and the upper triangle of the Gauss-Newton Hessian
-/// approximation from constraint residuals involving one model's parameters.
+/// Accumulates the upper triangle of the Gauss-Newton Hessian approximation
+/// (2·dr·dr^T) from constraint residuals involving one model's parameters.
+/// Gradient entries (2·r·dr) are written directly to the global gradient
+/// vector by `add_residual` — no per-block grad buffer.
 /// `N` equals `A::PARAM_COUNT`. `T` is the float type (f32 or f64, default f64).
 ///
 /// Created by generated constraint code; users rarely construct these manually.
 pub struct SelfBlock<A: Model, const N: usize, T: crate::utils::Float = f64> {
     indices: [u32; N],
-    grad: [T; N],
     hessian: std::vec::Vec<T>,
     _marker: std::marker::PhantomData<(A, T)>,
 }
@@ -1011,7 +1018,6 @@ impl<A: Model, const N: usize, T: crate::utils::Float> SelfBlock<A, N, T> {
     pub fn new() -> Self {
         SelfBlock {
             indices: [u32::MAX; N],
-            grad: std::array::from_fn(|_| T::zero()),
             hessian: vec![T::zero(); N * (N + 1) / 2],
             _marker: std::marker::PhantomData,
         }
@@ -1022,9 +1028,9 @@ impl<A: Model, const N: usize, T: crate::utils::Float> SelfBlock<A, N, T> {
         self.indices = *indices;
     }
 
-    /// Reset gradient and hessian to zero.
+    /// Reset Hessian to zero. Gradient lives in the global grad vector,
+    /// which LM zeros before each compute pass.
     pub fn zero(&mut self) {
-        self.grad = std::array::from_fn(|_| T::zero());
         self.hessian.fill(T::zero());
     }
 
@@ -1033,25 +1039,29 @@ impl<A: Model, const N: usize, T: crate::utils::Float> SelfBlock<A, N, T> {
         self.indices.iter().any(|&i| i != u32::MAX)
     }
 
-    /// Add one residual's contribution: accumulates 2*r*dr into gradient and 2*dr*dr^T into hessian.
-    pub fn add_residual(&mut self, r: T, dr: &[T; N]) {
+    /// Add one residual's contribution. Writes `2·r·dr[i]` into the global
+    /// `grad` at this block's indices, and accumulates `2·dr·dr^T` into the
+    /// block's internal upper-triangular Hessian.
+    pub fn add_residual(&mut self, r: T, dr: &[T; N], grad: &mut [T]) {
         let two = T::two();
         for i in 0..N {
-            self.grad[i] += two * r * dr[i];
+            let gi = self.indices[i];
+            if gi != u32::MAX {
+                grad[gi as usize] += two * r * dr[i];
+            }
             for j in i..N {
                 self.hessian[tri_idx(N, i, j)] += two * dr[i] * dr[j];
             }
         }
     }
 
-    /// Accumulate this block into the full dense gradient and symmetric hessian.
-    pub fn accumulate(&self, grad: &mut [T], hessian: &mut [T]) {
-        let n_total = grad.len();
+    /// Accumulate this block's Hessian into the full dense symmetric hessian.
+    pub fn accumulate_hessian(&self, hessian: &mut [T]) {
+        let n_total = (hessian.len() as f64).sqrt() as usize;
         for i in 0..N {
             let gi = self.indices[i];
             if gi == u32::MAX { continue; }
             let gi = gi as usize;
-            grad[gi] += self.grad[i];
             for j in i..N {
                 let gj = self.indices[j];
                 if gj == u32::MAX { continue; }
@@ -1067,7 +1077,7 @@ impl<A: Model, const N: usize, T: crate::utils::Float> SelfBlock<A, N, T> {
 
     /// Accumulate into upper-band format (column-major, (kd+1)*n).
     /// Returns Err if any element exceeds bandwidth kd.
-    pub fn accumulate_band(&self, grad: &mut [T], band: &mut [T], kd: usize)
+    pub fn accumulate_hessian_band(&self, band: &mut [T], kd: usize)
         -> Result<(), crate::simple_lm::BandError>
     {
         let ldab = kd + 1;
@@ -1075,7 +1085,6 @@ impl<A: Model, const N: usize, T: crate::utils::Float> SelfBlock<A, N, T> {
             let gi = self.indices[i];
             if gi == u32::MAX { continue; }
             let gi = gi as usize;
-            grad[gi] += self.grad[i];
             for j in i..N {
                 let gj = self.indices[j];
                 if gj == u32::MAX { continue; }
@@ -1092,11 +1101,10 @@ impl<A: Model, const N: usize, T: crate::utils::Float> SelfBlock<A, N, T> {
     }
 
     /// Accumulate into COO (triplet) sparse format. Upper triangle only.
-    pub fn accumulate_sparse(&self, grad: &mut [T], coo: &mut crate::simple_lm::CooMatrix<T>) {
+    pub fn accumulate_hessian_sparse(&self, coo: &mut crate::simple_lm::CooMatrix<T>) {
         for i in 0..N {
             let gi = self.indices[i];
             if gi == u32::MAX { continue; }
-            grad[gi as usize] += self.grad[i];
             for j in i..N {
                 let gj = self.indices[j];
                 if gj == u32::MAX { continue; }
@@ -1108,11 +1116,10 @@ impl<A: Model, const N: usize, T: crate::utils::Float> SelfBlock<A, N, T> {
     }
 
     /// Accumulate directly into CSC vals array using position lookup.
-    pub fn accumulate_sparse_direct(&self, grad: &mut [T], csc: &mut crate::simple_lm::CscMatrix<T>) {
+    pub fn accumulate_hessian_sparse_direct(&self, csc: &mut crate::simple_lm::CscMatrix<T>) {
         for i in 0..N {
             let gi = self.indices[i];
             if gi == u32::MAX { continue; }
-            grad[gi as usize] += self.grad[i];
             for j in i..N {
                 let gj = self.indices[j];
                 if gj == u32::MAX { continue; }
@@ -1127,11 +1134,10 @@ impl<A: Model, const N: usize, T: crate::utils::Float> SelfBlock<A, N, T> {
 
     /// Accumulate into CSC vals using precomputed position list.
     /// `cursor` advances through `positions` in lockstep with block traversal.
-    pub fn accumulate_sparse_indexed(&self, grad: &mut [T], vals: &mut [T], positions: &[usize], cursor: &mut usize) {
+    pub fn accumulate_hessian_sparse_indexed(&self, vals: &mut [T], positions: &[usize], cursor: &mut usize) {
         for i in 0..N {
             let gi = self.indices[i];
             if gi == u32::MAX { continue; }
-            grad[gi as usize] += self.grad[i];
             for j in i..N {
                 let gj = self.indices[j];
                 if gj == u32::MAX { continue; }
@@ -1200,7 +1206,8 @@ impl<A: Model, B: Model, const NA: usize, const NB: usize, T: crate::utils::Floa
 
     /// Add one residual's cross contribution: accumulates `2 * dr_a[i] * dr_b[j]`
     /// into the A×B rectangular Hessian. Gradient and A-A / B-B pairs must be
-    /// added separately to A's and B's SelfBlocks.
+    /// added separately via A's and B's SelfBlocks (they receive `r` + per-side
+    /// `dr` directly).
     pub fn add_residual_cross(&mut self, _r: T, dr_a: &[T; NA], dr_b: &[T; NB]) {
         let two = T::two();
         for i in 0..NA {
@@ -1214,10 +1221,8 @@ impl<A: Model, B: Model, const NA: usize, const NB: usize, T: crate::utils::Floa
     }
 
     /// Accumulate cross pairs into the full dense symmetric hessian.
-    /// Writes to `H[a, b]` and `H[b, a]` (the transpose) only; A-A / B-B
-    /// pairs are NOT written here (they live in the SelfBlocks).
-    pub fn accumulate(&self, _grad: &mut [T], hessian: &mut [T]) {
-        let n_total = _grad.len();
+    pub fn accumulate_hessian(&self, hessian: &mut [T]) {
+        let n_total = (hessian.len() as f64).sqrt() as usize;
         for i in 0..NA {
             let gi = self.indices_a[i];
             if gi == u32::MAX { continue; }
@@ -1228,7 +1233,7 @@ impl<A: Model, B: Model, const NA: usize, const NB: usize, T: crate::utils::Floa
                 if gj == u32::MAX { continue; }
                 let gj = gj as usize;
                 let val = self.cross_hessian[row + j];
-                if gi == gj { continue; }    // diagonal belongs to a SelfBlock
+                if gi == gj { continue; }
                 hessian[gi * n_total + gj] += val;
                 hessian[gj * n_total + gi] += val;
             }
@@ -1236,7 +1241,7 @@ impl<A: Model, B: Model, const NA: usize, const NB: usize, T: crate::utils::Floa
     }
 
     /// Accumulate into upper-band format (column-major, (kd+1)*n).
-    pub fn accumulate_band(&self, _grad: &mut [T], band: &mut [T], kd: usize)
+    pub fn accumulate_hessian_band(&self, band: &mut [T], kd: usize)
         -> Result<(), crate::simple_lm::BandError>
     {
         let ldab = kd + 1;
@@ -1261,8 +1266,8 @@ impl<A: Model, B: Model, const NA: usize, const NB: usize, T: crate::utils::Floa
         Ok(())
     }
 
-    /// Accumulate into COO (triplet) sparse format. Upper triangle only.
-    pub fn accumulate_sparse(&self, _grad: &mut [T], coo: &mut crate::simple_lm::CooMatrix<T>) {
+    /// Accumulate into COO sparse format. Upper triangle only.
+    pub fn accumulate_hessian_sparse(&self, coo: &mut crate::simple_lm::CooMatrix<T>) {
         for i in 0..NA {
             let gi = self.indices_a[i];
             if gi == u32::MAX { continue; }
@@ -1278,8 +1283,8 @@ impl<A: Model, B: Model, const NA: usize, const NB: usize, T: crate::utils::Floa
         }
     }
 
-    /// Accumulate directly into CSC vals array using position lookup.
-    pub fn accumulate_sparse_direct(&self, _grad: &mut [T], csc: &mut crate::simple_lm::CscMatrix<T>) {
+    /// Accumulate directly into CSC vals via position lookup.
+    pub fn accumulate_hessian_sparse_direct(&self, csc: &mut crate::simple_lm::CscMatrix<T>) {
         for i in 0..NA {
             let gi = self.indices_a[i];
             if gi == u32::MAX { continue; }
@@ -1297,8 +1302,8 @@ impl<A: Model, B: Model, const NA: usize, const NB: usize, T: crate::utils::Floa
         }
     }
 
-    /// Accumulate into CSC vals using precomputed position list.
-    pub fn accumulate_sparse_indexed(&self, _grad: &mut [T], vals: &mut [T], positions: &[usize], cursor: &mut usize) {
+    /// Accumulate into CSC vals via precomputed position list.
+    pub fn accumulate_hessian_sparse_indexed(&self, vals: &mut [T], positions: &[usize], cursor: &mut usize) {
         for i in 0..NA {
             let gi = self.indices_a[i];
             if gi == u32::MAX { continue; }
@@ -1319,23 +1324,35 @@ impl<A: Model, B: Model, const NA: usize, const NB: usize, T: crate::utils::Floa
 // TripletBlock -- sparse Hessian/gradient accumulation for N-ary constraints
 // ---------------------------------------------------------------------------
 
-/// Sparse Hessian and gradient accumulation block using COO (triplet) format.
+/// Sparse cross-only Hessian accumulation block for N-ary constraints.
 ///
-/// Unlike [`SelfBlock`] and [`CrossBlock`] which use packed dense storage for
-/// fixed-size blocks, `TripletBlock` stores individual `(index, value)` entries.
-/// This supports constraints that reference 3 or more entities where the total
-/// parameter count spans multiple entity types.
+/// After the refactor: TripletBlock stores ONLY across-entity Hessian pairs
+/// (pairs where the two params belong to different entity spans). The
+/// within-entity H[A,A] / H[B,B] / ... diagonals live in each entity's
+/// `SelfBlock<Self>`, and the gradient lives there too. This matches the
+/// invariant that every `∂r/∂p_i · ∂r/∂p_j` pair is written to exactly one
+/// block with no duplication.
 ///
 /// **Prefer [`CrossBlock`] for 2-entity constraints.** CrossBlock uses packed
-/// dense storage with compile-time-known sizes, which is more cache-friendly
-/// and avoids the Vec allocation overhead of COO format. Use TripletBlock only
-/// when a constraint couples 3+ entities that cannot fit in a single CrossBlock.
+/// dense storage with compile-time-known NA×NB size, which is more
+/// cache-friendly than COO. Use TripletBlock only when a constraint couples
+/// 3+ entities.
 ///
-/// Call [`add_residual`](TripletBlock::add_residual) with the global parameter
-/// indices and derivatives for each residual. Then [`accumulate`](TripletBlock::accumulate) merges the
-/// entries into the global dense or sparse matrices.
+/// Two entry points:
+/// - [`add_residual`](TripletBlock::add_residual) for direct callers with a
+///   flat param layout and no per-entity SelfBlocks: writes the gradient into
+///   the provided global slice AND pushes the full upper-triangle Hessian
+///   (including diagonal). One call, everything done.
+/// - [`add_residual_cross`](TripletBlock::add_residual_cross) for macro-
+///   emitted N-ary constraints where each participating entity has its own
+///   SelfBlock holding its grad+diagonal: stores ONLY across-entity pairs,
+///   using the `entity_offsets` span list to skip within-entity pairs.
 pub struct TripletBlock<T: crate::utils::Float = f64> {
-    pub grad: std::vec::Vec<(u32, T)>,
+    /// Hessian entries: upper-triangle (lo, hi, 2·dr_i·dr_j). Only cross-
+    /// entity pairs are stored (within-entity pairs live in each entity's
+    /// `SelfBlock`). Callers that manage their own flat param layout
+    /// without per-entity blocks can pass each param as its own "entity"
+    /// (entity_offsets = [0, 1, 2, ..., N]) to make every pair cross.
     pub hessian: std::vec::Vec<(u32, u32, T)>,
 }
 
@@ -1345,24 +1362,27 @@ impl<T: crate::utils::Float> Default for TripletBlock<T> {
 
 impl<T: crate::utils::Float> TripletBlock<T> {
     pub fn new() -> Self {
-        TripletBlock { grad: std::vec::Vec::new(), hessian: std::vec::Vec::new() }
+        TripletBlock { hessian: std::vec::Vec::new() }
     }
 
     /// Reset to empty (called at start of each optimization step).
     pub fn zero(&mut self) {
-        self.grad.clear();
         self.hessian.clear();
     }
 
-    /// Add one residual's contribution.
-    /// `indices` and `dr` must have the same length (one per parameter).
-    /// Accumulates 2*r*dr into gradient and 2*dr*dr^T into hessian (upper triangle).
-    pub fn add_residual(&mut self, r: T, indices: &[u32], dr: &[T]) {
+    /// One-shot entry for direct callers with a flat param layout and no
+    /// per-entity SelfBlocks. Writes the gradient entries `2*r*dr[i]` into
+    /// the provided global `grad` slice, and pushes the full upper-triangle
+    /// Hessian `(i, j, 2*dr[i]*dr[j])` for every `i <= j` (including the
+    /// diagonal) into `self.hessian`. `u32::MAX` entries in `indices` are
+    /// skipped (fixed/non-optimizable params).
+    pub fn add_residual(&mut self, r: T, indices: &[u32], dr: &[T], grad: &mut [T]) {
         let two = T::two();
         let n = indices.len();
         for i in 0..n {
             if indices[i] == u32::MAX { continue; }
-            self.grad.push((indices[i], two * r * dr[i]));
+            let gi = indices[i] as usize;
+            grad[gi] += two * r * dr[i];
             for j in i..n {
                 if indices[j] == u32::MAX { continue; }
                 let (lo, hi) = if indices[i] <= indices[j] {
@@ -1375,12 +1395,44 @@ impl<T: crate::utils::Float> TripletBlock<T> {
         }
     }
 
-    /// Accumulate into full dense gradient and symmetric hessian.
-    pub fn accumulate(&self, grad: &mut [T], hessian: &mut [T]) {
-        let n_total = grad.len();
-        for &(i, v) in &self.grad {
-            grad[i as usize] += v;
+    /// Macro-emission entry for N-ary constraints where each participating
+    /// entity has its own `SelfBlock<Self>` holding its grad + within-entity
+    /// Hessian diagonal. Stores ONLY across-entity pairs — within-entity
+    /// pairs are skipped (they live in the entity SelfBlock).
+    ///
+    /// `entity_offsets` is the cumulative span boundary list
+    /// (e.g. `[0, 6, 12, 18]` for three 6-param entities). Pairs `(i, j)`
+    /// where `i` and `j` fall inside the same entity span are skipped.
+    pub fn add_residual_cross(&mut self, _r: T, indices: &[u32], dr: &[T], entity_offsets: &[u32]) {
+        let two = T::two();
+        let n = indices.len();
+        let span_of = |i: u32| -> u32 {
+            let mut k = 0u32;
+            for (idx, &off) in entity_offsets.iter().enumerate() {
+                if off <= i { k = idx as u32; } else { break; }
+            }
+            k
+        };
+        for i in 0..n {
+            if indices[i] == u32::MAX { continue; }
+            let span_i = span_of(i as u32);
+            for j in (i + 1)..n {
+                if indices[j] == u32::MAX { continue; }
+                let span_j = span_of(j as u32);
+                if span_i == span_j { continue; }
+                let (lo, hi) = if indices[i] <= indices[j] {
+                    (indices[i], indices[j])
+                } else {
+                    (indices[j], indices[i])
+                };
+                self.hessian.push((lo, hi, two * dr[i] * dr[j]));
+            }
         }
+    }
+
+    /// Accumulate Hessian pairs into the full dense symmetric hessian.
+    pub fn accumulate_hessian(&self, hessian: &mut [T]) {
+        let n_total = (hessian.len() as f64).sqrt() as usize;
         for &(i, j, v) in &self.hessian {
             let (i, j) = (i as usize, j as usize);
             hessian[i * n_total + j] += v;
@@ -1390,14 +1442,11 @@ impl<T: crate::utils::Float> TripletBlock<T> {
         }
     }
 
-    /// Accumulate into upper-band format. Returns Err if any element exceeds bandwidth.
-    pub fn accumulate_band(&self, grad: &mut [T], band: &mut [T], kd: usize)
+    /// Accumulate into upper-band format.
+    pub fn accumulate_hessian_band(&self, band: &mut [T], kd: usize)
         -> Result<(), crate::simple_lm::BandError>
     {
         let ldab = kd + 1;
-        for &(i, v) in &self.grad {
-            grad[i as usize] += v;
-        }
         for &(row, col, v) in &self.hessian {
             let (r, c) = (row as usize, col as usize);
             if c < r || c - r > kd {
@@ -1408,21 +1457,15 @@ impl<T: crate::utils::Float> TripletBlock<T> {
         Ok(())
     }
 
-    /// Accumulate into COO (triplet) sparse format. Upper triangle only.
-    pub fn accumulate_sparse(&self, grad: &mut [T], coo: &mut crate::simple_lm::CooMatrix<T>) {
-        for &(i, v) in &self.grad {
-            grad[i as usize] += v;
-        }
+    /// Accumulate into COO sparse format. Upper triangle only.
+    pub fn accumulate_hessian_sparse(&self, coo: &mut crate::simple_lm::CooMatrix<T>) {
         for &(i, j, v) in &self.hessian {
             coo.push(i, j, v);
         }
     }
 
-    /// Accumulate directly into CSC vals array using position lookup.
-    pub fn accumulate_sparse_direct(&self, grad: &mut [T], csc: &mut crate::simple_lm::CscMatrix<T>) {
-        for &(i, v) in &self.grad {
-            grad[i as usize] += v;
-        }
+    /// Accumulate directly into CSC vals via position lookup.
+    pub fn accumulate_hessian_sparse_direct(&self, csc: &mut crate::simple_lm::CscMatrix<T>) {
         for &(row, col, v) in &self.hessian {
             if let Some(pos) = csc.find_pos(row as usize, col as usize) {
                 csc.vals[pos] += v;
@@ -1430,17 +1473,8 @@ impl<T: crate::utils::Float> TripletBlock<T> {
         }
     }
 
-    /// Accumulate into CSC vals using precomputed position list.
-    /// Note: TripletBlock cannot use precomputed positions since entries
-    /// are dynamic. Falls back to find_pos lookup.
-    /// Accumulate into CSC vals using precomputed position list.
-    /// TripletBlock entries are deterministic (same entity refs produce
-    /// same entries in same order), so the cursor advances in lockstep
-    /// with the COO entries emitted during pattern discovery.
-    pub fn accumulate_sparse_indexed(&self, grad: &mut [T], vals: &mut [T], positions: &[usize], cursor: &mut usize) {
-        for &(i, v) in &self.grad {
-            grad[i as usize] += v;
-        }
+    /// Accumulate into CSC vals via precomputed position list.
+    pub fn accumulate_hessian_sparse_indexed(&self, vals: &mut [T], positions: &[usize], cursor: &mut usize) {
         for &(_, _, v) in &self.hessian {
             vals[positions[*cursor]] += v;
             *cursor += 1;

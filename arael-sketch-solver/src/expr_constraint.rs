@@ -58,13 +58,18 @@ impl ExpressionConstraint {
             .collect();
     }
 
-    /// Compute the residual and derivatives, push into the shared TripletBlock.
-    pub fn compute(&self, vars: &HashMap<&str, f64>, constraint_isigma: f64, hb: &mut TripletBlock<f64>) -> Result<(), String> {
+    /// Compute the residual and derivatives, write grad directly into the
+    /// global `grad` vector and push cross pairs into the shared
+    /// TripletBlock. Each param symbol is treated as its own "entity"
+    /// (per-param span boundaries), so every pair is cross → full upper
+    /// triangle stored in the TripletBlock.
+    pub fn compute(&self, vars: &HashMap<&str, f64>, constraint_isigma: f64,
+                   hb: &mut TripletBlock<f64>, grad: &mut [f64]) -> Result<(), String> {
         let r = self.expr.eval(vars)? * constraint_isigma;
-        let dr: Result<Vec<f64>, String> = self.param_derivs.iter()
-            .map(|(_, deriv)| Ok(deriv.eval(vars)? * constraint_isigma))
-            .collect();
-        hb.add_residual(r, &self.indices, &dr?);
+        let dr: Vec<f64> = self.param_derivs.iter()
+            .map(|(_, deriv)| Ok::<_, String>(deriv.eval(vars)? * constraint_isigma))
+            .collect::<Result<_, _>>()?;
+        hb.add_residual(r, &self.indices, &dr, grad);
         Ok(())
     }
 

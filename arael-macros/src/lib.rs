@@ -553,16 +553,16 @@ fn emit_trivial_model_for_enum(input: &mut syn::DeriveInput) -> TokenStream2 {
             fn serialize_size(&self) -> u32 { 0 }
             fn param_symbols(_base: &str, _out: &mut std::vec::Vec<String>) {}
             fn zero_blocks(&mut self) {}
-            fn accumulate_blocks32(&self, _grad: &mut [f32], _hessian: &mut [f32]) {}
-            fn accumulate_blocks64(&self, _grad: &mut [f64], _hessian: &mut [f64]) {}
-            fn accumulate_blocks_band32(&self, _grad: &mut [f32], _band: &mut [f32], _kd: usize) -> Result<(), arael::simple_lm::BandError> { Ok(()) }
-            fn accumulate_blocks_band64(&self, _grad: &mut [f64], _band: &mut [f64], _kd: usize) -> Result<(), arael::simple_lm::BandError> { Ok(()) }
-            fn accumulate_blocks_sparse32(&self, _grad: &mut [f32], _coo: &mut arael::simple_lm::CooMatrix<f32>) {}
-            fn accumulate_blocks_sparse64(&self, _grad: &mut [f64], _coo: &mut arael::simple_lm::CooMatrix<f64>) {}
-            fn accumulate_blocks_sparse_direct32(&self, _grad: &mut [f32], _csc: &mut arael::simple_lm::CscMatrix<f32>) {}
-            fn accumulate_blocks_sparse_direct64(&self, _grad: &mut [f64], _csc: &mut arael::simple_lm::CscMatrix<f64>) {}
-            fn accumulate_blocks_sparse_indexed32(&self, _grad: &mut [f32], _vals: &mut [f32], _positions: &[usize], _cursor: &mut usize) {}
-            fn accumulate_blocks_sparse_indexed64(&self, _grad: &mut [f64], _vals: &mut [f64], _positions: &[usize], _cursor: &mut usize) {}
+            fn accumulate_hessian32(&self, _hessian: &mut [f32]) {}
+            fn accumulate_hessian64(&self, _hessian: &mut [f64]) {}
+            fn accumulate_hessian_band32(&self, _band: &mut [f32], _kd: usize) -> Result<(), arael::simple_lm::BandError> { Ok(()) }
+            fn accumulate_hessian_band64(&self, _band: &mut [f64], _kd: usize) -> Result<(), arael::simple_lm::BandError> { Ok(()) }
+            fn accumulate_hessian_sparse32(&self, _coo: &mut arael::simple_lm::CooMatrix<f32>) {}
+            fn accumulate_hessian_sparse64(&self, _coo: &mut arael::simple_lm::CooMatrix<f64>) {}
+            fn accumulate_hessian_sparse_direct32(&self, _csc: &mut arael::simple_lm::CscMatrix<f32>) {}
+            fn accumulate_hessian_sparse_direct64(&self, _csc: &mut arael::simple_lm::CscMatrix<f64>) {}
+            fn accumulate_hessian_sparse_indexed32(&self, _vals: &mut [f32], _positions: &[usize], _cursor: &mut usize) {}
+            fn accumulate_hessian_sparse_indexed64(&self, _vals: &mut [f64], _positions: &[usize], _cursor: &mut usize) {}
         }
     }
 }
@@ -777,16 +777,16 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
     let mut deserialize64_stmts: Vec<TokenStream2> = Vec::new();
     let mut update64_phase1: Vec<TokenStream2> = Vec::new();
     let mut zero_blocks_stmts: Vec<TokenStream2> = Vec::new();
-    let mut accumulate_blocks32_stmts: Vec<TokenStream2> = Vec::new();
-    let mut accumulate_blocks64_stmts: Vec<TokenStream2> = Vec::new();
-    let mut accumulate_blocks_band32_stmts: Vec<TokenStream2> = Vec::new();
-    let mut accumulate_blocks_band64_stmts: Vec<TokenStream2> = Vec::new();
-    let mut accumulate_blocks_sparse32_stmts: Vec<TokenStream2> = Vec::new();
-    let mut accumulate_blocks_sparse64_stmts: Vec<TokenStream2> = Vec::new();
-    let mut accumulate_blocks_sparse_direct32_stmts: Vec<TokenStream2> = Vec::new();
-    let mut accumulate_blocks_sparse_direct64_stmts: Vec<TokenStream2> = Vec::new();
-    let mut accumulate_blocks_sparse_indexed32_stmts: Vec<TokenStream2> = Vec::new();
-    let mut accumulate_blocks_sparse_indexed64_stmts: Vec<TokenStream2> = Vec::new();
+    let mut accumulate_hessian32_stmts: Vec<TokenStream2> = Vec::new();
+    let mut accumulate_hessian64_stmts: Vec<TokenStream2> = Vec::new();
+    let mut accumulate_hessian_band32_stmts: Vec<TokenStream2> = Vec::new();
+    let mut accumulate_hessian_band64_stmts: Vec<TokenStream2> = Vec::new();
+    let mut accumulate_hessian_sparse32_stmts: Vec<TokenStream2> = Vec::new();
+    let mut accumulate_hessian_sparse64_stmts: Vec<TokenStream2> = Vec::new();
+    let mut accumulate_hessian_sparse_direct32_stmts: Vec<TokenStream2> = Vec::new();
+    let mut accumulate_hessian_sparse_direct64_stmts: Vec<TokenStream2> = Vec::new();
+    let mut accumulate_hessian_sparse_indexed32_stmts: Vec<TokenStream2> = Vec::new();
+    let mut accumulate_hessian_sparse_indexed64_stmts: Vec<TokenStream2> = Vec::new();
     let mut param_count_terms: Vec<TokenStream2> = Vec::new();
     let mut serialize_size_stmts: Vec<TokenStream2> = Vec::new();
     let mut param_symbols_stmts: Vec<TokenStream2> = Vec::new();
@@ -805,23 +805,23 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                 // HessianBlock fields: skip serialize, handle in zero/accumulate
                 if is_hessian_block_type(&field.ty) {
                     zero_blocks_stmts.push(quote! { self.#ident.zero(); });
-                    let acc_dense = quote! { self.#ident.accumulate(grad, hessian); };
-                    let acc_band = quote! { self.#ident.accumulate_band(grad, band, kd)?; };
-                    let acc_sparse = quote! { self.#ident.accumulate_sparse(grad, coo); };
-                    let acc_sparse_direct = quote! { self.#ident.accumulate_sparse_direct(grad, csc); };
-                    let acc_sparse_indexed = quote! { self.#ident.accumulate_sparse_indexed(grad, vals, positions, cursor); };
+                    let acc_dense = quote! { self.#ident.accumulate_hessian(hessian); };
+                    let acc_band = quote! { self.#ident.accumulate_hessian_band(band, kd)?; };
+                    let acc_sparse = quote! { self.#ident.accumulate_hessian_sparse(coo); };
+                    let acc_sparse_direct = quote! { self.#ident.accumulate_hessian_sparse_direct(csc); };
+                    let acc_sparse_indexed = quote! { self.#ident.accumulate_hessian_sparse_indexed(vals, positions, cursor); };
                     if block_is_f32(&field.ty) {
-                        accumulate_blocks32_stmts.push(acc_dense);
-                        accumulate_blocks_band32_stmts.push(acc_band);
-                        accumulate_blocks_sparse32_stmts.push(acc_sparse);
-                        accumulate_blocks_sparse_direct32_stmts.push(acc_sparse_direct);
-                        accumulate_blocks_sparse_indexed32_stmts.push(acc_sparse_indexed);
+                        accumulate_hessian32_stmts.push(acc_dense);
+                        accumulate_hessian_band32_stmts.push(acc_band);
+                        accumulate_hessian_sparse32_stmts.push(acc_sparse);
+                        accumulate_hessian_sparse_direct32_stmts.push(acc_sparse_direct);
+                        accumulate_hessian_sparse_indexed32_stmts.push(acc_sparse_indexed);
                     } else {
-                        accumulate_blocks64_stmts.push(acc_dense);
-                        accumulate_blocks_band64_stmts.push(acc_band);
-                        accumulate_blocks_sparse64_stmts.push(acc_sparse);
-                        accumulate_blocks_sparse_direct64_stmts.push(acc_sparse_direct);
-                        accumulate_blocks_sparse_indexed64_stmts.push(acc_sparse_indexed);
+                        accumulate_hessian64_stmts.push(acc_dense);
+                        accumulate_hessian_band64_stmts.push(acc_band);
+                        accumulate_hessian_sparse64_stmts.push(acc_sparse);
+                        accumulate_hessian_sparse_direct64_stmts.push(acc_sparse_direct);
+                        accumulate_hessian_sparse_indexed64_stmts.push(acc_sparse_indexed);
                     }
                     continue;
                 }
@@ -831,32 +831,32 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                         if let Some(ref mut __hb) = self.#ident { __hb.zero(); }
                     });
                     let acc_dense = quote! {
-                        if let Some(ref __hb) = self.#ident { __hb.accumulate(grad, hessian); }
+                        if let Some(ref __hb) = self.#ident { __hb.accumulate_hessian(hessian); }
                     };
                     let acc_band = quote! {
-                        if let Some(ref __hb) = self.#ident { __hb.accumulate_band(grad, band, kd)?; }
+                        if let Some(ref __hb) = self.#ident { __hb.accumulate_hessian_band(band, kd)?; }
                     };
                     let acc_sparse = quote! {
-                        if let Some(ref __hb) = self.#ident { __hb.accumulate_sparse(grad, coo); }
+                        if let Some(ref __hb) = self.#ident { __hb.accumulate_hessian_sparse(coo); }
                     };
                     let acc_sparse_direct = quote! {
-                        if let Some(ref __hb) = self.#ident { __hb.accumulate_sparse_direct(grad, csc); }
+                        if let Some(ref __hb) = self.#ident { __hb.accumulate_hessian_sparse_direct(csc); }
                     };
                     let acc_sparse_indexed = quote! {
-                        if let Some(ref __hb) = self.#ident { __hb.accumulate_sparse_indexed(grad, vals, positions, cursor); }
+                        if let Some(ref __hb) = self.#ident { __hb.accumulate_hessian_sparse_indexed(vals, positions, cursor); }
                     };
                     if block_is_f32(&field.ty) {
-                        accumulate_blocks32_stmts.push(acc_dense);
-                        accumulate_blocks_band32_stmts.push(acc_band);
-                        accumulate_blocks_sparse32_stmts.push(acc_sparse);
-                        accumulate_blocks_sparse_direct32_stmts.push(acc_sparse_direct);
-                        accumulate_blocks_sparse_indexed32_stmts.push(acc_sparse_indexed);
+                        accumulate_hessian32_stmts.push(acc_dense);
+                        accumulate_hessian_band32_stmts.push(acc_band);
+                        accumulate_hessian_sparse32_stmts.push(acc_sparse);
+                        accumulate_hessian_sparse_direct32_stmts.push(acc_sparse_direct);
+                        accumulate_hessian_sparse_indexed32_stmts.push(acc_sparse_indexed);
                     } else {
-                        accumulate_blocks64_stmts.push(acc_dense);
-                        accumulate_blocks_band64_stmts.push(acc_band);
-                        accumulate_blocks_sparse64_stmts.push(acc_sparse);
-                        accumulate_blocks_sparse_direct64_stmts.push(acc_sparse_direct);
-                        accumulate_blocks_sparse_indexed64_stmts.push(acc_sparse_indexed);
+                        accumulate_hessian64_stmts.push(acc_dense);
+                        accumulate_hessian_band64_stmts.push(acc_band);
+                        accumulate_hessian_sparse64_stmts.push(acc_sparse);
+                        accumulate_hessian_sparse_direct64_stmts.push(acc_sparse_direct);
+                        accumulate_hessian_sparse_indexed64_stmts.push(acc_sparse_indexed);
                     }
                     continue;
                 }
@@ -905,35 +905,35 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                 zero_blocks_stmts.push(quote! {
                     arael::model::Model::zero_blocks(&mut self.#ident);
                 });
-                accumulate_blocks32_stmts.push(quote! {
-                    arael::model::Model::accumulate_blocks32(&self.#ident, grad, hessian);
+                accumulate_hessian32_stmts.push(quote! {
+                    arael::model::Model::accumulate_hessian32(&self.#ident, hessian);
                 });
-                accumulate_blocks64_stmts.push(quote! {
-                    arael::model::Model::accumulate_blocks64(&self.#ident, grad, hessian);
+                accumulate_hessian64_stmts.push(quote! {
+                    arael::model::Model::accumulate_hessian64(&self.#ident, hessian);
                 });
-                accumulate_blocks_band32_stmts.push(quote! {
-                    arael::model::Model::accumulate_blocks_band32(&self.#ident, grad, band, kd)?;
+                accumulate_hessian_band32_stmts.push(quote! {
+                    arael::model::Model::accumulate_hessian_band32(&self.#ident, band, kd)?;
                 });
-                accumulate_blocks_band64_stmts.push(quote! {
-                    arael::model::Model::accumulate_blocks_band64(&self.#ident, grad, band, kd)?;
+                accumulate_hessian_band64_stmts.push(quote! {
+                    arael::model::Model::accumulate_hessian_band64(&self.#ident, band, kd)?;
                 });
-                accumulate_blocks_sparse32_stmts.push(quote! {
-                    arael::model::Model::accumulate_blocks_sparse32(&self.#ident, grad, coo);
+                accumulate_hessian_sparse32_stmts.push(quote! {
+                    arael::model::Model::accumulate_hessian_sparse32(&self.#ident, coo);
                 });
-                accumulate_blocks_sparse64_stmts.push(quote! {
-                    arael::model::Model::accumulate_blocks_sparse64(&self.#ident, grad, coo);
+                accumulate_hessian_sparse64_stmts.push(quote! {
+                    arael::model::Model::accumulate_hessian_sparse64(&self.#ident, coo);
                 });
-                accumulate_blocks_sparse_direct32_stmts.push(quote! {
-                    arael::model::Model::accumulate_blocks_sparse_direct32(&self.#ident, grad, csc);
+                accumulate_hessian_sparse_direct32_stmts.push(quote! {
+                    arael::model::Model::accumulate_hessian_sparse_direct32(&self.#ident, csc);
                 });
-                accumulate_blocks_sparse_direct64_stmts.push(quote! {
-                    arael::model::Model::accumulate_blocks_sparse_direct64(&self.#ident, grad, csc);
+                accumulate_hessian_sparse_direct64_stmts.push(quote! {
+                    arael::model::Model::accumulate_hessian_sparse_direct64(&self.#ident, csc);
                 });
-                accumulate_blocks_sparse_indexed32_stmts.push(quote! {
-                    arael::model::Model::accumulate_blocks_sparse_indexed32(&self.#ident, grad, vals, positions, cursor);
+                accumulate_hessian_sparse_indexed32_stmts.push(quote! {
+                    arael::model::Model::accumulate_hessian_sparse_indexed32(&self.#ident, vals, positions, cursor);
                 });
-                accumulate_blocks_sparse_indexed64_stmts.push(quote! {
-                    arael::model::Model::accumulate_blocks_sparse_indexed64(&self.#ident, grad, vals, positions, cursor);
+                accumulate_hessian_sparse_indexed64_stmts.push(quote! {
+                    arael::model::Model::accumulate_hessian_sparse_indexed64(&self.#ident, vals, positions, cursor);
                 });
             }
         }
@@ -978,37 +978,37 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
             fn zero_blocks(&mut self) {
                 #(#zero_blocks_stmts)*
             }
-            fn accumulate_blocks32(&self, grad: &mut [f32], hessian: &mut [f32]) {
-                #(#accumulate_blocks32_stmts)*
+            fn accumulate_hessian32(&self, hessian: &mut [f32]) {
+                #(#accumulate_hessian32_stmts)*
             }
-            fn accumulate_blocks64(&self, grad: &mut [f64], hessian: &mut [f64]) {
-                #(#accumulate_blocks64_stmts)*
+            fn accumulate_hessian64(&self, hessian: &mut [f64]) {
+                #(#accumulate_hessian64_stmts)*
             }
-            fn accumulate_blocks_band32(&self, grad: &mut [f32], band: &mut [f32], kd: usize) -> Result<(), arael::simple_lm::BandError> {
-                #(#accumulate_blocks_band32_stmts)*
+            fn accumulate_hessian_band32(&self, band: &mut [f32], kd: usize) -> Result<(), arael::simple_lm::BandError> {
+                #(#accumulate_hessian_band32_stmts)*
                 Ok(())
             }
-            fn accumulate_blocks_band64(&self, grad: &mut [f64], band: &mut [f64], kd: usize) -> Result<(), arael::simple_lm::BandError> {
-                #(#accumulate_blocks_band64_stmts)*
+            fn accumulate_hessian_band64(&self, band: &mut [f64], kd: usize) -> Result<(), arael::simple_lm::BandError> {
+                #(#accumulate_hessian_band64_stmts)*
                 Ok(())
             }
-            fn accumulate_blocks_sparse32(&self, grad: &mut [f32], coo: &mut arael::simple_lm::CooMatrix<f32>) {
-                #(#accumulate_blocks_sparse32_stmts)*
+            fn accumulate_hessian_sparse32(&self, coo: &mut arael::simple_lm::CooMatrix<f32>) {
+                #(#accumulate_hessian_sparse32_stmts)*
             }
-            fn accumulate_blocks_sparse64(&self, grad: &mut [f64], coo: &mut arael::simple_lm::CooMatrix<f64>) {
-                #(#accumulate_blocks_sparse64_stmts)*
+            fn accumulate_hessian_sparse64(&self, coo: &mut arael::simple_lm::CooMatrix<f64>) {
+                #(#accumulate_hessian_sparse64_stmts)*
             }
-            fn accumulate_blocks_sparse_direct32(&self, grad: &mut [f32], csc: &mut arael::simple_lm::CscMatrix<f32>) {
-                #(#accumulate_blocks_sparse_direct32_stmts)*
+            fn accumulate_hessian_sparse_direct32(&self, csc: &mut arael::simple_lm::CscMatrix<f32>) {
+                #(#accumulate_hessian_sparse_direct32_stmts)*
             }
-            fn accumulate_blocks_sparse_direct64(&self, grad: &mut [f64], csc: &mut arael::simple_lm::CscMatrix<f64>) {
-                #(#accumulate_blocks_sparse_direct64_stmts)*
+            fn accumulate_hessian_sparse_direct64(&self, csc: &mut arael::simple_lm::CscMatrix<f64>) {
+                #(#accumulate_hessian_sparse_direct64_stmts)*
             }
-            fn accumulate_blocks_sparse_indexed32(&self, grad: &mut [f32], vals: &mut [f32], positions: &[usize], cursor: &mut usize) {
-                #(#accumulate_blocks_sparse_indexed32_stmts)*
+            fn accumulate_hessian_sparse_indexed32(&self, vals: &mut [f32], positions: &[usize], cursor: &mut usize) {
+                #(#accumulate_hessian_sparse_indexed32_stmts)*
             }
-            fn accumulate_blocks_sparse_indexed64(&self, grad: &mut [f64], vals: &mut [f64], positions: &[usize], cursor: &mut usize) {
-                #(#accumulate_blocks_sparse_indexed64_stmts)*
+            fn accumulate_hessian_sparse_indexed64(&self, vals: &mut [f64], positions: &[usize], cursor: &mut usize) {
+                #(#accumulate_hessian_sparse_indexed64_stmts)*
             }
         }
     };

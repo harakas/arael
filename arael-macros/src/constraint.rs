@@ -881,6 +881,7 @@ pub fn generate_root_methods(
         block_ident: syn::Ident,
         constraint_index_field: Option<syn::Ident>,
         triplet_idx_stmts: Vec<TokenStream2>,
+        entity_offsets: Vec<u32>,           // cumulative entity span boundaries
         resolve_stmts: Vec<TokenStream2>,
         root_var_ident: syn::Ident,
         cost_entries: Vec<TokenStream2>,
@@ -1220,6 +1221,47 @@ pub fn generate_root_methods(
         let n_params = param_symbols.len();
         let n_residuals = residual_exprs.len();
 
+        // TripletBlock per-entity span info (needed by gh_stmts emission below).
+        // Built alongside triplet_idx_stmts later in this same iteration —
+        // collect it here so the emission has access. Each entry:
+        // (ref-field ident bound in scope, entity type ident, dr-slice start,
+        //  entity param count).
+        let mut triplet_entities: Vec<(syn::Ident, syn::Ident, usize, usize)> = Vec::new();
+        if is_triplet {
+            let struct_layout = registry_lookup(&sc.struct_name);
+            let ref_paths = struct_layout.as_ref().map(|l| l.ref_paths.clone()).unwrap_or_default();
+            let mut used = std::collections::HashSet::new();
+            let mut offset = 0usize;
+            for (field_name, _) in &ref_paths {
+                if !used.insert(field_name.clone()) { continue; }
+                if let Some(field) = fields.named.iter().find(|f|
+                    f.ident.as_ref().map(|i| i.to_string()) == Some(field_name.clone()))
+                    && let Some((_, inner_ident)) = extract_wrapper_inner(&field.ty, "Ref") {
+                        let type_name = inner_ident.to_string();
+                        if let Some(layout) = registry_lookup(&type_name) {
+                            let var_ident = syn::Ident::new(field_name, proc_macro2::Span::call_site());
+                            let type_ident = syn::Ident::new(&type_name, proc_macro2::Span::call_site());
+                            let entity_start = offset;
+                            for pf in &layout.param_fields {
+                                let size = layout.fields.iter()
+                                    .find(|(n, _)| n == pf)
+                                    .map(|(_, sft)| match sft {
+                                        SymFieldType::Scalar => 1usize,
+                                        SymFieldType::Vec2 => 2,
+                                        SymFieldType::Vec3 => 3,
+                                        _ => 0,
+                                    }).unwrap_or(0);
+                                offset += size;
+                            }
+                            let entity_count = offset - entity_start;
+                            if entity_count > 0 {
+                                triplet_entities.push((var_ident, type_ident, entity_start, entity_count));
+                            }
+                        }
+                    }
+            }
+        }
+
         // A- and B-entity param counts (scalar width). Hoisted up here so
         // both the gh_stmts cross-emission and the index-building code can
         // use them. `param_symbols` is ordered A-first then B for cross
@@ -1384,29 +1426,52 @@ pub fn generate_root_methods(
             }
             let dr_f64: Vec<TokenStream2> = dr_idents.iter().map(|d| quote! { #d as #cast_type }).collect();
             if is_triplet {
-                // TripletBlock: pass indices + derivatives as slices
+                // TripletBlock: per-entity SelfBlock writes grad + within-entity
+                // diagonals; triplet block gets only cross-entity pairs.
+                let mut triplet_calls: Vec<TokenStream2> = Vec::new();
+                for (var_id, type_id, start, count) in &triplet_entities {
+                    let hb = registry_lookup(&type_id.to_string())
+                        .and_then(|l| l.self_block_field.clone())
+                        .ok_or_else(|| syn::Error::new_spanned(&struct_ident,
+                            format!("type `{}` must declare a `SelfBlock<Self>` field (required as triplet participant)", type_id)))?;
+                    let hb_ident = syn::Ident::new(&hb, proc_macro2::Span::call_site());
+                    let entity_dr: Vec<TokenStream2> = dr_f64.iter().skip(*start).take(*count).cloned().collect();
+                    // Ref-resolved var is &T immutable via resolve_stmts; use raw-ptr cast.
+                    triplet_calls.push(quote! {
+                        unsafe {
+                            (*(#var_id as *const #type_id as *mut #type_id)).#hb_ident
+                                .add_residual(#r_ident as #cast_type, &[#(#entity_dr),*], grad);
+                        }
+                    });
+                }
                 gh_stmts.push(quote! {
-                    __frine.#block_ident.add_residual(#r_ident as #cast_type, &__all_idx, &[#(#dr_f64),*]);
+                    #(#triplet_calls)*
+                    __frine.#block_ident.add_residual_cross(
+                        #r_ident as #cast_type,
+                        &__all_idx,
+                        &[#(#dr_f64),*],
+                        &__entity_offsets,
+                    );
                 });
             } else if is_remote_block {
                 gh_stmts.push(quote! {
-                    __target_block.add_residual(#r_ident as #cast_type, &[#(#dr_f64),*]);
+                    __target_block.add_residual(#r_ident as #cast_type, &[#(#dr_f64),*], grad);
                 });
             } else if is_self_block {
                 gh_stmts.push(quote! {
-                    __item.#block_ident.add_residual(#r_ident as #cast_type, &[#(#dr_f64),*]);
+                    __item.#block_ident.add_residual(#r_ident as #cast_type, &[#(#dr_f64),*], grad);
                 });
             } else {
                 // CrossBlock: split dr into dr_a (first a_param_count) + dr_b
                 // (next b_param_count). Three calls: A's SelfBlock gets
                 // grad[A] + H[A,A] diagonal; B's SelfBlock same for B; the
                 // cross block holds only the A-B rectangular cross Hessian.
-                // __a_self_block / __b_self_block cached at top of gh_stmts.
+                // __a_self_block_ptr / __b_self_block_ptr cached at top of gh_stmts.
                 let dr_a: Vec<TokenStream2> = dr_f64.iter().take(a_param_count).cloned().collect();
                 let dr_b: Vec<TokenStream2> = dr_f64.iter().skip(a_param_count).take(b_param_count).cloned().collect();
                 gh_stmts.push(quote! {
-                    unsafe { (*__a_self_block_ptr).add_residual(#r_ident as #cast_type, &[#(#dr_a),*]); }
-                    unsafe { (*__b_self_block_ptr).add_residual(#r_ident as #cast_type, &[#(#dr_b),*]); }
+                    unsafe { (*__a_self_block_ptr).add_residual(#r_ident as #cast_type, &[#(#dr_a),*], grad); }
+                    unsafe { (*__b_self_block_ptr).add_residual(#r_ident as #cast_type, &[#(#dr_b),*], grad); }
                     __frine.#block_ident.add_residual_cross(#r_ident as #cast_type, &[#(#dr_a),*], &[#(#dr_b),*]);
                 });
             }
@@ -1543,7 +1608,9 @@ pub fn generate_root_methods(
             }).unwrap_or(0)
         }).sum::<usize>()).unwrap_or(0);
 
-        // TripletBlock: build flat index array from all ref fields
+        // TripletBlock: build flat index array from all ref fields.
+        // Entity span layout is computed above for gh_stmts; here we emit the
+        // write_indices() calls per-param-field.
         let mut triplet_idx_stmts: Vec<TokenStream2> = Vec::new();
         let mut triplet_param_count = 0usize;
         if is_triplet {
@@ -1579,6 +1646,16 @@ pub fn generate_root_methods(
                     }
             }
         }
+        // Cumulative entity offsets derived from triplet_entities (for the
+        // add_residual span boundaries).
+        let triplet_entity_offsets: Vec<u32> = {
+            let mut v: Vec<u32> = vec![0];
+            for (_, _, _start, count) in &triplet_entities {
+                let next = v.last().unwrap() + *count as u32;
+                v.push(next);
+            }
+            v
+        };
 
         // Parse guard expression — replace "self" with the loop variable
         let guard_expr: Option<syn::Expr> = constraint.guard.as_ref()
@@ -1817,6 +1894,7 @@ pub fn generate_root_methods(
                     block_ident: block_ident.clone(),
                     constraint_index_field: ci_field,
                     triplet_idx_stmts: triplet_idx_stmts.clone(),
+                    entity_offsets: triplet_entity_offsets.clone(),
                     resolve_stmts: resolve_stmts.clone(),
                     root_var_ident: root_var_ident.clone(),
                     cost_entries: Vec::new(),
@@ -2221,12 +2299,15 @@ pub fn generate_root_methods(
             }
         });
 
+        let entity_offsets = &group.entity_offsets;
+        let entity_offsets_len = entity_offsets.len();
         grad_hessian_loops.push(quote! {
             for __frine in self.#rc_ident.iter_mut() {
                 #(#resolve_stmts)*
                 let #root_var = &*__self_ref;
                 let mut __all_idx = [0u32; #tp];
                 #(#triplet_idx_stmts)*
+                let __entity_offsets: [u32; #entity_offsets_len] = [#(#entity_offsets),*];
                 #(#gh_entries)*
             }
         });
@@ -2276,19 +2357,19 @@ pub fn generate_root_methods(
         &format!("update{}", if precision == "f32" { "32" } else { "64" }),
         proc_macro2::Span::call_site());
     let accumulate_method = syn::Ident::new(
-        &format!("accumulate_blocks{}", if precision == "f32" { "32" } else { "64" }),
+        &format!("accumulate_hessian{}", if precision == "f32" { "32" } else { "64" }),
         proc_macro2::Span::call_site());
     let accumulate_band_method = syn::Ident::new(
-        &format!("accumulate_blocks_band{}", if precision == "f32" { "32" } else { "64" }),
+        &format!("accumulate_hessian_band{}", if precision == "f32" { "32" } else { "64" }),
         proc_macro2::Span::call_site());
     let accumulate_sparse_method = syn::Ident::new(
-        &format!("accumulate_blocks_sparse{}", if precision == "f32" { "32" } else { "64" }),
+        &format!("accumulate_hessian_sparse{}", if precision == "f32" { "32" } else { "64" }),
         proc_macro2::Span::call_site());
     let accumulate_sparse_direct_method = syn::Ident::new(
-        &format!("accumulate_blocks_sparse_direct{}", if precision == "f32" { "32" } else { "64" }),
+        &format!("accumulate_hessian_sparse_direct{}", if precision == "f32" { "32" } else { "64" }),
         proc_macro2::Span::call_site());
     let accumulate_sparse_indexed_method = syn::Ident::new(
-        &format!("accumulate_blocks_sparse_indexed{}", if precision == "f32" { "32" } else { "64" }),
+        &format!("accumulate_hessian_sparse_indexed{}", if precision == "f32" { "32" } else { "64" }),
         proc_macro2::Span::call_site());
 
     // Build advance() body: absorb universal_euler_angles deltas
@@ -2321,14 +2402,16 @@ pub fn generate_root_methods(
         stmts
     };
 
+    // `extended_compute_call` now passes `grad` so the extended hook can
+    // write gradient entries directly into the LM-provided slice.
     let (extended_update_call, extended_cost_call, extended_compute_call) = if precision == "f64" {
         (quote! { arael::model::ExtendedModel::extended_update64(self, params); },
          quote! { __cost += arael::model::ExtendedModel::extended_cost64(self, params); },
-         quote! { arael::model::ExtendedModel::extended_compute64(self, params); })
+         quote! { arael::model::ExtendedModel::extended_compute64(self, params, grad); })
     } else {
         (quote! { arael::model::ExtendedModel::extended_update32(self, params); },
          quote! { __cost += arael::model::ExtendedModel::extended_cost32(self, params); },
-         quote! { arael::model::ExtendedModel::extended_compute32(self, params); })
+         quote! { arael::model::ExtendedModel::extended_compute32(self, params, grad); })
     };
 
     let extended_jacobian_call = if custom {
@@ -2368,7 +2451,7 @@ pub fn generate_root_methods(
                 #(#set_block_indices_loops)*
             }
 
-            fn __compute_blocks(&mut self, params: &[#prec_type]) {
+            fn __compute_blocks(&mut self, params: &[#prec_type], grad: &mut [#prec_type]) {
                 arael::model::Model::#update_method(self, params);
                 #extended_update_call
                 let __self_ref = unsafe { &*(self as *const Self) };
@@ -2436,39 +2519,39 @@ pub fn generate_root_methods(
             }
 
             fn calc_grad_hessian_dense(&mut self, params: &[#prec_type], grad: &mut [#prec_type], hessian: &mut [#prec_type]) {
-                self.__compute_blocks(params);
                 grad.iter_mut().for_each(|g| *g = 0.0);
+                self.__compute_blocks(params, grad);
                 hessian.iter_mut().for_each(|h| *h = 0.0);
-                self.#accumulate_method(grad, hessian);
+                self.#accumulate_method(hessian);
             }
 
             fn calc_grad_hessian_band(&mut self, params: &[#prec_type], grad: &mut [#prec_type], band: &mut [#prec_type], kd: usize) -> Result<(), arael::simple_lm::BandError> {
-                self.__compute_blocks(params);
                 grad.iter_mut().for_each(|g| *g = 0.0);
+                self.__compute_blocks(params, grad);
                 band.iter_mut().for_each(|b| *b = 0.0);
-                self.#accumulate_band_method(grad, band, kd)
+                self.#accumulate_band_method(band, kd)
             }
 
             fn calc_grad_hessian_sparse(&mut self, params: &[#prec_type], grad: &mut [#prec_type], coo: &mut arael::simple_lm::CooMatrix<#prec_type>) {
-                self.__compute_blocks(params);
                 grad.iter_mut().for_each(|g| *g = 0.0);
+                self.__compute_blocks(params, grad);
                 coo.clear();
-                self.#accumulate_sparse_method(grad, coo);
+                self.#accumulate_sparse_method(coo);
             }
 
             fn calc_grad_hessian_sparse_direct(&mut self, params: &[#prec_type], grad: &mut [#prec_type], csc: &mut arael::simple_lm::CscMatrix<#prec_type>) {
-                self.__compute_blocks(params);
                 grad.iter_mut().for_each(|g| *g = 0.0);
+                self.__compute_blocks(params, grad);
                 csc.vals.iter_mut().for_each(|v| *v = 0.0 as #prec_type);
-                self.#accumulate_sparse_direct_method(grad, csc);
+                self.#accumulate_sparse_direct_method(csc);
             }
 
             fn calc_grad_hessian_sparse_indexed(&mut self, params: &[#prec_type], grad: &mut [#prec_type], vals: &mut [#prec_type], positions: &[usize]) {
-                self.__compute_blocks(params);
                 grad.iter_mut().for_each(|g| *g = 0.0);
+                self.__compute_blocks(params, grad);
                 vals.iter_mut().for_each(|v| *v = 0.0 as #prec_type);
                 let mut cursor = 0usize;
-                self.#accumulate_sparse_indexed_method(grad, vals, positions, &mut cursor);
+                self.#accumulate_sparse_indexed_method(vals, positions, &mut cursor);
             }
 
             fn advance(&mut self, params: &mut [#prec_type]) {
