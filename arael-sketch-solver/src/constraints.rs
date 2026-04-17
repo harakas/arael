@@ -1816,10 +1816,13 @@ pub struct LineP2OnArc {
 // `use_normal_ray` selects ray direction: true = B's normal (default),
 // false = B's direction (for when A/C are nearly perpendicular to B).
 // Set at constraint creation based on initial geometry.
-// Uses TripletBlock for 3-entity Hessian accumulation.
+// Dense 3-entity coupling: one named CrossBlock<Line, Line> per unordered
+// ref pair. Packed NA*NB storage is faster than TripletBlock's COO push.
+// `cross = (refA, refB)` is mandatory here since all three CrossBlocks
+// share the same type signature.
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
-#[arael(constraint(hb, {
+#[arael(constraint([hb_ab, hb_ac, hb_bc], {
     let bn = (b.p2 - b.p1).across();
     let bd = b.p2 - b.p1;
     let ad = a.p2 - a.p1;
@@ -1850,8 +1853,15 @@ pub struct SymmetryLL {
     #[arael(constraint_index)]
     #[serde(skip)]
     pub cid: u32,
+    #[arael(cross = (a, b))]
     #[serde(skip)]
-    pub hb: TripletBlock<f64>,
+    pub hb_ab: CrossBlock<Line, Line>,
+    #[arael(cross = (a, c))]
+    #[serde(skip)]
+    pub hb_ac: CrossBlock<Line, Line>,
+    #[arael(cross = (b, c))]
+    #[serde(skip)]
+    pub hb_bc: CrossBlock<Line, Line>,
 }
 
 // -- Distance Point-Line --
@@ -1987,9 +1997,13 @@ pub struct DistanceArcEndL {
 
 /// Two points forced symmetric about a mirror line.
 /// Residual: reflect a across line, compare to c.
+/// Dense 3-entity coupling: packed CrossBlocks for each pair beat
+/// TripletBlock's COO push. hb_ac is unambiguous by type (only
+/// Point-Point pair); the two Point-Line blocks need explicit
+/// `cross = (..)` to pick their ref.
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
-#[arael(constraint(hb, {
+#[arael(constraint([hb_ac, hb_al, hb_cl], {
     let dx = line.p2.x - line.p1.x;
     let dy = line.p2.y - line.p1.y;
     let len2 = dx * dx + dy * dy;
@@ -2012,7 +2026,13 @@ pub struct SymmetryPP {
     #[serde(skip)]
     pub cid: u32,
     #[serde(skip)]
-    pub hb: TripletBlock<f64>,
+    pub hb_ac: CrossBlock<Point, Point>,
+    #[arael(cross = (a, line))]
+    #[serde(skip)]
+    pub hb_al: CrossBlock<Point, Line>,
+    #[arael(cross = (c, line))]
+    #[serde(skip)]
+    pub hb_cl: CrossBlock<Point, Line>,
 }
 
 // Symmetry of two arcs/ellipses about a mirror line.
@@ -2020,9 +2040,11 @@ pub struct SymmetryPP {
 // adds radius_b equality + rotation reflection (5 residuals).
 // Cannot unify because radius_b is a real parameter for circles (equality
 // constraint), so the extra residuals affect DOF counting.
+// Dense 3-entity coupling; decomposed into packed CrossBlocks per pair.
+// Both guarded constraint bodies share the same three CrossBlock fields.
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
-#[arael(constraint(hb, guard = !a.is_ellipse && !c.is_ellipse, {
+#[arael(constraint([hb_ac, hb_al, hb_cl], guard = !a.is_ellipse && !c.is_ellipse, {
     let dx = line.p2.x - line.p1.x;
     let dy = line.p2.y - line.p1.y;
     let len2 = dx * dx + dy * dy;
@@ -2033,7 +2055,7 @@ pub struct SymmetryPP {
      (ry - c.center.y) * sketch.constraint_isigma,
      (a.radius - c.radius) * sketch.constraint_isigma]
 }))]
-#[arael(constraint(hb, guard = a.is_ellipse || c.is_ellipse, {
+#[arael(constraint([hb_ac, hb_al, hb_cl], guard = a.is_ellipse || c.is_ellipse, {
     let dx = line.p2.x - line.p1.x;
     let dy = line.p2.y - line.p1.y;
     let len2 = dx * dx + dy * dy;
@@ -2059,7 +2081,13 @@ pub struct SymmetryAA {
     #[serde(skip)]
     pub cid: u32,
     #[serde(skip)]
-    pub hb: TripletBlock<f64>,
+    pub hb_ac: CrossBlock<Arc, Arc>,
+    #[arael(cross = (a, line))]
+    #[serde(skip)]
+    pub hb_al: CrossBlock<Arc, Line>,
+    #[arael(cross = (c, line))]
+    #[serde(skip)]
+    pub hb_cl: CrossBlock<Arc, Line>,
 }
 
 // ---------------------------------------------------------------------------

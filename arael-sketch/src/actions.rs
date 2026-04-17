@@ -1,6 +1,6 @@
 // Action enum and apply() for undo/redo in the sketch editor.
 
-use arael::model::{Param, CrossBlock, TripletBlock};
+use arael::model::{Param, CrossBlock};
 use arael::refs::Ref;
 use arael::utils::deg2rad;
 use arael::vect::vect2d;
@@ -740,13 +740,22 @@ impl Action {
                 sketch.collinear.push(Collinear { a: *a, b: *b, cid: 0, hb: CrossBlock::new() });
             }
             Action::ApplySymmetryLL { a, b, c } => {
-                sketch.symmetry_ll.push(SymmetryLL { a: *a, b: *b, c: *c, cid: 0, hb: TripletBlock::new() });
+                sketch.symmetry_ll.push(SymmetryLL {
+                    a: *a, b: *b, c: *c, cid: 0,
+                    hb_ab: CrossBlock::new(), hb_ac: CrossBlock::new(), hb_bc: CrossBlock::new(),
+                });
             }
             Action::ApplySymmetryPP { a, line, c } => {
-                sketch.symmetry_pp.push(SymmetryPP { a: *a, c: *c, line: *line, cid: 0, hb: TripletBlock::new() });
+                sketch.symmetry_pp.push(SymmetryPP {
+                    a: *a, c: *c, line: *line, cid: 0,
+                    hb_ac: CrossBlock::new(), hb_al: CrossBlock::new(), hb_cl: CrossBlock::new(),
+                });
             }
             Action::ApplySymmetryAA { a, line, c } => {
-                sketch.symmetry_aa.push(SymmetryAA { a: *a, c: *c, line: *line, cid: 0, hb: TripletBlock::new() });
+                sketch.symmetry_aa.push(SymmetryAA {
+                    a: *a, c: *c, line: *line, cid: 0,
+                    hb_ac: CrossBlock::new(), hb_al: CrossBlock::new(), hb_cl: CrossBlock::new(),
+                });
             }
             Action::ApplyMidpoint { point, line } => {
                 sketch.midpoint.push(MidpointConstraint { point: *point, line: *line, cid: 0, hb: CrossBlock::new() });

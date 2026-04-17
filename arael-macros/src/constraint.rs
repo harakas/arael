@@ -952,13 +952,17 @@ pub fn build_multi_cross_routing(
             }
             (a_idx, b_idx)
         } else {
-            // Type-based auto-resolution. Collect ordered (a_idx, b_idx)
-            // pairs where a_idx != b_idx and types match.
+            // Type-based auto-resolution. When A == B (same type on both
+            // sides), (i, j) and (j, i) label the same Hessian pair, so we
+            // canonicalize on i < j to avoid spurious ambiguity. When
+            // A != B, search all ordered pairs.
             let mut pairs: Vec<(usize, usize)> = Vec::new();
+            let same_type = a_type == b_type;
             for ai in 0..triplet_entities.len() {
                 for bi in 0..triplet_entities.len() {
-                    if ai != bi
-                        && triplet_entities[ai].1 == a_type
+                    if ai == bi { continue; }
+                    if same_type && ai > bi { continue; }
+                    if triplet_entities[ai].1 == a_type
                         && triplet_entities[bi].1 == b_type
                     {
                         pairs.push((ai, bi));

@@ -796,7 +796,10 @@ fn test_symmetry_ll() {
     let b = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(0.0, 5.0));
     let c = sketch.add_line(vect2d::new(1.0, 3.0), vect2d::new(4.0, 2.0));
     sketch.symmetry_ll.push(SymmetryLL {
-        a, b, c, cid: 0, hb: arael::model::TripletBlock::new(),
+        a, b, c, cid: 0,
+        hb_ab: arael::model::CrossBlock::new(),
+        hb_ac: arael::model::CrossBlock::new(),
+        hb_bc: arael::model::CrossBlock::new(),
     });
     sketch.solve();
 
@@ -819,7 +822,10 @@ fn test_symmetry_ll_nonparallel() {
     let b = sketch.add_line(vect2d::new(0.0, -1.0), vect2d::new(0.0, 5.0));
     let c = sketch.add_line(vect2d::new(-3.0, -2.0), vect2d::new(3.0, -4.0));
     sketch.symmetry_ll.push(SymmetryLL {
-        a, b, c, cid: 0, hb: arael::model::TripletBlock::new(),
+        a, b, c, cid: 0,
+        hb_ab: arael::model::CrossBlock::new(),
+        hb_ac: arael::model::CrossBlock::new(),
+        hb_bc: arael::model::CrossBlock::new(),
     });
     sketch.solve();
 
@@ -1367,7 +1373,10 @@ fn test_symmetry_pp() {
     sketch.lines[mirror].p1 = Param::fixed(vect2d::new(5.0, 0.0));
     sketch.lines[mirror].p2 = Param::fixed(vect2d::new(5.0, 10.0));
     sketch.symmetry_pp.push(SymmetryPP {
-        a: p0, c: p1, line: mirror, cid: 0, hb: TripletBlock::new(),
+        a: p0, c: p1, line: mirror, cid: 0,
+        hb_ac: arael::model::CrossBlock::new(),
+        hb_al: arael::model::CrossBlock::new(),
+        hb_cl: arael::model::CrossBlock::new(),
     });
     let result = sketch.solve();
     assert!(result.end_cost < 1.0, "solver failed: cost={}", result.end_cost);
@@ -1390,7 +1399,10 @@ fn test_symmetry_pp_diagonal() {
     let p1 = sketch.add_point(vect2d::new(3.5, 1.5));
     let mirror = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(5.0, 5.0));
     sketch.symmetry_pp.push(SymmetryPP {
-        a: p0, c: p1, line: mirror, cid: 0, hb: TripletBlock::new(),
+        a: p0, c: p1, line: mirror, cid: 0,
+        hb_ac: arael::model::CrossBlock::new(),
+        hb_al: arael::model::CrossBlock::new(),
+        hb_cl: arael::model::CrossBlock::new(),
     });
     let result = sketch.solve();
     assert!(result.end_cost < 1.0, "solver failed: cost={}", result.end_cost);
