@@ -378,6 +378,12 @@ pub trait LmSolver<T: Float> {
     /// Apply LM damping and solve: sets diagonal to (1+lambda)*saved_diag, then solves.
     /// Returns false if the system is not positive definite.
     fn solve_damped(&mut self, n: usize, matrix: &mut Self::Matrix, diagonal: &[T], lambda: T, grad: &[T], delta: &mut [T]) -> bool;
+
+    /// Count non-finite (NaN / inf) entries in the matrix. Used by the
+    /// main loop for diagnostic output when Cholesky rejects a solve.
+    /// No default -- every solver must scan its own storage so the
+    /// diagnostic can never silently lie.
+    fn matrix_nonfinite_count(&self, matrix: &Self::Matrix) -> usize;
 }
 
 /// Dense Cholesky solver (nalgebra).
@@ -397,6 +403,9 @@ impl LmSolver<f64> for Dense {
         for i in 0..n { matrix[i * n + i] = (1.0 + lambda) * diagonal[i]; }
         solve_spd(n, matrix, grad, delta)
     }
+    fn matrix_nonfinite_count(&self, matrix: &Vec<f64>) -> usize {
+        matrix.iter().filter(|v| !v.is_finite()).count()
+    }
 }
 
 impl LmSolver<f32> for Dense {
@@ -412,6 +421,9 @@ impl LmSolver<f32> for Dense {
     fn solve_damped(&mut self, n: usize, matrix: &mut Vec<f32>, diagonal: &[f32], lambda: f32, grad: &[f32], delta: &mut [f32]) -> bool {
         for i in 0..n { matrix[i * n + i] = (1.0 + lambda) * diagonal[i]; }
         solve_spd_f32(n, matrix, grad, delta)
+    }
+    fn matrix_nonfinite_count(&self, matrix: &Vec<f32>) -> usize {
+        matrix.iter().filter(|v| !v.is_finite()).count()
     }
 }
 
@@ -440,6 +452,9 @@ impl LmSolver<f64> for Band {
         delta.copy_from_slice(grad);
         solve_spd_band(n, self.kd, &mut buf, delta)
     }
+    fn matrix_nonfinite_count(&self, matrix: &Vec<f64>) -> usize {
+        matrix.iter().filter(|v| !v.is_finite()).count()
+    }
 }
 
 impl LmSolver<f32> for Band {
@@ -459,6 +474,9 @@ impl LmSolver<f32> for Band {
         for i in 0..n { buf[self.kd + i * ldab] = (1.0 + lambda) * diagonal[i]; }
         delta.copy_from_slice(grad);
         solve_spd_band_f32(n, self.kd, &mut buf, delta)
+    }
+    fn matrix_nonfinite_count(&self, matrix: &Vec<f32>) -> usize {
+        matrix.iter().filter(|v| !v.is_finite()).count()
     }
 }
 
@@ -570,11 +588,26 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
                 if config.verbose {
                     let step_us = timer.elapsed().as_micros();
                     timer = Instant::now();
-                    eprintln!("{}/{}: Cholesky failed (damped matrix not positive-definite), lambda={} -> {} (step={})",
+                    let n_nan_g = grad.iter().filter(|v| !v.is_finite()).count();
+                    let n_nan_d = diagonal.iter().filter(|v| !v.is_finite()).count();
+                    let n_nan_x = cur_x.iter().filter(|v| !v.is_finite()).count();
+                    let n_nan_m = solver.matrix_nonfinite_count(&matrix);
+                    // A Cholesky-fit Hessian must have strictly positive
+                    // diagonals. Any diagonal <= 0 means the block
+                    // accumulation never touched that parameter (indices
+                    // left at u32::MAX, or constraint misses it) or a
+                    // negative contribution slipped in -- both are real
+                    // bugs distinct from tiny-lambda rounding.
+                    let n_nonpos_d = diagonal.iter()
+                        .filter(|v| **v <= T::zero())
+                        .count();
+                    eprintln!("{}/{}: Cholesky failed (damped matrix not positive-definite), lambda={} -> {} (step={}) [non-finite: grad={} diag={} x={} matrix={}] [diag<=0: {}]",
                         iter, inner,
                         G(lambda.to_f64().unwrap()),
                         G((lambda * lambda_up).to_f64().unwrap()),
-                        step_us);
+                        step_us,
+                        n_nan_g, n_nan_d, n_nan_x, n_nan_m,
+                        n_nonpos_d);
                 }
                 lambda *= lambda_up;
                 inner += 1;
@@ -736,6 +769,9 @@ pub struct SparseMatrix<T> {
 
 impl LmSolver<f64> for Sparse {
     type Matrix = SparseMatrix<f64>;
+    fn matrix_nonfinite_count(&self, matrix: &SparseMatrix<f64>) -> usize {
+        matrix.csc.vals.iter().filter(|v| !v.is_finite()).count()
+    }
 
     fn new_matrix(&self, n: usize) -> SparseMatrix<f64> {
         SparseMatrix { csc: CscMatrix::empty(n) }
@@ -797,6 +833,9 @@ impl SparseDirect {
 
 impl LmSolver<f64> for SparseDirect {
     type Matrix = SparseMatrix<f64>;
+    fn matrix_nonfinite_count(&self, matrix: &SparseMatrix<f64>) -> usize {
+        matrix.csc.vals.iter().filter(|v| !v.is_finite()).count()
+    }
 
     fn new_matrix(&self, n: usize) -> SparseMatrix<f64> {
         SparseMatrix { csc: CscMatrix::empty(n) }
@@ -866,6 +905,9 @@ impl SparseFaer {
 
 impl LmSolver<f64> for SparseFaer {
     type Matrix = SparseMatrix<f64>;
+    fn matrix_nonfinite_count(&self, matrix: &SparseMatrix<f64>) -> usize {
+        matrix.csc.vals.iter().filter(|v| !v.is_finite()).count()
+    }
 
     fn new_matrix(&self, n: usize) -> SparseMatrix<f64> {
         SparseMatrix { csc: CscMatrix::empty(n) }
@@ -1018,6 +1060,10 @@ impl LmSolver<f32> for SparseFaerF32 {
         }
     }
 
+    fn matrix_nonfinite_count(&self, matrix: &SparseMatrix<f32>) -> usize {
+        matrix.csc.vals.iter().filter(|v| !v.is_finite()).count()
+    }
+
     fn solve_damped(&mut self, n: usize, matrix: &mut SparseMatrix<f32>, diagonal: &[f32], lambda: f32, grad: &[f32], delta: &mut [f32]) -> bool {
         for i in 0..n { matrix.csc.vals[matrix.csc.diag_pos[i]] = (1.0 + lambda) * diagonal[i]; }
         use faer::sparse::linalg::cholesky::*;
@@ -1164,6 +1210,9 @@ fn invert_spd_3x3(u: &[f64; 6]) -> Option<[f64; 9]> {
 
 impl LmSolver<f64> for SparseSchur {
     type Matrix = SparseMatrix<f64>;
+    fn matrix_nonfinite_count(&self, matrix: &SparseMatrix<f64>) -> usize {
+        matrix.csc.vals.iter().filter(|v| !v.is_finite()).count()
+    }
 
     fn new_matrix(&self, n: usize) -> SparseMatrix<f64> {
         SparseMatrix { csc: CscMatrix::empty(n) }
@@ -1437,6 +1486,9 @@ impl Drop for SparseEigen {
 #[cfg(feature = "eigen")]
 impl LmSolver<f64> for SparseEigen {
     type Matrix = SparseMatrix<f64>;
+    fn matrix_nonfinite_count(&self, matrix: &SparseMatrix<f64>) -> usize {
+        matrix.csc.vals.iter().filter(|v| !v.is_finite()).count()
+    }
 
     fn new_matrix(&self, n: usize) -> SparseMatrix<f64> {
         SparseMatrix { csc: CscMatrix::empty(n) }
@@ -1535,6 +1587,9 @@ impl Drop for SparseCholmod {
 #[cfg(feature = "cholmod")]
 impl LmSolver<f64> for SparseCholmod {
     type Matrix = SparseMatrix<f64>;
+    fn matrix_nonfinite_count(&self, matrix: &SparseMatrix<f64>) -> usize {
+        matrix.csc.vals.iter().filter(|v| !v.is_finite()).count()
+    }
 
     fn new_matrix(&self, n: usize) -> SparseMatrix<f64> {
         SparseMatrix { csc: CscMatrix::empty(n) }
