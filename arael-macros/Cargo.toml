@@ -16,6 +16,6 @@ proc-macro = true
 [dependencies]
 syn = { version = "2", features = ["full", "visit-mut"] }
 quote = "1"
-proc-macro2 = "1"
+proc-macro2 = { version = "1", features = ["span-locations"] }
 arael-sym = { version = "0.4.1", path = "../arael-sym" }
 arael-sym-macros = { version = "0.4.1", path = "../arael-sym-macros" }

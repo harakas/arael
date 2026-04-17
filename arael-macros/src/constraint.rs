@@ -1168,6 +1168,7 @@ pub fn generate_root_methods(
         let root_name_str = root_name.to_string();
         let (residual_exprs, param_symbols) = interpret_constraint_body(
             &struct_ident, &fields.named, &constraint, &root_name_str)?;
+        check_residual_coverage(sc, &struct_ident, &residual_exprs, &param_symbols)?;
 
         // Apply euler_angles substitutions from all referenced types
         let mut all_subs: Vec<(arael_sym::E, arael_sym::E)> = Vec::new();
@@ -1516,31 +1517,40 @@ pub fn generate_root_methods(
                 }
             }
 
+            let marker = source_marker(sc);
+
             // Cost loop: iterate parent -> frines, resolve refs, evaluate
             cost_loops.push(quote! {
-                for __lm in self.#coll_ident.iter() {
-                    for __frine in &__lm.#frines_ident {
-                        #(#resolve_stmts)*
-                        let #parent_ident = __lm;
-                        let #root_var_ident = &*__self_ref;
-                        #(#cost_stmts)*
+                {
+                    #marker
+                    for __lm in self.#coll_ident.iter() {
+                        for __frine in &__lm.#frines_ident {
+                            #(#resolve_stmts)*
+                            let #parent_ident = __lm;
+                            let #root_var_ident = &*__self_ref;
+                            #(#cost_stmts)*
+                        }
                     }
                 }
             });
 
             // Grad+hessian loop: same traversal but get mutable access to target block
             let _target_coll_id = target_coll_ident.unwrap();
+            let marker_gh = marker.clone();
             grad_hessian_loops.push(quote! {
-                for __lm in self.#coll_ident.iter() {
-                    let #parent_ident = __lm;
-                    for __frine in &__lm.#frines_ident {
-                        #(#resolve_stmts)*
-                        let #root_var_ident = &*__self_ref;
-                        let __target_block = unsafe {
-                            &mut (*(#ref_field_ident
-                                as *const #target_type_ident as *mut #target_type_ident)).#block_ident
-                        };
-                        { #(#gh_stmts)* }
+                {
+                    #marker_gh
+                    for __lm in self.#coll_ident.iter() {
+                        let #parent_ident = __lm;
+                        for __frine in &__lm.#frines_ident {
+                            #(#resolve_stmts)*
+                            let #root_var_ident = &*__self_ref;
+                            let __target_block = unsafe {
+                                &mut (*(#ref_field_ident
+                                    as *const #target_type_ident as *mut #target_type_ident)).#block_ident
+                            };
+                            { #(#gh_stmts)* }
+                        }
                     }
                 }
             });
@@ -1562,24 +1572,25 @@ pub fn generate_root_methods(
             });
         } else if is_self_block {
             let self_var = syn::Ident::new(&self_var_name, proc_macro2::Span::call_site());
+            let marker = source_marker(sc);
 
             let cost_entry = if let Some(ref guard) = guard_expr {
-                quote! { if #guard { #(#cost_stmts)* } }
+                quote! { if #guard { #marker #(#cost_stmts)* } }
             } else {
-                quote! { { #(#cost_stmts)* } }
+                quote! { { #marker #(#cost_stmts)* } }
             };
 
             let gh_entry = if let Some(ref guard) = guard_expr {
-                quote! { if #guard { #(#gh_stmts)* } }
+                quote! { if #guard { #marker #(#gh_stmts)* } }
             } else {
-                quote! { { #(#gh_stmts)* } }
+                quote! { { #marker #(#gh_stmts)* } }
             };
 
             let jac_entry = if !jac_stmts.is_empty() {
                 let entry = if let Some(ref guard) = guard_expr {
-                    quote! { if #guard { #(#jac_stmts)* } }
+                    quote! { if #guard { #marker #(#jac_stmts)* } }
                 } else {
-                    quote! { { #(#jac_stmts)* } }
+                    quote! { { #marker #(#jac_stmts)* } }
                 };
                 Some(entry)
             } else { None };
@@ -1659,22 +1670,23 @@ pub fn generate_root_methods(
             // Multiple attributes on the same struct are merged into one loop per collection.
             let rc_ident = frines_ident.unwrap();
             let group_key = rc_ident.to_string();
+            let marker = source_marker(sc);
 
             let cost_entry = if let Some(ref guard) = guard_expr {
-                quote! { if #guard { #(#cost_stmts)* } }
+                quote! { if #guard { #marker #(#cost_stmts)* } }
             } else {
-                quote! { { #(#cost_stmts)* } }
+                quote! { { #marker #(#cost_stmts)* } }
             };
             let gh_entry = if let Some(ref guard) = guard_expr {
-                quote! { if #guard { #(#gh_stmts)* } }
+                quote! { if #guard { #marker #(#gh_stmts)* } }
             } else {
-                quote! { { #(#gh_stmts)* } }
+                quote! { { #marker #(#gh_stmts)* } }
             };
             let jac_entry = if !jac_stmts.is_empty() {
                 if let Some(ref guard) = guard_expr {
-                    Some(quote! { if #guard { #(#jac_stmts)* } })
+                    Some(quote! { if #guard { #marker #(#jac_stmts)* } })
                 } else {
-                    Some(quote! { { #(#jac_stmts)* } })
+                    Some(quote! { { #marker #(#jac_stmts)* } })
                 }
             } else { None };
 
@@ -1705,22 +1717,23 @@ pub fn generate_root_methods(
             // same struct are merged into a single loop per collection via cross_groups.
             let rc_ident = frines_ident.unwrap();
             let group_key = rc_ident.to_string();
+            let marker = source_marker(sc);
 
             let cost_entry = if let Some(ref guard) = guard_expr {
-                quote! { if #guard { #(#cost_stmts)* } }
+                quote! { if #guard { #marker #(#cost_stmts)* } }
             } else {
-                quote! { { #(#cost_stmts)* } }
+                quote! { { #marker #(#cost_stmts)* } }
             };
             let gh_entry = if let Some(ref guard) = guard_expr {
-                quote! { if #guard { #(#gh_stmts)* } }
+                quote! { if #guard { #marker #(#gh_stmts)* } }
             } else {
-                quote! { { #(#gh_stmts)* } }
+                quote! { { #marker #(#gh_stmts)* } }
             };
             let jac_entry = if !jac_stmts.is_empty() {
                 if let Some(ref guard) = guard_expr {
-                    Some(quote! { if #guard { #(#jac_stmts)* } })
+                    Some(quote! { if #guard { #marker #(#jac_stmts)* } })
                 } else {
-                    Some(quote! { { #(#jac_stmts)* } })
+                    Some(quote! { { #marker #(#jac_stmts)* } })
                 }
             } else { None };
 
@@ -1754,9 +1767,11 @@ pub fn generate_root_methods(
             let group_key = coll_ident_str.clone();
 
             let self_var = syn::Ident::new(&a_type.to_lowercase(), proc_macro2::Span::call_site());
+            let marker = source_marker(sc);
 
             let nested_cost = quote! {
                 {
+                    #marker
                     let #parent_ident = __item;
                     for __frine in &__item.#frines_ident {
                         #(#resolve_stmts)*
@@ -1768,6 +1783,7 @@ pub fn generate_root_methods(
 
             let nested_gh = quote! {
                 {
+                    #marker
                     let #parent_ident = unsafe { &*(__item as *const #a_type_ident) };
                     for __frine in __item.#frines_ident.iter_mut() {
                         #(#resolve_stmts)*
@@ -1780,8 +1796,10 @@ pub fn generate_root_methods(
             let nested_jac = if !jac_stmts.is_empty() {
                 let resolve_stmts_j = resolve_stmts.clone();
                 let b_idx_stmts_j = b_idx_stmts.clone();
+                let marker_j = marker.clone();
                 Some(quote! {
                     {
+                        #marker_j
                         let #parent_ident = __item;
                         for __frine in &__item.#frines_ident {
                             #(#resolve_stmts_j)*
@@ -2264,8 +2282,32 @@ pub fn generate_root_methods(
         });
     }
 
+    // Summary doc-comment listing every constraint's source location. Shows
+    // up above the generated `impl LmProblem` block in `cargo expand`, and
+    // appears in rustdoc output for the root type too.
+    let summary_docs: Vec<TokenStream2> = {
+        let mut lines: Vec<TokenStream2> = Vec::new();
+        lines.push({
+            let s = syn::LitStr::new(
+                "Auto-generated by `#[arael::model]` / `#[arael(root)]`. Constraint sources:",
+                proc_macro2::Span::call_site());
+            quote! { #[doc = #s] }
+        });
+        for sc in &stashed {
+            if !reachable.contains(&sc.struct_name) { continue; }
+            let line = format!(
+                "- `{}[{}]` @ {}:{}",
+                sc.struct_name, sc.label_hint, sc.attr_file, sc.attr_line
+            );
+            let lit = syn::LitStr::new(&line, proc_macro2::Span::call_site());
+            lines.push(quote! { #[doc = #lit] });
+        }
+        lines
+    };
+
     tokens.extend(quote! {
 
+        #(#summary_docs)*
         impl arael::simple_lm::LmProblem<#prec_type> for #root_name {
             fn calc_cost(&mut self, params: &[#prec_type]) -> #prec_type {
                 arael::model::Model::#update_method(self, params);
@@ -2509,41 +2551,63 @@ fn interpret_constraint_body(
         }
     }
 
-    // Every `.work()` symbol reached by the residuals must be in
-    // `param_symbols` — otherwise the generated `add_residual` call will
-    // emit a gradient vector of the wrong arity or, worse, silently drop
-    // the derivative w.r.t. that parameter. Both yield an optimizer that
-    // compiles but fails to move the offending parameter. Error loudly
-    // instead. Common trigger: referencing a Param on the root struct from
-    // a non-root constraint (root-level parameters need their own block
-    // machinery; not supported yet).
-    {
-        let param_set: std::collections::HashSet<&str> =
-            param_symbols.iter().map(|s| s.as_str()).collect();
-        let mut missing: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-        for r in &residuals {
-            for v in r.free_vars() {
-                if v.contains(".work()") && !param_set.contains(v.as_str()) {
-                    missing.insert(v);
-                }
+    Ok((residuals, param_symbols))
+}
+
+/// Zero-cost source-origin marker: emits a doc-attribute on a nested dummy
+/// const so `cargo expand` renders a `///` line above each constraint block.
+/// `#[doc = "..."]` is the token form of a `///` comment, and pretty-printers
+/// typically render it back into the `///` syntax. Attaching it to
+/// `const _: () = ();` keeps the attribute legal inside function bodies (bare
+/// `#[doc]` on a statement isn't allowed on stable).
+fn source_marker(sc: &crate::StashedConstraint) -> TokenStream2 {
+    let text = format!(
+        " arael: {}[{}] @ {}:{}",
+        sc.struct_name, sc.label_hint, sc.attr_file, sc.attr_line
+    );
+    let lit = syn::LitStr::new(&text, proc_macro2::Span::call_site());
+    quote! {
+        #[doc = #lit]
+        const _: () = ();
+    }
+}
+
+/// `.work()` coverage check: every `.work()` symbol reached by the residuals
+/// must be in `param_symbols`. Otherwise the generated `add_residual` call
+/// emits a gradient vector that silently drops the derivative w.r.t. the
+/// missing parameter — the optimizer compiles but fails to move it.
+///
+/// Common trigger: referencing a root-struct Param from a sub-entity's
+/// constraint (root-level params need their own block machinery; not yet
+/// supported). Error message leads with `file:line:` so most terminals /
+/// IDEs auto-link the diagnostic text to the offending constraint
+/// attribute, even though the syn::Error span (at the root's
+/// `#[arael::model]`) can't be fixed — spans don't cross proc-macro
+/// invocations.
+pub(crate) fn check_residual_coverage(
+    sc: &crate::StashedConstraint,
+    struct_name: &syn::Ident,
+    residuals: &[E],
+    param_symbols: &[String],
+) -> syn::Result<()> {
+    let param_set: std::collections::HashSet<&str> =
+        param_symbols.iter().map(|s| s.as_str()).collect();
+    let mut missing: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for r in residuals {
+        for v in r.free_vars() {
+            if v.contains(".work()") && !param_set.contains(v.as_str()) {
+                missing.insert(v);
             }
         }
-        if !missing.is_empty() {
-            let list: Vec<String> = missing.into_iter().collect();
-            // Span points at the root's `#[arael::model]` (constraints are
-            // collected & checked at root expansion); message names the
-            // actual offending struct so the user knows where to look.
-            let msg = format!(
-                "constraint on `struct {0}` references param(s) outside its hessian block: [{1}] \
-                 (SelfBlock<A> covers A; CrossBlock<A, B> covers A and B; root-level params have no block slot yet)",
-                struct_name,
-                list.join(", ")
-            );
-            return Err(syn::Error::new_spanned(struct_name, msg));
-        }
     }
-
-    Ok((residuals, param_symbols))
+    if missing.is_empty() { return Ok(()); }
+    let list: Vec<String> = missing.into_iter().collect();
+    let msg = format!(
+        "{0}:{1}: constraint on `struct {2}` references param(s) outside its hessian block: [{3}] \
+         (SelfBlock<A> covers A; CrossBlock<A, B> covers A and B; root-level params have no block slot yet)",
+        sc.attr_file, sc.attr_line, struct_name, list.join(", ")
+    );
+    Err(syn::Error::new_spanned(struct_name, msg))
 }
 
 fn params_from_registry_check(params: &[String]) -> bool {

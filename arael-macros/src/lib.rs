@@ -66,15 +66,23 @@ struct SymLayout {
     constraint_index_field: Option<String>,
 }
 
-/// Stashed constraint: struct name + raw attribute tokens, waiting for root to generate code.
-/// Spans are intentionally not stashed: `proc_macro2::Span` is backed by an
-/// Rc into the proc-macro bridge's handle table that is invalidated once the
-/// originating macro invocation returns (tried; rustc panics). Errors about
-/// stashed constraints therefore surface at the root's `#[arael::model]`
-/// site and must name the offending struct in the message.
+/// Stashed constraint: struct name + raw attribute tokens + source-location
+/// metadata, waiting for root to generate code.
+///
+/// Spans themselves are not stashed: `proc_macro2::Span` is backed by an Rc
+/// into the proc-macro bridge's handle table that is invalidated once the
+/// originating macro invocation returns (tried; rustc panics). But primitive
+/// location DATA (file path, line number) survives fine — we extract it at
+/// stash time via proc-macro2's `span-locations` feature and carry it as
+/// plain strings/u32s. Used both to prefix error messages with
+/// `file:line:` and to emit `arael: <label> @ file:line` markers into
+/// generated code so `cargo expand` is easy to navigate.
 #[derive(Clone)]
 struct StashedConstraint {
     struct_name: String,
+    attr_file: String,           // source file of the `#[arael(constraint(...))]` attribute
+    attr_line: u32,
+    label_hint: String,          // `name = "..."` if given, else struct name
     attr_tokens: String,         // serialized constraint attribute content
     fields_tokens: String,       // serialized struct fields
 }
@@ -112,6 +120,39 @@ fn registry_stash_constraint(c: StashedConstraint) {
 fn registry_take_constraints() -> Vec<StashedConstraint> {
     let mut guard = SYM_REGISTRY.lock().unwrap();
     guard.as_mut().map(|reg| std::mem::take(&mut reg.constraints)).unwrap_or_default()
+}
+
+/// Scan the `constraint(...)` token list for `name = "<str>"`. Returns the
+/// string literal value if found. Used to produce a readable marker label
+/// (`name` is how users disambiguate multiple constraints on one struct).
+fn extract_constraint_label(tokens: &[proc_macro2::TokenTree]) -> Option<String> {
+    // Expect: `constraint`, Group(parens containing the inner tokens).
+    let group = match tokens.get(1)? {
+        proc_macro2::TokenTree::Group(g)
+            if g.delimiter() == proc_macro2::Delimiter::Parenthesis => g,
+        _ => return None,
+    };
+    let inner: Vec<proc_macro2::TokenTree> = group.stream().into_iter().collect();
+    // Walk looking for the sequence `name = "..."`.
+    let mut i = 0;
+    while i + 2 < inner.len() {
+        if let (
+            proc_macro2::TokenTree::Ident(id),
+            proc_macro2::TokenTree::Punct(p),
+            proc_macro2::TokenTree::Literal(lit),
+        ) = (&inner[i], &inner[i + 1], &inner[i + 2])
+            && *id == "name" && p.as_char() == '='
+        {
+            let s = lit.to_string();
+            // Strip surrounding quotes if present.
+            if s.starts_with('"') && s.ends_with('"') && s.len() >= 2 {
+                return Some(s[1..s.len() - 1].to_string());
+            }
+            return Some(s);
+        }
+        i += 1;
+    }
+    None
 }
 
 
@@ -938,6 +979,9 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
     };
 
     // Check for #[arael(constraint(...))] — stash ALL constraints for later generation.
+    // Capture plain (file, line) data from span while we're still inside the
+    // originating invocation — Span itself doesn't survive the bridge but
+    // primitives do.
     {
         let fields_ts = quote! { #fields };
         for attr in &input.attrs {
@@ -947,9 +991,16 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
             if tvec.is_empty() { continue; }
             if let proc_macro2::TokenTree::Ident(ref id) = tvec[0]
                 && *id == "constraint" {
+                    use syn::spanned::Spanned as _;
+                    let attr_span = attr.span();
+                    let label_hint = extract_constraint_label(&tvec)
+                        .unwrap_or_else(|| name.to_string());
                     let tokens: TokenStream2 = tvec.into_iter().collect();
                     registry_stash_constraint(StashedConstraint {
                         struct_name: name.to_string(),
+                        attr_file: attr_span.file(),
+                        attr_line: attr_span.start().line as u32,
+                        label_hint,
                         attr_tokens: tokens.to_string(),
                         fields_tokens: fields_ts.to_string(),
                     });
