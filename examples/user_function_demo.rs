@@ -34,9 +34,14 @@ fn sigmoid(x: E) -> E {
 }
 
 // --- Form B: opaque clamped asin. The derivative of asin is
-// 1/sqrt(1 - x^2), which blows up at |x| = 1. The +1e-12 keeps the
-// denominator finite so LM never divides by zero near the clamp edge.
-#[arael::function(my_safe_asin, derivs = [1.0 / sqrt(1.0 - x * x + 1e-12)])]
+// 1/sqrt(1 - x^2), which blows up at |x| = 1. The `identity(...)`
+// guard stops arael-sym's simplifier from reordering
+// `1 - x*x + 1e-12` into `1 + 1e-12 - x*x`: near |x| = 1, the
+// subtraction cancels most significant bits, and the reordered form
+// would lose the 1e-12 floor to catastrophic cancellation. This is
+// the same pattern the built-in `safe_asin` uses.
+#[arael::function(my_safe_asin,
+    derivs = [1.0 / sqrt(identity(1.0 - x * x) + 1e-12)])]
 fn my_safe_asin_eval(x: f64) -> f64 {
     x.clamp(-1.0, 1.0).asin()
 }

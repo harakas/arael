@@ -432,6 +432,123 @@ struct PosePair {
 }
 ```
 
+## User-defined functions (`#[arael::function]`)
+
+Constraint bodies have a fixed set of built-in ops (arithmetic,
+`sin` / `cos` / `exp` / `sqrt` / `clamp` / `safe_asin` / ..., vector
+helpers). When your residual needs a custom function -- a factored-
+out symbolic helper, or an opaque numerical routine with a known
+closed-form derivative -- declare it with `#[arael::function]` and
+use it in constraint bodies the same way you'd use `sin`.
+
+Two forms, distinguished by the attributed fn's signature.
+
+### Form A: purely symbolic
+
+`fn name(x: E, ...) -> E { expr }` -- the body is an arael-sym
+expression. The macro captures the body as an arael-sym source
+string, re-parses it at constraint-expansion time, and inlines the
+resulting `E` tree into the surrounding residual. Derivatives come
+from arael-sym's own auto-diff.
+
+```rust,ignore
+use arael_sym::E;
+
+#[arael::function]
+fn sigmoid(x: E) -> E {
+    1.0 / (1.0 + exp(-x))
+}
+
+#[arael::function]
+fn square(x: E) -> E { x * x }
+
+#[arael::model]
+#[arael(root, jacobian)]
+#[arael(constraint(hb, name = "fit", {
+    [(sigmoid(m.x) - m.target) * m.isigma,
+     (square(m.y) - 9.0) * m.isigma]
+}))]
+struct M {
+    x: Param<f64>,
+    y: Param<f64>,
+    target: f64,
+    isigma: f64,
+    hb: SelfBlock<M>,
+}
+```
+
+The body is stringified and handed to
+`arael_sym::parse_with_functions`, so identifiers resolve against
+arael-sym's parser rather than Rust's name resolution.
+
+Optional `derivs = [expr, ...]` overrides auto-diff with an
+explicit partial per parameter. Expressions are raw tokens, not
+strings or closures.
+
+### Form B: opaque numerical eval + symbolic derivatives
+
+`#[arael::function(sym_name, derivs = [...])]` on a
+`fn name_eval(x: f32, ...) -> f32` (or `f64`). The eval fn is
+opaque numerical code the macro never inspects. The positional
+`sym_name` names the symbolic sibling the macro emits for use
+inside constraints; the sibling delegates residual evaluation to
+the eval fn and uses the stashed `derivs` expressions for
+gradient / Hessian assembly.
+
+```rust,ignore
+// `my_safe_asin` clamps its input before calling the libm asin
+// and supplies a closed-form derivative that stays finite at the
+// clamp edge. The `identity(...)` guard blocks the simplifier
+// from reordering `1 - x*x + 1e-12` into `1 + 1e-12 - x*x` -- at
+// |x| ~ 1 the subtraction already cancels most significant bits
+// and the reordered form loses the 1e-12 floor. Same pattern as
+// arael-sym's built-in `safe_asin`.
+#[arael::function(my_safe_asin,
+    derivs = [1.0 / sqrt(identity(1.0 - x * x) + 1e-12)])]
+fn my_safe_asin_eval(x: f64) -> f64 {
+    x.clamp(-1.0, 1.0).asin()
+}
+
+#[arael::model]
+#[arael(root, jacobian)]
+#[arael(constraint(hb, name = "inverse_sin", {
+    [(my_safe_asin(m.x) - m.target) * m.isigma]
+}))]
+struct M {
+    x: Param<f64>,
+    target: f64,
+    isigma: f64,
+    hb: SelfBlock<M>,
+}
+```
+
+`derivs` is required in Form B -- one expression per scalar
+parameter, same token shape as Form A derivs. Parameter names
+inside the derivative expressions refer to the eval fn's own
+parameters in declaration order, so the `x` in
+`1.0 / sqrt(1.0 - x * x + 1e-12)` is the `x` from
+`fn my_safe_asin_eval(x: f64)`. Derivative expressions may call
+other registered `#[arael::function]`s, including each other and
+themselves -- mutual recursion is resolved by a two-pass bag
+build at constraint-expansion time.
+
+### Ergonomics
+
+- Parameter names in deriv expressions resolve to the attributed
+  fn's own parameters, not to anything in the surrounding module.
+- Numeric literals accept scientific notation (`1e-12`, `2.5E+2`).
+- The sibling fn (Form A body, Form B positional name) is also
+  callable from ordinary Rust with `E` arguments, so user fns
+  compose with `ExtendedModel` / runtime `parse_with_functions`
+  workflows for residuals that aren't known at compile time.
+- Errors point at user source: bad signatures, mismatched deriv
+  counts, and name collisions fire at attribute expansion;
+  parse failures and arity mismatches fire at the call site
+  inside the constraint body.
+
+See [examples/user_function_demo.rs](../examples/user_function_demo.rs)
+for a runnable two-form demo.
+
 ## Runtime differentiation (`ExtendedModel`)
 
 For Models whose residuals aren't known at compile time (e.g. a

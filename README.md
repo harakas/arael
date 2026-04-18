@@ -20,6 +20,7 @@ A Rust framework for nonlinear optimization with compile-time symbolic different
 - **Model trait** -- hierarchical serialize/deserialize/update protocol for parameter optimization
 - **Type-safe references** -- `Ref<T>`, `Vec<T>`, `Deque<T>`, `Arena<T>` for indexed collections with stable references
 - **Runtime differentiation** -- parse equations from strings at runtime, auto-differentiate symbolically, and optimize via `ExtendedModel` + `TripletBlock` (used by the sketch editor for parametric expression dimensions)
+- **User-defined functions** -- `#[arael::function]` lets you plug custom operators into constraint bodies, either purely symbolic (`fn name(x: E) -> E`) or opaque numerical eval + closed-form derivatives. See [docs/MODEL.md](docs/MODEL.md#user-defined-functions-araelfunction) and [examples/user_function_demo.rs](examples/user_function_demo.rs).
 - **Hessian blocks** -- `SelfBlock<A>` and `CrossBlock<A, B>` for 1- and 2-entity constraints (packed dense); `TripletBlock` for 3+ entities (COO sparse)
 - **Jacobian computation** -- `#[arael(root, jacobian)]` generates `calc_jacobian()` returning a sparse Jacobian matrix for DOF analysis and constraint diagnostics (see `examples/jacobian_demo.rs`)
 - **Gimbal-lock-free rotations** -- `EulerAngleParam` optimizes a small delta around a reference rotation matrix
@@ -265,6 +266,7 @@ The `examples/` directory is the primary place to see the API in use. Each file 
 - **[single_root_demo](examples/single_root_demo.rs)** -- single-struct model-and-root + a direct-composed sub-model, each carrying its own `SelfBlock<Self>`. The smallest example that exercises the "root has its own params" path.
 - **[slam_demo](examples/slam_demo.rs)** -- synthetic visual-inertial SLAM: S-curve trajectory, 20 poses, 40 landmarks, odometry + tilt + GPS + feature observations. Full verbose-LM trace across graduated isigma passes -- the reference for what a healthy solver run looks like.
 - **[sym_demo](examples/sym_demo.rs)** -- symbolic-math tour: expression building, automatic differentiation, CSE, pretty printing, parsing. No solver involvement; pure `arael-sym`.
+- **[user_function_demo](examples/user_function_demo.rs)** -- `#[arael::function]` for user-defined operators in constraint bodies. Form A purely symbolic `sigmoid(x) = 1 / (1 + exp(-x))` and Form B opaque numerical `my_safe_asin` with a closed-form symbolic derivative, both used in a single two-residual LM fit.
 
 ## Model Structure
 
