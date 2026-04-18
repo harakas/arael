@@ -204,6 +204,24 @@
 //!
 //! ## My solve doesn't converge. What do I check?
 //!
+//! 0. **Turn on solver verbose mode first.** Set `verbose: true` on
+//!    `LmConfig` and every LM step prints cost, lambda, and the step
+//!    outcome. On a Cholesky rejection the line also reports
+//!    non-finite counts for grad / diagonal / cur_x / matrix and a
+//!    count of non-positive diagonal entries -- four quick signals
+//!    that narrow the problem before any deeper digging:
+//!
+//!    ```ignore
+//!    let cfg = arael::simple_lm::LmConfig::<f32> { verbose: true, ..Default::default() };
+//!    let result = arael::simple_lm::solve_sparse_faer_f32(&x0, &mut model, &cfg);
+//!    ```
+//!
+//!    A healthy pass looks like steady cost drops with rising /
+//!    stabilising step sizes and no Cholesky rejections -- see
+//!    `examples/slam_demo.rs` run for a reference trace. If verbose
+//!    already reports NaN / Inf or diag ≤ 0, skip to steps 2 / 3
+//!    below; otherwise continue to the cost-by-label breakdown.
+//!
 //! 1. **Cost breakdown by label.** Name your constraint attributes with
 //!    `#[arael(constraint(hb, name = "drift", { ... }))]` so each group
 //!    shows up under its own label in the sum-of-squares. Call
@@ -219,7 +237,10 @@
 //!    either an overly tight sigma, bad initial values for its inputs,
 //!    or a constraint that's mathematically unsatisfiable.
 //!
-//! 2. **NaN or Inf residuals / derivatives.** Walk the Jacobian rows:
+//! 2. **NaN or Inf residuals / derivatives.** The verbose-mode output
+//!    from step 0 already tells you whether grad / matrix / params
+//!    contain non-finite values at the failing step. If they do, walk
+//!    the Jacobian to find the specific row:
 //!
 //!    ```ignore
 //!    let j = model.calc_jacobian(&params);
@@ -232,13 +253,31 @@
 //!    }
 //!    ```
 //!
-//!    A NaN residual or partial derivative usually means a `sqrt` or
-//!    `atan2` saw a degenerate input (zero-length vector, both-zero
-//!    arguments). Use `arael_sym::safe_sqrt` / `safe_atan2` in the
-//!    constraint body -- they return finite values and non-diverging
-//!    derivatives at the singular point.
+//!    A NaN residual or partial derivative usually means a `sqrt`,
+//!    `acos`, `asin`, or `atan2` saw a degenerate input (zero-length
+//!    vector, both-zero arguments, `|x| > 1` for asin/acos).
+//!    `arael_sym` ships `safe_sqrt`, `safe_asin`, `safe_acos`,
+//!    `safe_atan2` that clamp / regularise at the singular point and
+//!    produce non-diverging derivatives. Before reaching for them,
+//!    though, **prefer to redesign the constraint so the singularity
+//!    can't be hit**. A `safe_*` wrapper hides the degeneracy from
+//!    the solver and may leave the residual insensitive to the
+//!    parameters that should drive it out of the singular region;
+//!    an equivalent constraint formulated on the right geometric
+//!    quantity avoids the singularity entirely. E.g. match 3D
+//!    landmarks to features in 3D space (compare world-frame
+//!    directions or positions) instead of projecting through a
+//!    camera model and computing 2D image-plane residuals -- the
+//!    3D formulation is simpler, better conditioned, and has no
+//!    pixel-wraparound / behind-camera pathology.
 //!
-//! 3. **Gradient magnitude.** After
+//! 3. **Non-positive diagonal.** The verbose-mode `diag<=0: N`
+//!    counter at a Cholesky rejection is the loudest possible signal
+//!    that some parameter is untouched by every constraint (indices
+//!    left at `u32::MAX`) or is receiving a negative contribution.
+//!    Either outcome is a bug distinct from f32 accumulation noise.
+//!
+//! 4. **Gradient magnitude.** After
 //!    [`simple_lm::LmProblem::calc_grad_hessian_dense`], the maximum
 //!    absolute gradient component should be small relative
 //!    to the cost scale at a local minimum. A huge gradient with tiny
@@ -246,13 +285,38 @@
 //!    cost several orders of magnitude more than another, which
 //!    destabilises Levenberg-Marquardt.
 //!
-//! 4. **Hessian health.** The same `hessian` array should be finite and
+//! 5. **Hessian health.** The same `hessian` array should be finite and
 //!    positive-semi-definite at a minimum (smallest eigenvalue ≥ 0
 //!    modulo roundoff). A significantly-negative smallest eigenvalue
 //!    means the Gauss-Newton approximation J^T J is a poor local fit
 //!    -- often because constraints are ill-conditioned or cancel.
 //!
-//! 5. **Rank / DOF.** Call [`model::Jacobian::singular_values`] (or the
+//! 6. **Stiffness.** Ratios between the smallest and largest sigmas
+//!    (or equivalently, smallest and largest eigenvalues of J^T J)
+//!    that span many orders of magnitude make the problem numerically
+//!    stiff. LM damping has to pick a lambda that suits both ends,
+//!    which is hard at f32 precision. Keep isigmas comparable where
+//!    you can; if a tight constraint dominates one direction, a gauge
+//!    direction orthogonal to it will starve for signal. Starting
+//!    with a loose scale and ramping up (graduated optimisation --
+//!    see `examples/loc_demo.rs` and `slam_demo.rs` for the
+//!    `frine_isigma_scale` pattern) helps LM climb a stiff problem
+//!    without rejecting early steps.
+//!
+//! 7. **Simpler math beats clever math.** Reformulate residuals on the
+//!    most natural geometric quantity. 3D direction / position errors
+//!    are cheaper and better-conditioned than 2D reprojection errors;
+//!    relative rotations compared as matrices or unit quaternions
+//!    avoid Euler-angle gimbal lock; distances compared in squared
+//!    form avoid `sqrt` derivatives near zero. Every nonlinear
+//!    operation you remove is one less place for the residual /
+//!    derivative to misbehave and one less source of stiffness.
+//!
+//! 8. **Inspect the generated code.** Use [`cargo expand`](https://github.com/dtolnay/cargo-expand)
+//!    to see what the macro emitted for your constraint. See the
+//!    next section for a walkthrough.
+//!
+//! 9. **Rank / DOF.** Call [`model::Jacobian::singular_values`] (or the
 //!    full [`Jacobian::svd`](model::Jacobian::svd) for directions):
 //!
 //!    ```ignore
@@ -277,6 +341,117 @@
 //! If its row count is zero, a `guard` is excluding it. See
 //! [examples/jacobian_demo.rs](https://github.com/harakas/arael/blob/master/examples/jacobian_demo.rs)
 //! for an end-to-end walkthrough.
+//!
+//! ## Looking under the hood with `cargo expand`
+//!
+//! Mastering arael means being able to read what the macros actually
+//! generated for your equations. `#[arael::model]` does a lot: it
+//! interprets the constraint body symbolically, differentiates it
+//! against every reachable parameter, runs common-subexpression
+//! elimination, and emits Rust code for three call paths
+//! (`__compute_blocks`, `__set_block_indices`, `calc_jacobian`).
+//! [`cargo expand`](https://github.com/dtolnay/cargo-expand)
+//! (`cargo install cargo-expand`) prints the expansion exactly as
+//! the compiler sees it.
+//!
+//! ```bash
+//! cargo expand --example single_root_demo
+//! # or, for your own crate:
+//! cargo expand --lib              # library
+//! cargo expand --bin my_bin       # binary
+//! cargo expand my_mod::MyModel    # a specific path
+//! ```
+//!
+//! ### Example: a one-line fix constraint
+//!
+//! The single-root demo declares
+//!
+//! ```ignore
+//! #[arael(constraint(hb, name = "fix_x", {
+//!     [(singleroot.x - 3.0) * singleroot.isigma]
+//! }))]
+//! struct SingleRoot {
+//!     x: Param<f64>,
+//!     y: Param<f64>,
+//!     isigma: f64,
+//!     /* ... */
+//! }
+//! ```
+//!
+//! `cargo expand --example single_root_demo` shows the macro emits a
+//! `__compute_blocks` method with a block like:
+//!
+//! ```ignore
+//! /// arael: SingleRoot[fix_x] @ examples/single_root_demo.rs:28
+//! let __r_0       = singleroot.isigma * (singleroot.x.work() - 3.0);
+//! let __dr_0_0    = singleroot.isigma;      // d/d x
+//! let __dr_0_1    = 0.0;                    // d/d y
+//! __item.hb.add_residual(
+//!     __r_0 as f64,
+//!     &[__dr_0_0 as f64, __dr_0_1 as f64],
+//!     grad,
+//! );
+//! ```
+//!
+//! Things to notice:
+//!
+//! - `singleroot.x.work()` -- each param access is rewritten to
+//!   `work()` so the LM trial step is used in place of the stored
+//!   value without mutating it.
+//! - Derivatives for every param the constraint touches appear
+//!   individually (`__dr_0_0`, `__dr_0_1`). The `0.0` entry for `y`
+//!   is not elided because the index into `hb` is positional;
+//!   dead rows fold out at optimisation time.
+//! - The residual and the partials flow into the entity's Hessian
+//!   block via `hb.add_residual(r, dr, grad)` -- one call per
+//!   residual, accumulating `2*r*dr` into `grad` and `2*dr_i*dr_j`
+//!   into the block's packed upper triangle.
+//! - The `/// arael: ...` doc comment is a source marker pointing at
+//!   the constraint attribute the block came from -- invaluable when
+//!   the expansion runs to thousands of lines.
+//!
+//! ### Example: shared subexpressions
+//!
+//! In a larger body -- say a landmark observation that builds a
+//! rotation matrix and reuses it across x/y/z residuals -- the
+//! macro runs CSE before emitting code, so you see lines like
+//!
+//! ```ignore
+//! let __cse_0 = cos(pose.ea.z.work());
+//! let __cse_1 = sin(pose.ea.z.work());
+//! let __cse_2 = __cse_0 * (lm.pos.x - pose.pos.x.work())
+//!             + __cse_1 * (lm.pos.y - pose.pos.y.work());
+//! // __cse_2 reused in __r_0, __r_1, and every __dr_* that needs it
+//! ```
+//!
+//! Reading these tells you what the compiler *actually* has to
+//! evaluate -- useful for understanding the cost of a constraint,
+//! spotting accidental non-shared work, and sanity-checking that
+//! symbolic simplification collapsed things you expected it to.
+//!
+//! ### What to look for
+//!
+//! - **`__set_block_indices`** -- where each `SelfBlock` /
+//!   `CrossBlock` / `TripletBlock` gets its global parameter indices
+//!   written into place. A block that isn't touched here is invisible
+//!   to the solver (its `u32::MAX` sentinel causes every `add_residual`
+//!   to silently skip) -- a common failure mode.
+//! - **`__compute_blocks`** -- the grad + block-Hessian accumulation
+//!   path. Each constraint is a nested block with its own CSE'd body.
+//! - **`calc_jacobian`** -- same body structure but builds a
+//!   `JacobianRow` per residual instead of accumulating into the
+//!   blocks. Generated only when you declare `#[arael(root, jacobian)]`.
+//! - **source markers** -- doc comments like
+//!   `/// arael: PointFrine[<name>] @ path/to/file.rs:NNN`
+//!   pinpoint the constraint attribute each block came from.
+//!
+//! Expansion grows quickly (the single_root demo is ~800 lines; a
+//! full SLAM model is several thousand). Use `sed -n` or a pager
+//! scoped to the method you care about:
+//!
+//! ```bash
+//! cargo expand --example slam_demo | sed -n '/fn __compute_blocks/,/^    fn /p'
+//! ```
 //!
 //! # 2D Sketch Editor
 //!
@@ -362,6 +537,76 @@
 //! parameters the hessian is block-tridiagonal, so the band solver gives
 //! O(n) scaling -- 9.4x faster than dense at 500 poses.
 //! See [examples/loc_demo.rs](https://github.com/harakas/arael/blob/master/examples/loc_demo.rs).
+//!
+//! # Examples
+//!
+//! The `examples/` directory is the primary place to see the API in use.
+//! Each file is a runnable `cargo run --release --example <name>`.
+//!
+//! - **[`bench_band`](https://github.com/harakas/arael/blob/master/examples/bench_band.rs)**
+//!   -- benchmarks the band Cholesky backend against dense on the
+//!   localisation model at increasing pose counts. Prints timing +
+//!   speedup.
+//! - **[`bench_investigate`](https://github.com/harakas/arael/blob/master/examples/bench_investigate.rs)**
+//!   -- deeper comparison of sparse backends (faer, schur) on the
+//!   SLAM model, with assembly vs solve breakdown and numeric
+//!   cross-check of the solutions.
+//! - **[`bench_sparse`](https://github.com/harakas/arael/blob/master/examples/bench_sparse.rs)**
+//!   -- sparse Cholesky backends (faer / schur) vs dense on SLAM.
+//! - **[`calc_demo`](https://github.com/harakas/arael/blob/master/examples/calc_demo.rs)**
+//!   -- `bc`-style REPL calculator built on `arael-sym`. Shows
+//!   `parse_with_functions` + `FunctionBag` for user-defined
+//!   functions, persistent history via rustyline.
+//! - **[`jacobian_demo`](https://github.com/harakas/arael/blob/master/examples/jacobian_demo.rs)**
+//!   -- `#[arael(root, jacobian)]`, `#[arael(constraint_index)]`, and
+//!   `calc_jacobian` / `calc_cost_table` walk-through. End-to-end
+//!   reference for the instrumentation features referenced from
+//!   "My solve doesn't converge".
+//! - **[`linear_demo`](https://github.com/harakas/arael/blob/master/examples/linear_demo.rs)**
+//!   -- robust linear regression on noisy 2D data. Residual wrapped
+//!   in `gamma * atan(r / gamma)` -- the Starship method
+//!   (US12346118), same robustifier used by the feature constraints
+//!   in loc/SLAM. Minimal single-struct model + LM fit, compared
+//!   against plain closed-form least squares.
+//! - **[`loc_demo`](https://github.com/harakas/arael/blob/master/examples/loc_demo.rs)**
+//!   -- localisation with fixed known landmarks (no gauge freedom).
+//!   Block-tridiagonal Hessian + band solver. Graduated-isigma
+//!   optimisation via a root `frine_isigma_scale` field.
+//! - **[`loc_global_demo`](https://github.com/harakas/arael/blob/master/examples/loc_global_demo.rs)**
+//!   -- how to put `Param` fields on the root struct and have
+//!   constraints consume them. Uses a system-global rigid transform
+//!   (translation + 3-axis rotation applied to every pose) as the
+//!   running example; every residual that reads the robot's world
+//!   pose composes the globals before evaluating. Shows the two
+//!   wiring shapes for pose<->root cross-Hessian pairs
+//!   (`CrossBlock<Pose, Path>` on the constraint struct, and a
+//!   root-owned `TripletBlock` named via the `root.<field>` block
+//!   spec) and a `Path::optimise_center` pass that freezes pose
+//!   params and optimises only the globals before the main sweep.
+//! - **[`model_demo`](https://github.com/harakas/arael/blob/master/examples/model_demo.rs)**
+//!   -- minimal `#[arael::model]` walk-through showing how
+//!   `Param`, `SimpleEulerAngleParam`, and the update cycle fit
+//!   together.
+//! - **[`refs_demo`](https://github.com/harakas/arael/blob/master/examples/refs_demo.rs)**
+//!   -- `Ref<T>`, `refs::Vec`, `refs::Deque`, and `refs::Arena`
+//!   behaviour: insertion, iteration, stable handles.
+//! - **[`runtime_fit_demo`](https://github.com/harakas/arael/blob/master/examples/runtime_fit_demo.rs)**
+//!   -- curve fitting where the residual equation is a string parsed
+//!   at runtime. Demonstrates `ExtendedModel` + robust loss on top
+//!   of the symbolic front end.
+//! - **[`single_root_demo`](https://github.com/harakas/arael/blob/master/examples/single_root_demo.rs)**
+//!   -- single-struct model-and-root + a direct-composed sub-model,
+//!   each carrying its own `SelfBlock<Self>`. The smallest example
+//!   that exercises the "root has its own params" path.
+//! - **[`slam_demo`](https://github.com/harakas/arael/blob/master/examples/slam_demo.rs)**
+//!   -- synthetic visual-inertial SLAM: S-curve trajectory, 20 poses,
+//!   40 landmarks, odometry + tilt + GPS + feature observations.
+//!   Full verbose-LM trace across graduated isigma passes -- the
+//!   reference for what a healthy solver run looks like.
+//! - **[`sym_demo`](https://github.com/harakas/arael/blob/master/examples/sym_demo.rs)**
+//!   -- symbolic-math tour: expression building, automatic
+//!   differentiation, CSE, pretty printing, parsing. No solver
+//!   involvement; pure `arael-sym`.
 //!
 //! # Crate structure
 //!
