@@ -44,6 +44,14 @@ pub enum DimensionKind {
     /// meaningful; the dimension is auto-removed when that constraint
     /// is deleted.
     ConcentricDistance(Ref<Arc>, Ref<Arc>),
+    /// Perpendicular distance between two lines. Meaningful only when
+    /// the lines are parallel -- the creation sites (CLI / GUI) apply
+    /// a `Parallel` constraint alongside this dimension. The residual
+    /// reuses the point-to-line perpendicular math with line B's `p1`
+    /// as the anchor point (any point on B works once parallel is
+    /// enforced). The dimension is auto-removed when the backing
+    /// `Parallel` constraint is deleted.
+    LineLineDistance(Ref<Line>, Ref<Line>),
 }
 
 impl DimensionEndpoint {
@@ -76,6 +84,7 @@ impl DimensionKind {
             DimensionKind::Angle(a, b, _) => *a == r || *b == r,
             DimensionKind::HDistance(a, b) | DimensionKind::VDistance(a, b) => a.references_line(r) || b.references_line(r),
             DimensionKind::LineAngle(l) => *l == r,
+            DimensionKind::LineLineDistance(a, b) => *a == r || *b == r,
             _ => false,
         }
     }
@@ -98,6 +107,17 @@ impl DimensionKind {
     pub fn references_concentric_pair(&self, a: Ref<Arc>, b: Ref<Arc>) -> bool {
         matches!(self,
             DimensionKind::ConcentricDistance(x, y)
+            if (*x == a && *y == b) || (*x == b && *y == a)
+        )
+    }
+
+    /// True when this is a `LineLineDistance` referencing the
+    /// (unordered) line pair `(a, b)`. Used by the cascade that
+    /// removes such dimensions when their backing `Parallel`
+    /// constraint is deleted.
+    pub fn references_parallel_pair(&self, a: Ref<Line>, b: Ref<Line>) -> bool {
+        matches!(self,
+            DimensionKind::LineLineDistance(x, y)
             if (*x == a && *y == b) || (*x == b && *y == a)
         )
     }
@@ -278,6 +298,34 @@ impl Dimension {
                            - symbol(&format!("{}.radius", na));
                 let init_diff = sketch.arcs[*b].radius.value - sketch.arcs[*a].radius.value;
                 if init_diff >= 0.0 { signed } else { -signed }
+            }
+            DimensionKind::LineLineDistance(a, b) => {
+                // Reuse the point-to-line perpendicular expression with
+                // line B's p1 as the anchor point. Once the paired
+                // Parallel constraint is active, the perpendicular
+                // distance from any point on B to A equals the inter-
+                // line gap by definition. Sign captured from current
+                // geometry so the residual stays stable across solver
+                // iterations.
+                let la = &sketch.lines[*a].name;
+                let lb = &sketch.lines[*b].name;
+                let px = symbol(&format!("{}.p1.x", lb));
+                let py = symbol(&format!("{}.p1.y", lb));
+                let p1x = symbol(&format!("{}.p1.x", la));
+                let p1y = symbol(&format!("{}.p1.y", la));
+                let p2x = symbol(&format!("{}.p2.x", la));
+                let p2y = symbol(&format!("{}.p2.y", la));
+                let dx = p2x.clone() - p1x.clone();
+                let dy = p2y.clone() - p1y.clone();
+                let len = arael_sym::sqrt(dx.clone() * dx.clone() + dy.clone() * dy.clone());
+                let signed = ((px - p1x) * dy.clone() - (py - p1y) * dx.clone()) / len;
+                let la_line = &sketch.lines[*a];
+                let lb_line = &sketch.lines[*b];
+                let ldx = la_line.p2.value.x - la_line.p1.value.x;
+                let ldy = la_line.p2.value.y - la_line.p1.value.y;
+                let cross = (lb_line.p1.value.x - la_line.p1.value.x) * ldy
+                          - (lb_line.p1.value.y - la_line.p1.value.y) * ldx;
+                if cross >= 0.0 { signed } else { -signed }
             }
         }
     }

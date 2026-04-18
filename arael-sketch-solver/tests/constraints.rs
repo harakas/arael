@@ -269,6 +269,43 @@ fn test_distance_pl() {
     assert_near(dist, 2.0, 0.01);
 }
 
+#[test]
+fn test_parallel_lines_distance() {
+    // Backing constraint for LineLineDistance: a Parallel coupling +
+    // a DistanceLP1L that holds line B's p1 at a given perpendicular
+    // distance from line A. After solve, both the paired-parallel
+    // invariant and the target gap must hold.
+    let mut sketch = Sketch::new();
+    let la = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(4.0, 0.5));
+    let lb = sketch.add_line(vect2d::new(0.0, 2.7), vect2d::new(4.0, 3.4));
+    sketch.parallel.push(Parallel {
+        a: la, b: lb, cid: 0, hb: CrossBlock::new(),
+    });
+    sketch.distance_lp1l.push(DistanceLP1L {
+        a: lb, b: la, distance: 3.0, cid: 0, hb: CrossBlock::new(),
+    });
+    sketch.solve();
+    let ap = &sketch.lines[la];
+    let bp = &sketch.lines[lb];
+    // Parallel invariant: cross-product of direction vectors -> 0.
+    let dax = ap.p2.value.x - ap.p1.value.x;
+    let day = ap.p2.value.y - ap.p1.value.y;
+    let dbx = bp.p2.value.x - bp.p1.value.x;
+    let dby = bp.p2.value.y - bp.p1.value.y;
+    let alen = (dax * dax + day * day).sqrt();
+    let blen = (dbx * dbx + dby * dby).sqrt();
+    let sin_theta = (dax * dby - day * dbx).abs() / (alen * blen);
+    assert!(sin_theta < 1e-4, "lines not parallel: sin_theta = {sin_theta}");
+    // Perpendicular distance from B's p1 to line A.
+    let signed = ((bp.p1.value.x - ap.p1.value.x) * day
+                - (bp.p1.value.y - ap.p1.value.y) * dax) / alen;
+    assert_near(signed.abs(), 3.0, 0.01);
+    // Once parallel holds, distance from B's p2 should match too.
+    let signed2 = ((bp.p2.value.x - ap.p1.value.x) * day
+                 - (bp.p2.value.y - ap.p1.value.y) * dax) / alen;
+    assert_near(signed2.abs(), 3.0, 0.01);
+}
+
 // -- Point-Arc --
 
 #[test]
