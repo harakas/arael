@@ -795,12 +795,14 @@ pub fn function_names() -> impl Iterator<Item = &'static str> {
 /// [`parse::parse_with_functions`]: variables, runtime function
 /// definitions (`name(args) = expr`), `vars` / `funcs` listings, and
 /// readline-style history.
+#[derive(Clone)]
 pub struct FunctionBag {
     // Name -> (params, kind). Args are filled in at call time to build
     // a fresh Expr::Func per invocation. Mirrors Expr::Func directly.
     table: std::collections::HashMap<String, BagFunction>,
 }
 
+#[derive(Clone)]
 struct BagFunction {
     params: std::vec::Vec<String>,
     kind: FuncKind,
@@ -948,12 +950,14 @@ impl FunctionBag {
         Some((&f.params, &f.kind))
     }
 
-    /// Internal dispatch used by the parser. Looks up `name`,
-    /// validates arity against the registered parameter list, and
-    /// returns an `Expr::Func` with the caller's actual arguments.
-    /// `None` means the name isn't in the bag -- caller should fall
-    /// through to [`function_by_name`] for built-ins.
-    pub(crate) fn call(&self, name: &str, args: &[E]) -> Option<Result<E, String>> {
+    /// Build an `Expr::Func` by looking up `name` in this bag and
+    /// pairing it with `args`. Returns `None` if `name` is not
+    /// registered; returns `Some(Err(..))` if the arity disagrees.
+    /// `None` means the name isn't in the bag -- callers that want
+    /// built-ins as a fallback should route through
+    /// [`parse::parse_with_functions`] or
+    /// [`function_by_name`](crate::function_by_name).
+    pub fn call(&self, name: &str, args: &[E]) -> Option<Result<E, String>> {
         let f = self.table.get(name)?;
         if args.len() != f.params.len() {
             return Some(Err(format!(
