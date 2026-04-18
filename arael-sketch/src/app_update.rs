@@ -326,6 +326,15 @@ impl eframe::App for EditorApp {
                             } else if is_numeric || (input.is_empty() && self.dim_derived) {
                                 let value = input.parse::<f64>().unwrap_or(0.0);
                                 let n_dims_before = self.sketch.dimensions.len();
+                                // LineLineDistance requires a paired Parallel
+                                // constraint; emit it first if not already present.
+                                if let DimensionKind::LineLineDistance(a, b) = kind {
+                                    let has_parallel = self.sketch.parallel.iter().any(|p|
+                                        (p.a == a && p.b == b) || (p.a == b && p.b == a));
+                                    if !has_parallel {
+                                        self.exec(Action::ApplyParallel { a, b });
+                                    }
+                                }
                                 self.exec(Action::AddDimension { kind, value, expr: None, derived: self.dim_derived });
                                 if self.sketch.dimensions.len() > n_dims_before
                                     && let Some(d) = self.sketch.dimensions.last_mut() {
@@ -338,6 +347,13 @@ impl eframe::App for EditorApp {
                                     self.status_error = Some(format!("Expression error: {}", e));
                                 } else {
                                     let n_dims_before = self.sketch.dimensions.len();
+                                    if let DimensionKind::LineLineDistance(a, b) = kind {
+                                        let has_parallel = self.sketch.parallel.iter().any(|p|
+                                            (p.a == a && p.b == b) || (p.a == b && p.b == a));
+                                        if !has_parallel {
+                                            self.exec(Action::ApplyParallel { a, b });
+                                        }
+                                    }
                                     self.exec(Action::AddDimension {
                                         kind, value: 0.0, expr: Some(input.clone()), derived: self.dim_derived,
                                     });

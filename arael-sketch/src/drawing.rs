@@ -187,6 +187,20 @@ impl EditorApp {
             let nearest = if d1 < d2 { self.to_screen(l.p1.value) } else { self.to_screen(l.p2.value) };
             painter.line_segment([sp1, sq1], egui::Stroke::new(0.5, color));
             painter.line_segment([nearest, sq2], egui::Stroke::new(0.5, color));
+        } else if let DimensionKind::LineLineDistance(a_ref, b_ref) = kind {
+            // Both extensions go from the nearest endpoint of each line
+            // to the arrow tip on that line's side.
+            let la = &self.sketch.lines[*a_ref];
+            let lb = &self.sketch.lines[*b_ref];
+            let nearest_on = |l: &crate::Line, target: vect2d| {
+                let d1 = ((l.p1.value.x - target.x).powi(2) + (l.p1.value.y - target.y).powi(2)).sqrt();
+                let d2 = ((l.p2.value.x - target.x).powi(2) + (l.p2.value.y - target.y).powi(2)).sqrt();
+                if d1 < d2 { l.p1.value } else { l.p2.value }
+            };
+            let na = self.to_screen(nearest_on(la, p1_sketch));
+            let nb = self.to_screen(nearest_on(lb, p2_sketch));
+            painter.line_segment([na, sq1], egui::Stroke::new(0.5, color));
+            painter.line_segment([nb, sq2], egui::Stroke::new(0.5, color));
         } else {
             painter.line_segment([sp1, sq1], egui::Stroke::new(0.5, color));
             painter.line_segment([sp2, sq2], egui::Stroke::new(0.5, color));

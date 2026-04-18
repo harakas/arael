@@ -180,6 +180,18 @@ fn dimension_rejection_hint(sketch: &Sketch, action: &Action) -> String {
             let rb = sketch.arcs[*b].radius.value;
             Some(("distance", (rb - ra).abs()))
         }
+        DimensionKind::LineLineDistance(a, b) => {
+            let la = &sketch.lines[*a];
+            let lb = &sketch.lines[*b];
+            let dx = la.p2.value.x - la.p1.value.x;
+            let dy = la.p2.value.y - la.p1.value.y;
+            let len = (dx * dx + dy * dy).sqrt();
+            if len < 1e-12 { None } else {
+                let dist = ((lb.p1.value.x - la.p1.value.x) * dy
+                          - (lb.p1.value.y - la.p1.value.y) * dx).abs() / len;
+                Some(("distance", dist))
+            }
+        }
     };
     if let Some((label, current_val)) = current {
         format!(". Current {} is {:.4}, requested {:.4}", label, current_val, requested)
@@ -5029,8 +5041,37 @@ fn cmd_distance(ctx: &mut CommandContext, args: &str) -> CommandResult {
         return ok_or_status(ctx, format!("{} distance {} {} = ({:.4})", label, tokens[0], tokens[1], dist));
     }
 
-    if tokens.len() != 3 { return err("Usage: distance L0.p1 L1.p2 5.0 [derived|driven]  or  distance P0 L0 3.0 [derived|driven]  or  distance A0 A1 5.0 (concentric circles)"); }
+    if tokens.len() != 3 { return err("Usage: distance L0.p1 L1.p2 5.0 [derived|driven]  or  distance P0 L0 3.0 [derived|driven]  or  distance A0 A1 5.0 (concentric circles)  or  distance L0 L1 5.0 (two lines; also applies a Parallel constraint)"); }
     let (val, expr) = match parse_dim_value(&ctx.sketch, tokens[2]) { Ok(v) => v, Err(e) => return err(e) };
+
+    // Two-line perpendicular distance: `distance L0 L1 v` for two bare
+    // line names. Also applies a Parallel constraint between them -- the
+    // gap between non-parallel lines is ill-defined, so the CLI makes
+    // the pairing explicit. Idempotent when Parallel is already there.
+    if !tokens[0].contains('.') && !tokens[1].contains('.')
+        && tokens[0].starts_with('L') && tokens[1].starts_with('L')
+    {
+        let line_a = match resolve_line(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
+        let line_b = match resolve_line(&ctx.sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
+        let kind = DimensionKind::LineLineDistance(line_a, line_b);
+        ctx.begin_group();
+        // Ensure a Parallel constraint exists between the two lines
+        // before AddDimension runs (the action's apply body validates
+        // the pairing is present).
+        let already_parallel = ctx.sketch.parallel.iter().any(|p|
+            (p.a == line_a && p.b == line_b) || (p.a == line_b && p.b == line_a));
+        if !already_parallel {
+            ctx.exec(Action::ApplyParallel { a: line_a, b: line_b });
+        }
+        if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
+            let name = ctx.sketch.dimensions[idx].name.clone();
+            ctx.exec(Action::UpdateDimension { index: idx, value: val, expr });
+            return ok_or_status(ctx, format!("Updated {} line-line distance = {}", name, tokens[2]));
+        }
+        ctx.exec(Action::AddDimension { kind, value: val, expr, derived: is_derived });
+        let prefix = if is_derived { "Derived line-line distance" } else { "Set line-line distance" };
+        return ok_or_status(ctx, format!("{} = {}", prefix, tokens[2]));
+    }
 
     // Concentric-arcs radial distance: `distance A0 A1 v` for two
     // non-ellipse arcs that are already concentric. Falls through if

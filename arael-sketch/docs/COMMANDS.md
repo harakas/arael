@@ -505,6 +505,7 @@ distance A0.center A1.center 5.0  Arc center to arc center
 distance A0.start L1.p2 4.0  Arc start to line endpoint
 distance P0 L0 3.0            Point-line distance (point/endpoint first, line second)
 distance A0 A1 2.0            Radial distance between two concentric circles/arcs (requires Concentric A0 A1)
+distance L0 L1 5.0            Perpendicular distance between two lines; also applies Parallel L0 L1 if not already present. The backing constraint cascades: deleting the Parallel constraint removes the dimension.
 hdistance L0.p1 L1.p2 5.0    Horizontal (x-axis) distance between endpoints
 vdistance L0.p1 L1.p2 3.0    Vertical (y-axis) distance between endpoints
 xangle L0 45                  Line angle from x-axis (degrees, CCW positive)

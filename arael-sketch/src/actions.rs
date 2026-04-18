@@ -173,6 +173,7 @@ impl Action {
                     DimensionKind::VDistance(_, _) => "vdistance",
                     DimensionKind::LineAngle(_) => "xangle",
                     DimensionKind::ConcentricDistance(_, _) => "concentric_distance",
+                    DimensionKind::LineLineDistance(_, _) => "distance",
                 };
                 if expr.is_some() { format!("Add {} (expr)", kind_str) }
                 else { format!("Add {}", kind_str) }
@@ -944,6 +945,25 @@ impl Action {
                             hb: CrossBlock::new(),
                         });
                     }
+                    DimensionKind::LineLineDistance(a, b) => {
+                        // Validate: both lines exist and a Parallel
+                        // constraint is already coupling them. The caller
+                        // (cmd_distance / GUI tool) is responsible for
+                        // emitting ApplyParallel before AddDimension.
+                        let valid_lines = sketch.lines.get(*a).is_some()
+                            && sketch.lines.get(*b).is_some();
+                        let parallel_present = sketch.parallel.iter().any(|p|
+                            (p.a == *a && p.b == *b) || (p.a == *b && p.b == *a));
+                        if !valid_lines || !parallel_present {
+                            return false;
+                        }
+                        // Reuse the point-to-line distance constraint:
+                        // anchor line B's p1 to line A at the target gap.
+                        let pt = DimensionEndpoint::LineP1(*b);
+                        let pt_pos = dim_endpoint_pos_sketch(sketch, &pt);
+                        let signed = compute_signed_pl(sketch, pt_pos, *a, *value);
+                        push_distance_pl(sketch, &pt, *a, signed);
+                    }
                 }
                 } // end if !derived
                 sketch.dimensions.push(Dimension {
@@ -1007,6 +1027,12 @@ impl Action {
                             DimensionKind::ConcentricDistance(a, b) => {
                                 sketch.distance_concentric.retain(|c|
                                     !((c.a == a && c.b == b) || (c.a == b && c.b == a)));
+                            }
+                            DimensionKind::LineLineDistance(a, b) => {
+                                // Drop the DistancePL anchored at line B's p1
+                                // against line A (the shape we pushed on add).
+                                let pt = DimensionEndpoint::LineP1(b);
+                                remove_distance_pl(sketch, &pt, a);
                             }
                         }
                     }
@@ -1088,6 +1114,14 @@ impl Action {
                                 hb: CrossBlock::new(),
                             });
                         }
+                        DimensionKind::LineLineDistance(a, b) => {
+                            // Re-push the DistancePL with sign captured from
+                            // current geometry, same shape as the add path.
+                            let pt = DimensionEndpoint::LineP1(b);
+                            let pt_pos = dim_endpoint_pos_sketch(sketch, &pt);
+                            let signed = compute_signed_pl(sketch, pt_pos, a, value);
+                            push_distance_pl(sketch, &pt, a, signed);
+                        }
                     }
                 }
                 // Expression dims: rebuild_expr_constraints() in solve() handles it
@@ -1147,6 +1181,10 @@ impl Action {
                             sketch.distance_concentric.retain(|c|
                                 !((c.a == a && c.b == b) || (c.a == b && c.b == a)));
                         }
+                        DimensionKind::LineLineDistance(a, b) => {
+                            let pt = DimensionEndpoint::LineP1(b);
+                            remove_distance_pl(sketch, &pt, a);
+                        }
                     }
                     sketch.cleanup_helper_points();
                 }
@@ -1199,7 +1237,22 @@ impl Action {
                 match id {
                     ConstraintId::Horizontal(r) => { sketch.lines[*r].constraints.horizontal = false; }
                     ConstraintId::Vertical(r) => { sketch.lines[*r].constraints.vertical = false; }
-                    ConstraintId::Parallel(i) => { sketch.parallel.remove(*i); }
+                    ConstraintId::Parallel(i) => {
+                        let (a, b) = {
+                            let p = &sketch.parallel[*i];
+                            (p.a, p.b)
+                        };
+                        sketch.parallel.remove(*i);
+                        // Cascade: any LineLineDistance dimension backed by
+                        // this Parallel constraint (and its underlying
+                        // DistancePL) goes too, matching the Concentric
+                        // cascade immediately below.
+                        let pt = DimensionEndpoint::LineP1(b);
+                        remove_distance_pl(sketch, &pt, a);
+                        let pt = DimensionEndpoint::LineP1(a);
+                        remove_distance_pl(sketch, &pt, b);
+                        sketch.dimensions.retain(|d| !d.kind.references_parallel_pair(a, b));
+                    }
                     ConstraintId::Perpendicular(i) => { sketch.perpendicular.remove(*i); }
                     ConstraintId::EqualLength(i) => { sketch.equal_length.remove(*i); }
                     ConstraintId::EqualRadius(i) => { sketch.equal_radius.remove(*i); }

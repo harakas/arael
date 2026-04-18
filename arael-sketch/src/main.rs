@@ -85,6 +85,11 @@ fn spawn_async<F: std::future::Future<Output = ()> + Send + 'static>(f: F) {
 // pixels from the cursor to the virtual 90-degree axis before the cursor
 // is pulled onto that axis.
 const PERP_SNAP_PX: f32 = 10.0;
+/// Tolerance on |sin(theta)| for "treat these two lines as parallel" in
+/// the interactive dimension tool. ~3 degrees: user clicking precision
+/// is coarse, and a false positive self-corrects when the paired
+/// Parallel constraint snaps the lines exactly parallel.
+const PARALLEL_SELECTION_TOL: f64 = 0.05;
 
 pub struct EditorApp {
     pub sketch: Sketch,
@@ -1696,6 +1701,16 @@ impl EditorApp {
                 let rb = self.sketch.arcs[*b].radius.value;
                 (rb - ra).abs()
             }
+            DimensionKind::LineLineDistance(a, b) => {
+                let la = &self.sketch.lines[*a];
+                let lb = &self.sketch.lines[*b];
+                let dx = la.p2.value.x - la.p1.value.x;
+                let dy = la.p2.value.y - la.p1.value.y;
+                let len = (dx * dx + dy * dy).sqrt();
+                if len < 1e-12 { return 0.0; }
+                (((lb.p1.value.x - la.p1.value.x) * dy
+                - (lb.p1.value.y - la.p1.value.y) * dx) / len).abs()
+            }
         }
     }
 
@@ -1739,8 +1754,26 @@ impl EditorApp {
             }
         }
         if sel.len() == 2 {
-            // Two lines -> angle dimension
+            // Two lines: parallel-within-tolerance -> line-line distance,
+            // otherwise angle dimension. User click precision is coarse,
+            // so ~3 degrees is the cutoff; a false-positive parallel is
+            // harmless because the caller also applies a Parallel
+            // constraint that snaps the lines exactly parallel.
             if let (Selection::Line(a), Selection::Line(b)) = (sel[0], sel[1]) {
+                let la = &self.sketch.lines[a];
+                let lb = &self.sketch.lines[b];
+                let dax = la.p2.value.x - la.p1.value.x;
+                let day = la.p2.value.y - la.p1.value.y;
+                let dbx = lb.p2.value.x - lb.p1.value.x;
+                let dby = lb.p2.value.y - lb.p1.value.y;
+                let alen = (dax * dax + day * day).sqrt();
+                let blen = (dbx * dbx + dby * dby).sqrt();
+                if alen > 1e-12 && blen > 1e-12 {
+                    let sin_theta = (dax * dby - day * dbx).abs() / (alen * blen);
+                    if sin_theta < PARALLEL_SELECTION_TOL {
+                        return Some(DimensionKind::LineLineDistance(a, b));
+                    }
+                }
                 return Some(DimensionKind::Angle(a, b, false));
             }
             // Two arcs -> radial distance, but only when concentric and
@@ -1883,6 +1916,23 @@ impl EditorApp {
                 let p1 = vect2d::new(center.x + ra, center.y);
                 let p2 = vect2d::new(center.x + rb, center.y);
                 (p1, p2)
+            }
+            DimensionKind::LineLineDistance(a, b) => {
+                // Anchor at line A's midpoint; project perpendicularly onto
+                // line B's infinite line. Once the Parallel constraint is
+                // active this gives an arrow pair that straddles the gap.
+                let la = &self.sketch.lines[*a];
+                let lb = &self.sketch.lines[*b];
+                let ma = vect2d::new((la.p1.value.x + la.p2.value.x) / 2.0,
+                                     (la.p1.value.y + la.p2.value.y) / 2.0);
+                let dx = lb.p2.value.x - lb.p1.value.x;
+                let dy = lb.p2.value.y - lb.p1.value.y;
+                let len2 = dx * dx + dy * dy;
+                let foot = if len2 < 1e-12 { lb.p1.value } else {
+                    let t = ((ma.x - lb.p1.value.x) * dx + (ma.y - lb.p1.value.y) * dy) / len2;
+                    vect2d::new(lb.p1.value.x + t * dx, lb.p1.value.y + t * dy)
+                };
+                (ma, foot)
             }
         }
     }
