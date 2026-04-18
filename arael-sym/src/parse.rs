@@ -82,6 +82,35 @@ impl Lexer {
                     s.push(self.chars[self.pos]);
                     self.pos += 1;
                 }
+                // Optional scientific exponent: e / E, optional sign, >=1 digit.
+                // Only consume `e`/`E` if immediately followed by a digit or
+                // signed digit -- otherwise leave it for the identifier path
+                // (e.g. `2e` must stay an error, `2 * exp(x)` must parse the
+                // `exp` ident cleanly when the number ends).
+                if self.pos < self.chars.len()
+                    && (self.chars[self.pos] == 'e' || self.chars[self.pos] == 'E')
+                {
+                    let mut look = self.pos + 1;
+                    if look < self.chars.len()
+                        && (self.chars[look] == '+' || self.chars[look] == '-')
+                    {
+                        look += 1;
+                    }
+                    if look < self.chars.len() && self.chars[look].is_ascii_digit() {
+                        s.push(self.chars[self.pos]);
+                        self.pos += 1;
+                        if self.chars[self.pos] == '+' || self.chars[self.pos] == '-' {
+                            s.push(self.chars[self.pos]);
+                            self.pos += 1;
+                        }
+                        while self.pos < self.chars.len()
+                            && self.chars[self.pos].is_ascii_digit()
+                        {
+                            s.push(self.chars[self.pos]);
+                            self.pos += 1;
+                        }
+                    }
+                }
                 let val: f64 = s.parse().map_err(|_| ParseError {
                     pos: start,
                     msg: format!("invalid number: {s}"),
@@ -442,6 +471,36 @@ mod tests {
     fn parse_rejects_wrong_arity() {
         let err = parse("sin(1, 2)").unwrap_err();
         assert!(err.msg.contains("1 argument"), "{err}");
+    }
+
+    #[test]
+    fn parse_scientific_notation() {
+        // Positive exponent.
+        let e = parse("1e3").unwrap();
+        approx(e.eval(&noenv()).unwrap(), 1000.0, 1e-12);
+        // Negative exponent.
+        let e = parse("1e-12").unwrap();
+        approx(e.eval(&noenv()).unwrap(), 1e-12, 1e-20);
+        // Explicit positive sign and decimal mantissa.
+        let e = parse("2.5E+2").unwrap();
+        approx(e.eval(&noenv()).unwrap(), 250.0, 1e-12);
+        // In expression context.
+        let e = parse("1.0 - x * x + 1e-12").unwrap();
+        let mut env: HashMap<&'static str, f64> = HashMap::new();
+        env.insert("x", 0.0);
+        approx(e.eval(&env).unwrap(), 1.0 + 1e-12, 1e-20);
+        // `e` starting an ident must still work when not attached to a number.
+        let e = parse("2 * exp(0)").unwrap();
+        approx(e.eval(&noenv()).unwrap(), 2.0, 1e-12);
+    }
+
+    #[test]
+    fn parse_rejects_bare_e_after_number() {
+        // `2e` with no following digit is invalid: the lexer leaves `e`
+        // as a separate token, and `exp`-less `e` is an unknown symbol.
+        let err = parse("2e").unwrap_err();
+        assert!(err.msg.contains("unknown") || err.msg.contains("unexpected"),
+            "{err}");
     }
 
     // --- parse_with_functions behaviour. ---

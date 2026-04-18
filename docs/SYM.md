@@ -318,7 +318,7 @@ CSE is applied automatically in the constraint code generation macro, reducing g
 
 ## Parsing
 
-`parse(input)` reads an expression in standard infix notation: arithmetic, parentheses, function calls, the `^` operator for power, and the named constants `pi` and `e`. Anything else becomes a free symbol.
+`parse(input)` reads an expression in standard infix notation: arithmetic, parentheses, function calls, the `^` operator for power, and the named constants `pi` and `e`. Numeric literals accept an optional scientific exponent (`1e-12`, `2.5E+2`). Anything else becomes a free symbol.
 
 ```rust
 let e: E = "x^2 + 3*x + 1".parse().unwrap();
