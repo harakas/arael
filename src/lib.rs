@@ -1352,3 +1352,5 @@ pub use arael_sym::sym;
 pub use arael_macros::Model;
 /// Attribute macro: `#[arael::model]`.
 pub use arael_macros::model;
+/// Attribute macro: `#[arael::function]`.
+pub use arael_macros::function;

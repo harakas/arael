@@ -33,6 +33,7 @@
 //! CSE, and emission of `LmProblem` trait methods.
 
 mod constraint;
+mod function;
 
 use std::collections::{HashSet, HashMap};
 use std::sync::Mutex;
@@ -101,19 +102,74 @@ struct StashedConstraint {
     fields_tokens: String,       // serialized struct fields
 }
 
+/// User-defined function registered via `#[arael::function]`. Carried in
+/// the process-wide macro registry so the constraint-body interpreter can
+/// dispatch calls like `elliptic_k(k)` to arael-sym's parser with an
+/// appropriate `FunctionBag`.
+#[derive(Clone)]
+pub(crate) enum UserFunction {
+    /// Form A: attribute sits on `fn <sym_name>(x: E, ...) -> E`. Body is
+    /// an arael-sym expression, captured as a source string. Derivatives
+    /// are optional -- when present, they override auto-diff from the body.
+    Symbolic {
+        sym_name: String,
+        param_names: Vec<String>,
+        body: String,            // arael-sym source, `TokenStream::to_string()`
+        deriv_strings: Option<Vec<String>>, // None -> auto-diff from body
+        attr_file: String,
+        attr_line: u32,
+    },
+    /// Form B: attribute sits on `fn <eval_name>(x: f32 | f64, ...) -> <same>`.
+    /// First positional attr arg names the symbolic sibling. Eval body is
+    /// opaque. Derivatives required.
+    Extern {
+        sym_name: String,          // e.g. "elliptic_k"
+        eval_path: String,         // e.g. "elliptic_k_eval" (resolved at use site)
+        param_names: Vec<String>,  // eval fn's scalar param names
+        arity: usize,
+        scalar_ty: String,         // "f32" or "f64"
+        deriv_strings: Vec<String>, // one per param
+        attr_file: String,
+        attr_line: u32,
+    },
+}
+
+impl UserFunction {
+    #[allow(dead_code)]
+    pub(crate) fn sym_name(&self) -> &str {
+        match self {
+            UserFunction::Symbolic { sym_name, .. } |
+            UserFunction::Extern   { sym_name, .. } => sym_name,
+        }
+    }
+    #[allow(dead_code)]
+    pub(crate) fn param_names(&self) -> &[String] {
+        match self {
+            UserFunction::Symbolic { param_names, .. } |
+            UserFunction::Extern   { param_names, .. } => param_names,
+        }
+    }
+}
+
 struct Registry {
     layouts: HashMap<String, SymLayout>,
     constraints: Vec<StashedConstraint>,
+    functions: HashMap<String, UserFunction>,
 }
 
 static SYM_REGISTRY: Mutex<Option<Registry>> = Mutex::new(None);
 
-fn registry_store(name: &str, layout: SymLayout) {
-    let mut guard = SYM_REGISTRY.lock().unwrap();
-    let reg = guard.get_or_insert_with(|| Registry {
+fn registry_init() -> Registry {
+    Registry {
         layouts: HashMap::new(),
         constraints: Vec::new(),
-    });
+        functions: HashMap::new(),
+    }
+}
+
+fn registry_store(name: &str, layout: SymLayout) {
+    let mut guard = SYM_REGISTRY.lock().unwrap();
+    let reg = guard.get_or_insert_with(registry_init);
     reg.layouts.insert(name.to_string(), layout);
 }
 
@@ -124,16 +180,34 @@ fn registry_lookup(name: &str) -> Option<SymLayout> {
 
 fn registry_stash_constraint(c: StashedConstraint) {
     let mut guard = SYM_REGISTRY.lock().unwrap();
-    let reg = guard.get_or_insert_with(|| Registry {
-        layouts: HashMap::new(),
-        constraints: Vec::new(),
-    });
+    let reg = guard.get_or_insert_with(registry_init);
     reg.constraints.push(c);
 }
 
 fn registry_take_constraints() -> Vec<StashedConstraint> {
     let mut guard = SYM_REGISTRY.lock().unwrap();
     guard.as_mut().map(|reg| std::mem::take(&mut reg.constraints)).unwrap_or_default()
+}
+
+#[allow(dead_code)]
+pub(crate) fn registry_store_function(name: &str, f: UserFunction) {
+    let mut guard = SYM_REGISTRY.lock().unwrap();
+    let reg = guard.get_or_insert_with(registry_init);
+    reg.functions.insert(name.to_string(), f);
+}
+
+#[allow(dead_code)]
+pub(crate) fn registry_lookup_function(name: &str) -> Option<UserFunction> {
+    let guard = SYM_REGISTRY.lock().unwrap();
+    guard.as_ref().and_then(|reg| reg.functions.get(name).cloned())
+}
+
+/// Snapshot every registered user function. Used by the constraint-body
+/// interpreter to build a full `FunctionBag` for `parse_with_functions`.
+#[allow(dead_code)]
+pub(crate) fn registry_all_functions() -> Vec<UserFunction> {
+    let guard = SYM_REGISTRY.lock().unwrap();
+    guard.as_ref().map(|reg| reg.functions.values().cloned().collect()).unwrap_or_default()
 }
 
 /// Scan the `constraint(...)` token list for `name = "<str>"`. Returns the
@@ -353,6 +427,28 @@ fn extract_constraint_label(tokens: &[proc_macro2::TokenTree]) -> Option<String>
 pub fn model(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut input = parse_macro_input!(item as syn::DeriveInput);
     match model_attribute(&mut input) {
+        Ok(tokens) => tokens.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+/// Register a user-defined function for use in `#[arael::model]`
+/// constraint bodies. Two forms:
+///
+/// - **Form A** (purely symbolic): `fn name(x: E, ...) -> E { body_expr }`
+///   -- no positional argument; `body_expr` is the arael-sym expression
+///   the call materialises into. Optional `derivs = [expr, ...]` to
+///   override auto-diff.
+/// - **Form B** (opaque eval + derivs): `#[arael::function(name, derivs = [expr, ...])]`
+///   on `fn name_eval(x: f32, ...) -> f32` (or `f64`) -- positional
+///   `name` is the symbolic sibling the macro emits. `derivs` required.
+///
+/// See the arael crate-level docs and
+/// [examples/runtime_fit_demo.rs](https://github.com/harakas/arael) for
+/// usage context.
+#[proc_macro_attribute]
+pub fn function(attr: TokenStream, item: TokenStream) -> TokenStream {
+    match function::function_attribute(attr.into(), item.into()) {
         Ok(tokens) => tokens.into(),
         Err(e) => e.to_compile_error().into(),
     }
