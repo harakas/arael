@@ -20,6 +20,7 @@ cholmod = ["eigen"]
 [dependencies]
 arael-macros = { version = "0.4.1", path = "arael-macros" }
 arael-sym = { version = "0.4.1", path = "arael-sym" }
+inventory = "0.3"
 num = "0.4"
 nalgebra = "0.33"
 rand = "0.9"

@@ -541,6 +541,10 @@ build at constraint-expansion time.
   callable from ordinary Rust with `E` arguments, so user fns
   compose with `ExtendedModel` / runtime `parse_with_functions`
   workflows for residuals that aren't known at compile time.
+  Mutually-referencing user fns (and forward references to fns
+  declared later in the file or in a dependency) work at runtime
+  via a registry populated through `inventory`; cross-crate
+  composition works without re-declaration.
 - Errors point at user source: bad signatures, mismatched deriv
   counts, and name collisions fire at attribute expansion;
   parse failures and arity mismatches fire at the call site

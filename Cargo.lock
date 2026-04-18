@@ -231,6 +231,7 @@ dependencies = [
  "faer",
  "getrandom 0.3.4",
  "image",
+ "inventory",
  "lapack-sys",
  "nalgebra",
  "num",
@@ -2566,6 +2567,15 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "inventory"
+version = "0.3.24"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a4f0c30c76f2f4ccee3fe55a2435f691ca00c0e4bd87abe4f4a851b1d4dac39b"
+dependencies = [
+ "rustversion",
 ]
 
 [[package]]

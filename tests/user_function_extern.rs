@@ -64,12 +64,6 @@ fn f_extern_forward_and_grad() {
     assert!((g[0] - ng).abs() < 1e-4, "grad[0]: analytic={} numerical={}", g[0], ng);
 }
 
-// Note: the emitted sibling fn `f(x: E) -> E` is only safe to call
-// from runtime code when the fn's derivative expressions reference only
-// built-in ops, constants, or *previously-attribute-expanded* user
-// functions in the same crate. Cross-references (e.g. `f`'s deriv
-// mentioning `g` when `g` is declared later in the file) panic at
-// construction time. Constraint-body use (the primary target of this
-// feature) is not affected -- the macro has the full registry
-// available at constraint-expansion time. See
-// `f_extern_forward_and_grad` for the constraint-body path.
+// Runtime callability of the emitted siblings (including mutual
+// cross-references across declaration order) is covered by
+// `tests/user_function_cross_ref_runtime.rs`.

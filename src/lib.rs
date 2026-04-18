@@ -720,7 +720,11 @@
 //!   also callable from ordinary Rust with `E` arguments, so
 //!   user fns compose with [`model::ExtendedModel`] / runtime
 //!   `parse_with_functions` workflows for residuals that aren't
-//!   known at compile time.
+//!   known at compile time. Mutually-referencing user fns (and
+//!   forward references to fns declared later in the file or in
+//!   a dependency) work at runtime via a registry populated
+//!   through `inventory`; cross-crate composition works without
+//!   re-declaration.
 //! - Errors point at user source: bad signatures, mismatched
 //!   deriv counts, and name collisions fire at attribute
 //!   expansion; parse failures and arity mismatches fire at the
@@ -1464,6 +1468,15 @@ pub mod matrix;
 pub mod quatern;
 /// Type-safe indexed collections: `Ref`, `Vec`, `Deque`, `Arena`.
 pub mod refs;
+/// Runtime registry for user-defined functions declared via
+/// `#[arael::function]`. Built from [`inventory`] submissions; see
+/// [`user_fn::registry_bag`].
+pub mod user_fn;
+/// Re-export of the `inventory` crate. The `#[arael::function]` macro
+/// expands to `::arael::inventory::submit!(...)` so user crates do
+/// not need to depend on `inventory` directly.
+#[doc(hidden)]
+pub use inventory;
 /// Re-export of the `arael-sym` symbolic math crate.
 pub use arael_sym as sym;
 /// Model trait, parameter types, and Hessian blocks.
