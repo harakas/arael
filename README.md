@@ -282,13 +282,29 @@ reference: [docs/MODEL.md](docs/MODEL.md) and
   params-having Model. `CrossBlock<A, B>` holds the **off-diagonal
   block** for the (A, B) pair -- one `CrossBlock` covers both
   `H[A, B]` and its transpose `H[B, A]`, written from the single
-  stored rectangle by the accumulator (cheap in-place writes, the
-  default choice). `TripletBlock<T>` is COO storage for across-entity
-  pairs -- the alternative when the per-pair rectangular layout
-  doesn't fit; assembly is noticeably slower because every entry is
-  a `Vec` push. Constraints touching a pair of entities all **add
-  into the same block** -- the assembled matrix is the sum of all
-  constraints' contributions.
+  stored rectangle by the accumulator (cheap in-place writes -- the
+  default for cross-entity Hessian pairs). `TripletBlock<T>` is COO
+  storage for across-entity pairs and is **always placed on the
+  root** (declare one `hbt: TripletBlock<T>` on the root struct;
+  constraints reach it via the `root.<field>` block spec). Two
+  canonical uses: (1) the root has its own `Param` fields and
+  constraints couple per-entity params with root params -- the
+  (entity, root) cross pair lives in the root TripletBlock; (2)
+  runtime-parsed residuals via `ExtendedModel` that can't enumerate
+  per-pair CrossBlocks statically. Don't put a TripletBlock on a
+  non-root struct. Assembly is noticeably slower than `CrossBlock`
+  because every entry is a `Vec` push. **Caveat for (1)**: root-
+  level `Param`s that are read by many constraints destroy Hessian
+  sparsity -- the root's rows / columns become dense, sparse
+  Cholesky fill-in grows, solve time suffers. Use root `Param`s
+  only when the quantity is genuinely system-wide -- canonical
+  cases are **frame corrections** (rigid translation / rotation
+  applied to every pose) and **global calibration** (camera
+  intrinsics, IMU bias / scale factors, magnetometer declination,
+  etc. -- one per sensor, read by every measurement from that
+  sensor). Prefer per-entity params for local quantities. Constraints touching a pair
+  of entities all **add into the same block** -- the assembled
+  matrix is the sum of all constraints' contributions.
 - **Parameter control**: `Param::new(v)` (optimisable), `Param::fixed(v)`
   (never moves), or `pose.pos.optimize = false;` at runtime to freeze
   a live parameter. Initial values are available in constraint bodies

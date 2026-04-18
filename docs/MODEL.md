@@ -129,7 +129,7 @@ reach:
 |---|---|---|
 | **`SelfBlock<T>`** | grad + upper-triangular Hessian for entity T's own params | **mandatory on every params-having struct.** Holds the per-entity gradient and the (T, T) block of the Hessian |
 | **`CrossBlock<A, B>`** | rectangular (A, B) cross Hessian only | **default for cross-entity Hessian pairs.** Packed in-place writes, cheap to assemble. One entry per unordered (A, B) entity pair in a constraint; (A, A) / (B, B) diagonals stay on each entity's SelfBlock |
-| **`TripletBlock<T>`** | COO across-entity pairs | only when the per-pair rectangular layout doesn't fit -- sparse / irregular cross-pairs inside a large N-entity constraint, varying entity sets, or one root-owned COO store shared by many constraints. **Noticeably slower to assemble** than an equivalent multi-CrossBlock because every entry is a `Vec` push |
+| **`TripletBlock<T>`** | COO across-entity pairs | **always placed on the root** (declare one `hbt: TripletBlock<T>` on the root struct; constraints reach it via the `root.<field>` block spec). Two canonical uses: (1) the root has its own `Param` fields and constraints couple entity params with root params -- the (entity, root) cross pair lives in the root's TripletBlock; (2) runtime-parsed residuals via `ExtendedModel` that can't enumerate per-pair CrossBlocks statically -- `extended_compute*` writes into the root's TripletBlock directly. Never on a non-root struct. **Noticeably slower to assemble** than a multi-CrossBlock because every entry is a `Vec` push |
 
 `SelfBlock<Self>` is required on every Model that has parameters --
 failing to declare it is a compile-time error. Grad and diagonal
@@ -160,10 +160,16 @@ struct PosePair {
 For N-entity residuals the macro accepts two shapes:
 
 - **`constraint([hb_ab, hb_ac, hb_bc], { ... })`** -- one
-  `CrossBlock<A, B>` field per unordered entity pair. Packed
-  rectangular storage, one `add_residual_cross` per pair.
-- **`constraint([hb], { ... })`** where `hb: TripletBlock` --
-  single COO accumulator, one entry per stored Hessian value.
+  `CrossBlock<A, B>` field per unordered entity pair on the
+  constraint struct. Packed rectangular storage, one
+  `add_residual_cross` per pair.
+- **`constraint(..., root.hbt, { ... })`** -- route across-entity
+  pairs into a root-owned `TripletBlock<T>`. One COO accumulator on
+  the root absorbs cross pairs from every constraint that
+  references it. **The `TripletBlock` always lives on the root**
+  -- don't put one on a constraint struct or an entity struct; the
+  macro's `root.<field>` block spec is the only correct way to
+  reach a `TripletBlock`.
 
 ```rust,ignore
 // Multi-CrossBlock: explicit Hessian pair per unordered entity pair.
@@ -178,16 +184,20 @@ struct SymmetryLL {
     #[arael(cross = (b, c))] hb_bc: CrossBlock<Line, Line>,
 }
 
-// TripletBlock: one COO accumulator (use only when a rectangular
-// per-pair layout doesn't fit).
+// Root-owned TripletBlock: one COO accumulator on the root,
+// referenced by constraints that couple an entity with root
+// params (or where a per-pair CrossBlock layout doesn't fit).
 #[arael::model]
-#[arael(constraint(hb, { /* residual coupling all three */ }))]
-struct WeirdTriple {
-    #[arael(ref = root.things)] a: Ref<Thing>,
-    #[arael(ref = root.things)] b: Ref<Thing>,
-    #[arael(ref = root.things)] c: Ref<Thing>,
-    hb: TripletBlock<f64>,
+#[arael(root)]
+struct Path {
+    poses: refs::Deque<Pose>,
+    /* ... */
+    hb:  SelfBlock<Path, f32>,
+    hbt: TripletBlock<f32>,   // shared across-entity accumulator
 }
+
+#[arael(constraint(hb_pose, root.hbt, { /* residual touching pose + root */ }))]
+struct Pose { /* ... hb_pose: SelfBlock<Pose, f32> ... */ }
 ```
 
 **Prefer multi-CrossBlock whenever the set of cross-pairs is fixed
@@ -199,12 +209,47 @@ constraint assembles substantially faster through multi-CrossBlock
 than through a TripletBlock, and the rectangular layout is also
 friendlier to the CSC factorisation step that follows.
 
-Reach for TripletBlock only when the rectangular-per-pair layout
-doesn't fit -- most cross-pairs are zero (sparse coupling within a
-large N-entity constraint), the entity set varies per residual, or
-you genuinely want one root-owned COO store for residuals from
-many different constraints (the `root.<triplet>` spec in the
-self-primary pattern).
+Reach for the root-owned TripletBlock in two canonical situations:
+
+1. **The root has its own `Param` fields** and constraints couple
+   per-entity params with root params. The (entity, root) cross pair
+   has to live somewhere; a dedicated `CrossBlock<Entity, Root>` per
+   entity type is verbose and scatters the cross storage, so the
+   root TripletBlock is the clean place for it. The `loc_global_demo`
+   example uses this: `hbt: TripletBlock<f32>` on `Path` absorbs
+   every pose-to-globals cross pair emitted by the tilt and related
+   constraints.
+2. **Runtime-parsed residuals via `ExtendedModel`**. When the
+   residual body is a user-supplied expression parsed at runtime,
+   the macro cannot enumerate per-pair CrossBlocks statically.
+   `ExtendedModel::extended_compute*` writes directly into the
+   root's TripletBlock instead -- see
+   [examples/runtime_fit_demo.rs](../examples/runtime_fit_demo.rs).
+
+In both cases the triplet lives on the root, not on a constraint
+struct.
+
+**Caveat for case 1 -- root-level `Param`s destroy sparsity.** Every
+constraint that reads a root param introduces an (entity, root)
+cross pair in the Hessian. If *many* constraints read the same root
+param -- which is the whole point of "global" root params -- the
+root's rows and columns in the Hessian become dense (coupled to
+every entity that touches them). Sparse Cholesky's fill-in grows
+accordingly and solve times suffer. Use root `Param`s only when the
+quantity is genuinely system-wide. Two canonical examples:
+
+- **Frame corrections** -- rigid translation + rotation applied to
+  *every* pose (the `loc_global_demo` pattern).
+- **Global calibration** -- one-per-sensor quantities referenced by
+  every observation from that sensor: camera intrinsics
+  (`fx`, `fy`, `cx`, `cy`), lens-distortion coefficients, IMU bias
+  and scale factors, magnetometer declination, barometric altitude
+  reference. These live on the root naturally because there's one
+  of them for the whole problem and every measurement reads them.
+
+Prefer per-entity params whenever the quantity is local. A root
+`Param` referenced by 1% of constraints is fine; one referenced by
+90% of them will dominate factorisation cost.
 
 ## Collection types
 
