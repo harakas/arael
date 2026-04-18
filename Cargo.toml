@@ -40,6 +40,7 @@ criterion = "0.5"
 image = "0.25"
 rustyline = "15"
 dirs = "5"
+trybuild = "1"
 
 [[bench]]
 name = "benchmarks"

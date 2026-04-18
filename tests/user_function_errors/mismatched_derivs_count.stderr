@@ -1,0 +1,5 @@
+error: #[arael::function(derivs = [...])] on `foo`: expected 1 deriv expression, got 2
+ --> tests/user_function_errors/mismatched_derivs_count.rs:4:1
+  |
+4 | fn foo_eval(k: f32) -> f32 { k }
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^

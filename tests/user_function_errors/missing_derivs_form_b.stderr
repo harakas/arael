@@ -1,0 +1,5 @@
+error: #[arael::function] on a numerical eval fn requires `derivs = [...]`
+ --> tests/user_function_errors/missing_derivs_form_b.rs:3:19
+  |
+3 | #[arael::function(foo)]
+  |                   ^^^

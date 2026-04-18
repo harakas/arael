@@ -1,0 +1,15 @@
+error: unary expects 1 arg(s), got 2
+  --> tests/user_function_errors/arity_mismatch_at_call.rs:11:1
+   |
+11 | #[arael::model]
+   | ^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused imports: `Param` and `SelfBlock`
+ --> tests/user_function_errors/arity_mismatch_at_call.rs:5:20
+  |
+5 | use arael::model::{Param, SelfBlock};
+  |                    ^^^^^  ^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

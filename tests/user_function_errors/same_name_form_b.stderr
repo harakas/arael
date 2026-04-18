@@ -1,0 +1,5 @@
+error: symbolic sibling name must differ from the eval fn name (convention: <name>_eval for the eval fn, <name> for the sibling)
+ --> tests/user_function_errors/same_name_form_b.rs:3:19
+  |
+3 | #[arael::function(foo, derivs = [k])]
+  |                   ^^^

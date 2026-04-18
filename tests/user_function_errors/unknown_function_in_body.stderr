@@ -1,0 +1,15 @@
+error: arael::function `bad_body` body parse: parse error at position 0: unknown function: totally_unknown_fn
+  --> tests/user_function_errors/unknown_function_in_body.rs:13:1
+   |
+13 | #[arael::model]
+   | ^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused imports: `Param` and `SelfBlock`
+ --> tests/user_function_errors/unknown_function_in_body.rs:5:20
+  |
+5 | use arael::model::{Param, SelfBlock};
+  |                    ^^^^^  ^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

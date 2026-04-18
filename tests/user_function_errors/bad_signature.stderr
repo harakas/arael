@@ -1,0 +1,7 @@
+error: #[arael::function] requires one of:
+         - Form A: `fn name(x: E, ...) -> E`
+         - Form B: `fn name(x: f32, ...) -> f32` (or `f64`, all params and return type uniform)
+ --> tests/user_function_errors/bad_signature.rs:6:1
+  |
+6 | fn bad(x: f32) -> arael_sym::E {
+  | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
