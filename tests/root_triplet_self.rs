@@ -20,7 +20,7 @@ use arael::model::{Param, SelfBlock, TripletBlock, Model};
 use arael::simple_lm::LmProblem;
 
 #[arael::model]
-#[arael(constraint(hb, root.hbt, {
+#[arael(constraint([hb, root.hbt], {
     [(item.a + testmodel.offset) * testmodel.isigma,
      (2.0 * item.a - 3.0 * testmodel.offset) * testmodel.isigma]
 }))]

@@ -686,6 +686,13 @@ fn parse_constraint_inner_impl(
     let mut guard: Option<String> = None;
     let mut name_label: Option<String> = None;
     let mut vars: Vec<ConstraintVar> = Vec::new();
+    // Track the first-token span of each positional block field so we
+    // can point errors back at the offending item. Only populated for
+    // items that come in via the positional loop below; entries from
+    // the bracketed branch skip this vec because the bracketed form is
+    // unrestricted (any N >= 1 is fine).
+    let mut positional_spans: Vec<proc_macro2::Span> = Vec::new();
+    let mut was_bracketed = false;
 
     // Bracketed list form: first token is [ ... ]. Walk its stream as a
     // comma-separated list of (dotted) idents to populate block_fields.
@@ -720,6 +727,7 @@ fn parse_constraint_inner_impl(
                     "constraint block list must name at least one field"));
             }
             pos += 1;
+            was_bracketed = true;
             // Skip optional trailing comma between list and next arg
             if let Some(proc_macro2::TokenTree::Punct(p)) = tokens.get(pos)
                 && p.as_char() == ',' { pos += 1; }
@@ -729,6 +737,7 @@ fn parse_constraint_inner_impl(
         match tokens.get(pos) {
             Some(proc_macro2::TokenTree::Ident(id)) => {
                 let name = id.to_string();
+                let ident_span = id.span();
                 pos += 1;
                 // Check for = (parent=lm) or : (var: Type)
                 match tokens.get(pos) {
@@ -780,6 +789,7 @@ fn parse_constraint_inner_impl(
                         };
                         if block_fields.is_empty() {
                             block_fields.push(name);
+                            positional_spans.push(ident_span);
                         } else {
                             vars.push(ConstraintVar { name, type_name });
                         }
@@ -802,12 +812,11 @@ fn parse_constraint_inner_impl(
                         }
                         // Any bare ident / dotted path at a positional
                         // slot (not `name=val`, not `name: Type`) is a
-                        // block-field reference -- the positional form
-                        // of the bracketed list, so
-                        //   constraint(hb_pose, root.hbt, { body })
-                        // parses identically to
-                        //   constraint([hb_pose, root.hbt], { body }).
+                        // block-field reference. The positional form
+                        // is restricted: see the post-loop check for
+                        // the allowed shapes.
                         block_fields.push(full_name);
+                        positional_spans.push(ident_span);
                     }
                 }
             }
@@ -828,6 +837,18 @@ fn parse_constraint_inner_impl(
     if block_fields.is_empty() {
         return Err(syn::Error::new_spanned(err_span,
             "constraint needs at least the block field name"));
+    }
+
+    // Positional block lists are restricted to N = 1. Any N >= 2 list
+    // (including `(<local>, root.<triplet>)`) must use the bracketed
+    // form `constraint([a, b, ...], { body })` so the attribute has one
+    // unambiguous shape for multi-block constraints.
+    if !was_bracketed && positional_spans.len() >= 2 {
+        let span = positional_spans[1];
+        return Err(syn::Error::new(span,
+            "constraint(...) accepts a single positional block; wrap \
+             N >= 2 block lists in brackets: \
+             `constraint([a, b, ...], { body })`"));
     }
 
     // Parse the body block

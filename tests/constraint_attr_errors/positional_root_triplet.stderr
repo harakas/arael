@@ -1,0 +1,15 @@
+error: constraint(...) accepts a single positional block; wrap N >= 2 block lists in brackets: `constraint([a, b, ...], { body })`
+ --> tests/constraint_attr_errors/positional_root_triplet.rs:7:1
+  |
+7 | #[arael::model]
+  | ^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused imports: `Param`, `SelfBlock`, and `TripletBlock`
+ --> tests/constraint_attr_errors/positional_root_triplet.rs:5:20
+  |
+5 | use arael::model::{Param, SelfBlock, TripletBlock};
+  |                    ^^^^^  ^^^^^^^^^  ^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

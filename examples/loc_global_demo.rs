@@ -93,7 +93,7 @@ fn decompose_cov(cov: matrix3f) -> (matrix3f, vect3f) {
 // routes through the root-owned `hbt: TripletBlock` (COO). No
 // dedicated CrossBlock<Pose, Path> field on Pose needed; diagonal
 // writes still land on each entity's own SelfBlock<Self>.
-#[arael(constraint(hb_pose, root.hbt, {
+#[arael(constraint([hb_pose, root.hbt], {
     let mr_global = path.global_rot.rotation_matrix();
     let mr2w_eff = mr_global * pose.ea.rotation_matrix();
     let ea_eff = mr2w_eff.get_euler_angles();

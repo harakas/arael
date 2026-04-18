@@ -1,0 +1,15 @@
+error: constraint(...) accepts a single positional block; wrap N >= 2 block lists in brackets: `constraint([a, b, ...], { body })`
+ --> tests/constraint_attr_errors/positional_two_non_root.rs:6:1
+  |
+6 | #[arael::model]
+  | ^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused imports: `CrossBlock`, `Param`, and `SelfBlock`
+ --> tests/constraint_attr_errors/positional_two_non_root.rs:4:20
+  |
+4 | use arael::model::{CrossBlock, Param, SelfBlock};
+  |                    ^^^^^^^^^^  ^^^^^  ^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

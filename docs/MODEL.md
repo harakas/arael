@@ -196,7 +196,7 @@ struct Path {
     hbt: TripletBlock<f32>,   // shared across-entity accumulator
 }
 
-#[arael(constraint(hb_pose, root.hbt, { /* residual touching pose + root */ }))]
+#[arael(constraint([hb_pose, root.hbt], { /* residual touching pose + root */ }))]
 struct Pose { /* ... hb_pose: SelfBlock<Pose, f32> ... */ }
 ```
 
@@ -320,11 +320,17 @@ any Model struct:
 ### Block-spec forms
 
 ```rust,ignore
-#[arael(constraint(hb, { body }))]                    // single local block
-#[arael(constraint([hb_ab, hb_ac, hb_bc], { body }))] // bracketed multi-block (N ≥ 2)
-#[arael(constraint(pose.hb_pose, { body }))]          // remote SelfBlock (reach into Ref target)
-#[arael(constraint(hb_pose, root.hbt, { body }))]     // self-primary + root-owned TripletBlock
+#[arael(constraint(hb, { body }))]                      // single local block
+#[arael(constraint([hb_ab, hb_ac, hb_bc], { body }))]   // bracketed multi-block (N ≥ 2)
+#[arael(constraint(pose.hb_pose, { body }))]            // remote SelfBlock (reach into Ref target)
+#[arael(constraint([hb_pose, root.hbt], { body }))]     // self-primary + root-owned TripletBlock
 ```
+
+The positional form carries a single block only. Any N ≥ 2 block
+list -- including the `(<local_self_block>, root.<triplet>)`
+shape -- must use brackets so multi-block attributes have one
+unambiguous syntax. Writing
+`constraint(hb_a, hb_b, { body })` is rejected at macro expansion.
 
 Dotted names mean two different things depending on the first
 segment:
@@ -354,7 +360,7 @@ struct PointFrine {
 // Self-primary + root-owned TripletBlock: tilt on Pose references
 // path.global_rot, so the pose<->path cross pair needs somewhere to
 // live. `root.hbt` names a TripletBlock field on the Path root.
-#[arael(constraint(hb_pose, root.hbt, {
+#[arael(constraint([hb_pose, root.hbt], {
     let mr_global = path.global_rot.rotation_matrix();
     let mr2w_eff  = mr_global * pose.ea.rotation_matrix();
     let ea_eff    = mr2w_eff.get_euler_angles();
