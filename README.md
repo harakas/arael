@@ -266,6 +266,86 @@ The `examples/` directory is the primary place to see the API in use. Each file 
 - **[slam_demo](examples/slam_demo.rs)** -- synthetic visual-inertial SLAM: S-curve trajectory, 20 poses, 40 landmarks, odometry + tilt + GPS + feature observations. Full verbose-LM trace across graduated isigma passes -- the reference for what a healthy solver run looks like.
 - **[sym_demo](examples/sym_demo.rs)** -- symbolic-math tour: expression building, automatic differentiation, CSE, pretty printing, parsing. No solver involvement; pure `arael-sym`.
 
+## Model Structure
+
+Every piece that appears in an `#[arael::model]` declaration. Full
+reference: [docs/MODEL.md](docs/MODEL.md) and
+[docs.rs/arael](https://docs.rs/arael).
+
+- **Parameter types**: `Param<T>` (scalar / vec2 / vec3),
+  `SimpleEulerAngleParam<T>` (direct Euler angles),
+  `EulerAngleParam<T>` (universal delta-from-reference).
+- **Hessian blocks**: the full Gauss-Newton Hessian is a *symmetric*
+  block matrix, one block per (entity, entity) pair.
+  `SelfBlock<Self>` holds the **diagonal block** (upper triangle
+  stored, symmetric by construction) and is **mandatory** on every
+  params-having Model. `CrossBlock<A, B>` holds the **off-diagonal
+  block** for the (A, B) pair -- one `CrossBlock` covers both
+  `H[A, B]` and its transpose `H[B, A]`, written from the single
+  stored rectangle by the accumulator (cheap in-place writes, the
+  default choice). `TripletBlock<T>` is COO storage for across-entity
+  pairs -- the alternative when the per-pair rectangular layout
+  doesn't fit; assembly is noticeably slower because every entry is
+  a `Vec` push. Constraints touching a pair of entities all **add
+  into the same block** -- the assembled matrix is the sum of all
+  constraints' contributions.
+- **Parameter control**: `Param::new(v)` (optimisable), `Param::fixed(v)`
+  (never moves), or `pose.pos.optimize = false;` at runtime to freeze
+  a live parameter. Initial values are available in constraint bodies
+  as `<field>_value` (e.g. `pose.pos_value`) so drift constraints can
+  anchor to the seed.
+- **Constraint attributes**: single-block `(hb, { body })`, bracketed
+  multi-block `([hb_ab, hb_ac, hb_bc], { body })` (N ≥ 2), remote
+  `(pose.hb_pose, { body })` reaching through a `Ref` field, and
+  self-primary + root-owned TripletBlock `(hb_pose, root.hbt, { body })`.
+  Modifiers: `parent=`, `name=`, `guard=`, typed `var: T` bindings.
+- **Field attributes**: `#[arael(ref = root.foo)]` for `Ref<T>` fields,
+  `#[arael(cross = (a, b))]` to disambiguate `CrossBlock<T, T>`,
+  `#[arael(constraint_index)]` for a per-constraint row id,
+  `#[arael(skip)]` to exclude a field.
+- **Collection types**: `refs::Vec`, `refs::Deque`, `refs::Arena`;
+  `Ref<T>` handles into any of them. Direct composition (plain struct
+  field) also works -- see `single_root_demo`.
+
+## Solvers
+
+Levenberg-Marquardt with pluggable linear-algebra backends. Full
+reference: [docs/SOLVERS.md](docs/SOLVERS.md).
+
+**Default to `solve_sparse_faer_f32` (or `solve_sparse_faer` for f64).**
+For most real problems the Hessian is sparse enough for sparse
+Cholesky to be the right choice, and `faer` is pure Rust, no
+external dependency, and handles the full sparsity pattern of a
+SLAM-like problem.
+
+| Backend | When |
+|---|---|
+| **`solve_sparse_faer[_f32]`** | **default**. Any non-trivial problem |
+| `solve[_f32]` (dense) | toy problems (≤ 4 parameters) |
+| `solve_band[_f32]` | **only** when the Hessian is genuinely block-tridiagonal with a known half-bandwidth `kd` |
+
+`LmConfig` fields: `abs_precision` (1e-6), `rel_precision` (1e-4),
+`max_iters` (100), `min_iters` (5), `patience` (3),
+`initial_lambda` (1e-4), `cost_threshold` (0.0), `verbose` (false).
+Turn `verbose: true` on first whenever debugging -- each LM step
+prints cost, lambda, and timing; Cholesky rejections additionally
+report non-finite counts for grad / diagonal / cur_x / matrix and a
+`diag<=0: N` count (any non-zero is a bug, not rounding noise).
+
+**Tuning performance vs quality matters.** Defaults are a safe
+middle ground, but every iteration costs time and the last few
+often deliver very little cost improvement. For production solves,
+enable `verbose`, find the iteration `K` at which cost improvement
+effectively stops, then set `max_iters` and loosen `rel_precision`
+so the solver terminates near `K` on representative input without
+regressing corner cases. See [docs/SOLVERS.md](docs/SOLVERS.md#tuning-for-performance-vs-quality)
+for the full process.
+
+Graduated-optimisation idiom: a scale field on the root (e.g.
+`frine_isigma_scale: f32`) multiplied into stiff residuals, stepped
+per pass from loose to tight. Avoid mutating every feature's
+`isigma` in place -- see `loc_demo.rs` / `slam_demo.rs`.
+
 ## My solve doesn't converge. What do I check?
 
 0. **Turn on solver verbose mode first.** Set `verbose: true` on `LmConfig` and every LM step prints cost, lambda, and the step outcome. On a Cholesky rejection the line also reports non-finite counts for grad / diagonal / cur_x / matrix and a count of non-positive diagonal entries -- four quick signals that narrow the problem before any deeper digging:
