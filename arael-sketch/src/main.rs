@@ -1747,12 +1747,14 @@ impl EditorApp {
 
     /// For two point-like endpoints plus the current mouse position,
     /// pick PointPointDistance / HDistance / VDistance based on where
-    /// the mouse sits relative to the two points' bounding box:
-    /// - Mouse between them in x, and clearly above/below by >=15px ->
-    ///   HDistance (axis-aligned horizontal dimension).
-    /// - Mouse between them in y, and clearly left/right by >=15px ->
-    ///   VDistance (axis-aligned vertical dimension).
-    /// - Otherwise -> PointPointDistance (oblique dimension).
+    /// the mouse sits relative to the two points' bounding box. Dead
+    /// zone: an inflated bbox (+/- 15 screen pixels on each axis);
+    /// inside this zone -> PointPointDistance. Outside, pick H or V
+    /// by whichever axis the mouse is farther outside the bbox on:
+    /// more up/down than left/right -> HDistance, more left/right
+    /// than up/down -> VDistance. This covers the "diagonal" sectors
+    /// too -- not only the strict horizontal/vertical strips over
+    /// the bbox edges.
     /// Called on the frame of the second-entity click to seed the dim
     /// kind, and re-called each preview frame while placing so the
     /// dimension type tracks the mouse zone.
@@ -1774,16 +1776,15 @@ impl EditorApp {
         // 15 screen pixels converted to sketch units. `self.scale` is
         // pixels per sketch unit (see to_screen); guard against zero.
         let t = if self.scale > 1e-6 { 15.0_f64 / self.scale as f64 } else { 0.0 };
-        let in_x_range = m.x >= min_x && m.x <= max_x;
-        let in_y_range = m.y >= min_y && m.y <= max_y;
-        let outside_y = m.y > max_y + t || m.y < min_y - t;
-        let outside_x = m.x > max_x + t || m.x < min_x - t;
-        if in_x_range && outside_y {
-            DimensionKind::HDistance(a_ep, b_ep)
-        } else if in_y_range && outside_x {
-            DimensionKind::VDistance(a_ep, b_ep)
-        } else {
+        // Signed distance outside the bbox per axis; 0 if inside.
+        let dx_out = (m.x - max_x).max(min_x - m.x).max(0.0);
+        let dy_out = (m.y - max_y).max(min_y - m.y).max(0.0);
+        if dx_out < t && dy_out < t {
             DimensionKind::PointPointDistance(a_ep, b_ep)
+        } else if dy_out > dx_out {
+            DimensionKind::HDistance(a_ep, b_ep)
+        } else {
+            DimensionKind::VDistance(a_ep, b_ep)
         }
     }
 
