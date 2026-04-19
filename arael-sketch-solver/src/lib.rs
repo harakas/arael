@@ -477,6 +477,7 @@ impl Sketch {
             pos: Param::new(pos),
             constraints: PointConstraints { has_fix_x: false, fix_x: 0.0, has_fix_y: false, fix_y: 0.0 },
             helper: false, quiet: false, name,
+            drag_pull: 0.0,
             cid: 0, hb: SelfBlock::new(),
         })
     }
@@ -489,6 +490,7 @@ impl Sketch {
             pos: Param::fixed(pos),
             constraints: PointConstraints { has_fix_x: false, fix_x: 0.0, has_fix_y: false, fix_y: 0.0 },
             helper: false, quiet: false, name,
+            drag_pull: 0.0,
             cid: 0, hb: SelfBlock::new(),
         })
     }
@@ -501,6 +503,7 @@ impl Sketch {
             pos: Param::new(pos),
             constraints: PointConstraints { has_fix_x: false, fix_x: 0.0, has_fix_y: false, fix_y: 0.0 },
             helper: true, quiet: false, name,
+            drag_pull: 0.0,
             cid: 0, hb: SelfBlock::new(),
         })
     }

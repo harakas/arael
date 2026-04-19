@@ -91,6 +91,15 @@ const PERP_SNAP_PX: f32 = 10.0;
 /// Parallel constraint snaps the lines exactly parallel.
 const PARALLEL_SELECTION_TOL: f64 = 0.05;
 
+/// Weight of the soft-drag helper's attractor residual. Sits between
+/// `drift_isigma` (~1e-3, the per-entity stability regularizer) and
+/// `constraint_isigma` (~1e3, hard constraints). At 1.0 the attractor
+/// overwhelms background drift so the helper tracks the cursor
+/// cleanly on unconstrained DOFs, but yields to any real constraint,
+/// leaving the sketch at cost ~ 0 with the dragged endpoint lagging
+/// when the cursor target is infeasible.
+const DRAG_PULL_WEIGHT: f64 = 1.0;
+
 pub struct EditorApp {
     pub sketch: Sketch,
     // View transform
@@ -200,6 +209,13 @@ pub struct EditorApp {
 
     // Echo command output to stdout (--stdout flag)
     pub echo_stdout: bool,
+    // Raw-drag mode (--drag-raw flag): use the old hard-pin drag where a
+    // fixed helper point forces the dragged endpoint to the cursor exactly,
+    // deforming the sketch when that is infeasible. When false (default),
+    // the drag helper is an optimizable Point so the Point drift residual
+    // softly anchors it at the cursor -- hard constraints overrule, so the
+    // user sees the relaxed cost ~ 0 state while dragging.
+    pub drag_raw: bool,
     // Exit requested by the exit command
     pub exit_requested: bool,
 
@@ -346,6 +362,7 @@ impl EditorApp {
             dark_mode: cfg!(target_arch = "wasm32"),
             colors: if cfg!(target_arch = "wasm32") { ColorScheme::dark() } else { ColorScheme::light() },
             echo_stdout: false,
+            drag_raw: false,
             exit_requested: false,
             status_error: None,
             last_cost,
@@ -612,15 +629,40 @@ impl EditorApp {
         None
     }
 
-    // Start dragging: create a temporary fixed point and coincident constraint
+    /// Build the drag helper's Param. In soft-drag mode (default), the
+    /// helper is an optimizable Point so the Point drift residual pulls
+    /// it toward `pos` but hard constraints can overrule; the user sees
+    /// the sketch's relaxed state. `--drag-raw` returns a fixed Param
+    /// that pins the helper exactly at `pos` (legacy hard-pin drag).
+    fn drag_helper_param(&self, pos: vect2d) -> Param<vect2d> {
+        if self.drag_raw { Param::fixed(pos) } else { Param::new(pos) }
+    }
+
+    /// Add a drag helper point using the mode-appropriate Param.
+    ///
+    /// Soft drag uses an optimizable helper point with `drag_pull > 0`
+    /// so the dedicated attractor residual tracks the cursor while hard
+    /// constraints stay satisfied. Raw drag uses `Param::fixed`, which
+    /// reproduces the old hard-pin behaviour.
+    fn add_drag_helper(&mut self, pos: vect2d) -> Ref<Point> {
+        if self.drag_raw {
+            self.sketch.add_point_fixed(pos)
+        } else {
+            let r = self.sketch.add_helper_point(pos);
+            self.sketch.points[r].drag_pull = DRAG_PULL_WEIGHT;
+            r
+        }
+    }
+
+    // Start dragging: create a temporary drag helper point and coincident constraint
     fn start_drag(&mut self, target: GrabTarget, mouse_pos: vect2d) {
         self.show_hints = false;
         // Save pre-drag state before adding drag apparatus
         self.drag_saved_cost = self.last_cost;
         self.drag_saved_snapshot = bincode::serialize(&self.sketch).ok();
 
-        // Create a fixed point at mouse position
-        let drag_pt = self.sketch.add_point_fixed(mouse_pos);
+        // Create a drag helper point at mouse position
+        let drag_pt = self.add_drag_helper(mouse_pos);
         self.drag_point = Some(drag_pt);
 
         // Add coincident constraint between drag point and the grabbed target
@@ -660,12 +702,12 @@ impl EditorApp {
                 self.drag_offset = vect2d::new(l.p1.value.x - mouse_pos.x, l.p1.value.y - mouse_pos.y);
                 self.drag_offset2 = vect2d::new(l.p2.value.x - mouse_pos.x, l.p2.value.y - mouse_pos.y);
                 // First drag point at p1
-                self.sketch.points[drag_pt].pos = Param::fixed(l.p1.value);
+                self.sketch.points[drag_pt].pos = self.drag_helper_param(l.p1.value);
                 self.sketch.coincident_lp1.push(CoincidentLP1 {
                     line: r, point: drag_pt, nid: 0, cid: 0, hb: CrossBlock::new(),
                 });
                 // Second drag point at p2
-                let drag_pt2 = self.sketch.add_point_fixed(l.p2.value);
+                let drag_pt2 = self.add_drag_helper(l.p2.value);
                 self.drag_point2 = Some(drag_pt2);
                 self.sketch.coincident_lp2.push(CoincidentLP2 {
                     line: r, point: drag_pt2, nid: 0, cid: 0, hb: CrossBlock::new(),
@@ -675,7 +717,7 @@ impl EditorApp {
                 let a = &self.sketch.arcs[r];
                 self.drag_offset = vect2d::new(a.center.value.x - mouse_pos.x, a.center.value.y - mouse_pos.y);
                 // Drag point at center
-                self.sketch.points[drag_pt].pos = Param::fixed(a.center.value);
+                self.sketch.points[drag_pt].pos = self.drag_helper_param(a.center.value);
                 self.sketch.coincident_arc_center.push(CoincidentArcCenter {
                     point: drag_pt, arc: r, nid: 0, cid: 0, hb: CrossBlock::new(),
                 });
@@ -804,13 +846,13 @@ impl EditorApp {
 
             if is_body_drag {
                 let pos1 = vect2d::new(mouse_pos.x + self.drag_offset.x, mouse_pos.y + self.drag_offset.y);
-                self.sketch.points[drag_pt].pos = Param::fixed(pos1);
+                self.sketch.points[drag_pt].pos = self.drag_helper_param(pos1);
                 if let Some(drag_pt2) = self.drag_point2 {
                     let pos2 = vect2d::new(mouse_pos.x + self.drag_offset2.x, mouse_pos.y + self.drag_offset2.y);
-                    self.sketch.points[drag_pt2].pos = Param::fixed(pos2);
+                    self.sketch.points[drag_pt2].pos = self.drag_helper_param(pos2);
                 }
             } else {
-                self.sketch.points[drag_pt].pos = Param::fixed(effective_pos);
+                self.sketch.points[drag_pt].pos = self.drag_helper_param(effective_pos);
             }
             let result = self.sketch.solve();
             self.last_cost = result.end_cost;
@@ -1126,6 +1168,7 @@ impl EditorApp {
             blocked_commands: Vec::new(),
             skip_dof_check: false,
             exit_requested: false,
+            drag_raw: self.drag_raw,
         };
         let results = crate::commands::execute(&mut ctx, input);
         if self.echo_stdout {
@@ -1186,6 +1229,7 @@ impl EditorApp {
             blocked_commands: blocked,
             skip_dof_check: false,
             exit_requested: false,
+            drag_raw: self.drag_raw,
         };
         let results = crate::commands::execute(&mut ctx, input);
         self.sketch = ctx.sketch;
@@ -3587,6 +3631,7 @@ fn main() -> eframe::Result {
     let mut echo_stdout = false;
     let mut no_gui = false;
     let mut script_path: Option<String> = None;
+    let mut drag_raw = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -3601,6 +3646,8 @@ fn main() -> eframe::Result {
                 eprintln!("  --script FILE   Execute commands from file at startup");
                 eprintln!("  --stdout        Echo command output to stdout");
                 eprintln!("  --nogui         Run without GUI (use with --script)");
+                eprintln!("  --drag-raw      Hard-pin drag: deforms sketch when cursor target is infeasible");
+                eprintln!("                  (default is soft: sketch stays at cost ~ 0, point lags if pinned)");
                 eprintln!("  --mcp [addr]    Start MCP server (default 127.0.0.1:8585)");
                 eprintln!("  --mcp-verbose   Log all MCP traffic to stdout");
                 eprintln!("  --mcp-allow-all Auto-approve MCP OAuth connections");
@@ -3614,6 +3661,7 @@ fn main() -> eframe::Result {
             "--mcp-allow-all" => mcp_allow_all = true,
             "--stdout" => echo_stdout = true,
             "--nogui" => no_gui = true,
+            "--drag-raw" => drag_raw = true,
             "--script" => {
                 if i + 1 < args.len() {
                     i += 1;
@@ -3672,6 +3720,9 @@ fn main() -> eframe::Result {
     }
     if echo_stdout {
         app.echo_stdout = true;
+    }
+    if drag_raw {
+        app.drag_raw = true;
     }
     if dark {
         app.dark_mode = true;

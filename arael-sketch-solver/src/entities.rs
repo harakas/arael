@@ -109,6 +109,17 @@ fn default_param_zero() -> arael::model::Param<f64> { arael::model::Param::fixed
     let d = point.pos - point.pos_value;
     [d.x * sketch.drift_isigma, d.y * sketch.drift_isigma]
 }))]
+// Drag pull: soft attractor toward pos_value with per-point weight.
+// Used by the editor's soft-drag helper to pull the helper (and, via
+// a hard coincident constraint, the dragged endpoint) toward the
+// cursor. Weight sits between drift_isigma (1e-3) and
+// constraint_isigma (1e3) so it dominates other drifts but yields
+// to any real constraint -- the sketch stays at cost ~ 0 and the
+// dragged point lags if the cursor target is infeasible.
+#[arael(constraint(hb, guard = self.drag_pull > 0.0, name = "drag_pull", {
+    let d = point.pos - point.pos_value;
+    [d.x * point.drag_pull, d.y * point.drag_pull]
+}))]
 // Fix X coordinate
 #[arael(constraint(hb, guard = self.constraints.has_fix_x, name = "fix_x", {
     [(point.pos.x - point.constraints.fix_x) * sketch.constraint_isigma]
@@ -124,6 +135,12 @@ pub struct Point {
     #[serde(default)]
     pub quiet: bool,
     pub name: String,
+    /// Weight of the drag-pull attractor toward `pos.value`. Zero (the
+    /// default) disables the attractor; set to e.g. 1.0 on an
+    /// editor-owned helper point during a drag so the solver softly
+    /// tracks the cursor without overriding hard constraints.
+    #[serde(skip)]
+    pub drag_pull: f64,
     #[arael(constraint_index)]
     #[serde(skip)]
     pub cid: u32,

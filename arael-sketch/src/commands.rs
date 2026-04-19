@@ -11,6 +11,7 @@ use crate::actions::Action;
 use crate::geometry::{arc_start_pos, arc_end_pos};
 use crate::history::{History, CursorState};
 use crate::tools::Selection;
+use crate::DRAG_PULL_WEIGHT;
 
 // ---------------------------------------------------------------------------
 // CommandContext: GUI-free state for command execution
@@ -39,6 +40,12 @@ pub struct CommandContext {
     pub blocked_commands: Vec<&'static str>,
     /// Set by the `exit` command to signal the app should close.
     pub exit_requested: bool,
+    /// Raw-drag mode (see --drag-raw). When true, `cmd_drag` hard-pins
+    /// the dragged endpoint to the target via a fixed helper; the sketch
+    /// deforms when the target is infeasible. When false (default), the
+    /// helper is optimizable so hard constraints stay satisfied and the
+    /// dragged endpoint lands at the nearest feasible point.
+    pub drag_raw: bool,
 }
 
 #[allow(dead_code)]
@@ -65,6 +72,7 @@ impl CommandContext {
             pending_fit: false,
             blocked_commands: Vec::new(),
             exit_requested: false,
+            drag_raw: false,
         }
     }
 
@@ -89,6 +97,7 @@ impl CommandContext {
             pending_fit: false,
             blocked_commands: Vec::new(),
             exit_requested: false,
+            drag_raw: false,
         }
     }
 
@@ -3506,8 +3515,18 @@ fn cmd_drag(ctx: &mut CommandContext, args: &str) -> CommandResult {
         ctx.sketch.calc_cost(&params)
     };
 
-    // Create drag apparatus: temp fixed point + coincident constraint
-    let drag_pt = ctx.sketch.add_point_fixed(target_pos);
+    // Create drag apparatus: helper point + coincident constraint. In soft
+    // mode (default) the helper is optimizable and carries the drag-pull
+    // attractor residual so hard constraints stay satisfied while the
+    // helper tracks the cursor; in --drag-raw mode the helper is fixed
+    // and the drag hard-pins.
+    let drag_pt = if ctx.drag_raw {
+        ctx.sketch.add_point_fixed(target_pos)
+    } else {
+        let r = ctx.sketch.add_helper_point(target_pos);
+        ctx.sketch.points[r].drag_pull = DRAG_PULL_WEIGHT;
+        r
+    };
 
     // For body drags, we need a second point or to drag center
     let drag_pt2: Option<arael::refs::Ref<Point>>;
@@ -3533,9 +3552,15 @@ fn cmd_drag(ctx: &mut CommandContext, args: &str) -> CommandResult {
             let offset = vect2d::new(target_pos.x - current_pos.x, target_pos.y - current_pos.y);
             let p1_target = vect2d::new(ctx.sketch.lines[*r].p1.value.x + offset.x, ctx.sketch.lines[*r].p1.value.y + offset.y);
             let p2_target = vect2d::new(ctx.sketch.lines[*r].p2.value.x + offset.x, ctx.sketch.lines[*r].p2.value.y + offset.y);
-            ctx.sketch.points[drag_pt].pos = Param::fixed(p1_target);
+            ctx.sketch.points[drag_pt].pos = if ctx.drag_raw { Param::fixed(p1_target) } else { Param::new(p1_target) };
             ctx.sketch.coincident_lp1.push(CoincidentLP1 { line: *r, point: drag_pt, nid: 0, cid: 0, hb: CrossBlock::new() });
-            let dp2 = ctx.sketch.add_point_fixed(p2_target);
+            let dp2 = if ctx.drag_raw {
+                ctx.sketch.add_point_fixed(p2_target)
+            } else {
+                let r = ctx.sketch.add_helper_point(p2_target);
+                ctx.sketch.points[r].drag_pull = DRAG_PULL_WEIGHT;
+                r
+            };
             ctx.sketch.coincident_lp2.push(CoincidentLP2 { line: *r, point: dp2, nid: 0, cid: 0, hb: CrossBlock::new() });
             drag_pt2 = Some(dp2);
             saved_arc_locks = None;
@@ -11690,6 +11715,43 @@ mod tests {
         run_ok(&mut ctx, "drag L0.p2 5,3");
         let l = &ctx.sketch.lines[ctx.sketch.lines.refs().next().unwrap()];
         assert!((l.p1.value.y - l.p2.value.y).abs() < 0.1, "should stay horizontal: p1.y={:.4} p2.y={:.4}", l.p1.value.y, l.p2.value.y);
+    }
+
+    /// Soft drag (default): dragging L0.p2 toward an infeasible target
+    /// must leave the sketch at its relaxed cost ~ 0 state, with the
+    /// dragged endpoint lagging at the nearest feasible point rather
+    /// than forcing the sketch to deform.
+    #[test]
+    fn test_drag_soft_respects_constraints() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0");
+        run_ok(&mut ctx, "lock L0.p1");
+        run_ok(&mut ctx, "length L0 5");
+        // Target (10, 0) is outside the reachable circle (radius 5).
+        run_ok(&mut ctx, "drag L0.p2 10,0");
+        let l = &ctx.sketch.lines[ctx.sketch.lines.refs().next().unwrap()];
+        let len = ((l.p2.value.x - l.p1.value.x).powi(2) + (l.p2.value.y - l.p1.value.y).powi(2)).sqrt();
+        assert!((len - 5.0).abs() < 0.01, "length constraint must hold: {:.4}", len);
+        // p1 stays locked at origin.
+        assert!(l.p1.value.x.abs() < 0.01 && l.p1.value.y.abs() < 0.01,
+            "p1 must stay locked: {:?}", l.p1.value);
+        // p2 lands at (5, 0), the nearest feasible point toward (10, 0).
+        assert!((l.p2.value.x - 5.0).abs() < 0.1 && l.p2.value.y.abs() < 0.1,
+            "p2 should relax to nearest feasible point: {:?}", l.p2.value);
+    }
+
+    /// Feasible soft drag must still land exactly on the cursor target.
+    /// Verifies the drag-pull attractor dominates background drift so
+    /// unconstrained DOFs track the cursor rather than compromising
+    /// between cursor and starting position.
+    #[test]
+    fn test_drag_soft_feasible_hits_target() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0");
+        run_ok(&mut ctx, "drag L0.p2 3,4");
+        let l = &ctx.sketch.lines[ctx.sketch.lines.refs().next().unwrap()];
+        assert!((l.p2.value.x - 3.0).abs() < 0.01 && (l.p2.value.y - 4.0).abs() < 0.01,
+            "drag should land at cursor: {:?}", l.p2.value);
     }
 
     // -- Range-dimension transitions (regression tests) --
