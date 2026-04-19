@@ -513,8 +513,16 @@ distance L0 L1 >= low         Evaluate-once: binds the current value of `low` as
 distance L0 L1 >= =low        Live expression: the bound re-evaluates each solve and tracks `low`.
 distance L0 L1 =low to =high  Two-sided live range; either side may be literal, evaluate-once, or live (`{expr}` also accepted).
                               Range syntax also works on `distance <point> <line>`, `distance <endpoint> <endpoint>`, and `distance A0 A1` (concentric arcs). The residual is a one-sided penalty (zero inside the feasible region, linear outside), so an inactive bound contributes no curvature. If a live bound becomes infeasible (e.g. low > high after a param change), the parameter edit is rejected by the existing solver-failure rollback.
+length L0 >= 2                Length range: lower bound.
+length L0 <= 10               Length range: upper bound.
+length L0 4 to 6              Length range: two-sided.
+sweep A0 30 to 270            Sweep range (degrees): two-sided.
+angle L0 L1 30 to 60          Angle range: two-sided.
+angle L0 L1 >= 90 supplement  Range on the supplementary angle. `closest` / `acute` / `obtuse` modifiers require a single target value and are rejected with a range.
 hdistance L0.p1 L1.p2 5.0    Horizontal (x-axis) distance between endpoints
+hdistance L0.p1 L1.p2 2 to 5 Range on |x|-distance.
 vdistance L0.p1 L1.p2 3.0    Vertical (y-axis) distance between endpoints
+vdistance L0.p1 L0.p2 >= 3   Range on |y|-distance.
 xangle L0 45                  Line angle from x-axis (degrees, CCW positive)
 remove_dim d0                 Remove dimension by name
 freeze                        Add numeric dimensions for all entities at current values

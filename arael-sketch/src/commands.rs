@@ -2996,7 +2996,38 @@ fn cmd_length(ctx: &mut CommandContext, args: &str) -> CommandResult {
         let label = if is_derived { "Derived" } else { "Driven" };
         return ok_or_status(ctx, format!("{} {} length = ({:.4})", label, tokens[0], len));
     }
-    if tokens.len() != 2 { return err("Usage: length L0 5.0 [derived|driven]"); }
+    // Range form: `length L0 >= V`, `length L0 <= V`, `length L0 LO to HI`
+    let range_opt = if tokens.len() >= 2 && !is_derived && !is_driven {
+        match parse_range_tokens(&ctx.sketch, &tokens[1..]) {
+            Ok(rb) => rb,
+            Err(e) => return err(e),
+        }
+    } else { None };
+    if let Some(rb) = range_opt {
+        let line = match resolve_line(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
+        let l = &ctx.sketch.lines[line];
+        let dx = l.p2.value.x - l.p1.value.x;
+        let dy = l.p2.value.y - l.p1.value.y;
+        let measured = (dx * dx + dy * dy).sqrt();
+        let kind = DimensionKind::LineLength(line);
+        let bound_desc = match &rb {
+            RangeBound::Min(v) => format!(">= {}", v),
+            RangeBound::Max(v) => format!("<= {}", v),
+            RangeBound::Between(lo, hi) => format!("in {} to {}", lo, hi),
+        };
+        ctx.begin_group();
+        if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
+            let name = ctx.sketch.dimensions[idx].name.clone();
+            ctx.exec(Action::UpdateDimension { index: idx, value: measured, expr: None, range: Some(rb) });
+            return ok_or_status(ctx, format!("Updated {} length {} (current {:.4})", name, bound_desc, measured));
+        }
+        ctx.exec(Action::AddDimension {
+            kind, value: measured, expr: None, derived: false, range: Some(rb),
+        });
+        return ok_or_status(ctx, format!("Set {} length {} (current {:.4})", tokens[0], bound_desc, measured));
+    }
+
+    if tokens.len() != 2 { return err("Usage: length L0 5.0 [derived|driven]  or  length L0 >=V | <=V | LO to HI"); }
     let line = match resolve_line(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
     let kind = DimensionKind::LineLength(line);
     let (value, expr) = match parse_dim_value(&ctx.sketch, tokens[1]) { Ok(v) => v, Err(e) => return err(e) };
@@ -3115,7 +3146,34 @@ fn cmd_sweep(ctx: &mut CommandContext, args: &str) -> CommandResult {
         let label = if is_derived { "Derived" } else { "Driven" };
         return ok_or_status(ctx, format!("{} {} sweep = ({:.4})", label, tokens[0], sweep_deg));
     }
-    if tokens.len() != 2 { return err("Usage: sweep A0 180 [derived|driven]"); }
+    // Range form: `sweep A0 >= V`, `sweep A0 <= V`, `sweep A0 LO to HI`
+    let range_opt = if tokens.len() >= 2 && !is_derived && !is_driven {
+        match parse_range_tokens(&ctx.sketch, &tokens[1..]) {
+            Ok(rb) => rb,
+            Err(e) => return err(e),
+        }
+    } else { None };
+    if let Some(rb) = range_opt {
+        let a = &ctx.sketch.arcs[arc];
+        let measured = arael::utils::rad2deg((a.end_angle.value - a.start_angle.value).abs());
+        let bound_desc = match &rb {
+            RangeBound::Min(v) => format!(">= {}", v),
+            RangeBound::Max(v) => format!("<= {}", v),
+            RangeBound::Between(lo, hi) => format!("in {} to {}", lo, hi),
+        };
+        ctx.begin_group();
+        if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
+            let name = ctx.sketch.dimensions[idx].name.clone();
+            ctx.exec(Action::UpdateDimension { index: idx, value: measured, expr: None, range: Some(rb) });
+            return ok_or_status(ctx, format!("Updated {} sweep {} (current {:.4})", name, bound_desc, measured));
+        }
+        ctx.exec(Action::AddDimension {
+            kind, value: measured, expr: None, derived: false, range: Some(rb),
+        });
+        return ok_or_status(ctx, format!("Set {} sweep {} (current {:.4})", tokens[0], bound_desc, measured));
+    }
+
+    if tokens.len() != 2 { return err("Usage: sweep A0 180 [derived|driven]  or  sweep A0 >=V | <=V | LO to HI"); }
     let (value, expr) = match parse_dim_value(&ctx.sketch, tokens[1]) { Ok(v) => v, Err(e) => return err(e) };
     let display = if expr.is_some() { tokens[1].to_string() } else { format!("{}", value) };
     ctx.begin_group();
@@ -4960,7 +5018,45 @@ fn cmd_angle(ctx: &mut CommandContext, args: &str) -> CommandResult {
         return ok_or_status(ctx, format!("{} angle {} {} = ({:.4})", label, tokens[0], tokens[1], val));
     }
 
-    if tokens.len() != 3 { return err("Usage: angle L0 L1 45 [supplement|closest|acute|obtuse] [derived|driven]"); }
+    // Range form: `angle L0 L1 >= V | <= V | LO to HI [supplement]`.
+    // `closest` / `acute` / `obtuse` are value-selection heuristics
+    // and are rejected with a range (no single target value).
+    let range_opt = if tokens.len() >= 3 && !is_derived && !is_driven {
+        match parse_range_tokens(&ctx.sketch, &tokens[2..]) {
+            Ok(rb) => rb,
+            Err(e) => return err(e),
+        }
+    } else { None };
+    if let Some(rb) = range_opt {
+        if matches!(sector_mode, SectorMode::Closest | SectorMode::Acute | SectorMode::Obtuse) {
+            return err("closest / acute / obtuse require a specific target angle; use a bare value or `supplement`");
+        }
+        let a = match resolve_line(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
+        let b = match resolve_line(&ctx.sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
+        let (current_deg, supplement_deg) = compute_angle(ctx, a, b);
+        let supplement = matches!(sector_mode, SectorMode::Supplement);
+        let measured = if supplement { supplement_deg } else { current_deg };
+        let kind = DimensionKind::Angle(a, b, supplement);
+        let bound_desc = match &rb {
+            RangeBound::Min(v) => format!(">= {}", v),
+            RangeBound::Max(v) => format!("<= {}", v),
+            RangeBound::Between(lo, hi) => format!("in {} to {}", lo, hi),
+        };
+        let sector = if supplement { " (supplement)" } else { "" };
+        ctx.begin_group();
+        if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
+            let name = ctx.sketch.dimensions[idx].name.clone();
+            ctx.exec(Action::UpdateDimension { index: idx, value: measured, expr: None, range: Some(rb) });
+            return ok_or_status(ctx, format!("Updated {} angle {}{} (current {:.4})", name, bound_desc, sector, measured));
+        }
+        ctx.exec(Action::AddDimension {
+            kind, value: measured, expr: None, derived: false, range: Some(rb),
+        });
+        return ok_or_status(ctx, format!("Set angle {} {} {}{} (current {:.4})",
+            tokens[0], tokens[1], bound_desc, sector, measured));
+    }
+
+    if tokens.len() != 3 { return err("Usage: angle L0 L1 45 [supplement|closest|acute|obtuse] [derived|driven]  or  angle L0 L1 >=V | <=V | LO to HI [supplement]"); }
     let a = match resolve_line(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
     let b = match resolve_line(&ctx.sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
     let (value, expr) = match parse_dim_value(&ctx.sketch, tokens[2]) { Ok(v) => v, Err(e) => return err(e) };
@@ -5332,8 +5428,41 @@ fn cmd_axis_distance(ctx: &mut CommandContext, args: &str, horizontal: bool) -> 
         return ok_or_status(ctx, format!("{} {} {} {} = ({:.4})", prefix, label, tokens[0], tokens[1], measured));
     }
 
+    // Range form: `hdistance <a> <b> >= V | <= V | LO to HI`
+    let range_opt = if tokens.len() >= 3 && !is_derived && !is_driven {
+        match parse_range_tokens(&ctx.sketch, &tokens[2..]) {
+            Ok(rb) => rb,
+            Err(e) => return err(e),
+        }
+    } else { None };
+    if let Some(rb) = range_opt {
+        let ep_a = match resolve_endpoint_ref(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
+        let ep_b = match resolve_endpoint_ref(&ctx.sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
+        let pa = resolve_endpoint_pos(&ctx.sketch, tokens[0]).unwrap();
+        let pb = resolve_endpoint_pos(&ctx.sketch, tokens[1]).unwrap();
+        let measured = if horizontal { (pa.x - pb.x).abs() } else { (pa.y - pb.y).abs() };
+        let kind = if horizontal { DimensionKind::HDistance(to_dim_ep(ep_a), to_dim_ep(ep_b)) }
+                   else { DimensionKind::VDistance(to_dim_ep(ep_a), to_dim_ep(ep_b)) };
+        let bound_desc = match &rb {
+            RangeBound::Min(v) => format!(">= {}", v),
+            RangeBound::Max(v) => format!("<= {}", v),
+            RangeBound::Between(lo, hi) => format!("in {} to {}", lo, hi),
+        };
+        ctx.begin_group();
+        if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
+            let name = ctx.sketch.dimensions[idx].name.clone();
+            ctx.exec(Action::UpdateDimension { index: idx, value: measured, expr: None, range: Some(rb) });
+            return ok_or_status(ctx, format!("Updated {} {} {} (current {:.4})", name, label, bound_desc, measured));
+        }
+        ctx.exec(Action::AddDimension {
+            kind, value: measured, expr: None, derived: false, range: Some(rb),
+        });
+        return ok_or_status(ctx, format!("Set {} {} {} {} (current {:.4})",
+            label, tokens[0], tokens[1], bound_desc, measured));
+    }
+
     if tokens.len() != 3 {
-        return err(format!("Usage: {} L0.p1 L1.p2 5 [derived|driven]", label));
+        return err(format!("Usage: {} L0.p1 L1.p2 5 [derived|driven]  or  {} <a> <b> >=V | <=V | LO to HI", label, label));
     }
     let (val, expr) = match parse_dim_value(&ctx.sketch, tokens[2]) { Ok(v) => v, Err(e) => return err(e) };
     let ep_a = match resolve_endpoint_ref(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
