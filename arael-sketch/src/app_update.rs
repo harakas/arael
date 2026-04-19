@@ -267,162 +267,9 @@ impl eframe::App for EditorApp {
                 self.dim_kind = None;
             }
 
-            // Dimension value input
-            if self.dim_editing {
-                ui.separator();
-                let label = if self.dim_edit_index.is_some() { "Edit dimension:" } else { "New dimension:" };
-                ui.label(label);
-                ui.checkbox(&mut self.dim_derived, "Derived");
-                let response = ui.text_edit_singleline(&mut self.dim_input);
-                // Select all text when entering edit mode (one-shot flag)
-                if self.dim_select_all && response.has_focus() {
-                    self.dim_select_all = false;
-                    let mut state = egui::TextEdit::load_state(ui.ctx(), response.id).unwrap_or_default();
-                    state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
-                        egui::text::CCursor::new(0),
-                        egui::text::CCursor::new(self.dim_input.len()),
-                    )));
-                    egui::TextEdit::store_state(ui.ctx(), response.id, state);
-                }
-                let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
-                if enter_pressed || (response.lost_focus() && enter_pressed) {
-                    let input = self.dim_input.trim().to_string();
-                    // Range syntax: `>= V`, `<= V`, `LO to HI`. If the
-                    // input matches, short-circuit the numeric / expr
-                    // paths and build a ranged dimension.
-                    let range_result = crate::commands::parse_range_input(&self.sketch, &input);
-                    let is_range = matches!(range_result, Ok(Some(_)));
-                    let is_numeric = !is_range && input.parse::<f64>().is_ok();
-                    let is_expr = !is_range && !is_numeric && arael_sym::parse(&input).is_ok();
-
-                    let mut success = false;
-                    if let Err(e) = &range_result {
-                        self.status_error = Some(format!("Range parse: {}", e));
-                    } else if is_range {
-                        let rb = range_result.unwrap().unwrap();
-                        if self.dim_derived {
-                            self.status_error = Some("Range dimensions are not compatible with `derived`".into());
-                        } else if let Some(edit_idx) = self.dim_edit_index.take() {
-                            // Editing existing dim -> re-bind as range.
-                            let measured = self.sketch.dimensions.get(edit_idx)
-                                .map(|d| d.value).unwrap_or(0.0);
-                            self.begin_group();
-                            self.exec(Action::UpdateDimension {
-                                index: edit_idx, value: measured, expr: None, range: Some(rb),
-                            });
-                            success = true;
-                        } else if let Some(kind) = self.dim_kind {
-                            self.begin_group();
-                            let measured = self.measure_dimension(&kind);
-                            // LineLineDistance still needs its paired
-                            // Parallel constraint before the range dim.
-                            if let DimensionKind::LineLineDistance(a, b) = kind {
-                                let has_parallel = self.sketch.parallel.iter().any(|p|
-                                    (p.a == a && p.b == b) || (p.a == b && p.b == a));
-                                if !has_parallel {
-                                    self.exec(Action::ApplyParallel { a, b });
-                                }
-                            }
-                            let n_dims_before = self.sketch.dimensions.len();
-                            self.exec(Action::AddDimension {
-                                kind, value: measured, expr: None, derived: false, range: Some(rb),
-                            });
-                            if self.sketch.dimensions.len() > n_dims_before
-                                && let Some(d) = self.sketch.dimensions.last_mut() {
-                                    d.offset = self.dim_offset;
-                                    d.text_along = self.dim_text_along;
-                                }
-                            success = true;
-                        }
-                    } else if is_numeric || is_expr || (input.is_empty() && self.dim_derived) {
-                        self.begin_group();
-                        if let Some(edit_idx) = self.dim_edit_index.take() {
-                            // Editing existing: update in place (preserves name)
-                            if self.dim_derived != self.sketch.dimensions[edit_idx].derived {
-                                // Toggle derived status
-                                let name = self.sketch.dimensions[edit_idx].name.clone();
-                                if self.dim_derived {
-                                    self.run_commands(&format!("set_derived {}", name));
-                                } else {
-                                    let val = if is_numeric { input.parse::<f64>().unwrap() } else { self.sketch.dimensions[edit_idx].value };
-                                    self.run_commands(&format!("set_driven {} {}", name, val));
-                                }
-                                success = true;
-                            } else if is_numeric {
-                                let value = input.parse::<f64>().unwrap();
-                                self.exec(Action::UpdateDimension { index: edit_idx, value, expr: None, range: None,  });
-                                success = true;
-                            } else if let Err(e) = self.sketch.validate_expr(&input) {
-                                self.status_error = Some(format!("Expression error: {}", e));
-                                self.dim_edit_index = Some(edit_idx); // restore
-                            } else {
-                                self.exec(Action::UpdateDimension {
-                                    index: edit_idx, value: 0.0,
-                                    expr: Some(input.clone()), range: None,
-                                });
-                                success = true;
-                            }
-                        } else if let Some(kind) = self.dim_kind {
-                            let is_dup = self.sketch.dimensions.iter().any(|d| d.kind == kind);
-                            if is_dup {
-                                self.status_error = Some("Dimension already exists".into());
-                            } else if is_numeric || (input.is_empty() && self.dim_derived) {
-                                let value = input.parse::<f64>().unwrap_or(0.0);
-                                let n_dims_before = self.sketch.dimensions.len();
-                                // LineLineDistance requires a paired Parallel
-                                // constraint; emit it first if not already present.
-                                if let DimensionKind::LineLineDistance(a, b) = kind {
-                                    let has_parallel = self.sketch.parallel.iter().any(|p|
-                                        (p.a == a && p.b == b) || (p.a == b && p.b == a));
-                                    if !has_parallel {
-                                        self.exec(Action::ApplyParallel { a, b });
-                                    }
-                                }
-                                self.exec(Action::AddDimension { kind, value, expr: None, derived: self.dim_derived, range: None,  });
-                                if self.sketch.dimensions.len() > n_dims_before
-                                    && let Some(d) = self.sketch.dimensions.last_mut() {
-                                        d.offset = self.dim_offset;
-                                        d.text_along = self.dim_text_along;
-                                    }
-                                success = true;
-                            } else {
-                                if let Err(e) = self.sketch.validate_expr(&input) {
-                                    self.status_error = Some(format!("Expression error: {}", e));
-                                } else {
-                                    let n_dims_before = self.sketch.dimensions.len();
-                                    if let DimensionKind::LineLineDistance(a, b) = kind {
-                                        let has_parallel = self.sketch.parallel.iter().any(|p|
-                                            (p.a == a && p.b == b) || (p.a == b && p.b == a));
-                                        if !has_parallel {
-                                            self.exec(Action::ApplyParallel { a, b });
-                                        }
-                                    }
-                                    self.exec(Action::AddDimension {
-                                        kind, value: 0.0, expr: Some(input.clone()), derived: self.dim_derived, range: None,
-                                    });
-                                    if self.sketch.dimensions.len() > n_dims_before
-                                        && let Some(d) = self.sketch.dimensions.last_mut() {
-                                            d.offset = self.dim_offset;
-                                            d.text_along = self.dim_text_along;
-                                        }
-                                    success = true;
-                                }
-                            }
-                        }
-                    } else if !input.is_empty() {
-                        self.status_error = Some(format!("Invalid value or expression: {}", input));
-                    }
-                    if success {
-                        self.dim_editing = false;
-                        self.dim_placing = false;
-                        self.dim_edit_index = None;
-                        self.dim_kind = None;
-                        self.selection.clear();
-                    }
-                } else if !response.has_focus() && self.dim_editing {
-                    response.request_focus();
-                }
-            }
+            // Dimension value input: rendered as a floating overlay near
+            // the dimension label (see `render_dim_input`), not inline
+            // in this side panel.
 
             ui.separator();
             ui.heading("File");
@@ -2410,5 +2257,213 @@ impl eframe::App for EditorApp {
                 "https://github.com/harakas/arael",
             ).open_in_new_tab(true));
         });
+
+        // Dimension-value input overlay: floats over the canvas at the
+        // dim label position so the user types where they're already
+        // looking, instead of shuttling attention to the side panel.
+        if self.dim_editing
+            && let Some(anchor) = self.dim_input_anchor_screen()
+        {
+            // Offset down-right of the label so the input doesn't cover
+            // the dimension text itself.
+            let offset = egui::Vec2::new(12.0, 12.0);
+            egui::Area::new("dim_input_overlay".into())
+                .order(egui::Order::Foreground)
+                .fixed_pos(anchor + offset)
+                .show(ctx, |ui| {
+                    egui::Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.set_min_width(180.0);
+                        self.render_dim_input(ui);
+                    });
+                });
+        }
+    }
+}
+
+impl EditorApp {
+    /// Screen-space anchor for the dimension-value input overlay:
+    /// midpoint of the dim text segment. For an in-progress placement
+    /// we synthesise a temporary `Dimension` with the current kind /
+    /// offset / text_along / measured value so `dim_text_segment`
+    /// computes the same text position the preview is showing.
+    fn dim_input_anchor_screen(&self) -> Option<egui::Pos2> {
+        let dim_ref = if let Some(idx) = self.dim_edit_index {
+            self.sketch.dimensions.get(idx).cloned()
+        } else if let Some(kind) = self.dim_kind {
+            let value = self.measure_dimension(&kind);
+            Some(arael_sketch_solver::Dimension {
+                kind,
+                value,
+                offset: self.dim_offset,
+                text_along: self.dim_text_along,
+                name: String::new(),
+                expr_str: None,
+                broken: false,
+                derived: false,
+                range: None,
+            })
+        } else {
+            None
+        };
+        let dim = dim_ref?;
+        let (ts, te) = self.dim_text_segment(&dim);
+        Some(egui::Pos2::new((ts.x + te.x) * 0.5, (ts.y + te.y) * 0.5))
+    }
+
+    /// Render the dimension-value input (derived checkbox + text
+    /// edit + submit handling). Extracted from the side panel so it
+    /// can be hosted in a floating `egui::Area` over the canvas,
+    /// near the dimension label where the user is looking.
+    fn render_dim_input(&mut self, ui: &mut egui::Ui) {
+        ui.checkbox(&mut self.dim_derived, "Derived");
+        let response = ui.text_edit_singleline(&mut self.dim_input);
+        // Select all text when entering edit mode (one-shot flag)
+        if self.dim_select_all && response.has_focus() {
+            self.dim_select_all = false;
+            let mut state = egui::TextEdit::load_state(ui.ctx(), response.id).unwrap_or_default();
+            state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
+                egui::text::CCursor::new(0),
+                egui::text::CCursor::new(self.dim_input.len()),
+            )));
+            egui::TextEdit::store_state(ui.ctx(), response.id, state);
+        }
+        let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
+        if enter_pressed || (response.lost_focus() && enter_pressed) {
+            let input = self.dim_input.trim().to_string();
+            // Range syntax: `>= V`, `<= V`, `LO to HI`. If the
+            // input matches, short-circuit the numeric / expr
+            // paths and build a ranged dimension.
+            let range_result = crate::commands::parse_range_input(&self.sketch, &input);
+            let is_range = matches!(range_result, Ok(Some(_)));
+            let is_numeric = !is_range && input.parse::<f64>().is_ok();
+            let is_expr = !is_range && !is_numeric && arael_sym::parse(&input).is_ok();
+
+            let mut success = false;
+            if let Err(e) = &range_result {
+                self.status_error = Some(format!("Range parse: {}", e));
+            } else if is_range {
+                let rb = range_result.unwrap().unwrap();
+                if self.dim_derived {
+                    self.status_error = Some("Range dimensions are not compatible with `derived`".into());
+                } else if let Some(edit_idx) = self.dim_edit_index.take() {
+                    // Editing existing dim -> re-bind as range.
+                    let measured = self.sketch.dimensions.get(edit_idx)
+                        .map(|d| d.value).unwrap_or(0.0);
+                    self.begin_group();
+                    self.exec(Action::UpdateDimension {
+                        index: edit_idx, value: measured, expr: None, range: Some(rb),
+                    });
+                    success = true;
+                } else if let Some(kind) = self.dim_kind {
+                    self.begin_group();
+                    let measured = self.measure_dimension(&kind);
+                    // LineLineDistance still needs its paired
+                    // Parallel constraint before the range dim.
+                    if let DimensionKind::LineLineDistance(a, b) = kind {
+                        let has_parallel = self.sketch.parallel.iter().any(|p|
+                            (p.a == a && p.b == b) || (p.a == b && p.b == a));
+                        if !has_parallel {
+                            self.exec(Action::ApplyParallel { a, b });
+                        }
+                    }
+                    let n_dims_before = self.sketch.dimensions.len();
+                    self.exec(Action::AddDimension {
+                        kind, value: measured, expr: None, derived: false, range: Some(rb),
+                    });
+                    if self.sketch.dimensions.len() > n_dims_before
+                        && let Some(d) = self.sketch.dimensions.last_mut() {
+                            d.offset = self.dim_offset;
+                            d.text_along = self.dim_text_along;
+                        }
+                    success = true;
+                }
+            } else if is_numeric || is_expr || (input.is_empty() && self.dim_derived) {
+                self.begin_group();
+                if let Some(edit_idx) = self.dim_edit_index.take() {
+                    // Editing existing: update in place (preserves name)
+                    if self.dim_derived != self.sketch.dimensions[edit_idx].derived {
+                        // Toggle derived status
+                        let name = self.sketch.dimensions[edit_idx].name.clone();
+                        if self.dim_derived {
+                            self.run_commands(&format!("set_derived {}", name));
+                        } else {
+                            let val = if is_numeric { input.parse::<f64>().unwrap() } else { self.sketch.dimensions[edit_idx].value };
+                            self.run_commands(&format!("set_driven {} {}", name, val));
+                        }
+                        success = true;
+                    } else if is_numeric {
+                        let value = input.parse::<f64>().unwrap();
+                        self.exec(Action::UpdateDimension { index: edit_idx, value, expr: None, range: None });
+                        success = true;
+                    } else if let Err(e) = self.sketch.validate_expr(&input) {
+                        self.status_error = Some(format!("Expression error: {}", e));
+                        self.dim_edit_index = Some(edit_idx); // restore
+                    } else {
+                        self.exec(Action::UpdateDimension {
+                            index: edit_idx, value: 0.0,
+                            expr: Some(input.clone()), range: None,
+                        });
+                        success = true;
+                    }
+                } else if let Some(kind) = self.dim_kind {
+                    let is_dup = self.sketch.dimensions.iter().any(|d| d.kind == kind);
+                    if is_dup {
+                        self.status_error = Some("Dimension already exists".into());
+                    } else if is_numeric || (input.is_empty() && self.dim_derived) {
+                        let value = input.parse::<f64>().unwrap_or(0.0);
+                        let n_dims_before = self.sketch.dimensions.len();
+                        // LineLineDistance requires a paired Parallel
+                        // constraint; emit it first if not already present.
+                        if let DimensionKind::LineLineDistance(a, b) = kind {
+                            let has_parallel = self.sketch.parallel.iter().any(|p|
+                                (p.a == a && p.b == b) || (p.a == b && p.b == a));
+                            if !has_parallel {
+                                self.exec(Action::ApplyParallel { a, b });
+                            }
+                        }
+                        self.exec(Action::AddDimension { kind, value, expr: None, derived: self.dim_derived, range: None });
+                        if self.sketch.dimensions.len() > n_dims_before
+                            && let Some(d) = self.sketch.dimensions.last_mut() {
+                                d.offset = self.dim_offset;
+                                d.text_along = self.dim_text_along;
+                            }
+                        success = true;
+                    } else {
+                        if let Err(e) = self.sketch.validate_expr(&input) {
+                            self.status_error = Some(format!("Expression error: {}", e));
+                        } else {
+                            let n_dims_before = self.sketch.dimensions.len();
+                            if let DimensionKind::LineLineDistance(a, b) = kind {
+                                let has_parallel = self.sketch.parallel.iter().any(|p|
+                                    (p.a == a && p.b == b) || (p.a == b && p.b == a));
+                                if !has_parallel {
+                                    self.exec(Action::ApplyParallel { a, b });
+                                }
+                            }
+                            self.exec(Action::AddDimension {
+                                kind, value: 0.0, expr: Some(input.clone()), derived: self.dim_derived, range: None,
+                            });
+                            if self.sketch.dimensions.len() > n_dims_before
+                                && let Some(d) = self.sketch.dimensions.last_mut() {
+                                    d.offset = self.dim_offset;
+                                    d.text_along = self.dim_text_along;
+                                }
+                            success = true;
+                        }
+                    }
+                }
+            } else if !input.is_empty() {
+                self.status_error = Some(format!("Invalid value or expression: {}", input));
+            }
+            if success {
+                self.dim_editing = false;
+                self.dim_placing = false;
+                self.dim_edit_index = None;
+                self.dim_kind = None;
+                self.selection.clear();
+            }
+        } else if !response.has_focus() && self.dim_editing {
+            response.request_focus();
+        }
     }
 }
