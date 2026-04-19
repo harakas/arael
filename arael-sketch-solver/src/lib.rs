@@ -215,6 +215,10 @@ pub struct Sketch {
     #[arael(skip)]
     pub dimensions: std::vec::Vec<Dimension>,
     pub next_dimension_id: u32,
+    // Next auto-assigned numeric constraint id (C<nid>). 0 is reserved
+    // as the "unassigned" sentinel picked up by assign_constraint_names().
+    #[serde(default = "default_next_constraint_id")]
+    pub next_constraint_id: u32,
     // User-defined parameters
     #[arael(skip)]
     #[serde(default)]
@@ -236,6 +240,27 @@ pub struct Sketch {
 }
 
 fn default_min_length() -> f64 { 0.0001 }
+fn default_next_constraint_id() -> u32 { 1 }
+
+/// Format a synthetic constraint name for a flag-style constraint on a
+/// named entity. Pattern: "C<entity><flag>", e.g. "CL0H", "CL3V".
+pub fn format_flag_name(entity_name: &str, flag: char) -> String {
+    format!("C{}{}", entity_name, flag)
+}
+
+/// Parse a synthetic constraint name into its entity-name + flag-char
+/// components. Returns None for names that don't match "C<entity>F"
+/// where the first char is 'C' and the final char is an uppercase
+/// ASCII flag tag ('H' or 'V' today).
+pub fn parse_flag_name(token: &str) -> Option<(String, char)> {
+    let bytes = token.as_bytes();
+    if bytes.len() < 3 || bytes[0] != b'C' { return None; }
+    let flag = bytes[bytes.len() - 1] as char;
+    if !matches!(flag, 'H' | 'V') { return None; }
+    let entity = &token[1..token.len() - 1];
+    if entity.is_empty() { return None; }
+    Some((entity.to_string(), flag))
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -368,12 +393,80 @@ impl Sketch {
             axis_distance_aa_e_e: Vec::new(),
             dimensions: Vec::new(),
             next_dimension_id: 0,
+            next_constraint_id: 1,
             user_params: Vec::new(),
             expr_constraints: Vec::new(),
             symbol_bag: None,
             expr_hb: TripletBlock::new(),
             cached_dof: None,
         }
+    }
+
+    /// Walk every Vec-stored constraint in canonical order and assign a
+    /// numeric id (C<nid>) to any constraint whose nid is still the 0
+    /// sentinel. Call at the tail of every mutating action and after
+    /// loading a sketch so freshly-deserialised sketches pick up names.
+    pub fn assign_constraint_names(&mut self) {
+        macro_rules! assign {
+            ($($field:ident),* $(,)?) => {
+                $(
+                    for c in self.$field.iter_mut() {
+                        if c.nid == 0 {
+                            c.nid = self.next_constraint_id;
+                            self.next_constraint_id += 1;
+                        }
+                    }
+                )*
+            };
+        }
+        assign!(
+            coincident_pp,
+            coincident_lp1, coincident_lp2,
+            coincident_ll11, coincident_ll12, coincident_ll21, coincident_ll22,
+            distance_pp, hdistance_pp, vdistance_pp,
+            point_on_line,
+            midpoint, midpoint_lp1, midpoint_lp2,
+            midpoint_arc_start, midpoint_arc_end,
+            midpoint_arc_point,
+            midpoint_lp1_arc, midpoint_lp2_arc,
+            midpoint_arc_start_arc, midpoint_arc_end_arc,
+            point_on_arc,
+            parallel, perpendicular, collinear,
+            equal_length, angle,
+            tangent_la, concentric, equal_radius, tangent_aa,
+            symmetry_ll, symmetry_pp, symmetry_aa,
+            distance_pl, distance_lp1l, distance_lp2l,
+            distance_arc_center_l, distance_arc_start_l, distance_arc_end_l,
+            line_p1_on_line, line_p2_on_line,
+            coincident_arc_center, coincident_arc_start, coincident_arc_end,
+            coincident_lp1_arc_center, coincident_lp2_arc_center,
+            coincident_lp1_arc_start, coincident_lp2_arc_start,
+            coincident_lp1_arc_end, coincident_lp2_arc_end,
+            coincident_arc_center_start, coincident_arc_center_end,
+            coincident_arc_start_center, coincident_arc_end_center,
+            coincident_arc_start_start, coincident_arc_start_end,
+            coincident_arc_end_start, coincident_arc_end_end,
+            line_p1_on_arc, line_p2_on_arc,
+            distance_ll11, distance_ll12, distance_ll21, distance_ll22,
+            distance_lp1, distance_lp2,
+            distance_arc_center_p, distance_arc_start_p, distance_arc_end_p,
+            distance_arc_center_l1, distance_arc_center_l2,
+            distance_arc_start_l1, distance_arc_start_l2,
+            distance_arc_end_l1, distance_arc_end_l2,
+            distance_aa_ce_ce, distance_aa_ce_s, distance_aa_ce_e,
+            distance_aa_s_ce, distance_aa_s_s, distance_aa_s_e,
+            distance_aa_e_ce, distance_aa_e_s, distance_aa_e_e,
+            distance_concentric,
+            axis_distance_ll11, axis_distance_ll12, axis_distance_ll21, axis_distance_ll22,
+            axis_distance_lp1, axis_distance_lp2,
+            axis_distance_arc_center_p, axis_distance_arc_start_p, axis_distance_arc_end_p,
+            axis_distance_arc_center_l1, axis_distance_arc_center_l2,
+            axis_distance_arc_start_l1, axis_distance_arc_start_l2,
+            axis_distance_arc_end_l1, axis_distance_arc_end_l2,
+            axis_distance_aa_ce_ce, axis_distance_aa_ce_s, axis_distance_aa_ce_e,
+            axis_distance_aa_s_ce, axis_distance_aa_s_s, axis_distance_aa_s_e,
+            axis_distance_aa_e_ce, axis_distance_aa_e_s, axis_distance_aa_e_e,
+        );
     }
 
     /// Add a free point at the given position.
@@ -1057,7 +1150,7 @@ impl Sketch {
                 ($lines:expr, $arcs:expr, $lp_coll:ident, $arc_coll:ident, $direct_coll:ident, $DirectType:ident, $label:expr) => {
                     for &line in &$lines {
                         for &arc in &$arcs {
-                            self.$direct_coll.push($DirectType { line, arc, cid: 0, hb: CrossBlock::new() });
+                            self.$direct_coll.push($DirectType { line, arc, nid: 0, cid: 0, hb: CrossBlock::new() });
                             self.$lp_coll.retain(|c| !(c.line == line && c.point == hr));
                             self.$arc_coll.retain(|c| !(c.point == hr && c.arc == arc));
                             eprintln!("INFO: consolidated helper {} -> {}", hr.index(), $label);
@@ -1485,8 +1578,8 @@ impl Sketch {
         // Entity-level flags
         for r in self.lines.refs() {
             let l = &self.lines[r];
-            if l.constraints.horizontal { out.push(format!("horizontal {}", l.name)); }
-            if l.constraints.vertical { out.push(format!("vertical {}", l.name)); }
+            if l.constraints.horizontal { out.push(format!("{}: horizontal {}", format_flag_name(&l.name, 'H'), l.name)); }
+            if l.constraints.vertical { out.push(format!("{}: vertical {}", format_flag_name(&l.name, 'V'), l.name)); }
             if l.constraints.has_length { out.push(format!("length {} = {}", l.name, l.constraints.length)); }
             if l.constraints.has_angle { out.push(format!("xangle {} = {:.4}", l.name, l.constraints.target_angle.to_degrees())); }
             if !l.p1.optimize { out.push(format!("lock {}.p1", l.name)); }
@@ -1510,7 +1603,7 @@ impl Sketch {
                 for c in &$vec {
                     let na = &self.lines[c.$fa].name;
                     let nb = &self.lines[c.$fb].name;
-                    out.push(format!("{} {} {}", $name, na, nb));
+                    out.push(format!("C{}: {} {} {}", c.nid, $name, na, nb));
                 }
             };
         }
@@ -1521,150 +1614,150 @@ impl Sketch {
         // Coincident: suppress bridge constraints (helper point bridges)
         for c in &self.coincident_pp {
             if !self.points[c.a].helper && !self.points[c.b].helper {
-                out.push(format!("coincident {} {}", self.points[c.a].name, self.points[c.b].name));
+                out.push(format!("C{}: coincident {} {}", c.nid, self.points[c.a].name, self.points[c.b].name));
             }
         }
-        for c in &self.coincident_ll11 { out.push(format!("coincident {}.p1 {}.p1", self.lines[c.a].name, self.lines[c.b].name)); }
-        for c in &self.coincident_ll12 { out.push(format!("coincident {}.p1 {}.p2", self.lines[c.a].name, self.lines[c.b].name)); }
-        for c in &self.coincident_ll21 { out.push(format!("coincident {}.p2 {}.p1", self.lines[c.a].name, self.lines[c.b].name)); }
-        for c in &self.coincident_ll22 { out.push(format!("coincident {}.p2 {}.p2", self.lines[c.a].name, self.lines[c.b].name)); }
+        for c in &self.coincident_ll11 { out.push(format!("C{}: coincident {}.p1 {}.p1", c.nid, self.lines[c.a].name, self.lines[c.b].name)); }
+        for c in &self.coincident_ll12 { out.push(format!("C{}: coincident {}.p1 {}.p2", c.nid, self.lines[c.a].name, self.lines[c.b].name)); }
+        for c in &self.coincident_ll21 { out.push(format!("C{}: coincident {}.p2 {}.p1", c.nid, self.lines[c.a].name, self.lines[c.b].name)); }
+        for c in &self.coincident_ll22 { out.push(format!("C{}: coincident {}.p2 {}.p2", c.nid, self.lines[c.a].name, self.lines[c.b].name)); }
         for c in &self.coincident_lp1 {
             if !self.points[c.point].helper {
-                out.push(format!("coincident {}.p1 {}", self.lines[c.line].name, self.points[c.point].name));
+                out.push(format!("C{}: coincident {}.p1 {}", c.nid, self.lines[c.line].name, self.points[c.point].name));
             }
         }
         for c in &self.coincident_lp2 {
             if !self.points[c.point].helper {
-                out.push(format!("coincident {}.p2 {}", self.lines[c.line].name, self.points[c.point].name));
+                out.push(format!("C{}: coincident {}.p2 {}", c.nid, self.lines[c.line].name, self.points[c.point].name));
             }
         }
         // Point-Arc coincident: suppress helper bridges
         for c in &self.coincident_arc_center {
             if !self.points[c.point].helper {
-                out.push(format!("coincident {} {}.center", self.points[c.point].name, self.arcs[c.arc].name));
+                out.push(format!("C{}: coincident {} {}.center", c.nid, self.points[c.point].name, self.arcs[c.arc].name));
             }
         }
         for c in &self.coincident_arc_start {
             if !self.points[c.point].helper {
-                out.push(format!("coincident {} {}.start", self.points[c.point].name, self.arcs[c.arc].name));
+                out.push(format!("C{}: coincident {} {}.start", c.nid, self.points[c.point].name, self.arcs[c.arc].name));
             }
         }
         for c in &self.coincident_arc_end {
             if !self.points[c.point].helper {
-                out.push(format!("coincident {} {}.end", self.points[c.point].name, self.arcs[c.arc].name));
+                out.push(format!("C{}: coincident {} {}.end", c.nid, self.points[c.point].name, self.arcs[c.arc].name));
             }
         }
         // Line-Arc coincident
-        for c in &self.coincident_lp1_arc_center { out.push(format!("coincident {}.p1 {}.center", self.lines[c.line].name, self.arcs[c.arc].name)); }
-        for c in &self.coincident_lp2_arc_center { out.push(format!("coincident {}.p2 {}.center", self.lines[c.line].name, self.arcs[c.arc].name)); }
-        for c in &self.coincident_lp1_arc_start { out.push(format!("coincident {}.p1 {}.start", self.lines[c.line].name, self.arcs[c.arc].name)); }
-        for c in &self.coincident_lp2_arc_start { out.push(format!("coincident {}.p2 {}.start", self.lines[c.line].name, self.arcs[c.arc].name)); }
-        for c in &self.coincident_lp1_arc_end { out.push(format!("coincident {}.p1 {}.end", self.lines[c.line].name, self.arcs[c.arc].name)); }
-        for c in &self.coincident_lp2_arc_end { out.push(format!("coincident {}.p2 {}.end", self.lines[c.line].name, self.arcs[c.arc].name)); }
+        for c in &self.coincident_lp1_arc_center { out.push(format!("C{}: coincident {}.p1 {}.center", c.nid, self.lines[c.line].name, self.arcs[c.arc].name)); }
+        for c in &self.coincident_lp2_arc_center { out.push(format!("C{}: coincident {}.p2 {}.center", c.nid, self.lines[c.line].name, self.arcs[c.arc].name)); }
+        for c in &self.coincident_lp1_arc_start { out.push(format!("C{}: coincident {}.p1 {}.start", c.nid, self.lines[c.line].name, self.arcs[c.arc].name)); }
+        for c in &self.coincident_lp2_arc_start { out.push(format!("C{}: coincident {}.p2 {}.start", c.nid, self.lines[c.line].name, self.arcs[c.arc].name)); }
+        for c in &self.coincident_lp1_arc_end { out.push(format!("C{}: coincident {}.p1 {}.end", c.nid, self.lines[c.line].name, self.arcs[c.arc].name)); }
+        for c in &self.coincident_lp2_arc_end { out.push(format!("C{}: coincident {}.p2 {}.end", c.nid, self.lines[c.line].name, self.arcs[c.arc].name)); }
         // Arc-Arc coincident
-        for c in &self.coincident_arc_center_start { out.push(format!("coincident {}.center {}.start", self.arcs[c.a].name, self.arcs[c.b].name)); }
-        for c in &self.coincident_arc_center_end { out.push(format!("coincident {}.center {}.end", self.arcs[c.a].name, self.arcs[c.b].name)); }
-        for c in &self.coincident_arc_start_center { out.push(format!("coincident {}.start {}.center", self.arcs[c.a].name, self.arcs[c.b].name)); }
-        for c in &self.coincident_arc_end_center { out.push(format!("coincident {}.end {}.center", self.arcs[c.a].name, self.arcs[c.b].name)); }
-        for c in &self.coincident_arc_start_start { out.push(format!("coincident {}.start {}.start", self.arcs[c.a].name, self.arcs[c.b].name)); }
-        for c in &self.coincident_arc_start_end { out.push(format!("coincident {}.start {}.end", self.arcs[c.a].name, self.arcs[c.b].name)); }
-        for c in &self.coincident_arc_end_start { out.push(format!("coincident {}.end {}.start", self.arcs[c.a].name, self.arcs[c.b].name)); }
-        for c in &self.coincident_arc_end_end { out.push(format!("coincident {}.end {}.end", self.arcs[c.a].name, self.arcs[c.b].name)); }
+        for c in &self.coincident_arc_center_start { out.push(format!("C{}: coincident {}.center {}.start", c.nid, self.arcs[c.a].name, self.arcs[c.b].name)); }
+        for c in &self.coincident_arc_center_end { out.push(format!("C{}: coincident {}.center {}.end", c.nid, self.arcs[c.a].name, self.arcs[c.b].name)); }
+        for c in &self.coincident_arc_start_center { out.push(format!("C{}: coincident {}.start {}.center", c.nid, self.arcs[c.a].name, self.arcs[c.b].name)); }
+        for c in &self.coincident_arc_end_center { out.push(format!("C{}: coincident {}.end {}.center", c.nid, self.arcs[c.a].name, self.arcs[c.b].name)); }
+        for c in &self.coincident_arc_start_start { out.push(format!("C{}: coincident {}.start {}.start", c.nid, self.arcs[c.a].name, self.arcs[c.b].name)); }
+        for c in &self.coincident_arc_start_end { out.push(format!("C{}: coincident {}.start {}.end", c.nid, self.arcs[c.a].name, self.arcs[c.b].name)); }
+        for c in &self.coincident_arc_end_start { out.push(format!("C{}: coincident {}.end {}.start", c.nid, self.arcs[c.a].name, self.arcs[c.b].name)); }
+        for c in &self.coincident_arc_end_end { out.push(format!("C{}: coincident {}.end {}.end", c.nid, self.arcs[c.a].name, self.arcs[c.b].name)); }
         // Line endpoint on line/arc
-        for c in &self.line_p1_on_line { out.push(format!("point_on {}.p1 {}", self.lines[c.a].name, self.lines[c.b].name)); }
-        for c in &self.line_p2_on_line { out.push(format!("point_on {}.p2 {}", self.lines[c.a].name, self.lines[c.b].name)); }
-        for c in &self.line_p1_on_arc { out.push(format!("point_on {}.p1 {}", self.lines[c.line].name, self.arcs[c.arc].name)); }
-        for c in &self.line_p2_on_arc { out.push(format!("point_on {}.p2 {}", self.lines[c.line].name, self.arcs[c.arc].name)); }
-        for c in &self.angle { out.push(format!("angle {} {} = {:.1}deg", self.lines[c.a].name, self.lines[c.b].name, c.angle.to_degrees())); }
-        for c in &self.tangent_la { out.push(format!("tangent {} {}", self.lines[c.line].name, self.arcs[c.arc].name)); }
-        for c in &self.tangent_aa { out.push(format!("tangent {} {}", self.arcs[c.a].name, self.arcs[c.b].name)); }
-        for c in &self.concentric { out.push(format!("concentric {} {}", self.arcs[c.a].name, self.arcs[c.b].name)); }
-        for c in &self.equal_radius { out.push(format!("equal {} {}", self.arcs[c.a].name, self.arcs[c.b].name)); }
-        for c in &self.symmetry_ll { out.push(format!("symmetry {} {} {}", self.lines[c.a].name, self.lines[c.b].name, self.lines[c.c].name)); }
-        for c in &self.symmetry_pp { out.push(format!("symmetry {} {} {}", self.point_display_name(c.a), self.lines[c.line].name, self.point_display_name(c.c))); }
-        for c in &self.symmetry_aa { out.push(format!("symmetry {} {} {}", self.arcs[c.a].name, self.lines[c.line].name, self.arcs[c.c].name)); }
+        for c in &self.line_p1_on_line { out.push(format!("C{}: point_on {}.p1 {}", c.nid, self.lines[c.a].name, self.lines[c.b].name)); }
+        for c in &self.line_p2_on_line { out.push(format!("C{}: point_on {}.p2 {}", c.nid, self.lines[c.a].name, self.lines[c.b].name)); }
+        for c in &self.line_p1_on_arc { out.push(format!("C{}: point_on {}.p1 {}", c.nid, self.lines[c.line].name, self.arcs[c.arc].name)); }
+        for c in &self.line_p2_on_arc { out.push(format!("C{}: point_on {}.p2 {}", c.nid, self.lines[c.line].name, self.arcs[c.arc].name)); }
+        for c in &self.angle { out.push(format!("C{}: angle {} {} = {:.1}deg", c.nid, self.lines[c.a].name, self.lines[c.b].name, c.angle.to_degrees())); }
+        for c in &self.tangent_la { out.push(format!("C{}: tangent {} {}", c.nid, self.lines[c.line].name, self.arcs[c.arc].name)); }
+        for c in &self.tangent_aa { out.push(format!("C{}: tangent {} {}", c.nid, self.arcs[c.a].name, self.arcs[c.b].name)); }
+        for c in &self.concentric { out.push(format!("C{}: concentric {} {}", c.nid, self.arcs[c.a].name, self.arcs[c.b].name)); }
+        for c in &self.equal_radius { out.push(format!("C{}: equal {} {}", c.nid, self.arcs[c.a].name, self.arcs[c.b].name)); }
+        for c in &self.symmetry_ll { out.push(format!("C{}: symmetry {} {} {}", c.nid, self.lines[c.a].name, self.lines[c.b].name, self.lines[c.c].name)); }
+        for c in &self.symmetry_pp { out.push(format!("C{}: symmetry {} {} {}", c.nid, self.point_display_name(c.a), self.lines[c.line].name, self.point_display_name(c.c))); }
+        for c in &self.symmetry_aa { out.push(format!("C{}: symmetry {} {} {}", c.nid, self.arcs[c.a].name, self.lines[c.line].name, self.arcs[c.c].name)); }
         // Point-based constraints: use display names to resolve helpers
-        for c in &self.point_on_line { out.push(format!("point_on {} {}", self.point_display_name(c.point), self.lines[c.line].name)); }
-        for c in &self.point_on_arc { out.push(format!("point_on {} {}", self.point_display_name(c.point), self.arcs[c.arc].name)); }
-        for c in &self.midpoint { out.push(format!("midpoint {} {}", self.point_display_name(c.point), self.lines[c.line].name)); }
-        for c in &self.midpoint_lp1 { out.push(format!("midpoint {}.p1 {}", self.lines[c.line].name, self.lines[c.target].name)); }
-        for c in &self.midpoint_lp2 { out.push(format!("midpoint {}.p2 {}", self.lines[c.line].name, self.lines[c.target].name)); }
-        for c in &self.midpoint_arc_start { out.push(format!("midpoint {}.start {}", self.arcs[c.arc].name, self.lines[c.line].name)); }
-        for c in &self.midpoint_arc_end { out.push(format!("midpoint {}.end {}", self.arcs[c.arc].name, self.lines[c.line].name)); }
-        for c in &self.midpoint_arc_point { out.push(format!("midpoint {} {}", self.point_display_name(c.point), self.arcs[c.arc].name)); }
-        for c in &self.midpoint_lp1_arc { out.push(format!("midpoint {}.p1 {}", self.lines[c.line].name, self.arcs[c.arc].name)); }
-        for c in &self.midpoint_lp2_arc { out.push(format!("midpoint {}.p2 {}", self.lines[c.line].name, self.arcs[c.arc].name)); }
-        for c in &self.midpoint_arc_start_arc { out.push(format!("midpoint {}.start {}", self.arcs[c.a].name, self.arcs[c.b].name)); }
-        for c in &self.midpoint_arc_end_arc { out.push(format!("midpoint {}.end {}", self.arcs[c.a].name, self.arcs[c.b].name)); }
-        for c in &self.distance_pp { out.push(format!("distance {} {} = {}", self.point_display_name(c.a), self.point_display_name(c.b), c.distance)); }
-        for c in &self.hdistance_pp { out.push(format!("hdistance {} {} = {}", self.point_display_name(c.a), self.point_display_name(c.b), c.distance)); }
-        for c in &self.vdistance_pp { out.push(format!("vdistance {} {} = {}", self.point_display_name(c.a), self.point_display_name(c.b), c.distance)); }
-        for c in &self.distance_pl { out.push(format!("distance {} {} = {}", self.point_display_name(c.point), self.lines[c.line].name, c.distance)); }
-        for c in &self.distance_lp1l { out.push(format!("distance {}.p1 {} = {}", self.lines[c.a].name, self.lines[c.b].name, c.distance)); }
-        for c in &self.distance_lp2l { out.push(format!("distance {}.p2 {} = {}", self.lines[c.a].name, self.lines[c.b].name, c.distance)); }
-        for c in &self.distance_arc_center_l { out.push(format!("distance {}.center {} = {}", self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
-        for c in &self.distance_arc_start_l { out.push(format!("distance {}.start {} = {}", self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
-        for c in &self.distance_arc_end_l { out.push(format!("distance {}.end {} = {}", self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
+        for c in &self.point_on_line { out.push(format!("C{}: point_on {} {}", c.nid, self.point_display_name(c.point), self.lines[c.line].name)); }
+        for c in &self.point_on_arc { out.push(format!("C{}: point_on {} {}", c.nid, self.point_display_name(c.point), self.arcs[c.arc].name)); }
+        for c in &self.midpoint { out.push(format!("C{}: midpoint {} {}", c.nid, self.point_display_name(c.point), self.lines[c.line].name)); }
+        for c in &self.midpoint_lp1 { out.push(format!("C{}: midpoint {}.p1 {}", c.nid, self.lines[c.line].name, self.lines[c.target].name)); }
+        for c in &self.midpoint_lp2 { out.push(format!("C{}: midpoint {}.p2 {}", c.nid, self.lines[c.line].name, self.lines[c.target].name)); }
+        for c in &self.midpoint_arc_start { out.push(format!("C{}: midpoint {}.start {}", c.nid, self.arcs[c.arc].name, self.lines[c.line].name)); }
+        for c in &self.midpoint_arc_end { out.push(format!("C{}: midpoint {}.end {}", c.nid, self.arcs[c.arc].name, self.lines[c.line].name)); }
+        for c in &self.midpoint_arc_point { out.push(format!("C{}: midpoint {} {}", c.nid, self.point_display_name(c.point), self.arcs[c.arc].name)); }
+        for c in &self.midpoint_lp1_arc { out.push(format!("C{}: midpoint {}.p1 {}", c.nid, self.lines[c.line].name, self.arcs[c.arc].name)); }
+        for c in &self.midpoint_lp2_arc { out.push(format!("C{}: midpoint {}.p2 {}", c.nid, self.lines[c.line].name, self.arcs[c.arc].name)); }
+        for c in &self.midpoint_arc_start_arc { out.push(format!("C{}: midpoint {}.start {}", c.nid, self.arcs[c.a].name, self.arcs[c.b].name)); }
+        for c in &self.midpoint_arc_end_arc { out.push(format!("C{}: midpoint {}.end {}", c.nid, self.arcs[c.a].name, self.arcs[c.b].name)); }
+        for c in &self.distance_pp { out.push(format!("C{}: distance {} {} = {}", c.nid, self.point_display_name(c.a), self.point_display_name(c.b), c.distance)); }
+        for c in &self.hdistance_pp { out.push(format!("C{}: hdistance {} {} = {}", c.nid, self.point_display_name(c.a), self.point_display_name(c.b), c.distance)); }
+        for c in &self.vdistance_pp { out.push(format!("C{}: vdistance {} {} = {}", c.nid, self.point_display_name(c.a), self.point_display_name(c.b), c.distance)); }
+        for c in &self.distance_pl { out.push(format!("C{}: distance {} {} = {}", c.nid, self.point_display_name(c.point), self.lines[c.line].name, c.distance)); }
+        for c in &self.distance_lp1l { out.push(format!("C{}: distance {}.p1 {} = {}", c.nid, self.lines[c.a].name, self.lines[c.b].name, c.distance)); }
+        for c in &self.distance_lp2l { out.push(format!("C{}: distance {}.p2 {} = {}", c.nid, self.lines[c.a].name, self.lines[c.b].name, c.distance)); }
+        for c in &self.distance_arc_center_l { out.push(format!("C{}: distance {}.center {} = {}", c.nid, self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
+        for c in &self.distance_arc_start_l { out.push(format!("C{}: distance {}.start {} = {}", c.nid, self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
+        for c in &self.distance_arc_end_l { out.push(format!("C{}: distance {}.end {} = {}", c.nid, self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
         // Line-endpoint distance constraints
-        for c in &self.distance_ll11 { out.push(format!("distance {}.p1 {}.p1 = {}", self.lines[c.a].name, self.lines[c.b].name, c.distance)); }
-        for c in &self.distance_ll12 { out.push(format!("distance {}.p1 {}.p2 = {}", self.lines[c.a].name, self.lines[c.b].name, c.distance)); }
-        for c in &self.distance_ll21 { out.push(format!("distance {}.p2 {}.p1 = {}", self.lines[c.a].name, self.lines[c.b].name, c.distance)); }
-        for c in &self.distance_ll22 { out.push(format!("distance {}.p2 {}.p2 = {}", self.lines[c.a].name, self.lines[c.b].name, c.distance)); }
-        for c in &self.distance_lp1 { out.push(format!("distance {}.p1 {} = {}", self.lines[c.line].name, self.point_display_name(c.point), c.distance)); }
-        for c in &self.distance_lp2 { out.push(format!("distance {}.p2 {} = {}", self.lines[c.line].name, self.point_display_name(c.point), c.distance)); }
-        for c in &self.distance_arc_center_p { out.push(format!("distance {}.center {} = {}", self.arcs[c.arc].name, self.point_display_name(c.point), c.distance)); }
-        for c in &self.distance_arc_start_p { out.push(format!("distance {}.start {} = {}", self.arcs[c.arc].name, self.point_display_name(c.point), c.distance)); }
-        for c in &self.distance_arc_end_p { out.push(format!("distance {}.end {} = {}", self.arcs[c.arc].name, self.point_display_name(c.point), c.distance)); }
-        for c in &self.distance_arc_center_l1 { out.push(format!("distance {}.center {}.p1 = {}", self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
-        for c in &self.distance_arc_center_l2 { out.push(format!("distance {}.center {}.p2 = {}", self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
-        for c in &self.distance_arc_start_l1 { out.push(format!("distance {}.start {}.p1 = {}", self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
-        for c in &self.distance_arc_start_l2 { out.push(format!("distance {}.start {}.p2 = {}", self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
-        for c in &self.distance_arc_end_l1 { out.push(format!("distance {}.end {}.p1 = {}", self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
-        for c in &self.distance_arc_end_l2 { out.push(format!("distance {}.end {}.p2 = {}", self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
-        for c in &self.distance_aa_ce_ce { out.push(format!("distance {}.center {}.center = {}", self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
-        for c in &self.distance_aa_ce_s { out.push(format!("distance {}.center {}.start = {}", self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
-        for c in &self.distance_aa_ce_e { out.push(format!("distance {}.center {}.end = {}", self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
-        for c in &self.distance_aa_s_ce { out.push(format!("distance {}.start {}.center = {}", self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
-        for c in &self.distance_aa_s_s { out.push(format!("distance {}.start {}.start = {}", self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
-        for c in &self.distance_aa_s_e { out.push(format!("distance {}.start {}.end = {}", self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
-        for c in &self.distance_aa_e_ce { out.push(format!("distance {}.end {}.center = {}", self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
-        for c in &self.distance_aa_e_s { out.push(format!("distance {}.end {}.start = {}", self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
-        for c in &self.distance_aa_e_e { out.push(format!("distance {}.end {}.end = {}", self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
+        for c in &self.distance_ll11 { out.push(format!("C{}: distance {}.p1 {}.p1 = {}", c.nid, self.lines[c.a].name, self.lines[c.b].name, c.distance)); }
+        for c in &self.distance_ll12 { out.push(format!("C{}: distance {}.p1 {}.p2 = {}", c.nid, self.lines[c.a].name, self.lines[c.b].name, c.distance)); }
+        for c in &self.distance_ll21 { out.push(format!("C{}: distance {}.p2 {}.p1 = {}", c.nid, self.lines[c.a].name, self.lines[c.b].name, c.distance)); }
+        for c in &self.distance_ll22 { out.push(format!("C{}: distance {}.p2 {}.p2 = {}", c.nid, self.lines[c.a].name, self.lines[c.b].name, c.distance)); }
+        for c in &self.distance_lp1 { out.push(format!("C{}: distance {}.p1 {} = {}", c.nid, self.lines[c.line].name, self.point_display_name(c.point), c.distance)); }
+        for c in &self.distance_lp2 { out.push(format!("C{}: distance {}.p2 {} = {}", c.nid, self.lines[c.line].name, self.point_display_name(c.point), c.distance)); }
+        for c in &self.distance_arc_center_p { out.push(format!("C{}: distance {}.center {} = {}", c.nid, self.arcs[c.arc].name, self.point_display_name(c.point), c.distance)); }
+        for c in &self.distance_arc_start_p { out.push(format!("C{}: distance {}.start {} = {}", c.nid, self.arcs[c.arc].name, self.point_display_name(c.point), c.distance)); }
+        for c in &self.distance_arc_end_p { out.push(format!("C{}: distance {}.end {} = {}", c.nid, self.arcs[c.arc].name, self.point_display_name(c.point), c.distance)); }
+        for c in &self.distance_arc_center_l1 { out.push(format!("C{}: distance {}.center {}.p1 = {}", c.nid, self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
+        for c in &self.distance_arc_center_l2 { out.push(format!("C{}: distance {}.center {}.p2 = {}", c.nid, self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
+        for c in &self.distance_arc_start_l1 { out.push(format!("C{}: distance {}.start {}.p1 = {}", c.nid, self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
+        for c in &self.distance_arc_start_l2 { out.push(format!("C{}: distance {}.start {}.p2 = {}", c.nid, self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
+        for c in &self.distance_arc_end_l1 { out.push(format!("C{}: distance {}.end {}.p1 = {}", c.nid, self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
+        for c in &self.distance_arc_end_l2 { out.push(format!("C{}: distance {}.end {}.p2 = {}", c.nid, self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
+        for c in &self.distance_aa_ce_ce { out.push(format!("C{}: distance {}.center {}.center = {}", c.nid, self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
+        for c in &self.distance_aa_ce_s { out.push(format!("C{}: distance {}.center {}.start = {}", c.nid, self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
+        for c in &self.distance_aa_ce_e { out.push(format!("C{}: distance {}.center {}.end = {}", c.nid, self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
+        for c in &self.distance_aa_s_ce { out.push(format!("C{}: distance {}.start {}.center = {}", c.nid, self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
+        for c in &self.distance_aa_s_s { out.push(format!("C{}: distance {}.start {}.start = {}", c.nid, self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
+        for c in &self.distance_aa_s_e { out.push(format!("C{}: distance {}.start {}.end = {}", c.nid, self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
+        for c in &self.distance_aa_e_ce { out.push(format!("C{}: distance {}.end {}.center = {}", c.nid, self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
+        for c in &self.distance_aa_e_s { out.push(format!("C{}: distance {}.end {}.start = {}", c.nid, self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
+        for c in &self.distance_aa_e_e { out.push(format!("C{}: distance {}.end {}.end = {}", c.nid, self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
         for c in &self.distance_concentric {
             let signed = if c.sign >= 0.0 { c.distance } else { -c.distance };
-            out.push(format!("distance {} {} = {} (concentric)", self.arcs[c.a].name, self.arcs[c.b].name, signed));
+            out.push(format!("C{}: distance {} {} = {} (concentric)", c.nid, self.arcs[c.a].name, self.arcs[c.b].name, signed));
         }
         // Midpoint variants
-        for c in &self.midpoint_lp1 { out.push(format!("midpoint {}.p1 {}", self.lines[c.target].name, self.lines[c.line].name)); }
-        for c in &self.midpoint_lp2 { out.push(format!("midpoint {}.p2 {}", self.lines[c.target].name, self.lines[c.line].name)); }
-        for c in &self.midpoint_arc_start { out.push(format!("midpoint {}.start {}", self.arcs[c.arc].name, self.lines[c.line].name)); }
-        for c in &self.midpoint_arc_end { out.push(format!("midpoint {}.end {}", self.arcs[c.arc].name, self.lines[c.line].name)); }
+        for c in &self.midpoint_lp1 { out.push(format!("C{}: midpoint {}.p1 {}", c.nid, self.lines[c.target].name, self.lines[c.line].name)); }
+        for c in &self.midpoint_lp2 { out.push(format!("C{}: midpoint {}.p2 {}", c.nid, self.lines[c.target].name, self.lines[c.line].name)); }
+        for c in &self.midpoint_arc_start { out.push(format!("C{}: midpoint {}.start {}", c.nid, self.arcs[c.arc].name, self.lines[c.line].name)); }
+        for c in &self.midpoint_arc_end { out.push(format!("C{}: midpoint {}.end {}", c.nid, self.arcs[c.arc].name, self.lines[c.line].name)); }
         // Axis distance constraints
         let axis_label = |h: bool| if h { "hdistance" } else { "vdistance" };
-        for c in &self.axis_distance_ll11 { out.push(format!("{} {}.p1 {}.p1 = {}", axis_label(c.horizontal), self.lines[c.a].name, self.lines[c.b].name, c.distance)); }
-        for c in &self.axis_distance_ll12 { out.push(format!("{} {}.p1 {}.p2 = {}", axis_label(c.horizontal), self.lines[c.a].name, self.lines[c.b].name, c.distance)); }
-        for c in &self.axis_distance_ll21 { out.push(format!("{} {}.p2 {}.p1 = {}", axis_label(c.horizontal), self.lines[c.a].name, self.lines[c.b].name, c.distance)); }
-        for c in &self.axis_distance_ll22 { out.push(format!("{} {}.p2 {}.p2 = {}", axis_label(c.horizontal), self.lines[c.a].name, self.lines[c.b].name, c.distance)); }
-        for c in &self.axis_distance_lp1 { out.push(format!("{} {}.p1 {} = {}", axis_label(c.horizontal), self.lines[c.line].name, self.point_display_name(c.point), c.distance)); }
-        for c in &self.axis_distance_lp2 { out.push(format!("{} {}.p2 {} = {}", axis_label(c.horizontal), self.lines[c.line].name, self.point_display_name(c.point), c.distance)); }
-        for c in &self.axis_distance_arc_center_p { out.push(format!("{} {}.center {} = {}", axis_label(c.horizontal), self.arcs[c.arc].name, self.point_display_name(c.point), c.distance)); }
-        for c in &self.axis_distance_arc_start_p { out.push(format!("{} {}.start {} = {}", axis_label(c.horizontal), self.arcs[c.arc].name, self.point_display_name(c.point), c.distance)); }
-        for c in &self.axis_distance_arc_end_p { out.push(format!("{} {}.end {} = {}", axis_label(c.horizontal), self.arcs[c.arc].name, self.point_display_name(c.point), c.distance)); }
-        for c in &self.axis_distance_arc_center_l1 { out.push(format!("{} {}.center {}.p1 = {}", axis_label(c.horizontal), self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
-        for c in &self.axis_distance_arc_center_l2 { out.push(format!("{} {}.center {}.p2 = {}", axis_label(c.horizontal), self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
-        for c in &self.axis_distance_arc_start_l1 { out.push(format!("{} {}.start {}.p1 = {}", axis_label(c.horizontal), self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
-        for c in &self.axis_distance_arc_start_l2 { out.push(format!("{} {}.start {}.p2 = {}", axis_label(c.horizontal), self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
-        for c in &self.axis_distance_arc_end_l1 { out.push(format!("{} {}.end {}.p1 = {}", axis_label(c.horizontal), self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
-        for c in &self.axis_distance_arc_end_l2 { out.push(format!("{} {}.end {}.p2 = {}", axis_label(c.horizontal), self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
-        for c in &self.axis_distance_aa_ce_ce { out.push(format!("{} {}.center {}.center = {}", axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
-        for c in &self.axis_distance_aa_ce_s { out.push(format!("{} {}.center {}.start = {}", axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
-        for c in &self.axis_distance_aa_ce_e { out.push(format!("{} {}.center {}.end = {}", axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
-        for c in &self.axis_distance_aa_s_ce { out.push(format!("{} {}.start {}.center = {}", axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
-        for c in &self.axis_distance_aa_s_s { out.push(format!("{} {}.start {}.start = {}", axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
-        for c in &self.axis_distance_aa_s_e { out.push(format!("{} {}.start {}.end = {}", axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
-        for c in &self.axis_distance_aa_e_ce { out.push(format!("{} {}.end {}.center = {}", axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
-        for c in &self.axis_distance_aa_e_s { out.push(format!("{} {}.end {}.start = {}", axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
-        for c in &self.axis_distance_aa_e_e { out.push(format!("{} {}.end {}.end = {}", axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
+        for c in &self.axis_distance_ll11 { out.push(format!("C{}: {} {}.p1 {}.p1 = {}", c.nid, axis_label(c.horizontal), self.lines[c.a].name, self.lines[c.b].name, c.distance)); }
+        for c in &self.axis_distance_ll12 { out.push(format!("C{}: {} {}.p1 {}.p2 = {}", c.nid, axis_label(c.horizontal), self.lines[c.a].name, self.lines[c.b].name, c.distance)); }
+        for c in &self.axis_distance_ll21 { out.push(format!("C{}: {} {}.p2 {}.p1 = {}", c.nid, axis_label(c.horizontal), self.lines[c.a].name, self.lines[c.b].name, c.distance)); }
+        for c in &self.axis_distance_ll22 { out.push(format!("C{}: {} {}.p2 {}.p2 = {}", c.nid, axis_label(c.horizontal), self.lines[c.a].name, self.lines[c.b].name, c.distance)); }
+        for c in &self.axis_distance_lp1 { out.push(format!("C{}: {} {}.p1 {} = {}", c.nid, axis_label(c.horizontal), self.lines[c.line].name, self.point_display_name(c.point), c.distance)); }
+        for c in &self.axis_distance_lp2 { out.push(format!("C{}: {} {}.p2 {} = {}", c.nid, axis_label(c.horizontal), self.lines[c.line].name, self.point_display_name(c.point), c.distance)); }
+        for c in &self.axis_distance_arc_center_p { out.push(format!("C{}: {} {}.center {} = {}", c.nid, axis_label(c.horizontal), self.arcs[c.arc].name, self.point_display_name(c.point), c.distance)); }
+        for c in &self.axis_distance_arc_start_p { out.push(format!("C{}: {} {}.start {} = {}", c.nid, axis_label(c.horizontal), self.arcs[c.arc].name, self.point_display_name(c.point), c.distance)); }
+        for c in &self.axis_distance_arc_end_p { out.push(format!("C{}: {} {}.end {} = {}", c.nid, axis_label(c.horizontal), self.arcs[c.arc].name, self.point_display_name(c.point), c.distance)); }
+        for c in &self.axis_distance_arc_center_l1 { out.push(format!("C{}: {} {}.center {}.p1 = {}", c.nid, axis_label(c.horizontal), self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
+        for c in &self.axis_distance_arc_center_l2 { out.push(format!("C{}: {} {}.center {}.p2 = {}", c.nid, axis_label(c.horizontal), self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
+        for c in &self.axis_distance_arc_start_l1 { out.push(format!("C{}: {} {}.start {}.p1 = {}", c.nid, axis_label(c.horizontal), self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
+        for c in &self.axis_distance_arc_start_l2 { out.push(format!("C{}: {} {}.start {}.p2 = {}", c.nid, axis_label(c.horizontal), self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
+        for c in &self.axis_distance_arc_end_l1 { out.push(format!("C{}: {} {}.end {}.p1 = {}", c.nid, axis_label(c.horizontal), self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
+        for c in &self.axis_distance_arc_end_l2 { out.push(format!("C{}: {} {}.end {}.p2 = {}", c.nid, axis_label(c.horizontal), self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
+        for c in &self.axis_distance_aa_ce_ce { out.push(format!("C{}: {} {}.center {}.center = {}", c.nid, axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
+        for c in &self.axis_distance_aa_ce_s { out.push(format!("C{}: {} {}.center {}.start = {}", c.nid, axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
+        for c in &self.axis_distance_aa_ce_e { out.push(format!("C{}: {} {}.center {}.end = {}", c.nid, axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
+        for c in &self.axis_distance_aa_s_ce { out.push(format!("C{}: {} {}.start {}.center = {}", c.nid, axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
+        for c in &self.axis_distance_aa_s_s { out.push(format!("C{}: {} {}.start {}.start = {}", c.nid, axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
+        for c in &self.axis_distance_aa_s_e { out.push(format!("C{}: {} {}.start {}.end = {}", c.nid, axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
+        for c in &self.axis_distance_aa_e_ce { out.push(format!("C{}: {} {}.end {}.center = {}", c.nid, axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
+        for c in &self.axis_distance_aa_e_s { out.push(format!("C{}: {} {}.end {}.start = {}", c.nid, axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
+        for c in &self.axis_distance_aa_e_e { out.push(format!("C{}: {} {}.end {}.end = {}", c.nid, axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
         out
     }
 
@@ -2247,7 +2340,7 @@ mod jacobian_tests {
         sketch.coincident_ll21.push(CoincidentLL21 {
             a: l0,
             b: l1,
-            cid: 0,
+            nid: 0, cid: 0,
             hb: arael::model::CrossBlock::new(),
         });
         // Length dimension on L0 (creates an expression constraint)

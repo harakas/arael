@@ -1,5 +1,6 @@
 # TODO
 
+- **arael-sketch conflict messages**: Enhance `check_constraint_conflict` so the "already parallel / perpendicular / equal / ..." error messages include the offending existing constraint's name (e.g. "conflict with C5: parallel L0 L1"). The plan (`yes-did-you-check-memoized-wren.md`) called this a single-site change, but the conflict messages are spread across many arms in `arael-sketch/src/conflicts.rs` and the current `pair_exists` helper does not expose the matching index. Adding a sibling helper that returns both the boolean and the index (or refactoring `pair_exists` to return `Option<usize>`) would let every arm include the nid. Skipped for now to keep the initial naming feature surface-area small.
 - **Sketch editor**: Tag constraints owned by dimensions so they can be deleted logically instead of matching by approximate value comparison. Currently `RemoveDimension` in `arael-sketch/examples/editor.rs` searches for the underlying constraint (e.g. `distance_pl`) by floating-point distance match, which is fragile (e.g. signed vs unsigned mismatch for `PointLineDistance` — the constraint stores -5.0 but the dimension stores 5.0).
 - **Sketch editor**: Add `MoveDimension` action to cleanly reposition dimension annotations (offset + text_along). Currently dimension dragging uses the `Drag` action which snapshots the entire sketch state. Alternatively, extend `AddDimension` to accept optional offset/text_along so the position can be specified at creation time.
 - derived dimensions -- DONE
@@ -33,6 +34,21 @@
 - **arael-sketch**: dragging should keep hilight, not hilight others -- DONE
 - **arael-sketch**: sometimes we somehow get stuck pasting into cmd input -- ??? browser/wasm issue?
 - **arael-sketch**: make language more real so that you can do vector algebra
+- **arael-sketch**: add keywords into language? stop assigning to anything?
+- **arael-sketch**: dimension: distance between concentric circles
 - **arael-macros**: support general func() syntax -- right now we have to describe all of them which is annoying..
-- **arael**: support single struct model+root. right now it does not function.
-- **arael**: support global optimization parameters with a triplet block
+- **arael**: support single struct model+root. right now it does not function. -- DONE (SelfBlock<Self> on root + direct-composed sub-model fields now route through EntityLocation::RootSelf / EntityLocation::DirectField in arael-macros)
+- **arael**: support global optimization parameters with a triplet block, so a global param can be mixed with hessianblock, or efficiently omitted
+- **arael-sym**: parse_with_bag -- bag with functions and substitutions so func() gets current active function
+- **arael-sym**: cli calculator demo app, better than bc, define functions, etc.
+- **arael**: docs: document constraint has name= property
+- **arael**: extend jacobi demo with constraint labels
+- **arael-sketch**: clean up points obscuring everything, make line endpoint when creating explicit and clean -- cross on line snap, cross+box on point snap
+- **arael-sketch**: auto-perpendicular constraint
+- **arael-sketch**: switch to hdimension/vdimension at creation when moving mouse far -- switching commands during tool usage
+- **arael-sketch**: hdimension/vdimension at creation when moving mouse far
+- **arael-sketch**: toggle tags like driven, quiet, construction during line creation
+- **arael-sketch**: robot.cmd scale to 0.1 takes us to "interesting" view
+- **arael-macros**: tighten the constraint attribute parser to reject the N-way positional multi-block form `constraint(hb_a, hb_b, hb_c, {body})`. The parser currently accepts it as a side effect of supporting `constraint(hb_pose, root.hbt, {body})` (self-primary + root-owned TripletBlock). N ≥ 2 regular multi-block should always be written with brackets -- `constraint([a, b, c], {body})` -- and the only positional form we genuinely need is the specific 2-item `(<local_self_block>, root.<triplet>)` case. Two parsers for the same thing is a surprise waiting to bite users.
+- **arael-sketch**: investigate chain misbehavior
+

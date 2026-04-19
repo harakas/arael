@@ -255,7 +255,7 @@ pub fn resolve_dim_endpoint(sketch: &mut Sketch, ep: &DimensionEndpoint) -> Ref<
             }
             let pos = sketch.lines[r].p1.value;
             let hp = sketch.add_helper_point(pos);
-            sketch.coincident_lp1.push(CoincidentLP1 { line: r, point: hp, cid: 0, hb: CrossBlock::new() });
+            sketch.coincident_lp1.push(CoincidentLP1 { line: r, point: hp, nid: 0, cid: 0, hb: CrossBlock::new() });
             hp
         }
         DimensionEndpoint::LineP2(r) => {
@@ -264,7 +264,7 @@ pub fn resolve_dim_endpoint(sketch: &mut Sketch, ep: &DimensionEndpoint) -> Ref<
             }
             let pos = sketch.lines[r].p2.value;
             let hp = sketch.add_helper_point(pos);
-            sketch.coincident_lp2.push(CoincidentLP2 { line: r, point: hp, cid: 0, hb: CrossBlock::new() });
+            sketch.coincident_lp2.push(CoincidentLP2 { line: r, point: hp, nid: 0, cid: 0, hb: CrossBlock::new() });
             hp
         }
         DimensionEndpoint::ArcCenter(r) => {
@@ -273,7 +273,7 @@ pub fn resolve_dim_endpoint(sketch: &mut Sketch, ep: &DimensionEndpoint) -> Ref<
             }
             let pos = sketch.arcs[r].center.value;
             let hp = sketch.add_helper_point(pos);
-            sketch.coincident_arc_center.push(CoincidentArcCenter { point: hp, arc: r, cid: 0, hb: CrossBlock::new() });
+            sketch.coincident_arc_center.push(CoincidentArcCenter { point: hp, arc: r, nid: 0, cid: 0, hb: CrossBlock::new() });
             hp
         }
         DimensionEndpoint::ArcStart(r) => {
@@ -282,7 +282,7 @@ pub fn resolve_dim_endpoint(sketch: &mut Sketch, ep: &DimensionEndpoint) -> Ref<
             }
             let pos = arc_start_pos_sketch(sketch, r);
             let hp = sketch.add_helper_point(pos);
-            sketch.coincident_arc_start.push(CoincidentArcStart { point: hp, arc: r, cid: 0, hb: CrossBlock::new() });
+            sketch.coincident_arc_start.push(CoincidentArcStart { point: hp, arc: r, nid: 0, cid: 0, hb: CrossBlock::new() });
             hp
         }
         DimensionEndpoint::ArcEnd(r) => {
@@ -291,7 +291,7 @@ pub fn resolve_dim_endpoint(sketch: &mut Sketch, ep: &DimensionEndpoint) -> Ref<
             }
             let pos = arc_end_pos_sketch(sketch, r);
             let hp = sketch.add_helper_point(pos);
-            sketch.coincident_arc_end.push(CoincidentArcEnd { point: hp, arc: r, cid: 0, hb: CrossBlock::new() });
+            sketch.coincident_arc_end.push(CoincidentArcEnd { point: hp, arc: r, nid: 0, cid: 0, hb: CrossBlock::new() });
             hp
         }
     }
@@ -329,36 +329,36 @@ pub fn dim_endpoint_pos_sketch(sketch: &Sketch, ep: &DimensionEndpoint) -> vect2
 fn push_distance(sketch: &mut Sketch, a: &DimensionEndpoint, b: &DimensionEndpoint, distance: f64) {
     use DimensionEndpoint::*;
     match (a, b) {
-        (Point(pa), Point(pb)) => { sketch.distance_pp.push(DistancePP { a: *pa, b: *pb, distance, cid: 0, hb: CrossBlock::new() }); }
+        (Point(pa), Point(pb)) => { sketch.distance_pp.push(DistancePP { a: *pa, b: *pb, distance, nid: 0, cid: 0, hb: CrossBlock::new() }); }
         // Line-Line
-        (LineP1(la), LineP1(lb)) => { sketch.distance_ll11.push(DistanceLL11 { a: *la, b: *lb, distance, cid: 0, hb: CrossBlock::new() }); }
-        (LineP1(la), LineP2(lb)) => { sketch.distance_ll12.push(DistanceLL12 { a: *la, b: *lb, distance, cid: 0, hb: CrossBlock::new() }); }
-        (LineP2(la), LineP1(lb)) => { sketch.distance_ll21.push(DistanceLL21 { a: *la, b: *lb, distance, cid: 0, hb: CrossBlock::new() }); }
-        (LineP2(la), LineP2(lb)) => { sketch.distance_ll22.push(DistanceLL22 { a: *la, b: *lb, distance, cid: 0, hb: CrossBlock::new() }); }
+        (LineP1(la), LineP1(lb)) => { sketch.distance_ll11.push(DistanceLL11 { a: *la, b: *lb, distance, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        (LineP1(la), LineP2(lb)) => { sketch.distance_ll12.push(DistanceLL12 { a: *la, b: *lb, distance, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        (LineP2(la), LineP1(lb)) => { sketch.distance_ll21.push(DistanceLL21 { a: *la, b: *lb, distance, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        (LineP2(la), LineP2(lb)) => { sketch.distance_ll22.push(DistanceLL22 { a: *la, b: *lb, distance, nid: 0, cid: 0, hb: CrossBlock::new() }); }
         // Line-Point
-        (LineP1(l), Point(p)) | (Point(p), LineP1(l)) => { sketch.distance_lp1.push(DistanceLP1 { line: *l, point: *p, distance, cid: 0, hb: CrossBlock::new() }); }
-        (LineP2(l), Point(p)) | (Point(p), LineP2(l)) => { sketch.distance_lp2.push(DistanceLP2 { line: *l, point: *p, distance, cid: 0, hb: CrossBlock::new() }); }
+        (LineP1(l), Point(p)) | (Point(p), LineP1(l)) => { sketch.distance_lp1.push(DistanceLP1 { line: *l, point: *p, distance, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        (LineP2(l), Point(p)) | (Point(p), LineP2(l)) => { sketch.distance_lp2.push(DistanceLP2 { line: *l, point: *p, distance, nid: 0, cid: 0, hb: CrossBlock::new() }); }
         // Arc-Point
-        (ArcCenter(ar), Point(p)) | (Point(p), ArcCenter(ar)) => { sketch.distance_arc_center_p.push(DistanceArcCenterP { arc: *ar, point: *p, distance, cid: 0, hb: CrossBlock::new() }); }
-        (ArcStart(ar), Point(p)) | (Point(p), ArcStart(ar)) => { sketch.distance_arc_start_p.push(DistanceArcStartP { arc: *ar, point: *p, distance, cid: 0, hb: CrossBlock::new() }); }
-        (ArcEnd(ar), Point(p)) | (Point(p), ArcEnd(ar)) => { sketch.distance_arc_end_p.push(DistanceArcEndP { arc: *ar, point: *p, distance, cid: 0, hb: CrossBlock::new() }); }
+        (ArcCenter(ar), Point(p)) | (Point(p), ArcCenter(ar)) => { sketch.distance_arc_center_p.push(DistanceArcCenterP { arc: *ar, point: *p, distance, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        (ArcStart(ar), Point(p)) | (Point(p), ArcStart(ar)) => { sketch.distance_arc_start_p.push(DistanceArcStartP { arc: *ar, point: *p, distance, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        (ArcEnd(ar), Point(p)) | (Point(p), ArcEnd(ar)) => { sketch.distance_arc_end_p.push(DistanceArcEndP { arc: *ar, point: *p, distance, nid: 0, cid: 0, hb: CrossBlock::new() }); }
         // Arc-Line
-        (ArcCenter(ar), LineP1(l)) | (LineP1(l), ArcCenter(ar)) => { sketch.distance_arc_center_l1.push(DistanceArcCenterL1 { arc: *ar, line: *l, distance, cid: 0, hb: CrossBlock::new() }); }
-        (ArcCenter(ar), LineP2(l)) | (LineP2(l), ArcCenter(ar)) => { sketch.distance_arc_center_l2.push(DistanceArcCenterL2 { arc: *ar, line: *l, distance, cid: 0, hb: CrossBlock::new() }); }
-        (ArcStart(ar), LineP1(l)) | (LineP1(l), ArcStart(ar)) => { sketch.distance_arc_start_l1.push(DistanceArcStartL1 { arc: *ar, line: *l, distance, cid: 0, hb: CrossBlock::new() }); }
-        (ArcStart(ar), LineP2(l)) | (LineP2(l), ArcStart(ar)) => { sketch.distance_arc_start_l2.push(DistanceArcStartL2 { arc: *ar, line: *l, distance, cid: 0, hb: CrossBlock::new() }); }
-        (ArcEnd(ar), LineP1(l)) | (LineP1(l), ArcEnd(ar)) => { sketch.distance_arc_end_l1.push(DistanceArcEndL1 { arc: *ar, line: *l, distance, cid: 0, hb: CrossBlock::new() }); }
-        (ArcEnd(ar), LineP2(l)) | (LineP2(l), ArcEnd(ar)) => { sketch.distance_arc_end_l2.push(DistanceArcEndL2 { arc: *ar, line: *l, distance, cid: 0, hb: CrossBlock::new() }); }
+        (ArcCenter(ar), LineP1(l)) | (LineP1(l), ArcCenter(ar)) => { sketch.distance_arc_center_l1.push(DistanceArcCenterL1 { arc: *ar, line: *l, distance, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        (ArcCenter(ar), LineP2(l)) | (LineP2(l), ArcCenter(ar)) => { sketch.distance_arc_center_l2.push(DistanceArcCenterL2 { arc: *ar, line: *l, distance, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        (ArcStart(ar), LineP1(l)) | (LineP1(l), ArcStart(ar)) => { sketch.distance_arc_start_l1.push(DistanceArcStartL1 { arc: *ar, line: *l, distance, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        (ArcStart(ar), LineP2(l)) | (LineP2(l), ArcStart(ar)) => { sketch.distance_arc_start_l2.push(DistanceArcStartL2 { arc: *ar, line: *l, distance, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        (ArcEnd(ar), LineP1(l)) | (LineP1(l), ArcEnd(ar)) => { sketch.distance_arc_end_l1.push(DistanceArcEndL1 { arc: *ar, line: *l, distance, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        (ArcEnd(ar), LineP2(l)) | (LineP2(l), ArcEnd(ar)) => { sketch.distance_arc_end_l2.push(DistanceArcEndL2 { arc: *ar, line: *l, distance, nid: 0, cid: 0, hb: CrossBlock::new() }); }
         // Arc-Arc
-        (ArcCenter(a), ArcCenter(b)) => { sketch.distance_aa_ce_ce.push(DistanceAACeCe { a: *a, b: *b, distance, cid: 0, hb: CrossBlock::new() }); }
-        (ArcCenter(a), ArcStart(b)) => { sketch.distance_aa_ce_s.push(DistanceAACeS { a: *a, b: *b, distance, cid: 0, hb: CrossBlock::new() }); }
-        (ArcCenter(a), ArcEnd(b)) => { sketch.distance_aa_ce_e.push(DistanceAACeE { a: *a, b: *b, distance, cid: 0, hb: CrossBlock::new() }); }
-        (ArcStart(a), ArcCenter(b)) => { sketch.distance_aa_s_ce.push(DistanceAASCe { a: *a, b: *b, distance, cid: 0, hb: CrossBlock::new() }); }
-        (ArcStart(a), ArcStart(b)) => { sketch.distance_aa_s_s.push(DistanceAASS { a: *a, b: *b, distance, cid: 0, hb: CrossBlock::new() }); }
-        (ArcStart(a), ArcEnd(b)) => { sketch.distance_aa_s_e.push(DistanceAASE { a: *a, b: *b, distance, cid: 0, hb: CrossBlock::new() }); }
-        (ArcEnd(a), ArcCenter(b)) => { sketch.distance_aa_e_ce.push(DistanceAAECe { a: *a, b: *b, distance, cid: 0, hb: CrossBlock::new() }); }
-        (ArcEnd(a), ArcStart(b)) => { sketch.distance_aa_e_s.push(DistanceAAES { a: *a, b: *b, distance, cid: 0, hb: CrossBlock::new() }); }
-        (ArcEnd(a), ArcEnd(b)) => { sketch.distance_aa_e_e.push(DistanceAAEE { a: *a, b: *b, distance, cid: 0, hb: CrossBlock::new() }); }
+        (ArcCenter(a), ArcCenter(b)) => { sketch.distance_aa_ce_ce.push(DistanceAACeCe { a: *a, b: *b, distance, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        (ArcCenter(a), ArcStart(b)) => { sketch.distance_aa_ce_s.push(DistanceAACeS { a: *a, b: *b, distance, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        (ArcCenter(a), ArcEnd(b)) => { sketch.distance_aa_ce_e.push(DistanceAACeE { a: *a, b: *b, distance, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        (ArcStart(a), ArcCenter(b)) => { sketch.distance_aa_s_ce.push(DistanceAASCe { a: *a, b: *b, distance, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        (ArcStart(a), ArcStart(b)) => { sketch.distance_aa_s_s.push(DistanceAASS { a: *a, b: *b, distance, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        (ArcStart(a), ArcEnd(b)) => { sketch.distance_aa_s_e.push(DistanceAASE { a: *a, b: *b, distance, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        (ArcEnd(a), ArcCenter(b)) => { sketch.distance_aa_e_ce.push(DistanceAAECe { a: *a, b: *b, distance, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        (ArcEnd(a), ArcStart(b)) => { sketch.distance_aa_e_s.push(DistanceAAES { a: *a, b: *b, distance, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        (ArcEnd(a), ArcEnd(b)) => { sketch.distance_aa_e_e.push(DistanceAAEE { a: *a, b: *b, distance, nid: 0, cid: 0, hb: CrossBlock::new() }); }
     }
 }
 
@@ -409,12 +409,12 @@ fn compute_signed_pl(sketch: &Sketch, pt_pos: vect2d, line: Ref<Line>, value: f6
 fn push_distance_pl(sketch: &mut Sketch, pt: &DimensionEndpoint, line: Ref<Line>, distance: f64) {
     use DimensionEndpoint::*;
     match pt {
-        Point(p) => { sketch.distance_pl.push(DistancePL { point: *p, line, distance, cid: 0, hb: CrossBlock::new() }); }
-        LineP1(l) => { sketch.distance_lp1l.push(DistanceLP1L { a: *l, b: line, distance, cid: 0, hb: CrossBlock::new() }); }
-        LineP2(l) => { sketch.distance_lp2l.push(DistanceLP2L { a: *l, b: line, distance, cid: 0, hb: CrossBlock::new() }); }
-        ArcCenter(ar) => { sketch.distance_arc_center_l.push(DistanceArcCenterL { arc: *ar, line, distance, cid: 0, hb: CrossBlock::new() }); }
-        ArcStart(ar) => { sketch.distance_arc_start_l.push(DistanceArcStartL { arc: *ar, line, distance, cid: 0, hb: CrossBlock::new() }); }
-        ArcEnd(ar) => { sketch.distance_arc_end_l.push(DistanceArcEndL { arc: *ar, line, distance, cid: 0, hb: CrossBlock::new() }); }
+        Point(p) => { sketch.distance_pl.push(DistancePL { point: *p, line, distance, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        LineP1(l) => { sketch.distance_lp1l.push(DistanceLP1L { a: *l, b: line, distance, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        LineP2(l) => { sketch.distance_lp2l.push(DistanceLP2L { a: *l, b: line, distance, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        ArcCenter(ar) => { sketch.distance_arc_center_l.push(DistanceArcCenterL { arc: *ar, line, distance, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        ArcStart(ar) => { sketch.distance_arc_start_l.push(DistanceArcStartL { arc: *ar, line, distance, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        ArcEnd(ar) => { sketch.distance_arc_end_l.push(DistanceArcEndL { arc: *ar, line, distance, nid: 0, cid: 0, hb: CrossBlock::new() }); }
     }
 }
 
@@ -495,51 +495,51 @@ fn push_axis_distance(sketch: &mut Sketch, a: &DimensionEndpoint, b: &DimensionE
     match (a, b) {
         (Point(pa), Point(pb)) => {
             if horizontal {
-                sketch.hdistance_pp.push(HorizontalDistancePP { a: *pa, b: *pb, distance, cid: 0, hb: CrossBlock::new() });
+                sketch.hdistance_pp.push(HorizontalDistancePP { a: *pa, b: *pb, distance, nid: 0, cid: 0, hb: CrossBlock::new() });
             } else {
-                sketch.vdistance_pp.push(VerticalDistancePP { a: *pa, b: *pb, distance, cid: 0, hb: CrossBlock::new() });
+                sketch.vdistance_pp.push(VerticalDistancePP { a: *pa, b: *pb, distance, nid: 0, cid: 0, hb: CrossBlock::new() });
             }
         }
         // Line-Line
-        (LineP1(la), LineP1(lb)) => { sketch.axis_distance_ll11.push(AxisDistanceLL11 { a: *la, b: *lb, distance, horizontal, cid: 0, hb: CrossBlock::new() }); }
-        (LineP1(la), LineP2(lb)) => { sketch.axis_distance_ll12.push(AxisDistanceLL12 { a: *la, b: *lb, distance, horizontal, cid: 0, hb: CrossBlock::new() }); }
-        (LineP2(la), LineP1(lb)) => { sketch.axis_distance_ll21.push(AxisDistanceLL21 { a: *la, b: *lb, distance, horizontal, cid: 0, hb: CrossBlock::new() }); }
-        (LineP2(la), LineP2(lb)) => { sketch.axis_distance_ll22.push(AxisDistanceLL22 { a: *la, b: *lb, distance, horizontal, cid: 0, hb: CrossBlock::new() }); }
+        (LineP1(la), LineP1(lb)) => { sketch.axis_distance_ll11.push(AxisDistanceLL11 { a: *la, b: *lb, distance, horizontal, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        (LineP1(la), LineP2(lb)) => { sketch.axis_distance_ll12.push(AxisDistanceLL12 { a: *la, b: *lb, distance, horizontal, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        (LineP2(la), LineP1(lb)) => { sketch.axis_distance_ll21.push(AxisDistanceLL21 { a: *la, b: *lb, distance, horizontal, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        (LineP2(la), LineP2(lb)) => { sketch.axis_distance_ll22.push(AxisDistanceLL22 { a: *la, b: *lb, distance, horizontal, nid: 0, cid: 0, hb: CrossBlock::new() }); }
         // Line-Point (constraint has line first, so negate distance if point is first arg)
-        (LineP1(l), Point(p)) => { sketch.axis_distance_lp1.push(AxisDistanceLP1 { line: *l, point: *p, distance, horizontal, cid: 0, hb: CrossBlock::new() }); }
-        (Point(p), LineP1(l)) => { sketch.axis_distance_lp1.push(AxisDistanceLP1 { line: *l, point: *p, distance: -distance, horizontal, cid: 0, hb: CrossBlock::new() }); }
-        (LineP2(l), Point(p)) => { sketch.axis_distance_lp2.push(AxisDistanceLP2 { line: *l, point: *p, distance, horizontal, cid: 0, hb: CrossBlock::new() }); }
-        (Point(p), LineP2(l)) => { sketch.axis_distance_lp2.push(AxisDistanceLP2 { line: *l, point: *p, distance: -distance, horizontal, cid: 0, hb: CrossBlock::new() }); }
+        (LineP1(l), Point(p)) => { sketch.axis_distance_lp1.push(AxisDistanceLP1 { line: *l, point: *p, distance, horizontal, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        (Point(p), LineP1(l)) => { sketch.axis_distance_lp1.push(AxisDistanceLP1 { line: *l, point: *p, distance: -distance, horizontal, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        (LineP2(l), Point(p)) => { sketch.axis_distance_lp2.push(AxisDistanceLP2 { line: *l, point: *p, distance, horizontal, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        (Point(p), LineP2(l)) => { sketch.axis_distance_lp2.push(AxisDistanceLP2 { line: *l, point: *p, distance: -distance, horizontal, nid: 0, cid: 0, hb: CrossBlock::new() }); }
         // Arc-Point (constraint has arc first)
-        (ArcCenter(ar), Point(p)) => { sketch.axis_distance_arc_center_p.push(AxisDistanceArcCenterP { arc: *ar, point: *p, distance, horizontal, cid: 0, hb: CrossBlock::new() }); }
-        (Point(p), ArcCenter(ar)) => { sketch.axis_distance_arc_center_p.push(AxisDistanceArcCenterP { arc: *ar, point: *p, distance: -distance, horizontal, cid: 0, hb: CrossBlock::new() }); }
-        (ArcStart(ar), Point(p)) => { sketch.axis_distance_arc_start_p.push(AxisDistanceArcStartP { arc: *ar, point: *p, distance, horizontal, cid: 0, hb: CrossBlock::new() }); }
-        (Point(p), ArcStart(ar)) => { sketch.axis_distance_arc_start_p.push(AxisDistanceArcStartP { arc: *ar, point: *p, distance: -distance, horizontal, cid: 0, hb: CrossBlock::new() }); }
-        (ArcEnd(ar), Point(p)) => { sketch.axis_distance_arc_end_p.push(AxisDistanceArcEndP { arc: *ar, point: *p, distance, horizontal, cid: 0, hb: CrossBlock::new() }); }
-        (Point(p), ArcEnd(ar)) => { sketch.axis_distance_arc_end_p.push(AxisDistanceArcEndP { arc: *ar, point: *p, distance: -distance, horizontal, cid: 0, hb: CrossBlock::new() }); }
+        (ArcCenter(ar), Point(p)) => { sketch.axis_distance_arc_center_p.push(AxisDistanceArcCenterP { arc: *ar, point: *p, distance, horizontal, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        (Point(p), ArcCenter(ar)) => { sketch.axis_distance_arc_center_p.push(AxisDistanceArcCenterP { arc: *ar, point: *p, distance: -distance, horizontal, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        (ArcStart(ar), Point(p)) => { sketch.axis_distance_arc_start_p.push(AxisDistanceArcStartP { arc: *ar, point: *p, distance, horizontal, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        (Point(p), ArcStart(ar)) => { sketch.axis_distance_arc_start_p.push(AxisDistanceArcStartP { arc: *ar, point: *p, distance: -distance, horizontal, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        (ArcEnd(ar), Point(p)) => { sketch.axis_distance_arc_end_p.push(AxisDistanceArcEndP { arc: *ar, point: *p, distance, horizontal, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        (Point(p), ArcEnd(ar)) => { sketch.axis_distance_arc_end_p.push(AxisDistanceArcEndP { arc: *ar, point: *p, distance: -distance, horizontal, nid: 0, cid: 0, hb: CrossBlock::new() }); }
         // Arc-Line (constraint has arc first)
-        (ArcCenter(ar), LineP1(l)) => { sketch.axis_distance_arc_center_l1.push(AxisDistanceArcCenterL1 { arc: *ar, line: *l, distance, horizontal, cid: 0, hb: CrossBlock::new() }); }
-        (LineP1(l), ArcCenter(ar)) => { sketch.axis_distance_arc_center_l1.push(AxisDistanceArcCenterL1 { arc: *ar, line: *l, distance: -distance, horizontal, cid: 0, hb: CrossBlock::new() }); }
-        (ArcCenter(ar), LineP2(l)) => { sketch.axis_distance_arc_center_l2.push(AxisDistanceArcCenterL2 { arc: *ar, line: *l, distance, horizontal, cid: 0, hb: CrossBlock::new() }); }
-        (LineP2(l), ArcCenter(ar)) => { sketch.axis_distance_arc_center_l2.push(AxisDistanceArcCenterL2 { arc: *ar, line: *l, distance: -distance, horizontal, cid: 0, hb: CrossBlock::new() }); }
-        (ArcStart(ar), LineP1(l)) => { sketch.axis_distance_arc_start_l1.push(AxisDistanceArcStartL1 { arc: *ar, line: *l, distance, horizontal, cid: 0, hb: CrossBlock::new() }); }
-        (LineP1(l), ArcStart(ar)) => { sketch.axis_distance_arc_start_l1.push(AxisDistanceArcStartL1 { arc: *ar, line: *l, distance: -distance, horizontal, cid: 0, hb: CrossBlock::new() }); }
-        (ArcStart(ar), LineP2(l)) => { sketch.axis_distance_arc_start_l2.push(AxisDistanceArcStartL2 { arc: *ar, line: *l, distance, horizontal, cid: 0, hb: CrossBlock::new() }); }
-        (LineP2(l), ArcStart(ar)) => { sketch.axis_distance_arc_start_l2.push(AxisDistanceArcStartL2 { arc: *ar, line: *l, distance: -distance, horizontal, cid: 0, hb: CrossBlock::new() }); }
-        (ArcEnd(ar), LineP1(l)) => { sketch.axis_distance_arc_end_l1.push(AxisDistanceArcEndL1 { arc: *ar, line: *l, distance, horizontal, cid: 0, hb: CrossBlock::new() }); }
-        (LineP1(l), ArcEnd(ar)) => { sketch.axis_distance_arc_end_l1.push(AxisDistanceArcEndL1 { arc: *ar, line: *l, distance: -distance, horizontal, cid: 0, hb: CrossBlock::new() }); }
-        (ArcEnd(ar), LineP2(l)) => { sketch.axis_distance_arc_end_l2.push(AxisDistanceArcEndL2 { arc: *ar, line: *l, distance, horizontal, cid: 0, hb: CrossBlock::new() }); }
-        (LineP2(l), ArcEnd(ar)) => { sketch.axis_distance_arc_end_l2.push(AxisDistanceArcEndL2 { arc: *ar, line: *l, distance: -distance, horizontal, cid: 0, hb: CrossBlock::new() }); }
+        (ArcCenter(ar), LineP1(l)) => { sketch.axis_distance_arc_center_l1.push(AxisDistanceArcCenterL1 { arc: *ar, line: *l, distance, horizontal, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        (LineP1(l), ArcCenter(ar)) => { sketch.axis_distance_arc_center_l1.push(AxisDistanceArcCenterL1 { arc: *ar, line: *l, distance: -distance, horizontal, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        (ArcCenter(ar), LineP2(l)) => { sketch.axis_distance_arc_center_l2.push(AxisDistanceArcCenterL2 { arc: *ar, line: *l, distance, horizontal, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        (LineP2(l), ArcCenter(ar)) => { sketch.axis_distance_arc_center_l2.push(AxisDistanceArcCenterL2 { arc: *ar, line: *l, distance: -distance, horizontal, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        (ArcStart(ar), LineP1(l)) => { sketch.axis_distance_arc_start_l1.push(AxisDistanceArcStartL1 { arc: *ar, line: *l, distance, horizontal, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        (LineP1(l), ArcStart(ar)) => { sketch.axis_distance_arc_start_l1.push(AxisDistanceArcStartL1 { arc: *ar, line: *l, distance: -distance, horizontal, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        (ArcStart(ar), LineP2(l)) => { sketch.axis_distance_arc_start_l2.push(AxisDistanceArcStartL2 { arc: *ar, line: *l, distance, horizontal, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        (LineP2(l), ArcStart(ar)) => { sketch.axis_distance_arc_start_l2.push(AxisDistanceArcStartL2 { arc: *ar, line: *l, distance: -distance, horizontal, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        (ArcEnd(ar), LineP1(l)) => { sketch.axis_distance_arc_end_l1.push(AxisDistanceArcEndL1 { arc: *ar, line: *l, distance, horizontal, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        (LineP1(l), ArcEnd(ar)) => { sketch.axis_distance_arc_end_l1.push(AxisDistanceArcEndL1 { arc: *ar, line: *l, distance: -distance, horizontal, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        (ArcEnd(ar), LineP2(l)) => { sketch.axis_distance_arc_end_l2.push(AxisDistanceArcEndL2 { arc: *ar, line: *l, distance, horizontal, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        (LineP2(l), ArcEnd(ar)) => { sketch.axis_distance_arc_end_l2.push(AxisDistanceArcEndL2 { arc: *ar, line: *l, distance: -distance, horizontal, nid: 0, cid: 0, hb: CrossBlock::new() }); }
         // Arc-Arc
-        (ArcCenter(a), ArcCenter(b)) => { sketch.axis_distance_aa_ce_ce.push(AxisDistanceAACeCe { a: *a, b: *b, distance, horizontal, cid: 0, hb: CrossBlock::new() }); }
-        (ArcCenter(a), ArcStart(b)) => { sketch.axis_distance_aa_ce_s.push(AxisDistanceAACeS { a: *a, b: *b, distance, horizontal, cid: 0, hb: CrossBlock::new() }); }
-        (ArcCenter(a), ArcEnd(b)) => { sketch.axis_distance_aa_ce_e.push(AxisDistanceAACeE { a: *a, b: *b, distance, horizontal, cid: 0, hb: CrossBlock::new() }); }
-        (ArcStart(a), ArcCenter(b)) => { sketch.axis_distance_aa_s_ce.push(AxisDistanceAASCe { a: *a, b: *b, distance, horizontal, cid: 0, hb: CrossBlock::new() }); }
-        (ArcStart(a), ArcStart(b)) => { sketch.axis_distance_aa_s_s.push(AxisDistanceAASS { a: *a, b: *b, distance, horizontal, cid: 0, hb: CrossBlock::new() }); }
-        (ArcStart(a), ArcEnd(b)) => { sketch.axis_distance_aa_s_e.push(AxisDistanceAASE { a: *a, b: *b, distance, horizontal, cid: 0, hb: CrossBlock::new() }); }
-        (ArcEnd(a), ArcCenter(b)) => { sketch.axis_distance_aa_e_ce.push(AxisDistanceAAECe { a: *a, b: *b, distance, horizontal, cid: 0, hb: CrossBlock::new() }); }
-        (ArcEnd(a), ArcStart(b)) => { sketch.axis_distance_aa_e_s.push(AxisDistanceAAES { a: *a, b: *b, distance, horizontal, cid: 0, hb: CrossBlock::new() }); }
-        (ArcEnd(a), ArcEnd(b)) => { sketch.axis_distance_aa_e_e.push(AxisDistanceAAEE { a: *a, b: *b, distance, horizontal, cid: 0, hb: CrossBlock::new() }); }
+        (ArcCenter(a), ArcCenter(b)) => { sketch.axis_distance_aa_ce_ce.push(AxisDistanceAACeCe { a: *a, b: *b, distance, horizontal, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        (ArcCenter(a), ArcStart(b)) => { sketch.axis_distance_aa_ce_s.push(AxisDistanceAACeS { a: *a, b: *b, distance, horizontal, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        (ArcCenter(a), ArcEnd(b)) => { sketch.axis_distance_aa_ce_e.push(AxisDistanceAACeE { a: *a, b: *b, distance, horizontal, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        (ArcStart(a), ArcCenter(b)) => { sketch.axis_distance_aa_s_ce.push(AxisDistanceAASCe { a: *a, b: *b, distance, horizontal, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        (ArcStart(a), ArcStart(b)) => { sketch.axis_distance_aa_s_s.push(AxisDistanceAASS { a: *a, b: *b, distance, horizontal, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        (ArcStart(a), ArcEnd(b)) => { sketch.axis_distance_aa_s_e.push(AxisDistanceAASE { a: *a, b: *b, distance, horizontal, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        (ArcEnd(a), ArcCenter(b)) => { sketch.axis_distance_aa_e_ce.push(AxisDistanceAAECe { a: *a, b: *b, distance, horizontal, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        (ArcEnd(a), ArcStart(b)) => { sketch.axis_distance_aa_e_s.push(AxisDistanceAAES { a: *a, b: *b, distance, horizontal, nid: 0, cid: 0, hb: CrossBlock::new() }); }
+        (ArcEnd(a), ArcEnd(b)) => { sketch.axis_distance_aa_e_e.push(AxisDistanceAAEE { a: *a, b: *b, distance, horizontal, nid: 0, cid: 0, hb: CrossBlock::new() }); }
     }
 }
 
@@ -587,6 +587,7 @@ impl Action {
     /// Apply the action, then solve.
     pub fn apply(&self, sketch: &mut Sketch) {
         let needs_expr_update = self.apply_without_solve(sketch);
+        sketch.assign_constraint_names();
         sketch.solve();
         if needs_expr_update {
             sketch.update_expr_dim_values();
@@ -634,28 +635,28 @@ impl Action {
                 }
             }
             Action::ApplyCoincidentPP { a, b } => {
-                sketch.coincident_pp.push(CoincidentPP { a: *a, b: *b, cid: 0, hb: CrossBlock::new() });
+                sketch.coincident_pp.push(CoincidentPP { a: *a, b: *b, nid: 0, cid: 0, hb: CrossBlock::new() });
             }
             Action::ApplyCoincidentLL11 { a, b } => {
-                sketch.coincident_ll11.push(CoincidentLL11 { a: *a, b: *b, cid: 0, hb: CrossBlock::new() });
+                sketch.coincident_ll11.push(CoincidentLL11 { a: *a, b: *b, nid: 0, cid: 0, hb: CrossBlock::new() });
             }
             Action::ApplyCoincidentLL12 { a, b } => {
-                sketch.coincident_ll12.push(CoincidentLL12 { a: *a, b: *b, cid: 0, hb: CrossBlock::new() });
+                sketch.coincident_ll12.push(CoincidentLL12 { a: *a, b: *b, nid: 0, cid: 0, hb: CrossBlock::new() });
             }
             Action::ApplyCoincidentLL21 { a, b } => {
-                sketch.coincident_ll21.push(CoincidentLL21 { a: *a, b: *b, cid: 0, hb: CrossBlock::new() });
+                sketch.coincident_ll21.push(CoincidentLL21 { a: *a, b: *b, nid: 0, cid: 0, hb: CrossBlock::new() });
             }
             Action::ApplyCoincidentLL22 { a, b } => {
-                sketch.coincident_ll22.push(CoincidentLL22 { a: *a, b: *b, cid: 0, hb: CrossBlock::new() });
+                sketch.coincident_ll22.push(CoincidentLL22 { a: *a, b: *b, nid: 0, cid: 0, hb: CrossBlock::new() });
             }
             Action::ApplyCoincidentLP1 { line, point } => {
-                sketch.coincident_lp1.push(CoincidentLP1 { line: *line, point: *point, cid: 0, hb: CrossBlock::new() });
+                sketch.coincident_lp1.push(CoincidentLP1 { line: *line, point: *point, nid: 0, cid: 0, hb: CrossBlock::new() });
             }
             Action::ApplyCoincidentLP2 { line, point } => {
-                sketch.coincident_lp2.push(CoincidentLP2 { line: *line, point: *point, cid: 0, hb: CrossBlock::new() });
+                sketch.coincident_lp2.push(CoincidentLP2 { line: *line, point: *point, nid: 0, cid: 0, hb: CrossBlock::new() });
             }
             Action::ApplyParallel { a, b } => {
-                sketch.parallel.push(Parallel { a: *a, b: *b, cid: 0, hb: CrossBlock::new() });
+                sketch.parallel.push(Parallel { a: *a, b: *b, nid: 0, cid: 0, hb: CrossBlock::new() });
             }
             Action::ApplyPerpendicular { a, b } => {
                 let la = &sketch.lines[*a];
@@ -666,73 +667,73 @@ impl Action {
                 let dy2 = lb.p2.value.y - lb.p1.value.y;
                 let cross = dx1 * dy2 - dy1 * dx2;
                 let dir_sign = if cross >= 0.0 { 1.0 } else { -1.0 };
-                sketch.perpendicular.push(Perpendicular { a: *a, b: *b, dir_sign, cid: 0, hb: CrossBlock::new() });
+                sketch.perpendicular.push(Perpendicular { a: *a, b: *b, dir_sign, nid: 0, cid: 0, hb: CrossBlock::new() });
             }
             Action::ApplyEqualLength { a, b } => {
-                sketch.equal_length.push(EqualLength { a: *a, b: *b, cid: 0, hb: CrossBlock::new() });
+                sketch.equal_length.push(EqualLength { a: *a, b: *b, nid: 0, cid: 0, hb: CrossBlock::new() });
             }
             Action::ApplyCoincidentArcCenter { point, arc } => {
-                sketch.coincident_arc_center.push(CoincidentArcCenter { point: *point, arc: *arc, cid: 0, hb: CrossBlock::new() });
+                sketch.coincident_arc_center.push(CoincidentArcCenter { point: *point, arc: *arc, nid: 0, cid: 0, hb: CrossBlock::new() });
             }
             Action::ApplyCoincidentArcStart { point, arc } => {
-                sketch.coincident_arc_start.push(CoincidentArcStart { point: *point, arc: *arc, cid: 0, hb: CrossBlock::new() });
+                sketch.coincident_arc_start.push(CoincidentArcStart { point: *point, arc: *arc, nid: 0, cid: 0, hb: CrossBlock::new() });
             }
             Action::ApplyCoincidentArcEnd { point, arc } => {
-                sketch.coincident_arc_end.push(CoincidentArcEnd { point: *point, arc: *arc, cid: 0, hb: CrossBlock::new() });
+                sketch.coincident_arc_end.push(CoincidentArcEnd { point: *point, arc: *arc, nid: 0, cid: 0, hb: CrossBlock::new() });
             }
             Action::ApplyConcentric { a, b } => {
-                sketch.concentric.push(Concentric { a: *a, b: *b, cid: 0, hb: CrossBlock::new() });
+                sketch.concentric.push(Concentric { a: *a, b: *b, nid: 0, cid: 0, hb: CrossBlock::new() });
             }
             Action::ApplyCoincidentLP1ArcCenter { line, arc } => {
-                sketch.coincident_lp1_arc_center.push(CoincidentLP1ArcCenter { line: *line, arc: *arc, cid: 0, hb: CrossBlock::new() });
+                sketch.coincident_lp1_arc_center.push(CoincidentLP1ArcCenter { line: *line, arc: *arc, nid: 0, cid: 0, hb: CrossBlock::new() });
             }
             Action::ApplyCoincidentLP2ArcCenter { line, arc } => {
-                sketch.coincident_lp2_arc_center.push(CoincidentLP2ArcCenter { line: *line, arc: *arc, cid: 0, hb: CrossBlock::new() });
+                sketch.coincident_lp2_arc_center.push(CoincidentLP2ArcCenter { line: *line, arc: *arc, nid: 0, cid: 0, hb: CrossBlock::new() });
             }
             Action::ApplyCoincidentLP1ArcStart { line, arc } => {
-                sketch.coincident_lp1_arc_start.push(CoincidentLP1ArcStart { line: *line, arc: *arc, cid: 0, hb: CrossBlock::new() });
+                sketch.coincident_lp1_arc_start.push(CoincidentLP1ArcStart { line: *line, arc: *arc, nid: 0, cid: 0, hb: CrossBlock::new() });
             }
             Action::ApplyCoincidentLP2ArcStart { line, arc } => {
-                sketch.coincident_lp2_arc_start.push(CoincidentLP2ArcStart { line: *line, arc: *arc, cid: 0, hb: CrossBlock::new() });
+                sketch.coincident_lp2_arc_start.push(CoincidentLP2ArcStart { line: *line, arc: *arc, nid: 0, cid: 0, hb: CrossBlock::new() });
             }
             Action::ApplyCoincidentLP1ArcEnd { line, arc } => {
-                sketch.coincident_lp1_arc_end.push(CoincidentLP1ArcEnd { line: *line, arc: *arc, cid: 0, hb: CrossBlock::new() });
+                sketch.coincident_lp1_arc_end.push(CoincidentLP1ArcEnd { line: *line, arc: *arc, nid: 0, cid: 0, hb: CrossBlock::new() });
             }
             Action::ApplyCoincidentLP2ArcEnd { line, arc } => {
-                sketch.coincident_lp2_arc_end.push(CoincidentLP2ArcEnd { line: *line, arc: *arc, cid: 0, hb: CrossBlock::new() });
+                sketch.coincident_lp2_arc_end.push(CoincidentLP2ArcEnd { line: *line, arc: *arc, nid: 0, cid: 0, hb: CrossBlock::new() });
             }
             Action::ApplyCoincidentArcCenterStart { a, b } => {
-                sketch.coincident_arc_center_start.push(CoincidentArcCenterStart { a: *a, b: *b, cid: 0, hb: CrossBlock::new() });
+                sketch.coincident_arc_center_start.push(CoincidentArcCenterStart { a: *a, b: *b, nid: 0, cid: 0, hb: CrossBlock::new() });
             }
             Action::ApplyCoincidentArcCenterEnd { a, b } => {
-                sketch.coincident_arc_center_end.push(CoincidentArcCenterEnd { a: *a, b: *b, cid: 0, hb: CrossBlock::new() });
+                sketch.coincident_arc_center_end.push(CoincidentArcCenterEnd { a: *a, b: *b, nid: 0, cid: 0, hb: CrossBlock::new() });
             }
             Action::ApplyCoincidentArcStartCenter { a, b } => {
-                sketch.coincident_arc_start_center.push(CoincidentArcStartCenter { a: *a, b: *b, cid: 0, hb: CrossBlock::new() });
+                sketch.coincident_arc_start_center.push(CoincidentArcStartCenter { a: *a, b: *b, nid: 0, cid: 0, hb: CrossBlock::new() });
             }
             Action::ApplyCoincidentArcEndCenter { a, b } => {
-                sketch.coincident_arc_end_center.push(CoincidentArcEndCenter { a: *a, b: *b, cid: 0, hb: CrossBlock::new() });
+                sketch.coincident_arc_end_center.push(CoincidentArcEndCenter { a: *a, b: *b, nid: 0, cid: 0, hb: CrossBlock::new() });
             }
             Action::ApplyCoincidentArcStartStart { a, b } => {
-                sketch.coincident_arc_start_start.push(CoincidentArcStartStart { a: *a, b: *b, cid: 0, hb: CrossBlock::new() });
+                sketch.coincident_arc_start_start.push(CoincidentArcStartStart { a: *a, b: *b, nid: 0, cid: 0, hb: CrossBlock::new() });
             }
             Action::ApplyCoincidentArcStartEnd { a, b } => {
-                sketch.coincident_arc_start_end.push(CoincidentArcStartEnd { a: *a, b: *b, cid: 0, hb: CrossBlock::new() });
+                sketch.coincident_arc_start_end.push(CoincidentArcStartEnd { a: *a, b: *b, nid: 0, cid: 0, hb: CrossBlock::new() });
             }
             Action::ApplyCoincidentArcEndStart { a, b } => {
-                sketch.coincident_arc_end_start.push(CoincidentArcEndStart { a: *a, b: *b, cid: 0, hb: CrossBlock::new() });
+                sketch.coincident_arc_end_start.push(CoincidentArcEndStart { a: *a, b: *b, nid: 0, cid: 0, hb: CrossBlock::new() });
             }
             Action::ApplyCoincidentArcEndEnd { a, b } => {
-                sketch.coincident_arc_end_end.push(CoincidentArcEndEnd { a: *a, b: *b, cid: 0, hb: CrossBlock::new() });
+                sketch.coincident_arc_end_end.push(CoincidentArcEndEnd { a: *a, b: *b, nid: 0, cid: 0, hb: CrossBlock::new() });
             }
             Action::ApplyLineP1OnArc { line, arc } => {
-                sketch.line_p1_on_arc.push(LineP1OnArc { line: *line, arc: *arc, cid: 0, hb: CrossBlock::new() });
+                sketch.line_p1_on_arc.push(LineP1OnArc { line: *line, arc: *arc, nid: 0, cid: 0, hb: CrossBlock::new() });
             }
             Action::ApplyLineP2OnArc { line, arc } => {
-                sketch.line_p2_on_arc.push(LineP2OnArc { line: *line, arc: *arc, cid: 0, hb: CrossBlock::new() });
+                sketch.line_p2_on_arc.push(LineP2OnArc { line: *line, arc: *arc, nid: 0, cid: 0, hb: CrossBlock::new() });
             }
             Action::ApplyEqualRadius { a, b } => {
-                sketch.equal_radius.push(EqualRadius { a: *a, b: *b, cid: 0, hb: CrossBlock::new() });
+                sketch.equal_radius.push(EqualRadius { a: *a, b: *b, nid: 0, cid: 0, hb: CrossBlock::new() });
             }
             Action::ApplyTangentLA { line, arc } => {
                 let l = &sketch.lines[*line];
@@ -779,7 +780,7 @@ impl Action {
                 sketch.tangent_la.push(TangentLA {
                     line: *line, arc: *arc, sign,
                     p1_arc_start, p1_arc_end, p2_arc_start, p2_arc_end,
-                    dir_sign, cid: 0, hb: CrossBlock::new(),
+                    dir_sign, nid: 0, cid: 0, hb: CrossBlock::new(),
                 });
             }
             Action::ApplyTangentAA { a, b } => {
@@ -796,78 +797,78 @@ impl Action {
                     else if near(a_ep, b_sp) { SharedEndpoint::EndStart }
                     else if near(a_ep, b_ep) { SharedEndpoint::EndEnd }
                     else { SharedEndpoint::None };
-                sketch.tangent_aa.push(TangentAA { a: *a, b: *b, shared, cid: 0, hb: CrossBlock::new() });
+                sketch.tangent_aa.push(TangentAA { a: *a, b: *b, shared, nid: 0, cid: 0, hb: CrossBlock::new() });
             }
             Action::ApplyPointOnLine { point, line } => {
-                sketch.point_on_line.push(PointOnLine { point: *point, line: *line, cid: 0, hb: CrossBlock::new() });
+                sketch.point_on_line.push(PointOnLine { point: *point, line: *line, nid: 0, cid: 0, hb: CrossBlock::new() });
             }
             Action::ApplyPointOnArc { point, arc } => {
-                sketch.point_on_arc.push(PointOnArc { point: *point, arc: *arc, cid: 0, hb: CrossBlock::new() });
+                sketch.point_on_arc.push(PointOnArc { point: *point, arc: *arc, nid: 0, cid: 0, hb: CrossBlock::new() });
             }
             Action::ApplyEndpointOnLine { endpoint, line } => {
                 let point = resolve_dim_endpoint(sketch, endpoint);
-                sketch.point_on_line.push(PointOnLine { point, line: *line, cid: 0, hb: CrossBlock::new() });
+                sketch.point_on_line.push(PointOnLine { point, line: *line, nid: 0, cid: 0, hb: CrossBlock::new() });
             }
             Action::ApplyEndpointOnArc { endpoint, arc } => {
                 let point = resolve_dim_endpoint(sketch, endpoint);
-                sketch.point_on_arc.push(PointOnArc { point, arc: *arc, cid: 0, hb: CrossBlock::new() });
+                sketch.point_on_arc.push(PointOnArc { point, arc: *arc, nid: 0, cid: 0, hb: CrossBlock::new() });
             }
             Action::ApplyCollinear { a, b } => {
-                sketch.collinear.push(Collinear { a: *a, b: *b, cid: 0, hb: CrossBlock::new() });
+                sketch.collinear.push(Collinear { a: *a, b: *b, nid: 0, cid: 0, hb: CrossBlock::new() });
             }
             Action::ApplySymmetryLL { a, b, c } => {
                 sketch.symmetry_ll.push(SymmetryLL {
-                    a: *a, b: *b, c: *c, cid: 0,
+                    a: *a, b: *b, c: *c, nid: 0, cid: 0,
                     hb_ab: CrossBlock::new(), hb_ac: CrossBlock::new(), hb_bc: CrossBlock::new(),
                 });
             }
             Action::ApplySymmetryPP { a, line, c } => {
                 sketch.symmetry_pp.push(SymmetryPP {
-                    a: *a, c: *c, line: *line, cid: 0,
+                    a: *a, c: *c, line: *line, nid: 0, cid: 0,
                     hb_ac: CrossBlock::new(), hb_al: CrossBlock::new(), hb_cl: CrossBlock::new(),
                 });
             }
             Action::ApplySymmetryAA { a, line, c } => {
                 sketch.symmetry_aa.push(SymmetryAA {
-                    a: *a, c: *c, line: *line, cid: 0,
+                    a: *a, c: *c, line: *line, nid: 0, cid: 0,
                     hb_ac: CrossBlock::new(), hb_al: CrossBlock::new(), hb_cl: CrossBlock::new(),
                 });
             }
             Action::ApplyMidpoint { point, line } => {
-                sketch.midpoint.push(MidpointConstraint { point: *point, line: *line, cid: 0, hb: CrossBlock::new() });
+                sketch.midpoint.push(MidpointConstraint { point: *point, line: *line, nid: 0, cid: 0, hb: CrossBlock::new() });
             }
             Action::ApplyMidpointLP1 { line, target } => {
-                sketch.midpoint_lp1.push(MidpointLP1 { line: *line, target: *target, cid: 0, hb: CrossBlock::new() });
+                sketch.midpoint_lp1.push(MidpointLP1 { line: *line, target: *target, nid: 0, cid: 0, hb: CrossBlock::new() });
             }
             Action::ApplyMidpointLP2 { line, target } => {
-                sketch.midpoint_lp2.push(MidpointLP2 { line: *line, target: *target, cid: 0, hb: CrossBlock::new() });
+                sketch.midpoint_lp2.push(MidpointLP2 { line: *line, target: *target, nid: 0, cid: 0, hb: CrossBlock::new() });
             }
             Action::ApplyMidpointArcStart { arc, line } => {
-                sketch.midpoint_arc_start.push(MidpointArcStart { arc: *arc, line: *line, cid: 0, hb: CrossBlock::new() });
+                sketch.midpoint_arc_start.push(MidpointArcStart { arc: *arc, line: *line, nid: 0, cid: 0, hb: CrossBlock::new() });
             }
             Action::ApplyMidpointArcEnd { arc, line } => {
-                sketch.midpoint_arc_end.push(MidpointArcEnd { arc: *arc, line: *line, cid: 0, hb: CrossBlock::new() });
+                sketch.midpoint_arc_end.push(MidpointArcEnd { arc: *arc, line: *line, nid: 0, cid: 0, hb: CrossBlock::new() });
             }
             Action::ApplyMidpointArcPoint { point, arc } => {
-                sketch.midpoint_arc_point.push(MidpointArcPoint { point: *point, arc: *arc, cid: 0, hb: CrossBlock::new() });
+                sketch.midpoint_arc_point.push(MidpointArcPoint { point: *point, arc: *arc, nid: 0, cid: 0, hb: CrossBlock::new() });
             }
             Action::ApplyMidpointLP1Arc { line, arc } => {
-                sketch.midpoint_lp1_arc.push(MidpointLP1Arc { line: *line, arc: *arc, cid: 0, hb: CrossBlock::new() });
+                sketch.midpoint_lp1_arc.push(MidpointLP1Arc { line: *line, arc: *arc, nid: 0, cid: 0, hb: CrossBlock::new() });
             }
             Action::ApplyMidpointLP2Arc { line, arc } => {
-                sketch.midpoint_lp2_arc.push(MidpointLP2Arc { line: *line, arc: *arc, cid: 0, hb: CrossBlock::new() });
+                sketch.midpoint_lp2_arc.push(MidpointLP2Arc { line: *line, arc: *arc, nid: 0, cid: 0, hb: CrossBlock::new() });
             }
             Action::ApplyMidpointArcStartArc { a, b } => {
-                sketch.midpoint_arc_start_arc.push(MidpointArcStartArc { a: *a, b: *b, cid: 0, hb: CrossBlock::new() });
+                sketch.midpoint_arc_start_arc.push(MidpointArcStartArc { a: *a, b: *b, nid: 0, cid: 0, hb: CrossBlock::new() });
             }
             Action::ApplyMidpointArcEndArc { a, b } => {
-                sketch.midpoint_arc_end_arc.push(MidpointArcEndArc { a: *a, b: *b, cid: 0, hb: CrossBlock::new() });
+                sketch.midpoint_arc_end_arc.push(MidpointArcEndArc { a: *a, b: *b, nid: 0, cid: 0, hb: CrossBlock::new() });
             }
             Action::ApplyLineP1OnLine { a, b } => {
-                sketch.line_p1_on_line.push(LineP1OnLine { a: *a, b: *b, cid: 0, hb: CrossBlock::new() });
+                sketch.line_p1_on_line.push(LineP1OnLine { a: *a, b: *b, nid: 0, cid: 0, hb: CrossBlock::new() });
             }
             Action::ApplyLineP2OnLine { a, b } => {
-                sketch.line_p2_on_line.push(LineP2OnLine { a: *a, b: *b, cid: 0, hb: CrossBlock::new() });
+                sketch.line_p2_on_line.push(LineP2OnLine { a: *a, b: *b, nid: 0, cid: 0, hb: CrossBlock::new() });
             }
             Action::LockPoint { point, pos } => {
                 let p = &mut sketch.points[*point];
@@ -1001,7 +1002,7 @@ impl Action {
                         // Match sign to current atan2
                         if current < 0.0 { target = -target; }
                         sketch.angle.push(AngleConstraint {
-                            a: *a, b: *b, angle: target, cid: 0, hb: CrossBlock::new(),
+                            a: *a, b: *b, angle: target, nid: 0, cid: 0, hb: CrossBlock::new(),
                         });
                     }
                     DimensionKind::HDistance(a, b) | DimensionKind::VDistance(a, b) => {
@@ -1036,7 +1037,7 @@ impl Action {
                             a: *a, b: *b,
                             sign,
                             distance: value.abs(),
-                            cid: 0,
+                            nid: 0, cid: 0,
                             hb: CrossBlock::new(),
                         });
                     }
@@ -1208,7 +1209,7 @@ impl Action {
                             if supplement { target = std::f64::consts::PI - target; }
                             if current < 0.0 { target = -target; }
                             sketch.angle.push(AngleConstraint {
-                                a, b, angle: target, cid: 0, hb: CrossBlock::new(),
+                                a, b, angle: target, nid: 0, cid: 0, hb: CrossBlock::new(),
                             });
                         }
                         DimensionKind::HDistance(a, b) | DimensionKind::VDistance(a, b) => {
@@ -1235,7 +1236,7 @@ impl Action {
                                 a, b,
                                 sign,
                                 distance: value.abs(),
-                                cid: 0,
+                                nid: 0, cid: 0,
                                 hb: CrossBlock::new(),
                             });
                         }

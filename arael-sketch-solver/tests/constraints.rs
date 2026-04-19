@@ -22,7 +22,7 @@ fn test_coincident_pp() {
     let a = sketch.add_point(vect2d::new(1.0, 2.0));
     let b = sketch.add_point(vect2d::new(1.1, 2.2));
     sketch.coincident_pp.push(CoincidentPP {
-        a, b, cid: 0, hb: CrossBlock::new(),
+        a, b, nid: 0, cid: 0, hb: CrossBlock::new(),
     });
     sketch.solve();
     let pa = sketch.points[a].pos.value;
@@ -71,7 +71,7 @@ fn test_parallel_lines() {
     let a = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(3.0, 1.0));
     let b = sketch.add_line(vect2d::new(0.0, 2.0), vect2d::new(4.0, 2.5));
     sketch.parallel.push(Parallel {
-        a, b, cid: 0, hb: CrossBlock::new(),
+        a, b, nid: 0, cid: 0, hb: CrossBlock::new(),
     });
     sketch.solve();
     let la = &sketch.lines[a];
@@ -97,7 +97,7 @@ fn test_perpendicular_lines() {
               - (la.p2.value.y - la.p1.value.y) * (lb.p2.value.x - lb.p1.value.x);
     let dir_sign = if cross >= 0.0 { 1.0 } else { -1.0 };
     sketch.perpendicular.push(Perpendicular {
-        a, b, dir_sign, cid: 0, hb: CrossBlock::new(),
+        a, b, dir_sign, nid: 0, cid: 0, hb: CrossBlock::new(),
     });
     sketch.solve();
     let la = &sketch.lines[a];
@@ -120,7 +120,7 @@ fn test_perpendicular_no_flip() {
     let b = sketch.add_line(vect2d::new(1.0, 0.0), vect2d::new(1.0, 2.0));
     // cross = 3*2 - 0*0 = 6 > 0, dir_sign = 1
     sketch.perpendicular.push(Perpendicular {
-        a, b, dir_sign: 1.0, cid: 0, hb: CrossBlock::new(),
+        a, b, dir_sign: 1.0, nid: 0, cid: 0, hb: CrossBlock::new(),
     });
     sketch.solve();
     // Record initial cross product sign
@@ -146,7 +146,7 @@ fn test_fixed_point_doesnt_move() {
     let a = sketch.add_point_fixed(vect2d::new(1.0, 2.0));
     let b = sketch.add_point(vect2d::new(1.5, 2.5));
     sketch.coincident_pp.push(CoincidentPP {
-        a, b, cid: 0, hb: CrossBlock::new(),
+        a, b, nid: 0, cid: 0, hb: CrossBlock::new(),
     });
     sketch.solve();
     let pa = sketch.points[a].pos.value;
@@ -165,7 +165,7 @@ fn test_point_on_line() {
     let p = sketch.add_point(vect2d::new(2.0, 1.5));
     let l = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(4.0, 1.0));
     sketch.point_on_line.push(PointOnLine {
-        point: p, line: l, cid: 0, hb: CrossBlock::new(),
+        point: p, line: l, nid: 0, cid: 0, hb: CrossBlock::new(),
     });
     sketch.solve();
     let pp = sketch.points[p].pos.value;
@@ -194,7 +194,7 @@ fn test_distance_pp() {
     let a = sketch.add_point(vect2d::new(0.0, 0.0));
     let b = sketch.add_point(vect2d::new(3.0, 0.0));
     sketch.distance_pp.push(DistancePP {
-        a, b, distance: 5.0, cid: 0, hb: CrossBlock::new(),
+        a, b, distance: 5.0, nid: 0, cid: 0, hb: CrossBlock::new(),
     });
     sketch.solve();
     let pa = sketch.points[a].pos.value;
@@ -211,7 +211,7 @@ fn test_horizontal_distance_pp() {
     let a = sketch.add_point(vect2d::new(0.0, 1.0));
     let b = sketch.add_point(vect2d::new(2.0, 1.0));
     sketch.hdistance_pp.push(HorizontalDistancePP {
-        a, b, distance: 5.0, cid: 0, hb: CrossBlock::new(),
+        a, b, distance: 5.0, nid: 0, cid: 0, hb: CrossBlock::new(),
     });
     sketch.solve();
     let pa = sketch.points[a].pos.value;
@@ -225,7 +225,7 @@ fn test_vertical_distance_pp() {
     let a = sketch.add_point(vect2d::new(1.0, 0.0));
     let b = sketch.add_point(vect2d::new(1.0, 3.0));
     sketch.vdistance_pp.push(VerticalDistancePP {
-        a, b, distance: 5.0, cid: 0, hb: CrossBlock::new(),
+        a, b, distance: 5.0, nid: 0, cid: 0, hb: CrossBlock::new(),
     });
     sketch.solve();
     let pa = sketch.points[a].pos.value;
@@ -241,7 +241,7 @@ fn test_midpoint() {
     let p = sketch.add_point(vect2d::new(1.0, 0.5));
     let l = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(4.0, 2.0));
     sketch.midpoint.push(MidpointConstraint {
-        point: p, line: l, cid: 0, hb: CrossBlock::new(),
+        point: p, line: l, nid: 0, cid: 0, hb: CrossBlock::new(),
     });
     sketch.solve();
     let pp = sketch.points[p].pos.value;
@@ -258,7 +258,7 @@ fn test_distance_pl() {
     let p = sketch.add_point(vect2d::new(2.0, 3.0));
     let l = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(4.0, 0.0));
     sketch.distance_pl.push(DistancePL {
-        point: p, line: l, distance: 2.0, cid: 0, hb: CrossBlock::new(),
+        point: p, line: l, distance: 2.0, nid: 0, cid: 0, hb: CrossBlock::new(),
     });
     sketch.solve();
     let pp = sketch.points[p].pos.value;
@@ -280,10 +280,10 @@ fn test_parallel_lines_distance() {
     let la = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(4.0, 0.5));
     let lb = sketch.add_line(vect2d::new(0.0, 2.7), vect2d::new(4.0, 3.4));
     sketch.parallel.push(Parallel {
-        a: la, b: lb, cid: 0, hb: CrossBlock::new(),
+        a: la, b: lb, nid: 0, cid: 0, hb: CrossBlock::new(),
     });
     sketch.distance_lp1l.push(DistanceLP1L {
-        a: lb, b: la, distance: 3.0, cid: 0, hb: CrossBlock::new(),
+        a: lb, b: la, distance: 3.0, nid: 0, cid: 0, hb: CrossBlock::new(),
     });
     sketch.solve();
     let ap = &sketch.lines[la];
@@ -320,7 +320,7 @@ fn build_two_parallel(gap_init: f64) -> (Sketch, Ref<Line>, Ref<Line>) {
     let la = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(4.0, 0.0));
     let lb = sketch.add_line(vect2d::new(0.0, gap_init), vect2d::new(4.0, gap_init));
     sketch.parallel.push(Parallel {
-        a: la, b: lb, cid: 0, hb: CrossBlock::new(),
+        a: la, b: lb, nid: 0, cid: 0, hb: CrossBlock::new(),
     });
     (sketch, la, lb)
 }
@@ -430,7 +430,7 @@ fn test_point_on_arc() {
     let p = sketch.add_point(vect2d::new(3.5, 0.0));
     let a = sketch.add_arc(vect2d::new(0.0, 0.0), 3.0, 0.0, std::f64::consts::PI, false);
     sketch.point_on_arc.push(PointOnArc {
-        point: p, arc: a, cid: 0, hb: CrossBlock::new(),
+        point: p, arc: a, nid: 0, cid: 0, hb: CrossBlock::new(),
     });
     sketch.solve();
     let pp = sketch.points[p].pos.value;
@@ -450,7 +450,7 @@ fn test_collinear() {
     let a = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(2.0, 1.0));
     let b = sketch.add_line(vect2d::new(3.0, 1.8), vect2d::new(5.0, 2.3));
     sketch.collinear.push(Collinear {
-        a, b, cid: 0, hb: CrossBlock::new(),
+        a, b, nid: 0, cid: 0, hb: CrossBlock::new(),
     });
     sketch.solve();
     let la = &sketch.lines[a];
@@ -471,7 +471,7 @@ fn test_equal_length() {
     let a = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(3.0, 0.0));
     let b = sketch.add_line(vect2d::new(0.0, 2.0), vect2d::new(5.0, 2.0));
     sketch.equal_length.push(EqualLength {
-        a, b, cid: 0, hb: CrossBlock::new(),
+        a, b, nid: 0, cid: 0, hb: CrossBlock::new(),
     });
     sketch.solve();
     let la = &sketch.lines[a];
@@ -496,7 +496,7 @@ fn test_angle_constraint() {
     let b = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(2.0, 2.5));
     let target = std::f64::consts::FRAC_PI_4; // 45 degrees
     sketch.angle.push(AngleConstraint {
-        a, b, angle: target, cid: 0, hb: CrossBlock::new(),
+        a, b, angle: target, nid: 0, cid: 0, hb: CrossBlock::new(),
     });
     sketch.solve();
     let la = &sketch.lines[a];
@@ -517,7 +517,7 @@ fn test_coincident_ll21() {
     let a = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(2.0, 1.0));
     let b = sketch.add_line(vect2d::new(2.2, 1.1), vect2d::new(4.0, 0.0));
     sketch.coincident_ll21.push(CoincidentLL21 {
-        a, b, cid: 0, hb: CrossBlock::new(),
+        a, b, nid: 0, cid: 0, hb: CrossBlock::new(),
     });
     sketch.solve();
     let la = &sketch.lines[a];
@@ -534,7 +534,7 @@ fn test_coincident_lp1() {
     let l = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(3.0, 1.0));
     let p = sketch.add_point(vect2d::new(0.2, 0.1));
     sketch.coincident_lp1.push(CoincidentLP1 {
-        line: l, point: p, cid: 0, hb: CrossBlock::new(),
+        line: l, point: p, nid: 0, cid: 0, hb: CrossBlock::new(),
     });
     sketch.solve();
     let lp = &sketch.lines[l];
@@ -559,7 +559,7 @@ fn test_tangent_la() {
               - (sketch.arcs[a].center.value.y - l_ref.p1.value.y) * dx) / len;
     let sign = if dist >= 0.0 { 1.0 } else { -1.0 };
     sketch.tangent_la.push(TangentLA {
-        line: l, arc: a, sign, p1_arc_start: false, p1_arc_end: false, p2_arc_start: false, p2_arc_end: false, dir_sign: 0.0, cid: 0, hb: CrossBlock::new(),
+        line: l, arc: a, sign, p1_arc_start: false, p1_arc_end: false, p2_arc_start: false, p2_arc_end: false, dir_sign: 0.0, nid: 0, cid: 0, hb: CrossBlock::new(),
     });
     sketch.solve();
     let lp = &sketch.lines[l];
@@ -582,11 +582,11 @@ fn test_tangent_la_shared_endpoint_no_flip() {
     let l = sketch.add_line(vect2d::new(2.0, 0.0), vect2d::new(2.0, 3.0));
     // Coincident: line.p1 == arc start
     sketch.coincident_lp1_arc_start.push(CoincidentLP1ArcStart {
-        line: l, arc: a, cid: 0, hb: CrossBlock::new(),
+        line: l, arc: a, nid: 0, cid: 0, hb: CrossBlock::new(),
     });
     // Tangent with p1_arc_start=true (dir_sign will be computed by update_tangent_flags)
     sketch.tangent_la.push(TangentLA {
-        line: l, arc: a, sign: 1.0, p1_arc_start: true, p1_arc_end: false, p2_arc_start: false, p2_arc_end: false, dir_sign: f64::NAN, cid: 0, hb: CrossBlock::new(),
+        line: l, arc: a, sign: 1.0, p1_arc_start: true, p1_arc_end: false, p2_arc_start: false, p2_arc_end: false, dir_sign: f64::NAN, nid: 0, cid: 0, hb: CrossBlock::new(),
     });
     sketch.solve();
     // After solve, line should be tangent at arc start (angle=0).
@@ -612,7 +612,7 @@ fn test_concentric() {
     let a = sketch.add_arc(vect2d::new(1.0, 2.0), 3.0, 0.0, std::f64::consts::PI, false);
     let b = sketch.add_arc(vect2d::new(1.2, 2.1), 5.0, 0.0, std::f64::consts::PI, false);
     sketch.concentric.push(Concentric {
-        a, b, cid: 0, hb: CrossBlock::new(),
+        a, b, nid: 0, cid: 0, hb: CrossBlock::new(),
     });
     sketch.solve();
     let ca = sketch.arcs[a].center.value;
@@ -627,7 +627,7 @@ fn test_equal_radius() {
     let a = sketch.add_arc(vect2d::new(0.0, 0.0), 3.0, 0.0, std::f64::consts::PI, false);
     let b = sketch.add_arc(vect2d::new(5.0, 0.0), 5.0, 0.0, std::f64::consts::PI, false);
     sketch.equal_radius.push(EqualRadius {
-        a, b, cid: 0, hb: CrossBlock::new(),
+        a, b, nid: 0, cid: 0, hb: CrossBlock::new(),
     });
     sketch.solve();
     assert_near(sketch.arcs[a].radius.value, sketch.arcs[b].radius.value, 0.01);
@@ -639,7 +639,7 @@ fn test_tangent_aa() {
     let a = sketch.add_arc(vect2d::new(0.0, 0.0), 2.0, 0.0, std::f64::consts::PI, false);
     let b = sketch.add_arc(vect2d::new(4.5, 0.0), 3.0, 0.0, std::f64::consts::PI, false);
     sketch.tangent_aa.push(TangentAA {
-        a, b, shared: SharedEndpoint::None, cid: 0, hb: CrossBlock::new(),
+        a, b, shared: SharedEndpoint::None, nid: 0, cid: 0, hb: CrossBlock::new(),
     });
     sketch.solve();
     let ca = sketch.arcs[a].center.value;
@@ -671,10 +671,10 @@ fn test_rectangle() {
     sketch.lines[right].constraints.vertical = true;
 
     // Connect corners: bottom.p2 = right.p1, right.p2 = top.p1, etc.
-    sketch.coincident_ll21.push(CoincidentLL21 { a: bottom, b: right, cid: 0, hb: CrossBlock::new() });
-    sketch.coincident_ll21.push(CoincidentLL21 { a: right, b: top, cid: 0, hb: CrossBlock::new() });
-    sketch.coincident_ll21.push(CoincidentLL21 { a: top, b: left, cid: 0, hb: CrossBlock::new() });
-    sketch.coincident_ll21.push(CoincidentLL21 { a: left, b: bottom, cid: 0, hb: CrossBlock::new() });
+    sketch.coincident_ll21.push(CoincidentLL21 { a: bottom, b: right, nid: 0, cid: 0, hb: CrossBlock::new() });
+    sketch.coincident_ll21.push(CoincidentLL21 { a: right, b: top, nid: 0, cid: 0, hb: CrossBlock::new() });
+    sketch.coincident_ll21.push(CoincidentLL21 { a: top, b: left, nid: 0, cid: 0, hb: CrossBlock::new() });
+    sketch.coincident_ll21.push(CoincidentLL21 { a: left, b: bottom, nid: 0, cid: 0, hb: CrossBlock::new() });
 
     // Fix bottom-left corner
     sketch.lines[bottom].p1 = arael::model::Param::fixed(vect2d::new(0.0, 0.0));
@@ -713,9 +713,9 @@ fn test_serde_roundtrip_triangle() {
     let l1 = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(3.0, 0.0));
     let l2 = sketch.add_line(vect2d::new(3.0, 0.0), vect2d::new(1.5, 2.5));
     let l3 = sketch.add_line(vect2d::new(1.5, 2.5), vect2d::new(0.0, 0.0));
-    sketch.coincident_ll21.push(CoincidentLL21 { a: l1, b: l2, cid: 0, hb: CrossBlock::new() });
-    sketch.coincident_ll21.push(CoincidentLL21 { a: l2, b: l3, cid: 0, hb: CrossBlock::new() });
-    sketch.coincident_ll21.push(CoincidentLL21 { a: l3, b: l1, cid: 0, hb: CrossBlock::new() });
+    sketch.coincident_ll21.push(CoincidentLL21 { a: l1, b: l2, nid: 0, cid: 0, hb: CrossBlock::new() });
+    sketch.coincident_ll21.push(CoincidentLL21 { a: l2, b: l3, nid: 0, cid: 0, hb: CrossBlock::new() });
+    sketch.coincident_ll21.push(CoincidentLL21 { a: l3, b: l1, nid: 0, cid: 0, hb: CrossBlock::new() });
     sketch.lines[l1].constraints.horizontal = true;
     sketch.solve();
 
@@ -750,10 +750,10 @@ fn test_serde_roundtrip_rectangle_with_fixed() {
     sketch.lines[top].constraints.horizontal = true;
     sketch.lines[left].constraints.vertical = true;
     sketch.lines[right].constraints.vertical = true;
-    sketch.coincident_ll21.push(CoincidentLL21 { a: bottom, b: right, cid: 0, hb: CrossBlock::new() });
-    sketch.coincident_ll21.push(CoincidentLL21 { a: right, b: top, cid: 0, hb: CrossBlock::new() });
-    sketch.coincident_ll21.push(CoincidentLL21 { a: top, b: left, cid: 0, hb: CrossBlock::new() });
-    sketch.coincident_ll21.push(CoincidentLL21 { a: left, b: bottom, cid: 0, hb: CrossBlock::new() });
+    sketch.coincident_ll21.push(CoincidentLL21 { a: bottom, b: right, nid: 0, cid: 0, hb: CrossBlock::new() });
+    sketch.coincident_ll21.push(CoincidentLL21 { a: right, b: top, nid: 0, cid: 0, hb: CrossBlock::new() });
+    sketch.coincident_ll21.push(CoincidentLL21 { a: top, b: left, nid: 0, cid: 0, hb: CrossBlock::new() });
+    sketch.coincident_ll21.push(CoincidentLL21 { a: left, b: bottom, nid: 0, cid: 0, hb: CrossBlock::new() });
     sketch.lines[bottom].p1 = Param::fixed(vect2d::new(0.0, 0.0));
     sketch.lines[bottom].constraints.has_length = true;
     sketch.lines[bottom].constraints.length = 4.0;
@@ -824,7 +824,7 @@ fn test_collinear_nonaligned() {
     let mut sketch = Sketch::new();
     let a = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(2.0, 1.0));
     let b = sketch.add_line(vect2d::new(3.0, 2.0), vect2d::new(5.0, 3.5));
-    sketch.collinear.push(Collinear { a, b, cid: 0, hb: CrossBlock::new() });
+    sketch.collinear.push(Collinear { a, b, nid: 0, cid: 0, hb: CrossBlock::new() });
     sketch.solve();
     // Both endpoints of b should lie on the infinite line through a
     let la = &sketch.lines[a];
@@ -845,7 +845,7 @@ fn test_midpoint_point() {
     let mut sketch = Sketch::new();
     let p = sketch.add_point(vect2d::new(3.0, 1.0));
     let l = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(4.0, 2.0));
-    sketch.midpoint.push(MidpointConstraint { point: p, line: l, cid: 0, hb: CrossBlock::new() });
+    sketch.midpoint.push(MidpointConstraint { point: p, line: l, nid: 0, cid: 0, hb: CrossBlock::new() });
     sketch.solve();
     let pt = sketch.points[p].pos.value;
     let ln = &sketch.lines[l];
@@ -860,7 +860,7 @@ fn test_midpoint_lp1() {
     let mut sketch = Sketch::new();
     let src = sketch.add_line(vect2d::new(5.0, 5.0), vect2d::new(6.0, 6.0));
     let tgt = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(4.0, 2.0));
-    sketch.midpoint_lp1.push(MidpointLP1 { line: src, target: tgt, cid: 0, hb: CrossBlock::new() });
+    sketch.midpoint_lp1.push(MidpointLP1 { line: src, target: tgt, nid: 0, cid: 0, hb: CrossBlock::new() });
     sketch.solve();
     let p1 = sketch.lines[src].p1.value;
     let tl = &sketch.lines[tgt];
@@ -875,7 +875,7 @@ fn test_midpoint_arc_start() {
     let mut sketch = Sketch::new();
     let arc = sketch.add_arc(vect2d::new(5.0, 5.0), 2.0, 0.0, 1.5, false);
     let l = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(4.0, 2.0));
-    sketch.midpoint_arc_start.push(MidpointArcStart { arc, line: l, cid: 0, hb: CrossBlock::new() });
+    sketch.midpoint_arc_start.push(MidpointArcStart { arc, line: l, nid: 0, cid: 0, hb: CrossBlock::new() });
     sketch.solve();
     let a = &sketch.arcs[arc];
     let sx = a.center.value.x + a.radius.value * a.start_angle.value.cos();
@@ -894,7 +894,7 @@ fn test_angle_dimension_45deg() {
     let a = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(3.0, 0.0));
     let b = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(2.0, 1.0));
     let target_rad = std::f64::consts::FRAC_PI_4; // 45 degrees
-    sketch.angle.push(AngleConstraint { a, b, angle: target_rad, cid: 0, hb: CrossBlock::new() });
+    sketch.angle.push(AngleConstraint { a, b, angle: target_rad, nid: 0, cid: 0, hb: CrossBlock::new() });
     sketch.solve();
     let la = &sketch.lines[a];
     let lb = &sketch.lines[b];
@@ -928,7 +928,7 @@ fn test_angle_dimension_negative_atan2() {
     // Target: supplement of 35 deg, matching sign of current
     let mut target = std::f64::consts::PI - 35.0f64.to_radians();
     if current < 0.0 { target = -target; }
-    sketch.angle.push(AngleConstraint { a, b, angle: target, cid: 0, hb: CrossBlock::new() });
+    sketch.angle.push(AngleConstraint { a, b, angle: target, nid: 0, cid: 0, hb: CrossBlock::new() });
     let result = sketch.solve();
     assert!(result.end_cost < 1.0, "solver failed: cost={}", result.end_cost);
     let la = &sketch.lines[a];
@@ -949,7 +949,7 @@ fn test_symmetry_ll() {
     let b = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(0.0, 5.0));
     let c = sketch.add_line(vect2d::new(1.0, 3.0), vect2d::new(4.0, 2.0));
     sketch.symmetry_ll.push(SymmetryLL {
-        a, b, c, cid: 0,
+        a, b, c, nid: 0, cid: 0,
         hb_ab: arael::model::CrossBlock::new(),
         hb_ac: arael::model::CrossBlock::new(),
         hb_bc: arael::model::CrossBlock::new(),
@@ -975,7 +975,7 @@ fn test_symmetry_ll_nonparallel() {
     let b = sketch.add_line(vect2d::new(0.0, -1.0), vect2d::new(0.0, 5.0));
     let c = sketch.add_line(vect2d::new(-3.0, -2.0), vect2d::new(3.0, -4.0));
     sketch.symmetry_ll.push(SymmetryLL {
-        a, b, c, cid: 0,
+        a, b, c, nid: 0, cid: 0,
         hb_ab: arael::model::CrossBlock::new(),
         hb_ac: arael::model::CrossBlock::new(),
         hb_bc: arael::model::CrossBlock::new(),
@@ -1223,13 +1223,13 @@ fn test_expr_dim_angle_reference() {
     let l0 = sketch.add_line(vect2d::new(0.0, 2.0), vect2d::new(0.0, -3.0));
     sketch.lines[l0].p2 = Param::fixed(vect2d::new(0.0, -3.0));
     let l1 = sketch.add_line(vect2d::new(0.0, -3.0), vect2d::new(2.0, 1.0));
-    sketch.coincident_ll21.push(CoincidentLL21 { a: l0, b: l1, cid: 0, hb: CrossBlock::new() });
+    sketch.coincident_ll21.push(CoincidentLL21 { a: l0, b: l1, nid: 0, cid: 0, hb: CrossBlock::new() });
 
     // L2 vertical, L3 going up-right from L2.p2
     let l2 = sketch.add_line(vect2d::new(5.0, 2.0), vect2d::new(5.0, -3.0));
     sketch.lines[l2].p2 = Param::fixed(vect2d::new(5.0, -3.0));
     let l3 = sketch.add_line(vect2d::new(5.0, -3.0), vect2d::new(7.0, 1.0));
-    sketch.coincident_ll21.push(CoincidentLL21 { a: l2, b: l3, cid: 0, hb: CrossBlock::new() });
+    sketch.coincident_ll21.push(CoincidentLL21 { a: l2, b: l3, nid: 0, cid: 0, hb: CrossBlock::new() });
 
     // d1: angle between L0 and L1, supplement=true, value=20 deg
     sketch.lines[l0].constraints.has_length = true;
@@ -1248,7 +1248,7 @@ fn test_expr_dim_angle_reference() {
             if current < 0.0 { target = -target; }
             target
         },
-        cid: 0, hb: CrossBlock::new(),
+        nid: 0, cid: 0, hb: CrossBlock::new(),
     });
     sketch.dimensions.push(Dimension {
         kind: DimensionKind::Angle(l0, l1, true), value: 20.0,
@@ -1535,7 +1535,7 @@ fn test_symmetry_pp() {
     sketch.lines[mirror].p1 = Param::fixed(vect2d::new(5.0, 0.0));
     sketch.lines[mirror].p2 = Param::fixed(vect2d::new(5.0, 10.0));
     sketch.symmetry_pp.push(SymmetryPP {
-        a: p0, c: p1, line: mirror, cid: 0,
+        a: p0, c: p1, line: mirror, nid: 0, cid: 0,
         hb_ac: arael::model::CrossBlock::new(),
         hb_al: arael::model::CrossBlock::new(),
         hb_cl: arael::model::CrossBlock::new(),
@@ -1561,7 +1561,7 @@ fn test_symmetry_pp_diagonal() {
     let p1 = sketch.add_point(vect2d::new(3.5, 1.5));
     let mirror = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(5.0, 5.0));
     sketch.symmetry_pp.push(SymmetryPP {
-        a: p0, c: p1, line: mirror, cid: 0,
+        a: p0, c: p1, line: mirror, nid: 0, cid: 0,
         hb_ac: arael::model::CrossBlock::new(),
         hb_al: arael::model::CrossBlock::new(),
         hb_cl: arael::model::CrossBlock::new(),
@@ -1860,7 +1860,7 @@ fn test_ellipse_arc_distance_convergence() {
     sketch.solve(); // anchor drift
 
     sketch.distance_arc_start_p.push(DistanceArcStartP {
-        arc, point: pt, distance: 3.0, cid: 0, hb: CrossBlock::new(),
+        arc, point: pt, distance: 3.0, nid: 0, cid: 0, hb: CrossBlock::new(),
     });
 
     let result = sketch.solve();
@@ -1912,22 +1912,22 @@ fn test_dof_at_large_scale() {
         );
         // Couple: arcs share start/end endpoints with the line endpoints.
         sketch.coincident_lp1_arc_start.push(CoincidentLP1ArcStart {
-            line: l1, arc: a_top, cid: 0, hb: CrossBlock::new(),
+            line: l1, arc: a_top, nid: 0, cid: 0, hb: CrossBlock::new(),
         });
         sketch.coincident_lp2_arc_end.push(CoincidentLP2ArcEnd {
-            line: l1, arc: a_top, cid: 0, hb: CrossBlock::new(),
+            line: l1, arc: a_top, nid: 0, cid: 0, hb: CrossBlock::new(),
         });
         sketch.coincident_lp1_arc_start.push(CoincidentLP1ArcStart {
-            line: l2, arc: a_bot, cid: 0, hb: CrossBlock::new(),
+            line: l2, arc: a_bot, nid: 0, cid: 0, hb: CrossBlock::new(),
         });
         sketch.coincident_lp2_arc_end.push(CoincidentLP2ArcEnd {
-            line: l2, arc: a_bot, cid: 0, hb: CrossBlock::new(),
+            line: l2, arc: a_bot, nid: 0, cid: 0, hb: CrossBlock::new(),
         });
         // Equal-radius between the two arcs (redundant with the shared
         // endpoints but introduces the kind of scale-dependent coupling
         // that breaks the J^T J eigenvalue path).
         sketch.equal_radius.push(EqualRadius {
-            a: a_top, b: a_bot, cid: 0, hb: CrossBlock::new(),
+            a: a_top, b: a_bot, nid: 0, cid: 0, hb: CrossBlock::new(),
         });
         // Dimensions that scale with s.
         sketch.lines[l1].constraints.has_length = true;
@@ -1965,7 +1965,7 @@ fn test_pp_distance_signed_along_line() {
     // Point on the line at x=3 (on the negative-x side if we later anchor to p2).
     let p = sketch.add_point(vect2d::new(3.0, 0.0));
     sketch.point_on_line.push(PointOnLine {
-        point: p, line: l, cid: 0, hb: CrossBlock::new(),
+        point: p, line: l, nid: 0, cid: 0, hb: CrossBlock::new(),
     });
 
     // Expression dimension: distance LineP1(l) -- Point(p) = "2".
@@ -2007,7 +2007,7 @@ fn test_horizontal_direction_preserved() {
     // Without the barrier it might pick either; with the barrier
     // (h_dir_sign=+1) it must choose p1.x < p2.x.
     let anchor = sketch.add_point_fixed(vect2d::new(2.0, 0.0));
-    sketch.coincident_lp2.push(CoincidentLP2 { line: l, point: anchor, cid: 0, hb: CrossBlock::new() });
+    sketch.coincident_lp2.push(CoincidentLP2 { line: l, point: anchor, nid: 0, cid: 0, hb: CrossBlock::new() });
     sketch.solve();
     let line = &sketch.lines[l];
     assert!(line.p2.value.x > line.p1.value.x,
@@ -2028,7 +2028,7 @@ fn test_vertical_direction_preserved() {
     sketch.lines[l].constraints.has_length = true;
     sketch.lines[l].constraints.length = 3.0;
     let anchor = sketch.add_point_fixed(vect2d::new(0.0, 2.0));
-    sketch.coincident_lp2.push(CoincidentLP2 { line: l, point: anchor, cid: 0, hb: CrossBlock::new() });
+    sketch.coincident_lp2.push(CoincidentLP2 { line: l, point: anchor, nid: 0, cid: 0, hb: CrossBlock::new() });
     sketch.solve();
     let line = &sketch.lines[l];
     assert!(line.p2.value.y > line.p1.value.y,
@@ -2060,9 +2060,9 @@ fn distance_concentric_basic() {
     let mut sketch = Sketch::new();
     let a = sketch.add_arc(vect2d::new(0.0, 0.0), 5.0, 0.0, std::f64::consts::TAU, true);
     let b = sketch.add_arc(vect2d::new(0.0, 0.0), 8.0, 0.0, std::f64::consts::TAU, true);
-    sketch.concentric.push(Concentric { a, b, cid: 0, hb: CrossBlock::new() });
+    sketch.concentric.push(Concentric { a, b, nid: 0, cid: 0, hb: CrossBlock::new() });
     sketch.distance_concentric.push(DistanceConcentric {
-        a, b, sign: 1.0, distance: 2.0, cid: 0, hb: CrossBlock::new(),
+        a, b, sign: 1.0, distance: 2.0, nid: 0, cid: 0, hb: CrossBlock::new(),
     });
     sketch.solve();
     let diff = sketch.arcs[b].radius.value - sketch.arcs[a].radius.value;
@@ -2076,9 +2076,9 @@ fn distance_concentric_negative_sign_preserved() {
     let mut sketch = Sketch::new();
     let a = sketch.add_arc(vect2d::new(0.0, 0.0), 8.0, 0.0, std::f64::consts::TAU, true);
     let b = sketch.add_arc(vect2d::new(0.0, 0.0), 5.0, 0.0, std::f64::consts::TAU, true);
-    sketch.concentric.push(Concentric { a, b, cid: 0, hb: CrossBlock::new() });
+    sketch.concentric.push(Concentric { a, b, nid: 0, cid: 0, hb: CrossBlock::new() });
     sketch.distance_concentric.push(DistanceConcentric {
-        a, b, sign: -1.0, distance: 3.0, cid: 0, hb: CrossBlock::new(),
+        a, b, sign: -1.0, distance: 3.0, nid: 0, cid: 0, hb: CrossBlock::new(),
     });
     sketch.solve();
     let diff = sketch.arcs[b].radius.value - sketch.arcs[a].radius.value;
@@ -2092,12 +2092,105 @@ fn distance_concentric_arc_delete_cascade() {
     let mut sketch = Sketch::new();
     let a = sketch.add_arc(vect2d::new(0.0, 0.0), 5.0, 0.0, std::f64::consts::TAU, true);
     let b = sketch.add_arc(vect2d::new(0.0, 0.0), 8.0, 0.0, std::f64::consts::TAU, true);
-    sketch.concentric.push(Concentric { a, b, cid: 0, hb: CrossBlock::new() });
+    sketch.concentric.push(Concentric { a, b, nid: 0, cid: 0, hb: CrossBlock::new() });
     sketch.distance_concentric.push(DistanceConcentric {
-        a, b, sign: 1.0, distance: 3.0, cid: 0, hb: CrossBlock::new(),
+        a, b, sign: 1.0, distance: 3.0, nid: 0, cid: 0, hb: CrossBlock::new(),
     });
     assert_eq!(sketch.distance_concentric.len(), 1);
     sketch.delete_arc(a);
     assert!(sketch.distance_concentric.is_empty(),
         "DistanceConcentric should be removed when arc is deleted");
+}
+
+// -- Auto-assigned constraint names (C<n>) --
+
+#[test]
+fn test_constraint_names_sequential() {
+    let mut sketch = Sketch::new();
+    let a = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(5.0, 0.0));
+    let b = sketch.add_line(vect2d::new(0.0, 2.0), vect2d::new(5.0, 2.0));
+    let c = sketch.add_line(vect2d::new(0.0, 4.0), vect2d::new(5.0, 4.0));
+    sketch.parallel.push(Parallel { a, b, nid: 0, cid: 0, hb: CrossBlock::new() });
+    sketch.parallel.push(Parallel { a: b, b: c, nid: 0, cid: 0, hb: CrossBlock::new() });
+    sketch.parallel.push(Parallel { a, b: c, nid: 0, cid: 0, hb: CrossBlock::new() });
+    sketch.assign_constraint_names();
+    assert_eq!(sketch.parallel[0].nid, 1);
+    assert_eq!(sketch.parallel[1].nid, 2);
+    assert_eq!(sketch.parallel[2].nid, 3);
+    assert_eq!(sketch.next_constraint_id, 4);
+}
+
+#[test]
+fn test_constraint_names_idempotent() {
+    // Re-running assign_constraint_names does not renumber already-named
+    // constraints. Only nid==0 sentinel values get assigned.
+    let mut sketch = Sketch::new();
+    let a = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(5.0, 0.0));
+    let b = sketch.add_line(vect2d::new(0.0, 2.0), vect2d::new(5.0, 2.0));
+    sketch.parallel.push(Parallel { a, b, nid: 0, cid: 0, hb: CrossBlock::new() });
+    sketch.assign_constraint_names();
+    let first = sketch.parallel[0].nid;
+    sketch.assign_constraint_names();
+    assert_eq!(sketch.parallel[0].nid, first);
+    // Adding a fresh constraint with nid==0 picks up the next id.
+    let c = sketch.add_line(vect2d::new(0.0, 4.0), vect2d::new(5.0, 4.0));
+    sketch.equal_length.push(EqualLength { a, b: c, nid: 0, cid: 0, hb: CrossBlock::new() });
+    sketch.assign_constraint_names();
+    assert_eq!(sketch.equal_length[0].nid, first + 1);
+}
+
+#[test]
+fn test_constraint_names_migration() {
+    // A legacy sketch has every constraint at nid==0 (serde default).
+    // assign_constraint_names must pick them all up starting from 1.
+    let mut sketch = Sketch::new();
+    let a = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(5.0, 0.0));
+    let b = sketch.add_line(vect2d::new(0.0, 2.0), vect2d::new(5.0, 2.0));
+    let c = sketch.add_line(vect2d::new(0.0, 4.0), vect2d::new(5.0, 4.0));
+    sketch.parallel.push(Parallel { a, b, nid: 0, cid: 0, hb: CrossBlock::new() });
+    sketch.collinear.push(Collinear { a, b: c, nid: 0, cid: 0, hb: CrossBlock::new() });
+    sketch.equal_length.push(EqualLength { a, b, nid: 0, cid: 0, hb: CrossBlock::new() });
+    // Simulate legacy save -> load via bincode (round-trips NaN / f64 cleanly).
+    let bytes = bincode::serialize(&sketch).unwrap();
+    let mut reloaded: Sketch = bincode::deserialize(&bytes).unwrap();
+    // nids survive round-trip as 0 because we haven't assigned yet.
+    assert_eq!(reloaded.parallel[0].nid, 0);
+    assert_eq!(reloaded.collinear[0].nid, 0);
+    assert_eq!(reloaded.equal_length[0].nid, 0);
+    reloaded.assign_constraint_names();
+    // All distinct, all >= 1.
+    let mut ids = [reloaded.parallel[0].nid, reloaded.collinear[0].nid, reloaded.equal_length[0].nid];
+    ids.sort();
+    assert_eq!(ids, [1, 2, 3]);
+}
+
+#[test]
+fn test_format_and_parse_flag_name() {
+    assert_eq!(format_flag_name("L0", 'H'), "CL0H");
+    assert_eq!(format_flag_name("L12", 'V'), "CL12V");
+    assert_eq!(parse_flag_name("CL0H"), Some(("L0".to_string(), 'H')));
+    assert_eq!(parse_flag_name("CL12V"), Some(("L12".to_string(), 'V')));
+    // Non-flag suffix -> None.
+    assert_eq!(parse_flag_name("C5"), None);
+    assert_eq!(parse_flag_name("CL0X"), None);
+    // Missing entity.
+    assert_eq!(parse_flag_name("CH"), None);
+    // Empty / short.
+    assert_eq!(parse_flag_name(""), None);
+    assert_eq!(parse_flag_name("C"), None);
+}
+
+#[test]
+fn test_list_constraints_includes_names() {
+    let mut sketch = Sketch::new();
+    let a = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(5.0, 0.0));
+    let b = sketch.add_line(vect2d::new(0.0, 2.0), vect2d::new(5.0, 2.0));
+    sketch.lines[a].constraints.horizontal = true;
+    sketch.parallel.push(Parallel { a, b, nid: 0, cid: 0, hb: CrossBlock::new() });
+    sketch.assign_constraint_names();
+    let lines = sketch.list_constraints();
+    assert!(lines.iter().any(|l| l == "CL0H: horizontal L0"),
+        "expected CL0H: horizontal L0, got {:?}", lines);
+    assert!(lines.iter().any(|l| l.starts_with("C1: parallel ")),
+        "expected C1: parallel ..., got {:?}", lines);
 }

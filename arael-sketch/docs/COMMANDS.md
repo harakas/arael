@@ -443,6 +443,23 @@ Using `force` results in an overconstrained sketch -- redundant constraints make
 
 ### Removing Constraints
 
+Every constraint has an auto-assigned name. Vec-stored constraints
+get a sequential `C<n>` name (`C1`, `C2`, ...) shown by the `list`
+command. Flag-style constraints on lines (horizontal, vertical) get
+synthetic names of the form `C<entity><flag>`: `CL0H` is "horizontal
+on L0", `CL3V` is "vertical on L3". Names are stable across save /
+load and undo / redo. Deleting constraints can leave holes in the
+numbering; holes are not reused.
+
+```
+rc C3                        Remove the constraint named C3
+rc CL0H                      Remove horizontal flag from L0
+rc CL3V                      Remove vertical flag from L3
+info C3                      Show the list line for constraint C3
+```
+
+Entity-based syntax keeps working for backwards compatibility:
+
 ```
 remove_constraint L0 horizontal
 remove_constraint L0 L1 parallel
@@ -463,7 +480,12 @@ remove_constraint L0.p1 L1 midpoint
 remove_constraint L0.p1 lock
 ```
 
-Alias: `rc` (e.g., `rc L0 horizontal`)
+Alias: `rc` (e.g., `rc L0 horizontal`, `rc C3`, `rc CL0H`)
+
+Dimension-managed constraints (distances, angles) are reached through
+the backing dimension name (`remove_dim d0`, `info d0`). Name-lookup
+of `C<n>` for those constraints falls through — use the dimension
+name instead.
 
 ## Mirror
 

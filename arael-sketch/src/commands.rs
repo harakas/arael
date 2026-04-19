@@ -3515,17 +3515,17 @@ fn cmd_drag(ctx: &mut CommandContext, args: &str) -> CommandResult {
 
     match &target {
         DragTarget::Point(r) => {
-            ctx.sketch.coincident_pp.push(CoincidentPP { a: drag_pt, b: *r, cid: 0, hb: CrossBlock::new() });
+            ctx.sketch.coincident_pp.push(CoincidentPP { a: drag_pt, b: *r, nid: 0, cid: 0, hb: CrossBlock::new() });
             drag_pt2 = None;
             saved_arc_locks = None;
         }
         DragTarget::LineP1(r) => {
-            ctx.sketch.coincident_lp1.push(CoincidentLP1 { line: *r, point: drag_pt, cid: 0, hb: CrossBlock::new() });
+            ctx.sketch.coincident_lp1.push(CoincidentLP1 { line: *r, point: drag_pt, nid: 0, cid: 0, hb: CrossBlock::new() });
             drag_pt2 = None;
             saved_arc_locks = None;
         }
         DragTarget::LineP2(r) => {
-            ctx.sketch.coincident_lp2.push(CoincidentLP2 { line: *r, point: drag_pt, cid: 0, hb: CrossBlock::new() });
+            ctx.sketch.coincident_lp2.push(CoincidentLP2 { line: *r, point: drag_pt, nid: 0, cid: 0, hb: CrossBlock::new() });
             drag_pt2 = None;
             saved_arc_locks = None;
         }
@@ -3534,29 +3534,29 @@ fn cmd_drag(ctx: &mut CommandContext, args: &str) -> CommandResult {
             let p1_target = vect2d::new(ctx.sketch.lines[*r].p1.value.x + offset.x, ctx.sketch.lines[*r].p1.value.y + offset.y);
             let p2_target = vect2d::new(ctx.sketch.lines[*r].p2.value.x + offset.x, ctx.sketch.lines[*r].p2.value.y + offset.y);
             ctx.sketch.points[drag_pt].pos = Param::fixed(p1_target);
-            ctx.sketch.coincident_lp1.push(CoincidentLP1 { line: *r, point: drag_pt, cid: 0, hb: CrossBlock::new() });
+            ctx.sketch.coincident_lp1.push(CoincidentLP1 { line: *r, point: drag_pt, nid: 0, cid: 0, hb: CrossBlock::new() });
             let dp2 = ctx.sketch.add_point_fixed(p2_target);
-            ctx.sketch.coincident_lp2.push(CoincidentLP2 { line: *r, point: dp2, cid: 0, hb: CrossBlock::new() });
+            ctx.sketch.coincident_lp2.push(CoincidentLP2 { line: *r, point: dp2, nid: 0, cid: 0, hb: CrossBlock::new() });
             drag_pt2 = Some(dp2);
             saved_arc_locks = None;
         }
         DragTarget::ArcCenter(r) => {
-            ctx.sketch.coincident_arc_center.push(CoincidentArcCenter { point: drag_pt, arc: *r, cid: 0, hb: CrossBlock::new() });
+            ctx.sketch.coincident_arc_center.push(CoincidentArcCenter { point: drag_pt, arc: *r, nid: 0, cid: 0, hb: CrossBlock::new() });
             drag_pt2 = None;
             saved_arc_locks = None;
         }
         DragTarget::ArcStart(r) => {
-            ctx.sketch.coincident_arc_start.push(CoincidentArcStart { point: drag_pt, arc: *r, cid: 0, hb: CrossBlock::new() });
+            ctx.sketch.coincident_arc_start.push(CoincidentArcStart { point: drag_pt, arc: *r, nid: 0, cid: 0, hb: CrossBlock::new() });
             drag_pt2 = None;
             saved_arc_locks = None;
         }
         DragTarget::ArcEnd(r) => {
-            ctx.sketch.coincident_arc_end.push(CoincidentArcEnd { point: drag_pt, arc: *r, cid: 0, hb: CrossBlock::new() });
+            ctx.sketch.coincident_arc_end.push(CoincidentArcEnd { point: drag_pt, arc: *r, nid: 0, cid: 0, hb: CrossBlock::new() });
             drag_pt2 = None;
             saved_arc_locks = None;
         }
         DragTarget::ArcBody(r) => {
-            ctx.sketch.coincident_arc_center.push(CoincidentArcCenter { point: drag_pt, arc: *r, cid: 0, hb: CrossBlock::new() });
+            ctx.sketch.coincident_arc_center.push(CoincidentArcCenter { point: drag_pt, arc: *r, nid: 0, cid: 0, hb: CrossBlock::new() });
             // Lock radius and sweep
             let a = &ctx.sketch.arcs[*r];
             let locks = (
@@ -3953,6 +3953,19 @@ fn constraints_for(sketch: &Sketch, name: &str) -> Vec<String> {
 
 fn cmd_info(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let name = args.trim();
+    // Constraint name lookup: C3, CL0H, CL2V.
+    if name.starts_with('C') && !name.contains('.')
+        && crate::tools::find_constraint_by_name(&ctx.sketch, name).is_some() {
+        // Find the matching line in list_constraints that starts with "<name>: ".
+        let prefix = format!("{}: ", name);
+        for line in ctx.sketch.list_constraints() {
+            if line.starts_with(&prefix) {
+                return ok(line);
+            }
+        }
+        // Fallback: no list line matched (should not happen for valid names).
+        return ok(format!("{}: (constraint exists)", name));
+    }
     // Endpoint info: L0.p1, L0.p2, A0.center, etc.
     if name.contains('.')
         && let Ok(pos) = resolve_endpoint_pos(&ctx.sketch, name) {
@@ -4205,14 +4218,20 @@ fn cmd_list(ctx: &mut CommandContext, args: &str) -> CommandResult {
         "tangent", "coincident", "concentric", "midpoint", "symmetry", "point_on", "lock",
     ];
     const DIMENSION_FILTERS: &[&str] = &["angle", "length", "radius", "sweep", "distance", "hdistance", "vdistance", "xangle"];
+    // Match against the line body — `list` output prefixes every constraint
+    // with its C<name>: tag.
+    fn body_matches(s: &str, needle: &str) -> bool {
+        let body = s.split_once(": ").map(|(_, rest)| rest).unwrap_or(s);
+        body.starts_with(needle)
+    }
     if CONSTRAINT_FILTERS.contains(&filter) {
         let all = ctx.sketch.list_constraints();
-        let filtered: Vec<String> = all.into_iter().filter(|s| s.starts_with(filter)).collect();
+        let filtered: Vec<String> = all.into_iter().filter(|s| body_matches(s, filter)).collect();
         return if filtered.is_empty() { ok("(empty)") } else { ok(filtered.join("\n")) };
     }
     if DIMENSION_FILTERS.contains(&filter) {
         let all = ctx.sketch.list_constraints();
-        let filtered: Vec<String> = all.into_iter().filter(|s| s.starts_with(filter)).collect();
+        let filtered: Vec<String> = all.into_iter().filter(|s| body_matches(s, filter)).collect();
         return if filtered.is_empty() { ok("(empty)") } else { ok(filtered.join("\n")) };
     }
     if filter == "constr" {
@@ -5836,8 +5855,27 @@ fn find_midpoint_id(sketch: &Sketch, ep: EndpointRef, target_name: &str) -> Opti
 }
 
 fn cmd_remove_constraint(ctx: &mut CommandContext, args: &str) -> CommandResult {
-    use crate::tools::ConstraintId;
+    use crate::tools::{ConstraintId, find_constraint_by_name};
     let tokens: Vec<&str> = args.split_whitespace().collect();
+    if tokens.is_empty() { return err("Usage: remove_constraint C3 | remove_constraint CL0H | remove_constraint L0 horizontal | remove_constraint L0 L1 parallel"); }
+
+    // Single-token name lookup: rc C3, rc CL0H, rc CL2V.
+    if tokens.len() == 1 {
+        let name = tokens[0];
+        if let Some(id) = find_constraint_by_name(&ctx.sketch, name) {
+            // Capture the descriptive list line before deletion so the
+            // user sees exactly which constraint went away.
+            let prefix = format!("{}: ", name);
+            let desc = ctx.sketch.list_constraints().into_iter()
+                .find(|l| l.starts_with(&prefix))
+                .unwrap_or_else(|| name.to_string());
+            ctx.begin_group();
+            ctx.exec(Action::DeleteConstraint { id });
+            return ok(format!("Removed {}", desc));
+        }
+        return err(format!("Unknown constraint: {}", name));
+    }
+
     if tokens.len() < 2 { return err("Usage: remove_constraint L0 horizontal | remove_constraint L0 L1 parallel"); }
 
     let ctype = tokens.last().unwrap();
@@ -6181,6 +6219,7 @@ fn cmd_load(ctx: &mut CommandContext, args: &str) -> CommandResult {
     match std::fs::read_to_string(path) {
         Ok(json) => match serde_json::from_str::<Sketch>(&json) {
             Ok(mut sketch) => {
+                sketch.assign_constraint_names();
                 sketch.solve();
                 ctx.history = crate::history::History::new(&sketch);
                 ctx.sketch = sketch;
@@ -11144,6 +11183,103 @@ mod tests {
         let out = run_ok(&mut ctx, "list coincident");
         assert!(out.contains("coincident"), "should show coincident: {}", out);
         assert!(!out.contains("L0:"), "should not include entity listing: {}", out);
+    }
+
+    // -- Auto-assigned constraint names (C<n>, CL0H) --
+
+    #[test]
+    fn test_rc_by_numeric_name() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,2 5,2");
+        run_ok(&mut ctx, "parallel L0 L1");
+        assert_eq!(ctx.sketch.parallel.len(), 1);
+        let nid = ctx.sketch.parallel[0].nid;
+        let out = run_ok(&mut ctx, &format!("rc C{}", nid));
+        assert!(out.contains(&format!("C{}", nid)), "output should mention name: {}", out);
+        assert!(out.contains("parallel"), "output should describe constraint: {}", out);
+        assert_eq!(ctx.sketch.parallel.len(), 0);
+    }
+
+    #[test]
+    fn test_rc_by_flag_name() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,2 0,7");
+        run_ok(&mut ctx, "horizontal L0; vertical L1");
+        assert!(ctx.sketch.lines[ctx.sketch.lines.refs().next().unwrap()].constraints.horizontal);
+        let out = run_ok(&mut ctx, "rc CL0H");
+        assert!(out.contains("CL0H"), "output should mention name: {}", out);
+        assert!(out.contains("horizontal L0"), "output should describe constraint: {}", out);
+        let l0 = ctx.sketch.lines.refs().next().unwrap();
+        assert!(!ctx.sketch.lines[l0].constraints.horizontal);
+        // CL1V still set until removed.
+        let l1 = ctx.sketch.lines.refs().nth(1).unwrap();
+        assert!(ctx.sketch.lines[l1].constraints.vertical);
+        run_ok(&mut ctx, "rc CL1V");
+        assert!(!ctx.sketch.lines[l1].constraints.vertical);
+    }
+
+    #[test]
+    fn test_rc_unknown_name() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0");
+        let e = run_err(&mut ctx, "rc C999");
+        assert!(e.contains("Unknown"), "{}", e);
+        let e = run_err(&mut ctx, "rc CL0H");
+        assert!(e.contains("Unknown"), "{}", e);
+    }
+
+    #[test]
+    fn test_info_by_constraint_name() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,2 5,2");
+        run_ok(&mut ctx, "parallel L0 L1");
+        let nid = ctx.sketch.parallel[0].nid;
+        let out = run_ok(&mut ctx, &format!("info C{}", nid));
+        assert!(out.contains("parallel"), "info output: {}", out);
+        assert!(out.contains(&format!("C{}:", nid)), "info output: {}", out);
+    }
+
+    #[test]
+    fn test_info_by_flag_name() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0");
+        run_ok(&mut ctx, "horizontal L0");
+        let out = run_ok(&mut ctx, "info CL0H");
+        assert!(out.contains("horizontal L0"), "info output: {}", out);
+    }
+
+    #[test]
+    fn test_list_includes_constraint_names() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,2 5,2");
+        run_ok(&mut ctx, "horizontal L0; parallel L0 L1");
+        let out = run_ok(&mut ctx, "list");
+        assert!(out.contains("CL0H: horizontal L0"), "list output: {}", out);
+        assert!(out.contains(": parallel L0 L1"), "list output: {}", out);
+    }
+
+    #[test]
+    fn test_rc_entity_syntax_still_works() {
+        // Existing entity-pair + type dispatch keeps working alongside name lookup.
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,2 5,2");
+        run_ok(&mut ctx, "parallel L0 L1");
+        assert_eq!(ctx.sketch.parallel.len(), 1);
+        run_ok(&mut ctx, "rc L0 L1 parallel");
+        assert_eq!(ctx.sketch.parallel.len(), 0);
+    }
+
+    #[test]
+    fn test_constraint_names_survive_undo_redo() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,2 5,2");
+        run_ok(&mut ctx, "parallel L0 L1");
+        let nid_before = ctx.sketch.parallel[0].nid;
+        run_ok(&mut ctx, "undo");
+        assert_eq!(ctx.sketch.parallel.len(), 0);
+        run_ok(&mut ctx, "redo");
+        assert_eq!(ctx.sketch.parallel.len(), 1);
+        assert_eq!(ctx.sketch.parallel[0].nid, nid_before);
     }
 
     #[test]
