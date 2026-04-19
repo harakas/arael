@@ -153,6 +153,10 @@ pub struct EditorApp {
     pub dim_edit_index: Option<usize>, // index of dimension being edited (for double-click edit)
     pub dim_select_all: bool,           // one-shot: select all text on next frame
     pub dim_derived: bool,              // checkbox state for derived (reference) dimensions
+    pub dim_derived_prev: bool,         // previous frame's `dim_derived`, for edge-detect
+    pub dim_input_backup: String,       // `dim_input` saved when `dim_derived` went false->true,
+                                        // restored when it goes back true->false
+    pub dim_select_all_on_uncheck: bool, // one-shot: select all after uncheck restore
 
     // Display
     pub show_constraints: bool,
@@ -306,6 +310,9 @@ impl EditorApp {
             dim_edit_index: None,
             dim_select_all: false,
             dim_derived: false,
+            dim_derived_prev: false,
+            dim_input_backup: String::new(),
+            dim_select_all_on_uncheck: false,
             show_constraints: true,
             show_dimensions: true,
             show_points: true,

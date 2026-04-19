@@ -1086,6 +1086,8 @@ impl eframe::App for EditorApp {
                                 self.dim_select_all = true;
                                 self.dim_placing = false;
                                 self.dim_derived = dim.derived;
+                                self.dim_derived_prev = dim.derived;
+                                self.dim_input_backup.clear();
                                 self.tool = Tool::Dimension;
                                 self.selection.clear();
                                 self.selection.push(Selection::Dimension(i));
@@ -1752,6 +1754,8 @@ impl eframe::App for EditorApp {
                                 self.dim_editing = true;
                                 self.dim_select_all = true;
                                 self.dim_derived = false;
+                                self.dim_derived_prev = false;
+                                self.dim_input_backup.clear();
                             }
                         }
                     } else if !self.dim_editing {
@@ -1795,6 +1799,8 @@ impl eframe::App for EditorApp {
                                 self.dim_select_all = true;
                                 self.dim_placing = false;
                                 self.dim_derived = dim.derived;
+                                self.dim_derived_prev = dim.derived;
+                                self.dim_input_backup.clear();
                                 break;
                             }
                         }
@@ -2316,10 +2322,39 @@ impl EditorApp {
     /// near the dimension label where the user is looking.
     fn render_dim_input(&mut self, ui: &mut egui::Ui) {
         ui.checkbox(&mut self.dim_derived, "Derived");
-        let response = ui.text_edit_singleline(&mut self.dim_input);
+        // Edge-detect the checkbox: on false -> true, back up what
+        // the user had typed and swap in the measured value; on
+        // true -> false, restore the backup so they see their
+        // expression / number unchanged. Keeps the derived toggle
+        // non-destructive.
+        if self.dim_derived && !self.dim_derived_prev {
+            self.dim_input_backup = self.dim_input.clone();
+            let measured = if let Some(idx) = self.dim_edit_index {
+                self.sketch.dimensions.get(idx).map(|d| d.value).unwrap_or(0.0)
+            } else if let Some(kind) = self.dim_kind {
+                self.measure_dimension(&kind)
+            } else {
+                0.0
+            };
+            self.dim_input = format!("{:.4}", measured);
+        } else if !self.dim_derived && self.dim_derived_prev {
+            self.dim_input = std::mem::take(&mut self.dim_input_backup);
+            // After restoring, select all so the user can immediately
+            // overtype if they wish.
+            self.dim_select_all_on_uncheck = true;
+        }
+        self.dim_derived_prev = self.dim_derived;
+        // When derived is checked the value is locked to what the
+        // sketch currently measures; show it read-only so the user
+        // can't mistakenly type a number that won't be used.
+        let response = ui.add(
+            egui::TextEdit::singleline(&mut self.dim_input)
+                .interactive(!self.dim_derived),
+        );
         // Select all text when entering edit mode (one-shot flag)
-        if self.dim_select_all && response.has_focus() {
+        if (self.dim_select_all || self.dim_select_all_on_uncheck) && response.has_focus() {
             self.dim_select_all = false;
+            self.dim_select_all_on_uncheck = false;
             let mut state = egui::TextEdit::load_state(ui.ctx(), response.id).unwrap_or_default();
             state.cursor.set_char_range(Some(egui::text::CCursorRange::two(
                 egui::text::CCursor::new(0),
