@@ -1253,7 +1253,8 @@ impl Sketch {
         self.expr_constraints.clear();
         let has_expr = self.dimensions.iter().any(|d| d.expr_str.is_some());
         let has_user_params = !self.user_params.is_empty();
-        if !has_expr && !has_user_params {
+        let has_range = self.dimensions.iter().any(|d| d.range.is_some());
+        if !has_expr && !has_user_params && !has_range {
             for d in &mut self.dimensions { d.broken = false; }
             return;
         }
@@ -1342,6 +1343,61 @@ impl Sketch {
             } else {
                 self.dimensions[i].broken = false;
             }
+        }
+
+        // Range dimensions: barrier residuals (piecewise-zero inside the
+        // feasible region). Each contributes one direct ExpressionConstraint
+        // whose `expr` IS the residual (not measured - expr, as in the
+        // equality path above). Live bounds re-parse + resolve against the
+        // current SymbolBag; a bound with unresolved free symbols marks
+        // the dimension broken (same cascade as expression dims above).
+        for i in 0..self.dimensions.len() {
+            let rb = match self.dimensions[i].range.clone() {
+                Some(rb) => rb,
+                None => continue,
+            };
+            let resolve_value = |rv: &dimensions::RangeValue, bag: &SymbolBag|
+                -> Option<arael_sym::E>
+            {
+                match rv {
+                    dimensions::RangeValue::Literal(v) => Some(arael_sym::constant(*v)),
+                    dimensions::RangeValue::Live(src) => {
+                        let parsed = arael_sym::parse(src).ok()?;
+                        let expanded = expr_constraint::expand_derived(&parsed, bag);
+                        let all_resolved = expanded.symbols().iter().all(|sym|
+                            bag.param_indices.contains_key(sym.as_str())
+                            || bag.dim_values.contains_key(sym.as_str()));
+                        if all_resolved { Some(expanded) } else { None }
+                    }
+                }
+            };
+            let resolved = match &rb {
+                dimensions::RangeBound::Min(v) =>
+                    resolve_value(v, &bag).map(dimensions::ResolvedBound::Min),
+                dimensions::RangeBound::Max(v) =>
+                    resolve_value(v, &bag).map(dimensions::ResolvedBound::Max),
+                dimensions::RangeBound::Between(lo, hi) => {
+                    match (resolve_value(lo, &bag), resolve_value(hi, &bag)) {
+                        (Some(l), Some(h)) => Some(dimensions::ResolvedBound::Between(l, h)),
+                        _ => None,
+                    }
+                }
+            };
+            let Some(resolved) = resolved else {
+                self.dimensions[i].broken = true;
+                continue;
+            };
+            self.dimensions[i].broken = false;
+            let measured = self.dimensions[i].measured_symbol(self);
+            let residual = Dimension::range_residual(&resolved, measured);
+            let desc = format!("{} {}", self.dimensions[i].name,
+                match &rb {
+                    dimensions::RangeBound::Min(v) => format!(">= {}", v),
+                    dimensions::RangeBound::Max(v) => format!("<= {}", v),
+                    dimensions::RangeBound::Between(lo, hi) => format!("in {} to {}", lo, hi),
+                });
+            self.expr_constraints.push(
+                ExpressionConstraint::new_unresolved(residual, desc));
         }
     }
 
@@ -1628,6 +1684,7 @@ impl Sketch {
             name: name.clone(), expr_str: Some(expr_str.to_string()),
             broken: false,
             derived: false,
+            range: None,
         };
         let measured = dim.measured_symbol(self);
         self.dimensions.push(dim);
@@ -2115,7 +2172,7 @@ impl Sketch {
 
     /// Evaluate expression/derived dimensions and user params, cache their computed values.
     pub fn update_expr_dim_values(&mut self) {
-        let has_work = self.dimensions.iter().any(|d| d.expr_str.is_some() || d.derived)
+        let has_work = self.dimensions.iter().any(|d| d.expr_str.is_some() || d.derived || d.range.is_some())
             || self.user_params.iter().any(|p| !p.broken);
         if !has_work { return; }
         let bag = SymbolBag::build(self);
@@ -2157,6 +2214,20 @@ impl Sketch {
         for (i, val) in derived_vals {
             self.dimensions[i].value = val;
         }
+        // Range dimensions track the current measured value in `value` for
+        // display (the bound itself lives in `range`). Same eval shape as
+        // the derived-dim update above.
+        let range_vals: Vec<(usize, f64)> = (0..self.dimensions.len())
+            .filter(|&i| self.dimensions[i].range.is_some())
+            .filter_map(|i| {
+                let measured = self.dimensions[i].measured_symbol(self);
+                let expanded = expr_constraint::expand_derived(&measured, &bag);
+                expanded.eval(&vars).ok().map(|v| (i, v))
+            })
+            .collect();
+        for (i, val) in range_vals {
+            self.dimensions[i].value = val;
+        }
     }
 }
 
@@ -2186,6 +2257,7 @@ mod jacobian_tests {
             kind: DimensionKind::LineLength(l0),
             value: 5.0, offset: vect2d::new(0.0, 1.0), text_along: 0.0,
             name: "d0".into(), expr_str: None, broken: false, derived: false,
+            range: None,
         });
 
         sketch.prepare_expr_constraints();

@@ -1,4 +1,5 @@
 use arael::model::{CrossBlock, Param, TripletBlock};
+use arael::refs::Ref;
 use arael::vect::vect2d;
 use arael_sketch_solver::*;
 
@@ -304,6 +305,121 @@ fn test_parallel_lines_distance() {
     let signed2 = ((bp.p2.value.x - ap.p1.value.x) * day
                  - (bp.p2.value.y - ap.p1.value.y) * dax) / alen;
     assert_near(signed2.abs(), 3.0, 0.01);
+}
+
+// -- Range (inequality) dimensions --
+//
+// Barrier residuals: zero inside the feasible region, linear penalty on
+// the violating side. Each test constructs two lines with a Parallel
+// coupling and a LineLineDistance dimension whose `range` field holds
+// the bound, then solves and checks the inter-line gap lands in the
+// feasible region.
+
+fn build_two_parallel(gap_init: f64) -> (Sketch, Ref<Line>, Ref<Line>) {
+    let mut sketch = Sketch::new();
+    let la = sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(4.0, 0.0));
+    let lb = sketch.add_line(vect2d::new(0.0, gap_init), vect2d::new(4.0, gap_init));
+    sketch.parallel.push(Parallel {
+        a: la, b: lb, cid: 0, hb: CrossBlock::new(),
+    });
+    (sketch, la, lb)
+}
+
+fn gap_abs(sketch: &Sketch, la: Ref<Line>, lb: Ref<Line>) -> f64 {
+    let ap = &sketch.lines[la];
+    let bp = &sketch.lines[lb];
+    let dax = ap.p2.value.x - ap.p1.value.x;
+    let day = ap.p2.value.y - ap.p1.value.y;
+    let alen = (dax * dax + day * day).sqrt();
+    ((bp.p1.value.x - ap.p1.value.x) * day - (bp.p1.value.y - ap.p1.value.y) * dax).abs() / alen
+}
+
+#[test]
+fn test_range_min_activates_when_violated() {
+    let (mut sketch, la, lb) = build_two_parallel(1.0);
+    sketch.dimensions.push(Dimension {
+        kind: DimensionKind::LineLineDistance(la, lb),
+        value: 1.0, offset: vect2d::new(0.0, 1.0), text_along: 0.0,
+        name: "d0".into(), expr_str: None, broken: false, derived: false,
+        range: Some(RangeBound::Min(RangeValue::Literal(3.0))),
+    });
+    sketch.solve();
+    let gap = gap_abs(&sketch, la, lb);
+    assert!(gap >= 3.0 - 0.01, "gap {} should be >= 3.0 after bound activates", gap);
+}
+
+#[test]
+fn test_range_min_inactive_when_feasible() {
+    let (mut sketch, la, lb) = build_two_parallel(5.0);
+    sketch.dimensions.push(Dimension {
+        kind: DimensionKind::LineLineDistance(la, lb),
+        value: 5.0, offset: vect2d::new(0.0, 1.0), text_along: 0.0,
+        name: "d0".into(), expr_str: None, broken: false, derived: false,
+        range: Some(RangeBound::Min(RangeValue::Literal(3.0))),
+    });
+    sketch.solve();
+    let gap = gap_abs(&sketch, la, lb);
+    assert_near(gap, 5.0, 0.01);
+}
+
+#[test]
+fn test_range_max_activates_when_violated() {
+    let (mut sketch, la, lb) = build_two_parallel(10.0);
+    sketch.dimensions.push(Dimension {
+        kind: DimensionKind::LineLineDistance(la, lb),
+        value: 10.0, offset: vect2d::new(0.0, 1.0), text_along: 0.0,
+        name: "d0".into(), expr_str: None, broken: false, derived: false,
+        range: Some(RangeBound::Max(RangeValue::Literal(5.0))),
+    });
+    sketch.solve();
+    let gap = gap_abs(&sketch, la, lb);
+    assert!(gap <= 5.0 + 0.01, "gap {} should be <= 5.0 after bound activates", gap);
+}
+
+#[test]
+fn test_range_between_clamps_into_band() {
+    let (mut sketch, la, lb) = build_two_parallel(10.0);
+    sketch.dimensions.push(Dimension {
+        kind: DimensionKind::LineLineDistance(la, lb),
+        value: 10.0, offset: vect2d::new(0.0, 1.0), text_along: 0.0,
+        name: "d0".into(), expr_str: None, broken: false, derived: false,
+        range: Some(RangeBound::Between(RangeValue::Literal(2.0), RangeValue::Literal(4.0))),
+    });
+    sketch.solve();
+    let gap = gap_abs(&sketch, la, lb);
+    assert!(gap >= 2.0 - 0.01 && gap <= 4.0 + 0.01,
+        "gap {} should land in [2, 4] after clamping", gap);
+}
+
+#[test]
+fn test_range_live_tracks_param() {
+    use arael_sketch_solver::UserParam;
+    let (mut sketch, la, lb) = build_two_parallel(10.0);
+    // Seed a user parameter referenced by the live upper bound.
+    sketch.user_params.push(UserParam {
+        name: "hi".into(), expr_str: "3".into(), value: 3.0, broken: false,
+    });
+    sketch.dimensions.push(Dimension {
+        kind: DimensionKind::LineLineDistance(la, lb),
+        value: 10.0, offset: vect2d::new(0.0, 1.0), text_along: 0.0,
+        name: "d0".into(), expr_str: None, broken: false, derived: false,
+        range: Some(RangeBound::Max(RangeValue::Live("hi".into()))),
+    });
+    sketch.solve();
+    let gap = gap_abs(&sketch, la, lb);
+    assert!(gap <= 3.0 + 0.01, "initial solve: gap {} should be <= 3.0", gap);
+    // Bump the param and solve again -- the bound should track.
+    sketch.user_params[0].expr_str = "6".into();
+    sketch.user_params[0].value = 6.0;
+    // Nudge the geometry above the new bound so the barrier activates.
+    sketch.lines[lb].p1.value.y = 10.0;
+    sketch.lines[lb].p2.value.y = 10.0;
+    sketch.solve();
+    let gap2 = gap_abs(&sketch, la, lb);
+    assert!(gap2 <= 6.0 + 0.01,
+        "after param change: gap {} should be <= 6.0 (new live bound)", gap2);
+    assert!(gap2 > 3.0 + 0.01,
+        "gap {} should have grown past the old 3.0 bound", gap2);
 }
 
 // -- Point-Arc --
@@ -929,6 +1045,7 @@ fn test_expr_dim_reference() {
         kind: DimensionKind::LineLength(l0), value: 10.0,
         offset: vect2d::new(0.0, 1.0), text_along: 0.0,
         name: "d0".into(), expr_str: None, broken: false, derived: false,
+        range: None,
     });
     sketch.next_dimension_id = 1;
 
@@ -959,6 +1076,7 @@ fn test_expr_dim_arithmetic() {
         kind: DimensionKind::LineLength(l0), value: 5.0,
         offset: vect2d::new(0.0, 1.0), text_along: 0.0,
         name: "d0".into(), expr_str: None, broken: false, derived: false,
+        range: None,
     });
     sketch.next_dimension_id = 1;
 
@@ -1013,6 +1131,7 @@ fn test_bincode_roundtrip() {
         kind: DimensionKind::LineLength(l0), value: 5.0,
         offset: vect2d::new(0.0, 1.0), text_along: 0.0,
         name: "d0".into(), expr_str: None, broken: false, derived: false,
+        range: None,
     });
     sketch.next_dimension_id = 1;
 
@@ -1135,6 +1254,7 @@ fn test_expr_dim_angle_reference() {
         kind: DimensionKind::Angle(l0, l1, true), value: 20.0,
         offset: vect2d::new(0.0, 1.0), text_along: 0.0,
         name: "d1".into(), expr_str: None, broken: false, derived: false,
+        range: None,
     });
     sketch.next_dimension_id = 2;
 
@@ -1184,6 +1304,7 @@ fn test_update_dimension_preserves_name() {
         text_along: 0.0,
         name: "d0".into(),
         expr_str: None, broken: false, derived: false,
+        range: None,
     });
     sketch.solve();
     let len0 = line_length(&sketch, l0);
@@ -1225,6 +1346,7 @@ fn test_update_dimension_numeric_to_expr() {
         text_along: 0.0,
         name: "d0".into(),
         expr_str: None, broken: false, derived: false,
+        range: None,
     });
     sketch.solve();
     assert_near(line_length(&sketch, l0), 10.0, 0.01);
@@ -1274,6 +1396,7 @@ fn test_broken_expr_dim_detection() {
         text_along: 0.0,
         name: "d0".into(),
         expr_str: None, broken: false, derived: false,
+        range: None,
     });
     sketch.next_dimension_id = 1;
 
@@ -1318,6 +1441,7 @@ fn test_broken_expr_dim_no_cascade() {
         text_along: 0.0,
         name: "d0".into(),
         expr_str: None, broken: false, derived: false,
+        range: None,
     });
     sketch.next_dimension_id = 1;
 
@@ -1365,6 +1489,7 @@ fn test_circular_expr_dim_ref() {
         text_along: 0.0,
         name: "d0".into(),
         expr_str: None, broken: false, derived: false,
+        range: None,
     });
     sketch.next_dimension_id = 1;
 
@@ -1570,6 +1695,7 @@ fn test_user_param_in_dimension() {
         kind: DimensionKind::LineLength(l0), value: 5.0,
         offset: vect2d::new(0.0, 1.0), text_along: 0.0,
         name: "d0".into(), expr_str: Some("gap".into()), broken: false, derived: false,
+        range: None,
     });
     sketch.next_dimension_id = 1;
     sketch.solve();
@@ -1679,6 +1805,7 @@ fn test_derived_length() {
         expr_str: None,
         broken: false,
         derived: true,
+        range: None,
     });
     sketch.solve();
     sketch.update_expr_dim_values();
@@ -1706,6 +1833,7 @@ fn test_derived_to_driven() {
         expr_str: None,
         broken: false,
         derived: true,
+        range: None,
     });
     sketch.solve();
     assert!(!sketch.lines[l].constraints.has_length);

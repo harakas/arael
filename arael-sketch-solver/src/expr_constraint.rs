@@ -135,6 +135,7 @@ mod tests {
             text_along: 0.0,
             name: "d0".into(),
             expr_str: None, broken: false, derived: false,
+            range: None,
         });
 
         let mut params = Vec::new();

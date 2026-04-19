@@ -123,6 +123,53 @@ impl DimensionKind {
     }
 }
 
+/// A single bound value: either a resolved literal (captured at
+/// command time, including the result of an evaluate-once
+/// expression) or a live arael-sym source string that the solver
+/// re-evaluates every iteration.
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum RangeValue {
+    Literal(f64),
+    Live(String),
+}
+
+impl RangeValue {
+    /// Best-effort numeric read for display / diagnostics. Live
+    /// values return the stashed f64 from the dimension's cached
+    /// `value` field via the caller; we just expose the literal.
+    pub fn as_literal(&self) -> Option<f64> {
+        match self {
+            RangeValue::Literal(v) => Some(*v),
+            RangeValue::Live(_) => None,
+        }
+    }
+}
+
+impl std::fmt::Display for RangeValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        match self {
+            RangeValue::Literal(v) => write!(f, "{}", v),
+            RangeValue::Live(src) => write!(f, "={}", src),
+        }
+    }
+}
+
+/// One-sided or two-sided bound on a dimension's measured value.
+/// Residual is piecewise-zero inside the feasible region, linear
+/// outside (penalty method). Inactive bounds contribute zero rows
+/// to J and zero curvature to J^T J; the solver sees them only
+/// when they're violated. Each slot is a `RangeValue`, so bounds
+/// can be literals or live expressions that track user params.
+#[derive(Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum RangeBound {
+    /// measured >= v
+    Min(RangeValue),
+    /// measured <= v
+    Max(RangeValue),
+    /// lo <= measured <= hi
+    Between(RangeValue, RangeValue),
+}
+
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Dimension {
     pub kind: DimensionKind,
@@ -142,6 +189,13 @@ pub struct Dimension {
     /// not constrain the solver. Shown with parentheses: "(3.40)".
     #[serde(default)]
     pub derived: bool,
+    /// Inequality bound on the measured value. When Some, the dimension
+    /// contributes a barrier residual (zero inside the feasible region,
+    /// linear penalty outside). `value` tracks the current measured
+    /// reading for display. Mutually exclusive with `expr_str` and
+    /// `derived`.
+    #[serde(default)]
+    pub range: Option<RangeBound>,
 }
 
 // ---------------------------------------------------------------------------
@@ -178,7 +232,43 @@ pub fn is_system_name(name: &str) -> bool {
     false
 }
 
+/// Opaque "which side of the bound" marker used when the caller
+/// already has per-slot bound `E` expressions in hand.
+pub enum ResolvedBound {
+    Min(arael_sym::E),
+    Max(arael_sym::E),
+    Between(arael_sym::E, arael_sym::E),
+}
+
 impl Dimension {
+    /// Build a barrier residual E tree from a `measured` expression
+    /// and pre-resolved bound(s). The residual is zero inside the
+    /// feasible region and linear on the violating side (heaviside
+    /// convention `H(x)=1` for `x >= 0`). Gauss-Newton auto-diff
+    /// treats the heaviside gradient as zero, matching the line-
+    /// length positivity guards. The caller resolves each
+    /// `RangeValue` into an `E` first: `Literal(v)` -> `constant(v)`,
+    /// `Live(src)` -> `parse_with_functions + expand_derived` against
+    /// the current `SymbolBag`.
+    pub fn range_residual(rb: &ResolvedBound, measured: arael_sym::E) -> arael_sym::E {
+        use arael_sym::heaviside;
+        match rb {
+            ResolvedBound::Min(v) => {
+                let d = v.clone() - measured;
+                heaviside(d.clone()) * d
+            }
+            ResolvedBound::Max(v) => {
+                let d = measured - v.clone();
+                heaviside(d.clone()) * d
+            }
+            ResolvedBound::Between(lo, hi) => {
+                let d_lo = lo.clone() - measured.clone();
+                let d_hi = measured - hi.clone();
+                heaviside(d_lo.clone()) * d_lo + heaviside(d_hi.clone()) * d_hi
+            }
+        }
+    }
+
     /// Build a symbolic expression for the measured property of this
     /// dimension kind, using entity names from the sketch.
     pub fn measured_symbol(&self, sketch: &super::Sketch) -> arael_sym::E {
