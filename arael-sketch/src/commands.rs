@@ -539,7 +539,7 @@ fn eval_expr_with(sketch: &Sketch, expr_str: &str, extra: &HashMap<String, f64>)
     parsed.eval(&vars)
 }
 
-fn eval_expr(sketch: &Sketch, expr_str: &str) -> Result<f64, String> {
+pub(crate) fn eval_expr(sketch: &Sketch, expr_str: &str) -> Result<f64, String> {
     eval_expr_with(sketch, expr_str, &HashMap::new())
 }
 
@@ -2938,27 +2938,23 @@ fn cmd_concentric(ctx: &mut CommandContext, args: &str) -> CommandResult {
 /// - numeric literal → (value, None)
 /// - anything else → evaluate as expression to number: (value, None)
 fn parse_dim_value(sketch: &Sketch, val_str: &str) -> Result<(f64, Option<String>), String> {
-    let val_str = val_str.trim();
-    // Live expression: =prefix
+    let val_str = val_str.trim().trim_matches('"');
+    // Snapshot form: `=expr` evaluates now and stores the result as
+    // a literal (the dim won't track further changes).
     if let Some(expr) = val_str.strip_prefix('=') {
-        return Ok((0.0, Some(expr.to_string())));
+        return match eval_expr(sketch, expr.trim()) {
+            Ok(value) => Ok((value, None)),
+            Err(e) => Err(format!("Cannot evaluate snapshot '{}': {}", expr, e)),
+        };
     }
-    // Live expression: {braces}
-    if val_str.starts_with('{') && val_str.ends_with('}') {
-        let expr = &val_str[1..val_str.len()-1];
-        return Ok((0.0, Some(expr.to_string())));
-    }
-    // Strip quotes (just delimiters, not expression markers)
-    let val_str = val_str.trim_matches('"');
-    // Numeric literal
+    // Numeric literal.
     if let Ok(value) = val_str.parse::<f64>() {
         return Ok((value, None));
     }
-    // Evaluate expression to number
-    match eval_expr(sketch, val_str) {
-        Ok(value) => Ok((value, None)),
-        Err(e) => Err(format!("Cannot parse value '{}': {}", val_str, e)),
-    }
+    // Anything else: live expression (re-evaluated every solve).
+    arael_sym::parse(val_str).map_err(|e|
+        format!("Cannot parse value '{}': {}", val_str, e))?;
+    Ok((0.0, Some(val_str.to_string())))
 }
 
 /// Find existing dimension index matching the given kind.
@@ -5152,22 +5148,20 @@ fn cmd_angle(ctx: &mut CommandContext, args: &str) -> CommandResult {
 /// than `(f64, Option<String>)`.
 pub(crate) fn parse_range_value(sketch: &Sketch, token: &str) -> Result<RangeValue, String> {
     let token = token.trim();
+    // Snapshot form: `=expr` evaluates now and becomes a literal.
     if let Some(expr) = token.strip_prefix('=') {
-        arael_sym::parse(expr).map_err(|e| format!("Cannot parse expression '{}': {}", expr, e))?;
-        return Ok(RangeValue::Live(expr.to_string()));
-    }
-    if token.starts_with('{') && token.ends_with('}') && token.len() >= 2 {
-        let expr = &token[1..token.len() - 1];
-        arael_sym::parse(expr).map_err(|e| format!("Cannot parse expression '{}': {}", expr, e))?;
-        return Ok(RangeValue::Live(expr.to_string()));
+        return match eval_expr(sketch, expr.trim()) {
+            Ok(v) => Ok(RangeValue::Literal(v)),
+            Err(e) => Err(format!("Cannot evaluate snapshot '{}': {}", expr, e)),
+        };
     }
     if let Ok(v) = token.parse::<f64>() {
         return Ok(RangeValue::Literal(v));
     }
-    match eval_expr(sketch, token) {
-        Ok(v) => Ok(RangeValue::Literal(v)),
-        Err(e) => Err(format!("Cannot parse range value '{}': {}", token, e)),
-    }
+    // Anything else: live expression.
+    arael_sym::parse(token).map_err(|e|
+        format!("Cannot parse range value '{}': {}", token, e))?;
+    Ok(RangeValue::Live(token.to_string()))
 }
 
 /// Parse `>= V`, `<= V`, `>=V`, `<=V`, or `LO to HI` shapes from the
@@ -11548,6 +11542,53 @@ mod tests {
         run_ok(&mut ctx, "length L0 2 to 3");
         assert!(near(line_len(&ctx, "L0"), 3.0),
             "expected length 3.0 after numeric->range clamp, got {:.4}", line_len(&ctx, "L0"));
+    }
+
+    #[test]
+    fn test_bare_expr_is_live() {
+        // Bare parameter names in a dimension value are live by
+        // default: `length L0 w` creates an expression dim that
+        // tracks `w`. Snapshot form `=w` bakes the current value
+        // in as a literal.
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0");
+        run_ok(&mut ctx, "param w 5");
+        run_ok(&mut ctx, "length L0 w");
+        run_ok(&mut ctx, "param w 8");
+        assert!(near(line_len(&ctx, "L0"), 8.0),
+            "bare `w` must be live; len after `param w 8`: {:.4}",
+            line_len(&ctx, "L0"));
+    }
+
+    #[test]
+    fn test_eq_prefix_is_snapshot() {
+        // `=w` snapshots: length is baked as a literal at command
+        // time and does not track later param changes.
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0");
+        run_ok(&mut ctx, "param w 5");
+        run_ok(&mut ctx, "length L0 =w");
+        run_ok(&mut ctx, "param w 8");
+        assert!(near(line_len(&ctx, "L0"), 5.0),
+            "`=w` must snapshot; len after `param w 8`: {:.4}",
+            line_len(&ctx, "L0"));
+    }
+
+    #[test]
+    fn test_range_bare_expr_is_live() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 4,0");
+        run_ok(&mut ctx, "param lo 2");
+        run_ok(&mut ctx, "param hi 6");
+        run_ok(&mut ctx, "length L0 lo to hi");
+        // Current 4 is inside [2, 6], bound inactive.
+        assert!(near(line_len(&ctx, "L0"), 4.0));
+        // Shrink the band by moving `hi` below the current length;
+        // the barrier activates and clamps.
+        run_ok(&mut ctx, "param hi 3");
+        assert!(near(line_len(&ctx, "L0"), 3.0),
+            "range must track `hi`; len after `param hi 3`: {:.4}",
+            line_len(&ctx, "L0"));
     }
 
     #[test]

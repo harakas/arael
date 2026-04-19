@@ -2361,12 +2361,22 @@ impl EditorApp {
         }
         let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
         if enter_pressed || (response.lost_focus() && enter_pressed) {
-            let input = self.dim_input.trim().to_string();
+            let mut input = self.dim_input.trim().to_string();
             // Range syntax: `>= V`, `<= V`, `LO to HI`. If the
             // input matches, short-circuit the numeric / expr
             // paths and build a ranged dimension.
             let range_result = crate::commands::parse_range_input(&self.sketch, &input);
             let is_range = matches!(range_result, Ok(Some(_)));
+            // Snapshot prefix `=expr`: evaluate now, rewrite `input`
+            // as the resulting literal so the numeric branch below
+            // handles it. Failure falls through to is_expr, which
+            // will catch the parse error with a clearer message.
+            if !is_range
+                && let Some(expr) = input.strip_prefix('=')
+                && let Ok(v) = crate::commands::eval_expr(&self.sketch, expr.trim())
+            {
+                input = format!("{}", v);
+            }
             let is_numeric = !is_range && input.parse::<f64>().is_ok();
             let is_expr = !is_range && !is_numeric && arael_sym::parse(&input).is_ok();
 

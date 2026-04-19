@@ -489,10 +489,11 @@ When mirroring entities that share endpoints (connected via coincident), the mir
 ## Dimensions
 
 ```
-length L0 5                  Set line length (numeric)
-length L0 L0.length          Evaluate expression, use as numeric value
-length L0 =2*scale           Live expression (tracks parameter changes)
-length L0 {2*scale}          Live expression (alternative syntax)
+length L0 5                  Numeric literal
+length L0 scale              Live expression (re-evaluates every solve)
+length L0 2*scale + 1        Compound live expression
+length L1 L0.length          Live; L1's length tracks L0's length
+length L0 =2*scale           Snapshot: evaluate `2*scale` now, store as a literal
 radius A0 1.5                Set arc radius
 sweep A0 180                 Set arc sweep angle (degrees)
 angle L0 L1 45               Set angle between direction vectors (p1->p2)
@@ -509,9 +510,8 @@ distance L0 L1 5.0            Perpendicular distance between two lines; also app
 distance L0 L1 >= 2.0         Lower-bound range: inter-line gap must be at least 2.0. Shown in the drawing as `[(<current>)]`.
 distance L0 L1 <= 5.0         Upper-bound range: gap at most 5.0.
 distance L0 L1 2 to 5         Two-sided range: 2 <= gap <= 5.
-distance L0 L1 >= low         Evaluate-once: binds the current value of `low` as a literal bound.
-distance L0 L1 >= =low        Live expression: the bound re-evaluates each solve and tracks `low`.
-distance L0 L1 =low to =high  Two-sided live range; either side may be literal, evaluate-once, or live (`{expr}` also accepted).
+distance L0 L1 low to high    Two-sided live range: both sides track the params.
+distance L0 L1 >= =low        Snapshot: bind the current value of `low` as a literal lower bound.
                               Range syntax also works on `distance <point> <line>`, `distance <endpoint> <endpoint>`, and `distance A0 A1` (concentric arcs). The residual is a one-sided penalty (zero inside the feasible region, linear outside), so an inactive bound contributes no curvature. If a live bound becomes infeasible (e.g. low > high after a param change), the parameter edit is rejected by the existing solver-failure rollback.
 length L0 >= 2                Length range: lower bound.
 length L0 <= 10               Length range: upper bound.
@@ -535,10 +535,17 @@ freeze L0 A0                  Freeze specific entities only
 
 ### Expression syntax
 
-Dimension values can be:
-- **Numeric**: `5`, `3.14` — constant value
-- **Evaluate-once**: `L0.length`, `2*scale` — expression evaluated to a number at command time
-- **Live expression**: `=2*scale` or `{2*scale}` — re-evaluated when parameters change. Prefix with `=` or wrap in `{}`.
+Dimension values are one of:
+- **Numeric literal**: `5`, `3.14` — plain number.
+- **Live expression** (the default for anything non-numeric):
+  `scale`, `2*scale + 1`, `L0.length` — re-evaluated every solve,
+  so the dim tracks whatever the expression refers to. A reference
+  to a user parameter, an entity property, or any combination of
+  both works. Unresolved names at solve time mark the dim broken.
+- **Snapshot**: prefix with `=`. `=2*scale` evaluates `2*scale`
+  once, at command time, and stores the result as a literal. Use
+  this when you want the current value baked in -- the dim will
+  not track further changes.
 
 The `angle` command by default constrains the angle between the line direction vectors (p1 to p2). Two lines always form two angles that sum to 180. Keywords control which angle is constrained:
 
@@ -950,8 +957,8 @@ horizontal bot
 horizontal top
 vertical left
 vertical right
-length bot =width
-length right =height
+length bot width
+length right height
 ```
 
 Notes:
@@ -960,11 +967,11 @@ Notes:
   (`add_line top.p2 bot.p1`) and `add_line @dx,dy` from the
   previous endpoint both auto-emit a coincident constraint, so
   no explicit `coincident` is needed.
-- `=width` (or `{width}`) makes the dimension value a live
-  expression that re-evaluates every solve. A later
-  `param width 7` reshapes the rectangle. A bare token like
-  `length bot width` evaluates once at command time and stores the
-  numeric value, losing the link to the parameter.
+- Bare names like `width` in a dimension value are **live**:
+  they re-evaluate every solve, so a later `param width 7`
+  reshapes the rectangle. Type the number directly (`length bot 5`)
+  or use the `=expr` snapshot prefix (`length bot =width`) if you
+  want the value baked in at command time instead.
 - `add_rect 0,0 width,height hv` produces the same shape in one
   command. The four-line form above is a worked example of how
   the building blocks fit together.
@@ -982,19 +989,16 @@ side1 = add_line base.p2 2,3
 side2 = add_line side1.p2 base.p1
 lock base.p1 0,0
 horizontal base
-length base =b
-hdistance base.p1 side1.p2 =b/2
-vdistance base.p1 side1.p2 =h
+length base b
+hdistance base.p1 side1.p2 b/2
+vdistance base.p1 side1.p2 h
 ```
 
 `add_line` from an existing line endpoint auto-emits a coincident
 constraint, so no explicit `coincident` commands are needed. The
-`=` prefix on each dimension value makes it a **live** expression
-that re-evaluates on every solve -- that's what makes the sketch
-parametric: `param b 6` afterward reshapes the triangle. Passing
-raw numbers (`length base 4` or an un-prefixed `length base b`)
-would bind the value as a literal at command time and lose the
-link to the parameter.
+bare parameter names in the dimension values are live references:
+they re-evaluate on every solve, so `param b 6` afterward
+reshapes the triangle.
 
 ### Offset Line
 
@@ -1081,7 +1085,7 @@ Check `dof` after each batch of constraints. If DOF doesn't drop as expected, di
 
 ### Use named parameters, not magic numbers
 
-Define `param width 10; param height 5` and write dimensions as expressions: `length L0 {width}`, `length L1 {height}`. When the same value appears in multiple dimensions, a named parameter ensures they stay in sync and makes the sketch self-documenting. Use `param scale 1` with `radius A0 {5*scale}` for globally scalable sketches.
+Define `param width 10; param height 5` and write dimensions as expressions: `length L0 width`, `length L1 height`. When the same value appears in multiple dimensions, a named parameter ensures they stay in sync and makes the sketch self-documenting. Use `param scale 1` with `radius A0 5*scale` for globally scalable sketches.
 
 ### Constrain one side, then close the loop
 
@@ -1229,7 +1233,7 @@ s5 = add_line 2.5,-4.33 5,0
 equal s0 s1; equal s1 s2; equal s2 s3; equal s3 s4; equal s4 s5
 # Interior angles: first sets the value, rest reference it: -3 DOF
 ia = angle s0 s1 120 closest
-angle s1 s2 {ia} closest; angle s2 s3 {ia} closest
+angle s1 s2 ia closest; angle s2 s3 ia closest
 length s0 5                    # -1 DOF -> DOF=3: shape fixed, can translate + rotate
 # Fix position and orientation for DOF=0:
 lock s0.p1 5,0                 # -2 DOF

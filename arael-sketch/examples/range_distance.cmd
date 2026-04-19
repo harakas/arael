@@ -1,9 +1,10 @@
 # Range (inequality) dimension demo.
 #
-# Each bound on a range can be a literal, an evaluate-once expression
-# (bound as a constant at command time), or a live expression (prefix
-# `=` or wrap in `{}`), matching the existing dimension-value grammar.
-# Live bounds re-evaluate each solve, so parameter changes propagate.
+# Each bound is either a numeric literal or a live expression
+# (anything non-numeric -- bare param name, entity property, compound
+# arithmetic). Live bounds re-evaluate every solve so parameter
+# changes propagate. Prefix with `=` to force a snapshot (evaluate
+# once at command time, store the result as a literal).
 #
 # Run with:
 #   cargo run -r -p arael-sketch -- --nogui --stdout --script \
@@ -27,7 +28,7 @@ param low 2
 param high 5
 add_line -5,-5 -1,-5
 add_line -5,5 -1,5
-distance L2 L3 =low to =high
+distance L2 L3 low to high
 list
 
 param high 8

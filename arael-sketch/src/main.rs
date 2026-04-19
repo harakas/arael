@@ -1723,7 +1723,7 @@ impl EditorApp {
 
     /// Build the input-box display string for editing a dimension.
     /// Range dims round-trip to their source syntax (`>= 2`, `2 to 6`,
-    /// `=low to =high`); expression dims show their source; numeric
+    /// `low to high`); expression dims show their source; numeric
     /// dims show the current value.
     fn dim_edit_string(dim: &Dimension) -> String {
         if let Some(rb) = &dim.range {
