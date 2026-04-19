@@ -9419,12 +9419,12 @@ mod tests {
 
     #[test]
     fn test_dimension_expr_constrains() {
-        // Exact reproduction from bug report
+        // Bare expression is live under the current grammar (commit 76947c1).
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "clear");
         run_ok(&mut ctx, "param scale 1");
         run_ok(&mut ctx, "add_circle 0,0 5");
-        run_ok(&mut ctx, "radius A0 =5*scale");
+        run_ok(&mut ctx, "radius A0 5*scale");
         // Check that expr_constraints were created
         ctx.sketch.solve();
         assert!(!ctx.sketch.expr_constraints.is_empty(),
@@ -9439,12 +9439,12 @@ mod tests {
 
     #[test]
     fn test_dimension_expr_constrains_fresh() {
-        // Fresh expression dim without prior numeric — exact bug report scenario
+        // Fresh expression dim without prior numeric.
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "param scale 1");
         run_ok(&mut ctx, "add_circle 0,0 5");
-        // No prior "radius A0 5" — go straight to expression
-        run_ok(&mut ctx, "radius A0 =5*scale");
+        // Bare form is live (tracks `scale`).
+        run_ok(&mut ctx, "radius A0 5*scale");
         // Check dimension was created with expression
         assert_eq!(ctx.sketch.dimensions.len(), 1);
         assert_eq!(ctx.sketch.dimensions[0].expr_str.as_deref(), Some("5*scale"));
@@ -9461,12 +9461,14 @@ mod tests {
 
     #[test]
     fn test_dimension_expr_update_constrains() {
-        // Updating numeric dim to expression should constrain
+        // Updating numeric dim to an expression should constrain. The old
+        // `{2*scale}` brace form was removed by the grammar flip; use the
+        // bare-expression form for live tracking.
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_circle 0,0 5");
         run_ok(&mut ctx, "radius A0 5");
         run_ok(&mut ctx, "param scale 3");
-        run_ok(&mut ctx, "radius A0 {2*scale}");
+        run_ok(&mut ctx, "radius A0 2*scale");
         ctx.sketch.solve();
         assert!(!ctx.sketch.expr_constraints.is_empty(),
             "Updated expression should create expr_constraint");
