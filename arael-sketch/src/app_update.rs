@@ -307,7 +307,7 @@ impl eframe::App for EditorApp {
                                 success = true;
                             } else if is_numeric {
                                 let value = input.parse::<f64>().unwrap();
-                                self.exec(Action::UpdateDimension { index: edit_idx, value, expr: None });
+                                self.exec(Action::UpdateDimension { index: edit_idx, value, expr: None, range: None,  });
                                 success = true;
                             } else if let Err(e) = self.sketch.validate_expr(&input) {
                                 self.status_error = Some(format!("Expression error: {}", e));
@@ -315,7 +315,7 @@ impl eframe::App for EditorApp {
                             } else {
                                 self.exec(Action::UpdateDimension {
                                     index: edit_idx, value: 0.0,
-                                    expr: Some(input.clone()),
+                                    expr: Some(input.clone()), range: None,
                                 });
                                 success = true;
                             }
@@ -335,7 +335,7 @@ impl eframe::App for EditorApp {
                                         self.exec(Action::ApplyParallel { a, b });
                                     }
                                 }
-                                self.exec(Action::AddDimension { kind, value, expr: None, derived: self.dim_derived });
+                                self.exec(Action::AddDimension { kind, value, expr: None, derived: self.dim_derived, range: None,  });
                                 if self.sketch.dimensions.len() > n_dims_before
                                     && let Some(d) = self.sketch.dimensions.last_mut() {
                                         d.offset = self.dim_offset;
@@ -355,7 +355,7 @@ impl eframe::App for EditorApp {
                                         }
                                     }
                                     self.exec(Action::AddDimension {
-                                        kind, value: 0.0, expr: Some(input.clone()), derived: self.dim_derived,
+                                        kind, value: 0.0, expr: Some(input.clone()), derived: self.dim_derived, range: None,
                                     });
                                     if self.sketch.dimensions.len() > n_dims_before
                                         && let Some(d) = self.sketch.dimensions.last_mut() {
@@ -1902,7 +1902,7 @@ impl eframe::App for EditorApp {
                 let measured = self.measure_dimension(&kind);
                 let is_radius = matches!(kind, DimensionKind::ArcRadius(_) | DimensionKind::ArcRadiusB(_));
                 let preview_color = self.colors.dimension_preview;
-                self.draw_dimension(&painter, &kind, measured, self.dim_offset, self.dim_text_along, preview_color, is_radius, false, false);
+                self.draw_dimension(&painter, &kind, measured, self.dim_offset, self.dim_text_along, preview_color, is_radius, false, false, false);
             }
 
             // Draw overlays ON TOP of canvas: preview line and cursor crosshair

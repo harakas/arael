@@ -71,7 +71,7 @@ impl EditorApp {
     // Draw a dimension annotation. Returns (text_start, text_end) screen segment for hit testing.
     pub fn draw_dimension(&self, painter: &egui::Painter, kind: &DimensionKind, value: f64,
                        offset: vect2d, text_along: f64, color: egui::Color32, is_radius: bool,
-                       is_expr: bool, is_derived: bool) -> (egui::Pos2, egui::Pos2) {
+                       is_expr: bool, is_derived: bool, is_range: bool) -> (egui::Pos2, egui::Pos2) {
         if is_radius {
             let (arc_ref, is_b) = match kind {
                 DimensionKind::ArcRadius(r) => (Some(*r), false),
@@ -116,7 +116,8 @@ impl EditorApp {
                 // Text along arrow
                 let mid = egui::Pos2::new((se.x + si.x) / 2.0, (se.y + si.y) / 2.0);
                 let label = if is_b { "Rb" } else { "R" };
-                let text = if is_derived { format!("({label}{:.2})", value) }
+                let text = if is_range { format!("[({label}{:.2})]", value) }
+                    else if is_derived { format!("({label}{:.2})", value) }
                     else if is_expr { format!("fx: {label}{:.2}", value) }
                     else { format!("{label}{:.2}", value) };
                 return self.draw_rotated_text(painter, mid, ax, ay, &text,
@@ -127,19 +128,19 @@ impl EditorApp {
         // Angle dimension: draw arc between two lines
         if let DimensionKind::Angle(a_ref, b_ref, supplement) = kind {
             return self.draw_angle_dimension(painter, *a_ref, *b_ref, *supplement,
-                value, offset, text_along, color, is_expr, is_derived);
+                value, offset, text_along, color, is_expr, is_derived, is_range);
         }
 
         // Sweep dimension: arc annotation from start_angle to end_angle
         if let DimensionKind::ArcSweep(r) = kind {
             return self.draw_sweep_dimension(painter, *r, value, offset, text_along,
-                color, is_expr, is_derived);
+                color, is_expr, is_derived, is_range);
         }
 
         // Line angle from x-axis: draw helper x-axis line and angle arc from p1
         if let DimensionKind::LineAngle(r) = kind {
             return self.draw_xangle_dimension(painter, *r, value, offset, text_along,
-                color, is_expr, is_derived);
+                color, is_expr, is_derived, is_range);
         }
 
         // Horizontal/vertical axis distance
@@ -147,7 +148,7 @@ impl EditorApp {
             let horizontal = matches!(kind, DimensionKind::HDistance(..));
             let (p1, p2) = self.dim_endpoints(kind);
             return self.draw_axis_distance_dimension(painter, p1, p2, horizontal, value,
-                offset, text_along, color, is_expr, is_derived);
+                offset, text_along, color, is_expr, is_derived, is_range);
         }
 
         // Concentric distance: leader spanning from inner radius to outer
@@ -155,7 +156,7 @@ impl EditorApp {
         // `offset.y` as perpendicular offset and `text_along` along the leader.
         if let DimensionKind::ConcentricDistance(a_ref, b_ref) = kind {
             return self.draw_concentric_distance(painter, *a_ref, *b_ref, value,
-                offset, text_along, color, is_expr, is_derived);
+                offset, text_along, color, is_expr, is_derived, is_range);
         }
 
         let (p1_sketch, p2_sketch) = self.dim_endpoints(kind);
@@ -215,7 +216,8 @@ impl EditorApp {
         let asz = 6.0;
 
         // Text position along the line
-        let text = if is_derived { format!("({:.2})", value) }
+        let text = if is_range { format!("[({:.2})]", value) }
+            else if is_derived { format!("({:.2})", value) }
             else if is_expr { format!("fx: {:.2}", value) }
             else { format!("{:.2}", value) };
         let char_width = 12.0 * 0.6;
@@ -389,7 +391,7 @@ impl EditorApp {
     fn draw_angle_dimension(&self, painter: &egui::Painter, a_ref: Ref<Line>,
                             b_ref: Ref<Line>, supplement: bool, value: f64,
                             offset: vect2d, text_along: f64,
-                            color: egui::Color32, is_expr: bool, is_derived: bool) -> (egui::Pos2, egui::Pos2) {
+                            color: egui::Color32, is_expr: bool, is_derived: bool, is_range: bool) -> (egui::Pos2, egui::Pos2) {
         let (ix, start_angle, sweep) = self.angle_dim_sector(a_ref, b_ref, supplement, offset);
         let radius = offset.y.max(0.3);
         let stroke = egui::Stroke::new(1.0, color);
@@ -457,7 +459,8 @@ impl EditorApp {
         let sign = if sweep >= 0.0 { 1.0f32 } else { -1.0f32 };
         let tx = -(text_angle.sin() as f32) * sign;
         let ty = -(text_angle.cos() as f32) * sign;
-        let text = if is_derived { format!("({:.1}\u{00b0})", value) }
+        let text = if is_range { format!("[({:.1}\u{00b0})]", value) }
+            else if is_derived { format!("({:.1}\u{00b0})", value) }
             else if is_expr { format!("fx: {:.1}\u{00b0}", value) }
             else { format!("{:.1}\u{00b0}", value) };
         self.draw_rotated_text(painter, screen_pt, tx, ty, &text,
@@ -466,7 +469,7 @@ impl EditorApp {
 
     fn draw_sweep_dimension(&self, painter: &egui::Painter, arc_ref: Ref<Arc>,
                              value: f64, offset: vect2d, text_along: f64,
-                             color: egui::Color32, is_expr: bool, is_derived: bool) -> (egui::Pos2, egui::Pos2) {
+                             color: egui::Color32, is_expr: bool, is_derived: bool, is_range: bool) -> (egui::Pos2, egui::Pos2) {
         let a = &self.sketch.arcs[arc_ref];
         let cx = a.center.value.x;
         let cy = a.center.value.y;
@@ -556,7 +559,8 @@ impl EditorApp {
         let sign = if sweep >= 0.0 { 1.0f32 } else { -1.0f32 };
         let tx = -(text_angle.sin() as f32) * sign;
         let ty = -(text_angle.cos() as f32) * sign;
-        let text = if is_derived { format!("({:.1}\u{00b0})", value) }
+        let text = if is_range { format!("[({:.1}\u{00b0})]", value) }
+            else if is_derived { format!("({:.1}\u{00b0})", value) }
             else if is_expr { format!("fx: {:.1}\u{00b0}", value) }
             else { format!("{:.1}\u{00b0}", value) };
         self.draw_rotated_text(painter, screen_pt, tx, ty, &text,
@@ -573,7 +577,7 @@ impl EditorApp {
     fn draw_concentric_distance(&self, painter: &egui::Painter,
                                 a_ref: Ref<Arc>, b_ref: Ref<Arc>,
                                 value: f64, offset: vect2d, _text_along: f64,
-                                color: egui::Color32, is_expr: bool, is_derived: bool)
+                                color: egui::Color32, is_expr: bool, is_derived: bool, is_range: bool)
         -> (egui::Pos2, egui::Pos2)
     {
         let a = &self.sketch.arcs[a_ref];
@@ -685,7 +689,8 @@ impl EditorApp {
         if tdx < 0.0 { tdx = -tdx; tdy = -tdy; }
 
         let display = value.abs();
-        let text = if is_derived { format!("({:.2})", display) }
+        let text = if is_range { format!("[({:.2})]", display) }
+            else if is_derived { format!("({:.2})", display) }
             else if is_expr { format!("fx: {:.2}", display) }
             else { format!("{:.2}", display) };
         let char_width = 12.0_f32 * 0.6;
@@ -719,7 +724,7 @@ impl EditorApp {
 
     fn draw_xangle_dimension(&self, painter: &egui::Painter, line_ref: Ref<Line>,
                               value: f64, offset: vect2d, text_along: f64,
-                              color: egui::Color32, is_expr: bool, is_derived: bool) -> (egui::Pos2, egui::Pos2) {
+                              color: egui::Color32, is_expr: bool, is_derived: bool, is_range: bool) -> (egui::Pos2, egui::Pos2) {
         let l = &self.sketch.lines[line_ref];
         let p1 = l.p1.value;
         let dx = l.p2.value.x - p1.x;
@@ -801,7 +806,8 @@ impl EditorApp {
         let sign = if sweep >= 0.0 { 1.0f32 } else { -1.0f32 };
         let tx = -(text_angle_pos.sin() as f32) * sign;
         let ty = -(text_angle_pos.cos() as f32) * sign;
-        let text = if is_derived { format!("({:.1}\u{00b0})", value) }
+        let text = if is_range { format!("[({:.1}\u{00b0})]", value) }
+            else if is_derived { format!("({:.1}\u{00b0})", value) }
             else if is_expr { format!("fx: {:.1}\u{00b0}", value) }
             else { format!("{:.1}\u{00b0}", value) };
         self.draw_rotated_text(painter, screen_pt, tx, ty, &text,
@@ -811,7 +817,7 @@ impl EditorApp {
     fn draw_axis_distance_dimension(&self, painter: &egui::Painter,
                                      p1: vect2d, p2: vect2d, horizontal: bool,
                                      value: f64, offset: vect2d, text_along: f64,
-                                     color: egui::Color32, is_expr: bool, is_derived: bool) -> (egui::Pos2, egui::Pos2) {
+                                     color: egui::Color32, is_expr: bool, is_derived: bool, is_range: bool) -> (egui::Pos2, egui::Pos2) {
         let stroke = egui::Stroke::new(1.0, color);
         let ext_stroke = egui::Stroke::new(0.5, color);
 
@@ -887,7 +893,8 @@ impl EditorApp {
 
         // Text
         let screen_pt = egui::Pos2::new(text_x, text_y);
-        let text = if is_derived { format!("({:.2})", value) }
+        let text = if is_range { format!("[({:.2})]", value) }
+            else if is_derived { format!("({:.2})", value) }
             else if is_expr { format!("fx: {:.2}", value) }
             else { format!("{:.2}", value) };
         // Text direction along the dimension line (ensure left-to-right)
@@ -1977,7 +1984,8 @@ impl EditorApp {
                         else { dim_color };
             let is_radius = matches!(dim.kind, DimensionKind::ArcRadius(_) | DimensionKind::ArcRadiusB(_));
             let is_expr = dim.expr_str.is_some();
-            self.draw_dimension(painter, &dim.kind, dim.value, dim.offset, dim.text_along, color, is_radius, is_expr, dim.derived);
+            let is_range = dim.range.is_some();
+            self.draw_dimension(painter, &dim.kind, dim.value, dim.offset, dim.text_along, color, is_radius, is_expr, dim.derived, is_range);
         }
         }
 

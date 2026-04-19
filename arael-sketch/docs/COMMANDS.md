@@ -506,6 +506,13 @@ distance A0.start L1.p2 4.0  Arc start to line endpoint
 distance P0 L0 3.0            Point-line distance (point/endpoint first, line second)
 distance A0 A1 2.0            Radial distance between two concentric circles/arcs (requires Concentric A0 A1)
 distance L0 L1 5.0            Perpendicular distance between two lines; also applies Parallel L0 L1 if not already present. The backing constraint cascades: deleting the Parallel constraint removes the dimension.
+distance L0 L1 >= 2.0         Lower-bound range: inter-line gap must be at least 2.0. Shown in the drawing as `[(<current>)]`.
+distance L0 L1 <= 5.0         Upper-bound range: gap at most 5.0.
+distance L0 L1 2 to 5         Two-sided range: 2 <= gap <= 5.
+distance L0 L1 >= low         Evaluate-once: binds the current value of `low` as a literal bound.
+distance L0 L1 >= =low        Live expression: the bound re-evaluates each solve and tracks `low`.
+distance L0 L1 =low to =high  Two-sided live range; either side may be literal, evaluate-once, or live (`{expr}` also accepted).
+                              Range syntax also works on `distance <point> <line>`, `distance <endpoint> <endpoint>`, and `distance A0 A1` (concentric arcs). The residual is a one-sided penalty (zero inside the feasible region, linear outside), so an inactive bound contributes no curvature. If a live bound becomes infeasible (e.g. low > high after a param change), the parameter edit is rejected by the existing solver-failure rollback.
 hdistance L0.p1 L1.p2 5.0    Horizontal (x-axis) distance between endpoints
 vdistance L0.p1 L1.p2 3.0    Vertical (y-axis) distance between endpoints
 xangle L0 45                  Line angle from x-axis (degrees, CCW positive)

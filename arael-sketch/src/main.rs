@@ -255,18 +255,18 @@ impl EditorApp {
         });
 
         // Dimensions (via Action, then adjust offsets for nice layout)
-        Action::AddDimension { kind: DimensionKind::LineLength(l1), value: 0.0, expr: Some("base_length".into()), derived: false }.apply(&mut sketch);
+        Action::AddDimension { kind: DimensionKind::LineLength(l1), value: 0.0, expr: Some("base_length".into()), derived: false, range: None }.apply(&mut sketch);
         sketch.dimensions.last_mut().unwrap().offset = vect2d::new(0.0, -0.32);
         sketch.dimensions.last_mut().unwrap().text_along = -0.27;
 
         Action::AddDimension {
             kind: DimensionKind::PointLineDistance(DimensionEndpoint::LineP1(l0), l1), value: 5.0,
-            expr: None, derived: false,
+            expr: None, derived: false, range: None,
         }.apply(&mut sketch);
         sketch.dimensions.last_mut().unwrap().offset = vect2d::new(0.0, 1.72);
         sketch.dimensions.last_mut().unwrap().text_along = 0.20;
 
-        Action::AddDimension { kind: DimensionKind::ArcRadius(a0), value: 1.5, expr: None, derived: false }.apply(&mut sketch);
+        Action::AddDimension { kind: DimensionKind::ArcRadius(a0), value: 1.5, expr: None, derived: false, range: None }.apply(&mut sketch);
         sketch.dimensions.last_mut().unwrap().offset = vect2d::new(0.91, 0.0);
 
         let result = sketch.solve();

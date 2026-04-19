@@ -94,8 +94,25 @@ pub enum Action {
     SetStyleLine { line: Ref<Line>, style: LineStyle },
     SetStyleArc { arc: Ref<Arc>, style: LineStyle },
     DeleteArc { arc: Ref<Arc> },
-    AddDimension { kind: DimensionKind, value: f64, expr: Option<String>, derived: bool },
-    UpdateDimension { index: usize, value: f64, expr: Option<String> },
+    AddDimension {
+        kind: DimensionKind,
+        value: f64,
+        expr: Option<String>,
+        derived: bool,
+        /// Inequality bound. When set, the dimension is a range dim:
+        /// its residual is a barrier (zero inside the feasible region)
+        /// and `value` tracks the current measured reading for display.
+        /// Mutually exclusive with `expr` and `derived`.
+        #[serde(default)]
+        range: Option<RangeBound>,
+    },
+    UpdateDimension {
+        index: usize,
+        value: f64,
+        expr: Option<String>,
+        #[serde(default)]
+        range: Option<RangeBound>,
+    },
     RemoveDimension { index: usize },
     AddUserParam { name: String, expr_str: String },
     UpdateUserParam { index: usize, name: String, expr_str: String },
@@ -852,7 +869,27 @@ impl Action {
             Action::DeleteArc { arc } => {
                 sketch.delete_arc(*arc);
             }
-            Action::AddDimension { kind, value, expr, derived } => {
+            Action::AddDimension { kind, value, expr, derived, range } => {
+                // Range dimension: reject illegal combinations, then store
+                // `kind + range` on the dimension. No underlying-constraint
+                // push: `rebuild_expr_constraints` synthesises the barrier
+                // residual on every solve from `dim.range`.
+                if let Some(rb) = range {
+                    if expr.is_some() || *derived { return false; }
+                    let name = format!("d{}", sketch.next_dimension_id);
+                    sketch.next_dimension_id += 1;
+                    sketch.dimensions.push(Dimension {
+                        kind: *kind, value: *value,
+                        offset: vect2d::new(0.0, 1.0),
+                        text_along: 0.0,
+                        name,
+                        expr_str: None,
+                        broken: false,
+                        derived: false,
+                        range: Some(rb.clone()),
+                    });
+                    return false;
+                }
                 // Expression dimension: delegate to add_expr_dimension
                 if let Some(expr_str) = expr {
                     let _ = sketch.add_expr_dimension(*kind, expr_str,
@@ -973,10 +1010,25 @@ impl Action {
                     name,
                     expr_str: None,
                     broken: false, derived: *derived,
+                    range: None,
                 });
             }
-            Action::UpdateDimension { index, value, expr } => {
+            Action::UpdateDimension { index, value, expr, range } => {
                 if *index >= sketch.dimensions.len() { return false; }
+                // Range-dim update: rewrite the bound and re-measure.
+                // No underlying-constraint bookkeeping (none was pushed).
+                if let Some(rb) = range {
+                    if let Some(dim) = sketch.dimensions.get_mut(*index) {
+                        dim.range = Some(rb.clone());
+                        dim.value = *value;
+                        dim.expr_str = None;
+                        dim.broken = false;
+                    }
+                    return true;
+                }
+                // Clearing a range dim back to a normal numeric dim would
+                // go here if we ever support it; for MVP the
+                // range <-> non-range toggle isn't exposed.
                 // Remove old underlying constraint (only for numeric, non-derived dims)
                 {
                     let dim = &sketch.dimensions[*index];
