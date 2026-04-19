@@ -1418,14 +1418,20 @@ pub struct Concentric {
     pub hb: CrossBlock<Arc, Arc>,
 }
 
-// Radial distance between two concentric arcs/circles. Enforces
-// `b.radius - a.radius = sign * distance`, where `sign` is captured at
-// dimension creation time so the residual stays sign-stable under
-// big value updates (no mirror flip on which arc is outer).
+// Radial distance between two concentric arcs/circles. Self-contained:
+// the residual enforces both center-coincidence (`a.center == b.center`)
+// and the signed radial gap (`b.radius - a.radius = sign * distance`).
+// `sign` is captured at dimension creation time so the gap stays
+// sign-stable under big value updates (no mirror flip on which arc is
+// outer). Self-containment means the dim survives manual deletion of
+// the paired `Concentric` constraint -- the circles stay concentric
+// because the dim is enforcing it directly.
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(constraint(hb, name = "concentric_distance", {
-    [(b.radius - a.radius - distanceconcentric.distance * distanceconcentric.sign)
+    [(a.center.x - b.center.x) * sketch.constraint_isigma,
+     (a.center.y - b.center.y) * sketch.constraint_isigma,
+     (b.radius - a.radius - distanceconcentric.distance * distanceconcentric.sign)
      * sketch.constraint_isigma]
 }))]
 pub struct DistanceConcentric {

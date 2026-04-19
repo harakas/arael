@@ -419,6 +419,20 @@ fn resolve_arc(sketch: &Sketch, name: &str) -> Result<Ref<Arc>, String> {
     Err(format!("Unknown arc: {}", name))
 }
 
+/// True when two arcs' current centers coincide within a small
+/// geometric tolerance. Used to gate the concentric-distance
+/// dimension: the dim installs its own center-coincidence residual,
+/// so callers only need to check that the pair is already
+/// (approximately) concentric rather than that a paired `Concentric`
+/// constraint exists.
+fn arcs_are_concentric(sketch: &Sketch, a: Ref<Arc>, b: Ref<Arc>) -> bool {
+    let ca = sketch.arcs[a].center.value;
+    let cb = sketch.arcs[b].center.value;
+    let dx = ca.x - cb.x;
+    let dy = ca.y - cb.y;
+    (dx * dx + dy * dy).sqrt() < 1e-3
+}
+
 /// Resolve an endpoint reference like "L0.p1", "P0", "A0.center"
 fn resolve_endpoint_pos(sketch: &Sketch, name: &str) -> Result<vect2d, String> {
     if let Some((entity, field)) = name.split_once('.') {
@@ -5347,10 +5361,13 @@ fn cmd_distance(ctx: &mut CommandContext, args: &str) -> CommandResult {
         }
     } else { None };
     if let Some(rb) = range_opt {
-        // Resolve entities and pick a kind. For two-line shape, also
-        // emit ApplyParallel up front (same as the numeric two-line
-        // path below).
-        let (kind, measured, parallel_emit): (DimensionKind, f64, Option<(Ref<Line>, Ref<Line>)>) = {
+        // Resolve entities and pick a kind. For two-line / two-arc
+        // shapes, also capture an optional pairing constraint to emit
+        // up front (Parallel for LineLineDistance, Concentric for
+        // ConcentricDistance).
+        let (kind, measured, parallel_emit, concentric_emit): (
+            DimensionKind, f64, Option<(Ref<Line>, Ref<Line>)>, Option<(Ref<Arc>, Ref<Arc>)>,
+        ) = {
             // Two bare lines -> LineLineDistance
             if !tokens[0].contains('.') && !tokens[1].contains('.')
                 && tokens[0].starts_with('L') && tokens[1].starts_with('L')
@@ -5369,7 +5386,7 @@ fn cmd_distance(ctx: &mut CommandContext, args: &str) -> CommandResult {
                 let already_parallel = ctx.sketch.parallel.iter().any(|p|
                     (p.a == a && p.b == b) || (p.a == b && p.b == a));
                 let emit = if already_parallel { None } else { Some((a, b)) };
-                (DimensionKind::LineLineDistance(a, b), measured, emit)
+                (DimensionKind::LineLineDistance(a, b), measured, emit, None)
             }
             // Point + Line -> PointLineDistance
             else if (tokens[0].starts_with('P') || tokens[0].contains('.'))
@@ -5383,21 +5400,28 @@ fn cmd_distance(ctx: &mut CommandContext, args: &str) -> CommandResult {
                 let dy = l.p2.value.y - l.p1.value.y;
                 let len = (dx * dx + dy * dy).sqrt();
                 let measured = if len < 1e-12 { 0.0 } else { ((p.x - l.p1.value.x) * dy - (p.y - l.p1.value.y) * dx).abs() / len };
-                (DimensionKind::PointLineDistance(to_dim_ep(ep), line), measured, None)
+                (DimensionKind::PointLineDistance(to_dim_ep(ep), line), measured, None, None)
             }
-            // Concentric arcs -> ConcentricDistance
+            // Geometrically-concentric arcs -> ConcentricDistance. The
+            // dimension enforces its own center-coincidence, so an
+            // explicit `Concentric` isn't required to place it -- we
+            // still emit one up front for visibility in `list`. The
+            // caller-emit pattern mirrors LineLineDistance + Parallel.
             else if !tokens[0].contains('.') && !tokens[1].contains('.')
                 && tokens[0].starts_with('A') && tokens[1].starts_with('A')
                 && let Ok(arc_a) = resolve_arc(&ctx.sketch, tokens[0])
                 && let Ok(arc_b) = resolve_arc(&ctx.sketch, tokens[1])
+                && arc_a != arc_b
                 && !ctx.sketch.arcs[arc_a].is_ellipse
                 && !ctx.sketch.arcs[arc_b].is_ellipse
-                && ctx.sketch.concentric.iter().any(|c|
-                    (c.a == arc_a && c.b == arc_b) || (c.a == arc_b && c.b == arc_a))
+                && arcs_are_concentric(&ctx.sketch, arc_a, arc_b)
             {
                 let ra = ctx.sketch.arcs[arc_a].radius.value;
                 let rb2 = ctx.sketch.arcs[arc_b].radius.value;
-                (DimensionKind::ConcentricDistance(arc_a, arc_b), (rb2 - ra).abs(), None)
+                let already_concentric = ctx.sketch.concentric.iter().any(|c|
+                    (c.a == arc_a && c.b == arc_b) || (c.a == arc_b && c.b == arc_a));
+                let emit = if already_concentric { None } else { Some((arc_a, arc_b)) };
+                (DimensionKind::ConcentricDistance(arc_a, arc_b), (rb2 - ra).abs(), None, emit)
             }
             // Default: PointPointDistance
             else {
@@ -5407,12 +5431,15 @@ fn cmd_distance(ctx: &mut CommandContext, args: &str) -> CommandResult {
                 let pb = resolve_endpoint_pos(&ctx.sketch, tokens[1]).unwrap();
                 let dx = pa.x - pb.x; let dy = pa.y - pb.y;
                 (DimensionKind::PointPointDistance(to_dim_ep(ep_a), to_dim_ep(ep_b)),
-                 (dx * dx + dy * dy).sqrt(), None)
+                 (dx * dx + dy * dy).sqrt(), None, None)
             }
         };
         ctx.begin_group();
         if let Some((a, b)) = parallel_emit {
             ctx.exec(Action::ApplyParallel { a, b });
+        }
+        if let Some((a, b)) = concentric_emit {
+            ctx.exec(Action::ApplyConcentric { a, b });
         }
         let bound_desc = match &rb {
             RangeBound::Min(v) => format!(">= {}", v),
@@ -5460,17 +5487,21 @@ fn cmd_distance(ctx: &mut CommandContext, args: &str) -> CommandResult {
     }
 
     // Concentric-arcs radial distance: `distance A0 A1 v` for two
-    // non-ellipse arcs that are already concentric. Falls through if
-    // either token isn't a bare arc name, the arcs are ellipses, or
-    // the Concentric prerequisite isn't present.
+    // distinct non-ellipse circles whose centers coincide (within
+    // epsilon). The dim is self-contained: it enforces both
+    // center-coincidence and radial gap, so it can be placed on any
+    // geometrically-concentric pair without a pre-existing
+    // `Concentric` constraint. For visibility in `list`, also emit
+    // `ApplyConcentric` up front when one isn't already there, same
+    // pattern as LineLineDistance + Parallel.
     if !tokens[0].contains('.') && !tokens[1].contains('.')
         && tokens[0].starts_with('A') && tokens[1].starts_with('A')
         && let Ok(arc_a) = resolve_arc(&ctx.sketch, tokens[0])
         && let Ok(arc_b) = resolve_arc(&ctx.sketch, tokens[1])
+        && arc_a != arc_b
         && !ctx.sketch.arcs[arc_a].is_ellipse
         && !ctx.sketch.arcs[arc_b].is_ellipse
-        && ctx.sketch.concentric.iter().any(|c|
-            (c.a == arc_a && c.b == arc_b) || (c.a == arc_b && c.b == arc_a))
+        && arcs_are_concentric(&ctx.sketch, arc_a, arc_b)
     {
         let kind = DimensionKind::ConcentricDistance(arc_a, arc_b);
         ctx.begin_group();
@@ -5478,6 +5509,11 @@ fn cmd_distance(ctx: &mut CommandContext, args: &str) -> CommandResult {
             let name = ctx.sketch.dimensions[idx].name.clone();
             ctx.exec(Action::UpdateDimension { index: idx, value: val, expr, range: None,  });
             return ok_or_status(ctx, format!("Updated {} concentric distance = {}", name, tokens[2]));
+        }
+        let already_concentric = ctx.sketch.concentric.iter().any(|c|
+            (c.a == arc_a && c.b == arc_b) || (c.a == arc_b && c.b == arc_a));
+        if !already_concentric {
+            ctx.exec(Action::ApplyConcentric { a: arc_a, b: arc_b });
         }
         ctx.exec(Action::AddDimension { kind, value: val, expr, derived: is_derived, range: None,  });
         let prefix = if is_derived { "Derived concentric distance" } else { "Set concentric distance" };
@@ -10225,6 +10261,74 @@ mod tests {
         assert_eq!(ctx.sketch.concentric.len(), 1);
         run_ok(&mut ctx, "remove_constraint A0 A1 concentric");
         assert_eq!(ctx.sketch.concentric.len(), 0);
+    }
+
+    /// Regression: the circle-to-circle distance dimension must be
+    /// placeable on two geometrically-concentric circles without a
+    /// pre-existing `Concentric` constraint. The command auto-installs
+    /// a Concentric for list-visibility.
+    #[test]
+    fn test_distance_concentric_no_prior_concentric() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_circle 0,0 2 noconnect");
+        run_ok(&mut ctx, "add_circle 0,0 5 noconnect");
+        assert_eq!(ctx.sketch.concentric.len(), 0);
+        run_ok(&mut ctx, "distance A0 A1 3");
+        assert_eq!(ctx.sketch.dimensions.len(), 1);
+        assert_eq!(ctx.sketch.distance_concentric.len(), 1);
+        // A paired Concentric was auto-installed for visibility.
+        assert_eq!(ctx.sketch.concentric.len(), 1);
+        assert!((ctx.sketch.arcs[ctx.sketch.arcs.refs().nth(1).unwrap()].radius.value
+               - ctx.sketch.arcs[ctx.sketch.arcs.refs().next().unwrap()].radius.value
+               - 3.0).abs() < 0.01);
+    }
+
+    /// Regression: the dim's self-contained residual keeps the circles
+    /// concentric even after the user manually deletes the paired
+    /// `Concentric` constraint. Previously the cascade removed the dim
+    /// alongside the Concentric; now the dim survives.
+    #[test]
+    fn test_concentric_distance_survives_concentric_delete() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_circle 0,0 2 noconnect");
+        run_ok(&mut ctx, "add_circle 0,0 5 noconnect");
+        run_ok(&mut ctx, "distance A0 A1 3");
+        assert_eq!(ctx.sketch.concentric.len(), 1);
+        assert_eq!(ctx.sketch.distance_concentric.len(), 1);
+        // Delete the paired Concentric by name. The dim (and its
+        // backing constraint) must stay.
+        let nid = ctx.sketch.concentric[0].nid;
+        run_ok(&mut ctx, &format!("rc C{}", nid));
+        assert_eq!(ctx.sketch.concentric.len(), 0);
+        assert_eq!(ctx.sketch.dimensions.len(), 1,
+            "dim must survive manual Concentric deletion");
+        assert_eq!(ctx.sketch.distance_concentric.len(), 1,
+            "backing DistanceConcentric must survive");
+        // Solve must still hold the circles concentric (the dim's own
+        // residual enforces it).
+        ctx.sketch.solve();
+        let ca = ctx.sketch.arcs[ctx.sketch.arcs.refs().next().unwrap()].center.value;
+        let cb = ctx.sketch.arcs[ctx.sketch.arcs.refs().nth(1).unwrap()].center.value;
+        assert!((ca.x - cb.x).abs() < 0.01 && (ca.y - cb.y).abs() < 0.01,
+            "circles must stay concentric: {:?} vs {:?}", ca, cb);
+    }
+
+    /// The dim only accepts circles whose centers currently coincide.
+    /// Non-concentric pairs fall through to PointPointDistance or
+    /// fail, per the existing grammar.
+    #[test]
+    fn test_distance_concentric_rejects_non_concentric_circles() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_circle 0,0 2 noconnect");
+        run_ok(&mut ctx, "add_circle 5,0 3 noconnect");
+        // Centers are 5 units apart -> not eligible for
+        // ConcentricDistance. `distance A0 A1 3` falls through to the
+        // endpoint-pair path, which fails to resolve bare arc names as
+        // endpoints.
+        let out = run_err(&mut ctx, "distance A0 A1 3");
+        assert!(out.contains("Cannot parse endpoint"), "{}", out);
+        assert_eq!(ctx.sketch.dimensions.len(), 0);
+        assert_eq!(ctx.sketch.distance_concentric.len(), 0);
     }
 
     #[test]

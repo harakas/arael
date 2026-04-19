@@ -1930,15 +1930,24 @@ impl EditorApp {
                 }
                 return Some(DimensionKind::Angle(a, b, false));
             }
-            // Two arcs -> radial distance, but only when concentric and
-            // both circular. Falls through silently otherwise.
+            // Two arcs -> radial distance, offered when both are
+            // circular and their centers currently coincide (within
+            // epsilon). A prior `Concentric` constraint is no longer
+            // required -- `ConcentricDistance` is self-contained and
+            // enforces its own center-coincidence; the dim-placement
+            // path still emits `ApplyConcentric` for visibility.
             if let (Selection::Arc(a), Selection::Arc(b)) = (sel[0], sel[1])
+                && a != b
                 && !self.sketch.arcs[a].is_ellipse
                 && !self.sketch.arcs[b].is_ellipse
-                && self.sketch.concentric.iter().any(|c|
-                    (c.a == a && c.b == b) || (c.a == b && c.b == a))
             {
-                return Some(DimensionKind::ConcentricDistance(a, b));
+                let ca = self.sketch.arcs[a].center.value;
+                let cb = self.sketch.arcs[b].center.value;
+                let dx = ca.x - cb.x;
+                let dy = ca.y - cb.y;
+                if (dx * dx + dy * dy).sqrt() < 1e-3 {
+                    return Some(DimensionKind::ConcentricDistance(a, b));
+                }
             }
             // Point + Line -> point-line distance
             let point_ep = sel.iter().find_map(Self::selection_to_dim_endpoint);

@@ -2408,6 +2408,15 @@ impl EditorApp {
                             self.exec(Action::ApplyParallel { a, b });
                         }
                     }
+                    // ConcentricDistance is self-contained but we emit a
+                    // paired `Concentric` for visibility in `list`.
+                    if let DimensionKind::ConcentricDistance(a, b) = kind {
+                        let has_concentric = self.sketch.concentric.iter().any(|c|
+                            (c.a == a && c.b == b) || (c.a == b && c.b == a));
+                        if !has_concentric {
+                            self.exec(Action::ApplyConcentric { a, b });
+                        }
+                    }
                     let n_dims_before = self.sketch.dimensions.len();
                     self.exec(Action::AddDimension {
                         kind, value: measured, expr: None, derived: false, range: Some(rb),
@@ -2463,6 +2472,17 @@ impl EditorApp {
                                 self.exec(Action::ApplyParallel { a, b });
                             }
                         }
+                        // ConcentricDistance: also emit Concentric for
+                        // list-visibility (the dim enforces concentricity
+                        // itself, so it would work without this, but
+                        // users expect to see the pairing).
+                        if let DimensionKind::ConcentricDistance(a, b) = kind {
+                            let has_concentric = self.sketch.concentric.iter().any(|c|
+                                (c.a == a && c.b == b) || (c.a == b && c.b == a));
+                            if !has_concentric {
+                                self.exec(Action::ApplyConcentric { a, b });
+                            }
+                        }
                         self.exec(Action::AddDimension { kind, value, expr: None, derived: self.dim_derived, range: None });
                         if self.sketch.dimensions.len() > n_dims_before
                             && let Some(d) = self.sketch.dimensions.last_mut() {
@@ -2480,6 +2500,13 @@ impl EditorApp {
                                     (p.a == a && p.b == b) || (p.a == b && p.b == a));
                                 if !has_parallel {
                                     self.exec(Action::ApplyParallel { a, b });
+                                }
+                            }
+                            if let DimensionKind::ConcentricDistance(a, b) = kind {
+                                let has_concentric = self.sketch.concentric.iter().any(|c|
+                                    (c.a == a && c.b == b) || (c.a == b && c.b == a));
+                                if !has_concentric {
+                                    self.exec(Action::ApplyConcentric { a, b });
                                 }
                             }
                             self.exec(Action::AddDimension {

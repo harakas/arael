@@ -1019,15 +1019,19 @@ impl Action {
                         sketch.lines[*line].constraints.target_angle = target;
                     }
                     DimensionKind::ConcentricDistance(a, b) => {
-                        // Validate prerequisites: both arcs are circular,
-                        // and a Concentric constraint already couples them.
+                        // Validate: both arcs exist and are circular.
+                        // `DistanceConcentric`'s residual is
+                        // self-contained (it enforces center-coincidence
+                        // itself), so we no longer require a paired
+                        // `Concentric` -- the caller (cmd_distance / GUI
+                        // tool) still emits `ApplyConcentric` up front
+                        // for list-output visibility, but the action
+                        // doesn't depend on it.
                         let valid_arcs = sketch.arcs.get(*a).is_some()
                             && sketch.arcs.get(*b).is_some()
                             && !sketch.arcs[*a].is_ellipse
                             && !sketch.arcs[*b].is_ellipse;
-                        let concentric_present = sketch.concentric.iter().any(|c|
-                            (c.a == *a && c.b == *b) || (c.a == *b && c.b == *a));
-                        if !valid_arcs || !concentric_present {
+                        if !valid_arcs {
                             return false;
                         }
                         let init_diff = sketch.arcs[*b].radius.value
@@ -1383,20 +1387,14 @@ impl Action {
                     ConstraintId::EqualLength(i) => { sketch.equal_length.remove(*i); }
                     ConstraintId::EqualRadius(i) => { sketch.equal_radius.remove(*i); }
                     ConstraintId::Concentric(i) => {
-                        let (a, b) = {
-                            let c = &sketch.concentric[*i];
-                            (c.a, c.b)
-                        };
                         sketch.concentric.remove(*i);
-                        // Cascade: any ConcentricDistance dimension and its
-                        // backing constraint that referenced this same arc
-                        // pair go too. Expression-dim cleanup falls out of
-                        // removing the dimension -- the corresponding
-                        // expr_constraints entry is rebuilt on the next
-                        // prepare_expr_constraints / solve.
-                        sketch.distance_concentric.retain(|c|
-                            !((c.a == a && c.b == b) || (c.a == b && c.b == a)));
-                        sketch.dimensions.retain(|d| !d.kind.references_concentric_pair(a, b));
+                        // No cascade: `DistanceConcentric` is now
+                        // self-contained (its residual enforces
+                        // center-coincidence on its own), so the
+                        // concentric-distance dimension and its backing
+                        // constraint survive deletion of the paired
+                        // `Concentric`. The dim's residual keeps the
+                        // circles concentric as long as the dim exists.
                     }
                     ConstraintId::TangentLA(i) => { sketch.tangent_la.remove(*i); }
                     ConstraintId::TangentAA(i) => { sketch.tangent_aa.remove(*i); }
