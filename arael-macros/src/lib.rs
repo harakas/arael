@@ -107,6 +107,10 @@ struct StashedConstraint {
 /// dispatch calls like `elliptic_k(k)` to arael-sym's parser with an
 /// appropriate `FunctionBag`.
 #[derive(Clone)]
+// Dead-code analysis ignores usage via the derived Clone impl, so the
+// fields below appear unread even though they are read when an
+// UserFunction is cloned out of the registry. Silence the lint.
+#[allow(dead_code)]
 pub(crate) enum UserFunction {
     /// Form A: attribute sits on `fn <sym_name>(x: E, ...) -> E`. Body is
     /// an arael-sym expression, captured as a source string. Derivatives

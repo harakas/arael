@@ -1,4 +1,4 @@
-use arael::model::{CrossBlock, Param, TripletBlock};
+use arael::model::{CrossBlock, Param};
 use arael::refs::Ref;
 use arael::vect::vect2d;
 use arael_sketch_solver::*;
