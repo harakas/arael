@@ -149,7 +149,7 @@ impl std::fmt::Display for RangeValue {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         match self {
             RangeValue::Literal(v) => write!(f, "{}", v),
-            RangeValue::Live(src) => write!(f, "={}", src),
+            RangeValue::Live(src) => write!(f, "{}", src),
         }
     }
 }
