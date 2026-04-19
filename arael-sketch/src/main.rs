@@ -1727,6 +1727,48 @@ impl EditorApp {
         }
     }
 
+    /// For two point-like endpoints plus the current mouse position,
+    /// pick PointPointDistance / HDistance / VDistance based on where
+    /// the mouse sits relative to the two points' bounding box:
+    /// - Mouse between them in x, and clearly above/below by >=10px ->
+    ///   HDistance (axis-aligned horizontal dimension).
+    /// - Mouse between them in y, and clearly left/right by >=10px ->
+    ///   VDistance (axis-aligned vertical dimension).
+    /// - Otherwise -> PointPointDistance (oblique dimension).
+    /// Called on the frame of the second-entity click to seed the dim
+    /// kind, and re-called each preview frame while placing so the
+    /// dimension type tracks the mouse zone.
+    fn pick_point_pair_dim_kind(
+        &self,
+        a_ep: DimensionEndpoint,
+        b_ep: DimensionEndpoint,
+        mouse: Option<vect2d>,
+    ) -> DimensionKind {
+        let Some(m) = mouse else {
+            return DimensionKind::PointPointDistance(a_ep, b_ep);
+        };
+        let pa = self.dim_endpoint_pos(&a_ep);
+        let pb = self.dim_endpoint_pos(&b_ep);
+        let min_x = pa.x.min(pb.x);
+        let max_x = pa.x.max(pb.x);
+        let min_y = pa.y.min(pb.y);
+        let max_y = pa.y.max(pb.y);
+        // 10 screen pixels converted to sketch units. `self.scale` is
+        // pixels per sketch unit (see to_screen); guard against zero.
+        let t = if self.scale > 1e-6 { 10.0_f64 / self.scale as f64 } else { 0.0 };
+        let in_x_range = m.x >= min_x && m.x <= max_x;
+        let in_y_range = m.y >= min_y && m.y <= max_y;
+        let outside_y = m.y > max_y + t || m.y < min_y - t;
+        let outside_x = m.x > max_x + t || m.x < min_x - t;
+        if in_x_range && outside_y {
+            DimensionKind::HDistance(a_ep, b_ep)
+        } else if in_y_range && outside_x {
+            DimensionKind::VDistance(a_ep, b_ep)
+        } else {
+            DimensionKind::PointPointDistance(a_ep, b_ep)
+        }
+    }
+
     // Try to determine DimensionKind from current selection
     fn selection_to_dim_kind(&self, mouse: Option<vect2d>) -> Option<DimensionKind> {
         let sel = &self.selection;
@@ -1792,11 +1834,13 @@ impl EditorApp {
             if let (Some(ep), Some(line)) = (point_ep, line_ref) {
                 return Some(DimensionKind::PointLineDistance(ep, line));
             }
-            // Two point-like -> point-point distance
+            // Two point-like -> point-point / H-distance / V-distance
+            // depending on where the mouse sits relative to the two
+            // points (see `pick_point_pair_dim_kind`).
             let ep_a = Self::selection_to_dim_endpoint(&sel[0]);
             let ep_b = Self::selection_to_dim_endpoint(&sel[1]);
             if let (Some(a), Some(b)) = (ep_a, ep_b) {
-                return Some(DimensionKind::PointPointDistance(a, b));
+                return Some(self.pick_point_pair_dim_kind(a, b, mouse));
             }
         }
         if sel.len() == 3 {

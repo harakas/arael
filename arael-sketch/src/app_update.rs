@@ -1668,6 +1668,27 @@ impl eframe::App for EditorApp {
 
                 Tool::Dimension => {
                     if self.dim_placing {
+                        // Dynamic point-pair kind switching: while the user
+                        // drags the preview, re-pick between PointPoint /
+                        // H / V distance based on the mouse's zone relative
+                        // to the two selected points. Same knob the
+                        // initial-click path uses.
+                        if let Some(current_kind) = self.dim_kind {
+                            let endpoints = match current_kind {
+                                DimensionKind::PointPointDistance(a, b)
+                                | DimensionKind::HDistance(a, b)
+                                | DimensionKind::VDistance(a, b) => Some((a, b)),
+                                _ => None,
+                            };
+                            if let Some((a, b)) = endpoints {
+                                let new_kind = self.pick_point_pair_dim_kind(a, b, Some(mouse_sketch));
+                                if new_kind != current_kind {
+                                    self.dim_kind = Some(new_kind);
+                                    let measured = self.measure_dimension(&new_kind);
+                                    self.dim_input = format!("{:.4}", measured);
+                                }
+                            }
+                        }
                         // Phase 2: positioning with mouse, click to confirm
                         if let Some(ref kind) = self.dim_kind {
                             if matches!(kind, DimensionKind::ArcRadius(_) | DimensionKind::ArcRadiusB(_)) {
