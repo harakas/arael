@@ -522,6 +522,7 @@ angle L0 L1 >= 90 supplement  Range on the supplementary angle. `closest` / `acu
 radius A0 >= 2                Radius range: lower bound.
 radius A0 2 to 4              Radius range: two-sided.
 radius_b A0 <= 3              Ellipse semi-minor-axis range.
+xangle L0 30 to 60            Line-angle range (degrees from x-axis).
 hdistance L0.p1 L1.p2 5.0    Horizontal (x-axis) distance between endpoints
 hdistance L0.p1 L1.p2 2 to 5 Range on |x|-distance.
 vdistance L0.p1 L1.p2 3.0    Vertical (y-axis) distance between endpoints

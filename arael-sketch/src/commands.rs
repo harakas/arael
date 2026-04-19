@@ -5570,8 +5570,39 @@ fn cmd_xangle(ctx: &mut CommandContext, args: &str) -> CommandResult {
         return ok_or_status(ctx, format!("{} xangle {} = ({:.4})", label, tokens[0], measured));
     }
 
+    // Range form: `xangle L0 >= V | <= V | LO to HI`.
+    let range_opt = if tokens.len() >= 2 && !is_derived && !is_driven {
+        match parse_range_tokens(&ctx.sketch, &tokens[1..]) {
+            Ok(rb) => rb,
+            Err(e) => return err(e),
+        }
+    } else { None };
+    if let Some(rb) = range_opt {
+        let line = match resolve_line(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
+        let l = &ctx.sketch.lines[line];
+        let dx = l.p2.value.x - l.p1.value.x;
+        let dy = l.p2.value.y - l.p1.value.y;
+        let measured = arael::utils::rad2deg(dy.atan2(dx));
+        let kind = DimensionKind::LineAngle(line);
+        let bound_desc = match &rb {
+            RangeBound::Min(v) => format!(">= {}", v),
+            RangeBound::Max(v) => format!("<= {}", v),
+            RangeBound::Between(lo, hi) => format!("in {} to {}", lo, hi),
+        };
+        ctx.begin_group();
+        if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
+            let name = ctx.sketch.dimensions[idx].name.clone();
+            ctx.exec(Action::UpdateDimension { index: idx, value: measured, expr: None, range: Some(rb) });
+            return ok_or_status(ctx, format!("Updated {} xangle {} (current {:.4})", name, bound_desc, measured));
+        }
+        ctx.exec(Action::AddDimension {
+            kind, value: measured, expr: None, derived: false, range: Some(rb),
+        });
+        return ok_or_status(ctx, format!("Set {} xangle {} (current {:.4})", tokens[0], bound_desc, measured));
+    }
+
     if tokens.len() != 2 {
-        return err("Usage: xangle L0 45 [derived|driven]");
+        return err("Usage: xangle L0 45 [derived|driven]  or  xangle L0 >=V | <=V | LO to HI");
     }
     let line = match resolve_line(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
     let (val, expr) = match parse_dim_value(&ctx.sketch, tokens[1]) { Ok(v) => v, Err(e) => return err(e) };
@@ -11517,6 +11548,23 @@ mod tests {
         run_ok(&mut ctx, "length L0 2 to 3");
         assert!(near(line_len(&ctx, "L0"), 3.0),
             "expected length 3.0 after numeric->range clamp, got {:.4}", line_len(&ctx, "L0"));
+    }
+
+    #[test]
+    fn test_xangle_range() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0");  // xangle 0
+        run_ok(&mut ctx, "xangle L0 30 to 60");
+        let l = &ctx.sketch.lines[ctx.sketch.lines.refs().next().unwrap()];
+        let dx = l.p2.value.x - l.p1.value.x;
+        let dy = l.p2.value.y - l.p1.value.y;
+        let ang = dy.atan2(dx).to_degrees();
+        assert!((30.0..=60.0).contains(&ang) || ang.abs() < 0.1,
+            "xangle {:.4} not in [30, 60] after Between(30, 60)", ang);
+        // The solver should have rotated the line to at least reach the band.
+        // (The lower bound activates; exact landing is near 30 given the initial 0.)
+        assert!(ang >= 30.0 - 0.1,
+            "xangle lower bound: {:.4} should be >= 30", ang);
     }
 
     #[test]
