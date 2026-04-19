@@ -287,11 +287,54 @@ impl eframe::App for EditorApp {
                 let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
                 if enter_pressed || (response.lost_focus() && enter_pressed) {
                     let input = self.dim_input.trim().to_string();
-                    let is_numeric = input.parse::<f64>().is_ok();
-                    let is_expr = !is_numeric && arael_sym::parse(&input).is_ok();
+                    // Range syntax: `>= V`, `<= V`, `LO to HI`. If the
+                    // input matches, short-circuit the numeric / expr
+                    // paths and build a ranged dimension.
+                    let range_result = crate::commands::parse_range_input(&self.sketch, &input);
+                    let is_range = matches!(range_result, Ok(Some(_)));
+                    let is_numeric = !is_range && input.parse::<f64>().is_ok();
+                    let is_expr = !is_range && !is_numeric && arael_sym::parse(&input).is_ok();
 
                     let mut success = false;
-                    if is_numeric || is_expr || (input.is_empty() && self.dim_derived) {
+                    if let Err(e) = &range_result {
+                        self.status_error = Some(format!("Range parse: {}", e));
+                    } else if is_range {
+                        let rb = range_result.unwrap().unwrap();
+                        if self.dim_derived {
+                            self.status_error = Some("Range dimensions are not compatible with `derived`".into());
+                        } else if let Some(edit_idx) = self.dim_edit_index.take() {
+                            // Editing existing dim -> re-bind as range.
+                            let measured = self.sketch.dimensions.get(edit_idx)
+                                .map(|d| d.value).unwrap_or(0.0);
+                            self.begin_group();
+                            self.exec(Action::UpdateDimension {
+                                index: edit_idx, value: measured, expr: None, range: Some(rb),
+                            });
+                            success = true;
+                        } else if let Some(kind) = self.dim_kind {
+                            self.begin_group();
+                            let measured = self.measure_dimension(&kind);
+                            // LineLineDistance still needs its paired
+                            // Parallel constraint before the range dim.
+                            if let DimensionKind::LineLineDistance(a, b) = kind {
+                                let has_parallel = self.sketch.parallel.iter().any(|p|
+                                    (p.a == a && p.b == b) || (p.a == b && p.b == a));
+                                if !has_parallel {
+                                    self.exec(Action::ApplyParallel { a, b });
+                                }
+                            }
+                            let n_dims_before = self.sketch.dimensions.len();
+                            self.exec(Action::AddDimension {
+                                kind, value: measured, expr: None, derived: false, range: Some(rb),
+                            });
+                            if self.sketch.dimensions.len() > n_dims_before
+                                && let Some(d) = self.sketch.dimensions.last_mut() {
+                                    d.offset = self.dim_offset;
+                                    d.text_along = self.dim_text_along;
+                                }
+                            success = true;
+                        }
+                    } else if is_numeric || is_expr || (input.is_empty() && self.dim_derived) {
                         self.begin_group();
                         if let Some(edit_idx) = self.dim_edit_index.take() {
                             // Editing existing: update in place (preserves name)
@@ -1188,11 +1231,7 @@ impl eframe::App for EditorApp {
                             let (ts, te) = self.dim_text_segment(dim);
                             let d = Self::screen_point_to_segment_dist(mouse_screen, ts, te);
                             if d < 15.0 {
-                                self.dim_input = if let Some(ref expr) = dim.expr_str {
-                                    expr.clone()
-                                } else {
-                                    format!("{:.4}", dim.value)
-                                };
+                                self.dim_input = Self::dim_edit_string(dim);
                                 self.dim_kind = Some(dim.kind);
                                 self.dim_offset = dim.offset;
                                 self.dim_edit_index = Some(i);
@@ -1890,11 +1929,7 @@ impl eframe::App for EditorApp {
                             let (ts, te) = self.dim_text_segment(dim);
                             let d = Self::screen_point_to_segment_dist(mouse_screen, ts, te);
                             if d < 15.0 {
-                                self.dim_input = if let Some(ref expr) = dim.expr_str {
-                                    expr.clone()
-                                } else {
-                                    format!("{:.4}", dim.value)
-                                };
+                                self.dim_input = Self::dim_edit_string(dim);
                                 self.dim_kind = Some(dim.kind);
                                 self.dim_offset = dim.offset;
                                 self.dim_edit_index = Some(i);

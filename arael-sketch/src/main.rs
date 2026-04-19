@@ -1714,6 +1714,24 @@ impl EditorApp {
         }
     }
 
+    /// Build the input-box display string for editing a dimension.
+    /// Range dims round-trip to their source syntax (`>= 2`, `2 to 6`,
+    /// `=low to =high`); expression dims show their source; numeric
+    /// dims show the current value.
+    fn dim_edit_string(dim: &Dimension) -> String {
+        if let Some(rb) = &dim.range {
+            return match rb {
+                RangeBound::Min(v) => format!(">= {}", v),
+                RangeBound::Max(v) => format!("<= {}", v),
+                RangeBound::Between(lo, hi) => format!("{} to {}", lo, hi),
+            };
+        }
+        if let Some(expr) = &dim.expr_str {
+            return expr.clone();
+        }
+        format!("{:.4}", dim.value)
+    }
+
     // Convert a Selection to a DimensionEndpoint (for point-like selections)
     fn selection_to_dim_endpoint(sel: &Selection) -> Option<DimensionEndpoint> {
         match *sel {
@@ -1730,9 +1748,9 @@ impl EditorApp {
     /// For two point-like endpoints plus the current mouse position,
     /// pick PointPointDistance / HDistance / VDistance based on where
     /// the mouse sits relative to the two points' bounding box:
-    /// - Mouse between them in x, and clearly above/below by >=10px ->
+    /// - Mouse between them in x, and clearly above/below by >=15px ->
     ///   HDistance (axis-aligned horizontal dimension).
-    /// - Mouse between them in y, and clearly left/right by >=10px ->
+    /// - Mouse between them in y, and clearly left/right by >=15px ->
     ///   VDistance (axis-aligned vertical dimension).
     /// - Otherwise -> PointPointDistance (oblique dimension).
     /// Called on the frame of the second-entity click to seed the dim
@@ -1753,9 +1771,9 @@ impl EditorApp {
         let max_x = pa.x.max(pb.x);
         let min_y = pa.y.min(pb.y);
         let max_y = pa.y.max(pb.y);
-        // 10 screen pixels converted to sketch units. `self.scale` is
+        // 15 screen pixels converted to sketch units. `self.scale` is
         // pixels per sketch unit (see to_screen); guard against zero.
-        let t = if self.scale > 1e-6 { 10.0_f64 / self.scale as f64 } else { 0.0 };
+        let t = if self.scale > 1e-6 { 15.0_f64 / self.scale as f64 } else { 0.0 };
         let in_x_range = m.x >= min_x && m.x <= max_x;
         let in_y_range = m.y >= min_y && m.y <= max_y;
         let outside_y = m.y > max_y + t || m.y < min_y - t;

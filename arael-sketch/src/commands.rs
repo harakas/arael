@@ -5091,7 +5091,7 @@ fn cmd_angle(ctx: &mut CommandContext, args: &str) -> CommandResult {
 /// evaluates now and is stored as a literal. Mirrors
 /// `parse_dim_value` with the result typed as `RangeValue` rather
 /// than `(f64, Option<String>)`.
-fn parse_range_value(sketch: &Sketch, token: &str) -> Result<RangeValue, String> {
+pub(crate) fn parse_range_value(sketch: &Sketch, token: &str) -> Result<RangeValue, String> {
     let token = token.trim();
     if let Some(expr) = token.strip_prefix('=') {
         arael_sym::parse(expr).map_err(|e| format!("Cannot parse expression '{}': {}", expr, e))?;
@@ -5118,7 +5118,7 @@ fn parse_range_value(sketch: &Sketch, token: &str) -> Result<RangeValue, String>
 /// Returns None if the tokens don't match any recognised range
 /// syntax; returns Err if they do but one of the values fails to
 /// parse.
-fn parse_range_tokens(sketch: &Sketch, tokens: &[&str]) -> Result<Option<RangeBound>, String> {
+pub(crate) fn parse_range_tokens(sketch: &Sketch, tokens: &[&str]) -> Result<Option<RangeBound>, String> {
     if tokens.is_empty() { return Ok(None); }
     // >=V or >= V
     if tokens[0].starts_with(">=") {
@@ -5151,6 +5151,17 @@ fn parse_range_tokens(sketch: &Sketch, tokens: &[&str]) -> Result<Option<RangeBo
         return Ok(Some(RangeBound::Between(lo, hi)));
     }
     Ok(None)
+}
+
+/// GUI wrapper: accept the raw text the user typed into the
+/// dimension-value input and try to parse it as a range bound.
+/// Returns `Ok(None)` if the input isn't a range (caller should
+/// fall through to numeric / live-expression parsing), `Ok(Some)`
+/// on a successful range match, `Err` on a match with a malformed
+/// value.
+pub(crate) fn parse_range_input(sketch: &Sketch, input: &str) -> Result<Option<RangeBound>, String> {
+    let tokens: Vec<&str> = input.split_whitespace().collect();
+    parse_range_tokens(sketch, &tokens)
 }
 
 fn cmd_distance(ctx: &mut CommandContext, args: &str) -> CommandResult {
