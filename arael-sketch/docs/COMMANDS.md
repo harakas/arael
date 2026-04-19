@@ -519,6 +519,9 @@ length L0 4 to 6              Length range: two-sided.
 sweep A0 30 to 270            Sweep range (degrees): two-sided.
 angle L0 L1 30 to 60          Angle range: two-sided.
 angle L0 L1 >= 90 supplement  Range on the supplementary angle. `closest` / `acute` / `obtuse` modifiers require a single target value and are rejected with a range.
+radius A0 >= 2                Radius range: lower bound.
+radius A0 2 to 4              Radius range: two-sided.
+radius_b A0 <= 3              Ellipse semi-minor-axis range.
 hdistance L0.p1 L1.p2 5.0    Horizontal (x-axis) distance between endpoints
 hdistance L0.p1 L1.p2 2 to 5 Range on |x|-distance.
 vdistance L0.p1 L1.p2 3.0    Vertical (y-axis) distance between endpoints

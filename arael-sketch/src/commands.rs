@@ -3063,7 +3063,35 @@ fn cmd_radius(ctx: &mut CommandContext, args: &str) -> CommandResult {
         let label = if is_derived { "Derived" } else { "Driven" };
         return ok_or_status(ctx, format!("{} {} radius = ({:.4})", label, tokens[0], r));
     }
-    if tokens.len() != 2 { return err("Usage: radius A0 1.5 [derived|driven]"); }
+    // Range form: `radius A0 >= V | <= V | LO to HI`.
+    let range_opt = if tokens.len() >= 2 && !is_derived && !is_driven {
+        match parse_range_tokens(&ctx.sketch, &tokens[1..]) {
+            Ok(rb) => rb,
+            Err(e) => return err(e),
+        }
+    } else { None };
+    if let Some(rb) = range_opt {
+        let arc = match resolve_arc(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
+        let measured = ctx.sketch.arcs[arc].radius.value;
+        let kind = DimensionKind::ArcRadius(arc);
+        let bound_desc = match &rb {
+            RangeBound::Min(v) => format!(">= {}", v),
+            RangeBound::Max(v) => format!("<= {}", v),
+            RangeBound::Between(lo, hi) => format!("in {} to {}", lo, hi),
+        };
+        ctx.begin_group();
+        if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
+            let name = ctx.sketch.dimensions[idx].name.clone();
+            ctx.exec(Action::UpdateDimension { index: idx, value: measured, expr: None, range: Some(rb) });
+            return ok_or_status(ctx, format!("Updated {} radius {} (current {:.4})", name, bound_desc, measured));
+        }
+        ctx.exec(Action::AddDimension {
+            kind, value: measured, expr: None, derived: false, range: Some(rb),
+        });
+        return ok_or_status(ctx, format!("Set {} radius {} (current {:.4})", tokens[0], bound_desc, measured));
+    }
+
+    if tokens.len() != 2 { return err("Usage: radius A0 1.5 [derived|driven]  or  radius A0 >=V | <=V | LO to HI"); }
     let arc = match resolve_arc(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
     let kind = DimensionKind::ArcRadius(arc);
     let (value, expr) = match parse_dim_value(&ctx.sketch, tokens[1]) { Ok(v) => v, Err(e) => return err(e) };
@@ -3102,7 +3130,38 @@ fn cmd_radius_b(ctx: &mut CommandContext, args: &str) -> CommandResult {
         let label = if is_derived { "Derived" } else { "Driven" };
         return ok_or_status(ctx, format!("{} {} radius_b = ({:.4})", label, tokens[0], r));
     }
-    if tokens.len() != 2 { return err("Usage: radius_b A0 1.5 [derived|driven]"); }
+    // Range form: `radius_b A0 >= V | <= V | LO to HI`.
+    let range_opt = if tokens.len() >= 2 && !is_derived && !is_driven {
+        match parse_range_tokens(&ctx.sketch, &tokens[1..]) {
+            Ok(rb) => rb,
+            Err(e) => return err(e),
+        }
+    } else { None };
+    if let Some(rb) = range_opt {
+        let arc = match resolve_arc(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
+        if !ctx.sketch.arcs[arc].is_ellipse {
+            return err("radius_b only applies to ellipses (use add_ellipse to create one)");
+        }
+        let measured = ctx.sketch.arcs[arc].radius_b.value;
+        let kind = DimensionKind::ArcRadiusB(arc);
+        let bound_desc = match &rb {
+            RangeBound::Min(v) => format!(">= {}", v),
+            RangeBound::Max(v) => format!("<= {}", v),
+            RangeBound::Between(lo, hi) => format!("in {} to {}", lo, hi),
+        };
+        ctx.begin_group();
+        if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
+            let name = ctx.sketch.dimensions[idx].name.clone();
+            ctx.exec(Action::UpdateDimension { index: idx, value: measured, expr: None, range: Some(rb) });
+            return ok_or_status(ctx, format!("Updated {} radius_b {} (current {:.4})", name, bound_desc, measured));
+        }
+        ctx.exec(Action::AddDimension {
+            kind, value: measured, expr: None, derived: false, range: Some(rb),
+        });
+        return ok_or_status(ctx, format!("Set {} radius_b {} (current {:.4})", tokens[0], bound_desc, measured));
+    }
+
+    if tokens.len() != 2 { return err("Usage: radius_b A0 1.5 [derived|driven]  or  radius_b A0 >=V | <=V | LO to HI"); }
     let arc = match resolve_arc(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
     if !ctx.sketch.arcs[arc].is_ellipse {
         return err("radius_b only applies to ellipses (use add_ellipse to create one)");
@@ -11458,6 +11517,20 @@ mod tests {
         run_ok(&mut ctx, "length L0 2 to 3");
         assert!(near(line_len(&ctx, "L0"), 3.0),
             "expected length 3.0 after numeric->range clamp, got {:.4}", line_len(&ctx, "L0"));
+    }
+
+    #[test]
+    fn test_radius_range() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_circle 0,0 5");
+        // Lower bound activates: radius grows from 5 to 7.
+        run_ok(&mut ctx, "radius A0 >= 7");
+        let r = ctx.sketch.arcs[ctx.sketch.arcs.refs().next().unwrap()].radius.value;
+        assert!(near(r, 7.0), "radius after Min(7): {:.4}", r);
+        // Transition to a two-sided range clamping down.
+        run_ok(&mut ctx, "radius A0 2 to 4");
+        let r = ctx.sketch.arcs[ctx.sketch.arcs.refs().next().unwrap()].radius.value;
+        assert!(near(r, 4.0), "radius after 2..4: {:.4}", r);
     }
 
     /// Round-trip: numeric -> range -> numeric -> range exercises both
