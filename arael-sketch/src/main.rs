@@ -1788,12 +1788,53 @@ impl EditorApp {
         }
     }
 
+    /// Same zone-based dispatch as `pick_point_pair_dim_kind` but for
+    /// a single line: inside the dead-zone the natural measurement
+    /// is `LineLength` (oblique along the line), and outside the
+    /// band H/V-distance between the two endpoints takes over.
+    fn pick_line_dim_kind(&self, line: Ref<Line>, mouse: Option<vect2d>) -> DimensionKind {
+        let a_ep = DimensionEndpoint::LineP1(line);
+        let b_ep = DimensionEndpoint::LineP2(line);
+        match self.pick_point_pair_dim_kind(a_ep, b_ep, mouse) {
+            DimensionKind::PointPointDistance(_, _) => DimensionKind::LineLength(line),
+            other => other,
+        }
+    }
+
+    /// Extract the "base line" of a dim kind when it is either a
+    /// `LineLength` or an H/V-distance between the two endpoints of
+    /// the same line. Used by the Phase 2 preview to keep re-picking
+    /// between LineLength / HDistance / VDistance as the mouse moves,
+    /// without losing which line was originally selected.
+    fn line_dim_base_line(kind: &DimensionKind) -> Option<Ref<Line>> {
+        match *kind {
+            DimensionKind::LineLength(r) => Some(r),
+            DimensionKind::HDistance(
+                DimensionEndpoint::LineP1(r1),
+                DimensionEndpoint::LineP2(r2),
+            ) if r1 == r2 => Some(r1),
+            DimensionKind::HDistance(
+                DimensionEndpoint::LineP2(r1),
+                DimensionEndpoint::LineP1(r2),
+            ) if r1 == r2 => Some(r1),
+            DimensionKind::VDistance(
+                DimensionEndpoint::LineP1(r1),
+                DimensionEndpoint::LineP2(r2),
+            ) if r1 == r2 => Some(r1),
+            DimensionKind::VDistance(
+                DimensionEndpoint::LineP2(r1),
+                DimensionEndpoint::LineP1(r2),
+            ) if r1 == r2 => Some(r1),
+            _ => None,
+        }
+    }
+
     // Try to determine DimensionKind from current selection
     fn selection_to_dim_kind(&self, mouse: Option<vect2d>) -> Option<DimensionKind> {
         let sel = &self.selection;
         if sel.len() == 1 {
             match sel[0] {
-                Selection::Line(r) => return Some(DimensionKind::LineLength(r)),
+                Selection::Line(r) => return Some(self.pick_line_dim_kind(r, mouse)),
                 Selection::Arc(r) => {
                     let a = &self.sketch.arcs[r];
                     if a.is_ellipse

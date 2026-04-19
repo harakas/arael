@@ -1707,24 +1707,35 @@ impl eframe::App for EditorApp {
 
                 Tool::Dimension => {
                     if self.dim_placing {
-                        // Dynamic point-pair kind switching: while the user
-                        // drags the preview, re-pick between PointPoint /
-                        // H / V distance based on the mouse's zone relative
-                        // to the two selected points. Same knob the
-                        // initial-click path uses.
+                        // Dynamic kind switching: while the user drags the
+                        // preview, re-pick between PointPointDistance /
+                        // LineLength / HDistance / VDistance based on the
+                        // mouse's zone relative to the selected entities.
+                        // Line-based shapes (LineLength, or H/V between
+                        // the line's own endpoints) are checked first so
+                        // we don't degrade them to a generic point-pair.
                         if let Some(current_kind) = self.dim_kind {
-                            let endpoints = match current_kind {
-                                DimensionKind::PointPointDistance(a, b)
-                                | DimensionKind::HDistance(a, b)
-                                | DimensionKind::VDistance(a, b) => Some((a, b)),
-                                _ => None,
-                            };
-                            if let Some((a, b)) = endpoints {
-                                let new_kind = self.pick_point_pair_dim_kind(a, b, Some(mouse_sketch));
+                            if let Some(line_ref) = Self::line_dim_base_line(&current_kind) {
+                                let new_kind = self.pick_line_dim_kind(line_ref, Some(mouse_sketch));
                                 if new_kind != current_kind {
                                     self.dim_kind = Some(new_kind);
                                     let measured = self.measure_dimension(&new_kind);
                                     self.dim_input = format!("{:.4}", measured);
+                                }
+                            } else {
+                                let endpoints = match current_kind {
+                                    DimensionKind::PointPointDistance(a, b)
+                                    | DimensionKind::HDistance(a, b)
+                                    | DimensionKind::VDistance(a, b) => Some((a, b)),
+                                    _ => None,
+                                };
+                                if let Some((a, b)) = endpoints {
+                                    let new_kind = self.pick_point_pair_dim_kind(a, b, Some(mouse_sketch));
+                                    if new_kind != current_kind {
+                                        self.dim_kind = Some(new_kind);
+                                        let measured = self.measure_dimension(&new_kind);
+                                        self.dim_input = format!("{:.4}", measured);
+                                    }
                                 }
                             }
                         }
