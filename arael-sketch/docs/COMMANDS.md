@@ -935,34 +935,66 @@ add_line 0,0 5,0; horizontal L0; length L0 3
 
 ### Rectangle with Dimensions
 
+A fully-constrained, parametric rectangle built from four lines.
+Changing `width` or `height` afterwards reshapes the rectangle.
+
 ```
-bot = add_line 0,0 5,0
+param width 5
+param height 3
+bot   = add_line 0,0 5,0
 right = add_line @0,3
-top = add_line @-5,0
-left = add_line bot.p1
-coincident bot.p2 right.p1
-coincident right.p2 top.p1
-coincident top.p2 left.p1
-coincident left.p2 bot.p1
-horizontal bot; horizontal top
-vertical left; vertical right
+top   = add_line @-5,0
+left  = add_line top.p2 bot.p1
 lock bot.p1 0,0
-param width 5; param height 3
-length bot "width"; length right "height"
+horizontal bot
+horizontal top
+vertical left
+vertical right
+length bot =width
+length right =height
 ```
+
+Notes:
+
+- `add_line` from an existing line's endpoint
+  (`add_line top.p2 bot.p1`) and `add_line @dx,dy` from the
+  previous endpoint both auto-emit a coincident constraint, so
+  no explicit `coincident` is needed.
+- `=width` (or `{width}`) makes the dimension value a live
+  expression that re-evaluates every solve. A later
+  `param width 7` reshapes the rectangle. A bare token like
+  `length bot width` evaluates once at command time and stores the
+  numeric value, losing the link to the parameter.
+- `add_rect 0,0 width,height hv` produces the same shape in one
+  command. The four-line form above is a worked example of how
+  the building blocks fit together.
 
 ### Parametric Triangle
 
+Isoceles triangle with live base length `b` and height `h`: change
+the parameter value and the triangle re-solves.
+
 ```
-param b 4; param h 3
-base = add_line 0,0 b,0
-side1 = add_line base.p2 b/2,h
+param b 4
+param h 3
+base  = add_line 0,0 4,0
+side1 = add_line base.p2 2,3
 side2 = add_line side1.p2 base.p1
-coincident base.p2 side1.p1
-coincident side1.p2 side2.p1
-coincident side2.p2 base.p1
 lock base.p1 0,0
+horizontal base
+length base =b
+hdistance base.p1 side1.p2 =b/2
+vdistance base.p1 side1.p2 =h
 ```
+
+`add_line` from an existing line endpoint auto-emits a coincident
+constraint, so no explicit `coincident` commands are needed. The
+`=` prefix on each dimension value makes it a **live** expression
+that re-evaluates on every solve -- that's what makes the sketch
+parametric: `param b 6` afterward reshapes the triangle. Passing
+raw numbers (`length base 4` or an un-prefixed `length base b`)
+would bind the value as a literal at command time and lose the
+link to the parameter.
 
 ### Offset Line
 
