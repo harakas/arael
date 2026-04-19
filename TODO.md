@@ -51,4 +51,5 @@
 - **arael-sketch**: robot.cmd scale to 0.1 takes us to "interesting" view
 - **arael-macros**: tighten the constraint attribute parser to reject the N-way positional multi-block form `constraint(hb_a, hb_b, hb_c, {body})`. The parser currently accepts it as a side effect of supporting `constraint(hb_pose, root.hbt, {body})` (self-primary + root-owned TripletBlock). N ≥ 2 regular multi-block should always be written with brackets -- `constraint([a, b, c], {body})` -- and the only positional form we genuinely need is the specific 2-item `(<local_self_block>, root.<triplet>)` case. Two parsers for the same thing is a surprise waiting to bite users.
 - **arael-sketch**: investigate chain misbehavior
+- **arael-sketch**: when selecting a line/point/arc/etc hilight/hover all the constraints associated with it
 

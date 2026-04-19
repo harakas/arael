@@ -3951,6 +3951,16 @@ fn constraints_for(sketch: &Sketch, name: &str) -> Vec<String> {
         .collect()
 }
 
+/// Format a `RangeBound` for script / info output using the same
+/// surface syntax that the user typed: `>= v`, `<= v`, `lo to hi`.
+fn format_range_bound(rb: &RangeBound) -> String {
+    match rb {
+        RangeBound::Min(v) => format!(">= {}", v),
+        RangeBound::Max(v) => format!("<= {}", v),
+        RangeBound::Between(lo, hi) => format!("{} to {}", lo, hi),
+    }
+}
+
 fn cmd_info(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let name = args.trim();
     // Constraint name lookup: C3, CL0H, CL2V.
@@ -4028,15 +4038,21 @@ fn cmd_info(ctx: &mut CommandContext, args: &str) -> CommandResult {
         ok(s)
     } else if name.starts_with('d') {
         if let Some(d) = ctx.sketch.dimensions.iter().find(|d| d.name == name) {
-            let expr = d.expr_str.as_deref().unwrap_or("(numeric)");
+            let source = if let Some(rb) = &d.range {
+                format!("range={}", format_range_bound(rb))
+            } else if let Some(es) = &d.expr_str {
+                format!("expr={}", es)
+            } else {
+                "expr=(numeric)".to_string()
+            };
             let flags = match (d.derived, d.broken) {
                 (true, true) => " derived broken",
                 (true, false) => " derived",
                 (false, true) => " broken",
                 (false, false) => "",
             };
-            ok(format!("{}: value={:.4} expr={} offset={:.2} along={:.2}{}",
-                d.name, d.value, expr, d.offset.y, d.text_along, flags))
+            ok(format!("{}: value={:.4} {} offset={:.2} along={:.2}{}",
+                d.name, d.value, source, d.offset.y, d.text_along, flags))
         } else {
             err(format!("Unknown dimension: {}", name))
         }
@@ -4307,9 +4323,13 @@ fn cmd_list(ctx: &mut CommandContext, args: &str) -> CommandResult {
     }
     if show_all || filter == "dims" {
         for d in &ctx.sketch.dimensions {
-            let expr = d.expr_str.as_deref().unwrap_or("");
+            let source = if let Some(rb) = &d.range {
+                format_range_bound(rb)
+            } else {
+                d.expr_str.clone().unwrap_or_default()
+            };
             let tag = if d.derived { " derived" } else { "" };
-            lines.push(format!("{}: {:.4} {}{}", d.name, d.value, expr, tag));
+            lines.push(format!("{}: {:.4} {}{}", d.name, d.value, source, tag));
         }
     }
     if show_all || filter == "params" {
@@ -11267,6 +11287,32 @@ mod tests {
         assert_eq!(ctx.sketch.parallel.len(), 1);
         run_ok(&mut ctx, "rc L0 L1 parallel");
         assert_eq!(ctx.sketch.parallel.len(), 0);
+    }
+
+    #[test]
+    fn test_list_and_info_show_range_bound() {
+        // Range dimensions must be identifiable from script output (was
+        // previously indistinguishable from a numeric dim in both `list
+        // dims` and `info d0`).
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0");
+        run_ok(&mut ctx, "length L0 3 to 7");
+        let out = run_ok(&mut ctx, "list dims");
+        assert!(out.contains("3 to 7"), "list dims should show range: {}", out);
+        let out = run_ok(&mut ctx, "info d0");
+        assert!(out.contains("range=3 to 7"), "info should mark range: {}", out);
+        assert!(!out.contains("expr=(numeric)"), "info should not say numeric: {}", out);
+
+        // One-sided and live-expression forms stay recognisable too.
+        run_ok(&mut ctx, "add_line 0,3 5,3");
+        run_ok(&mut ctx, "length L1 >= 2");
+        let out = run_ok(&mut ctx, "info d1");
+        assert!(out.contains("range=>= 2"), "one-sided: {}", out);
+
+        run_ok(&mut ctx, "param lo 2");
+        run_ok(&mut ctx, "length L0 lo to 8");
+        let out = run_ok(&mut ctx, "list dims");
+        assert!(out.contains("lo to 8"), "live range: {}", out);
     }
 
     #[test]
