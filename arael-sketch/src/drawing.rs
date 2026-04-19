@@ -864,9 +864,15 @@ impl EditorApp {
 
         // Draw dimension line, extending past arrows if text is outside
         if text_outside {
-            // Extend the line to cover the text
-            let text_half_w = 30.0; // approximate half-width of text in pixels
-            let ext = text_along.abs() as f32 * dlen + text_half_w;
+            // `text_along` is measured from the dim-line midpoint; the
+            // arrow tips are at +/- 0.5, so the extension past whichever
+            // arrow equals `(|text_along| - 0.5) * dlen`, plus a text-
+            // glyph allowance so the line reaches the far edge of the
+            // number label. Previous formula (|text_along| * dlen)
+            // counted the arrow-to-midpoint distance too and
+            // overshot by half the arrow spacing.
+            let text_half_w = 30.0;
+            let ext = (text_along.abs() as f32 - 0.5).max(0.0) * dlen + text_half_w;
             if text_along < 0.0 {
                 painter.line_segment([
                     egui::Pos2::new(sq1.x - ux * ext, sq1.y - uy * ext), sq2], stroke);
