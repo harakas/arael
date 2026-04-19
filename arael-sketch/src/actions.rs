@@ -431,6 +431,64 @@ fn remove_distance_pl(sketch: &mut Sketch, pt: &DimensionEndpoint, line: Ref<Lin
     }
 }
 
+/// Remove the underlying numeric equality constraint installed for a
+/// dimension kind. Called when a dimension is removed, updated with a
+/// new value, or switched to a range / expression (where the equality
+/// constraint must go so the barrier / expr residual can drive the
+/// parameter unopposed).
+fn remove_numeric_dim_constraint(sketch: &mut Sketch, kind: &DimensionKind) {
+    match *kind {
+        DimensionKind::LineLength(line) => {
+            if let Some(l) = sketch.lines.get_mut(line) {
+                l.constraints.has_length = false;
+            }
+        }
+        DimensionKind::ArcRadius(arc) => {
+            if let Some(a) = sketch.arcs.get_mut(arc) {
+                a.constraints.has_target_radius = false;
+            }
+        }
+        DimensionKind::ArcRadiusB(arc) => {
+            if let Some(a) = sketch.arcs.get_mut(arc) {
+                a.constraints.has_target_radius_b = false;
+            }
+        }
+        DimensionKind::ArcSweep(arc) => {
+            if let Some(a) = sketch.arcs.get_mut(arc) {
+                a.constraints.has_target_sweep = false;
+            }
+        }
+        DimensionKind::PointPointDistance(ref a, ref b) => {
+            remove_distance(sketch, a, b);
+        }
+        DimensionKind::PointLineDistance(ref pt, line) => {
+            remove_distance_pl(sketch, pt, line);
+        }
+        DimensionKind::Angle(a, b, _) => {
+            sketch.angle.retain(|c| !(c.a == a && c.b == b));
+        }
+        DimensionKind::HDistance(ref a, ref b) => {
+            remove_axis_distance(sketch, a, b, true);
+        }
+        DimensionKind::VDistance(ref a, ref b) => {
+            remove_axis_distance(sketch, a, b, false);
+        }
+        DimensionKind::LineAngle(line) => {
+            if let Some(l) = sketch.lines.get_mut(line) {
+                l.constraints.has_angle = false;
+            }
+        }
+        DimensionKind::ConcentricDistance(a, b) => {
+            sketch.distance_concentric.retain(|c|
+                !((c.a == a && c.b == b) || (c.a == b && c.b == a)));
+        }
+        DimensionKind::LineLineDistance(a, b) => {
+            let pt = DimensionEndpoint::LineP1(b);
+            remove_distance_pl(sketch, &pt, a);
+        }
+    }
+}
+
 /// Push the correct AxisDistance constraint for the given endpoint pair.
 fn push_axis_distance(sketch: &mut Sketch, a: &DimensionEndpoint, b: &DimensionEndpoint, distance: f64, horizontal: bool) {
     use DimensionEndpoint::*;
@@ -1018,6 +1076,17 @@ impl Action {
                 // Range-dim update: rewrite the bound and re-measure.
                 // No underlying-constraint bookkeeping (none was pushed).
                 if let Some(rb) = range {
+                    // Numeric -> range transition: drop any existing
+                    // per-kind equality constraint so the barrier
+                    // residual drives the parameter on its own. No-op
+                    // when the dim was already range-typed (nothing
+                    // was pushed) or derived.
+                    let was_numeric_non_derived = sketch.dimensions.get(*index)
+                        .is_some_and(|d| d.expr_str.is_none() && !d.derived && d.range.is_none());
+                    if was_numeric_non_derived {
+                        let kind_copy = sketch.dimensions[*index].kind;
+                        remove_numeric_dim_constraint(sketch, &kind_copy);
+                    }
                     if let Some(dim) = sketch.dimensions.get_mut(*index) {
                         dim.range = Some(rb.clone());
                         dim.value = *value;
@@ -1026,9 +1095,13 @@ impl Action {
                     }
                     return true;
                 }
-                // Clearing a range dim back to a normal numeric dim would
-                // go here if we ever support it; for MVP the
-                // range <-> non-range toggle isn't exposed.
+                // Range -> numeric (or expression) transition: clear the
+                // `range` marker so `rebuild_expr_constraints` stops
+                // synthesising the barrier residual. The numeric /
+                // expression constraint is (re)built below.
+                if let Some(dim) = sketch.dimensions.get_mut(*index) {
+                    dim.range = None;
+                }
                 // Remove old underlying constraint (only for numeric, non-derived dims)
                 {
                     let dim = &sketch.dimensions[*index];

@@ -11423,4 +11423,58 @@ mod tests {
         let l = &ctx.sketch.lines[ctx.sketch.lines.refs().next().unwrap()];
         assert!((l.p1.value.y - l.p2.value.y).abs() < 0.1, "should stay horizontal: p1.y={:.4} p2.y={:.4}", l.p1.value.y, l.p2.value.y);
     }
+
+    // -- Range-dimension transitions (regression tests) --
+
+    /// Regression: updating a range dim with a bare numeric value must
+    /// clear `dim.range` so the barrier residual stops firing in
+    /// `rebuild_expr_constraints`. Previously the old range stuck and
+    /// the geometry couldn't leave the band.
+    #[test]
+    fn test_range_to_numeric_transition() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0");
+        run_ok(&mut ctx, "length L0 3 to 6");
+        // Currently 5, inside the [3, 6] band.
+        assert!(near(line_len(&ctx, "L0"), 5.0));
+        // Set to 2 (outside the band). With the bug, length would stay
+        // clamped to 3 because the old barrier still applied.
+        run_ok(&mut ctx, "length L0 2");
+        assert!(near(line_len(&ctx, "L0"), 2.0),
+            "expected length 2.0 after range->numeric, got {:.4}", line_len(&ctx, "L0"));
+    }
+
+    /// Regression: updating a numeric dim to a range must drop the old
+    /// per-kind equality constraint (e.g. `has_length = 5`) so the
+    /// barrier can drive the parameter into the band unopposed.
+    /// Previously both constraints stayed and the equality won.
+    #[test]
+    fn test_numeric_to_range_transition() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0");
+        run_ok(&mut ctx, "length L0 5");
+        assert!(near(line_len(&ctx, "L0"), 5.0));
+        // Upper bound 3: barrier must clamp length down from 5 to 3.
+        run_ok(&mut ctx, "length L0 2 to 3");
+        assert!(near(line_len(&ctx, "L0"), 3.0),
+            "expected length 3.0 after numeric->range clamp, got {:.4}", line_len(&ctx, "L0"));
+    }
+
+    /// Round-trip: numeric -> range -> numeric -> range exercises both
+    /// transition directions through the same command path.
+    #[test]
+    fn test_range_numeric_roundtrip() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0");
+        run_ok(&mut ctx, "length L0 5");
+        assert!(near(line_len(&ctx, "L0"), 5.0));
+        run_ok(&mut ctx, "length L0 2 to 3");
+        assert!(near(line_len(&ctx, "L0"), 3.0));
+        run_ok(&mut ctx, "length L0 4");
+        assert!(near(line_len(&ctx, "L0"), 4.0),
+            "range->numeric: got {:.4}", line_len(&ctx, "L0"));
+        run_ok(&mut ctx, "length L0 1 to 2");
+        assert!(near(line_len(&ctx, "L0"), 2.0),
+            "numeric->range clamp: got {:.4}", line_len(&ctx, "L0"));
+    }
 }
