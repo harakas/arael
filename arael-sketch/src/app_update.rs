@@ -228,6 +228,11 @@ impl eframe::App for EditorApp {
                     self.tool = Tool::DrawArc;
                     self.arc_draw = None;
                 }
+                if ui.selectable_label(self.tool == Tool::Dimension, "Dims (D)").clicked() {
+                    self.tool = Tool::Dimension;
+                    self.dim_editing = false;
+                    self.dim_kind = None;
+                }
                 ui.end_row();
             });
 
@@ -258,18 +263,10 @@ impl eframe::App for EditorApp {
             constraint_btn(ui, self, ConstraintType::Lock, "Lock (K)");
             constraint_btn(ui, self, ConstraintType::ToggleConstruction, "Constr (X)");
 
-            ui.separator();
-            let dim_active = matches!(self.tool, Tool::Dimension);
-            let dim_btn = egui::Button::new("Dimension (D)").selected(dim_active);
-            if ui.add(dim_btn).clicked() {
-                self.tool = Tool::Dimension;
-                self.dim_editing = false;
-                self.dim_kind = None;
-            }
-
-            // Dimension value input: rendered as a floating overlay near
-            // the dimension label (see `render_dim_input`), not inline
-            // in this side panel.
+            // Dimension tool now lives under Tools (see "Dims (D)" in
+            // the tools grid above). Dimension value input renders as
+            // a floating overlay near the dim label via
+            // `render_dim_input`.
 
             ui.separator();
             ui.heading("File");
