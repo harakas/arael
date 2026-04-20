@@ -8,14 +8,16 @@ The symbolic math library provides expression trees with automatic differentiati
 use arael::sym::*;
 
 arael::sym! {
-    let x = symbol("x");
-    let y = symbol("y");
+    let (x, y) = symbols!(x, y);
 
     println!("x + y = {}", x + y);             // x + y
     println!("x * y - 1 = {}", x * y - 1.0);   // x * y - 1
     println!("x^2 = {}", pow(x, c(2.0)));       // x^2
 }
 ```
+
+The `symbols!` macro expands each bare identifier to
+`symbol("<name>")` and returns a tuple.
 
 The `arael::sym!` macro auto-inserts `.clone()` on variable reuse, eliminating ownership boilerplate.
 
@@ -25,8 +27,7 @@ All operations auto-simplify:
 
 ```rust
 arael::sym! {
-    let x = symbol("x");
-    let y = symbol("y");
+    let (x, y) = symbols!(x, y);
     println!("{}", (x + y) / (x + y)); // 1
     println!("{}", x + 0.0);          // x
     println!("{}", x * 1.0);          // x
@@ -91,10 +92,7 @@ arael::sym! {
 
 ```rust
 arael::sym! {
-    let a = symbol("a");
-    let b = symbol("b");
-    let x = symbol("x");
-    let y = symbol("y");
+    let (a, b, x, y) = symbols!(a, b, x, y);
 
     println!("{}", (x * (a + b)).expand());  // a * x + b * x
     println!("{}", pow(x + y, c(2.0)).expand());  // x^2 + 2 * x * y + y^2
@@ -107,8 +105,7 @@ arael::sym! {
 
 ```rust
 arael::sym! {
-    let x = symbol("x");
-    let y = symbol("y");
+    let (x, y) = symbols!(x, y);
     let f = pow(x, c(2.0)) + 3.0 * x + 1.0;
 
     let vars = HashMap::from([("x", 2.0)]);
@@ -123,9 +120,7 @@ arael::sym! {
 
 ```rust
 arael::sym! {
-    let t = symbol("t");
-    let v0 = symbol("v0");
-    let a = symbol("a");
+    let (t, v0, a) = symbols!(t, v0, a);
 
     let s = 0.5 * a * pow(t, c(2.0)) + v0 * t;
     let v = s.diff("t");   // a * t + v0
@@ -302,8 +297,7 @@ The same pattern -- `simple_func*_derivs` plus `clamp` and/or `epsilon`-regulari
 
 ```rust
 arael::sym! {
-    let x = symbol("x");
-    let y = symbol("y");
+    let (x, y) = symbols!(x, y);
     let common = sin(x * y);
     let e1 = common + 1.0;
     let e2 = common * 2.0;

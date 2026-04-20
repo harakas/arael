@@ -169,7 +169,11 @@ impl SymVisitor {
                     // Don't descend into items (fn, struct, etc.)
                 }
                 Stmt::Macro(stmt_macro) => {
-                    self.process_macro_tokens(&mut stmt_macro.mac.tokens);
+                    if stmt_macro.mac.path.is_ident("symbols") {
+                        // See the matching guard in visit_expr_mut.
+                    } else {
+                        self.process_macro_tokens(&mut stmt_macro.mac.tokens);
+                    }
                 }
             }
             i += 1;
@@ -364,7 +368,15 @@ impl VisitMut for SymVisitor {
             }
             Expr::Cast(cast) => { self.visit_expr_mut(&mut cast.expr); }
             Expr::Let(expr_let) => { self.visit_expr_mut(&mut expr_let.expr); }
-            Expr::Macro(expr_macro) => { self.process_macro_tokens(&mut expr_macro.mac.tokens); }
+            Expr::Macro(expr_macro) => {
+                // `symbols!(a, b, c)` takes bare identifiers as names,
+                // not variable uses -- don't rewrite them into
+                // `a.clone()`, which would break the macro's ident
+                // pattern. Same rule applies to any future
+                // ident-argument helpers we add.
+                if expr_macro.mac.path.is_ident("symbols") { return; }
+                self.process_macro_tokens(&mut expr_macro.mac.tokens);
+            }
             Expr::Repeat(repeat) => {
                 self.visit_expr_mut(&mut repeat.expr);
                 self.visit_expr_mut(&mut repeat.len);

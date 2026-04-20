@@ -9,10 +9,7 @@ fn main() {
     println!("=== Basics ===\n");
 
     sym! {
-        let x = symbol("x");
-        let y = symbol("y");
-        let a = symbol("a");
-        let b = symbol("b");
+        let (x, y, a, b) = symbols!(x, y, a, b);
 
         println!("Symbols:    x = {x}, y = {y}");
         println!("Constants:  constant(3.0) = {}, c(3.0) = {}", constant(3.0), c(3.0));
@@ -109,10 +106,8 @@ fn main() {
 
         // Kinematics example
         println!("\n--- Kinematics ---");
-        let t = symbol("t");
-        let v0 = symbol("v0");
-        let acc = symbol("a");
-        let s = v0 * t + c(0.5) * acc * pow(t, c(2.0));
+        let (t, v0, a) = symbols!(t, v0, a);
+        let s = v0 * t + c(0.5) * a * pow(t, c(2.0));
         println!("Position:   s(t) = {s}");
         let v = s.diff(t);
         println!("Velocity:   v(t) = ds/dt = {v}");
@@ -169,10 +164,7 @@ fn main() {
         // Error suppression (SymPy comparison)
         // ============================================================
         println!("\n=== Error suppression ===\n");
-        let gamma = symbol("gamma");
-        let a = symbol("a");
-        let b = symbol("b");
-        let sigma = symbol("sigma");
+        let (gamma, a, b, sigma) = symbols!(gamma, a, b, sigma);
         let r = (y - (a * x + b)) / sigma;
         let rs = gamma * atan(r / gamma);
         #[allow(non_snake_case)]

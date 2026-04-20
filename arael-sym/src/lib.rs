@@ -75,8 +75,9 @@
 //! ```
 //! use arael_sym::*;
 //! let (code1, code2) = sym! {
-//!     let f = sin(symbol("x")) + 1.0;
-//!     let g = atan2(symbol("y"), symbol("x"));
+//!     let (x, y) = symbols!(x, y);
+//!     let f = sin(x) + 1.0;
+//!     let g = atan2(y, x);
 //!     (f.to_rust("f64"), g.to_rust("f32"))
 //! };
 //! assert_eq!(code1, "x.sin() + 1.0_f64");
@@ -123,8 +124,7 @@
 //! ```
 //! use arael_sym::*;
 //! let (j00, j01, j10, j11) = sym! {
-//!     let x = symbol("x");
-//!     let y = symbol("y");
+//!     let (x, y) = symbols!(x, y);
 //!     let f = vec![x * y, sin(x) + y];
 //!     let j = jacobian(&f, &["x", "y"]);
 //!     // j is 2x2: [[df0/dx, df0/dy], [df1/dx, df1/dy]]
@@ -239,8 +239,7 @@
 //!     // eval uses my_angle_diff
 //!     let angle_diff = extern_func2("angle_diff", "my_mod::angle_diff",
 //!         grad2(|a, b| a - b), my_angle_diff);
-//!     let x = symbol("x");
-//!     let y = symbol("y");
+//!     let (x, y) = symbols!(x, y);
 //!     let f = angle_diff(x * x, y);
 //!     assert_eq!(format!("{}", f.diff("x")), "2 * x");
 //!     assert_eq!(f.to_rust("f64"), "my_mod::angle_diff(x.powf(2.0_f64), y)");
@@ -587,6 +586,27 @@ impl Hash for E {
 /// Create a named symbolic variable.
 pub fn symbol(name: &str) -> E {
     E::new(Expr::Sym(name.to_string()))
+}
+
+/// Create several symbolic variables at once and return them as a
+/// tuple. Each identifier becomes a fresh [`E`] whose name is that
+/// identifier stringified, sparing the caller from writing the name
+/// twice per variable.
+///
+/// ```
+/// use arael_sym::*;
+/// let (x, y, z) = symbols!(x, y, z);
+/// assert_eq!(format!("{}", x * y + z), "x * y + z");
+/// ```
+///
+/// A trailing comma in the expansion makes the single-identifier
+/// form a 1-tuple (`(E,)`); for a single symbol [`symbol`] is
+/// usually the clearer spelling.
+#[macro_export]
+macro_rules! symbols {
+    ($($name:ident),+ $(,)?) => {
+        ( $( $crate::symbol(stringify!($name)) ),+ , )
+    };
 }
 
 /// Create a numeric constant.
@@ -1234,8 +1254,7 @@ pub fn extern_func1(
 ///     let f = extern_func2("rad_diff", "arael::utils::rad_diff",
 ///         grad2(|a, b| a - b),
 ///         |args: &[f64]| args[0] - args[1]);
-///     let x = symbol("x");
-///     let y = symbol("y");
+///     let (x, y) = symbols!(x, y);
 ///     assert_eq!(format!("{}", f(x, y).diff("x")), "1");
 ///     assert_eq!(f(x, y).to_rust("f64"), "arael::utils::rad_diff(x, y)");
 /// };
