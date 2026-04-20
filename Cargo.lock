@@ -221,7 +221,7 @@ dependencies = [
 
 [[package]]
 name = "arael"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "arael-macros",
  "arael-sym",
@@ -245,7 +245,7 @@ dependencies = [
 
 [[package]]
 name = "arael-macros"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "arael-sym",
  "arael-sym-macros",
@@ -256,7 +256,7 @@ dependencies = [
 
 [[package]]
 name = "arael-sketch"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "arael",
  "arael-sketch-solver",
@@ -285,7 +285,7 @@ dependencies = [
 
 [[package]]
 name = "arael-sketch-solver"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "arael",
  "arael-sym",
@@ -298,14 +298,14 @@ dependencies = [
 
 [[package]]
 name = "arael-sym"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "arael-sym-macros",
 ]
 
 [[package]]
 name = "arael-sym-macros"
-version = "0.5.1"
+version = "0.5.2"
 dependencies = [
  "proc-macro2",
  "quote",

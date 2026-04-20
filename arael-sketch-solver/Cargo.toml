@@ -1,6 +1,6 @@
 [package]
 name = "arael-sketch-solver"
-version = "0.5.1"
+version = "0.5.2"
 edition = "2024"
 authors = ["Indrek Mandre <indrek@mare.ee>"]
 readme = "../README.md"
@@ -11,8 +11,8 @@ keywords = ["constraint-solver", "sketch", "cad", "2d", "optimization"]
 categories = ["mathematics", "science"]
 
 [dependencies]
-arael = { version = "0.5.1", path = ".." }
-arael-sym = { version = "0.5.1", path = "../arael-sym" }
+arael = { version = "0.5.2", path = ".." }
+arael-sym = { version = "0.5.2", path = "../arael-sym" }
 serde = { version = "1", features = ["derive"] }
 nalgebra = "0.33"
 faer = { version = "0.24", default-features = false, features = ["std"] }
