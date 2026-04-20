@@ -29,19 +29,33 @@
 //!
 //! # Examples
 //!
-//! The [`sym!`] macro auto-inserts `.clone()` on reused variables, so you
-//! can write natural math without ownership boilerplate.
+//! See [`docs/SYM.md`](https://github.com/harakas/arael/blob/master/docs/SYM.md)
+//! for the full reference with worked examples for every feature,
+//! and [`examples/sym_demo.rs`](https://github.com/harakas/arael/blob/master/examples/sym_demo.rs)
+//! for a runnable walkthrough (`cargo run --example sym_demo`).
+//! The tour below hits the high points.
 //!
 //! ## Basics
+//!
+//! The [`symbols!`] macro expands each bare identifier to
+//! `symbol("<name>")` and returns a tuple -- you write the name once
+//! instead of twice per variable. The [`sym!`] macro auto-inserts
+//! `.clone()` on every reused variable so the body reads as natural
+//! math without ownership boilerplate.
+//!
+//! Every expression has type [`E`], defined as
+//! `struct E(Rc<Expr>)`. Cloning is cheap (a reference-count bump) --
+//! the `.clone()` calls `sym!` inserts don't duplicate the
+//! expression tree.
 //!
 //! ```
 //! use arael_sym::*;
 //! let result = sym! {
-//!     let x = symbol("x");
-//!     let f = x * x + 3.0 * x + 1.0;
+//!     let (x, y) = symbols!(x, y);
+//!     let f = x * y - 1.0 + pow(x, 2.0);
 //!     format!("{}", f)
 //! };
-//! assert_eq!(result, "x^2 + 3 * x + 1");
+//! assert_eq!(result, "x * y + x^2 - 1");
 //! ```
 //!
 //! ## Differentiation
@@ -52,7 +66,7 @@
 //!     let x = symbol("x");
 //!     let f = sin(x) * x;
 //!     // Product rule + chain rule applied automatically:
-//!     format!("{}", f.diff("x"))
+//!     format!("{}", f.diff(x))
 //! };
 //! assert_eq!(result, "x * cos(x) + sin(x)");
 //! ```
@@ -112,8 +126,9 @@
 //! ```
 //! use arael_sym::*;
 //! let dot = sym! {
-//!     let v = SymVec::new(vec![symbol("x"), symbol("y"), symbol("z")]);
-//!     let w = SymVec::new(vec![c(1.0), c(2.0), c(3.0)]);
+//!     let (x, y, z) = symbols!(x, y, z);
+//!     let v = SymVec::new([x, y, z]);
+//!     let w = SymVec::new([1.0, 2.0, 3.0]);
 //!     format!("{}", v.dot(&w))
 //! };
 //! assert_eq!(dot, "x + 2 * y + 3 * z");
@@ -189,7 +204,7 @@
 //!     let x = symbol("x");
 //!     // Without identity: terms may reorder, epsilon^2 lost at x=1
 //!     // With identity: (1 - x^2) evaluates first, then epsilon^2 is added
-//!     let safe = identity(c(1.0) - x * x) + epsilon * epsilon;
+//!     let safe = identity(1.0 - x * x) + epsilon * epsilon;
 //!     let code = safe.to_rust("f64");
 //!     // Body is wrapped in parens in generated code
 //!     assert!(code.contains("(-x.powf(2.0_f64) + 1.0_f64)"));
@@ -209,12 +224,11 @@
 //! ```
 //! use arael_sym::*;
 //! sym! {
-//!     let t = symbol("t");
-//!     let square = simple_func1("square", |t| t * t);
 //!     let x = symbol("x");
+//!     let square = simple_func1("square", |t| t * t);
 //!     let f = square(x + 1.0);
 //!     assert_eq!(format!("{}", f), "square(x + 1)");
-//!     assert_eq!(format!("{}", f.diff("x")), "2 * (x + 1)");
+//!     assert_eq!(format!("{}", f.diff(x)), "2 * (x + 1)");
 //!     // Codegen inlines the expanded body:
 //!     assert_eq!(f.to_rust("f64"), "(x + 1.0_f64).powf(2.0_f64)");
 //! };
@@ -241,7 +255,7 @@
 //!         grad2(|a, b| a - b), my_angle_diff);
 //!     let (x, y) = symbols!(x, y);
 //!     let f = angle_diff(x * x, y);
-//!     assert_eq!(format!("{}", f.diff("x")), "2 * x");
+//!     assert_eq!(format!("{}", f.diff(x)), "2 * x");
 //!     assert_eq!(f.to_rust("f64"), "my_mod::angle_diff(x.powf(2.0_f64), y)");
 //!     // eval uses the native eval_fn:
 //!     let vars = std::collections::HashMap::from([("x", 0.0), ("y", 6.283185307179586)]);
@@ -266,7 +280,7 @@
 //!     // by providing custom derivatives with simple_func1_derivs as
 //!     // is done in the built-in safe_asin().
 //!     let my_asin = simple_func1("my_asin",
-//!         |t| asin(clamp(t, c(-1.0), c(1.0))));
+//!         |t| asin(clamp(t, -1.0, 1.0)));
 //!     let x = symbol("x");
 //!     let f = my_asin(x);
 //!     let vars = std::collections::HashMap::from([("x", 1.5)]);
@@ -1219,7 +1233,7 @@ pub(crate) fn expand_func(params: &[String], body: &E, args: &[E]) -> E {
 ///     let square = simple_func1("square", |t| t * t);
 ///     let x = symbol("x");
 ///     assert_eq!(format!("{}", square(x + 1.0)), "square(x + 1)");
-///     assert_eq!(format!("{}", square(x).diff("x")), "2 * x");
+///     assert_eq!(format!("{}", square(x).diff(x)), "2 * x");
 /// };
 /// ```
 pub fn simple_func1(name: &str, body: impl Fn(E) -> E) -> impl Fn(E) -> E + Clone {
@@ -1379,7 +1393,7 @@ pub fn extern_func1(
 ///         grad2(|a, b| a - b),
 ///         |args: &[f64]| args[0] - args[1]);
 ///     let (x, y) = symbols!(x, y);
-///     assert_eq!(format!("{}", f(x, y).diff("x")), "1");
+///     assert_eq!(format!("{}", f(x, y).diff(x)), "1");
 ///     assert_eq!(f(x, y).to_rust("f64"), "arael::utils::rad_diff(x, y)");
 /// };
 /// ```

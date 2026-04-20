@@ -1,6 +1,23 @@
 # Symbolic Math Library (arael-sym)
 
-The symbolic math library provides expression trees with automatic differentiation, algebraic simplification, code generation, and common subexpression elimination.
+`arael-sym` provides a lightweight computer algebra system built around a reference-counted expression tree (`E`). Expressions are constructed from symbols and constants, combined with standard arithmetic operators (which auto-simplify), and then differentiated, evaluated, pretty-printed, or compiled to Rust source code.
+
+This crate is the symbolic engine behind the [`arael`](https://docs.rs/arael) optimization framework, where it powers compile-time constraint differentiation and code generation. It can also be used independently for any symbolic math task.
+
+See [`examples/sym_demo.rs`](../examples/sym_demo.rs) for a runnable walkthrough covering every section below (`cargo run --example sym_demo`).
+
+## Scope and limitations
+
+`arael-sym` is focused on what's needed for nonlinear optimization: scalar expressions, differentiation, and code generation. Compared to a full CAS like Python's SymPy, it does **not** support:
+
+- Symbolic integration
+- Equation solving (solve for x)
+- Symbolic matrix algebra (symbolic determinant, inverse, eigenvalues)
+- Polynomial factoring, GCD, partial fractions
+- Limits, series expansion, Taylor series
+- Assumptions / domain reasoning (positive, real, integer)
+- Pattern matching / rewrite rules
+- Pretty-printing of intermediate simplification steps
 
 ## Basics
 
@@ -296,19 +313,26 @@ sym! {
         // Body: clamp the input, then asin. Used for both numeric
         // evaluation and codegen.
         |x| asin(clamp(x, -1.0, 1.0)),
-        // Derivative: 1 / sqrt(1 - x^2 + eps^2). The `identity` guard
-        // around `1 - x^2` prevents the simplifier from reordering the
-        // subtraction relative to the `+eps^2`, which would otherwise
-        // cancel in floating point near |x| = 1.
-        |x| [1.0 / sqrt(identity(1.0 - x * x) + epsilon() * epsilon())],
+        // Derivative: 1 / sqrt(1 - xc^2 + eps^2), where `xc` is `x`
+        // clamped to [-1, 1] so `1 - xc^2` stays non-negative for
+        // any input (an unclamped `1 - x*x` at |x| > 1 goes
+        // negative, sqrt NaNs, and the eps^2 term can't recover
+        // it). The `identity` guard around `1 - xc^2` prevents the
+        // simplifier from reordering the subtraction relative to
+        // `+eps^2`, which would otherwise cancel in floating point
+        // near |x| = 1.
+        |x| {
+            let xc = clamp(x, -1.0, 1.0);
+            [1.0 / sqrt(identity(1.0 - xc * xc) + epsilon() * epsilon())]
+        },
     );
     let f = safe_asin(x);
     println!("{}",       f);             // safe_asin(x)
-    println!("d/dx = {}", f.diff(x));    // 1 / sqrt(identity(1 - x^2) + epsilon^2)
+    println!("d/dx = {}", f.diff(x));    // 1 / sqrt(epsilon^2 + identity(-clamp(x, -1, 1)^2 + 1))
 }
 ```
 
-Why explicit derivatives? Auto-differentiating `asin(clamp(x, -1, 1))` would produce `(d/dx clamp) / sqrt(1 - clamp(x, -1, 1)^2)`, which still diverges at the boundary. The regularised version replaces `sqrt(1 - x^2)` with `sqrt(1 - x^2 + eps^2)` and uses `identity` to defend the `1 - x^2` subtraction from simplifier reordering.
+Why explicit derivatives? Auto-differentiating `asin(clamp(x, -1, 1))` would produce `(d/dx clamp) / sqrt(1 - clamp(x, -1, 1)^2)`, which still diverges at the boundary because `clamp`'s derivative is the identity. The regularised version replaces `sqrt(1 - x^2)` with `sqrt(1 - clamp(x, -1, 1)^2 + eps^2)` (clamp on both the body and the derivative input) and uses `identity` to defend the subtraction from simplifier reordering.
 
 The same pattern -- `simple_func*_derivs` plus `clamp` and/or `epsilon`-regularisation in the derivative -- is how `safe_acos`, `safe_sqrt`, `safe_atan2`, and similar are implemented.
 
