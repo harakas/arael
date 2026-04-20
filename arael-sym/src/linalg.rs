@@ -1,8 +1,7 @@
 use std::collections::HashMap;
 use std::fmt;
 use std::ops;
-use super::{E, constant};
-use super::diff::DiffVar;
+use super::{AsVarName, E, constant};
 
 // ============================================================
 // SymVec
@@ -47,7 +46,7 @@ impl SymVec {
     }
 
     /// Differentiate each element with respect to a variable.
-    pub fn diff(&self, var: impl DiffVar) -> SymVec {
+    pub fn diff(&self, var: impl AsVarName) -> SymVec {
         let v = var.var_name();
         SymVec(self.0.iter().map(|e| e.diff(v)).collect())
     }
@@ -68,8 +67,9 @@ impl SymVec {
     }
 
     /// Substitute a variable in each element.
-    pub fn subs(&self, var: &str, replacement: &E) -> SymVec {
-        SymVec(self.0.iter().map(|e| e.subs(var, replacement)).collect())
+    pub fn subs(&self, var: impl AsVarName, replacement: &E) -> SymVec {
+        let name = var.var_name();
+        SymVec(self.0.iter().map(|e| e.subs(name, replacement)).collect())
     }
 
     /// Format the vector as a LaTeX column vector (pmatrix).
@@ -204,7 +204,7 @@ impl SymMat {
     }
 
     /// Differentiate every element with respect to a variable.
-    pub fn diff(&self, var: impl DiffVar) -> SymMat {
+    pub fn diff(&self, var: impl AsVarName) -> SymMat {
         let v = var.var_name();
         SymMat {
             rows: self.rows,
@@ -245,11 +245,12 @@ impl SymMat {
     }
 
     /// Substitute a variable in every element.
-    pub fn subs(&self, var: &str, replacement: &E) -> SymMat {
+    pub fn subs(&self, var: impl AsVarName, replacement: &E) -> SymMat {
+        let name = var.var_name();
         SymMat {
             rows: self.rows,
             cols: self.cols,
-            data: self.data.iter().map(|e| e.subs(var, replacement)).collect(),
+            data: self.data.iter().map(|e| e.subs(name, replacement)).collect(),
         }
     }
 

@@ -1,51 +1,11 @@
-use super::{Expr, E, constant, sin, cos, cosh, sinh, tanh, exp, ln, sqrt, abs, pow};
-
-/// Types that can be used as differentiation variables.
-///
-/// Implemented for `&str`, `String`, and [`E`] (when it wraps a `Sym` node),
-/// so you can call `expr.diff("x")` or `expr.diff(&my_symbol)`.
-pub trait DiffVar {
-    /// Return the variable name as a string slice.
-    fn var_name(&self) -> &str;
-}
-
-impl DiffVar for &str {
-    fn var_name(&self) -> &str { self }
-}
-
-impl DiffVar for &&str {
-    fn var_name(&self) -> &str { self }
-}
-
-impl DiffVar for str {
-    fn var_name(&self) -> &str { self }
-}
-
-impl DiffVar for String {
-    fn var_name(&self) -> &str { self.as_str() }
-}
-
-impl DiffVar for &E {
-    fn var_name(&self) -> &str {
-        (*self).var_name()
-    }
-}
-
-impl DiffVar for E {
-    fn var_name(&self) -> &str {
-        match self.as_ref() {
-            Expr::Sym(name) => name.as_str(),
-            _ => panic!("diff: expected a symbol, got `{self}`"),
-        }
-    }
-}
+use super::{AsVarName, Expr, E, constant, sin, cos, cosh, sinh, tanh, exp, ln, sqrt, abs, pow};
 
 impl Expr {
     /// Symbolically differentiate this expression with respect to a variable.
     ///
     /// Applies the chain rule, product rule, and quotient rule automatically.
     /// The result is simplified.
-    pub fn diff(&self, var: impl DiffVar) -> E {
+    pub fn diff(&self, var: impl AsVarName) -> E {
         let var = var.var_name();
         let zero = || constant(0.0);
         let one = || constant(1.0);

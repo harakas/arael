@@ -809,15 +809,18 @@ impl Expr {
 
     /// Collect like terms containing `var` by structural match.
     ///
-    /// Groups additive terms that share `var` as a factor, summing their
-    /// coefficients. For example, `a*x + b*x + c` becomes `(a + b)*x + c`.
-    pub fn collect(&self, var: &E) -> E {
+    /// `var` can be any [`AsVarName`] -- a `&str`, a `String`, or an
+    /// [`E`] handle wrapping a `Sym` node. Groups additive terms
+    /// that share `var` as a factor, summing their coefficients.
+    /// For example, `a*x + b*x + c` becomes `(a + b)*x + c`.
+    pub fn collect(&self, var: impl crate::AsVarName) -> E {
+        let var = var.var_expr();
         let terms = flatten_add_simple(&E::new(self.clone()));
         let mut with_var: Vec<E> = Vec::new();
         let mut without_var: Vec<E> = Vec::new();
 
         for term in &terms {
-            if let Some(coeff) = extract_factor(term, var) {
+            if let Some(coeff) = extract_factor(term, &var) {
                 with_var.push(coeff);
             } else {
                 without_var.push(term.clone());
@@ -828,7 +831,7 @@ impl Expr {
 
         if !with_var.is_empty() {
             let coeff_sum = sum_terms(with_var);
-            let collected = coeff_sum * var.clone();
+            let collected = coeff_sum * var;
             result = Some(collected);
         }
 

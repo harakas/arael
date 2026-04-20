@@ -59,37 +59,43 @@ impl Expr {
 
     /// Substitute all occurrences of the named variable with `replacement`.
     ///
-    /// Returns a new expression with the substitution applied throughout.
-    pub fn subs(&self, var: &str, replacement: &E) -> E {
+    /// `var` can be any [`AsVarName`] -- a `&str`, a `String`, or an
+    /// [`E`] handle wrapping a `Sym` node. Returns a new expression
+    /// with the substitution applied throughout.
+    pub fn subs(&self, var: impl crate::AsVarName, replacement: &E) -> E {
+        self.subs_by_name(var.var_name(), replacement)
+    }
+
+    fn subs_by_name(&self, var: &str, replacement: &E) -> E {
         match self {
             Expr::Sym(name) if name == var => replacement.clone(),
             Expr::Sym(_) | Expr::Const(_) | Expr::NamedConst { .. } => E::new(self.clone()),
-            Expr::Neg(a) => -a.subs(var, replacement),
-            Expr::Add(a, b) => a.subs(var, replacement) + b.subs(var, replacement),
-            Expr::Sub(a, b) => a.subs(var, replacement) - b.subs(var, replacement),
-            Expr::Mul(a, b) => a.subs(var, replacement) * b.subs(var, replacement),
-            Expr::Div(a, b) => a.subs(var, replacement) / b.subs(var, replacement),
-            Expr::Pow(a, b) => E::new(Expr::Pow(a.subs(var, replacement), b.subs(var, replacement))),
-            Expr::Sin(a) => E::new(Expr::Sin(a.subs(var, replacement))),
-            Expr::Cos(a) => E::new(Expr::Cos(a.subs(var, replacement))),
-            Expr::Tan(a) => E::new(Expr::Tan(a.subs(var, replacement))),
-            Expr::Asin(a) => E::new(Expr::Asin(a.subs(var, replacement))),
-            Expr::Acos(a) => E::new(Expr::Acos(a.subs(var, replacement))),
-            Expr::Atan(a) => E::new(Expr::Atan(a.subs(var, replacement))),
-            Expr::Atan2(y, x) => E::new(Expr::Atan2(y.subs(var, replacement), x.subs(var, replacement))),
-            Expr::Sinh(a) => E::new(Expr::Sinh(a.subs(var, replacement))),
-            Expr::Cosh(a) => E::new(Expr::Cosh(a.subs(var, replacement))),
-            Expr::Tanh(a) => E::new(Expr::Tanh(a.subs(var, replacement))),
-            Expr::Exp(a) => E::new(Expr::Exp(a.subs(var, replacement))),
-            Expr::Ln(a) => E::new(Expr::Ln(a.subs(var, replacement))),
-            Expr::Log2(a) => E::new(Expr::Log2(a.subs(var, replacement))),
-            Expr::Log10(a) => E::new(Expr::Log10(a.subs(var, replacement))),
-            Expr::Sqrt(a) => E::new(Expr::Sqrt(a.subs(var, replacement))),
-            Expr::Abs(a) => E::new(Expr::Abs(a.subs(var, replacement))),
-            Expr::Heaviside(a) => E::new(Expr::Heaviside(a.subs(var, replacement))),
-            Expr::Clamp(a, lo, hi) => E::new(Expr::Clamp(a.subs(var, replacement), lo.subs(var, replacement), hi.subs(var, replacement))),
+            Expr::Neg(a) => -a.subs_by_name(var, replacement),
+            Expr::Add(a, b) => a.subs_by_name(var, replacement) + b.subs_by_name(var, replacement),
+            Expr::Sub(a, b) => a.subs_by_name(var, replacement) - b.subs_by_name(var, replacement),
+            Expr::Mul(a, b) => a.subs_by_name(var, replacement) * b.subs_by_name(var, replacement),
+            Expr::Div(a, b) => a.subs_by_name(var, replacement) / b.subs_by_name(var, replacement),
+            Expr::Pow(a, b) => E::new(Expr::Pow(a.subs_by_name(var, replacement), b.subs_by_name(var, replacement))),
+            Expr::Sin(a) => E::new(Expr::Sin(a.subs_by_name(var, replacement))),
+            Expr::Cos(a) => E::new(Expr::Cos(a.subs_by_name(var, replacement))),
+            Expr::Tan(a) => E::new(Expr::Tan(a.subs_by_name(var, replacement))),
+            Expr::Asin(a) => E::new(Expr::Asin(a.subs_by_name(var, replacement))),
+            Expr::Acos(a) => E::new(Expr::Acos(a.subs_by_name(var, replacement))),
+            Expr::Atan(a) => E::new(Expr::Atan(a.subs_by_name(var, replacement))),
+            Expr::Atan2(y, x) => E::new(Expr::Atan2(y.subs_by_name(var, replacement), x.subs_by_name(var, replacement))),
+            Expr::Sinh(a) => E::new(Expr::Sinh(a.subs_by_name(var, replacement))),
+            Expr::Cosh(a) => E::new(Expr::Cosh(a.subs_by_name(var, replacement))),
+            Expr::Tanh(a) => E::new(Expr::Tanh(a.subs_by_name(var, replacement))),
+            Expr::Exp(a) => E::new(Expr::Exp(a.subs_by_name(var, replacement))),
+            Expr::Ln(a) => E::new(Expr::Ln(a.subs_by_name(var, replacement))),
+            Expr::Log2(a) => E::new(Expr::Log2(a.subs_by_name(var, replacement))),
+            Expr::Log10(a) => E::new(Expr::Log10(a.subs_by_name(var, replacement))),
+            Expr::Sqrt(a) => E::new(Expr::Sqrt(a.subs_by_name(var, replacement))),
+            Expr::Abs(a) => E::new(Expr::Abs(a.subs_by_name(var, replacement))),
+            Expr::Heaviside(a) => E::new(Expr::Heaviside(a.subs_by_name(var, replacement))),
+            Expr::Clamp(a, lo, hi) => E::new(Expr::Clamp(a.subs_by_name(var, replacement), lo.subs_by_name(var, replacement), hi.subs_by_name(var, replacement))),
             Expr::Func { name, params, kind, args } => {
-                let new_args = args.iter().map(|a| a.subs(var, replacement)).collect();
+                let new_args = args.iter().map(|a| a.subs_by_name(var, replacement)).collect();
                 E::new(Expr::Func { name: name.clone(), params: params.clone(), kind: kind.clone(), args: new_args })
             }
         }

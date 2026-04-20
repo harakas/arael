@@ -588,6 +588,60 @@ pub fn symbol(name: &str) -> E {
     E::new(Expr::Sym(name.to_string()))
 }
 
+/// Types that can name a symbolic variable for operations that key
+/// into the expression tree by name -- `diff`, `subs`, `collect`.
+/// Implemented for `&str`, `String`, `&String`, and [`E`] (when it
+/// wraps a `Sym` node), so you can write `expr.diff("x")` or
+/// `expr.diff(&my_symbol)` and reach the same variable. The blanket
+/// `var_expr` default builds a fresh `Sym` node from the name;
+/// implementations on [`E`] override it to reuse the caller's handle
+/// and avoid an allocation.
+pub trait AsVarName {
+    /// Return the variable name as a string slice.
+    fn var_name(&self) -> &str;
+
+    /// Return an `E` representing this variable. Default: build a
+    /// fresh `Sym` node from `var_name()`.
+    fn var_expr(&self) -> E {
+        symbol(self.var_name())
+    }
+}
+
+impl AsVarName for &str {
+    fn var_name(&self) -> &str { self }
+}
+
+impl AsVarName for &&str {
+    fn var_name(&self) -> &str { self }
+}
+
+impl AsVarName for str {
+    fn var_name(&self) -> &str { self }
+}
+
+impl AsVarName for String {
+    fn var_name(&self) -> &str { self.as_str() }
+}
+
+impl AsVarName for &String {
+    fn var_name(&self) -> &str { self.as_str() }
+}
+
+impl AsVarName for &E {
+    fn var_name(&self) -> &str { (*self).var_name() }
+    fn var_expr(&self) -> E { (*self).clone() }
+}
+
+impl AsVarName for E {
+    fn var_name(&self) -> &str {
+        match self.as_ref() {
+            Expr::Sym(name) => name.as_str(),
+            _ => panic!("AsVarName::var_name: expected a symbol, got `{self}`"),
+        }
+    }
+    fn var_expr(&self) -> E { self.clone() }
+}
+
 /// Create several symbolic variables at once and return them as a
 /// tuple. Each identifier becomes a fresh [`E`] whose name is that
 /// identifier stringified, sparing the caller from writing the name
@@ -612,6 +666,18 @@ macro_rules! symbols {
 /// Create a numeric constant.
 pub fn constant(val: f64) -> E {
     E::new(Expr::Const(val))
+}
+
+impl From<f64> for E {
+    fn from(v: f64) -> E { constant(v) }
+}
+
+impl From<i64> for E {
+    fn from(v: i64) -> E { constant(v as f64) }
+}
+
+impl From<i32> for E {
+    fn from(v: i32) -> E { constant(v as f64) }
 }
 
 /// Create a named constant with explicit display, eval, codegen, and LaTeX representations.
@@ -681,7 +747,11 @@ pub fn heaviside(e: E) -> E { E::new(Expr::Heaviside(e)) }
 /// Symbolic clamp: clamp value to [lo, hi]. Derivative passes through.
 pub fn clamp(val: E, lo: E, hi: E) -> E { E::new(Expr::Clamp(val, lo, hi)) }
 /// Symbolic power function. Auto-simplifies (e.g. x^0 = 1, x^1 = x).
-pub fn pow(base: E, exponent: E) -> E { E::new(Expr::Pow(base, exponent)).simplify() }
+/// Accepts `impl Into<E>` for both args so bare numeric literals
+/// compose naturally: `pow(x, 2.0)`, `pow(x, 3)`.
+pub fn pow(base: impl Into<E>, exponent: impl Into<E>) -> E {
+    E::new(Expr::Pow(base.into(), exponent.into())).simplify()
+}
 
 // ---------------------------------------------------------------------------
 // Name-based function lookup
@@ -1489,7 +1559,6 @@ pub fn safe_sqrt(x: E) -> E {
 
 // Re-export linalg types
 pub use linalg::{SymVec, SymMat, jacobian};
-pub use diff::DiffVar;
 pub use parse::{parse, parse_with_functions, ParseError};
 pub use geo::{vect2sym, vect3sym, matrix2sym, matrix3sym, quaternsym};
 pub use cse::cse;

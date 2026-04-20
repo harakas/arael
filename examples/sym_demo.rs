@@ -15,7 +15,7 @@ fn main() {
         println!("Constants:  constant(3.0) = {}, c(3.0) = {}", constant(3.0), c(3.0));
         println!("Arithmetic: x + y = {}", x + y);
         println!("            x * y - 1 = {}", x * y - 1.0);
-        println!("            x^2 = {}", pow(x, c(2.0)));
+        println!("            x^2 = {}", pow(x, 2.0));
 
         // Auto-simplification (like SymPy)
         println!("\n--- Auto-simplification ---");
@@ -25,7 +25,7 @@ fn main() {
         println!("x * 0 = {}", x * 0.0);
         println!("-(-x) = {}", -(-x));
         println!("x - x = {}", x - x);
-        println!("3*x + 2*x = {}", c(3.0) * x + c(2.0) * x);
+        println!("3*x + 2*x = {}", 3.0 * x + 2.0 * x);
         println!("x * x = {}", x * x);
 
         // ============================================================
@@ -34,7 +34,7 @@ fn main() {
         println!("\n=== Derivatives ===\n");
 
         // Power rule
-        let x4 = pow(x, c(4.0));
+        let x4 = pow(x, 4.0);
         let dx4 = x4.diff(x);
         println!("Power rule:     d/dx(x^4)  = {dx4}");
         let d2x4 = dx4.diff(x);
@@ -52,7 +52,7 @@ fn main() {
         let exp_sin = exp(sin(x));
         println!("Chain rule:     d/dx(exp(sin(x))) = {}", exp_sin.diff(x));
 
-        let ln_sqrt = ln(sqrt(pow(x, c(2.0)) + c(1.0)));
+        let ln_sqrt = ln(sqrt(pow(x, 2.0) + c(1.0)));
         println!("  nested:       d/dx(ln(√(x²+1))) = {}", ln_sqrt.diff(x));
 
         // General power: x^x
@@ -77,10 +77,10 @@ fn main() {
         let dist = x * (a + b);
         println!("Distributive:   ({dist}).expand() = {}", dist.expand());
 
-        let sq = pow(x + y, c(2.0));
+        let sq = pow(x + y, 2.0);
         println!("(x + y)^2:      {}", sq.expand());
 
-        let cb = pow(x - y, c(3.0));
+        let cb = pow(x - y, 3.0);
         println!("(x - y)^3:      {}", cb.expand());
 
         // ============================================================
@@ -96,18 +96,18 @@ fn main() {
         // ============================================================
         println!("\n=== Evaluation & Substitution ===\n");
 
-        let expr = pow(x, c(2.0)) + c(3.0) * x + c(1.0);
+        let expr = pow(x, 2.0) + 3.0 * x + 1.0;
         let vars = HashMap::from([("x", 2.0)]);
         println!("f(x) = {expr}");
         println!("f(2) = {}", expr.eval(&vars).unwrap());
 
-        let subst = expr.subs("x", &(y + c(1.0)));
+        let subst = expr.subs(x, &(y + 1.0));
         println!("f(y+1) = {subst}");
 
         // Kinematics example
         println!("\n--- Kinematics ---");
         let (t, v0, a) = symbols!(t, v0, a);
-        let s = v0 * t + c(0.5) * a * pow(t, c(2.0));
+        let s = v0 * t + 0.5 * a * pow(t, 2.0);
         println!("Position:   s(t) = {s}");
         let v = s.diff(t);
         println!("Velocity:   v(t) = ds/dt = {v}");
@@ -139,7 +139,7 @@ fn main() {
 
         // Jacobian
         let f1 = x * y;
-        let f2 = pow(x, c(2.0)) + sin(y);
+        let f2 = pow(x, 2.0) + sin(y);
         let j = jacobian(&[f1, f2], &["x", "y"]);
         println!("\nJ([x·y, x²+sin(y)]) = {}", j.simplify());
 
@@ -148,7 +148,7 @@ fn main() {
         // ============================================================
         println!("\n=== Output Formats ===\n");
 
-        let complex = sin(x) / pow(y, c(2.0));
+        let complex = sin(x) / pow(y, 2.0);
         println!("Expression: {complex}");
         println!("LaTeX:      {}", complex.to_latex());
         println!("Rust f64:   {}", complex.to_rust("f64"));
@@ -168,7 +168,7 @@ fn main() {
         let r = (y - (a * x + b)) / sigma;
         let rs = gamma * atan(r / gamma);
         #[allow(non_snake_case)]
-        let S = pow(rs, c(2.0));
+        let S = pow(rs, 2.0);
         println!("S = {S}");
         println!("dS/dx = {}", S.diff(x));
 

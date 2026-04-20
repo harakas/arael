@@ -53,7 +53,7 @@ sym! {
     let f = sin(x) * x + 1.0;
 
     println!("f(x)   = {}", f);           // sin(x) * x + 1
-    println!("f'(x)  = {}", f.diff("x")); // x * cos(x) + sin(x)
+    println!("f'(x)  = {}", f.diff(x));   // x * cos(x) + sin(x)
 
     let vars = hashmap!{ "x" => 2.0 };
     println!("f(2.0) = {}", f.eval(&vars).unwrap()); // 2.8185...
