@@ -4,6 +4,24 @@
 
 A Rust framework for nonlinear optimization with compile-time symbolic differentiation. Define your model and constraints declaratively -- the macro system symbolically differentiates, applies common subexpression elimination, and generates compiled cost, gradient, and Gauss-Newton hessian (J^T J approximation) code.
 
+## Contents
+
+- [Features](#features)
+- [Scope](#scope)
+- [Quick Example: Symbolic Math](#quick-example-symbolic-math)
+- [Quick Example: Robust Linear Regression](#quick-example-robust-linear-regression)
+- [SLAM Path Optimization](#slam-path-optimization)
+- [Localization Demo](#localization-demo)
+- [Examples](#examples)
+- [Solvers](#solvers)
+- [Runtime Differentiation](#runtime-differentiation)
+- [Instrumentation and troubleshooting](#instrumentation-and-troubleshooting)
+  - [My solve doesn't converge. What do I check?](#my-solve-doesnt-converge-what-do-i-check)
+  - [Looking under the hood with `cargo expand`](#looking-under-the-hood-with-cargo-expand)
+- [2D Sketch Editor](#2d-sketch-editor)
+- [Project Structure](#project-structure)
+- [License](#license)
+
 ## Features
 
 - **Symbolic math** -- expression trees with automatic differentiation, simplification, expansion, LaTeX/Rust code generation
@@ -20,7 +38,7 @@ A Rust framework for nonlinear optimization with compile-time symbolic different
 - **Model trait** -- hierarchical serialize/deserialize/update protocol for parameter optimization
 - **Type-safe references** -- `Ref<T>`, `Vec<T>`, `Deque<T>`, `Arena<T>` for indexed collections with stable references
 - **Runtime differentiation** -- parse equations from strings at runtime, auto-differentiate symbolically, and optimize via `ExtendedModel` + `TripletBlock` (used by the sketch editor for parametric expression dimensions)
-- **User-defined functions** -- `#[arael::function]` lets you plug custom operators into constraint bodies, either purely symbolic (`fn name(x: E) -> E`) or opaque numerical eval + closed-form derivatives. See [docs/MODEL.md](docs/MODEL.md#user-defined-functions-araelfunction) and [examples/user_function_demo.rs](examples/user_function_demo.rs).
+- **User-defined functions** -- plug custom symbolic or native-eval operators into constraint bodies with `#[arael::function]`.
 - **Hessian blocks** -- `SelfBlock<A>` and `CrossBlock<A, B>` for 1- and 2-entity constraints (packed dense); `TripletBlock` for 3+ entities (COO sparse)
 - **Jacobian computation** -- `#[arael(root, jacobian)]` generates `calc_jacobian()` returning a sparse Jacobian matrix for DOF analysis and constraint diagnostics (see `examples/jacobian_demo.rs`)
 - **Gimbal-lock-free rotations** -- `EulerAngleParam` optimizes a small delta around a reference rotation matrix
@@ -49,14 +67,15 @@ use arael::sym;
 use maplit::hashmap;
 
 sym! {
-    let x = symbol("x");
-    let f = sin(x) * x + 1.0;
+    let (x, y) = symbols!(x, y);
+    let f = sin(x) * y + pow(x, 2.0);
 
-    println!("f(x)   = {}", f);           // sin(x) * x + 1
-    println!("f'(x)  = {}", f.diff(x));   // x * cos(x) + sin(x)
+    println!("f(x, y)    = {}", f);           // x^2 + y * sin(x)
+    println!("df/dx      = {}", f.diff(x));   // y * cos(x) + 2 * x
+    println!("df/dy      = {}", f.diff(y));   // sin(x)
 
-    let vars = hashmap!{ "x" => 2.0 };
-    println!("f(2.0) = {}", f.eval(&vars).unwrap()); // 2.8185...
+    let vars = hashmap!{ "x" => 2.0, "y" => 3.0 };
+    println!("f(2, 3)    = {}", f.eval(&vars).unwrap()); // 6.7278...
 }
 ```
 
@@ -66,7 +85,13 @@ See [docs/SYM.md](docs/SYM.md) for the full symbolic math reference.
 
 ## Quick Example: Robust Linear Regression
 
-Define a model with optimizable parameters and a residual expression. The `gamma * atan(plain_r / gamma)` formulation is the [Starship robust error suppression method](https://patents.google.com/patent/US12346118) -- residuals up to ~gamma pass linearly, beyond that they saturate, suppressing outlier influence while preserving smooth differentiability:
+You describe the model as a Rust struct and the residual as an arael-sym expression; the macros do the rest.
+
+- `#[arael::model]` auto-implements the `Model` trait for the struct: serialize / deserialize / update of every optimizable parameter, flat indexing into the residual vector, and all the hooks the solver needs.
+- Every `Param<T>` field is an optimization variable. Plain fields (`data`, `sigma`, `gamma` here) are constants.
+- `#[arael(fit(data, |e| ...))]` declares a least-squares fit: one residual per element of `data`, body written as a symbolic expression referencing model fields and the current data entry. The macro compiles the body into residual + gradient + Hessian code with symbolic differentiation and CSE.
+
+The `gamma * atan(plain_r / gamma)` wrapper is the [Starship robust error-suppression method](https://patents.google.com/patent/US12346118) -- residuals up to ~gamma pass through linearly, beyond that they saturate, suppressing outlier influence while staying smoothly differentiable.
 
 ```rust
 #[arael::model]
@@ -113,55 +138,21 @@ The robust fit ignores outliers while tracking the inlier data:
 
 See [docs/LINEAR.md](docs/LINEAR.md) for the full walkthrough. Full source: [examples/linear_demo.rs](examples/linear_demo.rs).
 
-## Runtime Differentiation
-
-Compile-time differentiation generates optimized Rust code with CSE at build time -- ideal when the model structure is fixed. But many applications need equations that are only known at runtime: user-typed formulas in a CAD parametric dimension, configuration-driven curve fitting, or symbolic constraints loaded from a file.
-
-Arael supports this through **runtime differentiation**: parse an equation string with `arael_sym::parse`, symbolically differentiate once at setup with `E::diff`, then evaluate the expression tree numerically each solver iteration. The `ExtendedModel` trait and `TripletBlock` provide the integration point with the LM solver.
-
-The sketch editor (`arael-sketch`) uses this extensively for parametric expression dimensions -- a user can type `d0 * 2 + 3` as a dimension value, and the solver constrains the geometry to satisfy the equation in real time, with full symbolic derivatives.
-
-```rust
-// Parse equation at runtime, differentiate symbolically
-let expr = arael_sym::parse("a * x + b").unwrap();
-let residual = expr - arael_sym::symbol("y");
-let dr_da = residual.diff("a");  // symbolic derivative w.r.t. a
-let dr_db = residual.diff("b");  // symbolic derivative w.r.t. b
-
-// In ExtendedModel::extended_compute64(params, grad) -- each solver iteration:
-for &(x, y) in &data {
-    vars.insert("x", x);
-    vars.insert("y", y);
-    let r = residual.eval(&vars)?;
-    let dr = vec![dr_da.eval(&vars)?, dr_db.eval(&vars)?];
-    // writes 2*r*dr into `grad` AND pushes upper-triangle Hessian
-    // into the TripletBlock -- one call, both done
-    hb.add_residual(r, &param_indices, &dr, grad);
-}
-```
-
-The demo accepts an arbitrary equation from the command line:
-
-```bash
-cargo run --example runtime_fit_demo                            # default: y = a * x + b
-cargo run --example runtime_fit_demo -- "a * x^2 + b * x + c"  # quadratic
-cargo run --example runtime_fit_demo -- "a * sin(x * b) + c"   # sinusoidal
-```
-
-Full source: [examples/runtime_fit_demo.rs](examples/runtime_fit_demo.rs).
-
 ## SLAM Path Optimization
 
-For multi-body optimization (SLAM, bundle adjustment), define your model hierarchy with constraints. The macro system handles symbolic differentiation, reference resolution, and code generation automatically.
+The earlier regression example fitted two scalar parameters against one residual. Real SLAM and bundle-adjustment problems have many coupled entities -- poses, landmarks, cameras -- with many constraint types between them. arael models the hierarchy as plain Rust structs, each annotated with `#[arael::model]` and one or more `#[arael(constraint(...))]` attributes. The macros walk the hierarchy at compile time, differentiate every residual symbolically, eliminate common subexpressions, and emit one fused `calc_cost` + `calc_grad_hessian` pair for the whole graph.
 
-The demo ([examples/slam_demo.rs](examples/slam_demo.rs)) generates a synthetic S-curve trajectory with 60 poses and 240 landmarks observed by 5 cameras. It handles 50% outlier associations with 30x pixel noise via robust suppression and graduated optimization. The solver uses faer sparse Cholesky (pure Rust) to exploit the hessian's sparsity structure:
+The demo ([examples/slam_demo.rs](examples/slam_demo.rs)) generates a synthetic S-curve trajectory with 60 poses and 240 point landmarks observed by 5 cameras. It handles 50% outlier associations with 30x pixel noise via robust suppression and graduated optimization. The solver uses faer sparse Cholesky (pure Rust) to exploit the hessian's sparsity structure.
+
+Each entity owns its own parameters and its own `SelfBlock` -- the diagonal block of the Hessian for that entity. Constraints that touch a single entity accumulate into its self block; constraints that couple two entities (an odometry residual between two poses, a bearing residual between a landmark and a pose) accumulate into a `CrossBlock` between the pair. The assembled Hessian therefore mirrors the model hierarchy: one block row/column per entity, a self block on the diagonal, and a cross block off-diagonal wherever a constraint ties two entities together. Entities that never share a constraint remain exactly zero in that corner of the matrix -- which is where the sparsity comes from.
 
 ![Hessian Sparsity](docs/sparsity.png)
 
-The sparsity pattern shows pose-pose blocks (upper-left), pose-landmark coupling (off-diagonal), and landmark self-blocks (lower-right diagonal). The faer sparse Cholesky solver exploits this, achieving 66x speedup over dense at 200 poses.
+The pattern in the S-curve demo above shows pose-pose blocks (upper-left), pose-landmark coupling (off-diagonal), and landmark self-blocks (lower-right diagonal). The faer sparse Cholesky solver exploits this, achieving 66x speedup over dense at 200 poses.
+
+A `Pose` is the robot's 6-DOF state at one timestep. Three constraint attributes stack on the same `hb_pose` Hessian block: a guarded GPS constraint (active only when GPS data is present), a drift regularizer that stabilises graduated optimization, and an accelerometer-based tilt constraint on roll and pitch. Every `Param<...>` is an optimization variable; `info` holds per-timestep measurements.
 
 ```rust
-// Robot pose -- multiple constraints on the same hessian block
 #[arael::model]
 #[arael(constraint(hb_pose, guard = self.info.gps.is_some(), {
     // GPS constraint (guarded -- only when GPS data is present)
@@ -185,8 +176,15 @@ struct Pose {
     info: PoseInfo,
     hb_pose: SelfBlock<Pose>,
 }
+```
 
-// Observation linking a landmark to a pose
+`PointFrine` links a `PointLandmark` to the `PointFeature` (a 2D detection in one of the pose's cameras) that observed it. A "frine" is the 3D direction ray built once, at set-up time, from the 2D pixel measurement plus the camera's intrinsics; afterwards the solver never touches pixel coordinates or undistortion and works in the camera frame directly. Staying in 3D keeps derivatives smooth and sidesteps the projective singularities that show up when you differentiate through a pixel-space reprojection.
+
+The residual transforms the landmark into the pose's frame and then into the camera's feature frame (`feature.mf2r`), and compares its direction to the stored frine via two `atan2` bearings (azimuth and elevation). Each bearing is whitened by the feature's per-axis `isigma` and passed through the robust `gamma * atan(.../gamma)` wrapper for outlier tolerance.
+
+The `#[arael(ref = ...)]` attributes declare which collection each reference resolves against -- `pose` from `root.poses`, `feature` chained off `pose.info.features` -- and the constraint uses a `CrossBlock<PointLandmark, Pose>` because it couples two entity types.
+
+```rust
 #[arael::model]
 #[arael(constraint(hb, parent=lm, {
     let mr2w = pose.ea.rotation_matrix();
@@ -203,8 +201,11 @@ struct PointFrine {
     feature: Ref<PointFeature>,
     hb: CrossBlock<PointLandmark, Pose>,
 }
+```
 
-// Odometry constraint between consecutive poses
+`PosePair` is the odometry constraint between two consecutive poses -- a relative-motion residual whitened by a decomposed covariance. Another `CrossBlock`, this time Pose-to-Pose.
+
+```rust
 #[arael::model]
 #[arael(constraint(hb, {
     let mr2w_prev = prev.ea.rotation_matrix();
@@ -222,8 +223,11 @@ struct PosePair {
     cur: Ref<Pose>,
     hb: CrossBlock<Pose, Pose>,
 }
+```
 
-// Root model -- triggers code generation for all constraints
+Finally, `Path` ties it all together. `#[arael(root)]` is what actually triggers code generation: the macro walks every constraint attribute on every reachable struct, resolves the refs, and emits `calc_cost()` / `calc_grad_hessian()` for the whole model hierarchy.
+
+```rust
 #[arael::model]
 #[arael(root)]
 struct Path {
@@ -237,8 +241,6 @@ struct Path {
     tilt_isigma: f32,
 }
 ```
-
-The `#[arael(root)]` attribute generates `calc_cost()` and `calc_grad_hessian()` methods that traverse the entire hierarchy, resolve references, and evaluate all constraints with compiled, CSE-optimized derivative code.
 
 See [docs/SLAM.md](docs/SLAM.md) for the full walkthrough.
 
@@ -269,63 +271,6 @@ The `examples/` directory is the primary place to see the API in use. Each file 
 - **[slam_demo](examples/slam_demo.rs)** -- synthetic visual-inertial SLAM: S-curve trajectory, 20 poses, 40 landmarks, odometry + tilt + GPS + feature observations. Full verbose-LM trace across graduated isigma passes -- the reference for what a healthy solver run looks like.
 - **[sym_demo](examples/sym_demo.rs)** -- symbolic-math tour: expression building, automatic differentiation, CSE, pretty printing, parsing. No solver involvement; pure `arael-sym`.
 - **[user_function_demo](examples/user_function_demo.rs)** -- `#[arael::function]` for user-defined operators in constraint bodies. Form A purely symbolic `sigmoid(x) = 1 / (1 + exp(-x))` and Form B opaque numerical `my_safe_asin` with a closed-form symbolic derivative, both used in a single two-residual LM fit.
-
-## Model Structure
-
-Every piece that appears in an `#[arael::model]` declaration. Full
-reference: [docs/MODEL.md](docs/MODEL.md) and
-[docs.rs/arael](https://docs.rs/arael).
-
-- **Parameter types**: `Param<T>` (scalar / vec2 / vec3),
-  `SimpleEulerAngleParam<T>` (direct Euler angles),
-  `EulerAngleParam<T>` (universal delta-from-reference).
-- **Hessian blocks**: the full Gauss-Newton Hessian is a *symmetric*
-  block matrix, one block per (entity, entity) pair.
-  `SelfBlock<Self>` holds the **diagonal block** (upper triangle
-  stored, symmetric by construction) and is **mandatory** on every
-  params-having Model. `CrossBlock<A, B>` holds the **off-diagonal
-  block** for the (A, B) pair -- one `CrossBlock` covers both
-  `H[A, B]` and its transpose `H[B, A]`, written from the single
-  stored rectangle by the accumulator (cheap in-place writes -- the
-  default for cross-entity Hessian pairs). `TripletBlock<T>` is COO
-  storage for across-entity pairs and is **always placed on the
-  root** (declare one `hbt: TripletBlock<T>` on the root struct;
-  constraints reach it via the `root.<field>` block spec). Two
-  canonical uses: (1) the root has its own `Param` fields and
-  constraints couple per-entity params with root params -- the
-  (entity, root) cross pair lives in the root TripletBlock; (2)
-  runtime-parsed residuals via `ExtendedModel` that can't enumerate
-  per-pair CrossBlocks statically. Don't put a TripletBlock on a
-  non-root struct. Assembly is noticeably slower than `CrossBlock`
-  because every entry is a `Vec` push. **Caveat for (1)**: root-
-  level `Param`s that are read by many constraints destroy Hessian
-  sparsity -- the root's rows / columns become dense, sparse
-  Cholesky fill-in grows, solve time suffers. Use root `Param`s
-  only when the quantity is genuinely system-wide -- canonical
-  cases are **frame corrections** (rigid translation / rotation
-  applied to every pose) and **global calibration** (camera
-  intrinsics, IMU bias / scale factors, magnetometer declination,
-  etc. -- one per sensor, read by every measurement from that
-  sensor). Prefer per-entity params for local quantities. Constraints touching a pair
-  of entities all **add into the same block** -- the assembled
-  matrix is the sum of all constraints' contributions.
-- **Parameter control**: `Param::new(v)` (optimisable), `Param::fixed(v)`
-  (never moves), or `pose.pos.optimize = false;` at runtime to freeze
-  a live parameter. Initial values are available in constraint bodies
-  as `<field>_value` (e.g. `pose.pos_value`) so drift constraints can
-  anchor to the seed.
-- **Constraint attributes**: single-block `(hb, { body })`, bracketed
-  multi-block `([hb_ab, hb_ac, hb_bc], { body })` (N ≥ 2), remote
-  `(pose.hb_pose, { body })` reaching through a `Ref` field, and
-  self-primary + root-owned TripletBlock `(hb_pose, root.hbt, { body })`.
-  Modifiers: `parent=`, `name=`, `guard=`, typed `var: T` bindings.
-- **Field attributes**: `#[arael(ref = root.foo)]` for `Ref<T>` fields,
-  `#[arael(cross = (a, b))]` to disambiguate `CrossBlock<T, T>`,
-  `#[arael(constraint_index)]` for a per-constraint row id,
-  `#[arael(skip)]` to exclude a field.
-- **Collection types**: `refs::Vec`, `refs::Deque`, `refs::Arena`;
-  `Ref<T>` handles into any of them. Direct composition (plain struct
-  field) also works -- see `single_root_demo`.
 
 ## Solvers
 
@@ -366,7 +311,46 @@ Graduated-optimisation idiom: a scale field on the root (e.g.
 per pass from loose to tight. Avoid mutating every feature's
 `isigma` in place -- see `loc_demo.rs` / `slam_demo.rs`.
 
-## My solve doesn't converge. What do I check?
+## Runtime Differentiation
+
+Compile-time differentiation generates optimized Rust code with CSE at build time -- ideal when the model structure is fixed. But many applications need equations that are only known at runtime: user-typed formulas in a CAD parametric dimension, configuration-driven curve fitting, or symbolic constraints loaded from a file.
+
+Arael supports this through **runtime differentiation**: parse an equation string with `arael_sym::parse`, symbolically differentiate once at setup with `E::diff`, then evaluate the expression tree numerically each solver iteration. The `ExtendedModel` trait and `TripletBlock` provide the integration point with the LM solver.
+
+The sketch editor (`arael-sketch`) uses this extensively for parametric expression dimensions -- a user can type `d0 * 2 + 3` as a dimension value, and the solver constrains the geometry to satisfy the equation in real time, with full symbolic derivatives.
+
+```rust
+// Parse equation at runtime, differentiate symbolically
+let expr = arael_sym::parse("a * x + b").unwrap();
+let residual = expr - arael_sym::symbol("y");
+let dr_da = residual.diff("a");  // symbolic derivative w.r.t. a
+let dr_db = residual.diff("b");  // symbolic derivative w.r.t. b
+
+// In ExtendedModel::extended_compute64(params, grad) -- each solver iteration:
+for &(x, y) in &data {
+    vars.insert("x", x);
+    vars.insert("y", y);
+    let r = residual.eval(&vars)?;
+    let dr = vec![dr_da.eval(&vars)?, dr_db.eval(&vars)?];
+    // writes 2*r*dr into `grad` AND pushes upper-triangle Hessian
+    // into the TripletBlock -- one call, both done
+    hb.add_residual(r, &param_indices, &dr, grad);
+}
+```
+
+The demo accepts an arbitrary equation from the command line:
+
+```bash
+cargo run --example runtime_fit_demo                            # default: y = a * x + b
+cargo run --example runtime_fit_demo -- "a * x^2 + b * x + c"  # quadratic
+cargo run --example runtime_fit_demo -- "a * sin(x * b) + c"   # sinusoidal
+```
+
+Full source: [examples/runtime_fit_demo.rs](examples/runtime_fit_demo.rs).
+
+## Instrumentation and troubleshooting
+
+### My solve doesn't converge. What do I check?
 
 0. **Turn on solver verbose mode first.** Set `verbose: true` on `LmConfig` and every LM step prints cost, lambda, and the step outcome. On a Cholesky rejection the line also reports non-finite counts for grad / diagonal / cur_x / matrix and a count of non-positive diagonal entries -- four quick signals that narrow the problem before any deeper digging:
 
@@ -395,7 +379,7 @@ per pass from loose to tight. Avoid mutating every feature's
 
 9. **Rank / DOF.** Call `Jacobian::singular_values` (or the full `Jacobian::svd` for directions). Near-zero singular values count the degrees of freedom. If this is higher than you expect, the model is under-constrained. The right singular vectors (columns of `SvdResult::v`) corresponding to σ ≈ 0 name the unconstrained parameter directions -- useful for identifying *which* parameters are free. SVD is always performed in f64 regardless of the model's element type, so rank detection stays reliable even for f32 models.
 
-## Looking under the hood with `cargo expand`
+### Looking under the hood with `cargo expand`
 
 Mastering arael means being able to read what the macros actually generated for your equations. `#[arael::model]` does a lot: it interprets the constraint body symbolically, differentiates it against every reachable parameter, runs common-subexpression elimination, and emits Rust code for three call paths (`__compute_blocks`, `__set_block_indices`, `calc_jacobian`). [`cargo expand`](https://github.com/dtolnay/cargo-expand) (`cargo install cargo-expand`) prints the expansion exactly as the compiler sees it.
 
