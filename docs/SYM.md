@@ -230,14 +230,26 @@ When the body is implemented natively (not as a symbolic expression), use `exter
 
 ```rust
 sym! {
-    // extern_func ties differentiation, codegen, and runtime eval together.
-    let lerp = extern_func2(
-        "lerp",
-        "my_crate::lerp",
-        |a, b| [c(1.0) - symbol("__t"), symbol("__t")], // dummy derivs sketch
+    // lerp(a, b, t) = a*(1-t) + b*t. Eval calls `my_crate::lerp`
+    // at runtime; diff uses the supplied per-arg derivatives;
+    // codegen emits `my_crate::lerp(a, b, t)`.
+    let lerp = extern_func(
+        "lerp", 3, "my_crate::lerp",
+        // [d/da, d/db, d/dt] for lerp(a, b, t):
+        |args| {
+            let a = args[0].clone();
+            let b = args[1].clone();
+            let t = args[2].clone();
+            vec![1.0 - t, t, b - a]
+        },
         |args: &[f64]| args[0] * (1.0 - args[2]) + args[1] * args[2],
     );
-    // ...
+
+    let (x, y, t) = symbols!(x, y, t);
+    let e = lerp(vec![x, y, t]);
+    println!("{e}");                   // lerp(x, y, t)
+    println!("d/dx = {}", e.diff(x));  // 1 - t
+    println!("d/dt = {}", e.diff(t));  // y - x
 }
 ```
 
@@ -292,7 +304,7 @@ sym! {
         // around `1 - x^2` prevents the simplifier from reordering the
         // subtraction relative to the `+eps^2`, which would otherwise
         // cancel in floating point near |x| = 1.
-        |x| [1.0 / sqrt(identity(1.0 - x.clone() * x) + epsilon() * epsilon())],
+        |x| [1.0 / sqrt(identity(1.0 - x * x) + epsilon() * epsilon())],
     );
     let f = safe_asin(x);
     println!("{}",       f);             // safe_asin(x)
