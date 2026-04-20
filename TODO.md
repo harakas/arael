@@ -26,7 +26,7 @@
 - **Document Jacobian feature**: DONE -- documented in lib.rs features, macro docs, README.
 - **Degenerate tangent at shared endpoint**: DONE -- TangentLA uses dot-product formulation when tangent point is a shared endpoint (detected via coincident scan). The perpendicular-distance formulation has zero Jacobian at shared endpoints; the dot-product does not.
 - **DOF computation ownership in Sketch**: Move async DOF lifecycle into Sketch itself. Mutations kick off async computation internally. `sketch.dof()` blocks and waits if result not ready. GUI reads `sketch.cached_dof` for non-blocking display. Eliminates the external async plumbing (dof_input/dof_output/dof_display, bincode serialize/deserialize copy, poll_dof).
-- **arael-sym**: Implement `Mul<E> for f64`, `Mul<E> for i64`, etc. so `2.0 * expr` works (currently only `expr * 2.0` compiles). Same for Add, Sub, Div.
+- **arael-sym**: Implement `Mul<E> for f64`, `Mul<E> for i64`, etc. so `2.0 * expr` works (currently only `expr * 2.0` compiles). Same for Add, Sub, Div. -- DONE
 - **arael-sketch**: when rotating arcs the arc radius dimension does not rotate -- DONE
 - **arael-sketch**: implement sweep A0 driven/distance L0 driven -- make to current value and driven -- DONE
 - **arael-sketch**: arc angles when rotating arc can drift? so I see things like arc sweep 480 degrees -- DONE
@@ -39,8 +39,8 @@
 - **arael-macros**: support general func() syntax -- right now we have to describe all of them which is annoying..
 - **arael**: support single struct model+root. right now it does not function. -- DONE (SelfBlock<Self> on root + direct-composed sub-model fields now route through EntityLocation::RootSelf / EntityLocation::DirectField in arael-macros)
 - **arael**: support global optimization parameters with a triplet block, so a global param can be mixed with hessianblock, or efficiently omitted
-- **arael-sym**: parse_with_bag -- bag with functions and substitutions so func() gets current active function
-- **arael-sym**: cli calculator demo app, better than bc, define functions, etc.
+- **arael-sym**: parse_with_bag -- bag with functions and substitutions so func() gets current active function -- DONE
+- **arael-sym**: cli calculator demo app, better than bc, define functions, etc. -- DONE
 - **arael**: docs: document constraint has name= property
 - **arael**: extend jacobi demo with constraint labels
 - **arael-sketch**: clean up points obscuring everything, make line endpoint when creating explicit and clean -- cross on line snap, cross+box on point snap

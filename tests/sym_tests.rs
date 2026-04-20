@@ -1573,6 +1573,35 @@ fn test_cse_large_expression_count() {
 }
 
 #[test]
+fn test_mixed_ops_with_i64() {
+    // Bare integer literals (no `.0` suffix) must compose with E in
+    // both directions for every basic operator. Without the i64
+    // impls this test fails to compile. Exact output strings depend
+    // on the simplifier's canonical ordering -- we verify numeric
+    // equivalence at x = 4 instead.
+    use arael_sym::*;
+    use std::collections::HashMap;
+    let x = symbol("x");
+    let vars = HashMap::from([("x", 4.0)]);
+
+    let cases: &[(E, f64)] = &[
+        (x.clone() + 2, 4.0 + 2.0),
+        (2 + x.clone(), 2.0 + 4.0),
+        (x.clone() - 2, 4.0 - 2.0),
+        (5 - x.clone(), 5.0 - 4.0),
+        (x.clone() * 3, 4.0 * 3.0),
+        (3 * x.clone(), 3.0 * 4.0),
+        (x.clone() / 4, 4.0 / 4.0),
+        (8 / x.clone(), 8.0 / 4.0),
+    ];
+    for (i, (expr, expected)) in cases.iter().enumerate() {
+        let v = expr.eval(&vars).unwrap();
+        assert!((v - expected).abs() < 1e-12,
+            "case {}: got {} expected {} (expr: {})", i, v, expected, expr);
+    }
+}
+
+#[test]
 fn test_eval_unbound_symbol() {
     use std::collections::HashMap;
     let expr = arael_sym::symbol("x") + arael_sym::symbol("y");

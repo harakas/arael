@@ -1074,6 +1074,56 @@ impl std::ops::Div<E> for f64 {
     fn div(self, rhs: E) -> E { E::new(Expr::Div(constant(self), rhs)).simplify() }
 }
 
+// --- Mixed ops: E with i64 (auto-simplify).
+//
+// The pure-E and E-with-f64 impls above already cover the common
+// cases. These i64 impls let bare integer literals (`2 * x`,
+// `x + 1`) work without an explicit `.0` suffix: Rust's type
+// inference picks i64 when no concrete type is pinned, and
+// integer literals with type annotations (`2i64 * x`) also flow
+// through here. We convert to f64 at construction time to keep
+// the expression tree representation uniform.
+
+impl std::ops::Add<i64> for E {
+    type Output = E;
+    fn add(self, rhs: i64) -> E { E::new(Expr::Add(self, constant(rhs as f64))).simplify() }
+}
+
+impl std::ops::Add<E> for i64 {
+    type Output = E;
+    fn add(self, rhs: E) -> E { E::new(Expr::Add(constant(self as f64), rhs)).simplify() }
+}
+
+impl std::ops::Sub<i64> for E {
+    type Output = E;
+    fn sub(self, rhs: i64) -> E { E::new(Expr::Sub(self, constant(rhs as f64))).simplify() }
+}
+
+impl std::ops::Sub<E> for i64 {
+    type Output = E;
+    fn sub(self, rhs: E) -> E { E::new(Expr::Sub(constant(self as f64), rhs)).simplify() }
+}
+
+impl std::ops::Mul<i64> for E {
+    type Output = E;
+    fn mul(self, rhs: i64) -> E { E::new(Expr::Mul(self, constant(rhs as f64))).simplify() }
+}
+
+impl std::ops::Mul<E> for i64 {
+    type Output = E;
+    fn mul(self, rhs: E) -> E { E::new(Expr::Mul(constant(self as f64), rhs)).simplify() }
+}
+
+impl std::ops::Div<i64> for E {
+    type Output = E;
+    fn div(self, rhs: i64) -> E { E::new(Expr::Div(self, constant(rhs as f64))).simplify() }
+}
+
+impl std::ops::Div<E> for i64 {
+    type Output = E;
+    fn div(self, rhs: E) -> E { E::new(Expr::Div(constant(self as f64), rhs)).simplify() }
+}
+
 // --- Custom function support ---
 
 /// Expand a Func node by substituting params -> args in the body.
