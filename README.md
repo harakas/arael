@@ -289,27 +289,13 @@ SLAM-like problem.
 | `solve[_f32]` (dense) | toy problems (≤ 4 parameters) |
 | `solve_band[_f32]` | **only** when the Hessian is genuinely block-tridiagonal with a known half-bandwidth `kd` |
 
-`LmConfig` fields: `abs_precision` (1e-6), `rel_precision` (1e-4),
-`max_iters` (100), `min_iters` (5), `patience` (3),
-`initial_lambda` (1e-4), `cost_threshold` (0.0), `verbose` (false).
-Turn `verbose: true` on first whenever debugging -- each LM step
-prints cost, lambda, and timing; Cholesky rejections additionally
-report non-finite counts for grad / diagonal / cur_x / matrix and a
-`diag<=0: N` count (any non-zero is a bug, not rounding noise).
-
-**Tuning performance vs quality matters.** Defaults are a safe
-middle ground, but every iteration costs time and the last few
-often deliver very little cost improvement. For production solves,
-enable `verbose`, find the iteration `K` at which cost improvement
-effectively stops, then set `max_iters` and loosen `rel_precision`
-so the solver terminates near `K` on representative input without
-regressing corner cases. See [docs/SOLVERS.md](docs/SOLVERS.md#tuning-for-performance-vs-quality)
-for the full process.
-
-Graduated-optimisation idiom: a scale field on the root (e.g.
-`frine_isigma_scale: f32`) multiplied into stiff residuals, stepped
-per pass from loose to tight. Avoid mutating every feature's
-`isigma` in place -- see `loc_demo.rs` / `slam_demo.rs`.
+`LmConfig` controls the solve -- convergence tolerances, iteration
+caps, initial lambda, and `verbose` (turn it on first when
+debugging). Defaults are a safe middle ground; production solves
+usually want `max_iters` and `rel_precision` tuned for the
+performance/quality trade-off that actually matters for the
+problem. See [docs/SOLVERS.md](docs/SOLVERS.md) for the full field
+reference and a recipe for picking them.
 
 ## Runtime Differentiation
 
