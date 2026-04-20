@@ -141,7 +141,8 @@ sym! {
 
 ```rust
 sym! {
-    let e = symbol("x") * symbol("y") + sin(symbol("z"));
+    let (x, y, z) = symbols!(x, y, z);
+    let e = x * y + sin(z);
     println!("{:?}", e.free_vars()); // {"x", "y", "z"}
 }
 ```
@@ -150,16 +151,17 @@ sym! {
 
 ```rust
 sym! {
-    let v = SymVec(vec![symbol("x"), symbol("y")]);
-    println!("v.v = {}", v.dot(&v));   // x^2 + y^2
+    let (x, y) = symbols!(x, y);
+    let v = SymVec(vec![x, y]);
+    println!("v.v = {}", v.dot(&v));      // x^2 + y^2
 
     let m = SymMat::new(2, 2, vec![c(1.0), c(2.0), c(3.0), c(4.0)]);
-    println!("M*v = {}", m * &v);      // [x + 2 * y, 3 * x + 4 * y]
-    println!("M^T = {}", m.transpose()); // [1, 3; 2, 4]
+    println!("M*v = {}", m * &v);         // [x + 2 * y, 3 * x + 4 * y]
+    println!("M^T = {}", m.transpose());  // [1, 3; 2, 4]
 
-    let exprs = vec![symbol("x") * symbol("y"), pow(symbol("x"), c(2.0)) + sin(symbol("y"))];
+    let exprs = vec![x * y, pow(x, c(2.0)) + sin(y)];
     let j = jacobian(&exprs, &["x", "y"]);
-    println!("J = {}", j); // [y, x; 2 * x, cos(y)]
+    println!("J = {}", j);                // [y, x; 2 * x, cos(y)]
 }
 ```
 
