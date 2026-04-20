@@ -281,9 +281,10 @@ $$
 \alpha(x) = \gamma \arctan\frac{x}{\gamma}, \qquad \gamma = \frac{2 \sqrt{\Delta S_{\max}}}{\pi}.
 $$
 
-Two properties fall out:
+The $\gamma$ value follows from the saturation requirement: as $|x| \to \infty$, $\arctan(x/\gamma) \to \pm \pi/2$, so $\alpha(x)^2 \to (\gamma \pi / 2)^2$; setting that equal to $\Delta S_{\max}$ and solving gives the $\gamma$ above. Three further properties fall out:
 
 - $\alpha(x) \approx x$ for $|x| \sim 1$ -- small residuals pass through unchanged.
+- $\alpha'(0) = 1$, so near the optimum the loss is indistinguishable from plain $r^2$.
 - $\alpha(x)^2 \to \Delta S_{\max}$ as $|x| \to \infty$ -- no single residual can push the sum by more than $\Delta S_{\max}$.
 
 ![Starship suppression function](docs/starship/capper.png)
@@ -298,7 +299,7 @@ $$
 \hat{S}(M) = \sum_i \alpha(r_i)^2 = \sum_i \left[ \gamma \arctan\frac{L_i^D - G_i(M)}{\gamma \sigma_i} \right]^2.
 $$
 
-In practice $\Delta S_{\max}$ in the range $[10, 25]$ (so $\gamma$ between roughly $2$ and $3$) suppresses genuine outliers hard without biasing inlier-dominated regions.
+In practice $\Delta S_{\max}$ in the range $[10, 25]$ (so $\gamma$ between roughly $2$ and $3$) suppresses genuine outliers hard without biasing inlier-dominated regions. Since residuals are already sigma-scaled, this corresponds roughly to saying "residuals past $3$ to $5\sigma$ stop mattering".
 
 In arael this is exactly what you see in the demo constraint bodies:
 
@@ -308,6 +309,12 @@ gamma * atan(plain_r / gamma)
 ```
 
 The symbolic-differentiation pipeline handles `atan`'s derivative automatically; from the macro's point of view the residual is just another expression. No special-case code, no outlier bookkeeping.
+
+### Initialisation matters
+
+Gauss-Newton (and Levenberg-Marquardt) is a local method: each step linearises the cost around the current $M$ and moves in the direction that linearisation suggests. For any loss, you need a starting $M_0$ close enough to the optimum that the linearisation is informative.
+
+Starship makes this requirement stricter. The gradient falls off as $\alpha'(r) = 1 / (1 + \pi^2 r^2 / (4 \Delta S_{\max}))$, so at the middle of the tuning range ($\Delta S_{\max} = 15$) a residual at $5\sigma$ still carries about $20\%$ of its least-squares pull and a $10\sigma$ residual about $6\%$ -- still usable. Once you get out to $20\sigma$ and beyond it drops under $2\%$ and those residuals are effectively frozen. If $M_0$ puts many residuals that far out, the solver has nothing to work with and stalls. The usual remedy is **graduated optimisation**: start with a large $\Delta S_{\max}$ (loose cap, everything in the informative regime), solve, then shrink it across passes down to the target value. The SLAM demo does this via a `frine_isigma_scale` field stepped per pass.
 
 ## Localization Demo
 
