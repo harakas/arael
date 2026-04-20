@@ -1526,7 +1526,14 @@ pub fn safe_atan2(y: E, x: E) -> E {
 pub fn safe_asin(x: E) -> E {
     simple_func1_derivs("safe_asin",
         |x| asin(clamp(x, c(-1.0), c(1.0))),
-        |x| [c(1.0) / sqrt(identity(c(1.0) - x.clone()*x) + epsilon()*epsilon())]
+        // Clamp x to [-1, 1] in the derivative too, so eval at |x| > 1
+        // gives a finite value (1 / epsilon) instead of NaN. The body's
+        // clamp keeps `asin` inside its domain; this one keeps the
+        // derivative's `1 - x^2` non-negative.
+        |x| {
+            let xc = clamp(x, c(-1.0), c(1.0));
+            [c(1.0) / sqrt(identity(c(1.0) - xc.clone()*xc) + epsilon()*epsilon())]
+        }
     )(x)
 }
 
@@ -1538,7 +1545,12 @@ pub fn safe_asin(x: E) -> E {
 pub fn safe_acos(x: E) -> E {
     simple_func1_derivs("safe_acos",
         |x| acos(clamp(x, c(-1.0), c(1.0))),
-        |x| [-c(1.0) / sqrt(identity(c(1.0) - x.clone()*x) + epsilon()*epsilon())]
+        // Same fix as `safe_asin`: clamp x in the derivative so
+        // `1 - x^2` stays non-negative for any input.
+        |x| {
+            let xc = clamp(x, c(-1.0), c(1.0));
+            [-c(1.0) / sqrt(identity(c(1.0) - xc.clone()*xc) + epsilon()*epsilon())]
+        }
     )(x)
 }
 
@@ -1553,7 +1565,11 @@ pub fn safe_acos(x: E) -> E {
 /// derivative from diverging at $x = 0$.
 pub fn safe_sqrt(x: E) -> E {
     extern_func1("safe_sqrt", "arael::utils::safe_sqrt",
-        |x| [c(0.5) / sqrt(identity(x) + epsilon()*epsilon())],
+        // Guard the derivative's `x` against negative inputs so
+        // `sqrt(x + eps^2)` stays defined. `heaviside(x)` folds
+        // negative x to zero; at eval time that gives `0.5 / eps`,
+        // finite and large, instead of NaN.
+        |x| [c(0.5) / sqrt(identity(x.clone() * heaviside(x)) + epsilon()*epsilon())],
         |args| {
             let v = args[0];
             if v <= 0.0 { 0.0 } else { v.sqrt() }
@@ -1890,6 +1906,34 @@ mod tests {
             let vars = HashMap::from([("x", 1.0)]);
             let v = da.eval(&vars).unwrap();
             assert!(v.is_finite(), "safe_acos derivative at 1.0 should be finite, got {}", v);
+        }
+    }
+
+    /// Regression: the derivative of `safe_asin` / `safe_acos` /
+    /// `safe_sqrt` must stay finite even for inputs well outside the
+    /// safe domain. Previously each derivative formula used the raw
+    /// `x` unclamped, so for `|x| > 1` (asin/acos) or `x < 0` (sqrt)
+    /// the inner `sqrt(1 - x^2 + eps^2)` / `sqrt(x + eps^2)` evaluated
+    /// a negative operand and produced NaN.
+    #[test]
+    fn safe_derivs_finite_outside_domain() {
+        sym! {
+            let x = symbol("x");
+            let d_asin = safe_asin(x).diff("x");
+            let d_acos = safe_acos(x).diff("x");
+            let d_sqrt = safe_sqrt(x).diff("x");
+            for v in [-5.0_f64, -1.5, 1.5, 5.0] {
+                let vars = HashMap::from([("x", v)]);
+                let a = d_asin.eval(&vars).unwrap();
+                let c = d_acos.eval(&vars).unwrap();
+                assert!(a.is_finite(), "safe_asin'({}) should be finite, got {}", v, a);
+                assert!(c.is_finite(), "safe_acos'({}) should be finite, got {}", v, c);
+            }
+            for v in [-5.0_f64, -1.0, -1e-12, 0.0] {
+                let vars = HashMap::from([("x", v)]);
+                let s = d_sqrt.eval(&vars).unwrap();
+                assert!(s.is_finite(), "safe_sqrt'({}) should be finite, got {}", v, s);
+            }
         }
     }
 
