@@ -10,9 +10,9 @@ use arael::sym::*;
 arael::sym! {
     let (x, y) = symbols!(x, y);
 
-    println!("x + y = {}", x + y);             // x + y
-    println!("x * y - 1 = {}", x * y - 1.0);   // x * y - 1
-    println!("x^2 = {}", pow(x, c(2.0)));       // x^2
+    println!("x + y = {}", x + y);            // x + y
+    println!("x * y - 1 = {}", x * y - 1.0);  // x * y - 1
+    println!("x^2 = {}", pow(x, c(2.0)));     // x^2
 }
 ```
 
@@ -21,6 +21,8 @@ The `symbols!` macro expands each bare identifier to
 
 The `arael::sym!` macro auto-inserts `.clone()` on variable reuse, eliminating ownership boilerplate.
 
+Every expression has type `arael::sym::E`, defined as `struct E(Rc<Expr>)`. Cloning is cheap (a reference-count bump) -- the `.clone()` calls `sym!` inserts don't duplicate the expression tree.
+
 ### Auto-simplification
 
 All operations auto-simplify:
@@ -28,14 +30,14 @@ All operations auto-simplify:
 ```rust
 arael::sym! {
     let (x, y) = symbols!(x, y);
-    println!("{}", (x + y) / (x + y)); // 1
-    println!("{}", x + 0.0);          // x
-    println!("{}", x * 1.0);          // x
-    println!("{}", x * 0.0);          // 0
-    println!("{}", -(-x));             // x
-    println!("{}", x - x);            // 0
-    println!("{}", 3.0 * x + 2.0 * x); // 5 * x
-    println!("{}", x * x);            // x^2
+    println!("{}", (x + y) / (x + y));  // 1
+    println!("{}", x + 0.0);            // x
+    println!("{}", x * 1.0);            // x
+    println!("{}", x * 0.0);            // 0
+    println!("{}", -(-x));              // x
+    println!("{}", x - x);              // 0
+    println!("{}", 3.0 * x + 2.0 * x);  // 5 * x
+    println!("{}", x * x);              // x^2
 }
 ```
 
@@ -79,12 +81,12 @@ arael::sym! {
 ```rust
 arael::sym! {
     let x = symbol("x");
-    println!("d/dx(sin(x)) = {}", sin(x).diff("x"));  // cos(x)
-    println!("d/dx(cos(x)) = {}", cos(x).diff("x"));  // -sin(x)
-    println!("d/dx(tan(x)) = {}", tan(x).diff("x"));  // 1 / cos(x)^2
-    println!("d/dx(asin(x)) = {}", asin(x).diff("x")); // 1 / sqrt(-x^2 + 1)
-    println!("d/dx(acos(x)) = {}", acos(x).diff("x")); // -1 / sqrt(-x^2 + 1)
-    println!("d/dx(atan(x)) = {}", atan(x).diff("x")); // 1 / (x^2 + 1)
+    println!("d/dx(sin(x)) = {}", sin(x).diff("x"));    // cos(x)
+    println!("d/dx(cos(x)) = {}", cos(x).diff("x"));    // -sin(x)
+    println!("d/dx(tan(x)) = {}", tan(x).diff("x"));    // 1 / cos(x)^2
+    println!("d/dx(asin(x)) = {}", asin(x).diff("x"));  // 1 / sqrt(-x^2 + 1)
+    println!("d/dx(acos(x)) = {}", acos(x).diff("x"));  // -1 / sqrt(-x^2 + 1)
+    println!("d/dx(atan(x)) = {}", atan(x).diff("x"));  // 1 / (x^2 + 1)
 }
 ```
 
@@ -94,10 +96,10 @@ arael::sym! {
 arael::sym! {
     let (a, b, x, y) = symbols!(a, b, x, y);
 
-    println!("{}", (x * (a + b)).expand());  // a * x + b * x
-    println!("{}", pow(x + y, c(2.0)).expand());  // x^2 + 2 * x * y + y^2
-    println!("{}", pow(x - y, c(3.0)).expand());  // x^3 - 3 * x^2 * y + 3 * x * y^2 - y^3
-    println!("{}", (a * x + b * x).collect("x")); // x * (a + b)
+    println!("{}", (x * (a + b)).expand());        // a * x + b * x
+    println!("{}", pow(x + y, c(2.0)).expand());   // x^2 + 2 * x * y + y^2
+    println!("{}", pow(x - y, c(3.0)).expand());   // x^3 - 3 * x^2 * y + 3 * x * y^2 - y^3
+    println!("{}", (a * x + b * x).collect("x"));  // x * (a + b)
 }
 ```
 
@@ -162,10 +164,11 @@ arael::sym! {
 
 ```rust
 arael::sym! {
-    let e = sin(symbol("x")) / pow(symbol("y"), c(2.0));
-    println!("Display: {}", e);               // sin(x) / y^2
-    println!("LaTeX:   {}", e.to_latex());     // \frac{\sin\left(x\right)}{y^{2}}
-    println!("Rust:    {}", e.to_rust("f64")); // x.sin() / y.powf(2.0_f64)
+    let (x, y) = symbols!(x, y);
+    let e = sin(x) / pow(y, c(2.0));
+    println!("Display: {}", e);                 // sin(x) / y^2
+    println!("LaTeX:   {}", e.to_latex());      // \frac{\sin\left(x\right)}{y^{2}}
+    println!("Rust:    {}", e.to_rust("f64"));  // x.sin() / y.powf(2.0_f64)
 }
 ```
 
