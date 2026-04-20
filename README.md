@@ -178,9 +178,9 @@ struct Pose {
 }
 ```
 
-`PointFrine` links a `PointLandmark` to the `PointFeature` (a 2D detection in one of the pose's cameras) that observed it. A "frine" is the 3D direction ray built once, at set-up time, from the 2D pixel measurement plus the camera's intrinsics; afterwards the solver never touches pixel coordinates or undistortion and works in the camera frame directly. Staying in 3D keeps derivatives smooth and sidesteps the projective singularities that show up when you differentiate through a pixel-space reprojection.
+A **frine** (project vocabulary) is a structure that ties one entity to one measurement. `PointFrine` is the frine for a point landmark: it binds a `PointLandmark` to a `PointFeature` -- the 2D detection in one of the pose's cameras that observed it. In factor-graph SLAM terms, a frine plays the role of a `Factor` (GTSAM) or an `Edge` (g2o). The measurement itself is pre-processed once at set-up time into a 3D direction ray in the camera frame (stored on `PointFeature`), so the solver never touches pixel coordinates or undistortion. Staying in 3D keeps derivatives smooth and sidesteps the projective singularities that show up when you differentiate through a pixel-space reprojection.
 
-The residual transforms the landmark into the pose's frame and then into the camera's feature frame (`feature.mf2r`), and compares its direction to the stored frine via two `atan2` bearings (azimuth and elevation). Each bearing is whitened by the feature's per-axis `isigma` and passed through the robust `gamma * atan(.../gamma)` wrapper for outlier tolerance.
+The residual transforms the landmark into the pose's frame and then into the camera's feature frame (`feature.mf2r`), and compares its direction to the stored measurement via two `atan2` bearings (azimuth and elevation). Each bearing is whitened by the feature's per-axis `isigma` and passed through the robust `gamma * atan(.../gamma)` wrapper for outlier tolerance.
 
 The `#[arael(ref = ...)]` attributes declare which collection each reference resolves against -- `pose` from `root.poses`, `feature` chained off `pose.info.features` -- and the constraint uses a `CrossBlock<PointLandmark, Pose>` because it couples two entity types.
 
