@@ -254,7 +254,7 @@ Both demos wrap every residual in $\gamma \arctan(r / \gamma)$. This is the **St
 Given sensor readings stacked into a vector $L$, model parameters $M$ (poses, landmarks, etc.), and a prediction $\mu(M)$ of what the sensors should report given $M$, Bayesian inference with $L \mid M \sim \mathcal{N}(\mu(M), K_L)$ -- where $K_L$ is the sensor covariance matrix -- leads to minimising the sum
 
 $$
-S(M) = (L - \mu(M))^T \, K_L^{-1} \, (L - \mu(M)).
+S(M) = (L - \mu(M))^T K_L^{-1} (L - \mu(M)).
 $$
 
 **Whitening.** Diagonalising $K_L = R D R^T$ and substituting $L^D = R^T L$, $G(M) = R^T \mu(M)$ turns the quadratic form into a plain sum of squares in units of standard deviations:
@@ -295,7 +295,7 @@ Left: $\alpha(x)$ (green) bends away from the identity $x$ (purple) once $|x|$ m
 Replace each $r_i$ in the sum with $\alpha(r_i)$:
 
 $$
-\hat{S}(M) = \sum_i \alpha(r_i)^2 = \sum_i \left[ \gamma \arctan\frac{L_i^D - G_i(M)}{\gamma \, \sigma_i} \right]^2.
+\hat{S}(M) = \sum_i \alpha(r_i)^2 = \sum_i \left[ \gamma \arctan\frac{L_i^D - G_i(M)}{\gamma \sigma_i} \right]^2.
 $$
 
 In practice $\Delta S_{\max}$ in the range $[10, 25]$ (so $\gamma$ between roughly $2$ and $3$) suppresses genuine outliers hard without biasing inlier-dominated regions.
