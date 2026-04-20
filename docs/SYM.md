@@ -152,10 +152,10 @@ sym! {
 ```rust
 sym! {
     let (x, y) = symbols!(x, y);
-    let v = SymVec(vec![x, y]);
+    let v = SymVec::new([x, y]);
     println!("v.v = {}", v.dot(&v));      // x^2 + y^2
 
-    let m = SymMat::new(2, 2, vec![c(1.0), c(2.0), c(3.0), c(4.0)]);
+    let m = SymMat::new(2, 2, [1.0, 2.0, 3.0, 4.0]);
     println!("M*v = {}", m * &v);         // [x + 2 * y, 3 * x + 4 * y]
     println!("M^T = {}", m.transpose());  // [1, 3; 2, 4]
 
@@ -215,7 +215,7 @@ sym! {
     let safe_sq = simple_func1_derivs(
         "safe_sq",
         |t| t * t,
-        |t| [c(2.0) * t],   // d/dt
+        |t| [2.0 * t],   // d/dt
     );
     let f = safe_sq(x);
     println!("df/dx = {}", f.diff(x));      // 2 * x
@@ -266,7 +266,7 @@ Clamps the value to `[lo, hi]`. Differentiation passes through `value` (the limi
 ```rust
 sym! {
     let x = symbol("x");
-    let safe = asin(clamp(x, c(-1.0), c(1.0)));
+    let safe = asin(clamp(x, -1.0, 1.0));
     // safe is well-defined for any x; derivative at |x| > 1 is 0 (clamp's
     // derivative is the indicator of the interior).
     println!("{}", safe);                   // asin(clamp(x, -1, 1))
@@ -287,12 +287,12 @@ sym! {
         "safe_asin",
         // Body: clamp the input, then asin. Used for both numeric
         // evaluation and codegen.
-        |x| asin(clamp(x, c(-1.0), c(1.0))),
+        |x| asin(clamp(x, -1.0, 1.0)),
         // Derivative: 1 / sqrt(1 - x^2 + eps^2). The `identity` guard
         // around `1 - x^2` prevents the simplifier from reordering the
         // subtraction relative to the `+eps^2`, which would otherwise
         // cancel in floating point near |x| = 1.
-        |x| [c(1.0) / sqrt(identity(c(1.0) - x.clone() * x) + epsilon() * epsilon())],
+        |x| [1.0 / sqrt(identity(1.0 - x.clone() * x) + epsilon() * epsilon())],
     );
     let f = safe_asin(x);
     println!("{}",       f);             // safe_asin(x)
@@ -340,7 +340,7 @@ The plain `parse` only knows the built-in function set. To recognise additional 
 
 ```rust
 let mut bag = FunctionBag::new();
-bag.add_symbolic("sq", vec!["t".into()], parse("t*t").unwrap());
+bag.add1(simple_func1("sq", |t| t.clone() * t)).unwrap();
 
 let e = parse_with_functions("sq(3) + 1", &bag).unwrap();
 assert_eq!(e.eval(&HashMap::new()).unwrap(), 10.0);

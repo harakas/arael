@@ -3,6 +3,9 @@ use arael::sym::*;
 use arael::sym;
 
 fn main() {
+    // FunctionBag for use at parse_with_functions
+    let mut bag = FunctionBag::new();
+
     // ============================================================
     // Basics
     // ============================================================
@@ -127,11 +130,11 @@ fn main() {
         // ============================================================
         println!("\n=== Linear Algebra ===\n");
 
-        let v = SymVec::new(vec![x, y]);
+        let v = SymVec::new([x, y]);
         println!("v = {v}");
         println!("v·v = {}", v.dot(&v));
 
-        let m = SymMat::new(2, 2, vec![c(1.0), c(2.0), c(3.0), c(4.0)]);
+        let m = SymMat::new(2, 2, [1.0, 2.0, 3.0, 4.0]);
         let mv = m.clone() * v;
         println!("M = {m}");
         println!("M·v = {mv}");
@@ -173,6 +176,27 @@ fn main() {
         println!("dS/dx = {}", S.diff(x));
 
         // ============================================================
+        // User-defined functions
+        // ============================================================
+        //
+        // `simple_func1` / `simple_func2` wrap a symbolic body as a
+        // named callable. Diff and codegen see the body when they need
+        // to (chain rule, inlined emission) and the name otherwise --
+        // the function participates in expression building like a
+        // built-in. `simple_func*_derivs` and `extern_func*` provide
+        // explicit derivatives and native eval when the body is
+        // opaque or brittle to auto-diff.
+        println!("\n=== User-defined functions ===\n");
+
+        let sq = simple_func1("sq", |t| t * t);
+        let hypot = simple_func2("hypot",
+            |a, b| sqrt(a * a + b * b));
+
+        let f = sq(x + 1.0) + hypot(x, y);
+        println!("f = {f}");
+        println!("df/dx = {}", f.diff(x));
+
+        // ============================================================
         // Parsing expressions from strings
         // ============================================================
         println!("\n=== Parsing ===\n");
@@ -189,5 +213,20 @@ fn main() {
 
         let e4: E = "-a * x^2 + b".parse().unwrap();
         println!("FromStr: \"-a * x^2 + b\" = {e4}");
+
+        // `parse_with_functions` consults a FunctionBag before
+        // falling back to built-ins, so expressions typed at runtime
+        // can reference user-defined `sq` / `hypot`.
+        bag.add1(simple_func1("sq", |t| t * t)).unwrap();
+        bag.add2(simple_func2("hypot",
+            |a, b| sqrt(a * a + b * b))).unwrap();
+
+        let e5 = parse_with_functions("sq(3) + hypot(3, 4)", &bag).unwrap();
+        println!("parse_with_functions(\"sq(3) + hypot(3, 4)\") = {e5}");
+        println!("  eval = {}", e5.eval(&HashMap::new()).unwrap());
+
+        // Parsed user-defined functions diff + codegen like built-ins.
+        let e6 = parse_with_functions("sq(x) + hypot(x, y)", &bag).unwrap();
+        println!("d/dx(sq(x) + hypot(x, y)) = {}", e6.diff(x));
     }
 }

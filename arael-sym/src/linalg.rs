@@ -15,9 +15,15 @@ use super::{AsVarName, E, constant};
 pub struct SymVec(pub Vec<E>);
 
 impl SymVec {
-    /// Create a symbolic vector from a list of expressions.
-    pub fn new(elems: Vec<E>) -> Self {
-        SymVec(elems)
+    /// Create a symbolic vector from a list of expressions. Accepts
+    /// any iterable of `Into<E>` so you can pass bare numeric
+    /// literals: `SymVec::new([1.0, 2.0, 3.0])`.
+    pub fn new<I>(elems: I) -> Self
+    where
+        I: IntoIterator,
+        I::Item: Into<E>,
+    {
+        SymVec(elems.into_iter().map(Into::into).collect())
     }
 
     /// Return the number of elements.
@@ -158,8 +164,15 @@ pub struct SymMat {
 }
 
 impl SymMat {
-    /// Create a matrix from dimensions and row-major data.
-    pub fn new(rows: usize, cols: usize, data: Vec<E>) -> Self {
+    /// Create a matrix from dimensions and row-major data. Accepts
+    /// any iterable of `Into<E>` so you can pass bare numeric literals:
+    /// `SymMat::new(2, 2, [1.0, 2.0, 3.0, 4.0])`.
+    pub fn new<I>(rows: usize, cols: usize, data: I) -> Self
+    where
+        I: IntoIterator,
+        I::Item: Into<E>,
+    {
+        let data: Vec<E> = data.into_iter().map(Into::into).collect();
         assert_eq!(data.len(), rows * cols, "SymMat::new: data size mismatch");
         SymMat { rows, cols, data }
     }

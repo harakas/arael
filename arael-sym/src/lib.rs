@@ -745,7 +745,11 @@ pub fn abs(e: E) -> E { E::new(Expr::Abs(e)) }
 /// Symbolic Heaviside step function: 0 if x < 0, 1 if x >= 0.
 pub fn heaviside(e: E) -> E { E::new(Expr::Heaviside(e)) }
 /// Symbolic clamp: clamp value to [lo, hi]. Derivative passes through.
-pub fn clamp(val: E, lo: E, hi: E) -> E { E::new(Expr::Clamp(val, lo, hi)) }
+/// Accepts `impl Into<E>` on all three args so bare numeric bounds
+/// compose naturally: `clamp(x, -1.0, 1.0)`.
+pub fn clamp(val: impl Into<E>, lo: impl Into<E>, hi: impl Into<E>) -> E {
+    E::new(Expr::Clamp(val.into(), lo.into(), hi.into()))
+}
 /// Symbolic power function. Auto-simplifies (e.g. x^0 = 1, x^1 = x).
 /// Accepts `impl Into<E>` for both args so bare numeric literals
 /// compose naturally: `pow(x, 2.0)`, `pow(x, 3)`.
