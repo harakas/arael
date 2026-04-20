@@ -6,8 +6,9 @@ The symbolic math library provides expression trees with automatic differentiati
 
 ```rust
 use arael::sym::*;
+use arael::sym;
 
-arael::sym! {
+sym! {
     let (x, y) = symbols!(x, y);
 
     println!("x + y = {}", x + y);            // x + y
@@ -19,7 +20,7 @@ arael::sym! {
 The `symbols!` macro expands each bare identifier to
 `symbol("<name>")` and returns a tuple.
 
-The `arael::sym!` macro auto-inserts `.clone()` on variable reuse, eliminating ownership boilerplate.
+The `sym!` macro auto-inserts `.clone()` on variable reuse, eliminating ownership boilerplate.
 
 Every expression has type `arael::sym::E`, defined as `struct E(Rc<Expr>)`. Cloning is cheap (a reference-count bump) -- the `.clone()` calls `sym!` inserts don't duplicate the expression tree.
 
@@ -28,7 +29,7 @@ Every expression has type `arael::sym::E`, defined as `struct E(Rc<Expr>)`. Clon
 All operations auto-simplify:
 
 ```rust
-arael::sym! {
+sym! {
     let (x, y) = symbols!(x, y);
     println!("{}", (x + y) / (x + y));  // 1
     println!("{}", x + 0.0);            // x
@@ -46,7 +47,7 @@ arael::sym! {
 The library implements all standard calculus rules:
 
 ```rust
-arael::sym! {
+sym! {
     let x = symbol("x");
 
     // Power rule
@@ -79,7 +80,7 @@ arael::sym! {
 ### Trigonometric derivatives
 
 ```rust
-arael::sym! {
+sym! {
     let x = symbol("x");
     println!("d/dx(sin(x)) = {}", sin(x).diff("x"));    // cos(x)
     println!("d/dx(cos(x)) = {}", cos(x).diff("x"));    // -sin(x)
@@ -93,7 +94,7 @@ arael::sym! {
 ## Expansion and Collection
 
 ```rust
-arael::sym! {
+sym! {
     let (a, b, x, y) = symbols!(a, b, x, y);
 
     println!("{}", (x * (a + b)).expand());        // a * x + b * x
@@ -106,11 +107,13 @@ arael::sym! {
 ## Evaluation and Substitution
 
 ```rust
-arael::sym! {
+use maplit::hashmap;
+
+sym! {
     let (x, y) = symbols!(x, y);
     let f = pow(x, c(2.0)) + 3.0 * x + 1.0;
 
-    let vars = HashMap::from([("x", 2.0)]);
+    let vars = hashmap!{ "x" => 2.0 };
     println!("f(2) = {}", f.eval(&vars).unwrap()); // 11
 
     println!("f(y+1) = {}", f.subs("x", &(y + 1.0)));
@@ -121,7 +124,7 @@ arael::sym! {
 ### Kinematics example
 
 ```rust
-arael::sym! {
+sym! {
     let (t, v0, a) = symbols!(t, v0, a);
 
     let s = 0.5 * a * pow(t, c(2.0)) + v0 * t;
@@ -137,7 +140,7 @@ arael::sym! {
 ## Free Variables
 
 ```rust
-arael::sym! {
+sym! {
     let e = symbol("x") * symbol("y") + sin(symbol("z"));
     println!("{:?}", e.free_vars()); // {"x", "y", "z"}
 }
@@ -146,7 +149,7 @@ arael::sym! {
 ## Linear Algebra
 
 ```rust
-arael::sym! {
+sym! {
     let v = SymVec(vec![symbol("x"), symbol("y")]);
     println!("v.v = {}", v.dot(&v));   // x^2 + y^2
 
@@ -163,7 +166,7 @@ arael::sym! {
 ## Output Formats
 
 ```rust
-arael::sym! {
+sym! {
     let (x, y) = symbols!(x, y);
     let e = sin(x) / pow(y, c(2.0));
     println!("Display: {}", e);                 // sin(x) / y^2
@@ -189,7 +192,7 @@ Each constructor returns a *closure* that, when applied to actual argument expre
 ### Symbolic with auto-diff
 
 ```rust
-arael::sym! {
+sym! {
     let sq = simple_func1("sq", |t| t * t);
     let f = sq(symbol("x")) + sq(symbol("y"));
     println!("f = {}", f);                  // sq(x) + sq(y)
@@ -204,7 +207,7 @@ The body lambda runs once with placeholder symbols to capture the body expressio
 When auto-diff would yield brittle or expensive derivatives, supply them explicitly:
 
 ```rust
-arael::sym! {
+sym! {
     let safe_sq = simple_func1_derivs(
         "safe_sq",
         |t| t * t,
@@ -222,7 +225,7 @@ The arael-sym built-ins `safe_sqrt`, `safe_atan2`, `safe_asin`, `safe_acos`, `ra
 When the body is implemented natively (not as a symbolic expression), use `extern_func1/2/func`. The function is generated as a normal Rust call (`call_path(args...)`) in `to_rust_*` codegen, and uses `eval_fn` for numeric evaluation.
 
 ```rust
-arael::sym! {
+sym! {
     // extern_func ties differentiation, codegen, and runtime eval together.
     let lerp = extern_func2(
         "lerp",
@@ -257,7 +260,7 @@ The Heaviside step function: 0 for `x < 0`, 1 for `x >= 0`. Auto-differentiates 
 Clamps the value to `[lo, hi]`. Differentiation passes through `value` (the limits are treated as constant from the perspective of the derivative). Useful to *bound the input* of an inner function whose math is undefined or numerically unstable outside that range.
 
 ```rust
-arael::sym! {
+sym! {
     let x = symbol("x");
     let safe = asin(clamp(x, c(-1.0), c(1.0)));
     // safe is well-defined for any x; derivative at |x| > 1 is 0 (clamp's
@@ -274,7 +277,7 @@ The catch: when `x` sits exactly at `-1` or `+1`, `asin`'s derivative is `1 / sq
 The arael-sym built-in `safe_asin` combines `clamp` for the body with an `epsilon`-regularised derivative supplied via `simple_func1_derivs`:
 
 ```rust
-arael::sym! {
+sym! {
     let safe_asin = simple_func1_derivs(
         "safe_asin",
         // Body: clamp the input, then asin. Used for both numeric
@@ -299,7 +302,7 @@ The same pattern -- `simple_func*_derivs` plus `clamp` and/or `epsilon`-regulari
 ## Common Subexpression Elimination
 
 ```rust
-arael::sym! {
+sym! {
     let (x, y) = symbols!(x, y);
     let common = sin(x * y);
     let e1 = common + 1.0;
@@ -380,10 +383,12 @@ Plus `remove(name) -> bool`, `contains(name)`, `names() -> Vec<String>`, `entrie
 Formal parameters always shadow outer variables of the same name during the function body's evaluation. This is what you want for an interactive REPL: defining `sq(x) = x*x` after `x = 5` should still yield 9 when you call `sq(3)`, not 25.
 
 ```rust
+use maplit::hashmap;
+
 let mut bag = FunctionBag::new();
 bag.add_symbolic("sq", vec!["x".into()], parse("x*x").unwrap());
 let e = parse_with_functions("sq(3)", &bag).unwrap();
-let vars: HashMap<&str, f64> = [("x", 5.0)].into_iter().collect();
+let vars = hashmap!{ "x" => 5.0 };
 assert_eq!(e.eval(&vars).unwrap(), 9.0); // 3*3, not 5*5
 ```
 

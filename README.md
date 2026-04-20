@@ -45,20 +45,22 @@ Arael provides the compile-time-differentiated solver that sits at the core of s
 
 ```rust
 use arael::sym::*;
+use arael::sym;
+use maplit::hashmap;
 
-arael::sym! {
+sym! {
     let x = symbol("x");
     let f = sin(x) * x + 1.0;
 
     println!("f(x)   = {}", f);           // sin(x) * x + 1
     println!("f'(x)  = {}", f.diff("x")); // x * cos(x) + sin(x)
 
-    let vars = std::collections::HashMap::from([("x", 2.0)]);
+    let vars = hashmap!{ "x" => 2.0 };
     println!("f(2.0) = {}", f.eval(&vars).unwrap()); // 2.8185...
 }
 ```
 
-The `arael::sym!` macro auto-inserts `.clone()` on variable reuse, so you write natural math without Rust's ownership boilerplate.
+The `sym!` macro auto-inserts `.clone()` on variable reuse, so you write natural math without Rust's ownership boilerplate.
 
 See [docs/SYM.md](docs/SYM.md) for the full symbolic math reference.
 
