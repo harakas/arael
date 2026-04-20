@@ -147,21 +147,42 @@ fn main() {
         println!("\nJ([x·y, x²+sin(y)]) = {}", j.simplify());
 
         // ============================================================
-        // Output formats
+        // Output formatting / code generation
         // ============================================================
-        println!("\n=== Output Formats ===\n");
+        println!("\n=== Output Formatting / Code Generation ===\n");
 
-        let complex = sin(x) / pow(y, 2.0);
-        println!("Expression: {complex}");
-        println!("LaTeX:      {}", complex.to_latex());
-        println!("Rust f64:   {}", complex.to_rust("f64"));
-        println!("Rust f32:   {}", complex.to_rust("f32"));
+        // Rosenbrock: a benchmark with shared subterms to motivate CSE
+        // below. Each of f's two partial derivatives reuses x*x and
+        // (y - x*x).
+        let f = pow(1.0 - x, 2.0) + 100.0 * pow(y - x * x, 2.0);
+        println!("Display:    {f}");
+        println!("LaTeX:      {}", f.to_latex());
+        println!("Rust f64:   {}", f.to_rust("f64"));
+        println!("Rust f32:   {}", f.to_rust("f32"));
 
         println!("\nLaTeX samples:");
         println!("  sqrt(x)   → {}", sqrt(x).to_latex());
         println!("  |x|       → {}", abs(x).to_latex());
         println!("  exp(x)    → {}", exp(x).to_latex());
         println!("  M (LaTeX) → {}", m.to_latex());
+
+        // ============================================================
+        // Common Subexpression Elimination
+        // ============================================================
+        println!("\n=== Common Subexpression Elimination ===\n");
+
+        // cse() factors subtrees that appear more than once across a
+        // batch into named intermediates. Here, f and its two
+        // partial derivatives share `y - x*x` and `1 - x`.
+        let batch = [f, f.diff(x), f.diff(y)];
+        let (intermediates, simplified) = cse::cse(&batch);
+        for (name, val) in &intermediates {
+            println!("let {name} = {};", val.to_rust("f64"));
+        }
+        let names = ["f", "df_dx", "df_dy"];
+        for (i, s) in simplified.iter().enumerate() {
+            println!("let {} = {};", names[i], s.to_rust("f64"));
+        }
 
         // ============================================================
         // Error suppression (SymPy comparison)

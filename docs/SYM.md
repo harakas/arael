@@ -182,17 +182,65 @@ sym! {
 }
 ```
 
-## Output Formats
+## Output Formatting / Code Generation
+
+Any `E` renders three ways: `Display` for human reading, `to_latex()` for typeset output, and `to_rust("f64")` / `to_rust("f32")` for generated Rust code (the scalar type controls `powf` suffixes and literal formatting).
 
 ```rust
 sym! {
     let (x, y) = symbols!(x, y);
-    let e = sin(x) / pow(y, 2.0);
-    println!("Display: {}", e);                 // sin(x) / y^2
-    println!("LaTeX:   {}", e.to_latex());      // \frac{\sin\left(x\right)}{y^{2}}
-    println!("Rust:    {}", e.to_rust("f64"));  // x.sin() / y.powf(2.0_f64)
+    // Rosenbrock: a benchmark function with shared subterms.
+    let f = pow(1.0 - x, 2.0) + 100.0 * pow(y - x * x, 2.0);
+
+    println!("Display:  {f}");
+    println!("LaTeX:    {}", f.to_latex());
+    println!("Rust f64: {}", f.to_rust("f64"));
 }
 ```
+
+Output:
+
+```text
+Display:  (-x + 1)^2 + 100 * (-x^2 + y)^2
+LaTeX:    \left(-x + 1\right)^{2} + 100 \cdot \left(-x^{2} + y\right)^{2}
+Rust f64: (-x + 1.0_f64).powf(2.0_f64) + 100.0_f64 * (-x.powf(2.0_f64) + y).powf(2.0_f64)
+```
+
+## Common Subexpression Elimination
+
+`cse(&[expr0, expr1, ...])` walks a batch of expressions, finds subtrees that appear more than once across the batch, and factors them into named intermediates. Paired with `to_rust`, it produces generated code that computes the shared work once.
+
+Continuing the Rosenbrock example, its value and its two partial derivatives share `y - x*x` and `1 - x`:
+
+```rust
+sym! {
+    let (x, y) = symbols!(x, y);
+    let f = pow(1.0 - x, 2.0) + 100.0 * pow(y - x * x, 2.0);
+
+    let batch = [f, f.diff(x), f.diff(y)];
+    let (intermediates, simplified) = cse(&batch);
+
+    for (name, val) in &intermediates {
+        println!("let {name} = {};", val.to_rust("f64"));
+    }
+    let names = ["f", "df_dx", "df_dy"];
+    for (i, s) in simplified.iter().enumerate() {
+        println!("let {} = {};", names[i], s.to_rust("f64"));
+    }
+}
+```
+
+Output:
+
+```text
+let __x1 = -x + 1.0_f64;
+let __x0 = -x.powf(2.0_f64) + y;
+let f = __x1.powf(2.0_f64) + 100.0_f64 * __x0.powf(2.0_f64);
+let df_dx = -400.0_f64 * (x * __x0) - 2.0_f64 * __x1;
+let df_dy = 200.0_f64 * __x0;
+```
+
+`y - x*x` and `1 - x` each appear once, as `__x0` and `__x1`, rather than being recomputed at every use. CSE is applied automatically by `arael`'s constraint code-generation macro, where batches grow much larger -- one SLAM constraint went from 47000 ops to ~400 after CSE.
 
 ## Custom Functions
 
@@ -335,23 +383,6 @@ sym! {
 Why explicit derivatives? Auto-differentiating `asin(clamp(x, -1, 1))` would produce `(d/dx clamp) / sqrt(1 - clamp(x, -1, 1)^2)`, which still diverges at the boundary because `clamp`'s derivative is the identity. The regularised version replaces `sqrt(1 - x^2)` with `sqrt(1 - clamp(x, -1, 1)^2 + eps^2)` (clamp on both the body and the derivative input) and uses `identity` to defend the subtraction from simplifier reordering.
 
 The same pattern -- `simple_func*_derivs` plus `clamp` and/or `epsilon`-regularisation in the derivative -- is how `safe_acos`, `safe_sqrt`, `safe_atan2`, and similar are implemented.
-
-## Common Subexpression Elimination
-
-```rust
-sym! {
-    let (x, y) = symbols!(x, y);
-    let common = sin(x * y);
-    let e1 = common + 1.0;
-    let e2 = common * 2.0;
-
-    let (intermediates, simplified) = cse(&[e1, e2]);
-    // intermediates: [("__x0", sin(x * y))]
-    // simplified: [__x0 + 1, 2 * __x0]
-}
-```
-
-CSE is applied automatically in the constraint code generation macro, reducing generated code size dramatically (e.g., 47000 ops down to ~400 for a SLAM constraint).
 
 ## Parsing
 
