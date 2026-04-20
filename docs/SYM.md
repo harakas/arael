@@ -265,28 +265,24 @@ You can construct `Expr::Func` values directly via `FuncKind` if you need to byp
 
 ## Switching and Clamping: `heaviside`, `clamp`
 
-Two built-ins act as conditional building blocks. Both are continuous in value but produce discontinuous (or zero) derivatives at their boundaries, so they're typically used inside larger expressions where the discontinuity is either intentional (a threshold penalty) or guarded by a clamp on the input domain.
-
 ### `heaviside(x)`
 
-The Heaviside step function: 0 for `x < 0`, 1 for `x >= 0`. Auto-differentiates to 0 everywhere. `H` is a parser-level alias: `parse("H(x)")` is the same as `parse("heaviside(x)")`.
+The Heaviside step function: 0 for `x < 0`, 1 for `x >= 0`. Auto-differentiates to 0 everywhere -- the true derivative is a Dirac delta, whose applications in numeric calculations are limited, so we drop it. `H` is a parser-level alias: `parse("H(x)")` is the same as `parse("heaviside(x)")`.
 
 ### `clamp(value, lo, hi)`
 
-Clamps the value to `[lo, hi]`. Differentiation passes through `value` (the limits are treated as constant from the perspective of the derivative). Useful to *bound the input* of an inner function whose math is undefined or numerically unstable outside that range.
+Clamps the value to `[lo, hi]` for numeric evaluation. Differentiation passes through as if clamp were the identity on `value`: `d/dvar clamp(v, lo, hi)` is `v.diff(var)`, independent of the bounds. This makes clamp useful for *bounding the input* of an inner function whose math is undefined or numerically unstable outside `[lo, hi]`, without the derivative flattening to zero at the boundary.
 
 ```rust
 sym! {
     let x = symbol("x");
     let safe = asin(clamp(x, -1.0, 1.0));
-    // safe is well-defined for any x; derivative at |x| > 1 is 0 (clamp's
-    // derivative is the indicator of the interior).
     println!("{}", safe);                   // asin(clamp(x, -1, 1))
     println!("d/dx = {}", safe.diff(x));    // 1 / sqrt(-clamp(x, -1, 1)^2 + 1)
 }
 ```
 
-The catch: when `x` sits exactly at `-1` or `+1`, `asin`'s derivative is `1 / sqrt(1 - x^2)` which diverges. The next subsection shows the standard fix.
+The catch: at `|x| >= 1`, `clamp(x, -1, 1) = +/-1`, so `asin`'s derivative `1 / sqrt(1 - x^2)` becomes `1 / sqrt(0)` -- numerically NaN or infinite. The pass-through derivative is the right choice for inputs strictly inside `[lo, hi]`, but it doesn't tame a singularity at the boundary. When the inner function has one (as `asin` does at `|x| = 1`), the standard fix is to replace the auto-diffed derivative with an epsilon-regularised explicit derivative via `simple_func1_derivs`, as the next subsection shows.
 
 ### Example: building `safe_asin` from scratch
 
@@ -314,7 +310,7 @@ sym! {
 
 Why explicit derivatives? Auto-differentiating `asin(clamp(x, -1, 1))` would produce `(d/dx clamp) / sqrt(1 - clamp(x, -1, 1)^2)`, which still diverges at the boundary. The regularised version replaces `sqrt(1 - x^2)` with `sqrt(1 - x^2 + eps^2)` and uses `identity` to defend the `1 - x^2` subtraction from simplifier reordering.
 
-The same pattern -- `simple_func*_derivs` plus `clamp` and/or `epsilon`-regularisation in the derivative -- is how `safe_acos`, `safe_sqrt`, `safe_atan2`, and similar are implemented. Their source is short and worth reading when you need a domain-safe primitive of your own.
+The same pattern -- `simple_func*_derivs` plus `clamp` and/or `epsilon`-regularisation in the derivative -- is how `safe_acos`, `safe_sqrt`, `safe_atan2`, and similar are implemented.
 
 ## Common Subexpression Elimination
 
