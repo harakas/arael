@@ -3380,7 +3380,41 @@ impl EditorApp {
                 };
                 Some(format!("C{}", nid))
             }
-            ConstraintId::HelperBridge(_) => None,
+            // A helper-point bridge is plumbing: a helper Pc<n>
+            // anchored to one real entity via CoincidentArc* / LP1 /
+            // LP2 / ... and attached to another via point_on_line /
+            // point_on_arc. The user-facing constraint is the
+            // "attach" relation, not the bridge itself -- so resolve
+            // to that C<nid> when available. Helper names (Pc<n>)
+            // must never leak out.
+            ConstraintId::HelperBridge(pt) => {
+                if let Some(c) = self.sketch.point_on_line.iter().find(|c| c.point == pt) {
+                    return Some(format!("C{}", c.nid));
+                }
+                if let Some(c) = self.sketch.point_on_arc.iter().find(|c| c.point == pt) {
+                    return Some(format!("C{}", c.nid));
+                }
+                // Fall back to the first anchoring coincidence.
+                if let Some(c) = self.sketch.coincident_pp.iter().find(|c| c.a == pt || c.b == pt) {
+                    return Some(format!("C{}", c.nid));
+                }
+                if let Some(c) = self.sketch.coincident_lp1.iter().find(|c| c.point == pt) {
+                    return Some(format!("C{}", c.nid));
+                }
+                if let Some(c) = self.sketch.coincident_lp2.iter().find(|c| c.point == pt) {
+                    return Some(format!("C{}", c.nid));
+                }
+                if let Some(c) = self.sketch.coincident_arc_center.iter().find(|c| c.point == pt) {
+                    return Some(format!("C{}", c.nid));
+                }
+                if let Some(c) = self.sketch.coincident_arc_start.iter().find(|c| c.point == pt) {
+                    return Some(format!("C{}", c.nid));
+                }
+                if let Some(c) = self.sketch.coincident_arc_end.iter().find(|c| c.point == pt) {
+                    return Some(format!("C{}", c.nid));
+                }
+                None
+            }
         }
     }
 
@@ -3458,18 +3492,12 @@ impl EditorApp {
                 };
                 format!("Coinc({})", desc)
             }
-            ConstraintId::HelperBridge(pt) => {
-                let mut parts = Vec::new();
-                for c in &self.sketch.coincident_lp1 { if c.point == pt { parts.push(format!("{}.p1", ln(c.line))); } }
-                for c in &self.sketch.coincident_lp2 { if c.point == pt { parts.push(format!("{}.p2", ln(c.line))); } }
-                for c in &self.sketch.coincident_pp { if c.a == pt { parts.push(pn(c.b)); } if c.b == pt { parts.push(pn(c.a)); } }
-                for c in &self.sketch.point_on_line { if c.point == pt { parts.push(format!("on {}", ln(c.line))); } }
-                for c in &self.sketch.point_on_arc { if c.point == pt { parts.push(format!("on {}", an(c.arc))); } }
-                for c in &self.sketch.coincident_arc_center { if c.point == pt { parts.push(format!("{}.c", an(c.arc))); } }
-                for c in &self.sketch.coincident_arc_start { if c.point == pt { parts.push(format!("{}.s", an(c.arc))); } }
-                for c in &self.sketch.coincident_arc_end { if c.point == pt { parts.push(format!("{}.e", an(c.arc))); } }
-                format!("Bridge({})", parts.join(" = "))
-            }
+            // HelperBridge is resolved to the underlying point_on /
+            // coincidence constraint via `constraint_name` above, so
+            // this arm is only reached when the bridge has no
+            // resolvable sub-constraint (shouldn't happen in a
+            // well-formed sketch). Fall back to the generic label.
+            ConstraintId::HelperBridge(_) => "bridge".to_string(),
         }
     }
 
