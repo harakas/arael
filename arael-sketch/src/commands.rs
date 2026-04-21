@@ -1481,6 +1481,7 @@ fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
     let args_str = args_str.as_str();
 
     match cmd {
+        "explain" => cmd_explain(ctx, args_str),
         "add_line" => cmd_add_line(ctx, args_str),
         "add_rect" => cmd_add_rect(ctx, args_str),
         "add_rect3" => cmd_add_rect3(ctx, args_str),
@@ -3126,6 +3127,78 @@ fn strip_force(args: &str) -> (&str, bool) {
     } else {
         (args, false)
     }
+}
+
+/// Dry-run wrapper: snapshot the sketch, execute the inner command
+/// (which may add a constraint or dimension), capture whether it was
+/// accepted or rejected (and any blocker info), then restore the
+/// sketch so no state is kept. Returns a human-readable explanation.
+/// Intended for the `explain` command and for UI code that wants to
+/// preview whether a proposed constraint would succeed.
+pub fn dry_run(ctx: &mut CommandContext, input: &str) -> DryRunOutcome {
+    let snapshot = bincode::serialize(&ctx.sketch).ok();
+    let history_cursor_before = ctx.history.cursor;
+    let status_err_before = ctx.status_error.take();
+    let blockers_before = ctx.status_blocker_names.take();
+    let last_cost_before = ctx.last_cost;
+    let dof_before = ctx.sketch.cached_dof;
+
+    let result = execute_one(ctx, input);
+    let err = ctx.status_error.take().or_else(||
+        if result.is_error { Some(result.output.clone()) } else { None });
+    let blockers = ctx.status_blocker_names.take();
+
+    if let Some(snap) = snapshot
+        && let Ok(restored) = bincode::deserialize::<Sketch>(&snap) {
+        ctx.sketch = restored;
+    }
+    // Roll history back: drop any entries the inner command pushed
+    // past the original cursor and reset the cursor itself.
+    ctx.history.actions.truncate(history_cursor_before);
+    ctx.history.snapshots.truncate(history_cursor_before);
+    ctx.history.cursors.truncate(history_cursor_before);
+    ctx.history.groups.truncate(history_cursor_before);
+    ctx.history.cursor = history_cursor_before;
+    ctx.status_error = status_err_before;
+    ctx.status_blocker_names = blockers_before;
+    ctx.last_cost = last_cost_before;
+    ctx.sketch.cached_dof = dof_before;
+
+    DryRunOutcome {
+        accepted: err.is_none(),
+        message: err.unwrap_or(result.output),
+        blocker_names: blockers.unwrap_or_default(),
+    }
+}
+
+/// Result of a dry-run command evaluation.
+#[allow(dead_code)]
+pub struct DryRunOutcome {
+    /// True if the inner command succeeded.
+    pub accepted: bool,
+    /// Success output or rejection message (includes blocker hint
+    /// when the inner path produced one).
+    pub message: String,
+    /// User-facing names of conflicting constraints when the inner
+    /// path was a DOF-rejection with blocker analysis. Empty
+    /// otherwise. Intended for UI consumers (e.g. drag preview) that
+    /// want the structured names rather than parsing the message.
+    pub blocker_names: Vec<String>,
+}
+
+fn cmd_explain(ctx: &mut CommandContext, args: &str) -> CommandResult {
+    let inner = args.trim();
+    if inner.is_empty() {
+        return err("Usage: explain <constraint-command> [args]");
+    }
+    let outcome = dry_run(ctx, inner);
+    let tag = if outcome.accepted { "accepts" } else { "rejects" };
+    let msg = if outcome.message.is_empty() {
+        format!("'{}': {} (no further detail)", inner, tag)
+    } else {
+        format!("'{}': {} -- {}", inner, tag, outcome.message)
+    };
+    ok(msg)
 }
 
 fn cmd_horizontal(ctx: &mut CommandContext, args: &str) -> CommandResult {

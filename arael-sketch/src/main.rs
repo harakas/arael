@@ -227,6 +227,14 @@ pub struct EditorApp {
     /// (coincident bridges, flag-style H/V). See `start_constraint_flash`.
     pub flash_names: Vec<String>,
     pub flash_start: Option<web_time::Instant>,
+    /// Short-lived cache of failed `perp_would_reduce_dof` checks.
+    /// On a big sketch a full DOF recompute can be tens of ms, too
+    /// much for 60 Hz drag preview. Once we've determined that a
+    /// perpendicular between a given `(line, host)` pair wouldn't
+    /// reduce DOF, skip re-checking for ~1 second so the drag
+    /// remains responsive even if the user keeps hovering near the
+    /// same perpendicular anchor.
+    pub drag_perp_fail_cache: Option<(u32, u32, web_time::Instant)>,
     pub last_cost: f64,
     drag_saved_cost: f64,              // best cost seen during drag
     drag_saved_snapshot: Option<Vec<u8>>, // sketch state at that best cost
@@ -373,6 +381,7 @@ impl EditorApp {
             status_error: None,
             flash_names: Vec::new(),
             flash_start: None,
+            drag_perp_fail_cache: None,
             last_cost,
             drag_saved_cost: 0.0,
             drag_saved_snapshot: None,
@@ -646,6 +655,54 @@ impl EditorApp {
         if self.drag_raw { Param::fixed(pos) } else { Param::new(pos) }
     }
 
+    /// Test whether adding a perpendicular constraint between `a`
+    /// and `b` would reduce DOF. Used by drag preview to suppress
+    /// auto-perpendicular proposals that would be rejected on release.
+    ///
+    /// Cheap variant: push one entry, recompute DOF, pop it back.
+    /// No bincode round-trip and no solve. Still costs one full SVD
+    /// on the Jacobian which can be tens of milliseconds on big
+    /// sketches -- too much at 60 Hz during a drag. So: once the
+    /// check fails for a given (a, b) pair, cache that failure for
+    /// 1 second before re-testing. Successes are never cached
+    /// (cheap path: if perp is structurally active, we want the
+    /// check to re-confirm promptly if the user maneuvers the
+    /// geometry in a way that could change applicability).
+    fn perp_would_reduce_dof(&mut self, a: Ref<Line>, b: Ref<Line>) -> bool {
+        let key = (a.index(), b.index());
+        if let Some((ka, kb, at)) = self.drag_perp_fail_cache
+            && (ka, kb) == key
+            && at.elapsed() < std::time::Duration::from_secs(1) {
+            return false;
+        }
+        let old_dof = match self.sketch.dof() { Ok(d) => d, Err(_) => return false };
+        let saved_cached = self.sketch.cached_dof;
+
+        let la = &self.sketch.lines[a];
+        let lb = &self.sketch.lines[b];
+        let dx1 = la.p2.value.x - la.p1.value.x;
+        let dy1 = la.p2.value.y - la.p1.value.y;
+        let dx2 = lb.p2.value.x - lb.p1.value.x;
+        let dy2 = lb.p2.value.y - lb.p1.value.y;
+        let cross = dx1 * dy2 - dy1 * dx2;
+        let dir_sign = if cross >= 0.0 { 1.0 } else { -1.0 };
+        self.sketch.perpendicular.push(Perpendicular {
+            a, b, dir_sign, nid: 0, cid: 0, hb: arael::model::CrossBlock::new(),
+        });
+        self.sketch.cached_dof = None;
+        let new_dof = self.sketch.dof().unwrap_or(old_dof);
+        self.sketch.perpendicular.pop();
+        self.sketch.cached_dof = saved_cached;
+
+        let result = new_dof < old_dof;
+        if !result {
+            self.drag_perp_fail_cache = Some((key.0, key.1, web_time::Instant::now()));
+        } else {
+            self.drag_perp_fail_cache = None;
+        }
+        result
+    }
+
     /// Add a drag helper point using the mode-appropriate Param.
     ///
     /// Soft drag uses an optimizable helper point with `drag_pull > 0`
@@ -829,21 +886,32 @@ impl EditorApp {
                                 if let Some(p) = self.try_perp_snap(
                                     opp, hl.p1.value, hl.p2.value, mouse_pos, PERP_SNAP_PX,
                                 ) {
-                                    self.drag_perp_snap = Some((host, opp));
-                                    if let Some((_, SnapTarget::Line(other))) = snap_preview {
-                                        let hdx = hl.p2.value.x - hl.p1.value.x;
-                                        let hdy = hl.p2.value.y - hl.p1.value.y;
-                                        let ol = &self.sketch.lines[other];
-                                        let odx = ol.p2.value.x - ol.p1.value.x;
-                                        let ody = ol.p2.value.y - ol.p1.value.y;
-                                        let cross = (-hdy) * ody - hdx * odx;
-                                        if cross.abs() >= 1e-9 {
-                                            let perp_p2 = vect2d::new(opp.x - hdy, opp.y + hdx);
-                                            effective_pos = crate::geometry::line_line_intersection(
-                                                opp, perp_p2, ol.p1.value, ol.p2.value);
+                                    // Only propose the perpendicular hint if
+                                    // applying it would actually reduce DOF.
+                                    // If the candidate's row is already in the
+                                    // row-span (e.g. parallel already implies
+                                    // perp via the rest of the sketch) the
+                                    // release would just reject it, so
+                                    // suppress the preview.
+                                    let hl_p1 = hl.p1.value;
+                                    let hl_p2 = hl.p2.value;
+                                    if self.perp_would_reduce_dof(line, host) {
+                                        self.drag_perp_snap = Some((host, opp));
+                                        if let Some((_, SnapTarget::Line(other))) = snap_preview {
+                                            let hdx = hl_p2.x - hl_p1.x;
+                                            let hdy = hl_p2.y - hl_p1.y;
+                                            let ol = &self.sketch.lines[other];
+                                            let odx = ol.p2.value.x - ol.p1.value.x;
+                                            let ody = ol.p2.value.y - ol.p1.value.y;
+                                            let cross = (-hdy) * ody - hdx * odx;
+                                            if cross.abs() >= 1e-9 {
+                                                let perp_p2 = vect2d::new(opp.x - hdy, opp.y + hdx);
+                                                effective_pos = crate::geometry::line_line_intersection(
+                                                    opp, perp_p2, ol.p1.value, ol.p2.value);
+                                            }
+                                        } else {
+                                            effective_pos = p;
                                         }
-                                    } else {
-                                        effective_pos = p;
                                     }
                                 }
                             }

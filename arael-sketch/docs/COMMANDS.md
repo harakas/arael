@@ -441,6 +441,22 @@ equal L0 L1 force            Skip DOF check
 
 Using `force` results in an overconstrained sketch -- redundant constraints make it harder to modify the sketch later because changing one dimension may conflict with the redundant constraint. Prefer rethinking the constraint strategy over using `force`.
 
+### Dry-Run with `explain`
+
+`explain <cmd> [args]` runs a constraint or dimension command as a dry-run: it evaluates whether the inner command would be accepted or rejected (including the blocker analysis for DOF-rejections) and then restores the sketch to its pre-command state. Nothing is committed, no history entry is added.
+
+```
+explain perpendicular L0 L1
+explain hdistance L0.p2 L1.p2 3
+explain length L0 5
+```
+
+Output mirrors a normal command run:
+- Accepted: `'<cmd>': accepts -- <normal success message>`
+- Rejected: `'<cmd>': rejects -- Constraint rejected: ... Blocked by one of: C1 (...), d0 (...)`
+
+Useful for probing why a constraint would fail before committing to it, or for tooling (MCP, scripts) that wants to surface blocker info without mutating sketch state.
+
 ### Removing Constraints
 
 Every constraint has an auto-assigned name. Vec-stored constraints
