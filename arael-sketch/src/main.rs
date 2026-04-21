@@ -1053,8 +1053,14 @@ impl EditorApp {
                 }
                 _ => {}
             }
-            // Auto-snap errors (e.g. redundant coincident) should not be shown
+            // Auto-snap errors (e.g. redundant coincident) should not
+            // be shown -- clear both the error string and the
+            // blocker-flash state so an internally-rejected
+            // auto-perp / auto-snap doesn't flash constraints at the
+            // user on every drag release.
             self.status_error = None;
+            self.flash_names.clear();
+            self.flash_start = None;
         }
         self.grab = None;
     }
