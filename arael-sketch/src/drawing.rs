@@ -2035,7 +2035,7 @@ impl EditorApp {
             let flash = self.flash_on_now(&dim.name);
             let color = if flash { dim_sel_color }
                         else if dim.broken { dim_broken_color }
-                        else if selected { dim_sel_color }
+                        else if selected || dim_editing { dim_sel_color }
                         else if dim_hovered { dim_hover_color }
                         else { dim_color };
             let is_radius = matches!(dim.kind, DimensionKind::ArcRadius(_) | DimensionKind::ArcRadiusB(_));
