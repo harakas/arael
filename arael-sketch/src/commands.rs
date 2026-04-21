@@ -28,6 +28,11 @@ pub struct CommandContext {
     pub cursor_tangent: Option<vect2d>,
     pub saved_cursor: CursorState,
     pub status_error: Option<String>,
+    /// When a constraint was rejected with a blocker analysis, the
+    /// user-facing names ("C<n>", "d<n>", "CL0H") of the conflicting
+    /// existing constraints. Consumed by the GUI to flash those
+    /// constraints briefly. Cleared on the next successful action.
+    pub status_blocker_names: Option<Vec<String>>,
     pub last_cost: f64,
     pub dof: Option<usize>,
     pub skip_dof_check: bool,
@@ -63,6 +68,7 @@ impl CommandContext {
             cursor_tangent: None,
             saved_cursor: CursorState::default(),
             status_error: None,
+            status_blocker_names: None,
             last_cost: 0.0,
             dof: None,
             skip_dof_check: false,
@@ -88,6 +94,7 @@ impl CommandContext {
             cursor_tangent: None,
             saved_cursor: CursorState::default(),
             status_error: None,
+            status_blocker_names: None,
             last_cost: 0.0,
             dof: None,
             skip_dof_check: false,
@@ -229,14 +236,35 @@ fn dim_endpoint_pos_from_sketch(sketch: &Sketch, ep: &DimensionEndpoint) -> vect
     }
 }
 
+/// Rejection info returned by `validate_and_apply_constraint` when a
+/// constraint is refused. Carries the human-readable message plus,
+/// for DOF-rejection, the user-facing names of the existing
+/// constraints the blocker analysis identified as conflicting
+/// ("C<n>" / "d<n>" / "CL0H") so the GUI can flash them via the
+/// existing `find_constraint_by_name` / dimension-name resolvers.
+pub struct Rejection {
+    pub message: String,
+    pub blocker_names: Vec<String>,
+}
+
+impl Rejection {
+    fn msg(message: impl Into<String>) -> Self {
+        Rejection { message: message.into(), blocker_names: Vec::new() }
+    }
+}
+
+impl From<String> for Rejection {
+    fn from(s: String) -> Self { Rejection::msg(s) }
+}
+
 /// Validate and apply a constraint action on a sketch.
-/// Returns Ok(new_cost) on success, Err(message) on rejection.
+/// Returns Ok(new_cost) on success, Err(Rejection) on rejection.
 /// Handles snapshot/restore, cost checking, and DOF checking.
 pub fn validate_and_apply_constraint(
     sketch: &mut Sketch,
     action: &Action,
     skip_dof_check: bool,
-) -> Result<f64, String> {
+) -> Result<f64, Rejection> {
     use arael::simple_lm::LmProblem;
 
     let snapshot = bincode::serialize(sketch).ok();
@@ -289,9 +317,9 @@ pub fn validate_and_apply_constraint(
             && let Ok(restored) = bincode::deserialize(snap) {
                 *sketch = restored;
                 let hint = dimension_rejection_hint(sketch, action);
-                return Err(format!(
+                return Err(Rejection::msg(format!(
                     "Constraint rejected: could not satisfy all constraints{}",
-                    hint));
+                    hint)));
             }
 
     // Negative radius rejection
@@ -309,9 +337,9 @@ pub fn validate_and_apply_constraint(
             if let Some(ref snap) = snapshot
                 && let Ok(restored) = bincode::deserialize(snap) {
                     *sketch = restored;
-                    return Err(format!(
+                    return Err(Rejection::msg(format!(
                         "Constraint rejected: {} got negative {} ({:.4}). This is likely a solver bug -- please report it.",
-                        name, which, val));
+                        name, which, val)));
                 }
         }
     }
@@ -321,12 +349,15 @@ pub fn validate_and_apply_constraint(
         let new_dof = sketch.dof()?;
         if new_dof >= old_dof
             && let Some(ref snap) = snapshot {
-                let blocker_hint = blocker_hint_for_rejection(sketch, snap);
+                let (blocker_hint, blocker_names) = blocker_hint_for_rejection(sketch, snap);
                 if let Ok(restored) = bincode::deserialize(snap) {
                     *sketch = restored;
-                    return Err(format!(
-                        "Constraint rejected: DOF unchanged at {}. {}Use 'force' to override.",
-                        new_dof, blocker_hint));
+                    return Err(Rejection {
+                        message: format!(
+                            "Constraint rejected: DOF unchanged at {}. {}Use 'force' to override.",
+                            new_dof, blocker_hint),
+                        blocker_names,
+                    });
                 }
             }
     }
@@ -334,19 +365,20 @@ pub fn validate_and_apply_constraint(
     Ok(new_cost)
 }
 
-/// Run blocker analysis on a post-apply sketch and return a human
-/// readable hint naming which existing constraints prevent the
-/// candidate from reducing DOF. Returns an empty string if the
-/// analysis cannot identify a blocker (e.g. empty sketch, numerical
-/// edge case, or cutoff reached).
-fn blocker_hint_for_rejection(sketch: &mut Sketch, pre_snap: &[u8]) -> String {
+/// Run blocker analysis on a post-apply sketch. Returns the
+/// human-readable hint (embedded in the rejection message) and the
+/// user-facing constraint names (`"C<n>"` / `"d<n>"` / `"CL0H"`) of
+/// the conflicting existing constraints so the GUI can flash them.
+/// Returns `(String::new(), Vec::new())` if no blocker can be
+/// identified (empty sketch, numerical edge case, cutoff reached).
+fn blocker_hint_for_rejection(sketch: &mut Sketch, pre_snap: &[u8]) -> (String, Vec<String>) {
     // Pre-apply identifiers. Nids are serialised so they survive
     // deserialize without re-running calc_jacobian. Expression
     // constraints don't have nids, so they're identified by
     // description (also stable across rebuilds).
     let mut pre: Sketch = match bincode::deserialize::<Sketch>(pre_snap) {
         Ok(s) => s,
-        Err(_) => return String::new(),
+        Err(_) => return (String::new(), Vec::new()),
     };
     pre.prepare_expr_constraints();
     let pre_nids: std::collections::HashSet<u32> = pre.constraint_nid_cid_pairs()
@@ -377,12 +409,12 @@ fn blocker_hint_for_rejection(sketch: &mut Sketch, pre_snap: &[u8]) -> String {
         }
     }
     if candidate_cids.is_empty() {
-        return String::new();
+        return (String::new(), Vec::new());
     }
 
     let report = match analyze_blockers(&post_jac, &candidate_cids) {
         Some(r) => r,
-        None => return String::new(),
+        None => return (String::new(), Vec::new()),
     };
     if sketch.verbose {
         let s = &report.stats;
@@ -398,7 +430,76 @@ fn blocker_hint_for_rejection(sketch: &mut Sketch, pre_snap: &[u8]) -> String {
             report.minimum_size, report.sets.len(), report.truncated, report.existing_redundant);
     }
     let label_map = build_cid_display_map(sketch, &post_jac);
-    format_blocker_report(&label_map, &report)
+    let name_map = build_cid_name_map(sketch, &post_jac);
+    let hint = format_blocker_report(&label_map, &report);
+    // Flatten all distinct blocker names across all minimum-size sets
+    // into a single list (dedup while preserving first-seen order).
+    let mut names: Vec<String> = Vec::new();
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    for set in &report.sets {
+        for cid in set {
+            if let Some(n) = name_map.get(cid)
+                && seen.insert(n.clone()) {
+                names.push(n.clone());
+            }
+        }
+    }
+    (hint, names)
+}
+
+/// Same as `build_cid_display_map` but returns only the bare name
+/// ("C<n>" / "d<n>" / "CL0H") without the descriptive parenthesis.
+/// Used to surface blocker identifiers to the GUI for highlighting.
+fn build_cid_name_map(
+    sketch: &Sketch,
+    jac: &arael::model::Jacobian<f64>,
+) -> HashMap<u32, String> {
+    let base = sketch.constraint_labels();
+    let dim_names = sketch.dimension_cid_name_map();
+    let mut out: HashMap<u32, String> = HashMap::new();
+    for (nid, cid) in sketch.constraint_nid_cid_pairs() {
+        let name = dim_names.get(&cid).cloned().unwrap_or_else(|| format!("C{}", nid));
+        out.insert(cid, name);
+    }
+    // Expression-backed dimension constraints don't appear in
+    // constraint_nid_cid_pairs (they're not in a named collection);
+    // pick them up directly from dim_names so their d<N> handle
+    // reaches the GUI flash path.
+    for (&cid, name) in &dim_names {
+        out.entry(cid).or_insert_with(|| name.clone());
+    }
+    let mut per_cid_labels: HashMap<u32, Vec<&'static str>> = HashMap::new();
+    for row in &jac.rows {
+        let v = per_cid_labels.entry(row.constraint).or_default();
+        if !v.contains(&row.label) { v.push(row.label); }
+    }
+    for (cid, row_labels) in per_cid_labels {
+        if out.contains_key(&cid) { continue; }
+        let Some(base_name) = base.get(&cid).cloned() else { continue; };
+        let entity_name = base_name
+            .strip_prefix("point:")
+            .or_else(|| base_name.strip_prefix("line:"))
+            .or_else(|| base_name.strip_prefix("arc:"))
+            .map(|s| s.to_string())
+            .unwrap_or(base_name);
+        let attrs: Vec<&str> = row_labels.iter()
+            .copied()
+            .filter(|l| *l != "drift" && *l != "drag_pull")
+            .collect();
+        let flag_char = match attrs.as_slice() {
+            ["horizontal"] => Some('H'),
+            ["vertical"] => Some('V'),
+            _ => None,
+        };
+        if let Some(ch) = flag_char {
+            out.insert(cid, arael_sketch_solver::format_flag_name(&entity_name, ch));
+        } else {
+            // No stable name -- skip rather than expose an internal cid.
+            // The hint string already names the entity; highlighting
+            // falls back to entity-level (future work).
+        }
+    }
+    out
 }
 
 /// Build a CID -> user-visible label map. Each label is in the form
@@ -550,6 +651,7 @@ impl CommandContext {
     /// For constraint actions: validates by solving, checking cost, and optionally checking DOF.
     pub fn exec(&mut self, action: Action) {
         self.status_error = None;
+        self.status_blocker_names = None;
 
         if action.is_constraint_action() {
             match validate_and_apply_constraint(
@@ -559,8 +661,11 @@ impl CommandContext {
                     self.last_cost = new_cost;
                     self.history.push(action, &self.sketch, self.saved_cursor.clone());
                 }
-                Err(msg) => {
-                    self.status_error = Some(msg);
+                Err(rejection) => {
+                    self.status_error = Some(rejection.message);
+                    if !rejection.blocker_names.is_empty() {
+                        self.status_blocker_names = Some(rejection.blocker_names);
+                    }
                 }
             }
         } else {
@@ -595,6 +700,18 @@ fn ok_or_status(ctx: &mut CommandContext, msg: impl Into<String>) -> CommandResu
         } else {
             CommandResult { output: m, is_error: false, no_echo: false, markdown: false }
         }
+    }
+}
+
+/// Format "<name>: <description>" for a just-applied constraint,
+/// looking up the canonical descriptive text from
+/// `Sketch::find_constraint_description`. Falls back to the supplied
+/// fallback string if the name doesn't resolve (shouldn't happen for
+/// freshly-applied constraints, but keeps the UX path safe).
+fn applied_msg(sketch: &Sketch, name: &str, fallback: &str) -> String {
+    match sketch.find_constraint_description(name) {
+        Some(desc) => format!("{}: {}", name, desc),
+        None => fallback.to_string(),
     }
 }
 
@@ -2975,8 +3092,15 @@ fn cmd_horizontal(ctx: &mut CommandContext, args: &str) -> CommandResult {
         }
     }
     ctx.begin_group();
+    let lines_copy = lines.clone();
     ctx.exec(Action::ApplyHorizontal { lines });
-    ok_or_status(ctx, "Applied horizontal")
+    let parts: Vec<String> = lines_copy.iter()
+        .map(|r| {
+            let name = arael_sketch_solver::format_flag_name(&ctx.sketch.lines[*r].name, 'H');
+            applied_msg(&ctx.sketch, &name, &format!("{}: horizontal", name))
+        })
+        .collect();
+    ok_or_status(ctx, parts.join(", "))
 }
 
 fn cmd_vertical(ctx: &mut CommandContext, args: &str) -> CommandResult {
@@ -2994,8 +3118,15 @@ fn cmd_vertical(ctx: &mut CommandContext, args: &str) -> CommandResult {
         }
     }
     ctx.begin_group();
+    let lines_copy = lines.clone();
     ctx.exec(Action::ApplyVertical { lines });
-    ok_or_status(ctx, "Applied vertical")
+    let parts: Vec<String> = lines_copy.iter()
+        .map(|r| {
+            let name = arael_sketch_solver::format_flag_name(&ctx.sketch.lines[*r].name, 'V');
+            applied_msg(&ctx.sketch, &name, &format!("{}: vertical", name))
+        })
+        .collect();
+    ok_or_status(ctx, parts.join(", "))
 }
 
 fn cmd_parallel(ctx: &mut CommandContext, args: &str) -> CommandResult {
@@ -3009,7 +3140,9 @@ fn cmd_parallel(ctx: &mut CommandContext, args: &str) -> CommandResult {
     }
     ctx.begin_group();
     ctx.exec(Action::ApplyParallel { a, b });
-    ok_or_status(ctx, "Applied parallel")
+    let nid = ctx.sketch.parallel.last().map(|c| c.nid).unwrap_or(0);
+    let msg = applied_msg(&ctx.sketch, &format!("C{}", nid), "Applied parallel");
+    ok_or_status(ctx, msg)
 }
 
 fn cmd_perpendicular(ctx: &mut CommandContext, args: &str) -> CommandResult {
@@ -3023,7 +3156,9 @@ fn cmd_perpendicular(ctx: &mut CommandContext, args: &str) -> CommandResult {
     }
     ctx.begin_group();
     ctx.exec(Action::ApplyPerpendicular { a, b });
-    ok_or_status(ctx, "Applied perpendicular")
+    let nid = ctx.sketch.perpendicular.last().map(|c| c.nid).unwrap_or(0);
+    let msg = applied_msg(&ctx.sketch, &format!("C{}", nid), "Applied perpendicular");
+    ok_or_status(ctx, msg)
 }
 
 fn cmd_equal(ctx: &mut CommandContext, args: &str) -> CommandResult {
@@ -3038,7 +3173,9 @@ fn cmd_equal(ctx: &mut CommandContext, args: &str) -> CommandResult {
         if exists { return err("Equal length constraint already exists"); }
         ctx.begin_group();
         ctx.exec(Action::ApplyEqualLength { a, b });
-        ok_or_status(ctx, "Applied equal length")
+        let nid = ctx.sketch.equal_length.last().map(|c| c.nid).unwrap_or(0);
+        let msg = applied_msg(&ctx.sketch, &format!("C{}", nid), "Applied equal length");
+        ok_or_status(ctx, msg)
     } else if is_arc_name(tokens[0]) && is_arc_name(tokens[1]) {
         let a = match resolve_arc(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
         let b = match resolve_arc(&ctx.sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
@@ -3048,7 +3185,9 @@ fn cmd_equal(ctx: &mut CommandContext, args: &str) -> CommandResult {
         if exists { return err("Equal radius constraint already exists"); }
         ctx.begin_group();
         ctx.exec(Action::ApplyEqualRadius { a, b });
-        ok_or_status(ctx, "Applied equal radius")
+        let nid = ctx.sketch.equal_radius.last().map(|c| c.nid).unwrap_or(0);
+        let msg = applied_msg(&ctx.sketch, &format!("C{}", nid), "Applied equal radius");
+        ok_or_status(ctx, msg)
     } else {
         err("equal needs two lines or two arcs")
     }
@@ -3065,7 +3204,9 @@ fn cmd_collinear(ctx: &mut CommandContext, args: &str) -> CommandResult {
     }
     ctx.begin_group();
     ctx.exec(Action::ApplyCollinear { a, b });
-    ok_or_status(ctx, "Applied collinear")
+    let nid = ctx.sketch.collinear.last().map(|c| c.nid).unwrap_or(0);
+    let msg = applied_msg(&ctx.sketch, &format!("C{}", nid), "Applied collinear");
+    ok_or_status(ctx, msg)
 }
 
 fn cmd_tangent(ctx: &mut CommandContext, args: &str) -> CommandResult {
@@ -3079,7 +3220,9 @@ fn cmd_tangent(ctx: &mut CommandContext, args: &str) -> CommandResult {
         }
         ctx.begin_group();
         ctx.exec(Action::ApplyTangentLA { line, arc });
-        ok_or_status(ctx, "Applied tangent")
+        let nid = ctx.sketch.tangent_la.last().map(|c| c.nid).unwrap_or(0);
+        let msg = applied_msg(&ctx.sketch, &format!("C{}", nid), "Applied tangent");
+        ok_or_status(ctx, msg)
     } else if is_arc_name(tokens[0]) && is_arc_name(tokens[1]) {
         let a = match resolve_arc(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
         let b = match resolve_arc(&ctx.sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
@@ -3089,7 +3232,9 @@ fn cmd_tangent(ctx: &mut CommandContext, args: &str) -> CommandResult {
         }
         ctx.begin_group();
         ctx.exec(Action::ApplyTangentAA { a, b });
-        ok_or_status(ctx, "Applied tangent")
+        let nid = ctx.sketch.tangent_aa.last().map(|c| c.nid).unwrap_or(0);
+        let msg = applied_msg(&ctx.sketch, &format!("C{}", nid), "Applied tangent");
+        ok_or_status(ctx, msg)
     } else {
         err("tangent needs line+arc or arc+arc")
     }
@@ -3147,7 +3292,11 @@ fn cmd_coincident(ctx: &mut CommandContext, args: &str) -> CommandResult {
     };
     ctx.begin_group();
     ctx.exec(action);
-    ok_or_status(ctx, "Applied coincident")
+    // Coincident has many backing collections; saturate to the most
+    // recently assigned nid via next_constraint_id - 1.
+    let nid = ctx.sketch.next_constraint_id.saturating_sub(1);
+    let msg = applied_msg(&ctx.sketch, &format!("C{}", nid), "Applied coincident");
+    ok_or_status(ctx, msg)
 }
 
 fn cmd_concentric(ctx: &mut CommandContext, args: &str) -> CommandResult {
@@ -3161,7 +3310,9 @@ fn cmd_concentric(ctx: &mut CommandContext, args: &str) -> CommandResult {
     }
     ctx.begin_group();
     ctx.exec(Action::ApplyConcentric { a, b });
-    ok_or_status(ctx, "Applied concentric")
+    let nid = ctx.sketch.concentric.last().map(|c| c.nid).unwrap_or(0);
+    let msg = applied_msg(&ctx.sketch, &format!("C{}", nid), "Applied concentric");
+    ok_or_status(ctx, msg)
 }
 
 // ---------------------------------------------------------------------------
@@ -4815,7 +4966,9 @@ fn cmd_midpoint(ctx: &mut CommandContext, args: &str) -> CommandResult {
         };
         ctx.begin_group();
         ctx.exec(action);
-        ok_or_status(ctx, "Applied midpoint")
+        let nid = ctx.sketch.next_constraint_id.saturating_sub(1);
+        let msg = applied_msg(&ctx.sketch, &format!("C{}", nid), "Applied midpoint");
+        ok_or_status(ctx, msg)
     } else if let Ok(arc) = resolve_arc(&ctx.sketch, target) {
         if ctx.sketch.arcs[arc].closed { return err("Cannot use midpoint on a full circle"); }
         let s = &ctx.sketch;
@@ -4838,7 +4991,9 @@ fn cmd_midpoint(ctx: &mut CommandContext, args: &str) -> CommandResult {
         };
         ctx.begin_group();
         ctx.exec(action);
-        ok_or_status(ctx, "Applied midpoint")
+        let nid = ctx.sketch.next_constraint_id.saturating_sub(1);
+        let msg = applied_msg(&ctx.sketch, &format!("C{}", nid), "Applied midpoint");
+        ok_or_status(ctx, msg)
     } else {
         err("Second arg must be a line (L0) or arc (A0)")
     }
@@ -4903,7 +5058,9 @@ fn cmd_symmetry(ctx: &mut CommandContext, args: &str) -> CommandResult {
             }
             ctx.begin_group();
             ctx.exec(Action::ApplySymmetryAA { a, line, c });
-            return ok_or_status(ctx, "Applied arc symmetry");
+            let nid = ctx.sketch.symmetry_aa.last().map(|c| c.nid).unwrap_or(0);
+            let msg = applied_msg(&ctx.sketch, &format!("C{}", nid), "Applied arc symmetry");
+            return ok_or_status(ctx, msg);
         }
     // Try point/endpoint + line + point/endpoint symmetry
     let mid_is_line = resolve_line(&ctx.sketch, tokens[1]).is_ok();
@@ -4919,7 +5076,9 @@ fn cmd_symmetry(ctx: &mut CommandContext, args: &str) -> CommandResult {
         let line = resolve_line(&ctx.sketch, tokens[1]).unwrap();
         let c = match resolve_as_point(ctx, tokens[2]) { Ok(r) => r, Err(e) => return err(e) };
         ctx.exec(Action::ApplySymmetryPP { a, line, c });
-        return ok_or_status(ctx, "Applied point symmetry");
+        let nid = ctx.sketch.symmetry_pp.last().map(|c| c.nid).unwrap_or(0);
+        let msg = applied_msg(&ctx.sketch, &format!("C{}", nid), "Applied point symmetry");
+        return ok_or_status(ctx, msg);
     }
     // Fall back to line-line-line symmetry
     let a = match resolve_line(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
@@ -4931,7 +5090,9 @@ fn cmd_symmetry(ctx: &mut CommandContext, args: &str) -> CommandResult {
     }
     ctx.begin_group();
     ctx.exec(Action::ApplySymmetryLL { a, b, c });
-    ok_or_status(ctx, "Applied symmetry")
+    let nid = ctx.sketch.symmetry_ll.last().map(|c| c.nid).unwrap_or(0);
+    let msg = applied_msg(&ctx.sketch, &format!("C{}", nid), "Applied symmetry");
+    ok_or_status(ctx, msg)
 }
 
 /// Reflect a point across a line defined by two points.
@@ -5267,7 +5428,9 @@ fn cmd_point_on(ctx: &mut CommandContext, args: &str) -> CommandResult {
             EndpointRef::ArcEnd(a) => Action::ApplyEndpointOnLine { endpoint: DimensionEndpoint::ArcEnd(a), line },
         };
         ctx.exec(action);
-        ok_or_status(ctx, "Applied point-on-line")
+        let nid = ctx.sketch.next_constraint_id.saturating_sub(1);
+        let msg = applied_msg(&ctx.sketch, &format!("C{}", nid), "Applied point-on-line");
+        ok_or_status(ctx, msg)
     } else if is_arc_name(target) {
         let arc = match resolve_arc(&ctx.sketch, target) { Ok(r) => r, Err(e) => return err(e) };
         let s = &ctx.sketch;
@@ -5290,7 +5453,9 @@ fn cmd_point_on(ctx: &mut CommandContext, args: &str) -> CommandResult {
             EndpointRef::ArcEnd(a) => Action::ApplyEndpointOnArc { endpoint: DimensionEndpoint::ArcEnd(a), arc },
         };
         ctx.exec(action);
-        ok_or_status(ctx, "Applied point-on-arc")
+        let nid = ctx.sketch.next_constraint_id.saturating_sub(1);
+        let msg = applied_msg(&ctx.sketch, &format!("C{}", nid), "Applied point-on-arc");
+        ok_or_status(ctx, msg)
     } else {
         err("Second arg must be a line (L0) or arc (A0)")
     }

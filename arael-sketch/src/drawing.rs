@@ -1386,6 +1386,39 @@ impl EditorApp {
                 for c in &self.sketch.coincident_arc_end { if c.point == r { visible |= ae_sel(c.arc); } }
                 for c in &self.sketch.coincident_pp { if c.a == r { visible |= pt_sel(c.b); } if c.b == r { visible |= pt_sel(c.a); } }
             }
+            // Bridge also becomes visible during a flash when any of
+            // the coincident sub-constraints tied to this helper is a
+            // flash target.
+            if !visible && self.flash_window_active() {
+                for (i, c) in self.sketch.coincident_lp1.iter().enumerate() {
+                    if c.point == r && self.is_flash_target(ConstraintId::Coincident(CoincidentKind::LP1, i)) { visible = true; break; }
+                }
+                if !visible {
+                    for (i, c) in self.sketch.coincident_lp2.iter().enumerate() {
+                        if c.point == r && self.is_flash_target(ConstraintId::Coincident(CoincidentKind::LP2, i)) { visible = true; break; }
+                    }
+                }
+                if !visible {
+                    for (i, c) in self.sketch.coincident_pp.iter().enumerate() {
+                        if (c.a == r || c.b == r) && self.is_flash_target(ConstraintId::Coincident(CoincidentKind::PP, i)) { visible = true; break; }
+                    }
+                }
+                if !visible {
+                    for (i, c) in self.sketch.coincident_arc_center.iter().enumerate() {
+                        if c.point == r && self.is_flash_target(ConstraintId::Coincident(CoincidentKind::ArcCenter, i)) { visible = true; break; }
+                    }
+                }
+                if !visible {
+                    for (i, c) in self.sketch.coincident_arc_start.iter().enumerate() {
+                        if c.point == r && self.is_flash_target(ConstraintId::Coincident(CoincidentKind::ArcStart, i)) { visible = true; break; }
+                    }
+                }
+                if !visible {
+                    for (i, c) in self.sketch.coincident_arc_end.iter().enumerate() {
+                        if c.point == r && self.is_flash_target(ConstraintId::Coincident(CoincidentKind::ArcEnd, i)) { visible = true; break; }
+                    }
+                }
+            }
             if visible {
                 let pos = self.to_screen(p.pos.value);
                 let key = pos_key(pos);
@@ -1552,12 +1585,21 @@ impl EditorApp {
             |c: &CoincidentArcEndEnd| ae_sel(c.a) || ae_sel(c.b));
 
         // Phase 2: determine which positions should show markers.
-        // A position is visible if any entry there has vertex_selected=true OR any entry there is selected as a constraint.
+        // A position is visible if any entry there has vertex_selected=true,
+        // the constraint itself is selected, or it's a flash target
+        // (rejection blocker analysis named it; see
+        // `EditorApp::start_constraint_flash`). The flash case
+        // force-shows normally-hidden coincident markers for the
+        // 1 s flash window so the user can see which constraint is
+        // blocking even when its symbol is not drawn by default.
         let mut pos_visible: std::collections::HashSet<u64> = std::collections::HashSet::new();
         let pos_key = |p: egui::Pos2| -> u64 { ((p.x * 100.0) as u64) << 32 | ((p.y * 100.0) as u64) };
         for e in &coinc_entries {
             let key = pos_key(e.base_pos);
-            if e.vertex_selected || sel.contains(&Selection::Constraint(e.id)) {
+            if e.vertex_selected
+                || sel.contains(&Selection::Constraint(e.id))
+                || self.is_flash_target(e.id)
+            {
                 pos_visible.insert(key);
             }
         }
@@ -1831,12 +1873,18 @@ impl EditorApp {
         for marker in &self.constraint_markers {
             let selected = self.selection.contains(&Selection::Constraint(marker.id));
             let marker_hovered = self.hovered == Some(Selection::Constraint(marker.id));
-            let color = if selected {
+            // Flash: when a constraint was just identified as a blocker
+            // on rejection, pulse in the selected colour for three
+            // cycles at 3 Hz so the user can see the conflict.
+            let flash = self.constraint_name(marker.id)
+                .map(|n| self.flash_on_now(&n))
+                .unwrap_or(false);
+            let color = if selected || flash {
                 c.constraint_marker_selected
             } else {
                 c.constraint_marker
             };
-            let emphasized = selected || marker_hovered;
+            let emphasized = selected || marker_hovered || flash;
             let w = if emphasized { 2.0 } else { 1.5 };
             let s = if emphasized { 7.0 } else { 5.0 }; // half-size
             let p = marker.pos;
@@ -1984,7 +2032,9 @@ impl EditorApp {
                 };
                 if entity_quiet && !entity_selected { continue; }
             }
-            let color = if dim.broken { dim_broken_color }
+            let flash = self.flash_on_now(&dim.name);
+            let color = if flash { dim_sel_color }
+                        else if dim.broken { dim_broken_color }
                         else if selected { dim_sel_color }
                         else if dim_hovered { dim_hover_color }
                         else { dim_color };

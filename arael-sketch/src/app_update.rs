@@ -75,6 +75,19 @@ impl eframe::App for EditorApp {
         // Poll background DOF computation
         self.poll_dof();
 
+        // Keep repainting while a constraint-conflict flash is active
+        // (3 flashes at 3 Hz = 1 s total). Without continuous repaint
+        // the canvas would freeze between input events.
+        if let Some(start) = self.flash_start {
+            let elapsed = start.elapsed().as_secs_f64();
+            if elapsed > 1.0 {
+                self.flash_start = None;
+                self.flash_names.clear();
+            } else {
+                ctx.request_repaint_after(std::time::Duration::from_millis(16));
+            }
+        }
+
         // Hold-to-disable snapping and auto-constraints. Modifier keys
         // (Shift / Ctrl / Alt / Command) are unusable under Parallels +
         // GNOME: the host captures the hold and only leaks a brief

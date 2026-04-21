@@ -221,6 +221,12 @@ pub struct EditorApp {
 
     // Constraint conflict error message
     pub status_error: Option<String>,
+    /// Flash state: when a constraint is rejected, briefly highlight
+    /// the conflicting constraints so the user can see what's blocking
+    /// the new one, even if those constraints are normally invisible
+    /// (coincident bridges, flag-style H/V). See `start_constraint_flash`.
+    pub flash_names: Vec<String>,
+    pub flash_start: Option<web_time::Instant>,
     pub last_cost: f64,
     drag_saved_cost: f64,              // best cost seen during drag
     drag_saved_snapshot: Option<Vec<u8>>, // sketch state at that best cost
@@ -365,6 +371,8 @@ impl EditorApp {
             drag_raw: false,
             exit_requested: false,
             status_error: None,
+            flash_names: Vec::new(),
+            flash_start: None,
             last_cost,
             drag_saved_cost: 0.0,
             drag_saved_snapshot: None,
@@ -1159,6 +1167,7 @@ impl EditorApp {
             cursor_tangent: self.command_cursor_tangent,
             saved_cursor: crate::history::CursorState::default(),
             status_error: self.status_error.take(),
+            status_blocker_names: None,
             last_cost: self.last_cost,
             dof: self.dof_display,
             scale: self.scale,
@@ -1193,6 +1202,9 @@ impl EditorApp {
         self.command_cursor = ctx.cursor;
         self.command_cursor_tangent = ctx.cursor_tangent;
         self.status_error = ctx.status_error;
+        if let Some(names) = ctx.status_blocker_names.take() {
+            self.start_constraint_flash(names);
+        }
         self.last_cost = ctx.last_cost;
         self.dof_display = ctx.dof;
         self.scale = ctx.scale;
@@ -1203,6 +1215,56 @@ impl EditorApp {
         self.show_hints = false;
         self.compute_dof_async();
         results
+    }
+
+    /// Begin a 3-flash cycle at 3 Hz on the named constraints. Called
+    /// when a constraint is rejected and the blocker analysis
+    /// identified conflicting existing constraints -- the user sees
+    /// them briefly in the selected colour (even if they would be
+    /// invisible in the normal render, e.g. coincident bridges).
+    pub fn start_constraint_flash(&mut self, names: Vec<String>) {
+        self.flash_names = names;
+        self.flash_start = Some(web_time::Instant::now());
+    }
+
+    /// Return true if the named constraint is currently in an "on"
+    /// phase of the flash cycle. Cycle: 3 flashes at 3 Hz => total
+    /// duration 1 second, on during the first half of each 333ms
+    /// period. Used by render code to pick the highlight colour.
+    pub fn flash_on_now(&self, name: &str) -> bool {
+        if !self.flash_pulse_on() { return false; }
+        self.flash_names.iter().any(|n| n == name)
+    }
+
+    /// Pulse state: true during any "on" half-period of the flash.
+    /// Shared by `flash_on_now` and by `flash_show_hidden`.
+    pub fn flash_pulse_on(&self) -> bool {
+        let Some(start) = self.flash_start else { return false };
+        let elapsed = start.elapsed().as_secs_f64();
+        if elapsed > 1.0 { return false; }
+        let period = 1.0 / 3.0;
+        let phase = (elapsed % period) / period;
+        phase < 0.5
+    }
+
+    /// True any time within the 1 s flash window (used by marker
+    /// builders that must still decide visibility when we're in the
+    /// "off" half of the current pulse -- we still want the marker to
+    /// be registered so it can be highlighted when the pulse flips
+    /// back on, without extra round-trips to rebuild the marker set).
+    pub fn flash_window_active(&self) -> bool {
+        let Some(start) = self.flash_start else { return false };
+        start.elapsed().as_secs_f64() <= 1.0 && !self.flash_names.is_empty()
+    }
+
+    /// For a `ConstraintId`, return whether that constraint is a
+    /// flash target (name appears in `flash_names`).
+    pub fn is_flash_target(&self, id: ConstraintId) -> bool {
+        if !self.flash_window_active() { return false; }
+        match self.constraint_name(id) {
+            Some(n) => self.flash_names.iter().any(|x| *x == n),
+            None => false,
+        }
     }
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -1220,6 +1282,7 @@ impl EditorApp {
             cursor_tangent: self.command_cursor_tangent,
             saved_cursor: crate::history::CursorState::default(),
             status_error: self.status_error.take(),
+            status_blocker_names: None,
             last_cost: self.last_cost,
             dof: self.dof_display,
             scale: self.scale,
@@ -1241,6 +1304,9 @@ impl EditorApp {
         self.command_cursor = ctx.cursor;
         self.command_cursor_tangent = ctx.cursor_tangent;
         self.status_error = ctx.status_error;
+        if let Some(names) = ctx.status_blocker_names.take() {
+            self.start_constraint_flash(names);
+        }
         self.last_cost = ctx.last_cost;
         self.dof_display = ctx.dof;
         self.scale = ctx.scale;
@@ -1267,8 +1333,11 @@ impl EditorApp {
                     self.last_cost = new_cost;
                     self.history.push(action, &self.sketch, crate::history::CursorState { pos: self.command_cursor, tangent: self.command_cursor_tangent });
                 }
-                Err(msg) => {
-                    self.status_error = Some(msg);
+                Err(rejection) => {
+                    self.status_error = Some(rejection.message);
+                    if !rejection.blocker_names.is_empty() {
+                        self.start_constraint_flash(rejection.blocker_names);
+                    }
                 }
             }
         } else {
@@ -3134,7 +3203,87 @@ impl EditorApp {
         }
     }
 
+    /// Resolve a `ConstraintId` to its user-visible name (`C<nid>` for
+    /// numbered constraints, `CL0H` / `CL0V` for line flag constraints).
+    /// `HelperBridge` has no user-visible constraint name since it's a
+    /// synthetic grouping of coincident constraints.
+    pub fn constraint_name(&self, id: ConstraintId) -> Option<String> {
+        use arael_sketch_solver::format_flag_name;
+        match id {
+            ConstraintId::Horizontal(r) => Some(format_flag_name(&self.sketch.lines[r].name, 'H')),
+            ConstraintId::Vertical(r) => Some(format_flag_name(&self.sketch.lines[r].name, 'V')),
+            ConstraintId::Parallel(i) => Some(format!("C{}", self.sketch.parallel[i].nid)),
+            ConstraintId::Perpendicular(i) => Some(format!("C{}", self.sketch.perpendicular[i].nid)),
+            ConstraintId::EqualLength(i) => Some(format!("C{}", self.sketch.equal_length[i].nid)),
+            ConstraintId::EqualRadius(i) => Some(format!("C{}", self.sketch.equal_radius[i].nid)),
+            ConstraintId::Concentric(i) => Some(format!("C{}", self.sketch.concentric[i].nid)),
+            ConstraintId::TangentLA(i) => Some(format!("C{}", self.sketch.tangent_la[i].nid)),
+            ConstraintId::TangentAA(i) => Some(format!("C{}", self.sketch.tangent_aa[i].nid)),
+            ConstraintId::Collinear(i) => Some(format!("C{}", self.sketch.collinear[i].nid)),
+            ConstraintId::Symmetry(i) => Some(format!("C{}", self.sketch.symmetry_ll[i].nid)),
+            ConstraintId::SymmetryPP(i) => Some(format!("C{}", self.sketch.symmetry_pp[i].nid)),
+            ConstraintId::SymmetryAA(i) => Some(format!("C{}", self.sketch.symmetry_aa[i].nid)),
+            ConstraintId::Midpoint(kind, i) => {
+                let nid = match kind {
+                    MidpointKind::Point => self.sketch.midpoint[i].nid,
+                    MidpointKind::LP1 => self.sketch.midpoint_lp1[i].nid,
+                    MidpointKind::LP2 => self.sketch.midpoint_lp2[i].nid,
+                    MidpointKind::ArcStart => self.sketch.midpoint_arc_start[i].nid,
+                    MidpointKind::ArcEnd => self.sketch.midpoint_arc_end[i].nid,
+                    MidpointKind::ArcPoint => self.sketch.midpoint_arc_point[i].nid,
+                    MidpointKind::LP1Arc => self.sketch.midpoint_lp1_arc[i].nid,
+                    MidpointKind::LP2Arc => self.sketch.midpoint_lp2_arc[i].nid,
+                    MidpointKind::ArcStartArc => self.sketch.midpoint_arc_start_arc[i].nid,
+                    MidpointKind::ArcEndArc => self.sketch.midpoint_arc_end_arc[i].nid,
+                };
+                Some(format!("C{}", nid))
+            }
+            ConstraintId::Coincident(kind, i) => {
+                let nid = match kind {
+                    CoincidentKind::PP => self.sketch.coincident_pp[i].nid,
+                    CoincidentKind::LP1 => self.sketch.coincident_lp1[i].nid,
+                    CoincidentKind::LP2 => self.sketch.coincident_lp2[i].nid,
+                    CoincidentKind::LL11 => self.sketch.coincident_ll11[i].nid,
+                    CoincidentKind::LL12 => self.sketch.coincident_ll12[i].nid,
+                    CoincidentKind::LL21 => self.sketch.coincident_ll21[i].nid,
+                    CoincidentKind::LL22 => self.sketch.coincident_ll22[i].nid,
+                    CoincidentKind::PointOnLine => self.sketch.point_on_line[i].nid,
+                    CoincidentKind::PointOnArc => self.sketch.point_on_arc[i].nid,
+                    CoincidentKind::LP1OnLine => self.sketch.line_p1_on_line[i].nid,
+                    CoincidentKind::LP2OnLine => self.sketch.line_p2_on_line[i].nid,
+                    CoincidentKind::LP1OnArc => self.sketch.line_p1_on_arc[i].nid,
+                    CoincidentKind::LP2OnArc => self.sketch.line_p2_on_arc[i].nid,
+                    CoincidentKind::ArcCenter => self.sketch.coincident_arc_center[i].nid,
+                    CoincidentKind::ArcStart => self.sketch.coincident_arc_start[i].nid,
+                    CoincidentKind::ArcEnd => self.sketch.coincident_arc_end[i].nid,
+                    CoincidentKind::LP1ArcCenter => self.sketch.coincident_lp1_arc_center[i].nid,
+                    CoincidentKind::LP2ArcCenter => self.sketch.coincident_lp2_arc_center[i].nid,
+                    CoincidentKind::LP1ArcStart => self.sketch.coincident_lp1_arc_start[i].nid,
+                    CoincidentKind::LP2ArcStart => self.sketch.coincident_lp2_arc_start[i].nid,
+                    CoincidentKind::LP1ArcEnd => self.sketch.coincident_lp1_arc_end[i].nid,
+                    CoincidentKind::LP2ArcEnd => self.sketch.coincident_lp2_arc_end[i].nid,
+                    CoincidentKind::ArcCenterStart => self.sketch.coincident_arc_center_start[i].nid,
+                    CoincidentKind::ArcCenterEnd => self.sketch.coincident_arc_center_end[i].nid,
+                    CoincidentKind::ArcStartCenter => self.sketch.coincident_arc_start_center[i].nid,
+                    CoincidentKind::ArcEndCenter => self.sketch.coincident_arc_end_center[i].nid,
+                    CoincidentKind::ArcStartStart => self.sketch.coincident_arc_start_start[i].nid,
+                    CoincidentKind::ArcStartEnd => self.sketch.coincident_arc_start_end[i].nid,
+                    CoincidentKind::ArcEndStart => self.sketch.coincident_arc_end_start[i].nid,
+                    CoincidentKind::ArcEndEnd => self.sketch.coincident_arc_end_end[i].nid,
+                };
+                Some(format!("C{}", nid))
+            }
+            ConstraintId::HelperBridge(_) => None,
+        }
+    }
+
     pub fn describe_constraint(&self, id: ConstraintId) -> String {
+        // For most constraints, format as "C<nid>: <listing>" / "CL0H: <listing>"
+        // so the UI status bar matches `list` / `info <name>` output.
+        if let Some(name) = self.constraint_name(id)
+            && let Some(desc) = self.sketch.find_constraint_description(&name) {
+            return format!("{}: {}", name, desc);
+        }
         let ln = |r: Ref<Line>| self.sketch.lines[r].name.clone();
         let an = |r: Ref<Arc>| self.sketch.arcs[r].name.clone();
         let pn = |r: Ref<Point>| self.sketch.points[r].name.clone();
