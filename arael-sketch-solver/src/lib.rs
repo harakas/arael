@@ -36,6 +36,8 @@ pub mod symbol_bag;
 pub use symbol_bag::SymbolBag;
 pub mod expr_constraint;
 pub use expr_constraint::ExpressionConstraint;
+pub mod blocker;
+pub use blocker::{BlockerReport, analyze as analyze_blockers};
 
 use arael::model::{CrossBlock, JacobianModel, Model, Param, SelfBlock, TripletBlock};
 
@@ -265,6 +267,128 @@ pub fn parse_flag_name(token: &str) -> Option<(String, char)> {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Locate the cid of the axis-distance constraint (horizontal=true
+/// for HDistance, false for VDistance) that matches the endpoint
+/// pair. Mirrors the add path in
+/// `arael-sketch/src/actions.rs::push_axis_distance`.
+fn find_axis_cid(
+    s: &Sketch,
+    a: &crate::dimensions::DimensionEndpoint,
+    b: &crate::dimensions::DimensionEndpoint,
+    horizontal: bool,
+) -> Option<u32> {
+    use crate::dimensions::DimensionEndpoint::*;
+    match (a, b) {
+        (Point(pa), Point(pb)) => {
+            if horizontal {
+                s.hdistance_pp.iter().find(|c| c.a == *pa && c.b == *pb).map(|c| c.cid)
+            } else {
+                s.vdistance_pp.iter().find(|c| c.a == *pa && c.b == *pb).map(|c| c.cid)
+            }
+        }
+        (LineP1(la), LineP1(lb)) => s.axis_distance_ll11.iter().find(|c| c.a == *la && c.b == *lb && c.horizontal == horizontal).map(|c| c.cid),
+        (LineP1(la), LineP2(lb)) => s.axis_distance_ll12.iter().find(|c| c.a == *la && c.b == *lb && c.horizontal == horizontal).map(|c| c.cid),
+        (LineP2(la), LineP1(lb)) => s.axis_distance_ll21.iter().find(|c| c.a == *la && c.b == *lb && c.horizontal == horizontal).map(|c| c.cid),
+        (LineP2(la), LineP2(lb)) => s.axis_distance_ll22.iter().find(|c| c.a == *la && c.b == *lb && c.horizontal == horizontal).map(|c| c.cid),
+        (LineP1(l), Point(p)) | (Point(p), LineP1(l)) =>
+            s.axis_distance_lp1.iter().find(|c| c.line == *l && c.point == *p && c.horizontal == horizontal).map(|c| c.cid),
+        (LineP2(l), Point(p)) | (Point(p), LineP2(l)) =>
+            s.axis_distance_lp2.iter().find(|c| c.line == *l && c.point == *p && c.horizontal == horizontal).map(|c| c.cid),
+        (ArcCenter(ar), Point(p)) | (Point(p), ArcCenter(ar)) =>
+            s.axis_distance_arc_center_p.iter().find(|c| c.arc == *ar && c.point == *p && c.horizontal == horizontal).map(|c| c.cid),
+        (ArcStart(ar), Point(p)) | (Point(p), ArcStart(ar)) =>
+            s.axis_distance_arc_start_p.iter().find(|c| c.arc == *ar && c.point == *p && c.horizontal == horizontal).map(|c| c.cid),
+        (ArcEnd(ar), Point(p)) | (Point(p), ArcEnd(ar)) =>
+            s.axis_distance_arc_end_p.iter().find(|c| c.arc == *ar && c.point == *p && c.horizontal == horizontal).map(|c| c.cid),
+        (ArcCenter(ar), LineP1(l)) | (LineP1(l), ArcCenter(ar)) =>
+            s.axis_distance_arc_center_l1.iter().find(|c| c.arc == *ar && c.line == *l && c.horizontal == horizontal).map(|c| c.cid),
+        (ArcCenter(ar), LineP2(l)) | (LineP2(l), ArcCenter(ar)) =>
+            s.axis_distance_arc_center_l2.iter().find(|c| c.arc == *ar && c.line == *l && c.horizontal == horizontal).map(|c| c.cid),
+        (ArcStart(ar), LineP1(l)) | (LineP1(l), ArcStart(ar)) =>
+            s.axis_distance_arc_start_l1.iter().find(|c| c.arc == *ar && c.line == *l && c.horizontal == horizontal).map(|c| c.cid),
+        (ArcStart(ar), LineP2(l)) | (LineP2(l), ArcStart(ar)) =>
+            s.axis_distance_arc_start_l2.iter().find(|c| c.arc == *ar && c.line == *l && c.horizontal == horizontal).map(|c| c.cid),
+        (ArcEnd(ar), LineP1(l)) | (LineP1(l), ArcEnd(ar)) =>
+            s.axis_distance_arc_end_l1.iter().find(|c| c.arc == *ar && c.line == *l && c.horizontal == horizontal).map(|c| c.cid),
+        (ArcEnd(ar), LineP2(l)) | (LineP2(l), ArcEnd(ar)) =>
+            s.axis_distance_arc_end_l2.iter().find(|c| c.arc == *ar && c.line == *l && c.horizontal == horizontal).map(|c| c.cid),
+        (ArcCenter(a), ArcCenter(b)) => s.axis_distance_aa_ce_ce.iter().find(|c| c.a == *a && c.b == *b && c.horizontal == horizontal).map(|c| c.cid),
+        (ArcCenter(a), ArcStart(b))  => s.axis_distance_aa_ce_s.iter().find(|c| c.a == *a && c.b == *b && c.horizontal == horizontal).map(|c| c.cid),
+        (ArcCenter(a), ArcEnd(b))    => s.axis_distance_aa_ce_e.iter().find(|c| c.a == *a && c.b == *b && c.horizontal == horizontal).map(|c| c.cid),
+        (ArcStart(a), ArcCenter(b))  => s.axis_distance_aa_s_ce.iter().find(|c| c.a == *a && c.b == *b && c.horizontal == horizontal).map(|c| c.cid),
+        (ArcStart(a), ArcStart(b))   => s.axis_distance_aa_s_s.iter().find(|c| c.a == *a && c.b == *b && c.horizontal == horizontal).map(|c| c.cid),
+        (ArcStart(a), ArcEnd(b))     => s.axis_distance_aa_s_e.iter().find(|c| c.a == *a && c.b == *b && c.horizontal == horizontal).map(|c| c.cid),
+        (ArcEnd(a), ArcCenter(b))    => s.axis_distance_aa_e_ce.iter().find(|c| c.a == *a && c.b == *b && c.horizontal == horizontal).map(|c| c.cid),
+        (ArcEnd(a), ArcStart(b))     => s.axis_distance_aa_e_s.iter().find(|c| c.a == *a && c.b == *b && c.horizontal == horizontal).map(|c| c.cid),
+        (ArcEnd(a), ArcEnd(b))       => s.axis_distance_aa_e_e.iter().find(|c| c.a == *a && c.b == *b && c.horizontal == horizontal).map(|c| c.cid),
+    }
+}
+
+/// Locate the cid of the `PointPointDistance` backing constraint for
+/// a dimension. Each supported endpoint pair maps to one of the
+/// `distance_*` collections (see `arael-sketch/src/actions.rs`
+/// distance dispatch for the canonical routing).
+fn find_distance_cid(
+    s: &Sketch,
+    a: &crate::dimensions::DimensionEndpoint,
+    b: &crate::dimensions::DimensionEndpoint,
+) -> Option<u32> {
+    use crate::dimensions::DimensionEndpoint::*;
+    match (a, b) {
+        (Point(pa), Point(pb)) =>
+            s.distance_pp.iter().find(|c| c.a == *pa && c.b == *pb).map(|c| c.cid),
+        (LineP1(la), LineP1(lb)) => s.distance_ll11.iter().find(|c| c.a == *la && c.b == *lb).map(|c| c.cid),
+        (LineP1(la), LineP2(lb)) => s.distance_ll12.iter().find(|c| c.a == *la && c.b == *lb).map(|c| c.cid),
+        (LineP2(la), LineP1(lb)) => s.distance_ll21.iter().find(|c| c.a == *la && c.b == *lb).map(|c| c.cid),
+        (LineP2(la), LineP2(lb)) => s.distance_ll22.iter().find(|c| c.a == *la && c.b == *lb).map(|c| c.cid),
+        (LineP1(l), Point(p)) | (Point(p), LineP1(l)) =>
+            s.distance_lp1.iter().find(|c| c.line == *l && c.point == *p).map(|c| c.cid),
+        (LineP2(l), Point(p)) | (Point(p), LineP2(l)) =>
+            s.distance_lp2.iter().find(|c| c.line == *l && c.point == *p).map(|c| c.cid),
+        (ArcCenter(ar), Point(p)) | (Point(p), ArcCenter(ar)) =>
+            s.distance_arc_center_p.iter().find(|c| c.arc == *ar && c.point == *p).map(|c| c.cid),
+        (ArcStart(ar), Point(p)) | (Point(p), ArcStart(ar)) =>
+            s.distance_arc_start_p.iter().find(|c| c.arc == *ar && c.point == *p).map(|c| c.cid),
+        (ArcEnd(ar), Point(p)) | (Point(p), ArcEnd(ar)) =>
+            s.distance_arc_end_p.iter().find(|c| c.arc == *ar && c.point == *p).map(|c| c.cid),
+        (ArcCenter(a), ArcCenter(b)) => s.distance_aa_ce_ce.iter().find(|c| c.a == *a && c.b == *b).map(|c| c.cid),
+        (ArcCenter(a), ArcStart(b))  => s.distance_aa_ce_s.iter().find(|c| c.a == *a && c.b == *b).map(|c| c.cid),
+        (ArcCenter(a), ArcEnd(b))    => s.distance_aa_ce_e.iter().find(|c| c.a == *a && c.b == *b).map(|c| c.cid),
+        (ArcStart(a), ArcCenter(b))  => s.distance_aa_s_ce.iter().find(|c| c.a == *a && c.b == *b).map(|c| c.cid),
+        (ArcStart(a), ArcStart(b))   => s.distance_aa_s_s.iter().find(|c| c.a == *a && c.b == *b).map(|c| c.cid),
+        (ArcStart(a), ArcEnd(b))     => s.distance_aa_s_e.iter().find(|c| c.a == *a && c.b == *b).map(|c| c.cid),
+        (ArcEnd(a), ArcCenter(b))    => s.distance_aa_e_ce.iter().find(|c| c.a == *a && c.b == *b).map(|c| c.cid),
+        (ArcEnd(a), ArcStart(b))     => s.distance_aa_e_s.iter().find(|c| c.a == *a && c.b == *b).map(|c| c.cid),
+        (ArcEnd(a), ArcEnd(b))       => s.distance_aa_e_e.iter().find(|c| c.a == *a && c.b == *b).map(|c| c.cid),
+        (LineP1(_), ArcCenter(_)) | (ArcCenter(_), LineP1(_))
+        | (LineP2(_), ArcCenter(_)) | (ArcCenter(_), LineP2(_))
+        | (LineP1(_), ArcStart(_)) | (ArcStart(_), LineP1(_))
+        | (LineP2(_), ArcStart(_)) | (ArcStart(_), LineP2(_))
+        | (LineP1(_), ArcEnd(_)) | (ArcEnd(_), LineP1(_))
+        | (LineP2(_), ArcEnd(_)) | (ArcEnd(_), LineP2(_)) => None,
+    }
+}
+
+/// Locate the cid of the point-to-line distance backing constraint
+/// for a dimension. Covers `distance_pl`, `distance_lp1l`,
+/// `distance_lp2l`, `distance_arc_center_l`, `distance_arc_start_l`,
+/// `distance_arc_end_l`.
+fn find_point_line_cid(
+    s: &Sketch,
+    ep: &crate::dimensions::DimensionEndpoint,
+    line: Ref<Line>,
+) -> Option<u32> {
+    use crate::dimensions::DimensionEndpoint::*;
+    match ep {
+        Point(p) => s.distance_pl.iter().find(|c| c.point == *p && c.line == line).map(|c| c.cid),
+        LineP1(l) => s.distance_lp1l.iter().find(|c| c.a == *l && c.b == line).map(|c| c.cid),
+        LineP2(l) => s.distance_lp2l.iter().find(|c| c.a == *l && c.b == line).map(|c| c.cid),
+        ArcCenter(ar) => s.distance_arc_center_l.iter().find(|c| c.arc == *ar && c.line == line).map(|c| c.cid),
+        ArcStart(ar) => s.distance_arc_start_l.iter().find(|c| c.arc == *ar && c.line == line).map(|c| c.cid),
+        ArcEnd(ar) => s.distance_arc_end_l.iter().find(|c| c.arc == *ar && c.line == line).map(|c| c.cid),
+    }
+}
 
 impl Sketch {
     /// Create an empty sketch with default solver parameters.
@@ -1243,6 +1367,81 @@ impl arael::model::ExtendedModel for Sketch {
 }
 
 impl Sketch {
+    /// Return `(nid, cid)` pairs for every constraint in the sketch
+    /// (across all constraint collections, entity constraints excluded).
+    ///
+    /// `nid` is the user-visible stable numeric constraint id (C1, C2,
+    /// ...) and is serialised, so pre/post action comparisons are
+    /// robust against the macro's per-pass cid renumbering. `cid` is
+    /// the post-calc_jacobian identifier used by [`Jacobian::rows`].
+    ///
+    /// Must be called AFTER `calc_jacobian`/`solve`/`compute_dof` so
+    /// the `cid` field is populated on every constraint instance.
+    /// Constraints whose `nid` is still 0 (never named) are omitted.
+    pub fn constraint_nid_cid_pairs(&self) -> std::vec::Vec<(u32, u32)> {
+        let mut out = std::vec::Vec::new();
+        macro_rules! collect {
+            ($($field:ident),* $(,)?) => {
+                $(
+                    for c in &self.$field {
+                        if c.nid != 0 {
+                            out.push((c.nid, c.cid));
+                        }
+                    }
+                )*
+            };
+        }
+        collect!(
+            coincident_pp,
+            coincident_lp1, coincident_lp2,
+            coincident_ll11, coincident_ll12, coincident_ll21, coincident_ll22,
+            distance_pp, hdistance_pp, vdistance_pp,
+            point_on_line,
+            midpoint, midpoint_lp1, midpoint_lp2,
+            midpoint_arc_start, midpoint_arc_end,
+            midpoint_arc_point,
+            midpoint_lp1_arc, midpoint_lp2_arc,
+            midpoint_arc_start_arc, midpoint_arc_end_arc,
+            point_on_arc,
+            parallel, perpendicular, collinear,
+            equal_length, angle,
+            tangent_la, concentric, equal_radius, tangent_aa,
+            symmetry_ll, symmetry_pp, symmetry_aa,
+            distance_pl, distance_lp1l, distance_lp2l,
+            distance_arc_center_l, distance_arc_start_l, distance_arc_end_l,
+            line_p1_on_line, line_p2_on_line,
+            coincident_arc_center, coincident_arc_start, coincident_arc_end,
+            coincident_lp1_arc_center, coincident_lp2_arc_center,
+            coincident_lp1_arc_start, coincident_lp2_arc_start,
+            coincident_lp1_arc_end, coincident_lp2_arc_end,
+            coincident_arc_center_start, coincident_arc_center_end,
+            coincident_arc_start_center, coincident_arc_end_center,
+            coincident_arc_start_start, coincident_arc_start_end,
+            coincident_arc_end_start, coincident_arc_end_end,
+            line_p1_on_arc, line_p2_on_arc,
+            distance_ll11, distance_ll12, distance_ll21, distance_ll22,
+            distance_lp1, distance_lp2,
+            distance_arc_center_p, distance_arc_start_p, distance_arc_end_p,
+            distance_arc_center_l1, distance_arc_center_l2,
+            distance_arc_start_l1, distance_arc_start_l2,
+            distance_arc_end_l1, distance_arc_end_l2,
+            distance_aa_ce_ce, distance_aa_ce_s, distance_aa_ce_e,
+            distance_aa_s_ce, distance_aa_s_s, distance_aa_s_e,
+            distance_aa_e_ce, distance_aa_e_s, distance_aa_e_e,
+            distance_concentric,
+            axis_distance_ll11, axis_distance_ll12, axis_distance_ll21, axis_distance_ll22,
+            axis_distance_lp1, axis_distance_lp2,
+            axis_distance_arc_center_p, axis_distance_arc_start_p, axis_distance_arc_end_p,
+            axis_distance_arc_center_l1, axis_distance_arc_center_l2,
+            axis_distance_arc_start_l1, axis_distance_arc_start_l2,
+            axis_distance_arc_end_l1, axis_distance_arc_end_l2,
+            axis_distance_aa_ce_ce, axis_distance_aa_ce_s, axis_distance_aa_ce_e,
+            axis_distance_aa_s_ce, axis_distance_aa_s_s, axis_distance_aa_s_e,
+            axis_distance_aa_e_ce, axis_distance_aa_e_s, axis_distance_aa_e_e,
+        );
+        out
+    }
+
     /// Build a map from CID to human-readable constraint description.
     /// Must be called AFTER calc_jacobian/solve/compute_dof, which populates
     /// the `cid` field on each constraint instance.
@@ -1575,6 +1774,88 @@ impl Sketch {
     }
 
     /// Add an expression-based dimension. The expression string is parsed
+    /// Build a `cid -> dimension_name` map for constraints that are
+    /// backed by a dimension (`d<n>`). Deleting the dimension via
+    /// `delete d<n>` removes both the dimension and its backing
+    /// constraint, which is the user-facing way to edit or remove
+    /// these constraints -- `C<nid>` is visible in `list` but is not
+    /// a valid handle for `delete` (see [`tools::find_constraint_by_name`]).
+    ///
+    /// Coverage focuses on the dimension kinds that write into
+    /// constraint collections: `HDistance`, `VDistance`,
+    /// `PointPointDistance`, `PointLineDistance`, `Angle`,
+    /// `ConcentricDistance`, `LineLineDistance`. Dimensions that only
+    /// feed expression constraints (`LineLength`, `ArcRadius`,
+    /// `ArcRadiusB`, `ArcSweep`, `LineAngle`) don't have a backing
+    /// cid in any collection and are omitted.
+    pub fn dimension_cid_name_map(&self) -> std::collections::HashMap<u32, String> {
+        use crate::dimensions::{DimensionEndpoint as E, DimensionKind as K};
+        let mut out = std::collections::HashMap::new();
+        for dim in &self.dimensions {
+            // Each arm scans the collection(s) that the corresponding
+            // add path pushes into. See `push_axis_distance` and
+            // `add_dimension` in arael-sketch/src/actions.rs for the
+            // inverse mapping.
+            let cid = match &dim.kind {
+                K::HDistance(a, b) => find_axis_cid(self, a, b, true),
+                K::VDistance(a, b) => find_axis_cid(self, a, b, false),
+                K::PointPointDistance(a, b) => find_distance_cid(self, a, b),
+                K::PointLineDistance(ep, l) => find_point_line_cid(self, ep, *l),
+                K::Angle(la, lb, _) => self.angle.iter()
+                    .find(|c| c.a == *la && c.b == *lb)
+                    .map(|c| c.cid),
+                K::ConcentricDistance(a, b) => self.distance_concentric.iter()
+                    .find(|c| (c.a == *a && c.b == *b) || (c.a == *b && c.b == *a))
+                    .map(|c| c.cid),
+                K::LineLineDistance(a, b) => {
+                    // LineLineDistance uses point-to-line with LineP1(b) as anchor.
+                    find_point_line_cid(self, &E::LineP1(*b), *a)
+                }
+                K::LineLength(_) | K::ArcRadius(_) | K::ArcRadiusB(_)
+                    | K::ArcSweep(_) | K::LineAngle(_) => None,
+            };
+            if let Some(cid) = cid {
+                out.insert(cid, dim.name.clone());
+            }
+        }
+        // Expression-backed dimensions (LineLength, ArcRadius,
+        // ArcRadiusB, ArcSweep, LineAngle, plus any dimension with an
+        // expr_str or range bound) feed into self.expr_constraints.
+        // Their descriptions always start with the dimension name
+        // followed by a space -- parse that prefix to map cid -> name.
+        for ec in &self.expr_constraints {
+            if let Some((dim_name, _)) = ec.description.split_once(' ') {
+                let is_dim = dim_name.starts_with('d')
+                    && dim_name.len() > 1
+                    && dim_name[1..].chars().all(|c| c.is_ascii_digit());
+                if is_dim {
+                    out.insert(ec.cid, dim_name.to_string());
+                }
+            }
+        }
+        out
+    }
+
+    /// Look up a constraint by its user-visible name (e.g. `"C1"`,
+    /// `"CL0H"`) and return the descriptive part of its
+    /// `list_constraints` entry. Returns `None` if no active
+    /// constraint bears that name.
+    ///
+    /// The search walks `list_constraints` and strips the `"<name>: "`
+    /// prefix, so every constraint that appears in the canonical list
+    /// output is findable -- including dimension-managed distance
+    /// constraints that have a `C<nid>` name but no `ConstraintId`
+    /// variant.
+    pub fn find_constraint_description(&self, name: &str) -> Option<String> {
+        let prefix = format!("{}: ", name);
+        for line in self.list_constraints() {
+            if let Some(rest) = line.strip_prefix(&prefix) {
+                return Some(rest.to_string());
+            }
+        }
+        None
+    }
+
     /// List all active constraints as human-readable strings.
     pub fn list_constraints(&self) -> Vec<String> {
         let mut out = Vec::new();

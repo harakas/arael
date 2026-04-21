@@ -1,0 +1,353 @@
+//! Blocker analysis for DOF-rejected constraints.
+//!
+//! When a candidate constraint is rejected because its Jacobian rows
+//! already lie in the row-span of existing constraints, identify the
+//! minimum-size set of existing constraints whose removal would
+//! unblock the candidate.
+//!
+//! Operates at constraint-block granularity: each constraint is a
+//! block of one or more Jacobian rows (a DistancePP is 1 row, a
+//! CoincidentPP is 2 rows, a DistanceConcentric is 3 rows, etc.),
+//! and the candidate may itself be multi-row. A subset S of existing
+//! constraints is a blocker iff, with all rows from S removed, at
+//! least one candidate row falls out of the remaining row-span.
+//!
+//! The search is exhaustive at constraint granularity for sizes
+//! k = 1, 2, 3, with cutoffs on existing-constraint count to keep
+//! cost bounded. For typical sketches (1-50 constraints) the search
+//! is instantaneous; for larger sketches k=3 may be skipped and the
+//! report flagged as truncated.
+
+use std::collections::{HashMap, HashSet};
+use arael::model::Jacobian;
+use nalgebra::{DMatrix, DVector};
+
+/// Result of a blocker analysis.
+pub struct BlockerReport {
+    /// Size of the minimum blocker set. 0 means no blocker was found
+    /// within the enumeration cutoff.
+    pub minimum_size: usize,
+    /// Enumerated minimum-size blocker sets (capped at MAX_SETS).
+    /// Each inner Vec is a set of existing-constraint CIDs whose
+    /// removal unblocks the candidate. Empty if nothing found within
+    /// the cutoff.
+    pub sets: Vec<Vec<u32>>,
+    /// Total number of existing constraints considered.
+    pub existing_count: usize,
+    /// True if enumeration was cut off before reaching k=3 due to
+    /// existing-constraint count exceeding the per-k limit.
+    pub truncated: bool,
+    /// True if the existing-constraint Jacobian itself has internal
+    /// rank deficiency (linear dependencies among existing
+    /// constraints that dedup did not collapse). Hints that blocker
+    /// sets may be approximate.
+    pub existing_redundant: bool,
+}
+
+// Relative tolerance for treating a projection residual as zero.
+const ZERO_TOL_REL: f64 = 1e-8;
+// Maximum number of equivalent minimum-size blocker sets to report.
+const MAX_SETS: usize = 5;
+// Skip k=2 search if more existing constraints than this.
+const K2_LIMIT: usize = 200;
+// Skip k=3 search if more existing constraints than this.
+const K3_LIMIT: usize = 40;
+
+/// Run blocker analysis on a post-apply Jacobian.
+///
+/// `candidate_cids` names the CIDs of the just-added constraint block.
+/// All other CIDs in `jac.rows` are treated as existing constraints.
+/// Returns `None` if the rejection condition is not actually present
+/// (e.g. the candidate's rows do add rank, so there is nothing to
+/// explain).
+pub fn analyze(
+    jac: &Jacobian<f64>,
+    candidate_cids: &HashSet<u32>,
+) -> Option<BlockerReport> {
+    let n = jac.num_params;
+    if n == 0 { return None; }
+
+    // Partition rows into candidate vs existing, grouped by CID.
+    // Preserve first-seen order for existing CIDs so enumeration is
+    // deterministic across runs. Skip all-zero rows (drift-suppressed
+    // regularisers, guarded constraints that didn't activate): they
+    // don't contribute to row-span and would only inflate m_a.
+    let mut existing_cids_ordered: Vec<u32> = Vec::new();
+    let mut existing_rows_by_cid: HashMap<u32, Vec<Vec<f64>>> = HashMap::new();
+    let mut candidate_rows: Vec<Vec<f64>> = Vec::new();
+    for row in &jac.rows {
+        let nonzero = row.entries.iter().any(|&(_, v)| v != 0.0);
+        if !nonzero { continue; }
+        let mut dense = vec![0.0f64; n];
+        for &(j, v) in &row.entries {
+            dense[j as usize] = v;
+        }
+        if candidate_cids.contains(&row.constraint) {
+            candidate_rows.push(dense);
+        } else {
+            if !existing_rows_by_cid.contains_key(&row.constraint) {
+                existing_cids_ordered.push(row.constraint);
+            }
+            existing_rows_by_cid.entry(row.constraint).or_default().push(dense);
+        }
+    }
+    if candidate_rows.is_empty() || existing_cids_ordered.is_empty() {
+        return None;
+    }
+
+    // Flatten existing into parallel (row, cid) vectors.
+    let mut a_rows: Vec<Vec<f64>> = Vec::new();
+    let mut a_row_cid: Vec<u32> = Vec::new();
+    for &cid in &existing_cids_ordered {
+        for row in &existing_rows_by_cid[&cid] {
+            a_rows.push(row.clone());
+            a_row_cid.push(cid);
+        }
+    }
+    let m_a = a_rows.len();
+
+    // Verify rejection condition. Every candidate row must already lie
+    // in rowspan(A); if not, there is no blocker to find (the DOF check
+    // should not have rejected this constraint).
+    let a_mat = rows_to_matrix(&a_rows, n);
+    let (a_rank, a_sv_max) = rank_and_max(&a_mat);
+    let scale = a_sv_max.max(1e-30);
+    let rej_tol = ZERO_TOL_REL * scale;
+    for c in &candidate_rows {
+        let cvec = DVector::from_column_slice(c);
+        if residual_onto_rowspan(&a_mat, &cvec) > rej_tol {
+            return None;
+        }
+    }
+
+    let existing_redundant = a_rank < m_a;
+    let n_ex = existing_cids_ordered.len();
+
+    // Subset check: given a set of CIDs to remove, return true iff at
+    // least one candidate row is no longer in the remaining rowspan.
+    let check_blocker = |to_remove: &HashSet<u32>| -> bool {
+        let mut rest: Vec<&Vec<f64>> = Vec::with_capacity(m_a);
+        for (row, cid) in a_rows.iter().zip(a_row_cid.iter()) {
+            if !to_remove.contains(cid) {
+                rest.push(row);
+            }
+        }
+        if rest.is_empty() {
+            // No existing rows left; any non-zero candidate is now out
+            // of the (empty) rowspan. Treat as unblocking.
+            return true;
+        }
+        let a_rest = rows_refs_to_matrix(&rest, n);
+        let (_r, sv_max_rest) = rank_and_max(&a_rest);
+        let local_tol = ZERO_TOL_REL * sv_max_rest.max(1e-30);
+        for c in &candidate_rows {
+            let cvec = DVector::from_column_slice(c);
+            if residual_onto_rowspan(&a_rest, &cvec) > local_tol {
+                return true;
+            }
+        }
+        false
+    };
+
+    let mut truncated = false;
+    for k in 1..=3 {
+        if k == 2 && n_ex > K2_LIMIT { truncated = true; break; }
+        if k == 3 && n_ex > K3_LIMIT { truncated = true; break; }
+        let mut found: Vec<Vec<u32>> = Vec::new();
+        each_combination(&existing_cids_ordered, k, |combo| {
+            let set: HashSet<u32> = combo.iter().copied().collect();
+            if check_blocker(&set) {
+                found.push(combo.to_vec());
+            }
+            found.len() < MAX_SETS
+        });
+        if !found.is_empty() {
+            return Some(BlockerReport {
+                minimum_size: k,
+                sets: found,
+                existing_count: n_ex,
+                truncated: false,
+                existing_redundant,
+            });
+        }
+    }
+
+    Some(BlockerReport {
+        minimum_size: 0,
+        sets: Vec::new(),
+        existing_count: n_ex,
+        truncated,
+        existing_redundant,
+    })
+}
+
+fn rows_to_matrix(rows: &[Vec<f64>], n: usize) -> DMatrix<f64> {
+    let m = rows.len();
+    if m == 0 { return DMatrix::zeros(0, n); }
+    let mut data = Vec::with_capacity(m * n);
+    for r in rows { data.extend_from_slice(r); }
+    DMatrix::from_row_slice(m, n, &data)
+}
+
+fn rows_refs_to_matrix(rows: &[&Vec<f64>], n: usize) -> DMatrix<f64> {
+    let m = rows.len();
+    if m == 0 { return DMatrix::zeros(0, n); }
+    let mut data = Vec::with_capacity(m * n);
+    for r in rows { data.extend_from_slice(r); }
+    DMatrix::from_row_slice(m, n, &data)
+}
+
+fn rank_and_max(m: &DMatrix<f64>) -> (usize, f64) {
+    if m.nrows() == 0 || m.ncols() == 0 { return (0, 0.0); }
+    let svs = m.clone().singular_values();
+    let max = svs.iter().copied().fold(0.0f64, f64::max);
+    let tol = 1e-12 * max.max(1.0);
+    let rank = svs.iter().filter(|&&s| s > tol).count();
+    (rank, max)
+}
+
+/// Return the 2-norm of the residual of projecting `v` onto the
+/// row-span of `a`. Uses SVD right singular vectors; dimensions
+/// beyond the numerical rank are excluded from the projector.
+fn residual_onto_rowspan(a: &DMatrix<f64>, v: &DVector<f64>) -> f64 {
+    if a.nrows() == 0 { return v.norm(); }
+    let svd = a.clone().svd(false, true);
+    let vt = svd.v_t.as_ref().expect("v_t computed");
+    let svs = &svd.singular_values;
+    let max_sv = svs.iter().copied().fold(0.0f64, f64::max);
+    let rank_tol = 1e-12 * max_sv.max(1.0);
+    let n = v.len();
+    let mut v_proj = DVector::<f64>::zeros(n);
+    for i in 0..svs.len() {
+        if svs[i] > rank_tol {
+            let row_i = vt.row(i);
+            let mut coeff = 0.0f64;
+            for j in 0..n { coeff += row_i[j] * v[j]; }
+            for j in 0..n { v_proj[j] += coeff * row_i[j]; }
+        }
+    }
+    (v - v_proj).norm()
+}
+
+/// Call `f` with every size-`k` combination of `items` in lexicographic
+/// order. Stops early when `f` returns false.
+fn each_combination<F: FnMut(&[u32]) -> bool>(items: &[u32], k: usize, mut f: F) {
+    if k == 0 { f(&[]); return; }
+    if k > items.len() { return; }
+    let mut current: Vec<u32> = Vec::with_capacity(k);
+    fn recur<F: FnMut(&[u32]) -> bool>(
+        items: &[u32], k: usize, start: usize,
+        current: &mut Vec<u32>, f: &mut F,
+    ) -> bool {
+        if current.len() == k {
+            return f(current);
+        }
+        let need = k - current.len();
+        let max_start = items.len() + 1 - need;
+        for i in start..max_start {
+            current.push(items[i]);
+            let cont = recur(items, k, i + 1, current, f);
+            current.pop();
+            if !cont { return false; }
+        }
+        true
+    }
+    recur(items, k, 0, &mut current, &mut f);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arael::model::JacobianRow;
+
+    fn row(cid: u32, _n: usize, entries: &[(u32, f64)], residual: f64) -> JacobianRow<f64> {
+        JacobianRow {
+            constraint: cid,
+            label: "test",
+            residual,
+            entries: entries.to_vec(),
+        }
+    }
+
+    fn jac(n: usize, rows: Vec<JacobianRow<f64>>) -> Jacobian<f64> {
+        Jacobian { num_params: n, rows }
+    }
+
+    #[test]
+    fn single_row_duplicate() {
+        // Two single-row constraints, second copies the first's row.
+        // The candidate is CID=20, existing CIDs 10 (original). Add
+        // one more existing (CID=11) that's different. Candidate
+        // duplicates CID=10's row. Expect minimum size 1, set {10}.
+        let j = jac(3, vec![
+            row(10, 3, &[(0, 1.0), (1, -1.0)], 0.0), // existing: x0 - x1
+            row(11, 3, &[(2, 1.0)], 0.0),             // existing: x2
+            row(20, 3, &[(0, 2.0), (1, -2.0)], 0.0), // candidate: 2*(x0 - x1), colinear with CID 10
+        ]);
+        let candidate: HashSet<u32> = [20u32].into_iter().collect();
+        let r = analyze(&j, &candidate).expect("analysis runs");
+        assert_eq!(r.minimum_size, 1);
+        assert_eq!(r.sets.len(), 1);
+        assert_eq!(r.sets[0], vec![10u32]);
+    }
+
+    #[test]
+    fn multi_row_candidate_requires_size_two() {
+        // Candidate has 2 rows (1,0) and (0,1). Three existing
+        // single-row constraints (1,0), (0,1), (1,1) jointly span
+        // the 2D row-space but any single removal still leaves 2D
+        // spanning rows, so candidate stays implied. Minimum blocker
+        // set is size 2 with three equivalent alternatives.
+        let j = jac(2, vec![
+            row(10, 2, &[(0, 1.0)], 0.0),
+            row(11, 2, &[(1, 1.0)], 0.0),
+            row(12, 2, &[(0, 1.0), (1, 1.0)], 0.0),
+            row(20, 2, &[(0, 1.0)], 0.0), // candidate row 1
+            row(20, 2, &[(1, 1.0)], 0.0), // candidate row 2
+        ]);
+        let candidate: HashSet<u32> = [20u32].into_iter().collect();
+        let r = analyze(&j, &candidate).expect("analysis runs");
+        assert_eq!(r.minimum_size, 2);
+        use std::collections::BTreeSet;
+        let got: BTreeSet<BTreeSet<u32>> = r.sets.iter()
+            .map(|s| s.iter().copied().collect::<BTreeSet<u32>>())
+            .collect();
+        let expected: BTreeSet<BTreeSet<u32>> = [
+            [10u32, 11].into_iter().collect(),
+            [10u32, 12].into_iter().collect(),
+            [11u32, 12].into_iter().collect(),
+        ].into_iter().collect();
+        assert_eq!(got, expected);
+    }
+
+    #[test]
+    fn size_one_with_alternatives() {
+        // Candidate row (1, 1). Existing (1,0) and (0,1) jointly span
+        // the plane, so candidate is implied. Remove either single
+        // existing row and the remaining 1D span no longer contains
+        // (1, 1). Minimum size 1 with two alternatives.
+        let j = jac(2, vec![
+            row(10, 2, &[(0, 1.0)], 0.0),
+            row(11, 2, &[(1, 1.0)], 0.0),
+            row(20, 2, &[(0, 1.0), (1, 1.0)], 0.0), // candidate
+        ]);
+        let candidate: HashSet<u32> = [20u32].into_iter().collect();
+        let r = analyze(&j, &candidate).expect("analysis runs");
+        assert_eq!(r.minimum_size, 1);
+        use std::collections::BTreeSet;
+        let sets: BTreeSet<Vec<u32>> = r.sets.into_iter().collect();
+        assert_eq!(sets, [vec![10u32], vec![11u32]].into_iter().collect());
+    }
+
+    #[test]
+    fn not_a_rejection() {
+        // Candidate adds a fresh independent direction. analyze should
+        // return None (no blocker to find).
+        let j = jac(3, vec![
+            row(10, 3, &[(0, 1.0)], 0.0),
+            row(20, 3, &[(1, 1.0)], 0.0), // candidate, independent
+        ]);
+        let candidate: HashSet<u32> = [20u32].into_iter().collect();
+        assert!(analyze(&j, &candidate).is_none());
+    }
+}

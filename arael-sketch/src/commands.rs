@@ -320,16 +320,216 @@ pub fn validate_and_apply_constraint(
     if let Some(old_dof) = old_dof {
         let new_dof = sketch.dof()?;
         if new_dof >= old_dof
-            && let Some(ref snap) = snapshot
-                && let Ok(restored) = bincode::deserialize(snap) {
+            && let Some(ref snap) = snapshot {
+                let blocker_hint = blocker_hint_for_rejection(sketch, snap);
+                if let Ok(restored) = bincode::deserialize(snap) {
                     *sketch = restored;
                     return Err(format!(
-                        "Constraint rejected: DOF unchanged at {}. Constraint is redundant or degenerate. Use 'force' to override.",
-                        new_dof));
+                        "Constraint rejected: DOF unchanged at {}. {}Use 'force' to override.",
+                        new_dof, blocker_hint));
                 }
+            }
     }
 
     Ok(new_cost)
+}
+
+/// Run blocker analysis on a post-apply sketch and return a human
+/// readable hint naming which existing constraints prevent the
+/// candidate from reducing DOF. Returns an empty string if the
+/// analysis cannot identify a blocker (e.g. empty sketch, numerical
+/// edge case, or cutoff reached).
+fn blocker_hint_for_rejection(sketch: &mut Sketch, pre_snap: &[u8]) -> String {
+    // Pre-apply identifiers. Nids are serialised so they survive
+    // deserialize without re-running calc_jacobian. Expression
+    // constraints don't have nids, so they're identified by
+    // description (also stable across rebuilds).
+    let mut pre: Sketch = match bincode::deserialize::<Sketch>(pre_snap) {
+        Ok(s) => s,
+        Err(_) => return String::new(),
+    };
+    pre.prepare_expr_constraints();
+    let pre_nids: std::collections::HashSet<u32> = pre.constraint_nid_cid_pairs()
+        .into_iter().map(|(nid, _)| nid).collect();
+    let pre_expr_descs: std::collections::HashSet<String> = pre.expr_constraints
+        .iter().map(|ec| ec.description.clone()).collect();
+
+    // Post-apply jacobian, with drift suppressed so the weak
+    // regularizer doesn't dominate rowspan. Match compute_dof's
+    // approach.
+    let saved_drift = sketch.drift_isigma;
+    sketch.drift_isigma = 0.0;
+    let mut post_params = Vec::new();
+    sketch.serialize64(&mut post_params);
+    let post_jac = sketch.calc_jacobian(&post_params);
+    sketch.drift_isigma = saved_drift;
+
+    // Candidate cids: collection constraints whose nid is new, and
+    // expression constraints whose description is new.
+    let mut candidate_cids: std::collections::HashSet<u32> = sketch.constraint_nid_cid_pairs()
+        .into_iter()
+        .filter(|(nid, _)| !pre_nids.contains(nid))
+        .map(|(_, cid)| cid)
+        .collect();
+    for ec in &sketch.expr_constraints {
+        if !pre_expr_descs.contains(&ec.description) {
+            candidate_cids.insert(ec.cid);
+        }
+    }
+    if candidate_cids.is_empty() {
+        return String::new();
+    }
+
+    let report = match analyze_blockers(&post_jac, &candidate_cids) {
+        Some(r) => r,
+        None => return String::new(),
+    };
+    let label_map = build_cid_display_map(sketch, &post_jac);
+    format_blocker_report(&label_map, &report)
+}
+
+/// Build a CID -> user-visible label map. Each label is in the form
+/// `<name> (<description>)` where `<name>` is the deletable handle
+/// (`C{nid}` or `CL0H` / `CL0V` for synthetic flag constraints) and
+/// `<description>` is the same descriptive text the user sees in
+/// `list` / `info <name>`. For entity cids that carry attributes
+/// without a stable name (`fix_x`, `has_length`, etc.), fall back to
+/// `<entity> (<attrs>)` rendered from the jacobian row labels.
+fn build_cid_display_map(
+    sketch: &Sketch,
+    jac: &arael::model::Jacobian<f64>,
+) -> HashMap<u32, String> {
+    let base = sketch.constraint_labels();
+    let dim_names = sketch.dimension_cid_name_map();
+    let mut out: HashMap<u32, String> = HashMap::new();
+    // Collection-backed constraints: prefer the dimension name
+    // (`d<N>`) when the constraint is dimension-backed, since
+    // `delete d<N>` is the actionable handle; fall back to `C<nid>`
+    // otherwise. In both cases append the descriptive text from
+    // `find_constraint_description` (same text as `info` output).
+    for (nid, cid) in sketch.constraint_nid_cid_pairs() {
+        let name = match dim_names.get(&cid) {
+            Some(dname) => dname.clone(),
+            None => format!("C{}", nid),
+        };
+        let desc = sketch.find_constraint_description(&format!("C{}", nid));
+        let display = match desc {
+            Some(d) => format!("{} ({})", name, d),
+            None => name,
+        };
+        out.insert(cid, display);
+    }
+    // Expression-backed dimension constraints. The backing lives in
+    // `sketch.expr_constraints`, not a named collection, so
+    // `constraint_nid_cid_pairs` skips them. Use `dim_names` to get
+    // the actionable `d<N>` handle; take the description from the
+    // expr_constraint, stripping its leading "d<N> " since it would
+    // duplicate the handle.
+    for ec in &sketch.expr_constraints {
+        let Some(dim_name) = dim_names.get(&ec.cid) else { continue };
+        let remainder = ec.description
+            .strip_prefix(&format!("{} ", dim_name))
+            .unwrap_or(&ec.description);
+        let display = format!("{} ({})", dim_name, remainder);
+        out.insert(ec.cid, display);
+    }
+    // Entity-attached attributes. Collect the row labels active on
+    // each unnamed entity cid; emit `<name> (<attr>)` for flags that
+    // have a stable C{entity}{flag} name, otherwise fall back to
+    // `<entity> (<attrs>)`. Drop drift/drag_pull.
+    let mut per_cid_labels: HashMap<u32, Vec<&'static str>> = HashMap::new();
+    for row in &jac.rows {
+        let v = per_cid_labels.entry(row.constraint).or_default();
+        if !v.contains(&row.label) { v.push(row.label); }
+    }
+    for (cid, row_labels) in per_cid_labels {
+        if out.contains_key(&cid) { continue; }
+        let Some(base_name) = base.get(&cid).cloned() else { continue; };
+        let entity_name = base_name
+            .strip_prefix("point:")
+            .or_else(|| base_name.strip_prefix("line:"))
+            .or_else(|| base_name.strip_prefix("arc:"))
+            .map(|s| s.to_string())
+            .unwrap_or(base_name);
+        let attrs: Vec<&str> = row_labels.iter()
+            .copied()
+            .filter(|l| *l != "drift" && *l != "drag_pull")
+            .collect();
+        if attrs.is_empty() {
+            out.insert(cid, entity_name);
+            continue;
+        }
+        // If there's a single attribute with a known flag name
+        // (horizontal/vertical), use the C<entity>{flag} form so
+        // `info` resolves it directly.
+        let flag_char = match attrs.as_slice() {
+            ["horizontal"] => Some('H'),
+            ["vertical"] => Some('V'),
+            _ => None,
+        };
+        let display = match flag_char {
+            Some(ch) => {
+                let flag_name = arael_sketch_solver::format_flag_name(&entity_name, ch);
+                match sketch.find_constraint_description(&flag_name) {
+                    Some(desc) => format!("{} ({})", flag_name, desc),
+                    None => format!("{} ({})", entity_name, attrs.join(",")),
+                }
+            }
+            None => format!("{} ({})", entity_name, attrs.join(",")),
+        };
+        out.insert(cid, display);
+    }
+    out
+}
+
+fn format_blocker_report(
+    labels: &HashMap<u32, String>,
+    report: &BlockerReport,
+) -> String {
+    let name = |cid: u32| -> String {
+        labels.get(&cid).cloned().unwrap_or_else(|| format!("C<cid={}>", cid))
+    };
+    if report.sets.is_empty() {
+        if report.truncated {
+            return "Could not isolate a small blocker set within the search cutoff. ".to_string();
+        }
+        return String::new();
+    }
+    let mut s = String::new();
+    match report.minimum_size {
+        1 => {
+            if report.sets.len() == 1 {
+                s.push_str(&format!("Blocked by: {}. ", name(report.sets[0][0])));
+            } else {
+                let names: Vec<String> = report.sets.iter()
+                    .map(|set| name(set[0]))
+                    .collect();
+                s.push_str(&format!(
+                    "Blocked by one of: {} (removing any one unblocks). ",
+                    names.join(", ")));
+            }
+        }
+        k => {
+            let fmt_set = |set: &[u32]| -> String {
+                let names: Vec<String> = set.iter().map(|&c| name(c)).collect();
+                format!("{{{}}}", names.join(", "))
+            };
+            if report.sets.len() == 1 {
+                s.push_str(&format!(
+                    "Blocked jointly by: {} (all {} must be removed). ",
+                    fmt_set(&report.sets[0]), k));
+            } else {
+                let alts: Vec<String> = report.sets.iter().map(|set| fmt_set(set)).collect();
+                s.push_str(&format!(
+                    "Blocked (min {} constraints); equivalent sets: {}. ",
+                    k, alts.join(", ")));
+            }
+        }
+    }
+    if report.existing_redundant {
+        s.push_str("(Existing constraints contain internal redundancies; blocker set may be approximate.) ");
+    }
+    s
 }
 
 impl CommandContext {
@@ -4002,18 +4202,12 @@ fn format_range_bound(rb: &RangeBound) -> String {
 
 fn cmd_info(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let name = args.trim();
-    // Constraint name lookup: C3, CL0H, CL2V.
+    // Constraint name lookup: C<nid> (every numeric constraint name,
+    // including dimension-managed distance constraints) and
+    // synthetic flag names like CL0H / CL2V.
     if name.starts_with('C') && !name.contains('.')
-        && crate::tools::find_constraint_by_name(&ctx.sketch, name).is_some() {
-        // Find the matching line in list_constraints that starts with "<name>: ".
-        let prefix = format!("{}: ", name);
-        for line in ctx.sketch.list_constraints() {
-            if line.starts_with(&prefix) {
-                return ok(line);
-            }
-        }
-        // Fallback: no list line matched (should not happen for valid names).
-        return ok(format!("{}: (constraint exists)", name));
+        && let Some(desc) = ctx.sketch.find_constraint_description(name) {
+        return ok(format!("{}: {}", name, desc));
     }
     // Endpoint info: L0.p1, L0.p2, A0.center, etc.
     if name.contains('.')
