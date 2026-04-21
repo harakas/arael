@@ -1082,7 +1082,7 @@ impl EditorApp {
                     Some(self.sketch.dimensions[i].name.clone())
                 } else { None }
             }
-            Selection::Constraint(_) => None,
+            Selection::Constraint(id) => self.constraint_name(id),
         }
     }
 
