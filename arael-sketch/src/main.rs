@@ -1755,10 +1755,28 @@ impl EditorApp {
                 // with ANY entity currently anchored at `l`'s midpoint
                 // (midpoints sit on the body), OR a direct *_on_line
                 // entry between the dragged entity and `l` exists.
+                // Arc-point variants route through a helper point +
+                // CoincidentArc* constraint + PointOnLine(helper, l);
+                // detect that compound attachment here so the release
+                // path doesn't re-add a duplicate PointOnLine.
+                let arc_point_on_line = |arc: Ref<Arc>, which: ArcPoint| -> bool {
+                    let helper = match which {
+                        ArcPoint::Center => self.sketch.coincident_arc_center.iter().find(|c| c.arc == arc).map(|c| c.point),
+                        ArcPoint::Start => self.sketch.coincident_arc_start.iter().find(|c| c.arc == arc).map(|c| c.point),
+                        ArcPoint::End => self.sketch.coincident_arc_end.iter().find(|c| c.arc == arc).map(|c| c.point),
+                    };
+                    match helper {
+                        Some(hp) => self.sketch.point_on_line.iter().any(|c| c.point == hp && c.line == l),
+                        None => false,
+                    }
+                };
                 let direct = match grab {
                     GrabTarget::Point(r) => self.sketch.point_on_line.iter().any(|c| c.point == r && c.line == l),
                     GrabTarget::LineP1(r) => self.sketch.line_p1_on_line.iter().any(|c| c.a == r && c.b == l),
                     GrabTarget::LineP2(r) => self.sketch.line_p2_on_line.iter().any(|c| c.a == r && c.b == l),
+                    GrabTarget::ArcCenter(a) => arc_point_on_line(a, ArcPoint::Center),
+                    GrabTarget::ArcStart(a) => arc_point_on_line(a, ArcPoint::Start),
+                    GrabTarget::ArcEnd(a) => arc_point_on_line(a, ArcPoint::End),
                     _ => false,
                 };
                 direct
@@ -1768,10 +1786,25 @@ impl EditorApp {
                         .any(|s| self.are_transitively_coincident(grab_sel, *s))
             }
             SnapTarget::ArcBody(a) => {
+                // Same arc-point-helper plumbing for point_on_arc.
+                let arc_point_on_arc = |arc_src: Ref<Arc>, which: ArcPoint| -> bool {
+                    let helper = match which {
+                        ArcPoint::Center => self.sketch.coincident_arc_center.iter().find(|c| c.arc == arc_src).map(|c| c.point),
+                        ArcPoint::Start => self.sketch.coincident_arc_start.iter().find(|c| c.arc == arc_src).map(|c| c.point),
+                        ArcPoint::End => self.sketch.coincident_arc_end.iter().find(|c| c.arc == arc_src).map(|c| c.point),
+                    };
+                    match helper {
+                        Some(hp) => self.sketch.point_on_arc.iter().any(|c| c.point == hp && c.arc == a),
+                        None => false,
+                    }
+                };
                 let direct = match grab {
                     GrabTarget::Point(r) => self.sketch.point_on_arc.iter().any(|c| c.point == r && c.arc == a),
                     GrabTarget::LineP1(r) => self.sketch.line_p1_on_arc.iter().any(|c| c.line == r && c.arc == a),
                     GrabTarget::LineP2(r) => self.sketch.line_p2_on_arc.iter().any(|c| c.line == r && c.arc == a),
+                    GrabTarget::ArcCenter(src) => arc_point_on_arc(src, ArcPoint::Center),
+                    GrabTarget::ArcStart(src) => arc_point_on_arc(src, ArcPoint::Start),
+                    GrabTarget::ArcEnd(src) => arc_point_on_arc(src, ArcPoint::End),
                     _ => false,
                 };
                 direct
