@@ -1973,43 +1973,42 @@ impl Sketch {
         for c in &self.midpoint_lp2_arc { out.push(format!("C{}: midpoint {}.p2 {}", c.nid, self.lines[c.line].name, self.arcs[c.arc].name)); }
         for c in &self.midpoint_arc_start_arc { out.push(format!("C{}: midpoint {}.start {}", c.nid, self.arcs[c.a].name, self.arcs[c.b].name)); }
         for c in &self.midpoint_arc_end_arc { out.push(format!("C{}: midpoint {}.end {}", c.nid, self.arcs[c.a].name, self.arcs[c.b].name)); }
-        for c in &self.distance_pp { out.push(format!("C{}: distance {} {} = {}", c.nid, self.point_display_name(c.a), self.point_display_name(c.b), c.distance)); }
-        for c in &self.hdistance_pp { out.push(format!("C{}: hdistance {} {} = {}", c.nid, self.point_display_name(c.a), self.point_display_name(c.b), c.distance)); }
-        for c in &self.vdistance_pp { out.push(format!("C{}: vdistance {} {} = {}", c.nid, self.point_display_name(c.a), self.point_display_name(c.b), c.distance)); }
-        for c in &self.distance_pl { out.push(format!("C{}: distance {} {} = {}", c.nid, self.point_display_name(c.point), self.lines[c.line].name, c.distance)); }
-        for c in &self.distance_lp1l { out.push(format!("C{}: distance {}.p1 {} = {}", c.nid, self.lines[c.a].name, self.lines[c.b].name, c.distance)); }
-        for c in &self.distance_lp2l { out.push(format!("C{}: distance {}.p2 {} = {}", c.nid, self.lines[c.a].name, self.lines[c.b].name, c.distance)); }
-        for c in &self.distance_arc_center_l { out.push(format!("C{}: distance {}.center {} = {}", c.nid, self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
-        for c in &self.distance_arc_start_l { out.push(format!("C{}: distance {}.start {} = {}", c.nid, self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
-        for c in &self.distance_arc_end_l { out.push(format!("C{}: distance {}.end {} = {}", c.nid, self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
+        for c in &self.distance_pp { out.push(format!("C{}: distance {} {} = {}", c.nid, self.point_display_name(c.a), self.point_display_name(c.b), c.distance.abs())); }
+        for c in &self.hdistance_pp { out.push(format!("C{}: hdistance {} {} = {}", c.nid, self.point_display_name(c.a), self.point_display_name(c.b), c.distance.abs())); }
+        for c in &self.vdistance_pp { out.push(format!("C{}: vdistance {} {} = {}", c.nid, self.point_display_name(c.a), self.point_display_name(c.b), c.distance.abs())); }
+        for c in &self.distance_pl { out.push(format!("C{}: distance {} {} = {}", c.nid, self.point_display_name(c.point), self.lines[c.line].name, c.distance.abs())); }
+        for c in &self.distance_lp1l { out.push(format!("C{}: distance {}.p1 {} = {}", c.nid, self.lines[c.a].name, self.lines[c.b].name, c.distance.abs())); }
+        for c in &self.distance_lp2l { out.push(format!("C{}: distance {}.p2 {} = {}", c.nid, self.lines[c.a].name, self.lines[c.b].name, c.distance.abs())); }
+        for c in &self.distance_arc_center_l { out.push(format!("C{}: distance {}.center {} = {}", c.nid, self.arcs[c.arc].name, self.lines[c.line].name, c.distance.abs())); }
+        for c in &self.distance_arc_start_l { out.push(format!("C{}: distance {}.start {} = {}", c.nid, self.arcs[c.arc].name, self.lines[c.line].name, c.distance.abs())); }
+        for c in &self.distance_arc_end_l { out.push(format!("C{}: distance {}.end {} = {}", c.nid, self.arcs[c.arc].name, self.lines[c.line].name, c.distance.abs())); }
         // Line-endpoint distance constraints
-        for c in &self.distance_ll11 { out.push(format!("C{}: distance {}.p1 {}.p1 = {}", c.nid, self.lines[c.a].name, self.lines[c.b].name, c.distance)); }
-        for c in &self.distance_ll12 { out.push(format!("C{}: distance {}.p1 {}.p2 = {}", c.nid, self.lines[c.a].name, self.lines[c.b].name, c.distance)); }
-        for c in &self.distance_ll21 { out.push(format!("C{}: distance {}.p2 {}.p1 = {}", c.nid, self.lines[c.a].name, self.lines[c.b].name, c.distance)); }
-        for c in &self.distance_ll22 { out.push(format!("C{}: distance {}.p2 {}.p2 = {}", c.nid, self.lines[c.a].name, self.lines[c.b].name, c.distance)); }
-        for c in &self.distance_lp1 { out.push(format!("C{}: distance {}.p1 {} = {}", c.nid, self.lines[c.line].name, self.point_display_name(c.point), c.distance)); }
-        for c in &self.distance_lp2 { out.push(format!("C{}: distance {}.p2 {} = {}", c.nid, self.lines[c.line].name, self.point_display_name(c.point), c.distance)); }
-        for c in &self.distance_arc_center_p { out.push(format!("C{}: distance {}.center {} = {}", c.nid, self.arcs[c.arc].name, self.point_display_name(c.point), c.distance)); }
-        for c in &self.distance_arc_start_p { out.push(format!("C{}: distance {}.start {} = {}", c.nid, self.arcs[c.arc].name, self.point_display_name(c.point), c.distance)); }
-        for c in &self.distance_arc_end_p { out.push(format!("C{}: distance {}.end {} = {}", c.nid, self.arcs[c.arc].name, self.point_display_name(c.point), c.distance)); }
-        for c in &self.distance_arc_center_l1 { out.push(format!("C{}: distance {}.center {}.p1 = {}", c.nid, self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
-        for c in &self.distance_arc_center_l2 { out.push(format!("C{}: distance {}.center {}.p2 = {}", c.nid, self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
-        for c in &self.distance_arc_start_l1 { out.push(format!("C{}: distance {}.start {}.p1 = {}", c.nid, self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
-        for c in &self.distance_arc_start_l2 { out.push(format!("C{}: distance {}.start {}.p2 = {}", c.nid, self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
-        for c in &self.distance_arc_end_l1 { out.push(format!("C{}: distance {}.end {}.p1 = {}", c.nid, self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
-        for c in &self.distance_arc_end_l2 { out.push(format!("C{}: distance {}.end {}.p2 = {}", c.nid, self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
-        for c in &self.distance_aa_ce_ce { out.push(format!("C{}: distance {}.center {}.center = {}", c.nid, self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
-        for c in &self.distance_aa_ce_s { out.push(format!("C{}: distance {}.center {}.start = {}", c.nid, self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
-        for c in &self.distance_aa_ce_e { out.push(format!("C{}: distance {}.center {}.end = {}", c.nid, self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
-        for c in &self.distance_aa_s_ce { out.push(format!("C{}: distance {}.start {}.center = {}", c.nid, self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
-        for c in &self.distance_aa_s_s { out.push(format!("C{}: distance {}.start {}.start = {}", c.nid, self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
-        for c in &self.distance_aa_s_e { out.push(format!("C{}: distance {}.start {}.end = {}", c.nid, self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
-        for c in &self.distance_aa_e_ce { out.push(format!("C{}: distance {}.end {}.center = {}", c.nid, self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
-        for c in &self.distance_aa_e_s { out.push(format!("C{}: distance {}.end {}.start = {}", c.nid, self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
-        for c in &self.distance_aa_e_e { out.push(format!("C{}: distance {}.end {}.end = {}", c.nid, self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
+        for c in &self.distance_ll11 { out.push(format!("C{}: distance {}.p1 {}.p1 = {}", c.nid, self.lines[c.a].name, self.lines[c.b].name, c.distance.abs())); }
+        for c in &self.distance_ll12 { out.push(format!("C{}: distance {}.p1 {}.p2 = {}", c.nid, self.lines[c.a].name, self.lines[c.b].name, c.distance.abs())); }
+        for c in &self.distance_ll21 { out.push(format!("C{}: distance {}.p2 {}.p1 = {}", c.nid, self.lines[c.a].name, self.lines[c.b].name, c.distance.abs())); }
+        for c in &self.distance_ll22 { out.push(format!("C{}: distance {}.p2 {}.p2 = {}", c.nid, self.lines[c.a].name, self.lines[c.b].name, c.distance.abs())); }
+        for c in &self.distance_lp1 { out.push(format!("C{}: distance {}.p1 {} = {}", c.nid, self.lines[c.line].name, self.point_display_name(c.point), c.distance.abs())); }
+        for c in &self.distance_lp2 { out.push(format!("C{}: distance {}.p2 {} = {}", c.nid, self.lines[c.line].name, self.point_display_name(c.point), c.distance.abs())); }
+        for c in &self.distance_arc_center_p { out.push(format!("C{}: distance {}.center {} = {}", c.nid, self.arcs[c.arc].name, self.point_display_name(c.point), c.distance.abs())); }
+        for c in &self.distance_arc_start_p { out.push(format!("C{}: distance {}.start {} = {}", c.nid, self.arcs[c.arc].name, self.point_display_name(c.point), c.distance.abs())); }
+        for c in &self.distance_arc_end_p { out.push(format!("C{}: distance {}.end {} = {}", c.nid, self.arcs[c.arc].name, self.point_display_name(c.point), c.distance.abs())); }
+        for c in &self.distance_arc_center_l1 { out.push(format!("C{}: distance {}.center {}.p1 = {}", c.nid, self.arcs[c.arc].name, self.lines[c.line].name, c.distance.abs())); }
+        for c in &self.distance_arc_center_l2 { out.push(format!("C{}: distance {}.center {}.p2 = {}", c.nid, self.arcs[c.arc].name, self.lines[c.line].name, c.distance.abs())); }
+        for c in &self.distance_arc_start_l1 { out.push(format!("C{}: distance {}.start {}.p1 = {}", c.nid, self.arcs[c.arc].name, self.lines[c.line].name, c.distance.abs())); }
+        for c in &self.distance_arc_start_l2 { out.push(format!("C{}: distance {}.start {}.p2 = {}", c.nid, self.arcs[c.arc].name, self.lines[c.line].name, c.distance.abs())); }
+        for c in &self.distance_arc_end_l1 { out.push(format!("C{}: distance {}.end {}.p1 = {}", c.nid, self.arcs[c.arc].name, self.lines[c.line].name, c.distance.abs())); }
+        for c in &self.distance_arc_end_l2 { out.push(format!("C{}: distance {}.end {}.p2 = {}", c.nid, self.arcs[c.arc].name, self.lines[c.line].name, c.distance.abs())); }
+        for c in &self.distance_aa_ce_ce { out.push(format!("C{}: distance {}.center {}.center = {}", c.nid, self.arcs[c.a].name, self.arcs[c.b].name, c.distance.abs())); }
+        for c in &self.distance_aa_ce_s { out.push(format!("C{}: distance {}.center {}.start = {}", c.nid, self.arcs[c.a].name, self.arcs[c.b].name, c.distance.abs())); }
+        for c in &self.distance_aa_ce_e { out.push(format!("C{}: distance {}.center {}.end = {}", c.nid, self.arcs[c.a].name, self.arcs[c.b].name, c.distance.abs())); }
+        for c in &self.distance_aa_s_ce { out.push(format!("C{}: distance {}.start {}.center = {}", c.nid, self.arcs[c.a].name, self.arcs[c.b].name, c.distance.abs())); }
+        for c in &self.distance_aa_s_s { out.push(format!("C{}: distance {}.start {}.start = {}", c.nid, self.arcs[c.a].name, self.arcs[c.b].name, c.distance.abs())); }
+        for c in &self.distance_aa_s_e { out.push(format!("C{}: distance {}.start {}.end = {}", c.nid, self.arcs[c.a].name, self.arcs[c.b].name, c.distance.abs())); }
+        for c in &self.distance_aa_e_ce { out.push(format!("C{}: distance {}.end {}.center = {}", c.nid, self.arcs[c.a].name, self.arcs[c.b].name, c.distance.abs())); }
+        for c in &self.distance_aa_e_s { out.push(format!("C{}: distance {}.end {}.start = {}", c.nid, self.arcs[c.a].name, self.arcs[c.b].name, c.distance.abs())); }
+        for c in &self.distance_aa_e_e { out.push(format!("C{}: distance {}.end {}.end = {}", c.nid, self.arcs[c.a].name, self.arcs[c.b].name, c.distance.abs())); }
         for c in &self.distance_concentric {
-            let signed = if c.sign >= 0.0 { c.distance } else { -c.distance };
-            out.push(format!("C{}: distance {} {} = {} (concentric)", c.nid, self.arcs[c.a].name, self.arcs[c.b].name, signed));
+            out.push(format!("C{}: distance {} {} = {} (concentric)", c.nid, self.arcs[c.a].name, self.arcs[c.b].name, c.distance.abs()));
         }
         // Midpoint variants
         for c in &self.midpoint_lp1 { out.push(format!("C{}: midpoint {}.p1 {}", c.nid, self.lines[c.target].name, self.lines[c.line].name)); }
@@ -2018,30 +2017,30 @@ impl Sketch {
         for c in &self.midpoint_arc_end { out.push(format!("C{}: midpoint {}.end {}", c.nid, self.arcs[c.arc].name, self.lines[c.line].name)); }
         // Axis distance constraints
         let axis_label = |h: bool| if h { "hdistance" } else { "vdistance" };
-        for c in &self.axis_distance_ll11 { out.push(format!("C{}: {} {}.p1 {}.p1 = {}", c.nid, axis_label(c.horizontal), self.lines[c.a].name, self.lines[c.b].name, c.distance)); }
-        for c in &self.axis_distance_ll12 { out.push(format!("C{}: {} {}.p1 {}.p2 = {}", c.nid, axis_label(c.horizontal), self.lines[c.a].name, self.lines[c.b].name, c.distance)); }
-        for c in &self.axis_distance_ll21 { out.push(format!("C{}: {} {}.p2 {}.p1 = {}", c.nid, axis_label(c.horizontal), self.lines[c.a].name, self.lines[c.b].name, c.distance)); }
-        for c in &self.axis_distance_ll22 { out.push(format!("C{}: {} {}.p2 {}.p2 = {}", c.nid, axis_label(c.horizontal), self.lines[c.a].name, self.lines[c.b].name, c.distance)); }
-        for c in &self.axis_distance_lp1 { out.push(format!("C{}: {} {}.p1 {} = {}", c.nid, axis_label(c.horizontal), self.lines[c.line].name, self.point_display_name(c.point), c.distance)); }
-        for c in &self.axis_distance_lp2 { out.push(format!("C{}: {} {}.p2 {} = {}", c.nid, axis_label(c.horizontal), self.lines[c.line].name, self.point_display_name(c.point), c.distance)); }
-        for c in &self.axis_distance_arc_center_p { out.push(format!("C{}: {} {}.center {} = {}", c.nid, axis_label(c.horizontal), self.arcs[c.arc].name, self.point_display_name(c.point), c.distance)); }
-        for c in &self.axis_distance_arc_start_p { out.push(format!("C{}: {} {}.start {} = {}", c.nid, axis_label(c.horizontal), self.arcs[c.arc].name, self.point_display_name(c.point), c.distance)); }
-        for c in &self.axis_distance_arc_end_p { out.push(format!("C{}: {} {}.end {} = {}", c.nid, axis_label(c.horizontal), self.arcs[c.arc].name, self.point_display_name(c.point), c.distance)); }
-        for c in &self.axis_distance_arc_center_l1 { out.push(format!("C{}: {} {}.center {}.p1 = {}", c.nid, axis_label(c.horizontal), self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
-        for c in &self.axis_distance_arc_center_l2 { out.push(format!("C{}: {} {}.center {}.p2 = {}", c.nid, axis_label(c.horizontal), self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
-        for c in &self.axis_distance_arc_start_l1 { out.push(format!("C{}: {} {}.start {}.p1 = {}", c.nid, axis_label(c.horizontal), self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
-        for c in &self.axis_distance_arc_start_l2 { out.push(format!("C{}: {} {}.start {}.p2 = {}", c.nid, axis_label(c.horizontal), self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
-        for c in &self.axis_distance_arc_end_l1 { out.push(format!("C{}: {} {}.end {}.p1 = {}", c.nid, axis_label(c.horizontal), self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
-        for c in &self.axis_distance_arc_end_l2 { out.push(format!("C{}: {} {}.end {}.p2 = {}", c.nid, axis_label(c.horizontal), self.arcs[c.arc].name, self.lines[c.line].name, c.distance)); }
-        for c in &self.axis_distance_aa_ce_ce { out.push(format!("C{}: {} {}.center {}.center = {}", c.nid, axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
-        for c in &self.axis_distance_aa_ce_s { out.push(format!("C{}: {} {}.center {}.start = {}", c.nid, axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
-        for c in &self.axis_distance_aa_ce_e { out.push(format!("C{}: {} {}.center {}.end = {}", c.nid, axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
-        for c in &self.axis_distance_aa_s_ce { out.push(format!("C{}: {} {}.start {}.center = {}", c.nid, axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
-        for c in &self.axis_distance_aa_s_s { out.push(format!("C{}: {} {}.start {}.start = {}", c.nid, axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
-        for c in &self.axis_distance_aa_s_e { out.push(format!("C{}: {} {}.start {}.end = {}", c.nid, axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
-        for c in &self.axis_distance_aa_e_ce { out.push(format!("C{}: {} {}.end {}.center = {}", c.nid, axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
-        for c in &self.axis_distance_aa_e_s { out.push(format!("C{}: {} {}.end {}.start = {}", c.nid, axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
-        for c in &self.axis_distance_aa_e_e { out.push(format!("C{}: {} {}.end {}.end = {}", c.nid, axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance)); }
+        for c in &self.axis_distance_ll11 { out.push(format!("C{}: {} {}.p1 {}.p1 = {}", c.nid, axis_label(c.horizontal), self.lines[c.a].name, self.lines[c.b].name, c.distance.abs())); }
+        for c in &self.axis_distance_ll12 { out.push(format!("C{}: {} {}.p1 {}.p2 = {}", c.nid, axis_label(c.horizontal), self.lines[c.a].name, self.lines[c.b].name, c.distance.abs())); }
+        for c in &self.axis_distance_ll21 { out.push(format!("C{}: {} {}.p2 {}.p1 = {}", c.nid, axis_label(c.horizontal), self.lines[c.a].name, self.lines[c.b].name, c.distance.abs())); }
+        for c in &self.axis_distance_ll22 { out.push(format!("C{}: {} {}.p2 {}.p2 = {}", c.nid, axis_label(c.horizontal), self.lines[c.a].name, self.lines[c.b].name, c.distance.abs())); }
+        for c in &self.axis_distance_lp1 { out.push(format!("C{}: {} {}.p1 {} = {}", c.nid, axis_label(c.horizontal), self.lines[c.line].name, self.point_display_name(c.point), c.distance.abs())); }
+        for c in &self.axis_distance_lp2 { out.push(format!("C{}: {} {}.p2 {} = {}", c.nid, axis_label(c.horizontal), self.lines[c.line].name, self.point_display_name(c.point), c.distance.abs())); }
+        for c in &self.axis_distance_arc_center_p { out.push(format!("C{}: {} {}.center {} = {}", c.nid, axis_label(c.horizontal), self.arcs[c.arc].name, self.point_display_name(c.point), c.distance.abs())); }
+        for c in &self.axis_distance_arc_start_p { out.push(format!("C{}: {} {}.start {} = {}", c.nid, axis_label(c.horizontal), self.arcs[c.arc].name, self.point_display_name(c.point), c.distance.abs())); }
+        for c in &self.axis_distance_arc_end_p { out.push(format!("C{}: {} {}.end {} = {}", c.nid, axis_label(c.horizontal), self.arcs[c.arc].name, self.point_display_name(c.point), c.distance.abs())); }
+        for c in &self.axis_distance_arc_center_l1 { out.push(format!("C{}: {} {}.center {}.p1 = {}", c.nid, axis_label(c.horizontal), self.arcs[c.arc].name, self.lines[c.line].name, c.distance.abs())); }
+        for c in &self.axis_distance_arc_center_l2 { out.push(format!("C{}: {} {}.center {}.p2 = {}", c.nid, axis_label(c.horizontal), self.arcs[c.arc].name, self.lines[c.line].name, c.distance.abs())); }
+        for c in &self.axis_distance_arc_start_l1 { out.push(format!("C{}: {} {}.start {}.p1 = {}", c.nid, axis_label(c.horizontal), self.arcs[c.arc].name, self.lines[c.line].name, c.distance.abs())); }
+        for c in &self.axis_distance_arc_start_l2 { out.push(format!("C{}: {} {}.start {}.p2 = {}", c.nid, axis_label(c.horizontal), self.arcs[c.arc].name, self.lines[c.line].name, c.distance.abs())); }
+        for c in &self.axis_distance_arc_end_l1 { out.push(format!("C{}: {} {}.end {}.p1 = {}", c.nid, axis_label(c.horizontal), self.arcs[c.arc].name, self.lines[c.line].name, c.distance.abs())); }
+        for c in &self.axis_distance_arc_end_l2 { out.push(format!("C{}: {} {}.end {}.p2 = {}", c.nid, axis_label(c.horizontal), self.arcs[c.arc].name, self.lines[c.line].name, c.distance.abs())); }
+        for c in &self.axis_distance_aa_ce_ce { out.push(format!("C{}: {} {}.center {}.center = {}", c.nid, axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance.abs())); }
+        for c in &self.axis_distance_aa_ce_s { out.push(format!("C{}: {} {}.center {}.start = {}", c.nid, axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance.abs())); }
+        for c in &self.axis_distance_aa_ce_e { out.push(format!("C{}: {} {}.center {}.end = {}", c.nid, axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance.abs())); }
+        for c in &self.axis_distance_aa_s_ce { out.push(format!("C{}: {} {}.start {}.center = {}", c.nid, axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance.abs())); }
+        for c in &self.axis_distance_aa_s_s { out.push(format!("C{}: {} {}.start {}.start = {}", c.nid, axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance.abs())); }
+        for c in &self.axis_distance_aa_s_e { out.push(format!("C{}: {} {}.start {}.end = {}", c.nid, axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance.abs())); }
+        for c in &self.axis_distance_aa_e_ce { out.push(format!("C{}: {} {}.end {}.center = {}", c.nid, axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance.abs())); }
+        for c in &self.axis_distance_aa_e_s { out.push(format!("C{}: {} {}.end {}.start = {}", c.nid, axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance.abs())); }
+        for c in &self.axis_distance_aa_e_e { out.push(format!("C{}: {} {}.end {}.end = {}", c.nid, axis_label(c.horizontal), self.arcs[c.a].name, self.arcs[c.b].name, c.distance.abs())); }
         out
     }
 
@@ -2297,19 +2296,43 @@ impl Sketch {
             return Ok(result);
         }
 
-        // Determine rank from the singular value spectrum. The gap algorithm
-        // mirrors the old eigenvalue version but operates on sigma directly:
-        // a sharp jump between "near zero" and "constrained" still shows up
-        // as a large gap ratio, but without the condition-number squaring
+
+        let t_svd = if TIMING_DEBUG { Some(std::time::Instant::now()) } else { None };
+        // Determine rank from the singular value spectrum of the
+        // current-params Jacobian. The gap algorithm mirrors the old
+        // eigenvalue version but operates on sigma directly: a sharp
+        // jump between "near zero" and "constrained" shows up as a
+        // large gap ratio, without the condition-number squaring
         // that killed precision in the J^T J approach.
+        //
+        // This is the *instantaneous* rank at the current params,
+        // which can over-count DOF at configurations where two
+        // Jacobian rows happen to be tangent-aligned -- classic
+        // example: `hdistance L0.p2 L1.p2 = X` at a horizontal L1
+        // has a row parallel to the length row at that instant, so
+        // adding it doesn't lower the SVD rank even though it's
+        // structurally a new constraint (rotate the triangle and it
+        // decouples).
+        //
+        // The natural fix is to SVD a slightly-perturbed copy of the
+        // params instead ("structural rank"); we tried it and backed
+        // it out. Even tiny perturbations introduce a new spectrum
+        // of small-but-nonzero sigmas in real sketches (robot.cmd
+        // produced a sigma at 4e-5 with rel 5e-10 of max), and the
+        // rank threshold that would classify the horizontal-line
+        // sigma as "real" also classifies the robot sigma as "real",
+        // reporting DOF=2 when the sketch actually has DOF=3. We
+        // couldn't find a single threshold that handled both cases
+        // without breaking another. A correct fix would track a
+        // *structural* rank delta per constraint at creation time
+        // and sum those instead of trusting the instantaneous SVD;
+        // that's left for future work. The blocker analysis uses
+        // this same current-params Jacobian so its row-span check
+        // agrees with the DOF check that triggered it.
         let rank_from_svs = |svs: &[f64]| -> usize {
             let mut sorted: Vec<f64> = svs.iter().map(|v| v.abs()).collect();
             sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
             let max_sv = sorted.last().copied().unwrap_or(0.0);
-            // Only search for the gap in the lower portion of the spectrum
-            // (below 1% of max). Prevents gaps between large constrained
-            // singular values from being mistaken for the free/constrained
-            // boundary.
             let upper_bound = max_sv * 0.01;
             let mut best_gap = 0.0f64;
             let mut best_cut = 0;
@@ -2327,20 +2350,14 @@ impl Sketch {
             if best_gap < 1e3 {
                 best_cut = sorted.iter().filter(|&&v| v < 1e-15).count();
             }
-            
             svs.len() - best_cut
         };
+        let rank = rank_from_svs(&jacobian.singular_values());
+        let dof = n.saturating_sub(rank);
 
-        let t_svd = if TIMING_DEBUG { Some(std::time::Instant::now()) } else { None };
-        // Delegate to Jacobian::svd / singular_values. Returned matrices are
-        // always in f64 regardless of the Jacobian's parameter type. SvdResult
-        // gives thin-SVD dimensions (V is n x k row-major); here we repack
-        // per-direction into the legacy eigenvectors-by-row layout.
         let result = if analyze {
             let svd = jacobian.svd();
             let svs = &svd.singular_values;
-            let rank = rank_from_svs(svs);
-            let dof = n.saturating_sub(rank);
             let k = svs.len();
             let mut eigenvalues = vec![0.0; n];
             let mut eigenvectors: Vec<Vec<f64>> = (0..n).map(|_| vec![0.0; n]).collect();
@@ -2361,9 +2378,6 @@ impl Sketch {
             }
             DofResult { dof, param_names, eigenvalues, eigenvectors }
         } else {
-            let svs = jacobian.singular_values();
-            let rank = rank_from_svs(&svs);
-            let dof = n.saturating_sub(rank);
             DofResult { dof, param_names: Vec::new(), eigenvalues: Vec::new(), eigenvectors: Vec::new() }
         };
         let method = if n < 32 { "Jacobian::svd (nalgebra)" } else { "Jacobian::svd (faer)" };

@@ -387,8 +387,11 @@ fn blocker_hint_for_rejection(sketch: &mut Sketch, pre_snap: &[u8]) -> (String, 
         .iter().map(|ec| ec.description.clone()).collect();
 
     // Post-apply jacobian, with drift suppressed so the weak
-    // regularizer doesn't dominate rowspan. Match compute_dof's
-    // approach.
+    // regularizer doesn't dominate rowspan. Uses current params so
+    // the rowspan analysis matches what DOF-rejection just saw --
+    // at a tangent-aligned config the blocker hint then correctly
+    // names the rows whose instantaneous linear dependence caused
+    // the rejection.
     let saved_drift = sketch.drift_isigma;
     sketch.drift_isigma = 0.0;
     let mut post_params = Vec::new();
@@ -406,6 +409,54 @@ fn blocker_hint_for_rejection(sketch: &mut Sketch, pre_snap: &[u8]) -> (String, 
     for ec in &sketch.expr_constraints {
         if !pre_expr_descs.contains(&ec.description) {
             candidate_cids.insert(ec.cid);
+        }
+    }
+    // Entity-flag candidates. Flag actions (`horizontal`, `vertical`,
+    // `length`, `lock`, `radius`, `sweep`, `angle`) just flip a bool
+    // on the host entity rather than pushing into a constraint
+    // collection, so they don't show up in the nid or expr diffs.
+    // Compare pre vs post entity flags directly; any flag flipped
+    // from false -> true adds the entity's cid as a candidate. Rows
+    // on that entity share the entity's cid, and at this point the
+    // only non-zero row there is the one the flag just enabled
+    // (drift rows are zero under drift_isigma=0, earlier active
+    // flags are already in both pre and post so they cancel out of
+    // the blocker analysis -- a pre-existing flag is NOT a blocker
+    // candidate, only the just-added one).
+    for r in sketch.lines.refs() {
+        let post = &sketch.lines[r];
+        let Some(pre_line) = pre.lines.get(r) else { continue };
+        let flag_added =
+            (post.constraints.horizontal && !pre_line.constraints.horizontal)
+            || (post.constraints.vertical && !pre_line.constraints.vertical)
+            || (post.constraints.has_length && !pre_line.constraints.has_length)
+            || (post.constraints.has_angle && !pre_line.constraints.has_angle)
+            || (!post.p1.optimize && pre_line.p1.optimize)
+            || (!post.p2.optimize && pre_line.p2.optimize);
+        if flag_added {
+            candidate_cids.insert(post.cid);
+        }
+    }
+    for r in sketch.points.refs() {
+        let post = &sketch.points[r];
+        let Some(pre_pt) = pre.points.get(r) else { continue };
+        let flag_added =
+            (post.constraints.has_fix_x && !pre_pt.constraints.has_fix_x)
+            || (post.constraints.has_fix_y && !pre_pt.constraints.has_fix_y)
+            || (!post.pos.optimize && pre_pt.pos.optimize);
+        if flag_added {
+            candidate_cids.insert(post.cid);
+        }
+    }
+    for r in sketch.arcs.refs() {
+        let post = &sketch.arcs[r];
+        let Some(pre_arc) = pre.arcs.get(r) else { continue };
+        let flag_added =
+            (post.constraints.has_target_radius && !pre_arc.constraints.has_target_radius)
+            || (post.constraints.has_target_sweep && !pre_arc.constraints.has_target_sweep)
+            || (!post.center.optimize && pre_arc.center.optimize);
+        if flag_added {
+            candidate_cids.insert(post.cid);
         }
     }
     if candidate_cids.is_empty() {
