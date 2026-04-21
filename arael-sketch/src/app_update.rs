@@ -7,8 +7,8 @@ use arael::refs::Ref;
 use arael_sketch_solver::*;
 use crate::colors::ColorScheme;
 use crate::tools::*;
-use crate::actions::Action;
-use crate::geometry::*;
+use arael_sketch_backend::actions::Action;
+use arael_sketch_backend::geometry::*;
 use crate::{EditorApp, spawn_async};
 
 // Small right-angle corner marker placed at the corner where the drawn
@@ -710,7 +710,7 @@ impl eframe::App for EditorApp {
                             .and_then(|s| s.cursor.char_range())
                             .map(|cr| cr.primary.index)
                             .unwrap_or(self.command_input.len());
-                        self.completions = crate::commands::complete(
+                        self.completions = arael_sketch_backend::commands::complete(
                             &self.sketch, &self.session_names,
                             &self.command_input, cursor_pos);
                         if self.completions.is_empty() {
@@ -2378,7 +2378,7 @@ impl EditorApp {
             // Range syntax: `>= V`, `<= V`, `LO to HI`. If the
             // input matches, short-circuit the numeric / expr
             // paths and build a ranged dimension.
-            let range_result = crate::commands::parse_range_input(&self.sketch, &input);
+            let range_result = arael_sketch_backend::commands::parse_range_input(&self.sketch, &input);
             let is_range = matches!(range_result, Ok(Some(_)));
             // Snapshot prefix `=expr`: evaluate now, rewrite `input`
             // as the resulting literal so the numeric branch below
@@ -2386,7 +2386,7 @@ impl EditorApp {
             // will catch the parse error with a clearer message.
             if !is_range
                 && let Some(expr) = input.strip_prefix('=')
-                && let Ok(v) = crate::commands::eval_expr(&self.sketch, expr.trim())
+                && let Ok(v) = arael_sketch_backend::commands::eval_expr(&self.sketch, expr.trim())
             {
                 input = format!("{}", v);
             }

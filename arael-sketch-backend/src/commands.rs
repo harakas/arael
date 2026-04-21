@@ -10,8 +10,12 @@ use arael_sketch_solver::*;
 use crate::actions::Action;
 use crate::geometry::{arc_start_pos, arc_end_pos};
 use crate::history::{History, CursorState};
-use crate::tools::Selection;
-use crate::DRAG_PULL_WEIGHT;
+use crate::ids::Selection;
+
+/// Weight applied to the drag-pull pseudo-constraint when the user drags
+/// a point; kept here with the command/action layer that sets it so the
+/// GUI can import the same value.
+pub const DRAG_PULL_WEIGHT: f64 = 1.0;
 
 // ---------------------------------------------------------------------------
 // CommandContext: GUI-free state for command execution
@@ -943,7 +947,7 @@ fn eval_expr_with(sketch: &Sketch, expr_str: &str, extra: &HashMap<String, f64>)
     parsed.eval(&vars)
 }
 
-pub(crate) fn eval_expr(sketch: &Sketch, expr_str: &str) -> Result<f64, String> {
+pub fn eval_expr(sketch: &Sketch, expr_str: &str) -> Result<f64, String> {
     eval_expr_with(sketch, expr_str, &HashMap::new())
 }
 
@@ -5786,7 +5790,7 @@ pub(crate) fn parse_range_tokens(sketch: &Sketch, tokens: &[&str]) -> Result<Opt
 /// fall through to numeric / live-expression parsing), `Ok(Some)`
 /// on a successful range match, `Err` on a match with a malformed
 /// value.
-pub(crate) fn parse_range_input(sketch: &Sketch, input: &str) -> Result<Option<RangeBound>, String> {
+pub fn parse_range_input(sketch: &Sketch, input: &str) -> Result<Option<RangeBound>, String> {
     let tokens: Vec<&str> = input.split_whitespace().collect();
     parse_range_tokens(sketch, &tokens)
 }
@@ -6343,8 +6347,8 @@ fn resolve_endpoint_as_point(sketch: &Sketch, ep: EndpointRef) -> Option<Ref<Poi
     }
 }
 
-fn find_coincident_id(sketch: &Sketch, a: EndpointRef, b: EndpointRef) -> Option<crate::tools::ConstraintId> {
-    use crate::tools::{ConstraintId, CoincidentKind};
+fn find_coincident_id(sketch: &Sketch, a: EndpointRef, b: EndpointRef) -> Option<crate::ids::ConstraintId> {
+    use crate::ids::{ConstraintId, CoincidentKind};
     use EndpointRef::*;
     macro_rules! find_in {
         ($coll:expr, $kind:expr, $pred:expr) => {
@@ -6382,8 +6386,8 @@ fn find_coincident_id(sketch: &Sketch, a: EndpointRef, b: EndpointRef) -> Option
     }
 }
 
-fn find_point_on_line_id(sketch: &Sketch, ep: EndpointRef, line: Ref<Line>) -> Option<crate::tools::ConstraintId> {
-    use crate::tools::{ConstraintId, CoincidentKind};
+fn find_point_on_line_id(sketch: &Sketch, ep: EndpointRef, line: Ref<Line>) -> Option<crate::ids::ConstraintId> {
+    use crate::ids::{ConstraintId, CoincidentKind};
     match ep {
         EndpointRef::Point(p) => sketch.point_on_line.iter().position(|c| c.point == p && c.line == line)
             .map(|i| ConstraintId::Coincident(CoincidentKind::PointOnLine, i)),
@@ -6395,8 +6399,8 @@ fn find_point_on_line_id(sketch: &Sketch, ep: EndpointRef, line: Ref<Line>) -> O
     }
 }
 
-fn find_point_on_arc_id(sketch: &Sketch, ep: EndpointRef, arc: Ref<Arc>) -> Option<crate::tools::ConstraintId> {
-    use crate::tools::{ConstraintId, CoincidentKind};
+fn find_point_on_arc_id(sketch: &Sketch, ep: EndpointRef, arc: Ref<Arc>) -> Option<crate::ids::ConstraintId> {
+    use crate::ids::{ConstraintId, CoincidentKind};
     match ep {
         EndpointRef::Point(p) => sketch.point_on_arc.iter().position(|c| c.point == p && c.arc == arc)
             .map(|i| ConstraintId::Coincident(CoincidentKind::PointOnArc, i)),
@@ -6408,8 +6412,8 @@ fn find_point_on_arc_id(sketch: &Sketch, ep: EndpointRef, arc: Ref<Arc>) -> Opti
     }
 }
 
-fn find_midpoint_id(sketch: &Sketch, ep: EndpointRef, target_name: &str) -> Option<crate::tools::ConstraintId> {
-    use crate::tools::{ConstraintId, MidpointKind};
+fn find_midpoint_id(sketch: &Sketch, ep: EndpointRef, target_name: &str) -> Option<crate::ids::ConstraintId> {
+    use crate::ids::{ConstraintId, MidpointKind};
     if let Ok(line) = resolve_line(sketch, target_name) {
         match ep {
             EndpointRef::Point(p) => sketch.midpoint.iter().position(|c| c.point == p && c.line == line).map(|i| ConstraintId::Midpoint(MidpointKind::Point, i)),
@@ -6432,7 +6436,7 @@ fn find_midpoint_id(sketch: &Sketch, ep: EndpointRef, target_name: &str) -> Opti
 }
 
 fn cmd_remove_constraint(ctx: &mut CommandContext, args: &str) -> CommandResult {
-    use crate::tools::{ConstraintId, find_constraint_by_name};
+    use crate::ids::{ConstraintId, find_constraint_by_name};
     let tokens: Vec<&str> = args.split_whitespace().collect();
     if tokens.is_empty() { return err("Usage: remove_constraint C3 | remove_constraint CL0H | remove_constraint L0 horizontal | remove_constraint L0 L1 parallel"); }
 
@@ -7303,7 +7307,7 @@ fn classify_free_direction(parts: &[(String, f64)]) -> String {
 fn cmd_help(args: &str) -> CommandResult {
     if args.trim() == "full" {
         return CommandResult {
-            output: include_str!("../docs/COMMANDS.md").to_string(),
+            output: include_str!("../../arael-sketch/docs/COMMANDS.md").to_string(),
             is_error: false, no_echo: false, markdown: true,
         };
     }

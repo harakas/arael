@@ -7,7 +7,7 @@ use arael::vect::vect2d;
 use arael_sketch_solver::*;
 
 use crate::tools::*;
-use crate::geometry::*;
+use arael_sketch_backend::geometry::*;
 use crate::EditorApp;
 
 /// Compute (start_angle, span) for an arc respecting ccw flag.
@@ -274,7 +274,7 @@ impl EditorApp {
                         offset: vect2d) -> (vect2d, f64, f64) {
         let la = &self.sketch.lines[a_ref];
         let lb = &self.sketch.lines[b_ref];
-        let ix = crate::geometry::line_line_intersection(
+        let ix = arael_sketch_backend::geometry::line_line_intersection(
             la.p1.value, la.p2.value, lb.p1.value, lb.p2.value);
 
         let da = vect2d::new(la.p2.value.x - la.p1.value.x, la.p2.value.y - la.p1.value.y);
@@ -1802,7 +1802,7 @@ impl EditorApp {
             let n_segs = ((span.abs() * max_r_px as f64 / 4.0).ceil() as usize).clamp(8, 256);
             let points: Vec<egui::Pos2> = (0..=n_segs).map(|i| {
                 let t = sa + span * (i as f64 / n_segs as f64);
-                self.to_screen(crate::geometry::arc_point_at(a, t))
+                self.to_screen(arael_sketch_backend::geometry::arc_point_at(a, t))
             }).collect();
             draw_styled_polyline(painter, &points, stroke, a.style);
 

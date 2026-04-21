@@ -1,9 +1,14 @@
 // MCP (Model Context Protocol) server embedded in the sketch editor.
 // Runs an async HTTP server (axum/tokio) in a background thread.
-// Communicates with the GUI thread via channels.
+// Communicates with the host (GUI, CLI, whatever) via channels.
 //
 // Protocol: Streamable HTTP (MCP spec 2025-03-26)
 // Spec: https://modelcontextprotocol.io/specification/
+//
+// This crate (arael-sketch-backend) is GUI-free. The host provides a
+// wake callback that the MCP thread invokes whenever a new request
+// lands on the mpsc channel, so e.g. the egui GUI can request a
+// repaint. Hosts without a wake concept can pass a no-op closure.
 
 #![cfg(not(target_arch = "wasm32"))]
 
@@ -19,24 +24,27 @@ use axum::{
     routing::{get, post, delete},
     Json, Router,
 };
-use eframe::egui;
 use serde_json::{json, Value};
 use sha2::{Sha256, Digest};
 use base64::engine::{Engine, general_purpose::URL_SAFE_NO_PAD};
 use rand::Rng;
 
-/// A request from the MCP server to the GUI thread.
+/// A request from the MCP server to the host.
 pub struct McpRequest {
     pub command: String,
     pub response_tx: oneshot::Sender<String>,
     pub blocked_commands: Vec<&'static str>,
 }
 
+/// Wake callback handed in by the host. Invoked after every command
+/// dispatch so the host's event loop can notice the pending request.
+pub type WakeFn = Arc<dyn Fn() + Send + Sync>;
+
 #[derive(Clone)]
 struct McpState {
     tx: Arc<mpsc::Sender<McpRequest>>,
     verbose: bool,
-    egui_ctx: Arc<Mutex<Option<egui::Context>>>,
+    wake: WakeFn,
     session_id: Arc<Mutex<Option<String>>>,
     addr: SocketAddr,
     allow_all: bool,
@@ -46,18 +54,18 @@ struct McpState {
 }
 
 /// Start the MCP server on the given address.
-/// Returns a receiver for commands that the GUI thread should poll.
+/// Returns a receiver for commands that the host should poll.
 pub fn start(
     addr: SocketAddr,
     verbose: bool,
     allow_all: bool,
-    egui_ctx: Arc<Mutex<Option<egui::Context>>>,
+    wake: WakeFn,
 ) -> mpsc::Receiver<McpRequest> {
     let (tx, rx) = mpsc::channel::<McpRequest>(32);
     let state = McpState {
         tx: Arc::new(tx),
         verbose,
-        egui_ctx,
+        wake,
         session_id: Arc::new(Mutex::new(None)),
         addr,
         allow_all,
@@ -115,11 +123,9 @@ async fn log_middleware(
 // Route handlers
 // ---------------------------------------------------------------------------
 
-/// Wake the GUI thread so it polls the MCP channel.
-fn wake_gui(state: &McpState) {
-    if let Some(ctx) = state.egui_ctx.lock().unwrap().as_ref() {
-        ctx.request_repaint();
-    }
+/// Wake the host so it polls the MCP channel.
+fn wake_host(state: &McpState) {
+    (state.wake)();
 }
 
 /// Build response headers (session ID, content-type).
@@ -234,7 +240,7 @@ async fn handle_oauth_metadata(state: State<McpState>) -> Json<Value> {
     }))
 }
 
-/// Dynamic client registration (RFC 7591) — accept any client
+/// Dynamic client registration (RFC 7591) -- accept any client
 async fn handle_register(Json(body): Json<Value>) -> Json<Value> {
     let client_name = body.get("client_name").and_then(|v| v.as_str()).unwrap_or("unknown");
     let client_id = random_hex(16);
@@ -248,7 +254,7 @@ async fn handle_register(Json(body): Json<Value>) -> Json<Value> {
     }))
 }
 
-/// Authorization endpoint — auto-approve and redirect back with auth code
+/// Authorization endpoint -- auto-approve and redirect back with auth code
 async fn handle_authorize(state: State<McpState>, Query(params): Query<HashMap<String, String>>) -> Response {
     let redirect_uri = match params.get("redirect_uri") {
         Some(uri) => uri.clone(),
@@ -259,21 +265,18 @@ async fn handle_authorize(state: State<McpState>, Query(params): Query<HashMap<S
     let request_state = params.get("state").cloned().unwrap_or_default();
 
     if !state.allow_all {
-        // Future: GUI approval prompt. For now, reject.
         return (StatusCode::FORBIDDEN, Json(json!({"error": "access_denied", "error_description": "GUI approval not yet implemented. Use --mcp-allow-all"}))).into_response();
     }
 
-    // Generate auth code and store with challenge for PKCE verification
     let code = random_hex(32);
     state.auth_codes.lock().unwrap().insert(code.clone(), (code_challenge, client_id));
 
-    // Redirect back to client with code
     let sep = if redirect_uri.contains('?') { '&' } else { '?' };
     let redirect_url = format!("{}{}code={}&state={}", redirect_uri, sep, code, request_state);
     Redirect::to(&redirect_url).into_response()
 }
 
-/// Token endpoint — exchange auth code + PKCE verifier for bearer token
+/// Token endpoint -- exchange auth code + PKCE verifier for bearer token
 async fn handle_token(state: State<McpState>, body: String) -> Response {
     let params: HashMap<String, String> = form_urlencoded::parse(body.as_bytes())
         .map(|(k, v)| (k.into_owned(), v.into_owned()))
@@ -282,14 +285,12 @@ async fn handle_token(state: State<McpState>, body: String) -> Response {
     let code = params.get("code").cloned().unwrap_or_default();
     let code_verifier = params.get("code_verifier").cloned().unwrap_or_default();
 
-    // Look up the auth code
     let stored = state.auth_codes.lock().unwrap().remove(&code);
     let (code_challenge, _client_id) = match stored {
         Some(v) => v,
         None => return (StatusCode::BAD_REQUEST, Json(json!({"error": "invalid_grant"}))).into_response(),
     };
 
-    // PKCE S256 verification: SHA256(code_verifier) base64url-encoded == code_challenge
     if !code_challenge.is_empty() {
         let mut hasher = Sha256::new();
         hasher.update(code_verifier.as_bytes());
@@ -300,7 +301,6 @@ async fn handle_token(state: State<McpState>, body: String) -> Response {
         }
     }
 
-    // Issue bearer token
     let access_token = random_hex(32);
     state.valid_tokens.lock().unwrap().insert(access_token.clone());
 
@@ -330,7 +330,6 @@ async fn handle_initialize(id: Value, request: &Value, state: &McpState) -> Valu
     let client_name = request.pointer("/params/clientInfo/name").and_then(|v| v.as_str()).unwrap_or("unknown");
     let client_version = request.pointer("/params/clientInfo/version").and_then(|v| v.as_str()).unwrap_or("?");
     eprintln!("MCP: agent connected: {} v{}", client_name, client_version);
-    // Notify GUI via a msg command
     let msg = format!("msg **MCP agent connected:** {} v{}", client_name, client_version);
     let _ = send_command_str(&state.tx, &msg, state).await;
     json!({
@@ -346,7 +345,7 @@ async fn handle_initialize(id: Value, request: &Value, state: &McpState) -> Valu
                 "name": "arael-sketch",
                 "version": env!("CARGO_PKG_VERSION")
             },
-            "instructions": format!("{}\n\n{}", MCP_PREAMBLE, include_str!("../docs/COMMANDS.md"))
+            "instructions": format!("{}\n\n{}", MCP_PREAMBLE, include_str!("../../arael-sketch/docs/COMMANDS.md"))
         }
     })
 }
@@ -438,7 +437,7 @@ async fn handle_tools_call(id: Value, request: &Value, state: &McpState) -> Valu
             tool_result(id, &result)
         }
         "get_help" => {
-            tool_result(id, include_str!("../docs/COMMANDS.md"))
+            tool_result(id, include_str!("../../arael-sketch/docs/COMMANDS.md"))
         }
         _ => {
             json!({
@@ -481,7 +480,7 @@ fn handle_resources_read(id: Value, request: &Value) -> Value {
                 "contents": [{
                     "uri": "sketch://commands",
                     "mimeType": "text/markdown",
-                    "text": include_str!("../docs/COMMANDS.md")
+                    "text": include_str!("../../arael-sketch/docs/COMMANDS.md")
                 }]
             }
         }),
@@ -493,7 +492,7 @@ fn handle_resources_read(id: Value, request: &Value) -> Value {
 }
 
 // ---------------------------------------------------------------------------
-// Channel communication with GUI
+// Channel communication with host
 // ---------------------------------------------------------------------------
 
 const MCP_BLOCKED: &[&str] = &["save", "load", "exit", "quit"];
@@ -507,7 +506,7 @@ async fn send_command_str(tx: &mpsc::Sender<McpRequest>, command: &str, state: &
     }).await.is_err() {
         return "Error: sketch editor disconnected".to_string();
     }
-    wake_gui(state);
+    wake_host(state);
     resp_rx.await.unwrap_or_else(|_| "Error: no response from sketch editor".to_string())
 }
 

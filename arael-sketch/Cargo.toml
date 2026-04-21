@@ -14,10 +14,9 @@ categories = ["graphics", "mathematics"]
 arael = { version = "0.5.2", path = ".." }
 arael-sym = { version = "0.5.2", path = "../arael-sym" }
 arael-sketch-solver = { version = "0.5.2", path = "../arael-sketch-solver" }
+arael-sketch-backend = { version = "0.5.2", path = "../arael-sketch-backend" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-nalgebra = "0.33"
-faer = { version = "0.24", default-features = false, features = ["std"] }
 eframe = "0.31"
 egui_extras = "0.31"
 egui_commonmark = "0.20"
@@ -27,12 +26,7 @@ pollster = "0.4"
 web-time = "1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-axum = "0.7"
-tokio = { version = "1", features = ["rt-multi-thread", "net", "sync", "macros"] }
-sha2 = "0.10"
-base64 = "0.22"
-form_urlencoded = "1"
-rand = "0.9"
+tokio = { version = "1", features = ["sync"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2"

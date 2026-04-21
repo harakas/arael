@@ -117,7 +117,7 @@ pub enum Action {
     AddUserParam { name: String, expr_str: String },
     UpdateUserParam { index: usize, name: String, expr_str: String },
     RemoveUserParam { index: usize },
-    DeleteConstraint { id: crate::tools::ConstraintId },
+    DeleteConstraint { id: crate::ids::ConstraintId },
     // Drag is non-deterministic; store full state after drag completes
     Drag { snapshot: Vec<u8> },
 }
@@ -1363,7 +1363,7 @@ impl Action {
                 }
             }
             Action::DeleteConstraint { id } => {
-                use crate::tools::{ConstraintId, CoincidentKind, MidpointKind};
+                use crate::ids::{ConstraintId, CoincidentKind, MidpointKind};
                 match id {
                     ConstraintId::Horizontal(r) => { sketch.lines[*r].constraints.horizontal = false; }
                     ConstraintId::Vertical(r) => { sketch.lines[*r].constraints.vertical = false; }

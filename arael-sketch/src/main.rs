@@ -6,16 +6,8 @@
 
 mod colors;
 mod tools;
-mod actions;
-mod history;
-mod geometry;
-mod earc_fit;
 mod drawing;
 mod app_update;
-mod conflicts;
-mod commands;
-#[cfg(not(target_arch = "wasm32"))]
-mod mcp_server;
 
 use std::collections::HashMap;
 use eframe::egui;
@@ -28,9 +20,8 @@ use arael_sketch_solver::*;
 
 use colors::ColorScheme;
 use tools::*;
-use actions::Action;
-use history::History;
-use geometry::*;
+use arael_sketch_backend::{Action, History};
+use arael_sketch_backend::geometry::*;
 
 pub struct SavedArcLocks {
     pub had_radius: bool,
@@ -98,7 +89,7 @@ const PARALLEL_SELECTION_TOL: f64 = 0.05;
 /// cleanly on unconstrained DOFs, but yields to any real constraint,
 /// leaving the sketch at cost ~ 0 with the dragged endpoint lagging
 /// when the cursor target is infeasible.
-const DRAG_PULL_WEIGHT: f64 = 1.0;
+use arael_sketch_backend::DRAG_PULL_WEIGHT;
 
 pub struct EditorApp {
     pub sketch: Sketch,
@@ -249,8 +240,10 @@ pub struct EditorApp {
 
     // MCP server channel (None when --mcp not used)
     #[cfg(not(target_arch = "wasm32"))]
-    pub mcp_rx: Option<tokio::sync::mpsc::Receiver<mcp_server::McpRequest>>,
-    // Shared egui context for MCP server to wake the GUI thread
+    pub mcp_rx: Option<tokio::sync::mpsc::Receiver<arael_sketch_backend::mcp_server::McpRequest>>,
+    // Shared egui context for the MCP server to wake the GUI thread.
+    // Populated the first frame update() is called; captured inside the
+    // wake callback handed to the backend MCP server.
     #[cfg(not(target_arch = "wasm32"))]
     egui_ctx: std::sync::Arc<std::sync::Mutex<Option<egui::Context>>>,
 }
@@ -906,7 +899,7 @@ impl EditorApp {
                                             let cross = (-hdy) * ody - hdx * odx;
                                             if cross.abs() >= 1e-9 {
                                                 let perp_p2 = vect2d::new(opp.x - hdy, opp.y + hdx);
-                                                effective_pos = crate::geometry::line_line_intersection(
+                                                effective_pos = arael_sketch_backend::geometry::line_line_intersection(
                                                     opp, perp_p2, ol.p1.value, ol.p2.value);
                                             }
                                         } else {
@@ -1040,7 +1033,7 @@ impl EditorApp {
             // Record drag as a non-deterministic action with full state snapshot
             let snapshot = bincode::serialize(&self.sketch).unwrap();
             let action = Action::Drag { snapshot };
-            self.history.push(action, &self.sketch, crate::history::CursorState { pos: self.command_cursor, tangent: self.command_cursor_tangent });
+            self.history.push(action, &self.sketch, arael_sketch_backend::history::CursorState { pos: self.command_cursor, tangent: self.command_cursor_tangent });
 
             // Auto-snap: if a point-like entity was dragged near another,
             // create a coincident constraint
@@ -1234,10 +1227,10 @@ impl EditorApp {
     }
 
     /// Create a CommandContext view of this app's state, run commands, sync back.
-    pub fn run_commands(&mut self, input: &str) -> Vec<crate::commands::CommandResult> {
+    pub fn run_commands(&mut self, input: &str) -> Vec<arael_sketch_backend::commands::CommandResult> {
         let empty_sketch = Sketch::new();
-        let empty_history = crate::history::History::new(&empty_sketch);
-        let mut ctx = crate::commands::CommandContext {
+        let empty_history = arael_sketch_backend::history::History::new(&empty_sketch);
+        let mut ctx = arael_sketch_backend::commands::CommandContext {
             sketch: std::mem::replace(&mut self.sketch, empty_sketch),
             history: std::mem::replace(&mut self.history, empty_history),
             selection: std::mem::take(&mut self.selection),
@@ -1246,7 +1239,7 @@ impl EditorApp {
             session_names: std::mem::take(&mut self.session_names),
             cursor: self.command_cursor,
             cursor_tangent: self.command_cursor_tangent,
-            saved_cursor: crate::history::CursorState::default(),
+            saved_cursor: arael_sketch_backend::history::CursorState::default(),
             status_error: self.status_error.take(),
             status_blocker_names: None,
             last_cost: self.last_cost,
@@ -1260,7 +1253,7 @@ impl EditorApp {
             exit_requested: false,
             drag_raw: self.drag_raw,
         };
-        let results = crate::commands::execute(&mut ctx, input);
+        let results = arael_sketch_backend::commands::execute(&mut ctx, input);
         if self.echo_stdout {
             let cmds: Vec<&str> = input.split(';').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
             for (i, r) in results.iter().enumerate() {
@@ -1349,10 +1342,10 @@ impl EditorApp {
     }
 
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn run_commands_with_blocked(&mut self, input: &str, blocked: Vec<&'static str>) -> Vec<crate::commands::CommandResult> {
+    pub fn run_commands_with_blocked(&mut self, input: &str, blocked: Vec<&'static str>) -> Vec<arael_sketch_backend::commands::CommandResult> {
         let empty_sketch = Sketch::new();
-        let empty_history = crate::history::History::new(&empty_sketch);
-        let mut ctx = crate::commands::CommandContext {
+        let empty_history = arael_sketch_backend::history::History::new(&empty_sketch);
+        let mut ctx = arael_sketch_backend::commands::CommandContext {
             sketch: std::mem::replace(&mut self.sketch, empty_sketch),
             history: std::mem::replace(&mut self.history, empty_history),
             selection: std::mem::take(&mut self.selection),
@@ -1361,7 +1354,7 @@ impl EditorApp {
             session_names: std::mem::take(&mut self.session_names),
             cursor: self.command_cursor,
             cursor_tangent: self.command_cursor_tangent,
-            saved_cursor: crate::history::CursorState::default(),
+            saved_cursor: arael_sketch_backend::history::CursorState::default(),
             status_error: self.status_error.take(),
             status_blocker_names: None,
             last_cost: self.last_cost,
@@ -1375,7 +1368,7 @@ impl EditorApp {
             exit_requested: false,
             drag_raw: self.drag_raw,
         };
-        let results = crate::commands::execute(&mut ctx, input);
+        let results = arael_sketch_backend::commands::execute(&mut ctx, input);
         self.sketch = ctx.sketch;
         self.history = ctx.history;
         self.selection = ctx.selection;
@@ -1407,12 +1400,12 @@ impl EditorApp {
         self.show_hints = false;
 
         if action.is_constraint_action() {
-            match crate::commands::validate_and_apply_constraint(
+            match arael_sketch_backend::commands::validate_and_apply_constraint(
                 &mut self.sketch, &action, false)
             {
                 Ok(new_cost) => {
                     self.last_cost = new_cost;
-                    self.history.push(action, &self.sketch, crate::history::CursorState { pos: self.command_cursor, tangent: self.command_cursor_tangent });
+                    self.history.push(action, &self.sketch, arael_sketch_backend::history::CursorState { pos: self.command_cursor, tangent: self.command_cursor_tangent });
                 }
                 Err(rejection) => {
                     self.status_error = Some(rejection.message);
@@ -1424,7 +1417,7 @@ impl EditorApp {
         } else {
             action.apply(&mut self.sketch);
             self.sketch.dedup_constraints();
-            self.history.push(action, &self.sketch, crate::history::CursorState { pos: self.command_cursor, tangent: self.command_cursor_tangent });
+            self.history.push(action, &self.sketch, arael_sketch_backend::history::CursorState { pos: self.command_cursor, tangent: self.command_cursor_tangent });
         }
         self.compute_dof_async();
     }
@@ -2297,7 +2290,7 @@ impl EditorApp {
         }).collect();
         if !lines.is_empty() {
             let action = Action::ApplyHorizontal { lines };
-            if let Some(err) = conflicts::check_constraint_conflict(&self.sketch, &action) {
+            if let Some(err) = arael_sketch_backend::conflicts::check_constraint_conflict(&self.sketch, &action) {
                 self.status_error = Some(err);
                 return;
             }
@@ -2312,7 +2305,7 @@ impl EditorApp {
         }).collect();
         if !lines.is_empty() {
             let action = Action::ApplyVertical { lines };
-            if let Some(err) = conflicts::check_constraint_conflict(&self.sketch, &action) {
+            if let Some(err) = arael_sketch_backend::conflicts::check_constraint_conflict(&self.sketch, &action) {
                 self.status_error = Some(err);
                 return;
             }
@@ -2451,7 +2444,7 @@ impl EditorApp {
             // Line-to-line (default: a.p2 == b.p1)
             (Selection::Line(a), Selection::Line(b)) => {
                 let action = Action::ApplyCoincidentLL21 { a, b };
-                if let Some(err) = conflicts::check_constraint_conflict(&self.sketch, &action) {
+                if let Some(err) = arael_sketch_backend::conflicts::check_constraint_conflict(&self.sketch, &action) {
                     self.status_error = Some(err);
                     return;
                 }
@@ -2508,7 +2501,7 @@ impl EditorApp {
             }
             (Selection::ArcCenter(a), Selection::ArcCenter(b)) => {
                 let action = Action::ApplyConcentric { a, b };
-                if let Some(err) = conflicts::check_constraint_conflict(&self.sketch, &action) {
+                if let Some(err) = arael_sketch_backend::conflicts::check_constraint_conflict(&self.sketch, &action) {
                     self.status_error = Some(err);
                     return;
                 }
@@ -2582,7 +2575,7 @@ impl EditorApp {
         if self.selection.len() == 2
             && let (Selection::Line(a), Selection::Line(b)) = (self.selection[0], self.selection[1]) {
                 let action = Action::ApplyParallel { a, b };
-                if let Some(err) = conflicts::check_constraint_conflict(&self.sketch, &action) {
+                if let Some(err) = arael_sketch_backend::conflicts::check_constraint_conflict(&self.sketch, &action) {
                     self.status_error = Some(err);
                     return;
                 }
@@ -2595,7 +2588,7 @@ impl EditorApp {
         if self.selection.len() == 2
             && let (Selection::Line(a), Selection::Line(b)) = (self.selection[0], self.selection[1]) {
                 let action = Action::ApplyPerpendicular { a, b };
-                if let Some(err) = conflicts::check_constraint_conflict(&self.sketch, &action) {
+                if let Some(err) = arael_sketch_backend::conflicts::check_constraint_conflict(&self.sketch, &action) {
                     self.status_error = Some(err);
                     return;
                 }
@@ -2608,7 +2601,7 @@ impl EditorApp {
         if self.selection.len() == 2
             && let (Selection::Line(a), Selection::Line(b)) = (self.selection[0], self.selection[1]) {
                 let action = Action::ApplyCollinear { a, b };
-                if let Some(err) = conflicts::check_constraint_conflict(&self.sketch, &action) {
+                if let Some(err) = arael_sketch_backend::conflicts::check_constraint_conflict(&self.sketch, &action) {
                     self.status_error = Some(err);
                     return;
                 }
@@ -2624,7 +2617,7 @@ impl EditorApp {
                 (self.selection[0], self.selection[1], self.selection[2])
             {
                 let action = Action::ApplySymmetryLL { a, b, c };
-                if let Some(err) = conflicts::check_constraint_conflict(&self.sketch, &action) {
+                if let Some(err) = arael_sketch_backend::conflicts::check_constraint_conflict(&self.sketch, &action) {
                     self.status_error = Some(err);
                     return;
                 }
@@ -2671,13 +2664,13 @@ impl EditorApp {
                         Some(hp)
                     }
                     Selection::ArcStart(r) => {
-                        let pos = crate::geometry::arc_start_pos(&sketch.arcs[*r]);
+                        let pos = arael_sketch_backend::geometry::arc_start_pos(&sketch.arcs[*r]);
                         let hp = sketch.add_helper_point(pos);
                         sketch.coincident_arc_start.push(CoincidentArcStart { point: hp, arc: *r, nid: 0, cid: 0, hb: CrossBlock::new() });
                         Some(hp)
                     }
                     Selection::ArcEnd(r) => {
-                        let pos = crate::geometry::arc_end_pos(&sketch.arcs[*r]);
+                        let pos = arael_sketch_backend::geometry::arc_end_pos(&sketch.arcs[*r]);
                         let hp = sketch.add_helper_point(pos);
                         sketch.coincident_arc_end.push(CoincidentArcEnd { point: hp, arc: *r, nid: 0, cid: 0, hb: CrossBlock::new() });
                         Some(hp)
@@ -2732,7 +2725,7 @@ impl EditorApp {
             _ => None,
         };
         if let Some(action) = action {
-            if let Some(err) = conflicts::check_constraint_conflict(&self.sketch, &action) {
+            if let Some(err) = arael_sketch_backend::conflicts::check_constraint_conflict(&self.sketch, &action) {
                 self.status_error = Some(err);
                 return;
             }
@@ -2882,7 +2875,7 @@ impl EditorApp {
             }
             (Selection::Arc(a), Selection::Arc(b)) => {
                 let action = Action::ApplyTangentAA { a, b };
-                if let Some(err) = conflicts::check_constraint_conflict(&self.sketch, &action) {
+                if let Some(err) = arael_sketch_backend::conflicts::check_constraint_conflict(&self.sketch, &action) {
                     self.status_error = Some(err);
                     return;
                 }
@@ -2898,7 +2891,7 @@ impl EditorApp {
             match (self.selection[0], self.selection[1]) {
                 (Selection::Line(a), Selection::Line(b)) => {
                     let action = Action::ApplyEqualLength { a, b };
-                    if let Some(err) = conflicts::check_constraint_conflict(&self.sketch, &action) {
+                    if let Some(err) = arael_sketch_backend::conflicts::check_constraint_conflict(&self.sketch, &action) {
                         self.status_error = Some(err);
                         return;
                     }
@@ -2906,7 +2899,7 @@ impl EditorApp {
                 }
                 (Selection::Arc(a), Selection::Arc(b)) => {
                     let action = Action::ApplyEqualRadius { a, b };
-                    if let Some(err) = conflicts::check_constraint_conflict(&self.sketch, &action) {
+                    if let Some(err) = arael_sketch_backend::conflicts::check_constraint_conflict(&self.sketch, &action) {
                         self.status_error = Some(err);
                         return;
                     }
@@ -3019,7 +3012,7 @@ impl EditorApp {
             let l = &self.sketch.lines[r];
             let d1 = ((l.p1.value.x - anchor.x).powi(2) + (l.p1.value.y - anchor.y).powi(2)).sqrt();
             let d2 = ((l.p2.value.x - anchor.x).powi(2) + (l.p2.value.y - anchor.y).powi(2)).sqrt();
-            let db = crate::geometry::point_to_segment_dist(anchor, l.p1.value, l.p2.value);
+            let db = arael_sketch_backend::geometry::point_to_segment_dist(anchor, l.p1.value, l.p2.value);
             if !(d1 < HOST_EPS || d2 < HOST_EPS || db < HOST_EPS) { continue; }
             if let Some(p) = self.try_perp_snap(anchor, l.p1.value, l.p2.value, cursor, threshold_px) {
                 let hdx = l.p2.value.x - l.p1.value.x;
@@ -3730,8 +3723,8 @@ impl EditorApp {
         for r in self.sketch.arcs.refs() {
             let a = &self.sketch.arcs[r];
             // Include start and end points
-            let sp = crate::geometry::arc_start_pos(a);
-            let ep = crate::geometry::arc_end_pos(a);
+            let sp = arael_sketch_backend::geometry::arc_start_pos(a);
+            let ep = arael_sketch_backend::geometry::arc_end_pos(a);
             extend(sp.x, sp.y);
             extend(ep.x, ep.y);
             // Include axis points (0, 90, 180, 270 deg) if within sweep range
@@ -3752,7 +3745,7 @@ impl EditorApp {
             for k in 0..4 {
                 let axis_angle = k as f64 * std::f64::consts::FRAC_PI_2;
                 if norm_in_sweep(axis_angle) {
-                    let pt = crate::geometry::arc_point_at(a, axis_angle);
+                    let pt = arael_sketch_backend::geometry::arc_point_at(a, axis_angle);
                     extend(pt.x, pt.y);
                 }
             }
@@ -3760,7 +3753,7 @@ impl EditorApp {
             let steps = ((sweep.abs().to_degrees() / 16.0).ceil() as usize).max(1);
             for i in 1..steps {
                 let t = sa + sweep * (i as f64 / steps as f64);
-                let pt = crate::geometry::arc_point_at(a, t);
+                let pt = arael_sketch_backend::geometry::arc_point_at(a, t);
                 extend(pt.x, pt.y);
             }
         }
@@ -4049,7 +4042,13 @@ fn main() -> eframe::Result {
         return Ok(());
     }
     if let Some(addr) = mcp_addr {
-        app.mcp_rx = Some(mcp_server::start(addr, mcp_verbose, mcp_allow_all, std::sync::Arc::clone(&app.egui_ctx)));
+        let egui_ctx = std::sync::Arc::clone(&app.egui_ctx);
+        let wake: arael_sketch_backend::mcp_server::WakeFn = std::sync::Arc::new(move || {
+            if let Some(ctx) = egui_ctx.lock().unwrap().as_ref() {
+                ctx.request_repaint();
+            }
+        });
+        app.mcp_rx = Some(arael_sketch_backend::mcp_server::start(addr, mcp_verbose, mcp_allow_all, wake));
     }
     app.compute_dof_async();
 

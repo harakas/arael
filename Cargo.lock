@@ -259,27 +259,42 @@ name = "arael-sketch"
 version = "0.5.2"
 dependencies = [
  "arael",
+ "arael-sketch-backend",
+ "arael-sketch-solver",
+ "arael-sym",
+ "bincode",
+ "eframe",
+ "egui_commonmark",
+ "egui_extras",
+ "pollster",
+ "rfd",
+ "serde",
+ "serde_json",
+ "tokio",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+ "web-time",
+]
+
+[[package]]
+name = "arael-sketch-backend"
+version = "0.5.2"
+dependencies = [
+ "arael",
  "arael-sketch-solver",
  "arael-sym",
  "axum",
  "base64",
  "bincode",
- "eframe",
- "egui_commonmark",
- "egui_extras",
  "faer",
  "form_urlencoded",
  "nalgebra",
- "pollster",
  "rand 0.9.2",
- "rfd",
  "serde",
  "serde_json",
  "sha2",
  "tokio",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
  "web-time",
 ]
 
