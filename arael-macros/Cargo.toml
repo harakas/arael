@@ -1,6 +1,6 @@
 [package]
 name = "arael-macros"
-version = "0.5.2"
+version = "0.6.0"
 edition = "2024"
 authors = ["Indrek Mandre <indrek@mare.ee>"]
 readme = "../README.md"
@@ -17,5 +17,5 @@ proc-macro = true
 syn = { version = "2", features = ["full", "visit-mut"] }
 quote = "1"
 proc-macro2 = { version = "1", features = ["span-locations"] }
-arael-sym = { version = "0.5.2", path = "../arael-sym" }
-arael-sym-macros = { version = "0.5.2", path = "../arael-sym-macros" }
+arael-sym = { version = "0.6.0", path = "../arael-sym" }
+arael-sym-macros = { version = "0.6.0", path = "../arael-sym-macros" }
