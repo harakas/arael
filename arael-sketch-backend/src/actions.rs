@@ -1,4 +1,52 @@
-// Action enum and apply() for undo/redo in the sketch editor.
+//! Action enum and `apply()` for undo/redo in the sketch editor.
+//!
+//! # Three layers, one `Action` alphabet
+//!
+//! The sketch is always mutated through an [`Action`]. Three
+//! independent layers build sequences of actions, but all of them
+//! emit the same variants of this enum, which is why undo/redo,
+//! serialization, and MCP replay work uniformly regardless of how
+//! a sketch was built:
+//!
+//! 1. **Raw `Action::apply`.** The lowest layer. Each variant does
+//!    one thing on the underlying [`Sketch`] and nothing else.
+//!    `Action::AddLine { p1, p2 }` is literally
+//!    `sketch.add_line(p1, p2)` -- no endpoint snapping, no
+//!    coincidence, no solve. Stable semantics for programmatic
+//!    callers (the `rectangle_actions` example is the canonical
+//!    use). Actions are deliberately dumb; anything cleverer
+//!    belongs in a higher layer.
+//!
+//! 2. **Command parser** (`commands::cmd_add_line` and siblings in
+//!    [`crate::commands`]). Walks the parsed text arguments, snaps
+//!    endpoints against existing entities within a tolerance, and
+//!    emits extra coincidence actions (`ApplyCoincidentPP`,
+//!    `ApplyCoincidentLL21`, `ApplyCoincidentArcStart`, etc.)
+//!    alongside the bare `AddLine`. The "Coincident constraint
+//!    already exists" dedup messages and the
+//!    `[connected: L1.p1=L0.p2]` output seen in the
+//!    `rectangle_commands` example come from this layer.
+//!
+//! 3. **GUI tools** (`EditorApp::apply_snap_coincident` and
+//!    `apply_snap_coincident_arc` in the `arael-sketch` crate). The
+//!    mouse resolves to a richer `SnapTarget` enum than a parser can
+//!    concisely spell -- line body, line midpoint, arc body, arc
+//!    midpoint, arc start/end/center -- so the GUI dispatches the
+//!    full ten-variant snap taxonomy into the matching actions
+//!    (`ApplyLineP1OnLine`, `ApplyMidpointLP1`, `ApplyMidpointLP1Arc`,
+//!    `ApplyLineP1OnArc`, ...). It also layers in auto-perpendicular
+//!    (`ApplyPerpendicular`) when the drawn line crosses a host line
+//!    at a right angle, gated by `has_perp_conflict` so a redundant
+//!    perp is never pushed. All of it goes into one `begin_group()`
+//!    frame so a single Ctrl+Z undoes the line *and* its auto-snaps
+//!    *and* any auto-perpendiculars as one unit.
+//!
+//! The command parser and the GUI are independent pipelines and do
+//! duplicate the "add line then coincident-where-needed" shape,
+//! but they converge on the same low-level `Action` alphabet. That
+//! convergence is what makes [`History`](crate::History)'s
+//! bincode-snapshot model work uniformly across GUI edits,
+//! scripted batches, and MCP tool calls.
 
 use arael::model::{Param, CrossBlock};
 use arael::refs::Ref;

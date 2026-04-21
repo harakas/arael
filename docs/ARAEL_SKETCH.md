@@ -99,6 +99,56 @@ pub mod earc_fit;      // elliptic arc from tangents + bulge
 pub mod mcp_server;    // (not wasm) MCP HTTP server behind a wake callback
 ```
 
+### Three layers, one `Action` alphabet
+
+The sketch is always mutated through an `Action`. Three independent
+layers build sequences of actions, but they all emit variants from
+the same enum, which is what makes `History`'s snapshot model work
+uniformly across GUI edits, scripted batches, and MCP tool calls:
+
+1. **Raw `Action::apply`.** The lowest layer.
+   `Action::AddLine { p1, p2 }` is literally
+   `sketch.add_line(p1, p2)` -- no endpoint snapping, no
+   coincidence, no solve. Stable semantics for programmatic
+   callers. Actions are deliberately dumb; anything cleverer
+   belongs in a higher layer. (See
+   [`rectangle_actions`](../arael-sketch-backend/examples/rectangle_actions.rs)
+   -- the rectangle's four corner coincidences are pushed
+   explicitly because no layer below is doing it for you.)
+
+2. **Command parser** (`cmd_add_line` and siblings in
+   `arael-sketch-backend/src/commands.rs`). Walks the parsed text
+   arguments, snaps endpoints against existing entities within a
+   tolerance, and emits extra coincidence actions
+   (`ApplyCoincidentPP`, `ApplyCoincidentLL21`,
+   `ApplyCoincidentArcStart`, etc.) alongside the bare `AddLine`.
+   The `[connected: L1.p1=L0.p2]` messages and the "Coincident
+   constraint already exists" dedup you see in the
+   [`rectangle_commands`](../arael-sketch-backend/examples/rectangle_commands.rs)
+   example come from this layer.
+
+3. **GUI tools** (`EditorApp::apply_snap_coincident` and friends in
+   `arael-sketch/src/main.rs`). The mouse resolves to a richer
+   `SnapTarget` enum than a parser can concisely name -- line body,
+   line midpoint, arc body, arc midpoint, arc start/end/center --
+   so the GUI dispatches the full ten-variant snap taxonomy into
+   the matching actions (`ApplyLineP1OnLine`, `ApplyMidpointLP1`,
+   `ApplyMidpointLP1Arc`, `ApplyLineP1OnArc`, ...). It also layers
+   in auto-perpendicular (`ApplyPerpendicular`) when the drawn line
+   crosses a host line at a right angle, gated by
+   `has_perp_conflict` so a redundant perp is never pushed. All of
+   it goes into one `begin_group()` frame so a single Ctrl+Z
+   undoes the line *and* its auto-snaps *and* any auto-perps as
+   one unit.
+
+The command parser and the GUI are independent pipelines and do
+duplicate the "add line then coincident-where-needed" shape --
+deliberately, because each sees different input -- but they
+converge on the same low-level `Action` alphabet. That is the key
+invariant the whole backend leans on.
+
+### Dispatch paths
+
 Two dispatch paths into the sketch, both supported by the same
 backend:
 
@@ -143,6 +193,38 @@ Additional backend facilities worth knowing about:
   `AddLine`s, four coincidences, and four flags in one go) undoes
   as one unit. The GUI's Ctrl+Z and the MCP's implicit atomicity
   both ride on this.
+
+  `History` exists for four reasons:
+
+  1. **Undo/redo.** Every GUI click, drag, and command line funnels
+     through `history.push(action, sketch, cursor)`; Ctrl+Z and
+     Ctrl+Shift+Z are the undo/redo methods on this struct.
+  2. **Atomicity.** `begin_group()` tags subsequent pushes with the
+     same group id so a multi-step operation undoes as one frame.
+     `Action::Drag { snapshot }` wraps a whole drag trajectory in a
+     single reversible unit.
+  3. **Cursor restoration.** Each frame stores where the
+     command-panel cursor was and which tangent it pointed along,
+     so undoing a `move` puts the typing cursor back where it was.
+  4. **Snapshot storage, not replay.** Every push serialises the
+     post-apply sketch via bincode; undo/redo deserialises the
+     snapshot and calls `sketch.solve()` once. The action log is
+     *not* replayed forward, because `Action::apply` is
+     non-deterministic in general (drag trajectories, solver
+     starting points, helper-point ordering) and a forward replay
+     could diverge. Snapshots make undo/redo exact.
+
+  > **Only `Action`s are tracked.** Any mutation you want to be
+  > reversible must go through an `Action`. Raw mutations like
+  > `sketch.lines[r].p1 = Param::fixed(..)` or pushing constraint
+  > structs directly into `sketch.*` collections bypass `History`
+  > entirely, are invisible to undo/redo, and will not come back on
+  > a redo. The raw `Sketch` API is there for headless batch work
+  > where history does not matter (see `rectangle_solver`); the
+  > moment you want undo/redo, always go through the `Action` enum
+  > (see `rectangle_actions`, which uses `Action::LockLineP1`
+  > instead of a direct `Param::fixed` assignment precisely so the
+  > pin survives undo/redo).
 - **`check_constraint_conflict(sketch, action)`.** Cheap pre-apply
   validation -- catches self-reference, impossible orientations
   (horizontal and vertical on the same line), and transitive

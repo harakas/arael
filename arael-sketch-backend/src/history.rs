@@ -1,4 +1,58 @@
-// History for undo/redo in the sketch editor.
+//! Undo/redo stack and canonical edit log for a sketch.
+//!
+//! `History` exists for four reasons:
+//!
+//! 1. **Undo/redo.** Every GUI toolbar click, drag, and
+//!    command-panel line funnels through [`History::push`]. Ctrl+Z
+//!    calls [`History::undo`], Ctrl+Shift+Z calls
+//!    [`History::redo`]. Without `History`, the editor has no
+//!    reversible edits.
+//!
+//! 2. **Atomicity across multi-step operations.**
+//!    [`History::begin_group`] tags subsequent pushes with the same
+//!    group id. A rectangle tool that pushes four `AddLine`s, four
+//!    `ApplyCoincidentLL21`s, and two length flags is *one* undo
+//!    frame, not ten. `Action::Drag { snapshot }` likewise rolls an
+//!    entire drag trajectory into one reversible unit.
+//!
+//! 3. **Cursor restoration.** Each frame stores a [`CursorState`]
+//!    -- where the command-panel cursor was and which tangent it
+//!    pointed along. Undoing a `move` command puts the cursor back
+//!    where it was so the user can keep typing naturally, instead
+//!    of dropping it to the origin.
+//!
+//! 4. **Snapshot storage, not replay.** Each push serialises the
+//!    post-apply sketch via bincode. Undo/redo deserialises the
+//!    snapshot and calls `sketch.solve()` once; it does *not*
+//!    replay the action log forward. This is deliberate:
+//!    `Action::apply` is non-deterministic in general (drag
+//!    trajectories, solver starting points, helper-point ordering),
+//!    so a forward replay could diverge. Snapshots make undo/redo
+//!    exact.
+//!
+//! The cost is that every push serialises the whole sketch. In
+//! practice that is tens to low hundreds of kilobytes of bincode
+//! and has been fine for interactive use. If that ever becomes a
+//! bottleneck -- for instance, recording thousands of frames of
+//! procedural generation -- the likely fix is a delta-snapshot
+//! scheme or a determinism contract on `Action::apply` that lets
+//! replay take over.
+//!
+//! # Only `Action`s are tracked
+//!
+//! **Any mutation you want to be reversible must go through an
+//! [`Action`].** Direct mutation of sketch fields --
+//! `sketch.lines[r].p1 = Param::fixed(..)`, pushing raw constraint
+//! structs into the collection vectors, flipping
+//! `sketch.cached_dof`, etc. -- bypasses `History` entirely, is
+//! invisible to undo/redo, and will not come back on a redo.
+//!
+//! The raw `Sketch` API is there for headless batch work where
+//! history does not matter (see the `rectangle_solver` example).
+//! The moment you want undo/redo, always go through the `Action`
+//! enum (see the `rectangle_actions` example, including the
+//! `LockLineP1` action used instead of a direct `Param::fixed`
+//! assignment).
 
 use arael::vect::vect2d;
 use arael_sketch_solver::Sketch;
