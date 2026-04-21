@@ -20,7 +20,7 @@
 
 use std::collections::{HashMap, HashSet};
 use arael::model::Jacobian;
-use nalgebra::{DMatrix, DVector};
+use nalgebra::DMatrix;
 
 /// Result of a blocker analysis.
 pub struct BlockerReport {
@@ -194,19 +194,65 @@ pub fn analyze(
     stats.candidate_rows = candidate_rows.len();
     stats.existing_rows = m_a;
 
-    // Verify rejection condition. Every candidate row must already lie
-    // in rowspan(A); if not, there is no blocker to find (the DOF check
-    // should not have rejected this constraint).
+    // Compute SVD of A once. V_r (n x r) is an orthonormal basis for
+    // rowspan(A), where r = rank(A). Project everything into that
+    // basis: B = A V_r (m_a x r) holds the coordinates of each
+    // existing row, y_i = V_r^T c_i (length r) the coordinates of
+    // each candidate row. All subsequent subset rank checks run in
+    // R^r instead of R^n, which is the optimisation win: r is
+    // bounded by min(m_a, n) and is usually much smaller than n
+    // (one row per constraint, params often outnumber residuals).
+    //
+    // Correctness: c_i is in rowspan(A - S) iff y_i is in rowspan of
+    // the corresponding subset of B, since rowspan(A - S) lives
+    // entirely in the V_r subspace and V_r is injective restricted
+    // to that subspace.
     let t_rej = web_time::Instant::now();
     let a_mat = rows_to_matrix(&a_rows, n);
-    let (a_rank, a_sv_max) = rank_and_max(&a_mat);
-    let scale = a_sv_max.max(1e-30);
-    let rej_tol = ZERO_TOL_REL * scale;
-    for c in &candidate_rows {
-        let cvec = DVector::from_column_slice(c);
-        if residual_onto_rowspan(&a_mat, &cvec) > rej_tol {
-            return None;
+    let svd_a = a_mat.clone().svd(false, true);
+    let vt_a = svd_a.v_t.as_ref().expect("V^T computed");
+    let svs_a = &svd_a.singular_values;
+    let max_sv_a = svs_a.iter().copied().fold(0.0f64, f64::max);
+    let rank_tol_a = 1e-12 * max_sv_a.max(1.0);
+    let a_rank = svs_a.iter().filter(|&&s| s > rank_tol_a).count();
+    // Build V_r (n x r) row-major by taking the first r rows of V^T
+    // and transposing conceptually. In the loop below we just index
+    // vt_a.row(k) for k < a_rank (each row is V_r column k).
+    // Project existing rows: B[j, k] = <V_r col k, a_rows[j]> = <vt_a row k, a_rows[j]>.
+    let mut b_rows: Vec<Vec<f64>> = Vec::with_capacity(m_a);
+    for j in 0..m_a {
+        let aj = &a_rows[j];
+        let mut bj = vec![0.0f64; a_rank];
+        for k in 0..a_rank {
+            let row_k = vt_a.row(k);
+            let mut s = 0.0f64;
+            for i in 0..n { s += row_k[i] * aj[i]; }
+            bj[k] = s;
         }
+        b_rows.push(bj);
+    }
+    // Project candidate rows and verify the rejection condition:
+    // every c_i must lie in rowspan(A) (else projection residual is
+    // non-zero and there's no blocker to find).
+    let scale = max_sv_a.max(1e-30);
+    let rej_tol = ZERO_TOL_REL * scale;
+    let mut y_rows: Vec<Vec<f64>> = Vec::with_capacity(candidate_rows.len());
+    for c in &candidate_rows {
+        // y = V_r^T c
+        let mut y = vec![0.0f64; a_rank];
+        // Reconstruction for residual check: c_proj = V_r y.
+        let mut c_proj = vec![0.0f64; n];
+        for k in 0..a_rank {
+            let row_k = vt_a.row(k);
+            let mut s = 0.0f64;
+            for i in 0..n { s += row_k[i] * c[i]; }
+            y[k] = s;
+            for i in 0..n { c_proj[i] += s * row_k[i]; }
+        }
+        let mut resid_sq = 0.0f64;
+        for i in 0..n { let d = c[i] - c_proj[i]; resid_sq += d * d; }
+        if resid_sq.sqrt() > rej_tol { return None; }
+        y_rows.push(y);
     }
     stats.rejection_check_ms = t_rej.elapsed().as_secs_f64() * 1000.0;
 
@@ -214,27 +260,41 @@ pub fn analyze(
     let n_ex = existing_cids_ordered.len();
 
     // Subset check: given a set of CIDs to remove, return true iff at
-    // least one candidate row is no longer in the remaining rowspan.
+    // least one candidate row is no longer in rowspan(B - S). Builds
+    // B_rest (small, m' x r), runs one SVD per subset, then shares
+    // V^T across all candidate projections.
     let check_blocker = |to_remove: &HashSet<u32>| -> bool {
         let mut rest: Vec<&Vec<f64>> = Vec::with_capacity(m_a);
-        for (row, cid) in a_rows.iter().zip(a_row_cid.iter()) {
+        for (row, cid) in b_rows.iter().zip(a_row_cid.iter()) {
             if !to_remove.contains(cid) {
                 rest.push(row);
             }
         }
         if rest.is_empty() {
-            // No existing rows left; any non-zero candidate is now out
-            // of the (empty) rowspan. Treat as unblocking.
+            // No existing rows left; any non-zero candidate is now
+            // out of the (empty) rowspan.
             return true;
         }
-        let a_rest = rows_refs_to_matrix(&rest, n);
-        let (_r, sv_max_rest) = rank_and_max(&a_rest);
-        let local_tol = ZERO_TOL_REL * sv_max_rest.max(1e-30);
-        for c in &candidate_rows {
-            let cvec = DVector::from_column_slice(c);
-            if residual_onto_rowspan(&a_rest, &cvec) > local_tol {
-                return true;
+        let b_rest = rows_refs_to_matrix(&rest, a_rank);
+        let svd = b_rest.svd(false, true);
+        let vt = match svd.v_t.as_ref() { Some(v) => v, None => return true };
+        let svs = &svd.singular_values;
+        let max_sv = svs.iter().copied().fold(0.0f64, f64::max);
+        let rank_tol = 1e-12 * max_sv.max(1.0);
+        let local_tol = ZERO_TOL_REL * max_sv.max(1e-30);
+        for y in &y_rows {
+            // Residual of projecting y onto rowspan(b_rest).
+            let mut y_proj = vec![0.0f64; a_rank];
+            for i in 0..svs.len() {
+                if svs[i] <= rank_tol { continue; }
+                let row_i = vt.row(i);
+                let mut coeff = 0.0f64;
+                for j in 0..a_rank { coeff += row_i[j] * y[j]; }
+                for j in 0..a_rank { y_proj[j] += coeff * row_i[j]; }
             }
+            let mut resid_sq = 0.0f64;
+            for j in 0..a_rank { let d = y[j] - y_proj[j]; resid_sq += d * d; }
+            if resid_sq.sqrt() > local_tol { return true; }
         }
         false
     };
@@ -307,37 +367,6 @@ fn rows_refs_to_matrix(rows: &[&Vec<f64>], n: usize) -> DMatrix<f64> {
     DMatrix::from_row_slice(m, n, &data)
 }
 
-fn rank_and_max(m: &DMatrix<f64>) -> (usize, f64) {
-    if m.nrows() == 0 || m.ncols() == 0 { return (0, 0.0); }
-    let svs = m.clone().singular_values();
-    let max = svs.iter().copied().fold(0.0f64, f64::max);
-    let tol = 1e-12 * max.max(1.0);
-    let rank = svs.iter().filter(|&&s| s > tol).count();
-    (rank, max)
-}
-
-/// Return the 2-norm of the residual of projecting `v` onto the
-/// row-span of `a`. Uses SVD right singular vectors; dimensions
-/// beyond the numerical rank are excluded from the projector.
-fn residual_onto_rowspan(a: &DMatrix<f64>, v: &DVector<f64>) -> f64 {
-    if a.nrows() == 0 { return v.norm(); }
-    let svd = a.clone().svd(false, true);
-    let vt = svd.v_t.as_ref().expect("v_t computed");
-    let svs = &svd.singular_values;
-    let max_sv = svs.iter().copied().fold(0.0f64, f64::max);
-    let rank_tol = 1e-12 * max_sv.max(1.0);
-    let n = v.len();
-    let mut v_proj = DVector::<f64>::zeros(n);
-    for i in 0..svs.len() {
-        if svs[i] > rank_tol {
-            let row_i = vt.row(i);
-            let mut coeff = 0.0f64;
-            for j in 0..n { coeff += row_i[j] * v[j]; }
-            for j in 0..n { v_proj[j] += coeff * row_i[j]; }
-        }
-    }
-    (v - v_proj).norm()
-}
 
 /// Path-compressing union-find over integer indices [0, n).
 struct UnionFind {
