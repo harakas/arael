@@ -218,11 +218,31 @@ constraints). Some constraints internally introduce a **helper
 point** (named `Pc<n>`) to bridge into entity centres or midpoints;
 helper points are invisible to the user and the command interface.
 
-## Example: Sketch Solver API (`arael-sketch-solver`)
+## Runnable examples
+
+Three end-to-end rectangle examples, one per crate, demonstrating
+each layer of the API:
+
+| Example | Crate | Shows |
+|---|---|---|
+| [`rectangle_solver`](../arael-sketch-solver/examples/rectangle_solver.rs) | `arael-sketch-solver` | Raw `Sketch` API: add lines, flag H/V, push `CoincidentLL21` structs, set length flags, call `sketch.solve()`. |
+| [`rectangle_actions`](../arael-sketch-backend/examples/rectangle_actions.rs) | `arael-sketch-backend` | `Action` enum + `History`: same rectangle built through `Action::AddLine` / `ApplyHorizontal` / `ApplyCoincidentLL21` / `AddDimension` / `LockLineP1`, then undo+redo. |
+| [`rectangle_commands`](../arael-sketch-backend/examples/rectangle_commands.rs) | `arael-sketch-backend` | `CommandContext` + text commands: same rectangle driven by the command parser, exactly the syntax the `/` panel and MCP agents use. |
+
+Run them with:
+
+```bash
+cargo run -r -p arael-sketch-solver   --example rectangle_solver
+cargo run -r -p arael-sketch-backend  --example rectangle_actions
+cargo run -r -p arael-sketch-backend  --example rectangle_commands
+```
+
+## Sketch Solver API in detail
 
 The solver crate can be used directly, independently of the command
 layer or the GUI. Good for unit tests, batch tooling, or embedding in
-another application.
+another application. This is the code inside
+[`rectangle_solver`](../arael-sketch-solver/examples/rectangle_solver.rs):
 
 ```rust
 use arael::model::CrossBlock;
