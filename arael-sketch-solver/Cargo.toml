@@ -16,6 +16,7 @@ arael-sym = { version = "0.5.2", path = "../arael-sym" }
 serde = { version = "1", features = ["derive"] }
 nalgebra = "0.33"
 faer = { version = "0.24", default-features = false, features = ["std"] }
+web-time = "1"
 
 [dev-dependencies]
 serde_json = "1"

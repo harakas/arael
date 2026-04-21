@@ -42,6 +42,46 @@ pub struct BlockerReport {
     /// constraints that dedup did not collapse). Hints that blocker
     /// sets may be approximate.
     pub existing_redundant: bool,
+    /// Per-step timing and counter breakdown. Always populated;
+    /// callers decide whether to print it.
+    pub stats: BlockerStats,
+}
+
+/// Instrumentation data for a single `analyze` call.
+#[derive(Default)]
+pub struct BlockerStats {
+    /// Wall time for the whole `analyze` call.
+    pub total_ms: f64,
+    /// Time spent building the union-find and filtering existing
+    /// constraints to the candidate's connected component.
+    pub component_prune_ms: f64,
+    /// Existing constraint count before component pruning.
+    pub existing_before_prune: usize,
+    /// Existing constraint count after component pruning (input to
+    /// the brute-force search).
+    pub existing_after_prune: usize,
+    /// Time spent verifying the rejection condition (every candidate
+    /// row projected onto rowspan(A)).
+    pub rejection_check_ms: f64,
+    /// Number of candidate rows analysed (after zero-row filtering).
+    pub candidate_rows: usize,
+    /// Number of existing constraint rows in the pruned problem.
+    pub existing_rows: usize,
+    /// Per-`k` search stats in order (k=1, k=2, k=3).
+    pub per_k: Vec<BlockerKStats>,
+}
+
+/// Breakdown for one `k` level of the brute-force search.
+pub struct BlockerKStats {
+    pub k: usize,
+    /// True if this level was skipped due to the pool-size cutoff.
+    pub skipped: bool,
+    /// Number of subsets enumerated (subset_check calls).
+    pub subsets_tested: usize,
+    /// Number of subsets accepted as a minimum blocker set.
+    pub blockers_found: usize,
+    /// Wall time for this level.
+    pub time_ms: f64,
 }
 
 // Relative tolerance for treating a projection residual as zero.
@@ -64,33 +104,78 @@ pub fn analyze(
     jac: &Jacobian<f64>,
     candidate_cids: &HashSet<u32>,
 ) -> Option<BlockerReport> {
+    let t_total = web_time::Instant::now();
+    let mut stats = BlockerStats::default();
+
     let n = jac.num_params;
     if n == 0 { return None; }
+
+    // Union-find over params: two params are in the same component
+    // if some (non-zero) row touches both. A constraint outside the
+    // candidate's component(s) cannot affect whether candidate rows
+    // lie in rowspan -- its rows have zero entries on all candidate
+    // params. Pruning those constraints up front drops the per-k
+    // brute-force cost proportionally to the disjoint sketch size.
+    let t_prune = web_time::Instant::now();
+    let mut uf = UnionFind::new(n);
+    for row in &jac.rows {
+        let mut first: Option<usize> = None;
+        for &(j, v) in &row.entries {
+            if v == 0.0 { continue; }
+            let j = j as usize;
+            match first {
+                None => first = Some(j),
+                Some(a) => uf.union(a, j),
+            }
+        }
+    }
+    // Collect components touched by candidate rows.
+    let mut cand_components: HashSet<usize> = HashSet::new();
+    for row in &jac.rows {
+        if !candidate_cids.contains(&row.constraint) { continue; }
+        for &(j, v) in &row.entries {
+            if v != 0.0 { cand_components.insert(uf.find(j as usize)); }
+        }
+    }
+
+    let in_candidate_component = |row: &arael::model::JacobianRow<f64>,
+                                   uf: &mut UnionFind| -> bool {
+        row.entries.iter().any(|&(j, v)|
+            v != 0.0 && cand_components.contains(&uf.find(j as usize)))
+    };
 
     // Partition rows into candidate vs existing, grouped by CID.
     // Preserve first-seen order for existing CIDs so enumeration is
     // deterministic across runs. Skip all-zero rows (drift-suppressed
     // regularisers, guarded constraints that didn't activate): they
     // don't contribute to row-span and would only inflate m_a.
+    // Existing rows outside the candidate's component are also
+    // skipped -- they can't possibly be blockers.
     let mut existing_cids_ordered: Vec<u32> = Vec::new();
     let mut existing_rows_by_cid: HashMap<u32, Vec<Vec<f64>>> = HashMap::new();
     let mut candidate_rows: Vec<Vec<f64>> = Vec::new();
+    let mut total_existing_cids: HashSet<u32> = HashSet::new();
     for row in &jac.rows {
         let nonzero = row.entries.iter().any(|&(_, v)| v != 0.0);
         if !nonzero { continue; }
-        let mut dense = vec![0.0f64; n];
-        for &(j, v) in &row.entries {
-            dense[j as usize] = v;
-        }
         if candidate_cids.contains(&row.constraint) {
+            let mut dense = vec![0.0f64; n];
+            for &(j, v) in &row.entries { dense[j as usize] = v; }
             candidate_rows.push(dense);
-        } else {
-            if !existing_rows_by_cid.contains_key(&row.constraint) {
-                existing_cids_ordered.push(row.constraint);
-            }
-            existing_rows_by_cid.entry(row.constraint).or_default().push(dense);
+            continue;
         }
+        total_existing_cids.insert(row.constraint);
+        if !in_candidate_component(row, &mut uf) { continue; }
+        let mut dense = vec![0.0f64; n];
+        for &(j, v) in &row.entries { dense[j as usize] = v; }
+        if !existing_rows_by_cid.contains_key(&row.constraint) {
+            existing_cids_ordered.push(row.constraint);
+        }
+        existing_rows_by_cid.entry(row.constraint).or_default().push(dense);
     }
+    stats.existing_before_prune = total_existing_cids.len();
+    stats.existing_after_prune = existing_cids_ordered.len();
+    stats.component_prune_ms = t_prune.elapsed().as_secs_f64() * 1000.0;
     if candidate_rows.is_empty() || existing_cids_ordered.is_empty() {
         return None;
     }
@@ -106,9 +191,13 @@ pub fn analyze(
     }
     let m_a = a_rows.len();
 
+    stats.candidate_rows = candidate_rows.len();
+    stats.existing_rows = m_a;
+
     // Verify rejection condition. Every candidate row must already lie
     // in rowspan(A); if not, there is no blocker to find (the DOF check
     // should not have rejected this constraint).
+    let t_rej = web_time::Instant::now();
     let a_mat = rows_to_matrix(&a_rows, n);
     let (a_rank, a_sv_max) = rank_and_max(&a_mat);
     let scale = a_sv_max.max(1e-30);
@@ -119,6 +208,7 @@ pub fn analyze(
             return None;
         }
     }
+    stats.rejection_check_ms = t_rej.elapsed().as_secs_f64() * 1000.0;
 
     let existing_redundant = a_rank < m_a;
     let n_ex = existing_cids_ordered.len();
@@ -150,34 +240,54 @@ pub fn analyze(
     };
 
     let mut truncated = false;
+    let mut minimum: Option<(usize, Vec<Vec<u32>>)> = None;
     for k in 1..=3 {
-        if k == 2 && n_ex > K2_LIMIT { truncated = true; break; }
-        if k == 3 && n_ex > K3_LIMIT { truncated = true; break; }
+        let t_k = web_time::Instant::now();
+        let mut kstat = BlockerKStats {
+            k, skipped: false, subsets_tested: 0, blockers_found: 0, time_ms: 0.0,
+        };
+        if (k == 2 && n_ex > K2_LIMIT) || (k == 3 && n_ex > K3_LIMIT) {
+            kstat.skipped = true;
+            kstat.time_ms = t_k.elapsed().as_secs_f64() * 1000.0;
+            stats.per_k.push(kstat);
+            truncated = true;
+            break;
+        }
         let mut found: Vec<Vec<u32>> = Vec::new();
         each_combination(&existing_cids_ordered, k, |combo| {
+            kstat.subsets_tested += 1;
             let set: HashSet<u32> = combo.iter().copied().collect();
             if check_blocker(&set) {
+                kstat.blockers_found += 1;
                 found.push(combo.to_vec());
             }
             found.len() < MAX_SETS
         });
+        kstat.time_ms = t_k.elapsed().as_secs_f64() * 1000.0;
+        stats.per_k.push(kstat);
         if !found.is_empty() {
-            return Some(BlockerReport {
-                minimum_size: k,
-                sets: found,
-                existing_count: n_ex,
-                truncated: false,
-                existing_redundant,
-            });
+            minimum = Some((k, found));
+            break;
         }
     }
+    stats.total_ms = t_total.elapsed().as_secs_f64() * 1000.0;
 
-    Some(BlockerReport {
-        minimum_size: 0,
-        sets: Vec::new(),
-        existing_count: n_ex,
-        truncated,
-        existing_redundant,
+    Some(match minimum {
+        Some((k, sets)) => BlockerReport {
+            minimum_size: k, sets,
+            existing_count: n_ex,
+            truncated: false,
+            existing_redundant,
+            stats,
+        },
+        None => BlockerReport {
+            minimum_size: 0,
+            sets: Vec::new(),
+            existing_count: n_ex,
+            truncated,
+            existing_redundant,
+            stats,
+        },
     })
 }
 
@@ -227,6 +337,33 @@ fn residual_onto_rowspan(a: &DMatrix<f64>, v: &DVector<f64>) -> f64 {
         }
     }
     (v - v_proj).norm()
+}
+
+/// Path-compressing union-find over integer indices [0, n).
+struct UnionFind {
+    parent: Vec<usize>,
+    rank: Vec<u8>,
+}
+
+impl UnionFind {
+    fn new(n: usize) -> Self {
+        Self { parent: (0..n).collect(), rank: vec![0; n] }
+    }
+    fn find(&mut self, mut x: usize) -> usize {
+        while self.parent[x] != x {
+            self.parent[x] = self.parent[self.parent[x]];
+            x = self.parent[x];
+        }
+        x
+    }
+    fn union(&mut self, a: usize, b: usize) {
+        let ra = self.find(a);
+        let rb = self.find(b);
+        if ra == rb { return; }
+        let (lo, hi) = if self.rank[ra] < self.rank[rb] { (ra, rb) } else { (rb, ra) };
+        self.parent[lo] = hi;
+        if self.rank[lo] == self.rank[hi] { self.rank[hi] += 1; }
+    }
 }
 
 /// Call `f` with every size-`k` combination of `items` in lexicographic

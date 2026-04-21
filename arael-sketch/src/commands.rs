@@ -384,6 +384,19 @@ fn blocker_hint_for_rejection(sketch: &mut Sketch, pre_snap: &[u8]) -> String {
         Some(r) => r,
         None => return String::new(),
     };
+    if sketch.verbose {
+        let s = &report.stats;
+        eprintln!("[BLOCKER] candidates={} existing_constraints {}->{} (prune {:.3}ms) existing_rows={} rej_check={:.3}ms total={:.3}ms",
+            s.candidate_rows, s.existing_before_prune, s.existing_after_prune,
+            s.component_prune_ms, s.existing_rows, s.rejection_check_ms, s.total_ms);
+        for kstat in &s.per_k {
+            let tag = if kstat.skipped { "SKIPPED (pool > cutoff)" } else { "" };
+            eprintln!("[BLOCKER]   k={} tested={} blockers={} time={:.3}ms {}",
+                kstat.k, kstat.subsets_tested, kstat.blockers_found, kstat.time_ms, tag);
+        }
+        eprintln!("[BLOCKER] result: min_size={} sets={} truncated={} existing_redundant={}",
+            report.minimum_size, report.sets.len(), report.truncated, report.existing_redundant);
+    }
     let label_map = build_cid_display_map(sketch, &post_jac);
     format_blocker_report(&label_map, &report)
 }
