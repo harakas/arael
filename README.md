@@ -603,7 +603,7 @@ The sketch solver uses Levenberg-Marquardt optimization with drift regularizatio
 
 Press `/` to open the command panel. Full scripting support with 40+ commands for geometry creation, constraints, dimensions, parameters, introspection, and view control. Commands support expressions, coordinate references (`L0.p2`, `@dx,dy`), geometric functions (`midpoint(L0)`, `intersect(L0,L1)`), and vector arithmetic (`L0.p2 + normal(L0) * 3`).
 
-See [arael-sketch/docs/COMMANDS.md](arael-sketch/docs/COMMANDS.md) for the full command reference.
+See [arael-sketch-backend/docs/COMMANDS.md](arael-sketch-backend/docs/COMMANDS.md) for the full command reference.
 
 ### AI Agent Integration (MCP)
 

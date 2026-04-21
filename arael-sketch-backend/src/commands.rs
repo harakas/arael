@@ -7307,7 +7307,7 @@ fn classify_free_direction(parts: &[(String, f64)]) -> String {
 fn cmd_help(args: &str) -> CommandResult {
     if args.trim() == "full" {
         return CommandResult {
-            output: include_str!("../../arael-sketch/docs/COMMANDS.md").to_string(),
+            output: include_str!("../docs/COMMANDS.md").to_string(),
             is_error: false, no_echo: false, markdown: true,
         };
     }

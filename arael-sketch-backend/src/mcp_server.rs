@@ -345,7 +345,7 @@ async fn handle_initialize(id: Value, request: &Value, state: &McpState) -> Valu
                 "name": "arael-sketch",
                 "version": env!("CARGO_PKG_VERSION")
             },
-            "instructions": format!("{}\n\n{}", MCP_PREAMBLE, include_str!("../../arael-sketch/docs/COMMANDS.md"))
+            "instructions": format!("{}\n\n{}", MCP_PREAMBLE, include_str!("../docs/COMMANDS.md"))
         }
     })
 }
@@ -437,7 +437,7 @@ async fn handle_tools_call(id: Value, request: &Value, state: &McpState) -> Valu
             tool_result(id, &result)
         }
         "get_help" => {
-            tool_result(id, include_str!("../../arael-sketch/docs/COMMANDS.md"))
+            tool_result(id, include_str!("../docs/COMMANDS.md"))
         }
         _ => {
             json!({
@@ -480,7 +480,7 @@ fn handle_resources_read(id: Value, request: &Value) -> Value {
                 "contents": [{
                     "uri": "sketch://commands",
                     "mimeType": "text/markdown",
-                    "text": include_str!("../../arael-sketch/docs/COMMANDS.md")
+                    "text": include_str!("../docs/COMMANDS.md")
                 }]
             }
         }),

@@ -183,7 +183,7 @@ backend:
 Full command reference (40+ commands for geometry, constraints,
 dimensions, parameters, introspection, view control, explain / DOF
 diagnostics): see
-[`arael-sketch/docs/COMMANDS.md`](../arael-sketch/docs/COMMANDS.md).
+[`arael-sketch-backend/docs/COMMANDS.md`](../arael-sketch-backend/docs/COMMANDS.md).
 
 Additional backend facilities worth knowing about:
 
@@ -378,7 +378,7 @@ support expressions, coordinate references (`L0.p2`, `@dx,dy`),
 geometric functions (`midpoint(L0)`, `intersect(L0,L1)`), and vector
 arithmetic (`L0.p2 + normal(L0) * 3`).
 
-See [arael-sketch/docs/COMMANDS.md](../arael-sketch/docs/COMMANDS.md)
+See [arael-sketch-backend/docs/COMMANDS.md](../arael-sketch-backend/docs/COMMANDS.md)
 for the full command reference.
 
 Scripts can also be run headless:
@@ -425,5 +425,5 @@ crate with zero GUI dependencies.
   compile-time differentiation.
 - [docs/SOLVERS.md](SOLVERS.md) -- Levenberg-Marquardt,
   `LmConfig`, and backend selection.
-- [arael-sketch/docs/COMMANDS.md](../arael-sketch/docs/COMMANDS.md)
+- [arael-sketch-backend/docs/COMMANDS.md](../arael-sketch-backend/docs/COMMANDS.md)
   -- full command reference.
