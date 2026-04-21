@@ -1211,6 +1211,13 @@ impl EditorApp {
     /// Only the latest sketch state is kept -- intermediate requests are discarded.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn compute_dof_async(&mut self) {
+        // Invalidate any result still sitting in dof_output from an
+        // earlier (now-stale) sketch state -- e.g. --empty then
+        // --script robot.cmd: the empty sketch's worker result (0)
+        // would otherwise be picked up by the first poll_dof frame
+        // and overwrite the correct cached value for the loaded
+        // script.
+        *self.dof_output.lock().unwrap() = None;
         if let Some(d) = self.sketch.cached_dof {
             self.dof_display = Some(d);
             return;
