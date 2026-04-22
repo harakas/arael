@@ -143,6 +143,14 @@ impl EditorApp {
                 color, is_expr, is_derived, is_range);
         }
 
+        // Ellipse rotation (major axis angle from x-axis): same visual as
+        // LineAngle, anchored at the ellipse center, with helper lines along
+        // +x and along the current rotation angle.
+        if let DimensionKind::ArcRotation(r) = kind {
+            return self.draw_arc_rotation_dimension(painter, *r, value, offset, text_along,
+                color, is_expr, is_derived, is_range);
+        }
+
         // Horizontal/vertical axis distance
         if matches!(kind, DimensionKind::HDistance(..) | DimensionKind::VDistance(..)) {
             let horizontal = matches!(kind, DimensionKind::HDistance(..));
@@ -814,6 +822,102 @@ impl EditorApp {
             egui::FontId::proportional(12.0), color)
     }
 
+    fn draw_arc_rotation_dimension(&self, painter: &egui::Painter, arc_ref: Ref<Arc>,
+                                    value: f64, offset: vect2d, text_along: f64,
+                                    color: egui::Color32, is_expr: bool, is_derived: bool, is_range: bool) -> (egui::Pos2, egui::Pos2) {
+        // Anchor: ellipse center. Reference direction: +x (0 rad).
+        // Target direction: current rotation (angle of the major axis from +x).
+        // Draws two thin helper lines (one dashed along +x, one along the
+        // rotation angle) plus an arc+arrowhead sector between them, with
+        // the numeric value printed along the arc. Matches the LineAngle
+        // style so the user sees the same visual idiom for angular dims.
+        let a = &self.sketch.arcs[arc_ref];
+        let center = a.center.value;
+        let rotation = a.rotation.value;
+
+        let stroke = egui::Stroke::new(1.0, color);
+        let ext_stroke = egui::Stroke::new(0.5, color);
+        let dash_stroke = egui::Stroke::new(0.5, color);
+        let sc = self.to_screen(center);
+
+        // Base length for helper lines: a bit longer than the major axis
+        // so the sector arc can sit outside the ellipse itself.
+        let helper_len = (a.radius.value.max(a.radius_b.value)).max(0.5) * 1.4;
+
+        // Dashed +x reference line (short negative stub, longer positive)
+        let x_end = vect2d::new(center.x + helper_len, center.y);
+        let x_neg = vect2d::new(center.x - helper_len * 0.2, center.y);
+        painter.line_segment([self.to_screen(x_neg), self.to_screen(x_end)], dash_stroke);
+
+        // Extension line along the current rotation
+        let ext_end = vect2d::new(center.x + helper_len * rotation.cos(),
+                                  center.y + helper_len * rotation.sin());
+        painter.line_segment([sc, self.to_screen(ext_end)], ext_stroke);
+
+        // Angle arc from 0 to rotation.
+        let radius = offset.y.max(0.3);
+        let sweep = rotation;
+        let start_angle = 0.0;
+
+        let draw_arc = |a_start: f64, a_sweep: f64, s: egui::Stroke| {
+            let n = ((a_sweep.abs() * 20.0).ceil() as usize).max(8);
+            let pts: Vec<egui::Pos2> = (0..=n).map(|i| {
+                let t = i as f64 / n as f64;
+                let ang = a_start + a_sweep * t;
+                self.to_screen(vect2d::new(center.x + radius * ang.cos(),
+                                           center.y + radius * ang.sin()))
+            }).collect();
+            for w in pts.windows(2) { painter.line_segment([w[0], w[1]], s); }
+            pts
+        };
+        let points = draw_arc(start_angle, sweep, stroke);
+
+        // Arrowheads at both ends of the arc.
+        let asz = 6.0;
+        let draw_arrow = |tip: egui::Pos2, prev: egui::Pos2| {
+            let adx = prev.x - tip.x;
+            let ady = prev.y - tip.y;
+            let alen = (adx * adx + ady * ady).sqrt().max(1.0);
+            let (ax, ay) = (adx / alen, ady / alen);
+            painter.line_segment([tip, egui::Pos2::new(tip.x + ax * asz + ay * asz * 0.4,
+                tip.y + ay * asz - ax * asz * 0.4)], stroke);
+            painter.line_segment([tip, egui::Pos2::new(tip.x + ax * asz - ay * asz * 0.4,
+                tip.y + ay * asz + ax * asz * 0.4)], stroke);
+        };
+        if points.len() >= 2 {
+            draw_arrow(points[0], points[1]);
+            let pn = points.len();
+            draw_arrow(points[pn - 1], points[pn - 2]);
+        }
+
+        // Optional extension arc past the text if text_along pushes it outside.
+        let screen_radius = (self.to_screen(vect2d::new(center.x + radius, center.y)).x - sc.x).abs().max(1.0);
+        let text_half_angle = 20.0 / screen_radius;
+        let extra = (text_half_angle as f64) * sweep.signum();
+        if text_along < -0.5 {
+            let ext_sweep = sweep * (text_along + 0.5) - extra;
+            draw_arc(start_angle, ext_sweep, ext_stroke);
+        } else if text_along > 0.5 {
+            let ext_sweep = sweep * (text_along - 0.5) + extra;
+            draw_arc(start_angle + sweep, ext_sweep, ext_stroke);
+        }
+
+        // Text, rotated to follow the arc tangent.
+        let text_angle_pos = start_angle + sweep * (0.5 + text_along);
+        let text_pt = vect2d::new(center.x + radius * text_angle_pos.cos(),
+                                  center.y + radius * text_angle_pos.sin());
+        let screen_pt = self.to_screen(text_pt);
+        let sign = if sweep >= 0.0 { 1.0f32 } else { -1.0f32 };
+        let tx = -(text_angle_pos.sin() as f32) * sign;
+        let ty = -(text_angle_pos.cos() as f32) * sign;
+        let text = if is_range { format!("[({:.1}\u{00b0})]", value) }
+            else if is_derived { format!("({:.1}\u{00b0})", value) }
+            else if is_expr { format!("fx: {:.1}\u{00b0}", value) }
+            else { format!("{:.1}\u{00b0}", value) };
+        self.draw_rotated_text(painter, screen_pt, tx, ty, &text,
+            egui::FontId::proportional(12.0), color)
+    }
+
     fn draw_axis_distance_dimension(&self, painter: &egui::Painter,
                                      p1: vect2d, p2: vect2d, horizontal: bool,
                                      value: f64, offset: vect2d, text_along: f64,
@@ -1093,14 +1197,27 @@ impl EditorApp {
         }
 
         // Line angle from x-axis: text along arc from p1
-        if let DimensionKind::LineAngle(r) = dim.kind {
-            let l = &self.sketch.lines[r];
-            let p1 = l.p1.value;
-            let line_angle = (l.p2.value.y - p1.y).atan2(l.p2.value.x - p1.x);
+        // Ellipse rotation: text along arc from ellipse center at the current
+        // rotation angle. Both use the same angular-text-position formula with
+        // different anchors.
+        let angle_dim_anchor_and_sweep = match dim.kind {
+            DimensionKind::LineAngle(r) => {
+                let l = &self.sketch.lines[r];
+                let p1 = l.p1.value;
+                let line_angle = (l.p2.value.y - p1.y).atan2(l.p2.value.x - p1.x);
+                Some((p1, line_angle))
+            }
+            DimensionKind::ArcRotation(r) => {
+                let a = &self.sketch.arcs[r];
+                Some((a.center.value, a.rotation.value))
+            }
+            _ => None,
+        };
+        if let Some((anchor, sweep)) = angle_dim_anchor_and_sweep {
             let radius = dim.offset.y.max(0.3);
-            let sweep = line_angle;
             let text_angle = sweep * (0.5 + dim.text_along);
-            let text_pt = vect2d::new(p1.x + radius * text_angle.cos(), p1.y + radius * text_angle.sin());
+            let text_pt = vect2d::new(anchor.x + radius * text_angle.cos(),
+                                       anchor.y + radius * text_angle.sin());
             let screen_pt = self.to_screen(text_pt);
             let sign = if sweep >= 0.0 { 1.0f32 } else { -1.0f32 };
             let tx = -(text_angle.sin() as f32) * sign;
@@ -1266,6 +1383,16 @@ impl EditorApp {
             let id = ConstraintId::Parallel(i);
             add_line_marker(self, &mut markers, c.a, ConstraintSymbol::Parallel, id, &mut line_marker_count);
             add_line_marker(self, &mut markers, c.b, ConstraintSymbol::Parallel, id, &mut line_marker_count);
+        }
+        for (i, c) in self.sketch.arc_line_parallel.iter().enumerate() {
+            let id = ConstraintId::ArcLineParallel(i);
+            add_arc_marker(self, &mut markers, c.arc, ConstraintSymbol::Parallel, id, &mut arc_marker_count);
+            add_line_marker(self, &mut markers, c.line, ConstraintSymbol::Parallel, id, &mut line_marker_count);
+        }
+        for (i, c) in self.sketch.arc_arc_parallel.iter().enumerate() {
+            let id = ConstraintId::ArcArcParallel(i);
+            add_arc_marker(self, &mut markers, c.a, ConstraintSymbol::Parallel, id, &mut arc_marker_count);
+            add_arc_marker(self, &mut markers, c.b, ConstraintSymbol::Parallel, id, &mut arc_marker_count);
         }
         for (i, c) in self.sketch.perpendicular.iter().enumerate() {
             let id = ConstraintId::Perpendicular(i);

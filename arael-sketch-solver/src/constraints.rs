@@ -1063,6 +1063,73 @@ pub struct Perpendicular {
     pub hb: CrossBlock<Line, Line>,
 }
 
+// Arc-Line parallel: ellipse's major-axis direction parallel to a
+// line's direction. Residual is the unnormalised 2D cross product of
+// the line direction `(dx, dy)` with the ellipse's major-axis unit
+// vector `(cos(rotation), sin(rotation))`, which equals
+// `|line| * sin(angle_between)`. Zero iff axes are parallel or
+// antiparallel -- natural pi-periodicity means the solver does not
+// fight the ellipse's inherent two-fold rotational symmetry.
+//
+// We deliberately do NOT divide by the line length. The old form
+// `... / len * isigma` normalised the residual to `sin(angle)`, but
+// that made the Jacobian wrt positions scale as `isigma / len`, so
+// on a long line the SVD's singular value from this row shrank like
+// `1 / len` -- producing tiny sigmas at large sketch scales and
+// breaking the rank algorithm's gap detection. The unnormalised
+// form gives Jacobian wrt positions ~= `isigma` (scale-invariant)
+// and Jacobian wrt rotation ~= `len * isigma` (scale-linear, same
+// family as coincidence-to-arc-endpoint derivatives wrt angles).
+// The SV from this row is now in the same order as the other
+// angle-mode sigmas, not collapsing to zero at large scales.
+//
+// Guarded on arc.is_ellipse; circular arcs have rotation fixed at 0
+// and the constraint would be meaningless.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[arael::model]
+#[arael(constraint(hb, guard = arc.is_ellipse, {
+    let dx = line.p2.x - line.p1.x;
+    let dy = line.p2.y - line.p1.y;
+    [(cos(arc.rotation) * dy - sin(arc.rotation) * dx) * sketch.constraint_isigma]
+}))]
+pub struct ArcLineParallel {
+    #[arael(ref = root.arcs)]
+    pub arc: Ref<Arc>,
+    #[arael(ref = root.lines)]
+    pub line: Ref<Line>,
+    #[serde(default)]
+    pub nid: u32,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
+    #[serde(skip)]
+    pub hb: CrossBlock<Arc, Line>,
+}
+
+// Arc-Arc parallel: two ellipses share the same major-axis direction.
+// Residual is sin(a.rotation - b.rotation) -- zero when rotations
+// match modulo pi, which matches the ellipse's inherent two-fold
+// rotational symmetry. Guarded on both is_ellipse; inert for
+// circular-arc operands (whose rotations are fixed at 0 anyway).
+#[derive(serde::Serialize, serde::Deserialize)]
+#[arael::model]
+#[arael(constraint(hb, guard = a.is_ellipse && b.is_ellipse, {
+    [sin(a.rotation - b.rotation) * sketch.constraint_isigma]
+}))]
+pub struct ArcArcParallel {
+    #[arael(ref = root.arcs)]
+    pub a: Ref<Arc>,
+    #[arael(ref = root.arcs)]
+    pub b: Ref<Arc>,
+    #[serde(default)]
+    pub nid: u32,
+    #[arael(constraint_index)]
+    #[serde(skip)]
+    pub cid: u32,
+    #[serde(skip)]
+    pub hb: CrossBlock<Arc, Arc>,
+}
+
 // Collinear: line2 endpoints both lie on infinite line of line1
 #[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]

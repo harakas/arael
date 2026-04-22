@@ -148,6 +148,9 @@ fn dimension_rejection_hint(sketch: &Sketch, action: &Action) -> String {
             let a = &sketch.arcs[*r];
             Some(("sweep", arael::utils::rad2deg((a.end_angle.value - a.start_angle.value).abs())))
         }
+        DimensionKind::ArcRotation(r) => {
+            Some(("xangle", arael::utils::rad2deg(sketch.arcs[*r].rotation.value)))
+        }
         DimensionKind::Angle(a, b, supplement) => {
             let la = &sketch.lines[*a];
             let lb = &sketch.lines[*b];
@@ -3257,20 +3260,62 @@ fn cmd_vertical(ctx: &mut CommandContext, args: &str) -> CommandResult {
     ok_or_status(ctx, parts.join(", "))
 }
 
+/// Classify a `parallel` argument: may be a line, an ellipse major
+/// axis (only ellipses have an optimisable rotation), or fail. A
+/// circular arc (non-ellipse) is rejected with a clear message.
+enum ParallelArg {
+    Line(Ref<Line>),
+    Ellipse(Ref<Arc>),
+}
+
+fn resolve_parallel_arg(sketch: &Sketch, name: &str) -> Result<ParallelArg, String> {
+    if let Ok(arc) = resolve_arc(sketch, name) {
+        if !sketch.arcs[arc].is_ellipse {
+            return Err(format!("parallel on {name}: only ellipses have an optimisable major-axis rotation; circular arcs have no orientation to align"));
+        }
+        return Ok(ParallelArg::Ellipse(arc));
+    }
+    let line = resolve_line(sketch, name)?;
+    Ok(ParallelArg::Line(line))
+}
+
 fn cmd_parallel(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let tokens: Vec<&str> = args.split_whitespace().collect();
-    if tokens.len() != 2 { return err("Usage: parallel L0 L1"); }
-    let a = match resolve_line(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
-    let b = match resolve_line(&ctx.sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
-    if a == b { return err("Cannot constrain a line parallel to itself"); }
-    if ctx.sketch.parallel.iter().any(|c| (c.a == a && c.b == b) || (c.a == b && c.b == a)) {
-        return err("Parallel constraint already exists");
+    if tokens.len() != 2 { return err("Usage: parallel <L|EA> <L|EA>"); }
+    let a = match resolve_parallel_arg(&ctx.sketch, tokens[0]) { Ok(v) => v, Err(e) => return err(e) };
+    let b = match resolve_parallel_arg(&ctx.sketch, tokens[1]) { Ok(v) => v, Err(e) => return err(e) };
+    match (a, b) {
+        (ParallelArg::Line(la), ParallelArg::Line(lb)) => {
+            if la == lb { return err("Cannot constrain a line parallel to itself"); }
+            if ctx.sketch.parallel.iter().any(|c| (c.a == la && c.b == lb) || (c.a == lb && c.b == la)) {
+                return err("Parallel constraint already exists");
+            }
+            ctx.begin_group();
+            ctx.exec(Action::ApplyParallel { a: la, b: lb });
+            let nid = ctx.sketch.parallel.last().map(|c| c.nid).unwrap_or(0);
+            ok_or_status(ctx, applied_msg(&ctx.sketch, &format!("C{}", nid), "Applied parallel"))
+        }
+        (ParallelArg::Ellipse(ea), ParallelArg::Ellipse(eb)) => {
+            if ea == eb { return err("Cannot constrain an ellipse parallel to itself"); }
+            if ctx.sketch.arc_arc_parallel.iter().any(|c| (c.a == ea && c.b == eb) || (c.a == eb && c.b == ea)) {
+                return err("Parallel constraint already exists");
+            }
+            ctx.begin_group();
+            ctx.exec(Action::ApplyArcArcParallel { a: ea, b: eb });
+            let nid = ctx.sketch.arc_arc_parallel.last().map(|c| c.nid).unwrap_or(0);
+            ok_or_status(ctx, applied_msg(&ctx.sketch, &format!("C{}", nid), "Applied parallel"))
+        }
+        (ParallelArg::Ellipse(ea), ParallelArg::Line(lb))
+        | (ParallelArg::Line(lb), ParallelArg::Ellipse(ea)) => {
+            if ctx.sketch.arc_line_parallel.iter().any(|c| c.arc == ea && c.line == lb) {
+                return err("Parallel constraint already exists");
+            }
+            ctx.begin_group();
+            ctx.exec(Action::ApplyArcLineParallel { arc: ea, line: lb });
+            let nid = ctx.sketch.arc_line_parallel.last().map(|c| c.nid).unwrap_or(0);
+            ok_or_status(ctx, applied_msg(&ctx.sketch, &format!("C{}", nid), "Applied parallel"))
+        }
     }
-    ctx.begin_group();
-    ctx.exec(Action::ApplyParallel { a, b });
-    let nid = ctx.sketch.parallel.last().map(|c| c.nid).unwrap_or(0);
-    let msg = applied_msg(&ctx.sketch, &format!("C{}", nid), "Applied parallel");
-    ok_or_status(ctx, msg)
 }
 
 fn cmd_perpendicular(ctx: &mut CommandContext, args: &str) -> CommandResult {
@@ -6144,27 +6189,48 @@ fn cmd_axis_distance(ctx: &mut CommandContext, args: &str, horizontal: bool) -> 
     ok_or_status(ctx, format!("{} = {}", prefix, tokens[2]))
 }
 
+/// Resolve the entity argument of `xangle` to either a line (angle
+/// of the line from the x-axis) or an ellipse (rotation of the
+/// major axis). Rejects circular arcs, whose rotation is a fixed
+/// Param::fixed(0.0).
+fn resolve_xangle_target(
+    sketch: &Sketch,
+    name: &str,
+) -> Result<(DimensionKind, f64), String> {
+    if let Ok(arc) = resolve_arc(sketch, name) {
+        let a = &sketch.arcs[arc];
+        if !a.is_ellipse {
+            return Err(format!("xangle on {name}: only ellipses have an optimisable rotation; circular arcs have rotation = 0"));
+        }
+        return Ok((DimensionKind::ArcRotation(arc),
+                   arael::utils::rad2deg(a.rotation.value)));
+    }
+    let line = resolve_line(sketch, name)?;
+    let l = &sketch.lines[line];
+    let dx = l.p2.value.x - l.p1.value.x;
+    let dy = l.p2.value.y - l.p1.value.y;
+    Ok((DimensionKind::LineAngle(line),
+        arael::utils::rad2deg(dy.atan2(dx))))
+}
+
 fn cmd_xangle(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let mut tokens: Vec<&str> = args.split_whitespace().collect();
     let is_derived = tokens.last() == Some(&"derived");
     let is_driven = !is_derived && tokens.last() == Some(&"driven");
     if is_derived || is_driven { tokens.pop(); }
 
-    // "xangle L0 derived" — measure-only
+    // "xangle L0 derived" / "xangle A0 derived" -- measure-only
     if tokens.len() == 1 && (is_derived || is_driven) {
-        let line = match resolve_line(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
-        let l = &ctx.sketch.lines[line];
-        let dx = l.p2.value.x - l.p1.value.x;
-        let dy = l.p2.value.y - l.p1.value.y;
-        let measured = arael::utils::rad2deg(dy.atan2(dx));
-        let kind = DimensionKind::LineAngle(line);
+        let (kind, measured) = match resolve_xangle_target(&ctx.sketch, tokens[0]) {
+            Ok(v) => v, Err(e) => return err(e),
+        };
         ctx.begin_group();
         ctx.exec(Action::AddDimension { kind, value: measured, expr: None, derived: is_derived, range: None,  });
         let label = if is_derived { "Derived" } else { "Driven" };
         return ok_or_status(ctx, format!("{} xangle {} = ({:.4})", label, tokens[0], measured));
     }
 
-    // Range form: `xangle L0 >= V | <= V | LO to HI`.
+    // Range form: `xangle L0 >= V | <= V | LO to HI`, likewise for arcs.
     let range_opt = if tokens.len() >= 2 && !is_derived && !is_driven {
         match parse_range_tokens(&ctx.sketch, &tokens[1..]) {
             Ok(rb) => rb,
@@ -6172,12 +6238,9 @@ fn cmd_xangle(ctx: &mut CommandContext, args: &str) -> CommandResult {
         }
     } else { None };
     if let Some(rb) = range_opt {
-        let line = match resolve_line(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
-        let l = &ctx.sketch.lines[line];
-        let dx = l.p2.value.x - l.p1.value.x;
-        let dy = l.p2.value.y - l.p1.value.y;
-        let measured = arael::utils::rad2deg(dy.atan2(dx));
-        let kind = DimensionKind::LineAngle(line);
+        let (kind, measured) = match resolve_xangle_target(&ctx.sketch, tokens[0]) {
+            Ok(v) => v, Err(e) => return err(e),
+        };
         let bound_desc = match &rb {
             RangeBound::Min(v) => format!(">= {}", v),
             RangeBound::Max(v) => format!("<= {}", v),
@@ -6196,11 +6259,12 @@ fn cmd_xangle(ctx: &mut CommandContext, args: &str) -> CommandResult {
     }
 
     if tokens.len() != 2 {
-        return err("Usage: xangle L0 45 [derived|driven]  or  xangle L0 >=V | <=V | LO to HI");
+        return err("Usage: xangle L0 45 [derived|driven]  or  xangle A0 45 [derived|driven]  or  xangle L0 >=V | <=V | LO to HI");
     }
-    let line = match resolve_line(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
+    let (kind, _measured) = match resolve_xangle_target(&ctx.sketch, tokens[0]) {
+        Ok(v) => v, Err(e) => return err(e),
+    };
     let (val, expr) = match parse_dim_value(&ctx.sketch, tokens[1]) { Ok(v) => v, Err(e) => return err(e) };
-    let kind = DimensionKind::LineAngle(line);
     ctx.begin_group();
     if let Some(idx) = find_existing_dimension(&ctx.sketch, &kind) {
         let name = ctx.sketch.dimensions[idx].name.clone();
@@ -8341,6 +8405,105 @@ mod tests {
         let dy = l.p2.value.y - l.p1.value.y;
         let angle = dy.atan2(dx).to_degrees();
         assert!(near(angle, 45.0));
+    }
+
+    #[test]
+    fn test_xangle_ellipse_rotation() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_ellipse 0,0 2 1 0");
+        run_ok(&mut ctx, "xangle EA0 30");
+        assert_eq!(ctx.sketch.dimensions.len(), 1);
+        let arc = resolve_arc(&ctx.sketch, "EA0").unwrap();
+        let rot_deg = ctx.sketch.arcs[arc].rotation.value.to_degrees();
+        assert!(near(rot_deg, 30.0), "rotation = {rot_deg}");
+        assert!(matches!(ctx.sketch.dimensions[0].kind,
+                         DimensionKind::ArcRotation(_)));
+    }
+
+    #[test]
+    fn test_xangle_ellipse_expression() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,5"); // L0 at 45deg
+        run_ok(&mut ctx, "xangle L0 derived");
+        run_ok(&mut ctx, "add_ellipse 10,10 2 1 0");
+        // Ellipse rotation tracks L0's angle via the expression pipeline.
+        run_ok(&mut ctx, "xangle EA0 d0");
+        let arc = resolve_arc(&ctx.sketch, "EA0").unwrap();
+        let rot_deg = ctx.sketch.arcs[arc].rotation.value.to_degrees();
+        assert!(near(rot_deg, 45.0), "rotation = {rot_deg}");
+    }
+
+    #[test]
+    fn test_xangle_rejects_circular_arc() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_arc 0,0 0,1 -1,0");
+        run_err(&mut ctx, "xangle A0 45");
+    }
+
+    #[test]
+    fn test_xangle_ellipse_normalised() {
+        // User input and effective rotation both fold into (-180, 180].
+        // Value stored on the dimension is the normalised form, so
+        // `list dims` / `info` / GUI never show a > 180 angle.
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_ellipse 0,0 2 1 0");
+        run_ok(&mut ctx, "xangle EA0 200");
+        let arc = resolve_arc(&ctx.sketch, "EA0").unwrap();
+        let rot_deg = ctx.sketch.arcs[arc].rotation.value.to_degrees();
+        assert!(near(rot_deg, -160.0), "rot = {rot_deg}");
+        assert!(near(ctx.sketch.dimensions[0].value, -160.0));
+
+        // Large-magnitude input (-540deg) folds to -180deg.
+        run_ok(&mut ctx, "xangle EA0 -540");
+        let rot_deg = ctx.sketch.arcs[arc].rotation.value.to_degrees();
+        assert!(near(rot_deg, -180.0) || near(rot_deg, 180.0), "rot = {rot_deg}");
+    }
+
+    #[test]
+    fn test_parallel_arc_line() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,5");
+        run_ok(&mut ctx, "lock L0.p1 0,0");
+        run_ok(&mut ctx, "lock L0.p2 5,5");
+        run_ok(&mut ctx, "add_ellipse 10,10 2 1 0");
+        run_ok(&mut ctx, "parallel L0 EA0");
+        assert_eq!(ctx.sketch.arc_line_parallel.len(), 1);
+        let arc = resolve_arc(&ctx.sketch, "EA0").unwrap();
+        let rot_deg = ctx.sketch.arcs[arc].rotation.value.to_degrees();
+        assert!(near(rot_deg, 45.0), "rotation = {rot_deg}");
+    }
+
+    #[test]
+    fn test_parallel_arc_arc() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_ellipse 0,0 2 1 30");
+        run_ok(&mut ctx, "lock EA0.center 0,0");
+        run_ok(&mut ctx, "xangle EA0 30");
+        run_ok(&mut ctx, "add_ellipse 5,5 3 1 0");
+        run_ok(&mut ctx, "parallel EA0 EA1");
+        assert_eq!(ctx.sketch.arc_arc_parallel.len(), 1);
+        let ea1 = resolve_arc(&ctx.sketch, "EA1").unwrap();
+        let rot_deg = ctx.sketch.arcs[ea1].rotation.value.to_degrees();
+        assert!(near(rot_deg, 30.0), "EA1 rotation = {rot_deg}");
+    }
+
+    #[test]
+    fn test_parallel_rejects_circular_arc() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0");
+        run_ok(&mut ctx, "add_arc 0,0 0,1 -1,0");
+        run_err(&mut ctx, "parallel L0 A0");
+    }
+
+    #[test]
+    fn test_parallel_dedup_arc_line() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,5");
+        run_ok(&mut ctx, "add_ellipse 10,10 2 1 0");
+        run_ok(&mut ctx, "parallel L0 EA0");
+        run_err(&mut ctx, "parallel L0 EA0");
+        run_err(&mut ctx, "parallel EA0 L0");
+        assert_eq!(ctx.sketch.arc_line_parallel.len(), 1);
     }
 
     #[test]

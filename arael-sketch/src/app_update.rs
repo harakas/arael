@@ -1213,6 +1213,18 @@ impl eframe::App for EditorApp {
                                     let along = if sweep.abs() > 1e-6 { delta / sweep - 0.5 } else { 0.0 };
                                     self.sketch.dimensions[dim_idx].offset = vect2d::new(0.0, dist.max(0.3));
                                     self.sketch.dimensions[dim_idx].text_along = along;
+                                } else if let DimensionKind::ArcRotation(r) = kind {
+                                    let a = &self.sketch.arcs[r];
+                                    let center = a.center.value;
+                                    let rotation = a.rotation.value;
+                                    let dist = ((mouse_sketch.x - center.x).powi(2)
+                                        + (mouse_sketch.y - center.y).powi(2)).sqrt();
+                                    let mouse_angle = (mouse_sketch.y - center.y).atan2(mouse_sketch.x - center.x);
+                                    let sweep = rotation;
+                                    let delta = rad2rad(mouse_angle);
+                                    let along = if sweep.abs() > 1e-6 { delta / sweep - 0.5 } else { 0.0 };
+                                    self.sketch.dimensions[dim_idx].offset = vect2d::new(0.0, dist.max(0.3));
+                                    self.sketch.dimensions[dim_idx].text_along = along;
                                 } else if matches!(kind, DimensionKind::HDistance(..) | DimensionKind::VDistance(..)) {
                                     let horizontal = matches!(kind, DimensionKind::HDistance(..));
                                     let (p1, p2) = self.dim_endpoints(&kind);
@@ -1682,6 +1694,21 @@ impl eframe::App for EditorApp {
                                     + (mouse_sketch.y - p1.y).powi(2)).sqrt();
                                 let mouse_angle = (mouse_sketch.y - p1.y).atan2(mouse_sketch.x - p1.x);
                                 let sweep = line_angle;
+                                let delta = rad2rad(mouse_angle);
+                                let along = if sweep.abs() > 1e-6 { delta / sweep - 0.5 } else { 0.0 };
+                                self.dim_offset = vect2d::new(0.0, dist.max(0.3));
+                                self.dim_text_along = along.clamp(-0.5, 0.5);
+                            } else if let DimensionKind::ArcRotation(r) = kind {
+                                // Same sector placement as LineAngle, anchored
+                                // at the ellipse center and sweeping to the
+                                // current rotation angle of the major axis.
+                                let a = &self.sketch.arcs[*r];
+                                let center = a.center.value;
+                                let rotation = a.rotation.value;
+                                let dist = ((mouse_sketch.x - center.x).powi(2)
+                                    + (mouse_sketch.y - center.y).powi(2)).sqrt();
+                                let mouse_angle = (mouse_sketch.y - center.y).atan2(mouse_sketch.x - center.x);
+                                let sweep = rotation;
                                 let delta = rad2rad(mouse_angle);
                                 let along = if sweep.abs() > 1e-6 { delta / sweep - 0.5 } else { 0.0 };
                                 self.dim_offset = vect2d::new(0.0, dist.max(0.3));

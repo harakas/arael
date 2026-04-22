@@ -27,6 +27,11 @@ pub enum DimensionKind {
     ArcRadiusB(Ref<Arc>),
     /// Arc sweep angle (end_angle - start_angle), stored in degrees.
     ArcSweep(Ref<Arc>),
+    /// Ellipse/earc rotation: angle of the semi-major axis from the
+    /// world x-axis, stored in degrees. Only meaningful when the arc
+    /// is an ellipse (`is_ellipse`); for circular arcs `rotation` is
+    /// `Param::fixed(0.0)` and this dimension is a no-op.
+    ArcRotation(Ref<Arc>),
     /// Angle between two lines. The bool is `supplement`: when true,
     /// constrains the supplementary angle (pi - angle) instead.
     Angle(Ref<Line>, Ref<Line>, bool),
@@ -90,7 +95,7 @@ impl DimensionKind {
     }
     pub fn references_arc(&self, r: Ref<Arc>) -> bool {
         match self {
-            DimensionKind::ArcRadius(a) | DimensionKind::ArcRadiusB(a) | DimensionKind::ArcSweep(a) => *a == r,
+            DimensionKind::ArcRadius(a) | DimensionKind::ArcRadiusB(a) | DimensionKind::ArcSweep(a) | DimensionKind::ArcRotation(a) => *a == r,
             DimensionKind::PointPointDistance(a, b) => a.references_arc(r) || b.references_arc(r),
             DimensionKind::PointLineDistance(a, _) => a.references_arc(r),
             DimensionKind::HDistance(a, b) | DimensionKind::VDistance(a, b) => a.references_arc(r) || b.references_arc(r),
@@ -291,6 +296,11 @@ impl Dimension {
                 let start = symbol(&format!("{}.start_angle", name));
                 let end = symbol(&format!("{}.end_angle", name));
                 arael_sym::abs(end - start) * arael_sym::constant(180.0 / std::f64::consts::PI)
+            }
+            DimensionKind::ArcRotation(r) => {
+                let name = &sketch.arcs[*r].name;
+                symbol(&format!("{}.rotation", name))
+                    * arael_sym::constant(180.0 / std::f64::consts::PI)
             }
             DimensionKind::PointPointDistance(a, b) => {
                 // When one endpoint anchors to a line endpoint and the other

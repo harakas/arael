@@ -409,6 +409,8 @@ delete A0                    Delete an arc
 horizontal L0 [L1 ...]      Make lines horizontal
 vertical L0 [L1 ...]        Make lines vertical
 parallel L0 L1               Make two lines parallel
+parallel L0 EA0              Align ellipse major axis with a line
+parallel EA0 EA1             Align two ellipses' major axes (circular arcs rejected)
 perpendicular L0 L1          Make two lines perpendicular (alias: perp)
 equal L0 L1                  Equal length (lines) or equal radius (arcs)
 collinear L0 L1              Make two lines collinear
@@ -610,19 +612,25 @@ hdistance A0.center L0.p1 2    X-distance from arc center to line endpoint
 vdistance P0 L0.p2 1.5 derived  Derived vertical distance
 ```
 
-### Line Angle from X-Axis (xangle)
+### Angle from X-Axis (xangle)
 
-`xangle` constrains the angle of a line (measured from p1 to p2) relative to the positive x-axis. The angle is in degrees, counter-clockwise positive. This also makes the sketch axis-locked.
+`xangle` constrains the angle of a line or the rotation of an ellipse / elliptic arc, both measured from the positive x-axis in degrees (counter-clockwise positive).
+
+- For a **line** the angle runs from `.p1` toward `.p2`.
+- For an **ellipse / earc** (`EA<n>`) the angle is the rotation of the semi-major axis; only ellipses have an optimisable rotation, so `xangle A0 45` on a circular arc is rejected with an error.
 
 ```
 xangle L0 45                   Line at 45 degrees from x-axis
 xangle L0 -30                  Line at -30 degrees (30 degrees below x-axis)
 xangle L0 0                    Force line horizontal (alternative to horizontal command)
-xangle L0 90                   Force line vertical (alternative to vertical command)
-xangle L0 derived              Measure current angle without constraining
+xangle L0 90                   Force line vertical
+xangle L0 derived              Measure current line angle without constraining
+xangle EA0 30                  Ellipse major axis at 30 degrees from x-axis
+xangle EA0 d0 + 90             Ellipse rotation tracked to the first dim + 90 degrees
+xangle EA0 >= -45               Range bound: rotation must stay at or above -45deg
 ```
 
-In the GUI, the xangle dimension draws a helper x-axis line from p1 and an angle arc. The dimension is draggable and editable like other angle dimensions.
+In the GUI, the xangle dimension draws a helper x-axis line from the anchor (line `p1` or ellipse center) and an angle arc. The dimension is draggable and editable like other angle dimensions.
 
 ### Derived (Reference) Dimensions
 

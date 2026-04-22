@@ -57,6 +57,8 @@ pub enum ConstraintId {
     Horizontal(Ref<Line>),
     Vertical(Ref<Line>),
     Parallel(usize),
+    ArcLineParallel(usize),
+    ArcArcParallel(usize),
     Perpendicular(usize),
     EqualLength(usize),
     EqualRadius(usize),
@@ -102,6 +104,8 @@ pub fn find_constraint_by_name(sketch: &Sketch, name: &str) -> Option<Constraint
         for (i, c) in sketch.midpoint_arc_end_arc.iter().enumerate() { if c.nid == nid { return Some(ConstraintId::Midpoint(MidpointKind::ArcEndArc, i)); } }
         for (i, c) in sketch.point_on_arc.iter().enumerate() { if c.nid == nid { return Some(ConstraintId::Coincident(CoincidentKind::PointOnArc, i)); } }
         for (i, c) in sketch.parallel.iter().enumerate() { if c.nid == nid { return Some(ConstraintId::Parallel(i)); } }
+        for (i, c) in sketch.arc_line_parallel.iter().enumerate() { if c.nid == nid { return Some(ConstraintId::ArcLineParallel(i)); } }
+        for (i, c) in sketch.arc_arc_parallel.iter().enumerate() { if c.nid == nid { return Some(ConstraintId::ArcArcParallel(i)); } }
         for (i, c) in sketch.perpendicular.iter().enumerate() { if c.nid == nid { return Some(ConstraintId::Perpendicular(i)); } }
         for (i, c) in sketch.collinear.iter().enumerate() { if c.nid == nid { return Some(ConstraintId::Collinear(i)); } }
         for (i, c) in sketch.equal_length.iter().enumerate() { if c.nid == nid { return Some(ConstraintId::EqualLength(i)); } }

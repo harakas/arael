@@ -595,7 +595,7 @@ impl EditorApp {
             let (ts, te) = self.dim_text_segment(dim);
             let dt = Self::screen_point_to_segment_dist(screen_pos, ts, te);
             // Arrow line segment (for angle dimensions, use the arc)
-            let da = if matches!(dim.kind, DimensionKind::ArcRadius(_) | DimensionKind::ArcSweep(_) | DimensionKind::Angle(..) | DimensionKind::LineAngle(_) | DimensionKind::HDistance(..) | DimensionKind::VDistance(..) | DimensionKind::ConcentricDistance(..)) {
+            let da = if matches!(dim.kind, DimensionKind::ArcRadius(_) | DimensionKind::ArcRadiusB(_) | DimensionKind::ArcSweep(_) | DimensionKind::ArcRotation(_) | DimensionKind::Angle(..) | DimensionKind::LineAngle(_) | DimensionKind::HDistance(..) | DimensionKind::VDistance(..) | DimensionKind::ConcentricDistance(..)) {
                 dt // for radius/angle/concentric, text check is enough
             } else {
                 let (p1, p2) = self.dim_endpoints(&dim.kind);
@@ -1453,7 +1453,19 @@ impl EditorApp {
             ConstraintType::Horizontal | ConstraintType::Vertical => {
                 !sel.is_empty() && sel.iter().all(|s| matches!(s, Selection::Line(_)))
             }
-            ConstraintType::Parallel | ConstraintType::Perpendicular => {
+            ConstraintType::Parallel => {
+                // Line+Line, Line+Arc (either order), or Arc+Arc. Rejecting
+                // circular arcs vs ellipses happens in apply_parallel -- the
+                // selection gate only checks the coarse entity mix so the
+                // user gets a clear "you need two orientable entities"
+                // prompt rather than a silent no-op.
+                sel.len() == 2 && {
+                    let lines = sel.iter().filter(|s| matches!(s, Selection::Line(_))).count();
+                    let arcs = sel.iter().filter(|s| matches!(s, Selection::Arc(_))).count();
+                    lines + arcs == 2
+                }
+            }
+            ConstraintType::Perpendicular => {
                 sel.len() == 2 && sel.iter().all(|s| matches!(s, Selection::Line(_)))
             }
             ConstraintType::EqualLength => {
@@ -1547,8 +1559,16 @@ impl EditorApp {
     fn is_valid_for_constraint(ct: ConstraintType, sel: &Selection) -> bool {
         match ct {
             ConstraintType::Horizontal | ConstraintType::Vertical
-            | ConstraintType::Parallel | ConstraintType::Perpendicular => {
+            | ConstraintType::Perpendicular => {
                 matches!(sel, Selection::Line(_))
+            }
+            ConstraintType::Parallel => {
+                // Lines always valid; arcs valid too since ellipses can pair
+                // with lines or other ellipses through ArcLineParallel /
+                // ArcArcParallel. Circular arcs still get through the gate
+                // but are rejected in apply_parallel with a clear status
+                // message.
+                matches!(sel, Selection::Line(_) | Selection::Arc(_))
             }
             ConstraintType::EqualLength => {
                 matches!(sel, Selection::Line(_) | Selection::Arc(_))
@@ -1895,6 +1915,9 @@ impl EditorApp {
                 let a = &self.sketch.arcs[*r];
                 rad2deg((a.end_angle.value - a.start_angle.value).abs())
             }
+            DimensionKind::ArcRotation(r) => {
+                rad2deg(self.sketch.arcs[*r].rotation.value)
+            }
             DimensionKind::Angle(a, b, supplement) => {
                 let la = &self.sketch.lines[*a];
                 let lb = &self.sketch.lines[*b];
@@ -2229,6 +2252,17 @@ impl EditorApp {
                 let p1 = vect2d::new(a.center.value.x + rad * sa.cos(), a.center.value.y + rad * sa.sin());
                 let p2 = vect2d::new(a.center.value.x + rad * ea.cos(), a.center.value.y + rad * ea.sin());
                 (p1, p2)
+            }
+            DimensionKind::ArcRotation(r) => {
+                // Two endpoints along the major axis at the current
+                // rotation, from center out to the +major-axis edge.
+                let a = &self.sketch.arcs[*r];
+                let rot = a.rotation.value;
+                let edge = vect2d::new(
+                    a.center.value.x + a.radius.value * rot.cos(),
+                    a.center.value.y + a.radius.value * rot.sin(),
+                );
+                (a.center.value, edge)
             }
             DimensionKind::Angle(a, b, _) => {
                 // Return midpoints of both lines (for hit testing fallback)
@@ -2571,16 +2605,39 @@ impl EditorApp {
     }
 
     fn apply_parallel(&mut self) {
+        if self.selection.len() != 2 { return; }
         self.begin_group();
-        if self.selection.len() == 2
-            && let (Selection::Line(a), Selection::Line(b)) = (self.selection[0], self.selection[1]) {
-                let action = Action::ApplyParallel { a, b };
-                if let Some(err) = arael_sketch_backend::conflicts::check_constraint_conflict(&self.sketch, &action) {
-                    self.status_error = Some(err);
-                    return;
-                }
-                self.exec(action);
+        // Line-Line, Arc-Line (either order), and Arc-Arc all map to
+        // the Parallel tool. Circular arcs are rejected because their
+        // rotation is Param::fixed(0.0) -- only ellipses have an
+        // optimisable major-axis direction.
+        let s0 = self.selection[0];
+        let s1 = self.selection[1];
+        let ellipse_ref = |r: Ref<Arc>| -> Option<Ref<Arc>> {
+            self.sketch.arcs.get(r).and_then(|a| if a.is_ellipse { Some(r) } else { None })
+        };
+        let action = match (s0, s1) {
+            (Selection::Line(a), Selection::Line(b)) => Some(Action::ApplyParallel { a, b }),
+            (Selection::Arc(a), Selection::Line(l)) | (Selection::Line(l), Selection::Arc(a)) => {
+                ellipse_ref(a).map(|arc| Action::ApplyArcLineParallel { arc, line: l })
             }
+            (Selection::Arc(a), Selection::Arc(b)) => {
+                match (ellipse_ref(a), ellipse_ref(b)) {
+                    (Some(ea), Some(eb)) if ea != eb => Some(Action::ApplyArcArcParallel { a: ea, b: eb }),
+                    _ => None,
+                }
+            }
+            _ => None,
+        };
+        let Some(action) = action else {
+            self.status_error = Some("Parallel: pick two lines, a line + an ellipse, or two ellipses (circular arcs have no orientation).".into());
+            return;
+        };
+        if let Some(err) = arael_sketch_backend::conflicts::check_constraint_conflict(&self.sketch, &action) {
+            self.status_error = Some(err);
+            return;
+        }
+        self.exec(action);
     }
 
     fn apply_perpendicular(&mut self) {
@@ -3320,6 +3377,8 @@ impl EditorApp {
             ConstraintId::Horizontal(r) => Some(format_flag_name(&self.sketch.lines[r].name, 'H')),
             ConstraintId::Vertical(r) => Some(format_flag_name(&self.sketch.lines[r].name, 'V')),
             ConstraintId::Parallel(i) => Some(format!("C{}", self.sketch.parallel[i].nid)),
+            ConstraintId::ArcLineParallel(i) => Some(format!("C{}", self.sketch.arc_line_parallel[i].nid)),
+            ConstraintId::ArcArcParallel(i) => Some(format!("C{}", self.sketch.arc_arc_parallel[i].nid)),
             ConstraintId::Perpendicular(i) => Some(format!("C{}", self.sketch.perpendicular[i].nid)),
             ConstraintId::EqualLength(i) => Some(format!("C{}", self.sketch.equal_length[i].nid)),
             ConstraintId::EqualRadius(i) => Some(format!("C{}", self.sketch.equal_radius[i].nid)),
@@ -3432,6 +3491,8 @@ impl EditorApp {
             ConstraintId::Horizontal(r) => format!("H({})", ln(r)),
             ConstraintId::Vertical(r) => format!("V({})", ln(r)),
             ConstraintId::Parallel(i) => { let c = &self.sketch.parallel[i]; format!("Parallel({}, {})", ln(c.a), ln(c.b)) }
+            ConstraintId::ArcLineParallel(i) => { let c = &self.sketch.arc_line_parallel[i]; format!("Parallel({}, {})", an(c.arc), ln(c.line)) }
+            ConstraintId::ArcArcParallel(i) => { let c = &self.sketch.arc_arc_parallel[i]; format!("Parallel({}, {})", an(c.a), an(c.b)) }
             ConstraintId::Perpendicular(i) => { let c = &self.sketch.perpendicular[i]; format!("Perp({}, {})", ln(c.a), ln(c.b)) }
             ConstraintId::EqualLength(i) => { let c = &self.sketch.equal_length[i]; format!("Equal({}, {})", ln(c.a), ln(c.b)) }
             ConstraintId::EqualRadius(i) => { let c = &self.sketch.equal_radius[i]; format!("EqualR({}, {})", an(c.a), an(c.b)) }
@@ -3514,6 +3575,14 @@ impl EditorApp {
             ConstraintId::Parallel(i) => {
                 let c = &self.sketch.parallel[i];
                 lines.push(c.a); lines.push(c.b);
+            }
+            ConstraintId::ArcLineParallel(i) => {
+                let c = &self.sketch.arc_line_parallel[i];
+                arcs.push(c.arc); lines.push(c.line);
+            }
+            ConstraintId::ArcArcParallel(i) => {
+                let c = &self.sketch.arc_arc_parallel[i];
+                arcs.push(c.a); arcs.push(c.b);
             }
             ConstraintId::Perpendicular(i) => {
                 let c = &self.sketch.perpendicular[i];

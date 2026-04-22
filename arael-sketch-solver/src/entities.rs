@@ -92,6 +92,14 @@ pub struct ArcConstraints {
     pub target_sweep: f64,
     #[serde(default = "default_sweep_sign")]
     pub sweep_sign: f64,
+    /// Ellipse rotation dimension flag. When true, the arc's
+    /// rotation param is constrained to `target_rotation` (radians).
+    /// Only meaningful when `is_ellipse`; for circular arcs rotation
+    /// is `Param::fixed(0.0)` and the constraint is inert.
+    #[serde(default)]
+    pub has_target_rotation: bool,
+    #[serde(default)]
+    pub target_rotation: f64,
 }
 
 fn default_sweep_sign() -> f64 { 1.0 }
@@ -275,6 +283,17 @@ pub struct Line {
 // Target sweep angle (multiplied by radius for position-equivalent scaling)
 #[arael(constraint(hb, guard = self.constraints.has_target_sweep, name = "sweep", {
     [(arc.end_angle - arc.start_angle - arc.constraints.sweep_sign * arc.constraints.target_sweep) * arc.radius * sketch.constraint_isigma]
+}))]
+// Target ellipse rotation. Only meaningful when is_ellipse (for
+// circular arcs `rotation` is Param::fixed(0.0)). target_rotation is
+// stored in radians. Residual is the raw angular error scaled by
+// `constraint_isigma` only -- unlike `sweep`, we do NOT multiply by
+// `arc.radius`, because that would let the solver collapse the
+// radius as a cheap way to zero out a hard-to-reach target rotation
+// (the min_radius barrier is too weak to fight a large rotation
+// residual). Rotation is already dimensionless radians.
+#[arael(constraint(hb, guard = self.constraints.has_target_rotation && self.is_ellipse, name = "rotation", {
+    [(arc.rotation - arc.constraints.target_rotation) * sketch.constraint_isigma]
 }))]
 pub struct Arc {
     pub center: Param<vect2d>,

@@ -50,7 +50,22 @@
 
 use arael::model::{Param, CrossBlock};
 use arael::refs::Ref;
-use arael::utils::deg2rad;
+use arael::utils::{deg2rad, rad2deg, rad2rad};
+
+/// Normalise a user-typed numeric dimension value into the canonical
+/// range for its kind. Angular kinds (`ArcRotation`, `LineAngle`)
+/// fold into `[-180, 180]` so repeated edits and save/load cycles do
+/// not accumulate +/- 360 offsets -- `xangle L0 190` stores as -170,
+/// matching the signed-angle convention of `atan2` that already
+/// drives the displayed value. Other kinds pass through unchanged.
+fn canonicalise_dim_value(kind: &DimensionKind, value: f64) -> f64 {
+    match kind {
+        DimensionKind::ArcRotation(_) | DimensionKind::LineAngle(_) => {
+            rad2deg(rad2rad(deg2rad(value)))
+        }
+        _ => value,
+    }
+}
 use arael::vect::vect2d;
 use arael_sketch_solver::*;
 
@@ -71,6 +86,8 @@ pub enum Action {
     ApplyCoincidentLP1 { line: Ref<Line>, point: Ref<Point> },
     ApplyCoincidentLP2 { line: Ref<Line>, point: Ref<Point> },
     ApplyParallel { a: Ref<Line>, b: Ref<Line> },
+    ApplyArcLineParallel { arc: Ref<Arc>, line: Ref<Line> },
+    ApplyArcArcParallel { a: Ref<Arc>, b: Ref<Arc> },
     ApplyPerpendicular { a: Ref<Line>, b: Ref<Line> },
     ApplyEqualLength { a: Ref<Line>, b: Ref<Line> },
     AddCircle { center: vect2d, edge: vect2d },
@@ -187,6 +204,8 @@ impl Action {
             Action::ApplyCoincidentLL21 { .. } | Action::ApplyCoincidentLL22 { .. } => "Coincident LL".into(),
             Action::ApplyCoincidentLP1 { .. } | Action::ApplyCoincidentLP2 { .. } => "Coincident LP".into(),
             Action::ApplyParallel { .. } => "Parallel".into(),
+            Action::ApplyArcLineParallel { .. } => "Arc-Line parallel".into(),
+            Action::ApplyArcArcParallel { .. } => "Arc-Arc parallel".into(),
             Action::ApplyPerpendicular { .. } => "Perpendicular".into(),
             Action::ApplyEqualLength { .. } => "Equal length".into(),
             Action::ApplyCollinear { .. } => "Collinear".into(),
@@ -231,6 +250,7 @@ impl Action {
                     DimensionKind::ArcRadius(_) => "radius",
                     DimensionKind::ArcRadiusB(_) => "radius_b",
                     DimensionKind::ArcSweep(_) => "sweep",
+                    DimensionKind::ArcRotation(_) => "xangle",
                     DimensionKind::PointPointDistance(_, _) => "distance",
                     DimensionKind::PointLineDistance(_, _) => "distance",
                     DimensionKind::Angle(_, _, _) => "angle",
@@ -263,6 +283,7 @@ impl Action {
             Action::ApplyCoincidentLL21 { .. } | Action::ApplyCoincidentLL22 { .. } |
             Action::ApplyCoincidentLP1 { .. } | Action::ApplyCoincidentLP2 { .. } |
             Action::ApplyParallel { .. } | Action::ApplyPerpendicular { .. } |
+            Action::ApplyArcLineParallel { .. } | Action::ApplyArcArcParallel { .. } |
             Action::ApplyEqualLength { .. } |
             Action::ApplyCoincidentArcCenter { .. } | Action::ApplyCoincidentArcStart { .. } |
             Action::ApplyCoincidentArcEnd { .. } |
@@ -506,6 +527,11 @@ fn remove_numeric_dim_constraint(sketch: &mut Sketch, kind: &DimensionKind) {
                 a.constraints.has_target_sweep = false;
             }
         }
+        DimensionKind::ArcRotation(arc) => {
+            if let Some(a) = sketch.arcs.get_mut(arc) {
+                a.constraints.has_target_rotation = false;
+            }
+        }
         DimensionKind::PointPointDistance(ref a, ref b) => {
             remove_distance(sketch, a, b);
         }
@@ -705,6 +731,16 @@ impl Action {
             }
             Action::ApplyParallel { a, b } => {
                 sketch.parallel.push(Parallel { a: *a, b: *b, nid: 0, cid: 0, hb: CrossBlock::new() });
+            }
+            Action::ApplyArcLineParallel { arc, line } => {
+                sketch.arc_line_parallel.push(ArcLineParallel {
+                    arc: *arc, line: *line, nid: 0, cid: 0, hb: CrossBlock::new()
+                });
+            }
+            Action::ApplyArcArcParallel { a, b } => {
+                sketch.arc_arc_parallel.push(ArcArcParallel {
+                    a: *a, b: *b, nid: 0, cid: 0, hb: CrossBlock::new()
+                });
             }
             Action::ApplyPerpendicular { a, b } => {
                 let la = &sketch.lines[*a];
@@ -977,6 +1013,13 @@ impl Action {
                 sketch.delete_arc(*arc);
             }
             Action::AddDimension { kind, value, expr, derived, range } => {
+                // Normalise user input early so every branch below sees a
+                // canonical angle for ArcRotation (range-, derived-,
+                // expression- and numeric-dim paths alike). All other dim
+                // kinds pass through unchanged.
+                let value_ref = value;
+                let normed_value = canonicalise_dim_value(kind, *value_ref);
+                let value = &normed_value;
                 // Range dimension: reject illegal combinations, then store
                 // `kind + range` on the dimension. No underlying-constraint
                 // push: `rebuild_expr_constraints` synthesises the barrier
@@ -1033,6 +1076,14 @@ impl Action {
                         sketch.arcs[*arc].constraints.sweep_sign = if sketch.arcs[*arc].ccw { 1.0 } else { -1.0 };
                         sketch.arcs[*arc].constraints.has_target_sweep = true;
                         sketch.arcs[*arc].constraints.target_sweep = deg2rad(*value);
+                    }
+                    DimensionKind::ArcRotation(arc) => {
+                        // Normalise user input into (-pi, pi] so repeated
+                        // `xangle EA0 200` edits don't accumulate value
+                        // drift across save/load and undo/redo cycles.
+                        let target = arael::utils::rad2rad(deg2rad(*value));
+                        sketch.arcs[*arc].constraints.has_target_rotation = true;
+                        sketch.arcs[*arc].constraints.target_rotation = target;
                     }
                     DimensionKind::Angle(a, b, supplement) => {
                         // value is in degrees, constraint uses radians.
@@ -1126,6 +1177,13 @@ impl Action {
             }
             Action::UpdateDimension { index, value, expr, range } => {
                 if *index >= sketch.dimensions.len() { return false; }
+                // Same normalisation as AddDimension -- keeps the stored
+                // value and the effective target in canonical range when
+                // the user overwrites an xangle numeric dim.
+                let normed_value = sketch.dimensions.get(*index)
+                    .map(|d| canonicalise_dim_value(&d.kind, *value))
+                    .unwrap_or(*value);
+                let value = &normed_value;
                 // Range-dim update: rewrite the bound and re-measure.
                 // No underlying-constraint bookkeeping (none was pushed).
                 if let Some(rb) = range {
@@ -1180,6 +1238,11 @@ impl Action {
                             DimensionKind::ArcSweep(arc) => {
                                 if let Some(a) = sketch.arcs.get_mut(arc) {
                                     a.constraints.has_target_sweep = false;
+                                }
+                            }
+                            DimensionKind::ArcRotation(arc) => {
+                                if let Some(a) = sketch.arcs.get_mut(arc) {
+                                    a.constraints.has_target_rotation = false;
                                 }
                             }
                             DimensionKind::PointPointDistance(ref a, ref b) => {
@@ -1240,6 +1303,11 @@ impl Action {
                             sketch.arcs[arc].constraints.sweep_sign = if sketch.arcs[arc].ccw { 1.0 } else { -1.0 };
                             sketch.arcs[arc].constraints.has_target_sweep = true;
                             sketch.arcs[arc].constraints.target_sweep = deg2rad(value);
+                        }
+                        DimensionKind::ArcRotation(arc) => {
+                            let target = arael::utils::rad2rad(deg2rad(value));
+                            sketch.arcs[arc].constraints.has_target_rotation = true;
+                            sketch.arcs[arc].constraints.target_rotation = target;
                         }
                         DimensionKind::PointPointDistance(a, b) => {
                             push_distance(sketch, &a, &b, value);
@@ -1333,6 +1401,11 @@ impl Action {
                         DimensionKind::ArcSweep(arc) => {
                             if let Some(a) = sketch.arcs.get_mut(arc) {
                                 a.constraints.has_target_sweep = false;
+                            }
+                        }
+                        DimensionKind::ArcRotation(arc) => {
+                            if let Some(a) = sketch.arcs.get_mut(arc) {
+                                a.constraints.has_target_rotation = false;
                             }
                         }
                         DimensionKind::PointPointDistance(a, b) => {
@@ -1432,6 +1505,8 @@ impl Action {
                         sketch.dimensions.retain(|d| !d.kind.references_parallel_pair(a, b));
                     }
                     ConstraintId::Perpendicular(i) => { sketch.perpendicular.remove(*i); }
+                    ConstraintId::ArcLineParallel(i) => { sketch.arc_line_parallel.remove(*i); }
+                    ConstraintId::ArcArcParallel(i) => { sketch.arc_arc_parallel.remove(*i); }
                     ConstraintId::EqualLength(i) => { sketch.equal_length.remove(*i); }
                     ConstraintId::EqualRadius(i) => { sketch.equal_radius.remove(*i); }
                     ConstraintId::Concentric(i) => {

@@ -121,6 +121,10 @@ pub struct Sketch {
     pub point_on_arc: std::vec::Vec<PointOnArc>,
     pub parallel: std::vec::Vec<Parallel>,
     pub perpendicular: std::vec::Vec<Perpendicular>,
+    #[serde(default)]
+    pub arc_line_parallel: std::vec::Vec<ArcLineParallel>,
+    #[serde(default)]
+    pub arc_arc_parallel: std::vec::Vec<ArcArcParallel>,
     pub collinear: std::vec::Vec<Collinear>,
     pub equal_length: std::vec::Vec<EqualLength>,
     pub angle: std::vec::Vec<AngleConstraint>,
@@ -429,6 +433,8 @@ impl Sketch {
             point_on_arc: Vec::new(),
             parallel: Vec::new(),
             perpendicular: Vec::new(),
+            arc_line_parallel: Vec::new(),
+            arc_arc_parallel: Vec::new(),
             collinear: Vec::new(),
             equal_length: Vec::new(),
             angle: Vec::new(),
@@ -677,7 +683,7 @@ impl Sketch {
             constraints: ArcConstraints {
                 has_target_radius: false, target_radius: 0.0,
                 has_target_radius_b: false, target_radius_b: 0.0,
-                has_target_sweep: false, target_sweep: 0.0, sweep_sign: 1.0,
+                has_target_sweep: false, target_sweep: 0.0, sweep_sign: 1.0, has_target_rotation: false, target_rotation: 0.0,
             },
             cid: 0, hb: SelfBlock::new(),
         })
@@ -702,7 +708,7 @@ impl Sketch {
             constraints: ArcConstraints {
                 has_target_radius: false, target_radius: 0.0,
                 has_target_radius_b: false, target_radius_b: 0.0,
-                has_target_sweep: false, target_sweep: 0.0, sweep_sign: 1.0,
+                has_target_sweep: false, target_sweep: 0.0, sweep_sign: 1.0, has_target_rotation: false, target_rotation: 0.0,
             },
             cid: 0, hb: SelfBlock::new(),
         })
@@ -735,7 +741,7 @@ impl Sketch {
             constraints: ArcConstraints {
                 has_target_radius: false, target_radius: 0.0,
                 has_target_radius_b: false, target_radius_b: 0.0,
-                has_target_sweep: false, target_sweep: 0.0, sweep_sign: 1.0,
+                has_target_sweep: false, target_sweep: 0.0, sweep_sign: 1.0, has_target_rotation: false, target_rotation: 0.0,
             },
             cid: 0, hb: SelfBlock::new(),
         })
@@ -1147,6 +1153,8 @@ impl Sketch {
         }
         dedup_pa!(self.point_on_arc, "point_on_arc");
         dedup_ab!(self.parallel, "parallel", self.lines, self.lines);
+        dedup_la!(self.arc_line_parallel, "arc_line_parallel");
+        dedup_ab!(self.arc_arc_parallel, "arc_arc_parallel", self.arcs, self.arcs);
         dedup_ab!(self.perpendicular, "perpendicular", self.lines, self.lines);
         dedup_ab!(self.collinear, "collinear", self.lines, self.lines);
         {
@@ -1468,6 +1476,8 @@ impl Sketch {
         for c in &self.midpoint { m.insert(c.cid, format!("midpoint:{},{}", pn(c.point), ln(c.line))); }
         for c in &self.point_on_arc { m.insert(c.cid, format!("on_arc:{},{}", pn(c.point), an(c.arc))); }
         for c in &self.parallel { m.insert(c.cid, format!("parallel:{},{}", ln(c.a), ln(c.b))); }
+        for c in &self.arc_line_parallel { m.insert(c.cid, format!("parallel:{},{}", an(c.arc), ln(c.line))); }
+        for c in &self.arc_arc_parallel { m.insert(c.cid, format!("parallel:{},{}", an(c.a), an(c.b))); }
         for c in &self.perpendicular { m.insert(c.cid, format!("perp:{},{}", ln(c.a), ln(c.b))); }
         for c in &self.collinear { m.insert(c.cid, format!("collinear:{},{}", ln(c.a), ln(c.b))); }
         for c in &self.equal_length { m.insert(c.cid, format!("eq_len:{},{}", ln(c.a), ln(c.b))); }
@@ -1812,7 +1822,7 @@ impl Sketch {
                     find_point_line_cid(self, &E::LineP1(*b), *a)
                 }
                 K::LineLength(_) | K::ArcRadius(_) | K::ArcRadiusB(_)
-                    | K::ArcSweep(_) | K::LineAngle(_) => None,
+                    | K::ArcSweep(_) | K::LineAngle(_) | K::ArcRotation(_) => None,
             };
             if let Some(cid) = cid {
                 out.insert(cid, dim.name.clone());
@@ -1892,6 +1902,16 @@ impl Sketch {
             };
         }
         list_cross!(self.parallel, "parallel", a, b);
+        for c in &self.arc_line_parallel {
+            let na = &self.arcs[c.arc].name;
+            let nb = &self.lines[c.line].name;
+            out.push(format!("C{}: parallel {} {}", c.nid, na, nb));
+        }
+        for c in &self.arc_arc_parallel {
+            let na = &self.arcs[c.a].name;
+            let nb = &self.arcs[c.b].name;
+            out.push(format!("C{}: parallel {} {}", c.nid, na, nb));
+        }
         list_cross!(self.perpendicular, "perpendicular", a, b);
         list_cross!(self.collinear, "collinear", a, b);
         list_cross!(self.equal_length, "equal", a, b);
@@ -2334,12 +2354,23 @@ impl Sketch {
             sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
             let max_sv = sorted.last().copied().unwrap_or(0.0);
             let upper_bound = max_sv * 0.01;
+            // Floor near-zero sigmas at `max_sv * 1e-20` so they
+            // participate in the gap search instead of being skipped.
+            // No plausible real sigma lives below `max_sv * 1e-15`, so a
+            // floor at `1e-20` leaves 5 orders of magnitude of headroom
+            // above the floor for real rank sigmas to remain resolvable
+            // while letting the zero-to-first-real gap compete on its
+            // own merits. Multiple adjacent zeros collapse to ratio ~1
+            // against each other (both pulled to the same floor),
+            // leaving only the last-zero -> first-real transition as a
+            // huge-gap candidate -- which is exactly what identifies the
+            // rank cut.
+            let floor = max_sv * 1e-20;
             let mut best_gap = 0.0f64;
             let mut best_cut = 0;
             for i in 0..sorted.len().saturating_sub(1) {
-                let lo = sorted[i];
-                let hi = sorted[i + 1];
-                if lo < 1e-20 { continue; }
+                let lo = sorted[i].max(floor);
+                let hi = sorted[i + 1].max(floor);
                 if lo > upper_bound { break; }
                 let gap = hi / lo;
                 if gap > best_gap {
@@ -2556,9 +2587,34 @@ impl Sketch {
         }
 
         self.constraint_isigma = full_isigma;
+        self.normalise_ellipse_rotations();
         self.update_expr_dim_values();
         result.iterations = total_iters;
         result
+    }
+
+    /// Wrap every ellipse's `rotation` param into `(-pi, pi]`. Angles
+    /// can accumulate integer multiples of `2*pi` across repeated drags
+    /// or expression-driven updates; without this post-pass the solver
+    /// can settle on rotations like `3.5*pi` that are numerically fine
+    /// but render as nonsense in `info` / `list` output. Wrapping by
+    /// whole `2*pi` turns leaves every geometric quantity (point
+    /// positions, tangents, curvatures) unchanged; the drift anchor is
+    /// the committed `.value` itself, so next solve's drift picks up
+    /// the wrapped angle as its new anchor automatically.
+    fn normalise_ellipse_rotations(&mut self) {
+        use arael::utils::rad2rad;
+        let refs: std::vec::Vec<_> = self.arcs.refs().collect();
+        for r in refs {
+            let a = &mut self.arcs[r];
+            if !a.is_ellipse { continue; }
+            // Only `rotation` is normalised; `start_angle` / `end_angle`
+            // parameterise the traversal of the ellipse and may span more
+            // than 2*pi (e.g. a "large" elliptic arc where the sweep
+            // itself exceeds pi). Wrapping them would silently change
+            // which side of the ellipse is drawn.
+            a.rotation.value = rad2rad(a.rotation.value);
+        }
     }
 
     /// Evaluate expression/derived dimensions and user params, cache their computed values.
