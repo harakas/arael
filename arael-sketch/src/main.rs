@@ -113,6 +113,7 @@ pub struct EditorApp {
     pub line_draw: Option<LineDrawState>,
     pub circle_draw: Option<CircleDrawState>,
     pub arc_draw: Option<ArcDrawState>,
+    pub rect_draw: Option<RectDrawState>,
 
     // Selection and hover
     pub selection: Vec<Selection>,
@@ -237,6 +238,14 @@ pub struct EditorApp {
     /// remains responsive even if the user keeps hovering near the
     /// same perpendicular anchor.
     pub drag_perp_fail_cache: Option<(u32, u32, web_time::Instant)>,
+    /// Pairs (line, host) that were already (directly or implicitly)
+    /// perpendicular at drag-start. During drag the geometry is briefly
+    /// off-axis so a rank-based re-check would spuriously report the
+    /// perp as DOF-reducing; suppressing these pairs for the whole drag
+    /// avoids phantom perp hints. Checked once per drag, reused every
+    /// frame -- also saves the per-frame DOF recompute that caused the
+    /// drag to feel choppy.
+    pub drag_perp_already: Vec<(u32, u32)>,
     pub last_cost: f64,
     drag_saved_cost: f64,              // best cost seen during drag
     drag_saved_snapshot: Option<Vec<u8>>, // sketch state at that best cost
@@ -319,6 +328,7 @@ impl EditorApp {
             line_draw: None,
             circle_draw: None,
             arc_draw: None,
+            rect_draw: None,
             selection: Vec::new(),
             hovered: None,
             grab: None,
@@ -386,6 +396,7 @@ impl EditorApp {
             flash_names: Vec::new(),
             flash_start: None,
             drag_perp_fail_cache: None,
+            drag_perp_already: Vec::new(),
             last_cost,
             drag_saved_cost: 0.0,
             drag_saved_snapshot: None,
@@ -679,6 +690,29 @@ impl EditorApp {
             && at.elapsed() < std::time::Duration::from_secs(1) {
             return false;
         }
+        // Fast path: if one line is horizontal and the other vertical
+        // (or vice versa), perpendicularity is already implied by the
+        // H/V flags -- no need to run a full jacobian-rank check.
+        // During drag the geometry is briefly off-axis so the rank
+        // query can wrongly report a DOF reduction; the flags are
+        // unambiguous. Suppresses the spurious perp hint on rect
+        // corners and avoids the tens-of-ms DOF recompute per frame.
+        let la_c = &self.sketch.lines[a].constraints;
+        let lb_c = &self.sketch.lines[b].constraints;
+        if (la_c.horizontal && lb_c.vertical) || (la_c.vertical && lb_c.horizontal) {
+            self.drag_perp_fail_cache = Some((key.0, key.1, web_time::Instant::now()));
+            return false;
+        }
+        // Pre-drag snapshot: pairs that were already perpendicular
+        // (directly or via an implicit chain such as equal-length
+        // plus collinear neighbours) when the drag started. Stored
+        // by start_drag. Covers the general case beyond the H/V flag
+        // shortcut above.
+        for &(ai, bi) in &self.drag_perp_already {
+            if (ai == key.0 && bi == key.1) || (ai == key.1 && bi == key.0) {
+                return false;
+            }
+        }
         let old_dof = match self.sketch.dof() { Ok(d) => d, Err(_) => return false };
         let saved_cached = self.sketch.cached_dof;
 
@@ -729,6 +763,18 @@ impl EditorApp {
         // Save pre-drag state before adding drag apparatus
         self.drag_saved_cost = self.last_cost;
         self.drag_saved_snapshot = bincode::serialize(&self.sketch).ok();
+
+        // Pre-compute pairs that are already perpendicular now, so the
+        // per-frame auto-perp hint can short-circuit without a rank-based
+        // check on off-axis intermediate geometry. See drag_perp_already.
+        self.drag_perp_already.clear();
+        if let GrabTarget::LineP1(line) | GrabTarget::LineP2(line) = target {
+            let is_p1 = matches!(target, GrabTarget::LineP1(_));
+            if let Some(host) = self.find_anchor_host_line_for_drag(line, is_p1)
+                && !self.perp_would_reduce_dof(line, host) {
+                self.drag_perp_already.push((line.index(), host.index()));
+            }
+        }
 
         // Create a drag helper point at mouse position
         let drag_pt = self.add_drag_helper(mouse_pos);
@@ -1048,6 +1094,7 @@ impl EditorApp {
     fn end_drag(&mut self, hit_threshold: f64) {
         self.begin_group();
         self.drag_snap_preview = None;
+        self.drag_perp_already.clear();
         if let Some(drag_pt) = self.drag_point.take() {
             let _drag_pos = self.sketch.points[drag_pt].pos.value;
             let grab = self.grab;
@@ -1233,7 +1280,18 @@ impl EditorApp {
     /// Check if background DOF computation finished, update display.
     pub fn poll_dof(&mut self) {
         if let Some(dof) = self.dof_output.lock().unwrap().take() {
-            self.dof_display = Some(dof);
+            // Worker results reflect whatever sketch state was in
+            // dof_input when the worker picked it up. If the main
+            // thread has since computed a definitive DOF inline (e.g.
+            // validate_and_apply_constraint caches it after accepting
+            // a constraint), that cached value is authoritative --
+            // blindly adopting the older worker result would let a
+            // post-AddLine DOF=16 clobber the post-Horizontal DOF=4
+            // produced by the rect tool a moment earlier.
+            if self.sketch.cached_dof.is_none() {
+                self.dof_display = Some(dof);
+                self.sketch.cached_dof = Some(dof);
+            }
         }
     }
 

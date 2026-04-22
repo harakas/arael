@@ -72,6 +72,7 @@ pub enum Tool {
     DrawLine,
     DrawCircle,
     DrawArc,
+    DrawRect,
     ConstraintMode(ConstraintType),
     Dimension,
 }
@@ -105,6 +106,14 @@ pub struct ArcDrawState {
     pub start: vect2d,
     pub snap_start: Option<SnapTarget>,
     pub end: Option<(vect2d, Option<SnapTarget>)>,  // None until second click
+}
+
+// Rectangle drawing: user clicks two opposite corners, we build an
+// axis-aligned rect as four lines with corner coincidents and H/V
+// constraints on the sides.
+pub struct RectDrawState {
+    pub corner: vect2d,
+    pub snap_corner: Option<SnapTarget>,
 }
 
 // Constraint symbol types (drawn with painter, not text)

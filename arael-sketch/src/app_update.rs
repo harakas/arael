@@ -241,6 +241,11 @@ impl eframe::App for EditorApp {
                     self.tool = Tool::DrawArc;
                     self.arc_draw = None;
                 }
+                if ui.selectable_label(self.tool == Tool::DrawRect, "Rect (R)").clicked() {
+                    self.tool = Tool::DrawRect;
+                    self.rect_draw = None;
+                }
+                ui.end_row();
                 if ui.selectable_label(self.tool == Tool::Dimension, "Dims (D)").clicked() {
                     self.tool = Tool::Dimension;
                     self.dim_editing = false;
@@ -928,6 +933,10 @@ impl eframe::App for EditorApp {
                 self.tool = Tool::DrawArc;
                 self.arc_draw = None;
             }
+            if ui.input(|i| i.key_pressed(egui::Key::R) && !i.modifiers.ctrl && !i.modifiers.mac_cmd) {
+                self.tool = Tool::DrawRect;
+                self.rect_draw = None;
+            }
             if ui.input(|i| i.key_pressed(egui::Key::H)) { self.try_apply_or_enter_mode(ConstraintType::Horizontal); }
             if ui.input(|i| i.key_pressed(egui::Key::V)) { self.try_apply_or_enter_mode(ConstraintType::Vertical); }
             if ui.input(|i| i.key_pressed(egui::Key::C)) { self.try_apply_or_enter_mode(ConstraintType::Coincident); }
@@ -951,6 +960,7 @@ impl eframe::App for EditorApp {
                 self.line_draw = None;
                 self.circle_draw = None;
                 self.arc_draw = None;
+                self.rect_draw = None;
                 self.dim_editing = false;
                 self.dim_kind = None;
                 self.dim_placing = false;
@@ -1543,6 +1553,65 @@ impl eframe::App for EditorApp {
                     }
                 }
 
+                Tool::DrawRect => {
+                    if response.clicked_by(egui::PointerButton::Primary) {
+                        self.begin_group();
+                        if let Some(state) = self.rect_draw.take() {
+                            // Second click: opposite corner. Snap it, reject
+                            // zero-area rects.
+                            let snap = self.find_snap_target(mouse_sketch, hit_threshold);
+                            let p2 = snap.map_or(mouse_sketch, |(p, _)| p);
+                            let dx = p2.x - state.corner.x;
+                            let dy = p2.y - state.corner.y;
+                            if dx.abs() < 1e-6 || dy.abs() < 1e-6 {
+                                self.rect_draw = Some(state);
+                            } else {
+                                let bl = state.corner;
+                                let br = vect2d::new(p2.x, state.corner.y);
+                                let tr = p2;
+                                let tl = vect2d::new(state.corner.x, p2.y);
+                                let corners = [bl, br, tr, tl];
+
+                                let mut lines = [Ref::<Line>::new(0); 4];
+                                for i in 0..4 {
+                                    let a = corners[i];
+                                    let b = corners[(i + 1) % 4];
+                                    self.exec(Action::AddLine { p1: a, p2: b });
+                                    lines[i] = Ref::new(self.sketch.lines.slot_count() as u32 - 1);
+                                }
+
+                                // Corner coincidents: L(i).p2 = L(i+1).p1
+                                for i in 0..4 {
+                                    self.exec(Action::ApplyCoincidentLL21 {
+                                        a: lines[i],
+                                        b: lines[(i + 1) % 4],
+                                    });
+                                }
+
+                                // Axis-aligned: top/bottom horizontal, sides vertical.
+                                self.exec(Action::ApplyHorizontal { lines: vec![lines[0], lines[2]] });
+                                self.exec(Action::ApplyVertical { lines: vec![lines[1], lines[3]] });
+
+                                // External snap for bl (L0.p1) and tr (L1.p2).
+                                if let Some(s) = state.snap_corner {
+                                    self.apply_snap_coincident(s, lines[0], true);
+                                }
+                                if let Some((_, s)) = snap {
+                                    self.apply_snap_coincident(s, lines[1], false);
+                                }
+                            }
+                        } else {
+                            // First click: opposite corner, snap to nearby entity.
+                            let snap = self.find_snap_target(mouse_sketch, hit_threshold);
+                            let corner = snap.map_or(mouse_sketch, |(p, _)| p);
+                            self.rect_draw = Some(RectDrawState {
+                                corner,
+                                snap_corner: snap.map(|(_, t)| t),
+                            });
+                        }
+                    }
+                }
+
                 Tool::ConstraintMode(ct) => {
                     if response.clicked_by(egui::PointerButton::Primary) {
                         // Find what was clicked
@@ -2103,8 +2172,9 @@ impl eframe::App for EditorApp {
                 }
             } else if matches!(self.tool,
                 Tool::DrawLine | Tool::DrawPoint
-                | Tool::DrawCircle | Tool::DrawArc)
+                | Tool::DrawCircle | Tool::DrawArc | Tool::DrawRect)
                 && self.circle_draw.is_none() && self.arc_draw.is_none()
+                && self.rect_draw.is_none()
             {
                 // Pre-first-click hint: snap marker if a target is in
                 // range, otherwise the plain "+" cursor cross so the
@@ -2161,6 +2231,32 @@ impl eframe::App for EditorApp {
                 if let Some(ref t) = state.snap_center { draw_snap_hint(center, t); }
                 if let Some((_, t)) = &edge_snap { draw_snap_hint(edge_pt, t); }
                 if edge_snap.is_none() { draw_cursor_cross(edge_pt); }
+            }
+
+            // Rect preview
+            if let Some(ref state) = self.rect_draw {
+                let corner_screen = self.to_screen(state.corner);
+                painter.circle_filled(corner_screen, 4.0, self.colors.endpoint);
+                if let Some(ref t) = state.snap_corner { draw_snap_hint(corner_screen, t); }
+
+                let end_snap = self.find_snap_target(mouse_sketch, hit_threshold)
+                    .filter(|(p, _)| {
+                        (p.x - state.corner.x).abs() > 1e-6
+                            && (p.y - state.corner.y).abs() > 1e-6
+                    });
+                let end_sketch = end_snap.map_or(mouse_sketch, |(p, _)| p);
+                let end_pt = self.to_screen(end_sketch);
+                let c1 = self.to_screen(state.corner);
+                let c2 = egui::Pos2::new(end_pt.x, c1.y);
+                let c3 = end_pt;
+                let c4 = egui::Pos2::new(c1.x, end_pt.y);
+                let stroke = egui::Stroke::new(1.5, self.colors.preview_line);
+                painter.line_segment([c1, c2], stroke);
+                painter.line_segment([c2, c3], stroke);
+                painter.line_segment([c3, c4], stroke);
+                painter.line_segment([c4, c1], stroke);
+                if let Some((_, t)) = &end_snap { draw_snap_hint(end_pt, t); }
+                if end_snap.is_none() { draw_cursor_cross(end_pt); }
             }
 
             // Arc preview
@@ -2256,6 +2352,11 @@ impl eframe::App for EditorApp {
                     }
                 } else {
                     "Arc: click to place start point."
+                },
+                Tool::DrawRect => if self.rect_draw.is_some() {
+                    "Rect: click to place opposite corner."
+                } else {
+                    "Rect: click to place first corner."
                 },
                 Tool::ConstraintMode(_) => "Constraint: click entities to apply. Escape to cancel.",
                 Tool::Dimension => if self.dim_editing {
