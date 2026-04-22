@@ -91,6 +91,17 @@ const PARALLEL_SELECTION_TOL: f64 = 0.05;
 /// when the cursor target is infeasible.
 use arael_sketch_backend::DRAG_PULL_WEIGHT;
 
+/// Maximum distance (in screen pixels) the drag cursor may pull the
+/// drag helper beyond its last-solved feasible position. The GUI
+/// projects any cursor position outside this ball back onto the
+/// boundary before feeding it to the solver, so a very-far drag on
+/// a locked sketch cannot cause the drag attractor to overwhelm the
+/// constraints and deform the sketch. The clamp reference moves
+/// with the sketch as it tracks the cursor -- free DOFs still
+/// follow the mouse pixel-for-pixel; only the excess lag when the
+/// sketch runs out of slack is absorbed.
+const DRAG_MAX_LAG_PX: f32 = 100.0;
+
 pub struct EditorApp {
     pub sketch: Sketch,
     // View transform
@@ -913,15 +924,41 @@ impl EditorApp {
                 }
             }
 
+            // Ball-clamp each cursor to a radius of DRAG_MAX_LAG_PX
+            // screen pixels around the helper's last-solved feasible
+            // position. The solver never sees a cursor further out
+            // than that, so on a locked sketch where the helper cannot
+            // follow, the drag attractor residual stays bounded and
+            // cannot deform the sketch. When the sketch has slack the
+            // helper tracks the cursor exactly (delta < R → clamp is a
+            // no-op) so free-direction drags feel unchanged.
+            let r_world = (DRAG_MAX_LAG_PX / self.scale.max(1e-6)) as f64;
+            let clamp = |target: vect2d, center: vect2d| -> vect2d {
+                let dx = target.x - center.x;
+                let dy = target.y - center.y;
+                let dist = (dx * dx + dy * dy).sqrt();
+                if dist <= r_world || dist < 1e-12 {
+                    target
+                } else {
+                    vect2d::new(center.x + dx * r_world / dist,
+                                center.y + dy * r_world / dist)
+                }
+            };
             if is_body_drag {
-                let pos1 = vect2d::new(mouse_pos.x + self.drag_offset.x, mouse_pos.y + self.drag_offset.y);
+                let ref1 = self.sketch.points[drag_pt].pos.value;
+                let pos1 = clamp(vect2d::new(mouse_pos.x + self.drag_offset.x,
+                                              mouse_pos.y + self.drag_offset.y), ref1);
                 self.sketch.points[drag_pt].pos = self.drag_helper_param(pos1);
                 if let Some(drag_pt2) = self.drag_point2 {
-                    let pos2 = vect2d::new(mouse_pos.x + self.drag_offset2.x, mouse_pos.y + self.drag_offset2.y);
+                    let ref2 = self.sketch.points[drag_pt2].pos.value;
+                    let pos2 = clamp(vect2d::new(mouse_pos.x + self.drag_offset2.x,
+                                                  mouse_pos.y + self.drag_offset2.y), ref2);
                     self.sketch.points[drag_pt2].pos = self.drag_helper_param(pos2);
                 }
             } else {
-                self.sketch.points[drag_pt].pos = self.drag_helper_param(effective_pos);
+                let ref_pos = self.sketch.points[drag_pt].pos.value;
+                let pos = clamp(effective_pos, ref_pos);
+                self.sketch.points[drag_pt].pos = self.drag_helper_param(pos);
             }
             let result = self.sketch.solve();
             self.last_cost = result.end_cost;
