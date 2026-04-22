@@ -397,11 +397,106 @@ add_earc_tangent @cursor @tangent 15,0 1,0     Continues from previous arc
 
 ## Deletion
 
+`delete` is the single removal command. It handles entities, named
+constraints, dimensions, and the relational (multi-argument) form
+of constraint removal. Every removal path goes through `delete` —
+there is no separate `remove_constraint` or `remove_dim`.
+
+### By name
+
 ```
-delete L0                    Delete a line
-delete P0                    Delete a point
-delete A0                    Delete an arc
+delete L0                    Delete a line  (L0, L1, ...)
+delete P0                    Delete a point (P0, P1, ...)
+delete A0                    Delete a circular arc or circle (A0, A1, ...)
+delete EA0                   Delete an ellipse or elliptic arc (EA0, EA1, ...)
+delete C3                    Delete a named constraint (parallel, coincident,
+                             tangent, midpoint, symmetry, ...)
+delete CL0H                  Delete a synthetic line-flag constraint
+                             (CL<line>H for horizontal, CL<line>V for vertical)
+delete d0                    Delete a dimension (d0, d1, ...)
 ```
+
+Use `list` or `info <entity>` to discover the `C<n>` / `d<n>` names
+to pass here. Dimension-managed constraints (e.g. the `distance_pp`
+coupling behind a `distance P0 P1 5` dimension) are reached through
+the backing dimension name, not through a `C<n>` — `delete d0`
+removes both the dimension and its underlying constraint.
+
+### Relational (multi-argument) form
+
+When a constraint hasn't got a handy `C<n>` yet (or the user just
+wants to describe it by the entities involved), pass the entities
+and the constraint type:
+
+```
+delete L0 horizontal                  Drop the horizontal flag from L0
+delete L0 vertical                    Drop the vertical flag from L0
+delete L0 L1 parallel                 Drop a parallel constraint between L0 and L1
+delete L0 L1 perpendicular            Drop a perpendicular constraint
+delete L0 L1 equal                    Drop an equal-length constraint
+delete A0 A1 equal_radius             Drop an equal-radius constraint
+delete L0 L1 collinear                Drop a collinear constraint
+delete L0 A0 tangent                  Drop a line-arc tangent
+delete A0 A1 tangent                  Drop an arc-arc tangent
+delete A0 A1 concentric               Drop a concentric constraint
+delete L0.p2 L1.p1 coincident         Drop a point-point coincidence
+delete P0 L0 point_on                 Drop a point-on-line constraint
+delete L0.p1 A0 point_on              Drop a line-endpoint-on-arc constraint
+delete A0.center L0 point_on          Drop an arc-center-on-line constraint
+delete P0 L0 P1 symmetry              Drop a point-point-about-line symmetry
+delete L0 L1 L2 symmetry              Drop a line-line-about-line symmetry
+delete P0 L0 midpoint                 Drop a point-at-midpoint constraint
+delete L0.p1 L1 midpoint              Drop a line-endpoint-at-midpoint
+delete L0.p1 lock                     Unlock an endpoint  (also: delete P0 lock)
+```
+
+The constraint-type token comes last. Either ordering of the two
+entities is accepted.
+
+### Cascade on entity deletion
+
+Deleting an entity also deletes every constraint and dimension that
+references it — you don't need to tear them down by hand first.
+The response message lists each cascaded removal so you can see
+exactly what went away with the entity:
+
+```
+> delete L0
+Deleted line L0
+  cascade:
+    C1: coincident L1.p1 L0.p2
+    CL0H: horizontal L0
+    length L0 = 4
+    d0
+```
+
+What cascades:
+
+- **Flag constraints** on the entity (`horizontal`, `vertical`, lock status).
+- **Length / xangle** constraints on the entity.
+- **Coincident / midpoint / point-on / tangent / symmetry / parallel
+  / perpendicular / equal / collinear / concentric / equal-radius**
+  constraints whose endpoints touch the entity.
+- **Dimensions** whose kind references the entity (for a line: its
+  length dim, any point-point / point-line distance involving its
+  endpoints, any angle involving it, any line-line distance paired
+  with it, etc.).
+- **Helper points** that the solver created internally for complex
+  coincidences involving the entity. These are invisible to the
+  user so they don't appear in the cascade list, but they are
+  cleaned up.
+
+Naming shown in the cascade list matches `list` output: `C<n>` for
+numbered constraints, `CL<line>H` / `CL<line>V` for flag
+constraints, `d<n>` for dimensions, and the natural phrasing
+(`length L0 = 4`, `lock L0.p1`) for entity-bound constraints that
+don't have their own numeric name.
+
+### Undo
+
+`delete` is a single atomic action in the undo stack — `undo`
+restores the entity together with every cascaded constraint and
+dimension in one step.
 
 ## Constraints
 
@@ -470,40 +565,38 @@ load and undo / redo. Deleting constraints can leave holes in the
 numbering; holes are not reused.
 
 ```
-rc C3                        Remove the constraint named C3
-rc CL0H                      Remove horizontal flag from L0
-rc CL3V                      Remove vertical flag from L3
+delete C3                    Remove the constraint named C3
+delete CL0H                  Remove horizontal flag from L0
+delete CL3V                  Remove vertical flag from L3
 info C3                      Show the list line for constraint C3
 ```
 
-Entity-based syntax keeps working for backwards compatibility:
+Relational syntax (specify the pair and constraint type):
 
 ```
-remove_constraint L0 horizontal
-remove_constraint L0 L1 parallel
-remove_constraint L0 L1 perpendicular
-remove_constraint L0 L1 equal
-remove_constraint A0 A1 equal_radius
-remove_constraint L0 L1 collinear
-remove_constraint L0 A0 tangent
-remove_constraint A0 A1 concentric
-remove_constraint L0.p2 L1.p1 coincident
-remove_constraint P0 L0 point_on
-remove_constraint L0.p1 A0 point_on
-remove_constraint A0.center L0 point_on
-remove_constraint P0 L0 P1 symmetry
-remove_constraint L0 L1 L2 symmetry
-remove_constraint P0 L0 midpoint
-remove_constraint L0.p1 L1 midpoint
-remove_constraint L0.p1 lock
+delete L0 horizontal
+delete L0 L1 parallel
+delete L0 L1 perpendicular
+delete L0 L1 equal
+delete A0 A1 equal_radius
+delete L0 L1 collinear
+delete L0 A0 tangent
+delete A0 A1 concentric
+delete L0.p2 L1.p1 coincident
+delete P0 L0 point_on
+delete L0.p1 A0 point_on
+delete A0.center L0 point_on
+delete P0 L0 P1 symmetry
+delete L0 L1 L2 symmetry
+delete P0 L0 midpoint
+delete L0.p1 L1 midpoint
+delete L0.p1 lock
 ```
-
-Alias: `rc` (e.g., `rc L0 horizontal`, `rc C3`, `rc CL0H`)
 
 Dimension-managed constraints (distances, angles) are reached through
-the backing dimension name (`remove_dim d0`, `info d0`). Name-lookup
-of `C<n>` for those constraints falls through — use the dimension
-name instead.
+the backing dimension name (`delete d0`, `info d0`). Name-lookup of
+`C<n>` for those constraints falls through — use the dimension name
+instead.
 
 ## Mirror
 
@@ -568,7 +661,7 @@ hdistance L0.p1 L1.p2 2 to 5 Range on |x|-distance.
 vdistance L0.p1 L1.p2 3.0    Vertical (y-axis) distance between endpoints
 vdistance L0.p1 L0.p2 >= 3   Range on |y|-distance.
 xangle L0 45                  Line angle from x-axis (degrees, CCW positive)
-remove_dim d0                 Remove dimension by name
+delete d0                     Remove dimension by name
 freeze                        Add numeric dimensions for all entities at current values
 freeze L0 A0                  Freeze specific entities only
 ```

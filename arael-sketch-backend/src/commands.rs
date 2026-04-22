@@ -1530,8 +1530,6 @@ fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
         "hdistance" => cmd_hdistance(ctx, args_str),
         "vdistance" => cmd_vdistance(ctx, args_str),
         "xangle" => cmd_xangle(ctx, args_str),
-        "remove_dim" => cmd_remove_dim(ctx, args_str),
-        "remove_constraint" | "rc" => cmd_remove_constraint(ctx, args_str),
         "lock" => cmd_lock(ctx, args_str),
         "unlock" => cmd_unlock(ctx, args_str),
         "param" => cmd_param(ctx, args_str),
@@ -3086,26 +3084,108 @@ fn cmd_add_circle3t(ctx: &mut CommandContext, args: &str) -> CommandResult {
     ok(msg)
 }
 
+/// Unified `delete` command: removes entities (L0, P0, A0, EA0),
+/// constraints (C3, CL0H, CL0V, or the relational form
+/// `L0 L1 parallel`), and dimensions (d0, d1, ...). This is the
+/// single removal command; the old `remove_constraint` (alias `rc`)
+/// and `remove_dim` were merged into it.
+///
+/// When an entity is deleted, the response message also lists which
+/// constraints and dimensions got cascade-removed alongside it
+/// (e.g. deleting L0 removes its horizontal flag, any coincidences
+/// touching L0.p1 / L0.p2, any length dimension on L0, etc.). The
+/// report is computed by diffing `list_constraints()` and
+/// `dimensions` before vs after the delete, so it catches every
+/// cascade path the solver walks internally.
 fn cmd_delete(ctx: &mut CommandContext, args: &str) -> CommandResult {
-    let name = args.trim();
-    if name.starts_with('L') {
-        let r = match resolve_line(&ctx.sketch, name) { Ok(r) => r, Err(e) => return err(e) };
-        ctx.begin_group();
-        ctx.exec(Action::DeleteLine { line: r });
-        ok(format!("Deleted {}", name))
-    } else if name.starts_with('P') {
-        let r = match resolve_point(&ctx.sketch, name) { Ok(r) => r, Err(e) => return err(e) };
-        ctx.begin_group();
-        ctx.exec(Action::DeletePoint { point: r });
-        ok(format!("Deleted {}", name))
-    } else if is_arc_name(name) {
-        let r = match resolve_arc(&ctx.sketch, name) { Ok(r) => r, Err(e) => return err(e) };
-        ctx.begin_group();
-        ctx.exec(Action::DeleteArc { arc: r });
-        ok(format!("Deleted {}", name))
-    } else {
-        err(format!("Unknown entity: {}", name))
+    use crate::ids::find_constraint_by_name;
+    let cleaned = args.trim();
+    if cleaned.is_empty() {
+        return err("Usage: delete L0 | delete P0 | delete A0 | delete C3 | delete CL0H | delete d0 | delete L0 L1 parallel");
     }
+    let tokens: Vec<&str> = cleaned.split_whitespace().collect();
+
+    // Multi-token relational form: `delete L0 L1 parallel`.
+    if tokens.len() > 1 {
+        return delete_relational(ctx, cleaned);
+    }
+
+    let name = tokens[0];
+
+    // 1) Named constraint: C<n>, CL0H, CL0V.
+    if let Some(id) = find_constraint_by_name(&ctx.sketch, name) {
+        let prefix = format!("{}: ", name);
+        let desc = ctx.sketch.list_constraints().into_iter()
+            .find(|l| l.starts_with(&prefix))
+            .unwrap_or_else(|| name.to_string());
+        ctx.begin_group();
+        ctx.exec(Action::DeleteConstraint { id });
+        return ok(format!("Deleted {}", desc));
+    }
+
+    // 2) Dimension: d<n>.
+    if let Some(idx) = ctx.sketch.dimensions.iter().position(|d| d.name == name) {
+        ctx.begin_group();
+        ctx.exec(Action::RemoveDimension { index: idx });
+        return ok(format!("Deleted dimension {}", name));
+    }
+
+    // 3) Entity: L0, P0, A0, EA0.
+    let action = if name.starts_with('L') && !name.starts_with("LineAngle") {
+        // Resolve as line.
+        match resolve_line(&ctx.sketch, name) {
+            Ok(r) => Some(("line", Action::DeleteLine { line: r })),
+            Err(e) => return err(e),
+        }
+    } else if name.starts_with('P') {
+        match resolve_point(&ctx.sketch, name) {
+            Ok(r) => Some(("point", Action::DeletePoint { point: r })),
+            Err(e) => return err(e),
+        }
+    } else if is_arc_name(name) {
+        match resolve_arc(&ctx.sketch, name) {
+            Ok(r) => Some(("arc", Action::DeleteArc { arc: r })),
+            Err(e) => return err(e),
+        }
+    } else {
+        None
+    };
+
+    let Some((kind, action)) = action else {
+        return err(format!("Unknown name: {}", name));
+    };
+
+    // Snapshot constraint + dimension names before the delete, so we
+    // can report what got cascade-removed. list_constraints() covers
+    // flag constraints, C<n> constraints, and expression-backed dims;
+    // sketch.dimensions covers d<n>-named dimensions independently.
+    let before_constraints: std::collections::BTreeSet<String> =
+        ctx.sketch.list_constraints().into_iter().collect();
+    let before_dims: std::collections::BTreeSet<String> =
+        ctx.sketch.dimensions.iter().map(|d| d.name.clone()).collect();
+
+    ctx.begin_group();
+    ctx.exec(action);
+
+    let after_constraints: std::collections::BTreeSet<String> =
+        ctx.sketch.list_constraints().into_iter().collect();
+    let after_dims: std::collections::BTreeSet<String> =
+        ctx.sketch.dimensions.iter().map(|d| d.name.clone()).collect();
+
+    let removed_constraints: Vec<String> = before_constraints.difference(&after_constraints).cloned().collect();
+    let removed_dims: Vec<String> = before_dims.difference(&after_dims).cloned().collect();
+
+    let mut msg = format!("Deleted {} {}", kind, name);
+    if !removed_constraints.is_empty() || !removed_dims.is_empty() {
+        msg.push_str("\n  cascade:");
+        for c in &removed_constraints {
+            msg.push_str(&format!("\n    {}", c));
+        }
+        for d in &removed_dims {
+            msg.push_str(&format!("\n    {}", d));
+        }
+    }
+    ok(msg)
 }
 
 // ---------------------------------------------------------------------------
@@ -6388,17 +6468,6 @@ fn cmd_freeze(ctx: &mut CommandContext, args: &str) -> CommandResult {
     }
 }
 
-fn cmd_remove_dim(ctx: &mut CommandContext, args: &str) -> CommandResult {
-    let name = args.trim();
-    if let Some(idx) = ctx.sketch.dimensions.iter().position(|d| d.name == name) {
-        ctx.begin_group();
-        ctx.exec(Action::RemoveDimension { index: idx });
-        ok(format!("Removed dimension {}", name))
-    } else {
-        err(format!("Unknown dimension: {}", name))
-    }
-}
-
 /// Find the helper point associated with an arc endpoint ref (center/start/end).
 /// Returns None for non-arc endpoints or if no helper point exists.
 fn resolve_endpoint_as_point(sketch: &Sketch, ep: EndpointRef) -> Option<Ref<Point>> {
@@ -6499,29 +6568,17 @@ fn find_midpoint_id(sketch: &Sketch, ep: EndpointRef, target_name: &str) -> Opti
     } else { None }
 }
 
-fn cmd_remove_constraint(ctx: &mut CommandContext, args: &str) -> CommandResult {
-    use crate::ids::{ConstraintId, find_constraint_by_name};
+/// Resolve a multi-token relational constraint form
+/// (`L0 L1 parallel`, `L0 horizontal`, `A0 L0 A1 symmetry`, etc.) to
+/// a `ConstraintId` and delete it. Called from `cmd_delete` when the
+/// argument list has more than one token. Not exposed as its own
+/// top-level command.
+fn delete_relational(ctx: &mut CommandContext, args: &str) -> CommandResult {
+    use crate::ids::ConstraintId;
     let tokens: Vec<&str> = args.split_whitespace().collect();
-    if tokens.is_empty() { return err("Usage: remove_constraint C3 | remove_constraint CL0H | remove_constraint L0 horizontal | remove_constraint L0 L1 parallel"); }
-
-    // Single-token name lookup: rc C3, rc CL0H, rc CL2V.
-    if tokens.len() == 1 {
-        let name = tokens[0];
-        if let Some(id) = find_constraint_by_name(&ctx.sketch, name) {
-            // Capture the descriptive list line before deletion so the
-            // user sees exactly which constraint went away.
-            let prefix = format!("{}: ", name);
-            let desc = ctx.sketch.list_constraints().into_iter()
-                .find(|l| l.starts_with(&prefix))
-                .unwrap_or_else(|| name.to_string());
-            ctx.begin_group();
-            ctx.exec(Action::DeleteConstraint { id });
-            return ok(format!("Removed {}", desc));
-        }
-        return err(format!("Unknown constraint: {}", name));
+    if tokens.len() < 2 {
+        return err("Usage: delete L0 horizontal | delete L0 L1 parallel");
     }
-
-    if tokens.len() < 2 { return err("Usage: remove_constraint L0 horizontal | remove_constraint L0 L1 parallel"); }
 
     let ctype = tokens.last().unwrap();
     let sketch = &ctx.sketch;
@@ -7426,10 +7483,10 @@ fn cmd_help(args: &str) -> CommandResult {
     if args.is_empty() {
         ok("Commands: add_line add_point add_circle add_arc offset_line delete horizontal vertical \
             parallel perpendicular equal collinear tangent coincident concentric midpoint \
-            symmetry point_on length radius sweep angle distance hdistance vdistance xangle freeze remove_dim set_derived set_driven \
+            symmetry point_on length radius sweep angle distance hdistance vdistance xangle freeze set_derived set_driven \
             lock unlock param del_param rename_param style select deselect print info list \
             find dof cost undo redo history goto center zoom cursor dim_pos clear let save load \
-            remove_constraint(rc) exit help\n\
+            exit help\n\
             Type 'help <command>' for details. 'help full' for complete reference.")
     } else {
         let msg = match args.trim() {
@@ -7444,7 +7501,7 @@ fn cmd_help(args: &str) -> CommandResult {
             "add_circle2t" => "add_circle2t L0 L1 radius [noconnect] [noconstraint] [driven] [strict] — circle tangent to 2 lines",
             "add_circle3t" => "add_circle3t L0 L1 L2 [noconnect] [noconstraint] [driven] [strict] — circle tangent to 3 lines",
             "add_ellipse" => "add_ellipse cx,cy rx ry rotation_deg [noconnect] [nocursor] [driven]",
-            "delete" => "delete L0 | delete P0 | delete A0",
+            "delete" => "delete <L0|P0|A0|EA0|C3|CL0H|d0> | delete L0 L1 parallel",
             "horizontal" => "horizontal L0 [L1 ...]",
             "vertical" => "vertical L0 [L1 ...]",
             "parallel" => "parallel L0 L1",
@@ -7468,8 +7525,6 @@ fn cmd_help(args: &str) -> CommandResult {
             "vdistance" => "vdistance L0.p1 L1.p2 3 [derived|driven] — vertical (y-axis) distance",
             "xangle" => "xangle L0 45 [derived|driven] — line angle from x-axis in degrees",
             "freeze" => "freeze [L0 L1 A0 ...] — add numeric dimensions at current values (all if no args)",
-            "remove_constraint" | "rc" => "remove_constraint L0 horizontal | remove_constraint L0 L1 parallel | rc A0 L0 A1 symmetry (type last)",
-            "remove_dim" => "remove_dim d0",
             "set_derived" => "set_derived d0 (make dimension display-only)",
             "set_driven" => "set_driven d0 [value|\"expr\"] (make dimension constraining)",
             "lock" => "lock P0 | lock L0.p1 | lock L0.p1 x,y",
@@ -7528,7 +7583,7 @@ const COMMAND_NAMES: &[&str] = &[
     "delete", "horizontal", "vertical", "parallel", "perpendicular", "perp",
     "equal", "collinear", "tangent", "coincident", "concentric", "midpoint",
     "symmetry", "mirror", "point_on", "length", "radius", "radius_b", "sweep", "angle", "distance", "hdistance", "vdistance", "xangle",
-    "remove_dim", "remove_constraint", "rc", "set_derived", "set_driven",
+    "set_derived", "set_driven",
     "lock", "unlock", "param", "del_param", "rename_param", "style", "quiet", "constr", "drag",
     "select", "deselect", "freeze", "print", "info", "measure", "list", "find", "let",
     "dof", "cost", "undo", "redo", "history", "goto", "center", "zoom",
@@ -7633,9 +7688,22 @@ pub fn complete(
             }
         }
 
-        // Variadic entity commands: exclude already-typed
+        // Delete: entity / dimension / named constraint on first token,
+        // plus the multi-token relational form (`delete L0 L1 parallel`)
+        // offering entity completions and a constraint-type keyword
+        // for the trailing slot.
         "delete" => {
-            add_all_entities_excluding(sketch, &mut results, current_word, &typed_args);
+            if token_index == 1 {
+                add_all_entities_excluding(sketch, &mut results, current_word, &typed_args);
+                add_dimensions(sketch, &mut results, current_word);
+            } else if token_index <= 3 {
+                add_all_entities_excluding(sketch, &mut results, current_word, &typed_args);
+                add_matching(&mut results, current_word,
+                    &["horizontal", "vertical", "parallel", "perpendicular",
+                      "equal", "equal_length", "equal_radius", "collinear",
+                      "tangent", "concentric", "coincident", "point_on",
+                      "symmetry", "midpoint", "lock"]);
+            }
         }
         "select" => {
             if token_index == 1 {
@@ -7786,7 +7854,7 @@ pub fn complete(
         }
 
         // Dimension management: single dim arg
-        "remove_dim" | "set_derived" | "set_driven" => {
+        "set_derived" | "set_driven" => {
             if token_index == 1 {
                 add_dimensions(sketch, &mut results, current_word);
             }
@@ -7837,19 +7905,6 @@ pub fn complete(
             }
         }
 
-        // Remove constraint
-        "remove_constraint" | "rc" => {
-            if token_index == 1 {
-                add_all_entities(sketch, &mut results, current_word);
-            } else if token_index <= 3 {
-                add_all_entities(sketch, &mut results, current_word);
-                add_matching(&mut results, current_word,
-                    &["horizontal", "vertical", "parallel", "perpendicular",
-                      "equal", "equal_length", "equal_radius", "collinear",
-                      "tangent", "concentric", "coincident", "point_on",
-                      "symmetry", "midpoint", "lock"]);
-            }
-        }
 
         // Param commands: single param name
         "param" | "del_param" | "rename_param" => {
@@ -8563,7 +8618,7 @@ mod tests {
         assert_eq!(ctx.sketch.dimensions.len(), 1); // updated, not duplicated
         let l = &ctx.sketch.lines[resolve_line(&ctx.sketch, "L0").unwrap()];
         assert!(near((l.p2.value.x - l.p1.value.x).abs(), 6.0));
-        run_ok(&mut ctx, "remove_dim d0");
+        run_ok(&mut ctx, "delete d0");
         assert_eq!(ctx.sketch.dimensions.len(), 0);
     }
 
@@ -8589,7 +8644,7 @@ mod tests {
         let l = &ctx.sketch.lines[resolve_line(&ctx.sketch, "L0").unwrap()];
         let angle = (l.p2.value.y - l.p1.value.y).atan2(l.p2.value.x - l.p1.value.x).to_degrees();
         assert!(near(angle, 60.0));
-        run_ok(&mut ctx, "remove_dim d0");
+        run_ok(&mut ctx, "delete d0");
         assert_eq!(ctx.sketch.dimensions.len(), 0);
     }
 
@@ -8995,7 +9050,7 @@ mod tests {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_line 0,0 5,0; length L0 3");
         assert_eq!(ctx.sketch.dimensions.len(), 1);
-        run_ok(&mut ctx, "remove_dim d0");
+        run_ok(&mut ctx, "delete d0");
         assert_eq!(ctx.sketch.dimensions.len(), 0);
     }
 
@@ -9224,7 +9279,7 @@ mod tests {
         run_ok(&mut ctx, "add_line 0,0 5,1; horizontal L0");
         let r = resolve_line(&ctx.sketch, "L0").unwrap();
         assert!(ctx.sketch.lines[r].constraints.horizontal);
-        run_ok(&mut ctx, "rc L0 horizontal");
+        run_ok(&mut ctx, "delete L0 horizontal");
         let r = resolve_line(&ctx.sketch, "L0").unwrap();
         assert!(!ctx.sketch.lines[r].constraints.horizontal);
     }
@@ -9234,7 +9289,7 @@ mod tests {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,1 5,1; parallel L0 L1");
         assert!(!ctx.sketch.parallel.is_empty());
-        run_ok(&mut ctx, "rc L0 L1 parallel");
+        run_ok(&mut ctx, "delete L0 L1 parallel");
         assert!(ctx.sketch.parallel.is_empty());
     }
 
@@ -9591,7 +9646,7 @@ mod tests {
         run_ok(&mut ctx, "add_arc -4,0 4,0 0,4; add_point 0,5");
         run_ok(&mut ctx, "midpoint P0 A0");
         assert_eq!(ctx.sketch.midpoint_arc_point.len(), 1);
-        run_ok(&mut ctx, "remove_constraint P0 A0 midpoint");
+        run_ok(&mut ctx, "delete P0 A0 midpoint");
         assert_eq!(ctx.sketch.midpoint_arc_point.len(), 0);
     }
 
@@ -9998,7 +10053,7 @@ mod tests {
         run_ok(&mut ctx, "add_circle 0,0 3; add_circle 10,0 2");
         run_ok(&mut ctx, "distance A0.center A1.center 10");
         assert_eq!(ctx.sketch.distance_aa_ce_ce.len(), 1);
-        run_ok(&mut ctx, "remove_dim d0");
+        run_ok(&mut ctx, "delete d0");
         assert!(ctx.sketch.distance_aa_ce_ce.is_empty(), "constraint cleaned up after remove_dim");
     }
 
@@ -10009,7 +10064,7 @@ mod tests {
         run_ok(&mut ctx, "distance L0.p1 L1 3");
         assert!(!has_helper_points(&ctx), "direct constraint, no helpers");
         assert_eq!(ctx.sketch.distance_lp1l.len(), 1);
-        run_ok(&mut ctx, "remove_dim d0");
+        run_ok(&mut ctx, "delete d0");
         assert!(ctx.sketch.distance_lp1l.is_empty(), "constraint cleaned up after remove_dim");
     }
 
@@ -10020,7 +10075,7 @@ mod tests {
         run_ok(&mut ctx, "distance A0.center L0 5");
         assert!(!has_helper_points(&ctx), "direct constraint, no helpers");
         assert_eq!(ctx.sketch.distance_arc_center_l.len(), 1);
-        run_ok(&mut ctx, "remove_dim d0");
+        run_ok(&mut ctx, "delete d0");
         assert!(ctx.sketch.distance_arc_center_l.is_empty(), "constraint cleaned up after remove_dim");
     }
 
@@ -10066,7 +10121,7 @@ mod tests {
         run_ok(&mut ctx, "distance A0.center L0.p1 10");
         assert!(!has_helper_points(&ctx), "direct constraint, no helpers");
         assert_eq!(ctx.sketch.distance_arc_center_l1.len(), 1);
-        run_ok(&mut ctx, "remove_dim d0");
+        run_ok(&mut ctx, "delete d0");
         assert!(ctx.sketch.distance_arc_center_l1.is_empty(), "constraint cleaned up after remove_dim");
     }
 
@@ -10388,11 +10443,10 @@ mod tests {
     }
 
     #[test]
-    fn test_complete_remove_dim() {
+    fn test_complete_delete_dim() {
         let ctx = setup_complete_ctx();
-        let c = completions(&ctx, "remove_dim d");
+        let c = completions(&ctx, "delete d");
         assert!(c.contains(&"d0".to_string()));
-        assert!(!c.iter().any(|s| s.starts_with('L')), "remove_dim should not offer lines");
     }
 
     #[test]
@@ -10439,9 +10493,9 @@ mod tests {
     }
 
     #[test]
-    fn test_complete_rc_constraint_types() {
+    fn test_complete_delete_constraint_types() {
         let ctx = setup_complete_ctx();
-        let c = completions(&ctx, "rc L0 h");
+        let c = completions(&ctx, "delete L0 h");
         assert!(c.contains(&"horizontal".to_string()));
     }
 
@@ -10684,7 +10738,7 @@ mod tests {
         run_ok(&mut ctx, "sweep A0 180");
         assert_eq!(ctx.sketch.dimensions.len(), 1);
         let name = ctx.sketch.dimensions[0].name.clone();
-        run_ok(&mut ctx, &format!("remove_dim {}", name));
+        run_ok(&mut ctx, &format!("delete {}", name));
         assert_eq!(ctx.sketch.dimensions.len(), 0);
         let r = ctx.sketch.arcs.refs().next().unwrap();
         assert!(!ctx.sketch.arcs[r].constraints.has_target_sweep);
@@ -10756,7 +10810,7 @@ mod tests {
         assert!(out.trim().parse::<f64>().is_ok(), "should resolve: {}", out);
     }
 
-    // -- remove_constraint tests --
+    // -- delete (relational / named constraint) tests --
 
     #[test]
     fn test_remove_constraint_coincident_pp() {
@@ -10764,7 +10818,7 @@ mod tests {
         run_ok(&mut ctx, "add_point 0,0; add_point 1,0");
         run_ok(&mut ctx, "coincident P0 P1");
         assert_eq!(ctx.sketch.coincident_pp.len(), 1);
-        run_ok(&mut ctx, "remove_constraint P0 P1 coincident");
+        run_ok(&mut ctx, "delete P0 P1 coincident");
         assert_eq!(ctx.sketch.coincident_pp.len(), 0);
     }
 
@@ -10774,7 +10828,7 @@ mod tests {
         run_ok(&mut ctx, "add_line 0,0 5,0; add_line 5,1 10,1");
         run_ok(&mut ctx, "coincident L0.p2 L1.p1");
         assert_eq!(ctx.sketch.coincident_ll21.len(), 1);
-        run_ok(&mut ctx, "remove_constraint L0.p2 L1.p1 coincident");
+        run_ok(&mut ctx, "delete L0.p2 L1.p1 coincident");
         assert_eq!(ctx.sketch.coincident_ll21.len(), 0);
     }
 
@@ -10782,7 +10836,7 @@ mod tests {
     fn test_remove_constraint_coincident_not_found() {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_line 0,0 5,0; add_line 5,1 10,1");
-        let e = run_err(&mut ctx, "remove_constraint L0.p2 L1.p1 coincident");
+        let e = run_err(&mut ctx, "delete L0.p2 L1.p1 coincident");
         assert!(e.contains("not found"), "{}", e);
     }
 
@@ -10792,7 +10846,7 @@ mod tests {
         run_ok(&mut ctx, "add_point 2,0.5; add_line 0,0 5,0");
         run_ok(&mut ctx, "point_on P0 L0");
         assert_eq!(ctx.sketch.point_on_line.len(), 1);
-        run_ok(&mut ctx, "remove_constraint P0 L0 point_on");
+        run_ok(&mut ctx, "delete P0 L0 point_on");
         assert_eq!(ctx.sketch.point_on_line.len(), 0);
     }
 
@@ -10802,7 +10856,7 @@ mod tests {
         run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,1 5,1");
         run_ok(&mut ctx, "point_on L0.p1 L1");
         assert_eq!(ctx.sketch.line_p1_on_line.len(), 1);
-        run_ok(&mut ctx, "remove_constraint L0.p1 L1 point_on");
+        run_ok(&mut ctx, "delete L0.p1 L1 point_on");
         assert_eq!(ctx.sketch.line_p1_on_line.len(), 0);
     }
 
@@ -10812,7 +10866,7 @@ mod tests {
         run_ok(&mut ctx, "add_point 5,0; add_circle 0,0 5");
         run_ok(&mut ctx, "point_on P0 A0");
         assert_eq!(ctx.sketch.point_on_arc.len(), 1);
-        run_ok(&mut ctx, "remove_constraint P0 A0 point_on");
+        run_ok(&mut ctx, "delete P0 A0 point_on");
         assert_eq!(ctx.sketch.point_on_arc.len(), 0);
     }
 
@@ -10822,7 +10876,7 @@ mod tests {
         run_ok(&mut ctx, "add_circle 0,0.5 2; add_line -5,0 5,0");
         run_ok(&mut ctx, "point_on A0.center L0");
         assert!(!ctx.sketch.point_on_line.is_empty());
-        run_ok(&mut ctx, "remove_constraint A0.center L0 point_on");
+        run_ok(&mut ctx, "delete A0.center L0 point_on");
         // The point_on_line constraint on the helper should be removed
         // cleanup_helper_points removes orphan helpers
         assert!(ctx.sketch.point_on_line.is_empty() || ctx.sketch.points.refs().all(|p| !ctx.sketch.points[p].helper));
@@ -10834,7 +10888,7 @@ mod tests {
         run_ok(&mut ctx, "add_point -3,0; add_line 0,-5 0,5; add_point 3,0");
         run_ok(&mut ctx, "symmetry P0 L0 P1");
         assert_eq!(ctx.sketch.symmetry_pp.len(), 1);
-        run_ok(&mut ctx, "remove_constraint P0 L0 P1 symmetry");
+        run_ok(&mut ctx, "delete P0 L0 P1 symmetry");
         assert_eq!(ctx.sketch.symmetry_pp.len(), 0);
     }
 
@@ -10844,7 +10898,7 @@ mod tests {
         run_ok(&mut ctx, "add_line -2,0 -2,3; add_line 0,0 0,5; add_line 2,0 2,3");
         run_ok(&mut ctx, "symmetry L0 L1 L2");
         assert_eq!(ctx.sketch.symmetry_ll.len(), 1);
-        run_ok(&mut ctx, "remove_constraint L0 L1 L2 symmetry");
+        run_ok(&mut ctx, "delete L0 L1 L2 symmetry");
         assert_eq!(ctx.sketch.symmetry_ll.len(), 0);
     }
 
@@ -10854,7 +10908,7 @@ mod tests {
         run_ok(&mut ctx, "add_point 2.5,0.5; add_line 0,0 5,0");
         run_ok(&mut ctx, "midpoint P0 L0");
         assert_eq!(ctx.sketch.midpoint.len(), 1);
-        run_ok(&mut ctx, "remove_constraint P0 L0 midpoint");
+        run_ok(&mut ctx, "delete P0 L0 midpoint");
         assert_eq!(ctx.sketch.midpoint.len(), 0);
     }
 
@@ -10864,7 +10918,7 @@ mod tests {
         run_ok(&mut ctx, "add_line 0,0 5,0; add_line -5,0 10,0");
         run_ok(&mut ctx, "midpoint L0.p1 L1");
         assert_eq!(ctx.sketch.midpoint_lp1.len(), 1);
-        run_ok(&mut ctx, "remove_constraint L0.p1 L1 midpoint");
+        run_ok(&mut ctx, "delete L0.p1 L1 midpoint");
         assert_eq!(ctx.sketch.midpoint_lp1.len(), 0);
     }
 
@@ -10874,7 +10928,7 @@ mod tests {
         run_ok(&mut ctx, "add_circle 0,0 5; add_circle 10,0 3");
         run_ok(&mut ctx, "equal A0 A1");
         assert_eq!(ctx.sketch.equal_radius.len(), 1);
-        run_ok(&mut ctx, "remove_constraint A0 A1 equal_radius");
+        run_ok(&mut ctx, "delete A0 A1 equal_radius");
         assert_eq!(ctx.sketch.equal_radius.len(), 0);
     }
 
@@ -10882,7 +10936,7 @@ mod tests {
     fn test_remove_constraint_equal_radius_not_found() {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_circle 0,0 5; add_circle 10,0 3");
-        let e = run_err(&mut ctx, "remove_constraint A0 A1 equal_radius");
+        let e = run_err(&mut ctx, "delete A0 A1 equal_radius");
         assert!(e.contains("not found"), "{}", e);
     }
 
@@ -10891,7 +10945,7 @@ mod tests {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_line 0,0 5,0");
         run_ok(&mut ctx, "horizontal L0");
-        run_ok(&mut ctx, "remove_constraint L0 horizontal");
+        run_ok(&mut ctx, "delete L0 horizontal");
         assert!(!ctx.sketch.lines[arael::refs::Ref::new(0)].constraints.horizontal);
     }
 
@@ -10900,7 +10954,7 @@ mod tests {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_line 0,0 0,5");
         run_ok(&mut ctx, "vertical L0");
-        run_ok(&mut ctx, "remove_constraint L0 vertical");
+        run_ok(&mut ctx, "delete L0 vertical");
         assert!(!ctx.sketch.lines[arael::refs::Ref::new(0)].constraints.vertical);
     }
 
@@ -10910,7 +10964,7 @@ mod tests {
         run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,2 5,2");
         run_ok(&mut ctx, "parallel L0 L1");
         assert_eq!(ctx.sketch.parallel.len(), 1);
-        run_ok(&mut ctx, "remove_constraint L0 L1 parallel");
+        run_ok(&mut ctx, "delete L0 L1 parallel");
         assert_eq!(ctx.sketch.parallel.len(), 0);
     }
 
@@ -10920,7 +10974,7 @@ mod tests {
         run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,0 0,5");
         run_ok(&mut ctx, "perpendicular L0 L1");
         assert_eq!(ctx.sketch.perpendicular.len(), 1);
-        run_ok(&mut ctx, "remove_constraint L0 L1 perpendicular");
+        run_ok(&mut ctx, "delete L0 L1 perpendicular");
         assert_eq!(ctx.sketch.perpendicular.len(), 0);
     }
 
@@ -10930,7 +10984,7 @@ mod tests {
         run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,2 5,2");
         run_ok(&mut ctx, "equal L0 L1");
         assert_eq!(ctx.sketch.equal_length.len(), 1);
-        run_ok(&mut ctx, "remove_constraint L0 L1 equal");
+        run_ok(&mut ctx, "delete L0 L1 equal");
         assert_eq!(ctx.sketch.equal_length.len(), 0);
     }
 
@@ -10940,7 +10994,7 @@ mod tests {
         run_ok(&mut ctx, "add_line 0,0 5,0; add_line 6,0 10,0");
         run_ok(&mut ctx, "collinear L0 L1");
         assert_eq!(ctx.sketch.collinear.len(), 1);
-        run_ok(&mut ctx, "remove_constraint L0 L1 collinear");
+        run_ok(&mut ctx, "delete L0 L1 collinear");
         assert_eq!(ctx.sketch.collinear.len(), 0);
     }
 
@@ -10950,7 +11004,7 @@ mod tests {
         run_ok(&mut ctx, "add_line 0,4 5,4; add_circle 2,0 4");
         run_ok(&mut ctx, "tangent L0 A0");
         assert_eq!(ctx.sketch.tangent_la.len(), 1);
-        run_ok(&mut ctx, "remove_constraint L0 A0 tangent");
+        run_ok(&mut ctx, "delete L0 A0 tangent");
         assert_eq!(ctx.sketch.tangent_la.len(), 0);
     }
 
@@ -10960,7 +11014,7 @@ mod tests {
         run_ok(&mut ctx, "add_circle 0,0 3; add_circle 7,0 4");
         run_ok(&mut ctx, "tangent A0 A1");
         assert_eq!(ctx.sketch.tangent_aa.len(), 1);
-        run_ok(&mut ctx, "remove_constraint A0 A1 tangent");
+        run_ok(&mut ctx, "delete A0 A1 tangent");
         assert_eq!(ctx.sketch.tangent_aa.len(), 0);
     }
 
@@ -10970,7 +11024,7 @@ mod tests {
         run_ok(&mut ctx, "add_circle 0,0 3; add_circle 1,0 5");
         run_ok(&mut ctx, "concentric A0 A1");
         assert_eq!(ctx.sketch.concentric.len(), 1);
-        run_ok(&mut ctx, "remove_constraint A0 A1 concentric");
+        run_ok(&mut ctx, "delete A0 A1 concentric");
         assert_eq!(ctx.sketch.concentric.len(), 0);
     }
 
@@ -11009,7 +11063,7 @@ mod tests {
         // Delete the paired Concentric by name. The dim (and its
         // backing constraint) must stay.
         let nid = ctx.sketch.concentric[0].nid;
-        run_ok(&mut ctx, &format!("rc C{}", nid));
+        run_ok(&mut ctx, &format!("delete C{}", nid));
         assert_eq!(ctx.sketch.concentric.len(), 0);
         assert_eq!(ctx.sketch.dimensions.len(), 1,
             "dim must survive manual Concentric deletion");
@@ -11048,7 +11102,7 @@ mod tests {
         run_ok(&mut ctx, "add_line 0,0 5,0");
         run_ok(&mut ctx, "horizontal L0");
         let dof_with = ctx.sketch.dof().unwrap();
-        run_ok(&mut ctx, "remove_constraint L0 horizontal");
+        run_ok(&mut ctx, "delete L0 horizontal");
         let dof_without = ctx.sketch.dof().unwrap();
         assert!(dof_without > dof_with, "DOF should increase after removing constraint: {} vs {}", dof_without, dof_with);
         run_ok(&mut ctx, "undo");
@@ -11062,7 +11116,7 @@ mod tests {
         run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,2 5,2");
         run_ok(&mut ctx, "parallel L0 L1");
         let dof_before = ctx.sketch.dof().unwrap();
-        run_ok(&mut ctx, "remove_constraint L0 L1 parallel");
+        run_ok(&mut ctx, "delete L0 L1 parallel");
         let dof_after = ctx.sketch.dof().unwrap();
         assert_eq!(dof_after, dof_before + 1, "removing parallel should increase DOF by 1: {} -> {}", dof_before, dof_after);
     }
@@ -11955,7 +12009,7 @@ mod tests {
         run_ok(&mut ctx, "add_line 0,-5 0,5; add_circle -3,0 1; add_circle 3,0 1");
         run_ok(&mut ctx, "symmetry A0 L0 A1");
         assert_eq!(ctx.sketch.symmetry_aa.len(), 1);
-        run_ok(&mut ctx, "remove_constraint A0 L0 A1 symmetry");
+        run_ok(&mut ctx, "delete A0 L0 A1 symmetry");
         assert_eq!(ctx.sketch.symmetry_aa.len(), 0);
     }
 
@@ -12054,7 +12108,7 @@ mod tests {
         run_ok(&mut ctx, "parallel L0 L1");
         assert_eq!(ctx.sketch.parallel.len(), 1);
         let nid = ctx.sketch.parallel[0].nid;
-        let out = run_ok(&mut ctx, &format!("rc C{}", nid));
+        let out = run_ok(&mut ctx, &format!("delete C{}", nid));
         assert!(out.contains(&format!("C{}", nid)), "output should mention name: {}", out);
         assert!(out.contains("parallel"), "output should describe constraint: {}", out);
         assert_eq!(ctx.sketch.parallel.len(), 0);
@@ -12066,7 +12120,7 @@ mod tests {
         run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,2 0,7");
         run_ok(&mut ctx, "horizontal L0; vertical L1");
         assert!(ctx.sketch.lines[ctx.sketch.lines.refs().next().unwrap()].constraints.horizontal);
-        let out = run_ok(&mut ctx, "rc CL0H");
+        let out = run_ok(&mut ctx, "delete CL0H");
         assert!(out.contains("CL0H"), "output should mention name: {}", out);
         assert!(out.contains("horizontal L0"), "output should describe constraint: {}", out);
         let l0 = ctx.sketch.lines.refs().next().unwrap();
@@ -12074,7 +12128,7 @@ mod tests {
         // CL1V still set until removed.
         let l1 = ctx.sketch.lines.refs().nth(1).unwrap();
         assert!(ctx.sketch.lines[l1].constraints.vertical);
-        run_ok(&mut ctx, "rc CL1V");
+        run_ok(&mut ctx, "delete CL1V");
         assert!(!ctx.sketch.lines[l1].constraints.vertical);
     }
 
@@ -12082,9 +12136,9 @@ mod tests {
     fn test_rc_unknown_name() {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_line 0,0 5,0");
-        let e = run_err(&mut ctx, "rc C999");
+        let e = run_err(&mut ctx, "delete C999");
         assert!(e.contains("Unknown"), "{}", e);
-        let e = run_err(&mut ctx, "rc CL0H");
+        let e = run_err(&mut ctx, "delete CL0H");
         assert!(e.contains("Unknown"), "{}", e);
     }
 
@@ -12125,7 +12179,7 @@ mod tests {
         run_ok(&mut ctx, "add_line 0,0 5,0; add_line 0,2 5,2");
         run_ok(&mut ctx, "parallel L0 L1");
         assert_eq!(ctx.sketch.parallel.len(), 1);
-        run_ok(&mut ctx, "rc L0 L1 parallel");
+        run_ok(&mut ctx, "delete L0 L1 parallel");
         assert_eq!(ctx.sketch.parallel.len(), 0);
     }
 
