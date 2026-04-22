@@ -6424,8 +6424,9 @@ fn cmd_xangle(ctx: &mut CommandContext, args: &str) -> CommandResult {
         };
         ctx.begin_group();
         ctx.exec(Action::AddDimension { kind, value: measured, expr: None, derived: is_derived, range: None,  });
+        let dim_name = ctx.sketch.dimensions.last().map(|d| d.name.clone()).unwrap_or_default();
         let label = if is_derived { "Derived" } else { "Driven" };
-        return ok_or_status(ctx, format!("{} xangle {} = ({:.4})", label, tokens[0], measured));
+        return ok_or_status(ctx, format!("{} {} xangle {} = ({:.4})", label, dim_name, tokens[0], measured));
     }
 
     // Range form: `xangle L0 >= V | <= V | LO to HI`, likewise for arcs.
@@ -12761,6 +12762,30 @@ mod tests {
         run_ok(&mut ctx, "length L0 2");
         assert!(near(line_len(&ctx, "L0"), 2.0),
             "expected length 2.0 after range->numeric, got {:.4}", line_len(&ctx, "L0"));
+    }
+
+    /// Range dimensions must not contribute to the reported DOF --
+    /// their Jacobian row is zero inside the feasible band and
+    /// non-zero at/outside the bound, so including them would make
+    /// DOF swing by one as the user drags geometry across the bound.
+    /// Reported DOF should be the geometric DOF, stable regardless
+    /// of whether the barrier is currently active.
+    #[test]
+    fn test_range_dim_does_not_affect_dof() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0");
+        run_ok(&mut ctx, "length L0 3 to 6");
+        let dof_inside = ctx.sketch.dof().unwrap();
+        // Push onto the lower bound: barrier would be active there.
+        run_ok(&mut ctx, "length L0 1 to 6");
+        let dof_at_lower = ctx.sketch.dof().unwrap();
+        // Push onto the upper bound.
+        run_ok(&mut ctx, "length L0 3 to 4");
+        let dof_at_upper = ctx.sketch.dof().unwrap();
+        assert_eq!(dof_inside, dof_at_lower,
+            "DOF must be stable; inside={}, at lower={}", dof_inside, dof_at_lower);
+        assert_eq!(dof_inside, dof_at_upper,
+            "DOF must be stable; inside={}, at upper={}", dof_inside, dof_at_upper);
     }
 
     /// Regression: updating a numeric dim to a range must drop the old

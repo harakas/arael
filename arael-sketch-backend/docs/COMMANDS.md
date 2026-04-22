@@ -646,6 +646,8 @@ distance L0 L1 2 to 5         Two-sided range: 2 <= gap <= 5.
 distance L0 L1 low to high    Two-sided live range: both sides track the params.
 distance L0 L1 >= =low        Snapshot: bind the current value of `low` as a literal lower bound.
                               Range syntax also works on `distance <point> <line>`, `distance <endpoint> <endpoint>`, and `distance A0 A1` (concentric arcs). The residual is a one-sided penalty (zero inside the feasible region, linear outside), so an inactive bound contributes no curvature. If a live bound becomes infeasible (e.g. low > high after a param change), the parameter edit is rejected by the existing solver-failure rollback.
+
+Range dimensions are **not counted in the reported DOF**. Because the penalty only fires at/outside the bound, counting it would make the reported DOF flip by one as geometry drags across the boundary (same sketch, same equality constraints, different DOF). The DOF number you see reflects only equality constraints -- the rigid structure of the sketch -- regardless of whether any range is currently active. This applies to `dof`, `dof singular`, and `dof eigenvalues`.
 length L0 >= 2                Length range: lower bound.
 length L0 <= 10               Length range: upper bound.
 length L0 4 to 6              Length range: two-sided.

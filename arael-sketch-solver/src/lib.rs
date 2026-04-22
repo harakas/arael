@@ -1701,8 +1701,15 @@ impl Sketch {
                     dimensions::RangeBound::Max(v) => format!("<= {}", v),
                     dimensions::RangeBound::Between(lo, hi) => format!("in {} to {}", lo, hi),
                 });
-            self.expr_constraints.push(
-                ExpressionConstraint::new_unresolved(residual, desc));
+            let mut ec = ExpressionConstraint::new_unresolved(residual, desc);
+            // Range dimensions are one-sided barriers: the residual is
+            // zero inside the feasible band and linear outside it. Tag
+            // the label so DOF rank detection can strip them -- their
+            // Jacobian row would otherwise flip in/out of rank as the
+            // geometry crosses the bound, reporting DOF 2 at the bound
+            // and DOF 3 off it for the same sketch.
+            ec.label = "range";
+            self.expr_constraints.push(ec);
         }
     }
 
@@ -2152,10 +2159,28 @@ impl Sketch {
     /// are of the raw Hessian -- useful for debugging residual scaling
     /// choices.
     pub fn compute_dof_eigenvalues_opt(&mut self, analyze: bool, preconditioned: bool) -> Result<DofResult, String> {
+        // Strip range barriers before the Hessian is assembled -- their
+        // contribution is state-dependent (zero inside the feasible
+        // band, non-zero outside) and would make the reported DOF
+        // swing as geometry crosses a bound. See the matching comment
+        // in compute_dof. Restored after computation regardless of
+        // outcome.
+        self.prepare_expr_constraints();
+        let saved_ranges: Vec<_> = {
+            let (kept, ranges): (Vec<_>, Vec<_>) = std::mem::take(&mut self.expr_constraints)
+                .into_iter().partition(|ec| ec.label != "range");
+            self.expr_constraints = kept;
+            ranges
+        };
+        let result = self.compute_dof_eigenvalues_opt_inner(analyze, preconditioned);
+        self.expr_constraints.extend(saved_ranges);
+        result
+    }
+
+    fn compute_dof_eigenvalues_opt_inner(&mut self, analyze: bool, preconditioned: bool) -> Result<DofResult, String> {
         use arael::simple_lm::LmProblem;
         let t_total = if TIMING_DEBUG { Some(std::time::Instant::now()) } else { None };
 
-        self.prepare_expr_constraints();
         self.update_tangent_flags();
         self.update_perpendicular_flags();
         self.update_line_dir_flags();
@@ -2356,8 +2381,18 @@ impl Sketch {
         };
 
         let t_jac = if TIMING_DEBUG { Some(std::time::Instant::now()) } else { None };
-        let jacobian = self.calc_jacobian(&params);
+        let mut jacobian = self.calc_jacobian(&params);
         self.drift_isigma = saved_drift;
+        // Strip one-sided barrier rows (range dimensions, tagged
+        // label = "range") before rank detection. Their Jacobian row
+        // is zero inside the feasible band and non-zero outside, so
+        // including them would make the reported DOF swing by one as
+        // the user drags the geometry across a bound -- e.g. a rect
+        // with interval width 1..999 would show DOF 2 at width 1 and
+        // DOF 3 at width 2. The geometric DOF of the sketch is the
+        // same either way; bounds are inequality constraints that
+        // shouldn't count.
+        jacobian.rows.retain(|r| r.label != "range");
         let m = jacobian.num_residuals();
         let t_jac = t_jac.map(|t| t.elapsed());
 
