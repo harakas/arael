@@ -2131,6 +2131,27 @@ impl Sketch {
     ///   nalgebra eigenvalues-only: 110ms
     ///   nalgebra full eigen:      220ms
     pub fn compute_dof_eigenvalues(&mut self, analyze: bool) -> Result<DofResult, String> {
+        self.compute_dof_eigenvalues_opt(analyze, true)
+    }
+
+    /// Eigenvalue-based DOF analysis with explicit preconditioning flag.
+    ///
+    /// When `preconditioned` is true (the default via
+    /// [`Self::compute_dof_eigenvalues`]), the Hessian is scaled as
+    /// `H_N = D^{-1} H D^{-1}` where `D = diag(sqrt(diag(H)))`. This is
+    /// symmetric Jacobi preconditioning -- it preserves the null-space
+    /// (and hence rank) exactly, but tames the condition number by
+    /// folding per-parameter scale differences into the diagonal.
+    /// `J^T J` would otherwise square an already-wide Jacobian
+    /// condition number, making eigenvalue-based rank detection fail
+    /// at large sketch scales. Right eigenvectors are back-transformed
+    /// to raw parameter space as `v_raw = D^{-1} v_N` (then renormed
+    /// to unit length) so the reported directions remain physical.
+    ///
+    /// When `preconditioned` is false, the eigenvalues and eigenvectors
+    /// are of the raw Hessian -- useful for debugging residual scaling
+    /// choices.
+    pub fn compute_dof_eigenvalues_opt(&mut self, analyze: bool, preconditioned: bool) -> Result<DofResult, String> {
         use arael::simple_lm::LmProblem;
         let t_total = if TIMING_DEBUG { Some(std::time::Instant::now()) } else { None };
 
@@ -2169,6 +2190,24 @@ impl Sketch {
         self.drift_isigma = saved_drift;
         let t_hessian = t_hessian.map(|t| t.elapsed());
 
+        // Symmetric Jacobi preconditioning: scale by `sqrt(diag(H))`
+        // which equals the Jacobian's column L2 norms. Preserves
+        // null-space exactly (zero eigenvalues stay zero) but narrows
+        // the non-zero spectrum, so rank detection becomes robust to
+        // per-parameter scale mismatches. Skipped in `raw` mode.
+        let d: Vec<f64> = if preconditioned {
+            (0..n).map(|i| hessian[i * n + i].max(0.0).sqrt().max(1e-15)).collect()
+        } else {
+            vec![1.0; n]
+        };
+        if preconditioned {
+            for i in 0..n {
+                for k in 0..n {
+                    hessian[i * n + k] /= d[i] * d[k];
+                }
+            }
+        }
+
         // Determine rank via spectral gap in the lower portion of the spectrum.
         let t_eigen = if TIMING_DEBUG { Some(std::time::Instant::now()) } else { None };
         let rank_from_evs = |evs: &[f64]| -> usize {
@@ -2176,12 +2215,15 @@ impl Sketch {
             sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
             let max_ev = sorted.last().copied().unwrap_or(0.0);
             let upper_bound = max_ev * 0.01;
+            // Same zero-floor trick as rank_from_svs: let near-zero
+            // eigenvalues participate in the gap search instead of
+            // being silently skipped when `lo < 1e-20`.
+            let floor = max_ev * 1e-20;
             let mut best_gap = 0.0f64;
             let mut best_cut = 0;
             for i in 0..sorted.len().saturating_sub(1) {
-                let lo = sorted[i];
-                let hi = sorted[i + 1];
-                if lo < 1e-20 { continue; }
+                let lo = sorted[i].max(floor);
+                let hi = sorted[i + 1].max(floor);
                 if lo > upper_bound { break; }
                 let gap = hi / lo;
                 if gap > best_gap {
@@ -2192,18 +2234,37 @@ impl Sketch {
             if best_gap < 1e3 {
                 best_cut = sorted.iter().filter(|&&v| v < 1e-15).count();
             }
-            
+
             evs.len() - best_cut
         };
+        // Eigenvectors come out in the normalised parameter space.
+        // Back-transform via `v_raw = D^{-1} v_N` (then renormalise to
+        // unit length) so the reported direction is a physical one
+        // the user can act on. When preconditioning is off, D is all
+        // ones and this is a no-op.
+        let unscale_evecs = |mut evs: Vec<Vec<f64>>| -> Vec<Vec<f64>> {
+            if !preconditioned { return evs; }
+            for v in evs.iter_mut() {
+                for (i, vi) in v.iter_mut().enumerate() {
+                    *vi /= d[i];
+                }
+                let norm: f64 = v.iter().map(|x| x * x).sum::<f64>().sqrt();
+                if norm > 1e-20 {
+                    for vi in v.iter_mut() { *vi /= norm; }
+                }
+            }
+            evs
+        };
+
         let (method, result) = if n < 32 && analyze {
             let h = nalgebra::DMatrix::from_row_slice(n, n, &hessian);
             let eigen = nalgebra::SymmetricEigen::new(h);
             let eigenvalues: Vec<f64> = eigen.eigenvalues.iter().cloned().collect();
             let rank = rank_from_evs(&eigenvalues);
             let dof = n.saturating_sub(rank);
-            let eigenvectors: Vec<Vec<f64>> = (0..n)
+            let eigenvectors: Vec<Vec<f64>> = unscale_evecs((0..n)
                 .map(|col| eigen.eigenvectors.column(col).iter().cloned().collect())
-                .collect();
+                .collect());
             ("nalgebra eigen", DofResult { dof, param_names, eigenvalues, eigenvectors })
         } else if n < 32 {
             let h = nalgebra::DMatrix::from_row_slice(n, n, &hessian);
@@ -2221,9 +2282,9 @@ impl Sketch {
                     let eigenvalues: Vec<f64> = (0..n).map(|i| s[i]).collect();
                     let rank = rank_from_evs(&eigenvalues);
                     let dof = n.saturating_sub(rank);
-                    let eigenvectors: Vec<Vec<f64>> = (0..n)
+                    let eigenvectors: Vec<Vec<f64>> = unscale_evecs((0..n)
                         .map(|col| (0..n).map(|row| u[(row, col)]).collect())
-                        .collect();
+                        .collect());
                     ("faer eigen", DofResult { dof, param_names, eigenvalues, eigenvectors })
                 }
                 Err(e) => return Err(Self::hessian_error_msg(n, &hessian, &format!("{:?}", e))),
@@ -2383,7 +2444,17 @@ impl Sketch {
             }
             svs.len() - best_cut
         };
-        let rank = rank_from_svs(&jacobian.singular_values());
+        // Column-normalise the Jacobian before running rank detection.
+        // Per-parameter scale differences (angular columns with
+        // `radius * isigma` entries vs length columns with `isigma`
+        // entries) can span >= 10^10, which makes the raw SVD spectrum
+        // span the same range -- and the gap algorithm then picks a
+        // spurious intra-rank gap on ill-conditioned sketches. The
+        // column-normalised SVD preserves the Jacobian's null-space
+        // (rank) but has a spectrum bounded by the row-space geometry,
+        // where the gap algorithm is robust. Raw SVD remains available
+        // via `dof singular raw` for residual-design debugging.
+        let rank = rank_from_svs(&jacobian.singular_values_column_normalised());
         let dof = n.saturating_sub(rank);
 
         let result = if analyze {

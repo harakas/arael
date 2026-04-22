@@ -1595,69 +1595,145 @@ impl<T: crate::utils::Float> Jacobian<T> {
     pub fn svd(&self) -> SvdResult {
         let m = self.num_residuals();
         let n = self.num_params;
-        if m == 0 || n == 0 {
-            return SvdResult {
-                singular_values: std::vec::Vec::new(),
-                u: std::vec::Vec::new(),
-                v: std::vec::Vec::new(),
-                m, n,
-            };
-        }
         let dense = self.to_dense_f64();
-        let k = m.min(n);
+        svd_dense_f64(m, n, &dense)
+    }
+
+    /// L2 norm of each Jacobian column, in parameter-index order.
+    /// Useful for column-preconditioning before SVD: scaling each
+    /// column by `1 / col_norm` produces a matrix whose singular
+    /// values reflect only row-space linear dependence, not the
+    /// per-parameter scale differences that leak through from the
+    /// residual formulation.
+    pub fn column_l2_norms(&self) -> std::vec::Vec<f64> {
+        let n = self.num_params;
+        let mut sum_sq = vec![0.0f64; n];
+        for row in &self.rows {
+            for &(j, v) in &row.entries {
+                let vf: f64 = <f64 as num::NumCast>::from(v).unwrap_or(0.0);
+                sum_sq[j as usize] += vf * vf;
+            }
+        }
+        sum_sq.into_iter().map(|s| s.sqrt()).collect()
+    }
+
+    /// Singular values of the column-normalised Jacobian (each column
+    /// scaled by `1 / max(col_norm, 1e-15)`). Preserves the null-space
+    /// (rank) of the Jacobian but flattens its spectrum: no scale-
+    /// dependent conditioning leaks into rank detection.
+    pub fn singular_values_column_normalised(&self) -> std::vec::Vec<f64> {
+        let m = self.num_residuals();
+        let n = self.num_params;
+        if m == 0 || n == 0 { return std::vec::Vec::new(); }
+        let col_norms = self.column_l2_norms();
+        let mut dense = self.to_dense_f64();
+        for r in 0..m {
+            for c in 0..n {
+                dense[r * n + c] /= col_norms[c].max(1e-15);
+            }
+        }
         if n < 32 {
             let j = nalgebra::DMatrix::from_row_slice(m, n, &dense);
-            let svd = j.svd(true, true);
-            let singular_values: std::vec::Vec<f64> = svd.singular_values.iter().cloned().collect();
-            // nalgebra SVD returns U (m x k_actual) and V^t (k_actual x n);
-            // pad/truncate to our declared k.
-            let u_mat = svd.u.as_ref().expect("U requested");
-            let vt_mat = svd.v_t.as_ref().expect("V^t requested");
-            let mut u = vec![0.0f64; m * k];
-            let mut v = vec![0.0f64; n * k];
-            let kk = singular_values.len().min(k);
-            for i in 0..m {
-                for j in 0..kk {
-                    u[i * k + j] = u_mat[(i, j)];
-                }
-            }
-            for i in 0..n {
-                for j in 0..kk {
-                    // V = (V^t)^t, so V[i][j] = V^t[j][i].
-                    v[i * k + j] = vt_mat[(j, i)];
-                }
-            }
-            SvdResult { singular_values, u, v, m, n }
+            j.singular_values().iter().cloned().collect()
         } else {
             let faer_j = faer::Mat::from_fn(m, n, |i, k| dense[i * n + k]);
             match faer_j.thin_svd() {
                 Ok(svd) => {
                     let s = svd.S().column_vector();
-                    let singular_values: std::vec::Vec<f64> = (0..s.nrows()).map(|i| s[i]).collect();
-                    let u_mat = svd.U();
-                    let v_mat = svd.V();
-                    let mut u = vec![0.0f64; m * k];
-                    let mut v = vec![0.0f64; n * k];
-                    let kk = singular_values.len().min(k);
-                    for i in 0..m {
-                        for j in 0..kk {
-                            u[i * k + j] = u_mat[(i, j)];
-                        }
-                    }
-                    for i in 0..n {
-                        for j in 0..kk {
-                            v[i * k + j] = v_mat[(i, j)];
-                        }
-                    }
-                    SvdResult { singular_values, u, v, m, n }
+                    (0..s.nrows()).map(|i| s[i]).collect()
                 }
-                Err(_) => SvdResult {
-                    singular_values: std::vec::Vec::new(),
-                    u: std::vec::Vec::new(),
-                    v: std::vec::Vec::new(),
-                    m, n,
-                },
+                Err(_) => std::vec::Vec::new(),
             }
+        }
+    }
+
+    /// Full SVD of the column-normalised Jacobian (see
+    /// [`Self::singular_values_column_normalised`]). Also returns the
+    /// column L2 norms used for normalisation so callers can back-
+    /// transform right singular vectors from normalised parameter
+    /// space to raw: `v_raw[i] = v[i] / col_norms[i]` (then renormalise
+    /// to unit length if needed).
+    pub fn svd_column_normalised(&self) -> (SvdResult, std::vec::Vec<f64>) {
+        let m = self.num_residuals();
+        let n = self.num_params;
+        if m == 0 || n == 0 {
+            return (SvdResult {
+                singular_values: std::vec::Vec::new(),
+                u: std::vec::Vec::new(),
+                v: std::vec::Vec::new(),
+                m, n,
+            }, std::vec::Vec::new());
+        }
+        let col_norms = self.column_l2_norms();
+        let mut dense = self.to_dense_f64();
+        for r in 0..m {
+            for c in 0..n {
+                dense[r * n + c] /= col_norms[c].max(1e-15);
+            }
+        }
+        (svd_dense_f64(m, n, &dense), col_norms)
+    }
+}
+
+fn svd_dense_f64(m: usize, n: usize, dense: &[f64]) -> SvdResult {
+    if m == 0 || n == 0 {
+        return SvdResult {
+            singular_values: std::vec::Vec::new(),
+            u: std::vec::Vec::new(),
+            v: std::vec::Vec::new(),
+            m, n,
+        };
+    }
+    let k = m.min(n);
+    if n < 32 {
+        let j = nalgebra::DMatrix::from_row_slice(m, n, dense);
+        let svd = j.svd(true, true);
+        let singular_values: std::vec::Vec<f64> = svd.singular_values.iter().cloned().collect();
+        let u_mat = svd.u.as_ref().expect("U requested");
+        let vt_mat = svd.v_t.as_ref().expect("V^t requested");
+        let mut u = vec![0.0f64; m * k];
+        let mut v = vec![0.0f64; n * k];
+        let kk = singular_values.len().min(k);
+        for i in 0..m {
+            for j in 0..kk {
+                u[i * k + j] = u_mat[(i, j)];
+            }
+        }
+        for i in 0..n {
+            for j in 0..kk {
+                v[i * k + j] = vt_mat[(j, i)];
+            }
+        }
+        SvdResult { singular_values, u, v, m, n }
+    } else {
+        let faer_j = faer::Mat::from_fn(m, n, |i, k| dense[i * n + k]);
+        match faer_j.thin_svd() {
+            Ok(svd) => {
+                let s = svd.S().column_vector();
+                let singular_values: std::vec::Vec<f64> = (0..s.nrows()).map(|i| s[i]).collect();
+                let u_mat = svd.U();
+                let v_mat = svd.V();
+                let mut u = vec![0.0f64; m * k];
+                let mut v = vec![0.0f64; n * k];
+                let kk = singular_values.len().min(k);
+                for i in 0..m {
+                    for j in 0..kk {
+                        u[i * k + j] = u_mat[(i, j)];
+                    }
+                }
+                for i in 0..n {
+                    for j in 0..kk {
+                        v[i * k + j] = v_mat[(i, j)];
+                    }
+                }
+                SvdResult { singular_values, u, v, m, n }
+            }
+            Err(_) => SvdResult {
+                singular_values: std::vec::Vec::new(),
+                u: std::vec::Vec::new(),
+                v: std::vec::Vec::new(),
+                m, n,
+            },
         }
     }
 }

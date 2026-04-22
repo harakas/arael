@@ -7055,13 +7055,17 @@ fn classify_dof_directions(result: &arael_sketch_solver::DofResult) -> Vec<Strin
     free_dirs
 }
 
-fn cmd_dof_eigenvalues(ctx: &mut CommandContext) -> CommandResult {
+fn cmd_dof_eigenvalues(ctx: &mut CommandContext, raw: bool) -> CommandResult {
     let t0 = web_time::Instant::now();
-    // Use the legacy Hessian-based path so this command genuinely reports
-    // eigenvalues of J^T J (the `dof` count itself uses SVD for robustness
-    // at high scale, but this diagnostic shows the older eigendecomposition
-    // for comparison).
-    let result = match ctx.sketch.compute_dof_eigenvalues(true) {
+    // Hessian-based diagnostic. Default is the symmetrically Jacobi-
+    // preconditioned Hessian `D^{-1} H D^{-1}` with `D =
+    // diag(sqrt(diag(H)))` -- the null-space is preserved (rank
+    // unchanged) but the per-parameter scale differences that
+    // otherwise make eigenvalue rank-detection break at high sketch
+    // scales are folded into `D`. Eigenvectors back-transformed to
+    // raw parameter space. `raw` shows the un-preconditioned Hessian
+    // for residual-design debugging.
+    let result = match ctx.sketch.compute_dof_eigenvalues_opt(true, !raw) {
         Ok(r) => r,
         Err(e) => return err(e),
     };
@@ -7070,8 +7074,9 @@ fn cmd_dof_eigenvalues(ctx: &mut CommandContext) -> CommandResult {
     if n == 0 {
         return ok("Hessian: 0x0 (empty)".to_string());
     }
-    let mut lines = vec![format!("Hessian: {}x{}, DOF: {}, time: {:.2}ms",
-        n, n, result.dof, t_total.as_secs_f64() * 1000.0)];
+    let header = if raw { "Hessian (raw)" } else { "Hessian (preconditioned)" };
+    let mut lines = vec![format!("{}: {}x{}, DOF: {}, time: {:.2}ms",
+        header, n, n, result.dof, t_total.as_secs_f64() * 1000.0)];
     let mut evs: Vec<(f64, usize)> = result.eigenvalues.iter().cloned().enumerate().map(|(i,v)| (v, i)).collect();
     evs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
     for (val, col) in &evs {
@@ -7096,7 +7101,7 @@ fn cmd_dof_eigenvalues(ctx: &mut CommandContext) -> CommandResult {
     ok(lines.join("\n"))
 }
 
-fn cmd_dof_singular(ctx: &mut CommandContext) -> CommandResult {
+fn cmd_dof_singular(ctx: &mut CommandContext, raw: bool) -> CommandResult {
     use arael_sketch_solver::SymbolBag;
     ctx.sketch.prepare_expr_constraints();
     let saved_drift = ctx.sketch.drift_isigma;
@@ -7118,8 +7123,20 @@ fn cmd_dof_singular(ctx: &mut CommandContext) -> CommandResult {
     if m == 0 || n == 0 {
         return ok(format!("Jacobian: {} residuals x {} params (empty)", m, n));
     }
+    // Raw SVD: un-normalised Jacobian; sigmas carry the real
+    // per-parameter scale, useful for spotting residual-design issues.
+    // Normalised SVD (the default): each column of J scaled by
+    // 1 / col_L2_norm, so the spectrum reflects only row-space linear
+    // dependence. Right singular vectors get back-transformed to raw
+    // parameter space (v_raw[i] = v_norm[i] / col_norms[i], renormed
+    // to unit length) so the printed eigenvector still describes a
+    // direction in the user's parameter coordinates.
     let t1 = web_time::Instant::now();
-    let svd = jacobian.svd();
+    let (svd, col_norms) = if raw {
+        (jacobian.svd(), Vec::new())
+    } else {
+        jacobian.svd_column_normalised()
+    };
     let t_svd = t1.elapsed();
     let svs_vec = &svd.singular_values;
     let k_dim = svs_vec.len();
@@ -7139,15 +7156,33 @@ fn cmd_dof_singular(ctx: &mut CommandContext) -> CommandResult {
 
     let labels = ctx.sketch.constraint_labels();
 
-    let mut lines = vec![format!("Jacobian: {} residuals x {} params", m, n)];
+    let header = if raw { "Jacobian (raw)" } else { "Jacobian (column-normalised)" };
+    let mut lines = vec![format!("{}: {} residuals x {} params", header, m, n)];
     lines.push(format!("  build: {:.2}ms, svd: {:.2}ms",
         t_build.as_secs_f64() * 1000.0,
         t_svd.as_secs_f64() * 1000.0));
     let mut svs: Vec<(f64, usize)> = svs_vec.iter().cloned().enumerate().map(|(i,v)| (v, i)).collect();
     svs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
     for (val, idx) in &svs {
-        // Right singular vector: direction in parameter space
-        let sv = v_row(*idx);
+        // Right singular vector: direction in parameter space.
+        // For the normalised SVD we back-transform by dividing each
+        // component by the corresponding column norm and then rescaling
+        // to unit length, so the printed eigenvector still describes a
+        // physical direction the user can act on. Raw SVD needs no
+        // transform.
+        let sv_raw = v_row(*idx);
+        let sv: Vec<f64> = if raw {
+            sv_raw
+        } else {
+            let mut adjusted: Vec<f64> = sv_raw.iter().enumerate()
+                .map(|(i, &v)| v / col_norms[i].max(1e-15))
+                .collect();
+            let norm: f64 = adjusted.iter().map(|v| v * v).sum::<f64>().sqrt();
+            if norm > 1e-20 {
+                for v in adjusted.iter_mut() { *v /= norm; }
+            }
+            adjusted
+        };
         let max_comp = sv.iter().cloned().fold(0.0f64, |a, b| a.max(b.abs()));
         let comp_threshold = max_comp * 0.3;
         let parts: Vec<String> = (0..n).filter(|&i| sv[i].abs() > comp_threshold)
@@ -7250,16 +7285,29 @@ fn cmd_dof_jacobian(ctx: &mut CommandContext) -> CommandResult {
 fn cmd_dof(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let arg = args.trim();
     if arg == "eigenvalues" {
-        return cmd_dof_eigenvalues(ctx);
+        return cmd_dof_eigenvalues(ctx, false);
     }
+    if arg == "eigenvalues raw" {
+        return cmd_dof_eigenvalues(ctx, true);
+    }
+    // `dof singular` uses the column-normalised Jacobian (each column
+    // scaled by 1 / L2_norm) so the sigma spectrum reflects row-space
+    // linear dependence only, not per-parameter scale conditioning.
+    // This matches what the internal rank detector uses. `dof singular
+    // raw` falls back to the un-normalised Jacobian, useful when
+    // debugging residual scaling choices where the raw sigmas carry
+    // meaningful physical magnitudes.
     if arg == "singular" {
-        return cmd_dof_singular(ctx);
+        return cmd_dof_singular(ctx, false);
+    }
+    if arg == "singular raw" {
+        return cmd_dof_singular(ctx, true);
     }
     if arg == "jacobian" {
         return cmd_dof_jacobian(ctx);
     }
     if !arg.is_empty() && arg != "analyze" {
-        return err("Usage: dof | dof analyze | dof eigenvalues | dof singular | dof jacobian");
+        return err("Usage: dof | dof analyze | dof eigenvalues [raw] | dof singular [raw] | dof jacobian");
     }
 
     let analyze = arg == "analyze";
@@ -7461,7 +7509,7 @@ fn cmd_help(args: &str) -> CommandResult {
             "save" => "save path.json",
             "load" => "load path.json",
             "exit" | "quit" => "exit — close the application (blocked for MCP clients)",
-            "dof" => "dof | dof analyze | dof eigenvalues",
+            "dof" => "dof | dof analyze | dof eigenvalues [raw] | dof singular [raw] | dof jacobian",
             "perp" => "alias for perpendicular",
             other => return err(format!("help: unknown command: {}. Usage: help | help <command> | help full", other)),
         };
