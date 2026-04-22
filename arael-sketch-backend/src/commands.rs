@@ -1387,7 +1387,45 @@ pub fn execute(ctx: &mut CommandContext, input: &str) -> Vec<CommandResult> {
     if results.is_empty() {
         results.push(ok(""));
     }
+    append_dof_tail(ctx, input, &mut results);
     results
+}
+
+/// Append a `DOF: <n>` summary line at the end of a command
+/// sequence so the user always knows the current degree-of-freedom
+/// state after their edits -- especially important when the
+/// sequence errored out partway through, since the user needs to
+/// see how their edits left the sketch before diagnosing the
+/// failure. Skipped only when:
+///
+/// - the sketch is empty (no entities -> no meaningful DOF);
+/// - every command in the sequence is purely observational
+///   (`dof*`, `list`, `info`, `find`, `help`, `print`, `cost`,
+///   `history`, `measure`, `msg`) -- DOF hasn't changed, no need
+///   to re-announce it.
+fn append_dof_tail(ctx: &mut CommandContext, input: &str, results: &mut Vec<CommandResult>) {
+    if ctx.sketch.lines.refs().next().is_none()
+        && ctx.sketch.points.refs().next().is_none()
+        && ctx.sketch.arcs.refs().next().is_none() {
+        return;
+    }
+    const OBSERVATIONAL: &[&str] = &[
+        "dof", "list", "info", "find", "help", "print", "cost",
+        "history", "measure", "msg",
+    ];
+    let all_observational = input.split(';').map(|c| c.trim()).filter(|c| !c.is_empty())
+        .all(|c| {
+            let head = c.split_whitespace().next().unwrap_or("");
+            OBSERVATIONAL.contains(&head)
+        });
+    if all_observational { return; }
+    let Ok(dof) = ctx.sketch.dof() else { return };
+    results.push(CommandResult {
+        output: format!("DOF: {}", dof),
+        is_error: false,
+        no_echo: false,
+        markdown: false,
+    });
 }
 
 fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
@@ -9379,9 +9417,11 @@ mod tests {
     fn test_semicolon() {
         let mut ctx = CommandContext::new();
         let results = execute(&mut ctx, "add_line 0,0 5,0; horizontal L0");
-        assert_eq!(results.len(), 2);
+        // Two commands + one trailing DOF summary line.
+        assert_eq!(results.len(), 3);
         assert!(!results[0].is_error);
         assert!(!results[1].is_error);
+        assert!(results[2].output.starts_with("DOF:"));
     }
 
     // -- Error handling --
