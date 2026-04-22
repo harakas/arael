@@ -3155,25 +3155,42 @@ fn cmd_delete(ctx: &mut CommandContext, args: &str) -> CommandResult {
         return err(format!("Unknown name: {}", name));
     };
 
-    // Snapshot constraint + dimension names before the delete, so we
-    // can report what got cascade-removed. list_constraints() covers
-    // flag constraints, C<n> constraints, and expression-backed dims;
-    // sketch.dimensions covers d<n>-named dimensions independently.
+    // Snapshot both views of the current state so we can report
+    // what got cascade-removed. list_constraints() covers flag,
+    // lock, and C<n>-named constraints; a per-dim description pass
+    // covers d<n>-named dimensions. When a dim has a backing entity
+    // flag (LineLength -> "length L0 = V", ArcSweep -> "sweep A0 =
+    // V deg", etc.), its list_constraints phrase duplicates the
+    // dim: the next pair of snapshots captures each separately so
+    // we can de-dupe them in the output.
     let before_constraints: std::collections::BTreeSet<String> =
         ctx.sketch.list_constraints().into_iter().collect();
-    let before_dims: std::collections::BTreeSet<String> =
-        ctx.sketch.dimensions.iter().map(|d| d.name.clone()).collect();
+    let before_dim_phrases: Vec<(String, String)> = ctx.sketch.dimensions.iter()
+        .map(|d| (d.name.clone(), dim_phrase(&ctx.sketch, d)))
+        .collect();
 
     ctx.begin_group();
     ctx.exec(action);
 
     let after_constraints: std::collections::BTreeSet<String> =
         ctx.sketch.list_constraints().into_iter().collect();
-    let after_dims: std::collections::BTreeSet<String> =
+    let after_dim_names: std::collections::BTreeSet<String> =
         ctx.sketch.dimensions.iter().map(|d| d.name.clone()).collect();
 
-    let removed_constraints: Vec<String> = before_constraints.difference(&after_constraints).cloned().collect();
-    let removed_dims: Vec<String> = before_dims.difference(&after_dims).cloned().collect();
+    let mut removed_constraints: Vec<String> = before_constraints
+        .difference(&after_constraints).cloned().collect();
+    let removed_dims: Vec<(String, String)> = before_dim_phrases.iter()
+        .filter(|(n, _)| !after_dim_names.contains(n))
+        .cloned().collect();
+
+    // Any list_constraints phrase that exactly duplicates a removed
+    // dim's backing description gets dropped so it isn't shown
+    // twice. The remaining entries are real constraints (C<n>,
+    // CL<n>H/V, lock, horizontal/vertical flags not backed by a dim).
+    let dup: std::collections::HashSet<&str> = removed_dims.iter()
+        .map(|(_, phrase)| phrase.as_str())
+        .collect();
+    removed_constraints.retain(|c| !dup.contains(c.as_str()));
 
     let mut msg = format!("Deleted {} {}", kind, name);
     if !removed_constraints.is_empty() || !removed_dims.is_empty() {
@@ -3181,11 +3198,74 @@ fn cmd_delete(ctx: &mut CommandContext, args: &str) -> CommandResult {
         for c in &removed_constraints {
             msg.push_str(&format!("\n    {}", c));
         }
-        for d in &removed_dims {
-            msg.push_str(&format!("\n    {}", d));
+        for (dname, phrase) in &removed_dims {
+            if phrase.is_empty() {
+                msg.push_str(&format!("\n    {}", dname));
+            } else {
+                msg.push_str(&format!("\n    {}: {}", dname, phrase));
+            }
         }
     }
     ok(msg)
+}
+
+/// Human-readable backing description for a dimension, matching the
+/// phrase `list_constraints()` would emit for its entity-flag or
+/// scalar constraint. Used by the delete-cascade reporter so each
+/// removed dim is shown as `d<n>: <what it was>` and any identical
+/// phrase in the list_constraints diff is suppressed. Returns an
+/// empty string for dimensions that don't have a canonical phrase
+/// (range-only dims without a matching kind string, for example).
+fn dim_phrase(sketch: &Sketch, dim: &Dimension) -> String {
+    use arael_sketch_solver::DimensionKind as K;
+    use arael_sketch_solver::DimensionEndpoint as E;
+    let ep_name = |e: &E| -> String {
+        match e {
+            E::Point(r) => sketch.point_display_name(*r),
+            E::LineP1(r) => format!("{}.p1", sketch.lines[*r].name),
+            E::LineP2(r) => format!("{}.p2", sketch.lines[*r].name),
+            E::ArcCenter(r) => format!("{}.center", sketch.arcs[*r].name),
+            E::ArcStart(r) => format!("{}.start", sketch.arcs[*r].name),
+            E::ArcEnd(r) => format!("{}.end", sketch.arcs[*r].name),
+        }
+    };
+    match dim.kind {
+        // Entity-flag-backed: match the exact `list_constraints` format
+        // so the de-dupe string compare succeeds.
+        K::LineLength(r) => {
+            let l = &sketch.lines[r];
+            format!("length {} = {}", l.name, l.constraints.length)
+        }
+        K::LineAngle(r) => {
+            let l = &sketch.lines[r];
+            format!("xangle {} = {:.4}", l.name, l.constraints.target_angle.to_degrees())
+        }
+        K::ArcRadius(r) => {
+            let a = &sketch.arcs[r];
+            format!("radius {} = {}", a.name, a.constraints.target_radius)
+        }
+        K::ArcRadiusB(r) => {
+            let a = &sketch.arcs[r];
+            format!("radius_b {} = {}", a.name, a.constraints.target_radius_b)
+        }
+        K::ArcSweep(r) => {
+            let a = &sketch.arcs[r];
+            format!("sweep {} = {:.2} deg", a.name, a.constraints.target_sweep.to_degrees())
+        }
+        K::ArcRotation(r) => {
+            let a = &sketch.arcs[r];
+            format!("rotation {} = {:.4}", a.name, a.constraints.target_rotation.to_degrees())
+        }
+        // Collection-backed: phrase the info from the dim itself
+        // (the C<n> form appears separately in list_constraints).
+        K::PointPointDistance(a, b) => format!("distance {} {} = {}", ep_name(&a), ep_name(&b), dim.value),
+        K::PointLineDistance(ep, l) => format!("distance {} {} = {}", ep_name(&ep), sketch.lines[l].name, dim.value),
+        K::Angle(a, b, sup) => format!("angle {} {} = {}{}", sketch.lines[a].name, sketch.lines[b].name, dim.value, if sup { " supplement" } else { "" }),
+        K::HDistance(a, b) => format!("hdistance {} {} = {}", ep_name(&a), ep_name(&b), dim.value),
+        K::VDistance(a, b) => format!("vdistance {} {} = {}", ep_name(&a), ep_name(&b), dim.value),
+        K::ConcentricDistance(a, b) => format!("distance {} {} = {}", sketch.arcs[a].name, sketch.arcs[b].name, dim.value),
+        K::LineLineDistance(a, b) => format!("distance {} {} = {}", sketch.lines[a].name, sketch.lines[b].name, dim.value),
+    }
 }
 
 // ---------------------------------------------------------------------------
