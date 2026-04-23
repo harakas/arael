@@ -777,6 +777,14 @@ fn err(msg: impl Into<String>) -> CommandResult {
     CommandResult { output: msg.into(), is_error: true, no_echo: false, markdown: false }
 }
 
+/// Name of the last dimension in the sketch -- the one just added by
+/// the caller's `Action::AddDimension`. Used by the dim-creation
+/// commands so their success messages surface the newly-minted
+/// `d<N>` identifier.
+fn last_dim_name(ctx: &CommandContext) -> String {
+    ctx.sketch.dimensions.last().map(|d| d.name.clone()).unwrap_or_default()
+}
+
 // ---------------------------------------------------------------------------
 // Entity resolution
 // ---------------------------------------------------------------------------
@@ -2098,7 +2106,8 @@ fn cmd_add_line(ctx: &mut CommandContext, args: &str) -> CommandResult {
                 kind: DimensionKind::LineLength(line_ref),
                 value: len, expr: None, derived: false, range: None,
             });
-            msg += &format!(" [driven length={:.4}]", len);
+            let dim_name = last_dim_name(ctx);
+            msg += &format!(" [driven {} length={:.4}]", dim_name, len);
         }
         msgs.push(msg);
     }
@@ -2374,7 +2383,8 @@ fn cmd_add_circle(ctx: &mut CommandContext, args: &str) -> CommandResult {
             kind: DimensionKind::ArcRadius(arc_ref),
             value: r, expr: None, derived: false, range: None,
         });
-        msg += &format!(" [driven radius={:.4}]", r);
+        let radius_dim = last_dim_name(ctx);
+        msg += &format!(" [driven {} radius={:.4}]", radius_dim, r);
     }
     if quiet { msg += " [quiet]"; }
     ok(msg)
@@ -2425,7 +2435,8 @@ fn cmd_add_circle2(ctx: &mut CommandContext, args: &str) -> CommandResult {
             kind: DimensionKind::ArcRadius(arc_ref),
             value: r, expr: None, derived: false, range: None,
         });
-        msg += &format!(" [driven radius={:.4}]", r);
+        let radius_dim = last_dim_name(ctx);
+        msg += &format!(" [driven {} radius={:.4}]", radius_dim, r);
     }
     if quiet { msg += " [quiet]"; }
     ok(msg)
@@ -2479,7 +2490,8 @@ fn cmd_add_circle3(ctx: &mut CommandContext, args: &str) -> CommandResult {
             kind: DimensionKind::ArcRadius(arc_ref),
             value: r, expr: None, derived: false, range: None,
         });
-        msg += &format!(" [driven radius={:.4}]", r);
+        let radius_dim = last_dim_name(ctx);
+        msg += &format!(" [driven {} radius={:.4}]", radius_dim, r);
     }
     if quiet { msg += " [quiet]"; }
     ok(msg)
@@ -2604,8 +2616,10 @@ fn cmd_add_earc(ctx: &mut CommandContext, args: &str) -> CommandResult {
     }
     if driven {
         ctx.exec(Action::AddDimension { kind: DimensionKind::ArcRadius(arc_ref), value: rx, expr: None, derived: false, range: None,  });
+        let rx_dim = last_dim_name(ctx);
         ctx.exec(Action::AddDimension { kind: DimensionKind::ArcRadiusB(arc_ref), value: ry, expr: None, derived: false, range: None,  });
-        msg += &format!(" [driven rx={:.4} ry={:.4}]", rx, ry);
+        let ry_dim = last_dim_name(ctx);
+        msg += &format!(" [driven {} rx={:.4} {} ry={:.4}]", rx_dim, rx, ry_dim, ry);
     }
     if quiet { msg += " [quiet]"; }
     ok(msg)
@@ -2693,8 +2707,10 @@ fn cmd_add_earc3(ctx: &mut CommandContext, args: &str) -> CommandResult {
     }
     if driven {
         ctx.exec(Action::AddDimension { kind: DimensionKind::ArcRadius(arc_ref), value: rx, expr: None, derived: false, range: None,  });
+        let rx_dim = last_dim_name(ctx);
         ctx.exec(Action::AddDimension { kind: DimensionKind::ArcRadiusB(arc_ref), value: ry, expr: None, derived: false, range: None,  });
-        msg += &format!(" [driven rx={:.4} ry={:.4}]", rx, ry);
+        let ry_dim = last_dim_name(ctx);
+        msg += &format!(" [driven {} rx={:.4} {} ry={:.4}]", rx_dim, rx, ry_dim, ry);
     }
     if quiet { msg += " [quiet]"; }
     ok(msg)
@@ -2754,8 +2770,10 @@ fn cmd_add_earc_center(ctx: &mut CommandContext, args: &str) -> CommandResult {
     }
     if driven {
         ctx.exec(Action::AddDimension { kind: DimensionKind::ArcRadius(arc_ref), value: rx, expr: None, derived: false, range: None,  });
+        let rx_dim = last_dim_name(ctx);
         ctx.exec(Action::AddDimension { kind: DimensionKind::ArcRadiusB(arc_ref), value: ry, expr: None, derived: false, range: None,  });
-        msg += &format!(" [driven rx={:.4} ry={:.4}]", rx, ry);
+        let ry_dim = last_dim_name(ctx);
+        msg += &format!(" [driven {} rx={:.4} {} ry={:.4}]", rx_dim, rx, ry_dim, ry);
     }
     if quiet { msg += " [quiet]"; }
     ok(msg)
@@ -2819,8 +2837,10 @@ fn cmd_add_earc_tangent(ctx: &mut CommandContext, args: &str) -> CommandResult {
     }
     if driven {
         ctx.exec(Action::AddDimension { kind: DimensionKind::ArcRadius(arc_ref), value: rx, expr: None, derived: false, range: None,  });
+        let rx_dim = last_dim_name(ctx);
         ctx.exec(Action::AddDimension { kind: DimensionKind::ArcRadiusB(arc_ref), value: ry, expr: None, derived: false, range: None,  });
-        msg += &format!(" [driven rx={:.4} ry={:.4}]", rx, ry);
+        let ry_dim = last_dim_name(ctx);
+        msg += &format!(" [driven {} rx={:.4} {} ry={:.4}]", rx_dim, rx, ry_dim, ry);
     }
     if quiet { msg += " [quiet]"; }
     ok(msg)
@@ -3747,8 +3767,9 @@ fn cmd_length(ctx: &mut CommandContext, args: &str) -> CommandResult {
             return ok_or_status(ctx, format!("Updated {} {} length = ({:.4})", name, label, len));
         }
         ctx.exec(Action::AddDimension { kind, value: len, expr: None, derived: is_derived, range: None,  });
+        let dim_name = last_dim_name(ctx);
         let label = if is_derived { "Derived" } else { "Driven" };
-        return ok_or_status(ctx, format!("{} {} length = ({:.4})", label, tokens[0], len));
+        return ok_or_status(ctx, format!("{} {} length {} = ({:.4})", label, dim_name, tokens[0], len));
     }
     // Range form: `length L0 >= V`, `length L0 <= V`, `length L0 LO to HI`
     let range_opt = if tokens.len() >= 2 && !is_derived && !is_driven {
@@ -3778,7 +3799,8 @@ fn cmd_length(ctx: &mut CommandContext, args: &str) -> CommandResult {
         ctx.exec(Action::AddDimension {
             kind, value: measured, expr: None, derived: false, range: Some(rb),
         });
-        return ok_or_status(ctx, format!("Set {} length {} (current {:.4})", tokens[0], bound_desc, measured));
+        let dim_name = last_dim_name(ctx);
+        return ok_or_status(ctx, format!("Set {} length {} {} (current {:.4})", dim_name, tokens[0], bound_desc, measured));
     }
 
     if tokens.len() != 2 { return err("Usage: length L0 5.0 [derived|driven]  or  length L0 >=V | <=V | LO to HI"); }
@@ -3793,8 +3815,9 @@ fn cmd_length(ctx: &mut CommandContext, args: &str) -> CommandResult {
         return ok_or_status(ctx, format!("Updated {} length = {}", name, display));
     }
     ctx.exec(Action::AddDimension { kind, value, expr, derived: is_derived, range: None,  });
+    let dim_name = last_dim_name(ctx);
     let prefix = if is_derived { "Derived" } else { "Set" };
-    ok_or_status(ctx, format!("{} {} length = {}", prefix, tokens[0], display))
+    ok_or_status(ctx, format!("{} {} length {} = {}", prefix, dim_name, tokens[0], display))
 }
 
 fn cmd_radius(ctx: &mut CommandContext, args: &str) -> CommandResult {
@@ -3814,8 +3837,9 @@ fn cmd_radius(ctx: &mut CommandContext, args: &str) -> CommandResult {
             return ok_or_status(ctx, format!("Updated {} {} radius = ({:.4})", label, name, r));
         }
         ctx.exec(Action::AddDimension { kind, value: r, expr: None, derived: is_derived, range: None,  });
+        let dim_name = last_dim_name(ctx);
         let label = if is_derived { "Derived" } else { "Driven" };
-        return ok_or_status(ctx, format!("{} {} radius = ({:.4})", label, tokens[0], r));
+        return ok_or_status(ctx, format!("{} {} radius {} = ({:.4})", label, dim_name, tokens[0], r));
     }
     // Range form: `radius A0 >= V | <= V | LO to HI`.
     let range_opt = if tokens.len() >= 2 && !is_derived && !is_driven {
@@ -3842,7 +3866,8 @@ fn cmd_radius(ctx: &mut CommandContext, args: &str) -> CommandResult {
         ctx.exec(Action::AddDimension {
             kind, value: measured, expr: None, derived: false, range: Some(rb),
         });
-        return ok_or_status(ctx, format!("Set {} radius {} (current {:.4})", tokens[0], bound_desc, measured));
+        let dim_name = last_dim_name(ctx);
+        return ok_or_status(ctx, format!("Set {} radius {} {} (current {:.4})", dim_name, tokens[0], bound_desc, measured));
     }
 
     if tokens.len() != 2 { return err("Usage: radius A0 1.5 [derived|driven]  or  radius A0 >=V | <=V | LO to HI"); }
@@ -3857,8 +3882,9 @@ fn cmd_radius(ctx: &mut CommandContext, args: &str) -> CommandResult {
         return ok_or_status(ctx, format!("Updated {} radius = {}", name, display));
     }
     ctx.exec(Action::AddDimension { kind, value, expr, derived: is_derived, range: None,  });
+    let dim_name = last_dim_name(ctx);
     let prefix = if is_derived { "Derived" } else { "Set" };
-    ok_or_status(ctx, format!("{} {} radius = {}", prefix, tokens[0], display))
+    ok_or_status(ctx, format!("{} {} radius {} = {}", prefix, dim_name, tokens[0], display))
 }
 
 fn cmd_radius_b(ctx: &mut CommandContext, args: &str) -> CommandResult {
@@ -3881,8 +3907,9 @@ fn cmd_radius_b(ctx: &mut CommandContext, args: &str) -> CommandResult {
             return ok_or_status(ctx, format!("Updated {} {} radius_b = ({:.4})", label, name, r));
         }
         ctx.exec(Action::AddDimension { kind, value: r, expr: None, derived: is_derived, range: None,  });
+        let dim_name = last_dim_name(ctx);
         let label = if is_derived { "Derived" } else { "Driven" };
-        return ok_or_status(ctx, format!("{} {} radius_b = ({:.4})", label, tokens[0], r));
+        return ok_or_status(ctx, format!("{} {} radius_b {} = ({:.4})", label, dim_name, tokens[0], r));
     }
     // Range form: `radius_b A0 >= V | <= V | LO to HI`.
     let range_opt = if tokens.len() >= 2 && !is_derived && !is_driven {
@@ -3912,7 +3939,8 @@ fn cmd_radius_b(ctx: &mut CommandContext, args: &str) -> CommandResult {
         ctx.exec(Action::AddDimension {
             kind, value: measured, expr: None, derived: false, range: Some(rb),
         });
-        return ok_or_status(ctx, format!("Set {} radius_b {} (current {:.4})", tokens[0], bound_desc, measured));
+        let dim_name = last_dim_name(ctx);
+        return ok_or_status(ctx, format!("Set {} radius_b {} {} (current {:.4})", dim_name, tokens[0], bound_desc, measured));
     }
 
     if tokens.len() != 2 { return err("Usage: radius_b A0 1.5 [derived|driven]  or  radius_b A0 >=V | <=V | LO to HI"); }
@@ -3930,8 +3958,9 @@ fn cmd_radius_b(ctx: &mut CommandContext, args: &str) -> CommandResult {
         return ok_or_status(ctx, format!("Updated {} radius_b = {}", name, display));
     }
     ctx.exec(Action::AddDimension { kind, value, expr, derived: is_derived, range: None,  });
+    let dim_name = last_dim_name(ctx);
     let prefix = if is_derived { "Derived" } else { "Set" };
-    ok_or_status(ctx, format!("{} {} radius_b = {}", prefix, tokens[0], display))
+    ok_or_status(ctx, format!("{} {} radius_b {} = {}", prefix, dim_name, tokens[0], display))
 }
 
 fn cmd_sweep(ctx: &mut CommandContext, args: &str) -> CommandResult {
@@ -3956,8 +3985,9 @@ fn cmd_sweep(ctx: &mut CommandContext, args: &str) -> CommandResult {
             return ok_or_status(ctx, format!("Updated {} {} sweep = ({:.4})", label, name, sweep_deg));
         }
         ctx.exec(Action::AddDimension { kind, value: sweep_deg, expr: None, derived: is_derived, range: None,  });
+        let dim_name = last_dim_name(ctx);
         let label = if is_derived { "Derived" } else { "Driven" };
-        return ok_or_status(ctx, format!("{} {} sweep = ({:.4})", label, tokens[0], sweep_deg));
+        return ok_or_status(ctx, format!("{} {} sweep {} = ({:.4})", label, dim_name, tokens[0], sweep_deg));
     }
     // Range form: `sweep A0 >= V`, `sweep A0 <= V`, `sweep A0 LO to HI`
     let range_opt = if tokens.len() >= 2 && !is_derived && !is_driven {
@@ -3983,7 +4013,8 @@ fn cmd_sweep(ctx: &mut CommandContext, args: &str) -> CommandResult {
         ctx.exec(Action::AddDimension {
             kind, value: measured, expr: None, derived: false, range: Some(rb),
         });
-        return ok_or_status(ctx, format!("Set {} sweep {} (current {:.4})", tokens[0], bound_desc, measured));
+        let dim_name = last_dim_name(ctx);
+        return ok_or_status(ctx, format!("Set {} sweep {} {} (current {:.4})", dim_name, tokens[0], bound_desc, measured));
     }
 
     if tokens.len() != 2 { return err("Usage: sweep A0 180 [derived|driven]  or  sweep A0 >=V | <=V | LO to HI"); }
@@ -3996,8 +4027,9 @@ fn cmd_sweep(ctx: &mut CommandContext, args: &str) -> CommandResult {
         return ok_or_status(ctx, format!("Updated {} sweep = {}", name, display));
     }
     ctx.exec(Action::AddDimension { kind, value, expr, derived: is_derived, range: None,  });
+    let dim_name = last_dim_name(ctx);
     let prefix = if is_derived { "Derived" } else { "Set" };
-    ok_or_status(ctx, format!("{} {} sweep = {}", prefix, tokens[0], display))
+    ok_or_status(ctx, format!("{} {} sweep {} = {}", prefix, dim_name, tokens[0], display))
 }
 
 // ---------------------------------------------------------------------------
@@ -5272,13 +5304,16 @@ fn cmd_add_arc(ctx: &mut CommandContext, args: &str) -> CommandResult {
             kind: DimensionKind::ArcRadius(arc_ref),
             value: radius, expr: None, derived: false, range: None,
         });
+        let radius_dim = last_dim_name(ctx);
         let a = &ctx.sketch.arcs[arc_ref];
         let sweep = (a.end_angle.value - a.start_angle.value).abs().to_degrees();
         ctx.exec(Action::AddDimension {
             kind: DimensionKind::ArcSweep(arc_ref),
             value: sweep, expr: None, derived: false, range: None,
         });
-        msg += &format!(" [driven radius={:.4} sweep={:.4}]", radius, sweep);
+        let sweep_dim = last_dim_name(ctx);
+        msg += &format!(" [driven {} radius={:.4} {} sweep={:.4}]",
+            radius_dim, radius, sweep_dim, sweep);
     }
     if quiet { msg += " [quiet]"; }
     ok(msg)
@@ -5890,8 +5925,9 @@ fn cmd_angle(ctx: &mut CommandContext, args: &str) -> CommandResult {
             return ok_or_status(ctx, format!("Updated {} {} angle = ({:.4})", label, name, val));
         }
         ctx.exec(Action::AddDimension { kind, value: val, expr: None, derived: is_derived, range: None,  });
+        let dim_name = last_dim_name(ctx);
         let label = if is_derived { "Derived" } else { "Driven" };
-        return ok_or_status(ctx, format!("{} angle {} {} = ({:.4})", label, tokens[0], tokens[1], val));
+        return ok_or_status(ctx, format!("{} {} angle {} {} = ({:.4})", label, dim_name, tokens[0], tokens[1], val));
     }
 
     // Range form: `angle L0 L1 >= V | <= V | LO to HI [supplement]`.
@@ -5928,8 +5964,9 @@ fn cmd_angle(ctx: &mut CommandContext, args: &str) -> CommandResult {
         ctx.exec(Action::AddDimension {
             kind, value: measured, expr: None, derived: false, range: Some(rb),
         });
-        return ok_or_status(ctx, format!("Set angle {} {} {}{} (current {:.4})",
-            tokens[0], tokens[1], bound_desc, sector, measured));
+        let dim_name = last_dim_name(ctx);
+        return ok_or_status(ctx, format!("Set {} angle {} {} {}{} (current {:.4})",
+            dim_name, tokens[0], tokens[1], bound_desc, sector, measured));
     }
 
     if tokens.len() != 3 { return err("Usage: angle L0 L1 45 [supplement|closest|acute|obtuse] [derived|driven]  or  angle L0 L1 >=V | <=V | LO to HI [supplement]"); }
@@ -5957,9 +5994,10 @@ fn cmd_angle(ctx: &mut CommandContext, args: &str) -> CommandResult {
         return ok_or_status(ctx, format!("Updated {} angle = {} {}", name, display, sector).trim_end().to_string());
     }
     ctx.exec(Action::AddDimension { kind, value, expr, derived: is_derived, range: None,  });
+    let dim_name = last_dim_name(ctx);
     let sector = if supplement { " (supplement)" } else { "" };
     let prefix = if is_derived { "Derived" } else { "Set" };
-    ok_or_status(ctx, format!("{} angle {} {} = {}{}", prefix, tokens[0], tokens[1], display, sector))
+    ok_or_status(ctx, format!("{} {} angle {} {} = {}{}", prefix, dim_name, tokens[0], tokens[1], display, sector))
 }
 
 /// Parse a single range-value token: numeric literal, `=expr` /
@@ -6071,7 +6109,8 @@ fn cmd_distance(ctx: &mut CommandContext, args: &str) -> CommandResult {
             let kind = DimensionKind::PointLineDistance(to_dim_ep(ep), line);
             ctx.begin_group();
             ctx.exec(Action::AddDimension { kind, value: dist, expr: None, derived: is_derived, range: None,  });
-            return ok_or_status(ctx, format!("{} distance {} {} = ({:.4})", label, tokens[0], tokens[1], dist));
+            let dim_name = last_dim_name(ctx);
+            return ok_or_status(ctx, format!("{} {} distance {} {} = ({:.4})", label, dim_name, tokens[0], tokens[1], dist));
         }
         // Point-point distance
         let ep_a = match resolve_endpoint_ref(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
@@ -6089,7 +6128,8 @@ fn cmd_distance(ctx: &mut CommandContext, args: &str) -> CommandResult {
             return ok_or_status(ctx, format!("Updated {} {} distance = ({:.4})", name, ulabel, dist));
         }
         ctx.exec(Action::AddDimension { kind, value: dist, expr: None, derived: is_derived, range: None,  });
-        return ok_or_status(ctx, format!("{} distance {} {} = ({:.4})", label, tokens[0], tokens[1], dist));
+        let dim_name = last_dim_name(ctx);
+        return ok_or_status(ctx, format!("{} {} distance {} {} = ({:.4})", label, dim_name, tokens[0], tokens[1], dist));
     }
 
     // Range-dimension form: two entities + one of `>=V`, `<=V`,
@@ -6192,9 +6232,10 @@ fn cmd_distance(ctx: &mut CommandContext, args: &str) -> CommandResult {
         ctx.exec(Action::AddDimension {
             kind, value: measured, expr: None, derived: false, range: Some(rb),
         });
+        let dim_name = last_dim_name(ctx);
         return ok_or_status(ctx, format!(
-            "Set distance {} {} {} (current {:.4})",
-            tokens[0], tokens[1], bound_desc, measured));
+            "Set {} distance {} {} {} (current {:.4})",
+            dim_name, tokens[0], tokens[1], bound_desc, measured));
     }
 
     if tokens.len() != 3 { return err("Usage: distance L0.p1 L1.p2 5.0 [derived|driven]  or  distance P0 L0 3.0 [derived|driven]  or  distance A0 A1 5.0 (concentric circles)  or  distance L0 L1 5.0 (two lines; also applies a Parallel constraint)  or  distance <entities> >=V | <=V | LO to HI (range bound)"); }
@@ -6225,8 +6266,9 @@ fn cmd_distance(ctx: &mut CommandContext, args: &str) -> CommandResult {
             return ok_or_status(ctx, format!("Updated {} line-line distance = {}", name, tokens[2]));
         }
         ctx.exec(Action::AddDimension { kind, value: val, expr, derived: is_derived, range: None,  });
-        let prefix = if is_derived { "Derived line-line distance" } else { "Set line-line distance" };
-        return ok_or_status(ctx, format!("{} = {}", prefix, tokens[2]));
+        let dim_name = last_dim_name(ctx);
+        let prefix = if is_derived { "Derived" } else { "Set" };
+        return ok_or_status(ctx, format!("{} {} line-line distance {} {} = {}", prefix, dim_name, tokens[0], tokens[1], tokens[2]));
     }
 
     // Concentric-arcs radial distance: `distance A0 A1 v` for two
@@ -6259,8 +6301,9 @@ fn cmd_distance(ctx: &mut CommandContext, args: &str) -> CommandResult {
             ctx.exec(Action::ApplyConcentric { a: arc_a, b: arc_b });
         }
         ctx.exec(Action::AddDimension { kind, value: val, expr, derived: is_derived, range: None,  });
-        let prefix = if is_derived { "Derived concentric distance" } else { "Set concentric distance" };
-        return ok_or_status(ctx, format!("{} = {}", prefix, tokens[2]));
+        let dim_name = last_dim_name(ctx);
+        let prefix = if is_derived { "Derived" } else { "Set" };
+        return ok_or_status(ctx, format!("{} {} concentric distance {} {} = {}", prefix, dim_name, tokens[0], tokens[1], tokens[2]));
     }
 
     // Try point-line distance
@@ -6275,8 +6318,9 @@ fn cmd_distance(ctx: &mut CommandContext, args: &str) -> CommandResult {
             return ok_or_status(ctx, format!("Updated {} distance = {}", name, tokens[2]));
         }
         ctx.exec(Action::AddDimension { kind, value: val, expr, derived: is_derived, range: None,  });
-        let prefix = if is_derived { "Derived distance" } else { "Set distance" };
-        return ok_or_status(ctx, format!("{} = {}", prefix, tokens[2]));
+        let dim_name = last_dim_name(ctx);
+        let prefix = if is_derived { "Derived" } else { "Set" };
+        return ok_or_status(ctx, format!("{} {} distance {} {} = {}", prefix, dim_name, tokens[0], tokens[1], tokens[2]));
     }
 
     // Point-point distance
@@ -6290,8 +6334,9 @@ fn cmd_distance(ctx: &mut CommandContext, args: &str) -> CommandResult {
         return ok_or_status(ctx, format!("Updated {} distance = {}", name, tokens[2]));
     }
     ctx.exec(Action::AddDimension { kind, value: val, expr, derived: is_derived, range: None,  });
-    let prefix = if is_derived { "Derived distance" } else { "Set distance" };
-    ok_or_status(ctx, format!("{} = {}", prefix, tokens[2]))
+    let dim_name = last_dim_name(ctx);
+    let prefix = if is_derived { "Derived" } else { "Set" };
+    ok_or_status(ctx, format!("{} {} distance {} {} = {}", prefix, dim_name, tokens[0], tokens[1], tokens[2]))
 }
 
 fn cmd_hdistance(ctx: &mut CommandContext, args: &str) -> CommandResult {
@@ -6331,8 +6376,9 @@ fn cmd_axis_distance(ctx: &mut CommandContext, args: &str, horizontal: bool) -> 
                    else { DimensionKind::VDistance(to_dim_ep(ep_a), to_dim_ep(ep_b)) };
         ctx.begin_group();
         ctx.exec(Action::AddDimension { kind, value: measured, expr: None, derived: is_derived, range: None,  });
+        let dim_name = last_dim_name(ctx);
         let prefix = if is_derived { "Derived" } else { "Driven" };
-        return ok_or_status(ctx, format!("{} {} {} {} = ({:.4})", prefix, label, tokens[0], tokens[1], measured));
+        return ok_or_status(ctx, format!("{} {} {} {} {} = ({:.4})", prefix, dim_name, label, tokens[0], tokens[1], measured));
     }
 
     // Range form: `hdistance <a> <b> >= V | <= V | LO to HI`
@@ -6364,8 +6410,9 @@ fn cmd_axis_distance(ctx: &mut CommandContext, args: &str, horizontal: bool) -> 
         ctx.exec(Action::AddDimension {
             kind, value: measured, expr: None, derived: false, range: Some(rb),
         });
-        return ok_or_status(ctx, format!("Set {} {} {} {} (current {:.4})",
-            label, tokens[0], tokens[1], bound_desc, measured));
+        let dim_name = last_dim_name(ctx);
+        return ok_or_status(ctx, format!("Set {} {} {} {} {} (current {:.4})",
+            dim_name, label, tokens[0], tokens[1], bound_desc, measured));
     }
 
     if tokens.len() != 3 {
@@ -6383,8 +6430,9 @@ fn cmd_axis_distance(ctx: &mut CommandContext, args: &str, horizontal: bool) -> 
         return ok_or_status(ctx, format!("Updated {} {} = {}", name, label, tokens[2]));
     }
     ctx.exec(Action::AddDimension { kind, value: val, expr, derived: is_derived, range: None,  });
-    let prefix = if is_derived { format!("Derived {}", label) } else { format!("Set {}", label) };
-    ok_or_status(ctx, format!("{} = {}", prefix, tokens[2]))
+    let dim_name = last_dim_name(ctx);
+    let prefix = if is_derived { "Derived" } else { "Set" };
+    ok_or_status(ctx, format!("{} {} {} {} {} = {}", prefix, dim_name, label, tokens[0], tokens[1], tokens[2]))
 }
 
 /// Resolve the entity argument of `xangle` to either a line (angle
@@ -6454,7 +6502,8 @@ fn cmd_xangle(ctx: &mut CommandContext, args: &str) -> CommandResult {
         ctx.exec(Action::AddDimension {
             kind, value: measured, expr: None, derived: false, range: Some(rb),
         });
-        return ok_or_status(ctx, format!("Set {} xangle {} (current {:.4})", tokens[0], bound_desc, measured));
+        let dim_name = last_dim_name(ctx);
+        return ok_or_status(ctx, format!("Set {} xangle {} {} (current {:.4})", dim_name, tokens[0], bound_desc, measured));
     }
 
     if tokens.len() != 2 {
@@ -6471,8 +6520,9 @@ fn cmd_xangle(ctx: &mut CommandContext, args: &str) -> CommandResult {
         return ok_or_status(ctx, format!("Updated {} xangle = {}", name, tokens[1]));
     }
     ctx.exec(Action::AddDimension { kind, value: val, expr, derived: is_derived, range: None,  });
-    let prefix = if is_derived { "Derived xangle" } else { "Set xangle" };
-    ok_or_status(ctx, format!("{} = {}", prefix, tokens[1]))
+    let dim_name = last_dim_name(ctx);
+    let prefix = if is_derived { "Derived" } else { "Set" };
+    ok_or_status(ctx, format!("{} {} xangle {} = {}", prefix, dim_name, tokens[0], tokens[1]))
 }
 
 fn cmd_freeze(ctx: &mut CommandContext, args: &str) -> CommandResult {
