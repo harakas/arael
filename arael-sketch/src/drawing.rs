@@ -1473,15 +1473,93 @@ impl EditorApp {
             add_arc_marker(self, &mut markers, c.a, ConstraintSymbol::Symmetry, id, &mut arc_marker_count);
             add_arc_marker(self, &mut markers, c.c, ConstraintSymbol::Symmetry, id, &mut arc_marker_count);
         }
+        // Tangent markers sit near the tangency point -- one glyph
+        // per pair -- offset a fixed screen distance perpendicular
+        // to the tangent direction so the glyph doesn't cover the
+        // actual geometry.
+        let marker_offset_px: f32 = 12.0;
         for (i, c) in self.sketch.tangent_la.iter().enumerate() {
             let id = ConstraintId::TangentLA(i);
-            add_line_marker(self, &mut markers, c.line, ConstraintSymbol::Tangent, id, &mut line_marker_count);
-            add_arc_marker(self, &mut markers, c.arc, ConstraintSymbol::Tangent, id, &mut arc_marker_count);
+            let l = &self.sketch.lines[c.line];
+            let a = &self.sketch.arcs[c.arc];
+            let dx = l.p2.value.x - l.p1.value.x;
+            let dy = l.p2.value.y - l.p1.value.y;
+            let len2 = dx * dx + dy * dy;
+            let (t_pos, nx_world, ny_world) = if len2 > 1e-18 {
+                let len = len2.sqrt();
+                let t = ((a.center.value.x - l.p1.value.x) * dx
+                       + (a.center.value.y - l.p1.value.y) * dy) / len2;
+                let foot = vect2d::new(l.p1.value.x + t * dx, l.p1.value.y + t * dy);
+                // Offset direction = from foot toward the arc's
+                // centre (the "outside" of the line from the arc's
+                // perspective). Keeps the marker out of the arc.
+                let ncx = a.center.value.x - foot.x;
+                let ncy = a.center.value.y - foot.y;
+                let nlen = (ncx * ncx + ncy * ncy).sqrt();
+                if nlen > 1e-9 {
+                    (foot, ncx / nlen, ncy / nlen)
+                } else {
+                    // Degenerate (centre on line): fall back to the
+                    // line's screen-up normal.
+                    (foot, -dy / len, dx / len)
+                }
+            } else {
+                (a.center.value, 0.0, 1.0)
+            };
+            let pos_screen = self.to_screen(t_pos);
+            // Screen y is flipped; negate the sketch-y component so
+            // the offset actually matches the chosen world direction.
+            let pos = egui::Pos2::new(
+                pos_screen.x + (nx_world as f32) * marker_offset_px,
+                pos_screen.y - (ny_world as f32) * marker_offset_px,
+            );
+            markers.push(ConstraintMarker {
+                pos,
+                symbol: ConstraintSymbol::Tangent,
+                id,
+            });
         }
         for (i, c) in self.sketch.tangent_aa.iter().enumerate() {
             let id = ConstraintId::TangentAA(i);
-            add_arc_marker(self, &mut markers, c.a, ConstraintSymbol::Tangent, id, &mut arc_marker_count);
-            add_arc_marker(self, &mut markers, c.b, ConstraintSymbol::Tangent, id, &mut arc_marker_count);
+            let a = &self.sketch.arcs[c.a];
+            let b = &self.sketch.arcs[c.b];
+            let ca = a.center.value;
+            let cb = b.center.value;
+            let dx = cb.x - ca.x;
+            let dy = cb.y - ca.y;
+            let d = (dx * dx + dy * dy).sqrt();
+            let ra = a.radius.value;
+            let rb = b.radius.value;
+            let (t_pos, nx_world, ny_world) = if d < 1e-9 {
+                (ca, 0.0, 1.0)
+            } else {
+                let ux = dx / d;
+                let uy = dy / d;
+                let external_err = (d - (ra + rb)).abs();
+                let internal_err = (d - (ra - rb).abs()).abs();
+                let foot = if external_err <= internal_err {
+                    vect2d::new(ca.x + ux * ra, ca.y + uy * ra)
+                } else if ra >= rb {
+                    vect2d::new(ca.x + ux * ra, ca.y + uy * ra)
+                } else {
+                    vect2d::new(cb.x - ux * rb, cb.y - uy * rb)
+                };
+                // Offset perpendicular to the line of centres; the
+                // tangent line at the contact point runs along that
+                // same perpendicular, so this keeps the marker off
+                // both arcs.
+                (foot, -uy, ux)
+            };
+            let pos_screen = self.to_screen(t_pos);
+            let pos = egui::Pos2::new(
+                pos_screen.x + (nx_world as f32) * marker_offset_px,
+                pos_screen.y - (ny_world as f32) * marker_offset_px,
+            );
+            markers.push(ConstraintMarker {
+                pos,
+                symbol: ConstraintSymbol::Tangent,
+                id,
+            });
         }
 
         // Coincident display setup
