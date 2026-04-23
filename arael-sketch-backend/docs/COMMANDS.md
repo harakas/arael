@@ -123,6 +123,8 @@ add_circle2t L0 L1 radius    Circle tangent to 2 lines with given radius
 add_circle3t L0 L1 L2        Circle tangent to 3 lines (incircle)
 add_arc x1,y1 x2,y2 xm,ym  Create an arc through start, end, midpoint [driven]
 offset_line L0 distance      Create a parallel line offset by distance (alias: offset)
+fillet L1 L2 r               Round the shared corner of L1 and L2 with a tangent arc of radius r
+fillet L1.pN r               Same, naming the corner endpoint directly
 ```
 
 ### Auto-Coincident
@@ -1154,6 +1156,46 @@ Or manually with vector arithmetic:
 ```
 add_line 0,0 10,0
 add_line L0.p1+normal(L0)*2 L0.p2+normal(L0)*2
+```
+
+### Fillet
+
+Round a shared corner between two connected lines with a tangent arc
+of given radius. The corner coincident is broken, both lines are
+trimmed back to the tangent points, and the new arc is pinned to the
+trimmed endpoints with coincident constraints. Tangent-line-arc
+constraints are added on each side (unless `notangent`), and a
+driven radius dimension is added on the arc (unless `noradius`).
+
+```
+fillet L1 L2 r               Round the shared corner of L1 and L2
+fillet L1.pN r               Round the corner at L1's pN endpoint
+fillet L1 L2 r notangent     Skip the tangent constraints
+fillet L1 L2 r noradius      Skip the radius dimension
+```
+
+**Requirements.** The two lines must share a corner via a direct
+line-line coincident (one of `CoincidentLL11`, `CoincidentLL12`,
+`CoincidentLL21`, `CoincidentLL22`). Corners tied through an
+intermediate point are rejected. The corner angle must be non-zero
+and non-180 degrees (neither overlapping nor collinear). Each line
+must be at least `r / tan(theta/2)` long, where `theta` is the angle
+between the outgoing directions at the corner.
+
+**Geometry.** Given corner `C`, unit directions `u_a`, `u_b` from `C`
+toward the far endpoint of each line, and angle `theta` between them:
+the tangent points are at distance `r / tan(theta/2)` along each
+line, and the arc center is at distance `r / sin(theta/2)` along the
+angle bisector. The arc curves into the interior of the corner.
+
+**Example.**
+
+```
+add_rect 0,0 5,3 hv
+fillet L0 L1 0.5             Round the (5,0) corner
+fillet L1 L2 0.5             Round the (5,3) corner
+fillet L2 L3 0.5             Round the (0,3) corner
+fillet L3 L0 0.5             Round the (0,0) corner
 ```
 
 ## Solver Parameters
