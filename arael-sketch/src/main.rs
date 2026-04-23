@@ -114,6 +114,10 @@ pub struct EditorApp {
     pub circle_draw: Option<CircleDrawState>,
     pub arc_draw: Option<ArcDrawState>,
     pub rect_draw: Option<RectDrawState>,
+    /// In-flight fillet from the GUI Fillet tool. Set after the fillet
+    /// actions run; kept alive while the radius dim-input overlay is
+    /// open so Escape can restore the pre-fillet sketch.
+    pub fillet_pending: Option<FilletPending>,
 
     // Selection and hover
     pub selection: Vec<Selection>,
@@ -361,6 +365,7 @@ impl EditorApp {
             circle_draw: None,
             arc_draw: None,
             rect_draw: None,
+            fillet_pending: None,
             selection: Vec::new(),
             hovered: None,
             grab: None,
@@ -2668,6 +2673,228 @@ impl EditorApp {
     // Start a new undo group. All exec() calls until the next begin_group share the same group.
     pub fn begin_group(&mut self) {
         self.history.begin_group();
+    }
+
+    /// Kick off a fillet from the GUI Fillet tool: snapshot the
+    /// pre-fillet sketch, record the first corner, apply it with
+    /// 10 % of the shortest involved line's length as the starting
+    /// radius, then drop the user straight into radius editing.
+    /// Additional corners can be toggled in/out while editing.
+    fn try_start_gui_fillet(&mut self, arg: &str, shortest_len: f64) {
+        if shortest_len < 1e-6 { return; }
+        let pre_snapshot = match bincode::serialize(&self.sketch) {
+            Ok(s) => s,
+            Err(_) => return,
+        };
+        let history_cursor_before = self.history.cursor;
+        let initial_r = format!("{:.4}", shortest_len * 0.1);
+        self.fillet_pending = Some(FilletPending {
+            pre_snapshot,
+            history_cursor_before,
+            corners: vec![arg.to_string()],
+            last_valid_radius: initial_r.clone(),
+            last_applied_sig: String::new(),
+        });
+        // Pre-populate the dim input so Enter on an empty edit still
+        // commits the 10 % mock. Reapply runs below; it creates the
+        // primary dim, then we hook the dim-edit overlay up to it.
+        self.dim_input = initial_r;
+        self.reapply_fillets();
+        // If reapply couldn't produce a primary dim (corner invalid),
+        // bail and surface the error.
+        if self.primary_fillet_dim_index().is_none() {
+            self.cancel_pending_fillet();
+            return;
+        }
+        self.dim_editing = true;
+        self.dim_edit_index = self.primary_fillet_dim_index();
+        self.dim_kind = None;
+        self.dim_placing = false;
+        self.dim_select_all = true;
+        self.dim_derived = false;
+        self.dim_derived_prev = false;
+        self.dim_input_backup.clear();
+        self.selection.clear();
+    }
+
+    /// Index of the radius dimension created by the first (primary)
+    /// fillet in `fillet_pending`. None if reapply has never run or
+    /// the primary fillet failed.
+    pub fn primary_fillet_dim_index(&self) -> Option<usize> {
+        // The primary fillet is the first entry in `corners`. After
+        // reapply, its AddDimension is the oldest fillet-created dim;
+        // scan by name prefix isn't reliable here, so find the first
+        // dim whose kind is ArcRadius(arc) where arc is filleted.
+        // Simpler: pick the first ArcRadius dim whose index >= the
+        // pre-snapshot dim count. Use last-applied signature to know
+        // how many dims were pre-existing.
+        let p = self.fillet_pending.as_ref()?;
+        // Deserialize pre_snapshot once to learn how many dims existed
+        // before the fillet session started. Cheap vs. every-frame.
+        let pre = bincode::deserialize::<Sketch>(&p.pre_snapshot).ok()?;
+        let n_pre = pre.dimensions.len();
+        // First dim added by fillet session (the primary's radius).
+        if self.sketch.dimensions.len() > n_pre {
+            Some(n_pre)
+        } else {
+            None
+        }
+    }
+
+    /// Current radius token for reapply: the user's dim_input if it
+    /// parses to something usable, otherwise the pending's last
+    /// valid radius so the canvas keeps showing the most recent
+    /// feasible fillet while the user is mid-edit.
+    fn fillet_effective_radius(&self) -> Option<String> {
+        let p = self.fillet_pending.as_ref()?;
+        let typed = self.dim_input.trim();
+        // Empty, "0", or unparseable -> fall back.
+        if typed.is_empty() {
+            return Some(p.last_valid_radius.clone());
+        }
+        // Strip snapshot prefix for parsing, but keep it in the
+        // resubmitted token so the dim stores the literal snapshot.
+        let parse_src = typed.strip_prefix('=').unwrap_or(typed).trim();
+        if let Ok(v) = parse_src.parse::<f64>() {
+            if v <= 0.0 {
+                return Some(p.last_valid_radius.clone());
+            }
+            return Some(typed.to_string());
+        }
+        if arael_sym::parse(parse_src).is_ok()
+            && arael_sketch_backend::commands::eval_expr(&self.sketch, parse_src)
+                .map(|v| v > 0.0)
+                .unwrap_or(false)
+        {
+            return Some(typed.to_string());
+        }
+        Some(p.last_valid_radius.clone())
+    }
+
+    /// Restore the pre-fillet sketch and reapply every pending
+    /// corner from scratch. Called whenever the radius or the
+    /// corner list changes during an active fillet edit. Cheap
+    /// enough for live typing (one bincode deserialize + a handful
+    /// of `fillet` command runs).
+    pub fn reapply_fillets(&mut self) {
+        let Some(p) = self.fillet_pending.as_ref() else { return; };
+        let radius = match self.fillet_effective_radius() {
+            Some(r) => r,
+            None => return,
+        };
+        let sig = format!("{}|{}", radius, p.corners.join(","));
+        if sig == p.last_applied_sig { return; }
+
+        let pre_snapshot = p.pre_snapshot.clone();
+        let history_cursor_before = p.history_cursor_before;
+        let corners = p.corners.clone();
+
+        // Restore pre-fillet state so the reapply is deterministic.
+        if let Ok(s) = bincode::deserialize::<Sketch>(&pre_snapshot) {
+            self.sketch = s;
+        }
+        self.history.actions.truncate(history_cursor_before);
+        self.history.snapshots.truncate(history_cursor_before);
+        self.history.cursors.truncate(history_cursor_before);
+        self.history.groups.truncate(history_cursor_before);
+        self.history.cursor = history_cursor_before;
+        self.status_error = None;
+
+        // Run primary fillet. Its radius dim name drives the rest.
+        let mut primary_dim_name: Option<String> = None;
+        let mut applied_any = false;
+        let mut first_result_radius = radius.clone();
+        if let Some(first) = corners.first() {
+            let cmd = format!("fillet {} {}", first, radius);
+            let results = self.run_commands(&cmd);
+            let ok = !results.iter().any(|r| r.is_error)
+                && self.sketch.dimensions.last().is_some();
+            if ok {
+                applied_any = true;
+                primary_dim_name = self.sketch.dimensions.last().map(|d| d.name.clone());
+            } else {
+                // Primary failed: surface the error and leave
+                // last_applied_sig empty so the next typed change
+                // retries.
+                if let Some(r) = results.iter().find(|r| r.is_error) {
+                    self.status_error = Some(r.output.clone());
+                }
+                first_result_radius.clear();
+            }
+        }
+
+        // Secondary fillets reference the primary dim by name.
+        if let Some(pdn) = &primary_dim_name {
+            for corner in corners.iter().skip(1) {
+                let cmd = format!("fillet {} {}", corner, pdn);
+                let results = self.run_commands(&cmd);
+                if results.iter().any(|r| r.is_error) {
+                    // Leave this corner failed; the others still stick.
+                }
+            }
+        }
+
+        // Collapse every action pushed in this reapply into a
+        // single undo group. `cmd_fillet` opens its own group per
+        // call, so without this stitching a 3-corner fillet tool
+        // session would need three Ctrl+Z presses to undo.
+        if self.history.cursor > history_cursor_before
+            && let Some(&first) = self.history.groups.get(history_cursor_before)
+        {
+            for g in &mut self.history.groups[history_cursor_before..self.history.cursor] {
+                *g = first;
+            }
+        }
+
+        if let Some(pending) = self.fillet_pending.as_mut() {
+            if applied_any && !first_result_radius.is_empty() {
+                pending.last_valid_radius = first_result_radius;
+            }
+            pending.last_applied_sig = sig;
+        }
+        self.compute_dof_async();
+    }
+
+    /// Add a corner to the active fillet session, or remove it if
+    /// it's already there. Reapplies so the preview updates.
+    pub fn toggle_fillet_corner(&mut self, arg: &str) {
+        if let Some(p) = self.fillet_pending.as_mut() {
+            if let Some(idx) = p.corners.iter().position(|c| c == arg) {
+                p.corners.remove(idx);
+            } else {
+                p.corners.push(arg.to_string());
+            }
+        }
+        // If we removed the last corner, drop the pending and bail.
+        if self.fillet_pending.as_ref().is_some_and(|p| p.corners.is_empty()) {
+            self.cancel_pending_fillet();
+            return;
+        }
+        self.reapply_fillets();
+        // dim_edit_index may have shifted if dims were re-numbered.
+        self.dim_edit_index = self.primary_fillet_dim_index();
+    }
+
+    /// Restore the sketch and history to the state captured at
+    /// fillet start. Called from the Escape handler when a
+    /// FilletPending is live, or when all corners are removed mid
+    /// edit.
+    pub fn cancel_pending_fillet(&mut self) {
+        let Some(p) = self.fillet_pending.take() else { return; };
+        if let Ok(s) = bincode::deserialize::<Sketch>(&p.pre_snapshot) {
+            self.sketch = s;
+        }
+        self.history.actions.truncate(p.history_cursor_before);
+        self.history.snapshots.truncate(p.history_cursor_before);
+        self.history.cursors.truncate(p.history_cursor_before);
+        self.history.groups.truncate(p.history_cursor_before);
+        self.history.cursor = p.history_cursor_before;
+        self.dim_editing = false;
+        self.dim_edit_index = None;
+        self.dim_kind = None;
+        self.dim_input.clear();
+        self.status_error = None;
+        self.compute_dof_async();
     }
 
     fn apply_horizontal(&mut self) {

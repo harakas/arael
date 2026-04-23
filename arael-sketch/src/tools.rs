@@ -73,6 +73,7 @@ pub enum Tool {
     DrawCircle,
     DrawArc,
     DrawRect,
+    Fillet,
     ConstraintMode(ConstraintType),
     Dimension,
 }
@@ -114,6 +115,35 @@ pub struct ArcDrawState {
 pub struct RectDrawState {
     pub corner: vect2d,
     pub snap_corner: Option<SnapTarget>,
+}
+
+// In-flight fillet set, created when the Fillet tool fires but still
+// editable via the dim-input overlay until the user commits with
+// Enter or reverts with Escape. The pre-fillet sketch snapshot lets
+// Escape fully restore the sketch -- trim, arcs, coincidents,
+// tangents and the radius dim(s) all undone -- and
+// `history_cursor_before` matches the dropped actions so undo lines
+// up. Every live edit restores to this snapshot and re-applies all
+// pending fillets; keeping the state declarative lets the radius
+// edit and corner add/remove ripple through cleanly.
+pub struct FilletPending {
+    pub pre_snapshot: std::vec::Vec<u8>,
+    pub history_cursor_before: usize,
+    /// Fillet argument strings, one per corner: `"L0 L1"` or
+    /// `"L0.p2"`. First entry is the primary fillet -- its radius
+    /// dimension receives the user-typed value. The rest each
+    /// reference the primary dim by name (`d<N>`) so they track it
+    /// if the user edits.
+    pub corners: std::vec::Vec<String>,
+    /// Last radius token (literal or expression) whose reapply
+    /// actually produced a fillet. Empty / 0 / unparseable input
+    /// falls back to this, so the canvas shows the most recent
+    /// valid state until the user types something parseable again.
+    pub last_valid_radius: String,
+    /// Signature of the last successful reapply: radius token plus
+    /// corner count. Used to decide whether another reapply pass
+    /// is needed when dim_input or `corners` changes.
+    pub last_applied_sig: String,
 }
 
 // Constraint symbol types (drawn with painter, not text)

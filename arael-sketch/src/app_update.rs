@@ -306,6 +306,10 @@ impl eframe::App for EditorApp {
                     self.rect_draw = None;
                 }
                 ui.end_row();
+                if ui.selectable_label(self.tool == Tool::Fillet, "Fillet (F)").clicked() {
+                    self.tool = Tool::Fillet;
+                    self.selection.clear();
+                }
                 if ui.selectable_label(self.tool == Tool::Dimension, "Dims (D)").clicked() {
                     self.tool = Tool::Dimension;
                     self.dim_editing = false;
@@ -997,6 +1001,10 @@ impl eframe::App for EditorApp {
                 self.tool = Tool::DrawRect;
                 self.rect_draw = None;
             }
+            if ui.input(|i| i.key_pressed(egui::Key::F) && !i.modifiers.ctrl && !i.modifiers.mac_cmd) {
+                self.tool = Tool::Fillet;
+                self.selection.clear();
+            }
             if ui.input(|i| i.key_pressed(egui::Key::H)) { self.try_apply_or_enter_mode(ConstraintType::Horizontal); }
             if ui.input(|i| i.key_pressed(egui::Key::V)) { self.try_apply_or_enter_mode(ConstraintType::Vertical); }
             if ui.input(|i| i.key_pressed(egui::Key::C)) { self.try_apply_or_enter_mode(ConstraintType::Coincident); }
@@ -1016,6 +1024,12 @@ impl eframe::App for EditorApp {
             }
             } // !wants_keyboard_input
             if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                // Fillet-in-flight gets first crack: roll back the
+                // applied fillet before the generic Escape clears
+                // dim-editing state and flips the tool.
+                if self.fillet_pending.is_some() {
+                    self.cancel_pending_fillet();
+                }
                 self.selection.clear();
                 self.line_draw = None;
                 self.circle_draw = None;
@@ -1720,6 +1734,61 @@ impl eframe::App for EditorApp {
                                 corner,
                                 snap_corner: snap.map(|(_, t)| t),
                             });
+                        }
+                    }
+                }
+
+                Tool::Fillet => {
+                    if response.clicked_by(egui::PointerButton::Primary) {
+                        // Derive a "corner arg" from this click: an
+                        // endpoint snap yields "<line>.pN"; a
+                        // line-body click accumulates into
+                        // self.selection and, once two lines are in,
+                        // yields "L0 L1". Returns the arg plus the
+                        // shortest line length (used for the 10 %
+                        // starting radius when this is the first
+                        // corner of the session).
+                        #[derive(Clone)]
+                        enum Picked { Corner(String, f64), Nothing }
+                        let pre_len = |app: &Self, r: Ref<Line>| -> f64 {
+                            let ln = &app.sketch.lines[r];
+                            let dx = ln.p2.value.x - ln.p1.value.x;
+                            let dy = ln.p2.value.y - ln.p1.value.y;
+                            (dx * dx + dy * dy).sqrt()
+                        };
+                        let picked = match self.find_snap_target(mouse_sketch, hit_threshold) {
+                            Some((_, SnapTarget::LineP1(l))) => {
+                                Picked::Corner(format!("{}.p1", self.sketch.lines[l].name), pre_len(self, l))
+                            }
+                            Some((_, SnapTarget::LineP2(l))) => {
+                                Picked::Corner(format!("{}.p2", self.sketch.lines[l].name), pre_len(self, l))
+                            }
+                            _ => if let Some(Selection::Line(r)) = self.hit_test_selection(mouse_sketch, hit_threshold) {
+                                if self.selection.iter().any(|s| matches!(s, Selection::Line(rr) if *rr == r)) {
+                                    self.selection.retain(|s| !matches!(s, Selection::Line(rr) if *rr == r));
+                                } else {
+                                    self.selection.push(Selection::Line(r));
+                                }
+                                let lines: Vec<Ref<Line>> = self.selection.iter().filter_map(|s| {
+                                    if let Selection::Line(r) = s { Some(*r) } else { None }
+                                }).collect();
+                                if lines.len() == 2 {
+                                    let shortest = pre_len(self, lines[0]).min(pre_len(self, lines[1]));
+                                    let arg = format!("{} {}", self.sketch.lines[lines[0]].name, self.sketch.lines[lines[1]].name);
+                                    self.selection.clear();
+                                    Picked::Corner(arg, shortest)
+                                } else { Picked::Nothing }
+                            } else { Picked::Nothing },
+                        };
+                        match picked {
+                            Picked::Corner(arg, shortest) => {
+                                if self.fillet_pending.is_some() {
+                                    self.toggle_fillet_corner(&arg);
+                                } else {
+                                    self.try_start_gui_fillet(&arg, shortest);
+                                }
+                            }
+                            Picked::Nothing => {}
                         }
                     }
                 }
@@ -2553,6 +2622,11 @@ impl eframe::App for EditorApp {
                 } else {
                     "Rect: click to place first corner."
                 },
+                Tool::Fillet => if self.fillet_pending.is_some() {
+                    "Fillet: type radius and press Enter. Escape to cancel."
+                } else {
+                    "Fillet: click a connecting endpoint, or select two lines. Escape to cancel."
+                },
                 Tool::ConstraintMode(_) => "Constraint: click entities to apply. Escape to cancel.",
                 Tool::Dimension => if self.dim_editing {
                     "Dimension: type value and press Enter. Escape to cancel."
@@ -2654,7 +2728,13 @@ impl EditorApp {
     /// can be hosted in a floating `egui::Area` over the canvas,
     /// near the dimension label where the user is looking.
     fn render_dim_input(&mut self, ui: &mut egui::Ui) {
-        ui.checkbox(&mut self.dim_derived, "Derived");
+        // Derived checkbox is meaningless during a fillet edit --
+        // the radius dim is always driven (it's the control the user
+        // is actively setting), and its value flows from the typed
+        // expression or the fallback literal.
+        if self.fillet_pending.is_none() {
+            ui.checkbox(&mut self.dim_derived, "Derived");
+        }
         // Edge-detect the checkbox: on false -> true, back up what
         // the user had typed and swap in the measured value; on
         // true -> false, restore the backup so they see their
@@ -2684,6 +2764,13 @@ impl EditorApp {
             egui::TextEdit::singleline(&mut self.dim_input)
                 .interactive(!self.dim_derived),
         );
+        // Live fillet preview: whenever the text or corner set
+        // changes, restore the pre-fillet sketch and reapply every
+        // pending corner. reapply_fillets is a no-op when nothing
+        // meaningful changed (signature match).
+        if self.fillet_pending.is_some() && response.changed() {
+            self.reapply_fillets();
+        }
         // Select all text when entering edit mode (one-shot flag)
         if (self.dim_select_all || self.dim_select_all_on_uncheck) && response.has_focus() {
             self.dim_select_all = false;
@@ -2696,6 +2783,19 @@ impl EditorApp {
             egui::TextEdit::store_state(ui.ctx(), response.id, state);
         }
         let enter_pressed = ui.input(|i| i.key_pressed(egui::Key::Enter));
+        if enter_pressed && self.fillet_pending.is_some() {
+            // Fillet commit: reapply already baked the current input
+            // into the sketch, so Enter just finalises the session.
+            // No UpdateDimension is queued -- the single fillet undo
+            // group built by reapply stays as the canonical record.
+            self.reapply_fillets();
+            self.fillet_pending = None;
+            self.dim_editing = false;
+            self.dim_edit_index = None;
+            self.dim_kind = None;
+            self.selection.clear();
+            return;
+        }
         if enter_pressed || (response.lost_focus() && enter_pressed) {
             let mut input = self.dim_input.trim().to_string();
             // Range syntax: `>= V`, `<= V`, `LO to HI`. If the
@@ -2866,6 +2966,10 @@ impl EditorApp {
                 self.dim_edit_index = None;
                 self.dim_kind = None;
                 self.selection.clear();
+                // Fillet-in-flight: the dim commit finalises the
+                // fillet, so drop the pre-fillet snapshot. A later
+                // Escape would otherwise roll the whole fillet back.
+                self.fillet_pending = None;
             }
         } else if !response.has_focus() && self.dim_editing {
             response.request_focus();
