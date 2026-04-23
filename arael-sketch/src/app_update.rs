@@ -310,6 +310,11 @@ impl eframe::App for EditorApp {
                     self.tool = Tool::Fillet;
                     self.selection.clear();
                 }
+                if ui.selectable_label(self.tool == Tool::Chamfer, "Chamfer").clicked() {
+                    self.tool = Tool::Chamfer;
+                    self.selection.clear();
+                }
+                ui.end_row();
                 if ui.selectable_label(self.tool == Tool::Dimension, "Dims (D)").clicked() {
                     self.tool = Tool::Dimension;
                     self.dim_editing = false;
@@ -1738,7 +1743,7 @@ impl eframe::App for EditorApp {
                     }
                 }
 
-                Tool::Fillet => {
+                Tool::Fillet | Tool::Chamfer => {
                     if response.clicked_by(egui::PointerButton::Primary) {
                         // Derive a "corner arg" from this click: an
                         // endpoint snap yields "<line>.pN"; a
@@ -1784,6 +1789,8 @@ impl eframe::App for EditorApp {
                             Picked::Corner(arg, shortest) => {
                                 if self.fillet_pending.is_some() {
                                     self.toggle_fillet_corner(&arg);
+                                } else if self.tool == Tool::Chamfer {
+                                    self.try_start_gui_chamfer(&arg, shortest);
                                 } else {
                                     self.try_start_gui_fillet(&arg, shortest);
                                 }
@@ -2626,6 +2633,11 @@ impl eframe::App for EditorApp {
                     "Fillet: type radius and press Enter. Escape to cancel."
                 } else {
                     "Fillet: click a connecting endpoint, or select two lines. Escape to cancel."
+                },
+                Tool::Chamfer => if self.fillet_pending.is_some() {
+                    "Chamfer: type corner-to-end distance and press Enter. Escape to cancel."
+                } else {
+                    "Chamfer: click a connecting endpoint, or select two lines. Escape to cancel."
                 },
                 Tool::ConstraintMode(_) => "Constraint: click entities to apply. Escape to cancel.",
                 Tool::Dimension => if self.dim_editing {

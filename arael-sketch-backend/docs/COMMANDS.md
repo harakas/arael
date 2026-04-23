@@ -125,6 +125,8 @@ add_arc x1,y1 x2,y2 xm,ym  Create an arc through start, end, midpoint [driven]
 offset_line L0 distance      Create a parallel line offset by distance (alias: offset)
 fillet L1 L2 r               Round the shared corner of L1 and L2 with a tangent arc of radius r
 fillet L1.pN r               Same, naming the corner endpoint directly
+chamfer L1 L2 d              Bevel the shared corner at distance d from the corner
+chamfer L1.pN d              Same, naming the corner endpoint directly
 ```
 
 ### Auto-Coincident
@@ -1196,6 +1198,34 @@ fillet L0 L1 0.5             Round the (5,0) corner
 fillet L1 L2 0.5             Round the (5,3) corner
 fillet L2 L3 0.5             Round the (0,3) corner
 fillet L3 L0 0.5             Round the (0,0) corner
+```
+
+### Chamfer
+
+Bevel a shared corner. The corner coincident is broken, both lines
+are trimmed back by distance `d` from the corner, a new "chamfer
+line" spans the two trim points, and an anchor point is pinned at
+the original corner location via `PointOnLine` on each of the two
+input lines. Two distance dimensions record the trim: the primary
+holds the typed value (literal or live expression); the secondary is
+stored as `expr = <primary-dim-name>` so the two legs stay equal and
+track the primary parametrically.
+
+```
+chamfer L1 L2 d              Bevel the shared corner of L1 and L2
+chamfer L1.pN d              Bevel the corner at L1's pN endpoint
+```
+
+**Requirements.** Same as fillet: the two lines must share a corner
+via a direct `coincident_ll*`, the angle must be non-zero and
+non-180, and each line must be longer than `d`.
+
+**Example.**
+
+```
+add_rect 0,0 5,3 hv
+chamfer L0 L1 0.5            Bevel the (5,0) corner
+chamfer L1 L2 0.5            Bevel the (5,3) corner
 ```
 
 ## Solver Parameters

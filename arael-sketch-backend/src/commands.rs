@@ -1485,7 +1485,7 @@ fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
                 "add_line" | "add_rect" | "add_rect3" | "add_rectcenter" |
                 "add_point" | "add_circle" | "add_circle2" | "add_circle3" |
                 "add_circle2t" | "add_circle3t" | "add_ellipse" | "add_arc" |
-                "add_earc" | "add_earc3" | "add_earc_center" | "add_earc_tangent" | "add_earc_rtangent" | "offset_line" | "offset" | "fillet" | "mirror" |
+                "add_earc" | "add_earc3" | "add_earc_center" | "add_earc_tangent" | "add_earc_rtangent" | "offset_line" | "offset" | "fillet" | "chamfer" | "mirror" |
                 "length" | "radius" | "radius_b" | "sweep" | "angle" | "distance");
             if is_command {
                 let dim_count_before = ctx.sketch.dimensions.len();
@@ -1554,6 +1554,7 @@ fn execute_one(ctx: &mut CommandContext, input: &str) -> CommandResult {
         "add_earc_rtangent" => cmd_add_earc_rtangent(ctx, args_str),
         "offset_line" | "offset" => cmd_offset_line(ctx, args_str),
         "fillet" => cmd_fillet(ctx, args_str),
+        "chamfer" => cmd_chamfer(ctx, args_str),
         "delete" => cmd_delete(ctx, args_str),
         "horizontal" => cmd_horizontal(ctx, args_str),
         "vertical" => cmd_vertical(ctx, args_str),
@@ -5571,6 +5572,170 @@ fn cmd_fillet(ctx: &mut CommandContext, args: &str) -> CommandResult {
     ok(msg)
 }
 
+fn cmd_chamfer(ctx: &mut CommandContext, args: &str) -> CommandResult {
+    let tokens: Vec<&str> = args.split_whitespace().collect();
+    // Radius-token parsing reused verbatim from the fillet parse_radius
+    // helper: `d` may be a literal, a `=expr` snapshot, or a live
+    // expression like `d0`. Live exprs stay on the primary dim so the
+    // chamfer tracks its source parametrically.
+    let parse_distance = |ctx: &CommandContext, tok: &str| -> Result<(f64, Option<String>), String> {
+        match parse_dim_value(&ctx.sketch, tok)? {
+            (v, None) => Ok((v, None)),
+            (_, Some(expr)) => {
+                let v = eval_expr(&ctx.sketch, &expr)
+                    .map_err(|e| format!("Cannot evaluate '{}': {}", expr, e))?;
+                Ok((v, Some(expr)))
+            }
+        }
+    };
+
+    let (line_a, is_p1_a, line_b, is_p1_b, coincident_id, distance, dist_expr) = match tokens.len() {
+        3 => {
+            let la = match resolve_line(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
+            let lb = match resolve_line(&ctx.sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
+            if la == lb { return err("chamfer needs two different lines"); }
+            let (d, d_expr) = match parse_distance(ctx, tokens[2]) { Ok(v) => v, Err(e) => return err(e) };
+            let (is_p1_a, partner, is_p1_b, cid) = {
+                let mut found = None;
+                for probe in [true, false] {
+                    if let Some((p, is_p1_p, id)) = find_ll_coincident_partner(&ctx.sketch, la, probe) {
+                        if p == lb {
+                            found = Some((probe, p, is_p1_p, id));
+                            break;
+                        }
+                    }
+                }
+                match found {
+                    Some(v) => v,
+                    None => return err(format!(
+                        "chamfer: {} and {} are not connected at an endpoint",
+                        tokens[0], tokens[1])),
+                }
+            };
+            (la, is_p1_a, partner, is_p1_b, cid, d, d_expr)
+        }
+        2 => {
+            let ep = match resolve_endpoint_ref(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
+            let (la, is_p1_a) = match ep {
+                EndpointRef::LineP1(l) => (l, true),
+                EndpointRef::LineP2(l) => (l, false),
+                _ => return err("chamfer: endpoint must be a line end (L0.p1 / L0.p2)"),
+            };
+            let (d, d_expr) = match parse_distance(ctx, tokens[1]) { Ok(v) => v, Err(e) => return err(e) };
+            match find_ll_coincident_partner(&ctx.sketch, la, is_p1_a) {
+                Some((lb, is_p1_b, cid)) => (la, is_p1_a, lb, is_p1_b, cid, d, d_expr),
+                None => return err(format!(
+                    "chamfer: {} isn't coincident with another line endpoint",
+                    tokens[0])),
+            }
+        }
+        _ => return err("Usage: chamfer L1 L2 d  or  chamfer L1.pN d"),
+    };
+
+    if distance <= 1e-9 {
+        return err("chamfer distance must be positive");
+    }
+
+    // Geometry: unit direction from each line's corner end toward its
+    // far end, angle guard, trim distances. Same shape as cmd_fillet.
+    let la_ref = &ctx.sketch.lines[line_a];
+    let lb_ref = &ctx.sketch.lines[line_b];
+    let (corner_a, far_a) = if is_p1_a { (la_ref.p1.value, la_ref.p2.value) } else { (la_ref.p2.value, la_ref.p1.value) };
+    let (corner_b, far_b) = if is_p1_b { (lb_ref.p1.value, lb_ref.p2.value) } else { (lb_ref.p2.value, lb_ref.p1.value) };
+    let corner = vect2d::new((corner_a.x + corner_b.x) * 0.5, (corner_a.y + corner_b.y) * 0.5);
+    let dx_a = far_a.x - corner.x;
+    let dy_a = far_a.y - corner.y;
+    let len_a = (dx_a * dx_a + dy_a * dy_a).sqrt();
+    let dx_b = far_b.x - corner.x;
+    let dy_b = far_b.y - corner.y;
+    let len_b = (dx_b * dx_b + dy_b * dy_b).sqrt();
+    if len_a < 1e-9 || len_b < 1e-9 {
+        return err("chamfer: one of the lines has zero length");
+    }
+    let ua = vect2d::new(dx_a / len_a, dy_a / len_a);
+    let ub = vect2d::new(dx_b / len_b, dy_b / len_b);
+    let cos_theta = ua.x * ub.x + ua.y * ub.y;
+    if cos_theta >= 1.0 - 1e-6 {
+        return err("chamfer: lines overlap at the corner (cannot chamfer a zero angle)");
+    }
+    if cos_theta <= -1.0 + 1e-6 {
+        return err("chamfer: lines are collinear at the corner (no chamfer possible)");
+    }
+    if distance + 1e-9 >= len_a || distance + 1e-9 >= len_b {
+        return err(format!(
+            "chamfer: lines too short for distance {} (have {:.4} and {:.4})",
+            distance, len_a, len_b));
+    }
+    let t_a = vect2d::new(corner.x + ua.x * distance, corner.y + ua.y * distance);
+    let t_b = vect2d::new(corner.x + ub.x * distance, corner.y + ub.y * distance);
+
+    ctx.begin_group();
+    ctx.exec(Action::DeleteConstraint { id: coincident_id });
+
+    // Trim initial values; the solver then pins via PointOnLine + LL
+    // coincidents added below, so these are just good starting points.
+    if is_p1_a { ctx.sketch.lines[line_a].p1.value = t_a; }
+    else { ctx.sketch.lines[line_a].p2.value = t_a; }
+    if is_p1_b { ctx.sketch.lines[line_b].p1.value = t_b; }
+    else { ctx.sketch.lines[line_b].p2.value = t_b; }
+
+    // Corner anchor point at the original corner.
+    ctx.exec(Action::AddPoint { pos: corner });
+    let point_ref = ctx.sketch.points.refs().last().unwrap();
+    let point_name = ctx.sketch.points[point_ref].name.clone();
+
+    // The chamfer line itself (between the two trim points).
+    ctx.exec(Action::AddLine { p1: t_a, p2: t_b });
+    let new_line_ref = ctx.sketch.lines.refs().last().unwrap();
+    let new_line_name = ctx.sketch.lines[new_line_ref].name.clone();
+
+    // Stitch trimmed line ends to the chamfer line endpoints. L_new.p1
+    // sits at t_a (La's trimmed end), L_new.p2 at t_b (Lb's trimmed
+    // end). Positional bridges -- skip DOF check since every bridge
+    // is geometrically already satisfied by the initial values.
+    let coincide_a = if is_p1_a {
+        Action::ApplyCoincidentLL11 { a: line_a, b: new_line_ref }
+    } else {
+        Action::ApplyCoincidentLL21 { a: line_a, b: new_line_ref }
+    };
+    let coincide_b = if is_p1_b {
+        Action::ApplyCoincidentLL12 { a: line_b, b: new_line_ref }
+    } else {
+        Action::ApplyCoincidentLL22 { a: line_b, b: new_line_ref }
+    };
+    let saved_skip = ctx.skip_dof_check;
+    ctx.skip_dof_check = true;
+    ctx.exec(coincide_a);
+    ctx.exec(coincide_b);
+    // Pin the corner point at the intersection of La and Lb.
+    ctx.exec(Action::ApplyPointOnLine { point: point_ref, line: line_a });
+    ctx.exec(Action::ApplyPointOnLine { point: point_ref, line: line_b });
+    ctx.skip_dof_check = saved_skip;
+
+    // Primary distance dimension: corner point -> La's trimmed end.
+    let ep_a = if is_p1_a { DimensionEndpoint::LineP1(line_a) } else { DimensionEndpoint::LineP2(line_a) };
+    let ep_b = if is_p1_b { DimensionEndpoint::LineP1(line_b) } else { DimensionEndpoint::LineP2(line_b) };
+    ctx.exec(Action::AddDimension {
+        kind: DimensionKind::PointPointDistance(DimensionEndpoint::Point(point_ref), ep_a),
+        value: distance, expr: dist_expr, derived: false, range: None,
+    });
+    let first_dim_name = last_dim_name(ctx);
+
+    // Secondary distance dimension: equal to the primary, stored as
+    // `expr = <primary_dim_name>` so it tracks parametrically.
+    ctx.exec(Action::AddDimension {
+        kind: DimensionKind::PointPointDistance(DimensionEndpoint::Point(point_ref), ep_b),
+        value: distance, expr: Some(first_dim_name.clone()), derived: false, range: None,
+    });
+    let second_dim_name = last_dim_name(ctx);
+
+    ctx.session_names.insert("_".into(), new_line_name.clone());
+    ok(format!(
+        "Chamfered {} {} with {} + {} (d={:.4}) [{} distance, {} = {}]",
+        ctx.sketch.lines[line_a].name, ctx.sketch.lines[line_b].name,
+        new_line_name, point_name, distance, first_dim_name, second_dim_name, first_dim_name))
+}
+
 fn cmd_offset_line(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let tokens: Vec<&str> = args.split_whitespace().collect();
     if tokens.len() != 2 { return err("Usage: offset_line L0 distance"); }
@@ -7982,6 +8147,7 @@ fn cmd_help(args: &str) -> CommandResult {
             "add_earc_rtangent" => "add_earc_rtangent p2 t2 [bulge] (chain from cursor+tangent)",
             "offset_line" | "offset" => "offset_line L0 distance (create parallel line offset by distance)",
             "fillet" => "fillet L1 L2 r [notangent] [noradius]  or  fillet L1.pN r [notangent] [noradius] (round a corner with a tangent arc of radius r; breaks the shared LL coincident, trims both lines, adds arc + tangent + radius dim)",
+            "chamfer" => "chamfer L1 L2 d  or  chamfer L1.pN d (bevel a corner at distance d from the corner; breaks the shared LL coincident, trims both lines by d, adds a bevel line + corner anchor point + two equal distance dims)",
             "let" => "let name = expression (session variable, scalar or coordinate)",
             "save" => "save path.json",
             "load" => "load path.json",
@@ -8001,7 +8167,7 @@ fn cmd_help(args: &str) -> CommandResult {
 const COMMAND_NAMES: &[&str] = &[
     "add_line", "add_rect", "add_rect3", "add_rectcenter",
     "add_point", "add_circle", "add_circle2", "add_circle3", "add_circle2t", "add_circle3t", "add_ellipse",
-    "add_arc", "add_earc", "add_earc3", "add_earc_center", "add_earc_tangent", "add_earc_rtangent", "offset_line", "offset", "fillet",
+    "add_arc", "add_earc", "add_earc3", "add_earc_center", "add_earc_tangent", "add_earc_rtangent", "offset_line", "offset", "fillet", "chamfer",
     "delete", "horizontal", "vertical", "parallel", "perpendicular", "perp",
     "equal", "collinear", "tangent", "coincident", "concentric", "midpoint",
     "symmetry", "mirror", "point_on", "length", "radius", "radius_b", "sweep", "angle", "distance", "hdistance", "vdistance", "xangle",
@@ -8359,6 +8525,20 @@ pub fn complete(
                     for k in &["notangent", "noradius"] {
                         if k.starts_with(current_word) { results.push((*k).to_string()); }
                     }
+                }
+            }
+        }
+
+        // Chamfer: same arg shape as fillet, no keyword options yet.
+        "chamfer" => {
+            match token_index {
+                1 => add_lines(sketch, &mut results, current_word),
+                2 => {
+                    add_lines(sketch, &mut results, current_word);
+                    add_expression_completions(sketch, session_names, &mut results, current_word);
+                }
+                _ => {
+                    add_expression_completions(sketch, session_names, &mut results, current_word);
                 }
             }
         }
@@ -11791,6 +11971,81 @@ mod tests {
         run_ok(&mut ctx, "angle L0 L1 45 driven closest");
         assert_eq!(ctx.sketch.dimensions.len(), 1);
         assert!(!ctx.sketch.dimensions[0].derived);
+    }
+
+    // -- chamfer --
+
+    #[test]
+    fn test_chamfer_two_lines() {
+        let mut ctx = CommandContext::new();
+        // Right-angle corner at (5,0).
+        run_ok(&mut ctx, "add_line 0,0 5,0");
+        run_ok(&mut ctx, "add_line 5,0 5,3");
+        let out = run_ok(&mut ctx, "chamfer L0 L1 0.5");
+        assert!(out.contains("Chamfered L0 L1"), "got: {}", out);
+        // A new line (the bevel) and a new point (corner anchor).
+        assert_eq!(ctx.sketch.lines.refs().count(), 3);
+        assert_eq!(ctx.sketch.points.refs().filter(|r| !ctx.sketch.points[*r].helper).count(), 1);
+        // Two distance dims.
+        assert_eq!(ctx.sketch.dimensions.len(), 2);
+        // Secondary dim tracks the primary by name.
+        let primary_name = ctx.sketch.dimensions[0].name.clone();
+        assert_eq!(ctx.sketch.dimensions[1].expr_str.as_deref(), Some(primary_name.as_str()));
+        // L0 trimmed to x=4.5, L1 trimmed to y=0.5.
+        let l0 = &ctx.sketch.lines[Ref::<Line>::new(0)];
+        assert!((l0.p2.value.x - 4.5).abs() < 1e-6);
+        let l1 = &ctx.sketch.lines[Ref::<Line>::new(1)];
+        assert!((l1.p1.value.y - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_chamfer_endpoint_form() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0");
+        run_ok(&mut ctx, "add_line 5,0 5,3");
+        let out = run_ok(&mut ctx, "chamfer L0.p2 0.5");
+        assert!(out.contains("Chamfered L0 L1"), "got: {}", out);
+    }
+
+    #[test]
+    fn test_chamfer_parametric_distance() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 10,0");
+        run_ok(&mut ctx, "add_line 10,0 10,10");
+        run_ok(&mut ctx, "length L0 10");
+        // Live expression on the chamfer distance -- must stick as
+        // expr_str on the primary distance dim so the whole chamfer
+        // tracks when d0 moves.
+        run_ok(&mut ctx, "chamfer L0 L1 d0*0.1");
+        // Dim layout: d0 (length), d1 (chamfer primary), d2 (secondary).
+        let d1 = &ctx.sketch.dimensions[1];
+        assert_eq!(d1.expr_str.as_deref(), Some("d0*0.1"));
+        let d2 = &ctx.sketch.dimensions[2];
+        assert_eq!(d2.expr_str.as_deref(), Some(d1.name.as_str()));
+        run_ok(&mut ctx, "length L0 20");
+        let d1 = &ctx.sketch.dimensions[1];
+        assert!((d1.value - 2.0).abs() < 1e-3,
+            "chamfer primary should track to 2.0, got {}", d1.value);
+    }
+
+    #[test]
+    fn test_chamfer_rejects_collinear() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0");
+        run_ok(&mut ctx, "add_line 5,0 10,0");
+        let r = execute_one(&mut ctx, "chamfer L0 L1 0.5");
+        assert!(r.is_error);
+        assert!(r.output.contains("collinear"), "got: {}", r.output);
+    }
+
+    #[test]
+    fn test_chamfer_rejects_too_short() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 1,0");
+        run_ok(&mut ctx, "add_line 1,0 1,1");
+        let r = execute_one(&mut ctx, "chamfer L0 L1 2");
+        assert!(r.is_error);
+        assert!(r.output.contains("too short"), "got: {}", r.output);
     }
 
     // -- fillet --

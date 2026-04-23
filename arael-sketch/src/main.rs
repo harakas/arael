@@ -2675,12 +2675,22 @@ impl EditorApp {
         self.history.begin_group();
     }
 
-    /// Kick off a fillet from the GUI Fillet tool: snapshot the
-    /// pre-fillet sketch, record the first corner, apply it with
-    /// 10 % of the shortest involved line's length as the starting
-    /// radius, then drop the user straight into radius editing.
-    /// Additional corners can be toggled in/out while editing.
+    /// Kick off a corner op (fillet or chamfer) from the GUI: snapshot
+    /// the pre-op sketch, record the first corner, apply it with 10 %
+    /// of the shortest involved line's length as the starting
+    /// radius/distance, then drop the user straight into value
+    /// editing. Additional corners can be toggled in/out while
+    /// editing. `command` is the backend command name the reapply
+    /// loop runs.
     fn try_start_gui_fillet(&mut self, arg: &str, shortest_len: f64) {
+        self.try_start_gui_corner_op("fillet", arg, shortest_len);
+    }
+
+    fn try_start_gui_chamfer(&mut self, arg: &str, shortest_len: f64) {
+        self.try_start_gui_corner_op("chamfer", arg, shortest_len);
+    }
+
+    fn try_start_gui_corner_op(&mut self, command: &'static str, arg: &str, shortest_len: f64) {
         if shortest_len < 1e-6 { return; }
         let pre_snapshot = match bincode::serialize(&self.sketch) {
             Ok(s) => s,
@@ -2689,6 +2699,7 @@ impl EditorApp {
         let history_cursor_before = self.history.cursor;
         let initial_r = format!("{:.4}", shortest_len * 0.1);
         self.fillet_pending = Some(FilletPending {
+            command,
             pre_snapshot,
             history_cursor_before,
             corners: vec![arg.to_string()],
@@ -2800,12 +2811,13 @@ impl EditorApp {
         self.history.cursor = history_cursor_before;
         self.status_error = None;
 
-        // Run primary fillet. Its radius dim name drives the rest.
+        // Run primary corner op. Its dim name drives the rest.
+        let command = self.fillet_pending.as_ref().map(|p| p.command).unwrap_or("fillet");
         let mut primary_dim_name: Option<String> = None;
         let mut applied_any = false;
         let mut first_result_radius = radius.clone();
         if let Some(first) = corners.first() {
-            let cmd = format!("fillet {} {}", first, radius);
+            let cmd = format!("{} {} {}", command, first, radius);
             let results = self.run_commands(&cmd);
             let ok = !results.iter().any(|r| r.is_error)
                 && self.sketch.dimensions.last().is_some();
@@ -2823,10 +2835,10 @@ impl EditorApp {
             }
         }
 
-        // Secondary fillets reference the primary dim by name.
+        // Secondary corner ops reference the primary dim by name.
         if let Some(pdn) = &primary_dim_name {
             for corner in corners.iter().skip(1) {
-                let cmd = format!("fillet {} {}", corner, pdn);
+                let cmd = format!("{} {} {}", command, corner, pdn);
                 let results = self.run_commands(&cmd);
                 if results.iter().any(|r| r.is_error) {
                     // Leave this corner failed; the others still stick.

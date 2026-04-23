@@ -74,6 +74,7 @@ pub enum Tool {
     DrawArc,
     DrawRect,
     Fillet,
+    Chamfer,
     ConstraintMode(ConstraintType),
     Dimension,
 }
@@ -117,34 +118,41 @@ pub struct RectDrawState {
     pub snap_corner: Option<SnapTarget>,
 }
 
-// In-flight fillet set, created when the Fillet tool fires but still
-// editable via the dim-input overlay until the user commits with
-// Enter or reverts with Escape. The pre-fillet sketch snapshot lets
-// Escape fully restore the sketch -- trim, arcs, coincidents,
-// tangents and the radius dim(s) all undone -- and
+// In-flight corner-op set (fillet or chamfer), created when the tool
+// fires but still editable via the dim-input overlay until the user
+// commits with Enter or reverts with Escape. The pre-op sketch
+// snapshot lets Escape fully restore the sketch -- trim, new arc or
+// chamfer line, coincidents, tangents, and dim(s) all undone -- and
 // `history_cursor_before` matches the dropped actions so undo lines
 // up. Every live edit restores to this snapshot and re-applies all
-// pending fillets; keeping the state declarative lets the radius
-// edit and corner add/remove ripple through cleanly.
-pub struct FilletPending {
+// pending corners; keeping state declarative lets the radius edit
+// and corner add/remove ripple through cleanly.
+pub struct CornerOpPending {
+    /// Backend command name: "fillet" or "chamfer". The reapply loop
+    /// runs `<command> <corner_arg> <radius>` per corner, so the
+    /// two tools share the same live-preview plumbing.
+    pub command: &'static str,
     pub pre_snapshot: std::vec::Vec<u8>,
     pub history_cursor_before: usize,
-    /// Fillet argument strings, one per corner: `"L0 L1"` or
-    /// `"L0.p2"`. First entry is the primary fillet -- its radius
-    /// dimension receives the user-typed value. The rest each
-    /// reference the primary dim by name (`d<N>`) so they track it
-    /// if the user edits.
+    /// Corner argument strings, one per corner: `"L0 L1"` or
+    /// `"L0.p2"`. First entry is the primary -- its created dimension
+    /// receives the user-typed value. Subsequent entries reference
+    /// the primary dim by name (`d<N>`) so every corner tracks it.
     pub corners: std::vec::Vec<String>,
-    /// Last radius token (literal or expression) whose reapply
-    /// actually produced a fillet. Empty / 0 / unparseable input
-    /// falls back to this, so the canvas shows the most recent
-    /// valid state until the user types something parseable again.
+    /// Last radius/distance token whose reapply actually produced
+    /// a result. Empty / 0 / unparseable input falls back to this so
+    /// the canvas keeps the most recent valid state while the user
+    /// is mid-edit.
     pub last_valid_radius: String,
     /// Signature of the last successful reapply: radius token plus
-    /// corner count. Used to decide whether another reapply pass
-    /// is needed when dim_input or `corners` changes.
+    /// corner count. Used to decide whether another reapply pass is
+    /// needed when dim_input or `corners` changes.
     pub last_applied_sig: String,
 }
+
+/// Back-compat type alias while the rest of the code still uses
+/// FilletPending. Cheap rename target.
+pub type FilletPending = CornerOpPending;
 
 // Constraint symbol types (drawn with painter, not text)
 #[derive(Clone, Copy)]
