@@ -5369,16 +5369,34 @@ fn cmd_fillet(ctx: &mut CommandContext, args: &str) -> CommandResult {
         }
     }
 
+    // Parse the radius token into a (numeric value, optional live
+    // expression) pair. The numeric value drives the fillet geometry
+    // right now (tangent-point offsets, arc center). The expression,
+    // when present, is passed through to the AddDimension action so
+    // the radius tracks the named param / dim -- `fillet L1 L2 d3`
+    // stays parametric as dimensions shift, matching every other
+    // dim-creation command.
+    let parse_radius = |ctx: &CommandContext, tok: &str| -> Result<(f64, Option<String>), String> {
+        match parse_dim_value(&ctx.sketch, tok)? {
+            (v, None) => Ok((v, None)),
+            (_, Some(expr)) => {
+                let v = eval_expr(&ctx.sketch, &expr)
+                    .map_err(|e| format!("Cannot evaluate '{}': {}", expr, e))?;
+                Ok((v, Some(expr)))
+            }
+        }
+    };
+
     // Resolve the two lines and which endpoint of each sits at the
     // shared corner. Two forms:
     //   fillet L1 L2 r     -- scan for the shared corner automatically
     //   fillet L1.pN r     -- corner pinned; partner discovered by scan
-    let (line_a, is_p1_a, line_b, is_p1_b, coincident_id, radius) = match tokens.len() {
+    let (line_a, is_p1_a, line_b, is_p1_b, coincident_id, radius, radius_expr) = match tokens.len() {
         3 => {
             let la = match resolve_line(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
             let lb = match resolve_line(&ctx.sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
             if la == lb { return err("fillet needs two different lines"); }
-            let r = match eval_expr(&ctx.sketch, tokens[2]) { Ok(v) => v, Err(e) => return err(e) };
+            let (r, r_expr) = match parse_radius(ctx, tokens[2]) { Ok(v) => v, Err(e) => return err(e) };
             // Try both endpoint sides of line_a to find the one whose
             // partner is line_b. Catches the caller listing lines in
             // either order without forcing them to know which endpoint.
@@ -5399,7 +5417,7 @@ fn cmd_fillet(ctx: &mut CommandContext, args: &str) -> CommandResult {
                         tokens[0], tokens[1])),
                 }
             };
-            (la, is_p1_a, partner, is_p1_b, cid, r)
+            (la, is_p1_a, partner, is_p1_b, cid, r, r_expr)
         }
         2 => {
             let ep = match resolve_endpoint_ref(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
@@ -5408,9 +5426,9 @@ fn cmd_fillet(ctx: &mut CommandContext, args: &str) -> CommandResult {
                 EndpointRef::LineP2(l) => (l, false),
                 _ => return err("fillet: endpoint must be a line end (L0.p1 / L0.p2)"),
             };
-            let r = match eval_expr(&ctx.sketch, tokens[1]) { Ok(v) => v, Err(e) => return err(e) };
+            let (r, r_expr) = match parse_radius(ctx, tokens[1]) { Ok(v) => v, Err(e) => return err(e) };
             match find_ll_coincident_partner(&ctx.sketch, la, is_p1_a) {
-                Some((lb, is_p1_b, cid)) => (la, is_p1_a, lb, is_p1_b, cid, r),
+                Some((lb, is_p1_b, cid)) => (la, is_p1_a, lb, is_p1_b, cid, r, r_expr),
                 None => return err(format!(
                     "fillet: {} isn't coincident with another line endpoint",
                     tokens[0])),
@@ -5533,7 +5551,7 @@ fn cmd_fillet(ctx: &mut CommandContext, args: &str) -> CommandResult {
     if !noradius {
         ctx.exec(Action::AddDimension {
             kind: DimensionKind::ArcRadius(arc_ref),
-            value: radius, expr: None, derived: false, range: None,
+            value: radius, expr: radius_expr, derived: false, range: None,
         });
         if ctx.status_error.is_none() {
             let dim_name = last_dim_name(ctx);
@@ -11817,6 +11835,28 @@ mod tests {
         assert_eq!(ctx.sketch.dimensions.len(), 0);
         // Arc still exists.
         assert_eq!(ctx.sketch.arcs.refs().count(), 1);
+    }
+
+    #[test]
+    fn test_fillet_parametric_radius() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 10,0");
+        run_ok(&mut ctx, "add_line 10,0 10,10");
+        run_ok(&mut ctx, "length L0 10");
+        // Radius expressed as a live expression referencing the length
+        // dim: the fillet dim must store the expression so later edits
+        // to d0 propagate through.
+        run_ok(&mut ctx, "fillet L0 L1 d0*0.1");
+        // Radius dim is the second dim (d1). Verify it captured the
+        // expression, not the numeric snapshot.
+        let r_dim = &ctx.sketch.dimensions[1];
+        assert_eq!(r_dim.expr_str.as_deref(), Some("d0*0.1"),
+            "expected live expr, got {:?}", r_dim.expr_str);
+        // Change the source; fillet radius must follow.
+        run_ok(&mut ctx, "length L0 20");
+        let r_dim = &ctx.sketch.dimensions[1];
+        assert!((r_dim.value - 2.0).abs() < 1e-3,
+            "radius should track to 2.0 after length=20, got {}", r_dim.value);
     }
 
     #[test]
