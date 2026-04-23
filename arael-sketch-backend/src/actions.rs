@@ -1145,14 +1145,33 @@ impl Action {
                         });
                     }
                     DimensionKind::LineLineDistance(a, b) => {
-                        // Validate: both lines exist and a Parallel
-                        // constraint is already coupling them. The caller
-                        // (cmd_distance / GUI tool) is responsible for
-                        // emitting ApplyParallel before AddDimension.
+                        // Validate: both lines exist and are currently
+                        // geometrically parallel. The dim's residual is a
+                        // point-to-line perpendicular distance; if the
+                        // lines ever rotate off-parallel its meaning
+                        // decays, but we don't enforce the pairing here --
+                        // the caller (cmd_distance / GUI) emits Parallel
+                        // explicitly when it matters. Keeping the action
+                        //'s guard purely geometric means the dim works
+                        // the instant you ask for it, without caring
+                        // whether parallelism is currently expressed via
+                        // an explicit Parallel, twin H/V flags, or a
+                        // chain of other constraints.
                         let valid_lines = sketch.lines.get(*a).is_some()
                             && sketch.lines.get(*b).is_some();
-                        let parallel_present = sketch.parallel.iter().any(|p|
-                            (p.a == *a && p.b == *b) || (p.a == *b && p.b == *a));
+                        let parallel_present = if !valid_lines { false }
+                        else {
+                            let la_line = &sketch.lines[*a];
+                            let lb_line = &sketch.lines[*b];
+                            let ax = la_line.p2.value.x - la_line.p1.value.x;
+                            let ay = la_line.p2.value.y - la_line.p1.value.y;
+                            let bx = lb_line.p2.value.x - lb_line.p1.value.x;
+                            let by = lb_line.p2.value.y - lb_line.p1.value.y;
+                            let alen = (ax * ax + ay * ay).sqrt();
+                            let blen = (bx * bx + by * by).sqrt();
+                            if alen < 1e-12 || blen < 1e-12 { false }
+                            else { (ax * by - ay * bx).abs() / (alen * blen) < 1e-6 }
+                        };
                         if !valid_lines || !parallel_present {
                             return false;
                         }

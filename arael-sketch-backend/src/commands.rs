@@ -6891,11 +6891,25 @@ fn cmd_distance(ctx: &mut CommandContext, args: &str) -> CommandResult {
         let line_b = match resolve_line(&ctx.sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
         let kind = DimensionKind::LineLineDistance(line_a, line_b);
         ctx.begin_group();
-        // Ensure a Parallel constraint exists between the two lines
-        // before AddDimension runs (the action's apply body validates
-        // the pairing is present).
-        let already_parallel = ctx.sketch.parallel.iter().any(|p|
-            (p.a == line_a && p.b == line_b) || (p.a == line_b && p.b == line_a));
+        // "Already parallel" means the two lines are currently
+        // geometrically parallel -- whether via an explicit Parallel,
+        // matching H/V flags, or just happening to align. In all
+        // three cases a fresh ApplyParallel would be DOF-rejected or
+        // redundant, so skip it; the dim is also placeable without
+        // a paired Parallel since the action-side guard is purely
+        // geometric. If the lines aren't parallel yet, add Parallel
+        // first so the solver brings them into alignment before
+        // trying to satisfy the gap.
+        let la_line = &ctx.sketch.lines[line_a];
+        let lb_line = &ctx.sketch.lines[line_b];
+        let ax = la_line.p2.value.x - la_line.p1.value.x;
+        let ay = la_line.p2.value.y - la_line.p1.value.y;
+        let bx = lb_line.p2.value.x - lb_line.p1.value.x;
+        let by = lb_line.p2.value.y - lb_line.p1.value.y;
+        let alen = (ax * ax + ay * ay).sqrt();
+        let blen = (bx * bx + by * by).sqrt();
+        let already_parallel = alen > 1e-12 && blen > 1e-12
+            && (ax * by - ay * bx).abs() / (alen * blen) < 1e-6;
         if !already_parallel {
             ctx.exec(Action::ApplyParallel { a: line_a, b: line_b });
         }
@@ -6904,7 +6918,17 @@ fn cmd_distance(ctx: &mut CommandContext, args: &str) -> CommandResult {
             ctx.exec(Action::UpdateDimension { index: idx, value: val, expr, range: None,  });
             return ok_or_status(ctx, format!("Updated {} line-line distance = {}", name, tokens[2]));
         }
+        // When the pair is already parallel, the dim is unambiguously
+        // a new gap constraint. At axis-aligned configs the Jacobian
+        // row of a new LineLineDistance can be instantaneously
+        // tangent-aligned with an existing H/Tangent row, so the
+        // rank check misses the genuine DOF reduction. Skip the DOF
+        // check here so the user isn't asked to 'force' a constraint
+        // we know is real.
+        let saved_skip = ctx.skip_dof_check;
+        if already_parallel { ctx.skip_dof_check = true; }
         ctx.exec(Action::AddDimension { kind, value: val, expr, derived: is_derived, range: None,  });
+        ctx.skip_dof_check = saved_skip;
         let dim_name = last_dim_name(ctx);
         let prefix = if is_derived { "Derived" } else { "Set" };
         return ok_or_status(ctx, format!("{} {} line-line distance {} {} = {}", prefix, dim_name, tokens[0], tokens[1], tokens[2]));
