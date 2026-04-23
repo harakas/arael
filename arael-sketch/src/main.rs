@@ -263,6 +263,13 @@ pub struct EditorApp {
     /// just be rejected by the DOF check on release.
     pub drag_line_locked_h: bool,
     pub drag_line_locked_v: bool,
+    /// Captured at drag-start: true if the dragged line's dragged
+    /// endpoint is coincident with / on / tied to some other entity.
+    /// Suppresses the auto-H/V hint for interior vertices of a
+    /// segmented structure. Snapshotted at drag-start so the
+    /// drag-helper coincident pushed a moment later doesn't itself
+    /// count as a "connection".
+    pub drag_line_endpoint_connected: bool,
     pub last_cost: f64,
     drag_saved_cost: f64,              // best cost seen during drag
     drag_saved_snapshot: Option<Vec<u8>>, // sketch state at that best cost
@@ -417,6 +424,7 @@ impl EditorApp {
             drag_hv_hint: None,
             drag_line_locked_h: false,
             drag_line_locked_v: false,
+            drag_line_endpoint_connected: false,
             last_cost,
             drag_saved_cost: 0.0,
             drag_saved_snapshot: None,
@@ -823,6 +831,7 @@ impl EditorApp {
         self.drag_perp_already.clear();
         self.drag_line_locked_h = false;
         self.drag_line_locked_v = false;
+        self.drag_line_endpoint_connected = false;
         if let GrabTarget::LineP1(line) | GrabTarget::LineP2(line) = target {
             let is_p1 = matches!(target, GrabTarget::LineP1(_));
             if let Some(host) = self.find_anchor_host_line_for_drag(line, is_p1)
@@ -833,6 +842,10 @@ impl EditorApp {
             // already pinned (directly or implicitly), skip the hint.
             self.drag_line_locked_h = !self.hv_would_reduce_dof(line, true);
             self.drag_line_locked_v = !self.hv_would_reduce_dof(line, false);
+            // Connectedness check must happen BEFORE start_drag pushes
+            // its drag-helper coincident (otherwise the helper's own
+            // coincident registers as a connection).
+            self.drag_line_endpoint_connected = self.line_endpoint_has_connection(line, is_p1);
         }
 
         // Create a drag helper point at mouse position
@@ -1074,7 +1087,8 @@ impl EditorApp {
                         } else {
                             self.sketch.lines[line].p1.value
                         };
-                        if let Some((horizontal, snapped)) = crate::app_update::hv_snap_from(
+                        if !self.drag_line_endpoint_connected
+                            && let Some((horizontal, snapped)) = crate::app_update::hv_snap_from(
                             anchor, effective_pos, self.scale, PERP_SNAP_PX,
                         ) {
                             let already_locked = if horizontal {
@@ -2083,6 +2097,43 @@ impl EditorApp {
     }
 
     // Check if a coincident constraint already exists (direct or transitive)
+    /// True when the dragged endpoint of `line` (the P1 end if
+    /// `is_p1`, otherwise the P2 end) is already coincident with,
+    /// lying on, or tied to the midpoint of some other entity.
+    /// Used to suppress the auto-H/V drag hint when dragging an
+    /// interior vertex of a segmented structure -- the endpoint
+    /// can't actually move in isolation there, so offering an
+    /// axis-snap would just be noise.
+    fn line_endpoint_has_connection(&self, line: Ref<Line>, is_p1: bool) -> bool {
+        let s = &self.sketch;
+        if is_p1 {
+            if s.coincident_lp1.iter().any(|c| c.line == line) { return true; }
+            if s.coincident_ll11.iter().any(|c| c.a == line || c.b == line) { return true; }
+            if s.coincident_ll12.iter().any(|c| c.a == line) { return true; }
+            if s.coincident_ll21.iter().any(|c| c.b == line) { return true; }
+            if s.line_p1_on_line.iter().any(|c| c.a == line) { return true; }
+            if s.coincident_lp1_arc_center.iter().any(|c| c.line == line) { return true; }
+            if s.coincident_lp1_arc_start.iter().any(|c| c.line == line) { return true; }
+            if s.coincident_lp1_arc_end.iter().any(|c| c.line == line) { return true; }
+            if s.line_p1_on_arc.iter().any(|c| c.line == line) { return true; }
+            if s.midpoint_lp1.iter().any(|c| c.line == line) { return true; }
+            if s.midpoint_lp1_arc.iter().any(|c| c.line == line) { return true; }
+        } else {
+            if s.coincident_lp2.iter().any(|c| c.line == line) { return true; }
+            if s.coincident_ll22.iter().any(|c| c.a == line || c.b == line) { return true; }
+            if s.coincident_ll12.iter().any(|c| c.b == line) { return true; }
+            if s.coincident_ll21.iter().any(|c| c.a == line) { return true; }
+            if s.line_p2_on_line.iter().any(|c| c.a == line) { return true; }
+            if s.coincident_lp2_arc_center.iter().any(|c| c.line == line) { return true; }
+            if s.coincident_lp2_arc_start.iter().any(|c| c.line == line) { return true; }
+            if s.coincident_lp2_arc_end.iter().any(|c| c.line == line) { return true; }
+            if s.line_p2_on_arc.iter().any(|c| c.line == line) { return true; }
+            if s.midpoint_lp2.iter().any(|c| c.line == line) { return true; }
+            if s.midpoint_lp2_arc.iter().any(|c| c.line == line) { return true; }
+        }
+        false
+    }
+
     fn has_existing_coincident_line(&self, line: Ref<Line>, is_p1: bool, snap: SnapTarget) -> bool {
         if let Some(snap_sel) = Self::snap_to_selection(snap) {
             let line_sel = if is_p1 { Selection::LineP1(line) } else { Selection::LineP2(line) };
