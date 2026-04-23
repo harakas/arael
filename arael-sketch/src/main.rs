@@ -887,6 +887,33 @@ impl EditorApp {
                 Some(GrabTarget::ArcCenter(r)) | Some(GrabTarget::ArcStart(r)) | Some(GrabTarget::ArcEnd(r)) => (None, Some(r)),
                 _ => (None, None),
             };
+            // Where the dragged entity actually sits after the last
+            // solve. Used to gate snap hints -- a snap is only real if
+            // the grab can physically reach the target. Without this
+            // gate a DOF=0 sketch would flash snap previews as the
+            // cursor roams, and a heavily-lagged drag (ball-clamp)
+            // would propose unreachable snaps. The probe itself stays
+            // at mouse_pos so snaps still *detach* when the user
+            // moves the cursor away from the target.
+            let grab_pos = match self.grab {
+                Some(GrabTarget::Point(r)) => Some(self.sketch.points[r].pos.value),
+                Some(GrabTarget::LineP1(r)) => Some(self.sketch.lines[r].p1.value),
+                Some(GrabTarget::LineP2(r)) => Some(self.sketch.lines[r].p2.value),
+                Some(GrabTarget::ArcCenter(r)) => Some(self.sketch.arcs[r].center.value),
+                Some(GrabTarget::ArcStart(r)) => Some(arael_sketch_backend::geometry::arc_start_pos(&self.sketch.arcs[r])),
+                Some(GrabTarget::ArcEnd(r)) => Some(arael_sketch_backend::geometry::arc_end_pos(&self.sketch.arcs[r])),
+                _ => None,
+            };
+            let reach = |target: vect2d| -> bool {
+                match grab_pos {
+                    Some(gp) => {
+                        let dx = target.x - gp.x;
+                        let dy = target.y - gp.y;
+                        (dx * dx + dy * dy).sqrt() < hit_threshold
+                    }
+                    None => true,
+                }
+            };
             let (effective_pos, snap_preview) = match self.grab {
                 Some(grab @ (GrabTarget::Point(_)
                     | GrabTarget::LineP1(_) | GrabTarget::LineP2(_)
@@ -901,8 +928,8 @@ impl EditorApp {
                         mouse_pos, hit_threshold, exclude_line, exclude_arc,
                         |t| !self.has_existing_snap_attachment(grab, *t),
                     ) {
-                        Some((p, t)) => (p, Some((p, t))),
-                        None => (mouse_pos, None),
+                        Some((p, t)) if reach(p) => (p, Some((p, t))),
+                        _ => (mouse_pos, None),
                     }
                 }
                 _ => (mouse_pos, None),
@@ -935,7 +962,7 @@ impl EditorApp {
                                 let hl = &self.sketch.lines[host];
                                 if let Some(p) = self.try_perp_snap(
                                     opp, hl.p1.value, hl.p2.value, mouse_pos, PERP_SNAP_PX,
-                                ) {
+                                ).filter(|foot| reach(*foot)) {
                                     // Only propose the perpendicular hint if
                                     // applying it would actually reduce DOF.
                                     // If the candidate's row is already in the
