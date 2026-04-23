@@ -74,6 +74,85 @@ pub enum ConstraintId {
     HelperBridge(Ref<Point>),
 }
 
+/// Format a ConstraintId as its user-visible name: `CL0H` /
+/// `CL0V` for Horizontal/Vertical line flags, `C<nid>` for every
+/// numbered constraint collection. Mirrors the name shown by `list`,
+/// accepted by `delete`, and returned from `find_constraint_by_name`.
+/// Command handlers use this to surface the IDs of constraints they
+/// create or delete in their success messages.
+pub fn constraint_id_name(sketch: &Sketch, id: ConstraintId) -> Option<String> {
+    use arael_sketch_solver::format_flag_name;
+    match id {
+        ConstraintId::Horizontal(r) => Some(format_flag_name(&sketch.lines[r].name, 'H')),
+        ConstraintId::Vertical(r) => Some(format_flag_name(&sketch.lines[r].name, 'V')),
+        ConstraintId::Parallel(i) => Some(format!("C{}", sketch.parallel.get(i)?.nid)),
+        ConstraintId::ArcLineParallel(i) => Some(format!("C{}", sketch.arc_line_parallel.get(i)?.nid)),
+        ConstraintId::ArcArcParallel(i) => Some(format!("C{}", sketch.arc_arc_parallel.get(i)?.nid)),
+        ConstraintId::Perpendicular(i) => Some(format!("C{}", sketch.perpendicular.get(i)?.nid)),
+        ConstraintId::EqualLength(i) => Some(format!("C{}", sketch.equal_length.get(i)?.nid)),
+        ConstraintId::EqualRadius(i) => Some(format!("C{}", sketch.equal_radius.get(i)?.nid)),
+        ConstraintId::Concentric(i) => Some(format!("C{}", sketch.concentric.get(i)?.nid)),
+        ConstraintId::TangentLA(i) => Some(format!("C{}", sketch.tangent_la.get(i)?.nid)),
+        ConstraintId::TangentAA(i) => Some(format!("C{}", sketch.tangent_aa.get(i)?.nid)),
+        ConstraintId::Collinear(i) => Some(format!("C{}", sketch.collinear.get(i)?.nid)),
+        ConstraintId::Symmetry(i) => Some(format!("C{}", sketch.symmetry_ll.get(i)?.nid)),
+        ConstraintId::SymmetryPP(i) => Some(format!("C{}", sketch.symmetry_pp.get(i)?.nid)),
+        ConstraintId::SymmetryAA(i) => Some(format!("C{}", sketch.symmetry_aa.get(i)?.nid)),
+        ConstraintId::Midpoint(kind, i) => {
+            let nid = match kind {
+                MidpointKind::Point => sketch.midpoint.get(i)?.nid,
+                MidpointKind::LP1 => sketch.midpoint_lp1.get(i)?.nid,
+                MidpointKind::LP2 => sketch.midpoint_lp2.get(i)?.nid,
+                MidpointKind::ArcStart => sketch.midpoint_arc_start.get(i)?.nid,
+                MidpointKind::ArcEnd => sketch.midpoint_arc_end.get(i)?.nid,
+                MidpointKind::ArcPoint => sketch.midpoint_arc_point.get(i)?.nid,
+                MidpointKind::LP1Arc => sketch.midpoint_lp1_arc.get(i)?.nid,
+                MidpointKind::LP2Arc => sketch.midpoint_lp2_arc.get(i)?.nid,
+                MidpointKind::ArcStartArc => sketch.midpoint_arc_start_arc.get(i)?.nid,
+                MidpointKind::ArcEndArc => sketch.midpoint_arc_end_arc.get(i)?.nid,
+            };
+            Some(format!("C{}", nid))
+        }
+        ConstraintId::Coincident(kind, i) => {
+            let nid = match kind {
+                CoincidentKind::PP => sketch.coincident_pp.get(i)?.nid,
+                CoincidentKind::LP1 => sketch.coincident_lp1.get(i)?.nid,
+                CoincidentKind::LP2 => sketch.coincident_lp2.get(i)?.nid,
+                CoincidentKind::LL11 => sketch.coincident_ll11.get(i)?.nid,
+                CoincidentKind::LL12 => sketch.coincident_ll12.get(i)?.nid,
+                CoincidentKind::LL21 => sketch.coincident_ll21.get(i)?.nid,
+                CoincidentKind::LL22 => sketch.coincident_ll22.get(i)?.nid,
+                CoincidentKind::PointOnLine => sketch.point_on_line.get(i)?.nid,
+                CoincidentKind::PointOnArc => sketch.point_on_arc.get(i)?.nid,
+                CoincidentKind::LP1OnLine => sketch.line_p1_on_line.get(i)?.nid,
+                CoincidentKind::LP2OnLine => sketch.line_p2_on_line.get(i)?.nid,
+                CoincidentKind::LP1OnArc => sketch.line_p1_on_arc.get(i)?.nid,
+                CoincidentKind::LP2OnArc => sketch.line_p2_on_arc.get(i)?.nid,
+                CoincidentKind::ArcCenter => sketch.coincident_arc_center.get(i)?.nid,
+                CoincidentKind::ArcStart => sketch.coincident_arc_start.get(i)?.nid,
+                CoincidentKind::ArcEnd => sketch.coincident_arc_end.get(i)?.nid,
+                CoincidentKind::LP1ArcCenter => sketch.coincident_lp1_arc_center.get(i)?.nid,
+                CoincidentKind::LP2ArcCenter => sketch.coincident_lp2_arc_center.get(i)?.nid,
+                CoincidentKind::LP1ArcStart => sketch.coincident_lp1_arc_start.get(i)?.nid,
+                CoincidentKind::LP2ArcStart => sketch.coincident_lp2_arc_start.get(i)?.nid,
+                CoincidentKind::LP1ArcEnd => sketch.coincident_lp1_arc_end.get(i)?.nid,
+                CoincidentKind::LP2ArcEnd => sketch.coincident_lp2_arc_end.get(i)?.nid,
+                CoincidentKind::ArcCenterStart => sketch.coincident_arc_center_start.get(i)?.nid,
+                CoincidentKind::ArcCenterEnd => sketch.coincident_arc_center_end.get(i)?.nid,
+                CoincidentKind::ArcStartCenter => sketch.coincident_arc_start_center.get(i)?.nid,
+                CoincidentKind::ArcEndCenter => sketch.coincident_arc_end_center.get(i)?.nid,
+                CoincidentKind::ArcStartStart => sketch.coincident_arc_start_start.get(i)?.nid,
+                CoincidentKind::ArcStartEnd => sketch.coincident_arc_start_end.get(i)?.nid,
+                CoincidentKind::ArcEndStart => sketch.coincident_arc_end_start.get(i)?.nid,
+                CoincidentKind::ArcEndEnd => sketch.coincident_arc_end_end.get(i)?.nid,
+            };
+            Some(format!("C{}", nid))
+        }
+        // Helper bridges are internal plumbing -- no user-visible name.
+        ConstraintId::HelperBridge(_) => None,
+    }
+}
+
 /// Look up a constraint by its auto-assigned name.
 ///
 /// Numeric names "C<n>" scan every Vec-stored constraint that has a

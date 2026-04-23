@@ -5357,6 +5357,106 @@ fn find_ll_coincident_partner(
     None
 }
 
+/// Refs resolved from a corner argument token (or pair of tokens):
+/// the two lines that meet at the corner, which endpoint of each is
+/// at the corner, and the coincident constraint that ties them there.
+struct CornerRefs {
+    line_a: Ref<Line>,
+    is_p1_a: bool,
+    line_b: Ref<Line>,
+    is_p1_b: bool,
+    coincident_id: crate::ids::ConstraintId,
+}
+
+/// Resolve a single corner spec (list of 1 or 2 tokens) against the
+/// sketch. Used by fillet and chamfer to accept any mix of
+/// `L1 L2` and `L1.pN` args on one command line.
+fn resolve_corner_tokens(sketch: &Sketch, tokens: &[String]) -> Result<CornerRefs, String> {
+    match tokens.len() {
+        1 => {
+            let ep = resolve_endpoint_ref(sketch, &tokens[0])?;
+            let (la, is_p1_a) = match ep {
+                EndpointRef::LineP1(l) => (l, true),
+                EndpointRef::LineP2(l) => (l, false),
+                _ => return Err(format!("endpoint must be a line end: {}", tokens[0])),
+            };
+            match find_ll_coincident_partner(sketch, la, is_p1_a) {
+                Some((lb, is_p1_b, cid)) => Ok(CornerRefs {
+                    line_a: la, is_p1_a, line_b: lb, is_p1_b, coincident_id: cid }),
+                None => Err(format!(
+                    "{} isn't coincident with another line endpoint", tokens[0])),
+            }
+        }
+        2 => {
+            let la = resolve_line(sketch, &tokens[0])?;
+            let lb = resolve_line(sketch, &tokens[1])?;
+            if la == lb { return Err("two-line corner needs two different lines".into()); }
+            let mut found = None;
+            for probe in [true, false] {
+                if let Some((p, is_p1_p, id)) = find_ll_coincident_partner(sketch, la, probe)
+                    && p == lb
+                {
+                    found = Some((probe, is_p1_p, id));
+                    break;
+                }
+            }
+            match found {
+                Some((is_p1_a, is_p1_b, cid)) => Ok(CornerRefs {
+                    line_a: la, is_p1_a, line_b: lb, is_p1_b, coincident_id: cid }),
+                None => Err(format!(
+                    "{} and {} are not connected at an endpoint",
+                    tokens[0], tokens[1])),
+            }
+        }
+        _ => Err("corner expects 1 token (Ln.pN) or 2 tokens (Ln Ln)".into()),
+    }
+}
+
+/// Split the full corner-spec list (everything before the trailing
+/// radius/distance token) into individual corner specs. An `Lx.pN`
+/// token stands alone; a bare `Lx` consumes the following `Lx` too
+/// to form a two-line corner.
+fn parse_corner_list(tokens: &[&str]) -> Result<Vec<Vec<String>>, String> {
+    let mut corners = Vec::new();
+    let mut i = 0;
+    while i < tokens.len() {
+        let t = tokens[i];
+        if t.contains('.') {
+            corners.push(vec![t.to_string()]);
+            i += 1;
+        } else if t.starts_with('L') {
+            if i + 1 >= tokens.len() {
+                return Err(format!("expected a second line after '{}'", t));
+            }
+            let next = tokens[i + 1];
+            if !next.starts_with('L') || next.contains('.') {
+                return Err(format!(
+                    "expected a bare line name after '{}', got '{}'", t, next));
+            }
+            corners.push(vec![t.to_string(), next.to_string()]);
+            i += 2;
+        } else {
+            return Err(format!("unexpected corner token '{}'", t));
+        }
+    }
+    Ok(corners)
+}
+
+/// Parse a radius/distance token as either a numeric literal or a
+/// live expression. Live exprs are stored on the primary dim so the
+/// whole operation tracks its source. For chained corners we also
+/// need an evaluated numeric to drive geometry right now.
+fn parse_radius_token(sketch: &Sketch, tok: &str) -> Result<(f64, Option<String>), String> {
+    match parse_dim_value(sketch, tok)? {
+        (v, None) => Ok((v, None)),
+        (_, Some(expr)) => {
+            let v = eval_expr(sketch, &expr)
+                .map_err(|e| format!("Cannot evaluate '{}': {}", expr, e))?;
+            Ok((v, Some(expr)))
+        }
+    }
+}
+
 fn cmd_fillet(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let mut tokens: Vec<&str> = args.split_whitespace().collect();
     // Trailing keyword options: notangent, noradius. Either order.
@@ -5369,78 +5469,129 @@ fn cmd_fillet(ctx: &mut CommandContext, args: &str) -> CommandResult {
             _ => break,
         }
     }
-
-    // Parse the radius token into a (numeric value, optional live
-    // expression) pair. The numeric value drives the fillet geometry
-    // right now (tangent-point offsets, arc center). The expression,
-    // when present, is passed through to the AddDimension action so
-    // the radius tracks the named param / dim -- `fillet L1 L2 d3`
-    // stays parametric as dimensions shift, matching every other
-    // dim-creation command.
-    let parse_radius = |ctx: &CommandContext, tok: &str| -> Result<(f64, Option<String>), String> {
-        match parse_dim_value(&ctx.sketch, tok)? {
-            (v, None) => Ok((v, None)),
-            (_, Some(expr)) => {
-                let v = eval_expr(&ctx.sketch, &expr)
-                    .map_err(|e| format!("Cannot evaluate '{}': {}", expr, e))?;
-                Ok((v, Some(expr)))
-            }
-        }
-    };
-
-    // Resolve the two lines and which endpoint of each sits at the
-    // shared corner. Two forms:
-    //   fillet L1 L2 r     -- scan for the shared corner automatically
-    //   fillet L1.pN r     -- corner pinned; partner discovered by scan
-    let (line_a, is_p1_a, line_b, is_p1_b, coincident_id, radius, radius_expr) = match tokens.len() {
-        3 => {
-            let la = match resolve_line(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
-            let lb = match resolve_line(&ctx.sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
-            if la == lb { return err("fillet needs two different lines"); }
-            let (r, r_expr) = match parse_radius(ctx, tokens[2]) { Ok(v) => v, Err(e) => return err(e) };
-            // Try both endpoint sides of line_a to find the one whose
-            // partner is line_b. Catches the caller listing lines in
-            // either order without forcing them to know which endpoint.
-            let (is_p1_a, partner, is_p1_b, cid) = {
-                let mut found = None;
-                for probe in [true, false] {
-                    if let Some((p, is_p1_p, id)) = find_ll_coincident_partner(&ctx.sketch, la, probe) {
-                        if p == lb {
-                            found = Some((probe, p, is_p1_p, id));
-                            break;
-                        }
-                    }
-                }
-                match found {
-                    Some(v) => v,
-                    None => return err(format!(
-                        "fillet: {} and {} are not connected at an endpoint",
-                        tokens[0], tokens[1])),
-                }
-            };
-            (la, is_p1_a, partner, is_p1_b, cid, r, r_expr)
-        }
-        2 => {
-            let ep = match resolve_endpoint_ref(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
-            let (la, is_p1_a) = match ep {
-                EndpointRef::LineP1(l) => (l, true),
-                EndpointRef::LineP2(l) => (l, false),
-                _ => return err("fillet: endpoint must be a line end (L0.p1 / L0.p2)"),
-            };
-            let (r, r_expr) = match parse_radius(ctx, tokens[1]) { Ok(v) => v, Err(e) => return err(e) };
-            match find_ll_coincident_partner(&ctx.sketch, la, is_p1_a) {
-                Some((lb, is_p1_b, cid)) => (la, is_p1_a, lb, is_p1_b, cid, r, r_expr),
-                None => return err(format!(
-                    "fillet: {} isn't coincident with another line endpoint",
-                    tokens[0])),
-            }
-        }
-        _ => return err("Usage: fillet L1 L2 r [notangent] [noradius]  or  fillet L1.pN r [notangent] [noradius]"),
-    };
-
-    if radius <= 1e-9 {
-        return err("fillet radius must be positive");
+    if tokens.len() < 2 {
+        return err("Usage: fillet <corner>... r [notangent] [noradius]  where each corner is Lx.pN or Lx Ly");
     }
+    let radius_tok = tokens.pop().unwrap();
+    let (radius, radius_expr) = match parse_radius_token(&ctx.sketch, radius_tok) {
+        Ok(v) => v, Err(e) => return err(e),
+    };
+    if radius <= 1e-9 { return err("fillet radius must be positive"); }
+
+    let corner_specs = match parse_corner_list(&tokens) { Ok(v) => v, Err(e) => return err(format!("fillet: {}", e)) };
+    if corner_specs.is_empty() {
+        return err("fillet: need at least one corner");
+    }
+
+    // Validate once up front so clearly-bad commands fail before any
+    // mutation. The result is discarded; the actual fillet loop
+    // re-resolves each spec after the previous fillet because
+    // coincident-collection indices shift when an LL coincident is
+    // removed.
+    for spec in &corner_specs {
+        if let Err(e) = resolve_corner_tokens(&ctx.sketch, spec) {
+            return err(format!("fillet {}: {}", spec.join(" "), e));
+        }
+    }
+
+    let mut outs: Vec<FilletOut> = Vec::new();
+    ctx.begin_group();
+
+    // First corner takes the user's radius expression (or literal);
+    // subsequent corners reference the first corner's dim name so
+    // they all track a single source.
+    let mut primary_dim_name: Option<String> = None;
+    for (idx, spec) in corner_specs.iter().enumerate() {
+        // Re-resolve against current state -- every previous fillet
+        // deleted one LL coincident, shifting later indices.
+        let refs = match resolve_corner_tokens(&ctx.sketch, spec) {
+            Ok(r) => r,
+            Err(e) => {
+                outs.push(FilletOut {
+                    spec: spec.clone(),
+                    arc_name: String::new(),
+                    removed: None,
+                    dim_name: None,
+                    added: vec![format!("FAILED: {}", e)],
+                });
+                continue;
+            }
+        };
+        let (radius_for_this, expr_for_this) = if idx == 0 {
+            (radius, radius_expr.clone())
+        } else if let Some(name) = &primary_dim_name {
+            let v = eval_expr(&ctx.sketch, name).unwrap_or(radius);
+            (v, Some(name.clone()))
+        } else {
+            (radius, None)
+        };
+        let out = match apply_one_fillet(
+            ctx, spec.clone(), &refs, radius_for_this, expr_for_this, notangent, noradius,
+        ) {
+            Ok(o) => o,
+            Err(e) => {
+                outs.push(FilletOut {
+                    spec: spec.clone(),
+                    arc_name: String::new(),
+                    removed: None,
+                    dim_name: None,
+                    added: vec![format!("FAILED: {}", e)],
+                });
+                continue;
+            }
+        };
+        if idx == 0 && out.dim_name.is_some() {
+            primary_dim_name = out.dim_name.clone();
+        }
+        outs.push(out);
+    }
+
+    // Format one line per corner: the spec, the new arc, the dim,
+    // the deleted coincident and the set of added constraint ids.
+    let mut lines: Vec<String> = Vec::with_capacity(outs.len());
+    for out in &outs {
+        if out.arc_name.is_empty() {
+            lines.push(format!("  {}: {}", out.spec.join(" "), out.added.join(" ")));
+            continue;
+        }
+        let mut parts = Vec::new();
+        parts.push(out.arc_name.clone());
+        if let Some(d) = &out.dim_name { parts.push(d.clone()); }
+        let mut tail = Vec::new();
+        if let Some(r) = &out.removed { tail.push(format!("removed {}", r)); }
+        if !out.added.is_empty() { tail.push(format!("added {}", out.added.join(" "))); }
+        let tail_str = if tail.is_empty() { String::new() } else { format!(" [{}]", tail.join(", ")) };
+        lines.push(format!("  {} -> {}{}", out.spec.join(" "), parts.join(" "), tail_str));
+    }
+    let succeeded = outs.iter().filter(|o| !o.arc_name.is_empty()).count();
+    let header = if corner_specs.len() == 1 {
+        format!("Filleted (r={:.4}):", radius)
+    } else {
+        format!("Filleted {} of {} corners (r={:.4}):",
+            succeeded, corner_specs.len(), radius)
+    };
+    if let Some(last) = outs.iter().rev().find(|o| !o.arc_name.is_empty()) {
+        ctx.session_names.insert("_".into(), last.arc_name.clone());
+    }
+    let msg = format!("{}\n{}", header, lines.join("\n"));
+    if succeeded == 0 { err(msg) } else { ok(msg) }
+}
+
+/// Apply one fillet at the resolved corner. Returns the ids of every
+/// new constraint and the deleted coincident so the caller can
+/// surface them in the command output. Returns Err with a
+/// human-readable string for geometry errors (too short, zero-angle,
+/// etc.) without mutating the sketch.
+fn apply_one_fillet(
+    ctx: &mut CommandContext,
+    spec: Vec<String>,
+    refs: &CornerRefs,
+    radius: f64,
+    radius_expr: Option<String>,
+    notangent: bool,
+    noradius: bool,
+) -> Result<FilletOut, String> {
+    let CornerRefs { line_a, is_p1_a, line_b, is_p1_b, coincident_id } = *refs;
 
     // Geometry: unit direction vectors from the shared corner toward
     // the far endpoint of each line.
@@ -5448,8 +5599,8 @@ fn cmd_fillet(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let lb_ref = &ctx.sketch.lines[line_b];
     let (corner_a, far_a) = if is_p1_a { (la_ref.p1.value, la_ref.p2.value) } else { (la_ref.p2.value, la_ref.p1.value) };
     let (corner_b, far_b) = if is_p1_b { (lb_ref.p1.value, lb_ref.p2.value) } else { (lb_ref.p2.value, lb_ref.p1.value) };
-    // The solver should have the corners coincident; use their mean
-    // as the reference so small solver residuals don't bias the geometry.
+    // Use the corners' mean so small solver residuals don't bias
+    // the geometry.
     let corner = vect2d::new((corner_a.x + corner_b.x) * 0.5, (corner_a.y + corner_b.y) * 0.5);
     let dx_a = far_a.x - corner.x;
     let dy_a = far_a.y - corner.y;
@@ -5458,49 +5609,43 @@ fn cmd_fillet(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let dy_b = far_b.y - corner.y;
     let len_b = (dx_b * dx_b + dy_b * dy_b).sqrt();
     if len_a < 1e-9 || len_b < 1e-9 {
-        return err("fillet: one of the lines has zero length");
+        return Err("one of the lines has zero length".into());
     }
     let ua = vect2d::new(dx_a / len_a, dy_a / len_a);
     let ub = vect2d::new(dx_b / len_b, dy_b / len_b);
     let cos_theta = ua.x * ub.x + ua.y * ub.y;
     if cos_theta >= 1.0 - 1e-6 {
-        return err("fillet: lines overlap at the corner (cannot fillet a zero angle)");
+        return Err("lines overlap at the corner (zero angle)".into());
     }
     if cos_theta <= -1.0 + 1e-6 {
-        return err("fillet: lines are collinear at the corner (no fillet possible)");
+        return Err("lines are collinear at the corner (no fillet possible)".into());
     }
     let half_theta = (cos_theta.acos()) * 0.5;
     let tan_half = half_theta.tan();
     let sin_half = half_theta.sin();
     let trim_dist = radius / tan_half;
     if trim_dist + 1e-9 >= len_a || trim_dist + 1e-9 >= len_b {
-        return err(format!(
-            "fillet: lines too short for radius {} (need at least {:.4} on each side; have {:.4} and {:.4})",
+        return Err(format!(
+            "lines too short for radius {} (need {:.4} on each side; have {:.4} and {:.4})",
             radius, trim_dist, len_a, len_b));
     }
-    // Tangent points on each line (post-trim endpoints).
     let t_a = vect2d::new(corner.x + ua.x * trim_dist, corner.y + ua.y * trim_dist);
     let t_b = vect2d::new(corner.x + ub.x * trim_dist, corner.y + ub.y * trim_dist);
-    // Bisector direction into the corner interior.
     let bis_x = ua.x + ub.x;
     let bis_y = ua.y + ub.y;
     let bis_len = (bis_x * bis_x + bis_y * bis_y).sqrt();
-    // bis_len == 2 cos(half_theta) > 0 when cos_theta > -1, which the
-    // collinearity guard above already ensured.
     let bis = vect2d::new(bis_x / bis_len, bis_y / bis_len);
     let center_dist = radius / sin_half;
     let arc_center = vect2d::new(corner.x + bis.x * center_dist, corner.y + bis.y * center_dist);
-    // Mid point on the arc, closest to the corner along the bisector.
     let mid = vect2d::new(arc_center.x - bis.x * radius, arc_center.y - bis.y * radius);
 
-    // All checks passed -- commit.
-    ctx.begin_group();
+    let mut added: Vec<String> = Vec::new();
+
+    // Capture the deleted coincident's user-visible name BEFORE the
+    // delete so we can surface it alongside the new ids.
+    let removed = crate::ids::constraint_id_name(&ctx.sketch, coincident_id);
     ctx.exec(Action::DeleteConstraint { id: coincident_id });
 
-    // Slide each line's corner endpoint to its tangent point as an
-    // initial guess for the solver. The coincident-to-arc constraint
-    // added below will pin the final position; this just makes sure
-    // the solver starts from the right basin.
     if is_p1_a { ctx.sketch.lines[line_a].p1.value = t_a; }
     else { ctx.sketch.lines[line_a].p2.value = t_a; }
     if is_p1_b { ctx.sketch.lines[line_b].p1.value = t_b; }
@@ -5510,10 +5655,6 @@ fn cmd_fillet(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let arc_ref = ctx.sketch.arcs.refs().last().unwrap();
     let arc_name = ctx.sketch.arcs[arc_ref].name.clone();
 
-    // Map each line's trimmed end onto whichever arc endpoint is
-    // closer. AddArc picks ccw by the orientation of (start, end,
-    // mid), so the start/end labels after creation aren't always in
-    // the same order as the arguments we passed -- compute it.
     let arc_start = arc_start_pos(&ctx.sketch.arcs[arc_ref]);
     let arc_end = arc_end_pos(&ctx.sketch.arcs[arc_ref]);
     let a_to_start = (t_a.x - arc_start.x).powi(2) + (t_a.y - arc_start.y).powi(2);
@@ -5532,112 +5673,189 @@ fn cmd_fillet(ctx: &mut CommandContext, args: &str) -> CommandResult {
         (false, true) => Action::ApplyCoincidentLP2ArcEnd { line: line_b, arc: arc_ref },
         (false, false) => Action::ApplyCoincidentLP2ArcStart { line: line_b, arc: arc_ref },
     };
+    // Helper: look up the most recently added constraint in the
+    // collection whose kind matches `action` and format its id.
+    let bridge_name = |ctx: &CommandContext, action: &Action| -> Option<String> {
+        match action {
+            Action::ApplyCoincidentLP1ArcStart { .. } => ctx.sketch.coincident_lp1_arc_start.last().map(|c| format!("C{}", c.nid)),
+            Action::ApplyCoincidentLP1ArcEnd { .. } => ctx.sketch.coincident_lp1_arc_end.last().map(|c| format!("C{}", c.nid)),
+            Action::ApplyCoincidentLP2ArcStart { .. } => ctx.sketch.coincident_lp2_arc_start.last().map(|c| format!("C{}", c.nid)),
+            Action::ApplyCoincidentLP2ArcEnd { .. } => ctx.sketch.coincident_lp2_arc_end.last().map(|c| format!("C{}", c.nid)),
+            _ => None,
+        }
+    };
     let saved_skip = ctx.skip_dof_check;
-    ctx.skip_dof_check = true; // positional bridges, no DOF check needed
+    ctx.skip_dof_check = true;
+    let ca = coincide_a.clone();
     ctx.exec(coincide_a);
+    if let Some(n) = bridge_name(ctx, &ca) { added.push(n); }
+    let cb = coincide_b.clone();
     ctx.exec(coincide_b);
+    if let Some(n) = bridge_name(ctx, &cb) { added.push(n); }
     ctx.skip_dof_check = saved_skip;
 
-    let mut applied = Vec::new();
     if !notangent {
         ctx.exec(Action::ApplyTangentLA { line: line_a, arc: arc_ref });
-        if ctx.status_error.is_none() { applied.push(format!("tangent {} {}", arc_name, ctx.sketch.lines[line_a].name)); }
+        if ctx.status_error.is_none()
+            && let Some(c) = ctx.sketch.tangent_la.last() {
+            added.push(format!("C{}", c.nid));
+        }
         ctx.status_error = None;
         ctx.exec(Action::ApplyTangentLA { line: line_b, arc: arc_ref });
-        if ctx.status_error.is_none() { applied.push(format!("tangent {} {}", arc_name, ctx.sketch.lines[line_b].name)); }
+        if ctx.status_error.is_none()
+            && let Some(c) = ctx.sketch.tangent_la.last() {
+            added.push(format!("C{}", c.nid));
+        }
         ctx.status_error = None;
     }
 
-    let mut radius_dim_msg = String::new();
+    let mut dim_name: Option<String> = None;
     if !noradius {
         ctx.exec(Action::AddDimension {
             kind: DimensionKind::ArcRadius(arc_ref),
             value: radius, expr: radius_expr, derived: false, range: None,
         });
         if ctx.status_error.is_none() {
-            let dim_name = last_dim_name(ctx);
-            radius_dim_msg = format!(" [{} radius={:.4}]", dim_name, radius);
+            dim_name = Some(last_dim_name(ctx));
         }
         ctx.status_error = None;
     }
 
-    ctx.session_names.insert("_".into(), arc_name.clone());
-    let mut msg = format!("Filleted {} {} with {} (r={:.4})",
-        ctx.sketch.lines[line_a].name, ctx.sketch.lines[line_b].name,
-        arc_name, radius);
-    if !applied.is_empty() {
-        msg += &format!(" [{}]", applied.join(", "));
-    }
-    msg += &radius_dim_msg;
-    ok(msg)
+    Ok(FilletOut { spec, arc_name, removed, dim_name, added })
+}
+
+/// Outcome of one fillet corner, bubbled up to cmd_fillet so every
+/// success message lists the deleted coincident and every added
+/// constraint / dim id.
+struct FilletOut {
+    spec: Vec<String>,
+    arc_name: String,
+    removed: Option<String>,
+    dim_name: Option<String>,
+    added: Vec<String>,
 }
 
 fn cmd_chamfer(ctx: &mut CommandContext, args: &str) -> CommandResult {
-    let tokens: Vec<&str> = args.split_whitespace().collect();
-    // Radius-token parsing reused verbatim from the fillet parse_radius
-    // helper: `d` may be a literal, a `=expr` snapshot, or a live
-    // expression like `d0`. Live exprs stay on the primary dim so the
-    // chamfer tracks its source parametrically.
-    let parse_distance = |ctx: &CommandContext, tok: &str| -> Result<(f64, Option<String>), String> {
-        match parse_dim_value(&ctx.sketch, tok)? {
-            (v, None) => Ok((v, None)),
-            (_, Some(expr)) => {
-                let v = eval_expr(&ctx.sketch, &expr)
-                    .map_err(|e| format!("Cannot evaluate '{}': {}", expr, e))?;
-                Ok((v, Some(expr)))
-            }
-        }
+    let mut tokens: Vec<&str> = args.split_whitespace().collect();
+    if tokens.len() < 2 {
+        return err("Usage: chamfer <corner>... d  where each corner is Lx.pN or Lx Ly");
+    }
+    let dist_tok = tokens.pop().unwrap();
+    let (distance, dist_expr) = match parse_radius_token(&ctx.sketch, dist_tok) {
+        Ok(v) => v, Err(e) => return err(e),
     };
+    if distance <= 1e-9 { return err("chamfer distance must be positive"); }
 
-    let (line_a, is_p1_a, line_b, is_p1_b, coincident_id, distance, dist_expr) = match tokens.len() {
-        3 => {
-            let la = match resolve_line(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
-            let lb = match resolve_line(&ctx.sketch, tokens[1]) { Ok(r) => r, Err(e) => return err(e) };
-            if la == lb { return err("chamfer needs two different lines"); }
-            let (d, d_expr) = match parse_distance(ctx, tokens[2]) { Ok(v) => v, Err(e) => return err(e) };
-            let (is_p1_a, partner, is_p1_b, cid) = {
-                let mut found = None;
-                for probe in [true, false] {
-                    if let Some((p, is_p1_p, id)) = find_ll_coincident_partner(&ctx.sketch, la, probe) {
-                        if p == lb {
-                            found = Some((probe, p, is_p1_p, id));
-                            break;
-                        }
-                    }
-                }
-                match found {
-                    Some(v) => v,
-                    None => return err(format!(
-                        "chamfer: {} and {} are not connected at an endpoint",
-                        tokens[0], tokens[1])),
-                }
-            };
-            (la, is_p1_a, partner, is_p1_b, cid, d, d_expr)
-        }
-        2 => {
-            let ep = match resolve_endpoint_ref(&ctx.sketch, tokens[0]) { Ok(r) => r, Err(e) => return err(e) };
-            let (la, is_p1_a) = match ep {
-                EndpointRef::LineP1(l) => (l, true),
-                EndpointRef::LineP2(l) => (l, false),
-                _ => return err("chamfer: endpoint must be a line end (L0.p1 / L0.p2)"),
-            };
-            let (d, d_expr) = match parse_distance(ctx, tokens[1]) { Ok(v) => v, Err(e) => return err(e) };
-            match find_ll_coincident_partner(&ctx.sketch, la, is_p1_a) {
-                Some((lb, is_p1_b, cid)) => (la, is_p1_a, lb, is_p1_b, cid, d, d_expr),
-                None => return err(format!(
-                    "chamfer: {} isn't coincident with another line endpoint",
-                    tokens[0])),
-            }
-        }
-        _ => return err("Usage: chamfer L1 L2 d  or  chamfer L1.pN d"),
-    };
+    let corner_specs = match parse_corner_list(&tokens) { Ok(v) => v, Err(e) => return err(format!("chamfer: {}", e)) };
+    if corner_specs.is_empty() { return err("chamfer: need at least one corner"); }
 
-    if distance <= 1e-9 {
-        return err("chamfer distance must be positive");
+    // Validate once up front; re-resolve inside the loop because
+    // coincident-collection indices shift when an LL coincident is
+    // removed by a prior chamfer.
+    for spec in &corner_specs {
+        if let Err(e) = resolve_corner_tokens(&ctx.sketch, spec) {
+            return err(format!("chamfer {}: {}", spec.join(" "), e));
+        }
     }
 
-    // Geometry: unit direction from each line's corner end toward its
-    // far end, angle guard, trim distances. Same shape as cmd_fillet.
+    let mut outs: Vec<ChamferOut> = Vec::new();
+    ctx.begin_group();
+
+    let mut primary_dim_name: Option<String> = None;
+    for (idx, spec) in corner_specs.iter().enumerate() {
+        let refs = match resolve_corner_tokens(&ctx.sketch, spec) {
+            Ok(r) => r,
+            Err(e) => {
+                outs.push(ChamferOut {
+                    spec: spec.clone(),
+                    new_line_name: String::new(),
+                    point_name: String::new(),
+                    removed: None,
+                    primary_dim: None,
+                    secondary_dim: None,
+                    added: vec![format!("FAILED: {}", e)],
+                });
+                continue;
+            }
+        };
+        let (distance_for_this, expr_for_this) = if idx == 0 {
+            (distance, dist_expr.clone())
+        } else if let Some(name) = &primary_dim_name {
+            let v = eval_expr(&ctx.sketch, name).unwrap_or(distance);
+            (v, Some(name.clone()))
+        } else {
+            (distance, None)
+        };
+        let out = match apply_one_chamfer(ctx, spec.clone(), &refs, distance_for_this, expr_for_this) {
+            Ok(o) => o,
+            Err(e) => {
+                outs.push(ChamferOut {
+                    spec: spec.clone(),
+                    new_line_name: String::new(),
+                    point_name: String::new(),
+                    removed: None,
+                    primary_dim: None,
+                    secondary_dim: None,
+                    added: vec![format!("FAILED: {}", e)],
+                });
+                continue;
+            }
+        };
+        if idx == 0 && out.primary_dim.is_some() {
+            primary_dim_name = out.primary_dim.clone();
+        }
+        outs.push(out);
+    }
+
+    let mut lines: Vec<String> = Vec::with_capacity(outs.len());
+    for out in &outs {
+        if out.new_line_name.is_empty() {
+            lines.push(format!("  {}: {}", out.spec.join(" "), out.added.join(" ")));
+            continue;
+        }
+        let mut parts = Vec::new();
+        parts.push(out.new_line_name.clone());
+        parts.push(out.point_name.clone());
+        if let Some(d) = &out.primary_dim { parts.push(d.clone()); }
+        if let Some(d) = &out.secondary_dim { parts.push(d.clone()); }
+        let mut tail = Vec::new();
+        if let Some(r) = &out.removed { tail.push(format!("removed {}", r)); }
+        if !out.added.is_empty() { tail.push(format!("added {}", out.added.join(" "))); }
+        let tail_str = if tail.is_empty() { String::new() } else { format!(" [{}]", tail.join(", ")) };
+        lines.push(format!("  {} -> {}{}", out.spec.join(" "), parts.join(" "), tail_str));
+    }
+    let succeeded = outs.iter().filter(|o| !o.new_line_name.is_empty()).count();
+    let header = if corner_specs.len() == 1 {
+        format!("Chamfered (d={:.4}):", distance)
+    } else {
+        format!("Chamfered {} of {} corners (d={:.4}):",
+            succeeded, corner_specs.len(), distance)
+    };
+    if let Some(last) = outs.iter().rev().find(|o| !o.new_line_name.is_empty()) {
+        ctx.session_names.insert("_".into(), last.new_line_name.clone());
+    }
+    let msg = format!("{}\n{}", header, lines.join("\n"));
+    if succeeded == 0 { err(msg) } else { ok(msg) }
+}
+
+struct ChamferOut {
+    spec: Vec<String>,
+    new_line_name: String,
+    point_name: String,
+    removed: Option<String>,
+    primary_dim: Option<String>,
+    secondary_dim: Option<String>,
+    added: Vec<String>,
+}
+
+fn apply_one_chamfer(
+    ctx: &mut CommandContext,
+    spec: Vec<String>,
+    refs: &CornerRefs,
+    distance: f64,
+    dist_expr: Option<String>,
+) -> Result<ChamferOut, String> {
+    let CornerRefs { line_a, is_p1_a, line_b, is_p1_b, coincident_id } = *refs;
     let la_ref = &ctx.sketch.lines[line_a];
     let lb_ref = &ctx.sketch.lines[line_b];
     let (corner_a, far_a) = if is_p1_a { (la_ref.p1.value, la_ref.p2.value) } else { (la_ref.p2.value, la_ref.p1.value) };
@@ -5650,49 +5868,43 @@ fn cmd_chamfer(ctx: &mut CommandContext, args: &str) -> CommandResult {
     let dy_b = far_b.y - corner.y;
     let len_b = (dx_b * dx_b + dy_b * dy_b).sqrt();
     if len_a < 1e-9 || len_b < 1e-9 {
-        return err("chamfer: one of the lines has zero length");
+        return Err("one of the lines has zero length".into());
     }
     let ua = vect2d::new(dx_a / len_a, dy_a / len_a);
     let ub = vect2d::new(dx_b / len_b, dy_b / len_b);
     let cos_theta = ua.x * ub.x + ua.y * ub.y;
     if cos_theta >= 1.0 - 1e-6 {
-        return err("chamfer: lines overlap at the corner (cannot chamfer a zero angle)");
+        return Err("lines overlap at the corner (zero angle)".into());
     }
     if cos_theta <= -1.0 + 1e-6 {
-        return err("chamfer: lines are collinear at the corner (no chamfer possible)");
+        return Err("lines are collinear at the corner (no chamfer possible)".into());
     }
     if distance + 1e-9 >= len_a || distance + 1e-9 >= len_b {
-        return err(format!(
-            "chamfer: lines too short for distance {} (have {:.4} and {:.4})",
+        return Err(format!(
+            "lines too short for distance {} (have {:.4} and {:.4})",
             distance, len_a, len_b));
     }
     let t_a = vect2d::new(corner.x + ua.x * distance, corner.y + ua.y * distance);
     let t_b = vect2d::new(corner.x + ub.x * distance, corner.y + ub.y * distance);
 
-    ctx.begin_group();
+    let mut added: Vec<String> = Vec::new();
+
+    let removed = crate::ids::constraint_id_name(&ctx.sketch, coincident_id);
     ctx.exec(Action::DeleteConstraint { id: coincident_id });
 
-    // Trim initial values; the solver then pins via PointOnLine + LL
-    // coincidents added below, so these are just good starting points.
     if is_p1_a { ctx.sketch.lines[line_a].p1.value = t_a; }
     else { ctx.sketch.lines[line_a].p2.value = t_a; }
     if is_p1_b { ctx.sketch.lines[line_b].p1.value = t_b; }
     else { ctx.sketch.lines[line_b].p2.value = t_b; }
 
-    // Corner anchor point at the original corner.
     ctx.exec(Action::AddPoint { pos: corner });
     let point_ref = ctx.sketch.points.refs().last().unwrap();
     let point_name = ctx.sketch.points[point_ref].name.clone();
 
-    // The chamfer line itself (between the two trim points).
     ctx.exec(Action::AddLine { p1: t_a, p2: t_b });
     let new_line_ref = ctx.sketch.lines.refs().last().unwrap();
     let new_line_name = ctx.sketch.lines[new_line_ref].name.clone();
 
-    // Stitch trimmed line ends to the chamfer line endpoints. L_new.p1
-    // sits at t_a (La's trimmed end), L_new.p2 at t_b (Lb's trimmed
-    // end). Positional bridges -- skip DOF check since every bridge
-    // is geometrically already satisfied by the initial values.
     let coincide_a = if is_p1_a {
         Action::ApplyCoincidentLL11 { a: line_a, b: new_line_ref }
     } else {
@@ -5705,35 +5917,45 @@ fn cmd_chamfer(ctx: &mut CommandContext, args: &str) -> CommandResult {
     };
     let saved_skip = ctx.skip_dof_check;
     ctx.skip_dof_check = true;
+    let ca = coincide_a.clone();
     ctx.exec(coincide_a);
+    let ca_id = match ca {
+        Action::ApplyCoincidentLL11 { .. } => ctx.sketch.coincident_ll11.last().map(|c| format!("C{}", c.nid)),
+        Action::ApplyCoincidentLL21 { .. } => ctx.sketch.coincident_ll21.last().map(|c| format!("C{}", c.nid)),
+        _ => None,
+    };
+    if let Some(n) = ca_id { added.push(n); }
+    let cb = coincide_b.clone();
     ctx.exec(coincide_b);
-    // Pin the corner point at the intersection of La and Lb.
+    let cb_id = match cb {
+        Action::ApplyCoincidentLL12 { .. } => ctx.sketch.coincident_ll12.last().map(|c| format!("C{}", c.nid)),
+        Action::ApplyCoincidentLL22 { .. } => ctx.sketch.coincident_ll22.last().map(|c| format!("C{}", c.nid)),
+        _ => None,
+    };
+    if let Some(n) = cb_id { added.push(n); }
     ctx.exec(Action::ApplyPointOnLine { point: point_ref, line: line_a });
+    if let Some(c) = ctx.sketch.point_on_line.last() { added.push(format!("C{}", c.nid)); }
     ctx.exec(Action::ApplyPointOnLine { point: point_ref, line: line_b });
+    if let Some(c) = ctx.sketch.point_on_line.last() { added.push(format!("C{}", c.nid)); }
     ctx.skip_dof_check = saved_skip;
 
-    // Primary distance dimension: corner point -> La's trimmed end.
     let ep_a = if is_p1_a { DimensionEndpoint::LineP1(line_a) } else { DimensionEndpoint::LineP2(line_a) };
     let ep_b = if is_p1_b { DimensionEndpoint::LineP1(line_b) } else { DimensionEndpoint::LineP2(line_b) };
     ctx.exec(Action::AddDimension {
         kind: DimensionKind::PointPointDistance(DimensionEndpoint::Point(point_ref), ep_a),
         value: distance, expr: dist_expr, derived: false, range: None,
     });
-    let first_dim_name = last_dim_name(ctx);
+    let primary_dim = Some(last_dim_name(ctx));
 
-    // Secondary distance dimension: equal to the primary, stored as
-    // `expr = <primary_dim_name>` so it tracks parametrically.
     ctx.exec(Action::AddDimension {
         kind: DimensionKind::PointPointDistance(DimensionEndpoint::Point(point_ref), ep_b),
-        value: distance, expr: Some(first_dim_name.clone()), derived: false, range: None,
+        value: distance, expr: primary_dim.clone(), derived: false, range: None,
     });
-    let second_dim_name = last_dim_name(ctx);
+    let secondary_dim = Some(last_dim_name(ctx));
 
-    ctx.session_names.insert("_".into(), new_line_name.clone());
-    ok(format!(
-        "Chamfered {} {} with {} + {} (d={:.4}) [{} distance, {} = {}]",
-        ctx.sketch.lines[line_a].name, ctx.sketch.lines[line_b].name,
-        new_line_name, point_name, distance, first_dim_name, second_dim_name, first_dim_name))
+    Ok(ChamferOut {
+        spec, new_line_name, point_name, removed, primary_dim, secondary_dim, added,
+    })
 }
 
 fn cmd_offset_line(ctx: &mut CommandContext, args: &str) -> CommandResult {
@@ -11982,7 +12204,7 @@ mod tests {
         run_ok(&mut ctx, "add_line 0,0 5,0");
         run_ok(&mut ctx, "add_line 5,0 5,3");
         let out = run_ok(&mut ctx, "chamfer L0 L1 0.5");
-        assert!(out.contains("Chamfered L0 L1"), "got: {}", out);
+        assert!(out.contains("L0 L1 -> "), "got: {}", out);
         // A new line (the bevel) and a new point (corner anchor).
         assert_eq!(ctx.sketch.lines.refs().count(), 3);
         assert_eq!(ctx.sketch.points.refs().filter(|r| !ctx.sketch.points[*r].helper).count(), 1);
@@ -12004,7 +12226,7 @@ mod tests {
         run_ok(&mut ctx, "add_line 0,0 5,0");
         run_ok(&mut ctx, "add_line 5,0 5,3");
         let out = run_ok(&mut ctx, "chamfer L0.p2 0.5");
-        assert!(out.contains("Chamfered L0 L1"), "got: {}", out);
+        assert!(out.contains("L0.p2 -> "), "got: {}", out);
     }
 
     #[test]
@@ -12057,7 +12279,7 @@ mod tests {
         run_ok(&mut ctx, "add_line 0,0 5,0");
         run_ok(&mut ctx, "add_line 5,0 5,3");
         let out = run_ok(&mut ctx, "fillet L0 L1 0.5");
-        assert!(out.contains("Filleted L0 L1 with A0"), "got: {}", out);
+        assert!(out.contains("L0 L1 -> A0"), "got: {}", out);
         assert_eq!(ctx.sketch.arcs.refs().count(), 1);
         assert_eq!(ctx.sketch.tangent_la.len(), 2);
         // Radius dimension added.
@@ -12077,7 +12299,43 @@ mod tests {
         run_ok(&mut ctx, "add_line 0,0 5,0");
         run_ok(&mut ctx, "add_line 5,0 5,3");
         let out = run_ok(&mut ctx, "fillet L0.p2 0.5");
-        assert!(out.contains("Filleted L0 L1"), "got: {}", out);
+        assert!(out.contains("L0.p2 -> "), "got: {}", out);
+    }
+
+    #[test]
+    fn test_fillet_variadic_all_rect_corners() {
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_rect 0,0 5,3 hv");
+        // All four corners in one command, last token is radius.
+        // Every non-primary fillet references the primary dim name
+        // so the four radii track one source.
+        let out = run_ok(&mut ctx, "fillet L0 L1 L1 L2 L2 L3 L3 L0 0.5");
+        assert!(out.contains("Filleted 4 of 4"), "got: {}", out);
+        assert_eq!(ctx.sketch.arcs.refs().count(), 4);
+        // Exactly one radius dim that's a literal; three that
+        // reference the primary by name.
+        let dims: Vec<_> = ctx.sketch.dimensions.iter().collect();
+        assert_eq!(dims.len(), 4);
+        let primary = &dims[0];
+        assert!(primary.expr_str.is_none());
+        for d in &dims[1..] {
+            assert_eq!(d.expr_str.as_deref(), Some(primary.name.as_str()));
+        }
+    }
+
+    #[test]
+    fn test_fillet_variadic_partial_failure() {
+        // First corner valid, second corner too short -- whole command
+        // still succeeds with one fillet reported and the other as
+        // FAILED in the per-corner report.
+        let mut ctx = CommandContext::new();
+        run_ok(&mut ctx, "add_line 0,0 5,0");
+        run_ok(&mut ctx, "add_line 5,0 5,3");
+        // L2 is only 0.1 long -- fillet radius 0.5 is too short.
+        run_ok(&mut ctx, "add_line 5,3 5.1,3");
+        let out = run_ok(&mut ctx, "fillet L0 L1 L1 L2 0.5");
+        assert!(out.contains("Filleted 1 of 2"), "got: {}", out);
+        assert!(out.contains("FAILED"), "got: {}", out);
     }
 
     #[test]

@@ -125,8 +125,10 @@ add_arc x1,y1 x2,y2 xm,ym  Create an arc through start, end, midpoint [driven]
 offset_line L0 distance      Create a parallel line offset by distance (alias: offset)
 fillet L1 L2 r               Round the shared corner of L1 and L2 with a tangent arc of radius r
 fillet L1.pN r               Same, naming the corner endpoint directly
+fillet L1 L2 L3.pN ... r     Multiple corners at once (any mix of two-line and endpoint forms); last token is the radius
 chamfer L1 L2 d              Bevel the shared corner at distance d from the corner
 chamfer L1.pN d              Same, naming the corner endpoint directly
+chamfer L1 L2 L3.pN ... d    Multiple corners at once
 ```
 
 ### Auto-Coincident
@@ -1174,7 +1176,21 @@ fillet L1 L2 r               Round the shared corner of L1 and L2
 fillet L1.pN r               Round the corner at L1's pN endpoint
 fillet L1 L2 r notangent     Skip the tangent constraints
 fillet L1 L2 r noradius      Skip the radius dimension
+fillet L1 L2 L3 L4 r         Variadic: multiple corners in one command
+fillet L1.p2 L3.p1 r         Variadic: multiple endpoints
+fillet L1 L2 L3.p1 r         Variadic: mix of forms
 ```
+
+**Variadic form.** Any number of corners can be given in one
+command, with the radius as the last token. Each corner is either
+`Lx.pN` (one token) or `Lx Ly` (two tokens). The parser walks left
+to right and consumes tokens accordingly. The first corner's radius
+dimension carries the typed value or expression; subsequent corners
+reference that dim by name so all radii stay equal and track a
+single source. Corners that can't be filleted (too short,
+collinear, etc.) are reported as `FAILED: <reason>` but don't abort
+the other corners; the header shows `Filleted N of M corners`. All
+actions run inside a single undo group.
 
 **Requirements.** The two lines must share a corner via a direct
 line-line coincident (one of `CoincidentLL11`, `CoincidentLL12`,
@@ -1214,7 +1230,15 @@ track the primary parametrically.
 ```
 chamfer L1 L2 d              Bevel the shared corner of L1 and L2
 chamfer L1.pN d              Bevel the corner at L1's pN endpoint
+chamfer L1 L2 L3 L4 d        Variadic: multiple corners in one command
 ```
+
+**Variadic form.** Same parser as `fillet`: any number of corner
+specs followed by the distance token. First corner's primary dim
+carries the typed value; each corner's secondary dim tracks its
+own primary; every subsequent corner's primary dim is `expr = <first
+corner's primary dim name>`, so every chamfer leg on the sketch is
+equal and driven by a single source.
 
 **Requirements.** Same as fillet: the two lines must share a corner
 via a direct `coincident_ll*`, the angle must be non-zero and
