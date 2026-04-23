@@ -246,6 +246,23 @@ pub struct EditorApp {
     /// frame -- also saves the per-frame DOF recompute that caused the
     /// drag to feel choppy.
     pub drag_perp_already: Vec<(u32, u32)>,
+    /// Auto-horizontal / auto-vertical hint during line-endpoint drag.
+    /// `(line, true)` means "snap the dragged line to horizontal on
+    /// release", `(line, false)` means vertical. Only populated when
+    /// the line did not already carry an H or V constraint at drag
+    /// start -- the snap turns a free-angle line into an axis-aligned
+    /// one, same pattern as the existing auto-perpendicular.
+    pub drag_hv_hint: Option<(Ref<Line>, bool)>,
+    /// Captured at drag-start: true if the dragged line is already
+    /// locked to horizontal / vertical by the existing constraint
+    /// system -- either via the direct flag or implicitly through
+    /// other constraints (e.g. a triangle side made horizontal by
+    /// two parallel constraints + a pinned partner). Suppresses the
+    /// auto-H/V hint for the duration of the drag: the line already
+    /// IS that axis, so proposing to make it so is noise and would
+    /// just be rejected by the DOF check on release.
+    pub drag_line_locked_h: bool,
+    pub drag_line_locked_v: bool,
     pub last_cost: f64,
     drag_saved_cost: f64,              // best cost seen during drag
     drag_saved_snapshot: Option<Vec<u8>>, // sketch state at that best cost
@@ -397,6 +414,9 @@ impl EditorApp {
             flash_start: None,
             drag_perp_fail_cache: None,
             drag_perp_already: Vec::new(),
+            drag_hv_hint: None,
+            drag_line_locked_h: false,
+            drag_line_locked_v: false,
             last_cost,
             drag_saved_cost: 0.0,
             drag_saved_snapshot: None,
@@ -683,6 +703,39 @@ impl EditorApp {
     /// (cheap path: if perp is structurally active, we want the
     /// check to re-confirm promptly if the user maneuvers the
     /// geometry in a way that could change applicability).
+    /// True when making `line` horizontal (if `horizontal`) or vertical
+    /// would reduce sketch DOF -- i.e. the axis is not already forced
+    /// by the existing constraint system. Flag-based short-circuit
+    /// first (same orientation flag already set = no reduction), then
+    /// fall back to a single rank check. Used by auto-H/V snap gating
+    /// at drag-start so a line that's already axis-locked (directly or
+    /// via implicit chains) doesn't flash a redundant hint.
+    fn hv_would_reduce_dof(&mut self, line: Ref<Line>, horizontal: bool) -> bool {
+        let l_c = &self.sketch.lines[line].constraints;
+        if horizontal && l_c.horizontal { return false; }
+        if !horizontal && l_c.vertical { return false; }
+        let Ok(old_dof) = self.sketch.dof() else { return true; };
+        let saved_cached = self.sketch.cached_dof;
+        if horizontal {
+            let dx = self.sketch.lines[line].p2.value.x - self.sketch.lines[line].p1.value.x;
+            self.sketch.lines[line].constraints.h_dir_sign = if dx >= 0.0 { 1.0 } else { -1.0 };
+            self.sketch.lines[line].constraints.horizontal = true;
+        } else {
+            let dy = self.sketch.lines[line].p2.value.y - self.sketch.lines[line].p1.value.y;
+            self.sketch.lines[line].constraints.v_dir_sign = if dy >= 0.0 { 1.0 } else { -1.0 };
+            self.sketch.lines[line].constraints.vertical = true;
+        }
+        self.sketch.cached_dof = None;
+        let new_dof = self.sketch.dof().unwrap_or(old_dof);
+        if horizontal {
+            self.sketch.lines[line].constraints.horizontal = false;
+        } else {
+            self.sketch.lines[line].constraints.vertical = false;
+        }
+        self.sketch.cached_dof = saved_cached;
+        new_dof < old_dof
+    }
+
     fn perp_would_reduce_dof(&mut self, a: Ref<Line>, b: Ref<Line>) -> bool {
         let key = (a.index(), b.index());
         if let Some((ka, kb, at)) = self.drag_perp_fail_cache
@@ -768,12 +821,18 @@ impl EditorApp {
         // per-frame auto-perp hint can short-circuit without a rank-based
         // check on off-axis intermediate geometry. See drag_perp_already.
         self.drag_perp_already.clear();
+        self.drag_line_locked_h = false;
+        self.drag_line_locked_v = false;
         if let GrabTarget::LineP1(line) | GrabTarget::LineP2(line) = target {
             let is_p1 = matches!(target, GrabTarget::LineP1(_));
             if let Some(host) = self.find_anchor_host_line_for_drag(line, is_p1)
                 && !self.perp_would_reduce_dof(line, host) {
                 self.drag_perp_already.push((line.index(), host.index()));
             }
+            // Auto-H/V suppression: if the line's orientation is
+            // already pinned (directly or implicitly), skip the hint.
+            self.drag_line_locked_h = !self.hv_would_reduce_dof(line, true);
+            self.drag_line_locked_v = !self.hv_would_reduce_dof(line, false);
         }
 
         // Create a drag helper point at mouse position
@@ -997,6 +1056,41 @@ impl EditorApp {
                 }
             }
 
+            // Auto-H/V hint for line-endpoint drags. Fires only when
+            // no snap or perp claimed the position and the line did
+            // not already carry an H or V constraint -- mirroring the
+            // line-creation auto-H/V. The snap anchors the opposite
+            // endpoint (the fixed end) and pulls the dragged endpoint
+            // onto the nearest axis through it, so the user can turn
+            // a free-angle line into an axis-aligned one by the same
+            // motion that would otherwise drop it free-hand.
+            self.drag_hv_hint = None;
+            if !self.snap_disabled && self.drag_perp_snap.is_none() && snap_preview.is_none() {
+                if let Some(grab) = self.grab {
+                    if let GrabTarget::LineP1(line) | GrabTarget::LineP2(line) = grab {
+                        let is_p1 = matches!(grab, GrabTarget::LineP1(_));
+                        let anchor = if is_p1 {
+                            self.sketch.lines[line].p2.value
+                        } else {
+                            self.sketch.lines[line].p1.value
+                        };
+                        if let Some((horizontal, snapped)) = crate::app_update::hv_snap_from(
+                            anchor, effective_pos, self.scale, PERP_SNAP_PX,
+                        ) {
+                            let already_locked = if horizontal {
+                                self.drag_line_locked_h
+                            } else {
+                                self.drag_line_locked_v
+                            };
+                            if !already_locked {
+                                effective_pos = snapped;
+                                self.drag_hv_hint = Some((line, horizontal));
+                            }
+                        }
+                    }
+                }
+            }
+
             // Ball-clamp each cursor to a radius of DRAG_MAX_LAG_PX
             // screen pixels around the helper's last-solved feasible
             // position. The solver never sees a cursor further out
@@ -1155,6 +1249,7 @@ impl EditorApp {
             // apply even when no snap target wins, and it must be emitted
             // inside the same undo group as the drag itself.
             let perp_hint = self.drag_perp_snap.take();
+            let hv_hint = self.drag_hv_hint.take();
             match grab {
                 Some(g @ (GrabTarget::LineP1(line) | GrabTarget::LineP2(line))) => {
                     let is_p1 = matches!(g, GrabTarget::LineP1(_));
@@ -1184,6 +1279,24 @@ impl EditorApp {
                             if !self.has_perp_conflict(line, host) {
                                 self.exec(Action::ApplyPerpendicular { a: line, b: host });
                             }
+                        }
+                    }
+                    // Auto-H/V: emit when the hint was active and no
+                    // position-pinning snap fired. A line-body snap is
+                    // incompatible (the snapped line fixes orientation
+                    // already); other snaps already pinned the endpoint
+                    // and we don't know it's still axis-aligned.
+                    if snap_kind.is_none()
+                        && let Some((hv_line, horizontal)) = hv_hint
+                        && hv_line == line
+                    {
+                        let action = if horizontal {
+                            Action::ApplyHorizontal { lines: vec![line] }
+                        } else {
+                            Action::ApplyVertical { lines: vec![line] }
+                        };
+                        if arael_sketch_backend::conflicts::check_constraint_conflict(&self.sketch, &action).is_none() {
+                            self.exec(action);
                         }
                     }
                 }

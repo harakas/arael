@@ -20,6 +20,50 @@ use crate::{EditorApp, spawn_async};
 // sides are valid, so we fall back to the quadrant that also sits along
 // the drawn-line direction -- keeping the marker visually "hugging" the
 // drawn line's side.
+/// Auto-horizontal / auto-vertical snap for a line defined by `start`
+/// and `end`. Returns `(horizontal, snapped_end)` when the line's
+/// perpendicular-to-axis deviation (in screen pixels) falls below
+/// `threshold_px`: the end is pulled onto the axis. Requires the line
+/// to be at least a minimum length so short jitter doesn't fire the
+/// hint. Mirrors PERP_SNAP_PX in spirit -- same tolerance scale.
+pub fn hv_snap_from(start: arael::vect::vect2d, end: arael::vect::vect2d, scale: f32, threshold_px: f32) -> Option<(bool, arael::vect::vect2d)> {
+    let dx = end.x - start.x;
+    let dy = end.y - start.y;
+    let dx_px = (dx.abs() as f32) * scale;
+    let dy_px = (dy.abs() as f32) * scale;
+    // Below this segment length the line is too short for the H/V
+    // hint to be meaningful; let the user position freely.
+    let min_len_px = threshold_px * 3.0;
+    if dx_px < min_len_px && dy_px < min_len_px {
+        return None;
+    }
+    if dy_px < threshold_px && dx_px >= dy_px {
+        return Some((true, arael::vect::vect2d::new(end.x, start.y)));
+    }
+    if dx_px < threshold_px && dy_px >= dx_px {
+        return Some((false, arael::vect::vect2d::new(start.x, end.y)));
+    }
+    None
+}
+
+/// Draw an H or V constraint symbol on the sketch canvas at the given
+/// screen position. Mirrors the ConstraintSymbol::H / V glyphs from
+/// drawing.rs so a live hint during line-draw or drag looks the same
+/// as a committed marker.
+fn draw_hv_marker(painter: &egui::Painter, pos: egui::Pos2, horizontal: bool, color: egui::Color32) {
+    let s = 7.0f32;
+    let stroke = egui::Stroke::new(2.0, color);
+    if horizontal {
+        let g = s * 0.45;
+        painter.line_segment([egui::Pos2::new(pos.x - g, pos.y - s), egui::Pos2::new(pos.x - g, pos.y + s)], stroke);
+        painter.line_segment([egui::Pos2::new(pos.x + g, pos.y - s), egui::Pos2::new(pos.x + g, pos.y + s)], stroke);
+        painter.line_segment([egui::Pos2::new(pos.x - g, pos.y), egui::Pos2::new(pos.x + g, pos.y)], stroke);
+    } else {
+        painter.line_segment([egui::Pos2::new(pos.x - s, pos.y - s), egui::Pos2::new(pos.x, pos.y + s)], stroke);
+        painter.line_segment([egui::Pos2::new(pos.x + s, pos.y - s), egui::Pos2::new(pos.x, pos.y + s)], stroke);
+    }
+}
+
 fn draw_perp_corner_marker(
     painter: &egui::Painter,
     corner_screen: egui::Pos2,
@@ -1419,6 +1463,23 @@ impl eframe::App for EditorApp {
                                 }
                             } else { None };
 
+                            // Auto-horizontal/vertical snap: only when no
+                            // stronger placement constraint has fired
+                            // (end-snap position, start-perp combined,
+                            // start-perp free, or end-perp). Otherwise
+                            // the drawn line already has its angle
+                            // determined by the perp/snap and H/V would
+                            // conflict.
+                            let hv = if !self.snap_disabled
+                                && !combined_used
+                                && perp_host.is_none()
+                                && end_perp_target.is_none()
+                                && end_snap.is_none()
+                            {
+                                hv_snap_from(state.start, end_pos, self.scale, crate::PERP_SNAP_PX)
+                            } else { None };
+                            if let Some((_, p)) = hv { end_pos = p; }
+
                             // Reject zero-length lines
                             let dx = end_pos.x - state.start.x;
                             let dy = end_pos.y - state.start.y;
@@ -1448,6 +1509,18 @@ impl eframe::App for EditorApp {
                             if let Some(target) = end_perp_target {
                                 if !self.has_perp_conflict(new_line, target) {
                                     self.exec(Action::ApplyPerpendicular { a: new_line, b: target });
+                                }
+                            }
+                            // Auto-H/V constraint emission in the same
+                            // undo group as the AddLine.
+                            if let Some((horizontal, _)) = hv {
+                                let action = if horizontal {
+                                    Action::ApplyHorizontal { lines: vec![new_line] }
+                                } else {
+                                    Action::ApplyVertical { lines: vec![new_line] }
+                                };
+                                if arael_sketch_backend::conflicts::check_constraint_conflict(&self.sketch, &action).is_none() {
+                                    self.exec(action);
                                 }
                             }
 
@@ -2133,16 +2206,46 @@ impl eframe::App for EditorApp {
                         _ => None,
                     }
                 } else { None };
-                let end_pt = match (combined, &end_perp, &end_snap, &perp) {
-                    (Some(p), _, _, _) => self.to_screen(p),
-                    (_, Some((_, p)), _, _) => self.to_screen(*p),
-                    (_, _, Some((p, _)), _) => self.to_screen(*p),
-                    (_, _, None, Some((_, p))) => self.to_screen(*p),
+                // Auto-H/V preview: when no stronger hint decides the
+                // endpoint, pull it onto the nearest axis through the
+                // start so the user sees the axis-aligned line they
+                // will commit.
+                let hv_preview = if !self.snap_disabled
+                    && combined.is_none()
+                    && end_perp.is_none()
+                    && end_snap.is_none()
+                    && perp.is_none()
+                {
+                    hv_snap_from(state.start, mouse_sketch, self.scale, crate::PERP_SNAP_PX)
+                } else { None };
+                let end_pt = match (combined, &end_perp, &end_snap, &perp, &hv_preview) {
+                    (Some(p), _, _, _, _) => self.to_screen(p),
+                    (_, Some((_, p)), _, _, _) => self.to_screen(*p),
+                    (_, _, Some((p, _)), _, _) => self.to_screen(*p),
+                    (_, _, None, Some((_, p)), _) => self.to_screen(*p),
+                    (_, _, _, _, Some((_, p))) => self.to_screen(*p),
                     _ => mouse_screen,
                 };
                 painter.line_segment([p1, end_pt],
                     egui::Stroke::new(1.5, self.colors.preview_line));
                 painter.circle_filled(p1, 4.0, self.colors.endpoint);
+                if let Some((horizontal, p)) = hv_preview {
+                    // Side-offset placement matching committed H/V
+                    // markers (see line_marker_pos).
+                    let end_screen = self.to_screen(p);
+                    let mx = (p1.x + end_screen.x) * 0.5;
+                    let my = (p1.y + end_screen.y) * 0.5;
+                    let dx = end_screen.x - p1.x;
+                    let dy = end_screen.y - p1.y;
+                    let len = (dx * dx + dy * dy).sqrt().max(1.0);
+                    let nx = -dy / len;
+                    let ny = dx / len;
+                    let sign = if ny > 0.0 { -1.0 } else { 1.0 };
+                    let off = 10.0f32;
+                    let pos = egui::Pos2::new(mx + nx * off * sign, my + ny * off * sign);
+                    draw_hv_marker(&painter, pos, horizontal,
+                        self.colors.constraint_marker_selected);
+                }
 
                 // No start-snap marker during 2nd-click placement: the
                 // user just placed it, and a marker that persists for
@@ -2190,6 +2293,14 @@ impl eframe::App for EditorApp {
             // this paints the visual marker so the user sees why.
             if let Some((pos, ref t)) = self.drag_snap_preview {
                 draw_snap_hint(self.to_screen(pos), t);
+            }
+            // Auto-H/V hint during line-endpoint drag: render the H or
+            // V glyph offset to the side of the line, matching the
+            // placement of a committed H/V marker.
+            if let Some((line, horizontal)) = self.drag_hv_hint {
+                let pos = self.line_marker_pos(line, 10.0, 0.0);
+                draw_hv_marker(&painter, pos, horizontal,
+                    self.colors.constraint_marker_selected);
             }
             // Auto-perpendicular hint during drag: corner marker at the
             // opposite (anchored) endpoint of the dragged line.
