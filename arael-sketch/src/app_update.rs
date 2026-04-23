@@ -46,6 +46,22 @@ pub fn hv_snap_from(start: arael::vect::vect2d, end: arael::vect::vect2d, scale:
     None
 }
 
+/// Draw the Collinear glyph (diagonal line with a gap in the middle)
+/// at the given screen position. Mirrors ConstraintSymbol::Collinear
+/// in drawing.rs so live hints look the same as committed markers.
+fn draw_collinear_marker(painter: &egui::Painter, pos: egui::Pos2, color: egui::Color32) {
+    let s = 7.0f32;
+    let stroke = egui::Stroke::new(2.0, color);
+    painter.line_segment([
+        egui::Pos2::new(pos.x - s * 0.7, pos.y + s * 0.7),
+        egui::Pos2::new(pos.x - s * 0.1, pos.y + s * 0.1),
+    ], stroke);
+    painter.line_segment([
+        egui::Pos2::new(pos.x + s * 0.1, pos.y - s * 0.1),
+        egui::Pos2::new(pos.x + s * 0.7, pos.y - s * 0.7),
+    ], stroke);
+}
+
 /// Draw an H or V constraint symbol on the sketch canvas at the given
 /// screen position. Mirrors the ConstraintSymbol::H / V glyphs from
 /// drawing.rs so a live hint during line-draw or drag looks the same
@@ -1463,18 +1479,34 @@ impl eframe::App for EditorApp {
                                 }
                             } else { None };
 
+                            // Auto-collinear: pull end onto a host line
+                            // whose infinite extension passes through
+                            // start, when the cursor is close to that
+                            // line. Priority over auto-H/V because it's
+                            // the stronger structural relation.
+                            let collinear_host = if !self.snap_disabled
+                                && !combined_used
+                                && perp_host.is_none()
+                                && end_perp_target.is_none()
+                                && end_snap.is_none()
+                            {
+                                self.find_best_collinear_host_at(state.start, end_pos, crate::PERP_SNAP_PX, None)
+                            } else { None };
+                            if let Some((_, p)) = collinear_host { end_pos = p; }
+
                             // Auto-horizontal/vertical snap: only when no
                             // stronger placement constraint has fired
                             // (end-snap position, start-perp combined,
-                            // start-perp free, or end-perp). Otherwise
-                            // the drawn line already has its angle
-                            // determined by the perp/snap and H/V would
-                            // conflict.
+                            // start-perp free, or end-perp, or collinear).
+                            // Otherwise the drawn line already has its
+                            // angle determined by the perp/snap and H/V
+                            // would conflict.
                             let hv = if !self.snap_disabled
                                 && !combined_used
                                 && perp_host.is_none()
                                 && end_perp_target.is_none()
                                 && end_snap.is_none()
+                                && collinear_host.is_none()
                             {
                                 hv_snap_from(state.start, end_pos, self.scale, crate::PERP_SNAP_PX)
                             } else { None };
@@ -1509,6 +1541,13 @@ impl eframe::App for EditorApp {
                             if let Some(target) = end_perp_target {
                                 if !self.has_perp_conflict(new_line, target) {
                                     self.exec(Action::ApplyPerpendicular { a: new_line, b: target });
+                                }
+                            }
+                            // Auto-collinear constraint emission.
+                            if let Some((host, _)) = collinear_host {
+                                let action = Action::ApplyCollinear { a: new_line, b: host };
+                                if arael_sketch_backend::conflicts::check_constraint_conflict(&self.sketch, &action).is_none() {
+                                    self.exec(action);
                                 }
                             }
                             // Auto-H/V constraint emission in the same
@@ -2206,6 +2245,17 @@ impl eframe::App for EditorApp {
                         _ => None,
                     }
                 } else { None };
+                // Auto-collinear preview: pull end onto a host's
+                // infinite line when the cursor is aligned with a
+                // line passing through start.
+                let collinear_preview = if !self.snap_disabled
+                    && combined.is_none()
+                    && end_perp.is_none()
+                    && end_snap.is_none()
+                    && perp.is_none()
+                {
+                    self.find_best_collinear_host_at(state.start, mouse_sketch, crate::PERP_SNAP_PX, None)
+                } else { None };
                 // Auto-H/V preview: when no stronger hint decides the
                 // endpoint, pull it onto the nearest axis through the
                 // start so the user sees the axis-aligned line they
@@ -2215,20 +2265,43 @@ impl eframe::App for EditorApp {
                     && end_perp.is_none()
                     && end_snap.is_none()
                     && perp.is_none()
+                    && collinear_preview.is_none()
                 {
                     hv_snap_from(state.start, mouse_sketch, self.scale, crate::PERP_SNAP_PX)
                 } else { None };
-                let end_pt = match (combined, &end_perp, &end_snap, &perp, &hv_preview) {
-                    (Some(p), _, _, _, _) => self.to_screen(p),
-                    (_, Some((_, p)), _, _, _) => self.to_screen(*p),
-                    (_, _, Some((p, _)), _, _) => self.to_screen(*p),
-                    (_, _, None, Some((_, p)), _) => self.to_screen(*p),
-                    (_, _, _, _, Some((_, p))) => self.to_screen(*p),
+                let end_pt = match (combined, &end_perp, &end_snap, &perp, &collinear_preview, &hv_preview) {
+                    (Some(p), _, _, _, _, _) => self.to_screen(p),
+                    (_, Some((_, p)), _, _, _, _) => self.to_screen(*p),
+                    (_, _, Some((p, _)), _, _, _) => self.to_screen(*p),
+                    (_, _, None, Some((_, p)), _, _) => self.to_screen(*p),
+                    (_, _, _, _, Some((_, p)), _) => self.to_screen(*p),
+                    (_, _, _, _, _, Some((_, p))) => self.to_screen(*p),
                     _ => mouse_screen,
                 };
                 painter.line_segment([p1, end_pt],
                     egui::Stroke::new(1.5, self.colors.preview_line));
                 painter.circle_filled(p1, 4.0, self.colors.endpoint);
+                if let Some((host, p)) = collinear_preview {
+                    // Marker on the drawn line (side-offset from its
+                    // own midpoint), and on the host at its committed
+                    // marker position so both legs of the pair show.
+                    let end_screen = self.to_screen(p);
+                    let mx = (p1.x + end_screen.x) * 0.5;
+                    let my = (p1.y + end_screen.y) * 0.5;
+                    let dx = end_screen.x - p1.x;
+                    let dy = end_screen.y - p1.y;
+                    let len = (dx * dx + dy * dy).sqrt().max(1.0);
+                    let nx = -dy / len;
+                    let ny = dx / len;
+                    let sign = if ny > 0.0 { -1.0 } else { 1.0 };
+                    let off = 10.0f32;
+                    let pos = egui::Pos2::new(mx + nx * off * sign, my + ny * off * sign);
+                    draw_collinear_marker(&painter, pos,
+                        self.colors.constraint_marker_selected);
+                    let host_pos = self.line_marker_pos(host, 10.0, 0.0);
+                    draw_collinear_marker(&painter, host_pos,
+                        self.colors.constraint_marker_selected);
+                }
                 if let Some((horizontal, p)) = hv_preview {
                     // Side-offset placement matching committed H/V
                     // markers (see line_marker_pos).
@@ -2293,6 +2366,17 @@ impl eframe::App for EditorApp {
             // this paints the visual marker so the user sees why.
             if let Some((pos, ref t)) = self.drag_snap_preview {
                 draw_snap_hint(self.to_screen(pos), t);
+            }
+            // Auto-collinear hint during line-endpoint drag: render the
+            // Collinear glyph on both the dragged line and the host so
+            // the user sees which pair the release will tie together.
+            if let Some((line, host)) = self.drag_collinear_hint {
+                let p1 = self.line_marker_pos(line, 10.0, 0.0);
+                let p2 = self.line_marker_pos(host, 10.0, 0.0);
+                draw_collinear_marker(&painter, p1,
+                    self.colors.constraint_marker_selected);
+                draw_collinear_marker(&painter, p2,
+                    self.colors.constraint_marker_selected);
             }
             // Auto-H/V hint during line-endpoint drag: render the H or
             // V glyph offset to the side of the line, matching the

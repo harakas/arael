@@ -270,6 +270,14 @@ pub struct EditorApp {
     /// drag-helper coincident pushed a moment later doesn't itself
     /// count as a "connection".
     pub drag_line_endpoint_connected: bool,
+    /// Pairs (line, host) already collinear at drag-start. Used the
+    /// same way as drag_perp_already: skip the hint / DOF probe for
+    /// the duration of the drag when the line is structurally already
+    /// collinear with the host, avoiding phantom hints and the
+    /// per-frame rank recompute.
+    pub drag_collinear_already: Vec<(u32, u32)>,
+    /// Auto-collinear hint during line-endpoint drag.
+    pub drag_collinear_hint: Option<(Ref<Line>, Ref<Line>)>,
     pub last_cost: f64,
     drag_saved_cost: f64,              // best cost seen during drag
     drag_saved_snapshot: Option<Vec<u8>>, // sketch state at that best cost
@@ -425,6 +433,8 @@ impl EditorApp {
             drag_line_locked_h: false,
             drag_line_locked_v: false,
             drag_line_endpoint_connected: false,
+            drag_collinear_already: Vec::new(),
+            drag_collinear_hint: None,
             last_cost,
             drag_saved_cost: 0.0,
             drag_saved_snapshot: None,
@@ -744,6 +754,24 @@ impl EditorApp {
         new_dof < old_dof
     }
 
+    /// True when adding Collinear(a, b) would reduce sketch DOF.
+    /// Same pattern as perp_would_reduce_dof: temporarily push the
+    /// constraint, recompute DOF, compare, restore. Used by auto-
+    /// collinear hint gating at drag-start.
+    fn collinear_would_reduce_dof(&mut self, a: Ref<Line>, b: Ref<Line>) -> bool {
+        if self.has_collinear_conflict(a, b) { return false; }
+        let Ok(old_dof) = self.sketch.dof() else { return true; };
+        let saved_cached = self.sketch.cached_dof;
+        self.sketch.collinear.push(Collinear {
+            a, b, nid: 0, cid: 0, hb: arael::model::CrossBlock::new(),
+        });
+        self.sketch.cached_dof = None;
+        let new_dof = self.sketch.dof().unwrap_or(old_dof);
+        self.sketch.collinear.pop();
+        self.sketch.cached_dof = saved_cached;
+        new_dof < old_dof
+    }
+
     fn perp_would_reduce_dof(&mut self, a: Ref<Line>, b: Ref<Line>) -> bool {
         let key = (a.index(), b.index());
         if let Some((ka, kb, at)) = self.drag_perp_fail_cache
@@ -829,14 +857,19 @@ impl EditorApp {
         // per-frame auto-perp hint can short-circuit without a rank-based
         // check on off-axis intermediate geometry. See drag_perp_already.
         self.drag_perp_already.clear();
+        self.drag_collinear_already.clear();
         self.drag_line_locked_h = false;
         self.drag_line_locked_v = false;
         self.drag_line_endpoint_connected = false;
         if let GrabTarget::LineP1(line) | GrabTarget::LineP2(line) = target {
             let is_p1 = matches!(target, GrabTarget::LineP1(_));
-            if let Some(host) = self.find_anchor_host_line_for_drag(line, is_p1)
-                && !self.perp_would_reduce_dof(line, host) {
-                self.drag_perp_already.push((line.index(), host.index()));
+            if let Some(host) = self.find_anchor_host_line_for_drag(line, is_p1) {
+                if !self.perp_would_reduce_dof(line, host) {
+                    self.drag_perp_already.push((line.index(), host.index()));
+                }
+                if !self.collinear_would_reduce_dof(line, host) {
+                    self.drag_collinear_already.push((line.index(), host.index()));
+                }
             }
             // Auto-H/V suppression: if the line's orientation is
             // already pinned (directly or implicitly), skip the hint.
@@ -1078,7 +1111,12 @@ impl EditorApp {
             // a free-angle line into an axis-aligned one by the same
             // motion that would otherwise drop it free-hand.
             self.drag_hv_hint = None;
-            if !self.snap_disabled && self.drag_perp_snap.is_none() && snap_preview.is_none() {
+            self.drag_collinear_hint = None;
+            if !self.snap_disabled
+                && self.drag_perp_snap.is_none()
+                && snap_preview.is_none()
+                && !self.drag_line_endpoint_connected
+            {
                 if let Some(grab) = self.grab {
                     if let GrabTarget::LineP1(line) | GrabTarget::LineP2(line) = grab {
                         let is_p1 = matches!(grab, GrabTarget::LineP1(_));
@@ -1087,7 +1125,24 @@ impl EditorApp {
                         } else {
                             self.sketch.lines[line].p1.value
                         };
-                        if !self.drag_line_endpoint_connected
+                        // Auto-collinear takes priority over H/V: it's a
+                        // stronger structural constraint (same infinite
+                        // line as host). Only fire when the host isn't
+                        // already structurally collinear with the line
+                        // and the dragged-line direction points along
+                        // the host, not across it.
+                        if let Some((host, foot)) = self.find_best_collinear_host_at(
+                            anchor, effective_pos, PERP_SNAP_PX, Some(line),
+                        ) {
+                            let already = self.drag_collinear_already.iter()
+                                .any(|&(la, lb)| la == line.index() && lb == host.index());
+                            if !already && !self.has_collinear_conflict(line, host) {
+                                effective_pos = foot;
+                                self.drag_collinear_hint = Some((line, host));
+                            }
+                        }
+                        // Fall through to H/V only if collinear didn't fire.
+                        if self.drag_collinear_hint.is_none()
                             && let Some((horizontal, snapped)) = crate::app_update::hv_snap_from(
                             anchor, effective_pos, self.scale, PERP_SNAP_PX,
                         ) {
@@ -1264,6 +1319,7 @@ impl EditorApp {
             // inside the same undo group as the drag itself.
             let perp_hint = self.drag_perp_snap.take();
             let hv_hint = self.drag_hv_hint.take();
+            let collinear_hint = self.drag_collinear_hint.take();
             match grab {
                 Some(g @ (GrabTarget::LineP1(line) | GrabTarget::LineP2(line))) => {
                     let is_p1 = matches!(g, GrabTarget::LineP1(_));
@@ -1293,6 +1349,17 @@ impl EditorApp {
                             if !self.has_perp_conflict(line, host) {
                                 self.exec(Action::ApplyPerpendicular { a: line, b: host });
                             }
+                        }
+                    }
+                    // Auto-collinear: emit when the hint was active and
+                    // no position-pinning snap fired.
+                    if snap_kind.is_none()
+                        && let Some((cl_line, host)) = collinear_hint
+                        && cl_line == line
+                    {
+                        let action = Action::ApplyCollinear { a: line, b: host };
+                        if arael_sketch_backend::conflicts::check_constraint_conflict(&self.sketch, &action).is_none() {
+                            self.exec(action);
                         }
                     }
                     // Auto-H/V: emit when the hint was active and no
@@ -3371,6 +3438,65 @@ impl EditorApp {
             }
         }
         best.map(|(_, r, p)| (r, p))
+    }
+
+    /// Auto-collinear host search. Mirrors `find_best_perp_host_at`
+    /// but looks for a host whose *infinite* line passes through
+    /// `anchor` AND is close to `cursor` in the perpendicular sense
+    /// (rather than the along sense that defines perp). Returns the
+    /// cursor's projection onto the host's infinite line -- the end
+    /// position the drawn/dragged line would commit to if the user
+    /// releases. Used for auto-collinear on line creation and drag.
+    pub fn find_best_collinear_host_at(
+        &self,
+        anchor: vect2d,
+        cursor: vect2d,
+        threshold_px: f32,
+        exclude: Option<Ref<Line>>,
+    ) -> Option<(Ref<Line>, vect2d)> {
+        if self.snap_disabled { return None; }
+        const HOST_EPS: f64 = 1e-4;
+        let mut best: Option<(f32, Ref<Line>, vect2d)> = None;
+        for r in self.sketch.lines.refs() {
+            if Some(r) == exclude { continue; }
+            let l = &self.sketch.lines[r];
+            let d1 = ((l.p1.value.x - anchor.x).powi(2) + (l.p1.value.y - anchor.y).powi(2)).sqrt();
+            let d2 = ((l.p2.value.x - anchor.x).powi(2) + (l.p2.value.y - anchor.y).powi(2)).sqrt();
+            let db = arael_sketch_backend::geometry::point_to_segment_dist(anchor, l.p1.value, l.p2.value);
+            if !(d1 < HOST_EPS || d2 < HOST_EPS || db < HOST_EPS) { continue; }
+            let hdx = l.p2.value.x - l.p1.value.x;
+            let hdy = l.p2.value.y - l.p1.value.y;
+            let hlen = (hdx * hdx + hdy * hdy).sqrt();
+            if hlen < 1e-12 { continue; }
+            let hd_x = hdx / hlen;
+            let hd_y = hdy / hlen;
+            // Perpendicular distance from cursor to host's infinite line.
+            let cx = cursor.x - anchor.x;
+            let cy = cursor.y - anchor.y;
+            let perp_dist = (cx * (-hd_y) + cy * hd_x).abs();
+            let perp_px = (perp_dist as f32) * self.scale;
+            if perp_px >= threshold_px { continue; }
+            // Require the drawn segment to run *along* the host, not
+            // just through its origin: the along projection must be
+            // non-trivial compared to the perp deviation. Otherwise a
+            // zero-length probe looks collinear with every host.
+            let along = cx * hd_x + cy * hd_y;
+            let along_px = (along.abs() as f32) * self.scale;
+            if along_px < threshold_px * 3.0 { continue; }
+            // Project cursor onto host's infinite line at anchor.
+            let foot = vect2d::new(anchor.x + along * hd_x, anchor.y + along * hd_y);
+            if best.as_ref().map_or(true, |b| perp_px < b.0) {
+                best = Some((perp_px, r, foot));
+            }
+        }
+        best.map(|(_, r, p)| (r, p))
+    }
+
+    /// True if applying Collinear between `a` and `b` is a direct
+    /// conflict (already exists, or parallel/perpendicular is set).
+    fn has_collinear_conflict(&self, a: Ref<Line>, b: Ref<Line>) -> bool {
+        self.sketch.collinear.iter().any(|c| (c.a == a && c.b == b) || (c.a == b && c.b == a))
+            || self.sketch.perpendicular.iter().any(|c| (c.a == a && c.b == b) || (c.a == b && c.b == a))
     }
 
     // End-side perpendicular snap. The drawn line goes from `start` to
