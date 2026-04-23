@@ -437,7 +437,48 @@ impl eframe::App for EditorApp {
                         }
                     }
                 }).collect();
-                ui.label(format!("Selected: {}", names.join(", ")));
+                // For a single line / circle / arc selection, append
+                // live measurements (length, radius, minor radius,
+                // sweep-based arc length) so the user can read them
+                // without running `info`.
+                let measurement = if self.selection.len() == 1 {
+                    match self.selection[0] {
+                        Selection::Line(r) => {
+                            let l = &self.sketch.lines[r];
+                            let dx = l.p2.value.x - l.p1.value.x;
+                            let dy = l.p2.value.y - l.p1.value.y;
+                            Some(format!("length={:.4}", (dx * dx + dy * dy).sqrt()))
+                        }
+                        Selection::Arc(r) => {
+                            let a = &self.sketch.arcs[r];
+                            // Sweep: closed arcs are 2 pi by construction; open
+                            // arcs use |end - start|. Arc length = sweep * r
+                            // (for a circle) or the ellipse perimeter when
+                            // is_ellipse, approximated via Ramanujan's 2nd
+                            // formula.
+                            let sweep = if a.closed { std::f64::consts::TAU }
+                                else { (a.end_angle.value - a.start_angle.value).abs() };
+                            if a.is_ellipse {
+                                // No length -- the perimeter / arc
+                                // length needs incomplete elliptic
+                                // integrals; don't surface an
+                                // approximation the user might trust.
+                                let _ = sweep;
+                                Some(format!("rx={:.4} ry={:.4}",
+                                    a.radius.value, a.radius_b.value))
+                            } else {
+                                let r = a.radius.value;
+                                Some(format!("r={:.4} length={:.4}", r, sweep * r))
+                            }
+                        }
+                        _ => None,
+                    }
+                } else { None };
+                let label = match measurement {
+                    Some(m) => format!("Selected: {} ({})", names.join(", "), m),
+                    None => format!("Selected: {}", names.join(", ")),
+                };
+                ui.label(label);
             }
 
             // Constraint conflict error message
