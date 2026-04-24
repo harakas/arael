@@ -1236,8 +1236,19 @@ impl eframe::App for EditorApp {
                                 break;
                             }
                         }
-                        if !edited {
-                            // Normal double-click behavior (if any)
+                        if !edited
+                            && let Some(sel) = self.hit_test_selection(mouse_sketch, hit_threshold)
+                        {
+                            // Double-click on a line or arc: extend
+                            // selection with the whole connected chain
+                            // of lines + arcs, stopping at branches
+                            // and dead ends. Shift extends the existing
+                            // selection; otherwise we replace.
+                            if matches!(sel, Selection::Line(_) | Selection::Arc(_)) {
+                                let additive = ui.input(|i| i.modifiers.shift);
+                                if !additive { self.selection.clear(); }
+                                self.select_chain(sel);
+                            }
                         }
                     }
 
@@ -1460,8 +1471,14 @@ impl eframe::App for EditorApp {
                         }
                     }
 
-                    // Click (no drag): paste into command prompt if focused, else select/deselect
-                    if response.clicked_by(egui::PointerButton::Primary) {
+                    // Click (no drag): paste into command prompt if focused, else select/deselect.
+                    // egui fires `clicked_by` together with `double_clicked_by` on the
+                    // second release of a double-click -- skip the single-click path
+                    // in that case so the double-click chain-select isn't immediately
+                    // toggled off by the same event.
+                    if response.clicked_by(egui::PointerButton::Primary)
+                        && !response.double_clicked_by(egui::PointerButton::Primary)
+                    {
                         if let Some(sel) = self.hit_test_selection(mouse_sketch, hit_threshold) {
                             if self.show_command && self.command_has_focus {
                                 if let Some(name) = self.selection_command_name(&sel) {

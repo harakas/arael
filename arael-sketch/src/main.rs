@@ -585,6 +585,227 @@ impl EditorApp {
         }
     }
 
+    /// Double-click chain selection: starting from `seed` (a Line or
+    /// Arc), walk the graph of coincident endpoints and add every
+    /// line / arc reachable via an unbranched chain. "Unbranched"
+    /// means every endpoint class we follow has exactly one other
+    /// entity attached; as soon as we hit a fork (three or more
+    /// entity-endpoints at a class) or a dead end (zero others), the
+    /// chain stops from that side. The seed itself is always added.
+    pub fn select_chain(&mut self, seed: Selection) {
+        use std::collections::{HashMap, HashSet, VecDeque};
+
+        /// A geometric endpoint slot. `Point` is a bare sketch point
+        /// which acts as a junction; unioning everything coincident
+        /// to it keeps the chain logic independent of how the
+        /// connection was recorded (direct LL* coincident vs via
+        /// bare Point).
+        #[derive(PartialEq, Eq, Hash, Clone, Copy)]
+        enum Ep {
+            Point(u32),
+            LineP1(u32),
+            LineP2(u32),
+            ArcStart(u32),
+            ArcEnd(u32),
+        }
+
+        // ---- Build equivalence classes via union-find ----
+        fn find(p: &mut HashMap<Ep, Ep>, e: Ep) -> Ep {
+            let mut cur = e;
+            while let Some(&parent) = p.get(&cur) {
+                if parent == cur { break; }
+                cur = parent;
+            }
+            // Path compression.
+            let mut walker = e;
+            while let Some(&parent) = p.get(&walker) {
+                if parent == cur { break; }
+                p.insert(walker, cur);
+                walker = parent;
+            }
+            cur
+        }
+        fn ensure(p: &mut HashMap<Ep, Ep>, e: Ep) {
+            p.entry(e).or_insert(e);
+        }
+        fn union(p: &mut HashMap<Ep, Ep>, a: Ep, b: Ep) {
+            ensure(p, a); ensure(p, b);
+            let ra = find(p, a);
+            let rb = find(p, b);
+            if ra != rb { p.insert(ra, rb); }
+        }
+
+        let mut parent: HashMap<Ep, Ep> = HashMap::new();
+
+        // Seed every relevant endpoint slot so lone endpoints still
+        // appear in the map (chain ends need empty classes too).
+        for r in self.sketch.lines.refs() {
+            ensure(&mut parent, Ep::LineP1(r.index()));
+            ensure(&mut parent, Ep::LineP2(r.index()));
+        }
+        for r in self.sketch.arcs.refs() {
+            if self.sketch.arcs[r].closed { continue; }
+            ensure(&mut parent, Ep::ArcStart(r.index()));
+            ensure(&mut parent, Ep::ArcEnd(r.index()));
+        }
+        for r in self.sketch.points.refs() {
+            if self.sketch.points[r].helper { continue; }
+            ensure(&mut parent, Ep::Point(r.index()));
+        }
+
+        // Line-line coincidents.
+        for c in &self.sketch.coincident_ll11 {
+            union(&mut parent, Ep::LineP1(c.a.index()), Ep::LineP1(c.b.index()));
+        }
+        for c in &self.sketch.coincident_ll12 {
+            union(&mut parent, Ep::LineP1(c.a.index()), Ep::LineP2(c.b.index()));
+        }
+        for c in &self.sketch.coincident_ll21 {
+            union(&mut parent, Ep::LineP2(c.a.index()), Ep::LineP1(c.b.index()));
+        }
+        for c in &self.sketch.coincident_ll22 {
+            union(&mut parent, Ep::LineP2(c.a.index()), Ep::LineP2(c.b.index()));
+        }
+        // Line endpoint <-> bare point.
+        for c in &self.sketch.coincident_lp1 {
+            if !self.sketch.points[c.point].helper {
+                union(&mut parent, Ep::LineP1(c.line.index()), Ep::Point(c.point.index()));
+            }
+        }
+        for c in &self.sketch.coincident_lp2 {
+            if !self.sketch.points[c.point].helper {
+                union(&mut parent, Ep::LineP2(c.line.index()), Ep::Point(c.point.index()));
+            }
+        }
+        // Point-point coincidents keep a junction "one" node even if
+        // the sketch author used two separate points.
+        for c in &self.sketch.coincident_pp {
+            if !self.sketch.points[c.a].helper && !self.sketch.points[c.b].helper {
+                union(&mut parent, Ep::Point(c.a.index()), Ep::Point(c.b.index()));
+            }
+        }
+        // Line endpoint <-> arc endpoint (direct).
+        for c in &self.sketch.coincident_lp1_arc_start {
+            union(&mut parent, Ep::LineP1(c.line.index()), Ep::ArcStart(c.arc.index()));
+        }
+        for c in &self.sketch.coincident_lp2_arc_start {
+            union(&mut parent, Ep::LineP2(c.line.index()), Ep::ArcStart(c.arc.index()));
+        }
+        for c in &self.sketch.coincident_lp1_arc_end {
+            union(&mut parent, Ep::LineP1(c.line.index()), Ep::ArcEnd(c.arc.index()));
+        }
+        for c in &self.sketch.coincident_lp2_arc_end {
+            union(&mut parent, Ep::LineP2(c.line.index()), Ep::ArcEnd(c.arc.index()));
+        }
+        // Arc endpoint <-> bare point.
+        for c in &self.sketch.coincident_arc_start {
+            if !self.sketch.points[c.point].helper {
+                union(&mut parent, Ep::ArcStart(c.arc.index()), Ep::Point(c.point.index()));
+            }
+        }
+        for c in &self.sketch.coincident_arc_end {
+            if !self.sketch.points[c.point].helper {
+                union(&mut parent, Ep::ArcEnd(c.arc.index()), Ep::Point(c.point.index()));
+            }
+        }
+        // Arc-arc endpoint unions (direct).
+        for c in &self.sketch.coincident_arc_start_start {
+            union(&mut parent, Ep::ArcStart(c.a.index()), Ep::ArcStart(c.b.index()));
+        }
+        for c in &self.sketch.coincident_arc_start_end {
+            union(&mut parent, Ep::ArcStart(c.a.index()), Ep::ArcEnd(c.b.index()));
+        }
+        for c in &self.sketch.coincident_arc_end_start {
+            union(&mut parent, Ep::ArcEnd(c.a.index()), Ep::ArcStart(c.b.index()));
+        }
+        for c in &self.sketch.coincident_arc_end_end {
+            union(&mut parent, Ep::ArcEnd(c.a.index()), Ep::ArcEnd(c.b.index()));
+        }
+
+        // ---- Chain walk ----
+        // An entity key distinguishes "self" from "other" when
+        // counting neighbours at an endpoint class. ArcCenter and
+        // Points aren't entities in the chain sense -- they're
+        // junctions or fixtures.
+        #[derive(PartialEq, Eq, Hash, Clone, Copy)]
+        enum EntKey { Line(u32), Arc(u32) }
+
+        let all_eps: Vec<Ep> = parent.keys().copied().collect();
+        // Resolve every ep to its root and collect class members.
+        let mut class: HashMap<Ep, Vec<Ep>> = HashMap::new();
+        for ep in all_eps {
+            let r = find(&mut parent, ep);
+            class.entry(r).or_default().push(ep);
+        }
+        // Per-endpoint neighbour: given a concrete (entity, end) pair,
+        // return the unique OTHER entity sharing that endpoint's
+        // class -- or None if the class is a branch or dead end.
+        let neighbour = |ep: Ep| -> Option<(EntKey, Ep)> {
+            let r = parent.get(&ep).copied()?;
+            let members = class.get(&r)?;
+            let self_key = match ep {
+                Ep::LineP1(i) | Ep::LineP2(i) => EntKey::Line(i),
+                Ep::ArcStart(i) | Ep::ArcEnd(i) => EntKey::Arc(i),
+                Ep::Point(_) => return None,
+            };
+            let mut others: Vec<(EntKey, Ep)> = Vec::new();
+            for m in members {
+                let k = match *m {
+                    Ep::LineP1(i) | Ep::LineP2(i) => EntKey::Line(i),
+                    Ep::ArcStart(i) | Ep::ArcEnd(i) => EntKey::Arc(i),
+                    Ep::Point(_) => continue, // junctions don't count as entities
+                };
+                if k == self_key { continue; }
+                if !others.iter().any(|(ek, _)| *ek == k) {
+                    others.push((k, *m));
+                }
+            }
+            if others.len() == 1 { Some(others[0]) } else { None }
+        };
+
+        let seed_key = match seed {
+            Selection::Line(r) => EntKey::Line(r.index()),
+            Selection::Arc(r) => {
+                if self.sketch.arcs[r].closed {
+                    // Closed arcs aren't chainable; just select this one.
+                    if !self.selection.contains(&seed) { self.selection.push(seed); }
+                    return;
+                }
+                EntKey::Arc(r.index())
+            }
+            _ => return,
+        };
+
+        let endpoints_of = |k: EntKey| -> [Ep; 2] {
+            match k {
+                EntKey::Line(i) => [Ep::LineP1(i), Ep::LineP2(i)],
+                EntKey::Arc(i) => [Ep::ArcStart(i), Ep::ArcEnd(i)],
+            }
+        };
+        let key_to_selection = |k: EntKey| -> Selection {
+            match k {
+                EntKey::Line(i) => Selection::Line(Ref::new(i)),
+                EntKey::Arc(i) => Selection::Arc(Ref::new(i)),
+            }
+        };
+
+        let mut visited: HashSet<EntKey> = HashSet::new();
+        let mut queue: VecDeque<EntKey> = VecDeque::new();
+        queue.push_back(seed_key);
+        while let Some(cur) = queue.pop_front() {
+            if !visited.insert(cur) { continue; }
+            let sel = key_to_selection(cur);
+            if !self.selection.contains(&sel) { self.selection.push(sel); }
+            for ep in endpoints_of(cur) {
+                if let Some((nb_key, _nb_ep)) = neighbour(ep)
+                    && !visited.contains(&nb_key)
+                {
+                    queue.push_back(nb_key);
+                }
+            }
+        }
+    }
+
     fn hit_test(&self, sketch_pos: vect2d, threshold: f64) -> Option<GrabTarget> {
         let mut best: Option<(f64, GrabTarget)> = None;
 
