@@ -1081,6 +1081,7 @@ impl eframe::App for EditorApp {
                 self.circle_draw = None;
                 self.arc_draw = None;
                 self.rect_draw = None;
+                self.box_select_start = None;
                 self.dim_editing = false;
                 self.dim_kind = None;
                 self.dim_placing = false;
@@ -1242,7 +1243,7 @@ impl eframe::App for EditorApp {
 
                     // Drag: geometry or dimension
                     if response.dragged_by(egui::PointerButton::Primary) {
-                        if self.grab.is_none() && self.drag_dimension.is_none() {
+                        if self.grab.is_none() && self.drag_dimension.is_none() && self.box_select_start.is_none() {
                             // First drag frame: hit-test against the PRESS ORIGIN,
                             // not the current cursor. egui's dragged_by only fires
                             // after the pointer has moved past its internal
@@ -1251,7 +1252,8 @@ impl eframe::App for EditorApp {
                             // time we get here. pointer.press_origin() returns the
                             // screen position where the mouse button actually went
                             // down -- what the user aimed at.
-                            let press_sketch = ui.ctx().input(|i| i.pointer.press_origin())
+                            let press_origin = ui.ctx().input(|i| i.pointer.press_origin());
+                            let press_sketch = press_origin
                                 .map(|p| self.to_sketch(p))
                                 .unwrap_or(mouse_sketch);
                             let mut grabbed_dim = false;
@@ -1264,6 +1266,18 @@ impl eframe::App for EditorApp {
                                 && let Some(target) = self.hit_test(press_sketch, hit_threshold) {
                                     self.start_drag(target, press_sketch);
                                 }
+                            // Nothing grabbable at the press origin --
+                            // enter classical box-select. The start
+                            // position lives in screen coords so the
+                            // rect tracks the viewport if the user pans
+                            // mid-drag (it doesn't, since Select drag
+                            // doesn't pan, but this also shields the
+                            // stored point from zoom changes).
+                            if !grabbed_dim && self.grab.is_none()
+                                && let Some(p) = press_origin
+                            {
+                                self.box_select_start = Some(p);
+                            }
                         }
                         if let Some(dim_idx) = self.drag_dimension {
                             // Update dimension offset and text_along from mouse
@@ -1417,6 +1431,9 @@ impl eframe::App for EditorApp {
                             self.update_drag(mouse_sketch, hit_threshold);
                             ctx.request_repaint();
                         }
+                        if self.box_select_start.is_some() {
+                            ctx.request_repaint();
+                        }
                     }
 
                     // End drag
@@ -1425,6 +1442,22 @@ impl eframe::App for EditorApp {
                             self.end_drag(hit_threshold);
                         }
                         self.drag_dimension = None;
+                        // Box-select completion: compute the rect in
+                        // sketch coords and add every entity that sits
+                        // inside or crosses it to the selection. Shift
+                        // extends the existing selection; without it
+                        // we replace. Empty rects (barely-moved mouse)
+                        // are ignored so a stray click doesn't wipe
+                        // the selection.
+                        if let Some(start) = self.box_select_start.take() {
+                            let end = mouse_screen;
+                            let dx = (end.x - start.x).abs();
+                            let dy = (end.y - start.y).abs();
+                            if dx >= 2.0 || dy >= 2.0 {
+                                let additive = ui.input(|i| i.modifiers.shift);
+                                self.apply_box_select(start, end, additive);
+                            }
+                        }
                     }
 
                     // Click (no drag): paste into command prompt if focused, else select/deselect
@@ -2621,6 +2654,28 @@ impl eframe::App for EditorApp {
                 }
             }
 
+            // Box-select marquee: dashed rectangle between the press
+            // origin and the current mouse. Drawn in selection colour
+            // so it reads as a live selection overlay.
+            if let Some(start) = self.box_select_start {
+                let end = mouse_screen;
+                let min = egui::Pos2::new(start.x.min(end.x), start.y.min(end.y));
+                let max = egui::Pos2::new(start.x.max(end.x), start.y.max(end.y));
+                let col = self.colors.constraint_marker_selected;
+                let stroke = egui::Stroke::new(1.0, col);
+                painter.line_segment([min, egui::Pos2::new(max.x, min.y)], stroke);
+                painter.line_segment([egui::Pos2::new(max.x, min.y), max], stroke);
+                painter.line_segment([max, egui::Pos2::new(min.x, max.y)], stroke);
+                painter.line_segment([egui::Pos2::new(min.x, max.y), min], stroke);
+                // Faint fill to make the zone obvious.
+                let fill = egui::Color32::from_rgba_unmultiplied(col.r(), col.g(), col.b(), 32);
+                painter.rect_filled(
+                    egui::Rect::from_min_max(min, max),
+                    0.0,
+                    fill,
+                );
+            }
+
             if self.snap_disabled {
                 painter.text(
                     egui::Pos2::new(rect.right() - 10.0, rect.top() + 10.0),
@@ -2644,7 +2699,7 @@ impl eframe::App for EditorApp {
             // Status bar at bottom (hidden after first modification)
             if self.show_hints {
             let status = match self.tool {
-                Tool::Select => "Select: click to select/deselect, drag to move. Ctrl+Z undo, Ctrl+Shift+Z redo.",
+                Tool::Select => "Select: click to select/deselect, drag entity to move, drag empty space for box-select (Shift to extend).",
                 Tool::DrawPoint => "Point: click to place.",
                 Tool::DrawLine => if self.line_draw.is_some() {
                     "Line: click to place end point (chains next line). Escape to finish."

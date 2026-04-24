@@ -242,6 +242,12 @@ pub struct EditorApp {
     /// remains responsive even if the user keeps hovering near the
     /// same perpendicular anchor.
     pub drag_perp_fail_cache: Option<(u32, u32, web_time::Instant)>,
+    /// Classical box-select: when the user starts dragging on empty
+    /// canvas (nothing grabbable at the press origin), we enter
+    /// box-select mode. The start position is the press-origin in
+    /// screen coords so the rect renders correctly across pan/zoom
+    /// during the drag. Cleared when the drag completes.
+    pub box_select_start: Option<egui::Pos2>,
     /// Pairs (line, host) that were already (directly or implicitly)
     /// perpendicular at drag-start. During drag the geometry is briefly
     /// off-axis so a rank-based re-check would spuriously report the
@@ -433,6 +439,7 @@ impl EditorApp {
             flash_names: Vec::new(),
             flash_start: None,
             drag_perp_fail_cache: None,
+            box_select_start: None,
             drag_perp_already: Vec::new(),
             drag_hv_hint: None,
             drag_line_locked_h: false,
@@ -501,6 +508,83 @@ impl EditorApp {
     }
 
     // Hit test: find nearest grabbable target within threshold
+    /// Classical box-select: take two screen points (press origin
+    /// and release point), build their axis-aligned bounding box in
+    /// sketch coords, then add every entity inside or crossing that
+    /// box to the selection. `additive` keeps the existing selection
+    /// (shift-drag); otherwise the prior selection is replaced.
+    pub fn apply_box_select(&mut self, a: egui::Pos2, b: egui::Pos2, additive: bool) {
+        let a_s = self.to_sketch(a);
+        let b_s = self.to_sketch(b);
+        let min = vect2d::new(a_s.x.min(b_s.x), a_s.y.min(b_s.y));
+        let max = vect2d::new(a_s.x.max(b_s.x), a_s.y.max(b_s.y));
+        let in_rect = |p: vect2d| -> bool {
+            p.x >= min.x && p.x <= max.x && p.y >= min.y && p.y <= max.y
+        };
+        let segment_crosses = |p1: vect2d, p2: vect2d| -> bool {
+            if in_rect(p1) || in_rect(p2) { return true; }
+            // Any of the four rect edges crossed by p1-p2?
+            let corners = [
+                vect2d::new(min.x, min.y),
+                vect2d::new(max.x, min.y),
+                vect2d::new(max.x, max.y),
+                vect2d::new(min.x, max.y),
+            ];
+            let orient = |a: vect2d, b: vect2d, c: vect2d| -> f64 {
+                (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x)
+            };
+            let segs_cross = |a: vect2d, b: vect2d, c: vect2d, d: vect2d| -> bool {
+                let o1 = orient(a, b, c);
+                let o2 = orient(a, b, d);
+                let o3 = orient(c, d, a);
+                let o4 = orient(c, d, b);
+                (o1 * o2 < 0.0) && (o3 * o4 < 0.0)
+            };
+            for i in 0..4 {
+                if segs_cross(p1, p2, corners[i], corners[(i + 1) % 4]) { return true; }
+            }
+            false
+        };
+        let circle_bbox_hits = |center: vect2d, r: f64| -> bool {
+            // Cheap AABB/AABB overlap: circle bbox [c-r, c+r].
+            let cmin = vect2d::new(center.x - r, center.y - r);
+            let cmax = vect2d::new(center.x + r, center.y + r);
+            cmin.x <= max.x && cmax.x >= min.x
+                && cmin.y <= max.y && cmax.y >= min.y
+        };
+
+        if !additive { self.selection.clear(); }
+        let add = |sel: &mut Vec<Selection>, s: Selection| {
+            if !sel.contains(&s) { sel.push(s); }
+        };
+        for r in self.sketch.points.refs() {
+            let p = &self.sketch.points[r];
+            if p.helper { continue; }
+            if in_rect(p.pos.value) { add(&mut self.selection, Selection::Point(r)); }
+        }
+        for r in self.sketch.lines.refs() {
+            let l = &self.sketch.lines[r];
+            if segment_crosses(l.p1.value, l.p2.value) {
+                add(&mut self.selection, Selection::Line(r));
+            }
+        }
+        for r in self.sketch.arcs.refs() {
+            let a = &self.sketch.arcs[r];
+            // Bounding-box hit is a deliberate over-approximation for
+            // a selection tool: a marquee that grazes the bbox but
+            // misses the curve itself is rare in practice, and the
+            // user-friendly answer when in doubt is "include it".
+            let r_eff = if a.is_ellipse {
+                a.radius.value.max(a.radius_b.value)
+            } else {
+                a.radius.value
+            };
+            if circle_bbox_hits(a.center.value, r_eff) {
+                add(&mut self.selection, Selection::Arc(r));
+            }
+        }
+    }
+
     fn hit_test(&self, sketch_pos: vect2d, threshold: f64) -> Option<GrabTarget> {
         let mut best: Option<(f64, GrabTarget)> = None;
 
