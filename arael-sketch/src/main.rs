@@ -639,12 +639,18 @@ impl EditorApp {
 
         // Seed every relevant endpoint slot so lone endpoints still
         // appear in the map (chain ends need empty classes too).
+        // Construction lines / arcs are skipped -- they exist for
+        // reference geometry and the user's mental chain is the
+        // solid outline. They don't end up in classes or in the
+        // walk's visitable set.
         for r in self.sketch.lines.refs() {
+            if self.sketch.lines[r].construction { continue; }
             ensure(&mut parent, Ep::LineP1(r.index()));
             ensure(&mut parent, Ep::LineP2(r.index()));
         }
         for r in self.sketch.arcs.refs() {
             if self.sketch.arcs[r].closed { continue; }
+            if self.sketch.arcs[r].construction { continue; }
             ensure(&mut parent, Ep::ArcStart(r.index()));
             ensure(&mut parent, Ep::ArcEnd(r.index()));
         }
@@ -652,28 +658,40 @@ impl EditorApp {
             if self.sketch.points[r].helper { continue; }
             ensure(&mut parent, Ep::Point(r.index()));
         }
+        // Skip construction-tied coincidents below via these
+        // predicates so unions never touch a construction entity.
+        let line_ok = |r: Ref<Line>| -> bool { !self.sketch.lines[r].construction };
+        let arc_ok = |r: Ref<Arc>| -> bool { !self.sketch.arcs[r].construction };
 
         // Line-line coincidents.
         for c in &self.sketch.coincident_ll11 {
-            union(&mut parent, Ep::LineP1(c.a.index()), Ep::LineP1(c.b.index()));
+            if line_ok(c.a) && line_ok(c.b) {
+                union(&mut parent, Ep::LineP1(c.a.index()), Ep::LineP1(c.b.index()));
+            }
         }
         for c in &self.sketch.coincident_ll12 {
-            union(&mut parent, Ep::LineP1(c.a.index()), Ep::LineP2(c.b.index()));
+            if line_ok(c.a) && line_ok(c.b) {
+                union(&mut parent, Ep::LineP1(c.a.index()), Ep::LineP2(c.b.index()));
+            }
         }
         for c in &self.sketch.coincident_ll21 {
-            union(&mut parent, Ep::LineP2(c.a.index()), Ep::LineP1(c.b.index()));
+            if line_ok(c.a) && line_ok(c.b) {
+                union(&mut parent, Ep::LineP2(c.a.index()), Ep::LineP1(c.b.index()));
+            }
         }
         for c in &self.sketch.coincident_ll22 {
-            union(&mut parent, Ep::LineP2(c.a.index()), Ep::LineP2(c.b.index()));
+            if line_ok(c.a) && line_ok(c.b) {
+                union(&mut parent, Ep::LineP2(c.a.index()), Ep::LineP2(c.b.index()));
+            }
         }
         // Line endpoint <-> bare point.
         for c in &self.sketch.coincident_lp1 {
-            if !self.sketch.points[c.point].helper {
+            if line_ok(c.line) && !self.sketch.points[c.point].helper {
                 union(&mut parent, Ep::LineP1(c.line.index()), Ep::Point(c.point.index()));
             }
         }
         for c in &self.sketch.coincident_lp2 {
-            if !self.sketch.points[c.point].helper {
+            if line_ok(c.line) && !self.sketch.points[c.point].helper {
                 union(&mut parent, Ep::LineP2(c.line.index()), Ep::Point(c.point.index()));
             }
         }
@@ -686,40 +704,56 @@ impl EditorApp {
         }
         // Line endpoint <-> arc endpoint (direct).
         for c in &self.sketch.coincident_lp1_arc_start {
-            union(&mut parent, Ep::LineP1(c.line.index()), Ep::ArcStart(c.arc.index()));
+            if line_ok(c.line) && arc_ok(c.arc) {
+                union(&mut parent, Ep::LineP1(c.line.index()), Ep::ArcStart(c.arc.index()));
+            }
         }
         for c in &self.sketch.coincident_lp2_arc_start {
-            union(&mut parent, Ep::LineP2(c.line.index()), Ep::ArcStart(c.arc.index()));
+            if line_ok(c.line) && arc_ok(c.arc) {
+                union(&mut parent, Ep::LineP2(c.line.index()), Ep::ArcStart(c.arc.index()));
+            }
         }
         for c in &self.sketch.coincident_lp1_arc_end {
-            union(&mut parent, Ep::LineP1(c.line.index()), Ep::ArcEnd(c.arc.index()));
+            if line_ok(c.line) && arc_ok(c.arc) {
+                union(&mut parent, Ep::LineP1(c.line.index()), Ep::ArcEnd(c.arc.index()));
+            }
         }
         for c in &self.sketch.coincident_lp2_arc_end {
-            union(&mut parent, Ep::LineP2(c.line.index()), Ep::ArcEnd(c.arc.index()));
+            if line_ok(c.line) && arc_ok(c.arc) {
+                union(&mut parent, Ep::LineP2(c.line.index()), Ep::ArcEnd(c.arc.index()));
+            }
         }
         // Arc endpoint <-> bare point.
         for c in &self.sketch.coincident_arc_start {
-            if !self.sketch.points[c.point].helper {
+            if arc_ok(c.arc) && !self.sketch.points[c.point].helper {
                 union(&mut parent, Ep::ArcStart(c.arc.index()), Ep::Point(c.point.index()));
             }
         }
         for c in &self.sketch.coincident_arc_end {
-            if !self.sketch.points[c.point].helper {
+            if arc_ok(c.arc) && !self.sketch.points[c.point].helper {
                 union(&mut parent, Ep::ArcEnd(c.arc.index()), Ep::Point(c.point.index()));
             }
         }
         // Arc-arc endpoint unions (direct).
         for c in &self.sketch.coincident_arc_start_start {
-            union(&mut parent, Ep::ArcStart(c.a.index()), Ep::ArcStart(c.b.index()));
+            if arc_ok(c.a) && arc_ok(c.b) {
+                union(&mut parent, Ep::ArcStart(c.a.index()), Ep::ArcStart(c.b.index()));
+            }
         }
         for c in &self.sketch.coincident_arc_start_end {
-            union(&mut parent, Ep::ArcStart(c.a.index()), Ep::ArcEnd(c.b.index()));
+            if arc_ok(c.a) && arc_ok(c.b) {
+                union(&mut parent, Ep::ArcStart(c.a.index()), Ep::ArcEnd(c.b.index()));
+            }
         }
         for c in &self.sketch.coincident_arc_end_start {
-            union(&mut parent, Ep::ArcEnd(c.a.index()), Ep::ArcStart(c.b.index()));
+            if arc_ok(c.a) && arc_ok(c.b) {
+                union(&mut parent, Ep::ArcEnd(c.a.index()), Ep::ArcStart(c.b.index()));
+            }
         }
         for c in &self.sketch.coincident_arc_end_end {
-            union(&mut parent, Ep::ArcEnd(c.a.index()), Ep::ArcEnd(c.b.index()));
+            if arc_ok(c.a) && arc_ok(c.b) {
+                union(&mut parent, Ep::ArcEnd(c.a.index()), Ep::ArcEnd(c.b.index()));
+            }
         }
 
         // ---- Chain walk ----
