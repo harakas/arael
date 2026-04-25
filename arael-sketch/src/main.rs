@@ -1912,20 +1912,9 @@ impl EditorApp {
             skip_dof_check: false,
             exit_requested: false,
             drag_raw: self.drag_raw,
+            echo_stdout: self.echo_stdout,
         };
         let results = arael_sketch_backend::commands::execute(&mut ctx, input);
-        if self.echo_stdout {
-            let cmds: Vec<&str> = input.split(';').map(|s| s.trim()).filter(|s| !s.is_empty()).collect();
-            for (i, r) in results.iter().enumerate() {
-                if let Some(cmd) = cmds.get(i)
-                    && !cmd.starts_with('#') {
-                        println!("> {}", cmd);
-                    }
-                if !r.output.is_empty() {
-                    println!("{}", r.output);
-                }
-            }
-        }
         // Sync back
         self.sketch = ctx.sketch;
         self.history = ctx.history;
@@ -2027,6 +2016,7 @@ impl EditorApp {
             skip_dof_check: false,
             exit_requested: false,
             drag_raw: self.drag_raw,
+            echo_stdout: self.echo_stdout,
         };
         let results = arael_sketch_backend::commands::execute(&mut ctx, input);
         self.sketch = ctx.sketch;

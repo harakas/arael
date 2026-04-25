@@ -55,6 +55,10 @@ pub struct CommandContext {
     /// helper is optimizable so hard constraints stay satisfied and the
     /// dragged endpoint lands at the nearest feasible point.
     pub drag_raw: bool,
+    /// Stream each command's echo + output to stdout as it executes,
+    /// flushing line by line. Lets `eprintln!` LM verbose traces and
+    /// `println!` command echo interleave chronologically when piped.
+    pub echo_stdout: bool,
 }
 
 #[allow(dead_code)]
@@ -83,6 +87,7 @@ impl CommandContext {
             blocked_commands: Vec::new(),
             exit_requested: false,
             drag_raw: false,
+            echo_stdout: false,
         }
     }
 
@@ -109,6 +114,7 @@ impl CommandContext {
             blocked_commands: Vec::new(),
             exit_requested: false,
             drag_raw: false,
+            echo_stdout: false,
         }
     }
 
@@ -1380,13 +1386,22 @@ fn substitute_aliases(ctx: &CommandContext, input: &str) -> String {
 }
 
 pub fn execute(ctx: &mut CommandContext, input: &str) -> Vec<CommandResult> {
+    use std::io::Write;
     let mut results = Vec::new();
     for cmd in input.split(';') {
         let cmd = cmd.trim();
         if cmd.is_empty() { continue; }
+        if ctx.echo_stdout && !cmd.starts_with('#') {
+            println!("> {}", cmd);
+            let _ = std::io::stdout().flush();
+        }
         let mut r = execute_one(ctx, cmd);
         if r.is_error && !r.output.starts_with('>') {
             r.output = format!("'{}': {}", cmd, r.output);
+        }
+        if ctx.echo_stdout && !r.output.is_empty() {
+            println!("{}", r.output);
+            let _ = std::io::stdout().flush();
         }
         let is_err = r.is_error;
         results.push(r);
@@ -1395,7 +1410,16 @@ pub fn execute(ctx: &mut CommandContext, input: &str) -> Vec<CommandResult> {
     if results.is_empty() {
         results.push(ok(""));
     }
+    let dof_start = results.len();
     append_dof_tail(ctx, input, &mut results);
+    if ctx.echo_stdout {
+        for r in &results[dof_start..] {
+            if !r.output.is_empty() {
+                println!("{}", r.output);
+                let _ = std::io::stdout().flush();
+            }
+        }
+    }
     results
 }
 
