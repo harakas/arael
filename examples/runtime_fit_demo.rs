@@ -30,7 +30,6 @@ use arael_sym::E;
 /// One optimizable coefficient. Params are written by RegressionModel's
 /// ExtendedModel::extended_compute64 directly into the global grad/hessian
 /// via a TripletBlock, so Coefficient itself has no grad+diag to store.
-#[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(skip_self_block)]
 struct Coefficient {
@@ -38,23 +37,21 @@ struct Coefficient {
 }
 
 /// Regression model whose equation is parsed at runtime.
-#[derive(serde::Serialize, serde::Deserialize)]
 #[arael::model]
 #[arael(root, extended)]
 struct RegressionModel {
     coeffs: arael::refs::Vec<Coefficient>,
 
-    #[serde(skip)]
     hb: TripletBlock<f64>,
 
     // --- runtime (not part of model tree) ---
-    #[arael(skip)] #[serde(skip)]
+    #[arael(skip)]
     residual_expr: Option<E>,
-    #[arael(skip)] #[serde(skip)]
+    #[arael(skip)]
     derivs: Vec<(String, u32, E)>,
-    #[arael(skip)] #[serde(skip)]
+    #[arael(skip)]
     data: Vec<(f64, f64)>,
-    #[arael(skip)] #[serde(skip)]
+    #[arael(skip)]
     param_names: Vec<String>,
 }
 
@@ -160,6 +157,13 @@ fn build_model(equation: &str, data: Vec<(f64, f64)>, init: &HashMap<String, f64
 
     println!("Equation:    y = {}", model_expr);
     println!("Parameters:  {:?}", param_names);
+    print!("Initial:    ");
+    for (i, name) in param_names.iter().enumerate() {
+        let v = init.get(name).copied().unwrap_or(0.1 * (i as f64 + 1.0));
+        print!(" {} = {}", name, v);
+    }
+    println!();
+    println!("Sigma:       {}", sigma);
     println!("Data points: {}\n", data.len());
 
     // Robust residual: gamma * atan((model - y) / (sigma * gamma))
@@ -226,8 +230,39 @@ fn load_csv(path: &str) -> Vec<(f64, f64)> {
     data
 }
 
+fn print_help() {
+    println!(r#"Robust curve fitting with a runtime-parsed equation.
+
+Usage:
+  cargo run --example runtime_fit_demo -- [options] [equation]
+
+Equation:
+  Any expression in x; symbols other than x and y become free
+  parameters to optimize. Default: "a * x + b".
+
+Examples:
+  cargo run --example runtime_fit_demo
+  cargo run --example runtime_fit_demo -- "a * x + b"
+  cargo run --example runtime_fit_demo -- "a * x^2 + b * x + c"
+  cargo run --example runtime_fit_demo -- --data points.csv "a * sin(x * b) + c"
+  cargo run --example runtime_fit_demo -- --init "a=1,b=0.5,c=-0.1" "a * sin(x * b) + c"
+
+Options:
+  --data <path.csv>   Load (x, y) data from CSV (two columns, '#' comments).
+                      Default: a small built-in sample dataset.
+  --init <vals>       Initial parameter values, e.g. "a=1,b=0.5,c=-0.1".
+                      Defaults to 0.1, 0.2, 0.3, ... by parameter order.
+  --sigma <value>     Residual normalization for the robust loss
+                      (gamma * atan(r / (sigma * gamma))). Default: 0.01.
+  -h, --help          Show this help and exit."#);
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.iter().any(|a| a == "-h" || a == "--help") {
+        print_help();
+        return;
+    }
     let mut equation = "a * x + b";
     let mut data_path: Option<&str> = None;
     let mut init_str: Option<&str> = None;
@@ -267,10 +302,41 @@ fn main() {
     };
 
     println!("\nIterations: {}, cost: {:.6} -> {:.6}", result.iterations, result.start_cost, result.end_cost);
-    print!("Result:");
+
+    // Parameter uncertainties from the inverse Hessian at the
+    // solution. arael's `calc_grad_hessian_dense` writes the full
+    // mathematical Hessian H = d2S/d theta2 = 2 JT J (under
+    // Gauss-Newton; see TripletBlock::add_residual). The textbook
+    // covariance is sigma_r2 * (JT J)^-1 = 2 sigma_r2 * H^-1, hence
+    // the factor of 2 here. sigma_r2 is estimated from
+    // s2 = end_cost / (N - p) -- the reduced-chi-squared / Birge-ratio
+    // correction that compensates if the user-supplied `sigma`
+    // mis-scales the residuals.
+    // https://en.wikipedia.org/wiki/Reduced_chi-squared_statistic
+    // With the robust gamma*atan loss the result is a local curvature
+    // interval, not a strict Gaussian interval.
+    use arael::simple_lm::LmProblem;
+    let mut params_final = Vec::new();
+    model.serialize64(&mut params_final);
+    let n_p = params_final.len();
+    let mut grad = vec![0.0_f64; n_p];
+    let mut hess = vec![0.0_f64; n_p * n_p];
+    model.calc_grad_hessian_dense(&params_final, &mut grad, &mut hess);
+    let h = nalgebra::DMatrix::from_row_slice(n_p, n_p, &hess);
+    let n_data = model.data.len() as f64;
+    let dof = (n_data - n_p as f64).max(1.0);
+    let s2 = result.end_cost / dof;
+    let uncertainties: Vec<f64> = match h.try_inverse() {
+        Some(inv) => (0..n_p).map(|i| (2.0 * s2 * inv[(i, i)]).max(0.0).sqrt()).collect(),
+        None => vec![f64::NAN; n_p],
+    };
+
+    println!("Birge ratio:    s = {:.6} (s^2 = cost/(N-p) = {:.6})", s2.sqrt(), s2);
+    print!("Result (+/- 1 sigma, ~68% CI):");
     for (i, name) in model.param_names.iter().enumerate() {
         let v = model.coeffs[arael::refs::Ref::new(i as u32)].value.value;
-        print!(" {} = {:.8}", name, v);
+        let pi = model.coeffs[arael::refs::Ref::new(i as u32)].value.index() as usize;
+        print!(" {} = {:.8} +/- {:.8}", name, v, uncertainties[pi]);
     }
     println!();
 
