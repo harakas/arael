@@ -55,6 +55,19 @@ include!("constraints.rs");
 // DOF analysis
 // ---------------------------------------------------------------------------
 
+/// Snapshot returned by `Sketch::add_drag_auto_anchors` and consumed
+/// by `Sketch::remove_drag_auto_anchors` to roll auto-anchors back at
+/// drag-end. Cloneable so the GUI can also roll anchors back from a
+/// serialized clone of the live sketch.
+#[derive(Clone)]
+pub struct DragAutoAnchorState {
+    helper_points: std::vec::Vec<arael::refs::Ref<Point>>,
+    coincident_lp1_len: usize,
+    coincident_lp2_len: usize,
+    coincident_arc_start_len: usize,
+    coincident_arc_end_len: usize,
+}
+
 /// Result of DOF (degrees of freedom) analysis.
 pub struct DofResult {
     /// Number of unconstrained degrees of freedom.
@@ -2600,6 +2613,168 @@ impl Sketch {
                 let dy = l.p2.value.y - l.p1.value.y;
                 l.constraints.v_dir_sign = if dy >= 0.0 { 1.0 } else { -1.0 };
             }
+        }
+    }
+
+    /// Add hidden helper Points coincident with every "free" Line/Arc
+    /// endpoint -- one that doesn't already appear in any coincident_*
+    /// constraint linking it to another entity. Returns a state token
+    /// that must be passed to `remove_drag_auto_anchors` at drag-end.
+    ///
+    /// # Why this exists (a hack we couldn't avoid)
+    ///
+    /// In long equal-length chains, the `length L = c` Jacobian is
+    /// rank-deficient when a segment is perpendicular to the chain's
+    /// drag direction (`sqrt(dx^2 + dy^2)` has zero derivative w.r.t.
+    /// `dx` when `dx ~ 0`). At that pose nothing in the constraint
+    /// system pulls a free endpoint along the chain's translation
+    /// axis: `length` doesn't (rank-deficient), `equal` doesn't (only
+    /// couples lengths), `coincident` only acts on joined endpoints,
+    /// and the `drift` regularizer is six orders of magnitude weaker
+    /// than the constraints. Result: per-frame drag translates the
+    /// chain forward but leaves the free endpoint behind, so the
+    /// last segment rotates 90 degrees away from the chain's axis,
+    /// then snaps back, then flips again -- visibly unstable.
+    ///
+    /// Boosting `drift_isigma` is the "obvious" fix and doesn't work
+    /// at long chains (the boost needed to lock down 20 articulation
+    /// modes also makes the chain feel rigid). Adding a free Point
+    /// coincident with the free endpoint -- the user's empirical
+    /// workaround -- does fix it: the new Point's drift residual
+    /// gets folded into the soft chain eigenmode through the
+    /// coincident, so the Newton step now displaces the free
+    /// endpoint along with the chain instead of leaving it stationary.
+    /// We don't fully understand why this works at chain20 but a
+    /// straight drift boost doesn't (Hessian spectra differ only in
+    /// the 4th decimal at start-of-solve), only that it does. So we
+    /// automate the workaround.
+    ///
+    /// # Mechanics
+    ///
+    /// Walks every coincident_* vec to identify joined endpoints,
+    /// then for each Line p1/p2 (optimizable, not joined) and each
+    /// Arc start/end (optimizable, not joined) pushes a hidden helper
+    /// `Point` plus a matching `coincident_lp1`/`coincident_lp2`/
+    /// `coincident_arc_start`/`coincident_arc_end`. The helper is
+    /// placed at the endpoint's current position with a 0.001 offset
+    /// so the parser doesn't reject it as a no-op coincidence.
+    ///
+    /// Call AFTER pushing the drag apparatus onto the sketch so the
+    /// dragged endpoint is already "joined" (to the drag helper) and
+    /// won't get a redundant auto-anchor.
+    pub fn add_drag_auto_anchors(&mut self) -> DragAutoAnchorState {
+        // Arc endpoint world position: c + R * cos(t) * cos(rot) - R_b * sin(t) * sin(rot),
+        //                              c + R * cos(t) * sin(rot) + R_b * sin(t) * cos(rot)
+        // where t is the start_angle or end_angle.
+        fn arc_pt(a: &Arc, angle: f64) -> vect2d {
+            let ct = angle.cos();
+            let st = angle.sin();
+            let cr = a.rotation.value.cos();
+            let sr = a.rotation.value.sin();
+            vect2d::new(
+                a.center.value.x + a.radius.value * ct * cr - a.radius_b.value * st * sr,
+                a.center.value.y + a.radius.value * ct * sr + a.radius_b.value * st * cr,
+            )
+        }
+
+        let mut state = DragAutoAnchorState {
+            helper_points: std::vec::Vec::new(),
+            coincident_lp1_len: self.coincident_lp1.len(),
+            coincident_lp2_len: self.coincident_lp2.len(),
+            coincident_arc_start_len: self.coincident_arc_start.len(),
+            coincident_arc_end_len: self.coincident_arc_end.len(),
+        };
+
+        // Build sets of joined endpoints by walking every coincident_*
+        // that touches a Line endpoint or Arc start/end.
+        let mut joined_lp1: std::collections::HashSet<Ref<Line>> = std::collections::HashSet::new();
+        let mut joined_lp2: std::collections::HashSet<Ref<Line>> = std::collections::HashSet::new();
+        let mut joined_arc_start: std::collections::HashSet<Ref<Arc>> = std::collections::HashSet::new();
+        let mut joined_arc_end: std::collections::HashSet<Ref<Arc>> = std::collections::HashSet::new();
+
+        for c in &self.coincident_lp1 { joined_lp1.insert(c.line); }
+        for c in &self.coincident_lp2 { joined_lp2.insert(c.line); }
+        for c in &self.coincident_ll11 { joined_lp1.insert(c.a); joined_lp1.insert(c.b); }
+        for c in &self.coincident_ll12 { joined_lp1.insert(c.a); joined_lp2.insert(c.b); }
+        for c in &self.coincident_ll21 { joined_lp2.insert(c.a); joined_lp1.insert(c.b); }
+        for c in &self.coincident_ll22 { joined_lp2.insert(c.a); joined_lp2.insert(c.b); }
+        for c in &self.coincident_lp1_arc_center { joined_lp1.insert(c.line); }
+        for c in &self.coincident_lp2_arc_center { joined_lp2.insert(c.line); }
+        for c in &self.coincident_lp1_arc_start  { joined_lp1.insert(c.line); joined_arc_start.insert(c.arc); }
+        for c in &self.coincident_lp2_arc_start  { joined_lp2.insert(c.line); joined_arc_start.insert(c.arc); }
+        for c in &self.coincident_lp1_arc_end    { joined_lp1.insert(c.line); joined_arc_end.insert(c.arc); }
+        for c in &self.coincident_lp2_arc_end    { joined_lp2.insert(c.line); joined_arc_end.insert(c.arc); }
+        for c in &self.coincident_arc_start { joined_arc_start.insert(c.arc); }
+        for c in &self.coincident_arc_end   { joined_arc_end.insert(c.arc); }
+        for c in &self.coincident_arc_center_start { joined_arc_start.insert(c.b); }
+        for c in &self.coincident_arc_start_center { joined_arc_start.insert(c.a); }
+        for c in &self.coincident_arc_center_end { joined_arc_end.insert(c.b); }
+        for c in &self.coincident_arc_end_center { joined_arc_end.insert(c.a); }
+        for c in &self.coincident_arc_start_start { joined_arc_start.insert(c.a); joined_arc_start.insert(c.b); }
+        for c in &self.coincident_arc_start_end   { joined_arc_start.insert(c.a); joined_arc_end.insert(c.b); }
+        for c in &self.coincident_arc_end_start   { joined_arc_end.insert(c.a); joined_arc_start.insert(c.b); }
+        for c in &self.coincident_arc_end_end     { joined_arc_end.insert(c.a); joined_arc_end.insert(c.b); }
+
+        // Lines
+        let line_refs: std::vec::Vec<Ref<Line>> = self.lines.refs().collect();
+        for r in line_refs {
+            let l = &self.lines[r];
+            if l.p1.optimize && !joined_lp1.contains(&r) {
+                let pos = vect2d::new(l.p1.value.x + 0.001, l.p1.value.y);
+                let p = self.add_helper_point(pos);
+                self.coincident_lp1.push(CoincidentLP1 {
+                    line: r, point: p, nid: 0, cid: 0, hb: arael::model::CrossBlock::new(),
+                });
+                state.helper_points.push(p);
+            }
+            let l = &self.lines[r];
+            if l.p2.optimize && !joined_lp2.contains(&r) {
+                let pos = vect2d::new(l.p2.value.x + 0.001, l.p2.value.y);
+                let p = self.add_helper_point(pos);
+                self.coincident_lp2.push(CoincidentLP2 {
+                    line: r, point: p, nid: 0, cid: 0, hb: arael::model::CrossBlock::new(),
+                });
+                state.helper_points.push(p);
+            }
+        }
+
+        // Arcs (only optimizable start/end angles -- skip closed circles
+        // where the angles are fixed)
+        let arc_refs: std::vec::Vec<Ref<Arc>> = self.arcs.refs().collect();
+        for r in arc_refs {
+            let a = &self.arcs[r];
+            if a.start_angle.optimize && !joined_arc_start.contains(&r) {
+                let pt = arc_pt(a, a.start_angle.value);
+                let pos = vect2d::new(pt.x + 0.001, pt.y);
+                let p = self.add_helper_point(pos);
+                self.coincident_arc_start.push(CoincidentArcStart {
+                    point: p, arc: r, nid: 0, cid: 0, hb: arael::model::CrossBlock::new(),
+                });
+                state.helper_points.push(p);
+            }
+            let a = &self.arcs[r];
+            if a.end_angle.optimize && !joined_arc_end.contains(&r) {
+                let pt = arc_pt(a, a.end_angle.value);
+                let pos = vect2d::new(pt.x + 0.001, pt.y);
+                let p = self.add_helper_point(pos);
+                self.coincident_arc_end.push(CoincidentArcEnd {
+                    point: p, arc: r, nid: 0, cid: 0, hb: arael::model::CrossBlock::new(),
+                });
+                state.helper_points.push(p);
+            }
+        }
+
+        state
+    }
+
+    /// Roll back the auto-anchors set up by `add_drag_auto_anchors`.
+    pub fn remove_drag_auto_anchors(&mut self, state: DragAutoAnchorState) {
+        self.coincident_lp1.truncate(state.coincident_lp1_len);
+        self.coincident_lp2.truncate(state.coincident_lp2_len);
+        self.coincident_arc_start.truncate(state.coincident_arc_start_len);
+        self.coincident_arc_end.truncate(state.coincident_arc_end_len);
+        for p in state.helper_points {
+            self.points.remove(p);
         }
     }
 

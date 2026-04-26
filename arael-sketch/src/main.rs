@@ -291,6 +291,10 @@ pub struct EditorApp {
     pub last_cost: f64,
     drag_saved_cost: f64,              // best cost seen during drag
     drag_saved_snapshot: Option<Vec<u8>>, // sketch state at that best cost
+    /// State token for the auto-anchor hack (helper Points on every
+    /// free chain endpoint), pushed at start_drag and rolled back at
+    /// end_drag. See Sketch::add_drag_auto_anchors for the rationale.
+    drag_auto_anchors: Option<arael_sketch_solver::DragAutoAnchorState>,
 
     // DOF (degrees of freedom) computed in background thread.
     // Single worker thread reads latest sketch data from dof_input,
@@ -450,6 +454,7 @@ impl EditorApp {
             last_cost,
             drag_saved_cost: 0.0,
             drag_saved_snapshot: None,
+            drag_auto_anchors: None,
             dof_display: None,
             dof_input: std::sync::Arc::new(std::sync::Mutex::new(None)),
             dof_output: std::sync::Arc::new(std::sync::Mutex::new(None)),
@@ -1318,6 +1323,10 @@ impl EditorApp {
             }
         }
         self.grab = Some(target);
+        // Auto-anchor hack stabilises chain-style drags; rolled back
+        // at end_drag (and from clone snapshots in update_drag).
+        // See Sketch::add_drag_auto_anchors for the full rationale.
+        self.drag_auto_anchors = Some(self.sketch.add_drag_auto_anchors());
     }
 
     // Update drag position and re-solve.
@@ -1547,6 +1556,14 @@ impl EditorApp {
             if self.last_cost < self.drag_saved_cost + 1e-3
                 && let Ok(snap) = bincode::serialize(&self.sketch)
                     && let Ok(mut clean) = bincode::deserialize::<Sketch>(&snap) {
+                        // Auto-anchors are present in the live sketch
+                        // (and therefore in the serialized clone).
+                        // Roll them back from the clone first so the
+                        // drag-apparatus pop()s below hit the right
+                        // vec entries.
+                        if let Some(state) = self.drag_auto_anchors.clone() {
+                            clean.remove_drag_auto_anchors(state);
+                        }
                         // Remove drag constraint from clone
                         match self.grab {
                             Some(GrabTarget::Point(_)) => { clean.coincident_pp.pop(); }
@@ -1629,6 +1646,11 @@ impl EditorApp {
         self.begin_group();
         self.drag_snap_preview = None;
         self.drag_perp_already.clear();
+        // Roll back the auto-anchor hack before remove_drag_apparatus
+        // so the apparatus pop()s hit the right vec entries.
+        if let Some(state) = self.drag_auto_anchors.take() {
+            self.sketch.remove_drag_auto_anchors(state);
+        }
         if let Some(drag_pt) = self.drag_point.take() {
             let _drag_pos = self.sketch.points[drag_pt].pos.value;
             let grab = self.grab;

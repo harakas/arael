@@ -4421,8 +4421,19 @@ fn cmd_drag(ctx: &mut CommandContext, args: &str) -> CommandResult {
         }
     }
 
+    // Auto-anchor hack: drop a hidden helper Point + coincident on
+    // every free Line/Arc endpoint for the duration of the solve.
+    // Stabilizes long-chain drags where the length residual's
+    // Jacobian is rank-deficient at perpendicular segment poses --
+    // see Sketch::add_drag_auto_anchors for the full rationale.
+    let auto_anchors = ctx.sketch.add_drag_auto_anchors();
+
     // Solve (drag)
     ctx.sketch.solve();
+
+    // Roll back auto-anchors before the drag apparatus so the pop()s
+    // below hit the drag-apparatus entries, not the auto-anchor ones.
+    ctx.sketch.remove_drag_auto_anchors(auto_anchors);
 
     // Remove apparatus
     match &target {
