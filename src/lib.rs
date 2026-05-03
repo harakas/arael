@@ -8,6 +8,23 @@
 //! compiled cost, gradient, and Gauss-Newton hessian (J^T J approximation)
 //! code.
 //!
+//! # Contents
+//!
+//! - [Features](#features)
+//! - [Scope](#scope)
+//! - [Example: Symbolic Math](#example-symbolic-math)
+//! - [Example: Robust Linear Regression](#example-robust-linear-regression)
+//! - [Runtime Differentiation](#runtime-differentiation)
+//! - [Model Structure](#model-structure)
+//! - [Solvers](#solvers)
+//! - [Instrumentation & Debugging](#instrumentation--debugging)
+//! - [2D Sketch Editor](#2d-sketch-editor)
+//! - [Example: SLAM Constraints](#example-slam-constraints)
+//! - [Starship robust error suppression](#starship-robust-error-suppression)
+//! - [Example: Localization](#example-localization)
+//! - [Examples](#examples)
+//! - [Crate structure](#crate-structure)
+//!
 //! # Features
 //!
 //! - **Symbolic math** -- expression trees with automatic differentiation,
