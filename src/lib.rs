@@ -1375,6 +1375,139 @@
 //! estimation.
 //! See [docs/SLAM.md](https://github.com/harakas/arael/blob/master/docs/SLAM.md) for the full walkthrough.
 //!
+//! # Starship robust error suppression
+//!
+//! Both demos wrap every residual in $\gamma \arctan(r / \gamma)$. This is
+//! the **Starship method**
+//! ([US Patent 12,346,118](https://patents.google.com/patent/US12346118))
+//! -- a way to cap how much a single outlier can move the optimum without
+//! losing smooth differentiability. This section explains what it does and
+//! why.
+//!
+//! ## Setup
+//!
+//! Given sensor readings stacked into a vector $L$, model parameters $M$
+//! (poses, landmarks, etc.), and a prediction $\mu(M)$ of what the sensors
+//! should report given $M$, Bayesian inference with
+//! $L \mid M \sim \mathcal{N}(\mu(M), K_L)$ -- where $K_L$ is the sensor
+//! covariance matrix -- leads to minimising the sum
+//!
+//! $$
+//! S(M) = (L - \mu(M))^T K_L^{-1} (L - \mu(M)).
+//! $$
+//!
+//! **Whitening.** Diagonalising $K_L = R D R^T$ and substituting
+//! $L^D = R^T L$, $G(M) = R^T \mu(M)$ turns the quadratic form into a
+//! plain sum of squares in units of standard deviations:
+//!
+//! $$
+//! S(M) = \sum_i r_i^2, \qquad r_i = \frac{L_i^D - G_i(M)}{\sigma_i}.
+//! $$
+//!
+//! The solver minimises $S(M)$ (the Gauss-Newton / LM step), and every
+//! inner term $r_i$ is dimensionless -- a pure sigma count.
+//!
+//! ## The outlier problem
+//!
+//! Each $r_i^2$ grows as the *square* of the measurement error. With proper
+//! covariances and no outliers a typical $|r_i|$ sits around $1$ (the
+//! whitening divides by the noise scale, so inliers cluster near unity),
+//! and $\mathbb{E}[r_i^2] = 1$ per residual. A single bad association at
+//! $10\sigma$ already contributes $100$ to the sum; at $30\sigma$ it
+//! contributes $900$. A handful of bad measurements drown out the signal
+//! from hundreds of good ones and pull the optimum off.
+//!
+//! The usual robust-loss fixes -- L1 ($|r|$) and Huber (quadratic near
+//! zero, linear past a threshold) -- replace $r^2$ with something that
+//! grows slower than quadratically, which limits but does not cap each
+//! residual's contribution; a single very bad outlier can still pull the
+//! solution. Their derivatives are also awkward: L1 has a kink at $r = 0$
+//! (undefined derivative there), Huber has a kink at the
+//! quadratic-to-linear transition (continuous but not smooth), and
+//! Gauss-Newton wants a smooth Jacobian. We want a loss that is both
+//! fully bounded and smooth everywhere.
+//!
+//! ## The cap
+//!
+//! We look for a function $\alpha(x)$ that behaves like $x$ in the normal
+//! range but saturates for large inputs, so that $\alpha(x)^2$ contributes
+//! a bounded amount $\Delta S_{\max}$ to the sum instead of an unbounded
+//! $x^2$.
+//!
+//! A clean choice is
+//!
+//! $$
+//! \alpha(x) = \gamma \arctan\frac{x}{\gamma}, \qquad
+//! \gamma = \frac{2 \sqrt{\Delta S_{\max}}}{\pi}.
+//! $$
+//!
+//! The $\gamma$ value follows from the saturation requirement: as
+//! $|x| \to \infty$, $\arctan(x/\gamma) \to \pm \pi/2$, so
+//! $\alpha(x)^2 \to (\gamma \pi / 2)^2$; setting that equal to
+//! $\Delta S_{\max}$ and solving gives the $\gamma$ above. Three further
+//! properties fall out:
+//!
+//! - $\alpha(x) \approx x$ for $|x| \sim 1$ -- small residuals pass
+//!   through unchanged.
+//! - $\alpha'(0) = 1$, so near the optimum the loss is indistinguishable
+//!   from plain $r^2$.
+//! - $\alpha(x)^2 \to \Delta S_{\max}$ as $|x| \to \infty$ -- no single
+//!   residual can push the sum by more than $\Delta S_{\max}$.
+//!
+//! ![Starship suppression function](https://raw.githubusercontent.com/harakas/arael/refs/heads/master/docs/starship/capper.png)
+//!
+//! Left: $\alpha(x)$ (green) bends away from the identity $x$ (purple)
+//! once $|x|$ moves past a few sigmas. Right: the *squared* contribution
+//! -- the unbounded $x^2$ parabola vs the saturating $\alpha(x)^2$,
+//! capped at $\Delta S_{\max}$. The cap is also smooth; Gauss-Newton
+//! still sees a well-defined Jacobian everywhere.
+//!
+//! ## Using it
+//!
+//! Replace each $r_i$ in the sum with $\alpha(r_i)$:
+//!
+//! $$
+//! \hat{S}(M) = \sum_i \alpha(r_i)^2
+//! = \sum_i \left[ \gamma \arctan\frac{L_i^D - G_i(M)}{\gamma \sigma_i} \right]^2.
+//! $$
+//!
+//! In practice $\Delta S_{\max}$ in the range $[10, 25]$ (so $\gamma$
+//! between roughly $2$ and $3$) suppresses genuine outliers hard without
+//! biasing inlier-dominated regions. Since residuals are already
+//! sigma-scaled, this corresponds roughly to saying "residuals past $3$
+//! to $5\sigma$ stop mattering".
+//!
+//! In arael this is exactly what you see in the demo constraint bodies:
+//!
+//! ```ignore
+//! let plain_r = (a * e.x + b - e.y) / sigma;
+//! gamma * atan(plain_r / gamma)
+//! ```
+//!
+//! The symbolic-differentiation pipeline handles `atan`'s derivative
+//! automatically; from the macro's point of view the residual is just
+//! another expression. No special-case code, no outlier bookkeeping.
+//!
+//! ## Initialisation matters
+//!
+//! Gauss-Newton (and Levenberg-Marquardt) is a local method: each step
+//! linearises the cost around the current $M$ and moves in the direction
+//! that linearisation suggests. For any loss, you need a starting $M_0$
+//! close enough to the optimum that the linearisation is informative.
+//!
+//! Starship makes this requirement stricter. The gradient falls off as
+//! $\alpha'(r) = 1 / (1 + \pi^2 r^2 / (4 \Delta S_{\max}))$, so at the
+//! recommended $\Delta S_{\max} = 25$ a residual at $5\sigma$ still
+//! carries about 29% of its least-squares pull and a $10\sigma$ residual
+//! about 9% -- still usable. Once you get out to $20\sigma$ and beyond
+//! it drops under 3% and those residuals are effectively frozen. If
+//! $M_0$ puts many residuals that far out, the solver has nothing to
+//! work with and stalls. The usual remedy is **graduated optimisation**:
+//! start with a large $\Delta S_{\max}$ (loose cap, everything in the
+//! informative regime), solve, then shrink it across passes down to the
+//! target value. The SLAM demo does this via a `frine_isigma_scale`
+//! field stepped per pass.
+//!
 //! # Example: Localization
 //!
 //! Same model as SLAM but landmarks are fixed (known map). With only pose
