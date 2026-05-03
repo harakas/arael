@@ -12,6 +12,9 @@ repository = "https://github.com/harakas/arael"
 keywords = ["optimization", "nonlinear", "least-squares", "symbolic-math", "slam"]
 categories = ["science::robotics", "mathematics", "algorithms"]
 
+[package.metadata.docs.rs]
+rustdoc-args = ["--html-in-header", "docs-header.html"]
+
 [features]
 lapack = ["dep:lapack-sys"]
 eigen = ["dep:cc"]
