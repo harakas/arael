@@ -1,6 +1,6 @@
 [package]
 name = "arael-sym"
-version = "0.6.1"
+version = "0.6.2"
 edition = "2024"
 authors = ["Indrek Mandre <indrek@mare.ee>"]
 readme = "../docs/SYM.md"
@@ -14,4 +14,4 @@ categories = ["mathematics", "science"]
 rustdoc-args = ["--html-in-header", "docs-header.html"]
 
 [dependencies]
-arael-sym-macros = { version = "0.6.1", path = "../arael-sym-macros" }
+arael-sym-macros = { version = "0.6.2", path = "../arael-sym-macros" }
