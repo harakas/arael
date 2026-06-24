@@ -1592,6 +1592,18 @@
 //!   -- single-struct model-and-root + a direct-composed sub-model,
 //!   each carrying its own `SelfBlock<Self>`. The smallest example
 //!   that exercises the "root has its own params" path.
+//! - **[`slam2d_simple_demo`](https://github.com/harakas/arael/blob/master/examples/slam2d_simple_demo.rs)**
+//!   -- minimal pedagogical 2D SLAM: pose = (x, y, gamma), single
+//!   forward-facing camera reporting a bearing per landmark, diagonal
+//!   odometry covariance, first pose anchored at the origin facing east
+//!   (the only gauge fix). Constraint bodies use the symbolic
+//!   `matrix2sym::rotation(angle)` surface. After the LM fit it computes
+//!   the parameter covariance from the dense Hessian and writes
+//!   `slam2d_simple.eps` -- a colour-per-landmark plot of the trajectory,
+//!   the bearing fan, ground-truth shadows, the GT-vs-estimate error
+//!   lines, and 95% confidence ellipses around each landmark (visibly
+//!   elongated along the radial direction, illustrating that depth is
+//!   the unobservable dimension of bearing-only SLAM).
 //! - **[`slam_demo`](https://github.com/harakas/arael/blob/master/examples/slam_demo.rs)**
 //!   -- synthetic visual-inertial SLAM: S-curve trajectory, 20 poses,
 //!   40 landmarks, odometry + tilt + GPS + feature observations.

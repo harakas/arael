@@ -772,3 +772,12 @@ and their Jacobians) and accumulate them into `SelfBlock` /
 ## Full source
 
 See [examples/slam_demo.rs](../examples/slam_demo.rs).
+
+For a stripped-down 2D variant used in teaching slides --
+`pose = (x, y, gamma)`, single bearing per landmark, first pose
+anchored at the origin -- see
+[examples/slam2d_simple_demo.rs](../examples/slam2d_simple_demo.rs).
+It also writes `slam2d_simple.eps` with per-landmark colours, the
+bearing fan, ground-truth shadows, and 95% Hessian-derived confidence
+ellipses (visibly radial -- the textbook depth-unobservability picture
+of bearing-only SLAM).
