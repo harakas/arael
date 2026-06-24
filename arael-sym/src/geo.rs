@@ -327,6 +327,58 @@ impl matrix2sym {
             ],
         }
     }
+
+    /// Build a 2D rotation matrix from a symbolic angle (radians, CCW).
+    /// Mirrors `matrix2f::rotation`.
+    pub fn rotation(angle: E) -> matrix2sym {
+        let s = sin(angle.clone());
+        let c = cos(angle);
+        matrix2sym {
+            rows: [
+                vect2sym { x: c.clone(), y: -s.clone() },
+                vect2sym { x: s,         y: c          },
+            ],
+        }
+    }
+
+    /// Return the transpose of this 2x2 matrix.
+    pub fn transpose(&self) -> matrix2sym {
+        matrix2sym {
+            rows: [
+                vect2sym { x: self.rows[0].x.clone(), y: self.rows[1].x.clone() },
+                vect2sym { x: self.rows[0].y.clone(), y: self.rows[1].y.clone() },
+            ],
+        }
+    }
+}
+
+impl ops::Mul<matrix2sym> for matrix2sym {
+    type Output = matrix2sym;
+    fn mul(self, rhs: matrix2sym) -> matrix2sym {
+        let rhs_t = rhs.transpose();
+        matrix2sym {
+            rows: [
+                vect2sym {
+                    x: self.rows[0].clone() * rhs_t.rows[0].clone(),
+                    y: self.rows[0].clone() * rhs_t.rows[1].clone(),
+                },
+                vect2sym {
+                    x: self.rows[1].clone() * rhs_t.rows[0].clone(),
+                    y: self.rows[1].clone() * rhs_t.rows[1].clone(),
+                },
+            ],
+        }
+    }
+}
+
+impl ops::Mul<vect2sym> for matrix2sym {
+    type Output = vect2sym;
+    fn mul(self, rhs: vect2sym) -> vect2sym {
+        vect2sym {
+            x: self.rows[0].x.clone() * rhs.x.clone() + self.rows[0].y.clone() * rhs.y.clone(),
+            y: self.rows[1].x.clone() * rhs.x.clone() + self.rows[1].y.clone() * rhs.y.clone(),
+        }
+    }
 }
 
 impl ops::Index<usize> for matrix2sym {
@@ -357,5 +409,58 @@ impl quaternsym {
             t: symbol(&format!("{}.t", base)),
             v: vect3sym::new(&format!("{}.v", base)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn matrix2sym_rotation_components() {
+        // R(a) = [[cos a, -sin a], [sin a, cos a]]
+        let r = matrix2sym::rotation(symbol("a"));
+        assert_eq!(format!("{}", r.rows[0].x), "cos(a)");
+        assert_eq!(format!("{}", r.rows[0].y), "-sin(a)");
+        assert_eq!(format!("{}", r.rows[1].x), "sin(a)");
+        assert_eq!(format!("{}", r.rows[1].y), "cos(a)");
+    }
+
+    #[test]
+    fn matrix2sym_transpose_swaps_off_diagonal() {
+        let r = matrix2sym::rotation(symbol("a"));
+        let rt = r.transpose();
+        // R^T(a) = [[cos a, sin a], [-sin a, cos a]] = R(-a)
+        assert_eq!(format!("{}", rt.rows[0].x), "cos(a)");
+        assert_eq!(format!("{}", rt.rows[0].y), "sin(a)");
+        assert_eq!(format!("{}", rt.rows[1].x), "-sin(a)");
+        assert_eq!(format!("{}", rt.rows[1].y), "cos(a)");
+    }
+
+    #[test]
+    fn matrix2sym_mul_vect2sym_applies_rotation() {
+        // R(a) * v = (cos(a)*v.x - sin(a)*v.y, sin(a)*v.x + cos(a)*v.y)
+        let r = matrix2sym::rotation(symbol("a"));
+        let v = vect2sym::new("v");
+        let rv = r * v;
+        assert_eq!(format!("{}", rv.x.simplify()),
+            "v.x * cos(a) - v.y * sin(a)");
+        assert_eq!(format!("{}", rv.y.simplify()),
+            "v.x * sin(a) + v.y * cos(a)");
+    }
+
+    #[test]
+    fn matrix2sym_mul_matrix2sym_yields_2d_composition() {
+        // R(a) * R(b) -- the (0,0) entry is cos(a)*cos(b) - sin(a)*sin(b),
+        // i.e. the expanded form of cos(a+b). We don't rely on a trig
+        // identity collapser; just check the bilinear structure.
+        let ra = matrix2sym::rotation(symbol("a"));
+        let rb = matrix2sym::rotation(symbol("b"));
+        let prod = ra * rb;
+        assert_eq!(format!("{}", prod.rows[0].x.simplify()),
+            "cos(a) * cos(b) - sin(a) * sin(b)");
+        // (1, 0) = sin(a)*cos(b) + cos(a)*sin(b) = sin(a+b)
+        assert_eq!(format!("{}", prod.rows[1].x.simplify()),
+            "cos(b) * sin(a) + cos(a) * sin(b)");
     }
 }

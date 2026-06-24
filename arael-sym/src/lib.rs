@@ -134,6 +134,24 @@
 //! assert_eq!(dot, "x + 2 * y + 3 * z");
 //! ```
 //!
+//! ## Geometric primitives
+//!
+//! Fixed-shape companions to the runtime `vect{2,3}f` / `matrix{2,3}f` types
+//! used inside `#[arael::model]` constraint bodies. They live in
+//! [`geo`] and are re-exported at the crate root:
+//! [`vect2sym`], [`vect3sym`], [`matrix2sym`], [`matrix3sym`], [`quaternsym`].
+//!
+//! ```
+//! use arael_sym::*;
+//! let r = matrix2sym::rotation(symbol("a"));      // 2D rotation
+//! let v = vect2sym::new("v");
+//! let rv = r * v;
+//! assert_eq!(format!("{}", rv.x.simplify()), "v.x * cos(a) - v.y * sin(a)");
+//! ```
+//!
+//! See `docs/SYM.md` for the full surface (transpose, mat*vec, mat*mat,
+//! `vect3sym::rotation_matrix()`, `matrix3sym::get_euler_angles()`, etc.).
+//!
 //! ## Jacobian
 //!
 //! ```

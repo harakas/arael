@@ -182,6 +182,70 @@ sym! {
 }
 ```
 
+## Geometric Primitives
+
+Fixed-shape symbolic vectors/matrices live in `arael_sym::geo`. They're used by `#[arael::model]` constraint bodies as the companions to the runtime `vect2f`/`vect3f`/`matrix2f`/`matrix3f` types -- the macro's body interpreter dispatches operators and methods through these.
+
+| Symbolic         | Runtime companion        | Fields / shape                     |
+| ---------------- | ------------------------ | ---------------------------------- |
+| `vect2sym`       | `vect2f` / `vect2d`      | `.x .y`                            |
+| `vect3sym`       | `vect3f` / `vect3d`      | `.x .y .z`                         |
+| `matrix2sym`     | `matrix2f` / `matrix2d`  | `rows: [vect2sym; 2]`              |
+| `matrix3sym`     | `matrix3f` / `matrix3d`  | `rows: [vect3sym; 3]`              |
+| `quaternsym`     | `quaternf` / `quaternd`  | `.t` (scalar) + `.v` (vect3sym)    |
+
+### vect2sym / vect3sym
+
+```rust
+let v = vect2sym::new("v");      // v.x, v.y as symbols
+let u = vect2sym::new("u");
+let dot     = v.clone() * u.clone();   // E (scalar)
+let scaled  = v.clone() * symbol("k"); // vect2sym
+let perp    = v.clone().across();      // (-v.y, v.x)
+let cross_z = v.cross(&u);             // E: v.x*u.y - v.y*u.x
+let n2      = v.square();              // v.x*v.x + v.y*v.y
+let n       = v.norm();                // sqrt(v.square())
+let u_hat   = v.unit();                // v / v.norm()
+```
+
+`vect3sym` adds `.rotation_matrix()` (intrinsic ZYX Euler angles -> `matrix3sym`) and the usual dot / scaled / negate / add / sub.
+
+### matrix2sym
+
+```rust
+let r = matrix2sym::rotation(symbol("a"));    // 2D rotation
+let rt = r.transpose();                       // R(-a)
+let v  = vect2sym::new("v");
+let rv = r.clone() * v;                       // matrix * vec  -> vect2sym
+let rr = r.clone() * rt;                      // matrix * matrix -> matrix2sym
+```
+
+### matrix3sym
+
+```rust
+let m = matrix3sym::new("m");                 // 9 symbols
+let mt = m.transpose();
+let ea = m.get_euler_angles();                // -> vect3sym
+let mv = m.clone() * vect3sym::new("v");      // -> vect3sym
+let mm = m.clone() * m.clone();               // -> matrix3sym
+```
+
+### Use in constraint bodies
+
+Inside `#[arael(constraint(..., { ... }))]` the body is interpreted (not compiled as Rust), so you write the *runtime* type names but the macro dispatches through the symbolic companions:
+
+```rust
+#[arael(constraint(hb, parent = lm, {
+    // pose.gamma is a Param<f32>; lm.pos / pose.pos are Param<vect2f>.
+    let world_angle = pose.gamma + frine.measured;
+    let aligned = matrix2sym::rotation(world_angle).transpose()
+                  * (lm.pos - pose.pos);
+    [atan2(aligned.y, aligned.x) * frine.isigma]
+}))]
+```
+
+You don't need `use arael::matrix::matrix2sym;` -- the macro matches `matrix2sym::rotation(...)` by path suffix, so any spelling that ends in `matrix2sym::rotation` works.
+
 ## Output Formatting / Code Generation
 
 Any `E` renders three ways: `Display` for human reading, `to_latex()` for typeset output, and `to_rust("f64")` / `to_rust("f32")` for generated Rust code (the scalar type controls `powf` suffixes and literal formatting).
