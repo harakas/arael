@@ -21,6 +21,7 @@ pub enum SymVal {
     Scalar(E),
     Vec2(vect2sym),
     Vec3(vect3sym),
+    Mat2(arael_sym::geo::matrix2sym),
     Mat3(matrix3sym),
     /// Universal euler angles: composed ea for .x/.y/.z, composed rotation for .rotation_matrix()
     UniversalEulerAngles {
@@ -35,6 +36,7 @@ impl SymVal {
             SymVal::Scalar(_) => "scalar",
             SymVal::Vec2(_) => "vec2",
             SymVal::Vec3(_) => "vec3",
+            SymVal::Mat2(_) => "mat2",
             SymVal::Mat3(_) => "mat3",
             SymVal::UniversalEulerAngles { .. } => "universal_euler_angles",
         }
@@ -154,6 +156,9 @@ fn eval_expr(expr: &Expr, ctx: &mut ConstraintCtx) -> Result<SymVal, syn::Error>
                 (SymVal::Mat3(m), "get_euler_angles") => {
                     Ok(SymVal::Vec3(m.get_euler_angles()))
                 }
+                (SymVal::Mat2(m), "transpose") => {
+                    Ok(SymVal::Mat2(m.transpose()))
+                }
                 (SymVal::Vec2(v), "norm") => Ok(SymVal::Scalar(v.norm())),
                 (SymVal::Vec2(v), "square") => Ok(SymVal::Scalar(v.square())),
                 (SymVal::Vec2(v), "unit") => Ok(SymVal::Vec2(v.clone().unit())),
@@ -201,13 +206,26 @@ fn eval_expr(expr: &Expr, ctx: &mut ConstraintCtx) -> Result<SymVal, syn::Error>
 
         // Function calls: atan2, atan, sin, cos, etc.
         Expr::Call(ec) => {
-            if let Expr::Path(func_path) = ec.func.as_ref()
-                && let Some(func_name) = func_path.path.get_ident() {
-                    let args: Vec<SymVal> = ec.args.iter()
-                        .map(|a| eval_expr(a, ctx))
-                        .collect::<Result<_, _>>()?;
+            if let Expr::Path(func_path) = ec.func.as_ref() {
+                let args: Vec<SymVal> = ec.args.iter()
+                    .map(|a| eval_expr(a, ctx))
+                    .collect::<Result<_, _>>()?;
+                // Single-segment path: scalar fn registry (sin/cos/atan2/user fns)
+                if let Some(func_name) = func_path.path.get_ident() {
                     return eval_function(&func_name.to_string(), args, expr);
                 }
+                // Multi-segment path: static constructors on symbolic types,
+                // e.g. matrix2sym::rotation(angle). Match by the last two
+                // segments so all of `matrix2sym::rotation`,
+                // `arael::matrix::matrix2sym::rotation`, etc. resolve the same.
+                let segs: Vec<String> = func_path.path.segments.iter()
+                    .map(|s| s.ident.to_string()).collect();
+                if segs.len() >= 2 {
+                    let ty = &segs[segs.len() - 2];
+                    let func = &segs[segs.len() - 1];
+                    return eval_static_constructor(ty, func, args, expr);
+                }
+            }
             Err(syn::Error::new_spanned(expr, "unsupported function call in constraint"))
         }
 
@@ -599,9 +617,37 @@ fn sym_mul(left: SymVal, right: SymVal, span: &Expr) -> Result<SymVal, syn::Erro
         (SymVal::Vec3(a), SymVal::Scalar(b)) => Ok(SymVal::Vec3(a * b)),
         (SymVal::Vec2(a), SymVal::Vec2(b)) => Ok(SymVal::Scalar(a * b)), // dot product
         (SymVal::Vec3(a), SymVal::Vec3(b)) => Ok(SymVal::Scalar(a * b)), // dot product
+        (SymVal::Mat2(a), SymVal::Vec2(b)) => Ok(SymVal::Vec2(a * b)),
+        (SymVal::Mat2(a), SymVal::Mat2(b)) => Ok(SymVal::Mat2(a * b)),
         (SymVal::Mat3(a), SymVal::Vec3(b)) => Ok(SymVal::Vec3(a * b)),
         (SymVal::Mat3(a), SymVal::Mat3(b)) => Ok(SymVal::Mat3(a * b)),
         _ => Err(syn::Error::new_spanned(span, "type mismatch in multiplication")),
+    }
+}
+
+/// Static constructor dispatch for `matrix2sym::rotation(angle)` etc.
+/// Match-by-last-two-segments lets users write either `matrix2sym::rotation(x)`
+/// (with `use arael::matrix::matrix2sym;`) or the fully qualified
+/// `arael::matrix::matrix2sym::rotation(x)`; both end with the same pair.
+fn eval_static_constructor(ty: &str, func: &str, args: Vec<SymVal>, span: &Expr)
+    -> Result<SymVal, syn::Error>
+{
+    match (ty, func) {
+        ("matrix2sym", "rotation") => {
+            if args.len() != 1 {
+                return Err(syn::Error::new_spanned(span,
+                    "matrix2sym::rotation expects 1 argument (the angle)"));
+            }
+            match &args[0] {
+                SymVal::Scalar(a) => Ok(SymVal::Mat2(
+                    arael_sym::geo::matrix2sym::rotation(a.clone()))),
+                other => Err(syn::Error::new_spanned(span,
+                    format!("matrix2sym::rotation expects scalar, got {}",
+                        other.type_name()))),
+            }
+        }
+        _ => Err(syn::Error::new_spanned(span,
+            format!("unsupported constructor `{}::{}` in constraint", ty, func))),
     }
 }
 
