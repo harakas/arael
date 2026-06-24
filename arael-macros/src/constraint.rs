@@ -3175,6 +3175,82 @@ pub fn generate_root_methods(
         }
     }
 
+    // Auto-wire SelfBlock indices for "passive" entities: structs that have
+    // Param + SelfBlock<Self> but no self-constraint referencing that block,
+    // yet participate as A or B in some cross-block (e.g. landmarks in a
+    // BA-style problem where bearings are owned by a peer struct). Without
+    // this loop the macro emits add_residual calls into a SelfBlock whose
+    // parameter indices are still u32::MAX, so its contributions silently
+    // get dropped by accumulate_hessian -- the Hessian diagonal stays zero
+    // and Cholesky blows up.
+    //
+    // A self-constraint would have created a collection_group with self_block
+    // populated; the loop above already emits set_indices for those. Here we
+    // walk root's collections one more time and emit set_indices for any
+    // collection whose inner type has Param + SelfBlock but no group entry.
+    // No __cid bump -- this isn't a constraint, just index wiring.
+    {
+        let mut wired: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for (key, group) in &collection_groups {
+            if group.self_block.is_some() { wired.insert(key.clone()); }
+        }
+        let root_fields_passive: syn::FieldsNamed = syn::parse2(quote! { { #root_fields } })?;
+        for field in &root_fields_passive.named {
+            let field_ident = match field.ident.as_ref() {
+                Some(i) => i.clone(),
+                None => continue,
+            };
+            let field_name = field_ident.to_string();
+            if wired.contains(&field_name) { continue; }
+            // Pull T from Vec<T> / Deque<T> / refs::Vec<T> / refs::Deque<T>.
+            // Filter on the OUTER segment name so SelfBlock<Self> / CrossBlock<...>
+            // / Param<...> / Option<...> at the root don't get misread as
+            // collections of their first type argument.
+            let inner_name: Option<String> = if let syn::Type::Path(tp) = &field.ty
+                && let Some(seg) = tp.path.segments.last()
+                && matches!(seg.ident.to_string().as_str(), "Vec" | "Deque")
+                && let syn::PathArguments::AngleBracketed(args) = &seg.arguments
+                && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
+            { type_ident_name(inner).ok() } else { None };
+            let type_name = match inner_name { Some(s) => s, None => continue };
+            if !reachable.contains(&type_name) { continue; }
+            let layout = match registry_lookup(&type_name) { Some(l) => l, None => continue };
+            if layout.param_fields.is_empty() { continue; }
+            let hb_field = match layout.self_block_field.clone() {
+                Some(s) => s, None => continue,
+            };
+            let hb_ident = syn::Ident::new(&hb_field, proc_macro2::Span::call_site());
+            let mut a_idx_stmts: Vec<TokenStream2> = Vec::new();
+            let mut offset = 0usize;
+            for pf in &layout.param_fields {
+                let pf_ident = syn::Ident::new(pf, proc_macro2::Span::call_site());
+                let size = layout.fields.iter()
+                    .find(|(n, _)| n == pf)
+                    .map(|(_, sft)| match sft {
+                        SymFieldType::Scalar => 1usize,
+                        SymFieldType::Vec2 => 2,
+                        SymFieldType::Vec3 => 3,
+                        _ => 0,
+                    }).unwrap_or(0);
+                if size == 0 { continue; }
+                let end = offset + size;
+                a_idx_stmts.push(quote! {
+                    __item.#pf_ident.write_indices(&mut __a_idx[#offset..#end]);
+                });
+                offset = end;
+            }
+            if offset == 0 { continue; }
+            let a_count = offset;
+            merged_sbi.push(quote! {
+                for __item in self.#field_ident.iter_mut() {
+                    let mut __a_idx = [0u32; #a_count];
+                    #(#a_idx_stmts)*
+                    __item.#hb_ident.set_indices(&__a_idx);
+                }
+            });
+        }
+    }
+
     // Emit single-instance entity groups (RootSelf + DirectField). No loops —
     // each block evaluates its constraint(s) exactly once, with __item bound to
     // the entity (or a reborrow of self for RootSelf). Still advances __cid /
