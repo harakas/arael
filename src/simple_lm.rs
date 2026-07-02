@@ -578,21 +578,28 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
     let eight = T::from(8.0).unwrap();
 
     let mut lambda = config.initial_lambda;
-    let start_cost = problem.calc_cost(&cur_x);
-    let mut end_cost = start_cost;
-
-    // Already at zero cost — nothing to do
-    if start_cost == T::zero() {
-        return LmResult { x: cur_x, start_cost, end_cost, iterations: 0 };
-    }
+    let mut start_cost = T::zero();
+    let mut end_cost = T::zero();
 
     let mut small_count = 0usize;
     let mut done = false;
     let mut iter = 0usize;
+    let mut first = true;
     let mut timer = Instant::now();
 
     while iter < config.max_iters && !done {
-        solver.compute(problem, &cur_x, &mut grad, &mut matrix);
+        let computed_cost = solver.compute(problem, &cur_x, &mut grad, &mut matrix);
+        if first {
+            // The cost is a free byproduct of assembly; using it here
+            // replaces the separate calc_cost(x0) pass of the old loop.
+            first = false;
+            start_cost = computed_cost;
+            end_cost = computed_cost;
+            // Already at zero cost — nothing to do
+            if start_cost == T::zero() {
+                return LmResult { x: cur_x, start_cost, end_cost, iterations: 0 };
+            }
+        }
         solver.extract_diagonal(&matrix, &mut diagonal);
 
         let mut inner = 0usize;
