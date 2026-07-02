@@ -1,2 +1,7 @@
 [toolchain]
-channel = "stable"
+# Pinned so CI and local builds agree -- the trybuild compile-fail fixtures
+# (tests/constraint_attr_errors/, tests/user_function_errors/) compare rustc
+# stderr verbatim, and diagnostic wording changes between releases. When
+# bumping: update the pin, run TRYBUILD=overwrite cargo test, and commit the
+# regenerated .stderr files together with this file.
+channel = "1.94.0"

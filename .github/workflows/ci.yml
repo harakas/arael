@@ -1,0 +1,81 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# A push that also has an open PR would run twice; cancel superseded runs
+# on the same ref instead.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Full workspace test suite with default features (includes arael-sketch*
+  # and all doctests). Examples are compiled as part of `cargo test`.
+  test:
+    name: workspace tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system dependencies (egui/eframe build deps)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libxcb-render0-dev libxcb-shape0-dev \
+            libxcb-xfixes0-dev libxkbcommon-dev libssl-dev
+      - name: Install pinned toolchain (from rust-toolchain.toml)
+        run: rustup toolchain install && rustup show
+      - uses: Swatinem/rust-cache@v2
+      - name: Run workspace tests
+        run: cargo test --workspace
+
+  # Optional solver backends are behind cargo features and invisible to the
+  # default build -- they must be compiled and tested explicitly (REVIEW.md
+  # B1: all three were uncompilable for ~118 commits because nothing built
+  # them). Paths in build.rs assume the Ubuntu locations of Eigen and
+  # SuiteSparse headers.
+  features:
+    name: arael ${{ matrix.features }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features:
+          - "lapack"
+          - "eigen"
+          - "cholmod"
+          - "lapack,cholmod"
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install solver backend dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y liblapack-dev libblas-dev libeigen3-dev \
+            libsuitesparse-dev
+      - name: Install pinned toolchain (from rust-toolchain.toml)
+        run: rustup toolchain install && rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.features }}
+      - name: Test arael with features
+        run: cargo test -p arael --lib --features ${{ matrix.features }}
+      - name: Check tests and examples build with features
+        run: cargo check -p arael --tests --examples --features ${{ matrix.features }}
+
+  # The arael crate with no optional features (what docs.rs and plain
+  # `cargo add arael` users get).
+  minimal:
+    name: arael no-default-features
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install pinned toolchain (from rust-toolchain.toml)
+        run: rustup toolchain install && rustup show
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: minimal
+      - name: Test arael without optional features
+        run: cargo test -p arael --lib --no-default-features
