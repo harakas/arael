@@ -903,6 +903,14 @@ pub fn solve_sparse_direct(x0: &[f64], problem: &mut impl LmProblem<f64>, config
 pub struct SparseFaer {
     symbolic: Option<faer::sparse::linalg::cholesky::SymbolicCholesky<usize>>,
     positions: Option<Vec<usize>>,
+    // Buffers reused across solve_damped calls (every iteration and every
+    // lambda retry). The sparsity pattern is fixed after the first call, so
+    // the usize copy of the row indices, the L-factor storage, and both
+    // faer scratch buffers are sized once and reused.
+    row_idx_usize: Vec<usize>,
+    l_vals: Vec<f64>,
+    factor_mem: Vec<std::mem::MaybeUninit<u8>>,
+    solve_mem: Vec<std::mem::MaybeUninit<u8>>,
 }
 
 impl Default for SparseFaer {
@@ -913,7 +921,14 @@ impl Default for SparseFaer {
 
 impl SparseFaer {
     pub fn new() -> Self {
-        SparseFaer { symbolic: None, positions: None }
+        SparseFaer {
+            symbolic: None,
+            positions: None,
+            row_idx_usize: Vec::new(),
+            l_vals: Vec::new(),
+            factor_mem: Vec::new(),
+            solve_mem: Vec::new(),
+        }
     }
 }
 
@@ -951,19 +966,17 @@ impl LmSolver<f64> for SparseFaer {
         for i in 0..n { matrix.csc.vals[matrix.csc.diag_pos[i]] = (1.0 + lambda) * diagonal[i]; }
         use faer::sparse::linalg::cholesky::*;
 
-        // Convert our CSC (u32 row_idx) to faer format (usize row_idx)
-        let row_idx_usize: Vec<usize> = matrix.csc.row_idx.iter().map(|&r| r as usize).collect();
-
-        let symbolic_ref = faer::sparse::SymbolicSparseColMatRef::new_checked(
-            n, n,
-            &matrix.csc.col_ptr,
-            None,
-            &row_idx_usize,
-        );
-        let mat_ref = faer::sparse::SparseColMatRef::new(symbolic_ref, &matrix.csc.vals);
-
-        // Symbolic factorization (cached across calls)
+        // First call: convert the pattern to faer's usize row indices, run
+        // the symbolic factorization, and size the reusable buffers.
         if self.symbolic.is_none() {
+            self.row_idx_usize.clear();
+            self.row_idx_usize.extend(matrix.csc.row_idx.iter().map(|&r| r as usize));
+            let symbolic_ref = faer::sparse::SymbolicSparseColMatRef::new_checked(
+                n, n,
+                &matrix.csc.col_ptr,
+                None,
+                &self.row_idx_usize,
+            );
             let sym = factorize_symbolic_cholesky(
                 symbolic_ref,
                 faer::Side::Upper,
@@ -974,20 +987,33 @@ impl LmSolver<f64> for SparseFaer {
                 Ok(s) => self.symbolic = Some(s),
                 Err(_) => return false,
             }
+            let symbolic = self.symbolic.as_ref().unwrap();
+            self.l_vals.resize(symbolic.len_val(), 0.0);
+            let factor_scratch = symbolic.factorize_numeric_llt_scratch::<f64>(
+                faer::Par::Seq,
+                faer::Spec::default(),
+            );
+            self.factor_mem.resize(factor_scratch.unaligned_bytes_required(), std::mem::MaybeUninit::uninit());
+            let solve_scratch = symbolic.solve_in_place_scratch::<f64>(1, faer::Par::Seq);
+            self.solve_mem.resize(solve_scratch.unaligned_bytes_required(), std::mem::MaybeUninit::uninit());
         }
         let symbolic = self.symbolic.as_ref().unwrap();
 
-        // Numeric factorization
-        let mut l_vals = vec![0.0f64; symbolic.len_val()];
-        let scratch_size = symbolic.factorize_numeric_llt_scratch::<f64>(
-            faer::Par::Seq,
-            faer::Spec::default(),
+        // The pattern is fixed after the first call; reconstructing the ref
+        // from the cached indices costs one validation scan, no allocation.
+        let symbolic_ref = faer::sparse::SymbolicSparseColMatRef::new_checked(
+            n, n,
+            &matrix.csc.col_ptr,
+            None,
+            &self.row_idx_usize,
         );
-        let mut scratch_mem: Vec<std::mem::MaybeUninit<u8>> = vec![std::mem::MaybeUninit::uninit(); scratch_size.unaligned_bytes_required()];
-        let stack = faer::dyn_stack::MemStack::new(&mut scratch_mem);
+        let mat_ref = faer::sparse::SparseColMatRef::new(symbolic_ref, &matrix.csc.vals);
 
+        // Numeric factorization into the cached buffers. faer fully
+        // overwrites l_vals, so no re-zeroing is needed between calls.
+        let stack = faer::dyn_stack::MemStack::new(&mut self.factor_mem);
         let llt = symbolic.factorize_numeric_llt(
-            &mut l_vals,
+            &mut self.l_vals,
             mat_ref,
             faer::Side::Upper,
             faer::linalg::cholesky::llt::factor::LltRegularization::default(),
@@ -1004,9 +1030,7 @@ impl LmSolver<f64> for SparseFaer {
         // Solve
         delta.copy_from_slice(grad);
         let rhs = faer::col::ColMut::from_slice_mut(delta);
-        let solve_scratch_size = symbolic.solve_in_place_scratch::<f64>(1, faer::Par::Seq);
-        let mut solve_mem: Vec<std::mem::MaybeUninit<u8>> = vec![std::mem::MaybeUninit::uninit(); solve_scratch_size.unaligned_bytes_required()];
-        let solve_stack = faer::dyn_stack::MemStack::new(&mut solve_mem);
+        let solve_stack = faer::dyn_stack::MemStack::new(&mut self.solve_mem);
 
         llt.solve_in_place_with_conj(
             faer::Conj::No,
@@ -1028,6 +1052,11 @@ pub fn solve_sparse_faer(x0: &[f64], problem: &mut impl LmProblem<f64>, config: 
 pub struct SparseFaerF32 {
     symbolic: Option<faer::sparse::linalg::cholesky::SymbolicCholesky<usize>>,
     positions: Option<Vec<usize>>,
+    // Buffers reused across solve_damped calls; see SparseFaer.
+    row_idx_usize: Vec<usize>,
+    l_vals: Vec<f32>,
+    factor_mem: Vec<std::mem::MaybeUninit<u8>>,
+    solve_mem: Vec<std::mem::MaybeUninit<u8>>,
 }
 
 impl Default for SparseFaerF32 {
@@ -1038,7 +1067,14 @@ impl Default for SparseFaerF32 {
 
 impl SparseFaerF32 {
     pub fn new() -> Self {
-        SparseFaerF32 { symbolic: None, positions: None }
+        SparseFaerF32 {
+            symbolic: None,
+            positions: None,
+            row_idx_usize: Vec::new(),
+            l_vals: Vec::new(),
+            factor_mem: Vec::new(),
+            solve_mem: Vec::new(),
+        }
     }
 }
 
@@ -1076,17 +1112,17 @@ impl LmSolver<f32> for SparseFaerF32 {
         for i in 0..n { matrix.csc.vals[matrix.csc.diag_pos[i]] = (1.0 + lambda) * diagonal[i]; }
         use faer::sparse::linalg::cholesky::*;
 
-        let row_idx_usize: Vec<usize> = matrix.csc.row_idx.iter().map(|&r| r as usize).collect();
-
-        let symbolic_ref = faer::sparse::SymbolicSparseColMatRef::new_checked(
-            n, n,
-            &matrix.csc.col_ptr,
-            None,
-            &row_idx_usize,
-        );
-        let mat_ref = faer::sparse::SparseColMatRef::new(symbolic_ref, &matrix.csc.vals);
-
+        // First call: convert the pattern, run the symbolic factorization,
+        // size the reusable buffers (see SparseFaer for details).
         if self.symbolic.is_none() {
+            self.row_idx_usize.clear();
+            self.row_idx_usize.extend(matrix.csc.row_idx.iter().map(|&r| r as usize));
+            let symbolic_ref = faer::sparse::SymbolicSparseColMatRef::new_checked(
+                n, n,
+                &matrix.csc.col_ptr,
+                None,
+                &self.row_idx_usize,
+            );
             let sym = factorize_symbolic_cholesky(
                 symbolic_ref,
                 faer::Side::Upper,
@@ -1097,19 +1133,29 @@ impl LmSolver<f32> for SparseFaerF32 {
                 Ok(s) => self.symbolic = Some(s),
                 Err(_) => return false,
             }
+            let symbolic = self.symbolic.as_ref().unwrap();
+            self.l_vals.resize(symbolic.len_val(), 0.0);
+            let factor_scratch = symbolic.factorize_numeric_llt_scratch::<f32>(
+                faer::Par::Seq,
+                faer::Spec::default(),
+            );
+            self.factor_mem.resize(factor_scratch.unaligned_bytes_required(), std::mem::MaybeUninit::uninit());
+            let solve_scratch = symbolic.solve_in_place_scratch::<f32>(1, faer::Par::Seq);
+            self.solve_mem.resize(solve_scratch.unaligned_bytes_required(), std::mem::MaybeUninit::uninit());
         }
         let symbolic = self.symbolic.as_ref().unwrap();
 
-        let mut l_vals = vec![0.0f32; symbolic.len_val()];
-        let scratch_size = symbolic.factorize_numeric_llt_scratch::<f32>(
-            faer::Par::Seq,
-            faer::Spec::default(),
+        let symbolic_ref = faer::sparse::SymbolicSparseColMatRef::new_checked(
+            n, n,
+            &matrix.csc.col_ptr,
+            None,
+            &self.row_idx_usize,
         );
-        let mut scratch_mem: Vec<std::mem::MaybeUninit<u8>> = vec![std::mem::MaybeUninit::uninit(); scratch_size.unaligned_bytes_required()];
-        let stack = faer::dyn_stack::MemStack::new(&mut scratch_mem);
+        let mat_ref = faer::sparse::SparseColMatRef::new(symbolic_ref, &matrix.csc.vals);
 
+        let stack = faer::dyn_stack::MemStack::new(&mut self.factor_mem);
         let llt = symbolic.factorize_numeric_llt(
-            &mut l_vals,
+            &mut self.l_vals,
             mat_ref,
             faer::Side::Upper,
             faer::linalg::cholesky::llt::factor::LltRegularization::default(),
@@ -1125,9 +1171,7 @@ impl LmSolver<f32> for SparseFaerF32 {
 
         delta.copy_from_slice(grad);
         let rhs = faer::col::ColMut::from_slice_mut(delta);
-        let solve_scratch_size = symbolic.solve_in_place_scratch::<f32>(1, faer::Par::Seq);
-        let mut solve_mem: Vec<std::mem::MaybeUninit<u8>> = vec![std::mem::MaybeUninit::uninit(); solve_scratch_size.unaligned_bytes_required()];
-        let solve_stack = faer::dyn_stack::MemStack::new(&mut solve_mem);
+        let solve_stack = faer::dyn_stack::MemStack::new(&mut self.solve_mem);
 
         llt.solve_in_place_with_conj(
             faer::Conj::No,
