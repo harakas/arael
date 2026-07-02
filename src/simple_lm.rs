@@ -1942,7 +1942,8 @@ pub fn solve_spd_band_lapack(n: usize, kd: usize, band: &mut [f64], b: &mut [f64
     let ldab = (kd + 1) as i32;
     unsafe {
         lapack_sys::dpbsv_(
-            &b'U',  // upper band
+            // c_char is u8 on aarch64 but i8 on x86_64; cast covers both
+            &(b'U' as std::ffi::c_char),  // upper band
             &(n as i32),
             &(kd as i32),
             &1i32,           // nrhs = 1
@@ -1963,7 +1964,7 @@ pub fn solve_spd_band_lapack_f32(n: usize, kd: usize, band: &mut [f32], b: &mut 
     let ldab = (kd + 1) as i32;
     unsafe {
         lapack_sys::spbsv_(
-            &b'U',
+            &(b'U' as std::ffi::c_char),  // upper band
             &(n as i32),
             &(kd as i32),
             &1i32,
