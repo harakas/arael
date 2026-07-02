@@ -1616,3 +1616,76 @@ fn test_eval_unbound_symbol() {
     vars.insert("y", 2.0);
     assert!((expr.eval(&vars).unwrap() - 3.0).abs() < 1e-10);
 }
+
+// ============================================================
+// Power-of-product expansion: (a*b)^n -> a^n * b^n is only valid
+// for integer exponents. For fractional n and negative factors the
+// two sides differ ((xy)^0.5 = 1 but x^0.5 * y^0.5 = NaN at
+// x = y = -1), so simplify must leave those unexpanded.
+// ============================================================
+
+#[test]
+fn test_pow_product_fractional_exponent_not_distributed() {
+    use std::collections::HashMap;
+    sym! {
+        let x = symbol("x");
+        let y = symbol("y");
+        let e = pow(x * y, constant(0.5)) * symbol("z");
+        let s = e.simplify();
+        // Value must be preserved where the original is defined:
+        // (-1 * -1)^0.5 * 3 = 3. Distribution would produce NaN.
+        let vars = HashMap::from([("x", -1.0), ("y", -1.0), ("z", 3.0)]);
+        let v = s.eval(&vars).unwrap();
+        assert!((v - 3.0).abs() < 1e-12, "got {} from {}", v, s);
+    }
+}
+
+#[test]
+fn test_pow_negated_base_fractional_exponent_no_nan_coefficient() {
+    use std::collections::HashMap;
+    sym! {
+        let x = symbol("x");
+        // (-2 * x)^0.5: expansion would bake the coefficient
+        // (-2)^0.5 = NaN into the tree.
+        // The outer multiplication forces the flatten_mul path where the
+        // expansion lives.
+        let e = pow(constant(-2.0) * x, constant(0.5)) * symbol("y");
+        let s = e.simplify();
+        let vars = HashMap::from([("x", -1.0), ("y", 3.0)]);
+        let v = s.eval(&vars).unwrap();
+        // ((-2)*(-1))^0.5 * 3 = 3*sqrt(2)
+        assert!((v - 3.0 * 2.0_f64.sqrt()).abs() < 1e-12, "got {} from {}", v, s);
+    }
+}
+
+#[test]
+fn test_pow_product_integer_exponents_still_expand_and_agree() {
+    use std::collections::HashMap;
+    sym! {
+        let x = symbol("x");
+        let y = symbol("y");
+        let vars = HashMap::from([("x", 3.0), ("y", 5.0)]);
+        // Positive, negative, and zero integer exponents: expansion is
+        // valid and values must agree with the unsimplified expression.
+        for n in [2.0, 3.0, -1.0, -2.0, 0.0] {
+            let e = pow(x * y, constant(n)) * constant(7.0);
+            let s = e.simplify();
+            let expect = (15.0_f64).powf(n) * 7.0;
+            let v = s.eval(&vars).unwrap();
+            assert!((v - expect).abs() < 1e-9 * expect.abs().max(1.0),
+                "n={}: got {} expected {} (simplified: {})", n, v, expect, s);
+        }
+        // The square actually expands structurally (the point of the
+        // rule). Expansion happens where the Pow participates in a
+        // product, so wrap it in one:
+        let sq = (pow(x * y, constant(2.0)) * symbol("z")).simplify();
+        let shown = format!("{}", sq);
+        assert!(!shown.contains("(x * y)") && shown.contains("x^2"),
+            "expected expanded form, got {}", shown);
+        // Negated base with integer exponent: sign handled via coefficient.
+        let neg = pow(-x, constant(3.0)) * symbol("y");
+        let vars2 = HashMap::from([("x", 2.0), ("y", 4.0)]);
+        let v2 = neg.simplify().eval(&vars2).unwrap();
+        assert!((v2 - (-32.0)).abs() < 1e-12, "got {}", v2);
+    }
+}

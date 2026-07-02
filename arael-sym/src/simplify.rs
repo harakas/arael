@@ -143,11 +143,16 @@ fn flatten_mul(e: &E) -> (f64, Vec<E>) {
             (-c, f)
         }
         Expr::Const(v) => (*v, vec![]),
-        // (a * b * ...)^n → a^n * b^n * ... (expand compound-base powers)
+        // (a * b * ...)^n → a^n * b^n * ... (expand compound-base powers).
+        // Only valid for INTEGER exponents: for fractional n and negative
+        // factors the sides differ ((xy)^0.5 = 1 but x^0.5 * y^0.5 = NaN
+        // at x = y = -1), and a negative extracted coefficient would bake
+        // a NaN into the tree via powf.
         Expr::Pow(base, exp) if matches!(base.as_ref(), Expr::Mul(..) | Expr::Neg(..)) => {
-            if let Expr::Const(n) = exp.as_ref() {
+            if is_const_int(exp.as_ref()).is_some() {
+                let n = match exp.as_ref() { Expr::Const(v) => *v, _ => unreachable!() };
                 let (c_base, factors) = flatten_mul(base);
-                let coeff = c_base.powf(*n);
+                let coeff = c_base.powf(n);
                 let powered: Vec<E> = factors
                     .into_iter()
                     .map(|f| E::new(Expr::Pow(f, exp.clone())))
