@@ -12,6 +12,7 @@ fn quadratic_converges_fast() {
             g[0] = 2.0 * (x[0] - 3.0);
             g[1] = 2.0 * (x[1] - 7.0);
             h[0] = 2.0; h[1] = 0.0; h[2] = 0.0; h[3] = 2.0;
+            (x[0] - 3.0).powi(2) + (x[1] - 7.0).powi(2)
         },
     };
     let result = solve(&[0.0, 0.0], &mut p, &LmConfig::default());
@@ -32,6 +33,7 @@ fn rosenbrock_converges() {
             h[1] = -400.0 * x;
             h[2] = -400.0 * x;
             h[3] = 200.0;
+            (1.0 - p[0]).powi(2) + 100.0 * (p[1] - p[0] * p[0]).powi(2)
         },
     };
     let result = solve(
@@ -58,6 +60,7 @@ fn high_dimensional_quadratic() {
                 for j in 0..n { h[i * n + j] = 0.0; }
                 h[i * n + i] = 2.0;
             }
+            x.iter().enumerate().map(|(i, &xi)| (xi - i as f64).powi(2)).sum()
         },
     };
     let x0: Vec<f64> = vec![0.0; n];
@@ -78,6 +81,7 @@ fn solver_does_not_waste_iterations_on_converged_problem() {
             g[0] = 2.0 * x[0];
             g[1] = 2.0 * x[1];
             h[0] = 2.0; h[1] = 0.0; h[2] = 0.0; h[3] = 2.0;
+            x[0].powi(2) + x[1].powi(2)
         },
     };
     let result = solve(&[0.0, 0.0], &mut p, &LmConfig::default());

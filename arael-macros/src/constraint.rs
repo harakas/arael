@@ -2212,7 +2212,14 @@ pub fn generate_root_methods(
         for ri in 0..n_residuals {
             let r_ident = syn::Ident::new(&format!("__r_{}", ri), proc_macro2::Span::call_site());
             let r_expr: Expr = parse_sym_code(&gh_simplified[idx].to_rust(""))?;
-            gh_stmts.push(quote! { let #r_ident= #r_expr; });
+            // Accumulate the cost alongside the derivatives: the residual
+            // value is already in hand, so the fused calc_cost_grad_hessian_*
+            // entry points get the cost for free (saves a separate cost-only
+            // model evaluation in the LM loop).
+            gh_stmts.push(quote! {
+                let #r_ident= #r_expr;
+                __cost += (#r_ident as #cast_type) * (#r_ident as #cast_type);
+            });
             idx += 1;
 
             let mut dr_idents = Vec::new();
@@ -3654,13 +3661,17 @@ pub fn generate_root_methods(
                 #(#set_block_indices_loops)*
             }
 
-            fn __compute_blocks(&mut self, params: &[#prec_type], grad: &mut [#prec_type]) {
+            /// Returns the cost (sum of squared residuals, excluding
+            /// extended-model residuals) as a byproduct of the sweep.
+            fn __compute_blocks(&mut self, params: &[#prec_type], grad: &mut [#prec_type]) -> #prec_type {
                 arael::model::Model::#update_method(self, params);
                 #extended_update_call
                 let __self_ref = unsafe { &*(self as *const Self) };
                 self.zero_blocks();
+                let mut __cost = 0.0 as #prec_type;
                 #(#grad_hessian_loops)*
                 #extended_compute_call
+                __cost
             }
         }
     };
@@ -3721,40 +3732,50 @@ pub fn generate_root_methods(
                 __cost
             }
 
-            fn calc_grad_hessian_dense(&mut self, params: &[#prec_type], grad: &mut [#prec_type], hessian: &mut [#prec_type]) {
+            fn calc_grad_hessian_dense(&mut self, params: &[#prec_type], grad: &mut [#prec_type], hessian: &mut [#prec_type]) -> #prec_type {
                 grad.iter_mut().for_each(|g| *g = 0.0);
-                self.__compute_blocks(params, grad);
+                let mut __cost = self.__compute_blocks(params, grad);
+                #extended_cost_call
                 hessian.iter_mut().for_each(|h| *h = 0.0);
                 self.#accumulate_method(hessian);
+                __cost
             }
 
-            fn calc_grad_hessian_band(&mut self, params: &[#prec_type], grad: &mut [#prec_type], band: &mut [#prec_type], kd: usize) -> Result<(), arael::simple_lm::BandError> {
+            fn calc_grad_hessian_band(&mut self, params: &[#prec_type], grad: &mut [#prec_type], band: &mut [#prec_type], kd: usize) -> Result<#prec_type, arael::simple_lm::BandError> {
                 grad.iter_mut().for_each(|g| *g = 0.0);
-                self.__compute_blocks(params, grad);
+                let mut __cost = self.__compute_blocks(params, grad);
+                #extended_cost_call
                 band.iter_mut().for_each(|b| *b = 0.0);
-                self.#accumulate_band_method(band, kd)
+                self.#accumulate_band_method(band, kd)?;
+                Ok(__cost)
             }
 
-            fn calc_grad_hessian_sparse(&mut self, params: &[#prec_type], grad: &mut [#prec_type], coo: &mut arael::simple_lm::CooMatrix<#prec_type>) {
+            fn calc_grad_hessian_sparse(&mut self, params: &[#prec_type], grad: &mut [#prec_type], coo: &mut arael::simple_lm::CooMatrix<#prec_type>) -> #prec_type {
                 grad.iter_mut().for_each(|g| *g = 0.0);
-                self.__compute_blocks(params, grad);
+                let mut __cost = self.__compute_blocks(params, grad);
+                #extended_cost_call
                 coo.clear();
                 self.#accumulate_sparse_method(coo);
+                __cost
             }
 
-            fn calc_grad_hessian_sparse_direct(&mut self, params: &[#prec_type], grad: &mut [#prec_type], csc: &mut arael::simple_lm::CscMatrix<#prec_type>) {
+            fn calc_grad_hessian_sparse_direct(&mut self, params: &[#prec_type], grad: &mut [#prec_type], csc: &mut arael::simple_lm::CscMatrix<#prec_type>) -> #prec_type {
                 grad.iter_mut().for_each(|g| *g = 0.0);
-                self.__compute_blocks(params, grad);
+                let mut __cost = self.__compute_blocks(params, grad);
+                #extended_cost_call
                 csc.vals.iter_mut().for_each(|v| *v = 0.0 as #prec_type);
                 self.#accumulate_sparse_direct_method(csc);
+                __cost
             }
 
-            fn calc_grad_hessian_sparse_indexed(&mut self, params: &[#prec_type], grad: &mut [#prec_type], vals: &mut [#prec_type], positions: &[usize]) {
+            fn calc_grad_hessian_sparse_indexed(&mut self, params: &[#prec_type], grad: &mut [#prec_type], vals: &mut [#prec_type], positions: &[usize]) -> #prec_type {
                 grad.iter_mut().for_each(|g| *g = 0.0);
-                self.__compute_blocks(params, grad);
+                let mut __cost = self.__compute_blocks(params, grad);
+                #extended_cost_call
                 vals.iter_mut().for_each(|v| *v = 0.0 as #prec_type);
                 let mut cursor = 0usize;
                 self.#accumulate_sparse_indexed_method(vals, positions, &mut cursor);
+                __cost
             }
 
             fn advance(&mut self, params: &mut [#prec_type]) {

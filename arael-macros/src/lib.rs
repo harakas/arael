@@ -2158,19 +2158,22 @@ fn generate_fit_impl(
                 params: &[f32],
                 grad: &mut [f32],
                 hessian: &mut [f32],
-            ) {
+            ) -> f32 {
                 #(#param_unpack)*
                 #(#constant_bind)*
                 grad.iter_mut().for_each(|g| *g = 0.0);
                 hessian.iter_mut().for_each(|h| *h = 0.0);
+                let mut __cost = 0.0_f32;
                 for #loop_var_id in &self.#data_field_id {
                     #(#data_bind)*
                     let __r: f32 = #r_expr;
+                    __cost += __r * __r;
                     #(#dr_bindings)*
                     #(#grad_accum)*
                     #(#hessian_accum)*
                 }
                 #(#hessian_symmetry)*
+                __cost
             }
 
             fn calc_grad_hessian_band(
@@ -2179,7 +2182,7 @@ fn generate_fit_impl(
                 _grad: &mut [f32],
                 _band: &mut [f32],
                 _kd: usize,
-            ) -> Result<(), arael::simple_lm::BandError> {
+            ) -> Result<f32, arael::simple_lm::BandError> {
                 unimplemented!("fit models do not support band assembly")
             }
 
@@ -2188,7 +2191,7 @@ fn generate_fit_impl(
                 _params: &[f32],
                 _grad: &mut [f32],
                 _coo: &mut arael::simple_lm::CooMatrix<f32>,
-            ) {
+            ) -> f32 {
                 unimplemented!("fit models do not support sparse assembly")
             }
 
@@ -2197,7 +2200,7 @@ fn generate_fit_impl(
                 _params: &[f32],
                 _grad: &mut [f32],
                 _csc: &mut arael::simple_lm::CscMatrix<f32>,
-            ) {
+            ) -> f32 {
                 unimplemented!("fit models do not support sparse direct assembly")
             }
 
@@ -2207,7 +2210,7 @@ fn generate_fit_impl(
                 _grad: &mut [f32],
                 _vals: &mut [f32],
                 _positions: &[usize],
-            ) {
+            ) -> f32 {
                 unimplemented!("fit models do not support sparse indexed assembly")
             }
         }

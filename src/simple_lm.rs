@@ -198,17 +198,24 @@ impl std::fmt::Display for BandError {
 pub trait LmProblem<T> {
     /// Evaluate the total cost at the given parameters.
     fn calc_cost(&mut self, params: &[T]) -> T;
-    /// Assemble gradient and dense row-major Hessian (n*n).
-    fn calc_grad_hessian_dense(&mut self, params: &[T], grad: &mut [T], hessian: &mut [T]);
+    /// Assemble gradient and dense row-major Hessian (n*n). Returns the
+    /// cost at `params` -- the residual values are in hand during assembly,
+    /// so the cost is a free byproduct (macro-generated models compute it
+    /// in the same sweep; hand-written impls should return it likewise).
+    fn calc_grad_hessian_dense(&mut self, params: &[T], grad: &mut [T], hessian: &mut [T]) -> T;
     /// Assemble gradient and Hessian in upper-band format (column-major, (kd+1)*n).
-    /// Returns Err if any block exceeds the declared bandwidth kd.
-    fn calc_grad_hessian_band(&mut self, params: &[T], grad: &mut [T], band: &mut [T], kd: usize) -> Result<(), BandError>;
+    /// Returns the cost at `params`, or Err if any block exceeds the
+    /// declared bandwidth kd.
+    fn calc_grad_hessian_band(&mut self, params: &[T], grad: &mut [T], band: &mut [T], kd: usize) -> Result<T, BandError>;
     /// Assemble gradient and upper-triangle Hessian as COO triplets.
-    fn calc_grad_hessian_sparse(&mut self, params: &[T], grad: &mut [T], coo: &mut CooMatrix<T>);
-    /// Assemble gradient and accumulate Hessian directly into CSC vals (structure must be pre-built).
-    fn calc_grad_hessian_sparse_direct(&mut self, params: &[T], grad: &mut [T], csc: &mut CscMatrix<T>);
-    /// Assemble gradient and accumulate Hessian into CSC vals using a precomputed position map.
-    fn calc_grad_hessian_sparse_indexed(&mut self, params: &[T], grad: &mut [T], vals: &mut [T], positions: &[usize]);
+    /// Returns the cost at `params`.
+    fn calc_grad_hessian_sparse(&mut self, params: &[T], grad: &mut [T], coo: &mut CooMatrix<T>) -> T;
+    /// Assemble gradient and accumulate Hessian directly into CSC vals
+    /// (structure must be pre-built). Returns the cost at `params`.
+    fn calc_grad_hessian_sparse_direct(&mut self, params: &[T], grad: &mut [T], csc: &mut CscMatrix<T>) -> T;
+    /// Assemble gradient and accumulate Hessian into CSC vals using a
+    /// precomputed position map. Returns the cost at `params`.
+    fn calc_grad_hessian_sparse_indexed(&mut self, params: &[T], grad: &mut [T], vals: &mut [T], positions: &[usize]) -> T;
     /// Called after each accepted LM step to let the problem update internal state.
     /// Default: no-op.
     fn advance(&mut self, _params: &mut [T]) {}
@@ -216,33 +223,35 @@ pub trait LmProblem<T> {
 
 /// Adapter: wrap two closures into an LmProblem (dense only).
 pub struct FnProblem<F1, F2> {
-    /// Closure computing the scalar cost from parameters.
+    /// Closure computing the scalar cost from parameters. Used for trial
+    /// points during the LM damping search.
     pub cost: F1,
-    /// Closure assembling gradient and dense Hessian from parameters.
+    /// Closure assembling gradient and dense Hessian from parameters,
+    /// returning the cost (a free byproduct -- the residuals are in hand).
     pub grad_hessian: F2,
 }
 
 impl<T, F1, F2> LmProblem<T> for FnProblem<F1, F2>
 where
     F1: FnMut(&[T]) -> T,
-    F2: FnMut(&[T], &mut [T], &mut [T]),
+    F2: FnMut(&[T], &mut [T], &mut [T]) -> T,
 {
     fn calc_cost(&mut self, params: &[T]) -> T {
         (self.cost)(params)
     }
-    fn calc_grad_hessian_dense(&mut self, params: &[T], grad: &mut [T], hessian: &mut [T]) {
+    fn calc_grad_hessian_dense(&mut self, params: &[T], grad: &mut [T], hessian: &mut [T]) -> T {
         (self.grad_hessian)(params, grad, hessian)
     }
-    fn calc_grad_hessian_band(&mut self, _params: &[T], _grad: &mut [T], _band: &mut [T], _kd: usize) -> Result<(), BandError> {
+    fn calc_grad_hessian_band(&mut self, _params: &[T], _grad: &mut [T], _band: &mut [T], _kd: usize) -> Result<T, BandError> {
         unimplemented!("FnProblem does not support band assembly")
     }
-    fn calc_grad_hessian_sparse(&mut self, _params: &[T], _grad: &mut [T], _coo: &mut CooMatrix<T>) {
+    fn calc_grad_hessian_sparse(&mut self, _params: &[T], _grad: &mut [T], _coo: &mut CooMatrix<T>) -> T {
         unimplemented!("FnProblem does not support sparse assembly")
     }
-    fn calc_grad_hessian_sparse_direct(&mut self, _params: &[T], _grad: &mut [T], _csc: &mut CscMatrix<T>) {
+    fn calc_grad_hessian_sparse_direct(&mut self, _params: &[T], _grad: &mut [T], _csc: &mut CscMatrix<T>) -> T {
         unimplemented!("FnProblem does not support sparse direct assembly")
     }
-    fn calc_grad_hessian_sparse_indexed(&mut self, _params: &[T], _grad: &mut [T], _vals: &mut [T], _positions: &[usize]) {
+    fn calc_grad_hessian_sparse_indexed(&mut self, _params: &[T], _grad: &mut [T], _vals: &mut [T], _positions: &[usize]) -> T {
         unimplemented!("FnProblem does not support sparse indexed assembly")
     }
 }
@@ -369,8 +378,10 @@ pub trait LmSolver<T: Float> {
     /// Create a zero-initialized matrix for n parameters.
     fn new_matrix(&self, n: usize) -> Self::Matrix;
 
-    /// Compute gradient and Hessian matrix from the problem.
-    fn compute(&mut self, problem: &mut dyn LmProblem<T>, params: &[T], grad: &mut [T], matrix: &mut Self::Matrix);
+    /// Compute gradient and Hessian matrix from the problem. Returns the
+    /// cost at `params` (a free byproduct of assembly); the LM loop uses
+    /// it for the first evaluation of a solve.
+    fn compute(&mut self, problem: &mut dyn LmProblem<T>, params: &[T], grad: &mut [T], matrix: &mut Self::Matrix) -> T;
 
     /// Extract all diagonal elements from the matrix.
     fn extract_diagonal(&self, matrix: &Self::Matrix, diagonal: &mut [T]);
@@ -392,8 +403,8 @@ pub struct Dense;
 impl LmSolver<f64> for Dense {
     type Matrix = Vec<f64>;
     fn new_matrix(&self, n: usize) -> Vec<f64> { vec![0.0; n * n] }
-    fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], hessian: &mut Vec<f64>) {
-        problem.calc_grad_hessian_dense(params, grad, hessian);
+    fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], hessian: &mut Vec<f64>) -> f64 {
+        problem.calc_grad_hessian_dense(params, grad, hessian)
     }
     fn extract_diagonal(&self, matrix: &Vec<f64>, diagonal: &mut [f64]) {
         let n = diagonal.len();
@@ -411,8 +422,8 @@ impl LmSolver<f64> for Dense {
 impl LmSolver<f32> for Dense {
     type Matrix = Vec<f32>;
     fn new_matrix(&self, n: usize) -> Vec<f32> { vec![0.0; n * n] }
-    fn compute(&mut self, problem: &mut dyn LmProblem<f32>, params: &[f32], grad: &mut [f32], hessian: &mut Vec<f32>) {
-        problem.calc_grad_hessian_dense(params, grad, hessian);
+    fn compute(&mut self, problem: &mut dyn LmProblem<f32>, params: &[f32], grad: &mut [f32], hessian: &mut Vec<f32>) -> f32 {
+        problem.calc_grad_hessian_dense(params, grad, hessian)
     }
     fn extract_diagonal(&self, matrix: &Vec<f32>, diagonal: &mut [f32]) {
         let n = diagonal.len();
@@ -436,9 +447,9 @@ pub struct Band {
 impl LmSolver<f64> for Band {
     type Matrix = Vec<f64>;
     fn new_matrix(&self, n: usize) -> Vec<f64> { vec![0.0; (self.kd + 1) * n] }
-    fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], band: &mut Vec<f64>) {
+    fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], band: &mut Vec<f64>) -> f64 {
         problem.calc_grad_hessian_band(params, grad, band, self.kd)
-            .expect("band assembly failed: element outside bandwidth");
+            .expect("band assembly failed: element outside bandwidth")
     }
     fn extract_diagonal(&self, matrix: &Vec<f64>, diagonal: &mut [f64]) {
         let ldab = self.kd + 1;
@@ -460,9 +471,9 @@ impl LmSolver<f64> for Band {
 impl LmSolver<f32> for Band {
     type Matrix = Vec<f32>;
     fn new_matrix(&self, n: usize) -> Vec<f32> { vec![0.0; (self.kd + 1) * n] }
-    fn compute(&mut self, problem: &mut dyn LmProblem<f32>, params: &[f32], grad: &mut [f32], band: &mut Vec<f32>) {
+    fn compute(&mut self, problem: &mut dyn LmProblem<f32>, params: &[f32], grad: &mut [f32], band: &mut Vec<f32>) -> f32 {
         problem.calc_grad_hessian_band(params, grad, band, self.kd)
-            .expect("band assembly failed: element outside bandwidth");
+            .expect("band assembly failed: element outside bandwidth")
     }
     fn extract_diagonal(&self, matrix: &Vec<f32>, diagonal: &mut [f32]) {
         let ldab = self.kd + 1;
@@ -491,9 +502,9 @@ pub struct BandLapack {
 impl LmSolver<f64> for BandLapack {
     type Matrix = Vec<f64>;
     fn new_matrix(&self, n: usize) -> Vec<f64> { vec![0.0; (self.kd + 1) * n] }
-    fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], band: &mut Vec<f64>) {
+    fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], band: &mut Vec<f64>) -> f64 {
         problem.calc_grad_hessian_band(params, grad, band, self.kd)
-            .expect("band assembly failed: element outside bandwidth");
+            .expect("band assembly failed: element outside bandwidth")
     }
     fn extract_diagonal(&self, matrix: &Vec<f64>, diagonal: &mut [f64]) {
         let ldab = self.kd + 1;
@@ -515,9 +526,9 @@ impl LmSolver<f64> for BandLapack {
 impl LmSolver<f32> for BandLapack {
     type Matrix = Vec<f32>;
     fn new_matrix(&self, n: usize) -> Vec<f32> { vec![0.0; (self.kd + 1) * n] }
-    fn compute(&mut self, problem: &mut dyn LmProblem<f32>, params: &[f32], grad: &mut [f32], band: &mut Vec<f32>) {
+    fn compute(&mut self, problem: &mut dyn LmProblem<f32>, params: &[f32], grad: &mut [f32], band: &mut Vec<f32>) -> f32 {
         problem.calc_grad_hessian_band(params, grad, band, self.kd)
-            .expect("band assembly failed: element outside bandwidth");
+            .expect("band assembly failed: element outside bandwidth")
     }
     fn extract_diagonal(&self, matrix: &Vec<f32>, diagonal: &mut [f32]) {
         let ldab = self.kd + 1;
@@ -786,15 +797,16 @@ impl LmSolver<f64> for Sparse {
         SparseMatrix { csc: CscMatrix::empty(n) }
     }
 
-    fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], matrix: &mut SparseMatrix<f64>) {
+    fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], matrix: &mut SparseMatrix<f64>) -> f64 {
         let n = matrix.csc.n;
         if self.coo.n != n {
             self.coo = CooMatrix::new(n);
         } else {
             self.coo.clear();
         }
-        problem.calc_grad_hessian_sparse(params, grad, &mut self.coo);
+        let cost = problem.calc_grad_hessian_sparse(params, grad, &mut self.coo);
         matrix.csc = self.coo.to_csc();
+        cost
     }
 
     fn extract_diagonal(&self, matrix: &SparseMatrix<f64>, diagonal: &mut [f64]) {
@@ -852,19 +864,20 @@ impl LmSolver<f64> for SparseDirect {
         SparseMatrix { csc: CscMatrix::empty(n) }
     }
 
-    fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], matrix: &mut SparseMatrix<f64>) {
+    fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], matrix: &mut SparseMatrix<f64>) -> f64 {
         if !self.pattern_built {
             // First call: use COO to discover pattern
             let n = matrix.csc.n;
             let mut coo = CooMatrix::new(n);
-            problem.calc_grad_hessian_sparse(params, grad, &mut coo);
+            let cost = problem.calc_grad_hessian_sparse(params, grad, &mut coo);
             matrix.csc = coo.to_csc();
             self.pattern_built = true;
+            cost
         } else {
             // Subsequent calls: direct accumulate into existing CSC structure
             // (the generated code zeroes csc.vals before accumulating, which
             // also clears the damped diagonal left behind by solve_damped)
-            problem.calc_grad_hessian_sparse_direct(params, grad, &mut matrix.csc);
+            problem.calc_grad_hessian_sparse_direct(params, grad, &mut matrix.csc)
         }
     }
 
@@ -942,17 +955,18 @@ impl LmSolver<f64> for SparseFaer {
         SparseMatrix { csc: CscMatrix::empty(n) }
     }
 
-    fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], matrix: &mut SparseMatrix<f64>) {
+    fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], matrix: &mut SparseMatrix<f64>) -> f64 {
         if let Some(positions) = &self.positions {
-            problem.calc_grad_hessian_sparse_indexed(params, grad, &mut matrix.csc.vals, positions);
+            problem.calc_grad_hessian_sparse_indexed(params, grad, &mut matrix.csc.vals, positions)
         } else {
             // First call: COO assembly to discover pattern + build position map
             let n = matrix.csc.n;
             let mut coo = CooMatrix::new(n);
-            problem.calc_grad_hessian_sparse(params, grad, &mut coo);
+            let cost = problem.calc_grad_hessian_sparse(params, grad, &mut coo);
             let (csc, positions) = coo.to_csc_with_map();
             self.positions = Some(positions);
             matrix.csc = csc;
+            cost
         }
     }
 
@@ -1085,17 +1099,17 @@ impl LmSolver<f32> for SparseFaerF32 {
         SparseMatrix { csc: CscMatrix::empty(n) }
     }
 
-    fn compute(&mut self, problem: &mut dyn LmProblem<f32>, params: &[f32], grad: &mut [f32], matrix: &mut SparseMatrix<f32>) {
+    fn compute(&mut self, problem: &mut dyn LmProblem<f32>, params: &[f32], grad: &mut [f32], matrix: &mut SparseMatrix<f32>) -> f32 {
         if let Some(positions) = &self.positions {
-            problem.calc_grad_hessian_sparse_indexed(params, grad, &mut matrix.csc.vals, positions);
-            return;
+            return problem.calc_grad_hessian_sparse_indexed(params, grad, &mut matrix.csc.vals, positions);
         }
         let n = matrix.csc.n;
         let mut coo = CooMatrix::new(n);
-        problem.calc_grad_hessian_sparse(params, grad, &mut coo);
+        let cost = problem.calc_grad_hessian_sparse(params, grad, &mut coo);
         let (csc, positions) = coo.to_csc_with_map();
         self.positions = Some(positions);
         matrix.csc = csc;
+        cost
     }
 
     fn extract_diagonal(&self, matrix: &SparseMatrix<f32>, diagonal: &mut [f32]) {
@@ -1270,16 +1284,17 @@ impl LmSolver<f64> for SparseSchur {
         SparseMatrix { csc: CscMatrix::empty(n) }
     }
 
-    fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], matrix: &mut SparseMatrix<f64>) {
+    fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], matrix: &mut SparseMatrix<f64>) -> f64 {
         if let Some(positions) = &self.positions {
-            problem.calc_grad_hessian_sparse_indexed(params, grad, &mut matrix.csc.vals, positions);
+            problem.calc_grad_hessian_sparse_indexed(params, grad, &mut matrix.csc.vals, positions)
         } else {
             let n = matrix.csc.n;
             let mut coo = CooMatrix::new(n);
-            problem.calc_grad_hessian_sparse(params, grad, &mut coo);
+            let cost = problem.calc_grad_hessian_sparse(params, grad, &mut coo);
             let (csc, positions) = coo.to_csc_with_map();
             self.positions = Some(positions);
             matrix.csc = csc;
+            cost
         }
     }
 
@@ -1542,16 +1557,17 @@ impl LmSolver<f64> for SparseEigen {
     fn new_matrix(&self, n: usize) -> SparseMatrix<f64> {
         SparseMatrix { csc: CscMatrix::empty(n) }
     }
-    fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], matrix: &mut SparseMatrix<f64>) {
+    fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], matrix: &mut SparseMatrix<f64>) -> f64 {
         if let Some(positions) = &self.positions {
-            problem.calc_grad_hessian_sparse_indexed(params, grad, &mut matrix.csc.vals, positions);
+            problem.calc_grad_hessian_sparse_indexed(params, grad, &mut matrix.csc.vals, positions)
         } else {
             let n = matrix.csc.n;
             let mut coo = CooMatrix::new(n);
-            problem.calc_grad_hessian_sparse(params, grad, &mut coo);
+            let cost = problem.calc_grad_hessian_sparse(params, grad, &mut coo);
             let (csc, positions) = coo.to_csc_with_map();
             self.positions = Some(positions);
             matrix.csc = csc;
+            cost
         }
     }
     fn extract_diagonal(&self, matrix: &SparseMatrix<f64>, diagonal: &mut [f64]) {
@@ -1592,16 +1608,17 @@ impl LmSolver<f32> for SparseEigenF32 {
     fn new_matrix(&self, n: usize) -> SparseMatrix<f32> {
         SparseMatrix { csc: CscMatrix::empty(n) }
     }
-    fn compute(&mut self, problem: &mut dyn LmProblem<f32>, params: &[f32], grad: &mut [f32], matrix: &mut SparseMatrix<f32>) {
+    fn compute(&mut self, problem: &mut dyn LmProblem<f32>, params: &[f32], grad: &mut [f32], matrix: &mut SparseMatrix<f32>) -> f32 {
         if let Some(positions) = &self.positions {
-            problem.calc_grad_hessian_sparse_indexed(params, grad, &mut matrix.csc.vals, positions);
+            problem.calc_grad_hessian_sparse_indexed(params, grad, &mut matrix.csc.vals, positions)
         } else {
             let n = matrix.csc.n;
             let mut coo = CooMatrix::new(n);
-            problem.calc_grad_hessian_sparse(params, grad, &mut coo);
+            let cost = problem.calc_grad_hessian_sparse(params, grad, &mut coo);
             let (csc, positions) = coo.to_csc_with_map();
             self.positions = Some(positions);
             matrix.csc = csc;
+            cost
         }
     }
     fn extract_diagonal(&self, matrix: &SparseMatrix<f32>, diagonal: &mut [f32]) {
@@ -1642,16 +1659,17 @@ impl LmSolver<f64> for SparseCholmod {
     fn new_matrix(&self, n: usize) -> SparseMatrix<f64> {
         SparseMatrix { csc: CscMatrix::empty(n) }
     }
-    fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], matrix: &mut SparseMatrix<f64>) {
+    fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], matrix: &mut SparseMatrix<f64>) -> f64 {
         if let Some(positions) = &self.positions {
-            problem.calc_grad_hessian_sparse_indexed(params, grad, &mut matrix.csc.vals, positions);
+            problem.calc_grad_hessian_sparse_indexed(params, grad, &mut matrix.csc.vals, positions)
         } else {
             let n = matrix.csc.n;
             let mut coo = CooMatrix::new(n);
-            problem.calc_grad_hessian_sparse(params, grad, &mut coo);
+            let cost = problem.calc_grad_hessian_sparse(params, grad, &mut coo);
             let (csc, positions) = coo.to_csc_with_map();
             self.positions = Some(positions);
             matrix.csc = csc;
+            cost
         }
     }
     fn extract_diagonal(&self, matrix: &SparseMatrix<f64>, diagonal: &mut [f64]) {
@@ -2190,6 +2208,7 @@ mod tests {
                 grad[1] = 2.0 * (x[1] - 7.0);
                 hess[0] = 2.0; hess[1] = 0.0;
                 hess[2] = 0.0; hess[3] = 2.0;
+                (x[0] - 3.0) * (x[0] - 3.0) + (x[1] - 7.0) * (x[1] - 7.0)
             },
         };
         let result = solve(
@@ -2219,6 +2238,10 @@ mod tests {
                 hess[1] = -400.0 * x;
                 hess[2] = -400.0 * x;
                 hess[3] = 200.0;
+                {
+                let (x, y) = (p[0], p[1]);
+                (1.0 - x).powi(2) + 100.0 * (y - x * x).powi(2)
+                }
             },
         };
         let result = solve(
@@ -2240,6 +2263,7 @@ mod tests {
                 grad[1] = 2.0 * (x[1] - 7.0);
                 hess[0] = 2.0; hess[1] = 0.0;
                 hess[2] = 0.0; hess[3] = 2.0;
+                (x[0] - 3.0) * (x[0] - 3.0) + (x[1] - 7.0) * (x[1] - 7.0)
             },
         };
         let result = solve_f32(
@@ -2604,20 +2628,22 @@ mod tests {
             fn calc_cost(&mut self, x: &[f64]) -> f64 {
                 (x[0] - 3.0) * (x[0] - 3.0) + (x[1] - 7.0) * (x[1] - 7.0)
             }
-            fn calc_grad_hessian_dense(&mut self, x: &[f64], grad: &mut [f64], hess: &mut [f64]) {
+            fn calc_grad_hessian_dense(&mut self, x: &[f64], grad: &mut [f64], hess: &mut [f64]) -> f64 {
                 grad[0] = 2.0 * (x[0] - 3.0); grad[1] = 2.0 * (x[1] - 7.0);
                 hess[0] = 2.0; hess[1] = 0.0; hess[2] = 0.0; hess[3] = 2.0;
+                self.calc_cost(x)
             }
-            fn calc_grad_hessian_band(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: usize) -> Result<(), BandError> {
+            fn calc_grad_hessian_band(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: usize) -> Result<f64, BandError> {
                 unimplemented!()
             }
-            fn calc_grad_hessian_sparse_direct(&mut self, _: &[f64], _: &mut [f64], _: &mut CscMatrix<f64>) { unimplemented!() }
-            fn calc_grad_hessian_sparse_indexed(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: &[usize]) { unimplemented!() }
-            fn calc_grad_hessian_sparse(&mut self, x: &[f64], grad: &mut [f64], coo: &mut CooMatrix<f64>) {
+            fn calc_grad_hessian_sparse_direct(&mut self, _: &[f64], _: &mut [f64], _: &mut CscMatrix<f64>) -> f64 { unimplemented!() }
+            fn calc_grad_hessian_sparse_indexed(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: &[usize]) -> f64 { unimplemented!() }
+            fn calc_grad_hessian_sparse(&mut self, x: &[f64], grad: &mut [f64], coo: &mut CooMatrix<f64>) -> f64 {
                 grad[0] = 2.0 * (x[0] - 3.0); grad[1] = 2.0 * (x[1] - 7.0);
                 coo.clear();
                 coo.push(0, 0, 2.0);
                 coo.push(1, 1, 2.0);
+                self.calc_cost(x)
             }
         }
 
@@ -2638,24 +2664,27 @@ mod tests {
             fn calc_cost(&mut self, x: &[f64]) -> f64 {
                 (x[0] - 3.0) * (x[0] - 3.0) + (x[1] - 7.0) * (x[1] - 7.0)
             }
-            fn calc_grad_hessian_dense(&mut self, x: &[f64], grad: &mut [f64], hess: &mut [f64]) {
+            fn calc_grad_hessian_dense(&mut self, x: &[f64], grad: &mut [f64], hess: &mut [f64]) -> f64 {
                 grad[0] = 2.0 * (x[0] - 3.0); grad[1] = 2.0 * (x[1] - 7.0);
                 hess[0] = 2.0; hess[1] = 0.0; hess[2] = 0.0; hess[3] = 2.0;
+                self.calc_cost(x)
             }
-            fn calc_grad_hessian_band(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: usize) -> Result<(), BandError> { unimplemented!() }
-            fn calc_grad_hessian_sparse_direct(&mut self, _: &[f64], _: &mut [f64], _: &mut CscMatrix<f64>) { unimplemented!() }
-            fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], grad: &mut [f64], vals: &mut [f64], positions: &[usize]) {
+            fn calc_grad_hessian_band(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: usize) -> Result<f64, BandError> { unimplemented!() }
+            fn calc_grad_hessian_sparse_direct(&mut self, _: &[f64], _: &mut [f64], _: &mut CscMatrix<f64>) -> f64 { unimplemented!() }
+            fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], grad: &mut [f64], vals: &mut [f64], positions: &[usize]) -> f64 {
                 grad[0] = 2.0 * (x[0] - 3.0); grad[1] = 2.0 * (x[1] - 7.0);
                 vals.iter_mut().for_each(|v| *v = 0.0);
                 // Same order as sparse COO push: (0,0)=2.0, (1,1)=2.0
                 vals[positions[0]] += 2.0;
                 vals[positions[1]] += 2.0;
+                self.calc_cost(x)
             }
-            fn calc_grad_hessian_sparse(&mut self, x: &[f64], grad: &mut [f64], coo: &mut CooMatrix<f64>) {
+            fn calc_grad_hessian_sparse(&mut self, x: &[f64], grad: &mut [f64], coo: &mut CooMatrix<f64>) -> f64 {
                 grad[0] = 2.0 * (x[0] - 3.0); grad[1] = 2.0 * (x[1] - 7.0);
                 coo.clear();
                 coo.push(0, 0, 2.0);
                 coo.push(1, 1, 2.0);
+                self.calc_cost(x)
             }
         }
 
@@ -2680,22 +2709,24 @@ mod tests {
             fn calc_cost(&mut self, x: &[f64]) -> f64 {
                 (x[0] - 3.0) * (x[0] - 3.0) + (x[1] - 7.0) * (x[1] - 7.0)
             }
-            fn calc_grad_hessian_dense(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64]) { unimplemented!() }
-            fn calc_grad_hessian_band(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: usize) -> Result<(), BandError> { unimplemented!() }
-            fn calc_grad_hessian_sparse_direct(&mut self, x: &[f64], grad: &mut [f64], csc: &mut CscMatrix<f64>) {
+            fn calc_grad_hessian_dense(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64]) -> f64 { unimplemented!() }
+            fn calc_grad_hessian_band(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: usize) -> Result<f64, BandError> { unimplemented!() }
+            fn calc_grad_hessian_sparse_direct(&mut self, x: &[f64], grad: &mut [f64], csc: &mut CscMatrix<f64>) -> f64 {
                 self.direct_calls += 1;
                 grad[0] = 2.0 * (x[0] - 3.0); grad[1] = 2.0 * (x[1] - 7.0);
                 csc.vals.iter_mut().for_each(|v| *v = 0.0);
                 csc.vals[csc.diag_pos[0]] += 2.0;
                 csc.vals[csc.diag_pos[1]] += 2.0;
+                self.calc_cost(x)
             }
-            fn calc_grad_hessian_sparse_indexed(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: &[usize]) { unimplemented!() }
-            fn calc_grad_hessian_sparse(&mut self, x: &[f64], grad: &mut [f64], coo: &mut CooMatrix<f64>) {
+            fn calc_grad_hessian_sparse_indexed(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: &[usize]) -> f64 { unimplemented!() }
+            fn calc_grad_hessian_sparse(&mut self, x: &[f64], grad: &mut [f64], coo: &mut CooMatrix<f64>) -> f64 {
                 self.coo_calls += 1;
                 grad[0] = 2.0 * (x[0] - 3.0); grad[1] = 2.0 * (x[1] - 7.0);
                 coo.clear();
                 coo.push(0, 0, 2.0);
                 coo.push(1, 1, 2.0);
+                self.calc_cost(x)
             }
         }
 
@@ -2739,7 +2770,7 @@ mod tests {
                 (x[0]-1.0).powi(2) + (x[1]-2.0).powi(2) + (x[2]-3.0).powi(2) + (x[3]-4.0).powi(2)
                     + (x[0]-x[2]).powi(2) + (x[1]-x[3]).powi(2)
             }
-            fn calc_grad_hessian_dense(&mut self, x: &[f64], g: &mut [f64], h: &mut [f64]) {
+            fn calc_grad_hessian_dense(&mut self, x: &[f64], g: &mut [f64], h: &mut [f64]) -> f64 {
                 g[0] = 2.0*(x[0]-1.0) + 2.0*(x[0]-x[2]);
                 g[1] = 2.0*(x[1]-2.0) + 2.0*(x[1]-x[3]);
                 g[2] = 2.0*(x[2]-3.0) - 2.0*(x[0]-x[2]);
@@ -2749,11 +2780,12 @@ mod tests {
                 h[1*4+0]=0.0; h[1*4+1]=4.0; h[1*4+2]=0.0;  h[1*4+3]=-2.0;
                 h[2*4+0]=-2.0;h[2*4+1]=0.0; h[2*4+2]=4.0;  h[2*4+3]=0.0;
                 h[3*4+0]=0.0; h[3*4+1]=-2.0;h[3*4+2]=0.0;  h[3*4+3]=4.0;
+                self.calc_cost(x)
             }
-            fn calc_grad_hessian_band(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: usize) -> Result<(), BandError> { unimplemented!() }
-            fn calc_grad_hessian_sparse_direct(&mut self, _: &[f64], _: &mut [f64], _: &mut CscMatrix<f64>) { unimplemented!() }
-            fn calc_grad_hessian_sparse_indexed(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: &[usize]) { unimplemented!() }
-            fn calc_grad_hessian_sparse(&mut self, x: &[f64], g: &mut [f64], coo: &mut CooMatrix<f64>) {
+            fn calc_grad_hessian_band(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: usize) -> Result<f64, BandError> { unimplemented!() }
+            fn calc_grad_hessian_sparse_direct(&mut self, _: &[f64], _: &mut [f64], _: &mut CscMatrix<f64>) -> f64 { unimplemented!() }
+            fn calc_grad_hessian_sparse_indexed(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: &[usize]) -> f64 { unimplemented!() }
+            fn calc_grad_hessian_sparse(&mut self, x: &[f64], g: &mut [f64], coo: &mut CooMatrix<f64>) -> f64 {
                 g[0] = 2.0*(x[0]-1.0) + 2.0*(x[0]-x[2]);
                 g[1] = 2.0*(x[1]-2.0) + 2.0*(x[1]-x[3]);
                 g[2] = 2.0*(x[2]-3.0) - 2.0*(x[0]-x[2]);
@@ -2766,6 +2798,7 @@ mod tests {
                 coo.push(1, 3, -2.0);
                 coo.push(2, 2, 4.0);
                 coo.push(3, 3, 4.0);
+                self.calc_cost(x)
             }
         }
 
@@ -2825,20 +2858,23 @@ mod tests {
             fn calc_cost(&mut self, x: &[f64]) -> f64 {
                 (x[0]-3.0)*(x[0]-3.0) + (x[1]-7.0)*(x[1]-7.0)
             }
-            fn calc_grad_hessian_dense(&mut self, x: &[f64], g: &mut [f64], h: &mut [f64]) {
+            fn calc_grad_hessian_dense(&mut self, x: &[f64], g: &mut [f64], h: &mut [f64]) -> f64 {
                 g[0]=2.0*(x[0]-3.0); g[1]=2.0*(x[1]-7.0);
                 h[0]=2.0; h[1]=0.0; h[2]=0.0; h[3]=2.0;
+                self.calc_cost(x)
             }
-            fn calc_grad_hessian_band(&mut self,_:&[f64],_:&mut[f64],_:&mut[f64],_:usize)->Result<(),BandError>{unimplemented!()}
-            fn calc_grad_hessian_sparse_direct(&mut self,_:&[f64],_:&mut[f64],_:&mut CscMatrix<f64>){unimplemented!()}
-            fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], g: &mut [f64], vals: &mut [f64], pos: &[usize]) {
+            fn calc_grad_hessian_band(&mut self,_:&[f64],_:&mut[f64],_:&mut[f64],_:usize)->Result<f64,BandError>{unimplemented!()}
+            fn calc_grad_hessian_sparse_direct(&mut self,_:&[f64],_:&mut[f64],_:&mut CscMatrix<f64>)->f64{unimplemented!()}
+            fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], g: &mut [f64], vals: &mut [f64], pos: &[usize]) -> f64 {
                 g[0]=2.0*(x[0]-3.0); g[1]=2.0*(x[1]-7.0);
                 vals.iter_mut().for_each(|v| *v = 0.0);
                 vals[pos[0]] += 2.0; vals[pos[1]] += 2.0;
+                self.calc_cost(x)
             }
-            fn calc_grad_hessian_sparse(&mut self, x: &[f64], g: &mut [f64], coo: &mut CooMatrix<f64>) {
+            fn calc_grad_hessian_sparse(&mut self, x: &[f64], g: &mut [f64], coo: &mut CooMatrix<f64>) -> f64 {
                 g[0]=2.0*(x[0]-3.0); g[1]=2.0*(x[1]-7.0);
                 coo.clear(); coo.push(0,0,2.0); coo.push(1,1,2.0);
+                self.calc_cost(x)
             }
         }
         let r = solve_sparse_eigen(&[0.0,0.0], &mut QP,
@@ -2858,31 +2894,34 @@ mod tests {
                 (x[0]-1.0).powi(2)+(x[1]-2.0).powi(2)+(x[2]-3.0).powi(2)+(x[3]-4.0).powi(2)
                     +(x[0]-x[2]).powi(2)+(x[1]-x[3]).powi(2)
             }
-            fn calc_grad_hessian_dense(&mut self, x: &[f64], g: &mut [f64], h: &mut [f64]) {
+            fn calc_grad_hessian_dense(&mut self, x: &[f64], g: &mut [f64], h: &mut [f64]) -> f64 {
                 g[0]=2.0*(x[0]-1.0)+2.0*(x[0]-x[2]); g[1]=2.0*(x[1]-2.0)+2.0*(x[1]-x[3]);
                 g[2]=2.0*(x[2]-3.0)-2.0*(x[0]-x[2]); g[3]=2.0*(x[3]-4.0)-2.0*(x[1]-x[3]);
                 h[0]=4.0;h[1]=0.0;h[2]=-2.0;h[3]=0.0;
                 h[4]=0.0;h[5]=4.0;h[6]=0.0;h[7]=-2.0;
                 h[8]=-2.0;h[9]=0.0;h[10]=4.0;h[11]=0.0;
                 h[12]=0.0;h[13]=-2.0;h[14]=0.0;h[15]=4.0;
+                self.calc_cost(x)
             }
-            fn calc_grad_hessian_band(&mut self,_:&[f64],_:&mut[f64],_:&mut[f64],_:usize)->Result<(),BandError>{unimplemented!()}
-            fn calc_grad_hessian_sparse_direct(&mut self,_:&[f64],_:&mut[f64],_:&mut CscMatrix<f64>){unimplemented!()}
-            fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], g: &mut [f64], vals: &mut [f64], pos: &[usize]) {
+            fn calc_grad_hessian_band(&mut self,_:&[f64],_:&mut[f64],_:&mut[f64],_:usize)->Result<f64,BandError>{unimplemented!()}
+            fn calc_grad_hessian_sparse_direct(&mut self,_:&[f64],_:&mut[f64],_:&mut CscMatrix<f64>)->f64{unimplemented!()}
+            fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], g: &mut [f64], vals: &mut [f64], pos: &[usize]) -> f64 {
                 g[0]=2.0*(x[0]-1.0)+2.0*(x[0]-x[2]); g[1]=2.0*(x[1]-2.0)+2.0*(x[1]-x[3]);
                 g[2]=2.0*(x[2]-3.0)-2.0*(x[0]-x[2]); g[3]=2.0*(x[3]-4.0)-2.0*(x[1]-x[3]);
                 vals.iter_mut().for_each(|v| *v = 0.0);
                 vals[pos[0]] += 4.0; vals[pos[1]] += -2.0;
                 vals[pos[2]] += 4.0; vals[pos[3]] += -2.0;
                 vals[pos[4]] += 4.0; vals[pos[5]] += 4.0;
+                self.calc_cost(x)
             }
-            fn calc_grad_hessian_sparse(&mut self, x: &[f64], g: &mut [f64], coo: &mut CooMatrix<f64>) {
+            fn calc_grad_hessian_sparse(&mut self, x: &[f64], g: &mut [f64], coo: &mut CooMatrix<f64>) -> f64 {
                 g[0]=2.0*(x[0]-1.0)+2.0*(x[0]-x[2]); g[1]=2.0*(x[1]-2.0)+2.0*(x[1]-x[3]);
                 g[2]=2.0*(x[2]-3.0)-2.0*(x[0]-x[2]); g[3]=2.0*(x[3]-4.0)-2.0*(x[1]-x[3]);
                 coo.clear();
                 coo.push(0,0,4.0); coo.push(0,2,-2.0);
                 coo.push(1,1,4.0); coo.push(1,3,-2.0);
                 coo.push(2,2,4.0); coo.push(3,3,4.0);
+                self.calc_cost(x)
             }
         }
         let cfg = LmConfig{abs_precision:1e-10, max_iters:100, initial_lambda:0.001, verbose:false, ..Default::default()};
@@ -2901,20 +2940,23 @@ mod tests {
             fn calc_cost(&mut self, x: &[f64]) -> f64 {
                 (x[0]-3.0)*(x[0]-3.0) + (x[1]-7.0)*(x[1]-7.0)
             }
-            fn calc_grad_hessian_dense(&mut self, x: &[f64], g: &mut [f64], h: &mut [f64]) {
+            fn calc_grad_hessian_dense(&mut self, x: &[f64], g: &mut [f64], h: &mut [f64]) -> f64 {
                 g[0]=2.0*(x[0]-3.0); g[1]=2.0*(x[1]-7.0);
                 h[0]=2.0; h[1]=0.0; h[2]=0.0; h[3]=2.0;
+                self.calc_cost(x)
             }
-            fn calc_grad_hessian_band(&mut self,_:&[f64],_:&mut[f64],_:&mut[f64],_:usize)->Result<(),BandError>{unimplemented!()}
-            fn calc_grad_hessian_sparse_direct(&mut self,_:&[f64],_:&mut[f64],_:&mut CscMatrix<f64>){unimplemented!()}
-            fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], g: &mut [f64], vals: &mut [f64], pos: &[usize]) {
+            fn calc_grad_hessian_band(&mut self,_:&[f64],_:&mut[f64],_:&mut[f64],_:usize)->Result<f64,BandError>{unimplemented!()}
+            fn calc_grad_hessian_sparse_direct(&mut self,_:&[f64],_:&mut[f64],_:&mut CscMatrix<f64>)->f64{unimplemented!()}
+            fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], g: &mut [f64], vals: &mut [f64], pos: &[usize]) -> f64 {
                 g[0]=2.0*(x[0]-3.0); g[1]=2.0*(x[1]-7.0);
                 vals.iter_mut().for_each(|v| *v = 0.0);
                 vals[pos[0]] += 2.0; vals[pos[1]] += 2.0;
+                self.calc_cost(x)
             }
-            fn calc_grad_hessian_sparse(&mut self, x: &[f64], g: &mut [f64], coo: &mut CooMatrix<f64>) {
+            fn calc_grad_hessian_sparse(&mut self, x: &[f64], g: &mut [f64], coo: &mut CooMatrix<f64>) -> f64 {
                 g[0]=2.0*(x[0]-3.0); g[1]=2.0*(x[1]-7.0);
                 coo.clear(); coo.push(0,0,2.0); coo.push(1,1,2.0);
+                self.calc_cost(x)
             }
         }
         let r = solve_sparse_cholmod(&[0.0,0.0], &mut QP,
