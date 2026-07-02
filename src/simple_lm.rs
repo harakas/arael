@@ -395,6 +395,14 @@ pub trait LmSolver<T: Float> {
     /// No default -- every solver must scan its own storage so the
     /// diagnostic can never silently lie.
     fn matrix_nonfinite_count(&self, matrix: &Self::Matrix) -> usize;
+
+    /// Drop all cached problem structure (sparsity patterns, symbolic
+    /// factorizations, position maps) so the solver behaves like a
+    /// freshly constructed one. Called by `lm_solve` at entry, making
+    /// solver reuse across solves safe: caches are only ever valid
+    /// within one solve. No default -- every backend must state what
+    /// it caches, so a future cache cannot silently outlive a solve.
+    fn reset(&mut self);
 }
 
 /// Dense Cholesky solver (nalgebra).
@@ -417,6 +425,7 @@ impl LmSolver<f64> for Dense {
     fn matrix_nonfinite_count(&self, matrix: &Vec<f64>) -> usize {
         matrix.iter().filter(|v| !v.is_finite()).count()
     }
+    fn reset(&mut self) {} // stateless: no cached problem structure
 }
 
 impl LmSolver<f32> for Dense {
@@ -436,6 +445,7 @@ impl LmSolver<f32> for Dense {
     fn matrix_nonfinite_count(&self, matrix: &Vec<f32>) -> usize {
         matrix.iter().filter(|v| !v.is_finite()).count()
     }
+    fn reset(&mut self) {} // stateless: no cached problem structure
 }
 
 /// Band Cholesky solver (pure Rust).
@@ -466,6 +476,7 @@ impl LmSolver<f64> for Band {
     fn matrix_nonfinite_count(&self, matrix: &Vec<f64>) -> usize {
         matrix.iter().filter(|v| !v.is_finite()).count()
     }
+    fn reset(&mut self) {} // stateless: no cached problem structure
 }
 
 impl LmSolver<f32> for Band {
@@ -489,6 +500,7 @@ impl LmSolver<f32> for Band {
     fn matrix_nonfinite_count(&self, matrix: &Vec<f32>) -> usize {
         matrix.iter().filter(|v| !v.is_finite()).count()
     }
+    fn reset(&mut self) {} // stateless: no cached problem structure
 }
 
 /// Band Cholesky solver using LAPACK dpbsv/spbsv.
@@ -520,6 +532,7 @@ impl LmSolver<f64> for BandLapack {
     fn matrix_nonfinite_count(&self, matrix: &Vec<f64>) -> usize {
         matrix.iter().filter(|v| !v.is_finite()).count()
     }
+    fn reset(&mut self) {} // stateless: no cached problem structure
 }
 
 #[cfg(feature = "lapack")]
@@ -544,6 +557,7 @@ impl LmSolver<f32> for BandLapack {
     fn matrix_nonfinite_count(&self, matrix: &Vec<f32>) -> usize {
         matrix.iter().filter(|v| !v.is_finite()).count()
     }
+    fn reset(&mut self) {} // stateless: no cached problem structure
 }
 
 // ---------------------------------------------------------------------------
@@ -563,6 +577,11 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
             x: x0.to_vec(), start_cost: T::zero(), end_cost: T::zero(), iterations: 0,
         };
     }
+
+    // Solver caches (sparsity pattern, symbolic factorization) are only
+    // valid within a single solve; drop them so reused solver instances
+    // behave identically to fresh ones. No-op on a fresh solver.
+    solver.reset();
 
     let mut cur_x = x0.to_vec();
     let mut try_x = vec![T::zero(); n];
@@ -799,6 +818,9 @@ impl LmSolver<f64> for Sparse {
     fn matrix_nonfinite_count(&self, matrix: &SparseMatrix<f64>) -> usize {
         matrix.csc.vals.iter().filter(|v| !v.is_finite()).count()
     }
+    fn reset(&mut self) {
+        self.coo = CooMatrix::new(0);
+    }
 
     fn new_matrix(&self, n: usize) -> SparseMatrix<f64> {
         SparseMatrix { csc: CscMatrix::empty(n) }
@@ -865,6 +887,9 @@ impl LmSolver<f64> for SparseDirect {
     type Matrix = SparseMatrix<f64>;
     fn matrix_nonfinite_count(&self, matrix: &SparseMatrix<f64>) -> usize {
         matrix.csc.vals.iter().filter(|v| !v.is_finite()).count()
+    }
+    fn reset(&mut self) {
+        self.pattern_built = false;
     }
 
     fn new_matrix(&self, n: usize) -> SparseMatrix<f64> {
@@ -956,6 +981,12 @@ impl LmSolver<f64> for SparseFaer {
     type Matrix = SparseMatrix<f64>;
     fn matrix_nonfinite_count(&self, matrix: &SparseMatrix<f64>) -> usize {
         matrix.csc.vals.iter().filter(|v| !v.is_finite()).count()
+    }
+    fn reset(&mut self) {
+        self.positions = None;
+        self.symbolic = None;
+        // Buffer allocations are kept; they are resized when the next
+        // symbolic factorization is created.
     }
 
     fn new_matrix(&self, n: usize) -> SparseMatrix<f64> {
@@ -1101,6 +1132,10 @@ impl SparseFaerF32 {
 
 impl LmSolver<f32> for SparseFaerF32 {
     type Matrix = SparseMatrix<f32>;
+    fn reset(&mut self) {
+        self.positions = None;
+        self.symbolic = None;
+    }
 
     fn new_matrix(&self, n: usize) -> SparseMatrix<f32> {
         SparseMatrix { csc: CscMatrix::empty(n) }
@@ -1285,6 +1320,9 @@ impl LmSolver<f64> for SparseSchur {
     type Matrix = SparseMatrix<f64>;
     fn matrix_nonfinite_count(&self, matrix: &SparseMatrix<f64>) -> usize {
         matrix.csc.vals.iter().filter(|v| !v.is_finite()).count()
+    }
+    fn reset(&mut self) {
+        self.positions = None;
     }
 
     fn new_matrix(&self, n: usize) -> SparseMatrix<f64> {
@@ -1557,6 +1595,9 @@ impl Drop for SparseEigen {
 #[cfg(feature = "eigen")]
 impl LmSolver<f64> for SparseEigen {
     type Matrix = SparseMatrix<f64>;
+    fn reset(&mut self) {
+        self.positions = None;
+    }
     fn matrix_nonfinite_count(&self, matrix: &SparseMatrix<f64>) -> usize {
         matrix.csc.vals.iter().filter(|v| !v.is_finite()).count()
     }
@@ -1608,6 +1649,9 @@ impl Drop for SparseEigenF32 {
 #[cfg(feature = "eigen")]
 impl LmSolver<f32> for SparseEigenF32 {
     type Matrix = SparseMatrix<f32>;
+    fn reset(&mut self) {
+        self.positions = None;
+    }
     fn matrix_nonfinite_count(&self, matrix: &SparseMatrix<f32>) -> usize {
         matrix.csc.vals.iter().filter(|v| !v.is_finite()).count()
     }
@@ -1659,6 +1703,9 @@ impl Drop for SparseCholmod {
 #[cfg(feature = "cholmod")]
 impl LmSolver<f64> for SparseCholmod {
     type Matrix = SparseMatrix<f64>;
+    fn reset(&mut self) {
+        self.positions = None;
+    }
     fn matrix_nonfinite_count(&self, matrix: &SparseMatrix<f64>) -> usize {
         matrix.csc.vals.iter().filter(|v| !v.is_finite()).count()
     }
@@ -2745,6 +2792,100 @@ mod tests {
         assert!(problem.direct_calls >= 1,
             "direct CSC assembly must handle all iterations after the first \
              (got {} direct calls)", problem.direct_calls);
+    }
+
+    #[test]
+    fn solver_reuse_across_solves_is_safe() {
+        // Regression: reusing a solver across lm_solve calls used to panic
+        // (index out of bounds) because the solver kept its cached position
+        // map / symbolic factorization while lm_solve created a fresh empty
+        // matrix. lm_solve now resets solver caches at entry, so a reused
+        // solver behaves identically to a fresh one -- even when the second
+        // problem has a different structure.
+        struct QP;
+        impl LmProblem<f64> for QP {
+            fn calc_cost(&mut self, x: &[f64]) -> f64 {
+                (x[0] - 3.0) * (x[0] - 3.0) + (x[1] - 7.0) * (x[1] - 7.0)
+            }
+            fn calc_grad_hessian_dense(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64]) -> f64 { unimplemented!() }
+            fn calc_grad_hessian_band(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: usize) -> Result<f64, BandError> { unimplemented!() }
+            fn calc_grad_hessian_sparse_direct(&mut self, x: &[f64], grad: &mut [f64], csc: &mut CscMatrix<f64>) -> f64 {
+                grad[0] = 2.0 * (x[0] - 3.0); grad[1] = 2.0 * (x[1] - 7.0);
+                csc.vals.iter_mut().for_each(|v| *v = 0.0);
+                csc.vals[csc.diag_pos[0]] += 2.0;
+                csc.vals[csc.diag_pos[1]] += 2.0;
+                self.calc_cost(x)
+            }
+            fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], grad: &mut [f64], vals: &mut [f64], positions: &[usize]) -> f64 {
+                grad[0] = 2.0 * (x[0] - 3.0); grad[1] = 2.0 * (x[1] - 7.0);
+                vals.iter_mut().for_each(|v| *v = 0.0);
+                vals[positions[0]] += 2.0;
+                vals[positions[1]] += 2.0;
+                self.calc_cost(x)
+            }
+            fn calc_grad_hessian_sparse(&mut self, x: &[f64], grad: &mut [f64], coo: &mut CooMatrix<f64>) -> f64 {
+                grad[0] = 2.0 * (x[0] - 3.0); grad[1] = 2.0 * (x[1] - 7.0);
+                coo.clear();
+                coo.push(0, 0, 2.0);
+                coo.push(1, 1, 2.0);
+                self.calc_cost(x)
+            }
+        }
+        // 3-variable problem with a coupling entry: different n AND
+        // different pattern than QP.
+        struct QP3;
+        impl LmProblem<f64> for QP3 {
+            fn calc_cost(&mut self, x: &[f64]) -> f64 {
+                (x[0] - 1.0).powi(2) + (x[1] - 2.0).powi(2) + (x[2] - 3.0).powi(2) + (x[0] - x[2]).powi(2)
+            }
+            fn calc_grad_hessian_dense(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64]) -> f64 { unimplemented!() }
+            fn calc_grad_hessian_band(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: usize) -> Result<f64, BandError> { unimplemented!() }
+            fn calc_grad_hessian_sparse_direct(&mut self, _: &[f64], _: &mut [f64], _: &mut CscMatrix<f64>) -> f64 { unimplemented!() }
+            fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], grad: &mut [f64], vals: &mut [f64], positions: &[usize]) -> f64 {
+                grad[0] = 2.0 * (x[0] - 1.0) + 2.0 * (x[0] - x[2]);
+                grad[1] = 2.0 * (x[1] - 2.0);
+                grad[2] = 2.0 * (x[2] - 3.0) - 2.0 * (x[0] - x[2]);
+                vals.iter_mut().for_each(|v| *v = 0.0);
+                vals[positions[0]] += 4.0;
+                vals[positions[1]] += 2.0;
+                vals[positions[2]] += -2.0;
+                vals[positions[3]] += 4.0;
+                self.calc_cost(x)
+            }
+            fn calc_grad_hessian_sparse(&mut self, x: &[f64], grad: &mut [f64], coo: &mut CooMatrix<f64>) -> f64 {
+                grad[0] = 2.0 * (x[0] - 1.0) + 2.0 * (x[0] - x[2]);
+                grad[1] = 2.0 * (x[1] - 2.0);
+                grad[2] = 2.0 * (x[2] - 3.0) - 2.0 * (x[0] - x[2]);
+                coo.clear();
+                coo.push(0, 0, 4.0);
+                coo.push(1, 1, 2.0);
+                coo.push(0, 2, -2.0);
+                coo.push(2, 2, 4.0);
+                self.calc_cost(x)
+            }
+        }
+
+        let cfg = LmConfig::default();
+        let mut solver = SparseFaer::new();
+        // Same structure twice
+        let r1 = lm_solve(&[0.0, 0.0], &mut solver, &mut QP, &cfg);
+        let r2 = lm_solve(&[5.0, 5.0], &mut solver, &mut QP, &cfg);
+        assert!((r1.x[0] - 3.0).abs() < 1e-6 && (r1.x[1] - 7.0).abs() < 1e-6);
+        assert!((r2.x[0] - 3.0).abs() < 1e-6 && (r2.x[1] - 7.0).abs() < 1e-6);
+        // Different structure with the same reused solver. Minimum of the
+        // coupled quadratic is at (5/3, 2, 7/3) with cost 4/3.
+        let r3 = lm_solve(&[0.0, 0.0, 0.0], &mut solver, &mut QP3, &cfg);
+        assert!((r3.x[0] - 5.0 / 3.0).abs() < 1e-6, "x0={}", r3.x[0]);
+        assert!((r3.x[1] - 2.0).abs() < 1e-6, "x1={}", r3.x[1]);
+        assert!((r3.x[2] - 7.0 / 3.0).abs() < 1e-6, "x2={}", r3.x[2]);
+        assert!((r3.end_cost - 4.0 / 3.0).abs() < 1e-9, "cost={}", r3.end_cost);
+
+        // Same exercise for SparseDirect (pattern_built flag)
+        let mut direct = SparseDirect::new();
+        let r4 = lm_solve(&[0.0, 0.0], &mut direct, &mut QP, &cfg);
+        let r5 = lm_solve(&[5.0, 5.0], &mut direct, &mut QP, &cfg);
+        assert!((r4.x[0] - 3.0).abs() < 1e-6);
+        assert!((r5.x[1] - 7.0).abs() < 1e-6);
     }
 
     #[test]

@@ -1,5 +1,34 @@
 # TODO
 
+- **lm_resolve(): warm re-solve for arael-sketch dragging** (design agreed
+  2026-07, shelved -- fringe for now; sketch systems are sub-millisecond
+  today, so this is headroom, not a rescue). Adds
+  `lm_resolve(x0, &mut solver, problem, cfg)` alongside `lm_solve`: same
+  loop, but skips the `LmSolver::reset()` at entry so the sparsity
+  pattern, COO->CSC position map, and faer symbolic factorization
+  (roughly a third to half of a short small-system solve) survive across
+  same-structure re-solves. Cold on a fresh solver, so callers need one
+  code path. Prerequisite: matrix storage must move INTO the solver
+  (drop the `Matrix` associated type; `new_matrix(n)` becomes
+  `prepare(&mut self, n)`; compute/extract_diagonal/solve_damped/
+  matrix_nonfinite_count lose the matrix parameter) -- lm_solve currently
+  creates the matrix locally, so there is nothing to pick up from.
+  Contract (documented, not auto-validated -- full pattern validation
+  costs the work being saved): structure must be unchanged since the
+  previous solve; `prepare` DOES cheaply panic on a parameter-count
+  change ("was 800, now 806 -- use lm_solve or reset()"), which catches
+  the most common violation (pose/point added); same-n pattern changes
+  remain a documented logic error (optional debug_assert full check).
+  Sketch integration notes: (1) Sketch implements LmProblem, so the
+  persistent solver cannot be a field of the struct passed as `problem`
+  (double &mut) -- hold it beside the sketch or Option::take() around the
+  call; (2) reuse scope is PER DRAG GESTURE: auto-anchor toggles
+  Param::fixed which changes the parameter count, so reset at gesture
+  start, warm resolves per mouse-move, reset on release/edit; guard
+  states must also be stable within the gesture. Optional follow-up:
+  carry converged lambda between resolves (needs final_lambda in
+  LmResult, REVIEW.md F4).
+
 - **Residual scale audit for DOF / eigenvalue analysis**: The eigenvalue-based DOF calculation (`compute_dof` + friends) depends on the singular values of `J^T J` being well-separated from zero for real constraints and near-zero for truly redundant ones. Several residuals are deliberately multiplied by a sketch-scale factor (e.g. `arc.radius` on the sweep constraint, `mlen` on the parallel cross product) so their SVs track the sketch size and stay out of the DOF-noise floor even for very small or very large geometry. Constraints whose residuals are NOT scaled by a sketch-size quantity will produce naturally small singular values (think pure-angular residuals like `xangle` / `ArcLineParallel` / `ArcArcParallel`) and are candidates for false-positive DOF rejections on tiny sketches or false-negatives on huge ones. Concrete steps:
   1. Enumerate every `#[arael(constraint(...))]` in `arael-sketch-solver` and note, per residual row, whether it has a sketch-scale factor (radius, length, `mlen`, `constraint_isigma`-only, etc.).
   2. Build a test sketch in pathological scale regimes (1e-3 and 1e5 world units) and log the singular-value spectrum of `J^T J`. Flag residuals whose SV drops below the DOF-zero threshold at one scale but not the other.
