@@ -370,7 +370,7 @@ pub trait LmSolver<T: Float> {
     fn new_matrix(&self, n: usize) -> Self::Matrix;
 
     /// Compute gradient and Hessian matrix from the problem.
-    fn compute(&self, problem: &mut dyn LmProblem<T>, params: &[T], grad: &mut [T], matrix: &mut Self::Matrix);
+    fn compute(&mut self, problem: &mut dyn LmProblem<T>, params: &[T], grad: &mut [T], matrix: &mut Self::Matrix);
 
     /// Extract all diagonal elements from the matrix.
     fn extract_diagonal(&self, matrix: &Self::Matrix, diagonal: &mut [T]);
@@ -392,7 +392,7 @@ pub struct Dense;
 impl LmSolver<f64> for Dense {
     type Matrix = Vec<f64>;
     fn new_matrix(&self, n: usize) -> Vec<f64> { vec![0.0; n * n] }
-    fn compute(&self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], hessian: &mut Vec<f64>) {
+    fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], hessian: &mut Vec<f64>) {
         problem.calc_grad_hessian_dense(params, grad, hessian);
     }
     fn extract_diagonal(&self, matrix: &Vec<f64>, diagonal: &mut [f64]) {
@@ -411,7 +411,7 @@ impl LmSolver<f64> for Dense {
 impl LmSolver<f32> for Dense {
     type Matrix = Vec<f32>;
     fn new_matrix(&self, n: usize) -> Vec<f32> { vec![0.0; n * n] }
-    fn compute(&self, problem: &mut dyn LmProblem<f32>, params: &[f32], grad: &mut [f32], hessian: &mut Vec<f32>) {
+    fn compute(&mut self, problem: &mut dyn LmProblem<f32>, params: &[f32], grad: &mut [f32], hessian: &mut Vec<f32>) {
         problem.calc_grad_hessian_dense(params, grad, hessian);
     }
     fn extract_diagonal(&self, matrix: &Vec<f32>, diagonal: &mut [f32]) {
@@ -436,7 +436,7 @@ pub struct Band {
 impl LmSolver<f64> for Band {
     type Matrix = Vec<f64>;
     fn new_matrix(&self, n: usize) -> Vec<f64> { vec![0.0; (self.kd + 1) * n] }
-    fn compute(&self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], band: &mut Vec<f64>) {
+    fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], band: &mut Vec<f64>) {
         problem.calc_grad_hessian_band(params, grad, band, self.kd)
             .expect("band assembly failed: element outside bandwidth");
     }
@@ -460,7 +460,7 @@ impl LmSolver<f64> for Band {
 impl LmSolver<f32> for Band {
     type Matrix = Vec<f32>;
     fn new_matrix(&self, n: usize) -> Vec<f32> { vec![0.0; (self.kd + 1) * n] }
-    fn compute(&self, problem: &mut dyn LmProblem<f32>, params: &[f32], grad: &mut [f32], band: &mut Vec<f32>) {
+    fn compute(&mut self, problem: &mut dyn LmProblem<f32>, params: &[f32], grad: &mut [f32], band: &mut Vec<f32>) {
         problem.calc_grad_hessian_band(params, grad, band, self.kd)
             .expect("band assembly failed: element outside bandwidth");
     }
@@ -491,7 +491,7 @@ pub struct BandLapack {
 impl LmSolver<f64> for BandLapack {
     type Matrix = Vec<f64>;
     fn new_matrix(&self, n: usize) -> Vec<f64> { vec![0.0; (self.kd + 1) * n] }
-    fn compute(&self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], band: &mut Vec<f64>) {
+    fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], band: &mut Vec<f64>) {
         problem.calc_grad_hessian_band(params, grad, band, self.kd)
             .expect("band assembly failed: element outside bandwidth");
     }
@@ -515,7 +515,7 @@ impl LmSolver<f64> for BandLapack {
 impl LmSolver<f32> for BandLapack {
     type Matrix = Vec<f32>;
     fn new_matrix(&self, n: usize) -> Vec<f32> { vec![0.0; (self.kd + 1) * n] }
-    fn compute(&self, problem: &mut dyn LmProblem<f32>, params: &[f32], grad: &mut [f32], band: &mut Vec<f32>) {
+    fn compute(&mut self, problem: &mut dyn LmProblem<f32>, params: &[f32], grad: &mut [f32], band: &mut Vec<f32>) {
         problem.calc_grad_hessian_band(params, grad, band, self.kd)
             .expect("band assembly failed: element outside bandwidth");
     }
@@ -753,7 +753,10 @@ pub fn solve_band_lapack_f32(x0: &[f32], kd: usize, problem: &mut impl LmProblem
 
 /// Sparse solver using COO assembly and dense Cholesky solve (for validation).
 /// Use SparseFaer for actual sparse Cholesky.
-pub struct Sparse;
+pub struct Sparse {
+    // Reused across iterations; clear() keeps the allocated capacity.
+    coo: CooMatrix<f64>,
+}
 
 impl Default for Sparse {
     fn default() -> Self {
@@ -763,7 +766,7 @@ impl Default for Sparse {
 
 impl Sparse {
     pub fn new() -> Self {
-        Sparse
+        Sparse { coo: CooMatrix::new(0) }
     }
 }
 
@@ -783,13 +786,15 @@ impl LmSolver<f64> for Sparse {
         SparseMatrix { csc: CscMatrix::empty(n) }
     }
 
-    fn compute(&self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], matrix: &mut SparseMatrix<f64>) {
-        // We need mutable COO but only have &self here. The COO is on the solver struct
-        // which we can't mutate from &self. Instead, create a temporary COO.
+    fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], matrix: &mut SparseMatrix<f64>) {
         let n = matrix.csc.n;
-        let mut coo = CooMatrix::new(n);
-        problem.calc_grad_hessian_sparse(params, grad, &mut coo);
-        matrix.csc = coo.to_csc();
+        if self.coo.n != n {
+            self.coo = CooMatrix::new(n);
+        } else {
+            self.coo.clear();
+        }
+        problem.calc_grad_hessian_sparse(params, grad, &mut self.coo);
+        matrix.csc = self.coo.to_csc();
     }
 
     fn extract_diagonal(&self, matrix: &SparseMatrix<f64>, diagonal: &mut [f64]) {
@@ -847,15 +852,18 @@ impl LmSolver<f64> for SparseDirect {
         SparseMatrix { csc: CscMatrix::empty(n) }
     }
 
-    fn compute(&self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], matrix: &mut SparseMatrix<f64>) {
+    fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], matrix: &mut SparseMatrix<f64>) {
         if !self.pattern_built {
             // First call: use COO to discover pattern
             let n = matrix.csc.n;
             let mut coo = CooMatrix::new(n);
             problem.calc_grad_hessian_sparse(params, grad, &mut coo);
             matrix.csc = coo.to_csc();
+            self.pattern_built = true;
         } else {
             // Subsequent calls: direct accumulate into existing CSC structure
+            // (the generated code zeroes csc.vals before accumulating, which
+            // also clears the damped diagonal left behind by solve_damped)
             problem.calc_grad_hessian_sparse_direct(params, grad, &mut matrix.csc);
         }
     }
@@ -894,7 +902,7 @@ pub fn solve_sparse_direct(x0: &[f64], problem: &mut impl LmProblem<f64>, config
 /// Sparse Cholesky solver via faer crate (f64).
 pub struct SparseFaer {
     symbolic: Option<faer::sparse::linalg::cholesky::SymbolicCholesky<usize>>,
-    positions: std::cell::RefCell<Option<Vec<usize>>>,
+    positions: Option<Vec<usize>>,
 }
 
 impl Default for SparseFaer {
@@ -905,7 +913,7 @@ impl Default for SparseFaer {
 
 impl SparseFaer {
     pub fn new() -> Self {
-        SparseFaer { symbolic: None, positions: std::cell::RefCell::new(None) }
+        SparseFaer { symbolic: None, positions: None }
     }
 }
 
@@ -919,11 +927,8 @@ impl LmSolver<f64> for SparseFaer {
         SparseMatrix { csc: CscMatrix::empty(n) }
     }
 
-    fn compute(&self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], matrix: &mut SparseMatrix<f64>) {
-        let has_positions = self.positions.borrow().is_some();
-        if has_positions {
-            let positions = self.positions.borrow();
-            let positions = positions.as_ref().unwrap();
+    fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], matrix: &mut SparseMatrix<f64>) {
+        if let Some(positions) = &self.positions {
             problem.calc_grad_hessian_sparse_indexed(params, grad, &mut matrix.csc.vals, positions);
         } else {
             // First call: COO assembly to discover pattern + build position map
@@ -931,7 +936,7 @@ impl LmSolver<f64> for SparseFaer {
             let mut coo = CooMatrix::new(n);
             problem.calc_grad_hessian_sparse(params, grad, &mut coo);
             let (csc, positions) = coo.to_csc_with_map();
-            *self.positions.borrow_mut() = Some(positions);
+            self.positions = Some(positions);
             matrix.csc = csc;
         }
     }
@@ -1022,7 +1027,7 @@ pub fn solve_sparse_faer(x0: &[f64], problem: &mut impl LmProblem<f64>, config: 
 /// faer sparse Cholesky solver (f32).
 pub struct SparseFaerF32 {
     symbolic: Option<faer::sparse::linalg::cholesky::SymbolicCholesky<usize>>,
-    positions: std::cell::RefCell<Option<Vec<usize>>>,
+    positions: Option<Vec<usize>>,
 }
 
 impl Default for SparseFaerF32 {
@@ -1033,7 +1038,7 @@ impl Default for SparseFaerF32 {
 
 impl SparseFaerF32 {
     pub fn new() -> Self {
-        SparseFaerF32 { symbolic: None, positions: std::cell::RefCell::new(None) }
+        SparseFaerF32 { symbolic: None, positions: None }
     }
 }
 
@@ -1044,11 +1049,8 @@ impl LmSolver<f32> for SparseFaerF32 {
         SparseMatrix { csc: CscMatrix::empty(n) }
     }
 
-    fn compute(&self, problem: &mut dyn LmProblem<f32>, params: &[f32], grad: &mut [f32], matrix: &mut SparseMatrix<f32>) {
-        let has_positions = self.positions.borrow().is_some();
-        if has_positions {
-            let positions = self.positions.borrow();
-            let positions = positions.as_ref().unwrap();
+    fn compute(&mut self, problem: &mut dyn LmProblem<f32>, params: &[f32], grad: &mut [f32], matrix: &mut SparseMatrix<f32>) {
+        if let Some(positions) = &self.positions {
             problem.calc_grad_hessian_sparse_indexed(params, grad, &mut matrix.csc.vals, positions);
             return;
         }
@@ -1056,7 +1058,7 @@ impl LmSolver<f32> for SparseFaerF32 {
         let mut coo = CooMatrix::new(n);
         problem.calc_grad_hessian_sparse(params, grad, &mut coo);
         let (csc, positions) = coo.to_csc_with_map();
-        *self.positions.borrow_mut() = Some(positions);
+        self.positions = Some(positions);
         matrix.csc = csc;
     }
 
@@ -1173,12 +1175,12 @@ pub fn solve_sparse_faer_f32(x0: &[f32], problem: &mut impl LmProblem<f32>, conf
 /// Schur complement solver for pose-landmark SLAM problems (f64).
 pub struct SparseSchur {
     np: usize,
-    positions: std::cell::RefCell<Option<Vec<usize>>>,
+    positions: Option<Vec<usize>>,
 }
 
 impl SparseSchur {
     pub fn new(np: usize) -> Self {
-        SparseSchur { np, positions: std::cell::RefCell::new(None) }
+        SparseSchur { np, positions: None }
     }
 }
 
@@ -1224,18 +1226,15 @@ impl LmSolver<f64> for SparseSchur {
         SparseMatrix { csc: CscMatrix::empty(n) }
     }
 
-    fn compute(&self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], matrix: &mut SparseMatrix<f64>) {
-        let has_positions = self.positions.borrow().is_some();
-        if has_positions {
-            let positions = self.positions.borrow();
-            let positions = positions.as_ref().unwrap();
+    fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], matrix: &mut SparseMatrix<f64>) {
+        if let Some(positions) = &self.positions {
             problem.calc_grad_hessian_sparse_indexed(params, grad, &mut matrix.csc.vals, positions);
         } else {
             let n = matrix.csc.n;
             let mut coo = CooMatrix::new(n);
             problem.calc_grad_hessian_sparse(params, grad, &mut coo);
             let (csc, positions) = coo.to_csc_with_map();
-            *self.positions.borrow_mut() = Some(positions);
+            self.positions = Some(positions);
             matrix.csc = csc;
         }
     }
@@ -1474,13 +1473,13 @@ fn eigen_ffi_solve<T>(
 #[cfg(feature = "eigen")]
 pub struct SparseEigen {
     handle: *mut std::ffi::c_void,
-    positions: std::cell::RefCell<Option<Vec<usize>>>,
+    positions: Option<Vec<usize>>,
 }
 
 #[cfg(feature = "eigen")]
 impl SparseEigen {
     pub fn new() -> Self {
-        SparseEigen { handle: unsafe { eigen_llt_f64_create() }, positions: std::cell::RefCell::new(None) }
+        SparseEigen { handle: unsafe { eigen_llt_f64_create() }, positions: None }
     }
 }
 
@@ -1499,17 +1498,15 @@ impl LmSolver<f64> for SparseEigen {
     fn new_matrix(&self, n: usize) -> SparseMatrix<f64> {
         SparseMatrix { csc: CscMatrix::empty(n) }
     }
-    fn compute(&self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], matrix: &mut SparseMatrix<f64>) {
-        let has_positions = self.positions.borrow().is_some();
-        if has_positions {
-            let positions = self.positions.borrow();
-            problem.calc_grad_hessian_sparse_indexed(params, grad, &mut matrix.csc.vals, positions.as_ref().unwrap());
+    fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], matrix: &mut SparseMatrix<f64>) {
+        if let Some(positions) = &self.positions {
+            problem.calc_grad_hessian_sparse_indexed(params, grad, &mut matrix.csc.vals, positions);
         } else {
             let n = matrix.csc.n;
             let mut coo = CooMatrix::new(n);
             problem.calc_grad_hessian_sparse(params, grad, &mut coo);
             let (csc, positions) = coo.to_csc_with_map();
-            *self.positions.borrow_mut() = Some(positions);
+            self.positions = Some(positions);
             matrix.csc = csc;
         }
     }
@@ -1526,13 +1523,13 @@ impl LmSolver<f64> for SparseEigen {
 #[cfg(feature = "eigen")]
 pub struct SparseEigenF32 {
     handle: *mut std::ffi::c_void,
-    positions: std::cell::RefCell<Option<Vec<usize>>>,
+    positions: Option<Vec<usize>>,
 }
 
 #[cfg(feature = "eigen")]
 impl SparseEigenF32 {
     pub fn new() -> Self {
-        SparseEigenF32 { handle: unsafe { eigen_llt_f32_create() }, positions: std::cell::RefCell::new(None) }
+        SparseEigenF32 { handle: unsafe { eigen_llt_f32_create() }, positions: None }
     }
 }
 
@@ -1551,17 +1548,15 @@ impl LmSolver<f32> for SparseEigenF32 {
     fn new_matrix(&self, n: usize) -> SparseMatrix<f32> {
         SparseMatrix { csc: CscMatrix::empty(n) }
     }
-    fn compute(&self, problem: &mut dyn LmProblem<f32>, params: &[f32], grad: &mut [f32], matrix: &mut SparseMatrix<f32>) {
-        let has_positions = self.positions.borrow().is_some();
-        if has_positions {
-            let positions = self.positions.borrow();
-            problem.calc_grad_hessian_sparse_indexed(params, grad, &mut matrix.csc.vals, positions.as_ref().unwrap());
+    fn compute(&mut self, problem: &mut dyn LmProblem<f32>, params: &[f32], grad: &mut [f32], matrix: &mut SparseMatrix<f32>) {
+        if let Some(positions) = &self.positions {
+            problem.calc_grad_hessian_sparse_indexed(params, grad, &mut matrix.csc.vals, positions);
         } else {
             let n = matrix.csc.n;
             let mut coo = CooMatrix::new(n);
             problem.calc_grad_hessian_sparse(params, grad, &mut coo);
             let (csc, positions) = coo.to_csc_with_map();
-            *self.positions.borrow_mut() = Some(positions);
+            self.positions = Some(positions);
             matrix.csc = csc;
         }
     }
@@ -1578,13 +1573,13 @@ impl LmSolver<f32> for SparseEigenF32 {
 #[cfg(feature = "cholmod")]
 pub struct SparseCholmod {
     handle: *mut std::ffi::c_void,
-    positions: std::cell::RefCell<Option<Vec<usize>>>,
+    positions: Option<Vec<usize>>,
 }
 
 #[cfg(feature = "cholmod")]
 impl SparseCholmod {
     pub fn new() -> Self {
-        SparseCholmod { handle: unsafe { eigen_cholmod_f64_create() }, positions: std::cell::RefCell::new(None) }
+        SparseCholmod { handle: unsafe { eigen_cholmod_f64_create() }, positions: None }
     }
 }
 
@@ -1603,17 +1598,15 @@ impl LmSolver<f64> for SparseCholmod {
     fn new_matrix(&self, n: usize) -> SparseMatrix<f64> {
         SparseMatrix { csc: CscMatrix::empty(n) }
     }
-    fn compute(&self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], matrix: &mut SparseMatrix<f64>) {
-        let has_positions = self.positions.borrow().is_some();
-        if has_positions {
-            let positions = self.positions.borrow();
-            problem.calc_grad_hessian_sparse_indexed(params, grad, &mut matrix.csc.vals, positions.as_ref().unwrap());
+    fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], matrix: &mut SparseMatrix<f64>) {
+        if let Some(positions) = &self.positions {
+            problem.calc_grad_hessian_sparse_indexed(params, grad, &mut matrix.csc.vals, positions);
         } else {
             let n = matrix.csc.n;
             let mut coo = CooMatrix::new(n);
             problem.calc_grad_hessian_sparse(params, grad, &mut coo);
             let (csc, positions) = coo.to_csc_with_map();
-            *self.positions.borrow_mut() = Some(positions);
+            self.positions = Some(positions);
             matrix.csc = csc;
         }
     }
@@ -2630,6 +2623,46 @@ mod tests {
         assert!((result.x[0] - 3.0).abs() < 1e-6, "x={}", result.x[0]);
         assert!((result.x[1] - 7.0).abs() < 1e-6, "y={}", result.x[1]);
         assert!(result.end_cost < 1e-10);
+    }
+
+    #[test]
+    fn sparse_direct_uses_direct_path_after_first_iteration() {
+        // Regression: SparseDirect never set pattern_built, so its direct
+        // CSC assembly path was dead code and every iteration re-ran COO
+        // assembly. Pin the intended behavior: COO exactly once (pattern
+        // discovery), direct accumulation for all later iterations.
+        struct CountingProblem { coo_calls: usize, direct_calls: usize }
+        impl LmProblem<f64> for CountingProblem {
+            fn calc_cost(&mut self, x: &[f64]) -> f64 {
+                (x[0] - 3.0) * (x[0] - 3.0) + (x[1] - 7.0) * (x[1] - 7.0)
+            }
+            fn calc_grad_hessian_dense(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64]) { unimplemented!() }
+            fn calc_grad_hessian_band(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: usize) -> Result<(), BandError> { unimplemented!() }
+            fn calc_grad_hessian_sparse_direct(&mut self, x: &[f64], grad: &mut [f64], csc: &mut CscMatrix<f64>) {
+                self.direct_calls += 1;
+                grad[0] = 2.0 * (x[0] - 3.0); grad[1] = 2.0 * (x[1] - 7.0);
+                csc.vals.iter_mut().for_each(|v| *v = 0.0);
+                csc.vals[csc.diag_pos[0]] += 2.0;
+                csc.vals[csc.diag_pos[1]] += 2.0;
+            }
+            fn calc_grad_hessian_sparse_indexed(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: &[usize]) { unimplemented!() }
+            fn calc_grad_hessian_sparse(&mut self, x: &[f64], grad: &mut [f64], coo: &mut CooMatrix<f64>) {
+                self.coo_calls += 1;
+                grad[0] = 2.0 * (x[0] - 3.0); grad[1] = 2.0 * (x[1] - 7.0);
+                coo.clear();
+                coo.push(0, 0, 2.0);
+                coo.push(1, 1, 2.0);
+            }
+        }
+
+        let mut problem = CountingProblem { coo_calls: 0, direct_calls: 0 };
+        let result = solve_sparse_direct(&[0.0, 0.0], &mut problem, &LmConfig::default());
+        assert!((result.x[0] - 3.0).abs() < 1e-6);
+        assert!((result.x[1] - 7.0).abs() < 1e-6);
+        assert_eq!(problem.coo_calls, 1, "COO assembly must run exactly once");
+        assert!(problem.direct_calls >= 1,
+            "direct CSC assembly must handle all iterations after the first \
+             (got {} direct calls)", problem.direct_calls);
     }
 
     #[test]
