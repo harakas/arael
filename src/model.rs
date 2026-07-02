@@ -1447,7 +1447,9 @@ impl<T: crate::utils::Float> TripletBlock<T> {
         }
     }
 
-    /// Accumulate into upper-band format.
+    /// Accumulate into upper-band format (LAPACK layout: A[r, c] at
+    /// band[(kd + r - c) + c * ldab], matching SelfBlock/CrossBlock and
+    /// the band solvers).
     pub fn accumulate_hessian_band(&self, band: &mut [T], kd: usize)
         -> Result<(), crate::simple_lm::BandError>
     {
@@ -1457,7 +1459,7 @@ impl<T: crate::utils::Float> TripletBlock<T> {
             if c < r || c - r > kd {
                 return Err(crate::simple_lm::BandError { row: r, col: c, kd });
             }
-            band[(c - r) + r * ldab] += v;
+            band[(kd + r - c) + c * ldab] += v;
         }
         Ok(())
     }
@@ -2094,5 +2096,106 @@ mod tests {
         assert_eq!(none.serialize_size(), 0);
         let some = Some(Param::new(1.0f32));
         assert_eq!(some.serialize_size(), 1);
+    }
+
+    // -----------------------------------------------------------------
+    // Block accumulation format equivalence: every block type must land
+    // identical values through its dense and band accumulate paths. The
+    // band format is the LAPACK upper-band convention used by the band
+    // solvers: A[i, j] lives at band[(kd + i - j) + j * ldab] for
+    // max(0, j - kd) <= i <= j, ldab = kd + 1.
+    // -----------------------------------------------------------------
+
+    /// Expand an upper-band matrix into a full dense symmetric n*n matrix.
+    fn densify_band(band: &[f64], n: usize, kd: usize) -> Vec<f64> {
+        let ldab = kd + 1;
+        let mut full = vec![0.0; n * n];
+        for j in 0..n {
+            for i in j.saturating_sub(kd)..=j {
+                let v = band[(kd + i - j) + j * ldab];
+                full[i * n + j] = v;
+                full[j * n + i] = v;
+            }
+        }
+        full
+    }
+
+    #[test]
+    fn selfblock_band_matches_dense() {
+        let n = 4;
+        let kd = 2;
+        let mut blk: SelfBlock<Param<f64>, 3, f64> = SelfBlock::new();
+        blk.set_indices(&[0, 1, 2]);
+        let mut grad = vec![0.0; n];
+        blk.add_residual(0.3, &[1.0, 0.5, -0.25], &mut grad);
+        blk.add_residual(-0.7, &[0.2, -1.5, 0.75], &mut grad);
+
+        let mut dense = vec![0.0; n * n];
+        blk.accumulate_hessian(&mut dense);
+        let mut band = vec![0.0; (kd + 1) * n];
+        blk.accumulate_hessian_band(&mut band, kd).unwrap();
+        assert_eq!(densify_band(&band, n, kd), dense);
+    }
+
+    #[test]
+    fn crossblock_band_matches_dense() {
+        let n = 5;
+        let kd = 3;
+        let mut blk: CrossBlock<Param<f64>, Param<f64>, 2, 2, f64> = CrossBlock::new();
+        blk.set_indices(&[0, 1], &[2, 3]);
+        blk.add_residual_cross(0.4, &[1.0, -0.5], &[0.25, 2.0]);
+        blk.add_residual_cross(-1.1, &[0.3, 0.7], &[-0.6, 0.1]);
+
+        let mut dense = vec![0.0; n * n];
+        blk.accumulate_hessian(&mut dense);
+        let mut band = vec![0.0; (kd + 1) * n];
+        blk.accumulate_hessian_band(&mut band, kd).unwrap();
+        assert_eq!(densify_band(&band, n, kd), dense);
+    }
+
+    #[test]
+    fn tripletblock_band_matches_dense() {
+        let n = 4;
+        let kd = 2;
+        let mut blk: TripletBlock<f64> = TripletBlock::new();
+        let mut grad = vec![0.0; n];
+        blk.add_residual(0.3, &[0, 1, 2], &[1.0, 0.5, -0.25], &mut grad);
+        blk.add_residual(-0.7, &[1, 3], &[2.0, -1.5], &mut grad);
+
+        let mut dense = vec![0.0; n * n];
+        blk.accumulate_hessian(&mut dense);
+        let mut band = vec![0.0; (kd + 1) * n];
+        blk.accumulate_hessian_band(&mut band, kd).unwrap();
+        assert_eq!(densify_band(&band, n, kd), dense,
+            "TripletBlock band accumulation must use the same upper-band \
+             layout as SelfBlock/CrossBlock and the band solvers");
+    }
+
+    #[test]
+    fn tripletblock_band_matches_selfblock_band() {
+        // The same residual pushed through both block types must produce
+        // byte-identical gradient and band arrays.
+        let n = 4;
+        let kd = 3;
+        let r = 0.9;
+        let dr = [1.0, -2.0, 0.5];
+        let idx = [0u32, 1, 3];
+
+        let mut g_self = vec![0.0; n];
+        let mut sb: SelfBlock<Param<f64>, 3, f64> = SelfBlock::new();
+        sb.set_indices(&idx);
+        sb.add_residual(r, &dr, &mut g_self);
+
+        let mut g_triplet = vec![0.0; n];
+        let mut tb: TripletBlock<f64> = TripletBlock::new();
+        tb.add_residual(r, &idx, &dr, &mut g_triplet);
+
+        assert_eq!(g_self, g_triplet);
+
+        let mut band_self = vec![0.0; (kd + 1) * n];
+        sb.accumulate_hessian_band(&mut band_self, kd).unwrap();
+        let mut band_triplet = vec![0.0; (kd + 1) * n];
+        tb.accumulate_hessian_band(&mut band_triplet, kd).unwrap();
+        assert_eq!(band_self, band_triplet);
     }
 }
