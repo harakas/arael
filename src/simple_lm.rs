@@ -506,6 +506,9 @@ impl LmSolver<f64> for BandLapack {
         delta.copy_from_slice(grad);
         solve_spd_band_lapack(n, self.kd, &mut buf, delta)
     }
+    fn matrix_nonfinite_count(&self, matrix: &Vec<f64>) -> usize {
+        matrix.iter().filter(|v| !v.is_finite()).count()
+    }
 }
 
 #[cfg(feature = "lapack")]
@@ -526,6 +529,9 @@ impl LmSolver<f32> for BandLapack {
         for i in 0..n { buf[self.kd + i * ldab] = (1.0 + lambda) * diagonal[i]; }
         delta.copy_from_slice(grad);
         solve_spd_band_lapack_f32(n, self.kd, &mut buf, delta)
+    }
+    fn matrix_nonfinite_count(&self, matrix: &Vec<f32>) -> usize {
+        matrix.iter().filter(|v| !v.is_finite()).count()
     }
 }
 
@@ -1538,6 +1544,9 @@ impl Drop for SparseEigenF32 {
 #[cfg(feature = "eigen")]
 impl LmSolver<f32> for SparseEigenF32 {
     type Matrix = SparseMatrix<f32>;
+    fn matrix_nonfinite_count(&self, matrix: &SparseMatrix<f32>) -> usize {
+        matrix.csc.vals.iter().filter(|v| !v.is_finite()).count()
+    }
 
     fn new_matrix(&self, n: usize) -> SparseMatrix<f32> {
         SparseMatrix { csc: CscMatrix::empty(n) }
@@ -2755,7 +2764,7 @@ mod tests {
             }
         }
         let r = solve_sparse_eigen(&[0.0,0.0], &mut QP,
-            &LmConfig{abs_precision:1e-10, max_iters:100, initial_lambda:0.001, verbose:false});
+            &LmConfig{abs_precision:1e-10, max_iters:100, initial_lambda:0.001, verbose:false, ..Default::default()});
         assert!((r.x[0]-3.0).abs()<1e-6, "x={}", r.x[0]);
         assert!((r.x[1]-7.0).abs()<1e-6, "y={}", r.x[1]);
         assert!(r.end_cost < 1e-10);
@@ -2798,7 +2807,7 @@ mod tests {
                 coo.push(2,2,4.0); coo.push(3,3,4.0);
             }
         }
-        let cfg = LmConfig{abs_precision:1e-10, max_iters:100, initial_lambda:0.001, verbose:false};
+        let cfg = LmConfig{abs_precision:1e-10, max_iters:100, initial_lambda:0.001, verbose:false, ..Default::default()};
         let rd = solve(&[0.0;4], &mut CP, &cfg);
         let re = solve_sparse_eigen(&[0.0;4], &mut CP, &cfg);
         for i in 0..4 {
@@ -2831,7 +2840,7 @@ mod tests {
             }
         }
         let r = solve_sparse_cholmod(&[0.0,0.0], &mut QP,
-            &LmConfig{abs_precision:1e-10, max_iters:100, initial_lambda:0.001, verbose:false});
+            &LmConfig{abs_precision:1e-10, max_iters:100, initial_lambda:0.001, verbose:false, ..Default::default()});
         assert!((r.x[0]-3.0).abs()<1e-6, "x={}", r.x[0]);
         assert!((r.x[1]-7.0).abs()<1e-6, "y={}", r.x[1]);
         assert!(r.end_cost < 1e-10);
