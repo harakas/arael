@@ -208,7 +208,11 @@ let n       = v.norm();                // sqrt(v.square())
 let u_hat   = v.unit();                // v / v.norm()
 ```
 
-`vect3sym` adds `.rotation_matrix()` (intrinsic ZYX Euler angles -> `matrix3sym`) and the usual dot / scaled / negate / add / sub.
+`vect3sym` has the same surface (`square`, `norm`, `unit`, division by a
+scalar) with a 3D cross product -- `a.cross(&b)` or the `%` operator,
+mirroring the runtime `vect3` -- and adds `.rotation_matrix()` (intrinsic
+ZYX Euler angles -> `matrix3sym`) plus the usual dot / scaled / negate /
+add / sub.
 
 ### matrix2sym
 

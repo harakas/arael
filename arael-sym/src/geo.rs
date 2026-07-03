@@ -118,6 +118,47 @@ impl ops::Mul<vect3sym> for vect3sym {
     }
 }
 
+impl ops::Div<E> for vect3sym {
+    type Output = vect3sym;
+    fn div(self, rhs: E) -> vect3sym {
+        vect3sym { x: self.x / rhs.clone(), y: self.y / rhs.clone(), z: self.z / rhs }
+    }
+}
+
+impl ops::Rem<vect3sym> for vect3sym {
+    type Output = vect3sym;
+    /// Cross product (mirrors the runtime `vect3` `%` operator).
+    fn rem(self, rhs: vect3sym) -> vect3sym {
+        self.cross(&rhs)
+    }
+}
+
+impl vect3sym {
+    /// Squared length (dot product with self).
+    pub fn square(&self) -> E {
+        self.x.clone() * self.x.clone()
+            + self.y.clone() * self.y.clone()
+            + self.z.clone() * self.z.clone()
+    }
+    /// Length (Euclidean norm).
+    pub fn norm(&self) -> E {
+        crate::sqrt(self.square())
+    }
+    /// Unit (normalized) vector.
+    pub fn unit(self) -> vect3sym {
+        let n = self.norm();
+        self / n
+    }
+    /// Cross product.
+    pub fn cross(&self, rhs: &vect3sym) -> vect3sym {
+        vect3sym {
+            x: self.y.clone() * rhs.z.clone() - self.z.clone() * rhs.y.clone(),
+            y: self.z.clone() * rhs.x.clone() - self.x.clone() * rhs.z.clone(),
+            z: self.x.clone() * rhs.y.clone() - self.y.clone() * rhs.x.clone(),
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // vect2sym
 // ---------------------------------------------------------------------------
@@ -417,6 +458,36 @@ impl quaternsym {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vect3sym_cross_norm_unit_square_div() {
+        use std::collections::HashMap;
+        let a = vect3sym::new("a");
+        let b = vect3sym::new("b");
+        let vars = HashMap::from([
+            ("a.x", 1.0), ("a.y", 2.0), ("a.z", 3.0),
+            ("b.x", 4.0), ("b.y", 5.0), ("b.z", -6.0),
+        ]);
+        let ev = |e: &E| e.eval(&vars).unwrap();
+
+        // cross: (1,2,3) x (4,5,-6) = (-27, 18, -3), and `%` is the same op
+        let c = a.cross(&b);
+        assert_eq!((ev(&c.x), ev(&c.y), ev(&c.z)), (-27.0, 18.0, -3.0));
+        let r = a.clone() % b.clone();
+        assert_eq!((ev(&r.x), ev(&r.y), ev(&r.z)), (-27.0, 18.0, -3.0));
+
+        assert_eq!(ev(&a.square()), 14.0);
+        assert!((ev(&a.norm()) - 14.0_f64.sqrt()).abs() < 1e-12);
+
+        let u = a.clone().unit();
+        let n = 14.0_f64.sqrt();
+        assert!((ev(&u.x) - 1.0 / n).abs() < 1e-12);
+        assert!((ev(&u.y) - 2.0 / n).abs() < 1e-12);
+        assert!((ev(&u.z) - 3.0 / n).abs() < 1e-12);
+
+        let d = a.clone() / crate::constant(2.0);
+        assert_eq!((ev(&d.x), ev(&d.y), ev(&d.z)), (0.5, 1.0, 1.5));
+    }
 
     #[test]
     fn matrix3sym_get_euler_angles_clamps_noisy_gimbal_boundary() {
