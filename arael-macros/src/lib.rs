@@ -54,6 +54,7 @@ enum SymFieldType {
     Scalar,
     Vec2,
     Vec3,
+    Mat2,
     Mat3,
     Struct(String),        // reference to another registered struct
     OptionalStruct(String), // Option<T> wrapping a struct
@@ -734,7 +735,7 @@ fn classify_field_sym_type(ty: &syn::Type) -> SymFieldType {
                 "vect2f" | "vect2d" => SymFieldType::Vec2,
                 "vect3f" | "vect3d" => SymFieldType::Vec3,
                 "matrix3f" | "matrix3d" => SymFieldType::Mat3,
-                "matrix2f" | "matrix2d" => SymFieldType::Skip, // not commonly used in constraints
+                "matrix2f" | "matrix2d" => SymFieldType::Mat2,
                 _ => {
                     // Check if it's a Ref<T> — extract inner type name
                     if let Some((_, inner_ident)) = extract_wrapper_inner(ty, "Ref") {

@@ -8,7 +8,7 @@ use quote::quote;
 use syn::{Expr, Stmt, Pat};
 use std::collections::HashMap;
 
-use arael_sym::{self, E, vect2sym, vect3sym, matrix3sym};
+use arael_sym::{self, E, vect2sym, vect3sym, matrix2sym, matrix3sym};
 
 use crate::{registry_lookup, SymFieldType, extract_wrapper_inner};
 
@@ -63,6 +63,7 @@ impl ConstraintCtx {
             SymFieldType::Scalar => SymVal::Scalar(arael_sym::symbol(base)),
             SymFieldType::Vec2 => SymVal::Vec2(vect2sym::new(base)),
             SymFieldType::Vec3 => SymVal::Vec3(vect3sym::new(base)),
+            SymFieldType::Mat2 => SymVal::Mat2(matrix2sym::new(base)),
             SymFieldType::Mat3 => SymVal::Mat3(matrix3sym::new(base)),
             SymFieldType::Struct(_) | SymFieldType::OptionalStruct(_) | SymFieldType::Skip => {
                 // Struct fields are resolved lazily via field access
@@ -82,15 +83,18 @@ fn eval_expr(expr: &Expr, ctx: &mut ConstraintCtx) -> Result<SymVal, syn::Error>
         Expr::Path(ep) if ep.qself.is_none() => {
             if let Some(ident) = ep.path.get_ident() {
                 let name = ident.to_string();
+                // Bindings shadow named constants, matching Rust `let`
+                // semantics: `let e = ...` must refer to the binding, not
+                // silently to Euler's number.
+                if let Some(val) = ctx.bindings.get(&name) {
+                    return Ok(val.clone());
+                }
                 // Named constants
                 match name.as_str() {
                     "pi" => return Ok(SymVal::Scalar(arael_sym::pi())),
                     "epsilon" => return Ok(SymVal::Scalar(arael_sym::epsilon())),
                     "e" => return Ok(SymVal::Scalar(arael_sym::euler())),
                     _ => {}
-                }
-                if let Some(val) = ctx.bindings.get(&name) {
-                    return Ok(val.clone());
                 }
                 return Err(syn::Error::new_spanned(ident,
                     format!("unknown variable '{}' in constraint", name)));
@@ -159,6 +163,11 @@ fn eval_expr(expr: &Expr, ctx: &mut ConstraintCtx) -> Result<SymVal, syn::Error>
                 (SymVal::Mat2(m), "transpose") => {
                     Ok(SymVal::Mat2(m.transpose()))
                 }
+                (SymVal::Mat2(m), "det") => Ok(SymVal::Scalar(m.det())),
+                (SymVal::Mat3(m), "det") => Ok(SymVal::Scalar(m.det())),
+                (SymVal::Mat2(m), "get_rotation_angle") => {
+                    Ok(SymVal::Scalar(m.get_rotation_angle()))
+                }
                 (SymVal::Vec2(v), "norm") => Ok(SymVal::Scalar(v.norm())),
                 (SymVal::Vec2(v), "square") => Ok(SymVal::Scalar(v.square())),
                 (SymVal::Vec2(v), "unit") => Ok(SymVal::Vec2(v.clone().unit())),
@@ -213,6 +222,8 @@ fn eval_expr(expr: &Expr, ctx: &mut ConstraintCtx) -> Result<SymVal, syn::Error>
                     SymVal::Scalar(e) => Ok(SymVal::Scalar(-e)),
                     SymVal::Vec2(v) => Ok(SymVal::Vec2(-v)),
                     SymVal::Vec3(v) => Ok(SymVal::Vec3(-v)),
+                    SymVal::Mat2(m) => Ok(SymVal::Mat2(-m)),
+                    SymVal::Mat3(m) => Ok(SymVal::Mat3(-m)),
                     _ => Err(syn::Error::new_spanned(expr, "cannot negate this type")),
                 },
                 _ => Err(syn::Error::new_spanned(expr, "unsupported unary operator")),
@@ -264,19 +275,31 @@ fn eval_expr(expr: &Expr, ctx: &mut ConstraintCtx) -> Result<SymVal, syn::Error>
             _ => Err(syn::Error::new_spanned(expr, "unsupported literal in constraint")),
         },
 
-        // Index access: expr[i]
+        // Index access: expr[i]. Vec2/Vec3 arms make chained m[i][j]
+        // element access work (m[i] yields the row vector).
         Expr::Index(idx) => {
             let base = eval_expr(&idx.expr, ctx)?;
-            let index_expr = &idx.index;
+            let i = literal_index(&idx.index)?;
             match &base {
-                SymVal::Mat3(m) => {
-                    if let Expr::Lit(lit) = index_expr.as_ref()
-                        && let syn::Lit::Int(li) = &lit.lit {
-                            let i: usize = li.base10_parse()?;
-                            return Ok(SymVal::Vec3(m.rows[i].clone()));
-                        }
-                    Err(syn::Error::new_spanned(index_expr, "matrix index must be a literal integer"))
-                }
+                SymVal::Mat3(m) => match m.rows.get(i) {
+                    Some(row) => Ok(SymVal::Vec3(row.clone())),
+                    None => Err(syn::Error::new_spanned(&idx.index, "matrix3 index out of range")),
+                },
+                SymVal::Mat2(m) => match m.rows.get(i) {
+                    Some(row) => Ok(SymVal::Vec2(row.clone())),
+                    None => Err(syn::Error::new_spanned(&idx.index, "matrix2 index out of range")),
+                },
+                SymVal::Vec3(v) => match i {
+                    0 => Ok(SymVal::Scalar(v.x.clone())),
+                    1 => Ok(SymVal::Scalar(v.y.clone())),
+                    2 => Ok(SymVal::Scalar(v.z.clone())),
+                    _ => Err(syn::Error::new_spanned(&idx.index, "vec3 index out of range")),
+                },
+                SymVal::Vec2(v) => match i {
+                    0 => Ok(SymVal::Scalar(v.x.clone())),
+                    1 => Ok(SymVal::Scalar(v.y.clone())),
+                    _ => Err(syn::Error::new_spanned(&idx.index, "vec2 index out of range")),
+                },
                 _ => Err(syn::Error::new_spanned(expr,
                     format!("cannot index into {}", base.type_name()))),
             }
@@ -578,6 +601,15 @@ fn eval_function(name: &str, args: Vec<SymVal>, span: &Expr) -> Result<SymVal, s
     }
 }
 
+/// Parse an index expression that must be a literal integer.
+fn literal_index(index_expr: &Expr) -> Result<usize, syn::Error> {
+    if let Expr::Lit(lit) = index_expr
+        && let syn::Lit::Int(li) = &lit.lit {
+            return li.base10_parse();
+        }
+    Err(syn::Error::new_spanned(index_expr, "index must be a literal integer"))
+}
+
 /// Extract Vec3 from SymVal, coercing UniversalEulerAngles to its composed ea.
 fn as_vec3(v: SymVal) -> Option<vect3sym> {
     match v {
@@ -594,6 +626,12 @@ fn sym_add(left: SymVal, right: SymVal, span: &Expr) -> Result<SymVal, syn::Erro
         }
         (SymVal::Vec2(_), SymVal::Vec2(_)) => {
             if let (SymVal::Vec2(a), SymVal::Vec2(b)) = (left, right) { Ok(SymVal::Vec2(a + b)) } else { unreachable!() }
+        }
+        (SymVal::Mat2(_), SymVal::Mat2(_)) => {
+            if let (SymVal::Mat2(a), SymVal::Mat2(b)) = (left, right) { Ok(SymVal::Mat2(a + b)) } else { unreachable!() }
+        }
+        (SymVal::Mat3(_), SymVal::Mat3(_)) => {
+            if let (SymVal::Mat3(a), SymVal::Mat3(b)) = (left, right) { Ok(SymVal::Mat3(a + b)) } else { unreachable!() }
         }
         _ => {
             if let (Some(a), Some(b)) = (as_vec3(left), as_vec3(right)) {
@@ -612,6 +650,12 @@ fn sym_sub(left: SymVal, right: SymVal, span: &Expr) -> Result<SymVal, syn::Erro
         }
         (SymVal::Vec2(_), SymVal::Vec2(_)) => {
             if let (SymVal::Vec2(a), SymVal::Vec2(b)) = (left, right) { Ok(SymVal::Vec2(a - b)) } else { unreachable!() }
+        }
+        (SymVal::Mat2(_), SymVal::Mat2(_)) => {
+            if let (SymVal::Mat2(a), SymVal::Mat2(b)) = (left, right) { Ok(SymVal::Mat2(a - b)) } else { unreachable!() }
+        }
+        (SymVal::Mat3(_), SymVal::Mat3(_)) => {
+            if let (SymVal::Mat3(a), SymVal::Mat3(b)) = (left, right) { Ok(SymVal::Mat3(a - b)) } else { unreachable!() }
         }
         _ => {
             if let (Some(a), Some(b)) = (as_vec3(left), as_vec3(right)) {
@@ -636,6 +680,12 @@ fn sym_mul(left: SymVal, right: SymVal, span: &Expr) -> Result<SymVal, syn::Erro
         (SymVal::Mat2(a), SymVal::Mat2(b)) => Ok(SymVal::Mat2(a * b)),
         (SymVal::Mat3(a), SymVal::Vec3(b)) => Ok(SymVal::Vec3(a * b)),
         (SymVal::Mat3(a), SymVal::Mat3(b)) => Ok(SymVal::Mat3(a * b)),
+        (SymVal::Vec2(a), SymVal::Mat2(b)) => Ok(SymVal::Vec2(a * b)), // v * M = M^T v
+        (SymVal::Vec3(a), SymVal::Mat3(b)) => Ok(SymVal::Vec3(a * b)), // v * M = M^T v
+        (SymVal::Scalar(a), SymVal::Mat2(b)) => Ok(SymVal::Mat2(a * b)),
+        (SymVal::Mat2(a), SymVal::Scalar(b)) => Ok(SymVal::Mat2(a * b)),
+        (SymVal::Scalar(a), SymVal::Mat3(b)) => Ok(SymVal::Mat3(a * b)),
+        (SymVal::Mat3(a), SymVal::Scalar(b)) => Ok(SymVal::Mat3(a * b)),
         _ => Err(syn::Error::new_spanned(span, "type mismatch in multiplication")),
     }
 }
@@ -647,19 +697,91 @@ fn sym_mul(left: SymVal, right: SymVal, span: &Expr) -> Result<SymVal, syn::Erro
 fn eval_static_constructor(ty: &str, func: &str, args: Vec<SymVal>, span: &Expr)
     -> Result<SymVal, syn::Error>
 {
+    // Small extractors so each constructor arm reads as its signature.
+    let scalar = |i: usize| -> Result<E, syn::Error> {
+        match &args[i] {
+            SymVal::Scalar(e) => Ok(e.clone()),
+            other => Err(syn::Error::new_spanned(span,
+                format!("{}::{} argument {} must be scalar, got {}",
+                    ty, func, i + 1, other.type_name()))),
+        }
+    };
+    let vec2 = |i: usize| -> Result<vect2sym, syn::Error> {
+        match &args[i] {
+            SymVal::Vec2(v) => Ok(v.clone()),
+            other => Err(syn::Error::new_spanned(span,
+                format!("{}::{} argument {} must be Vec2, got {}",
+                    ty, func, i + 1, other.type_name()))),
+        }
+    };
+    let vec3 = |i: usize| -> Result<vect3sym, syn::Error> {
+        match &args[i] {
+            SymVal::Vec3(v) => Ok(v.clone()),
+            other => Err(syn::Error::new_spanned(span,
+                format!("{}::{} argument {} must be Vec3, got {}",
+                    ty, func, i + 1, other.type_name()))),
+        }
+    };
+    let arity = |n: usize| -> Result<(), syn::Error> {
+        if args.len() == n { Ok(()) } else {
+            Err(syn::Error::new_spanned(span,
+                format!("{}::{} expects {} argument(s), got {}",
+                    ty, func, n, args.len())))
+        }
+    };
+
     match (ty, func) {
         ("matrix2sym", "rotation") => {
-            if args.len() != 1 {
-                return Err(syn::Error::new_spanned(span,
-                    "matrix2sym::rotation expects 1 argument (the angle)"));
-            }
-            match &args[0] {
-                SymVal::Scalar(a) => Ok(SymVal::Mat2(
-                    arael_sym::geo::matrix2sym::rotation(a.clone()))),
-                other => Err(syn::Error::new_spanned(span,
-                    format!("matrix2sym::rotation expects scalar, got {}",
-                        other.type_name()))),
-            }
+            arity(1)?;
+            Ok(SymVal::Mat2(matrix2sym::rotation(scalar(0)?)))
+        }
+        ("matrix2sym", "rotation_from_sincos") => {
+            arity(2)?;
+            Ok(SymVal::Mat2(matrix2sym::rotation_from_sincos(scalar(0)?, scalar(1)?)))
+        }
+        ("matrix2sym", "identity") => {
+            arity(0)?;
+            Ok(SymVal::Mat2(matrix2sym::identity()))
+        }
+        ("matrix2sym", "from_rows") => {
+            arity(2)?;
+            Ok(SymVal::Mat2(matrix2sym::from_rows(vec2(0)?, vec2(1)?)))
+        }
+        ("matrix2sym", "from_cols") => {
+            arity(2)?;
+            Ok(SymVal::Mat2(matrix2sym::from_cols(vec2(0)?, vec2(1)?)))
+        }
+        ("matrix2sym", "from_elements") => {
+            arity(4)?;
+            Ok(SymVal::Mat2(matrix2sym::from_elements(
+                scalar(0)?, scalar(1)?, scalar(2)?, scalar(3)?)))
+        }
+        ("matrix3sym", "identity") => {
+            arity(0)?;
+            Ok(SymVal::Mat3(matrix3sym::identity()))
+        }
+        ("matrix3sym", "from_rows") => {
+            arity(3)?;
+            Ok(SymVal::Mat3(matrix3sym::from_rows(vec3(0)?, vec3(1)?, vec3(2)?)))
+        }
+        ("matrix3sym", "from_cols") => {
+            arity(3)?;
+            Ok(SymVal::Mat3(matrix3sym::from_cols(vec3(0)?, vec3(1)?, vec3(2)?)))
+        }
+        ("matrix3sym", "from_elements") => {
+            arity(9)?;
+            Ok(SymVal::Mat3(matrix3sym::from_elements(
+                scalar(0)?, scalar(1)?, scalar(2)?,
+                scalar(3)?, scalar(4)?, scalar(5)?,
+                scalar(6)?, scalar(7)?, scalar(8)?)))
+        }
+        ("matrix3sym", "rotation_from_euler_angles") => {
+            arity(1)?;
+            Ok(SymVal::Mat3(matrix3sym::rotation_from_euler_angles(&vec3(0)?)))
+        }
+        ("matrix3sym", "rotation_from_axis_angle") => {
+            arity(2)?;
+            Ok(SymVal::Mat3(matrix3sym::rotation_from_axis_angle(&vec3(0)?, scalar(1)?)))
         }
         _ => Err(syn::Error::new_spanned(span,
             format!("unsupported constructor `{}::{}` in constraint", ty, func))),
