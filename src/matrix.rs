@@ -259,7 +259,8 @@ impl<T: Float> matrix3<T>
     }
 
     /// Extracts Euler angles (x=roll, y=pitch, z=yaw) from a rotation matrix.
-    /// Diverges near |pitch| = pi/2 (gimbal lock).
+    /// At gimbal lock (|pitch| = pi/2) only roll -+ yaw is determined;
+    /// the roll = 0 convention is used and yaw carries the combined angle.
     pub fn get_euler_angles(self) -> vect3<T> {
         // safe_asin: float noise can push a valid rotation's entry just
         // past +-1, where raw asin returns NaN and poisons all angles.
@@ -271,10 +272,15 @@ impl<T: Float> matrix3<T>
                 atan2(self[1][0], self[0][0])
             )
         } else {
+            // Gimbal lock: cos(pitch) = 0, so row 2 and column 0 carry
+            // no roll/yaw information (the entries above are all zero).
+            // m01/m11 stay well-conditioned and hold the combined angle
+            // in both hemispheres: m01 = -+sin(roll -+ yaw),
+            // m11 = cos(roll -+ yaw).
             vect3::<T>::new(
-                atan2(-self[2][1], -self[2][2]),
+                T::zero(),
                 y,
-                atan2(-self[1][0], -self[0][0])
+                atan2(-self[0][1], self[1][1])
             )
         }
     }
@@ -608,6 +614,50 @@ mod tests {
         let ea2 = noisy2.get_euler_angles();
         assert!(ea2.y.is_finite());
         assert!((ea2.y + f64::half_pi()).abs() < 1e-6, "pitch={}", ea2.y);
+    }
+
+    #[test]
+    fn test_get_euler_angles_exact_gimbal_lock() {
+        // At exact gimbal lock (cos(pitch) == 0, entries literally zero)
+        // only roll -+ yaw is determined; the extractor must use the
+        // roll = 0 convention and recover the combined angle from
+        // m01/m11, which stay well-conditioned at lock. A hand-written
+        // lock matrix (e.g. an axis-aligned 90 degree rotation) is the
+        // realistic trigger -- computed rotations never have exact zeros.
+        let d: f64 = 0.4;
+
+        // pitch = +pi/2: m01 = sin(roll - yaw), m11 = cos(roll - yaw)
+        let m = matrix3d::from_rows(
+            vect3d::new(0.0, d.sin(), d.cos()),
+            vect3d::new(0.0, d.cos(), -d.sin()),
+            vect3d::new(-1.0, 0.0, 0.0),
+        );
+        let ea = m.get_euler_angles();
+        assert_eq!(ea.x, 0.0, "roll must follow the roll=0 convention");
+        assert!((ea.y - f64::half_pi()).abs() < 1e-12, "pitch={}", ea.y);
+        assert!(matrix3d::rotation_from_euler_angles(ea).similar(m),
+            "recomposition mismatch, ea={:?}", ea);
+
+        // pitch = -pi/2: m01 = -sin(roll + yaw), m11 = cos(roll + yaw)
+        let m2 = matrix3d::from_rows(
+            vect3d::new(0.0, -d.sin(), -d.cos()),
+            vect3d::new(0.0, d.cos(), -d.sin()),
+            vect3d::new(1.0, 0.0, 0.0),
+        );
+        let ea2 = m2.get_euler_angles();
+        assert_eq!(ea2.x, 0.0);
+        assert!((ea2.y + f64::half_pi()).abs() < 1e-12, "pitch={}", ea2.y);
+        assert!(matrix3d::rotation_from_euler_angles(ea2).similar(m2),
+            "recomposition mismatch, ea={:?}", ea2);
+
+        // Round trip through a lock rotation built from angles: sin of
+        // the f64 nearest pi/2 rounds to exactly 1, so this also lands
+        // in the lock branch (with tiny nonzero off-entries).
+        let src = vect3d::new(0.3, f64::half_pi(), 0.7);
+        let m3 = matrix3d::rotation_from_euler_angles(src);
+        let ea3 = m3.get_euler_angles();
+        assert!(matrix3d::rotation_from_euler_angles(ea3).similar(m3),
+            "recomposition mismatch, ea={:?}", ea3);
     }
 
     use super::*;
