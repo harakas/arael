@@ -239,6 +239,7 @@ dependencies = [
  "rand_distr",
  "rustyline",
  "serde",
+ "serde_json",
  "trybuild",
  "web-time",
 ]

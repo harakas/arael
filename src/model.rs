@@ -51,6 +51,15 @@ impl ParamType for crate::vect::vect2<f32> {
     fn read_from64(src: &[f64]) -> Self { Self::new(src[0] as f32, src[1] as f32) }
 }
 
+impl ParamType for crate::vect::vect3<f64> {
+    const SIZE: usize = 3;
+    const SUFFIXES: &'static [&'static str] = &[".x", ".y", ".z"];
+    fn write_to32(&self, dst: &mut [f32]) { dst[0] = self.x as f32; dst[1] = self.y as f32; dst[2] = self.z as f32; }
+    fn read_from32(src: &[f32]) -> Self { Self::new(src[0] as f64, src[1] as f64, src[2] as f64) }
+    fn write_to64(&self, dst: &mut [f64]) { dst[0] = self.x; dst[1] = self.y; dst[2] = self.z; }
+    fn read_from64(src: &[f64]) -> Self { Self::new(src[0], src[1], src[2]) }
+}
+
 impl ParamType for crate::vect::vect3<f32> {
     const SIZE: usize = 3;
     const SUFFIXES: &'static [&'static str] = &[".x", ".y", ".z"];
@@ -72,13 +81,19 @@ impl ParamType for crate::vect::vect3<f32> {
 /// parameter vector.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Param<T: ParamType> {
+    #[serde(default = "default_true")]
     pub optimize: bool,
     pub value: T,
     #[serde(skip)]
     work: T,
-    #[serde(skip)]
+    // A plain skip would restore 0 -- a valid parameter index; the
+    // inactive sentinel must survive deserialization.
+    #[serde(skip, default = "inactive_index")]
     index: u32,
 }
+
+fn default_true() -> bool { true }
+fn inactive_index() -> u32 { u32::MAX }
 
 impl<T: ParamType> Param<T> {
     /// Create a new optimizable parameter with the given initial value.
