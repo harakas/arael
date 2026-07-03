@@ -1,0 +1,5 @@
+error: fit(...) cannot be combined with root; use a separate #[arael(fit(...))] attribute
+ --> tests/constraint_attr_errors/root_fit_combined.rs:9:15
+  |
+9 | #[arael(root, fit(y = k * x + c))]
+  |               ^^^

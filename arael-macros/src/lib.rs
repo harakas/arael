@@ -1243,32 +1243,57 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
         let tvec: Vec<proc_macro2::TokenTree> = content.into_iter().collect();
         if let Some(proc_macro2::TokenTree::Ident(id)) = tvec.first() {
             if *id != "root" { return None; }
-            // Parse optional keywords after comma: f32/f64, extended, jacobian
+            // Parse optional keywords after comma: f32/f64, extended, jacobian.
+            // Unknown keywords are hard errors: a silently ignored typo
+            // (`jacobain`) or a combined `fit(...)` would otherwise no-op.
             let mut precision = "f64".to_string();
             let mut custom = false;
             let mut jacobian = false;
             let mut pos = 1;
             while pos < tvec.len() {
-                if let proc_macro2::TokenTree::Punct(p) = &tvec[pos]
-                    && p.as_char() == ',' {
+                match &tvec[pos] {
+                    proc_macro2::TokenTree::Punct(p) if p.as_char() == ',' => {}
+                    other => return Some(Err(syn::Error::new(other.span(),
+                        "expected `,` between root keywords"))),
+                }
+                pos += 1;
+                match tvec.get(pos) {
+                    Some(proc_macro2::TokenTree::Ident(kw)) => {
+                        let kw_str = kw.to_string();
+                        if kw_str == "f32" || kw_str == "f64" {
+                            precision = kw_str.clone();
+                        } else if kw_str == "extended" {
+                            custom = true;
+                        } else if kw_str == "jacobian" {
+                            jacobian = true;
+                        } else if kw_str == "fit" {
+                            return Some(Err(syn::Error::new(kw.span(),
+                                "fit(...) cannot be combined with root; use a separate #[arael(fit(...))] attribute")));
+                        } else {
+                            return Some(Err(syn::Error::new(kw.span(),
+                                format!("unknown root keyword `{}`, expected `f32`, `f64`, `extended`, or `jacobian`", kw_str))));
+                        }
                         pos += 1;
-                        if let Some(proc_macro2::TokenTree::Ident(kw)) = tvec.get(pos) {
-                            let kw_str = kw.to_string();
-                            if kw_str == "f32" || kw_str == "f64" {
-                                precision = kw_str;
-                            } else if kw_str == "extended" {
-                                custom = true;
-                            } else if kw_str == "jacobian" {
-                                jacobian = true;
-                            }
+                        // Skip a group following a keyword (e.g. a stray
+                        // parenthesized argument) -- nothing takes one.
+                        if let Some(proc_macro2::TokenTree::Group(g)) = tvec.get(pos) {
+                            return Some(Err(syn::Error::new(g.span(),
+                                format!("root keyword `{}` takes no arguments", kw_str))));
                         }
                     }
-                pos += 1;
+                    Some(other) => return Some(Err(syn::Error::new(other.span(),
+                        "expected a keyword after `,` in root attribute"))),
+                    None => {} // trailing comma
+                }
             }
-            return Some((precision, custom, jacobian));
+            return Some(Ok((precision, custom, jacobian)));
         }
         None
     });
+    let root_info = match root_info {
+        Some(r) => Some(r?),
+        None => None,
+    };
     let root_precision = root_info.as_ref().map(|(p, _, _)| p.clone());
     let root_custom = root_info.as_ref().map(|(_, c, _)| *c).unwrap_or(false);
     let root_jacobian = root_info.as_ref().map(|(_, _, j)| *j).unwrap_or(false);

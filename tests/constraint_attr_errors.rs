@@ -16,4 +16,6 @@ fn constraint_attr_compile_errors() {
     t.compile_fail("tests/constraint_attr_errors/typo_gaurd.rs");
     t.compile_fail("tests/constraint_attr_errors/parent_bad_value.rs");
     t.compile_fail("tests/constraint_attr_errors/cross_bad_arity.rs");
+    t.compile_fail("tests/constraint_attr_errors/root_typo_keyword.rs");
+    t.compile_fail("tests/constraint_attr_errors/root_fit_combined.rs");
 }

@@ -286,7 +286,7 @@ struct Path {
 | `#[arael(root)]` | mark the top-level Model. Generates `LmProblem` impl, manages indices, owns the update cycle |
 | `#[arael(root, f32)]` | scalar precision for the generated solver surface (default is f64). Produces `*_f32` methods |
 | `#[arael(root, jacobian)]` | additionally emit `calc_jacobian(&params) -> Jacobian<T>` and `calc_cost_table(&params)` for diagnostics |
-| `#[arael(root, fit(coll, \|e\| body))]` | shorthand: sum-of-squares fit of a residual body over one collection. Generates a one-line solver entry point |
+| `#[arael(fit(coll, \|e\| body))]` | shorthand: sum-of-squares fit of a residual body over one collection. Generates a one-line solver entry point |
 | `#[arael(skip_self_block)]` | opt out of the mandatory `SelfBlock<Self>`. Reserved for Models whose parameters only appear inside constraints declared elsewhere (rare) |
 
 Constraints can also appear on the root itself -- useful for

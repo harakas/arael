@@ -1,0 +1,5 @@
+error: unknown root keyword `jacobain`, expected `f32`, `f64`, `extended`, or `jacobian`
+ --> tests/constraint_attr_errors/root_typo_keyword.rs:8:15
+  |
+8 | #[arael(root, jacobain)]
+  |               ^^^^^^^^

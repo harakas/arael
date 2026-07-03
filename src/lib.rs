@@ -488,7 +488,7 @@
 //! | `#[arael(root)]` | mark the top-level Model. Generates `LmProblem` impl, manages indices, owns the update cycle |
 //! | `#[arael(root, f32)]` | scalar precision for the generated solver surface (default is f64) |
 //! | `#[arael(root, jacobian)]` | additionally emit `calc_jacobian` and `calc_cost_table` for diagnostics |
-//! | `#[arael(root, fit(coll, \|e\| body))]` | shorthand: sum-of-squares fit of a residual body over one collection |
+//! | `#[arael(fit(coll, \|e\| body))]` | shorthand: sum-of-squares fit of a residual body over one collection |
 //! | `#[arael(skip_self_block)]` | opt out of the mandatory `SelfBlock<Self>` (rare) |
 //!
 //! Constraints can also appear on the root itself -- useful for
