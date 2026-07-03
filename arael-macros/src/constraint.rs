@@ -173,6 +173,19 @@ fn eval_expr(expr: &Expr, ctx: &mut ConstraintCtx) -> Result<SymVal, syn::Error>
                         _ => Err(syn::Error::new_spanned(&mc.args[0], ".cross() argument must be Vec2")),
                     }
                 }
+                (SymVal::Vec3(v), "norm") => Ok(SymVal::Scalar(v.norm())),
+                (SymVal::Vec3(v), "square") => Ok(SymVal::Scalar(v.square())),
+                (SymVal::Vec3(v), "unit") => Ok(SymVal::Vec3(v.clone().unit())),
+                (SymVal::Vec3(v), "cross") => {
+                    if mc.args.len() != 1 {
+                        return Err(syn::Error::new_spanned(&mc.method, ".cross() requires 1 argument"));
+                    }
+                    let arg = eval_expr(&mc.args[0], ctx)?;
+                    match arg {
+                        SymVal::Vec3(rhs) => Ok(SymVal::Vec3(v.cross(&rhs))),
+                        _ => Err(syn::Error::new_spanned(&mc.args[0], ".cross() argument must be Vec3")),
+                    }
+                }
                 _ => Err(syn::Error::new_spanned(&mc.method,
                     format!("unsupported method .{}() on {}", method, receiver.type_name()))),
             }
@@ -187,6 +200,7 @@ fn eval_expr(expr: &Expr, ctx: &mut ConstraintCtx) -> Result<SymVal, syn::Error>
                 syn::BinOp::Sub(_) => sym_sub(left, right, expr),
                 syn::BinOp::Mul(_) => sym_mul(left, right, expr),
                 syn::BinOp::Div(_) => sym_div(left, right, expr),
+                syn::BinOp::Rem(_) => sym_rem(left, right, expr),
                 _ => Err(syn::Error::new_spanned(expr, "unsupported operator in constraint")),
             }
         }
@@ -197,6 +211,7 @@ fn eval_expr(expr: &Expr, ctx: &mut ConstraintCtx) -> Result<SymVal, syn::Error>
             match eu.op {
                 syn::UnOp::Neg(_) => match inner {
                     SymVal::Scalar(e) => Ok(SymVal::Scalar(-e)),
+                    SymVal::Vec2(v) => Ok(SymVal::Vec2(-v)),
                     SymVal::Vec3(v) => Ok(SymVal::Vec3(-v)),
                     _ => Err(syn::Error::new_spanned(expr, "cannot negate this type")),
                 },
@@ -655,7 +670,17 @@ fn sym_div(left: SymVal, right: SymVal, span: &Expr) -> Result<SymVal, syn::Erro
     match (left, right) {
         (SymVal::Scalar(a), SymVal::Scalar(b)) => Ok(SymVal::Scalar(a / b)),
         (SymVal::Vec2(a), SymVal::Scalar(b)) => Ok(SymVal::Vec2(a / b)),
+        (SymVal::Vec3(a), SymVal::Scalar(b)) => Ok(SymVal::Vec3(a / b)),
         _ => Err(syn::Error::new_spanned(span, "unsupported division types")),
+    }
+}
+
+fn sym_rem(left: SymVal, right: SymVal, span: &Expr) -> Result<SymVal, syn::Error> {
+    match (left, right) {
+        // `%` is the cross product operator, mirroring the runtime vect3.
+        (SymVal::Vec3(a), SymVal::Vec3(b)) => Ok(SymVal::Vec3(a % b)),
+        _ => Err(syn::Error::new_spanned(span,
+            "`%` (cross product) requires Vec3 operands")),
     }
 }
 

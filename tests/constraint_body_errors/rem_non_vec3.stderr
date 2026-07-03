@@ -1,0 +1,15 @@
+error: `%` (cross product) requires Vec3 operands
+ --> tests/constraint_body_errors/rem_non_vec3.rs:5:1
+  |
+5 | #[arael::model]
+  | ^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused imports: `Param` and `SelfBlock`
+ --> tests/constraint_body_errors/rem_non_vec3.rs:3:20
+  |
+3 | use arael::model::{Param, SelfBlock};
+  |                    ^^^^^  ^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
