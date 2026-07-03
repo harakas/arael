@@ -250,6 +250,29 @@ Constructors: `identity()`, `from_rows/from_cols` (three vectors),
 `ea.rotation_matrix()`), `rotation_from_axis_angle(&axis, phi)` (axis must
 be unit length). Add / Sub / Neg / scalar Mul as for `matrix2sym`.
 
+### quaternsym
+
+```rust
+let q = quaternsym::new("q");                 // q.t + q.v (vect3sym)
+let r = quaternsym::from_axis_angle(&vect3sym::new("ax"), symbol("ang"));
+let p = quaternsym::from_euler_angles(&vect3sym::new("ea"));
+let h = q.clone() * r.clone();                // Hamilton product
+let c = q.conj();                             // negated vector part
+let v = q.rotate(&vect3sym::new("v"));        // q * (0, v) * q'
+let m = q.rotation_matrix();                  // -> matrix3sym
+let e = q.get_euler_angles();                 // continuous: safe_asin pitch
+let d = q.dot(&r);                            // E
+let n = q.norm();                             // E
+let u = q.clone().unit();
+```
+
+Mirrors the runtime `quatern` surface for everything branch-free; Add /
+Sub / Neg / scalar Mul as for the vectors, plus `identity()`. The branchy
+runtime operations (`pow`, `log`, `exp`, `slerp`, `from_two_vectors`,
+`get_axis_angle`) are deliberately absent: constraint expressions must
+stay continuous (see TODO.md). `get_euler_angles` uses `safe_asin` for
+the pitch instead of the runtime's boundary branches.
+
 ### Use in constraint bodies
 
 Inside `#[arael(constraint(..., { ... }))]` the body is interpreted (not compiled as Rust), so you write the *runtime* type names but the macro dispatches through the symbolic companions:

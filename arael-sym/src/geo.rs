@@ -698,6 +698,171 @@ impl quaternsym {
             v: vect3sym::new(&format!("{}.v", base)),
         }
     }
+
+    /// Identity quaternion (1 + 0i + 0j + 0k), representing no rotation.
+    pub fn identity() -> quaternsym {
+        quaternsym {
+            t: crate::constant(1.0),
+            v: vect3sym {
+                x: crate::constant(0.0),
+                y: crate::constant(0.0),
+                z: crate::constant(0.0),
+            },
+        }
+    }
+
+    /// Unit quaternion from Euler angles (x=roll, y=pitch, z=yaw).
+    /// Mirrors `quatern::from_euler_angles`.
+    pub fn from_euler_angles(ea: &vect3sym) -> quaternsym {
+        let half = crate::constant(0.5);
+        let (shax, chax) = (sin(ea.x.clone() * half.clone()), cos(ea.x.clone() * half.clone()));
+        let (shay, chay) = (sin(ea.y.clone() * half.clone()), cos(ea.y.clone() * half.clone()));
+        let (shaz, chaz) = (sin(ea.z.clone() * half.clone()), cos(ea.z.clone() * half));
+        quaternsym {
+            t: chax.clone() * chay.clone() * chaz.clone()
+                + shax.clone() * shay.clone() * shaz.clone(),
+            v: vect3sym {
+                x: shax.clone() * chay.clone() * chaz.clone()
+                    - chax.clone() * shay.clone() * shaz.clone(),
+                y: chax.clone() * shay.clone() * chaz.clone()
+                    + shax.clone() * chay.clone() * shaz.clone(),
+                z: chax * chay * shaz - shax * shay * chaz,
+            },
+        }
+    }
+
+    /// Unit quaternion from a rotation axis (must be unit length) and a
+    /// symbolic angle. Mirrors `quatern::from_axis_angle`.
+    pub fn from_axis_angle(axis: &vect3sym, angle: E) -> quaternsym {
+        let half_angle = angle * crate::constant(0.5);
+        quaternsym {
+            t: cos(half_angle.clone()),
+            v: axis.clone() * sin(half_angle),
+        }
+    }
+
+    /// Dot product of two quaternions.
+    pub fn dot(&self, q: &quaternsym) -> E {
+        self.t.clone() * q.t.clone() + self.v.clone() * q.v.clone()
+    }
+
+    /// Norm (magnitude).
+    pub fn norm(&self) -> E {
+        crate::sqrt(self.dot(self))
+    }
+
+    /// Unit (normalized) quaternion.
+    pub fn unit(self) -> quaternsym {
+        let n = self.norm();
+        quaternsym { t: self.t / n.clone(), v: self.v / n }
+    }
+
+    /// Conjugate (negated vector part).
+    pub fn conj(&self) -> quaternsym {
+        quaternsym { t: self.t.clone(), v: -self.v.clone() }
+    }
+
+    /// Rotate a 3D vector by this unit quaternion: `q * (0, v) * q'`.
+    pub fn rotate(&self, v: &vect3sym) -> vect3sym {
+        let pure = quaternsym { t: crate::constant(0.0), v: v.clone() };
+        (self.clone() * pure * self.conj()).v
+    }
+
+    /// The equivalent 3x3 rotation matrix of this unit quaternion.
+    /// Mirrors `quatern::rotation_matrix`.
+    pub fn rotation_matrix(&self) -> matrix3sym {
+        let one = || crate::constant(1.0);
+        let two = || crate::constant(2.0);
+        let (t, v) = (&self.t, &self.v);
+        let x2 = v.x.clone() * v.x.clone();
+        let y2 = v.y.clone() * v.y.clone();
+        let z2 = v.z.clone() * v.z.clone();
+        matrix3sym {
+            rows: [
+                vect3sym {
+                    x: one() - two() * (y2.clone() + z2.clone()),
+                    y: two() * (v.x.clone() * v.y.clone() - v.z.clone() * t.clone()),
+                    z: two() * (v.x.clone() * v.z.clone() + v.y.clone() * t.clone()),
+                },
+                vect3sym {
+                    x: two() * (v.x.clone() * v.y.clone() + v.z.clone() * t.clone()),
+                    y: one() - two() * (x2.clone() + z2),
+                    z: two() * (v.y.clone() * v.z.clone() - v.x.clone() * t.clone()),
+                },
+                vect3sym {
+                    x: two() * (v.x.clone() * v.z.clone() - v.y.clone() * t.clone()),
+                    y: two() * (v.y.clone() * v.z.clone() + v.x.clone() * t.clone()),
+                    z: one() - two() * (x2 + y2),
+                },
+            ],
+        }
+    }
+
+    /// Extract Euler angles (x=roll, y=pitch, z=yaw) from a unit quaternion.
+    /// Continuous form of `quatern::get_euler_angles`: safe_asin clamps the
+    /// pitch argument instead of branching at the gimbal boundary.
+    pub fn get_euler_angles(&self) -> vect3sym {
+        let one = || crate::constant(1.0);
+        let two = || crate::constant(2.0);
+        let (t, v) = (&self.t, &self.v);
+        vect3sym {
+            x: crate::atan2(
+                two() * (t.clone() * v.x.clone() + v.y.clone() * v.z.clone()),
+                one() - two() * (v.x.clone() * v.x.clone() + v.y.clone() * v.y.clone())),
+            y: crate::safe_asin(two() * (t.clone() * v.y.clone() - v.z.clone() * v.x.clone())),
+            z: crate::atan2(
+                two() * (t.clone() * v.z.clone() + v.x.clone() * v.y.clone()),
+                one() - two() * (v.y.clone() * v.y.clone() + v.z.clone() * v.z.clone())),
+        }
+    }
+}
+
+impl ops::Add<quaternsym> for quaternsym {
+    type Output = quaternsym;
+    fn add(self, rhs: quaternsym) -> quaternsym {
+        quaternsym { t: self.t + rhs.t, v: self.v + rhs.v }
+    }
+}
+
+impl ops::Sub<quaternsym> for quaternsym {
+    type Output = quaternsym;
+    fn sub(self, rhs: quaternsym) -> quaternsym {
+        quaternsym { t: self.t - rhs.t, v: self.v - rhs.v }
+    }
+}
+
+impl ops::Neg for quaternsym {
+    type Output = quaternsym;
+    fn neg(self) -> quaternsym {
+        quaternsym { t: -self.t, v: -self.v }
+    }
+}
+
+impl ops::Mul<E> for quaternsym {
+    type Output = quaternsym;
+    fn mul(self, rhs: E) -> quaternsym {
+        quaternsym { t: self.t * rhs.clone(), v: self.v * rhs }
+    }
+}
+
+impl ops::Mul<quaternsym> for E {
+    type Output = quaternsym;
+    fn mul(self, rhs: quaternsym) -> quaternsym {
+        rhs * self
+    }
+}
+
+impl ops::Mul<quaternsym> for quaternsym {
+    type Output = quaternsym;
+    /// Hamilton product. Mirrors the runtime `quatern` multiplication.
+    fn mul(self, rhs: quaternsym) -> quaternsym {
+        quaternsym {
+            t: self.t.clone() * rhs.t.clone() - self.v.clone() * rhs.v.clone(),
+            v: rhs.v.clone() * self.t
+                + self.v.clone() * rhs.t
+                + self.v % rhs.v,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -791,6 +956,61 @@ mod tests {
         assert!((ev(&r.rows[1].x) - 0.7_f64.sin()).abs() < 1e-12);
         assert!((ev(&r.rows[2].z) - 1.0).abs() < 1e-12);
         assert!((ev(&r.det()) - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn quaternsym_algebra_matches_quaternion_identities() {
+        use std::collections::HashMap;
+        // Unit quaternion for axis z, angle 0.8: t = cos(0.4), v = (0,0,sin(0.4)).
+        let vars = HashMap::from([
+            ("q.t", 0.4_f64.cos()), ("q.v.x", 0.0), ("q.v.y", 0.0), ("q.v.z", 0.4_f64.sin()),
+            ("p.x", 1.0), ("p.y", 2.0), ("p.z", 3.0),
+        ]);
+        let q = quaternsym::new("q");
+        let p = vect3sym::new("p");
+        let ev = |e: &E| e.eval(&vars).unwrap();
+
+        // Rotating p about z by 0.8 rad.
+        let (s, c) = 0.8_f64.sin_cos();
+        let r = q.rotate(&p);
+        assert!((ev(&r.x) - (c * 1.0 - s * 2.0)).abs() < 1e-12);
+        assert!((ev(&r.y) - (s * 1.0 + c * 2.0)).abs() < 1e-12);
+        assert!((ev(&r.z) - 3.0).abs() < 1e-12);
+
+        // rotation_matrix agrees with rotate.
+        let m = q.rotation_matrix();
+        let mv = m * p.clone();
+        assert!((ev(&mv.x) - ev(&r.x)).abs() < 1e-12);
+        assert!((ev(&mv.y) - ev(&r.y)).abs() < 1e-12);
+
+        // q * q' = identity; norm = 1; dot(q, q) = 1.
+        let qq = q.clone() * q.conj();
+        assert!((ev(&qq.t) - 1.0).abs() < 1e-12);
+        assert!(ev(&qq.v.x).abs() < 1e-12);
+        assert!((ev(&q.norm()) - 1.0).abs() < 1e-12);
+
+        // get_euler_angles of a pure yaw rotation: (0, 0, 0.8).
+        let ea = q.get_euler_angles();
+        assert!(ev(&ea.x).abs() < 1e-12);
+        assert!(ev(&ea.y).abs() < 1e-12);
+        assert!((ev(&ea.z) - 0.8).abs() < 1e-12);
+
+        // Constructors: from_axis_angle(z, 0.8) reproduces q's components;
+        // from_euler_angles((0,0,0.8)) does too; identity rotates nothing.
+        let axis = vect3sym::new("ax");
+        let vars2 = HashMap::from([
+            ("ax.x", 0.0), ("ax.y", 0.0), ("ax.z", 1.0), ("ang", 0.8_f64),
+            ("e.x", 0.0), ("e.y", 0.0), ("e.z", 0.8),
+        ]);
+        let fa = quaternsym::from_axis_angle(&axis, symbol("ang"));
+        assert!((fa.t.eval(&vars2).unwrap() - 0.4_f64.cos()).abs() < 1e-12);
+        assert!((fa.v.z.eval(&vars2).unwrap() - 0.4_f64.sin()).abs() < 1e-12);
+        let fe = quaternsym::from_euler_angles(&vect3sym::new("e"));
+        assert!((fe.t.eval(&vars2).unwrap() - 0.4_f64.cos()).abs() < 1e-12);
+        assert!((fe.v.z.eval(&vars2).unwrap() - 0.4_f64.sin()).abs() < 1e-12);
+        let iv = quaternsym::identity().rotate(&p);
+        assert!((ev(&iv.x) - 1.0).abs() < 1e-12);
+        assert!((ev(&iv.y) - 2.0).abs() < 1e-12);
     }
 
     #[test]
