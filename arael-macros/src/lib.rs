@@ -190,9 +190,13 @@ fn registry_stash_constraint(c: StashedConstraint) {
     reg.constraints.push(c);
 }
 
-fn registry_take_constraints() -> Vec<StashedConstraint> {
-    let mut guard = SYM_REGISTRY.lock().unwrap();
-    guard.as_mut().map(|reg| std::mem::take(&mut reg.constraints)).unwrap_or_default()
+// Clone, never take: a crate can define several #[arael(root)] models,
+// and each root selects its own constraints via the reachability filter.
+// A take here would hand the first root everything and later roots
+// nothing, silently generating no-op solvers for them.
+fn registry_constraints() -> Vec<StashedConstraint> {
+    let guard = SYM_REGISTRY.lock().unwrap();
+    guard.as_ref().map(|reg| reg.constraints.clone()).unwrap_or_default()
 }
 
 #[allow(dead_code)]

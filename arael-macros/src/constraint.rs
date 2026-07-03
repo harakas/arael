@@ -1562,7 +1562,7 @@ pub fn generate_root_methods(
     custom: bool,
     jacobian: bool,
 ) -> syn::Result<TokenStream2> {
-    let stashed = crate::registry_take_constraints();
+    let stashed = crate::registry_constraints();
     let root_var_name = root_name.to_string().to_lowercase();
     let root_var_ident = syn::Ident::new(&root_var_name, proc_macro2::Span::call_site());
     let cast_type: syn::Type = syn::parse_str(precision)
@@ -4457,7 +4457,7 @@ fn find_layout_for_var(var_name: &str) -> Option<crate::SymLayout> {
 /// Generate code for all stashed constraints (called when #[arael(root)] is processed).
 #[allow(dead_code)]
 pub fn generate_all_stashed_constraints() -> syn::Result<TokenStream2> {
-    let stashed = crate::registry_take_constraints();
+    let stashed = crate::registry_constraints();
     let mut all_impls = Vec::new();
 
     for sc in &stashed {
