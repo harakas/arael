@@ -6,6 +6,7 @@ use arael::model::{Model, Param, SelfBlock, CrossBlock, SimpleEulerAngleParam};
 use arael::simple_lm::LmProblem;
 use arael::vect::{vect2d, vect3d};
 use arael::matrix::{matrix2d, matrix3d};
+use arael::quatern::quaternd;
 use arael::refs::{self, Ref};
 
 #[arael::model]
@@ -124,6 +125,32 @@ struct Ean {
     hb: SelfBlock<Ean>,
 }
 
+// Quaternion surface: quaternd data field, Hamilton algebra, rotate,
+// conj/dot/norm/unit, rotation_matrix, get_euler_angles, constructors.
+#[arael::model]
+#[arael(constraint(hb, {
+    let r = quaternsym::from_axis_angle(qn.axis, qn.ang);
+    let fe = quaternsym::from_euler_angles(qn.p);
+    let h = (qn.q * r).conj();
+    let rv = qn.q.rotate(qn.p);
+    let u = (qn.q * 2.0 - -qn.q + quaternsym::identity()).unit();
+    [rv.x * space.w, rv.y * space.w, rv.z * space.w,
+     h.t * space.w, h.v.x * space.w,
+     qn.q.dot(r) * space.w,
+     fe.v.y * space.w, fe.t * space.w,
+     u.t * space.w, u.v.z * space.w,
+     qn.q.rotation_matrix()[0][1] * space.w,
+     r.get_euler_angles().z * space.w,
+     (0.5 * qn.q).norm() * space.w]
+}))]
+struct Qn {
+    p: Param<vect3d>,
+    ang: Param<f64>,
+    q: quaternd,
+    axis: vect3d,
+    hb: SelfBlock<Qn>,
+}
+
 #[arael::model]
 #[arael(root)]
 struct Space {
@@ -133,6 +160,7 @@ struct Space {
     nodes2: refs::Vec<N2>,
     nodes3: refs::Vec<N3>,
     eans: refs::Vec<Ean>,
+    quats: refs::Vec<Qn>,
     w: f64,
 }
 
@@ -144,6 +172,11 @@ const ANG2: f64 = 0.9;
 const ANG3: f64 = 0.6;
 const EA: (f64, f64, f64) = (0.2, -0.3, 0.4);
 const EV: (f64, f64, f64) = (1.1, 0.5, -0.7);
+const QANG: f64 = 0.7;
+
+fn qdata() -> quaternd {
+    quaternd::from_axis_angle(vect3d::new(2.0, -1.0, 0.5).unit(), 1.1)
+}
 
 fn m2() -> matrix2d {
     matrix2d::from_elements(0.8, -0.3, 0.5, 1.1)
@@ -160,8 +193,16 @@ fn build() -> (Space, Vec<f64>) {
         nodes2: refs::Vec::new(),
         nodes3: refs::Vec::new(),
         eans: refs::Vec::new(),
+        quats: refs::Vec::new(),
         w: W,
     };
+    space.quats.push(Qn {
+        p: Param::new(vect3d::new(A.0, A.1, A.2)),
+        ang: Param::new(QANG),
+        q: qdata(),
+        axis: axis3(),
+        hb: SelfBlock::new(),
+    });
     space.eans.push(Ean {
         ea: SimpleEulerAngleParam::new(vect3d::new(EA.0, EA.1, EA.2)),
         v: vect3d::new(EV.0, EV.1, EV.2),
@@ -275,6 +316,24 @@ fn expected_residuals() -> Vec<f64> {
         (ea - v).x * W,
     ]);
 
+    let q = qdata();
+    let p = vect3d::new(A.0, A.1, A.2);
+    let r = quaternd::from_axis_angle(axis3(), QANG);
+    let fe = quaternd::from_euler_angles(p);
+    let h = (q * r).conj();
+    let rv = q.rotate(p);
+    let u = (q * 2.0 - -q + quaternd::identity()).unit();
+    rs.extend([
+        rv.x * W, rv.y * W, rv.z * W,
+        h.t * W, h.v.x * W,
+        q.dot(r) * W,
+        fe.v.y * W, fe.t * W,
+        u.t * W, u.v.z * W,
+        q.rotation_matrix()[0][1] * W,
+        r.get_euler_angles().z * W,
+        (q * 0.5).norm() * W,
+    ]);
+
     rs
 }
 
@@ -291,7 +350,7 @@ fn cost_matches_runtime_vector_math() {
 fn gradient_matches_finite_differences() {
     let (mut space, params) = build();
     let n = params.len();
-    assert_eq!(n, 18, "2 x vect3 + 2 x vect2 + vect3 + 2 x scalar + euler params");
+    assert_eq!(n, 22, "vect3/vect2 params + scalars + euler + quaternion node");
 
     let mut grad = vec![0.0_f64; n];
     let mut hessian = vec![0.0_f64; n * n];

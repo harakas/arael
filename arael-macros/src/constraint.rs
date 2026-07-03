@@ -8,7 +8,7 @@ use quote::quote;
 use syn::{Expr, Stmt, Pat};
 use std::collections::HashMap;
 
-use arael_sym::{self, E, vect2sym, vect3sym, matrix2sym, matrix3sym};
+use arael_sym::{self, E, vect2sym, vect3sym, matrix2sym, matrix3sym, quaternsym};
 
 use crate::{registry_lookup, SymFieldType, extract_wrapper_inner};
 
@@ -23,6 +23,7 @@ pub enum SymVal {
     Vec3(vect3sym),
     Mat2(arael_sym::geo::matrix2sym),
     Mat3(matrix3sym),
+    Quat(quaternsym),
     /// Universal euler angles: composed ea for .x/.y/.z, composed rotation for .rotation_matrix()
     UniversalEulerAngles {
         ea: vect3sym,       // get_euler_angles(R_ref * rotation(ea_delta))
@@ -38,6 +39,7 @@ impl SymVal {
             SymVal::Vec3(_) => "vec3",
             SymVal::Mat2(_) => "mat2",
             SymVal::Mat3(_) => "mat3",
+            SymVal::Quat(_) => "quat",
             SymVal::UniversalEulerAngles { .. } => "universal_euler_angles",
         }
     }
@@ -65,6 +67,7 @@ impl ConstraintCtx {
             SymFieldType::Vec3 => SymVal::Vec3(vect3sym::new(base)),
             SymFieldType::Mat2 => SymVal::Mat2(matrix2sym::new(base)),
             SymFieldType::Mat3 => SymVal::Mat3(matrix3sym::new(base)),
+            SymFieldType::Quat => SymVal::Quat(quaternsym::new(base)),
             SymFieldType::Struct(_) | SymFieldType::OptionalStruct(_) | SymFieldType::Skip => {
                 // Struct fields are resolved lazily via field access
                 SymVal::Scalar(arael_sym::symbol(base))
@@ -130,6 +133,9 @@ fn eval_expr(expr: &Expr, ctx: &mut ConstraintCtx) -> Result<SymVal, syn::Error>
                     // Vec2 component access
                     (SymVal::Vec2(v), "x") => return Ok(SymVal::Scalar(v.x.clone())),
                     (SymVal::Vec2(v), "y") => return Ok(SymVal::Scalar(v.y.clone())),
+                    // Quaternion parts
+                    (SymVal::Quat(q), "t") => return Ok(SymVal::Scalar(q.t.clone())),
+                    (SymVal::Quat(q), "v") => return Ok(SymVal::Vec3(q.v.clone())),
                     _ => {}
                 }
             }
@@ -182,6 +188,31 @@ fn eval_expr(expr: &Expr, ctx: &mut ConstraintCtx) -> Result<SymVal, syn::Error>
                         _ => Err(syn::Error::new_spanned(&mc.args[0], ".cross() argument must be Vec2")),
                     }
                 }
+                (SymVal::Quat(q), "norm") => Ok(SymVal::Scalar(q.norm())),
+                (SymVal::Quat(q), "unit") => Ok(SymVal::Quat(q.clone().unit())),
+                (SymVal::Quat(q), "conj") => Ok(SymVal::Quat(q.conj())),
+                (SymVal::Quat(q), "rotation_matrix") => Ok(SymVal::Mat3(q.rotation_matrix())),
+                (SymVal::Quat(q), "get_euler_angles") => Ok(SymVal::Vec3(q.get_euler_angles())),
+                (SymVal::Quat(q), "dot") => {
+                    if mc.args.len() != 1 {
+                        return Err(syn::Error::new_spanned(&mc.method, ".dot() requires 1 argument"));
+                    }
+                    match eval_expr(&mc.args[0], ctx)? {
+                        SymVal::Quat(rhs) => Ok(SymVal::Scalar(q.dot(&rhs))),
+                        other => Err(syn::Error::new_spanned(&mc.args[0],
+                            format!(".dot() on a quaternion requires a quaternion argument, got {}", other.type_name()))),
+                    }
+                }
+                (SymVal::Quat(q), "rotate") => {
+                    if mc.args.len() != 1 {
+                        return Err(syn::Error::new_spanned(&mc.method, ".rotate() requires 1 argument"));
+                    }
+                    match eval_expr(&mc.args[0], ctx)? {
+                        SymVal::Vec3(v) => Ok(SymVal::Vec3(q.rotate(&v))),
+                        other => Err(syn::Error::new_spanned(&mc.args[0],
+                            format!(".rotate() requires a Vec3 argument, got {}", other.type_name()))),
+                    }
+                }
                 (SymVal::Vec3(v), "norm") => Ok(SymVal::Scalar(v.norm())),
                 (SymVal::Vec3(v), "square") => Ok(SymVal::Scalar(v.square())),
                 (SymVal::Vec3(v), "unit") => Ok(SymVal::Vec3(v.clone().unit())),
@@ -225,6 +256,7 @@ fn eval_expr(expr: &Expr, ctx: &mut ConstraintCtx) -> Result<SymVal, syn::Error>
                     SymVal::UniversalEulerAngles { ea, .. } => Ok(SymVal::Vec3(-ea)),
                     SymVal::Mat2(m) => Ok(SymVal::Mat2(-m)),
                     SymVal::Mat3(m) => Ok(SymVal::Mat3(-m)),
+                    SymVal::Quat(q) => Ok(SymVal::Quat(-q)),
                 },
                 _ => Err(syn::Error::new_spanned(expr, "unsupported unary operator")),
             }
@@ -633,6 +665,9 @@ fn sym_add(left: SymVal, right: SymVal, span: &Expr) -> Result<SymVal, syn::Erro
         (SymVal::Mat3(_), SymVal::Mat3(_)) => {
             if let (SymVal::Mat3(a), SymVal::Mat3(b)) = (left, right) { Ok(SymVal::Mat3(a + b)) } else { unreachable!() }
         }
+        (SymVal::Quat(_), SymVal::Quat(_)) => {
+            if let (SymVal::Quat(a), SymVal::Quat(b)) = (left, right) { Ok(SymVal::Quat(a + b)) } else { unreachable!() }
+        }
         _ => {
             if let (Some(a), Some(b)) = (as_vec3(left), as_vec3(right)) {
                 Ok(SymVal::Vec3(a + b))
@@ -656,6 +691,9 @@ fn sym_sub(left: SymVal, right: SymVal, span: &Expr) -> Result<SymVal, syn::Erro
         }
         (SymVal::Mat3(_), SymVal::Mat3(_)) => {
             if let (SymVal::Mat3(a), SymVal::Mat3(b)) = (left, right) { Ok(SymVal::Mat3(a - b)) } else { unreachable!() }
+        }
+        (SymVal::Quat(_), SymVal::Quat(_)) => {
+            if let (SymVal::Quat(a), SymVal::Quat(b)) = (left, right) { Ok(SymVal::Quat(a - b)) } else { unreachable!() }
         }
         _ => {
             if let (Some(a), Some(b)) = (as_vec3(left), as_vec3(right)) {
@@ -696,6 +734,9 @@ fn sym_mul(left: SymVal, right: SymVal, span: &Expr) -> Result<SymVal, syn::Erro
         (SymVal::Mat2(a), SymVal::Scalar(b)) => Ok(SymVal::Mat2(a * b)),
         (SymVal::Scalar(a), SymVal::Mat3(b)) => Ok(SymVal::Mat3(a * b)),
         (SymVal::Mat3(a), SymVal::Scalar(b)) => Ok(SymVal::Mat3(a * b)),
+        (SymVal::Quat(a), SymVal::Quat(b)) => Ok(SymVal::Quat(a * b)), // Hamilton product
+        (SymVal::Scalar(a), SymVal::Quat(b)) => Ok(SymVal::Quat(a * b)),
+        (SymVal::Quat(a), SymVal::Scalar(b)) => Ok(SymVal::Quat(a * b)),
         _ => Err(syn::Error::new_spanned(span, "type mismatch in multiplication")),
     }
 }
@@ -792,6 +833,18 @@ fn eval_static_constructor(ty: &str, func: &str, args: Vec<SymVal>, span: &Expr)
         ("matrix3sym", "rotation_from_axis_angle") => {
             arity(2)?;
             Ok(SymVal::Mat3(matrix3sym::rotation_from_axis_angle(&vec3(0)?, scalar(1)?)))
+        }
+        ("quaternsym", "identity") => {
+            arity(0)?;
+            Ok(SymVal::Quat(quaternsym::identity()))
+        }
+        ("quaternsym", "from_euler_angles") => {
+            arity(1)?;
+            Ok(SymVal::Quat(quaternsym::from_euler_angles(&vec3(0)?)))
+        }
+        ("quaternsym", "from_axis_angle") => {
+            arity(2)?;
+            Ok(SymVal::Quat(quaternsym::from_axis_angle(&vec3(0)?, scalar(1)?)))
         }
         _ => Err(syn::Error::new_spanned(span,
             format!("unsupported constructor `{}::{}` in constraint", ty, func))),
