@@ -1,4 +1,4 @@
-error: constraint(...) accepts a single positional block; wrap N >= 2 block lists in brackets: `constraint([a, b, ...], { body })`
+error: $DIR/tests/constraint_attr_errors/positional_root_triplet.rs:9: constraint(...) accepts a single positional block; wrap N >= 2 block lists in brackets: `constraint([a, b, ...], { body })`
  --> tests/constraint_attr_errors/positional_root_triplet.rs:7:1
   |
 7 | #[arael::model]

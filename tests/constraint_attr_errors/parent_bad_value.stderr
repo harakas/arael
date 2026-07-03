@@ -1,0 +1,15 @@
+error: $DIR/tests/constraint_attr_errors/parent_bad_value.rs:8: parent = expects an entity field name
+ --> tests/constraint_attr_errors/parent_bad_value.rs:6:1
+  |
+6 | #[arael::model]
+  | ^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused imports: `Param` and `SelfBlock`
+ --> tests/constraint_attr_errors/parent_bad_value.rs:4:20
+  |
+4 | use arael::model::{Param, SelfBlock};
+  |                    ^^^^^  ^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

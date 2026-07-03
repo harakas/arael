@@ -1,0 +1,15 @@
+error: $DIR/tests/constraint_attr_errors/typo_gaurd.rs:9: unknown constraint attribute key `gaurd`, expected `parent`, `guard`, or `name`
+ --> tests/constraint_attr_errors/typo_gaurd.rs:7:1
+  |
+7 | #[arael::model]
+  | ^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused imports: `Param` and `SelfBlock`
+ --> tests/constraint_attr_errors/typo_gaurd.rs:5:20
+  |
+5 | use arael::model::{Param, SelfBlock};
+  |                    ^^^^^  ^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

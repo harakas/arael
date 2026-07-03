@@ -1,0 +1,19 @@
+error: cross = (...) expects exactly two ref field names, got 1
+  --> tests/constraint_attr_errors/cross_bad_arity.rs:21:13
+   |
+21 |     #[arael(cross = (a))]
+   |             ^^^^^
+
+warning: unused import: `CrossBlock`
+ --> tests/constraint_attr_errors/cross_bad_arity.rs:3:20
+  |
+3 | use arael::model::{CrossBlock, Param, SelfBlock};
+  |                    ^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `arael::refs::Ref`
+ --> tests/constraint_attr_errors/cross_bad_arity.rs:4:5
+  |
+4 | use arael::refs::Ref;
+  |     ^^^^^^^^^^^^^^^^

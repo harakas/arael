@@ -1007,6 +1007,9 @@ fn parse_constraint_inner_impl(
                             if let Some(proc_macro2::TokenTree::Ident(val)) = tokens.get(pos) {
                                 parent_name = Some(val.to_string());
                                 pos += 1;
+                            } else {
+                                return Err(syn::Error::new(ident_span,
+                                    "parent = expects an entity field name"));
                             }
                         } else if name == "guard" {
                             // Collect all tokens until next comma or brace group
@@ -1036,6 +1039,12 @@ fn parse_constraint_inner_impl(
                                 return Err(syn::Error::new_spanned(err_span,
                                     "name = \"...\" expects a string literal"));
                             }
+                        } else {
+                            // A silently swallowed key here is dangerous:
+                            // `gaurd = ...` would compile as an unguarded,
+                            // always-active constraint.
+                            return Err(syn::Error::new(ident_span,
+                                format!("unknown constraint attribute key `{}`, expected `parent`, `guard`, or `name`", name)));
                         }
                     }
                     Some(proc_macro2::TokenTree::Punct(p)) if p.as_char() == ':' => {
@@ -1806,8 +1815,14 @@ pub fn generate_root_methods(
         let constraint = match &attr_tokens[0] {
             proc_macro2::TokenTree::Ident(id) if *id == "constraint" => {
                 if let Some(proc_macro2::TokenTree::Group(g)) = attr_tokens.get(1) {
+                    // The stash string round trip loses the original
+                    // spans, so errors would point at the root attribute.
+                    // Prefix the message with the constraint's recorded
+                    // source location instead.
                     parse_constraint_inner_impl(
-                        &g.stream().into_iter().collect::<Vec<_>>(), &err_ident)?
+                        &g.stream().into_iter().collect::<Vec<_>>(), &err_ident)
+                        .map_err(|e| syn::Error::new(e.span(),
+                            format!("{}:{}: {}", sc.attr_file, sc.attr_line, e)))?
                 } else { None }
             }
             _ => None,

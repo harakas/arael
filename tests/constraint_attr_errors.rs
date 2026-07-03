@@ -13,4 +13,7 @@ fn constraint_attr_compile_errors() {
     t.compile_fail("tests/constraint_attr_errors/positional_three_way.rs");
     t.compile_fail("tests/constraint_attr_errors/positional_two_non_root.rs");
     t.compile_fail("tests/constraint_attr_errors/positional_root_triplet.rs");
+    t.compile_fail("tests/constraint_attr_errors/typo_gaurd.rs");
+    t.compile_fail("tests/constraint_attr_errors/parent_bad_value.rs");
+    t.compile_fail("tests/constraint_attr_errors/cross_bad_arity.rs");
 }
