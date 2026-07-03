@@ -244,7 +244,9 @@ impl matrix3sym {
     pub fn get_euler_angles(&self) -> vect3sym {
         vect3sym {
             x: crate::atan2(self.rows[2].y.clone(), self.rows[2].z.clone()),
-            y: -crate::asin(self.rows[2].x.clone()),
+            // safe_asin mirrors the runtime matrix3::get_euler_angles:
+            // clamp noise past +-1 instead of emitting NaN.
+            y: -crate::safe_asin(self.rows[2].x.clone()),
             z: crate::atan2(self.rows[1].x.clone(), self.rows[0].x.clone()),
         }
     }
@@ -415,6 +417,20 @@ impl quaternsym {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn matrix3sym_get_euler_angles_clamps_noisy_gimbal_boundary() {
+        // Same regression as the runtime matrix3::get_euler_angles: the
+        // emitted pitch expression must clamp an out-of-range (2,0)
+        // entry instead of producing NaN.
+        use std::collections::HashMap;
+        let m = matrix3sym::new("m");
+        let ea = m.get_euler_angles();
+        let vars = HashMap::from([("m[2].x", -1.0000000001_f64)]);
+        let v = ea.y.eval(&vars).unwrap();
+        assert!(v.is_finite(), "pitch must be finite, got {} from {}", v, ea.y);
+        assert!((v - std::f64::consts::FRAC_PI_2).abs() < 1e-6, "pitch={}", v);
+    }
 
     #[test]
     fn matrix2sym_rotation_components() {

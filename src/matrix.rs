@@ -261,7 +261,9 @@ impl<T: Float> matrix3<T>
     /// Extracts Euler angles (x=roll, y=pitch, z=yaw) from a rotation matrix.
     /// Diverges near |pitch| = pi/2 (gimbal lock).
     pub fn get_euler_angles(self) -> vect3<T> {
-        let y = -self[2][0].asin();
+        // safe_asin: float noise can push a valid rotation's entry just
+        // past +-1, where raw asin returns NaN and poisons all angles.
+        let y = -self[2][0].safe_asin();
         if y.abs() < T::pi() / T::from(2).unwrap() {
             vect3::<T>::new(
                 atan2(self[2][1], self[2][2]),
@@ -580,6 +582,34 @@ pub use arael_sym::matrix2sym;
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn test_get_euler_angles_noisy_gimbal_boundary() {
+        // Regression: a rotation matrix whose (2,0) entry drifted past
+        // -1 by float noise fed raw asin -> NaN poisoned all three
+        // angles. safe_asin clamps, so pitch saturates at +pi/2.
+        let base = matrix3d::rotation_from_euler_angles(
+            vect3d::new(0.0, f64::half_pi(), 0.0));
+        let noisy = matrix3d::from_rows(
+            base[0],
+            base[1],
+            vect3d::new(-1.0 - 1e-10, base[2].y, base[2].z),
+        );
+        let ea = noisy.get_euler_angles();
+        assert!(ea.x.is_finite() && ea.y.is_finite() && ea.z.is_finite(),
+            "angles must be finite, got {:?}", ea);
+        assert!((ea.y - f64::half_pi()).abs() < 1e-6, "pitch={}", ea.y);
+
+        // And the other direction (entry past +1 -> pitch -pi/2).
+        let noisy2 = matrix3d::from_rows(
+            base[0], base[1],
+            vect3d::new(1.0 + 1e-10, base[2].y, base[2].z),
+        );
+        let ea2 = noisy2.get_euler_angles();
+        assert!(ea2.y.is_finite());
+        assert!((ea2.y + f64::half_pi()).abs() < 1e-6, "pitch={}", ea2.y);
+    }
+
     use super::*;
     use crate::vect::{vect2d, vect3d};
     use crate::quatern::quaternd;
