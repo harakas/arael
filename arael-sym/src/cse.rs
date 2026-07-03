@@ -217,10 +217,17 @@ pub fn cse(exprs: &[E]) -> (Vec<(String, E)>, Vec<E>) {
             count_subexprs(expr, &mut counts);
         }
 
-        // Find the best candidate: count >= 2, cost >= 1
+        // Find the best candidate: count >= 2, cost >= 1, and at least
+        // one symbol. Symbol-free (constant) subexpressions are never
+        // extracted: they cost nothing at runtime (the compiler folds
+        // them), and hoisting one into its own `let` strips the type
+        // context that unsuffixed literals in generated code rely on
+        // (e.g. `let __x = 2.2e-16.powf(2.0);` is an ambiguous numeric
+        // type, while the same expression inline infers from its
+        // surroundings).
         // Rank by savings = (count - 1) * cost — how many ops we save
         let best = counts.into_iter()
-            .filter(|(e, count)| *count >= 2 && expr_cost(e) >= 1)
+            .filter(|(e, count)| *count >= 2 && expr_cost(e) >= 1 && !e.symbols().is_empty())
             .max_by_key(|(e, count)| {
                 let cost = expr_cost(e);
                 let savings = (*count - 1) * cost;

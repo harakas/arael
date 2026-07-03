@@ -6,10 +6,9 @@ fn is_const(e: &Expr, v: f64) -> bool {
 }
 
 fn is_const_int(e: &Expr) -> Option<i64> {
-    if let Expr::Const(v) = e
-        && *v == v.floor() && v.abs() < 1e15 {
-            return Some(*v as i64);
-        }
+    if let Expr::Const(v) = e {
+        return crate::as_exact_int(*v);
+    }
     None
 }
 

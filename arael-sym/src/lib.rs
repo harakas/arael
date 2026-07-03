@@ -727,6 +727,25 @@ pub fn pi() -> E {
         "std::f32::consts::PI", "std::f64::consts::PI", "\\pi")
 }
 
+/// Integer value of `v` when it is exactly integer-valued AND small
+/// enough for the f64 -> i64 conversion to be lossless.
+///
+/// The magnitude bound is load-bearing, not a nicety: every f64 at or
+/// above 2^53 has no fractional bits, so `v == v.floor()` is true for
+/// ALL huge floats (1e300 included) -- and casting those to i64
+/// saturates, silently producing a wrong integer. Below 2^53
+/// (about 9.007e15) every integer is exactly representable and the
+/// round-trip is exact; 1e15 is a round decimal bound comfortably
+/// inside that. Shared by integer-exponent detection (simplify) and
+/// literal formatting (fmt).
+pub(crate) fn as_exact_int(v: f64) -> Option<i64> {
+    if v == v.floor() && v.abs() < 1e15 {
+        Some(v as i64)
+    } else {
+        None
+    }
+}
+
 /// Machine epsilon $\epsilon$ (`f64::EPSILON` $\approx 2.22 \times 10^{-16}$).
 pub fn epsilon() -> E {
     named_const("epsilon", f64::EPSILON,

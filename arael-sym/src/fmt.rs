@@ -42,12 +42,25 @@ fn fmt_binary_fn(f: &mut fmt::Formatter<'_>, name: &str, a: &Expr, b: &Expr) -> 
     write!(f, ")")
 }
 
+/// Human-readable constant: integer-valued floats print without a
+/// decimal point (Display and LaTeX).
 fn fmt_const(f: &mut fmt::Formatter<'_>, v: f64) -> fmt::Result {
-    if v == v.floor() && v.abs() < 1e15 {
-        write!(f, "{}", v as i64)
-    } else {
-        write!(f, "{v}")
+    match crate::as_exact_int(v) {
+        Some(i) => write!(f, "{i}"),
+        None => write!(f, "{v}"),
     }
+}
+
+/// Rust-source constant: always a FLOAT literal (integer-valued floats
+/// get a trailing `.0` so they cannot parse as integer literals), with
+/// the float-type suffix when one is requested. An empty `ft` emits an
+/// unsuffixed literal for type-inferred contexts (macro-generated code).
+fn rust_float_literal(v: f64, ft: &str) -> String {
+    let base = match crate::as_exact_int(v) {
+        Some(i) => format!("{i}.0"),
+        None => format!("{v}"),
+    };
+    if ft.is_empty() { base } else { format!("{base}_{ft}") }
 }
 
 impl fmt::Display for Expr {
@@ -178,10 +191,9 @@ impl Expr {
         match self {
             Expr::Sym(name) => buf.push_str(name),
             Expr::Const(v) => {
-                if *v == v.floor() && v.abs() < 1e15 {
-                    buf.push_str(&format!("{}", *v as i64));
-                } else {
-                    buf.push_str(&format!("{v}"));
+                match crate::as_exact_int(*v) {
+                    Some(i) => buf.push_str(&format!("{i}")),
+                    None => buf.push_str(&format!("{v}")),
                 }
             }
             Expr::NamedConst { latex, .. } => buf.push_str(latex),
@@ -346,6 +358,30 @@ impl Expr {
     }
 
     fn write_rust(&self, buf: &mut String, ft: &str, parent_prec: u8) {
+        // Type-inferred context: fold symbol-free subtrees to a single
+        // literal. NamedConsts (pi, epsilon, ...) deliberately survive
+        // simplification, so trees like epsilon^2 reach codegen intact --
+        // but an unsuffixed literal cannot take method calls
+        // (`2.2e-16.powf(2.0)` is an ambiguous numeric type), so the
+        // subtree must become one literal that infers its precision from
+        // the surrounding expression.
+        if ft.is_empty()
+            && !matches!(self, Expr::Const(_) | Expr::Sym(_))
+            && let e = crate::E::new(self.clone())
+            && e.symbols().is_empty()
+            && let Ok(v) = e.eval(&std::collections::HashMap::new())
+            && v.is_finite() {
+                let lit = rust_float_literal(v, "");
+                if v < 0.0 && parent_prec > 5 {
+                    buf.push('(');
+                    buf.push_str(&lit);
+                    buf.push(')');
+                } else {
+                    buf.push_str(&lit);
+                }
+                return;
+        }
+
         let my_prec = self.prec();
         // Need parens when our precedence is lower than parent's,
         // or for Sub/Div right-hand side at same precedence (non-associative)
@@ -354,21 +390,21 @@ impl Expr {
 
         match self {
             Expr::Sym(name) => buf.push_str(name),
-            Expr::Const(v) => {
-                if ft.is_empty() {
-                    if *v == v.floor() && v.abs() < 1e15 {
-                        buf.push_str(&format!("{}.0", *v as i64));
-                    } else {
-                        buf.push_str(&format!("{v}"));
-                    }
-                } else if *v == v.floor() && v.abs() < 1e15 {
-                    buf.push_str(&format!("{}.0_{ft}", *v as i64));
+            Expr::Const(v) => buf.push_str(&rust_float_literal(*v, ft)),
+            Expr::NamedConst { rust_f32, rust_f64, value, .. } => {
+                if ft == "f32" {
+                    buf.push_str(rust_f32);
+                } else if ft.is_empty() {
+                    // Type-inferred context (macro-generated constraint
+                    // code emits unsuffixed literals throughout): emit the
+                    // numeric value so it adopts the surrounding
+                    // expression's precision. Exact for pi/e; for epsilon
+                    // an f32 context gets the f64 magnitude, which keeps
+                    // the safe_* derivative guards finite.
+                    buf.push_str(&rust_float_literal(*value, ""));
                 } else {
-                    buf.push_str(&format!("{v}_{ft}"));
+                    buf.push_str(rust_f64);
                 }
-            }
-            Expr::NamedConst { rust_f32, rust_f64, .. } => {
-                buf.push_str(if ft == "f32" { rust_f32 } else { rust_f64 });
             }
             Expr::Neg(a) => {
                 buf.push('-');
