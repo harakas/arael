@@ -2,7 +2,7 @@
 // the macro. Residual values are checked against the runtime vector math,
 // and analytic gradients against central finite differences of calc_cost.
 
-use arael::model::{Model, Param, SelfBlock, CrossBlock};
+use arael::model::{Model, Param, SelfBlock, CrossBlock, SimpleEulerAngleParam};
 use arael::simple_lm::LmProblem;
 use arael::vect::{vect2d, vect3d};
 use arael::matrix::{matrix2d, matrix3d};
@@ -106,6 +106,24 @@ struct N3 {
     hb: SelfBlock<N3>,
 }
 
+// Euler angle param coercion: the composed angle vector must work in
+// Mul (scaling and dot), Div, and unary Neg exactly as in Add/Sub.
+#[arael::model]
+#[arael(constraint(hb, {
+    let s = ean.ea * 2.0;
+    let t = 0.5 * ean.ea;
+    let n = -ean.ea;
+    let d = ean.ea / 4.0;
+    [s.x * space.w, t.y * space.w, n.z * space.w, d.x * space.w,
+     (ean.ea * ean.v) * space.w,
+     (ean.ea - ean.v).x * space.w]
+}))]
+struct Ean {
+    ea: SimpleEulerAngleParam<f64>,
+    v: vect3d,
+    hb: SelfBlock<Ean>,
+}
+
 #[arael::model]
 #[arael(root)]
 struct Space {
@@ -114,6 +132,7 @@ struct Space {
     planars: refs::Vec<Planar>,
     nodes2: refs::Vec<N2>,
     nodes3: refs::Vec<N3>,
+    eans: refs::Vec<Ean>,
     w: f64,
 }
 
@@ -123,6 +142,8 @@ const P: (f64, f64) = (0.7, -0.4);
 const W: f64 = 1.3;
 const ANG2: f64 = 0.9;
 const ANG3: f64 = 0.6;
+const EA: (f64, f64, f64) = (0.2, -0.3, 0.4);
+const EV: (f64, f64, f64) = (1.1, 0.5, -0.7);
 
 fn m2() -> matrix2d {
     matrix2d::from_elements(0.8, -0.3, 0.5, 1.1)
@@ -138,8 +159,14 @@ fn build() -> (Space, Vec<f64>) {
         planars: refs::Vec::new(),
         nodes2: refs::Vec::new(),
         nodes3: refs::Vec::new(),
+        eans: refs::Vec::new(),
         w: W,
     };
+    space.eans.push(Ean {
+        ea: SimpleEulerAngleParam::new(vect3d::new(EA.0, EA.1, EA.2)),
+        v: vect3d::new(EV.0, EV.1, EV.2),
+        hb: SelfBlock::new(),
+    });
     space.nodes2.push(N2 {
         pos: Param::new(vect2d::new(P.0, P.1)),
         ang: Param::new(ANG2),
@@ -237,6 +264,17 @@ fn expected_residuals() -> Vec<f64> {
         (s3 * p).x * W,
     ]);
 
+    let ea = vect3d::new(EA.0, EA.1, EA.2);
+    let v = vect3d::new(EV.0, EV.1, EV.2);
+    rs.extend([
+        (ea * 2.0).x * W,
+        (ea * 0.5).y * W,
+        (-ea).z * W,
+        (ea * 0.25).x * W,
+        (ea * v) * W,
+        (ea - v).x * W,
+    ]);
+
     rs
 }
 
@@ -253,7 +291,7 @@ fn cost_matches_runtime_vector_math() {
 fn gradient_matches_finite_differences() {
     let (mut space, params) = build();
     let n = params.len();
-    assert_eq!(n, 15, "2 x vect3 + 2 x vect2 + vect3 + 2 x scalar params");
+    assert_eq!(n, 18, "2 x vect3 + 2 x vect2 + vect3 + 2 x scalar + euler params");
 
     let mut grad = vec![0.0_f64; n];
     let mut hessian = vec![0.0_f64; n * n];

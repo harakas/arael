@@ -222,9 +222,9 @@ fn eval_expr(expr: &Expr, ctx: &mut ConstraintCtx) -> Result<SymVal, syn::Error>
                     SymVal::Scalar(e) => Ok(SymVal::Scalar(-e)),
                     SymVal::Vec2(v) => Ok(SymVal::Vec2(-v)),
                     SymVal::Vec3(v) => Ok(SymVal::Vec3(-v)),
+                    SymVal::UniversalEulerAngles { ea, .. } => Ok(SymVal::Vec3(-ea)),
                     SymVal::Mat2(m) => Ok(SymVal::Mat2(-m)),
                     SymVal::Mat3(m) => Ok(SymVal::Mat3(-m)),
-                    _ => Err(syn::Error::new_spanned(expr, "cannot negate this type")),
                 },
                 _ => Err(syn::Error::new_spanned(expr, "unsupported unary operator")),
             }
@@ -668,6 +668,16 @@ fn sym_sub(left: SymVal, right: SymVal, span: &Expr) -> Result<SymVal, syn::Erro
 }
 
 fn sym_mul(left: SymVal, right: SymVal, span: &Expr) -> Result<SymVal, syn::Error> {
+    // Euler angle params coerce to their composed angle vector, exactly as
+    // in sym_add/sym_sub.
+    let left = match left {
+        SymVal::UniversalEulerAngles { ea, .. } => SymVal::Vec3(ea),
+        other => other,
+    };
+    let right = match right {
+        SymVal::UniversalEulerAngles { ea, .. } => SymVal::Vec3(ea),
+        other => other,
+    };
     match (left, right) {
         (SymVal::Scalar(a), SymVal::Scalar(b)) => Ok(SymVal::Scalar(a * b)),
         (SymVal::Scalar(a), SymVal::Vec2(b)) => Ok(SymVal::Vec2(arael_sym::geo::vect2sym { x: a.clone() * b.x, y: a * b.y })),
@@ -789,6 +799,10 @@ fn eval_static_constructor(ty: &str, func: &str, args: Vec<SymVal>, span: &Expr)
 }
 
 fn sym_div(left: SymVal, right: SymVal, span: &Expr) -> Result<SymVal, syn::Error> {
+    let left = match left {
+        SymVal::UniversalEulerAngles { ea, .. } => SymVal::Vec3(ea),
+        other => other,
+    };
     match (left, right) {
         (SymVal::Scalar(a), SymVal::Scalar(b)) => Ok(SymVal::Scalar(a / b)),
         (SymVal::Vec2(a), SymVal::Scalar(b)) => Ok(SymVal::Vec2(a / b)),
