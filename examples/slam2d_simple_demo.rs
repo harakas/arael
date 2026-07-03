@@ -1,11 +1,22 @@
 //! Minimal 2D SLAM demo for teaching: pose = (x, y, gamma).
 //!
+//! The problem: a robot drives in an arc. Its odometry reports how far it
+//! moved between poses, but with noise that accumulates into drift. A
+//! camera reports the direction (bearing) to building corners -- never the
+//! distance. Neither the robot's path nor the corner positions are known.
+//! SLAM (simultaneous localization and mapping) recovers both at once by
+//! finding the poses and corner positions that best agree with all the
+//! measurements together, in the least-squares sense.
+//!
 //! - World axes: x = forward (east), y = left (north), gamma = yaw.
 //! - Sensor: single forward-facing camera reporting bearing (angle from the
 //!   robot's forward heading) to building corners. One scalar per sighting.
 //! - Odometry: 3-DOF delta (dx_local, dy_local, dgamma), diagonal covariance.
-//! - Gauge: the first pose is locked to (0, 0, 0) -- facing east at origin.
-//!   That single anchor pins all 3 planar DOFs (translation x, y, yaw).
+//! - All measurements are relative, so the map as a whole could slide or
+//!   rotate freely. The first pose is held fixed at (0, 0, 0) -- facing
+//!   east at the origin -- via `optimize = false` on its params, giving
+//!   every other pose and landmark a fixed reference to be measured
+//!   against.
 //!
 //! Naming mirrors slam_demo.rs: Path (root), Pose, PosePair (odometry edge),
 //! Landmark (building corner), Frine (one landmark-to-pose bearing sighting).
@@ -28,22 +39,31 @@ use std::f32::consts::PI;
 // Model
 // ---------------------------------------------------------------------------
 
+// Solver bookkeeping declared in the structs below:
+// - SelfBlock<T>: the entity's diagonal block in the Hessian matrix
+//   calculated during solving.
+// - CrossBlock<A, B>: the off-diagonal Hessian block coupling the two
+//   entities that appear in the same constraint.
+// - Ref<T>: a typed index into a collection on the root struct; which
+//   collection is named by the #[arael(ref = root.poses)] attribute.
+
 // Robot pose. Carries its own odometry delta from the previous pose, in
 // the previous pose's local frame (dx forward, dy left, dgamma yaw change).
-// The anchor pose has no previous -- its delta fields are unused, and a
-// stiff prior pins it to (0, 0, 0).
+// The first pose has no previous -- its delta fields are unused and its
+// params are held fixed (optimize = false, see build_path). The SelfBlock
+// has no self-constraint; the macro still wires its parameter indices
+// because Pose participates in the PosePair and Frine CrossBlocks.
 #[arael::model]
-#[arael(constraint(hb_pose, guard = self.is_anchor, {
-    [pose.pos.x * path.anchor_isigma,
-     pose.pos.y * path.anchor_isigma,
-     pose.gamma * path.anchor_isigma]
-}))]
 struct Pose {
     pos: Param<vect2f>,
+    // Heading angle: 0 = facing east (+x), counterclockwise positive.
     gamma: Param<f32>,
-    is_anchor: bool,
     delta_pos: vect2f,
     delta_gamma: f32,
+    // isigma = 1 / sigma. Each residual is multiplied by the inverse of its
+    // measurement's noise level, turning it into "how many standard
+    // deviations off" -- an accurate sensor pulls harder than a sloppy one,
+    // and the units cancel so angles and meters can share one cost.
     delta_pos_isigma: f32,
     delta_gamma_isigma: f32,
     hb_pose: SelfBlock<Pose, f32>,
@@ -76,6 +96,9 @@ struct Landmark {
     hb: SelfBlock<Landmark, f32>,
 }
 
+// A "frine" is this demo's (and slam_demo's) name for a single bearing
+// sighting linking one landmark to one pose.
+//
 // One bearing observation of `lm` from `pose`. Rotating (lm - pose) into the
 // pose's local frame and then into the bearing-aligned frame collapses both
 // rotations into one: R(gamma + bearing).transpose() (2D rotations commute
@@ -101,7 +124,6 @@ struct Path {
     poses: refs::Deque<Pose>,
     pose_pairs: std::vec::Vec<PosePair>,
     landmarks: refs::Vec<Landmark>,
-    anchor_isigma: f32,
 }
 
 // ---------------------------------------------------------------------------
@@ -203,7 +225,6 @@ fn build_path(cfg: &Cfg) -> (
         poses: refs::Deque::new(),
         pose_pairs: std::vec::Vec::new(),
         landmarks: refs::Vec::new(),
-        anchor_isigma: 1.0e4,            // ~0.1 mm / 0.005 deg -- effectively pinned
     };
 
     // Initial pose estimates come from dead-reckoning noisy odometry, starting
@@ -213,16 +234,24 @@ fn build_path(cfg: &Cfg) -> (
 
     for (pi, &(gt_p, gt_g)) in gt_poses.iter().enumerate() {
         if pi == 0 {
-            path.poses.push_back(Pose {
+            let mut first = Pose {
                 pos: Param::new(vect2f::new(0.0, 0.0)),
                 gamma: Param::new(0.0),
-                is_anchor: true,
                 delta_pos: vect2f::new(0.0, 0.0),
                 delta_gamma: 0.0,
                 delta_pos_isigma: 0.0,
                 delta_gamma_isigma: 0.0,
                 hb_pose: SelfBlock::new(),
-            });
+            };
+            // Every measurement is relative (bearings, odometry deltas), so
+            // sliding or rotating the whole map changes no residual and the
+            // solver would have no unique solution. Hold the first pose at
+            // (0, 0, 0) as the fixed reference everything else is expressed
+            // against: optimize = false keeps its params out of the
+            // parameter vector, so the solver treats them as constants.
+            first.pos.optimize = false;
+            first.gamma.optimize = false;
+            path.poses.push_back(first);
             continue;
         }
 
@@ -236,14 +265,14 @@ fn build_path(cfg: &Cfg) -> (
         );
         let noisy_dg = true_dg + cfg.odo_gamma_sigma * rng.sample(nd);
 
-        // Dead-reckon initial estimate.
+        // Dead-reckon the initial estimate: add up the noisy deltas. Drift
+        // grows with every step -- this is what the optimizer will undo.
         est_pos = est_pos + matrix2f::rotation(est_gamma) * noisy_delta;
         est_gamma += noisy_dg;
 
         path.poses.push_back(Pose {
             pos: Param::new(est_pos),
             gamma: Param::new(est_gamma),
-            is_anchor: false,
             delta_pos: noisy_delta,
             delta_gamma: noisy_dg,
             delta_pos_isigma: 1.0 / cfg.odo_pos_sigma,
@@ -306,18 +335,28 @@ fn main() {
     let n_frines: usize = path.landmarks.iter().map(|l| l.frines.len()).sum();
     println!("Path: {} poses, {} pose_pairs, {} landmarks, {} frines",
         path.poses.len(), path.pose_pairs.len(), path.landmarks.len(), n_frines);
+    // Flatten every optimize = true param into one flat vector.
     let mut params: std::vec::Vec<f32> = std::vec::Vec::new();
     path.serialize32(&mut params);
     println!("Parameters: {} (Pose={}, Landmark={})\n",
         params.len(), Pose::PARAM_COUNT, Landmark::PARAM_COUNT);
 
+    // verbose prints one line per Levenberg-Marquardt iteration: cost
+    // before -> after / the improvement, and the damping lambda. Small
+    // lambda = confident near-Gauss-Newton steps; lambda grows when a step
+    // is rejected. With this seed you can see the cost spike and lambda
+    // climb mid-run before convergence resumes.
     let lm_cfg = arael::simple_lm::LmConfig::<f32> { verbose: true, ..Default::default() };
+    // Levenberg-Marquardt: repeatedly linearize the constraints around the
+    // current estimate, solve for a step, accept it if the cost drops.
     let result = arael::simple_lm::solve_sparse_faer_f32(&params, &mut path, &lm_cfg);
+    // Write the optimized values back into the structs.
     path.deserialize32(&result.x);
     println!("\n{} iterations, cost {:.4} -> {:.4}",
         result.iterations, result.start_cost, result.end_cost);
 
-    // Per-pose errors. Anchor pins the gauge, so absolute errors are meaningful.
+    // Per-pose errors. The first pose is held at the ground-truth origin, so
+    // comparing absolute positions against ground truth is meaningful.
     println!("\n-- Pose errors vs GT --");
     let mut pos_sum = 0.0_f32;
     let mut ea_sum = 0.0_f32;
@@ -353,7 +392,9 @@ fn main() {
     // Parameter covariance via inverse of the Gauss-Newton Hessian.
     //   H_ours = 2 * J^T J  (the factor of 2 comes from add_residual).
     //   Cov = (J^T J)^{-1} = 2 * H^{-1}.
-    // The anchor pose pins the gauge, so absolute covariance is meaningful;
+    // The first pose is held fixed, so uncertainties are relative to a known
+    // reference and the covariance is meaningful (with nothing held fixed the
+    // whole map could slide or rotate freely and H would not be invertible);
     // each landmark's 2x2 diagonal block is its own positional uncertainty.
     let ellipses = compute_landmark_ellipses(&mut path);
 

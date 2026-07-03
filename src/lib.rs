@@ -1595,8 +1595,10 @@
 //! - **[`slam2d_simple_demo`](https://github.com/harakas/arael/blob/master/examples/slam2d_simple_demo.rs)**
 //!   -- minimal pedagogical 2D SLAM: pose = (x, y, gamma), single
 //!   forward-facing camera reporting a bearing per landmark, diagonal
-//!   odometry covariance, first pose anchored at the origin facing east
-//!   (the only gauge fix). Constraint bodies use the symbolic
+//!   odometry covariance, first pose held fixed at the origin facing east
+//!   via `optimize = false` on its params (the fixed reference that makes
+//!   the solution unique -- all measurements are relative). Constraint
+//!   bodies use the symbolic
 //!   `matrix2sym::rotation(angle)` surface. After the LM fit it computes
 //!   the parameter covariance from the dense Hessian and writes
 //!   `slam2d_simple.eps` -- a colour-per-landmark plot of the trajectory,
