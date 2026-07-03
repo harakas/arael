@@ -3,6 +3,7 @@
 use arael::model::{Model, SelfBlock, EulerAngleParam};
 use arael::simple_lm::{self, LmConfig};
 use arael::vect::vect3d;
+use arael::matrix::matrix3d;
 use arael::refs::{self, Ref};
 
 #[arael::model]
@@ -52,4 +53,53 @@ fn fixed_euler_angle_param_does_not_panic_in_advance() {
     let fixed = &w.nodes[Ref::<Node>::new(1)];
     assert!((fixed.ea.value - frozen).norm() < 1e-12,
         "fixed EA must not move, got {:?}", fixed.ea.value);
+}
+
+// ---------------------------------------------------------------------------
+// Advance must reach EA params everywhere, not only in root collections
+// ---------------------------------------------------------------------------
+
+// A root-level EulerAngleParam pulled to a 150-degree pitch target (as a
+// rotation matrix -- such a pitch has no principal euler triple). The
+// delta must travel through pitch = 90; without per-step re-centering
+// (advance) the delta parametrization degenerates at the gimbal and the
+// solve stalls. Advance used to visit only root-level collections, so a
+// root-level EA param was never re-centered.
+#[arael::model]
+#[arael(root)]
+#[arael(constraint(hb, {
+    let d = rig.att.rotation_matrix() - rig.target;
+    [d[0][0] * rig.isigma, d[0][1] * rig.isigma, d[0][2] * rig.isigma,
+     d[1][0] * rig.isigma, d[1][1] * rig.isigma, d[1][2] * rig.isigma,
+     d[2][0] * rig.isigma, d[2][1] * rig.isigma, d[2][2] * rig.isigma]
+}))]
+struct Rig {
+    att: EulerAngleParam<f64>,
+    target: matrix3d,
+    isigma: f64,
+    hb: SelfBlock<Rig>,
+}
+
+#[test]
+fn root_level_euler_angle_param_advances_through_gimbal() {
+    let target = matrix3d::rotation_from_euler_angles(vect3d::new(0.0, 1.2, 0.0))
+        * matrix3d::rotation_from_euler_angles(vect3d::new(0.0, 1.4, 0.0));
+    // Combined pitch 2.6 rad (149 deg), well past the gimbal at pi/2.
+    let mut rig = Rig {
+        att: EulerAngleParam::new(vect3d::new(0.0, 0.0, 0.0)),
+        target,
+        isigma: 1.0,
+        hb: SelfBlock::new(),
+    };
+    let mut params = Vec::new();
+    rig.serialize64(&mut params);
+    let result = simple_lm::solve(&params, &mut rig,
+        &LmConfig { max_iters: 200, ..Default::default() });
+    rig.deserialize64(&result.x);
+
+    assert!(result.end_cost < 1e-12,
+        "root-level EA must converge through the gimbal, cost={}", result.end_cost);
+    let m = matrix3d::rotation_from_euler_angles(rig.att.value);
+    let err: f64 = (0..3).map(|i| (0..3).map(|j| (m[i][j] - target[i][j]).abs()).sum::<f64>()).sum();
+    assert!(err < 1e-6, "recomposition error {}", err);
 }

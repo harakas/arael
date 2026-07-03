@@ -3808,39 +3808,14 @@ pub fn generate_root_methods(
         &format!("accumulate_hessian_sparse_indexed{}", if precision == "f32" { "32" } else { "64" }),
         proc_macro2::Span::call_site());
 
-    // Build advance() body: absorb universal_euler_angles deltas
-    let advance_stmts = {
-        let mut stmts: Vec<TokenStream2> = Vec::new();
-        let root_fields_for_advance: syn::FieldsNamed = syn::parse2(quote! { { #root_fields } })?;
-        for field in &root_fields_for_advance.named {
-            let field_ident = field.ident.as_ref().unwrap().clone();
-            if let Some((_, inner_ident)) = crate::extract_wrapper_inner(&field.ty, "Vec")
-                .or_else(|| crate::extract_wrapper_inner(&field.ty, "Deque"))
-                .or_else(|| crate::extract_wrapper_inner(&field.ty, "Arena"))
-            {
-                let inner_name = inner_ident.to_string();
-                if let Some(layout) = crate::registry_lookup(&inner_name) {
-                    for ea_field in &layout.universal_euler_angle_fields {
-                        let ea_ident = syn::Ident::new(ea_field, proc_macro2::Span::call_site());
-                        stmts.push(quote! {
-                            for __item in self.#field_ident.iter_mut() {
-                                // Fixed params carry the u32::MAX sentinel
-                                // and have no delta in the vector to fold.
-                                let __idx = __item.#ea_ident.index();
-                                if __idx != u32::MAX {
-                                    let __idx = __idx as usize;
-                                    __item.#ea_ident.advance();
-                                    params[__idx] = 0.0 as #cast_type;
-                                    params[__idx + 1] = 0.0 as #cast_type;
-                                    params[__idx + 2] = 0.0 as #cast_type;
-                                }
-                            }
-                        });
-                    }
-                }
-            }
-        }
-        stmts
+    // advance(): fold accepted-step euler angle deltas. Recurses through
+    // the whole model tree via Model::advance_params, so EA params at any
+    // location (collections, root-level fields, direct-composed structs,
+    // nested sub-models) are re-centered.
+    let advance_call = if precision == "f32" {
+        quote! { arael::model::Model::advance_params32(self, params); }
+    } else {
+        quote! { arael::model::Model::advance_params64(self, params); }
     };
 
     // `extended_compute_call` now passes `grad` so the extended hook can
@@ -4013,7 +3988,7 @@ pub fn generate_root_methods(
             }
 
             fn advance(&mut self, params: &mut [#prec_type]) {
-                #(#advance_stmts)*
+                #advance_call
             }
         }
     });

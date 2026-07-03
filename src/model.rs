@@ -174,6 +174,16 @@ pub trait Model {
     fn param_symbols(_base: &str, _out: &mut std::vec::Vec<String>) {}
 
     fn zero_blocks(&mut self) {}
+
+    // Fold accepted-step euler angle deltas into their reference rotations
+    // and zero the delta entries in the parameter vector. A no-op for
+    // everything except EulerAngleParam, which re-centers after every
+    // accepted LM step (the property that avoids gimbal lock). Recurses
+    // through the model tree exactly like update/serialize, so params at
+    // any nesting depth are advanced.
+    fn advance_params32(&mut self, _params: &mut [f32]) {}
+    fn advance_params64(&mut self, _params: &mut [f64]) {}
+
     // Hessian-only accumulation: blocks hold only Hessian entries after the
     // refactor; the gradient is written directly by constraint evaluation
     // into the LM-provided `grad` slice, so there is nothing for these
@@ -746,6 +756,21 @@ impl<T: crate::utils::Float> Model for EulerAngleParam<T> where vect3<T>: ParamT
             out.push(format!("{}{}", base, suffix));
         }
     }
+
+    fn advance_params32(&mut self, params: &mut [f32]) {
+        if self.index != u32::MAX {
+            let i = self.index as usize;
+            self.advance();
+            params[i] = 0.0; params[i + 1] = 0.0; params[i + 2] = 0.0;
+        }
+    }
+    fn advance_params64(&mut self, params: &mut [f64]) {
+        if self.index != u32::MAX {
+            let i = self.index as usize;
+            self.advance();
+            params[i] = 0.0; params[i + 1] = 0.0; params[i + 2] = 0.0;
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -832,6 +857,12 @@ macro_rules! impl_model_collection {
             fn update64(&mut self, data: &[f64]) {
                 for item in self.$iter_mut() { item.update64(data); }
             }
+            fn advance_params32(&mut self, params: &mut [f32]) {
+                for item in self.$iter_mut() { item.advance_params32(params); }
+            }
+            fn advance_params64(&mut self, params: &mut [f64]) {
+                for item in self.$iter_mut() { item.advance_params64(params); }
+            }
             fn zero_blocks(&mut self) {
                 for item in self.$iter_mut() { item.zero_blocks(); }
             }
@@ -901,6 +932,12 @@ impl<T: Model> Model for crate::refs::Arena<T> {
     fn update64(&mut self, data: &[f64]) {
         for item in self.iter_mut() { item.update64(data); }
     }
+    fn advance_params32(&mut self, params: &mut [f32]) {
+        for item in self.iter_mut() { item.advance_params32(params); }
+    }
+    fn advance_params64(&mut self, params: &mut [f64]) {
+        for item in self.iter_mut() { item.advance_params64(params); }
+    }
     fn zero_blocks(&mut self) {
         for item in self.iter_mut() { item.zero_blocks(); }
     }
@@ -962,6 +999,12 @@ impl<T: Model> Model for Option<T> {
     }
     fn update64(&mut self, data: &[f64]) {
         if let Some(inner) = self { inner.update64(data); }
+    }
+    fn advance_params32(&mut self, params: &mut [f32]) {
+        if let Some(inner) = self { inner.advance_params32(params); }
+    }
+    fn advance_params64(&mut self, params: &mut [f64]) {
+        if let Some(inner) = self { inner.advance_params64(params); }
     }
     fn serialize_size(&self) -> u32 {
         if let Some(inner) = self { inner.serialize_size() } else { 0 }

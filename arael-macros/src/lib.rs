@@ -968,6 +968,8 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
     let mut accumulate_hessian_sparse_direct64_stmts: Vec<TokenStream2> = Vec::new();
     let mut accumulate_hessian_sparse_indexed32_stmts: Vec<TokenStream2> = Vec::new();
     let mut accumulate_hessian_sparse_indexed64_stmts: Vec<TokenStream2> = Vec::new();
+    let mut advance32_stmts: Vec<TokenStream2> = Vec::new();
+    let mut advance64_stmts: Vec<TokenStream2> = Vec::new();
     let mut param_count_terms: Vec<TokenStream2> = Vec::new();
     let mut serialize_size_stmts: Vec<TokenStream2> = Vec::new();
     let mut param_symbols_stmts: Vec<TokenStream2> = Vec::new();
@@ -1082,6 +1084,12 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                 update64_phase1.push(quote! {
                     arael::model::Model::update64(&mut self.#ident, data);
                 });
+                advance32_stmts.push(quote! {
+                    arael::model::Model::advance_params32(&mut self.#ident, params);
+                });
+                advance64_stmts.push(quote! {
+                    arael::model::Model::advance_params64(&mut self.#ident, params);
+                });
                 serialize_size_stmts.push(quote! {
                     arael::model::Model::serialize_size(&self.#ident)
                 });
@@ -1151,6 +1159,12 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                 #(#update64_phase1)*
                 #(#compute_stmts)*
                 #(#euler_compute_stmts)*
+            }
+            fn advance_params32(&mut self, params: &mut [f32]) {
+                #(#advance32_stmts)*
+            }
+            fn advance_params64(&mut self, params: &mut [f64]) {
+                #(#advance64_stmts)*
             }
             const PARAM_COUNT: u32 = 0 #(+ #param_count_terms)*;
             fn serialize_size(&self) -> u32 {
