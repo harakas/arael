@@ -1289,14 +1289,14 @@ impl SparseSchur {
 /// Output: full 3x3 inverse in row-major order, or None if not SPD.
 fn invert_spd_3x3(u: &[f64; 6]) -> Option<[f64; 9]> {
     let l00 = u[0].sqrt();
-    if l00 <= 0.0 { return None; }
+    if !(l00 > 0.0) { return None; } // !(x > 0) also catches NaN from sqrt of a negative
     let l10 = u[1] / l00;
     let l11 = (u[3] - l10 * l10).sqrt();
-    if l11 <= 0.0 { return None; }
+    if !(l11 > 0.0) { return None; } // !(x > 0) also catches NaN from sqrt of a negative
     let l20 = u[2] / l00;
     let l21 = (u[4] - l20 * l10) / l11;
     let l22 = (u[5] - l20 * l20 - l21 * l21).sqrt();
-    if l22 <= 0.0 { return None; }
+    if !(l22 > 0.0) { return None; } // !(x > 0) also catches NaN from sqrt of a negative
     let i00 = 1.0 / l00;
     let i11 = 1.0 / l11;
     let i22 = 1.0 / l22;
@@ -2108,7 +2108,7 @@ pub fn solve_spd_band(n: usize, kd: usize, band: &mut [f64], b: &mut [f64]) -> b
             let rkj = band[(kd + k - j) + j * ldab]; // R[k,j]
             s -= rkj * rkj;
         }
-        if s <= 0.0 { return false; }
+        if !(s > 0.0) { return false; } // !(x > 0) also rejects NaN input
         let rjj = s.sqrt();
         band[kd + j * ldab] = rjj;
 
@@ -2162,7 +2162,7 @@ pub fn solve_spd_band_f32(n: usize, kd: usize, band: &mut [f32], b: &mut [f32]) 
             let rkj = band[(kd + k - j) + j * ldab];
             s -= rkj * rkj;
         }
-        if s <= 0.0 { return false; }
+        if !(s > 0.0) { return false; } // !(x > 0) also rejects NaN input
         let rjj = s.sqrt();
         band[kd + j * ldab] = rjj;
 
@@ -2886,6 +2886,56 @@ mod tests {
         let r5 = lm_solve(&[5.0, 5.0], &mut direct, &mut QP, &cfg);
         assert!((r4.x[0] - 3.0).abs() < 1e-6);
         assert!((r5.x[1] - 7.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn spd_guards_reject_nan_not_just_negative() {
+        // Regression: the SPD guards used `x <= 0.0`, which NaN passes
+        // (NaN <= 0.0 is false). A non-SPD input then produced a NaN
+        // "success" instead of a rejection, defeating the lambda
+        // escalation that depends on the failure signal.
+
+        // invert_spd_3x3: negative leading diagonal -> l00 = sqrt(-1) = NaN
+        assert!(invert_spd_3x3(&[-1.0, 0.0, 0.0, 1.0, 0.0, 1.0]).is_none());
+        // second pivot NaN: l11 = sqrt(1 - 2^2)
+        assert!(invert_spd_3x3(&[1.0, 2.0, 0.0, 1.0, 0.0, 1.0]).is_none());
+        // third pivot NaN: l22 = sqrt(1 - 2^2)
+        assert!(invert_spd_3x3(&[1.0, 0.0, 2.0, 1.0, 0.0, 1.0]).is_none());
+        // and a valid SPD matrix still inverts correctly: A = diag-dominant
+        let a = [4.0, 1.0, 0.5, 3.0, 0.25, 2.0];
+        let inv = invert_spd_3x3(&a).expect("SPD must invert");
+        // check A * inv = I for the full symmetric A
+        let full = [
+            [a[0], a[1], a[2]],
+            [a[1], a[3], a[4]],
+            [a[2], a[4], a[5]],
+        ];
+        for i in 0..3 {
+            for j in 0..3 {
+                let mut acc = 0.0;
+                for k in 0..3 { acc += full[i][k] * inv[k * 3 + j]; }
+                let expect = if i == j { 1.0 } else { 0.0 };
+                assert!((acc - expect).abs() < 1e-12, "(A*inv)[{}][{}] = {}", i, j, acc);
+            }
+        }
+
+        // solve_spd_band: NaN on the diagonal must be rejected, not
+        // factorized into a NaN "solution" with a true return.
+        let kd = 1;
+        let n = 3;
+        let mut band = vec![0.0; (kd + 1) * n];
+        for j in 0..n { band[kd + j * (kd + 1)] = 4.0; }
+        band[kd + 1 * (kd + 1)] = f64::NAN;
+        let mut b = vec![1.0; n];
+        assert!(!solve_spd_band(n, kd, &mut band, &mut b),
+            "NaN diagonal must fail the factorization");
+
+        let mut band32 = vec![0.0f32; (kd + 1) * n];
+        for j in 0..n { band32[kd + j * (kd + 1)] = 4.0; }
+        band32[kd + 1 * (kd + 1)] = f32::NAN;
+        let mut b32 = vec![1.0f32; n];
+        assert!(!solve_spd_band_f32(n, kd, &mut band32, &mut b32),
+            "NaN diagonal must fail the f32 factorization");
     }
 
     #[test]
