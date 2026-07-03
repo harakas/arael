@@ -2,7 +2,7 @@
 //
 // A constraint declared ON the entity struct (self-primary) can couple
 // self-params with root-params via:
-//   #[arael(constraint(<local_self_block>, root.<triplet>, { body }))]
+//   #[arael(constraint([<local_self_block>, root.<triplet>], { body }))]
 //
 // where `root.<triplet>` names a `TripletBlock<T>` field on the root.
 // Diagonal J^T J writes land on each entity's `SelfBlock<Self>`; the

@@ -520,16 +520,13 @@
 //! #[arael(constraint(hb, { body }))]                      // single local block
 //! #[arael(constraint([hb_ab, hb_ac, hb_bc], { body }))]   // bracketed multi-block (N ≥ 2)
 //! #[arael(constraint(pose.hb_pose, { body }))]            // remote SelfBlock via Ref field
-//! #[arael(constraint(hb_pose, root.hbt, { body }))]       // self-primary + root-owned TripletBlock
+//! #[arael(constraint([hb_pose, root.hbt], { body }))]     // self-primary + root-owned TripletBlock
 //! ```
 //!
-//! N ≥ 2 block lists must use the bracketed form. The only
-//! exception is the specific 2-item positional shape
-//! `constraint(<local_self_block>, root.<triplet>, { body })`
-//! above, which carries distinct semantics (self-primary routing
-//! across the entity / root cross-pair). Writing
-//! `constraint(hb_a, hb_b, hb_c, { body })` is rejected at macro
-//! expansion -- use `constraint([hb_a, hb_b, hb_c], { body })`.
+//! The positional form carries a single block only; every N ≥ 2 block
+//! list must use the bracketed form. Writing
+//! `constraint(hb_a, hb_b, { body })` is rejected at macro
+//! expansion -- use `constraint([hb_a, hb_b], { body })`.
 //!
 //! Dotted names mean two different things depending on the first
 //! segment:

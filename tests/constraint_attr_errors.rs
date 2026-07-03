@@ -1,8 +1,7 @@
 //! Compile-fail fixtures for `#[arael(constraint(...))]` attribute
 //! argument shapes the parser rejects. The positional form is
-//! restricted to one block, or the specific 2-item
-//! `(<local_self_block>, root.<triplet>)` case; everything else N >= 2
-//! must use the bracketed form.
+//! restricted to one block; every N >= 2 list (including the 2-item
+//! `[<local_self_block>, root.<triplet>]` shape) must be bracketed.
 //!
 //! Regenerate snapshots with:
 //!     TRYBUILD=overwrite cargo test --test constraint_attr_errors
