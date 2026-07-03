@@ -3824,11 +3824,16 @@ pub fn generate_root_methods(
                         let ea_ident = syn::Ident::new(ea_field, proc_macro2::Span::call_site());
                         stmts.push(quote! {
                             for __item in self.#field_ident.iter_mut() {
-                                let __idx = __item.#ea_ident.index() as usize;
-                                __item.#ea_ident.advance();
-                                params[__idx] = 0.0 as #cast_type;
-                                params[__idx + 1] = 0.0 as #cast_type;
-                                params[__idx + 2] = 0.0 as #cast_type;
+                                // Fixed params carry the u32::MAX sentinel
+                                // and have no delta in the vector to fold.
+                                let __idx = __item.#ea_ident.index();
+                                if __idx != u32::MAX {
+                                    let __idx = __idx as usize;
+                                    __item.#ea_ident.advance();
+                                    params[__idx] = 0.0 as #cast_type;
+                                    params[__idx + 1] = 0.0 as #cast_type;
+                                    params[__idx + 2] = 0.0 as #cast_type;
+                                }
                             }
                         });
                     }
