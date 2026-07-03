@@ -218,11 +218,19 @@ add / sub.
 
 ```rust
 let r = matrix2sym::rotation(symbol("a"));    // 2D rotation
+let rs = matrix2sym::rotation_from_sincos(symbol("s"), symbol("c"));
 let rt = r.transpose();                       // R(-a)
 let v  = vect2sym::new("v");
-let rv = r.clone() * v;                       // matrix * vec  -> vect2sym
+let rv = r.clone() * v.clone();               // matrix * vec  -> vect2sym
+let vr = v * r.clone();                       // vec * matrix = M^T v
 let rr = r.clone() * rt;                      // matrix * matrix -> matrix2sym
+let a  = r.get_rotation_angle();              // E: atan2(m10, m00)
+let d  = r.det();                             // E
 ```
+
+Constructors: `identity()`, `from_rows(r0, r1)`, `from_cols(c0, c1)`,
+`from_elements(m00, m01, m10, m11)` (row-major). Matrices add, subtract,
+negate, and scale by a scalar (`m * k`, `k * m`).
 
 ### matrix3sym
 
@@ -231,8 +239,16 @@ let m = matrix3sym::new("m");                 // 9 symbols
 let mt = m.transpose();
 let ea = m.get_euler_angles();                // -> vect3sym
 let mv = m.clone() * vect3sym::new("v");      // -> vect3sym
+let vm = vect3sym::new("v") * m.clone();      // vec * matrix = M^T v
 let mm = m.clone() * m.clone();               // -> matrix3sym
+let d  = m.det();                             // E
 ```
+
+Constructors: `identity()`, `from_rows/from_cols` (three vectors),
+`from_elements` (nine scalars, row-major),
+`rotation_from_euler_angles(&ea)` (intrinsic ZYX, same as
+`ea.rotation_matrix()`), `rotation_from_axis_angle(&axis, phi)` (axis must
+be unit length). Add / Sub / Neg / scalar Mul as for `matrix2sym`.
 
 ### Use in constraint bodies
 
