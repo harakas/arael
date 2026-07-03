@@ -54,18 +54,22 @@ impl<T> fmt::Debug for Ref<T> {
 // ============================================================
 
 /// Iterator yielding `Ref<T>` for each element in a contiguous index range.
+/// Counts elements rather than comparing indices: Deque index ranges can
+/// straddle the u32 wrap point (push_front on a fresh deque starts at
+/// u32::MAX), where an end-index comparison would terminate immediately.
 pub struct RefIter<T> {
     current: u32,
-    len: u32,
+    remaining: u32,
     _marker: PhantomData<T>,
 }
 
 impl<T> Iterator for RefIter<T> {
     type Item = Ref<T>;
     fn next(&mut self) -> Option<Ref<T>> {
-        if self.current < self.len {
+        if self.remaining > 0 {
             let r = Ref::new(self.current);
             self.current = self.current.wrapping_add(1);
+            self.remaining -= 1;
             Some(r)
         } else {
             None
@@ -73,8 +77,7 @@ impl<T> Iterator for RefIter<T> {
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
-        let remaining = self.len.wrapping_sub(self.current) as usize;
-        (remaining, Some(remaining))
+        (self.remaining as usize, Some(self.remaining as usize))
     }
 }
 
@@ -193,7 +196,7 @@ impl<T> Vec<T> {
 
     /// Returns an iterator yielding a `Ref<T>` for each element.
     pub fn refs(&self) -> RefIter<T> {
-        RefIter { current: 0, len: self.inner.len() as u32, _marker: PhantomData }
+        RefIter { current: 0, remaining: self.inner.len() as u32, _marker: PhantomData }
     }
 }
 
@@ -396,7 +399,7 @@ impl<T> Deque<T> {
 
     /// Returns an iterator yielding a `Ref<T>` for each element, front to back.
     pub fn refs(&self) -> RefIter<T> {
-        RefIter { current: self.first_index, len: self.first_index.wrapping_add(self.inner.len() as u32), _marker: PhantomData }
+        RefIter { current: self.first_index, remaining: self.inner.len() as u32, _marker: PhantomData }
     }
 }
 
@@ -970,5 +973,129 @@ mod tests {
         let r = a.push(42);
         a.remove(r);
         let _ = a[r]; // should panic
+    }
+
+    // ============================================================
+    // Deque border cases: index arithmetic near the u32 wrap point.
+    // push_front decrements first_index with wrapping_sub, so the very
+    // first push_front on a fresh deque already places the live index
+    // range at u32::MAX. Every accessor must be wrap-safe.
+    // ============================================================
+
+    #[test]
+    fn deque_refs_after_push_front_from_empty() {
+        // Regression: refs() compared `current < len` without wrap
+        // handling, so a deque built with push_front yielded ZERO refs.
+        let mut d: Deque<i32> = Deque::new();
+        let r = d.push_front(10);
+        assert_eq!(r.index(), u32::MAX);
+        let collected: std::vec::Vec<Ref<i32>> = d.refs().collect();
+        assert_eq!(collected.len(), 1, "refs() must yield the single element");
+        assert_eq!(collected[0], r);
+        assert_eq!(d[collected[0]], 10);
+    }
+
+    #[test]
+    fn deque_refs_across_index_wrap() {
+        // Live range straddles the wrap point: MAX-1, MAX, 0, 1.
+        let mut d: Deque<i32> = Deque::new();
+        let r1 = d.push_front(1); // MAX
+        let r2 = d.push_front(2); // MAX - 1
+        let r3 = d.push_back(3);  // 0 (wrapped)
+        let r4 = d.push_back(4);  // 1
+        assert_eq!(r1.index(), u32::MAX);
+        assert_eq!(r2.index(), u32::MAX - 1);
+        assert_eq!(r3.index(), 0);
+        assert_eq!(r4.index(), 1);
+
+        let collected: std::vec::Vec<Ref<i32>> = d.refs().collect();
+        assert_eq!(collected, vec![r2, r1, r3, r4], "front-to-back order");
+        // Every yielded ref must resolve to the right element, and the
+        // ref-order must agree with iter() order.
+        let by_ref: std::vec::Vec<i32> = d.refs().map(|r| d[r]).collect();
+        let by_iter: std::vec::Vec<i32> = d.iter().copied().collect();
+        assert_eq!(by_ref, by_iter);
+        assert_eq!(by_ref, vec![2, 1, 3, 4]);
+    }
+
+    #[test]
+    fn deque_refs_exact_size_at_wrap() {
+        let mut d: Deque<i32> = Deque::new();
+        d.push_front(1);
+        d.push_front(2);
+        d.push_back(3);
+        let it = d.refs();
+        assert_eq!(it.size_hint(), (3, Some(3)));
+        assert_eq!(it.len(), 3);
+        let empty: Deque<i32> = Deque::new();
+        assert_eq!(empty.refs().size_hint(), (0, Some(0)));
+        assert_eq!(empty.refs().count(), 0);
+    }
+
+    #[test]
+    fn deque_front_back_get_at_wrap() {
+        let mut d: Deque<i32> = Deque::new();
+        let rf = d.push_front(1);   // MAX
+        let rb = d.push_back(2);    // 0
+        assert_eq!(d.front_ref(), Some(rf));
+        assert_eq!(d.back_ref(), Some(rb));
+        assert_eq!(*d.front().unwrap(), 1);
+        assert_eq!(*d.back().unwrap(), 2);
+        assert!(d.contains_ref(rf) && d.contains_ref(rb));
+        assert_eq!(d.get(rf), Some(&1));
+        assert_eq!(d.get(rb), Some(&2));
+        // A never-issued ref adjacent to the live range is not contained.
+        assert!(!d.contains_ref(Ref::new(u32::MAX - 1)));
+        assert!(!d.contains_ref(Ref::new(1)));
+    }
+
+    #[test]
+    fn deque_sliding_window_across_wrap() {
+        // Slide a 3-element window through the wrap point and verify
+        // refs()/get() stay consistent the whole way.
+        let mut d: Deque<u32> = Deque::new();
+        for i in 0..3 {
+            d.push_front(i); // indices MAX, MAX-1, MAX-2 (values 0,1,2)
+        }
+        for step in 0..6u32 {
+            d.push_back(100 + step);
+            let evicted = d.pop_front().unwrap();
+            let _ = evicted;
+            assert_eq!(d.len(), 3);
+            let collected: std::vec::Vec<u32> = d.refs().map(|r| d[r]).collect();
+            let by_iter: std::vec::Vec<u32> = d.iter().copied().collect();
+            assert_eq!(collected, by_iter, "step {}", step);
+            assert_eq!(d.front_ref().map(|r| d[r]), d.front().copied());
+            assert_eq!(d.back_ref().map(|r| d[r]), d.back().copied());
+        }
+    }
+
+    #[test]
+    fn deque_pop_front_invalidates_then_push_front_reuses_index() {
+        // Index reuse is inherent to the stable-index design: a ref to a
+        // popped front element becomes valid again if push_front reuses
+        // that index. Pin the behavior so a change is deliberate.
+        let mut d: Deque<i32> = Deque::new();
+        let r0 = d.push_back(1);
+        d.push_back(2);
+        assert_eq!(d.pop_front(), Some(1));
+        assert!(!d.contains_ref(r0), "popped ref is stale");
+        let r_new = d.push_front(99);
+        assert_eq!(r_new, r0, "push_front reuses the vacated index");
+        assert!(d.contains_ref(r0));
+        assert_eq!(d[r0], 99);
+    }
+
+    #[test]
+    fn deque_truncate_invalidates_back_refs() {
+        let mut d: Deque<i32> = Deque::new();
+        let r0 = d.push_back(1);
+        let r1 = d.push_back(2);
+        let r2 = d.push_back(3);
+        d.truncate(1);
+        assert!(d.contains_ref(r0));
+        assert!(!d.contains_ref(r1) && !d.contains_ref(r2));
+        assert_eq!(d.get(r1), None);
+        assert_eq!(d.refs().count(), 1);
     }
 }
