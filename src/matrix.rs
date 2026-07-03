@@ -315,9 +315,15 @@ impl<T: Float> matrix3<T>
 
     /// Symmetric eigendecomposition: self = R * diag(d) * R^T
     ///
-    /// The matrix must be symmetric. Returns (R, d) where R is the rotation
-    /// matrix of eigenvectors (columns) and d contains the eigenvalues.
-    /// Eigenvalues are sorted in ascending order.
+    /// The matrix must be symmetric. Returns (R, d) where R holds the
+    /// eigenvectors as columns and d the eigenvalues, sorted ascending.
+    /// R is orthonormal but not necessarily a rotation: eigenvector signs
+    /// and ordering are arbitrary, so det(R) may be -1 (a reflection).
+    /// This does not affect uses that rely only on self = R * diag(d) * R^T
+    /// (e.g. covariance whitening); if a proper rotation is needed, negate
+    /// one column when det(R) < 0.
+    ///
+    /// Non-finite input propagates: NaN in yields NaN out.
     pub fn symmetric_eigen(self) -> (matrix3<T>, vect3<T>) {
         // Convert to nalgebra for eigendecomposition
         let na_mat = nalgebra::Matrix3::new(
@@ -330,7 +336,7 @@ impl<T: Float> matrix3<T>
 
         // Sort by eigenvalue (ascending)
         let mut idx = [0usize, 1, 2];
-        idx.sort_by(|&a, &b| eigen.eigenvalues[a].partial_cmp(&eigen.eigenvalues[b]).unwrap());
+        idx.sort_by(|&a, &b| eigen.eigenvalues[a].total_cmp(&eigen.eigenvalues[b]));
 
         let d = vect3::<T>::new(
             T::from(eigen.eigenvalues[idx[0]]).unwrap(),
@@ -658,6 +664,21 @@ mod tests {
         let ea3 = m3.get_euler_angles();
         assert!(matrix3d::rotation_from_euler_angles(ea3).similar(m3),
             "recomposition mismatch, ea={:?}", ea3);
+    }
+
+    #[test]
+    fn test_symmetric_eigen_nan_propagates() {
+        // NaN input must propagate to the output, not panic in the
+        // eigenvalue sort (partial_cmp().unwrap() used to).
+        let nan = f64::NAN;
+        let m = matrix3d::from_rows(
+            vect3d::new(nan, 0.0, 0.0),
+            vect3d::new(0.0, 2.0, 0.0),
+            vect3d::new(0.0, 0.0, 1.0),
+        );
+        let (_r, d) = m.symmetric_eigen();
+        assert!(d.x.is_nan() || d.y.is_nan() || d.z.is_nan(),
+            "NaN input must yield NaN eigenvalues, got {:?}", d);
     }
 
     use super::*;
