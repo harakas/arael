@@ -91,6 +91,14 @@ impl<T: Float> ops::Rem for vect3<T>
     }
 }
 
+impl<T: Float> ops::Div<T> for vect3<T>
+{
+    type Output = vect3<T>;
+    fn div(self, _rhs: T) -> vect3<T> {
+        vect3::<T> {x: self.x / _rhs, y: self.y / _rhs, z: self.z / _rhs}
+    }
+}
+
 impl<T: Float> vect3<T> {
     /// Constructs a 3D vector from components.
     pub fn new(x: T, y: T, z: T) -> vect3<T> {
@@ -266,6 +274,14 @@ impl<T: Float> ops::Neg for vect2<T>
     }
 }
 
+impl<T: Float> ops::Div<T> for vect2<T>
+{
+    type Output = vect2<T>;
+    fn div(self, _rhs: T) -> vect2<T> {
+        vect2::<T> {x: self.x / _rhs, y: self.y / _rhs}
+    }
+}
+
 impl<T: Float> vect2<T> {
     /// Constructs a 2D vector from components.
     pub fn new(x: T, y: T) -> vect2<T> {
@@ -290,6 +306,11 @@ impl<T: Float> vect2<T> {
     /// Returns a unit vector perpendicular to `self` (90-degree counter-clockwise rotation).
     pub fn across(self) -> vect2<T> {
         vect2::<T>::new(-self.y, self.x)
+    }
+
+    /// Returns the 2D cross product (determinant): `self.x * rhs.y - self.y * rhs.x`.
+    pub fn cross(self, rhs: vect2<T>) -> T {
+        self.x * rhs.y - self.y * rhs.x
     }
 
     /// Returns true if all components are finite (not NaN or infinity).
@@ -409,6 +430,20 @@ mod tests {
         // cross product
         assert!(equal(v1 % v2, vect3d::new(-6.0, 22.0, -9.0)));
         assert!(equal(v1 % (5.0*v1), vect3d::new(0.0, 0.0, 0.0)));
+        // division by scalar
+        assert!(equal(v1 / 2.0, vect3d::new(1.0, 1.5, 3.0)));
+    }
+
+    #[test]
+    fn vect2_div_and_cross() {
+        let a = vect2d::new(3.0, -4.0);
+        let b = vect2d::new(1.0, 2.0);
+        assert!(equal(a / 2.0, vect2d::new(1.5, -2.0)));
+        // 2D cross product (determinant): 3*2 - (-4)*1 = 10
+        assert_eq!(a.cross(b), 10.0);
+        assert_eq!(b.cross(a), -10.0);
+        // cross with the 90-degree rotation of self equals the square
+        assert_eq!(a.cross(a.across()), a.square());
     }
 
     #[test]

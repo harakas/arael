@@ -91,3 +91,5 @@
 - **arael-sketch**: investigate chain misbehavior
 - **arael-sketch**: when selecting a line/point/arc/etc hilight/hover all the constraints associated with it
 
+- **arael**: geometry helpers deferred from the F6 math-coverage review (new feature surface rather than sym/runtime parity; nothing in the repo blocks on them): matrix2/matrix3 `inverse`, matrix -> quaternion conversion, SE(2)/SE(3) compose/between helpers, skew/hat operator (`[v]_x` from a vect3).
+- **arael-sym**: quaternsym operations deferred from F6 stage E: `pow`/`log`/`exp`/`slerp`/`from_two_vectors`/`get_axis_angle`. All are branchy (sign flips, acos edge cases, zero-angle guards) and not residual-friendly; the runtime `quatern` has them for data preparation.
