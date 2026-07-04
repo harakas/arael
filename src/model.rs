@@ -1249,6 +1249,12 @@ impl<A: Model, B: Model, const NA: usize, const NB: usize, T: crate::utils::Floa
     pub fn nb(&self) -> usize { NB }
 
     /// Set the global parameter indices.
+    ///
+    /// The two slots may resolve to the same entity ("aliased", e.g. a
+    /// distance between the two endpoints of a single line): the two
+    /// symmetric accumulate writes then land on the same Hessian cell,
+    /// summing to the 2 * dr_a * dr_b diagonal contribution the shared
+    /// parameter requires. No special casing anywhere.
     pub fn set_indices(&mut self, a_indices: &[u32], b_indices: &[u32]) {
         debug_assert_eq!(a_indices.len(), NA);
         debug_assert_eq!(b_indices.len(), NB);
@@ -1296,7 +1302,6 @@ impl<A: Model, B: Model, const NA: usize, const NB: usize, T: crate::utils::Floa
                 if gj == u32::MAX { continue; }
                 let gj = gj as usize;
                 let val = self.cross_hessian[row + j];
-                if gi == gj { continue; }
                 hessian[gi * n_total + gj] += val;
                 hessian[gj * n_total + gi] += val;
             }
@@ -1317,12 +1322,15 @@ impl<A: Model, B: Model, const NA: usize, const NB: usize, T: crate::utils::Floa
                 let gj = self.indices_b[j];
                 if gj == u32::MAX { continue; }
                 let gj = gj as usize;
-                if gi == gj { continue; }
                 let (lo, hi) = if gi <= gj { (gi, gj) } else { (gj, gi) };
                 if hi - lo > kd {
                     return Err(crate::simple_lm::BandError { row: lo, col: hi, kd });
                 }
                 let val = self.cross_hessian[row + j];
+                // Aliased slots (same entity in both refs): the triangle
+                // stores each symmetric pair once, so the diagonal needs
+                // both of the 2*dr_a*dr_b contributions explicitly.
+                let val = if gi == gj { val + val } else { val };
                 band[(kd + lo - hi) + hi * ldab] += val;
             }
         }
@@ -1338,9 +1346,10 @@ impl<A: Model, B: Model, const NA: usize, const NB: usize, T: crate::utils::Floa
             for j in 0..NB {
                 let gj = self.indices_b[j];
                 if gj == u32::MAX { continue; }
-                if gi == gj { continue; }
                 let (lo, hi) = if gi <= gj { (gi, gj) } else { (gj, gi) };
                 let val = self.cross_hessian[row + j];
+                // Aliased diagonal: see accumulate_hessian_band.
+                let val = if gi == gj { val + val } else { val };
                 coo.push(lo, hi, val);
             }
         }
@@ -1355,9 +1364,10 @@ impl<A: Model, B: Model, const NA: usize, const NB: usize, T: crate::utils::Floa
             for j in 0..NB {
                 let gj = self.indices_b[j];
                 if gj == u32::MAX { continue; }
-                if gi == gj { continue; }
                 let (lo, hi) = if gi <= gj { (gi, gj) } else { (gj, gi) };
                 let val = self.cross_hessian[row + j];
+                // Aliased diagonal: see accumulate_hessian_band.
+                let val = if gi == gj { val + val } else { val };
                 if let Some(pos) = csc.find_pos(lo as usize, hi as usize) {
                     csc.vals[pos] += val;
                 }
@@ -1374,8 +1384,9 @@ impl<A: Model, B: Model, const NA: usize, const NB: usize, T: crate::utils::Floa
             for j in 0..NB {
                 let gj = self.indices_b[j];
                 if gj == u32::MAX { continue; }
-                if gi == gj { continue; }
                 let val = self.cross_hessian[row + j];
+                // Aliased diagonal: see accumulate_hessian_band.
+                let val = if gi == gj { val + val } else { val };
                 vals[positions[*cursor]] += val;
                 *cursor += 1;
             }
@@ -1488,7 +1499,14 @@ impl<T: crate::utils::Float> TripletBlock<T> {
                 } else {
                     (indices[j], indices[i])
                 };
-                self.hessian.push((lo, hi, two * dr[i] * dr[j]));
+                let v = two * dr[i] * dr[j];
+                // lo == hi here can only mean two slots of DIFFERENT spans
+                // resolving to the same global parameter (aliased entities;
+                // span_i == span_j above already excluded within-entity
+                // diagonals). The symmetric pair collapses to one diagonal
+                // cell, which needs both contributions.
+                let v = if lo == hi { v + v } else { v };
+                self.hessian.push((lo, hi, v));
             }
         }
     }
@@ -1579,13 +1597,47 @@ pub struct JacobianRow<T> {
     /// Residual value.
     pub residual: T,
     /// Sparse partial derivatives: (global_param_index, dr/dp).
-    /// Only active (optimizable) parameters included.
+    /// Only active (optimizable) parameters included. Indices are unique:
+    /// when a constraint touches the same parameter through several slots
+    /// (aliased CrossBlock refs), the contributions are summed into one
+    /// entry at construction (see `Jacobian::merge_duplicate_entries`).
     pub entries: std::vec::Vec<(u32, T)>,
 }
 
 impl<T: crate::utils::Float> Jacobian<T> {
     /// Number of residuals (rows).
     pub fn num_residuals(&self) -> usize { self.rows.len() }
+
+    /// Sum entries that share a parameter index (a constraint reaching the
+    /// same parameter through several slots, e.g. aliased CrossBlock refs:
+    /// the total derivative is the sum of the per-slot partials). Called by
+    /// the generated `calc_jacobian` so consumers can rely on unique
+    /// indices per row.
+    pub fn merge_duplicate_entries(&mut self) {
+        for row in &mut self.rows {
+            // Fast path: indices are already unique unless a constraint
+            // reaches the same parameter through several slots (aliased
+            // refs) -- a cheap scan keeps the common case free of sorting
+            // and allocation. Rows are small (one entry per touched
+            // parameter), so the quadratic scan is a handful of integer
+            // compares.
+            let n = row.entries.len();
+            let has_dup = (1..n).any(|i| {
+                let ji = row.entries[i].0;
+                row.entries[..i].iter().any(|&(j, _)| j == ji)
+            });
+            if !has_dup { continue; }
+            row.entries.sort_unstable_by_key(|&(j, _)| j);
+            row.entries.dedup_by(|a, b| {
+                if a.0 == b.0 {
+                    b.1 = b.1 + a.1;
+                    true
+                } else {
+                    false
+                }
+            });
+        }
+    }
 
     /// Residual vector.
     pub fn residuals(&self) -> std::vec::Vec<T> {
@@ -2227,6 +2279,46 @@ mod tests {
         assert_eq!(densify_band(&band, n, kd), dense,
             "TripletBlock band accumulation must use the same upper-band \
              layout as SelfBlock/CrossBlock and the band solvers");
+    }
+
+    #[test]
+    fn tripletblock_aliased_spans_double_the_diagonal() {
+        // Two spans resolving to the same global parameters (aliased
+        // entities). The cross pair for a shared parameter collapses to
+        // one diagonal tuple, which must carry BOTH 2*dr_i*dr_j
+        // contributions: the full Hessian for the shared params is
+        // 2 * (dr_a + dr_b) outer (dr_a + dr_b); the self blocks own the
+        // dr_a*dr_a / dr_b*dr_b parts, this block the rest.
+        let n = 2;
+        let (da, db) = ([1.0_f64, 0.5], [-0.25_f64, 2.0]);
+        let mut blk: TripletBlock<f64> = TripletBlock::new();
+        // Slots: [a0, a1, b0, b1] with both spans on params [0, 1].
+        blk.add_residual_cross(
+            0.3,
+            &[0, 1, 0, 1],
+            &[da[0], da[1], db[0], db[1]],
+            &[0, 2],
+        );
+
+        let mut dense = vec![0.0; n * n];
+        blk.accumulate_hessian(&mut dense);
+
+        // Expected cross-only contribution, uniform for every cell
+        // including the diagonal: 2 * (da_i*db_j + db_i*da_j).
+        for i in 0..n {
+            for j in 0..n {
+                let expected = 2.0 * (da[i] * db[j] + db[i] * da[j]);
+                assert!((dense[i * n + j] - expected).abs() < 1e-14,
+                    "H[{},{}] = {} expected {}", i, j, dense[i * n + j], expected);
+            }
+        }
+
+        // All formats must agree on the aliased tuples.
+        let kd = n - 1;
+        let mut band = vec![0.0; (kd + 1) * n];
+        blk.accumulate_hessian_band(&mut band, kd).unwrap();
+        assert_eq!(densify_band(&band, n, kd), dense,
+            "aliased triplet band differs from dense");
     }
 
     #[test]

@@ -3898,7 +3898,11 @@ pub fn generate_root_methods(
                     let mut __jac_cid: u32 = 0;
                     #(#jacobian_loops)*
                     #extended_jacobian_call
-                    arael::model::Jacobian { num_params: params.len(), rows: __jac_rows }
+                    let mut __jac = arael::model::Jacobian { num_params: params.len(), rows: __jac_rows };
+                    // Shared-parameter slots (aliased CrossBlock refs) emit one
+                    // entry per slot; merge so rows carry unique indices.
+                    __jac.merge_duplicate_entries();
+                    __jac
                 }
             }
         });
