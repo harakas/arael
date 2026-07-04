@@ -10,4 +10,7 @@ fn constraint_body_compile_errors() {
     let t = trybuild::TestCases::new();
     t.compile_fail("tests/constraint_body_errors/rem_non_vec3.rs");
     t.compile_fail("tests/constraint_body_errors/cross_wrong_arg.rs");
+    t.compile_fail("tests/constraint_body_errors/field_typo.rs");
+    t.compile_fail("tests/constraint_body_errors/macro_stmt.rs");
+    t.compile_fail("tests/constraint_body_errors/stray_expr_stmt.rs");
 }

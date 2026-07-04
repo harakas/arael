@@ -52,11 +52,25 @@ impl SymVal {
 struct ConstraintCtx {
     // variable name -> SymVal
     bindings: HashMap<String, SymVal>,
+    // Entity variables (heads of pre-registered dotted paths) and their
+    // registered type names. Drives field-path validation: a dotted path
+    // starting at a known entity that is neither pre-registered nor a
+    // skip/opaque field is a typo, reported with a suggestion instead of
+    // being spliced into generated code as a free symbol.
+    entity_vars: HashMap<String, String>,
+    // User `let` binding names. Lets shadow pre-registered entity paths
+    // (Rust semantics), so field lookup consults these before the dotted
+    // binding table.
+    lets: std::collections::HashSet<String>,
 }
 
 impl ConstraintCtx {
     fn new() -> Self {
-        ConstraintCtx { bindings: HashMap::new() }
+        ConstraintCtx {
+            bindings: HashMap::new(),
+            entity_vars: HashMap::new(),
+            lets: std::collections::HashSet::new(),
+        }
     }
 
     /// Create a SymVal for a struct field, given the field's sym type and a base name.
@@ -112,9 +126,16 @@ fn eval_expr(expr: &Expr, ctx: &mut ConstraintCtx) -> Result<SymVal, syn::Error>
                 syn::Member::Unnamed(i) => i.index.to_string(),
             };
 
-            // Try to resolve as a dotted path first (e.g., "pose.ea" as a binding key)
+            // Try to resolve as a dotted path first (e.g., "pose.ea" as a
+            // binding key) -- unless the path head is a user `let`, which
+            // shadows pre-registered entity paths (Rust semantics; the
+            // dotted lookup used to win, silently ignoring the let).
             let dotted = build_dotted_path(expr);
-            if let Some(ref path) = dotted
+            let head_is_let = dotted.as_ref()
+                .and_then(|p| p.split('.').next())
+                .is_some_and(|h| ctx.lets.contains(h));
+            if !head_is_let
+                && let Some(ref path) = dotted
                 && let Some(val) = ctx.bindings.get(path) {
                     return Ok(val.clone());
                 }
@@ -140,8 +161,22 @@ fn eval_expr(expr: &Expr, ctx: &mut ConstraintCtx) -> Result<SymVal, syn::Error>
                 }
             }
 
-            // Fallback: create a scalar symbol for the dotted path
+            // Fallback: a scalar symbol spliced verbatim into generated
+            // code. Legitimate for skip fields and fields of types not
+            // registered with #[arael::model]; a typo would otherwise
+            // surface as a rustc E0609 at the root struct with no hint of
+            // the constraint, or silently compile against an unintended
+            // field. Validate against the registered layouts first.
             if let Some(ref path) = dotted {
+                if head_is_let {
+                    return Err(syn::Error::new_spanned(expr,
+                        format!("cannot access `{}`: the path root is a local `let` binding \
+                                 and the field is not a known component", path)));
+                }
+                let head = path.split('.').next().unwrap();
+                if let Some(type_name) = ctx.entity_vars.get(head).cloned() {
+                    validate_entity_path(&type_name, head, &path[head.len() + 1..], expr)?;
+                }
                 return Ok(SymVal::Scalar(arael_sym::symbol(path)));
             }
 
@@ -1339,6 +1374,74 @@ fn register_bindings_recursive(ctx: &mut ConstraintCtx, key_prefix: &str, sym_pr
             }
         }
     }
+}
+
+/// Walk a dotted field path through the registered layouts. Paths through
+/// `#[arael(skip)]` fields or types without a registered layout are opaque
+/// and allowed (they emit verbatim field access); a segment that names no
+/// field on a registered type is a typo -- error with the closest match.
+fn validate_entity_path(type_name: &str, var_head: &str, rest: &str, span: &Expr) -> syn::Result<()> {
+    let mut cur_type = type_name.to_string();
+    let mut walked = var_head.to_string();
+    let mut segs = rest.split('.').peekable();
+    while let Some(seg) = segs.next() {
+        let Some(layout) = registry_lookup(&cur_type) else {
+            return Ok(()); // unregistered type: opaque, trust the user
+        };
+        // Param `.value` aliases register as `<field>_value` bindings; if
+        // one reaches this fallback it is either a typo or a suffix on a
+        // param that resolves fine -- treat the bare field name.
+        let field = layout.fields.iter().find(|(n, _)| n == seg);
+        let Some((_, _)) = field else {
+            let mut pool: Vec<String> = layout.fields.iter().map(|(n, _)| n.clone()).collect();
+            for pf in &layout.param_fields {
+                pool.push(format!("{}_value", pf));
+            }
+            let suggestion = pool.iter()
+                .map(|c| (edit_distance(seg, c), c.as_str()))
+                .filter(|(d, _)| *d <= 2)
+                .min_by_key(|(d, c)| (*d, c.to_string()))
+                .map(|(_, c)| format!(" (did you mean `{}`?)", c))
+                .unwrap_or_default();
+            return Err(syn::Error::new_spanned(span,
+                format!("no field `{}` on `{}` (in `{}.{}`){}",
+                    seg, cur_type, walked, seg, suggestion)));
+        };
+        walked = format!("{}.{}", walked, seg);
+        match &field.unwrap().1 {
+            SymFieldType::Struct(inner) | SymFieldType::OptionalStruct(inner) => {
+                cur_type = inner.clone();
+            }
+            SymFieldType::Skip => return Ok(()), // opaque from here on
+            _ => {
+                // Leaf field with segments left: pre-registration and the
+                // component arms already cover every valid access, so
+                // whatever remains is not a component of this field.
+                if let Some(extra) = segs.next() {
+                    return Err(syn::Error::new_spanned(span,
+                        format!("`{}` has no component `{}` (in `{}`)", walked, extra, walked)));
+                }
+                return Ok(());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Levenshtein distance, for typo suggestions.
+fn edit_distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut prev: Vec<usize> = (0..=b.len()).collect();
+    for i in 1..=a.len() {
+        let mut cur = vec![i; b.len() + 1];
+        for j in 1..=b.len() {
+            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+            cur[j] = (prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + cost);
+        }
+        prev = cur;
+    }
+    prev[b.len()]
 }
 
 fn parse_sym_code(code: &str) -> syn::Result<Expr> {
@@ -4160,6 +4263,19 @@ fn interpret_constraint_body(
     // Setup context — recursively register all fields including nested structs
     let mut ctx = ConstraintCtx::new();
     for (var_name, type_name) in &var_infos {
+        // Two variables with the same name and different types is a real
+        // collision (e.g. a Ref field named `path` vs the auto-registered
+        // root variable for a root type `Path`): whichever registered
+        // last would silently win.
+        if let Some(prev) = ctx.entity_vars.get(var_name)
+            && prev != type_name {
+                return Err(syn::Error::new_spanned(struct_name,
+                    format!("variable name `{}` is ambiguous in this constraint: it refers \
+                             to both `{}` and `{}` (a Ref field colliding with an \
+                             auto-registered variable) -- rename the field",
+                        var_name, prev, type_name)));
+            }
+        ctx.entity_vars.insert(var_name.clone(), type_name.clone());
         register_bindings_recursive(&mut ctx, var_name, var_name, type_name);
     }
 
@@ -4170,6 +4286,7 @@ fn interpret_constraint_body(
         // Use a simple name derived from the struct name
         // Derive self-reference name from struct: PosePair -> "posepair"
         let self_var = struct_name.to_string().to_lowercase();
+        ctx.entity_vars.entry(self_var.clone()).or_insert_with(|| struct_name.to_string());
         register_bindings_recursive(&mut ctx, &self_var, "__frine", &struct_name.to_string());
     }
 
@@ -4257,9 +4374,13 @@ fn interpret_constraint_body(
             }
     }
 
-    // Interpret body
+    // Interpret body. Only `let` bindings and one final residual
+    // expression are meaningful here; anything else used to be silently
+    // dropped (macros, items) or silently treated as extra residuals
+    // (stray semicolon-terminated expressions).
     let mut residuals: Vec<E> = Vec::new();
-    for stmt in &constraint.body_stmts {
+    let n_stmts = constraint.body_stmts.len();
+    for (si, stmt) in constraint.body_stmts.iter().enumerate() {
         match stmt {
             Stmt::Local(local) => {
                 let name = match &local.pat {
@@ -4268,9 +4389,20 @@ fn interpret_constraint_body(
                 };
                 let init = local.init.as_ref().ok_or_else(|| syn::Error::new_spanned(local, "initializer required"))?;
                 let val = eval_expr(&init.expr, &mut ctx)?;
+                ctx.lets.insert(name.clone());
                 ctx.bindings.insert(name, val);
             }
-            Stmt::Expr(expr, _) => {
+            Stmt::Expr(expr, semi) => {
+                if si + 1 != n_stmts {
+                    return Err(syn::Error::new_spanned(expr,
+                        "only `let` bindings may precede the final residual expression \
+                         (this expression statement would otherwise be treated as extra \
+                         residuals or dropped)"));
+                }
+                if semi.is_some() {
+                    return Err(syn::Error::new_spanned(expr,
+                        "the residual expression must not end with a semicolon"));
+                }
                 if let Expr::Array(arr) = expr {
                     for elem in &arr.elems {
                         match eval_expr(elem, &mut ctx)? {
@@ -4285,7 +4417,15 @@ fn interpret_constraint_body(
                     }
                 }
             }
-            _ => {}
+            Stmt::Macro(m) => {
+                return Err(syn::Error::new_spanned(m,
+                    "macro statements are not supported in constraint bodies \
+                     (they were silently dropped before)"));
+            }
+            Stmt::Item(item) => {
+                return Err(syn::Error::new_spanned(item,
+                    "item declarations are not supported in constraint bodies"));
+            }
         }
     }
 

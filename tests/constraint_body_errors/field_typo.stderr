@@ -1,0 +1,15 @@
+error: no field `gama` on `M` (in `m.gama`) (did you mean `gamma`?)
+ --> tests/constraint_body_errors/field_typo.rs:8:1
+  |
+8 | #[arael::model]
+  | ^^^^^^^^^^^^^^^
+  |
+  = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused imports: `Param` and `SelfBlock`
+ --> tests/constraint_body_errors/field_typo.rs:6:20
+  |
+6 | use arael::model::{Param, SelfBlock};
+  |                    ^^^^^  ^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

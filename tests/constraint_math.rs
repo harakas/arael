@@ -151,6 +151,26 @@ struct Qn {
     hb: SelfBlock<Qn>,
 }
 
+// A2/A1 semantics: a `let` named like the entity variable shadows the
+// pre-registered entity paths (shnode.x below is the let's Vec2
+// component, NOT the entity's decoy `x` param field, which the old
+// dotted-first lookup would have picked), and #[arael(skip)] fields
+// pass through to generated code as verbatim field access.
+#[arael::model]
+#[arael(constraint(hb, {
+    let b = shnode.bias;
+    let shnode = shnode.pos * 2.0;
+    [(shnode.x - 1.0) * space.w,
+     (shnode.y + b) * space.w]
+}))]
+struct ShNode {
+    pos: Param<vect2d>,
+    x: Param<f64>,
+    #[arael(skip)]
+    bias: f64,
+    hb: SelfBlock<ShNode>,
+}
+
 #[arael::model]
 #[arael(root)]
 struct Space {
@@ -161,6 +181,7 @@ struct Space {
     nodes3: refs::Vec<N3>,
     eans: refs::Vec<Ean>,
     quats: refs::Vec<Qn>,
+    shs: refs::Vec<ShNode>,
     w: f64,
 }
 
@@ -194,8 +215,15 @@ fn build() -> (Space, Vec<f64>) {
         nodes3: refs::Vec::new(),
         eans: refs::Vec::new(),
         quats: refs::Vec::new(),
+        shs: refs::Vec::new(),
         w: W,
     };
+    space.shs.push(ShNode {
+        pos: Param::new(vect2d::new(0.6, -0.8)),
+        x: Param::new(9.0), // decoy: must NOT appear in any residual
+        bias: 0.35,
+        hb: SelfBlock::new(),
+    });
     space.quats.push(Qn {
         p: Param::new(vect3d::new(A.0, A.1, A.2)),
         ang: Param::new(QANG),
@@ -334,6 +362,13 @@ fn expected_residuals() -> Vec<f64> {
         (q * 0.5).norm() * W,
     ]);
 
+    // ShNode: let-shadowed entity var + skip-field passthrough.
+    let sv = vect2d::new(0.6, -0.8) * 2.0;
+    rs.extend([
+        (sv.x - 1.0) * W,
+        (sv.y + 0.35) * W,
+    ]);
+
     rs
 }
 
@@ -350,7 +385,7 @@ fn cost_matches_runtime_vector_math() {
 fn gradient_matches_finite_differences() {
     let (mut space, params) = build();
     let n = params.len();
-    assert_eq!(n, 22, "vect3/vect2 params + scalars + euler + quaternion node");
+    assert_eq!(n, 25, "vect3/vect2 params + scalars + euler + quaternion + shadow node");
 
     let mut grad = vec![0.0_f64; n];
     let mut hessian = vec![0.0_f64; n * n];
