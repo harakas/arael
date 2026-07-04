@@ -259,24 +259,33 @@ impl<T: Float> matrix3<T>
     }
 
     /// Extracts Euler angles (x=roll, y=pitch, z=yaw) from a rotation matrix.
-    /// At gimbal lock (|pitch| = pi/2) only roll -+ yaw is determined;
-    /// the roll = 0 convention is used and yaw carries the combined angle.
+    /// At and near gimbal lock (|pitch| within ~sqrt(eps) of pi/2) only
+    /// roll -+ yaw is determined; the roll = 0 convention is used and yaw
+    /// carries the combined angle. The recomposition error is bounded by
+    /// ~sqrt(eps) everywhere -- the information-theoretic floor for
+    /// extracting euler angles from a float matrix.
     pub fn get_euler_angles(self) -> vect3<T> {
         // safe_asin: float noise can push a valid rotation's entry just
         // past +-1, where raw asin returns NaN and poisons all angles.
         let y = -self[2][0].safe_asin();
-        if y.abs() < T::pi() / T::from(2).unwrap() {
+        // The roll/yaw split lives in entries scaled by cos(pitch); this
+        // sum of squares is cos(pitch)^2 for a consistent matrix, and the
+        // squared signal magnitude for one that is orthonormal only to
+        // solver tolerance. Below eps (i.e. |cos(pitch)| below sqrt(eps))
+        // the split is noise: sqrt(eps) is the crossover where the main
+        // branch's eps/cos(pitch) amplification equals the lock branch's
+        // cos(pitch) truncation.
+        let cp2 = self[2][1] * self[2][1] + self[2][2] * self[2][2];
+        if cp2 > T::epsilon() {
             vect3::<T>::new(
                 atan2(self[2][1], self[2][2]),
                 y,
                 atan2(self[1][0], self[0][0])
             )
         } else {
-            // Gimbal lock: cos(pitch) = 0, so row 2 and column 0 carry
-            // no roll/yaw information (the entries above are all zero).
-            // m01/m11 stay well-conditioned and hold the combined angle
-            // in both hemispheres: m01 = -+sin(roll -+ yaw),
-            // m11 = cos(roll -+ yaw).
+            // Gimbal lock: m01/m11 stay well-conditioned and hold the
+            // combined angle in both hemispheres:
+            // m01 = -+sin(roll -+ yaw), m11 = cos(roll -+ yaw).
             vect3::<T>::new(
                 T::zero(),
                 y,
