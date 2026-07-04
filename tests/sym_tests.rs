@@ -1689,3 +1689,45 @@ fn test_pow_product_integer_exponents_still_expand_and_agree() {
         assert!((v2 - (-32.0)).abs() < 1e-12, "got {}", v2);
     }
 }
+
+#[test]
+fn cse_output_is_deterministic_across_runs() {
+    // CSE candidate selection and divisor extraction iterate hash maps;
+    // per-instance random state used to break ties randomly, so two
+    // structurally identical inputs could emit differently-named/ordered
+    // temporaries (nondeterministic generated code, B23). Build the same
+    // expression set from scratch many times: every run must produce the
+    // identical intermediate list and rewritten expressions. The
+    // expression is chosen to have MANY equal-savings candidates so a
+    // random tie-break would be caught quickly.
+    let build = || -> Vec<E> {
+        let mk = |n: &str| symbol(n);
+        let mut out = Vec::new();
+        for pair in [("a", "b"), ("c", "d"), ("e2", "f"), ("g", "h")] {
+            let (x, y) = (mk(pair.0), mk(pair.1));
+            let u = sin(x.clone() * y.clone()) + cos(x.clone() * y.clone());
+            let v = sin(x.clone() * y.clone()) - cos(x.clone() * y.clone());
+            let w = (x.clone() + y.clone()) / (x.clone() * y.clone());
+            out.push(u.clone() * v.clone() + w.clone());
+            out.push(u * v - w);
+        }
+        out
+    };
+
+    let render = |exprs: &[E]| -> String {
+        let (intermediates, results) = cse(exprs);
+        let mut s = String::new();
+        for (name, e) in &intermediates {
+            s.push_str(&format!("{} = {}\n", name, e));
+        }
+        for r in &results {
+            s.push_str(&format!("{}\n", r));
+        }
+        s
+    };
+
+    let first = render(&build());
+    for _ in 0..20 {
+        assert_eq!(render(&build()), first, "CSE output changed between runs");
+    }
+}

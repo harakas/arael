@@ -225,7 +225,13 @@ pub fn cse(exprs: &[E]) -> (Vec<(String, E)>, Vec<E>) {
         // (e.g. `let __x = 2.2e-16.powf(2.0);` is an ambiguous numeric
         // type, while the same expression inline infers from its
         // surroundings).
-        // Rank by savings = (count - 1) * cost — how many ops we save
+        // Rank by savings = (count - 1) * cost — how many ops we save.
+        // The display string as the final tie-break makes the choice a
+        // total order: HashMap iteration order is randomized per
+        // instance, and max_by_key keeps the LAST maximum it sees, so
+        // without it two identical builds pick different candidates and
+        // emit differently-named/ordered temporaries (nondeterministic
+        // generated code).
         let best = counts.into_iter()
             .filter(|(e, count)| *count >= 2 && expr_cost(e) >= 1 && !e.symbols().is_empty())
             .max_by_key(|(e, count)| {
@@ -233,7 +239,8 @@ pub fn cse(exprs: &[E]) -> (Vec<(String, E)>, Vec<E>) {
                 let savings = (*count - 1) * cost;
                 // Primary: most savings
                 // Secondary: prefer deeper (to enable further extraction)
-                (savings, expr_depth(e))
+                // Tertiary: display string, for determinism
+                (savings, expr_depth(e), format!("{}", e))
             });
 
         let (subexpr, _count) = match best {
@@ -268,7 +275,11 @@ pub fn cse(exprs: &[E]) -> (Vec<(String, E)>, Vec<E>) {
     for (_, expr) in &intermediates {
         count_divisors(expr, &mut divisor_counts);
     }
-    for (divisor, count) in divisor_counts {
+    // Sort for determinism: HashMap iteration order would name and
+    // order the reciprocal temporaries randomly across builds.
+    let mut divisors: Vec<(E, usize)> = divisor_counts.into_iter().collect();
+    divisors.sort_by_key(|(e, _)| format!("{}", e));
+    for (divisor, count) in divisors {
         if count >= 2 {
             let var_name = format!("__x{}", var_counter);
             var_counter += 1;
@@ -365,10 +376,14 @@ fn topo_sort_intermediates(intermediates: Vec<(String, E)>) -> Vec<(String, E)> 
 
     let names: HashSet<String> = intermediates.iter().map(|(n, _)| n.clone()).collect();
 
-    // Build dependency graph: for each intermediate, which other intermediates does it reference?
-    let deps: Vec<HashSet<String>> = intermediates.iter().map(|(_, expr)| {
+    // Build dependency graph: for each intermediate, which other intermediates
+    // does it reference? Sorted: HashSet iteration order would randomize the
+    // dependents lists and with them the emitted definition order.
+    let deps: Vec<Vec<String>> = intermediates.iter().map(|(_, expr)| {
         let vars = expr.free_vars();
-        vars.into_iter().filter(|v| names.contains(v)).collect()
+        let mut d: Vec<String> = vars.into_iter().filter(|v| names.contains(v)).collect();
+        d.sort();
+        d
     }).collect();
 
     // Kahn's algorithm
@@ -399,6 +414,11 @@ fn topo_sort_intermediates(intermediates: Vec<(String, E)>) -> Vec<(String, E)> 
             }
         }
     }
+
+    // A cycle would make the queue dry up early and the tail of the
+    // definitions silently vanish from the generated code.
+    assert_eq!(sorted.len(), n,
+        "CSE topological sort dropped definitions: dependency cycle among intermediates");
 
     sorted.into_iter().map(|i| intermediates[i].clone()).collect()
 }
