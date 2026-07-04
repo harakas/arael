@@ -1651,7 +1651,7 @@ mod tests {
 
     #[test]
     fn tiny_coefficients_survive_simplification() {
-        // B3: build_sum pruned "zero" terms with `c.abs() > f64::EPSILON`,
+        // build_sum used to prune "zero" terms with `c.abs() > f64::EPSILON`,
         // silently deleting legitimate tiny terms (small residual weights,
         // regularization constants) from generated code. Like-term
         // coefficients are summed exactly, so true cancellation already

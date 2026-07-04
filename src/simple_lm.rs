@@ -598,6 +598,20 @@ impl LmSolver<f32> for BandLapack {
 // Generic LM solver
 // ---------------------------------------------------------------------------
 
+/// Damping floor for the LM accept path: the named 1e-12, raised to
+/// machine epsilon where 1e-12 is not representable meaningfully (f32).
+/// One mechanism -- this replaced a floor-guarded decrement plus a
+/// separate epsilon clamp whose interaction put the real f64 floor
+/// anywhere in [2e-13, 1e-12] depending on approach path.
+fn lambda_floor<T: Float>() -> T {
+    T::from(1e-12).unwrap().max(T::epsilon())
+}
+
+/// Lambda update after an accepted step: decrease, clamped to the floor.
+fn lambda_after_accept<T: Float>(lambda: T, down: T, floor: T) -> T {
+    (lambda * down).max(floor)
+}
+
 /// Run Levenberg-Marquardt optimization with the given solver backend.
 pub fn lm_solve<T: Float, S: LmSolver<T>>(
     x0: &[T],
@@ -624,7 +638,7 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
     let mut diagonal = vec![T::zero(); n];
     let mut delta = vec![T::zero(); n];
 
-    let lambda_floor = T::from(1e-12).unwrap();
+    let lambda_floor = lambda_floor::<T>();
     let lambda_ceiling = T::from(1e10).unwrap();
     let lambda_down = T::from(0.2).unwrap();
     let lambda_up = T::from(10.0).unwrap();
@@ -726,10 +740,7 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
                 && (end_cost - new_cost).abs() < eight * T::epsilon() * end_cost.abs();
 
             if new_cost.is_finite() && new_cost < end_cost {
-                if lambda > lambda_floor {
-                    lambda *= lambda_down;
-                }
-                lambda = lambda.max(T::epsilon());
+                lambda = lambda_after_accept(lambda, lambda_down, lambda_floor);
                 cur_x.copy_from_slice(&try_x);
                 problem.advance(&mut cur_x);
 
@@ -2003,6 +2014,32 @@ pub fn solve_spd_band_f32(n: usize, kd: usize, band: &mut [f32], b: &mut [f32]) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lambda_floor_is_the_actual_floor() {
+        // The named 1e-12 floor must be what lambda actually
+        // settles at. The old accept-path update (decrement guarded by
+        // `lambda > floor`, then clamp to epsilon) let f64 lambda land
+        // anywhere in [2e-13, 1e-12] depending on approach path, and
+        // for f32 the named floor was meaningless (epsilon dominates).
+        let floor64 = lambda_floor::<f64>();
+        let mut l64 = 1e-3f64;
+        for _ in 0..100 {
+            l64 = lambda_after_accept(l64, 0.2, floor64);
+            assert!(l64 >= floor64, "lambda {} fell below the floor {}", l64, floor64);
+        }
+        assert_eq!(l64, floor64, "f64 lambda must settle exactly at the named floor");
+
+        let floor32 = lambda_floor::<f32>();
+        assert!(floor32 >= f32::EPSILON,
+            "f32 floor {} must absorb the epsilon clamp", floor32);
+        let mut l32 = 1e-3f32;
+        for _ in 0..100 {
+            l32 = lambda_after_accept(l32, 0.2, floor32);
+            assert!(l32 >= floor32);
+        }
+        assert_eq!(l32, floor32, "f32 lambda must settle exactly at the named floor");
+    }
 
     #[test]
     fn cholesky_solve_2x2() {

@@ -1,11 +1,12 @@
 // Degenerate models -- a parameter with no Hessian diagonal entry -- must
 // fail fast with an actionable message.
 //
-// B19: a CSC column without a stored diagonal left diag_pos[j] = 0, so
+// Structural case: a CSC column without a stored diagonal left
+// diag_pos[j] = 0, so
 // extract_diagonal/solve_damped read and OVERWROTE vals[0] (an unrelated
 // entry) -- silent corruption surfacing as "Cholesky failed" far away.
 //
-// B20: a structurally present but zero diagonal cannot be rescued by
+// Value case: a structurally present but zero diagonal cannot be rescued by
 // multiplicative damping ((1+lambda)*0 stays 0): the solver burned all 20
 // inner failures per outer iteration against max_iters and returned with
 // no error indication. It now terminates the solve immediately with an
@@ -56,7 +57,7 @@ fn zero_diagonal_terminates_immediately() {
     assert_eq!(result.start_cost, 1.0);
 }
 
-// B10: the indexed (cached-pattern) assembly must detect a sparsity
+// Pattern drift: the indexed (cached-pattern) assembly must detect a sparsity
 // pattern that changed mid-solve. The position map is built from the
 // first iteration's entry sequence; a TripletBlock emitting fewer
 // entries later (here: a guard flipped between assemblies) used to

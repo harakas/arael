@@ -1,4 +1,4 @@
-// Solver / assembly-format equivalence (REVIEW.md section 8, test 1).
+// Solver / assembly-format equivalence.
 //
 // One macro-generated model -- a 2D zig-zag chain of points joined by
 // nonlinear spring constraints (CrossBlock<Point, Point>), each point

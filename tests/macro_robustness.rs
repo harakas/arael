@@ -1,4 +1,4 @@
-// B25 macro robustness: guard rewriting on the AST, passive SelfBlock
+// Macro robustness: guard rewriting on the AST, passive SelfBlock
 // wiring for Arena and direct-composed entities.
 
 use arael::model::{Model, Param, SelfBlock, CrossBlock};
@@ -42,7 +42,8 @@ struct GBlk {
 // ArenaPt has params + SelfBlock but NO self-constraint; it participates
 // only through the cross constraint below. The passive index wiring
 // matched Vec|Deque only, so an Arena-held entity kept u32::MAX indices:
-// its Hessian diagonal stayed zero (now caught by the B20 fail-fast,
+// its Hessian diagonal stayed zero (now caught by the zero-diagonal
+// fail-fast in lm_solve,
 // previously 20 silent failures per iteration).
 
 #[arael::model]
