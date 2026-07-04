@@ -1,0 +1,22 @@
+# cargo-audit configuration.
+#
+# Ignored advisories must carry a justification and a removal condition.
+# Revisit on every audit failure and whenever `cargo update` runs.
+
+[advisories]
+ignore = [
+    # quick-xml < 0.41 DoS advisories (quadratic duplicate-attribute check,
+    # unbounded NsReader namespace allocation). Both require parsing
+    # attacker-controlled XML. Our only quick-xml consumers are:
+    #   - wayland-scanner: build-time codegen over the pinned protocol XML
+    #     bundled in the wayland-protocols crates (not attacker input);
+    #   - zbus_xml via zbus-lockstep/atspi (accesskit accessibility stack):
+    #     compile-time D-Bus type validation plus runtime introspection XML
+    #     from the local session bus (a local peer can already do worse
+    #     than DoS a desktop app).
+    # No released wayland-scanner or zbus_xml accepts quick-xml 0.41 yet
+    # (checked 2026-07-04; both pin ^0.39, 0.30 for zbus_xml 4).
+    # REMOVE when `cargo update` can resolve quick-xml >= 0.41 everywhere.
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+]
