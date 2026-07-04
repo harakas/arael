@@ -1436,6 +1436,27 @@ fn validate_entity_path(type_name: &str, var_head: &str, rest: &str, span: &Expr
 
 /// Replace every `self` path in a guard expression with the given
 /// identifier, on the AST (no string surgery).
+/// Rename every occurrence of ident `from` to `to` in a token stream,
+/// recursing into groups. Used to rewrite generated constraint code from
+/// body-binding names (entity var, root var) to direct loop-item / `self`
+/// access: reads become disjoint field projections through the loop's
+/// `&mut` item or `self`, so the emission needs no whole-struct alias
+/// binding (the old `&*(self as *const Self)` laundering was undefined
+/// behavior under Stacked/Tree Borrows).
+fn rename_ident(ts: TokenStream2, from: &str, to: &str) -> TokenStream2 {
+    ts.into_iter().map(|tt| match tt {
+        proc_macro2::TokenTree::Ident(id) if id == from => {
+            proc_macro2::TokenTree::Ident(proc_macro2::Ident::new(to, id.span()))
+        }
+        proc_macro2::TokenTree::Group(g) => {
+            let mut ng = proc_macro2::Group::new(g.delimiter(), rename_ident(g.stream(), from, to));
+            ng.set_span(g.span());
+            proc_macro2::TokenTree::Group(ng)
+        }
+        other => other,
+    }).collect()
+}
+
 fn rewrite_guard_self(e: &mut syn::Expr, replacement: &str) {
     use syn::visit_mut::VisitMut;
     struct R<'a>(&'a str);
@@ -1822,6 +1843,7 @@ pub fn generate_root_methods(
         triplet_idx_stmts: Vec<TokenStream2>,
         entity_offsets: Vec<u32>,           // cumulative entity span boundaries
         resolve_stmts: Vec<TokenStream2>,
+        entity_index_copies: Vec<TokenStream2>,
         root_var_ident: syn::Ident,
         cost_entries: Vec<TokenStream2>,
         gh_entries: Vec<TokenStream2>,
@@ -1874,7 +1896,6 @@ pub fn generate_root_methods(
         accessor_write: TokenStream2,
         self_var: syn::Ident,
         root_var_ident: syn::Ident,
-        a_type_ident: syn::Ident,
         a_param_count: usize,
         a_idx_stmts: Vec<TokenStream2>,
         block_ident: syn::Ident,
@@ -2184,6 +2205,18 @@ pub fn generate_root_methods(
         // CrossBlock/remote: find frines field and build ref resolution
         let mut frines_ident = None;
         let mut resolve_stmts = Vec::new();
+        // Same bindings with #[allow(unused_variables)], re-emitted after
+        // each residual row's block writes: the writes take temporary
+        // `&mut` into the resolved collections, ending the row's shared
+        // borrows, so the next row re-establishes them (cheap address
+        // math; measured at parity with the old aliased-pointer code).
+        let mut resolve_reread_stmts = Vec::new();
+        let mut entity_index_copies: Vec<TokenStream2> = Vec::new();
+        // field name -> "self."-rooted index path (e.g. "self.poses"),
+        // used to build the WRITE access path for an entity's blocks:
+        // `self.poses[__frine.pose].hb_pose` -- a temporary exclusive
+        // borrow, taken per call, so aliased entities are sound.
+        let mut ref_index_paths: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         let mut parent_ident = None;
         let mut is_root_level_cross = false;  // constraint struct lives directly on root
 
@@ -2212,6 +2245,7 @@ pub fn generate_root_methods(
 
             let struct_layout = registry_lookup(&sc.struct_name);
             let ref_paths = struct_layout.as_ref().map(|l| l.ref_paths.clone()).unwrap_or_default();
+            let mut seen_ref_fields: std::collections::HashSet<String> = std::collections::HashSet::new();
             for (field_name, resolve_path) in &ref_paths {
                 let field_ident_inner = syn::Ident::new(field_name, proc_macro2::Span::call_site());
                 let adjusted_path = resolve_path.replace("root.", "self.");
@@ -2220,8 +2254,54 @@ pub fn generate_root_methods(
                 ).map_err(|e| syn::Error::new(proc_macro2::Span::call_site(),
                     format!("failed to parse resolve path: {}", e)))?;
                 resolve_stmts.push(quote! { let #field_ident_inner = &#resolve_expr; });
+                // Copy the Ref index to a local ONCE per constraint
+                // instance: rereads and block writes then index through the
+                // local, so the optimizer never has to re-load the Ref
+                // through the collection borrow after a write (measurable
+                // reload cost otherwise).
+                if seen_ref_fields.insert(field_name.clone()) {
+                    let ei_ident = syn::Ident::new(&format!("__ei_{}", field_name), proc_macro2::Span::call_site());
+                    entity_index_copies.push(quote! {
+                        #[allow(unused_variables)]
+                        let #ei_ident = __frine.#field_ident_inner;
+                    });
+                }
+                let reread_expr: syn::Expr = syn::parse_str(
+                    &format!("{}[__ei_{}]", adjusted_path, field_name)
+                ).map_err(|e| syn::Error::new(proc_macro2::Span::call_site(),
+                    format!("failed to parse resolve path: {}", e)))?;
+                resolve_reread_stmts.push(quote! {
+                    #[allow(unused_variables)]
+                    let #field_ident_inner = &#reread_expr;
+                });
+                ref_index_paths.insert(field_name.clone(), adjusted_path);
             }
         }
+
+        // Build a `self.`-rooted mutable access expression for an entity's
+        // field: `self.poses[__frine.pose]`. Resolve paths may chain through
+        // other refs ("pose.info.features"); substitute recursively until
+        // the path is `self.`-rooted.
+        let entity_access_expr = |field_name: &str| -> syn::Result<syn::Expr> {
+            let mut path = match ref_index_paths.get(field_name) {
+                Some(p) => format!("{}[__ei_{}]", p, field_name),
+                None => return Err(syn::Error::new(proc_macro2::Span::call_site(),
+                    format!("no resolve path for entity ref `{}`", field_name))),
+            };
+            for _ in 0..8 {
+                if path.starts_with("self.") { break; }
+                let head = path.split('.').next().unwrap_or("").to_string();
+                let sub = ref_index_paths.get(&head)
+                    .map(|p| format!("{}[__ei_{}]", p, head));
+                match sub {
+                    Some(s) => path = format!("{}{}", s, &path[head.len()..]),
+                    None => return Err(syn::Error::new(proc_macro2::Span::call_site(),
+                        format!("cannot root entity access path `{}` at self", path))),
+                }
+            }
+            syn::parse_str(&path).map_err(|e| syn::Error::new(proc_macro2::Span::call_site(),
+                format!("failed to parse entity access path `{}`: {}", path, e)))
+        };
 
         // Re-process constraint body to get residual-only code and full code
         // We need the symbolic expressions again
@@ -2502,15 +2582,14 @@ pub fn generate_root_methods(
 
         let mut gh_stmts = Vec::new();
 
-        // Cross-block prelude: cache mutable refs to A's and B's SelfBlocks
-        // via unsafe raw-pointer cast. One-time, reused across all residuals.
-        // Mirrors the remote-block pattern (`__target_block`) which coexists
-        // fine with the body's immutable reads. The per-call unsafe{} form
-        // tripped borrow-checker in multi-residual bodies.
+        // Cross-block write targets: mutable access paths taken fresh at
+        // every add_residual call (a temporary exclusive borrow, ending at
+        // the statement). Aliased A/B slots (both refs resolving to one
+        // entity) are sound automatically: the two writes are sequential
+        // borrows of the same place, never simultaneous.
         let is_cross_block = !is_self_block && !is_triplet && !is_remote_block && !is_multi_cross;
-        if is_cross_block {
+        let (a_write_target, b_write_target): (Option<TokenStream2>, Option<TokenStream2>) = if is_cross_block {
             let b_type_name = b_type.as_ref().expect("cross block requires B");
-            let b_type_ident = syn::Ident::new(b_type_name, proc_macro2::Span::call_site());
             let a_hb = registry_lookup(&a_type)
                 .and_then(|l| l.self_block_field.clone())
                 .ok_or_else(|| syn::Error::new_spanned(&struct_ident,
@@ -2527,31 +2606,29 @@ pub fn generate_root_methods(
             let b_var_id = b_var_ident_for_block.as_ref()
                 .ok_or_else(|| syn::Error::new_spanned(&struct_ident,
                     "cross-block constraint missing B-var binding"))?;
-            // `&raw mut` → *mut, bypassing borrow checker's &mut tracking.
-            // For nested cross (a_var = __item, already &mut Parent) taking the
-            // whole __item via raw pointer conflicts with `__item.frines.iter_mut()`
-            // in the surrounding loop. The narrow-field form is accepted
-            // because hb_drift/hb_pose are disjoint from frines.
-            // For root-level cross where a_var is bound immutably (e.g. `prev =
-            // &self.poses[...]`), we must cast through *const→*mut to re-
-            // acquire mutability; the macro chose this binding.
-            let a_raw_expr: TokenStream2 = if is_root_level_cross {
-                quote! { &raw mut (*(#a_var_id as *const #a_type_ident as *mut #a_type_ident)).#a_hb_ident }
+            let a_target: TokenStream2 = if is_root_level_cross {
+                // A is a Ref entity: index the owning collection directly.
+                let access = entity_access_expr(&a_var_id.to_string())?;
+                quote! { #access.#a_hb_ident }
             } else {
-                // nested cross: a_var is already &mut (outer __item)
-                quote! { &raw mut #a_var_id.#a_hb_ident }
+                // Nested cross: A is the parent (`__item`, the outer loop's
+                // &mut item); its block is a field disjoint from the frines
+                // collection the inner loop iterates.
+                quote! { __item.#a_hb_ident }
             };
-            let b_raw_expr: TokenStream2 = if is_root_level_cross {
-                quote! { &raw mut (*(#b_var_id as *const #b_type_ident as *mut #b_type_ident)).#b_hb_ident }
-            } else {
-                // For nested cross B is the ref-resolved &mut Pose via resolve_stmts
-                quote! { &raw mut (*(#b_var_id as *const #b_type_ident as *mut #b_type_ident)).#b_hb_ident }
-            };
-            gh_stmts.push(quote! {
-                let __a_self_block_ptr: *mut _ = unsafe { #a_raw_expr };
-                let __b_self_block_ptr: *mut _ = unsafe { #b_raw_expr };
-            });
-        }
+            let b_access = entity_access_expr(&b_var_id.to_string())?;
+            let b_target: TokenStream2 = quote! { #b_access.#b_hb_ident };
+            (Some(a_target), Some(b_target))
+        } else { (None, None) };
+
+        // Remote (dotted-path) block write target: the block lives on a
+        // Ref-resolved entity (e.g. `pose.hb_pose`); write through its
+        // owning collection slot, fresh per call.
+        let remote_target_write: Option<TokenStream2> = if is_remote_block {
+            let (ref_field_name, _, _) = remote_block_info.as_ref().unwrap();
+            let access = entity_access_expr(ref_field_name)?;
+            Some(quote! { #access.#block_ident })
+        } else { None };
 
         for (name, expr) in &gh_intermediates {
             let name_ident = syn::Ident::new(name, proc_macro2::Span::call_site());
@@ -2599,7 +2676,7 @@ pub fn generate_root_methods(
                 let offset = self_count + root_count;
                 let end = offset + size;
                 root_idx_stmts.push(quote! {
-                    (*__self_ref).#pf_ident.write_indices(&mut __all_idx[#offset..#end]);
+                    self.#pf_ident.write_indices(&mut __all_idx[#offset..#end]);
                 });
                 root_count += size;
             }
@@ -2615,7 +2692,26 @@ pub fn generate_root_methods(
         }
 
         let mut idx = 0;
+        // Remote-block constraints write only through the target path (plus
+        // per-frine cross blocks in multi-cross mode): emit ALL rows'
+        // computes first and defer the writes to the end, in original
+        // order. Reads are then never interrupted, so no reread bindings
+        // are needed (the old code cached one &mut across rows; per-row
+        // re-resolution measurably regressed the band bench). Measured
+        // remote-only: extending deferral to the other families regressed
+        // the sparse bench, so they keep the interleaved compute/write
+        // shape with per-row rereads.
+        let defer_writes = is_remote_block;
+        let mut deferred_writes: Vec<TokenStream2> = Vec::new();
         for ri in 0..n_residuals {
+            // Residual rows interleave reads (residual + derivative
+            // evaluation through shared borrows) and writes (temporary
+            // exclusive borrows into the resolved collections). The writes
+            // end the previous row's shared borrows, so every row after the
+            // first re-establishes the ref bindings.
+            if ri > 0 && !resolve_reread_stmts.is_empty() && !defer_writes {
+                gh_stmts.push(quote! { #(#resolve_reread_stmts)* });
+            }
             let r_ident = syn::Ident::new(&format!("__r_{}", ri), proc_macro2::Span::call_site());
             let r_expr: Expr = parse_sym_code(&gh_simplified[idx].to_rust(""))?;
             // Accumulate the cost alongside the derivatives: the residual
@@ -2664,12 +2760,13 @@ pub fn generate_root_methods(
                     let hb_ident = syn::Ident::new(&hb, proc_macro2::Span::call_site());
                     if span_zero(*start, *count) { continue; }
                     let entity_dr: Vec<TokenStream2> = dr_f64.iter().skip(*start).take(*count).cloned().collect();
-                    // Ref-resolved var is &T immutable via resolve_stmts; use raw-ptr cast.
+                    // Write through a fresh temporary exclusive borrow of the
+                    // entity's owning collection slot.
+                    let access = entity_access_expr(&var_id.to_string())?;
+                    let _ = type_id;
                     triplet_calls.push(quote! {
-                        unsafe {
-                            (*(#var_id as *const #type_id as *mut #type_id)).#hb_ident
-                                .add_residual(#r_ident as #cast_type, &[#(#entity_dr),*], grad);
-                        }
+                        #access.#hb_ident
+                            .add_residual(#r_ident as #cast_type, &[#(#entity_dr),*], grad);
                     });
                 }
                 // Cross pairs need two live spans: with <= 1 nonzero span
@@ -2685,10 +2782,11 @@ pub fn generate_root_methods(
                         &__entity_offsets,
                     );
                 }};
-                gh_stmts.push(quote! {
+                let writes = quote! {
                     #(#triplet_calls)*
                     #cross_call
-                });
+                };
+                if defer_writes { deferred_writes.push(writes); } else { gh_stmts.push(writes); }
             } else if is_multi_cross {
                 // Multi-cross: per-entity SelfBlock writes (same as triplet)
                 // + one CrossBlock.add_residual_cross per declared CrossBlock
@@ -2714,26 +2812,24 @@ pub fn generate_root_methods(
                     let entity_dr: Vec<TokenStream2> = dr_f64.iter().skip(*start).take(*count).cloned().collect();
                     let type_id_str = type_id.to_string();
                     if type_id_str == root_ident_str {
-                        // Root: access via `__self_ref` with *const→*mut cast to
-                        // the root struct type. Look up root's SelfBlock field
-                        // name from the registry.
+                        // Root: its block is a root field, disjoint from the
+                        // iterated collection -- write directly through self.
                         let hb = registry_lookup(&type_id_str)
                             .and_then(|l| l.self_block_field.clone())
                             .ok_or_else(|| syn::Error::new_spanned(&struct_ident,
                                 format!("root type `{}` must declare a `SelfBlock<Self>` field (required as implicit multi-cross participant)", type_id)))?;
                         let hb_ident = syn::Ident::new(&hb, proc_macro2::Span::call_site());
                         self_block_calls.push(quote! {
-                            unsafe {
-                                (*(__self_ref as *const #type_id as *mut #type_id)).#hb_ident
-                                    .add_residual(#r_ident as #cast_type, &[#(#entity_dr),*], grad);
-                            }
+                            self.#hb_ident
+                                .add_residual(#r_ident as #cast_type, &[#(#entity_dr),*], grad);
                         });
                         continue;
                     }
                     if remote_target_type.as_deref() == Some(type_id_str.as_str()) {
-                        // Remote primary: defer to __target_block call.
+                        // Remote primary: write through the remote target path.
+                        let rtw = remote_target_write.as_ref().unwrap();
                         remote_self_block_call = Some(quote! {
-                            __target_block.add_residual(#r_ident as #cast_type, &[#(#entity_dr),*], grad);
+                            #rtw.add_residual(#r_ident as #cast_type, &[#(#entity_dr),*], grad);
                         });
                         continue;
                     }
@@ -2742,11 +2838,10 @@ pub fn generate_root_methods(
                         .ok_or_else(|| syn::Error::new_spanned(&struct_ident,
                             format!("type `{}` must declare a `SelfBlock<Self>` field (required as multi-cross participant)", type_id)))?;
                     let hb_ident = syn::Ident::new(&hb, proc_macro2::Span::call_site());
+                    let access = entity_access_expr(&var_id.to_string())?;
                     self_block_calls.push(quote! {
-                        unsafe {
-                            (*(#var_id as *const #type_id as *mut #type_id)).#hb_ident
-                                .add_residual(#r_ident as #cast_type, &[#(#entity_dr),*], grad);
-                        }
+                        #access.#hb_ident
+                            .add_residual(#r_ident as #cast_type, &[#(#entity_dr),*], grad);
                     });
                 }
                 let mut cross_block_calls: Vec<TokenStream2> = Vec::new();
@@ -2766,15 +2861,17 @@ pub fn generate_root_methods(
                         );
                     });
                 }
-                gh_stmts.push(quote! {
+                let writes = quote! {
                     #(#self_block_calls)*
                     #remote_self_block_call
                     #(#cross_block_calls)*
-                });
+                };
+                if defer_writes { deferred_writes.push(writes); } else { gh_stmts.push(writes); }
             } else if is_remote_block {
                 if !all_zero {
-                    gh_stmts.push(quote! {
-                        __target_block.add_residual(#r_ident as #cast_type, &[#(#dr_f64),*], grad);
+                    let rtw = remote_target_write.as_ref().unwrap();
+                    deferred_writes.push(quote! {
+                        #rtw.add_residual(#r_ident as #cast_type, &[#(#dr_f64),*], grad);
                     });
                 }
             } else if is_self_block {
@@ -2784,10 +2881,11 @@ pub fn generate_root_methods(
                     // every J^T J pair:
                     //   1. __item.<hb_self>.add_residual  -- (self, self)
                     //      diagonal + grad.
-                    //   2. (*__self_ref).<hb_root>.add_residual -- (root,
-                    //      root) diagonal + grad.
-                    //   3. (*__self_ref).<hbt>.add_residual_cross -- the
-                    //      (self, root) across-entity block, COO storage.
+                    //   2. self.<hb_root>.add_residual -- (root, root)
+                    //      diagonal + grad (root fields are disjoint from
+                    //      the iterated collection).
+                    //   3. self.<hbt>.add_residual_cross -- the (self,
+                    //      root) across-entity block, COO storage.
                     let (_, _, _, self_count) = triplet_entities[0];
                     let (_, _, root_start, root_count) = triplet_entities[1];
                     let dr_self: Vec<TokenStream2> =
@@ -2806,58 +2904,63 @@ pub fn generate_root_methods(
                         __item.#block_ident.add_residual(#r_ident as #cast_type, &[#(#dr_self),*], grad);
                     }};
                     let root_call = if root_zero { quote! {} } else { quote! {
-                        unsafe {
-                            (*(__self_ref as *const #root_name as *mut #root_name)).#root_hb_ident
-                                .add_residual(#r_ident as #cast_type, &[#(#dr_root),*], grad);
-                        }
+                        self.#root_hb_ident
+                            .add_residual(#r_ident as #cast_type, &[#(#dr_root),*], grad);
                     }};
                     // The (self, root) cross pairs need both spans live.
                     let cross_call = if self_zero || root_zero { quote! {} } else { quote! {
-                        unsafe {
-                            (*(__self_ref as *const #root_name as *mut #root_name)).#triplet_ident
-                                .add_residual_cross(
-                                    #r_ident as #cast_type,
-                                    &__all_idx,
-                                    &[#(#dr_f64),*],
-                                    &__entity_offsets,
-                                );
-                        }
+                        self.#triplet_ident
+                            .add_residual_cross(
+                                #r_ident as #cast_type,
+                                &__all_idx,
+                                &[#(#dr_f64),*],
+                                &__entity_offsets,
+                            );
                     }};
-                    gh_stmts.push(quote! {
+                    let writes = quote! {
                         #self_call
                         #root_call
                         #cross_call
-                    });
+                    };
+                    if defer_writes { deferred_writes.push(writes); } else { gh_stmts.push(writes); }
                 } else if !all_zero {
-                    gh_stmts.push(quote! {
+                    let writes = quote! {
                         __item.#block_ident.add_residual(#r_ident as #cast_type, &[#(#dr_f64),*], grad);
-                    });
+                    };
+                    if defer_writes { deferred_writes.push(writes); } else { gh_stmts.push(writes); }
                 }
             } else {
                 // CrossBlock: split dr into dr_a (first a_param_count) + dr_b
                 // (next b_param_count). Three calls: A's SelfBlock gets
                 // grad[A] + H[A,A] diagonal; B's SelfBlock same for B; the
                 // cross block holds only the A-B rectangular cross Hessian.
-                // __a_self_block_ptr / __b_self_block_ptr cached at top of gh_stmts.
+                // Each write takes a fresh temporary exclusive borrow.
                 let dr_a: Vec<TokenStream2> = dr_f64.iter().take(a_param_count).cloned().collect();
                 let dr_b: Vec<TokenStream2> = dr_f64.iter().skip(a_param_count).take(b_param_count).cloned().collect();
                 let a_zero = span_zero(0, a_param_count);
                 let b_zero = span_zero(a_param_count, b_param_count);
+                let a_target = a_write_target.as_ref().unwrap();
+                let b_target = b_write_target.as_ref().unwrap();
                 let a_call = if a_zero { quote! {} } else { quote! {
-                    unsafe { (*__a_self_block_ptr).add_residual(#r_ident as #cast_type, &[#(#dr_a),*], grad); }
+                    #a_target.add_residual(#r_ident as #cast_type, &[#(#dr_a),*], grad);
                 }};
                 let b_call = if b_zero { quote! {} } else { quote! {
-                    unsafe { (*__b_self_block_ptr).add_residual(#r_ident as #cast_type, &[#(#dr_b),*], grad); }
+                    #b_target.add_residual(#r_ident as #cast_type, &[#(#dr_b),*], grad);
                 }};
                 let cross_call = if a_zero || b_zero { quote! {} } else { quote! {
                     __frine.#block_ident.add_residual_cross(#r_ident as #cast_type, &[#(#dr_a),*], &[#(#dr_b),*]);
                 }};
-                gh_stmts.push(quote! {
+                let writes = quote! {
                     #a_call
                     #b_call
                     #cross_call
-                });
+                };
+                if defer_writes { deferred_writes.push(writes); } else { gh_stmts.push(writes); }
             }
+        }
+
+        if !deferred_writes.is_empty() {
+            gh_stmts.push(quote! { #(#deferred_writes)* });
         }
 
         // --- Jacobian code: same intermediates + residuals + derivatives, push rows ---
@@ -3029,7 +3132,7 @@ pub fn generate_root_methods(
                     }
             }
             // Append root's write_indices calls when root is an implicit
-            // entity. Accessed via (*__self_ref).<param> since root is the
+            // entity. Accessed via `self.<param>` since root is the
             // enclosing `Self`.
             if has_root_entity
                 && let Some(root_layout) = registry_lookup(&root_type_str)
@@ -3047,7 +3150,7 @@ pub fn generate_root_methods(
                     let offset = triplet_param_count;
                     let end = offset + size;
                     triplet_idx_stmts.push(quote! {
-                        (*__self_ref).#pf_ident.write_indices(&mut __all_idx[#offset..#end]);
+                        self.#pf_ident.write_indices(&mut __all_idx[#offset..#end]);
                     });
                     triplet_param_count += size;
                 }
@@ -3091,7 +3194,7 @@ pub fn generate_root_methods(
             let parent_ident = parent_ident.unwrap();
             let (ref_field_name, _, target_type) = remote_block_info.as_ref().unwrap();
             let ref_field_ident = syn::Ident::new(ref_field_name, proc_macro2::Span::call_site());
-            let target_type_ident = syn::Ident::new(target_type, proc_macro2::Span::call_site());
+            let _target_type_ident = syn::Ident::new(target_type, proc_macro2::Span::call_site());
 
             // Find the root collection that contains the target type (for resolving the ref)
             let target_coll = find_root_collection(root_fields, target_type);
@@ -3180,42 +3283,43 @@ pub fn generate_root_methods(
             };
             let tp_remote = triplet_param_count;
             let triplet_idx_stmts_remote = triplet_idx_stmts.clone();
+            // Remote-target writes go through the owning collection slot
+            // (built into gh_stmts as `self.<coll>[__frine.<ref>].<block>`),
+            // a temporary exclusive borrow per call -- disjoint from the
+            // parent collection this loop iterates. Parent reads are
+            // `__lm.*` field projections; root reads go through `self`.
             if is_multi_cross {
-                grad_hessian_loops.push(quote! {
+                let gh_loop = quote! {
                     {
                         #marker_gh
                         for __lm in self.#coll_ident.iter_mut() {
-                            let #parent_ident = unsafe { &*(__lm as *const #a_type_ident) };
                             for __frine in __lm.#frines_ident.iter_mut() {
-                                #(#resolve_stmts)*
-                                let #root_var_ident = &*__self_ref;
-                                let __target_block = unsafe {
-                                    &mut (*(#ref_field_ident
-                                        as *const #target_type_ident as *mut #target_type_ident)).#block_ident
-                                };
+                                #(#entity_index_copies)*
+                                #(#resolve_reread_stmts)*
                                 { #(#gh_stmts)* }
                             }
                         }
                     }
-                });
+                };
+                let gh_loop = rename_ident(
+                    rename_ident(gh_loop, &parent_name, "__lm"), &root_var_name, "self");
+                grad_hessian_loops.push(gh_loop);
             } else {
-                grad_hessian_loops.push(quote! {
+                let gh_loop = quote! {
                     {
                         #marker_gh
                         for __lm in self.#coll_ident.iter() {
-                            let #parent_ident = __lm;
                             for __frine in &__lm.#frines_ident {
-                                #(#resolve_stmts)*
-                                let #root_var_ident = &*__self_ref;
-                                let __target_block = unsafe {
-                                    &mut (*(#ref_field_ident
-                                        as *const #target_type_ident as *mut #target_type_ident)).#block_ident
-                                };
+                                #(#entity_index_copies)*
+                                #(#resolve_reread_stmts)*
                                 { #(#gh_stmts)* }
                             }
                         }
                     }
-                });
+                };
+                let gh_loop = rename_ident(
+                    rename_ident(gh_loop, &parent_name, "__lm"), &root_var_name, "self");
+                grad_hessian_loops.push(gh_loop);
             }
 
             if is_multi_cross {
@@ -3232,42 +3336,43 @@ pub fn generate_root_methods(
                         );
                     }
                 }).collect();
-                set_block_indices_loops.push(quote! {
+                let rtw = remote_target_write.as_ref().unwrap();
+                let sbi_loop = quote! {
                     for __lm in self.#coll_ident.iter_mut() {
-                        let #parent_ident = unsafe { &*(__lm as *const #a_type_ident) };
                         for __frine in __lm.#frines_ident.iter_mut() {
+                            #(#entity_index_copies)*
                             #(#resolve_stmts)*
                             let __target_ref = #ref_field_ident;
-                            let __target_block = unsafe {
-                                &mut (*(#ref_field_ident
-                                    as *const #target_type_ident as *mut #target_type_ident)).#block_ident
-                            };
                             let mut __a_idx = [0u32; #target_param_count];
                             #(#target_idx_stmts)*
-                            __target_block.set_indices(&__a_idx);
                             let mut __all_idx = [0u32; #tp_remote];
                             #(#triplet_idx_stmts_remote)*
+                            #rtw.set_indices(&__a_idx);
                             #(#entity_self_indices)*
                             #(#mcb_calls)*
                         }
                     }
-                });
+                };
+                let sbi_loop = rename_ident(
+                    rename_ident(sbi_loop, &parent_name, "__lm"), &root_var_name, "self");
+                set_block_indices_loops.push(sbi_loop);
             } else {
-                set_block_indices_loops.push(quote! {
+                let rtw = remote_target_write.as_ref().unwrap();
+                let sbi_loop = quote! {
                     for __lm in self.#coll_ident.iter() {
                         for __frine in &__lm.#frines_ident {
+                            #(#entity_index_copies)*
                             #(#resolve_stmts)*
                             let __target_ref = #ref_field_ident;
-                            let __target_block = unsafe {
-                                &mut (*(#ref_field_ident
-                                    as *const #target_type_ident as *mut #target_type_ident)).#block_ident
-                            };
                             let mut __a_idx = [0u32; #target_param_count];
                             #(#target_idx_stmts)*
-                            __target_block.set_indices(&__a_idx);
+                            #rtw.set_indices(&__a_idx);
                         }
                     }
-                });
+                };
+                let sbi_loop = rename_ident(
+                    rename_ident(sbi_loop, &parent_name, "__lm"), &root_var_name, "self");
+                set_block_indices_loops.push(sbi_loop);
             }
         } else if is_self_block {
             let self_var = syn::Ident::new(&self_var_name, proc_macro2::Span::call_site());
@@ -3279,10 +3384,21 @@ pub fn generate_root_methods(
                 quote! { { #marker #(#cost_stmts)* } }
             };
 
+            // Grad+hessian entries access the entity through `__item` (the
+            // loop's `&mut` item) directly: reads are field projections,
+            // writes are temporary exclusive borrows of the block field --
+            // no whole-struct alias binding needed. Root-field reads go
+            // through `self` (disjoint from the iterated collection).
             let gh_entry = if let Some(ref guard) = guard_expr {
                 quote! { if #guard { #marker #(#gh_stmts)* } }
             } else {
                 quote! { { #marker #(#gh_stmts)* } }
+            };
+            let gh_entry = {
+                let renamed = rename_ident(gh_entry, &self_var_name, "__item");
+                if root_var_name != self_var_name {
+                    rename_ident(renamed, &root_var_name, "self")
+                } else { renamed }
             };
 
             let jac_entry = if !jac_stmts.is_empty() {
@@ -3350,7 +3466,6 @@ pub fn generate_root_methods(
                         accessor_write,
                         self_var: self_var.clone(),
                         root_var_ident: root_var_ident.clone(),
-                        a_type_ident: a_type_ident.clone(),
                         a_param_count,
                         a_idx_stmts: a_idx_stmts.clone(),
                         block_ident: block_ident.clone(),
@@ -3380,11 +3495,16 @@ pub fn generate_root_methods(
             } else {
                 quote! { { #marker #(#cost_stmts)* } }
             };
+            // Entry re-establishes the ref bindings at its top: a preceding
+            // entry's block writes ended the loop-level shared borrows.
+            // Rereads go BEFORE the guard -- guards may reference resolved
+            // entity vars (e.g. `guard = arc.is_ellipse`).
             let gh_entry = if let Some(ref guard) = guard_expr {
-                quote! { if #guard { #marker #(#gh_stmts)* } }
+                quote! { { #marker #(#entity_index_copies)* #(#resolve_reread_stmts)* if #guard { #(#gh_stmts)* } } }
             } else {
-                quote! { { #marker #(#gh_stmts)* } }
+                quote! { { #marker #(#entity_index_copies)* #(#resolve_reread_stmts)* #(#gh_stmts)* } }
             };
+            let gh_entry = rename_ident(gh_entry, &root_var_name, "self");
             let jac_entry = if !jac_stmts.is_empty() {
                 if let Some(ref guard) = guard_expr {
                     Some(quote! { if #guard { #marker #(#jac_stmts)* } })
@@ -3420,12 +3540,12 @@ pub fn generate_root_methods(
                 let hb_ident = syn::Ident::new(&hb, proc_macro2::Span::call_site());
                 let end = start + count;
                 let cnt = *count;
+                let access = entity_access_expr(&var_id.to_string())?;
+                let _ = type_id;
                 entity_set_indices.push(quote! {
-                    unsafe {
-                        (*(#var_id as *const #type_id as *mut #type_id)).#hb_ident.set_indices(
-                            <&[u32; #cnt]>::try_from(&__all_idx[#start..#end]).unwrap()
-                        );
-                    }
+                    #access.#hb_ident.set_indices(
+                        <&[u32; #cnt]>::try_from(&__all_idx[#start..#end]).unwrap()
+                    );
                 });
             }
 
@@ -3442,6 +3562,7 @@ pub fn generate_root_methods(
                     triplet_idx_stmts: triplet_idx_stmts.clone(),
                     entity_offsets: triplet_entity_offsets.clone(),
                     resolve_stmts: resolve_stmts.clone(),
+                    entity_index_copies: entity_index_copies.clone(),
                     root_var_ident: root_var_ident.clone(),
                     cost_entries: Vec::new(),
                     gh_entries: Vec::new(),
@@ -3473,11 +3594,13 @@ pub fn generate_root_methods(
             } else {
                 quote! { { #marker #(#cost_stmts)* } }
             };
+            // Entry-top rereads before the guard: see the triplet entry above.
             let gh_entry = if let Some(ref guard) = guard_expr {
-                quote! { if #guard { #marker #(#gh_stmts)* } }
+                quote! { { #marker #(#entity_index_copies)* #(#resolve_reread_stmts)* if #guard { #(#gh_stmts)* } } }
             } else {
-                quote! { { #marker #(#gh_stmts)* } }
+                quote! { { #marker #(#entity_index_copies)* #(#resolve_reread_stmts)* #(#gh_stmts)* } }
             };
+            let gh_entry = rename_ident(gh_entry, &root_var_name, "self");
             let jac_entry = if !jac_stmts.is_empty() {
                 if let Some(ref guard) = guard_expr {
                     Some(quote! { if #guard { #marker #(#jac_stmts)* } })
@@ -3530,16 +3653,23 @@ pub fn generate_root_methods(
                 }
             };
 
+            // Parent reads become `__item.*` field projections (disjoint
+            // from the iterated frines field); root reads go through
+            // `self`; entity writes are temporary borrows built into
+            // gh_stmts. No alias bindings remain.
             let nested_gh = quote! {
                 {
                     #marker
-                    let #parent_ident = unsafe { &*(__item as *const #a_type_ident) };
                     for __frine in __item.#frines_ident.iter_mut() {
-                        #(#resolve_stmts)*
-                        let #root_var_ident = &*__self_ref;
+                        #(#entity_index_copies)*
+                        #(#resolve_reread_stmts)*
                         { #(#gh_stmts)* }
                     }
                 }
+            };
+            let nested_gh = {
+                let renamed = rename_ident(nested_gh, &parent_name, "__item");
+                rename_ident(renamed, &root_var_name, "self")
             };
 
             let nested_jac = if !jac_stmts.is_empty() {
@@ -3619,6 +3749,7 @@ pub fn generate_root_methods(
         let coll = &group.coll_ident;
         let self_var = &group.self_var;
         let a_type = &group.a_type_ident;
+        let _ = a_type;
         let cost_entries = &group.cost_entries;
         let gh_entries = &group.gh_entries;
         let jac_entries = &group.jac_entries;
@@ -3636,11 +3767,11 @@ pub fn generate_root_methods(
             }
         });
 
-        // Merged grad+hessian loop
+        // Merged grad+hessian loop. Entries access the entity as `__item`
+        // and the root as `self` directly (renamed at entry creation) --
+        // no alias bindings.
         merged_gh.push(quote! {
             for __item in self.#coll.iter_mut() {
-                let #self_var = unsafe { &*(__item as *const #a_type) };
-                let #root_var_ident = &*__self_ref;
                 #(#gh_entries)*
                 #(#nested_gh)*
             }
@@ -3831,7 +3962,6 @@ pub fn generate_root_methods(
         let accessor_write = &group.accessor_write;
         let self_var = &group.self_var;
         let root_var = &group.root_var_ident;
-        let a_type = &group.a_type_ident;
         let a_count = group.a_param_count;
         let a_idx_stmts = &group.a_idx_stmts;
         let block_ident = &group.block_ident;
@@ -3854,8 +3984,6 @@ pub fn generate_root_methods(
         merged_gh.push(quote! {
             {
                 let __item = #accessor_write;
-                let #self_var = unsafe { &*(__item as *const #a_type) };
-                let #root_var = &*__self_ref;
                 #(#gh_entries)*
             }
         });
@@ -3916,10 +4044,10 @@ pub fn generate_root_methods(
             }
         });
 
+        // Entries carry their own ref rereads at the top; root reads go
+        // through `self` (renamed at entry creation).
         grad_hessian_loops.push(quote! {
             for __frine in self.#rc_ident.iter_mut() {
-                #(#resolve_stmts)*
-                let #root_var = &*__self_ref;
                 #(#gh_entries)*
             }
         });
@@ -3966,6 +4094,7 @@ pub fn generate_root_methods(
         let block_ident = &group.block_ident;
         let triplet_idx_stmts = &group.triplet_idx_stmts;
         let resolve_stmts = &group.resolve_stmts;
+        let entity_index_copies = &group.entity_index_copies;
         let root_var = &group.root_var_ident;
         let cost_entries = &group.cost_entries;
         let gh_entries = &group.gh_entries;
@@ -3984,10 +4113,11 @@ pub fn generate_root_methods(
 
         let entity_offsets = &group.entity_offsets;
         let entity_offsets_len = entity_offsets.len();
+        // Loop-level resolves feed the __all_idx build; entries re-establish
+        // their own bindings (a preceding entry's writes end these borrows).
         grad_hessian_loops.push(quote! {
             for __frine in self.#rc_ident.iter_mut() {
                 #(#resolve_stmts)*
-                let #root_var = &*__self_ref;
                 let mut __all_idx = [0u32; #tp];
                 #(#triplet_idx_stmts)*
                 let __entity_offsets: [u32; #entity_offsets_len] = [#(#entity_offsets),*];
@@ -4033,6 +4163,7 @@ pub fn generate_root_methods(
             }).collect();
             set_block_indices_loops.push(quote! {
                 for __frine in self.#rc_ident.iter_mut() {
+                    #(#entity_index_copies)*
                     #(#resolve_stmts)*
                     let mut __all_idx = [0u32; #tp];
                     #(#triplet_idx_stmts)*
@@ -4048,6 +4179,7 @@ pub fn generate_root_methods(
             // plus __cid assignment.
             set_block_indices_loops.push(quote! {
                 for __frine in self.#rc_ident.iter_mut() {
+                    #(#entity_index_copies)*
                     #(#resolve_stmts)*
                     let mut __all_idx = [0u32; #tp];
                     #(#triplet_idx_stmts)*
@@ -4150,8 +4282,6 @@ pub fn generate_root_methods(
             fn __set_block_indices(&mut self) {
                 let mut __cid: u32 = 0;
                 let _ = &__cid; // suppress unused warning when no constraint_index fields
-                let __self_ref = unsafe { &*(self as *const Self) };
-                let _ = __self_ref; // consumed only when root params participate
                 #root_self_block_prelude
                 #(#set_block_indices_loops)*
             }
@@ -4161,7 +4291,6 @@ pub fn generate_root_methods(
             fn __compute_blocks(&mut self, params: &[#prec_type], grad: &mut [#prec_type]) -> #prec_type {
                 arael::model::Model::#update_method(self, params);
                 #extended_update_call
-                let __self_ref = unsafe { &*(self as *const Self) };
                 self.zero_blocks();
                 let mut __cost = 0.0 as #prec_type;
                 #(#grad_hessian_loops)*
@@ -4179,7 +4308,8 @@ pub fn generate_root_methods(
                 fn calc_jacobian(&mut self, params: &[#prec_type]) -> arael::model::Jacobian<#prec_type> {
                     arael::model::Model::#update_method(self, params);
                     #ext_update
-                    let __self_ref = unsafe { &*(self as *const Self) };
+                    // Read-only traversal: a plain shared reborrow suffices.
+                    let __self_ref = &*self;
                     let mut __jac_rows: std::vec::Vec<arael::model::JacobianRow<#prec_type>> = std::vec::Vec::new();
                     let mut __jac_cid: u32 = 0;
                     #(#jacobian_loops)*
@@ -4224,7 +4354,8 @@ pub fn generate_root_methods(
             fn calc_cost(&mut self, params: &[#prec_type]) -> #prec_type {
                 arael::model::Model::#update_method(self, params);
                 #extended_update_call
-                let __self_ref = unsafe { &*(self as *const Self) };
+                // Read-only traversal: a plain shared reborrow suffices.
+                let __self_ref = &*self;
                 let mut __cost = 0.0 as #prec_type;
                 #(#cost_loops)*
                 #extended_cost_call

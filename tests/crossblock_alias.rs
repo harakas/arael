@@ -10,6 +10,13 @@
 // The residual is nonlinear (a.x * b.x) so the dropped term is visible:
 // for the aliased pair the true Hessian diagonal is (2x)^2 * 2, while
 // the skipping version produced only half of it.
+//
+// This suite doubles as the UB regression check for the generated
+// accumulation code (the aliased case is exactly where the old
+// raw-pointer emission created overlapping exclusive borrows). Verify
+// with:  cargo +nightly miri test --test crossblock_alias
+// (add MIRIFLAGS=-Zmiri-tree-borrows to get past a known upstream
+// Stacked Borrows violation inside nalgebra's Cholesky views).
 
 use arael::model::{Model, Param, SelfBlock, CrossBlock, JacobianModel};
 use arael::simple_lm::{self, LmConfig, LmProblem, CooMatrix, CscMatrix};

@@ -1361,9 +1361,9 @@ impl arael::model::ExtendedModel for Sketch {
         let bag = self.symbol_bag.as_ref().expect("symbol_bag not built");
         let vars = bag.eval_vars(params);
         let isigma = self.constraint_isigma;
-        let hb = &mut self.expr_hb as *mut TripletBlock<f64>;
+        let hb = &mut self.expr_hb;
         for ec in &self.expr_constraints {
-            if let Err(e) = ec.compute(&vars, isigma, unsafe { &mut *hb }, grad) {
+            if let Err(e) = ec.compute(&vars, isigma, hb, grad) {
                 eprintln!("expr constraint eval error: {}: {}", ec.description, e);
             }
         }
