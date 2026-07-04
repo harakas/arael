@@ -374,7 +374,7 @@ fn aliased_cross_equals_self_formulation() {
     // The production pipeline: CSC scatter (first iteration builds the
     // structure from COO; steady state replays via the cached position
     // map). Exercise both variants for both formulations.
-    let mut run_csc = |w: &mut W, params: &[f64], coo: &CooMatrix<f64>, label: &str| {
+    let run_csc = |w: &mut W, params: &[f64], coo: &CooMatrix<f64>, label: &str| {
         let mut csc_direct = coo.to_csc();
         csc_direct.vals.iter_mut().for_each(|v| *v = 0.0);
         let mut g = vec![0.0; n];

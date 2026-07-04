@@ -620,6 +620,27 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
             }
         }
         solver.extract_diagonal(&matrix, &mut diagonal);
+        // A non-positive diagonal cannot be rescued by multiplicative
+        // damping ((1 + lambda) * 0 stays 0): the matrix is singular, no
+        // step can ever be accepted, and the iteration would burn all its
+        // inner failures against max_iters with no error indication. The
+        // Gauss-Newton diagonal is a sum of squares, so zero means no
+        // active constraint curvature touches the parameter at this
+        // linearization point; NaN means poisoned assembly. !(d > 0)
+        // catches both. This is a runtime value condition (a guard or
+        // saturated robustifier can produce it from data), so it
+        // terminates the solve loudly instead of panicking; structural
+        // degeneracy (missing diagonal ENTRY) panics at CSC build time.
+        // TODO(F4): report as a proper LmStatus instead of a log line.
+        for (i, d) in diagonal.iter().enumerate() {
+            if !(*d > T::zero()) {
+                error!("arael::lm_solve: parameter {} has non-positive Hessian \
+                        diagonal ({:?}) at iteration {}; no active constraint \
+                        curvature touches it (degenerate model) -- terminating solve",
+                    i, d.to_f64(), iter);
+                return LmResult { x: cur_x, start_cost, end_cost, iterations: iter };
+            }
+        }
 
         let mut inner = 0usize;
         const INNER_LOOPS: usize = 20;
@@ -635,22 +656,15 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
                     let n_nan_d = diagonal.iter().filter(|v| !v.is_finite()).count();
                     let n_nan_x = cur_x.iter().filter(|v| !v.is_finite()).count();
                     let n_nan_m = solver.matrix_nonfinite_count(&matrix);
-                    // A Cholesky-fit Hessian must have strictly positive
-                    // diagonals. Any diagonal <= 0 means the block
-                    // accumulation never touched that parameter (indices
-                    // left at u32::MAX, or constraint misses it) or a
-                    // negative contribution slipped in -- both are real
-                    // bugs distinct from tiny-lambda rounding.
-                    let n_nonpos_d = diagonal.iter()
-                        .filter(|v| **v <= T::zero())
-                        .count();
-                    eprintln!("{}/{}: Cholesky failed (damped matrix not positive-definite), lambda={} -> {} (step={}) [non-finite: grad={} diag={} x={} matrix={}] [diag<=0: {}]",
+                    // Non-positive diagonals are ruled out by the explicit
+                    // check before the inner loop, so a failure here is
+                    // off-diagonal indefiniteness or tiny-lambda rounding.
+                    eprintln!("{}/{}: Cholesky failed (damped matrix not positive-definite), lambda={} -> {} (step={}) [non-finite: grad={} diag={} x={} matrix={}]",
                         iter, inner,
                         G(lambda.to_f64().unwrap()),
                         G((lambda * lambda_up).to_f64().unwrap()),
                         step_us,
-                        n_nan_g, n_nan_d, n_nan_x, n_nan_m,
-                        n_nonpos_d);
+                        n_nan_g, n_nan_d, n_nan_x, n_nan_m);
                 }
                 lambda *= lambda_up;
                 inner += 1;
@@ -1835,14 +1849,23 @@ impl<T: Float> CooMatrix<T> {
             col_ptr[j] += col_ptr[j - 1];
         }
 
-        // Find diagonal positions
+        // Find diagonal positions. A missing diagonal is a degenerate
+        // model (no constraint touches that parameter): fail here with
+        // the parameter index instead of letting diag_pos[j] = 0 corrupt
+        // vals[0] and surface as an unexplained Cholesky failure.
         let mut diag_pos = vec![0usize; n];
         for j in 0..n {
+            let mut found = false;
             for k in col_ptr[j]..col_ptr[j + 1] {
                 if row_idx[k] as usize == j {
                     diag_pos[j] = k;
+                    found = true;
                     break;
                 }
+            }
+            if !found {
+                panic!("parameter {} has no Hessian diagonal entry: no constraint \
+                        touches it (degenerate model)", j);
             }
         }
 
@@ -1965,14 +1988,21 @@ impl<T: Float> CooMatrix<T> {
             new_col_ptr[j] += new_col_ptr[j - 1];
         }
 
-        // Find diagonal positions
+        // Find diagonal positions; missing diagonal = degenerate model,
+        // see to_csc.
         let mut diag_pos = vec![0usize; n];
         for j in 0..n {
+            let mut found = false;
             for k in new_col_ptr[j]..new_col_ptr[j + 1] {
                 if row_idx[k] as usize == j {
                     diag_pos[j] = k;
+                    found = true;
                     break;
                 }
+            }
+            if !found {
+                panic!("parameter {} has no Hessian diagonal entry: no constraint \
+                        touches it (degenerate model)", j);
             }
         }
 
