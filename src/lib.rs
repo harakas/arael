@@ -798,7 +798,7 @@
 //! | [`solve_band[_f32]`](simple_lm::solve_band) | **only** when the Hessian is genuinely block-tridiagonal with a known half-bandwidth `kd`. ~10x faster than dense at 500 poses but hard-errors on any off-band element |
 //!
 //! Feature-gated backends (`BandLapack`, `SparseDirect`,
-//! `SparseSchur`, `SparseEigen`, `SparseCholmod`) target specific
+//! `SparseEigen`, `SparseCholmod`) target specific
 //! environments (LAPACK interop, alternative factorisations,
 //! external-solver interop). Enable the corresponding cargo feature
 //! only if you need the interop -- they don't outperform `faer` on
@@ -1539,11 +1539,11 @@
 //!   localisation model at increasing pose counts. Prints timing +
 //!   speedup.
 //! - **[`bench_investigate`](https://github.com/harakas/arael/blob/master/examples/bench_investigate.rs)**
-//!   -- deeper comparison of sparse backends (faer, schur) on the
+//!   -- deeper comparison of sparse backends on the
 //!   SLAM model, with assembly vs solve breakdown and numeric
 //!   cross-check of the solutions.
 //! - **[`bench_sparse`](https://github.com/harakas/arael/blob/master/examples/bench_sparse.rs)**
-//!   -- sparse Cholesky backends (faer / schur) vs dense on SLAM.
+//!   -- sparse Cholesky backends (faer) vs dense on SLAM.
 //! - **[`calc_demo`](https://github.com/harakas/arael/blob/master/examples/calc_demo.rs)**
 //!   -- `bc`-style REPL calculator built on `arael-sym`. Shows
 //!   `parse_with_functions` + `FunctionBag` for user-defined

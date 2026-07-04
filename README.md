@@ -329,8 +329,8 @@ See [examples/loc_demo.rs](examples/loc_demo.rs).
 The `examples/` directory is the primary place to see the API in use. Each file is a runnable `cargo run --release --example <name>`.
 
 - **[bench_band](examples/bench_band.rs)** -- benchmarks the band Cholesky backend against dense on the localisation model at increasing pose counts. Prints timing + speedup.
-- **[bench_investigate](examples/bench_investigate.rs)** -- deeper comparison of sparse backends (faer, schur) on SLAM, with assembly vs solve breakdown and numeric cross-check of the solutions.
-- **[bench_sparse](examples/bench_sparse.rs)** -- sparse Cholesky backends (faer / schur) vs dense on SLAM.
+- **[bench_investigate](examples/bench_investigate.rs)** -- deeper comparison of sparse backends on SLAM, with assembly vs solve breakdown and numeric cross-check of the solutions.
+- **[bench_sparse](examples/bench_sparse.rs)** -- sparse Cholesky backends (faer) vs dense on SLAM.
 - **[calc_demo](examples/calc_demo.rs)** -- `bc`-style REPL calculator built on `arael-sym`. Shows `parse_with_functions` + `FunctionBag` for user-defined functions, persistent history via rustyline.
 - **[jacobian_demo](examples/jacobian_demo.rs)** -- `#[arael(root, jacobian)]`, `#[arael(constraint_index)]`, and `calc_jacobian` / `calc_cost_table` walk-through. End-to-end reference for the instrumentation features used in convergence debugging.
 - **[linear_demo](examples/linear_demo.rs)** -- robust linear regression on noisy 2D data. Residual wrapped in `gamma * atan(r / gamma)` -- the [Starship method (US12346118)](https://patents.google.com/patent/US12346118), same robustifier used by the feature constraints in loc/SLAM. Minimal single-struct model + LM fit, compared against plain closed-form least squares.

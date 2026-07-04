@@ -451,14 +451,6 @@ fn main() {
             bench_solver("faer", &mut arael::simple_lm::SparseFaer::new(), &mut path, &params, runs);
         }
 
-        // schur
-        {
-            let mut path = build_path(&cfg);
-            let mut params: Vec<f64> = Vec::new();
-            path.serialize64(&mut params);
-            let np = cfg.num_poses * 6;
-            bench_solver("schur", &mut arael::simple_lm::SparseSchur::new(np), &mut path, &params, runs);
-        }
 
         // Eigen SimplicialLLT
         #[cfg(feature = "eigen")]

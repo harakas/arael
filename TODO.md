@@ -93,3 +93,4 @@
 
 - **arael**: geometry helpers deferred from the F6 math-coverage review (new feature surface rather than sym/runtime parity; nothing in the repo blocks on them): matrix2/matrix3 `inverse`, matrix -> quaternion conversion, SE(2)/SE(3) compose/between helpers, skew/hat operator (`[v]_x` from a vect3).
 - **arael-sym**: quaternsym operations deferred from F6 stage E: `pow`/`log`/`exp`/`slerp`/`from_two_vectors`/`get_axis_angle`. All are branchy (sign flips, acos edge cases, zero-angle guards) and not residual-friendly; the runtime `quatern` has them for data preparation.
+- **arael**: SparseSchur solver deleted (it lost to faer on every benchmark and its hard-coded 6-DOF-pose/3-DOF-landmark contract failed silently outside BA-shaped problems -- REVIEW B26). The explicit Schur-elimination math is the natural seed for F2 sliding-window marginalization; recover it from git history (src/simple_lm.rs prior to the deletion commit) if F2 lands.

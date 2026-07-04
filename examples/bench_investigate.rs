@@ -585,13 +585,4 @@ fn main() {
         compare("cholmod", &delta, &delta_dense);
     }
 
-    // Schur complement
-    {
-        let mut path = build_path(&cfg);
-        let mut params: Vec<f64> = Vec::new();
-        path.serialize64(&mut params);
-        let np = cfg.num_poses * 6;
-        let delta = time_one("schur", &mut arael::simple_lm::SparseSchur::new(np), &mut path, &params);
-        compare("schur", &delta, &delta_dense);
-    }
 }

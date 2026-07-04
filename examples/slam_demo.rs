@@ -542,7 +542,7 @@ fn build_path(cfg: &SceneConfig) -> (Path, Vec<(vect3f, vect3f)>, Vec<(vect3f, u
 
 fn print_usage() {
     eprintln!("Usage: slam_demo [OPTIONS]");
-    eprintln!("  --solver <dense|faer|schur|eigen|cholmod>  (default: faer)");
+    eprintln!("  --solver <dense|faer|eigen|cholmod>  (default: faer)");
     eprintln!("  --poses <N>                          (default: 60)");
     eprintln!("  --landmarks <N>                      (default: 240)");
 }
@@ -615,10 +615,6 @@ fn main() {
         let result = match solver_name.as_str() {
             "dense" => arael::simple_lm::solve(&params64, &mut path, &config),
             "faer" => arael::simple_lm::solve_sparse_faer(&params64, &mut path, &config),
-            "schur" => {
-                let np = path.poses.len() * 6;
-                arael::simple_lm::solve_sparse_schur(&params64, np, &mut path, &config)
-            }
             #[cfg(feature = "eigen")]
             "eigen" => arael::simple_lm::solve_sparse_eigen(&params64, &mut path, &config),
             #[cfg(not(feature = "eigen"))]
@@ -627,7 +623,7 @@ fn main() {
             "cholmod" => arael::simple_lm::solve_sparse_cholmod(&params64, &mut path, &config),
             #[cfg(not(feature = "cholmod"))]
             "cholmod" => { eprintln!("CHOLMOD solver requires --features cholmod"); return; }
-            _ => { eprintln!("Unknown solver: {}. Available: dense, faer, schur, eigen, cholmod", solver_name); return; }
+            _ => { eprintln!("Unknown solver: {}. Available: dense, faer, eigen, cholmod", solver_name); return; }
         };
         path.deserialize64(&result.x);
         println!("  {} iterations, cost {:.4} -> {:.4}", result.iterations, result.start_cost, result.end_cost);

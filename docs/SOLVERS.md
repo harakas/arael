@@ -22,7 +22,7 @@ Pick anything else only when you have a specific reason:
 | `solve[_f32]` (dense) | toy problems (≤ 4 parameters), or when the Hessian is actually dense and small. Simple, no overhead from sparse bookkeeping |
 | `solve_band[_f32]` | **only** when the Hessian is genuinely block-tridiagonal with a known half-bandwidth `kd` (pose-only localisation, smoother-like problems). ~10x faster than dense at 500 poses but hard-errors on any off-band element |
 
-Feature-gated backends (`BandLapack`, `SparseDirect`, `SparseSchur`,
+Feature-gated backends (`BandLapack`, `SparseDirect`,
 `SparseEigen`, `SparseCholmod`) target specific environments: LAPACK
 interop, alternative factorisation strategies, external-solver
 interop. Enable them via cargo features only when you need the
