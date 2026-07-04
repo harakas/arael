@@ -1651,7 +1651,12 @@ pub fn generate_root_methods(
         gh_entries: Vec<TokenStream2>,
         jac_entries: Vec<TokenStream2>,
     }
-    let mut cross_groups: std::collections::HashMap<String, CrossCollectionGroup> = std::collections::HashMap::new();
+    // All four emission group maps are BTreeMaps: their iteration order
+    // drives code emission (loop order, __cid assignment, floating-point
+    // accumulation order). HashMap's per-instance random state made every
+    // rustc invocation emit differently -- non-reproducible builds and
+    // last-ulp numeric drift between recompiles.
+    let mut cross_groups: std::collections::BTreeMap<String, CrossCollectionGroup> = std::collections::BTreeMap::new();
 
     // Per-CrossBlock info for a multi-cross constraint (one entry per
     // declared CrossBlock field). The entity-span setup (__all_idx via
@@ -1704,7 +1709,7 @@ pub fn generate_root_methods(
         /// unconditional root_self_block_prelude at method entry.
         entity_self_indices: Vec<TokenStream2>,
     }
-    let mut triplet_groups: std::collections::HashMap<String, TripletCollectionGroup> = std::collections::HashMap::new();
+    let mut triplet_groups: std::collections::BTreeMap<String, TripletCollectionGroup> = std::collections::BTreeMap::new();
 
     // Grouping for constraints that iterate the same collection.
     // Merges SelfBlock + nested CrossBlock into a single loop per collection.
@@ -1728,7 +1733,7 @@ pub fn generate_root_methods(
         a_idx_stmts: Vec<TokenStream2>,
         block_ident: syn::Ident,
     }
-    let mut collection_groups: std::collections::HashMap<String, CollectionGroup> = std::collections::HashMap::new();
+    let mut collection_groups: std::collections::BTreeMap<String, CollectionGroup> = std::collections::BTreeMap::new();
 
     // Grouping for SelfBlock constraints that live on a single-instance entity
     // (the root itself, or a direct-composed sub-model field). Keyed by the
@@ -1749,7 +1754,7 @@ pub fn generate_root_methods(
         gh_entries: Vec<TokenStream2>,
         jac_entries: Vec<TokenStream2>,
     }
-    let mut single_instance_groups: std::collections::HashMap<String, SingleInstanceGroup> = std::collections::HashMap::new();
+    let mut single_instance_groups: std::collections::BTreeMap<String, SingleInstanceGroup> = std::collections::BTreeMap::new();
 
     let mut _generated_constraints_fn: std::collections::HashSet<String> = std::collections::HashSet::new();
 

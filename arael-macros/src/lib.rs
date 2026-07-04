@@ -158,7 +158,12 @@ impl UserFunction {
 }
 
 struct Registry {
-    layouts: HashMap<String, SymLayout>,
+    // BTreeMap: parent-struct scans iterate layouts to find the struct
+    // containing a given child type; HashMap order made that pick (and
+    // with it generated code) differ between rustc invocations when
+    // several structs embed the same type. BTreeMap makes it the
+    // alphabetically first -- deterministic (B11).
+    layouts: std::collections::BTreeMap<String, SymLayout>,
     constraints: Vec<StashedConstraint>,
     functions: HashMap<String, UserFunction>,
 }
@@ -167,7 +172,7 @@ static SYM_REGISTRY: Mutex<Option<Registry>> = Mutex::new(None);
 
 fn registry_init() -> Registry {
     Registry {
-        layouts: HashMap::new(),
+        layouts: std::collections::BTreeMap::new(),
         constraints: Vec::new(),
         functions: HashMap::new(),
     }
