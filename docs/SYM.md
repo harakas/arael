@@ -315,6 +315,11 @@ Rust f64: (-x + 1.0_f64).powf(2.0_f64) + 100.0_f64 * (-x.powf(2.0_f64) + y).powf
 
 ## Common Subexpression Elimination
 
+`E::is_zero()` tests for the literal constant zero -- after `simplify`, a
+structurally-zero expression (e.g. a derivative of a residual with respect
+to a parameter it does not touch) is exactly that, and codegen uses the
+test to elide dead derivative emission and block-accumulation calls.
+
 `cse(&[expr0, expr1, ...])` walks a batch of expressions, finds subtrees that appear more than once across the batch, and factors them into named intermediates. Paired with `to_rust`, it produces generated code that computes the shared work once.
 
 Continuing the Rosenbrock example, its value and its two partial derivatives share `y - x*x` and `1 - x`:

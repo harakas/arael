@@ -2451,15 +2451,30 @@ pub fn generate_root_methods(
             });
             idx += 1;
 
-            let mut dr_idents = Vec::new();
+            // Structurally-zero derivatives (residual does not touch the
+            // parameter) are known post-simplify: skip their declarations,
+            // inline 0.0 literals where a full-width slice is still needed,
+            // and elide whole block calls when an entity's span is all
+            // zeros -- the accumulated contribution would be exactly 0.
+            let mut dr_zero: Vec<bool> = Vec::with_capacity(n_params);
+            let mut dr_f64: Vec<TokenStream2> = Vec::with_capacity(n_params);
             for pi in 0..n_params {
-                let dr_ident = syn::Ident::new(&format!("__dr_{}_{}", ri, pi), proc_macro2::Span::call_site());
-                let dr_expr: Expr = parse_sym_code(&gh_simplified[idx].to_rust(""))?;
-                gh_stmts.push(quote! { let #dr_ident= #dr_expr; });
-                dr_idents.push(dr_ident);
+                let zero = gh_simplified[idx].is_zero();
+                dr_zero.push(zero);
+                if zero {
+                    dr_f64.push(quote! { 0.0 as #cast_type });
+                } else {
+                    let dr_ident = syn::Ident::new(&format!("__dr_{}_{}", ri, pi), proc_macro2::Span::call_site());
+                    let dr_expr: Expr = parse_sym_code(&gh_simplified[idx].to_rust(""))?;
+                    gh_stmts.push(quote! { let #dr_ident= #dr_expr; });
+                    dr_f64.push(quote! { #dr_ident as #cast_type });
+                }
                 idx += 1;
             }
-            let dr_f64: Vec<TokenStream2> = dr_idents.iter().map(|d| quote! { #d as #cast_type }).collect();
+            let span_zero = |start: usize, count: usize| -> bool {
+                count == 0 || dr_zero[start..start + count].iter().all(|&z| z)
+            };
+            let all_zero = span_zero(0, n_params);
             if is_triplet {
                 // TripletBlock: per-entity SelfBlock writes grad + within-entity
                 // diagonals; triplet block gets only cross-entity pairs.
@@ -2470,6 +2485,7 @@ pub fn generate_root_methods(
                         .ok_or_else(|| syn::Error::new_spanned(&struct_ident,
                             format!("type `{}` must declare a `SelfBlock<Self>` field (required as triplet participant)", type_id)))?;
                     let hb_ident = syn::Ident::new(&hb, proc_macro2::Span::call_site());
+                    if span_zero(*start, *count) { continue; }
                     let entity_dr: Vec<TokenStream2> = dr_f64.iter().skip(*start).take(*count).cloned().collect();
                     // Ref-resolved var is &T immutable via resolve_stmts; use raw-ptr cast.
                     triplet_calls.push(quote! {
@@ -2479,14 +2495,22 @@ pub fn generate_root_methods(
                         }
                     });
                 }
-                gh_stmts.push(quote! {
-                    #(#triplet_calls)*
+                // Cross pairs need two live spans: with <= 1 nonzero span
+                // every cross product is structurally zero.
+                let nonzero_spans = triplet_entities.iter()
+                    .filter(|(_, _, start, count)| !span_zero(*start, *count))
+                    .count();
+                let cross_call = if nonzero_spans <= 1 { quote! {} } else { quote! {
                     __frine.#block_ident.add_residual_cross(
                         #r_ident as #cast_type,
                         &__all_idx,
                         &[#(#dr_f64),*],
                         &__entity_offsets,
                     );
+                }};
+                gh_stmts.push(quote! {
+                    #(#triplet_calls)*
+                    #cross_call
                 });
             } else if is_multi_cross {
                 // Multi-cross: per-entity SelfBlock writes (same as triplet)
@@ -2509,6 +2533,7 @@ pub fn generate_root_methods(
                 let mut self_block_calls: Vec<TokenStream2> = Vec::new();
                 let mut remote_self_block_call: Option<TokenStream2> = None;
                 for (var_id, type_id, start, count) in &triplet_entities {
+                    if span_zero(*start, *count) { continue; }
                     let entity_dr: Vec<TokenStream2> = dr_f64.iter().skip(*start).take(*count).cloned().collect();
                     let type_id_str = type_id.to_string();
                     if type_id_str == root_ident_str {
@@ -2549,6 +2574,8 @@ pub fn generate_root_methods(
                 }
                 let mut cross_block_calls: Vec<TokenStream2> = Vec::new();
                 for route in &multi_cross_routing {
+                    if span_zero(route.a_start, route.a_count)
+                        || span_zero(route.b_start, route.b_count) { continue; }
                     let block = &route.block_ident;
                     let dr_a: Vec<TokenStream2> = dr_f64.iter()
                         .skip(route.a_start).take(route.a_count).cloned().collect();
@@ -2568,9 +2595,11 @@ pub fn generate_root_methods(
                     #(#cross_block_calls)*
                 });
             } else if is_remote_block {
-                gh_stmts.push(quote! {
-                    __target_block.add_residual(#r_ident as #cast_type, &[#(#dr_f64),*], grad);
-                });
+                if !all_zero {
+                    gh_stmts.push(quote! {
+                        __target_block.add_residual(#r_ident as #cast_type, &[#(#dr_f64),*], grad);
+                    });
+                }
             } else if is_self_block {
                 if is_root_triplet_self {
                     // Self-primary + root-owned TripletBlock. dr_f64 is
@@ -2594,12 +2623,19 @@ pub fn generate_root_methods(
                             format!("root type `{}` must declare a `SelfBlock<Self>` field (required as root-triplet participant)", root_type_str)))?;
                     let root_hb_ident = syn::Ident::new(&root_hb, proc_macro2::Span::call_site());
                     let triplet_ident = root_triplet_field.as_ref().unwrap();
-                    gh_stmts.push(quote! {
+                    let self_zero = span_zero(0, self_count);
+                    let root_zero = span_zero(root_start, root_count);
+                    let self_call = if self_zero { quote! {} } else { quote! {
                         __item.#block_ident.add_residual(#r_ident as #cast_type, &[#(#dr_self),*], grad);
+                    }};
+                    let root_call = if root_zero { quote! {} } else { quote! {
                         unsafe {
                             (*(__self_ref as *const #root_name as *mut #root_name)).#root_hb_ident
                                 .add_residual(#r_ident as #cast_type, &[#(#dr_root),*], grad);
                         }
+                    }};
+                    // The (self, root) cross pairs need both spans live.
+                    let cross_call = if self_zero || root_zero { quote! {} } else { quote! {
                         unsafe {
                             (*(__self_ref as *const #root_name as *mut #root_name)).#triplet_ident
                                 .add_residual_cross(
@@ -2609,8 +2645,13 @@ pub fn generate_root_methods(
                                     &__entity_offsets,
                                 );
                         }
+                    }};
+                    gh_stmts.push(quote! {
+                        #self_call
+                        #root_call
+                        #cross_call
                     });
-                } else {
+                } else if !all_zero {
                     gh_stmts.push(quote! {
                         __item.#block_ident.add_residual(#r_ident as #cast_type, &[#(#dr_f64),*], grad);
                     });
@@ -2623,10 +2664,21 @@ pub fn generate_root_methods(
                 // __a_self_block_ptr / __b_self_block_ptr cached at top of gh_stmts.
                 let dr_a: Vec<TokenStream2> = dr_f64.iter().take(a_param_count).cloned().collect();
                 let dr_b: Vec<TokenStream2> = dr_f64.iter().skip(a_param_count).take(b_param_count).cloned().collect();
-                gh_stmts.push(quote! {
+                let a_zero = span_zero(0, a_param_count);
+                let b_zero = span_zero(a_param_count, b_param_count);
+                let a_call = if a_zero { quote! {} } else { quote! {
                     unsafe { (*__a_self_block_ptr).add_residual(#r_ident as #cast_type, &[#(#dr_a),*], grad); }
+                }};
+                let b_call = if b_zero { quote! {} } else { quote! {
                     unsafe { (*__b_self_block_ptr).add_residual(#r_ident as #cast_type, &[#(#dr_b),*], grad); }
+                }};
+                let cross_call = if a_zero || b_zero { quote! {} } else { quote! {
                     __frine.#block_ident.add_residual_cross(#r_ident as #cast_type, &[#(#dr_a),*], &[#(#dr_b),*]);
+                }};
+                gh_stmts.push(quote! {
+                    #a_call
+                    #b_call
+                    #cross_call
                 });
             }
         }

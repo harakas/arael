@@ -1120,11 +1120,15 @@ impl<A: Model, const N: usize, T: crate::utils::Float> SelfBlock<A, N, T> {
         let two = T::two();
         for i in 0..N {
             let gi = self.indices[i];
-            if gi != u32::MAX {
-                grad[gi as usize] += two * r * dr[i];
-            }
+            // Fixed params (u32::MAX): no gradient slot, and no Hessian
+            // pair involving them is ever read by the accumulate paths
+            // (they skip inactive indices) -- skip the whole row.
+            if gi == u32::MAX { continue; }
+            grad[gi as usize] += two * r * dr[i];
+            let tdi = two * dr[i];
             for j in i..N {
-                self.hessian[tri_idx(N, i, j)] += two * dr[i] * dr[j];
+                if self.indices[j] == u32::MAX { continue; }
+                self.hessian[tri_idx(N, i, j)] += tdi * dr[j];
             }
         }
     }

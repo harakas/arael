@@ -337,6 +337,15 @@ impl E {
         E(Rc::new(expr))
     }
 
+    /// Return true if this expression is the literal constant zero.
+    /// After `simplify`, a structurally-zero expression (e.g. the
+    /// derivative of a residual with respect to a parameter it does not
+    /// touch) is exactly `Const(0.0)`; codegen uses this to elide dead
+    /// derivative emission and block accumulation calls.
+    pub fn is_zero(&self) -> bool {
+        matches!(&*self.0, Expr::Const(v) if *v == 0.0)
+    }
+
     /// Collect all symbol names referenced in this expression.
     pub fn symbols(&self) -> std::collections::HashSet<String> {
         let mut out = std::collections::HashSet::new();
