@@ -406,6 +406,11 @@ pub trait LmSolver<T: Float> {
 }
 
 /// Dense Cholesky solver (nalgebra).
+///
+/// The per-retry DMatrix copy is deliberate: it is O(n^2) under an
+/// O(n^3) blocked factorization, and replacing nalgebra with a naive
+/// in-place scalar Cholesky to avoid it measured 5x SLOWER at n = 3000
+/// (P6 investigation) -- the allocation was never the cost.
 pub struct Dense;
 
 impl LmSolver<f64> for Dense {
@@ -452,6 +457,19 @@ impl LmSolver<f32> for Dense {
 pub struct Band {
     /// Half-bandwidth (number of superdiagonals).
     pub kd: usize,
+    // Retry scratch: band Cholesky destroys its input, so each damped
+    // attempt factors a copy. Reusing one buffer avoids an allocation
+    // per lambda retry. Fully overwritten before every use -- carries
+    // no state across retries or solves.
+    scratch64: Vec<f64>,
+    scratch32: Vec<f32>,
+}
+
+impl Band {
+    /// Create a band solver with the given half-bandwidth.
+    pub fn new(kd: usize) -> Band {
+        Band { kd, scratch64: Vec::new(), scratch32: Vec::new() }
+    }
 }
 
 impl LmSolver<f64> for Band {
@@ -466,17 +484,19 @@ impl LmSolver<f64> for Band {
         for i in 0..diagonal.len() { diagonal[i] = matrix[self.kd + i * ldab]; }
     }
     fn solve_damped(&mut self, n: usize, matrix: &mut Vec<f64>, diagonal: &[f64], lambda: f64, grad: &[f64], delta: &mut [f64]) -> bool {
-        // Band Cholesky destroys the matrix, so we must copy
+        // Band Cholesky destroys the matrix, so factor a copy -- in the
+        // reused scratch buffer, not a fresh allocation per retry.
         let ldab = self.kd + 1;
-        let mut buf = matrix.clone();
-        for i in 0..n { buf[self.kd + i * ldab] = (1.0 + lambda) * diagonal[i]; }
+        self.scratch64.resize(matrix.len(), 0.0);
+        self.scratch64.copy_from_slice(matrix);
+        for i in 0..n { self.scratch64[self.kd + i * ldab] = (1.0 + lambda) * diagonal[i]; }
         delta.copy_from_slice(grad);
-        solve_spd_band(n, self.kd, &mut buf, delta)
+        solve_spd_band(n, self.kd, &mut self.scratch64, delta)
     }
     fn matrix_nonfinite_count(&self, matrix: &Vec<f64>) -> usize {
         matrix.iter().filter(|v| !v.is_finite()).count()
     }
-    fn reset(&mut self) {} // stateless: no cached problem structure
+    fn reset(&mut self) {} // scratch is fully overwritten each use: no cross-solve state
 }
 
 impl LmSolver<f32> for Band {
@@ -492,15 +512,16 @@ impl LmSolver<f32> for Band {
     }
     fn solve_damped(&mut self, n: usize, matrix: &mut Vec<f32>, diagonal: &[f32], lambda: f32, grad: &[f32], delta: &mut [f32]) -> bool {
         let ldab = self.kd + 1;
-        let mut buf = matrix.clone();
-        for i in 0..n { buf[self.kd + i * ldab] = (1.0 + lambda) * diagonal[i]; }
+        self.scratch32.resize(matrix.len(), 0.0);
+        self.scratch32.copy_from_slice(matrix);
+        for i in 0..n { self.scratch32[self.kd + i * ldab] = (1.0 + lambda) * diagonal[i]; }
         delta.copy_from_slice(grad);
-        solve_spd_band_f32(n, self.kd, &mut buf, delta)
+        solve_spd_band_f32(n, self.kd, &mut self.scratch32, delta)
     }
     fn matrix_nonfinite_count(&self, matrix: &Vec<f32>) -> usize {
         matrix.iter().filter(|v| !v.is_finite()).count()
     }
-    fn reset(&mut self) {} // stateless: no cached problem structure
+    fn reset(&mut self) {} // scratch is fully overwritten each use: no cross-solve state
 }
 
 /// Band Cholesky solver using LAPACK dpbsv/spbsv.
@@ -508,6 +529,17 @@ impl LmSolver<f32> for Band {
 pub struct BandLapack {
     /// Half-bandwidth (number of superdiagonals).
     pub kd: usize,
+    // Retry scratch, see Band.
+    scratch64: Vec<f64>,
+    scratch32: Vec<f32>,
+}
+
+#[cfg(feature = "lapack")]
+impl BandLapack {
+    /// Create a LAPACK band solver with the given half-bandwidth.
+    pub fn new(kd: usize) -> BandLapack {
+        BandLapack { kd, scratch64: Vec::new(), scratch32: Vec::new() }
+    }
 }
 
 #[cfg(feature = "lapack")]
@@ -524,10 +556,11 @@ impl LmSolver<f64> for BandLapack {
     }
     fn solve_damped(&mut self, n: usize, matrix: &mut Vec<f64>, diagonal: &[f64], lambda: f64, grad: &[f64], delta: &mut [f64]) -> bool {
         let ldab = self.kd + 1;
-        let mut buf = matrix.clone();
-        for i in 0..n { buf[self.kd + i * ldab] = (1.0 + lambda) * diagonal[i]; }
+        self.scratch64.resize(matrix.len(), 0.0);
+        self.scratch64.copy_from_slice(matrix);
+        for i in 0..n { self.scratch64[self.kd + i * ldab] = (1.0 + lambda) * diagonal[i]; }
         delta.copy_from_slice(grad);
-        solve_spd_band_lapack(n, self.kd, &mut buf, delta)
+        solve_spd_band_lapack(n, self.kd, &mut self.scratch64, delta)
     }
     fn matrix_nonfinite_count(&self, matrix: &Vec<f64>) -> usize {
         matrix.iter().filter(|v| !v.is_finite()).count()
@@ -549,10 +582,11 @@ impl LmSolver<f32> for BandLapack {
     }
     fn solve_damped(&mut self, n: usize, matrix: &mut Vec<f32>, diagonal: &[f32], lambda: f32, grad: &[f32], delta: &mut [f32]) -> bool {
         let ldab = self.kd + 1;
-        let mut buf = matrix.clone();
-        for i in 0..n { buf[self.kd + i * ldab] = (1.0 + lambda) * diagonal[i]; }
+        self.scratch32.resize(matrix.len(), 0.0);
+        self.scratch32.copy_from_slice(matrix);
+        for i in 0..n { self.scratch32[self.kd + i * ldab] = (1.0 + lambda) * diagonal[i]; }
         delta.copy_from_slice(grad);
-        solve_spd_band_lapack_f32(n, self.kd, &mut buf, delta)
+        solve_spd_band_lapack_f32(n, self.kd, &mut self.scratch32, delta)
     }
     fn matrix_nonfinite_count(&self, matrix: &Vec<f32>) -> usize {
         matrix.iter().filter(|v| !v.is_finite()).count()
@@ -778,24 +812,24 @@ pub fn solve_f32(x0: &[f32], problem: &mut impl LmProblem<f32>, config: &LmConfi
 
 /// Solve with pure-Rust band Cholesky backend (f64).
 pub fn solve_band(x0: &[f64], kd: usize, problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> LmResult<f64> {
-    lm_solve(x0, &mut Band { kd }, problem, config)
+    lm_solve(x0, &mut Band::new(kd), problem, config)
 }
 
 /// Solve with pure-Rust band Cholesky backend (f32).
 pub fn solve_band_f32(x0: &[f32], kd: usize, problem: &mut impl LmProblem<f32>, config: &LmConfig<f32>) -> LmResult<f32> {
-    lm_solve(x0, &mut Band { kd }, problem, config)
+    lm_solve(x0, &mut Band::new(kd), problem, config)
 }
 
 /// Solve with LAPACK band Cholesky backend (f64).
 #[cfg(feature = "lapack")]
 pub fn solve_band_lapack(x0: &[f64], kd: usize, problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> LmResult<f64> {
-    lm_solve(x0, &mut BandLapack { kd }, problem, config)
+    lm_solve(x0, &mut BandLapack::new(kd), problem, config)
 }
 
 /// Solve with LAPACK band Cholesky backend (f32).
 #[cfg(feature = "lapack")]
 pub fn solve_band_lapack_f32(x0: &[f32], kd: usize, problem: &mut impl LmProblem<f32>, config: &LmConfig<f32>) -> LmResult<f32> {
-    lm_solve(x0, &mut BandLapack { kd }, problem, config)
+    lm_solve(x0, &mut BandLapack::new(kd), problem, config)
 }
 
 // ---------------------------------------------------------------------------
