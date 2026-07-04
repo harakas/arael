@@ -1,0 +1,13 @@
+error: collection element type `Later` has no registered #[arael::model] layout: define it BEFORE the root struct (macro expansion is top-down file order) and in the same crate
+  --> tests/constraint_attr_errors/root_before_entity.rs:12:5
+   |
+12 |     items: refs::Vec<Later>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `arael::refs`
+ --> tests/constraint_attr_errors/root_before_entity.rs:7:5
+  |
+7 | use arael::refs;
+  |     ^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

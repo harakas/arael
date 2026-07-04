@@ -1047,12 +1047,18 @@ fn parse_constraint_inner_impl(
                                     "parent = expects an entity field name"));
                             }
                         } else if name == "guard" {
-                            // Collect all tokens until next comma or brace group
+                            // Collect tokens until the comma before the body.
+                            // A top-level brace group only terminates the
+                            // guard when it is the FINAL token (the body with
+                            // a missing comma) -- guards may legitimately
+                            // contain block expressions.
                             let mut guard_tokens = Vec::new();
                             while pos < tokens.len() {
                                 match &tokens[pos] {
                                     proc_macro2::TokenTree::Punct(p) if p.as_char() == ',' => break,
-                                    proc_macro2::TokenTree::Group(g) if g.delimiter() == proc_macro2::Delimiter::Brace => break,
+                                    proc_macro2::TokenTree::Group(g)
+                                        if g.delimiter() == proc_macro2::Delimiter::Brace
+                                            && pos + 1 == tokens.len() => break,
                                     t => { guard_tokens.push(t.clone()); pos += 1; }
                                 }
                             }
@@ -1426,6 +1432,26 @@ fn validate_entity_path(type_name: &str, var_head: &str, rest: &str, span: &Expr
         }
     }
     Ok(())
+}
+
+/// Replace every `self` path in a guard expression with the given
+/// identifier, on the AST (no string surgery).
+fn rewrite_guard_self(e: &mut syn::Expr, replacement: &str) {
+    use syn::visit_mut::VisitMut;
+    struct R<'a>(&'a str);
+    impl<'a> VisitMut for R<'a> {
+        fn visit_expr_mut(&mut self, node: &mut syn::Expr) {
+            if let syn::Expr::Path(p) = node
+                && p.qself.is_none()
+                && p.path.is_ident("self") {
+                    let ident = syn::Ident::new(self.0, proc_macro2::Span::call_site());
+                    *node = syn::parse_quote!(#ident);
+                    return;
+                }
+            syn::visit_mut::visit_expr_mut(self, node);
+        }
+    }
+    R(replacement).visit_expr_mut(e);
 }
 
 /// Levenshtein distance, for typo suggestions.
@@ -1885,7 +1911,10 @@ pub fn generate_root_methods(
             if !set.insert(type_name.clone()) { continue; }
             if let Some(layout) = registry_lookup(&type_name) {
                 for (_, sft) in &layout.fields {
-                    if let SymFieldType::Struct(s) = sft {
+                    // OptionalStruct too: a type reachable only through an
+                    // Option<T> field used to be invisible here, silently
+                    // dropping its constraints.
+                    if let SymFieldType::Struct(s) | SymFieldType::OptionalStruct(s) = sft {
                         queue.push(s.clone());
                     }
                 }
@@ -1893,6 +1922,38 @@ pub fn generate_root_methods(
         }
         set
     };
+
+    // Ordering guard: every collection element type in the root's fields
+    // must have a registered layout by the time the root expands. Macro
+    // expansion is file-order top-down, so a #[arael::model] struct
+    // defined AFTER the root (or in another crate: the registry is
+    // per-rustc-process) is invisible -- its constraints would be
+    // silently dropped. Collection elements must implement Model, so a
+    // missing layout here is always an error, never an external type.
+    {
+        let root_fields_ordered: syn::FieldsNamed = syn::parse2(quote! { { #root_fields } })?;
+        for field in &root_fields_ordered.named {
+            let skipped = field.attrs.iter().any(|a| {
+                a.path().is_ident("arael")
+                    && a.parse_args::<proc_macro2::TokenStream>().map_or(false, |ts| {
+                        ts.into_iter().next().is_some_and(|t| t.to_string() == "skip")
+                    })
+            });
+            if skipped { continue; }
+            if let syn::Type::Path(tp) = &field.ty
+                && let Some(seg) = tp.path.segments.last()
+                && matches!(seg.ident.to_string().as_str(), "Vec" | "Deque" | "Arena")
+                && let syn::PathArguments::AngleBracketed(args) = &seg.arguments
+                && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
+                && let Ok(name) = type_ident_name(inner)
+                && registry_lookup(&name).is_none() {
+                    return Err(syn::Error::new_spanned(field,
+                        format!("collection element type `{}` has no registered #[arael::model] \
+                                 layout: define it BEFORE the root struct (macro expansion is \
+                                 top-down file order) and in the same crate", name)));
+                }
+        }
+    }
 
     // Count constraint attributes per struct (for default label naming).
     let mut attr_count_per_struct: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
@@ -1986,7 +2047,7 @@ pub fn generate_root_methods(
 
             // Find the parent struct that contains this constraint struct
             let parent_type = {
-                let guard = crate::SYM_REGISTRY.lock().unwrap();
+                let guard = crate::SYM_REGISTRY.lock().unwrap_or_else(|p| p.into_inner());
                 guard.as_ref().and_then(|reg| {
                     reg.layouts.iter().find(|(_, layout)| {
                         layout.fields.iter().any(|(_, sft)| {
@@ -2003,7 +2064,13 @@ pub fn generate_root_methods(
             let block_field_obj = fields.named.iter().find(|f|
                 f.ident.as_ref().map(|i| i.to_string()) == Some(constraint.primary_block_field().to_string())
             );
-            if block_field_obj.is_none() { continue; }
+            let Some(_) = block_field_obj else {
+                return Err(syn::Error::new(proc_macro2::Span::call_site(),
+                    format!("{}:{}: constraint names block field `{}` but `{}` has no such \
+                             field -- the constraint would be silently dropped",
+                        sc.attr_file, sc.attr_line,
+                        constraint.primary_block_field(), sc.struct_name)));
+            };
             let (a, b) = extract_block_type_args(&block_field_obj.unwrap().ty)?;
             (a, b, None)
         };
@@ -2160,7 +2227,9 @@ pub fn generate_root_methods(
         // We need the symbolic expressions again
         let root_name_str = root_name.to_string();
         let (residual_exprs, param_symbols) = interpret_constraint_body(
-            &struct_ident, &fields.named, &constraint, &root_name_str)?;
+            &struct_ident, &fields.named, &constraint, &root_name_str)
+            .map_err(|e| syn::Error::new(e.span(),
+                format!("{}:{}: {}", sc.attr_file, sc.attr_line, e)))?;
         check_residual_coverage(sc, &struct_ident, &residual_exprs, &param_symbols)?;
 
         // Apply euler_angles substitutions from all referenced types
@@ -2995,20 +3064,25 @@ pub fn generate_root_methods(
             v
         };
 
-        // Parse guard expression — replace "self" with the loop variable
+        // Parse the guard and rewrite `self` on the AST -- string surgery
+        // (`replacen("self.", ..)`) capped out at 10 occurrences, corrupted
+        // identifiers merely containing "self.", and could not handle
+        // block expressions.
         let guard_expr: Option<syn::Expr> = constraint.guard.as_ref()
-            .map(|g| {
-                let adjusted = if is_self_block {
-                    g.replacen("self.", &format!("{}.", self_var_name), 10)
+            .map(|g| -> syn::Result<syn::Expr> {
+                let mut e: syn::Expr = syn::parse_str(g).map_err(|err|
+                    syn::Error::new(proc_macro2::Span::call_site(),
+                        format!("failed to parse guard expression `{}`: {}", g, err)))?;
+                let replacement = if is_self_block {
+                    self_var_name.clone()
                 } else {
-                    // CrossBlock/TripletBlock: "self." refers to the constraint struct (__frine)
-                    g.replacen("self.", "__frine.", 10)
+                    // CrossBlock/TripletBlock: `self` is the constraint struct (__frine)
+                    "__frine".to_string()
                 };
-                syn::parse_str(&adjusted)
+                rewrite_guard_self(&mut e, &replacement);
+                Ok(e)
             })
-            .transpose()
-            .map_err(|e| syn::Error::new(proc_macro2::Span::call_site(),
-                format!("failed to parse guard expression: {}", e)))?;
+            .transpose()?;
 
         if is_remote_block {
             // Remote block: iterate parent collection -> frines,
@@ -3650,7 +3724,7 @@ pub fn generate_root_methods(
             // collections of their first type argument.
             let inner_name: Option<String> = if let syn::Type::Path(tp) = &field.ty
                 && let Some(seg) = tp.path.segments.last()
-                && matches!(seg.ident.to_string().as_str(), "Vec" | "Deque")
+                && matches!(seg.ident.to_string().as_str(), "Vec" | "Deque" | "Arena")
                 && let syn::PathArguments::AngleBracketed(args) = &seg.arguments
                 && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
             { type_ident_name(inner).ok() } else { None };
@@ -3688,6 +3762,58 @@ pub fn generate_root_methods(
                     let mut __a_idx = [0u32; #a_count];
                     #(#a_idx_stmts)*
                     __item.#hb_ident.set_indices(&__a_idx);
+                }
+            });
+        }
+
+        // Same pass for passive DIRECT-COMPOSED entities: a bare
+        // struct-typed root field holding Params + SelfBlock<Self> with no
+        // self-constraint kept u32::MAX indices (the exact silent-drop
+        // this wiring exists to prevent, in the DirectField location).
+        // set_indices is idempotent, so re-wiring an already-wired block
+        // is harmless.
+        for field in &root_fields_passive.named {
+            let field_ident = match field.ident.as_ref() {
+                Some(i) => i.clone(),
+                None => continue,
+            };
+            let type_name = if let syn::Type::Path(tp) = &field.ty
+                && let Some(seg) = tp.path.segments.last()
+                && matches!(seg.arguments, syn::PathArguments::None)
+            { seg.ident.to_string() } else { continue };
+            if !reachable.contains(&type_name) { continue; }
+            let layout = match registry_lookup(&type_name) { Some(l) => l, None => continue };
+            if layout.param_fields.is_empty() { continue; }
+            let hb_field = match layout.self_block_field.clone() {
+                Some(s) => s, None => continue,
+            };
+            let hb_ident = syn::Ident::new(&hb_field, proc_macro2::Span::call_site());
+            let mut idx_stmts: Vec<TokenStream2> = Vec::new();
+            let mut offset = 0usize;
+            for pf in &layout.param_fields {
+                let pf_ident = syn::Ident::new(pf, proc_macro2::Span::call_site());
+                let size = layout.fields.iter()
+                    .find(|(n, _)| n == pf)
+                    .map(|(_, sft)| match sft {
+                        SymFieldType::Scalar => 1usize,
+                        SymFieldType::Vec2 => 2,
+                        SymFieldType::Vec3 => 3,
+                        _ => 0,
+                    }).unwrap_or(0);
+                if size == 0 { continue; }
+                let end = offset + size;
+                idx_stmts.push(quote! {
+                    self.#field_ident.#pf_ident.write_indices(&mut __d_idx[#offset..#end]);
+                });
+                offset = end;
+            }
+            if offset == 0 { continue; }
+            let d_count = offset;
+            merged_sbi.push(quote! {
+                {
+                    let mut __d_idx = [0u32; #d_count];
+                    #(#idx_stmts)*
+                    self.#field_ident.#hb_ident.set_indices(&__d_idx);
                 }
             });
         }
@@ -4199,7 +4325,7 @@ fn interpret_constraint_body(
                 format!("field '{}' is not Ref<T>", ref_field_name)))?;
         // Find the parent struct (who contains this constraint struct)
         let parent_type = {
-            let guard = crate::SYM_REGISTRY.lock().unwrap();
+            let guard = crate::SYM_REGISTRY.lock().unwrap_or_else(|p| p.into_inner());
             guard.as_ref().and_then(|reg| {
                 reg.layouts.iter().find(|(_, layout)| {
                     layout.fields.iter().any(|(_, sft)| {
@@ -4634,7 +4760,7 @@ fn find_var_for_type(var_names: &[String], type_name: &str) -> syn::Result<Strin
 
 #[allow(dead_code)]
 fn find_layout_for_var(var_name: &str) -> Option<crate::SymLayout> {
-    let guard = crate::SYM_REGISTRY.lock().unwrap();
+    let guard = crate::SYM_REGISTRY.lock().unwrap_or_else(|p| p.into_inner());
     let reg = guard.as_ref()?;
 
     // Direct match

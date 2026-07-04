@@ -1,4 +1,4 @@
-error: .cross() argument must be Vec3
+error: $DIR/tests/constraint_body_errors/cross_wrong_arg.rs:8: .cross() argument must be Vec3
  --> tests/constraint_body_errors/cross_wrong_arg.rs:6:1
   |
 6 | #[arael::model]

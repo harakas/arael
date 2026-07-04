@@ -1,4 +1,4 @@
-error: unary expects 1 arg(s), got 2
+error: $DIR/tests/user_function_errors/arity_mismatch_at_call.rs:13: unary expects 1 arg(s), got 2
   --> tests/user_function_errors/arity_mismatch_at_call.rs:11:1
    |
 11 | #[arael::model]

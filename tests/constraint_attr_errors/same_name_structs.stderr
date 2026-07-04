@@ -1,0 +1,13 @@
+error: a different #[arael::model] struct named `Twin` is already registered (the registry is keyed by bare struct name; rename one of them)
+  --> tests/constraint_attr_errors/same_name_structs.rs:22:16
+   |
+22 |     pub struct Twin {
+   |                ^^^^
+
+warning: unused import: `arael::model::SelfBlock`
+  --> tests/constraint_attr_errors/same_name_structs.rs:19:9
+   |
+19 |     use arael::model::SelfBlock;
+   |         ^^^^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

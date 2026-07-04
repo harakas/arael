@@ -178,19 +178,32 @@ fn registry_init() -> Registry {
     }
 }
 
-fn registry_store(name: &str, layout: SymLayout) {
-    let mut guard = SYM_REGISTRY.lock().unwrap();
+/// Returns an error if a DIFFERENT layout is already registered under
+/// this name: the registry is keyed by bare struct name, so two
+/// #[arael::model] structs with the same name (different modules) would
+/// silently last-write-win and corrupt each other's generated code.
+/// Re-registering an identical layout (e.g. cfg-duplicated expansion)
+/// stays allowed.
+fn registry_store(name: &str, layout: SymLayout) -> Result<(), String> {
+    let mut guard = SYM_REGISTRY.lock().unwrap_or_else(|p| p.into_inner());
     let reg = guard.get_or_insert_with(registry_init);
+    if let Some(prev) = reg.layouts.get(name)
+        && format!("{:?}", prev) != format!("{:?}", layout) {
+            return Err(format!(
+                "a different #[arael::model] struct named `{}` is already registered \
+                 (the registry is keyed by bare struct name; rename one of them)", name));
+        }
     reg.layouts.insert(name.to_string(), layout);
+    Ok(())
 }
 
 fn registry_lookup(name: &str) -> Option<SymLayout> {
-    let guard = SYM_REGISTRY.lock().unwrap();
+    let guard = SYM_REGISTRY.lock().unwrap_or_else(|p| p.into_inner());
     guard.as_ref().and_then(|reg| reg.layouts.get(name).cloned())
 }
 
 fn registry_stash_constraint(c: StashedConstraint) {
-    let mut guard = SYM_REGISTRY.lock().unwrap();
+    let mut guard = SYM_REGISTRY.lock().unwrap_or_else(|p| p.into_inner());
     let reg = guard.get_or_insert_with(registry_init);
     reg.constraints.push(c);
 }
@@ -200,20 +213,20 @@ fn registry_stash_constraint(c: StashedConstraint) {
 // A take here would hand the first root everything and later roots
 // nothing, silently generating no-op solvers for them.
 fn registry_constraints() -> Vec<StashedConstraint> {
-    let guard = SYM_REGISTRY.lock().unwrap();
+    let guard = SYM_REGISTRY.lock().unwrap_or_else(|p| p.into_inner());
     guard.as_ref().map(|reg| reg.constraints.clone()).unwrap_or_default()
 }
 
 #[allow(dead_code)]
 pub(crate) fn registry_store_function(name: &str, f: UserFunction) {
-    let mut guard = SYM_REGISTRY.lock().unwrap();
+    let mut guard = SYM_REGISTRY.lock().unwrap_or_else(|p| p.into_inner());
     let reg = guard.get_or_insert_with(registry_init);
     reg.functions.insert(name.to_string(), f);
 }
 
 #[allow(dead_code)]
 pub(crate) fn registry_lookup_function(name: &str) -> Option<UserFunction> {
-    let guard = SYM_REGISTRY.lock().unwrap();
+    let guard = SYM_REGISTRY.lock().unwrap_or_else(|p| p.into_inner());
     guard.as_ref().and_then(|reg| reg.functions.get(name).cloned())
 }
 
@@ -221,7 +234,7 @@ pub(crate) fn registry_lookup_function(name: &str) -> Option<UserFunction> {
 /// interpreter to build a full `FunctionBag` for `parse_with_functions`.
 #[allow(dead_code)]
 pub(crate) fn registry_all_functions() -> Vec<UserFunction> {
-    let guard = SYM_REGISTRY.lock().unwrap();
+    let guard = SYM_REGISTRY.lock().unwrap_or_else(|p| p.into_inner());
     guard.as_ref().map(|reg| reg.functions.values().cloned().collect()).unwrap_or_default()
 }
 
@@ -477,7 +490,7 @@ fn model_attribute(input: &mut syn::DeriveInput) -> syn::Result<TokenStream2> {
     // metadata fields (e.g. style, direction, mode) so those fields don't
     // need #[arael(skip)] at every use site.
     if matches!(input.data, syn::Data::Enum(_)) {
-        return Ok(emit_trivial_model_for_enum(input));
+        return emit_trivial_model_for_enum(input);
     }
 
     // Compute PARAM_COUNT from Param<T> fields
@@ -624,7 +637,7 @@ fn model_attribute(input: &mut syn::DeriveInput) -> syn::Result<TokenStream2> {
         substitutions: substitutions_reg,
         constraint_index_field: constraint_index_field_reg,
         self_block_field: self_block_field_reg,
-    });
+    }).map_err(|msg| syn::Error::new_spanned(name, msg))?;
 
     // No field injection needed — SimpleEulerAngleParam/EulerAngleParam contain their own state.
 
@@ -673,7 +686,7 @@ fn model_attribute(input: &mut syn::DeriveInput) -> syn::Result<TokenStream2> {
 /// Emit a trivial Model + ModelSym impl for a data-less enum. All Model
 /// methods are no-ops, PARAM_COUNT is 0, and the ModelSym companion is an
 /// empty struct. The enum itself is emitted unchanged (attributes stripped).
-fn emit_trivial_model_for_enum(input: &mut syn::DeriveInput) -> TokenStream2 {
+fn emit_trivial_model_for_enum(input: &mut syn::DeriveInput) -> syn::Result<TokenStream2> {
     let name = &input.ident;
     let sym_name = syn::Ident::new(&format!("{}Sym", name), name.span());
     let const_name = syn::Ident::new(&format!("{}_PARAM_COUNT", name), name.span());
@@ -691,12 +704,12 @@ fn emit_trivial_model_for_enum(input: &mut syn::DeriveInput) -> TokenStream2 {
         substitutions: Vec::new(),
         constraint_index_field: None,
         self_block_field: None,
-    });
+    }).map_err(|msg| syn::Error::new_spanned(name, msg))?;
 
     // Strip any #[arael(...)] attributes from the emitted item.
     input.attrs.retain(|attr| !attr.path().is_ident("arael"));
 
-    quote! {
+    Ok(quote! {
         #input
         #[allow(non_upper_case_globals)]
         const #const_name: usize = 0;
@@ -732,7 +745,7 @@ fn emit_trivial_model_for_enum(input: &mut syn::DeriveInput) -> TokenStream2 {
             fn accumulate_hessian_sparse_indexed32(&self, _vals: &mut [f32], _positions: &[usize], _cursor: &mut usize) {}
             fn accumulate_hessian_sparse_indexed64(&self, _vals: &mut [f64], _positions: &[usize], _cursor: &mut usize) {}
         }
-    }
+    })
 }
 
 /// Classify a non-Param field's sym type from its type path.

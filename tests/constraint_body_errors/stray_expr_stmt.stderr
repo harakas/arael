@@ -1,4 +1,4 @@
-error: only `let` bindings may precede the final residual expression (this expression statement would otherwise be treated as extra residuals or dropped)
+error: $DIR/tests/constraint_body_errors/stray_expr_stmt.rs:8: only `let` bindings may precede the final residual expression (this expression statement would otherwise be treated as extra residuals or dropped)
  --> tests/constraint_body_errors/stray_expr_stmt.rs:6:1
   |
 6 | #[arael::model]

@@ -1,4 +1,4 @@
-error: macro statements are not supported in constraint bodies (they were silently dropped before)
+error: $DIR/tests/constraint_body_errors/macro_stmt.rs:7: macro statements are not supported in constraint bodies (they were silently dropped before)
  --> tests/constraint_body_errors/macro_stmt.rs:5:1
   |
 5 | #[arael::model]

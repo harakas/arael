@@ -1,4 +1,4 @@
-error: `%` (cross product) requires Vec3 operands
+error: $DIR/tests/constraint_body_errors/rem_non_vec3.rs:7: `%` (cross product) requires Vec3 operands
  --> tests/constraint_body_errors/rem_non_vec3.rs:5:1
   |
 5 | #[arael::model]
