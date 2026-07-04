@@ -1,6 +1,6 @@
 // EulerAngleParam behavior through the macro and solver.
 
-use arael::model::{Model, SelfBlock, EulerAngleParam};
+use arael::model::{Model, SelfBlock, CrossBlock, EulerAngleParam};
 use arael::simple_lm::{self, LmConfig};
 use arael::vect::vect3d;
 use arael::matrix::matrix3d;
@@ -102,4 +102,104 @@ fn root_level_euler_angle_param_advances_through_gimbal() {
     let m = matrix3d::rotation_from_euler_angles(rig.att.value);
     let err: f64 = (0..3).map(|i| (0..3).map(|j| (m[i][j] - target[i][j]).abs()).sum::<f64>()).sum();
     assert!(err < 1e-6, "recomposition error {}", err);
+}
+// ---------------------------------------------------------------------------
+// Aerobatics SLAM: barrel roll + Immelmann turn
+// ---------------------------------------------------------------------------
+//
+// A pose chain whose true orientations fly a barrel roll (full 360 roll)
+// followed by an Immelmann turn (half loop -- pitch through 90 and on to
+// 180 -- then a half roll back to upright). Relative-rotation constraints
+// tie consecutive poses; the first pose is a fixed EulerAngleParam. All
+// free poses start at identity, so the solver must rotate them across
+// both gimbal crossings. This exercises exactly what EulerAngleParam is
+// for: the delta parametrization stays near zero thanks to advance(),
+// while ref_rotation accumulates arbitrarily large rotations.
+
+#[arael::model]
+struct PoseE {
+    ea: EulerAngleParam<f64>,
+    hb: SelfBlock<PoseE>,
+}
+
+#[arael::model]
+#[arael(constraint(hb, {
+    let d = prev.ea.rotation_matrix().transpose() * cur.ea.rotation_matrix() - paire.delta;
+    [d[0][0] * sky.isigma, d[0][1] * sky.isigma, d[0][2] * sky.isigma,
+     d[1][0] * sky.isigma, d[1][1] * sky.isigma, d[1][2] * sky.isigma,
+     d[2][0] * sky.isigma, d[2][1] * sky.isigma, d[2][2] * sky.isigma]
+}))]
+struct PairE {
+    #[arael(ref = root.poses)]
+    prev: Ref<PoseE>,
+    #[arael(ref = root.poses)]
+    cur: Ref<PoseE>,
+    delta: matrix3d,
+    hb: CrossBlock<PoseE, PoseE>,
+}
+
+#[arael::model]
+#[arael(root)]
+struct Sky {
+    poses: refs::Vec<PoseE>,
+    pairs: std::vec::Vec<PairE>,
+    isigma: f64,
+}
+
+#[test]
+fn aerobatics_slam_barrel_roll_and_immelmann() {
+    let step = 15.0_f64.to_radians();
+    // Body-frame incremental rotations along the maneuver:
+    //   24 x roll steps  = 360 deg barrel roll,
+    //   12 x pitch steps = 180 deg half loop (through the gimbal at 90),
+    //   12 x roll steps  = 180 deg half roll back to upright.
+    let mut deltas: Vec<matrix3d> = Vec::new();
+    for _ in 0..24 { deltas.push(matrix3d::rotation_from_euler_angles(vect3d::new(step, 0.0, 0.0))); }
+    for _ in 0..12 { deltas.push(matrix3d::rotation_from_euler_angles(vect3d::new(0.0, step, 0.0))); }
+    for _ in 0..12 { deltas.push(matrix3d::rotation_from_euler_angles(vect3d::new(step, 0.0, 0.0))); }
+
+    // Ground truth by composition.
+    let mut truth: Vec<matrix3d> = vec![matrix3d::identity()];
+    for d in &deltas {
+        truth.push(*truth.last().unwrap() * *d);
+    }
+
+    let mut sky = Sky {
+        poses: refs::Vec::new(),
+        pairs: std::vec::Vec::new(),
+        isigma: 10.0,
+    };
+    // Fixed anchor at identity; every other pose starts at identity too,
+    // maximally far from the flown trajectory.
+    sky.poses.push(PoseE { ea: EulerAngleParam::fixed(vect3d::new(0.0, 0.0, 0.0)), hb: SelfBlock::new() });
+    for _ in 1..truth.len() {
+        sky.poses.push(PoseE { ea: EulerAngleParam::new(vect3d::new(0.0, 0.0, 0.0)), hb: SelfBlock::new() });
+    }
+    for (i, d) in deltas.iter().enumerate() {
+        sky.pairs.push(PairE {
+            prev: Ref::new(i as u32),
+            cur: Ref::new(i as u32 + 1),
+            delta: *d,
+            hb: CrossBlock::new(),
+        });
+    }
+
+    let mut params = Vec::new();
+    sky.serialize64(&mut params);
+    let result = simple_lm::solve(&params, &mut sky,
+        &LmConfig { max_iters: 500, ..Default::default() });
+    sky.deserialize64(&result.x);
+
+    assert!(result.end_cost < 1e-10,
+        "aerobatics chain must converge, cost={} after {} iters",
+        result.end_cost, result.iterations);
+    // Every pose's recomposed rotation must match the flown trajectory --
+    // compare matrices, not euler triples, since several poses sit at or
+    // beyond the gimbal where the triple is not unique.
+    for (i, t) in truth.iter().enumerate() {
+        let m = matrix3d::rotation_from_euler_angles(
+            sky.poses[Ref::<PoseE>::new(i as u32)].ea.value);
+        let err: f64 = (0..3).map(|r| (0..3).map(|c| (m[r][c] - t[r][c]).abs()).sum::<f64>()).sum();
+        assert!(err < 1e-4, "pose {} orientation error {}", i, err);
+    }
 }
