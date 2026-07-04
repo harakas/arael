@@ -1650,6 +1650,24 @@ mod tests {
     use std::collections::HashMap;
 
     #[test]
+    fn tiny_coefficients_survive_simplification() {
+        // B3: build_sum pruned "zero" terms with `c.abs() > f64::EPSILON`,
+        // silently deleting legitimate tiny terms (small residual weights,
+        // regularization constants) from generated code. Like-term
+        // coefficients are summed exactly, so true cancellation already
+        // yields 0.0 -- the prune must compare against exact zero.
+        let f = constant(1e-18) * symbol("x") + symbol("y");
+        let mut vars = HashMap::new();
+        vars.insert("x", 1.0);
+        vars.insert("y", 0.0);
+        assert_eq!(f.eval(&vars).unwrap(), 1e-18, "1e-18*x term was dropped: {}", f);
+
+        // Exact cancellation still prunes to a clean tree.
+        let g = symbol("x") - symbol("x") + symbol("y");
+        assert_eq!(format!("{}", g), "y");
+    }
+
+    #[test]
     fn simple_func_identity_display() {
         sym! {
             let identity = simple_func1("identity", |t| t);

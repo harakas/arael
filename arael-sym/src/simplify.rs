@@ -337,8 +337,12 @@ fn combine_like_terms(terms: Vec<(f64, E)>) -> Vec<(f64, E)> {
 
 /// Build an Add/Sub chain from (coefficient, base) pairs.
 fn build_sum(mut terms: Vec<(f64, E)>) -> E {
-    // Remove zero-coefficient terms
-    terms.retain(|(c, _)| c.abs() > f64::EPSILON);
+    // Remove zero-coefficient terms. Exact comparison on purpose:
+    // like-term coefficients are summed as plain f64, so true
+    // cancellation (x - x) yields exactly 0.0. An epsilon tolerance
+    // here silently deleted legitimate tiny terms (small residual
+    // weights, regularization constants) from the generated code.
+    terms.retain(|(c, _)| *c != 0.0);
 
     if terms.is_empty() {
         return constant(0.0);
