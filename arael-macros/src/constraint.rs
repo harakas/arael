@@ -3988,6 +3988,17 @@ pub fn generate_root_methods(
                 vals.iter_mut().for_each(|v| *v = 0.0 as #prec_type);
                 let mut cursor = 0usize;
                 self.#accumulate_sparse_indexed_method(vals, positions, &mut cursor);
+                // The cached position map is replayed by cursor and assumes
+                // an identical entry sequence every iteration. A shorter
+                // sequence (a TripletBlock or extended constraint emitting
+                // fewer entries than when the pattern was built) would
+                // scatter every subsequent block into wrong slots -- a
+                // silently wrong Hessian.
+                assert!(cursor == positions.len(),
+                    "sparsity pattern changed between iterations: {} Hessian entries \
+                     accumulated but the cached pattern has {} (TripletBlock / extended \
+                     constraint entry counts must stay constant within one solve)",
+                    cursor, positions.len());
                 __cost
             }
 

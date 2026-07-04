@@ -14,6 +14,7 @@
 // missing-ENTRY case panics at CSC build).
 
 use arael::simple_lm::{self, CooMatrix, FnProblem, LmConfig};
+use arael::simple_lm::LmProblem;
 
 #[test]
 #[should_panic(expected = "no Hessian diagonal")]
@@ -53,4 +54,65 @@ fn zero_diagonal_terminates_immediately() {
     assert_eq!(result.x, vec![0.0, 0.0], "params must be untouched");
     assert_eq!(result.end_cost, result.start_cost);
     assert_eq!(result.start_cost, 1.0);
+}
+
+// B10: the indexed (cached-pattern) assembly must detect a sparsity
+// pattern that changed mid-solve. The position map is built from the
+// first iteration's entry sequence; a TripletBlock emitting fewer
+// entries later (here: a guard flipped between assemblies) used to
+// scatter every subsequent block into wrong slots -- silently wrong
+// Hessian values with no error anywhere.
+
+use arael::model::{Model, Param, SelfBlock, TripletBlock};
+use arael::refs;
+
+#[arael::model]
+#[arael(constraint([hb, root.hbt], guard = self.active, {
+    [(item10.a + w10.offset) * w10.isigma]
+}))]
+struct Item10 {
+    a: Param<f64>,
+    active: bool,
+    hb: SelfBlock<Item10>,
+}
+
+#[arael::model]
+#[arael(root)]
+struct W10 {
+    items: refs::Vec<Item10>,
+    offset: Param<f64>,
+    isigma: f64,
+    hb: SelfBlock<W10>,
+    hbt: TripletBlock<f64>,
+}
+
+#[test]
+#[should_panic(expected = "sparsity pattern changed between iterations")]
+fn pattern_drift_detected_in_indexed_assembly() {
+    let mut items = refs::Vec::new();
+    items.push(Item10 { a: Param::new(1.0), active: true, hb: SelfBlock::new() });
+    let mut w = W10 {
+        items,
+        offset: Param::new(0.5),
+        isigma: 2.0,
+        hb: SelfBlock::new(),
+        hbt: TripletBlock::new(),
+    };
+    let mut params = Vec::new();
+    w.serialize64(&mut params);
+    let n = params.len();
+
+    // First iteration: build the pattern with the guard active.
+    let mut grad = vec![0.0; n];
+    let mut coo = simple_lm::CooMatrix::new(n);
+    w.calc_grad_hessian_sparse(&params, &mut grad, &mut coo);
+    let (csc, positions) = coo.to_csc_with_map();
+
+    // Mid-solve structure change: the guard flips off, the TripletBlock
+    // emits nothing this iteration.
+    w.items[refs::Ref::<Item10>::new(0)].active = false;
+
+    let mut vals = vec![0.0; csc.vals.len()];
+    let mut g2 = vec![0.0; n];
+    let _ = w.calc_grad_hessian_sparse_indexed(&params, &mut g2, &mut vals, &positions);
 }

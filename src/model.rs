@@ -319,8 +319,19 @@ pub trait ExtendedModel {
     /// macro-generated constraints. Writes gradient contributions directly
     /// into `grad` and cross-entity Hessian pairs into a
     /// [`TripletBlock`] field.
+    ///
+    /// **Iteration-invariance contract:** the sparse solvers cache the
+    /// Hessian sparsity pattern from the first iteration of a solve and
+    /// replay it positionally on every later iteration. The number and
+    /// order of Hessian entries this hook produces (TripletBlock tuples)
+    /// must therefore stay constant within one `lm_solve` call --
+    /// residual *values* may change freely, entry *structure* may not.
+    /// Violations are detected and reported ("sparsity pattern changed
+    /// between iterations"). Restructure between solves instead;
+    /// `LmSolver::reset()` rebuilds the cached pattern.
     fn extended_compute64(&mut self, _params: &[f64], _grad: &mut [f64]) {}
-    /// Compute custom constraint residuals (f32).
+    /// Compute custom constraint residuals (f32). See the
+    /// iteration-invariance contract on [`ExtendedModel::extended_compute64`].
     fn extended_compute32(&mut self, _params: &[f32], _grad: &mut [f32]) {}
     /// Append Jacobian rows for runtime constraints (f64).
     /// `cid` is the constraint counter -- increment per constraint object.
@@ -1557,7 +1568,15 @@ impl<T: crate::utils::Float> TripletBlock<T> {
     }
 
     /// Accumulate into CSC vals via precomputed position list.
+    ///
+    /// The position list is built once per solve from the first
+    /// iteration's entry sequence; this block must push the same number
+    /// of tuples every iteration (see `ExtendedModel` contract notes).
     pub fn accumulate_hessian_sparse_indexed(&self, vals: &mut [T], positions: &[usize], cursor: &mut usize) {
+        assert!(*cursor + self.hessian.len() <= positions.len(),
+            "sparsity pattern changed between iterations: TripletBlock holds {} \
+             entries but only {} slots remain in the cached pattern",
+            self.hessian.len(), positions.len() - *cursor);
         for &(_, _, v) in &self.hessian {
             vals[positions[*cursor]] += v;
             *cursor += 1;
