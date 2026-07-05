@@ -131,6 +131,13 @@ static RunResult solve(std::vector<Pose> poses, const std::vector<Edge>& edges,
     options.max_num_iterations = max_iters;
     options.linear_solver_type = ceres::SPARSE_NORMAL_CHOLESKY;
     options.num_threads = 1;
+    // Problem-appropriate initial trust region (the shipped 1e4 default
+    // over-damps these well-initialized graphs; see the README's
+    // initial-damping policy). Env-overridable for experiments.
+    options.initial_trust_region_radius = 1e12;
+    if (const char* r = getenv("CERES_RADIUS0")) {
+        options.initial_trust_region_radius = atof(r);
+    }
     // Same termination class as the other systems.
     options.function_tolerance = 1e-5;
     ceres::Solver::Summary summary;

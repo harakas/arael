@@ -54,6 +54,20 @@ inlier region.
   cost by less than 1e-5 absolute or 1e-5 relative -- the shipped
   defaults of both tiny-solver and GTSAM; arael is configured to the same
   thresholds (`patience = 1`).
+- **Problem-appropriate initial damping for every LM.** Damping-schedule
+  strategy is a per-problem tuning knob, not an intrinsic property of a
+  solver -- so each LM implementation gets an initial damping suited to
+  these well-initialized pose graphs instead of its shipped default:
+  arael `initial_lambda = 1e-8` (its own docs recommend small values
+  here), Ceres and tiny-solver `initial_trust_region_radius = 1e12`,
+  g2o `setUserLambdaInit(1e-12)`, GTSAM its default `1e-5` (insensitive:
+  its inner lambda search adapts within an iteration). All are
+  env-overridable (`ARAEL_LAMBDA0`, `CERES_RADIUS0`, `TINY_RADIUS0`,
+  `G2O_LAMBDA_INIT`, `GTSAM_LAMBDA0`; also `G2O_GAIN`). With this policy
+  every LM converges in 6-7 steps on M3500 and the durable cross-system
+  comparison becomes the METAL: time per step (linearize + assemble +
+  factorize + solve). Shipped-default behavior is documented under
+  "known solver behaviors" below.
 - **Threads: verified, not assumed.** Watching `/proc/<pid>/status`
   during a solve showed the official GTSAM wheel spawns 8 TBB threads;
   tiny-solver parallelizes assembly and its faer factorization through
@@ -90,24 +104,31 @@ hardcoded to double with no build option.
 
 ## Known solver behaviors (reported, not hidden)
 
-- **tiny-solver LM** checks its error-decrease thresholds even on a
-  *rejected* damping step; a rejection leaves the error unchanged, which
-  reads as "no improvement" and terminates the solve. On M3500 it stops
-  at cost 208 (optimum 138). Its own examples benchmark with GN.
+These were observed with the systems' SHIPPED initial damping (before
+the problem-appropriate policy above); all three damping pathologies
+disappear under the policy:
+
+- **tiny-solver LM** (default trust region 1e4) checks its
+  error-decrease thresholds even on a *rejected* damping step; a
+  rejection reads as "no improvement" and terminates the solve -- on the
+  weighted M3500 it stopped at cost 208 (optimum 138). With a
+  problem-appropriate initial trust region it takes no rejected steps
+  and converges everywhere.
+- **g2o LM** auto-computes lambda0 = 1e-5 * max Hessian diagonal
+  (additive lambda-I damping), which over-damps heavily weighted graphs;
+  the resulting slow descent then trips the 1e-5 gain-threshold stop
+  meters short of the optimum (cost 139.11, 1.9 m off, on weighted
+  M3500) -- not a local minimum: with patience (gain 1e-9) or a small
+  lambda0 it reaches the exact optimum.
+- **Ceres LM** (default trust region 1e4) converged everywhere but
+  ground ~30 near-identical iterations on M3500; with a large initial
+  region it takes 6-7.
 - **GTSAM on city10000 (batch, odometry init)**: LM stops in a local
-  minimum (cost 2.39M vs 512) after 30 iterations regardless of
-  tolerances; GN diverges. GTSAM's own city10000 examples solve it
-  incrementally with ISAM2. Its Pose2 between-factor residual uses the
-  SE(2) log map, whose basin of attraction from this initialization
-  differs from the rotation-frame residual arael and tiny-solver use.
-- **g2o LM on the weighted datasets** stops on flat plateaus: cost 139.11
-  (0.9% above the 137.91 optimum but 1.9 m away geometrically) on M3500,
-  1484.7 on city10000. Its GN converges everywhere and is the fastest
-  system on both M3500 configurations. g2o's termination is a relative
-  chi2 gain threshold (SparseOptimizerTerminateAction, 1e-5).
-- **Ceres LM** converges everywhere; its trust-region loop grinds ~30
-  near-identical iterations on M3500 before its function_tolerance
-  fires.
+  minimum (cost 2.39M vs 512) and GN diverges, at any damping -- this
+  one is not a damping artifact. GTSAM's own city10000 examples solve
+  it incrementally with ISAM2. Its Pose2 between-factor residual uses
+  the SE(2) log map, whose basin of attraction from this initialization
+  differs from the rotation-frame residual the other systems use.
 - **gtsam ISAM2 row**: the incremental reference -- GTSAM driven the way
   its own city10000 example works (one update per pose, odometry-composed
   initial guesses, loop closures at their later endpoint). It DOES solve
@@ -127,62 +148,61 @@ GTSAM_PYTHON=/path/to/venv/bin/python3   # override if needed (pip install gtsam
 
 ## Results (2026-07-05, aarch64 VM, single core enforced by the harness, min of 5 interleaved rounds)
 
-Iters are "accepted(total)" where the system reports both (arael,
-ceres); total includes damping retries. Final costs are all evaluated
-by the one reference cost function, so they are directly comparable.
+Iters are "accepted(total)" where the system reports both; total
+includes damping retries. Final costs are all evaluated by the one
+reference cost function, so they are directly comparable. With the
+initial-damping policy nearly every system converges in 6-7 steps, so
+ms/iter -- the per-step pipeline cost -- is the durable comparison.
 
-### M3500 unweighted (10500 parameters) -- tiny-solver's shipped benchmark configuration
+### M3500 unweighted (10500 parameters)
 
 | system          | total ms |  iters | ms/iter | 1st-iter ms | final cost |
 |-----------------|---------:|-------:|--------:|------------:|-----------:|
-| arael LM f64    |     28.5 |   9(9) |    3.17 |         5.9 |     3.0218 |
-| arael LM f32    |     43.6 | 15(15) |    2.91 |         5.5 |     3.0219 |
-| tiny-solver GN  |    131.3 |      6 |   21.88 |        29.8 |     3.0218 |
-| tiny-solver LM  |    615.7 |     28 |   21.99 |        31.5 |     3.0218 |
-| gtsam LM        |    110.9 |      7 |   15.84 |        17.7 |     3.0221 |
-| gtsam GN        |     76.7 |      6 |   12.78 |        14.2 |     3.0221 |
-| ceres LM        |    149.1 | 29(30) |    4.97 |        13.3 |     3.0219 |
-| g2o LM          |    122.6 |     31 |    3.95 |         8.1 |     3.0218 |
-| g2o GN          |     24.5 |      6 |    4.09 |         7.8 |     3.0218 |
-| gtsam ISAM2 (incremental reference) | 676.3 | 3500 upd | 0.19 | 0.1 | 3.0246 |
+| arael LM f64    |     19.8 |   6(6) |    3.31 |         6.3 |     3.0218 |
+| arael LM f32    |     30.8 | 10(10) |    3.08 |         5.5 |     3.0219 |
+| tiny-solver GN  |    123.9 |      6 |   20.64 |        28.3 |     3.0218 |
+| tiny-solver LM  |    132.3 |      6 |   22.05 |        30.1 |     3.0218 |
+| gtsam LM        |    111.2 |      7 |   15.88 |        17.1 |     3.0221 |
+| gtsam GN        |     77.6 |      6 |   12.93 |        14.2 |     3.0221 |
+| ceres LM        |     35.6 |   6(6) |    5.93 |        13.3 |     3.0218 |
+| g2o LM          |     26.0 |      6 |    4.33 |         8.1 |     3.0218 |
+| g2o GN          |     23.9 |      6 |    3.99 |         7.7 |     3.0218 |
+| gtsam ISAM2 (incremental reference) | 650.8 | 3500 upd | 0.19 | 0.2 | 3.0246 |
 
 ### M3500 (10500 parameters, information matrices applied)
 
 | system          | total ms |  iters | ms/iter | 1st-iter ms | final cost |
 |-----------------|---------:|-------:|--------:|------------:|-----------:|
-| arael LM f64    |     88.6 | 21(31) |    2.86 |         5.8 |   137.9310 |
-| arael LM f32    |    148.3 | 36(55) |    2.70 |         5.5 |   137.9338 |
-| tiny-solver GN  |    129.1 |      6 |   21.52 |        29.1 |   137.9130 |
-| tiny-solver LM  |    139.3 |      6 |   23.22 |        30.3 |   208.3 (not converged) |
-| gtsam LM        |     97.1 |      6 |   16.18 |        17.9 |   137.9273 |
-| gtsam GN        |     78.7 |      6 |   13.12 |        14.7 |   137.9273 |
-| ceres LM        |    140.9 | 27(28) |    5.03 |        13.5 |   137.9355 |
-| g2o LM          |     94.3 |     22 |    4.29 |         8.2 |   139.1 (plateau, 1.9 m off) |
-| g2o GN          |     24.7 |      6 |    4.11 |         7.7 |   137.9136 |
-| gtsam ISAM2 (incremental reference) | 649.9 | 3500 upd | 0.19 | 0.1 | 138.0320 |
+| arael LM f64    |     19.9 |   6(6) |    3.32 |         6.0 |   137.9130 |
+| arael LM f32    |     21.8 |   7(7) |    3.12 |         5.6 |   137.9544 |
+| tiny-solver GN  |    122.4 |      6 |   20.40 |        28.4 |   137.9130 |
+| tiny-solver LM  |    132.9 |      6 |   22.15 |        29.9 |   137.9130 |
+| gtsam LM        |     95.3 |      6 |   15.88 |        17.6 |   137.9273 |
+| gtsam GN        |     77.1 |      6 |   12.85 |        14.3 |   137.9273 |
+| ceres LM        |     35.3 |   6(6) |    5.88 |        13.3 |   137.9136 |
+| g2o LM          |     26.0 |      6 |    4.34 |         8.1 |   137.9136 |
+| g2o GN          |     24.3 |      6 |    4.05 |         7.4 |   137.9136 |
+| gtsam ISAM2 (incremental reference) | 658.2 | 3500 upd | 0.19 | 0.1 | 138.0320 |
 
 ### city10000 (30000 parameters, information matrices applied)
 
 | system          | total ms |  iters | ms/iter | 1st-iter ms | final cost |
 |-----------------|---------:|-------:|--------:|------------:|-----------:|
-| arael LM f64    |    106.4 |   8(9) |   11.82 |        20.9 |   511.9880 |
-| arael LM f32    |     90.6 |   9(9) |   10.07 |        18.4 |   511.9883 |
-| tiny-solver GN  |    602.3 |      7 |   86.05 |       114.1 |   511.9852 |
-| tiny-solver LM  |    891.2 |     10 |   89.12 |       119.2 |   511.9881 |
-| gtsam LM        |   4204.1 |     30 |  140.14 |        68.7 |   2.39e6 (local minimum) |
-| gtsam GN        |    213.2 |      4 |   53.30 |        58.4 |   2.48e8 (diverged) |
-| ceres LM        |    243.4 | 10(10) |   24.34 |        54.1 |   511.9886 |
-| g2o LM          |    342.5 |     18 |   19.03 |        37.7 |   1484.7 (plateau) |
-| g2o GN          |    136.2 |      7 |   19.46 |        35.6 |   511.9880 |
-| gtsam ISAM2 (incremental reference) | 10417.3 | 10000 upd | 1.04 | 0.1 | 512.5080 |
+| arael LM f64    |     87.4 |   7(7) |   12.49 |        22.4 |   511.9852 |
+| arael LM f32    |     71.4 |   7(7) |   10.20 |        18.8 |   512.0045 |
+| tiny-solver GN  |    569.3 |      7 |   81.33 |       111.3 |   511.9852 |
+| tiny-solver LM  |    617.2 |      7 |   88.18 |       115.6 |   511.9852 |
+| gtsam LM        |   4299.6 |     30 |  143.32 |        71.2 |   2.39e6 (local minimum) |
+| gtsam GN        |    214.1 |      4 |   53.52 |        59.9 |   2.48e8 (diverged) |
+| ceres LM        |    179.8 |   7(7) |   25.69 |        54.3 |   511.9880 |
+| g2o LM          |    145.9 |      7 |   20.85 |        37.2 |   511.9880 |
+| g2o GN          |    138.6 |      7 |   19.81 |        35.6 |   511.9880 |
+| gtsam ISAM2 (incremental reference) | 10378.0 | 10000 upd | 1.04 | 0.1 | 512.5080 |
 
-Headline reading: arael is the fastest system on city10000 (both
-precisions beat every competitor); g2o GN is the fastest on both M3500
-configurations. arael's per-iteration cost is the lowest of all batch
-systems throughout; on the weighted M3500 its fixed-factor lambda
-schedule spends 10 of 31 attempts on rejected retries chasing the last
-0.3% of cost (a known outer-loop work item), which is exactly the gap
-to g2o GN there.
+arael is the fastest system in every validated cell, in both total time
+and per-step cost. 10/10 systems converge on both M3500 configurations
+under the initial-damping policy; on city10000 batch GTSAM remains the
+only non-converger (residual parameterization, not damping).
 
-tiny-solver with its default rayon threading (8 cores, not core-pinned):
-M3500 GN 78.0 ms, city10000 GN 386.9 ms / LM 630.1 ms.
+tiny-solver GN with its default rayon threading (8 cores, not
+core-pinned): M3500 78.0 ms, city10000 386.9 ms.

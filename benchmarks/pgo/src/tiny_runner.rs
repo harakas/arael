@@ -137,7 +137,14 @@ fn run(ds: &Dataset, gn: bool) -> RunOut {
         let result = if gn {
             tiny_solver::GaussNewtonOptimizer::new().optimize(&problem, &init, Some(options(max_iter)))
         } else {
-            tiny_solver::LevenbergMarquardtOptimizer::default().optimize(&problem, &init, Some(options(max_iter)))
+            // Problem-appropriate initial trust region (shipped default
+            // 1e4 over-damps and triggers its terminate-on-rejected-step
+            // behavior; see the README's initial-damping policy).
+            let radius = std::env::var("TINY_RADIUS0").ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(1e12);
+            tiny_solver::LevenbergMarquardtOptimizer::new(1e-6, 1e32, radius)
+                .optimize(&problem, &init, Some(options(max_iter)))
         };
         let ms = t0.elapsed().as_secs_f64() * 1e3;
         (ms, ITER_COUNT.load(Ordering::Relaxed) - before, result)

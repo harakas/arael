@@ -163,12 +163,22 @@ pub struct RunOut {
 // GTSAM defaults (stop when a step improves the cost by less than 1e-5
 // absolute or 1e-5 relative). patience = 1 so ONE small step terminates,
 // matching how both other systems check it.
+// Initial damping, problem-appropriate for well-initialized pose graphs
+// (the LmConfig docs recommend small initial_lambda for these); see the
+// README's initial-damping policy. Env-overridable for experiments.
+fn lambda0() -> f64 {
+    std::env::var("ARAEL_LAMBDA0").ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1e-8)
+}
+
 fn cfg64(max_iters: usize) -> arael::simple_lm::LmConfig<f64> {
     arael::simple_lm::LmConfig {
         abs_precision: 1e-5,
         rel_precision: 1e-5,
         patience: 1,
         max_iters,
+        initial_lambda: lambda0(),
         ..Default::default()
     }
 }
@@ -179,6 +189,7 @@ fn cfg32(max_iters: usize) -> arael::simple_lm::LmConfig<f32> {
         rel_precision: 1e-5,
         patience: 1,
         max_iters,
+        initial_lambda: lambda0() as f32,
         ..Default::default()
     }
 }

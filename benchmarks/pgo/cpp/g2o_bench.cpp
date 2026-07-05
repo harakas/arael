@@ -66,7 +66,15 @@ static RunResult solve(const std::vector<PoseIn>& poses, const std::vector<EdgeI
     auto block = std::make_unique<BlockSolver>(std::move(linear));
     g2o::OptimizationAlgorithm* algo;
     if (lm) {
-        algo = new g2o::OptimizationAlgorithmLevenberg(std::move(block));
+        auto* lev = new g2o::OptimizationAlgorithmLevenberg(std::move(block));
+        // Problem-appropriate initial lambda (g2o's auto heuristic,
+        // 1e-5 * max Hessian diagonal, over-damps heavily weighted
+        // graphs and its descent then trips the gain-threshold stop;
+        // see the README's initial-damping policy). Env-overridable.
+        double lambda0 = 1e-12;
+        if (const char* li = getenv("G2O_LAMBDA_INIT")) lambda0 = atof(li);
+        lev->setUserLambdaInit(lambda0);
+        algo = lev;
     } else {
         algo = new g2o::OptimizationAlgorithmGaussNewton(std::move(block));
     }
@@ -107,7 +115,9 @@ static RunResult solve(const std::vector<PoseIn>& poses, const std::vector<EdgeI
     // Same termination class as the other systems: stop when the
     // relative chi2 gain of an iteration falls below 1e-5.
     auto* terminate = new g2o::SparseOptimizerTerminateAction();
-    terminate->setGainThreshold(1e-5);
+    double gain = 1e-5;
+    if (const char* g = getenv("G2O_GAIN")) gain = atof(g);
+    terminate->setGainThreshold(gain);
     terminate->setMaxIterations(max_iters);
     opt.addPostIterationAction(terminate);
 

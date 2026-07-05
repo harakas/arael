@@ -14,6 +14,7 @@
 # info), matching the unweighted benchmark configuration.
 
 import json
+import os
 import sys
 import time
 
@@ -32,6 +33,9 @@ def make_optimizer(kind, graph, initial, max_iterations):
     params.setAbsoluteErrorTol(1e-5)
     params.setMaxIterations(max_iterations)
     if kind == "lm":
+        lam = os.environ.get("GTSAM_LAMBDA0")
+        if lam is not None:
+            params.setlambdaInitial(float(lam))
         return gtsam.LevenbergMarquardtOptimizer(graph, initial, params)
     return gtsam.GaussNewtonOptimizer(graph, initial, params)
 
