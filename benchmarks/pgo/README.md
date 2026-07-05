@@ -3,9 +3,12 @@
 Batch pose-graph optimization on the two canonical 2D SLAM benchmark
 datasets, comparing arael against
 [tiny-solver](https://crates.io/crates/tiny-solver) (Rust, dual-number
-autodiff, faer sparse Cholesky) and [GTSAM](https://gtsam.org) (C++,
+autodiff, faer sparse Cholesky), [GTSAM](https://gtsam.org) (C++,
 analytic factors, via the official Python wheel -- timing wraps only the
-C++ `optimize()` call).
+C++ `optimize()` call), [Ceres](http://ceres-solver.org) (C++ 2.2,
+template autodiff, SPARSE_NORMAL_CHOLESKY, modeled on its own
+pose_graph_2d example), and [g2o](https://github.com/RainerKuemmerle/g2o)
+(C++ 2023-08, analytic Jacobians, CHOLMOD backend).
 
 ## Datasets
 
@@ -39,10 +42,14 @@ inlier region.
   and linear algebra remain tiny-solver's. GTSAM's `readG2o` honors the
   information matrices natively.
 - **One validation.** A single reference cost function (in `src/g2o.rs`)
-  evaluates every system's final poses. Hard asserts: arael rows must
-  reach the best cost within 1%, at least one *external* system must
-  agree (independent-implementation anchor), and all converged solutions
-  must agree pairwise under rigid alignment to < 5 cm RMSE.
+  evaluates every system's final poses. A row counts as converged only
+  when BOTH its cost is within 1% of the best AND its solution is within
+  5 cm rigid-aligned RMSE of the best solution -- the cost surface has
+  near-flat directions where a plateau under 1% above the optimum can
+  sit meters away geometrically (g2o LM lands on exactly such a plateau
+  on the weighted M3500). Hard asserts: arael rows must converge and at
+  least one external system must agree (independent-implementation
+  anchor).
 - **One termination class.** All systems stop when a step improves the
   cost by less than 1e-5 absolute or 1e-5 relative -- the shipped
   defaults of both tiny-solver and GTSAM; arael is configured to the same
@@ -90,6 +97,14 @@ no f32 rows exist for them.
   incrementally with ISAM2. Its Pose2 between-factor residual uses the
   SE(2) log map, whose basin of attraction from this initialization
   differs from the rotation-frame residual arael and tiny-solver use.
+- **g2o LM on the weighted datasets** stops on flat plateaus: cost 139.11
+  (0.9% above the 137.91 optimum but 1.9 m away geometrically) on M3500,
+  1484.7 on city10000. Its GN converges everywhere and is the fastest
+  system on both M3500 configurations. g2o's termination is a relative
+  chi2 gain threshold (SparseOptimizerTerminateAction, 1e-5).
+- **Ceres LM** converges everywhere; its trust-region loop grinds ~30
+  near-identical iterations on M3500 before its function_tolerance
+  fires.
 - **gtsam ISAM2 row**: the incremental reference -- GTSAM driven the way
   its own city10000 example works (one update per pose, odometry-composed
   initial guesses, loop closures at their later endpoint). It DOES solve
@@ -109,52 +124,62 @@ GTSAM_PYTHON=/path/to/venv/bin/python3   # override if needed (pip install gtsam
 
 ## Results (2026-07-05, aarch64 VM, single core enforced by the harness, min of 5 interleaved rounds)
 
-arael iters are "accepted(total)": accepted cost-decreasing steps, and
-total damped solve attempts including retries. Final costs are all
-evaluated by the one reference cost function, so they are directly
-comparable.
+Iters are "accepted(total)" where the system reports both (arael,
+ceres); total includes damping retries. Final costs are all evaluated
+by the one reference cost function, so they are directly comparable.
 
 ### M3500 unweighted (10500 parameters) -- tiny-solver's shipped benchmark configuration
 
 | system          | total ms |  iters | ms/iter | 1st-iter ms | final cost |
 |-----------------|---------:|-------:|--------:|------------:|-----------:|
-| arael LM f64    |     29.0 |   9(9) |    3.23 |         6.4 |     3.0218 |
-| arael LM f32    |     44.3 | 15(15) |    2.95 |         5.9 |     3.0219 |
-| tiny-solver GN  |    130.4 |      6 |   21.74 |        30.0 |     3.0218 |
-| tiny-solver LM  |    625.8 |     28 |   22.35 |        32.3 |     3.0218 |
-| gtsam LM        |    115.2 |      7 |   16.46 |        18.8 |     3.0221 |
-| gtsam GN        |     81.6 |      6 |   13.60 |        14.8 |     3.0221 |
-| gtsam ISAM2 (incremental reference) | 695.5 | 3500 upd | 0.20 | 0.1 | 3.0246 |
+| arael LM f64    |     28.5 |   9(9) |    3.17 |         5.9 |     3.0218 |
+| arael LM f32    |     43.6 | 15(15) |    2.91 |         5.5 |     3.0219 |
+| tiny-solver GN  |    131.3 |      6 |   21.88 |        29.8 |     3.0218 |
+| tiny-solver LM  |    615.7 |     28 |   21.99 |        31.5 |     3.0218 |
+| gtsam LM        |    110.9 |      7 |   15.84 |        17.7 |     3.0221 |
+| gtsam GN        |     76.7 |      6 |   12.78 |        14.2 |     3.0221 |
+| ceres LM        |    149.1 | 29(30) |    4.97 |        13.3 |     3.0219 |
+| g2o LM          |    122.6 |     31 |    3.95 |         8.1 |     3.0218 |
+| g2o GN          |     24.5 |      6 |    4.09 |         7.8 |     3.0218 |
+| gtsam ISAM2 (incremental reference) | 676.3 | 3500 upd | 0.19 | 0.1 | 3.0246 |
 
 ### M3500 (10500 parameters, information matrices applied)
 
 | system          | total ms |  iters | ms/iter | 1st-iter ms | final cost |
 |-----------------|---------:|-------:|--------:|------------:|-----------:|
-| arael LM f64    |     89.9 | 21(31) |    2.90 |         6.1 |   137.9310 |
-| arael LM f32    |    149.2 | 36(55) |    2.71 |         5.6 |   137.9338 |
-| tiny-solver GN  |    128.1 |      6 |   21.35 |        29.5 |   137.9130 |
-| tiny-solver LM  |    138.3 |      6 |   23.05 |        31.4 |   208.3 (not converged) |
-| gtsam LM        |     98.6 |      6 |   16.44 |        18.3 |   137.9273 |
-| gtsam GN        |     79.8 |      6 |   13.31 |        15.2 |   137.9273 |
-| gtsam ISAM2 (incremental reference) | 668.6 | 3500 upd | 0.19 | 0.1 | 138.0320 |
+| arael LM f64    |     88.6 | 21(31) |    2.86 |         5.8 |   137.9310 |
+| arael LM f32    |    148.3 | 36(55) |    2.70 |         5.5 |   137.9338 |
+| tiny-solver GN  |    129.1 |      6 |   21.52 |        29.1 |   137.9130 |
+| tiny-solver LM  |    139.3 |      6 |   23.22 |        30.3 |   208.3 (not converged) |
+| gtsam LM        |     97.1 |      6 |   16.18 |        17.9 |   137.9273 |
+| gtsam GN        |     78.7 |      6 |   13.12 |        14.7 |   137.9273 |
+| ceres LM        |    140.9 | 27(28) |    5.03 |        13.5 |   137.9355 |
+| g2o LM          |     94.3 |     22 |    4.29 |         8.2 |   139.1 (plateau, 1.9 m off) |
+| g2o GN          |     24.7 |      6 |    4.11 |         7.7 |   137.9136 |
+| gtsam ISAM2 (incremental reference) | 649.9 | 3500 upd | 0.19 | 0.1 | 138.0320 |
 
 ### city10000 (30000 parameters, information matrices applied)
 
 | system          | total ms |  iters | ms/iter | 1st-iter ms | final cost |
 |-----------------|---------:|-------:|--------:|------------:|-----------:|
-| arael LM f64    |    111.0 |   8(9) |   12.34 |        22.1 |   511.9880 |
-| arael LM f32    |     89.8 |   9(9) |    9.98 |        19.2 |   511.9883 |
-| tiny-solver GN  |    601.1 |      7 |   85.87 |       114.4 |   511.9852 |
-| tiny-solver LM  |    904.0 |     10 |   90.40 |       121.3 |   511.9881 |
-| gtsam LM        |   4405.2 |     30 |  146.84 |        73.6 |   2.39e6 (local minimum) |
-| gtsam GN        |    221.1 |      4 |   55.27 |        60.3 |   2.48e8 (diverged) |
-| gtsam ISAM2 (incremental reference) | 11148.4 | 10000 upd | 1.11 | 0.1 | 512.5080 |
+| arael LM f64    |    106.4 |   8(9) |   11.82 |        20.9 |   511.9880 |
+| arael LM f32    |     90.6 |   9(9) |   10.07 |        18.4 |   511.9883 |
+| tiny-solver GN  |    602.3 |      7 |   86.05 |       114.1 |   511.9852 |
+| tiny-solver LM  |    891.2 |     10 |   89.12 |       119.2 |   511.9881 |
+| gtsam LM        |   4204.1 |     30 |  140.14 |        68.7 |   2.39e6 (local minimum) |
+| gtsam GN        |    213.2 |      4 |   53.30 |        58.4 |   2.48e8 (diverged) |
+| ceres LM        |    243.4 | 10(10) |   24.34 |        54.1 |   511.9886 |
+| g2o LM          |    342.5 |     18 |   19.03 |        37.7 |   1484.7 (plateau) |
+| g2o GN          |    136.2 |      7 |   19.46 |        35.6 |   511.9880 |
+| gtsam ISAM2 (incremental reference) | 10417.3 | 10000 upd | 1.04 | 0.1 | 512.5080 |
 
-On the weighted M3500, arael's fixed-factor lambda schedule oscillates
-around the optimal damping (heterogeneous edge weights narrow the good-
-lambda band): 10 of 31 attempts are rejected retries and the accepted
-tail chases the last 0.3% of cost -- a known outer-loop work item;
-per-iteration cost is unaffected.
+Headline reading: arael is the fastest system on city10000 (both
+precisions beat every competitor); g2o GN is the fastest on both M3500
+configurations. arael's per-iteration cost is the lowest of all batch
+systems throughout; on the weighted M3500 its fixed-factor lambda
+schedule spends 10 of 31 attempts on rejected retries chasing the last
+0.3% of cost (a known outer-loop work item), which is exactly the gap
+to g2o GN there.
 
 tiny-solver with its default rayon threading (8 cores, not core-pinned):
 M3500 GN 78.0 ms, city10000 GN 386.9 ms / LM 630.1 ms.

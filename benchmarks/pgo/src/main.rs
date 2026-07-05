@@ -35,31 +35,31 @@ fn gtsam_available() -> Option<String> {
     std::path::Path::new(&venv).exists().then_some(venv)
 }
 
-fn run_gtsam(python: &str, ds_path: &str, kind: &str, weighted: bool, n_poses: usize) -> (f64, f64, usize, Option<usize>, Vec<PoseIn>) {
-    let poses_out = format!("/tmp/gtsam_poses_{}.txt", kind);
-    let weights = if weighted { "info" } else { "unit" };
-    let out = std::process::Command::new(python)
-        .args(["gtsam_bench.py", ds_path, kind, &poses_out, weights])
-        .output()
-        .expect("failed to run gtsam_bench.py");
-    assert!(out.status.success(), "gtsam bench failed: {}", String::from_utf8_lossy(&out.stderr));
+// Run an external benchmark process speaking the shared protocol: JSON
+// line {solve_ms, first_iter_ms, iterations, accepted?, cpus_allowed}
+// on stdout, "x y theta" lines in poses_out. Asserts the subprocess
+// inherited the single-core pin.
+fn run_external(mut cmd: std::process::Command, poses_out: &str, n_poses: usize) -> (f64, f64, usize, Option<usize>, Vec<PoseIn>) {
+    let out = cmd.output().unwrap_or_else(|e| panic!("failed to run {:?}: {}", cmd, e));
+    assert!(out.status.success(), "{:?} failed: {}", cmd, String::from_utf8_lossy(&out.stderr));
     let text = String::from_utf8(out.stdout).unwrap();
     let line = text.lines().last().unwrap();
-    let get = |key: &str| -> f64 {
-        let i = line.find(key).unwrap_or_else(|| panic!("missing {} in {}", key, line));
+    let get = |key: &str| -> Option<f64> {
+        let i = line.find(key)?;
         let rest = &line[i + key.len() + 2..];
         rest.trim_start_matches(':').trim()
             .split(|c: char| c == ',' || c == '}')
-            .next().unwrap().trim().parse().unwrap()
+            .next().unwrap().trim().parse().ok()
     };
-    let solve_ms = get("solve_ms");
-    let first_iter_ms = get("first_iter_ms");
-    let iterations = get("iterations") as usize;
-    // Active check: the GTSAM subprocess must have inherited the pin.
+    let solve_ms = get("solve_ms").expect("solve_ms");
+    let first_iter_ms = get("first_iter_ms").expect("first_iter_ms");
+    let iterations = get("\"iterations\"").expect("iterations") as usize;
+    let accepted = get("accepted").map(|v| v as usize);
+    // Active check: the subprocess must have inherited the pin.
     let core = std::env::var("PGO_BENCH_CORE").unwrap();
     assert!(line.contains(&format!("\"cpus_allowed\": \"{}\"", core)),
-        "gtsam subprocess not pinned to CPU {}: {}", core, line);
-    let poses: Vec<PoseIn> = std::fs::read_to_string(&poses_out).unwrap()
+        "{:?} not pinned to CPU {}: {}", cmd, core, line);
+    let poses: Vec<PoseIn> = std::fs::read_to_string(poses_out).unwrap()
         .lines()
         .map(|l| {
             let v: Vec<f64> = l.split_whitespace().map(|t| t.parse().unwrap()).collect();
@@ -67,7 +67,28 @@ fn run_gtsam(python: &str, ds_path: &str, kind: &str, weighted: bool, n_poses: u
         })
         .collect();
     assert_eq!(poses.len(), n_poses);
-    (solve_ms, first_iter_ms, iterations, None, poses)
+    (solve_ms, first_iter_ms, iterations, accepted, poses)
+}
+
+fn run_gtsam(python: &str, ds_path: &str, kind: &str, weighted: bool, n_poses: usize) -> (f64, f64, usize, Option<usize>, Vec<PoseIn>) {
+    let poses_out = format!("/tmp/gtsam_poses_{}.txt", kind);
+    let weights = if weighted { "info" } else { "unit" };
+    let mut cmd = std::process::Command::new(python);
+    cmd.args(["gtsam_bench.py", ds_path, kind, &poses_out, weights]);
+    run_external(cmd, &poses_out, n_poses)
+}
+
+fn run_ceres(ds_path: &str, weighted: bool, n_poses: usize) -> (f64, f64, usize, Option<usize>, Vec<PoseIn>) {
+    let mut cmd = std::process::Command::new("cpp/build/ceres_bench");
+    cmd.args([ds_path, "/tmp/ceres_poses.txt", if weighted { "info" } else { "unit" }]);
+    run_external(cmd, "/tmp/ceres_poses.txt", n_poses)
+}
+
+fn run_g2o(ds_path: &str, kind: &str, weighted: bool, n_poses: usize) -> (f64, f64, usize, Option<usize>, Vec<PoseIn>) {
+    let poses_out = format!("/tmp/g2o_poses_{}.txt", kind);
+    let mut cmd = std::process::Command::new("cpp/build/g2o_bench");
+    cmd.args([ds_path, kind, &poses_out, if weighted { "info" } else { "unit" }]);
+    run_external(cmd, &poses_out, n_poses)
 }
 
 // Single-core enforcement, applied before any thread pool can spawn:
@@ -119,6 +140,11 @@ fn main() {
     if python.is_none() {
         eprintln!("WARNING: GTSAM python not found (set GTSAM_PYTHON); skipping GTSAM rows");
     }
+    let cpp_available = std::path::Path::new("cpp/build/ceres_bench").exists()
+        && std::path::Path::new("cpp/build/g2o_bench").exists();
+    if !cpp_available {
+        eprintln!("WARNING: cpp/build runners missing (cmake -B cpp/build cpp && cmake --build cpp/build); skipping ceres/g2o rows");
+    }
 
     for (name, path, weighted) in &datasets {
         let path = path.to_str().unwrap();
@@ -155,6 +181,11 @@ fn main() {
                 record("gtsam LM", run_gtsam(py, path, "lm", *weighted, ds.poses.len()), &mut cells);
                 record("gtsam GN", run_gtsam(py, path, "gn", *weighted, ds.poses.len()), &mut cells);
             }
+            if cpp_available {
+                record("ceres LM", run_ceres(path, *weighted, ds.poses.len()), &mut cells);
+                record("g2o LM", run_g2o(path, "lm", *weighted, ds.poses.len()), &mut cells);
+                record("g2o GN", run_g2o(path, "gn", *weighted, ds.poses.len()), &mut cells);
+            }
             eprintln!("  round {}/{} done", round + 1, rounds);
         }
 
@@ -166,15 +197,25 @@ fn main() {
             record("gtsam ISAM2 (incr)", run_gtsam(py, path, "isam2", *weighted, ds.poses.len()), &mut cells);
         }
 
-        // Convergence is judged from the measured cost itself: a row is
-        // "converged" when it is within 1% of the best cost any system
-        // reached. Failures to reach the common optimum are real,
-        // reportable solver behavior (see README), not benchmark errors --
-        // but arael rows must always converge, and at least one external
-        // system must agree with the best cost so correctness is anchored
-        // by an independent implementation.
-        let best = cells.iter().map(|(_, c)| c.cost).fold(f64::MAX, f64::min);
-        let converged = |c: &Cell| (c.cost - best) / best < 1e-2;
+        // Convergence is judged against the best solution by BOTH cost
+        // (within 1%) and geometry (rigid-aligned RMSE under 5 cm to the
+        // best solution) -- the cost surface has near-flat directions
+        // where a plateau 0.9% above the optimum can sit meters away
+        // geometrically (observed with g2o LM on the weighted M3500).
+        // Failures to reach the common optimum are real, reportable
+        // solver behavior (see README), not benchmark errors -- but
+        // arael rows must always converge, and at least one external
+        // system must agree so correctness is anchored by an
+        // independent implementation.
+        let best_idx = (0..cells.len())
+            .min_by(|&i, &j| cells[i].1.cost.partial_cmp(&cells[j].1.cost).unwrap())
+            .unwrap();
+        let best = cells[best_idx].1.cost;
+        let best_poses = cells[best_idx].1.poses.clone();
+        let converged = |c: &Cell| {
+            (c.cost - best) / best < 1e-2
+                && g2o::aligned_rmse(&best_poses, &c.poses) < 0.05
+        };
 
         // iters column: "accepted(total)" where the system reports both;
         // total includes damping retries. Other systems report only their
@@ -203,15 +244,9 @@ fn main() {
             .count();
         assert!(external_agree >= 1,
             "no external system confirms the best cost {} -- cannot validate", best);
-        let conv: Vec<&(String, Cell)> = cells.iter().filter(|(_, c)| converged(c)).collect();
-        for i in 1..conv.len() {
-            let rmse = g2o::aligned_rmse(&conv[0].1.poses, &conv[i].1.poses);
-            assert!(rmse < 0.05,
-                "{} vs {}: aligned RMSE {:.4} m too large",
-                conv[0].0, conv[i].0, rmse);
-        }
-        println!("validation: {}/{} systems at the common optimum ({:.4}), \
-                  agreement anchored by {} external system(s), pairwise aligned RMSE < 5 cm",
-            conv.len(), cells.len(), best, external_agree);
+        let conv = cells.iter().filter(|(_, c)| converged(c)).count();
+        println!("validation: {}/{} systems at the common optimum ({:.4}: cost within 1%, \
+                  aligned RMSE to best < 5 cm), anchored by {} external system(s)",
+            conv, cells.len(), best, external_agree);
     }
 }
