@@ -11,6 +11,7 @@
 //! # Contents
 //!
 //! - [Features](#features)
+//! - [Benchmarks](#benchmarks)
 //! - [Scope](#scope)
 //! - [Example: Symbolic Math](#example-symbolic-math)
 //! - [Example: Robust Linear Regression](#example-robust-linear-regression)
@@ -61,6 +62,39 @@
 //!   delta around a reference rotation matrix
 //! - **WASM/browser support** -- compiles to WebAssembly; the `arael-sketch`
 //!   constraint editor runs in the browser via eframe/egui
+//!
+//! # Benchmarks
+//!
+//! Batch pose-graph optimization on city10000, the classic 10000-pose SLAM
+//! benchmark (iSAM dataset: 30000 parameters, 20687 weighted constraints).
+//! Best converging configuration per system, all verified to reach the
+//! same minimum -- final costs are evaluated by one shared reference
+//! function, so they are directly comparable. Apple M4 Pro, single
+//! threaded:
+//!
+//! | system | total time | iterations | final cost |
+//! |--------|-----------:|-----------:|-----------:|
+//! | **arael (LM, f32)** | **90.6 ms** | 9(9) | 511.99 |
+//! | **arael (LM, f64)** | **106.4 ms** | 8(9) | 511.99 |
+//! | [g2o](https://github.com/RainerKuemmerle/g2o) (GN) | 136.2 ms | 7 | 511.99 |
+//! | [Ceres](http://ceres-solver.org) (LM) | 243.4 ms | 10(10) | 511.99 |
+//! | [tiny-solver](https://crates.io/crates/tiny-solver) (GN) | 602.3 ms | 7 | 511.99 |
+//! | [GTSAM](https://gtsam.org) (batch) | did not converge* | | |
+//!
+//! \* GTSAM's batch LM/GN does not survive this dataset's odometry
+//! initialization; its incremental ISAM2 solves it in 10.4 s of update
+//! time. arael's iteration count is "accepted(total damped attempts)";
+//! other systems report outer iterations, so per-iteration figures are
+//! not directly comparable across systems.
+//!
+//! Arael's iterations are extremely low cost: all derivative code is
+//! generated and CSE-optimized at compile time, and the system matrix is
+//! assembled through precomputed sparse positions rather than built from
+//! scratch each iteration. On the smaller M3500 benchmark (10500
+//! parameters) g2o's Gauss-Newton currently leads (24.5 ms vs arael's
+//! 28.5 ms) -- full tables for three dataset configurations, methodology,
+//! and the cross-system validation harness:
+//! [benchmarks/pgo](https://github.com/harakas/arael/tree/master/benchmarks/pgo).
 //!
 //! # Scope
 //!

@@ -7,6 +7,7 @@ A Rust framework for nonlinear optimization with compile-time symbolic different
 ## Contents
 
 - [Features](#features)
+- [Benchmarks](#benchmarks)
 - [Scope](#scope)
 - [Quick Example: Symbolic Math](#quick-example-symbolic-math)
 - [Quick Example: Robust Linear Regression](#quick-example-robust-linear-regression)
@@ -44,6 +45,39 @@ A Rust framework for nonlinear optimization with compile-time symbolic different
 - **Jacobian computation** -- `#[arael(root, jacobian)]` generates `calc_jacobian()` returning a sparse Jacobian matrix for DOF analysis and constraint diagnostics (see `examples/jacobian_demo.rs`)
 - **Gimbal-lock-free rotations** -- `EulerAngleParam` optimizes a small delta around a reference rotation matrix
 - **WASM/browser support** -- the sketch editor compiles to WebAssembly and runs in the browser via eframe/egui
+
+## Benchmarks
+
+Batch pose-graph optimization on city10000, the classic 10000-pose SLAM
+benchmark (iSAM dataset: 30000 parameters, 20687 weighted constraints).
+Best converging configuration per system, all verified to reach the
+same minimum -- final costs are evaluated by one shared reference
+function, so they are directly comparable. Apple M4 Pro, single
+threaded:
+
+| system | total time | iterations | final cost |
+|--------|-----------:|-----------:|-----------:|
+| **arael (LM, f32)** | **90.6 ms** | 9(9) | 511.99 |
+| **arael (LM, f64)** | **106.4 ms** | 8(9) | 511.99 |
+| [g2o](https://github.com/RainerKuemmerle/g2o) (GN) | 136.2 ms | 7 | 511.99 |
+| [Ceres](http://ceres-solver.org) (LM) | 243.4 ms | 10(10) | 511.99 |
+| [tiny-solver](https://crates.io/crates/tiny-solver) (GN) | 602.3 ms | 7 | 511.99 |
+| [GTSAM](https://gtsam.org) (batch) | did not converge* | | |
+
+\* GTSAM's batch LM/GN does not survive this dataset's odometry
+initialization; its incremental ISAM2 solves it in 10.4 s of update
+time. arael's iteration count is "accepted(total damped attempts)";
+other systems report outer iterations, so per-iteration figures are
+not directly comparable across systems.
+
+Arael's iterations are extremely low cost: all derivative code is
+generated and CSE-optimized at compile time, and the system matrix is
+assembled through precomputed sparse positions rather than built from
+scratch each iteration. On the smaller M3500 benchmark (10500
+parameters) g2o's Gauss-Newton currently leads (24.5 ms vs arael's
+28.5 ms) -- full tables for three dataset configurations, methodology,
+and the cross-system validation harness:
+[benchmarks/pgo](benchmarks/pgo/README.md).
 
 ## Scope
 
@@ -336,6 +370,7 @@ The `examples/` directory is the primary place to see the API in use. Each file 
 - **[linear_demo](examples/linear_demo.rs)** -- robust linear regression on noisy 2D data. Residual wrapped in `gamma * atan(r / gamma)` -- the [Starship method (US12346118)](https://patents.google.com/patent/US12346118), same robustifier used by the feature constraints in loc/SLAM. Minimal single-struct model + LM fit, compared against plain closed-form least squares.
 - **[loc_demo](examples/loc_demo.rs)** -- localisation with fixed known landmarks (no gauge freedom). Block-tridiagonal Hessian + band solver. Graduated-isigma optimisation via a root `frine_isigma_scale` field.
 - **[loc_global_demo](examples/loc_global_demo.rs)** -- how to put `Param` fields on the root struct and have constraints consume them. Uses a system-global rigid transform (translation + 3-axis rotation applied to every pose) as the running example; every residual that reads the robot's world pose composes the globals before evaluating. Shows the two wiring shapes for pose<->root cross-Hessian pairs (`CrossBlock<Pose, Path>` on the constraint struct, and a root-owned `TripletBlock` named via the `root.<field>` block spec) and a `Path::optimise_center` pass that freezes pose params and optimises only the globals before the main sweep.
+- **[m3500_demo](examples/m3500_demo.rs)** -- the classic M3500 Manhattan-world pose-graph benchmark (Olson 2006): 3500 SE2 poses, 5453 relative-pose constraints read from a g2o file (vendored under `benchmarks/pgo/datasets/`, any 2D g2o file works). Between-factor written symbolically in ~10 lines (`matrix2sym::rotation`, `rad_diff`), gauge fixed by a guarded soft prior on pose 0, solved with sparse faer LM in ~30 ms. `--weighted` applies the file's information matrices; writes `m3500.eps`, an overlay of the drifted odometry input vs the optimized grid. The same model backs the cross-solver comparison in [benchmarks/pgo](benchmarks/pgo/README.md).
 - **[model_demo](examples/model_demo.rs)** -- minimal `#[arael::model]` walk-through showing how `Param`, `SimpleEulerAngleParam`, and the update cycle fit together.
 - **[refs_demo](examples/refs_demo.rs)** -- `Ref<T>`, `refs::Vec`, `refs::Deque`, and `refs::Arena` behaviour: insertion, iteration, stable handles.
 - **[runtime_fit_demo](examples/runtime_fit_demo.rs)** -- curve fitting where the residual equation is a string parsed at runtime. Demonstrates `ExtendedModel` + robust loss on top of the symbolic front end.

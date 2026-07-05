@@ -1230,7 +1230,7 @@ impl<A: Model, const N: usize, T: crate::utils::Float> SelfBlock<A, N, T> {
 /// Hessian block coupling two model types — stores ONLY the rectangular A×B
 /// cross Hessian pairs. A's gradient and A-A diagonal live in A's own
 /// [`SelfBlock`]; same for B. This matches the refactor where every
-/// params-having Model owns a SelfBlock<Self>, and cross blocks carry only
+/// params-having Model owns a `SelfBlock<Self>`, and cross blocks carry only
 /// the pieces that don't fit in a per-entity block.
 ///
 /// `NA = A::PARAM_COUNT`, `NB = B::PARAM_COUNT`. Internal Hessian storage
@@ -1417,7 +1417,7 @@ impl<A: Model, B: Model, const NA: usize, const NB: usize, T: crate::utils::Floa
 ///
 /// After the refactor: TripletBlock stores ONLY across-entity Hessian pairs
 /// (pairs where the two params belong to different entity spans). The
-/// within-entity H[A,A] / H[B,B] / ... diagonals live in each entity's
+/// within-entity `H[A,A]` / `H[B,B]` / ... diagonals live in each entity's
 /// `SelfBlock<Self>`, and the gradient lives there too. This matches the
 /// invariant that every `∂r/∂p_i · ∂r/∂p_j` pair is written to exactly one
 /// block with no duplication.
