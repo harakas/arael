@@ -477,6 +477,11 @@ fn simplify_div(a: E, b: E) -> E {
     // Flatten both sides, collecting all num/den factors across Div chains
     let (ca, na, da) = flatten_fraction(&a);
     let (cb, nb, db) = flatten_fraction(&b);
+    // A zero denominator coefficient must not be folded (ca/cb would bake
+    // inf/NaN into the tree); leave the division for IEEE eval semantics.
+    if cb == 0.0 {
+        return E::new(Expr::Div(a, b));
+    }
     // a/b = (na*db) / (da*nb), coeff = ca/cb
     let mut num_factors = na;
     num_factors.extend(db);
@@ -627,7 +632,9 @@ impl Expr {
                 }
                 if is_const(&b, 0.0) { return constant(1.0); }
                 if is_const(&b, 1.0) { return a; }
-                if is_const(&a, 0.0) { return constant(0.0); }
+                // No 0^b -> 0 rule for symbolic b: wrong for b == 0
+                // (0^0 = 1) and b < 0 (0^b = inf). Constant b is already
+                // folded by the Const/Const branch above.
                 if is_const(&a, 1.0) { return constant(1.0); }
                 E::new(Expr::Pow(a, b))
             }
@@ -692,7 +699,9 @@ impl Expr {
             Expr::Heaviside(a) => {
                 let a = a.simplify_once();
                 if let Expr::Const(v) = a.as_ref() {
-                    return constant(if *v < 0.0 { 0.0 } else { 1.0 });
+                    // Same branch sense as runtime utils::heaviside
+                    // (heaviside(NaN) = 0).
+                    return constant(if *v >= 0.0 { 1.0 } else { 0.0 });
                 }
                 E::new(Expr::Heaviside(a))
             }

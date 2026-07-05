@@ -37,7 +37,10 @@ impl Expr {
             Expr::Abs(a) => Ok(a.eval(vars)?.abs()),
             Expr::Heaviside(a) => {
                 let v = a.eval(vars)?;
-                Ok(if v < 0.0 { 0.0 } else { 1.0 })
+                // Same branch sense as the runtime utils::heaviside so
+                // interpreted and compiled code agree -- including on NaN
+                // (>= is false for NaN, so heaviside(NaN) = 0).
+                Ok(if v >= 0.0 { 1.0 } else { 0.0 })
             }
             Expr::Clamp(val, lo, hi) => {
                 let v = val.eval(vars)?;
@@ -96,7 +99,23 @@ impl Expr {
             Expr::Clamp(a, lo, hi) => E::new(Expr::Clamp(a.subs_by_name(var, replacement), lo.subs_by_name(var, replacement), hi.subs_by_name(var, replacement))),
             Expr::Func { name, params, kind, args } => {
                 let new_args = args.iter().map(|a| a.subs_by_name(var, replacement)).collect();
-                E::new(Expr::Func { name: name.clone(), params: params.clone(), kind: kind.clone(), args: new_args })
+                // Captured symbols: substitute inside the body/derivs too,
+                // unless the name is shadowed by a param (bound inside).
+                let new_kind = if params.iter().any(|p| p == var) {
+                    kind.clone()
+                } else {
+                    match kind {
+                        crate::FuncKind::Symbolic { body } => crate::FuncKind::Symbolic {
+                            body: body.subs_by_name(var, replacement),
+                        },
+                        crate::FuncKind::SymbolicDerivs { body, derivs } => crate::FuncKind::SymbolicDerivs {
+                            body: body.subs_by_name(var, replacement),
+                            derivs: derivs.iter().map(|d| d.subs_by_name(var, replacement)).collect(),
+                        },
+                        crate::FuncKind::Extern { .. } => kind.clone(),
+                    }
+                };
+                E::new(Expr::Func { name: name.clone(), params: params.clone(), kind: new_kind, args: new_args })
             }
         }
     }
@@ -133,8 +152,17 @@ impl Expr {
                 lo.collect_vars(set);
                 hi.collect_vars(set);
             }
-            Expr::Func { args, .. } => {
+            Expr::Func { name: _, params, kind, args } => {
                 for arg in args { arg.collect_vars(set); }
+                // Captured symbols: body may reference symbols beyond its
+                // params; they are free variables of this expression.
+                if let Some(body) = kind.body() {
+                    let mut inner = BTreeSet::new();
+                    body.collect_vars(&mut inner);
+                    for n in inner {
+                        if !params.contains(&n) { set.insert(n); }
+                    }
+                }
             }
         }
     }

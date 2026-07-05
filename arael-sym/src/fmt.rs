@@ -56,6 +56,19 @@ fn fmt_const(f: &mut fmt::Formatter<'_>, v: f64) -> fmt::Result {
 /// the float-type suffix when one is requested. An empty `ft` emits an
 /// unsuffixed literal for type-inferred contexts (macro-generated code).
 fn rust_float_literal(v: f64, ft: &str) -> String {
+    if !v.is_finite() {
+        // `{v}` prints inf/NaN, which are not Rust tokens. Suffixed
+        // contexts get the typed constant path; the type-inferred
+        // context gets a literal expression that adopts the surrounding
+        // precision (a `f64::` path would pin it).
+        if ft.is_empty() {
+            return if v.is_nan() { "(0.0 / 0.0)".to_string() }
+                else if v > 0.0 { "(1.0 / 0.0)".to_string() }
+                else { "(-1.0 / 0.0)".to_string() };
+        }
+        let path = if v.is_nan() { "NAN" } else if v > 0.0 { "INFINITY" } else { "NEG_INFINITY" };
+        return format!("{ft}::{path}");
+    }
     let base = match crate::as_exact_int(v) {
         Some(i) => format!("{i}.0"),
         None => format!("{v}"),
@@ -105,7 +118,10 @@ impl fmt::Display for Expr {
                 fmt_child(f, b, p, true)
             }
             Expr::Pow(a, b) => {
-                let base_needs = precedence(a) < precedence(self);
+                // A Pow base must also be parenthesized: `x^2^3` re-parses
+                // right-associatively as x^(2^3), not the (x^2)^3 it prints.
+                let base_needs = precedence(a) < precedence(self)
+                    || matches!(&**a, Expr::Pow(..));
                 if base_needs {
                     write!(f, "(")?;
                     fmt::Display::fmt(a.as_ref(), f)?;

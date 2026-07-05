@@ -332,7 +332,13 @@ impl VisitMut for SymVisitor {
                 }
             }
             Expr::MethodCall(mc) => {
-                self.visit_expr_mut(&mut mc.receiver);
+                // Never clone-wrap the receiver itself: `s.push(x)` must
+                // mutate s, not a temporary clone (silent data loss).
+                // Complex receivers still get visited for their inner
+                // expressions.
+                if !matches!(&*mc.receiver, Expr::Path(_)) {
+                    self.visit_expr_mut(&mut mc.receiver);
+                }
                 for arg in &mut mc.args { self.visit_expr_mut(arg); }
             }
             Expr::Call(call) => {
@@ -405,6 +411,7 @@ fn collect_pat_idents_into(pat: &Pat, names: &mut Vec<String>) {
         Pat::Struct(ps) => { for field in &ps.fields { collect_pat_idents_into(&field.pat, names); } }
         Pat::Slice(ps) => { for elem in &ps.elems { collect_pat_idents_into(elem, names); } }
         Pat::Reference(pr) => { collect_pat_idents_into(&pr.pat, names); }
+        Pat::Type(pt) => { collect_pat_idents_into(&pt.pat, names); }
         Pat::Or(por) => { for case in &por.cases { collect_pat_idents_into(case, names); } }
         Pat::Paren(pp) => { collect_pat_idents_into(&pp.pat, names); }
         Pat::Wild(_) | Pat::Lit(_) | Pat::Rest(_) | Pat::Const(_) => {}

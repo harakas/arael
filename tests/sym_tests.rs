@@ -1234,8 +1234,12 @@ fn test_parse_functions() {
 
 #[test]
 fn test_parse_named_constants() {
-    assert_eq!(parse("pi").unwrap(), constant(std::f64::consts::PI));
-    assert_eq!(parse("e").unwrap(), constant(std::f64::consts::E));
+    // pi/e parse to NamedConst nodes (same as the sym! macro), not
+    // pre-folded numeric literals: display keeps the name, codegen
+    // emits the exact constant path, and sin(pi) simplifies to
+    // exactly 0 instead of sin(3.14159...) = 1.2e-16.
+    assert_eq!(parse("pi").unwrap(), arael_sym::pi());
+    assert_eq!(parse("e").unwrap(), arael_sym::euler());
 }
 
 #[test]
@@ -1245,7 +1249,7 @@ fn test_parse_nested() {
         let y = symbol("y");
         assert_eq!(
             parse("sqrt(atan2(y, x) + pi)").unwrap(),
-            sqrt(atan2(y, x) + constant(std::f64::consts::PI))
+            sqrt(atan2(y, x) + arael_sym::pi())
         );
         assert_eq!(
             parse("exp(sin(x))").unwrap(),

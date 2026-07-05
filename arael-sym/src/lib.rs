@@ -373,7 +373,18 @@ impl E {
                 b.collect_symbols(out);
                 c.collect_symbols(out);
             }
-            Expr::Func { args, .. } => {
+            Expr::Func { params, kind, args, .. } => {
+                // Captured symbols: a function body may reference symbols
+                // beyond its params (eval resolves them from the outer
+                // vars map), so they are free symbols of this expression.
+                // Params themselves are bound.
+                if let Some(body) = kind.body() {
+                    let mut inner = std::collections::HashSet::new();
+                    body.collect_symbols(&mut inner);
+                    for n in inner {
+                        if !params.contains(&n) { out.insert(n); }
+                    }
+                }
                 for arg in args { arg.collect_symbols(out); }
             }
         }
@@ -406,7 +417,7 @@ impl E {
             Expr::Exp(a) => exp(a.substitute(subs)),
             Expr::Ln(a) => ln(a.substitute(subs)),
             Expr::Log2(a) => log2(a.substitute(subs)),
-            Expr::Log10(a) => ln(a.substitute(subs)) / ln(constant(10.0)),
+            Expr::Log10(a) => log10(a.substitute(subs)),
             Expr::Sqrt(a) => sqrt(a.substitute(subs)),
             Expr::Abs(a) => abs(a.substitute(subs)),
             Expr::Heaviside(a) => heaviside(a.substitute(subs)),
@@ -1648,6 +1659,150 @@ pub use arael_sym_macros::sym;
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    // --- assorted wrong-output fixes (verified red before each fix) ---
+
+    #[test]
+    fn substitute_preserves_log10() {
+        // substitute() rewrote Log10(a) into ln(a)/ln(10) -- a copy-paste
+        // structural rewrite that changed the node type and emitted code.
+        let f = log10(symbol("x"));
+        let g = f.substitute(&[(symbol("q"), symbol("r"))]);
+        assert_eq!(format!("{}", g), "log10(x)");
+    }
+
+    #[test]
+    fn nested_pow_display_reparses_to_same_value() {
+        // Pow(Pow(x,2),3) printed as x^2^3, which re-parses
+        // right-associatively as x^(2^3) = x^8, not (x^2)^3 = x^6.
+        let f = pow(pow(symbol("x"), constant(2.0)), constant(3.0));
+        let printed = format!("{}", f);
+        let reparsed = crate::parse::parse(&printed).unwrap();
+        let mut vars = HashMap::new();
+        vars.insert("x", 2.0);
+        assert_eq!(reparsed.eval(&vars).unwrap(), f.eval(&vars).unwrap(),
+            "display `{}` changes value on reparse", printed);
+    }
+
+    #[test]
+    fn nonfinite_constants_emit_valid_rust() {
+        // Constants folded to inf/NaN emitted `inf_f64` / `NaN_f64` --
+        // not valid Rust tokens.
+        let f = symbol("x") + constant(f64::INFINITY);
+        let code = f.to_rust("f64");
+        assert!(!code.contains("inf_"), "bad literal in `{}`", code);
+        assert!(code.contains("INFINITY"), "expected INFINITY in `{}`", code);
+        let g = symbol("x") + constant(f64::NAN);
+        let code = g.to_rust("f32");
+        assert!(!code.contains("NaN_"), "bad literal in `{}`", code);
+        // Type-inferred context must still emit something type-correct.
+        let code = f.to_rust("");
+        assert!(!code.contains("inf"), "bad literal in `{}`", code);
+    }
+
+    #[test]
+    fn division_by_zero_constant_is_not_simplified() {
+        // simplify's fraction flatten computed coeff = ca/cb unguarded,
+        // baking an inf coefficient into the tree for x / 0.
+        let f = (symbol("x") * constant(2.0)) / (symbol("y") * constant(0.0));
+        let g = f.simplify();
+        let mut vars = HashMap::new();
+        vars.insert("x", 1.0);
+        vars.insert("y", 1.0);
+        // Division by zero happens at eval time (IEEE inf), and the tree
+        // must not contain a folded non-finite coefficient.
+        assert!(g.eval(&vars).unwrap().is_infinite());
+        assert!(!format!("{}", g).contains("inf"), "folded inf into `{}`", g);
+    }
+
+    #[test]
+    fn zero_pow_symbolic_exponent_stays_symbolic() {
+        // 0^b -> 0 fired for symbolic b: wrong for b == 0 (0^0 = 1)
+        // and for b < 0 (0^b = inf).
+        let f = pow(constant(0.0), symbol("b"));
+        let mut vars = HashMap::new();
+        vars.insert("b", 0.0);
+        assert_eq!(f.simplify().eval(&vars).unwrap(), 1.0, "0^0 must be 1");
+        vars.insert("b", -1.0);
+        assert!(f.simplify().eval(&vars).unwrap().is_infinite(), "0^-1 must be inf");
+    }
+
+    #[test]
+    fn heaviside_nan_matches_runtime_semantics() {
+        // eval/simplify used `v < 0` (NaN -> 1); the runtime
+        // utils::heaviside uses `v >= 0` (NaN -> 0). Interpreted and
+        // compiled constraint code disagreed on NaN input.
+        let f = heaviside(symbol("x"));
+        let mut vars = HashMap::new();
+        vars.insert("x", f64::NAN);
+        assert_eq!(f.eval(&vars).unwrap(), 0.0, "eval heaviside(NaN)");
+        let g = heaviside(constant(f64::NAN)).simplify();
+        assert_eq!(format!("{}", g), "0", "simplify heaviside(NaN)");
+    }
+
+    #[test]
+    fn parse_pi_e_are_named_constants() {
+        // parse folded pi/e to numeric literals, so printed output lost
+        // the name and codegen emitted decimal literals -- while sym! and
+        // the documented behavior keep them as named constants.
+        let f = crate::parse::parse("pi * x").unwrap();
+        assert!(format!("{}", f).contains("pi"), "pi lost in `{}`", f);
+        // The named constant folds exactly: sin(pi) is 0, not sin(3.14...)
+        // = 1.2e-16 as it was with a numeric literal.
+        let g = crate::parse::parse("sin(pi)").unwrap();
+        assert_eq!(g.simplify().eval(&HashMap::new()).unwrap(), 0.0);
+        let h = crate::parse::parse("e * x").unwrap();
+        assert!(format!("{}", h).contains('e'), "e lost in `{}`", h);
+    }
+
+    #[test]
+    fn sym_macro_does_not_clone_method_receivers() {
+        // The auto-clone visitor wrapped tracked method-call receivers,
+        // so `parts.push(..)` mutated a temporary clone -- silent loss.
+        sym! {
+            let x = symbol("x");
+            let mut parts: std::vec::Vec<E> = std::vec::Vec::new();
+            parts.push(x * 2.0);
+            parts.push(x + 1.0);
+            assert_eq!(parts.len(), 2, "push mutated a clone, not the vec");
+        }
+    }
+
+    #[test]
+    fn sym_macro_tracks_typed_let_bindings() {
+        // `let f: E = ...` (a typed pattern) was not tracked, so reusing
+        // f moved it twice and failed to compile inside sym!.
+        sym! {
+            let x = symbol("x");
+            let f: E = x * x;
+            let g = f + f;
+            let mut vars = HashMap::new();
+            vars.insert("x", 3.0);
+            assert_eq!(g.eval(&vars).unwrap(), 18.0);
+        }
+    }
+
+    #[test]
+    fn func_free_vars_include_captured_symbols() {
+        // A function body may capture symbols beyond its params; eval
+        // resolves them from the outer vars map, but free_vars/subs did
+        // not walk the body -- callers could not know what to supply,
+        // and subs silently skipped the capture.
+        sym! {
+            let w = symbol("w");
+            let scaled = simple_func1("scaled", |t| t * w);
+            let x = symbol("x");
+            let f = scaled(x);
+            let fv = f.free_vars();
+            assert!(fv.contains("w"), "captured symbol missing from free_vars: {:?}", fv);
+            assert!(fv.contains("x"));
+            // subs must reach into the body for captured symbols
+            let g = f.subs("w", &constant(3.0));
+            let mut vars = HashMap::new();
+            vars.insert("x", 2.0);
+            assert_eq!(g.eval(&vars).unwrap(), 6.0);
+        }
+    }
 
     #[test]
     fn tiny_coefficients_survive_simplification() {

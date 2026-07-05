@@ -259,8 +259,11 @@ impl<'a> Parser<'a> {
                 } else {
                     // Named constant or symbol
                     match name.as_str() {
-                        "pi" => Ok(constant(std::f64::consts::PI)),
-                        "e" => Ok(constant(std::f64::consts::E)),
+                        // Named constants survive as NamedConst nodes (same
+                        // as the sym! macro), so display keeps the name and
+                        // codegen emits the exact constant path.
+                        "pi" => Ok(crate::pi()),
+                        "e" => Ok(crate::euler()),
                         _ => Ok(symbol(&name)),
                     }
                 }

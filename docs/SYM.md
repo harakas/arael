@@ -444,7 +444,7 @@ You can construct `Expr::Func` values directly via `FuncKind` if you need to byp
 
 ### `heaviside(x)`
 
-The Heaviside step function: 0 for `x < 0`, 1 for `x >= 0`. Auto-differentiates to 0 everywhere -- the true derivative is a Dirac delta, whose applications in numeric calculations are limited, so we drop it. `H` is a parser-level alias: `parse("H(x)")` is the same as `parse("heaviside(x)")`.
+The Heaviside step function: 0 for `x < 0`, 1 for `x >= 0`, and 0 for NaN (interpreted eval and compiled code agree on this). Auto-differentiates to 0 everywhere -- the true derivative is a Dirac delta, whose applications in numeric calculations are limited, so we drop it. `H` is a parser-level alias: `parse("H(x)")` is the same as `parse("heaviside(x)")`.
 
 ### `clamp(value, lo, hi)`
 
