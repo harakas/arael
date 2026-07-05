@@ -199,6 +199,7 @@ Fixed-shape symbolic vectors/matrices live in `arael_sym::geo`. They're used by 
 ```rust
 let v = vect2sym::new("v");      // v.x, v.y as symbols
 let u = vect2sym::new("u");
+let w = vect2sym::from_components(symbol("a"), symbol("b")); // from scalar exprs
 let dot     = v.clone() * u.clone();   // E (scalar)
 let scaled  = v.clone() * symbol("k"); // vect2sym
 let perp    = v.clone().across();      // (-v.y, v.x)
@@ -208,11 +209,16 @@ let n       = v.norm();                // sqrt(v.square())
 let u_hat   = v.unit();                // v / v.norm()
 ```
 
-`vect3sym` has the same surface (`square`, `norm`, `unit`, division by a
-scalar) with a 3D cross product -- `a.cross(&b)` or the `%` operator,
-mirroring the runtime `vect3` -- and adds `.rotation_matrix()` (intrinsic
-ZYX Euler angles -> `matrix3sym`) plus the usual dot / scaled / negate /
-add / sub.
+`vect3sym` has the same surface (`from_components`, `square`, `norm`,
+`unit`, division by a scalar) with a 3D cross product -- `a.cross(&b)` or
+the `%` operator, mirroring the runtime `vect3` -- and adds
+`.rotation_matrix()` (intrinsic ZYX Euler angles -> `matrix3sym`) plus
+the usual dot / scaled / negate / add / sub.
+
+Both `from_components` constructors are also available inside
+`#[arael(constraint(...))]` bodies (`vect3sym::from_components(a, b, c)`)
+for assembling a vector from scalar expressions -- e.g. the vee of a
+skew-symmetric matrix.
 
 ### matrix2sym
 

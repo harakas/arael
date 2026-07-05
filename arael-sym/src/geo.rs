@@ -33,6 +33,11 @@ impl vect3sym {
         }
     }
 
+    /// Build a vector from three scalar expressions.
+    pub fn from_components(x: E, y: E, z: E) -> Self {
+        vect3sym { x, y, z }
+    }
+
     /// Compute element-wise (sin, cos) of this vector, returning two vectors.
     pub fn sincos(&self) -> (vect3sym, vect3sym) {
         (
@@ -180,6 +185,11 @@ impl vect2sym {
             x: symbol(&format!("{}.x", base)),
             y: symbol(&format!("{}.y", base)),
         }
+    }
+
+    /// Build a vector from two scalar expressions.
+    pub fn from_components(x: E, y: E) -> Self {
+        vect2sym { x, y }
     }
 }
 
@@ -868,6 +878,20 @@ impl ops::Mul<quaternsym> for quaternsym {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn from_components_builds_vectors() {
+        use std::collections::HashMap;
+        let vars = HashMap::from([("p", 2.0), ("q", 3.0)]);
+        let v3 = vect3sym::from_components(
+            symbol("p"), symbol("q"), symbol("p") * symbol("q"));
+        assert_eq!(v3.x.eval(&vars).unwrap(), 2.0);
+        assert_eq!(v3.y.eval(&vars).unwrap(), 3.0);
+        assert_eq!(v3.z.eval(&vars).unwrap(), 6.0);
+        let v2 = vect2sym::from_components(symbol("q") - symbol("p"), symbol("p"));
+        assert_eq!(v2.x.eval(&vars).unwrap(), 1.0);
+        assert_eq!(v2.y.eval(&vars).unwrap(), 2.0);
+    }
 
     #[test]
     fn vect3sym_cross_norm_unit_square_div() {
