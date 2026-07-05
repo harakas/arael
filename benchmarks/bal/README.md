@@ -1,10 +1,16 @@
-# Bundle-adjustment benchmark: arael vs Ceres (BAL)
+# Bundle-adjustment benchmark: arael vs Ceres vs g2o (BAL)
 
 Bundle adjustment on the [BAL](https://grail.cs.washington.edu/projects/bal/)
 (Bundle Adjustment in the Large) datasets -- the standard BA solver
 benchmark -- comparing arael against [Ceres](http://ceres-solver.org)
-on Ceres's home turf: BAL is the problem family Ceres's examples,
-defaults, and Schur solvers were built around.
+on Ceres's home turf (BAL is the problem family Ceres's examples,
+defaults, and Schur solvers were built around) and
+[g2o](https://github.com/RainerKuemmerle/g2o) in its own bal_example
+configuration: flat 9-parameter camera vertices, point vertices
+marginalized so g2o performs its Schur elimination (its sparse-BA
+heritage), CHOLMOD on the reduced camera system, the residual
+autodiffed with g2o's bundled AD. With unit information g2o's chi2 IS
+the reference cost, asserted at the initial estimate like the others.
 
 Same methodology as [benchmarks/pgo](../pgo/README.md): one loader,
 one reference cost function evaluating every system's final
@@ -36,12 +42,16 @@ gauge is left to LM damping, as Ceres runs these problems).
 
 A row converges when BOTH its reference cost is within 1% of the best
 AND its similarity-aligned (rotation + translation + scale: the BA
-gauge) camera-center RMSE is under 1e-3 of the scene extent. Landmark
+gauge) camera-center RMSE is under 5e-3 of the scene extent. Landmark
 positions are deliberately NOT the geometric gate: BAL scenes contain
 weakly-observed points (two rays at tiny parallax) that slide along
 their rays almost cost-free -- converged solutions with costs within
 0.004% of each other differ by 3-8% in all-points RMSE. Camera centers
-are constrained by hundreds of residuals each.
+are constrained by hundreds of residuals each; the 5e-3 threshold sits
+above the measured scatter of genuinely converged solutions (up to
+~1.3e-3 between stops agreeing in cost to 0.13% -- the valley is that
+flat) and below measured non-converged plateaus (5.8e-3 and beyond,
+which fail the cost gate too).
 
 ## Damping
 
@@ -63,8 +73,10 @@ Ceres's, and the damping floor rendered moot (measured identical at
 Initial lambda is per-dataset (harness table, env `ARAEL_LAMBDA0`):
 1e-3 on Ladybug-138 (1e-4 plateaus 1.4% high there), 1e-4 elsewhere.
 Ceres runs its shipped trust-region defaults -- BAL is the problem
-family they were tuned on. `ARAEL_VERBOSE=1` prints the solver's
-per-iteration trace.
+family they were tuned on. g2o runs its auto lambda heuristic
+(`G2O_LAMBDA_INIT` overrides; probed 1e-6/1e-4 on Ladybug-49, within
+14% of auto). `ARAEL_VERBOSE=1` prints the solver's per-iteration
+trace.
 
 ## Results (Ladybug problems, aarch64 VM, single core, min of 3 rounds; arael rows use the Nielsen driver)
 
@@ -72,28 +84,31 @@ per-iteration trace.
 
 | system             | total ms |  iters  | ms/iter | 1st-iter ms | final cost |
 |--------------------|---------:|--------:|--------:|------------:|-----------:|
-| arael LM f64       |    593.8 |  22(22) |   26.99 |        58.1 | 26689.3493 |
-| arael LM f32       |    531.0 |  20(23) |   23.09 |        52.4 | 26690.5913 |
-| ceres dense_schur  |    485.3 |  22(22) |   22.06 |        47.2 | 26689.7174 |
-| ceres sparse_schur |    506.8 |  22(22) |   23.04 |        59.3 | 26689.7174 |
+| arael LM f64       |    588.1 |  22(22) |   26.73 |        56.1 | 26689.3493 |
+| arael LM f32       |    540.0 |  20(23) |   23.48 |        50.8 | 26690.5913 |
+| ceres dense_schur  |    495.2 |  22(22) |   22.51 |        46.8 | 26689.7174 |
+| ceres sparse_schur |    516.9 |  22(22) |   23.49 |        60.4 | 26689.7174 |
+| g2o LM (schur)     |   1079.1 |      42 |   25.69 |        40.6 | 26714.5561 |
 
 ### Ladybug-138 (60876 parameters)
 
 | system             | total ms |  iters  | ms/iter | 1st-iter ms | final cost |
 |--------------------|---------:|--------:|--------:|------------:|------------:|
-| arael LM f64       |   1950.8 |  20(21) |   92.89 |       249.3 | 119055.9961 |
-| arael LM f32       |   1893.5 |  21(23) |   82.33 |       221.7 | 119053.6517 |
-| ceres dense_schur  |   2070.5 |  22(25) |   82.82 |       169.6 | 119056.2145 |
-| ceres sparse_schur |   1932.7 |  22(25) |   77.31 |       206.1 | 119056.2145 |
+| arael LM f64       |   1938.4 |  20(21) |   92.30 |       230.5 | 119055.9961 |
+| arael LM f32       |   1868.3 |  21(23) |   81.23 |       209.7 | 119053.6517 |
+| ceres dense_schur  |   2056.7 |  22(25) |   82.27 |       164.9 | 119056.2145 |
+| ceres sparse_schur |   1899.7 |  22(25) |   75.99 |       196.3 | 119056.2145 |
+| g2o LM (schur)     |   3742.6 |      40 |   93.56 |       139.4 | 118904.3429 |
 
 ### Ladybug-372 (145617 parameters)
 
 | system             | total ms |  iters  | ms/iter | 1st-iter ms |  final cost |
 |--------------------|---------:|--------:|--------:|------------:|------------:|
-| arael LM f64       |   3618.2 |   5(11) |  328.93 |       698.3 | 225577.5976 |
-| arael LM f32       |   3919.3 |   8(15) |  261.28 |       629.6 | 225465.6238 |
-| ceres dense_schur  |   8113.6 |  10(17) |  477.27 |       787.6 | 225447.1709 |
-| ceres sparse_schur |   4567.6 |  10(17) |  268.68 |       656.1 | 225447.1709 |
+| arael LM f64       |   3616.7 |   5(11) |  328.79 |       701.2 | 225577.5976 |
+| arael LM f32       |   3874.2 |   8(15) |  258.28 |       605.3 | 225465.6238 |
+| ceres dense_schur  |   8015.0 |  10(17) |  471.47 |       753.0 | 225447.1709 |
+| ceres sparse_schur |   4592.2 |  10(17) |  270.13 |       649.1 | 225447.1709 |
+| g2o LM (schur)     |   9654.8 |      28 |  344.82 |       473.0 | 226586.4232 |
 
 All rows validate on all three. Two Ceres reference points measured
 outside the tables on Ladybug-49 (its other linear solvers, same run
@@ -139,6 +154,14 @@ With the Nielsen driver the size story flattens into near parity:
 5. **arael's f32 solves bundle adjustment and validates on 49, 138 and
    372** (Ceres offers no f32 mode at all) and wins Ladybug-138. It
    fails at 485k parameters (NaN in f32 assembly, above).
+6. **g2o validates everywhere at per-step parity but 1.9-2.7x behind
+   on totals** (25.7 / 93.6 / 345 ms per step vs arael's 26.7 / 92.3 /
+   329) because its fixed-multiplier lambda schedule needs roughly
+   twice the iterations (42 / 40 / 28) -- the same pathology arael's
+   fixed schedule exhibited here before the Nielsen driver, now
+   confirmed in a third independent implementation. The flip side: on
+   Ladybug-138 those extra iterations grind to the deepest stop of the
+   run (118904, 0.13% below everyone else's).
 
 ## Running
 

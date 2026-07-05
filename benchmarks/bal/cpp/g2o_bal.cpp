@@ -1,0 +1,244 @@
+// g2o runner for the BAL benchmark, modeled on g2o's own
+// examples/bal/bal_example.cpp: a flat 9-parameter camera vertex
+// (additive updates, Rodrigues rotation inside the residual -- the
+// same treatment as Ceres's example), a 3-parameter point vertex
+// MARGINALIZED so g2o performs its Schur elimination (its sparse-BA
+// heritage), CHOLMOD on the reduced camera system, and the Snavely
+// reprojection error autodiffed with g2o's bundled AD. Unit
+// information, so g2o's chi2 IS the reference cost -- asserted by the
+// harness at the initial estimate. Protocol:
+//   g2o_bal <problem.txt> <params_out>
+// prints JSON {solve_ms, first_iter_ms, iterations, initial_chi2,
+// cpus_allowed}; params_out carries one camera per line (9 values)
+// followed by one point per line (3 values).
+
+#include <g2o/core/auto_differentiation.h>
+#include <g2o/core/base_binary_edge.h>
+#include <g2o/core/base_vertex.h>
+#include <g2o/core/block_solver.h>
+#include <g2o/core/optimization_algorithm_levenberg.h>
+#include <g2o/core/sparse_optimizer.h>
+#include <g2o/core/sparse_optimizer_terminate_action.h>
+#include <g2o/solvers/cholmod/linear_solver_cholmod.h>
+
+#include <Eigen/Core>
+#include <chrono>
+#include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
+#include <string>
+#include <vector>
+
+struct Bal {
+    int n_cams = 0, n_points = 0, n_obs = 0;
+    std::vector<int> cam_idx, point_idx;
+    std::vector<double> xy;
+    std::vector<double> cameras; // 9 per camera
+    std::vector<double> points;  // 3 per point
+};
+
+static Bal load(const char* path) {
+    FILE* f = fopen(path, "r");
+    if (!f) { fprintf(stderr, "cannot read %s\n", path); exit(1); }
+    Bal b;
+    if (fscanf(f, "%d %d %d", &b.n_cams, &b.n_points, &b.n_obs) != 3) exit(1);
+    b.cam_idx.resize(b.n_obs);
+    b.point_idx.resize(b.n_obs);
+    b.xy.resize(2 * b.n_obs);
+    for (int i = 0; i < b.n_obs; i++) {
+        if (fscanf(f, "%d %d %lf %lf", &b.cam_idx[i], &b.point_idx[i],
+                   &b.xy[2 * i], &b.xy[2 * i + 1]) != 4) exit(1);
+    }
+    b.cameras.resize(9 * b.n_cams);
+    for (double& v : b.cameras) if (fscanf(f, "%lf", &v) != 1) exit(1);
+    b.points.resize(3 * b.n_points);
+    for (double& v : b.points) if (fscanf(f, "%lf", &v) != 1) exit(1);
+    fclose(f);
+    return b;
+}
+
+class VertexCameraBAL : public g2o::BaseVertex<9, Eigen::Matrix<double, 9, 1>> {
+public:
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+    void setToOriginImpl() override { _estimate.setZero(); }
+    void oplusImpl(const double* update) override {
+        _estimate += Eigen::Map<const Eigen::Matrix<double, 9, 1>>(update);
+    }
+    bool read(std::istream&) override { return false; }
+    bool write(std::ostream&) const override { return false; }
+};
+
+class VertexPointBAL : public g2o::BaseVertex<3, Eigen::Vector3d> {
+public:
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+    void setToOriginImpl() override { _estimate.setZero(); }
+    void oplusImpl(const double* update) override {
+        _estimate += Eigen::Map<const Eigen::Vector3d>(update);
+    }
+    bool read(std::istream&) override { return false; }
+    bool write(std::ostream&) const override { return false; }
+};
+
+class EdgeObservationBAL
+    : public g2o::BaseBinaryEdge<2, Eigen::Vector2d, VertexCameraBAL, VertexPointBAL> {
+public:
+    EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+    bool read(std::istream&) override { return false; }
+    bool write(std::ostream&) const override { return false; }
+
+    // The Snavely reprojection error, identically to the reference cost
+    // and the Ceres runner. Angle-axis rotation with the standard
+    // small-angle branch (branching on the jet's scalar part, as
+    // Ceres's AngleAxisRotatePoint does).
+    template <typename T>
+    bool operator()(const T* camera, const T* point, T* error) const {
+        const T* w = camera;
+        T p[3];
+        const T theta2 = w[0] * w[0] + w[1] * w[1] + w[2] * w[2];
+        if (theta2 > T(1e-24)) {
+            const T theta = sqrt(theta2);
+            const T c = cos(theta);
+            const T s = sin(theta);
+            const T k[3] = {w[0] / theta, w[1] / theta, w[2] / theta};
+            const T kx = k[1] * point[2] - k[2] * point[1];
+            const T ky = k[2] * point[0] - k[0] * point[2];
+            const T kz = k[0] * point[1] - k[1] * point[0];
+            const T kd = k[0] * point[0] + k[1] * point[1] + k[2] * point[2];
+            for (int i = 0; i < 3; i++) {
+                const T kxp = (i == 0) ? kx : (i == 1) ? ky : kz;
+                p[i] = point[i] * c + kxp * s + k[i] * kd * (T(1.0) - c);
+            }
+        } else {
+            // First order: p = X + w x X.
+            p[0] = point[0] + w[1] * point[2] - w[2] * point[1];
+            p[1] = point[1] + w[2] * point[0] - w[0] * point[2];
+            p[2] = point[2] + w[0] * point[1] - w[1] * point[0];
+        }
+        p[0] += camera[3];
+        p[1] += camera[4];
+        p[2] += camera[5];
+        const T xp = -p[0] / p[2];
+        const T yp = -p[1] / p[2];
+        const T r2 = xp * xp + yp * yp;
+        const T distortion = T(1.0) + r2 * (camera[7] + camera[8] * r2);
+        const T& focal = camera[6];
+        error[0] = focal * distortion * xp - T(measurement()(0));
+        error[1] = focal * distortion * yp - T(measurement()(1));
+        return true;
+    }
+
+    G2O_MAKE_AUTO_AD_FUNCTIONS
+};
+
+struct RunResult {
+    double ms;
+    int iterations;
+    double initial_chi2;
+};
+
+static RunResult solve(const Bal& b, int max_iters, std::vector<double>* cams_out,
+                       std::vector<double>* points_out) {
+    using BlockSolver = g2o::BlockSolver<g2o::BlockSolverTraits<9, 3>>;
+    auto linear = std::make_unique<g2o::LinearSolverCholmod<BlockSolver::PoseMatrixType>>();
+    auto block = std::make_unique<BlockSolver>(std::move(linear));
+    auto* lev = new g2o::OptimizationAlgorithmLevenberg(std::move(block));
+    // g2o's auto lambda heuristic by default -- BA is the problem family
+    // it was built for. Env-overridable like the other runners.
+    if (const char* li = getenv("G2O_LAMBDA_INIT")) lev->setUserLambdaInit(atof(li));
+
+    g2o::SparseOptimizer opt;
+    opt.setVerbose(false);
+    opt.setAlgorithm(lev);
+
+    std::vector<VertexCameraBAL*> cams(b.n_cams);
+    for (int i = 0; i < b.n_cams; i++) {
+        auto* v = new VertexCameraBAL();
+        v->setId(i);
+        v->setEstimate(Eigen::Map<const Eigen::Matrix<double, 9, 1>>(&b.cameras[9 * i]));
+        opt.addVertex(v);
+        cams[i] = v;
+    }
+    std::vector<VertexPointBAL*> pts(b.n_points);
+    for (int i = 0; i < b.n_points; i++) {
+        auto* v = new VertexPointBAL();
+        v->setId(b.n_cams + i);
+        v->setEstimate(Eigen::Map<const Eigen::Vector3d>(&b.points[3 * i]));
+        // Schur: eliminate the landmarks, solve the reduced camera system.
+        v->setMarginalized(true);
+        opt.addVertex(v);
+        pts[i] = v;
+    }
+    for (int i = 0; i < b.n_obs; i++) {
+        auto* e = new EdgeObservationBAL();
+        e->setVertex(0, cams[b.cam_idx[i]]);
+        e->setVertex(1, pts[b.point_idx[i]]);
+        e->setMeasurement(Eigen::Vector2d(b.xy[2 * i], b.xy[2 * i + 1]));
+        e->setInformation(Eigen::Matrix2d::Identity());
+        opt.addEdge(e);
+    }
+
+    // Same termination class as the other systems.
+    auto* terminate = new g2o::SparseOptimizerTerminateAction();
+    double gain = 1e-5;
+    if (const char* g = getenv("G2O_GAIN")) gain = atof(g);
+    terminate->setGainThreshold(gain);
+    terminate->setMaxIterations(max_iters);
+    opt.addPostIterationAction(terminate);
+
+    auto t0 = std::chrono::steady_clock::now();
+    opt.initializeOptimization();
+    // Unit information: chi2 IS the reference cost; the harness asserts
+    // this at the initial estimate.
+    opt.computeActiveErrors();
+    double initial_chi2 = opt.chi2();
+    int iters = opt.optimize(max_iters);
+    double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+
+    if (cams_out) {
+        cams_out->resize(9 * b.n_cams);
+        for (int i = 0; i < b.n_cams; i++) {
+            Eigen::Map<Eigen::Matrix<double, 9, 1>> m(&(*cams_out)[9 * i]);
+            m = cams[i]->estimate();
+        }
+    }
+    if (points_out) {
+        points_out->resize(3 * b.n_points);
+        for (int i = 0; i < b.n_points; i++) {
+            Eigen::Map<Eigen::Vector3d> m(&(*points_out)[3 * i]);
+            m = pts[i]->estimate();
+        }
+    }
+    return RunResult{ms, iters, initial_chi2};
+}
+
+int main(int argc, char** argv) {
+    if (argc < 3) { fprintf(stderr, "usage: %s <problem.txt> <params_out>\n", argv[0]); return 1; }
+    Bal b = load(argv[1]);
+
+    RunResult first = solve(b, 1, nullptr, nullptr);
+    std::vector<double> cams, points;
+    RunResult full = solve(b, 100, &cams, &points);
+
+    std::ofstream out(argv[2]);
+    out.precision(17);
+    for (int i = 0; i < b.n_cams; i++) {
+        for (int k = 0; k < 9; k++) out << cams[9 * i + k] << (k == 8 ? "\n" : " ");
+    }
+    for (int i = 0; i < b.n_points; i++) {
+        for (int k = 0; k < 3; k++) out << points[3 * i + k] << (k == 2 ? "\n" : " ");
+    }
+
+    std::string cpus = "?";
+    std::ifstream st("/proc/self/status");
+    std::string l;
+    while (std::getline(st, l)) {
+        if (l.rfind("Cpus_allowed_list:", 0) == 0) {
+            cpus = l.substr(l.find_last_of(" \t") + 1);
+        }
+    }
+    printf("{\"solve_ms\": %.3f, \"first_iter_ms\": %.3f, \"iterations\": %d, "
+           "\"initial_chi2\": %.6f, \"cpus_allowed\": \"%s\"}\n",
+           full.ms, first.ms, full.iterations, full.initial_chi2, cpus.c_str());
+    return 0;
+}
