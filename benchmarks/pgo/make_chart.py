@@ -1,34 +1,77 @@
 # Generates the benchmark bar chart committed as chart-light.svg /
 # chart-dark.svg and embedded in the top-level README.md and src/lib.rs.
 #
-# Plots the per-step cost (the durable cross-system number, see README)
-# on city10000, best configuration per system -- the same rows and
-# values as the top-level README table. Update DATA from the results
-# table after re-running the benchmark, then run:
+# A 2x2 small-multiple assembly: one panel per dataset, all on the same
+# metric (ms per solver step, the durable cross-system number -- see
+# README), one bar per system showing its best validated configuration
+# (best total time among configurations that pass both validation
+# gates; the ms/step shown is that configuration's). tiny-solver is
+# omitted from the bars for scale (6-9x arael) and reported in the
+# footnote instead. Update the data from the results tables after
+# re-running the benchmark, then run:
 #
 #   python3 make_chart.py
 #
 # Pure stdlib, no dependencies.
 
-# (label, ms per accepted step, vs-best ratio, is_arael)
-DATA = [
-    ("arael (LM, f32)", 10.1, "1.00x", True),
-    ("arael (LM, f64)", 13.1, "1.29x", True),
-    ("g2o (GN)", 19.8, "1.95x", False),
-    ("g2o (LM)", 21.5, "2.12x", False),
-    ("Ceres (LM)", 25.8, "2.55x", False),
-    ("SymForce (LM)", 28.3, "2.79x", False),
-    ("factrs (GN)", 30.0, "2.96x", False),
-    ("tiny-solver (GN)", 84.8, "8.37x", False),
+# Per panel: (title, x_max, tick step, [(label, ms_per_step, kind)])
+# kind: "arael" solid blue bar, "other" neutral bar; "arael*" adds a
+# star to the value (arael f32 where it does not pass the geometric
+# validation gate -- see footnote). None ms -> italic text row.
+PANELS = [
+    ("M3500 (2D, 10.5k params)", 15.0, 5.0, [
+        ("arael (f32)", 3.26, "arael"),
+        ("arael (f64)", 3.45, "arael"),
+        ("g2o (GN)", 4.14, "other"),
+        ("SymForce (f32)", 5.13, "other"),
+        ("Ceres (LM)", 6.03, "other"),
+        ("factrs (GN)", 8.30, "other"),
+        ("GTSAM (GN)", 13.15, "other"),
+    ]),
+    ("city10000 (2D, 30k params)", 32.0, 10.0, [
+        ("arael (f32)", 10.1, "arael"),
+        ("arael (f64)", 13.1, "arael"),
+        ("g2o (GN)", 19.8, "other"),
+        ("Ceres (LM)", 25.8, "other"),
+        ("SymForce (LM)", 28.3, "other"),
+        ("factrs (GN)", 30.0, "other"),
+        ("GTSAM", None, "other"),  # did not converge; text row
+    ]),
+    ("sphere2500 (3D, 15k params)", 70.0, 20.0, [
+        ("arael (f32)", 13.3, "arael"),
+        ("arael (f64)", 18.6, "arael"),
+        ("Ceres (LM)", 24.3, "other"),
+        ("g2o (LM)", 26.2, "other"),
+        ("GTSAM (GN)", 27.4, "other"),
+        ("factrs (GN)", 38.5, "other"),
+        ("SymForce (f32)", 65.3, "other"),
+    ]),
+    ("parking-garage (3D, 10k params)", 40.0, 10.0, [
+        ("g2o (GN)", 7.9, "other"),
+        ("arael (f32)", 10.1, "arael*"),
+        ("arael (f64)", 10.3, "arael"),
+        ("SymForce (f64)", 12.0, "other"),
+        ("GTSAM (GN)", 13.2, "other"),
+        ("Ceres (LM)", 14.1, "other"),
+        ("factrs (GN)", 37.9, "other"),
+    ]),
 ]
 
 TITLE = "Pose-graph optimization: time per solver step"
-SUBTITLE = ("city10000 (10,000 poses, 20,687 constraints), "
-            "single thread, Apple M4 Pro. Lower is better.")
-FOOT1 = ("Best configuration per system; every row verified to reach the "
-         "same minimum. Ratios are relative to the fastest.")
-FOOT2 = ("GTSAM (batch) did not converge on this dataset; its incremental "
-         "ISAM2 solves it in 10.4 s.")
+SUBTITLE = ("Four datasets, eight systems, single thread (Apple M4 Pro); "
+            "best validated configuration per system, both arael "
+            "precisions. Lower is better.")
+FOOT = [
+    ("Every bar is validated against its dataset's common optimum "
+     "(cost within 1%, rigid-aligned RMSE under 5 cm)."),
+    ("tiny-solver omitted for scale: 20.8 / 84.8 / 84.5 / 95.8 ms per "
+     "step across the four panels (6.0-9.3x arael)."),
+    ("GTSAM (batch) did not converge on city10000; its incremental "
+     "ISAM2 solves it in 10.4 s."),
+    ("* arael f32 on the parking garage passes the cost gate (0.03% "
+     "above the optimum) but not the geometric one -- a "
+     "single-precision floor shared by SymForce's f32."),
+]
 
 THEMES = {
     "light": {
@@ -46,29 +89,73 @@ THEMES = {
 FONT = ("ui-sans-serif, system-ui, -apple-system, 'Segoe UI', "
         "Helvetica, Arial, sans-serif")
 
-W = 760
-PLOT_X = 192       # left edge of the bars; row labels right-align to it
-PLOT_W = 460
-BAR_H = 20
-PITCH = 30
-PLOT_TOP = 76
-X_MAX = 90.0       # ms; axis ticks every 20
-PX_PER_MS = PLOT_W / X_MAX
+W = 880
+MARGIN = 24
+COL_GAP = 34
+PANEL_W = (W - 2 * MARGIN - COL_GAP) // 2   # 399
+LABEL_W = 104                                # row labels, right-aligned
+VALUE_W = 42                                 # value labels after bars
+PLOT_W = PANEL_W - LABEL_W - VALUE_W
+BAR_H = 12
+PITCH = 19
+PANEL_TITLE_H = 20
+AXIS_H = 20
+ROWS = 7
+PANEL_H = PANEL_TITLE_H + ROWS * PITCH + AXIS_H
+HEADER_H = 58
+ROW_GAP = 18
 
 
 def bar_path(x0, y, w, h, r):
-    """Bar with the data end rounded (4px), baseline end flat."""
+    """Bar with the data end rounded, baseline end flat."""
     return (f"M{x0},{y} L{x0 + w - r},{y} Q{x0 + w},{y} {x0 + w},{y + r} "
             f"L{x0 + w},{y + h - r} Q{x0 + w},{y + h} {x0 + w - r},{y + h} "
             f"L{x0},{y + h} Z")
 
 
+def render_panel(s, c, px, py, title, x_max, tick, rows):
+    plot_x = px + LABEL_W
+    plot_top = py + PANEL_TITLE_H
+    plot_h = ROWS * PITCH
+    s.append(f'<text x="{px}" y="{py + 12}" font-size="12.5" '
+             f'font-weight="600" fill="{c["ink"]}">{title}</text>')
+    # gridlines + ticks
+    t = 0.0
+    while t <= x_max + 1e-9:
+        x = plot_x + t / x_max * PLOT_W
+        s.append(f'<line x1="{x:.1f}" y1="{plot_top}" x2="{x:.1f}" '
+                 f'y2="{plot_top + plot_h + 3}" stroke="{c["grid"]}" '
+                 f'stroke-width="1"/>')
+        label = f"{t:.0f} ms" if t + tick > x_max + 1e-9 else f"{t:.0f}"
+        s.append(f'<text x="{x:.1f}" y="{plot_top + plot_h + 15}" '
+                 f'font-size="10" text-anchor="middle" '
+                 f'fill="{c["muted"]}">{label}</text>')
+        t += tick
+    for i, (label, ms, kind) in enumerate(rows):
+        is_arael = kind.startswith("arael")
+        y = plot_top + i * PITCH + (PITCH - BAR_H) / 2
+        ty = y + BAR_H / 2 + 3.5
+        weight = ' font-weight="600"' if is_arael else ""
+        name_ink = c["ink"] if is_arael else c["secondary"]
+        s.append(f'<text x="{plot_x - 8}" y="{ty:.1f}" font-size="11.5" '
+                 f'text-anchor="end"{weight} fill="{name_ink}">{label}</text>')
+        if ms is None:
+            s.append(f'<text x="{plot_x + 4}" y="{ty:.1f}" font-size="10.5" '
+                     f'font-style="italic" fill="{c["muted"]}">did not '
+                     f'converge</text>')
+            continue
+        w = ms / x_max * PLOT_W
+        fill = c["arael"] if is_arael else c["other"]
+        s.append(f'<path d="{bar_path(plot_x, y, w, BAR_H, 3)}" fill="{fill}"/>')
+        star = "*" if kind.endswith("*") else ""
+        s.append(f'<text x="{plot_x + w + 6:.1f}" y="{ty:.1f}" '
+                 f'font-size="10.5"{weight} fill="{c["ink"]}">{ms:.1f}{star}</text>')
+
+
 def render(theme):
     c = THEMES[theme]
-    plot_h = len(DATA) * PITCH
-    axis_y = PLOT_TOP + plot_h + 18
-    foot_y = axis_y + 24
-    height = foot_y + 34
+    foot_y = HEADER_H + 2 * PANEL_H + ROW_GAP + 18
+    height = foot_y + len(FOOT) * 14 + 10
 
     s = []
     s.append(f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" '
@@ -76,43 +163,19 @@ def render(theme):
              f'font-family="{FONT}">')
     s.append(f'<rect x="0.5" y="0.5" width="{W - 1}" height="{height - 1}" '
              f'rx="8" fill="{c["surface"]}" stroke="{c["border"]}"/>')
-    s.append(f'<text x="24" y="32" font-size="15" font-weight="600" '
+    s.append(f'<text x="{MARGIN}" y="30" font-size="15" font-weight="600" '
              f'fill="{c["ink"]}">{TITLE}</text>')
-    s.append(f'<text x="24" y="52" font-size="12" '
+    s.append(f'<text x="{MARGIN}" y="48" font-size="11.5" '
              f'fill="{c["secondary"]}">{SUBTITLE}</text>')
 
-    # gridlines + tick labels
-    for ms in range(0, int(X_MAX) + 1, 20):
-        x = PLOT_X + ms * PX_PER_MS
-        s.append(f'<line x1="{x:.1f}" y1="{PLOT_TOP - 6}" x2="{x:.1f}" '
-                 f'y2="{PLOT_TOP + plot_h + 4}" stroke="{c["grid"]}" '
-                 f'stroke-width="1"/>')
-        label = f"{ms} ms" if ms == 80 else str(ms)
-        s.append(f'<text x="{x:.1f}" y="{axis_y}" font-size="11" '
-                 f'text-anchor="middle" fill="{c["muted"]}">{label}</text>')
+    for k, (title, x_max, tick, rows) in enumerate(PANELS):
+        px = MARGIN + (k % 2) * (PANEL_W + COL_GAP)
+        py = HEADER_H + (k // 2) * (PANEL_H + ROW_GAP)
+        render_panel(s, c, px, py, title, x_max, tick, rows)
 
-    for i, (label, ms, ratio, is_arael) in enumerate(DATA):
-        y = PLOT_TOP + i * PITCH + (PITCH - BAR_H) / 2
-        w = ms * PX_PER_MS
-        fill = c["arael"] if is_arael else c["other"]
-        weight = ' font-weight="600"' if is_arael else ""
-        name_ink = c["ink"] if is_arael else c["secondary"]
-        s.append(f'<text x="{PLOT_X - 10}" y="{y + BAR_H / 2 + 4:.1f}" '
-                 f'font-size="12.5" text-anchor="end"{weight} '
-                 f'fill="{name_ink}">{label}</text>')
-        s.append(f'<path d="{bar_path(PLOT_X, y, w, BAR_H, 4)}" '
-                 f'fill="{fill}"/>')
-        vx = PLOT_X + w + 8
-        ty = y + BAR_H / 2 + 4
-        s.append(f'<text x="{vx:.1f}" y="{ty:.1f}" font-size="12"{weight} '
-                 f'fill="{c["ink"]}">{ms} ms</text>')
-        s.append(f'<text x="{vx + 48:.1f}" y="{ty:.1f}" font-size="12" '
-                 f'fill="{c["muted"]}">{ratio}</text>')
-
-    s.append(f'<text x="24" y="{foot_y}" font-size="11" '
-             f'fill="{c["muted"]}">{FOOT1}</text>')
-    s.append(f'<text x="24" y="{foot_y + 15}" font-size="11" '
-             f'fill="{c["muted"]}">{FOOT2}</text>')
+    for i, line in enumerate(FOOT):
+        s.append(f'<text x="{MARGIN}" y="{foot_y + i * 14}" font-size="10.5" '
+                 f'fill="{c["muted"]}">{line}</text>')
     s.append("</svg>")
     return "\n".join(s) + "\n"
 

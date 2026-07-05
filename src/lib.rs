@@ -67,18 +67,23 @@
 //!
 //! <picture>
 //!   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/pgo/chart-dark.svg">
-//!   <img alt="Bar chart of per-step solve time on city10000: arael f32 10.1 ms (1.00x), arael f64 13.1 ms (1.29x), g2o GN 19.8 ms, g2o LM 21.5 ms, Ceres 25.8 ms, SymForce 28.3 ms, factrs 30.0 ms, tiny-solver 84.8 ms (8.37x)" src="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/pgo/chart-light.svg">
+//!   <img alt="2x2 bar charts of per-step solve time on M3500, city10000, sphere2500 and parking-garage: arael is fastest on M3500 (3.3 ms), city10000 (10.1 ms) and sphere2500 (13.3 ms); g2o leads the parking garage (7.9 ms vs arael 10.3 ms)" src="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/pgo/chart-light.svg">
 //! </picture>
 //!
-//! Batch pose-graph optimization on city10000, the classic 10000-pose SLAM
-//! benchmark (iSAM dataset: 30000 parameters, 20687 weighted constraints).
+//! Batch pose-graph optimization on the four canonical SLAM benchmark
+//! datasets, 2D and 3D. The chart shows the per-step cost because that is
+//! the number that compares cleanly: a step is the same work in every
+//! system -- one linearize + assemble + factorize + solve pass over the
+//! identical, validated cost function -- whereas step counts and total
+//! times also reflect each solver's damping schedule, a per-problem
+//! tuning knob (and one that should be tuned). The table below details
+//! the headline run: city10000, the classic 10000-pose benchmark (iSAM
+//! dataset: 30000 parameters, 20687 weighted constraints).
 //! All solutions verified to reach the same minimum; final costs evaluated
 //! by one shared reference function, so they are directly comparable.
-//! Every LM system runs with problem-appropriate initial damping -- damping
-//! strategy is a per-problem tuning knob (and should be tuned), so the
-//! durable comparison between systems is the per-step cost: one
-//! linearize + assemble + factorize + solve pass, with the "vs best"
-//! column giving the ratio to the fastest. Apple M4 Pro, single threaded:
+//! Every LM system runs with problem-appropriate initial damping; the
+//! "vs best" column gives the per-step ratio to the fastest. Apple M4
+//! Pro, single threaded:
 //!
 //! | system | total time | steps | ms/step | vs best | final cost |
 //! |--------|-----------:|------:|--------:|--------:|-----------:|
@@ -107,9 +112,12 @@
 //! each step. That holds against every architecture class here -- runtime
 //! autodiff (Ceres, tiny-solver, factrs), hand-written analytic Jacobians
 //! (g2o), and the closest cousin, SymForce's compile-time symbolic
-//! codegen, which arael leads 2.5x on this dataset. Arael leads every
-//! cell of the full benchmark -- three dataset configurations, weighted
-//! and unweighted, in both total time and per-step cost. Methodology, the
+//! codegen, which arael leads 2.5x on this dataset (and 3.7x on
+//! sphere2500, running the identical symbolically-defined residual
+//! through SymForce's own codegen). Across the full benchmark arael is
+//! the fastest system on every dataset except the small parking garage,
+//! where g2o's hand-written analytic pipeline edges it 7.9 vs 10.3
+//! ms/step. Methodology, the
 //! initial-damping policy, f32 rows, and the cross-system validation
 //! harness: [benchmarks/pgo](https://github.com/harakas/arael/tree/master/benchmarks/pgo).
 //!
