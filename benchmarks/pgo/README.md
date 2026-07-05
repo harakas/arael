@@ -39,6 +39,16 @@ uses no robust loss anywhere (arael has no Huber), which is
 value-identical at these optima -- every residual block ends in the Huber
 inlier region.
 
+Mixed weighting is a real hazard when comparing published numbers:
+factrs's own M3500 benchmark (factrs-bench) loads each system through
+that system's own reader, so its factrs, GTSAM and Ceres entries honor
+the file's information matrices while its tiny-solver entry (tiny's
+`helper::read_g2o`) and its sophus loader (a literal
+`TODO: Noise models?`) drop them -- those rows minimize a different
+objective than the others. Here one loader feeds every system the same
+configuration and one validator checks they all reached the same
+optimum.
+
 ## Fairness rules
 
 - **One cost function.** Every system optimizes the identical weighted
@@ -75,7 +85,7 @@ inlier region.
   env-overridable (`ARAEL_LAMBDA0`, `CERES_RADIUS0`, `TINY_RADIUS0`,
   `G2O_LAMBDA_INIT`, `GTSAM_LAMBDA0`; also `G2O_GAIN`). With this policy
   every LM converges in 6-7 steps on M3500 and the durable cross-system
-  comparison becomes the METAL: time per step (linearize + assemble +
+  comparison becomes the metric: time per step (linearize + assemble +
   factorize + solve). Shipped-default behavior is documented under
   "known solver behaviors" below.
 - **Threads: verified, not assumed.** Watching `/proc/<pid>/status`
