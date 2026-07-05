@@ -149,6 +149,15 @@ pub struct LmConfig<T> {
     /// to disable (only terminate via precision/patience). Useful when you
     /// know the target cost (e.g. constraint satisfaction where 0 is perfect).
     pub cost_threshold: T,
+    /// Minimum damping lambda: LM never decreases lambda below this after
+    /// an accepted step (clamped from below to machine epsilon). The
+    /// default 1e-12 effectively means "no floor" for well-posed problems.
+    /// Raise it (e.g. 1e-6) for problems with gauge freedom or otherwise
+    /// near-singular Hessians -- bundle adjustment with its 7-DOF gauge is
+    /// the canonical case -- where near-zero damping produces
+    /// non-positive-definite damped systems and catastrophic Gauss-Newton
+    /// overshoots along the near-null directions.
+    pub lambda_floor: T,
     /// Print per-iteration cost, lambda, and timing to stderr. Very useful
     /// for understanding how the solver behaves with a given parameter set --
     /// check the output to validate convergence and tune the config.
@@ -165,6 +174,7 @@ impl<T: Float> Default for LmConfig<T> {
             patience: 3,
             initial_lambda: T::from(1e-4).unwrap(),
             cost_threshold: T::zero(),
+            lambda_floor: default_lambda_floor::<T>(),
             verbose: false,
         }
     }
@@ -602,12 +612,13 @@ impl LmSolver<f32> for BandLapack {
 // Generic LM solver
 // ---------------------------------------------------------------------------
 
-/// Damping floor for the LM accept path: the named 1e-12, raised to
-/// machine epsilon where 1e-12 is not representable meaningfully (f32).
-/// One mechanism -- this replaced a floor-guarded decrement plus a
-/// separate epsilon clamp whose interaction put the real f64 floor
-/// anywhere in [2e-13, 1e-12] depending on approach path.
-fn lambda_floor<T: Float>() -> T {
+/// Default damping floor for the LM accept path: the named 1e-12,
+/// raised to machine epsilon where 1e-12 is not representable
+/// meaningfully (f32). One mechanism -- this replaced a floor-guarded
+/// decrement plus a separate epsilon clamp whose interaction put the
+/// real f64 floor anywhere in [2e-13, 1e-12] depending on approach
+/// path. Overridable per solve via `LmConfig::lambda_floor`.
+fn default_lambda_floor<T: Float>() -> T {
     T::from(1e-12).unwrap().max(T::epsilon())
 }
 
@@ -643,7 +654,7 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
     let mut diagonal = vec![T::zero(); n];
     let mut delta = vec![T::zero(); n];
 
-    let lambda_floor = lambda_floor::<T>();
+    let lambda_floor = config.lambda_floor.max(T::epsilon());
     let lambda_ceiling = T::from(1e10).unwrap();
     let lambda_down = T::from(0.2).unwrap();
     let lambda_up = T::from(10.0).unwrap();
@@ -2067,7 +2078,7 @@ mod tests {
         // `lambda > floor`, then clamp to epsilon) let f64 lambda land
         // anywhere in [2e-13, 1e-12] depending on approach path, and
         // for f32 the named floor was meaningless (epsilon dominates).
-        let floor64 = lambda_floor::<f64>();
+        let floor64 = default_lambda_floor::<f64>();
         let mut l64 = 1e-3f64;
         for _ in 0..100 {
             l64 = lambda_after_accept(l64, 0.2, floor64);
@@ -2075,7 +2086,18 @@ mod tests {
         }
         assert_eq!(l64, floor64, "f64 lambda must settle exactly at the named floor");
 
-        let floor32 = lambda_floor::<f32>();
+        // A config-raised floor must be respected the same way: this is
+        // the knob for gauge-singular problems (bundle adjustment).
+        let raised = 1e-6f64;
+        let mut lr = 1e-3f64;
+        for _ in 0..100 {
+            lr = lambda_after_accept(lr, 0.2, raised);
+            assert!(lr >= raised);
+        }
+        assert_eq!(lr, raised, "raised floor must be where lambda settles");
+        assert_eq!(LmConfig::<f64>::default().lambda_floor, default_lambda_floor::<f64>());
+
+        let floor32 = default_lambda_floor::<f32>();
         assert!(floor32 >= f32::EPSILON,
             "f32 floor {} must absorb the epsilon clamp", floor32);
         let mut l32 = 1e-3f32;
