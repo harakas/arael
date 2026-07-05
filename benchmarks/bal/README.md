@@ -45,93 +45,100 @@ are constrained by hundreds of residuals each.
 
 ## Damping
 
-Bundle adjustment is far less linear than the pose graphs, so the
-pose-graph lambda values do not transfer: arael runs
-`initial_lambda = 1e-4` (probed best together with 1e-5; larger values
-add iterations), env `ARAEL_LAMBDA0`. Ceres runs its shipped
-trust-region defaults -- BAL is the problem family they were tuned on.
+arael runs the gain-ratio `NielsenLambdaDriver` here (the benchmark
+default; `ARAEL_DRIVER=fixed` selects the classic fixed-multiplier
+schedule). This benchmark is what drove the `LambdaDriver` abstraction
+into arael (see docs/SOLVERS.md): under the fixed schedule no
+(lambda0, floor) pair fits all sizes -- on Ladybug-138 the default
+floor let lambda decay until the gauge-singular damped system lost
+positive definiteness (Cholesky failures, a catastrophic +23000-cost
+rejected step, a give-up 2.8% above the optimum), while the 1e-4 floor
+that fixed it forced 54 crawling steps and pushed Ladybug-49's f32
+into the iteration cap. The Nielsen driver dissolves all of it: zero
+rejections on Ladybug-49 (22 accepted steps -- exactly Ceres's count),
+Ladybug-138 converging in 20 steps to a cost marginally BELOW
+Ceres's, and the damping floor rendered moot (measured identical at
+1e-12 and 1e-6; the library default stays).
 
-The damping FLOOR is per-dataset (harness table; `ARAEL_LAMBDA_FLOOR`
-overrides), and the probes behind it are the sharpest schedule evidence
-in the repo: on Ladybug-138 the library-default floor (1e-12) lets
-lambda decay until the gauge-singular damped system loses positive
-definiteness -- Cholesky failures, a catastrophic +23000-cost rejected
-step, and a give-up 2.8% above the optimum -- while a 1e-4 floor
-converges everywhere but makes Ladybug-49's f32 crawl into the
-iteration cap. No fixed (lambda0, floor) pair fits all sizes; an
-adaptive schedule (gain-ratio style, or a learned controller) is the
-single biggest lever on this benchmark. `ARAEL_VERBOSE=1` prints the
-solver's per-iteration trace to watch it happen.
+Initial lambda is per-dataset (harness table, env `ARAEL_LAMBDA0`):
+1e-3 on Ladybug-138 (1e-4 plateaus 1.4% high there), 1e-4 elsewhere.
+Ceres runs its shipped trust-region defaults -- BAL is the problem
+family they were tuned on. `ARAEL_VERBOSE=1` prints the solver's
+per-iteration trace.
 
-## Results (Ladybug problems, aarch64 VM, single core, min of rounds)
+## Results (Ladybug problems, aarch64 VM, single core, min of 3 rounds; arael rows use the Nielsen driver)
 
 ### Ladybug-49 (23769 parameters)
 
 | system             | total ms |  iters  | ms/iter | 1st-iter ms | final cost |
 |--------------------|---------:|--------:|--------:|------------:|-----------:|
-| arael LM f64       |    821.0 |  23(35) |   23.46 |        53.1 | 26688.7584 |
-| arael LM f32       |    695.3 |  22(35) |   19.86 |        47.1 | 26691.7649 |
-| ceres dense_schur  |    452.7 |  22(22) |   20.58 |        43.8 | 26689.7174 |
-| ceres sparse_schur |    469.5 |  22(22) |   21.34 |        54.7 | 26689.7174 |
+| arael LM f64       |    593.8 |  22(22) |   26.99 |        58.1 | 26689.3493 |
+| arael LM f32       |    531.0 |  20(23) |   23.09 |        52.4 | 26690.5913 |
+| ceres dense_schur  |    485.3 |  22(22) |   22.06 |        47.2 | 26689.7174 |
+| ceres sparse_schur |    506.8 |  22(22) |   23.04 |        59.3 | 26689.7174 |
 
 ### Ladybug-138 (60876 parameters)
 
 | system             | total ms |  iters  | ms/iter | 1st-iter ms | final cost |
 |--------------------|---------:|--------:|--------:|------------:|------------:|
-| arael LM f64       |   4968.3 |  54(59) |   84.21 |       216.8 | 119271.7865 |
-| arael LM f32       |   4587.0 |  53(63) |   72.81 |       206.8 | 119130.2961 |
-| ceres dense_schur  |   1944.3 |  22(25) |   77.77 |       152.2 | 119056.2145 |
-| ceres sparse_schur |   1787.6 |  22(25) |   71.50 |       186.2 | 119056.2145 |
+| arael LM f64       |   1950.8 |  20(21) |   92.89 |       249.3 | 119055.9961 |
+| arael LM f32       |   1893.5 |  21(23) |   82.33 |       221.7 | 119053.6517 |
+| ceres dense_schur  |   2070.5 |  22(25) |   82.82 |       169.6 | 119056.2145 |
+| ceres sparse_schur |   1932.7 |  22(25) |   77.31 |       206.1 | 119056.2145 |
 
 ### Ladybug-372 (145617 parameters)
 
 | system             | total ms |  iters  | ms/iter | 1st-iter ms |  final cost |
 |--------------------|---------:|--------:|--------:|------------:|------------:|
-| arael LM f64       |   3242.0 |   6(10) |  324.20 |       666.6 | 225480.2326 |
-| arael LM f32       |   4575.5 |   9(19) |  240.82 |       577.8 | 225579.5838 |
-| ceres dense_schur  |   7652.9 |  10(17) |  450.17 |       720.8 | 225447.1709 |
-| ceres sparse_schur |   4479.1 |  10(17) |  263.47 |       614.5 | 225447.1709 |
+| arael LM f64       |   3618.2 |   5(11) |  328.93 |       698.3 | 225577.5976 |
+| arael LM f32       |   3919.3 |   8(15) |  261.28 |       629.6 | 225465.6238 |
+| ceres dense_schur  |   8113.6 |  10(17) |  477.27 |       787.6 | 225447.1709 |
+| ceres sparse_schur |   4567.6 |  10(17) |  268.68 |       656.1 | 225447.1709 |
 
 All rows validate on all three. Two Ceres reference points measured
 outside the tables on Ladybug-49 (its other linear solvers, same run
 protocol): `sparse_normal_cholesky` (the full-system strategy arael
-uses) 853 ms at 38.8 ms/step, `iterative_schur` 681 ms.
+uses) 853 ms at 38.8 ms/step, `iterative_schur` 681 ms. Fixed-schedule
+arael numbers for comparison (ARAEL_DRIVER=fixed, per-dataset floors):
+821 / 4968 / 3242 ms -- the Nielsen driver is worth 1.4x, 2.5x, and a
+lower-cost stop respectively.
 
 ### Ladybug-1723 (485k parameters, exploratory: `BAL_ONLY=1723`)
 
 With the shared 1e-5 tolerances NEITHER system converges -- they stop
-at plateaus 1.9% apart, so the mutual validation gate cannot pass and
-the problem is excluded from the default suite pending a tighter
-shared termination criterion. The exploratory numbers: arael f64
-88.4 s / 16(29) steps / 3047 ms/step reaching cost 762281; Ceres
-sparse_schur 70.2 s / 14(24) / 2925 ms/step stopping at 776854 (1.9%
-HIGHER). arael f32 fails outright at this scale (the damped f32 system
-loses positive definiteness immediately -- the same failure mode as
-factrs's f32 on city10000).
+at different plateaus of a long descent, so the mutual validation gate
+cannot pass and the problem is excluded from the default suite pending
+a tighter shared termination criterion. The exploratory numbers
+(Nielsen): arael f64 84.4 s / 16(26) steps / 3246 ms/step reaching
+cost 766181; Ceres sparse_schur 71.6 s / 14(24) / 2984 ms/step
+stopping at 776854 -- 1.4% HIGHER than arael's plateau. arael f32
+fails at this scale before the first step: the f32 ASSEMBLY produces a
+NaN Hessian diagonal (single-precision range overflow accumulating
+J^T J at 485k parameters), and the solve terminates loudly.
 
 ## Reading the results
 
-The story inverts with size:
+With the Nielsen driver the size story flattens into near parity:
 
-1. **Ladybug-49/138: Ceres wins on total time (1.8x / 2.8x), and the
-   entire gap is the damping schedule.** Ceres's gain-ratio trust
-   region takes 22 rejection-free steps on both; arael burns 12
-   rejected attempts on 49 and needs 54 crawling floor-damped steps on
-   138 (see Damping above). Per-step costs are near parity throughout
-   (23.5 vs 20.6 on 49; 84 vs 72 on 138).
-2. **Ladybug-372: arael wins on total time (3.24 vs 4.40 s)** -- it
-   reaches the optimum in 6 accepted steps to Ceres's 10(17).
-3. **Per-step, arael's full-system faer solve tracks Ceres's
-   sparse-Schur within 4-26% across the whole range** (23.5/21.3 ->
-   84/72 -> 324/259 -> 3047/2925 ms at 485k parameters), while Ceres
-   running the same non-Schur strategy costs 1.65x more than arael at
-   the small end. On Ladybug's banded camera connectivity, explicit
-   Schur elimination is NOT the decisive advantage it is reputed to
-   be; the schedule is.
-4. **arael's f32 solves bundle adjustment and validates on 49, 138 and
-   372** (Ceres offers no f32 mode at all), and on 372 its per-step
-   cost is the cheapest measured (241 ms). It dies at 485k parameters
-   (positive-definiteness loss).
+1. **Ladybug-49: Ceres wins by ~20%** (485 vs 594 ms), both taking 22
+   rejection-free steps -- the remaining gap is per-step cost (22.1 vs
+   27.0 ms), i.e. dense-Schur elimination at the problem size it is
+   best at.
+2. **Ladybug-138: a tie for f64 (1951 vs 1933 ms) and arael f32 wins
+   the dataset outright** -- 1894 ms with the lowest final cost
+   measured (119053.65, marginally below Ceres's optimum).
+3. **Ladybug-372: arael wins** (3.62 vs 4.57 s, 5 accepted steps to
+   Ceres's 10). Run-to-run step counts vary (5-12) here; min-of-rounds
+   applies to every system equally.
+4. **Per-step, arael's full-system faer solve tracks Ceres's
+   sparse-Schur within 4-26% across the whole range** (27/23 -> 93/77
+   -> 329/269 -> 3246/2984 ms at 485k parameters), while Ceres running
+   the same non-Schur strategy costs 1.65x more than arael at the
+   small end. On Ladybug's banded camera connectivity, explicit Schur
+   elimination is NOT the decisive advantage it is reputed to be.
+5. **arael's f32 solves bundle adjustment and validates on 49, 138 and
+   372** (Ceres offers no f32 mode at all) and wins Ladybug-138. It
+   fails at 485k parameters (NaN in f32 assembly, above).
 
 ## Running
 

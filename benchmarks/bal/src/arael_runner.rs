@@ -177,24 +177,47 @@ fn lambda0() -> f64 {
         .unwrap_or(1e-4)
 }
 
-// Damping floor, problem-appropriate for bundle adjustment: the 7-DOF
-// gauge makes the undamped Hessian singular, and letting lambda decay
-// toward zero produces non-positive-definite damped systems and
-// catastrophic Gauss-Newton overshoots along the near-null directions
-// (observed on Ladybug-138: at the library default floor the solver
-// spirals into Cholesky failures and gives up 2.8% above the optimum;
-// with the floor at 1e-4 it converges on every Ladybug problem).
-// Env ARAEL_LAMBDA_FLOOR.
+// Damping floor (env ARAEL_LAMBDA_FLOOR, library default 1e-12). Under
+// the fixed schedule bundle adjustment needed a raised floor against
+// gauge-driven Cholesky failure spirals; the Nielsen driver's gain
+// ratio never marches lambda into that regime, so the floor is moot
+// (measured identical at 1e-12 and 1e-6) and stays at the default.
 fn lambda_floor() -> f64 {
     std::env::var("ARAEL_LAMBDA_FLOOR").ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(1e-4)
+        .unwrap_or(1e-12)
 }
 
 // ARAEL_VERBOSE=1 prints the solver's per-iteration trace (cost,
 // lambda, accepted/rejected) to stderr.
 fn verbose() -> bool {
     std::env::var("ARAEL_VERBOSE").map_or(false, |v| v == "1")
+}
+
+// The benchmark defaults to the gain-ratio NielsenLambdaDriver -- on
+// bundle adjustment it eliminates the fixed schedule's damping
+// rejections and the Ladybug-138 gauge spiral outright.
+// ARAEL_DRIVER=fixed selects the classic fixed-multiplier schedule.
+fn nielsen() -> bool {
+    std::env::var("ARAEL_DRIVER").map_or(true, |v| v != "fixed")
+}
+
+fn solve64(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmConfig<f64>) -> arael::simple_lm::LmResult<f64> {
+    if nielsen() {
+        arael::simple_lm::solve_sparse_faer_driven(
+            params, &mut arael::simple_lm::NielsenLambdaDriver::default(), s, cfg)
+    } else {
+        arael::simple_lm::solve_sparse_faer(params, s, cfg)
+    }
+}
+
+fn solve32(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmConfig<f32>) -> arael::simple_lm::LmResult<f32> {
+    if nielsen() {
+        arael::simple_lm::solve_sparse_faer_f32_driven(
+            params, &mut arael::simple_lm::NielsenLambdaDriver::default(), s, cfg)
+    } else {
+        arael::simple_lm::solve_sparse_faer_f32(params, s, cfg)
+    }
 }
 
 fn cfg64(max_iters: usize) -> arael::simple_lm::LmConfig<f64> {
@@ -234,11 +257,11 @@ pub fn run_f64(ds: &Dataset) -> RunOut {
     s.serialize64(&mut params);
 
     let t0 = std::time::Instant::now();
-    let _ = arael::simple_lm::solve_sparse_faer(&params, &mut s, &cfg64(1));
+    let _ = solve64(&params, &mut s, &cfg64(1));
     let first_iter_ms = t0.elapsed().as_secs_f64() * 1e3;
 
     let t0 = std::time::Instant::now();
-    let result = arael::simple_lm::solve_sparse_faer(&params, &mut s, &cfg64(100));
+    let result = solve64(&params, &mut s, &cfg64(100));
     let solve_ms = t0.elapsed().as_secs_f64() * 1e3;
     s.deserialize64(&result.x);
     let cameras = s.cameras.iter()
@@ -265,11 +288,11 @@ pub fn run_f32(ds: &Dataset) -> RunOut {
     s.serialize32(&mut params);
 
     let t0 = std::time::Instant::now();
-    let _ = arael::simple_lm::solve_sparse_faer_f32(&params, &mut s, &cfg32(1));
+    let _ = solve32(&params, &mut s, &cfg32(1));
     let first_iter_ms = t0.elapsed().as_secs_f64() * 1e3;
 
     let t0 = std::time::Instant::now();
-    let result = arael::simple_lm::solve_sparse_faer_f32(&params, &mut s, &cfg32(100));
+    let result = solve32(&params, &mut s, &cfg32(100));
     let solve_ms = t0.elapsed().as_secs_f64() * 1e3;
     s.deserialize32(&result.x);
     let cameras = s.cameras.iter()

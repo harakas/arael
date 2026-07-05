@@ -115,15 +115,13 @@ fn main() {
     // plateaus 1.9% apart (arael's the lower one), so the mutual
     // validation gate cannot pass; making the big problem a fair race
     // needs a tighter shared termination criterion first.
-    // The fourth column is arael's damping floor for the dataset --
+    // The fourth column is arael's initial lambda for the dataset --
     // per-problem, like every damping knob in these benchmarks (see the
-    // README's damping section; ARAEL_LAMBDA_FLOOR overrides). No single
-    // fixed floor fits all sizes: Ladybug-49 converges best with the
-    // library default (1e-12) while 138/372 need 1e-4 against gauge
-    // blow-ups -- the strongest evidence yet for an adaptive schedule.
+    // README's damping section; ARAEL_LAMBDA0 overrides): 1e-3 on
+    // Ladybug-138 (1e-4 plateaus 1.4% high there), 1e-4 elsewhere.
     let datasets = [
-        ("Ladybug-49", "datasets/problem-49-7776-pre.txt", true, "1e-12"),
-        ("Ladybug-138", "datasets/problem-138-19878-pre.txt", true, "1e-4"),
+        ("Ladybug-49", "datasets/problem-49-7776-pre.txt", true, "1e-4"),
+        ("Ladybug-138", "datasets/problem-138-19878-pre.txt", true, "1e-3"),
         ("Ladybug-372", "datasets/problem-372-47423-pre.txt", true, "1e-4"),
     ];
     let datasets_exploratory = [
@@ -135,7 +133,7 @@ fn main() {
             only.as_deref().map_or(false, |f| n.contains(f))
         }))
         .collect();
-    let user_floor = std::env::var("ARAEL_LAMBDA_FLOOR").ok();
+    let user_lambda0 = std::env::var("ARAEL_LAMBDA0").ok();
     let rounds: usize = std::env::var("ROUNDS").ok()
         .and_then(|v| v.parse().ok()).unwrap_or(5);
     let ceres_available = std::path::Path::new("cpp/build/ceres_bal").exists();
@@ -143,9 +141,9 @@ fn main() {
         eprintln!("WARNING: cpp/build/ceres_bal missing (cmake -B cpp/build cpp && cmake --build cpp/build); skipping ceres rows");
     }
 
-    for (name, rel_path, dense_schur_ok, floor) in &datasets {
-        if user_floor.is_none() {
-            std::env::set_var("ARAEL_LAMBDA_FLOOR", floor);
+    for (name, rel_path, dense_schur_ok, lambda0) in &datasets {
+        if user_lambda0.is_none() {
+            std::env::set_var("ARAEL_LAMBDA0", lambda0);
         }
         let path_buf = bench_dir.join(rel_path);
         let path = path_buf.to_str().unwrap();
