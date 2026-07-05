@@ -18,6 +18,9 @@ struct Cell {
     solve_ms: f64,
     first_iter_ms: f64,
     iterations: usize,
+    // Accepted steps, for systems that report it (arael). Displayed as
+    // "accepted(total)"; total includes damping retries.
+    accepted: Option<usize>,
     poses: Vec<PoseIn>,
     cost: f64,
 }
@@ -32,7 +35,7 @@ fn gtsam_available() -> Option<String> {
     std::path::Path::new(&venv).exists().then_some(venv)
 }
 
-fn run_gtsam(python: &str, ds_path: &str, kind: &str, weighted: bool, n_poses: usize) -> (f64, f64, usize, Vec<PoseIn>) {
+fn run_gtsam(python: &str, ds_path: &str, kind: &str, weighted: bool, n_poses: usize) -> (f64, f64, usize, Option<usize>, Vec<PoseIn>) {
     let poses_out = format!("/tmp/gtsam_poses_{}.txt", kind);
     let weights = if weighted { "info" } else { "unit" };
     let out = std::process::Command::new(python)
@@ -64,7 +67,7 @@ fn run_gtsam(python: &str, ds_path: &str, kind: &str, weighted: bool, n_poses: u
         })
         .collect();
     assert_eq!(poses.len(), n_poses);
-    (solve_ms, first_iter_ms, iterations, poses)
+    (solve_ms, first_iter_ms, iterations, None, poses)
 }
 
 // Single-core enforcement, applied before any thread pool can spawn:
@@ -127,27 +130,27 @@ fn main() {
 
         // One measured cell per system; times are min-of-N interleaved.
         let mut cells: Vec<(String, Cell)> = Vec::new();
-        let record = |label: &str, out: (f64, f64, usize, Vec<PoseIn>), cells: &mut Vec<(String, Cell)>| {
-            let (solve_ms, first_iter_ms, iterations, poses) = out;
+        let record = |label: &str, out: (f64, f64, usize, Option<usize>, Vec<PoseIn>), cells: &mut Vec<(String, Cell)>| {
+            let (solve_ms, first_iter_ms, iterations, accepted, poses) = out;
             let cost = g2o::reference_cost(&ds, &poses);
             if let Some((_, prev)) = cells.iter_mut().find(|(l, _)| l == label) {
                 prev.solve_ms = prev.solve_ms.min(solve_ms);
                 prev.first_iter_ms = prev.first_iter_ms.min(first_iter_ms);
             } else {
                 cells.push((label.to_string(),
-                    Cell { solve_ms, first_iter_ms, iterations, poses, cost }));
+                    Cell { solve_ms, first_iter_ms, iterations, accepted, poses, cost }));
             }
         };
 
         for round in 0..rounds {
             let a64 = arael_runner::run_f64(&ds);
-            record("arael LM f64", (a64.solve_ms, a64.first_iter_ms, a64.iterations, a64.poses), &mut cells);
+            record("arael LM f64", (a64.solve_ms, a64.first_iter_ms, a64.iterations, Some(a64.accepted), a64.poses), &mut cells);
             let a32 = arael_runner::run_f32(&ds);
-            record("arael LM f32", (a32.solve_ms, a32.first_iter_ms, a32.iterations, a32.poses), &mut cells);
+            record("arael LM f32", (a32.solve_ms, a32.first_iter_ms, a32.iterations, Some(a32.accepted), a32.poses), &mut cells);
             let tgn = tiny_runner::run_gn(&ds);
-            record("tiny-solver GN", (tgn.solve_ms, tgn.first_iter_ms, tgn.iterations, tgn.poses), &mut cells);
+            record("tiny-solver GN", (tgn.solve_ms, tgn.first_iter_ms, tgn.iterations, None, tgn.poses), &mut cells);
             let tlm = tiny_runner::run_lm(&ds);
-            record("tiny-solver LM", (tlm.solve_ms, tlm.first_iter_ms, tlm.iterations, tlm.poses), &mut cells);
+            record("tiny-solver LM", (tlm.solve_ms, tlm.first_iter_ms, tlm.iterations, None, tlm.poses), &mut cells);
             if let Some(py) = &python {
                 record("gtsam LM", run_gtsam(py, path, "lm", *weighted, ds.poses.len()), &mut cells);
                 record("gtsam GN", run_gtsam(py, path, "gn", *weighted, ds.poses.len()), &mut cells);
@@ -173,11 +176,18 @@ fn main() {
         let best = cells.iter().map(|(_, c)| c.cost).fold(f64::MAX, f64::min);
         let converged = |c: &Cell| (c.cost - best) / best < 1e-2;
 
-        println!("\n{:<18} {:>10} {:>6} {:>10} {:>12} {:>14}",
+        // iters column: "accepted(total)" where the system reports both;
+        // total includes damping retries. Other systems report only their
+        // outer iteration count.
+        println!("\n{:<18} {:>10} {:>9} {:>10} {:>12} {:>14}",
             "system", "total ms", "iters", "ms/iter", "1st-iter ms", "final cost");
         for (label, c) in &cells {
-            println!("{:<18} {:>10.1} {:>6} {:>10.2} {:>12.1} {:>14.4}{}",
-                label, c.solve_ms, c.iterations,
+            let iters = match c.accepted {
+                Some(a) => format!("{}({})", a, c.iterations),
+                None => format!("{}", c.iterations),
+            };
+            println!("{:<18} {:>10.1} {:>9} {:>10.2} {:>12.1} {:>14.4}{}",
+                label, c.solve_ms, iters,
                 c.solve_ms / c.iterations.max(1) as f64,
                 c.first_iter_ms, c.cost,
                 if converged(c) { "" } else { "  <- did not reach the common optimum" });

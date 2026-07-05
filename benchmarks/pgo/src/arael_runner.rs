@@ -152,6 +152,10 @@ pub struct RunOut {
     pub solve_ms: f64,
     pub first_iter_ms: f64,
     pub iterations: usize,
+    /// Accepted (cost-decreasing) steps; `iterations` additionally counts
+    /// damping retries. Other systems report only their outer iteration
+    /// count, so their tables carry a single number.
+    pub accepted: usize,
     pub poses: Vec<PoseIn>,
 }
 
@@ -197,7 +201,12 @@ pub fn run_f64(ds: &Dataset) -> RunOut {
     let poses = g.poses.iter()
         .map(|p| PoseIn { x: p.pos.value.x, y: p.pos.value.y, th: p.th.value })
         .collect();
-    RunOut { solve_ms, first_iter_ms, iterations: result.iterations, poses }
+    RunOut {
+        solve_ms, first_iter_ms,
+        iterations: result.iterations,
+        accepted: result.accepted_iterations,
+        poses,
+    }
 }
 
 pub fn run_f32(ds: &Dataset) -> RunOut {
@@ -216,5 +225,10 @@ pub fn run_f32(ds: &Dataset) -> RunOut {
     let poses = g.poses.iter()
         .map(|p| PoseIn { x: p.pos.value.x as f64, y: p.pos.value.y as f64, th: p.th.value as f64 })
         .collect();
-    RunOut { solve_ms, first_iter_ms, iterations: result.iterations, poses }
+    RunOut {
+        solve_ms, first_iter_ms,
+        iterations: result.iterations,
+        accepted: result.accepted_iterations,
+        poses,
+    }
 }

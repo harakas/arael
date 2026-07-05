@@ -65,10 +65,11 @@ inlier region.
   symbolic + numeric factorization + solve, identically defined for all
   systems.
 - **Iteration semantics differ.** GTSAM and tiny-solver report outer
-  iterations (inner damping retries hidden); arael counts every damped
-  solve attempt including retries and its trial-cost evaluations. ms/iter
-  is therefore comparable only within a system; total time is the
-  cross-system number.
+  iterations (inner damping retries hidden); arael reports both:
+  "accepted(total)" -- accepted cost-decreasing steps, and total damped
+  solve attempts including retries. ms/iter is computed from the total
+  and is comparable only within a system; total time is the cross-system
+  number.
 
 ## Precision
 
@@ -108,46 +109,52 @@ GTSAM_PYTHON=/path/to/venv/bin/python3   # override if needed (pip install gtsam
 
 ## Results (2026-07-05, aarch64 VM, single core enforced by the harness, min of 5 interleaved rounds)
 
+arael iters are "accepted(total)": accepted cost-decreasing steps, and
+total damped solve attempts including retries. Final costs are all
+evaluated by the one reference cost function, so they are directly
+comparable.
+
 ### M3500 unweighted (10500 parameters) -- tiny-solver's shipped benchmark configuration
 
-| system          | total ms | iters | ms/iter | 1st-iter ms | final cost |
-|-----------------|---------:|------:|--------:|------------:|-----------:|
-| arael LM f64    |     28.2 |     9 |    3.13 |         6.0 |     3.0218 |
-| arael LM f32    |     43.0 |    15 |    2.86 |         5.3 |     3.0219 |
-| tiny-solver GN  |    125.3 |     6 |   20.88 |        29.0 |     3.0218 |
-| tiny-solver LM  |    598.7 |    28 |   21.38 |        32.0 |     3.0218 |
-| gtsam LM        |    113.4 |     7 |   16.20 |        18.2 |     3.0221 |
-| gtsam GN        |     77.0 |     6 |   12.84 |        14.6 |     3.0221 |
-| gtsam ISAM2 (incremental reference) | 780.2 | 3500 upd | 0.22 | 0.1 | 3.0246 |
+| system          | total ms |  iters | ms/iter | 1st-iter ms | final cost |
+|-----------------|---------:|-------:|--------:|------------:|-----------:|
+| arael LM f64    |     29.0 |   9(9) |    3.23 |         6.4 |     3.0218 |
+| arael LM f32    |     44.3 | 15(15) |    2.95 |         5.9 |     3.0219 |
+| tiny-solver GN  |    130.4 |      6 |   21.74 |        30.0 |     3.0218 |
+| tiny-solver LM  |    625.8 |     28 |   22.35 |        32.3 |     3.0218 |
+| gtsam LM        |    115.2 |      7 |   16.46 |        18.8 |     3.0221 |
+| gtsam GN        |     81.6 |      6 |   13.60 |        14.8 |     3.0221 |
+| gtsam ISAM2 (incremental reference) | 695.5 | 3500 upd | 0.20 | 0.1 | 3.0246 |
 
 ### M3500 (10500 parameters, information matrices applied)
 
-| system          | total ms | iters | ms/iter | 1st-iter ms | final cost |
-|-----------------|---------:|------:|--------:|------------:|-----------:|
-| arael LM f64    |     90.0 |    31 |    2.90 |         5.9 |   137.9310 |
-| arael LM f32    |    149.0 |    55 |    2.71 |         5.6 |   137.9338 |
-| tiny-solver GN  |    125.8 |     6 |   20.97 |        28.7 |   137.9130 |
-| tiny-solver LM  |    135.4 |     6 |   22.57 |        30.2 |   208.3 (not converged) |
-| gtsam LM        |     97.3 |     6 |   16.22 |        18.1 |   137.9273 |
-| gtsam GN        |     78.3 |     6 |   13.05 |        14.8 |   137.9273 |
-| gtsam ISAM2 (incremental reference) | 785.2 | 3500 upd | 0.22 | 0.1 | 138.0320 |
+| system          | total ms |  iters | ms/iter | 1st-iter ms | final cost |
+|-----------------|---------:|-------:|--------:|------------:|-----------:|
+| arael LM f64    |     89.9 | 21(31) |    2.90 |         6.1 |   137.9310 |
+| arael LM f32    |    149.2 | 36(55) |    2.71 |         5.6 |   137.9338 |
+| tiny-solver GN  |    128.1 |      6 |   21.35 |        29.5 |   137.9130 |
+| tiny-solver LM  |    138.3 |      6 |   23.05 |        31.4 |   208.3 (not converged) |
+| gtsam LM        |     98.6 |      6 |   16.44 |        18.3 |   137.9273 |
+| gtsam GN        |     79.8 |      6 |   13.31 |        15.2 |   137.9273 |
+| gtsam ISAM2 (incremental reference) | 668.6 | 3500 upd | 0.19 | 0.1 | 138.0320 |
 
 ### city10000 (30000 parameters, information matrices applied)
 
-| system          | total ms | iters | ms/iter | 1st-iter ms | final cost |
-|-----------------|---------:|------:|--------:|------------:|-----------:|
-| arael LM f64    |    108.7 |     9 |   12.07 |        23.2 |   511.9880 |
-| arael LM f32    |     88.6 |     9 |    9.84 |        18.9 |   511.9883 |
-| tiny-solver GN  |    585.8 |     7 |   83.69 |       115.8 |   511.9852 |
-| tiny-solver LM  |    883.2 |    10 |   88.32 |       120.5 |   511.9881 |
-| gtsam LM        |   4344.8 |    30 |  144.83 |        73.1 |   2.39e6 (local minimum) |
-| gtsam GN        |    218.4 |     4 |   54.59 |        60.5 |   2.48e8 (diverged) |
-| gtsam ISAM2 (incremental reference) | 10599.2 | 10000 upd | 1.06 | 0.1 | 512.5080 |
+| system          | total ms |  iters | ms/iter | 1st-iter ms | final cost |
+|-----------------|---------:|-------:|--------:|------------:|-----------:|
+| arael LM f64    |    111.0 |   8(9) |   12.34 |        22.1 |   511.9880 |
+| arael LM f32    |     89.8 |   9(9) |    9.98 |        19.2 |   511.9883 |
+| tiny-solver GN  |    601.1 |      7 |   85.87 |       114.4 |   511.9852 |
+| tiny-solver LM  |    904.0 |     10 |   90.40 |       121.3 |   511.9881 |
+| gtsam LM        |   4405.2 |     30 |  146.84 |        73.6 |   2.39e6 (local minimum) |
+| gtsam GN        |    221.1 |      4 |   55.27 |        60.3 |   2.48e8 (diverged) |
+| gtsam ISAM2 (incremental reference) | 11148.4 | 10000 upd | 1.11 | 0.1 | 512.5080 |
 
 On the weighted M3500, arael's fixed-factor lambda schedule oscillates
 around the optimal damping (heterogeneous edge weights narrow the good-
-lambda band), spending ~20 extra iterations on the last 0.3% of cost --
-a known outer-loop work item; per-iteration cost is unaffected.
+lambda band): 10 of 31 attempts are rejected retries and the accepted
+tail chases the last 0.3% of cost -- a known outer-loop work item;
+per-iteration cost is unaffected.
 
 tiny-solver with its default rayon threading (8 cores, not core-pinned):
 M3500 GN 78.0 ms, city10000 GN 386.9 ms / LM 630.1 ms.
