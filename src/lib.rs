@@ -123,6 +123,12 @@
 //! initial-damping policy, f32 rows, and the cross-system validation
 //! harness: [benchmarks/pgo](https://github.com/harakas/arael/tree/master/benchmarks/pgo).
 //!
+//! There is also a bundle-adjustment benchmark on the standard BAL
+//! (Bundle Adjustment in the Large) Ladybug problems, where arael shows
+//! parity with Ceres on Ceres's home turf -- winning two of the three
+//! problem sizes -- with g2o measured alongside:
+//! [benchmarks/bal](https://github.com/harakas/arael/tree/master/benchmarks/bal).
+//!
 //! # Scope
 //!
 //! Arael is a **nonlinear optimization framework**, not a complete SLAM or

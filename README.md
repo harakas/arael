@@ -106,6 +106,12 @@ both 2D datasets, by default). Methodology, the
 initial-damping policy, f32 rows, and the cross-system validation
 harness: [benchmarks/pgo](benchmarks/pgo/README.md).
 
+There is also a bundle-adjustment benchmark on the standard BAL
+(Bundle Adjustment in the Large) Ladybug problems, where arael shows
+parity with Ceres on Ceres's home turf -- winning two of the three
+problem sizes -- with g2o measured alongside:
+[benchmarks/bal](benchmarks/bal/README.md).
+
 ## Scope
 
 Arael is a **nonlinear optimization framework**, not a complete SLAM or state estimation system. The SLAM and localization demos show how to use arael as the optimizer backend, but a production SLAM pipeline would additionally need:
