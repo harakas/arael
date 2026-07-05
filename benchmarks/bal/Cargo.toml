@@ -1,0 +1,15 @@
+[package]
+name = "bal-bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Standalone workspace, same pattern as benchmarks/pgo.
+[workspace]
+
+[dependencies]
+arael = { path = "../.." }
+libc = "0.2"
+
+[profile.release]
+debug = false
