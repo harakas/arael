@@ -1,0 +1,19 @@
+[package]
+name = "pgo-bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Standalone workspace: keeps tiny-solver and its dependency tree out of
+# the main arael lockfile.
+[workspace]
+
+[dependencies]
+arael = { path = "../.." }
+tiny-solver = "0.18.0"
+nalgebra = "0.33"
+log = "0.4"
+libc = "0.2"
+
+[profile.release]
+debug = false
