@@ -55,36 +55,41 @@ by one shared reference function, so they are directly comparable.
 Every LM system runs with problem-appropriate initial damping -- damping
 strategy is a per-problem tuning knob (and should be tuned), so the
 durable comparison between systems is the per-step cost: one
-linearize + assemble + factorize + solve pass. Apple M4 Pro, single
-threaded:
+linearize + assemble + factorize + solve pass, with the "vs best"
+column giving the ratio to the fastest. Apple M4 Pro, single threaded:
 
-| system | total time | steps | ms/step | final cost |
-|--------|-----------:|------:|--------:|-----------:|
-| **arael (LM, f32)** | **71.4 ms** | 7(7) | **10.2** | 512.00 |
-| **arael (LM, f64)** | **87.4 ms** | 7(7) | **12.5** | 511.99 |
-| [g2o](https://github.com/RainerKuemmerle/g2o) (GN) | 138.6 ms | 7 | 19.8 | 511.99 |
-| [g2o](https://github.com/RainerKuemmerle/g2o) (LM) | 145.9 ms | 7 | 20.9 | 511.99 |
-| [Ceres](http://ceres-solver.org) (LM) | 179.8 ms | 7(7) | 25.7 | 511.99 |
-| [factrs](https://github.com/rpl-cmu/factrs) (GN) | 208.0 ms | 7 | 29.7 | 511.99 |
-| [tiny-solver](https://crates.io/crates/tiny-solver) (GN) | 569.3 ms | 7 | 81.3 | 511.99 |
-| [GTSAM](https://gtsam.org) (batch) | did not converge* | | | |
+| system | total time | steps | ms/step | vs best | final cost |
+|--------|-----------:|------:|--------:|--------:|-----------:|
+| **arael (LM, f32)** | **71.0 ms** | 7(7) | **10.1** | **1.00** | 512.00 |
+| **arael (LM, f64)** | **91.5 ms** | 7(7) | **13.1** | **1.29** | 511.99 |
+| [g2o](https://github.com/RainerKuemmerle/g2o) (GN) | 138.7 ms | 7 | 19.8 | 1.95 | 511.99 |
+| [g2o](https://github.com/RainerKuemmerle/g2o) (LM) | 150.3 ms | 7 | 21.5 | 2.12 | 511.99 |
+| [Ceres](http://ceres-solver.org) (LM) | 180.7 ms | 7(7) | 25.8 | 2.55 | 511.99 |
+| [factrs](https://github.com/rpl-cmu/factrs) (GN) | 210.2 ms | 7 | 30.0 | 2.96 | 511.99 |
+| [SymForce](https://symforce.org) (LM) | 226.1 ms | 7(8) | 28.3 | 2.79 | 511.99 |
+| [tiny-solver](https://crates.io/crates/tiny-solver) (GN) | 593.8 ms | 7 | 84.8 | 8.37 | 511.99 |
+| [GTSAM](https://gtsam.org) (batch) | did not converge* | | | | |
 
 \* GTSAM's batch LM/GN does not survive this dataset's odometry
 initialization at any damping (a residual-parameterization effect); its
 incremental ISAM2 solves it in 10.4 s of update time. arael's step
 count is "accepted(total damped attempts)". Of the competitors only
-factrs offers f32 (as a whole-crate rebuild); on this dataset its f32
-crashes -- single precision loses positive definiteness in its
-Cholesky -- while arael's f32 is the fastest entry in the table.
+SymForce and factrs offer f32: factrs's crashes on this dataset (single
+precision loses positive definiteness in its Cholesky), SymForce's
+solves it in 386.9 ms -- arael's f32 is 5.4x faster and the fastest
+entry in the table.
 
 Arael's steps are extremely low cost: all derivative code is generated
 and CSE-optimized at compile time, and the system matrix is assembled
 through precomputed sparse positions rather than built from scratch
-each step. Arael leads every cell of the full benchmark -- three
-dataset configurations, weighted and unweighted, in both total time
-and per-step cost. Methodology, the initial-damping policy, f32 rows,
-and the cross-system validation harness:
-[benchmarks/pgo](benchmarks/pgo/README.md).
+each step. That holds against every architecture class here -- runtime
+autodiff (Ceres, tiny-solver, factrs), hand-written analytic Jacobians
+(g2o), and the closest cousin, SymForce's compile-time symbolic
+codegen, which arael leads 2.5x on this dataset. Arael leads every
+cell of the full benchmark -- three dataset configurations, weighted
+and unweighted, in both total time and per-step cost. Methodology, the
+initial-damping policy, f32 rows, and the cross-system validation
+harness: [benchmarks/pgo](benchmarks/pgo/README.md).
 
 ## Scope
 

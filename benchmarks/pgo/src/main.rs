@@ -44,7 +44,8 @@ fn run_external(mut cmd: std::process::Command, poses_out: &str, n_poses: usize)
     let out = cmd.output().unwrap_or_else(|e| panic!("failed to run {:?}: {}", cmd, e));
     assert!(out.status.success(), "{:?} failed: {}", cmd, String::from_utf8_lossy(&out.stderr));
     let text = String::from_utf8(out.stdout).unwrap();
-    let line = text.lines().last().unwrap();
+    let line = text.lines().rev().find(|l| l.contains("solve_ms"))
+        .unwrap_or_else(|| panic!("no protocol line from {:?}", cmd));
     let get = |key: &str| -> Option<f64> {
         let i = line.find(key)?;
         let rest = &line[i + key.len() + 2..];
@@ -101,6 +102,13 @@ fn run_factrs32(ds_path: &str, kind: &str, weighted: bool, n_poses: usize) -> Op
     let mut cmd = std::process::Command::new("factrs32/target/release/factrs32-bench");
     cmd.args([ds_path, kind, &poses_out, if weighted { "info" } else { "unit" }]);
     Some(run_external(cmd, &poses_out, n_poses))
+}
+
+fn run_symforce(ds_path: &str, prec: &str, weighted: bool, n_poses: usize) -> (f64, f64, usize, Option<usize>, Vec<PoseIn>) {
+    let poses_out = format!("/tmp/symforce_poses_{}.txt", prec);
+    let mut cmd = std::process::Command::new("cpp/build/symforce_bench");
+    cmd.args([ds_path, prec, &poses_out, if weighted { "info" } else { "unit" }]);
+    run_external(cmd, &poses_out, n_poses)
 }
 
 fn run_g2o(ds_path: &str, kind: &str, weighted: bool, n_poses: usize) -> (f64, f64, usize, Option<usize>, Vec<PoseIn>) {
@@ -168,6 +176,10 @@ fn main() {
     if !factrs32_available {
         eprintln!("WARNING: factrs32 runner missing (cargo build -r in factrs32/); skipping factrs f32 rows");
     }
+    let symforce_available = std::path::Path::new("cpp/build/symforce_bench").exists();
+    if !symforce_available {
+        eprintln!("WARNING: symforce runner missing (build cpp with -DSYMFORCE_DIR=<built symforce checkout>); skipping symforce rows");
+    }
 
     for (name, path, weighted) in &datasets {
         let path = path.to_str().unwrap();
@@ -217,6 +229,10 @@ fn main() {
             if let Some(py) = &python {
                 record("gtsam LM", run_gtsam(py, path, "lm", *weighted, ds.poses.len()), &mut cells);
                 record("gtsam GN", run_gtsam(py, path, "gn", *weighted, ds.poses.len()), &mut cells);
+            }
+            if symforce_available {
+                record("symforce LM", run_symforce(path, "f64", *weighted, ds.poses.len()), &mut cells);
+                record("symforce LM f32", run_symforce(path, "f32", *weighted, ds.poses.len()), &mut cells);
             }
             if cpp_available {
                 record("ceres LM", run_ceres(path, *weighted, ds.poses.len()), &mut cells);
