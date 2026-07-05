@@ -627,10 +627,206 @@ fn lambda_after_accept<T: Float>(lambda: T, down: T, floor: T) -> T {
     (lambda * down).max(floor)
 }
 
-/// Run Levenberg-Marquardt optimization with the given solver backend.
+// ---------------------------------------------------------------------------
+// Lambda drivers -- damping-schedule strategies for the LM loop
+// ---------------------------------------------------------------------------
+
+/// The solve state a [`LambdaDriver`] sees at solve start and on
+/// factorization failures: everything the loop has in hand at the
+/// current linearization point.
+pub struct LambdaState<'a, T> {
+    /// Cost (sum of squared residuals) at the linearization point.
+    pub cost: T,
+    /// Gradient at the linearization point.
+    pub grad: &'a [T],
+    /// Gauss-Newton Hessian diagonal at the linearization point.
+    pub diagonal: &'a [T],
+}
+
+/// Data the LM loop reports to a [`LambdaDriver`] about one attempted step.
+pub struct LambdaStep<'a, T> {
+    /// The lambda this step was attempted with.
+    pub lambda: T,
+    /// Cost (sum of squared residuals) before the step.
+    pub cost: T,
+    /// Cost at the attempted parameters.
+    pub new_cost: T,
+    /// Gradient at the linearization point the step was computed from.
+    pub grad: &'a [T],
+    /// Gauss-Newton Hessian diagonal at the same linearization point.
+    pub diagonal: &'a [T],
+    /// The attempted step vector (`x_new = x - delta`).
+    pub delta: &'a [T],
+}
+
+/// Damping-schedule strategy for the LM loop ("lambda driver").
+///
+/// The solver consults the driver for every lambda decision and feeds it
+/// each attempted step's outcome (costs, gradient, Hessian diagonal, and
+/// the attempted step vector), so a driver can be as simple as fixed
+/// multipliers ([`DefaultLambdaDriver`]) or adapt to measured step
+/// quality ([`NielsenLambdaDriver`]). Drivers are stateful; use a fresh
+/// instance per solve.
+/// Pass one via [`lm_solve_driven`] or the `*_driven` solve entry points;
+/// the plain entry points use [`DefaultLambdaDriver`].
+pub trait LambdaDriver<T: Float> {
+    /// Called once at solve start, after the first assembly (so the
+    /// initial cost, gradient and Hessian diagonal are available);
+    /// returns the initial lambda.
+    fn start(&mut self, config: &LmConfig<T>, state: &LambdaState<T>) -> T;
+    /// The step was accepted (cost decreased); returns the lambda for the
+    /// next iteration.
+    fn accepted(&mut self, step: &LambdaStep<T>) -> T;
+    /// The step was rejected (cost did not decrease); returns the lambda
+    /// for the retry, or `None` to abandon the solve (the schedule sees
+    /// no viable damping left -- the loop terminates as if its retry
+    /// budget were exhausted).
+    fn rejected(&mut self, step: &LambdaStep<T>) -> Option<T>;
+    /// The damped normal equations could not be factorized at `lambda`
+    /// (not positive definite); returns the lambda for the retry.
+    fn factorization_failed(&mut self, lambda: T, state: &LambdaState<T>) -> T;
+}
+
+/// The classic fixed-multiplier schedule (the library default): divide
+/// lambda by 5 on acceptance (clamped to `LmConfig::lambda_floor`),
+/// multiply by 10 on rejection or factorization failure, and despair
+/// when a rejection would push lambda past 1e10.
+pub struct DefaultLambdaDriver<T> {
+    floor: T,
+    ceiling: T,
+    down: T,
+    up: T,
+}
+
+impl<T: Float> Default for DefaultLambdaDriver<T> {
+    fn default() -> Self {
+        DefaultLambdaDriver {
+            floor: default_lambda_floor::<T>(),
+            ceiling: T::from(1e10).unwrap(),
+            down: T::from(0.2).unwrap(),
+            up: T::from(10.0).unwrap(),
+        }
+    }
+}
+
+impl<T: Float> LambdaDriver<T> for DefaultLambdaDriver<T> {
+    fn start(&mut self, config: &LmConfig<T>, _state: &LambdaState<T>) -> T {
+        self.floor = config.lambda_floor.max(T::epsilon());
+        config.initial_lambda
+    }
+    fn accepted(&mut self, step: &LambdaStep<T>) -> T {
+        lambda_after_accept(step.lambda, self.down, self.floor)
+    }
+    fn rejected(&mut self, step: &LambdaStep<T>) -> Option<T> {
+        let next = step.lambda * self.up;
+        if next > self.ceiling { None } else { Some(next) }
+    }
+    fn factorization_failed(&mut self, lambda: T, _state: &LambdaState<T>) -> T {
+        lambda * self.up
+    }
+}
+
+/// Gain-ratio adaptive damping (the Nielsen update).
+///
+/// After every accepted step the gain ratio
+/// `rho = actual reduction / predicted reduction` measures how well the
+/// linear model predicted reality, and lambda is scaled by
+/// `max(1/3, 1 - (2 rho - 1)^3)`: a near-perfect model (rho ~ 1) cuts
+/// lambda hard toward Gauss-Newton, a barely-accepted step (rho ~ 0)
+/// raises it. Rejections multiply lambda by an escalating factor `nu`
+/// (2, 4, 8, ...) that resets to 2 on the next acceptance, so recovery
+/// from a bad region is geometric rather than a fixed-rate sawtooth.
+/// This is the schedule from Nielsen, "Damping Parameter in Marquardt's
+/// Method" (IMM-REP-1999-05), as popularized by Madsen/Nielsen/Tingleff;
+/// it removes the oscillation the fixed schedule shows on strongly
+/// nonlinear problems (bundle adjustment), where dividing lambda by a
+/// constant after every acceptance marches straight into the next
+/// rejection.
+///
+/// Respects `LmConfig::lambda_floor` on the way down and despairs above
+/// the same 1e10 ceiling as the default schedule.
+pub struct NielsenLambdaDriver<T> {
+    nu: T,
+    floor: T,
+    ceiling: T,
+}
+
+impl<T: Float> Default for NielsenLambdaDriver<T> {
+    fn default() -> Self {
+        NielsenLambdaDriver {
+            nu: T::from(2.0).unwrap(),
+            floor: default_lambda_floor::<T>(),
+            ceiling: T::from(1e10).unwrap(),
+        }
+    }
+}
+
+impl<T: Float> NielsenLambdaDriver<T> {
+    fn escalate(&mut self, lambda: T) -> T {
+        let next = lambda * self.nu;
+        self.nu = self.nu * T::from(2.0).unwrap();
+        next
+    }
+}
+
+impl<T: Float> LambdaDriver<T> for NielsenLambdaDriver<T> {
+    fn start(&mut self, config: &LmConfig<T>, _state: &LambdaState<T>) -> T {
+        self.floor = config.lambda_floor.max(T::epsilon());
+        self.nu = T::from(2.0).unwrap();
+        config.initial_lambda
+    }
+    fn accepted(&mut self, step: &LambdaStep<T>) -> T {
+        self.nu = T::from(2.0).unwrap();
+        // The linear model's predicted cost reduction. grad and the
+        // Hessian diagonal are the true derivatives of the cost (the
+        // generated blocks accumulate 2 J^T r / 2 J^T J for
+        // cost = sum r^2), so with (H + lambda D) delta = g and
+        // x_new = x - delta the model predicts a drop of
+        // (delta.g + lambda delta.D.delta) / 2.
+        let mut predicted = T::zero();
+        for i in 0..step.delta.len() {
+            predicted += step.delta[i]
+                * (step.grad[i] + step.lambda * step.diagonal[i] * step.delta[i]);
+        }
+        predicted = predicted * T::from(0.5).unwrap();
+        // Guard degenerate model predictions (zero or negative predicted
+        // reduction on an ACCEPTED step is numerical noise near the
+        // optimum): treat as a perfectly modeled step.
+        let rho = if predicted > T::epsilon() {
+            (step.cost - step.new_cost) / predicted
+        } else {
+            T::one()
+        };
+        let x = T::from(2.0).unwrap() * rho - T::one();
+        let factor = (T::one() - x * x * x).max(T::from(1.0 / 3.0).unwrap());
+        (step.lambda * factor).max(self.floor)
+    }
+    fn rejected(&mut self, step: &LambdaStep<T>) -> Option<T> {
+        let next = self.escalate(step.lambda);
+        if next > self.ceiling { None } else { Some(next) }
+    }
+    fn factorization_failed(&mut self, lambda: T, _state: &LambdaState<T>) -> T {
+        self.escalate(lambda)
+    }
+}
+
+/// Run Levenberg-Marquardt optimization with the given solver backend
+/// and the default damping schedule ([`DefaultLambdaDriver`]).
 pub fn lm_solve<T: Float, S: LmSolver<T>>(
     x0: &[T],
     solver: &mut S,
+    problem: &mut impl LmProblem<T>,
+    config: &LmConfig<T>,
+) -> LmResult<T> {
+    lm_solve_driven(x0, solver, &mut DefaultLambdaDriver::default(), problem, config)
+}
+
+/// Run Levenberg-Marquardt optimization with the given solver backend
+/// and damping-schedule driver (see [`LambdaDriver`]).
+pub fn lm_solve_driven<T: Float, S: LmSolver<T>>(
+    x0: &[T],
+    solver: &mut S,
+    driver: &mut impl LambdaDriver<T>,
     problem: &mut impl LmProblem<T>,
     config: &LmConfig<T>,
 ) -> LmResult<T> {
@@ -654,13 +850,12 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
     let mut diagonal = vec![T::zero(); n];
     let mut delta = vec![T::zero(); n];
 
-    let lambda_floor = config.lambda_floor.max(T::epsilon());
-    let lambda_ceiling = T::from(1e10).unwrap();
-    let lambda_down = T::from(0.2).unwrap();
-    let lambda_up = T::from(10.0).unwrap();
     let eight = T::from(8.0).unwrap();
 
-    let mut lambda = config.initial_lambda;
+    // Set by driver.start() after the first assembly (so the driver
+    // sees the initial cost, gradient, and Hessian diagonal).
+    let mut lambda = T::zero();
+    let mut started = false;
     let mut start_cost = T::zero();
     let mut end_cost = T::zero();
 
@@ -707,6 +902,13 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
             }
         }
 
+        if !started {
+            started = true;
+            lambda = driver.start(config, &LambdaState {
+                cost: end_cost, grad: &grad, diagonal: &diagonal,
+            });
+        }
+
         let mut inner = 0usize;
         const INNER_LOOPS: usize = 20;
 
@@ -714,6 +916,9 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
             iter += 1;
 
             if !solver.solve_damped(n, &mut matrix, &diagonal, lambda, &grad, &mut delta) {
+                let next_lambda = driver.factorization_failed(lambda, &LambdaState {
+                    cost: end_cost, grad: &grad, diagonal: &diagonal,
+                });
                 if config.verbose {
                     let step_us = timer.elapsed().as_micros();
                     timer = Instant::now();
@@ -727,11 +932,11 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
                     eprintln!("{}/{}: Cholesky failed (damped matrix not positive-definite), lambda={} -> {} (step={}) [non-finite: grad={} diag={} x={} matrix={}]",
                         iter, inner,
                         G(lambda.to_f64().unwrap()),
-                        G((lambda * lambda_up).to_f64().unwrap()),
+                        G(next_lambda.to_f64().unwrap()),
                         step_us,
                         n_nan_g, n_nan_d, n_nan_x, n_nan_m);
                 }
-                lambda *= lambda_up;
+                lambda = next_lambda;
                 inner += 1;
                 continue;
             }
@@ -758,7 +963,10 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
 
             if new_cost.is_finite() && new_cost < end_cost {
                 accepted += 1;
-                lambda = lambda_after_accept(lambda, lambda_down, lambda_floor);
+                lambda = driver.accepted(&LambdaStep {
+                    lambda, cost: end_cost, new_cost,
+                    grad: &grad, diagonal: &diagonal, delta: &delta,
+                });
                 cur_x.copy_from_slice(&try_x);
                 problem.advance(&mut cur_x);
 
@@ -799,11 +1007,17 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
                 break;
             }
 
-            lambda *= lambda_up;
-
-            if lambda > lambda_ceiling {
-                inner = INNER_LOOPS;
-                break;
+            match driver.rejected(&LambdaStep {
+                lambda, cost: end_cost, new_cost,
+                grad: &grad, diagonal: &diagonal, delta: &delta,
+            }) {
+                Some(next) => lambda = next,
+                None => {
+                    // The schedule despaired (e.g. lambda past its
+                    // ceiling): terminate like an exhausted retry budget.
+                    inner = INNER_LOOPS;
+                    break;
+                }
             }
 
             inner += 1;
@@ -1173,6 +1387,12 @@ impl LmSolver<f64> for SparseFaer {
     }
 }
 
+/// Solve with faer sparse Cholesky backend (f64) and a caller-provided
+/// damping-schedule driver (see [`LambdaDriver`], e.g. [`NielsenLambdaDriver`]).
+pub fn solve_sparse_faer_driven(x0: &[f64], driver: &mut impl LambdaDriver<f64>, problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> LmResult<f64> {
+    lm_solve_driven(x0, &mut SparseFaer::new(), driver, problem, config)
+}
+
 /// Solve with faer sparse Cholesky backend (f64).
 pub fn solve_sparse_faer(x0: &[f64], problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> LmResult<f64> {
     lm_solve(x0, &mut SparseFaer::new(), problem, config)
@@ -1316,6 +1536,12 @@ impl LmSolver<f32> for SparseFaerF32 {
 
         true
     }
+}
+
+/// Solve with faer sparse Cholesky backend (f32) and a caller-provided
+/// damping-schedule driver (see [`LambdaDriver`], e.g. [`NielsenLambdaDriver`]).
+pub fn solve_sparse_faer_f32_driven(x0: &[f32], driver: &mut impl LambdaDriver<f32>, problem: &mut impl LmProblem<f32>, config: &LmConfig<f32>) -> LmResult<f32> {
+    lm_solve_driven(x0, &mut SparseFaerF32::new(), driver, problem, config)
 }
 
 /// Solve with faer sparse Cholesky backend (f32).
@@ -2069,6 +2295,135 @@ mod tests {
         assert!(r.accepted_iterations > 0);
         assert!(r.accepted_iterations <= r.iterations);
         assert!((r.x[0] - 3.0).abs() < 1e-8 && (r.x[1] + 1.0).abs() < 1e-8);
+    }
+
+    // A strongly nonlinear 2-parameter Rosenbrock fit, as residuals
+    // r = [10 (y - x^2), 1 - x], from a start that forces damping
+    // retries under the fixed schedule. Used by the driver tests.
+    fn rosenbrock_problem() -> FnProblem<
+        impl FnMut(&[f64]) -> f64,
+        impl FnMut(&[f64], &mut [f64], &mut [f64]) -> f64,
+    > {
+        fn residuals(p: &[f64]) -> [f64; 2] {
+            [10.0 * (p[1] - p[0] * p[0]), 1.0 - p[0]]
+        }
+        FnProblem {
+            cost: |p: &[f64]| {
+                let r = residuals(p);
+                r[0] * r[0] + r[1] * r[1]
+            },
+            grad_hessian: |p: &[f64], grad: &mut [f64], hessian: &mut [f64]| {
+                let r = residuals(p);
+                // J = [[-20 x, 10], [-1, 0]]; the library convention is
+                // grad = 2 J^T r and H = 2 J^T J -- the true derivatives
+                // of cost = sum r^2 (what the generated blocks store).
+                let j = [[-20.0 * p[0], 10.0], [-1.0, 0.0]];
+                for i in 0..2 {
+                    grad[i] = 2.0 * (j[0][i] * r[0] + j[1][i] * r[1]);
+                    for k in 0..2 {
+                        hessian[2 * i + k] = 2.0 * (j[0][i] * j[0][k] + j[1][i] * j[1][k]);
+                    }
+                }
+                r[0] * r[0] + r[1] * r[1]
+            },
+        }
+    }
+
+    // lm_solve must be EXACTLY lm_solve_driven with the default driver:
+    // identical iterates, costs, and iteration counts.
+    #[test]
+    fn default_driver_is_the_default_schedule() {
+        let cfg = LmConfig::<f64> {
+            abs_precision: 1e-12,
+            rel_precision: 1e-12,
+            initial_lambda: 1e-3,
+            max_iters: 200,
+            ..Default::default()
+        };
+        let x0 = [-1.9f64, 2.0];
+        let plain = lm_solve(&x0, &mut Dense, &mut rosenbrock_problem(), &cfg);
+        let driven = lm_solve_driven(
+            &x0, &mut Dense, &mut DefaultLambdaDriver::default(),
+            &mut rosenbrock_problem(), &cfg);
+        assert_eq!(plain.x, driven.x);
+        assert_eq!(plain.end_cost, driven.end_cost);
+        assert_eq!(plain.iterations, driven.iterations);
+        assert_eq!(plain.accepted_iterations, driven.accepted_iterations);
+    }
+
+    // NielsenLambdaDriver must reach the same optimum, and its whole point is
+    // spending fewer damped attempts than the fixed schedule on a
+    // strongly nonlinear problem.
+    #[test]
+    fn nielsen_converges_with_fewer_attempts() {
+        let cfg = LmConfig::<f64> {
+            abs_precision: 1e-12,
+            rel_precision: 1e-12,
+            initial_lambda: 1e-3,
+            max_iters: 200,
+            ..Default::default()
+        };
+        let x0 = [-1.9f64, 2.0];
+        let fixed = lm_solve(&x0, &mut Dense, &mut rosenbrock_problem(), &cfg);
+        let arb = lm_solve_driven(
+            &x0, &mut Dense, &mut NielsenLambdaDriver::default(),
+            &mut rosenbrock_problem(), &cfg);
+        assert!(arb.end_cost < 1e-15, "nielsen end cost {}", arb.end_cost);
+        assert!((arb.x[0] - 1.0).abs() < 1e-6 && (arb.x[1] - 1.0).abs() < 1e-6);
+        assert!(arb.iterations <= fixed.iterations,
+            "nielsen took {} attempts, fixed schedule {}",
+            arb.iterations, fixed.iterations);
+    }
+
+    // The NielsenLambdaDriver schedule mechanics: nu doubles across consecutive
+    // rejections and resets on acceptance; the accept factor is bounded
+    // to [1/3, 2]; the floor and the despair ceiling are respected.
+    #[test]
+    fn nielsen_schedule_mechanics() {
+        let mut a = NielsenLambdaDriver::<f64>::default();
+        let cfg = LmConfig::<f64> { initial_lambda: 1e-2, lambda_floor: 1e-6, ..Default::default() };
+        let l0 = a.start(&cfg, &LambdaState { cost: 10.0, grad: &[], diagonal: &[] });
+        assert_eq!(l0, 1e-2);
+        // A step context whose linear-model predicted reduction is
+        // exactly 1: delta = [1], diagonal = [1], grad = [2 - lambda]
+        // gives (delta.g + lambda delta.D.delta) / 2 = 1.
+        struct Ctx {
+            grad: [f64; 1],
+            diagonal: [f64; 1],
+            delta: [f64; 1],
+        }
+        fn ctx(lambda: f64) -> Ctx {
+            Ctx { grad: [2.0 - lambda], diagonal: [1.0], delta: [1.0] }
+        }
+        fn mk(c: &Ctx, lambda: f64, cost: f64, new_cost: f64) -> LambdaStep<'_, f64> {
+            LambdaStep {
+                lambda, cost, new_cost,
+                grad: &c.grad, diagonal: &c.diagonal, delta: &c.delta,
+            }
+        }
+        // Two consecutive rejections: x2 then x4.
+        let c = ctx(1e-2);
+        assert_eq!(a.rejected(&mk(&c, 1e-2, 10.0, 11.0)), Some(2e-2));
+        let c = ctx(2e-2);
+        assert_eq!(a.rejected(&mk(&c, 2e-2, 10.0, 11.0)), Some(8e-2));
+        // Perfectly modeled step (rho = 1, predicted = 1, actual = 1):
+        // lambda cut by 1/3, nu reset.
+        let c = ctx(8e-2);
+        let l = a.accepted(&mk(&c, 8e-2, 10.0, 9.0));
+        assert!((l - 8e-2 / 3.0).abs() < 1e-12, "l = {}", l);
+        let c = ctx(l);
+        assert_eq!(a.rejected(&mk(&c, l, 9.0, 9.5)), Some(l * 2.0));
+        // Barely useful step (rho ~ 0): lambda raised (factor -> 2).
+        let c = ctx(1e-2);
+        let l2 = a.accepted(&mk(&c, 1e-2, 10.0, 9.999999));
+        assert!(l2 > 1e-2 && l2 <= 2e-2 + 1e-12, "l2 = {}", l2);
+        // Floor respected on strong decreases.
+        let c = ctx(1.5e-6);
+        let lf = a.accepted(&mk(&c, 1.5e-6, 10.0, 9.0));
+        assert_eq!(lf, 1e-6);
+        // Despair above the ceiling.
+        let c = ctx(1e10);
+        assert_eq!(a.rejected(&mk(&c, 1e10, 10.0, 11.0)), None);
     }
 
     #[test]

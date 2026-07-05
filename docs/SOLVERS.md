@@ -339,3 +339,35 @@ begins. See `Path::optimise_center` in
 2. Solve (only root-level params vary).
 3. Bake the result into poses via `recenter()`, resetting globals to identity.
 4. The Param constructors in `recenter` reset `.optimize = true` automatically.
+
+## Damping-schedule drivers
+
+The lambda schedule is pluggable via the `LambdaDriver` trait: the LM
+loop asks the driver for every damping decision and reports each
+attempted step's outcome as a `LambdaStep { lambda, cost, new_cost,
+grad, diagonal, delta }` -- the gradient, Gauss-Newton Hessian
+diagonal, and attempted step vector give a driver everything needed to
+compute model-quality measures itself (the Nielsen driver derives its
+gain ratio from them). `start` fires after the first assembly with a
+`LambdaState { cost, grad, diagonal }`, so even the initial lambda can
+be chosen from the problem's actual scale.
+
+- `DefaultLambdaDriver` -- the classic fixed-multiplier schedule and
+  what every plain entry point uses: divide lambda by 5 on acceptance
+  (clamped to `LmConfig::lambda_floor`), multiply by 10 on rejection or
+  factorization failure, give up when a rejection would pass 1e10.
+- `NielsenLambdaDriver` -- the gain-ratio adaptive schedule (Nielsen,
+  IMM-REP-1999-05): on acceptance lambda scales by
+  `max(1/3, 1 - (2 rho - 1)^3)`, on rejection it multiplies by an
+  escalating `nu` (2, 4, 8, ... reset to 2 by the next acceptance).
+  Use it on strongly nonlinear problems where the fixed schedule
+  oscillates -- dividing lambda by a constant after every acceptance
+  marches straight into the next rejection (bundle adjustment is the
+  canonical case; see benchmarks/bal).
+
+Custom drivers implement the four-method trait (`start`, `accepted`,
+`rejected`, `factorization_failed` -- the latter also receives the
+current `LambdaState`); returning `None` from `rejected`
+abandons the solve like an exhausted retry budget. Entry points:
+`lm_solve_driven` (any backend), `solve_sparse_faer_driven`,
+`solve_sparse_faer_f32_driven`.
