@@ -2798,7 +2798,8 @@ impl Sketch {
 
         if n == 0 {
             return arael::simple_lm::LmResult {
-                x: params64, start_cost: 0.0, end_cost: 0.0, iterations: 0,
+                x: params64, start_cost: 0.0, end_cost: 0.0,
+                iterations: 0, accepted_iterations: 0,
             };
         }
 
@@ -2827,11 +2828,13 @@ impl Sketch {
         };
 
         let mut total_iters = 0usize;
+        let mut total_accepted = 0usize;
         let mut result = arael::simple_lm::LmResult {
             x: params64.clone(),
             start_cost,
             end_cost: start_cost,
             iterations: 0,
+            accepted_iterations: 0,
         };
 
         for &scale in stages {
@@ -2863,6 +2866,7 @@ impl Sketch {
             };
             self.deserialize64(&stage_result.x);
             total_iters += stage_result.iterations;
+            total_accepted += stage_result.accepted_iterations;
             result.end_cost = stage_result.end_cost;
             result.x = stage_result.x;
         }
@@ -2871,6 +2875,7 @@ impl Sketch {
         self.normalise_ellipse_rotations();
         self.update_expr_dim_values();
         result.iterations = total_iters;
+        result.accepted_iterations = total_accepted;
         result
     }
 

@@ -266,6 +266,10 @@ pub struct LmResult<T> {
     pub end_cost: T,
     /// Total number of iterations performed (including inner damping retries).
     pub iterations: usize,
+    /// Number of ACCEPTED steps (cost-decreasing parameter updates).
+    /// `iterations - accepted_iterations` is the damping-retry overhead:
+    /// rejected trial steps and failed factorizations.
+    pub accepted_iterations: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -622,7 +626,8 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
     let n = x0.len();
     if n == 0 {
         return LmResult {
-            x: x0.to_vec(), start_cost: T::zero(), end_cost: T::zero(), iterations: 0,
+            x: x0.to_vec(), start_cost: T::zero(), end_cost: T::zero(),
+            iterations: 0, accepted_iterations: 0,
         };
     }
 
@@ -651,6 +656,7 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
     let mut small_count = 0usize;
     let mut done = false;
     let mut iter = 0usize;
+    let mut accepted = 0usize;
     let mut first = true;
     let mut timer = Instant::now();
 
@@ -664,7 +670,7 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
             end_cost = computed_cost;
             // Already at zero cost — nothing to do
             if start_cost == T::zero() {
-                return LmResult { x: cur_x, start_cost, end_cost, iterations: 0 };
+                return LmResult { x: cur_x, start_cost, end_cost, iterations: 0, accepted_iterations: 0 };
             }
         }
         solver.extract_diagonal(&matrix, &mut diagonal);
@@ -686,7 +692,7 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
                         diagonal ({:?}) at iteration {}; no active constraint \
                         curvature touches it (degenerate model) -- terminating solve",
                     i, d.to_f64(), iter);
-                return LmResult { x: cur_x, start_cost, end_cost, iterations: iter };
+                return LmResult { x: cur_x, start_cost, end_cost, iterations: iter, accepted_iterations: accepted };
             }
         }
 
@@ -740,6 +746,7 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
                 && (end_cost - new_cost).abs() < eight * T::epsilon() * end_cost.abs();
 
             if new_cost.is_finite() && new_cost < end_cost {
+                accepted += 1;
                 lambda = lambda_after_accept(lambda, lambda_down, lambda_floor);
                 cur_x.copy_from_slice(&try_x);
                 problem.advance(&mut cur_x);
@@ -806,6 +813,7 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
         start_cost,
         end_cost,
         iterations: iter,
+        accepted_iterations: accepted,
     }
 }
 
@@ -2014,6 +2022,43 @@ pub fn solve_spd_band_f32(n: usize, kd: usize, band: &mut [f32], b: &mut [f32]) 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn accepted_iterations_counts_only_accepted_steps() {
+        // iterations counts every damped solve attempt; accepted_iterations
+        // only the cost-decreasing parameter updates. A well-conditioned
+        // quadratic accepts every step; the counts must match there, and
+        // accepted can never exceed total.
+        struct Quad;
+        impl LmProblem<f64> for Quad {
+            fn calc_cost(&mut self, p: &[f64]) -> f64 {
+                (p[0] - 3.0).powi(2) + (p[1] + 1.0).powi(2)
+            }
+            fn calc_grad_hessian_dense(&mut self, p: &[f64], grad: &mut [f64], hessian: &mut [f64]) -> f64 {
+                grad[0] = 2.0 * (p[0] - 3.0);
+                grad[1] = 2.0 * (p[1] + 1.0);
+                hessian.copy_from_slice(&[2.0, 0.0, 0.0, 2.0]);
+                self.calc_cost(p)
+            }
+            fn calc_grad_hessian_band(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: usize) -> Result<f64, BandError> {
+                unreachable!("dense-only test problem")
+            }
+            fn calc_grad_hessian_sparse(&mut self, _: &[f64], _: &mut [f64], _: &mut CooMatrix<f64>) -> f64 {
+                unreachable!("dense-only test problem")
+            }
+            fn calc_grad_hessian_sparse_direct(&mut self, _: &[f64], _: &mut [f64], _: &mut CscMatrix<f64>) -> f64 {
+                unreachable!("dense-only test problem")
+            }
+            fn calc_grad_hessian_sparse_indexed(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: &[usize]) -> f64 {
+                unreachable!("dense-only test problem")
+            }
+        }
+        let cfg = LmConfig::<f64>::default();
+        let r = solve(&[0.0, 0.0], &mut Quad, &cfg);
+        assert!(r.accepted_iterations > 0);
+        assert!(r.accepted_iterations <= r.iterations);
+        assert!((r.x[0] - 3.0).abs() < 1e-8 && (r.x[1] + 1.0).abs() < 1e-8);
+    }
 
     #[test]
     fn lambda_floor_is_the_actual_floor() {
