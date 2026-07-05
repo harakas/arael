@@ -125,10 +125,24 @@ disappear under the policy:
   region it takes 6-7.
 - **GTSAM on city10000 (batch, odometry init)**: LM stops in a local
   minimum (cost 2.39M vs 512) and GN diverges, at any damping -- this
-  one is not a damping artifact. GTSAM's own city10000 examples solve
-  it incrementally with ISAM2. Its Pose2 between-factor residual uses
-  the SE(2) log map, whose basin of attraction from this initialization
-  differs from the rotation-frame residual the other systems use.
+  one is not a damping artifact but a residual-parameterization effect,
+  isolated two ways:
+  - Replacing its native log-map BetweenFactorPose2 with the
+    rotation-frame residual the other systems use (as a CustomFactor),
+    GTSAM's own LM converges from the raw odometry init in 7 iterations
+    to the exact optimum (Python-callback factor, so no comparable
+    timing).
+  - Keeping its native factor but giving it a chordal initialization
+    (two GaussianFactorGraph linear solves: orientation relaxation over
+    (cos, sin), then linear translations -- the InitializePose2 method;
+    the 4.2.1 wheel does not wrap it) costs 195 ms, drops the error
+    from 6.5e8 to 607, and LM/GN then converge in 3 iterations
+    (~160-210 ms). From-file-to-solution that is roughly 0.4 s -- the
+    practical batch-GTSAM answer for this dataset, not table-eligible
+    because every other row starts from the file's odometry
+    initialization.
+
+  GTSAM's own city10000 examples solve it incrementally with ISAM2.
 - **gtsam ISAM2 row**: the incremental reference -- GTSAM driven the way
   its own city10000 example works (one update per pose, odometry-composed
   initial guesses, loop closures at their later endpoint). It DOES solve
