@@ -9,6 +9,7 @@
 //   below 1e-5 -- the tiny-solver and GTSAM defaults).
 
 mod arael_runner;
+mod factrs_runner;
 mod g2o;
 mod tiny_runner;
 
@@ -84,6 +85,24 @@ fn run_ceres(ds_path: &str, weighted: bool, n_poses: usize) -> (f64, f64, usize,
     run_external(cmd, "/tmp/ceres_poses.txt", n_poses)
 }
 
+// factrs's f32 mode can fail outright (its Cholesky panics on a
+// non-positive pivot on city10000 -- single precision loses positive
+// definiteness at 30000 parameters and its lambda floor of 1e-10 cannot
+// regularize it). A crashed run is a reportable outcome, not a harness
+// failure.
+fn run_factrs32(ds_path: &str, kind: &str, weighted: bool, n_poses: usize) -> Option<(f64, f64, usize, Option<usize>, Vec<PoseIn>)> {
+    let poses_out = format!("/tmp/factrs32_poses_{}.txt", kind);
+    let mut probe = std::process::Command::new("factrs32/target/release/factrs32-bench");
+    probe.args([ds_path, kind, &poses_out, if weighted { "info" } else { "unit" }]);
+    let out = probe.output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let mut cmd = std::process::Command::new("factrs32/target/release/factrs32-bench");
+    cmd.args([ds_path, kind, &poses_out, if weighted { "info" } else { "unit" }]);
+    Some(run_external(cmd, &poses_out, n_poses))
+}
+
 fn run_g2o(ds_path: &str, kind: &str, weighted: bool, n_poses: usize) -> (f64, f64, usize, Option<usize>, Vec<PoseIn>) {
     let poses_out = format!("/tmp/g2o_poses_{}.txt", kind);
     let mut cmd = std::process::Command::new("cpp/build/g2o_bench");
@@ -145,6 +164,10 @@ fn main() {
     if !cpp_available {
         eprintln!("WARNING: cpp/build runners missing (cmake -B cpp/build cpp && cmake --build cpp/build); skipping ceres/g2o rows");
     }
+    let factrs32_available = std::path::Path::new("factrs32/target/release/factrs32-bench").exists();
+    if !factrs32_available {
+        eprintln!("WARNING: factrs32 runner missing (cargo build -r in factrs32/); skipping factrs f32 rows");
+    }
 
     for (name, path, weighted) in &datasets {
         let path = path.to_str().unwrap();
@@ -156,6 +179,7 @@ fn main() {
 
         // One measured cell per system; times are min-of-N interleaved.
         let mut cells: Vec<(String, Cell)> = Vec::new();
+        let mut failed_notes: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         let record = |label: &str, out: (f64, f64, usize, Option<usize>, Vec<PoseIn>), cells: &mut Vec<(String, Cell)>| {
             let (solve_ms, first_iter_ms, iterations, accepted, poses) = out;
             let cost = g2o::reference_cost(&ds, &poses);
@@ -177,6 +201,19 @@ fn main() {
             record("tiny-solver GN", (tgn.solve_ms, tgn.first_iter_ms, tgn.iterations, None, tgn.poses), &mut cells);
             let tlm = tiny_runner::run_lm(&ds);
             record("tiny-solver LM", (tlm.solve_ms, tlm.first_iter_ms, tlm.iterations, None, tlm.poses), &mut cells);
+            let fgn = factrs_runner::run_gn(&ds);
+            record("factrs GN", (fgn.solve_ms, fgn.first_iter_ms, fgn.iterations, None, fgn.poses), &mut cells);
+            let flm = factrs_runner::run_lm(&ds);
+            record("factrs LM", (flm.solve_ms, flm.first_iter_ms, flm.iterations, None, flm.poses), &mut cells);
+            if factrs32_available {
+                match run_factrs32(path, "gn", *weighted, ds.poses.len()) {
+                    Some(out) => record("factrs GN f32", out, &mut cells),
+                    None => {
+                        failed_notes.insert(
+                            "factrs GN f32: solver crashed (f32 Cholesky non-positive pivot)".to_string());
+                    }
+                }
+            }
             if let Some(py) = &python {
                 record("gtsam LM", run_gtsam(py, path, "lm", *weighted, ds.poses.len()), &mut cells);
                 record("gtsam GN", run_gtsam(py, path, "gn", *weighted, ds.poses.len()), &mut cells);
@@ -244,6 +281,9 @@ fn main() {
             .count();
         assert!(external_agree >= 1,
             "no external system confirms the best cost {} -- cannot validate", best);
+        for note in &failed_notes {
+            println!("{:<18} {}", "", note);
+        }
         let conv = cells.iter().filter(|(_, c)| converged(c)).count();
         println!("validation: {}/{} systems at the common optimum ({:.4}: cost within 1%, \
                   aligned RMSE to best < 5 cm), anchored by {} external system(s)",

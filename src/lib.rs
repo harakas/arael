@@ -82,13 +82,17 @@
 //! | [g2o](https://github.com/RainerKuemmerle/g2o) (GN) | 138.6 ms | 7 | 19.8 | 511.99 |
 //! | [g2o](https://github.com/RainerKuemmerle/g2o) (LM) | 145.9 ms | 7 | 20.9 | 511.99 |
 //! | [Ceres](http://ceres-solver.org) (LM) | 179.8 ms | 7(7) | 25.7 | 511.99 |
+//! | [factrs](https://github.com/rpl-cmu/factrs) (GN) | 208.0 ms | 7 | 29.7 | 511.99 |
 //! | [tiny-solver](https://crates.io/crates/tiny-solver) (GN) | 569.3 ms | 7 | 81.3 | 511.99 |
 //! | [GTSAM](https://gtsam.org) (batch) | did not converge* | | | |
 //!
 //! \* GTSAM's batch LM/GN does not survive this dataset's odometry
 //! initialization at any damping (a residual-parameterization effect); its
 //! incremental ISAM2 solves it in 10.4 s of update time. arael's step
-//! count is "accepted(total damped attempts)".
+//! count is "accepted(total damped attempts)". Of the competitors only
+//! factrs offers f32 (as a whole-crate rebuild); on this dataset its f32
+//! crashes -- single precision loses positive definiteness in its
+//! Cholesky -- while arael's f32 is the fastest entry in the table.
 //!
 //! Arael's steps are extremely low cost: all derivative code is generated
 //! and CSE-optimized at compile time, and the system matrix is assembled

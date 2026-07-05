@@ -1,0 +1,15 @@
+[package]
+name = "factrs32-bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Separate binary because factrs's f32 support is a crate-global dtype
+# feature -- both precisions cannot coexist in one build graph.
+[workspace]
+
+[dependencies]
+factrs = { version = "0.3.0", features = ["f32"] }
+
+[profile.release]
+debug = false

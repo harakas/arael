@@ -8,7 +8,10 @@ analytic factors, via the official Python wheel -- timing wraps only the
 C++ `optimize()` call), [Ceres](http://ceres-solver.org) (C++ 2.2,
 template autodiff, SPARSE_NORMAL_CHOLESKY, modeled on its own
 pose_graph_2d example), and [g2o](https://github.com/RainerKuemmerle/g2o)
-(C++ 2023-08, analytic Jacobians, CHOLMOD backend).
+(C++ 2023-08, analytic Jacobians, CHOLMOD backend), and
+[factrs](https://github.com/rpl-cmu/factrs) (Rust 0.3, dual-number
+autodiff over Lie types, faer Cholesky; both f64 and, as a separate
+crate-global build, f32).
 
 ## Datasets
 
@@ -61,7 +64,8 @@ inlier region.
   arael `initial_lambda = 1e-8` (its own docs recommend small values
   here), Ceres and tiny-solver `initial_trust_region_radius = 1e12`,
   g2o `setUserLambdaInit(1e-12)`, GTSAM its default `1e-5` (insensitive:
-  its inner lambda search adapts within an iteration). All are
+  its inner lambda search adapts within an iteration), factrs its
+  default (lambda starts at 1e-10 -- already problem-appropriate). All are
   env-overridable (`ARAEL_LAMBDA0`, `CERES_RADIUS0`, `TINY_RADIUS0`,
   `G2O_LAMBDA_INIT`, `GTSAM_LAMBDA0`; also `G2O_GAIN`). With this policy
   every LM converges in 6-7 steps on M3500 and the durable cross-system
@@ -96,11 +100,17 @@ inlier region.
 
 arael solves the same models in f64 and f32 (`solve_sparse_faer` /
 `solve_sparse_faer_f32`), selected per model, both precisions in one
-binary; both rows are validated against the common optimum. None of the
-other systems offers single precision: tiny-solver's problem/optimizer
-layer is hardwired f64 (its Factor trait alone is generic), GTSAM and
-Ceres bake double into their public APIs, and g2o's number_t alias is
-hardcoded to double with no build option.
+binary; both rows are validated against the common optimum. Among the
+competitors only factrs offers single precision, as a crate-global
+`f32` feature (one precision per build -- hence the separate
+`factrs32/` subprocess crate). Its f32 solves both M3500 configurations
+but crashes on city10000: the f32 normal equations lose positive
+definiteness at 30000 parameters and its Cholesky panics (reported as
+a table note). arael's f32 solves city10000 -- and is the fastest
+entry in that table. The rest are f64-only: tiny-solver's
+problem/optimizer layer is hardwired f64 (its Factor trait alone is
+generic), GTSAM and Ceres bake double into their public APIs, and
+g2o's number_t alias is hardcoded to double with no build option.
 
 ## Known solver behaviors (reported, not hidden)
 
@@ -172,51 +182,62 @@ ms/iter -- the per-step pipeline cost -- is the durable comparison.
 
 | system          | total ms |  iters | ms/iter | 1st-iter ms | final cost |
 |-----------------|---------:|-------:|--------:|------------:|-----------:|
-| arael LM f64    |     19.8 |   6(6) |    3.31 |         6.3 |     3.0218 |
-| arael LM f32    |     30.8 | 10(10) |    3.08 |         5.5 |     3.0219 |
-| tiny-solver GN  |    123.9 |      6 |   20.64 |        28.3 |     3.0218 |
-| tiny-solver LM  |    132.3 |      6 |   22.05 |        30.1 |     3.0218 |
-| gtsam LM        |    111.2 |      7 |   15.88 |        17.1 |     3.0221 |
-| gtsam GN        |     77.6 |      6 |   12.93 |        14.2 |     3.0221 |
-| ceres LM        |     35.6 |   6(6) |    5.93 |        13.3 |     3.0218 |
-| g2o LM          |     26.0 |      6 |    4.33 |         8.1 |     3.0218 |
-| g2o GN          |     23.9 |      6 |    3.99 |         7.7 |     3.0218 |
-| gtsam ISAM2 (incremental reference) | 650.8 | 3500 upd | 0.19 | 0.2 | 3.0246 |
+| arael LM f64    |     20.4 |   6(6) |    3.40 |         6.0 |     3.0218 |
+| arael LM f32    |     29.8 | 10(10) |    2.98 |         5.5 |     3.0219 |
+| tiny-solver GN  |    130.6 |      6 |   21.77 |        29.3 |     3.0218 |
+| tiny-solver LM  |    140.6 |      6 |   23.43 |        31.0 |     3.0218 |
+| factrs GN       |     46.1 |      6 |    7.69 |        13.4 |     3.0218 |
+| factrs LM       |     55.6 |      6 |    9.27 |        15.5 |     3.0218 |
+| factrs GN f32   |     47.5 |      7 |    6.78 |        13.4 |     3.0218 |
+| gtsam LM        |    112.0 |      7 |   16.00 |        17.7 |     3.0221 |
+| gtsam GN        |     76.6 |      6 |   12.76 |        14.4 |     3.0221 |
+| ceres LM        |     36.0 |   6(6) |    5.99 |        13.1 |     3.0218 |
+| g2o LM          |     26.3 |      6 |    4.38 |         8.2 |     3.0218 |
+| g2o GN          |     24.2 |      6 |    4.04 |         7.8 |     3.0218 |
+| gtsam ISAM2 (incremental reference) | 656.4 | 3500 upd | 0.19 | 0.2 | 3.0246 |
 
 ### M3500 (10500 parameters, information matrices applied)
 
 | system          | total ms |  iters | ms/iter | 1st-iter ms | final cost |
 |-----------------|---------:|-------:|--------:|------------:|-----------:|
-| arael LM f64    |     19.9 |   6(6) |    3.32 |         6.0 |   137.9130 |
-| arael LM f32    |     21.8 |   7(7) |    3.12 |         5.6 |   137.9544 |
-| tiny-solver GN  |    122.4 |      6 |   20.40 |        28.4 |   137.9130 |
-| tiny-solver LM  |    132.9 |      6 |   22.15 |        29.9 |   137.9130 |
-| gtsam LM        |     95.3 |      6 |   15.88 |        17.6 |   137.9273 |
-| gtsam GN        |     77.1 |      6 |   12.85 |        14.3 |   137.9273 |
-| ceres LM        |     35.3 |   6(6) |    5.88 |        13.3 |   137.9136 |
-| g2o LM          |     26.0 |      6 |    4.34 |         8.1 |   137.9136 |
-| g2o GN          |     24.3 |      6 |    4.05 |         7.4 |   137.9136 |
-| gtsam ISAM2 (incremental reference) | 658.2 | 3500 upd | 0.19 | 0.1 | 138.0320 |
+| arael LM f64    |     20.1 |   6(6) |    3.35 |         6.1 |   137.9130 |
+| arael LM f32    |     21.8 |   7(7) |    3.11 |         5.5 |   137.9544 |
+| tiny-solver GN  |    131.4 |      6 |   21.90 |        29.4 |   137.9130 |
+| tiny-solver LM  |    140.3 |      6 |   23.38 |        30.8 |   137.9130 |
+| factrs GN       |     45.1 |      6 |    7.51 |        12.6 |   137.9130 |
+| factrs LM       |     56.2 |      6 |    9.37 |        14.8 |   137.9130 |
+| factrs GN f32   |     59.6 |      9 |    6.62 |        13.5 |   137.9194 |
+| gtsam LM        |     95.9 |      6 |   15.98 |        18.0 |   137.9273 |
+| gtsam GN        |     76.3 |      6 |   12.71 |        14.5 |   137.9273 |
+| ceres LM        |     35.5 |   6(6) |    5.91 |        13.6 |   137.9136 |
+| g2o LM          |     25.8 |      6 |    4.31 |         8.2 |   137.9136 |
+| g2o GN          |     24.5 |      6 |    4.08 |         7.5 |   137.9136 |
+| gtsam ISAM2 (incremental reference) | 643.1 | 3500 upd | 0.18 | 0.1 | 138.0320 |
 
 ### city10000 (30000 parameters, information matrices applied)
 
 | system          | total ms |  iters | ms/iter | 1st-iter ms | final cost |
 |-----------------|---------:|-------:|--------:|------------:|-----------:|
-| arael LM f64    |     87.4 |   7(7) |   12.49 |        22.4 |   511.9852 |
-| arael LM f32    |     71.4 |   7(7) |   10.20 |        18.8 |   512.0045 |
-| tiny-solver GN  |    569.3 |      7 |   81.33 |       111.3 |   511.9852 |
-| tiny-solver LM  |    617.2 |      7 |   88.18 |       115.6 |   511.9852 |
-| gtsam LM        |   4299.6 |     30 |  143.32 |        71.2 |   2.39e6 (local minimum) |
-| gtsam GN        |    214.1 |      4 |   53.52 |        59.9 |   2.48e8 (diverged) |
-| ceres LM        |    179.8 |   7(7) |   25.69 |        54.3 |   511.9880 |
-| g2o LM          |    145.9 |      7 |   20.85 |        37.2 |   511.9880 |
-| g2o GN          |    138.6 |      7 |   19.81 |        35.6 |   511.9880 |
-| gtsam ISAM2 (incremental reference) | 10378.0 | 10000 upd | 1.04 | 0.1 | 512.5080 |
+| arael LM f64    |     87.6 |   7(7) |   12.51 |        21.3 |   511.9852 |
+| arael LM f32    |     71.3 |   7(7) |   10.18 |        18.7 |   512.0045 |
+| tiny-solver GN  |    608.1 |      7 |   86.88 |       116.9 |   511.9852 |
+| tiny-solver LM  |    655.6 |      7 |   93.65 |       120.0 |   511.9852 |
+| factrs GN       |    208.0 |      7 |   29.71 |        49.3 |   511.9852 |
+| factrs LM       |    251.3 |      7 |   35.89 |        54.9 |   511.9852 |
+| factrs GN f32   | solver crashed (f32 Cholesky non-positive pivot) | | | | |
+| gtsam LM        |   4244.7 |     30 |  141.49 |        69.0 |   2.39e6 (local minimum) |
+| gtsam GN        |    215.9 |      4 |   53.97 |        58.5 |   2.48e8 (diverged) |
+| ceres LM        |    180.1 |   7(7) |   25.72 |        55.7 |   511.9880 |
+| g2o LM          |    144.5 |      7 |   20.64 |        37.1 |   511.9880 |
+| g2o GN          |    138.5 |      7 |   19.79 |        36.6 |   511.9880 |
+| gtsam ISAM2 (incremental reference) | 10405.8 | 10000 upd | 1.04 | 0.1 | 512.5080 |
 
 arael is the fastest system in every validated cell, in both total time
-and per-step cost. 10/10 systems converge on both M3500 configurations
-under the initial-damping policy; on city10000 batch GTSAM remains the
-only non-converger (residual parameterization, not damping).
+and per-step cost; its f32 is the fastest city10000 entry outright,
+where the only other f32-capable system (factrs) crashes. factrs is
+the fastest non-arael Rust library, consistent with its own published
+claim. On city10000 batch GTSAM remains the only local-solver
+non-converger (residual parameterization, not damping).
 
 tiny-solver GN with its default rayon threading (8 cores, not
 core-pinned): M3500 78.0 ms, city10000 386.9 ms.
