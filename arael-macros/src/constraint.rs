@@ -869,6 +869,14 @@ fn eval_static_constructor(ty: &str, func: &str, args: Vec<SymVal>, span: &Expr)
             arity(2)?;
             Ok(SymVal::Mat3(matrix3sym::rotation_from_axis_angle(&vec3(0)?, scalar(1)?)))
         }
+        ("vect2sym", "from_components") => {
+            arity(2)?;
+            Ok(SymVal::Vec2(vect2sym::from_components(scalar(0)?, scalar(1)?)))
+        }
+        ("vect3sym", "from_components") => {
+            arity(3)?;
+            Ok(SymVal::Vec3(vect3sym::from_components(scalar(0)?, scalar(1)?, scalar(2)?)))
+        }
         ("quaternsym", "identity") => {
             arity(0)?;
             Ok(SymVal::Quat(quaternsym::identity()))
@@ -4289,6 +4297,9 @@ pub fn generate_root_methods(
             /// Returns the cost (sum of squared residuals, excluding
             /// extended-model residuals) as a byproduct of the sweep.
             fn __compute_blocks(&mut self, params: &[#prec_type], grad: &mut [#prec_type]) -> #prec_type {
+                // Generated expressions may call Float trait methods
+                // (e.g. heaviside from safe-function derivatives).
+                use arael::utils::Float as _;
                 arael::model::Model::#update_method(self, params);
                 #extended_update_call
                 self.zero_blocks();
@@ -4306,6 +4317,9 @@ pub fn generate_root_methods(
         tokens.extend(quote! {
             impl arael::model::JacobianModel<#prec_type> for #root_name {
                 fn calc_jacobian(&mut self, params: &[#prec_type]) -> arael::model::Jacobian<#prec_type> {
+                    // Generated expressions may call Float trait methods
+                    // (e.g. heaviside from safe-function derivatives).
+                    use arael::utils::Float as _;
                     arael::model::Model::#update_method(self, params);
                     #ext_update
                     // Read-only traversal: a plain shared reborrow suffices.
@@ -4352,6 +4366,9 @@ pub fn generate_root_methods(
         #(#summary_docs)*
         impl arael::simple_lm::LmProblem<#prec_type> for #root_name {
             fn calc_cost(&mut self, params: &[#prec_type]) -> #prec_type {
+                // Generated expressions may call Float trait methods
+                // (e.g. heaviside from safe-function derivatives).
+                use arael::utils::Float as _;
                 arael::model::Model::#update_method(self, params);
                 #extended_update_call
                 // Read-only traversal: a plain shared reborrow suffices.
