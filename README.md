@@ -55,20 +55,25 @@ same minimum -- final costs are evaluated by one shared reference
 function, so they are directly comparable. Apple M4 Pro, single
 threaded:
 
-| system | total time | iterations | final cost |
-|--------|-----------:|-----------:|-----------:|
-| **arael (LM, f32)** | **90.6 ms** | 9(9) | 511.99 |
-| **arael (LM, f64)** | **106.4 ms** | 8(9) | 511.99 |
-| [g2o](https://github.com/RainerKuemmerle/g2o) (GN) | 136.2 ms | 7 | 511.99 |
-| [Ceres](http://ceres-solver.org) (LM) | 243.4 ms | 10(10) | 511.99 |
-| [tiny-solver](https://crates.io/crates/tiny-solver) (GN) | 602.3 ms | 7 | 511.99 |
-| [GTSAM](https://gtsam.org) (batch) | did not converge* | | |
+| system | total time | iterations | ms/step | final cost |
+|--------|-----------:|-----------:|--------:|-----------:|
+| **arael (LM, f32)** | **90.6 ms** | 9(9) | 10.1 | 511.99 |
+| **arael (LM, f64)** | **106.4 ms** | 8(9) | 13.3 | 511.99 |
+| [g2o](https://github.com/RainerKuemmerle/g2o) (GN) | 136.2 ms | 7 | 19.5 | 511.99 |
+| [g2o](https://github.com/RainerKuemmerle/g2o) (LM) | 342.5 ms | 18 | 19.0 | 1484.7 (plateau)** |
+| [Ceres](http://ceres-solver.org) (LM) | 243.4 ms | 10(10) | 24.3 | 511.99 |
+| [tiny-solver](https://crates.io/crates/tiny-solver) (GN) | 602.3 ms | 7 | 86.0 | 511.99 |
+| [GTSAM](https://gtsam.org) (batch) | did not converge* | | | |
 
 \* GTSAM's batch LM/GN does not survive this dataset's odometry
 initialization; its incremental ISAM2 solves it in 10.4 s of update
-time. arael's iteration count is "accepted(total damped attempts)";
-other systems report outer iterations, so per-iteration figures are
-not directly comparable across systems.
+time. \*\* g2o's LM terminates on a flat plateau 2.9x above the
+optimum (its GN converges; both shown for the like-for-like LM
+comparison). arael's iteration count is "accepted(total damped attempts)";
+ms/step divides by accepted steps for arael (each is a full
+linearize + factorize + solve step, the closest equivalent of the
+outer iterations other systems report) and by outer iterations for
+the rest.
 
 Arael's iterations are extremely low cost: all derivative code is
 generated and CSE-optimized at compile time, and the system matrix is

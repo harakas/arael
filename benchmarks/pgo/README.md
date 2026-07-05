@@ -81,9 +81,12 @@ inlier region.
 ## Precision
 
 arael solves the same models in f64 and f32 (`solve_sparse_faer` /
-`solve_sparse_faer_f32`); both rows are validated against the common
-optimum. tiny-solver's problem/optimizer layer and GTSAM are f64-only, so
-no f32 rows exist for them.
+`solve_sparse_faer_f32`), selected per model, both precisions in one
+binary; both rows are validated against the common optimum. None of the
+other systems offers single precision: tiny-solver's problem/optimizer
+layer is hardwired f64 (its Factor trait alone is generic), GTSAM and
+Ceres bake double into their public APIs, and g2o's number_t alias is
+hardcoded to double with no build option.
 
 ## Known solver behaviors (reported, not hidden)
 
