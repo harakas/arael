@@ -116,8 +116,10 @@
 //! sphere2500, running the identical symbolically-defined residual
 //! through SymForce's own codegen). Across the full benchmark arael is
 //! the fastest system on every dataset except the small parking garage,
-//! where g2o's hand-written analytic pipeline edges it 7.9 vs 10.3
-//! ms/step. Methodology, the
+//! where g2o edges it 7.9 vs 10.3 ms/step -- a margin owed to CHOLMOD's
+//! GPL-licensed supernodal factorization (with that same backend arael
+//! steps at 8.9 ms; it ships the permissive pure-Rust faer, which wins
+//! both 2D datasets, by default). Methodology, the
 //! initial-damping policy, f32 rows, and the cross-system validation
 //! harness: [benchmarks/pgo](https://github.com/harakas/arael/tree/master/benchmarks/pgo).
 //!

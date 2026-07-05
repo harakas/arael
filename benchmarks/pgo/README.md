@@ -347,9 +347,18 @@ The 3D standings are split. On sphere2500 arael f64 is the fastest
 system (18.6 ms/step vs Ceres 24.3, g2o LM 26.2, GTSAM 27.4, factrs
 38.5, SymForce 68.6, tiny-solver 84.5). On the parking garage g2o
 wins -- 7.9 ms/step GN / 8.5 LM against arael's 10.3, with SymForce at
-12.0, GTSAM at 13.2, and Ceres at 14.1 -- its hand-written analytic
-Jacobians and native EdgeSE3 pipeline are excellent on this small,
-weakly-weighted real-world graph. arael leads the Rust field (factrs,
+12.0, GTSAM at 13.2, and Ceres at 14.1. The garage margin was traced
+to the linear solver, not to g2o's hand-written Jacobians: arael's
+garage step is ~1.9 ms of linearize+assembly and ~8.5 ms of
+factorize+solve, and swapping arael's backend to CHOLMOD's supernodal
+factorization -- the module g2o links -- brings its step to 8.9 ms.
+That module is GPL, so arael ships the permissive pure-Rust faer by
+default instead; faer in turn wins both 2D datasets clearly (3.5 /
+12.7 ms/step vs supernodal CHOLMOD's 5.0 / 20.0) and trails it only
+mildly in 3D (sphere2500 19.4 vs 17.7). arael's optional LGPL-safe
+backends (Eigen SimplicialLLT, CHOLMOD simplicial) were measured too:
+on par with faer on the garage, 4.6-6x slower on sphere2500 --
+supernodal's block-friendliness is what the 6-DOF datasets reward. arael leads the Rust field (factrs,
 tiny-solver) by 2.1-9.6x per step on both 3D datasets, and leads
 SymForce -- the other compile-time codegen system, here running the
 identical symbolically-defined residual -- 3.7x on sphere2500 and 1.2x
