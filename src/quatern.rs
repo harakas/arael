@@ -185,6 +185,57 @@ impl<T: Float> quatern<T> {
         quatern::<T>::new(cos_half_angle, normal * sin_half_angle)
     }
 
+    /// Constructs a unit quaternion from a rotation matrix (Shepperd's
+    /// method: the largest of the four squared components is computed
+    /// first, so no branch divides by a small number).
+    pub fn from_rotation_matrix(m: matrix3<T>) -> quatern<T> {
+        let two = T::one() + T::one();
+        let quarter = T::half() * T::half();
+        let tr = m[0].x + m[1].y + m[2].z;
+        let q = if tr > T::zero() {
+            let s = (tr + T::one()).sqrt() * two;
+            quatern::<T>::new(
+                quarter * s,
+                vect3::<T>::new(
+                    (m[2].y - m[1].z) / s,
+                    (m[0].z - m[2].x) / s,
+                    (m[1].x - m[0].y) / s,
+                ),
+            )
+        } else if m[0].x > m[1].y && m[0].x > m[2].z {
+            let s = (T::one() + m[0].x - m[1].y - m[2].z).sqrt() * two;
+            quatern::<T>::new(
+                (m[2].y - m[1].z) / s,
+                vect3::<T>::new(
+                    quarter * s,
+                    (m[0].y + m[1].x) / s,
+                    (m[0].z + m[2].x) / s,
+                ),
+            )
+        } else if m[1].y > m[2].z {
+            let s = (T::one() + m[1].y - m[0].x - m[2].z).sqrt() * two;
+            quatern::<T>::new(
+                (m[0].z - m[2].x) / s,
+                vect3::<T>::new(
+                    (m[0].y + m[1].x) / s,
+                    quarter * s,
+                    (m[1].z + m[2].y) / s,
+                ),
+            )
+        } else {
+            let s = (T::one() + m[2].z - m[0].x - m[1].y).sqrt() * two;
+            quatern::<T>::new(
+                (m[1].x - m[0].y) / s,
+                vect3::<T>::new(
+                    (m[0].z + m[2].x) / s,
+                    (m[1].z + m[2].y) / s,
+                    quarter * s,
+                ),
+            )
+        };
+        q.unit()
+    }
+
     /// Raises this unit quaternion to a scalar power. Scales the rotation angle by `f`.
     pub fn pow(self, f: T) -> quatern<T> {
         let (axis, angle) = self.get_axis_angle();
@@ -253,6 +304,28 @@ mod tests {
     use super::*;
     use crate::vect::vect3d;
     use crate::matrix::matrix3d;
+
+    #[test]
+    fn test_from_rotation_matrix() {
+        // Angles chosen so the four Shepperd pivot branches are all hit:
+        // near-identity (trace pivot) and three near-180-degree rotations
+        // about each axis (the per-axis diagonal pivots).
+        let cases = [
+            vect3d::new(0.1, -0.2, 0.3),
+            vect3d::new(3.0, 0.05, -0.02),
+            vect3d::new(0.04, 3.0, 0.03),
+            vect3d::new(0.01, -0.06, 3.1),
+            vect3d::new(-1.4, 0.9, 2.2),
+        ];
+        for ea in cases {
+            let q = quaternd::from_euler_angles(ea);
+            let r = quaternd::from_rotation_matrix(q.rotation_matrix());
+            // q and -q encode the same rotation; compare the matrices.
+            assert!(r.rotation_matrix().similar(q.rotation_matrix()),
+                "roundtrip failed for {:?}", ea);
+            assert!((r.norm() - 1.0).abs() < 1e-12);
+        }
+    }
 
     #[test]
     fn test() {
