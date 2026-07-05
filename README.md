@@ -48,6 +48,11 @@ A Rust framework for nonlinear optimization with compile-time symbolic different
 
 ## Benchmarks
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="benchmarks/pgo/chart-dark.svg">
+  <img alt="Bar chart of per-step solve time on city10000: arael f32 10.1 ms (1.00x), arael f64 13.1 ms (1.29x), g2o GN 19.8 ms, g2o LM 21.5 ms, Ceres 25.8 ms, SymForce 28.3 ms, factrs 30.0 ms, tiny-solver 84.8 ms (8.37x)" src="benchmarks/pgo/chart-light.svg">
+</picture>
+
 Batch pose-graph optimization on city10000, the classic 10000-pose SLAM
 benchmark (iSAM dataset: 30000 parameters, 20687 weighted constraints).
 All solutions verified to reach the same minimum; final costs evaluated

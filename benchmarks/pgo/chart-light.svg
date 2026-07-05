@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="392" viewBox="0 0 760 392" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+<rect x="0.5" y="0.5" width="759" height="391" rx="8" fill="#fcfcfb" stroke="#e1e0d9"/>
+<text x="24" y="32" font-size="15" font-weight="600" fill="#0b0b0b">Pose-graph optimization: time per solver step</text>
+<text x="24" y="52" font-size="12" fill="#5f5e58">city10000 (10,000 poses, 20,687 constraints), single thread, Apple M4 Pro. Lower is better.</text>
+<line x1="192.0" y1="70" x2="192.0" y2="320" stroke="#e1e0d9" stroke-width="1"/>
+<text x="192.0" y="334" font-size="11" text-anchor="middle" fill="#85847c">0</text>
+<line x1="294.2" y1="70" x2="294.2" y2="320" stroke="#e1e0d9" stroke-width="1"/>
+<text x="294.2" y="334" font-size="11" text-anchor="middle" fill="#85847c">20</text>
+<line x1="396.4" y1="70" x2="396.4" y2="320" stroke="#e1e0d9" stroke-width="1"/>
+<text x="396.4" y="334" font-size="11" text-anchor="middle" fill="#85847c">40</text>
+<line x1="498.7" y1="70" x2="498.7" y2="320" stroke="#e1e0d9" stroke-width="1"/>
+<text x="498.7" y="334" font-size="11" text-anchor="middle" fill="#85847c">60</text>
+<line x1="600.9" y1="70" x2="600.9" y2="320" stroke="#e1e0d9" stroke-width="1"/>
+<text x="600.9" y="334" font-size="11" text-anchor="middle" fill="#85847c">80 ms</text>
+<text x="182" y="95.0" font-size="12.5" text-anchor="end" font-weight="600" fill="#0b0b0b">arael (LM, f32)</text>
+<path d="M192,81.0 L239.6222222222222,81.0 Q243.6222222222222,81.0 243.6222222222222,85.0 L243.6222222222222,97.0 Q243.6222222222222,101.0 239.6222222222222,101.0 L192,101.0 Z" fill="#2a78d6"/>
+<text x="251.6" y="95.0" font-size="12" font-weight="600" fill="#0b0b0b">10.1 ms</text>
+<text x="299.6" y="95.0" font-size="12" fill="#85847c">1.00x</text>
+<text x="182" y="125.0" font-size="12.5" text-anchor="end" font-weight="600" fill="#0b0b0b">arael (LM, f64)</text>
+<path d="M192,111.0 L254.95555555555552,111.0 Q258.9555555555555,111.0 258.9555555555555,115.0 L258.9555555555555,127.0 Q258.9555555555555,131.0 254.95555555555552,131.0 L192,131.0 Z" fill="#2a78d6"/>
+<text x="267.0" y="125.0" font-size="12" font-weight="600" fill="#0b0b0b">13.1 ms</text>
+<text x="315.0" y="125.0" font-size="12" fill="#85847c">1.29x</text>
+<text x="182" y="155.0" font-size="12.5" text-anchor="end" fill="#5f5e58">g2o (GN)</text>
+<path d="M192,141.0 L289.2,141.0 Q293.2,141.0 293.2,145.0 L293.2,157.0 Q293.2,161.0 289.2,161.0 L192,161.0 Z" fill="#8f8e86"/>
+<text x="301.2" y="155.0" font-size="12" fill="#0b0b0b">19.8 ms</text>
+<text x="349.2" y="155.0" font-size="12" fill="#85847c">1.95x</text>
+<text x="182" y="185.0" font-size="12.5" text-anchor="end" fill="#5f5e58">g2o (LM)</text>
+<path d="M192,171.0 L297.8888888888889,171.0 Q301.8888888888889,171.0 301.8888888888889,175.0 L301.8888888888889,187.0 Q301.8888888888889,191.0 297.8888888888889,191.0 L192,191.0 Z" fill="#8f8e86"/>
+<text x="309.9" y="185.0" font-size="12" fill="#0b0b0b">21.5 ms</text>
+<text x="357.9" y="185.0" font-size="12" fill="#85847c">2.12x</text>
+<text x="182" y="215.0" font-size="12.5" text-anchor="end" fill="#5f5e58">Ceres (LM)</text>
+<path d="M192,201.0 L319.8666666666667,201.0 Q323.8666666666667,201.0 323.8666666666667,205.0 L323.8666666666667,217.0 Q323.8666666666667,221.0 319.8666666666667,221.0 L192,221.0 Z" fill="#8f8e86"/>
+<text x="331.9" y="215.0" font-size="12" fill="#0b0b0b">25.8 ms</text>
+<text x="379.9" y="215.0" font-size="12" fill="#85847c">2.55x</text>
+<text x="182" y="245.0" font-size="12.5" text-anchor="end" fill="#5f5e58">SymForce (LM)</text>
+<path d="M192,231.0 L332.64444444444445,231.0 Q336.64444444444445,231.0 336.64444444444445,235.0 L336.64444444444445,247.0 Q336.64444444444445,251.0 332.64444444444445,251.0 L192,251.0 Z" fill="#8f8e86"/>
+<text x="344.6" y="245.0" font-size="12" fill="#0b0b0b">28.3 ms</text>
+<text x="392.6" y="245.0" font-size="12" fill="#85847c">2.79x</text>
+<text x="182" y="275.0" font-size="12.5" text-anchor="end" fill="#5f5e58">factrs (GN)</text>
+<path d="M192,261.0 L341.3333333333333,261.0 Q345.3333333333333,261.0 345.3333333333333,265.0 L345.3333333333333,277.0 Q345.3333333333333,281.0 341.3333333333333,281.0 L192,281.0 Z" fill="#8f8e86"/>
+<text x="353.3" y="275.0" font-size="12" fill="#0b0b0b">30.0 ms</text>
+<text x="401.3" y="275.0" font-size="12" fill="#85847c">2.96x</text>
+<text x="182" y="305.0" font-size="12.5" text-anchor="end" fill="#5f5e58">tiny-solver (GN)</text>
+<path d="M192,291.0 L621.4222222222222,291.0 Q625.4222222222222,291.0 625.4222222222222,295.0 L625.4222222222222,307.0 Q625.4222222222222,311.0 621.4222222222222,311.0 L192,311.0 Z" fill="#8f8e86"/>
+<text x="633.4" y="305.0" font-size="12" fill="#0b0b0b">84.8 ms</text>
+<text x="681.4" y="305.0" font-size="12" fill="#85847c">8.37x</text>
+<text x="24" y="358" font-size="11" fill="#85847c">Best configuration per system; every row verified to reach the same minimum. Ratios are relative to the fastest.</text>
+<text x="24" y="373" font-size="11" fill="#85847c">GTSAM (batch) did not converge on this dataset; its incremental ISAM2 solves it in 10.4 s.</text>
+</svg>
