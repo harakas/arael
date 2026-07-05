@@ -166,30 +166,38 @@ pub struct RunOut {
 // Initial damping, problem-appropriate for well-initialized pose graphs
 // (the LmConfig docs recommend small initial_lambda for these); see the
 // README's initial-damping policy. Env-overridable for experiments.
-fn lambda0() -> f64 {
+pub(crate) fn lambda0() -> f64 {
     std::env::var("ARAEL_LAMBDA0").ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(1e-8)
 }
 
-fn cfg64(max_iters: usize) -> arael::simple_lm::LmConfig<f64> {
+pub(crate) fn cfg64(max_iters: usize) -> arael::simple_lm::LmConfig<f64> {
+    cfg64_with_lambda(max_iters, lambda0())
+}
+
+pub(crate) fn cfg64_with_lambda(max_iters: usize, initial_lambda: f64) -> arael::simple_lm::LmConfig<f64> {
     arael::simple_lm::LmConfig {
         abs_precision: 1e-5,
         rel_precision: 1e-5,
         patience: 1,
         max_iters,
-        initial_lambda: lambda0(),
+        initial_lambda,
         ..Default::default()
     }
 }
 
-fn cfg32(max_iters: usize) -> arael::simple_lm::LmConfig<f32> {
+pub(crate) fn cfg32(max_iters: usize) -> arael::simple_lm::LmConfig<f32> {
+    cfg32_with_lambda(max_iters, lambda0() as f32)
+}
+
+pub(crate) fn cfg32_with_lambda(max_iters: usize, initial_lambda: f32) -> arael::simple_lm::LmConfig<f32> {
     arael::simple_lm::LmConfig {
         abs_precision: 1e-5,
         rel_precision: 1e-5,
         patience: 1,
         max_iters,
-        initial_lambda: lambda0() as f32,
+        initial_lambda,
         ..Default::default()
     }
 }

@@ -1,7 +1,8 @@
-# 2D pose-graph benchmark: arael vs tiny-solver vs GTSAM
+# Pose-graph benchmark: arael vs the field
 
-Batch pose-graph optimization on the two canonical 2D SLAM benchmark
-datasets, comparing arael against
+Batch pose-graph optimization on the canonical 2D SLAM benchmark
+datasets (M3500, city10000) and the canonical 3D ones (sphere2500,
+parking-garage), comparing arael against
 [tiny-solver](https://crates.io/crates/tiny-solver) (Rust, dual-number
 autodiff, faer sparse Cholesky), [GTSAM](https://gtsam.org) (C++,
 analytic factors, via the official Python wheel -- timing wraps only the
@@ -29,6 +30,18 @@ citations; `./fetch_datasets.sh` re-downloads from the original sources):
 - **city10000** -- the iSAM city dataset: 10000 poses, 20687 edges. From
   the SE-Sync data collection, odometry initialization, diagonal
   information (50, 50, 100).
+- **sphere2500** (3D) -- the synthetic sphere released with iSAM: 2500
+  SE3 poses, 4949 edges. SE-Sync data collection; full (near-diagonal
+  but coupled) 6x6 information matrices.
+- **parking-garage** (3D) -- real-world multi-level parking garage: 1661
+  SE3 poses, 6275 edges. SE-Sync data collection; full 6x6 information
+  matrices, weak absolute weights (the optimum cost is only 1.27),
+  which gives the cost surface pronounced near-flat directions.
+
+The 3D datasets run every system: arael f64/f32, tiny-solver GN/LM,
+factrs GN/LM, Ceres, g2o LM/GN, SymForce f64/f32 (generated-code path,
+same as 2D), and GTSAM LM/GN (native BetweenFactorPose3 via the
+wheel).
 
 Three configurations: **M3500 unweighted** (identity information -- the
 configuration tiny-solver's shipped benchmark runs, since its g2o reader
@@ -58,7 +71,13 @@ optimum.
   matrices, so the problem is assembled through its public `Factor` API
   with a weighted clone of its own `BetweenFactorSE2` -- solver, autodiff
   and linear algebra remain tiny-solver's. GTSAM's `readG2o` honors the
-  information matrices natively.
+  information matrices natively. One documented exception: GTSAM's
+  native 2D between factor is the SE2 log map, which differs from the
+  canonical rotation-frame residual beyond first order; at noise-level
+  residuals the two objectives coincide to second order, and GTSAM's
+  solutions are held to the same validation gates as everyone else's.
+  (Its Python `CustomFactor` would make it exact but is
+  timing-ineligible -- per-residual Python callbacks.)
 - **One validation.** A single reference cost function (in `src/g2o.rs`)
   evaluates every system's final poses. A row counts as converged only
   when BOTH its cost is within 1% of the best AND its solution is within
@@ -68,6 +87,42 @@ optimum.
   on the weighted M3500). Hard asserts: arael rows must converge and at
   least one external system must agree (independent-implementation
   anchor).
+- **One 3D residual convention.** In 3D the systems' native between
+  factors disagree: factrs, tiny-solver and GTSAM use the full SE3 log
+  map (rotation log with the theta-dependent V-matrix coupling into
+  translation), Ceres's own pose_graph_3d example and g2o's EdgeSE3 use
+  a decoupled quaternion form, and SymForce's Pose3 tangent is a third
+  variant (decoupled translation + rotation log). The benchmark
+  standardizes on the Ceres/g2o convention:
+
+      r = U * [ R_a^T (t_b - t_a) - t_meas ; 2 * vec(q_meas^-1 q_a^-1 q_b) ]
+
+  with U the upper Cholesky factor of the edge's full 6x6 information
+  matrix and the rotation part on its qw >= 0 branch (equivalently
+  vee(R - R^T)/sqrt(1 + trace R) on rotation matrices). It equals the
+  rotation log to first order, and unlike the log it is algebraically
+  smooth at zero error -- no acos, no 0/0 axis -- which is also what
+  makes it expressible in arael's branch-free symbolic codegen without
+  epsilon guards. factrs and tiny-solver therefore get this residual
+  through their public custom-residual/Factor APIs (their autodiff,
+  optimizers, and linear algebra untouched), and unit tests pin all
+  three Rust implementations to the reference cost function to 1e-12
+  relative. The full 6x6 sqrt-information (both 3D files carry coupled
+  rotation blocks) is folded into every residual identically. Ceres
+  runs its own pose_graph_3d example structure (quaternion blocks on
+  EigenQuaternionManifold, autodiff) with the canonical error-
+  quaternion composition order. g2o runs its native EdgeSE3 completely
+  unmodified: its error [t(delta); vec(q(delta))] differs from the
+  canonical residual only by a constant per-edge linear transform
+  B = blockdiag(R_meas^T, I/2), so each edge is fed the conjugated
+  information B^-T info B^-1 and g2o's chi2 then equals the canonical
+  cost bit-for-bit -- the harness ASSERTS this by comparing g2o's own
+  chi2 (and Ceres's and SymForce's own initial costs) at the initial
+  estimate against the reference cost function on every run. GTSAM
+  keeps its native SE3 log-map BetweenFactorPose3, the same documented
+  second-order deviation as its 2D rows (no linear information
+  transform can bridge a nonlinear residual difference), judged by the
+  same validation gates.
 - **One termination class.** All systems stop when a step improves the
   cost by less than 1e-5 absolute or 1e-5 relative -- the shipped
   defaults of both tiny-solver and GTSAM; arael is configured to the same
@@ -87,7 +142,11 @@ optimum.
   every LM converges in 6-7 steps on M3500 and the durable cross-system
   comparison becomes the metric: time per step (linearize + assemble +
   factorize + solve). Shipped-default behavior is documented under
-  "known solver behaviors" below.
+  "known solver behaviors" below. On the 3D datasets arael's default is
+  `1e-10`: the parking garage's weak information matrices leave `1e-8`
+  with damping rejections and a tolerance stop 6.5 cm short of the
+  optimum along the near-flat directions, while `1e-10` converges
+  cleanly in 5 steps; sphere2500 is insensitive to the choice.
 - **Threads: verified, not assumed.** Watching `/proc/<pid>/status`
   during a solve showed the official GTSAM wheel spawns 8 TBB threads;
   tiny-solver parallelizes assembly and its faer factorization through
@@ -152,6 +211,17 @@ disappear under the policy:
 - **Ceres LM** (default trust region 1e4) converged everywhere but
   ground ~30 near-identical iterations on M3500; with a large initial
   region it takes 6-7.
+- **g2o GN on sphere2500** stalls at cost 3053.9 (2.3x the optimum)
+  with the translations at the optimum (0.5 mm aligned RMSE to the
+  best solution) but the rotations unconverged; relaxing the gain stop
+  to 1e-12 lets it run 35 iterations without improving. Not a problem
+  defect: g2o's own LM on the bit-identical problem reaches the exact
+  optimum, and tiny-solver's and factrs's GN both converge in 6
+  iterations -- the stall is specific to g2o's undamped GN with its
+  MQT increment retraction on this large-rotation-error
+  initialization. (GTSAM's GN has a similar reputation on these
+  datasets, gtsam issue #846.) On the parking garage g2o GN is fine --
+  and the fastest entry in the table.
 - **GTSAM on city10000 (batch, odometry init)**: LM stops in a local
   minimum (cost 2.39M vs 512) and GN diverges, at any damping -- this
   one is not a damping artifact but a residual-parameterization effect,
@@ -187,6 +257,7 @@ disappear under the policy:
 ./fetch_datasets.sh
 ROUNDS=5 cargo run --release      # single-core pinning is built in
 GTSAM_PYTHON=/path/to/venv/bin/python3   # override if needed (pip install gtsam)
+PGO_ONLY=sphere ...               # run only datasets whose name contains the substring
 ```
 
 The bar chart embedded in the top-level README (`chart-light.svg` /
@@ -269,6 +340,76 @@ city10000. SymForce is the only other system whose f32 survives
 city10000 (386.9 ms vs arael's 71.0). factrs is the fastest non-arael
 Rust library. Batch GTSAM remains the only local-solver non-converger
 on city10000 (residual parameterization, not damping).
+
+The 3D standings are split. On sphere2500 arael f64 is the fastest
+system (18.6 ms/step vs Ceres 24.3, g2o LM 26.2, GTSAM 27.4, factrs
+38.5, SymForce 68.6, tiny-solver 84.5). On the parking garage g2o
+wins -- 7.9 ms/step GN / 8.5 LM against arael's 10.3, with SymForce at
+12.0, GTSAM at 13.2, and Ceres at 14.1 -- its hand-written analytic
+Jacobians and native EdgeSE3 pipeline are excellent on this small,
+weakly-weighted real-world graph. arael leads the Rust field (factrs,
+tiny-solver) by 2.1-9.6x per step on both 3D datasets, and leads
+SymForce -- the other compile-time codegen system, here running the
+identical symbolically-defined residual -- 3.7x on sphere2500 and 1.2x
+on the garage. GTSAM's batch solvers, the city10000 non-convergers,
+handle both 3D datasets: its SE3 log-map objective's optimum sits
+0.006% above the canonical one on sphere2500 (the documented
+second-order convention gap) and coincides on the garage, inside the
+gates both times.
+
+### sphere2500 (3D, 15000 parameters, full 6x6 information)
+
+| system          | total ms |  iters | ms/iter | 1st-iter ms | final cost |
+|-----------------|---------:|-------:|--------:|------------:|-----------:|
+| arael LM f64    |    113.7 |   6(6) |   18.95 |        24.7 |  1351.2157 |
+| arael LM f32    |     82.4 |   6(6) |   13.73 |        19.4 |  1351.3502 |
+| tiny-solver GN  |    522.8 |      6 |   87.14 |       109.2 |  1351.2157 |
+| tiny-solver LM  |    542.9 |      6 |   90.49 |       110.8 |  1351.2157 |
+| factrs GN       |    245.4 |      6 |   40.89 |        55.0 |  1351.2157 |
+| factrs LM       |    267.9 |      6 |   44.65 |        58.8 |  1351.2157 |
+| ceres LM        |    145.6 |   6(6) |   24.27 |        37.9 |  1351.2182 |
+| g2o LM          |    314.7 |     12 |   26.23 |       108.9 |  1351.2157 |
+| g2o GN          | stalls at 3053.93 (see known behaviors) | 14 | | 26.4 | |
+| symforce LM     |    480.1 |   6(7) |   68.59 |       103.4 |  1351.2158 |
+| symforce LM f32 |    457.1 |   6(7) |   65.30 |        96.5 |  1351.3300 |
+| gtsam LM        |    182.3 |      6 |   30.39 |        34.0 |  1351.2988 |
+| gtsam GN        |    164.7 |      6 |   27.44 |        31.4 |  1351.2988 |
+
+12/13 validate (initial cost 2.58e6, five orders of magnitude above the
+optimum -- the odometry initialization is badly drifted and every
+converging system recovers). SymForce's per-step cost here is dominated
+by its sparse factorization (its own TicToc: ~71 of ~80 ms per
+iteration), which does not like the sphere's fill pattern.
+
+### parking-garage (3D, 9966 parameters, full 6x6 information)
+
+| system          | total ms |  iters | ms/iter | 1st-iter ms | final cost |
+|-----------------|---------:|-------:|--------:|------------:|-----------:|
+| arael LM f64    |     51.6 |   5(5) |   10.31 |        16.7 |     1.2684 |
+| arael LM f32\*  |     50.4 |   5(5) |   10.09 |        15.7 |     1.2687 |
+| tiny-solver GN  |    396.1 |      4 |   99.02 |       121.8 |     1.2684 |
+| tiny-solver LM  |    411.5 |      4 |  102.88 |       123.1 |     1.2684 |
+| factrs GN       |    153.7 |      4 |   38.43 |        55.0 |     1.2684 |
+| factrs LM       |    162.5 |      4 |   40.63 |        60.8 |     1.2684 |
+| ceres LM        |     56.3 |   4(4) |   14.07 |        27.9 |     1.2696 |
+| g2o LM          |     34.2 |      4 |    8.54 |        13.7 |     1.2696 |
+| g2o GN          |     31.6 |      4 |    7.90 |        13.2 |     1.2696 |
+| symforce LM     |     59.8 |   4(5) |   11.96 |        34.9 |     1.2696 |
+| symforce LM f32\* |   57.3 |   4(5) |   11.46 |        32.5 |     1.2699 |
+| gtsam LM        |     93.0 |      6 |   15.51 |        17.6 |     1.2684 |
+| gtsam GN        |     52.8 |      4 |   13.20 |        15.2 |     1.2684 |
+
+\* the f32 rows reach the optimum cost to within 0.03-0.12% (well
+inside the cost gate) but sit 0.2-0.3 m from the f64 solution along
+the near-flat directions, outside the 5 cm geometric gate -- an
+expected single-precision floor on this dataset, not a tuning artifact
+or a solver defect: arael's f32 with the tolerance stop disabled runs
+22 accepted steps and plateaus at the same cost 0.21 m out (the
+per-step cost decrease is below f32 evaluation noise; optimum cost
+1.27 spread over 6275 edges), and SymForce's independent f32 pipeline
+lands on the same floor (0.22 m). The dataset's weak weights make tiny
+cost slack geometrically large; on sphere2500 (optimum cost 1351) both
+f32 builds validate.
 
 tiny-solver GN with its default rayon threading (8 cores, not
 core-pinned): M3500 78.0 ms, city10000 386.9 ms.

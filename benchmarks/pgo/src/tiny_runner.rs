@@ -77,6 +77,10 @@ pub fn install_iter_counter() {
     log::set_max_level(log::LevelFilter::Trace);
 }
 
+pub(crate) fn iter_count() -> usize {
+    ITER_COUNT.load(Ordering::Relaxed)
+}
+
 fn build(ds: &Dataset) -> (tiny_solver::Problem, HashMap<String, na::DVector<f64>>) {
     let mut problem = tiny_solver::Problem::new();
     let mut init = HashMap::new();

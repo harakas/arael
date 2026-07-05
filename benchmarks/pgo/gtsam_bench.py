@@ -113,9 +113,64 @@ def run_isam2(g2o_file, poses_out, unit):
     return total * 1e3, first_ms, n
 
 
+def is_3d(g2o_file):
+    with open(g2o_file) as f:
+        for line in f:
+            if line.startswith("VERTEX_SE3:QUAT"):
+                return True
+            if line.startswith("VERTEX_SE2"):
+                return False
+    return False
+
+
+def run_3d(g2o_file, kind, poses_out):
+    """Batch 3D solve. GTSAM's native BetweenFactorPose3 minimizes the
+    full SE3 log-map objective (its documented deviation from the
+    benchmark's canonical residual, second-order small at noise-level
+    residuals); readG2o honors the files' information matrices,
+    permuting them to GTSAM's rotation-first tangent order. The gauge
+    prior is the same unit-weight prior on pose 0 as every runner."""
+    graph, initial = gtsam.readG2o(g2o_file, True)
+    prior = gtsam.noiseModel.Diagonal.Sigmas([1.0] * 6)
+    graph.add(gtsam.PriorFactorPose3(0, initial.atPose3(0), prior))
+
+    opt = make_optimizer(kind, graph, initial, 1)
+    t0 = time.perf_counter()
+    opt.optimize()
+    first_iter_ms = (time.perf_counter() - t0) * 1e3
+
+    opt = make_optimizer(kind, graph, initial, 100)
+    t0 = time.perf_counter()
+    result = opt.optimize()
+    solve_ms = (time.perf_counter() - t0) * 1e3
+    iterations = opt.iterations()
+
+    with open(poses_out, "w") as f:
+        for i in range(initial.size()):
+            p = result.atPose3(i)
+            t = p.translation()
+            q = p.rotation().toQuaternion()
+            f.write(f"{t[0]} {t[1]} {t[2]} {q.x()} {q.y()} {q.z()} {q.w()}\n")
+
+    cpus = "?"
+    with open("/proc/self/status") as f:
+        for line in f:
+            if line.startswith("Cpus_allowed_list"):
+                cpus = line.split()[1]
+    print(json.dumps({
+        "solve_ms": solve_ms,
+        "first_iter_ms": first_iter_ms,
+        "iterations": iterations,
+        "cpus_allowed": cpus,
+    }))
+
+
 def main():
     g2o_file, kind, poses_out = sys.argv[1], sys.argv[2], sys.argv[3]
     unit = len(sys.argv) > 4 and sys.argv[4] == "unit"
+    if is_3d(g2o_file):
+        run_3d(g2o_file, kind, poses_out)
+        return
     if kind == "isam2":
         solve_ms, first_iter_ms, iterations = run_isam2(g2o_file, poses_out, unit)
         cpus = "?"

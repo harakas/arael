@@ -8,6 +8,8 @@ endif()
 find_package(Ceres REQUIRED)
 add_executable(ceres_bench ceres_bench.cpp)
 target_link_libraries(ceres_bench Ceres::ceres)
+add_executable(ceres_bench3 ceres_bench3.cpp)
+target_link_libraries(ceres_bench3 Ceres::ceres)
 
 # Ubuntu's g2o package ships no cmake config; link the libraries directly.
 find_package(Eigen3 REQUIRED)
@@ -15,11 +17,17 @@ find_library(G2O_CORE g2o_core REQUIRED)
 find_library(G2O_STUFF g2o_stuff REQUIRED)
 find_library(G2O_TYPES_SLAM2D g2o_types_slam2d REQUIRED)
 find_library(G2O_SOLVER_CHOLMOD g2o_solver_cholmod REQUIRED)
+find_library(G2O_TYPES_SLAM3D g2o_types_slam3d REQUIRED)
 find_library(CHOLMOD cholmod REQUIRED)
 add_executable(g2o_bench g2o_bench.cpp)
 target_include_directories(g2o_bench PRIVATE /usr/include/suitesparse)
 target_link_libraries(g2o_bench
     ${G2O_CORE} ${G2O_STUFF} ${G2O_TYPES_SLAM2D} ${G2O_SOLVER_CHOLMOD}
+    ${CHOLMOD} Eigen3::Eigen)
+add_executable(g2o_bench3 g2o_bench3.cpp)
+target_include_directories(g2o_bench3 PRIVATE /usr/include/suitesparse)
+target_link_libraries(g2o_bench3
+    ${G2O_CORE} ${G2O_STUFF} ${G2O_TYPES_SLAM3D} ${G2O_SOLVER_CHOLMOD}
     ${CHOLMOD} Eigen3::Eigen)
 
 # SymForce runner: requires a built symforce source checkout, pointed to
@@ -47,5 +55,20 @@ if(SYMFORCE_DIR)
         /usr/include/eigen3)
     target_link_libraries(symforce_bench ${SYMFORCE_OPT} ${SYMFORCE_GEN} ${SYMFORCE_CHOLESKY})
     set_target_properties(symforce_bench PROPERTIES
+        BUILD_RPATH ${SYMFORCE_BUILD_TEMP})
+    add_executable(symforce_bench3 symforce_bench3.cpp)
+    target_include_directories(symforce_bench3 PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${SYMFORCE_DIR}
+        ${SYMFORCE_DIR}/gen/cpp
+        ${SYMFORCE_BUILD_TEMP}/lcmtypes/cpp
+        ${SYMFORCE_DIR}/third_party/skymarshal/include
+        ${SYMFORCE_DIR}/third_party/eigen_lcm/lcmtypes/eigen_lcm_lcm/cpp
+        ${SYMFORCE_BUILD_TEMP}/_deps/metis-src/include
+        ${SYMFORCE_BUILD_TEMP}/_deps/spdlog-src/include
+        ${SYMFORCE_BUILD_TEMP}/_deps/fmtlib-src/include
+        /usr/include/eigen3)
+    target_link_libraries(symforce_bench3 ${SYMFORCE_OPT} ${SYMFORCE_GEN} ${SYMFORCE_CHOLESKY})
+    set_target_properties(symforce_bench3 PROPERTIES
         BUILD_RPATH ${SYMFORCE_BUILD_TEMP})
 endif()
