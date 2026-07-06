@@ -9,6 +9,17 @@ find_package(Ceres REQUIRED)
 add_executable(ceres_slam ceres_slam.cpp)
 target_link_libraries(ceres_slam Ceres::ceres)
 
+# g2o runner: custom vertices + six custom edges with analytic Jacobians.
+find_package(Eigen3 REQUIRED)
+find_library(G2O_CORE g2o_core REQUIRED)
+find_library(G2O_STUFF g2o_stuff REQUIRED)
+find_library(G2O_SOLVER_CHOLMOD g2o_solver_cholmod REQUIRED)
+find_library(CHOLMOD cholmod REQUIRED)
+add_executable(g2o_slam g2o_slam.cpp)
+target_include_directories(g2o_slam PRIVATE /usr/include/suitesparse)
+target_link_libraries(g2o_slam
+    ${G2O_CORE} ${G2O_STUFF} ${G2O_SOLVER_CHOLMOD} ${CHOLMOD} Eigen3::Eigen)
+
 # SymForce runner: requires a built symforce source checkout, pointed to
 # by -DSYMFORCE_DIR=... (or env SYMFORCE_DIR). The generated factor
 # headers come from ../symforce_gen.py (committed under symforce_gen/).

@@ -139,12 +139,16 @@ fn main() {
     let ceres_solvers: Vec<String> = std::env::var("CERES_SOLVERS")
         .unwrap_or_else(|_| "sparse_normal_cholesky,sparse_schur,iterative_schur".into())
         .split(',').map(|s| s.to_string()).collect();
-    // Peaks reported by subprocess solvers (Ceres, SymForce), keyed by row
-    // label; they measure their own VmHWM, so no re-solve is needed.
+    // Peaks reported by subprocess solvers (Ceres, SymForce, g2o), keyed by
+    // row label; they measure their own VmHWM, so no re-solve is needed.
     let mut subproc_peaks: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
     let symforce_ok = std::path::Path::new("cpp/build/symforce_slam").exists();
     if !symforce_ok {
         eprintln!("WARNING: cpp/build/symforce_slam missing (build with -DSYMFORCE_DIR=...); skipping SymForce");
+    }
+    let g2o_ok = std::path::Path::new("cpp/build/g2o_slam").exists();
+    if !g2o_ok {
+        eprintln!("WARNING: cpp/build/g2o_slam missing (needs g2o + cholmod); skipping g2o");
     }
 
     let skip_tiny = std::env::var("SLAM_SKIP_TINY").map_or(false, |v| v == "1");
@@ -185,6 +189,17 @@ fn main() {
                 record(label, sf.solve_ms, sf.first_iter_ms, sf.iterations, Some(sf.accepted),
                     sf.solution, &mut cells);
             }
+        }
+        if g2o_ok {
+            let g = run_g2o(scene_path, "lm", scene.poses.len(), scene.landmarks_init.len());
+            let rel = ((g.initial_cost - initial_cost) / initial_cost).abs();
+            assert!(rel < 1e-9, "g2o initial cost {} vs reference {} (rel {:.2e})",
+                g.initial_cost, initial_cost, rel);
+            let core = last_core();
+            assert!(g.cpus == core.to_string(), "g2o not pinned to core {}: {}", core, g.cpus);
+            subproc_peaks.insert("g2o LM".to_string(), g.peak_mb);
+            record("g2o LM", g.solve_ms, g.first_iter_ms, g.iterations, Some(g.accepted),
+                g.solution, &mut cells);
         }
     }
 
@@ -259,6 +274,17 @@ fn run_symforce(scene_path: &str, precision: &str, n_poses: usize, n_landmarks: 
         .args([scene_path, precision, sol_out])
         .output().expect("failed to run symforce_slam");
     assert!(out.status.success(), "symforce_slam failed: {}", String::from_utf8_lossy(&out.stderr));
+    parse_subproc_out(&out.stdout, sol_out, n_poses, n_landmarks)
+}
+
+// g2o runs as a subprocess (like Ceres) over the exported scene; custom
+// edges with analytic Jacobians, same JSON protocol. mode is "lm" or "gn".
+fn run_g2o(scene_path: &str, mode: &str, n_poses: usize, n_landmarks: usize) -> CeresOut {
+    let sol_out = "/tmp/slam_g2o_sol.txt";
+    let out = std::process::Command::new("cpp/build/g2o_slam")
+        .args([scene_path, mode, sol_out])
+        .output().expect("failed to run g2o_slam");
+    assert!(out.status.success(), "g2o_slam failed: {}", String::from_utf8_lossy(&out.stderr));
     parse_subproc_out(&out.stdout, sol_out, n_poses, n_landmarks)
 }
 
