@@ -130,6 +130,11 @@ impl<T> Vec<T> {
     }
 
     /// Truncates to at most `len` elements.
+    ///
+    /// Ref-invalidation warning: existing `Ref`s to removed elements are
+    /// NOT invalidated -- resolving one panics (index out of bounds), and
+    /// a later `push` REUSES the index, silently aliasing the new
+    /// element. Prefer [`Arena`] where deletion is part of the workflow.
     pub fn truncate(&mut self, len: usize) {
         self.inner.truncate(len);
     }
@@ -140,6 +145,13 @@ impl<T> Vec<T> {
     }
 
     /// Retains only elements for which the predicate returns true.
+    ///
+    /// Ref-invalidation warning: `retain` COMPACTS storage, so every
+    /// element after the first removal shifts down and existing `Ref`s
+    /// silently point at DIFFERENT elements -- no panic, wrong data.
+    /// This is exactly the failure class the typed-Ref design exists to
+    /// prevent; use [`Arena`] (stable indices, explicit free list) for
+    /// models that delete, or rebuild all `Ref`s after calling this.
     pub fn retain(&mut self, f: impl FnMut(&T) -> bool) {
         self.inner.retain(f);
     }
@@ -313,6 +325,12 @@ impl<T> Deque<T> {
 
     /// Removes and returns the front element, or `None` if empty.
     /// Existing refs to other elements remain valid.
+    ///
+    /// Ref-invalidation warning: `Ref`s to the popped element are NOT
+    /// invalidated; the ring slot is REUSED after enough pushes, at
+    /// which point a stale `Ref` silently aliases a new element.
+    /// Sliding-window models must prune constraints referencing evicted
+    /// entries as part of the eviction step.
     pub fn pop_front(&mut self) -> Option<T> {
         let val = self.inner.pop_front();
         if val.is_some() {

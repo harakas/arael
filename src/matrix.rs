@@ -196,7 +196,13 @@ impl<T: Float> matrix3<T>
         matrix3::<T>::from_rows(self.col(0), self.col(1), self.col(2))
     }
 
-    /// Creates a rotation matrix into frame where unit vector n forms the z axis
+    /// Builds an orthonormal frame whose THIRD column is the unit vector
+    /// `n`: the returned matrix maps frame coordinates to world
+    /// coordinates (`M * e_z == n`); its transpose maps world into the
+    /// frame. The first two columns span the plane perpendicular to `n`
+    /// (i.e. the null space of `n^T` -- the historical reason for the
+    /// name, which is otherwise misleading: the matrix is a full
+    /// rotation/frame, not a null-space projector).
     pub fn null_space(n: vect3<T>) -> matrix3<T> {
         n.assert_unit_length();
         let z = n;

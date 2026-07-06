@@ -173,7 +173,7 @@ sym! {
     println!("v.v = {}", v.dot(&v));      // x^2 + y^2
 
     let m = SymMat::new(2, 2, [1.0, 2.0, 3.0, 4.0]);
-    println!("M*v = {}", m * &v);         // [x + 2 * y, 3 * x + 4 * y]
+    println!("M*v = {}", m * v);          // [x + 2 * y, 3 * x + 4 * y]
     println!("M^T = {}", m.transpose());  // [1, 3; 2, 4]
 
     let exprs = vec![x * y, pow(x, 2.0) + sin(y)];
@@ -409,7 +409,7 @@ The arael-sym built-ins `safe_sqrt`, `safe_atan2`, `safe_asin`, `safe_acos`, `ra
 
 ### Extern (call out to a Rust function at eval)
 
-When the body is implemented natively (not as a symbolic expression), use `extern_func1/2/func`. The function is generated as a normal Rust call (`call_path(args...)`) in `to_rust_*` codegen, and uses `eval_fn` for numeric evaluation.
+When the body is implemented natively (not as a symbolic expression), use `extern_func1/2/func`. The function is generated as a normal Rust call (`call_path(args...)`) by `to_rust(float_type)` codegen, and uses `eval_fn` for numeric evaluation.
 
 ```rust
 sym! {

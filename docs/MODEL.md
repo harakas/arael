@@ -413,6 +413,7 @@ per residual group, mixed freely.
 |---|---|---|
 | `#[arael(ref = <path>)]` | `Ref<T>` field | where to resolve the Ref. Can be `root.<collection>` or `<other_ref>.<sub_collection>` (chain into a nested collection) |
 | `#[arael(cross = (<refA>, <refB>))]` | `CrossBlock<T, T>` field | disambiguate *which* ref pair this CrossBlock serves when two local Refs share the same T |
+| `#[arael(compute = <expr>)]` | any data field | derived field: excluded from serialization, reassigned as `self.<field> = <expr>` on every `update()` (param names in the expression read their current working values). Example: `#[arael(compute = ea.rotation_matrix())]` caching a rotation matrix (see examples/model_demo.rs) |
 | `#[arael(constraint_index)]` | `u32` field | receives a unique row id per constraint instance, useful for building per-constraint diagnostics / logs |
 | `#[arael(skip)]` | any field | exclude from the Model's serialize / accumulate path. Use sparingly -- the macro already handles non-Param fields correctly |
 
@@ -437,6 +438,59 @@ struct PosePair {
     hb: CrossBlock<Pose, Pose, f32>,
 }
 ```
+
+## Constraint-body language
+
+The body inside `#[arael(constraint(..., { body }))]` is interpreted
+by the macro (it is never compiled as ordinary Rust), symbolically
+differentiated, CSE-optimized, and emitted as flat floating-point
+code. The dialect:
+
+- **Statements**: `let` bindings followed by ONE final array
+  expression `[r0, r1, ...]` -- each element a residual. Macro calls
+  (`assert!`, `println!`), item declarations, and non-final expression
+  statements are compile errors (a stray `;`-terminated expression
+  used to silently become an extra residual; it no longer compiles).
+- **Variables**: the struct's own lowercase name (e.g. `pose2` inside
+  `Pose2`'s constraint), its `Ref` field names (`a`, `b`, ...), the
+  `parent =` name if given, and `path`-style root access. `let`
+  bindings shadow everything, constants included (Rust semantics).
+- **Constants**: `pi`, `e`, `epsilon` resolve as named constants when
+  not shadowed by a `let`.
+- **`<field>_value`**: the last-committed value of a param field as a
+  zero-derivative constant (see "Initial values via `_value`" above).
+- **Scalar functions**: the arael-sym registry -- `sin cos tan asin
+  acos atan sinh cosh tanh exp ln log2 log10 sqrt abs heaviside
+  identity safe_sqrt safe_asin safe_acos atan2 pow safe_atan2 rad_diff
+  rad_sum clamp` -- plus any `#[arael::function]` you define (next
+  section). Derivative conventions for the `safe_*`/`heaviside`/
+  `clamp` family are documented in [SYM.md](SYM.md).
+- **Vectors / matrices / quaternions**: fields of runtime type
+  `vect2*/vect3*/matrix2*/matrix3*/quatern*` dispatch through their
+  symbolic companions -- arithmetic, `transpose`, `det`, indexing
+  (`m[0]` row, `m[0].x` element), `rotation_matrix()`,
+  `get_euler_angles()`, cross products (`%` or `.cross()`),
+  `norm/square/unit`, and the static constructors
+  (`matrix2sym::rotation(a)`, `matrix3sym::from_rows/from_cols/
+  from_elements/rotation_from_euler_angles/rotation_from_axis_angle`,
+  `vect2sym/vect3sym::from_components`, `quaternsym::identity/
+  from_euler_angles/from_axis_angle`). Constructors are matched by
+  path suffix, so any spelling ending in `matrix3sym::rotation_from_
+  axis_angle` works. Full surface: [SYM.md](SYM.md), "Geometric
+  Primitives".
+- **Option fields**: reading through an `Option` struct field emits an
+  unguarded unwrap -- ALWAYS pair it with a
+  `guard = self.<field>.is_some()` modifier, or the first `None`
+  panics at solve time.
+- **Ordering rule**: every entity struct must be defined BEFORE the
+  root struct, in top-down file order -- the root's expansion consumes
+  the stashed constraints. Violations are a macro error ("define it
+  BEFORE the root"). The same applies across modules within a crate
+  (expansion order follows item order); models cannot span crates.
+- **Errors**: body and attribute diagnostics are prefixed with the
+  constraint's `file:line` (spans do not survive the macro's stash
+  round trip, so the error arrow points at the root struct -- read the
+  prefix).
 
 ## User-defined functions (`#[arael::function]`)
 

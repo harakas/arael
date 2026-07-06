@@ -41,8 +41,9 @@ The `#[arael(fit(...))]` attribute defines the residual expression for each data
 The residual uses robust error suppression: `gamma * atan(plain_r / gamma)`. For small residuals this behaves like the plain residual; for large residuals (outliers), the `atan` saturates, limiting their influence.
 
 The macro auto-generates at compile time:
-- `calc_cost(&self, params) -> f32` -- sum of squared residuals
-- `calc_grad_hessian(&self, params, grad, hessian)` -- gradient and Gauss-Newton hessian
+- `calc_cost(&mut self, params) -> f32` -- sum of squared residuals
+- the `calc_grad_hessian_*` family (`_dense`, `_band`, `_sparse`, ...) --
+  gradient and Gauss-Newton hessian per backend, returning the cost
 - `fit(&mut self) -> LmResult` -- runs the LM optimizer
 - `fit_with(&mut self, config) -> LmResult` -- with custom config
 
@@ -85,6 +86,7 @@ let result = model.fit_with(&LmConfig {
     max_iters: 100,
     initial_lambda: 0.001,
     verbose: true,
+    ..Default::default()
 });
 ```
 

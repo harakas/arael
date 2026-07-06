@@ -1,6 +1,6 @@
 // Synthetic visual-inertial SLAM demo.
 //
-// Generates an S-curve trajectory with 20 poses and 40 point landmarks at
+// Generates an S-curve trajectory (default 60 poses, 240 point landmarks) at
 // 5-30m distance. 5 cameras provide 360-degree coverage. Sensor data:
 // GPS (with systematic offset), wheel odometry, accelerometer tilt.
 //

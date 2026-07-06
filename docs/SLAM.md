@@ -18,7 +18,7 @@ graduated optimisation.
 
 The linear solver is faer sparse Cholesky (pure Rust) to exploit the
 Hessian sparsity, with optional Eigen SimplicialLLT and CHOLMOD
-backends via C++ FFI. On the default problem size (200 poses) the
+backends via C++ FFI. At 200 poses (default is 60; use --poses) the
 sparse path is 66x faster than dense. Problem size and solver are
 command-line flags:
 

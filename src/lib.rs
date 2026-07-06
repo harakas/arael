@@ -158,7 +158,7 @@
 //!
 //! # Example: Symbolic Math
 //!
-//! ```ignore
+//! ```
 //! use arael::sym::*;
 //!
 //! arael::sym! {
@@ -184,7 +184,8 @@
 //! The Starship method `gamma * atan(plain_r / gamma)` suppresses outlier
 //! influence while preserving smooth differentiability:
 //!
-//! ```ignore
+//! ```
+//! # use arael::model::Param;
 //! #[arael::model]
 //! struct DataEntry { x: f32, y: f32 }
 //!
@@ -200,9 +201,19 @@
 //!     sigma: f32,
 //!     gamma: f32,
 //! }
+//! # let mut m = LinearModel {
+//! #     a: Param::new(0.0), b: Param::new(0.0),
+//! #     data: vec![DataEntry { x: 0.0, y: 1.0 }, DataEntry { x: 1.0, y: 3.0 },
+//! #                DataEntry { x: 2.0, y: 5.0 }],
+//! #     sigma: 1.0, gamma: 10.0,
+//! # };
+//! # let r = m.fit();
+//! # assert!(r.end_cost < r.start_cost);
+//! # assert!((m.a.value - 2.0).abs() < 1e-2 && (m.b.value - 1.0).abs() < 1e-2);
 //! ```
 //!
-//! The macro generates `calc_cost()`, `calc_grad_hessian()`, and `fit()`
+//! The macro generates `calc_cost()`, the `calc_grad_hessian_*` backend
+//! family, and `fit()`/`fit_with()`
 //! with symbolically differentiated, CSE-optimized compiled code.
 //! The robust fit ignores outliers while tracking the inlier data:
 //!
@@ -401,7 +412,10 @@
 //! diagonal writes always land on each entity's `SelfBlock`;
 //! `CrossBlock` and `TripletBlock` are cross-only storage.
 //!
-//! ```ignore
+//! ```
+//! # use arael::model::{Model, Param, SimpleEulerAngleParam, SelfBlock, CrossBlock};
+//! # use arael::refs::{self, Ref};
+//! # use arael::vect::vect3f;
 //! // Entity with its mandatory SelfBlock.
 //! #[arael::model]
 //! struct Pose {
@@ -412,12 +426,23 @@
 //!
 //! // Constraint struct linking two entities via a CrossBlock.
 //! #[arael::model]
-//! #[arael(constraint(hb, { /* residuals involving prev and cur */ }))]
+//! #[arael(constraint(hb, {
+//!     let d = cur.pos - prev.pos;
+//!     [d.x, d.y, d.z]
+//! }))]
 //! struct PosePair {
 //!     #[arael(ref = root.poses)] prev: Ref<Pose>,
 //!     #[arael(ref = root.poses)] cur:  Ref<Pose>,
 //!     hb: CrossBlock<Pose, Pose, f32>, // only the (prev, cur) cross block
 //! }
+//! # // The root triggers code generation for the whole model (entities
+//! # // must be defined before it -- see docs/MODEL.md).
+//! # #[arael::model]
+//! # #[arael(root, f32)]
+//! # struct World {
+//! #     poses: refs::Vec<Pose>,
+//! #     pairs: std::vec::Vec<PosePair>,
+//! # }
 //! ```
 //!
 //! ### Multi-CrossBlock vs TripletBlock
@@ -887,11 +912,17 @@
 //!
 //! ## Basic usage
 //!
-//! ```ignore
+//! ```
+//! # use arael::model::{Model, Param, SelfBlock};
+//! # #[arael::model]
+//! # #[arael(root, f32)]
+//! # #[arael(constraint(hb, { [m.x - 3.0] }))]
+//! # struct M { x: Param<f32>, hb: SelfBlock<M, f32> }
+//! # let mut model = M { x: Param::new(0.0), hb: SelfBlock::new() };
 //! use arael::simple_lm::{LmConfig, solve_sparse_faer_f32};
 //!
 //! let cfg = LmConfig::<f32> {
-//!     verbose: true,
+//!     verbose: false, // turn on first when debugging a solve
 //!     ..Default::default()
 //! };
 //!
@@ -903,6 +934,7 @@
 //! model.deserialize32(&result.x);
 //! println!("{} iterations: {:.4} -> {:.4}",
 //!     result.iterations, result.start_cost, result.end_cost);
+//! # assert!((model.x.value - 3.0).abs() < 1e-3);
 //! ```
 //!
 //! The `#[arael(root)]` macro generates the `LmProblem<T>` impl the

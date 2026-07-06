@@ -98,7 +98,6 @@ pub const FIXED_SIZE_THRESHOLD: usize = 9;
 // ---------------------------------------------------------------------------
 
 /// Configuration for the Levenberg-Marquardt solver.
-/// Configuration for the Levenberg-Marquardt solver.
 ///
 /// Choosing good parameters depends heavily on the problem structure:
 ///
@@ -123,14 +122,17 @@ pub const FIXED_SIZE_THRESHOLD: usize = 9;
 /// experiment with the parameters on representative problem instances.
 pub struct LmConfig<T> {
     /// Absolute cost improvement threshold. A step counts as "small" when
-    /// the cost decrease is below this AND the relative improvement is also
-    /// below `rel_precision`. After `patience` consecutive small steps, the
-    /// solver terminates.
+    /// the cost decrease is below this OR the relative improvement is
+    /// below `rel_precision` (either criterion suffices -- abs alone can
+    /// stop a solve whose cost is tiny, rel alone one that plateaus at a
+    /// large cost). After `patience` consecutive small steps, the solver
+    /// terminates.
     pub abs_precision: T,
     /// Relative cost improvement threshold. A step counts as "small" when
-    /// `(old_cost - new_cost) / old_cost < rel_precision`. This prevents
-    /// premature termination when the cost is small but still improving
-    /// proportionally (e.g. cost 0.01 -> 0.009 is a 10% improvement).
+    /// `(old_cost - new_cost) / old_cost < rel_precision` (OR the absolute
+    /// criterion above). Note the badly-scaled-problem hazard: a solve at
+    /// cost 1e9 improving 1e4 per step is relatively small and will stop;
+    /// rescale the problem or lower `rel_precision`.
     pub rel_precision: T,
     /// Maximum number of LM iterations (including inner damping retries).
     pub max_iters: usize,

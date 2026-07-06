@@ -132,7 +132,7 @@ Arael provides the compile-time-differentiated solver that sits at the core of s
 ```rust
 use arael::sym::*;
 use arael::sym;
-use maplit::hashmap;
+use std::collections::HashMap;
 
 sym! {
     let (x, y) = symbols!(x, y);
@@ -142,7 +142,7 @@ sym! {
     println!("df/dx      = {}", f.diff(x));   // y * cos(x) + 2 * x
     println!("df/dy      = {}", f.diff(y));   // sin(x)
 
-    let vars = hashmap!{ "x" => 2.0, "y" => 3.0 };
+    let vars = HashMap::from([("x", 2.0), ("y", 3.0)]);
     println!("f(2, 3)    = {}", f.eval(&vars).unwrap()); // 6.7278...
 }
 ```
@@ -179,7 +179,7 @@ struct LinearModel {
 }
 ```
 
-The macro auto-generates `calc_cost()`, `calc_grad_hessian()`, and `fit()` methods with symbolically differentiated, CSE-optimized compiled code:
+The macro auto-generates `calc_cost()`, the `calc_grad_hessian_*` backend family, and `fit()`/`fit_with()` methods with symbolically differentiated, CSE-optimized compiled code:
 
 ```rust
 fn main() {
@@ -293,7 +293,7 @@ struct PosePair {
 }
 ```
 
-Finally, `Path` ties it all together. `#[arael(root)]` is what actually triggers code generation: the macro walks every constraint attribute on every reachable struct, resolves the refs, and emits `calc_cost()` / `calc_grad_hessian()` for the whole model hierarchy.
+Finally, `Path` ties it all together. `#[arael(root)]` is what actually triggers code generation: the macro walks every constraint attribute on every reachable struct, resolves the refs, and emits `calc_cost()` and the `calc_grad_hessian_*` backend family for the whole model hierarchy.
 
 ```rust
 #[arael::model]
@@ -409,7 +409,7 @@ The `examples/` directory is the primary place to see the API in use. Each file 
 - **[runtime_fit_demo](examples/runtime_fit_demo.rs)** -- curve fitting where the residual equation is a string parsed at runtime. Demonstrates `ExtendedModel` + robust loss on top of the symbolic front end.
 - **[single_root_demo](examples/single_root_demo.rs)** -- single-struct model-and-root + a direct-composed sub-model, each carrying its own `SelfBlock<Self>`. The smallest example that exercises the "root has its own params" path.
 - **[slam2d_simple_demo](examples/slam2d_simple_demo.rs)** -- minimal pedagogical 2D SLAM: pose = (x, y, gamma), single forward-facing camera reporting a bearing per landmark, diagonal odometry covariance, first pose held fixed at the origin facing east via `optimize = false` on its params (the fixed reference that makes the solution unique -- all measurements are relative). Constraint bodies use the symbolic `matrix2sym::rotation(angle)` surface. After the LM fit it computes the parameter covariance from the dense Hessian and writes `slam2d_simple.eps` -- a colour-per-landmark plot of the trajectory, the bearing fan, ground truth shadows, the GT-vs-estimate error lines, and 95% confidence ellipses around each landmark (visibly elongated along the radial direction, illustrating that depth is the unobservable dimension of bearing-only SLAM).
-- **[slam_demo](examples/slam_demo.rs)** -- synthetic visual-inertial SLAM: S-curve trajectory, 20 poses, 40 landmarks, odometry + tilt + GPS + feature observations. Full verbose-LM trace across graduated isigma passes -- the reference for what a healthy solver run looks like.
+- **[slam_demo](examples/slam_demo.rs)** -- synthetic visual-inertial SLAM: S-curve trajectory, 60 poses, 240 landmarks, odometry + tilt + GPS + feature observations. Full verbose-LM trace across graduated isigma passes -- the reference for what a healthy solver run looks like.
 - **[sym_demo](examples/sym_demo.rs)** -- symbolic-math tour: expression building, automatic differentiation, CSE, pretty printing, parsing. No solver involvement; pure `arael-sym`.
 - **[user_function_demo](examples/user_function_demo.rs)** -- `#[arael::function]` for user-defined operators in constraint bodies. Form A purely symbolic `sigmoid(x) = 1 / (1 + exp(-x))` and Form B opaque numerical `my_safe_asin` with a closed-form symbolic derivative, both used in a single two-residual LM fit.
 

@@ -192,16 +192,30 @@ per-solve cost is genuinely the bottleneck.
 
 ## Termination logic
 
-The solver stops when **all** of:
+An accepted step counts as "small" when EITHER its absolute cost
+improvement is below `abs_precision` OR its relative improvement is
+below `rel_precision` (so `abs_precision` alone can stop a solve whose
+cost is tiny, and `rel_precision` alone can stop one that plateaus at
+a large cost -- mind the flip side: a badly scaled problem making
+large absolute progress at small relative rates will stop; rescale or
+lower `rel_precision`).
+
+The solver stops when all of:
 
 - `iter >= min_iters`
-- current step is "small" (below both `abs_precision` and `rel_precision`)
-- the preceding `patience` steps were also "small"
+- the last `patience` consecutive accepted steps were "small"
 
-or one of:
+or on any of:
 
 - `iter >= max_iters`
 - `cost <= cost_threshold`
+- the new cost is within `8 * epsilon * cost` of the old one
+  (machine-precision noise floor -- further digits are not
+  resolvable)
+- 20 consecutive damped attempts without an accepted step (the inner
+  retry budget; hard-coded)
+- the damping schedule despairs (the lambda driver returns `None` on a
+  rejection -- for the default schedule, lambda passing 1e10)
 
 ## LM in five bullets
 
@@ -268,17 +282,25 @@ Reference "healthy" trace: run
 ```rust,ignore
 pub trait LmProblem<T> {
     fn calc_cost(&mut self, params: &[T]) -> T;
-    fn calc_grad_hessian_dense(...);
-    fn calc_grad_hessian_band(...);
-    fn calc_grad_hessian_sparse(...);
-    fn calc_grad_hessian_sparse_direct(...);
-    fn calc_grad_hessian_sparse_indexed(...);
+    fn calc_grad_hessian_dense(...) -> T;   // all assembly methods
+    fn calc_grad_hessian_band(...) -> T;    // return the cost as a
+    fn calc_grad_hessian_sparse(...) -> T;  // free byproduct
+    fn calc_grad_hessian_sparse_direct(...) -> T;
+    fn calc_grad_hessian_sparse_indexed(...) -> T;
+    fn advance(&mut self, params: &mut [T]);
 }
 ```
 
 The `#[arael(root)]` macro generates all of these from your constraint
 attributes. You only call them via `solve*`; you never implement
 them by hand.
+
+`advance` is called after every ACCEPTED step. It exists for
+`EulerAngleParam`: the accepted delta angles are folded into the
+reference rotation and their parameter slots reset to zero, which is
+what keeps the parameterization in its small-angle sweet spot on
+arbitrarily oriented problems. Hand-written `LmProblem` impls without
+re-centering state can leave it empty.
 
 ## `LmResult`
 
@@ -287,7 +309,8 @@ pub struct LmResult<T> {
     pub x: Vec<T>,          // optimised parameter vector
     pub start_cost: T,
     pub end_cost: T,
-    pub iterations: usize,  // including inner damping retries
+    pub iterations: usize,           // including inner damping retries
+    pub accepted_iterations: usize,  // cost-decreasing steps only
 }
 ```
 

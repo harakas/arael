@@ -135,7 +135,7 @@ fn main() {
         println!("v·v = {}", v.dot(&v));
 
         let m = SymMat::new(2, 2, [1.0, 2.0, 3.0, 4.0]);
-        let mv = m.clone() * v;
+        let mv = m * v;
         println!("M = {m}");
         println!("M·v = {mv}");
         println!("M^T = {}", m.transpose());
