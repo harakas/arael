@@ -20,6 +20,19 @@ target_include_directories(g2o_slam PRIVATE /usr/include/suitesparse)
 target_link_libraries(g2o_slam
     ${G2O_CORE} ${G2O_STUFF} ${G2O_SOLVER_CHOLMOD} ${CHOLMOD} Eigen3::Eigen)
 
+# GTSAM runner: custom NoiseModelFactorN factors with analytic Jacobians.
+# The Ubuntu libgtsam-dev CMake config is broken (its exports reference a
+# non-shipped libCppUnitLite.a), so link libgtsam directly instead of
+# find_package(GTSAM).
+find_library(GTSAM_LIB gtsam)
+find_library(TBB_LIB tbb)
+if(GTSAM_LIB)
+    add_executable(gtsam_slam gtsam_slam.cpp)
+    target_link_libraries(gtsam_slam ${GTSAM_LIB} ${TBB_LIB} Eigen3::Eigen)
+else()
+    message(STATUS "GTSAM not found; skipping gtsam_slam (apt install libgtsam-dev)")
+endif()
+
 # SymForce runner: requires a built symforce source checkout, pointed to
 # by -DSYMFORCE_DIR=... (or env SYMFORCE_DIR). The generated factor
 # headers come from ../symforce_gen.py (committed under symforce_gen/).

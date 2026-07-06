@@ -150,6 +150,10 @@ fn main() {
     if !g2o_ok {
         eprintln!("WARNING: cpp/build/g2o_slam missing (needs g2o + cholmod); skipping g2o");
     }
+    let gtsam_ok = std::path::Path::new("cpp/build/gtsam_slam").exists();
+    if !gtsam_ok {
+        eprintln!("WARNING: cpp/build/gtsam_slam missing (needs libgtsam-dev); skipping GTSAM");
+    }
 
     let skip_tiny = std::env::var("SLAM_SKIP_TINY").map_or(false, |v| v == "1");
     for _ in 0..rounds {
@@ -200,6 +204,17 @@ fn main() {
             subproc_peaks.insert("g2o LM".to_string(), g.peak_mb);
             record("g2o LM", g.solve_ms, g.first_iter_ms, g.iterations, Some(g.accepted),
                 g.solution, &mut cells);
+        }
+        if gtsam_ok {
+            let gt = run_gtsam(scene_path, scene.poses.len(), scene.landmarks_init.len());
+            let rel = ((gt.initial_cost - initial_cost) / initial_cost).abs();
+            assert!(rel < 1e-9, "gtsam initial cost {} vs reference {} (rel {:.2e})",
+                gt.initial_cost, initial_cost, rel);
+            let core = last_core();
+            assert!(gt.cpus == core.to_string(), "gtsam not pinned to core {}: {}", core, gt.cpus);
+            subproc_peaks.insert("gtsam LM".to_string(), gt.peak_mb);
+            record("gtsam LM", gt.solve_ms, gt.first_iter_ms, gt.iterations, Some(gt.accepted),
+                gt.solution, &mut cells);
         }
     }
 
@@ -285,6 +300,17 @@ fn run_g2o(scene_path: &str, mode: &str, n_poses: usize, n_landmarks: usize) -> 
         .args([scene_path, mode, sol_out])
         .output().expect("failed to run g2o_slam");
     assert!(out.status.success(), "g2o_slam failed: {}", String::from_utf8_lossy(&out.stderr));
+    parse_subproc_out(&out.stdout, sol_out, n_poses, n_landmarks)
+}
+
+// GTSAM runs as a subprocess (like Ceres); custom NoiseModelFactorN
+// factors with analytic Jacobians, same JSON protocol.
+fn run_gtsam(scene_path: &str, n_poses: usize, n_landmarks: usize) -> CeresOut {
+    let sol_out = "/tmp/slam_gtsam_sol.txt";
+    let out = std::process::Command::new("cpp/build/gtsam_slam")
+        .args([scene_path, "lm", sol_out])
+        .output().expect("failed to run gtsam_slam");
+    assert!(out.status.success(), "gtsam_slam failed: {}", String::from_utf8_lossy(&out.stderr));
     parse_subproc_out(&out.stdout, sol_out, n_poses, n_landmarks)
 }
 

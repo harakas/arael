@@ -1,16 +1,18 @@
 # Heterogeneous visual-inertial SLAM benchmark
 
 Batch optimization of a synthetic visual-inertial SLAM problem,
-comparing arael against four other solvers:
+comparing arael against six other solvers:
 [tiny-solver](https://crates.io/crates/tiny-solver) (Rust, dual-number
 autodiff), [factrs](https://crates.io/crates/factrs) (Rust, dual-number
 ForwardProp autodiff), [Ceres](http://ceres-solver.org) (C++ 2.2,
 template autodiff; three linear-solver configurations),
 [SymForce](https://symforce.org) (Skydio's symbolic code-generation
-path; its own `sym::Optimizer`, templated over f64/f32), and
+path; its own `sym::Optimizer`, templated over f64/f32),
 [g2o](https://github.com/RainerKuemmerle/g2o) (C++; custom vertices and
-six custom edges with hand-derived analytic Jacobians, supernodal
-CHOLMOD, landmarks marginalized via Schur). Unlike the pose-graph
+six custom edges with hand-derived analytic Jacobians, CHOLMOD, landmarks
+marginalized via Schur), and [GTSAM](https://gtsam.org) (C++ 4.2; six
+custom `NoiseModelFactorN` factors with hand-derived analytic Jacobians,
+multifrontal Cholesky). Unlike the pose-graph
 ([benchmarks/pgo](../pgo)) and bundle-adjustment ([benchmarks/bal](../bal))
 benchmarks -- each a single factor type -- this problem is
 heterogeneous: six factor types, several nonlinear.
@@ -61,8 +63,8 @@ Same as the pgo/bal benchmarks:
 - **One cost function.** `src/scene.rs::reference_cost` evaluates every
   system's final parameters. Each system's own residual code is
   cross-checked against it at the initial estimate to 1e-9 relative --
-  all six implementations (arael, tiny-solver, factrs, Ceres, SymForce,
-  g2o) and the reference agree bit-for-bit.
+  all seven implementations (arael, tiny-solver, factrs, Ceres, SymForce,
+  g2o, GTSAM) and the reference agree bit-for-bit.
 - **One validation.** A row is "at the common optimum" when its cost is
   within 1% of the best AND its per-pose translation RMSE to the best
   solution is under 5 cm (the gauge is fixed by GPS + priors, so
@@ -97,7 +99,8 @@ a gain-ratio driver would only over-damp and inflate the step count;
 and Ceres `initial_trust_region_radius = 1e12`, SymForce
 `initial_lambda = 1e-10` (it ships 1.0), factrs its default (`lambda`
 starts at 1e-10 -- already near-Gauss-Newton), g2o `setUserLambdaInit(1e-9)`
-(`G2O_LAMBDA_INIT` overrides). All stop at a shared termination class
+(`G2O_LAMBDA_INIT` overrides), GTSAM `lambdaInitial = 1e-9`
+(`GTSAM_LAMBDA0` overrides). All stop at a shared termination class
 (1e-5 absolute or relative). With this policy every exact-factorization
 solver converges in 3 steps, so **ms/iter -- the per-step pipeline cost
 (linearize + assemble + factorize + solve) -- is the durable cross-system
@@ -119,18 +122,19 @@ permissive pure-Rust faer.
 
 | system                        | total ms | iters  | ms/iter | 1st-iter ms | peak MB | final cost |
 |-------------------------------|---------:|-------:|--------:|------------:|--------:|-----------:|
-| arael LM f64                  |     14.9 |   3(3) |    4.98 |         7.0 |    12.8 |  3062.0482 |
-| arael LM f32                  |     40.3 | 3(11)* |    3.67 |         6.4 |    10.2 |  3062.0483 |
-| tiny-solver LM                |    103.7 |      3 |   34.58 |        40.1 |    26.4 |  3062.0482 |
-| factrs LM                     |     38.4 |      3 |   12.81 |        16.9 |    23.3 |  3062.0482 |
-| ceres sparse_normal_cholesky  |     18.3 |   3(3) |    6.10 |        10.8 |    16.9 |  3062.0482 |
-| ceres sparse_schur            |     19.5 |   3(3) |    6.49 |        11.6 |    16.5 |  3062.0482 |
-| ceres iterative_schur         |     25.7 |   6(6) |    4.28 |         6.5 |    12.9 |  3067.3849 (RMSE 0.745 m) |
-| symforce LM f64               |     27.4 |   3(4) |    6.84 |        18.0 |    27.1 |  3062.0482 |
-| symforce LM f32               |     32.1 |   4(5) |    6.41 |        17.3 |    23.3 |  3062.0500 |
-| g2o LM                        |     14.4 |   3(3) |    4.80 |         7.6 |    16.4 |  3062.0482 |
+| arael LM f64                  |     15.0 |   3(3) |    5.01 |         7.3 |    12.7 |  3062.0482 |
+| arael LM f32                  |     39.8 | 3(11)* |    3.62 |         6.4 |    10.1 |  3062.0483 |
+| tiny-solver LM               |    102.4 |      3 |   34.12 |        39.8 |    24.4 |  3062.0482 |
+| factrs LM                     |     38.0 |      3 |   12.68 |        16.9 |    23.3 |  3062.0482 |
+| ceres sparse_normal_cholesky  |     18.0 |   3(3) |    6.00 |        10.3 |    16.9 |  3062.0482 |
+| ceres sparse_schur            |     19.0 |   3(3) |    6.34 |        11.2 |    16.5 |  3062.0482 |
+| ceres iterative_schur         |     25.1 |   6(6) |    4.18 |         6.8 |    12.9 |  3067.3849 (RMSE 0.745 m) |
+| symforce LM f64               |     27.5 |   3(4) |    6.87 |        18.6 |    27.1 |  3062.0482 |
+| symforce LM f32               |     32.0 |   4(5) |    6.41 |        16.8 |    23.3 |  3062.0500 |
+| g2o LM                        |     14.3 |   3(3) |    4.75 |         7.2 |    16.4 |  3062.0482 |
+| gtsam LM                      |     31.8 |   3(3) |   10.61 |        15.4 |    47.4 |  3062.0482 |
 
-9/10 at the common optimum; ceres iterative_schur (inexact CG) does not
+10/11 at the common optimum; ceres iterative_schur (inexact CG) does not
 reach the gate.
 
 \* f32 hits the optimum by step 3, then the remaining steps can't improve
@@ -141,47 +145,53 @@ ms/iter.
 
 | system                        | total ms | iters  | ms/iter | 1st-iter ms | peak MB | final cost |
 |-------------------------------|---------:|-------:|--------:|------------:|--------:|-----------:|
-| arael LM f64                  |     46.1 |   3(3) |   15.37 |        20.6 |    26.1 |  7424.1484 |
-| arael LM f32                  |     40.4 |   3(3) |   13.47 |        17.8 |    20.4 |  7424.1506 |
-| tiny-solver LM                |    263.3 |      3 |   87.77 |       106.9 |    56.1 |  7424.1484 |
-| factrs LM                     |    100.1 |      3 |   33.36 |        43.4 |    50.9 |  7424.1484 |
-| ceres sparse_normal_cholesky  |     51.3 |   3(3) |   17.10 |        30.2 |    28.4 |  7424.1485 |
-| ceres sparse_schur            |     55.1 |   3(3) |   18.35 |        32.2 |    28.3 |  7424.1485 |
-| ceres iterative_schur         |    598.2 | 30(30) |   19.94 |        15.6 |    18.8 |  7424.7966 (RMSE 0.179 m) |
-| symforce LM f64               |     89.2 |   3(4) |   22.30 |        56.3 |    55.0 |  7424.1484 |
-| symforce LM f32               |    126.1 |   5(6) |   21.01 |        49.9 |    46.3 |  7424.1592 |
-| g2o LM                        |     43.0 |   3(3) |   14.32 |        20.9 |    32.1 |  7424.1484 |
+| arael LM f64                  |     44.1 |   3(3) |   14.69 |        20.2 |    26.1 |  7424.1484 |
+| arael LM f32                  |     39.6 |   3(3) |   13.19 |        17.6 |    20.3 |  7424.1506 |
+| tiny-solver LM               |    269.3 |      3 |   89.77 |       104.8 |    55.1 |  7424.1484 |
+| factrs LM                     |    101.9 |      3 |   33.95 |        43.2 |    50.9 |  7424.1484 |
+| ceres sparse_normal_cholesky  |     49.9 |   3(3) |   16.65 |        30.1 |    28.4 |  7424.1485 |
+| ceres sparse_schur            |     54.9 |   3(3) |   18.32 |        31.7 |    28.3 |  7424.1485 |
+| ceres iterative_schur         |    585.7 | 30(30) |   19.52 |        15.4 |    18.8 |  7424.7966 (RMSE 0.179 m) |
+| symforce LM f64               |     89.1 |   3(4) |   22.27 |        52.5 |    55.0 |  7424.1484 |
+| symforce LM f32               |    124.1 |   5(6) |   20.69 |        49.2 |    46.3 |  7424.1592 |
+| g2o LM                        |     40.0 |   3(3) |   13.33 |        20.1 |    32.1 |  7424.1484 |
+| gtsam LM                      |     88.0 |   3(3) |   29.32 |        44.4 |   116.2 |  7424.1484 |
 
-9/10 at the common optimum; ceres iterative_schur (inexact CG) does not
+10/11 at the common optimum; ceres iterative_schur (inexact CG) does not
 reach the gate.
 
 ### 250 poses (1,000 landmarks, 31,823 observations, 4,500 parameters)
 
 | system                        | total ms | iters  | ms/iter | 1st-iter ms | peak MB | final cost |
 |-------------------------------|---------:|-------:|--------:|------------:|--------:|-----------:|
-| arael LM f64                  |    200.6 |   3(3) |   66.87 |        83.8 |    65.4 | 18581.8936 |
-| arael LM f32                  |    159.0 |   2(3) |   53.00 |        65.5 |    46.8 | 18581.8975 |
-| tiny-solver LM                |    755.9 |      3 |  251.97 |       293.0 |   136.5 | 18581.8936 |
-| factrs LM                     |    341.2 |      3 |  113.73 |       144.7 |   139.4 | 18581.8936 |
-| ceres sparse_normal_cholesky  |    196.8 |   3(3) |   65.62 |       109.1 |    65.1 | 18581.8937 |
-| ceres sparse_schur            |    207.1 |   3(3) |   69.03 |       110.9 |    65.9 | 18581.8937 |
-| ceres iterative_schur         |    436.6 | 10(10) |   43.66 |        43.6 |    33.8 | 18583.3216 (RMSE 0.185 m) |
-| symforce LM f64               |    344.1 |   3(4) |   86.02 |       174.1 |   137.0 | 18581.8936 |
-| symforce LM f32               |    582.1 |   6(7) |   83.16 |       164.4 |   108.0 | 18581.9541 |
-| g2o LM                        |    155.1 |   3(3) |   51.69 |        77.0 |    84.8 | 18581.8936 |
+| arael LM f64                  |    201.1 |   3(3) |   67.05 |        77.6 |    65.2 | 18581.8936 |
+| arael LM f32                  |    157.2 |   2(3) |   52.40 |        64.6 |    46.7 | 18581.8975 |
+| tiny-solver LM               |    708.9 |      3 |  236.29 |       279.0 |   152.1 | 18581.8936 |
+| factrs LM                     |    341.2 |      3 |  113.75 |       136.2 |   139.5 | 18581.8936 |
+| ceres sparse_normal_cholesky  |    192.7 |   3(3) |   64.24 |       109.0 |    65.1 | 18581.8937 |
+| ceres sparse_schur            |    200.4 |   3(3) |   66.80 |       107.7 |    65.9 | 18581.8937 |
+| ceres iterative_schur         |    414.8 | 10(10) |   41.48 |        40.0 |    33.8 | 18583.3216 (RMSE 0.185 m) |
+| symforce LM f64               |    334.3 |   3(4) |   83.58 |       170.2 |   137.0 | 18581.8936 |
+| symforce LM f32               |    572.3 |   6(7) |   81.75 |       164.2 |   108.0 | 18581.9541 |
+| g2o LM                        |    155.2 |   3(3) |   51.75 |        74.6 |    84.8 | 18581.8936 |
+| gtsam LM                      |    312.1 |   3(3) |  104.02 |       144.9 |   390.6 | 18581.8936 |
 
-9/10 at the common optimum; ceres iterative_schur (inexact CG) does not
+10/11 at the common optimum; ceres iterative_schur (inexact CG) does not
 reach the gate.
 
 Every exact solver converges in 3 steps, so the tables compare per-step
 cost (ms/iter) directly. g2o edges ahead at the largest size -- possibly
 its supernodal CHOLMOD factorization (arael ships permissive faer),
-though this was not verified by a backend swap.
+though this was not verified by a backend swap. GTSAM reaches the same
+optimum but is the slowest exact solver per-step and, by a wide margin,
+the heaviest on memory (391 MB at 250 poses vs 65 for arael).
 
 ## Running
 
 ```sh
-cmake -B cpp/build cpp && cmake --build cpp/build   # Ceres + g2o
+cmake -B cpp/build cpp && cmake --build cpp/build   # Ceres, g2o, GTSAM
+# g2o needs libg2o-dev + cholmod; GTSAM needs libgtsam-dev (plus its
+#   undeclared deps libboost-all-dev and libtbb-dev)
 # add -DSYMFORCE_DIR=/path/to/symforce for the SymForce runner
 # (regenerate its factor headers with:
 #  symforce-venv/bin/python3 symforce_gen.py cpp/symforce_gen)
@@ -189,10 +199,12 @@ ROUNDS=3 cargo run --release                        # 60 poses (default)
 SLAM_POSES=250 ROUNDS=3 cargo run --release
 SLAM_SKIP_TINY=1 cargo run --release                # skip tiny-solver
 SLAM_VERBOSE=1 cargo run --release                  # arael per-iteration trace
-G2O_VERIFY_JAC=1 cpp/build/g2o_slam scene.txt lm out.txt   # check g2o Jacobians
+G2O_VERIFY_JAC=1 cpp/build/g2o_slam scene.txt lm out.txt     # check g2o Jacobians
+GTSAM_VERIFY_JAC=1 cpp/build/gtsam_slam scene.txt lm out.txt # check GTSAM Jacobians
 ```
 
 Env knobs: `SLAM_POSES`, `ROUNDS`, `SLAM_SKIP_TINY`, `SLAM_NO_MEM`,
 `SLAM_DRIVER=nielsen`, `SLAM_LAMBDA0`, `CERES_SOLVERS=<comma list>`,
 `CERES_RADIUS0`, `TINY_MAXITER`, `TINY_RADIUS0`, `SYMFORCE_LAMBDA0`,
-`SYMFORCE_MAXITER`, `G2O_LAMBDA_INIT`, `G2O_GAIN`, `G2O_VERIFY_JAC`.
+`SYMFORCE_MAXITER`, `G2O_LAMBDA_INIT`, `G2O_GAIN`, `G2O_VERIFY_JAC`,
+`GTSAM_LAMBDA0`, `GTSAM_VERIFY_JAC`.
