@@ -53,20 +53,13 @@ A Rust framework for nonlinear optimization with compile-time symbolic different
   <img alt="2x2 bar charts of per-step solve time on M3500, city10000, sphere2500 and parking-garage: arael is fastest on M3500 (3.3 ms), city10000 (10.1 ms) and sphere2500 (13.3 ms); g2o leads the parking garage (7.9 ms vs arael 10.3 ms)" src="benchmarks/pgo/chart-light.svg">
 </picture>
 
-Batch pose-graph optimization on the four canonical SLAM benchmark
-datasets, 2D and 3D. The chart shows the per-step cost because that is
-the number that compares cleanly: a step is the same work in every
-system -- one linearize + assemble + factorize + solve pass over the
-identical, validated cost function -- whereas step counts and total
-times also reflect each solver's damping schedule, a per-problem
-tuning knob (and one that should be tuned). The table below details
-the headline run: city10000, the classic 10000-pose benchmark (iSAM
-dataset: 30000 parameters, 20687 weighted constraints).
-All solutions verified to reach the same minimum; final costs evaluated
-by one shared reference function, so they are directly comparable.
-Every LM system runs with problem-appropriate initial damping; the
-"vs best" column gives the per-step ratio to the fastest. Apple M4
-Pro, single threaded:
+Per-step solve time on the four canonical pose-graph datasets, 2D and
+3D. Per-step is the clean cross-system number -- one linearize +
+assemble + factorize + solve over the identical validated cost function,
+the same work in every system, independent of each solver's damping
+schedule. The table is the headline run, city10000 (30000 parameters,
+20687 constraints); every system verified to the same minimum, single
+thread, Apple M4 Pro:
 
 | system | total time | steps | ms/step | vs best | final cost |
 |--------|-----------:|------:|--------:|--------:|-----------:|
@@ -78,39 +71,16 @@ Pro, single threaded:
 | [factrs](https://github.com/rpl-cmu/factrs) (GN) | 210.2 ms | 7 | 30.0 | 2.96 | 511.99 |
 | [SymForce](https://symforce.org) (LM) | 226.1 ms | 7(8) | 28.3 | 2.79 | 511.99 |
 | [tiny-solver](https://crates.io/crates/tiny-solver) (GN) | 593.8 ms | 7 | 84.8 | 8.37 | 511.99 |
-| [GTSAM](https://gtsam.org) (batch) | did not converge* | | | | |
+| [GTSAM](https://gtsam.org) (batch) | did not converge | | | | |
 
-\* GTSAM's batch LM/GN does not survive this dataset's odometry
-initialization at any damping (a residual-parameterization effect); its
-incremental ISAM2 solves it in 10.4 s of update time. arael's step
-count is "accepted(total damped attempts)". Of the competitors only
-SymForce and factrs offer f32: factrs's crashes on this dataset (single
-precision loses positive definiteness in its Cholesky), SymForce's
-solves it in 386.9 ms -- arael's f32 is 5.4x faster and the fastest
-entry in the table.
+Arael's step count is accepted(total). Of the competitors only SymForce
+and factrs offer f32 -- factrs's crashes here, arael's f32 is the fastest
+entry.
 
-Arael's steps are extremely low cost: all derivative code is generated
-and CSE-optimized at compile time, and the system matrix is assembled
-through precomputed sparse positions rather than built from scratch
-each step. That holds against every architecture class here -- runtime
-autodiff (Ceres, tiny-solver, factrs), hand-written analytic Jacobians
-(g2o), and the closest cousin, SymForce's compile-time symbolic
-codegen, which arael leads 2.5x on this dataset (and 3.7x on
-sphere2500, running the identical symbolically-defined residual
-through SymForce's own codegen). Across the full benchmark arael is
-the fastest system on every dataset except the small parking garage,
-where g2o edges it 7.9 vs 10.3 ms/step -- a margin owed to CHOLMOD's
-GPL-licensed supernodal factorization (with that same backend arael
-steps at 8.9 ms; it ships the permissive pure-Rust faer, which wins
-both 2D datasets, by default). Methodology, the
-initial-damping policy, f32 rows, and the cross-system validation
-harness: [benchmarks/pgo](benchmarks/pgo/README.md).
-
-There is also a bundle-adjustment benchmark on the standard BAL
-(Bundle Adjustment in the Large) Ladybug problems, where arael shows
-parity with Ceres on Ceres's home turf -- winning two of the three
-problem sizes -- with g2o measured alongside:
-[benchmarks/bal](benchmarks/bal/README.md).
+Full methodology, the initial-damping policy, and the cross-system
+validation harness: [benchmarks/pgo](benchmarks/pgo/README.md). A
+bundle-adjustment benchmark on the BAL Ladybug problems (arael vs Ceres
+and g2o): [benchmarks/bal](benchmarks/bal/README.md).
 
 ## Scope
 

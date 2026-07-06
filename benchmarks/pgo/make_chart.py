@@ -33,7 +33,7 @@ PANELS = [
         ("arael (f64)", 13.1, "arael"),
         ("g2o (GN)", 19.8, "other"),
         ("Ceres (LM)", 25.8, "other"),
-        ("SymForce (LM)", 28.3, "other"),
+        ("SymForce (f64)", 28.3, "other"),
         ("factrs (GN)", 30.0, "other"),
         ("GTSAM", None, "other"),  # did not converge; text row
     ]),
