@@ -229,8 +229,10 @@ impl<T> Vec<T> {
 
     /// Returns the `Ref` of the `pos`-th element (panics if out of range).
     /// Turns a positional index into a stable handle instead of writing
-    /// `Ref::new(pos as u32)` by hand.
-    pub fn ref_at(&self, pos: usize) -> Ref<T> {
+    /// `Ref::new(pos as u32)` by hand. Accepts any integer index (`u32`,
+    /// `usize`, ...) so callers never cast.
+    pub fn ref_at(&self, pos: impl TryInto<usize>) -> Ref<T> {
+        let pos = pos.try_into().ok().expect("ref_at: index out of usize range");
         assert!(pos < self.inner.len(),
             "ref_at: position {pos} out of range (len {})", self.inner.len());
         Ref::new(pos as u32)
@@ -465,7 +467,9 @@ impl<T> Deque<T> {
     /// Returns the `Ref` of the `pos`-th element from the front (panics if
     /// out of range). Accounts for the front offset left by prior
     /// `pop_front`s, so it stays correct as a sliding window advances.
-    pub fn ref_at(&self, pos: usize) -> Ref<T> {
+    /// Accepts any integer index (`u32`, `usize`, ...) so callers never cast.
+    pub fn ref_at(&self, pos: impl TryInto<usize>) -> Ref<T> {
+        let pos = pos.try_into().ok().expect("ref_at: index out of usize range");
         assert!(pos < self.inner.len(),
             "ref_at: position {pos} out of range (len {})", self.inner.len());
         Ref::new(self.first_index.wrapping_add(pos as u32))
@@ -678,8 +682,10 @@ impl<T> Arena<T> {
 
     /// Returns the `Ref` of the `pos`-th live element (panics if out of
     /// range). O(slots) because removed slots are skipped; prefer holding the
-    /// `Ref` returned by [`push`](Self::push) where you can.
-    pub fn ref_at(&self, pos: usize) -> Ref<T> {
+    /// `Ref` returned by [`push`](Self::push) where you can. Accepts any
+    /// integer index (`u32`, `usize`, ...) so callers never cast.
+    pub fn ref_at(&self, pos: impl TryInto<usize>) -> Ref<T> {
+        let pos: usize = pos.try_into().ok().expect("ref_at: index out of usize range");
         self.refs().nth(pos)
             .unwrap_or_else(|| panic!("ref_at: position {pos} out of range (len {})", self.count))
     }
