@@ -1511,7 +1511,7 @@
 //!
 //! # Starship robust error suppression
 //!
-//! Both demos wrap every residual in $\gamma \arctan(r / \gamma)$. This is
+//! Wrapping a residual $r$ in $\gamma \arctan(r / \gamma)$ is
 //! the **Starship method**
 //! ([US Patent 12,346,118](https://patents.google.com/patent/US12346118))
 //! -- a way to cap how much a single outlier can move the optimum without
