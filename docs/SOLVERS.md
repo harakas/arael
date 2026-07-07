@@ -391,6 +391,7 @@ be chosen from the problem's actual scale.
 Custom drivers implement the four-method trait (`start`, `accepted`,
 `rejected`, `factorization_failed` -- the latter also receives the
 current `LambdaState`); returning `None` from `rejected`
-abandons the solve like an exhausted retry budget. Entry points:
-`lm_solve_driven` (any backend), `solve_sparse_faer_driven`,
-`solve_sparse_faer_f32_driven`.
+abandons the solve like an exhausted retry budget. A driver is a
+`#[derive(Clone)]` type; attach it to the config with
+`LmConfig::with_driver(...)` and every solve entry point (`lm_solve`,
+`solve_sparse_faer`, ...) picks it up from `config.driver`.

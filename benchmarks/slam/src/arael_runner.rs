@@ -387,8 +387,17 @@ pub struct RunOut {
     pub solution: Solution,
 }
 
+// The plain fixed schedule with a problem-appropriate initial damping is
+// the default (this well-initialized graph needs no adaptive driver -- no
+// step is ever rejected, so a gain-ratio schedule only over-damps and
+// inflates the step count; see benchmarks/pgo's fairness rules). The
+// gain-ratio Nielsen driver is selected via SLAM_DRIVER=nielsen.
+fn nielsen() -> bool {
+    std::env::var("SLAM_DRIVER").map_or(false, |v| v == "nielsen")
+}
+
 fn cfg(max_iters: usize) -> arael::simple_lm::LmConfig<f64> {
-    arael::simple_lm::LmConfig {
+    let cfg = arael::simple_lm::LmConfig {
         abs_precision: 1e-5,
         rel_precision: 1e-5,
         patience: 1,
@@ -400,22 +409,13 @@ fn cfg(max_iters: usize) -> arael::simple_lm::LmConfig<f64> {
         initial_lambda: std::env::var("SLAM_LAMBDA0").ok().and_then(|v| v.parse().ok()).unwrap_or(1e-8),
         verbose: std::env::var("SLAM_VERBOSE").map_or(false, |v| v == "1"),
         ..Default::default()
-    }
+    };
+    if nielsen() { cfg.with_driver(arael::simple_lm::NielsenLambdaDriver::default()) } else { cfg }
 }
 
-// The plain fixed schedule with a problem-appropriate initial damping is
-// the default (this well-initialized graph needs no adaptive driver -- no
-// step is ever rejected, so a gain-ratio schedule only over-damps and
-// inflates the step count; see benchmarks/pgo's fairness rules). The
-// gain-ratio Nielsen driver is available via SLAM_DRIVER=nielsen.
 fn solve64(params: &[f64], path: &mut Path, cfg: &arael::simple_lm::LmConfig<f64>)
     -> arael::simple_lm::LmResult<f64> {
-    if std::env::var("SLAM_DRIVER").map_or(false, |v| v == "nielsen") {
-        arael::simple_lm::solve_sparse_faer_driven(
-            params, &mut arael::simple_lm::NielsenLambdaDriver::default(), path, cfg)
-    } else {
-        arael::simple_lm::solve_sparse_faer(params, path, cfg)
-    }
+    arael::simple_lm::solve_sparse_faer(params, path, cfg)
 }
 
 /// The arael model cost at the initial estimate -- for the harness to
@@ -459,7 +459,7 @@ fn cfg32(max_iters: usize, poses: usize) -> arael::simple_lm::LmConfig<f32> {
     // larger sizes are clean at 1e-8 (1e-7 would grind there instead --
     // there is no single value clean at every size). SLAM_LAMBDA0 overrides.
     let default_lambda = if poses <= 60 { 1e-7 } else { 1e-8 };
-    arael::simple_lm::LmConfig {
+    let cfg = arael::simple_lm::LmConfig {
         abs_precision: 1e-5,
         rel_precision: 1e-5,
         patience: 1,
@@ -469,17 +469,13 @@ fn cfg32(max_iters: usize, poses: usize) -> arael::simple_lm::LmConfig<f32> {
             .and_then(|v| v.parse().ok()).unwrap_or(default_lambda),
         verbose: std::env::var("SLAM_VERBOSE").map_or(false, |v| v == "1"),
         ..Default::default()
-    }
+    };
+    if nielsen() { cfg.with_driver(arael::simple_lm::NielsenLambdaDriver::default()) } else { cfg }
 }
 
 fn solve32(params: &[f32], path: &mut PathF, cfg: &arael::simple_lm::LmConfig<f32>)
     -> arael::simple_lm::LmResult<f32> {
-    if std::env::var("SLAM_DRIVER").map_or(false, |v| v == "nielsen") {
-        arael::simple_lm::solve_sparse_faer_f32_driven(
-            params, &mut arael::simple_lm::NielsenLambdaDriver::default(), path, cfg)
-    } else {
-        arael::simple_lm::solve_sparse_faer_f32(params, path, cfg)
-    }
+    arael::simple_lm::solve_sparse_faer_f32(params, path, cfg)
 }
 
 // Capped single solve (no timing) -- used for peak-memory measurement.

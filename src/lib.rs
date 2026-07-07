@@ -862,14 +862,15 @@
 //! The lambda schedule is pluggable: the LM loop consults a
 //! `LambdaDriver` for every damping decision, feeding it each attempted
 //! step's outcome (costs, gradient, Hessian diagonal, attempted step).
-//! `DefaultLambdaDriver` is the classic fixed-multiplier schedule (what
-//! the plain entry points use); **`NielsenLambdaDriver`** is the gain-ratio
+//! `DefaultLambdaDriver` is the classic fixed-multiplier schedule (the
+//! default on every `LmConfig`); **`NielsenLambdaDriver`** is the gain-ratio
 //! adaptive schedule: it scales lambda by how well the
 //! quadratic model predicted the actual cost change, escalating
 //! geometrically on rejections, which removes the fixed schedule's
 //! accept/reject sawtooth on strongly nonlinear problems such as bundle
-//! adjustment. Pass a driver with the `*_driven` entry points
-//! (`solve_sparse_faer_driven`, `lm_solve_driven`).
+//! adjustment. The driver lives on the config -- select one with
+//! `LmConfig::with_driver(NielsenLambdaDriver::default())`; every solve
+//! entry point uses `config.driver`.
 //!
 //! ## Basic usage
 //!

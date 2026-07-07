@@ -203,25 +203,15 @@ fn nielsen() -> bool {
 }
 
 fn solve64(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmConfig<f64>) -> arael::simple_lm::LmResult<f64> {
-    if nielsen() {
-        arael::simple_lm::solve_sparse_faer_driven(
-            params, &mut arael::simple_lm::NielsenLambdaDriver::default(), s, cfg)
-    } else {
-        arael::simple_lm::solve_sparse_faer(params, s, cfg)
-    }
+    arael::simple_lm::solve_sparse_faer(params, s, cfg)
 }
 
 fn solve32(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmConfig<f32>) -> arael::simple_lm::LmResult<f32> {
-    if nielsen() {
-        arael::simple_lm::solve_sparse_faer_f32_driven(
-            params, &mut arael::simple_lm::NielsenLambdaDriver::default(), s, cfg)
-    } else {
-        arael::simple_lm::solve_sparse_faer_f32(params, s, cfg)
-    }
+    arael::simple_lm::solve_sparse_faer_f32(params, s, cfg)
 }
 
 fn cfg64(max_iters: usize) -> arael::simple_lm::LmConfig<f64> {
-    arael::simple_lm::LmConfig {
+    let cfg = arael::simple_lm::LmConfig {
         abs_precision: 1e-5,
         rel_precision: 1e-5,
         patience: 1,
@@ -230,11 +220,12 @@ fn cfg64(max_iters: usize) -> arael::simple_lm::LmConfig<f64> {
         lambda_floor: lambda_floor(),
         verbose: verbose(),
         ..Default::default()
-    }
+    };
+    if nielsen() { cfg.with_driver(arael::simple_lm::NielsenLambdaDriver::default()) } else { cfg }
 }
 
 fn cfg32(max_iters: usize) -> arael::simple_lm::LmConfig<f32> {
-    arael::simple_lm::LmConfig {
+    let cfg = arael::simple_lm::LmConfig {
         abs_precision: 1e-5,
         rel_precision: 1e-5,
         patience: 1,
@@ -243,7 +234,8 @@ fn cfg32(max_iters: usize) -> arael::simple_lm::LmConfig<f32> {
         lambda_floor: lambda_floor() as f32,
         verbose: verbose(),
         ..Default::default()
-    }
+    };
+    if nielsen() { cfg.with_driver(arael::simple_lm::NielsenLambdaDriver::default()) } else { cfg }
 }
 
 fn rodrigues_of(m: arael::matrix::matrix3d) -> vect3d {

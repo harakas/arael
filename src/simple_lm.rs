@@ -120,7 +120,8 @@ pub const FIXED_SIZE_THRESHOLD: usize = 9;
 ///
 /// The defaults are a reasonable middle ground. For critical applications,
 /// experiment with the parameters on representative problem instances.
-pub struct LmConfig<T> {
+#[derive(Clone)]
+pub struct LmConfig<T: Float> {
     /// Absolute cost improvement threshold. A step counts as "small" when
     /// the cost decrease is below this OR the relative improvement is
     /// below `rel_precision` (either criterion suffices -- abs alone can
@@ -164,6 +165,13 @@ pub struct LmConfig<T> {
     /// for understanding how the solver behaves with a given parameter set --
     /// check the output to validate convergence and tune the config.
     pub verbose: bool,
+    /// The damping-schedule strategy: how lambda evolves across the solve
+    /// (see [`LambdaDriver`]). Defaults to [`DefaultLambdaDriver`], the
+    /// classic fixed-multiplier schedule; set another (e.g.
+    /// [`NielsenLambdaDriver`]) with [`LmConfig::with_driver`]. The driver
+    /// reads `initial_lambda` and `lambda_floor` from this config at solve
+    /// start, so those two fields configure whichever driver is in place.
+    pub driver: Box<dyn LambdaDriver<T>>,
 }
 
 impl<T: Float> Default for LmConfig<T> {
@@ -178,7 +186,19 @@ impl<T: Float> Default for LmConfig<T> {
             cost_threshold: T::zero(),
             lambda_floor: default_lambda_floor::<T>(),
             verbose: false,
+            driver: Box::new(DefaultLambdaDriver::default()),
         }
+    }
+}
+
+impl<T: Float> LmConfig<T> {
+    /// Set the damping-schedule driver, returning the config for chaining:
+    /// `LmConfig { initial_lambda: 1e-6, ..Default::default() }
+    /// .with_driver(NielsenLambdaDriver::default())`. The driver still
+    /// reads `initial_lambda` / `lambda_floor` from this config.
+    pub fn with_driver(mut self, driver: impl LambdaDriver<T> + 'static) -> Self {
+        self.driver = Box::new(driver);
+        self
     }
 }
 
@@ -669,9 +689,10 @@ pub struct LambdaStep<'a, T> {
 /// multipliers ([`DefaultLambdaDriver`]) or adapt to measured step
 /// quality ([`NielsenLambdaDriver`]). Drivers are stateful; use a fresh
 /// instance per solve.
-/// Pass one via [`lm_solve_driven`] or the `*_driven` solve entry points;
-/// the plain entry points use [`DefaultLambdaDriver`].
-pub trait LambdaDriver<T: Float> {
+/// A driver lives on the [`LmConfig`] (`config.driver`); set it with
+/// [`LmConfig::with_driver`]. The plain entry points use the config's
+/// driver, which defaults to [`DefaultLambdaDriver`].
+pub trait LambdaDriver<T: Float>: LambdaDriverClone<T> {
     /// Called once at solve start, after the first assembly (so the
     /// initial cost, gradient and Hessian diagonal are available);
     /// returns the initial lambda.
@@ -689,10 +710,32 @@ pub trait LambdaDriver<T: Float> {
     fn factorization_failed(&mut self, lambda: T, state: &LambdaState<T>) -> T;
 }
 
+/// Clone helper that lets the boxed driver an [`LmConfig`] carries be
+/// cloned (each solve works on a fresh clone, leaving the shared config
+/// untouched). Auto-implemented for every `Clone` driver; you never
+/// implement it by hand -- just `#[derive(Clone)]` your driver.
+pub trait LambdaDriverClone<T> {
+    /// Clone `self` into a fresh boxed driver.
+    fn clone_box(&self) -> Box<dyn LambdaDriver<T>>;
+}
+
+impl<T: Float, D: LambdaDriver<T> + Clone + 'static> LambdaDriverClone<T> for D {
+    fn clone_box(&self) -> Box<dyn LambdaDriver<T>> {
+        Box::new(self.clone())
+    }
+}
+
+impl<T: Float> Clone for Box<dyn LambdaDriver<T>> {
+    fn clone(&self) -> Self {
+        self.clone_box()
+    }
+}
+
 /// The classic fixed-multiplier schedule (the library default): divide
 /// lambda by 5 on acceptance (clamped to `LmConfig::lambda_floor`),
 /// multiply by 10 on rejection or factorization failure, and despair
 /// when a rejection would push lambda past 1e10.
+#[derive(Clone)]
 pub struct DefaultLambdaDriver<T> {
     floor: T,
     ceiling: T,
@@ -747,6 +790,7 @@ impl<T: Float> LambdaDriver<T> for DefaultLambdaDriver<T> {
 ///
 /// Respects `LmConfig::lambda_floor` on the way down and despairs above
 /// the same 1e10 ceiling as the default schedule.
+#[derive(Clone)]
 pub struct NielsenLambdaDriver<T> {
     nu: T,
     floor: T,
@@ -812,26 +856,19 @@ impl<T: Float> LambdaDriver<T> for NielsenLambdaDriver<T> {
     }
 }
 
-/// Run Levenberg-Marquardt optimization with the given solver backend
-/// and the default damping schedule ([`DefaultLambdaDriver`]).
+/// Run Levenberg-Marquardt optimization with the given solver backend.
+/// The damping schedule comes from `config.driver` (see [`LambdaDriver`];
+/// defaults to [`DefaultLambdaDriver`], set another with
+/// [`LmConfig::with_driver`]).
 pub fn lm_solve<T: Float, S: LmSolver<T>>(
     x0: &[T],
     solver: &mut S,
     problem: &mut impl LmProblem<T>,
     config: &LmConfig<T>,
 ) -> LmResult<T> {
-    lm_solve_driven(x0, solver, &mut DefaultLambdaDriver::default(), problem, config)
-}
-
-/// Run Levenberg-Marquardt optimization with the given solver backend
-/// and damping-schedule driver (see [`LambdaDriver`]).
-pub fn lm_solve_driven<T: Float, S: LmSolver<T>>(
-    x0: &[T],
-    solver: &mut S,
-    driver: &mut impl LambdaDriver<T>,
-    problem: &mut impl LmProblem<T>,
-    config: &LmConfig<T>,
-) -> LmResult<T> {
+    // Drivers are stateful per solve; clone the config's prototype so the
+    // shared config is untouched and a reused config starts each solve clean.
+    let mut driver = config.driver.clone_box();
     let n = x0.len();
     if n == 0 {
         return LmResult {
@@ -1389,12 +1426,6 @@ impl LmSolver<f64> for SparseFaer {
     }
 }
 
-/// Solve with faer sparse Cholesky backend (f64) and a caller-provided
-/// damping-schedule driver (see [`LambdaDriver`], e.g. [`NielsenLambdaDriver`]).
-pub fn solve_sparse_faer_driven(x0: &[f64], driver: &mut impl LambdaDriver<f64>, problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> LmResult<f64> {
-    lm_solve_driven(x0, &mut SparseFaer::new(), driver, problem, config)
-}
-
 /// Solve with faer sparse Cholesky backend (f64).
 pub fn solve_sparse_faer(x0: &[f64], problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> LmResult<f64> {
     lm_solve(x0, &mut SparseFaer::new(), problem, config)
@@ -1538,12 +1569,6 @@ impl LmSolver<f32> for SparseFaerF32 {
 
         true
     }
-}
-
-/// Solve with faer sparse Cholesky backend (f32) and a caller-provided
-/// damping-schedule driver (see [`LambdaDriver`], e.g. [`NielsenLambdaDriver`]).
-pub fn solve_sparse_faer_f32_driven(x0: &[f32], driver: &mut impl LambdaDriver<f32>, problem: &mut impl LmProblem<f32>, config: &LmConfig<f32>) -> LmResult<f32> {
-    lm_solve_driven(x0, &mut SparseFaerF32::new(), driver, problem, config)
 }
 
 /// Solve with faer sparse Cholesky backend (f32).
@@ -2331,11 +2356,12 @@ mod tests {
         }
     }
 
-    // lm_solve must be EXACTLY lm_solve_driven with the default driver:
-    // identical iterates, costs, and iteration counts.
+    // The default config carries a DefaultLambdaDriver; attaching one
+    // explicitly with with_driver must produce identical iterates, costs,
+    // and iteration counts.
     #[test]
     fn default_driver_is_the_default_schedule() {
-        let cfg = LmConfig::<f64> {
+        let base = LmConfig::<f64> {
             abs_precision: 1e-12,
             rel_precision: 1e-12,
             initial_lambda: 1e-3,
@@ -2343,22 +2369,21 @@ mod tests {
             ..Default::default()
         };
         let x0 = [-1.9f64, 2.0];
-        let plain = lm_solve(&x0, &mut Dense, &mut rosenbrock_problem(), &cfg);
-        let driven = lm_solve_driven(
-            &x0, &mut Dense, &mut DefaultLambdaDriver::default(),
-            &mut rosenbrock_problem(), &cfg);
+        let plain = lm_solve(&x0, &mut Dense, &mut rosenbrock_problem(), &base);
+        let explicit = base.clone().with_driver(DefaultLambdaDriver::default());
+        let driven = lm_solve(&x0, &mut Dense, &mut rosenbrock_problem(), &explicit);
         assert_eq!(plain.x, driven.x);
         assert_eq!(plain.end_cost, driven.end_cost);
         assert_eq!(plain.iterations, driven.iterations);
         assert_eq!(plain.accepted_iterations, driven.accepted_iterations);
     }
 
-    // NielsenLambdaDriver must reach the same optimum, and its whole point is
-    // spending fewer damped attempts than the fixed schedule on a
-    // strongly nonlinear problem.
+    // A NielsenLambdaDriver attached via with_driver must reach the same
+    // optimum, and its whole point is spending fewer damped attempts than
+    // the fixed schedule on a strongly nonlinear problem.
     #[test]
     fn nielsen_converges_with_fewer_attempts() {
-        let cfg = LmConfig::<f64> {
+        let base = LmConfig::<f64> {
             abs_precision: 1e-12,
             rel_precision: 1e-12,
             initial_lambda: 1e-3,
@@ -2366,10 +2391,9 @@ mod tests {
             ..Default::default()
         };
         let x0 = [-1.9f64, 2.0];
-        let fixed = lm_solve(&x0, &mut Dense, &mut rosenbrock_problem(), &cfg);
-        let arb = lm_solve_driven(
-            &x0, &mut Dense, &mut NielsenLambdaDriver::default(),
-            &mut rosenbrock_problem(), &cfg);
+        let fixed = lm_solve(&x0, &mut Dense, &mut rosenbrock_problem(), &base);
+        let nielsen_cfg = base.clone().with_driver(NielsenLambdaDriver::default());
+        let arb = lm_solve(&x0, &mut Dense, &mut rosenbrock_problem(), &nielsen_cfg);
         assert!(arb.end_cost < 1e-15, "nielsen end cost {}", arb.end_cost);
         assert!((arb.x[0] - 1.0).abs() < 1e-6 && (arb.x[1] - 1.0).abs() < 1e-6);
         assert!(arb.iterations <= fixed.iterations,
