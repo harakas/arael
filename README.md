@@ -382,10 +382,12 @@ SLAM-like problem.
 
 ### Damping-schedule drivers
 
-The initial damping, the per-step update strategy, and the termination
-criteria all depend on the problem's state along the solve -- there is no
-single schedule that is perfect for every problem, or even for one problem
-from start to finish. And it pays to get them right: every LM iteration is a
+Levenberg-Marquardt is an iterative algorithm with a damping parameter,
+lambda, that modulates each step between Gauss-Newton (small lambda) and
+gradient descent (large lambda). The initial value of lambda, how it evolves
+per step, and when to stop all depend on the problem's state along the solve
+-- there is no single schedule that is perfect for every problem, or even for
+one problem from start to finish. And it pays to get them right: every LM iteration is a
 full linearize + factorize + solve, so the iteration count is essentially the
 run time. Leaving damping and tolerances at their defaults therefore leaves
 considerable performance on the table, whatever the problem -- they are worth
