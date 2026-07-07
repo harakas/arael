@@ -859,6 +859,17 @@
 //!
 //! ## Damping-schedule drivers
 //!
+//! The initial damping, the per-step update strategy, and the termination
+//! criteria all depend on the problem's state along the solve -- there is no
+//! single schedule that is perfect for every problem, or even for one problem
+//! from start to finish. And it pays to get them right: every LM iteration is
+//! a full linearize + factorize + solve, so the iteration count is essentially
+//! the run time. Leaving damping and tolerances at their defaults therefore
+//! leaves considerable performance on the table, whatever the problem -- they
+//! are worth tuning to the one at hand, and a production system chasing every
+//! last bit of throughput writes a dedicated damping driver matched to its
+//! own problem.
+//!
 //! The lambda schedule is pluggable: the LM loop consults a
 //! `LambdaDriver` for every damping decision, feeding it each attempted
 //! step's outcome (costs, gradient, Hessian diagonal, attempted step).
@@ -881,19 +892,12 @@
 //! # #[arael(constraint(hb, { [m.x - 3.0] }))]
 //! # struct M { x: Param<f32>, hb: SelfBlock<M, f32> }
 //! # let mut model = M { x: Param::new(0.0), hb: SelfBlock::new() };
-//! use arael::simple_lm::{LmConfig, solve_sparse_faer_f32};
+//! use arael::simple_lm::LmConfig;
 //!
-//! let cfg = LmConfig::<f32> {
-//!     verbose: false, // turn on first when debugging a solve
-//!     ..Default::default()
-//! };
-//!
-//! let mut params = Vec::<f32>::new();
-//! model.serialize32(&mut params);
-//!
-//! let result = solve_sparse_faer_f32(&params, &mut model, &cfg);
-//!
-//! model.deserialize32(&result.x);
+//! let cfg = LmConfig::<f32> { verbose: false, ..Default::default() };
+//! // solve_sparse reads the params from the model, runs LM, and writes the
+//! // optimized values back into it.
+//! let result = model.solve_sparse(&cfg);
 //! println!("{} iterations: {:.4} -> {:.4}",
 //!     result.iterations, result.start_cost, result.end_cost);
 //! # assert!((model.x.value - 3.0).abs() < 1e-3);

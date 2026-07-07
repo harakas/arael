@@ -30,44 +30,60 @@ interop -- they don't outperform faer on any common workload.
 
 ## Basic usage
 
+Define the model with `#[arael(root)]`, build it, and call the generated
+solve method. It reads the parameters out of the model, runs LM, and writes
+the optimized values back in:
+
 ```rust,ignore
-use arael::simple_lm::{LmConfig, solve_sparse_faer_f32};
+use arael::simple_lm::LmConfig;
 
-let cfg = LmConfig::<f32> {
-    verbose: true,
-    ..Default::default()
-};
-
-let mut params = Vec::<f32>::new();
-model.serialize32(&mut params);
-
-let result = solve_sparse_faer_f32(&params, &mut model, &cfg);
-
-model.deserialize32(&result.x);
+let cfg = LmConfig::<f32> { verbose: true, ..Default::default() };
+let result = model.solve_sparse(&cfg);   // indexed sparse faer -- the default backend
 println!("{} iterations: {:.4} -> {:.4}",
     result.iterations, result.start_cost, result.end_cost);
+// `model` now holds the optimized parameters.
 ```
 
-`model: &mut impl LmProblem<T>` is the interface the solver needs.
-The `#[arael(root)]` macro generates the impl for you; you never
-write it by hand.
+`#[arael(root)]` generates `solve_sparse` and `solve_dense` on the root
+(along with the `LmProblem` impl the solver actually consumes) -- you never
+write either by hand. Reach for `solve_dense` on small or dense problems;
+otherwise `solve_sparse` is the default (see the backend table above).
 
-The macro also generates convenience methods on the root that wrap the
-serialize -> solve -> deserialize round trip, so the block above collapses
-to one call that reads the parameters from the model and writes the
-solution back into it:
+## Advanced usage
+
+**Choose a damping schedule.** The schedule driver lives on the config; the
+default is the fixed-multiplier one. For strongly nonlinear problems (bundle
+adjustment) attach the gain-ratio Nielsen schedule, and set a
+problem-appropriate `initial_lambda` -- matching the schedule and tolerances
+to the problem is where the performance is (see
+[Damping-schedule drivers](#damping-schedule-drivers)):
 
 ```rust,ignore
-let result = model.solve_sparse(&cfg);           // indexed sparse faer (the default)
-let result = model.solve_dense(&cfg);            // dense nalgebra Cholesky
-let result = model.solve_with(&mut backend, &cfg); // any LmSolver backend
+let cfg = LmConfig::<f64> { initial_lambda: 1e-6, ..Default::default() }
+    .with_driver(NielsenLambdaDriver::default());
+let result = model.solve_sparse(&cfg);
 ```
 
-The damping schedule comes from `config.driver` as usual, so
-`model.solve_sparse(&cfg.with_driver(NielsenLambdaDriver::default()))`
-runs the gain-ratio schedule. Use the free `solve_*` functions directly
-when you want to manage the parameter vector yourself (warm starts,
-sharing one buffer across solves).
+**Use an explicit backend.** `solve_with` takes any `LmSolver` instance --
+for backends that need construction, e.g. band Cholesky with a known
+half-bandwidth `kd`:
+
+```rust,ignore
+let result = model.solve_with(&mut Band::new(kd), &cfg);
+```
+
+**Manage the parameter vector yourself.** The generated methods own the
+serialize -> solve -> deserialize round trip. Drop to the free `solve_*`
+functions when you need the flat parameter vector directly -- warm-starting
+from a previous estimate, reusing one buffer across many solves, or timing
+the first iteration on its own:
+
+```rust,ignore
+let mut params = Vec::<f32>::new();
+model.serialize32(&mut params);
+let result = solve_sparse_faer_f32(&params, &mut model, &cfg);   // free function
+model.deserialize32(&result.x);
+```
 
 ## `LmConfig` -- every field, with defaults
 

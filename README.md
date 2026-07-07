@@ -381,6 +381,16 @@ SLAM-like problem.
 
 ### Damping-schedule drivers
 
+The initial damping, the per-step update strategy, and the termination
+criteria all depend on the problem's state along the solve -- there is no
+single schedule that is perfect for every problem, or even for one problem
+from start to finish. And it pays to get them right: every LM iteration is a
+full linearize + factorize + solve, so the iteration count is essentially the
+run time. Leaving damping and tolerances at their defaults therefore leaves
+considerable performance on the table, whatever the problem -- they are worth
+tuning to the one at hand, and a production system chasing every last bit of
+throughput writes a dedicated damping driver matched to its own problem.
+
 The lambda schedule is pluggable: the LM loop consults a
 `LambdaDriver` for every damping decision, feeding it each attempted
 step's outcome (costs, gradient, Hessian diagonal, attempted step).
