@@ -450,17 +450,23 @@ pub fn run(scene: &Scene) -> RunOut {
     }
 }
 
-fn cfg32(max_iters: usize) -> arael::simple_lm::LmConfig<f32> {
+fn cfg32(max_iters: usize, poses: usize) -> arael::simple_lm::LmConfig<f32> {
+    // Problem-appropriate initial damping, per pose count. At the small
+    // (60-pose) size the f32 solution lands a hair above the 1e-5 stop
+    // threshold at 1e-8 and then bounces in the f32 noise floor (a
+    // termination/precision interaction, not divergence); a slightly
+    // heavier 1e-7 makes the last step small enough to stop cleanly. The
+    // larger sizes are clean at 1e-8 (1e-7 would grind there instead --
+    // there is no single value clean at every size). SLAM_LAMBDA0 overrides.
+    let default_lambda = if poses <= 60 { 1e-7 } else { 1e-8 };
     arael::simple_lm::LmConfig {
         abs_precision: 1e-5,
         rel_precision: 1e-5,
         patience: 1,
-        // Terminate at true convergence like the other solvers: the
-        // LmConfig default min_iters is 5, which on this easy problem
-        // (converges by step 2) would pad the count with noise iterations.
         min_iters: 1,
         max_iters,
-        initial_lambda: std::env::var("SLAM_LAMBDA0").ok().and_then(|v| v.parse().ok()).unwrap_or(1e-8),
+        initial_lambda: std::env::var("SLAM_LAMBDA0").ok()
+            .and_then(|v| v.parse().ok()).unwrap_or(default_lambda),
         verbose: std::env::var("SLAM_VERBOSE").map_or(false, |v| v == "1"),
         ..Default::default()
     }
@@ -490,7 +496,7 @@ pub fn run_f32_capped(scene: &Scene, max_iters: usize) -> Solution {
     let mut path = build_f32(scene);
     let mut params: Vec<f32> = Vec::new();
     path.serialize32(&mut params);
-    let result = solve32(&params, &mut path, &cfg32(max_iters));
+    let result = solve32(&params, &mut path, &cfg32(max_iters, scene.poses.len()));
     path.deserialize32(&result.x);
     extract_f32(&path)
 }
@@ -501,11 +507,11 @@ pub fn run_f32(scene: &Scene) -> RunOut {
     path.serialize32(&mut params);
 
     let t0 = std::time::Instant::now();
-    let _ = solve32(&params, &mut path, &cfg32(1));
+    let _ = solve32(&params, &mut path, &cfg32(1, scene.poses.len()));
     let first_iter_ms = t0.elapsed().as_secs_f64() * 1e3;
 
     let t0 = std::time::Instant::now();
-    let result = solve32(&params, &mut path, &cfg32(200));
+    let result = solve32(&params, &mut path, &cfg32(200, scene.poses.len()));
     let solve_ms = t0.elapsed().as_secs_f64() * 1e3;
     path.deserialize32(&result.x);
 

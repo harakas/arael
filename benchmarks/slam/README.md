@@ -95,7 +95,9 @@ well-initialized graph rather than its shipped default (the same policy
 as [benchmarks/pgo](../pgo)): arael `initial_lambda = 1e-8` with the
 plain fixed schedule (no adaptive driver -- no step is rejected here, so
 a gain-ratio driver would only over-damp and inflate the step count;
-`SLAM_DRIVER=nielsen` opts into it, `SLAM_LAMBDA0` overrides), tiny-solver
+`SLAM_DRIVER=nielsen` opts into it, `SLAM_LAMBDA0` overrides; f32 uses
+`1e-7` at the 60-pose size, where a hair more damping stops it cleanly at
+the f32 precision floor instead of grinding), tiny-solver
 and Ceres `initial_trust_region_radius = 1e12`, SymForce
 `initial_lambda = 1e-10` (it ships 1.0), factrs its default (`lambda`
 starts at 1e-10 -- already near-Gauss-Newton), g2o `setUserLambdaInit(1e-9)`
@@ -116,30 +118,26 @@ step but inexact, and at near-Gauss-Newton damping it does not reach the
 validation gate here. g2o factorizes with CHOLMOD (GPL); arael ships the
 permissive pure-Rust faer.
 
-## Results (aarch64 VM, single core, min of rounds)
+## Results (Apple M4 Pro, single core, min of rounds)
 
 ### 60 poses (240 landmarks, 5,370 observations, 1,080 parameters)
 
 | system                        | total ms | iters  | ms/iter | 1st-iter ms | peak MB | final cost |
 |-------------------------------|---------:|-------:|--------:|------------:|--------:|-----------:|
-| arael LM f64                  |     15.0 |   3(3) |    5.01 |         7.3 |    12.7 |  3062.0482 |
-| arael LM f32                  |     39.8 | 3(11)* |    3.62 |         6.4 |    10.1 |  3062.0483 |
-| tiny-solver LM               |    102.4 |      3 |   34.12 |        39.8 |    24.4 |  3062.0482 |
-| factrs LM                     |     38.0 |      3 |   12.68 |        16.9 |    23.3 |  3062.0482 |
-| ceres sparse_normal_cholesky  |     18.0 |   3(3) |    6.00 |        10.3 |    16.9 |  3062.0482 |
-| ceres sparse_schur            |     19.0 |   3(3) |    6.34 |        11.2 |    16.5 |  3062.0482 |
-| ceres iterative_schur         |     25.1 |   6(6) |    4.18 |         6.8 |    12.9 |  3067.3849 (RMSE 0.745 m) |
-| symforce LM f64               |     27.5 |   3(4) |    6.87 |        18.6 |    27.1 |  3062.0482 |
-| symforce LM f32               |     32.0 |   4(5) |    6.41 |        16.8 |    23.3 |  3062.0500 |
-| g2o LM                        |     14.3 |   3(3) |    4.75 |         7.2 |    16.4 |  3062.0482 |
-| gtsam LM                      |     31.8 |   3(3) |   10.61 |        15.4 |    47.4 |  3062.0482 |
+| arael LM f64                  |     15.0 |   3(3) |    5.01 |         7.1 |    12.6 |  3062.0482 |
+| arael LM f32                  |     13.6 |   3(3) |    4.53 |         6.2 |    10.1 |  3062.0482 |
+| tiny-solver LM               |    102.4 |      3 |   34.13 |        40.4 |    26.1 |  3062.0482 |
+| factrs LM                     |     40.0 |      3 |   13.32 |        17.7 |    23.3 |  3062.0482 |
+| ceres sparse_normal_cholesky  |     18.4 |   3(3) |    6.13 |        10.5 |    17.0 |  3062.0482 |
+| ceres sparse_schur            |     19.3 |   3(3) |    6.42 |        11.5 |    16.5 |  3062.0482 |
+| ceres iterative_schur         |     25.6 |   6(6) |    4.27 |         6.3 |    12.9 |  3067.3849 (RMSE 0.745 m) |
+| symforce LM f64               |     28.1 |   3(4) |    7.03 |        18.5 |    27.1 |  3062.0482 |
+| symforce LM f32               |     32.7 |   4(5) |    6.53 |        17.3 |    23.3 |  3062.0500 |
+| g2o LM                        |     14.5 |   3(3) |    4.82 |         7.4 |    16.4 |  3062.0482 |
+| gtsam LM                      |     32.3 |   3(3) |   10.77 |        15.9 |    47.4 |  3062.0482 |
 
 10/11 at the common optimum; ceres iterative_schur (inexact CG) does not
 reach the gate.
-
-\* f32 hits the optimum by step 3, then the remaining steps can't improve
-at the f32 noise floor and are rejected -- inflating total time, not
-ms/iter.
 
 ### 125 poses (500 landmarks, 12,830 observations, 2,250 parameters)
 
@@ -185,6 +183,58 @@ its supernodal CHOLMOD factorization (arael ships permissive faer),
 though this was not verified by a backend swap. GTSAM reaches the same
 optimum but is the slowest exact solver per-step and, by a wide margin,
 the heaviest on memory (391 MB at 250 poses vs 65 for arael).
+
+### SLAM on the edge: Raspberry Pi
+
+**Raspberry Pi 5** -- Cortex-A76 @ 2.4 GHz, aarch64, Debian Bookworm --
+runs the 60-pose problem -- 240 landmarks, 5,370 observations, 1,080
+parameters -- via `SLAM_POSES=60 ROUNDS=10 cargo run --release`:
+
+| system                        | total ms | iters  | ms/iter | 1st-iter ms | peak MB | final cost |
+|-------------------------------|---------:|-------:|--------:|------------:|--------:|-----------:|
+| arael LM f64                  |     59.0 |   3(3) |   19.66 |        26.4 |    12.0 |  3062.0482 |
+| arael LM f32                  |     49.5 |   3(3) |   16.50 |        22.9 |     9.6 |  3062.0482 |
+| tiny-solver LM                |    385.2 |      3 |  128.39 |       148.5 |    25.0 |  3062.0482 |
+| factrs LM                     |    144.9 |      3 |   48.30 |        61.8 |    27.5 |  3062.0482 |
+| ceres sparse_normal_cholesky  |     92.5 |   3(3) |   30.83 |        41.6 |    15.5 |  3062.0482 |
+| ceres sparse_schur            |     83.5 |   3(3) |   27.83 |        42.6 |    15.1 |  3062.0482 |
+| ceres iterative_schur         |     84.1 |   6(6) |   14.02 |        21.3 |    11.3 |  3067.3849 (RMSE 0.745 m) |
+| symforce LM f64               |     89.0 |   3(4) |   22.25 |        57.5 |    27.1 |  3062.0482 |
+| symforce LM f32               |     98.3 |   4(5) |   19.66 |        50.5 |    23.3 |  3062.0500 |
+| g2o LM                        |     63.6 |   3(3) |   21.19 |        28.6 |    15.2 |  3062.0482 |
+| gtsam LM                      |    143.5 |   3(3) |   47.84 |        55.4 |    48.2 |  3062.0482 |
+
+**Raspberry Pi Zero W** -- ARM1176JZF-S @ ~1 GHz, ARMv6, no NEON,
+in-order, 512 MB -- is too small to compile natively, so it runs a
+cross-compiled, dependency-free static musl binary (flags in
+`.cargo/config.toml`). Only the Rust solvers run here -- the C++ stack
+(Ceres/g2o/GTSAM) is not cross-compiled for ARMv6:
+
+```sh
+rustup target add arm-unknown-linux-musleabihf
+cargo build --release --target arm-unknown-linux-musleabihf
+```
+
+| system                        | total ms | iters  | ms/iter | 1st-iter ms | peak MB | final cost |
+|-------------------------------|---------:|-------:|--------:|------------:|--------:|-----------:|
+| arael LM f64                  |   2217.6 |   3(3) |  739.21 |       858.5 |     8.9 |  3062.0484 |
+| arael LM f32                  |   1660.2 |   3(3) |  553.40 |       665.5 |     6.5 |  3062.0484 |
+| tiny-solver LM                |  11293.2 |      3 | 3764.38 |      4061.2 |    13.1 |  3062.0483 |
+| factrs LM                     |   4601.8 |      3 | 1533.92 |      1737.1 |    14.3 |  3062.0483 |
+
+Both reach the same optimum. The Pi 5's per-step slowdown vs the M4 Pro is
+not uniform: ~3.6-3.9x for the Rust/faer solvers (arael, tiny, factrs),
+~3.1x for SymForce, and 4.3-5.0x for the CHOLMOD-based C++ solvers (Ceres,
+g2o, GTSAM). So arael's per-step lead over those widens on the Pi 5 --
+g2o, a hair faster than arael f64 on the M4 Pro (4.82 vs 5.01), lands
+behind it here (21.19 vs 19.66) -- while its gap to SymForce narrows.
+60 poses in 50-385 ms; usable.
+
+The Zero (Rust solvers only), on its in-order ARMv6 core, is ~100x
+slower, and there arael's lead over tiny/factrs narrows (6.8x -> 5.1x
+over tiny). It was measured with the static-musl binary (the Pi 5 is
+native glibc); musl's simpler malloc inflates the allocation-heavy
+tiny/factrs there by ~30-50%.
 
 ## Running
 
