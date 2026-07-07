@@ -39,6 +39,10 @@ use std::f32::consts::PI;
 // Model
 // ---------------------------------------------------------------------------
 
+// Each #[arael(constraint(...))] below computes one or more residuals -- the
+// difference between what the model predicts and what a sensor measured. The
+// same per-measurement term is a factor (GTSAM) or an edge (g2o).
+//
 // Solver bookkeeping declared in the structs below:
 // - SelfBlock<T>: the entity's diagonal block in the Hessian matrix
 //   calculated during solving.
@@ -47,30 +51,30 @@ use std::f32::consts::PI;
 // - Ref<T>: a typed index into a collection on the root struct; which
 //   collection is named by the #[arael(ref = root.poses)] attribute.
 
-// Robot pose. Carries its own odometry delta from the previous pose, in
-// the previous pose's local frame (dx forward, dy left, dgamma yaw change).
+// Robot pose. Also carries the movement measured since the previous pose,
+// in that pose's local frame (dx forward, dy left, dgamma = change of heading).
 // The first pose has no previous -- its delta fields are unused and its
 // params are held fixed (optimize = false, see build_path). The SelfBlock
 // has no self-constraint; the macro still wires its parameter indices
 // because Pose participates in the PosePair and Frine CrossBlocks.
 #[arael::model]
 struct Pose {
-    pos: Param<vect2f>,
+    pos: Param<vect2f>,             // solved for: position (x, y)
     // Heading angle: 0 = facing east (+x), counterclockwise positive.
-    gamma: Param<f32>,
-    delta_pos: vect2f,
-    delta_gamma: f32,
-    // isigma = 1 / sigma. Each residual is multiplied by the inverse of its
-    // measurement's noise level, turning it into "how many standard
-    // deviations off" -- an accurate sensor pulls harder than a sloppy one,
-    // and the units cancel so angles and meters can share one cost.
+    gamma: Param<f32>,              // solved for
+    delta_pos: vect2f,              // measured: movement since the previous pose
+    delta_gamma: f32,               // measured: change of heading since the previous pose
+    // isigma = 1 / sigma, where sigma is the sensor's uncertainty (its
+    // measurement standard deviation). Multiplying each residual by 1/sigma
+    // makes an accurate sensor pull harder than a sloppy one, and the units
+    // cancel so angles and meters can share one cost.
     delta_pos_isigma: f32,
     delta_gamma_isigma: f32,
     hb_pose: SelfBlock<Pose, f32>,
 }
 
-// Odometry edge between two consecutive poses; pure carrier for the
-// CrossBlock. The delta data lives on `cur`.
+// Odometry constraint between two consecutive poses: their actual relative
+// motion must match the movement measured on `cur` (delta_pos, delta_gamma).
 #[arael::model]
 #[arael(constraint(hb, {
     let local = matrix2sym::rotation(prev.gamma).transpose() * (cur.pos - prev.pos);
@@ -97,13 +101,14 @@ struct Landmark {
 }
 
 // A "frine" is this demo's (and slam_demo's) name for a single bearing
-// sighting linking one landmark to one pose.
+// sighting linking one landmark to one pose -- a factor (GTSAM) or edge (g2o).
 //
-// One bearing observation of `lm` from `pose`. Rotating (lm - pose) into the
-// pose's local frame and then into the bearing-aligned frame collapses both
-// rotations into one: R(gamma + bearing).transpose() (2D rotations commute
-// and compose by addition). The residual is the angle of the resulting
-// vector -- naturally wrapped to (-pi, pi] by atan2.
+// One bearing observation of `lm` from `pose`. The residual is the angle
+// difference between the landmark's actual direction and the measured bearing
+// (zero when they agree). Rotating (lm - pose) into the pose's local frame and
+// then into the bearing-aligned frame collapses both rotations into one:
+// R(gamma + bearing).transpose() (2D rotations commute and compose by
+// addition), and atan2 reads off the leftover angle, wrapped to (-pi, pi].
 #[arael::model]
 #[arael(constraint(hb, parent = lm, {
     let world_angle = pose.gamma + frine.bearing;
@@ -123,7 +128,7 @@ struct Frine {
 struct Path {
     poses: refs::Deque<Pose>,
     pose_pairs: std::vec::Vec<PosePair>,
-    landmarks: refs::Vec<Landmark>,
+    landmarks: refs::Arena<Landmark>,
 }
 
 // ---------------------------------------------------------------------------
@@ -224,7 +229,7 @@ fn build_path(cfg: &Cfg) -> (
     let mut path = Path {
         poses: refs::Deque::new(),
         pose_pairs: std::vec::Vec::new(),
-        landmarks: refs::Vec::new(),
+        landmarks: refs::Arena::new(),
     };
 
     // Initial pose estimates come from dead-reckoning noisy odometry, starting
@@ -279,11 +284,9 @@ fn build_path(cfg: &Cfg) -> (
             delta_gamma_isigma: 1.0 / cfg.odo_gamma_sigma,
             hb_pose: SelfBlock::new(),
         });
-        path.pose_pairs.push(PosePair {
-            prev: Ref::<Pose>::new((pi - 1) as u32),
-            cur: Ref::<Pose>::new(pi as u32),
-            hb: CrossBlock::new(),
-        });
+        let prev = path.poses.ref_at(pi - 1);
+        let cur = path.poses.ref_at(pi);
+        path.pose_pairs.push(PosePair { prev, cur, hb: CrossBlock::new() });
     }
 
     let mut lm_to_gt: std::vec::Vec<usize> = std::vec::Vec::new();
@@ -295,7 +298,7 @@ fn build_path(cfg: &Cfg) -> (
             let bearing = true_b + cfg.bearing_sigma * rng.sample(nd);
             if first.is_none() { first = Some((pi, bearing)); }
             frines.push(Frine {
-                pose: Ref::<Pose>::new(pi as u32),
+                pose: path.poses.ref_at(pi),
                 bearing,
                 isigma: 1.0 / cfg.bearing_sigma,
                 hb: CrossBlock::new(),
@@ -307,7 +310,7 @@ fn build_path(cfg: &Cfg) -> (
         // Initialize the landmark by projecting the first observation ray to a
         // fixed distance from the *estimated* observing pose. The optimizer
         // does the actual triangulation.
-        let p0 = &path.poses[Ref::<Pose>::new(first_pi as u32)];
+        let p0 = &path.poses[first_pi];
         let world_b = p0.gamma.value + first_b;
         let init = p0.pos.value + vect2f::new(
             cfg.init_range * world_b.cos(),
@@ -361,8 +364,7 @@ fn main() {
     println!("\n-- Pose errors vs GT --");
     let mut pos_sum = 0.0_f32;
     let mut ea_sum = 0.0_f32;
-    for (i, &(gt_p, gt_g)) in gt_poses.iter().enumerate() {
-        let pose = &path.poses[Ref::<Pose>::new(i as u32)];
+    for (i, (pose, &(gt_p, gt_g))) in path.poses.iter().zip(gt_poses.iter()).enumerate() {
         let pe = (pose.pos.value - gt_p).norm();
         let ge = (pose.gamma.value - gt_g).abs();
         println!("  pose {:2}: |dp|={:.3}m  |dgamma|={:.3}deg  pos=({:7.3},{:7.3}) gamma={:7.4}",
@@ -378,8 +380,7 @@ fn main() {
     println!("\n-- Landmark errors vs GT --");
     let mut lm_sum = 0.0_f32;
     let n_l = path.landmarks.len();
-    for i in 0..n_l {
-        let lm = &path.landmarks[Ref::<Landmark>::new(i as u32)];
+    for (i, lm) in path.landmarks.iter().enumerate() {
         let gt = gt_lms[lm_to_gt[i]];
         let e = (lm.pos.value - gt).norm();
         println!("  lm {:2}: |d|={:.3}m  pos=({:7.3},{:7.3})  frines={}",
@@ -428,8 +429,7 @@ fn compute_landmark_ellipses(path: &mut Path) -> std::vec::Vec<(vect2f, f32, f32
 
     let chi2_95 = 5.991_f64;
     let mut out = std::vec::Vec::with_capacity(path.landmarks.len());
-    for li in 0..path.landmarks.len() {
-        let lm = &path.landmarks[Ref::<Landmark>::new(li as u32)];
+    for lm in path.landmarks.iter() {
         let k = lm.pos.index() as usize;
         let cll = cov.fixed_view::<2, 2>(k, k).clone_owned();
         let eig = nalgebra::SymmetricEigen::new(cll);
@@ -471,11 +471,11 @@ fn write_eps(
 
     // Bounding box across everything we plan to draw.
     let mut pts: std::vec::Vec<vect2f> = std::vec::Vec::new();
-    for i in 0..path.poses.len() {
-        pts.push(path.poses[Ref::<Pose>::new(i as u32)].pos.value);
+    for pose in path.poses.iter() {
+        pts.push(pose.pos.value);
     }
-    for i in 0..path.landmarks.len() {
-        pts.push(path.landmarks[Ref::<Landmark>::new(i as u32)].pos.value);
+    for lm in path.landmarks.iter() {
+        pts.push(lm.pos.value);
     }
     for (p, _) in gt_poses { pts.push(*p); }
     // Only show GT landmarks that ended up in the map (skip lone-sighting ones).
@@ -539,8 +539,7 @@ fn write_eps(
     // observed landmark with a small overshoot.
     writeln!(f, "0.25 setlinewidth")?;
     let n_lm = path.landmarks.len();
-    for li in 0..n_lm {
-        let lm = &path.landmarks[Ref::<Landmark>::new(li as u32)];
+    for (li, lm) in path.landmarks.iter().enumerate() {
         let (r, g, b) = landmark_color(li, n_lm, true);
         writeln!(f, "{:.3} {:.3} {:.3} setrgbcolor", r, g, b)?;
         for fr in &lm.frines {
@@ -559,15 +558,14 @@ fn write_eps(
 
     // --- Optimized pose chain (dashed) ---
     writeln!(f, "0.08 0.15 0.30 setrgbcolor 1.0 setlinewidth [4 2] 0 setdash")?;
-    let opt_chain: std::vec::Vec<(f32, f32)> = (0..path.poses.len())
-        .map(|i| to_pg(path.poses[Ref::<Pose>::new(i as u32)].pos.value))
+    let opt_chain: std::vec::Vec<(f32, f32)> = path.poses.iter()
+        .map(|pose| to_pg(pose.pos.value))
         .collect();
     polyline(&mut f, &opt_chain)?;
 
     // --- Optimized poses (filled triangles) ---
     writeln!(f, "[] 0 setdash 0.10 0.18 0.40 setrgbcolor")?;
-    for i in 0..path.poses.len() {
-        let pose = &path.poses[Ref::<Pose>::new(i as u32)];
+    for pose in path.poses.iter() {
         let (x, y) = to_pg(pose.pos.value);
         writeln!(f, "{:.2} {:.2} {:.2} 6.5 tri",
             x, y, pose.gamma.value.to_degrees())?;
@@ -597,8 +595,8 @@ fn write_eps(
 
     // --- Landmark error lines + GT landmark dots (above the ray bundles) ---
     writeln!(f, "0.55 0.55 0.55 setrgbcolor 0.5 setlinewidth")?;
-    for i in 0..path.landmarks.len() {
-        let opt = path.landmarks[Ref::<Landmark>::new(i as u32)].pos.value;
+    for (i, lm) in path.landmarks.iter().enumerate() {
+        let opt = lm.pos.value;
         let gt = gt_lms[lm_to_gt[i]];
         let (ox, oy) = to_pg(opt);
         let (gx, gy) = to_pg(gt);
@@ -611,8 +609,8 @@ fn write_eps(
     }
 
     // --- Optimized landmarks (one hue per landmark) ---
-    for i in 0..n_lm {
-        let (x, y) = to_pg(path.landmarks[Ref::<Landmark>::new(i as u32)].pos.value);
+    for (i, lm) in path.landmarks.iter().enumerate() {
+        let (x, y) = to_pg(lm.pos.value);
         let (r, g, b) = landmark_color(i, n_lm, false);
         writeln!(f, "{:.3} {:.3} {:.3} setrgbcolor {:.2} {:.2} 2.8 dot",
             r, g, b, x, y)?;

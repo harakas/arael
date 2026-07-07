@@ -1759,7 +1759,7 @@ impl EditorApp {
         // Arc-Arc
         // Concentric: own ConstraintId
         for (i, c) in self.sketch.concentric.iter().enumerate() {
-            if !self.sketch.arcs.contains(c.a) || !self.sketch.arcs.contains(c.b) { continue; }
+            if !self.sketch.arcs.contains_ref(c.a) || !self.sketch.arcs.contains_ref(c.b) { continue; }
             let pos = self.to_screen(self.sketch.arcs[c.a].center.value);
             let vis = ac_sel(c.a) || ac_sel(c.b);
             add_coinc_entry(&mut markers, pos, ConstraintId::Concentric(i), vis);

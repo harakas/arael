@@ -154,6 +154,6 @@ fn main() {
     // Other refs are still valid
     info!("");
     info!("a={}, c={}, d={}", items[a], items[c], items[d]);
-    info!("contains(b) = {}", items.contains(b));
+    info!("contains_ref(b) = {}", items.contains_ref(b));
     info!("get(b) = {:?}", items.get(b));
 }

@@ -1966,7 +1966,7 @@ impl eframe::App for EditorApp {
                                     _ => None,
                                 };
                                 if let Some(r) = arc_ref
-                                    && self.sketch.arcs.contains(r) {
+                                    && self.sketch.arcs.contains_ref(r) {
                                         let a = &self.sketch.arcs[r];
                                         if a.is_ellipse {
                                             let dx = mouse_sketch.x - a.center.value.x;

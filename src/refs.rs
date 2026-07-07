@@ -91,6 +91,12 @@ impl<T> ExactSizeIterator for RefIter<T> {}
 ///
 /// Also supports plain `usize` indexing for convenience. Push returns a `Ref<T>` that
 /// remains valid for the lifetime of the element.
+///
+/// A `Ref<T>` is a bare index, so removing or reordering elements (`pop`,
+/// `truncate`, `retain`, `clear`) invalidates the `Ref`s to the affected
+/// elements. Accessing an invalidated `Ref` panics, or silently resolves to a
+/// different element once its index is reused. This is by design; use
+/// [`Arena`] to hold `Ref`s across deletions.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct Vec<T> {
     inner: std::vec::Vec<T>,
@@ -120,21 +126,18 @@ impl<T> Vec<T> {
     }
 
     /// Removes and returns the last element, or `None` if empty.
+    /// Invalidates the `Ref` to it (see the type-level Ref-invalidation contract).
     pub fn pop(&mut self) -> Option<T> {
         self.inner.pop()
     }
 
-    /// Removes all elements.
+    /// Removes all elements, invalidating every `Ref` (see the type docs).
     pub fn clear(&mut self) {
         self.inner.clear();
     }
 
-    /// Truncates to at most `len` elements.
-    ///
-    /// Ref-invalidation warning: existing `Ref`s to removed elements are
-    /// NOT invalidated -- resolving one panics (index out of bounds), and
-    /// a later `push` REUSES the index, silently aliasing the new
-    /// element. Prefer [`Arena`] where deletion is part of the workflow.
+    /// Shortens to at most `len` elements, dropping the rest from the back.
+    /// Invalidates the `Ref`s to the dropped elements (see the type docs).
     pub fn truncate(&mut self, len: usize) {
         self.inner.truncate(len);
     }
@@ -144,14 +147,10 @@ impl<T> Vec<T> {
         self.inner.reserve(additional);
     }
 
-    /// Retains only elements for which the predicate returns true.
-    ///
-    /// Ref-invalidation warning: `retain` COMPACTS storage, so every
-    /// element after the first removal shifts down and existing `Ref`s
-    /// silently point at DIFFERENT elements -- no panic, wrong data.
-    /// This is exactly the failure class the typed-Ref design exists to
-    /// prevent; use [`Arena`] (stable indices, explicit free list) for
-    /// models that delete, or rebuild all `Ref`s after calling this.
+    /// Retains only the elements the predicate keeps, in order, compacting
+    /// storage. Invalidates the `Ref`s to every element at or after the first
+    /// removed one -- compaction shifts survivors down, so they resolve to a
+    /// different element with no panic (see the type docs).
     pub fn retain(&mut self, f: impl FnMut(&T) -> bool) {
         self.inner.retain(f);
     }
@@ -186,6 +185,11 @@ impl<T> Vec<T> {
         self.inner.get_mut(r.0 as usize)
     }
 
+    /// Returns true if `r` refers to a live element (its index is in bounds).
+    pub fn contains_ref(&self, r: Ref<T>) -> bool {
+        (r.0 as usize) < self.inner.len()
+    }
+
     /// Returns an iterator over references to the elements.
     pub fn iter(&self) -> std::slice::Iter<'_, T> {
         self.inner.iter()
@@ -209,6 +213,27 @@ impl<T> Vec<T> {
     /// Returns an iterator yielding a `Ref<T>` for each element.
     pub fn refs(&self) -> RefIter<T> {
         RefIter { current: 0, remaining: self.inner.len() as u32, _marker: PhantomData }
+    }
+
+    /// Returns an iterator yielding `(Ref<T>, &T)` for each element -- the
+    /// stable handle alongside the value, so you never hand-build a `Ref`
+    /// from a loop counter.
+    pub fn iter_refs(&self) -> impl Iterator<Item = (Ref<T>, &T)> + '_ {
+        self.inner.iter().enumerate().map(|(i, v)| (Ref::new(i as u32), v))
+    }
+
+    /// Returns an iterator yielding `(Ref<T>, &mut T)` for each element.
+    pub fn iter_refs_mut(&mut self) -> impl Iterator<Item = (Ref<T>, &mut T)> + '_ {
+        self.inner.iter_mut().enumerate().map(|(i, v)| (Ref::new(i as u32), v))
+    }
+
+    /// Returns the `Ref` of the `pos`-th element (panics if out of range).
+    /// Turns a positional index into a stable handle instead of writing
+    /// `Ref::new(pos as u32)` by hand.
+    pub fn ref_at(&self, pos: usize) -> Ref<T> {
+        assert!(pos < self.inner.len(),
+            "ref_at: position {pos} out of range (len {})", self.inner.len());
+        Ref::new(pos as u32)
     }
 }
 
@@ -279,10 +304,16 @@ impl<T: fmt::Debug> fmt::Debug for Vec<T> {
 
 /// Double-ended queue with Ref-based access. Like `VecDeque` but indexed by `Ref<T>`.
 ///
-/// Refs remain valid after push_front/push_back/pop_front/pop_back operations, as
-/// long as the referenced element has not been removed. Useful for sliding-window
-/// patterns where old elements are popped from the front while new ones are pushed
-/// to the back.
+/// A `Ref<T>` stays valid as long as the element it points to is still in the
+/// deque: pushing at either end, or removing a *different* element, does not
+/// affect it. That is what the sliding-window pattern needs -- pop old elements
+/// off the front, push new ones on the back, and every `Ref` to an element
+/// still present keeps resolving. Removing the element a `Ref` points to
+/// (`pop_front`, `pop_back`, `truncate`, `clear`) invalidates that `Ref` by
+/// design: it resolves out of range until the slot is reused, then silently
+/// aliases a new element, so prune constraints referencing evicted elements.
+/// Use [`Arena`] to keep a removed handle permanently dead.
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct Deque<T> {
     first_index: u32,
     inner: std::collections::VecDeque<T>,
@@ -319,18 +350,14 @@ impl<T> Deque<T> {
     }
 
     /// Removes and returns the back element, or `None` if empty.
+    /// Invalidates the `Ref` to it (see the type docs).
     pub fn pop_back(&mut self) -> Option<T> {
         self.inner.pop_back()
     }
 
-    /// Removes and returns the front element, or `None` if empty.
-    /// Existing refs to other elements remain valid.
-    ///
-    /// Ref-invalidation warning: `Ref`s to the popped element are NOT
-    /// invalidated; the ring slot is REUSED after enough pushes, at
-    /// which point a stale `Ref` silently aliases a new element.
-    /// Sliding-window models must prune constraints referencing evicted
-    /// entries as part of the eviction step.
+    /// Removes and returns the front element, or `None` if empty. The front
+    /// index advances, so `Ref`s to the remaining elements stay valid; only
+    /// the `Ref` to the removed element is invalidated (see the type docs).
     pub fn pop_front(&mut self) -> Option<T> {
         let val = self.inner.pop_front();
         if val.is_some() {
@@ -339,7 +366,8 @@ impl<T> Deque<T> {
         val
     }
 
-    /// Removes all elements and resets the index counter to 0.
+    /// Removes all elements and resets the front index to 0, invalidating
+    /// every `Ref` (see the type docs).
     pub fn clear(&mut self) {
         self.inner.clear();
         self.first_index = 0;
@@ -350,7 +378,8 @@ impl<T> Deque<T> {
         self.inner.reserve(additional);
     }
 
-    /// Truncates to at most `len` elements, removing from the back.
+    /// Shortens to at most `len` elements, dropping from the back.
+    /// Invalidates the `Ref`s to the dropped elements (see the type docs).
     pub fn truncate(&mut self, len: usize) {
         self.inner.truncate(len);
     }
@@ -419,6 +448,28 @@ impl<T> Deque<T> {
     pub fn refs(&self) -> RefIter<T> {
         RefIter { current: self.first_index, remaining: self.inner.len() as u32, _marker: PhantomData }
     }
+
+    /// Returns an iterator yielding `(Ref<T>, &T)` for each element, front to
+    /// back -- the stable handle alongside the value.
+    pub fn iter_refs(&self) -> impl Iterator<Item = (Ref<T>, &T)> + '_ {
+        let base = self.first_index;
+        self.inner.iter().enumerate().map(move |(i, v)| (Ref::new(base.wrapping_add(i as u32)), v))
+    }
+
+    /// Returns an iterator yielding `(Ref<T>, &mut T)` for each element, front to back.
+    pub fn iter_refs_mut(&mut self) -> impl Iterator<Item = (Ref<T>, &mut T)> + '_ {
+        let base = self.first_index;
+        self.inner.iter_mut().enumerate().map(move |(i, v)| (Ref::new(base.wrapping_add(i as u32)), v))
+    }
+
+    /// Returns the `Ref` of the `pos`-th element from the front (panics if
+    /// out of range). Accounts for the front offset left by prior
+    /// `pop_front`s, so it stays correct as a sliding window advances.
+    pub fn ref_at(&self, pos: usize) -> Ref<T> {
+        assert!(pos < self.inner.len(),
+            "ref_at: position {pos} out of range (len {})", self.inner.len());
+        Ref::new(self.first_index.wrapping_add(pos as u32))
+    }
 }
 
 impl<T: Clone> Deque<T> {
@@ -440,6 +491,23 @@ impl<T> ops::IndexMut<Ref<T>> for Deque<T> {
     fn index_mut(&mut self, r: Ref<T>) -> &mut T {
         let offset = r.0.wrapping_sub(self.first_index) as usize;
         &mut self.inner[offset]
+    }
+}
+
+impl<T> ops::Index<usize> for Deque<T> {
+    type Output = T;
+    /// Positional access from the front (`0` = front element), like
+    /// `VecDeque`. Distinct from `Index<Ref<T>>`: a `usize` is a position
+    /// that shifts as the front advances, a `Ref<T>` is a stable handle
+    /// that does not.
+    fn index(&self, pos: usize) -> &T {
+        &self.inner[pos]
+    }
+}
+
+impl<T> ops::IndexMut<usize> for Deque<T> {
+    fn index_mut(&mut self, pos: usize) -> &mut T {
+        &mut self.inner[pos]
     }
 }
 
@@ -486,6 +554,22 @@ impl<T> Arena<T> {
         Arena { slots: std::vec::Vec::new(), count: 0 }
     }
 
+    /// Creates an empty arena with room for at least `cap` slots.
+    pub fn with_capacity(cap: usize) -> Self {
+        Arena { slots: std::vec::Vec::with_capacity(cap), count: 0 }
+    }
+
+    /// Builds an arena holding the given values, with `Ref` indices `0..n`.
+    pub fn from_vec(v: std::vec::Vec<T>) -> Self {
+        let count = v.len();
+        Arena { slots: v.into_iter().map(Some).collect(), count }
+    }
+
+    /// Reserves capacity for at least `additional` more slots.
+    pub fn reserve(&mut self, additional: usize) {
+        self.slots.reserve(additional);
+    }
+
     /// Inserts a value and returns a `Ref` to it. Always appends a new slot.
     pub fn push(&mut self, val: T) -> Ref<T> {
         let idx = self.slots.len() as u32;
@@ -494,17 +578,43 @@ impl<T> Arena<T> {
         Ref::new(idx)
     }
 
-    /// Removes the element at `r` and returns it, or `None` if already removed.
-    /// Other refs remain valid.
+    /// Removes the element at `r` and returns it, or `None` if already
+    /// removed. Every other `Ref` stays valid, and the freed slot is never
+    /// reused, so the removed `Ref` fails loudly (`get` -> `None`, indexing
+    /// panics) rather than silently aliasing a later element.
     pub fn remove(&mut self, r: Ref<T>) -> Option<T> {
         let val = self.slots.get_mut(r.0 as usize)?.take();
         if val.is_some() { self.count -= 1; }
         val
     }
 
+    /// Retains only the elements for which the predicate returns `true`,
+    /// dropping the rest in place. Unlike `Vec::retain` this never compacts:
+    /// surviving elements keep their slots, so every `Ref` to a retained
+    /// element stays valid -- only the `Ref`s to dropped elements are
+    /// invalidated, and (per [`remove`](Self::remove)) those fail loudly
+    /// rather than aliasing a later element.
+    pub fn retain(&mut self, mut f: impl FnMut(&T) -> bool) {
+        for slot in self.slots.iter_mut() {
+            if let Some(v) = slot {
+                if !f(v) {
+                    *slot = None;
+                    self.count -= 1;
+                }
+            }
+        }
+    }
+
     /// Returns true if `r` refers to a live (non-removed) element.
-    pub fn contains(&self, r: Ref<T>) -> bool {
+    pub fn contains_ref(&self, r: Ref<T>) -> bool {
         self.slots.get(r.0 as usize).and_then(|s| s.as_ref()).is_some()
+    }
+
+    /// Deprecated alias for [`contains_ref`](Self::contains_ref) (renamed to
+    /// match `Deque::contains_ref`).
+    #[deprecated(note = "renamed to `contains_ref`")]
+    pub fn contains(&self, r: Ref<T>) -> bool {
+        self.contains_ref(r)
     }
 
     /// Returns a reference to the element at `r`, or `None` if removed or out of bounds.
@@ -552,6 +662,27 @@ impl<T> Arena<T> {
     pub fn refs(&self) -> ArenaRefIter<'_, T> {
         ArenaRefIter { current: 0, slots: &self.slots, _marker: PhantomData }
     }
+
+    /// Returns an iterator yielding `(Ref<T>, &T)` for each live element,
+    /// skipping removed slots -- the stable handle alongside the value.
+    pub fn iter_refs(&self) -> impl Iterator<Item = (Ref<T>, &T)> + '_ {
+        self.slots.iter().enumerate()
+            .filter_map(|(i, s)| s.as_ref().map(|v| (Ref::new(i as u32), v)))
+    }
+
+    /// Returns an iterator yielding `(Ref<T>, &mut T)` for each live element.
+    pub fn iter_refs_mut(&mut self) -> impl Iterator<Item = (Ref<T>, &mut T)> + '_ {
+        self.slots.iter_mut().enumerate()
+            .filter_map(|(i, s)| s.as_mut().map(|v| (Ref::new(i as u32), v)))
+    }
+
+    /// Returns the `Ref` of the `pos`-th live element (panics if out of
+    /// range). O(slots) because removed slots are skipped; prefer holding the
+    /// `Ref` returned by [`push`](Self::push) where you can.
+    pub fn ref_at(&self, pos: usize) -> Ref<T> {
+        self.refs().nth(pos)
+            .unwrap_or_else(|| panic!("ref_at: position {pos} out of range (len {})", self.count))
+    }
 }
 
 impl<T> ops::Index<Ref<T>> for Arena<T> {
@@ -572,6 +703,36 @@ impl<T: fmt::Debug> fmt::Debug for Arena<T> {
         let live: std::vec::Vec<&T> = self.iter().collect();
         write!(f, "Arena({}/{}){:?}", self.count, self.slots.len(), live)
     }
+}
+
+// `Option<T>` is IntoIterator (yielding its `Some` value), so flattening the
+// slot vec skips removed entries and gives a nameable iterator type.
+impl<'a, T> IntoIterator for &'a Arena<T> {
+    type Item = &'a T;
+    type IntoIter = std::iter::Flatten<std::slice::Iter<'a, Option<T>>>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.slots.iter().flatten()
+    }
+}
+
+impl<'a, T> IntoIterator for &'a mut Arena<T> {
+    type Item = &'a mut T;
+    type IntoIter = std::iter::Flatten<std::slice::IterMut<'a, Option<T>>>;
+    fn into_iter(self) -> Self::IntoIter {
+        self.slots.iter_mut().flatten()
+    }
+}
+
+impl<T> Default for Vec<T> {
+    fn default() -> Self { Self::new() }
+}
+
+impl<T> Default for Deque<T> {
+    fn default() -> Self { Self::new() }
+}
+
+impl<T> Default for Arena<T> {
+    fn default() -> Self { Self::new() }
 }
 
 // ============================================================
@@ -918,7 +1079,7 @@ mod tests {
         assert_eq!(a[r2], 30);
 
         // r1 is gone
-        assert!(!a.contains(r1));
+        assert!(!a.contains_ref(r1));
         assert_eq!(a.get(r1), None);
     }
 
@@ -1115,5 +1276,132 @@ mod tests {
         assert!(!d.contains_ref(r1) && !d.contains_ref(r2));
         assert_eq!(d.get(r1), None);
         assert_eq!(d.refs().count(), 1);
+    }
+
+    // -- iter_refs / iter_refs_mut / ref_at (handle-aware iteration + indexing) --
+
+    #[test]
+    fn vec_iter_refs_and_ref_at() {
+        let mut v: Vec<i32> = Vec::new();
+        let r0 = v.push(10);
+        let r1 = v.push(20);
+        let r2 = v.push(30);
+        let collected: std::vec::Vec<(Ref<i32>, i32)> =
+            v.iter_refs().map(|(r, &x)| (r, x)).collect();
+        assert_eq!(collected, vec![(r0, 10), (r1, 20), (r2, 30)]);
+        assert_eq!(v.ref_at(0), r0);
+        assert_eq!(v.ref_at(2), r2);
+        assert_eq!(v[v.ref_at(1)], 20);
+    }
+
+    #[test]
+    fn vec_iter_refs_mut() {
+        let mut v = Vec::from_vec(vec![1, 2, 3]);
+        for (r, x) in v.iter_refs_mut() {
+            *x += r.index() as i32; // 1+0, 2+1, 3+2
+        }
+        assert_eq!(v[Ref::new(0)], 1);
+        assert_eq!(v[Ref::new(1)], 3);
+        assert_eq!(v[Ref::new(2)], 5);
+    }
+
+    #[test]
+    #[should_panic(expected = "out of range")]
+    fn vec_ref_at_out_of_range_panics() {
+        let v = Vec::from_vec(vec![1, 2]);
+        let _ = v.ref_at(2);
+    }
+
+    #[test]
+    fn deque_iter_refs_and_ref_at_respect_front_offset() {
+        let mut d: Deque<i32> = Deque::new();
+        d.push_back(1);
+        let r1 = d.push_back(2);
+        let r2 = d.push_back(3);
+        d.pop_front(); // drop the first; the front offset is now 1
+        let collected: std::vec::Vec<(Ref<i32>, i32)> =
+            d.iter_refs().map(|(r, &x)| (r, x)).collect();
+        assert_eq!(collected, vec![(r1, 2), (r2, 3)]);
+        // ref_at counts from the current front, not from original push order.
+        assert_eq!(d.ref_at(0), r1);
+        assert_eq!(d.ref_at(1), r2);
+        assert_eq!(d[d.ref_at(0)], 2);
+    }
+
+    #[test]
+    fn deque_usize_index_is_positional_ref_index_is_stable() {
+        let mut d: Deque<i32> = Deque::new();
+        d.push_back(10);
+        let r1 = d.push_back(20);
+        d.push_back(30);
+        d.pop_front(); // front advances: position 0 is now the element `20`
+        // usize indexes by position from the front...
+        assert_eq!(d[0], 20);
+        assert_eq!(d[1], 30);
+        // ...while the Ref still resolves to the same element it always did.
+        assert_eq!(d[r1], 20);
+    }
+
+    #[test]
+    fn arena_retain_keeps_surviving_refs_valid() {
+        let mut a: Arena<i32> = Arena::new();
+        let r0 = a.push(10);
+        let r1 = a.push(20);
+        let r2 = a.push(30);
+        a.retain(|&v| v != 20); // drop the middle element in place
+        assert_eq!(a.len(), 2);
+        // Survivors keep their slots and handles -- no compaction.
+        assert_eq!(a[r0], 10);
+        assert_eq!(a[r2], 30);
+        assert!(a.contains_ref(r0) && a.contains_ref(r2));
+        assert!(!a.contains_ref(r1));
+        assert_eq!(a.get(r1), None);
+        // `for x in &arena` iterates live elements.
+        let seen: std::vec::Vec<i32> = (&a).into_iter().copied().collect();
+        assert_eq!(seen, vec![10, 30]);
+    }
+
+    #[test]
+    fn deque_serde_roundtrip_preserves_front_offset() {
+        let mut d: Deque<i32> = Deque::new();
+        d.push_back(1);
+        let r1 = d.push_back(2);
+        d.push_back(3);
+        d.pop_front(); // advance the front so first_index != 0
+        let json = serde_json::to_string(&d).unwrap();
+        let back: Deque<i32> = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.len(), 2);
+        // The front offset survives, so the original Ref still resolves.
+        assert_eq!(back[r1], 2);
+        assert_eq!(back.ref_at(0), r1);
+        let vals: std::vec::Vec<i32> = back.iter().copied().collect();
+        assert_eq!(vals, vec![2, 3]);
+    }
+
+    #[test]
+    fn containers_default_is_empty() {
+        assert!(Vec::<i32>::default().is_empty());
+        assert!(Deque::<i32>::default().is_empty());
+        assert!(Arena::<i32>::default().is_empty());
+    }
+
+    #[test]
+    fn arena_iter_refs_and_ref_at_skip_removed() {
+        let mut a: Arena<i32> = Arena::new();
+        let r0 = a.push(10);
+        let r1 = a.push(20);
+        let r2 = a.push(30);
+        a.remove(r1); // leave a hole in the middle
+        let collected: std::vec::Vec<(Ref<i32>, i32)> =
+            a.iter_refs().map(|(r, &x)| (r, x)).collect();
+        assert_eq!(collected, vec![(r0, 10), (r2, 30)]);
+        // ref_at indexes live elements, skipping the removed slot.
+        assert_eq!(a.ref_at(0), r0);
+        assert_eq!(a.ref_at(1), r2);
+        for (_, x) in a.iter_refs_mut() {
+            *x += 1;
+        }
+        assert_eq!(a[r0], 11);
+        assert_eq!(a[r2], 31);
     }
 }
