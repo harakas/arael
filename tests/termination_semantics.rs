@@ -8,7 +8,7 @@
 // small-step tail, so it cannot test this.)
 
 use arael::model::{Model, Param, SelfBlock, CrossBlock};
-use arael::simple_lm::LmConfig;
+use arael::simple_lm::{LmConfig, LmStatus};
 use arael::vect::vect2d;
 use arael::refs::{self, Ref};
 
@@ -127,4 +127,22 @@ fn patience_controls_stop() {
     let r8 = c8.solve_sparse(&cfg(8));
     assert!(r8.iterations > r2.iterations,
         "patience 8 ({}) should run longer than patience 2 ({})", r8.iterations, r2.iterations);
+}
+
+#[test]
+fn status_reports_convergence() {
+    // A normal solve stops via the small-step/noise-floor path (R11).
+    let mut c = build_chain();
+    let r = c.solve_sparse(&LmConfig { max_iters: 200, ..Default::default() });
+    assert_eq!(r.status, LmStatus::Converged, "normal solve should report Converged");
+    assert!(r.final_lambda.is_finite(), "final_lambda should be finite, got {}", r.final_lambda);
+}
+
+#[test]
+fn status_reports_max_iterations() {
+    // A tight cap stops before convergence -> MaxIterations, not Converged.
+    let mut c = build_chain();
+    let r = c.solve_sparse(&LmConfig { max_iters: 2, min_iters: 0, ..Default::default() });
+    assert_eq!(r.status, LmStatus::MaxIterations, "capped solve should report MaxIterations");
+    assert_eq!(r.iterations, 2);
 }

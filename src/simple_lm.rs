@@ -288,7 +288,31 @@ where
     }
 }
 
+/// Why the Levenberg-Marquardt solver stopped (see [`LmResult::status`]).
+/// Each variant is a distinct exit path in the solve loop.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LmStatus {
+    /// Reached a minimum: `patience` consecutive small steps, the
+    /// machine-precision noise floor, or a zero starting cost.
+    Converged,
+    /// Cost dropped to or below [`LmConfig::cost_threshold`].
+    CostThreshold,
+    /// Hit [`LmConfig::max_iters`] without meeting a convergence criterion.
+    MaxIterations,
+    /// The damping driver gave up -- lambda would pass its ceiling and no
+    /// step could be accepted ([`LambdaDriver::rejected`] returned `None`).
+    LambdaCeiling,
+    /// 20 consecutive damped attempts failed to produce a cost-decreasing
+    /// step (the hard inner-retry budget, distinct from `LambdaCeiling`).
+    RetryBudgetExhausted,
+    /// A parameter's Gauss-Newton Hessian diagonal was non-positive (no
+    /// active constraint curvature reaches it, or assembly was poisoned by
+    /// NaN). The solve returned the best parameters found so far.
+    DegenerateDiagonal { param: usize },
+}
+
 /// Result returned by the Levenberg-Marquardt solver.
+#[derive(Clone, Debug)]
 pub struct LmResult<T> {
     /// Final parameter vector.
     pub x: Vec<T>,
@@ -302,6 +326,11 @@ pub struct LmResult<T> {
     /// `iterations - accepted_iterations` is the damping-retry overhead:
     /// rejected trial steps and failed factorizations.
     pub accepted_iterations: usize,
+    /// Why the solve stopped.
+    pub status: LmStatus,
+    /// The damping parameter lambda at exit. Seeds a warm restart or a
+    /// follow-up solve that wants to resume from the same damping.
+    pub final_lambda: T,
 }
 
 // ---------------------------------------------------------------------------
@@ -874,6 +903,7 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
         return LmResult {
             x: x0.to_vec(), start_cost: T::zero(), end_cost: T::zero(),
             iterations: 0, accepted_iterations: 0,
+            status: LmStatus::Converged, final_lambda: T::zero(),
         };
     }
 
@@ -899,6 +929,9 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
     let mut end_cost = T::zero();
 
     let mut small_count = 0usize;
+    // The exit reason. Defaults to MaxIterations; each convergence or
+    // early-stop path overwrites it before breaking out of the loop.
+    let mut status = LmStatus::MaxIterations;
     let mut done = false;
     let mut iter = 0usize;
     let mut accepted = 0usize;
@@ -915,7 +948,8 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
             end_cost = computed_cost;
             // Already at zero cost — nothing to do
             if start_cost == T::zero() {
-                return LmResult { x: cur_x, start_cost, end_cost, iterations: 0, accepted_iterations: 0 };
+                return LmResult { x: cur_x, start_cost, end_cost, iterations: 0,
+                    accepted_iterations: 0, status: LmStatus::Converged, final_lambda: lambda };
             }
         }
         solver.extract_diagonal(&matrix, &mut diagonal);
@@ -930,14 +964,16 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
         // saturated robustifier can produce it from data), so it
         // terminates the solve loudly instead of panicking; structural
         // degeneracy (missing diagonal ENTRY) panics at CSC build time.
-        // TODO(F4): report as a proper LmStatus instead of a log line.
+        // Reported as LmStatus::DegenerateDiagonal on the returned result.
         for (i, d) in diagonal.iter().enumerate() {
             if !(*d > T::zero()) {
                 error!("arael::lm_solve: parameter {} has non-positive Hessian \
                         diagonal ({:?}) at iteration {}; no active constraint \
                         curvature touches it (degenerate model) -- terminating solve",
                     i, d.to_f64(), iter);
-                return LmResult { x: cur_x, start_cost, end_cost, iterations: iter, accepted_iterations: accepted };
+                return LmResult { x: cur_x, start_cost, end_cost, iterations: iter,
+                    accepted_iterations: accepted,
+                    status: LmStatus::DegenerateDiagonal { param: i }, final_lambda: lambda };
             }
         }
 
@@ -1012,6 +1048,7 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
                 // Cost reached target threshold -- terminate (respects min_iters)
                 if iter >= config.min_iters && new_cost <= config.cost_threshold {
                     end_cost = new_cost;
+                    status = LmStatus::CostThreshold;
                     done = true;
                     break;
                 }
@@ -1032,6 +1069,7 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
                 if iter >= config.min_iters && is_small {
                     small_count += 1;
                     if small_count >= config.patience {
+                        status = LmStatus::Converged;
                         done = true;
                     }
                 } else {
@@ -1042,6 +1080,7 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
             }
 
             if at_precision {
+                status = LmStatus::Converged;
                 done = true;
                 break;
             }
@@ -1054,6 +1093,7 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
                 None => {
                     // The driver gave up (lambda past its ceiling):
                     // terminate like an exhausted retry budget.
+                    status = LmStatus::LambdaCeiling;
                     inner = INNER_LOOPS;
                     break;
                 }
@@ -1062,6 +1102,11 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
             inner += 1;
         }
         if inner >= INNER_LOOPS && !done {
+            // Distinguish the hard 20-retry cap from the driver's lambda
+            // ceiling (the None branch above already set LambdaCeiling).
+            if status == LmStatus::MaxIterations {
+                status = LmStatus::RetryBudgetExhausted;
+            }
             if config.verbose {
                 eprintln!("LM terminated: {} consecutive inner steps without improvement (lambda={}, cost={})",
                     INNER_LOOPS,
@@ -1078,6 +1123,8 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
         end_cost,
         iterations: iter,
         accepted_iterations: accepted,
+        status,
+        final_lambda: lambda,
     }
 }
 

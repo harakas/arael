@@ -344,8 +344,29 @@ pub struct LmResult<T> {
     pub end_cost: T,
     pub iterations: usize,           // including inner damping retries
     pub accepted_iterations: usize,  // cost-decreasing steps only
+    pub status: LmStatus,            // why the solve stopped
+    pub final_lambda: T,             // damping at exit (seeds a warm restart)
 }
 ```
+
+`status` says *why* the solve stopped, so callers can branch on the outcome
+directly instead of inferring convergence from the cost or iteration count:
+
+```rust,ignore
+pub enum LmStatus {
+    Converged,             // patience small steps / noise floor / zero start cost
+    CostThreshold,         // reached LmConfig::cost_threshold
+    MaxIterations,         // hit LmConfig::max_iters
+    LambdaCeiling,         // driver gave up: lambda past its ceiling
+    RetryBudgetExhausted,  // 20 inner retries with no accepted step
+    DegenerateDiagonal { param: usize },  // non-positive Hessian diagonal
+}
+```
+
+`LambdaCeiling` and `RetryBudgetExhausted` both mean "no step could be
+accepted," but distinguish the driver hitting its damping ceiling from the
+hard inner-retry cap. `DegenerateDiagonal` returns the best parameters found
+so far rather than panicking. `LmResult` derives `Clone`/`Debug`.
 
 After a successful solve, hand `result.x` back to the model via
 `model.deserialize32(&result.x)` (or `deserialize64`).
