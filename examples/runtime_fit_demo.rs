@@ -75,7 +75,7 @@ impl ExtendedModel for RegressionModel {
         let derivs: Vec<(u32, E)> = self.derivs.iter().map(|(_, idx, d)| (*idx, d.clone())).collect();
         let mut vars: HashMap<&str, f64> = HashMap::new();
         for (i, name) in self.param_names.iter().enumerate() {
-            let idx = self.coeffs[arael::refs::Ref::new(i as u32)].value.index() as usize;
+            let idx = self.coeffs[i].value.index() as usize;
             vars.insert(name.as_str(), params[idx]);
         }
         let indices: Vec<u32> = derivs.iter().map(|(idx, _)| *idx).collect();
@@ -98,7 +98,7 @@ impl RegressionModel {
     fn build_vars<'a>(&'a self, params: &[f64]) -> HashMap<&'a str, f64> {
         let mut vars = HashMap::new();
         for (i, name) in self.param_names.iter().enumerate() {
-            let idx = self.coeffs[arael::refs::Ref::new(i as u32)].value.index() as usize;
+            let idx = self.coeffs[i].value.index() as usize;
             vars.insert(name.as_str(), params[idx]);
         }
         vars
@@ -198,7 +198,7 @@ fn build_model(equation: &str, data: Vec<(f64, f64)>, init: &HashMap<String, f64
     // Pre-compute symbolic derivatives
     for (i, name) in param_names.iter().enumerate() {
         let d = residual_expr.diff(name.as_str());
-        let idx = model.coeffs[arael::refs::Ref::new(i as u32)].value.index();
+        let idx = model.coeffs[i].value.index();
         model.derivs.push((name.clone(), idx, d));
     }
 
@@ -334,8 +334,8 @@ fn main() {
     println!("Birge ratio:    s = {:.6} (s^2 = cost/(N-p) = {:.6})", s2.sqrt(), s2);
     print!("Result (+/- 1 sigma, ~68% CI):");
     for (i, name) in model.param_names.iter().enumerate() {
-        let v = model.coeffs[arael::refs::Ref::new(i as u32)].value.value;
-        let pi = model.coeffs[arael::refs::Ref::new(i as u32)].value.index() as usize;
+        let v = model.coeffs[i].value.value;
+        let pi = model.coeffs[i].value.index() as usize;
         print!(" {} = {:.8} +/- {:.8}", name, v, uncertainties[pi]);
     }
     println!();
@@ -346,7 +346,7 @@ fn main() {
         let mut vars: HashMap<&str, f64> = HashMap::new();
         vars.insert("x", x);
         for (i, name) in model.param_names.iter().enumerate() {
-            vars.insert(name.as_str(), model.coeffs[arael::refs::Ref::new(i as u32)].value.value);
+            vars.insert(name.as_str(), model.coeffs[i].value.value);
         }
         let model_y = arael_sym::parse(equation).unwrap().eval(&vars).unwrap_or(f64::NAN);
         println!("{:12.8} {:12.8} {:12.8}", x, y, model_y);

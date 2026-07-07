@@ -120,9 +120,11 @@ fn build_f64(ds: &Dataset) -> Scene {
         s.points.push(Point { pos: Param::new(*p), hb: SelfBlock::new() });
     }
     for o in &ds.observations {
+        let cam = s.cameras.ref_at(o.cam);
+        let pt = s.points.ref_at(o.point);
         s.observations.push(Obs {
-            cam: Ref::new(o.cam),
-            pt: Ref::new(o.point),
+            cam,
+            pt,
             xy: o.xy,
             hb: CrossBlock::new(),
         });
@@ -148,9 +150,11 @@ fn build_f32(ds: &Dataset) -> SceneF {
         s.points.push(PointF { pos: Param::new(vect3f::from(*p)), hb: SelfBlock::new() });
     }
     for o in &ds.observations {
+        let cam = s.cameras.ref_at(o.cam);
+        let pt = s.points.ref_at(o.point);
         s.observations.push(ObsF {
-            cam: Ref::new(o.cam),
-            pt: Ref::new(o.point),
+            cam,
+            pt,
             xy: vect2f::from(o.xy),
             hb: CrossBlock::new(),
         });

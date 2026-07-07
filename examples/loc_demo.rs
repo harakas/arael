@@ -142,7 +142,7 @@ struct PosePair {
 #[arael(root, f32)]
 struct Path {
     poses: refs::Deque<Pose>,
-    landmarks: refs::Vec<PointLandmark>,
+    landmarks: refs::Arena<PointLandmark>,
     pose_pairs: std::vec::Vec<PosePair>,
     gamma: f32,
     drift_pos_isigma: f32,
@@ -288,7 +288,7 @@ fn build_path(cfg: &SceneConfig) -> (Path, Vec<(vect3f, vect3f)>, Vec<vect3f>) {
 
     let mut path = Path {
         poses: refs::Deque::new(),
-        landmarks: refs::Vec::new(),
+        landmarks: refs::Arena::new(),
         pose_pairs: std::vec::Vec::new(),
         gamma: 2.0 * (25.0_f32).sqrt() / std::f32::consts::PI,
         drift_pos_isigma: 1.0 / drift_pos_sigma,
@@ -297,7 +297,9 @@ fn build_path(cfg: &SceneConfig) -> (Path, Vec<(vect3f, vect3f)>, Vec<vect3f>) {
         frine_isigma_scale: 1.0,
     };
 
-    let mut frine_data: std::vec::Vec<(usize, Ref<Pose>, Ref<PointFeature>)> = std::vec::Vec::new();
+    // (landmark index, observing-pose index, feature ref). The pose ref is
+    // resolved after all poses are built (below).
+    let mut frine_data: std::vec::Vec<(usize, usize, Ref<PointFeature>)> = std::vec::Vec::new();
 
     for (pi, &(pos, ea)) in gt_poses.iter().enumerate() {
         let mr2w = matrix3f::rotation_from_euler_angles(ea);
@@ -378,7 +380,7 @@ fn build_path(cfg: &SceneConfig) -> (Path, Vec<(vect3f, vect3f)>, Vec<vect3f>) {
                     camera_pos: cam.camera_pos,
                     isigma,
                 });
-                frine_data.push((li, Ref::new(path.poses.len() as u32), feat_ref));
+                frine_data.push((li, pi, feat_ref));
             }
         }
 
@@ -414,11 +416,14 @@ fn build_path(cfg: &SceneConfig) -> (Path, Vec<(vect3f, vect3f)>, Vec<vect3f>) {
         });
     }
 
+    // Every pose is built; capture their handles to wire up frines and odometry.
+    let pose_refs: std::vec::Vec<Ref<Pose>> = path.poses.refs().collect();
+
     // Build landmarks with frines (landmarks are fixed at GT positions)
     for (li, &lm_pos) in gt_landmarks.iter().enumerate() {
         let frines: std::vec::Vec<PointFrine> = frine_data.iter()
             .filter(|(lmi, _, _)| *lmi == li)
-            .map(|(_, pose, feature)| PointFrine { pose: *pose, feature: *feature })
+            .map(|(_, pose_i, feature)| PointFrine { pose: pose_refs[*pose_i], feature: *feature })
             .collect();
         if frines.is_empty() { continue; }
         path.landmarks.push(PointLandmark {
@@ -428,7 +433,6 @@ fn build_path(cfg: &SceneConfig) -> (Path, Vec<(vect3f, vect3f)>, Vec<vect3f>) {
     }
 
     // Build pose pairs for odometry
-    let pose_refs: std::vec::Vec<Ref<Pose>> = path.poses.refs().collect();
     for i in 1..pose_refs.len() {
         path.pose_pairs.push(PosePair {
             prev: pose_refs[i - 1],
@@ -461,7 +465,7 @@ fn main() {
     // Print a few poses
     for i in [0, cfg.num_poses / 2, cfg.num_poses - 1] {
         if i >= path.poses.len() { continue; }
-        let pose = &path.poses[Ref::new(i as u32)];
+        let pose = &path.poses[i];
         let (gt_p, gt_e) = gt_poses[i];
         println!("Pose {:2}: pos=({:7.3}, {:7.3}, {:7.3}) ea=({:7.4}, {:7.4}, {:7.4})",
             i, pose.pos.value.x, pose.pos.value.y, pose.pos.value.z,
@@ -505,7 +509,7 @@ fn main() {
         let mut ea_errs_deg: std::vec::Vec<f32> = std::vec::Vec::new();
         let n = gt_poses.len().min(path.poses.len());
         for i in 0..n {
-            let pose = &path.poses[Ref::new(i as u32)];
+            let pose = &path.poses[i];
             let (gt_p, gt_e) = gt_poses[i];
             let pd = pose.pos.value - gt_p;
             let ed = pose.ea.value - gt_e;
@@ -537,8 +541,8 @@ fn main() {
     let mut dea_errs_deg: std::vec::Vec<f32> = std::vec::Vec::new();
     let mut dea_rel_errs: std::vec::Vec<f32> = std::vec::Vec::new();
     for i in 1..gt_poses.len().min(path.poses.len()) {
-        let prev = &path.poses[Ref::new((i - 1) as u32)];
-        let pose = &path.poses[Ref::new(i as u32)];
+        let prev = &path.poses[i - 1];
+        let pose = &path.poses[i];
         let (gt_prev_pos, gt_prev_ea) = gt_poses[i - 1];
         let (gt_cur_pos, gt_cur_ea) = gt_poses[i];
 

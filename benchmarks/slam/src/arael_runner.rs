@@ -268,8 +268,9 @@ fn build(scene: &Scene) -> Path {
     let mut per_lm: Vec<Vec<Frine>> = (0..scene.landmarks_init.len())
         .map(|_| Vec::new()).collect();
     for f in &scene.frines {
+        let pose = path.poses.ref_at(f.pose);
         per_lm[f.landmark as usize].push(Frine {
-            pose: Ref::new(f.pose),
+            pose,
             mf2r: matrix3d::from(f.mf2r),
             camera_pos: vect3d::from(f.camera_pos),
             isigma: vect2d::new(f.isigma.x as f64, f.isigma.y as f64),
@@ -285,9 +286,11 @@ fn build(scene: &Scene) -> Path {
         });
     }
     for o in &scene.odo {
+        let prev = path.poses.ref_at(o.prev);
+        let cur = path.poses.ref_at(o.cur);
         path.pose_pairs.push(PosePair {
-            prev: Ref::new(o.prev),
-            cur: Ref::new(o.cur),
+            prev,
+            cur,
             delta_pos: vect3d::from(o.delta_pos),
             delta_ea: vect3d::from(o.delta_ea),
             pos_cov_r: matrix3d::from(o.pos_cov_r),
@@ -337,8 +340,9 @@ fn build_f32(scene: &Scene) -> PathF {
     }
     let mut per_lm: Vec<Vec<FrineF>> = (0..scene.landmarks_init.len()).map(|_| Vec::new()).collect();
     for f in &scene.frines {
+        let pose = path.poses.ref_at(f.pose);
         per_lm[f.landmark as usize].push(FrineF {
-            pose: Ref::new(f.pose),
+            pose,
             mf2r: f.mf2r,
             camera_pos: f.camera_pos,
             isigma: f.isigma,
@@ -354,9 +358,11 @@ fn build_f32(scene: &Scene) -> PathF {
         });
     }
     for o in &scene.odo {
+        let prev = path.poses.ref_at(o.prev);
+        let cur = path.poses.ref_at(o.cur);
         path.pose_pairs.push(PosePairF {
-            prev: Ref::new(o.prev),
-            cur: Ref::new(o.cur),
+            prev,
+            cur,
             delta_pos: o.delta_pos,
             delta_ea: o.delta_ea,
             pos_cov_r: o.pos_cov_r,

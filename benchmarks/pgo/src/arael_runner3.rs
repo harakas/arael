@@ -140,9 +140,11 @@ fn build_f64(ds: &Dataset3) -> Graph3 {
     }
     for e in &ds.edges {
         let (u_tt, u_tr, u_rr) = e.u_blocks();
+        let a = g.poses.ref_at(e.a);
+        let b = g.poses.ref_at(e.b);
         g.edges.push(Edge3 {
-            a: Ref::new(e.a),
-            b: Ref::new(e.b),
+            a,
+            b,
             dt: e.dt,
             rmeas_t: crate::g2o3::quat_to_matrix(e.dq).transpose(),
             u_tt,
@@ -170,9 +172,11 @@ fn build_f32(ds: &Dataset3) -> Graph3F {
     }
     for e in &ds.edges {
         let (u_tt, u_tr, u_rr) = e.u_blocks();
+        let a = g.poses.ref_at(e.a);
+        let b = g.poses.ref_at(e.b);
         g.edges.push(Edge3F {
-            a: Ref::new(e.a),
-            b: Ref::new(e.b),
+            a,
+            b,
             dt: vect3f::from(e.dt),
             rmeas_t: matrix3f::from(crate::g2o3::quat_to_matrix(e.dq).transpose()),
             u_tt: matrix3f::from(u_tt),

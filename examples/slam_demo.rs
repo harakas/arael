@@ -197,7 +197,7 @@ struct PosePair {
 #[arael(root)]
 struct Path {
     poses: refs::Deque<Pose>,
-    landmarks: refs::Vec<PointLandmark>,
+    landmarks: refs::Arena<PointLandmark>,
     pose_pairs: std::vec::Vec<PosePair>,
     gamma: f32,
     drift_pos_isigma: f32,
@@ -354,7 +354,7 @@ fn build_path(cfg: &SceneConfig) -> (Path, Vec<(vect3f, vect3f)>, Vec<(vect3f, u
 
     let mut path = Path {
         poses: refs::Deque::new(),
-        landmarks: refs::Vec::new(),
+        landmarks: refs::Arena::new(),
         pose_pairs: std::vec::Vec::new(),
         // Robust suppression: gamma*atan(r/gamma). Residuals up to ~gamma pass
         // linearly, beyond that they saturate. With 25 expected inlier residuals,
@@ -367,7 +367,10 @@ fn build_path(cfg: &SceneConfig) -> (Path, Vec<(vect3f, vect3f)>, Vec<(vect3f, u
         frine_isigma_scale: 1.0,
     };
 
-    let mut frine_data: std::vec::Vec<(usize, Ref<Pose>, Ref<PointFeature>)> = std::vec::Vec::new();
+    // (landmark index, observing-pose index, feature ref). The pose ref is
+    // resolved after all poses are built (below); storing the index here
+    // avoids referencing a pose that has not been pushed yet.
+    let mut frine_data: std::vec::Vec<(usize, usize, Ref<PointFeature>)> = std::vec::Vec::new();
 
     for (pi, &(pos, ea)) in gt_poses.iter().enumerate() {
         let mr2w = matrix3f::rotation_from_euler_angles(ea);
@@ -453,7 +456,7 @@ fn build_path(cfg: &SceneConfig) -> (Path, Vec<(vect3f, vect3f)>, Vec<(vect3f, u
                     camera_pos: cam.camera_pos,
                     isigma,
                 });
-                frine_data.push((li, Ref::new(path.poses.len() as u32), feat_ref));
+                frine_data.push((li, pi, feat_ref));
             }
         }
 
@@ -504,6 +507,10 @@ fn build_path(cfg: &SceneConfig) -> (Path, Vec<(vect3f, vect3f)>, Vec<(vect3f, u
         });
     }
 
+    // Every pose is built; capture their handles to wire up frines and
+    // odometry.
+    let pose_refs: std::vec::Vec<Ref<Pose>> = path.poses.refs().collect();
+
     // Build landmarks with frines
     for (li, &(lm_pos, _)) in gt_landmarks.iter().enumerate() {
         let noisy_lm = vect3f::new(
@@ -513,7 +520,7 @@ fn build_path(cfg: &SceneConfig) -> (Path, Vec<(vect3f, vect3f)>, Vec<(vect3f, u
         );
         let frines: std::vec::Vec<PointFrine> = frine_data.iter()
             .filter(|(lmi, _, _)| *lmi == li)
-            .map(|(_, pose, feature)| PointFrine { pose: *pose, feature: *feature, hb: CrossBlock::new() })
+            .map(|(_, pose_i, feature)| PointFrine { pose: pose_refs[*pose_i], feature: *feature, hb: CrossBlock::new() })
             .collect();
         if frines.is_empty() { continue; } // skip landmarks with no observations
         path.landmarks.push(PointLandmark {
@@ -524,7 +531,6 @@ fn build_path(cfg: &SceneConfig) -> (Path, Vec<(vect3f, vect3f)>, Vec<(vect3f, u
     }
 
     // Build pose pairs for odometry
-    let pose_refs: std::vec::Vec<Ref<Pose>> = path.poses.refs().collect();
     for i in 1..pose_refs.len() {
         path.pose_pairs.push(PosePair {
             prev: pose_refs[i - 1],
@@ -585,7 +591,7 @@ fn main() {
     // Print a few poses
     for i in [0, cfg.num_poses / 2, cfg.num_poses - 1] {
         if i >= path.poses.len() { continue; }
-        let pose = &path.poses[Ref::new(i as u32)];
+        let pose = &path.poses[i];
         let (gt_p, gt_e) = gt_poses[i];
         println!("Pose {:2}: pos=({:7.3}, {:7.3}, {:7.3}) ea=({:7.4}, {:7.4}, {:7.4})",
             i, pose.pos.value.x, pose.pos.value.y, pose.pos.value.z,
@@ -635,7 +641,7 @@ fn main() {
         let mut ea_err_sum = 0.0_f32;
         let n = gt_poses.len().min(path.poses.len());
         for i in 0..n {
-            let pose = &path.poses[Ref::new(i as u32)];
+            let pose = &path.poses[i];
             let (gt_p, gt_e) = gt_poses[i];
             pos_err_sum += (pose.pos.value - gt_p).norm();
             ea_err_sum += (pose.ea.value - gt_e).norm();
@@ -656,8 +662,8 @@ fn main() {
     let mut dea_errs_deg: std::vec::Vec<f32> = std::vec::Vec::new();
     let mut dea_rel_errs: std::vec::Vec<f32> = std::vec::Vec::new();
     for i in 1..gt_poses.len().min(path.poses.len()) {
-        let prev = &path.poses[Ref::new((i - 1) as u32)];
-        let pose = &path.poses[Ref::new(i as u32)];
+        let prev = &path.poses[i - 1];
+        let pose = &path.poses[i];
         let (gt_prev_pos, gt_prev_ea) = gt_poses[i - 1];
         let (gt_cur_pos, gt_cur_ea) = gt_poses[i];
 
@@ -747,9 +753,7 @@ fn main() {
     let mut lm_errs: std::vec::Vec<f32> = std::vec::Vec::new();
     let mut lm_rel_errs: std::vec::Vec<f32> = std::vec::Vec::new();
     let mut max_sigmas: std::vec::Vec<f64> = std::vec::Vec::new();
-    for (i, &(gt_lm, _anchor)) in gt_landmarks.iter().enumerate() {
-        if i >= path.landmarks.len() { break; }
-        let lm = &path.landmarks[Ref::new(i as u32)];
+    for (i, (&(gt_lm, _anchor), lm)) in gt_landmarks.iter().zip(path.landmarks.iter()).enumerate() {
         // Find closest GT pose
         let (closest_idx, _) = gt_poses.iter().enumerate()
             .map(|(j, (p, _))| (j, (gt_lm - *p).norm()))
@@ -759,7 +763,7 @@ fn main() {
         let gt_mr2w = matrix3f::rotation_from_euler_angles(gt_pose_ea);
         let gt_vec = gt_mr2w.transpose() * (gt_lm - gt_pose_pos);
         // Optimized vector from closest opt pose to opt landmark in opt pose's local frame
-        let opt_pose = &path.poses[Ref::new(closest_idx as u32)];
+        let opt_pose = &path.poses[closest_idx];
         let opt_mr2w = matrix3f::rotation_from_euler_angles(opt_pose.ea.value);
         let opt_vec = opt_mr2w.transpose() * (lm.pos.value - opt_pose.pos.value);
         let err = (opt_vec - gt_vec).norm();

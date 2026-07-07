@@ -109,9 +109,11 @@ fn build_f64(ds: &Dataset) -> Graph {
         });
     }
     for e in &ds.edges {
+        let a = g.poses.ref_at(e.a);
+        let b = g.poses.ref_at(e.b);
         g.edges.push(Edge {
-            a: Ref::new(e.a),
-            b: Ref::new(e.b),
+            a,
+            b,
             delta: vect2d::new(e.dx, e.dy),
             dth: e.dth,
             wt: e.wt,
@@ -135,9 +137,11 @@ fn build_f32(ds: &Dataset) -> GraphF {
         });
     }
     for e in &ds.edges {
+        let a = g.poses.ref_at(e.a);
+        let b = g.poses.ref_at(e.b);
         g.edges.push(EdgeF {
-            a: Ref::new(e.a),
-            b: Ref::new(e.b),
+            a,
+            b,
             delta: vect2f::new(e.dx as f32, e.dy as f32),
             dth: e.dth as f32,
             wt: e.wt as f32,

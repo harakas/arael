@@ -255,7 +255,7 @@ fn build_path(cfg: &SceneConfig) -> Path {
         tilt_isigma: 1.0 / 0.25_f32.to_radians(),
     };
 
-    let mut frine_data: Vec<(usize, Ref<Pose>, Ref<PointFeature>)> = Vec::new();
+    let mut frine_data: Vec<(usize, usize, Ref<PointFeature>)> = Vec::new();
 
     for (pi, &(pos, ea)) in gt_poses.iter().enumerate() {
         let mr2w = matrix3f::rotation_from_euler_angles(ea);
@@ -298,7 +298,7 @@ fn build_path(cfg: &SceneConfig) -> Path {
                 let sigma = cam.pixel_angular_size(np);
                 let isigma = vect2f::new(1.0/sigma.x, 1.0/sigma.y);
                 let fr = features.push(PointFeature { pixel: np, mf2r, camera: cam_ref, camera_pos: cam.camera_pos, isigma });
-                frine_data.push((li, Ref::new(path.poses.len() as u32), fr));
+                frine_data.push((li, pi, fr));
             }
         }
 
@@ -328,17 +328,17 @@ fn build_path(cfg: &SceneConfig) -> Path {
         });
     }
 
+    let pose_refs: Vec<Ref<Pose>> = path.poses.refs().collect();
     for (li, &(lm_pos, _)) in gt_landmarks.iter().enumerate() {
         let noisy_lm = vect3f::new(lm_pos.x + 0.5*rng.sample(normal01) as f32, lm_pos.y + 0.5*rng.sample(normal01) as f32, lm_pos.z + 0.3*rng.sample(normal01) as f32);
         let frines: Vec<PointFrine> = frine_data.iter()
             .filter(|(lmi,_,_)| *lmi == li)
-            .map(|(_,pose,feature)| PointFrine { pose: *pose, feature: *feature, hb: CrossBlock::new() })
+            .map(|(_,pose_i,feature)| PointFrine { pose: pose_refs[*pose_i], feature: *feature, hb: CrossBlock::new() })
             .collect();
         if frines.is_empty() { continue; }
         path.landmarks.push(PointLandmark { pos: Param::new(noisy_lm), frines, hb_drift: SelfBlock::new() });
     }
 
-    let pose_refs: Vec<Ref<Pose>> = path.poses.refs().collect();
     for i in 1..pose_refs.len() {
         path.pose_pairs.push(PosePair { prev: pose_refs[i-1], cur: pose_refs[i], hb: CrossBlock::new() });
     }

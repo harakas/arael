@@ -77,9 +77,11 @@ fn main() {
         fix_x: 0.0,
         ci: 0, hb: SelfBlock::new(),
     });
+    let a = m.points.ref_at(0);
+    let b = m.points.ref_at(1);
     m.coincidents.push(Coincident {
-        a: arael::refs::Ref::new(0),
-        b: arael::refs::Ref::new(1),
+        a,
+        b,
         ci: 0, hb: CrossBlock::new(),
     });
 

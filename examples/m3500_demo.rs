@@ -113,9 +113,11 @@ fn load_g2o(path: &str, weighted: bool) -> Graph {
                     wt = i11.sqrt();
                     wr = i33.sqrt();
                 }
+                let a = graph.poses.ref_at(ia);
+                let b = graph.poses.ref_at(ib);
                 graph.edges.push(Edge {
-                    a: Ref::new(ia),
-                    b: Ref::new(ib),
+                    a,
+                    b,
                     delta: vect2d::new(dx, dy),
                     dth,
                     wt,
@@ -241,9 +243,9 @@ fn main() {
         println!("dumped poses to {}", dump);
     }
 
-    for (label, idx) in [("x0", 0u32), ("x1", 1), ("x3499", 3499)] {
-        if (idx as usize) < graph.poses.len() {
-            let p = &graph.poses[Ref::<Pose2>::new(idx)];
+    for (label, idx) in [("x0", 0usize), ("x1", 1), ("x3499", 3499)] {
+        if idx < graph.poses.len() {
+            let p = &graph.poses[idx];
             println!("{}: theta={:.6} x={:.6} y={:.6}", label, p.th.value, p.pos.value.x, p.pos.value.y);
         }
     }
