@@ -335,7 +335,8 @@ fn main() {
     let n_frines: usize = path.landmarks.iter().map(|l| l.frines.len()).sum();
     println!("Path: {} poses, {} pose_pairs, {} landmarks, {} frines",
         path.poses.len(), path.pose_pairs.len(), path.landmarks.len(), n_frines);
-    // Flatten every optimize = true param into one flat vector.
+    // Report the flattened parameter count (serialize32 collects every
+    // optimize = true param into one vector).
     let mut params: std::vec::Vec<f32> = std::vec::Vec::new();
     path.serialize32(&mut params);
     println!("Parameters: {} (Pose={}, Landmark={})\n",
@@ -347,11 +348,11 @@ fn main() {
     // is rejected. With this seed you can see the cost spike and lambda
     // climb mid-run before convergence resumes.
     let lm_cfg = arael::simple_lm::LmConfig::<f32> { verbose: true, ..Default::default() };
-    // Levenberg-Marquardt: repeatedly linearize the constraints around the
-    // current estimate, solve for a step, accept it if the cost drops.
-    let result = arael::simple_lm::solve_sparse_faer_f32(&params, &mut path, &lm_cfg);
-    // Write the optimized values back into the structs.
-    path.deserialize32(&result.x);
+    // One call runs the whole Levenberg-Marquardt solve (indexed sparse
+    // faer backend): it flattens the params, repeatedly linearizes the
+    // constraints and takes damped steps, then writes the optimized values
+    // straight back into the pose/landmark structs.
+    let result = path.solve_sparse(&lm_cfg);
     println!("\n{} iterations, cost {:.4} -> {:.4}",
         result.iterations, result.start_cost, result.end_cost);
 

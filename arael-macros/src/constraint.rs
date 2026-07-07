@@ -4266,6 +4266,23 @@ pub fn generate_root_methods(
         quote! {}
     };
 
+    // Precision-dependent pieces for the generated solve_with / solve_dense
+    // / solve_sparse convenience methods: the right (de)serialize method and
+    // the right f32/f64 faer backend constructor.
+    let (solve_serialize, solve_deserialize, sparse_backend) = if precision == "f32" {
+        (
+            quote! { serialize32 },
+            quote! { deserialize32 },
+            quote! { arael::simple_lm::SparseFaerF32::new() },
+        )
+    } else {
+        (
+            quote! { serialize64 },
+            quote! { deserialize64 },
+            quote! { arael::simple_lm::SparseFaer::new() },
+        )
+    };
+
     let mut tokens = quote! {
         #(#constraint_impls)*
 
@@ -4285,6 +4302,46 @@ pub fn generate_root_methods(
             pub fn deserialize32(&mut self, data: &[f32]) {
                 arael::model::Model::deserialize_params32(self, data);
                 arael::model::ExtendedModel::extended_deserialize32(self);
+            }
+
+            /// Solve the model with the given
+            /// [`LmSolver`](arael::simple_lm::LmSolver) backend, wrapping the
+            /// serialize -> solve -> deserialize round trip: parameters are
+            /// read from `self`, optimized, and written back. The damping
+            /// schedule comes from `config.driver` (set it with
+            /// [`with_driver`](arael::simple_lm::LmConfig::with_driver)). For
+            /// the common backends use [`solve_dense`](Self::solve_dense) or
+            /// [`solve_sparse`](Self::solve_sparse).
+            pub fn solve_with<__S: arael::simple_lm::LmSolver<#prec_type>>(
+                &mut self,
+                solver: &mut __S,
+                config: &arael::simple_lm::LmConfig<#prec_type>,
+            ) -> arael::simple_lm::LmResult<#prec_type> {
+                let mut __params = std::vec::Vec::new();
+                self.#solve_serialize(&mut __params);
+                let __result = arael::simple_lm::lm_solve(&__params, solver, self, config);
+                self.#solve_deserialize(&__result.x);
+                __result
+            }
+
+            /// Solve with the dense nalgebra Cholesky backend -- best for
+            /// small or dense problems. Convenience wrapper over
+            /// [`solve_with`](Self::solve_with).
+            pub fn solve_dense(
+                &mut self,
+                config: &arael::simple_lm::LmConfig<#prec_type>,
+            ) -> arael::simple_lm::LmResult<#prec_type> {
+                self.solve_with(&mut arael::simple_lm::Dense, config)
+            }
+
+            /// Solve with the indexed sparse faer backend (pure Rust) -- the
+            /// default choice for large, sparse problems. Convenience wrapper
+            /// over [`solve_with`](Self::solve_with).
+            pub fn solve_sparse(
+                &mut self,
+                config: &arael::simple_lm::LmConfig<#prec_type>,
+            ) -> arael::simple_lm::LmResult<#prec_type> {
+                self.solve_with(&mut #sparse_backend, config)
             }
 
             fn __set_block_indices(&mut self) {

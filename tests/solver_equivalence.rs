@@ -239,3 +239,71 @@ fn solvers_reach_same_minimizer() {
         }
     }
 }
+
+// The generated root convenience methods (solve_with / solve_dense /
+// solve_sparse) must match the hand-written serialize -> solve ->
+// deserialize dance, and leave the recovered parameters written back into
+// the model. solve_dense == free solve; solve_sparse == free
+// solve_sparse_faer; solve_with(Dense) == solve_dense.
+#[test]
+fn generated_solve_methods_match_manual_dance() {
+    let cfg = LmConfig::<f64> {
+        abs_precision: 1e-14,
+        rel_precision: 1e-12,
+        max_iters: 200,
+        ..Default::default()
+    };
+
+    // Reference: the manual dance with the free dense solver.
+    let reference = {
+        let mut chain = build();
+        let mut p = std::vec::Vec::new();
+        chain.serialize64(&mut p);
+        simple_lm::solve(&p, &mut chain, &cfg).x
+    };
+
+    // solve_dense writes the solution back into the model.
+    let mut chain = build();
+    let r = chain.solve_dense(&cfg);
+    let mut back = std::vec::Vec::new();
+    chain.serialize64(&mut back);
+    assert_eq!(back, r.x, "solve_dense must write the solution back into the model");
+    for i in 0..reference.len() {
+        assert!((r.x[i] - reference[i]).abs() < 1e-12,
+            "solve_dense disagrees with free solve at {i}: {} vs {}", r.x[i], reference[i]);
+    }
+
+    // solve_sparse must match the free faer sparse solver bit for bit.
+    let faer = {
+        let mut chain = build();
+        let mut p = std::vec::Vec::new();
+        chain.serialize64(&mut p);
+        simple_lm::solve_sparse_faer(&p, &mut chain, &cfg).x
+    };
+    let mut chain = build();
+    let r = chain.solve_sparse(&cfg);
+    assert_eq!(r.x, faer, "solve_sparse must equal the free solve_sparse_faer");
+
+    // solve_with(Dense) is exactly solve_dense.
+    let mut chain = build();
+    let r = chain.solve_with(&mut simple_lm::Dense, &cfg);
+    for i in 0..reference.len() {
+        assert!((r.x[i] - reference[i]).abs() < 1e-12,
+            "solve_with(Dense) disagrees with free solve at {i}: {} vs {}", r.x[i], reference[i]);
+    }
+
+    // A non-default driver placed on the config must be honored by the
+    // generated method: solve_sparse with a Nielsen config is bit-for-bit
+    // the free faer solve with that same config (both read config.driver).
+    let nielsen_cfg = cfg.clone().with_driver(simple_lm::NielsenLambdaDriver::default());
+    let free_nielsen = {
+        let mut chain = build();
+        let mut p = std::vec::Vec::new();
+        chain.serialize64(&mut p);
+        simple_lm::solve_sparse_faer(&p, &mut chain, &nielsen_cfg).x
+    };
+    let mut chain = build();
+    let r = chain.solve_sparse(&nielsen_cfg);
+    assert_eq!(r.x, free_nielsen,
+        "solve_sparse must route config.driver (Nielsen) like the free faer solve");
+}

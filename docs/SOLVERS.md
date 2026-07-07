@@ -52,6 +52,23 @@ println!("{} iterations: {:.4} -> {:.4}",
 The `#[arael(root)]` macro generates the impl for you; you never
 write it by hand.
 
+The macro also generates convenience methods on the root that wrap the
+serialize -> solve -> deserialize round trip, so the block above collapses
+to one call that reads the parameters from the model and writes the
+solution back into it:
+
+```rust,ignore
+let result = model.solve_sparse(&cfg);           // indexed sparse faer (the default)
+let result = model.solve_dense(&cfg);            // dense nalgebra Cholesky
+let result = model.solve_with(&mut backend, &cfg); // any LmSolver backend
+```
+
+The damping schedule comes from `config.driver` as usual, so
+`model.solve_sparse(&cfg.with_driver(NielsenLambdaDriver::default()))`
+runs the gain-ratio schedule. Use the free `solve_*` functions directly
+when you want to manage the parameter vector yourself (warm starts,
+sharing one buffer across solves).
+
 ## `LmConfig` -- every field, with defaults
 
 ```rust,ignore
