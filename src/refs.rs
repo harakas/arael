@@ -541,32 +541,63 @@ impl<T: fmt::Debug> fmt::Debug for Deque<T> {
 // Arena<T> -- stable-index arena with actual deletion
 // ============================================================
 
-/// Arena with stable Ref-based access. Supports alloc/free without invalidating
-/// other refs.
+/// A slot in an [`Arena`]: either holds a value, or is free and stores the
+/// index of the next free slot. The free slots form an index-based linked
+/// list (a "free list") -- the safe-Rust equivalent of a C pointer free list,
+/// the same technique the `slab` crate uses. The links live inside the
+/// vacated slots, so reclamation costs no extra memory.
+enum Slot<T> {
+    Occupied(T),
+    Free { next: Option<u32> },
+}
+
+/// Arena with stable `Ref`-based access: alloc/free without invalidating the
+/// `Ref`s to other elements.
 ///
-/// Removed slots become `None` internally; new pushes always append rather than
-/// reusing freed slots. Iteration and `refs()` skip removed entries.
-#[derive(serde::Serialize, serde::Deserialize)]
+/// Freed slots are reclaimed. `remove` links the slot onto an internal free
+/// list and the next `push` reuses it, so storage stays bounded by the peak
+/// live count rather than the total number of inserts -- what a long-running
+/// add/remove workload (a sliding-window map) needs. Reclamation is O(1) and
+/// the free list is threaded through the vacated slots (an index, not a
+/// pointer), so it costs no extra memory.
+///
+/// Reuse means a `Ref` to a removed element may, after a later `push`,
+/// silently resolve to that slot's new occupant -- the same contract [`Vec`]
+/// and [`Deque`] already have for reused indices. Construct with
+/// [`no_reuse`](Self::no_reuse) to disable reclamation (slots then grow
+/// forever, but a stale `Ref` stays dead and fails loudly) when hunting
+/// use-after-remove bugs.
 pub struct Arena<T> {
-    slots: std::vec::Vec<Option<T>>,
+    slots: std::vec::Vec<Slot<T>>,
+    free_head: Option<u32>,
     count: usize,
+    reuse: bool,
 }
 
 impl<T> Arena<T> {
-    /// Creates an empty arena.
+    /// Creates an empty arena that reclaims freed slots (the default).
     pub fn new() -> Self {
-        Arena { slots: std::vec::Vec::new(), count: 0 }
+        Arena { slots: std::vec::Vec::new(), free_head: None, count: 0, reuse: true }
+    }
+
+    /// Creates an empty arena that never reuses a freed slot: `push` always
+    /// appends and a removed `Ref` stays permanently dead (`get` -> `None`,
+    /// indexing panics) instead of aliasing a later element. Storage grows
+    /// with every insert -- for making use-after-remove bugs fail loud while
+    /// debugging, not for production.
+    pub fn no_reuse() -> Self {
+        Arena { slots: std::vec::Vec::new(), free_head: None, count: 0, reuse: false }
     }
 
     /// Creates an empty arena with room for at least `cap` slots.
     pub fn with_capacity(cap: usize) -> Self {
-        Arena { slots: std::vec::Vec::with_capacity(cap), count: 0 }
+        Arena { slots: std::vec::Vec::with_capacity(cap), free_head: None, count: 0, reuse: true }
     }
 
     /// Builds an arena holding the given values, with `Ref` indices `0..n`.
     pub fn from_vec(v: std::vec::Vec<T>) -> Self {
         let count = v.len();
-        Arena { slots: v.into_iter().map(Some).collect(), count }
+        Arena { slots: v.into_iter().map(Slot::Occupied).collect(), free_head: None, count, reuse: true }
     }
 
     /// Reserves capacity for at least `additional` more slots.
@@ -574,44 +605,66 @@ impl<T> Arena<T> {
         self.slots.reserve(additional);
     }
 
-    /// Inserts a value and returns a `Ref` to it. Always appends a new slot.
+    /// Inserts a value and returns a `Ref` to it, reusing a freed slot when
+    /// one is available (unless the arena was created with
+    /// [`no_reuse`](Self::no_reuse)).
     pub fn push(&mut self, val: T) -> Ref<T> {
+        if self.reuse {
+            if let Some(idx) = self.free_head {
+                let next = match &self.slots[idx as usize] {
+                    Slot::Free { next } => *next,
+                    Slot::Occupied(_) => unreachable!("free list points at an occupied slot"),
+                };
+                self.free_head = next;
+                self.slots[idx as usize] = Slot::Occupied(val);
+                self.count += 1;
+                return Ref::new(idx);
+            }
+        }
         let idx = self.slots.len() as u32;
-        self.slots.push(Some(val));
+        self.slots.push(Slot::Occupied(val));
         self.count += 1;
         Ref::new(idx)
     }
 
     /// Removes the element at `r` and returns it, or `None` if already
-    /// removed. Every other `Ref` stays valid, and the freed slot is never
-    /// reused, so the removed `Ref` fails loudly (`get` -> `None`, indexing
-    /// panics) rather than silently aliasing a later element.
+    /// removed. Every other `Ref` stays valid; the freed slot joins the free
+    /// list and a later `push` reclaims it (see the type docs for the
+    /// resulting aliasing contract, or [`no_reuse`](Self::no_reuse) to opt out).
     pub fn remove(&mut self, r: Ref<T>) -> Option<T> {
-        let val = self.slots.get_mut(r.0 as usize)?.take();
-        if val.is_some() { self.count -= 1; }
-        val
+        let head = self.free_head;
+        match self.slots.get_mut(r.0 as usize) {
+            Some(slot @ Slot::Occupied(_)) => {
+                let old = std::mem::replace(slot, Slot::Free { next: head });
+                self.free_head = Some(r.0);
+                self.count -= 1;
+                match old {
+                    Slot::Occupied(v) => Some(v),
+                    Slot::Free { .. } => unreachable!(),
+                }
+            }
+            _ => None,
+        }
     }
 
     /// Retains only the elements for which the predicate returns `true`,
-    /// dropping the rest in place. Unlike `Vec::retain` this never compacts:
+    /// freeing the rest in place. Unlike `Vec::retain` this never compacts:
     /// surviving elements keep their slots, so every `Ref` to a retained
-    /// element stays valid -- only the `Ref`s to dropped elements are
-    /// invalidated, and (per [`remove`](Self::remove)) those fail loudly
-    /// rather than aliasing a later element.
+    /// element stays valid. Freed slots join the free list for reuse.
     pub fn retain(&mut self, mut f: impl FnMut(&T) -> bool) {
-        for slot in self.slots.iter_mut() {
-            if let Some(v) = slot {
-                if !f(v) {
-                    *slot = None;
-                    self.count -= 1;
-                }
+        for idx in 0..self.slots.len() {
+            let drop = matches!(&self.slots[idx], Slot::Occupied(v) if !f(v));
+            if drop {
+                self.slots[idx] = Slot::Free { next: self.free_head };
+                self.free_head = Some(idx as u32);
+                self.count -= 1;
             }
         }
     }
 
     /// Returns true if `r` refers to a live (non-removed) element.
     pub fn contains_ref(&self, r: Ref<T>) -> bool {
-        self.slots.get(r.0 as usize).and_then(|s| s.as_ref()).is_some()
+        matches!(self.slots.get(r.0 as usize), Some(Slot::Occupied(_)))
     }
 
     /// Deprecated alias for [`contains_ref`](Self::contains_ref) (renamed to
@@ -623,12 +676,18 @@ impl<T> Arena<T> {
 
     /// Returns a reference to the element at `r`, or `None` if removed or out of bounds.
     pub fn get(&self, r: Ref<T>) -> Option<&T> {
-        self.slots.get(r.0 as usize)?.as_ref()
+        match self.slots.get(r.0 as usize) {
+            Some(Slot::Occupied(v)) => Some(v),
+            _ => None,
+        }
     }
 
     /// Returns a mutable reference to the element at `r`, or `None` if removed or out of bounds.
     pub fn get_mut(&mut self, r: Ref<T>) -> Option<&mut T> {
-        self.slots.get_mut(r.0 as usize)?.as_mut()
+        match self.slots.get_mut(r.0 as usize) {
+            Some(Slot::Occupied(v)) => Some(v),
+            _ => None,
+        }
     }
 
     /// Returns the number of live (non-removed) elements.
@@ -641,7 +700,8 @@ impl<T> Arena<T> {
         self.count == 0
     }
 
-    /// Total number of slots (including removed). The next push will get index slot_count().
+    /// Total number of slots, live plus free. With slot reuse this tracks the
+    /// peak live count, not the number of inserts.
     pub fn slot_count(&self) -> usize {
         self.slots.len()
     }
@@ -649,39 +709,44 @@ impl<T> Arena<T> {
     /// Removes all elements and deallocates storage.
     pub fn clear(&mut self) {
         self.slots.clear();
+        self.free_head = None;
         self.count = 0;
     }
 
-    /// Returns an iterator over references to live elements, skipping removed slots.
-    pub fn iter(&self) -> impl Iterator<Item = &T> {
-        self.slots.iter().filter_map(|s| s.as_ref())
+    /// Returns an iterator over references to live elements, skipping freed slots.
+    pub fn iter(&self) -> ArenaIter<'_, T> {
+        ArenaIter { inner: self.slots.iter() }
     }
 
-    /// Returns an iterator over mutable references to live elements, skipping removed slots.
-    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut T> {
-        self.slots.iter_mut().filter_map(|s| s.as_mut())
+    /// Returns an iterator over mutable references to live elements, skipping freed slots.
+    pub fn iter_mut(&mut self) -> ArenaIterMut<'_, T> {
+        ArenaIterMut { inner: self.slots.iter_mut() }
     }
 
-    /// Returns an iterator yielding `Ref<T>` for each live element, skipping removed slots.
+    /// Returns an iterator yielding `Ref<T>` for each live element, skipping freed slots.
     pub fn refs(&self) -> ArenaRefIter<'_, T> {
         ArenaRefIter { current: 0, slots: &self.slots, _marker: PhantomData }
     }
 
     /// Returns an iterator yielding `(Ref<T>, &T)` for each live element,
-    /// skipping removed slots -- the stable handle alongside the value.
+    /// skipping freed slots -- the stable handle alongside the value.
     pub fn iter_refs(&self) -> impl Iterator<Item = (Ref<T>, &T)> + '_ {
-        self.slots.iter().enumerate()
-            .filter_map(|(i, s)| s.as_ref().map(|v| (Ref::new(i as u32), v)))
+        self.slots.iter().enumerate().filter_map(|(i, s)| match s {
+            Slot::Occupied(v) => Some((Ref::new(i as u32), v)),
+            Slot::Free { .. } => None,
+        })
     }
 
     /// Returns an iterator yielding `(Ref<T>, &mut T)` for each live element.
     pub fn iter_refs_mut(&mut self) -> impl Iterator<Item = (Ref<T>, &mut T)> + '_ {
-        self.slots.iter_mut().enumerate()
-            .filter_map(|(i, s)| s.as_mut().map(|v| (Ref::new(i as u32), v)))
+        self.slots.iter_mut().enumerate().filter_map(|(i, s)| match s {
+            Slot::Occupied(v) => Some((Ref::new(i as u32), v)),
+            Slot::Free { .. } => None,
+        })
     }
 
     /// Returns the `Ref` of the `pos`-th live element (panics if out of
-    /// range). O(slots) because removed slots are skipped; prefer holding the
+    /// range). O(slots) because freed slots are skipped; prefer holding the
     /// `Ref` returned by [`push`](Self::push) where you can. Accepts any
     /// integer index (`u32`, `usize`, ...) so callers never cast.
     pub fn ref_at(&self, pos: impl TryInto<usize>) -> Ref<T> {
@@ -691,16 +756,52 @@ impl<T> Arena<T> {
     }
 }
 
+impl<T: serde::Serialize> serde::Serialize for Arena<T> {
+    fn serialize<S: serde::Serializer>(&self, ser: S) -> Result<S::Ok, S::Error> {
+        // Wire format is a sequence of `Option<T>` (Some = live, None = free),
+        // so the free-list wiring never leaks into serialized data.
+        ser.collect_seq(self.slots.iter().map(|slot| match slot {
+            Slot::Occupied(v) => Some(v),
+            Slot::Free { .. } => None,
+        }))
+    }
+}
+
+impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for Arena<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(de: D) -> Result<Self, D::Error> {
+        let opts: std::vec::Vec<Option<T>> = serde::Deserialize::deserialize(de)?;
+        let mut slots = std::vec::Vec::with_capacity(opts.len());
+        let mut free_head = None;
+        for o in opts {
+            match o {
+                Some(v) => slots.push(Slot::Occupied(v)),
+                None => {
+                    slots.push(Slot::Free { next: free_head });
+                    free_head = Some((slots.len() - 1) as u32);
+                }
+            }
+        }
+        let count = slots.iter().filter(|s| matches!(s, Slot::Occupied(_))).count();
+        Ok(Arena { slots, free_head, count, reuse: true })
+    }
+}
+
 impl<T> ops::Index<Ref<T>> for Arena<T> {
     type Output = T;
     fn index(&self, r: Ref<T>) -> &T {
-        self.slots[r.0 as usize].as_ref().expect("Arena: accessing removed slot")
+        match &self.slots[r.0 as usize] {
+            Slot::Occupied(v) => v,
+            Slot::Free { .. } => panic!("Arena: accessing removed slot"),
+        }
     }
 }
 
 impl<T> ops::IndexMut<Ref<T>> for Arena<T> {
     fn index_mut(&mut self, r: Ref<T>) -> &mut T {
-        self.slots[r.0 as usize].as_mut().expect("Arena: accessing removed slot")
+        match &mut self.slots[r.0 as usize] {
+            Slot::Occupied(v) => v,
+            Slot::Free { .. } => panic!("Arena: accessing removed slot"),
+        }
     }
 }
 
@@ -711,21 +812,19 @@ impl<T: fmt::Debug> fmt::Debug for Arena<T> {
     }
 }
 
-// `Option<T>` is IntoIterator (yielding its `Some` value), so flattening the
-// slot vec skips removed entries and gives a nameable iterator type.
 impl<'a, T> IntoIterator for &'a Arena<T> {
     type Item = &'a T;
-    type IntoIter = std::iter::Flatten<std::slice::Iter<'a, Option<T>>>;
+    type IntoIter = ArenaIter<'a, T>;
     fn into_iter(self) -> Self::IntoIter {
-        self.slots.iter().flatten()
+        self.iter()
     }
 }
 
 impl<'a, T> IntoIterator for &'a mut Arena<T> {
     type Item = &'a mut T;
-    type IntoIter = std::iter::Flatten<std::slice::IterMut<'a, Option<T>>>;
+    type IntoIter = ArenaIterMut<'a, T>;
     fn into_iter(self) -> Self::IntoIter {
-        self.slots.iter_mut().flatten()
+        self.iter_mut()
     }
 }
 
@@ -742,13 +841,47 @@ impl<T> Default for Arena<T> {
 }
 
 // ============================================================
-// ArenaRefIter -- iterator that yields Ref<T> for live slots
+// Arena iterators
 // ============================================================
+
+/// Iterator over references to the live elements of an [`Arena`].
+pub struct ArenaIter<'a, T> {
+    inner: std::slice::Iter<'a, Slot<T>>,
+}
+
+impl<'a, T> Iterator for ArenaIter<'a, T> {
+    type Item = &'a T;
+    fn next(&mut self) -> Option<&'a T> {
+        for slot in self.inner.by_ref() {
+            if let Slot::Occupied(v) = slot {
+                return Some(v);
+            }
+        }
+        None
+    }
+}
+
+/// Iterator over mutable references to the live elements of an [`Arena`].
+pub struct ArenaIterMut<'a, T> {
+    inner: std::slice::IterMut<'a, Slot<T>>,
+}
+
+impl<'a, T> Iterator for ArenaIterMut<'a, T> {
+    type Item = &'a mut T;
+    fn next(&mut self) -> Option<&'a mut T> {
+        for slot in self.inner.by_ref() {
+            if let Slot::Occupied(v) = slot {
+                return Some(v);
+            }
+        }
+        None
+    }
+}
 
 /// Iterator yielding `Ref<T>` for each live (non-removed) slot in an [`Arena`].
 pub struct ArenaRefIter<'a, T> {
     current: u32,
-    slots: &'a [Option<T>],
+    slots: &'a [Slot<T>],
     _marker: PhantomData<T>,
 }
 
@@ -758,7 +891,7 @@ impl<'a, T> Iterator for ArenaRefIter<'a, T> {
         while (self.current as usize) < self.slots.len() {
             let idx = self.current;
             self.current += 1;
-            if self.slots[idx as usize].is_some() {
+            if matches!(self.slots[idx as usize], Slot::Occupied(_)) {
                 return Some(Ref::new(idx));
             }
         }
@@ -1127,18 +1260,74 @@ mod tests {
     }
 
     #[test]
-    fn test_arena_push_after_remove() {
+    fn test_arena_push_after_remove_reuses_slot() {
         let mut a: Arena<i32> = Arena::new();
         let r0 = a.push(10);
         let r1 = a.push(20);
         a.remove(r0);
 
-        // New push gets a new index (does not reuse r0)
+        // The freed slot is reclaimed: the next push reuses r0's index and
+        // does not grow storage.
         let r2 = a.push(30);
-        assert_ne!(r0, r2);
+        assert_eq!(r0, r2, "push reuses the freed slot");
+        assert_eq!(a.slot_count(), 2, "no new slot allocated");
         assert_eq!(a[r1], 20);
         assert_eq!(a[r2], 30);
         assert_eq!(a.len(), 2);
+        // The stale r0 now aliases the new occupant (the documented reuse
+        // contract -- same as Vec/Deque index reuse).
+        assert_eq!(a[r0], 30);
+    }
+
+    #[test]
+    fn test_arena_no_reuse_mode() {
+        let mut a: Arena<i32> = Arena::no_reuse();
+        let r0 = a.push(10);
+        a.push(20);
+        a.remove(r0);
+
+        // No reclamation: the next push appends and r0 stays permanently dead.
+        let r2 = a.push(30);
+        assert_ne!(r0, r2, "no_reuse: push appends a fresh slot");
+        assert_eq!(a.slot_count(), 3, "no_reuse: slots grow with every insert");
+        assert!(!a.contains_ref(r0));
+        assert_eq!(a.get(r0), None);
+        assert_eq!(a.len(), 2);
+    }
+
+    #[test]
+    fn test_arena_free_list_bounds_storage() {
+        // Add/remove churn (the sliding-window case) must not grow storage:
+        // the single freed slot is reclaimed every iteration.
+        let mut a: Arena<i32> = Arena::new();
+        let mut r = a.push(0);
+        for i in 1..1000 {
+            a.remove(r);
+            r = a.push(i);
+        }
+        assert_eq!(a.len(), 1);
+        assert_eq!(a.slot_count(), 1, "reused the freed slot every time");
+        assert_eq!(a[r], 999);
+    }
+
+    #[test]
+    fn arena_serde_roundtrip_rebuilds_free_list() {
+        let mut a: Arena<i32> = Arena::new();
+        let r0 = a.push(10);
+        let r1 = a.push(20);
+        a.push(30);
+        a.remove(r1); // leave a hole
+        let json = serde_json::to_string(&a).unwrap();
+        let mut b: Arena<i32> = serde_json::from_str(&json).unwrap();
+        assert_eq!(b.len(), 2);
+        assert_eq!(b[r0], 10);
+        assert!(!b.contains_ref(r1));
+        let live: std::vec::Vec<i32> = b.iter().copied().collect();
+        assert_eq!(live, vec![10, 30]);
+        // The free list survives the roundtrip: a push reclaims the hole.
+        let r_new = b.push(99);
+        assert_eq!(r_new, r1, "deserialized arena reuses the freed slot");
+        assert_eq!(b.slot_count(), 3);
     }
 
     #[test]
