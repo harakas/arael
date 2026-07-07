@@ -175,6 +175,12 @@ pub trait Model {
 
     fn zero_blocks(&mut self) {}
 
+    /// Free every heap-backed (`Boxed*`) block's Hessian storage in this model
+    /// and its sub-models, reclaiming the transient assembly memory between
+    /// solves. Inline blocks are unaffected; the next solve re-allocates the
+    /// boxed ones on demand. Default: no-op.
+    fn release_blocks(&mut self) {}
+
     // Fold accepted-step euler angle deltas into their reference rotations
     // and zero the delta entries in the parameter vector. A no-op for
     // everything except EulerAngleParam, which re-centers after every
@@ -877,6 +883,9 @@ macro_rules! impl_model_collection {
             fn zero_blocks(&mut self) {
                 for item in self.$iter_mut() { item.zero_blocks(); }
             }
+            fn release_blocks(&mut self) {
+                for item in self.$iter_mut() { item.release_blocks(); }
+            }
             fn serialize_size(&self) -> u32 {
                 self.iter().map(|item| item.serialize_size()).sum()
             }
@@ -952,6 +961,9 @@ impl<T: Model> Model for crate::refs::Arena<T> {
     fn zero_blocks(&mut self) {
         for item in self.iter_mut() { item.zero_blocks(); }
     }
+    fn release_blocks(&mut self) {
+        for item in self.iter_mut() { item.release_blocks(); }
+    }
     fn serialize_size(&self) -> u32 {
         self.iter().map(|item| item.serialize_size()).sum()
     }
@@ -1022,6 +1034,9 @@ impl<T: Model> Model for Option<T> {
     }
     fn zero_blocks(&mut self) {
         if let Some(inner) = self { inner.zero_blocks(); }
+    }
+    fn release_blocks(&mut self) {
+        if let Some(inner) = self { inner.release_blocks(); }
     }
     fn accumulate_hessian32(&self, hessian: &mut [f32]) {
         if let Some(inner) = self { inner.accumulate_hessian32(hessian); }
@@ -1112,6 +1127,11 @@ impl<A: Model, const N: usize, const M: usize, T: crate::utils::Float> SelfBlock
     pub fn zero(&mut self) {
         self.hessian.fill(T::zero());
     }
+
+    /// No-op: inline storage owns no heap to release. Present so a model's
+    /// generated `release_blocks()` can call `.release()` on every block
+    /// uniformly (see [`BoxedSelfBlock`], where it frees the Hessian).
+    pub fn release(&mut self) {}
 
     /// Return true if any parameter in this block is being optimized.
     pub fn is_active(&self) -> bool {
@@ -1232,6 +1252,111 @@ impl<A: Model, const N: usize, const M: usize, T: crate::utils::Float> SelfBlock
     }
 }
 
+/// Heap-backed twin of [`SelfBlock`]: the whole block (indices + Hessian)
+/// lives behind a single `Box`, wrapped in `Option` so it can be released
+/// between solves and re-allocated on demand. `None` = released (no
+/// allocation at all); `Some` = one heap block. Every method delegates to the
+/// inline [`SelfBlock`], so the two are bit-for-bit identical.
+///
+/// Opt into it (`hb: BoxedSelfBlock<Self>`) when the inline `[T; M]` would
+/// fatten the entity struct too much (very large parameter counts), or to
+/// reclaim all transient Hessian memory between solves via the root's
+/// generated `release_blocks()`. Otherwise prefer [`SelfBlock`], which never
+/// allocates. `N`/`M` are supplied by the macro, exactly as for `SelfBlock`.
+pub struct BoxedSelfBlock<A: Model, const N: usize, const M: usize, T: crate::utils::Float = f64> {
+    inner: Option<std::boxed::Box<SelfBlock<A, N, M, T>>>,
+}
+
+impl<A: Model, const N: usize, const M: usize, T: crate::utils::Float> Default for BoxedSelfBlock<A, N, M, T> {
+    fn default() -> Self { Self::new() }
+}
+
+impl<A: Model, const N: usize, const M: usize, T: crate::utils::Float> BoxedSelfBlock<A, N, M, T> {
+    /// Create an empty (released) block. Storage is allocated by the first
+    /// `set_indices` call that finds the block active.
+    pub fn new() -> Self {
+        BoxedSelfBlock { inner: None }
+    }
+
+    /// Materialise the inner block, allocating it if released.
+    fn ensure(&mut self) -> &mut SelfBlock<A, N, M, T> {
+        self.inner.get_or_insert_with(|| std::boxed::Box::new(SelfBlock::new()))
+    }
+
+    /// Whether this block currently holds a heap allocation. False when
+    /// released, and false for an inactive block (its entity is not being
+    /// optimized -- every index is the `u32::MAX` fixed sentinel), so a frozen
+    /// sub-tree costs no Hessian memory. Mainly for diagnostics and tests.
+    pub fn is_allocated(&self) -> bool {
+        self.inner.is_some()
+    }
+
+    /// Set the global parameter indices. Allocates the block only if it is
+    /// active (at least one index is being optimized); an all-fixed block is
+    /// left released, so a frozen sub-tree never allocates its Hessian. The
+    /// solver calls this once, before any `zero`/`add_residual`, so activity
+    /// is settled before those run.
+    pub fn set_indices(&mut self, indices: &[u32; N]) {
+        if indices.iter().any(|&i| i != u32::MAX) {
+            self.ensure().set_indices(indices);
+        } else {
+            self.inner = None;
+        }
+    }
+
+    /// Reset the Hessian to zero. No-op when unallocated: `set_indices` has
+    /// already materialised every active block, so there is nothing to zero
+    /// for an inactive/released one.
+    pub fn zero(&mut self) {
+        if let Some(b) = &mut self.inner { b.zero(); }
+    }
+
+    /// Free the whole block's heap allocation. The next `set_indices` on an
+    /// active block re-allocates it.
+    pub fn release(&mut self) {
+        self.inner = None;
+    }
+
+    /// Return true if any parameter in this block is being optimized.
+    pub fn is_active(&self) -> bool {
+        self.inner.as_ref().is_some_and(|b| b.is_active())
+    }
+
+    /// Add one residual's contribution (see [`SelfBlock::add_residual`]).
+    /// No-op when unallocated: an inactive block (all indices fixed) writes
+    /// nothing to grad or Hessian anyway.
+    pub fn add_residual(&mut self, r: T, dr: &[T; N], grad: &mut [T]) {
+        if let Some(b) = &mut self.inner { b.add_residual(r, dr, grad); }
+    }
+
+    pub fn accumulate_hessian(&self, hessian: &mut [T]) {
+        if let Some(b) = &self.inner { b.accumulate_hessian(hessian); }
+    }
+
+    pub fn accumulate_hessian_band(&self, band: &mut [T], kd: usize)
+        -> Result<(), crate::simple_lm::BandError>
+    {
+        match &self.inner {
+            Some(b) => b.accumulate_hessian_band(band, kd),
+            None => Ok(()),
+        }
+    }
+
+    pub fn accumulate_hessian_sparse(&self, coo: &mut crate::simple_lm::CooMatrix<T>) {
+        if let Some(b) = &self.inner { b.accumulate_hessian_sparse(coo); }
+    }
+
+    pub fn accumulate_hessian_sparse_direct(&self, csc: &mut crate::simple_lm::CscMatrix<T>) {
+        if let Some(b) = &self.inner { b.accumulate_hessian_sparse_direct(csc); }
+    }
+
+    pub fn accumulate_hessian_sparse_indexed(&self, vals: &mut [T], positions: &[usize], cursor: &mut usize) {
+        if let Some(b) = &self.inner {
+            b.accumulate_hessian_sparse_indexed(vals, positions, cursor);
+        }
+    }
+}
+
 /// Hessian block coupling two model types — stores ONLY the rectangular A×B
 /// cross Hessian pairs. A's gradient and A-A diagonal live in A's own
 /// [`SelfBlock`]; same for B. This matches the refactor where every
@@ -1289,6 +1414,9 @@ impl<A: Model, B: Model, const NA: usize, const NB: usize, const P: usize, T: cr
     pub fn zero(&mut self) {
         self.cross_hessian.fill(T::zero());
     }
+
+    /// No-op: inline storage owns no heap to release (see [`BoxedCrossBlock`]).
+    pub fn release(&mut self) {}
 
     /// Return true if any parameter in this block is being optimized.
     pub fn is_active(&self) -> bool {
@@ -1418,7 +1546,109 @@ impl<A: Model, B: Model, const NA: usize, const NB: usize, const P: usize, T: cr
 }
 
 // ---------------------------------------------------------------------------
-// TripletBlock -- sparse Hessian/gradient accumulation for N-ary constraints
+
+/// Heap-backed twin of [`CrossBlock`]: the whole block (both index arrays +
+/// cross-Hessian) lives behind a single `Box`, wrapped in `Option` so it can
+/// be released between solves and re-allocated on demand. `None` = released;
+/// `Some` = one heap block. Every method delegates to the inline
+/// [`CrossBlock`]. See [`BoxedSelfBlock`] for when to opt in.
+pub struct BoxedCrossBlock<A: Model, B: Model, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float = f64> {
+    inner: Option<std::boxed::Box<CrossBlock<A, B, NA, NB, P, T>>>,
+}
+
+impl<A: Model, B: Model, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float> Default for BoxedCrossBlock<A, B, NA, NB, P, T> {
+    fn default() -> Self { Self::new() }
+}
+
+impl<A: Model, B: Model, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float> BoxedCrossBlock<A, B, NA, NB, P, T> {
+    /// Create an empty (released) block. Storage is allocated by the first
+    /// `set_indices` call that finds the block active.
+    pub fn new() -> Self {
+        BoxedCrossBlock { inner: None }
+    }
+
+    /// Materialise the inner block, allocating it if released.
+    fn ensure(&mut self) -> &mut CrossBlock<A, B, NA, NB, P, T> {
+        self.inner.get_or_insert_with(|| std::boxed::Box::new(CrossBlock::new()))
+    }
+
+    /// Return the number of parameters belonging to model A.
+    pub fn na(&self) -> usize { NA }
+    /// Return the number of parameters belonging to model B.
+    pub fn nb(&self) -> usize { NB }
+
+    /// Whether this block currently holds a heap allocation. False when
+    /// released, and false for an inactive block (both endpoints are fixed --
+    /// every index is the `u32::MAX` sentinel), so a link between two frozen
+    /// entities costs no Hessian memory. Mainly for diagnostics and tests.
+    pub fn is_allocated(&self) -> bool {
+        self.inner.is_some()
+    }
+
+    /// Set the global parameter indices. Allocates the block only if it is
+    /// active (at least one index, on either side, is being optimized); a link
+    /// between two fully-fixed entities is left released. The solver calls this
+    /// once, before any `zero`/`add_residual_cross`.
+    pub fn set_indices(&mut self, a_indices: &[u32], b_indices: &[u32]) {
+        let active = a_indices.iter().chain(b_indices.iter()).any(|&i| i != u32::MAX);
+        if active {
+            self.ensure().set_indices(a_indices, b_indices);
+        } else {
+            self.inner = None;
+        }
+    }
+
+    /// Reset the cross-Hessian to zero. No-op when unallocated: `set_indices`
+    /// has already materialised every active block.
+    pub fn zero(&mut self) {
+        if let Some(b) = &mut self.inner { b.zero(); }
+    }
+
+    /// Free the whole block's heap allocation. The next `set_indices` on an
+    /// active block re-allocates it.
+    pub fn release(&mut self) {
+        self.inner = None;
+    }
+
+    /// Return true if any parameter in this block is being optimized.
+    pub fn is_active(&self) -> bool {
+        self.inner.as_ref().is_some_and(|b| b.is_active())
+    }
+
+    /// Add one residual's cross contribution (see [`CrossBlock::add_residual_cross`]).
+    /// No-op when unallocated: an inactive block contributes nothing.
+    pub fn add_residual_cross(&mut self, r: T, dr_a: &[T; NA], dr_b: &[T; NB]) {
+        if let Some(b) = &mut self.inner { b.add_residual_cross(r, dr_a, dr_b); }
+    }
+
+    pub fn accumulate_hessian(&self, hessian: &mut [T]) {
+        if let Some(b) = &self.inner { b.accumulate_hessian(hessian); }
+    }
+
+    pub fn accumulate_hessian_band(&self, band: &mut [T], kd: usize)
+        -> Result<(), crate::simple_lm::BandError>
+    {
+        match &self.inner {
+            Some(b) => b.accumulate_hessian_band(band, kd),
+            None => Ok(()),
+        }
+    }
+
+    pub fn accumulate_hessian_sparse(&self, coo: &mut crate::simple_lm::CooMatrix<T>) {
+        if let Some(b) = &self.inner { b.accumulate_hessian_sparse(coo); }
+    }
+
+    pub fn accumulate_hessian_sparse_direct(&self, csc: &mut crate::simple_lm::CscMatrix<T>) {
+        if let Some(b) = &self.inner { b.accumulate_hessian_sparse_direct(csc); }
+    }
+
+    pub fn accumulate_hessian_sparse_indexed(&self, vals: &mut [T], positions: &[usize], cursor: &mut usize) {
+        if let Some(b) = &self.inner {
+            b.accumulate_hessian_sparse_indexed(vals, positions, cursor);
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 
 /// Sparse cross-only Hessian accumulation block for N-ary constraints.
@@ -1466,6 +1696,11 @@ impl<T: crate::utils::Float> TripletBlock<T> {
     pub fn zero(&mut self) {
         self.hessian.clear();
     }
+
+    /// No-op: TripletBlock already stores its triplets in a heap Vec that is
+    /// cleared each step, so there is nothing to release. Present so the
+    /// generated `release_blocks()` can call `.release()` uniformly.
+    pub fn release(&mut self) {}
 
     /// One-shot entry for direct callers with a flat param layout and no
     /// per-entity SelfBlocks. Writes the gradient entries `2*r*dr[i]` into

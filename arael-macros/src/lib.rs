@@ -837,7 +837,7 @@ fn is_self_block_for(ty: &syn::Type, self_name: &str) -> bool {
                     }
                 return false;
             }
-            if seg.ident == "SelfBlock"
+            if (seg.ident == "SelfBlock" || seg.ident == "BoxedSelfBlock")
                 && let syn::PathArguments::AngleBracketed(args) = &seg.arguments
                 && let Some(syn::GenericArgument::Type(syn::Type::Path(inner_tp))) = args.args.first()
                 && let Some(inner_seg) = inner_tp.path.segments.last()
@@ -848,15 +848,18 @@ fn is_self_block_for(ty: &syn::Type, self_name: &str) -> bool {
     false
 }
 
-/// Rewrite SelfBlock<A> to SelfBlock<A, {A_PARAM_COUNT}> and
-/// SelfBlock<A, f32> to SelfBlock<A, {A_PARAM_COUNT}, f32> and
-/// CrossBlock<A, B> to CrossBlock<A, B, {A_PARAM_COUNT}, {B_PARAM_COUNT}> and
-/// CrossBlock<A, B, f32> to CrossBlock<A, B, {A_PARAM_COUNT}, {B_PARAM_COUNT}, f32>.
+/// Rewrite SelfBlock<A> to SelfBlock<A, {A_PARAM_COUNT}, {N(N+1)/2}> and
+/// CrossBlock<A, B> to CrossBlock<A, B, {A_PARAM_COUNT}, {B_PARAM_COUNT}, {NA*NB}>
+/// (both with an optional trailing f32 float arg). The BoxedSelfBlock /
+/// BoxedCrossBlock variants take the identical const dims -- they wrap the
+/// inline block behind a Box -- so they are rewritten the same way, preserving
+/// the original type name.
 fn rewrite_block_type(ty: &mut syn::Type) {
     if let syn::Type::Path(tp) = ty
         && let Some(seg) = tp.path.segments.last_mut() {
             let type_name = seg.ident.to_string();
-            if type_name == "SelfBlock" {
+            let block_ident = seg.ident.clone();
+            if type_name == "SelfBlock" || type_name == "BoxedSelfBlock" {
                 if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
                     let type_args: Vec<&syn::Type> = args.args.iter()
                         .filter_map(|a| if let syn::GenericArgument::Type(t) = a { Some(t) } else { None })
@@ -871,23 +874,23 @@ fn rewrite_block_type(ty: &mut syn::Type) {
                                 );
                                 let a_path = type_args[0];
                                 if type_args.len() == 2 {
-                                    // SelfBlock<A, f32> -> SelfBlock<A, {N}, {N(N+1)/2}, f32>
+                                    // <A, f32> -> <A, {N}, {N(N+1)/2}, f32>
                                     let float_ty = type_args[1];
                                     let new_ty: syn::Type = syn::parse_quote! {
-                                        SelfBlock<#a_path, { #const_name }, { #const_name * (#const_name + 1) / 2 }, #float_ty>
+                                        #block_ident<#a_path, { #const_name }, { #const_name * (#const_name + 1) / 2 }, #float_ty>
                                     };
                                     *ty = new_ty;
                                 } else {
-                                    // SelfBlock<A> -> SelfBlock<A, {N}, {N(N+1)/2}>
+                                    // <A> -> <A, {N}, {N(N+1)/2}>
                                     let new_ty: syn::Type = syn::parse_quote! {
-                                        SelfBlock<#a_path, { #const_name }, { #const_name * (#const_name + 1) / 2 }>
+                                        #block_ident<#a_path, { #const_name }, { #const_name * (#const_name + 1) / 2 }>
                                     };
                                     *ty = new_ty;
                                 }
                             }
                     }
                 }
-            } else if type_name == "CrossBlock"
+            } else if (type_name == "CrossBlock" || type_name == "BoxedCrossBlock")
                 && let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
                     let type_args: Vec<&syn::Type> = args.args.iter()
                         .filter_map(|a| if let syn::GenericArgument::Type(t) = a { Some(t) } else { None })
@@ -907,16 +910,16 @@ fn rewrite_block_type(ty: &mut syn::Type) {
                                 let a_ty = type_args[0];
                                 let b_ty = type_args[1];
                                 if type_args.len() == 3 {
-                                    // CrossBlock<A, B, f32> -> CrossBlock<A, B, {NA}, {NB}, {NA*NB}, f32>
+                                    // <A, B, f32> -> <A, B, {NA}, {NB}, {NA*NB}, f32>
                                     let float_ty = type_args[2];
                                     let new_ty: syn::Type = syn::parse_quote! {
-                                        CrossBlock<#a_ty, #b_ty, { #a_const }, { #b_const }, { #a_const * #b_const }, #float_ty>
+                                        #block_ident<#a_ty, #b_ty, { #a_const }, { #b_const }, { #a_const * #b_const }, #float_ty>
                                     };
                                     *ty = new_ty;
                                 } else {
-                                    // CrossBlock<A, B> -> CrossBlock<A, B, {NA}, {NB}, {NA*NB}>
+                                    // <A, B> -> <A, B, {NA}, {NB}, {NA*NB}>
                                     let new_ty: syn::Type = syn::parse_quote! {
-                                        CrossBlock<#a_ty, #b_ty, { #a_const }, { #b_const }, { #a_const * #b_const }>
+                                        #block_ident<#a_ty, #b_ty, { #a_const }, { #b_const }, { #a_const * #b_const }>
                                     };
                                     *ty = new_ty;
                                 }
@@ -976,6 +979,7 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
     let mut deserialize64_stmts: Vec<TokenStream2> = Vec::new();
     let mut update64_phase1: Vec<TokenStream2> = Vec::new();
     let mut zero_blocks_stmts: Vec<TokenStream2> = Vec::new();
+    let mut release_blocks_stmts: Vec<TokenStream2> = Vec::new();
     let mut accumulate_hessian32_stmts: Vec<TokenStream2> = Vec::new();
     let mut accumulate_hessian64_stmts: Vec<TokenStream2> = Vec::new();
     let mut accumulate_hessian_band32_stmts: Vec<TokenStream2> = Vec::new();
@@ -1009,6 +1013,7 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                 // HessianBlock fields: skip serialize, handle in zero/accumulate
                 if is_hessian_block_type(&field.ty) {
                     zero_blocks_stmts.push(quote! { self.#ident.zero(); });
+                    release_blocks_stmts.push(quote! { self.#ident.release(); });
                     let acc_dense = quote! { self.#ident.accumulate_hessian(hessian); };
                     let acc_band = quote! { self.#ident.accumulate_hessian_band(band, kd)?; };
                     let acc_sparse = quote! { self.#ident.accumulate_hessian_sparse(coo); };
@@ -1033,6 +1038,9 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                 if is_option_hessian_block(&field.ty) {
                     zero_blocks_stmts.push(quote! {
                         if let Some(ref mut __hb) = self.#ident { __hb.zero(); }
+                    });
+                    release_blocks_stmts.push(quote! {
+                        if let Some(ref mut __hb) = self.#ident { __hb.release(); }
                     });
                     let acc_dense = quote! {
                         if let Some(ref __hb) = self.#ident { __hb.accumulate_hessian(hessian); }
@@ -1115,6 +1123,9 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                 zero_blocks_stmts.push(quote! {
                     arael::model::Model::zero_blocks(&mut self.#ident);
                 });
+                release_blocks_stmts.push(quote! {
+                    arael::model::Model::release_blocks(&mut self.#ident);
+                });
                 accumulate_hessian32_stmts.push(quote! {
                     arael::model::Model::accumulate_hessian32(&self.#ident, hessian);
                 });
@@ -1193,6 +1204,9 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
             }
             fn zero_blocks(&mut self) {
                 #(#zero_blocks_stmts)*
+            }
+            fn release_blocks(&mut self) {
+                #(#release_blocks_stmts)*
             }
             fn accumulate_hessian32(&self, hessian: &mut [f32]) {
                 #(#accumulate_hessian32_stmts)*
@@ -1393,7 +1407,8 @@ fn is_hessian_block_type(ty: &syn::Type) -> bool {
     if let syn::Type::Path(tp) = ty
         && let Some(seg) = tp.path.segments.last() {
             let name = seg.ident.to_string();
-            return matches!(name.as_str(), "SelfBlock" | "CrossBlock" | "TripletBlock");
+            return matches!(name.as_str(),
+                "SelfBlock" | "CrossBlock" | "TripletBlock" | "BoxedSelfBlock" | "BoxedCrossBlock");
         }
     false
 }

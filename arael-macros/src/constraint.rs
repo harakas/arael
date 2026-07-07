@@ -1517,11 +1517,11 @@ fn extract_block_type_args(ty: &syn::Type) -> syn::Result<(String, Option<String
                 let type_args: Vec<&syn::Type> = args.args.iter()
                     .filter_map(|a| if let syn::GenericArgument::Type(t) = a { Some(t) } else { None })
                     .collect();
-                if seg.ident == "SelfBlock" && !type_args.is_empty() {
+                if (seg.ident == "SelfBlock" || seg.ident == "BoxedSelfBlock") && !type_args.is_empty() {
                     let a = type_ident_name(type_args[0])?;
                     return Ok((a, None));
                 }
-                if seg.ident == "CrossBlock" && type_args.len() >= 2 {
+                if (seg.ident == "CrossBlock" || seg.ident == "BoxedCrossBlock") && type_args.len() >= 2 {
                     let a = type_ident_name(type_args[0])?;
                     let b = type_ident_name(type_args[1])?;
                     return Ok((a, Some(b)));

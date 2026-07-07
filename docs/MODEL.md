@@ -155,6 +155,52 @@ struct PosePair {
 }
 ```
 
+### Heap-backed blocks: `BoxedSelfBlock` / `BoxedCrossBlock`
+
+`SelfBlock` and `CrossBlock` store their Hessian **inline** as a fixed
+`[T; M]` array embedded in the entity struct -- no allocation, best
+cache locality. This is the right default.
+
+`BoxedSelfBlock<T>` and `BoxedCrossBlock<A, B>` are drop-in twins that
+hold the same block behind a single `Option<Box<...>>` instead. The
+math is identical (they delegate to the inline block), so a solve is
+bit-for-bit the same; only the storage differs. Swap the type and
+nothing else changes:
+
+```rust,ignore
+struct Pose {
+    pos: Param<vect3f>,
+    hb_pose: BoxedSelfBlock<Pose>,   // heap-backed instead of SelfBlock<Pose>
+}
+```
+
+Two reasons to opt in:
+
+- **Reclaim assembly memory between solves.** The root gains a
+  generated `release_blocks()` that frees every boxed Hessian in the
+  tree. For a long-lived model that is solved occasionally, call it
+  after each solve to hand the transient Hessian memory back; the next
+  solve re-allocates on demand. Inline blocks can't do this -- their
+  storage is part of the struct.
+
+- **Optimize only part of the model tree.** A boxed block allocates
+  its Hessian **only when it is active** -- i.e. at least one of its
+  parameters is being optimized. Freeze a sub-tree with `Param::fixed`
+  (every index becomes the `u32::MAX` sentinel) and its self-blocks,
+  plus any cross-blocks whose *both* endpoints are frozen, stay
+  unallocated. A sliding-window SLAM front-end that keeps the full
+  history in an [`Arena`](#collection-types) but only optimizes the
+  recent window pays Hessian memory for the active window alone.
+
+Allocation is decided once, when the solver assigns block indices
+(before the first `zero`/`add_residual`), so the choice is settled for
+the whole solve. `block.is_allocated()` reports whether a block
+currently holds storage -- useful for tests and diagnostics.
+
+Prefer inline blocks unless you specifically want one of the two
+behaviours above; the inline array avoids the pointer indirection and
+the per-solve allocation of the active blocks.
+
 ### Picking between multi-CrossBlock and TripletBlock
 
 For N-entity residuals the macro accepts two shapes:
