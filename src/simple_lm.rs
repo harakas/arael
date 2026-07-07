@@ -733,7 +733,7 @@ impl<T: Float> Clone for Box<dyn LambdaDriver<T>> {
 
 /// The classic fixed-multiplier schedule (the library default): divide
 /// lambda by 5 on acceptance (clamped to `LmConfig::lambda_floor`),
-/// multiply by 10 on rejection or factorization failure, and despair
+/// multiply by 10 on rejection or factorization failure, and give up
 /// when a rejection would push lambda past 1e10.
 #[derive(Clone)]
 pub struct DefaultLambdaDriver<T> {
@@ -788,7 +788,7 @@ impl<T: Float> LambdaDriver<T> for DefaultLambdaDriver<T> {
 /// constant after every acceptance marches straight into the next
 /// rejection.
 ///
-/// Respects `LmConfig::lambda_floor` on the way down and despairs above
+/// Respects `LmConfig::lambda_floor` on the way down and gives up above
 /// the same 1e10 ceiling as the default schedule.
 #[derive(Clone)]
 pub struct NielsenLambdaDriver<T> {
@@ -1052,8 +1052,8 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
             }) {
                 Some(next) => lambda = next,
                 None => {
-                    // The schedule despaired (e.g. lambda past its
-                    // ceiling): terminate like an exhausted retry budget.
+                    // The driver gave up (lambda past its ceiling):
+                    // terminate like an exhausted retry budget.
                     inner = INNER_LOOPS;
                     break;
                 }
@@ -2403,7 +2403,7 @@ mod tests {
 
     // The NielsenLambdaDriver schedule mechanics: nu doubles across consecutive
     // rejections and resets on acceptance; the accept factor is bounded
-    // to [1/3, 2]; the floor and the despair ceiling are respected.
+    // to [1/3, 2]; the floor and the ceiling are respected.
     #[test]
     fn nielsen_schedule_mechanics() {
         let mut a = NielsenLambdaDriver::<f64>::default();
@@ -2447,7 +2447,7 @@ mod tests {
         let c = ctx(1.5e-6);
         let lf = a.accepted(&mk(&c, 1.5e-6, 10.0, 9.0));
         assert_eq!(lf, 1e-6);
-        // Despair above the ceiling.
+        // Give up above the ceiling.
         let c = ctx(1e10);
         assert_eq!(a.rejected(&mk(&c, 1e10, 10.0, 11.0)), None);
     }

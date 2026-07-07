@@ -247,7 +247,7 @@ or on any of:
   resolvable)
 - 20 consecutive damped attempts without an accepted step (the inner
   retry budget; hard-coded)
-- the damping schedule despairs (the lambda driver returns `None` on a
+- the damping schedule gives up (the lambda driver returns `None` on a
   rejection -- for the default schedule, lambda passing 1e10)
 
 ## LM in five bullets
