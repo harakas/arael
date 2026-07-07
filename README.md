@@ -177,10 +177,10 @@ direction.
 #[arael::model]
 struct Pose {
     pos: Param<vect2f>,            // solved for: position (x, y)
-    gamma: Param<f32>,             // solved for: heading (0 = east, turning left is positive)
-    delta_pos: vect2f,             // measured: movement since the previous pose
-    delta_gamma: f32,              // measured: change of heading since the previous pose
-    delta_pos_isigma: f32,         // 1 / sigma, where sigma is the sensor's uncertainty (standard deviation)
+    gamma: Param<f32>,             // solved for: heading (0 = east)
+    delta_pos: vect2f,             // measured: movement since prev pose
+    delta_gamma: f32,              // measured: heading change since prev pose
+    delta_pos_isigma: f32,         // 1/sigma; sigma = sensor uncertainty (std dev)
     delta_gamma_isigma: f32,
     hb_pose: SelfBlock<Pose, f32>, // solver storage for this pose's parameters
 }
@@ -195,9 +195,9 @@ struct Pose {
      (cur.gamma - prev.gamma - cur.delta_gamma) * cur.delta_gamma_isigma]
 }))]
 struct PosePair {
-    #[arael(ref = root.poses)] prev: Ref<Pose>,  // Ref<T> = typed index into a root collection
+    #[arael(ref = root.poses)] prev: Ref<Pose>,  // Ref = a root-collection index
     #[arael(ref = root.poses)] cur: Ref<Pose>,
-    hb: CrossBlock<Pose, Pose, f32>,             // solver storage for the two poses this couples
+    hb: CrossBlock<Pose, Pose, f32>,  // storage for the two poses it couples
 }
 
 // A landmark and the bearing sightings that observed it.
@@ -208,8 +208,9 @@ struct Landmark {
     hb: SelfBlock<Landmark, f32>,
 }
 
-// One bearing sighting of `lm` from `pose`: the residual is the angle difference
-// between the landmark's actual direction and the measured bearing (zero when they agree).
+// One bearing sighting of `lm` from `pose`: the residual is the angle
+// difference between the landmark's actual direction and the measured
+// bearing (zero when they agree).
 #[arael::model]
 #[arael(constraint(hb, parent = lm, {
     let world_angle = pose.gamma + frine.bearing;
