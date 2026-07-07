@@ -8,6 +8,9 @@
 //! compiled cost, gradient, and Gauss-Newton hessian (J^T J approximation)
 //! code.
 //!
+//! Solve problems like linear and nonlinear regression, sensor fusion, SLAM,
+//! bundle adjustment, pose-graph and geometric constraint optimization.
+//!
 //! # Contents
 //!
 //! - [Features](#features)
@@ -74,25 +77,8 @@
 //! 3D. Per-step is the clean cross-system number -- one linearize +
 //! assemble + factorize + solve over the identical validated cost function,
 //! the same work in every system, independent of each solver's damping
-//! schedule. The table is the headline run, city10000 (30000 parameters,
-//! 20687 constraints); every system verified to the same minimum, single
-//! thread, Apple M4 Pro:
-//!
-//! | system | total time | steps | ms/step | vs best | final cost |
-//! |--------|-----------:|------:|--------:|--------:|-----------:|
-//! | **arael (LM, f32)** | **71.0 ms** | 7(7) | **10.1** | **1.00** | 512.00 |
-//! | **arael (LM, f64)** | **91.5 ms** | 7(7) | **13.1** | **1.29** | 511.99 |
-//! | [g2o](https://github.com/RainerKuemmerle/g2o) (GN) | 138.7 ms | 7 | 19.8 | 1.95 | 511.99 |
-//! | [g2o](https://github.com/RainerKuemmerle/g2o) (LM) | 150.3 ms | 7 | 21.5 | 2.12 | 511.99 |
-//! | [Ceres](http://ceres-solver.org) (LM) | 180.7 ms | 7(7) | 25.8 | 2.55 | 511.99 |
-//! | [factrs](https://github.com/rpl-cmu/factrs) (GN) | 210.2 ms | 7 | 30.0 | 2.96 | 511.99 |
-//! | [SymForce](https://symforce.org) (LM) | 226.1 ms | 7(8) | 28.3 | 2.79 | 511.99 |
-//! | [tiny-solver](https://crates.io/crates/tiny-solver) (GN) | 593.8 ms | 7 | 84.8 | 8.37 | 511.99 |
-//! | [GTSAM](https://gtsam.org) (batch) | did not converge | | | | |
-//!
-//! Arael's step count is accepted(total). Of the competitors only SymForce
-//! and factrs offer f32 -- factrs's crashes here, arael's f32 is the fastest
-//! entry.
+//! schedule -- with proper starting conditions all systems usually take the
+//! same number of iterations to reach a solution.
 //!
 //! Full methodology, the initial-damping policy, and the cross-system
 //! validation harness:
@@ -100,6 +86,9 @@
 //! A bundle-adjustment benchmark on the BAL Ladybug problems (arael vs
 //! Ceres and g2o):
 //! [benchmarks/bal](https://github.com/harakas/arael/tree/master/benchmarks/bal).
+//! A heterogeneous visual-inertial SLAM benchmark (six factor types, seven
+//! systems), including a Raspberry Pi edge run:
+//! [benchmarks/slam](https://github.com/harakas/arael/tree/master/benchmarks/slam).
 //!
 //! # Scope
 //!

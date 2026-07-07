@@ -4,6 +4,8 @@
 
 A Rust framework for nonlinear optimization with compile-time symbolic differentiation. Define your model and constraints declaratively -- the macro system symbolically differentiates, applies common subexpression elimination, and generates compiled cost, gradient, and Gauss-Newton hessian (J^T J approximation) code.
 
+Solve problems like linear and nonlinear regression, sensor fusion, SLAM, bundle adjustment, pose-graph and geometric constraint optimization.
+
 ## Contents
 
 - [Features](#features)
@@ -57,30 +59,15 @@ Per-step solve time on the four canonical pose-graph datasets, 2D and
 3D. Per-step is the clean cross-system number -- one linearize +
 assemble + factorize + solve over the identical validated cost function,
 the same work in every system, independent of each solver's damping
-schedule. The table is the headline run, city10000 (30000 parameters,
-20687 constraints); every system verified to the same minimum, single
-thread, Apple M4 Pro:
-
-| system | total time | steps | ms/step | vs best | final cost |
-|--------|-----------:|------:|--------:|--------:|-----------:|
-| **arael (LM, f32)** | **71.0 ms** | 7(7) | **10.1** | **1.00** | 512.00 |
-| **arael (LM, f64)** | **91.5 ms** | 7(7) | **13.1** | **1.29** | 511.99 |
-| [g2o](https://github.com/RainerKuemmerle/g2o) (GN) | 138.7 ms | 7 | 19.8 | 1.95 | 511.99 |
-| [g2o](https://github.com/RainerKuemmerle/g2o) (LM) | 150.3 ms | 7 | 21.5 | 2.12 | 511.99 |
-| [Ceres](http://ceres-solver.org) (LM) | 180.7 ms | 7(7) | 25.8 | 2.55 | 511.99 |
-| [factrs](https://github.com/rpl-cmu/factrs) (GN) | 210.2 ms | 7 | 30.0 | 2.96 | 511.99 |
-| [SymForce](https://symforce.org) (LM) | 226.1 ms | 7(8) | 28.3 | 2.79 | 511.99 |
-| [tiny-solver](https://crates.io/crates/tiny-solver) (GN) | 593.8 ms | 7 | 84.8 | 8.37 | 511.99 |
-| [GTSAM](https://gtsam.org) (batch) | did not converge | | | | |
-
-Arael's step count is accepted(total). Of the competitors only SymForce
-and factrs offer f32 -- factrs's crashes here, arael's f32 is the fastest
-entry.
+schedule -- with proper starting conditions all systems usually take the
+same number of iterations to reach a solution.
 
 Full methodology, the initial-damping policy, and the cross-system
 validation harness: [benchmarks/pgo](benchmarks/pgo/README.md). A
 bundle-adjustment benchmark on the BAL Ladybug problems (arael vs Ceres
-and g2o): [benchmarks/bal](benchmarks/bal/README.md).
+and g2o): [benchmarks/bal](benchmarks/bal/README.md). A heterogeneous
+visual-inertial SLAM benchmark (six factor types, seven systems),
+including a Raspberry Pi edge run: [benchmarks/slam](benchmarks/slam/README.md).
 
 ## Scope
 
@@ -692,14 +679,18 @@ See [arael-sketch/](arael-sketch/) for the full implementation.
 ## Project Structure
 
 ```
-arael/              Main library
+arael/              Main library (Levenberg-Marquardt solver + codegen)
   src/
     model.rs        Param<T>, Model trait, SelfBlock, CrossBlock, TripletBlock
     simple_lm.rs    LM solver, LmSolver trait, Dense/Band/Sparse backends, CooMatrix, CscMatrix
+    geometry.rs     Camera models and projections (pinhole intrinsics/extrinsics)
+    user_fn.rs      Runtime registry for #[arael::function] user-defined functions
+    utils.rs        Float f32/f64 trait, angle utilities, fast atan
     refs.rs         Type-safe Vec<T>, Deque<T>, Arena<T>, Ref<T>
     vect.rs         vect2<T>, vect3<T>
     matrix.rs       matrix2<T>, matrix3<T>
     quatern.rs      quatern<T>
+    log.rs          info!/warn!/error! logging macros
   cpp/
     eigen_sparse.cpp  Eigen SimplicialLLT + CHOLMOD FFI bridge (optional)
 
@@ -715,27 +706,50 @@ arael-sym/          Symbolic math library
     linalg.rs       SymVec, SymMat, Jacobian
     parse.rs        Expression parser
 
+arael-sym-macros/   Proc macro for arael-sym: sym! (auto-clone insertion)
+
 arael-macros/       Procedural macros
   src/
     lib.rs          #[arael::model], sym!, field rewriting
     constraint.rs   Constraint code generation, CSE integration
+    function.rs     #[arael::function] user-defined function codegen
 
 arael-sketch-solver/ 2D constraint solver library
   src/
     lib.rs          Sketch root, solve(), entity management
     entities.rs     Point, Line, Arc types
     constraints.rs  40+ cross-constraint types
+    expr_constraint.rs  Expression-based constraints for parametric dimensions
     dimensions.rs   Dimension annotations
+    blocker.rs      Blocker analysis for DOF-rejected constraints
+    symbol_bag.rs   Named parameters -> indices/expressions for parametric equations
 
-arael-sketch/       Interactive sketch editor application
+arael-sketch-backend/ Headless sketch backend: command interface + MCP server
   src/
-    main.rs         Entry points, EditorApp, core logic
+    lib.rs          Backend entry, module wiring
+    commands.rs     Text command parser/executor (GUI-decoupled)
     actions.rs      Action enum, undo-able operations
     history.rs      Undo/redo system
+    conflicts.rs    Constraint-conflict detection
+    earc_fit.rs     Elliptic arc fitting (endpoint + tangent + bulge)
+    geometry.rs     Coordinate transforms, snapping
+    ids.rs          Constraint/selection identification types
+    mcp_server.rs   MCP server for outside-agent access
+  docs/
+    COMMANDS.md     Command interface reference
+
+arael-sketch/       Interactive sketch editor GUI (egui/eframe)
+  src/
+    main.rs         Entry point, EditorApp
+    app_update.rs   eframe::App update loop
     tools.rs        Tool modes, selection, constraint types
     drawing.rs      Canvas rendering, grid, dimensions
     colors.rs       Color scheme (light/dark)
-    geometry.rs     Coordinate transforms, snapping
+
+benchmarks/         Solver benchmarks vs Ceres / g2o / GTSAM / SymForce / factrs / tiny-solver
+  bal/              Bundle Adjustment in the Large
+  pgo/              Pose-graph optimization
+  slam/             Heterogeneous visual-inertial SLAM (+ Raspberry Pi edge run)
 ```
 
 ## License
