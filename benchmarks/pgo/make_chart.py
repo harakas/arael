@@ -20,40 +20,40 @@
 # validation gate -- see footnote). None ms -> italic text row.
 PANELS = [
     ("M3500 (2D, 10.5k params)", 15.0, 5.0, [
-        ("arael (f32)", 3.26, "arael"),
-        ("arael (f64)", 3.45, "arael"),
-        ("g2o (GN)", 4.14, "other"),
-        ("SymForce (f32)", 5.13, "other"),
-        ("Ceres (LM)", 6.03, "other"),
-        ("factrs (GN)", 8.30, "other"),
-        ("GTSAM (GN)", 13.15, "other"),
+        ("arael (f32)", 3.08, "arael"),
+        ("arael (f64)", 3.28, "arael"),
+        ("g2o (GN)", 4.07, "other"),
+        ("SymForce (f32)", 4.94, "other"),
+        ("Ceres (LM)", 5.91, "other"),
+        ("factrs (GN)", 7.67, "other"),
+        ("GTSAM (GN)", 13.25, "other"),
     ]),
     ("city10000 (2D, 30k params)", 32.0, 10.0, [
-        ("arael (f32)", 10.1, "arael"),
-        ("arael (f64)", 13.1, "arael"),
-        ("g2o (GN)", 19.8, "other"),
-        ("Ceres (LM)", 25.8, "other"),
-        ("SymForce (f64)", 28.3, "other"),
-        ("factrs (GN)", 30.0, "other"),
+        ("arael (f32)", 10.00, "arael"),
+        ("arael (f64)", 12.15, "arael"),
+        ("g2o (GN)", 19.69, "other"),
+        ("Ceres (LM)", 25.29, "other"),
+        ("SymForce (f64)", 27.56, "other"),
+        ("factrs (GN)", 30.43, "other"),
         ("GTSAM", None, "other"),  # did not converge; text row
     ]),
     ("sphere2500 (3D, 15k params)", 70.0, 20.0, [
-        ("arael (f32)", 13.3, "arael"),
-        ("arael (f64)", 18.6, "arael"),
-        ("Ceres (LM)", 24.3, "other"),
-        ("g2o (LM)", 26.2, "other"),
-        ("GTSAM (GN)", 27.4, "other"),
-        ("factrs (GN)", 38.5, "other"),
-        ("SymForce (f32)", 65.3, "other"),
+        ("arael (f32)", 13.69, "arael"),
+        ("arael (f64)", 18.62, "arael"),
+        ("Ceres (LM)", 25.05, "other"),
+        ("g2o (LM)", 26.97, "other"),
+        ("GTSAM (GN)", 27.93, "other"),
+        ("factrs (GN)", 39.13, "other"),
+        ("SymForce (f32)", 66.74, "other"),
     ]),
     ("parking-garage (3D, 10k params)", 40.0, 10.0, [
-        ("g2o (GN)", 7.9, "other"),
-        ("arael (f32)", 10.1, "arael*"),
-        ("arael (f64)", 10.3, "arael"),
-        ("SymForce (f64)", 12.0, "other"),
-        ("GTSAM (GN)", 13.2, "other"),
-        ("Ceres (LM)", 14.1, "other"),
-        ("factrs (GN)", 37.9, "other"),
+        ("g2o (GN)", 8.16, "other"),
+        ("arael (f32)", 9.85, "arael*"),
+        ("arael (f64)", 10.18, "arael"),
+        ("SymForce (f64)", 12.30, "other"),
+        ("GTSAM (GN)", 13.71, "other"),
+        ("Ceres (LM)", 14.30, "other"),
+        ("factrs (GN)", 37.35, "other"),
     ]),
 ]
 
@@ -64,10 +64,10 @@ SUBTITLE = ("Four datasets, eight systems, single thread (Apple M4 Pro); "
 FOOT = [
     ("Every bar is validated against its dataset's common optimum "
      "(cost within 1%, rigid-aligned RMSE under 5 cm)."),
-    ("tiny-solver omitted for scale: 20.8 / 84.8 / 84.5 / 95.8 ms per "
-     "step across the four panels (6.0-9.3x arael)."),
+    ("tiny-solver omitted for scale: 20.1 / 80.6 / 84.9 / 95.8 ms per "
+     "step across the four panels (4.6-9.4x arael)."),
     ("GTSAM (batch) did not converge on city10000; its incremental "
-     "ISAM2 solves it in 10.4 s."),
+     "ISAM2 solves it in 9.2 s."),
     ("* arael f32 on the parking garage passes the cost gate (0.03% "
      "above the optimum) but not the geometric one -- a "
      "single-precision floor shared by SymForce's f32."),

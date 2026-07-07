@@ -255,8 +255,8 @@ disappear under the policy:
 
 ```sh
 ./fetch_datasets.sh
-ROUNDS=5 cargo run --release      # single-core pinning is built in
-GTSAM_PYTHON=/path/to/venv/bin/python3   # override if needed (pip install gtsam)
+ROUNDS=20 cargo run --release     # single-core pinning is built in
+GTSAM_PYTHON=/usr/bin/python3      # GTSAM via apt: sudo apt install python3-gtsam
 PGO_ONLY=sphere ...               # run only datasets whose name contains the substring
 ```
 
@@ -267,7 +267,7 @@ configuration per system; tiny-solver in the footnote for scale);
 after re-running the benchmark, update its `PANELS` table from the
 results below and re-run it.
 
-## Results (2026-07-05, aarch64 VM, single core enforced by the harness, min of 5 interleaved rounds)
+## Results (2026-07-07, aarch64 VM, single core enforced by the harness, min of 20 interleaved rounds)
 
 Iters are "accepted(total)" where the system reports both; total
 includes damping retries. Final costs are all evaluated by the one
@@ -279,75 +279,75 @@ ms/iter -- the per-step pipeline cost -- is the durable comparison.
 
 | system          | total ms |  iters | ms/iter | 1st-iter ms | final cost |
 |-----------------|---------:|-------:|--------:|------------:|-----------:|
-| arael LM f64    |     20.9 |   6(6) |    3.48 |         6.0 |     3.0218 |
-| arael LM f32    |     31.5 | 10(10) |    3.15 |         5.7 |     3.0219 |
-| tiny-solver GN  |    126.1 |      6 |   21.02 |        28.8 |     3.0218 |
-| tiny-solver LM  |    137.0 |      6 |   22.83 |        31.1 |     3.0218 |
-| factrs GN       |     45.5 |      6 |    7.59 |        13.6 |     3.0218 |
-| factrs LM       |     56.6 |      6 |    9.43 |        15.3 |     3.0218 |
-| factrs GN f32   |     48.1 |      7 |    6.87 |        13.7 |     3.0218 |
-| gtsam LM        |    114.0 |      7 |   16.28 |        18.1 |     3.0221 |
-| gtsam GN        |     77.5 |      6 |   12.91 |        14.2 |     3.0221 |
-| symforce LM     |     36.3 |   6(7) |    5.19 |        21.0 |     3.0218 |
-| symforce LM f32 |    153.9 | 18(42) |    3.66 |        20.1 |     3.0219 |
-| ceres LM        |     35.7 |   6(6) |    5.95 |        13.5 |     3.0218 |
-| g2o LM          |     26.4 |      6 |    4.39 |         8.3 |     3.0218 |
-| g2o GN          |     24.7 |      6 |    4.12 |         7.9 |     3.0218 |
-| gtsam ISAM2 (incremental reference) | 669.6 | 3500 upd | 0.19 | 0.2 | 3.0246 |
+| arael LM f64    |     19.1 |   6(6) |    3.18 |         5.9 |     3.0218 |
+| arael LM f32    |     28.1 | 10(10) |    2.81 |         5.3 |     3.0219 |
+| tiny-solver GN  |    118.6 |      6 |   19.77 |        27.5 |     3.0218 |
+| tiny-solver LM  |    129.1 |      6 |   21.51 |        28.9 |     3.0218 |
+| factrs GN       |     45.7 |      6 |    7.62 |        13.3 |     3.0218 |
+| factrs LM       |     53.3 |      6 |    8.88 |        14.3 |     3.0218 |
+| factrs GN f32   |     45.7 |      7 |    6.52 |        12.9 |     3.0218 |
+| gtsam LM        |    111.3 |      7 |   15.91 |        18.0 |     3.0221 |
+| gtsam GN        |     78.3 |      6 |   13.04 |        15.0 |     3.0221 |
+| symforce LM     |     34.6 |   6(7) |    4.95 |        20.9 |     3.0218 |
+| symforce LM f32 |    145.1 | 18(42) |    3.46 |        19.8 |     3.0219 |
+| ceres LM        |     34.5 |   6(6) |    5.75 |        13.3 |     3.0218 |
+| g2o LM          |     25.2 |      6 |    4.20 |         7.8 |     3.0218 |
+| g2o GN          |     23.8 |      6 |    3.97 |         7.5 |     3.0218 |
+| gtsam ISAM2 (incremental reference) | 737.4 | 3500 upd | 0.21 | 0.3 | 3.0246 |
 
 ### M3500 (10500 parameters, information matrices applied)
 
 | system          | total ms |  iters | ms/iter | 1st-iter ms | final cost |
 |-----------------|---------:|-------:|--------:|------------:|-----------:|
-| arael LM f64    |     20.7 |   6(6) |    3.45 |         6.3 |   137.9130 |
-| arael LM f32    |     22.8 |   7(7) |    3.26 |         5.7 |   137.9544 |
-| tiny-solver GN  |    124.8 |      6 |   20.80 |        28.6 |   137.9130 |
-| tiny-solver LM  |    135.2 |      6 |   22.54 |        30.5 |   137.9130 |
-| factrs GN       |     49.8 |      6 |    8.30 |        13.6 |   137.9130 |
-| factrs LM       |     56.5 |      6 |    9.41 |        15.2 |   137.9130 |
-| factrs GN f32   |     60.2 |      9 |    6.69 |        13.9 |   137.9194 |
-| gtsam LM        |     97.2 |      6 |   16.20 |        18.2 |   137.9273 |
-| gtsam GN        |     78.9 |      6 |   13.15 |        14.8 |   137.9273 |
-| symforce LM     |     37.1 |   6(7) |    5.29 |        21.5 |   137.9136 |
-| symforce LM f32 |     35.9 |   6(7) |    5.13 |        20.3 |   137.9157 |
-| ceres LM        |     36.2 |   6(6) |    6.03 |        13.7 |   137.9136 |
-| g2o LM          |     26.5 |      6 |    4.42 |         8.3 |   137.9136 |
-| g2o GN          |     24.9 |      6 |    4.14 |         7.9 |   137.9136 |
-| gtsam ISAM2 (incremental reference) | 666.6 | 3500 upd | 0.19 | 0.1 | 138.0320 |
+| arael LM f64    |     19.7 |   6(6) |    3.28 |         6.1 |   137.9130 |
+| arael LM f32    |     21.6 |   7(7) |    3.08 |         5.4 |   137.9544 |
+| tiny-solver GN  |    120.8 |      6 |   20.14 |        28.1 |   137.9130 |
+| tiny-solver LM  |    130.6 |      6 |   21.77 |        29.3 |   137.9130 |
+| factrs GN       |     46.0 |      6 |    7.67 |        13.4 |   137.9130 |
+| factrs LM       |     54.4 |      6 |    9.07 |        14.2 |   137.9130 |
+| factrs GN f32   |     59.4 |      9 |    6.60 |        13.4 |   137.9194 |
+| gtsam LM        |     97.9 |      6 |   16.31 |        18.7 |   137.9273 |
+| gtsam GN        |     79.5 |      6 |   13.25 |        15.1 |   137.9273 |
+| symforce LM     |     35.5 |   6(7) |    5.08 |        21.1 |   137.9136 |
+| symforce LM f32 |     34.6 |   6(7) |    4.94 |        20.1 |   137.9157 |
+| ceres LM        |     35.5 |   6(6) |    5.91 |        13.4 |   137.9136 |
+| g2o LM          |     26.1 |      6 |    4.35 |         8.0 |   137.9136 |
+| g2o GN          |     24.4 |      6 |    4.07 |         7.7 |   137.9136 |
+| gtsam ISAM2 (incremental reference) | 733.7 | 3500 upd | 0.21 | 0.3 | 138.0320 |
 
 ### city10000 (30000 parameters, information matrices applied)
 
 | system          | total ms |  iters | ms/iter | 1st-iter ms | final cost |
 |-----------------|---------:|-------:|--------:|------------:|-----------:|
-| arael LM f64    |     91.5 |   7(7) |   13.06 |        21.8 |   511.9852 |
-| arael LM f32    |     71.0 |   7(7) |   10.14 |        19.0 |   512.0045 |
-| tiny-solver GN  |    593.8 |      7 |   84.83 |       115.6 |   511.9852 |
-| tiny-solver LM  |    639.5 |      7 |   91.36 |       120.0 |   511.9852 |
-| factrs GN       |    210.2 |      7 |   30.03 |        49.8 |   511.9852 |
-| factrs LM       |    250.8 |      7 |   35.83 |        55.3 |   511.9852 |
+| arael LM f64    |     85.0 |   7(7) |   12.15 |        20.8 |   511.9852 |
+| arael LM f32    |     70.0 |   7(7) |   10.00 |        18.6 |   512.0045 |
+| tiny-solver GN  |    564.2 |      7 |   80.60 |       109.2 |   511.9852 |
+| tiny-solver LM  |    602.7 |      7 |   86.10 |       115.1 |   511.9852 |
+| factrs GN       |    213.0 |      7 |   30.43 |        49.7 |   511.9852 |
+| factrs LM       |    246.1 |      7 |   35.15 |        54.6 |   511.9852 |
 | factrs GN f32   | solver crashed (f32 Cholesky non-positive pivot) | | | | |
-| gtsam LM        |   4353.9 |     30 |  145.13 |        72.1 |   2.39e6 (local minimum) |
-| gtsam GN        |    217.3 |      4 |   54.32 |        61.0 |   2.48e8 (diverged) |
-| symforce LM     |    226.1 |   7(8) |   28.27 |       103.7 |   511.9881 |
-| symforce LM f32 |    386.9 |  7(16) |   24.18 |        99.4 |   511.9941 |
-| ceres LM        |    180.7 |   7(7) |   25.82 |        57.0 |   511.9880 |
-| g2o LM          |    150.3 |      7 |   21.47 |        38.9 |   511.9880 |
-| g2o GN          |    138.7 |      7 |   19.81 |        36.7 |   511.9880 |
-| gtsam ISAM2 (incremental reference) | 10613.5 | 10000 upd | 1.06 | 0.1 | 512.5080 |
+| gtsam LM        |   4302.6 |     30 |  143.42 |        72.6 |   2.39e6 (local minimum) |
+| gtsam GN        |    222.7 |      4 |   55.68 |        60.2 |   2.48e8 (diverged) |
+| symforce LM     |    220.5 |   7(8) |   27.56 |       102.0 |   511.9881 |
+| symforce LM f32 |    378.7 |  7(16) |   23.67 |        97.6 |   511.9941 |
+| ceres LM        |    177.0 |   7(7) |   25.29 |        55.1 |   511.9880 |
+| g2o LM          |    145.9 |      7 |   20.84 |        37.6 |   511.9880 |
+| g2o GN          |    137.8 |      7 |   19.69 |        36.1 |   511.9880 |
+| gtsam ISAM2 (incremental reference) |  9156.5 | 10000 upd | 0.92 | 0.4 | 512.5080 |
 
 arael is the fastest system in every validated cell, in both total time
 and per-step cost. Codegen head-to-head: arael leads SymForce -- the
-other compile-time symbolic system -- 1.7x on M3500 and 2.5x on
+other compile-time symbolic system -- 1.8x on M3500 and 2.6x on
 city10000. SymForce is the only other system whose f32 survives
-city10000 (386.9 ms vs arael's 71.0). factrs is the fastest non-arael
+city10000 (378.7 ms vs arael's 70.0). factrs is the fastest non-arael
 Rust library. Batch GTSAM remains the only local-solver non-converger
 on city10000 (residual parameterization, not damping).
 
 The 3D standings are split. On sphere2500 arael f64 is the fastest
-system (18.6 ms/step vs Ceres 24.3, g2o LM 26.2, GTSAM 27.4, factrs
-38.5, SymForce 68.6, tiny-solver 84.5). On the parking garage g2o
-wins -- 7.9 ms/step GN / 8.5 LM against arael's 10.3, with SymForce at
-12.0, GTSAM at 13.2, and Ceres at 14.1. The garage margin was traced
+system (18.6 ms/step vs Ceres 25.1, g2o LM 27.0, GTSAM 27.9, factrs
+39.1, SymForce 69.8, tiny-solver 84.9). On the parking garage g2o
+wins -- 8.2 ms/step GN / 8.6 LM against arael's 10.2, with SymForce at
+12.3, GTSAM at 13.7, and Ceres at 14.3. The garage margin was traced
 to the linear solver, not to g2o's hand-written Jacobians: arael's
 garage step is ~1.9 ms of linearize+assembly and ~8.5 ms of
 factorize+solve, and swapping arael's backend to CHOLMOD's supernodal
@@ -359,7 +359,7 @@ mildly in 3D (sphere2500 19.4 vs 17.7). arael's optional LGPL-safe
 backends (Eigen SimplicialLLT, CHOLMOD simplicial) were measured too:
 on par with faer on the garage, 4.6-6x slower on sphere2500 --
 supernodal's block-friendliness is what the 6-DOF datasets reward. arael leads the Rust field (factrs,
-tiny-solver) by 2.1-9.6x per step on both 3D datasets, and leads
+tiny-solver) by 2.1-9.4x per step on both 3D datasets, and leads
 SymForce -- the other compile-time codegen system, here running the
 identical symbolically-defined residual -- 3.7x on sphere2500 and 1.2x
 on the garage. GTSAM's batch solvers, the city10000 non-convergers,
@@ -372,19 +372,19 @@ gates both times.
 
 | system          | total ms |  iters | ms/iter | 1st-iter ms | final cost |
 |-----------------|---------:|-------:|--------:|------------:|-----------:|
-| arael LM f64    |    113.7 |   6(6) |   18.95 |        24.7 |  1351.2157 |
-| arael LM f32    |     82.4 |   6(6) |   13.73 |        19.4 |  1351.3502 |
-| tiny-solver GN  |    522.8 |      6 |   87.14 |       109.2 |  1351.2157 |
-| tiny-solver LM  |    542.9 |      6 |   90.49 |       110.8 |  1351.2157 |
-| factrs GN       |    245.4 |      6 |   40.89 |        55.0 |  1351.2157 |
-| factrs LM       |    267.9 |      6 |   44.65 |        58.8 |  1351.2157 |
-| ceres LM        |    145.6 |   6(6) |   24.27 |        37.9 |  1351.2182 |
-| g2o LM          |    314.7 |     12 |   26.23 |       108.9 |  1351.2157 |
+| arael LM f64    |    111.7 |   6(6) |   18.62 |        24.5 |  1351.2157 |
+| arael LM f32    |     82.1 |   6(6) |   13.69 |        19.0 |  1351.3502 |
+| tiny-solver GN  |    509.2 |      6 |   84.86 |       104.3 |  1351.2157 |
+| tiny-solver LM  |    521.8 |      6 |   86.97 |       106.5 |  1351.2157 |
+| factrs GN       |    234.8 |      6 |   39.13 |        54.5 |  1351.2157 |
+| factrs LM       |    249.2 |      6 |   41.53 |        56.3 |  1351.2157 |
+| ceres LM        |    150.3 |   6(6) |   25.05 |        40.2 |  1351.2182 |
+| g2o LM          |    323.7 |     12 |   26.97 |       113.6 |  1351.2157 |
 | g2o GN          | stalls at 3053.93 (see known behaviors) | 14 | | 26.4 | |
-| symforce LM     |    480.1 |   6(7) |   68.59 |       103.4 |  1351.2158 |
-| symforce LM f32 |    457.1 |   6(7) |   65.30 |        96.5 |  1351.3300 |
-| gtsam LM        |    182.3 |      6 |   30.39 |        34.0 |  1351.2988 |
-| gtsam GN        |    164.7 |      6 |   27.44 |        31.4 |  1351.2988 |
+| symforce LM     |    488.6 |   6(7) |   69.80 |       106.6 |  1351.2158 |
+| symforce LM f32 |    467.2 |   6(7) |   66.74 |        99.7 |  1351.3300 |
+| gtsam LM        |    185.9 |      6 |   30.98 |        36.4 |  1351.2988 |
+| gtsam GN        |    167.6 |      6 |   27.93 |        33.8 |  1351.2988 |
 
 12/13 validate (initial cost 2.58e6, five orders of magnitude above the
 optimum -- the odometry initialization is badly drifted and every
@@ -396,19 +396,19 @@ iteration), which does not like the sphere's fill pattern.
 
 | system          | total ms |  iters | ms/iter | 1st-iter ms | final cost |
 |-----------------|---------:|-------:|--------:|------------:|-----------:|
-| arael LM f64    |     51.6 |   5(5) |   10.31 |        16.7 |     1.2684 |
-| arael LM f32\*  |     50.4 |   5(5) |   10.09 |        15.7 |     1.2687 |
-| tiny-solver GN  |    396.1 |      4 |   99.02 |       121.8 |     1.2684 |
-| tiny-solver LM  |    411.5 |      4 |  102.88 |       123.1 |     1.2684 |
-| factrs GN       |    153.7 |      4 |   38.43 |        55.0 |     1.2684 |
-| factrs LM       |    162.5 |      4 |   40.63 |        60.8 |     1.2684 |
-| ceres LM        |     56.3 |   4(4) |   14.07 |        27.9 |     1.2696 |
-| g2o LM          |     34.2 |      4 |    8.54 |        13.7 |     1.2696 |
-| g2o GN          |     31.6 |      4 |    7.90 |        13.2 |     1.2696 |
-| symforce LM     |     59.8 |   4(5) |   11.96 |        34.9 |     1.2696 |
-| symforce LM f32\* |   57.3 |   4(5) |   11.46 |        32.5 |     1.2699 |
-| gtsam LM        |     93.0 |      6 |   15.51 |        17.6 |     1.2684 |
-| gtsam GN        |     52.8 |      4 |   13.20 |        15.2 |     1.2684 |
+| arael LM f64    |     50.9 |   5(5) |   10.18 |        15.8 |     1.2684 |
+| arael LM f32\*  |     49.2 |   5(5) |    9.85 |        15.0 |     1.2687 |
+| tiny-solver GN  |    383.3 |      4 |   95.83 |       116.5 |     1.2684 |
+| tiny-solver LM  |    394.4 |      4 |   98.60 |       119.5 |     1.2684 |
+| factrs GN       |    149.4 |      4 |   37.35 |        54.3 |     1.2684 |
+| factrs LM       |    160.2 |      4 |   40.05 |        56.6 |     1.2684 |
+| ceres LM        |     57.2 |   4(4) |   14.30 |        29.0 |     1.2696 |
+| g2o LM          |     34.4 |      4 |    8.59 |        14.3 |     1.2696 |
+| g2o GN          |     32.6 |      4 |    8.16 |        14.1 |     1.2696 |
+| symforce LM     |     61.5 |   4(5) |   12.30 |        36.5 |     1.2696 |
+| symforce LM f32\* |   58.8 |   4(5) |   11.76 |        34.4 |     1.2699 |
+| gtsam LM        |     95.0 |      6 |   15.83 |        18.3 |     1.2684 |
+| gtsam GN        |     54.8 |      4 |   13.71 |        16.1 |     1.2684 |
 
 \* the f32 rows reach the optimum cost to within 0.03-0.12% (well
 inside the cost gate) but sit 0.2-0.3 m from the f64 solution along

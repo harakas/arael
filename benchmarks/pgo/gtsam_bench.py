@@ -9,9 +9,12 @@
 # overhead outside it is excluded.
 #
 # usage: gtsam_bench.py <file.g2o> <lm|gn|isam2> <poses_out> <info|unit>
-# "unit" replaces the file's information matrices with identity (the
-# graph is then built manually -- readG2o always applies the file's
-# info), matching the unweighted benchmark configuration.
+# "unit" replaces the file's information matrices with identity, matching
+# the unweighted benchmark configuration. It does so by feeding readG2o a
+# copy of the file with identity info blocks -- NOT by building the graph
+# with a Python add() loop: an identical graph built that way optimizes
+# ~2x slower than readG2o's native C++ build on some gtsam builds (Debian
+# 4.2.0), which would misreport gtsam. The two give bit-identical results.
 
 import json
 import os
@@ -165,6 +168,30 @@ def run_3d(g2o_file, kind, poses_out):
     }))
 
 
+def readg2o_unit_2d(g2o_file):
+    """Unit-information 2D graph via GTSAM's native reader: write a copy of
+    the file with every EDGE_SE2 information block set to identity, then
+    readG2o it. Building the same graph with a Python graph.add() loop
+    optimizes ~2x slower on the Debian gtsam build (a native-vs-wrapped
+    factor-storage effect, independent of ordering and weights), so the
+    unweighted path stays on the same fast native path as the weighted one.
+    Bit-identical result to the manual build (verified to ~1e-12)."""
+    import tempfile
+    tmp = tempfile.NamedTemporaryFile("w", suffix=".g2o", delete=False)
+    try:
+        with open(g2o_file) as f:
+            for line in f:
+                t = line.split()
+                if t and t[0] == "EDGE_SE2":
+                    tmp.write(" ".join(t[:6] + ["1", "0", "0", "1", "0", "1"]) + "\n")
+                else:
+                    tmp.write(line)
+        tmp.close()
+        return gtsam.readG2o(tmp.name, False)
+    finally:
+        os.unlink(tmp.name)
+
+
 def main():
     g2o_file, kind, poses_out = sys.argv[1], sys.argv[2], sys.argv[3]
     unit = len(sys.argv) > 4 and sys.argv[4] == "unit"
@@ -186,13 +213,7 @@ def main():
         }))
         return
     if unit:
-        poses, edges = parse_g2o(g2o_file, True)
-        graph = gtsam.NonlinearFactorGraph()
-        for (a, b, delta, noise) in edges:
-            graph.add(gtsam.BetweenFactorPose2(a, b, delta, noise))
-        initial = gtsam.Values()
-        for k in sorted(poses):
-            initial.insert(k, poses[k])
+        graph, initial = readg2o_unit_2d(g2o_file)
     else:
         graph, initial = gtsam.readG2o(g2o_file, False)
     prior = gtsam.noiseModel.Diagonal.Sigmas([1.0, 1.0, 1.0])

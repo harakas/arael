@@ -73,7 +73,7 @@
 //!
 //! <picture>
 //!   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/pgo/chart-dark.svg">
-//!   <img alt="2x2 bar charts of per-step solve time on M3500, city10000, sphere2500 and parking-garage: arael is fastest on M3500 (3.3 ms), city10000 (10.1 ms) and sphere2500 (13.3 ms); g2o leads the parking garage (7.9 ms vs arael 10.3 ms)" src="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/pgo/chart-light.svg">
+//!   <img alt="2x2 bar charts of per-step solve time on M3500, city10000, sphere2500 and parking-garage: arael is fastest on M3500 (3.1 ms), city10000 (10.0 ms) and sphere2500 (13.7 ms); g2o leads the parking garage (8.2 ms vs arael 10.2 ms)" src="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/pgo/chart-light.svg">
 //! </picture>
 //!
 //! Per-step solve time on the four canonical pose-graph datasets, 2D and
