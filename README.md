@@ -165,109 +165,101 @@ See [docs/LINEAR.md](docs/LINEAR.md) for the full walkthrough. Full source: [exa
 
 ## SLAM Path Optimization
 
-The earlier regression example fitted two scalar parameters against one residual. Real SLAM and bundle-adjustment problems have many coupled entities -- poses, landmarks, cameras -- with many constraint types between them. arael models the hierarchy as plain Rust structs, each annotated with `#[arael::model]` and one or more `#[arael(constraint(...))]` attributes. The macros walk the hierarchy at compile time, differentiate every residual symbolically, eliminate common subexpressions, and emit one fused `calc_cost` + `calc_grad_hessian` pair for the whole graph.
-
-The demo ([examples/slam_demo.rs](examples/slam_demo.rs)) generates a synthetic S-curve trajectory with 60 poses and 240 point landmarks observed by 5 cameras. It handles 50% outlier associations with 30x pixel noise via robust suppression and graduated optimization. The solver uses faer sparse Cholesky (pure Rust) to exploit the hessian's sparsity structure.
-
-Each entity owns its own parameters and its own `SelfBlock` -- the diagonal block of the Hessian for that entity. Constraints that touch a single entity accumulate into its self block; constraints that couple two entities (an odometry residual between two poses, a bearing residual between a landmark and a pose) accumulate into a `CrossBlock` between the pair. The assembled Hessian therefore mirrors the model hierarchy: one block row/column per entity, a self block on the diagonal, and a cross block off-diagonal wherever a constraint ties two entities together. Entities that never share a constraint remain exactly zero in that corner of the matrix -- which is where the sparsity comes from.
-
-![Hessian Sparsity](docs/sparsity.png)
-
-The pattern in the S-curve demo above shows pose-pose blocks (upper-left), pose-landmark coupling (off-diagonal), and landmark self-blocks (lower-right diagonal). The faer sparse Cholesky solver exploits this, achieving 66x speedup over dense at 200 poses.
-
-A `Pose` is the robot's 6-DOF state at one timestep. Three constraint attributes stack on the same `hb_pose` Hessian block: a guarded GPS constraint (active only when GPS data is present), a drift regularizer that stabilises graduated optimization, and an accelerometer-based tilt constraint on roll and pitch. Every `Param<...>` is an optimization variable; `info` holds per-timestep measurements.
+A 2D SLAM problem: find the most likely robot path and landmark positions
+from the sensor readings. Each pose is a position `(x, y)` and a heading
+`gamma`; each landmark is a point `(x, y)`. The sensors give the angle
+(bearing) to a landmark from the poses that saw it, and how far the robot
+moved between consecutive poses -- never the distance to a landmark, only its
+direction.
 
 ```rust
+// A robot pose, plus the movement measured since the previous pose.
 #[arael::model]
-#[arael(constraint(hb_pose, guard = self.info.gps.is_some(), {
-    // GPS constraint (guarded -- only when GPS data is present)
-    let raw = pose.pos - pose.info.gps.pos;
-    let whitened = pose.info.gps.cov_r.transpose() * raw;
-    [gamma * atan(whitened.x * pose.info.gps.cov_isigma.x / gamma), ...]
-}))]
-#[arael(constraint(hb_pose, {
-    // Drift regularizer -- prevents divergence during graduated optimization
-    let pos_drift = pose.pos - pose.pos_value;
-    [pos_drift.x * path.drift_pos_isigma, ...]
-}))]
-#[arael(constraint(hb_pose, {
-    // Tilt sensor -- accelerometer constrains roll and pitch
-    [(pose.ea.x - pose.info.tilt_roll) * path.tilt_isigma,
-     (pose.ea.y - pose.info.tilt_pitch) * path.tilt_isigma]
-}))]
 struct Pose {
-    pos: Param<vect3f>,
-    ea: SimpleEulerAngleParam<f32>,  // precomputes sin/cos + rotation matrix
-    info: PoseInfo,
-    hb_pose: SelfBlock<Pose>,
+    pos: Param<vect2f>,            // solved for: position (x, y)
+    gamma: Param<f32>,             // solved for: heading (0 = east, turning left is positive)
+    delta_pos: vect2f,             // measured: movement since the previous pose
+    delta_gamma: f32,              // measured: change of heading since the previous pose
+    delta_pos_isigma: f32,         // 1 / sigma, where sigma is the sensor's uncertainty (standard deviation)
+    delta_gamma_isigma: f32,
+    hb_pose: SelfBlock<Pose, f32>, // solver storage for this pose's parameters
 }
-```
 
-A **frine** (project vocabulary) is a structure that ties one entity to one measurement. `PointFrine` is the frine for a point landmark: it binds a `PointLandmark` to a `PointFeature` -- the 2D detection in one of the pose's cameras that observed it. In factor-graph SLAM terms, a frine plays the role of a `Factor` (GTSAM) or an `Edge` (g2o). The measurement itself is pre-processed once at set-up time into a 3D direction ray in the camera frame (stored on `PointFeature`), so the solver never touches pixel coordinates or undistortion. Staying in 3D keeps derivatives smooth and sidesteps the projective singularities that show up when you differentiate through a pixel-space reprojection.
-
-The residual transforms the landmark into the pose's frame and then into the camera's feature frame (`feature.mf2r`), and compares its direction to the stored measurement via two `atan2` bearings (azimuth and elevation). Each bearing is whitened by the feature's per-axis `isigma` and passed through the robust `gamma * atan(.../gamma)` wrapper for outlier tolerance.
-
-The `#[arael(ref = ...)]` attributes declare which collection each reference resolves against -- `pose` from `root.poses`, `feature` chained off `pose.info.features` -- and the constraint uses a `CrossBlock<PointLandmark, Pose>` because it couples two entity types.
-
-```rust
-#[arael::model]
-#[arael(constraint(hb, parent=lm, {
-    let mr2w = pose.ea.rotation_matrix();
-    let lm_r = mr2w.transpose() * (lm.pos - pose.pos);
-    let r_f = feature.mf2r.transpose() * (lm_r - feature.camera_pos);
-    let plain1 = atan2(r_f.y, r_f.x) * feature.isigma.x;
-    let plain2 = atan2(r_f.z, r_f.x) * feature.isigma.y;
-    [gamma * atan(plain1 / gamma), gamma * atan(plain2 / gamma)]
-}))]
-struct PointFrine {
-    #[arael(ref = root.poses)]          // resolved from root collection
-    pose: Ref<Pose>,
-    #[arael(ref = pose.info.features)]  // chained resolution
-    feature: Ref<PointFeature>,
-    hb: CrossBlock<PointLandmark, Pose>,
-}
-```
-
-`PosePair` is the odometry constraint between two consecutive poses -- a relative-motion residual whitened by a decomposed covariance. Another `CrossBlock`, this time Pose-to-Pose.
-
-```rust
+// Two consecutive poses: their actual relative motion must match the
+// measured movement (delta_pos, delta_gamma).
 #[arael::model]
 #[arael(constraint(hb, {
-    let mr2w_prev = prev.ea.rotation_matrix();
-    let pos_diff = mr2w_prev.transpose() * (cur.pos - prev.pos);
-    let pos_err = pos_diff - cur.info.delta_pos;
-    let mr2w_cur = cur.ea.rotation_matrix();
-    let expected = mr2w_prev * cur.info.delta_ea.rotation_matrix();
-    let ea_err = (expected.transpose() * mr2w_cur).get_euler_angles();
-    // ... whitened by decomposed covariance
+    let local = matrix2sym::rotation(prev.gamma).transpose() * (cur.pos - prev.pos);
+    [(local.x - cur.delta_pos.x) * cur.delta_pos_isigma,
+     (local.y - cur.delta_pos.y) * cur.delta_pos_isigma,
+     (cur.gamma - prev.gamma - cur.delta_gamma) * cur.delta_gamma_isigma]
 }))]
 struct PosePair {
-    #[arael(ref = root.poses)]
-    prev: Ref<Pose>,
-    #[arael(ref = root.poses)]
-    cur: Ref<Pose>,
-    hb: CrossBlock<Pose, Pose>,
+    #[arael(ref = root.poses)] prev: Ref<Pose>,  // Ref<T> = typed index into a root collection
+    #[arael(ref = root.poses)] cur: Ref<Pose>,
+    hb: CrossBlock<Pose, Pose, f32>,             // solver storage for the two poses this couples
 }
-```
 
-Finally, `Path` ties it all together. `#[arael(root)]` is what actually triggers code generation: the macro walks every constraint attribute on every reachable struct, resolves the refs, and emits `calc_cost()` and the `calc_grad_hessian_*` backend family for the whole model hierarchy.
-
-```rust
+// A landmark and the bearing sightings that observed it.
 #[arael::model]
-#[arael(root)]
+struct Landmark {
+    pos: Param<vect2f>,
+    frines: std::vec::Vec<Frine>,
+    hb: SelfBlock<Landmark, f32>,
+}
+
+// One bearing sighting of `lm` from `pose`: the residual is the angle difference
+// between the landmark's actual direction and the measured bearing (zero when they agree).
+#[arael::model]
+#[arael(constraint(hb, parent = lm, {
+    let world_angle = pose.gamma + frine.bearing;
+    let aligned = matrix2sym::rotation(world_angle).transpose() * (lm.pos - pose.pos);
+    [atan2(aligned.y, aligned.x) * frine.isigma]
+}))]
+struct Frine {
+    #[arael(ref = root.poses)] pose: Ref<Pose>,
+    bearing: f32,
+    isigma: f32,
+    hb: CrossBlock<Landmark, Pose, f32>,
+}
+
+// The root. #[arael(root, f32)] triggers codegen over everything reachable.
+#[arael::model]
+#[arael(root, f32)]
 struct Path {
     poses: refs::Deque<Pose>,
-    landmarks: refs::Vec<PointLandmark>,
     pose_pairs: std::vec::Vec<PosePair>,
-    gamma: f32,
-    drift_pos_isigma: f32,
-    drift_ea_isigma: f32,
-    drift_lm_isigma: f32,
-    tilt_isigma: f32,
+    landmarks: refs::Arena<Landmark>,
 }
 ```
 
-See [docs/SLAM.md](docs/SLAM.md) for the full walkthrough.
+Each constraint body computes one or more **residuals** -- the differences
+between what the model predicts and what the sensor measured. Driving them
+toward zero pulls the estimate into agreement with the data, a soft constraint
+on the poses and landmarks involved; the same per-measurement term is what
+factor-graph frameworks call a *factor* (GTSAM) or an *edge* (g2o).
+
+There is no factor graph to build here, though: the model *is* plain Rust data
+structures, and each residual lives as code inside an
+`#[arael(constraint(...))]` attribute right next to the data it reads.
+
+Building the synthetic problem and solving it is two calls -- `solve_sparse`
+runs Levenberg-Marquardt on the faer sparse backend and writes the optimized
+values back into the structs:
+
+```rust
+let (mut path, ..) = build_path(&Cfg::default());  // synthetic arc + noisy bearings
+let cfg = LmConfig::<f32> { verbose: true, ..Default::default() };
+let result = path.solve_sparse(&cfg);
+println!("{} iterations, cost {:.1} -> {:.1}",
+    result.iterations, result.start_cost, result.end_cost);
+```
+
+Full runnable demo: [examples/slam2d_simple_demo.rs](examples/slam2d_simple_demo.rs).
+For the 3D version -- full position and orientation per pose, camera bearings,
+and rejection of wrong measurements -- see
+[examples/slam_demo.rs](examples/slam_demo.rs) and the full walkthrough in
+[docs/SLAM.md](docs/SLAM.md).
 
 ## Starship robust error suppression
 
