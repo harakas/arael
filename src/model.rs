@@ -1077,22 +1077,27 @@ fn tri_idx(n: usize, i: usize, j: usize) -> usize {
 /// `N` equals `A::PARAM_COUNT`. `T` is the float type (f32 or f64, default f64).
 ///
 /// Created by generated constraint code; users rarely construct these manually.
-pub struct SelfBlock<A: Model, const N: usize, T: crate::utils::Float = f64> {
+pub struct SelfBlock<A: Model, const N: usize, const M: usize, T: crate::utils::Float = f64> {
     indices: [u32; N],
-    hessian: std::vec::Vec<T>,
+    hessian: [T; M], // upper triangle, M = N(N+1)/2 (the macro sizes this)
     _marker: std::marker::PhantomData<(A, T)>,
 }
 
-impl<A: Model, const N: usize, T: crate::utils::Float> Default for SelfBlock<A, N, T> {
+impl<A: Model, const N: usize, const M: usize, T: crate::utils::Float> Default for SelfBlock<A, N, M, T> {
     fn default() -> Self { Self::new() }
 }
 
-impl<A: Model, const N: usize, T: crate::utils::Float> SelfBlock<A, N, T> {
+impl<A: Model, const N: usize, const M: usize, T: crate::utils::Float> SelfBlock<A, N, M, T> {
+    /// Compile-time guard that `M` matches `N` (the macro sets both; a
+    /// hand-written mismatch fails here rather than corrupting silently).
+    const CHECK_M: () = assert!(M == N * (N + 1) / 2, "SelfBlock: M must equal N*(N+1)/2");
+
     /// Create a new zeroed block.
     pub fn new() -> Self {
+        let () = Self::CHECK_M;
         SelfBlock {
             indices: [u32::MAX; N],
-            hessian: vec![T::zero(); N * (N + 1) / 2],
+            hessian: [T::zero(); M],
             _marker: std::marker::PhantomData,
         }
     }
@@ -1236,24 +1241,27 @@ impl<A: Model, const N: usize, T: crate::utils::Float> SelfBlock<A, N, T> {
 /// `NA = A::PARAM_COUNT`, `NB = B::PARAM_COUNT`. Internal Hessian storage
 /// is NA×NB row-major (one entry per cross pair). No grad, no A-A, no B-B.
 /// `T` is the float type (f32 or f64, default f64).
-pub struct CrossBlock<A: Model, B: Model, const NA: usize, const NB: usize, T: crate::utils::Float = f64> {
+pub struct CrossBlock<A: Model, B: Model, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float = f64> {
     indices_a: [u32; NA],
     indices_b: [u32; NB],
-    cross_hessian: std::vec::Vec<T>,    // NA*NB row-major
+    cross_hessian: [T; P],    // NA*NB row-major (the macro sizes this)
     _marker: std::marker::PhantomData<(A, B, T)>,
 }
 
-impl<A: Model, B: Model, const NA: usize, const NB: usize, T: crate::utils::Float> Default for CrossBlock<A, B, NA, NB, T> {
+impl<A: Model, B: Model, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float> Default for CrossBlock<A, B, NA, NB, P, T> {
     fn default() -> Self { Self::new() }
 }
 
-impl<A: Model, B: Model, const NA: usize, const NB: usize, T: crate::utils::Float> CrossBlock<A, B, NA, NB, T> {
+impl<A: Model, B: Model, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float> CrossBlock<A, B, NA, NB, P, T> {
+    /// Compile-time guard that `P` matches `NA*NB` (set by the macro).
+    const CHECK_P: () = assert!(P == NA * NB, "CrossBlock: P must equal NA*NB");
     /// Create a new zeroed cross-block.
     pub fn new() -> Self {
+        let () = Self::CHECK_P;
         CrossBlock {
             indices_a: [u32::MAX; NA],
             indices_b: [u32::MAX; NB],
-            cross_hessian: vec![T::zero(); NA * NB],
+            cross_hessian: [T::zero(); P],
             _marker: std::marker::PhantomData,
         }
     }
@@ -2257,7 +2265,7 @@ mod tests {
     fn selfblock_band_matches_dense() {
         let n = 4;
         let kd = 2;
-        let mut blk: SelfBlock<Param<f64>, 3, f64> = SelfBlock::new();
+        let mut blk: SelfBlock<Param<f64>, 3, 6, f64> = SelfBlock::new();
         blk.set_indices(&[0, 1, 2]);
         let mut grad = vec![0.0; n];
         blk.add_residual(0.3, &[1.0, 0.5, -0.25], &mut grad);
@@ -2274,7 +2282,7 @@ mod tests {
     fn crossblock_band_matches_dense() {
         let n = 5;
         let kd = 3;
-        let mut blk: CrossBlock<Param<f64>, Param<f64>, 2, 2, f64> = CrossBlock::new();
+        let mut blk: CrossBlock<Param<f64>, Param<f64>, 2, 2, 4, f64> = CrossBlock::new();
         blk.set_indices(&[0, 1], &[2, 3]);
         blk.add_residual_cross(0.4, &[1.0, -0.5], &[0.25, 2.0]);
         blk.add_residual_cross(-1.1, &[0.3, 0.7], &[-0.6, 0.1]);
@@ -2355,7 +2363,7 @@ mod tests {
         let idx = [0u32, 1, 3];
 
         let mut g_self = vec![0.0; n];
-        let mut sb: SelfBlock<Param<f64>, 3, f64> = SelfBlock::new();
+        let mut sb: SelfBlock<Param<f64>, 3, 6, f64> = SelfBlock::new();
         sb.set_indices(&idx);
         sb.add_residual(r, &dr, &mut g_self);
 

@@ -871,16 +871,16 @@ fn rewrite_block_type(ty: &mut syn::Type) {
                                 );
                                 let a_path = type_args[0];
                                 if type_args.len() == 2 {
-                                    // SelfBlock<A, f32> -> SelfBlock<A, {N}, f32>
+                                    // SelfBlock<A, f32> -> SelfBlock<A, {N}, {N(N+1)/2}, f32>
                                     let float_ty = type_args[1];
                                     let new_ty: syn::Type = syn::parse_quote! {
-                                        SelfBlock<#a_path, { #const_name }, #float_ty>
+                                        SelfBlock<#a_path, { #const_name }, { #const_name * (#const_name + 1) / 2 }, #float_ty>
                                     };
                                     *ty = new_ty;
                                 } else {
-                                    // SelfBlock<A> -> SelfBlock<A, {N}>
+                                    // SelfBlock<A> -> SelfBlock<A, {N}, {N(N+1)/2}>
                                     let new_ty: syn::Type = syn::parse_quote! {
-                                        SelfBlock<#a_path, { #const_name }>
+                                        SelfBlock<#a_path, { #const_name }, { #const_name * (#const_name + 1) / 2 }>
                                     };
                                     *ty = new_ty;
                                 }
@@ -907,16 +907,16 @@ fn rewrite_block_type(ty: &mut syn::Type) {
                                 let a_ty = type_args[0];
                                 let b_ty = type_args[1];
                                 if type_args.len() == 3 {
-                                    // CrossBlock<A, B, f32> -> CrossBlock<A, B, {NA}, {NB}, f32>
+                                    // CrossBlock<A, B, f32> -> CrossBlock<A, B, {NA}, {NB}, {NA*NB}, f32>
                                     let float_ty = type_args[2];
                                     let new_ty: syn::Type = syn::parse_quote! {
-                                        CrossBlock<#a_ty, #b_ty, { #a_const }, { #b_const }, #float_ty>
+                                        CrossBlock<#a_ty, #b_ty, { #a_const }, { #b_const }, { #a_const * #b_const }, #float_ty>
                                     };
                                     *ty = new_ty;
                                 } else {
-                                    // CrossBlock<A, B> -> CrossBlock<A, B, {NA}, {NB}>
+                                    // CrossBlock<A, B> -> CrossBlock<A, B, {NA}, {NB}, {NA*NB}>
                                     let new_ty: syn::Type = syn::parse_quote! {
-                                        CrossBlock<#a_ty, #b_ty, { #a_const }, { #b_const }>
+                                        CrossBlock<#a_ty, #b_ty, { #a_const }, { #b_const }, { #a_const * #b_const }>
                                     };
                                     *ty = new_ty;
                                 }
