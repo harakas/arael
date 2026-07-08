@@ -75,12 +75,14 @@ struct Pose {
 
 // Odometry constraint between two consecutive poses: their actual relative
 // motion must match the movement measured on `cur` (delta_pos, delta_gamma).
+// The heading term uses rad_diff so the residual wraps correctly across +-pi
+// (plain subtraction would blow up when the two headings straddle the branch).
 #[arael::model]
 #[arael(constraint(hb, {
     let local = matrix2sym::rotation(prev.gamma).transpose() * (cur.pos - prev.pos);
     [(local.x - cur.delta_pos.x) * cur.delta_pos_isigma,
      (local.y - cur.delta_pos.y) * cur.delta_pos_isigma,
-     (cur.gamma - prev.gamma - cur.delta_gamma) * cur.delta_gamma_isigma]
+     rad_diff(cur.gamma - prev.gamma, cur.delta_gamma) * cur.delta_gamma_isigma]
 }))]
 struct PosePair {
     #[arael(ref = root.poses)]

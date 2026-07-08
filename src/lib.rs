@@ -1454,7 +1454,7 @@
 //!     let local = matrix2sym::rotation(prev.gamma).transpose() * (cur.pos - prev.pos);
 //!     [(local.x - cur.delta_pos.x) * cur.delta_pos_isigma,
 //!      (local.y - cur.delta_pos.y) * cur.delta_pos_isigma,
-//!      (cur.gamma - prev.gamma - cur.delta_gamma) * cur.delta_gamma_isigma]
+//!      rad_diff(cur.gamma - prev.gamma, cur.delta_gamma) * cur.delta_gamma_isigma]
 //! }))]
 //! struct PosePair {
 //!     #[arael(ref = root.poses)] prev: Ref<Pose>,  // Ref<T> = typed index into a root collection
