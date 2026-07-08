@@ -1483,6 +1483,32 @@ fn rewrite_guard_self(e: &mut syn::Expr, replacement: &str) {
     R(replacement).visit_expr_mut(e);
 }
 
+/// Rewrite every `self` path to `replacement` across a constraint BODY, so
+/// `self.x` names the constraint's own entity (its lowercased struct name),
+/// exactly as `self` does in a guard. Applied once before the body is
+/// interpreted; downstream resolution then treats it like the ordinary
+/// `<struct_lower>.x` form users already write.
+fn rewrite_body_self(stmts: &mut [syn::Stmt], replacement: &str) {
+    use syn::visit_mut::VisitMut;
+    struct R<'a>(&'a str);
+    impl<'a> VisitMut for R<'a> {
+        fn visit_expr_mut(&mut self, node: &mut syn::Expr) {
+            if let syn::Expr::Path(p) = node
+                && p.qself.is_none()
+                && p.path.is_ident("self") {
+                    let ident = syn::Ident::new(self.0, proc_macro2::Span::call_site());
+                    *node = syn::parse_quote!(#ident);
+                    return;
+                }
+            syn::visit_mut::visit_expr_mut(self, node);
+        }
+    }
+    let mut r = R(replacement);
+    for stmt in stmts.iter_mut() {
+        r.visit_stmt_mut(stmt);
+    }
+}
+
 /// Levenshtein distance, for typo suggestions.
 fn edit_distance(a: &str, b: &str) -> usize {
     let a: Vec<char> = a.chars().collect();
@@ -2034,7 +2060,11 @@ pub fn generate_root_methods(
             }
             _ => None,
         };
-        let constraint = match constraint { Some(c) => c, None => continue };
+        let mut constraint = match constraint { Some(c) => c, None => continue };
+        // In a constraint body `self` names the constraint itself, matching the
+        // guard. Rewrite `self.x` -> `<struct_lower>.x` (the constraint's own
+        // entity) so the existing name-based resolution handles it uniformly.
+        rewrite_body_self(&mut constraint.body_stmts, &sc.struct_name.to_lowercase());
 
         // Compute the JacobianRow label for this constraint attribute:
         // - If user provided `name = "..."`, use it verbatim

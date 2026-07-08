@@ -505,10 +505,12 @@ code. The dialect:
   (`assert!`, `println!`), item declarations, and non-final expression
   statements are compile errors (a stray `;`-terminated expression
   used to silently become an extra residual; it no longer compiles).
-- **Variables**: the struct's own lowercase name (e.g. `pose2` inside
-  `Pose2`'s constraint), its `Ref` field names (`a`, `b`, ...), the
-  `parent =` name if given, and `path`-style root access. `let`
-  bindings shadow everything, constants included (Rust semantics).
+- **Variables**: the constraint's own entity -- reachable by the
+  struct's lowercase name (e.g. `pose2` inside `Pose2`'s constraint) or
+  by `self`, the same way a guard names it -- plus its `Ref` field
+  names (`a`, `b`, ...), the `parent =` name if given, and `path`-style
+  root access. `let` bindings shadow everything, constants included
+  (Rust semantics).
 - **Constants**: `pi`, `e`, `epsilon` resolve as named constants when
   not shadowed by a `let`.
 - **`<field>_value`**: the last-committed value of a param field as a
