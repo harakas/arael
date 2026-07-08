@@ -158,6 +158,15 @@ impl<T: Float> matrix3<T>
         )
     }
 
+    /// Constructs a matrix from a row-major nested array.
+    pub fn from_array(a: [[T; 3]; 3]) -> matrix3<T> {
+        matrix3::<T>::from_rows(
+            vect3::<T>::new(a[0][0], a[0][1], a[0][2]),
+            vect3::<T>::new(a[1][0], a[1][1], a[1][2]),
+            vect3::<T>::new(a[2][0], a[2][1], a[2][2]),
+        )
+    }
+
     /// Returns the 3x3 zero matrix.
     pub fn zero_matrix() -> matrix3<T> {
         matrix3::<T>::from_rows(
@@ -595,6 +604,45 @@ impl<T: Float> matrix2<T>
     pub fn det(self) -> T {
         self[0][0] * self[1][1] - self[0][1] * self[1][0]
     }
+
+    /// Symmetric eigendecomposition: self = R * diag(d) * R^T
+    ///
+    /// The matrix must be symmetric. Returns (R, d) where R holds the
+    /// eigenvectors as columns and d the eigenvalues, sorted ascending.
+    /// R is orthonormal but not necessarily a rotation: eigenvector signs
+    /// and ordering are arbitrary, so det(R) may be -1 (a reflection).
+    /// This does not affect uses that rely only on self = R * diag(d) * R^T
+    /// (e.g. covariance whitening); if a proper rotation is needed, negate
+    /// one column when det(R) < 0.
+    ///
+    /// Non-finite input propagates: NaN in yields NaN out.
+    pub fn symmetric_eigen(self) -> (matrix2<T>, vect2<T>) {
+        let na_mat = nalgebra::Matrix2::new(
+            self[0][0].to_f64().unwrap(), self[0][1].to_f64().unwrap(),
+            self[1][0].to_f64().unwrap(), self[1][1].to_f64().unwrap(),
+        );
+        let eigen = na_mat.symmetric_eigen();
+
+        // Sort by eigenvalue (ascending)
+        let mut idx = [0usize, 1];
+        idx.sort_by(|&a, &b| eigen.eigenvalues[a].total_cmp(&eigen.eigenvalues[b]));
+
+        let d = vect2::<T>::new(
+            T::from(eigen.eigenvalues[idx[0]]).unwrap(),
+            T::from(eigen.eigenvalues[idx[1]]).unwrap(),
+        );
+        let r = matrix2::<T>::from_cols(
+            vect2::<T>::new(
+                T::from(eigen.eigenvectors[(0, idx[0])]).unwrap(),
+                T::from(eigen.eigenvectors[(1, idx[0])]).unwrap(),
+            ),
+            vect2::<T>::new(
+                T::from(eigen.eigenvectors[(0, idx[1])]).unwrap(),
+                T::from(eigen.eigenvectors[(1, idx[1])]).unwrap(),
+            ),
+        );
+        (r, d)
+    }
 }
 
 impl<T: Float> Similar for matrix2<T> {
@@ -836,6 +884,44 @@ mod tests {
         );
         let k_rec = r * diag_rec * r.transpose();
         assert!(k_rec.similar(k));
+    }
+
+    #[test]
+    fn test_symmetric_eigen_2x2() {
+        // Build a symmetric 2x2 K = R * diag(d) * R^T with known values.
+        let r_orig = matrix2d::rotation(0.7);
+        let d_orig = vect2d::new(2.0, 9.0);
+        let diag = matrix2d::from_elements(d_orig.x, 0.0, 0.0, d_orig.y);
+        let k = r_orig * diag * r_orig.transpose();
+
+        let (r, d) = k.symmetric_eigen();
+
+        // Eigenvalues match (sorted ascending).
+        assert!((d.x - 2.0).abs() < 1e-10, "d.x={}", d.x);
+        assert!((d.y - 9.0).abs() < 1e-10, "d.y={}", d.y);
+        // R orthogonal.
+        assert!((r * r.transpose()).similar(matrix2d::identity()));
+        // Reconstruct.
+        let diag_rec = matrix2d::from_elements(d.x, 0.0, 0.0, d.y);
+        assert!((r * diag_rec * r.transpose()).similar(k));
+    }
+
+    #[test]
+    fn test_symmetric_eigen_2x2_nan_propagates() {
+        // NaN input must propagate to the output, not panic in the
+        // eigenvalue sort.
+        let nan = f64::NAN;
+        let m = matrix2d::from_rows(vect2d::new(nan, 0.0), vect2d::new(0.0, 2.0));
+        let (_r, d) = m.symmetric_eigen();
+        assert!(d.x.is_nan() || d.y.is_nan(),
+            "NaN input must yield NaN eigenvalues, got {:?}", d);
+    }
+
+    #[test]
+    fn test_from_array() {
+        let a = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]];
+        assert!(matrix3d::from_array(a).similar(
+            matrix3d::from_elements(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0)));
     }
 }
 
