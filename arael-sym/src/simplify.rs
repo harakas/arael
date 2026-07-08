@@ -714,6 +714,16 @@ impl Expr {
                 }
                 E::new(Expr::Clamp(val, lo, hi))
             }
+            Expr::Branch(q, a, b) => {
+                let q = q.simplify_once();
+                let a = a.simplify_once();
+                let b = b.simplify_once();
+                // Constant condition collapses to the taken side.
+                if let Expr::Const(qv) = q.as_ref() {
+                    return if *qv >= 0.0 { a } else { b };
+                }
+                E::new(Expr::Branch(q, a, b))
+            }
             Expr::Atan2(y, x) => {
                 let y = y.simplify_once();
                 let x = x.simplify_once();
@@ -810,6 +820,7 @@ impl Expr {
             Expr::Abs(a) => E::new(Expr::Abs(a.expand_inner())),
             Expr::Heaviside(a) => E::new(Expr::Heaviside(a.expand_inner())),
             Expr::Clamp(val, lo, hi) => E::new(Expr::Clamp(val.expand_inner(), lo.expand_inner(), hi.expand_inner())),
+            Expr::Branch(q, a, b) => E::new(Expr::Branch(q.expand_inner(), a.expand_inner(), b.expand_inner())),
             Expr::Func { name, params, kind, args } => {
                 let expanded_args: Vec<E> = args.iter().map(|a| a.expand_inner()).collect();
                 if let Some(body) = kind.body() {

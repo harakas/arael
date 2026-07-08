@@ -165,6 +165,15 @@ impl fmt::Display for Expr {
                 fmt::Display::fmt(hi.as_ref(), f)?;
                 write!(f, ")")
             }
+            Expr::Branch(q, a, b) => {
+                write!(f, "branch(")?;
+                fmt::Display::fmt(q.as_ref(), f)?;
+                write!(f, ", ")?;
+                fmt::Display::fmt(a.as_ref(), f)?;
+                write!(f, ", ")?;
+                fmt::Display::fmt(b.as_ref(), f)?;
+                write!(f, ")")
+            }
             Expr::Func { name, args, .. } => {
                 write!(f, "{name}(")?;
                 for (i, arg) in args.iter().enumerate() {
@@ -327,6 +336,15 @@ impl Expr {
                 hi.write_latex(buf);
                 buf.push_str("\\right)");
             }
+            Expr::Branch(q, a, b) => {
+                buf.push_str("\\operatorname{branch}\\left(");
+                q.write_latex(buf);
+                buf.push_str(", ");
+                a.write_latex(buf);
+                buf.push_str(", ");
+                b.write_latex(buf);
+                buf.push_str("\\right)");
+            }
             Expr::Func { name, args, .. } => {
                 let escaped = name.replace('_', "\\_");
                 buf.push_str(&format!("\\operatorname{{{escaped}}}\\left("));
@@ -481,6 +499,17 @@ impl Expr {
                 buf.push_str(", ");
                 hi.write_rust(buf, ft, 0);
                 buf.push(')');
+            }
+            Expr::Branch(q, a, b) => {
+                // q >= 0 ? a : b, lazy (only the taken side runs). The `0.0`
+                // infers to the expression's float type from the comparison.
+                buf.push_str("(if ");
+                q.write_rust(buf, ft, 0);
+                buf.push_str(" >= 0.0 { ");
+                a.write_rust(buf, ft, 0);
+                buf.push_str(" } else { ");
+                b.write_rust(buf, ft, 0);
+                buf.push_str(" })");
             }
             Expr::Func { name, params, kind, args } => {
                 if let Some(body) = kind.body() {

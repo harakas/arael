@@ -446,11 +446,15 @@ Every `Expr::Func` carries one of three `FuncKind` variants:
 
 You can construct `Expr::Func` values directly via `FuncKind` if you need to bypass the constructors above; usually the constructors are easier.
 
-## Switching and Clamping: `heaviside`, `clamp`
+## Switching and Clamping: `heaviside`, `clamp`, `branch`
 
 ### `heaviside(x)`
 
 The Heaviside step function: 0 for `x < 0`, 1 for `x >= 0`, and 0 for NaN (interpreted eval and compiled code agree on this). Auto-differentiates to 0 everywhere -- the true derivative is a Dirac delta, whose applications in numeric calculations are limited, so we drop it. `H` is a parser-level alias: `parse("H(x)")` is the same as `parse("heaviside(x)")`.
+
+### `branch(q, a, b)`
+
+Selects between two subexpressions on the sign of a third: `branch(q, a, b) = q >= 0 ? a : b`, with the same `>= 0` / NaN sense as `heaviside` (a NaN condition selects `b`). It compiles to `if q >= 0.0 { a } else { b }` and interprets the same way, so **only the taken side is evaluated** -- the untaken arm may be undefined (a division by zero, a `ln` of a negative) without poisoning the result. Differentiation selects the taken side's derivative: `d/dvar branch(q, a, b) = branch(q, d a/dvar, d b/dvar)`. The switch `q` contributes nothing (the jump at `q = 0` is dropped, as with `heaviside`), so `branch` gives a piecewise residual the correct one-sided gradient with no spurious boundary term. Use it for asymmetric penalties, one-sided barriers, or guarding an inner computation valid on only one side of a condition.
 
 ### `clamp(value, lo, hi)`
 

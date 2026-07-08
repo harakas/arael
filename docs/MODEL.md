@@ -518,9 +518,11 @@ code. The dialect:
 - **Scalar functions**: the arael-sym registry -- `sin cos tan asin
   acos atan sinh cosh tanh exp ln log2 log10 sqrt abs heaviside
   identity safe_sqrt safe_asin safe_acos atan2 pow safe_atan2 rad_diff
-  rad_sum clamp` -- plus any `#[arael::function]` you define (next
+  rad_sum clamp branch` -- plus any `#[arael::function]` you define (next
   section). Derivative conventions for the `safe_*`/`heaviside`/
-  `clamp` family are documented in [SYM.md](SYM.md).
+  `clamp`/`branch` family are documented in [SYM.md](SYM.md).
+  `branch(q, a, b)` compiles to `if q >= 0.0 { a } else { b }`, so only
+  the taken side runs and its derivative is the one selected.
 - **Vectors / matrices / quaternions**: fields of runtime type
   `vect2*/vect3*/matrix2*/matrix3*/quatern*` dispatch through their
   symbolic companions -- arithmetic, `transpose`, `det`, indexing

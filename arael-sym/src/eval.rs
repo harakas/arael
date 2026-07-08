@@ -48,6 +48,12 @@ impl Expr {
                 let h = hi.eval(vars)?;
                 Ok(v.clamp(l, h))
             }
+            Expr::Branch(q, a, b) => {
+                // q >= 0 ? a : b, with the same >= 0 / NaN sense as Heaviside
+                // (NaN is not >= 0, so it selects b). Only the taken side is
+                // evaluated, matching the generated if/else.
+                if q.eval(vars)? >= 0.0 { a.eval(vars) } else { b.eval(vars) }
+            }
             Expr::Func { params, kind, args, .. } => {
                 if let Some(f) = kind.eval_fn() {
                     let vals: Result<Vec<f64>, _> = args.iter().map(|a| a.eval(vars)).collect();
@@ -97,6 +103,7 @@ impl Expr {
             Expr::Abs(a) => E::new(Expr::Abs(a.subs_by_name(var, replacement))),
             Expr::Heaviside(a) => E::new(Expr::Heaviside(a.subs_by_name(var, replacement))),
             Expr::Clamp(a, lo, hi) => E::new(Expr::Clamp(a.subs_by_name(var, replacement), lo.subs_by_name(var, replacement), hi.subs_by_name(var, replacement))),
+            Expr::Branch(q, a, b) => E::new(Expr::Branch(q.subs_by_name(var, replacement), a.subs_by_name(var, replacement), b.subs_by_name(var, replacement))),
             Expr::Func { name, params, kind, args } => {
                 let new_args = args.iter().map(|a| a.subs_by_name(var, replacement)).collect();
                 // Captured symbols: substitute inside the body/derivs too,
@@ -147,7 +154,7 @@ impl Expr {
             | Expr::Heaviside(a) => {
                 a.collect_vars(set);
             }
-            Expr::Clamp(a, lo, hi) => {
+            Expr::Clamp(a, lo, hi) | Expr::Branch(a, lo, hi) => {
                 a.collect_vars(set);
                 lo.collect_vars(set);
                 hi.collect_vars(set);

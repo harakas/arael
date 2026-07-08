@@ -368,7 +368,7 @@ impl E {
                 a.collect_symbols(out);
                 b.collect_symbols(out);
             }
-            Expr::Clamp(a, b, c) => {
+            Expr::Clamp(a, b, c) | Expr::Branch(a, b, c) => {
                 a.collect_symbols(out);
                 b.collect_symbols(out);
                 c.collect_symbols(out);
@@ -422,6 +422,7 @@ impl E {
             Expr::Abs(a) => abs(a.substitute(subs)),
             Expr::Heaviside(a) => heaviside(a.substitute(subs)),
             Expr::Clamp(a, lo, hi) => clamp(a.substitute(subs), lo.substitute(subs), hi.substitute(subs)),
+            Expr::Branch(q, a, b) => branch(q.substitute(subs), a.substitute(subs), b.substitute(subs)),
             Expr::Func { name, params, kind, args } => {
                 let new_args = args.iter().map(|a| a.substitute(subs)).collect();
                 E::new(Expr::Func { name: name.clone(), params: params.clone(), kind: kind.clone(), args: new_args })
@@ -501,6 +502,11 @@ pub enum Expr {
     Heaviside(E),
     /// Clamp value to [lo, hi]. Derivative passes through (= d(val)/dvar).
     Clamp(E, E, E),
+    /// Branch select: `branch(q, a, b) = q >= 0 ? a : b`. Only the taken
+    /// side is evaluated. The derivative selects the taken side's
+    /// derivative -- the switch is piecewise-constant, so `q` contributes
+    /// nothing (like Heaviside).
+    Branch(E, E, E),
     /// Named constant (pi, epsilon, e, or user-defined).
     /// Survives simplification (unlike Const which may be folded away).
     NamedConst {
@@ -608,7 +614,7 @@ impl Hash for Expr {
                 a.hash(state);
                 b.hash(state);
             }
-            Expr::Clamp(a, b, c) => {
+            Expr::Clamp(a, b, c) | Expr::Branch(a, b, c) => {
                 a.hash(state);
                 b.hash(state);
                 c.hash(state);
@@ -821,6 +827,14 @@ pub fn heaviside(e: E) -> E { E::new(Expr::Heaviside(e)) }
 pub fn clamp(val: impl Into<E>, lo: impl Into<E>, hi: impl Into<E>) -> E {
     E::new(Expr::Clamp(val.into(), lo.into(), hi.into()))
 }
+/// Symbolic branch select: `branch(q, a, b) = q >= 0 ? a : b`. Only the taken
+/// side is evaluated (in both interpretation and generated code), so `a` / `b`
+/// may be undefined off their side. The derivative selects the taken side's
+/// derivative -- the switch `q` contributes nothing, like Heaviside. Accepts
+/// `impl Into<E>` so bare numeric arms compose: `branch(x, 1.0, -1.0)`.
+pub fn branch(q: impl Into<E>, a: impl Into<E>, b: impl Into<E>) -> E {
+    E::new(Expr::Branch(q.into(), a.into(), b.into()))
+}
 /// Symbolic power function. Auto-simplifies (e.g. x^0 = 1, x^1 = x).
 /// Accepts `impl Into<E>` for both args so bare numeric literals
 /// compose naturally: `pow(x, 2.0)`, `pow(x, 3)`.
@@ -884,6 +898,7 @@ pub const FUNCTIONS: &[(&str, FunctionRef)] = &[
     ("rad_sum", FunctionRef::Binary(rad_sum)),
     // Ternary
     ("clamp", FunctionRef::Ternary(clamp)),
+    ("branch", FunctionRef::Ternary(branch)),
 ];
 
 /// Look up a scalar function by its conventional name. Returns `None` for
@@ -2467,6 +2482,58 @@ mod tests {
             assert_eq!(format!("{}", g.simplify()), "0");
             let h = clamp(c(0.5), c(0.0), c(1.0));
             assert_eq!(format!("{}", h.simplify()), "0.5");
+        }
+    }
+
+    #[test]
+    fn branch_eval() {
+        sym! {
+            let x = symbol("x");
+            let f = branch(x, c(10.0), c(-10.0));
+            assert_eq!(f.eval(&HashMap::from([("x", 0.5)])).unwrap(), 10.0);
+            assert_eq!(f.eval(&HashMap::from([("x", 0.0)])).unwrap(), 10.0);   // q == 0 selects a
+            assert_eq!(f.eval(&HashMap::from([("x", -0.1)])).unwrap(), -10.0);
+        }
+    }
+
+    #[test]
+    fn branch_eval_only_taken_side() {
+        sym! {
+            let x = symbol("x");
+            // The untaken side (ln(-1) = NaN) must not be evaluated.
+            let f = branch(x, c(1.0), ln(c(-1.0)));
+            assert_eq!(f.eval(&HashMap::from([("x", 1.0)])).unwrap(), 1.0);
+        }
+    }
+
+    #[test]
+    fn branch_diff_selects_side() {
+        sym! {
+            let x = symbol("x");
+            let q = symbol("q");
+            // d/dx branch(q, x^2, 5) = branch(q, 2x, 0): selects the taken side's slope.
+            let d = branch(q, x * x, c(5.0)).diff("x");
+            assert_eq!(d.eval(&HashMap::from([("q", 1.0), ("x", 2.0)])).unwrap(), 4.0);
+            assert_eq!(d.eval(&HashMap::from([("q", -1.0), ("x", 2.0)])).unwrap(), 0.0);
+        }
+    }
+
+    #[test]
+    fn branch_display() {
+        sym! {
+            let x = symbol("x");
+            assert_eq!(format!("{}", branch(x, c(1.0), c(-1.0))), "branch(x, 1, -1)");
+        }
+    }
+
+    #[test]
+    fn branch_simplify_constant_condition() {
+        sym! {
+            let a = symbol("a");
+            let b = symbol("b");
+            assert_eq!(format!("{}", branch(c(2.0), a.clone(), b.clone()).simplify()), "a");
+            assert_eq!(format!("{}", branch(c(0.0), a.clone(), b.clone()).simplify()), "a");
+            assert_eq!(format!("{}", branch(c(-1.0), a, b).simplify()), "b");
         }
     }
 

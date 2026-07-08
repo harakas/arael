@@ -1,4 +1,4 @@
-use super::{AsVarName, Expr, E, constant, sin, cos, cosh, sinh, tanh, exp, ln, sqrt, abs, pow};
+use super::{AsVarName, Expr, E, constant, sin, cos, cosh, sinh, tanh, exp, ln, sqrt, abs, pow, branch};
 
 impl Expr {
     /// Symbolically differentiate this expression with respect to a variable.
@@ -120,6 +120,11 @@ impl Expr {
             Expr::Clamp(val, _, _) => {
                 // Pass-through: derivative ignores the clamping
                 val.diff(var)
+            }
+            Expr::Branch(q, a, b) => {
+                // Select the taken side's derivative; the switch q contributes
+                // nothing (piecewise-constant, like Heaviside).
+                branch(q.clone(), a.diff(var), b.diff(var))
             }
             Expr::Func { params, kind, args, .. } => {
                 if let Some(body) = kind.auto_diff_body() {

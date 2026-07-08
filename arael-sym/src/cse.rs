@@ -21,7 +21,7 @@ fn expr_cost(e: &E) -> usize {
         | Expr::Div(a, b) | Expr::Pow(a, b) | Expr::Atan2(a, b) => {
             1 + expr_cost(a) + expr_cost(b)
         }
-        Expr::Clamp(a, b, c) => 1 + expr_cost(a) + expr_cost(b) + expr_cost(c),
+        Expr::Clamp(a, b, c) | Expr::Branch(a, b, c) => 1 + expr_cost(a) + expr_cost(b) + expr_cost(c),
         Expr::Func { args, .. } => {
             1 + args.iter().map(expr_cost).sum::<usize>()
         }
@@ -42,7 +42,7 @@ fn expr_depth(e: &E) -> usize {
         | Expr::Div(a, b) | Expr::Pow(a, b) | Expr::Atan2(a, b) => {
             1 + expr_depth(a).max(expr_depth(b))
         }
-        Expr::Clamp(a, b, c) => 1 + expr_depth(a).max(expr_depth(b)).max(expr_depth(c)),
+        Expr::Clamp(a, b, c) | Expr::Branch(a, b, c) => 1 + expr_depth(a).max(expr_depth(b)).max(expr_depth(c)),
         Expr::Func { args, .. } => {
             1 + args.iter().map(expr_depth).max().unwrap_or(0)
         }
@@ -65,7 +65,7 @@ fn count_subexprs(e: &E, counts: &mut HashMap<E, usize>) {
             count_subexprs(a, counts);
             count_subexprs(b, counts);
         }
-        Expr::Clamp(a, b, c) => {
+        Expr::Clamp(a, b, c) | Expr::Branch(a, b, c) => {
             count_subexprs(a, counts);
             count_subexprs(b, counts);
             count_subexprs(c, counts);
@@ -149,6 +149,7 @@ fn replace(e: &E, target: &E, replacement: &E) -> E {
         Expr::Abs(a) => E::new(Expr::Abs(replace(a, target, replacement))),
         Expr::Heaviside(a) => E::new(Expr::Heaviside(replace(a, target, replacement))),
         Expr::Clamp(a, b, c) => E::new(Expr::Clamp(replace(a, target, replacement), replace(b, target, replacement), replace(c, target, replacement))),
+        Expr::Branch(a, b, c) => E::new(Expr::Branch(replace(a, target, replacement), replace(b, target, replacement), replace(c, target, replacement))),
         Expr::Func { name, params, kind, args } => {
             let new_args = args.iter().map(|a| replace(a, target, replacement)).collect();
             E::new(Expr::Func { name: name.clone(), params: params.clone(), kind: kind.clone(), args: new_args })
@@ -320,7 +321,7 @@ fn count_divisors(e: &E, counts: &mut HashMap<E, usize>) {
             count_divisors(a, counts);
             count_divisors(b, counts);
         }
-        Expr::Clamp(a, b, c) => {
+        Expr::Clamp(a, b, c) | Expr::Branch(a, b, c) => {
             count_divisors(a, counts);
             count_divisors(b, counts);
             count_divisors(c, counts);
@@ -363,6 +364,7 @@ fn replace_divisor(e: &E, divisor: &E, replacement: &E) -> E {
         Expr::Abs(a) => E::new(Expr::Abs(replace_divisor(a, divisor, replacement))),
         Expr::Heaviside(a) => E::new(Expr::Heaviside(replace_divisor(a, divisor, replacement))),
         Expr::Clamp(a, b, c) => E::new(Expr::Clamp(replace_divisor(a, divisor, replacement), replace_divisor(b, divisor, replacement), replace_divisor(c, divisor, replacement))),
+        Expr::Branch(a, b, c) => E::new(Expr::Branch(replace_divisor(a, divisor, replacement), replace_divisor(b, divisor, replacement), replace_divisor(c, divisor, replacement))),
         Expr::Func { name, params, kind, args } => {
             let new_args = args.iter().map(|a| replace_divisor(a, divisor, replacement)).collect();
             E::new(Expr::Func { name: name.clone(), params: params.clone(), kind: kind.clone(), args: new_args })
