@@ -73,50 +73,57 @@ Ceres's, and the damping floor rendered moot (measured identical at
 Initial lambda is per-dataset (harness table, env `ARAEL_LAMBDA0`):
 1e-3 on Ladybug-138 (1e-4 plateaus 1.4% high there), 1e-4 elsewhere.
 Ceres runs its shipped trust-region defaults -- BAL is the problem
-family they were tuned on. g2o runs its auto lambda heuristic
-(`G2O_LAMBDA_INIT` overrides; probed 1e-6/1e-4 on Ladybug-49, within
-14% of auto). `ARAEL_VERBOSE=1` prints the solver's per-iteration
-trace.
+family they were tuned on. g2o runs its auto lambda heuristic, which
+scales the initial damping to each problem (`G2O_LAMBDA_INIT`
+overrides). `ARAEL_VERBOSE=1` prints the solver's per-iteration trace.
 
-## Results (Ladybug problems, aarch64 VM, single core, min of 3 rounds; arael rows use the Nielsen driver)
+## Results (Ladybug problems, aarch64 VM, single core, min of 10 rounds; arael rows use the Nielsen driver)
 
 ### Ladybug-49 (23769 parameters)
 
-| system             | total ms |  iters  | ms/iter | 1st-iter ms | final cost |
-|--------------------|---------:|--------:|--------:|------------:|-----------:|
-| arael LM f64       |    588.1 |  22(22) |   26.73 |        56.1 | 26689.3493 |
-| arael LM f32       |    540.0 |  20(23) |   23.48 |        50.8 | 26690.5913 |
-| ceres dense_schur  |    495.2 |  22(22) |   22.51 |        46.8 | 26689.7174 |
-| ceres sparse_schur |    516.9 |  22(22) |   23.49 |        60.4 | 26689.7174 |
-| g2o LM (schur)     |   1079.1 |      42 |   25.69 |        40.6 | 26714.5561 |
+| system                | total ms |  iters  | ms/iter | 1st-iter ms | final cost |
+|-----------------------|---------:|--------:|--------:|------------:|-----------:|
+| arael LM f64          |    533.8 |  22(22) |   24.26 |        53.2 | 26689.3493 |
+| arael LM f32          |    478.3 |  20(23) |   20.80 |        46.2 | 26690.5913 |
+| ceres dense_schur     |    436.3 |  22(22) |   19.83 |        41.8 | 26689.7174 |
+| ceres sparse_schur    |    456.0 |  22(22) |   20.73 |        53.0 | 26689.7174 |
+| ceres iterative_schur |    662.6 |  24(24) |   27.61 |        38.2 | 26689.5841 |
+| g2o LM (schur)        |    972.8 |      42 |   23.16 |        34.3 | 26714.5561 |
 
 ### Ladybug-138 (60876 parameters)
 
-| system             | total ms |  iters  | ms/iter | 1st-iter ms | final cost |
-|--------------------|---------:|--------:|--------:|------------:|------------:|
-| arael LM f64       |   1938.4 |  20(21) |   92.30 |       230.5 | 119055.9961 |
-| arael LM f32       |   1868.3 |  21(23) |   81.23 |       209.7 | 119053.6517 |
-| ceres dense_schur  |   2056.7 |  22(25) |   82.27 |       164.9 | 119056.2145 |
-| ceres sparse_schur |   1899.7 |  22(25) |   75.99 |       196.3 | 119056.2145 |
-| g2o LM (schur)     |   3742.6 |      40 |   93.56 |       139.4 | 118904.3429 |
+| system                | total ms |  iters  | ms/iter | 1st-iter ms | final cost |
+|-----------------------|---------:|--------:|--------:|------------:|------------:|
+| arael LM f64          |   1834.8 |  20(21) |   87.37 |       214.8 | 119055.9961 |
+| arael LM f32          |   1720.4 |  21(23) |   74.80 |       194.8 | 119053.6517 |
+| ceres dense_schur     |   1874.8 |  22(25) |   74.99 |       145.6 | 119056.2145 |
+| ceres sparse_schur    |   1734.1 |  22(25) |   69.36 |       174.8 | 119056.2145 |
+| ceres iterative_schur |   3275.9 |  43(62) |   52.84 |       112.5 | 190424.2644 |
+| g2o LM (schur)        |   3477.0 |      40 |   86.93 |       127.3 | 118904.3429 |
+
+`iterative_schur` does not reach the common optimum on Ladybug-138: its
+inexact CG solve stalls at 190424 (60% above the 118904 optimum, camera
+RMSE 1.38e-2). The other five validate; g2o's 118904 is the deepest.
 
 ### Ladybug-372 (145617 parameters)
 
-| system             | total ms |  iters  | ms/iter | 1st-iter ms |  final cost |
-|--------------------|---------:|--------:|--------:|------------:|------------:|
-| arael LM f64       |   3616.7 |   5(11) |  328.79 |       701.2 | 225577.5976 |
-| arael LM f32       |   3874.2 |   8(15) |  258.28 |       605.3 | 225465.6238 |
-| ceres dense_schur  |   8015.0 |  10(17) |  471.47 |       753.0 | 225447.1709 |
-| ceres sparse_schur |   4592.2 |  10(17) |  270.13 |       649.1 | 225447.1709 |
-| g2o LM (schur)     |   9654.8 |      28 |  344.82 |       473.0 | 226586.4232 |
+| system                | total ms |  iters  | ms/iter | 1st-iter ms |  final cost |
+|-----------------------|---------:|--------:|--------:|------------:|------------:|
+| arael LM f64          |   3474.2 |   5(11) |  315.83 |       658.3 | 225577.5976 |
+| arael LM f32          |   3622.9 |   8(15) |  241.53 |       572.0 | 225465.6238 |
+| ceres dense_schur     |   7481.2 |  10(17) |  440.07 |       680.5 | 225447.1709 |
+| ceres sparse_schur    |   4283.0 |  10(17) |  251.94 |       597.7 | 225447.1709 |
+| ceres iterative_schur |   3326.6 |  15(26) |  127.94 |       327.5 | 225798.8928 |
+| g2o LM (schur)        |   9071.4 |      28 |  323.98 |       438.1 | 226586.4232 |
 
-All rows validate on all three. Two Ceres reference points measured
-outside the tables on Ladybug-49 (its other linear solvers, same run
-protocol): `sparse_normal_cholesky` (the full-system strategy arael
-uses) 853 ms at 38.8 ms/step, `iterative_schur` 681 ms. Fixed-schedule
-arael numbers for comparison (ARAEL_DRIVER=fixed, per-dataset floors):
-821 / 4968 / 3242 ms -- the Nielsen driver is worth 1.4x, 2.5x, and a
-lower-cost stop respectively.
+Every row validates on Ladybug-49 and 372. On Ladybug-138 five of six
+validate -- Ceres's `iterative_schur` is the exception (above). One
+Ceres reference point measured outside the tables on Ladybug-49 (same
+run protocol): `sparse_normal_cholesky`, the full-system strategy arael
+uses, at ~39 ms/step (~1.6x arael's per-step). Fixed-schedule arael
+numbers for comparison (ARAEL_DRIVER=fixed, per-dataset floors): 821 /
+4968 / 3242 ms -- the Nielsen driver is worth ~1.5x on Ladybug-49,
+~2.7x on Ladybug-138, and a lower-cost stop on Ladybug-372.
 
 ### Ladybug-1723 (485k parameters, exploratory: `BAL_ONLY=1723`)
 
@@ -135,33 +142,50 @@ J^T J at 485k parameters), and the solve terminates loudly.
 
 With the Nielsen driver the size story flattens into near parity:
 
-1. **Ladybug-49: Ceres wins by ~20%** (485 vs 594 ms), both taking 22
-   rejection-free steps -- the remaining gap is per-step cost (22.1 vs
-   27.0 ms), i.e. dense-Schur elimination at the problem size it is
+1. **Ladybug-49: Ceres wins by ~22%** (436 vs 534 ms), both taking 22
+   rejection-free steps -- the remaining gap is per-step cost (19.8 vs
+   24.3 ms), i.e. dense-Schur elimination at the problem size it is
    best at.
-2. **Ladybug-138: a tie for f64 (1951 vs 1933 ms) and arael f32 wins
-   the dataset outright** -- 1894 ms with the lowest final cost
-   measured (119053.65, marginally below Ceres's optimum).
-3. **Ladybug-372: arael wins** (3.62 vs 4.57 s, 5 accepted steps to
-   Ceres's 10). Run-to-run step counts vary (5-12) here; min-of-rounds
+2. **Ladybug-138: arael f32 wins the dataset** -- 1720 ms, the fastest
+   of any solver, with the lowest cost of the arael/Ceres cluster
+   (119053.65). arael f64 (1835 ms) sits between the two Ceres variants
+   (1734 / 1875). g2o alone descends deeper (118904, 0.13% below the
+   cluster) but takes ~2x the time (3477 ms).
+3. **Ladybug-372: arael is the fastest direct solver** (3.47 vs Ceres
+   sparse-Schur's 4.28 s, 5 accepted steps to Ceres's 10). Ceres's
+   `iterative_schur` edges it on wall-clock (3.33 s) with inexact CG,
+   stopping at a slightly higher but still-converged cost (225799 vs
+   225578). Run-to-run step counts vary (5-12) here; min-of-rounds
    applies to every system equally.
 4. **Per-step, arael's full-system faer solve tracks Ceres's
-   sparse-Schur within 4-26% across the whole range** (27/23 -> 93/77
-   -> 329/269 -> 3246/2984 ms at 485k parameters), while Ceres running
-   the same non-Schur strategy costs 1.65x more than arael at the
+   sparse-Schur within 9-26% across the whole range** (24/21 -> 87/69
+   -> 316/252 -> 3246/2984 ms at 485k parameters), while Ceres running
+   the same non-Schur strategy costs ~1.6x more than arael at the
    small end. On Ladybug's banded camera connectivity, explicit Schur
    elimination is NOT the decisive advantage it is reputed to be.
 5. **arael's f32 solves bundle adjustment and validates on 49, 138 and
    372** (Ceres offers no f32 mode at all) and wins Ladybug-138. It
    fails at 485k parameters (NaN in f32 assembly, above).
-6. **g2o validates everywhere at per-step parity but 1.9-2.7x behind
-   on totals** (25.7 / 93.6 / 345 ms per step vs arael's 26.7 / 92.3 /
-   329) because its fixed-multiplier lambda schedule needs roughly
-   twice the iterations (42 / 40 / 28) -- the same pathology arael's
-   fixed schedule exhibited here before the Nielsen driver, now
-   confirmed in a third independent implementation. The flip side: on
-   Ladybug-138 those extra iterations grind to the deepest stop of the
-   run (118904, 0.13% below everyone else's).
+6. **g2o validates everywhere at per-step parity but 1.8-2.6x behind
+   on totals** (23.2 / 86.9 / 324 ms per step vs arael's 24.3 / 87.4 /
+   316) because it needs roughly twice the iterations (42 / 40 / 28).
+   We have not established why. One confirmed code-level difference is
+   the damping form: g2o adds a single lambda to every Hessian diagonal
+   (plain Levenberg, H + lambda*I, block_solver.hpp), whereas arael
+   scales by curvature (Marquardt, H + lambda*diag(H)) and Ceres does
+   the equivalent through its default Jacobi column scaling. On BAL's
+   badly scaled blocks -- camera focal/rotation/translation and point
+   coordinates span orders of magnitude -- a single global lambda may
+   possibly not damp all scales at once, so this could contribute to
+   the extra iterations. That is a hypothesis only: it is not isolated
+   by experiment, and g2o's initial-lambda heuristic, termination
+   criteria, or step-acceptance trials could matter as much. The lambda
+   schedule is probably not the cause -- g2o's LM carries gain-ratio
+   fields (`_goodStepLowerScale` / `_ni`), so it appears to run a
+   Nielsen-style schedule like arael's rather than a fixed-multiplier
+   one -- but we have not read its update code to confirm. The flip
+   side: on Ladybug-138 those extra iterations grind to the deepest
+   stop of the run (118904, 0.13% below everyone else's).
 
 ## Running
 

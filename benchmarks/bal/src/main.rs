@@ -207,9 +207,9 @@ fn main() {
                 Some(a32.accepted), a32.cameras, a32.points, &mut cells, &ds);
             if ceres_available {
                 let solvers: &[&str] = if *dense_schur_ok {
-                    &["dense_schur", "sparse_schur"]
+                    &["dense_schur", "sparse_schur", "iterative_schur"]
                 } else {
-                    &["sparse_schur"]
+                    &["sparse_schur", "iterative_schur"]
                 };
                 for linsolver in solvers {
                     let (ms, fi, it, acc, cams, pts) =
@@ -241,14 +241,14 @@ fn main() {
                 && bal::aligned_relative_rmse(&bal::camera_centers(&c.cameras), &best_centers) < 5e-3
         };
 
-        println!("\n{:<20} {:>10} {:>9} {:>10} {:>12} {:>16}",
+        println!("\n{:<22} {:>10} {:>9} {:>10} {:>12} {:>16}",
             "system", "total ms", "iters", "ms/iter", "1st-iter ms", "final cost");
         for (label, c) in &cells {
             let iters = match c.accepted {
                 Some(a) => format!("{}({})", a, c.iterations),
                 None => format!("{}", c.iterations),
             };
-            println!("{:<20} {:>10.1} {:>9} {:>10.2} {:>12.1} {:>16.4}{}",
+            println!("{:<22} {:>10.1} {:>9} {:>10.2} {:>12.1} {:>16.4}{}",
                 label, c.solve_ms, iters,
                 c.solve_ms / c.iterations.max(1) as f64,
                 c.first_iter_ms, c.cost,
