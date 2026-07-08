@@ -1795,6 +1795,10 @@ pub fn generate_root_methods(
     // Merges multiple #[arael(constraint(...))] attributes into one loop per collection.
     struct CrossCollectionGroup {
         rc_ident: syn::Ident,
+        // Outer hops from root to the constraint collection `rc_ident`. Empty
+        // for a constraint struct directly on the root (PosePair on root);
+        // [paths] when the constraint lives in root.paths[k].<rc_ident>.
+        prefix: Vec<AccessSegment>,
         a_param_count: usize,
         b_param_count: usize,
         block_ident: syn::Ident,
@@ -1874,6 +1878,11 @@ pub fn generate_root_methods(
     // Merges SelfBlock + nested CrossBlock into a single loop per collection.
     struct CollectionGroup {
         coll_ident: syn::Ident,
+        // Outer hops from root down to `coll_ident`'s container. Empty for a
+        // collection directly on the root; e.g. [paths] when the entity lives
+        // in root.paths[k].<coll_ident>. The emitter wraps the per-entity loop
+        // in one loop per prefix segment.
+        prefix: Vec<AccessSegment>,
         self_var: syn::Ident,
         a_type_ident: syn::Ident,
         // SelfBlock: index setup + constraint entries
@@ -2189,18 +2198,32 @@ pub fn generate_root_methods(
             Some(loc) => loc,
             None => continue,
         };
-        if !is_self_block && !matches!(entity_location, EntityLocation::Collection { .. }) {
-            // TripletBlock / CrossBlock constraints without a root collection for
-            // their A-type / constraint struct fall through — direct-composed
-            // sub-models with cross-block constraints are not yet supported.
+        if !is_self_block
+            && !matches!(entity_location,
+                EntityLocation::Collection { .. } | EntityLocation::Nested { .. }) {
+            // TripletBlock / CrossBlock constraints whose A-type is neither a
+            // root collection nor a nested collection fall through --
+            // direct-composed (single-instance) sub-models with cross-block
+            // constraints are not yet supported. The cross emission drives its
+            // own iteration from the constraint-struct location (cross_prefix),
+            // so a Nested A-type is fine here.
             continue;
         }
         // `coll_ident(_str)` is only consumed by the Collection SelfBlock path and the
         // nested CrossBlock path (both of which require a Collection). For DirectField
         // / RootSelf we divert below and these placeholders are never read.
+        // Outer hops for a Nested entity (empty for every one-hop location).
+        let mut nested_prefix: Vec<AccessSegment> = Vec::new();
         let (coll_ident_str, coll_ident) = match &entity_location {
             EntityLocation::Collection { field, .. } => {
                 (field.clone(), syn::Ident::new(field, proc_macro2::Span::call_site()))
+            }
+            EntityLocation::Nested { segments } => {
+                // Last segment holds the entity; earlier segments are the loops
+                // wrapped around it.
+                let last = segments.last().expect("Nested location has >= 1 segment");
+                nested_prefix = segments[..segments.len() - 1].to_vec();
+                (last.field.clone(), syn::Ident::new(&last.field, proc_macro2::Span::call_site()))
             }
             EntityLocation::DirectField { field } => {
                 (String::new(), syn::Ident::new(field, proc_macro2::Span::call_site()))
@@ -2208,6 +2231,16 @@ pub fn generate_root_methods(
             EntityLocation::RootSelf => {
                 (String::new(), root_name.clone())
             }
+        };
+        // Group key: joined access path so distinct nested locations that share
+        // a final collection name never merge. One-hop collapses to the field
+        // name (unchanged from before).
+        let group_key_path = if nested_prefix.is_empty() {
+            coll_ident_str.clone()
+        } else {
+            let mut p: Vec<String> = nested_prefix.iter().map(|s| s.field.clone()).collect();
+            p.push(coll_ident_str.clone());
+            p.join(".")
         };
 
         // CrossBlock/remote: find frines field and build ref resolution
@@ -2226,7 +2259,10 @@ pub fn generate_root_methods(
         // borrow, taken per call, so aliased entities are sound.
         let mut ref_index_paths: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         let mut parent_ident = None;
-        let mut is_root_level_cross = false;  // constraint struct lives directly on root
+        let mut is_root_level_cross = false;  // constraint struct lives on root (possibly nested)
+        // Outer hops to the constraint collection when it lives in a sub-model
+        // collection (empty when the constraint struct is directly on root).
+        let mut cross_prefix: Vec<AccessSegment> = Vec::new();
 
         if is_triplet || is_multi_cross || (!is_self_block || is_remote_block) {
             // First try: constraint struct nested under A-type (e.g. PointFrine under PointLandmark)
@@ -2242,12 +2278,21 @@ pub fn generate_root_methods(
                 frines_ident = Some(syn::Ident::new(&ff, proc_macro2::Span::call_site()));
                 parent_ident = Some(syn::Ident::new(&parent_name, proc_macro2::Span::call_site()));
             } else {
-                // Root-level case (e.g. PosePair, CoincidentPP directly on root)
-                // The constraint struct has its own root collection
-                let root_coll = find_root_collection(root_fields, &sc.struct_name);
-                if root_coll.is_none() { continue; }
-                let (rc_name, _) = root_coll.unwrap();
+                // Constraint struct in a root collection (PosePair directly on
+                // root) or nested in a sub-model collection (PosePair in
+                // root.paths[k].pose_pairs). resolve_entity_location finds both.
+                let (rc_name, prefix) = match find_root_collection(root_fields, &sc.struct_name) {
+                    Some((name, _)) => (name, Vec::new()),
+                    None => match resolve_entity_location(root_fields, &root_name.to_string(), &sc.struct_name) {
+                        Some(EntityLocation::Nested { segments }) => {
+                            let last = segments.last().expect("Nested has >= 1 segment");
+                            (last.field.clone(), segments[..segments.len() - 1].to_vec())
+                        }
+                        _ => continue,
+                    },
+                };
                 frines_ident = Some(syn::Ident::new(&rc_name, proc_macro2::Span::call_site()));
+                cross_prefix = prefix;
                 is_root_level_cross = true;
             }
 
@@ -2256,7 +2301,16 @@ pub fn generate_root_methods(
             let mut seen_ref_fields: std::collections::HashSet<String> = std::collections::HashSet::new();
             for (field_name, resolve_path) in &ref_paths {
                 let field_ident_inner = syn::Ident::new(field_name, proc_macro2::Span::call_site());
+                // `root.<coll>` -> `self.<coll>`. `parent.<coll>` -> the
+                // containing sub-model instance (`__seg{n-1}`) for a nested
+                // constraint; only reached when cross_prefix is non-empty.
                 let adjusted_path = resolve_path.replace("root.", "self.");
+                let adjusted_path = if cross_prefix.is_empty() {
+                    adjusted_path
+                } else {
+                    adjusted_path.replace("parent.",
+                        &format!("__seg{}.", cross_prefix.len() - 1))
+                };
                 let resolve_expr: syn::Expr = syn::parse_str(
                     &format!("{}[__frine.{}]", adjusted_path, field_name)
                 ).map_err(|e| syn::Error::new(proc_macro2::Span::call_site(),
@@ -2297,7 +2351,10 @@ pub fn generate_root_methods(
                     format!("no resolve path for entity ref `{}`", field_name))),
             };
             for _ in 0..8 {
-                if path.starts_with("self.") { break; }
+                // `self.` (root) and `__seg{i}.` (a nested sub-model loop
+                // variable, in scope in the emitted loop) are both already
+                // rooted at a valid mutable place.
+                if path.starts_with("self.") || path.starts_with("__seg") { break; }
                 let head = path.split('.').next().unwrap_or("").to_string();
                 let sub = ref_index_paths.get(&head)
                     .map(|p| format!("{}[__ei_{}]", p, head));
@@ -3419,11 +3476,13 @@ pub fn generate_root_methods(
             } else { None };
 
             match &entity_location {
-                EntityLocation::Collection { .. } => {
-                    // SelfBlock on a Vec/Deque/Arena: group by collection name for merged-loop emission.
-                    let group_key = coll_ident_str.clone();
+                EntityLocation::Collection { .. } | EntityLocation::Nested { .. } => {
+                    // SelfBlock on a Vec/Deque/Arena (possibly nested below the
+                    // root): group by full access path for merged-loop emission.
+                    let group_key = group_key_path.clone();
                     let group = collection_groups.entry(group_key).or_insert_with(|| CollectionGroup {
                         coll_ident: coll_ident.clone(),
+                        prefix: nested_prefix.clone(),
                         self_var: self_var.clone(),
                         a_type_ident: a_type_ident.clone(),
                         self_block: None,
@@ -3624,6 +3683,7 @@ pub fn generate_root_methods(
                     }));
                 CrossCollectionGroup {
                     rc_ident: rc_ident.clone(),
+                    prefix: cross_prefix.clone(),
                     a_param_count,
                     b_param_count,
                     block_ident: block_ident.clone(),
@@ -3708,6 +3768,7 @@ pub fn generate_root_methods(
 
             let group = collection_groups.entry(group_key).or_insert_with(|| CollectionGroup {
                 coll_ident: coll_ident.clone(),
+                prefix: Vec::new(),
                 self_var: self_var.clone(),
                 a_type_ident: a_type_ident.clone(),
                 self_block: None,
@@ -3755,6 +3816,8 @@ pub fn generate_root_methods(
     let mut merged_sbi: Vec<TokenStream2> = Vec::new();
     for group in collection_groups.values() {
         let coll = &group.coll_ident;
+        let prefix = &group.prefix;
+        let ctn = nested_container(prefix);     // `self` (one-hop) or `__seg{n-1}` (nested)
         let self_var = &group.self_var;
         let a_type = &group.a_type_ident;
         let _ = a_type;
@@ -3766,32 +3829,32 @@ pub fn generate_root_methods(
         let nested_jac = &group.nested_jac_loops;
 
         // Merged cost loop: SelfBlock entries + nested CrossBlock inner loops
-        merged_cost.push(quote! {
-            for __item in self.#coll.iter() {
+        merged_cost.push(wrap_in_prefix(prefix, false, quote! {
+            for __item in #ctn.#coll.iter() {
                 let #self_var = __item;
                 let #root_var_ident = &*__self_ref;
                 #(#cost_entries)*
                 #(#nested_cost)*
             }
-        });
+        }));
 
         // Merged grad+hessian loop. Entries access the entity as `__item`
         // and the root as `self` directly (renamed at entry creation) --
         // no alias bindings.
-        merged_gh.push(quote! {
-            for __item in self.#coll.iter_mut() {
+        merged_gh.push(wrap_in_prefix(prefix, true, quote! {
+            for __item in #ctn.#coll.iter_mut() {
                 #(#gh_entries)*
                 #(#nested_gh)*
             }
-        });
+        }));
 
         // Merged Jacobian loop (only if Jacobian entries/nested exist)
         if !jac_entries.is_empty() || !nested_jac.is_empty() {
             let a_count = group.self_block.as_ref().map(|sb| sb.a_param_count).unwrap_or(0);
             let a_idx_stmts_j: Vec<_> = group.self_block.as_ref()
                 .map(|sb| sb.a_idx_stmts.clone()).unwrap_or_default();
-            merged_jac.push(quote! {
-                for __item in self.#coll.iter() {
+            merged_jac.push(wrap_in_prefix(prefix, false, quote! {
+                for __item in #ctn.#coll.iter() {
                     let #self_var = __item;
                     let #root_var_ident = &*__self_ref;
                     let __jac_idx: std::vec::Vec<u32> = {
@@ -3804,7 +3867,7 @@ pub fn generate_root_methods(
                     #(#nested_jac)*
                     __jac_cid += 1;
                 }
-            });
+            }));
         }
 
         // set_block_indices loop (only if there's a SelfBlock)
@@ -3818,15 +3881,15 @@ pub fn generate_root_methods(
                     let fi = syn::Ident::new(f, proc_macro2::Span::call_site());
                     quote! { __item.#fi = __cid; }
                 }));
-            merged_sbi.push(quote! {
-                for __item in self.#coll.iter_mut() {
+            merged_sbi.push(wrap_in_prefix(prefix, true, quote! {
+                for __item in #ctn.#coll.iter_mut() {
                     let mut __a_idx = [0u32; #a_count];
                     #(#a_idx)*
                     __item.#block.set_indices(&__a_idx);
                     #ci_set
                     __cid += 1;
                 }
-            });
+            }));
         }
     }
 
@@ -3956,6 +4019,60 @@ pub fn generate_root_methods(
                 }
             });
         }
+
+        // Passive NESTED entities: a block-bearing entity two or more hops
+        // below the root (e.g. root.paths[k].poses) with no self-constraint.
+        // The two passes above reach only the root's own collections / direct
+        // fields; walk the reachable set for anything whose location is Nested
+        // and wire its SelfBlock through the same prefix loops. Sorted
+        // iteration keeps emission deterministic (B11); the `wired` skip avoids
+        // double-wiring an entity a self-constraint already handled.
+        let mut nested_types: Vec<&String> = reachable.iter().collect();
+        nested_types.sort();
+        for type_name in nested_types {
+            let segments = match resolve_entity_location(root_fields, &root_name.to_string(), type_name) {
+                Some(EntityLocation::Nested { segments }) => segments,
+                _ => continue, // root-self / direct / one-hop handled above
+            };
+            let joined: String = segments.iter().map(|s| s.field.clone())
+                .collect::<Vec<_>>().join(".");
+            if wired.contains(&joined) { continue; }
+            let layout = match registry_lookup(type_name) { Some(l) => l, None => continue };
+            if layout.param_fields.is_empty() { continue; }
+            let hb_field = match layout.self_block_field.clone() { Some(s) => s, None => continue };
+            let hb_ident = syn::Ident::new(&hb_field, proc_macro2::Span::call_site());
+            let mut a_idx_stmts: Vec<TokenStream2> = Vec::new();
+            let mut offset = 0usize;
+            for pf in &layout.param_fields {
+                let pf_ident = syn::Ident::new(pf, proc_macro2::Span::call_site());
+                let size = layout.fields.iter().find(|(n, _)| n == pf)
+                    .map(|(_, sft)| match sft {
+                        SymFieldType::Scalar => 1usize,
+                        SymFieldType::Vec2 => 2,
+                        SymFieldType::Vec3 => 3,
+                        _ => 0,
+                    }).unwrap_or(0);
+                if size == 0 { continue; }
+                let end = offset + size;
+                a_idx_stmts.push(quote! {
+                    __item.#pf_ident.write_indices(&mut __a_idx[#offset..#end]);
+                });
+                offset = end;
+            }
+            if offset == 0 { continue; }
+            let a_count = offset;
+            let prefix = &segments[..segments.len() - 1];
+            let coll_ident = syn::Ident::new(&segments.last().unwrap().field,
+                proc_macro2::Span::call_site());
+            let ctn = nested_container(prefix);
+            merged_sbi.push(wrap_in_prefix(prefix, true, quote! {
+                for __item in #ctn.#coll_ident.iter_mut() {
+                    let mut __a_idx = [0u32; #a_count];
+                    #(#a_idx_stmts)*
+                    __item.#hb_ident.set_indices(&__a_idx);
+                }
+            }));
+        }
     }
 
     // Emit single-instance entity groups (RootSelf + DirectField). No loops —
@@ -4030,6 +4147,8 @@ pub fn generate_root_methods(
     // Emit merged cross-constraint loops (one per collection, all attributes inside)
     for group in cross_groups.values() {
         let rc_ident = &group.rc_ident;
+        let prefix = &group.prefix;
+        let ctn = nested_container(prefix);   // `self` (root-level) or `__seg{n-1}` (nested)
         let a_param_count = group.a_param_count;
         let b_param_count = group.b_param_count;
         let block_ident = &group.block_ident;
@@ -4044,25 +4163,25 @@ pub fn generate_root_methods(
             quote! { __frine.#fi = __cid; }
         });
 
-        cost_loops.push(quote! {
-            for __frine in self.#rc_ident.iter() {
+        cost_loops.push(wrap_in_prefix(prefix, false, quote! {
+            for __frine in #ctn.#rc_ident.iter() {
                 #(#resolve_stmts)*
                 let #root_var = &*__self_ref;
                 #(#cost_entries)*
             }
-        });
+        }));
 
         // Entries carry their own ref rereads at the top; root reads go
         // through `self` (renamed at entry creation).
-        grad_hessian_loops.push(quote! {
-            for __frine in self.#rc_ident.iter_mut() {
+        grad_hessian_loops.push(wrap_in_prefix(prefix, true, quote! {
+            for __frine in #ctn.#rc_ident.iter_mut() {
                 #(#gh_entries)*
             }
-        });
+        }));
 
         if !jac_entries.is_empty() {
-            jacobian_loops.push(quote! {
-                for __frine in self.#rc_ident.iter() {
+            jacobian_loops.push(wrap_in_prefix(prefix, false, quote! {
+                for __frine in #ctn.#rc_ident.iter() {
                     #(#resolve_stmts)*
                     let #root_var = &*__self_ref;
                     let __jac_idx: std::vec::Vec<u32> = {
@@ -4078,11 +4197,11 @@ pub fn generate_root_methods(
                     #(#jac_entries)*
                     __jac_cid += 1;
                 }
-            });
+            }));
         }
 
-        set_block_indices_loops.push(quote! {
-            for __frine in self.#rc_ident.iter_mut() {
+        set_block_indices_loops.push(wrap_in_prefix(prefix, true, quote! {
+            for __frine in #ctn.#rc_ident.iter_mut() {
                 #(#resolve_stmts)*
                 let mut __a_idx = [0u32; #a_param_count];
                 #(#a_idx_stmts)*
@@ -4092,7 +4211,7 @@ pub fn generate_root_methods(
                 #ci_set
                 __cid += 1;
             }
-        });
+        }));
     }
 
     // Emit merged TripletBlock loops (one per collection, with set_block_indices)
@@ -4885,6 +5004,11 @@ enum EntityLocation {
     DirectField { field: String },
     /// The constraint's entity type is the root struct itself. Single instance, accessor is `self`.
     RootSelf,
+    /// Entity reachable two or more hops below the root through a chain of
+    /// collection / direct-struct fields (e.g. `root.paths[k].poses`). The
+    /// last segment is the collection holding the entity; earlier segments are
+    /// the loops the emitter wraps around it.
+    Nested { segments: Vec<AccessSegment> },
 }
 
 fn resolve_entity_location(
@@ -4908,7 +5032,107 @@ fn resolve_entity_location(
                     return Some(EntityLocation::DirectField { field: field_name });
                 }
     }
+    // Not a direct child of the root: walk the registry for a deeper
+    // containment path (e.g. root -> Vec<Path> -> Deque<Pose>).
+    if let Some(segments) = resolve_nested_path(root_name, type_name) {
+        return Some(EntityLocation::Nested { segments });
+    }
     None
+}
+
+/// One hop in a root -> entity access path through the model tree.
+#[derive(Clone, Debug, PartialEq)]
+struct AccessSegment {
+    /// Field name on the containing struct.
+    field: String,
+    /// true = Vec/Deque/Arena (the emitter iterates it); false = a plain
+    /// struct-typed field (single instance).
+    collection: bool,
+}
+
+/// Walk the type registry from `root_name` to find where a struct of
+/// `target` type lives, returning the chain of field hops (root -> ... ->
+/// the field holding `target`; the last segment's element type is `target`).
+/// Follows only CONTAINMENT edges -- collection fields and direct struct
+/// fields -- and skips `Ref<T>` fields (recorded in `ref_paths`, not
+/// containment) and block/param fields. Returns the first path found in
+/// deterministic field order. `None` if `target` is not reachable by
+/// containment (or is the root itself / a one-hop child; those are handled by
+/// `resolve_entity_location`'s direct arms).
+fn resolve_nested_path(root_name: &str, target: &str) -> Option<Vec<AccessSegment>> {
+    fn walk(cur: &str, target: &str, path: &mut Vec<AccessSegment>, stack: &mut Vec<String>)
+        -> Option<Vec<AccessSegment>>
+    {
+        let layout = registry_lookup(cur)?;
+        if stack.iter().any(|s| s == cur) { return None; } // cycle guard
+        stack.push(cur.to_string());
+        for (fname, sft) in &layout.fields {
+            // Ref<T> fields point at an entity, they do not CONTAIN it.
+            if layout.ref_paths.iter().any(|(rf, _)| rf == fname) { continue; }
+            let (child, collection) = match sft {
+                SymFieldType::Struct(c) =>
+                    (c.clone(), layout.collection_fields.iter().any(|f| f == fname)),
+                SymFieldType::OptionalStruct(c) => (c.clone(), false),
+                _ => continue, // Scalar/Vec2/.../Skip: not a struct edge
+            };
+            path.push(AccessSegment { field: fname.clone(), collection });
+            if child == target {
+                return Some(path.clone());
+            }
+            if let Some(found) = walk(&child, target, path, stack) {
+                return Some(found);
+            }
+            path.pop();
+        }
+        stack.pop();
+        None
+    }
+    let mut path = Vec::new();
+    let mut stack = Vec::new();
+    walk(root_name, target, &mut path, &mut stack)
+}
+
+/// The accessor the innermost entity loop uses for its own collection: `self`
+/// when the prefix is empty (one-hop), otherwise the last prefix loop variable
+/// `__seg{n-1}` (e.g. the current `Path` when iterating `root.paths`).
+fn nested_container(prefix: &[AccessSegment]) -> TokenStream2 {
+    if prefix.is_empty() {
+        quote! { self }
+    } else {
+        let last = syn::Ident::new(&format!("__seg{}", prefix.len() - 1),
+            proc_macro2::Span::call_site());
+        quote! { #last }
+    }
+}
+
+/// Wrap `inner` in one `for` loop per `prefix` segment (the outer hops root ->
+/// ... -> the container of the innermost collection). `inner` is expected to
+/// reference the accessor returned by `nested_container(prefix)`. `mutable`
+/// picks iter_mut vs iter (the whole borrow chain must agree). A collection
+/// segment emits a loop binding `__seg{i}`; a direct struct segment emits a
+/// `let` binding. With an empty prefix this returns `inner` unchanged, so
+/// one-hop emission is byte-identical to before.
+fn wrap_in_prefix(prefix: &[AccessSegment], mutable: bool, inner: TokenStream2) -> TokenStream2 {
+    let mut code = inner;
+    for (i, seg) in prefix.iter().enumerate().rev() {
+        let field = syn::Ident::new(&seg.field, proc_macro2::Span::call_site());
+        let bind = syn::Ident::new(&format!("__seg{}", i), proc_macro2::Span::call_site());
+        let parent: TokenStream2 = if i == 0 {
+            quote! { self }
+        } else {
+            let pv = syn::Ident::new(&format!("__seg{}", i - 1), proc_macro2::Span::call_site());
+            quote! { #pv }
+        };
+        code = if seg.collection {
+            if mutable { quote! { for #bind in #parent.#field.iter_mut() { #code } } }
+            else       { quote! { for #bind in #parent.#field.iter()     { #code } } }
+        } else if mutable {
+            quote! { { let #bind = &mut #parent.#field; #code } }
+        } else {
+            quote! { { let #bind = &#parent.#field; #code } }
+        };
+    }
+    code
 }
 
 #[allow(dead_code)]
@@ -5038,3 +5262,69 @@ pub fn generate_all_stashed_constraints() -> syn::Result<TokenStream2> {
     Ok(quote::quote! { #(#all_impls)* })
 }
 
+
+#[cfg(test)]
+mod nested_path_tests {
+    use super::*;
+    use crate::{SymLayout, registry_store};
+
+    // Build a minimal SymLayout for resolver tests. Only `fields`,
+    // `collection_fields` and `ref_paths` matter to resolve_nested_path.
+    fn layout(fields: &[(&str, SymFieldType)], collections: &[&str]) -> SymLayout {
+        SymLayout {
+            fields: fields.iter().map(|(n, t)| (n.to_string(), t.clone())).collect(),
+            collection_fields: collections.iter().map(|s| s.to_string()).collect(),
+            param_fields: Vec::new(),
+            ref_paths: Vec::new(),
+            euler_angle_fields: Vec::new(),
+            universal_euler_angle_fields: Vec::new(),
+            substitutions: Vec::new(),
+            constraint_index_field: None,
+            self_block_field: None,
+        }
+    }
+
+    fn coll(field: &str) -> AccessSegment {
+        AccessSegment { field: field.to_string(), collection: true }
+    }
+
+    #[test]
+    fn resolves_entity_two_collection_hops_below_root() {
+        // Map { paths: Vec<Path>, landmarks: Vec<Landmark> }
+        // Path { poses: Deque<Pose>, pose_pairs: Vec<PosePair> }
+        // Distinct "Nrt" names so the process-global registry never collides.
+        registry_store("NrtMap", layout(
+            &[("paths", SymFieldType::Struct("NrtPath".into())),
+              ("landmarks", SymFieldType::Struct("NrtLandmark".into()))],
+            &["paths", "landmarks"])).unwrap();
+        registry_store("NrtPath", layout(
+            &[("poses", SymFieldType::Struct("NrtPose".into())),
+              ("pose_pairs", SymFieldType::Struct("NrtPosePair".into()))],
+            &["poses", "pose_pairs"])).unwrap();
+        registry_store("NrtPose", layout(&[], &[])).unwrap();
+        registry_store("NrtLandmark", layout(&[], &[])).unwrap();
+
+        // Two-hop nested entity.
+        assert_eq!(resolve_nested_path("NrtMap", "NrtPose"),
+                   Some(vec![coll("paths"), coll("poses")]));
+        // One-hop child is still found (real use routes it through the direct arms).
+        assert_eq!(resolve_nested_path("NrtMap", "NrtLandmark"),
+                   Some(vec![coll("landmarks")]));
+        // Unreachable.
+        assert_eq!(resolve_nested_path("NrtMap", "Nonexistent"), None);
+    }
+
+    #[test]
+    fn ref_fields_are_not_containment() {
+        // A constraint struct with a Ref<Target> must NOT make Target reachable
+        // by containment (that would be a spurious path through a reference).
+        registry_store("NrtRefRoot", layout(
+            &[("cons", SymFieldType::Struct("NrtCons".into()))], &["cons"])).unwrap();
+        let mut cons = layout(&[("target", SymFieldType::Struct("NrtTarget".into()))], &[]);
+        cons.ref_paths.push(("target".to_string(), "root.somewhere".to_string()));
+        registry_store("NrtCons", cons).unwrap();
+        registry_store("NrtTarget", layout(&[], &[])).unwrap();
+
+        assert_eq!(resolve_nested_path("NrtRefRoot", "NrtTarget"), None);
+    }
+}

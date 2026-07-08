@@ -65,6 +65,13 @@ enum SymFieldType {
 #[derive(Clone, Debug)]
 struct SymLayout {
     fields: Vec<(String, SymFieldType)>,
+    /// Field names that are Vec/Deque/Arena collections of a struct. A
+    /// collection field's element type is still recorded in `fields` as
+    /// `SymFieldType::Struct(elem)` (indistinguishable there from a direct
+    /// struct field or a `Ref<T>`); this set is what lets the entity-location
+    /// resolver tell "iterate this collection" from "single struct field" when
+    /// walking the model tree to any depth.
+    collection_fields: Vec<String>,
     param_fields: Vec<String>,       // field names that are Param<T>
     ref_paths: Vec<(String, String)>, // (field_name, resolution_path) for #[arael(ref = ...)]
     euler_angle_fields: Vec<String>,  // field names detected as SimpleEulerAngleParam
@@ -504,6 +511,7 @@ fn model_attribute(input: &mut syn::DeriveInput) -> syn::Result<TokenStream2> {
 
     let mut param_count: u32 = 0;
     let mut sym_fields: Vec<(String, SymFieldType)> = Vec::new();
+    let mut collection_fields_reg: Vec<String> = Vec::new();
     let mut param_field_names_for_reg: Vec<String> = Vec::new();
     let mut ref_paths_for_reg: Vec<(String, String)> = Vec::new();
     let mut euler_angle_fields_reg: Vec<String> = Vec::new();
@@ -565,6 +573,7 @@ fn model_attribute(input: &mut syn::DeriveInput) -> syn::Result<TokenStream2> {
                 .or_else(|| extract_wrapper_inner(&field.ty, "Deque"))
                 .or_else(|| extract_wrapper_inner(&field.ty, "Arena"));
             if let Some((_, inner_ident)) = inner_type {
+                collection_fields_reg.push(field_name.clone());
                 sym_fields.push((field_name, SymFieldType::Struct(inner_ident.to_string())));
             } else {
                 sym_fields.push((field_name, SymFieldType::Skip));
@@ -630,6 +639,7 @@ fn model_attribute(input: &mut syn::DeriveInput) -> syn::Result<TokenStream2> {
 
     registry_store(&name.to_string(), SymLayout {
         fields: sym_fields,
+        collection_fields: collection_fields_reg,
         param_fields: param_field_names_for_reg,
         ref_paths: ref_paths_for_reg,
         euler_angle_fields: euler_angle_fields_reg.clone(),
@@ -697,6 +707,7 @@ fn emit_trivial_model_for_enum(input: &mut syn::DeriveInput) -> syn::Result<Toke
     // nested struct field type in constraint bodies).
     registry_store(&name.to_string(), SymLayout {
         fields: Vec::new(),
+        collection_fields: Vec::new(),
         param_fields: Vec::new(),
         ref_paths: Vec::new(),
         euler_angle_fields: Vec::new(),
