@@ -2800,6 +2800,7 @@ impl Sketch {
             return arael::simple_lm::LmResult {
                 x: params64, start_cost: 0.0, end_cost: 0.0,
                 iterations: 0, accepted_iterations: 0,
+                status: arael::simple_lm::LmStatus::Converged, final_lambda: 0.0,
             };
         }
 
@@ -2835,6 +2836,10 @@ impl Sketch {
             end_cost: start_cost,
             iterations: 0,
             accepted_iterations: 0,
+            // Both are overwritten from each stage's solve below; these are
+            // the no-stage placeholders.
+            status: arael::simple_lm::LmStatus::Converged,
+            final_lambda: 0.0,
         };
 
         for &scale in stages {
@@ -2869,6 +2874,8 @@ impl Sketch {
             total_accepted += stage_result.accepted_iterations;
             result.end_cost = stage_result.end_cost;
             result.x = stage_result.x;
+            result.status = stage_result.status;
+            result.final_lambda = stage_result.final_lambda;
         }
 
         self.constraint_isigma = full_isigma;
