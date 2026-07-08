@@ -27,10 +27,13 @@ use arael::vect::vect2f;
 use arael::matrix::matrix2f;
 use arael::refs::{self, Ref};
 
-use rand::prelude::*;
-use rand::rngs::StdRng;
-use rand_distr::Normal;
 use std::f32::consts::PI;
+
+// Shared scene + measurements (also used by slam2d_align_demo) so both demos
+// run on the identical problem.
+#[path = "shared/scene2d.rs"]
+mod scene2d;
+use scene2d::Cfg;
 
 // ---------------------------------------------------------------------------
 // Model
@@ -136,167 +139,7 @@ struct Map {
 // Synthetic data
 // ---------------------------------------------------------------------------
 
-struct Cfg {
-    n_runs: usize,
-    n_poses: usize,
-    n_landmarks: usize,
-    seed: u64,
-    step: f32,
-    turn: f32,
-    fov_half: f32,
-    range_min: f32,
-    range_max: f32,
-    odo_pos_sigma: f32,
-    odo_gamma_sigma: f32,
-    bearing_sigma: f32,
-    init_range: f32,
-    gps_noise_sigma: f32, // per-fix GPS noise (m)
-}
-
-impl Default for Cfg {
-    fn default() -> Self {
-        Cfg {
-            n_runs: 3,
-            n_poses: 20,
-            n_landmarks: 30,
-            seed: 7,
-            step: 1.5,
-            turn: 0.10,
-            fov_half: 70.0_f32.to_radians(),
-            range_min: 4.0,
-            range_max: 55.0,
-            odo_pos_sigma: 0.05,
-            odo_gamma_sigma: 0.4_f32.to_radians(),
-            bearing_sigma: 1.0_f32.to_radians(),
-            init_range: 20.0,
-            gps_noise_sigma: 0.4,
-        }
-    }
-}
-
-// One run's ground-truth trajectory. Each run is a gentle left arc from near
-// the origin, perturbed per run: a small start offset and heading bias plus a
-// slightly different turn rate, so the runs cover the same scene from different
-// tracks (and drift into different frames once dead-reckoned).
-fn truth_poses(cfg: &Cfg, run: usize) -> std::vec::Vec<(vect2f, f32)> {
-    let mut out = std::vec::Vec::with_capacity(cfg.n_poses);
-    let off = (run as f32) - (cfg.n_runs as f32 - 1.0) * 0.5; // centered: -1, 0, 1
-    let mut pos = vect2f::new(0.0, 1.2 * off);
-    let mut gamma = 0.04 * off;
-    let turn = cfg.turn * (1.0 + 0.15 * off);
-    out.push((pos, gamma));
-    for _ in 1..cfg.n_poses {
-        pos = pos + vect2f::new(cfg.step * gamma.cos(), cfg.step * gamma.sin());
-        gamma += turn;
-        out.push((pos, gamma));
-    }
-    out
-}
-
-// Shared ground-truth landmarks, scattered around the union of all runs.
-fn truth_landmarks(cfg: &Cfg, rng: &mut StdRng, all_poses: &[(vect2f, f32)]) -> std::vec::Vec<vect2f> {
-    let mut out = std::vec::Vec::with_capacity(cfg.n_landmarks);
-    while out.len() < cfg.n_landmarks {
-        let anchor = all_poses[rng.random_range(0..all_poses.len())].0;
-        let theta = rng.random::<f32>() * 2.0 * PI;
-        let r = cfg.range_min + rng.random::<f32>() * (cfg.range_max - cfg.range_min);
-        let lm = anchor + vect2f::new(r * theta.cos(), r * theta.sin());
-        let visible = all_poses.iter().any(|(p, _)| {
-            let d = (lm - *p).norm();
-            d >= cfg.range_min && d <= cfg.range_max
-        });
-        if visible { out.push(lm); }
-    }
-    out
-}
-
-fn observe(cfg: &Cfg, pos: vect2f, gamma: f32, lm: vect2f) -> Option<f32> {
-    let d = lm - pos;
-    let dist = d.norm();
-    if dist < cfg.range_min || dist > cfg.range_max { return None; }
-    let local = matrix2f::rotation(gamma).transpose() * d;
-    let bearing = local.y.atan2(local.x);
-    if bearing.abs() > cfg.fov_half { return None; }
-    Some(bearing)
-}
-
-// A run's dead-reckoned pose estimates + measured odometry deltas, built from a
-// ground-truth trajectory and noisy odometry. Returns the Path (poses +
-// pose_pairs, no frines yet) and the estimated pose positions/headings (used to
-// initialise shared landmarks).
-struct RunBuild {
-    path: Path,
-    est: std::vec::Vec<(vect2f, f32)>,
-}
-
-fn build_run(cfg: &Cfg, rng: &mut StdRng, nd: &Normal<f32>, gt_poses: &[(vect2f, f32)]) -> RunBuild {
-    let mut path = Path {
-        poses: refs::Deque::new(),
-        pose_pairs: std::vec::Vec::new(),
-        frines: std::vec::Vec::new(),
-    };
-    let mut est: std::vec::Vec<(vect2f, f32)> = std::vec::Vec::with_capacity(cfg.n_poses);
-
-    let gps_isigma = 1.0 / cfg.gps_noise_sigma;
-    // A GPS fix for a pose: true position + per-fix noise. Every pose gets one
-    // (no dropouts in this demo).
-    let gps_of = |gt_pos: vect2f, rng: &mut StdRng| GpsData {
-        pos: gt_pos + vect2f::new(
-            cfg.gps_noise_sigma * rng.sample(nd),
-            cfg.gps_noise_sigma * rng.sample(nd)),
-        isigma: gps_isigma,
-    };
-
-    let mut est_pos = gt_poses[0].0;
-    let mut est_gamma = gt_poses[0].1;
-    // First pose: initial estimate at its dead-reckoning start; anchored by its
-    // own GPS fix (nothing is held fixed anymore).
-    let gps0 = gps_of(gt_poses[0].0, rng);
-    path.poses.push_back(Pose {
-        pos: Param::new(est_pos),
-        gamma: Param::new(est_gamma),
-        delta_pos: vect2f::new(0.0, 0.0),
-        delta_gamma: 0.0,
-        delta_pos_isigma: 0.0,
-        delta_gamma_isigma: 0.0,
-        gps: Some(gps0),
-        hb_pose: SelfBlock::new(),
-    });
-    est.push((est_pos, est_gamma));
-
-    for pi in 1..gt_poses.len() {
-        let (prev_p, prev_g) = gt_poses[pi - 1];
-        let (gt_p, gt_g) = gt_poses[pi];
-        let true_delta = matrix2f::rotation(prev_g).transpose() * (gt_p - prev_p);
-        let true_dg = gt_g - prev_g;
-        let noisy_delta = true_delta + vect2f::new(
-            cfg.odo_pos_sigma * rng.sample(nd),
-            cfg.odo_pos_sigma * rng.sample(nd),
-        );
-        let noisy_dg = true_dg + cfg.odo_gamma_sigma * rng.sample(nd);
-
-        est_pos = est_pos + matrix2f::rotation(est_gamma) * noisy_delta;
-        est_gamma += noisy_dg;
-
-        let gps = gps_of(gt_p, rng);
-        path.poses.push_back(Pose {
-            pos: Param::new(est_pos),
-            gamma: Param::new(est_gamma),
-            delta_pos: noisy_delta,
-            delta_gamma: noisy_dg,
-            delta_pos_isigma: 1.0 / cfg.odo_pos_sigma,
-            delta_gamma_isigma: 1.0 / cfg.odo_gamma_sigma,
-            gps: Some(gps),
-            hb_pose: SelfBlock::new(),
-        });
-        est.push((est_pos, est_gamma));
-        let prev = path.poses.ref_at(pi - 1);
-        let cur = path.poses.ref_at(pi);
-        path.pose_pairs.push(PosePair { prev, cur, hb: CrossBlock::new() });
-    }
-
-    RunBuild { path, est }
-}
+// Cfg, ground truth, and measurements all come from the shared scene2d module.
 
 struct Gt {
     poses: std::vec::Vec<std::vec::Vec<(vect2f, f32)>>, // per run
@@ -304,71 +147,71 @@ struct Gt {
     lm_to_gt: std::vec::Vec<usize>,                      // map landmark idx -> GT idx
 }
 
+// Assemble the JOINT Map from the shared scene. Byte-identical to the previous
+// inline generator (scene2d reproduces its exact RNG order).
 fn build_map(cfg: &Cfg) -> (Map, Gt) {
-    let mut rng = StdRng::seed_from_u64(cfg.seed);
-    let nd = Normal::new(0.0_f32, 1.0).unwrap();
+    let scene = scene2d::generate(cfg);
 
-    // Ground truth: one trajectory per run, one shared landmark field.
-    let gt_poses: std::vec::Vec<_> = (0..cfg.n_runs).map(|r| truth_poses(cfg, r)).collect();
-    let all_poses: std::vec::Vec<(vect2f, f32)> = gt_poses.iter().flatten().copied().collect();
-    let gt_lms = truth_landmarks(cfg, &mut rng, &all_poses);
-
-    // GPS fixes anchor every run in the world frame -- no pose is held fixed.
-    let mut runs: std::vec::Vec<RunBuild> = gt_poses.iter()
-        .map(|gp| build_run(cfg, &mut rng, &nd, gp)).collect();
-
-    // For each GT landmark, gather sightings across ALL runs. A landmark is kept
-    // (and merged) only if at least two poses -- anywhere across the runs -- see
-    // it, so it can be triangulated.
-    struct Sighting { run: usize, pose: usize, bearing: f32 }
-    let mut map = Map { paths: std::vec::Vec::new(), landmarks: refs::Vec::new() };
-    let mut lm_to_gt: std::vec::Vec<usize> = std::vec::Vec::new();
-    // Deferred frines: (run, pose_local_idx, map_lm_idx, bearing).
-    let mut pending: std::vec::Vec<(usize, usize, u32, f32)> = std::vec::Vec::new();
-
-    for (gt_li, &gt_lm) in gt_lms.iter().enumerate() {
-        let mut sights: std::vec::Vec<Sighting> = std::vec::Vec::new();
-        for (r, gp) in gt_poses.iter().enumerate() {
-            for (pi, &(p, g)) in gp.iter().enumerate() {
-                if let Some(true_b) = observe(cfg, p, g, gt_lm) {
-                    let bearing = true_b + cfg.bearing_sigma * rng.sample(&nd);
-                    sights.push(Sighting { run: r, pose: pi, bearing });
-                }
+    // One Path per run from the shared per-run measurements (poses + odometry +
+    // GPS). No pose is held fixed -- GPS anchors every run.
+    let mut paths: std::vec::Vec<Path> = scene.runs.iter().map(|rm| {
+        let mut path = Path {
+            poses: refs::Deque::new(),
+            pose_pairs: std::vec::Vec::new(),
+            frines: std::vec::Vec::new(),
+        };
+        for i in 0..rm.est.len() {
+            path.poses.push_back(Pose {
+                pos: Param::new(rm.est[i].0),
+                gamma: Param::new(rm.est[i].1),
+                delta_pos: rm.delta[i].0,
+                delta_gamma: rm.delta[i].1,
+                delta_pos_isigma: if i == 0 { 0.0 } else { 1.0 / cfg.odo_pos_sigma },
+                delta_gamma_isigma: if i == 0 { 0.0 } else { 1.0 / cfg.odo_gamma_sigma },
+                gps: Some(GpsData { pos: rm.gps[i], isigma: scene.gps_isigma }),
+                hb_pose: SelfBlock::new(),
+            });
+            if i > 0 {
+                let prev = path.poses.ref_at(i - 1);
+                let cur = path.poses.ref_at(i);
+                path.pose_pairs.push(PosePair { prev, cur, hb: CrossBlock::new() });
             }
         }
-        if sights.len() < 2 { continue; } // not enough rays to triangulate
+        path
+    }).collect();
 
-        // Initialise the shared landmark from the first sighting's ESTIMATED
-        // observing pose (drifted, per-run frame) -- the solver triangulates.
-        let s0 = &sights[0];
-        let (p0, g0) = runs[s0.run].est[s0.pose];
+    // Consensus landmarks: one per GT id seen by >= 2 sightings across all runs;
+    // sightings are contiguous by gt_id in the shared scene.
+    let mut map = Map { paths: std::vec::Vec::new(), landmarks: refs::Vec::new() };
+    let mut lm_to_gt: std::vec::Vec<usize> = std::vec::Vec::new();
+    let mut i = 0;
+    while i < scene.sightings.len() {
+        let gid = scene.sightings[i].gt_id;
+        let start = i;
+        while i < scene.sightings.len() && scene.sightings[i].gt_id == gid { i += 1; }
+        let group = &scene.sightings[start..i];
+        if group.len() < 2 { continue; }
+        let s0 = &group[0];
+        let (p0, g0) = scene.runs[s0.run].est[s0.pose];
         let world_b = g0 + s0.bearing;
         let init = p0 + vect2f::new(cfg.init_range * world_b.cos(), cfg.init_range * world_b.sin());
         let map_lm_idx = map.landmarks.len() as u32;
         map.landmarks.push(Landmark { pos: Param::new(init), hb: SelfBlock::new() });
-        lm_to_gt.push(gt_li);
-        for s in &sights {
-            pending.push((s.run, s.pose, map_lm_idx, s.bearing));
+        lm_to_gt.push(gid);
+        for s in group {
+            let pose_ref = paths[s.run].poses.ref_at(s.pose);
+            paths[s.run].frines.push(Frine {
+                pose: pose_ref,
+                lm: Ref::new(map_lm_idx),
+                bearing: s.bearing,
+                isigma: 1.0 / cfg.bearing_sigma,
+                hb: CrossBlock::new(),
+            });
         }
     }
+    for p in paths { map.paths.push(p); }
 
-    // Attach the sightings as frines on each run's Path.
-    for (run, pose, map_lm_idx, bearing) in pending {
-        let pose_ref = runs[run].path.poses.ref_at(pose);
-        runs[run].path.frines.push(Frine {
-            pose: pose_ref,
-            lm: Ref::new(map_lm_idx),
-            bearing,
-            isigma: 1.0 / cfg.bearing_sigma,
-            hb: CrossBlock::new(),
-        });
-    }
-
-    // Move each run's Path into the Map. No pose is held fixed -- the GPS fixes
-    // on every pose anchor the whole map.
-    for rb in runs { map.paths.push(rb.path); }
-
-    (map, Gt { poses: gt_poses, lms: gt_lms, lm_to_gt })
+    (map, Gt { poses: scene.gt_poses, lms: scene.gt_lms, lm_to_gt })
 }
 
 // ---------------------------------------------------------------------------
@@ -523,11 +366,11 @@ fn write_eps(map: &Map, gt: &Gt, ellipses: &[(vect2f, f32, f32, f32)], filename:
     -> std::io::Result<()> {
     use std::io::Write;
 
+    // Bounding box from the shared ground truth: all runs' poses + the merged
+    // (>=2-sighting) landmarks. slam2d_align_demo frames the identical set on the
+    // same scene, so the two plots share a page transform and line up. Excluding
+    // barely-seen edge landmarks (never drawn) keeps the frame tight.
     let mut pts: std::vec::Vec<vect2f> = std::vec::Vec::new();
-    for path in &map.paths {
-        for pose in path.poses.iter() { pts.push(pose.pos.value); }
-    }
-    for lm in map.landmarks.iter() { pts.push(lm.pos.value); }
     for gp in &gt.poses { for (p, _) in gp { pts.push(*p); } }
     for &gi in &gt.lm_to_gt { pts.push(gt.lms[gi]); }
 
