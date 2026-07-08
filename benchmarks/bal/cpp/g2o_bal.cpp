@@ -8,7 +8,7 @@
 // information, so g2o's chi2 IS the reference cost -- asserted by the
 // harness at the initial estimate. Protocol:
 //   g2o_bal <problem.txt> <params_out>
-// prints JSON {solve_ms, first_iter_ms, iterations, initial_chi2,
+// prints JSON {solve_ms, first_iter_ms, iterations, initial_chi2, final_chi2,
 // cpus_allowed}; params_out carries one camera per line (9 values)
 // followed by one point per line (3 values).
 
@@ -135,6 +135,7 @@ struct RunResult {
     double ms;
     int iterations;
     double initial_chi2;
+    double final_chi2;
 };
 
 static RunResult solve(const Bal& b, int max_iters, std::vector<double>* cams_out,
@@ -159,13 +160,18 @@ static RunResult solve(const Bal& b, int max_iters, std::vector<double>* cams_ou
         opt.addVertex(v);
         cams[i] = v;
     }
+    // Schur: marginalize the landmarks so g2o solves the reduced camera
+    // system (its bal_example default). G2O_MARGINALIZE=0 turns it off --
+    // CHOLMOD then factorizes the full camera+point system (for comparison;
+    // far larger, expected to be much slower).
+    bool marginalize = true;
+    if (const char* m = getenv("G2O_MARGINALIZE")) marginalize = atoi(m) != 0;
     std::vector<VertexPointBAL*> pts(b.n_points);
     for (int i = 0; i < b.n_points; i++) {
         auto* v = new VertexPointBAL();
         v->setId(b.n_cams + i);
         v->setEstimate(Eigen::Map<const Eigen::Vector3d>(&b.points[3 * i]));
-        // Schur: eliminate the landmarks, solve the reduced camera system.
-        v->setMarginalized(true);
+        v->setMarginalized(marginalize);
         opt.addVertex(v);
         pts[i] = v;
     }
@@ -194,6 +200,8 @@ static RunResult solve(const Bal& b, int max_iters, std::vector<double>* cams_ou
     double initial_chi2 = opt.chi2();
     int iters = opt.optimize(max_iters);
     double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    opt.computeActiveErrors();
+    double final_chi2 = opt.chi2();
 
     if (cams_out) {
         cams_out->resize(9 * b.n_cams);
@@ -209,7 +217,7 @@ static RunResult solve(const Bal& b, int max_iters, std::vector<double>* cams_ou
             m = pts[i]->estimate();
         }
     }
-    return RunResult{ms, iters, initial_chi2};
+    return RunResult{ms, iters, initial_chi2, final_chi2};
 }
 
 int main(int argc, char** argv) {
@@ -238,7 +246,7 @@ int main(int argc, char** argv) {
         }
     }
     printf("{\"solve_ms\": %.3f, \"first_iter_ms\": %.3f, \"iterations\": %d, "
-           "\"initial_chi2\": %.6f, \"cpus_allowed\": \"%s\"}\n",
-           full.ms, first.ms, full.iterations, full.initial_chi2, cpus.c_str());
+           "\"initial_chi2\": %.6f, \"final_chi2\": %.6f, \"cpus_allowed\": \"%s\"}\n",
+           full.ms, first.ms, full.iterations, full.initial_chi2, full.final_chi2, cpus.c_str());
     return 0;
 }
