@@ -1726,6 +1726,12 @@
 //!   lines, and 95% confidence ellipses around each landmark (visibly
 //!   elongated along the radial direction, illustrating that depth is
 //!   the unobservable dimension of bearing-only SLAM).
+//! - **[`slam2d_align_demo`](https://github.com/harakas/arael/blob/master/examples/slam2d_align_demo.rs)**
+//!   -- builds one map from three runs the cheap, two-step way: each
+//!   run is solved on its own, then a small second step lines the runs
+//!   up with each other. Same scene as `slam2d_multi_demo` (which solves
+//!   everything at once), so the two results can be compared; writes
+//!   `slam2d_align.eps`.
 //! - **[`slam_demo`](https://github.com/harakas/arael/blob/master/examples/slam_demo.rs)**
 //!   -- synthetic visual-inertial SLAM: S-curve trajectory, 20 poses,
 //!   40 landmarks, odometry + tilt + GPS + feature observations.
