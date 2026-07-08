@@ -345,24 +345,25 @@ See [examples/loc_demo.rs](examples/loc_demo.rs).
 
 The `examples/` directory is the primary place to see the API in use. Each file is a runnable `cargo run --release --example <name>`.
 
-- **[bench_band](examples/bench_band.rs)** -- benchmarks the band Cholesky backend against dense on the localisation model at increasing pose counts. Prints timing + speedup.
-- **[bench_investigate](examples/bench_investigate.rs)** -- deeper comparison of sparse backends on SLAM, with assembly vs solve breakdown and numeric cross-check of the solutions.
-- **[bench_sparse](examples/bench_sparse.rs)** -- sparse Cholesky backends (faer) vs dense on SLAM.
-- **[calc_demo](examples/calc_demo.rs)** -- `bc`-style REPL calculator built on `arael-sym`. Shows `parse_with_functions` + `FunctionBag` for user-defined functions, persistent history via rustyline.
-- **[jacobian_demo](examples/jacobian_demo.rs)** -- `#[arael(root, jacobian)]`, `#[arael(constraint_index)]`, and `calc_jacobian` / `calc_cost_table` walk-through. End-to-end reference for the instrumentation features used in convergence debugging.
 - **[linear_demo](examples/linear_demo.rs)** -- robust linear regression on noisy 2D data. Residual wrapped in `gamma * atan(r / gamma)` -- the [Starship method (US12346118)](https://patents.google.com/patent/US12346118), same robustifier used by the feature constraints in loc/SLAM. Minimal single-struct model + LM fit, compared against plain closed-form least squares.
+- **[slam2d_simple_demo](examples/slam2d_simple_demo.rs)** -- minimal pedagogical 2D SLAM: bearing-only landmark observations, pose `(x, y, gamma)`, first pose fixed as the gauge. Writes `slam2d_simple.eps` with per-landmark 95% covariance ellipses -- elongated radially, showing depth is the unobservable dimension of bearing-only SLAM.
+- **[slam2d_multi_demo](examples/slam2d_multi_demo.rs)** -- multi-run merge on a nested model tree (`Map { paths: Vec<Path>, landmarks }`): three GPS-anchored runs fused in one solve via bearings onto shared root-level landmarks (`ref = root.landmarks`, run-local odometry via `ref = parent.poses`). Writes `slam2d_multi.eps` with 95% ellipses.
+- **[slam_demo](examples/slam_demo.rs)** -- full 3D visual-inertial SLAM: S-curve trajectory, 60 poses, 240 landmarks, odometry + tilt + GPS + feature observations. Full verbose-LM trace across graduated isigma passes -- the reference for what a healthy solver run looks like.
 - **[loc_demo](examples/loc_demo.rs)** -- localisation with fixed known landmarks (no gauge freedom). Block-tridiagonal Hessian + band solver. Graduated-isigma optimisation via a root `frine_isigma_scale` field.
 - **[loc_global_demo](examples/loc_global_demo.rs)** -- root-level `Param` fields consumed by constraints: a global rigid transform (translation + rotation) applied to every pose. Shows the two pose<->root cross-Hessian wirings (`CrossBlock<Pose, Path>` vs a root-owned `TripletBlock`) and a staged pass that optimises only the globals first.
 - **[m3500_demo](examples/m3500_demo.rs)** -- the classic M3500 Manhattan-world pose-graph benchmark (Olson 2006): 3500 SE2 poses and 5453 relative-pose constraints from a g2o file, the between-factor written symbolically, solved with sparse faer LM. The same model backs [benchmarks/pgo](benchmarks/pgo/README.md).
 - **[bal_demo](examples/bal_demo.rs)** -- bundle adjustment on a real Bundle-Adjustment-in-the-Large Ladybug problem (49 cameras, 7776 points, 31843 observations, from the vendored file). The Snavely reprojection residual written symbolically; verbose LM with the Nielsen driver drives the cost 1.70M -> 26.7k and the reprojection RMS 7.3 px -> 0.92 px in 22 steps, reaching the same optimum as Ceres. Same model as [benchmarks/bal](benchmarks/bal/README.md).
 - **[model_demo](examples/model_demo.rs)** -- minimal `#[arael::model]` walk-through showing how `Param`, `SimpleEulerAngleParam`, and the update cycle fit together.
-- **[refs_demo](examples/refs_demo.rs)** -- `Ref<T>`, `refs::Vec`, `refs::Deque`, and `refs::Arena` behaviour: insertion, iteration, stable handles.
-- **[runtime_fit_demo](examples/runtime_fit_demo.rs)** -- curve fitting where the residual equation is a string parsed at runtime. Demonstrates `ExtendedModel` + robust loss on top of the symbolic front end.
 - **[single_root_demo](examples/single_root_demo.rs)** -- single-struct model-and-root + a direct-composed sub-model, each carrying its own `SelfBlock<Self>`. The smallest example that exercises the "root has its own params" path.
-- **[slam2d_simple_demo](examples/slam2d_simple_demo.rs)** -- minimal pedagogical 2D SLAM: bearing-only landmark observations, pose `(x, y, gamma)`, first pose fixed as the gauge. Writes `slam2d_simple.eps` with per-landmark 95% covariance ellipses -- elongated radially, showing depth is the unobservable dimension of bearing-only SLAM.
-- **[slam_demo](examples/slam_demo.rs)** -- synthetic visual-inertial SLAM: S-curve trajectory, 60 poses, 240 landmarks, odometry + tilt + GPS + feature observations. Full verbose-LM trace across graduated isigma passes -- the reference for what a healthy solver run looks like.
-- **[sym_demo](examples/sym_demo.rs)** -- symbolic-math tour: expression building, automatic differentiation, CSE, pretty printing, parsing. No solver involvement; pure `arael-sym`.
+- **[refs_demo](examples/refs_demo.rs)** -- `Ref<T>`, `refs::Vec`, `refs::Deque`, and `refs::Arena` behaviour: insertion, iteration, stable handles.
+- **[jacobian_demo](examples/jacobian_demo.rs)** -- `#[arael(root, jacobian)]`, `#[arael(constraint_index)]`, and `calc_jacobian` / `calc_cost_table` walk-through. End-to-end reference for the instrumentation features used in convergence debugging.
+- **[runtime_fit_demo](examples/runtime_fit_demo.rs)** -- curve fitting where the residual equation is a string parsed at runtime. Demonstrates `ExtendedModel` + robust loss on top of the symbolic front end.
 - **[user_function_demo](examples/user_function_demo.rs)** -- `#[arael::function]` for user-defined operators in constraint bodies, in its two forms: a purely symbolic `sigmoid(x) = 1 / (1 + exp(-x))` (arael differentiates it automatically) and an opaque numerical `my_safe_asin` that carries a hand-written closed-form derivative. Both are used in a single two-residual LM fit.
+- **[sym_demo](examples/sym_demo.rs)** -- symbolic-math tour: expression building, automatic differentiation, CSE, pretty printing, parsing. No solver involvement; pure `arael-sym`.
+- **[calc_demo](examples/calc_demo.rs)** -- `bc`-style REPL calculator built on `arael-sym`. Shows `parse_with_functions` + `FunctionBag` for user-defined functions, persistent history via rustyline.
+- **[bench_band](examples/bench_band.rs)** -- benchmarks the band Cholesky backend against dense on the localisation model at increasing pose counts. Prints timing + speedup.
+- **[bench_sparse](examples/bench_sparse.rs)** -- sparse Cholesky backends (faer) vs dense on SLAM.
+- **[bench_investigate](examples/bench_investigate.rs)** -- deeper comparison of sparse backends on SLAM, with assembly vs solve breakdown and numeric cross-check of the solutions.
 
 ## Solvers
 

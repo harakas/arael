@@ -312,6 +312,14 @@ A Model struct is "directly composed" if a child Model appears as a
 plain field (e.g. `sub: Sub` -- see `single_root_demo.rs`). It's
 "collection-composed" if it's wrapped in one of the containers above.
 
+Composition nests to any depth: a root may hold `Vec<Path>` where each
+`Path` is a Model with its own collections of entities and constraints.
+The macro recurses serialize / accumulate / index-wiring through the
+intermediate (often block-less) grouping structs, so entities and
+constraints can live at any level below the root. A constraint that deep
+resolves `root.<coll>` against the root and `parent.<coll>` against its
+immediate containing sub-model (see `slam2d_multi_demo.rs`).
+
 ```rust,ignore
 #[arael::model]
 #[arael(root)]
@@ -457,7 +465,7 @@ per residual group, mixed freely.
 
 | Attribute | Applies to | Purpose |
 |---|---|---|
-| `#[arael(ref = <path>)]` | `Ref<T>` field | where to resolve the Ref. Can be `root.<collection>` or `<other_ref>.<sub_collection>` (chain into a nested collection) |
+| `#[arael(ref = <path>)]` | `Ref<T>` field | where to resolve the Ref: `root.<collection>` (a collection on the root), `parent.<collection>` (a collection on the immediate containing sub-model -- for a constraint nested below the root), or `<other_ref>.<sub_collection>` (chain into a nested collection) |
 | `#[arael(cross = (<refA>, <refB>))]` | `CrossBlock<T, T>` field | disambiguate *which* ref pair this CrossBlock serves when two local Refs share the same T |
 | `#[arael(compute = <expr>)]` | any data field | derived field: excluded from serialization, reassigned as `self.<field> = <expr>` on every `update()` (param names in the expression read their current working values). Example: `#[arael(compute = ea.rotation_matrix())]` caching a rotation matrix (see examples/model_demo.rs) |
 | `#[arael(constraint_index)]` | `u32` field | receives a unique row id per constraint instance, useful for building per-constraint diagnostics / logs |
