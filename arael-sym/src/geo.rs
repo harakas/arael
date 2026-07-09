@@ -401,6 +401,44 @@ impl matrix3sym {
             ],
         }
     }
+
+    /// Rotation matrix of the small-angle retraction `normalize(1, v/2)`,
+    /// computed sqrt-free from the unnormalized quaternion `(1, v/2)`:
+    /// `M(1, v/2)` scaled by `s = 2/|q|^2` with `|q|^2 = 1 + |v|^2/4 >= 1`.
+    /// Algebraically identical to
+    /// `quaternsym::from_rotation_vector_small(v).rotation_matrix()`, but
+    /// without the normalization sqrt. The denominator is always >= 1, so it is
+    /// smooth and robust for any v.
+    pub fn from_rotation_vector_small(v: &vect3sym) -> matrix3sym {
+        let half = crate::constant(0.5);
+        let x = v.x.clone() * half.clone();
+        let y = v.y.clone() * half.clone();
+        let z = v.z.clone() * half;
+        let x2 = x.clone() * x.clone();
+        let y2 = y.clone() * y.clone();
+        let z2 = z.clone() * z.clone();
+        let s = crate::constant(2.0) / (crate::constant(1.0) + x2.clone() + y2.clone() + z2.clone());
+        let one = crate::constant(1.0);
+        matrix3sym {
+            rows: [
+                vect3sym {
+                    x: one.clone() - s.clone() * (y2.clone() + z2.clone()),
+                    y: s.clone() * (x.clone() * y.clone() - z.clone()),
+                    z: s.clone() * (x.clone() * z.clone() + y.clone()),
+                },
+                vect3sym {
+                    x: s.clone() * (x.clone() * y.clone() + z.clone()),
+                    y: one.clone() - s.clone() * (x2.clone() + z2),
+                    z: s.clone() * (y.clone() * z.clone() - x.clone()),
+                },
+                vect3sym {
+                    x: s.clone() * (x.clone() * z.clone() - y.clone()),
+                    y: s.clone() * (y.clone() * z.clone() + x.clone()),
+                    z: one - s * (x2 + y2),
+                },
+            ],
+        }
+    }
 }
 
 impl ops::Add<matrix3sym> for matrix3sym {
@@ -751,6 +789,45 @@ impl quaternsym {
         }
     }
 
+    /// Unit quaternion from a rotation vector `v = axis * angle` (the exp map
+    /// of so(3)): `q = [cos(|v|/2), (v/|v|) sin(|v|/2)]`. Mirrors
+    /// `quatern::from_rotation_vector`.
+    ///
+    /// The `sin(|v|/2)/|v|` and `cos(|v|/2)` coefficients are even functions of
+    /// `|v|`, i.e. smooth functions of `s = v.v` -- computed exactly for
+    /// `s >= 1e-8` and by their 2-term Taylor in `s` below it (`branch`), so
+    /// both the value and its derivative stay finite through `v = 0`. No axis
+    /// normalization, so no `0/0` singularity.
+    pub fn from_rotation_vector(v: &vect3sym) -> quaternsym {
+        let s = v.clone() * v.clone(); // |v|^2 (dot product)
+        let theta = crate::sqrt(s.clone());
+        let half = theta.clone() * crate::constant(0.5);
+        let cond = s.clone() - crate::constant(1e-8);
+        let s2 = s.clone() * s.clone();
+        // cos(theta/2): 1 - s/8 + s^2/384 - ...
+        let q_t = crate::branch(cond.clone(),
+            cos(half.clone()),
+            crate::constant(1.0) - s.clone() * crate::constant(0.125)
+                + s2 * crate::constant(1.0 / 384.0));
+        // sin(theta/2)/theta: 1/2 - s/48 + ...
+        let scale = crate::branch(cond,
+            sin(half) / theta,
+            crate::constant(0.5) - s * crate::constant(1.0 / 48.0));
+        quaternsym { t: q_t, v: v.clone() * scale }
+    }
+
+    /// First-order (small-angle) retraction of a rotation vector to a unit
+    /// quaternion: `normalize(1, v/2)`. Branch-free and smooth for all v -- the
+    /// normalizing denominator `sqrt(1 + |v|^2/4)` is always >= 1, so no `0/0`.
+    /// Agrees with the exact exp map [`from_rotation_vector`] to first order in
+    /// v; for a re-centered delta (kept near zero) it is effectively exact.
+    pub fn from_rotation_vector_small(v: &vect3sym) -> quaternsym {
+        quaternsym {
+            t: crate::constant(1.0),
+            v: v.clone() * crate::constant(0.5),
+        }.unit()
+    }
+
     /// Dot product of two quaternions.
     pub fn dot(&self, q: &quaternsym) -> E {
         self.t.clone() * q.t.clone() + self.v.clone() * q.v.clone()
@@ -878,6 +955,64 @@ impl ops::Mul<quaternsym> for quaternsym {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn from_rotation_vector_exp_map_smooth_at_zero() {
+        use std::collections::HashMap;
+        let d = vect3sym::new("d");
+        let q = quaternsym::from_rotation_vector(&d);
+        let zero = HashMap::from([("d.x", 0.0), ("d.y", 0.0), ("d.z", 0.0)]);
+
+        // Value at v = 0 -> identity quaternion [1, 0, 0, 0].
+        assert!((q.t.eval(&zero).unwrap() - 1.0).abs() < 1e-12);
+        assert!(q.v.x.eval(&zero).unwrap().abs() < 1e-12);
+        assert!(q.v.z.eval(&zero).unwrap().abs() < 1e-12);
+
+        // Jacobian at v = 0 is FINITE and correct: d(q.v.x)/d(d.x) = 1/2,
+        // d(q.v.x)/d(d.y) = 0, d(q.t)/d(d.x) = 0. A NaN/Inf here would mean the
+        // sqrt/division singularity leaked past the branch (or CSE hoisted it).
+        for c in ["x", "y", "z"] {
+            let key = format!("d.{c}");
+            let dvx = q.v.x.diff(&key).eval(&zero).unwrap();
+            assert!(dvx.is_finite(), "d(q.v.x)/d(d.{c}) not finite: {dvx}");
+            let want = if c == "x" { 0.5 } else { 0.0 };
+            assert!((dvx - want).abs() < 1e-9, "d(q.v.x)/d(d.{c}) = {dvx}, want {want}");
+            let dt = q.t.diff(&key).eval(&zero).unwrap();
+            assert!(dt.is_finite() && dt.abs() < 1e-9, "d(q.t)/d(d.{c}) = {dt}");
+        }
+
+        // Exact exp map away from zero: v = (0, 0, pi/2) -> 90 deg about z.
+        let hz = HashMap::from([("d.x", 0.0), ("d.y", 0.0), ("d.z", std::f64::consts::FRAC_PI_2)]);
+        assert!((q.t.eval(&hz).unwrap() - std::f64::consts::FRAC_PI_4.cos()).abs() < 1e-12);
+        assert!((q.v.z.eval(&hz).unwrap() - std::f64::consts::FRAC_PI_4.sin()).abs() < 1e-12);
+
+        // General vector matches the exact axis-angle formula.
+        let (vx, vy, vz) = (0.3_f64, -0.5, 0.2);
+        let g = HashMap::from([("d.x", vx), ("d.y", vy), ("d.z", vz)]);
+        let th = (vx * vx + vy * vy + vz * vz).sqrt();
+        assert!((q.t.eval(&g).unwrap() - (th / 2.0).cos()).abs() < 1e-12);
+        assert!((q.v.x.eval(&g).unwrap() - vx / th * (th / 2.0).sin()).abs() < 1e-12);
+        assert!((q.v.y.eval(&g).unwrap() - vy / th * (th / 2.0).sin()).abs() < 1e-12);
+    }
+
+    #[test]
+    fn from_rotation_vector_small_matrix_matches_quaternion() {
+        use std::collections::HashMap;
+        let d = vect3sym::new("d");
+        // The sqrt-free retraction matrix must equal the retraction quaternion's
+        // rotation matrix -- this is the algebraic identity the macro relies on.
+        let m = matrix3sym::from_rotation_vector_small(&d);
+        let q = quaternsym::from_rotation_vector_small(&d).rotation_matrix();
+        for (dx, dy, dz) in [(0.0, 0.0, 0.0), (0.3, -0.5, 0.2), (1.2, 0.4, -0.9)] {
+            let vars = HashMap::from([("d.x", dx), ("d.y", dy), ("d.z", dz)]);
+            let ev = |e: &E| e.eval(&vars).unwrap();
+            for r in 0..3 {
+                assert!((ev(&m.rows[r].x) - ev(&q.rows[r].x)).abs() < 1e-12, "row {r} .x");
+                assert!((ev(&m.rows[r].y) - ev(&q.rows[r].y)).abs() < 1e-12, "row {r} .y");
+                assert!((ev(&m.rows[r].z) - ev(&q.rows[r].z)).abs() < 1e-12, "row {r} .z");
+            }
+        }
+    }
 
     #[test]
     fn from_components_builds_vectors() {
