@@ -85,21 +85,31 @@ metric.** `LOC_POSES=N` sets the pose count (landmarks scale as `4N`).
 
 ## Analysis
 
-**The band solver is the whole story.** On a block-tridiagonal system band
-Cholesky is O(n) in the pose count, while the general sparse and
-Schur-complement solvers pay for a fill-reducing ordering and a sparse
-factorization the structure does not need. arael leads by **3-4x per
-iteration** at both sizes -- 0.38 vs the fastest competitor's 1.17 (SymForce
-f32) and ~1.5 (g2o/Ceres) at 60 poses; 3.0 vs 10.7-13.5 at 300 -- and the gap
-holds because arael's band scales near-linearly (0.38 -> 3.0 for 5x the poses)
-while the others scale worse. arael's peak memory is also a fraction of the
-field at scale -- 10-13 MB vs 37-104 MB at 300 poses -- because a band factor
-stores O(n * kd) rather than a general sparse Cholesky's fill-in (SymForce, the
-per-iteration runner-up, is the heaviest at ~100 MB).
+arael leads by **3-4x per iteration** at both sizes -- 0.38 vs the fastest
+competitor's 1.17 (SymForce f32) and ~1.5 (g2o/Ceres) at 60 poses; 3.0 vs
+10.7-13.5 at 300 -- and its memory is a fraction of the field at scale (10-13 MB
+vs 37-104 MB at 300 poses; SymForce, the per-iteration runner-up, is the
+heaviest).
 
-Running the same problem with `LOC_ARAEL_SOLVER=faer` shows what the structure
-buys: arael's general sparse path lands in the same neighborhood as g2o/Ceres,
-so the win is the band solver, not the assembly.
+**That lead is not the band solver.** Running the same problem with
+`LOC_ARAEL_SOLVER=faer` (arael's *general* sparse Cholesky -- the same approach
+the others take) is only ~7% slower than band at 300 poses (3.2 vs 3.0) and
+identical at 60, still ~4x faster than Ceres/g2o. The advantage is arael's
+**assembly**: it code-generates the residual + Jacobian + Hessian block at
+compile time (flat, CSE'd, accumulated directly), where Ceres/factrs/tiny pay a
+runtime autodiff tax and g2o/GTSAM pay their general-purpose graph frameworks'
+per-edge dispatch and sparse-assembly overhead. SymForce, which also
+code-generates, is the closest per-iteration -- confirming the assembly is most
+of the gap; the rest is solver/framework overhead.
+
+**What the band solver buys is a modest, growing edge, not the headline:** on
+this block-tridiagonal structure it is ~7% faster and ~10% less memory than
+arael's general sparse path at 300 poses (13.3 vs 14.6 MB), and both grow with
+the pose count -- band Cholesky is O(n * kd^2) with contiguous storage, while a
+general sparse factorization carries a fill-reducing ordering and supernodal
+machinery the band does not need. It is the right tool for localization, and on
+a long real trajectory (thousands of poses) the gap widens; at these sizes the
+code-gen assembly dominates.
 
 f32 matches f64 to the final cost here (the problem is well-conditioned) at
 lower memory -- the band factor and its Cholesky halve in width.
