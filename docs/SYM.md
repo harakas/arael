@@ -490,21 +490,27 @@ sym! {
         // it). The `identity` guard around `1 - xc^2` prevents the
         // simplifier from reordering the subtraction relative to
         // `+eps^2`, which would otherwise cancel in floating point
-        // near |x| = 1.
+        // near |x| = 1. `epsilon_for(xc)` is machine epsilon anchored
+        // to the TYPE of `xc` (see below).
         |x| {
             let xc = clamp(x, -1.0, 1.0);
-            [1.0 / sqrt(identity(1.0 - xc * xc) + epsilon() * epsilon())]
+            let e = epsilon_for(xc.clone());
+            [1.0 / sqrt(identity(1.0 - xc.clone() * xc) + e.clone() * e)]
         },
     );
     let f = safe_asin(x);
     println!("{}",       f);             // safe_asin(x)
-    println!("d/dx = {}", f.diff(x));    // 1 / sqrt(epsilon^2 + identity(-clamp(x, -1, 1)^2 + 1))
+    println!("d/dx = {}", f.diff(x));    // uses epsilon_for(clamp(x, -1, 1)) as the guard
 }
 ```
 
 Why explicit derivatives? Auto-differentiating `asin(clamp(x, -1, 1))` would produce `(d/dx clamp) / sqrt(1 - clamp(x, -1, 1)^2)`, which still diverges at the boundary because `clamp`'s derivative is the identity. The regularised version replaces `sqrt(1 - x^2)` with `sqrt(1 - clamp(x, -1, 1)^2 + eps^2)` (clamp on both the body and the derivative input) and uses `identity` to defend the subtraction from simplifier reordering.
 
-The same pattern -- `simple_func*_derivs` plus `clamp` and/or `epsilon`-regularisation in the derivative -- is how `safe_acos`, `safe_sqrt`, `safe_atan2`, and similar are implemented.
+Why `epsilon_for(xc)` and not the nullary `epsilon()`? The constant machine epsilon is precision-DEPENDENT (`f32::EPSILON` != `f64::EPSILON`). In type-inferred codegen (unsuffixed literals, one body for both f32 and f64), `epsilon()` folds to a single literal and bakes in the f64 value -- an f32 constraint then gets a guard ~1e18x too small. `epsilon_for(anchor)` instead emits `arael::utils::epsilon_for(anchor)`, whose type parameter is inferred from a nearby concrete value (here `xc`, a field-typed expression), so f32 code gets `f32::EPSILON` and f64 code `f64::EPSILON`. Its symbolic eval is `f64::EPSILON` and its derivative w.r.t. the anchor is 0.
+
+`epsilon_for` is a registered builtin, so you can call it directly in a constraint body (or in `parse`) to write your own precision-safe guard, e.g. `1 / sqrt(1 - x*x + epsilon_for(x)^2)` -- anchor it to a parameter or field so it picks up the model's precision.
+
+The same pattern -- `simple_func*_derivs` plus `clamp` and/or `epsilon_for`-regularisation in the derivative -- is how `safe_acos`, `safe_sqrt`, `safe_atan2`, and similar are implemented.
 
 ## Parsing
 

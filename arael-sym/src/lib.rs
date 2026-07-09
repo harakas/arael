@@ -778,6 +778,21 @@ pub fn epsilon() -> E {
         "f32::EPSILON", "f64::EPSILON", "\\epsilon")
 }
 
+/// Machine epsilon anchored to the TYPE of `anchor` (its value is ignored):
+/// codegen emits `arael::utils::epsilon_for(<anchor>)`, so the precision is
+/// inferred from a nearby concrete value -- f32 code gets `f32::EPSILON`, f64
+/// code `f64::EPSILON`. Symbolic eval returns `f64::EPSILON`; the derivative
+/// w.r.t. the anchor is 0 (it is a constant).
+///
+/// Prefer this over the nullary [`epsilon`] inside a machine-precision guard
+/// emitted into type-inferred (unsuffixed) code: [`epsilon`] folds to a single
+/// literal there, fixing the wrong precision for f32; `epsilon_for` does not.
+pub fn epsilon_for(anchor: E) -> E {
+    extern_func1("epsilon_for", "arael::utils::epsilon_for",
+        |_| [c(0.0)],
+        |_args: &[f64]| f64::EPSILON)(anchor)
+}
+
 /// Euler's number $e = 2.71828\ldots$
 pub fn euler() -> E {
     named_const("e", std::f64::consts::E,
@@ -890,6 +905,8 @@ pub const FUNCTIONS: &[(&str, FunctionRef)] = &[
     ("safe_sqrt", FunctionRef::Unary(safe_sqrt)),
     ("safe_asin", FunctionRef::Unary(safe_asin)),
     ("safe_acos", FunctionRef::Unary(safe_acos)),
+    // Machine epsilon anchored to the argument's type (value ignored).
+    ("epsilon_for", FunctionRef::Unary(epsilon_for)),
     // Binary
     ("atan2", FunctionRef::Binary(atan2)),
     ("pow", FunctionRef::Binary(pow)),
@@ -1595,8 +1612,10 @@ pub fn safe_atan2(y: E, x: E) -> E {
     simple_func2_derivs("safe_atan2",
         atan2,
         |y, x| {
-            let eps2 = epsilon() * epsilon();
-            let d = x.clone()*x.clone() + y.clone()*y.clone() + eps2;
+            // epsilon anchored to x so its precision follows the argument type
+            // in type-inferred codegen (see `epsilon_for`).
+            let e = epsilon_for(x.clone());
+            let d = x.clone()*x.clone() + y.clone()*y.clone() + e.clone()*e;
             [x / d.clone(), -y / d]
         })(y, x)
 }
@@ -1618,7 +1637,12 @@ pub fn safe_asin(x: E) -> E {
         // derivative's `1 - x^2` non-negative.
         |x| {
             let xc = clamp(x, c(-1.0), c(1.0));
-            [c(1.0) / sqrt(identity(c(1.0) - xc.clone()*xc) + epsilon()*epsilon())]
+            // Anchor the epsilon guard to xc so codegen infers its precision
+            // from the (concrete field-typed) argument -- f32::EPSILON in f32
+            // code, f64::EPSILON in f64. The nullary epsilon() would fold to a
+            // single-precision literal in type-inferred constraint code.
+            let e = epsilon_for(xc.clone());
+            [c(1.0) / sqrt(identity(c(1.0) - xc.clone()*xc) + e.clone()*e)]
         }
     )(x)
 }
@@ -1635,7 +1659,8 @@ pub fn safe_acos(x: E) -> E {
         // `1 - x^2` stays non-negative for any input.
         |x| {
             let xc = clamp(x, c(-1.0), c(1.0));
-            [-c(1.0) / sqrt(identity(c(1.0) - xc.clone()*xc) + epsilon()*epsilon())]
+            let e = epsilon_for(xc.clone());
+            [-c(1.0) / sqrt(identity(c(1.0) - xc.clone()*xc) + e.clone()*e)]
         }
     )(x)
 }
@@ -1655,7 +1680,12 @@ pub fn safe_sqrt(x: E) -> E {
         // `sqrt(x + eps^2)` stays defined. `heaviside(x)` folds
         // negative x to zero; at eval time that gives `0.5 / eps`,
         // finite and large, instead of NaN.
-        |x| [c(0.5) / sqrt(identity(x.clone() * heaviside(x)) + epsilon()*epsilon())],
+        |x| {
+            // epsilon anchored to x so its precision follows the argument type
+            // in type-inferred codegen (see `epsilon_for`).
+            let e = epsilon_for(x.clone());
+            [c(0.5) / sqrt(identity(x.clone() * heaviside(x)) + e.clone()*e)]
+        },
         |args| {
             let v = args[0];
             if v <= 0.0 { 0.0 } else { v.sqrt() }
@@ -2109,6 +2139,39 @@ mod tests {
             let vars = HashMap::from([("x", 1.0)]);
             let v = da.eval(&vars).unwrap();
             assert!(v.is_finite(), "safe_asin derivative at 1.0 should be finite, got {}", v);
+        }
+    }
+
+    #[test]
+    fn epsilon_for_codegen_eval_diff() {
+        sym! {
+            let x = symbol("x");
+            let e = epsilon_for(x.clone());
+            // Anchored call in every codegen context, so the precision follows
+            // the anchor -- unlike nullary epsilon(), which folds to a single-
+            // precision literal in a type-inferred context.
+            assert_eq!(e.to_rust(""), "arael::utils::epsilon_for(x)");
+            assert_eq!(e.to_rust("f32"), "arael::utils::epsilon_for(x)");
+            // Symbolic eval is f64::EPSILON regardless of the anchor value.
+            let vars = HashMap::from([("x", 3.0)]);
+            assert_eq!(e.eval(&vars).unwrap(), f64::EPSILON);
+            // Constant w.r.t. the anchor: derivative is 0.
+            assert_eq!(format!("{}", epsilon_for(x).diff("x")), "0");
+        }
+    }
+
+    #[test]
+    fn safe_asin_guard_uses_anchored_epsilon_not_folded_literal() {
+        sym! {
+            let x = symbol("x");
+            // The derivative guard must reach type-inferred codegen as the
+            // anchored epsilon_for call (so f32 code gets f32::EPSILON), never
+            // the folded f64 epsilon literal.
+            let code = safe_asin(x).diff("x").to_rust("");
+            assert!(code.contains("arael::utils::epsilon_for("),
+                "guard should use epsilon_for, got: {}", code);
+            assert!(!code.contains("4.930380657631324e-32"),
+                "guard must not fold to the f64 epsilon literal, got: {}", code);
         }
     }
 

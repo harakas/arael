@@ -340,7 +340,7 @@ fn build_function_call(name: &str, args: Vec<E>, bag: Option<&FunctionBag>) -> R
 /// `atan`, `atan2`, `sinh`, `cosh`, `tanh`, `exp`, `ln`, `log2`, `log10`,
 /// `sqrt`, `abs`, `heaviside` (alias `H`), `clamp`, `pow`, `rad_diff`,
 /// `rad_sum`, `safe_atan2`, `safe_sqrt`, `safe_asin`, `safe_acos`,
-/// `identity`). See the full list in [`crate::FUNCTIONS`].
+/// `epsilon_for`, `identity`). See the full list in [`crate::FUNCTIONS`].
 ///
 /// The identifiers `pi` and `e` are recognized as named constants.
 /// All other identifiers become symbolic variables.
@@ -462,6 +462,16 @@ mod tests {
     fn parse_heaviside_h_alias() {
         let e = parse("heaviside(0.5) + H(0.5)").unwrap();
         approx(e.eval(&noenv()).unwrap(), 2.0, 1e-12);
+    }
+
+    #[test]
+    fn parse_epsilon_for() {
+        // Registered builtin: parses, evals to f64::EPSILON (anchor value
+        // ignored), and codegens to the anchored runtime call.
+        let e = parse("epsilon_for(x)").unwrap();
+        let vars: HashMap<&str, f64> = [("x", 3.0)].into_iter().collect();
+        assert_eq!(e.eval(&vars).unwrap(), f64::EPSILON); // anchor value ignored
+        assert_eq!(e.to_rust(""), "arael::utils::epsilon_for(x)");
     }
 
     #[test]

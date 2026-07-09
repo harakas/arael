@@ -196,6 +196,23 @@ pub fn rad_diff<T: Float>(a: T, b: T) -> T { a.rad_diff(b) }
 /// Rollover-safe sum of two radian angles, result in [-pi, pi].
 pub fn rad_sum<T: Float>(a: T, b: T) -> T { a.rad_sum(b) }
 
+/// Machine epsilon of the anchor value's type (`f32::EPSILON` / `f64::EPSILON`).
+///
+/// The anchor value itself is ignored; only its TYPE is used, so the symbolic
+/// codegen can emit `arael::utils::epsilon_for(x)` in a type-inferred context
+/// and have `T` resolved from a nearby concrete value. A bare `T::epsilon()`
+/// call would give an unpinnable inference variable; passing an anchor pins it,
+/// so f32 constraint code gets `f32::EPSILON` and f64 code `f64::EPSILON`
+/// (a folded literal would bake in one precision). Used by the `safe_asin` /
+/// `safe_acos` derivative guards.
+///
+/// ```
+/// assert_eq!(arael::utils::epsilon_for(1.0_f32), f32::EPSILON);
+/// assert_eq!(arael::utils::epsilon_for(1.0_f64), f64::EPSILON);
+/// ```
+#[inline(always)]
+pub fn epsilon_for<T: Float>(_anchor: T) -> T { <T as num::Float>::epsilon() }
+
 /// Safe asin that clamps input to [-1, 1].
 pub fn safe_asin<T: Float>(v: T) -> T { v.safe_asin() }
 /// Safe acos that clamps input to [-1, 1].
