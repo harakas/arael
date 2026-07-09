@@ -247,6 +247,40 @@ impl<T: Float> matrix3<T>
         )
     }
 
+    /// Derivatives of [`rotation_from_euler_angles_sincos`] w.r.t. each euler
+    /// angle: returns `[dR/dea.x, dR/dea.y, dR/dea.z]` (roll, pitch, yaw). Each
+    /// entry is the derivative of the corresponding entry above, using
+    /// `d(sin)/dangle = cos` and `d(cos)/dangle = -sin`; it consumes only the
+    /// supplied sin/cos, so it adds no trig. Used to precompute the pose
+    /// rotation Jacobian for constraints that differentiate through the
+    /// euler-angle rotation.
+    pub fn rotation_from_euler_angles_sincos_deriv(
+        sin_euler_angles: vect3<T>, cos_euler_angles: vect3<T>,
+    ) -> [matrix3<T>; 3] {
+        let (sx, sy, sz) = (sin_euler_angles.x, sin_euler_angles.y, sin_euler_angles.z);
+        let (cx, cy, cz) = (cos_euler_angles.x, cos_euler_angles.y, cos_euler_angles.z);
+        let z = T::zero();
+        // d/d(roll): sx -> cx, cx -> -sx
+        let dx = matrix3::<T>::from_rows(
+            vect3::<T>::new(z, sx*sz + cz*cx*sy,  -sx*cz*sy + cx*sz),
+            vect3::<T>::new(z, -sx*cz + cx*sy*sz, -sx*sy*sz - cz*cx),
+            vect3::<T>::new(z, cy*cx,             -sx*cy),
+        );
+        // d/d(pitch): sy -> cy, cy -> -sy
+        let dy = matrix3::<T>::from_rows(
+            vect3::<T>::new(-sy*cz, cz*sx*cy, cx*cz*cy),
+            vect3::<T>::new(-sy*sz, sx*cy*sz, cx*cy*sz),
+            vect3::<T>::new(-cy,    -sy*sx,   -cx*sy),
+        );
+        // d/d(yaw): sz -> cz, cz -> -sz
+        let dz = matrix3::<T>::from_rows(
+            vect3::<T>::new(-cy*sz, -cx*cz - sz*sx*sy, -cx*sz*sy + sx*cz),
+            vect3::<T>::new(cy*cz,  -cx*sz + sx*sy*cz, cx*sy*cz + sz*sx),
+            vect3::<T>::new(z,      z,                 z),
+        );
+        [dx, dy, dz]
+    }
+
     /// Builds a rotation matrix from an axis (must be unit) and angle in radians.
     pub fn rotation_from_axis_angle(axis: vect3<T>, phi: T) -> matrix3<T> {
         matrix3::<T>::rotation_from_axis_angle_sincos(axis, phi.sin_cos())
@@ -1015,6 +1049,33 @@ mod tests {
                     let fd = (get(&rp,i,j) - get(&r0,i,j)) / eps;
                     assert!((get(&d[k],i,j) - fd).abs() < 1e-4,
                         "d/dv[{k}] [{i}][{j}] at v={v:?}: analytic {} vs fd {}",
+                        get(&d[k],i,j), fd);
+                }}
+            }
+        }
+    }
+
+    #[test]
+    fn rotation_from_euler_angles_sincos_deriv_matches_finite_diff() {
+        let eps = 1e-7;
+        let get = |m: &matrix3d, i: usize, j: usize| match (i, j) {
+            (0,0)=>m.rows[0].x,(0,1)=>m.rows[0].y,(0,2)=>m.rows[0].z,
+            (1,0)=>m.rows[1].x,(1,1)=>m.rows[1].y,(1,2)=>m.rows[1].z,
+            (2,0)=>m.rows[2].x,(2,1)=>m.rows[2].y,_=>m.rows[2].z,
+        };
+        for ea in [vect3d::new(0.0,0.0,0.0), vect3d::new(0.3,-0.5,0.2),
+                   vect3d::new(1.2,0.7,-0.4), vect3d::new(-0.7,0.9,2.1)] {
+            let (s, c) = ea.sincos();
+            let d = matrix3d::rotation_from_euler_angles_sincos_deriv(s, c);
+            let r0 = matrix3d::rotation_from_euler_angles(ea);
+            for k in 0..3 {
+                let mut ep = ea;
+                match k { 0=>ep.x+=eps, 1=>ep.y+=eps, _=>ep.z+=eps }
+                let rp = matrix3d::rotation_from_euler_angles(ep);
+                for i in 0..3 { for j in 0..3 {
+                    let fd = (get(&rp,i,j) - get(&r0,i,j)) / eps;
+                    assert!((get(&d[k],i,j) - fd).abs() < 1e-4,
+                        "dR/dea[{k}] [{i}][{j}] at ea={ea:?}: analytic {} vs fd {}",
                         get(&d[k],i,j), fd);
                 }}
             }
