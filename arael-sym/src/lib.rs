@@ -1601,11 +1601,14 @@ pub fn identity(x: E) -> E {
     simple_func1("identity", |t| t)(x)
 }
 
-/// Caching marker: `cached(x) = x`, `d/dx = 1`. Currently behaves exactly like
-/// [`identity`] -- the simplifier does not look inside, so the wrapped
-/// expression stays intact as a unit, and codegen inlines it in parentheses.
-/// The distinct name marks a subexpression that should be computed once and
-/// reused.
+/// Caching / substitution barrier: `cached(x) = x` in both value and codegen
+/// (the simplifier does not look inside, so the wrapped expression stays intact
+/// as a unit, and codegen inlines it in parentheses). Unlike [`identity`] it is
+/// STICKY under differentiation -- `diff` re-wraps it, `d(cached(g))/dx =
+/// cached(dg/dx)` -- so the barrier survives into the derivative. That lets a
+/// subexpression AND its derivative each be matched and substituted (e.g. a
+/// composed rotation and its Jacobian, both replaced by per-entity precomputed
+/// reads). Nested `cached(..cached()..)` is fine: substitute the outer wholesale.
 pub fn cached(x: E) -> E {
     simple_func1("cached", |t| t)(x)
 }
@@ -1921,10 +1924,11 @@ mod tests {
     fn cached_acts_as_identity() {
         sym! {
             let x = symbol("x");
-            // Value passes through, derivative chains as identity (d/dx = 1).
+            // Value/codegen is an identity, but STICKY under differentiation:
+            // d(cached(g))/dx = cached(dg/dx), so the barrier survives.
             let vars = HashMap::from([("x", 5.0)]);
             assert_eq!(cached(x.clone()).eval(&vars).unwrap(), 5.0);
-            assert_eq!(format!("{}", cached(x.clone()).diff("x")), "1");
+            assert_eq!(format!("{}", cached(x.clone()).diff("x")), "cached(1)");
             // Barrier like identity: the wrapped subtraction stays intact and
             // codegen inlines it in parentheses (evaluation order preserved).
             assert_eq!(cached(x.clone() - c(1.0)).to_rust(""), "(x - 1.0)");

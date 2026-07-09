@@ -126,8 +126,15 @@ impl Expr {
                 // nothing (piecewise-constant, like Heaviside).
                 branch(q.clone(), a.diff(var), b.diff(var))
             }
-            Expr::Func { params, kind, args, .. } => {
-                if let Some(body) = kind.auto_diff_body() {
+            Expr::Func { name, params, kind, args } => {
+                // EXPERIMENT: cached() as a STICKY barrier -- its derivative
+                // re-wraps, so d(cached(g))/dx = cached(dg/dx). The barrier then
+                // survives differentiation and the pose-level derivative
+                // structures stay as matchable cached() units (nested is fine;
+                // substituted wholesale).
+                if name == "cached" && args.len() == 1 {
+                    crate::cached(args[0].diff(var))
+                } else if let Some(body) = kind.auto_diff_body() {
                     // Auto-diff: expand body, differentiate
                     super::expand_func(params, body, args).diff(var)
                 } else {
