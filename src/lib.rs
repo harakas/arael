@@ -64,8 +64,9 @@
 //!   matrix for DOF analysis via SVD.
 //!   [`#[arael(constraint_index)]`](model::JacobianRow) tracks constraint
 //!   provenance per row. See `examples/jacobian_demo.rs`.
-//! - **Gimbal-lock-free rotations** -- `EulerAngleParam` optimizes a small
-//!   delta around a reference rotation matrix
+//! - **Gimbal-lock-free rotations** -- `EulerAngleParam` (euler-angle delta)
+//!   and `QuaternionParam` (rotation-vector delta) optimize a small delta
+//!   around a re-centered reference rotation
 //! - **WASM/browser support** -- compiles to WebAssembly; the `arael-sketch`
 //!   constraint editor runs in the browser via eframe/egui
 //!

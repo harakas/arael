@@ -45,7 +45,7 @@ Solve problems like linear and nonlinear regression, sensor fusion, SLAM, bundle
 - **User-defined functions** -- plug custom symbolic or native-eval operators into constraint bodies with `#[arael::function]`.
 - **Hessian blocks** -- `SelfBlock<A>` and `CrossBlock<A, B>` for 1- and 2-entity constraints (packed dense); `TripletBlock` for 3+ entities (COO sparse). Heap-backed `BoxedSelfBlock`/`BoxedCrossBlock` variants allocate only the active blocks and can be freed between solves -- lighter when optimizing part of a large model tree
 - **Jacobian computation** -- `#[arael(root, jacobian)]` generates `calc_jacobian()` returning a sparse Jacobian matrix for DOF analysis and constraint diagnostics (see `examples/jacobian_demo.rs`)
-- **Gimbal-lock-free rotations** -- `EulerAngleParam` optimizes a small delta around a reference rotation matrix
+- **Gimbal-lock-free rotations** -- `EulerAngleParam` (euler-angle delta) and `QuaternionParam` (rotation-vector delta) optimize a small delta around a re-centered reference rotation
 - **WASM/browser support** -- the sketch editor compiles to WebAssembly and runs in the browser via eframe/egui
 
 ## Benchmarks
