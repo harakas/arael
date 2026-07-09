@@ -24,6 +24,7 @@ rand = "0.9"
 rand_distr = "0.5"
 libc = "0.2"
 log = "0.4"
+image = "0.25"
 
 [profile.release]
 debug = false

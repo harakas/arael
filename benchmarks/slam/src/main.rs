@@ -117,6 +117,12 @@ fn main() {
         factrs_init, initial_cost, rel);
     println!("factrs initial cost matches reference to {:.2e}", rel);
 
+    // Hessian sparsity bitmap (eyeball the fill), env-gated.
+    if let Ok(v) = std::env::var("SLAM_HESSIAN_BITMAP") {
+        let out = if v == "1" || v.is_empty() { "hessian.png".to_string() } else { v };
+        arael_runner::write_hessian_bitmap(&scene, &out);
+    }
+
     tiny_runner::install_iter_counter();
     let rounds: usize = std::env::var("ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
 

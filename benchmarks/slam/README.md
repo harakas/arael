@@ -343,7 +343,7 @@ GTSAM_VERIFY_JAC=1 cpp/build/gtsam_slam scene.txt lm out.txt # check GTSAM Jacob
 ```
 
 Env knobs: `SLAM_POSES`, `ROUNDS`, `SLAM_SKIP_TINY`, `SLAM_NO_MEM`,
-`SLAM_ARAEL_SOLVER=eigen|cholmod|cholmod_gpl`,
+`SLAM_ARAEL_SOLVER=eigen|cholmod|cholmod_gpl`, `SLAM_HESSIAN_BITMAP=<png>`,
 `SLAM_DRIVER=nielsen`, `SLAM_LAMBDA0`, `CERES_SOLVERS=<comma list>`,
 `CERES_RADIUS0`, `TINY_MAXITER`, `TINY_RADIUS0`, `SYMFORCE_LAMBDA0`,
 `SYMFORCE_MAXITER`, `G2O_LAMBDA_INIT`, `G2O_GAIN`, `G2O_VERIFY_JAC`,

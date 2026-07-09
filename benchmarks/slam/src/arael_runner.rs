@@ -458,6 +458,29 @@ pub fn initial_cost(scene: &Scene) -> f64 {
     path.calc_cost(&params)
 }
 
+/// Write the arael Hessian (J^T J) sparsity/fill pattern as a PNG at the initial
+/// estimate -- one pixel per parameter, black where nonzero, mirrored to the
+/// full symmetric matrix. Env-gated from main (SLAM_HESSIAN_BITMAP).
+pub fn write_hessian_bitmap(scene: &Scene, out: &str) {
+    use arael::simple_lm::LmProblem;
+    let mut path = build(scene);
+    let mut params: Vec<f64> = Vec::new();
+    path.serialize64(&mut params);
+    let n = params.len();
+    let mut grad = vec![0.0f64; n];
+    let mut coo = arael::simple_lm::CooMatrix::new(n);
+    path.calc_grad_hessian_sparse(&params, &mut grad, &mut coo);
+    let mut img = image::GrayImage::from_pixel(n as u32, n as u32, image::Luma([255u8]));
+    for (&r, &c) in coo.rows.iter().zip(coo.cols.iter()) {
+        img.put_pixel(c, r, image::Luma([0])); // (col, row) = (x, y)
+        img.put_pixel(r, c, image::Luma([0])); // mirror the upper triangle to full
+    }
+    match img.save(out) {
+        Ok(()) => println!("Hessian fill bitmap: {n}x{n}, {} nonzeros -> {out}", coo.nnz()),
+        Err(e) => eprintln!("Hessian bitmap write failed ({out}): {e}"),
+    }
+}
+
 type Solve64 = fn(&[f64], &mut Path, &arael::simple_lm::LmConfig<f64>)
     -> arael::simple_lm::LmResult<f64>;
 
