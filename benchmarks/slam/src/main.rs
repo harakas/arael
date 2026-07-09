@@ -52,8 +52,17 @@ fn peak_rss_kb() -> u64 {
 // prints its VmHWM). Isolating each solver in its own process gives a
 // clean peak -- no allocator retention from a previous solver, and the
 // same measurement basis as the Ceres subprocess.
+//
+// A cholmod-gpl build links CHOLMOD's BLAS/LAPACK stack, which inflates
+// every row's VmHWM by a few MB of shared-library baseline that a
+// faer-only deployment would not carry. SLAM_MEM_EXE=<path to a default
+// build> sources the non-gpl rows' memory from that clean binary instead;
+// the cholmod-gpl row always self-measures (the stack is part of its cost).
 fn measure_peak_mb(which: &str, poses: usize) -> f64 {
-    let exe = std::env::current_exe().unwrap();
+    let exe = match std::env::var("SLAM_MEM_EXE") {
+        Ok(alt) if which != "arael_gpl" => std::path::PathBuf::from(alt),
+        _ => std::env::current_exe().unwrap(),
+    };
     let out = std::process::Command::new(exe)
         .env("SLAM_MEMSOLVER", which)
         .env("SLAM_POSES", poses.to_string())
