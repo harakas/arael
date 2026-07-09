@@ -1271,6 +1271,10 @@ fn build_euler_substitutions(var_base: &str, field_name: &str) -> Vec<(arael_sym
     let ea_sym = arael_sym::vect3sym::new(&format!("{}.{}.work()", var_base, field_name));
     let rot = ea_sym.rotation_matrix();
     push_rotation_matrix_subs(&mut subs, &rot, var_base, field_name);
+    // Derivative subs before the sin/cos subs below, so the cached derivative
+    // units (with raw sin/cos inside) still match before sin/cos get rewritten.
+    let dvar_prefix = format!("{}.{}.work()", var_base, field_name);
+    push_rotation_deriv_subs(&mut subs, &rot, &dvar_prefix, var_base, field_name);
 
     // sin/cos substitutions SECOND (catch remaining occurrences not part of rotation matrix)
     for comp in &["x", "y", "z"] {
@@ -1303,6 +1307,10 @@ fn build_universal_euler_substitutions(var_base: &str, field_name: &str) -> Vec<
     // residual's cached entries resolve to precomputed reads and the
     // derivatives' remaining sin/cos resolve to delta_sincos.
     push_rotation_matrix_subs(&mut subs, &composed, var_base, field_name);
+    // Derivative subs also before the sin/cos subs, so the cached derivative
+    // units (with raw sin/cos inside) still match before sin/cos get rewritten.
+    let dvar_prefix = format!("{}.{}.delta", var_base, field_name);
+    push_rotation_deriv_subs(&mut subs, &composed, &dvar_prefix, var_base, field_name);
 
     // sin/cos of ea.delta → ea.delta_sincos
     for comp in &["x", "y", "z"] {
@@ -1354,22 +1362,25 @@ fn push_rotation_matrix_subs(
     }
 }
 
-/// Push `cached(d(entry)/d(delta.k)) -> <field>.rotation_matrix_deriv[k][row].col`
-/// substitutions for the composed rotation's Jacobian. cached() is a STICKY
-/// barrier under differentiation (d(cached(g))/dx = cached(dg/dx)), so the
-/// constraint Jacobian carries these cached derivative units; they resolve to
-/// the per-pose precomputed `rotation_matrix_deriv` field -- computed once per
-/// pose in `__precompute` instead of re-derived at every observation. Only for
-/// QuaternionParam (the rotvec retraction, whose derivative is rational).
+/// Push `cached(d(entry)/d(param.k)) -> <field>.rotation_matrix_deriv[k][row].col`
+/// substitutions for a rotation matrix's Jacobian. cached() is a STICKY barrier
+/// under differentiation (d(cached(g))/dx = cached(dg/dx)), so the constraint
+/// Jacobian carries these cached derivative units; they resolve to the per-pose
+/// precomputed `rotation_matrix_deriv` field -- computed once per pose in
+/// `__precompute` instead of re-derived at every observation. Shared by all
+/// three rotation-param builders; `dvar_prefix` is the base of the parameter to
+/// differentiate by (`<field>.delta` for the delta-based params, `<field>.work()`
+/// for the direct euler param), each with `.x/.y/.z` appended.
 fn push_rotation_deriv_subs(
     subs: &mut Vec<(arael_sym::E, arael_sym::E)>,
     composed: &matrix3sym,
+    dvar_prefix: &str,
     var_base: &str,
     field_name: &str,
 ) {
     use arael_sym::{symbol, cached};
     for (k, dcomp) in ["x", "y", "z"].iter().enumerate() {
-        let dvar = format!("{}.{}.delta.{}", var_base, field_name, dcomp);
+        let dvar = format!("{}.{}", dvar_prefix, dcomp);
         for (row, r) in composed.rows.iter().enumerate() {
             for (col_name, col_expr) in [("x", &r.x), ("y", &r.y), ("z", &r.z)] {
                 let deriv = col_expr.diff(dvar.as_str());
@@ -1393,7 +1404,8 @@ fn build_universal_rotvec_substitutions(var_base: &str, field_name: &str) -> Vec
     let dea_sym = vect3sym::new(&format!("{}.{}.delta", var_base, field_name));
     let composed = r_ref_sym * matrix3sym::from_rotation_vector_small(&dea_sym);
     push_rotation_matrix_subs(&mut subs, &composed, var_base, field_name);
-    push_rotation_deriv_subs(&mut subs, &composed, var_base, field_name);
+    let dvar_prefix = format!("{}.{}.delta", var_base, field_name);
+    push_rotation_deriv_subs(&mut subs, &composed, &dvar_prefix, var_base, field_name);
     subs
 }
 
