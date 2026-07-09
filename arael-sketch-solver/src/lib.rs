@@ -2801,6 +2801,7 @@ impl Sketch {
                 x: params64, start_cost: 0.0, end_cost: 0.0,
                 iterations: 0, accepted_iterations: 0,
                 status: arael::simple_lm::LmStatus::Converged, final_lambda: 0.0,
+                timing: None,
             };
         }
 
@@ -2840,6 +2841,7 @@ impl Sketch {
             // the no-stage placeholders.
             status: arael::simple_lm::LmStatus::Converged,
             final_lambda: 0.0,
+            timing: None,
         };
 
         for &scale in stages {

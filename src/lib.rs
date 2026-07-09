@@ -924,6 +924,7 @@
 //! | `initial_lambda` | `1e-4` | starting LM damping; small ≈ Gauss-Newton, large ≈ gradient descent |
 //! | `cost_threshold` | `0.0` | terminate immediately when cost ≤ this (`0.0` disables) |
 //! | `verbose` | `false` | per-iteration line on stderr. **Turn on first whenever debugging** |
+//! | `gather_timing` | `false` | gather per-phase timing into `LmResult::timing` (`Some` when on, `None` when off) |
 //!
 //! The solver terminates when **all of** `iter >= min_iters`, the
 //! current step is "small" (below both `abs_precision` and

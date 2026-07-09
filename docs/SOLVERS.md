@@ -97,6 +97,7 @@ LmConfig {
     initial_lambda:  1e-4,   // starting LM damping
     cost_threshold:  0.0,    // stop when cost ≤ this (0.0 disables)
     verbose:         false,  // print per-iteration trace to stderr
+    gather_timing:   false,  // collect per-phase timing into LmResult::timing
 }
 ```
 
@@ -110,6 +111,7 @@ LmConfig {
 | `initial_lambda` | `1e-4` | starting damping. Small ≈ Gauss-Newton (fast, may overshoot), large ≈ gradient descent (slow, stable) |
 | `cost_threshold` | `0.0` | terminate immediately when cost drops to or below this. Useful for feasibility-style problems with a known target |
 | `verbose` | `false` | per-iteration line on stderr. **Turn on first whenever debugging** |
+| `gather_timing` | `false` | gather per-phase wall-clock timing into `LmResult::timing` (`Some` when on, `None` when off). Off = the clock is never read |
 
 ## Tuning for performance vs quality
 
@@ -346,6 +348,7 @@ pub struct LmResult<T> {
     pub accepted_iterations: usize,  // cost-decreasing steps only
     pub status: LmStatus,            // why the solve stopped
     pub final_lambda: T,             // damping at exit (seeds a warm restart)
+    pub timing: Option<LmTiming>,    // per-phase wall clock; Some iff gather_timing
 }
 ```
 
@@ -367,6 +370,43 @@ pub enum LmStatus {
 accepted," but distinguish the driver hitting its damping ceiling from the
 hard inner-retry cap. `DegenerateDiagonal` returns the best parameters found
 so far rather than panicking. `LmResult` derives `Clone`/`Debug`.
+
+## Profiling a solve -- `LmTiming`
+
+Set `gather_timing: true` to find out where a solve spends its time. The
+result's `timing` is then `Some(LmTiming)` (otherwise `None`, and the clock
+is never read):
+
+```rust,ignore
+pub struct LmTiming {
+    pub total: Duration,          // whole solve
+    pub assembly: Duration,       // residual + Jacobian + Hessian, all iters
+    pub first_assembly: Duration, //   ...of which the first (also builds the pattern)
+    pub linear_solve: Duration,   // damped factorization + solve, all attempts
+    pub first_linear_solve: Duration,  // ...of which the first (also symbolic factorization)
+    pub cost_eval: Duration,      // trial-point cost (residual only)
+    pub first_cost_eval: Duration,
+    pub advance: Duration,        // post-step re-centering
+    pub first_advance: Duration,
+    // plus a *_count for each phase
+}
+```
+
+Every phase records `{total, first, count}`. The first call is broken out
+because the first iteration carries a one-time structure cost the steady
+state does not: the first assembly discovers the sparsity pattern and builds
+the value-position map, and the first solve runs the symbolic factorization
+(fill-reducing ordering + elimination tree). On a fresh sparse problem those
+two often dominate the whole solve; a warm re-solve pays neither. Each
+`first_*` is part of its phase total (`first_assembly` ⊂ `assembly`, etc.).
+Phase times are single-threaded wall clock and cover only the work inside
+each phase, so they sum to slightly less than `total`.
+
+For the **steady-state cost per iteration**, use the `mean_*` methods --
+`mean_assembly()`, `mean_linear_solve()`, `mean_cost_eval()`,
+`mean_advance()`. Each returns `(phase - first) / (count - 1)` as an
+`Option<Duration>` (the first iteration is excluded so the one-time structure
+cost does not skew the average), or `None` when only the first call ran.
 
 After a successful solve, hand `result.x` back to the model via
 `model.deserialize32(&result.x)` (or `deserialize64`).

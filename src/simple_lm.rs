@@ -40,6 +40,7 @@
 
 use crate::utils::Float;
 use std::fmt;
+use std::time::Duration;
 #[cfg(target_arch = "wasm32")]
 use web_time::Instant;
 #[cfg(not(target_arch = "wasm32"))]
@@ -172,6 +173,14 @@ pub struct LmConfig<T: Float> {
     /// reads `initial_lambda` and `lambda_floor` from this config at solve
     /// start, so those two fields configure whichever driver is in place.
     pub driver: Box<dyn LambdaDriver<T>>,
+    /// Gather per-phase wall-clock timing. When `true`, [`LmResult::timing`]
+    /// is `Some(LmTiming)`; when `false` (the default) it is `None` and the
+    /// solver never reads the clock -- zero overhead. Enable it to profile
+    /// where a solve spends its time (assembly, factorization, cost
+    /// evaluation, re-centering); the first assembly and first factorization
+    /// are recorded separately because they also establish the sparsity
+    /// pattern and symbolic factorization.
+    pub gather_timing: bool,
 }
 
 impl<T: Float> Default for LmConfig<T> {
@@ -187,6 +196,7 @@ impl<T: Float> Default for LmConfig<T> {
             lambda_floor: default_lambda_floor::<T>(),
             verbose: false,
             driver: Box::new(DefaultLambdaDriver::default()),
+            gather_timing: false,
         }
     }
 }
@@ -311,6 +321,86 @@ pub enum LmStatus {
     DegenerateDiagonal { param: usize },
 }
 
+/// Per-phase wall-clock timing gathered during a solve. Produced only when
+/// [`LmConfig::gather_timing`] is set -- otherwise [`LmResult::timing`] is
+/// `None` and the solver never reads the clock. Times are wall-clock,
+/// single-threaded, and include only the work inside each phase (not the loop
+/// bookkeeping between them), so the phase sums are slightly less than `total`.
+#[derive(Clone, Debug, Default)]
+pub struct LmTiming {
+    /// Whole `lm_solve` wall clock, from the first assembly to the return.
+    pub total: Duration,
+    /// Gradient + Hessian assembly (residual, Jacobian, accumulation) summed
+    /// over every iteration.
+    pub assembly: Duration,
+    /// The first assembly alone. It also discovers the sparsity pattern and
+    /// builds the value-position map -- a one-time structure cost the steady
+    /// state does not pay.
+    pub first_assembly: Duration,
+    /// Damped linear solve (factorization + triangular solve) summed over
+    /// every inner attempt.
+    pub linear_solve: Duration,
+    /// The first damped solve alone. It also runs the symbolic factorization
+    /// (fill-reducing ordering + elimination-tree structure) -- a one-time
+    /// cost the steady state does not pay.
+    pub first_linear_solve: Duration,
+    /// Trial-point cost evaluation (residual only, no Jacobian) summed over
+    /// every inner attempt.
+    pub cost_eval: Duration,
+    /// The first cost evaluation alone (recorded apart so the steady-state
+    /// mean can drop the first iteration uniformly with the other phases).
+    pub first_cost_eval: Duration,
+    /// Post-step `advance` (parameter re-centering) summed over accepted steps.
+    pub advance: Duration,
+    /// The first `advance` alone (recorded apart so the steady-state mean can
+    /// drop the first iteration uniformly with the other phases).
+    pub first_advance: Duration,
+    /// Number of assembly calls (one per outer iteration).
+    pub assembly_count: usize,
+    /// Number of damped-solve attempts (one per inner iteration that reached
+    /// factorization).
+    pub linear_solve_count: usize,
+    /// Number of trial-point cost evaluations.
+    pub cost_eval_count: usize,
+    /// Number of `advance` calls (one per accepted step).
+    pub advance_count: usize,
+}
+
+/// Mean of a phase's per-call time with the first call removed:
+/// `(total - first) / (count - 1)`. Returns `None` when there is no call
+/// after the first (`count <= 1`), so there is no steady state to average.
+fn steady_mean(total: Duration, first: Duration, count: usize) -> Option<Duration> {
+    if count <= 1 {
+        return None;
+    }
+    Some((total - first) / (count as u32 - 1))
+}
+
+impl LmTiming {
+    /// Mean assembly time per iteration, EXCLUDING the first. The first
+    /// assembly also builds the sparsity pattern, so averaging it in would
+    /// skew the steady-state estimate. `None` if the solve had only one
+    /// assembly.
+    pub fn mean_assembly(&self) -> Option<Duration> {
+        steady_mean(self.assembly, self.first_assembly, self.assembly_count)
+    }
+    /// Mean damped-solve time per attempt, EXCLUDING the first (which also
+    /// runs the symbolic factorization). `None` if there was only one solve.
+    pub fn mean_linear_solve(&self) -> Option<Duration> {
+        steady_mean(self.linear_solve, self.first_linear_solve, self.linear_solve_count)
+    }
+    /// Mean trial-point cost evaluation, EXCLUDING the first call. `None` if
+    /// there was only one evaluation.
+    pub fn mean_cost_eval(&self) -> Option<Duration> {
+        steady_mean(self.cost_eval, self.first_cost_eval, self.cost_eval_count)
+    }
+    /// Mean re-centering (`advance`) time, EXCLUDING the first call. `None` if
+    /// there was only one accepted step.
+    pub fn mean_advance(&self) -> Option<Duration> {
+        steady_mean(self.advance, self.first_advance, self.advance_count)
+    }
+}
+
 /// Result returned by the Levenberg-Marquardt solver.
 #[derive(Clone, Debug)]
 pub struct LmResult<T> {
@@ -331,6 +421,9 @@ pub struct LmResult<T> {
     /// The damping parameter lambda at exit. Seeds a warm restart or a
     /// follow-up solve that wants to resume from the same damping.
     pub final_lambda: T,
+    /// Per-phase wall-clock timing: `Some` iff [`LmConfig::gather_timing`]
+    /// was set, `None` otherwise (see [`LmTiming`]).
+    pub timing: Option<LmTiming>,
 }
 
 // ---------------------------------------------------------------------------
@@ -904,6 +997,7 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
             x: x0.to_vec(), start_cost: T::zero(), end_cost: T::zero(),
             iterations: 0, accepted_iterations: 0,
             status: LmStatus::Converged, final_lambda: T::zero(),
+            timing: config.gather_timing.then(LmTiming::default),
         };
     }
 
@@ -938,8 +1032,22 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
     let mut first = true;
     let mut timer = Instant::now();
 
+    // Per-phase timing. Only read the clock when the caller asked for it
+    // (config.gather_timing) -- otherwise `gather.then(Instant::now)` is None
+    // and no clock call happens at all.
+    let gather = config.gather_timing;
+    let mut timing = LmTiming::default();
+    let solve_start = gather.then(Instant::now);
+
     while iter < config.max_iters && !done {
+        let t_asm = gather.then(Instant::now);
         let computed_cost = solver.compute(problem, &cur_x, &mut grad, &mut matrix);
+        if let Some(t) = t_asm {
+            let dt = t.elapsed();
+            if timing.assembly_count == 0 { timing.first_assembly = dt; }
+            timing.assembly += dt;
+            timing.assembly_count += 1;
+        }
         if first {
             // The cost is a free byproduct of assembly; using it here
             // replaces the separate calc_cost(x0) pass of the old loop.
@@ -948,8 +1056,10 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
             end_cost = computed_cost;
             // Already at zero cost — nothing to do
             if start_cost == T::zero() {
+                if let Some(s) = solve_start { timing.total = s.elapsed(); }
                 return LmResult { x: cur_x, start_cost, end_cost, iterations: 0,
-                    accepted_iterations: 0, status: LmStatus::Converged, final_lambda: lambda };
+                    accepted_iterations: 0, status: LmStatus::Converged, final_lambda: lambda,
+                    timing: gather.then_some(timing) };
             }
         }
         solver.extract_diagonal(&matrix, &mut diagonal);
@@ -971,9 +1081,11 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
                         diagonal ({:?}) at iteration {}; no active constraint \
                         curvature touches it (degenerate model) -- terminating solve",
                     i, d.to_f64(), iter);
+                if let Some(s) = solve_start { timing.total = s.elapsed(); }
                 return LmResult { x: cur_x, start_cost, end_cost, iterations: iter,
                     accepted_iterations: accepted,
-                    status: LmStatus::DegenerateDiagonal { param: i }, final_lambda: lambda };
+                    status: LmStatus::DegenerateDiagonal { param: i }, final_lambda: lambda,
+                    timing: gather.then_some(timing) };
             }
         }
 
@@ -990,7 +1102,17 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
         while inner < INNER_LOOPS && iter < config.max_iters {
             iter += 1;
 
-            if !solver.solve_damped(n, &mut matrix, &diagonal, lambda, &grad, &mut delta) {
+            let t_ls = gather.then(Instant::now);
+            let solved = solver.solve_damped(n, &mut matrix, &diagonal, lambda, &grad, &mut delta);
+            if let Some(t) = t_ls {
+                let dt = t.elapsed();
+                // The first solve also runs the symbolic factorization
+                // (fill-reducing ordering + structure); record it apart.
+                if timing.linear_solve_count == 0 { timing.first_linear_solve = dt; }
+                timing.linear_solve += dt;
+                timing.linear_solve_count += 1;
+            }
+            if !solved {
                 let next_lambda = driver.factorization_failed(lambda, &LambdaState {
                     cost: end_cost, grad: &grad, diagonal: &diagonal,
                 });
@@ -1020,7 +1142,14 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
                 try_x[i] = cur_x[i] - delta[i];
             }
 
+            let t_cost = gather.then(Instant::now);
             let new_cost = problem.calc_cost(&try_x);
+            if let Some(t) = t_cost {
+                let dt = t.elapsed();
+                if timing.cost_eval_count == 0 { timing.first_cost_eval = dt; }
+                timing.cost_eval += dt;
+                timing.cost_eval_count += 1;
+            }
 
             if config.verbose {
                 let step_us = timer.elapsed().as_micros();
@@ -1043,7 +1172,14 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
                     grad: &grad, diagonal: &diagonal, delta: &delta,
                 });
                 cur_x.copy_from_slice(&try_x);
+                let t_adv = gather.then(Instant::now);
                 problem.advance(&mut cur_x);
+                if let Some(t) = t_adv {
+                    let dt = t.elapsed();
+                    if timing.advance_count == 0 { timing.first_advance = dt; }
+                    timing.advance += dt;
+                    timing.advance_count += 1;
+                }
 
                 // Cost reached target threshold -- terminate (respects min_iters)
                 if iter >= config.min_iters && new_cost <= config.cost_threshold {
@@ -1117,6 +1253,7 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
         }
     }
 
+    if let Some(s) = solve_start { timing.total = s.elapsed(); }
     LmResult {
         x: cur_x,
         start_cost,
@@ -1125,6 +1262,7 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
         accepted_iterations: accepted,
         status,
         final_lambda: lambda,
+        timing: gather.then_some(timing),
     }
 }
 
@@ -2629,6 +2767,58 @@ mod tests {
 
         assert!((result.x[0] - 1.0).abs() < 1e-4, "x={}", result.x[0]);
         assert!((result.x[1] - 1.0).abs() < 1e-4, "y={}", result.x[1]);
+    }
+
+    #[test]
+    fn timing_gathered_when_enabled() {
+        // Rosenbrock takes several accepted steps, so every phase runs at
+        // least once -- a good fixture for the timing instrumentation.
+        let mut p = rosenbrock_problem();
+        let result = solve(&[-1.2, 1.0], &mut p, &LmConfig {
+            abs_precision: 1e-12, max_iters: 500, initial_lambda: 0.001,
+            gather_timing: true, ..Default::default()
+        });
+        let t = result.timing.as_ref().expect("timing gathered when enabled");
+        // Every phase ran and was clocked.
+        assert!(t.total > Duration::ZERO, "total not measured");
+        assert!(t.assembly_count > 1, "assembly_count={}", t.assembly_count);
+        assert!(t.linear_solve_count >= 1, "linear_solve_count={}", t.linear_solve_count);
+        assert!(t.cost_eval_count >= 1, "cost_eval_count={}", t.cost_eval_count);
+        assert!(t.advance_count >= 1, "advance_count={}", t.advance_count);
+        // The first-call times are a component of their running sums.
+        assert!(t.first_assembly <= t.assembly, "first_assembly > assembly");
+        assert!(t.first_linear_solve <= t.linear_solve, "first_linear_solve > linear_solve");
+        // The measured phases fit inside the total wall clock.
+        let phases = t.assembly + t.linear_solve + t.cost_eval + t.advance;
+        assert!(phases <= t.total, "phase sum {:?} exceeds total {:?}", phases, t.total);
+        // The per-iteration mean drops the first assembly.
+        assert_eq!(t.mean_assembly(),
+            Some((t.assembly - t.first_assembly) / (t.assembly_count as u32 - 1)));
+    }
+
+    #[test]
+    fn timing_mean_excludes_first_iteration() {
+        // (total - first) / (count - 1), independent of the solver.
+        let mut t = LmTiming { assembly_count: 3, ..Default::default() };
+        t.assembly = Duration::from_millis(10);
+        t.first_assembly = Duration::from_millis(4);
+        // (10 - 4) / (3 - 1) = 3 ms
+        assert_eq!(t.mean_assembly(), Some(Duration::from_millis(3)));
+        // No steady state to average when only the first call ran.
+        t.assembly_count = 1;
+        assert_eq!(t.mean_assembly(), None);
+        t.assembly_count = 0;
+        assert_eq!(t.mean_assembly(), None);
+    }
+
+    #[test]
+    fn timing_off_by_default() {
+        // gather_timing defaults to false: no clock is read, timing is None.
+        let mut p = rosenbrock_problem();
+        let result = solve(&[-1.2, 1.0], &mut p, &LmConfig {
+            abs_precision: 1e-12, max_iters: 500, initial_lambda: 0.001, ..Default::default()
+        });
+        assert!(result.timing.is_none());
     }
 
     #[test]
