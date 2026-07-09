@@ -1354,6 +1354,33 @@ fn push_rotation_matrix_subs(
     }
 }
 
+/// Push `cached(d(entry)/d(delta.k)) -> <field>.rotation_matrix_deriv[k][row].col`
+/// substitutions for the composed rotation's Jacobian. cached() is a STICKY
+/// barrier under differentiation (d(cached(g))/dx = cached(dg/dx)), so the
+/// constraint Jacobian carries these cached derivative units; they resolve to
+/// the per-pose precomputed `rotation_matrix_deriv` field -- computed once per
+/// pose in `__precompute` instead of re-derived at every observation. Only for
+/// QuaternionParam (the rotvec retraction, whose derivative is rational).
+fn push_rotation_deriv_subs(
+    subs: &mut Vec<(arael_sym::E, arael_sym::E)>,
+    composed: &matrix3sym,
+    var_base: &str,
+    field_name: &str,
+) {
+    use arael_sym::{symbol, cached};
+    for (k, dcomp) in ["x", "y", "z"].iter().enumerate() {
+        let dvar = format!("{}.{}.delta.{}", var_base, field_name, dcomp);
+        for (row, r) in composed.rows.iter().enumerate() {
+            for (col_name, col_expr) in [("x", &r.x), ("y", &r.y), ("z", &r.z)] {
+                let deriv = col_expr.diff(dvar.as_str());
+                let to_sym = symbol(&format!("{}.{}.rotation_matrix_deriv[{}][{}].{}",
+                    var_base, field_name, k, row, col_name));
+                subs.push((cached(deriv), to_sym));
+            }
+        }
+    }
+}
+
 /// Substitutions for a QuaternionParam (rotation-vector delta) field: replace
 /// the composed rotation R_ref * retraction(delta) entries with reads of the
 /// precomputed `<field>.rotation_matrix`. The retraction is rational (no
@@ -1366,6 +1393,7 @@ fn build_universal_rotvec_substitutions(var_base: &str, field_name: &str) -> Vec
     let dea_sym = vect3sym::new(&format!("{}.{}.delta", var_base, field_name));
     let composed = r_ref_sym * matrix3sym::from_rotation_vector_small(&dea_sym);
     push_rotation_matrix_subs(&mut subs, &composed, var_base, field_name);
+    push_rotation_deriv_subs(&mut subs, &composed, var_base, field_name);
     subs
 }
 
