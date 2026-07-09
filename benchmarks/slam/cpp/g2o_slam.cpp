@@ -495,8 +495,33 @@ static RunResult solve(const Scene& s, bool lm, int max_iters,
         }
     }
 
+    // G2O_STATS=1: per-iteration internal timing breakdown (g2o's own batch
+    // statistics) on stderr -- assembly vs Schur vs factorization vs solve.
+    // Diagnostics only, never in the timed comparison (stats collection adds
+    // its own overhead).
+    if (getenv("G2O_STATS")) opt.setComputeBatchStatistics(true);
+
     int iters = opt.optimize(max_iters);
     double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+
+    if (getenv("G2O_STATS")) {
+        fprintf(stderr, "%-4s %9s %9s %9s %9s %9s %9s %9s %8s %10s\n",
+            "it", "resid", "jacob", "quadform", "schur", "symbdec", "numdec", "linsolve", "update", "cholNNZ");
+        for (const auto& st : opt.batchStatistics()) {
+            if (st.iteration < 0) continue;  // container is pre-sized; skip unrun rows
+            fprintf(stderr, "%-4d %8.2fm %8.2fm %8.2fm %8.2fm %8.2fm %8.2fm %8.2fm %7.2fm %10zu\n",
+                st.iteration,
+                st.timeResiduals * 1e3, st.timeLinearize * 1e3, st.timeQuadraticForm * 1e3,
+                st.timeSchurComplement * 1e3, st.timeSymbolicDecomposition * 1e3,
+                st.timeNumericDecomposition * 1e3, st.timeLinearSolution * 1e3,
+                st.timeUpdate * 1e3, st.choleskyNNZ);
+        }
+        if (!opt.batchStatistics().empty()) {
+            const auto& st = opt.batchStatistics().front();
+            fprintf(stderr, "hessian dim %zu, pose block dim %zu (Schur-reduced system)\n",
+                st.hessianDimension, st.hessianPoseDimension);
+        }
+    }
 
     if (pose_out) {
         pose_out->resize(6 * s.n_poses);
