@@ -1324,12 +1324,30 @@ fn build_universal_euler_substitutions(var_base: &str, field_name: &str) -> Vec<
     subs
 }
 
+/// Wrap each entry of a symbolic rotation matrix in `cached()`. The composed
+/// R_ref * retraction(delta) entries otherwise get mixed into the surrounding
+/// residual math and reshaped by simplification, so `replace_pub` can no longer
+/// match them against the precompute substitution. `cached()` is an identity
+/// barrier: the entry stays a stable, matchable subtree, and the substitution
+/// (which also wraps its `from` in `cached()`) hits it reliably. See
+/// [`build_universal_rotvec_substitutions`].
+fn cache_rotation_entries(m: &matrix3sym) -> matrix3sym {
+    let c = |e: &arael_sym::E| arael_sym::cached(e.clone());
+    matrix3sym::from_elements(
+        c(&m.rows[0].x), c(&m.rows[0].y), c(&m.rows[0].z),
+        c(&m.rows[1].x), c(&m.rows[1].y), c(&m.rows[1].z),
+        c(&m.rows[2].x), c(&m.rows[2].y), c(&m.rows[2].z),
+    )
+}
+
 /// Substitutions for a QuaternionParam (rotation-vector delta) field: replace
 /// the composed rotation R_ref * retraction(delta) entries with reads of the
 /// precomputed `<field>.rotation_matrix`. The retraction is rational (no
-/// transcendentals), so there is no sincos analog to precompute.
+/// transcendentals), so there is no sincos analog to precompute. Each `from`
+/// is wrapped in `cached()` to match the cached entries the binding emits (see
+/// [`cache_rotation_entries`]).
 fn build_universal_rotvec_substitutions(var_base: &str, field_name: &str) -> Vec<(arael_sym::E, arael_sym::E)> {
-    use arael_sym::symbol;
+    use arael_sym::{symbol, cached};
     let mut subs = Vec::new();
     let r_ref_sym = matrix3sym::new(&format!("{}.{}.ref_rotation", var_base, field_name));
     let dea_sym = vect3sym::new(&format!("{}.{}.delta", var_base, field_name));
@@ -1337,7 +1355,7 @@ fn build_universal_rotvec_substitutions(var_base: &str, field_name: &str) -> Vec
     for row in 0..3 {
         for (col_name, col_expr) in [("x", &composed.rows[row].x), ("y", &composed.rows[row].y), ("z", &composed.rows[row].z)] {
             let to_sym = symbol(&format!("{}.{}.rotation_matrix[{}].{}", var_base, field_name, row, col_name));
-            subs.push((col_expr.clone(), to_sym));
+            subs.push((cached(col_expr.clone()), to_sym));
         }
     }
     subs
@@ -1397,6 +1415,14 @@ fn register_bindings_recursive(ctx: &mut ConstraintCtx, key_prefix: &str, sym_pr
                             dea_sym.rotation_matrix()
                         };
                         let composed_rot = r_ref_sym * delta_rot;
+                        // Rotvec entries are rational and get reshaped by
+                        // simplification; wrap each in cached() so the precompute
+                        // substitution can match them (see cache_rotation_entries).
+                        let composed_rot = if is_universal_rotvec {
+                            cache_rotation_entries(&composed_rot)
+                        } else {
+                            composed_rot
+                        };
                         let composed_ea = composed_rot.get_euler_angles();
                         ctx.bindings.insert(binding_key,
                             SymVal::UniversalEulerAngles {
