@@ -19,6 +19,10 @@ rustdoc-args = ["--html-in-header", "docs-header.html"]
 lapack = ["dep:lapack-sys"]
 eigen = ["dep:cc"]
 cholmod = ["eigen"]
+# WARNING: CHOLMOD's Supernodal module is GPL-licensed (unlike the Simplicial
+# module `cholmod` binds, which is LGPL). Enabling this feature makes the
+# resulting binary subject to the GPL. Enable knowingly.
+cholmod-gpl = ["cholmod"]
 
 [dependencies]
 arael-macros = { version = "0.6.3", path = "arael-macros" }

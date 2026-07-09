@@ -1795,6 +1795,17 @@ unsafe extern "C" {
     ) -> bool;
 }
 
+#[cfg(feature = "cholmod-gpl")]
+unsafe extern "C" {
+    fn eigen_cholmod_supernodal_f64_create() -> *mut std::ffi::c_void;
+    fn eigen_cholmod_supernodal_f64_destroy(handle: *mut std::ffi::c_void);
+    fn eigen_cholmod_supernodal_f64_solve(
+        handle: *mut std::ffi::c_void, n: i32, nnz: i32,
+        col_ptr: *const i64, row_idx: *const i32,
+        vals: *const f64, rhs: *const f64, solution: *mut f64,
+    ) -> bool;
+}
+
 // Helper: call an Eigen FFI solve function given our CscMatrix
 #[cfg(feature = "eigen")]
 fn eigen_ffi_solve<T>(
@@ -1994,6 +2005,73 @@ pub fn solve_sparse_eigen_f32(x0: &[f32], problem: &mut impl LmProblem<f32>, con
 #[cfg(feature = "cholmod")]
 pub fn solve_sparse_cholmod(x0: &[f64], problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> LmResult<f64> {
     lm_solve(x0, &mut SparseCholmod::new(), problem, config)
+}
+
+/// Eigen CholmodSupernodalLLT sparse Cholesky solver (f64 only).
+///
+/// **WARNING (license):** this binds CHOLMOD's Supernodal module, which is
+/// **GPL-licensed** (the Simplicial module behind [`SparseCholmod`] is LGPL).
+/// A binary built with the `cholmod-gpl` feature is subject to the GPL.
+#[cfg(feature = "cholmod-gpl")]
+pub struct SparseCholmodSupernodal {
+    handle: *mut std::ffi::c_void,
+    positions: Option<Vec<usize>>,
+}
+
+#[cfg(feature = "cholmod-gpl")]
+impl SparseCholmodSupernodal {
+    pub fn new() -> Self {
+        SparseCholmodSupernodal { handle: unsafe { eigen_cholmod_supernodal_f64_create() }, positions: None }
+    }
+}
+
+#[cfg(feature = "cholmod-gpl")]
+impl Drop for SparseCholmodSupernodal {
+    fn drop(&mut self) { unsafe { eigen_cholmod_supernodal_f64_destroy(self.handle); } }
+}
+
+#[cfg(feature = "cholmod-gpl")]
+impl LmSolver<f64> for SparseCholmodSupernodal {
+    type Matrix = SparseMatrix<f64>;
+    fn reset(&mut self) {
+        self.positions = None;
+    }
+    fn matrix_nonfinite_count(&self, matrix: &SparseMatrix<f64>) -> usize {
+        matrix.csc.vals.iter().filter(|v| !v.is_finite()).count()
+    }
+
+    fn new_matrix(&self, n: usize) -> SparseMatrix<f64> {
+        SparseMatrix { csc: CscMatrix::empty(n) }
+    }
+    fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], matrix: &mut SparseMatrix<f64>) -> f64 {
+        if let Some(positions) = &self.positions {
+            problem.calc_grad_hessian_sparse_indexed(params, grad, &mut matrix.csc.vals, positions)
+        } else {
+            let n = matrix.csc.n;
+            let mut coo = CooMatrix::new(n);
+            let cost = problem.calc_grad_hessian_sparse(params, grad, &mut coo);
+            let (csc, positions) = coo.to_csc_with_map();
+            self.positions = Some(positions);
+            matrix.csc = csc;
+            cost
+        }
+    }
+    fn extract_diagonal(&self, matrix: &SparseMatrix<f64>, diagonal: &mut [f64]) {
+        for i in 0..diagonal.len() { diagonal[i] = matrix.csc.vals[matrix.csc.diag_pos[i]]; }
+    }
+    fn solve_damped(&mut self, n: usize, matrix: &mut SparseMatrix<f64>, diagonal: &[f64], lambda: f64, grad: &[f64], delta: &mut [f64]) -> bool {
+        for i in 0..n { matrix.csc.vals[matrix.csc.diag_pos[i]] = (1.0 + lambda) * diagonal[i]; }
+        eigen_ffi_solve(eigen_cholmod_supernodal_f64_solve, self.handle, &matrix.csc, grad, delta)
+    }
+}
+
+/// Solve with CHOLMOD's supernodal sparse Cholesky (f64).
+///
+/// **WARNING (license):** the Supernodal module is **GPL-licensed**; a binary
+/// built with the `cholmod-gpl` feature is subject to the GPL.
+#[cfg(feature = "cholmod-gpl")]
+pub fn solve_sparse_cholmod_supernodal(x0: &[f64], problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> LmResult<f64> {
+    lm_solve(x0, &mut SparseCholmodSupernodal::new(), problem, config)
 }
 
 // ---------------------------------------------------------------------------
@@ -3646,6 +3724,40 @@ mod tests {
             }
         }
         let r = solve_sparse_cholmod(&[0.0,0.0], &mut QP,
+            &LmConfig{abs_precision:1e-10, max_iters:100, initial_lambda:0.001, verbose:false, ..Default::default()});
+        assert!((r.x[0]-3.0).abs()<1e-6, "x={}", r.x[0]);
+        assert!((r.x[1]-7.0).abs()<1e-6, "y={}", r.x[1]);
+        assert!(r.end_cost < 1e-10);
+    }
+
+    #[test]
+    #[cfg(feature = "cholmod-gpl")]
+    fn sparse_cholmod_supernodal_quadratic() {
+        struct QP;
+        impl LmProblem<f64> for QP {
+            fn calc_cost(&mut self, x: &[f64]) -> f64 {
+                (x[0]-3.0)*(x[0]-3.0) + (x[1]-7.0)*(x[1]-7.0)
+            }
+            fn calc_grad_hessian_dense(&mut self, x: &[f64], g: &mut [f64], h: &mut [f64]) -> f64 {
+                g[0]=2.0*(x[0]-3.0); g[1]=2.0*(x[1]-7.0);
+                h[0]=2.0; h[1]=0.0; h[2]=0.0; h[3]=2.0;
+                self.calc_cost(x)
+            }
+            fn calc_grad_hessian_band(&mut self,_:&[f64],_:&mut[f64],_:&mut[f64],_:usize)->Result<f64,BandError>{unimplemented!()}
+            fn calc_grad_hessian_sparse_direct(&mut self,_:&[f64],_:&mut[f64],_:&mut CscMatrix<f64>)->f64{unimplemented!()}
+            fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], g: &mut [f64], vals: &mut [f64], pos: &[usize]) -> f64 {
+                g[0]=2.0*(x[0]-3.0); g[1]=2.0*(x[1]-7.0);
+                vals.iter_mut().for_each(|v| *v = 0.0);
+                vals[pos[0]] += 2.0; vals[pos[1]] += 2.0;
+                self.calc_cost(x)
+            }
+            fn calc_grad_hessian_sparse(&mut self, x: &[f64], g: &mut [f64], coo: &mut CooMatrix<f64>) -> f64 {
+                g[0]=2.0*(x[0]-3.0); g[1]=2.0*(x[1]-7.0);
+                coo.clear(); coo.push(0,0,2.0); coo.push(1,1,2.0);
+                self.calc_cost(x)
+            }
+        }
+        let r = solve_sparse_cholmod_supernodal(&[0.0,0.0], &mut QP,
             &LmConfig{abs_precision:1e-10, max_iters:100, initial_lambda:0.001, verbose:false, ..Default::default()});
         assert!((r.x[0]-3.0).abs()<1e-6, "x={}", r.x[0]);
         assert!((r.x[1]-7.0).abs()<1e-6, "y={}", r.x[1]);

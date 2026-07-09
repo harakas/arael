@@ -44,6 +44,9 @@
 //!   - Band Cholesky -- pure Rust O(n*kd^2) for block-tridiagonal systems
 //!   - Sparse Cholesky (faer, pure Rust) -- for general sparse hessians
 //!   - Eigen SimplicialLLT and CHOLMOD (SuiteSparse) -- optional C++ backends via FFI
+//!   - CHOLMOD supernodal -- optional `cholmod-gpl` feature; CHOLMOD's
+//!     Supernodal module is GPL-licensed, so the resulting binary is subject
+//!     to the GPL (the `cholmod` feature binds only the LGPL Simplicial module)
 //!   - LAPACK band -- optional dpbsv/spbsv backend
 //! - **Indexed sparse assembly** -- precomputed position lists for
 //!   zero-overhead hessian assembly after first iteration

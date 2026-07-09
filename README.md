@@ -36,6 +36,7 @@ Solve problems like linear and nonlinear regression, sensor fusion, SLAM, bundle
   - **Band Cholesky** -- pure Rust O(n*kd^2) for block-tridiagonal systems (9.4x faster than dense at 500 poses)
   - **Sparse Cholesky** (faer, pure Rust) -- for general sparse hessians (66x faster than dense at 200 poses with 6% fill)
   - **Eigen SimplicialLLT** and **CHOLMOD** -- optional C++ backends via FFI (`--features eigen`, `--features cholmod`)
+  - **CHOLMOD supernodal** -- optional `--features cholmod-gpl`. **License warning:** CHOLMOD's Supernodal module is GPL (the `cholmod` feature binds only the LGPL Simplicial module), so the resulting binary is subject to the GPL
   - **LAPACK band** -- optional dpbsv/spbsv backend (`--features lapack`)
 - **Indexed sparse assembly** -- precomputed position lists for zero-overhead hessian assembly after first iteration
 - **f32 and f64 precision** -- `#[arael(root)]` for f64, `#[arael(root, f32)]` for f32 throughout

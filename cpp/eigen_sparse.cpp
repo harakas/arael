@@ -77,7 +77,15 @@ static bool llt_solve(
     }
 }
 
-// -- CholmodSimplicialLLT handle (f64 only) --
+// -- CHOLMOD handles (f64 only) --
+//
+// CholmodHandle: Eigen::CholmodSimplicialLLT over CHOLMOD's Simplicial
+// module (LGPL) -- the `cholmod` feature.
+//
+// CholmodSupernodalHandle: Eigen::CholmodSupernodalLLT over CHOLMOD's
+// Supernodal module, which is GPL-LICENSED -- linking it makes the resulting
+// binary subject to the GPL. Guarded by the separate ARAEL_CHOLMOD_GPL
+// define (`cholmod-gpl` feature); enable knowingly.
 
 #ifdef ARAEL_CHOLMOD
 struct CholmodHandle {
@@ -91,6 +99,20 @@ struct CholmodHandle {
     CholmodHandle() : pattern_analyzed(false) {}
 };
 
+#ifdef ARAEL_CHOLMOD_GPL
+struct CholmodSupernodalHandle {
+    using SpMat = Eigen::SparseMatrix<double, Eigen::ColMajor, int>;
+    using Solver = Eigen::CholmodSupernodalLLT<SpMat, Eigen::Upper>;
+
+    Solver solver;
+    bool pattern_analyzed;
+    std::vector<int> col_ptr_i32;
+
+    CholmodSupernodalHandle() : pattern_analyzed(false) {}
+};
+#endif
+
+template <typename Handle>
 static bool cholmod_solve_impl(
     void* handle_ptr,
     int n, int nnz,
@@ -101,8 +123,8 @@ static bool cholmod_solve_impl(
     double* solution)
 {
     try {
-        auto* h = static_cast<CholmodHandle*>(handle_ptr);
-        using SpMat = CholmodHandle::SpMat;
+        auto* h = static_cast<Handle*>(handle_ptr);
+        using SpMat = typename Handle::SpMat;
 
         h->col_ptr_i32.resize(n + 1);
         for (int i = 0; i <= n; i++) {
@@ -163,7 +185,18 @@ void eigen_cholmod_f64_destroy(void* h) { delete static_cast<CholmodHandle*>(h);
 bool eigen_cholmod_f64_solve(void* h, int n, int nnz,
     const int64_t* cp, const int32_t* ri, const double* v,
     const double* rhs, double* sol) {
-    return cholmod_solve_impl(h, n, nnz, cp, ri, v, rhs, sol);
+    return cholmod_solve_impl<CholmodHandle>(h, n, nnz, cp, ri, v, rhs, sol);
+}
+#endif
+
+// f64 CholmodSupernodalLLT -- GPL-licensed CHOLMOD module, see above.
+#ifdef ARAEL_CHOLMOD_GPL
+void* eigen_cholmod_supernodal_f64_create() { return new CholmodSupernodalHandle(); }
+void eigen_cholmod_supernodal_f64_destroy(void* h) { delete static_cast<CholmodSupernodalHandle*>(h); }
+bool eigen_cholmod_supernodal_f64_solve(void* h, int n, int nnz,
+    const int64_t* cp, const int32_t* ri, const double* v,
+    const double* rhs, double* sol) {
+    return cholmod_solve_impl<CholmodSupernodalHandle>(h, n, nnz, cp, ri, v, rhs, sol);
 }
 #endif
 
