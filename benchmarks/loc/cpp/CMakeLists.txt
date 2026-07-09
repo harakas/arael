@@ -21,4 +21,16 @@ target_include_directories(g2o_loc PRIVATE /usr/include/suitesparse)
 target_link_libraries(g2o_loc
     ${G2O_CORE} ${G2O_STUFF} ${G2O_SOLVER_CHOLMOD} ${CHOLMOD} Eigen3::Eigen)
 
-# GTSAM / SymForce loc runners are added here as they land.
+# GTSAM runner: custom NoiseModelFactorN factors with analytic Jacobians.
+# The Ubuntu libgtsam-dev CMake config is broken (its exports reference a
+# non-shipped libCppUnitLite.a), so link libgtsam directly.
+find_library(GTSAM_LIB gtsam)
+find_library(TBB_LIB tbb)
+if(GTSAM_LIB)
+    add_executable(gtsam_loc gtsam_loc.cpp)
+    target_link_libraries(gtsam_loc ${GTSAM_LIB} ${TBB_LIB} Eigen3::Eigen)
+else()
+    message(STATUS "GTSAM not found; skipping gtsam_loc (apt install libgtsam-dev)")
+endif()
+
+# SymForce loc runner is added here when it lands.
