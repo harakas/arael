@@ -236,6 +236,65 @@ over tiny). It was measured with the static-musl binary (the Pi 5 is
 native glibc); musl's simpler malloc inflates the allocation-heavy
 tiny/factrs there by ~30-50%.
 
+## Rotation parameterization: simple vs euler vs quaternion
+
+A standalone binary, `rot_compare`, isolates the cost of arael's three
+SO(3) parameterizations on this scene and solver: `SimpleEulerAngleParam`
+(Euler angles optimized directly), `EulerAngleParam` (an Euler-angle delta
+re-centered onto a matrix reference each step), and `QuaternionParam` (a
+rotation-vector / exp-map delta re-centered onto a unit-quaternion
+reference). Only the pose rotation parameter differs -- all three feed the
+identical GPS / drift / tilt / bearing / odometry factors (the cross-solver
+tables above use `SimpleEulerAngleParam`). Each solve reports where its time
+goes via `LmConfig::gather_timing`; the three run interleaved, median of 30
+rounds.
+
+All three reach the same optimum in the same 3 steps. The breakdown (Apple
+M4 Pro, 60 poses / 240 landmarks, per-iteration mean with the first iteration
+excluded):
+
+| parameterization        | assembly | linear solve | cost eval | advance | total ms | vs simple |
+|-------------------------|---------:|-------------:|----------:|--------:|---------:|----------:|
+| `SimpleEulerAngleParam` |    0.402 |         3.57 |      0.14 |   0.000 |     15.0 |        -- |
+| `EulerAngleParam`       |    0.466 |         3.57 |      0.14 |   0.001 |     15.2 |       +2% |
+| `QuaternionParam`       |    0.552 |         3.57 |      0.14 |   0.001 |     15.5 |       +3% |
+
+(ms/iter, except the last two columns: whole median solve, and total slowdown
+vs simple.) The linear solve -- factorize + back-substitute the damped normal
+equations -- is ~3.57 ms/iter for all three: they produce identical sparsity,
+and it dominates the solve. The parameterization shows up only in **assembly**
+(residual + Jacobian + Hessian): the naive variant is cheapest -- its rotation
+is a division-free polynomial in cached sincos values; `EulerAngleParam` adds
+the reference composition; `QuaternionParam`'s rotation-vector delta is a
+rational expression with the largest Jacobian. Assembly is **+16% (euler) and
++37% (quaternion)** slower per iteration than simple; because the shared linear
+solve dominates, that narrows to roughly **+2% and +3%** on total solve time
+(small enough to sit near the run-to-run noise, unlike the robust assembly
+gap). Re-centering (`advance`) is free for the naive variant (nothing to
+re-center) and a rounding sliver for the other two.
+
+The first iteration is far heavier and identical across all three: it
+establishes the structure -- ~1.5 ms to discover the sparsity pattern in the
+first assembly, ~5.2 ms for the one-time symbolic factorization in the first
+solve -- neither of which a warm re-solve pays.
+
+**Net: `SimpleEulerAngleParam` is fastest and `QuaternionParam` slowest** --
+up to +37% per iteration on the rotation assembly, but only +3% on total time,
+because the shared linear solve dwarfs the assembly gap. The total gap is a
+small-scene effect: the linear solve scales worse than assembly, so at 300
+poses / 1,200 landmarks it reaches ~90 ms/iter and the assembly difference --
+still ~+33% per iteration -- vanishes into under 1% of total (below run-to-run
+noise). The durable statement is the per-iteration assembly cost; choose the
+parameterization for its geometry (gimbal behaviour, large-step isotropy), not
+for these milliseconds.
+
+Run it (a separate binary from the cross-solver `cargo run`):
+
+```sh
+cargo run --release --bin rot_compare              # 60 poses (default), median of 30 rounds
+POSES=300 ROUNDS=10 cargo run --release --bin rot_compare   # larger scene, fewer rounds
+```
+
 ## Running
 
 ```sh

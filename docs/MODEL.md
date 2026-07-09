@@ -25,6 +25,13 @@ treated as a constant.
 | `EulerAngleParam<T>` | 3 | "universal" Euler angles: parameters are a delta composed with a fixed reference rotation, avoiding parameterisation singularities for large-angle motion |
 | `QuaternionParam<T>` | 3 | same 3-angle delta as `EulerAngleParam`, but the reference is a unit quaternion (renormalised on every re-center, so it never drifts off SO(3)) |
 
+The three SO(3) parameterizations reach the same optimum; they differ only in
+residual/Jacobian assembly cost (the linear solve is identical), so
+`SimpleEulerAngleParam` is fastest and `QuaternionParam` slowest -- up to +37%
+per iteration on the rotation assembly, though only a few percent on total
+solve time (less at larger scenes, where the shared linear solve dominates).
+Choose by geometry, not speed. See the [rotation-parameterization comparison](../benchmarks/slam/README.md#rotation-parameterization-simple-vs-euler-vs-quaternion).
+
 ```rust,ignore
 #[arael::model]
 struct Pose {
