@@ -7,6 +7,15 @@ publish = false
 # Standalone workspace, same pattern as benchmarks/pgo and benchmarks/bal.
 [workspace]
 
+[features]
+# Forward arael's optional sparse backends (selected via SLAM_ARAEL_SOLVER=
+# eigen|cholmod|cholmod_gpl; default faer).
+eigen = ["arael/eigen"]
+cholmod = ["arael/cholmod", "eigen"]
+# WARNING: cholmod-gpl links CHOLMOD's GPL-licensed Supernodal module; the
+# resulting binary is subject to the GPL.
+cholmod-gpl = ["arael/cholmod-gpl", "cholmod"]
+
 [dependencies]
 arael = { path = "../.." }
 tiny-solver = "0.18.0"

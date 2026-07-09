@@ -419,9 +419,33 @@ fn cfg(max_iters: usize) -> arael::simple_lm::LmConfig<f64> {
     if nielsen() { cfg.with_driver(arael::simple_lm::NielsenLambdaDriver::default()) } else { cfg }
 }
 
+// SLAM_ARAEL_SOLVER selects the f64 sparse backend: faer (default),
+// eigen (Eigen SimplicialLLT, --features eigen), cholmod (CHOLMOD simplicial,
+// --features cholmod), or cholmod_gpl (CHOLMOD supernodal, --features
+// cholmod-gpl -- GPL-licensed module, see the arael Cargo.toml warning).
 fn solve64(params: &[f64], path: &mut Path, cfg: &arael::simple_lm::LmConfig<f64>)
     -> arael::simple_lm::LmResult<f64> {
-    arael::simple_lm::solve_sparse_faer(params, path, cfg)
+    match std::env::var("SLAM_ARAEL_SOLVER").as_deref() {
+        Ok("eigen") => {
+            #[cfg(feature = "eigen")]
+            return arael::simple_lm::solve_sparse_eigen(params, path, cfg);
+            #[cfg(not(feature = "eigen"))]
+            panic!("SLAM_ARAEL_SOLVER=eigen requires building with --features eigen");
+        }
+        Ok("cholmod") => {
+            #[cfg(feature = "cholmod")]
+            return arael::simple_lm::solve_sparse_cholmod(params, path, cfg);
+            #[cfg(not(feature = "cholmod"))]
+            panic!("SLAM_ARAEL_SOLVER=cholmod requires building with --features cholmod");
+        }
+        Ok("cholmod_gpl") => {
+            #[cfg(feature = "cholmod-gpl")]
+            return arael::simple_lm::solve_sparse_cholmod_supernodal(params, path, cfg);
+            #[cfg(not(feature = "cholmod-gpl"))]
+            panic!("SLAM_ARAEL_SOLVER=cholmod_gpl requires building with --features cholmod-gpl");
+        }
+        _ => arael::simple_lm::solve_sparse_faer(params, path, cfg),
+    }
 }
 
 /// The arael model cost at the initial estimate -- for the harness to
@@ -434,17 +458,20 @@ pub fn initial_cost(scene: &Scene) -> f64 {
     path.calc_cost(&params)
 }
 
-pub fn run(scene: &Scene) -> RunOut {
+type Solve64 = fn(&[f64], &mut Path, &arael::simple_lm::LmConfig<f64>)
+    -> arael::simple_lm::LmResult<f64>;
+
+fn run_with(scene: &Scene, solve: Solve64) -> RunOut {
     let mut path = build(scene);
     let mut params: Vec<f64> = Vec::new();
     path.serialize64(&mut params);
 
     let t0 = std::time::Instant::now();
-    let _ = solve64(&params, &mut path, &cfg(1));
+    let _ = solve(&params, &mut path, &cfg(1));
     let first_iter_ms = t0.elapsed().as_secs_f64() * 1e3;
 
     let t0 = std::time::Instant::now();
-    let result = solve64(&params, &mut path, &cfg(200));
+    let result = solve(&params, &mut path, &cfg(200));
     let solve_ms = t0.elapsed().as_secs_f64() * 1e3;
     path.deserialize64(&result.x);
 
@@ -454,6 +481,17 @@ pub fn run(scene: &Scene) -> RunOut {
         accepted: result.accepted_iterations,
         solution: extract(&path),
     }
+}
+
+pub fn run(scene: &Scene) -> RunOut {
+    run_with(scene, solve64)
+}
+
+/// The CHOLMOD-supernodal row (GPL-licensed module; see the cholmod-gpl
+/// feature warning in the arael Cargo.toml).
+#[cfg(feature = "cholmod-gpl")]
+pub fn run_supernodal(scene: &Scene) -> RunOut {
+    run_with(scene, |p, path, cfg| arael::simple_lm::solve_sparse_cholmod_supernodal(p, path, cfg))
 }
 
 fn cfg32(max_iters: usize, poses: usize) -> arael::simple_lm::LmConfig<f32> {
@@ -490,6 +528,16 @@ pub fn run_capped(scene: &Scene, max_iters: usize) -> Solution {
     let mut params: Vec<f64> = Vec::new();
     path.serialize64(&mut params);
     let result = solve64(&params, &mut path, &cfg(max_iters));
+    path.deserialize64(&result.x);
+    extract(&path)
+}
+
+#[cfg(feature = "cholmod-gpl")]
+pub fn run_supernodal_capped(scene: &Scene, max_iters: usize) -> Solution {
+    let mut path = build(scene);
+    let mut params: Vec<f64> = Vec::new();
+    path.serialize64(&mut params);
+    let result = arael::simple_lm::solve_sparse_cholmod_supernodal(&params, &mut path, &cfg(max_iters));
     path.deserialize64(&result.x);
     extract(&path)
 }

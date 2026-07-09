@@ -76,6 +76,8 @@ fn main() {
             .and_then(|v| v.parse().ok()).unwrap_or(200);
         match which.as_str() {
             "arael_f64" => { std::hint::black_box(arael_runner::run_capped(&scene, iters)); }
+            #[cfg(feature = "cholmod-gpl")]
+            "arael_gpl" => { std::hint::black_box(arael_runner::run_supernodal_capped(&scene, iters)); }
             "arael_f32" => { std::hint::black_box(arael_runner::run_f32_capped(&scene, iters)); }
             "tiny" => {
                 std::env::set_var("TINY_MAXITER", iters.to_string());
@@ -159,6 +161,12 @@ fn main() {
     for _ in 0..rounds {
         let a = arael_runner::run(&scene);
         record("arael LM f64", a.solve_ms, a.first_iter_ms, a.iterations, Some(a.accepted), a.solution, &mut cells);
+        #[cfg(feature = "cholmod-gpl")]
+        {
+            let ag = arael_runner::run_supernodal(&scene);
+            record("arael LM f64 cholmod-gpl", ag.solve_ms, ag.first_iter_ms, ag.iterations,
+                Some(ag.accepted), ag.solution, &mut cells);
+        }
         let a32 = arael_runner::run_f32(&scene);
         record("arael LM f32", a32.solve_ms, a32.first_iter_ms, a32.iterations, Some(a32.accepted), a32.solution, &mut cells);
         if !skip_tiny {
@@ -232,6 +240,7 @@ fn main() {
     let mem_key = |label: &str| -> Option<&'static str> {
         match label {
             "arael LM f64" => Some("arael_f64"),
+            "arael LM f64 cholmod-gpl" => Some("arael_gpl"),
             "arael LM f32" => Some("arael_f32"),
             "tiny-solver LM" => Some("tiny"),
             "factrs LM" => Some("factrs"),
@@ -244,14 +253,14 @@ fn main() {
         else { 0.0 }
     }).collect();
 
-    println!("\n{:<16} {:>10} {:>9} {:>10} {:>12} {:>10} {:>16}",
+    println!("\n{:<30} {:>10} {:>9} {:>10} {:>12} {:>10} {:>16}",
         "system", "total ms", "iters", "ms/iter", "1st-iter ms", "peak MB", "final cost");
     for (i, c) in cells.iter().enumerate() {
         let iters = match c.4 { Some(a) => format!("{}({})", a, c.3), None => format!("{}", c.3) };
         let rmse = pose_rmse(&c.5, best_sol);
         let ok = (costs[i] - best) / best < 1e-2 && rmse < 0.05;
         let mem = if mems[i] > 0.0 { format!("{:.1}", mems[i]) } else { "-".to_string() };
-        println!("{:<16} {:>10.1} {:>9} {:>10.2} {:>12.1} {:>10} {:>16.4}{}",
+        println!("{:<30} {:>10.1} {:>9} {:>10.2} {:>12.1} {:>10} {:>16.4}{}",
             c.0, c.1, iters, c.1 / c.3.max(1) as f64, c.2, mem, costs[i],
             if ok { String::new() } else { format!("  <- off optimum (RMSE {:.3} m)", rmse) });
     }

@@ -26,6 +26,7 @@ version = "0.6.3"
 dependencies = [
  "arael-macros",
  "arael-sym",
+ "cc",
  "faer 0.24.4",
  "getrandom",
  "inventory",

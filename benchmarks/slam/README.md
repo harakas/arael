@@ -301,6 +301,30 @@ ROUNDS=1000 cargo run --release --bin rot_compare           # 60 poses, median o
 POSES=300 ROUNDS=10 cargo run --release --bin rot_compare   # larger scene, fewer rounds
 ```
 
+## arael sparse-backend comparison
+
+The default arael rows use faer. Building with `--features cholmod-gpl` adds
+an `arael LM f64 cholmod-gpl` row (CHOLMOD supernodal) to the output next to
+the faer row. `SLAM_ARAEL_SOLVER` additionally swaps the default row's f64
+backend (each needs its cargo feature). Measured at 300 poses (5,400
+parameters, 770k Hessian nonzeros), same optimum and iteration count on every
+backend:
+
+| backend (`SLAM_ARAEL_SOLVER=`)        | feature        | ms/iter |
+|---------------------------------------|----------------|--------:|
+| CHOLMOD supernodal (`cholmod_gpl`)    | `cholmod-gpl`  |     ~65 |
+| faer (default)                        | --             |    ~116 |
+| Eigen SimplicialLLT (`eigen`)         | `eigen`        |    ~411 |
+| CHOLMOD simplicial (`cholmod`)        | `cholmod`      |    ~420 |
+
+**License warning:** CHOLMOD's Supernodal module is GPL -- building with
+`cholmod-gpl` makes the binary subject to the GPL (the `cholmod` feature
+binds only the LGPL Simplicial module). That is why it is a separate,
+explicit opt-in and not the default.
+
+`G2O_STATS=1` prints g2o's own per-iteration timing breakdown (assembly,
+Schur complement, factorization) for comparison.
+
 ## Running
 
 ```sh
@@ -319,6 +343,7 @@ GTSAM_VERIFY_JAC=1 cpp/build/gtsam_slam scene.txt lm out.txt # check GTSAM Jacob
 ```
 
 Env knobs: `SLAM_POSES`, `ROUNDS`, `SLAM_SKIP_TINY`, `SLAM_NO_MEM`,
+`SLAM_ARAEL_SOLVER=eigen|cholmod|cholmod_gpl`,
 `SLAM_DRIVER=nielsen`, `SLAM_LAMBDA0`, `CERES_SOLVERS=<comma list>`,
 `CERES_RADIUS0`, `TINY_MAXITER`, `TINY_RADIUS0`, `SYMFORCE_LAMBDA0`,
 `SYMFORCE_MAXITER`, `G2O_LAMBDA_INIT`, `G2O_GAIN`, `G2O_VERIFY_JAC`,
