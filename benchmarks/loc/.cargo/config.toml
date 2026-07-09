@@ -1,0 +1,33 @@
+# Cross-compile for a Raspberry Pi Zero / Zero W / Pi 1 (BCM2835,
+# ARM1176JZF-S = ARMv6 + VFPv2 hardfloat, single core). We build a
+# static musl binary so there is no glibc coupling: Debian's armhf
+# toolchain targets ARMv7 (movw/movt etc.) and would fault on ARM1176,
+# and Raspbian's glibc is a separate ARMv6 build -- a self-contained
+# static binary sidesteps both. The bundled rust-lld links it with no
+# external cross toolchain.
+#
+#   rustup target add arm-unknown-linux-musleabihf
+#   cargo build --release --target arm-unknown-linux-musleabihf
+#
+# The C++ solver binaries (Ceres/SymForce/g2o/GTSAM) are not built here;
+# on the device the harness detects they are missing and runs the Rust
+# solvers only (arael f64/f32, tiny-solver, factrs).
+[target.arm-unknown-linux-musleabihf]
+rustflags = [
+    "-C", "target-cpu=arm1176jzf-s",
+    "-C", "link-self-contained=yes",
+    "-C", "linker=rust-lld",
+    "-C", "linker-flavor=ld.lld",
+]
+
+# aarch64 static musl for a Raspberry Pi 5 (Cortex-A76) or any 64-bit ARM
+# Linux -- dependency-free, runs on Raspberry Pi OS as-is. Same
+# self-contained rust-lld approach as the ARMv6 target above; no
+# target-cpu so the binary stays portable across aarch64 boards (add
+# -C target-cpu=cortex-a76 for a Pi-5-tuned build).
+[target.aarch64-unknown-linux-musl]
+rustflags = [
+    "-C", "link-self-contained=yes",
+    "-C", "linker=rust-lld",
+    "-C", "linker-flavor=ld.lld",
+]

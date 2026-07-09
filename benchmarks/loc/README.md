@@ -83,6 +83,40 @@ metric.** `LOC_POSES=N` sets the pose count (landmarks scale as `4N`).
 | factrs LM                    |   36.68 |        49.2 |    64.4 | 25269.0409 |
 | tiny-solver LM               |  205.29 |       223.7 |    69.3 | 25269.0409 |
 
+### Raspberry Pi 5 (Cortex-A76, single core, 60 poses)
+
+The full field on a Raspberry Pi 5. The ordering is unchanged -- arael leads
+~4x, everything is ~3x slower than the dev machine as expected for the smaller
+core, and all 11 rows still reach the common optimum.
+
+| system                       | ms/iter | 1st-iter ms | peak MB | final cost |
+|------------------------------|--------:|------------:|--------:|-----------:|
+| **arael LM f64 (band)**      |  **1.28** |       1.3 |     4.5 |  3274.6025 |
+| **arael LM f32 (band)**      |  **1.35** |       1.4 |     3.9 |  3274.6025 |
+| symforce LM f32              |    4.99 |        17.7 |    16.9 |  3274.6025 |
+| ceres sparse_normal_cholesky |    5.16 |        10.2 |    11.1 |  3274.6025 |
+| ceres iterative_schur        |    5.57 |         9.8 |    10.6 |  3274.6025 |
+| g2o LM                       |    5.58 |         8.4 |    10.0 |  3274.6025 |
+| ceres sparse_schur           |    5.65 |        10.6 |    11.0 |  3274.6025 |
+| symforce LM f64              |    5.73 |        20.1 |    19.2 |  3274.6025 |
+| gtsam LM                     |   15.61 |        16.5 |    15.4 |  3274.6025 |
+| factrs LM                    |   18.41 |        23.8 |    11.5 |  3274.6025 |
+| tiny-solver LM               |   89.13 |        97.2 |    11.4 |  3274.6025 |
+
+### Raspberry Pi Zero (ARM1176, ARMv6, single core, 100 poses)
+
+The cross-compiled static-musl binary on a real Pi Zero, arael + factrs only --
+the C++ solvers are not cross-built, and tiny-solver is omitted as too slow. arael dominates by ~18x, and the initial cost still matches
+the reference (5e-15), confirming the ARMv6 build is bit-faithful. Note **f32 is
+markedly faster than f64 here** -- the ARM1176 VFPv2 FPU favors single precision
+-- the reverse of the Cortex-A76 above.
+
+| system              | ms/iter | 1st-iter ms | peak MB | final cost |
+|---------------------|--------:|------------:|--------:|-----------:|
+| **arael LM f32 (band)** |  **47.74** |      48.4 |     2.9 |  6050.6032 |
+| **arael LM f64 (band)** |  **65.03** |      65.9 |     3.9 |  6050.6032 |
+| factrs LM               |  873.33 |     1069.5 |    11.5 |  6050.6032 |
+
 ## Analysis
 
 arael leads by **3-4x per iteration** at both sizes -- 0.38 vs the fastest
@@ -133,6 +167,25 @@ cmake -B cpp/build cpp && cmake --build cpp/build   # Ceres, g2o, GTSAM
 
 Verification (never in the timed solve): `G2O_VERIFY_JAC=1` and
 `GTSAM_VERIFY_JAC=1` check each analytic Jacobian against finite differences.
+
+### Cross-compiling for Raspberry Pi
+
+`.cargo/config.toml` defines two dependency-free static-musl targets, linked by
+the bundled `rust-lld` -- no external cross toolchain. The C++ solvers are not
+built; on the device the harness detects they are missing and runs the Rust
+solvers only (arael f64/f32, tiny-solver, factrs).
+
+```sh
+# Pi Zero / Zero W / Pi 1 (BCM2835, ARM1176 = ARMv6)
+rustup target add arm-unknown-linux-musleabihf
+cargo build --release --target arm-unknown-linux-musleabihf
+
+# Pi 5 / any aarch64 board
+rustup target add aarch64-unknown-linux-musl
+cargo build --release --target aarch64-unknown-linux-musl
+```
+
+Copy `target/<triple>/release/loc-bench` to the device and run it there.
 
 ### SymForce
 
