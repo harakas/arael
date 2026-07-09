@@ -819,6 +819,10 @@ pub struct QuaternionParam<T: crate::utils::Float> {
     #[doc(hidden)] pub delta: vect3<T>,
     #[doc(hidden)] pub sincos: (vect3<T>, vect3<T>),
     #[doc(hidden)] pub rotation_matrix: matrix3<T>,
+    /// Precomputed d(rotation_matrix)/d(delta.{x,y,z}) -- the pose rotation
+    /// Jacobian, so constraints that differentiate through the retraction read
+    /// it once per pose instead of recomputing it per observation.
+    #[doc(hidden)] pub rotation_matrix_deriv: [matrix3<T>; 3],
     #[doc(hidden)] pub delta_sincos: (vect3<T>, vect3<T>),
 }
 
@@ -833,6 +837,9 @@ impl<T: crate::utils::Float> Default for QuaternionParam<T> {
             delta: vect3::<T>::default(),
             sincos: (vect3::<T>::default(), vect3::<T>::default()),
             rotation_matrix: matrix3::<T>::identity(),
+            rotation_matrix_deriv: [matrix3::<T>::identity(),
+                                    matrix3::<T>::identity(),
+                                    matrix3::<T>::identity()],
             delta_sincos: (vect3::<T>::default(), vect3::<T>::default()),
         }
     }
@@ -878,6 +885,13 @@ impl<T: crate::utils::Float> QuaternionParam<T> {
     pub fn __precompute(&mut self) {
         let dea_rot = matrix3::<T>::from_rotation_vector_small(self.delta);
         self.rotation_matrix = self.ref_rotation * dea_rot;
+        // Compose the retraction's Jacobian with the reference: the composed
+        // rotation is linear in the retraction, so d(R_ref*R(d))/dd.k =
+        // R_ref * dR(d)/dd.k. Read once per pose by the constraint Jacobian.
+        let d = matrix3::<T>::from_rotation_vector_small_deriv(self.delta);
+        self.rotation_matrix_deriv = [self.ref_rotation * d[0],
+                                      self.ref_rotation * d[1],
+                                      self.ref_rotation * d[2]];
         self.work = self.rotation_matrix.get_euler_angles();
         self.sincos = self.work.sincos();
         self.delta_sincos = self.delta.sincos();

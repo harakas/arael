@@ -292,6 +292,38 @@ impl<T: Float> matrix3<T>
         )
     }
 
+    /// Derivatives of [`from_rotation_vector_small`] w.r.t. each component of
+    /// `v`: returns `[dR/dv.x, dR/dv.y, dR/dv.z]`. With `x,y,z = v/2` and
+    /// `s = 2/(1 + x^2+y^2+z^2)`, the only non-trivial part is `ds/d(v.k) =
+    /// -half * k_half * s^2` (each entry is `+-s*P` with polynomial `P`).
+    /// Used to precompute the pose rotation Jacobian for constraints that
+    /// differentiate through the retraction.
+    pub fn from_rotation_vector_small_deriv(v: vect3<T>) -> [matrix3<T>; 3] {
+        let half = T::half();
+        let two = T::two();
+        let (x, y, z) = (v.x * half, v.y * half, v.z * half);
+        let (x2, y2, z2) = (x * x, y * y, z * z);
+        let s = two / (T::one() + x2 + y2 + z2);
+        let s2 = s * s;
+        let n = |e: T| e * half; // d/d(v.k) = half * d/d(k_half)
+        let dx = matrix3::<T>::from_rows(
+            vect3::<T>::new(n(x*s2*(y2+z2)),           n(-x*s2*(x*y-z) + s*y),     n(-x*s2*(x*z+y) + s*z)),
+            vect3::<T>::new(n(-x*s2*(x*y+z) + s*y),    n(x*s2*(x2+z2) - two*s*x),  n(-x*s2*(y*z-x) - s)),
+            vect3::<T>::new(n(-x*s2*(x*z-y) + s*z),    n(-x*s2*(y*z+x) + s),       n(x*s2*(x2+y2) - two*s*x)),
+        );
+        let dy = matrix3::<T>::from_rows(
+            vect3::<T>::new(n(y*s2*(y2+z2) - two*s*y), n(-y*s2*(x*y-z) + s*x),     n(-y*s2*(x*z+y) + s)),
+            vect3::<T>::new(n(-y*s2*(x*y+z) + s*x),    n(y*s2*(x2+z2)),            n(-y*s2*(y*z-x) + s*z)),
+            vect3::<T>::new(n(-y*s2*(x*z-y) - s),      n(-y*s2*(y*z+x) + s*z),     n(y*s2*(x2+y2) - two*s*y)),
+        );
+        let dz = matrix3::<T>::from_rows(
+            vect3::<T>::new(n(z*s2*(y2+z2) - two*s*z), n(-z*s2*(x*y-z) - s),       n(-z*s2*(x*z+y) + s*x)),
+            vect3::<T>::new(n(-z*s2*(x*y+z) + s),      n(z*s2*(x2+z2) - two*s*z),  n(-z*s2*(y*z-x) + s*y)),
+            vect3::<T>::new(n(-z*s2*(x*z-y) + s*x),    n(-z*s2*(y*z+x) + s*y),     n(z*s2*(x2+y2))),
+        );
+        [dx, dy, dz]
+    }
+
     /// Extracts Euler angles (x=roll, y=pitch, z=yaw) from a rotation matrix.
     /// At and near gimbal lock (|pitch| within ~sqrt(eps) of pi/2) only
     /// roll -+ yaw is determined; the roll = 0 convention is used and yaw
@@ -960,6 +992,32 @@ mod tests {
             assert!((m * m.transpose()).similar(matrix3d::identity()),
                 "not orthonormal at v={:?}", v);
             assert!((m.det() - 1.0).abs() < 1e-12, "det != 1 at v={:?}", v);
+        }
+    }
+
+    #[test]
+    fn from_rotation_vector_small_deriv_matches_finite_diff() {
+        let eps = 1e-7;
+        let get = |m: &matrix3d, i: usize, j: usize| match (i, j) {
+            (0,0)=>m.rows[0].x,(0,1)=>m.rows[0].y,(0,2)=>m.rows[0].z,
+            (1,0)=>m.rows[1].x,(1,1)=>m.rows[1].y,(1,2)=>m.rows[1].z,
+            (2,0)=>m.rows[2].x,(2,1)=>m.rows[2].y,_=>m.rows[2].z,
+        };
+        for v in [vect3d::new(0.0,0.0,0.0), vect3d::new(0.3,-0.5,0.2),
+                  vect3d::new(1.2,0.0,-0.4), vect3d::new(-0.7,0.9,0.4)] {
+            let d = matrix3d::from_rotation_vector_small_deriv(v);
+            let r0 = matrix3d::from_rotation_vector_small(v);
+            for k in 0..3 {
+                let mut vp = v;
+                match k { 0=>vp.x+=eps, 1=>vp.y+=eps, _=>vp.z+=eps }
+                let rp = matrix3d::from_rotation_vector_small(vp);
+                for i in 0..3 { for j in 0..3 {
+                    let fd = (get(&rp,i,j) - get(&r0,i,j)) / eps;
+                    assert!((get(&d[k],i,j) - fd).abs() < 1e-4,
+                        "d/dv[{k}] [{i}][{j}] at v={v:?}: analytic {} vs fd {}",
+                        get(&d[k],i,j), fd);
+                }}
+            }
         }
     }
 }
