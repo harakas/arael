@@ -286,7 +286,10 @@ poses / 1,200 landmarks it reaches ~90 ms/iter and the assembly difference --
 still ~+33% per iteration -- vanishes into under 1% of total (below run-to-run
 noise). The durable statement is the per-iteration assembly cost; choose the
 parameterization for its geometry (gimbal behaviour, large-step isotropy), not
-for these milliseconds.
+for these milliseconds. The flip side -- how that geometry drives the
+*iteration count* when rotations are large and the initialization is bad -- is
+measured in [benchmarks/aerobatics](../aerobatics/README.md), where the ranking
+inverts (quaternion fewest iterations, naive euler the most).
 
 Run it (a separate binary from the cross-solver `cargo run`):
 

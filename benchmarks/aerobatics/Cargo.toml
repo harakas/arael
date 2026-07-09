@@ -1,0 +1,14 @@
+[package]
+name = "aerobatics-bench"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+# Standalone workspace, same pattern as benchmarks/slam, pgo, bal.
+[workspace]
+
+[dependencies]
+arael = { path = "../.." }
+
+[profile.release]
+debug = false
