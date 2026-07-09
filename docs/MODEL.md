@@ -26,11 +26,12 @@ treated as a constant.
 | `QuaternionParam<T>` | 3 | same 3-angle delta as `EulerAngleParam`, but the reference is a unit quaternion (renormalised on every re-center, so it never drifts off SO(3)) |
 
 The three SO(3) parameterizations reach the same optimum; they differ only in
-residual/Jacobian assembly cost (the linear solve is identical), so
-`SimpleEulerAngleParam` is fastest and `QuaternionParam` slowest -- up to +37%
-per iteration on the rotation assembly, though only a few percent on total
-solve time (less at larger scenes, where the shared linear solve dominates).
-Choose by geometry, not speed. See the [rotation-parameterization comparison](../benchmarks/slam/README.md#rotation-parameterization-simple-vs-euler-vs-quaternion).
+residual/Jacobian assembly cost (the linear solve is identical). Each pose
+precomputes its rotation matrix and rotation Jacobian once per update, so when
+many observations share a pose the exact parameterizations cost almost the same
+as the naive one -- on the bearing-dense slam benchmark all three land within
+~3% per iteration on assembly and ~0.3% on total solve time. Choose by geometry,
+not speed. See the [rotation-parameterization comparison](../benchmarks/slam/README.md#rotation-parameterization-simple-vs-euler-vs-quaternion).
 
 ```rust,ignore
 #[arael::model]

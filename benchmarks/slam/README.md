@@ -246,7 +246,7 @@ rotation-vector / exp-map delta re-centered onto a unit-quaternion
 reference). Only the pose rotation parameter differs -- all three feed the
 identical GPS / drift / tilt / bearing / odometry factors (the cross-solver
 tables above use `SimpleEulerAngleParam`). Each solve reports where its time
-goes via `LmConfig::gather_timing`; the three run interleaved, median of 30
+goes via `LmConfig::gather_timing`; the three run interleaved, median of 1000
 rounds.
 
 All three reach the same optimum in the same 3 steps. The breakdown (Apple
@@ -255,46 +255,49 @@ excluded):
 
 | parameterization        | assembly | linear solve | cost eval | advance | total ms | vs simple |
 |-------------------------|---------:|-------------:|----------:|--------:|---------:|----------:|
-| `SimpleEulerAngleParam` |    0.402 |         3.57 |      0.14 |   0.000 |     15.0 |        -- |
-| `EulerAngleParam`       |    0.466 |         3.57 |      0.14 |   0.001 |     15.2 |       +2% |
-| `QuaternionParam`       |    0.552 |         3.57 |      0.14 |   0.001 |     15.5 |       +3% |
+| `SimpleEulerAngleParam` |    0.395 |         3.53 |      0.13 |   0.000 |    15.56 |        -- |
+| `EulerAngleParam`       |    0.399 |         3.53 |      0.14 |   0.001 |    15.60 |     +0.3% |
+| `QuaternionParam`       |    0.408 |         3.53 |      0.14 |   0.001 |    15.61 |     +0.3% |
 
 (ms/iter, except the last two columns: whole median solve, and total slowdown
 vs simple.) The linear solve -- factorize + back-substitute the damped normal
-equations -- is ~3.57 ms/iter for all three: they produce identical sparsity,
+equations -- is ~3.53 ms/iter for all three: they produce identical sparsity,
 and it dominates the solve. The parameterization shows up only in **assembly**
-(residual + Jacobian + Hessian): the naive variant is cheapest -- its rotation
-is a division-free polynomial in cached sincos values; `EulerAngleParam` adds
-the reference composition; `QuaternionParam`'s rotation-vector delta is a
-rational expression with the largest Jacobian. Assembly is **+16% (euler) and
-+37% (quaternion)** slower per iteration than simple; because the shared linear
-solve dominates, that narrows to roughly **+2% and +3%** on total solve time
-(small enough to sit near the run-to-run noise, unlike the robust assembly
-gap). Re-centering (`advance`) is free for the naive variant (nothing to
-re-center) and a rounding sliver for the other two.
+(residual + Jacobian + Hessian). Each pose computes its rotation matrix and its
+rotation Jacobian (dR/dparam) once, when its parameters update, and the
+per-bearing assembly reads both rather than rebuilding them; with ~90 bearings
+per pose that spreads the parameterization-specific cost -- the naive variant's
+cached-sincos polynomial, `EulerAngleParam`'s reference composition,
+`QuaternionParam`'s rational rotation-vector Jacobian -- across all of a pose's
+observations. Assembly is then only **+1% (euler) and +3% (quaternion)** slower
+per iteration than simple, and the shared linear solve shrinks that to **+0.3%**
+on total solve time, at the run-to-run noise floor. Re-centering (`advance`) is
+free for the naive variant (nothing to re-center) and a rounding sliver for the
+other two.
 
 The first iteration is far heavier and identical across all three: it
-establishes the structure -- ~1.5 ms to discover the sparsity pattern in the
-first assembly, ~5.2 ms for the one-time symbolic factorization in the first
-solve -- neither of which a warm re-solve pays.
+establishes the structure -- the first assembly runs ~2.2 ms (one-time
+sparsity-pattern discovery over the ~0.4 ms steady state) and the first solve
+runs ~5.1 ms (the one-time symbolic factorization over the ~3.5 ms steady
+numeric solve) -- neither of which a warm re-solve pays.
 
-**Net: `SimpleEulerAngleParam` is fastest and `QuaternionParam` slowest** --
-up to +37% per iteration on the rotation assembly, but only +3% on total time,
-because the shared linear solve dwarfs the assembly gap. The total gap is a
-small-scene effect: the linear solve scales worse than assembly, so at 300
-poses / 1,200 landmarks it reaches ~90 ms/iter and the assembly difference --
-still ~+33% per iteration -- vanishes into under 1% of total (below run-to-run
-noise). The durable statement is the per-iteration assembly cost; choose the
-parameterization for its geometry (gimbal behaviour, large-step isotropy), not
-for these milliseconds. The flip side -- how that geometry drives the
-*iteration count* when rotations are large and the initialization is bad -- is
-measured in [benchmarks/aerobatics](../aerobatics/README.md), where the ranking
-inverts (quaternion fewest iterations, naive euler the most).
+**Net: the three parameterizations sit within ~3% per iteration on assembly and
+~0.3% on total solve time.** The per-pose rotation-Jacobian precompute keeps the
+exact SO(3) parameterizations (euler delta, quaternion) essentially as cheap per
+step as the naive angles, so per-iteration cost is not a reason to prefer one
+over another. Because the linear solve scales worse than assembly, at
+larger scenes it dominates total time even more completely and the small
+assembly gap disappears into it. Choose the parameterization for its geometry
+(gimbal behaviour, large-step isotropy), not for these milliseconds. The flip
+side -- how that geometry drives the *iteration count* when rotations are large
+and the initialization is bad -- is measured in
+[benchmarks/aerobatics](../aerobatics/README.md), where the ranking inverts
+(quaternion fewest iterations, naive euler the most).
 
 Run it (a separate binary from the cross-solver `cargo run`):
 
 ```sh
-cargo run --release --bin rot_compare              # 60 poses (default), median of 30 rounds
+ROUNDS=1000 cargo run --release --bin rot_compare           # 60 poses, median of 1000 rounds (table above)
 POSES=300 ROUNDS=10 cargo run --release --bin rot_compare   # larger scene, fewer rounds
 ```
 

@@ -77,17 +77,24 @@ estimator never hands the solver a problem shaped like this:
   of steps.
 
 Under those normal conditions the parameterizations are interchangeable on
-conditioning, and the choice comes down to per-iteration cost -- where the
-naive `SimpleEulerAngleParam` is the cheapest (that is exactly what the
+conditioning, so the choice comes down to cost. Each pose precomputes its
+rotation Jacobian once per update, so how much the exact parameterizations cost
+depends on how many constraints amortize it: in a bearing-dense problem the
 [slam benchmark](../slam/README.md#rotation-parameterization-simple-vs-euler-vs-quaternion)
-shows: all three converge in 3 steps, and simple is fastest). This benchmark
-measures the other axis -- robustness when the initialization is bad and the
-rotations are large -- and there the exp-map delta's isotropy earns its keep.
+spreads it over ~90 bearings per pose and all three land within ~3% on assembly
+and ~0.3% on total solve time; in a sparse pose graph like this one (~1
+constraint per pose) it barely amortizes, so the table above keeps a per-iteration
+edge for the naive variant. Either way this benchmark measures the other axis --
+robustness when the initialization is bad and the rotations are large -- and
+there the exp-map delta's isotropy earns its keep.
 
 The honest summary: pick the parameterization for the regime you actually
-operate in. Well-initialized and incremental (almost always) -> the cheap one.
-Large uncontrolled rotations from a cold start (rare, and usually a sign the
-front-end should be fixed instead) -> the quaternion.
+operate in. Well-initialized and incremental (almost always) -> any of them;
+per-iteration cost is close (a wash once bearings amortize the precompute), so
+favor simplicity with the naive `SimpleEulerAngleParam`. Large uncontrolled
+rotations from a cold start (rare, and usually a sign the front-end should be
+fixed instead) -> the quaternion, whose far lower iteration count dominates
+total time.
 
 ## Running
 
