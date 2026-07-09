@@ -18,3 +18,4 @@
  * arael-sketch: We have color scheme in colors.rs -- so don't hardcode colors but add/reuse entries.
  * There is no need to add #[arael(skip)] on every non-parameter bool, f32/f64, String, etc. They just clutter the code and reduce readability.
  * When modifying arael-sym with new features and docs -- also update docs/SYM.md
+ * When adding/changing features that might have performance impacts, run before and after benchmarks to compare, reject regressions in performance, and flag improvements.
