@@ -35,10 +35,11 @@ saturation manufactures spurious minima different solvers fall into).
 - **arael** (f64 + f32) -- band Cholesky (`kd=11`); `LOC_ARAEL_SOLVER=faer`
   switches to the general sparse solver for comparison.
 - **tiny-solver**, **factrs** -- Rust, dual-number autodiff, their own LM.
-- **Ceres** (3 linear solvers), **g2o**, **GTSAM** -- C++, custom factors with
-  analytic Jacobians (g2o/GTSAM) or autodiff (Ceres), each cross-checked to
-  the reference cost and, for g2o/GTSAM, Jacobian-verified against finite
-  differences (`G2O_VERIFY_JAC=1`, `GTSAM_VERIFY_JAC=1`).
+- **Ceres** (3 linear solvers), **g2o**, **GTSAM**, **SymForce** (f64 + f32) --
+  C++: analytic Jacobians (g2o/GTSAM), autodiff (Ceres), or code-generated
+  linearization (SymForce, from `symforce_gen.py`). Each is cross-checked to
+  the reference cost; g2o/GTSAM are additionally Jacobian-verified against
+  finite differences (`G2O_VERIFY_JAC=1`, `GTSAM_VERIFY_JAC=1`).
 
 The bearing factor is **single-variable** (the fixed landmark carries no
 derivatives): a remote block on the pose in arael, a unary edge/factor in
@@ -54,40 +55,47 @@ metric.** `LOC_POSES=N` sets the pose count (landmarks scale as `4N`).
 
 | system                       | ms/iter | 1st-iter ms | peak MB | final cost |
 |------------------------------|--------:|------------:|--------:|-----------:|
-| **arael LM f64 (band)**      |  **0.37** |       0.4 |     4.6 |  3274.6025 |
-| **arael LM f32 (band)**      |  **0.37** |       0.4 |     4.0 |  3274.6025 |
-| g2o LM                       |    1.57 |         2.2 |    11.2 |  3274.6025 |
-| ceres sparse_normal_cholesky |    1.51 |         3.1 |    13.0 |  3274.6025 |
-| ceres sparse_schur           |    1.58 |         3.1 |    12.9 |  3274.6025 |
-| ceres iterative_schur        |    1.68 |         2.9 |    12.1 |  3274.6025 |
-| gtsam LM                     |    3.51 |         4.4 |    14.6 |  3274.6025 |
-| factrs LM                    |    4.72 |         6.3 |    11.4 |  3274.6025 |
-| tiny-solver LM               |   23.14 |        25.4 |    12.4 |  3274.6025 |
+| **arael LM f64 (band)**      |  **0.39** |       0.4 |     4.6 |  3274.6025 |
+| **arael LM f32 (band)**      |  **0.38** |       0.4 |     4.0 |  3274.6025 |
+| symforce LM f32              |    1.17 |         4.9 |    17.0 |  3274.6025 |
+| symforce LM f64              |    1.33 |         5.5 |    19.3 |  3274.6025 |
+| ceres sparse_normal_cholesky |    1.50 |         3.2 |    12.9 |  3274.6025 |
+| g2o LM                       |    1.58 |         2.2 |    11.2 |  3274.6025 |
+| ceres sparse_schur           |    1.62 |         3.1 |    12.9 |  3274.6025 |
+| ceres iterative_schur        |    1.70 |         2.9 |    12.1 |  3274.6025 |
+| gtsam LM                     |    3.60 |         4.4 |    14.6 |  3274.6025 |
+| factrs LM                    |    4.62 |         6.4 |    11.4 |  3274.6025 |
+| tiny-solver LM               |   23.46 |        26.1 |    12.2 |  3274.6025 |
 
 ### 300 poses (1,200 landmarks, 41,323 observations, 1,800 parameters)
 
 | system                       | ms/iter | 1st-iter ms | peak MB | final cost |
 |------------------------------|--------:|------------:|--------:|-----------:|
-| **arael LM f64 (band)**      |  **3.05** |       3.0 |    13.3 | 25269.0409 |
-| **arael LM f32 (band)**      |  **3.00** |       3.0 |     9.6 | 25269.0410 |
-| ceres sparse_normal_cholesky |   12.13 |        23.9 |    42.0 | 25269.0409 |
-| g2o LM                       |   13.10 |        19.1 |    37.8 | 25269.0409 |
-| ceres iterative_schur        |   13.22 |        22.6 |    36.6 | 25269.0409 |
-| gtsam LM                     |   31.83 |        34.6 |    58.8 | 25269.0409 |
-| factrs LM                    |   35.34 |        46.3 |    64.4 | 25269.0409 |
-| tiny-solver LM               |  187.75 |       211.0 |    67.6 | 25269.0409 |
+| **arael LM f64 (band)**      |  **3.12** |       3.1 |    13.3 | 25269.0409 |
+| **arael LM f32 (band)**      |  **3.04** |       3.0 |     9.6 | 25269.0410 |
+| symforce LM f32              |   10.65 |        40.9 |    90.1 | 25269.0410 |
+| symforce LM f64              |   11.67 |        46.9 |   104.3 | 25269.0409 |
+| ceres sparse_normal_cholesky |   12.18 |        24.5 |    42.0 | 25269.0409 |
+| ceres sparse_schur           |   13.05 |        24.6 |    37.2 | 25269.0409 |
+| g2o LM                       |   13.09 |        18.9 |    37.8 | 25269.0409 |
+| ceres iterative_schur        |   13.49 |        22.8 |    36.6 | 25269.0409 |
+| gtsam LM                     |   31.71 |        34.2 |    58.8 | 25269.0409 |
+| factrs LM                    |   36.68 |        49.2 |    64.4 | 25269.0409 |
+| tiny-solver LM               |  205.29 |       223.7 |    69.3 | 25269.0409 |
 
 ## Analysis
 
 **The band solver is the whole story.** On a block-tridiagonal system band
 Cholesky is O(n) in the pose count, while the general sparse and
 Schur-complement solvers pay for a fill-reducing ordering and a sparse
-factorization the structure does not need. arael leads by **~4x per iteration**
-at both sizes (0.37 vs g2o/Ceres ~1.5 at 60 poses; 3.0 vs ~12-13 at 300), and
-the gap holds because arael's band scales near-linearly (0.37 -> 3.0 for 5x the
-poses) while the others scale worse. arael's peak memory is also a fraction of
-the field at scale -- 13 MB vs 37-68 MB at 300 poses -- because a band factor
-stores O(n * kd) rather than a general sparse Cholesky's fill-in.
+factorization the structure does not need. arael leads by **3-4x per
+iteration** at both sizes -- 0.38 vs the fastest competitor's 1.17 (SymForce
+f32) and ~1.5 (g2o/Ceres) at 60 poses; 3.0 vs 10.7-13.5 at 300 -- and the gap
+holds because arael's band scales near-linearly (0.38 -> 3.0 for 5x the poses)
+while the others scale worse. arael's peak memory is also a fraction of the
+field at scale -- 10-13 MB vs 37-104 MB at 300 poses -- because a band factor
+stores O(n * kd) rather than a general sparse Cholesky's fill-in (SymForce, the
+per-iteration runner-up, is the heaviest at ~100 MB).
 
 Running the same problem with `LOC_ARAEL_SOLVER=faer` shows what the structure
 buys: arael's general sparse path lands in the same neighborhood as g2o/Ceres,
@@ -118,7 +126,18 @@ Verification (never in the timed solve): `G2O_VERIFY_JAC=1` and
 
 ### SymForce
 
-The SymForce runner is not yet built here. It needs the SymForce Python
-codegen toolchain (`pip install -e` of a SymForce source checkout) to
-regenerate the loc factor set, then `-DSYMFORCE_DIR=<checkout>` at CMake time,
-mirroring [`benchmarks/slam`](../slam/README.md#symforce).
+The generated factor headers are committed under `cpp/symforce_gen/`, so the
+runner builds directly against a SymForce source checkout:
+
+```sh
+cmake -B cpp/build cpp -DSYMFORCE_DIR=<checkout> && cmake --build cpp/build
+```
+
+To regenerate the headers after changing a residual, run `symforce_gen.py` with
+the SymForce Python toolchain on its path -- the sympy backend suffices, no
+symengine build needed:
+
+```sh
+SYMFORCE_SYMBOLIC_API=sympy PYTHONPATH=<checkout>:<checkout>/gen/python \
+    python symforce_gen.py cpp/symforce_gen
+```
