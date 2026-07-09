@@ -515,7 +515,7 @@ impl Expr {
                 if let Some(body) = kind.body() {
                     // Symbolic: inline the expanded body.
                     // Identity functions force parentheses to preserve eval order.
-                    let prec = if name == "identity" { 8 } else { parent_prec };
+                    let prec = if name == "identity" || name == "cached" { 8 } else { parent_prec };
                     crate::expand_func(params, body, args).write_rust(buf, ft, prec);
                 } else if let crate::FuncKind::Extern { call_path, .. } = kind {
                     // Extern: emit function call

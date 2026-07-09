@@ -902,6 +902,7 @@ pub const FUNCTIONS: &[(&str, FunctionRef)] = &[
     ("heaviside", FunctionRef::Unary(heaviside)),
     // Unary "safe" variants
     ("identity", FunctionRef::Unary(identity)),
+    ("cached", FunctionRef::Unary(cached)),
     ("safe_sqrt", FunctionRef::Unary(safe_sqrt)),
     ("safe_asin", FunctionRef::Unary(safe_asin)),
     ("safe_acos", FunctionRef::Unary(safe_acos)),
@@ -1600,6 +1601,15 @@ pub fn identity(x: E) -> E {
     simple_func1("identity", |t| t)(x)
 }
 
+/// Caching marker: `cached(x) = x`, `d/dx = 1`. Currently behaves exactly like
+/// [`identity`] -- the simplifier does not look inside, so the wrapped
+/// expression stays intact as a unit, and codegen inlines it in parentheses.
+/// The distinct name marks a subexpression that should be computed once and
+/// reused.
+pub fn cached(x: E) -> E {
+    simple_func1("cached", |t| t)(x)
+}
+
 /// Safe atan2 with non-diverging derivatives.
 ///
 /// $$\text{atan2\\_safe}(y, x) = \text{atan2}(y, x)$$
@@ -1904,6 +1914,22 @@ mod tests {
             let f = identity(x);
             let vars = HashMap::from([("x", 5.0)]);
             assert_eq!(f.eval(&vars).unwrap(), 5.0);
+        }
+    }
+
+    #[test]
+    fn cached_acts_as_identity() {
+        sym! {
+            let x = symbol("x");
+            // Value passes through, derivative chains as identity (d/dx = 1).
+            let vars = HashMap::from([("x", 5.0)]);
+            assert_eq!(cached(x.clone()).eval(&vars).unwrap(), 5.0);
+            assert_eq!(format!("{}", cached(x.clone()).diff("x")), "1");
+            // Barrier like identity: the wrapped subtraction stays intact and
+            // codegen inlines it in parentheses (evaluation order preserved).
+            assert_eq!(cached(x.clone() - c(1.0)).to_rust(""), "(x - 1.0)");
+            // Registered builtin, so it parses and is usable in constraints.
+            assert!(crate::parse("cached(x)").is_ok());
         }
     }
 

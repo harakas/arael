@@ -523,7 +523,7 @@ let g = parse("exp(sin(x)) * cos(x)").unwrap();
 println!("d/dx = {}", g.diff("x")); // cos(x)^2 * exp(sin(x)) - exp(sin(x)) * sin(x)
 ```
 
-Built-in functions recognised: `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `sinh`, `cosh`, `tanh`, `exp`, `ln`, `log2`, `log10`, `sqrt`, `abs`, `heaviside` (alias `H`), `clamp`, `pow`, `rad_diff`, `rad_sum`, `safe_atan2`, `safe_sqrt`, `safe_asin`, `safe_acos`, `identity`. The full list is also enumerable at runtime via `function_names()` / `FUNCTIONS`.
+Built-in functions recognised: `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `sinh`, `cosh`, `tanh`, `exp`, `ln`, `log2`, `log10`, `sqrt`, `abs`, `heaviside` (alias `H`), `clamp`, `pow`, `rad_diff`, `rad_sum`, `safe_atan2`, `safe_sqrt`, `safe_asin`, `safe_acos`, `epsilon_for`, `cached`, `identity`. The full list is also enumerable at runtime via `function_names()` / `FUNCTIONS`.
 
 ### User-defined functions: `parse_with_functions` + `FunctionBag`
 

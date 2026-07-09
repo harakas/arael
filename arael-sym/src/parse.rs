@@ -340,7 +340,7 @@ fn build_function_call(name: &str, args: Vec<E>, bag: Option<&FunctionBag>) -> R
 /// `atan`, `atan2`, `sinh`, `cosh`, `tanh`, `exp`, `ln`, `log2`, `log10`,
 /// `sqrt`, `abs`, `heaviside` (alias `H`), `clamp`, `pow`, `rad_diff`,
 /// `rad_sum`, `safe_atan2`, `safe_sqrt`, `safe_asin`, `safe_acos`,
-/// `epsilon_for`, `identity`). See the full list in [`crate::FUNCTIONS`].
+/// `epsilon_for`, `cached`, `identity`). See the full list in [`crate::FUNCTIONS`].
 ///
 /// The identifiers `pi` and `e` are recognized as named constants.
 /// All other identifiers become symbolic variables.
