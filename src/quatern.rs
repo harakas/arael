@@ -14,7 +14,7 @@ use crate::matrix::matrix3;
 ///
 /// Supports addition, subtraction, negation, scalar multiplication, and quaternion
 /// multiplication (`*` operator). Unit quaternions represent 3D rotations.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct quatern<T : Float> {
     pub t : T,
     pub v : vect3<T>
@@ -185,6 +185,35 @@ impl<T: Float> quatern<T> {
         quatern::<T>::new(cos_half_angle, normal * sin_half_angle)
     }
 
+    /// Constructs a unit quaternion from a rotation vector `v = axis * angle`
+    /// (the exp map of so(3)): `q = [cos(|v|/2), (v/|v|) sin(|v|/2)]`. The
+    /// coefficients are even functions of `|v|`, computed exactly for
+    /// `|v|^2 >= 1e-8` and by their 2-term Taylor below it, so there is no
+    /// axis-normalization singularity at `v = 0`. Matches the symbolic
+    /// `quaternsym::from_rotation_vector`.
+    pub fn from_rotation_vector(v: vect3<T>) -> quatern<T> {
+        let s = v.x * v.x + v.y * v.y + v.z * v.z;
+        let theta = s.sqrt();
+        let half = T::half() * theta;
+        let eps = T::from(1e-8).unwrap();
+        let (q_t, scale) = if s >= eps {
+            (half.cos(), half.sin() / theta)
+        } else {
+            (T::one() - s * T::from(0.125).unwrap() + s * s * T::from(1.0 / 384.0).unwrap(),
+             T::half() - s * T::from(1.0 / 48.0).unwrap())
+        };
+        quatern::<T>::new(q_t, v * scale)
+    }
+
+    /// First-order (small-angle) retraction of a rotation vector to a unit
+    /// quaternion: `normalize(1, v/2)`. Branch-free and smooth for all v (the
+    /// normalizing denominator `sqrt(1 + |v|^2/4)` is always >= 1). Agrees with
+    /// the exact exp map `from_rotation_vector` to first order. Matches the
+    /// symbolic `quaternsym::from_rotation_vector_small`.
+    pub fn from_rotation_vector_small(v: vect3<T>) -> quatern<T> {
+        quatern::<T>::new(T::one(), v * T::half()).unit()
+    }
+
     /// Constructs a unit quaternion from a rotation matrix (Shepperd's
     /// method: the largest of the four squared components is computed
     /// first, so no branch divides by a small number).
@@ -325,6 +354,61 @@ mod tests {
                 "roundtrip failed for {:?}", ea);
             assert!((r.norm() - 1.0).abs() < 1e-12);
         }
+    }
+
+    #[test]
+    fn from_rotation_vector_runtime_exp_map() {
+        // Zero rotation vector -> identity quaternion.
+        let q0 = quaternd::from_rotation_vector(vect3d::new(0.0, 0.0, 0.0));
+        assert!((q0.t - 1.0).abs() < 1e-12);
+        assert!(q0.v.x.abs() < 1e-12 && q0.v.y.abs() < 1e-12 && q0.v.z.abs() < 1e-12);
+        // v = axis*angle matches from_axis_angle(v/|v|, |v|) and is unit.
+        for v in [vect3d::new(0.0, 0.0, std::f64::consts::FRAC_PI_2),
+                  vect3d::new(0.3, -0.5, 0.2), vect3d::new(1.2, 0.0, 0.0)] {
+            let theta = (v.x * v.x + v.y * v.y + v.z * v.z).sqrt();
+            let expected = quaternd::from_axis_angle(v * (1.0 / theta), theta);
+            let q = quaternd::from_rotation_vector(v);
+            assert!((q.t - expected.t).abs() < 1e-12
+                && (q.v.x - expected.v.x).abs() < 1e-12
+                && (q.v.y - expected.v.y).abs() < 1e-12
+                && (q.v.z - expected.v.z).abs() < 1e-12, "exp map mismatch at {:?}", v);
+            assert!((q.norm() - 1.0).abs() < 1e-12, "not unit at {:?}", v);
+        }
+    }
+
+    #[test]
+    fn from_rotation_vector_small_runtime_retraction() {
+        // Always unit; equals normalize(1, v/2) by definition.
+        for v in [vect3d::new(0.0, 0.0, 0.0), vect3d::new(0.3, -0.5, 0.2), vect3d::new(2.0, 1.0, -3.0)] {
+            let q = quaternd::from_rotation_vector_small(v);
+            assert!((q.norm() - 1.0).abs() < 1e-12, "not unit at {:?}", v);
+            let expected = quaternd::new(1.0, v * 0.5).unit();
+            assert!((q.t - expected.t).abs() < 1e-12
+                && (q.v.x - expected.v.x).abs() < 1e-12
+                && (q.v.y - expected.v.y).abs() < 1e-12
+                && (q.v.z - expected.v.z).abs() < 1e-12, "!= normalize(1, v/2) at {:?}", v);
+        }
+        // Zero -> identity.
+        let q0 = quaternd::from_rotation_vector_small(vect3d::new(0.0, 0.0, 0.0));
+        assert!((q0.t - 1.0).abs() < 1e-12 && q0.v.x.abs() < 1e-12);
+        // Agrees with the exact exp map to first order (small v).
+        let sv = vect3d::new(1e-3, -2e-3, 5e-4);
+        let (qr, qe) = (quaternd::from_rotation_vector_small(sv), quaternd::from_rotation_vector(sv));
+        assert!((qr.t - qe.t).abs() < 1e-8
+            && (qr.v.x - qe.v.x).abs() < 1e-8
+            && (qr.v.y - qe.v.y).abs() < 1e-8
+            && (qr.v.z - qe.v.z).abs() < 1e-8, "retraction should match exp to first order");
+    }
+
+    #[test]
+    fn quatern_serde_roundtrip() {
+        let q = quaternd::from_euler_angles(vect3d::new(0.1, -0.2, 0.3));
+        let json = serde_json::to_string(&q).expect("serialize");
+        let back: quaternd = serde_json::from_str(&json).expect("deserialize");
+        assert!((q.t - back.t).abs() < 1e-12
+            && (q.v.x - back.v.x).abs() < 1e-12
+            && (q.v.y - back.v.y).abs() < 1e-12
+            && (q.v.z - back.v.z).abs() < 1e-12);
     }
 
     #[test]

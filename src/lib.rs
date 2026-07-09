@@ -264,6 +264,7 @@
 //! | [`Param<vect3<T>>`](vect::vect3) | 3 | 3D position, velocity, linear vector |
 //! | [`SimpleEulerAngleParam<T>`](model::SimpleEulerAngleParam) | 3 | three direct Euler angles (roll, pitch, yaw) |
 //! | [`EulerAngleParam<T>`](model::EulerAngleParam) | 3 | "universal" delta composed with a fixed reference rotation; avoids parameterisation singularities for large-angle motion |
+//! | [`QuaternionParam<T>`](model::QuaternionParam) | 3 | same 3-angle delta as `EulerAngleParam`, but the reference is a unit quaternion (renormalised each re-center, never drifts off SO(3)) |
 //!
 //! ```ignore
 //! #[arael::model]

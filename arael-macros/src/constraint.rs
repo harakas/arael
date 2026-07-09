@@ -1324,6 +1324,25 @@ fn build_universal_euler_substitutions(var_base: &str, field_name: &str) -> Vec<
     subs
 }
 
+/// Substitutions for a QuaternionParam (rotation-vector delta) field: replace
+/// the composed rotation R_ref * retraction(delta) entries with reads of the
+/// precomputed `<field>.rotation_matrix`. The retraction is rational (no
+/// transcendentals), so there is no sincos analog to precompute.
+fn build_universal_rotvec_substitutions(var_base: &str, field_name: &str) -> Vec<(arael_sym::E, arael_sym::E)> {
+    use arael_sym::symbol;
+    let mut subs = Vec::new();
+    let r_ref_sym = matrix3sym::new(&format!("{}.{}.ref_rotation", var_base, field_name));
+    let dea_sym = vect3sym::new(&format!("{}.{}.delta", var_base, field_name));
+    let composed = r_ref_sym * matrix3sym::from_rotation_vector_small(&dea_sym);
+    for row in 0..3 {
+        for (col_name, col_expr) in [("x", &composed.rows[row].x), ("y", &composed.rows[row].y), ("z", &composed.rows[row].z)] {
+            let to_sym = symbol(&format!("{}.{}.rotation_matrix[{}].{}", var_base, field_name, row, col_name));
+            subs.push((col_expr.clone(), to_sym));
+        }
+    }
+    subs
+}
+
 /// Apply substitutions to a list of expressions. Returns the modified expressions.
 fn apply_substitutions(exprs: &mut Vec<arael_sym::E>, subs: &[(arael_sym::E, arael_sym::E)]) {
     for (from, to) in subs {
@@ -1361,13 +1380,23 @@ fn register_bindings_recursive(ctx: &mut ConstraintCtx, key_prefix: &str, sym_pr
                 _ => {
                     let is_universal_ea = is_param
                         && layout.universal_euler_angle_fields.contains(field_name);
-                    if is_universal_ea {
-                        // Build composed rotation and euler angles symbolically
+                    let is_universal_rotvec = is_param
+                        && layout.universal_rotvec_fields.contains(field_name);
+                    if is_universal_ea || is_universal_rotvec {
+                        // Build composed rotation R_ref * R(delta) symbolically.
+                        // EulerAngleParam maps the delta through the euler
+                        // rotation; QuaternionParam through the so(3) exp map.
                         let r_ref_sym = matrix3sym::new(
                             &format!("{}.{}.ref_rotation", sym_prefix, field_name));
                         let dea_sym = vect3sym::new(
                             &format!("{}.{}.delta", sym_prefix, field_name));
-                        let composed_rot = r_ref_sym * dea_sym.rotation_matrix();
+                        let delta_rot = if is_universal_rotvec {
+                            // Sqrt-free rotation matrix of the retraction normalize(1, delta/2).
+                            matrix3sym::from_rotation_vector_small(&dea_sym)
+                        } else {
+                            dea_sym.rotation_matrix()
+                        };
+                        let composed_rot = r_ref_sym * delta_rot;
                         let composed_ea = composed_rot.get_euler_angles();
                         ctx.bindings.insert(binding_key,
                             SymVal::UniversalEulerAngles {
@@ -2426,6 +2455,9 @@ pub fn generate_root_methods(
                         for ea in &layout.universal_euler_angle_fields {
                             all_subs.extend(build_universal_euler_substitutions(field_name, ea));
                         }
+                        for rv in &layout.universal_rotvec_fields {
+                            all_subs.extend(build_universal_rotvec_substitutions(field_name, rv));
+                        }
                     }
                 }
         }
@@ -2436,6 +2468,9 @@ pub fn generate_root_methods(
             }
             for ea in &a_layout.universal_euler_angle_fields {
                 all_subs.extend(build_universal_euler_substitutions(&self_var_name, ea));
+            }
+            for rv in &a_layout.universal_rotvec_fields {
+                all_subs.extend(build_universal_rotvec_substitutions(&self_var_name, rv));
             }
         }
         // For SelfBlock, also check the struct itself (it IS the A type)
@@ -4805,7 +4840,8 @@ fn interpret_constraint_body(
             if !used_vars.insert(var_name.clone()) { continue; }
             if let Some(layout) = registry_lookup(type_name) {
                 for pf in &layout.param_fields {
-                    let sym_base = if layout.universal_euler_angle_fields.contains(pf) {
+                    let sym_base = if layout.universal_euler_angle_fields.contains(pf)
+                        || layout.universal_rotvec_fields.contains(pf) {
                         format!("{}.{}.delta", var_name, pf)
                     } else {
                         format!("{}.{}.work()", var_name, pf)
@@ -4825,7 +4861,8 @@ fn interpret_constraint_body(
 
         if let Some(a_layout) = registry_lookup(&a_type) {
             for pf in &a_layout.param_fields {
-                let sym_base = if a_layout.universal_euler_angle_fields.contains(pf) {
+                let sym_base = if a_layout.universal_euler_angle_fields.contains(pf)
+                    || a_layout.universal_rotvec_fields.contains(pf) {
                     format!("{}.{}.delta", a_var_name, pf)
                 } else {
                     format!("{}.{}.work()", a_var_name, pf)
@@ -4842,7 +4879,8 @@ fn interpret_constraint_body(
                 }).or_else(|| var_infos.iter().find(|(_, tn)| tn == b_type_name))
                     .map(|(vn, _)| vn.clone()).unwrap_or_else(|| b_type_name.to_lowercase());
                 for pf in &b_layout.param_fields {
-                    let sym_base = if b_layout.universal_euler_angle_fields.contains(pf) {
+                    let sym_base = if b_layout.universal_euler_angle_fields.contains(pf)
+                        || b_layout.universal_rotvec_fields.contains(pf) {
                         format!("{}.{}.delta", b_var, pf)
                     } else {
                         format!("{}.{}.work()", b_var, pf)
@@ -5308,6 +5346,7 @@ mod nested_path_tests {
             ref_paths: Vec::new(),
             euler_angle_fields: Vec::new(),
             universal_euler_angle_fields: Vec::new(),
+            universal_rotvec_fields: Vec::new(),
             substitutions: Vec::new(),
             constraint_index_field: None,
             self_block_field: None,

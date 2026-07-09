@@ -97,3 +97,25 @@ fn simple_euler_angle_param_round_trips_with_sentinel() {
         .expect("deserialize without optimize field");
     assert!(q2.optimize);
 }
+
+#[test]
+fn quaternion_param_serde_roundtrip() {
+    use arael::model::QuaternionParam;
+    use arael::quatern::quaternd;
+    let p = QuaternionParam::from_euler_angles(vect3::new(0.1, -0.2, 0.3));
+    let json = serde_json::to_string(&p).expect("serialize");
+    let back: QuaternionParam<f64> = serde_json::from_str(&json).expect("deserialize");
+    assert_eq!(p.optimize, back.optimize);
+    // The reference quaternion round-trips and stays unit.
+    assert!((p.value.t - back.value.t).abs() < 1e-12
+        && (p.value.v.x - back.value.v.x).abs() < 1e-12
+        && (p.value.v.y - back.value.v.y).abs() < 1e-12
+        && (p.value.v.z - back.value.v.z).abs() < 1e-12);
+    assert!((back.value.norm() - 1.0).abs() < 1e-12, "deserialized reference not unit");
+    // A fixed param round-trips its optimize flag.
+    let f: QuaternionParam<f64> =
+        QuaternionParam::fixed(quaternd::from_euler_angles(vect3::new(0.2, 0.0, -0.1)));
+    let back_f: QuaternionParam<f64> =
+        serde_json::from_str(&serde_json::to_string(&f).unwrap()).unwrap();
+    assert!(!back_f.optimize);
+}

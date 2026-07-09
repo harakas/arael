@@ -23,6 +23,7 @@ treated as a constant.
 | `Param<vect3<T>>` | 3 | 3D position, velocity, linear vector |
 | `SimpleEulerAngleParam<T>` | 3 | three independent Euler angles (roll, pitch, yaw) stored directly |
 | `EulerAngleParam<T>` | 3 | "universal" Euler angles: parameters are a delta composed with a fixed reference rotation, avoiding parameterisation singularities for large-angle motion |
+| `QuaternionParam<T>` | 3 | same 3-angle delta as `EulerAngleParam`, but the reference is a unit quaternion (renormalised on every re-center, so it never drifts off SO(3)) |
 
 ```rust,ignore
 #[arael::model]

@@ -76,6 +76,7 @@ struct SymLayout {
     ref_paths: Vec<(String, String)>, // (field_name, resolution_path) for #[arael(ref = ...)]
     euler_angle_fields: Vec<String>,  // field names detected as SimpleEulerAngleParam
     universal_euler_angle_fields: Vec<String>, // field names detected as EulerAngleParam
+    universal_rotvec_fields: Vec<String>, // field names detected as QuaternionParam (rotation-vector delta)
     /// Symbolic substitutions: (from_expr, to_expr) applied before CSE.
     /// Stored as string pairs for thread-safe registry storage.
     #[allow(dead_code)]
@@ -516,6 +517,7 @@ fn model_attribute(input: &mut syn::DeriveInput) -> syn::Result<TokenStream2> {
     let mut ref_paths_for_reg: Vec<(String, String)> = Vec::new();
     let mut euler_angle_fields_reg: Vec<String> = Vec::new();
     let mut universal_euler_angle_fields_reg: Vec<String> = Vec::new();
+    let mut universal_rotvec_fields_reg: Vec<String> = Vec::new();
     let mut constraint_index_field_reg: Option<String> = None;
     // Detect SelfBlock<Self> field — this struct's canonical grad+diag home.
     let mut self_block_field_reg: Option<String> = None;
@@ -552,6 +554,7 @@ fn model_attribute(input: &mut syn::DeriveInput) -> syn::Result<TokenStream2> {
             match ea_kind {
                 "simple" => euler_angle_fields_reg.push(field_name.clone()),
                 "universal" => universal_euler_angle_fields_reg.push(field_name.clone()),
+                "universal_rotvec" => universal_rotvec_fields_reg.push(field_name.clone()),
                 _ => {}
             }
         }
@@ -644,6 +647,7 @@ fn model_attribute(input: &mut syn::DeriveInput) -> syn::Result<TokenStream2> {
         ref_paths: ref_paths_for_reg,
         euler_angle_fields: euler_angle_fields_reg.clone(),
         universal_euler_angle_fields: universal_euler_angle_fields_reg.clone(),
+        universal_rotvec_fields: universal_rotvec_fields_reg.clone(),
         substitutions: substitutions_reg,
         constraint_index_field: constraint_index_field_reg,
         self_block_field: self_block_field_reg,
@@ -712,6 +716,7 @@ fn emit_trivial_model_for_enum(input: &mut syn::DeriveInput) -> syn::Result<Toke
         ref_paths: Vec::new(),
         euler_angle_fields: Vec::new(),
         universal_euler_angle_fields: Vec::new(),
+        universal_rotvec_fields: Vec::new(),
         substitutions: Vec::new(),
         constraint_index_field: None,
         self_block_field: None,
@@ -797,7 +802,8 @@ fn param_type_size(ty: &syn::Type) -> u32 {
                     && let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
                         return inner_type_size(inner);
                     }
-            if name == "SimpleEulerAngleParam" || name == "EulerAngleParam" {
+            if name == "SimpleEulerAngleParam" || name == "EulerAngleParam"
+                || name == "QuaternionParam" {
                 return 3; // always vect3 = 3 params
             }
         }
@@ -1374,7 +1380,8 @@ fn is_param_type(ty: &syn::Type) -> bool {
     if let syn::Type::Path(tp) = ty
         && let Some(seg) = tp.path.segments.last() {
             let name = seg.ident.to_string();
-            return name == "Param" || name == "SimpleEulerAngleParam" || name == "EulerAngleParam";
+            return name == "Param" || name == "SimpleEulerAngleParam" || name == "EulerAngleParam"
+                || name == "QuaternionParam";
         }
     false
 }
@@ -1385,6 +1392,9 @@ fn is_euler_angle_param_type(ty: &syn::Type) -> Option<&'static str> {
             let name = seg.ident.to_string();
             if name == "SimpleEulerAngleParam" { return Some("simple"); }
             if name == "EulerAngleParam" { return Some("universal"); }
+            // QuaternionParam: same ref_rotation * R(delta) composition, but the
+            // delta is a rotation vector mapped through the exp map, not euler.
+            if name == "QuaternionParam" { return Some("universal_rotvec"); }
         }
     None
 }

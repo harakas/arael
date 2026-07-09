@@ -273,6 +273,25 @@ impl<T: Float> matrix3<T>
         )
     }
 
+    /// Rotation matrix of the small-angle retraction `normalize(1, v/2)`,
+    /// computed sqrt-free from the unnormalized quaternion `(1, v/2)`:
+    /// `M(1, v/2)` scaled by `s = 2/|q|^2`, `|q|^2 = 1 + |v|^2/4 >= 1`.
+    /// Algebraically identical to
+    /// `quatern::from_rotation_vector_small(v).rotation_matrix()` but with no
+    /// normalization sqrt; matches the symbolic `matrix3sym::from_rotation_vector_small`.
+    pub fn from_rotation_vector_small(v: vect3<T>) -> matrix3<T> {
+        let half = T::half();
+        let (x, y, z) = (v.x * half, v.y * half, v.z * half);
+        let (x2, y2, z2) = (x * x, y * y, z * z);
+        let s = T::two() / (T::one() + x2 + y2 + z2);
+        let one = T::one();
+        matrix3::<T>::from_rows(
+            vect3::<T>::new(one - s * (y2 + z2), s * (x * y - z), s * (x * z + y)),
+            vect3::<T>::new(s * (x * y + z), one - s * (x2 + z2), s * (y * z - x)),
+            vect3::<T>::new(s * (x * z - y), s * (y * z + x), one - s * (x2 + y2)),
+        )
+    }
+
     /// Extracts Euler angles (x=roll, y=pitch, z=yaw) from a rotation matrix.
     /// At and near gimbal lock (|pitch| within ~sqrt(eps) of pi/2) only
     /// roll -+ yaw is determined; the roll = 0 convention is used and yaw
@@ -922,6 +941,26 @@ mod tests {
         let a = [[1.0, 2.0, 3.0], [4.0, 5.0, 6.0], [7.0, 8.0, 9.0]];
         assert!(matrix3d::from_array(a).similar(
             matrix3d::from_elements(1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0)));
+    }
+
+    #[test]
+    fn from_rotation_vector_small_matches_quaternion_and_is_rotation() {
+        use crate::quatern::quaternd;
+        for v in [
+            vect3d::new(0.0, 0.0, 0.0),
+            vect3d::new(0.3, -0.5, 0.2),
+            vect3d::new(1.2, 0.0, 0.0),
+            vect3d::new(-0.8, 0.9, 1.5),
+        ] {
+            let m = matrix3d::from_rotation_vector_small(v);
+            // The sqrt-free matrix equals the retraction quaternion's rotation matrix.
+            assert!(m.similar(quaternd::from_rotation_vector_small(v).rotation_matrix()),
+                "sqrt-free != quaternion.rotation_matrix() at v={:?}", v);
+            // And it is a proper rotation.
+            assert!((m * m.transpose()).similar(matrix3d::identity()),
+                "not orthonormal at v={:?}", v);
+            assert!((m.det() - 1.0).abs() < 1e-12, "det != 1 at v={:?}", v);
+        }
     }
 }
 
