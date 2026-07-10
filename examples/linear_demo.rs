@@ -1,5 +1,4 @@
-use arael::model::Param;
-use arael::simple_lm::LmConfig;
+use arael::prelude::*;
 
 #[arael::model]
 struct DataEntry {
@@ -7,7 +6,9 @@ struct DataEntry {
     y: f32,
 }
 
-// Linear model y = a*x + b with robust (suppressed) residuals
+// Linear model y = a*x + b with robust (suppressed) residuals.
+// fit(...) is f32 throughout; use fit64(...) for an f64 model (Param<f64>
+// fields, f64 config and result) -- same shorthand otherwise.
 #[arael::model]
 #[arael(fit(data, |e| {
     let plain_r = (a * e.x + b - e.y) / sigma;

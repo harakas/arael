@@ -242,7 +242,7 @@ impl std::fmt::Display for BandError {
 /// deserialize); the solve entry points on [`LmProblem`] are default
 /// methods gated on it, so implementing this is what gives a type
 /// `solve_with` / `solve_dense` / `solve_sparse`.
-pub trait RootModel<T: Float> {
+pub trait RootProblem<T: Float> {
     /// Flatten the optimizable parameters into `data` and assign the
     /// Hessian block indices. The initial guess for a solve.
     fn serialize(&mut self, data: &mut Vec<T>);
@@ -252,9 +252,45 @@ pub trait RootModel<T: Float> {
     fn deserialize(&mut self, data: &[T]);
 }
 
+/// Entry points of an `#[arael(fit(...))]` / `#[arael(fit64(...))]` model.
+/// The macro implements the parameter round trip (`serialize` /
+/// `deserialize`); `fit` and `fit_with` are library-provided defaults
+/// running the dense LM over it -- fit models assemble a small dense
+/// Hessian and do not support the sparse/band backends, which is why they
+/// carry their own entry points instead of [`RootProblem`]'s `solve_*`
+/// family. `fit(...)` is f32; `fit64(...)` is f64.
+pub trait FitProblem<T: Float>: LmProblem<T> + Sized {
+    /// Flatten the optimizable parameters into `data`. The initial guess.
+    fn serialize(&mut self, data: &mut Vec<T>);
+    /// Write an optimized parameter vector back into the model.
+    fn deserialize(&mut self, data: &[T]);
+
+    /// Least-squares fit with the given config, wrapping the
+    /// serialize -> dense LM -> deserialize round trip: parameters are
+    /// read from the model and the optimized values written back.
+    fn fit_with(&mut self, config: &LmConfig<T>) -> LmResult<T>
+    where
+        Dense: LmSolver<T>,
+    {
+        let mut params = Vec::new();
+        self.serialize(&mut params);
+        let result = lm_solve(&params, &mut Dense, self, config);
+        self.deserialize(&result.x);
+        result
+    }
+
+    /// [`fit_with`](Self::fit_with) under the default [`LmConfig`].
+    fn fit(&mut self) -> LmResult<T>
+    where
+        Dense: LmSolver<T>,
+    {
+        self.fit_with(&LmConfig::default())
+    }
+}
+
 /// Provides cost evaluation and gradient/Hessian assembly in various matrix
 /// formats (dense, band, COO sparse, CSC sparse, indexed sparse), plus --
-/// for types that also implement [`RootModel`], i.e. every `#[arael(root)]`
+/// for types that also implement [`RootProblem`], i.e. every `#[arael(root)]`
 /// model -- the solve entry points `solve_with` / `solve_dense` /
 /// `solve_sparse` as default methods. Call them with the trait in scope:
 /// `use arael::simple_lm::LmProblem;`.
@@ -292,7 +328,7 @@ pub trait LmProblem<T> {
     /// [`solve_sparse`](Self::solve_sparse).
     fn solve_with<S: LmSolver<T>>(&mut self, solver: &mut S, config: &LmConfig<T>) -> LmResult<T>
     where
-        Self: RootModel<T> + Sized,
+        Self: RootProblem<T> + Sized,
         T: Float,
     {
         let mut params = Vec::new();
@@ -307,7 +343,7 @@ pub trait LmProblem<T> {
     /// over [`solve_with`](Self::solve_with).
     fn solve_dense(&mut self, config: &LmConfig<T>) -> LmResult<T>
     where
-        Self: RootModel<T> + Sized,
+        Self: RootProblem<T> + Sized,
         T: Float,
         Dense: LmSolver<T>,
     {
@@ -319,7 +355,7 @@ pub trait LmProblem<T> {
     /// over [`solve_with`](Self::solve_with).
     fn solve_sparse(&mut self, config: &LmConfig<T>) -> LmResult<T>
     where
-        Self: RootModel<T> + Sized,
+        Self: RootProblem<T> + Sized,
         T: Float,
         SparseFaer<T>: LmSolver<T>,
     {

@@ -1,11 +1,11 @@
-// The RootModel trait + the solve entry points as LmProblem default
-// methods: every #[arael(root)] model implements RootModel (serialize /
+// The RootProblem trait + the solve entry points as LmProblem default
+// methods: every #[arael(root)] model implements RootProblem (serialize /
 // deserialize round trip), which unlocks solve_with / solve_dense /
 // solve_sparse on LmProblem -- usable generically, not just as inherent
 // methods on a concrete struct.
 
 use arael::model::{Model, Param, SelfBlock};
-use arael::simple_lm::{Band, LmConfig, LmProblem, LmResult, RootModel};
+use arael::simple_lm::{Band, LmConfig, LmProblem, LmResult, RootProblem};
 
 #[arael::model]
 #[arael(root)]
@@ -28,7 +28,7 @@ fn model() -> M {
 fn optimize<T, P>(m: &mut P, cfg: &LmConfig<T>) -> LmResult<T>
 where
     T: arael::utils::Float,
-    P: LmProblem<T> + RootModel<T>,
+    P: LmProblem<T> + RootProblem<T>,
     arael::simple_lm::Dense: arael::simple_lm::LmSolver<T>,
 {
     m.solve_dense(cfg)
@@ -64,18 +64,18 @@ fn generic_over_root_model() {
     assert!(r.end_cost < 1e-9, "generic optimize: {}", r.end_cost);
 }
 
-// RootModel's round trip is the same one the suffixed inherent methods do.
+// RootProblem's round trip is the same one the suffixed inherent methods do.
 #[test]
 fn root_model_round_trip_matches_serialize64() {
     let mut a = model();
     let mut b = model();
     let mut va = Vec::new();
     let mut vb = Vec::new();
-    RootModel::serialize(&mut a, &mut va);
+    RootProblem::serialize(&mut a, &mut va);
     b.serialize64(&mut vb);
     assert_eq!(va, vb);
     va[0] = 7.0;
-    RootModel::deserialize(&mut a, &va);
+    RootProblem::deserialize(&mut a, &va);
     b.deserialize64(&va);
     assert_eq!(a.x.value, 7.0);
     assert_eq!(a.x.value, b.x.value);

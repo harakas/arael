@@ -4505,7 +4505,7 @@ pub fn generate_root_methods(
         quote! {}
     };
 
-    // Precision-dependent pieces for the generated RootModel impl (the
+    // Precision-dependent pieces for the generated RootProblem impl (the
     // solve_with / solve_dense / solve_sparse entry points are LmProblem
     // default methods gated on it -- nothing solver-side is generated).
     let (solve_serialize, solve_deserialize) = if precision == "f32" {
@@ -4517,7 +4517,7 @@ pub fn generate_root_methods(
     let mut tokens = quote! {
         #(#constraint_impls)*
 
-        impl arael::simple_lm::RootModel<#prec_type> for #root_name {
+        impl arael::simple_lm::RootProblem<#prec_type> for #root_name {
             fn serialize(&mut self, data: &mut std::vec::Vec<#prec_type>) {
                 self.#solve_serialize(data)
             }

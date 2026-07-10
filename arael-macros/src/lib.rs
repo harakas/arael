@@ -330,12 +330,15 @@ fn extract_constraint_label(tokens: &[proc_macro2::TokenTree]) -> Option<String>
 /// struct Point { /* ... */ }
 /// ```
 ///
-/// ## `#[arael(fit(data, |e| expr))]`
+/// ## `#[arael(fit(data, |e| expr))]` / `#[arael(fit64(data, |e| expr))]`
 ///
 /// Auto-generate a complete `LmProblem` implementation for simple curve
 /// fitting. Iterates over `data`, evaluates the residual expression for each
-/// entry, and generates `calc_cost()`, `calc_grad_hessian_*()`, and
-/// `fit_with()` methods.
+/// entry, and generates `calc_cost()` / `calc_grad_hessian_*()` (dense only)
+/// plus the `FitProblem` impl, which unlocks FitProblem's default `fit()` /
+/// `fit_with()` entry points (`use arael::simple_lm::FitProblem` or the
+/// prelude to call them). `fit(...)` is f32 throughout; `fit64(...)` is the
+/// f64 variant.
 ///
 /// ```ignore
 /// #[arael::model]
@@ -358,7 +361,7 @@ fn extract_constraint_label(tokens: &[proc_macro2::TokenTree]) -> Option<String>
 /// all stashed `constraint` attributes in the model hierarchy. Generates
 /// the `LmProblem` trait implementation (`calc_cost()`, the
 /// `calc_grad_hessian_*` assembly family, `advance()`) and the
-/// `RootModel` impl (`serialize` / `deserialize` -- the parameter round
+/// `RootProblem` impl (`serialize` / `deserialize` -- the parameter round
 /// trip), which unlocks LmProblem's default solve entry points
 /// `solve_with` / `solve_dense` / `solve_sparse` on the type
 /// (`use arael::simple_lm::LmProblem` to call them).
@@ -1316,7 +1319,7 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                             jacobian = true;
                         } else if kw_str == "fast_atan" {
                             fast_atan = true;
-                        } else if kw_str == "fit" {
+                        } else if kw_str == "fit" || kw_str == "fit64" {
                             return Some(Err(syn::Error::new(kw.span(),
                                 "fit(...) cannot be combined with root; use a separate #[arael(fit(...))] attribute")));
                         } else {
@@ -1715,6 +1718,8 @@ struct FitAttr {
     data_field: proc_macro2::Ident,
     loop_var: proc_macro2::Ident,
     body_stmts: Vec<Stmt>,
+    /// "f32" for `fit(...)`, "f64" for `fit64(...)`.
+    precision: &'static str,
 }
 
 /// Parse `#[arael(fit(data, |e| { ... }))]` from struct-level attributes.
@@ -1730,9 +1735,13 @@ fn parse_fit_attr(attrs: &[syn::Attribute]) -> syn::Result<Option<FitAttr>> {
         }
 
         if let proc_macro2::TokenTree::Ident(ref ident) = tokens[0] {
-            if *ident != "fit" {
+            let precision = if *ident == "fit" {
+                "f32"
+            } else if *ident == "fit64" {
+                "f64"
+            } else {
                 continue;
-            }
+            };
 
             if tokens.len() < 2 {
                 return Err(syn::Error::new_spanned(
@@ -1750,7 +1759,7 @@ fn parse_fit_attr(attrs: &[syn::Attribute]) -> syn::Result<Option<FitAttr>> {
                 }
                 let inner: Vec<proc_macro2::TokenTree> =
                     group.stream().into_iter().collect();
-                return parse_fit_inner(&inner, ident);
+                return parse_fit_inner(&inner, ident, precision);
             }
 
             return Err(syn::Error::new_spanned(
@@ -1765,6 +1774,7 @@ fn parse_fit_attr(attrs: &[syn::Attribute]) -> syn::Result<Option<FitAttr>> {
 fn parse_fit_inner(
     tokens: &[proc_macro2::TokenTree],
     err_span: &proc_macro2::Ident,
+    precision: &'static str,
 ) -> syn::Result<Option<FitAttr>> {
     // Expected tokens: data_field , | loop_var | { body }
     //              or: data_field , | loop_var | expr
@@ -1849,6 +1859,7 @@ fn parse_fit_inner(
         data_field,
         loop_var,
         body_stmts,
+        precision,
     }))
 }
 
@@ -2042,6 +2053,16 @@ fn generate_fit_impl(
     fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
     fit: &FitAttr,
 ) -> syn::Result<TokenStream2> {
+    // Precision-dependent pieces: `fit(...)` is f32, `fit64(...)` is f64.
+    let prec = fit.precision;
+    let prec_type: syn::Type = syn::parse_str(prec)
+        .map_err(|e| syn::Error::new_spanned(name,
+            format!("invalid fit precision '{}': {}", prec, e)))?;
+    let (fit_serialize, fit_deserialize) = if prec == "f32" {
+        (quote! { serialize_params32 }, quote! { deserialize_params32 })
+    } else {
+        (quote! { serialize_params64 }, quote! { deserialize_params64 })
+    };
     // 1. Classify fields
     let mut param_names: Vec<String> = Vec::new();
     let mut constant_names: HashSet<String> = HashSet::new();
@@ -2118,7 +2139,7 @@ fn generate_fit_impl(
         .collect();
 
     // 4. Generate Rust code strings and parse to syn::Expr
-    let r_code = residual.to_rust("f32");
+    let r_code = residual.to_rust(prec);
     let r_expr: Expr = syn::parse_str(&r_code).map_err(|e| {
         syn::Error::new_spanned(
             &fit.data_field,
@@ -2130,7 +2151,7 @@ fn generate_fit_impl(
         .iter()
         .enumerate()
         .map(|(i, d)| {
-            let code = d.to_rust("f32");
+            let code = d.to_rust(prec);
             syn::parse_str(&code).map_err(|e| {
                 syn::Error::new_spanned(
                     &fit.data_field,
@@ -2190,7 +2211,8 @@ fn generate_fit_impl(
         .map(|i| {
             let dr_id = &dr_idents[i];
             let dr_expr = &dr_exprs[i];
-            quote! { let #dr_id: f32 = #dr_expr; }
+            let prec_type = &prec_type;
+            quote! { let #dr_id: #prec_type = #dr_expr; }
         })
         .collect();
 
@@ -2198,7 +2220,8 @@ fn generate_fit_impl(
     let grad_accum: Vec<TokenStream2> = (0..n)
         .map(|i| {
             let dr_id = &dr_idents[i];
-            quote! { grad[#i] += 2.0_f32 * __r * #dr_id; }
+            let prec_type = &prec_type;
+            quote! { grad[#i] += (2.0 as #prec_type) * __r * #dr_id; }
         })
         .collect();
 
@@ -2206,11 +2229,12 @@ fn generate_fit_impl(
     let hessian_accum: Vec<TokenStream2> = (0..n)
         .flat_map(|i| {
             let dr_idents = &dr_idents;
+            let prec_type = &prec_type;
             (i..n).map(move |j| {
                 let idx = i * n + j;
                 let dr_i = &dr_idents[i];
                 let dr_j = &dr_idents[j];
-                quote! { hessian[#idx] += 2.0_f32 * #dr_i * #dr_j; }
+                quote! { hessian[#idx] += (2.0 as #prec_type) * #dr_i * #dr_j; }
             })
         })
         .collect();
@@ -2229,14 +2253,14 @@ fn generate_fit_impl(
     let data_field_id = &fit.data_field;
 
     Ok(quote! {
-        impl arael::simple_lm::LmProblem<f32> for #name {
-            fn calc_cost(&mut self, params: &[f32]) -> f32 {
+        impl arael::simple_lm::LmProblem<#prec_type> for #name {
+            fn calc_cost(&mut self, params: &[#prec_type]) -> #prec_type {
                 #(#param_unpack)*
                 #(#constant_bind)*
-                let mut __cost = 0.0_f32;
+                let mut __cost = (0.0 as #prec_type);
                 for #loop_var_id in &self.#data_field_id {
                     #(#data_bind)*
-                    let __r: f32 = #r_expr;
+                    let __r: #prec_type = #r_expr;
                     __cost += __r * __r;
                 }
                 __cost
@@ -2244,18 +2268,18 @@ fn generate_fit_impl(
 
             fn calc_grad_hessian_dense(
                 &mut self,
-                params: &[f32],
-                grad: &mut [f32],
-                hessian: &mut [f32],
-            ) -> f32 {
+                params: &[#prec_type],
+                grad: &mut [#prec_type],
+                hessian: &mut [#prec_type],
+            ) -> #prec_type {
                 #(#param_unpack)*
                 #(#constant_bind)*
                 grad.iter_mut().for_each(|g| *g = 0.0);
                 hessian.iter_mut().for_each(|h| *h = 0.0);
-                let mut __cost = 0.0_f32;
+                let mut __cost = (0.0 as #prec_type);
                 for #loop_var_id in &self.#data_field_id {
                     #(#data_bind)*
-                    let __r: f32 = #r_expr;
+                    let __r: #prec_type = #r_expr;
                     __cost += __r * __r;
                     #(#dr_bindings)*
                     #(#grad_accum)*
@@ -2267,61 +2291,49 @@ fn generate_fit_impl(
 
             fn calc_grad_hessian_band(
                 &mut self,
-                _params: &[f32],
-                _grad: &mut [f32],
-                _band: &mut [f32],
+                _params: &[#prec_type],
+                _grad: &mut [#prec_type],
+                _band: &mut [#prec_type],
                 _kd: usize,
-            ) -> Result<f32, arael::simple_lm::BandError> {
+            ) -> Result<#prec_type, arael::simple_lm::BandError> {
                 unimplemented!("fit models do not support band assembly")
             }
 
             fn calc_grad_hessian_sparse(
                 &mut self,
-                _params: &[f32],
-                _grad: &mut [f32],
-                _coo: &mut arael::simple_lm::CooMatrix<f32>,
-            ) -> f32 {
+                _params: &[#prec_type],
+                _grad: &mut [#prec_type],
+                _coo: &mut arael::simple_lm::CooMatrix<#prec_type>,
+            ) -> #prec_type {
                 unimplemented!("fit models do not support sparse assembly")
             }
 
             fn calc_grad_hessian_sparse_direct(
                 &mut self,
-                _params: &[f32],
-                _grad: &mut [f32],
-                _csc: &mut arael::simple_lm::CscMatrix<f32>,
-            ) -> f32 {
+                _params: &[#prec_type],
+                _grad: &mut [#prec_type],
+                _csc: &mut arael::simple_lm::CscMatrix<#prec_type>,
+            ) -> #prec_type {
                 unimplemented!("fit models do not support sparse direct assembly")
             }
 
             fn calc_grad_hessian_sparse_indexed(
                 &mut self,
-                _params: &[f32],
-                _grad: &mut [f32],
-                _vals: &mut [f32],
+                _params: &[#prec_type],
+                _grad: &mut [#prec_type],
+                _vals: &mut [#prec_type],
                 _positions: &[usize],
-            ) -> f32 {
+            ) -> #prec_type {
                 unimplemented!("fit models do not support sparse indexed assembly")
             }
         }
 
-        impl #name {
-            pub fn fit(&mut self) -> arael::simple_lm::LmResult<f32> {
-                self.fit_with(&arael::simple_lm::LmConfig::default())
+        impl arael::simple_lm::FitProblem<#prec_type> for #name {
+            fn serialize(&mut self, data: &mut std::vec::Vec<#prec_type>) {
+                arael::model::Model::#fit_serialize(self, data)
             }
-
-            pub fn fit_with(
-                &mut self,
-                config: &arael::simple_lm::LmConfig<f32>,
-            ) -> arael::simple_lm::LmResult<f32> {
-                let mut __params = std::vec::Vec::new();
-                arael::model::Model::serialize_params32(self, &mut __params);
-                let __result = arael::simple_lm::solve_f32(
-                    &__params,
-                    self,
-                    config,
-                );
-                arael::model::Model::deserialize_params32(self, &__result.x);
-                __result
+            fn deserialize(&mut self, data: &[#prec_type]) {
+                arael::model::Model::#fit_deserialize(self, data)
             }
         }
     })

@@ -3,7 +3,7 @@
 // Starship robust variant ignores an outlier, and exercises fit_with.
 
 use arael::model::Param;
-use arael::simple_lm::LmConfig;
+use arael::simple_lm::{FitProblem, LmConfig};
 
 #[arael::model]
 struct Pt { x: f32, y: f32 }
@@ -88,4 +88,36 @@ fn fit_with_custom_config() {
     assert!(r.iterations <= 50);
     assert!((m.a.value - 1.5).abs() < 1e-2 && (m.b.value - 0.5).abs() < 1e-2,
         "should recover the line, got a={} b={}", m.a.value, m.b.value);
+}
+
+// fit64: the f64 variant of the fit attribute -- same shorthand, f64
+// parameters, config, and result throughout.
+#[arael::model]
+#[arael(fit64(data, |e| a * e.x + b - e.y))]
+struct LinearModel64 {
+    a: Param<f64>,
+    b: Param<f64>,
+    data: std::vec::Vec<XY64>,
+}
+
+#[arael::model]
+struct XY64 {
+    x: f64,
+    y: f64,
+}
+
+#[test]
+fn fit64_recovers_line() {
+    let mut m = LinearModel64 {
+        a: Param::new(0.0),
+        b: Param::new(0.0),
+        data: (0..20).map(|i| {
+            let x = i as f64 * 0.5;
+            XY64 { x, y: 2.0 * x - 1.0 }
+        }).collect(),
+    };
+    let r = m.fit_with(&LmConfig::<f64> { max_iters: 50, ..Default::default() });
+    assert!(r.end_cost < 1e-18, "cost {}", r.end_cost);
+    assert!((m.a.value - 2.0).abs() < 1e-9, "a = {}", m.a.value);
+    assert!((m.b.value + 1.0).abs() < 1e-9, "b = {}", m.b.value);
 }

@@ -47,7 +47,7 @@ println!("{} iterations: {:.4} -> {:.4}",
 ```
 
 The solve methods live on `LmProblem` as default methods (hence the
-`use`), gated on `RootModel` -- the two-method parameter round trip
+`use`), gated on `RootProblem` -- the two-method parameter round trip
 (`serialize` / `deserialize`) that `#[arael(root)]` implements for
 every root, along with the `LmProblem` impl the solver actually
 consumes. You never write any of it by hand. `solve_with` is the

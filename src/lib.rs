@@ -169,6 +169,7 @@
 //!
 //! ```
 //! # use arael::model::Param;
+//! # use arael::simple_lm::FitProblem;
 //! #[arael::model]
 //! struct DataEntry { x: f32, y: f32 }
 //!
@@ -865,7 +866,7 @@
 //! optimize -> deserialize round trip (parameters are read from the
 //! model and written back) and takes any backend instance. Every
 //! `#[arael(root)]` model gets it: the macro implements
-//! [`RootModel`](simple_lm::RootModel) (the parameter round trip),
+//! [`RootProblem`](simple_lm::RootProblem) (the parameter round trip),
 //! which unlocks the solve methods LmProblem provides. `solve_sparse`
 //! and `solve_dense` are conveniences over `solve_with`, and the
 //! `simple_lm::solve_*` free functions run the same solves over a raw
@@ -1854,7 +1855,8 @@ pub mod prelude {
     };
     pub use crate::refs::{self, Ref};
     pub use crate::simple_lm::{
-        LmConfig, LmProblem, LmResult, LmSolver, NielsenLambdaDriver, RootModel,
+        FitProblem, LmConfig, LmProblem, LmResult, LmSolver, NielsenLambdaDriver,
+        RootProblem,
     };
     pub use crate::matrix::{matrix2d, matrix2f, matrix3d, matrix3f};
     pub use crate::quatern::{quaternd, quaternf};

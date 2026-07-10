@@ -388,7 +388,7 @@ trait (`LmSolver`) and one config (`LmConfig`). Full reference:
 **The main entry point is `solve_with` on `LmProblem`** -- it wraps
 the serialize -> optimize -> deserialize round trip (parameters are
 read from the model and written back) and takes any backend instance.
-Every `#[arael(root)]` model gets it: the macro implements `RootModel`
+Every `#[arael(root)]` model gets it: the macro implements `RootProblem`
 (the parameter round trip), which unlocks the solve methods LmProblem
 provides. `solve_sparse` and `solve_dense` are conveniences over
 `solve_with`, and the `simple_lm::solve_*` free functions run the same
