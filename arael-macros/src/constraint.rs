@@ -1260,42 +1260,26 @@ pub fn generate_constraint_impl(
 
 /// Build symbolic substitution pairs for euler_angles precomputation.
 /// Given a variable base (e.g. "pose") and field name (e.g. "ea"),
-/// returns pairs (from_expr, to_expr) that replace sin/cos with precomputed values
-/// and rotation matrix entries with precomputed matrix fields.
+/// returns pairs (from_expr, to_expr) that replace rotation matrix entries
+/// and their derivatives with precomputed matrix fields. Any sin/cos of the
+/// angles left outside those patterns stays inline (evaluated via `work()`).
 fn build_euler_substitutions(var_base: &str, field_name: &str) -> Vec<(arael_sym::E, arael_sym::E)> {
-    use arael_sym::{symbol, sin, cos};
-
     let mut subs = Vec::new();
 
-    // Rotation-entry subs FIRST (larger patterns, applied before sin/cos).
     let ea_sym = arael_sym::vect3sym::new(&format!("{}.{}.work()", var_base, field_name));
     let rot = ea_sym.rotation_matrix();
     push_rotation_matrix_subs(&mut subs, &rot, var_base, field_name);
-    // Derivative subs before the sin/cos subs below, so the cached derivative
-    // units (with raw sin/cos inside) still match before sin/cos get rewritten.
     let dvar_prefix = format!("{}.{}.work()", var_base, field_name);
     push_rotation_deriv_subs(&mut subs, &rot, &dvar_prefix, var_base, field_name);
-
-    // sin/cos substitutions SECOND (catch remaining occurrences not part of rotation matrix)
-    for comp in &["x", "y", "z"] {
-        let param_sym = symbol(&format!("{}.{}.work().{}", var_base, field_name, comp));
-        let sin_from = sin(param_sym.clone());
-        let cos_from = cos(param_sym);
-        let sin_to = symbol(&format!("{}.{}.sincos.0.{}", var_base, field_name, comp));
-        let cos_to = symbol(&format!("{}.{}.sincos.1.{}", var_base, field_name, comp));
-        subs.push((sin_from, sin_to));
-        subs.push((cos_from, cos_to));
-    }
 
     subs
 }
 
 /// Build symbolic substitutions for universal_euler_angles precomputation.
-/// Substitutes composed rotation (R_ref * rotation(ea_delta)) with precomputed matrix,
-/// and sin/cos of ea_delta with precomputed sincos.
+/// Substitutes composed rotation (R_ref * rotation(ea_delta)) entries and
+/// their derivatives with precomputed matrix fields. The delta is
+/// solver-internal, so no sin/cos of it can appear outside those patterns.
 fn build_universal_euler_substitutions(var_base: &str, field_name: &str) -> Vec<(arael_sym::E, arael_sym::E)> {
-    use arael_sym::{symbol, sin, cos};
-
     let mut subs = Vec::new();
 
     // Build composed rotation: R_ref * rotation(ea_delta)
@@ -1303,25 +1287,9 @@ fn build_universal_euler_substitutions(var_base: &str, field_name: &str) -> Vec<
     let dea_sym = vect3sym::new(&format!("{}.{}.delta", var_base, field_name));
     let composed = r_ref_sym * dea_sym.rotation_matrix();
 
-    // Rotation-entry subs FIRST (before the sin/cos subs below), so the
-    // residual's cached entries resolve to precomputed reads and the
-    // derivatives' remaining sin/cos resolve to delta_sincos.
     push_rotation_matrix_subs(&mut subs, &composed, var_base, field_name);
-    // Derivative subs also before the sin/cos subs, so the cached derivative
-    // units (with raw sin/cos inside) still match before sin/cos get rewritten.
     let dvar_prefix = format!("{}.{}.delta", var_base, field_name);
     push_rotation_deriv_subs(&mut subs, &composed, &dvar_prefix, var_base, field_name);
-
-    // sin/cos of ea.delta → ea.delta_sincos
-    for comp in &["x", "y", "z"] {
-        let param_sym = symbol(&format!("{}.{}.delta.{}", var_base, field_name, comp));
-        let sin_from = sin(param_sym.clone());
-        let cos_from = cos(param_sym);
-        let sin_to = symbol(&format!("{}.{}.delta_sincos.0.{}", var_base, field_name, comp));
-        let cos_to = symbol(&format!("{}.{}.delta_sincos.1.{}", var_base, field_name, comp));
-        subs.push((sin_from, sin_to));
-        subs.push((cos_from, cos_to));
-    }
 
     subs
 }
@@ -5419,7 +5387,6 @@ mod nested_path_tests {
             euler_angle_fields: Vec::new(),
             universal_euler_angle_fields: Vec::new(),
             universal_rotvec_fields: Vec::new(),
-            substitutions: Vec::new(),
             constraint_index_field: None,
             self_block_field: None,
         }

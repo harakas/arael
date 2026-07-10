@@ -77,10 +77,6 @@ struct SymLayout {
     euler_angle_fields: Vec<String>,  // field names detected as SimpleEulerAngleParam
     universal_euler_angle_fields: Vec<String>, // field names detected as EulerAngleParam
     universal_rotvec_fields: Vec<String>, // field names detected as QuaternionParam (rotation-vector delta)
-    /// Symbolic substitutions: (from_expr, to_expr) applied before CSE.
-    /// Stored as string pairs for thread-safe registry storage.
-    #[allow(dead_code)]
-    substitutions: Vec<(String, String)>, // (from_sym_str, to_sym_str)
     /// Field name of `#[arael(constraint_index)]` u32 field, if present.
     constraint_index_field: Option<String>,
     /// Field name of the struct's `SelfBlock<Self>` — detected automatically
@@ -611,33 +607,14 @@ fn model_attribute(input: &mut syn::DeriveInput) -> syn::Result<TokenStream2> {
                     name, param_count, if param_count == 1 { "" } else { "s" })));
     }
 
-    // Build symbolic substitutions for euler_angles fields
-    let mut substitutions_reg: Vec<(String, String)> = Vec::new();
-    for ea_field in &euler_angle_fields_reg {
-        // These substitutions will be applied with a variable base prefix later.
-        // Store them as template patterns with the field name as placeholder.
-        // sin(FIELD.work().x) -> FIELD_sincos.0.x, etc.
-        for (comp, _idx) in [("x", 0), ("y", 1), ("z", 2)] {
-            let sin_from = format!("SIN({}.work().{})", ea_field, comp);
-            let sin_to = format!("{}_sincos.0.{}", ea_field, comp);
-            let cos_from = format!("COS({}.work().{})", ea_field, comp);
-            let cos_to = format!("{}_sincos.1.{}", ea_field, comp);
-            substitutions_reg.push((sin_from, sin_to));
-            substitutions_reg.push((cos_from, cos_to));
-        }
-    }
-
     // Register injected fields in sym layout
     for ea_field in &euler_angle_fields_reg {
-        sym_fields.push((format!("{}_sincos", ea_field), SymFieldType::Skip));
         sym_fields.push((format!("{}_rotation_matrix", ea_field), SymFieldType::Mat3));
     }
     for ea_field in &universal_euler_angle_fields_reg {
         sym_fields.push((format!("{}_ref_rotation", ea_field), SymFieldType::Skip));
         sym_fields.push((format!("{}_delta", ea_field), SymFieldType::Skip));
-        sym_fields.push((format!("{}_sincos", ea_field), SymFieldType::Skip));
         sym_fields.push((format!("{}_rotation_matrix", ea_field), SymFieldType::Mat3));
-        sym_fields.push((format!("{}_delta_sincos", ea_field), SymFieldType::Skip));
     }
 
     registry_store(&name.to_string(), SymLayout {
@@ -648,7 +625,6 @@ fn model_attribute(input: &mut syn::DeriveInput) -> syn::Result<TokenStream2> {
         euler_angle_fields: euler_angle_fields_reg.clone(),
         universal_euler_angle_fields: universal_euler_angle_fields_reg.clone(),
         universal_rotvec_fields: universal_rotvec_fields_reg.clone(),
-        substitutions: substitutions_reg,
         constraint_index_field: constraint_index_field_reg,
         self_block_field: self_block_field_reg,
     }).map_err(|msg| syn::Error::new_spanned(name, msg))?;
@@ -717,7 +693,6 @@ fn emit_trivial_model_for_enum(input: &mut syn::DeriveInput) -> syn::Result<Toke
         euler_angle_fields: Vec::new(),
         universal_euler_angle_fields: Vec::new(),
         universal_rotvec_fields: Vec::new(),
-        substitutions: Vec::new(),
         constraint_index_field: None,
         self_block_field: None,
     }).map_err(|msg| syn::Error::new_spanned(name, msg))?;

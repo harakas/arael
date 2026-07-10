@@ -420,16 +420,16 @@ impl<T: ParamType> Model for Param<T> {
 }
 
 // ---------------------------------------------------------------------------
-// SimpleEulerAngleParam -- euler angles with precomputed sincos + rotation matrix
+// SimpleEulerAngleParam -- euler angles with precomputed rotation matrix
 // ---------------------------------------------------------------------------
 
 use crate::vect::vect3;
 use crate::matrix::matrix3;
 
-/// Euler angle parameter with precomputed sin/cos and rotation matrix.
+/// Euler angle parameter with a precomputed rotation matrix.
 ///
 /// Stores roll/pitch/yaw (x/y/z) as a `vect3<T>`. On each update the
-/// framework precomputes `sincos` and the full 3x3 rotation matrix so
+/// framework precomputes the full 3x3 rotation matrix and its derivative so
 /// that constraint code can reference them without redundant trig calls.
 ///
 /// Convention: x = roll, y = pitch, z = yaw. Axes: x = forward, y = left,
@@ -443,7 +443,6 @@ pub struct SimpleEulerAngleParam<T: crate::utils::Float> {
     pub value: vect3<T>,
     work: vect3<T>,
     index: u32,
-    #[doc(hidden)] pub sincos: (vect3<T>, vect3<T>),
     #[doc(hidden)] pub rotation_matrix: matrix3<T>,
     /// Precomputed d(rotation_matrix)/d(value.{x,y,z}) -- the pose rotation
     /// Jacobian, so constraints that differentiate through the rotation read it
@@ -458,7 +457,6 @@ impl<T: crate::utils::Float> Default for SimpleEulerAngleParam<T> {
             value: vect3::<T>::default(),
             work: vect3::<T>::default(),
             index: u32::MAX,
-            sincos: (vect3::<T>::default(), vect3::<T>::default()),
             rotation_matrix: matrix3::<T>::identity(),
             rotation_matrix_deriv: [matrix3::<T>::identity(),
                                     matrix3::<T>::identity(),
@@ -488,16 +486,14 @@ impl<T: crate::utils::Float> SimpleEulerAngleParam<T> {
             for (k, o) in out.iter_mut().enumerate() { *o = self.index + k as u32; }
         }
     }
-    /// Precompute sincos and rotation matrix from current work value.
+    /// Precompute the rotation matrix and its derivative from current work value.
     #[doc(hidden)]
     pub fn __precompute(&mut self) {
-        self.sincos = self.work.sincos();
-        self.rotation_matrix = matrix3::<T>::rotation_from_euler_angles_sincos(
-            self.sincos.0, self.sincos.1);
+        let (s, c) = self.work.sincos();
+        self.rotation_matrix = matrix3::<T>::rotation_from_euler_angles_sincos(s, c);
         // Pose rotation Jacobian: dR/d(value.k), read once per pose by the
         // constraint Jacobian instead of rebuilt from sincos per observation.
-        self.rotation_matrix_deriv = matrix3::<T>::rotation_from_euler_angles_sincos_deriv(
-            self.sincos.0, self.sincos.1);
+        self.rotation_matrix_deriv = matrix3::<T>::rotation_from_euler_angles_sincos_deriv(s, c);
     }
 }
 
@@ -621,14 +617,12 @@ pub struct EulerAngleParam<T: crate::utils::Float> {
     index: u32,
     #[doc(hidden)] pub ref_rotation: matrix3<T>,
     #[doc(hidden)] pub delta: vect3<T>,
-    #[doc(hidden)] pub sincos: (vect3<T>, vect3<T>),
     #[doc(hidden)] pub rotation_matrix: matrix3<T>,
     /// Precomputed d(rotation_matrix)/d(delta.{x,y,z}) -- the pose rotation
     /// Jacobian, so constraints that differentiate through the rotation read it
     /// once per pose instead of rebuilding R_ref * dR(delta)/ddelta per
     /// observation.
     #[doc(hidden)] pub rotation_matrix_deriv: [matrix3<T>; 3],
-    #[doc(hidden)] pub delta_sincos: (vect3<T>, vect3<T>),
 }
 
 impl<T: crate::utils::Float> Default for EulerAngleParam<T> {
@@ -640,12 +634,10 @@ impl<T: crate::utils::Float> Default for EulerAngleParam<T> {
             index: u32::MAX,
             ref_rotation: matrix3::<T>::identity(),
             delta: vect3::<T>::default(),
-            sincos: (vect3::<T>::default(), vect3::<T>::default()),
             rotation_matrix: matrix3::<T>::identity(),
             rotation_matrix_deriv: [matrix3::<T>::identity(),
                                     matrix3::<T>::identity(),
                                     matrix3::<T>::identity()],
-            delta_sincos: (vect3::<T>::default(), vect3::<T>::default()),
         }
     }
 }
@@ -677,23 +669,20 @@ impl<T: crate::utils::Float> EulerAngleParam<T> {
             * matrix3::<T>::rotation_from_euler_angles(self.delta);
         self.delta = vect3::<T>::default();
     }
-    /// Precompute composed rotation, sincos, work from current delta + ref_rotation.
+    /// Precompute composed rotation and work angles from current delta + ref_rotation.
     #[doc(hidden)]
     pub fn __precompute(&mut self) {
-        self.delta_sincos = self.delta.sincos();
-        let dea_rot = matrix3::<T>::rotation_from_euler_angles_sincos(
-            self.delta_sincos.0, self.delta_sincos.1);
+        let (s, c) = self.delta.sincos();
+        let dea_rot = matrix3::<T>::rotation_from_euler_angles_sincos(s, c);
         self.rotation_matrix = self.ref_rotation * dea_rot;
         // Pose rotation Jacobian: the composed rotation is linear in the delta
         // rotation, so d(R_ref*R(d))/dd.k = R_ref * dR(d)/dd.k. Read once per
         // pose by the constraint Jacobian instead of composed per observation.
-        let dea_rot_deriv = matrix3::<T>::rotation_from_euler_angles_sincos_deriv(
-            self.delta_sincos.0, self.delta_sincos.1);
+        let dea_rot_deriv = matrix3::<T>::rotation_from_euler_angles_sincos_deriv(s, c);
         self.rotation_matrix_deriv = [self.ref_rotation * dea_rot_deriv[0],
                                       self.ref_rotation * dea_rot_deriv[1],
                                       self.ref_rotation * dea_rot_deriv[2]];
         self.work = self.rotation_matrix.get_euler_angles();
-        self.sincos = self.work.sincos();
     }
 }
 
@@ -853,13 +842,11 @@ pub struct QuaternionParam<T: crate::utils::Float> {
     index: u32,
     #[doc(hidden)] pub ref_rotation: matrix3<T>,
     #[doc(hidden)] pub delta: vect3<T>,
-    #[doc(hidden)] pub sincos: (vect3<T>, vect3<T>),
     #[doc(hidden)] pub rotation_matrix: matrix3<T>,
     /// Precomputed d(rotation_matrix)/d(delta.{x,y,z}) -- the pose rotation
     /// Jacobian, so constraints that differentiate through the retraction read
     /// it once per pose instead of recomputing it per observation.
     #[doc(hidden)] pub rotation_matrix_deriv: [matrix3<T>; 3],
-    #[doc(hidden)] pub delta_sincos: (vect3<T>, vect3<T>),
 }
 
 impl<T: crate::utils::Float> Default for QuaternionParam<T> {
@@ -872,12 +859,10 @@ impl<T: crate::utils::Float> Default for QuaternionParam<T> {
             index: u32::MAX,
             ref_rotation: matrix3::<T>::identity(),
             delta: vect3::<T>::default(),
-            sincos: (vect3::<T>::default(), vect3::<T>::default()),
             rotation_matrix: matrix3::<T>::identity(),
             rotation_matrix_deriv: [matrix3::<T>::identity(),
                                     matrix3::<T>::identity(),
                                     matrix3::<T>::identity()],
-            delta_sincos: (vect3::<T>::default(), vect3::<T>::default()),
         }
     }
 }
@@ -931,8 +916,6 @@ impl<T: crate::utils::Float> QuaternionParam<T> {
                                       self.ref_rotation * d[1],
                                       self.ref_rotation * d[2]];
         self.work = self.rotation_matrix.get_euler_angles();
-        self.sincos = self.work.sincos();
-        self.delta_sincos = self.delta.sincos();
     }
 }
 
