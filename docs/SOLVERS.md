@@ -21,11 +21,11 @@ parameter vector.
 
 | Backend (`solve_with(&mut ..., &cfg)`) | Free function | When |
 |---|---|---|
-| **`SparseFaer::new()` / `SparseFaerF32::new()`** | **`solve_sparse_faer[_f32]`** | **default** (= the root's `solve_sparse`). Any non-trivial problem -- SLAM, bundle adjustment, sketch solver, anything with > ~10 parameters or a sparse Hessian structure. Sparsity pattern discovered once, indexed assembly after |
+| **`SparseFaer::<T>::new()`** (`T` = `f64`/`f32`) | **`solve_sparse_faer[_f32]`** | **default** (= the root's `solve_sparse`). Any non-trivial problem -- SLAM, bundle adjustment, sketch solver, anything with > ~10 parameters or a sparse Hessian structure. Sparsity pattern discovered once, indexed assembly after |
 | `Dense` | `solve[_f32]` | dense nalgebra Cholesky (= the root's `solve_dense`): low parameter counts, or when the Hessian is actually dense and small |
 | `Band::new(kd)` | `solve_band[_f32]` | **only** when the Hessian is genuinely block-tridiagonal with a known half-bandwidth `kd` (pose-only localisation, smoother-like problems). ~10x faster than dense at 500 poses but hard-errors on any off-band element |
 | `BandLapack::new(kd)` | `solve_band_lapack[_f32]` | the same band solve through LAPACK `dpbsv`/`spbsv` (feature `lapack`) -- for LAPACK-standardised environments |
-| `SparseEigen::new()` / `SparseEigenF32::new()` | `solve_sparse_eigen[_f32]` | Eigen `SimplicialLLT` through a C++ shim (feature `eigen`) -- for Eigen interop/comparison; measured well behind faer |
+| `SparseEigen::<T>::new()` | `solve_sparse_eigen[_f32]` | Eigen `SimplicialLLT` through a C++ shim (feature `eigen`) -- for Eigen interop/comparison; measured well behind faer |
 | `SparseCholmod::new()` | `solve_sparse_cholmod` | CHOLMOD simplicial Cholesky, LGPL (feature `cholmod`; f64 only) -- comparable to Eigen simplicial, behind faer |
 | `SparseCholmodSupernodal::new()` | `solve_sparse_cholmod_supernodal` | CHOLMOD supernodal Cholesky (feature `cholmod-gpl`; f64 only). **License warning: the Supernodal module is GPL**, unlike the LGPL simplicial one -- enabling it makes the binary subject to the GPL. The one backend measured faster than faer: ~1.8x on dense-fill Hessians (the 300-pose SLAM benchmark) |
 | `Sparse::new()` / `SparseDirect::new()` | `solve_sparse` / `solve_sparse_direct` | COO / direct-CSC assembly over a DENSE solve -- validation baselines for the assembly paths, not for production. Note the free `solve_sparse` is this baseline; the root's `.solve_sparse()` method is faer |
@@ -54,7 +54,7 @@ the solver actually consumes) -- you never write them by hand.
 `solve_dense` = `solve_with(Dense)` for small or dense problems (see
 the backend table above). The generated methods match the root's
 precision: on an `#[arael(root, f32)]` model they take `f32` configs
-and `solve_sparse` uses `SparseFaerF32`.
+and `solve_sparse` uses `SparseFaer<f32>`.
 
 ## Advanced usage
 

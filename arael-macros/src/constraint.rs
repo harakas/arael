@@ -4512,13 +4512,13 @@ pub fn generate_root_methods(
         (
             quote! { serialize32 },
             quote! { deserialize32 },
-            quote! { arael::simple_lm::SparseFaerF32::new() },
+            quote! { arael::simple_lm::SparseFaer::<f32>::new() },
         )
     } else {
         (
             quote! { serialize64 },
             quote! { deserialize64 },
-            quote! { arael::simple_lm::SparseFaer::new() },
+            quote! { arael::simple_lm::SparseFaer::<f64>::new() },
         )
     };
 

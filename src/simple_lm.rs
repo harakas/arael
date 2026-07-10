@@ -1461,7 +1461,7 @@ pub fn solve_sparse_direct(x0: &[f64], problem: &mut impl LmProblem<f64>, config
 // ---------------------------------------------------------------------------
 
 /// Sparse Cholesky solver via faer crate (f64).
-pub struct SparseFaer {
+pub struct SparseFaer<T = f64> {
     symbolic: Option<faer::sparse::linalg::cholesky::SymbolicCholesky<usize>>,
     positions: Option<Vec<usize>>,
     // Buffers reused across solve_damped calls (every iteration and every
@@ -1469,18 +1469,21 @@ pub struct SparseFaer {
     // the usize copy of the row indices, the L-factor storage, and both
     // faer scratch buffers are sized once and reused.
     row_idx_usize: Vec<usize>,
-    l_vals: Vec<f64>,
+    l_vals: Vec<T>,
     factor_mem: Vec<std::mem::MaybeUninit<u8>>,
     solve_mem: Vec<std::mem::MaybeUninit<u8>>,
 }
 
-impl Default for SparseFaer {
+/// Alias of [`SparseFaer<f32>`].
+pub type SparseFaerF32 = SparseFaer<f32>;
+
+impl<T> Default for SparseFaer<T> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl SparseFaer {
+impl<T> SparseFaer<T> {
     pub fn new() -> Self {
         SparseFaer {
             symbolic: None,
@@ -1493,9 +1496,9 @@ impl SparseFaer {
     }
 }
 
-impl LmSolver<f64> for SparseFaer {
-    type Matrix = SparseMatrix<f64>;
-    fn matrix_nonfinite_count(&self, matrix: &SparseMatrix<f64>) -> usize {
+impl<T: crate::utils::Float + faer::traits::RealField> LmSolver<T> for SparseFaer<T> {
+    type Matrix = SparseMatrix<T>;
+    fn matrix_nonfinite_count(&self, matrix: &SparseMatrix<T>) -> usize {
         matrix.csc.vals.iter().filter(|v| !v.is_finite()).count()
     }
     fn reset(&mut self) {
@@ -1505,11 +1508,11 @@ impl LmSolver<f64> for SparseFaer {
         // symbolic factorization is created.
     }
 
-    fn new_matrix(&self, n: usize) -> SparseMatrix<f64> {
+    fn new_matrix(&self, n: usize) -> SparseMatrix<T> {
         SparseMatrix { csc: CscMatrix::empty(n) }
     }
 
-    fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], matrix: &mut SparseMatrix<f64>) -> f64 {
+    fn compute(&mut self, problem: &mut dyn LmProblem<T>, params: &[T], grad: &mut [T], matrix: &mut SparseMatrix<T>) -> T {
         if let Some(positions) = &self.positions {
             problem.calc_grad_hessian_sparse_indexed(params, grad, &mut matrix.csc.vals, positions)
         } else {
@@ -1524,14 +1527,14 @@ impl LmSolver<f64> for SparseFaer {
         }
     }
 
-    fn extract_diagonal(&self, matrix: &SparseMatrix<f64>, diagonal: &mut [f64]) {
+    fn extract_diagonal(&self, matrix: &SparseMatrix<T>, diagonal: &mut [T]) {
         for i in 0..diagonal.len() {
             diagonal[i] = matrix.csc.vals[matrix.csc.diag_pos[i]];
         }
     }
 
-    fn solve_damped(&mut self, n: usize, matrix: &mut SparseMatrix<f64>, diagonal: &[f64], lambda: f64, grad: &[f64], delta: &mut [f64]) -> bool {
-        for i in 0..n { matrix.csc.vals[matrix.csc.diag_pos[i]] = (1.0 + lambda) * diagonal[i]; }
+    fn solve_damped(&mut self, n: usize, matrix: &mut SparseMatrix<T>, diagonal: &[T], lambda: T, grad: &[T], delta: &mut [T]) -> bool {
+        for i in 0..n { matrix.csc.vals[matrix.csc.diag_pos[i]] = (T::one() + lambda) * diagonal[i]; }
         use faer::sparse::linalg::cholesky::*;
 
         // First call: convert the pattern to faer's usize row indices, run
@@ -1556,13 +1559,13 @@ impl LmSolver<f64> for SparseFaer {
                 Err(_) => return false,
             }
             let symbolic = self.symbolic.as_ref().unwrap();
-            self.l_vals.resize(symbolic.len_val(), 0.0);
-            let factor_scratch = symbolic.factorize_numeric_llt_scratch::<f64>(
+            self.l_vals.resize(symbolic.len_val(), T::zero());
+            let factor_scratch = symbolic.factorize_numeric_llt_scratch::<T>(
                 faer::Par::Seq,
                 faer::Spec::default(),
             );
             self.factor_mem.resize(factor_scratch.unaligned_bytes_required(), std::mem::MaybeUninit::uninit());
-            let solve_scratch = symbolic.solve_in_place_scratch::<f64>(1, faer::Par::Seq);
+            let solve_scratch = symbolic.solve_in_place_scratch::<T>(1, faer::Par::Seq);
             self.solve_mem.resize(solve_scratch.unaligned_bytes_required(), std::mem::MaybeUninit::uninit());
         }
         let symbolic = self.symbolic.as_ref().unwrap();
@@ -1614,146 +1617,6 @@ impl LmSolver<f64> for SparseFaer {
 /// Solve with faer sparse Cholesky backend (f64).
 pub fn solve_sparse_faer(x0: &[f64], problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> LmResult<f64> {
     lm_solve(x0, &mut SparseFaer::new(), problem, config)
-}
-
-/// faer sparse Cholesky solver (f32).
-pub struct SparseFaerF32 {
-    symbolic: Option<faer::sparse::linalg::cholesky::SymbolicCholesky<usize>>,
-    positions: Option<Vec<usize>>,
-    // Buffers reused across solve_damped calls; see SparseFaer.
-    row_idx_usize: Vec<usize>,
-    l_vals: Vec<f32>,
-    factor_mem: Vec<std::mem::MaybeUninit<u8>>,
-    solve_mem: Vec<std::mem::MaybeUninit<u8>>,
-}
-
-impl Default for SparseFaerF32 {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl SparseFaerF32 {
-    pub fn new() -> Self {
-        SparseFaerF32 {
-            symbolic: None,
-            positions: None,
-            row_idx_usize: Vec::new(),
-            l_vals: Vec::new(),
-            factor_mem: Vec::new(),
-            solve_mem: Vec::new(),
-        }
-    }
-}
-
-impl LmSolver<f32> for SparseFaerF32 {
-    type Matrix = SparseMatrix<f32>;
-    fn reset(&mut self) {
-        self.positions = None;
-        self.symbolic = None;
-    }
-
-    fn new_matrix(&self, n: usize) -> SparseMatrix<f32> {
-        SparseMatrix { csc: CscMatrix::empty(n) }
-    }
-
-    fn compute(&mut self, problem: &mut dyn LmProblem<f32>, params: &[f32], grad: &mut [f32], matrix: &mut SparseMatrix<f32>) -> f32 {
-        if let Some(positions) = &self.positions {
-            return problem.calc_grad_hessian_sparse_indexed(params, grad, &mut matrix.csc.vals, positions);
-        }
-        let n = matrix.csc.n;
-        let mut coo = CooMatrix::new(n);
-        let cost = problem.calc_grad_hessian_sparse(params, grad, &mut coo);
-        let (csc, positions) = coo.to_csc_with_map();
-        self.positions = Some(positions);
-        matrix.csc = csc;
-        cost
-    }
-
-    fn extract_diagonal(&self, matrix: &SparseMatrix<f32>, diagonal: &mut [f32]) {
-        for i in 0..diagonal.len() {
-            diagonal[i] = matrix.csc.vals[matrix.csc.diag_pos[i]];
-        }
-    }
-
-    fn matrix_nonfinite_count(&self, matrix: &SparseMatrix<f32>) -> usize {
-        matrix.csc.vals.iter().filter(|v| !v.is_finite()).count()
-    }
-
-    fn solve_damped(&mut self, n: usize, matrix: &mut SparseMatrix<f32>, diagonal: &[f32], lambda: f32, grad: &[f32], delta: &mut [f32]) -> bool {
-        for i in 0..n { matrix.csc.vals[matrix.csc.diag_pos[i]] = (1.0 + lambda) * diagonal[i]; }
-        use faer::sparse::linalg::cholesky::*;
-
-        // First call: convert the pattern, run the symbolic factorization,
-        // size the reusable buffers (see SparseFaer for details).
-        if self.symbolic.is_none() {
-            self.row_idx_usize.clear();
-            self.row_idx_usize.extend(matrix.csc.row_idx.iter().map(|&r| r as usize));
-            let symbolic_ref = faer::sparse::SymbolicSparseColMatRef::new_checked(
-                n, n,
-                &matrix.csc.col_ptr,
-                None,
-                &self.row_idx_usize,
-            );
-            let sym = factorize_symbolic_cholesky(
-                symbolic_ref,
-                faer::Side::Upper,
-                SymmetricOrdering::Amd,
-                CholeskySymbolicParams::default(),
-            );
-            match sym {
-                Ok(s) => self.symbolic = Some(s),
-                Err(_) => return false,
-            }
-            let symbolic = self.symbolic.as_ref().unwrap();
-            self.l_vals.resize(symbolic.len_val(), 0.0);
-            let factor_scratch = symbolic.factorize_numeric_llt_scratch::<f32>(
-                faer::Par::Seq,
-                faer::Spec::default(),
-            );
-            self.factor_mem.resize(factor_scratch.unaligned_bytes_required(), std::mem::MaybeUninit::uninit());
-            let solve_scratch = symbolic.solve_in_place_scratch::<f32>(1, faer::Par::Seq);
-            self.solve_mem.resize(solve_scratch.unaligned_bytes_required(), std::mem::MaybeUninit::uninit());
-        }
-        let symbolic = self.symbolic.as_ref().unwrap();
-
-        let symbolic_ref = faer::sparse::SymbolicSparseColMatRef::new_checked(
-            n, n,
-            &matrix.csc.col_ptr,
-            None,
-            &self.row_idx_usize,
-        );
-        let mat_ref = faer::sparse::SparseColMatRef::new(symbolic_ref, &matrix.csc.vals);
-
-        let stack = faer::dyn_stack::MemStack::new(&mut self.factor_mem);
-        let llt = symbolic.factorize_numeric_llt(
-            &mut self.l_vals,
-            mat_ref,
-            faer::Side::Upper,
-            faer::linalg::cholesky::llt::factor::LltRegularization::default(),
-            faer::Par::Seq,
-            stack,
-            faer::Spec::default(),
-        );
-
-        let llt = match llt {
-            Ok(l) => l,
-            Err(_) => return false,
-        };
-
-        delta.copy_from_slice(grad);
-        let rhs = faer::col::ColMut::from_slice_mut(delta);
-        let solve_stack = faer::dyn_stack::MemStack::new(&mut self.solve_mem);
-
-        llt.solve_in_place_with_conj(
-            faer::Conj::No,
-            rhs.as_mat_mut(),
-            faer::Par::Seq,
-            solve_stack,
-        );
-
-        true
-    }
 }
 
 /// Solve with faer sparse Cholesky backend (f32).
@@ -1827,39 +1690,83 @@ fn eigen_ffi_solve<T>(
     }
 }
 
-/// Eigen SimplicialLLT sparse Cholesky solver (f64).
+/// Scalar dispatch for the Eigen LLT shim: implemented by `f64` and
+/// `f32`, selecting the per-precision extern entry points. An
+/// implementation detail of [`SparseEigen`].
 #[cfg(feature = "eigen")]
-pub struct SparseEigen {
-    handle: *mut std::ffi::c_void,
-    positions: Option<Vec<usize>>,
+pub trait EigenScalar: Sized {
+    #[doc(hidden)]
+    fn llt_create() -> *mut std::ffi::c_void;
+    #[doc(hidden)]
+    fn llt_destroy(handle: *mut std::ffi::c_void);
+    #[doc(hidden)]
+    const LLT_SOLVE: unsafe extern "C" fn(
+        *mut std::ffi::c_void, i32, i32, *const i64, *const i32,
+        *const Self, *const Self, *mut Self) -> bool;
 }
 
 #[cfg(feature = "eigen")]
-impl SparseEigen {
+impl EigenScalar for f64 {
+    fn llt_create() -> *mut std::ffi::c_void { unsafe { eigen_llt_f64_create() } }
+    fn llt_destroy(handle: *mut std::ffi::c_void) { unsafe { eigen_llt_f64_destroy(handle) } }
+    const LLT_SOLVE: unsafe extern "C" fn(
+        *mut std::ffi::c_void, i32, i32, *const i64, *const i32,
+        *const f64, *const f64, *mut f64) -> bool = eigen_llt_f64_solve;
+}
+
+#[cfg(feature = "eigen")]
+impl EigenScalar for f32 {
+    fn llt_create() -> *mut std::ffi::c_void { unsafe { eigen_llt_f32_create() } }
+    fn llt_destroy(handle: *mut std::ffi::c_void) { unsafe { eigen_llt_f32_destroy(handle) } }
+    const LLT_SOLVE: unsafe extern "C" fn(
+        *mut std::ffi::c_void, i32, i32, *const i64, *const i32,
+        *const f32, *const f32, *mut f32) -> bool = eigen_llt_f32_solve;
+}
+
+/// Eigen SimplicialLLT sparse Cholesky solver, generic over the scalar
+/// (`f64` / `f32`).
+#[cfg(feature = "eigen")]
+pub struct SparseEigen<T: EigenScalar = f64> {
+    handle: *mut std::ffi::c_void,
+    positions: Option<Vec<usize>>,
+    _scalar: std::marker::PhantomData<T>,
+}
+
+/// Alias of [`SparseEigen<f32>`].
+#[cfg(feature = "eigen")]
+pub type SparseEigenF32 = SparseEigen<f32>;
+
+#[cfg(feature = "eigen")]
+impl<T: EigenScalar> SparseEigen<T> {
     pub fn new() -> Self {
-        SparseEigen { handle: unsafe { eigen_llt_f64_create() }, positions: None }
+        SparseEigen { handle: T::llt_create(), positions: None, _scalar: std::marker::PhantomData }
     }
 }
 
 #[cfg(feature = "eigen")]
-impl Drop for SparseEigen {
-    fn drop(&mut self) { unsafe { eigen_llt_f64_destroy(self.handle); } }
+impl<T: EigenScalar> Default for SparseEigen<T> {
+    fn default() -> Self { Self::new() }
 }
 
 #[cfg(feature = "eigen")]
-impl LmSolver<f64> for SparseEigen {
-    type Matrix = SparseMatrix<f64>;
+impl<T: EigenScalar> Drop for SparseEigen<T> {
+    fn drop(&mut self) { T::llt_destroy(self.handle); }
+}
+
+#[cfg(feature = "eigen")]
+impl<T: EigenScalar + crate::utils::Float> LmSolver<T> for SparseEigen<T> {
+    type Matrix = SparseMatrix<T>;
     fn reset(&mut self) {
         self.positions = None;
     }
-    fn matrix_nonfinite_count(&self, matrix: &SparseMatrix<f64>) -> usize {
+    fn matrix_nonfinite_count(&self, matrix: &SparseMatrix<T>) -> usize {
         matrix.csc.vals.iter().filter(|v| !v.is_finite()).count()
     }
 
-    fn new_matrix(&self, n: usize) -> SparseMatrix<f64> {
+    fn new_matrix(&self, n: usize) -> SparseMatrix<T> {
         SparseMatrix { csc: CscMatrix::empty(n) }
     }
-    fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], matrix: &mut SparseMatrix<f64>) -> f64 {
+    fn compute(&mut self, problem: &mut dyn LmProblem<T>, params: &[T], grad: &mut [T], matrix: &mut SparseMatrix<T>) -> T {
         if let Some(positions) = &self.positions {
             problem.calc_grad_hessian_sparse_indexed(params, grad, &mut matrix.csc.vals, positions)
         } else {
@@ -1872,66 +1779,12 @@ impl LmSolver<f64> for SparseEigen {
             cost
         }
     }
-    fn extract_diagonal(&self, matrix: &SparseMatrix<f64>, diagonal: &mut [f64]) {
+    fn extract_diagonal(&self, matrix: &SparseMatrix<T>, diagonal: &mut [T]) {
         for i in 0..diagonal.len() { diagonal[i] = matrix.csc.vals[matrix.csc.diag_pos[i]]; }
     }
-    fn solve_damped(&mut self, n: usize, matrix: &mut SparseMatrix<f64>, diagonal: &[f64], lambda: f64, grad: &[f64], delta: &mut [f64]) -> bool {
-        for i in 0..n { matrix.csc.vals[matrix.csc.diag_pos[i]] = (1.0 + lambda) * diagonal[i]; }
-        eigen_ffi_solve(eigen_llt_f64_solve, self.handle, &matrix.csc, grad, delta)
-    }
-}
-
-/// Eigen SimplicialLLT sparse Cholesky solver (f32).
-#[cfg(feature = "eigen")]
-pub struct SparseEigenF32 {
-    handle: *mut std::ffi::c_void,
-    positions: Option<Vec<usize>>,
-}
-
-#[cfg(feature = "eigen")]
-impl SparseEigenF32 {
-    pub fn new() -> Self {
-        SparseEigenF32 { handle: unsafe { eigen_llt_f32_create() }, positions: None }
-    }
-}
-
-#[cfg(feature = "eigen")]
-impl Drop for SparseEigenF32 {
-    fn drop(&mut self) { unsafe { eigen_llt_f32_destroy(self.handle); } }
-}
-
-#[cfg(feature = "eigen")]
-impl LmSolver<f32> for SparseEigenF32 {
-    type Matrix = SparseMatrix<f32>;
-    fn reset(&mut self) {
-        self.positions = None;
-    }
-    fn matrix_nonfinite_count(&self, matrix: &SparseMatrix<f32>) -> usize {
-        matrix.csc.vals.iter().filter(|v| !v.is_finite()).count()
-    }
-
-    fn new_matrix(&self, n: usize) -> SparseMatrix<f32> {
-        SparseMatrix { csc: CscMatrix::empty(n) }
-    }
-    fn compute(&mut self, problem: &mut dyn LmProblem<f32>, params: &[f32], grad: &mut [f32], matrix: &mut SparseMatrix<f32>) -> f32 {
-        if let Some(positions) = &self.positions {
-            problem.calc_grad_hessian_sparse_indexed(params, grad, &mut matrix.csc.vals, positions)
-        } else {
-            let n = matrix.csc.n;
-            let mut coo = CooMatrix::new(n);
-            let cost = problem.calc_grad_hessian_sparse(params, grad, &mut coo);
-            let (csc, positions) = coo.to_csc_with_map();
-            self.positions = Some(positions);
-            matrix.csc = csc;
-            cost
-        }
-    }
-    fn extract_diagonal(&self, matrix: &SparseMatrix<f32>, diagonal: &mut [f32]) {
-        for i in 0..diagonal.len() { diagonal[i] = matrix.csc.vals[matrix.csc.diag_pos[i]]; }
-    }
-    fn solve_damped(&mut self, n: usize, matrix: &mut SparseMatrix<f32>, diagonal: &[f32], lambda: f32, grad: &[f32], delta: &mut [f32]) -> bool {
-        for i in 0..n { matrix.csc.vals[matrix.csc.diag_pos[i]] = (1.0 + lambda) * diagonal[i]; }
-        eigen_ffi_solve(eigen_llt_f32_solve, self.handle, &matrix.csc, grad, delta)
+    fn solve_damped(&mut self, n: usize, matrix: &mut SparseMatrix<T>, diagonal: &[T], lambda: T, grad: &[T], delta: &mut [T]) -> bool {
+        for i in 0..n { matrix.csc.vals[matrix.csc.diag_pos[i]] = (T::one() + lambda) * diagonal[i]; }
+        eigen_ffi_solve(T::LLT_SOLVE, self.handle, &matrix.csc, grad, delta)
     }
 }
 

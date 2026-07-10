@@ -402,15 +402,15 @@ let result = model.solve_dense(&cfg);  // = solve_with(Dense)
 real problems the Hessian is sparse enough for sparse Cholesky, and
 faer is pure Rust with no external dependency. The generated methods
 match the root's precision: on an `#[arael(root, f32)]` model they take
-`f32` configs and `solve_sparse` uses `SparseFaerF32`.
+`f32` configs and `solve_sparse` uses `SparseFaer<f32>`.
 
 | Backend (`solve_with(&mut ..., &cfg)`) | Free function | What it is |
 |---|---|---|
-| **`SparseFaer::new()` / `SparseFaerF32::new()`** | **`solve_sparse_faer[_f32]`** | **default** (= `solve_sparse`): sparse Cholesky via faer, pure Rust; sparsity pattern discovered once, indexed assembly after |
+| **`SparseFaer::<T>::new()`** (`T` = `f64`/`f32`) | **`solve_sparse_faer[_f32]`** | **default** (= `solve_sparse`): sparse Cholesky via faer, pure Rust; sparsity pattern discovered once, indexed assembly after |
 | `Dense` | `solve[_f32]` | dense nalgebra Cholesky (= `solve_dense`): low parameter counts or genuinely dense problems |
 | `Band::new(kd)` | `solve_band[_f32]` | pure-Rust band Cholesky for block-tridiagonal Hessians (localization-like); hard-errors on off-band elements |
 | `BandLapack::new(kd)` | `solve_band_lapack[_f32]` | the same band solve through LAPACK `dpbsv`/`spbsv` (feature `lapack`) |
-| `SparseEigen::new()` / `SparseEigenF32::new()` | `solve_sparse_eigen[_f32]` | Eigen `SimplicialLLT` (feature `eigen`) |
+| `SparseEigen::<T>::new()` | `solve_sparse_eigen[_f32]` | Eigen `SimplicialLLT` (feature `eigen`) |
 | `SparseCholmod::new()` | `solve_sparse_cholmod` | CHOLMOD simplicial Cholesky, LGPL (feature `cholmod`; f64 only) |
 | `SparseCholmodSupernodal::new()` | `solve_sparse_cholmod_supernodal` | CHOLMOD supernodal Cholesky, **GPL-licensed module** (feature `cholmod-gpl`; f64 only); the one backend measured faster than faer on dense-fill Hessians (~1.8x on the 300-pose SLAM benchmark) |
 | `Sparse::new()` / `SparseDirect::new()` | `solve_sparse` / `solve_sparse_direct` | COO / direct-CSC assembly over a dense solve -- validation baselines, not for production. (The free `solve_sparse` is this baseline; the root's `.solve_sparse()` is faer) |
