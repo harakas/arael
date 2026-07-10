@@ -553,6 +553,28 @@ fn print_usage() {
     eprintln!("  --landmarks <N>                      (default: 240)");
 }
 
+// Env-gated Hessian sparsity bitmap: assemble J^T J at the current estimate and
+// write its nonzero (fill) pattern as an image -- one pixel per (row, col),
+// black where the Hessian has an entry, mirrored to the full symmetric matrix.
+// Enabled by SLAM_HESSIAN_BITMAP=<path.png> (or =1 for the default hessian.png).
+fn write_hessian_bitmap(path: &mut Path, out: &str) {
+    let mut params: std::vec::Vec<f64> = std::vec::Vec::new();
+    path.serialize64(&mut params);
+    let n = params.len();
+    let mut grad = vec![0.0f64; n];
+    let mut coo = arael::simple_lm::CooMatrix::new(n);
+    path.calc_grad_hessian_sparse(&params, &mut grad, &mut coo);
+    let mut img = image::GrayImage::from_pixel(n as u32, n as u32, image::Luma([255u8]));
+    for (&r, &c) in coo.rows.iter().zip(coo.cols.iter()) {
+        img.put_pixel(c, r, image::Luma([0])); // (col, row) = (x, y)
+        img.put_pixel(r, c, image::Luma([0])); // mirror the upper triangle to full
+    }
+    match img.save(out) {
+        Ok(()) => println!("Hessian fill bitmap: {n}x{n}, {} nonzeros -> {out}", coo.nnz()),
+        Err(e) => eprintln!("Hessian bitmap write failed ({out}): {e}"),
+    }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mut solver_name = "faer".to_string();
@@ -600,6 +622,12 @@ fn main() {
             gt_p.x, gt_p.y, gt_p.z, gt_e.x, gt_e.y, gt_e.z);
     }
     println!();
+
+    // Hessian sparsity bitmap (eyeball the fill), env-gated.
+    if let Ok(v) = std::env::var("SLAM_HESSIAN_BITMAP") {
+        let out = if v == "1" || v.is_empty() { "hessian.png".to_string() } else { v };
+        write_hessian_bitmap(&mut path, &out);
+    }
 
     // Graduated optimization: start with loose feature constraints, tighten
     println!("--- Optimization ---");
