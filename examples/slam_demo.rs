@@ -194,7 +194,7 @@ struct PosePair {
 
 // Root
 #[arael::model]
-#[arael(root)]
+#[arael(root, fast_atan)]
 struct Path {
     poses: refs::Deque<Pose>,
     landmarks: refs::Arena<PointLandmark>,
