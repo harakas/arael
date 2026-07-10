@@ -427,6 +427,26 @@ fn solve32(params: &[f32], path: &mut PathF, cfg: &arael::simple_lm::LmConfig<f3
     }
 }
 
+/// One full solve with per-phase timing gathered (LOC_TIMING mode).
+pub fn run_timed_once(scene: &Scene) -> arael::simple_lm::LmTiming {
+    let mut path = build(scene);
+    let mut params: Vec<f64> = Vec::new();
+    path.serialize64(&mut params);
+    let mut c = cfg(200);
+    c.gather_timing = true;
+    solve64(&params, &mut path, &c).timing.unwrap()
+}
+
+/// One full f32 solve with per-phase timing gathered (LOC_TIMING mode).
+pub fn run_timed_once_f32(scene: &Scene) -> arael::simple_lm::LmTiming {
+    let mut path = build_f32(scene);
+    let mut params: Vec<f32> = Vec::new();
+    path.serialize32(&mut params);
+    let mut c = cfg32(200, scene.poses.len());
+    c.gather_timing = true;
+    solve32(&params, &mut path, &c).timing.unwrap()
+}
+
 pub fn run_capped(scene: &Scene, max_iters: usize) -> Solution {
     let mut path = build(scene);
     let mut params: Vec<f64> = Vec::new();

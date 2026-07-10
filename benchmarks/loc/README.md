@@ -161,6 +161,8 @@ ROUNDS=10 cargo run --release                    # 60 poses (default)
 LOC_POSES=300 ROUNDS=5 cargo run --release       # larger tier
 LOC_ARAEL_SOLVER=faer cargo run --release        # arael on general sparse
 LOC_NO_MEM=1 cargo run --release                 # skip peak-memory subprocess
+LOC_TIMING=1 ROUNDS=100 cargo run --release      # arael f64-vs-f32 per-phase
+                                                 # steady-state timing table
 ```
 
 The C++ runners execute as subprocesses over an exported copy of the scene;

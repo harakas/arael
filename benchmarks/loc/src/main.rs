@@ -102,6 +102,67 @@ fn main() {
         return;
     }
 
+    // Phase-timing mode: interleaved f64/f32 arael solves with per-phase
+    // instrumentation (LmConfig::gather_timing), steady-state means with
+    // each phase's first call excluded. For chasing where a precision
+    // does or does not speed up.
+    if std::env::var("LOC_TIMING").map_or(false, |v| v == "1") {
+        let rounds: usize = std::env::var("ROUNDS").ok()
+            .and_then(|v| v.parse().ok()).unwrap_or(100);
+        let mut t64: Vec<arael::simple_lm::LmTiming> = Vec::new();
+        let mut t32: Vec<arael::simple_lm::LmTiming> = Vec::new();
+        for _ in 0..rounds {
+            t64.push(arael_runner::run_timed_once(&scene));
+            t32.push(arael_runner::run_timed_once_f32(&scene));
+        }
+        let steady = |ts: &[arael::simple_lm::LmTiming]| -> [(f64, usize, f64); 4] {
+            // (steady mean us, steady samples, mean first us) per phase
+            let mut out = [(0.0, 0usize, 0.0); 4];
+            let phases = |t: &arael::simple_lm::LmTiming| [
+                (t.assembly, t.first_assembly, t.assembly_count),
+                (t.linear_solve, t.first_linear_solve, t.linear_solve_count),
+                (t.cost_eval, t.first_cost_eval, t.cost_eval_count),
+                (t.advance, t.first_advance, t.advance_count),
+            ];
+            for k in 0..4 {
+                let (mut sum_us, mut n, mut first_us) = (0.0, 0usize, 0.0);
+                for t in ts {
+                    let (total, first, count) = phases(t)[k];
+                    if count >= 1 { first_us += first.as_secs_f64() * 1e6; }
+                    if count >= 2 {
+                        sum_us += (total - first).as_secs_f64() * 1e6;
+                        n += count - 1;
+                    }
+                }
+                out[k] = (if n > 0 { sum_us / n as f64 } else { 0.0 }, n,
+                          first_us / ts.len() as f64);
+            }
+            out
+        };
+        let s64 = steady(&t64);
+        let s32 = steady(&t32);
+        println!("phase timing, {} poses, {} interleaved rounds per precision, band kd=11",
+            scene.poses.len(), rounds);
+        println!("(steady-state mean per call, us; first call of each phase excluded and shown apart)");
+        println!("{:<14} {:>12} {:>12} {:>9} {:>14} {:>14}",
+            "phase", "f64 us", "f32 us", "f32/f64", "f64 1st-call", "f32 1st-call");
+        let names = ["assembly", "linear solve", "cost eval", "advance"];
+        for k in 0..4 {
+            println!("{:<14} {:>12.2} {:>12.2} {:>9.3} {:>14.2} {:>14.2}",
+                names[k], s64[k].0, s32[k].0,
+                if s64[k].0 > 0.0 { s32[k].0 / s64[k].0 } else { 0.0 },
+                s64[k].2, s32[k].2);
+        }
+        let full = |s: &[(f64, usize, f64); 4]| s.iter().map(|p| p.0).sum::<f64>();
+        println!("{:<14} {:>12.2} {:>12.2} {:>9.3}", "full iter",
+            full(&s64), full(&s32),
+            if full(&s64) > 0.0 { full(&s32) / full(&s64) } else { 0.0 });
+        println!("steady samples per phase: f64 {:?}, f32 {:?}",
+            s64.iter().map(|p| p.1).collect::<Vec<_>>(),
+            s32.iter().map(|p| p.1).collect::<Vec<_>>());
+        return;
+    }
+
     let init_sol = initial_solution(&scene);
     let initial_cost = scene::reference_cost(&scene, &init_sol);
     println!("scene: {} poses, {} landmarks (fixed), {} observations, {} odometry edges, {} parameters",

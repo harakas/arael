@@ -2,6 +2,8 @@
 name = "loc-bench"
 version = "0.1.0"
 edition = "2021"
+# plain `cargo run` stays the benchmark; fpbench is opt-in via --bin
+default-run = "loc-bench"
 publish = false
 
 # Standalone workspace, same pattern as benchmarks/slam and benchmarks/pgo.
