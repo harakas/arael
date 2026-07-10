@@ -22,7 +22,7 @@ dependencies = [
 
 [[package]]
 name = "arael"
-version = "0.6.3"
+version = "0.7.0"
 dependencies = [
  "arael-macros",
  "arael-sym",
@@ -39,7 +39,7 @@ dependencies = [
 
 [[package]]
 name = "arael-macros"
-version = "0.6.3"
+version = "0.7.0"
 dependencies = [
  "arael-sym",
  "arael-sym-macros",
@@ -50,14 +50,14 @@ dependencies = [
 
 [[package]]
 name = "arael-sym"
-version = "0.6.3"
+version = "0.7.0"
 dependencies = [
  "arael-sym-macros",
 ]
 
 [[package]]
 name = "arael-sym-macros"
-version = "0.6.3"
+version = "0.7.0"
 dependencies = [
  "proc-macro2",
  "quote",
