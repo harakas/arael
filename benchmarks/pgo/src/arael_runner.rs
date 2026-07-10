@@ -2,7 +2,7 @@
 // the precision is a compile-time property of the generated code).
 
 use crate::g2o::{Dataset, PoseIn};
-use arael::model::{Model, Param, SelfBlock, CrossBlock};
+use arael::model::{Param, SelfBlock, CrossBlock};
 use arael::refs::{self, Ref};
 use arael::vect::{vect2d, vect2f};
 

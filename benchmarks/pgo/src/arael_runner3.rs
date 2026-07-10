@@ -9,7 +9,7 @@
 
 use crate::g2o3::{matrix_to_quat, Dataset3, Pose3In};
 use arael::matrix::{matrix3d, matrix3f};
-use arael::model::{CrossBlock, EulerAngleParam, Model, Param, SelfBlock};
+use arael::model::{CrossBlock, EulerAngleParam, Param, SelfBlock};
 use arael::refs::{self, Ref};
 use arael::vect::{vect3d, vect3f};
 

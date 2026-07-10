@@ -82,11 +82,13 @@ Same as the pgo/bal benchmarks:
   each solver measured in a fresh process: arael, tiny-solver, and
   factrs via a single-solver subprocess of this binary; Ceres, SymForce,
   and g2o as their own subprocesses.
-- **Single core**, verified: threading env vars forced to 1 (Ceres's
-  SPARSE_NORMAL_CHOLESKY BLAS runs at 757% CPU otherwise -- its
-  `num_threads=1` option does not cover its BLAS), the process pinned to a
-  fixed core, and each subprocess's `Cpus_allowed_list` asserted equal to
-  that core.
+- **Single core**, verified: threading env vars exported to 1 before the
+  process starts -- openblas-pthread sizes its pool at library load,
+  before `main()` can set the vars, and those early threads escape the
+  main-thread CPU pin (Ceres's SPARSE_NORMAL_CHOLESKY BLAS runs at 757%
+  CPU without the caps; its `num_threads=1` option does not cover its
+  BLAS). The process is pinned to a fixed core and each subprocess's
+  `Cpus_allowed_list` is asserted equal to that core.
 
 **Problem-appropriate initial damping for every LM.** Damping-schedule
 strategy is a per-problem tuning knob, not an intrinsic property of a
@@ -126,18 +128,18 @@ comparison below).
 
 | system                        | total ms | iters  | ms/iter | 1st-iter ms | peak MB | final cost |
 |-------------------------------|---------:|-------:|--------:|------------:|--------:|-----------:|
-| arael LM f64                  |     14.5 |   3(3) |    4.83 |         7.0 |    13.2 |  3062.0482 |
-| arael LM f64 cholmod-gpl      |     14.0 |   3(3) |    4.66 |         6.3 |    18.0 |  3062.0482 |
-| arael LM f32                  |     14.5 |   3(3) |    4.84 |         6.9 |    10.5 |  3062.0482 |
-| tiny-solver LM               |    103.0 |      3 |   34.35 |        42.7 |    26.7 |  3062.0482 |
-| factrs LM                     |     37.3 |      3 |   12.44 |        16.4 |    24.4 |  3062.0482 |
-| ceres sparse_normal_cholesky  |     18.1 |   3(3) |    6.04 |        10.5 |    17.0 |  3062.0482 |
-| ceres sparse_schur            |     18.6 |   3(3) |    6.20 |        11.1 |    16.5 |  3062.0482 |
-| ceres iterative_schur         |     25.0 |   6(6) |    4.17 |         6.3 |    12.9 |  3067.3849 (RMSE 0.745 m) |
-| symforce LM f64               |     27.1 |   3(4) |    6.77 |        17.9 |    27.1 |  3062.0482 |
-| symforce LM f32               |     31.6 |   4(5) |    6.32 |        16.9 |    23.3 |  3062.0500 |
-| g2o LM                        |     14.1 |   3(3) |    4.71 |         7.2 |    16.5 |  3062.0482 |
-| gtsam LM                      |     31.7 |   3(3) |   10.56 |        15.5 |    47.4 |  3062.0482 |
+| arael LM f64                  |     14.4 |   3(3) |    4.79 |         6.5 |    13.2 |  3062.0482 |
+| arael LM f64 cholmod-gpl      |     12.2 |   3(3) |    4.07 |         5.8 |    17.8 |  3062.0482 |
+| arael LM f32                  |     12.9 |   3(3) |    4.28 |         6.0 |    10.5 |  3062.0482 |
+| tiny-solver LM               |     99.2 |      3 |   33.08 |        39.0 |    26.7 |  3062.0482 |
+| factrs LM                     |     36.4 |      3 |   12.12 |        16.1 |    24.4 |  3062.0482 |
+| ceres sparse_normal_cholesky  |     17.8 |   3(3) |    5.93 |        10.1 |    16.9 |  3062.0482 |
+| ceres sparse_schur            |     18.6 |   3(3) |    6.21 |        11.0 |    16.5 |  3062.0482 |
+| ceres iterative_schur         |     24.8 |   6(6) |    4.13 |         6.1 |    12.9 |  3067.3849 (RMSE 0.745 m) |
+| symforce LM f64               |     26.6 |   3(4) |    6.65 |        17.8 |    27.0 |  3062.0482 |
+| symforce LM f32               |     31.5 |   4(5) |    6.30 |        16.7 |    23.3 |  3062.0500 |
+| g2o LM                        |     14.0 |   3(3) |    4.67 |         7.1 |    16.4 |  3062.0482 |
+| gtsam LM                      |     30.6 |   3(3) |   10.21 |        15.1 |    47.4 |  3062.0482 |
 
 11/12 at the common optimum; ceres iterative_schur (inexact CG) does not
 reach the gate.
@@ -146,18 +148,18 @@ reach the gate.
 
 | system                        | total ms | iters  | ms/iter | 1st-iter ms | peak MB | final cost |
 |-------------------------------|---------:|-------:|--------:|------------:|--------:|-----------:|
-| arael LM f64                  |     41.2 |   3(3) |   13.73 |        18.8 |    25.3 |  7065.8806 |
-| arael LM f64 cholmod-gpl      |     34.9 |   3(3) |   11.64 |        15.9 |    30.3 |  7065.8806 |
-| arael LM f32                  |     38.3 |   3(3) |   12.77 |        17.8 |    19.2 |  7065.8815 |
-| tiny-solver LM               |    240.6 |      3 |   80.19 |        97.5 |    54.7 |  7065.8806 |
-| factrs LM                     |     89.8 |      3 |   29.94 |        40.6 |    48.8 |  7065.8806 |
-| ceres sparse_normal_cholesky  |     47.3 |   3(3) |   15.77 |        28.6 |    28.5 |  7065.8809 |
-| ceres sparse_schur            |     54.2 |   3(3) |   18.08 |        30.8 |    27.4 |  7065.8809 |
-| ceres iterative_schur         |    236.1 | 15(15) |   15.74 |        15.0 |    18.3 |  7066.3200 (RMSE 0.150 m) |
-| symforce LM f64               |     84.1 |   3(4) |   21.02 |        50.9 |    52.7 |  7065.8806 |
-| symforce LM f32               |    118.6 |   5(6) |   19.77 |        47.1 |    44.5 |  7065.8881 |
-| g2o LM                        |     38.3 |   3(3) |   12.76 |        19.3 |    30.3 |  7065.8806 |
-| gtsam LM                      |     85.4 |   3(3) |   28.45 |        39.9 |   107.3 |  7065.8806 |
+| arael LM f64                  |     40.5 |   3(3) |   13.49 |        19.0 |    25.3 |  7065.8806 |
+| arael LM f64 cholmod-gpl      |     33.6 |   3(3) |   11.21 |        15.1 |    30.0 |  7065.8806 |
+| arael LM f32                  |     35.3 |   3(3) |   11.77 |        16.3 |    19.2 |  7065.8815 |
+| tiny-solver LM               |    238.2 |      3 |   79.41 |        92.8 |    54.7 |  7065.8806 |
+| factrs LM                     |     89.1 |      3 |   29.72 |        40.3 |    48.8 |  7065.8806 |
+| ceres sparse_normal_cholesky  |     46.3 |   3(3) |   15.44 |        28.3 |    28.5 |  7065.8809 |
+| ceres sparse_schur            |     53.6 |   3(3) |   17.86 |        30.2 |    27.4 |  7065.8809 |
+| ceres iterative_schur         |    232.6 | 15(15) |   15.51 |        14.8 |    18.3 |  7066.3200 (RMSE 0.150 m) |
+| symforce LM f64               |     81.9 |   3(4) |   20.49 |        50.0 |    52.7 |  7065.8806 |
+| symforce LM f32               |    117.0 |   5(6) |   19.50 |        46.8 |    44.4 |  7065.8881 |
+| g2o LM                        |     37.4 |   3(3) |   12.48 |        18.7 |    30.3 |  7065.8806 |
+| gtsam LM                      |     84.7 |   3(3) |   28.23 |        39.9 |   107.3 |  7065.8806 |
 
 11/12 at the common optimum; ceres iterative_schur (inexact CG) does not
 reach the gate.
@@ -166,29 +168,30 @@ reach the gate.
 
 | system                        | total ms | iters  | ms/iter | 1st-iter ms | peak MB | final cost |
 |-------------------------------|---------:|-------:|--------:|------------:|--------:|-----------:|
-| arael LM f64                  |    303.0 |   3(3) |  101.00 |       117.7 |    92.2 | 24243.9094 |
-| arael LM f64 cholmod-gpl      |    178.0 |   3(3) |   59.34 |        73.6 |   102.5 | 24243.9094 |
-| arael LM f32                  |    233.1 |   3(3) |   77.70 |       101.4 |    63.4 | 24243.9103 |
-| tiny-solver LM               |    953.3 |      3 |  317.77 |       368.8 |   148.6 | 24243.9094 |
-| factrs LM                     |    468.9 |      3 |  156.30 |       188.6 |   186.0 | 24243.9094 |
-| ceres sparse_normal_cholesky  |    304.8 |   3(3) |  101.61 |       137.7 |   101.8 | 24243.9095 |
-| ceres sparse_schur            |    308.6 |   3(3) |  102.86 |       160.9 |    87.2 | 24243.9095 |
-| ceres iterative_schur         |    506.7 |   9(9) |   56.30 |        54.7 |    41.1 | 24244.9863 (RMSE 0.137 m) |
-| symforce LM f64               |    483.3 |   3(4) |  120.83 |       240.9 |   177.2 | 24243.9094 |
-| symforce LM f32               |    826.8 |   6(7) |  118.11 |       226.9 |   136.2 | 24244.0803 (RMSE 0.060 m) |
-| g2o LM                        |    233.8 |   3(3) |   77.94 |       112.4 |   114.4 | 24243.9094 |
-| gtsam LM                      |    502.1 |   3(3) |  167.35 |       225.9 |   607.9 | 24243.9094 |
+| arael LM f64                  |    302.6 |   3(3) |  100.88 |       117.3 |    92.2 | 24243.9094 |
+| arael LM f64 cholmod-gpl      |    261.4 |   3(3) |   87.15 |       103.0 |   102.4 | 24243.9094 |
+| arael LM f32                  |    232.2 |   3(3) |   77.40 |        95.3 |    63.4 | 24243.9103 |
+| tiny-solver LM               |    962.1 |      3 |  320.71 |       370.4 |   148.6 | 24243.9094 |
+| factrs LM                     |    470.7 |      3 |  156.91 |       190.5 |   186.0 | 24243.9094 |
+| ceres sparse_normal_cholesky  |    305.4 |   3(3) |  101.79 |       136.5 |   101.8 | 24243.9095 |
+| ceres sparse_schur            |    308.1 |   3(3) |  102.70 |       162.1 |    87.2 | 24243.9095 |
+| ceres iterative_schur         |    514.2 |   9(9) |   57.13 |        55.7 |    41.1 | 24244.9863 (RMSE 0.137 m) |
+| symforce LM f64               |    482.6 |   3(4) |  120.64 |       239.3 |   177.0 | 24243.9094 |
+| symforce LM f32               |    827.8 |   6(7) |  118.25 |       227.3 |   136.1 | 24244.0803 (RMSE 0.060 m) |
+| g2o LM                        |    234.7 |   3(3) |   78.22 |       110.7 |   114.4 | 24243.9094 |
+| gtsam LM                      |    504.6 |   3(3) |  168.19 |       223.3 |   607.7 | 24243.9094 |
 
 10/12 at the common optimum; ceres iterative_schur (inexact CG) and
 symforce f32 do not reach the gate.
 
 Every exact solver converges in 3 steps, so the tables compare per-step
-cost (ms/iter) directly. g2o edges ahead of arael's default faer row at
-the largest size -- its supernodal CHOLMOD factorization; the arael
-cholmod-gpl row, using the same supernodal module, moves arael back in
-front (see the sparse-backend comparison below). GTSAM reaches the same
-optimum but is the slowest exact solver per-step and, by a wide margin,
-the heaviest on memory (608 MB at 300 poses vs 92 for arael).
+cost (ms/iter) directly. g2o edges ahead of arael's default faer f64 row
+at the largest size -- its supernodal CHOLMOD factorization; the arael
+cholmod-gpl row, using the same supernodal module, closes most of that
+gap (87.2 vs 78.2 ms/iter), and arael f32 matches g2o outright (see the
+sparse-backend comparison below). GTSAM reaches the same optimum but is
+the slowest exact solver per-step and, by a wide margin, the heaviest on
+memory (608 MB at 300 poses vs 92 for arael).
 
 ### SLAM on the edge: Raspberry Pi
 
@@ -318,8 +321,8 @@ backend:
 
 | backend (`SLAM_ARAEL_SOLVER=`)        | feature        | ms/iter |
 |---------------------------------------|----------------|--------:|
-| CHOLMOD supernodal (`cholmod_gpl`)    | `cholmod-gpl`  |     ~65 |
-| faer (default)                        | --             |    ~116 |
+| CHOLMOD supernodal (`cholmod_gpl`)    | `cholmod-gpl`  |     ~87 |
+| faer (default)                        | --             |    ~101 |
 | Eigen SimplicialLLT (`eigen`)         | `eigen`        |    ~411 |
 | CHOLMOD simplicial (`cholmod`)        | `cholmod`      |    ~420 |
 
@@ -354,6 +357,7 @@ cmake -B cpp/build cpp && cmake --build cpp/build   # Ceres, g2o, GTSAM
 # add -DSYMFORCE_DIR=/path/to/symforce for the SymForce runner
 # (regenerate its factor headers with:
 #  symforce-venv/bin/python3 symforce_gen.py cpp/symforce_gen)
+export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1     # before load; see Methodology
 ROUNDS=3 cargo run --release                        # 60 poses (default)
 SLAM_POSES=300 ROUNDS=3 cargo run --release
 SLAM_SKIP_TINY=1 cargo run --release                # skip tiny-solver

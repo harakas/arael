@@ -19,7 +19,7 @@
 #[path = "../scene.rs"]
 mod scene;
 
-use arael::model::{CrossBlock, EulerAngleParam, Model, Param, QuaternionParam, SelfBlock, SimpleEulerAngleParam};
+use arael::model::{CrossBlock, EulerAngleParam, Param, QuaternionParam, SelfBlock, SimpleEulerAngleParam};
 use arael::matrix::matrix3d;
 use arael::refs::{self, Ref};
 use arael::simple_lm::{self, LmConfig, LmProblem, LmTiming};

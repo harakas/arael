@@ -90,25 +90,25 @@ non-gpl arael rows (`BAL_MEM_EXE` removes it).
 
 | system                   | total ms |  iters  | ms/iter | full-it ms | 1st-iter ms | peak MB | final cost |
 |--------------------------|---------:|--------:|--------:|-----------:|------------:|--------:|-----------:|
-| arael LM f64             |    547.9 |  22(22) |   24.90 |      23.64 |        53.4 |    74.7 | 26689.3493 |
-| arael LM f64 cholmod-gpl |    661.6 |  22(22) |   30.07 |      28.57 |        56.1 |    76.5 | 26689.3493 |
-| arael LM f32             |    508.6 |  20(24) |   21.19 |      20.38 |        49.4 |    64.2 | 26690.8537 |
-| ceres dense_schur        |    447.7 |  22(22) |   20.35 |      18.17 |        43.1 |    38.4 | 26689.7174 |
-| ceres sparse_schur       |    468.7 |  22(22) |   21.30 |      18.79 |        55.0 |    41.6 | 26689.7174 |
-| ceres iterative_schur    |    679.2 |  24(24) |   28.30 |      26.17 |        39.0 |    37.0 | 26689.5841 |
-| g2o LM (schur)           |   1010.8 |  42(58) |   17.43 |      19.97 |        35.7 |    45.2 | 26714.5561 |
+| arael LM f64             |    542.0 |  22(22) |   24.63 |      23.36 |        52.9 |    74.8 | 26689.3493 |
+| arael LM f64 cholmod-gpl |    620.5 |  22(22) |   28.20 |      26.85 |        55.0 |    76.5 | 26689.3493 |
+| arael LM f32             |    498.4 |  20(24) |   20.77 |      20.07 |        46.9 |    64.2 | 26690.8537 |
+| ceres dense_schur        |    445.0 |  22(22) |   20.23 |      18.10 |        43.0 |    38.4 | 26689.7174 |
+| ceres sparse_schur       |    467.2 |  22(22) |   21.24 |      18.73 |        54.4 |    41.7 | 26689.7174 |
+| ceres iterative_schur    |    675.6 |  24(24) |   28.15 |      26.03 |        38.9 |    37.0 | 26689.5841 |
+| g2o LM (schur)           |    983.8 |  42(58) |   16.96 |      19.86 |        35.1 |    45.3 | 26714.5561 |
 
 ### Ladybug-138 (60876 parameters)
 
 | system                   | total ms |  iters  | ms/iter | full-it ms | 1st-iter ms | peak MB |  final cost |
 |--------------------------|---------:|--------:|--------:|-----------:|------------:|--------:|------------:|
-| arael LM f64             |   1846.2 |  20(21) |   87.91 |      81.95 |       213.9 |   189.0 | 119055.9961 |
-| arael LM f64 cholmod-gpl |   2047.7 |  20(21) |   97.51 |      91.60 |       202.8 |   198.5 | 119055.9961 |
-| arael LM f32             |   1531.9 |  19(20) |   76.59 |      70.14 |       206.2 |   161.5 | 119054.9134 |
-| ceres dense_schur        |   1917.9 |  22(25) |   76.72 |      73.16 |       150.3 |    98.0 | 119056.2145 |
-| ceres sparse_schur       |   1757.8 |  22(25) |   70.31 |      65.53 |       181.2 |   105.7 | 119056.2145 |
-| ceres iterative_schur    |   3294.1 |  43(62) |   53.13 |      55.21 |       114.1 |    84.4 | 190424.2644 |
-| g2o LM (schur)           |   3551.5 |  40(59) |   60.20 |      68.47 |       130.1 |   120.4 | 118904.3429 |
+| arael LM f64             |   1835.6 |  20(21) |   87.41 |      81.27 |       218.6 |   189.1 | 119055.9961 |
+| arael LM f64 cholmod-gpl |   1974.9 |  20(21) |   94.04 |      88.89 |       201.1 |   198.4 | 119055.9961 |
+| arael LM f32             |   1516.1 |  19(20) |   75.80 |      69.72 |       200.0 |   161.6 | 119054.9134 |
+| ceres dense_schur        |   1893.5 |  22(25) |   75.74 |      72.20 |       148.7 |    98.0 | 119056.2145 |
+| ceres sparse_schur       |   1744.8 |  22(25) |   69.79 |      65.29 |       178.7 |   105.7 | 119056.2145 |
+| ceres iterative_schur    |   3284.3 |  43(62) |   52.97 |      54.97 |       115.3 |    84.4 | 190424.2644 |
+| g2o LM (schur)           |   3481.4 |  40(59) |   59.01 |      68.49 |       127.5 |   121.0 | 118904.3429 |
 
 `iterative_schur` does not reach the common optimum on Ladybug-138: its
 inexact CG solve stalls at 190424 (60% above the 118904 optimum, camera
@@ -118,13 +118,13 @@ RMSE 1.38e-2). The other six validate; g2o's 118904 is the deepest.
 
 | system                   | total ms |  iters  | ms/iter | full-it ms | 1st-iter ms | peak MB |  final cost |
 |--------------------------|---------:|--------:|--------:|-----------:|------------:|--------:|------------:|
-| arael LM f64             |   3472.1 |   5(11) |  315.65 |     293.17 |       651.5 |   463.5 | 225577.5976 |
-| arael LM f64 cholmod-gpl |   3185.3 |   5(11) |  289.57 |     272.43 |       573.9 |   474.6 | 225577.5976 |
-| arael LM f32             |   4037.1 |   8(17) |  237.48 |     226.40 |       581.0 |   381.3 | 225464.4215 |
-| ceres dense_schur        |   7518.3 |  10(17) |  442.26 |     448.85 |       686.4 |   285.4 | 225447.1709 |
-| ceres sparse_schur       |   4303.4 |  10(17) |  253.14 |     256.05 |       602.8 |   287.2 | 225447.1709 |
-| ceres iterative_schur    |   3332.0 |  15(26) |  128.15 |     137.77 |       326.1 |   190.0 | 225798.8928 |
-| g2o LM (schur)           |   9277.3 |  28(35) |  265.07 |     271.92 |       445.2 |   357.6 | 226586.4232 |
+| arael LM f64             |   3475.2 |   5(11) |  315.92 |     293.50 |       652.5 |   463.5 | 225577.5976 |
+| arael LM f64 cholmod-gpl |   3808.6 |   5(11) |  346.24 |     328.31 |       641.5 |   474.6 | 225577.5976 |
+| arael LM f32             |   4054.4 |   8(17) |  238.49 |     226.77 |       575.4 |   381.4 | 225464.4215 |
+| ceres dense_schur        |   7516.1 |  10(17) |  442.12 |     448.31 |       687.8 |   285.4 | 225447.1709 |
+| ceres sparse_schur       |   4324.7 |  10(17) |  254.39 |     256.94 |       602.3 |   287.2 | 225447.1709 |
+| ceres iterative_schur    |   3334.0 |  15(26) |  128.23 |     137.75 |       332.6 |   190.1 | 225798.8928 |
+| g2o LM (schur)           |   9161.3 |  28(35) |  261.75 |     273.79 |       442.1 |   358.8 | 226586.4232 |
 
 Every row validates on Ladybug-49 and 372. On Ladybug-138 six of seven
 validate -- Ceres's `iterative_schur` is the exception (above). One
@@ -152,24 +152,23 @@ J^T J at 485k parameters), and the solve terminates loudly.
 
 With the Nielsen driver the size story flattens into near parity:
 
-1. **Ladybug-49: Ceres wins by ~22%** (448 vs 548 ms), both taking 22
-   rejection-free steps -- the remaining gap is per-step cost (18.2 vs
-   23.6 ms/full-it), i.e. dense-Schur elimination at the problem size
+1. **Ladybug-49: Ceres wins by ~22%** (445 vs 542 ms), both taking 22
+   rejection-free steps -- the remaining gap is per-step cost (18.1 vs
+   23.4 ms/full-it), i.e. dense-Schur elimination at the problem size
    it is best at.
-2. **Ladybug-138: arael f32 wins the dataset** -- 1532 ms, the fastest
+2. **Ladybug-138: arael f32 wins the dataset** -- 1516 ms, the fastest
    of any solver, with the lowest cost of the arael/Ceres cluster
-   (119054.91). arael f64 (1846 ms) sits between the two Ceres variants
-   (1758 / 1918). g2o alone descends deeper (118904, 0.13% below the
-   cluster) but takes ~2x the time (3552 ms).
-3. **Ladybug-372: arael cholmod-gpl is the fastest solver on the
-   dataset** (3.19 s), ahead of Ceres's inexact-CG `iterative_schur`
-   (3.33 s, stopping at a slightly higher but still-converged 225799)
-   and arael faer (3.47 s); Ceres sparse-Schur takes 4.30 s (10
-   accepted steps to arael's 5). Run-to-run step counts vary (5-12)
-   here; min-of-rounds applies to every system equally.
+   (119054.91). arael f64 (1836 ms) sits between the two Ceres variants
+   (1745 / 1894). g2o alone descends deeper (118904, 0.13% below the
+   cluster) but takes ~2x the time (3481 ms).
+3. **Ladybug-372: Ceres's inexact-CG `iterative_schur` takes the
+   dataset** (3.33 s, stopping at a slightly higher but still-converged
+   225799), with arael faer f64 next (3.48 s); Ceres sparse-Schur takes
+   4.32 s (10 accepted steps to arael's 5). Run-to-run step counts vary
+   (5-12) here; min-of-rounds applies to every system equally.
 4. **Per-full-iteration, arael's full-system faer solve tracks Ceres's
-   sparse-Schur within 15-26% across the tables** (23.6/18.8 ->
-   82.0/65.5 -> 293.2/256.1 ms full-it; exploratory 485k: 3246/2984
+   sparse-Schur within 14-25% across the tables** (23.4/18.7 ->
+   81.3/65.3 -> 293.5/256.9 ms full-it; exploratory 485k: 3246/2984
    ms/step), while Ceres running the same non-Schur strategy costs
    ~1.6x more than arael at the small end. On Ladybug's banded camera
    connectivity, explicit Schur elimination is NOT the decisive
@@ -179,8 +178,8 @@ With the Nielsen driver the size story flattens into near parity:
    fails at 485k parameters (NaN in f32 assembly, above). Its peak
    memory is only ~14-18% below f64's (64/74 -> 161/189 -> 381/463
    MB), not the halving the value size alone would suggest.
-6. **g2o's full iteration is cheaper than arael's (20.0 / 68.5 / 271.9
-   vs 23.6 / 82.0 / 293.2 ms, on its Schur-reduced camera system) yet
+6. **g2o's full iteration is cheaper than arael's (19.9 / 68.5 / 273.8
+   vs 23.4 / 81.3 / 293.5 ms, on its Schur-reduced camera system) yet
    it lands 1.8-2.7x behind on totals** because it needs roughly twice
    the accepted steps (42 / 40 / 28), plus internal lambda retries the
    bare iteration count used to hide (58 / 59 / 35 damped attempts).
@@ -202,17 +201,15 @@ With the Nielsen driver the size story flattens into near parity:
    side: on Ladybug-138 those extra iterations grind to the deepest
    stop of the run (118904, 0.13% below everyone else's).
 7. **CHOLMOD supernodal does not pay off on BAL.** The cholmod-gpl row
-   is SLOWER than faer on Ladybug-49 and 138 (28.6 vs 23.6 and 91.6 vs
-   82.0 ms/full-it) and only ~7% faster on 372 (272.4 vs 293.2, which
-   its lower first-iteration cost stretches to ~8% on totals) -- a
-   sharp contrast to the SLAM benchmark, where the same backend cuts
-   the 300-pose solve ~1.8x. Both f64 rows take identical steps to the
-   identical cost; only the linear solver differs. Consistent with
-   CHOLMOD's own design: its AUTO mode picks supernodal only when the
-   factor's flops/nnz(L) ratio is high (dense supernodes that reward
-   BLAS panels), and `CholmodSupernodalLLT` forces it regardless. We
-   have not measured the BAL factors' flop density to confirm that is
-   the mechanism here.
+   is SLOWER than faer at every size (26.9 vs 23.4, 88.9 vs 81.3, and
+   328.3 vs 293.5 ms/full-it) -- in contrast to the SLAM benchmark,
+   where the same backend is ~15% faster than faer at 300 poses. Both
+   f64 rows take identical steps to the identical cost; only the linear
+   solver differs. Consistent with CHOLMOD's own design: its AUTO mode
+   picks supernodal only when the factor's flops/nnz(L) ratio is high
+   (dense supernodes that reward BLAS panels), and
+   `CholmodSupernodalLLT` forces it regardless. We have not measured
+   the BAL factors' flop density to confirm that is the mechanism here.
 8. **arael's full-system peak memory is the highest in the field at
    the larger sizes** (189 MB on 138, 463 MB on 372 -- 1.6x Ceres
    sparse-Schur's 287, 2.4x iterative_schur's 190). Factorizing the
@@ -224,6 +221,7 @@ With the Nielsen driver the size story flattens into near parity:
 ```sh
 ./fetch_datasets.sh
 cmake -B cpp/build cpp && cmake --build cpp/build
+export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1   # thread caps before load
 ROUNDS=5 cargo run --release
 ```
 

@@ -19,7 +19,7 @@ mod g2o3;
 
 use arael::matrix::{matrix3d, matrix3f};
 use arael::model::{
-    CrossBlock, EulerAngleParam, Model, Param, QuaternionParam, SelfBlock, SimpleEulerAngleParam,
+    CrossBlock, EulerAngleParam, Param, QuaternionParam, SelfBlock, SimpleEulerAngleParam,
 };
 use arael::refs::{self, Ref};
 use arael::vect::{vect3d, vect3f};

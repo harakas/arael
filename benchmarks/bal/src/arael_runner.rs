@@ -9,7 +9,7 @@
 // 7-DOF gauge left to LM damping, as Ceres runs them.
 
 use crate::bal::{CameraIn, Dataset};
-use arael::model::{CrossBlock, EulerAngleParam, Model, Param, SelfBlock};
+use arael::model::{CrossBlock, EulerAngleParam, Param, SelfBlock};
 use arael::quatern::{quaternd, quaternf};
 use arael::refs::{self, Ref};
 use arael::vect::{vect2d, vect2f, vect3d, vect3f};

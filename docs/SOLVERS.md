@@ -27,7 +27,7 @@ parameter vector.
 | `BandLapack::new(kd)` | `solve_band_lapack[_f32]` | the same band solve through LAPACK `dpbsv`/`spbsv` (feature `lapack`) -- for LAPACK-standardised environments |
 | `SparseEigen::<T>::new()` | `solve_sparse_eigen[_f32]` | Eigen `SimplicialLLT` through a C++ shim (feature `eigen`) -- for Eigen interop/comparison; measured well behind faer |
 | `SparseCholmod::new()` | `solve_sparse_cholmod` | CHOLMOD simplicial Cholesky, LGPL (feature `cholmod`; f64 only) -- comparable to Eigen simplicial, behind faer |
-| `SparseCholmodSupernodal::new()` | `solve_sparse_cholmod_supernodal` | CHOLMOD supernodal Cholesky (feature `cholmod-gpl`; f64 only). **License warning: the Supernodal module is GPL**, unlike the LGPL simplicial one -- enabling it makes the binary subject to the GPL. The one backend measured faster than faer: ~1.8x on dense-fill Hessians (the 300-pose SLAM benchmark) |
+| `SparseCholmodSupernodal::new()` | `solve_sparse_cholmod_supernodal` | CHOLMOD supernodal Cholesky (feature `cholmod-gpl`; f64 only). **License warning: the Supernodal module is GPL**, unlike the LGPL simplicial one -- enabling it makes the binary subject to the GPL. The one backend measured faster than faer: ~15% on dense-fill Hessians (the 300-pose SLAM benchmark) |
 | `Sparse::new()` / `SparseDirect::new()` | `solve_sparse` / `solve_sparse_direct` | COO / direct-CSC assembly over a DENSE solve -- validation baselines for the assembly paths, not for production. Note the free `solve_sparse` is this baseline; the root's `.solve_sparse()` method is faer |
 
 ## Basic usage
