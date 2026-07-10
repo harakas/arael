@@ -70,6 +70,17 @@ and g2o): [benchmarks/bal](benchmarks/bal/README.md). A heterogeneous
 visual-inertial SLAM benchmark (six factor types, seven systems),
 including a Raspberry Pi edge run: [benchmarks/slam](benchmarks/slam/README.md).
 
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="benchmarks/chart-slam-loc-dark.svg">
+  <img alt="Two bar charts of per-iteration solve time: landmark SLAM at 300 poses on an Apple M4 Pro, and localization at 60 poses on a Raspberry Pi 5" src="benchmarks/chart-slam-loc-light.svg">
+</picture>
+
+The same per-iteration metric on the landmark-SLAM benchmark and on
+fixed-map localization running on a Raspberry Pi 5
+([benchmarks/loc](benchmarks/loc/README.md)): with the landmarks fixed
+the localization Hessian is block-tridiagonal, and arael solves it with
+its band Cholesky.
+
 ## Scope
 
 Arael is a **nonlinear optimization framework**, not a complete SLAM or state estimation system. The SLAM and localization demos show how to use arael as the optimizer backend, but a production SLAM pipeline would additionally need:

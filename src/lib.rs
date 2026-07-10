@@ -97,6 +97,17 @@
 //! systems), including a Raspberry Pi edge run:
 //! [benchmarks/slam](https://github.com/harakas/arael/tree/master/benchmarks/slam).
 //!
+//! <picture>
+//!   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/chart-slam-loc-dark.svg">
+//!   <img alt="Two bar charts of per-iteration solve time: landmark SLAM at 300 poses on an Apple M4 Pro, and localization at 60 poses on a Raspberry Pi 5" src="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/chart-slam-loc-light.svg">
+//! </picture>
+//!
+//! The same per-iteration metric on the landmark-SLAM benchmark and on
+//! fixed-map localization running on a Raspberry Pi 5
+//! ([benchmarks/loc](https://github.com/harakas/arael/tree/master/benchmarks/loc)):
+//! with the landmarks fixed the localization Hessian is
+//! block-tridiagonal, and arael solves it with its band Cholesky.
+//!
 //! # Scope
 //!
 //! Arael is a **nonlinear optimization framework**, not a complete SLAM or
