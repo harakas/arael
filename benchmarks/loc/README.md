@@ -92,34 +92,38 @@ count (landmarks scale as `4N`). The arael rows use `fast_atan` (above).
 | factrs LM                    |    104.8 |     3 |   34.94 |          - |        47.0 |    64.4 | 25269.0409 |
 | tiny-solver LM               |    550.9 |     3 |  183.62 |          - |       205.1 |    68.3 | 25269.0409 |
 
-### Raspberry Pi 5 (Cortex-A76, single core, 60 poses)
+### Raspberry Pi 5 (Cortex-A76, single core, 60 poses; ROUNDS=20, LOC_LAMBDA0=1e-2)
 
-The full field on a Raspberry Pi 5. The ordering is unchanged -- arael leads
-~4x, everything is ~3x slower than the dev machine as expected for the smaller
-core, and all 11 rows still reach the common optimum. (The Pi tables predate
-the arael rows' fast_atan adoption and the total/iters/full-it columns.)
+The full field on a Raspberry Pi 5. The ordering holds -- arael leads
+~4.5x per attempt and ~2.4x on the steady-state iteration, everything is
+~3.5x slower than the dev machine as expected for the smaller core, and
+all 11 rows reach the common optimum. With the fast_atan bearing
+residuals, **f32 is again faster than f64 here** -- the earlier
+exact-atan runs had f32 slower on this core, consistent with the libm
+atan2f suspicion in TODO.md.
 
-| system                       | ms/iter | 1st-iter ms | peak MB | final cost |
-|------------------------------|--------:|------------:|--------:|-----------:|
-| **arael LM f64 (band)**      |  **1.28** |       1.3 |     4.5 |  3274.6025 |
-| **arael LM f32 (band)**      |  **1.35** |       1.4 |     3.9 |  3274.6025 |
-| symforce LM f32              |    4.99 |        17.7 |    16.9 |  3274.6025 |
-| ceres sparse_normal_cholesky |    5.16 |        10.2 |    11.1 |  3274.6025 |
-| ceres iterative_schur        |    5.57 |         9.8 |    10.6 |  3274.6025 |
-| g2o LM                       |    5.58 |         8.4 |    10.0 |  3274.6025 |
-| ceres sparse_schur           |    5.65 |        10.6 |    11.0 |  3274.6025 |
-| symforce LM f64              |    5.73 |        20.1 |    19.2 |  3274.6025 |
-| gtsam LM                     |   15.61 |        16.5 |    15.4 |  3274.6025 |
-| factrs LM                    |   18.41 |        23.8 |    11.5 |  3274.6025 |
-| tiny-solver LM               |   89.13 |        97.2 |    11.4 |  3274.6025 |
+| system                       | total ms | iters | ms/iter | full-it ms | 1st-iter ms | peak MB | final cost |
+|------------------------------|---------:|------:|--------:|-----------:|------------:|--------:|-----------:|
+| **arael LM f32 (band)**      |      3.1 |  3(3) | **1.03** |   **1.03** |         1.0 |     4.0 |  3274.6025 |
+| **arael LM f64 (band)**      |      3.3 |  3(3) | **1.09** |   **1.09** |         1.1 |     4.6 |  3274.6025 |
+| symforce LM f32              |     19.3 |  3(4) |    4.82 |          - |        17.0 |    16.8 |  3274.6025 |
+| ceres sparse_normal_cholesky |     15.1 |  3(3) |    5.04 |       2.62 |         9.9 |    11.0 |  3274.6025 |
+| symforce LM f64              |     21.5 |  3(4) |    5.38 |          - |        19.1 |    19.1 |  3274.6025 |
+| ceres iterative_schur        |     16.5 |  3(3) |    5.49 |       3.45 |         9.6 |    10.5 |  3274.6025 |
+| ceres sparse_schur           |     16.7 |  3(3) |    5.56 |       3.18 |        10.3 |    10.9 |  3274.6025 |
+| g2o LM                       |     16.7 |  3(3) |    5.58 |       4.21 |         8.3 |    10.0 |  3274.6025 |
+| gtsam LM                     |     46.4 |  3(3) |   15.48 |      15.11 |        16.2 |    15.4 |  3274.6025 |
+| factrs LM                    |     54.7 |     3 |   18.22 |          - |        23.7 |    11.6 |  3274.6025 |
+| tiny-solver LM               |    265.5 |     3 |   88.51 |          - |        96.7 |    11.5 |  3274.6025 |
 
 ### Raspberry Pi Zero (ARM1176, ARMv6, single core, 100 poses)
 
 The cross-compiled static-musl binary on a real Pi Zero, arael + factrs only --
 the C++ solvers are not cross-built, and tiny-solver is omitted as too slow. arael dominates by ~18x, and the initial cost still matches
 the reference (5e-15), confirming the ARMv6 build is bit-faithful. Note **f32 is
-markedly faster than f64 here** -- the ARM1176 VFPv2 FPU favors single precision
--- the reverse of the Cortex-A76 above.
+markedly faster than f64 here** -- the ARM1176 VFPv2 FPU favors single
+precision far beyond the A76's few percent. (This table predates the
+arael rows' fast_atan adoption.)
 
 | system              | ms/iter | 1st-iter ms | peak MB | final cost |
 |---------------------|--------:|------------:|--------:|-----------:|

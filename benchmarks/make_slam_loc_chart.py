@@ -30,13 +30,13 @@ PANELS = [
         ("GTSAM (LM)", 167.35, "other"),
     ]),
     ("Localization -- 60 poses, 360 params (Raspberry Pi 5)", 20.0, 5.0, 2, [
-        ("arael (f64 band)", 1.28, "arael"),
-        ("arael (f32 band)", 1.35, "arael"),
-        ("SymForce (f32)", 4.99, "other"),
-        ("Ceres (LM)", 5.16, "other"),
+        ("arael (f32 band)", 1.03, "arael"),
+        ("arael (f64 band)", 1.09, "arael"),
+        ("SymForce (f32)", 4.82, "other"),
+        ("Ceres (LM)", 5.04, "other"),
         ("g2o (LM)", 5.58, "other"),
-        ("GTSAM (LM)", 15.61, "other"),
-        ("factrs (LM)", 18.41, "other"),
+        ("GTSAM (LM)", 15.48, "other"),
+        ("factrs (LM)", 18.22, "other"),
     ]),
 ]
 
@@ -51,7 +51,7 @@ FOOT = [
      "(GPL-licensed); the localization rows use arael's band-Cholesky "
      "solver on the block-tridiagonal Hessian."),
     ("tiny-solver omitted for scale: 317.8 ms/iter on the SLAM panel, "
-     "89.1 ms/iter on the Pi 5."),
+     "88.5 ms/iter on the Pi 5."),
 ]
 
 THEMES = {
