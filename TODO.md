@@ -1,5 +1,27 @@
 # TODO
 
+- **SparseFaer::with_threads(n): opt-in multithreaded faer solve**
+  (discussed 2026-07). faer threads via rayon: every heavy call takes a
+  `faer::Par` (`Par::Seq` / `Par::rayon(nthreads)`, 0 = all cores), and
+  `SparseFaer::solve_damped` currently hard-codes `Par::Seq` at its four
+  call sites (factor scratch, solve scratch, `factorize_numeric_llt`,
+  `solve_in_place_with_conj`). Plan: hold a `par: faer::Par` field on
+  `SparseFaer` (default `Seq`), expose a `with_threads(n: usize)`
+  builder taking a plain usize so `faer::Par` stays out of the public
+  API (1 = Seq, n > 1 = `Par::rayon(n)`, 0 = all cores). Needs a rayon
+  import: we build faer with `default-features = false`, so `faer/rayon`
+  is compiled out -- forward it through a new arael cargo feature (e.g.
+  `rayon`) to keep default builds dependency-light. Deliberately a
+  backend builder and NOT an LmConfig field: LmConfig is shared by all
+  backends and never reaches `LmSolver::solve_damped`, the knob would be
+  dead on Dense/Band/Eigen/LAPACK, and it would overpromise -- only the
+  factorize+solve phase threads, not assembly/cost eval. Revisit a
+  config-level `threads` only if assembly is ever parallelized. Payoff
+  is large-problem-only (loc solve share ~4%: pointless; slam-300
+  bracketed at 10-25%/iter by the threaded-BLAS cholmod accident;
+  BAL-372+ the real case). Benchmarking it needs the `RAYON_NUM_THREADS=1`
+  cap in the run.sh scripts lifted deliberately for that row.
+
 - **lm_resolve(): warm re-solve for arael-sketch dragging** (design agreed
   2026-07, shelved -- fringe for now; sketch systems are sub-millisecond
   today, so this is headroom, not a rescue). Adds
