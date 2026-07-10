@@ -247,7 +247,7 @@ impl<T: Float> matrix3<T>
         )
     }
 
-    /// Derivatives of [`rotation_from_euler_angles_sincos`] w.r.t. each euler
+    /// Derivatives of [`Self::rotation_from_euler_angles_sincos`] w.r.t. each euler
     /// angle: returns `[dR/dea.x, dR/dea.y, dR/dea.z]` (roll, pitch, yaw). Each
     /// entry is the derivative of the corresponding entry above, using
     /// `d(sin)/dangle = cos` and `d(cos)/dangle = -sin`; it consumes only the
@@ -326,7 +326,7 @@ impl<T: Float> matrix3<T>
         )
     }
 
-    /// Derivatives of [`from_rotation_vector_small`] w.r.t. each component of
+    /// Derivatives of [`Self::from_rotation_vector_small`] w.r.t. each component of
     /// `v`: returns `[dR/dv.x, dR/dv.y, dR/dv.z]`. With `x,y,z = v/2` and
     /// `s = 2/(1 + x^2+y^2+z^2)`, the only non-trivial part is `ds/d(v.k) =
     /// -half * k_half * s^2` (each entry is `+-s*P` with polynomial `P`).

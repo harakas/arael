@@ -68,7 +68,7 @@ Full methodology, the initial-damping policy, and the cross-system
 validation harness: [benchmarks/pgo](benchmarks/pgo/README.md). A
 bundle-adjustment benchmark on the BAL Ladybug problems (arael vs Ceres
 and g2o): [benchmarks/bal](benchmarks/bal/README.md). A heterogeneous
-visual-inertial SLAM benchmark (six factor types, seven systems),
+monocular SLAM benchmark (six factor types, seven systems),
 including a Raspberry Pi edge run: [benchmarks/slam](benchmarks/slam/README.md).
 
 <picture>
@@ -362,7 +362,7 @@ The `examples/` directory is the primary place to see the API in use. Each file 
 - **[slam2d_simple_demo](examples/slam2d_simple_demo.rs)** -- minimal pedagogical 2D SLAM: bearing-only landmark observations, pose `(x, y, gamma)`, first pose fixed as the gauge. Writes `slam2d_simple.eps` with per-landmark 95% covariance ellipses -- elongated radially, showing depth is the unobservable dimension of bearing-only SLAM.
 - **[slam2d_multi_demo](examples/slam2d_multi_demo.rs)** -- multi-run merge on a nested model tree (`Map { paths: Vec<Path>, landmarks }`): three GPS-anchored runs fused in one solve via bearings onto shared root-level landmarks (`ref = root.landmarks`, run-local odometry via `ref = parent.poses`). Writes `slam2d_multi.eps` with 95% ellipses.
 - **[slam2d_align_demo](examples/slam2d_align_demo.rs)** -- builds one map from three runs the cheap, two-step way: each run is solved on its own, then a small second step lines the runs up with each other. Same scene as `slam2d_multi_demo` (which solves everything at once), so the two results can be compared; writes `slam2d_align.eps`.
-- **[slam_demo](examples/slam_demo.rs)** -- full 3D visual-inertial SLAM: S-curve trajectory, 60 poses, 240 landmarks, odometry + tilt + GPS + feature observations. Full verbose-LM trace across graduated isigma passes -- the reference for what a healthy solver run looks like.
+- **[slam_demo](examples/slam_demo.rs)** -- full 3D monocular SLAM: S-curve trajectory, 60 poses, 240 landmarks, odometry + tilt + GPS + feature observations. Full verbose-LM trace across graduated isigma passes -- the reference for what a healthy solver run looks like.
 - **[loc_demo](examples/loc_demo.rs)** -- localisation with fixed known landmarks (no gauge freedom). Block-tridiagonal Hessian + band solver. Graduated-isigma optimisation via a root `frine_isigma_scale` field.
 - **[loc_global_demo](examples/loc_global_demo.rs)** -- root-level `Param` fields consumed by constraints: a global rigid transform (translation + rotation) applied to every pose. Shows the two pose<->root cross-Hessian wirings (`CrossBlock<Pose, Path>` vs a root-owned `TripletBlock`) and a staged pass that optimises only the globals first.
 - **[m3500_demo](examples/m3500_demo.rs)** -- the classic M3500 Manhattan-world pose-graph benchmark (Olson 2006): 3500 SE2 poses and 5453 relative-pose constraints from a g2o file, the between-factor written symbolically, solved with sparse faer LM. The same model backs [benchmarks/pgo](benchmarks/pgo/README.md).
@@ -725,8 +725,9 @@ See [arael-sketch/](arael-sketch/) for the full implementation.
 ```
 arael/              Main library (Levenberg-Marquardt solver + codegen)
   src/
-    model.rs        Param<T>, Model trait, SelfBlock, CrossBlock, TripletBlock
-    simple_lm.rs    LM solver, LmSolver trait, Dense/Band/Sparse backends, CooMatrix, CscMatrix
+    lib.rs          Crate documentation, arael::prelude
+    model.rs        Param<T>, rotation params, Model trait, SelfBlock, CrossBlock, TripletBlock
+    simple_lm.rs    LM solver, LmProblem/RootProblem/FitProblem, Dense/Band/Sparse backends
     geometry.rs     Camera models and projections (pinhole intrinsics/extrinsics)
     user_fn.rs      Runtime registry for #[arael::function] user-defined functions
     utils.rs        Float f32/f64 trait, angle utilities, fast atan
@@ -790,10 +791,23 @@ arael-sketch/       Interactive sketch editor GUI (egui/eframe)
     drawing.rs      Canvas rendering, grid, dimensions
     colors.rs       Color scheme (light/dark)
 
+examples/           Runnable demos (see Examples section above)
+
+docs/               Extended documentation
+  MODEL.md          #[arael::model] macro reference
+  SOLVERS.md        Solver backends and entry points
+  SYM.md            arael-sym symbolic math reference
+  LINEAR.md         Robust linear regression walkthrough
+  SLAM.md           SLAM example walkthrough
+  ARAEL_SKETCH.md   Sketch editor overview
+
 benchmarks/         Solver benchmarks vs Ceres / g2o / GTSAM / SymForce / factrs / tiny-solver
   bal/              Bundle Adjustment in the Large
   pgo/              Pose-graph optimization
-  slam/             Heterogeneous visual-inertial SLAM (+ Raspberry Pi edge run)
+  slam/             Heterogeneous monocular SLAM (+ Raspberry Pi edge run)
+  loc/              Localization against a known landmark map (+ Raspberry Pi edge run)
+  aerobatics/       Rotation-parameterization conditioning (arael-only)
+  make_slam_loc_chart.py  Generates the README SLAM/localization chart SVGs
 ```
 
 ## License

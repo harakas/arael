@@ -97,7 +97,7 @@
 //! A bundle-adjustment benchmark on the BAL Ladybug problems (arael vs
 //! Ceres and g2o):
 //! [benchmarks/bal](https://github.com/harakas/arael/tree/master/benchmarks/bal).
-//! A heterogeneous visual-inertial SLAM benchmark (six factor types, seven
+//! A heterogeneous monocular SLAM benchmark (six factor types, seven
 //! systems), including a Raspberry Pi edge run:
 //! [benchmarks/slam](https://github.com/harakas/arael/tree/master/benchmarks/slam).
 //!
@@ -1771,7 +1771,7 @@
 //!   everything at once), so the two results can be compared; writes
 //!   `slam2d_align.eps`.
 //! - **[`slam_demo`](https://github.com/harakas/arael/blob/master/examples/slam_demo.rs)**
-//!   -- synthetic visual-inertial SLAM: S-curve trajectory, 20 poses,
+//!   -- synthetic monocular SLAM: S-curve trajectory, 20 poses,
 //!   40 landmarks, odometry + tilt + GPS + feature observations.
 //!   Full verbose-LM trace across graduated isigma passes -- the
 //!   reference for what a healthy solver run looks like.

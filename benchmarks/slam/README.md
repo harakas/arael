@@ -1,6 +1,6 @@
-# Heterogeneous visual-inertial SLAM benchmark
+# Heterogeneous monocular SLAM benchmark
 
-Batch optimization of a synthetic visual-inertial SLAM problem,
+Batch optimization of a synthetic monocular SLAM problem,
 comparing arael against six other solvers:
 [tiny-solver](https://crates.io/crates/tiny-solver) (Rust, dual-number
 autodiff), [factrs](https://crates.io/crates/factrs) (Rust, dual-number

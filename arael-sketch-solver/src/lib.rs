@@ -39,7 +39,7 @@ pub use expr_constraint::ExpressionConstraint;
 pub mod blocker;
 pub use blocker::{BlockerReport, analyze as analyze_blockers};
 
-use arael::model::{CrossBlock, JacobianModel, Model, Param, SelfBlock, TripletBlock};
+use arael::model::{CrossBlock, JacobianModel, Param, SelfBlock, TripletBlock};
 
 const TIMING_DEBUG: bool = false;
 use arael::vect::vect2d;
@@ -1394,7 +1394,7 @@ impl Sketch {
     /// `nid` is the user-visible stable numeric constraint id (C1, C2,
     /// ...) and is serialised, so pre/post action comparisons are
     /// robust against the macro's per-pass cid renumbering. `cid` is
-    /// the post-calc_jacobian identifier used by [`Jacobian::rows`].
+    /// the post-calc_jacobian identifier used by [`arael::model::Jacobian::rows`].
     ///
     /// Must be called AFTER `calc_jacobian`/`solve`/`compute_dof` so
     /// the `cid` field is populated on every constraint instance.
@@ -1809,7 +1809,7 @@ impl Sketch {
     /// `delete d<n>` removes both the dimension and its backing
     /// constraint, which is the user-facing way to edit or remove
     /// these constraints -- `C<nid>` is visible in `list` but is not
-    /// a valid handle for `delete` (see [`tools::find_constraint_by_name`]).
+    /// a valid handle for `delete` (see `find_constraint_by_name` in arael-sketch-backend).
     ///
     /// Coverage focuses on the dimension kinds that write into
     /// constraint collections: `HDistance`, `VDistance`,

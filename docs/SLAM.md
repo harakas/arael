@@ -1,6 +1,6 @@
 # SLAM Path Optimization
 
-Arael's SLAM example is a visual-inertial backend: it jointly optimises
+Arael's SLAM example is a monocular SLAM backend: it jointly optimises
 robot poses and landmark positions from camera observations, GPS,
 wheel odometry, and accelerometer tilt readings. The focus is on the
 numerical backend -- nonlinear least squares with symbolic

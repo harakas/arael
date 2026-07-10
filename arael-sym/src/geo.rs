@@ -819,7 +819,7 @@ impl quaternsym {
     /// First-order (small-angle) retraction of a rotation vector to a unit
     /// quaternion: `normalize(1, v/2)`. Branch-free and smooth for all v -- the
     /// normalizing denominator `sqrt(1 + |v|^2/4)` is always >= 1, so no `0/0`.
-    /// Agrees with the exact exp map [`from_rotation_vector`] to first order in
+    /// Agrees with the exact exp map [`Self::from_rotation_vector`] to first order in
     /// v; for a re-centered delta (kept near zero) it is effectively exact.
     pub fn from_rotation_vector_small(v: &vect3sym) -> quaternsym {
         quaternsym {

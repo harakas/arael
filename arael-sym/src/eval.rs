@@ -68,7 +68,7 @@ impl Expr {
 
     /// Substitute all occurrences of the named variable with `replacement`.
     ///
-    /// `var` can be any [`AsVarName`] -- a `&str`, a `String`, or an
+    /// `var` can be any [`AsVarName`](crate::AsVarName) -- a `&str`, a `String`, or an
     /// [`E`] handle wrapping a `Sym` node. Returns a new expression
     /// with the substitution applied throughout.
     pub fn subs(&self, var: impl crate::AsVarName, replacement: &E) -> E {

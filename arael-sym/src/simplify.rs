@@ -837,7 +837,7 @@ impl Expr {
 
     /// Collect like terms containing `var` by structural match.
     ///
-    /// `var` can be any [`AsVarName`] -- a `&str`, a `String`, or an
+    /// `var` can be any [`AsVarName`](crate::AsVarName) -- a `&str`, a `String`, or an
     /// [`E`] handle wrapping a `Sym` node. Groups additive terms
     /// that share `var` as a factor, summing their coefficients.
     /// For example, `a*x + b*x + c` becomes `(a + b)*x + c`.
