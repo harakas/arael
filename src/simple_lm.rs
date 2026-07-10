@@ -235,8 +235,29 @@ impl std::fmt::Display for BandError {
 
 /// Interface for optimization problems.
 ///
+/// Parameter round trip of an `#[arael(root)]` model: flatten the model's
+/// parameters into a vector and write an optimized vector back. Implemented
+/// by the macro for every root (it is the part that needs generated code --
+/// block-index assignment on serialize, extended-model hooks on
+/// deserialize); the solve entry points on [`LmProblem`] are default
+/// methods gated on it, so implementing this is what gives a type
+/// `solve_with` / `solve_dense` / `solve_sparse`.
+pub trait RootModel<T: Float> {
+    /// Flatten the optimizable parameters into `data` and assign the
+    /// Hessian block indices. The initial guess for a solve.
+    fn serialize(&mut self, data: &mut Vec<T>);
+    /// Write an optimized parameter vector back into the model
+    /// (including extended-model state). Mandatory after a solve over a
+    /// raw vector; the `solve_*` entry points call it for you.
+    fn deserialize(&mut self, data: &[T]);
+}
+
 /// Provides cost evaluation and gradient/Hessian assembly in various matrix
-/// formats (dense, band, COO sparse, CSC sparse, indexed sparse).
+/// formats (dense, band, COO sparse, CSC sparse, indexed sparse), plus --
+/// for types that also implement [`RootModel`], i.e. every `#[arael(root)]`
+/// model -- the solve entry points `solve_with` / `solve_dense` /
+/// `solve_sparse` as default methods. Call them with the trait in scope:
+/// `use arael::simple_lm::LmProblem;`.
 pub trait LmProblem<T> {
     /// Evaluate the total cost at the given parameters.
     fn calc_cost(&mut self, params: &[T]) -> T;
@@ -261,6 +282,49 @@ pub trait LmProblem<T> {
     /// Called after each accepted LM step to let the problem update internal state.
     /// Default: no-op.
     fn advance(&mut self, _params: &mut [T]) {}
+
+    /// Solve with the given [`LmSolver`] backend, wrapping the
+    /// serialize -> optimize -> deserialize round trip: parameters are
+    /// read from the model and the optimized values written back. The
+    /// damping schedule comes from `config.driver` (set it with
+    /// [`LmConfig::with_driver`]). For the common backends use
+    /// [`solve_dense`](Self::solve_dense) or
+    /// [`solve_sparse`](Self::solve_sparse).
+    fn solve_with<S: LmSolver<T>>(&mut self, solver: &mut S, config: &LmConfig<T>) -> LmResult<T>
+    where
+        Self: RootModel<T> + Sized,
+        T: Float,
+    {
+        let mut params = Vec::new();
+        self.serialize(&mut params);
+        let result = lm_solve(&params, solver, self, config);
+        self.deserialize(&result.x);
+        result
+    }
+
+    /// Solve with the dense nalgebra Cholesky backend ([`Dense`]) --
+    /// low parameter counts or genuinely dense problems. Convenience
+    /// over [`solve_with`](Self::solve_with).
+    fn solve_dense(&mut self, config: &LmConfig<T>) -> LmResult<T>
+    where
+        Self: RootModel<T> + Sized,
+        T: Float,
+        Dense: LmSolver<T>,
+    {
+        self.solve_with(&mut Dense, config)
+    }
+
+    /// Solve with the indexed sparse faer backend ([`SparseFaer`], pure
+    /// Rust) -- the default choice for anything non-trivial. Convenience
+    /// over [`solve_with`](Self::solve_with).
+    fn solve_sparse(&mut self, config: &LmConfig<T>) -> LmResult<T>
+    where
+        Self: RootModel<T> + Sized,
+        T: Float,
+        SparseFaer<T>: LmSolver<T>,
+    {
+        self.solve_with(&mut SparseFaer::<T>::new(), config)
+    }
 }
 
 /// Adapter: wrap two closures into an LmProblem (dense only).

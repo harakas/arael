@@ -346,7 +346,7 @@ struct Path {
 | Attribute | Purpose |
 |---|---|
 | `#[arael::model]` | declare a Model; generates the Model trait impl (serialize / deserialize / update / accumulate_hessian) |
-| `#[arael(root)]` | mark the top-level Model. Generates `LmProblem` impl, manages indices, owns the update cycle |
+| `#[arael(root)]` | mark the top-level Model. Generates the `LmProblem` and `RootModel` impls (unlocking LmProblem's `solve_with` / `solve_dense` / `solve_sparse`), manages indices, owns the update cycle |
 | `#[arael(root, f32)]` | scalar precision for the generated solver surface (default is f64). Produces `*_f32` methods |
 | `#[arael(root, jacobian)]` | additionally emit `calc_jacobian(&params) -> Jacobian<T>` and `calc_cost_table(&params)` for diagnostics |
 | `#[arael(root, fast_atan)]` | generated code calls `arael::utils::fast_atan` / `fast_atan2` (max error < 1e-6 rad) instead of libm atan / atan2 -- everywhere in residuals, gradients, Hessians, Jacobians. Derivatives are the exact rational forms either way. Alternatively call `fast_atan` / `fast_atan2` per site in a constraint body |

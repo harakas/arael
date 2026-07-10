@@ -4505,25 +4505,26 @@ pub fn generate_root_methods(
         quote! {}
     };
 
-    // Precision-dependent pieces for the generated solve_with / solve_dense
-    // / solve_sparse convenience methods: the right (de)serialize method and
-    // the right f32/f64 faer backend constructor.
-    let (solve_serialize, solve_deserialize, sparse_backend) = if precision == "f32" {
-        (
-            quote! { serialize32 },
-            quote! { deserialize32 },
-            quote! { arael::simple_lm::SparseFaer::<f32>::new() },
-        )
+    // Precision-dependent pieces for the generated RootModel impl (the
+    // solve_with / solve_dense / solve_sparse entry points are LmProblem
+    // default methods gated on it -- nothing solver-side is generated).
+    let (solve_serialize, solve_deserialize) = if precision == "f32" {
+        (quote! { serialize32 }, quote! { deserialize32 })
     } else {
-        (
-            quote! { serialize64 },
-            quote! { deserialize64 },
-            quote! { arael::simple_lm::SparseFaer::<f64>::new() },
-        )
+        (quote! { serialize64 }, quote! { deserialize64 })
     };
 
     let mut tokens = quote! {
         #(#constraint_impls)*
+
+        impl arael::simple_lm::RootModel<#prec_type> for #root_name {
+            fn serialize(&mut self, data: &mut std::vec::Vec<#prec_type>) {
+                self.#solve_serialize(data)
+            }
+            fn deserialize(&mut self, data: &[#prec_type]) {
+                self.#solve_deserialize(data)
+            }
+        }
 
         impl #root_name {
             pub fn serialize64(&mut self, data: &mut std::vec::Vec<f64>) {
@@ -4543,46 +4544,6 @@ pub fn generate_root_methods(
                 arael::model::ExtendedModel::extended_deserialize32(self);
             }
 
-            /// Solve the model with the given
-            /// [`LmSolver`](arael::simple_lm::LmSolver) backend, wrapping the
-            /// serialize -> solve -> deserialize round trip: parameters are
-            /// read from `self`, optimized, and written back. The damping
-            /// schedule comes from `config.driver` (set it with
-            /// [`with_driver`](arael::simple_lm::LmConfig::with_driver)). For
-            /// the common backends use [`solve_dense`](Self::solve_dense) or
-            /// [`solve_sparse`](Self::solve_sparse).
-            pub fn solve_with<__S: arael::simple_lm::LmSolver<#prec_type>>(
-                &mut self,
-                solver: &mut __S,
-                config: &arael::simple_lm::LmConfig<#prec_type>,
-            ) -> arael::simple_lm::LmResult<#prec_type> {
-                let mut __params = std::vec::Vec::new();
-                self.#solve_serialize(&mut __params);
-                let __result = arael::simple_lm::lm_solve(&__params, solver, self, config);
-                self.#solve_deserialize(&__result.x);
-                __result
-            }
-
-            /// Solve with the dense nalgebra Cholesky backend -- best for
-            /// small or dense problems. Convenience wrapper over
-            /// [`solve_with`](Self::solve_with).
-            pub fn solve_dense(
-                &mut self,
-                config: &arael::simple_lm::LmConfig<#prec_type>,
-            ) -> arael::simple_lm::LmResult<#prec_type> {
-                self.solve_with(&mut arael::simple_lm::Dense, config)
-            }
-
-            /// Solve with the indexed sparse faer backend (pure Rust) -- the
-            /// default choice for large, sparse problems. Convenience wrapper
-            /// over [`solve_with`](Self::solve_with).
-            pub fn solve_sparse(
-                &mut self,
-                config: &arael::simple_lm::LmConfig<#prec_type>,
-            ) -> arael::simple_lm::LmResult<#prec_type> {
-                self.solve_with(&mut #sparse_backend, config)
-            }
-
             fn __set_block_indices(&mut self) {
                 let mut __cid: u32 = 0;
                 let _ = &__cid; // suppress unused warning when no constraint_index fields
@@ -4598,7 +4559,7 @@ pub fn generate_root_methods(
                 use arael::utils::Float as _;
                 arael::model::Model::#update_method(self, params);
                 #extended_update_call
-                self.zero_blocks();
+                arael::model::Model::zero_blocks(self);
                 let mut __cost = 0.0 as #prec_type;
                 #(#grad_hessian_loops)*
                 #extended_compute_call
@@ -4680,7 +4641,7 @@ pub fn generate_root_methods(
                 let mut __cost = self.__compute_blocks(params, grad);
                 #extended_cost_call
                 hessian.iter_mut().for_each(|h| *h = 0.0);
-                self.#accumulate_method(hessian);
+                arael::model::Model::#accumulate_method(self, hessian);
                 __cost
             }
 
@@ -4689,7 +4650,7 @@ pub fn generate_root_methods(
                 let mut __cost = self.__compute_blocks(params, grad);
                 #extended_cost_call
                 band.iter_mut().for_each(|b| *b = 0.0);
-                self.#accumulate_band_method(band, kd)?;
+                arael::model::Model::#accumulate_band_method(self, band, kd)?;
                 Ok(__cost)
             }
 
@@ -4698,7 +4659,7 @@ pub fn generate_root_methods(
                 let mut __cost = self.__compute_blocks(params, grad);
                 #extended_cost_call
                 coo.clear();
-                self.#accumulate_sparse_method(coo);
+                arael::model::Model::#accumulate_sparse_method(self, coo);
                 __cost
             }
 
@@ -4707,7 +4668,7 @@ pub fn generate_root_methods(
                 let mut __cost = self.__compute_blocks(params, grad);
                 #extended_cost_call
                 csc.vals.iter_mut().for_each(|v| *v = 0.0 as #prec_type);
-                self.#accumulate_sparse_direct_method(csc);
+                arael::model::Model::#accumulate_sparse_direct_method(self, csc);
                 __cost
             }
 
@@ -4717,7 +4678,7 @@ pub fn generate_root_methods(
                 #extended_cost_call
                 vals.iter_mut().for_each(|v| *v = 0.0 as #prec_type);
                 let mut cursor = 0usize;
-                self.#accumulate_sparse_indexed_method(vals, positions, &mut cursor);
+                arael::model::Model::#accumulate_sparse_indexed_method(self, vals, positions, &mut cursor);
                 // The cached position map is replayed by cursor and assumes
                 // an identical entry sequence every iteration. A shorter
                 // sequence (a TripletBlock or extended constraint emitting

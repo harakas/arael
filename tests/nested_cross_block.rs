@@ -21,6 +21,7 @@
 use arael::model::{Model, Param, SelfBlock, CrossBlock};
 use arael::refs::{self, Ref};
 use arael::simple_lm::LmConfig;
+use arael::simple_lm::LmProblem;
 
 #[arael::model]
 struct Node {

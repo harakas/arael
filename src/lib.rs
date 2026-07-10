@@ -860,15 +860,19 @@
 //!
 //! ## Entry points and backends
 //!
-//! **The main entry point is the generated `solve_with` on the root
-//! model** -- it wraps the serialize -> optimize -> deserialize round
-//! trip (parameters are read from the model and written back) and
-//! takes any backend instance. `solve_sparse` and `solve_dense` are
-//! conveniences over it, and the `simple_lm::solve_*` free functions
-//! run the same solves over a raw parameter vector you manage
-//! yourself:
+//! **The main entry point is [`solve_with`](simple_lm::LmProblem::solve_with)
+//! on [`LmProblem`](simple_lm::LmProblem)** -- it wraps the serialize ->
+//! optimize -> deserialize round trip (parameters are read from the
+//! model and written back) and takes any backend instance. Every
+//! `#[arael(root)]` model gets it: the macro implements
+//! [`RootModel`](simple_lm::RootModel) (the parameter round trip),
+//! which unlocks the solve methods LmProblem provides. `solve_sparse`
+//! and `solve_dense` are conveniences over `solve_with`, and the
+//! `simple_lm::solve_*` free functions run the same solves over a raw
+//! parameter vector you manage yourself:
 //!
 //! ```rust,ignore
+//! use arael::simple_lm::LmProblem;
 //! let result = model.solve_with(&mut Band::new(11), &cfg); // any LmSolver backend
 //! let result = model.solve_sparse(&cfg); // = solve_with(SparseFaer): the default backend
 //! let result = model.solve_dense(&cfg);  // = solve_with(Dense)
@@ -923,17 +927,17 @@
 //! ## Basic usage
 //!
 //! ```
-//! # use arael::model::{Model, Param, SelfBlock};
+//! # use arael::model::{Param, SelfBlock};
 //! # #[arael::model]
 //! # #[arael(root, f32)]
 //! # #[arael(constraint(hb, { [m.x - 3.0] }))]
 //! # struct M { x: Param<f32>, hb: SelfBlock<M, f32> }
 //! # let mut model = M { x: Param::new(0.0), hb: SelfBlock::new() };
-//! use arael::simple_lm::LmConfig;
+//! use arael::simple_lm::{LmConfig, LmProblem};
 //!
 //! let cfg = LmConfig::<f32> { verbose: false, ..Default::default() };
 //! // solve_sparse reads the params from the model, runs LM, and writes the
-//! // optimized values back into it.
+//! // optimized values back into it (LmProblem provides the solve methods).
 //! let result = model.solve_sparse(&cfg);
 //! println!("{} iterations: {:.4} -> {:.4}",
 //!     result.iterations, result.start_cost, result.end_cost);

@@ -10,7 +10,7 @@
 use arael::model::{CrossBlock, EulerAngleParam, Model, Param, SelfBlock};
 use arael::matrix::matrix3d;
 use arael::refs::{self, Ref};
-use arael::simple_lm::{LmConfig, NielsenLambdaDriver};
+use arael::simple_lm::{LmConfig, LmProblem, NielsenLambdaDriver};
 use arael::vect::{vect2d, vect3d};
 
 // ---------------------------------------------------------------------------

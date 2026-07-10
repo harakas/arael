@@ -8,7 +8,7 @@
 // small-step tail, so it cannot test this.)
 
 use arael::model::{Model, Param, SelfBlock, CrossBlock};
-use arael::simple_lm::{LmConfig, LmStatus};
+use arael::simple_lm::{LmConfig, LmProblem, LmStatus};
 use arael::vect::vect2d;
 use arael::refs::{self, Ref};
 

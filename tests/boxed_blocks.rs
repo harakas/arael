@@ -4,6 +4,7 @@
 
 use arael::model::{Model, Param, SelfBlock, CrossBlock, BoxedSelfBlock, BoxedCrossBlock};
 use arael::simple_lm::LmConfig;
+use arael::simple_lm::LmProblem;
 use arael::vect::vect2d;
 use arael::refs::{self, Ref};
 

@@ -37,7 +37,7 @@ solve method. It reads the parameters out of the model, runs LM, and writes
 the optimized values back in:
 
 ```rust,ignore
-use arael::simple_lm::LmConfig;
+use arael::simple_lm::{LmConfig, LmProblem};
 
 let cfg = LmConfig::<f32> { verbose: true, ..Default::default() };
 let result = model.solve_sparse(&cfg);   // indexed sparse faer -- the default backend
@@ -46,15 +46,17 @@ println!("{} iterations: {:.4} -> {:.4}",
 // `model` now holds the optimized parameters.
 ```
 
-`#[arael(root)]` generates `solve_with` plus the `solve_sparse` /
-`solve_dense` conveniences on the root (along with the `LmProblem` impl
-the solver actually consumes) -- you never write them by hand.
-`solve_with` is the general entry point taking any backend instance;
-`solve_sparse` = `solve_with(SparseFaer)` is the default,
-`solve_dense` = `solve_with(Dense)` for small or dense problems (see
-the backend table above). The generated methods match the root's
-precision: on an `#[arael(root, f32)]` model they take `f32` configs
-and `solve_sparse` uses `SparseFaer<f32>`.
+The solve methods live on `LmProblem` as default methods (hence the
+`use`), gated on `RootModel` -- the two-method parameter round trip
+(`serialize` / `deserialize`) that `#[arael(root)]` implements for
+every root, along with the `LmProblem` impl the solver actually
+consumes. You never write any of it by hand. `solve_with` is the
+general entry point taking any backend instance; `solve_sparse` =
+`solve_with(SparseFaer)` is the default, `solve_dense` =
+`solve_with(Dense)` for small or dense problems (see the backend table
+above). The methods match the root's precision: on an
+`#[arael(root, f32)]` model they take `f32` configs and `solve_sparse`
+uses `SparseFaer<f32>`.
 
 ## Advanced usage
 

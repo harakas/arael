@@ -6,6 +6,7 @@
 
 use arael::model::{Model, Param, SelfBlock};
 use arael::simple_lm::LmConfig;
+use arael::simple_lm::LmProblem;
 
 // A trivial entity pulled toward its own target: residual (x - target)*isigma.
 // Independent per entity, so the exact minimizer is x = target and the Hessian

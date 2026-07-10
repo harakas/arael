@@ -13,6 +13,7 @@ use arael::vect::vect2f;
 use arael::matrix::matrix2f;
 use arael::refs::{self, Ref};
 use arael::simple_lm::LmConfig;
+use arael::simple_lm::LmProblem;
 
 #[arael::model]
 struct Pose {
