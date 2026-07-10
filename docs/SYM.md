@@ -446,6 +446,33 @@ Every `Expr::Func` carries one of three `FuncKind` variants:
 
 You can construct `Expr::Func` values directly via `FuncKind` if you need to bypass the constructors above; usually the constructors are easier.
 
+### Replacing functions in an expression
+
+`e.replace_function(name, &|args| ...)` returns the expression with
+every occurrence of the named function rebuilt by the closure from its
+(already-transformed) arguments, recursing through the whole tree.
+Built-in nodes match by their conventional name (`"sin"`, `"atan2"`,
+`"pow"`, ... -- the names in `FUNCTIONS`), `Expr::Func` nodes by their
+`name`; operators are not addressable.
+
+```rust
+sym! {
+    let f = sin(atan2(y, x));
+    let g = f.replace_function("atan2", &|args| fast_atan2(args[0].clone(), args[1].clone()));
+    // sin(fast_atan2(y, x))
+}
+```
+
+### `fast_atan` / `fast_atan2`
+
+Approximate arctangents (max error < 1e-6 radians), the cheap
+alternative when the residual tolerates it -- e.g. bearing residuals
+in a localization pipeline. Codegen emits `arael::utils::fast_atan` /
+`fast_atan2`, eval runs the same polynomial, and the derivatives are
+the exact rational forms. Usable directly in constraint bodies by
+name; the `#[arael(root, fast_atan)]` macro keyword rewrites every
+plain `atan`/`atan2` in a model onto them via `replace_function`.
+
 ## Switching and Clamping: `heaviside`, `clamp`, `branch`
 
 ### `heaviside(x)`
@@ -523,7 +550,7 @@ let g = parse("exp(sin(x)) * cos(x)").unwrap();
 println!("d/dx = {}", g.diff("x")); // cos(x)^2 * exp(sin(x)) - exp(sin(x)) * sin(x)
 ```
 
-Built-in functions recognised: `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `sinh`, `cosh`, `tanh`, `exp`, `ln`, `log2`, `log10`, `sqrt`, `abs`, `heaviside` (alias `H`), `clamp`, `pow`, `rad_diff`, `rad_sum`, `safe_atan2`, `safe_sqrt`, `safe_asin`, `safe_acos`, `epsilon_for`, `cached`, `identity`. The full list is also enumerable at runtime via `function_names()` / `FUNCTIONS`.
+Built-in functions recognised: `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `sinh`, `cosh`, `tanh`, `exp`, `ln`, `log2`, `log10`, `sqrt`, `abs`, `heaviside` (alias `H`), `clamp`, `pow`, `rad_diff`, `rad_sum`, `safe_atan2`, `safe_sqrt`, `safe_asin`, `safe_acos`, `fast_atan`, `fast_atan2`, `epsilon_for`, `cached`, `identity`. The full list is also enumerable at runtime via `function_names()` / `FUNCTIONS`.
 
 ### User-defined functions: `parse_with_functions` + `FunctionBag`
 

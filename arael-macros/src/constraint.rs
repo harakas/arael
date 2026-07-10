@@ -1386,6 +1386,18 @@ fn apply_substitutions(exprs: &mut Vec<arael_sym::E>, subs: &[(arael_sym::E, ara
     }
 }
 
+/// `#[arael(root, fast_atan)]`: route every atan/atan2 in the generated
+/// code through `arael_sym::fast_atan` / `fast_atan2` (max error < 1e-6
+/// radians). Applied after differentiation, so derivatives stay the
+/// exact rational forms; only the emitted call targets change.
+fn replace_atan_fast(exprs: &mut Vec<arael_sym::E>) {
+    for e in exprs.iter_mut() {
+        *e = e
+            .replace_function("atan", &|args| arael_sym::fast_atan(args[0].clone()))
+            .replace_function("atan2", &|args| arael_sym::fast_atan2(args[0].clone(), args[1].clone()));
+    }
+}
+
 /// Recursively register sym bindings for a variable and all its nested struct fields.
 /// `key_prefix` is used for binding lookup (e.g. "pose.info.gps")
 /// `sym_prefix` is used for generated code (e.g. "pose.info.gps.as_ref().unwrap()")
@@ -1823,6 +1835,7 @@ pub fn generate_root_methods(
     precision: &str,
     custom: bool,
     jacobian: bool,
+    fast_atan: bool,
 ) -> syn::Result<TokenStream2> {
     let stashed = crate::registry_constraints();
     let root_var_name = root_name.to_string().to_lowercase();
@@ -2721,6 +2734,7 @@ pub fn generate_root_methods(
         // Apply substitutions to residuals (cost-only, no derivatives)
         let mut cost_exprs = residual_exprs.clone();
         apply_substitutions(&mut cost_exprs, &all_subs);
+        if fast_atan { replace_atan_fast(&mut cost_exprs); }
         let (cost_intermediates, cost_simplified) = arael_sym::cse(&cost_exprs);
         let mut cost_stmts = Vec::new();
         for (name, expr) in &cost_intermediates {
@@ -2748,6 +2762,7 @@ pub fn generate_root_methods(
         }
         // Apply substitutions AFTER differentiation, BEFORE CSE
         apply_substitutions(&mut all_gh_exprs, &all_subs);
+        if fast_atan { replace_atan_fast(&mut all_gh_exprs); }
         let (gh_intermediates, gh_simplified) = arael_sym::cse(&all_gh_exprs);
 
         let mut gh_stmts = Vec::new();

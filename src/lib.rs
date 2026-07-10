@@ -70,6 +70,10 @@
 //! - **Gimbal-lock-free rotations** -- `EulerAngleParam` (euler-angle delta)
 //!   and `QuaternionParam` (rotation-vector delta) optimize a small delta
 //!   around a re-centered reference rotation
+//! - **Fast approximate atan** -- `#[arael(root, fast_atan)]` swaps every
+//!   atan/atan2 in the generated code for polynomial approximations (max
+//!   error < 1e-6 rad); or call `fast_atan`/`fast_atan2` per site.
+//!   Derivatives stay the exact rational forms
 //! - **WASM/browser support** -- compiles to WebAssembly; the `arael-sketch`
 //!   constraint editor runs in the browser via eframe/egui
 //!

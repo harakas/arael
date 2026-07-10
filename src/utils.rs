@@ -229,6 +229,9 @@ pub fn safe_sqrt<T: Float>(v: T) -> T {
 /// Standard atan2(y, x).
 pub fn atan2<T: Float>(y: T, x: T) -> T { y.atan2(x) }
 
+/// Fast approximate atan. Max error < 1e-6 radians.
+pub fn fast_atan<T: Float>(x: T) -> T { x.fast_atan() }
+
 /// Fast approximate atan2. Max error < 1e-6 radians. Does not handle atan2(+-inf, +-inf).
 pub fn fast_atan2<T: Float>(y: T, x: T) -> T {
     if x > T::zero() {

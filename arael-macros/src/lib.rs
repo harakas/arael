@@ -376,6 +376,11 @@ fn extract_constraint_label(tokens: &[proc_macro2::TokenTree]) -> Option<String>
 ///   debug/instrumentation (DOF analysis, constraint diagnostics,
 ///   per-label cost breakdown). Uses the same symbolically differentiated
 ///   expressions as the Hessian path.
+/// - `fast_atan` -- the generated code calls `arael::utils::fast_atan` /
+///   `fast_atan2` (max error < 1e-6 radians) instead of the libm atan /
+///   atan2 for every occurrence in residuals, gradients, Hessians, and
+///   Jacobians. Derivatives are unaffected (they are the exact rational
+///   forms either way).
 ///
 /// ## `#[arael(skip_self_block)]`
 ///
@@ -1281,12 +1286,14 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
         let tvec: Vec<proc_macro2::TokenTree> = content.into_iter().collect();
         if let Some(proc_macro2::TokenTree::Ident(id)) = tvec.first() {
             if *id != "root" { return None; }
-            // Parse optional keywords after comma: f32/f64, extended, jacobian.
-            // Unknown keywords are hard errors: a silently ignored typo
-            // (`jacobain`) or a combined `fit(...)` would otherwise no-op.
+            // Parse optional keywords after comma: f32/f64, extended,
+            // jacobian, fast_atan. Unknown keywords are hard errors: a
+            // silently ignored typo (`jacobain`) or a combined `fit(...)`
+            // would otherwise no-op.
             let mut precision = "f64".to_string();
             let mut custom = false;
             let mut jacobian = false;
+            let mut fast_atan = false;
             let mut pos = 1;
             while pos < tvec.len() {
                 match &tvec[pos] {
@@ -1304,12 +1311,14 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                             custom = true;
                         } else if kw_str == "jacobian" {
                             jacobian = true;
+                        } else if kw_str == "fast_atan" {
+                            fast_atan = true;
                         } else if kw_str == "fit" {
                             return Some(Err(syn::Error::new(kw.span(),
                                 "fit(...) cannot be combined with root; use a separate #[arael(fit(...))] attribute")));
                         } else {
                             return Some(Err(syn::Error::new(kw.span(),
-                                format!("unknown root keyword `{}`, expected `f32`, `f64`, `extended`, or `jacobian`", kw_str))));
+                                format!("unknown root keyword `{}`, expected `f32`, `f64`, `extended`, `jacobian`, or `fast_atan`", kw_str))));
                         }
                         pos += 1;
                         // Skip a group following a keyword (e.g. a stray
@@ -1324,7 +1333,7 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                     None => {} // trailing comma
                 }
             }
-            return Some(Ok((precision, custom, jacobian)));
+            return Some(Ok((precision, custom, jacobian, fast_atan)));
         }
         None
     });
@@ -1332,12 +1341,14 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
         Some(r) => Some(r?),
         None => None,
     };
-    let root_precision = root_info.as_ref().map(|(p, _, _)| p.clone());
-    let root_custom = root_info.as_ref().map(|(_, c, _)| *c).unwrap_or(false);
-    let root_jacobian = root_info.as_ref().map(|(_, _, j)| *j).unwrap_or(false);
+    let root_precision = root_info.as_ref().map(|(p, _, _, _)| p.clone());
+    let root_custom = root_info.as_ref().map(|(_, c, _, _)| *c).unwrap_or(false);
+    let root_jacobian = root_info.as_ref().map(|(_, _, j, _)| *j).unwrap_or(false);
+    let root_fast_atan = root_info.as_ref().map(|(_, _, _, f)| *f).unwrap_or(false);
 
     let constraint_impls = if let Some(ref precision) = root_precision {
-        constraint::generate_root_methods(name, fields, precision, root_custom, root_jacobian)?
+        constraint::generate_root_methods(name, fields, precision, root_custom, root_jacobian,
+            root_fast_atan)?
     } else {
         quote! {}
     };

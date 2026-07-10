@@ -429,6 +429,74 @@ impl E {
             }
         }
     }
+
+    /// Replace every occurrence of the named function with the expression
+    /// built by `f` from its (already-transformed) arguments, recursing
+    /// through the whole tree. Matches built-in nodes by their
+    /// conventional name (`"sin"`, `"atan2"`, `"pow"`, ... -- the names in
+    /// [`FUNCTIONS`]) and [`Expr::Func`] nodes by their `name`. Operators
+    /// (`+`, `*`, unary `-`, ...) are not addressable. `f` receives the
+    /// node's arguments in order; backs e.g. the `#[arael(root,
+    /// fast_atan)]` keyword, which maps `atan`/`atan2` onto [`fast_atan`]
+    /// / [`fast_atan2`].
+    pub fn replace_function(&self, name: &str, f: &dyn Fn(&[E]) -> E) -> E {
+        let rec = |a: &E| a.replace_function(name, f);
+        macro_rules! un {
+            ($nm:literal, $ctor:ident, $a:ident) => {{
+                let a = rec($a);
+                if name == $nm { f(&[a]) } else { $ctor(a) }
+            }};
+        }
+        match &*self.0 {
+            Expr::Sym(_) | Expr::Const(_) | Expr::NamedConst { .. } => self.clone(),
+            Expr::Neg(a) => -rec(a),
+            Expr::Add(a, b) => rec(a) + rec(b),
+            Expr::Sub(a, b) => rec(a) - rec(b),
+            Expr::Mul(a, b) => rec(a) * rec(b),
+            Expr::Div(a, b) => rec(a) / rec(b),
+            Expr::Pow(a, b) => {
+                let (a, b) = (rec(a), rec(b));
+                if name == "pow" { f(&[a, b]) } else { pow(a, b) }
+            }
+            Expr::Sin(a) => un!("sin", sin, a),
+            Expr::Cos(a) => un!("cos", cos, a),
+            Expr::Tan(a) => un!("tan", tan, a),
+            Expr::Asin(a) => un!("asin", asin, a),
+            Expr::Acos(a) => un!("acos", acos, a),
+            Expr::Atan(a) => un!("atan", atan, a),
+            Expr::Atan2(y, x) => {
+                let (y, x) = (rec(y), rec(x));
+                if name == "atan2" { f(&[y, x]) } else { atan2(y, x) }
+            }
+            Expr::Sinh(a) => un!("sinh", sinh, a),
+            Expr::Cosh(a) => un!("cosh", cosh, a),
+            Expr::Tanh(a) => un!("tanh", tanh, a),
+            Expr::Exp(a) => un!("exp", exp, a),
+            Expr::Ln(a) => un!("ln", ln, a),
+            Expr::Log2(a) => un!("log2", log2, a),
+            Expr::Log10(a) => un!("log10", log10, a),
+            Expr::Sqrt(a) => un!("sqrt", sqrt, a),
+            Expr::Abs(a) => un!("abs", abs, a),
+            Expr::Heaviside(a) => un!("heaviside", heaviside, a),
+            Expr::Clamp(a, lo, hi) => {
+                let (a, lo, hi) = (rec(a), rec(lo), rec(hi));
+                if name == "clamp" { f(&[a, lo, hi]) } else { clamp(a, lo, hi) }
+            }
+            Expr::Branch(q, a, b) => {
+                let (q, a, b) = (rec(q), rec(a), rec(b));
+                if name == "branch" { f(&[q, a, b]) } else { branch(q, a, b) }
+            }
+            Expr::Func { name: fname, params, kind, args } => {
+                let new_args: Vec<E> = args.iter().map(rec).collect();
+                if fname == name {
+                    f(&new_args)
+                } else {
+                    E::new(Expr::Func { name: fname.clone(), params: params.clone(),
+                                        kind: kind.clone(), args: new_args })
+                }
+            }
+        }
+    }
 }
 
 impl std::ops::Deref for E {
@@ -908,10 +976,12 @@ pub const FUNCTIONS: &[(&str, FunctionRef)] = &[
     ("safe_acos", FunctionRef::Unary(safe_acos)),
     // Machine epsilon anchored to the argument's type (value ignored).
     ("epsilon_for", FunctionRef::Unary(epsilon_for)),
+    ("fast_atan", FunctionRef::Unary(fast_atan)),
     // Binary
     ("atan2", FunctionRef::Binary(atan2)),
     ("pow", FunctionRef::Binary(pow)),
     ("safe_atan2", FunctionRef::Binary(safe_atan2)),
+    ("fast_atan2", FunctionRef::Binary(fast_atan2)),
     ("rad_diff", FunctionRef::Binary(rad_diff)),
     ("rad_sum", FunctionRef::Binary(rad_sum)),
     // Ternary
@@ -1706,6 +1776,69 @@ pub fn safe_sqrt(x: E) -> E {
     )(x)
 }
 
+/// Fast approximate atan (max error < 1e-6 radians). Codegen emits
+/// `arael::utils::fast_atan(x)`; eval runs the same polynomial (the f64
+/// port of that implementation, kept in lockstep); the derivative is the
+/// exact `1 / (1 + x^2)` -- within the approximation error of the
+/// polynomial's own slope.
+pub fn fast_atan(x: E) -> E {
+    extern_func1("fast_atan", "arael::utils::fast_atan",
+        |x| [c(1.0) / (c(1.0) + x.clone() * x)],
+        |args| fast_atan_eval(args[0]))(x)
+}
+
+/// Fast approximate atan2 (max error < 1e-6 radians; does not handle
+/// atan2(+-inf, +-inf)). Codegen emits `arael::utils::fast_atan2(y, x)`;
+/// eval mirrors that implementation; the derivatives are the exact
+/// rational forms.
+pub fn fast_atan2(y: E, x: E) -> E {
+    extern_func2("fast_atan2", "arael::utils::fast_atan2",
+        |y, x| {
+            let d = x.clone() * x.clone() + y.clone() * y.clone();
+            [x / d.clone(), -y / d]
+        },
+        |args| fast_atan2_eval(args[0], args[1]))(y, x)
+}
+
+/// f64 port of `arael::utils::Float::fast_atan` (same folds, same
+/// polynomial, same constants) for symbolic eval of [`fast_atan`].
+fn fast_atan_eval(x: f64) -> f64 {
+    const SIXTH_PI: f64 = 5.235_987_755_982_988e-1;
+    const TAN_SIXTH_PI: f64 = 5.773_502_691_896_257e-1;
+    const TAN_TWELFTH_PI: f64 = 2.679_491_924_311_227e-1;
+    const C1: f64 = 1.6867629106;
+    const C2: f64 = 0.4378497304;
+    const C3: f64 = 1.6867633134;
+    let negative = x < 0.0;
+    let mut x = x.abs();
+    let inverted = x > 1.0;
+    if inverted { x = x.recip(); }
+    let mut y = if x > TAN_TWELFTH_PI {
+        let x = (x - TAN_SIXTH_PI) / (1.0 + TAN_SIXTH_PI * x);
+        let x2 = x * x;
+        x * (C1 + x2 * C2) / (C3 + x2) + SIXTH_PI
+    } else {
+        let x2 = x * x;
+        x * (C1 + x2 * C2) / (C3 + x2)
+    };
+    if inverted { y = std::f64::consts::FRAC_PI_2 - y; }
+    if negative { -y } else { y }
+}
+
+/// f64 port of `arael::utils::fast_atan2` for symbolic eval of
+/// [`fast_atan2`].
+fn fast_atan2_eval(y: f64, x: f64) -> f64 {
+    if x > 0.0 {
+        fast_atan_eval(y / x)
+    } else if x == 0.0 {
+        if y == 0.0 { 0.0 } else { std::f64::consts::FRAC_PI_2.copysign(y) }
+    } else if y >= 0.0 {
+        fast_atan_eval(y / x) + std::f64::consts::PI
+    } else {
+        fast_atan_eval(y / x) - std::f64::consts::PI
+    }
+}
+
 // Re-export linalg types
 pub use linalg::{SymVec, SymMat, jacobian};
 pub use parse::{parse, parse_with_functions, ParseError};
@@ -1727,6 +1860,50 @@ mod tests {
         let f = log10(symbol("x"));
         let g = f.substitute(&[(symbol("q"), symbol("r"))]);
         assert_eq!(format!("{}", g), "log10(x)");
+    }
+
+    #[test]
+    fn replace_function_rewrites_builtins_and_funcs_by_name() {
+        // Built-in node by conventional name, recursing into arguments.
+        let f = sin(atan2(symbol("a"), cos(symbol("b")))) + atan(symbol("a"));
+        let g = f.replace_function("atan2", &|args| safe_atan2(args[0].clone(), args[1].clone()));
+        assert_eq!(format!("{}", g), "sin(safe_atan2(a, cos(b))) + atan(a)");
+        // Untouched name: expression reconstructs unchanged.
+        let h = f.replace_function("sinh", &|args| cosh(args[0].clone()));
+        assert_eq!(format!("{}", f), format!("{}", h));
+        // Func nodes match by their name.
+        let k = safe_sqrt(symbol("x")).replace_function("safe_sqrt", &|args| sqrt(args[0].clone()));
+        assert_eq!(format!("{}", k), "sqrt(x)");
+    }
+
+    #[test]
+    fn fast_atan_matches_exact_within_tolerance() {
+        // The registered fast_atan/fast_atan2 eval within the documented
+        // 1e-6 radian bound, across octants and both atan2 half-planes.
+        for i in 0..200 {
+            let x = -10.0 + i as f64 * 0.1003;
+            let vars: HashMap<&str, f64> = [("x", x)].into();
+            let fa = fast_atan(symbol("x")).eval(&vars).unwrap();
+            assert!((fa - x.atan()).abs() < 1e-6, "fast_atan({}) = {} vs {}", x, fa, x.atan());
+        }
+        for (y, x) in [(0.3, 1.7), (2.1, -0.4), (-1.3, -2.2), (-0.7, 0.9), (1.0, 0.0), (-1.0, 0.0)] {
+            let vars: HashMap<&str, f64> = [("y", y), ("x", x)].into();
+            let fa = fast_atan2(symbol("y"), symbol("x")).eval(&vars).unwrap();
+            assert!((fa - y.atan2(x)).abs() < 1e-6,
+                "fast_atan2({}, {}) = {} vs {}", y, x, fa, y.atan2(x));
+        }
+    }
+
+    #[test]
+    fn fast_atan_codegen_and_derivative() {
+        let f = fast_atan2(symbol("y"), symbol("x"));
+        assert_eq!(f.to_rust(""), "arael::utils::fast_atan2(y, x)");
+        // Exact rational derivative, no atan anywhere in it.
+        let d = f.diff("y");
+        assert!(!format!("{}", d).contains("atan"), "d/dy = {}", d);
+        let vars: HashMap<&str, f64> = [("y", 0.5), ("x", 2.0)].into();
+        let expected = 2.0 / (2.0 * 2.0 + 0.5 * 0.5);
+        assert!((d.eval(&vars).unwrap() - expected).abs() < 1e-12);
     }
 
     #[test]

@@ -47,6 +47,7 @@ Solve problems like linear and nonlinear regression, sensor fusion, SLAM, bundle
 - **Hessian blocks** -- `SelfBlock<A>` and `CrossBlock<A, B>` for 1- and 2-entity constraints (packed dense); `TripletBlock` for 3+ entities (COO sparse). Heap-backed `BoxedSelfBlock`/`BoxedCrossBlock` variants allocate only the active blocks and can be freed between solves -- lighter when optimizing part of a large model tree
 - **Jacobian computation** -- `#[arael(root, jacobian)]` generates `calc_jacobian()` returning a sparse Jacobian matrix for DOF analysis and constraint diagnostics (see `examples/jacobian_demo.rs`)
 - **Gimbal-lock-free rotations** -- `EulerAngleParam` (euler-angle delta) and `QuaternionParam` (rotation-vector delta) optimize a small delta around a re-centered reference rotation
+- **Fast approximate atan** -- `#[arael(root, fast_atan)]` swaps every atan/atan2 in the generated code for polynomial approximations (max error < 1e-6 rad); or call `fast_atan`/`fast_atan2` per site. Derivatives stay the exact rational forms
 - **WASM/browser support** -- the sketch editor compiles to WebAssembly and runs in the browser via eframe/egui
 
 ## Benchmarks

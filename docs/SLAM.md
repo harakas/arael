@@ -426,6 +426,13 @@ Constraint:
   and the pose's diagonal blocks on the self-block side, and into
   the cross block on the off-diagonal.
 
+  Bearing residuals evaluate `atan`/`atan2` per observation, which
+  can dominate the per-iteration cost. If the ~1e-6 rad
+  approximation error is tolerable, `#[arael(root, fast_atan)]`
+  (or a per-site `fast_atan2(...)` call) swaps them for the fast
+  polynomial versions -- see the root keyword table in
+  [MODEL.md](MODEL.md).
+
 ### `PosePair` -- the odometry edge
 
 ```rust
