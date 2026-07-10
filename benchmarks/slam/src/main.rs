@@ -101,7 +101,7 @@ fn main() {
     }
     let init_sol = initial_solution(&scene);
     let initial_cost = scene::reference_cost(&scene, &init_sol);
-    println!("scene: {} poses, {} landmarks, {} observations, {} odometry edges, {} parameters",
+    println!("scene: {} poses, {} landmarks, {} frines, {} odometry pairs, {} parameters",
         scene.poses.len(), scene.landmarks_init.len(), scene.frines.len(), scene.odo.len(),
         scene.poses.len() * 6 + scene.landmarks_init.len() * 3);
     println!("initial reference cost: {:.4}", initial_cost);

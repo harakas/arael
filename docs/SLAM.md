@@ -433,7 +433,7 @@ Constraint:
   polynomial versions -- see the root keyword table in
   [MODEL.md](MODEL.md).
 
-### `PosePair` -- the odometry edge
+### `PosePair` -- the odometry constraint
 
 ```rust
 #[arael::model]
