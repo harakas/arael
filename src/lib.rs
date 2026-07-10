@@ -872,7 +872,7 @@
 //! parameter vector you manage yourself:
 //!
 //! ```rust,ignore
-//! use arael::simple_lm::LmProblem;
+//! use arael::simple_lm::LmProblem; // or `use arael::prelude::*;`
 //! let result = model.solve_with(&mut Band::new(11), &cfg); // any LmSolver backend
 //! let result = model.solve_sparse(&cfg); // = solve_with(SparseFaer): the default backend
 //! let result = model.solve_dense(&cfg);  // = solve_with(Dense)
@@ -1831,3 +1831,32 @@ pub use arael_macros::Model;
 pub use arael_macros::model;
 /// Attribute macro: `#[arael::function]`.
 pub use arael_macros::function;
+
+/// One-stop imports for defining and solving models:
+/// `use arael::prelude::*;`.
+///
+/// Curated, not exhaustive: it carries what a typical model-and-solve
+/// program names -- parameter and block types, the rotation
+/// parameterizations, the math aliases, the solve-side traits and
+/// config -- and deliberately leaves out generically named or
+/// specialist items (solver backends like `Dense`/`Band`, the free
+/// `solve_*` functions, `sym`), which read better explicitly
+/// imported. `refs` is re-exported as a module
+/// so collections stay qualified (`refs::Vec<Pose>` -- a bare `Vec`
+/// would fight std's). Additions are curated: a generically named item
+/// needs a strong case, since every prelude name is a potential glob
+/// ambiguity downstream.
+pub mod prelude {
+    pub use crate::model::{
+        BoxedCrossBlock, BoxedSelfBlock, CrossBlock, EulerAngleParam,
+        ExtendedModel, JacobianModel, Model, Param, QuaternionParam,
+        SelfBlock, SimpleEulerAngleParam, TripletBlock,
+    };
+    pub use crate::refs::{self, Ref};
+    pub use crate::simple_lm::{
+        LmConfig, LmProblem, LmResult, LmSolver, NielsenLambdaDriver, RootModel,
+    };
+    pub use crate::matrix::{matrix2d, matrix2f, matrix3d, matrix3f};
+    pub use crate::quatern::{quaternd, quaternf};
+    pub use crate::vect::{vect2d, vect2f, vect3d, vect3f};
+}

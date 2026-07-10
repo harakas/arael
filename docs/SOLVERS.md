@@ -37,7 +37,7 @@ solve method. It reads the parameters out of the model, runs LM, and writes
 the optimized values back in:
 
 ```rust,ignore
-use arael::simple_lm::{LmConfig, LmProblem};
+use arael::simple_lm::{LmConfig, LmProblem};   // or `use arael::prelude::*;`
 
 let cfg = LmConfig::<f32> { verbose: true, ..Default::default() };
 let result = model.solve_sparse(&cfg);   // indexed sparse faer -- the default backend

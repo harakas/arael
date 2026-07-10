@@ -395,7 +395,7 @@ provides. `solve_sparse` and `solve_dense` are conveniences over
 solves over a raw parameter vector you manage yourself:
 
 ```rust,ignore
-use arael::simple_lm::LmProblem;
+use arael::simple_lm::LmProblem; // or `use arael::prelude::*;`
 let result = model.solve_with(&mut Band::new(11), &cfg); // any LmSolver backend
 let result = model.solve_sparse(&cfg); // = solve_with(SparseFaer): the default backend
 let result = model.solve_dense(&cfg);  // = solve_with(Dense)

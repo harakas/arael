@@ -18,17 +18,13 @@
 //!   every other pose and landmark a fixed reference to be measured
 //!   against.
 //!
-//! Naming mirrors slam_demo.rs: Path (root), Pose, PosePair (odometry edge),
+//! Naming mirrors slam_demo.rs: Path (root), Pose, PosePair (odometry pair),
 //! Landmark (building corner), Frine (one landmark-to-pose bearing sighting).
 //!
 //! Run:
 //!     cargo run -r --example slam2d_simple_demo
 
-use arael::model::{Model, Param, SelfBlock, CrossBlock};
-use arael::simple_lm::LmProblem;
-use arael::vect::vect2f;
-use arael::matrix::matrix2f;
-use arael::refs::{self, Ref};
+use arael::prelude::*;
 
 use rand::prelude::*;
 use rand::rngs::StdRng;
@@ -352,7 +348,7 @@ fn main() {
     // lambda = confident near-Gauss-Newton steps; lambda grows when a step
     // is rejected. With this seed you can see the cost spike and lambda
     // climb mid-run before convergence resumes.
-    let lm_cfg = arael::simple_lm::LmConfig::<f32> { verbose: true, ..Default::default() };
+    let lm_cfg = LmConfig::<f32> { verbose: true, ..Default::default() };
     // One call runs the whole Levenberg-Marquardt solve (indexed sparse
     // faer backend): it flattens the params, repeatedly linearizes the
     // constraints and takes damped steps, then writes the optimized values
