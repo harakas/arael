@@ -738,8 +738,10 @@ impl<'de, T: crate::utils::Float + serde::Deserialize<'de>> serde::Deserialize<'
 
 impl<T: crate::utils::Float> Model for EulerAngleParam<T> where vect3<T>: ParamType {
     fn serialize_params32(&mut self, data: &mut std::vec::Vec<f32>) {
+        // Seed the reference from value for fixed params too -- constraints
+        // evaluate a fixed rotation through ref_rotation as well.
+        self.ref_rotation = matrix3::<T>::rotation_from_euler_angles(self.value);
         if self.optimize {
-            self.ref_rotation = matrix3::<T>::rotation_from_euler_angles(self.value);
             self.index = data.len() as u32;
             data.push(0.0); data.push(0.0); data.push(0.0);
         } else { self.index = u32::MAX; }
@@ -761,13 +763,14 @@ impl<T: crate::utils::Float> Model for EulerAngleParam<T> where vect3<T>: ParamT
         } else { self.delta = vect3::<T>::default(); }
     }
     fn update_self(&mut self) {
+        self.ref_rotation = matrix3::<T>::rotation_from_euler_angles(self.value);
         self.delta = vect3::<T>::default();
         self.__precompute();
     }
 
     fn serialize_params64(&mut self, data: &mut std::vec::Vec<f64>) {
+        self.ref_rotation = matrix3::<T>::rotation_from_euler_angles(self.value);
         if self.optimize {
-            self.ref_rotation = matrix3::<T>::rotation_from_euler_angles(self.value);
             self.index = data.len() as u32;
             data.push(0.0); data.push(0.0); data.push(0.0);
         } else { self.index = u32::MAX; }
@@ -829,13 +832,23 @@ impl<T: crate::utils::Float> Model for EulerAngleParam<T> where vect3<T>: ParamT
 /// rotation matrix (`ref_rotation`) and composed rotation as `EulerAngleParam`,
 /// so constraints consume it identically.
 ///
+/// `value` is the initial orientation going in and the optimized orientation
+/// coming out: the solver keeps its working state in an internal reference
+/// quaternion and syncs `value` only when `deserialize_params{32,64}` reads
+/// the result back. As with the other rotation parameters, call
+/// `deserialize(&result.x)` after a solve to get the result.
+///
 /// Convention: x = roll, y = pitch, z = yaw. Axes: x = forward, y = left,
 /// z = up. Rotation order: R = Rz(yaw) * Ry(pitch) * Rx(roll).
 #[derive(Clone, Copy)]
 pub struct QuaternionParam<T: crate::utils::Float> {
     pub optimize: bool,
-    /// Reference orientation, kept as a unit quaternion.
+    /// Initial orientation in, optimized orientation out (synced by
+    /// `deserialize_params`); a unit quaternion.
     pub value: crate::quatern::quatern<T>,
+    /// Solver-internal reference orientation, kept as a unit quaternion;
+    /// `advance` folds each accepted delta into it (renormalized).
+    ref_value: crate::quatern::quatern<T>,
     work: vect3<T>,
     index: u32,
     #[doc(hidden)] pub ref_rotation: matrix3<T>,
@@ -854,6 +867,7 @@ impl<T: crate::utils::Float> Default for QuaternionParam<T> {
         Self {
             optimize: true,
             value: crate::quatern::quatern::<T>::identity(),
+            ref_value: crate::quatern::quatern::<T>::identity(),
             work: vect3::<T>::default(),
             index: u32::MAX,
             ref_rotation: matrix3::<T>::identity(),
@@ -893,12 +907,13 @@ impl<T: crate::utils::Float> QuaternionParam<T> {
             for (k, o) in out.iter_mut().enumerate() { *o = self.index + k as u32; }
         }
     }
-    /// Absorb the current delta (a rotation vector) into the reference
-    /// quaternion via the exp map (renormalized) and reset delta.
+    /// Absorb the current delta (a rotation vector) into the internal
+    /// reference quaternion via the retraction (renormalized) and reset
+    /// delta. `value` is left untouched -- it syncs on deserialize.
     pub fn advance(&mut self) {
-        self.value = (self.value
+        self.ref_value = (self.ref_value
             * crate::quatern::quatern::<T>::from_rotation_vector_small(self.delta)).unit();
-        self.ref_rotation = self.value.rotation_matrix();
+        self.ref_rotation = self.ref_value.rotation_matrix();
         self.delta = vect3::<T>::default();
     }
     /// Precompute the composed rotation R_ref * R(delta) and derived euler
@@ -963,8 +978,11 @@ impl<'de, T: crate::utils::Float + serde::Deserialize<'de>> serde::Deserialize<'
 
 impl<T: crate::utils::Float> Model for QuaternionParam<T> where vect3<T>: ParamType {
     fn serialize_params32(&mut self, data: &mut std::vec::Vec<f32>) {
+        // Seed the internal reference from value for fixed params too --
+        // constraints evaluate a fixed rotation through ref_rotation as well.
+        self.ref_value = self.value.unit();
+        self.ref_rotation = self.ref_value.rotation_matrix();
         if self.optimize {
-            self.ref_rotation = self.value.rotation_matrix();
             self.index = data.len() as u32;
             data.push(0.0); data.push(0.0); data.push(0.0);
         } else { self.index = u32::MAX; }
@@ -972,8 +990,12 @@ impl<T: crate::utils::Float> Model for QuaternionParam<T> where vect3<T>: ParamT
     fn deserialize_params32(&mut self, data: &[f32]) {
         if self.index != u32::MAX {
             let i = self.index as usize;
-            let dea = <vect3<T> as ParamType>::read_from32(&data[i..i + 3]);
-            self.value = (self.value * crate::quatern::quatern::<T>::from_euler_angles(dea)).unit();
+            let dvec = <vect3<T> as ParamType>::read_from32(&data[i..i + 3]);
+            // Fold the handed-back rotation-vector delta with the same
+            // retraction advance uses. The reference itself is not mutated,
+            // so repeated deserialize calls are idempotent.
+            self.value = (self.ref_value
+                * crate::quatern::quatern::<T>::from_rotation_vector_small(dvec)).unit();
             self.ref_rotation = self.value.rotation_matrix();
             self.delta = vect3::<T>::default();
         }
@@ -985,13 +1007,16 @@ impl<T: crate::utils::Float> Model for QuaternionParam<T> where vect3<T>: ParamT
         } else { self.delta = vect3::<T>::default(); }
     }
     fn update_self(&mut self) {
+        self.ref_value = self.value.unit();
+        self.ref_rotation = self.ref_value.rotation_matrix();
         self.delta = vect3::<T>::default();
         self.__precompute();
     }
 
     fn serialize_params64(&mut self, data: &mut std::vec::Vec<f64>) {
+        self.ref_value = self.value.unit();
+        self.ref_rotation = self.ref_value.rotation_matrix();
         if self.optimize {
-            self.ref_rotation = self.value.rotation_matrix();
             self.index = data.len() as u32;
             data.push(0.0); data.push(0.0); data.push(0.0);
         } else { self.index = u32::MAX; }
@@ -999,8 +1024,9 @@ impl<T: crate::utils::Float> Model for QuaternionParam<T> where vect3<T>: ParamT
     fn deserialize_params64(&mut self, data: &[f64]) {
         if self.index != u32::MAX {
             let i = self.index as usize;
-            let dea = <vect3<T> as ParamType>::read_from64(&data[i..i + 3]);
-            self.value = (self.value * crate::quatern::quatern::<T>::from_euler_angles(dea)).unit();
+            let dvec = <vect3<T> as ParamType>::read_from64(&data[i..i + 3]);
+            self.value = (self.ref_value
+                * crate::quatern::quatern::<T>::from_rotation_vector_small(dvec)).unit();
             self.ref_rotation = self.value.rotation_matrix();
             self.delta = vect3::<T>::default();
         }

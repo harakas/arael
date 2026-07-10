@@ -55,6 +55,56 @@ fn fixed_euler_angle_param_does_not_panic_in_advance() {
         "fixed EA must not move, got {:?}", fixed.ea.value);
 }
 
+// An optimizable rotation pulled to match a FIXED, non-identity rotation.
+// The fixed ea must evaluate at its value during the solve, not at the
+// identity its default reference starts from.
+#[arael::model]
+#[arael(root)]
+#[arael(constraint(hb, {
+    let d = pairw.free_ea.rotation_matrix() - pairw.fixed_ea.rotation_matrix();
+    [d[0][0], d[0][1], d[0][2],
+     d[1][0], d[1][1], d[1][2],
+     d[2][0], d[2][1], d[2][2]]
+}))]
+struct PairW {
+    free_ea: EulerAngleParam<f64>,
+    fixed_ea: EulerAngleParam<f64>,
+    hb: SelfBlock<PairW>,
+}
+
+#[test]
+fn fixed_euler_angle_param_drives_constraints() {
+    let ea = vect3d::new(0.4, -0.3, 1.1);
+    let mut w = PairW {
+        free_ea: EulerAngleParam::new(vect3d::new(0.0, 0.0, 0.0)),
+        fixed_ea: EulerAngleParam::fixed(ea),
+        hb: SelfBlock::new(),
+    };
+    let mut params = Vec::new();
+    w.serialize64(&mut params);
+    let result = simple_lm::solve(&params, &mut w,
+        &LmConfig { max_iters: 100, ..Default::default() });
+    w.deserialize64(&result.x);
+
+    let m = matrix3d::rotation_from_euler_angles(w.free_ea.value);
+    let t = matrix3d::rotation_from_euler_angles(ea);
+    let err: f64 = (0..3).map(|i| (0..3).map(|j| (m[i][j] - t[i][j]).abs()).sum::<f64>()).sum();
+    assert!(err < 1e-6,
+        "free rotation must land on the fixed one's actual orientation, err={}", err);
+}
+
+// update_self resets the working state from `value` (the documented Model
+// contract), including on a model that was never serialized.
+#[test]
+fn update_self_derives_working_state_from_value() {
+    let ea = vect3d::new(0.4, -0.3, 1.1);
+    let mut p = EulerAngleParam::new(ea);
+    p.update_self();
+    let t = matrix3d::rotation_from_euler_angles(ea);
+    let err: f64 = (0..3).map(|i| (0..3).map(|j| (p.rotation_matrix[i][j] - t[i][j]).abs()).sum::<f64>()).sum();
+    assert!(err < 1e-12, "update_self must derive the rotation from value, err={}", err);
+}
+
 // ---------------------------------------------------------------------------
 // Advance must reach EA params everywhere, not only in root collections
 // ---------------------------------------------------------------------------
