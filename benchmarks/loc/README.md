@@ -33,7 +33,13 @@ Gaussian: this is the outlier-free scenario, so `loc_demo`'s robust
 saturation manufactures spurious minima different solvers fall into).
 
 - **arael** (f64 + f32) -- band Cholesky (`kd=11`); `LOC_ARAEL_SOLVER=faer`
-  switches to the general sparse solver for comparison.
+  switches to the general sparse solver for comparison. Both roots use
+  `#[arael(root, fast_atan)]`: the bearing residuals go through the fast
+  polynomial atan2 (max error < 1e-6 rad), which is why the shared
+  initial-cost cross-check tolerance is 1e-5 (arael measures ~4e-7
+  relative, the exact systems ~1e-16). The validation gates (cost
+  within 1%, pose RMSE < 5 cm) are orders of magnitude above the
+  approximation.
 - **tiny-solver**, **factrs** -- Rust, dual-number autodiff, their own LM.
 - **Ceres** (3 linear solvers), **g2o**, **GTSAM**, **SymForce** (f64 + f32) --
   C++: analytic Jacobians (g2o/GTSAM), autodiff (Ceres), or code-generated
@@ -47,47 +53,51 @@ g2o/GTSAM.
 
 ## Results
 
-Single core, min of N interleaved rounds. All systems converge in 3 steps to
-the same optimum; **ms/iter -- the per-step pipeline cost -- is the headline
-metric.** `LOC_POSES=N` sets the pose count (landmarks scale as `4N`).
+Apple M4 Pro, single core, min of N interleaved rounds; each run's
+`config:` banner records ROUNDS, solver, and damping. All systems converge
+in 3 steps to the same optimum; **`full-it ms` -- the cost of one full
+steady-state iteration (defined under Running) -- is the headline metric**,
+with the one-time first iteration shown apart. `LOC_POSES=N` sets the pose
+count (landmarks scale as `4N`). The arael rows use `fast_atan` (above).
 
-### 60 poses (240 landmarks, 5,357 observations, 360 parameters)
+### 60 poses (240 landmarks, 5,357 frines, 360 parameters; ROUNDS=50, LOC_LAMBDA0=1e-5)
 
-| system                       | ms/iter | 1st-iter ms | peak MB | final cost |
-|------------------------------|--------:|------------:|--------:|-----------:|
-| **arael LM f64 (band)**      |  **0.39** |       0.4 |     4.6 |  3274.6025 |
-| **arael LM f32 (band)**      |  **0.38** |       0.4 |     4.0 |  3274.6025 |
-| symforce LM f32              |    1.17 |         4.9 |    17.0 |  3274.6025 |
-| symforce LM f64              |    1.33 |         5.5 |    19.3 |  3274.6025 |
-| ceres sparse_normal_cholesky |    1.50 |         3.2 |    12.9 |  3274.6025 |
-| g2o LM                       |    1.58 |         2.2 |    11.2 |  3274.6025 |
-| ceres sparse_schur           |    1.62 |         3.1 |    12.9 |  3274.6025 |
-| ceres iterative_schur        |    1.70 |         2.9 |    12.1 |  3274.6025 |
-| gtsam LM                     |    3.60 |         4.4 |    14.6 |  3274.6025 |
-| factrs LM                    |    4.62 |         6.4 |    11.4 |  3274.6025 |
-| tiny-solver LM               |   23.46 |        26.1 |    12.2 |  3274.6025 |
+| system                       | total ms | iters | ms/iter | full-it ms | 1st-iter ms | peak MB | final cost |
+|------------------------------|---------:|------:|--------:|-----------:|------------:|--------:|-----------:|
+| **arael LM f64 (band)**      |      0.9 |  3(3) | **0.31** |   **0.31** |         0.4 |     4.7 |  3274.6025 |
+| **arael LM f32 (band)**      |      0.9 |  3(3) | **0.31** |   **0.31** |         0.3 |     4.1 |  3274.6025 |
+| symforce LM f32              |      4.6 |  3(4) |    1.15 |          - |         4.8 |    16.9 |  3274.6025 |
+| symforce LM f64              |      5.2 |  3(4) |    1.29 |          - |         5.3 |    19.2 |  3274.6025 |
+| ceres sparse_normal_cholesky |      4.6 |  3(3) |    1.52 |       0.80 |         3.0 |    13.0 |  3274.6025 |
+| g2o LM                       |      4.6 |  3(3) |    1.52 |       1.25 |         2.1 |    11.3 |  3274.6025 |
+| ceres sparse_schur           |      4.7 |  3(3) |    1.58 |       0.85 |         3.0 |    12.9 |  3274.6025 |
+| ceres iterative_schur        |      4.9 |  3(3) |    1.64 |       1.05 |         2.8 |    12.1 |  3274.6025 |
+| gtsam LM                     |     10.5 |  3(3) |    3.51 |       3.15 |         4.2 |    14.6 |  3274.6025 |
+| factrs LM                    |     14.3 |     3 |    4.75 |          - |         6.2 |    11.4 |  3274.6025 |
+| tiny-solver LM               |     69.2 |     3 |   23.07 |          - |        25.3 |    12.5 |  3274.6025 |
 
-### 300 poses (1,200 landmarks, 41,323 observations, 1,800 parameters)
+### 300 poses (1,200 landmarks, 41,323 frines, 1,800 parameters; ROUNDS=5, default damping)
 
-| system                       | ms/iter | 1st-iter ms | peak MB | final cost |
-|------------------------------|--------:|------------:|--------:|-----------:|
-| **arael LM f64 (band)**      |  **3.12** |       3.1 |    13.3 | 25269.0409 |
-| **arael LM f32 (band)**      |  **3.04** |       3.0 |     9.6 | 25269.0410 |
-| symforce LM f32              |   10.65 |        40.9 |    90.1 | 25269.0410 |
-| symforce LM f64              |   11.67 |        46.9 |   104.3 | 25269.0409 |
-| ceres sparse_normal_cholesky |   12.18 |        24.5 |    42.0 | 25269.0409 |
-| ceres sparse_schur           |   13.05 |        24.6 |    37.2 | 25269.0409 |
-| g2o LM                       |   13.09 |        18.9 |    37.8 | 25269.0409 |
-| ceres iterative_schur        |   13.49 |        22.8 |    36.6 | 25269.0409 |
-| gtsam LM                     |   31.71 |        34.2 |    58.8 | 25269.0409 |
-| factrs LM                    |   36.68 |        49.2 |    64.4 | 25269.0409 |
-| tiny-solver LM               |  205.29 |       223.7 |    69.3 | 25269.0409 |
+| system                       | total ms | iters | ms/iter | full-it ms | 1st-iter ms | peak MB | final cost |
+|------------------------------|---------:|------:|--------:|-----------:|------------:|--------:|------------:|
+| **arael LM f64 (band)**      |      7.9 |  3(3) | **2.64** |   **2.69** |         2.7 |    13.4 | 25269.0409 |
+| **arael LM f32 (band)**      |      7.7 |  2(3) | **2.55** |   **2.56** |         2.5 |     9.7 | 25269.0410 |
+| symforce LM f32              |     41.6 |  2(4) |   10.41 |          - |        41.5 |    90.1 | 25269.0410 |
+| symforce LM f64              |     45.5 |  3(4) |   11.36 |          - |        44.9 |   104.3 | 25269.0409 |
+| ceres sparse_normal_cholesky |     36.4 |  3(3) |   12.12 |       5.90 |        24.6 |    42.0 | 25269.0409 |
+| ceres sparse_schur           |     37.1 |  3(3) |   12.38 |       6.85 |        23.4 |    37.2 | 25269.0409 |
+| ceres iterative_schur        |     38.9 |  3(3) |   12.97 |       8.30 |        22.3 |    36.6 | 25269.0409 |
+| g2o LM                       |     38.9 |  3(3) |   12.98 |      10.20 |        18.5 |    37.8 | 25269.0409 |
+| gtsam LM                     |     89.9 |  3(3) |   29.98 |      28.05 |        33.8 |    58.8 | 25269.0409 |
+| factrs LM                    |    104.8 |     3 |   34.94 |          - |        47.0 |    64.4 | 25269.0409 |
+| tiny-solver LM               |    550.9 |     3 |  183.62 |          - |       205.1 |    68.3 | 25269.0409 |
 
 ### Raspberry Pi 5 (Cortex-A76, single core, 60 poses)
 
 The full field on a Raspberry Pi 5. The ordering is unchanged -- arael leads
 ~4x, everything is ~3x slower than the dev machine as expected for the smaller
-core, and all 11 rows still reach the common optimum.
+core, and all 11 rows still reach the common optimum. (The Pi tables predate
+the arael rows' fast_atan adoption and the total/iters/full-it columns.)
 
 | system                       | ms/iter | 1st-iter ms | peak MB | final cost |
 |------------------------------|--------:|------------:|--------:|-----------:|
@@ -119,30 +129,40 @@ markedly faster than f64 here** -- the ARM1176 VFPv2 FPU favors single precision
 
 ## Analysis
 
-arael leads by **3-4x per iteration** at both sizes -- 0.38 vs the fastest
-competitor's 1.17 (SymForce f32) and ~1.5 (g2o/Ceres) at 60 poses; 3.0 vs
-10.7-13.5 at 300 -- and its memory is a fraction of the field at scale (10-13 MB
-vs 37-104 MB at 300 poses; SymForce, the per-iteration runner-up, is the
-heaviest).
+arael leads by **~4x per attempt** (ms/iter) at both sizes -- 0.31 vs
+the fastest competitor's 1.15 (SymForce f32) and ~1.5 (Ceres/g2o) at 60
+poses; 2.5/2.6 vs 10-13 at 300 -- and its memory is a fraction of the field
+at scale (10-13 MB vs 37-104 MB at 300 poses; SymForce, the per-attempt
+runner-up, is the heaviest).
 
-**That lead is not the band solver.** Running the same problem with
-`LOC_ARAEL_SOLVER=faer` (arael's *general* sparse Cholesky -- the same approach
-the others take) is only ~7% slower than band at 300 poses (3.2 vs 3.0) and
-identical at 60, still ~4x faster than Ceres/g2o. The advantage is arael's
-**assembly**: it code-generates the residual + Jacobian + Hessian block at
-compile time (flat, CSE'd, accumulated directly), where Ceres/factrs/tiny pay a
-runtime autodiff tax and g2o/GTSAM pay their general-purpose graph frameworks'
-per-edge dispatch and sparse-assembly overhead. SymForce, which also
-code-generates, is the closest per-iteration -- confirming the assembly is most
-of the gap; the rest is solver/framework overhead.
+The `full-it ms` column splits that lead in two. On the pure steady-state
+iteration arael's closest exact competitor is Ceres sparse_normal_cholesky
+at **~2.2-2.6x** (0.80 vs 0.31 at 60 poses; 5.90 vs 2.69 at 300). The rest
+of the headline gap is the field's much heavier FIRST iteration -- symbolic
+factorization and structure setup that arael largely avoids (1st-iter 24.6
+ms for Ceres vs 2.7 for arael at 300 poses) -- amortized over a solve that
+only takes 3 iterations.
 
-**What the band solver buys is a modest, growing edge, not the headline:** on
-this block-tridiagonal structure it is ~7% faster and ~10% less memory than
-arael's general sparse path at 300 poses (13.3 vs 14.6 MB), and both grow with
-the pose count -- band Cholesky is O(n * kd^2) with contiguous storage, while a
-general sparse factorization carries a fill-reducing ordering and supernodal
-machinery the band does not need. It is the right tool for localization, and on
-a long real trajectory (thousands of poses) the gap widens; at these sizes the
+**The steady-state lead is not the band solver.** Running the same problem
+with `LOC_ARAEL_SOLVER=faer` (arael's *general* sparse Cholesky -- the same
+approach the others take) measured only ~7% slower than band at 300 poses
+and identical at 60 before the fast_atan adoption; with the bearing
+residuals now cheaper the solver's share grows, and the pair needs a
+re-measure. The advantage is arael's **assembly**: it code-generates the
+residual + Jacobian + Hessian block at compile time (flat, CSE'd,
+accumulated directly), where Ceres/factrs/tiny pay a runtime autodiff tax
+and g2o/GTSAM pay their general-purpose graph frameworks' per-edge dispatch
+and sparse-assembly overhead. SymForce, which also code-generates, is the
+closest per-attempt -- confirming the assembly is most of the gap; the rest
+is solver/framework overhead.
+
+**What the band solver buys is memory and scaling, not the headline:** on
+this block-tridiagonal structure it holds ~10% less peak memory than
+arael's general sparse path at 300 poses (13.4 vs 14.6 MB), and band
+Cholesky is O(n * kd^2) with contiguous storage, while a general sparse
+factorization carries a fill-reducing ordering and supernodal machinery the
+band does not need. It is the right tool for localization, and on a long
+real trajectory (thousands of poses) the gap widens; at these sizes the
 code-gen assembly dominates.
 
 f32 matches f64 to the final cost here (the problem is well-conditioned) at
@@ -164,6 +184,19 @@ LOC_NO_MEM=1 cargo run --release                 # skip peak-memory subprocess
 LOC_TIMING=1 ROUNDS=100 cargo run --release      # arael f64-vs-f32 per-phase
                                                  # steady-state timing table
 ```
+
+The `full-it ms` column is the cost of one FULL steady-state iteration,
+free of the two distortions in `ms/iter` = total/attempts: rejected
+damping attempts (which skip the re-linearization) deflate it, and the
+first iteration's one-time costs (sparsity discovery, symbolic
+factorization) inflate it. arael reports the sum of the solver's
+steady-state per-phase means (`gather_timing`; first calls excluded).
+External systems report `(total - 1st-iter) / (attempts - 1)` computed
+from the min-of-rounds totals -- exact when the run is rejection-free,
+since every steady iteration is then a full one -- and `-` when the run
+had rejected attempts or no attempt accounting (tiny-solver, factrs). g2o's `iters` reads
+accepted(attempts) with the attempts from an untimed statistics pass,
+never gathered in the timed solve.
 
 The C++ runners execute as subprocesses over an exported copy of the scene;
 they are skipped with a warning if their binary is absent.

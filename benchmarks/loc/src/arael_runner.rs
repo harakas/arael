@@ -3,7 +3,10 @@
 // so the bearing factor carries no landmark derivatives -- its Hessian block
 // is a REMOTE block on the pose (`pose.hb_pose`), not a CrossBlock. No GPS:
 // the fixed map pins the frame. Drift regularizers use explicit stored priors
-// (not `_value`). Four factor types, matching scene::reference_cost exactly.
+// (not `_value`). Four factor types, matching scene::reference_cost within
+// fast_atan's approximation: both roots use `fast_atan`, so the bearing
+// residuals go through arael::utils::fast_atan2 (max error < 1e-6 rad) --
+// the reason for the shared INITIAL_COST_RTOL in main.rs.
 
 use crate::scene::{Scene, Solution};
 use arael::matrix::{matrix3d, matrix3f};
@@ -102,7 +105,7 @@ struct PosePair {
 }
 
 #[arael::model]
-#[arael(root)]
+#[arael(root, fast_atan)]
 struct Path {
     poses: refs::Vec<Pose>,
     landmarks: refs::Vec<PointLandmark>,
@@ -190,7 +193,7 @@ struct PosePairF {
 }
 
 #[arael::model]
-#[arael(root, f32)]
+#[arael(root, f32, fast_atan)]
 struct PathF {
     poses: refs::Vec<PoseF>,
     landmarks: refs::Vec<PointLandmarkF>,
@@ -335,7 +338,21 @@ pub struct RunOut {
     pub first_iter_ms: f64,
     pub iterations: usize,
     pub accepted: usize,
+    /// Cost of one FULL accepted iteration -- the solver's steady-state
+    /// per-phase means (assembly + damped solve + trial cost + advance,
+    /// first calls excluded: they carry one-time structure costs) summed.
+    /// Undiluted by rejected attempts, which skip the re-linearization.
+    /// 0.0 when a phase has no steady-state sample (fewer than 2 calls).
+    pub full_iter_ms: f64,
     pub solution: Solution,
+}
+
+fn full_iter_ms(timing: Option<&arael::simple_lm::LmTiming>) -> f64 {
+    let Some(t) = timing else { return 0.0 };
+    match (t.mean_assembly(), t.mean_linear_solve(), t.mean_cost_eval(), t.mean_advance()) {
+        (Some(a), Some(l), Some(c), Some(adv)) => (a + l + c + adv).as_secs_f64() * 1e3,
+        _ => 0.0,
+    }
 }
 
 fn nielsen() -> bool {
@@ -351,6 +368,7 @@ fn cfg(max_iters: usize) -> arael::simple_lm::LmConfig<f64> {
         max_iters,
         initial_lambda: std::env::var("LOC_LAMBDA0").ok().and_then(|v| v.parse().ok()).unwrap_or(1e-8),
         verbose: std::env::var("LOC_VERBOSE").map_or(false, |v| v == "1"),
+        gather_timing: true, // per-phase times for the full-iteration column
         ..Default::default()
     };
     if nielsen() { cfg.with_driver(arael::simple_lm::NielsenLambdaDriver::default()) } else { cfg }
@@ -369,6 +387,22 @@ fn solve64(params: &[f64], path: &mut Path, cfg: &arael::simple_lm::LmConfig<f64
         Ok("faer") => arael::simple_lm::solve_sparse_faer(params, path, cfg),
         _ => arael::simple_lm::solve_band(params, BAND_KD, path, cfg),
     }
+}
+
+/// One-line report of the effective arael configuration (solver, driver,
+/// per-precision initial lambda) for the harness's config banner --
+/// whatever the env knobs resolved to, not just their raw values.
+pub fn config_report(poses: usize) -> String {
+    let solver = match std::env::var("LOC_ARAEL_SOLVER").as_deref() {
+        Ok("faer") => "faer".to_string(),
+        _ => format!("band kd={}", BAND_KD),
+    };
+    format!("arael: solver={}, driver={}, lambda0 f64={:e} f32={:e}{}",
+        solver,
+        if nielsen() { "nielsen" } else { "fixed" },
+        cfg(0).initial_lambda,
+        cfg32(0, poses).initial_lambda,
+        if std::env::var("LOC_LAMBDA0").is_ok() { " (LOC_LAMBDA0)" } else { " (default)" })
 }
 
 /// The arael model cost at the initial estimate -- for the harness to
@@ -399,6 +433,7 @@ pub fn run(scene: &Scene) -> RunOut {
         solve_ms, first_iter_ms,
         iterations: result.iterations,
         accepted: result.accepted_iterations,
+        full_iter_ms: full_iter_ms(result.timing.as_ref()),
         solution: extract(&path),
     }
 }
@@ -414,6 +449,7 @@ fn cfg32(max_iters: usize, poses: usize) -> arael::simple_lm::LmConfig<f32> {
         initial_lambda: std::env::var("LOC_LAMBDA0").ok()
             .and_then(|v| v.parse().ok()).unwrap_or(default_lambda),
         verbose: std::env::var("LOC_VERBOSE").map_or(false, |v| v == "1"),
+        gather_timing: true, // per-phase times for the full-iteration column
         ..Default::default()
     };
     if nielsen() { cfg.with_driver(arael::simple_lm::NielsenLambdaDriver::default()) } else { cfg }
@@ -483,6 +519,7 @@ pub fn run_f32(scene: &Scene) -> RunOut {
         solve_ms, first_iter_ms,
         iterations: result.iterations,
         accepted: result.accepted_iterations,
+        full_iter_ms: full_iter_ms(result.timing.as_ref()),
         solution: extract_f32(&path),
     }
 }

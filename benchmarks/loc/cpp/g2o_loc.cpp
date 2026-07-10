@@ -13,14 +13,17 @@
 //
 //   g2o_loc <scene.txt> <lm|gn> <solution_out>
 // JSON {solve_ms, first_iter_ms, iterations, accepted, initial_cost,
-// peak_rss_kb, cpus_allowed} on stdout; solution_out carries one pose per line
-// (6 values). Landmarks are fixed and not written.
+// peak_rss_kb, cpus_allowed} on stdout -- iterations counts every damped
+// lambda trial (from an untimed statistics pass), accepted the outer
+// iterations; solution_out carries one pose per line (6 values). Landmarks
+// are fixed and not written.
 // G2O_LAMBDA_INIT overrides the LM initial damping (default 1e-9); G2O_GAIN
 // overrides the terminate gain (default 1e-5, the shared termination class).
 
 #include <g2o/core/base_binary_edge.h>
 #include <g2o/core/base_unary_edge.h>
 #include <g2o/core/base_vertex.h>
+#include <g2o/core/batch_stats.h>
 #include <g2o/core/block_solver.h>
 #include <g2o/core/jacobian_workspace.h>
 #include <g2o/core/optimization_algorithm_gauss_newton.h>
@@ -302,9 +305,18 @@ static double fd_edge(g2o::OptimizableGraph::Edge* e, const Eigen::MatrixXd& Jan
     return (Jan - Jfd).cwiseAbs().maxCoeff();
 }
 
-struct RunResult { double ms; int iterations; double initial_cost; };
+struct RunResult {
+    double ms;
+    int iterations; // outer iterations (each ends with an accepted step)
+    // Total damped trials: sum of levenbergIterations over the outer
+    // iterations (from the untimed statistics pass) -- the count
+    // comparable to the other systems' attempts.
+    int attempts;
+    double initial_cost;
+};
 
-static RunResult solve(const Scene& s, bool lm, int max_iters, std::vector<double>* pose_out) {
+static RunResult solve(const Scene& s, bool lm, int max_iters, std::vector<double>* pose_out,
+                       bool stats) {
     using BlockSolver = g2o::BlockSolver<g2o::BlockSolverTraits<-1, -1>>;
     auto linear = std::make_unique<g2o::LinearSolverCholmod<BlockSolver::PoseMatrixType>>();
     auto block = std::make_unique<BlockSolver>(std::move(linear));
@@ -320,6 +332,9 @@ static RunResult solve(const Scene& s, bool lm, int max_iters, std::vector<doubl
     }
     g2o::SparseOptimizer opt;
     opt.setVerbose(false);
+    // Batch statistics cost ~14% of the solve (measured at 300 poses), so
+    // they are gathered in a separate UNTIMED solve, never in the timed one.
+    opt.setComputeBatchStatistics(stats);
     opt.setAlgorithm(algo);
 
     for (int i = 0; i < s.n_poses; i++) {
@@ -404,6 +419,15 @@ static RunResult solve(const Scene& s, bool lm, int max_iters, std::vector<doubl
     int iters = opt.optimize(max_iters);
     double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 
+    int attempts = 0;
+    if (stats) {
+        for (const auto& st : opt.batchStatistics()) {
+            if (st.iteration < 0) continue;
+            attempts += st.levenbergIterations;
+        }
+    }
+    if (attempts < iters) attempts = iters; // stats off / GN -- never undercount
+
     if (pose_out) {
         pose_out->resize(6 * s.n_poses);
         for (int i = 0; i < s.n_poses; i++) {
@@ -411,7 +435,7 @@ static RunResult solve(const Scene& s, bool lm, int max_iters, std::vector<doubl
             for (int k = 0; k < 6; k++) (*pose_out)[6 * i + k] = e[k];
         }
     }
-    return RunResult{ms, iters, initial_cost};
+    return RunResult{ms, iters, attempts, initial_cost};
 }
 
 static long peak_rss_kb() {
@@ -427,9 +451,12 @@ int main(int argc, char** argv) {
     bool lm = std::string(argv[2]) == "lm";
     Scene s = load(argv[1]);
 
-    RunResult first = solve(s, lm, 1, nullptr);
+    RunResult first = solve(s, lm, 1, nullptr, false);
     std::vector<double> poses;
-    RunResult full = solve(s, lm, 200, &poses);
+    RunResult full = solve(s, lm, 200, &poses, false);
+    // Untimed statistics pass: the damped-trial (attempts) count.
+    RunResult st_run = solve(s, lm, 200, nullptr, true);
+    full.attempts = st_run.attempts;
 
     std::ofstream out(argv[3]);
     out.precision(17);
@@ -445,6 +472,6 @@ int main(int argc, char** argv) {
 
     printf("{\"solve_ms\": %.3f, \"first_iter_ms\": %.3f, \"iterations\": %d, "
            "\"accepted\": %d, \"initial_cost\": %.6f, \"peak_rss_kb\": %ld, \"cpus_allowed\": \"%s\"}\n",
-           full.ms, first.ms, full.iterations, full.iterations, full.initial_cost, peak_rss_kb(), cpus.c_str());
+           full.ms, first.ms, full.attempts, full.iterations, full.initial_cost, peak_rss_kb(), cpus.c_str());
     return 0;
 }
