@@ -167,8 +167,22 @@ pub struct RunOut {
     pub first_iter_ms: f64,
     pub iterations: usize,
     pub accepted: usize,
+    /// Cost of one FULL accepted iteration -- the solver's steady-state
+    /// per-phase means (assembly + damped solve + trial cost + advance,
+    /// first calls excluded: they carry one-time structure costs) summed.
+    /// Undiluted by rejected attempts, which skip the re-linearization.
+    /// 0.0 when a phase has no steady-state sample (fewer than 2 calls).
+    pub full_iter_ms: f64,
     pub cameras: Vec<CameraIn>,
     pub points: Vec<vect3d>,
+}
+
+fn full_iter_ms(timing: Option<&arael::simple_lm::LmTiming>) -> f64 {
+    let Some(t) = timing else { return 0.0 };
+    match (t.mean_assembly(), t.mean_linear_solve(), t.mean_cost_eval(), t.mean_advance()) {
+        (Some(a), Some(l), Some(c), Some(adv)) => (a + l + c + adv).as_secs_f64() * 1e3,
+        _ => 0.0,
+    }
 }
 
 // Initial damping: bundle adjustment is far less linear than the pose
@@ -223,6 +237,7 @@ fn cfg64(max_iters: usize) -> arael::simple_lm::LmConfig<f64> {
         initial_lambda: lambda0(),
         lambda_floor: lambda_floor(),
         verbose: verbose(),
+        gather_timing: true, // per-phase times for the full-iteration column
         ..Default::default()
     };
     if nielsen() { cfg.with_driver(arael::simple_lm::NielsenLambdaDriver::default()) } else { cfg }
@@ -237,6 +252,7 @@ fn cfg32(max_iters: usize) -> arael::simple_lm::LmConfig<f32> {
         initial_lambda: lambda0() as f32,
         lambda_floor: lambda_floor() as f32,
         verbose: verbose(),
+        gather_timing: true,
         ..Default::default()
     };
     if nielsen() { cfg.with_driver(arael::simple_lm::NielsenLambdaDriver::default()) } else { cfg }
@@ -247,17 +263,20 @@ fn rodrigues_of(m: arael::matrix::matrix3d) -> vect3d {
     axis * angle
 }
 
-pub fn run_f64(ds: &Dataset) -> RunOut {
+type Solve64 = fn(&[f64], &mut Scene, &arael::simple_lm::LmConfig<f64>)
+    -> arael::simple_lm::LmResult<f64>;
+
+fn run_f64_with(ds: &Dataset, solve: Solve64) -> RunOut {
     let mut s = build_f64(ds);
     let mut params: Vec<f64> = Vec::new();
     s.serialize64(&mut params);
 
     let t0 = std::time::Instant::now();
-    let _ = solve64(&params, &mut s, &cfg64(1));
+    let _ = solve(&params, &mut s, &cfg64(1));
     let first_iter_ms = t0.elapsed().as_secs_f64() * 1e3;
 
     let t0 = std::time::Instant::now();
-    let result = solve64(&params, &mut s, &cfg64(100));
+    let result = solve(&params, &mut s, &cfg64(100));
     let solve_ms = t0.elapsed().as_secs_f64() * 1e3;
     s.deserialize64(&result.x);
     let cameras = s.cameras.iter()
@@ -274,8 +293,45 @@ pub fn run_f64(ds: &Dataset) -> RunOut {
         solve_ms, first_iter_ms,
         iterations: result.iterations,
         accepted: result.accepted_iterations,
+        full_iter_ms: full_iter_ms(result.timing.as_ref()),
         cameras, points,
     }
+}
+
+pub fn run_f64(ds: &Dataset) -> RunOut {
+    run_f64_with(ds, solve64)
+}
+
+/// The CHOLMOD-supernodal row (GPL-licensed module; see the cholmod-gpl
+/// feature warning in the arael Cargo.toml).
+#[cfg(feature = "cholmod-gpl")]
+pub fn run_f64_supernodal(ds: &Dataset) -> RunOut {
+    run_f64_with(ds, |p, s, cfg| arael::simple_lm::solve_sparse_cholmod_supernodal(p, s, cfg))
+}
+
+// Single capped solves for the peak-memory measurement (no warm-up pass;
+// peak fill-in is reached in the first factorization).
+
+pub fn run_f64_capped(ds: &Dataset, max_iters: usize) -> Vec<f64> {
+    let mut s = build_f64(ds);
+    let mut params: Vec<f64> = Vec::new();
+    s.serialize64(&mut params);
+    solve64(&params, &mut s, &cfg64(max_iters)).x
+}
+
+#[cfg(feature = "cholmod-gpl")]
+pub fn run_f64_supernodal_capped(ds: &Dataset, max_iters: usize) -> Vec<f64> {
+    let mut s = build_f64(ds);
+    let mut params: Vec<f64> = Vec::new();
+    s.serialize64(&mut params);
+    arael::simple_lm::solve_sparse_cholmod_supernodal(&params, &mut s, &cfg64(max_iters)).x
+}
+
+pub fn run_f32_capped(ds: &Dataset, max_iters: usize) -> Vec<f32> {
+    let mut s = build_f32(ds);
+    let mut params: Vec<f32> = Vec::new();
+    s.serialize32(&mut params);
+    solve32(&params, &mut s, &cfg32(max_iters)).x
 }
 
 pub fn run_f32(ds: &Dataset) -> RunOut {
@@ -309,6 +365,7 @@ pub fn run_f32(ds: &Dataset) -> RunOut {
         solve_ms, first_iter_ms,
         iterations: result.iterations,
         accepted: result.accepted_iterations,
+        full_iter_ms: full_iter_ms(result.timing.as_ref()),
         cameras, points,
     }
 }

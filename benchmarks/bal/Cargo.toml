@@ -7,6 +7,12 @@ publish = false
 # Standalone workspace, same pattern as benchmarks/pgo.
 [workspace]
 
+[features]
+# Adds the "arael LM f64 cholmod-gpl" row (CHOLMOD supernodal backend).
+# WARNING: cholmod-gpl links CHOLMOD's GPL-licensed Supernodal module; the
+# resulting binary is subject to the GPL.
+cholmod-gpl = ["arael/cholmod-gpl"]
+
 [dependencies]
 arael = { path = "../.." }
 libc = "0.2"

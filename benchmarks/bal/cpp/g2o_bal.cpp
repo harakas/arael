@@ -8,13 +8,17 @@
 // information, so g2o's chi2 IS the reference cost -- asserted by the
 // harness at the initial estimate. Protocol:
 //   g2o_bal <problem.txt> <params_out>
-// prints JSON {solve_ms, first_iter_ms, iterations, initial_chi2, final_chi2,
-// cpus_allowed}; params_out carries one camera per line (9 values)
-// followed by one point per line (3 values).
+// prints JSON {solve_ms, first_iter_ms, iterations, accepted, initial_chi2,
+// final_chi2, full_iter_ms, peak_rss_kb, cpus_allowed} -- iterations counts
+// every damped lambda trial (from the batch statistics), accepted the outer
+// Levenberg iterations, matching the other systems' accepted(attempts);
+// params_out carries one camera per line (9 values) followed by one point
+// per line (3 values).
 
 #include <g2o/core/auto_differentiation.h>
 #include <g2o/core/base_binary_edge.h>
 #include <g2o/core/base_vertex.h>
+#include <g2o/core/batch_stats.h>
 #include <g2o/core/block_solver.h>
 #include <g2o/core/optimization_algorithm_levenberg.h>
 #include <g2o/core/sparse_optimizer.h>
@@ -133,9 +137,19 @@ public:
 
 struct RunResult {
     double ms;
-    int iterations;
+    int iterations; // outer Levenberg iterations (each ends with an accepted step)
+    // Total damped trials: sum of levenbergIterations over the outer
+    // iterations -- each trial is a factorization + solve + cost eval, so
+    // this is the count comparable to the other systems' "iterations".
+    int attempts;
     double initial_chi2;
     double final_chi2;
+    // Mean whole-iteration time over iterations that ran exactly one
+    // lambda trial (levenbergIterations == 1), first iteration excluded
+    // (it carries the symbolic decomposition) -- the cost of one full
+    // accepted iteration, undiluted by internal damping retries. -1 if
+    // no iteration qualifies.
+    double full_iter_ms;
 };
 
 static RunResult solve(const Bal& b, int max_iters, std::vector<double>* cams_out,
@@ -150,6 +164,7 @@ static RunResult solve(const Bal& b, int max_iters, std::vector<double>* cams_ou
 
     g2o::SparseOptimizer opt;
     opt.setVerbose(false);
+    opt.setComputeBatchStatistics(true); // per-iteration phase timings
     opt.setAlgorithm(lev);
 
     std::vector<VertexCameraBAL*> cams(b.n_cams);
@@ -203,6 +218,22 @@ static RunResult solve(const Bal& b, int max_iters, std::vector<double>* cams_ou
     opt.computeActiveErrors();
     double final_chi2 = opt.chi2();
 
+    double full_iter_ms = -1.0;
+    int attempts = 0;
+    {
+        double sum = 0.0;
+        int n = 0;
+        for (const auto& st : opt.batchStatistics()) {
+            if (st.iteration < 0) continue;
+            attempts += st.levenbergIterations;
+            if (st.iteration == 0 || st.levenbergIterations != 1) continue;
+            sum += st.timeIteration;
+            n++;
+        }
+        if (n > 0) full_iter_ms = 1e3 * sum / n;
+    }
+    if (attempts < iters) attempts = iters; // stats missing -- never undercount
+
     if (cams_out) {
         cams_out->resize(9 * b.n_cams);
         for (int i = 0; i < b.n_cams; i++) {
@@ -217,7 +248,7 @@ static RunResult solve(const Bal& b, int max_iters, std::vector<double>* cams_ou
             m = pts[i]->estimate();
         }
     }
-    return RunResult{ms, iters, initial_chi2, final_chi2};
+    return RunResult{ms, iters, attempts, initial_chi2, final_chi2, full_iter_ms};
 }
 
 int main(int argc, char** argv) {
@@ -238,15 +269,19 @@ int main(int argc, char** argv) {
     }
 
     std::string cpus = "?";
+    long peak_rss_kb = 0;
     std::ifstream st("/proc/self/status");
     std::string l;
     while (std::getline(st, l)) {
         if (l.rfind("Cpus_allowed_list:", 0) == 0) {
             cpus = l.substr(l.find_last_of(" \t") + 1);
         }
+        if (l.rfind("VmHWM:", 0) == 0) peak_rss_kb = atol(l.c_str() + 6);
     }
     printf("{\"solve_ms\": %.3f, \"first_iter_ms\": %.3f, \"iterations\": %d, "
-           "\"initial_chi2\": %.6f, \"final_chi2\": %.6f, \"cpus_allowed\": \"%s\"}\n",
-           full.ms, first.ms, full.iterations, full.initial_chi2, full.final_chi2, cpus.c_str());
+           "\"accepted\": %d, \"initial_chi2\": %.6f, \"final_chi2\": %.6f, "
+           "\"full_iter_ms\": %.3f, \"peak_rss_kb\": %ld, \"cpus_allowed\": \"%s\"}\n",
+           full.ms, first.ms, full.attempts, full.iterations, full.initial_chi2,
+           full.final_chi2, full.full_iter_ms, peak_rss_kb, cpus.c_str());
     return 0;
 }
