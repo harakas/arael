@@ -116,20 +116,23 @@ atan2f suspicion in TODO.md.
 | factrs LM                    |     54.7 |     3 |   18.22 |          - |        23.7 |    11.6 |  3274.6025 |
 | tiny-solver LM               |    265.5 |     3 |   88.51 |          - |        96.7 |    11.5 |  3274.6025 |
 
-### Raspberry Pi Zero (ARM1176, ARMv6, single core, 100 poses)
+### Raspberry Pi Zero (ARM1176, ARMv6, single core, 60 poses; ROUNDS=10, LOC_LAMBDA0=1e-2)
 
-The cross-compiled static-musl binary on a real Pi Zero, arael + factrs only --
-the C++ solvers are not cross-built, and tiny-solver is omitted as too slow. arael dominates by ~18x, and the initial cost still matches
-the reference (5e-15), confirming the ARMv6 build is bit-faithful. Note **f32 is
-markedly faster than f64 here** -- the ARM1176 VFPv2 FPU favors single
-precision far beyond the A76's few percent. (This table predates the
-arael rows' fast_atan adoption.)
+The cross-compiled static-musl binary on a real Pi Zero, arael + factrs
+only -- the C++ solvers are not cross-built, and tiny-solver is omitted
+as too slow. Same 60-pose scene as the Pi 5 table above: the in-order
+ARM1176 runs it ~22x (arael f32) to ~28x (f64) slower than the A76, and
+arael leads factrs by ~21x per iteration. factrs matches the reference
+initial cost to 1.1e-16, confirming the ARMv6 build is bit-faithful; the
+arael rows go through fast_atan (4.4e-7, within the shared tolerance).
+**f32 is markedly faster than f64 here** (1.37x) -- the ARM1176 VFPv2
+FPU favors single precision far beyond the A76's few percent.
 
-| system              | ms/iter | 1st-iter ms | peak MB | final cost |
-|---------------------|--------:|------------:|--------:|-----------:|
-| **arael LM f32 (band)** |  **47.74** |      48.4 |     2.9 |  6050.6032 |
-| **arael LM f64 (band)** |  **65.03** |      65.9 |     3.9 |  6050.6032 |
-| factrs LM               |  873.33 |     1069.5 |    11.5 |  6050.6032 |
+| system                  | total ms | iters | ms/iter | full-it ms | 1st-iter ms | peak MB | final cost |
+|-------------------------|---------:|------:|--------:|-----------:|------------:|--------:|-----------:|
+| **arael LM f32 (band)** |     67.7 |  3(3) | **22.56** |  **22.18** |        23.1 |     2.3 |  3274.6021 |
+| **arael LM f64 (band)** |     92.9 |  3(3) | **30.96** |  **30.52** |        31.6 |     2.9 |  3274.6021 |
+| factrs LM               |   1424.9 |     3 |  474.95 |          - |       565.6 |     7.2 |  3274.6021 |
 
 ## Analysis
 

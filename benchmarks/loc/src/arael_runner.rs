@@ -10,7 +10,7 @@
 
 use crate::scene::{Scene, Solution};
 use arael::matrix::{matrix3d, matrix3f};
-use arael::model::{CrossBlock, Model, Param, SelfBlock, SimpleEulerAngleParam};
+use arael::model::{CrossBlock, Param, SelfBlock, SimpleEulerAngleParam};
 use arael::refs::{self, Ref};
 use arael::vect::{vect2d, vect2f, vect3d, vect3f};
 
