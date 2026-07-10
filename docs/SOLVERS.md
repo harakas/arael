@@ -14,19 +14,21 @@ sparse Cholesky is the right choice, and `faer` is the best-supported
 backend -- pure Rust, no external dependency, benchmarks cleanly, and
 handles the full sparsity pattern of a SLAM-like problem.
 
-Pick anything else only when you have a specific reason:
+Pick anything else only when you have a specific reason. Every backend
+comes in two forms: an `LmSolver` instance for the root's `solve_with`
+(the main API -- see below) and a `simple_lm::` free function over a raw
+parameter vector.
 
-| Backend | When |
-|---|---|
-| **`solve_sparse_faer[_f32]`** | **default**. Any non-trivial problem -- SLAM, bundle adjustment, sketch solver, anything with > ~10 parameters or a sparse Hessian structure |
-| `solve[_f32]` (dense) | toy problems (≤ 4 parameters), or when the Hessian is actually dense and small. Simple, no overhead from sparse bookkeeping |
-| `solve_band[_f32]` | **only** when the Hessian is genuinely block-tridiagonal with a known half-bandwidth `kd` (pose-only localisation, smoother-like problems). ~10x faster than dense at 500 poses but hard-errors on any off-band element |
-
-Feature-gated backends (`BandLapack`, `SparseDirect`,
-`SparseEigen`, `SparseCholmod`) target specific environments: LAPACK
-interop, alternative factorisation strategies, external-solver
-interop. Enable them via cargo features only when you need the
-interop -- they don't outperform faer on any common workload.
+| Backend (`solve_with(&mut ..., &cfg)`) | Free function | When |
+|---|---|---|
+| **`SparseFaer::new()` / `SparseFaerF32::new()`** | **`solve_sparse_faer[_f32]`** | **default** (= the root's `solve_sparse`). Any non-trivial problem -- SLAM, bundle adjustment, sketch solver, anything with > ~10 parameters or a sparse Hessian structure. Sparsity pattern discovered once, indexed assembly after |
+| `Dense` | `solve[_f32]` | dense nalgebra Cholesky (= the root's `solve_dense`): low parameter counts, or when the Hessian is actually dense and small |
+| `Band::new(kd)` | `solve_band[_f32]` | **only** when the Hessian is genuinely block-tridiagonal with a known half-bandwidth `kd` (pose-only localisation, smoother-like problems). ~10x faster than dense at 500 poses but hard-errors on any off-band element |
+| `BandLapack::new(kd)` | `solve_band_lapack[_f32]` | the same band solve through LAPACK `dpbsv`/`spbsv` (feature `lapack`) -- for LAPACK-standardised environments |
+| `SparseEigen::new()` / `SparseEigenF32::new()` | `solve_sparse_eigen[_f32]` | Eigen `SimplicialLLT` through a C++ shim (feature `eigen`) -- for Eigen interop/comparison; measured well behind faer |
+| `SparseCholmod::new()` | `solve_sparse_cholmod` | CHOLMOD simplicial Cholesky, LGPL (feature `cholmod`; f64 only) -- comparable to Eigen simplicial, behind faer |
+| `SparseCholmodSupernodal::new()` | `solve_sparse_cholmod_supernodal` | CHOLMOD supernodal Cholesky (feature `cholmod-gpl`; f64 only). **License warning: the Supernodal module is GPL**, unlike the LGPL simplicial one -- enabling it makes the binary subject to the GPL. The one backend measured faster than faer: ~1.8x on dense-fill Hessians (the 300-pose SLAM benchmark) |
+| `Sparse::new()` / `SparseDirect::new()` | `solve_sparse` / `solve_sparse_direct` | COO / direct-CSC assembly over a DENSE solve -- validation baselines for the assembly paths, not for production. Note the free `solve_sparse` is this baseline; the root's `.solve_sparse()` method is faer |
 
 ## Basic usage
 
@@ -44,10 +46,15 @@ println!("{} iterations: {:.4} -> {:.4}",
 // `model` now holds the optimized parameters.
 ```
 
-`#[arael(root)]` generates `solve_sparse` and `solve_dense` on the root
-(along with the `LmProblem` impl the solver actually consumes) -- you never
-write either by hand. Reach for `solve_dense` on small or dense problems;
-otherwise `solve_sparse` is the default (see the backend table above).
+`#[arael(root)]` generates `solve_with` plus the `solve_sparse` /
+`solve_dense` conveniences on the root (along with the `LmProblem` impl
+the solver actually consumes) -- you never write them by hand.
+`solve_with` is the general entry point taking any backend instance;
+`solve_sparse` = `solve_with(SparseFaer)` is the default,
+`solve_dense` = `solve_with(Dense)` for small or dense problems (see
+the backend table above). The generated methods match the root's
+precision: on an `#[arael(root, f32)]` model they take `f32` configs
+and `solve_sparse` uses `SparseFaerF32`.
 
 ## Advanced usage
 

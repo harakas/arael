@@ -858,27 +858,39 @@
 //! one config struct ([`simple_lm::LmConfig`]). Markdown mirror:
 //! [docs/SOLVERS.md](https://github.com/harakas/arael/blob/master/docs/SOLVERS.md).
 //!
-//! ## Which backend?
+//! ## Entry points and backends
 //!
-//! **Default to [`simple_lm::solve_sparse_faer_f32`] (or
-//! [`simple_lm::solve_sparse_faer`] for f64).** For most real
-//! problems the Hessian is sparse enough that sparse Cholesky is
-//! the right choice, and `faer` is the best-supported backend --
-//! pure Rust, no external dependency, handles the full sparsity
-//! pattern of a SLAM-like problem.
+//! **The main entry point is the generated `solve_with` on the root
+//! model** -- it wraps the serialize -> optimize -> deserialize round
+//! trip (parameters are read from the model and written back) and
+//! takes any backend instance. `solve_sparse` and `solve_dense` are
+//! conveniences over it, and the `simple_lm::solve_*` free functions
+//! run the same solves over a raw parameter vector you manage
+//! yourself:
 //!
-//! | Backend | When |
-//! |---|---|
-//! | **[`solve_sparse_faer[_f32]`](simple_lm::solve_sparse_faer)** | **default**. Any non-trivial problem (> ~10 parameters, any sparse Hessian structure) |
-//! | [`solve[_f32]`](simple_lm::solve) (dense) | toy problems (≤ 4 parameters), or when the Hessian is actually small and dense |
-//! | [`solve_band[_f32]`](simple_lm::solve_band) | **only** when the Hessian is genuinely block-tridiagonal with a known half-bandwidth `kd`. ~10x faster than dense at 500 poses but hard-errors on any off-band element |
+//! ```rust,ignore
+//! let result = model.solve_with(&mut Band::new(11), &cfg); // any LmSolver backend
+//! let result = model.solve_sparse(&cfg); // = solve_with(SparseFaer): the default backend
+//! let result = model.solve_dense(&cfg);  // = solve_with(Dense)
+//! ```
 //!
-//! Feature-gated backends (`BandLapack`, `SparseDirect`,
-//! `SparseEigen`, `SparseCholmod`) target specific
-//! environments (LAPACK interop, alternative factorisations,
-//! external-solver interop). Enable the corresponding cargo feature
-//! only if you need the interop -- they don't outperform `faer` on
-//! any common workload.
+//! `solve_sparse` (indexed sparse faer) is the right default: for most
+//! real problems the Hessian is sparse enough for sparse Cholesky, and
+//! faer is pure Rust with no external dependency. The generated
+//! methods match the root's precision: on an `#[arael(root, f32)]`
+//! model they take `f32` configs and `solve_sparse` uses
+//! [`SparseFaerF32`](simple_lm::SparseFaerF32).
+//!
+//! | Backend (`solve_with(&mut ..., &cfg)`) | Free function | What it is |
+//! |---|---|---|
+//! | **[`SparseFaer`](simple_lm::SparseFaer)`::new()` / [`SparseFaerF32`](simple_lm::SparseFaerF32)`::new()`** | **[`solve_sparse_faer[_f32]`](simple_lm::solve_sparse_faer)** | **default** (= `solve_sparse`): sparse Cholesky via faer, pure Rust; sparsity pattern discovered once, indexed assembly after |
+//! | [`Dense`](simple_lm::Dense) | [`solve[_f32]`](simple_lm::solve) | dense nalgebra Cholesky (= `solve_dense`): low parameter counts or genuinely dense problems |
+//! | [`Band`](simple_lm::Band)`::new(kd)` | [`solve_band[_f32]`](simple_lm::solve_band) | pure-Rust band Cholesky for block-tridiagonal Hessians (localization-like); hard-errors on off-band elements |
+//! | `BandLapack::new(kd)` | `solve_band_lapack[_f32]` | the same band solve through LAPACK `dpbsv`/`spbsv` (feature `lapack`) |
+//! | `SparseEigen::new()` / `SparseEigenF32::new()` | `solve_sparse_eigen[_f32]` | Eigen `SimplicialLLT` (feature `eigen`) |
+//! | `SparseCholmod::new()` | `solve_sparse_cholmod` | CHOLMOD simplicial Cholesky, LGPL (feature `cholmod`; f64 only) |
+//! | `SparseCholmodSupernodal::new()` | `solve_sparse_cholmod_supernodal` | CHOLMOD supernodal Cholesky, **GPL-licensed module** (feature `cholmod-gpl`; f64 only); the one backend measured faster than faer on dense-fill Hessians (~1.8x on the 300-pose SLAM benchmark) |
+//! | [`Sparse`](simple_lm::Sparse)`::new()` / [`SparseDirect`](simple_lm::SparseDirect)`::new()` | [`solve_sparse`](simple_lm::solve_sparse) / [`solve_sparse_direct`](simple_lm::solve_sparse_direct) | COO / direct-CSC assembly over a dense solve -- validation baselines, not for production. (The free `solve_sparse` is this baseline; the root's `.solve_sparse()` is faer) |
 //!
 //! ## Damping-schedule drivers
 //!
