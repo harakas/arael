@@ -120,7 +120,7 @@ struct PosePair {
 }
 
 #[arael::model]
-#[arael(root)]
+#[arael(root, eliminate_first(landmarks))]
 struct Path {
     poses: refs::Vec<Pose>,
     landmarks: refs::Vec<PointLandmark>,
@@ -226,7 +226,7 @@ struct PosePairF {
 }
 
 #[arael::model]
-#[arael(root, f32)]
+#[arael(root, f32, eliminate_first(landmarks))]
 struct PathF {
     poses: refs::Vec<PoseF>,
     landmarks: refs::Vec<PointLandmarkF>,
@@ -414,6 +414,7 @@ fn cfg(max_iters: usize) -> arael::simple_lm::LmConfig<f64> {
         max_iters,
         initial_lambda: std::env::var("SLAM_LAMBDA0").ok().and_then(|v| v.parse().ok()).unwrap_or(1e-8),
         verbose: std::env::var("SLAM_VERBOSE").map_or(false, |v| v == "1"),
+        gather_timing: std::env::var("SLAM_TIMING").map_or(false, |v| v == "1"),
         ..Default::default()
     };
     if nielsen() { cfg.with_driver(arael::simple_lm::NielsenLambdaDriver::default()) } else { cfg }
@@ -444,7 +445,15 @@ fn solve64(params: &[f64], path: &mut Path, cfg: &arael::simple_lm::LmConfig<f64
             #[cfg(not(feature = "cholmod-gpl"))]
             panic!("SLAM_ARAEL_SOLVER=cholmod_gpl requires building with --features cholmod-gpl");
         }
-        _ => arael::simple_lm::solve_sparse_faer(params, path, cfg),
+        _ => {
+            // Default faer backend with the model's elimination hint
+            // (landmarks eliminated first).
+            let mut solver = arael::simple_lm::SparseFaer::new();
+            for r in arael::simple_lm::RootProblem::elimination_hint(path) {
+                solver = solver.with_eliminate_first(r);
+            }
+            arael::simple_lm::lm_solve(params, &mut solver, path, cfg)
+        }
     }
 }
 
@@ -498,6 +507,21 @@ fn run_with(scene: &Scene, solve: Solve64) -> RunOut {
     let solve_ms = t0.elapsed().as_secs_f64() * 1e3;
     path.deserialize64(&result.x);
 
+    // SLAM_TIMING=1: per-phase breakdown of the f64 solve (steady-state
+    // mean per call, first call apart -- the first also pays the one-time
+    // structure/symbolic costs).
+    if let Some(t) = &result.timing {
+        let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
+        let m = |o: Option<std::time::Duration>| o.map_or(f64::NAN, ms);
+        eprintln!(
+            "timing ms/call (first): assembly {:.2} ({:.2})  linear_solve {:.2} ({:.2})  cost_eval {:.2} ({:.2})  advance {:.3} ({:.3})",
+            m(t.mean_assembly()), ms(t.first_assembly),
+            m(t.mean_linear_solve()), ms(t.first_linear_solve),
+            m(t.mean_cost_eval()), ms(t.first_cost_eval),
+            m(t.mean_advance()), ms(t.first_advance),
+        );
+    }
+
     RunOut {
         solve_ms, first_iter_ms,
         iterations: result.iterations,
@@ -542,7 +566,11 @@ fn cfg32(max_iters: usize, poses: usize) -> arael::simple_lm::LmConfig<f32> {
 
 fn solve32(params: &[f32], path: &mut PathF, cfg: &arael::simple_lm::LmConfig<f32>)
     -> arael::simple_lm::LmResult<f32> {
-    arael::simple_lm::solve_sparse_faer_f32(params, path, cfg)
+    let mut solver = arael::simple_lm::SparseFaerF32::new();
+    for r in arael::simple_lm::RootProblem::elimination_hint(path) {
+        solver = solver.with_eliminate_first(r);
+    }
+    arael::simple_lm::lm_solve(params, &mut solver, path, cfg)
 }
 
 // Capped single solve (no timing) -- used for peak-memory measurement.

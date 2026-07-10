@@ -7,7 +7,7 @@
 //   cargo run -r --features faer --example bench_sparse
 //   OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 cargo run -r --features faer --example bench_sparse
 
-use arael::model::{Model, Param, SelfBlock, CrossBlock, SimpleEulerAngleParam};
+use arael::model::{Param, SelfBlock, CrossBlock, SimpleEulerAngleParam};
 use arael::vect::{vect3f, vect2f};
 use arael::matrix::matrix3f;
 use arael::refs::{self, Ref};

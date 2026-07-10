@@ -19,7 +19,7 @@
 /// --sigma <value>    Residual normalization (default: 0.01)
 
 use std::collections::HashMap;
-use arael::model::{ExtendedModel, Model, Param, TripletBlock};
+use arael::model::{ExtendedModel, Param, TripletBlock};
 use arael::simple_lm::LmConfig;
 use arael_sym::E;
 

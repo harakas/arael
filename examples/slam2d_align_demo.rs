@@ -42,7 +42,7 @@
 //!
 //! Run:  cargo run -r --example slam2d_align_demo
 
-use arael::model::{Model, Param, SelfBlock, CrossBlock};
+use arael::model::{Param, SelfBlock, CrossBlock};
 use arael::simple_lm::{LmConfig, LmProblem};
 use arael::vect::{vect2f, vect3f};
 use arael::matrix::{matrix2f, matrix3d, matrix3f};

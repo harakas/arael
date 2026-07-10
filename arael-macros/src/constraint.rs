@@ -1836,6 +1836,7 @@ pub fn generate_root_methods(
     custom: bool,
     jacobian: bool,
     fast_atan: bool,
+    elimination_hint_fn: &Option<TokenStream2>,
 ) -> syn::Result<TokenStream2> {
     let stashed = crate::registry_constraints();
     let root_var_name = root_name.to_string().to_lowercase();
@@ -4524,6 +4525,7 @@ pub fn generate_root_methods(
             fn deserialize(&mut self, data: &[#prec_type]) {
                 self.#solve_deserialize(data)
             }
+            #elimination_hint_fn
         }
 
         impl #root_name {

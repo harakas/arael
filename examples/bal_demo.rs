@@ -7,7 +7,7 @@
 // Run (defaults to the vendored 49-camera problem):
 //   cargo run -r --example bal_demo [-- path/to/problem.txt]
 
-use arael::model::{CrossBlock, EulerAngleParam, Model, Param, SelfBlock};
+use arael::model::{CrossBlock, EulerAngleParam, Param, SelfBlock};
 use arael::matrix::matrix3d;
 use arael::refs::{self, Ref};
 use arael::simple_lm::{LmConfig, LmProblem, NielsenLambdaDriver};

@@ -113,6 +113,8 @@ strategy, which is tuning, not implementation.
 
 arael runs f64 and f32; its residuals and SymForce's are code-generated
 (SymForce from `symforce_gen.py`, flattened C++ under `cpp/symforce_gen/`).
+The arael models mark `eliminate_first(landmarks)`, so the faer rows
+factorize with the landmarks ordered first instead of AMD.
 Ceres runs three linear solvers: the two exact factorizations
 (`sparse_normal_cholesky`, `sparse_schur`) are the like-for-like per-step
 rows; `iterative_schur` is matrix-free preconditioned CG -- cheaper per
@@ -128,18 +130,18 @@ comparison below).
 
 | system                        | total ms | iters  | ms/iter | 1st-iter ms | peak MB | final cost |
 |-------------------------------|---------:|-------:|--------:|------------:|--------:|-----------:|
-| arael LM f64                  |     14.4 |   3(3) |    4.79 |         6.5 |    13.2 |  3062.0482 |
-| arael LM f64 cholmod-gpl      |     12.2 |   3(3) |    4.07 |         5.8 |    17.8 |  3062.0482 |
-| arael LM f32                  |     12.9 |   3(3) |    4.28 |         6.0 |    10.5 |  3062.0482 |
-| tiny-solver LM               |     99.2 |      3 |   33.08 |        39.0 |    26.7 |  3062.0482 |
-| factrs LM                     |     36.4 |      3 |   12.12 |        16.1 |    24.4 |  3062.0482 |
-| ceres sparse_normal_cholesky  |     17.8 |   3(3) |    5.93 |        10.1 |    16.9 |  3062.0482 |
-| ceres sparse_schur            |     18.6 |   3(3) |    6.21 |        11.0 |    16.5 |  3062.0482 |
-| ceres iterative_schur         |     24.8 |   6(6) |    4.13 |         6.1 |    12.9 |  3067.3849 (RMSE 0.745 m) |
-| symforce LM f64               |     26.6 |   3(4) |    6.65 |        17.8 |    27.0 |  3062.0482 |
-| symforce LM f32               |     31.5 |   4(5) |    6.30 |        16.7 |    23.3 |  3062.0500 |
-| g2o LM                        |     14.0 |   3(3) |    4.67 |         7.1 |    16.4 |  3062.0482 |
-| gtsam LM                      |     30.6 |   3(3) |   10.21 |        15.1 |    47.4 |  3062.0482 |
+| arael LM f64                  |     13.7 |   3(3) |    4.57 |         5.8 |    14.3 |  3062.0482 |
+| arael LM f64 cholmod-gpl      |     12.7 |   3(3) |    4.22 |         5.9 |    17.8 |  3062.0482 |
+| arael LM f32                  |     12.5 |   3(3) |    4.18 |         5.0 |    11.0 |  3062.1407 |
+| tiny-solver LM               |    101.9 |      3 |   33.97 |        40.0 |    27.0 |  3062.0482 |
+| factrs LM                     |     37.0 |      3 |   12.33 |        16.7 |    24.2 |  3062.0482 |
+| ceres sparse_normal_cholesky  |     18.5 |   3(3) |    6.15 |        10.6 |    16.9 |  3062.0482 |
+| ceres sparse_schur            |     19.0 |   3(3) |    6.32 |        11.3 |    16.4 |  3062.0482 |
+| ceres iterative_schur         |     25.4 |   6(6) |    4.23 |         6.3 |    12.8 |  3067.3849 (RMSE 0.745 m) |
+| symforce LM f64               |     27.6 |   3(4) |    6.90 |        18.2 |    27.1 |  3062.0482 |
+| symforce LM f32               |     32.3 |   4(5) |    6.47 |        17.2 |    23.3 |  3062.0500 |
+| g2o LM                        |     14.4 |   3(3) |    4.81 |         7.4 |    16.4 |  3062.0482 |
+| gtsam LM                      |     32.0 |   3(3) |   10.67 |        15.6 |    47.3 |  3062.0482 |
 
 11/12 at the common optimum; ceres iterative_schur (inexact CG) does not
 reach the gate.
@@ -148,18 +150,18 @@ reach the gate.
 
 | system                        | total ms | iters  | ms/iter | 1st-iter ms | peak MB | final cost |
 |-------------------------------|---------:|-------:|--------:|------------:|--------:|-----------:|
-| arael LM f64                  |     40.5 |   3(3) |   13.49 |        19.0 |    25.3 |  7065.8806 |
-| arael LM f64 cholmod-gpl      |     33.6 |   3(3) |   11.21 |        15.1 |    30.0 |  7065.8806 |
-| arael LM f32                  |     35.3 |   3(3) |   11.77 |        16.3 |    19.2 |  7065.8815 |
-| tiny-solver LM               |    238.2 |      3 |   79.41 |        92.8 |    54.7 |  7065.8806 |
-| factrs LM                     |     89.1 |      3 |   29.72 |        40.3 |    48.8 |  7065.8806 |
-| ceres sparse_normal_cholesky  |     46.3 |   3(3) |   15.44 |        28.3 |    28.5 |  7065.8809 |
-| ceres sparse_schur            |     53.6 |   3(3) |   17.86 |        30.2 |    27.4 |  7065.8809 |
-| ceres iterative_schur         |    232.6 | 15(15) |   15.51 |        14.8 |    18.3 |  7066.3200 (RMSE 0.150 m) |
-| symforce LM f64               |     81.9 |   3(4) |   20.49 |        50.0 |    52.7 |  7065.8806 |
-| symforce LM f32               |    117.0 |   5(6) |   19.50 |        46.8 |    44.4 |  7065.8881 |
-| g2o LM                        |     37.4 |   3(3) |   12.48 |        18.7 |    30.3 |  7065.8806 |
-| gtsam LM                      |     84.7 |   3(3) |   28.23 |        39.9 |   107.3 |  7065.8806 |
+| arael LM f64                  |     36.3 |   3(3) |   12.11 |        14.7 |    26.9 |  7065.8806 |
+| arael LM f64 cholmod-gpl      |     34.5 |   3(3) |   11.51 |        15.9 |    30.1 |  7065.8806 |
+| arael LM f32                  |     31.9 |   3(3) |   10.65 |        12.9 |    19.3 |  7065.8816 |
+| tiny-solver LM               |    242.5 |      3 |   80.84 |        95.3 |    52.7 |  7065.8806 |
+| factrs LM                     |     92.9 |      3 |   30.96 |        41.0 |    48.9 |  7065.8806 |
+| ceres sparse_normal_cholesky  |     47.8 |   3(3) |   15.92 |        29.1 |    28.5 |  7065.8809 |
+| ceres sparse_schur            |     54.3 |   3(3) |   18.11 |        31.3 |    27.3 |  7065.8809 |
+| ceres iterative_schur         |    236.8 | 15(15) |   15.79 |        15.1 |    18.3 |  7066.3200 (RMSE 0.150 m) |
+| symforce LM f64               |     84.6 |   3(4) |   21.15 |        51.9 |    52.7 |  7065.8806 |
+| symforce LM f32               |    119.9 |   5(6) |   19.98 |        48.2 |    44.5 |  7065.8881 |
+| g2o LM                        |     38.5 |   3(3) |   12.83 |        19.5 |    30.2 |  7065.8806 |
+| gtsam LM                      |     87.5 |   3(3) |   29.16 |        41.2 |   107.2 |  7065.8806 |
 
 11/12 at the common optimum; ceres iterative_schur (inexact CG) does not
 reach the gate.
@@ -168,30 +170,31 @@ reach the gate.
 
 | system                        | total ms | iters  | ms/iter | 1st-iter ms | peak MB | final cost |
 |-------------------------------|---------:|-------:|--------:|------------:|--------:|-----------:|
-| arael LM f64                  |    302.6 |   3(3) |  100.88 |       117.3 |    92.2 | 24243.9094 |
-| arael LM f64 cholmod-gpl      |    261.4 |   3(3) |   87.15 |       103.0 |   102.4 | 24243.9094 |
-| arael LM f32                  |    232.2 |   3(3) |   77.40 |        95.3 |    63.4 | 24243.9103 |
-| tiny-solver LM               |    962.1 |      3 |  320.71 |       370.4 |   148.6 | 24243.9094 |
-| factrs LM                     |    470.7 |      3 |  156.91 |       190.5 |   186.0 | 24243.9094 |
-| ceres sparse_normal_cholesky  |    305.4 |   3(3) |  101.79 |       136.5 |   101.8 | 24243.9095 |
-| ceres sparse_schur            |    308.1 |   3(3) |  102.70 |       162.1 |    87.2 | 24243.9095 |
-| ceres iterative_schur         |    514.2 |   9(9) |   57.13 |        55.7 |    41.1 | 24244.9863 (RMSE 0.137 m) |
-| symforce LM f64               |    482.6 |   3(4) |  120.64 |       239.3 |   177.0 | 24243.9094 |
-| symforce LM f32               |    827.8 |   6(7) |  118.25 |       227.3 |   136.1 | 24244.0803 (RMSE 0.060 m) |
-| g2o LM                        |    234.7 |   3(3) |   78.22 |       110.7 |   114.4 | 24243.9094 |
-| gtsam LM                      |    504.6 |   3(3) |  168.19 |       223.3 |   607.7 | 24243.9094 |
+| arael LM f64                  |    225.6 |   3(3) |   75.19 |        83.9 |    87.6 | 24243.9094 |
+| arael LM f64 cholmod-gpl      |    269.8 |   3(3) |   89.92 |       105.5 |   102.4 | 24243.9094 |
+| arael LM f32                  |    183.5 |   3(3) |   61.15 |        70.7 |    64.8 | 24243.9107 |
+| tiny-solver LM               |    990.6 |      3 |  330.21 |       377.7 |   172.0 | 24243.9094 |
+| factrs LM                     |    482.8 |      3 |  160.94 |       195.1 |   186.2 | 24243.9094 |
+| ceres sparse_normal_cholesky  |    312.5 |   3(3) |  104.17 |       141.1 |   101.8 | 24243.9095 |
+| ceres sparse_schur            |    316.9 |   3(3) |  105.65 |       168.1 |    87.2 | 24243.9095 |
+| ceres iterative_schur         |    515.7 |   9(9) |   57.30 |        56.3 |    41.1 | 24244.9863 (RMSE 0.137 m) |
+| symforce LM f64               |    495.3 |   3(4) |  123.83 |       249.2 |   177.1 | 24243.9094 |
+| symforce LM f32               |    854.7 |   6(7) |  122.10 |       235.7 |   136.1 | 24244.0803 (RMSE 0.060 m) |
+| g2o LM                        |    240.2 |   3(3) |   80.07 |       114.8 |   114.4 | 24243.9094 |
+| gtsam LM                      |    521.3 |   3(3) |  173.75 |       237.4 |   607.7 | 24243.9094 |
 
 10/12 at the common optimum; ceres iterative_schur (inexact CG) and
 symforce f32 do not reach the gate.
 
 Every exact solver converges in 3 steps, so the tables compare per-step
-cost (ms/iter) directly. g2o edges ahead of arael's default faer f64 row
-at the largest size -- its supernodal CHOLMOD factorization; the arael
-cholmod-gpl row, using the same supernodal module, closes most of that
-gap (87.2 vs 78.2 ms/iter), and arael f32 matches g2o outright (see the
-sparse-backend comparison below). GTSAM reaches the same optimum but is
-the slowest exact solver per-step and, by a wide margin, the heaviest on
-memory (608 MB at 300 poses vs 92 for arael).
+cost (ms/iter) directly. arael f64 leads the f64 field at every size --
+the landmarks-first elimination ordering keeps the faer factor small
+where AMD's pose/landmark interleaving fills in (see the sparse-backend
+comparison below), and it beats g2o's Schur-reduced supernodal CHOLMOD
+75.2 vs 80.1 ms/iter at 300 poses. The cholmod-gpl row (CHOLMOD's own
+AMD, no hint) no longer pays off at scale. GTSAM reaches the same
+optimum but is the slowest exact solver per-step and, by a wide margin,
+the heaviest on memory (608 MB at 300 poses vs 88 for arael).
 
 ### SLAM on the edge: Raspberry Pi
 
@@ -312,19 +315,25 @@ POSES=300 ROUNDS=10 cargo run --release --bin rot_compare   # larger scene, fewe
 
 ## arael sparse-backend comparison
 
-The default arael rows use faer. Building with `--features cholmod-gpl` adds
-an `arael LM f64 cholmod-gpl` row (CHOLMOD supernodal) to the output next to
-the faer row. `SLAM_ARAEL_SOLVER` additionally swaps the default row's f64
-backend (each needs its cargo feature). Measured at 300 poses (5,400
-parameters, 770k Hessian nonzeros), same optimum and iteration count on every
+The default arael rows use faer with the model's `eliminate_first
+(landmarks)` ordering. Building with `--features cholmod-gpl` adds an
+`arael LM f64 cholmod-gpl` row (CHOLMOD supernodal, its own AMD -- the
+hint cannot be injected through the Eigen wrapper) next to the faer row.
+`SLAM_ARAEL_SOLVER` additionally swaps the default row's f64 backend
+(each needs its cargo feature). Measured at 300 poses (5,400 parameters,
+770k Hessian nonzeros), same optimum and iteration count on every
 backend:
 
 | backend (`SLAM_ARAEL_SOLVER=`)        | feature        | ms/iter |
 |---------------------------------------|----------------|--------:|
-| CHOLMOD supernodal (`cholmod_gpl`)    | `cholmod-gpl`  |     ~87 |
-| faer (default)                        | --             |    ~101 |
+| faer (default, landmarks-first)       | --             |     ~75 |
+| CHOLMOD supernodal (`cholmod_gpl`)    | `cholmod-gpl`  |     ~90 |
 | Eigen SimplicialLLT (`eigen`)         | `eigen`        |    ~411 |
 | CHOLMOD simplicial (`cholmod`)        | `cholmod`      |    ~420 |
+
+The elimination ordering is most of faer's lead: with plain AMD the same
+faer solve measures ~101 ms/iter -- AMD interleaves poses and landmarks
+and its factor carries 3.05M nonzeros against landmarks-first's 2.25M.
 
 **License warning:** CHOLMOD's Supernodal module is GPL -- building with
 `cholmod-gpl` makes the binary subject to the GPL (the `cholmod` feature
@@ -366,7 +375,7 @@ G2O_VERIFY_JAC=1 cpp/build/g2o_slam scene.txt lm out.txt     # check g2o Jacobia
 GTSAM_VERIFY_JAC=1 cpp/build/gtsam_slam scene.txt lm out.txt # check GTSAM Jacobians
 ```
 
-Env knobs: `SLAM_POSES`, `ROUNDS`, `SLAM_SKIP_TINY`, `SLAM_NO_MEM`,
+Env knobs: `SLAM_POSES`, `ROUNDS`, `SLAM_SKIP_TINY`, `SLAM_NO_MEM`, `SLAM_TIMING`,
 `SLAM_ARAEL_SOLVER=eigen|cholmod|cholmod_gpl`, `SLAM_HESSIAN_BITMAP=<png>`,
 `SLAM_MEM_EXE=<default-build binary for clean Rust-row memory>`,
 `SLAM_DRIVER=nielsen`, `SLAM_LAMBDA0`, `CERES_SOLVERS=<comma list>`,

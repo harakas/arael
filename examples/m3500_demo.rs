@@ -13,7 +13,7 @@
 // pass a path to run any other 2D g2o file:
 //   cargo run -r --example m3500_demo [-- path/to/file.g2o] [--weighted]
 
-use arael::model::{Model, Param, SelfBlock, CrossBlock};
+use arael::model::{Param, SelfBlock, CrossBlock};
 use arael::refs::{self, Ref};
 use arael::vect::vect2d;
 

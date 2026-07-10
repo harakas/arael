@@ -7,7 +7,7 @@
 // Run: cargo run -r --example bench_band
 // With LAPACK: cargo run -r --features lapack --example bench_band
 
-use arael::model::{Model, Param, SelfBlock, CrossBlock, SimpleEulerAngleParam};
+use arael::model::{Param, SelfBlock, CrossBlock, SimpleEulerAngleParam};
 use arael::vect::{vect3f, vect2f};
 use arael::matrix::matrix3f;
 use arael::refs::{self, Ref};

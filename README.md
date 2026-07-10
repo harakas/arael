@@ -415,7 +415,7 @@ match the root's precision: on an `#[arael(root, f32)]` model they take
 | `BandLapack::new(kd)` | `solve_band_lapack[_f32]` | the same band solve through LAPACK `dpbsv`/`spbsv` (feature `lapack`) |
 | `SparseEigen::<T>::new()` | `solve_sparse_eigen[_f32]` | Eigen `SimplicialLLT` (feature `eigen`) |
 | `SparseCholmod::new()` | `solve_sparse_cholmod` | CHOLMOD simplicial Cholesky, LGPL (feature `cholmod`; f64 only) |
-| `SparseCholmodSupernodal::new()` | `solve_sparse_cholmod_supernodal` | CHOLMOD supernodal Cholesky, **GPL-licensed module** (feature `cholmod-gpl`; f64 only); the one backend measured faster than faer on dense-fill Hessians (~15% on the 300-pose SLAM benchmark) |
+| `SparseCholmodSupernodal::new()` | `solve_sparse_cholmod_supernodal` | CHOLMOD supernodal Cholesky, **GPL-licensed module** (feature `cholmod-gpl`; f64 only) |
 | `Sparse::new()` / `SparseDirect::new()` | `solve_sparse` / `solve_sparse_direct` | COO / direct-CSC assembly over a dense solve -- validation baselines, not for production. (The free `solve_sparse` is this baseline; the root's `.solve_sparse()` is faer) |
 
 ### Damping-schedule drivers

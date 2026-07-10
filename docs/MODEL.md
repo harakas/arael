@@ -350,6 +350,7 @@ struct Path {
 | `#[arael(root, f32)]` | scalar precision for the generated solver surface (default is f64). Produces `*_f32` methods |
 | `#[arael(root, jacobian)]` | additionally emit `calc_jacobian(&params) -> Jacobian<T>` and `calc_cost_table(&params)` for diagnostics |
 | `#[arael(root, fast_atan)]` | generated code calls `arael::utils::fast_atan` / `fast_atan2` (max error < 1e-6 rad) instead of libm atan / atan2 -- everywhere in residuals, gradients, Hessians, Jacobians. Derivatives are the exact rational forms either way. Alternatively call `fast_atan` / `fast_atan2` per site in a constraint body |
+| `#[arael(root, eliminate_first(field, ...))]` | mark landmark-style fields (small blocks coupled to poses but never to each other) for the sparse solver to eliminate first. Generates `RootProblem::elimination_hint()` with the fields' parameter ranges; `solve_sparse` wires it into `SparseFaer::with_eliminate_first`, which orders those parameters first in the factorization (replacing AMD). The hint is used as given -- mark only genuinely landmark-like fields and measure |
 | `#[arael(fit(coll, \|e\| body))]` / `fit64(...)` | shorthand: sum-of-squares fit of a residual body over one collection (f32; `fit64` is f64). Implements `FitProblem`, whose `fit()` / `fit_with()` run the dense LM round trip |
 | `#[arael(skip_self_block)]` | opt out of the mandatory `SelfBlock<Self>`. Reserved for Models whose parameters only appear inside constraints declared elsewhere (rare) |
 

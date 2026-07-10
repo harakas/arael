@@ -1,5 +1,25 @@
 # TODO
 
+- **Automatic eliminate_first detection** (follow-up to the
+  `eliminate_first(...)` root keyword, 2026-07). The hint could be derived
+  from the Hessian pattern alone: group columns into blocks, greedily pick a
+  maximal independent set of small blocks (structural landmarks), order it
+  first. Any ordering is solution-safe, but since hints are trusted
+  outright (no comparison against AMD), an automatic picker would need its
+  own quality guard -- e.g. compare symbolic L nnz against AMD's before
+  adopting, the check the explicit keyword deliberately does not do. Not
+  built because the explicit hint covers the known use cases and the model
+  knows its own structure; revisit if hand-built LmProblem users without
+  macro models need it.
+
+- **Explicit blocked Schur-complement backend**. The eliminate_first
+  ordering closes most of the gap to g2o on landmark SLAM, but an explicit
+  Schur backend (form S = Hpp - Hpl Hll^-1 Hlp with blocked 3x3/6x6
+  kernels, factorize the reduced pose system, back-substitute) measured
+  ~1.7x faster still on the linear-solve phase in g2o's stats (42 vs 71 ms
+  at 300 poses). A new LmSolver backend + block-partition machinery; only
+  worth it if solve-dominated problems become the primary target.
+
 - **SparseFaer::with_threads(n): opt-in multithreaded faer solve**
   (discussed 2026-07). faer threads via rayon: every heavy call takes a
   `faer::Par` (`Par::Seq` / `Par::rayon(nthreads)`, 0 = all cores), and

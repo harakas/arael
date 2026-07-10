@@ -20,7 +20,7 @@
 //! weighted equally. LM converges to a single best-fit x.
 
 use arael::info;
-use arael::model::{Model, Param, SelfBlock};
+use arael::model::{Param, SelfBlock};
 use arael::simple_lm::{self, LmConfig, LmProblem};
 use arael_sym::E;
 

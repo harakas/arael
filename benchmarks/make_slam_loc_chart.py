@@ -20,14 +20,14 @@
 # kind: "arael" solid blue bar, "other" neutral bar.
 PANELS = [
     ("Landmark SLAM -- 300 poses, 5.4k params (Apple M4 Pro)", 200.0, 50.0, 1, [
-        ("arael (f32)", 77.40, "arael"),
-        ("g2o (LM)", 78.22, "other"),
-        ("arael (f64 cholmod-gpl)", 87.15, "arael"),
-        ("arael (f64)", 100.88, "arael"),
-        ("Ceres (LM)", 101.79, "other"),
-        ("SymForce (f64)", 120.64, "other"),
-        ("factrs (LM)", 156.91, "other"),
-        ("GTSAM (LM)", 168.19, "other"),
+        ("arael (f32)", 61.15, "arael"),
+        ("arael (f64)", 75.19, "arael"),
+        ("g2o (LM)", 80.07, "other"),
+        ("arael (f64 cholmod-gpl)", 89.92, "arael"),
+        ("Ceres (LM)", 104.17, "other"),
+        ("SymForce (f64)", 123.83, "other"),
+        ("factrs (LM)", 160.94, "other"),
+        ("GTSAM (LM)", 173.75, "other"),
     ]),
     ("Localization -- 60 poses, 360 params (Raspberry Pi 5)", 20.0, 5.0, 2, [
         ("arael (f32 band)", 1.03, "arael"),
@@ -50,7 +50,7 @@ FOOT = [
     ("arael cholmod-gpl is the optional CHOLMOD supernodal backend "
      "(GPL-licensed); the localization rows use arael's band-Cholesky "
      "solver on the block-tridiagonal Hessian."),
-    ("tiny-solver omitted for scale: 320.7 ms/iter on the SLAM panel, "
+    ("tiny-solver omitted for scale: 330.2 ms/iter on the SLAM panel, "
      "88.5 ms/iter on the Pi 5."),
 ]
 

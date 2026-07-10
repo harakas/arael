@@ -27,7 +27,7 @@ parameter vector.
 | `BandLapack::new(kd)` | `solve_band_lapack[_f32]` | the same band solve through LAPACK `dpbsv`/`spbsv` (feature `lapack`) -- for LAPACK-standardised environments |
 | `SparseEigen::<T>::new()` | `solve_sparse_eigen[_f32]` | Eigen `SimplicialLLT` through a C++ shim (feature `eigen`) -- for Eigen interop/comparison; measured well behind faer |
 | `SparseCholmod::new()` | `solve_sparse_cholmod` | CHOLMOD simplicial Cholesky, LGPL (feature `cholmod`; f64 only) -- comparable to Eigen simplicial, behind faer |
-| `SparseCholmodSupernodal::new()` | `solve_sparse_cholmod_supernodal` | CHOLMOD supernodal Cholesky (feature `cholmod-gpl`; f64 only). **License warning: the Supernodal module is GPL**, unlike the LGPL simplicial one -- enabling it makes the binary subject to the GPL. The one backend measured faster than faer: ~15% on dense-fill Hessians (the 300-pose SLAM benchmark) |
+| `SparseCholmodSupernodal::new()` | `solve_sparse_cholmod_supernodal` | CHOLMOD supernodal Cholesky (feature `cholmod-gpl`; f64 only). **License warning: the Supernodal module is GPL**, unlike the LGPL simplicial one -- enabling it makes the binary subject to the GPL |
 | `Sparse::new()` / `SparseDirect::new()` | `solve_sparse` / `solve_sparse_direct` | COO / direct-CSC assembly over a DENSE solve -- validation baselines for the assembly paths, not for production. Note the free `solve_sparse` is this baseline; the root's `.solve_sparse()` method is faer |
 
 ## Basic usage
@@ -80,6 +80,30 @@ half-bandwidth `kd`:
 ```rust,ignore
 let result = model.solve_with(&mut Band::new(kd), &cfg);
 ```
+
+**Eliminate landmark-style blocks first.** On landmark SLAM structures --
+many small parameter blocks coupled to poses but never to each other --
+eliminating those columns first is a reordering that fills in far less
+than AMD's pose/landmark interleaving, cutting the sparse factorization
+sharply (-25% per iteration on the 300-pose SLAM benchmark). Mark the
+field on the model and `solve_sparse` handles the rest:
+
+```rust,ignore
+#[arael(root, eliminate_first(landmarks))]
+```
+
+or hand the parameter ranges to the backend explicitly:
+
+```rust,ignore
+let mut solver = SparseFaer::new().with_eliminate_first(pose_params..n);
+let result = model.solve_with(&mut solver, &cfg);
+```
+
+The hinted ordering replaces AMD outright, so mark only genuinely
+landmark-like fields and measure: on structures where AMD is already
+near-optimal (bundle adjustment, where the points vastly outnumber the
+cameras and AMD eliminates them early on its own), a hint can make the
+factorization worse instead of better.
 
 **Manage the parameter vector yourself.** The generated methods own the
 serialize -> solve -> deserialize round trip. Drop to the free `solve_*`

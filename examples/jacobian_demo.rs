@@ -8,7 +8,7 @@
 ///
 /// Use `cargo expand --example jacobian_demo` to inspect generated code.
 
-use arael::model::{CrossBlock, JacobianModel, Model, Param, SelfBlock};
+use arael::model::{CrossBlock, JacobianModel, Param, SelfBlock};
 use arael::simple_lm::LmProblem;
 use arael::vect::vect2d;
 

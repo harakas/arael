@@ -250,6 +250,14 @@ pub trait RootProblem<T: Float> {
     /// (including extended-model state). Mandatory after a solve over a
     /// raw vector; the `solve_*` entry points call it for you.
     fn deserialize(&mut self, data: &[T]);
+    /// Parameter index ranges of fields marked `#[arael(root,
+    /// eliminate_first(field))]`: small mutually uncoupled blocks
+    /// (landmark-style entities) that a sparse backend may eliminate
+    /// first (see [`SparseFaer::with_eliminate_first`]). Empty by
+    /// default; the macro overrides it for marked fields.
+    fn elimination_hint(&self) -> std::vec::Vec<std::ops::Range<usize>> {
+        std::vec::Vec::new()
+    }
 }
 
 /// Entry points of an `#[arael(fit(...))]` / `#[arael(fit64(...))]` model.
@@ -352,14 +360,21 @@ pub trait LmProblem<T> {
 
     /// Solve with the indexed sparse faer backend ([`SparseFaer`], pure
     /// Rust) -- the default choice for anything non-trivial. Convenience
-    /// over [`solve_with`](Self::solve_with).
+    /// over [`solve_with`](Self::solve_with). The model's
+    /// [`elimination hint`](RootProblem::elimination_hint) (from
+    /// `#[arael(root, eliminate_first(field))]`) is wired into the solver
+    /// automatically.
     fn solve_sparse(&mut self, config: &LmConfig<T>) -> LmResult<T>
     where
         Self: RootProblem<T> + Sized,
         T: Float,
         SparseFaer<T>: LmSolver<T>,
     {
-        self.solve_with(&mut SparseFaer::<T>::new(), config)
+        let mut solver = SparseFaer::<T>::new();
+        for range in RootProblem::elimination_hint(self) {
+            solver = solver.with_eliminate_first(range);
+        }
+        self.solve_with(&mut solver, config)
     }
 }
 
@@ -1572,6 +1587,11 @@ pub struct SparseFaer<T = f64> {
     l_vals: Vec<T>,
     factor_mem: Vec<std::mem::MaybeUninit<u8>>,
     solve_mem: Vec<std::mem::MaybeUninit<u8>>,
+    // Elimination hint (see with_eliminate_first) and the custom
+    // permutation built from it for the symbolic factorization.
+    eliminate_first: Vec<std::ops::Range<usize>>,
+    perm_fwd: Vec<usize>,
+    perm_inv: Vec<usize>,
 }
 
 /// Alias of [`SparseFaer<f32>`].
@@ -1592,7 +1612,28 @@ impl<T> SparseFaer<T> {
             l_vals: Vec::new(),
             factor_mem: Vec::new(),
             solve_mem: Vec::new(),
+            eliminate_first: Vec::new(),
+            perm_fwd: Vec::new(),
+            perm_inv: Vec::new(),
         }
+    }
+
+    /// Eliminate the parameters in `range` first: the factorization orders
+    /// them ahead of everything else (which keeps its natural order),
+    /// replacing the default AMD ordering. Intended for landmark-style
+    /// entities -- small blocks coupled to other parameters but never to
+    /// each other -- where this ordering fills in far less than AMD's
+    /// interleaving. The hint is used as given: a poor choice degrades the
+    /// factorization, so mark only genuinely landmark-like fields and
+    /// measure.
+    ///
+    /// Call repeatedly to add several ranges. `#[arael(root,
+    /// eliminate_first(field))]` generates the ranges on the model and
+    /// [`LmProblem::solve_sparse`] wires them in automatically; this method
+    /// is the explicit path for hand-built solvers.
+    pub fn with_eliminate_first(mut self, range: std::ops::Range<usize>) -> Self {
+        self.eliminate_first.push(range);
+        self
     }
 }
 
@@ -1648,10 +1689,38 @@ impl<T: crate::utils::Float + faer::traits::RealField> LmSolver<T> for SparseFae
                 None,
                 &self.row_idx_usize,
             );
+            // Elimination hint: order the hinted parameters first, the
+            // rest in natural order. Used as given -- no fallback
+            // comparison against AMD.
+            let ordering = if self.eliminate_first.is_empty() {
+                SymmetricOrdering::Amd
+            } else {
+                self.perm_fwd.clear();
+                let mut hinted = vec![false; n];
+                for r in &self.eliminate_first {
+                    for i in r.clone().filter(|&i| i < n) {
+                        if !hinted[i] {
+                            hinted[i] = true;
+                            self.perm_fwd.push(i);
+                        }
+                    }
+                }
+                for i in 0..n {
+                    if !hinted[i] {
+                        self.perm_fwd.push(i);
+                    }
+                }
+                self.perm_inv.resize(n, 0);
+                for (new, &old) in self.perm_fwd.iter().enumerate() {
+                    self.perm_inv[old] = new;
+                }
+                SymmetricOrdering::Custom(faer::perm::PermRef::new_checked(
+                    &self.perm_fwd, &self.perm_inv, n))
+            };
             let sym = factorize_symbolic_cholesky(
                 symbolic_ref,
                 faer::Side::Upper,
-                SymmetricOrdering::Amd,
+                ordering,
                 CholeskySymbolicParams::default(),
             );
             match sym {
