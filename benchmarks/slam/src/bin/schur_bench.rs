@@ -13,7 +13,7 @@ mod arael_runner;
 
 use arael::simple_lm::{block_partition_from_spans, LmProblem, RootProblem};
 use arael_faer::bsc::{PositionResolver, SparseBlockColMat, SymbolicSparseBlockColMat};
-use arael_faer::schur::{schur_reduce, schur_symbolic, SchurContext};
+use arael_faer::schur::{schur_backsub, schur_reduce, schur_symbolic, SchurContext};
 use scene::SceneConfig;
 use std::time::Instant;
 
@@ -142,6 +142,149 @@ fn main() {
     println!("    gemm   (pair contributions into S)         {:7.3}", ms(t.gemm));
     println!("    rhs    (observer rhs updates)              {:7.3}", ms(t.rhs));
     println!("    finish (re-zero diag lower)                {:7.3}", ms(t.finish));
+
+    // -- factor + solve the reduced system --------------------------------
+    // faer sparse LLT on S's scalar CSC, mirroring the SparseFaer
+    // backend's calls: the symbolic factorization runs once on the
+    // first iteration (in the future solver backend it lives next to
+    // SchurSymbolic in the solver state); every iteration then pays
+    // numeric factorization + triangular solve.
+    {
+        use arael_faer::faer::dyn_stack::MemStack;
+        use arael_faer::faer::sparse::linalg::cholesky::{
+            factorize_symbolic_cholesky, CholeskySymbolicParams, SymmetricOrdering,
+        };
+        use arael_faer::faer;
+
+        let nk = s.symbolic().nrows();
+        let (t_llt_sym, llt_sym) = min_ms(rounds, || {
+            factorize_symbolic_cholesky(
+                s_csc.as_ref().symbolic(),
+                faer::Side::Upper,
+                SymmetricOrdering::Amd,
+                CholeskySymbolicParams::default(),
+            )
+            .unwrap()
+        });
+
+        let mut l_vals = vec![0.0f64; llt_sym.len_val()];
+        let factor_bytes = llt_sym
+            .factorize_numeric_llt_scratch::<f64>(faer::Par::Seq, faer::Spec::default())
+            .unaligned_bytes_required();
+        let mut factor_mem = vec![std::mem::MaybeUninit::<u8>::uninit(); factor_bytes];
+        let solve_bytes = llt_sym
+            .solve_in_place_scratch::<f64>(1, faer::Par::Seq)
+            .unaligned_bytes_required();
+        let mut solve_mem = vec![std::mem::MaybeUninit::<u8>::uninit(); solve_bytes];
+
+        let (t_factor, _) = min_ms(rounds, || {
+            let stack = MemStack::new(&mut factor_mem);
+            llt_sym
+                .factorize_numeric_llt(
+                    &mut l_vals,
+                    s_csc.as_ref(),
+                    faer::Side::Upper,
+                    faer::linalg::cholesky::llt::factor::LltRegularization::default(),
+                    faer::Par::Seq,
+                    stack,
+                    faer::Spec::default(),
+                )
+                .unwrap();
+        });
+        let stack = MemStack::new(&mut factor_mem);
+        let llt = llt_sym
+            .factorize_numeric_llt(
+                &mut l_vals,
+                s_csc.as_ref(),
+                faer::Side::Upper,
+                faer::linalg::cholesky::llt::factor::LltRegularization::default(),
+                faer::Par::Seq,
+                stack,
+                faer::Spec::default(),
+            )
+            .unwrap();
+        let mut x = vec![0.0f64; nk];
+        let (t_solve, _) = min_ms(rounds, || {
+            x.copy_from_slice(&rhs_out);
+            let stack = MemStack::new(&mut solve_mem);
+            llt.solve_in_place_with_conj(
+                faer::Conj::No,
+                faer::col::ColMut::from_slice_mut(&mut x).as_mat_mut(),
+                faer::Par::Seq,
+                stack,
+            );
+        });
+
+        // recover the eliminated blocks (landmarks)
+        let mut x_full = vec![0.0f64; n];
+        let (t_back, _) = min_ms(rounds, || {
+            schur_backsub(&sym, &h, &grad, &x, &mut ctx, &mut x_full).unwrap()
+        });
+
+        println!();
+        println!("reduced system S (n = {}): faer sparse LLT        ms", nk);
+        println!("  symbolic factorization (first iteration only){:7.3}", t_llt_sym);
+        println!("  numeric factorization (per iteration)        {:7.3}", t_factor);
+        println!("  triangular solve (per iteration)             {:7.3}", t_solve);
+        println!("  back-substitution (per iteration)            {:7.3}", t_back);
+        println!(
+            "  Schur route 1st iter: reduce {:.1} + csc {:.1} + sym {:.1} + factor {:.1} + solve {:.1} + back {:.1} = {:.1}",
+            t_reduce, t_csc, t_llt_sym, t_factor, t_solve, t_back,
+            t_reduce + t_csc + t_llt_sym + t_factor + t_solve + t_back
+        );
+        println!(
+            "  Schur route steady state: {:.1}",
+            t_reduce + t_csc + t_factor + t_solve + t_back
+        );
+
+        // reduced-solve validation against a dense solve
+        if nk <= 2200 {
+            let sd = s.to_dense();
+            let mut fullm = faer::Mat::<f64>::zeros(nk, nk);
+            for j in 0..nk {
+                for i in 0..nk {
+                    fullm[(i, j)] = if sd[(i, j)] != 0.0 { sd[(i, j)] } else { sd[(j, i)] };
+                }
+            }
+            use arael_faer::faer::prelude::Solve;
+            let dl = fullm.llt(faer::Side::Lower).expect("S SPD");
+            let mut xr = faer::Mat::<f64>::zeros(nk, 1);
+            for i in 0..nk {
+                xr[(i, 0)] = rhs_out[i];
+            }
+            let xd = dl.solve(&xr);
+            let mut max_rel = 0.0f64;
+            for i in 0..nk {
+                max_rel = max_rel.max((x[i] - xd[(i, 0)]).abs() / (1.0 + xd[(i, 0)].abs()));
+            }
+            assert!(max_rel < 1e-8, "reduced solve vs dense: {:.2e}", max_rel);
+            println!("  reduced solve matches dense: {:.2e} max rel", max_rel);
+
+            // full-route identity: reduce -> solve S -> backsub vs a
+            // dense solve of the full mirrored system
+            let hd = h.to_dense();
+            let mut hfull = faer::Mat::<f64>::zeros(n, n);
+            for j in 0..n {
+                for i in 0..n {
+                    hfull[(i, j)] = if hd[(i, j)] != 0.0 { hd[(i, j)] } else { hd[(j, i)] };
+                }
+            }
+            let dl = hfull.llt(faer::Side::Lower).expect("H SPD");
+            let mut br = faer::Mat::<f64>::zeros(n, 1);
+            for i in 0..n {
+                br[(i, 0)] = grad[i];
+            }
+            let xd_full = dl.solve(&br);
+            let mut max_full = 0.0f64;
+            for i in 0..n {
+                max_full = max_full.max(
+                    (x_full[i] - xd_full[(i, 0)]).abs() / (1.0 + xd_full[(i, 0)].abs()),
+                );
+            }
+            assert!(max_full < 1e-8, "full route vs dense: {:.2e}", max_full);
+            println!("  full solution (kept + landmarks) matches dense: {:.2e} max rel", max_full);
+        }
+    }
 
     // -- transposed-orientation variant ---------------------------------
     // the same system with block ids permuted landmarks-first: every

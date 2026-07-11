@@ -376,7 +376,7 @@ GTSAM_VERIFY_JAC=1 cpp/build/gtsam_slam scene.txt lm out.txt # check GTSAM Jacob
 ```
 
 Env knobs: `SLAM_POSES`, `ROUNDS`, `SLAM_SKIP_TINY`, `SLAM_NO_MEM`, `SLAM_TIMING`,
-`SLAM_ARAEL_SOLVER=eigen|cholmod|cholmod_gpl`, `SLAM_HESSIAN_BITMAP=<png>`,
+`SLAM_ARAEL_SOLVER=schur|faer|eigen|cholmod|cholmod_gpl` (default: schur), `SLAM_HESSIAN_BITMAP=<png>`,
 `SLAM_MEM_EXE=<default-build binary for clean Rust-row memory>`,
 `SLAM_DRIVER=nielsen`, `SLAM_LAMBDA0`, `CERES_SOLVERS=<comma list>`,
 `CERES_RADIUS0`, `TINY_MAXITER`, `TINY_RADIUS0`, `SYMFORCE_LAMBDA0`,

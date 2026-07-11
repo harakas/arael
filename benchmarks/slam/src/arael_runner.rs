@@ -420,10 +420,14 @@ fn cfg(max_iters: usize) -> arael::simple_lm::LmConfig<f64> {
     if nielsen() { cfg.with_driver(arael::simple_lm::NielsenLambdaDriver::default()) } else { cfg }
 }
 
-// SLAM_ARAEL_SOLVER selects the f64 sparse backend: faer (default),
-// eigen (Eigen SimplicialLLT, --features eigen), cholmod (CHOLMOD simplicial,
+// SLAM_ARAEL_SOLVER selects the arael sparse backend: schur (default --
+// Schur-complement, landmarks marginalized every damped solve), faer
+// (plain sparse faer, landmarks-first ordering), eigen (Eigen
+// SimplicialLLT, --features eigen), cholmod (CHOLMOD simplicial,
 // --features cholmod), or cholmod_gpl (CHOLMOD supernodal, --features
 // cholmod-gpl -- GPL-licensed module, see the arael Cargo.toml warning).
+// The f32 row is always pure Rust: schur by default, faer on
+// SLAM_ARAEL_SOLVER=faer.
 fn solve64(params: &[f64], path: &mut Path, cfg: &arael::simple_lm::LmConfig<f64>)
     -> arael::simple_lm::LmResult<f64> {
     match std::env::var("SLAM_ARAEL_SOLVER").as_deref() {
@@ -445,10 +449,20 @@ fn solve64(params: &[f64], path: &mut Path, cfg: &arael::simple_lm::LmConfig<f64
             #[cfg(not(feature = "cholmod-gpl"))]
             panic!("SLAM_ARAEL_SOLVER=cholmod_gpl requires building with --features cholmod-gpl");
         }
-        _ => {
-            // Default faer backend with the model's elimination hint
-            // (landmarks eliminated first).
+        Ok("faer") => {
+            // Plain sparse faer with the model's elimination hint
+            // (landmarks ordered first in the full-system factorization).
             let mut solver = arael::simple_lm::SparseFaer::new();
+            for r in arael::simple_lm::RootProblem::elimination_hint(path) {
+                solver = solver.with_eliminate_first(r);
+            }
+            arael::simple_lm::lm_solve(params, &mut solver, path, cfg)
+        }
+        _ => {
+            // Default: Schur-complement backend -- landmarks
+            // marginalized every damped solve, only the reduced pose
+            // system factorized.
+            let mut solver = arael::simple_lm::SparseFaerSchur::new();
             for r in arael::simple_lm::RootProblem::elimination_hint(path) {
                 solver = solver.with_eliminate_first(r);
             }
@@ -572,7 +586,14 @@ fn cfg32(max_iters: usize, poses: usize) -> arael::simple_lm::LmConfig<f32> {
 
 fn solve32(params: &[f32], path: &mut PathF, cfg: &arael::simple_lm::LmConfig<f32>)
     -> arael::simple_lm::LmResult<f32> {
-    let mut solver = arael::simple_lm::SparseFaerF32::new();
+    if std::env::var("SLAM_ARAEL_SOLVER").as_deref() == Ok("faer") {
+        let mut solver = arael::simple_lm::SparseFaerF32::new();
+        for r in arael::simple_lm::RootProblem::elimination_hint(path) {
+            solver = solver.with_eliminate_first(r);
+        }
+        return arael::simple_lm::lm_solve(params, &mut solver, path, cfg);
+    }
+    let mut solver = arael::simple_lm::SparseFaerSchurF32::new();
     for r in arael::simple_lm::RootProblem::elimination_hint(path) {
         solver = solver.with_eliminate_first(r);
     }
