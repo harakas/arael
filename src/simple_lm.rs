@@ -2235,10 +2235,24 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             let sym_ref = faer::sparse::SymbolicSparseColMatRef::new_checked(
                 nk, nk, &self.s_col_ptr, None, &self.s_row_idx,
             );
+            // Fill-reducing ordering, but only where there is fill to
+            // reduce. Marginalizing shared landmarks makes S dense
+            // (69% of the upper triangle at slam-300), and on such a
+            // matrix AMD finds nothing the natural order does not
+            // already have -- measured identical factor size and
+            // numeric time, for 4x the symbolic cost. Below the
+            // threshold S is a sparse graph again and AMD earns its
+            // keep, so it stays the default there.
+            let density = self.s_row_idx.len() as f64 / (nk as f64 * (nk as f64 + 1.0) / 2.0);
+            let ordering = if density > 0.25 {
+                SymmetricOrdering::Identity
+            } else {
+                SymmetricOrdering::Amd
+            };
             let llt_symbolic = factorize_symbolic_cholesky(
                 sym_ref,
                 faer::Side::Upper,
-                SymmetricOrdering::Amd,
+                ordering,
                 CholeskySymbolicParams::default(),
             )
             .expect("symbolic factorization of the reduced system failed");
