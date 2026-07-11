@@ -69,6 +69,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "arael-faer"
+version = "0.7.0"
+dependencies = [
+ "faer 0.24.4",
+]
+
+[[package]]
 name = "arael-macros"
 version = "0.7.0"
 dependencies = [
@@ -2277,6 +2284,7 @@ name = "slam-bench"
 version = "0.1.0"
 dependencies = [
  "arael",
+ "arael-faer",
  "factrs",
  "image",
  "libc",

@@ -121,7 +121,7 @@ struct PosePair {
 
 #[arael::model]
 #[arael(root, eliminate_first(landmarks))]
-struct Path {
+pub struct Path {
     poses: refs::Vec<Pose>,
     landmarks: refs::Vec<PointLandmark>,
     pose_pairs: std::vec::Vec<PosePair>,
@@ -238,7 +238,7 @@ struct PathF {
     frine_isigma_scale: f32,
 }
 
-fn build(scene: &Scene) -> Path {
+pub fn build(scene: &Scene) -> Path {
     let mut path = Path {
         poses: refs::Vec::new(),
         landmarks: refs::Vec::new(),

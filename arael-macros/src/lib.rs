@@ -1009,6 +1009,9 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
     // consumed by the eliminate_first root keyword to compute param ranges
     // with exactly the serialize walk's field selection.
     let mut size_walk: Vec<(syn::Ident, TokenStream2)> = Vec::new();
+    // Per-struct recursion for Model::collect_param_blocks (entity spans
+    // read from SelfBlock indices).
+    let mut collect_param_blocks_stmts: Vec<TokenStream2> = Vec::new();
 
     for field in fields {
         let ident = field.ident.as_ref().unwrap();
@@ -1028,6 +1031,11 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                 if is_hessian_block_type(&field.ty) {
                     zero_blocks_stmts.push(quote! { self.#ident.zero(); });
                     release_blocks_stmts.push(quote! { self.#ident.release(); });
+                    if is_self_block_type(&field.ty) {
+                        collect_param_blocks_stmts.push(quote! {
+                            self.#ident.collect_param_block(out);
+                        });
+                    }
                     let acc_dense = quote! { self.#ident.accumulate_hessian(hessian); };
                     let acc_band = quote! { self.#ident.accumulate_hessian_band(band, kd)?; };
                     let acc_sparse = quote! { self.#ident.accumulate_hessian_sparse(coo); };
@@ -1053,6 +1061,11 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                     zero_blocks_stmts.push(quote! {
                         if let Some(ref mut __hb) = self.#ident { __hb.zero(); }
                     });
+                    if is_self_block_type(&field.ty) {
+                        collect_param_blocks_stmts.push(quote! {
+                            if let Some(ref __hb) = self.#ident { __hb.collect_param_block(out); }
+                        });
+                    }
                     release_blocks_stmts.push(quote! {
                         if let Some(ref mut __hb) = self.#ident { __hb.release(); }
                     });
@@ -1140,6 +1153,9 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                 zero_blocks_stmts.push(quote! {
                     arael::model::Model::zero_blocks(&mut self.#ident);
                 });
+                collect_param_blocks_stmts.push(quote! {
+                    arael::model::Model::collect_param_blocks(&self.#ident, out);
+                });
                 release_blocks_stmts.push(quote! {
                     arael::model::Model::release_blocks(&mut self.#ident);
                 });
@@ -1221,6 +1237,10 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
             }
             fn zero_blocks(&mut self) {
                 #(#zero_blocks_stmts)*
+            }
+            fn collect_param_blocks(&self, out: &mut std::vec::Vec<(u32, u32)>) {
+                let _ = &out;
+                #(#collect_param_blocks_stmts)*
             }
             fn release_blocks(&mut self) {
                 #(#release_blocks_stmts)*
@@ -1496,6 +1516,24 @@ fn is_hessian_block_type(ty: &syn::Type) -> bool {
             let name = seg.ident.to_string();
             return matches!(name.as_str(),
                 "SelfBlock" | "CrossBlock" | "TripletBlock" | "BoxedSelfBlock" | "BoxedCrossBlock");
+        }
+    false
+}
+
+/// Check if a type is `SelfBlock`/`BoxedSelfBlock` (unwrapping `Option`) --
+/// the blocks that carry per-entity parameter spans.
+fn is_self_block_type(ty: &syn::Type) -> bool {
+    if let syn::Type::Path(tp) = ty
+        && let Some(seg) = tp.path.segments.last() {
+            if seg.ident == "Option" {
+                if let syn::PathArguments::AngleBracketed(args) = &seg.arguments
+                    && let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
+                        return is_self_block_type(inner_ty);
+                    }
+                return false;
+            }
+            let name = seg.ident.to_string();
+            return matches!(name.as_str(), "SelfBlock" | "BoxedSelfBlock");
         }
     false
 }

@@ -223,6 +223,7 @@ dependencies = [
 name = "arael"
 version = "0.7.0"
 dependencies = [
+ "arael-faer",
  "arael-macros",
  "arael-sym",
  "cc",
