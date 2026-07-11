@@ -258,6 +258,41 @@ pub trait RootProblem<T: Float> {
     fn elimination_hint(&self) -> std::vec::Vec<std::ops::Range<usize>> {
         std::vec::Vec::new()
     }
+    /// Entity parameter blocks as `(offset, width)` spans of the flat
+    /// parameter vector, one per live entity, in serialize order --
+    /// read from each entity's `SelfBlock` indices, so it is valid only
+    /// after [`serialize`](Self::serialize). The macro overrides this;
+    /// the default is empty. See [`block_partition_from_spans`] for
+    /// turning spans into a full partition.
+    fn param_block_spans(&self) -> std::vec::Vec<(u32, u32)> {
+        std::vec::Vec::new()
+    }
+}
+
+/// Turn entity spans (from [`RootProblem::param_block_spans`]) into a
+/// full block partition of `0..n`: ascending scalar offsets with one
+/// entry per block boundary, first 0, last `n`. Parameters not covered
+/// by any entity span (e.g. `skip_self_block` models) become one block
+/// per gap. Panics if spans overlap or run backwards.
+pub fn block_partition_from_spans(spans: &[(u32, u32)], n: usize) -> std::vec::Vec<usize> {
+    let mut part = std::vec::Vec::with_capacity(spans.len() + 2);
+    part.push(0usize);
+    let mut end = 0usize;
+    for &(off, width) in spans {
+        let off = off as usize;
+        assert!(off >= end, "param block spans overlap or are unsorted");
+        if off > end {
+            // gap: params owned by no SelfBlock form their own block
+            part.push(off);
+        }
+        end = off + width as usize;
+        part.push(end);
+    }
+    assert!(end <= n);
+    if end < n {
+        part.push(n);
+    }
+    part
 }
 
 /// Entry points of an `#[arael(fit(...))]` / `#[arael(fit64(...))]` model.

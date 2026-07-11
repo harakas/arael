@@ -18,6 +18,7 @@ cholmod-gpl = ["arael/cholmod-gpl", "cholmod"]
 
 [dependencies]
 arael = { path = "../.." }
+arael-faer = { path = "../../arael-faer" }
 tiny-solver = "0.18.0"
 factrs = "0.3.0"
 rand = "0.9"

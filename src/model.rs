@@ -175,6 +175,13 @@ pub trait Model {
 
     fn zero_blocks(&mut self) {}
 
+    /// Append this model's parameter blocks as `(offset, width)` spans of
+    /// the flat parameter vector -- one span per entity, read from each
+    /// entity's `SelfBlock` indices. Valid only after `serialize` has
+    /// assigned indices. Entities whose params are all fixed contribute
+    /// nothing.
+    fn collect_param_blocks(&self, _out: &mut std::vec::Vec<(u32, u32)>) {}
+
     /// Free every heap-backed (`Boxed*`) block's Hessian storage in this model
     /// and its sub-models, reclaiming the transient assembly memory between
     /// solves. Inline blocks are unaffected; the next solve re-allocates the
@@ -1138,6 +1145,9 @@ macro_rules! impl_model_collection {
             fn zero_blocks(&mut self) {
                 for item in self.$iter_mut() { item.zero_blocks(); }
             }
+            fn collect_param_blocks(&self, out: &mut std::vec::Vec<(u32, u32)>) {
+                for item in self.iter() { item.collect_param_blocks(out); }
+            }
             fn release_blocks(&mut self) {
                 for item in self.$iter_mut() { item.release_blocks(); }
             }
@@ -1216,6 +1226,9 @@ impl<T: Model> Model for crate::refs::Arena<T> {
     fn zero_blocks(&mut self) {
         for item in self.iter_mut() { item.zero_blocks(); }
     }
+    fn collect_param_blocks(&self, out: &mut std::vec::Vec<(u32, u32)>) {
+        for item in self.iter() { item.collect_param_blocks(out); }
+    }
     fn release_blocks(&mut self) {
         for item in self.iter_mut() { item.release_blocks(); }
     }
@@ -1289,6 +1302,9 @@ impl<T: Model> Model for Option<T> {
     }
     fn zero_blocks(&mut self) {
         if let Some(inner) = self { inner.zero_blocks(); }
+    }
+    fn collect_param_blocks(&self, out: &mut std::vec::Vec<(u32, u32)>) {
+        if let Some(inner) = self { inner.collect_param_blocks(out); }
     }
     fn release_blocks(&mut self) {
         if let Some(inner) = self { inner.release_blocks(); }
@@ -1375,6 +1391,23 @@ impl<A: Model, const N: usize, const M: usize, T: crate::utils::Float> SelfBlock
     /// Set the global parameter indices for this block.
     pub fn set_indices(&mut self, indices: &[u32; N]) {
         self.indices = *indices;
+    }
+
+    /// Append this entity's parameter span as `(offset, width)`: the
+    /// smallest live index and the count of live (non-fixed) params.
+    /// All-fixed entities append nothing.
+    pub fn collect_param_block(&self, out: &mut std::vec::Vec<(u32, u32)>) {
+        let mut min = u32::MAX;
+        let mut count = 0u32;
+        for &i in &self.indices {
+            if i != u32::MAX {
+                if i < min { min = i; }
+                count += 1;
+            }
+        }
+        if count > 0 {
+            out.push((min, count));
+        }
     }
 
     /// Reset Hessian to zero. Gradient lives in the global grad vector,
@@ -1564,6 +1597,12 @@ impl<A: Model, const N: usize, const M: usize, T: crate::utils::Float> BoxedSelf
     /// for an inactive/released one.
     pub fn zero(&mut self) {
         if let Some(b) = &mut self.inner { b.zero(); }
+    }
+
+    /// Append this entity's parameter span; a released or all-fixed block
+    /// appends nothing (see [`SelfBlock::collect_param_block`]).
+    pub fn collect_param_block(&self, out: &mut std::vec::Vec<(u32, u32)>) {
+        if let Some(b) = &self.inner { b.collect_param_block(out); }
     }
 
     /// Free the whole block's heap allocation. The next `set_indices` on an

@@ -4525,6 +4525,11 @@ pub fn generate_root_methods(
             fn deserialize(&mut self, data: &[#prec_type]) {
                 self.#solve_deserialize(data)
             }
+            fn param_block_spans(&self) -> std::vec::Vec<(u32, u32)> {
+                let mut __out = std::vec::Vec::new();
+                arael::model::Model::collect_param_blocks(self, &mut __out);
+                __out
+            }
             #elimination_hint_fn
         }
 

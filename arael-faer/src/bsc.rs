@@ -174,6 +174,121 @@ impl<I: Index> SymbolicSparseBlockColMat<I> {
         self.val_ptr[b].zx()..self.val_ptr[b + 1].zx()
     }
 
+    /// Builds the block structure covering a stream of scalar
+    /// coordinates, plus each coordinate's scatter POSITION into the
+    /// value buffer -- the block-level analog of a COO -> CSC
+    /// conversion with a position map. A tile is stored iff any
+    /// coordinate falls inside it.
+    ///
+    /// `coord(k)` returns the k-th scalar `(row, col)`; it is called
+    /// twice per coordinate (structure pass, then position pass), so it
+    /// must be pure and cheap (e.g. an indexed read of COO arrays).
+    /// Duplicate coordinates are fine and map to the same position
+    /// (accumulation semantics are the caller's).
+    ///
+    /// Positions follow the tile layout: `val_ptr[b] + local_col *
+    /// row_width + local_row` (column-major within the tile), matching
+    /// [`SparseBlockColMat::block`].
+    pub fn from_scalar_coords(
+        row_part: Vec<I>,
+        col_part: Vec<I>,
+        n_coords: usize,
+        coord: impl Fn(usize) -> (usize, usize),
+    ) -> (Self, Vec<usize>) {
+        // scalar index -> block index lookup tables, O(n) once
+        let of = |part: &[I]| {
+            let nblk = part.len() - 1;
+            let mut of = vec![0u32; part[nblk].zx()];
+            for b in 0..nblk {
+                for i in part[b].zx()..part[b + 1].zx() {
+                    of[i] = b as u32;
+                }
+            }
+            of
+        };
+        let blk_row_of = of(&row_part);
+        let blk_col_of = of(&col_part);
+
+        // structure pass: the set of touched cells, as (block_col,
+        // block_row) packed for one sort. After sort + dedup the vector
+        // IS the block enumeration in storage order (columns ascending,
+        // rows ascending within a column). Contributions arrive
+        // block-object by block-object, so consecutive coordinates
+        // usually share a cell: run-compressing before the sort shrinks
+        // it from one key per scalar to roughly one per contributing
+        // block object.
+        let key = |i: usize, j: usize| {
+            ((blk_col_of[j] as u64) << 32) | blk_row_of[i] as u64
+        };
+        let mut cells: Vec<u64> = Vec::with_capacity(1024);
+        let mut last = u64::MAX;
+        for k in 0..n_coords {
+            let (i, j) = coord(k);
+            let c = key(i, j);
+            if c != last {
+                cells.push(c);
+                last = c;
+            }
+        }
+        cells.sort_unstable();
+        cells.dedup();
+
+        let nblk_cols = col_part.len() - 1;
+        let nblocks = cells.len();
+        let mut blk_col_ptr = Vec::with_capacity(nblk_cols + 1);
+        let mut blk_row_idx = Vec::with_capacity(nblocks);
+        let mut val_ptr = Vec::with_capacity(nblocks + 1);
+        blk_col_ptr.push(I::truncate(0));
+        val_ptr.push(I::truncate(0));
+        let mut val_total = 0usize;
+        let mut col = 0usize;
+        for &cell in &cells {
+            let (bc, br) = ((cell >> 32) as usize, cell as u32 as usize);
+            while col < bc {
+                blk_col_ptr.push(I::truncate(blk_row_idx.len()));
+                col += 1;
+            }
+            blk_row_idx.push(I::truncate(br));
+            let row_w = row_part[br + 1].zx() - row_part[br].zx();
+            let col_w = col_part[bc + 1].zx() - col_part[bc].zx();
+            val_total += row_w * col_w;
+            val_ptr.push(I::truncate(val_total));
+        }
+        while col < nblk_cols {
+            blk_col_ptr.push(I::truncate(blk_row_idx.len()));
+            col += 1;
+        }
+
+        let this = Self::new_checked(
+            row_part, col_part, blk_col_ptr, blk_row_idx, val_ptr,
+        );
+
+        // position pass: block index recovered by binary search in the
+        // sorted cell keys (block numbering == sorted order), memoized
+        // per run of same-cell coordinates -- one search per block
+        // object, arithmetic only for the scalars inside it
+        let mut positions = Vec::with_capacity(n_coords);
+        let mut last = u64::MAX;
+        let (mut base, mut row_w, mut row_start, mut col_start) = (0usize, 0usize, 0usize, 0usize);
+        for k in 0..n_coords {
+            let (i, j) = coord(k);
+            let c = key(i, j);
+            if c != last {
+                last = c;
+                let b = cells.binary_search(&c).unwrap();
+                let br = this.blk_row(b);
+                let bc = blk_col_of[j] as usize;
+                base = this.val_ptr[b].zx();
+                row_w = this.row_span(br).len();
+                row_start = this.row_span(br).start;
+                col_start = this.col_span(bc).start;
+            }
+            positions.push(base + (j - col_start) * row_w + (i - row_start));
+        }
+
+        (this, positions)
+    }
+
     /// partition and pattern arrays: `(row_part, col_part, blk_col_ptr,
     /// blk_row_idx, val_ptr)`
     #[inline]
@@ -259,6 +374,14 @@ impl<I: Index, T> SparseBlockColMat<I, T> {
 }
 
 impl<I: Index, T: ComplexField> SparseBlockColMat<I, T> {
+    /// a zero-filled matrix over the given structure (the target of an
+    /// indexed scatter fill)
+    pub fn zeroed(symbolic: SymbolicSparseBlockColMat<I>) -> Self {
+        let n = symbolic.val_count();
+        Self::new(symbolic, vec![zero::<T>(); n])
+    }
+
+
     /// expands to a scalar CSC matrix with the same values (rows sorted
     /// within each column; only stored tiles contribute entries)
     pub fn to_csc(&self) -> SparseColMat<I, T> {
@@ -469,6 +592,43 @@ mod tests {
         let got: Vec<usize> =
             m.col_blocks(3).map(|(_, r, _)| r).collect();
         assert_eq!(got, vec![0, 3]);
+    }
+
+    #[test]
+    fn scalar_coords_builder() {
+        // rebuild the doodle's structure from its scalar coordinates
+        // and scatter the same values through the position map
+        let m = doodle();
+        let csc = m.to_csc();
+        let mut coords = Vec::new();
+        for j in 0..csc.ncols() {
+            for i in csc.row_idx_of_col(j) {
+                coords.push((i, j));
+            }
+        }
+        let part = vec![0usize, 2, 4, 5, 6, 7];
+        let (sym, positions) = SymbolicSparseBlockColMat::from_scalar_coords(
+            part.clone(),
+            part,
+            coords.len(),
+            |k| coords[k],
+        );
+        assert_eq!(sym.nblocks(), m.symbolic().nblocks());
+        assert_eq!(sym.parts().2, m.symbolic().parts().2);
+        assert_eq!(sym.parts().3, m.symbolic().parts().3);
+        assert_eq!(sym.parts().4, m.symbolic().parts().4);
+
+        let mut rebuilt = SparseBlockColMat::<usize, f64>::zeroed(sym);
+        let mut k = 0;
+        for j in 0..csc.ncols() {
+            for (_, v) in
+                iter::zip(csc.row_idx_of_col(j), csc.val_of_col(j))
+            {
+                rebuilt.vals_mut()[positions[k]] += *v;
+                k += 1;
+            }
+        }
+        assert_eq!(rebuilt.vals(), m.vals());
     }
 
     #[test]
