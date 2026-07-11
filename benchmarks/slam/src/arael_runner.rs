@@ -493,6 +493,24 @@ pub fn write_hessian_bitmap(scene: &Scene, out: &str) {
 type Solve64 = fn(&[f64], &mut Path, &arael::simple_lm::LmConfig<f64>)
     -> arael::simple_lm::LmResult<f64>;
 
+// SLAM_TIMING=1: per-phase breakdown of a solve (steady-state mean per
+// call, first call apart -- the first also pays the one-time
+// structure/symbolic costs).
+fn print_timing(label: &str, timing: Option<&arael::simple_lm::LmTiming>) {
+    if let Some(t) = timing {
+        let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
+        let m = |o: Option<std::time::Duration>| o.map_or(f64::NAN, ms);
+        eprintln!(
+            "timing {} ms/call (first): assembly {:.2} ({:.2})  linear_solve {:.2} ({:.2})  cost_eval {:.2} ({:.2})  advance {:.3} ({:.3})",
+            label,
+            m(t.mean_assembly()), ms(t.first_assembly),
+            m(t.mean_linear_solve()), ms(t.first_linear_solve),
+            m(t.mean_cost_eval()), ms(t.first_cost_eval),
+            m(t.mean_advance()), ms(t.first_advance),
+        );
+    }
+}
+
 fn run_with(scene: &Scene, solve: Solve64) -> RunOut {
     let mut path = build(scene);
     let mut params: Vec<f64> = Vec::new();
@@ -507,20 +525,7 @@ fn run_with(scene: &Scene, solve: Solve64) -> RunOut {
     let solve_ms = t0.elapsed().as_secs_f64() * 1e3;
     path.deserialize64(&result.x);
 
-    // SLAM_TIMING=1: per-phase breakdown of the f64 solve (steady-state
-    // mean per call, first call apart -- the first also pays the one-time
-    // structure/symbolic costs).
-    if let Some(t) = &result.timing {
-        let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
-        let m = |o: Option<std::time::Duration>| o.map_or(f64::NAN, ms);
-        eprintln!(
-            "timing ms/call (first): assembly {:.2} ({:.2})  linear_solve {:.2} ({:.2})  cost_eval {:.2} ({:.2})  advance {:.3} ({:.3})",
-            m(t.mean_assembly()), ms(t.first_assembly),
-            m(t.mean_linear_solve()), ms(t.first_linear_solve),
-            m(t.mean_cost_eval()), ms(t.first_cost_eval),
-            m(t.mean_advance()), ms(t.first_advance),
-        );
-    }
+    print_timing("f64", result.timing.as_ref());
 
     RunOut {
         solve_ms, first_iter_ms,
@@ -559,6 +564,7 @@ fn cfg32(max_iters: usize, poses: usize) -> arael::simple_lm::LmConfig<f32> {
         initial_lambda: std::env::var("SLAM_LAMBDA0").ok()
             .and_then(|v| v.parse().ok()).unwrap_or(default_lambda),
         verbose: std::env::var("SLAM_VERBOSE").map_or(false, |v| v == "1"),
+        gather_timing: std::env::var("SLAM_TIMING").map_or(false, |v| v == "1"),
         ..Default::default()
     };
     if nielsen() { cfg.with_driver(arael::simple_lm::NielsenLambdaDriver::default()) } else { cfg }
@@ -615,6 +621,8 @@ pub fn run_f32(scene: &Scene) -> RunOut {
     let result = solve32(&params, &mut path, &cfg32(200, scene.poses.len()));
     let solve_ms = t0.elapsed().as_secs_f64() * 1e3;
     path.deserialize32(&result.x);
+
+    print_timing("f32", result.timing.as_ref());
 
     RunOut {
         solve_ms, first_iter_ms,
