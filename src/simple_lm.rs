@@ -583,6 +583,24 @@ pub trait LmProblem<T> {
         }
         self.solve_with(&mut solver, config)
     }
+
+    /// Solve with the Schur-complement faer backend ([`SparseFaerSchur`]):
+    /// the model's `eliminate_first` blocks are marginalized on every
+    /// damped solve and only the reduced system is factorized. Requires
+    /// the hint and a statically-knowable Hessian pattern -- see
+    /// [`SparseFaerSchur`] for the exact contract.
+    fn solve_sparse_schur(&mut self, config: &LmConfig<T>) -> LmResult<T>
+    where
+        Self: RootProblem<T> + Sized,
+        T: Float,
+        SparseFaerSchur<T>: LmSolver<T>,
+    {
+        let mut solver = SparseFaerSchur::<T>::new();
+        for range in RootProblem::elimination_hint(self) {
+            solver = solver.with_eliminate_first(range);
+        }
+        self.solve_with(&mut solver, config)
+    }
 }
 
 /// Adapter: wrap two closures into an LmProblem (dense only).
@@ -2015,6 +2033,300 @@ impl<T: crate::utils::Float + faer::traits::RealField> LmSolver<T> for SparseFae
 /// Solve with faer sparse Cholesky backend (f64).
 pub fn solve_sparse_faer(x0: &[f64], problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> LmResult<f64> {
     lm_solve(x0, &mut SparseFaer::new(), problem, config)
+}
+
+/// Matrix storage for [`SparseFaerSchur`]: the Hessian in block form
+/// (arael-faer block CSC) over the model's entity partition.
+pub struct SchurBlockMatrix<T> {
+    n: usize,
+    h: Option<arael_faer::bsc::SparseBlockColMat<usize, T>>,
+}
+
+/// Schur-complement solver backend (pure Rust). Assembles the Hessian
+/// in block form over the model's entity partition; every damped solve
+/// then eliminates the hinted blocks (typically landmarks) via
+/// [`arael_faer::schur`], factors only the REDUCED system with faer's
+/// sparse LLT, and recovers the eliminated blocks by back-substitution.
+/// The elimination hint is trusted as given, like
+/// [`SparseFaer::with_eliminate_first`].
+///
+/// Requirements, checked on the first compute of a solve:
+/// - a statically-knowable Hessian pattern
+///   ([`LmProblem::hessian_pattern_requires_compute`] is `false`; no
+///   TripletBlock / extended-constraint models);
+/// - a non-empty elimination hint
+///   ([`with_eliminate_first`](Self::with_eliminate_first), auto-wired
+///   from `#[arael(root, eliminate_first(...))]` by
+///   [`LmProblem::solve_sparse_schur`]);
+/// - the hinted blocks must be mutually uncoupled (no constraint joins
+///   two of them) -- anything else is rejected loudly.
+pub struct SparseFaerSchur<T = f64> {
+    // Elimination hint (scalar parameter ranges; see with_eliminate_first).
+    eliminate_first: Vec<std::ops::Range<usize>>,
+    // Structure, built on the first compute of a solve and reused for
+    // every following iteration and damping retry.
+    positions: Option<Vec<usize>>,
+    bdiag_pos: Vec<usize>,
+    schur: Option<arael_faer::schur::SchurSymbolic<usize>>,
+    s: Option<arael_faer::bsc::SparseBlockColMat<usize, T>>,
+    ctx: arael_faer::schur::SchurContext<T>,
+    rhs_kept: Vec<T>,
+    x_kept: Vec<T>,
+    // S's scalar CSC: the pattern is cached once, only the values are
+    // regathered per damped solve (csc_pattern / csc_vals_into).
+    s_col_ptr: Vec<usize>,
+    s_row_idx: Vec<usize>,
+    s_vals: Vec<T>,
+    // faer LLT state on the reduced system, sized once.
+    llt_symbolic: Option<faer::sparse::linalg::cholesky::SymbolicCholesky<usize>>,
+    l_vals: Vec<T>,
+    factor_mem: Vec<std::mem::MaybeUninit<u8>>,
+    solve_mem: Vec<std::mem::MaybeUninit<u8>>,
+}
+
+/// Alias of [`SparseFaerSchur<f32>`].
+pub type SparseFaerSchurF32 = SparseFaerSchur<f32>;
+
+impl<T> Default for SparseFaerSchur<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<T> SparseFaerSchur<T> {
+    pub fn new() -> Self {
+        SparseFaerSchur {
+            eliminate_first: Vec::new(),
+            positions: None,
+            bdiag_pos: Vec::new(),
+            schur: None,
+            s: None,
+            ctx: arael_faer::schur::SchurContext::new(),
+            rhs_kept: Vec::new(),
+            x_kept: Vec::new(),
+            s_col_ptr: Vec::new(),
+            s_row_idx: Vec::new(),
+            s_vals: Vec::new(),
+            llt_symbolic: None,
+            l_vals: Vec::new(),
+            factor_mem: Vec::new(),
+            solve_mem: Vec::new(),
+        }
+    }
+
+    /// Parameter blocks fully inside `range` are eliminated (Schur
+    /// complement) before the kept system is factorized. Same contract
+    /// as [`SparseFaer::with_eliminate_first`]: trusted as given. May
+    /// be called multiple times for multiple ranges.
+    pub fn with_eliminate_first(mut self, range: std::ops::Range<usize>) -> Self {
+        self.eliminate_first.push(range);
+        self
+    }
+}
+
+impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::SchurReal> LmSolver<T>
+    for SparseFaerSchur<T>
+{
+    type Matrix = SchurBlockMatrix<T>;
+
+    fn matrix_nonfinite_count(&self, matrix: &SchurBlockMatrix<T>) -> usize {
+        matrix.h.as_ref().map_or(0, |h| h.vals().iter().filter(|v| !v.is_finite()).count())
+    }
+
+    fn reset(&mut self) {
+        self.positions = None;
+        self.schur = None;
+        self.s = None;
+        self.llt_symbolic = None;
+        // Buffer allocations are kept; they are resized when the next
+        // structure is built. The elimination hint is configuration,
+        // not cache, and survives.
+    }
+
+    fn new_matrix(&self, n: usize) -> SchurBlockMatrix<T> {
+        SchurBlockMatrix { n, h: None }
+    }
+
+    fn compute(&mut self, problem: &mut dyn LmProblem<T>, params: &[T], grad: &mut [T], matrix: &mut SchurBlockMatrix<T>) -> T {
+        if let (Some(positions), Some(h)) = (&self.positions, matrix.h.as_mut()) {
+            return problem.calc_grad_hessian_sparse_indexed(params, grad, h.vals_mut(), positions);
+        }
+        let n = matrix.n;
+
+        // First call: block structure from the model's structure walks.
+        assert!(
+            !problem.hessian_pattern_requires_compute(),
+            "SparseFaerSchur requires a statically-knowable Hessian pattern \
+             (TripletBlock / extended-constraint models are not supported)"
+        );
+        assert!(
+            !self.eliminate_first.is_empty(),
+            "SparseFaerSchur requires an elimination hint (with_eliminate_first \
+             or #[arael(root, eliminate_first(...))] with solve_sparse_schur)"
+        );
+        let mut cells = std::vec::Vec::new();
+        problem.collect_hessian_cells(&mut cells);
+        let mut spans = std::vec::Vec::new();
+        problem.collect_param_block_spans(&mut spans);
+        assert!(
+            !cells.is_empty() && !spans.is_empty(),
+            "SparseFaerSchur requires the model structure walks (macro-generated \
+             models; hand-built problems are not supported)"
+        );
+        let partition = block_partition_from_spans(&spans, n);
+        let nblk = partition.len() - 1;
+        let (hsym, _) = arael_faer::bsc::SymbolicSparseBlockColMat::from_scalar_coords(
+            partition.clone(),
+            partition.clone(),
+            cells.len(),
+            |k| (cells[k].0 as usize, cells[k].1 as usize),
+        );
+        let mut resolver = arael_faer::bsc::PositionResolver::new(&hsym);
+        let mut positions = std::vec::Vec::new();
+        problem.accumulate_hessian_positions(
+            &mut |i, j| resolver.resolve(i as usize, j as usize),
+            &mut positions,
+        );
+
+        // Scalar diagonal positions inside the diagonal tiles (damping
+        // and extract_diagonal read/write through these).
+        self.bdiag_pos.clear();
+        self.bdiag_pos.resize(n, usize::MAX);
+        for b in 0..nblk {
+            let w = partition[b + 1] - partition[b];
+            let diag = hsym
+                .col_range(b)
+                .find(|&x| hsym.blk_row(x) == b)
+                .unwrap_or_else(|| panic!("parameter block {} has no diagonal Hessian tile", b));
+            let base = hsym.val_range(diag).start;
+            for k in 0..w {
+                self.bdiag_pos[partition[b] + k] = base + k * (w + 1);
+            }
+        }
+
+        // Eliminated block ids: blocks fully inside a hinted scalar range.
+        let eliminated: Vec<usize> = (0..nblk)
+            .filter(|&b| {
+                self.eliminate_first
+                    .iter()
+                    .any(|r| r.start <= partition[b] && partition[b + 1] <= r.end)
+            })
+            .collect();
+        assert!(!eliminated.is_empty(), "the elimination hint selects no parameter blocks");
+        let schur = match arael_faer::schur::schur_symbolic(&hsym, &eliminated) {
+            Ok(s) => s,
+            Err(e) => panic!(
+                "Schur elimination rejected ({:?}): the hinted blocks must be \
+                 mutually uncoupled and each needs a diagonal Hessian tile",
+                e
+            ),
+        };
+
+        // S storage, its scalar-CSC pattern, and faer's symbolic
+        // factorization of the reduced system -- all one-time.
+        let s = schur.alloc_s::<T>();
+        let (col_ptr, row_idx) = s.symbolic().csc_pattern();
+        self.s_col_ptr = col_ptr;
+        self.s_row_idx = row_idx;
+        self.s_vals.resize(self.s_row_idx.len(), T::zero());
+        let nk = s.symbolic().nrows();
+        {
+            use faer::sparse::linalg::cholesky::*;
+            let sym_ref = faer::sparse::SymbolicSparseColMatRef::new_checked(
+                nk, nk, &self.s_col_ptr, None, &self.s_row_idx,
+            );
+            let llt_symbolic = factorize_symbolic_cholesky(
+                sym_ref,
+                faer::Side::Upper,
+                SymmetricOrdering::Amd,
+                CholeskySymbolicParams::default(),
+            )
+            .expect("symbolic factorization of the reduced system failed");
+            self.l_vals.resize(llt_symbolic.len_val(), T::zero());
+            let factor_scratch = llt_symbolic
+                .factorize_numeric_llt_scratch::<T>(faer::Par::Seq, faer::Spec::default());
+            self.factor_mem
+                .resize(factor_scratch.unaligned_bytes_required(), std::mem::MaybeUninit::uninit());
+            let solve_scratch = llt_symbolic.solve_in_place_scratch::<T>(1, faer::Par::Seq);
+            self.solve_mem
+                .resize(solve_scratch.unaligned_bytes_required(), std::mem::MaybeUninit::uninit());
+            self.llt_symbolic = Some(llt_symbolic);
+        }
+        self.rhs_kept.resize(nk, T::zero());
+        self.x_kept.resize(nk, T::zero());
+        self.s = Some(s);
+        self.schur = Some(schur);
+
+        // First numeric fill.
+        let mut h = arael_faer::bsc::SparseBlockColMat::zeroed(hsym);
+        let cost = problem.calc_grad_hessian_sparse_indexed(params, grad, h.vals_mut(), &positions);
+        matrix.h = Some(h);
+        self.positions = Some(positions);
+        cost
+    }
+
+    fn extract_diagonal(&self, matrix: &SchurBlockMatrix<T>, diagonal: &mut [T]) {
+        let vals = matrix.h.as_ref().expect("compute before extract_diagonal").vals();
+        for (i, d) in diagonal.iter_mut().enumerate() {
+            *d = vals[self.bdiag_pos[i]];
+        }
+    }
+
+    fn solve_damped(&mut self, n: usize, matrix: &mut SchurBlockMatrix<T>, diagonal: &[T], lambda: T, grad: &[T], delta: &mut [T]) -> bool {
+        let h = matrix.h.as_mut().expect("compute before solve_damped");
+        let damped = T::one() + lambda;
+        {
+            let vals = h.vals_mut();
+            for i in 0..n {
+                vals[self.bdiag_pos[i]] = damped * diagonal[i];
+            }
+        }
+
+        // Reduce: S and the reduced rhs from the damped H.
+        let schur = self.schur.as_ref().unwrap();
+        let s = self.s.as_mut().unwrap();
+        if arael_faer::schur::schur_reduce(schur, h, grad, &mut self.ctx, s, &mut self.rhs_kept)
+            .is_err()
+        {
+            return false;
+        }
+
+        // Factor the reduced system and solve for the kept blocks.
+        s.csc_vals_into(&mut self.s_vals);
+        let nk = self.rhs_kept.len();
+        let sym_ref = faer::sparse::SymbolicSparseColMatRef::new_checked(
+            nk, nk, &self.s_col_ptr, None, &self.s_row_idx,
+        );
+        let mat_ref = faer::sparse::SparseColMatRef::new(sym_ref, &self.s_vals);
+        let stack = faer::dyn_stack::MemStack::new(&mut self.factor_mem);
+        let llt = match self.llt_symbolic.as_ref().unwrap().factorize_numeric_llt(
+            &mut self.l_vals,
+            mat_ref,
+            faer::Side::Upper,
+            faer::linalg::cholesky::llt::factor::LltRegularization::default(),
+            faer::Par::Seq,
+            stack,
+            faer::Spec::default(),
+        ) {
+            Ok(l) => l,
+            Err(_) => return false,
+        };
+        self.x_kept.copy_from_slice(&self.rhs_kept);
+        let rhs = faer::col::ColMut::from_slice_mut(&mut self.x_kept);
+        let solve_stack = faer::dyn_stack::MemStack::new(&mut self.solve_mem);
+        llt.solve_in_place_with_conj(faer::Conj::No, rhs.as_mat_mut(), faer::Par::Seq, solve_stack);
+
+        // Recover the eliminated blocks into the full-length delta.
+        arael_faer::schur::schur_backsub(schur, h, grad, &self.x_kept, &mut self.ctx, delta)
+            .is_ok()
+    }
+}
+
+/// Solve with the Schur-complement faer backend (f64); the eliminated
+/// ranges come from the model's elimination hint, wired by
+/// [`LmProblem::solve_sparse_schur`].
+pub fn solve_sparse_faer_schur(x0: &[f64], problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> LmResult<f64> {
+    lm_solve(x0, &mut SparseFaerSchur::new(), problem, config)
 }
 
 /// Solve with faer sparse Cholesky backend (f32).
