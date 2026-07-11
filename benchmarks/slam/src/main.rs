@@ -53,14 +53,14 @@ fn peak_rss_kb() -> u64 {
 // clean peak -- no allocator retention from a previous solver, and the
 // same measurement basis as the Ceres subprocess.
 //
-// A cholmod-gpl build links CHOLMOD's BLAS/LAPACK stack, which inflates
-// every row's VmHWM by a few MB of shared-library baseline that a
-// faer-only deployment would not carry. SLAM_MEM_EXE=<path to a default
-// build> sources the non-gpl rows' memory from that clean binary instead;
-// the cholmod-gpl row always self-measures (the stack is part of its cost).
+// A feature build (eigen/cholmod/cholmod-gpl) links C libraries that
+// inflate every row's VmHWM by a few MB of shared-library baseline a
+// pure-Rust deployment would not carry. SLAM_MEM_EXE=<path to a default
+// build> sources the rows' memory from that clean binary instead; the
+// default build self-measures cleanly (the output records which).
 fn measure_peak_mb(which: &str, poses: usize) -> f64 {
     let exe = match std::env::var("SLAM_MEM_EXE") {
-        Ok(alt) if which != "arael_gpl" => std::path::PathBuf::from(alt),
+        Ok(alt) => std::path::PathBuf::from(alt),
         _ => std::env::current_exe().unwrap(),
     };
     let out = std::process::Command::new(exe)
@@ -85,8 +85,6 @@ fn main() {
             .and_then(|v| v.parse().ok()).unwrap_or(200);
         match which.as_str() {
             "arael_f64" => { std::hint::black_box(arael_runner::run_capped(&scene, iters)); }
-            #[cfg(feature = "cholmod-gpl")]
-            "arael_gpl" => { std::hint::black_box(arael_runner::run_supernodal_capped(&scene, iters)); }
             "arael_f32" => { std::hint::black_box(arael_runner::run_f32_capped(&scene, iters)); }
             "tiny" => {
                 std::env::set_var("TINY_MAXITER", iters.to_string());
@@ -176,12 +174,6 @@ fn main() {
     for _ in 0..rounds {
         let a = arael_runner::run(&scene);
         record("arael LM f64", a.solve_ms, a.first_iter_ms, a.iterations, Some(a.accepted), a.solution, &mut cells);
-        #[cfg(feature = "cholmod-gpl")]
-        {
-            let ag = arael_runner::run_supernodal(&scene);
-            record("arael LM f64 cholmod-gpl", ag.solve_ms, ag.first_iter_ms, ag.iterations,
-                Some(ag.accepted), ag.solution, &mut cells);
-        }
         let a32 = arael_runner::run_f32(&scene);
         record("arael LM f32", a32.solve_ms, a32.first_iter_ms, a32.iterations, Some(a32.accepted), a32.solution, &mut cells);
         if !skip_tiny {
@@ -255,7 +247,6 @@ fn main() {
     let mem_key = |label: &str| -> Option<&'static str> {
         match label {
             "arael LM f64" => Some("arael_f64"),
-            "arael LM f64 cholmod-gpl" => Some("arael_gpl"),
             "arael LM f32" => Some("arael_f32"),
             "tiny-solver LM" => Some("tiny"),
             "factrs LM" => Some("factrs"),
@@ -267,6 +258,18 @@ fn main() {
         else if measure_mem { mem_key(&c.0).map_or(0.0, |k| measure_peak_mb(k, scene.poses.len())) }
         else { 0.0 }
     }).collect();
+    // Provenance of the Rust rows' peak MB, so every log records which
+    // binary the numbers came from (feature builds link extra C
+    // libraries into self-measured RSS; see README Methodology).
+    if measure_mem {
+        let featured = cfg!(any(feature = "eigen", feature = "cholmod", feature = "cholmod-gpl"));
+        match std::env::var("SLAM_MEM_EXE") {
+            Ok(exe) => println!("peak MB: Rust rows measured via SLAM_MEM_EXE ({})", exe),
+            Err(_) if featured => println!(
+                "peak MB: self-measured inside a FEATURE build (linked C libraries inflate RSS) --                  set SLAM_MEM_EXE to a default-build binary"),
+            Err(_) => println!("peak MB: self-measured (default build)"),
+        }
+    }
 
     println!("\n{:<30} {:>10} {:>9} {:>10} {:>12} {:>10} {:>16}",
         "system", "total ms", "iters", "ms/iter", "1st-iter ms", "peak MB", "final cost");

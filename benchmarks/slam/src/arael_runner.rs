@@ -553,13 +553,6 @@ pub fn run(scene: &Scene) -> RunOut {
     run_with(scene, solve64)
 }
 
-/// The CHOLMOD-supernodal row (GPL-licensed module; see the cholmod-gpl
-/// feature warning in the arael Cargo.toml).
-#[cfg(feature = "cholmod-gpl")]
-pub fn run_supernodal(scene: &Scene) -> RunOut {
-    run_with(scene, |p, path, cfg| arael::simple_lm::solve_sparse_cholmod_supernodal(p, path, cfg))
-}
-
 fn cfg32(max_iters: usize, poses: usize) -> arael::simple_lm::LmConfig<f32> {
     // Problem-appropriate initial damping, per pose count. At the small
     // (60-pose) size the f32 solution lands a hair above the 1e-5 stop
@@ -606,16 +599,6 @@ pub fn run_capped(scene: &Scene, max_iters: usize) -> Solution {
     let mut params: Vec<f64> = Vec::new();
     path.serialize64(&mut params);
     let result = solve64(&params, &mut path, &cfg(max_iters));
-    path.deserialize64(&result.x);
-    extract(&path)
-}
-
-#[cfg(feature = "cholmod-gpl")]
-pub fn run_supernodal_capped(scene: &Scene, max_iters: usize) -> Solution {
-    let mut path = build(scene);
-    let mut params: Vec<f64> = Vec::new();
-    path.serialize64(&mut params);
-    let result = arael::simple_lm::solve_sparse_cholmod_supernodal(&params, &mut path, &cfg(max_iters));
     path.deserialize64(&result.x);
     extract(&path)
 }
