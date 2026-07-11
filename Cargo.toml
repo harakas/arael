@@ -1,5 +1,5 @@
 [workspace]
-members = ["arael-macros", "arael-sym", "arael-sym-macros", "arael-sketch", "arael-sketch-backend", "arael-sketch-solver"]
+members = ["arael-faer", "arael-macros", "arael-sym", "arael-sym-macros", "arael-sketch", "arael-sketch-backend", "arael-sketch-solver"]
 
 [package]
 name = "arael"

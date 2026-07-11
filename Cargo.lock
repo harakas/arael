@@ -245,6 +245,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "arael-faer"
+version = "0.7.0"
+dependencies = [
+ "faer",
+]
+
+[[package]]
 name = "arael-macros"
 version = "0.7.0"
 dependencies = [
