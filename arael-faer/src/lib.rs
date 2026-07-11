@@ -3,4 +3,7 @@
 //! Everything here uses only faer's public API and is written as an
 //! upstream candidate; module layout mirrors the intended faer home.
 
+pub use faer;
+
 pub mod bsc;
+pub mod schur;

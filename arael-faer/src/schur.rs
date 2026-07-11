@@ -1,0 +1,1036 @@
+//! blocked Schur complement over [`bsc`](crate::bsc) matrices:
+//! eliminate a set of mutually-uncoupled block variables (typically
+//! landmarks) from a symmetric block system stored upper, producing
+//! the reduced system `S = Hkk - Hke Hee^-1 Hek` and the reduced
+//! right-hand side `bk' = bk - Hke Hee^-1 be`.
+//!
+//! symbolic/numeric split in faer's house style: [`schur_symbolic`]
+//! analyzes the structure once -- S's block pattern (kept-kept tiles
+//! plus one observer clique per eliminated block), a copy map for the
+//! kept-kept part, per-eliminated coupling-tile lists, and the target
+//! position of every observer-pair contribution. [`schur_reduce`] is
+//! the per-iteration numeric pass: indexed arithmetic only, no
+//! allocation once the [`SchurContext`] workspaces have grown to size.
+//! Blocks arrive pre-damped; the module is lambda-free.
+//!
+//! The eliminated set must be internally uncoupled (no stored tile
+//! joining two eliminated blocks) so that `Hee` is block-diagonal --
+//! [`schur_symbolic`] rejects anything else.
+//!
+//! Storage convention: symmetric matrices store the upper block
+//! triangle, and diagonal tiles carry only their scalar upper triangle
+//! (the strictly-lower part is zero, as the indexed assembly leaves
+//! it). Diagonal tiles are read as symmetric from the upper part, and
+//! S comes back in the same convention.
+
+use crate::bsc::{SparseBlockColMat, SymbolicSparseBlockColMat};
+use faer::Index;
+use faer::traits::ComplexField;
+
+/// scalar operations the hand-rolled tile kernels need. the kernels
+/// run on raw column-major slices (tile sizes are single digits, where
+/// plain loops beat dispatching into a general GEMM).
+pub trait SchurReal:
+    ComplexField
+    + Copy
+    + PartialOrd
+    + core::ops::Add<Output = Self>
+    + core::ops::Sub<Output = Self>
+    + core::ops::Mul<Output = Self>
+    + core::ops::Div<Output = Self>
+{
+    const ZERO: Self;
+    fn sqrt(self) -> Self;
+}
+impl SchurReal for f32 {
+    const ZERO: Self = 0.0;
+    fn sqrt(self) -> Self {
+        f32::sqrt(self)
+    }
+}
+impl SchurReal for f64 {
+    const ZERO: Self = 0.0;
+    fn sqrt(self) -> Self {
+        f64::sqrt(self)
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum SchurError {
+    /// a stored tile couples two eliminated blocks: `Hee` is not
+    /// block-diagonal and the per-block elimination is invalid
+    CoupledEliminated { row: usize, col: usize },
+    /// an eliminated block has no stored diagonal tile
+    MissingDiagonal { block: usize },
+    /// `eliminated` was not strictly ascending or held an id out of range
+    BadEliminatedSet,
+    /// a diagonal tile was not positive definite during factorization
+    /// (with LM damping applied upstream this indicates a modeling bug)
+    NotPositiveDefinite { block: usize },
+}
+
+/// one-time structural analysis of a Schur reduction (see
+/// [`schur_symbolic`]); consumed by [`schur_reduce`] every iteration.
+#[derive(Clone, Debug)]
+pub struct SchurSymbolic<I: Index> {
+    /// kept id -> original block id, ascending
+    pub kept: Vec<I>,
+    /// original block id -> kept id (unspecified for eliminated blocks)
+    kept_of: Vec<I>,
+    /// structure of S over the kept partition
+    pub s: SymbolicSparseBlockColMat<I>,
+    /// kept-kept tiles: block index in H -> block index in S
+    copy_src: Vec<I>,
+    copy_dst: Vec<I>,
+    /// per eliminated block, in `eliminated` order: H block index of
+    /// its diagonal tile, plus ranges into the obs_* / pair_dst arrays
+    elim_diag: Vec<I>,
+    elim_obs_ptr: Vec<I>,
+    elim_pair_ptr: Vec<I>,
+    /// flattened observer lists: coupling tile's H block index, whether
+    /// it is stored transposed (tile (elim, kept) instead of
+    /// (kept, elim)), and the observer's original block id
+    obs_hblk: Vec<I>,
+    obs_trans: Vec<bool>,
+    obs_block: Vec<I>,
+    /// S block index of every observer-pair target: per eliminated
+    /// block, for each observer b (ascending) all pairs (a, b) with
+    /// a <= b, a ascending -- the numeric pass consumes it in this
+    /// exact order
+    pair_dst: Vec<I>,
+    /// S block indices of the kept diagonal tiles (for the final
+    /// zero-lower pass -- diagonal tiles are upper-only by convention)
+    s_diag: Vec<I>,
+    /// workspace sizing: max panel elements / max eliminated width
+    max_panel: usize,
+    max_ew: usize,
+}
+
+impl<I: Index> SchurSymbolic<I> {
+    /// allocate a zeroed S with this structure (reused across iterations)
+    pub fn alloc_s<T: ComplexField>(&self) -> SparseBlockColMat<I, T> {
+        SparseBlockColMat::zeroed(self.s.clone())
+    }
+    /// number of observer-pair contributions per reduction (the flop
+    /// driver: quadratic in observers-per-eliminated-block)
+    pub fn pair_count(&self) -> usize {
+        self.pair_dst.len()
+    }
+    /// kept id of an original block id (must be kept)
+    pub fn kept_of(&self, orig: usize) -> usize {
+        self.kept_of[orig].zx()
+    }
+}
+
+/// reusable numeric workspaces for [`schur_reduce`]; grows to the
+/// symbolic sizes on first use, no allocation afterwards.
+pub struct SchurContext<T> {
+    /// lower-LLT factor of the current diagonal tile, column-major
+    dwork: Vec<T>,
+    /// solve panel `Z = D^-1 [C^T | b_e]`, column-major, width
+    /// `sum(observer widths) + 1`
+    panel: Vec<T>,
+    /// (panel column offset, width) per observer of the current block
+    obs_col: Vec<(usize, usize)>,
+    /// per-stage breakdown of the last [`schur_reduce`] call, gathered
+    /// only when enabled (the clock is never read otherwise)
+    timing: Option<SchurTiming>,
+}
+
+impl<T> Default for SchurContext<T> {
+    fn default() -> Self {
+        Self { dwork: Vec::new(), panel: Vec::new(), obs_col: Vec::new(), timing: None }
+    }
+}
+
+impl<T> SchurContext<T> {
+    pub fn new() -> Self {
+        Self::default()
+    }
+    /// gather a per-stage [`SchurTiming`] on every subsequent
+    /// [`schur_reduce`] call (costs a few clock reads per eliminated
+    /// block; leave off for production solves)
+    pub fn enable_timing(&mut self) {
+        self.timing = Some(SchurTiming::default());
+    }
+    /// stage breakdown of the last [`schur_reduce`] call, if gathering
+    /// was enabled
+    pub fn timing(&self) -> Option<&SchurTiming> {
+        self.timing.as_ref()
+    }
+}
+
+/// where a [`schur_reduce`] call spent its time (see that function's
+/// stage-by-stage description; enable via
+/// [`SchurContext::enable_timing`])
+#[derive(Clone, Debug, Default)]
+pub struct SchurTiming {
+    /// stage 1: zero S, copy the Hkk tiles and the kept rhs slices
+    pub seed: std::time::Duration,
+    /// stage 2a: dense Cholesky of every eliminated diagonal tile
+    pub factor: std::time::Duration,
+    /// stage 2b: gather each panel and triangular-solve it
+    /// (`Z = D_e^-1 [C^T | b_e]`)
+    pub panel: std::time::Duration,
+    /// stage 2c: the observer-pair GEMMs into S (the flop driver)
+    pub gemm: std::time::Duration,
+    /// stage 2d: the per-observer rhs updates
+    pub rhs: std::time::Duration,
+    /// stage 3: re-zero the strictly-lower part of S's diagonal tiles
+    pub finish: std::time::Duration,
+}
+
+impl SchurTiming {
+    pub fn total(&self) -> std::time::Duration {
+        self.seed + self.factor + self.panel + self.gemm + self.rhs + self.finish
+    }
+}
+
+/// accumulates wall time between laps into stage counters; a no-op
+/// (single branch, no clock read) when timing is disabled
+struct Stopwatch {
+    last: Option<std::time::Instant>,
+}
+
+impl Stopwatch {
+    fn new(on: bool) -> Self {
+        Self { last: on.then(std::time::Instant::now) }
+    }
+    #[inline]
+    fn lap(&mut self, acc: &mut std::time::Duration) {
+        if let Some(last) = &mut self.last {
+            let now = std::time::Instant::now();
+            *acc += now - *last;
+            *last = now;
+        }
+    }
+}
+
+/// analyze the Schur reduction of `h` (symmetric, upper block triangle
+/// stored, square partition) eliminating the given block ids (strictly
+/// ascending). Errors if the eliminated set is internally coupled or an
+/// eliminated block lacks its diagonal tile.
+pub fn schur_symbolic<I: Index>(
+    h: &SymbolicSparseBlockColMat<I>,
+    eliminated: &[usize],
+) -> Result<SchurSymbolic<I>, SchurError> {
+    let nblk = h.nblk_cols();
+    assert_eq!(h.nblk_rows(), nblk, "square block partition required");
+
+    // eliminated bitmap + per-eliminated slot id
+    let mut elim_slot = vec![usize::MAX; nblk];
+    let mut prev = None;
+    for (slot, &e) in eliminated.iter().enumerate() {
+        if e >= nblk || prev.is_some_and(|p| p >= e) {
+            return Err(SchurError::BadEliminatedSet);
+        }
+        prev = Some(e);
+        elim_slot[e] = slot;
+    }
+    let ne = eliminated.len();
+
+    // kept renumbering and kept scalar partition
+    let mut kept: Vec<I> = Vec::with_capacity(nblk - ne);
+    let mut kept_of = vec![I::truncate(0); nblk];
+    let mut kept_part: Vec<usize> = Vec::with_capacity(nblk - ne + 1);
+    kept_part.push(0);
+    for b in 0..nblk {
+        if elim_slot[b] == usize::MAX {
+            kept_of[b] = I::truncate(kept.len());
+            kept.push(I::truncate(b));
+            kept_part.push(kept_part.last().unwrap() + h.col_span(b).len());
+        }
+    }
+
+    // single scan over all stored tiles: classify each as kept-kept
+    // (copy), eliminated diagonal, or coupling tile of one eliminated
+    // block. observers of one eliminated block arrive in ascending
+    // block order (rows of its own column first, then transposed tiles
+    // from later columns), so the per-block lists come out sorted.
+    let mut diag: Vec<Option<I>> = vec![None; ne];
+    let mut obs: Vec<Vec<(I, bool, I)>> = vec![Vec::new(); ne];
+    let mut copy_kk: Vec<(I, usize, usize)> = Vec::new(); // (hblk, kr, kc)
+    for c in 0..nblk {
+        for b in h.col_range(c) {
+            let r = h.blk_row(b);
+            let (re, ce) = (elim_slot[r], elim_slot[c]);
+            match (re != usize::MAX, ce != usize::MAX) {
+                (true, true) => {
+                    if r == c {
+                        diag[ce] = Some(I::truncate(b));
+                    } else {
+                        return Err(SchurError::CoupledEliminated { row: r, col: c });
+                    }
+                }
+                (false, true) => obs[ce].push((I::truncate(b), false, I::truncate(r))),
+                (true, false) => obs[re].push((I::truncate(b), true, I::truncate(c))),
+                (false, false) => {
+                    copy_kk.push((I::truncate(b), kept_of[r].zx(), kept_of[c].zx()));
+                }
+            }
+        }
+    }
+
+    // per-eliminated flat lists (observer order = ascending block id)
+    let mut elim_diag = Vec::with_capacity(ne);
+    let mut elim_obs_ptr = Vec::with_capacity(ne + 1);
+    let mut elim_pair_ptr = Vec::with_capacity(ne + 1);
+    let mut obs_hblk = Vec::new();
+    let mut obs_trans = Vec::new();
+    let mut obs_block = Vec::new();
+    let mut max_panel = 0usize;
+    let mut max_ew = 0usize;
+    let mut total_pairs = 0usize;
+    elim_obs_ptr.push(I::truncate(0));
+    elim_pair_ptr.push(I::truncate(0));
+    for slot in 0..ne {
+        let e = eliminated[slot];
+        let d = diag[slot].ok_or(SchurError::MissingDiagonal { block: e })?;
+        elim_diag.push(d);
+        let list = &obs[slot];
+        let mut panel_cols = 1usize; // + the rhs column
+        for &(hb, tr, oblk) in list {
+            obs_hblk.push(hb);
+            obs_trans.push(tr);
+            obs_block.push(oblk);
+            panel_cols += h.col_span(oblk.zx()).len();
+        }
+        total_pairs += list.len() * (list.len() + 1) / 2;
+        let ew = h.col_span(e).len();
+        max_ew = max_ew.max(ew);
+        max_panel = max_panel.max(ew * panel_cols);
+        elim_obs_ptr.push(I::truncate(obs_hblk.len()));
+        elim_pair_ptr.push(I::truncate(total_pairs));
+    }
+
+    // S structure and every target position in one column-major pass,
+    // no sorting: a stamp array unions each kept column's rows -- its
+    // kept-kept tiles (already sorted by the scan) plus each clique's
+    // {a <= b} for every observer b living in this column -- and the
+    // read-back scan of 0..=kc emits them ascending. blk_at resolves
+    // rows to S block indices for the copy map and pair targets, which
+    // scatter straight into their b-major slots. everything is O(1)
+    // per contribution; nothing is searched.
+    let nk = kept.len();
+    // inverted clique index: per kept column, the (slot, bi) of every
+    // observer b in that column (CSR layout)
+    let mut land_ptr = vec![0usize; nk + 1];
+    for b in &obs_block {
+        land_ptr[kept_of[b.zx()].zx() + 1] += 1;
+    }
+    for k in 0..nk {
+        land_ptr[k + 1] += land_ptr[k];
+    }
+    let mut land_ent = vec![(0u32, 0u32); *land_ptr.last().unwrap()];
+    {
+        let mut cursor = land_ptr.clone();
+        for slot in 0..ne {
+            let start = elim_obs_ptr[slot].zx();
+            for (bi, o) in (start..elim_obs_ptr[slot + 1].zx()).enumerate() {
+                let kc = kept_of[obs_block[o].zx()].zx();
+                land_ent[cursor[kc]] = (slot as u32, bi as u32);
+                cursor[kc] += 1;
+            }
+        }
+    }
+
+    let mut mark = vec![0u32; nk];
+    let mut blk_at = vec![0u32; nk];
+    let mut blk_col_ptr: Vec<I> = Vec::with_capacity(nk + 1);
+    let mut blk_row_idx: Vec<I> = Vec::new();
+    let mut val_ptr: Vec<I> = Vec::new();
+    let mut copy_dst = vec![I::truncate(0); copy_kk.len()];
+    let mut pair_dst = vec![I::truncate(0); total_pairs];
+    let mut s_diag = Vec::with_capacity(nk);
+    blk_col_ptr.push(I::truncate(0));
+    val_ptr.push(I::truncate(0));
+    let mut vals_end = 0usize;
+    let mut copy_cursor = 0usize;
+    for kc in 0..nk {
+        let stamp = kc as u32 + 1;
+        let copy_begin = copy_cursor;
+        while copy_cursor < copy_kk.len() && copy_kk[copy_cursor].2 == kc {
+            mark[copy_kk[copy_cursor].1] = stamp;
+            copy_cursor += 1;
+        }
+        for &(slot, bi) in &land_ent[land_ptr[kc]..land_ptr[kc + 1]] {
+            let start = elim_obs_ptr[slot as usize].zx();
+            for o in start..=start + bi as usize {
+                mark[kept_of[obs_block[o].zx()].zx()] = stamp;
+            }
+        }
+        let colw = kept_part[kc + 1] - kept_part[kc];
+        for kr in 0..=kc {
+            if mark[kr] == stamp {
+                blk_at[kr] = blk_row_idx.len() as u32;
+                if kr == kc {
+                    s_diag.push(I::truncate(blk_row_idx.len()));
+                }
+                blk_row_idx.push(I::truncate(kr));
+                vals_end += (kept_part[kr + 1] - kept_part[kr]) * colw;
+                val_ptr.push(I::truncate(vals_end));
+            }
+        }
+        blk_col_ptr.push(I::truncate(blk_row_idx.len()));
+        for ci in copy_begin..copy_cursor {
+            copy_dst[ci] = I::truncate(blk_at[copy_kk[ci].1] as usize);
+        }
+        for &(slot, bi) in &land_ent[land_ptr[kc]..land_ptr[kc + 1]] {
+            let start = elim_obs_ptr[slot as usize].zx();
+            let base =
+                elim_pair_ptr[slot as usize].zx() + (bi as usize) * (bi as usize + 1) / 2;
+            for ai in 0..=bi as usize {
+                let ka = kept_of[obs_block[start + ai].zx()].zx();
+                pair_dst[base + ai] = I::truncate(blk_at[ka] as usize);
+            }
+        }
+    }
+    let kp: Vec<I> = kept_part.iter().map(|&x| I::truncate(x)).collect();
+    let s = SymbolicSparseBlockColMat::new_checked(
+        kp.clone(),
+        kp,
+        blk_col_ptr,
+        blk_row_idx,
+        val_ptr,
+    );
+    let copy_src: Vec<I> = copy_kk.iter().map(|&(hb, _, _)| hb).collect();
+
+    Ok(SchurSymbolic {
+        kept,
+        kept_of,
+        s,
+        copy_src,
+        copy_dst,
+        elim_diag,
+        elim_obs_ptr,
+        elim_pair_ptr,
+        obs_hblk,
+        obs_trans,
+        obs_block,
+        pair_dst,
+        s_diag,
+        max_panel,
+        max_ew,
+    })
+}
+
+/// in-place lower-Cholesky of a `w x w` column-major tile; false if a
+/// pivot is not strictly positive
+fn llt_in_place<T: SchurReal>(a: &mut [T], w: usize) -> bool {
+    for k in 0..w {
+        let mut d = a[k + k * w];
+        for p in 0..k {
+            let l = a[k + p * w];
+            d = d - l * l;
+        }
+        if !(d > T::ZERO) {
+            return false;
+        }
+        let dk = d.sqrt();
+        a[k + k * w] = dk;
+        for i in k + 1..w {
+            let mut s = a[i + k * w];
+            for p in 0..k {
+                s = s - a[i + p * w] * a[k + p * w];
+            }
+            a[i + k * w] = s / dk;
+        }
+    }
+    true
+}
+
+/// solve `(L L^T) Z = P` in place on a `w x m` column-major panel,
+/// `L` lower from [`llt_in_place`]
+fn llt_solve_panel<T: SchurReal>(l: &[T], panel: &mut [T], w: usize, m: usize) {
+    for c in 0..m {
+        let col = &mut panel[c * w..(c + 1) * w];
+        for i in 0..w {
+            let mut s = col[i];
+            for p in 0..i {
+                s = s - l[i + p * w] * col[p];
+            }
+            col[i] = s / l[i + i * w];
+        }
+        for i in (0..w).rev() {
+            let mut s = col[i];
+            for p in i + 1..w {
+                s = s - l[p + i * w] * col[p];
+            }
+            col[i] = s / l[i + i * w];
+        }
+    }
+}
+
+/// [`gemm_sub`] with compile-time dimensions: constant trip counts let
+/// the compiler fully unroll and vectorize (measured 2x on the slam
+/// pair GEMMs vs the runtime-dimension loop)
+#[inline]
+fn gemm_sub_fixed<T: SchurReal, const WA: usize, const WE: usize, const WB: usize>(
+    dst: &mut [T],
+    ca: &[T],
+    zb: &[T],
+) {
+    for c in 0..WB {
+        for k in 0..WE {
+            let z = zb[k + c * WE];
+            let dcol = &mut dst[c * WA..(c + 1) * WA];
+            let acol = &ca[k * WA..(k + 1) * WA];
+            for i in 0..WA {
+                dcol[i] = dcol[i] - acol[i] * z;
+            }
+        }
+    }
+}
+
+/// [`gemm_sub_fixed`] for a transposed-stored lhs: `ca` holds `C_a^T`
+/// (`WE x WA` column-major), so each output element is a WE-term dot
+#[inline]
+fn gemm_sub_fixed_trans<T: SchurReal, const WA: usize, const WE: usize, const WB: usize>(
+    dst: &mut [T],
+    ca: &[T],
+    zb: &[T],
+) {
+    for c in 0..WB {
+        for i in 0..WA {
+            let arow = &ca[i * WE..(i + 1) * WE];
+            let zcol = &zb[c * WE..(c + 1) * WE];
+            let mut s = T::ZERO;
+            for k in 0..WE {
+                s = s + arow[k] * zcol[k];
+            }
+            dst[i + c * WA] = dst[i + c * WA] - s;
+        }
+    }
+}
+
+/// `dst -= C_a * Z_b` where `dst` is `wa x wb` column-major, `Z_b` is
+/// `we x wb` column-major, and `C_a` is `wa x we` -- stored directly
+/// (`trans == false`) or as its transpose `we x wa` (`trans == true`)
+#[inline]
+fn gemm_sub<T: SchurReal>(
+    dst: &mut [T],
+    ca: &[T],
+    trans: bool,
+    wa: usize,
+    we: usize,
+    zb: &[T],
+    wb: usize,
+) {
+    if !trans {
+        // fixed-size fast paths for the common tile shapes: 6-wide
+        // poses through 3- or 4-wide landmarks, 9-wide cameras (BAL)
+        // through 3-wide points
+        match (wa, we, wb) {
+            (6, 3, 6) => return gemm_sub_fixed::<T, 6, 3, 6>(dst, ca, zb),
+            (6, 4, 6) => return gemm_sub_fixed::<T, 6, 4, 6>(dst, ca, zb),
+            (9, 3, 9) => return gemm_sub_fixed::<T, 9, 3, 9>(dst, ca, zb),
+            _ => {}
+        }
+        for c in 0..wb {
+            for k in 0..we {
+                let z = zb[k + c * we];
+                let dcol = &mut dst[c * wa..(c + 1) * wa];
+                let acol = &ca[k * wa..(k + 1) * wa];
+                for i in 0..wa {
+                    dcol[i] = dcol[i] - acol[i] * z;
+                }
+            }
+        }
+    } else {
+        match (wa, we, wb) {
+            (6, 3, 6) => return gemm_sub_fixed_trans::<T, 6, 3, 6>(dst, ca, zb),
+            (6, 4, 6) => return gemm_sub_fixed_trans::<T, 6, 4, 6>(dst, ca, zb),
+            (9, 3, 9) => return gemm_sub_fixed_trans::<T, 9, 3, 9>(dst, ca, zb),
+            _ => {}
+        }
+        // stored tile is C_a^T (we x wa): C_a[i, k] = ca[k + i * we]
+        for c in 0..wb {
+            for i in 0..wa {
+                let mut s = T::ZERO;
+                let arow = &ca[i * we..(i + 1) * we];
+                let zcol = &zb[c * we..(c + 1) * we];
+                for k in 0..we {
+                    s = s + arow[k] * zcol[k];
+                }
+                dst[i + c * wa] = dst[i + c * wa] - s;
+            }
+        }
+    }
+}
+
+/// numeric Schur reduction: fills `s` (allocated via
+/// [`SchurSymbolic::alloc_s`]) with `S = Hkk - Hke Hee^-1 Hek` and
+/// `rhs_out` (length `s.nrows()`, the kept blocks compacted in order)
+/// with `bk - Hke Hee^-1 be`, from pre-damped `h` and `rhs`. `h` must
+/// have the exact symbolic structure `sym` was built from.
+///
+/// The work runs in three stages:
+///
+/// 1. **seed** -- S is zeroed, the kept-kept tiles of H are copied in
+///    (S starts as `Hkk`), and the kept slices of `rhs` are copied to
+///    `rhs_out`.
+///
+/// 2. **per eliminated block `e`** (independent of every other one,
+///    because `Hee` is block-diagonal). Writing `C_a = H(a, e)` for
+///    the coupling tile to observer `a` and `D_e = H(e, e)`:
+///
+///    - **factor**: dense Cholesky `D_e = L L^T` of the `w_e x w_e`
+///      diagonal tile (read symmetric-from-upper into `ctx.dwork`).
+///    - **panel**: the block's whole `Hee^-1`-application happens
+///      here, once, as `Z = D_e^-1 [C^T | b_e]`. The coupling tiles'
+///      transposes and the block's rhs slice are gathered into one
+///      `w_e x (sum w_a + 1)` panel, and each panel column gets a
+///      forward solve against `L` then a backward solve against
+///      `L^T` -- that pair of triangular solves IS the `D_e^-1`
+///      application; no inverse is ever formed. Afterwards panel
+///      column group `b` holds `Z_b = D_e^-1 C_b^T` and the last
+///      column holds `z = D_e^-1 b_e`.
+///    - **gemm**: for every observer pair `a <= b`,
+///      `S(a, b) -= C_a * Z_b` (i.e. `C_a D_e^-1 C_b^T`), the target
+///      tile found via the precomputed `pair_dst` map -- consumed
+///      sequentially, so the loop order must stay b-major exactly as
+///      the symbolic pass emitted it.
+///    - **rhs**: for every observer `a`, `rhs_out(a) -= C_a * z`.
+///
+/// 3. **finish** -- diagonal-pair GEMMs wrote full tiles; the
+///    strictly-lower part of S's kept diagonal tiles is re-zeroed to
+///    restore the upper-only-within-tile convention.
+///
+/// Per-stage wall time lands in [`SchurContext::timing`] when enabled.
+pub fn schur_reduce<I: Index, T: SchurReal>(
+    sym: &SchurSymbolic<I>,
+    h: &SparseBlockColMat<I, T>,
+    rhs: &[T],
+    ctx: &mut SchurContext<T>,
+    s: &mut SparseBlockColMat<I, T>,
+    rhs_out: &mut [T],
+) -> Result<(), SchurError> {
+    let hs = h.symbolic();
+    assert_eq!(rhs.len(), hs.nrows());
+    assert_eq!(rhs_out.len(), sym.s.nrows());
+    ctx.dwork.resize(sym.max_ew * sym.max_ew, T::ZERO);
+    ctx.panel.resize(sym.max_panel, T::ZERO);
+    let gather = ctx.timing.is_some();
+    let mut t = SchurTiming::default();
+    let mut sw = Stopwatch::new(gather);
+
+    // stage 1: seed S with Hkk and rhs_out with the kept rhs
+    s.vals_mut().iter_mut().for_each(|v| *v = T::ZERO);
+    for (hb, sb) in core::iter::zip(&sym.copy_src, &sym.copy_dst) {
+        let src = hs.val_range(hb.zx());
+        let dst = sym.s.val_range(sb.zx());
+        s.vals_mut()[dst].copy_from_slice(&h.vals()[src]);
+    }
+    for (k, &orig) in sym.kept.iter().enumerate() {
+        let src = hs.col_span(orig.zx());
+        let dst = sym.s.col_span(k);
+        rhs_out[dst].copy_from_slice(&rhs[src]);
+    }
+    sw.lap(&mut t.seed);
+
+    // stage 2: one eliminated block at a time
+    for slot in 0..sym.elim_diag.len() {
+        let d_blk = sym.elim_diag[slot].zx();
+        let e = hs.blk_row(d_blk);
+        let we = hs.col_span(e).len();
+
+        // 2a factor: D_e = L L^T (diagonal tiles are stored upper-only
+        // within the tile, so read symmetric from the upper triangle)
+        let dwork = &mut ctx.dwork[..we * we];
+        let dtile = &h.vals()[hs.val_range(d_blk)];
+        for j in 0..we {
+            for i in 0..=j {
+                let v = dtile[i + j * we];
+                dwork[i + j * we] = v;
+                dwork[j + i * we] = v;
+            }
+        }
+        if !llt_in_place(dwork, we) {
+            return Err(SchurError::NotPositiveDefinite { block: e });
+        }
+        sw.lap(&mut t.factor);
+
+        // 2b panel: gather [C^T | b_e], then Z = D_e^-1 [C^T | b_e]
+        // via one forward + one backward triangular solve per column
+        let orange = sym.elim_obs_ptr[slot].zx()..sym.elim_obs_ptr[slot + 1].zx();
+        let mut col = 0usize;
+        ctx.obs_col.clear();
+        for o in orange.clone() {
+            let hb = sym.obs_hblk[o].zx();
+            let wo = hs.col_span(sym.obs_block[o].zx()).len();
+            let tile = &h.vals()[hs.val_range(hb)];
+            let dst = &mut ctx.panel[col * we..(col + wo) * we];
+            if sym.obs_trans[o] {
+                // stored (e, kept): the tile IS C^T (we x wo)
+                dst.copy_from_slice(tile);
+            } else {
+                // stored (kept, e) as wo x we: transpose into the panel
+                for cc in 0..wo {
+                    for rr in 0..we {
+                        dst[rr + cc * we] = tile[cc + rr * wo];
+                    }
+                }
+            }
+            ctx.obs_col.push((col, wo));
+            col += wo;
+        }
+        ctx.panel[col * we..col * we + we].copy_from_slice(&rhs[hs.col_span(e)]);
+        llt_solve_panel(dwork, &mut ctx.panel[..(col + 1) * we], we, col + 1);
+        sw.lap(&mut t.panel);
+
+        // 2c gemm: S(a, b) -= C_a * Z_b for every pair a <= b, b-major
+        // (pair_dst is consumed sequentially in the symbolic emission
+        // order)
+        let mut pair = sym.elim_pair_ptr[slot].zx();
+        for (bi, _o_b) in orange.clone().enumerate() {
+            let (bcol, wb) = ctx.obs_col[bi];
+            let zb = &ctx.panel[bcol * we..(bcol + wb) * we];
+            for o_a in orange.clone().take(bi + 1) {
+                let hb_a = sym.obs_hblk[o_a].zx();
+                let trans_a = sym.obs_trans[o_a];
+                let wa = hs.col_span(sym.obs_block[o_a].zx()).len();
+                let ca = &h.vals()[hs.val_range(hb_a)];
+                let dst = sym.s.val_range(sym.pair_dst[pair].zx());
+                gemm_sub(&mut s.vals_mut()[dst], ca, trans_a, wa, we, zb, wb);
+                pair += 1;
+            }
+        }
+        sw.lap(&mut t.gemm);
+
+        // 2d rhs: b'_a -= C_a * z for every observer
+        let z = &ctx.panel[col * we..col * we + we];
+        for o_a in orange.clone() {
+            let hb_a = sym.obs_hblk[o_a].zx();
+            let trans_a = sym.obs_trans[o_a];
+            let wa = hs.col_span(sym.obs_block[o_a].zx()).len();
+            let ca = &h.vals()[hs.val_range(hb_a)];
+            let ka = sym.kept_of[sym.obs_block[o_a].zx()].zx();
+            let out = &mut rhs_out[sym.s.col_span(ka)];
+            gemm_sub(out, ca, trans_a, wa, we, z, 1);
+        }
+        sw.lap(&mut t.rhs);
+    }
+
+    // stage 3: diagonal-pair GEMMs wrote full tiles; restore the
+    // upper-only-within-tile convention on S's kept diagonal
+    for sb in &sym.s_diag {
+        let range = sym.s.val_range(sb.zx());
+        let w = sym.s.block_dims(sb.zx()).0;
+        let tile = &mut s.vals_mut()[range];
+        for j in 0..w {
+            for i in j + 1..w {
+                tile[i + j * w] = T::ZERO;
+            }
+        }
+    }
+    sw.lap(&mut t.finish);
+    if gather {
+        ctx.timing = Some(t);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // deterministic LCG so fixtures need no rand dependency
+    struct Lcg(u64);
+    impl Lcg {
+        fn next(&mut self) -> f64 {
+            self.0 = self.0.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
+            ((self.0 >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0
+        }
+    }
+
+    /// upper-stored symmetric block matrix with mixed widths.
+    /// widths [2, 3, 1, 2, 3, 2]; tiles:
+    ///   diag on every block; couplings (0,1) (0,3) (1,2) (1,3) (1,5)
+    ///   (2,3) (3,5) (0,4) (2,4) (4,5)
+    /// eliminating [1, 4] exercises both storage orientations for the
+    /// coupling tiles: (0,1)/(0,4)/(2,4) are stored (kept, elim);
+    /// (1,2)/(1,3)/(1,5)/(4,5) are stored (elim, kept).
+    fn fixture() -> (SparseBlockColMat<usize, f64>, Vec<f64>) {
+        build_upper(
+            &[0, 2, 5, 6, 8, 11, 13],
+            &[
+                (0, 0),
+                (0, 1), (1, 1),
+                (1, 2), (2, 2),
+                (0, 3), (1, 3), (2, 3), (3, 3),
+                (0, 4), (2, 4), (4, 4),
+                (1, 5), (3, 5), (4, 5), (5, 5),
+            ],
+            42,
+        )
+    }
+
+    /// random upper-stored symmetric block matrix + rhs over the given
+    /// partition and block cells. diagonal tiles are upper-only within
+    /// the tile (the assembly convention) and strongly diagonally
+    /// dominant so every LLT (eliminated tiles AND the dense
+    /// reference) succeeds.
+    fn build_upper(
+        part: &[usize],
+        cells: &[(usize, usize)],
+        seed: u64,
+    ) -> (SparseBlockColMat<usize, f64>, Vec<f64>) {
+        let anchors: Vec<(usize, usize)> =
+            cells.iter().map(|&(r, c)| (part[r], part[c])).collect();
+        let (sym, _) = SymbolicSparseBlockColMat::from_scalar_coords(
+            part.to_vec(),
+            part.to_vec(),
+            anchors.len(),
+            |k| anchors[k],
+        );
+        let mut m = SparseBlockColMat::<usize, f64>::zeroed(sym);
+        let mut rng = Lcg(seed);
+        for v in m.vals_mut() {
+            *v = rng.next();
+        }
+        for b in 0..part.len() - 1 {
+            let w = part[b + 1] - part[b];
+            let blk = m.symbolic().val_range(
+                m.symbolic().col_range(b).find(|&i| m.symbolic().blk_row(i) == b).unwrap(),
+            );
+            let vals = &mut m.vals_mut()[blk];
+            for i in 0..w {
+                for j in 0..i {
+                    vals[i + j * w] = 0.0;
+                }
+                vals[i + i * w] = 10.0 + vals[i + i * w].abs();
+            }
+        }
+        let n = *part.last().unwrap();
+        let rhs: Vec<f64> = (0..n).map(|_| rng.next()).collect();
+        (m, rhs)
+    }
+
+    /// mirror the upper-stored block matrix into a full dense one
+    fn full_dense(m: &SparseBlockColMat<usize, f64>) -> Vec<f64> {
+        let n = m.symbolic().nrows();
+        let d = m.to_dense();
+        let mut full = vec![0.0; n * n];
+        for j in 0..n {
+            for i in 0..n {
+                let v = if d[(i, j)] != 0.0 { d[(i, j)] } else { d[(j, i)] };
+                full[i + j * n] = v;
+            }
+        }
+        full
+    }
+
+    /// dense reference: S = Hkk - Hke Hee^-1 Hek and
+    /// bk' = bk - Hke Hee^-1 be, via the module's own LLT on the full
+    /// (block-diagonal) eliminated subsystem
+    fn dense_reference(
+        full: &[f64],
+        n: usize,
+        keep: &[usize],
+        elim: &[usize],
+        rhs: &[f64],
+    ) -> (Vec<f64>, Vec<f64>) {
+        let (nk, ne) = (keep.len(), elim.len());
+        let mut hee = vec![0.0; ne * ne];
+        for (a, &i) in elim.iter().enumerate() {
+            for (b, &j) in elim.iter().enumerate() {
+                hee[a + b * ne] = full[i + j * n];
+            }
+        }
+        assert!(llt_in_place(&mut hee, ne));
+        // panel [Hek | be] -> Hee^-1 [Hek | bk]
+        let m = nk + 1;
+        let mut panel = vec![0.0; ne * m];
+        for (c, &j) in keep.iter().enumerate() {
+            for (r, &i) in elim.iter().enumerate() {
+                panel[r + c * ne] = full[i + j * n];
+            }
+        }
+        for (r, &i) in elim.iter().enumerate() {
+            panel[r + nk * ne] = rhs[i];
+        }
+        llt_solve_panel(&hee, &mut panel, ne, m);
+        let mut s = vec![0.0; nk * nk];
+        for a in 0..nk {
+            for b in 0..nk {
+                let mut acc = full[keep[a] + keep[b] * n];
+                for r in 0..ne {
+                    acc -= full[keep[a] + elim[r] * n] * panel[r + b * ne];
+                }
+                s[a + b * nk] = acc;
+            }
+        }
+        let mut rk = vec![0.0; nk];
+        for a in 0..nk {
+            let mut acc = rhs[keep[a]];
+            for r in 0..ne {
+                acc -= full[keep[a] + elim[r] * n] * panel[r + nk * ne];
+            }
+            rk[a] = acc;
+        }
+        (s, rk)
+    }
+
+    fn run_and_compare(elim_blocks: &[usize]) {
+        let (h, rhs) = fixture();
+        check_vs_dense(&h, &rhs, &[0, 2, 5, 6, 8, 11, 13], elim_blocks);
+    }
+
+    fn check_vs_dense(
+        h: &SparseBlockColMat<usize, f64>,
+        rhs: &[f64],
+        part: &[usize],
+        elim_blocks: &[usize],
+    ) {
+        let nblk = part.len() - 1;
+        let n = *part.last().unwrap();
+        let sym = schur_symbolic(h.symbolic(), elim_blocks).unwrap();
+        let mut s = sym.alloc_s::<f64>();
+        let mut ctx = SchurContext::new();
+        let mut rk = vec![0.0; s.symbolic().nrows()];
+        schur_reduce(&sym, h, rhs, &mut ctx, &mut s, &mut rk).unwrap();
+
+        // scalar keep/elim index lists
+        let is_elim = |b: usize| elim_blocks.contains(&b);
+        let keep_idx: Vec<usize> =
+            (0..nblk).filter(|&b| !is_elim(b)).flat_map(|b| part[b]..part[b + 1]).collect();
+        let elim_idx: Vec<usize> =
+            (0..nblk).filter(|&b| is_elim(b)).flat_map(|b| part[b]..part[b + 1]).collect();
+        let full = full_dense(h);
+        let (s_ref, rk_ref) = dense_reference(&full, n, &keep_idx, &elim_idx, rhs);
+
+        let nk = keep_idx.len();
+        let sd = s.to_dense();
+        for j in 0..nk {
+            for i in 0..=j {
+                let got = sd[(i, j)];
+                let want = s_ref[i + j * nk];
+                assert!(
+                    (got - want).abs() <= 1e-11 * (1.0 + want.abs()),
+                    "S[{}, {}]: {} vs {}",
+                    i, j, got, want
+                );
+            }
+        }
+        for i in 0..nk {
+            assert!(
+                (rk[i] - rk_ref[i]).abs() <= 1e-11 * (1.0 + rk_ref[i].abs()),
+                "rhs[{}]: {} vs {}",
+                i, rk[i], rk_ref[i]
+            );
+        }
+    }
+
+    #[test]
+    fn matches_dense_reference() {
+        run_and_compare(&[1, 4]);
+    }
+
+    #[test]
+    fn single_block_and_widths() {
+        run_and_compare(&[4]);
+        run_and_compare(&[2]); // width-1 eliminated block
+        run_and_compare(&[0]); // eliminated first, all couplings transposed
+        run_and_compare(&[5]); // eliminated last, all couplings direct
+    }
+
+    #[test]
+    fn wide_blocks_both_orientations() {
+        // widths [6, 3, 6], eliminate the middle block: observer 0
+        // couples non-transposed (tile (0, 1)) and observer 2
+        // transposed (tile (1, 2)), so the (6, 3, 6)-shaped pairs hit
+        // both the fixed-size fast path and the transposed fallback
+        let part = [0usize, 6, 9, 15];
+        let cells = [(0, 0), (1, 1), (2, 2), (0, 1), (1, 2), (0, 2)];
+        let (h, rhs) = build_upper(&part, &cells, 7);
+        check_vs_dense(&h, &rhs, &part, &[1]);
+    }
+
+    #[test]
+    fn observer_pair_bookkeeping() {
+        let (h, _) = fixture();
+        let sym = schur_symbolic(h.symbolic(), &[2]).unwrap();
+        // block 2 (width 1) couples to blocks 1, 3, 4 -> 3 observers,
+        // 3 * 4 / 2 = 6 pairs
+        assert_eq!(sym.pair_count(), 6);
+    }
+
+    #[test]
+    fn clique_structure_present() {
+        let (h, _) = fixture();
+        let sym = schur_symbolic(h.symbolic(), &[1, 4]).unwrap();
+        // eliminating block 1 couples its observers {0, 2, 3, 5}
+        // pairwise (kept ids 0, 1, 2, 3). tile (2, 5) -> kept (1, 3)
+        // is clique-only: H does not store it
+        let s = &sym.s;
+        let has = |kr: usize, kc: usize| s.col_range(kc).any(|b| s.blk_row(b) == kr);
+        assert!(has(1, 3), "clique tile (2,5) must exist in S");
+        // all four observers share eliminated block 1, so the kept
+        // upper triangle of S is complete
+        for kc in 0..4 {
+            for kr in 0..=kc {
+                assert!(has(kr, kc), "S({}, {}) missing", kr, kc);
+            }
+        }
+    }
+
+    #[test]
+    fn coupled_eliminated_rejected() {
+        let (h, _) = fixture();
+        // blocks 1 and 2 are coupled by tile (1, 2)
+        assert_eq!(
+            schur_symbolic(h.symbolic(), &[1, 2]).unwrap_err(),
+            SchurError::CoupledEliminated { row: 1, col: 2 }
+        );
+    }
+
+    #[test]
+    fn bad_set_rejected() {
+        let (h, _) = fixture();
+        assert_eq!(
+            schur_symbolic(h.symbolic(), &[4, 1]).unwrap_err(),
+            SchurError::BadEliminatedSet
+        );
+        assert_eq!(
+            schur_symbolic(h.symbolic(), &[6]).unwrap_err(),
+            SchurError::BadEliminatedSet
+        );
+    }
+
+    #[test]
+    fn missing_diagonal_rejected() {
+        // structure without a diagonal tile on block 1
+        let part = vec![0usize, 2, 4, 6];
+        let cells = [(0usize, 0usize), (0, 1), (1, 2), (2, 2)];
+        let anchors: Vec<(usize, usize)> =
+            cells.iter().map(|&(r, c)| (part[r], part[c])).collect();
+        let (sym, _) = SymbolicSparseBlockColMat::from_scalar_coords(
+            part.clone(),
+            part,
+            anchors.len(),
+            |k| anchors[k],
+        );
+        assert_eq!(
+            schur_symbolic(&sym, &[1]).unwrap_err(),
+            SchurError::MissingDiagonal { block: 1 }
+        );
+    }
+
+    #[test]
+    fn not_positive_definite_reported() {
+        let (mut h, rhs) = fixture();
+        // wreck eliminated block 4's diagonal tile
+        let sym4 = h.symbolic().clone();
+        let d4 = sym4.col_range(4).find(|&b| sym4.blk_row(b) == 4).unwrap();
+        for v in &mut h.vals_mut()[sym4.val_range(d4)] {
+            *v = -1.0;
+        }
+        let sym = schur_symbolic(h.symbolic(), &[4]).unwrap();
+        let mut s = sym.alloc_s::<f64>();
+        let mut rk = vec![0.0; s.symbolic().nrows()];
+        assert_eq!(
+            schur_reduce(&sym, &h, &rhs, &mut SchurContext::new(), &mut s, &mut rk).unwrap_err(),
+            SchurError::NotPositiveDefinite { block: 4 }
+        );
+    }
+}
