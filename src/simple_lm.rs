@@ -1862,6 +1862,54 @@ impl<T> SparseFaer<T> {
     }
 }
 
+/// First Hessian assembly of a solve, shared by every scalar-CSC backend
+/// (faer, Eigen, CHOLMOD). Models whose pattern is knowable before any
+/// compute -- see [`LmProblem::hessian_pattern_requires_compute`] -- get
+/// their CSC pattern and position map built straight from the block
+/// structure the macro exposes, with no COO pass and none of its
+/// transient memory. Everything else (TripletBlock / extended models,
+/// hand-built problems) falls back to COO discovery.
+///
+/// The fast path's pattern is tile-expanded, so it carries the blocks'
+/// structural zeros as explicit entries (~1.2% more nonzeros on
+/// entity-block models). Every backend treats those as ordinary
+/// nonzeros; the factor grows by well under a percent and the values are
+/// unchanged.
+///
+/// Returns the cost and the position map the caller must cache for the
+/// steady state.
+fn assemble_first_csc<T: Float>(
+    problem: &mut dyn LmProblem<T>,
+    params: &[T],
+    grad: &mut [T],
+    csc: &mut CscMatrix<T>,
+) -> (T, std::vec::Vec<usize>) {
+    let n = csc.n;
+    if !problem.hessian_pattern_requires_compute() {
+        let mut cells = std::vec::Vec::new();
+        problem.collect_hessian_cells(&mut cells);
+        let mut spans = std::vec::Vec::new();
+        problem.collect_param_block_spans(&mut spans);
+        if !cells.is_empty() && !spans.is_empty() {
+            let partition = block_partition_from_spans(&spans, n);
+            let (built, mut resolver) = csc_from_cells::<T>(&partition, &cells);
+            let mut positions = std::vec::Vec::new();
+            problem.accumulate_hessian_positions(
+                &mut |i, j| resolver.resolve(i, j),
+                &mut positions,
+            );
+            *csc = built;
+            let cost = problem.calc_grad_hessian_sparse_indexed(params, grad, &mut csc.vals, &positions);
+            return (cost, positions);
+        }
+    }
+    let mut coo = CooMatrix::new(n);
+    let cost = problem.calc_grad_hessian_sparse(params, grad, &mut coo);
+    let (built, positions) = coo.to_csc_with_map();
+    *csc = built;
+    (cost, positions)
+}
+
 impl<T: crate::utils::Float + faer::traits::RealField> LmSolver<T> for SparseFaer<T> {
     type Matrix = SparseMatrix<T>;
     fn matrix_nonfinite_count(&self, matrix: &SparseMatrix<T>) -> usize {
@@ -1882,36 +1930,8 @@ impl<T: crate::utils::Float + faer::traits::RealField> LmSolver<T> for SparseFae
         if let Some(positions) = &self.positions {
             return problem.calc_grad_hessian_sparse_indexed(params, grad, &mut matrix.csc.vals, positions);
         }
-        let n = matrix.csc.n;
-        // First call, fast path: models whose pattern is knowable before
-        // any compute expose their block structure, so the tile-expanded
-        // pattern and position map are built without a COO pass (and
-        // without its transient memory).
-        if !problem.hessian_pattern_requires_compute() {
-            let mut cells = std::vec::Vec::new();
-            problem.collect_hessian_cells(&mut cells);
-            let mut spans = std::vec::Vec::new();
-            problem.collect_param_block_spans(&mut spans);
-            if !cells.is_empty() && !spans.is_empty() {
-                let partition = block_partition_from_spans(&spans, n);
-                let (csc, mut resolver) = csc_from_cells::<T>(&partition, &cells);
-                let mut positions = std::vec::Vec::new();
-                problem.accumulate_hessian_positions(
-                    &mut |i, j| resolver.resolve(i, j),
-                    &mut positions,
-                );
-                matrix.csc = csc;
-                let cost = problem.calc_grad_hessian_sparse_indexed(params, grad, &mut matrix.csc.vals, &positions);
-                self.positions = Some(positions);
-                return cost;
-            }
-        }
-        // Fallback: COO assembly to discover pattern + build position map
-        let mut coo = CooMatrix::new(n);
-        let cost = problem.calc_grad_hessian_sparse(params, grad, &mut coo);
-        let (csc, positions) = coo.to_csc_with_map();
+        let (cost, positions) = assemble_first_csc(problem, params, grad, &mut matrix.csc);
         self.positions = Some(positions);
-        matrix.csc = csc;
         cost
     }
 
@@ -2492,16 +2512,11 @@ impl<T: EigenScalar + crate::utils::Float> LmSolver<T> for SparseEigen<T> {
     }
     fn compute(&mut self, problem: &mut dyn LmProblem<T>, params: &[T], grad: &mut [T], matrix: &mut SparseMatrix<T>) -> T {
         if let Some(positions) = &self.positions {
-            problem.calc_grad_hessian_sparse_indexed(params, grad, &mut matrix.csc.vals, positions)
-        } else {
-            let n = matrix.csc.n;
-            let mut coo = CooMatrix::new(n);
-            let cost = problem.calc_grad_hessian_sparse(params, grad, &mut coo);
-            let (csc, positions) = coo.to_csc_with_map();
-            self.positions = Some(positions);
-            matrix.csc = csc;
-            cost
+            return problem.calc_grad_hessian_sparse_indexed(params, grad, &mut matrix.csc.vals, positions);
         }
+        let (cost, positions) = assemble_first_csc(problem, params, grad, &mut matrix.csc);
+        self.positions = Some(positions);
+        cost
     }
     fn extract_diagonal(&self, matrix: &SparseMatrix<T>, diagonal: &mut [T]) {
         for i in 0..diagonal.len() { diagonal[i] = matrix.csc.vals[matrix.csc.diag_pos[i]]; }
@@ -2546,16 +2561,11 @@ impl LmSolver<f64> for SparseCholmod {
     }
     fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], matrix: &mut SparseMatrix<f64>) -> f64 {
         if let Some(positions) = &self.positions {
-            problem.calc_grad_hessian_sparse_indexed(params, grad, &mut matrix.csc.vals, positions)
-        } else {
-            let n = matrix.csc.n;
-            let mut coo = CooMatrix::new(n);
-            let cost = problem.calc_grad_hessian_sparse(params, grad, &mut coo);
-            let (csc, positions) = coo.to_csc_with_map();
-            self.positions = Some(positions);
-            matrix.csc = csc;
-            cost
+            return problem.calc_grad_hessian_sparse_indexed(params, grad, &mut matrix.csc.vals, positions);
         }
+        let (cost, positions) = assemble_first_csc(problem, params, grad, &mut matrix.csc);
+        self.positions = Some(positions);
+        cost
     }
     fn extract_diagonal(&self, matrix: &SparseMatrix<f64>, diagonal: &mut [f64]) {
         for i in 0..diagonal.len() { diagonal[i] = matrix.csc.vals[matrix.csc.diag_pos[i]]; }
@@ -2622,16 +2632,11 @@ impl LmSolver<f64> for SparseCholmodSupernodal {
     }
     fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], matrix: &mut SparseMatrix<f64>) -> f64 {
         if let Some(positions) = &self.positions {
-            problem.calc_grad_hessian_sparse_indexed(params, grad, &mut matrix.csc.vals, positions)
-        } else {
-            let n = matrix.csc.n;
-            let mut coo = CooMatrix::new(n);
-            let cost = problem.calc_grad_hessian_sparse(params, grad, &mut coo);
-            let (csc, positions) = coo.to_csc_with_map();
-            self.positions = Some(positions);
-            matrix.csc = csc;
-            cost
+            return problem.calc_grad_hessian_sparse_indexed(params, grad, &mut matrix.csc.vals, positions);
         }
+        let (cost, positions) = assemble_first_csc(problem, params, grad, &mut matrix.csc);
+        self.positions = Some(positions);
+        cost
     }
     fn extract_diagonal(&self, matrix: &SparseMatrix<f64>, diagonal: &mut [f64]) {
         for i in 0..diagonal.len() { diagonal[i] = matrix.csc.vals[matrix.csc.diag_pos[i]]; }
