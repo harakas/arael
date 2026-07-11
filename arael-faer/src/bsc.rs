@@ -521,6 +521,71 @@ impl<I: Index, T: ComplexField> SparseBlockColMat<I, T> {
     }
 }
 
+/// Memoized scalar-coordinate -> value-buffer position resolver over a
+/// built structure: one block lookup per RUN of same-cell coordinates
+/// (contributions arrive block-object by block-object), arithmetic only
+/// inside a run. The consumer for building indexed position maps
+/// without a COO pass.
+pub struct PositionResolver<'a, I: Index> {
+    sym: &'a SymbolicSparseBlockColMat<I>,
+    blk_row_of: Vec<u32>,
+    blk_col_of: Vec<u32>,
+    last_key: u64,
+    base: usize,
+    row_w: usize,
+    row_start: usize,
+    col_start: usize,
+}
+
+impl<'a, I: Index> PositionResolver<'a, I> {
+    pub fn new(sym: &'a SymbolicSparseBlockColMat<I>) -> Self {
+        let of = |part: &[I]| {
+            let nblk = part.len() - 1;
+            let mut of = vec![0u32; part[nblk].zx()];
+            for b in 0..nblk {
+                for i in part[b].zx()..part[b + 1].zx() {
+                    of[i] = b as u32;
+                }
+            }
+            of
+        };
+        let (row_part, col_part, _, _, _) = sym.parts();
+        Self {
+            blk_row_of: of(row_part),
+            blk_col_of: of(col_part),
+            sym,
+            last_key: u64::MAX,
+            base: 0,
+            row_w: 0,
+            row_start: 0,
+            col_start: 0,
+        }
+    }
+
+    /// Position of scalar (i, j) in the value buffer. Panics if the
+    /// coordinate's cell is not part of the structure.
+    #[inline]
+    pub fn resolve(&mut self, i: usize, j: usize) -> usize {
+        let bc = self.blk_col_of[j] as usize;
+        let br = self.blk_row_of[i] as usize;
+        let key = ((bc as u64) << 32) | br as u64;
+        if key != self.last_key {
+            self.last_key = key;
+            let range = self.sym.col_range(bc);
+            let idx = &self.sym.parts().3[range.clone()];
+            let k = idx
+                .binary_search_by_key(&br, |x| x.zx())
+                .expect("coordinate outside the built block structure");
+            let b = range.start + k;
+            self.base = self.sym.val_range(b).start;
+            self.row_w = self.sym.row_span(br).len();
+            self.row_start = self.sym.row_span(br).start;
+            self.col_start = self.sym.col_span(bc).start;
+        }
+        self.base + (j - self.col_start) * self.row_w + (i - self.row_start)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

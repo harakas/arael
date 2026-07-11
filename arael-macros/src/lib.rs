@@ -1012,6 +1012,14 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
     // Per-struct recursion for Model::collect_param_blocks (entity spans
     // read from SelfBlock indices).
     let mut collect_param_blocks_stmts: Vec<TokenStream2> = Vec::new();
+    // Per-struct recursion for the structure-only Hessian walks (cells
+    // and scatter positions), split by block precision to mirror the
+    // accumulate stmt lists exactly -- emission order is the invariant.
+    let mut has_triplet_block = false;
+    let mut collect_cells32_stmts: Vec<TokenStream2> = Vec::new();
+    let mut collect_cells64_stmts: Vec<TokenStream2> = Vec::new();
+    let mut positions32_stmts: Vec<TokenStream2> = Vec::new();
+    let mut positions64_stmts: Vec<TokenStream2> = Vec::new();
 
     for field in fields {
         let ident = field.ident.as_ref().unwrap();
@@ -1029,6 +1037,11 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
             Some(AraelAttr::RefResolve(_)) | Some(AraelAttr::Cross(_)) | None => {
                 // HessianBlock fields: skip serialize, handle in zero/accumulate
                 if is_hessian_block_type(&field.ty) {
+                    if let syn::Type::Path(tp) = &field.ty
+                        && let Some(seg) = tp.path.segments.last()
+                            && seg.ident == "TripletBlock" {
+                                has_triplet_block = true;
+                            }
                     zero_blocks_stmts.push(quote! { self.#ident.zero(); });
                     release_blocks_stmts.push(quote! { self.#ident.release(); });
                     if is_self_block_type(&field.ty) {
@@ -1041,6 +1054,15 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                     let acc_sparse = quote! { self.#ident.accumulate_hessian_sparse(coo); };
                     let acc_sparse_direct = quote! { self.#ident.accumulate_hessian_sparse_direct(csc); };
                     let acc_sparse_indexed = quote! { self.#ident.accumulate_hessian_sparse_indexed(vals, positions, cursor); };
+                    let cells = quote! { self.#ident.collect_hessian_cells(out); };
+                    let posns = quote! { self.#ident.accumulate_hessian_positions(resolve, out); };
+                    if block_is_f32(&field.ty) {
+                        collect_cells32_stmts.push(cells.clone());
+                        positions32_stmts.push(posns.clone());
+                    } else {
+                        collect_cells64_stmts.push(cells.clone());
+                        positions64_stmts.push(posns.clone());
+                    }
                     if block_is_f32(&field.ty) {
                         accumulate_hessian32_stmts.push(acc_dense);
                         accumulate_hessian_band32_stmts.push(acc_band);
@@ -1084,6 +1106,19 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                     let acc_sparse_indexed = quote! {
                         if let Some(ref __hb) = self.#ident { __hb.accumulate_hessian_sparse_indexed(vals, positions, cursor); }
                     };
+                    let cells = quote! {
+                        if let Some(ref __hb) = self.#ident { __hb.collect_hessian_cells(out); }
+                    };
+                    let posns = quote! {
+                        if let Some(ref __hb) = self.#ident { __hb.accumulate_hessian_positions(resolve, out); }
+                    };
+                    if block_is_f32(&field.ty) {
+                        collect_cells32_stmts.push(cells.clone());
+                        positions32_stmts.push(posns.clone());
+                    } else {
+                        collect_cells64_stmts.push(cells.clone());
+                        positions64_stmts.push(posns.clone());
+                    }
                     if block_is_f32(&field.ty) {
                         accumulate_hessian32_stmts.push(acc_dense);
                         accumulate_hessian_band32_stmts.push(acc_band);
@@ -1155,6 +1190,18 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                 });
                 collect_param_blocks_stmts.push(quote! {
                     arael::model::Model::collect_param_blocks(&self.#ident, out);
+                });
+                collect_cells32_stmts.push(quote! {
+                    arael::model::Model::collect_hessian_cells32(&self.#ident, out);
+                });
+                collect_cells64_stmts.push(quote! {
+                    arael::model::Model::collect_hessian_cells64(&self.#ident, out);
+                });
+                positions32_stmts.push(quote! {
+                    arael::model::Model::accumulate_hessian_positions32(&self.#ident, resolve, out);
+                });
+                positions64_stmts.push(quote! {
+                    arael::model::Model::accumulate_hessian_positions64(&self.#ident, resolve, out);
                 });
                 release_blocks_stmts.push(quote! {
                     arael::model::Model::release_blocks(&mut self.#ident);
@@ -1241,6 +1288,22 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
             fn collect_param_blocks(&self, out: &mut std::vec::Vec<(u32, u32)>) {
                 let _ = &out;
                 #(#collect_param_blocks_stmts)*
+            }
+            fn collect_hessian_cells64(&self, out: &mut std::vec::Vec<(u32, u32)>) {
+                let _ = &out;
+                #(#collect_cells64_stmts)*
+            }
+            fn collect_hessian_cells32(&self, out: &mut std::vec::Vec<(u32, u32)>) {
+                let _ = &out;
+                #(#collect_cells32_stmts)*
+            }
+            fn accumulate_hessian_positions64(&self, resolve: &mut dyn FnMut(u32, u32) -> usize, out: &mut std::vec::Vec<usize>) {
+                let _ = (&resolve, &out);
+                #(#positions64_stmts)*
+            }
+            fn accumulate_hessian_positions32(&self, resolve: &mut dyn FnMut(u32, u32) -> usize, out: &mut std::vec::Vec<usize>) {
+                let _ = (&resolve, &out);
+                #(#positions32_stmts)*
             }
             fn release_blocks(&mut self) {
                 #(#release_blocks_stmts)*
@@ -1448,7 +1511,7 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
 
     let constraint_impls = if let Some(ref precision) = root_precision {
         constraint::generate_root_methods(name, fields, precision, root_custom, root_jacobian,
-            root_fast_atan, &elimination_hint_fn)?
+            root_fast_atan, &elimination_hint_fn, has_triplet_block)?
     } else {
         quote! {}
     };

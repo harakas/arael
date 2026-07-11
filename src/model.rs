@@ -182,6 +182,29 @@ pub trait Model {
     /// nothing.
     fn collect_param_blocks(&self, _out: &mut std::vec::Vec<(u32, u32)>) {}
 
+    /// Append one representative scalar coordinate per Hessian block cell
+    /// this model's f64 blocks touch (TripletBlocks: one per stored
+    /// entry). Same traversal order as `accumulate_hessian_sparse64`;
+    /// valid after `serialize`. Structure-only: no numeric work.
+    fn collect_hessian_cells64(&self, _out: &mut std::vec::Vec<(u32, u32)>) {}
+    /// f32-block variant of [`collect_hessian_cells64`](Self::collect_hessian_cells64).
+    fn collect_hessian_cells32(&self, _out: &mut std::vec::Vec<(u32, u32)>) {}
+    /// Push every f64 Hessian scatter position in exactly the emission
+    /// order of `accumulate_hessian_sparse64` / `_indexed64`, resolving
+    /// each scalar coordinate through `resolve`. Builds the indexed
+    /// position map without a COO pass.
+    fn accumulate_hessian_positions64(
+        &self,
+        _resolve: &mut dyn FnMut(u32, u32) -> usize,
+        _out: &mut std::vec::Vec<usize>,
+    ) {}
+    /// f32-block variant of [`accumulate_hessian_positions64`](Self::accumulate_hessian_positions64).
+    fn accumulate_hessian_positions32(
+        &self,
+        _resolve: &mut dyn FnMut(u32, u32) -> usize,
+        _out: &mut std::vec::Vec<usize>,
+    ) {}
+
     /// Free every heap-backed (`Boxed*`) block's Hessian storage in this model
     /// and its sub-models, reclaiming the transient assembly memory between
     /// solves. Inline blocks are unaffected; the next solve re-allocates the
@@ -1148,6 +1171,18 @@ macro_rules! impl_model_collection {
             fn collect_param_blocks(&self, out: &mut std::vec::Vec<(u32, u32)>) {
                 for item in self.iter() { item.collect_param_blocks(out); }
             }
+            fn collect_hessian_cells64(&self, out: &mut std::vec::Vec<(u32, u32)>) {
+                for item in self.iter() { item.collect_hessian_cells64(out); }
+            }
+            fn collect_hessian_cells32(&self, out: &mut std::vec::Vec<(u32, u32)>) {
+                for item in self.iter() { item.collect_hessian_cells32(out); }
+            }
+            fn accumulate_hessian_positions64(&self, resolve: &mut dyn FnMut(u32, u32) -> usize, out: &mut std::vec::Vec<usize>) {
+                for item in self.iter() { item.accumulate_hessian_positions64(resolve, out); }
+            }
+            fn accumulate_hessian_positions32(&self, resolve: &mut dyn FnMut(u32, u32) -> usize, out: &mut std::vec::Vec<usize>) {
+                for item in self.iter() { item.accumulate_hessian_positions32(resolve, out); }
+            }
             fn release_blocks(&mut self) {
                 for item in self.$iter_mut() { item.release_blocks(); }
             }
@@ -1229,6 +1264,18 @@ impl<T: Model> Model for crate::refs::Arena<T> {
     fn collect_param_blocks(&self, out: &mut std::vec::Vec<(u32, u32)>) {
         for item in self.iter() { item.collect_param_blocks(out); }
     }
+    fn collect_hessian_cells64(&self, out: &mut std::vec::Vec<(u32, u32)>) {
+        for item in self.iter() { item.collect_hessian_cells64(out); }
+    }
+    fn collect_hessian_cells32(&self, out: &mut std::vec::Vec<(u32, u32)>) {
+        for item in self.iter() { item.collect_hessian_cells32(out); }
+    }
+    fn accumulate_hessian_positions64(&self, resolve: &mut dyn FnMut(u32, u32) -> usize, out: &mut std::vec::Vec<usize>) {
+        for item in self.iter() { item.accumulate_hessian_positions64(resolve, out); }
+    }
+    fn accumulate_hessian_positions32(&self, resolve: &mut dyn FnMut(u32, u32) -> usize, out: &mut std::vec::Vec<usize>) {
+        for item in self.iter() { item.accumulate_hessian_positions32(resolve, out); }
+    }
     fn release_blocks(&mut self) {
         for item in self.iter_mut() { item.release_blocks(); }
     }
@@ -1305,6 +1352,18 @@ impl<T: Model> Model for Option<T> {
     }
     fn collect_param_blocks(&self, out: &mut std::vec::Vec<(u32, u32)>) {
         if let Some(inner) = self { inner.collect_param_blocks(out); }
+    }
+    fn collect_hessian_cells64(&self, out: &mut std::vec::Vec<(u32, u32)>) {
+        if let Some(inner) = self { inner.collect_hessian_cells64(out); }
+    }
+    fn collect_hessian_cells32(&self, out: &mut std::vec::Vec<(u32, u32)>) {
+        if let Some(inner) = self { inner.collect_hessian_cells32(out); }
+    }
+    fn accumulate_hessian_positions64(&self, resolve: &mut dyn FnMut(u32, u32) -> usize, out: &mut std::vec::Vec<usize>) {
+        if let Some(inner) = self { inner.accumulate_hessian_positions64(resolve, out); }
+    }
+    fn accumulate_hessian_positions32(&self, resolve: &mut dyn FnMut(u32, u32) -> usize, out: &mut std::vec::Vec<usize>) {
+        if let Some(inner) = self { inner.accumulate_hessian_positions32(resolve, out); }
     }
     fn release_blocks(&mut self) {
         if let Some(inner) = self { inner.release_blocks(); }
@@ -1407,6 +1466,38 @@ impl<A: Model, const N: usize, const M: usize, T: crate::utils::Float> SelfBlock
         }
         if count > 0 {
             out.push((min, count));
+        }
+    }
+
+    /// Emit one representative scalar coordinate for this block's cell:
+    /// (anchor, anchor) on the diagonal of the entity partition.
+    /// All-fixed blocks emit nothing (they scatter nothing either).
+    pub fn collect_hessian_cells(&self, out: &mut std::vec::Vec<(u32, u32)>) {
+        let mut min = u32::MAX;
+        for &i in &self.indices {
+            if i != u32::MAX && i < min { min = i; }
+        }
+        if min != u32::MAX {
+            out.push((min, min));
+        }
+    }
+
+    /// Push scatter positions in exactly the emission order of
+    /// [`accumulate_hessian_sparse`](Self::accumulate_hessian_sparse).
+    pub fn accumulate_hessian_positions(
+        &self,
+        resolve: &mut dyn FnMut(u32, u32) -> usize,
+        out: &mut std::vec::Vec<usize>,
+    ) {
+        for i in 0..N {
+            let gi = self.indices[i];
+            if gi == u32::MAX { continue; }
+            for j in i..N {
+                let gj = self.indices[j];
+                if gj == u32::MAX { continue; }
+                let (lo, hi) = if gi <= gj { (gi, gj) } else { (gj, gi) };
+                out.push(resolve(lo, hi));
+            }
         }
     }
 
@@ -1636,6 +1727,18 @@ impl<A: Model, const N: usize, const M: usize, T: crate::utils::Float> BoxedSelf
         }
     }
 
+    pub fn collect_hessian_cells(&self, out: &mut std::vec::Vec<(u32, u32)>) {
+        if let Some(b) = &self.inner { b.collect_hessian_cells(out); }
+    }
+
+    pub fn accumulate_hessian_positions(
+        &self,
+        resolve: &mut dyn FnMut(u32, u32) -> usize,
+        out: &mut std::vec::Vec<usize>,
+    ) {
+        if let Some(b) = &self.inner { b.accumulate_hessian_positions(resolve, out); }
+    }
+
     pub fn accumulate_hessian_sparse(&self, coo: &mut crate::simple_lm::CooMatrix<T>) {
         if let Some(b) = &self.inner { b.accumulate_hessian_sparse(coo); }
     }
@@ -1782,6 +1885,42 @@ impl<A: Model, B: Model, const NA: usize, const NB: usize, const P: usize, T: cr
         Ok(())
     }
 
+    /// Emit one representative scalar coordinate for this block's cell.
+    /// Both entities are contiguous spans, so every pair lands in one
+    /// cell of the entity partition (the diagonal cell when aliased).
+    pub fn collect_hessian_cells(&self, out: &mut std::vec::Vec<(u32, u32)>) {
+        let min_live = |idx: &[u32]| {
+            let mut min = u32::MAX;
+            for &i in idx {
+                if i != u32::MAX && i < min { min = i; }
+            }
+            min
+        };
+        let (ma, mb) = (min_live(&self.indices_a), min_live(&self.indices_b));
+        if ma != u32::MAX && mb != u32::MAX {
+            out.push((ma.min(mb), ma.max(mb)));
+        }
+    }
+
+    /// Push scatter positions in exactly the emission order of
+    /// [`accumulate_hessian_sparse`](Self::accumulate_hessian_sparse).
+    pub fn accumulate_hessian_positions(
+        &self,
+        resolve: &mut dyn FnMut(u32, u32) -> usize,
+        out: &mut std::vec::Vec<usize>,
+    ) {
+        for i in 0..NA {
+            let gi = self.indices_a[i];
+            if gi == u32::MAX { continue; }
+            for j in 0..NB {
+                let gj = self.indices_b[j];
+                if gj == u32::MAX { continue; }
+                let (lo, hi) = if gi <= gj { (gi, gj) } else { (gj, gi) };
+                out.push(resolve(lo, hi));
+            }
+        }
+    }
+
     /// Accumulate into COO sparse format. Upper triangle only.
     pub fn accumulate_hessian_sparse(&self, coo: &mut crate::simple_lm::CooMatrix<T>) {
         for i in 0..NA {
@@ -1926,6 +2065,18 @@ impl<A: Model, B: Model, const NA: usize, const NB: usize, const P: usize, T: cr
             Some(b) => b.accumulate_hessian_band(band, kd),
             None => Ok(()),
         }
+    }
+
+    pub fn collect_hessian_cells(&self, out: &mut std::vec::Vec<(u32, u32)>) {
+        if let Some(b) = &self.inner { b.collect_hessian_cells(out); }
+    }
+
+    pub fn accumulate_hessian_positions(
+        &self,
+        resolve: &mut dyn FnMut(u32, u32) -> usize,
+        out: &mut std::vec::Vec<usize>,
+    ) {
+        if let Some(b) = &self.inner { b.accumulate_hessian_positions(resolve, out); }
     }
 
     pub fn accumulate_hessian_sparse(&self, coo: &mut crate::simple_lm::CooMatrix<T>) {
@@ -2093,6 +2244,33 @@ impl<T: crate::utils::Float> TripletBlock<T> {
     }
 
     /// Accumulate into COO sparse format. Upper triangle only.
+    /// Emit one coordinate per stored entry (raw, as pushed by the
+    /// extended model -- matching accumulate_hessian_sparse exactly).
+    /// Requires the block populated (run a compute pass first).
+    ///
+    /// CONTRACT: a TripletBlock must be refilled with the same entries
+    /// in the same order every iteration of a solve. Count changes trip
+    /// the indexed-fill assert; same-count cell or order changes
+    /// produce a silently wrong Hessian. Rebuild the solver (reset the
+    /// pattern) when the constraint structure changes.
+    pub fn collect_hessian_cells(&self, out: &mut std::vec::Vec<(u32, u32)>) {
+        for &(i, j, _) in &self.hessian {
+            out.push((i, j));
+        }
+    }
+
+    /// Push scatter positions in exactly the emission order of
+    /// [`accumulate_hessian_sparse`](Self::accumulate_hessian_sparse).
+    pub fn accumulate_hessian_positions(
+        &self,
+        resolve: &mut dyn FnMut(u32, u32) -> usize,
+        out: &mut std::vec::Vec<usize>,
+    ) {
+        for &(i, j, _) in &self.hessian {
+            out.push(resolve(i, j));
+        }
+    }
+
     pub fn accumulate_hessian_sparse(&self, coo: &mut crate::simple_lm::CooMatrix<T>) {
         for &(i, j, v) in &self.hessian {
             coo.push(i, j, v);

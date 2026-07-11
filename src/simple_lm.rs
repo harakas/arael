@@ -269,6 +269,150 @@ pub trait RootProblem<T: Float> {
     }
 }
 
+/// Scalar-coordinate -> CSC-position resolver over a tile-expanded
+/// pattern built by [`csc_from_cells`], memoized per run of same-cell
+/// coordinates (one cell lookup per contributing block object). Owns
+/// its lookup tables, so it has no lifetime ties to the matrix.
+#[derive(Clone)]
+pub struct ScalarCscResolver {
+    col_ptr: std::vec::Vec<usize>,
+    row_part: std::vec::Vec<usize>,
+    blk_of: std::vec::Vec<u32>,
+    /// sorted (block_col << 32 | block_row) keys of the stored cells
+    keys: std::vec::Vec<u64>,
+    /// per stored cell: scalar-row prefix of the tiles above it within
+    /// its block column (column-independent)
+    prefix: std::vec::Vec<usize>,
+    memo_key: u64,
+    memo_prefix: usize,
+    memo_row_start: usize,
+}
+
+impl ScalarCscResolver {
+    /// Position of scalar (row, col) in the tile-expanded CSC. Panics
+    /// if the coordinate's cell is not part of the structure.
+    #[inline]
+    pub fn resolve(&mut self, i: u32, j: u32) -> usize {
+        let (i, j) = (i as usize, j as usize);
+        let key = ((self.blk_of[j] as u64) << 32) | self.blk_of[i] as u64;
+        if key != self.memo_key {
+            self.memo_key = key;
+            let c = self.keys.binary_search(&key)
+                .expect("coordinate outside the built pattern");
+            self.memo_prefix = self.prefix[c];
+            self.memo_row_start = self.row_part[self.blk_of[i] as usize];
+        }
+        self.col_ptr[j] + self.memo_prefix + (i - self.memo_row_start)
+    }
+}
+
+/// Build a scalar CSC pattern by tile-expanding the block cells of an
+/// entity partition (the two-scan construction, scalar flavor): every
+/// stored cell contributes its full dense tile, so the pattern carries
+/// the tiles' structural zeros (~1% on entity-block models) and needs
+/// no COO pass. Returns the zero-valued matrix and the position
+/// resolver for [`LmProblem::accumulate_hessian_positions`].
+pub fn csc_from_cells<T: Float>(
+    partition: &[usize],
+    cells: &[(u32, u32)],
+) -> (CscMatrix<T>, ScalarCscResolver) {
+    let nblk = partition.len() - 1;
+    let n = partition[nblk];
+    let mut blk_of = vec![0u32; n];
+    for b in 0..nblk {
+        for i in partition[b]..partition[b + 1] {
+            blk_of[i] = b as u32;
+        }
+    }
+
+    // cell set, sorted by (block_col, block_row), run-compressed first
+    let mut keys: std::vec::Vec<u64> = std::vec::Vec::with_capacity(1024);
+    let mut last = u64::MAX;
+    for &(i, j) in cells {
+        let key = ((blk_of[j as usize] as u64) << 32) | blk_of[i as usize] as u64;
+        if key != last {
+            keys.push(key);
+            last = key;
+        }
+    }
+    keys.sort_unstable();
+    keys.dedup();
+
+    // per-cell row prefix within its block column; per-column nnz
+    let mut prefix = vec![0usize; keys.len()];
+    let mut col_ptr = vec![0usize; n + 1];
+    {
+        let mut c = 0;
+        while c < keys.len() {
+            let bc = (keys[c] >> 32) as usize;
+            let mut acc = 0usize;
+            let mut e = c;
+            while e < keys.len() && (keys[e] >> 32) as usize == bc {
+                let br = keys[e] as u32 as usize;
+                prefix[e] = acc;
+                acc += partition[br + 1] - partition[br];
+                e += 1;
+            }
+            // every scalar column of this block column holds `acc` rows
+            for j in partition[bc]..partition[bc + 1] {
+                col_ptr[j + 1] = acc;
+            }
+            c = e;
+        }
+    }
+    for j in 0..n {
+        col_ptr[j + 1] += col_ptr[j];
+    }
+
+    // row indices: per block column, the tiles' row spans, repeated for
+    // each scalar column; diagonal positions where the diagonal tile is
+    // stored (0 otherwise -- degenerate model, matching to_csc)
+    let nnz = col_ptr[n];
+    let mut row_idx = std::vec::Vec::with_capacity(nnz);
+    let mut diag_pos = vec![0usize; n];
+    {
+        let mut c = 0;
+        while c < keys.len() {
+            let bc = (keys[c] >> 32) as usize;
+            let mut e = c;
+            while e < keys.len() && (keys[e] >> 32) as usize == bc {
+                e += 1;
+            }
+            for j in partition[bc]..partition[bc + 1] {
+                for k in c..e {
+                    let br = keys[k] as u32 as usize;
+                    if br == bc {
+                        diag_pos[j] = col_ptr[j] + prefix[k] + (j - partition[br]);
+                    }
+                    for i in partition[br]..partition[br + 1] {
+                        row_idx.push(i as u32);
+                    }
+                }
+            }
+            c = e;
+        }
+    }
+
+    let csc = CscMatrix {
+        n,
+        col_ptr: col_ptr.clone(),
+        row_idx,
+        vals: vec![T::zero(); nnz],
+        diag_pos,
+    };
+    let resolver = ScalarCscResolver {
+        col_ptr,
+        row_part: partition.to_vec(),
+        blk_of,
+        keys,
+        prefix,
+        memo_key: u64::MAX,
+        memo_prefix: 0,
+        memo_row_start: 0,
+    };
+    (csc, resolver)
+}
+
 /// Turn entity spans (from [`RootProblem::param_block_spans`]) into a
 /// full block partition of `0..n`: ascending scalar offsets with one
 /// entry per block boundary, first 0, last `n`. Parameters not covered
@@ -392,6 +536,34 @@ pub trait LmProblem<T> {
     {
         self.solve_with(&mut Dense, config)
     }
+
+    /// Whether the Hessian pattern is only discoverable by running a
+    /// compute pass first (TripletBlock / extended-model constraints
+    /// fill their entries at runtime). The pattern itself is frozen
+    /// after the first iteration by contract for EVERY model -- this
+    /// flag is about when it becomes knowable, not whether it changes.
+    /// When `false`, the structure walks below are complete before any
+    /// compute, and sparse backends may build their pattern without a
+    /// COO discovery pass. Defaults to `true` (unknown = assume
+    /// runtime-determined); the macro overrides it.
+    fn hessian_pattern_requires_compute(&self) -> bool {
+        true
+    }
+    /// Append one representative scalar coordinate per Hessian block
+    /// cell (see `Model::collect_hessian_cells64`). Default: nothing
+    /// (structure walk unsupported -- backends fall back to COO).
+    fn collect_hessian_cells(&self, _out: &mut std::vec::Vec<(u32, u32)>) {}
+    /// Push every Hessian scatter position in the exact emission order
+    /// of [`calc_grad_hessian_sparse_indexed`](Self::calc_grad_hessian_sparse_indexed),
+    /// resolving each scalar coordinate through `resolve`.
+    fn accumulate_hessian_positions(
+        &self,
+        _resolve: &mut dyn FnMut(u32, u32) -> usize,
+        _out: &mut std::vec::Vec<usize>,
+    ) {}
+    /// Append the entity parameter spans (see
+    /// [`RootProblem::param_block_spans`]). Default: nothing.
+    fn collect_param_block_spans(&self, _out: &mut std::vec::Vec<(u32, u32)>) {}
 
     /// Solve with the indexed sparse faer backend ([`SparseFaer`], pure
     /// Rust) -- the default choice for anything non-trivial. Convenience
@@ -1690,17 +1862,39 @@ impl<T: crate::utils::Float + faer::traits::RealField> LmSolver<T> for SparseFae
 
     fn compute(&mut self, problem: &mut dyn LmProblem<T>, params: &[T], grad: &mut [T], matrix: &mut SparseMatrix<T>) -> T {
         if let Some(positions) = &self.positions {
-            problem.calc_grad_hessian_sparse_indexed(params, grad, &mut matrix.csc.vals, positions)
-        } else {
-            // First call: COO assembly to discover pattern + build position map
-            let n = matrix.csc.n;
-            let mut coo = CooMatrix::new(n);
-            let cost = problem.calc_grad_hessian_sparse(params, grad, &mut coo);
-            let (csc, positions) = coo.to_csc_with_map();
-            self.positions = Some(positions);
-            matrix.csc = csc;
-            cost
+            return problem.calc_grad_hessian_sparse_indexed(params, grad, &mut matrix.csc.vals, positions);
         }
+        let n = matrix.csc.n;
+        // First call, fast path: models whose pattern is knowable before
+        // any compute expose their block structure, so the tile-expanded
+        // pattern and position map are built without a COO pass (and
+        // without its transient memory).
+        if !problem.hessian_pattern_requires_compute() {
+            let mut cells = std::vec::Vec::new();
+            problem.collect_hessian_cells(&mut cells);
+            let mut spans = std::vec::Vec::new();
+            problem.collect_param_block_spans(&mut spans);
+            if !cells.is_empty() && !spans.is_empty() {
+                let partition = block_partition_from_spans(&spans, n);
+                let (csc, mut resolver) = csc_from_cells::<T>(&partition, &cells);
+                let mut positions = std::vec::Vec::new();
+                problem.accumulate_hessian_positions(
+                    &mut |i, j| resolver.resolve(i, j),
+                    &mut positions,
+                );
+                matrix.csc = csc;
+                let cost = problem.calc_grad_hessian_sparse_indexed(params, grad, &mut matrix.csc.vals, &positions);
+                self.positions = Some(positions);
+                return cost;
+            }
+        }
+        // Fallback: COO assembly to discover pattern + build position map
+        let mut coo = CooMatrix::new(n);
+        let cost = problem.calc_grad_hessian_sparse(params, grad, &mut coo);
+        let (csc, positions) = coo.to_csc_with_map();
+        self.positions = Some(positions);
+        matrix.csc = csc;
+        cost
     }
 
     fn extract_diagonal(&self, matrix: &SparseMatrix<T>, diagonal: &mut [T]) {

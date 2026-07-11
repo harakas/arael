@@ -10,8 +10,8 @@ mod scene;
 #[path = "../arael_runner.rs"]
 mod arael_runner;
 
-use arael::simple_lm::{block_partition_from_spans, CooMatrix, LmProblem, RootProblem};
-use arael_faer::bsc::{SparseBlockColMat, SymbolicSparseBlockColMat};
+use arael::simple_lm::{block_partition_from_spans, csc_from_cells, CooMatrix, LmProblem, RootProblem};
+use arael_faer::bsc::{PositionResolver, SparseBlockColMat, SymbolicSparseBlockColMat};
 use scene::SceneConfig;
 use std::time::Instant;
 
@@ -98,6 +98,54 @@ fn main() {
             &path, bsc.vals_mut(), &positions_block, &mut cursor);
     });
 
+    // -- two-scan route: no COO at all ---------------------------------
+    // scan 1: block cells from indices alone (structure-only)
+    let (t_cells, cells) = min_ms(rounds, || {
+        let mut cells: Vec<(u32, u32)> = Vec::new();
+        arael::model::Model::collect_hessian_cells64(&path, &mut cells);
+        cells
+    });
+    // symbolic from the cells (anchors are ordinary scalar coords)
+    let (t_sym2, sym2) = min_ms(rounds, || {
+        SymbolicSparseBlockColMat::from_scalar_coords(
+            partition.clone(),
+            partition.clone(),
+            cells.len(),
+            |k| (cells[k].0 as usize, cells[k].1 as usize),
+        ).0
+    });
+    // scan 2: position map by replaying the emission order
+    let (t_pos2, positions2) = min_ms(rounds, || {
+        let mut resolver = PositionResolver::new(&sym2);
+        let mut out: Vec<usize> = Vec::with_capacity(positions_block.len());
+        arael::model::Model::accumulate_hessian_positions64(
+            &path,
+            &mut |i, j| resolver.resolve(i as usize, j as usize),
+            &mut out,
+        );
+        out
+    });
+    // both routes must produce the identical structure and map
+    assert_eq!(sym2.parts().2, sym.parts().2);
+    assert_eq!(sym2.parts().3, sym.parts().3);
+    assert_eq!(sym2.parts().4, sym.parts().4);
+    assert_eq!(positions2, positions_block);
+
+    // scalar two-scan (SparseFaer's new fast path): tile-expanded CSC
+    let (t_scsc, (csc_fast, _)) = min_ms(rounds, || csc_from_cells::<f64>(&partition, &cells));
+    let (_, resolver_proto) = csc_from_cells::<f64>(&partition, &cells);
+    let (t_spos, _spos) = min_ms(rounds, || {
+        let mut resolver = resolver_proto.clone();
+        let mut out: Vec<usize> = Vec::with_capacity(positions_scalar.len());
+        arael::model::Model::accumulate_hessian_positions64(
+            &path,
+            &mut |i, j| resolver.resolve(i, j),
+            &mut out,
+        );
+        out
+    });
+    let scalar_fast_nnz = csc_fast.vals.len();
+
     // -- steady-state refill ------------------------------------------
 
     let mut vals_s = vec![0.0; csc.vals.len()];
@@ -118,18 +166,38 @@ fn main() {
         cfg.num_poses, n, coo.nnz(), csc.vals.len(), nblocks, block_vals);
     println!("rounds: {} (min reported)", rounds);
     println!();
-    println!("first iteration                     ms");
-    println!("  COO discovery (shared)        {:8.3}", t_coo);
-    println!("  scalar: to_csc_with_map       {:8.3}", t_scalar_map);
-    println!("  block:  param spans+partition {:8.3}", t_spans);
-    println!("  block:  from_scalar_coords    {:8.3}", t_block_map);
-    println!("  block:  zeroed alloc          {:8.3}", t_alloc);
-    println!("  block:  value scatter         {:8.3}", t_scatter);
-    println!("  first-iter total scalar       {:8.3}", t_coo + t_scalar_map);
-    println!("  first-iter total block        {:8.3}", t_coo + t_spans + t_block_map + t_alloc + t_scatter);
+    println!("Every first-iteration total contains exactly ONE full numeric");
+    println!("computation (residuals + Jacobians + block accumulation); the");
+    println!("line carrying it is marked [compute].");
     println!();
-    println!("steady iteration                    ms");
-    println!("  scalar CSC direct (search)    {:8.3}", t_fill_direct);
-    println!("  scalar CSC indexed            {:8.3}", t_fill_scalar);
-    println!("  block CSC indexed             {:8.3}", t_fill_block);
+    println!("scalar CSC (today's pipeline)                    ms");
+    println!("  COO pass (compute + push triplets) [compute] {:7.3}", t_coo);
+    println!("  to_csc_with_map (pattern + positions + vals) {:7.3}", t_scalar_map);
+    println!("  first iteration total                        {:7.3}", t_coo + t_scalar_map);
+    println!();
+    println!("block CSC via COO                                ms");
+    println!("  COO pass (compute + push triplets) [compute] {:7.3}", t_coo);
+    println!("  partition + from_scalar_coords               {:7.3}", t_spans + t_block_map);
+    println!("  zeroed alloc + value scatter                 {:7.3}", t_alloc + t_scatter);
+    println!("  first iteration total                        {:7.3}", t_coo + t_spans + t_block_map + t_alloc + t_scatter);
+    println!();
+    println!("block CSC two-scan (no COO)                      ms");
+    println!("  cells scan (structure only)                  {:7.3}", t_cells);
+    println!("  symbolic + partition + alloc                 {:7.3}", t_sym2 + t_spans + t_alloc);
+    println!("  position map (emission replay)               {:7.3}", t_pos2);
+    println!("  first indexed fill                 [compute] {:7.3}", t_fill_block);
+    println!("  first iteration total                        {:7.3}", t_spans + t_cells + t_sym2 + t_pos2 + t_alloc + t_fill_block);
+    println!();
+    println!("scalar CSC two-scan (SparseFaer fast path; nnz {} = +{:.1}% padding)", scalar_fast_nnz,
+        100.0 * (scalar_fast_nnz as f64 / csc.vals.len() as f64 - 1.0));
+    println!("  cells scan (structure only)                  {:7.3}", t_cells);
+    println!("  tile-expanded CSC (csc_from_cells)           {:7.3}", t_scsc);
+    println!("  position map (emission replay)               {:7.3}", t_spos);
+    println!("  first indexed fill                 [compute] {:7.3}", t_fill_scalar);
+    println!("  first iteration total                        {:7.3}", t_cells + t_scsc + t_spos + t_fill_scalar);
+    println!();
+    println!("steady iteration (each is one [compute] + scatter)");
+    println!("  scalar CSC direct (search per write)         {:7.3}", t_fill_direct);
+    println!("  scalar CSC indexed                           {:7.3}", t_fill_scalar);
+    println!("  block CSC indexed                            {:7.3}", t_fill_block);
 }
