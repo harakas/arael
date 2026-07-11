@@ -1837,6 +1837,7 @@ pub fn generate_root_methods(
     jacobian: bool,
     fast_atan: bool,
     elimination_hint_fn: &Option<TokenStream2>,
+    has_triplet_block: bool,
 ) -> syn::Result<TokenStream2> {
     let stashed = crate::registry_constraints();
     let root_var_name = root_name.to_string().to_lowercase();
@@ -4514,6 +4515,12 @@ pub fn generate_root_methods(
     } else {
         (quote! { serialize64 }, quote! { deserialize64 })
     };
+    let requires_compute = custom || has_triplet_block;
+    let (cells_method, positions_method) = if precision == "f32" {
+        (quote! { collect_hessian_cells32 }, quote! { accumulate_hessian_positions32 })
+    } else {
+        (quote! { collect_hessian_cells64 }, quote! { accumulate_hessian_positions64 })
+    };
 
     let mut tokens = quote! {
         #(#constraint_impls)*
@@ -4629,6 +4636,16 @@ pub fn generate_root_methods(
 
         #(#summary_docs)*
         impl arael::simple_lm::LmProblem<#prec_type> for #root_name {
+            fn hessian_pattern_requires_compute(&self) -> bool { #requires_compute }
+            fn collect_hessian_cells(&self, out: &mut std::vec::Vec<(u32, u32)>) {
+                arael::model::Model::#cells_method(self, out)
+            }
+            fn accumulate_hessian_positions(&self, resolve: &mut dyn FnMut(u32, u32) -> usize, out: &mut std::vec::Vec<usize>) {
+                arael::model::Model::#positions_method(self, resolve, out)
+            }
+            fn collect_param_block_spans(&self, out: &mut std::vec::Vec<(u32, u32)>) {
+                arael::model::Model::collect_param_blocks(self, out)
+            }
             fn calc_cost(&mut self, params: &[#prec_type]) -> #prec_type {
                 // Generated expressions may call Float trait methods
                 // (e.g. heaviside from safe-function derivatives).
