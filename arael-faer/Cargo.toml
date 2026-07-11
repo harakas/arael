@@ -1,0 +1,10 @@
+[package]
+name = "arael-faer"
+version = "0.7.0"
+edition = "2024"
+authors = ["Indrek Mandre <indrek@mare.ee>"]
+description = "faer extensions staged for upstreaming: variable-block sparse matrix storage (block CSC)"
+license = "MIT"
+
+[dependencies]
+faer = { version = "0.24", default-features = false, features = ["std", "sparse-linalg"] }

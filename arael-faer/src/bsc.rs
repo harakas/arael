@@ -1,0 +1,512 @@
+//! variable-block sparse column-major matrix storage ("block CSC").
+//!
+//! the scalar matrix is partitioned into rectangular tiles by two
+//! partition arrays (variable block widths). each STORED block is a
+//! dense column-major tile, viewable as a [`MatRef`] at zero cost.
+//!
+//! layout, mirroring scalar CSC one level up:
+//! - `row_part`/`col_part` hold SCALAR OFFSETS: block-row r spans
+//!   scalar rows `row_part[r]..row_part[r+1]` (variable widths).
+//! - `blk_col_ptr` holds INDICES INTO `blk_row_idx` AND `val_ptr`:
+//!   those are all block-columns concatenated, and `blk_col_ptr[j]` is
+//!   where block-column j's segment begins in both.
+//! - `blk_row_idx[b]` and `vals[val_ptr[b]..val_ptr[b + 1]]` are a
+//!   pair: "there is a dense tile at block-row `blk_row_idx[b]` of
+//!   this block-column, with these column-major values".
+//!
+//! Symmetric matrices store the upper block triangle by convention
+//! (like faer's `Side::Upper` elsewhere); the type itself is a
+//! general rectangular matrix.
+//!
+//! Uses only faer's public API; written as an upstream candidate for
+//! a future `faer::sparse::bsc` module.
+
+use core::iter;
+use faer::sparse::{SparseColMat, SparseColMatRef, SymbolicSparseColMat};
+use faer::traits::ComplexField;
+use faer::traits::math_utils::zero;
+use faer::{Index, MatMut, MatRef};
+
+/// structure (pattern + partitions) of a variable-block sparse
+/// column-major matrix. see the [module docs](self) for the layout.
+#[derive(Clone, Debug)]
+pub struct SymbolicSparseBlockColMat<I> {
+    row_part: Vec<I>,
+    col_part: Vec<I>,
+    blk_col_ptr: Vec<I>,
+    blk_row_idx: Vec<I>,
+    val_ptr: Vec<I>,
+}
+
+/// variable-block sparse column-major matrix: structure + one
+/// contiguous value buffer holding every tile's column-major payload.
+#[derive(Clone, Debug)]
+pub struct SparseBlockColMat<I, T> {
+    symbolic: SymbolicSparseBlockColMat<I>,
+    vals: Vec<T>,
+}
+
+impl<I: Index> SymbolicSparseBlockColMat<I> {
+    /// creates the symbolic structure after checking every invariant:
+    /// partitions monotone starting at 0; `blk_col_ptr` monotone
+    /// covering `blk_row_idx`; block rows in range, strictly ascending
+    /// within each block-column; `val_ptr` gaps equal to each stored
+    /// tile's `row_width * col_width`, with nonzero dimensions.
+    #[track_caller]
+    pub fn new_checked(
+        row_part: Vec<I>,
+        col_part: Vec<I>,
+        blk_col_ptr: Vec<I>,
+        blk_row_idx: Vec<I>,
+        val_ptr: Vec<I>,
+    ) -> Self {
+        let monotone_from_zero = |p: &[I]| {
+            assert!(!p.is_empty());
+            assert!(p[0].zx() == 0);
+            for w in p.windows(2) {
+                assert!(w[0].zx() <= w[1].zx());
+            }
+        };
+        monotone_from_zero(&row_part);
+        monotone_from_zero(&col_part);
+        monotone_from_zero(&blk_col_ptr);
+        monotone_from_zero(&val_ptr);
+
+        let nblk_rows = row_part.len() - 1;
+        let nblk_cols = col_part.len() - 1;
+        let nblocks = blk_row_idx.len();
+        assert!(blk_col_ptr.len() == nblk_cols + 1);
+        assert!(blk_col_ptr[nblk_cols].zx() == nblocks);
+        assert!(val_ptr.len() == nblocks + 1);
+
+        for j in 0..nblk_cols {
+            let col_width = col_part[j + 1].zx() - col_part[j].zx();
+            let begin = blk_col_ptr[j].zx();
+            let end = blk_col_ptr[j + 1].zx();
+            for b in begin..end {
+                let r = blk_row_idx[b].zx();
+                assert!(r < nblk_rows);
+                if b > begin {
+                    // strictly ascending: sorted, no duplicate tiles
+                    assert!(blk_row_idx[b - 1].zx() < r);
+                }
+                let row_width = row_part[r + 1].zx() - row_part[r].zx();
+                assert!(row_width > 0);
+                assert!(col_width > 0);
+                let len = val_ptr[b + 1].zx() - val_ptr[b].zx();
+                assert!(len == row_width * col_width);
+            }
+        }
+
+        Self {
+            row_part,
+            col_part,
+            blk_col_ptr,
+            blk_row_idx,
+            val_ptr,
+        }
+    }
+
+    /// number of block-rows
+    #[inline]
+    pub fn nblk_rows(&self) -> usize {
+        self.row_part.len() - 1
+    }
+    /// number of block-columns
+    #[inline]
+    pub fn nblk_cols(&self) -> usize {
+        self.col_part.len() - 1
+    }
+    /// number of stored blocks
+    #[inline]
+    pub fn nblocks(&self) -> usize {
+        self.blk_row_idx.len()
+    }
+    /// number of scalar rows
+    #[inline]
+    pub fn nrows(&self) -> usize {
+        self.row_part[self.nblk_rows()].zx()
+    }
+    /// number of scalar columns
+    #[inline]
+    pub fn ncols(&self) -> usize {
+        self.col_part[self.nblk_cols()].zx()
+    }
+    /// total number of stored scalar values
+    #[inline]
+    pub fn val_count(&self) -> usize {
+        self.val_ptr[self.nblocks()].zx()
+    }
+
+    /// scalar row range of block-row `r`
+    #[inline]
+    pub fn row_span(&self, r: usize) -> core::ops::Range<usize> {
+        self.row_part[r].zx()..self.row_part[r + 1].zx()
+    }
+    /// scalar column range of block-column `j`
+    #[inline]
+    pub fn col_span(&self, j: usize) -> core::ops::Range<usize> {
+        self.col_part[j].zx()..self.col_part[j + 1].zx()
+    }
+    /// indices (into `blk_row_idx`/`val_ptr`/payloads) of the blocks
+    /// stored in block-column `j`
+    #[inline]
+    pub fn col_range(&self, j: usize) -> core::ops::Range<usize> {
+        self.blk_col_ptr[j].zx()..self.blk_col_ptr[j + 1].zx()
+    }
+    /// block-row of stored block `b`
+    #[inline]
+    pub fn blk_row(&self, b: usize) -> usize {
+        self.blk_row_idx[b].zx()
+    }
+    /// (row_width, col_width) of stored block `b`. the column width is
+    /// recovered from the payload length, so no column lookup is needed.
+    #[inline]
+    pub fn block_dims(&self, b: usize) -> (usize, usize) {
+        let r = self.blk_row(b);
+        let row_width = self.row_part[r + 1].zx() - self.row_part[r].zx();
+        let len = self.val_ptr[b + 1].zx() - self.val_ptr[b].zx();
+        (row_width, len / row_width)
+    }
+    /// payload range of stored block `b` in the value buffer
+    #[inline]
+    pub fn val_range(&self, b: usize) -> core::ops::Range<usize> {
+        self.val_ptr[b].zx()..self.val_ptr[b + 1].zx()
+    }
+
+    /// partition and pattern arrays: `(row_part, col_part, blk_col_ptr,
+    /// blk_row_idx, val_ptr)`
+    #[inline]
+    pub fn parts(&self) -> (&[I], &[I], &[I], &[I], &[I]) {
+        (
+            &self.row_part,
+            &self.col_part,
+            &self.blk_col_ptr,
+            &self.blk_row_idx,
+            &self.val_ptr,
+        )
+    }
+}
+
+impl<I: Index, T> SparseBlockColMat<I, T> {
+    /// wraps a value buffer (length [`val_count`](SymbolicSparseBlockColMat::val_count))
+    /// around a symbolic structure
+    #[track_caller]
+    pub fn new(symbolic: SymbolicSparseBlockColMat<I>, vals: Vec<T>) -> Self {
+        assert!(vals.len() == symbolic.val_count());
+        Self { symbolic, vals }
+    }
+
+    /// the symbolic structure
+    #[inline]
+    pub fn symbolic(&self) -> &SymbolicSparseBlockColMat<I> {
+        &self.symbolic
+    }
+    /// the raw value buffer
+    #[inline]
+    pub fn vals(&self) -> &[T] {
+        &self.vals
+    }
+    /// the raw value buffer, mutable (numeric refill between solves)
+    #[inline]
+    pub fn vals_mut(&mut self) -> &mut [T] {
+        &mut self.vals
+    }
+
+    /// stored block `b` as a dense column-major view. O(1).
+    #[inline]
+    pub fn block(&self, b: usize) -> MatRef<'_, T> {
+        let (nrows, ncols) = self.symbolic.block_dims(b);
+        MatRef::from_column_major_slice(
+            &self.vals[self.symbolic.val_range(b)],
+            nrows,
+            ncols,
+        )
+    }
+
+    /// stored block `b` as a mutable dense column-major view. O(1).
+    #[inline]
+    pub fn block_mut(&mut self, b: usize) -> MatMut<'_, T> {
+        let (nrows, ncols) = self.symbolic.block_dims(b);
+        let range = self.symbolic.val_range(b);
+        MatMut::from_column_major_slice_mut(
+            &mut self.vals[range],
+            nrows,
+            ncols,
+        )
+    }
+
+    /// iterates block-column `j`'s stored blocks as
+    /// `(block_index, block_row, tile)`
+    pub fn col_blocks(
+        &self,
+        j: usize,
+    ) -> impl Iterator<Item = (usize, usize, MatRef<'_, T>)> {
+        self.symbolic
+            .col_range(j)
+            .map(move |b| (b, self.symbolic.blk_row(b), self.block(b)))
+    }
+
+    /// tile at (block-row `r`, block-column `j`), if stored.
+    /// O(log of the column's block count).
+    pub fn get_block(&self, r: usize, j: usize) -> Option<MatRef<'_, T>> {
+        let range = self.symbolic.col_range(j);
+        let idx = &self.symbolic.blk_row_idx[range.clone()];
+        idx.binary_search_by_key(&r, |i| i.zx())
+            .ok()
+            .map(|k| self.block(range.start + k))
+    }
+}
+
+impl<I: Index, T: ComplexField> SparseBlockColMat<I, T> {
+    /// expands to a scalar CSC matrix with the same values (rows sorted
+    /// within each column; only stored tiles contribute entries)
+    pub fn to_csc(&self) -> SparseColMat<I, T> {
+        let sym = &self.symbolic;
+        let nrows = sym.nrows();
+        let ncols = sym.ncols();
+
+        let mut col_ptr = Vec::with_capacity(ncols + 1);
+        let mut row_idx = Vec::with_capacity(sym.val_count());
+        let mut vals = Vec::with_capacity(sym.val_count());
+
+        col_ptr.push(I::truncate(0));
+        for j in 0..sym.nblk_cols() {
+            let col_width = sym.col_span(j).len();
+            for local_col in 0..col_width {
+                // blocks are sorted by block-row and their scalar rows
+                // are contiguous, so scalar rows come out sorted
+                for b in sym.col_range(j) {
+                    let rows = sym.row_span(sym.blk_row(b));
+                    let payload = &self.vals[sym.val_range(b)];
+                    let col_slice =
+                        &payload[local_col * rows.len()..][..rows.len()];
+                    for (i, v) in iter::zip(rows, col_slice) {
+                        row_idx.push(I::truncate(i));
+                        vals.push(v.clone());
+                    }
+                }
+                col_ptr.push(I::truncate(row_idx.len()));
+            }
+        }
+
+        SparseColMat::new(
+            SymbolicSparseColMat::new_checked(
+                nrows, ncols, col_ptr, None, row_idx,
+            ),
+            vals,
+        )
+    }
+
+    /// gathers a scalar CSC matrix into block form under the given
+    /// partitions. a tile is stored iff any scalar entry falls inside
+    /// it; unset scalars within a stored tile are zero.
+    #[track_caller]
+    pub fn from_csc(
+        csc: SparseColMatRef<'_, I, T>,
+        row_part: Vec<I>,
+        col_part: Vec<I>,
+    ) -> Self {
+        let nrows = csc.nrows();
+        let ncols = csc.ncols();
+        assert!(row_part[row_part.len() - 1].zx() == nrows);
+        assert!(col_part[col_part.len() - 1].zx() == ncols);
+        let nblk_rows = row_part.len() - 1;
+        let nblk_cols = col_part.len() - 1;
+
+        // scalar index -> block index maps (both directions cheap;
+        // build once, O(n))
+        let row_of = |part: &[I], nblk: usize| {
+            let mut of = vec![0usize; part[nblk].zx()];
+            for r in 0..nblk {
+                for i in part[r].zx()..part[r + 1].zx() {
+                    of[i] = r;
+                }
+            }
+            of
+        };
+        let blk_row_of = row_of(&row_part, nblk_rows);
+
+        // pass 1: which tiles exist in each block-column
+        let mut blk_col_ptr = Vec::with_capacity(nblk_cols + 1);
+        let mut blk_row_idx = Vec::new();
+        let mut val_ptr = Vec::new();
+        let mut seen = vec![usize::MAX; nblk_rows];
+        blk_col_ptr.push(I::truncate(0));
+        val_ptr.push(I::truncate(0));
+        let mut val_total = 0usize;
+        for jb in 0..nblk_cols {
+            let begin = blk_row_idx.len();
+            for j in col_part[jb].zx()..col_part[jb + 1].zx() {
+                for i in csc.row_idx_of_col(j) {
+                    let rb = blk_row_of[i];
+                    if seen[rb] != jb {
+                        seen[rb] = jb;
+                        blk_row_idx.push(I::truncate(rb));
+                    }
+                }
+            }
+            blk_row_idx[begin..].sort_unstable_by_key(|i: &I| i.zx());
+            let col_width = col_part[jb + 1].zx() - col_part[jb].zx();
+            for k in begin..blk_row_idx.len() {
+                let rb = blk_row_idx[k].zx();
+                let row_width = row_part[rb + 1].zx() - row_part[rb].zx();
+                val_total += row_width * col_width;
+                val_ptr.push(I::truncate(val_total));
+            }
+            blk_col_ptr.push(I::truncate(blk_row_idx.len()));
+        }
+
+        let symbolic = SymbolicSparseBlockColMat::new_checked(
+            row_part,
+            col_part,
+            blk_col_ptr,
+            blk_row_idx,
+            val_ptr,
+        );
+
+        // pass 2: scatter values into zero-filled payloads
+        let mut this = SparseBlockColMat::new(
+            symbolic,
+            vec![zero::<T>(); val_total],
+        );
+        for jb in 0..this.symbolic.nblk_cols() {
+            let col_start = this.symbolic.col_span(jb).start;
+            for j in this.symbolic.col_span(jb) {
+                for (i, v) in
+                    iter::zip(csc.row_idx_of_col(j), csc.val_of_col(j))
+                {
+                    let rb = blk_row_of[i];
+                    let range = this.symbolic.col_range(jb);
+                    let idx = &this.symbolic.blk_row_idx[range.clone()];
+                    let k = idx
+                        .binary_search_by_key(&rb, |x| x.zx())
+                        .unwrap();
+                    let b = range.start + k;
+                    let rows = this.symbolic.row_span(rb);
+                    let row_width = rows.len();
+                    let local_row = i - rows.start;
+                    let local_col = j - col_start;
+                    let at = this.symbolic.val_range(b).start
+                        + local_col * row_width
+                        + local_row;
+                    this.vals[at] = v.clone();
+                }
+            }
+        }
+        this
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // the SCHUR.md doodle: poses P1, P2 (width 2), landmarks L1, L2,
+    // L3 (width 1); upper block triangle of
+    //     [ P1  .   A  C  .  ]
+    //     [ .   P2  B  .  D  ]
+    //     [         L1       ]
+    //     [            L2    ]
+    //     [               L3 ]
+    // block-rows/cols: [P1, P2, L1, L2, L3] -> partitions [0,2,4,5,6,7]
+    fn doodle() -> SparseBlockColMat<usize, f64> {
+        let part = vec![0usize, 2, 4, 5, 6, 7];
+        // per block-column (sorted block rows):
+        //   col0: {0: P1}          col1: {1: P2}
+        //   col2: {0: A, 2: L1}    col3: {0: C, 3: L2}
+        //   col4: {1: D, 4: L3}
+        let blk_col_ptr = vec![0usize, 1, 2, 4, 6, 8];
+        let blk_row_idx = vec![0usize, 1, 0, 2, 0, 3, 1, 4];
+        // payload sizes: P1 2x2=4, P2 2x2=4, A 2x1=2, L1 1, C 2, L2 1,
+        // D 2, L3 1
+        let val_ptr = vec![0usize, 4, 8, 10, 11, 13, 14, 16, 17];
+        let symbolic = SymbolicSparseBlockColMat::new_checked(
+            part.clone(),
+            part,
+            blk_col_ptr,
+            blk_row_idx,
+            val_ptr,
+        );
+        // values chosen so every scalar cell is identifiable:
+        // column-major within each tile
+        let vals = vec![
+            11., 21., 12., 22., // P1
+            33., 43., 34., 44., // P2
+            15., 25., // A
+            55., // L1
+            16., 26., // C
+            66., // L2
+            37., 47., // D
+            77., // L3
+        ];
+        SparseBlockColMat::new(symbolic, vals)
+    }
+
+    #[test]
+    fn block_access() {
+        let m = doodle();
+        assert_eq!(m.symbolic().nrows(), 7);
+        assert_eq!(m.symbolic().ncols(), 7);
+        assert_eq!(m.symbolic().nblocks(), 8);
+
+        // A = block at (blk_row 0, blk_col 2), 2x1
+        let a = m.get_block(0, 2).unwrap();
+        assert_eq!(a.nrows(), 2);
+        assert_eq!(a.ncols(), 1);
+        assert_eq!(a[(0, 0)], 15.);
+        assert_eq!(a[(1, 0)], 25.);
+
+        // P2 diagonal tile, column-major
+        let p2 = m.get_block(1, 1).unwrap();
+        assert_eq!(p2[(0, 1)], 34.);
+        assert_eq!(p2[(1, 0)], 43.);
+
+        // absent tile
+        assert!(m.get_block(1, 2).is_none());
+
+        // iteration order within a block-column
+        let got: Vec<usize> =
+            m.col_blocks(3).map(|(_, r, _)| r).collect();
+        assert_eq!(got, vec![0, 3]);
+    }
+
+    #[test]
+    fn csc_roundtrip() {
+        let m = doodle();
+        let csc = m.to_csc();
+        assert_eq!(csc.nrows(), 7);
+        assert_eq!(csc.ncols(), 7);
+        // scalar column 2 (P2's first column): rows 2,3 from P2
+        assert_eq!(csc.row_idx_of_col(2).collect::<Vec<_>>(), vec![2, 3]);
+        // scalar column 4 (the L1 block-column): A's rows then L1's diagonal
+        assert_eq!(csc.row_idx_of_col(4).collect::<Vec<_>>(), vec![0, 1, 4]);
+
+        // value spot checks against the dense picture
+        let dense = |csc: &SparseColMat<usize, f64>, i: usize, j: usize| {
+            let mut out = 0.0;
+            for (r, v) in iter::zip(csc.row_idx_of_col(j), csc.val_of_col(j)) {
+                if r == i {
+                    out = *v;
+                }
+            }
+            out
+        };
+        assert_eq!(dense(&csc, 0, 4), 15.); // A[0,0]
+        assert_eq!(dense(&csc, 1, 4), 25.); // A[1,0]
+        assert_eq!(dense(&csc, 4, 4), 55.); // L1
+        assert_eq!(dense(&csc, 3, 6), 47.); // D[1,0] -> scalar (3, 6)
+        assert_eq!(dense(&csc, 2, 4), 0.0); // structural zero
+
+        // roundtrip: from_csc under the same partitions reproduces
+        // the block matrix exactly
+        let part = vec![0usize, 2, 4, 5, 6, 7];
+        let back = SparseBlockColMat::from_csc(
+            csc.as_ref(),
+            part.clone(),
+            part,
+        );
+        assert_eq!(back.symbolic().nblocks(), m.symbolic().nblocks());
+        assert_eq!(back.vals(), m.vals());
+    }
+}

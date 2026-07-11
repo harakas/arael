@@ -19,6 +19,15 @@
   ~1.7x faster still on the linear-solve phase in g2o's stats (42 vs 71 ms
   at 300 poses). A new LmSolver backend + block-partition machinery; only
   worth it if solve-dominated problems become the primary target.
+  Ordering refinement is NOT the path to that headroom: a prototype that
+  ordered the trailing pose blocks by AMD on the reduced pose graph
+  (via an eliminate_first range sequence) measured a wash to -2% vs
+  trajectory order at 300/600 poses -- after landmark elimination the
+  reduced system is ~70% dense, so ordering barely moves the factor, and
+  trajectory order feeds the supernodal kernels contiguous blocks.
+  Reduced-graph AMD would only matter on problems whose reduced system
+  is genuinely sparse (BA-style covisibility), where trailing natural
+  order is the failure case.
 
 - **SparseFaer::with_threads(n): opt-in multithreaded faer solve**
   (discussed 2026-07). faer threads via rayon: every heavy call takes a
