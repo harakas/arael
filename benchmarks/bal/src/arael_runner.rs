@@ -50,8 +50,8 @@ struct Obs {
 }
 
 #[arael::model]
-#[arael(root)]
-struct Scene {
+#[arael(root, eliminate_first(points))]
+pub struct Scene {
     cameras: refs::Vec<Camera>,
     points: refs::Vec<Point>,
     observations: std::vec::Vec<Obs>,
@@ -93,7 +93,7 @@ struct ObsF {
 }
 
 #[arael::model]
-#[arael(root, f32)]
+#[arael(root, f32, eliminate_first(points))]
 struct SceneF {
     cameras: refs::Vec<CameraF>,
     points: refs::Vec<PointF>,
@@ -102,7 +102,7 @@ struct SceneF {
 
 // ---------------------------------------------------------------- runners
 
-fn build_f64(ds: &Dataset) -> Scene {
+pub fn build_f64(ds: &Dataset) -> Scene {
     let mut s = Scene {
         cameras: refs::Vec::new(),
         points: refs::Vec::new(),
@@ -220,12 +220,35 @@ fn nielsen() -> bool {
     std::env::var("ARAEL_DRIVER").map_or(true, |v| v != "fixed")
 }
 
+// The two arael linear-solver routes the benchmark compares.
+//
+// `sparse` factorizes the full camera+point system with faer (no
+// elimination hint: ordering the points first was measured to HURT on
+// BAL, unlike the slam benchmark). `schur` marginalizes the points on
+// every damped solve and factorizes only the camera system. Which wins
+// depends on the camera count -- see the README.
 fn solve64(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmConfig<f64>) -> arael::simple_lm::LmResult<f64> {
     arael::simple_lm::solve_sparse_faer(params, s, cfg)
 }
 
+fn solve64_schur(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmConfig<f64>) -> arael::simple_lm::LmResult<f64> {
+    let mut solver = arael::simple_lm::SparseFaerSchur::new();
+    for r in arael::simple_lm::RootProblem::elimination_hint(s) {
+        solver = solver.with_eliminate_first(r);
+    }
+    arael::simple_lm::lm_solve(params, &mut solver, s, cfg)
+}
+
 fn solve32(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmConfig<f32>) -> arael::simple_lm::LmResult<f32> {
     arael::simple_lm::solve_sparse_faer_f32(params, s, cfg)
+}
+
+fn solve32_schur(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmConfig<f32>) -> arael::simple_lm::LmResult<f32> {
+    let mut solver = arael::simple_lm::SparseFaerSchurF32::new();
+    for r in arael::simple_lm::RootProblem::elimination_hint(s) {
+        solver = solver.with_eliminate_first(r);
+    }
+    arael::simple_lm::lm_solve(params, &mut solver, s, cfg)
 }
 
 fn cfg64(max_iters: usize) -> arael::simple_lm::LmConfig<f64> {
@@ -302,6 +325,10 @@ pub fn run_f64(ds: &Dataset) -> RunOut {
     run_f64_with(ds, solve64)
 }
 
+pub fn run_f64_schur(ds: &Dataset) -> RunOut {
+    run_f64_with(ds, solve64_schur)
+}
+
 /// The CHOLMOD-supernodal row (GPL-licensed module; see the cholmod-gpl
 /// feature warning in the arael Cargo.toml).
 #[cfg(feature = "cholmod-gpl")]
@@ -319,6 +346,13 @@ pub fn run_f64_capped(ds: &Dataset, max_iters: usize) -> Vec<f64> {
     solve64(&params, &mut s, &cfg64(max_iters)).x
 }
 
+pub fn run_f64_schur_capped(ds: &Dataset, max_iters: usize) -> Vec<f64> {
+    let mut s = build_f64(ds);
+    let mut params: Vec<f64> = Vec::new();
+    s.serialize64(&mut params);
+    solve64_schur(&params, &mut s, &cfg64(max_iters)).x
+}
+
 #[cfg(feature = "cholmod-gpl")]
 pub fn run_f64_supernodal_capped(ds: &Dataset, max_iters: usize) -> Vec<f64> {
     let mut s = build_f64(ds);
@@ -334,17 +368,35 @@ pub fn run_f32_capped(ds: &Dataset, max_iters: usize) -> Vec<f32> {
     solve32(&params, &mut s, &cfg32(max_iters)).x
 }
 
+pub fn run_f32_schur_capped(ds: &Dataset, max_iters: usize) -> Vec<f32> {
+    let mut s = build_f32(ds);
+    let mut params: Vec<f32> = Vec::new();
+    s.serialize32(&mut params);
+    solve32_schur(&params, &mut s, &cfg32(max_iters)).x
+}
+
+type Solve32 = fn(&[f32], &mut SceneF, &arael::simple_lm::LmConfig<f32>)
+    -> arael::simple_lm::LmResult<f32>;
+
 pub fn run_f32(ds: &Dataset) -> RunOut {
+    run_f32_with(ds, solve32)
+}
+
+pub fn run_f32_schur(ds: &Dataset) -> RunOut {
+    run_f32_with(ds, solve32_schur)
+}
+
+fn run_f32_with(ds: &Dataset, solve: Solve32) -> RunOut {
     let mut s = build_f32(ds);
     let mut params: Vec<f32> = Vec::new();
     s.serialize32(&mut params);
 
     let t0 = std::time::Instant::now();
-    let _ = solve32(&params, &mut s, &cfg32(1));
+    let _ = solve(&params, &mut s, &cfg32(1));
     let first_iter_ms = t0.elapsed().as_secs_f64() * 1e3;
 
     let t0 = std::time::Instant::now();
-    let result = solve32(&params, &mut s, &cfg32(100));
+    let result = solve(&params, &mut s, &cfg32(100));
     let solve_ms = t0.elapsed().as_secs_f64() * 1e3;
     s.deserialize32(&result.x);
     let cameras = s.cameras.iter()

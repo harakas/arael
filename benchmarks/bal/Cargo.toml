@@ -15,6 +15,7 @@ cholmod-gpl = ["arael/cholmod-gpl"]
 
 [dependencies]
 arael = { path = "../.." }
+arael-faer = { path = "../../arael-faer" }
 libc = "0.2"
 
 [profile.release]

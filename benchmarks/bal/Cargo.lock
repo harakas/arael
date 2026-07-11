@@ -15,6 +15,7 @@ dependencies = [
 name = "arael"
 version = "0.7.0"
 dependencies = [
+ "arael-faer",
  "arael-macros",
  "arael-sym",
  "cc",
@@ -27,6 +28,13 @@ dependencies = [
  "rand_distr",
  "serde",
  "web-time",
+]
+
+[[package]]
+name = "arael-faer"
+version = "0.7.0"
+dependencies = [
+ "faer",
 ]
 
 [[package]]
@@ -67,6 +75,7 @@ name = "bal-bench"
 version = "0.1.0"
 dependencies = [
  "arael",
+ "arael-faer",
  "libc",
 ]
 

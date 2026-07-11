@@ -191,6 +191,8 @@ fn main() {
             #[cfg(feature = "cholmod-gpl")]
             "arael_gpl" => { std::hint::black_box(arael_runner::run_f64_supernodal_capped(&ds, iters)); }
             "arael_f32" => { std::hint::black_box(arael_runner::run_f32_capped(&ds, iters)); }
+            "arael_f64_schur" => { std::hint::black_box(arael_runner::run_f64_schur_capped(&ds, iters)); }
+            "arael_f32_schur" => { std::hint::black_box(arael_runner::run_f32_schur_capped(&ds, iters)); }
             other => { eprintln!("unknown BAL_MEMSOLVER {}", other); }
         }
         println!("PEAK_RSS_KB: {}", peak_rss_kb());
@@ -212,7 +214,7 @@ fn main() {
     // README's damping section; ARAEL_LAMBDA0 overrides): 1e-3 on
     // Ladybug-138 (1e-4 plateaus 1.4% high there), 1e-4 elsewhere.
     let datasets = [
-        ("Ladybug-49", "datasets/problem-49-7776-pre.txt", true, "1e-4"),
+        ("Ladybug-49", "datasets/problem-49-7776-pre.txt", true, "1e-5"),
         ("Ladybug-138", "datasets/problem-138-19878-pre.txt", true, "1e-3"),
         ("Ladybug-372", "datasets/problem-372-47423-pre.txt", true, "1e-4"),
     ];
@@ -282,7 +284,7 @@ fn main() {
 
         for round in 0..rounds {
             let a64 = arael_runner::run_f64(&ds);
-            record("arael LM f64", a64.solve_ms, a64.first_iter_ms, a64.iterations,
+            record("arael LM f64 sparse", a64.solve_ms, a64.first_iter_ms, a64.iterations,
                 Some(a64.accepted), 0.0, a64.full_iter_ms, a64.cameras, a64.points,
                 &mut cells, &ds);
             #[cfg(feature = "cholmod-gpl")]
@@ -293,8 +295,16 @@ fn main() {
                     &mut cells, &ds);
             }
             let a32 = arael_runner::run_f32(&ds);
-            record("arael LM f32", a32.solve_ms, a32.first_iter_ms, a32.iterations,
+            record("arael LM f32 sparse", a32.solve_ms, a32.first_iter_ms, a32.iterations,
                 Some(a32.accepted), 0.0, a32.full_iter_ms, a32.cameras, a32.points,
+                &mut cells, &ds);
+            let q64 = arael_runner::run_f64_schur(&ds);
+            record("arael LM f64 schur", q64.solve_ms, q64.first_iter_ms, q64.iterations,
+                Some(q64.accepted), 0.0, q64.full_iter_ms, q64.cameras, q64.points,
+                &mut cells, &ds);
+            let q32 = arael_runner::run_f32_schur(&ds);
+            record("arael LM f32 schur", q32.solve_ms, q32.first_iter_ms, q32.iterations,
+                Some(q32.accepted), 0.0, q32.full_iter_ms, q32.cameras, q32.points,
                 &mut cells, &ds);
             if ceres_available {
                 let solvers: &[&str] = if *dense_schur_ok {
@@ -324,9 +334,11 @@ fn main() {
         if measure_mem {
             let mem_key = |label: &str| -> Option<&'static str> {
                 match label {
-                    "arael LM f64" => Some("arael_f64"),
+                    "arael LM f64 sparse" => Some("arael_f64"),
                     "arael LM f64 cholmod-gpl" => Some("arael_gpl"),
-                    "arael LM f32" => Some("arael_f32"),
+                    "arael LM f32 sparse" => Some("arael_f32"),
+                    "arael LM f64 schur" => Some("arael_f64_schur"),
+                    "arael LM f32 schur" => Some("arael_f32_schur"),
                     _ => None,
                 }
             };
@@ -374,7 +386,7 @@ fn main() {
         }
 
         for (label, c) in &cells {
-            if label == "arael LM f64" {
+            if label == "arael LM f64 sparse" {
                 assert!(converged(c), "{} failed to converge: {} vs best {}", label, c.cost, best);
             }
         }
