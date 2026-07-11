@@ -20,18 +20,17 @@
 # kind: "arael" solid blue bar, "other" neutral bar.
 PANELS = [
     ("Landmark SLAM -- 300 poses, 5.4k params (Apple M4 Pro)", 200.0, 50.0, 1, [
-        ("arael (f32)", 58.47, "arael"),
-        ("arael (f64)", 73.46, "arael"),
-        ("g2o (LM)", 79.46, "other"),
-        ("arael (f64 cholmod-gpl)", 89.55, "arael"),
-        ("Ceres (LM)", 104.32, "other"),
-        ("SymForce (f64)", 123.73, "other"),
-        ("factrs (LM)", 159.30, "other"),
-        ("GTSAM (LM)", 176.94, "other"),
+        ("arael (f32)", 36.07, "arael"),
+        ("arael (f64)", 50.51, "arael"),
+        ("g2o (LM)", 78.66, "other"),
+        ("Ceres (LM)", 102.70, "other"),
+        ("SymForce (f64)", 121.84, "other"),
+        ("factrs (LM)", 158.67, "other"),
+        ("GTSAM (LM)", 176.27, "other"),
     ]),
     ("Localization -- 60 poses, 360 params (Raspberry Pi 5)", 20.0, 5.0, 2, [
-        ("arael (f32 band)", 1.03, "arael"),
-        ("arael (f64 band)", 1.09, "arael"),
+        ("arael (f32)", 1.03, "arael"),
+        ("arael (f64)", 1.09, "arael"),
         ("SymForce (f32)", 4.82, "other"),
         ("Ceres (LM)", 5.04, "other"),
         ("g2o (LM)", 5.58, "other"),
@@ -47,10 +46,9 @@ SUBTITLE = ("Landmark SLAM on a desktop core, fixed-map localization on an "
 FOOT = [
     ("Every bar reaches its problem's common optimum, cross-validated "
      "against all systems."),
-    ("arael cholmod-gpl is the optional CHOLMOD supernodal backend "
-     "(GPL-licensed); the localization rows use arael's band-Cholesky "
-     "solver on the block-tridiagonal Hessian."),
-    ("tiny-solver omitted for scale: 322.3 ms/iter on the SLAM panel, "
+    ("arael solves the SLAM panel with its Schur solver, the localization "
+     "panel with its band solver."),
+    ("tiny-solver omitted for scale: 329.5 ms/iter on the SLAM panel, "
      "88.5 ms/iter on the Pi 5."),
 ]
 
