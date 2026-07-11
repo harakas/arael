@@ -25,7 +25,7 @@ use core::iter;
 use faer::sparse::{SparseColMat, SparseColMatRef, SymbolicSparseColMat};
 use faer::traits::ComplexField;
 use faer::traits::math_utils::zero;
-use faer::{Index, MatMut, MatRef};
+use faer::{Index, Mat, MatMut, MatRef};
 
 /// structure (pattern + partitions) of a variable-block sparse
 /// column-major matrix. see the [module docs](self) for the layout.
@@ -421,6 +421,28 @@ impl<I: Index, T: ComplexField> SparseBlockColMat<I, T> {
         )
     }
 
+    /// expands to a dense matrix (missing tiles stay zero). literal
+    /// expansion of the storage: upper-only symmetric storage is NOT
+    /// mirrored -- callers mirror themselves if they need the full
+    /// matrix.
+    pub fn to_dense(&self) -> Mat<T> {
+        let sym = &self.symbolic;
+        let mut out = Mat::<T>::zeros(sym.nrows(), sym.ncols());
+        for j in 0..sym.nblk_cols() {
+            let cols = sym.col_span(j);
+            for b in sym.col_range(j) {
+                let rows = sym.row_span(sym.blk_row(b));
+                let blk = self.block(b);
+                for (jj, cj) in cols.clone().enumerate() {
+                    for (ii, ri) in rows.clone().enumerate() {
+                        out[(ri, cj)] = blk[(ii, jj)].clone();
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// gathers a scalar CSC matrix into block form under the given
     /// partitions. a tile is stored iff any scalar entry falls inside
     /// it; unset scalars within a stored tile are zero.
@@ -657,6 +679,26 @@ mod tests {
         let got: Vec<usize> =
             m.col_blocks(3).map(|(_, r, _)| r).collect();
         assert_eq!(got, vec![0, 3]);
+    }
+
+    #[test]
+    fn to_dense_matches_csc_expansion() {
+        let m = doodle();
+        let dense = m.to_dense();
+        assert_eq!(dense.nrows(), m.symbolic().nrows());
+        assert_eq!(dense.ncols(), m.symbolic().ncols());
+        // reference: expand through the scalar CSC
+        let csc = m.to_csc();
+        let mut full = Mat::<f64>::zeros(csc.nrows(), csc.ncols());
+        for j in 0..csc.ncols() {
+            for (i, v) in iter::zip(csc.row_idx_of_col(j), csc.val_of_col(j)) {
+                full[(i, j)] = *v;
+            }
+        }
+        assert_eq!(dense, full);
+        // a coordinate inside a stored tile and one outside any tile
+        assert_eq!(dense[(0, 4)], 15.);
+        assert_eq!(dense[(4, 0)], 0.);
     }
 
     #[test]
