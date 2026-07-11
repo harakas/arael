@@ -107,6 +107,15 @@ static RunResult solve(Bal b, ceres::LinearSolverType linsolver, int max_iters,
     if (cams_out) *cams_out = b.cameras;
     if (points_out) *points_out = b.points;
     double full_iter_ms = -1.0;
+    if (getenv("CERES_STATS")) {
+        fprintf(stderr, "ceres stats: linear_solver %.1f ms/solve (%d solves), "
+                "jacobian %.1f ms, residual %.1f ms, total %.1f s\n",
+                1e3 * summary.linear_solver_time_in_seconds / std::max(1, summary.num_linear_solves),
+                summary.num_linear_solves,
+                1e3 * summary.jacobian_evaluation_time_in_seconds / std::max(1, summary.num_jacobian_evaluations),
+                1e3 * summary.residual_evaluation_time_in_seconds / std::max(1, summary.num_residual_evaluations),
+                summary.total_time_in_seconds);
+    }
     if (summary.num_jacobian_evaluations > 0 && summary.num_linear_solves > 0 &&
         summary.num_residual_evaluations > 0) {
         full_iter_ms = 1e3 *
