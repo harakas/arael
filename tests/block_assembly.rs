@@ -539,3 +539,84 @@ fn fixed_param_full_matrix() {
     assert_eq!(w.landmarks[Ref::<Landmark>::new(3)].x.value, 1.8);
     assert_eq!(w.landmarks[Ref::<Landmark>::new(3)].y.value, 1.15);
 }
+
+/// The Schur-complement backend (landmarks eliminated every damped
+/// solve, only the pose system factorized) must land on the same
+/// optimum as the plain sparse backend.
+#[test]
+fn schur_solve_matches_sparse() {
+    use arael::simple_lm::{LmConfig, SparseFaerSchur};
+    let cfg = LmConfig { max_iters: 50, ..Default::default() };
+
+    let mut ws = build();
+    let rs = ws.solve_sparse(&cfg);
+
+    let mut wq = build();
+    let mut params = Vec::new();
+    RootProblem::serialize(&mut wq, &mut params); // populates block indices
+    let lm_start = RootProblem::param_block_spans(&wq)[N_POSES].0 as usize;
+    let mut solver = SparseFaerSchur::new().with_eliminate_first(lm_start..params.len());
+    let rq = wq.solve_with(&mut solver, &cfg);
+
+    assert!(
+        (rs.end_cost - rq.end_cost).abs() <= 1e-10 * (1.0 + rs.end_cost),
+        "sparse {} vs schur {}",
+        rs.end_cost,
+        rq.end_cost
+    );
+    for i in 0..N_POSES {
+        let (a, b) = (&ws.poses[Ref::<Pose>::new(i as u32)], &wq.poses[Ref::<Pose>::new(i as u32)]);
+        assert!((a.x.value - b.x.value).abs() < 1e-8, "pose {} x", i);
+        assert!((a.y.value - b.y.value).abs() < 1e-8, "pose {} y", i);
+    }
+    for j in 0..N_LANDMARKS {
+        let (a, b) = (
+            &ws.landmarks[Ref::<Landmark>::new(j as u32)],
+            &wq.landmarks[Ref::<Landmark>::new(j as u32)],
+        );
+        assert!((a.x.value - b.x.value).abs() < 1e-8, "landmark {} x", j);
+        assert!((a.y.value - b.y.value).abs() < 1e-8, "landmark {} y", j);
+    }
+}
+
+/// Schur backend under partially fixed parameters (shrunken blocks on
+/// both sides of the elimination), against the dense reference.
+#[test]
+fn schur_solve_with_fixed_params() {
+    use arael::simple_lm::{LmConfig, SparseFaerSchur};
+    let cfg = LmConfig { max_iters: 50, ..Default::default() };
+
+    let fix = |w: &mut World| {
+        w.poses[Ref::<Pose>::new(0)].x = Param::fixed(0.25);
+        w.landmarks[Ref::<Landmark>::new(4)].y = Param::fixed(1.3);
+    };
+
+    let mut wd = build();
+    fix(&mut wd);
+    let rd = wd.solve_dense(&cfg);
+
+    let mut wq = build();
+    fix(&mut wq);
+    let mut params = Vec::new();
+    RootProblem::serialize(&mut wq, &mut params); // populates block indices
+    let lm_start = RootProblem::param_block_spans(&wq)[N_POSES].0 as usize;
+    let mut solver = SparseFaerSchur::new().with_eliminate_first(lm_start..params.len());
+    let rq = wq.solve_with(&mut solver, &cfg);
+
+    assert!(
+        (rd.end_cost - rq.end_cost).abs() <= 1e-10 * (1.0 + rd.end_cost),
+        "dense {} vs schur {}",
+        rd.end_cost,
+        rq.end_cost
+    );
+    assert_eq!(wq.poses[Ref::<Pose>::new(0)].x.value, 0.25);
+    assert_eq!(wq.landmarks[Ref::<Landmark>::new(4)].y.value, 1.3);
+    for j in 0..N_LANDMARKS {
+        let (a, b) = (
+            &wd.landmarks[Ref::<Landmark>::new(j as u32)],
+            &wq.landmarks[Ref::<Landmark>::new(j as u32)],
+        );
+        assert!((a.x.value - b.x.value).abs() < 1e-8, "landmark {} x", j);
+        assert!((a.y.value - b.y.value).abs() < 1e-8, "landmark {} y", j);
+    }
+}

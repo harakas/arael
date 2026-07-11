@@ -27,6 +27,7 @@ cholmod-gpl = ["cholmod"]
 [dependencies]
 arael-macros = { version = "0.7.0", path = "arael-macros" }
 arael-sym = { version = "0.7.0", path = "arael-sym" }
+arael-faer = { version = "0.7.0", path = "arael-faer" }
 inventory = "0.3"
 num = "0.4"
 nalgebra = "0.33"
@@ -44,7 +45,6 @@ web-time = "1"
 cc = { version = "1", optional = true }
 
 [dev-dependencies]
-arael-faer = { path = "arael-faer", version = "0.7.0" }
 criterion = "0.5"
 serde_json = "1"
 image = "0.25"
