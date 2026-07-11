@@ -289,6 +289,43 @@ impl<I: Index> SymbolicSparseBlockColMat<I> {
         (this, positions)
     }
 
+    /// row partition: block-row `r` spans scalar rows
+    /// `row_part()[r]..row_part()[r + 1]`
+    #[inline]
+    pub fn row_part(&self) -> &[I] {
+        &self.row_part
+    }
+
+    /// column partition: block-column `j` spans scalar columns
+    /// `col_part()[j]..col_part()[j + 1]`
+    #[inline]
+    pub fn col_part(&self) -> &[I] {
+        &self.col_part
+    }
+
+    /// scalar-CSC pattern of the tile expansion (the structure half of
+    /// [`SparseBlockColMat::to_csc`]): `(col_ptr, row_idx)`, rows
+    /// sorted within each column. blocks are sorted by block-row and
+    /// their scalar rows are contiguous, so sortedness comes free.
+    /// pair with [`SparseBlockColMat::csc_vals_into`] to refill values
+    /// each iteration without rebuilding the pattern.
+    pub fn csc_pattern(&self) -> (Vec<I>, Vec<I>) {
+        let mut col_ptr = Vec::with_capacity(self.ncols() + 1);
+        let mut row_idx = Vec::with_capacity(self.val_count());
+        col_ptr.push(I::truncate(0));
+        for j in 0..self.nblk_cols() {
+            for _ in 0..self.col_span(j).len() {
+                for b in self.col_range(j) {
+                    for i in self.row_span(self.blk_row(b)) {
+                        row_idx.push(I::truncate(i));
+                    }
+                }
+                col_ptr.push(I::truncate(row_idx.len()));
+            }
+        }
+        (col_ptr, row_idx)
+    }
+
     /// partition and pattern arrays: `(row_part, col_part, blk_col_ptr,
     /// blk_row_idx, val_ptr)`
     #[inline]
@@ -386,39 +423,38 @@ impl<I: Index, T: ComplexField> SparseBlockColMat<I, T> {
     /// within each column; only stored tiles contribute entries)
     pub fn to_csc(&self) -> SparseColMat<I, T> {
         let sym = &self.symbolic;
-        let nrows = sym.nrows();
-        let ncols = sym.ncols();
-
-        let mut col_ptr = Vec::with_capacity(ncols + 1);
-        let mut row_idx = Vec::with_capacity(sym.val_count());
-        let mut vals = Vec::with_capacity(sym.val_count());
-
-        col_ptr.push(I::truncate(0));
-        for j in 0..sym.nblk_cols() {
-            let col_width = sym.col_span(j).len();
-            for local_col in 0..col_width {
-                // blocks are sorted by block-row and their scalar rows
-                // are contiguous, so scalar rows come out sorted
-                for b in sym.col_range(j) {
-                    let rows = sym.row_span(sym.blk_row(b));
-                    let payload = &self.vals[sym.val_range(b)];
-                    let col_slice =
-                        &payload[local_col * rows.len()..][..rows.len()];
-                    for (i, v) in iter::zip(rows, col_slice) {
-                        row_idx.push(I::truncate(i));
-                        vals.push(v.clone());
-                    }
-                }
-                col_ptr.push(I::truncate(row_idx.len()));
-            }
-        }
-
+        let (col_ptr, row_idx) = sym.csc_pattern();
+        let mut vals = vec![zero::<T>(); sym.val_count()];
+        self.csc_vals_into(&mut vals);
         SparseColMat::new(
             SymbolicSparseColMat::new_checked(
-                nrows, ncols, col_ptr, None, row_idx,
+                sym.nrows(), sym.ncols(), col_ptr, None, row_idx,
             ),
             vals,
         )
+    }
+
+    /// refills a scalar-CSC value buffer laid out exactly as
+    /// [`to_csc`](Self::to_csc) produces (`out.len()` must equal
+    /// [`val_count`](SymbolicSparseBlockColMat::val_count)). the
+    /// per-iteration companion to a one-time `to_csc`: the pattern is
+    /// fixed, so later iterations only need the values re-gathered.
+    pub fn csc_vals_into(&self, out: &mut [T]) {
+        let sym = &self.symbolic;
+        assert_eq!(out.len(), sym.val_count());
+        let mut k = 0;
+        for j in 0..sym.nblk_cols() {
+            let col_width = sym.col_span(j).len();
+            for local_col in 0..col_width {
+                for b in sym.col_range(j) {
+                    let rows = sym.row_span(sym.blk_row(b)).len();
+                    let payload = &self.vals[sym.val_range(b)];
+                    let col_slice = &payload[local_col * rows..][..rows];
+                    out[k..k + rows].clone_from_slice(col_slice);
+                    k += rows;
+                }
+            }
+        }
     }
 
     /// expands to a dense matrix (missing tiles stay zero). literal
@@ -679,6 +715,20 @@ mod tests {
         let got: Vec<usize> =
             m.col_blocks(3).map(|(_, r, _)| r).collect();
         assert_eq!(got, vec![0, 3]);
+    }
+
+    #[test]
+    fn csc_vals_refill_matches_to_csc() {
+        let mut m = doodle();
+        let csc0 = m.to_csc();
+        // perturb the values, refill, and compare against a fresh to_csc
+        for (k, v) in m.vals_mut().iter_mut().enumerate() {
+            *v += k as f64;
+        }
+        let mut vals = vec![0.0; csc0.val().len()];
+        m.csc_vals_into(&mut vals);
+        assert_eq!(vals, m.to_csc().val());
+        assert_ne!(vals, csc0.val());
     }
 
     #[test]

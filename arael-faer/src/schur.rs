@@ -730,6 +730,82 @@ pub fn schur_reduce<I: Index, T: SchurReal>(
     Ok(())
 }
 
+/// back-substitution after the reduced solve: recovers the eliminated
+/// blocks and scatters everything into full-length coordinates.
+///
+/// With `x_kept` solving `S x_kept = bk'` (kept-compacted order), each
+/// eliminated block `e` is recovered independently as
+///
+/// ```text
+/// x_e = D_e^-1 (b_e - sum_a C_a^T x_a)
+/// ```
+///
+/// over its observers `a` -- the same coupling tiles as the reduction,
+/// applied in the OPPOSITE orientation (the forward pass applies
+/// `C_a`, back-substitution applies `C_a^T`, so the storage-orientation
+/// flag simply flips). `rhs` is the ORIGINAL full right-hand side;
+/// `x_full` (length `h.nrows()`) receives the kept slices of `x_kept`
+/// and the recovered eliminated blocks. `D_e` is re-factored here --
+/// caching the reduce-time factors in [`SchurContext`] is a deferred
+/// optimization (the factor stage costs ~1% of a reduction).
+pub fn schur_backsub<I: Index, T: SchurReal>(
+    sym: &SchurSymbolic<I>,
+    h: &SparseBlockColMat<I, T>,
+    rhs: &[T],
+    x_kept: &[T],
+    ctx: &mut SchurContext<T>,
+    x_full: &mut [T],
+) -> Result<(), SchurError> {
+    let hs = h.symbolic();
+    assert_eq!(rhs.len(), hs.nrows());
+    assert_eq!(x_full.len(), hs.nrows());
+    assert_eq!(x_kept.len(), sym.s.nrows());
+    ctx.dwork.resize(sym.max_ew * sym.max_ew, T::ZERO);
+    ctx.panel.resize(sym.max_panel.max(sym.max_ew), T::ZERO);
+
+    // kept blocks scatter back to their original spans first: the
+    // eliminated recovery below reads them out of x_full
+    for (k, &orig) in sym.kept.iter().enumerate() {
+        let dst = hs.col_span(orig.zx());
+        let src = sym.s.col_span(k);
+        x_full[dst].copy_from_slice(&x_kept[src]);
+    }
+
+    for slot in 0..sym.elim_diag.len() {
+        let d_blk = sym.elim_diag[slot].zx();
+        let e = hs.blk_row(d_blk);
+        let we = hs.col_span(e).len();
+
+        // t = b_e - sum_a C_a^T x_a
+        let t = &mut ctx.panel[..we];
+        t.copy_from_slice(&rhs[hs.col_span(e)]);
+        for o in sym.elim_obs_ptr[slot].zx()..sym.elim_obs_ptr[slot + 1].zx() {
+            let tile = &h.vals()[hs.val_range(sym.obs_hblk[o].zx())];
+            let a = sym.obs_block[o].zx();
+            let wa = hs.col_span(a).len();
+            let xa = &x_full[hs.col_span(a)];
+            gemm_sub(t, tile, !sym.obs_trans[o], we, wa, xa, 1);
+        }
+
+        // x_e = D_e^-1 t (same two triangular solves as the reduction)
+        let dwork = &mut ctx.dwork[..we * we];
+        let dtile = &h.vals()[hs.val_range(d_blk)];
+        for j in 0..we {
+            for i in 0..=j {
+                let v = dtile[i + j * we];
+                dwork[i + j * we] = v;
+                dwork[j + i * we] = v;
+            }
+        }
+        if !llt_in_place(dwork, we) {
+            return Err(SchurError::NotPositiveDefinite { block: e });
+        }
+        llt_solve_panel(dwork, t, we, 1);
+        x_full[hs.col_span(e)].copy_from_slice(t);
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -917,6 +993,28 @@ mod tests {
                 (rk[i] - rk_ref[i]).abs() <= 1e-11 * (1.0 + rk_ref[i].abs()),
                 "rhs[{}]: {} vs {}",
                 i, rk[i], rk_ref[i]
+            );
+        }
+
+        // full-solve identity: reduce -> solve S -> backsub must
+        // reproduce the direct full-system solve
+        let mut x_ref = rhs.to_vec();
+        let mut hfull = full.clone();
+        assert!(llt_in_place(&mut hfull, n));
+        llt_solve_panel(&hfull, &mut x_ref, n, 1);
+
+        let mut xk = rk.clone();
+        let mut sfull = s_ref.clone();
+        assert!(llt_in_place(&mut sfull, nk));
+        llt_solve_panel(&sfull, &mut xk, nk, 1);
+
+        let mut x_full = vec![0.0; n];
+        schur_backsub(&sym, h, rhs, &xk, &mut ctx, &mut x_full).unwrap();
+        for i in 0..n {
+            assert!(
+                (x_full[i] - x_ref[i]).abs() <= 1e-9 * (1.0 + x_ref[i].abs()),
+                "x[{}]: {} vs {}",
+                i, x_full[i], x_ref[i]
             );
         }
     }
