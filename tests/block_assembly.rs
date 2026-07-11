@@ -620,3 +620,74 @@ fn schur_solve_with_fixed_params() {
         assert!((a.y.value - b.y.value).abs() < 1e-8, "landmark {} y", j);
     }
 }
+
+/// Every scalar-CSC backend shares one first-call assembly
+/// (assemble_first_csc), so the tile-expanded pattern -- which carries
+/// the blocks' structural zeros as explicit entries -- must be as
+/// solvable for Eigen and CHOLMOD as it is for faer. Each backend must
+/// land on the dense solve's optimum.
+#[cfg(feature = "eigen")]
+#[test]
+fn eigen_backend_matches_dense() {
+    use arael::simple_lm::{solve_sparse_eigen, LmConfig};
+    let cfg = LmConfig { max_iters: 50, ..Default::default() };
+
+    let mut wd = build();
+    let rd = wd.solve_dense(&cfg);
+
+    let mut we = build();
+    let mut params = Vec::new();
+    RootProblem::serialize(&mut we, &mut params);
+    let re = solve_sparse_eigen(&params, &mut we, &cfg);
+
+    assert!(
+        (rd.end_cost - re.end_cost).abs() <= 1e-10 * (1.0 + rd.end_cost),
+        "dense {} vs eigen {}",
+        rd.end_cost,
+        re.end_cost
+    );
+}
+
+#[cfg(feature = "cholmod")]
+#[test]
+fn cholmod_backend_matches_dense() {
+    use arael::simple_lm::{solve_sparse_cholmod, LmConfig};
+    let cfg = LmConfig { max_iters: 50, ..Default::default() };
+
+    let mut wd = build();
+    let rd = wd.solve_dense(&cfg);
+
+    let mut wc = build();
+    let mut params = Vec::new();
+    RootProblem::serialize(&mut wc, &mut params);
+    let rc = solve_sparse_cholmod(&params, &mut wc, &cfg);
+
+    assert!(
+        (rd.end_cost - rc.end_cost).abs() <= 1e-10 * (1.0 + rd.end_cost),
+        "dense {} vs cholmod {}",
+        rd.end_cost,
+        rc.end_cost
+    );
+}
+
+#[cfg(feature = "cholmod-gpl")]
+#[test]
+fn cholmod_supernodal_backend_matches_dense() {
+    use arael::simple_lm::{solve_sparse_cholmod_supernodal, LmConfig};
+    let cfg = LmConfig { max_iters: 50, ..Default::default() };
+
+    let mut wd = build();
+    let rd = wd.solve_dense(&cfg);
+
+    let mut wc = build();
+    let mut params = Vec::new();
+    RootProblem::serialize(&mut wc, &mut params);
+    let rc = solve_sparse_cholmod_supernodal(&params, &mut wc, &cfg);
+
+    assert!(
+        (rd.end_cost - rc.end_cost).abs() <= 1e-10 * (1.0 + rd.end_cost),
+        "dense {} vs cholmod supernodal {}",
+        rd.end_cost,
+        rc.end_cost
+    );
+}
