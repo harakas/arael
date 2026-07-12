@@ -2454,6 +2454,10 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         // and the declined route needs exactly this object.
         let mut declined_llt: Option<faer::sparse::linalg::cholesky::SymbolicCholesky<usize>> = None;
         let mut declined_pat: Option<(Vec<usize>, Vec<usize>)> = None;
+        // The reduced system's symbolic factorization, when the gate built one:
+        // it is exactly what the reduction needs next, so it is kept rather
+        // than recomputed.
+        let mut reduced_llt: Option<faer::sparse::linalg::cholesky::SymbolicCholesky<usize>> = None;
         if let SchurPolicy::Auto { fill_ratio_max } = self.policy
             && !eliminated.is_empty()
         {
@@ -2483,6 +2487,8 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                     eliminated.clear();
                     declined_llt = Some(hl);
                     declined_pat = Some(h_pat);
+                } else {
+                    reduced_llt = Some(sl);
                 }
             }
         }
@@ -2572,16 +2578,18 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         let s = schur.alloc_s::<T>();
         {
             use faer::sparse::linalg::cholesky::*;
-            let sym_ref = faer::sparse::SymbolicSparseColMatRef::new_checked(
-                nk, nk, &self.s_col_ptr, None, &self.s_row_idx,
-            );
-            let llt_symbolic = factorize_symbolic_cholesky(
-                sym_ref,
-                faer::Side::Upper,
-                ordering_for(&self.s_col_ptr, nk),
-                CholeskySymbolicParams::default(),
-            )
-            .expect("symbolic factorization of the reduced system failed");
+            let llt_symbolic = reduced_llt.unwrap_or_else(|| {
+                let sym_ref = faer::sparse::SymbolicSparseColMatRef::new_checked(
+                    nk, nk, &self.s_col_ptr, None, &self.s_row_idx,
+                );
+                factorize_symbolic_cholesky(
+                    sym_ref,
+                    faer::Side::Upper,
+                    ordering_for(&self.s_col_ptr, nk),
+                    CholeskySymbolicParams::default(),
+                )
+                .expect("symbolic factorization of the reduced system failed")
+            });
             self.size_llt_buffers(&llt_symbolic);
             self.llt_symbolic = Some(llt_symbolic);
         }
