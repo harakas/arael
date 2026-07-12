@@ -214,11 +214,11 @@ pub fn run_f64(ds: &Dataset3) -> RunOut3 {
     g.serialize64(&mut params);
 
     let t0 = std::time::Instant::now();
-    let _ = arael::simple_lm::solve_sparse_faer(&params, &mut g, &crate::arael_runner::cfg64_with_lambda(1, lambda0_3d()));
+    let _ = crate::arael_runner::solve_f64(&params, &mut g, &crate::arael_runner::cfg64_with_lambda(1, lambda0_3d()));
     let first_iter_ms = t0.elapsed().as_secs_f64() * 1e3;
 
     let t0 = std::time::Instant::now();
-    let result = arael::simple_lm::solve_sparse_faer(&params, &mut g, &crate::arael_runner::cfg64_with_lambda(100, lambda0_3d()));
+    let result = crate::arael_runner::solve_f64(&params, &mut g, &crate::arael_runner::cfg64_with_lambda(100, lambda0_3d()));
     let solve_ms = t0.elapsed().as_secs_f64() * 1e3;
     g.deserialize64(&result.x);
     let poses = g.poses.iter()
@@ -347,11 +347,11 @@ pub fn run_f32(ds: &Dataset3) -> RunOut3 {
     g.serialize32(&mut params);
 
     let t0 = std::time::Instant::now();
-    let _ = arael::simple_lm::solve_sparse_faer_f32(&params, &mut g, &crate::arael_runner::cfg32_with_lambda(1, lambda0_3d() as f32));
+    let _ = crate::arael_runner::solve_f32(&params, &mut g, &crate::arael_runner::cfg32_with_lambda(1, lambda0_3d() as f32));
     let first_iter_ms = t0.elapsed().as_secs_f64() * 1e3;
 
     let t0 = std::time::Instant::now();
-    let result = arael::simple_lm::solve_sparse_faer_f32(&params, &mut g, &crate::arael_runner::cfg32_with_lambda(100, lambda0_3d() as f32));
+    let result = crate::arael_runner::solve_f32(&params, &mut g, &crate::arael_runner::cfg32_with_lambda(100, lambda0_3d() as f32));
     let solve_ms = t0.elapsed().as_secs_f64() * 1e3;
     g.deserialize32(&result.x);
     let poses = g.poses.iter()

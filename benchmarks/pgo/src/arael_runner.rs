@@ -152,6 +152,47 @@ fn build_f32(ds: &Dataset) -> GraphF {
     g
 }
 
+/// PGO_ORDERING=nd factorizes the whole system under a nested-dissection
+/// ordering instead of AMD. On parking-garage -- a 3D pose graph dense enough
+/// that AMD's ordering leaves faer no supernodes worth having -- it is worth a
+/// lot; on the sparser graphs it is not. Default stays AMD.
+fn ordering() -> arael::simple_lm::FaerOrdering {
+    if std::env::var("PGO_ORDERING").as_deref() == Ok("nd") {
+        arael::simple_lm::FaerOrdering::NestedDissection
+    } else {
+        arael::simple_lm::FaerOrdering::Auto
+    }
+}
+
+pub fn solve_f64<P: arael::simple_lm::LmProblem<f64>>(
+    params: &[f64],
+    p: &mut P,
+    cfg: &arael::simple_lm::LmConfig<f64>,
+) -> arael::simple_lm::LmResult<f64> {
+    let mut solver = arael::simple_lm::SparseFaer::new().with_ordering(ordering());
+    let r = arael::simple_lm::lm_solve(params, &mut solver, p, cfg);
+    if let Some(t) = &r.timing {
+        eprintln!(
+            "  [timing] total {:.1} ms = assembly {:.1} + linear solve {:.1} (first assembly {:.1}), {} iters",
+            t.total.as_secs_f64() * 1e3,
+            t.assembly.as_secs_f64() * 1e3,
+            t.linear_solve.as_secs_f64() * 1e3,
+            t.first_assembly.as_secs_f64() * 1e3,
+            r.iterations,
+        );
+    }
+    r
+}
+
+pub fn solve_f32<P: arael::simple_lm::LmProblem<f32>>(
+    params: &[f32],
+    p: &mut P,
+    cfg: &arael::simple_lm::LmConfig<f32>,
+) -> arael::simple_lm::LmResult<f32> {
+    let mut solver = arael::simple_lm::SparseFaerF32::new().with_ordering(ordering());
+    arael::simple_lm::lm_solve(params, &mut solver, p, cfg)
+}
+
 pub struct RunOut {
     pub solve_ms: f64,
     pub first_iter_ms: f64,
@@ -182,6 +223,8 @@ pub(crate) fn cfg64(max_iters: usize) -> arael::simple_lm::LmConfig<f64> {
 
 pub(crate) fn cfg64_with_lambda(max_iters: usize, initial_lambda: f64) -> arael::simple_lm::LmConfig<f64> {
     arael::simple_lm::LmConfig {
+        verbose: std::env::var("PGO_VERBOSE").is_ok(),
+        gather_timing: std::env::var("PGO_TIMING").is_ok(),
         abs_precision: 1e-5,
         rel_precision: 1e-5,
         patience: 1,
@@ -214,11 +257,11 @@ pub fn run_f64(ds: &Dataset) -> RunOut {
     // First-iteration time: a fresh solve capped at one iteration
     // (setup + first assembly + symbolic + numeric factorization + step).
     let t0 = std::time::Instant::now();
-    let _ = arael::simple_lm::solve_sparse_faer(&params, &mut g, &cfg64(1));
+    let _ = solve_f64(&params, &mut g, &cfg64(1));
     let first_iter_ms = t0.elapsed().as_secs_f64() * 1e3;
 
     let t0 = std::time::Instant::now();
-    let result = arael::simple_lm::solve_sparse_faer(&params, &mut g, &cfg64(100));
+    let result = solve_f64(&params, &mut g, &cfg64(100));
     let solve_ms = t0.elapsed().as_secs_f64() * 1e3;
     g.deserialize64(&result.x);
     let poses = g.poses.iter()
@@ -238,11 +281,11 @@ pub fn run_f32(ds: &Dataset) -> RunOut {
     g.serialize32(&mut params);
 
     let t0 = std::time::Instant::now();
-    let _ = arael::simple_lm::solve_sparse_faer_f32(&params, &mut g, &cfg32(1));
+    let _ = solve_f32(&params, &mut g, &cfg32(1));
     let first_iter_ms = t0.elapsed().as_secs_f64() * 1e3;
 
     let t0 = std::time::Instant::now();
-    let result = arael::simple_lm::solve_sparse_faer_f32(&params, &mut g, &cfg32(100));
+    let result = solve_f32(&params, &mut g, &cfg32(100));
     let solve_ms = t0.elapsed().as_secs_f64() * 1e3;
     g.deserialize32(&result.x);
     let poses = g.poses.iter()

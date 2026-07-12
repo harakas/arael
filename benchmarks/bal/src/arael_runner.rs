@@ -246,7 +246,18 @@ fn solve64_schur(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmConfig
     } else {
         arael::simple_lm::SchurPolicy::Force
     };
-    let mut solver = arael::simple_lm::SparseFaer::new().with_policy(policy);
+    // Nested dissection on the reduced camera system: a 3D point makes a
+    // clique of the cameras that see it, and AMD drowns in cliques. At
+    // Ladybug-1723 it factorizes S in 1508 ms against AMD's 4730.
+    // BAL_ORDERING=amd goes back to AMD for comparison.
+    let ordering = if std::env::var("BAL_ORDERING").as_deref() == Ok("amd") {
+        arael::simple_lm::FaerOrdering::Auto
+    } else {
+        arael::simple_lm::FaerOrdering::NestedDissection
+    };
+    let mut solver = arael::simple_lm::SparseFaer::new()
+        .with_policy(policy)
+        .with_ordering(ordering);
     let r = arael::simple_lm::lm_solve(params, &mut solver, s, cfg);
     if std::env::var("BAL_SCHUR_PLAN").is_ok() {
         if let Some(p) = solver.plan() {
@@ -265,8 +276,14 @@ fn solve32(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmConfig<f32>
 }
 
 fn solve32_schur(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmConfig<f32>) -> arael::simple_lm::LmResult<f32> {
+    let ordering = if std::env::var("BAL_ORDERING").as_deref() == Ok("amd") {
+        arael::simple_lm::FaerOrdering::Auto
+    } else {
+        arael::simple_lm::FaerOrdering::NestedDissection
+    };
     let mut solver = arael::simple_lm::SparseFaerF32::new()
-        .with_policy(arael::simple_lm::SchurPolicy::Force);
+        .with_policy(arael::simple_lm::SchurPolicy::Force)
+        .with_ordering(ordering);
     arael::simple_lm::lm_solve(params, &mut solver, s, cfg)
 }
 
