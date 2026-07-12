@@ -1915,6 +1915,9 @@ pub enum ReducedOrdering {
     /// A general sparse graph. AMD earns its keep -- and on the pose-graph
     /// shape it beats nested dissection outright.
     Amd,
+    /// Nested dissection, because the caller asked for it
+    /// ([`FaerOrdering::NestedDissection`]).
+    Nd,
 }
 
 /// Fill-reducing ordering, but only where there is fill to reduce.
@@ -1958,8 +1961,26 @@ impl ReducedOrdering {
                  so a fill-reducing ordering pays for itself",
                 band, n, density
             ),
+            ReducedOrdering::Nd => std::format!(
+                "nested dissection -- asked for (half-bandwidth {} of {}, {:.0}% dense)",
+                band, n, density
+            ),
         }
     }
+}
+
+/// Symbolic-factorization parameters. The one thing we override is faer's
+/// choice between a supernodal factorization (dense panels, BLAS3) and a
+/// simplicial one (a column at a time): its flop-count heuristic is too
+/// conservative for the systems this crate produces, and picks columns where
+/// panels are 2.6x faster. See [`SparseFaer::with_supernodal`].
+fn chol_params<'a>(supernodal: bool) -> faer::sparse::linalg::cholesky::CholeskySymbolicParams<'a> {
+    let mut p = faer::sparse::linalg::cholesky::CholeskySymbolicParams::default();
+    if supernodal {
+        p.supernodal_flop_ratio_threshold =
+            faer::sparse::linalg::SupernodalThreshold::FORCE_SUPERNODAL;
+    }
+    p
 }
 
 /// Matrix storage for [`SparseFaer`]. The Hessian lives in exactly one of
@@ -2092,6 +2113,18 @@ pub enum FaerOrdering {
     MarginalizeFirst,
     /// Natural order, no permutation.
     Natural,
+    /// Nested dissection ([`arael_faer::nd`]). For a reduced system with no
+    /// band and no small degrees -- bundle adjustment, where every 3D point
+    /// makes a clique of the cameras that see it and minimum degree drowns in
+    /// them. On Ladybug-1723's reduced system it factorizes in 1508 ms against
+    /// AMD's 4730, and beats METIS.
+    ///
+    /// It is a bad ordering for anything else, and badly so: a banded system (a
+    /// SLAM trajectory's reduced system) is 3.3x SLOWER dissected than left in
+    /// its natural order, and a pose graph prefers AMD. There is no
+    /// auto-detection for it yet -- ask for it only when you know the shape of
+    /// your problem.
+    NestedDissection,
 }
 
 impl Default for FaerOrdering {
@@ -2173,6 +2206,7 @@ pub struct SparseFaer<T = f64> {
     model_hint: Vec<std::ops::Range<usize>>,
     policy: SchurPolicy,
     ordering: FaerOrdering,
+    supernodal: bool,
     plan: Option<SchurPlan>,
     // From LmConfig via configure(): explain the decisions below.
     verbose: bool,
@@ -2218,6 +2252,7 @@ impl<T> SparseFaer<T> {
             model_hint: Vec::new(),
             policy: SchurPolicy::default(),
             ordering: FaerOrdering::default(),
+            supernodal: true,
             plan: None,
             verbose: false,
             positions: None,
@@ -2269,6 +2304,21 @@ impl<T> SparseFaer<T> {
     /// system in hand.
     pub fn with_ordering(mut self, ordering: FaerOrdering) -> Self {
         self.ordering = ordering;
+        self
+    }
+
+    /// Factorize supernodally -- gather the factor into dense panels and run
+    /// BLAS3 over them -- rather than one column at a time. On by default.
+    ///
+    /// faer decides this for itself from a flop-count heuristic, and on the
+    /// sparse systems this crate produces the heuristic is too conservative: it
+    /// picks the column-at-a-time route where the panels would have been 2.6x
+    /// faster (a 3D pose graph, 6.1 ms against 2.3), and never picks it where
+    /// the columns are actually better. Measured across every benchmark we
+    /// have, forcing panels is a large win twice and a wash everywhere else, so
+    /// it is the default. Turn it off to hand the choice back to faer.
+    pub fn with_supernodal(mut self, on: bool) -> Self {
+        self.supernodal = on;
         self
     }
 
@@ -2346,6 +2396,26 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
             }
         };
 
+        // Nested dissection of the WHOLE system, when the caller asked for it
+        // and the model has a block structure to dissect. A hand-built problem
+        // has none, and there is nothing to dissect.
+        let nd = matches!(self.ordering, FaerOrdering::NestedDissection)
+            .then(|| {
+                structure.map(|(partition, cells)| {
+                    let (hsym, _) = arael_faer::bsc::SymbolicSparseBlockColMat::from_scalar_coords(
+                        partition.to_vec(),
+                        partition.to_vec(),
+                        cells.len(),
+                        |k| (cells[k].0 as usize, cells[k].1 as usize),
+                    );
+                    arael_faer::nd::NestedDissection::of_blocks(
+                        &hsym,
+                        arael_faer::nd::NdParams::default(),
+                    )
+                })
+            })
+            .flatten();
+
         // faer wants usize row indices; the analysis may already have them.
         let reused = prebuilt.is_some();
         let llt = match prebuilt {
@@ -2359,7 +2429,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
                 self.s_col_ptr.extend_from_slice(&csc.col_ptr);
                 self.s_row_idx.clear();
                 self.s_row_idx.extend(csc.row_idx.iter().map(|&r| r as usize));
-                self.full_symbolic(n, vb)
+                self.full_symbolic(n, vb, nd.as_ref())
             }
         };
         if vb && reused {
@@ -2390,6 +2460,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
         &mut self,
         n: usize,
         vb: bool,
+        nd: Option<&arael_faer::nd::NestedDissection>,
     ) -> faer::sparse::linalg::cholesky::SymbolicCholesky<usize> {
         use faer::sparse::linalg::cholesky::*;
 
@@ -2402,7 +2473,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
         let first = match self.ordering {
             FaerOrdering::MarginalizeFirst => !named.is_empty(),
             FaerOrdering::Auto => !named.is_empty(),
-            FaerOrdering::Amd | FaerOrdering::Natural => false,
+            FaerOrdering::Amd | FaerOrdering::Natural | FaerOrdering::NestedDissection => false,
         };
         if first {
             self.perm_fwd.clear();
@@ -2426,7 +2497,9 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
                 self.perm_inv[old] = new;
             }
         }
-        let ordering = if first {
+        let ordering = if let Some(nd) = nd {
+            SymmetricOrdering::Custom(nd.perm())
+        } else if first {
             SymmetricOrdering::Custom(faer::perm::PermRef::new_checked(
                 &self.perm_fwd,
                 &self.perm_inv,
@@ -2438,10 +2511,14 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
                 _ => SymmetricOrdering::Amd,
             }
         };
-        let name = if first {
+        let name = if nd.is_some() {
+            "nested dissection"
+        } else if first {
             "marginalized parameters first"
         } else if matches!(self.ordering, FaerOrdering::Natural) {
             "natural order"
+        } else if matches!(self.ordering, FaerOrdering::NestedDissection) {
+            "AMD (nested dissection needs a block structure; this model has none)"
         } else {
             "AMD"
         };
@@ -2453,7 +2530,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
             sym_ref,
             faer::Side::Upper,
             ordering,
-            CholeskySymbolicParams::default(),
+            chol_params(self.supernodal),
         )
         .expect("symbolic factorization of the whole system failed");
         if vb {
@@ -2725,6 +2802,18 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         // one code path, always correct, only the route changes.
         let t_schur_symbolic = lap(vb);
 
+        // Nested dissection of the reduced system, when the caller asked for
+        // it. Computed once: the viability gate and the factorization must both
+        // weigh the SAME ordering, or the gate is deciding about a system it is
+        // not going to build.
+        let nd = matches!(self.ordering, FaerOrdering::NestedDissection)
+            .then(|| {
+                arael_faer::nd::NestedDissection::of_blocks(
+                    &schur.s,
+                    arael_faer::nd::NdParams::default(),
+                )
+            });
+
         // The reduction is a GEMM loop over pairs of observers, and the tile
         // shapes it needs come from the model's block widths. The common ones
         // have a fully unrolled kernel; anything else runs a generic loop at
@@ -2802,18 +2891,23 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             && flop_ratio.is_some_and(|r| r > obvious_flop_ratio)
         {
             use faer::sparse::linalg::cholesky::*;
+            let supernodal = self.supernodal;
             let analyze = |col_ptr: &[usize], row_idx: &[usize], dim: usize, ordering| {
                 let r = faer::sparse::SymbolicSparseColMatRef::new_checked(
                     dim, dim, col_ptr, None, row_idx,
                 );
-                factorize_symbolic_cholesky(r, faer::Side::Upper, ordering, CholeskySymbolicParams::default())
+                factorize_symbolic_cholesky(r, faer::Side::Upper, ordering, chol_params(supernodal))
                     .ok()
             };
             let s_pat = schur.s.csc_pattern();
             let h_pat = hsym.csc_pattern();
             let nk = schur.s.nrows();
             let t0 = std::time::Instant::now();
-            let s_llt = analyze(&s_pat.0, &s_pat.1, nk, ordering_for(&s_pat.0, nk, band).faer());
+            let s_ord = match &nd {
+                Some(nd) => SymmetricOrdering::Custom(nd.perm()),
+                None => ordering_for(&s_pat.0, nk, band).faer(),
+            };
+            let s_llt = analyze(&s_pat.0, &s_pat.1, nk, s_ord);
             t_sym_reduced = t0.elapsed().as_secs_f64() * 1e3;
             let t0 = std::time::Instant::now();
             let h_llt = analyze(&h_pat.0, &h_pat.1, n, SymmetricOrdering::Amd);
@@ -2951,7 +3045,10 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         let s = schur.alloc_s::<T>();
         {
             use faer::sparse::linalg::cholesky::*;
-            let ord = ordering_for(&self.s_col_ptr, nk, band);
+            let ord = match &nd {
+                Some(_) => ReducedOrdering::Nd,
+                None => ordering_for(&self.s_col_ptr, nk, band),
+            };
             if let Some(plan) = self.plan.as_mut() {
                 plan.ordering = Some(ord);
             }
@@ -2959,11 +3056,15 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 let sym_ref = faer::sparse::SymbolicSparseColMatRef::new_checked(
                     nk, nk, &self.s_col_ptr, None, &self.s_row_idx,
                 );
+                let faer_ord = match &nd {
+                    Some(nd) => SymmetricOrdering::Custom(nd.perm()),
+                    None => ord.faer(),
+                };
                 factorize_symbolic_cholesky(
                     sym_ref,
                     faer::Side::Upper,
-                    ord.faer(),
-                    CholeskySymbolicParams::default(),
+                    faer_ord,
+                    chol_params(self.supernodal),
                 )
                 .expect("symbolic factorization of the reduced system failed")
             });
