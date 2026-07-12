@@ -120,7 +120,7 @@ struct PosePair {
 }
 
 #[arael::model]
-#[arael(root, eliminate_first(landmarks))]
+#[arael(root)]
 pub struct Path {
     poses: refs::Vec<Pose>,
     landmarks: refs::Vec<PointLandmark>,
@@ -226,7 +226,7 @@ struct PosePairF {
 }
 
 #[arael::model]
-#[arael(root, f32, eliminate_first(landmarks))]
+#[arael(root, f32)]
 struct PathF {
     poses: refs::Vec<PoseF>,
     landmarks: refs::Vec<PointLandmarkF>,
