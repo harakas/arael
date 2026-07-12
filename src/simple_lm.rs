@@ -2244,21 +2244,28 @@ pub enum SchurPolicy {
     /// when the reduction is obviously right, by `obvious_flop_ratio` below.
     Auto {
         fill_ratio_max: f64,
-        /// Skip the comparison entirely when the reduction is obviously
-        /// worth it: when factorizing the reduced system -- even if it came
-        /// out FULLY DENSE, the worst it can be -- would cost no more than
-        /// this multiple of the reduction we are committed to anyway.
+        /// Skip the comparison entirely when the reduction is obviously worth
+        /// it: when factorizing the reduced system -- at the WORST it could
+        /// cost -- would still cost no more than this multiple of the
+        /// reduction we are committed to anyway.
         ///
-        /// Both quantities are free: the kept size comes from the partition,
-        /// the reduction's flops from the symbolic pass. Across every problem
-        /// measured the ratio is 0.5-10.2 where the reduction wins, 23.7
-        /// where it is a wash and 681 where it loses, so the default of 15
-        /// short-circuits every obvious case and defers on the rest.
+        /// The worst case is the cheaper of two bounds, both free:
+        /// * dense -- the reduced system's factor cannot exceed `n^3 / 3`;
+        /// * banded -- nor can it spill outside the system's own bandwidth,
+        ///   `n * b^2`. This is the bound that matters on a trajectory: a
+        ///   landmark is seen from a bounded stretch of it, so the reduced
+        ///   pose system is banded and the dense bound is wildly pessimistic
+        ///   (at 6000 slam poses it overstates the cost 500x, which used to
+        ///   send every large problem down the expensive comparison).
+        ///
+        /// Measured, worst-case-over-reduction: 0.5 (BAL-49), 1.3 (slam-60),
+        /// 3.2 (BAL-138), 4.7 (slam-6000), 7.7 (slam-300) -- all reductions
+        /// that win; 24 (BAL-372, a wash) and 681 (BAL-1723, a loss). The
+        /// default of 15 fires on every win and defers on the rest.
         ///
         /// Deferring is safe -- the exact comparison then decides -- so the
         /// only real risk is firing on a problem the reduction loses, and the
-        /// margin to the nearest non-win (23.7, itself only a wash) is wide.
-        /// Set to 0 to always run the comparison.
+        /// margin to the nearest non-win is wide. Set to 0 to always compare.
         obvious_flop_ratio: f64,
     },
 }
@@ -2552,21 +2559,20 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                  Force. Supply with_eliminate_first(..) or use SchurPolicy::Auto."
             );
         }
+        let t_block = lap(vb);
         if vb {
             let elim_params: usize =
                 eliminated.iter().map(|&b| partition[b + 1] - partition[b]).sum();
             let source = if hinted { "hinted" } else { "detected" };
             info!(
-                "schur: {} {} marginalizable blocks ({} of {} parameters); \
-                 block structure {:.1} ms",
+                "schur: {} {} marginalizable blocks ({} of {} parameters)",
                 source,
                 eliminated.len(),
                 elim_params,
                 n,
-                lap(true),
             );
         }
-        let mut schur = match arael_faer::schur::schur_symbolic(&hsym, &eliminated) {
+        let schur = match arael_faer::schur::schur_symbolic(&hsym, &eliminated) {
             Ok(s) => s,
             Err(e) => panic!(
                 "Schur elimination rejected ({:?}): the marginalized blocks must be \
@@ -2589,10 +2595,16 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         // one code path, always correct, only the route changes.
         let t_schur_symbolic = lap(vb);
         let mut fill_ratio = None;
+        let band = if eliminated.is_empty() { 0 } else { schur.kept_bandwidth() };
         let flop_ratio = match self.policy {
             SchurPolicy::Auto { .. } if !eliminated.is_empty() => {
                 let nk = schur.s.nrows() as f64;
-                Some(nk * nk * nk / 3.0 / schur.reduce_flops().max(1.0))
+                let b = band as f64;
+                // Worst the reduced factorization can cost: dense, or -- if
+                // the reduced system is banded, as a trajectory's is -- the
+                // band, whichever is smaller.
+                let worst = (nk * nk * nk / 3.0).min(nk * b * b);
+                Some(worst / schur.reduce_flops().max(1.0))
             }
             _ => None,
         };
@@ -2605,6 +2617,9 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         // it is exactly what the reduction needs next, so it is kept rather
         // than recomputed.
         let mut reduced_llt: Option<faer::sparse::linalg::cholesky::SymbolicCholesky<usize>> = None;
+        // Verbose accounting of the one-time work, phase by phase.
+        let mut t_sym_reduced = 0.0;
+        let mut t_amd_full = 0.0;
         if let SchurPolicy::Auto { fill_ratio_max, obvious_flop_ratio } = self.policy
             && !eliminated.is_empty()
             // Cheap pre-filter: is the reduction obviously right? Worst case
@@ -2626,8 +2641,12 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             let s_pat = schur.s.csc_pattern();
             let h_pat = hsym.csc_pattern();
             let nk = schur.s.nrows();
+            let t0 = std::time::Instant::now();
             let s_llt = analyze(&s_pat.0, &s_pat.1, nk, ordering_for(&s_pat.0, nk));
+            t_sym_reduced = t0.elapsed().as_secs_f64() * 1e3;
+            let t0 = std::time::Instant::now();
             let h_llt = analyze(&h_pat.0, &h_pat.1, n, SymmetricOrdering::Amd);
+            t_amd_full = t0.elapsed().as_secs_f64() * 1e3;
             if let (Some(sl), Some(hl)) = (s_llt, h_llt)
                 && hl.len_val() > 0
             {
@@ -2647,13 +2666,25 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             }
         }
         let reduced = !eliminated.is_empty();
+        let t_gate = lap(vb);
+        // The weighing step only has parts to itemise when it actually ran.
+        let decision_detail = if fill_ratio.is_none() {
+            String::from(" (skipped)")
+        } else {
+            std::format!(
+                " (ordering the reduced system {:.1}, AMD over the whole system {:.1}{})",
+                t_sym_reduced,
+                t_amd_full,
+                if reduced { ", the latter only to compare against" } else { ", the one now in use" },
+            )
+        };
         if vb {
-            let t_gate = lap(true);
             match (flop_ratio, fill_ratio) {
                 (Some(flop), None) => info!(
-                    "schur: reducing -- obviously worth it (a fully dense reduced \
-                     system would cost {:.1}x the reduction itself, under the {:.0}x \
-                     bar), so the ordering comparison was skipped",
+                    "schur: REDUCING -- clearly worth it. Factorizing the reduced \
+                     system, at the worst it could possibly cost, is still only \
+                     {:.1}x the reduction itself (bar: {:.0}x), so there was no \
+                     need to weigh it against factorizing the whole system",
                     flop,
                     match self.policy {
                         SchurPolicy::Auto { obvious_flop_ratio, .. } => obvious_flop_ratio,
@@ -2661,22 +2692,21 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                     },
                 ),
                 (Some(flop), Some(fill)) => info!(
-                    "schur: {} -- not obvious ({:.1}x), so the orderings were \
-                     compared: the reduced factor is {:.2}x the full one under AMD \
-                     ({} takes it)",
-                    if reduced { "reducing" } else { "declining, factorizing the full system" },
+                    "schur: {} -- worst case for the reduction was {:.1}x its own \
+                     cost (over the {:.0}x bar), so both routes were analysed: the \
+                     reduced system's factor holds {:.2}x the values the whole \
+                     system's does under AMD -- {}",
+                    if reduced { "REDUCING" } else { "NOT reducing, factorizing the whole system" },
                     flop,
+                    match self.policy {
+                        SchurPolicy::Auto { obvious_flop_ratio, .. } => obvious_flop_ratio,
+                        _ => 0.0,
+                    },
                     fill,
-                    if reduced { "the reduction" } else { "AMD" },
+                    if reduced { "the smaller factor wins" } else { "AMD's is smaller" },
                 ),
-                _ => info!("schur: reducing -- forced, no analysis"),
+                _ => info!("schur: REDUCING -- forced, nothing analysed"),
             }
-            info!(
-                "schur: analysis {:.1} ms (structure {:.1}, gate {:.1})",
-                t_schur_symbolic + t_gate,
-                t_schur_symbolic,
-                t_gate,
-            );
         }
         self.plan = Some(SchurPlan {
             reduced,
@@ -2735,12 +2765,22 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 .expect("symbolic factorization of the full system failed")
             });
             if vb {
+                let rest = lap(true);
                 info!(
-                    "schur: full system {} params, symbolic factorization {:.1} ms, \
-                     L holds {} values",
+                    "schur: whole system {} params, its factor holds {} values",
                     n,
-                    lap(true),
                     llt_symbolic.len_val(),
+                );
+                info!(
+                    "schur: setup {:.1} ms = finding the blocks {:.1} + finding the \
+                     reduction {:.1} (thrown away with it) + weighing it {:.1}{} + CSC \
+                     pattern, scatter map and the rest {:.1}",
+                    t_block + t_schur_symbolic + t_gate + rest,
+                    t_block,
+                    t_schur_symbolic,
+                    t_gate,
+                    decision_detail,
+                    rest,
                 );
             }
             self.size_llt_buffers(&llt_symbolic);
@@ -2787,14 +2827,29 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             });
             if vb {
                 info!(
-                    "schur: reduced system {} params ({:.0}% dense), symbolic \
-                     factorization {:.1} ms, L holds {} values",
+                    "schur: reduced system {} params ({:.0}% dense, half-bandwidth {}), \
+                     L holds {} values",
                     nk,
                     100.0 * self.s_row_idx.len() as f64 / (nk as f64 * (nk as f64 + 1.0) / 2.0),
-                    lap(true),
+                    band,
                     llt_symbolic.len_val(),
                 );
             }
+            if vb {
+                let rest = lap(true);
+                info!(
+                    "schur: setup {:.1} ms = finding the blocks {:.1} + finding the \
+                     reduction {:.1} + weighing it {:.1}{} + CSC pattern, scatter map \
+                     and symbolic factorization {:.1}",
+                    t_block + t_schur_symbolic + t_gate + rest,
+                    t_block,
+                    t_schur_symbolic,
+                    t_gate,
+                    decision_detail,
+                    rest,
+                );
+            }
+
             self.size_llt_buffers(&llt_symbolic);
             self.llt_symbolic = Some(llt_symbolic);
         }
