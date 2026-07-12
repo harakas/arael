@@ -96,11 +96,14 @@ pub struct SceneConfig {
     pub odo_pos_base: f32,
     pub odo_ea_k: f32,
     pub odo_ea_base: f32,
+    // One-sided POSE-INDEX distance: a pose observes a landmark when it is
+    // within this many poses of the landmark's anchor, so the landmark's
+    // SPAN -- the poses that see it -- is 2 * range + 1.
     pub lm_visibility_range: usize,
     pub lm_visibility_prob: f32,
-    // Heavy-tailed connectivity: a fraction of landmarks are "wide",
-    // visible across up to num_poses/4 poses (hundreds of observations),
-    // modeling map points a real trajectory revisits.
+    // Heavy-tailed connectivity: a fraction of landmarks are "wide", spanning
+    // up to half the trajectory (capped at WIDE_SPAN_CAP poses), modeling map
+    // points a real trajectory revisits.
     pub wide_fraction: f32,
     // Initialization noise. The bearing factors are stiff (isigma ~600).
     // This benchmark polishes from a good init (a well-conditioned single
@@ -184,11 +187,30 @@ fn ground_truth_poses(cfg: &SceneConfig) -> Vec<(vect3f, vect3f)> {
     poses
 }
 
+/// A landmark's visibility SPAN is how many consecutive poses observe it.
+/// Visibility is topological -- a pose sees a landmark when their POSE-INDEX
+/// distance is within the landmark's range -- and `range` is that distance
+/// measured ONE WAY from the anchor pose, so `span = 2 * range + 1` (the +1
+/// is the anchor itself). Keeping the two straight matters: reading a span
+/// as a range doubles the window.
+fn range_for_span(span: usize) -> usize {
+    span / 2
+}
+
+/// Widest span a landmark may have, whatever the trajectory length. Past
+/// this a single map point couples most of the trajectory into one clique,
+/// which is not what revisiting a place looks like.
+const WIDE_SPAN_CAP: usize = 150;
+
 // (landmark_pos, anchor_pose_index, visibility_range)
 fn ground_truth_landmarks(cfg: &SceneConfig, rng: &mut StdRng, poses: &[(vect3f, vect3f)])
     -> Vec<(vect3f, usize, usize)> {
-    let wide_max = (cfg.num_poses / 4).max(cfg.lm_visibility_range);
-    let wide_min = (cfg.num_poses / 8).max(cfg.lm_visibility_range);
+    // Wide landmarks span up to half the trajectory, capped at WIDE_SPAN_CAP
+    // poses; the narrowest of them spans a quarter of it.
+    let wide_max = range_for_span((cfg.num_poses / 2).min(WIDE_SPAN_CAP))
+        .max(cfg.lm_visibility_range);
+    let wide_min = range_for_span((cfg.num_poses / 4).min(WIDE_SPAN_CAP))
+        .max(cfg.lm_visibility_range);
     let mut landmarks = Vec::new();
     for _ in 0..cfg.num_landmarks {
         loop {
