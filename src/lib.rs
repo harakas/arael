@@ -84,8 +84,8 @@
 //! # Benchmarks
 //!
 //! <picture>
-//!   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/harakas/arael/v0.7.1/benchmarks/pgo/chart-dark.svg">
-//!   <img alt="2x2 bar charts of per-step solve time on M3500, city10000, sphere2500 and parking-garage: arael is fastest on M3500 (3.1 ms), city10000 (10.0 ms) and sphere2500 (13.7 ms); g2o leads the parking garage (8.2 ms vs arael 10.2 ms)" src="https://raw.githubusercontent.com/harakas/arael/v0.7.1/benchmarks/pgo/chart-light.svg">
+//!   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/charts/v0.7.1/pgo-dark.svg">
+//!   <img alt="2x2 bar charts of per-step solve time on M3500, city10000, sphere2500 and parking-garage: arael is fastest on M3500 (3.1 ms), city10000 (10.0 ms) and sphere2500 (13.7 ms); g2o leads the parking garage (8.2 ms vs arael 10.2 ms)" src="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/charts/v0.7.1/pgo-light.svg">
 //! </picture>
 //!
 //! Per-step solve time on the four canonical pose-graph datasets, 2D and
@@ -106,8 +106,8 @@
 //! [benchmarks/slam](https://github.com/harakas/arael/tree/master/benchmarks/slam).
 //!
 //! <picture>
-//!   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/harakas/arael/v0.7.1/benchmarks/chart-slam-loc-dark.svg">
-//!   <img alt="Two bar charts of per-iteration solve time: landmark SLAM at 300 poses on an Apple M4 Pro, and localization at 60 poses on a Raspberry Pi 5" src="https://raw.githubusercontent.com/harakas/arael/v0.7.1/benchmarks/chart-slam-loc-light.svg">
+//!   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/charts/v0.7.1/slam-loc-dark.svg">
+//!   <img alt="Two bar charts of per-iteration solve time: landmark SLAM at 300 poses on an Apple M4 Pro, and localization at 60 poses on a Raspberry Pi 5" src="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/charts/v0.7.1/slam-loc-light.svg">
 //! </picture>
 //!
 //! The same per-iteration metric on the landmark-SLAM benchmark and on
@@ -205,7 +205,7 @@
 //! with symbolically differentiated, CSE-optimized compiled code.
 //! The robust fit ignores outliers while tracking the inlier data:
 //!
-//! ![Linear Regression](https://raw.githubusercontent.com/harakas/arael/v0.7.1/docs/linear_regression.png)
+//! ![Linear Regression](https://raw.githubusercontent.com/harakas/arael/refs/heads/master/docs/linear_regression.png)
 //!
 //! See [examples/linear_demo.rs](https://github.com/harakas/arael/blob/master/examples/linear_demo.rs) for the full source.
 //!
@@ -1450,7 +1450,7 @@
 //! parametric constraint solver. Runs natively and in the browser via
 //! WebAssembly.
 //!
-//! [![Sketch Editor](https://raw.githubusercontent.com/harakas/arael/v0.7.1/docs/sketch.png)](https://sketch.mare.ee/)
+//! [![Sketch Editor](https://raw.githubusercontent.com/harakas/arael/refs/heads/master/docs/sketch.png)](https://sketch.mare.ee/)
 //!
 //! [Try it in the browser](https://sketch.mare.ee/)
 //!
@@ -1458,7 +1458,7 @@
 //! commands, and an embedded MCP server (`--mcp`) that enables AI agents
 //! like Claude Code to create and modify sketches programmatically.
 //!
-//! ![Dark mode](https://raw.githubusercontent.com/harakas/arael/v0.7.1/arael-sketch/docs/dark.png)
+//! ![Dark mode](https://raw.githubusercontent.com/harakas/arael/refs/heads/master/arael-sketch/docs/dark.png)
 //!
 //! # Example: SLAM Constraints
 //!
@@ -1633,7 +1633,7 @@
 //! - $\alpha(x)^2 \to \Delta S_{\max}$ as $|x| \to \infty$ -- no single
 //!   residual can push the sum by more than $\Delta S_{\max}$.
 //!
-//! ![Starship suppression function](https://raw.githubusercontent.com/harakas/arael/v0.7.1/docs/starship/capper.png)
+//! ![Starship suppression function](https://raw.githubusercontent.com/harakas/arael/refs/heads/master/docs/starship/capper.png)
 //!
 //! Left: $\alpha(x)$ (green) bends away from the identity $x$ (purple)
 //! once $|x|$ moves past a few sigmas. Right: the *squared* contribution

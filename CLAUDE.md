@@ -21,4 +21,5 @@
  * When adding/changing features that might have performance impacts, run before and after benchmarks to compare, reject regressions in performance, and flag improvements.
  * When benchmark numbers change, regenerate the charts (`benchmarks/make_slam_loc_chart.py`, `benchmarks/pgo/make_chart.py`)
  * Charts contain release version, so need to be updated when they have changed for a new release
- * Image URLs in README.md and src/lib.rs are absolute and pinned to a release tag -- never `master`, never relative -- they need to be updated on releases.
+ * Charts live in `benchmarks/charts/v<version>/` -- the path carries the version. Do not delete legacy versions as they are referenced by published crates.
+ * README.md and src/lib.rs point at the current version's chart dir -- update on release

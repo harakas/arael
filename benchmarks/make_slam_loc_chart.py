@@ -183,8 +183,10 @@ def render(theme):
 def main():
     import os
     here = os.path.dirname(os.path.abspath(__file__))
+    out = os.path.join(here, "charts", f"v{arael_version()}")
+    os.makedirs(out, exist_ok=True)
     for theme in THEMES:
-        path = os.path.join(here, f"chart-slam-loc-{theme}.svg")
+        path = os.path.join(out, f"slam-loc-{theme}.svg")
         with open(path, "w") as f:
             f.write(render(theme))
         print(f"wrote {path}")
@@ -192,3 +194,12 @@ def main():
 
 if __name__ == "__main__":
     main()
+# Charts are written to benchmarks/charts/v<version>/ -- a new directory each
+# release. The path carries the version, so a chart URL never changes meaning:
+# crates.io rewrites the README's relative paths against the default branch, and
+# a versioned path still resolves to the numbers that version shipped with.
+#
+# The four charts at the old unversioned paths (benchmarks/chart-slam-loc-*.svg,
+# benchmarks/pgo/chart-*.svg) are FROZEN. Crates published up to 0.7.0 reference
+# them and their READMEs can never be changed. Do not regenerate them.
+
