@@ -1,33 +1,18 @@
 # TODO
 
-- **Automatic eliminate_first detection** (follow-up to the
-  `eliminate_first(...)` root keyword, 2026-07). The hint could be derived
-  from the Hessian pattern alone: group columns into blocks, greedily pick a
-  maximal independent set of small blocks (structural landmarks), order it
-  first. Any ordering is solution-safe, but since hints are trusted
-  outright (no comparison against AMD), an automatic picker would need its
-  own quality guard -- e.g. compare symbolic L nnz against AMD's before
-  adopting, the check the explicit keyword deliberately does not do. Not
-  built because the explicit hint covers the known use cases and the model
-  knows its own structure; revisit if hand-built LmProblem users without
-  macro models need it.
+- **Automatic marginalize detection** -- DONE (2026-07-12). The macro hands the
+  solver the model's type-coupling graph and `SparseFaer` reads the
+  marginalizable families off it, so no hint is needed. The quality guard this
+  entry asked for exists and is stronger than the fill comparison it proposed:
+  a cheap band/dense filter settles the obvious cases from the block structure
+  alone, and only the unclear ones pay for the exact fill comparison against
+  AMD. `SchurPolicy` overrides, `LmResult::solver` reports what happened.
 
-- **Explicit blocked Schur-complement backend**. The eliminate_first
-  ordering closes most of the gap to g2o on landmark SLAM, but an explicit
-  Schur backend (form S = Hpp - Hpl Hll^-1 Hlp with blocked 3x3/6x6
-  kernels, factorize the reduced pose system, back-substitute) measured
-  ~1.7x faster still on the linear-solve phase in g2o's stats (42 vs 71 ms
-  at 300 poses). A new LmSolver backend + block-partition machinery; only
-  worth it if solve-dominated problems become the primary target.
-  Ordering refinement is NOT the path to that headroom: a prototype that
-  ordered the trailing pose blocks by AMD on the reduced pose graph
-  (via an eliminate_first range sequence) measured a wash to -2% vs
-  trajectory order at 300/600 poses -- after landmark elimination the
-  reduced system is ~70% dense, so ordering barely moves the factor, and
-  trajectory order feeds the supernodal kernels contiguous blocks.
-  Reduced-graph AMD would only matter on problems whose reduced system
-  is genuinely sparse (BA-style covisibility), where trailing natural
-  order is the failure case.
+- **Explicit blocked Schur-complement backend** -- DONE (2026-07-11/12). This
+  entry judged it "only worth it if solve-dominated problems become the primary
+  target"; it measured 2.1x per iteration at slam-300 and is now the default
+  route whenever the model has something to marginalize. It is not a separate
+  backend: `SparseFaer` reduces or factorizes the whole system, and picks.
 
 - **SparseFaer::with_threads(n): opt-in multithreaded faer solve**
   (discussed 2026-07). faer threads via rayon: every heavy call takes a
