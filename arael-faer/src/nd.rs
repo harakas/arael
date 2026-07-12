@@ -29,10 +29,18 @@
 //! camera, not per parameter. Two reasons, both measured:
 //!
 //! * a block's parameters stay contiguous in the permutation, so the factor
-//!   keeps its supernodes. On Ladybug-372 this ordering has 9% MORE fill than
-//!   scalar METIS and still factorizes FASTER (122 ms against 126), because
-//!   fill is not what the dense kernels care about;
-//! * the graph is 9x smaller, and the ordering runs in 12 ms instead of 916.
+//!   keeps its supernodes, and a separator is priced in the parameters it
+//!   actually costs;
+//! * the graph is 9x smaller, and the ordering runs in 50 ms instead of 916.
+//!
+//! # What to minimise
+//!
+//! Not fill. Cholesky flops go as the SUM OF SQUARES of the column heights, so
+//! a smaller separator sitting in a worse place can cost MORE arithmetic --
+//! measured: moving the cut to shrink the separator cut fill by 3% and raised
+//! flops by 2%, and the factorization got slower. What pays is shrinking the
+//! separator WITHOUT moving the cut, which is what the minimum vertex cover
+//! does: it drops vertices the cut never needed.
 
 use crate::bsc::SymbolicSparseBlockColMat;
 use faer::Index;
@@ -48,9 +56,8 @@ pub struct NdParams {
     /// Ladybug-1723.
     pub leaf: usize,
     /// Passes of Fiduccia-Mattheyses refinement over each separator. 0 leaves
-    /// the raw BFS separator, which is a poor one. Refinement is where the
-    /// quality is: it is the difference between "a separator" and "a small
-    /// separator", and fill is quadratic in separator size.
+    /// the raw cut, and costs a lot: on Ladybug-1723 the factor grows from
+    /// 39.2M values to 48.7M.
     pub fm_passes: usize,
     /// How lopsided a bisection may get, as a fraction of the subgraph's
     /// weight on the heavier side. Refinement will not push past it.
@@ -383,12 +390,170 @@ fn pseudo_peripheral(g: &Graph, nodes: &[usize], s: &mut Scratch) -> usize {
     start
 }
 
+/// The smallest set of vertices that covers every cut edge -- which is exactly
+/// the smallest vertex separator for a given edge cut.
+///
+/// The cut edges form a BIPARTITE graph between A's boundary and B's boundary,
+/// and a vertex separator is precisely a vertex cover of it: leave a cut edge
+/// uncovered and the two sides still touch. Taking one side's whole boundary
+/// (the obvious construction) is only an upper bound on the smallest such
+/// cover, and usually a loose one.
+///
+/// Minimum-WEIGHT vertex cover in a bipartite graph is a min cut: source ->
+/// left with capacity w(u), left -> right with infinite capacity on each cut
+/// edge, right -> sink with capacity w(v). The min cut has to sever a
+/// source-side or a sink-side edge for every cut edge -- it cannot cut the
+/// infinite middle -- so it names a cover, and being minimum it names the
+/// smallest one. Weight matters here: a 9-wide camera in the separator costs
+/// nine times a 1-wide landmark, and Koenig's unweighted matching would not
+/// know that.
+///
+/// Returns `None` when the cut is degenerate (no cut edges at all).
+fn min_vertex_cover(
+    g: &Graph,
+    s: &Scratch,
+    bnd_a: &[usize],
+    bnd_b: &[usize],
+) -> Option<Vec<usize>> {
+    if bnd_a.is_empty() || bnd_b.is_empty() {
+        return None;
+    }
+    // Dinic on a tiny network: source, |bnd_a| + |bnd_b| nodes, sink.
+    let (nl, nr) = (bnd_a.len(), bnd_b.len());
+    let (src, snk) = (0usize, 1 + nl + nr);
+    let n = snk + 1;
+    let inf = usize::MAX / 4;
+
+    let mut head: Vec<usize> = Vec::new(); // to
+    let mut cap: Vec<usize> = Vec::new();
+    let mut next: Vec<Vec<usize>> = vec![Vec::new(); n]; // edge ids out of each node
+    let add = |u: usize,
+                   v: usize,
+                   c: usize,
+                   head: &mut Vec<usize>,
+                   cap: &mut Vec<usize>,
+                   next: &mut Vec<Vec<usize>>| {
+        next[u].push(head.len());
+        head.push(v);
+        cap.push(c);
+        next[v].push(head.len());
+        head.push(u);
+        cap.push(0); // the reverse edge
+    };
+
+    let mut idx_a = std::collections::HashMap::with_capacity(nl);
+    for (i, &u) in bnd_a.iter().enumerate() {
+        idx_a.insert(u, 1 + i);
+        add(src, 1 + i, g.w(u), &mut head, &mut cap, &mut next);
+    }
+    let mut idx_b = std::collections::HashMap::with_capacity(nr);
+    for (j, &v) in bnd_b.iter().enumerate() {
+        idx_b.insert(v, 1 + nl + j);
+        add(1 + nl + j, snk, g.w(v), &mut head, &mut cap, &mut next);
+    }
+    let mut any_edge = false;
+    for &u in bnd_a {
+        for &v in g.neighbours(u) {
+            if s.inset[v] && s.side[v] == 2 && let Some(&jv) = idx_b.get(&v) {
+                add(idx_a[&u], jv, inf, &mut head, &mut cap, &mut next);
+                any_edge = true;
+            }
+        }
+    }
+    if !any_edge {
+        return None;
+    }
+
+    // Dinic: level graph by BFS, then blocking flow by DFS.
+    let mut level = vec![usize::MAX; n];
+    let mut iter = vec![0usize; n];
+    loop {
+        level.fill(usize::MAX);
+        level[src] = 0;
+        let mut q = std::collections::VecDeque::from([src]);
+        while let Some(u) = q.pop_front() {
+            for &e in &next[u] {
+                if cap[e] > 0 && level[head[e]] == usize::MAX {
+                    level[head[e]] = level[u] + 1;
+                    q.push_back(head[e]);
+                }
+            }
+        }
+        if level[snk] == usize::MAX {
+            break; // no augmenting path: the flow is maximal
+        }
+        iter.fill(0);
+        // iterative DFS, so a deep network cannot blow the stack
+        loop {
+            let mut path: Vec<usize> = Vec::new();
+            let mut u = src;
+            let pushed = loop {
+                if u == snk {
+                    break path.iter().map(|&e| cap[e]).min().unwrap_or(0);
+                }
+                let mut advanced = false;
+                while iter[u] < next[u].len() {
+                    let e = next[u][iter[u]];
+                    let v = head[e];
+                    if cap[e] > 0 && level[v] == level[u] + 1 {
+                        path.push(e);
+                        u = v;
+                        advanced = true;
+                        break;
+                    }
+                    iter[u] += 1;
+                }
+                if !advanced {
+                    level[u] = usize::MAX; // dead end; never come back
+                    match path.pop() {
+                        Some(e) => u = head[e ^ 1],
+                        None => break 0,
+                    }
+                }
+            };
+            if pushed == 0 {
+                break;
+            }
+            for &e in &path {
+                cap[e] -= pushed;
+                cap[e ^ 1] += pushed;
+            }
+        }
+    }
+
+    // The min cut, read off the residual graph: a left node whose source edge
+    // is saturated (unreachable from the source) is in the cover, and so is a
+    // right node still reachable from it.
+    let mut seen = vec![false; n];
+    let mut q = std::collections::VecDeque::from([src]);
+    seen[src] = true;
+    while let Some(u) = q.pop_front() {
+        for &e in &next[u] {
+            if cap[e] > 0 && !seen[head[e]] {
+                seen[head[e]] = true;
+                q.push_back(head[e]);
+            }
+        }
+    }
+    let mut cover = Vec::new();
+    for (i, &u) in bnd_a.iter().enumerate() {
+        if !seen[1 + i] {
+            cover.push(u);
+        }
+    }
+    for (j, &v) in bnd_b.iter().enumerate() {
+        if seen[1 + nl + j] {
+            cover.push(v);
+        }
+    }
+    if cover.is_empty() { None } else { Some(cover) }
+}
+
 /// Split a subgraph into two halves and the vertex separator between them.
 ///
 /// Grow a region from a peripheral node by BFS until it holds about half the
-/// nodes -- a BFS frontier is a natural cut -- then turn that edge cut into a
-/// VERTEX separator by taking the boundary of whichever side has fewer
-/// boundary nodes. Removing those vertices disconnects the halves.
+/// nodes -- a BFS frontier is a natural cut -- then turn that edge cut into the
+/// SMALLEST vertex separator it admits, by minimum vertex cover.
 fn bisect(
     g: &Graph,
     nodes: &[usize],
@@ -422,6 +587,24 @@ fn bisect(
                 bnd_b.push(u);
             }
         }
+    }
+    if let Some(cover) = min_vertex_cover(g, s, &bnd_a, &bnd_b) {
+        let mut in_sep = vec![false; g.nodes()];
+        for &u in &cover {
+            in_sep[u] = true;
+        }
+        let (mut a, mut b) = (Vec::new(), Vec::new());
+        for &u in nodes {
+            if in_sep[u] {
+                continue;
+            }
+            if s.side[u] == 1 {
+                a.push(u);
+            } else {
+                b.push(u);
+            }
+        }
+        return (a, b, cover);
     }
     let sep = if bnd_a.len() <= bnd_b.len() { bnd_a } else { bnd_b };
 
@@ -635,6 +818,69 @@ mod tests {
             "the last {} nodes should separate the grid, but it stayed in one piece",
             w
         );
+    }
+
+    /// The separator must be the SMALLEST vertex set covering the cut, not
+    /// just one side's boundary. Two hubs, one per side, cover every cut edge
+    /// here -- while either boundary alone is five nodes. Taking a boundary
+    /// would be a valid separator and a bad one, and nothing else in the suite
+    /// could tell the difference: a worse separator still gives a correct
+    /// ordering, just a slower factorization.
+    #[test]
+    fn the_separator_is_a_minimum_cover_of_the_cut() {
+        // a0..a4 on one side, b0..b4 on the other. a0 sees every b; b0 sees
+        // every a. So {a0, b0} covers all nine cut edges.
+        let mut edges = Vec::new();
+        for i in 0..5 {
+            for j in 0..5 {
+                if i > 0 && j > 0 {
+                    continue; // only the hubs reach across
+                }
+                edges.push((i, 5 + j));
+            }
+        }
+        // keep each side connected so the bisection sees two halves
+        for i in 1..5 {
+            edges.push((0, i));
+            edges.push((5, 5 + i));
+        }
+        let g = Graph::from_edges(10, edges);
+        let mut s = Scratch::new(10);
+        for u in 0..10 {
+            s.inset[u] = true;
+            s.side[u] = if u < 5 { 1 } else { 2 };
+        }
+        let bnd_a: Vec<usize> = (0..5)
+            .filter(|&u| g.neighbours(u).iter().any(|&v| v >= 5))
+            .collect();
+        let bnd_b: Vec<usize> = (5..10)
+            .filter(|&u| g.neighbours(u).iter().any(|&v| v < 5))
+            .collect();
+        assert_eq!(bnd_a.len(), 5, "every a touches across");
+        assert_eq!(bnd_b.len(), 5, "every b touches across");
+
+        let cover = min_vertex_cover(&g, &s, &bnd_a, &bnd_b).expect("a cover exists");
+        assert_eq!(
+            cover.len(),
+            2,
+            "the two hubs cover every cut edge; got {:?}",
+            cover
+        );
+
+        // and it really is a cover: no cut edge survives it
+        let in_sep: std::collections::HashSet<usize> = cover.iter().copied().collect();
+        for u in 0..5 {
+            for &v in g.neighbours(u) {
+                if v >= 5 {
+                    assert!(
+                        in_sep.contains(&u) || in_sep.contains(&v),
+                        "cut edge {}-{} left uncovered",
+                        u,
+                        v
+                    );
+                }
+            }
+        }
     }
 
     /// A disconnected graph has nothing to separate: each component is ordered
