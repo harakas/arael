@@ -2802,6 +2802,7 @@ impl Sketch {
                 iterations: 0, accepted_iterations: 0,
                 status: arael::simple_lm::LmStatus::Converged, final_lambda: 0.0,
                 timing: None,
+                solver: None,
             };
         }
 
@@ -2842,6 +2843,7 @@ impl Sketch {
             status: arael::simple_lm::LmStatus::Converged,
             final_lambda: 0.0,
             timing: None,
+            solver: None,
         };
 
         for &scale in stages {
