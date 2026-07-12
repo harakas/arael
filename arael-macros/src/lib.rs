@@ -170,6 +170,13 @@ struct Registry {
     layouts: std::collections::BTreeMap<String, SymLayout>,
     constraints: Vec<StashedConstraint>,
     functions: HashMap<String, UserFunction>,
+    /// Every `CrossBlock<A, B>` entity pair seen anywhere in the model, in
+    /// declaration order. This is the coupling graph the Schur detector
+    /// reasons over: a Hessian tile can join an A to a B only if such a
+    /// block exists (the macro must emit a block for every J^T J pair), so
+    /// a set of types with no CrossBlock among them is provably
+    /// uncoupled -- exactly what marginalization requires.
+    cross_pairs: std::collections::BTreeSet<(String, String)>,
 }
 
 static SYM_REGISTRY: Mutex<Option<Registry>> = Mutex::new(None);
@@ -179,7 +186,26 @@ fn registry_init() -> Registry {
         layouts: std::collections::BTreeMap::new(),
         constraints: Vec::new(),
         functions: HashMap::new(),
+        cross_pairs: std::collections::BTreeSet::new(),
     }
+}
+
+/// Record a `CrossBlock<A, B>` coupling (unordered; stored sorted).
+fn registry_record_cross(a: &str, b: &str) {
+    let mut guard = SYM_REGISTRY.lock().unwrap_or_else(|p| p.into_inner());
+    let reg = guard.get_or_insert_with(registry_init);
+    let pair = if a <= b {
+        (a.to_string(), b.to_string())
+    } else {
+        (b.to_string(), a.to_string())
+    };
+    reg.cross_pairs.insert(pair);
+}
+
+/// Snapshot of every recorded CrossBlock coupling.
+fn registry_cross_pairs() -> Vec<(String, String)> {
+    let guard = SYM_REGISTRY.lock().unwrap_or_else(|p| p.into_inner());
+    guard.as_ref().map(|r| r.cross_pairs.iter().cloned().collect()).unwrap_or_default()
 }
 
 /// Returns an error if a DIFFERENT layout is already registered under
@@ -909,6 +935,10 @@ fn rewrite_block_type(ty: &mut syn::Type) {
                         && let (syn::Type::Path(a_path), syn::Type::Path(b_path)) =
                             (type_args[0], type_args[1])
                             && let (Some(a_seg), Some(b_seg)) = (a_path.path.segments.last(), b_path.path.segments.last()) {
+                                registry_record_cross(
+                                    &a_seg.ident.to_string(),
+                                    &b_seg.ident.to_string(),
+                                );
                                 let a_const = syn::Ident::new(
                                     &format!("{}_PARAM_COUNT", a_seg.ident),
                                     a_seg.ident.span(),
@@ -1008,7 +1038,9 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
     // Param-bearing fields in serialize order, with their size expression --
     // consumed by the eliminate_first root keyword to compute param ranges
     // with exactly the serialize walk's field selection.
-    let mut size_walk: Vec<(syn::Ident, TokenStream2)> = Vec::new();
+    // (field, size expr, element type name). The type name is what the
+    // Schur detector's coupling graph is built over.
+    let mut size_walk: Vec<(syn::Ident, TokenStream2, Option<String>)> = Vec::new();
     // Per-struct recursion for Model::collect_param_blocks (entity spans
     // read from SelfBlock indices).
     let mut collect_param_blocks_stmts: Vec<TokenStream2> = Vec::new();
@@ -1181,9 +1213,18 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                 serialize_size_stmts.push(quote! {
                     arael::model::Model::serialize_size(&self.#ident)
                 });
+                let elem_name = extract_wrapper_inner(&field.ty, "Vec")
+                    .or_else(|| extract_wrapper_inner(&field.ty, "Deque"))
+                    .or_else(|| extract_wrapper_inner(&field.ty, "Arena"))
+                    .map(|(_, id)| id.to_string())
+                    .or_else(|| if let syn::Type::Path(tp) = &field.ty {
+                        tp.path.segments.last().map(|s| s.ident.to_string())
+                    } else {
+                        None
+                    });
                 size_walk.push((ident.clone(), quote! {
                     arael::model::Model::serialize_size(&self.#ident) as usize
-                }));
+                }, elem_name));
                 // Also recurse into sub-models for zero/accumulate
                 zero_blocks_stmts.push(quote! {
                     arael::model::Model::zero_blocks(&mut self.#ident);
@@ -1473,6 +1514,127 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
     let root_fast_atan = root_info.as_ref().map(|(_, _, _, f, _)| *f).unwrap_or(false);
     let root_eliminate = root_info.as_ref().map(|(_, _, _, _, e)| e.clone()).unwrap_or_default();
 
+    // Schur auto-detection: which parameter blocks may be marginalized.
+    //
+    // The coupling graph has one node per entity type appearing in a
+    // parameter-bearing root field, and an edge for every CrossBlock<A, B>
+    // anywhere in the model (a SELF-LOOP when A == B, e.g. odometry's
+    // CrossBlock<Pose, Pose>). A set of types is eliminable exactly when it
+    // is an INDEPENDENT SET: no edge among its members. That is sound
+    // because the macro emits a block for every J^T J pair, so no
+    // CrossBlock<A, B> means no Hessian tile can ever join an A to a B --
+    // which is precisely the block-diagonal Hee that marginalization needs.
+    //
+    // A model can have several legal sets (bundle adjustment: cameras and
+    // points couple only to each other, so BOTH {cameras} and {points}
+    // qualify), and which one pays depends on instance counts the macro
+    // cannot see. So every maximal independent set is emitted as a
+    // candidate and the solver picks at runtime. Several landmark TYPES in
+    // one set is the normal case, not a special one -- points and lines with
+    // different block sizes are simply two nodes with no edge between them.
+    //
+    // TripletBlock roots emit nothing: their Hessian pattern is only known
+    // after a compute pass, so no static claim about coupling is possible
+    // (the Schur backend refuses those models anyway).
+    let elimination_candidates_fn = if root_precision.is_some() && !has_triplet_block {
+        let cross = registry_cross_pairs();
+        // Graph nodes are ENTITY types only: those owning a SelfBlock, i.e.
+        // a diagonal Hessian block. Constraint structs (an Odo holding a
+        // CrossBlock<Pose, Pose>) carry no parameters of their own and no
+        // diagonal block, so they are not variables and cannot be
+        // marginalized -- they are the EDGES of this graph, not nodes.
+        let is_entity = |t: &str| {
+            registry_lookup(t).is_some_and(|l| l.self_block_field.is_some())
+        };
+        let mut types: Vec<String> = Vec::new();
+        for (_, _, elem) in &size_walk {
+            if let Some(e) = elem
+                && is_entity(e)
+                && !types.contains(e) {
+                    types.push(e.clone());
+                }
+        }
+        let coupled = |a: &str, b: &str| {
+            cross.iter().any(|(x, y)| {
+                (x == a && y == b) || (x == b && y == a)
+            })
+        };
+        // Independent sets, brute-forced: the graph has one node per entity
+        // type, so it is tiny. Bail out rather than explode on a pathological
+        // model.
+        let mut candidates: Vec<Vec<String>> = Vec::new();
+        if !types.is_empty() && types.len() <= 16 {
+            let mut sets: Vec<Vec<String>> = Vec::new();
+            for mask in 1u32..(1u32 << types.len()) {
+                let members: Vec<String> = (0..types.len())
+                    .filter(|i| mask & (1 << i) != 0)
+                    .map(|i| types[i].clone())
+                    .collect();
+                // independent: no member self-couples, no pair couples
+                let ok = members.iter().all(|a| !coupled(a, a))
+                    && members.iter().enumerate().all(|(i, a)| {
+                        members[i + 1..].iter().all(|b| !coupled(a, b))
+                    });
+                if ok {
+                    sets.push(members);
+                }
+            }
+            // keep only the maximal ones (no other set is a strict superset)
+            for set in &sets {
+                let maximal = !sets.iter().any(|other| {
+                    other.len() > set.len() && set.iter().all(|m| other.contains(m))
+                });
+                if maximal {
+                    candidates.push(set.clone());
+                }
+            }
+        }
+        // Every candidate must leave something behind: eliminating the whole
+        // model is not a reduction, it is the same factorization by another
+        // name.
+        candidates.retain(|set| types.iter().any(|t| !set.contains(t)));
+
+        if candidates.is_empty() {
+            None
+        } else {
+            let per_candidate: Vec<TokenStream2> = candidates.iter().map(|set| {
+                let last = size_walk.iter().rposition(|(_, _, e)|
+                    e.as_ref().is_some_and(|e| set.contains(e)));
+                let Some(last) = last else {
+                    return quote! {};
+                };
+                let stmts: Vec<TokenStream2> = size_walk[..=last].iter().map(|(_, size, elem)| {
+                    if elem.as_ref().is_some_and(|e| set.contains(e)) {
+                        quote! {
+                            let __start = __off;
+                            __off += #size;
+                            __ranges.push(__start..__off);
+                        }
+                    } else {
+                        quote! { __off += #size; }
+                    }
+                }).collect();
+                quote! {
+                    {
+                        let mut __ranges = std::vec::Vec::new();
+                        let mut __off = 0usize;
+                        #(#stmts)*
+                        __out.push(__ranges);
+                    }
+                }
+            }).collect();
+            Some(quote! {
+                fn elimination_candidates(&self) -> std::vec::Vec<std::vec::Vec<std::ops::Range<usize>>> {
+                    let mut __out = std::vec::Vec::new();
+                    #(#per_candidate)*
+                    __out
+                }
+            })
+        }
+    } else {
+        None
+    };
+
     // eliminate_first(fields): generate the RootProblem::elimination_hint
     // override. Ranges come from the same field walk serialize uses, so
     // fixed params and nested models are counted identically.
@@ -1480,15 +1642,15 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
         None
     } else {
         for id in &root_eliminate {
-            if !size_walk.iter().any(|(f, _)| f == id) {
+            if !size_walk.iter().any(|(f, _, _)| f == id) {
                 return Err(syn::Error::new(id.span(), format!(
                     "eliminate_first: `{}` is not a parameter-bearing field of this struct", id)));
             }
         }
         // Walk fields in serialize order up to the last marked one.
-        let last = size_walk.iter().rposition(|(f, _)|
+        let last = size_walk.iter().rposition(|(f, _, _)|
             root_eliminate.iter().any(|id| id == f)).unwrap();
-        let stmts: Vec<TokenStream2> = size_walk[..=last].iter().map(|(f, size)| {
+        let stmts: Vec<TokenStream2> = size_walk[..=last].iter().map(|(f, size, _)| {
             if root_eliminate.iter().any(|id| id == f) {
                 quote! {
                     let __start = __off;
@@ -1511,7 +1673,7 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
 
     let constraint_impls = if let Some(ref precision) = root_precision {
         constraint::generate_root_methods(name, fields, precision, root_custom, root_jacobian,
-            root_fast_atan, &elimination_hint_fn, has_triplet_block)?
+            root_fast_atan, &elimination_hint_fn, &elimination_candidates_fn, has_triplet_block)?
     } else {
         quote! {}
     };
