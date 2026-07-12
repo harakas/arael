@@ -34,6 +34,18 @@
 //!   scalar sparse factorization
 //! * `to_dense` -- expand, for tests and debugging
 //!
+//! # nd -- nested dissection
+//!
+//! A fill-reducing ordering for matrices with no band and no small degrees --
+//! bundle adjustment, where every 3D point makes a clique of the cameras that
+//! see it and minimum degree drowns in them. It dissects the BLOCK graph, so a
+//! block's parameters stay contiguous and the factor keeps its supernodes.
+//! [`NestedDissection::of_blocks`] gives a permutation faer takes as-is
+//! (`SymmetricOrdering::Custom`).
+//!
+//! Not a general win: a banded system (a SLAM trajectory) is 3.4x SLOWER
+//! dissected, and a pose graph prefers AMD. The caller must know its matrix.
+//!
 //! # schur -- Schur complement
 //!
 //! Given `H` in block CSC and a set of blocks to eliminate,
@@ -70,4 +82,5 @@
 pub use faer;
 
 pub mod bsc;
+pub mod nd;
 pub mod schur;

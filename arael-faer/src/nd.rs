@@ -1,0 +1,706 @@
+//! Nested dissection: a fill-reducing ordering for matrices that have no band
+//! and no small degrees to chew on.
+//!
+//! Cholesky fill spreads along paths in the matrix's graph. Nested dissection
+//! cuts those paths: find a set of vertices whose removal splits the graph in
+//! two, order each half first and the separator last, and no fill can ever
+//! reach from one half to the other. Recurse.
+//!
+//! ```text
+//! order(V) = order(A) ++ order(B) ++ S      S separates A from B
+//! ```
+//!
+//! This is what bundle adjustment needs and minimum degree cannot give it: a
+//! 3D point seen by k cameras makes a k-clique among them, and AMD drowns in
+//! cliques. On the 1723-camera Ladybug problem AMD leaves 83.1M values in the
+//! factor and faer takes 4.7 s over it; this ordering leaves 46.9M and takes
+//! 2.3 s.
+//!
+//! It is NOT a general win, and the caller must know which matrix it has:
+//!
+//! * **banded** (a SLAM trajectory's reduced system) -- the natural order is
+//!   already at the fill limit, and dissecting it is 3.4x SLOWER.
+//! * **very sparse graphs** (a pose graph) -- AMD wins outright.
+//! * **cliquey, no band** (bundle adjustment) -- this is the one.
+//!
+//! # Ordering the block graph, not the matrix
+//!
+//! [`NestedDissection::of_blocks`] dissects the graph of BLOCKS -- one node per
+//! camera, not per parameter. Two reasons, both measured:
+//!
+//! * a block's parameters stay contiguous in the permutation, so the factor
+//!   keeps its supernodes. On Ladybug-372 this ordering has 9% MORE fill than
+//!   scalar METIS and still factorizes FASTER (122 ms against 126), because
+//!   fill is not what the dense kernels care about;
+//! * the graph is 9x smaller, and the ordering runs in 12 ms instead of 916.
+
+use crate::bsc::SymbolicSparseBlockColMat;
+use faer::Index;
+use faer::dyn_stack::{MemBuffer, MemStack};
+use faer::perm::PermRef;
+use faer::sparse::SymbolicSparseColMat;
+
+/// How hard to work at it.
+#[derive(Clone, Copy, Debug)]
+pub struct NdParams {
+    /// Stop dissecting below this many nodes and order the rest with AMD.
+    /// Barely matters: 16 / 64 / 256 measured 2398 / 2419 / 2333 ms on
+    /// Ladybug-1723.
+    pub leaf: usize,
+    /// Passes of Fiduccia-Mattheyses refinement over each separator. 0 leaves
+    /// the raw BFS separator, which is a poor one. Refinement is where the
+    /// quality is: it is the difference between "a separator" and "a small
+    /// separator", and fill is quadratic in separator size.
+    pub fm_passes: usize,
+    /// How lopsided a bisection may get, as a fraction of the subgraph's
+    /// weight on the heavier side. Refinement will not push past it.
+    pub max_imbalance: f64,
+}
+
+impl Default for NdParams {
+    fn default() -> Self {
+        NdParams { leaf: 128, fm_passes: 4, max_imbalance: 0.6 }
+    }
+}
+
+/// An undirected graph in CSR, no self-loops, both directions stored.
+#[derive(Clone, Debug)]
+pub struct Graph {
+    xadj: Vec<usize>,
+    adj: Vec<usize>,
+    /// what eliminating this node costs -- its scalar width. A separator's
+    /// price is paid in parameters, not in nodes, so a 9-wide camera is worth
+    /// nine times a 1-wide one.
+    vwgt: Vec<usize>,
+}
+
+impl Graph {
+    /// Build from an edge list. Duplicate and reversed edges are fine; self
+    /// loops are dropped.
+    pub fn from_edges(n: usize, edges: impl IntoIterator<Item = (usize, usize)>) -> Self {
+        let mut e: Vec<(usize, usize)> = Vec::new();
+        for (a, b) in edges {
+            if a != b {
+                e.push((a, b));
+                e.push((b, a));
+            }
+        }
+        e.sort_unstable();
+        e.dedup();
+        let mut xadj = vec![0usize; n + 1];
+        for &(a, _) in &e {
+            xadj[a + 1] += 1;
+        }
+        for i in 0..n {
+            xadj[i + 1] += xadj[i];
+        }
+        let mut adj = vec![0usize; e.len()];
+        let mut cur = xadj.clone();
+        for &(a, b) in &e {
+            adj[cur[a]] = b;
+            cur[a] += 1;
+        }
+        Graph { xadj, adj, vwgt: vec![1; n] }
+    }
+
+    /// Give the nodes weights (their scalar widths). Length must be `nodes()`.
+    pub fn with_weights(mut self, vwgt: Vec<usize>) -> Self {
+        assert_eq!(vwgt.len(), self.nodes());
+        self.vwgt = vwgt;
+        self
+    }
+
+    fn w(&self, u: usize) -> usize {
+        self.vwgt[u]
+    }
+
+    /// The graph of a symmetric block matrix: one node per block column, an
+    /// edge wherever an off-diagonal tile couples two of them.
+    pub fn of_blocks<I: Index>(sym: &SymbolicSparseBlockColMat<I>) -> Self {
+        let n = sym.nblk_cols();
+        let mut edges = Vec::new();
+        for j in 0..n {
+            for b in sym.col_range(j) {
+                let i = sym.blk_row(b);
+                if i != j {
+                    edges.push((i, j));
+                }
+            }
+        }
+        let widths = (0..n).map(|j| sym.col_span(j).len()).collect();
+        Graph::from_edges(n, edges).with_weights(widths)
+    }
+
+    pub fn nodes(&self) -> usize {
+        self.xadj.len() - 1
+    }
+
+    pub fn neighbours(&self, u: usize) -> &[usize] {
+        &self.adj[self.xadj[u]..self.xadj[u + 1]]
+    }
+}
+
+/// Scratch reused across the whole recursion, so a dissection allocates once.
+struct Scratch {
+    /// which nodes belong to the subgraph being worked on
+    inset: Vec<bool>,
+    /// BFS bookkeeping
+    seen: Vec<u32>,
+    stamp: u32,
+    queue: Vec<usize>,
+    /// which half of the current bisection a node landed in (1 or 2)
+    side: Vec<u8>,
+    in_sep: Vec<bool>,
+    /// FM refinement: where each node sits (A / B / SEP) and whether it has
+    /// already been moved in this pass
+    part: Vec<u8>,
+    locked: Vec<bool>,
+}
+
+impl Scratch {
+    fn new(n: usize) -> Self {
+        Scratch {
+            inset: vec![false; n],
+            seen: vec![0; n],
+            stamp: 0,
+            queue: Vec::with_capacity(n),
+            side: vec![0; n],
+            in_sep: vec![false; n],
+            part: vec![0; n],
+            locked: vec![false; n],
+        }
+    }
+}
+
+const A: u8 = 0;
+const B: u8 = 1;
+const SEP: u8 = 2;
+
+/// One vertex moved out of the separator, and the neighbours it dragged in.
+struct Move {
+    v: usize,
+    to: u8,
+    dragged: Vec<usize>,
+}
+
+/// Fiduccia-Mattheyses refinement of a vertex separator.
+///
+/// The move: take `v` out of the separator into side `T`. Every neighbour of
+/// `v` that sat on the *other* side must then enter the separator, or `v`
+/// would touch it directly and the separator would not separate. So
+///
+/// ```text
+/// gain(v -> T) = w(v) - sum of w(u) for u in N(v) on the far side
+/// ```
+///
+/// and a positive gain shrinks the separator. The point of FM -- and the
+/// reason a greedy hill-climber is not FM -- is that it takes the best move
+/// available even when the gain is NEGATIVE, keeps going, and afterwards rolls
+/// back to the best separator it saw along the way. That is how it climbs out
+/// of a local minimum: a chain of bad moves can open a much better cut.
+///
+/// Balance is a hard constraint, not a term in the objective: a perfectly thin
+/// separator that leaves 99% of the graph on one side has dissected nothing.
+fn refine(
+    g: &Graph,
+    nodes: &[usize],
+    a: &mut Vec<usize>,
+    b: &mut Vec<usize>,
+    sep: &mut Vec<usize>,
+    s: &mut Scratch,
+    p: NdParams,
+) {
+    if sep.is_empty() || a.is_empty() || b.is_empty() {
+        return;
+    }
+    for &u in a.iter() {
+        s.part[u] = A;
+    }
+    for &u in b.iter() {
+        s.part[u] = B;
+    }
+    for &u in sep.iter() {
+        s.part[u] = SEP;
+    }
+
+    let total: usize = nodes.iter().map(|&u| g.w(u)).sum();
+    let max_side = (total as f64 * p.max_imbalance) as usize;
+    let mut wa: usize = a.iter().map(|&u| g.w(u)).sum();
+    let mut wb: usize = b.iter().map(|&u| g.w(u)).sum();
+    let mut wsep: usize = sep.iter().map(|&u| g.w(u)).sum();
+
+    for _pass in 0..p.fm_passes {
+        for &u in nodes {
+            s.locked[u] = false;
+        }
+        let mut moves: Vec<Move> = Vec::new();
+        let mut best_sep = wsep;
+        let mut best_step = 0usize;
+        let (start_wa, start_wb, start_wsep) = (wa, wb, wsep);
+
+        loop {
+            // Best move over the whole separator. The separator is small (it
+            // is the point), so scanning it beats maintaining gain buckets.
+            let mut best: Option<(isize, usize, u8)> = None;
+            for k in 0..sep.len() {
+                let v = sep[k];
+                if s.part[v] != SEP || s.locked[v] {
+                    continue;
+                }
+                for to in [A, B] {
+                    let far = if to == A { B } else { A };
+                    let drag: usize = g
+                        .neighbours(v)
+                        .iter()
+                        .filter(|&&u| s.part[u] == far)
+                        .map(|&u| g.w(u))
+                        .sum();
+                    // v joins `to`; the dragged neighbours leave `far` for SEP
+                    let new_to = if to == A { wa } else { wb } + g.w(v);
+                    if new_to > max_side {
+                        continue;
+                    }
+                    let gain = g.w(v) as isize - drag as isize;
+                    if best.is_none_or(|(gb, _, _)| gain > gb) {
+                        best = Some((gain, v, to));
+                    }
+                }
+            }
+            let Some((gain, v, to)) = best else { break };
+
+            let far = if to == A { B } else { A };
+            let dragged: Vec<usize> = g
+                .neighbours(v)
+                .iter()
+                .copied()
+                .filter(|&u| s.part[u] == far)
+                .collect();
+            let dragw: usize = dragged.iter().map(|&u| g.w(u)).sum();
+
+            s.part[v] = to;
+            for &u in &dragged {
+                s.part[u] = SEP;
+                sep.push(u);
+            }
+            s.locked[v] = true;
+            if to == A {
+                wa += g.w(v);
+                wb -= dragw;
+            } else {
+                wb += g.w(v);
+                wa -= dragw;
+            }
+            wsep = (wsep as isize - gain) as usize;
+            moves.push(Move { v, to, dragged });
+
+            if wsep < best_sep {
+                best_sep = wsep;
+                best_step = moves.len();
+            }
+            // A long tail of bad moves that never pays off is just wasted
+            // work; FM's escape is usually a few moves deep.
+            if moves.len() > best_step + 50 {
+                break;
+            }
+        }
+
+        // Roll back everything after the best separator we saw.
+        for m in moves.drain(best_step..).rev() {
+            let far = if m.to == A { B } else { A };
+            s.part[m.v] = SEP;
+            for &u in &m.dragged {
+                s.part[u] = far;
+            }
+        }
+        // Rebuild the three sets from `part`. This is NOT optional even when
+        // the pass improved nothing: the moves pushed dragged nodes into
+        // `sep`, and although the rollback restored `part`, those pushes are
+        // still there -- a node would be handed to the recursion twice.
+        // It has to come from `nodes`, the subgraph, each node exactly once.
+        a.clear();
+        b.clear();
+        sep.clear();
+        wa = 0;
+        wb = 0;
+        wsep = 0;
+        for &u in nodes {
+            match s.part[u] {
+                A => {
+                    a.push(u);
+                    wa += g.w(u);
+                }
+                B => {
+                    b.push(u);
+                    wb += g.w(u);
+                }
+                _ => {
+                    sep.push(u);
+                    wsep += g.w(u);
+                }
+            }
+        }
+        debug_assert_eq!(a.len() + b.len() + sep.len(), nodes.len());
+        if best_step == 0 {
+            // Nothing improved, and another pass would start from exactly
+            // here: the rollback put every node back where it was.
+            debug_assert_eq!((wa, wb, wsep), (start_wa, start_wb, start_wsep));
+            break;
+        }
+    }
+}
+
+/// Breadth-first search inside the current subgraph. Fills `queue` with the
+/// nodes in visit order and returns how many it reached -- fewer than the
+/// subgraph holds means the subgraph is disconnected.
+fn bfs(g: &Graph, start: usize, s: &mut Scratch) -> usize {
+    s.stamp += 1;
+    s.queue.clear();
+    s.queue.push(start);
+    s.seen[start] = s.stamp;
+    let mut head = 0;
+    while head < s.queue.len() {
+        let u = s.queue[head];
+        head += 1;
+        for &v in g.neighbours(u) {
+            if s.inset[v] && s.seen[v] != s.stamp {
+                s.seen[v] = s.stamp;
+                s.queue.push(v);
+            }
+        }
+    }
+    s.queue.len()
+}
+
+/// A node far from the graph's middle. BFS from such a node gives deep, thin
+/// level sets, and a thin level set is a small separator. Two rounds of "go to
+/// the last node reached, start again" is the standard cheap heuristic.
+fn pseudo_peripheral(g: &Graph, nodes: &[usize], s: &mut Scratch) -> usize {
+    let mut start = nodes[0];
+    for _ in 0..2 {
+        bfs(g, start, s);
+        start = *s.queue.last().unwrap();
+    }
+    start
+}
+
+/// Split a subgraph into two halves and the vertex separator between them.
+///
+/// Grow a region from a peripheral node by BFS until it holds about half the
+/// nodes -- a BFS frontier is a natural cut -- then turn that edge cut into a
+/// VERTEX separator by taking the boundary of whichever side has fewer
+/// boundary nodes. Removing those vertices disconnects the halves.
+fn bisect(
+    g: &Graph,
+    nodes: &[usize],
+    s: &mut Scratch,
+) -> (Vec<usize>, Vec<usize>, Vec<usize>) {
+    let start = pseudo_peripheral(g, nodes, s);
+    let reached = bfs(g, start, s);
+
+    // Disconnected: peel the reached component off. The two parts are already
+    // independent, so there is nothing to separate.
+    if reached < nodes.len() {
+        let a: Vec<usize> = s.queue.clone();
+        let stamp = s.stamp;
+        let b: Vec<usize> = nodes.iter().copied().filter(|&u| s.seen[u] != stamp).collect();
+        return (a, b, Vec::new());
+    }
+
+    let half = nodes.len() / 2;
+    for (i, &u) in s.queue.iter().enumerate() {
+        s.side[u] = if i < half { 1 } else { 2 };
+    }
+
+    let mut bnd_a = Vec::new();
+    let mut bnd_b = Vec::new();
+    for &u in nodes {
+        let cuts = g.neighbours(u).iter().any(|&v| s.inset[v] && s.side[v] != s.side[u]);
+        if cuts {
+            if s.side[u] == 1 {
+                bnd_a.push(u);
+            } else {
+                bnd_b.push(u);
+            }
+        }
+    }
+    let sep = if bnd_a.len() <= bnd_b.len() { bnd_a } else { bnd_b };
+
+    for &u in &sep {
+        s.in_sep[u] = true;
+    }
+    let mut a = Vec::new();
+    let mut b = Vec::new();
+    for &u in nodes {
+        if s.in_sep[u] {
+            continue;
+        }
+        if s.side[u] == 1 {
+            a.push(u);
+        } else {
+            b.push(u);
+        }
+    }
+    for &u in &sep {
+        s.in_sep[u] = false;
+    }
+    (a, b, sep)
+}
+
+/// Order a small subgraph with faer's AMD -- the same minimum-degree code the
+/// Cholesky uses, so the leaves cost nothing to get right.
+fn amd_leaf(g: &Graph, nodes: &[usize], s: &mut Scratch) -> Vec<usize> {
+    let n = nodes.len();
+    if n <= 2 {
+        return nodes.to_vec();
+    }
+    // node -> local index, through the seen array (stamped, so no clearing)
+    s.stamp += 1;
+    let stamp = s.stamp;
+    let mut local = vec![0usize; g.nodes()];
+    for (i, &u) in nodes.iter().enumerate() {
+        s.seen[u] = stamp;
+        local[u] = i;
+    }
+    let mut col_ptr = vec![0usize; n + 1];
+    let mut row_idx: Vec<usize> = Vec::new();
+    let mut col = Vec::new();
+    for (i, &u) in nodes.iter().enumerate() {
+        col.clear();
+        col.push(i); // the diagonal
+        for &v in g.neighbours(u) {
+            if s.seen[v] == stamp && local[v] < i {
+                col.push(local[v]);
+            }
+        }
+        col.sort_unstable();
+        col.dedup();
+        row_idx.extend_from_slice(&col);
+        col_ptr[i + 1] = row_idx.len();
+    }
+    let sym = SymbolicSparseColMat::<usize>::new_checked(n, n, col_ptr, None, row_idx);
+    let mut perm = vec![0usize; n];
+    let mut perm_inv = vec![0usize; n];
+    let mut mem = MemBuffer::new(faer::sparse::linalg::amd::order_scratch::<usize>(
+        n,
+        sym.compute_nnz(),
+    ));
+    faer::sparse::linalg::amd::order(
+        &mut perm,
+        &mut perm_inv,
+        sym.as_ref(),
+        Default::default(),
+        MemStack::new(&mut mem),
+    )
+    .expect("amd on a leaf");
+    perm.iter().map(|&i| nodes[i]).collect()
+}
+
+fn dissect(g: &Graph, nodes: Vec<usize>, p: NdParams, s: &mut Scratch, out: &mut Vec<usize>) {
+    if nodes.len() <= p.leaf {
+        let leaf = amd_leaf(g, &nodes, s);
+        out.extend(leaf);
+        return;
+    }
+    for &u in &nodes {
+        s.inset[u] = true;
+    }
+    let (mut a, mut b, mut sep) = bisect(g, &nodes, s);
+    if p.fm_passes > 0 {
+        refine(g, &nodes, &mut a, &mut b, &mut sep, s, p);
+    }
+    for &u in &nodes {
+        s.inset[u] = false;
+    }
+
+    // A cut that separates nothing would recurse forever.
+    if a.is_empty() || b.is_empty() {
+        let leaf = amd_leaf(g, &nodes, s);
+        out.extend(leaf);
+        return;
+    }
+    dissect(g, a, p, s, out);
+    dissect(g, b, p, s, out);
+    out.extend(sep); // the separator is eliminated last: it pays for both halves
+}
+
+/// Order a graph's nodes by nested dissection. The result is the elimination
+/// order: `order[k]` is the node eliminated k-th.
+pub fn order_graph(g: &Graph, p: NdParams) -> Vec<usize> {
+    let n = g.nodes();
+    let mut s = Scratch::new(n);
+    let mut out = Vec::with_capacity(n);
+    dissect(g, (0..n).collect(), p, &mut s, &mut out);
+    debug_assert_eq!(out.len(), n);
+    out
+}
+
+/// A nested-dissection permutation of a block matrix, ready for faer.
+///
+/// Hand it to a symbolic Cholesky as
+/// `SymmetricOrdering::Custom(nd.perm())` -- no change to faer is needed, the
+/// custom ordering is part of its public API.
+pub struct NestedDissection {
+    fwd: Vec<usize>,
+    inv: Vec<usize>,
+}
+
+impl NestedDissection {
+    /// Dissect the block graph and expand the result to scalar coordinates.
+    /// Every block's parameters stay contiguous and in their original relative
+    /// order -- which is what keeps the factor's supernodes intact.
+    pub fn of_blocks<I: Index>(sym: &SymbolicSparseBlockColMat<I>, p: NdParams) -> Self {
+        let g = Graph::of_blocks(sym);
+        let block_order = order_graph(&g, p);
+
+        let n = sym.ncols();
+        let mut fwd = Vec::with_capacity(n);
+        for &b in &block_order {
+            fwd.extend(sym.col_span(b));
+        }
+        let mut inv = vec![0usize; n];
+        for (new, &old) in fwd.iter().enumerate() {
+            inv[old] = new;
+        }
+        NestedDissection { fwd, inv }
+    }
+
+    /// The permutation, as faer wants it.
+    pub fn perm(&self) -> PermRef<'_, usize> {
+        PermRef::new_checked(&self.fwd, &self.inv, self.fwd.len())
+    }
+
+    /// `fwd[k]` is the scalar index eliminated k-th.
+    pub fn forward(&self) -> &[usize] {
+        &self.fwd
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A grid: the classic nested-dissection case. A separator down the middle
+    /// splits it, and every recursion does the same. The ordering must be a
+    /// permutation, and it must put the top-level separator LAST -- that is the
+    /// whole mechanism.
+    #[test]
+    fn a_grid_is_dissected_and_the_separator_goes_last() {
+        let (w, h) = (16usize, 16usize);
+        let id = |x: usize, y: usize| y * w + x;
+        let mut edges = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                if x + 1 < w {
+                    edges.push((id(x, y), id(x + 1, y)));
+                }
+                if y + 1 < h {
+                    edges.push((id(x, y), id(x, y + 1)));
+                }
+            }
+        }
+        let g = Graph::from_edges(w * h, edges);
+        let order = order_graph(&g, NdParams { leaf: 16, ..Default::default() });
+
+        assert_eq!(order.len(), w * h);
+        let mut seen = vec![false; w * h];
+        for &u in &order {
+            assert!(!seen[u], "node {} ordered twice", u);
+            seen[u] = true;
+        }
+
+        // The last nodes eliminated must separate the graph: remove them, and
+        // what is left must fall into at least two pieces.
+        let sep: std::collections::HashSet<usize> =
+            order[order.len() - w..].iter().copied().collect();
+        let mut comp = vec![usize::MAX; w * h];
+        let mut ncomp = 0;
+        for start in 0..w * h {
+            if sep.contains(&start) || comp[start] != usize::MAX {
+                continue;
+            }
+            let mut q = std::vec![start];
+            comp[start] = ncomp;
+            while let Some(u) = q.pop() {
+                for &v in g.neighbours(u) {
+                    if !sep.contains(&v) && comp[v] == usize::MAX {
+                        comp[v] = ncomp;
+                        q.push(v);
+                    }
+                }
+            }
+            ncomp += 1;
+        }
+        assert!(
+            ncomp >= 2,
+            "the last {} nodes should separate the grid, but it stayed in one piece",
+            w
+        );
+    }
+
+    /// A disconnected graph has nothing to separate: each component is ordered
+    /// on its own, and no node is lost.
+    #[test]
+    fn disconnected_components_are_each_ordered() {
+        let mut edges = Vec::new();
+        for k in 0..4 {
+            let base = k * 50;
+            for i in 0..49 {
+                edges.push((base + i, base + i + 1));
+            }
+        }
+        let g = Graph::from_edges(200, edges);
+        let order = order_graph(&g, NdParams { leaf: 8, ..Default::default() });
+        assert_eq!(order.len(), 200);
+        let mut seen = vec![false; 200];
+        for &u in &order {
+            assert!(!seen[u]);
+            seen[u] = true;
+        }
+    }
+
+    /// Isolated nodes, empty graphs, and a graph smaller than the leaf size all
+    /// have to come out as valid permutations.
+    #[test]
+    fn degenerate_graphs() {
+        for n in [0usize, 1, 2, 5] {
+            let g = Graph::from_edges(n, []);
+            let order = order_graph(&g, NdParams::default());
+            assert_eq!(order.len(), n);
+            let mut seen = vec![false; n];
+            for &u in &order {
+                assert!(!seen[u]);
+                seen[u] = true;
+            }
+        }
+    }
+
+    /// The block entry point: the permutation must be a valid scalar
+    /// permutation, and every block's parameters must stay contiguous -- that
+    /// contiguity is the whole reason we dissect the block graph.
+    #[test]
+    fn a_block_permutation_keeps_blocks_together() {
+        // three 3-wide blocks in a path: 0 - 1 - 2
+        let part = std::vec![0usize, 3, 6, 9];
+        let (sym, _) = SymbolicSparseBlockColMat::<usize>::from_scalar_coords(
+            part.clone(),
+            part,
+            4,
+            |k| [(0, 0), (0, 1), (1, 1), (1, 2)][k],
+        );
+        let nd = NestedDissection::of_blocks(&sym, NdParams { leaf: 1, ..Default::default() });
+        let fwd = nd.forward();
+        assert_eq!(fwd.len(), 9);
+
+        let mut seen = vec![false; 9];
+        for &i in fwd {
+            assert!(!seen[i], "scalar {} appears twice", i);
+            seen[i] = true;
+        }
+        // each block of 3 must appear as a contiguous, ascending run
+        for chunk in fwd.chunks(3) {
+            assert_eq!(chunk[1], chunk[0] + 1);
+            assert_eq!(chunk[2], chunk[0] + 2);
+            assert_eq!(chunk[0] % 3, 0, "a block was split across the permutation");
+        }
+    }
+}
