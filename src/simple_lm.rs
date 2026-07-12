@@ -1888,17 +1888,77 @@ fn assemble_first_csc<T: Float>(
 /// the natural order does not already have -- measured identical factor
 /// size and numeric time, for 4x the symbolic cost. Below the threshold the
 /// matrix is a sparse graph again and AMD earns its keep.
-fn ordering_for<'a>(
-    col_ptr: &[usize],
-    n: usize,
-) -> faer::sparse::linalg::cholesky::SymmetricOrdering<'a, usize> {
-    use faer::sparse::linalg::cholesky::SymmetricOrdering;
+/// Why the reduced system got the ordering it got -- the verbose output
+/// explains the choice, and the choice is worth a lot (measured on the
+/// reduced systems our own benchmarks produce, faer numeric factorization):
+///
+/// | S | n | density | b/n | natural | AMD |
+/// |---|---|---|---|---|---|
+/// | slam-6000 | 36000 | 4.9% | 0.03 | **795 ms** | 837 ms |
+/// | slam-1200 | 7200 | 23% | 0.13 | **150 ms** | 151 ms |
+/// | slam-300 | 1800 | 69% | 0.50 | 22.8 ms | 22.8 ms |
+/// | BAL-1723 | 15507 | 8.0% | 0.89 | 4481 ms | **4794 ms**\* |
+///
+/// \* AMD is not the best ordering for BAL -- nested dissection factorizes
+/// that same matrix in 1538 ms -- but it is the best of the two faer offers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SOrdering {
+    /// The matrix is banded: a landmark is seen from a bounded stretch of the
+    /// trajectory, so S is banded too, and the natural order already sits at
+    /// the band limit. AMD then costs a fill-reducing pass to rediscover an
+    /// ordering no better than the one we have (at 6000 slam poses: 452 ms of
+    /// symbolic against 65, for 0.2% more fill).
+    NaturalBanded,
+    /// The matrix is dense enough that there is no fill to reduce: AMD finds
+    /// nothing the natural order does not already have, for 4x the symbolic.
+    NaturalDense,
+    /// A general sparse graph. AMD earns its keep -- and on the pose-graph
+    /// shape it beats nested dissection outright.
+    Amd,
+}
+
+/// Fill-reducing ordering, but only where there is fill to reduce.
+///
+/// `band` is S's half-bandwidth ([`arael_faer::schur::SchurSymbolic::kept_bandwidth`]),
+/// which the symbolic pass hands over for free.
+fn ordering_for(col_ptr: &[usize], n: usize, band: usize) -> SOrdering {
     let nnz = col_ptr.last().copied().unwrap_or(0) as f64;
     let density = nnz / (n as f64 * (n as f64 + 1.0) / 2.0);
     if density > 0.25 {
-        SymmetricOrdering::Identity
+        SOrdering::NaturalDense
+    } else if n > 0 && (band as f64) < 0.2 * n as f64 {
+        SOrdering::NaturalBanded
     } else {
-        SymmetricOrdering::Amd
+        SOrdering::Amd
+    }
+}
+
+impl SOrdering {
+    fn faer<'a>(self) -> faer::sparse::linalg::cholesky::SymmetricOrdering<'a, usize> {
+        use faer::sparse::linalg::cholesky::SymmetricOrdering;
+        match self {
+            SOrdering::Amd => SymmetricOrdering::Amd,
+            _ => SymmetricOrdering::Identity,
+        }
+    }
+    fn why(self, n: usize, nnz: usize, band: usize) -> String {
+        let density = 100.0 * nnz as f64 / (n as f64 * (n as f64 + 1.0) / 2.0);
+        match self {
+            SOrdering::NaturalDense => std::format!(
+                "natural order -- S is {:.0}% dense, so there is no fill for AMD to reduce",
+                density
+            ),
+            SOrdering::NaturalBanded => std::format!(
+                "natural order -- S is banded (half-bandwidth {} of {}, {:.0}% dense), \
+                 and the natural order is already at the band limit",
+                band, n, density
+            ),
+            SOrdering::Amd => std::format!(
+                "AMD -- S is a general sparse graph (half-bandwidth {} of {}, {:.0}% dense), \
+                 so a fill-reducing ordering pays for itself",
+                band, n, density
+            ),
+        }
     }
 }
 
@@ -2743,7 +2803,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             let h_pat = hsym.csc_pattern();
             let nk = schur.s.nrows();
             let t0 = std::time::Instant::now();
-            let s_llt = analyze(&s_pat.0, &s_pat.1, nk, ordering_for(&s_pat.0, nk));
+            let s_llt = analyze(&s_pat.0, &s_pat.1, nk, ordering_for(&s_pat.0, nk, band).faer());
             t_sym_reduced = t0.elapsed().as_secs_f64() * 1e3;
             let t0 = std::time::Instant::now();
             let h_llt = analyze(&h_pat.0, &h_pat.1, n, SymmetricOrdering::Amd);
@@ -2876,6 +2936,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         let s = schur.alloc_s::<T>();
         {
             use faer::sparse::linalg::cholesky::*;
+            let ord = ordering_for(&self.s_col_ptr, nk, band);
             let llt_symbolic = reduced_llt.unwrap_or_else(|| {
                 let sym_ref = faer::sparse::SymbolicSparseColMatRef::new_checked(
                     nk, nk, &self.s_col_ptr, None, &self.s_row_idx,
@@ -2883,7 +2944,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 factorize_symbolic_cholesky(
                     sym_ref,
                     faer::Side::Upper,
-                    ordering_for(&self.s_col_ptr, nk),
+                    ord.faer(),
                     CholeskySymbolicParams::default(),
                 )
                 .expect("symbolic factorization of the reduced system failed")
@@ -2896,6 +2957,10 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                     100.0 * self.s_row_idx.len() as f64 / (nk as f64 * (nk as f64 + 1.0) / 2.0),
                     band,
                     llt_symbolic.len_val(),
+                );
+                info!(
+                    "schur: ordering the reduced system by {}",
+                    ord.why(nk, self.s_row_idx.len(), band),
                 );
             }
             if vb {
@@ -3797,6 +3862,58 @@ pub fn solve_spd_band_f32(n: usize, kd: usize, band: &mut [f32], b: &mut [f32]) 
 
 #[cfg(test)]
 mod tests {
+    use super::{ordering_for, SOrdering};
+
+    /// The reduced system's ordering is picked from its shape, and the shape
+    /// is what decides whether a fill-reducing pass is worth running at all.
+    /// Measured on the real matrices (faer numeric factorization):
+    ///
+    /// * banded, slam-6000 (36000, 4.9% dense, b/n = 0.03): natural 795 ms,
+    ///   AMD 837 ms -- and AMD spends 452 ms of symbolic to find nothing,
+    ///   against 65 ms for the natural order.
+    /// * dense, slam-300 (1800, 69% dense): natural = AMD, 22.8 ms.
+    /// * general sparse, a pose graph (0.1% dense, b/n = 0.8): AMD 2.1 ms,
+    ///   natural 101 ms -- 48x. Getting this one wrong is the expensive
+    ///   mistake, so the band test has to be strict.
+    #[test]
+    fn the_ordering_follows_the_shape_of_the_reduced_system() {
+        // A banded matrix: every column reaches back a bounded distance.
+        let n = 10_000;
+        let band = 100;
+        let mut col_ptr = vec![0usize];
+        for j in 0..n {
+            let rows = (j + 1).min(band + 1);
+            col_ptr.push(col_ptr[j] + rows);
+        }
+        assert_eq!(
+            ordering_for(&col_ptr, n, band),
+            SOrdering::NaturalBanded,
+            "a narrow band is already at the fill limit; AMD only costs symbolic time"
+        );
+
+        // The same matrix, but a landmark reaches across the whole trajectory
+        // (a loop closure): the band is gone and AMD earns its keep.
+        assert_eq!(
+            ordering_for(&col_ptr, n, n - 1),
+            SOrdering::Amd,
+            "no band -- a fill-reducing ordering must run"
+        );
+
+        // Dense enough that there is no fill to reduce.
+        let dense_nnz = (0.7 * (n as f64) * (n as f64 + 1.0) / 2.0) as usize;
+        let dense = vec![0usize, dense_nnz];
+        assert_eq!(
+            ordering_for(&dense, 1, dense_nnz),
+            SOrdering::NaturalDense,
+        );
+
+        // The pose-graph shape: very sparse, no band. This is the case where
+        // guessing natural costs 48x, so it must come out AMD.
+        let sparse_nnz = 3 * n;
+        let sparse = vec![0usize, sparse_nnz];
+        assert_eq!(ordering_for(&sparse, n, n - 1), SOrdering::Amd);
+    }
+
     use super::*;
 
     #[test]
