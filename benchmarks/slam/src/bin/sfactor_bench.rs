@@ -248,6 +248,38 @@ fn main() {
         );
     }
 
+    // ---- the auto-detector's question ------------------------------------
+    // Is "eliminate the landmarks first" a better ELIMINATION ORDERING than
+    // letting AMD order the whole system? Compare the fill each leaves,
+    // symbolically. Each route needs its own symbolic anyway, so the
+    // comparison costs exactly one extra symbolic -- the route not taken.
+    {
+        let h_csc = h.to_csc();
+        let (t_hsym, h_llt) = min_ms(rounds, || {
+            factorize_symbolic_cholesky(
+                h_csc.as_ref().symbolic(),
+                faer::Side::Upper,
+                SymmetricOrdering::Amd,
+                CholeskySymbolicParams::default(),
+            )
+            .unwrap()
+        });
+        let s_llt = factorize_symbolic_cholesky(
+            s_csc.as_ref().symbolic(),
+            faer::Side::Upper,
+            SymmetricOrdering::Identity,
+            CholeskySymbolicParams::default(),
+        )
+        .unwrap();
+        println!();
+        println!("elimination-ordering comparison (symbolic only):");
+        println!("  full system, AMD:        L = {:>10} vals ({:6.1} MB), symbolic {:6.2} ms",
+            h_llt.len_val(), h_llt.len_val() as f64 * 8.0 / 1e6, t_hsym);
+        println!("  landmarks first (S):     L = {:>10} vals ({:6.1} MB)",
+            s_llt.len_val(), s_llt.len_val() as f64 * 8.0 / 1e6);
+        println!("  fill ratio L_S / L_H:    {:.2}", s_llt.len_val() as f64 / h_llt.len_val() as f64);
+    }
+
     // ---- dense LLT --------------------------------------------------------
     println!();
     println!("dense LLT on S (n = {}, {:.1} MB dense)", nk, (nk * nk) as f64 * 8.0 / 1e6);

@@ -50,7 +50,7 @@ struct Obs {
 }
 
 #[arael::model]
-#[arael(root, eliminate_first(points))]
+#[arael(root)]
 pub struct Scene {
     cameras: refs::Vec<Camera>,
     points: refs::Vec<Point>,
@@ -93,7 +93,7 @@ struct ObsF {
 }
 
 #[arael::model]
-#[arael(root, f32, eliminate_first(points))]
+#[arael(root, f32)]
 struct SceneF {
     cameras: refs::Vec<CameraF>,
     points: refs::Vec<PointF>,
@@ -232,11 +232,24 @@ fn solve64(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmConfig<f64>)
 }
 
 fn solve64_schur(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmConfig<f64>) -> arael::simple_lm::LmResult<f64> {
-    let mut solver = arael::simple_lm::SparseFaerSchur::new();
-    for r in arael::simple_lm::RootProblem::elimination_hint(s) {
-        solver = solver.with_eliminate_first(r);
+    // No hint: the eliminable blocks are detected from the model's coupling
+    // graph. Forced, so the benchmark measures the reduction itself rather
+    // than the policy's verdict about it.
+    // BAL_SCHUR_POLICY=auto gates the reduction on the fill analysis
+    // instead of forcing it (see SchurPolicy).
+    let policy = if std::env::var("BAL_SCHUR_POLICY").as_deref() == Ok("auto") {
+        arael::simple_lm::SchurPolicy::default()
+    } else {
+        arael::simple_lm::SchurPolicy::Force
+    };
+    let mut solver = arael::simple_lm::SparseFaerSchur::new().with_policy(policy);
+    let r = arael::simple_lm::lm_solve(params, &mut solver, s, cfg);
+    if std::env::var("BAL_SCHUR_PLAN").is_ok() {
+        if let Some(p) = solver.plan() {
+            eprintln!("schur plan: {:?}", p);
+        }
     }
-    arael::simple_lm::lm_solve(params, &mut solver, s, cfg)
+    r
 }
 
 fn solve32(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmConfig<f32>) -> arael::simple_lm::LmResult<f32> {
@@ -244,10 +257,8 @@ fn solve32(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmConfig<f32>
 }
 
 fn solve32_schur(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmConfig<f32>) -> arael::simple_lm::LmResult<f32> {
-    let mut solver = arael::simple_lm::SparseFaerSchurF32::new();
-    for r in arael::simple_lm::RootProblem::elimination_hint(s) {
-        solver = solver.with_eliminate_first(r);
-    }
+    let mut solver = arael::simple_lm::SparseFaerSchurF32::new()
+        .with_policy(arael::simple_lm::SchurPolicy::Force);
     arael::simple_lm::lm_solve(params, &mut solver, s, cfg)
 }
 

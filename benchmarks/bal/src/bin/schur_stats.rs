@@ -42,8 +42,9 @@ fn main() {
     ];
     let rounds: usize = std::env::var("ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
 
-    println!("{:<14} {:>7} {:>8} {:>9} {:>7} {:>8} {:>10} {:>9} {:>9}",
-        "dataset", "cams", "S n", "S dens%", "pairs", "L MB", "reduce ms", "sym ms", "numer ms");
+    println!("{:<14} {:>7} {:>8} {:>9} {:>7} {:>8} {:>10} {:>9} {:>9} {:>9} {:>8} {:>8}",
+        "dataset", "cams", "S n", "S dens%", "pairs", "L_S MB", "reduce ms", "sym ms", "numer ms",
+        "L_H MB", "L_S/L_H", "Hsym ms");
     for (name, path) in datasets {
         if !std::path::Path::new(path).exists() {
             println!("{:<14} (missing)", name);
@@ -147,15 +148,35 @@ fn main() {
                 .unwrap();
         });
 
-        println!("{:<14} {:>7} {:>8} {:>9.1} {:>7} {:>8.1} {:>10.1} {:>9.1} {:>9.1}",
+        // The decision the auto-detector would have to make: is
+        // "eliminate the points first" a better ELIMINATION ORDERING than
+        // letting AMD order the whole camera+point system? Compare the
+        // fill each leaves, symbolically -- no numeric factorization.
+        let h_csc = h.to_csc();
+        let (t_hsym, h_llt) = min_ms(1, || {
+            factorize_symbolic_cholesky(
+                h_csc.as_ref().symbolic(),
+                faer::Side::Upper,
+                SymmetricOrdering::Amd,
+                CholeskySymbolicParams::default(),
+            )
+            .unwrap()
+        });
+        let fill_schur = l_vals.len() as f64;
+        let fill_full = h_llt.len_val() as f64;
+
+        println!("{:<14} {:>7} {:>8} {:>9.1} {:>7} {:>8.1} {:>10.1} {:>9.1} {:>9.1} {:>9.1} {:>8.2} {:>8.0}",
             name,
             ds.cameras.len(),
             nk,
             density,
             sym.pair_count(),
-            l_vals.len() as f64 * 8.0 / 1e6,
+            fill_schur * 8.0 / 1e6,
             t_reduce,
             t_sym,
-            t_num);
+            t_num,
+            fill_full * 8.0 / 1e6,
+            fill_schur / fill_full,
+            t_hsym);
     }
 }
