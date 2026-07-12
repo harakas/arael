@@ -36,9 +36,16 @@ built from the euler angles inside each residual (arael's
 `SimpleEulerAngleParam`; matched by plain 6-vectors in the other four
 systems). Landmarks are 3 parameters. The scene is generated from a
 fixed seed; `SLAM_POSES=N` sets the pose count (landmarks scale as `4N`).
-"Wide" landmarks (15%) are visible across up to `N/4` poses, so the
-observation count grows faster than linearly (5.4k / 12.2k / 41.4k at
-60 / 120 / 300 poses).
+"Wide" landmarks (15%) span up to half the trajectory -- they are observed
+from up to `N/2` consecutive poses, capped at 150 -- so the observation
+count grows faster than linearly (5.4k / 12.2k / 41.4k at 60 / 120 / 300
+poses). The widest landmark at 300 poses is seen from 150 poses and carries
+127 observations, against a median of 26. That heavy tail is the point: it
+is what fills in the Hessian and what makes the marginalized (Schur)
+system dense, so it is where the solvers actually differ. Below ~120 poses
+the mechanism is inert -- a quarter of a short trajectory is no wider than
+an ordinary landmark's 31-pose window -- so the small scenes have no heavy
+tail at all.
 
 This is the **outlier-free** scenario: the bearing and GPS residuals are
 plain Gaussian (max-likelihood when there are no outliers). The
