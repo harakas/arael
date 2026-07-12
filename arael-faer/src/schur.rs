@@ -346,30 +346,42 @@ pub fn schur_symbolic<I: Index>(
     val_ptr.push(I::truncate(0));
     let mut vals_end = 0usize;
     let mut copy_cursor = 0usize;
+    // Rows touched in the current column, gathered rather than searched
+    // for. Reading the marks back with a `for kr in 0..=kc` scan would be
+    // O(kept^2) overall -- invisible when the kept system is a handful of
+    // cameras, ruinous when it is most of the model (six seconds at
+    // 158k kept blocks). Gathering and sorting is O(nnz log w) instead.
+    let mut touched: Vec<usize> = Vec::new();
     for kc in 0..nk {
         let stamp = kc as u32 + 1;
         let copy_begin = copy_cursor;
+        touched.clear();
+        let mut touch = |kr: usize, mark: &mut Vec<u32>, touched: &mut Vec<usize>| {
+            if mark[kr] != stamp {
+                mark[kr] = stamp;
+                touched.push(kr);
+            }
+        };
         while copy_cursor < copy_kk.len() && copy_kk[copy_cursor].2 == kc {
-            mark[copy_kk[copy_cursor].1] = stamp;
+            touch(copy_kk[copy_cursor].1, &mut mark, &mut touched);
             copy_cursor += 1;
         }
         for &(slot, bi) in &land_ent[land_ptr[kc]..land_ptr[kc + 1]] {
             let start = elim_obs_ptr[slot as usize].zx();
             for o in start..=start + bi as usize {
-                mark[kept_of[obs_block[o].zx()].zx()] = stamp;
+                touch(kept_of[obs_block[o].zx()].zx(), &mut mark, &mut touched);
             }
         }
+        touched.sort_unstable();
         let colw = kept_part[kc + 1] - kept_part[kc];
-        for kr in 0..=kc {
-            if mark[kr] == stamp {
-                blk_at[kr] = blk_row_idx.len() as u32;
-                if kr == kc {
-                    s_diag.push(I::truncate(blk_row_idx.len()));
-                }
-                blk_row_idx.push(I::truncate(kr));
-                vals_end += (kept_part[kr + 1] - kept_part[kr]) * colw;
-                val_ptr.push(I::truncate(vals_end));
+        for &kr in &touched {
+            blk_at[kr] = blk_row_idx.len() as u32;
+            if kr == kc {
+                s_diag.push(I::truncate(blk_row_idx.len()));
             }
+            blk_row_idx.push(I::truncate(kr));
+            vals_end += (kept_part[kr + 1] - kept_part[kr]) * colw;
+            val_ptr.push(I::truncate(vals_end));
         }
         blk_col_ptr.push(I::truncate(blk_row_idx.len()));
         for ci in copy_begin..copy_cursor {
@@ -1030,6 +1042,18 @@ mod tests {
         run_and_compare(&[2]); // width-1 eliminated block
         run_and_compare(&[0]); // eliminated first, all couplings transposed
         run_and_compare(&[5]); // eliminated last, all couplings direct
+    }
+
+    #[test]
+    fn mixed_width_eliminated_set() {
+        // Several entity TYPES eliminated together -- e.g. 3-parameter
+        // points and 6-parameter lines in one reduction. Blocks 2 and 5
+        // have widths 1 and 2 and are uncoupled (no (2, 5) tile), so they
+        // are a legal eliminated set with differing block sizes.
+        run_and_compare(&[2, 5]);
+        // and with a third, wider one (block 0, width 2; no (0, 2) or
+        // (0, 5) tile either)
+        run_and_compare(&[0, 2, 5]);
     }
 
     #[test]
