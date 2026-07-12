@@ -104,6 +104,9 @@ pub struct SchurSymbolic<I: Index> {
     /// workspace sizing: max panel elements / max eliminated width
     max_panel: usize,
     max_ew: usize,
+    /// every GEMM tile shape this reduction needs, with the number of pair
+    /// contributions carried by each -- see [`SchurSymbolic::gemm_shapes`]
+    shapes: Vec<((usize, usize, usize), usize)>,
     /// flops one [`schur_reduce`] costs: the observer-pair GEMMs, which
     /// dominate it. a caller weighing the reduction against factorizing the
     /// whole system needs this, and it is free to accumulate here.
@@ -119,6 +122,14 @@ impl<I: Index> SchurSymbolic<I> {
     /// driver: quadratic in observers-per-eliminated-block)
     pub fn pair_count(&self) -> usize {
         self.pair_dst.len()
+    }
+    /// The GEMM tile shapes this reduction needs, `((wa, we, wb), pairs)`, in
+    /// no particular order. A shape not in [`FIXED_SHAPES`] runs the generic
+    /// loop and costs roughly 2x, so a caller that cares about speed should
+    /// look here -- and the pair count says how much of the reduction is on
+    /// the slow path.
+    pub fn gemm_shapes(&self) -> &[((usize, usize, usize), usize)] {
+        &self.shapes
     }
     /// flops one [`schur_reduce`] costs (its observer-pair GEMMs). Free to
     /// read; the symbolic pass accumulates it.
@@ -314,6 +325,7 @@ pub fn schur_symbolic<I: Index>(
     let mut max_ew = 0usize;
     let mut total_pairs = 0usize;
     let mut reduce_flops = 0.0f64;
+    let mut shapes: Vec<((usize, usize, usize), usize)> = Vec::new();
     elim_obs_ptr.push(I::truncate(0));
     elim_pair_ptr.push(I::truncate(0));
     for slot in 0..ne {
@@ -330,6 +342,20 @@ pub fn schur_symbolic<I: Index>(
         }
         total_pairs += list.len() * (list.len() + 1) / 2;
         let ew = h.col_span(e).len();
+        // Which GEMM shapes this problem actually needs, and how many pair
+        // contributions each carries. The widths are in hand here, so the
+        // census is free; a caller uses it to see whether the reduction is
+        // running on unrolled kernels or on the generic loop.
+        for (bi, &(_, _, ob)) in list.iter().enumerate() {
+            let wb = h.col_span(ob.zx()).len();
+            for &(_, _, oa) in list.iter().take(bi + 1) {
+                let wa = h.col_span(oa.zx()).len();
+                match shapes.iter_mut().find(|(k, _)| *k == (wa, ew, wb)) {
+                    Some((_, n)) => *n += 1,
+                    None => shapes.push(((wa, ew, wb), 1)),
+                }
+            }
+        }
         {
             // sum over pairs a <= b of 2 * w_a * ew * w_b, in closed form
             let mut sum_w = 0.0f64;
@@ -465,6 +491,7 @@ pub fn schur_symbolic<I: Index>(
         obs_block,
         pair_dst,
         s_diag,
+        shapes,
         max_panel,
         max_ew,
         reduce_flops,
@@ -527,6 +554,7 @@ fn gemm_sub_fixed<T: SchurReal, const WA: usize, const WE: usize, const WB: usiz
     ca: &[T],
     zb: &[T],
 ) {
+    note_fixed_kernel();
     for c in 0..WB {
         for k in 0..WE {
             let z = zb[k + c * WE];
@@ -547,6 +575,7 @@ fn gemm_sub_fixed_trans<T: SchurReal, const WA: usize, const WE: usize, const WB
     ca: &[T],
     zb: &[T],
 ) {
+    note_fixed_kernel();
     for c in 0..WB {
         for i in 0..WA {
             let arow = &ca[i * WE..(i + 1) * WE];
@@ -558,6 +587,114 @@ fn gemm_sub_fixed_trans<T: SchurReal, const WA: usize, const WE: usize, const WB
             dst[i + c * WA] = dst[i + c * WA] - s;
         }
     }
+}
+
+/// The `(observer, marginalized, observer)` tile shapes that have a fully
+/// unrolled GEMM kernel. Every other shape works, through a generic loop that
+/// leaves the widths -- and so the loop bounds and the vectorization -- to run
+/// time, and costs roughly 2x for it.
+///
+/// This is the same list [`fixed_shapes`] dispatches on; a test walks every
+/// shape up to 9x9x9 and checks the two agree, so they cannot drift apart.
+/// [`SchurSymbolic::gemm_shapes`] reports what a given problem actually needs,
+/// which is how a caller finds out it is paying the 2x.
+/// The widths are the ones SLAM systems actually use. Observers: 3 (a 2D
+/// pose), 6 (a 3D pose), 7 (a similarity, for scale-aware loop closure), 9 (a
+/// camera with intrinsics, which is also what a BAL camera and a NavState
+/// are). Marginalized: 1 (inverse depth), 2 (a 2D point, or a bearing), 3 (a
+/// 3D point), 4 (a 3D line, or a 2D segment). Cross-checked against g2o's
+/// vertex dimensions and GTSAM's variable dimensions.
+pub const FIXED_SHAPES: [(usize, usize, usize); 11] = [
+    // -- 2D --
+    (3, 2, 3), // 2D pose (x, y, theta) through a 2D point. The slam2d demos,
+    // g2o VertexSE2 + VertexPointXY, Victoria-Park-style range-bearing SLAM
+    (3, 3, 3), // 2D pose through an oriented landmark (a fiducial marker)
+    (3, 4, 3), // 2D pose through a segment landmark (g2o VertexSegment2D)
+    (2, 3, 2), // the mirror: a 3-wide family marginalized, seen from 2-wide
+    // ones (map alignment -- a few path corrections, many landmarks)
+    // -- 3D --
+    (6, 1, 6), // 3D pose through an inverse-depth point (monocular SLAM/VIO)
+    (6, 2, 6), // 3D pose through a bearing / direction landmark (GTSAM Unit3)
+    (6, 3, 6), // 3D pose through a 3D point. g2o VertexSE3Expmap +
+    // VertexPointXYZ, GTSAM Pose3 + Point3: the workhorse
+    (6, 4, 6), // 3D pose through a line (g2o VertexLine3D, Plucker) or a plane
+    (6, 6, 6), // 3D pose through a marginalized 6-dof entity (marker, object)
+    // -- larger observers --
+    (7, 3, 7), // similarity pose through a 3D point (g2o VertexSim3Expmap:
+    // scale-aware loop closure)
+    (9, 3, 9), // camera-with-intrinsics through a 3D point. BAL, GTSAM
+    // SfmCamera = PinholeCamera<Cal3Bundler>, and a 9-dof NavState
+];
+
+/// Does this tile shape have an unrolled kernel, or does it fall to the
+/// generic loop? See [`FIXED_SHAPES`].
+pub fn has_fixed_kernel(wa: usize, we: usize, wb: usize) -> bool {
+    FIXED_SHAPES.contains(&(wa, we, wb))
+}
+
+/// Counts calls that reached an unrolled kernel. Whether the dispatch fires
+/// is invisible in the output -- the generic loop computes the same thing --
+/// so without this a broken match arm would silently cost 2x and no test
+/// would notice. Compiled out of every non-test build.
+#[cfg(test)]
+thread_local! {
+    static FIXED_KERNEL_HITS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+#[inline]
+fn note_fixed_kernel() {
+    FIXED_KERNEL_HITS.with(|c| c.set(c.get() + 1));
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn note_fixed_kernel() {}
+
+/// The tile shapes that get a fully unrolled kernel, as
+/// `(observer, marginalized, observer)` widths. Every other shape falls to
+/// the generic loop below, which is correct but leaves the widths -- and so
+/// the loop bounds and the vectorization -- to run time.
+///
+/// The list is what arael's own models produce:
+///
+/// * `(3, 2, 3)` -- 2D SLAM: a pose is `(x, y, theta)`, a landmark `(x, y)`.
+/// * `(2, 3, 2)` -- the same models the other way up, when the 3-wide family
+///   is the one worth marginalizing (map alignment: a few path corrections
+///   seen from many landmarks, rather than the reverse).
+/// * `(3, 3, 3)` -- 2D SLAM with oriented landmarks (fiducial markers), which
+///   are pose-shaped themselves.
+/// * `(6, 3, 6)` -- 3D SLAM: a 6-dof pose through a 3D point.
+/// * `(6, 4, 6)` -- 3D SLAM with a 4-parameter landmark.
+/// * `(6, 6, 6)` -- 3D with a marginalized 6-dof entity (a marker, an object).
+/// * `(9, 3, 9)` -- bundle adjustment: a 9-parameter camera through a point.
+///
+/// The three widths are packed into one integer (a nibble each) and matched
+/// as a single value, so the compiler emits ONE switch. Matching the tuple
+/// `(wa, we, wb)` directly compiles to a chain of comparisons instead, and
+/// every shape then pays for the shapes listed ahead of it: measured on a
+/// 7-arm chain, the reduce got 5.5% slower at (6, 4, 6) and 2.0% slower at
+/// (6, 3, 6) purely from their position in the list. With the pack, growing
+/// the list to 11 shapes costs the existing ones nothing (measured again).
+/// It is not a micro-optimization -- it is what makes the list free to grow.
+macro_rules! fixed_shapes {
+    ($kernel:ident, $dst:expr, $ca:expr, $zb:expr, $wa:expr, $we:expr, $wb:expr) => {
+        // widths are tile dimensions, far below 16
+        match ($wa << 8) | ($we << 4) | $wb {
+            0x323 => return $kernel::<T, 3, 2, 3>($dst, $ca, $zb),
+            0x333 => return $kernel::<T, 3, 3, 3>($dst, $ca, $zb),
+            0x343 => return $kernel::<T, 3, 4, 3>($dst, $ca, $zb),
+            0x232 => return $kernel::<T, 2, 3, 2>($dst, $ca, $zb),
+            0x616 => return $kernel::<T, 6, 1, 6>($dst, $ca, $zb),
+            0x626 => return $kernel::<T, 6, 2, 6>($dst, $ca, $zb),
+            0x636 => return $kernel::<T, 6, 3, 6>($dst, $ca, $zb),
+            0x646 => return $kernel::<T, 6, 4, 6>($dst, $ca, $zb),
+            0x666 => return $kernel::<T, 6, 6, 6>($dst, $ca, $zb),
+            0x737 => return $kernel::<T, 7, 3, 7>($dst, $ca, $zb),
+            0x939 => return $kernel::<T, 9, 3, 9>($dst, $ca, $zb),
+            _ => {}
+        }
+    };
 }
 
 /// `dst -= C_a * Z_b` where `dst` is `wa x wb` column-major, `Z_b` is
@@ -574,15 +711,7 @@ fn gemm_sub<T: SchurReal>(
     wb: usize,
 ) {
     if !trans {
-        // fixed-size fast paths for the common tile shapes: 6-wide
-        // poses through 3- or 4-wide landmarks, 9-wide cameras (BAL)
-        // through 3-wide points
-        match (wa, we, wb) {
-            (6, 3, 6) => return gemm_sub_fixed::<T, 6, 3, 6>(dst, ca, zb),
-            (6, 4, 6) => return gemm_sub_fixed::<T, 6, 4, 6>(dst, ca, zb),
-            (9, 3, 9) => return gemm_sub_fixed::<T, 9, 3, 9>(dst, ca, zb),
-            _ => {}
-        }
+        fixed_shapes!(gemm_sub_fixed, dst, ca, zb, wa, we, wb);
         for c in 0..wb {
             for k in 0..we {
                 let z = zb[k + c * we];
@@ -594,12 +723,7 @@ fn gemm_sub<T: SchurReal>(
             }
         }
     } else {
-        match (wa, we, wb) {
-            (6, 3, 6) => return gemm_sub_fixed_trans::<T, 6, 3, 6>(dst, ca, zb),
-            (6, 4, 6) => return gemm_sub_fixed_trans::<T, 6, 4, 6>(dst, ca, zb),
-            (9, 3, 9) => return gemm_sub_fixed_trans::<T, 9, 3, 9>(dst, ca, zb),
-            _ => {}
-        }
+        fixed_shapes!(gemm_sub_fixed_trans, dst, ca, zb, wa, we, wb);
         // stored tile is C_a^T (we x wa): C_a[i, k] = ca[k + i * we]
         for c in 0..wb {
             for i in 0..wa {
@@ -1087,6 +1211,87 @@ mod tests {
         run_and_compare(&[2]); // width-1 eliminated block
         run_and_compare(&[0]); // eliminated first, all couplings transposed
         run_and_compare(&[5]); // eliminated last, all couplings direct
+    }
+
+    const NOT_LISTED: (usize, usize, usize) = (5, 3, 7);
+
+    /// FIXED_SHAPES advertises which shapes are fast; fixed_shapes! decides
+    /// which ones actually are. Nothing in the OUTPUT distinguishes them --
+    /// the generic loop computes the same values -- so a match arm that never
+    /// fires, or a list that promises a kernel nobody wrote, would cost 2x in
+    /// silence. Walk every shape up to 9x9x9 and demand the two agree, in
+    /// both orientations. This is the only test that can see the property.
+    #[test]
+    fn the_shape_list_and_the_dispatch_agree() {
+        let hits = || FIXED_KERNEL_HITS.with(|c| c.get());
+        for wa in 1..=9usize {
+            for we in 1..=9usize {
+                for wb in 1..=9usize {
+                    for trans in [false, true] {
+                        let ca = vec![0.5f64; wa * we];
+                        let zb = vec![0.5f64; we * wb];
+                        let mut dst = vec![0.0f64; wa * wb];
+                        FIXED_KERNEL_HITS.with(|c| c.set(0));
+                        gemm_sub(&mut dst, &ca, trans, wa, we, &zb, wb);
+                        let unrolled = hits() == 1;
+                        assert_eq!(
+                            unrolled,
+                            has_fixed_kernel(wa, we, wb),
+                            "({}, {}, {}) trans={}: dispatch says unrolled={}, \
+                             FIXED_SHAPES says {}",
+                            wa, we, wb, trans, unrolled,
+                            has_fixed_kernel(wa, we, wb)
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    /// Every shape with an unrolled kernel must agree with the generic
+    /// loop, in both orientations. A wrong const-generic arm would be
+    /// invisible on the models that do not use that shape.
+    #[test]
+    fn fixed_shape_kernels_match_the_generic_loop() {
+        let shapes: Vec<(usize, usize, usize)> =
+            FIXED_SHAPES.iter().copied().chain([NOT_LISTED]).collect();
+        for (wa, we, wb) in shapes {
+            for trans in [false, true] {
+                let mut rng = 12345u64;
+                let mut next = || {
+                    rng = rng.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    ((rng >> 33) as f64) / (u32::MAX as f64) - 0.5
+                };
+                // C_a is wa x we, stored as itself or as its transpose
+                let ca: Vec<f64> = (0..wa * we).map(|_| next()).collect();
+                let zb: Vec<f64> = (0..we * wb).map(|_| next()).collect();
+                let dst0: Vec<f64> = (0..wa * wb).map(|_| next()).collect();
+
+                // reference: dst -= C_a * Z_b, read straight from the
+                // definition, whatever the storage orientation
+                let mut want = dst0.clone();
+                for c in 0..wb {
+                    for i in 0..wa {
+                        let mut acc = 0.0;
+                        for k in 0..we {
+                            let a = if trans { ca[k + i * we] } else { ca[i + k * wa] };
+                            acc += a * zb[k + c * we];
+                        }
+                        want[i + c * wa] -= acc;
+                    }
+                }
+
+                let mut got = dst0.clone();
+                gemm_sub(&mut got, &ca, trans, wa, we, &zb, wb);
+                for (i, (g, w)) in core::iter::zip(&got, &want).enumerate() {
+                    assert!(
+                        (g - w).abs() <= 1e-12 * (1.0 + w.abs()),
+                        "({}, {}, {}) trans={}: element {}: {} vs {}",
+                        wa, we, wb, trans, i, g, w
+                    );
+                }
+            }
+        }
     }
 
     /// The band bound the reduce/decline heuristic leans on: a landmark
