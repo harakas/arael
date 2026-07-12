@@ -729,6 +729,7 @@ arael/              Main library (Levenberg-Marquardt solver + codegen)
     lib.rs          Crate documentation, arael::prelude
     model.rs        Param<T>, rotation params, Model trait, SelfBlock, CrossBlock, TripletBlock
     simple_lm.rs    LM solver, LmProblem/RootProblem/FitProblem, Dense/Band/Sparse backends
+                    (SparseFaer: sparse Cholesky + Schur marginalization)
     geometry.rs     Camera models and projections (pinhole intrinsics/extrinsics)
     user_fn.rs      Runtime registry for #[arael::function] user-defined functions
     utils.rs        Float f32/f64 trait, angle utilities, fast atan
@@ -739,6 +740,12 @@ arael/              Main library (Levenberg-Marquardt solver + codegen)
     log.rs          info!/warn!/error! logging macros
   cpp/
     eigen_sparse.cpp  Eigen SimplicialLLT + CHOLMOD FFI bridge (optional)
+
+arael-faer/         faer extensions (block CSC + Schur complement), staged for upstreaming
+  src/
+    lib.rs          Crate documentation
+    bsc.rs          Sparse matrix over a variable block partition (block CSC)
+    schur.rs        Schur-complement reduction and back-substitution
 
 arael-sym/          Symbolic math library
   src/
