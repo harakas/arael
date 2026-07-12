@@ -45,6 +45,15 @@ one independent contribution per eliminated block.
 | `schur_backsub(sym, h, rhs, x_kept, ctx, x_full)` | recover the eliminated blocks once the reduced system is solved |
 | `SchurSymbolic::{kept_size, kept_bandwidth, reduce_flops, pair_count}` | what the reduction will cost and how big S is -- free, from the symbolic pass, for deciding whether to reduce at all |
 | `SchurContext` | reusable workspace across iterations; `enable_timing` breaks a reduction down by stage |
+| `FIXED_SHAPES` / `has_fixed_kernel` | the tile shapes with a fully unrolled GEMM kernel. Anything else works, through a generic loop, at roughly half the speed |
+| `SchurSymbolic::gemm_shapes` | which shapes a given problem needs, and how many pair contributions each carries -- so a caller can see whether it is on the slow path |
+
+The shapes with unrolled kernels are the ones SLAM systems actually use --
+observers 3 (a 2D pose), 6 (a 3D pose), 7 (a similarity), 9 (a camera with
+intrinsics); marginalized 1 (inverse depth), 2 (a 2D point or a bearing), 3 (a
+3D point), 4 (a 3D line or a 2D segment) -- cross-checked against g2o's vertex
+dimensions and GTSAM's variable dimensions. A shape outside the list is not an
+error, only slower, and `gemm_shapes` will say so.
 
 The caller factorizes S itself (`csc_pattern` + faer's sparse Cholesky, or any
 other solver), then calls `schur_backsub`. See `arael::simple_lm::SparseFaer`

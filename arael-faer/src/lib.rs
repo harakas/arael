@@ -55,6 +55,13 @@
 //!   symbolic pass, for deciding whether to reduce at all
 //! * [`SchurContext`](schur::SchurContext) -- reusable workspace across
 //!   iterations; `enable_timing` breaks a reduction down by stage
+//! * [`FIXED_SHAPES`](schur::FIXED_SHAPES) /
+//!   [`has_fixed_kernel`](schur::has_fixed_kernel) -- the tile shapes with a
+//!   fully unrolled GEMM kernel (the ones SLAM systems use: 3/6/7/9-wide
+//!   observers through 1/2/3/4-wide marginalized blocks). Anything else works,
+//!   through a generic loop, at roughly half the speed
+//! * [`gemm_shapes`](schur::SchurSymbolic::gemm_shapes) -- which shapes a given
+//!   problem needs, so a caller can see whether it is on the slow path
 //!
 //! The caller factorizes S itself (`csc_pattern` + faer's sparse Cholesky, or
 //! any other solver), then calls `schur_backsub`. See
