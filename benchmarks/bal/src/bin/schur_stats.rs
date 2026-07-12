@@ -21,6 +21,42 @@ use arael_faer::faer::sparse::linalg::cholesky::{
 use arael_faer::schur::{schur_reduce, schur_symbolic, SchurContext};
 use std::time::Instant;
 
+/// Dump S in Matrix Market symmetric form (lower triangle, 1-based) when
+/// SCHUR_DUMP_DIR is set, so the ordering experiments can run on exactly the
+/// matrix the solver faces. Research scaffolding.
+fn dump_s(name: &str, nk: usize, col_ptr: &[usize], row_idx: &[usize], vals: &[f64]) {
+    let Ok(dir) = std::env::var("SCHUR_DUMP_DIR") else { return };
+    use std::io::Write;
+    let path = format!("{}/{}.mtx", dir, name);
+    let f = std::fs::File::create(&path).expect("create mtx");
+    let mut w = std::io::BufWriter::new(f);
+    writeln!(w, "%%MatrixMarket matrix coordinate real symmetric").unwrap();
+    // stored upper (i <= j); Matrix Market symmetric wants the lower triangle,
+    // so emit each entry transposed
+    // Our block CSC is tile-expanded: a diagonal tile carries its strictly
+    // lower half as explicit zeros. Those are not part of S -- emit the true
+    // upper triangle only, transposed, which is the lower triangle Matrix
+    // Market's symmetric format asks for.
+    let mut n_emitted = 0usize;
+    for j in 0..nk {
+        for k in col_ptr[j]..col_ptr[j + 1] {
+            if row_idx[k] <= j {
+                n_emitted += 1;
+            }
+        }
+    }
+    writeln!(w, "{} {} {}", nk, nk, n_emitted).unwrap();
+    for j in 0..nk {
+        for k in col_ptr[j]..col_ptr[j + 1] {
+            if row_idx[k] <= j {
+                writeln!(w, "{} {} {:.17e}", j + 1, row_idx[k] + 1, vals[k]).unwrap();
+            }
+        }
+    }
+    w.flush().unwrap();
+    eprintln!("  dumped {} ({} x {}, {} nnz upper)", path, nk, nk, n_emitted);
+}
+
 fn min_ms<R>(rounds: usize, mut f: impl FnMut() -> R) -> (f64, R) {
     let mut best = f64::INFINITY;
     let mut out = None;
@@ -96,10 +132,30 @@ fn main() {
             }
         }
 
+        // What the solver marginalizes: the model names nothing, so take the
+        // coupling graph's candidates and pick the biggest, exactly as
+        // SparseFaer does.
+        let blocks_in = |ranges: &[std::ops::Range<usize>]| -> Vec<usize> {
+            (0..nblk)
+                .filter(|&b| {
+                    ranges.iter().any(|r| r.start <= partition[b] && partition[b + 1] <= r.end)
+                })
+                .collect()
+        };
         let hint = RootProblem::marginalize_hint(&scene);
-        let eliminated: Vec<usize> = (0..nblk)
-            .filter(|&b| hint.iter().any(|r| r.start <= partition[b] && partition[b + 1] <= r.end))
-            .collect();
+        let candidates: Vec<Vec<usize>> = if hint.is_empty() {
+            LmProblem::marginalize_candidates(&scene).iter().map(|r| blocks_in(r)).collect()
+        } else {
+            vec![blocks_in(&hint)]
+        };
+        let params_of = |ids: &[usize]| -> usize {
+            ids.iter().map(|&b| partition[b + 1] - partition[b]).sum::<usize>()
+        };
+        let eliminated: Vec<usize> = candidates
+            .into_iter()
+            .filter(|ids| !ids.is_empty())
+            .max_by_key(|ids| params_of(ids))
+            .expect("nothing marginalizable in a BAL scene");
         let sym = schur_symbolic(h.symbolic(), &eliminated).unwrap();
         let mut s = sym.alloc_s::<f64>();
         let mut ctx = SchurContext::new();
@@ -111,6 +167,13 @@ fn main() {
 
         let s_csc = s.to_csc();
         let s_nnz = s_csc.compute_nnz();
+        if std::env::var("SCHUR_DUMP_DIR").is_ok() {
+            // S already exists in the exact CSC the factorization consumes.
+            let (cp, ri) = sym.s.csc_pattern();
+            let mut vals = vec![0.0f64; cp[nk]];
+            s.csc_vals_into(&mut vals);
+            dump_s(&format!("bal-{}", name), nk, &cp, &ri, &vals);
+        }
         let density = 100.0 * s_nnz as f64 / (nk as f64 * (nk as f64 + 1.0) / 2.0);
         let ordering = if density > 25.0 {
             SymmetricOrdering::Identity

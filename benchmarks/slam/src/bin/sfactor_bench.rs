@@ -50,6 +50,40 @@ fn min_ms<R>(rounds: usize, mut f: impl FnMut() -> R) -> (f64, R) {
     (best, out.unwrap())
 }
 
+/// Dump S in Matrix Market symmetric form (lower triangle, 1-based) when
+/// SCHUR_DUMP_DIR is set, so the ordering experiments run on exactly the
+/// matrix the solver faces. Research scaffolding.
+fn dump_s(name: &str, nk: usize, col_ptr: &[usize], row_idx: &[usize], vals: &[f64]) {
+    let Ok(dir) = std::env::var("SCHUR_DUMP_DIR") else { return };
+    use std::io::Write;
+    let path = format!("{}/{}.mtx", dir, name);
+    let f = std::fs::File::create(&path).expect("create mtx");
+    let mut w = std::io::BufWriter::new(f);
+    writeln!(w, "%%MatrixMarket matrix coordinate real symmetric").unwrap();
+    // Our block CSC is tile-expanded: a diagonal tile carries its strictly
+    // lower half as explicit zeros. Those are not part of S -- emit the true
+    // upper triangle only, transposed, which is the lower triangle Matrix
+    // Market's symmetric format asks for.
+    let mut n_emitted = 0usize;
+    for j in 0..nk {
+        for k in col_ptr[j]..col_ptr[j + 1] {
+            if row_idx[k] <= j {
+                n_emitted += 1;
+            }
+        }
+    }
+    writeln!(w, "{} {} {}", nk, nk, n_emitted).unwrap();
+    for j in 0..nk {
+        for k in col_ptr[j]..col_ptr[j + 1] {
+            if row_idx[k] <= j {
+                writeln!(w, "{} {} {:.17e}", j + 1, row_idx[k] + 1, vals[k]).unwrap();
+            }
+        }
+    }
+    w.flush().unwrap();
+    eprintln!("  dumped {} ({} x {}, {} nnz upper)", path, nk, nk, n_emitted);
+}
+
 fn main() {
     pin_single_core();
     let mut cfg = SceneConfig::default();
@@ -99,16 +133,46 @@ fn main() {
             h.vals_mut()[base + k * (w + 1)] *= 1.0 + 1e-8;
         }
     }
+    // What the solver marginalizes: the model names nothing, so take the
+    // coupling graph's candidates and pick the biggest, exactly as SparseFaer
+    // does.
+    let blocks_in = |ranges: &[std::ops::Range<usize>]| -> Vec<usize> {
+        (0..nblk)
+            .filter(|&b| {
+                ranges.iter().any(|r| r.start <= partition[b] && partition[b + 1] <= r.end)
+            })
+            .collect()
+    };
     let hint = RootProblem::marginalize_hint(&path);
-    let eliminated: Vec<usize> = (0..nblk)
-        .filter(|&b| hint.iter().any(|r| r.start <= partition[b] && partition[b + 1] <= r.end))
-        .collect();
+    let candidates: Vec<Vec<usize>> = if hint.is_empty() {
+        LmProblem::marginalize_candidates(&path).iter().map(|r| blocks_in(r)).collect()
+    } else {
+        vec![blocks_in(&hint)]
+    };
+    let eliminated: Vec<usize> = candidates
+        .into_iter()
+        .filter(|ids| !ids.is_empty())
+        .max_by_key(|ids| {
+            ids.iter().map(|&b| partition[b + 1] - partition[b]).sum::<usize>()
+        })
+        .expect("nothing marginalizable in the slam scene");
     let sym = schur_symbolic(h.symbolic(), &eliminated).unwrap();
     let mut s = sym.alloc_s::<f64>();
     let mut ctx = SchurContext::new();
     let nk = sym.s.nrows();
     let mut rhs = vec![0.0; nk];
     schur_reduce(&sym, &h, &grad, &mut ctx, &mut s, &mut rhs).unwrap();
+
+    if std::env::var("SCHUR_DUMP_DIR").is_ok() {
+        let (cp, ri) = sym.s.csc_pattern();
+        let mut vals = vec![0.0f64; cp[nk]];
+        s.csc_vals_into(&mut vals);
+        let poses = std::env::var("SLAM_POSES").unwrap_or_else(|_| "300".into());
+        dump_s(&format!("slam-{}", poses), nk, &cp, &ri, &vals);
+        // Dumping is all we were asked for. Everything below allocates dense
+        // n x n matrices, which is not survivable at large n (see the guard).
+        return;
+    }
 
     let s_csc = s.to_csc();
     let s_nnz = s_csc.compute_nnz();
@@ -120,7 +184,22 @@ fn main() {
     println!("rounds: {} (min reported)", rounds);
     println!();
 
-    // reference solution: dense LLT of the mirrored S
+    // reference solution: dense LLT of the mirrored S.
+    //
+    // This is two n x n dense matrices. At 300 poses (n = 1800) that is 26 MB
+    // each; at 6000 poses (n = 36000) it is 10.4 GB each, and the process gets
+    // OOM-killed -- which is exactly what happened. The dense route is a
+    // roofline for small S, so bound it rather than let it take the machine
+    // down.
+    const DENSE_MAX: usize = 8000; // 8000^2 * 8 B = 512 MB per matrix
+    if nk > DENSE_MAX {
+        println!();
+        println!("dense reference SKIPPED: S is {} x {}, and the dense route needs two",
+            nk, nk);
+        println!("  {} x {} matrices = {:.1} GB each. Raise DENSE_MAX if you mean it.",
+            nk, nk, (nk as f64).powi(2) * 8.0 / 1e9);
+        return;
+    }
     let sd = s.to_dense();
     let mut full = faer::Mat::<f64>::zeros(nk, nk);
     for j in 0..nk {
