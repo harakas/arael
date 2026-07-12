@@ -171,19 +171,41 @@ fn main() {
     }
 
     let skip_tiny = std::env::var("SLAM_SKIP_TINY").map_or(false, |v| v == "1");
+    // SLAM_SYSTEMS=<comma-separated substrings> runs only the matching rows
+    // (e.g. SLAM_SYSTEMS=arael). Unset runs everything. A filtered run
+    // validates only against whatever ran -- for iterating, not publishing.
+    let systems_filter = std::env::var("SLAM_SYSTEMS").ok();
+    let want = |label: &str| -> bool {
+        systems_filter.as_deref().is_none_or(|f| {
+            f.split(',').any(|pat| label.contains(pat.trim()))
+        })
+    };
+    if systems_filter.is_some() {
+        eprintln!("SLAM_SYSTEMS={} -- partial run, cross-system validation is not meaningful",
+            systems_filter.as_deref().unwrap_or(""));
+    }
     for _ in 0..rounds {
+        if want("arael LM f64") {
         let a = arael_runner::run(&scene);
         record("arael LM f64", a.solve_ms, a.first_iter_ms, a.iterations, Some(a.accepted), a.solution, &mut cells);
+        }
+        if want("arael LM f32") {
         let a32 = arael_runner::run_f32(&scene);
         record("arael LM f32", a32.solve_ms, a32.first_iter_ms, a32.iterations, Some(a32.accepted), a32.solution, &mut cells);
-        if !skip_tiny {
+        }
+        if !skip_tiny && want("tiny-solver LM") {
             let t = tiny_runner::run_lm(&scene);
             record("tiny-solver LM", t.solve_ms, t.first_iter_ms, t.iterations, None, t.solution, &mut cells);
         }
+        if want("factrs LM") {
         let fa = factrs_runner::run(&scene);
         record("factrs LM", fa.solve_ms, fa.first_iter_ms, fa.iterations, None, fa.solution, &mut cells);
+        }
         if ceres_ok {
             for solver in &ceres_solvers {
+                if !want(&format!("ceres {}", solver)) {
+                    continue;
+                }
                 let c = run_ceres(scene_path, solver, scene.poses.len(), scene.landmarks_init.len());
                 let rel = ((c.initial_cost - initial_cost) / initial_cost).abs();
                 assert!(rel < 1e-9, "ceres initial cost {} vs reference {} (rel {:.2e})",
@@ -198,6 +220,9 @@ fn main() {
         }
         if symforce_ok {
             for (precision, label) in [("f64", "symforce LM f64"), ("f32", "symforce LM f32")] {
+                if !want(label) {
+                    continue;
+                }
                 let sf = run_symforce(scene_path, precision, scene.poses.len(), scene.landmarks_init.len());
                 let rel = ((sf.initial_cost - initial_cost) / initial_cost).abs();
                 assert!(rel < 1e-9, "symforce {} initial cost {} vs reference {} (rel {:.2e})",
@@ -209,7 +234,7 @@ fn main() {
                     sf.solution, &mut cells);
             }
         }
-        if g2o_ok {
+        if g2o_ok && want("g2o LM") {
             let g = run_g2o(scene_path, "lm", scene.poses.len(), scene.landmarks_init.len());
             let rel = ((g.initial_cost - initial_cost) / initial_cost).abs();
             assert!(rel < 1e-9, "g2o initial cost {} vs reference {} (rel {:.2e})",
@@ -220,7 +245,7 @@ fn main() {
             record("g2o LM", g.solve_ms, g.first_iter_ms, g.iterations, Some(g.accepted),
                 g.solution, &mut cells);
         }
-        if gtsam_ok {
+        if gtsam_ok && want("gtsam LM") {
             let gt = run_gtsam(scene_path, scene.poses.len(), scene.landmarks_init.len());
             let rel = ((gt.initial_cost - initial_cost) / initial_cost).abs();
             assert!(rel < 1e-9, "gtsam initial cost {} vs reference {} (rel {:.2e})",

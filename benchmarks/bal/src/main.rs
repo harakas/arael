@@ -282,30 +282,55 @@ fn main() {
             }
         };
 
+        // BAL_SYSTEMS=<comma-separated substrings> runs only the rows whose
+        // label matches one of them -- e.g. BAL_SYSTEMS=schur for the two
+        // arael Schur rows, or BAL_SYSTEMS="f64 schur" for one. Unset runs
+        // everything. Cross-system validation still applies to whatever ran,
+        // so a filtered run validates only against itself: use it to iterate,
+        // not to publish numbers.
+        let filter = std::env::var("BAL_SYSTEMS").ok();
+        let want = |label: &str| -> bool {
+            filter.as_deref().is_none_or(|f| {
+                f.split(',').any(|pat| label.contains(pat.trim()))
+            })
+        };
+        if filter.is_some() {
+            eprintln!("  BAL_SYSTEMS={} -- partial run, cross-system validation is not meaningful",
+                filter.as_deref().unwrap_or(""));
+        }
+
         for round in 0..rounds {
-            let a64 = arael_runner::run_f64(&ds);
-            record("arael LM f64 sparse", a64.solve_ms, a64.first_iter_ms, a64.iterations,
-                Some(a64.accepted), 0.0, a64.full_iter_ms, a64.cameras, a64.points,
-                &mut cells, &ds);
+            if want("arael LM f64 sparse") {
+                let a64 = arael_runner::run_f64(&ds);
+                record("arael LM f64 sparse", a64.solve_ms, a64.first_iter_ms, a64.iterations,
+                    Some(a64.accepted), 0.0, a64.full_iter_ms, a64.cameras, a64.points,
+                    &mut cells, &ds);
+            }
             #[cfg(feature = "cholmod-gpl")]
-            {
+            if want("arael LM f64 cholmod-gpl") {
                 let ag = arael_runner::run_f64_supernodal(&ds);
                 record("arael LM f64 cholmod-gpl", ag.solve_ms, ag.first_iter_ms, ag.iterations,
                     Some(ag.accepted), 0.0, ag.full_iter_ms, ag.cameras, ag.points,
                     &mut cells, &ds);
             }
-            let a32 = arael_runner::run_f32(&ds);
-            record("arael LM f32 sparse", a32.solve_ms, a32.first_iter_ms, a32.iterations,
-                Some(a32.accepted), 0.0, a32.full_iter_ms, a32.cameras, a32.points,
-                &mut cells, &ds);
-            let q64 = arael_runner::run_f64_schur(&ds);
-            record("arael LM f64 schur", q64.solve_ms, q64.first_iter_ms, q64.iterations,
-                Some(q64.accepted), 0.0, q64.full_iter_ms, q64.cameras, q64.points,
-                &mut cells, &ds);
-            let q32 = arael_runner::run_f32_schur(&ds);
-            record("arael LM f32 schur", q32.solve_ms, q32.first_iter_ms, q32.iterations,
-                Some(q32.accepted), 0.0, q32.full_iter_ms, q32.cameras, q32.points,
-                &mut cells, &ds);
+            if want("arael LM f32 sparse") {
+                let a32 = arael_runner::run_f32(&ds);
+                record("arael LM f32 sparse", a32.solve_ms, a32.first_iter_ms, a32.iterations,
+                    Some(a32.accepted), 0.0, a32.full_iter_ms, a32.cameras, a32.points,
+                    &mut cells, &ds);
+            }
+            if want("arael LM f64 schur") {
+                let q64 = arael_runner::run_f64_schur(&ds);
+                record("arael LM f64 schur", q64.solve_ms, q64.first_iter_ms, q64.iterations,
+                    Some(q64.accepted), 0.0, q64.full_iter_ms, q64.cameras, q64.points,
+                    &mut cells, &ds);
+            }
+            if want("arael LM f32 schur") {
+                let q32 = arael_runner::run_f32_schur(&ds);
+                record("arael LM f32 schur", q32.solve_ms, q32.first_iter_ms, q32.iterations,
+                    Some(q32.accepted), 0.0, q32.full_iter_ms, q32.cameras, q32.points,
+                    &mut cells, &ds);
+            }
             if ceres_available {
                 let solvers: &[&str] = if *dense_schur_ok {
                     &["dense_schur", "sparse_schur", "iterative_schur"]
@@ -313,19 +338,27 @@ fn main() {
                     &["sparse_schur", "iterative_schur"]
                 };
                 for linsolver in solvers {
+                    let label = format!("ceres {}", linsolver);
+                    if !want(&label) {
+                        continue;
+                    }
                     let e = run_ceres(path, linsolver, ds.cameras.len(), ds.points.len(), initial_cost);
-                    record(&format!("ceres {}", linsolver), e.solve_ms, e.first_iter_ms,
+                    record(&label, e.solve_ms, e.first_iter_ms,
                         e.iterations, e.accepted, e.peak_mb, e.full_iter_ms,
                         e.cameras, e.points, &mut cells, &ds);
                 }
             }
-            if g2o_available {
+            if g2o_available && want("g2o LM (schur)") {
                 let e = run_g2o(path, ds.cameras.len(), ds.points.len(), initial_cost);
                 record("g2o LM (schur)", e.solve_ms, e.first_iter_ms, e.iterations,
                     e.accepted, e.peak_mb, e.full_iter_ms, e.cameras, e.points,
                     &mut cells, &ds);
             }
             eprintln!("  round {}/{} done", round + 1, rounds);
+        }
+        if cells.is_empty() {
+            eprintln!("  BAL_SYSTEMS matched no rows -- nothing ran");
+            continue;
         }
 
         // Peak memory for the arael rows (fresh subprocess per solver; the
