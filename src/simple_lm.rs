@@ -2178,12 +2178,34 @@ pub enum SchurPolicy {
     /// The default `fill_ratio_max` of 0.8 ranks every problem measured so
     /// far correctly (slam 60/300 at 0.45/0.54 and BAL 49/138 at 0.16/0.47
     /// all win; BAL-372 at 0.84 is a wash; BAL-1723 at 1.21 loses).
-    Auto { fill_ratio_max: f64 },
+    ///
+    /// That comparison needs a fill-reducing ordering of the WHOLE matrix,
+    /// which is the expensive part (17.6 ms at slam-300) -- so it is skipped
+    /// when the reduction is obviously right, by `obvious_flop_ratio` below.
+    Auto {
+        fill_ratio_max: f64,
+        /// Skip the comparison entirely when the reduction is obviously
+        /// worth it: when factorizing the reduced system -- even if it came
+        /// out FULLY DENSE, the worst it can be -- would cost no more than
+        /// this multiple of the reduction we are committed to anyway.
+        ///
+        /// Both quantities are free: the kept size comes from the partition,
+        /// the reduction's flops from the symbolic pass. Across every problem
+        /// measured the ratio is 0.5-10.2 where the reduction wins, 23.7
+        /// where it is a wash and 681 where it loses, so the default of 15
+        /// short-circuits every obvious case and defers on the rest.
+        ///
+        /// Deferring is safe -- the exact comparison then decides -- so the
+        /// only real risk is firing on a problem the reduction loses, and the
+        /// margin to the nearest non-win (23.7, itself only a wash) is wide.
+        /// Set to 0 to always run the comparison.
+        obvious_flop_ratio: f64,
+    },
 }
 
 impl Default for SchurPolicy {
     fn default() -> Self {
-        SchurPolicy::Auto { fill_ratio_max: 0.8 }
+        SchurPolicy::Auto { fill_ratio_max: 0.8, obvious_flop_ratio: 15.0 }
     }
 }
 
@@ -2199,9 +2221,18 @@ pub struct SchurPlan {
     /// Parameters marginalized, and parameters left in the reduced system.
     pub eliminated_params: usize,
     pub kept_params: usize,
-    /// `fill(L_S) / fill(L_H)` -- the evidence behind an
-    /// [`SchurPolicy::Auto`] decision; `None` when the decision was forced.
+    /// `fill(L_S) / fill(L_H)` -- the ordering comparison's verdict. `Some`
+    /// only when that comparison actually ran: it is skipped when the cheap
+    /// `flop_ratio` below already settles the question, and never runs under
+    /// [`SchurPolicy::Force`].
     pub fill_ratio: Option<f64>,
+    /// The cheap statistic: what factorizing the reduced system would cost if
+    /// it came out fully dense, over what the reduction costs. `Some`
+    /// whenever the policy was [`SchurPolicy::Auto`]. Below the policy's
+    /// `obvious_flop_ratio` the reduction is taken on this alone and
+    /// `fill_ratio` stays `None` -- so between the two fields the plan says
+    /// exactly which test decided.
+    pub flop_ratio: Option<f64>,
 }
 
 pub struct SparseFaerSchur<T = f64> {
@@ -2449,6 +2480,13 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         // reduction degenerate into an ordinary full-system factorization:
         // one code path, always correct, only the route changes.
         let mut fill_ratio = None;
+        let flop_ratio = match self.policy {
+            SchurPolicy::Auto { .. } if !eliminated.is_empty() => {
+                let nk = schur.s.nrows() as f64;
+                Some(nk * nk * nk / 3.0 / schur.reduce_flops().max(1.0))
+            }
+            _ => None,
+        };
         // The full system's symbolic factorization, computed by the gate and
         // reused when it declines -- at BAL scale this is seconds of work,
         // and the declined route needs exactly this object.
@@ -2458,8 +2496,15 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         // it is exactly what the reduction needs next, so it is kept rather
         // than recomputed.
         let mut reduced_llt: Option<faer::sparse::linalg::cholesky::SymbolicCholesky<usize>> = None;
-        if let SchurPolicy::Auto { fill_ratio_max } = self.policy
+        if let SchurPolicy::Auto { fill_ratio_max, obvious_flop_ratio } = self.policy
             && !eliminated.is_empty()
+            // Cheap pre-filter: is the reduction obviously right? Worst case
+            // for it is a fully dense reduced system; if even that costs no
+            // more than a few times the reduction itself, the reduction has
+            // plainly made the problem smaller and the ordering comparison --
+            // whose fill-reducing pass over the whole matrix is the expensive
+            // part -- is not worth running.
+            && flop_ratio.is_some_and(|r| r > obvious_flop_ratio)
         {
             use faer::sparse::linalg::cholesky::*;
             let analyze = |col_ptr: &[usize], row_idx: &[usize], dim: usize, ordering| {
@@ -2501,6 +2546,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             // the reduction we did NOT take, so its size is not the answer.
             kept_params: if reduced { schur.s.nrows() } else { n },
             fill_ratio,
+            flop_ratio,
         });
 
         let (col_ptr, row_idx) = match declined_pat {
