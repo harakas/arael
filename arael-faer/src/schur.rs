@@ -129,6 +129,25 @@ impl<I: Index> SchurSymbolic<I> {
     pub fn kept_size(&self) -> usize {
         self.s.nrows()
     }
+
+    /// Half-bandwidth of the reduced system: the largest scalar distance
+    /// between a stored tile's first row and its last column. A banded
+    /// system's factor cannot spill outside the band, so this bounds what
+    /// factorizing it can cost -- far tighter than "it might be dense" when
+    /// the eliminated blocks only couple nearby kept ones, which is the norm
+    /// for a trajectory (a landmark is seen from a bounded stretch of it).
+    /// O(tiles), no factorization.
+    pub fn kept_bandwidth(&self) -> usize {
+        let mut b = 0usize;
+        for j in 0..self.s.nblk_cols() {
+            let col_end = self.s.col_span(j).end;
+            if let Some(first) = self.s.col_range(j).next() {
+                let row_start = self.s.row_span(self.s.blk_row(first)).start;
+                b = b.max(col_end - row_start);
+            }
+        }
+        b
+    }
     /// kept id of an original block id (must be kept)
     pub fn kept_of(&self, orig: usize) -> usize {
         self.kept_of[orig].zx()
@@ -381,7 +400,7 @@ pub fn schur_symbolic<I: Index>(
         let stamp = kc as u32 + 1;
         let copy_begin = copy_cursor;
         touched.clear();
-        let mut touch = |kr: usize, mark: &mut Vec<u32>, touched: &mut Vec<usize>| {
+        let touch = |kr: usize, mark: &mut Vec<u32>, touched: &mut Vec<usize>| {
             if mark[kr] != stamp {
                 mark[kr] = stamp;
                 touched.push(kr);
@@ -1068,6 +1087,39 @@ mod tests {
         run_and_compare(&[2]); // width-1 eliminated block
         run_and_compare(&[0]); // eliminated first, all couplings transposed
         run_and_compare(&[5]); // eliminated last, all couplings direct
+    }
+
+    /// The band bound the reduce/decline heuristic leans on: a landmark
+    /// seen only from nearby poses leaves a narrow band in S, and one
+    /// that reaches across the trajectory widens it to the whole system.
+    #[test]
+    fn kept_bandwidth_tracks_how_far_landmarks_reach() {
+        let part = [0, 2, 4, 6, 8, 10, 12];
+        // blocks 0..3 are a pose chain (odometry couples neighbours);
+        // blocks 4 and 5 are landmarks, each seen from two poses.
+        let chain = [(0, 0), (0, 1), (1, 1), (1, 2), (2, 2), (2, 3), (3, 3)];
+
+        // near: landmark 4 sees poses 0-1, landmark 5 sees poses 2-3.
+        let mut cells = chain.to_vec();
+        cells.extend([(0, 4), (1, 4), (4, 4), (2, 5), (3, 5), (5, 5)]);
+        let (h, rhs) = build_upper(&part, &cells, 7);
+        let sym = schur_symbolic(h.symbolic(), &[4, 5]).unwrap();
+        assert_eq!(sym.kept_size(), 8);
+        // S couples only neighbouring poses: 2 scalar columns of pose,
+        // reaching back over one more pose block.
+        assert_eq!(sym.kept_bandwidth(), 4);
+        check_vs_dense(&h, &rhs, &part, &[4, 5]);
+
+        // far: landmark 5 now sees poses 0 and 3, the ends of the chain.
+        let mut cells = chain.to_vec();
+        cells.extend([(0, 4), (1, 4), (4, 4), (0, 5), (3, 5), (5, 5)]);
+        let (h, rhs) = build_upper(&part, &cells, 7);
+        let sym = schur_symbolic(h.symbolic(), &[4, 5]).unwrap();
+        assert_eq!(sym.kept_size(), 8);
+        // eliminating it couples pose 0 to pose 3, so the band spans all
+        // 8 kept parameters -- no better than calling S dense.
+        assert_eq!(sym.kept_bandwidth(), 8);
+        check_vs_dense(&h, &rhs, &part, &[4, 5]);
     }
 
     #[test]
