@@ -303,7 +303,10 @@ fn declined_schur_falls_back_to_full_system() {
     let mut params = Vec::new();
     RootProblem::serialize(&mut wq, &mut params);
     let mut solver =
-        SparseFaerSchur::new().with_policy(SchurPolicy::Auto { fill_ratio_max: 0.0 });
+        SparseFaerSchur::new().with_policy(SchurPolicy::Auto {
+            fill_ratio_max: 0.0,
+            obvious_flop_ratio: 0.0, // never short-circuit: force the comparison
+        });
     let rq = wq.solve_with(&mut solver, &cfg);
 
     let plan = solver.plan().unwrap();
@@ -337,9 +340,15 @@ fn solve_reports_what_the_backend_did() {
     assert_eq!(plan.eliminated_blocks, N_POINTS + N_LINES);
     assert_eq!(plan.eliminated_params, 2 * N_POINTS + 3 * N_LINES);
     assert_eq!(plan.kept_params, 2 * (N_A + N_B));
-    // no hint on this model, so the Auto policy ran and left its evidence
-    let ratio = plan.fill_ratio.expect("Auto records the fill ratio it decided on");
-    assert!(ratio > 0.0 && ratio < 1.0, "implausible fill ratio {}", ratio);
+    // No hint, so the Auto policy ran. This model's reduced system is tiny
+    // (18 pose parameters), so the cheap test settles it and the ordering
+    // comparison is skipped -- the plan says exactly that.
+    let flop = plan.flop_ratio.expect("Auto records its cheap statistic");
+    assert!(flop < 15.0, "expected an obvious reduction, got flop ratio {}", flop);
+    assert_eq!(
+        plan.fill_ratio, None,
+        "the ordering comparison must be skipped when the reduction is obvious"
+    );
 
     // and the backend that has nothing to say says nothing
     let mut wd = build();

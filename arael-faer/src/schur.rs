@@ -104,6 +104,10 @@ pub struct SchurSymbolic<I: Index> {
     /// workspace sizing: max panel elements / max eliminated width
     max_panel: usize,
     max_ew: usize,
+    /// flops one [`schur_reduce`] costs: the observer-pair GEMMs, which
+    /// dominate it. a caller weighing the reduction against factorizing the
+    /// whole system needs this, and it is free to accumulate here.
+    reduce_flops: f64,
 }
 
 impl<I: Index> SchurSymbolic<I> {
@@ -115,6 +119,15 @@ impl<I: Index> SchurSymbolic<I> {
     /// driver: quadratic in observers-per-eliminated-block)
     pub fn pair_count(&self) -> usize {
         self.pair_dst.len()
+    }
+    /// flops one [`schur_reduce`] costs (its observer-pair GEMMs). Free to
+    /// read; the symbolic pass accumulates it.
+    pub fn reduce_flops(&self) -> f64 {
+        self.reduce_flops
+    }
+    /// scalar size of the reduced system
+    pub fn kept_size(&self) -> usize {
+        self.s.nrows()
     }
     /// kept id of an original block id (must be kept)
     pub fn kept_of(&self, orig: usize) -> usize {
@@ -281,6 +294,7 @@ pub fn schur_symbolic<I: Index>(
     let mut max_panel = 0usize;
     let mut max_ew = 0usize;
     let mut total_pairs = 0usize;
+    let mut reduce_flops = 0.0f64;
     elim_obs_ptr.push(I::truncate(0));
     elim_pair_ptr.push(I::truncate(0));
     for slot in 0..ne {
@@ -297,6 +311,17 @@ pub fn schur_symbolic<I: Index>(
         }
         total_pairs += list.len() * (list.len() + 1) / 2;
         let ew = h.col_span(e).len();
+        {
+            // sum over pairs a <= b of 2 * w_a * ew * w_b, in closed form
+            let mut sum_w = 0.0f64;
+            let mut sum_w2 = 0.0f64;
+            for &(_, _, oblk) in list {
+                let w = h.col_span(oblk.zx()).len() as f64;
+                sum_w += w;
+                sum_w2 += w * w;
+            }
+            reduce_flops += ew as f64 * (sum_w * sum_w + sum_w2);
+        }
         max_ew = max_ew.max(ew);
         max_panel = max_panel.max(ew * panel_cols);
         elim_obs_ptr.push(I::truncate(obs_hblk.len()));
@@ -423,6 +448,7 @@ pub fn schur_symbolic<I: Index>(
         s_diag,
         max_panel,
         max_ew,
+        reduce_flops,
     })
 }
 
