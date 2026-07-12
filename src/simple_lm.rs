@@ -933,6 +933,13 @@ pub trait LmSolver<T: Float> {
     fn report(&self) -> Option<SolverReport> {
         None
     }
+
+    /// Hands the backend the solve's configuration, once, at entry --
+    /// [`LmConfig::verbose`] above all, so a backend that makes its own
+    /// decisions can explain them. The config stays the single place
+    /// verbosity is set: no separate builder call to forget or contradict.
+    /// Default: ignore it.
+    fn configure(&mut self, _config: &LmConfig<T>) {}
 }
 
 /// Dense Cholesky solver (nalgebra).
@@ -1378,6 +1385,7 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
     // valid within a single solve; drop them so reused solver instances
     // behave identically to fresh ones. No-op on a fresh solver.
     solver.reset();
+    solver.configure(config);
 
     let mut cur_x = x0.to_vec();
     let mut try_x = vec![T::zero(); n];
@@ -1851,6 +1859,8 @@ pub struct SparseFaer<T = f64> {
     eliminate_first: Vec<std::ops::Range<usize>>,
     perm_fwd: Vec<usize>,
     perm_inv: Vec<usize>,
+    // From LmConfig via configure().
+    verbose: bool,
 }
 
 /// Alias of [`SparseFaer<f32>`].
@@ -1874,6 +1884,7 @@ impl<T> SparseFaer<T> {
             eliminate_first: Vec::new(),
             perm_fwd: Vec::new(),
             perm_inv: Vec::new(),
+            verbose: false,
         }
     }
 
@@ -1953,7 +1964,12 @@ impl<T: crate::utils::Float + faer::traits::RealField> LmSolver<T> for SparseFae
         self.positions = None;
         self.symbolic = None;
         // Buffer allocations are kept; they are resized when the next
-        // symbolic factorization is created.
+        // symbolic factorization is created. The hint is configuration, not
+        // cache, and survives.
+    }
+
+    fn configure(&mut self, config: &LmConfig<T>) {
+        self.verbose = config.verbose;
     }
 
     fn new_matrix(&self, n: usize) -> SparseMatrix<T> {
@@ -1990,24 +2006,37 @@ impl<T: crate::utils::Float + faer::traits::RealField> LmSolver<T> for SparseFae
                 None,
                 &self.row_idx_usize,
             );
-            // Elimination hint: order the hinted parameters first, the
-            // rest in natural order. Used as given -- no fallback
+            // Elimination ordering, from the hint alone -- used as given, no
             // comparison against AMD.
-            let ordering = if self.eliminate_first.is_empty() {
+            //
+            // The model can say which blocks are marginalizable
+            // (LmProblem::elimination_candidates), so this could pick the
+            // ordering itself. It deliberately does not. The only cheap way
+            // to choose is to compare the two factors' SIZES, and fill does
+            // not predict time here: on Ladybug-49 ordering the points first
+            // leaves 9% LESS fill and runs 6% SLOWER (5 of 5 interleaved
+            // runs), because it chops the factor into thousands of 3-column
+            // supernodes that use BLAS3 far worse than AMD's larger panels.
+            // The comparison also costs a second symbolic factorization on
+            // every solve. Callers who know their problem pass the hint;
+            // callers who do not are better served by SparseFaerSchur, which
+            // decides on evidence that does hold up.
+            let ranges: Vec<std::ops::Range<usize>> = self.eliminate_first.clone();
+            let ordering = if ranges.is_empty() {
                 SymmetricOrdering::Amd
             } else {
                 self.perm_fwd.clear();
-                let mut hinted = vec![false; n];
-                for r in &self.eliminate_first {
+                let mut first = vec![false; n];
+                for r in &ranges {
                     for i in r.clone().filter(|&i| i < n) {
-                        if !hinted[i] {
-                            hinted[i] = true;
+                        if !first[i] {
+                            first[i] = true;
                             self.perm_fwd.push(i);
                         }
                     }
                 }
                 for i in 0..n {
-                    if !hinted[i] {
+                    if !first[i] {
                         self.perm_fwd.push(i);
                     }
                 }
@@ -2018,6 +2047,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> LmSolver<T> for SparseFae
                 SymmetricOrdering::Custom(faer::perm::PermRef::new_checked(
                     &self.perm_fwd, &self.perm_inv, n))
             };
+            let t_sym = std::time::Instant::now();
             let sym = factorize_symbolic_cholesky(
                 symbolic_ref,
                 faer::Side::Upper,
@@ -2029,6 +2059,14 @@ impl<T: crate::utils::Float + faer::traits::RealField> LmSolver<T> for SparseFae
                 Err(_) => return false,
             }
             let symbolic = self.symbolic.as_ref().unwrap();
+            if self.verbose {
+                info!(
+                    "sparse: {} params, symbolic factorization {:.1} ms, L holds {} values",
+                    n,
+                    t_sym.elapsed().as_secs_f64() * 1e3,
+                    symbolic.len_val(),
+                );
+            }
             self.l_vals.resize(symbolic.len_val(), T::zero());
             let factor_scratch = symbolic.factorize_numeric_llt_scratch::<T>(
                 faer::Par::Seq,
@@ -2240,6 +2278,8 @@ pub struct SparseFaerSchur<T = f64> {
     eliminate_first: Vec<std::ops::Range<usize>>,
     policy: SchurPolicy,
     plan: Option<SchurPlan>,
+    // From LmConfig via configure(): explain the decisions below.
+    verbose: bool,
     // Structure, built on the first compute of a solve and reused for
     // every following iteration and damping retry.
     positions: Option<Vec<usize>>,
@@ -2276,6 +2316,7 @@ impl<T> SparseFaerSchur<T> {
             eliminate_first: Vec::new(),
             policy: SchurPolicy::default(),
             plan: None,
+            verbose: false,
             positions: None,
             bdiag_pos: Vec::new(),
             schur: None,
@@ -2364,6 +2405,10 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         self.plan.map(SolverReport::Schur)
     }
 
+    fn configure(&mut self, config: &LmConfig<T>) {
+        self.verbose = config.verbose;
+    }
+
     fn new_matrix(&self, n: usize) -> SchurBlockMatrix<T> {
         SchurBlockMatrix { n, h: None, csc: None }
     }
@@ -2385,6 +2430,19 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             "SparseFaerSchur requires a statically-knowable Hessian pattern \
              (TripletBlock / extended-constraint models are not supported)"
         );
+        // Verbose mode narrates the one-time structural work below: what was
+        // detected, how the reduction was decided, and what each analysis
+        // cost -- the phases that make a first iteration expensive.
+        let vb = self.verbose;
+        let mut clock = std::time::Instant::now();
+        let mut lap = move |on: bool| -> f64 {
+            let ms = clock.elapsed().as_secs_f64() * 1e3;
+            if on {
+                clock = std::time::Instant::now();
+            }
+            ms
+        };
+
         let mut cells = std::vec::Vec::new();
         problem.collect_hessian_cells(&mut cells);
         let mut spans = std::vec::Vec::new();
@@ -2458,6 +2516,20 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                  Force. Supply with_eliminate_first(..) or use SchurPolicy::Auto."
             );
         }
+        if vb {
+            let elim_params: usize =
+                eliminated.iter().map(|&b| partition[b + 1] - partition[b]).sum();
+            let source = if self.eliminate_first.is_empty() { "detected" } else { "hinted" };
+            info!(
+                "schur: {} {} marginalizable blocks ({} of {} parameters); \
+                 block structure {:.1} ms",
+                source,
+                eliminated.len(),
+                elim_params,
+                n,
+                lap(true),
+            );
+        }
         let mut schur = match arael_faer::schur::schur_symbolic(&hsym, &eliminated) {
             Ok(s) => s,
             Err(e) => panic!(
@@ -2479,6 +2551,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         // Declining means eliminating NOTHING, which makes S == H and the
         // reduction degenerate into an ordinary full-system factorization:
         // one code path, always correct, only the route changes.
+        let t_schur_symbolic = lap(vb);
         let mut fill_ratio = None;
         let flop_ratio = match self.policy {
             SchurPolicy::Auto { .. } if !eliminated.is_empty() => {
@@ -2538,6 +2611,37 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             }
         }
         let reduced = !eliminated.is_empty();
+        if vb {
+            let t_gate = lap(true);
+            match (flop_ratio, fill_ratio) {
+                (Some(flop), None) => info!(
+                    "schur: reducing -- obviously worth it (a fully dense reduced \
+                     system would cost {:.1}x the reduction itself, under the {:.0}x \
+                     bar), so the ordering comparison was skipped",
+                    flop,
+                    match self.policy {
+                        SchurPolicy::Auto { obvious_flop_ratio, .. } => obvious_flop_ratio,
+                        _ => 0.0,
+                    },
+                ),
+                (Some(flop), Some(fill)) => info!(
+                    "schur: {} -- not obvious ({:.1}x), so the orderings were \
+                     compared: the reduced factor is {:.2}x the full one under AMD \
+                     ({} takes it)",
+                    if reduced { "reducing" } else { "declining, factorizing the full system" },
+                    flop,
+                    fill,
+                    if reduced { "the reduction" } else { "AMD" },
+                ),
+                _ => info!("schur: reducing -- forced, no analysis"),
+            }
+            info!(
+                "schur: analysis {:.1} ms (structure {:.1}, gate {:.1})",
+                t_schur_symbolic + t_gate,
+                t_schur_symbolic,
+                t_gate,
+            );
+        }
         self.plan = Some(SchurPlan {
             reduced,
             eliminated_blocks: eliminated.len(),
@@ -2594,6 +2698,15 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 )
                 .expect("symbolic factorization of the full system failed")
             });
+            if vb {
+                info!(
+                    "schur: full system {} params, symbolic factorization {:.1} ms, \
+                     L holds {} values",
+                    n,
+                    lap(true),
+                    llt_symbolic.len_val(),
+                );
+            }
             self.size_llt_buffers(&llt_symbolic);
             self.llt_symbolic = Some(llt_symbolic);
             self.rhs_kept = Vec::new();
@@ -2636,6 +2749,16 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 )
                 .expect("symbolic factorization of the reduced system failed")
             });
+            if vb {
+                info!(
+                    "schur: reduced system {} params ({:.0}% dense), symbolic \
+                     factorization {:.1} ms, L holds {} values",
+                    nk,
+                    100.0 * self.s_row_idx.len() as f64 / (nk as f64 * (nk as f64 + 1.0) / 2.0),
+                    lap(true),
+                    llt_symbolic.len_val(),
+                );
+            }
             self.size_llt_buffers(&llt_symbolic);
             self.llt_symbolic = Some(llt_symbolic);
         }
