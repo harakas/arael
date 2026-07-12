@@ -4638,6 +4638,7 @@ pub fn generate_root_methods(
         #(#summary_docs)*
         impl arael::simple_lm::LmProblem<#prec_type> for #root_name {
             fn hessian_pattern_requires_compute(&self) -> bool { #requires_compute }
+            #elimination_hint_fn
             #elimination_candidates_fn
             fn collect_hessian_cells(&self, out: &mut std::vec::Vec<(u32, u32)>) {
                 arael::model::Model::#cells_method(self, out)

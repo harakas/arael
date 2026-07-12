@@ -565,6 +565,19 @@ pub trait LmProblem<T> {
     /// [`RootProblem::param_block_spans`]). Default: nothing.
     fn collect_param_block_spans(&self, _out: &mut std::vec::Vec<(u32, u32)>) {}
 
+    /// The model's OWN elimination hint -- the ranges named by
+    /// `#[arael(root, eliminate_first(...))]`, if any. The sparse backends
+    /// read this themselves at the first compute, so declaring it on the
+    /// model is all that is needed: no caller has to carry it from the model
+    /// into the solver. An explicit
+    /// [`SparseFaerSchur::with_eliminate_first`] still overrides it.
+    ///
+    /// Default: no hint (and then the Schur backend detects what it can --
+    /// see [`elimination_candidates`](Self::elimination_candidates)).
+    fn elimination_hint(&self) -> std::vec::Vec<std::ops::Range<usize>> {
+        std::vec::Vec::new()
+    }
+
     /// Parameter ranges the model's structure says MAY be marginalized --
     /// one entry per legal candidate set, each a list of scalar ranges.
     ///
@@ -595,11 +608,9 @@ pub trait LmProblem<T> {
         T: Float,
         SparseFaer<T>: LmSolver<T>,
     {
-        let mut solver = SparseFaer::<T>::new();
-        for range in RootProblem::elimination_hint(self) {
-            solver = solver.with_eliminate_first(range);
-        }
-        self.solve_with(&mut solver, config)
+        // No hint plumbing: SparseFaer reads the model's eliminate_first(..)
+        // itself (LmProblem::elimination_hint).
+        self.solve_with(&mut SparseFaer::<T>::new(), config)
     }
 
     /// Solve with the Schur-complement faer backend ([`SparseFaerSchur`]):
@@ -613,11 +624,7 @@ pub trait LmProblem<T> {
         T: Float,
         SparseFaerSchur<T>: LmSolver<T>,
     {
-        let mut solver = SparseFaerSchur::<T>::new();
-        for range in RootProblem::elimination_hint(self) {
-            solver = solver.with_eliminate_first(range);
-        }
-        self.solve_with(&mut solver, config)
+        self.solve_with(&mut SparseFaerSchur::<T>::new(), config)
     }
 }
 
@@ -1507,7 +1514,7 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
                     // Non-positive diagonals are ruled out by the explicit
                     // check before the inner loop, so a failure here is
                     // off-diagonal indefiniteness or tiny-lambda rounding.
-                    eprintln!("{}/{}: Cholesky failed (damped matrix not positive-definite), lambda={} -> {} (step={}) [non-finite: grad={} diag={} x={} matrix={}]",
+                    info!("{}/{}: Cholesky failed (damped matrix not positive-definite), lambda={} -> {} (step={}) [non-finite: grad={} diag={} x={} matrix={}]",
                         iter, inner,
                         G(lambda.to_f64().unwrap()),
                         G(next_lambda.to_f64().unwrap()),
@@ -1535,7 +1542,7 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
             if config.verbose {
                 let step_us = timer.elapsed().as_micros();
                 timer = Instant::now();
-                eprintln!("{}/{}: {}->{} / {}, lambda={} (step={})",
+                info!("{}/{}: {}->{} / {}, lambda={} (step={})",
                     iter, inner,
                     G(end_cost.to_f64().unwrap()), G(new_cost.to_f64().unwrap()),
                     G((end_cost - new_cost).to_f64().unwrap()), G(lambda.to_f64().unwrap()),
@@ -1625,7 +1632,7 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
                 status = LmStatus::RetryBudgetExhausted;
             }
             if config.verbose {
-                eprintln!("LM terminated: {} consecutive inner steps without improvement (lambda={}, cost={})",
+                info!("LM terminated: {} consecutive inner steps without improvement (lambda={}, cost={})",
                     INNER_LOOPS,
                     G(lambda.to_f64().unwrap()),
                     G(end_cost.to_f64().unwrap()));
@@ -1857,6 +1864,10 @@ pub struct SparseFaer<T = f64> {
     // Elimination hint (see with_eliminate_first) and the custom
     // permutation built from it for the symbolic factorization.
     eliminate_first: Vec<std::ops::Range<usize>>,
+    // The MODEL's own hint, read at the first compute. Callers do not carry
+    // it from the model into the solver; the solver asks. An explicit
+    // with_eliminate_first overrides it.
+    model_hint: Vec<std::ops::Range<usize>>,
     perm_fwd: Vec<usize>,
     perm_inv: Vec<usize>,
     // From LmConfig via configure().
@@ -1882,6 +1893,7 @@ impl<T> SparseFaer<T> {
             factor_mem: Vec::new(),
             solve_mem: Vec::new(),
             eliminate_first: Vec::new(),
+            model_hint: Vec::new(),
             perm_fwd: Vec::new(),
             perm_inv: Vec::new(),
             verbose: false,
@@ -1963,9 +1975,10 @@ impl<T: crate::utils::Float + faer::traits::RealField> LmSolver<T> for SparseFae
     fn reset(&mut self) {
         self.positions = None;
         self.symbolic = None;
+        self.model_hint.clear();
         // Buffer allocations are kept; they are resized when the next
-        // symbolic factorization is created. The hint is configuration, not
-        // cache, and survives.
+        // symbolic factorization is created. An explicitly configured hint
+        // is configuration, not cache, and survives.
     }
 
     fn configure(&mut self, config: &LmConfig<T>) {
@@ -1979,6 +1992,11 @@ impl<T: crate::utils::Float + faer::traits::RealField> LmSolver<T> for SparseFae
     fn compute(&mut self, problem: &mut dyn LmProblem<T>, params: &[T], grad: &mut [T], matrix: &mut SparseMatrix<T>) -> T {
         if let Some(positions) = &self.positions {
             return problem.calc_grad_hessian_sparse_indexed(params, grad, &mut matrix.csc.vals, positions);
+        }
+        // First call: the model's own hint, if it declared one. The caller
+        // does not carry it over -- the solver asks.
+        if self.eliminate_first.is_empty() {
+            self.model_hint = problem.elimination_hint();
         }
         let (cost, positions) = assemble_first_csc(problem, params, grad, &mut matrix.csc);
         self.positions = Some(positions);
@@ -2021,7 +2039,11 @@ impl<T: crate::utils::Float + faer::traits::RealField> LmSolver<T> for SparseFae
             // every solve. Callers who know their problem pass the hint;
             // callers who do not are better served by SparseFaerSchur, which
             // decides on evidence that does hold up.
-            let ranges: Vec<std::ops::Range<usize>> = self.eliminate_first.clone();
+            let ranges: Vec<std::ops::Range<usize>> = if self.eliminate_first.is_empty() {
+                self.model_hint.clone()
+            } else {
+                self.eliminate_first.clone()
+            };
             let ordering = if ranges.is_empty() {
                 SymmetricOrdering::Amd
             } else {
@@ -2334,23 +2356,26 @@ impl<T> SparseFaerSchur<T> {
         }
     }
 
-    /// Parameter blocks fully inside `range` are marginalized before the
-    /// kept system is factorized. Trusted as given: this also selects
-    /// [`SchurPolicy::Force`], so no analysis runs and the reduction is
-    /// never declined. Call [`with_policy`](Self::with_policy) afterwards
-    /// to gate it anyway. May be called multiple times for multiple ranges.
+    /// Marginalize the parameter blocks fully inside `range`, instead of the
+    /// ones the model's coupling graph would offer
+    /// ([`LmProblem::elimination_candidates`]). May be called several times
+    /// for several ranges.
     ///
-    /// Without a hint the eliminable blocks are detected from the model's
-    /// coupling graph -- see [`LmProblem::elimination_candidates`].
+    /// This says WHICH blocks, not WHETHER marginalizing them is a good idea
+    /// -- that stays with the policy, and the default
+    /// ([`SchurPolicy::Auto`]) still weighs it. Naming the blocks is not
+    /// evidence that eliminating them pays: on a large enough kept system it
+    /// does not (Ladybug-1723 is 1.6x slower reduced), and the check is free
+    /// on the problems where the answer is obvious. Add
+    /// `.with_policy(SchurPolicy::Force)` to skip it anyway.
     pub fn with_eliminate_first(mut self, range: std::ops::Range<usize>) -> Self {
         self.eliminate_first.push(range);
-        self.policy = SchurPolicy::Force;
         self
     }
 
-    /// Override the decision policy. `with_policy(SchurPolicy::Force)` on a
-    /// freshly built solver means "detect the blocks, then marginalize them
-    /// no matter what the analysis says".
+    /// Override the decision policy. `with_policy(SchurPolicy::Force)` means
+    /// "marginalize the blocks -- hinted or detected -- no matter what the
+    /// analysis says".
     pub fn with_policy(mut self, policy: SchurPolicy) -> Self {
         self.policy = policy;
         self
@@ -2489,8 +2514,19 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 })
                 .collect()
         };
-        let candidates: Vec<Vec<usize>> = if !self.eliminate_first.is_empty() {
-            vec![blocks_in(&self.eliminate_first)]
+        // Where the blocks come from, in order of authority: an explicit
+        // with_eliminate_first on this solver, then the model's own
+        // eliminate_first(..) keyword, then -- if the model named nothing --
+        // the coupling graph's candidates. Nobody has to carry the model's
+        // hint into the solver: the solver asks the model for it.
+        let hint = if self.eliminate_first.is_empty() {
+            problem.elimination_hint()
+        } else {
+            self.eliminate_first.clone()
+        };
+        let hinted = !hint.is_empty();
+        let candidates: Vec<Vec<usize>> = if hinted {
+            vec![blocks_in(&hint)]
         } else {
             problem
                 .elimination_candidates()
@@ -2519,7 +2555,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         if vb {
             let elim_params: usize =
                 eliminated.iter().map(|&b| partition[b + 1] - partition[b]).sum();
-            let source = if self.eliminate_first.is_empty() { "detected" } else { "hinted" };
+            let source = if hinted { "hinted" } else { "detected" };
             info!(
                 "schur: {} {} marginalizable blocks ({} of {} parameters); \
                  block structure {:.1} ms",
