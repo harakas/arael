@@ -450,23 +450,21 @@ fn solve64(params: &[f64], path: &mut Path, cfg: &arael::simple_lm::LmConfig<f64
             panic!("SLAM_ARAEL_SOLVER=cholmod_gpl requires building with --features cholmod-gpl");
         }
         Ok("faer") => {
-            // Plain sparse faer with the model's elimination hint
-            // (landmarks ordered first in the full-system factorization).
-            let mut solver = arael::simple_lm::SparseFaer::new();
-            for r in arael::simple_lm::RootProblem::elimination_hint(path) {
-                solver = solver.with_eliminate_first(r);
-            }
-            arael::simple_lm::lm_solve(params, &mut solver, path, cfg)
+            // Plain sparse faer. The model's eliminate_first(landmarks) is
+            // picked up by the solver itself -- landmarks ordered first in
+            // the full-system factorization.
+            arael::simple_lm::solve_sparse_faer(params, path, cfg)
         }
         _ => {
-            // Default: Schur-complement backend -- landmarks
-            // marginalized every damped solve, only the reduced pose
-            // system factorized.
-            let mut solver = arael::simple_lm::SparseFaerSchur::new();
-            for r in arael::simple_lm::RootProblem::elimination_hint(path) {
-                solver = solver.with_eliminate_first(r);
-            }
-            arael::simple_lm::lm_solve(params, &mut solver, path, cfg)
+            // Default: Schur-complement backend -- landmarks marginalized
+            // every damped solve, only the reduced pose system factorized.
+            // Again the model's hint needs no carrying over.
+            arael::simple_lm::lm_solve(
+                params,
+                &mut arael::simple_lm::SparseFaerSchur::new(),
+                path,
+                cfg,
+            )
         }
     }
 }
@@ -580,17 +578,11 @@ fn cfg32(max_iters: usize, poses: usize) -> arael::simple_lm::LmConfig<f32> {
 fn solve32(params: &[f32], path: &mut PathF, cfg: &arael::simple_lm::LmConfig<f32>)
     -> arael::simple_lm::LmResult<f32> {
     if std::env::var("SLAM_ARAEL_SOLVER").as_deref() == Ok("faer") {
-        let mut solver = arael::simple_lm::SparseFaerF32::new();
-        for r in arael::simple_lm::RootProblem::elimination_hint(path) {
-            solver = solver.with_eliminate_first(r);
-        }
-        return arael::simple_lm::lm_solve(params, &mut solver, path, cfg);
+        return arael::simple_lm::lm_solve(
+            params, &mut arael::simple_lm::SparseFaerF32::new(), path, cfg);
     }
-    let mut solver = arael::simple_lm::SparseFaerSchurF32::new();
-    for r in arael::simple_lm::RootProblem::elimination_hint(path) {
-        solver = solver.with_eliminate_first(r);
-    }
-    arael::simple_lm::lm_solve(params, &mut solver, path, cfg)
+    arael::simple_lm::lm_solve(
+        params, &mut arael::simple_lm::SparseFaerSchurF32::new(), path, cfg)
 }
 
 // Capped single solve (no timing) -- used for peak-memory measurement.
