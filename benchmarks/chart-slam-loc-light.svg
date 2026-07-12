@@ -1,6 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="880" height="301" viewBox="0 0 880 301" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
 <rect x="0.5" y="0.5" width="879" height="300" rx="8" fill="#fcfcfb" stroke="#e1e0d9"/>
 <text x="24" y="30" font-size="15" font-weight="600" fill="#0b0b0b">Landmark SLAM and localization: time per solver iteration</text>
+<text x="856" y="30" font-size="11.5" text-anchor="end" fill="#85847c">arael 0.7.1</text>
 <text x="24" y="48" font-size="11.5" fill="#5f5e58">Landmark SLAM on a desktop core, fixed-map localization on an edge board; single thread, best validated configuration per system. Lower is better.</text>
 <text x="24" y="70" font-size="12.5" font-weight="600" fill="#0b0b0b">Landmark SLAM -- 300 poses, 5.4k params (Apple M4 Pro)</text>
 <line x1="164.0" y1="78" x2="164.0" y2="214" stroke="#e1e0d9" stroke-width="1"/>

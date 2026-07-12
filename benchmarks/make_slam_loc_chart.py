@@ -125,6 +125,30 @@ def render_panel(s, c, px, py, title, x_max, tick, decimals, rows):
                  f'{ms:.{decimals}f}</text>')
 
 
+
+def arael_version():
+    """Read the workspace version, so the stamp cannot drift from the code.
+
+    A chart travels: it gets copied into slides, issues and blog posts, far
+    away from the README that explains it. Without a version on the image
+    itself, a reader has no way to know which arael produced the numbers.
+    """
+    import os, re
+    here = os.path.dirname(os.path.abspath(__file__))
+    root = here
+    for _ in range(4):
+        manifest = os.path.join(root, "Cargo.toml")
+        if os.path.exists(manifest):
+            with open(manifest) as f:
+                text = f.read()
+            if '[package]\nname = "arael"' in text or 'name = "arael"' in text:
+                m = re.search(r'^version = "([^"]+)"', text, re.M)
+                if m:
+                    return m.group(1)
+        root = os.path.dirname(root)
+    raise SystemExit("cannot find the arael version in any parent Cargo.toml")
+
+
 def render(theme):
     c = THEMES[theme]
     foot_y = HEADER_H + PANEL_H + 18
@@ -138,6 +162,10 @@ def render(theme):
              f'rx="8" fill="{c["surface"]}" stroke="{c["border"]}"/>')
     s.append(f'<text x="{MARGIN}" y="30" font-size="15" font-weight="600" '
              f'fill="{c["ink"]}">{TITLE}</text>')
+    # The version that produced these numbers, on the image itself: a chart
+    # gets copied out of the README and has to carry its own provenance.
+    s.append(f'<text x="{W - MARGIN}" y="30" font-size="11.5" text-anchor="end" '
+             f'fill="{c["muted"]}">arael {arael_version()}</text>')
     s.append(f'<text x="{MARGIN}" y="48" font-size="11.5" '
              f'fill="{c["secondary"]}">{SUBTITLE}</text>')
 
