@@ -228,7 +228,11 @@ fn nielsen() -> bool {
 // every damped solve and factorizes only the camera system. Which wins
 // depends on the camera count -- see the README.
 fn solve64(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmConfig<f64>) -> arael::simple_lm::LmResult<f64> {
-    arael::simple_lm::solve_sparse_faer(params, s, cfg)
+    // The plain row: the whole system, no reduction. Without the policy the
+    // backend would marginalize the points itself -- that is the other row.
+    let mut solver = arael::simple_lm::SparseFaer::new()
+        .with_policy(arael::simple_lm::SchurPolicy::Never);
+    arael::simple_lm::lm_solve(params, &mut solver, s, cfg)
 }
 
 fn solve64_schur(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmConfig<f64>) -> arael::simple_lm::LmResult<f64> {
@@ -242,7 +246,7 @@ fn solve64_schur(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmConfig
     } else {
         arael::simple_lm::SchurPolicy::Force
     };
-    let mut solver = arael::simple_lm::SparseFaerSchur::new().with_policy(policy);
+    let mut solver = arael::simple_lm::SparseFaer::new().with_policy(policy);
     let r = arael::simple_lm::lm_solve(params, &mut solver, s, cfg);
     if std::env::var("BAL_SCHUR_PLAN").is_ok() {
         if let Some(p) = solver.plan() {
@@ -253,11 +257,15 @@ fn solve64_schur(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmConfig
 }
 
 fn solve32(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmConfig<f32>) -> arael::simple_lm::LmResult<f32> {
-    arael::simple_lm::solve_sparse_faer_f32(params, s, cfg)
+    // The plain row: the whole system, no reduction. Without the policy the
+    // backend would marginalize the points itself -- that is the other row.
+    let mut solver = arael::simple_lm::SparseFaerF32::new()
+        .with_policy(arael::simple_lm::SchurPolicy::Never);
+    arael::simple_lm::lm_solve(params, &mut solver, s, cfg)
 }
 
 fn solve32_schur(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmConfig<f32>) -> arael::simple_lm::LmResult<f32> {
-    let mut solver = arael::simple_lm::SparseFaerSchurF32::new()
+    let mut solver = arael::simple_lm::SparseFaerF32::new()
         .with_policy(arael::simple_lm::SchurPolicy::Force);
     arael::simple_lm::lm_solve(params, &mut solver, s, cfg)
 }

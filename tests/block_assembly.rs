@@ -545,7 +545,7 @@ fn fixed_param_full_matrix() {
 /// optimum as the plain sparse backend.
 #[test]
 fn schur_solve_matches_sparse() {
-    use arael::simple_lm::{LmConfig, SparseFaerSchur};
+    use arael::simple_lm::{LmConfig, SparseFaer};
     let cfg = LmConfig { max_iters: 50, ..Default::default() };
 
     let mut ws = build();
@@ -555,7 +555,7 @@ fn schur_solve_matches_sparse() {
     let mut params = Vec::new();
     RootProblem::serialize(&mut wq, &mut params); // populates block indices
     let lm_start = RootProblem::param_block_spans(&wq)[N_POSES].0 as usize;
-    let mut solver = SparseFaerSchur::new().with_eliminate_first(lm_start..params.len());
+    let mut solver = SparseFaer::new().with_marginalize(lm_start..params.len());
     let rq = wq.solve_with(&mut solver, &cfg);
 
     assert!(
@@ -583,7 +583,7 @@ fn schur_solve_matches_sparse() {
 /// both sides of the elimination), against the dense reference.
 #[test]
 fn schur_solve_with_fixed_params() {
-    use arael::simple_lm::{LmConfig, SparseFaerSchur};
+    use arael::simple_lm::{LmConfig, SparseFaer};
     let cfg = LmConfig { max_iters: 50, ..Default::default() };
 
     let fix = |w: &mut World| {
@@ -600,7 +600,7 @@ fn schur_solve_with_fixed_params() {
     let mut params = Vec::new();
     RootProblem::serialize(&mut wq, &mut params); // populates block indices
     let lm_start = RootProblem::param_block_spans(&wq)[N_POSES].0 as usize;
-    let mut solver = SparseFaerSchur::new().with_eliminate_first(lm_start..params.len());
+    let mut solver = SparseFaer::new().with_marginalize(lm_start..params.len());
     let rq = wq.solve_with(&mut solver, &cfg);
 
     assert!(

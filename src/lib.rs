@@ -48,6 +48,10 @@
 //!     Supernodal module is GPL-licensed, so the resulting binary is subject
 //!     to the GPL (the `cholmod` feature binds only the LGPL Simplicial module)
 //!   - LAPACK band -- optional dpbsv/spbsv backend
+//! - **Schur marginalization** -- mutually uncoupled parameter blocks are
+//!   eliminated before the factorization and recovered by back-substitution.
+//!   The sparse backend detects them and applies it when it is faster;
+//!   `SchurPolicy` overrides
 //! - **Indexed sparse assembly** -- precomputed position lists for
 //!   zero-overhead hessian assembly after first iteration
 //! - **f32 and f64 precision** -- `#[arael(root)]` for f64,
@@ -888,7 +892,7 @@
 //!
 //! | Backend (`solve_with(&mut ..., &cfg)`) | Free function | What it is |
 //! |---|---|---|
-//! | **[`SparseFaer`](simple_lm::SparseFaer)`::<T>::new()`** (`T` = `f64`/`f32`) | **[`solve_sparse_faer[_f32]`](simple_lm::solve_sparse_faer)** | **default** (= `solve_sparse`): sparse Cholesky via faer, pure Rust; sparsity pattern discovered once, indexed assembly after |
+//! | **[`SparseFaer`](simple_lm::SparseFaer)`::<T>::new()`** (`T` = `f64`/`f32`) | **[`solve_sparse_faer[_f32]`](simple_lm::solve_sparse_faer)** | **default** (= `solve_sparse`): sparse Cholesky via faer, pure Rust. Marginalizes the model's landmark-like blocks (a Schur complement) when that is faster than factorizing the whole system, and decides which by itself; [`SchurPolicy`](simple_lm::SchurPolicy) / [`FaerOrdering`](simple_lm::FaerOrdering) override it |
 //! | [`Dense`](simple_lm::Dense) | [`solve[_f32]`](simple_lm::solve) | dense nalgebra Cholesky (= `solve_dense`): low parameter counts or genuinely dense problems |
 //! | [`Band`](simple_lm::Band)`::new(kd)` | [`solve_band[_f32]`](simple_lm::solve_band) | pure-Rust band Cholesky for block-tridiagonal Hessians (localization-like); hard-errors on off-band elements |
 //! | `BandLapack::new(kd)` | `solve_band_lapack[_f32]` | the same band solve through LAPACK `dpbsv`/`spbsv` (feature `lapack`) |

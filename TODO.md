@@ -170,6 +170,30 @@
 
 - **arael**: port the COO-free first iteration to the other scalar-CSC backends -- DONE 2026-07-11. The first-call assembly is now one shared function (`assemble_first_csc` in simple_lm), used by SparseFaer, SparseEigen, SparseCholmod and SparseCholmodSupernodal alike: models with a statically-knowable pattern build their CSC and position map from the block structure, everything else falls back to COO. Interleaved at slam-300, first iteration: eigen 431.6 -> 416.2 ms, cholmod 433.4 -> 420.9, cholmod-gpl 111.3 -> 105.2; steady-state ms/iter unchanged on all three, so the tile-expanded pattern's ~1.2% explicit zeros cost the CHOLMOD and Eigen factorizations nothing measurable (the open question when this was deferred). First-assembly means from SLAM_TIMING confirm the mechanism: 12.92 -> 7.69 ms (cholmod-gpl), 13.16 -> 9.72 (eigen). Tests: eigen/cholmod/cholmod-gpl backends each land on the dense optimum (tests/block_assembly.rs, feature-gated -- they had no tests at all before).
 
+- **arael-faer**: parallelize the Schur reduction's GEMMs. `with_threads` above
+  buys faer's threads for the FACTORIZATION; it does nothing for the reduction,
+  which is our own code and, at slam-300, 94% of `schur_reduce` (measured stage
+  timings: seed 0.05, factor 0.17, panel 1.78, GEMM 36.5, rhs 0.31, finish 0.01
+  ms -- the whole `Hee^-1` side, 1200 Cholesky factors and their triangular
+  solves, is under 2 ms). So the reduction is a GEMM loop and nothing else, and
+  it is the half of the Schur route faer cannot thread for us.
+
+  It parallelizes almost perfectly in principle: `Hee` is block-diagonal, so
+  every eliminated block's contribution is independent -- that independence is
+  the whole reason the reduction decomposes per landmark. The catch is the
+  destination: two landmarks seen from the same pair of poses accumulate into
+  the SAME tile of S, so a naive `par_iter` over eliminated blocks races. Three
+  ways out, in rising order of effort: (a) per-thread S buffers summed at the
+  end -- trivial, but S is ~260 MB at 6000 poses so it costs memory per thread;
+  (b) partition the eliminated blocks by their observer sets so no two threads
+  target the same tile (a graph coloring, computed once in `schur_symbolic`,
+  which already knows every pair target); (c) invert the loop and parallelize
+  over S's tiles instead of over landmarks, each thread owning its own
+  destinations and gathering the contributions -- no races, no extra memory,
+  but it needs the transpose of `pair_dst` (tile -> contributing landmarks),
+  which is also a one-time symbolic build. (b) or (c) is the real answer.
+  Needs the same `rayon` cargo feature as `with_threads`.
+
 - **arael**: threading for the Schur route's S factorization. INVESTIGATED 2026-07-11 (benchmarks/slam sfactor_bench): the earlier premise that faer trails CHOLMOD here was WRONG -- a misread G2O_STATS dump. Re-measured, g2o's CHOLMOD supernodal numeric on the same 1800-parameter reduced system takes 22.5 ms/iter against faer's 21.9: parity. faer's auto threshold already selects supernodal (identical to FORCE_SUPERNODAL; forcing simplicial is 7x slower), and at ~50 GFLOP/s it runs at the machine's dense-kernel rate, so there is no kernel headroom to reclaim single-threaded. A dense LLT on S is slower (37.3 vs 21.9 ms at 300 poses) despite S being 69% dense, because the sparse factor is half the size. What is left: more cores (faer's Par::rayon on the numeric factorization, tied to the with_threads item above) and fewer flops (a structurally different reduction). Not band+border: the wide landmarks make S dense, so there is no band to exploit.
 
 - **arael-faer**: dedicated README.md before the next publish (the crate ships to crates.io as an arael dependency now). Cover: what the crate is (faer extensions staged for upstreaming, usable standalone), the block-CSC storage layout (referent-first: the two partition arrays, blk_col_ptr indexing blk_row_idx/val_ptr, dense column-major tiles), the to_csc/csc_pattern/csc_vals_into trio, and the Schur module's symbolic/numeric/backsub flow with the storage conventions (upper block triangle, diagonal tiles upper-only-within-tile, both coupling orientations). Mirror the crate docs in src/lib.rs per house rule.

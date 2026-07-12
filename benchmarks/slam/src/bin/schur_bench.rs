@@ -84,14 +84,14 @@ fn main() {
 
     // eliminated block ids: blocks fully inside the elimination hint's
     // scalar ranges (the landmark blocks)
-    let hint = RootProblem::elimination_hint(&path);
+    let hint = RootProblem::marginalize_hint(&path);
     let nblk = partition.len() - 1;
     let eliminated: Vec<usize> = (0..nblk)
         .filter(|&b| {
             hint.iter().any(|r| r.start <= partition[b] && partition[b + 1] <= r.end)
         })
         .collect();
-    assert!(!eliminated.is_empty(), "no eliminate_first hint on the model");
+    assert!(!eliminated.is_empty(), "no marginalize hint on the model");
 
     // -- symbolic (one-time) -------------------------------------------
     let (t_sym, sym) = min_ms(rounds, || schur_symbolic(h.symbolic(), &eliminated).unwrap());

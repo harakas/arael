@@ -38,6 +38,7 @@ Solve problems like linear and nonlinear regression, sensor fusion, SLAM, bundle
   - **Eigen SimplicialLLT** and **CHOLMOD** -- optional C++ backends via FFI (`--features eigen`, `--features cholmod`)
   - **CHOLMOD supernodal** -- optional `--features cholmod-gpl`. **License warning:** CHOLMOD's Supernodal module is GPL (the `cholmod` feature binds only the LGPL Simplicial module), so the resulting binary is subject to the GPL
   - **LAPACK band** -- optional dpbsv/spbsv backend (`--features lapack`)
+- **Schur marginalization** -- mutually uncoupled parameter blocks are eliminated before the factorization and recovered by back-substitution. The sparse backend detects them and applies it when it is faster; `SchurPolicy` overrides
 - **Indexed sparse assembly** -- precomputed position lists for zero-overhead hessian assembly after first iteration
 - **f32 and f64 precision** -- `#[arael(root)]` for f64, `#[arael(root, f32)]` for f32 throughout
 - **Model trait** -- hierarchical serialize/deserialize/update protocol for parameter optimization
@@ -409,7 +410,7 @@ match the root's precision: on an `#[arael(root, f32)]` model they take
 
 | Backend (`solve_with(&mut ..., &cfg)`) | Free function | What it is |
 |---|---|---|
-| **`SparseFaer::<T>::new()`** (`T` = `f64`/`f32`) | **`solve_sparse_faer[_f32]`** | **default** (= `solve_sparse`): sparse Cholesky via faer, pure Rust; sparsity pattern discovered once, indexed assembly after |
+| **`SparseFaer::<T>::new()`** (`T` = `f64`/`f32`) | **`solve_sparse_faer[_f32]`** | **default** (= `solve_sparse`): sparse Cholesky via faer, pure Rust. Marginalizes the model's landmark-like blocks (a Schur complement) when that is faster than factorizing the whole system, and decides which by itself; `SchurPolicy` / `FaerOrdering` override it |
 | `Dense` | `solve[_f32]` | dense nalgebra Cholesky (= `solve_dense`): low parameter counts or genuinely dense problems |
 | `Band::new(kd)` | `solve_band[_f32]` | pure-Rust band Cholesky for block-tridiagonal Hessians (localization-like); hard-errors on off-band elements |
 | `BandLapack::new(kd)` | `solve_band_lapack[_f32]` | the same band solve through LAPACK `dpbsv`/`spbsv` (feature `lapack`) |

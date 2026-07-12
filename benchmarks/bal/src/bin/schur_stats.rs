@@ -96,7 +96,7 @@ fn main() {
             }
         }
 
-        let hint = RootProblem::elimination_hint(&scene);
+        let hint = RootProblem::marginalize_hint(&scene);
         let eliminated: Vec<usize> = (0..nblk)
             .filter(|&b| hint.iter().any(|r| r.start <= partition[b] && partition[b + 1] <= r.end))
             .collect();
