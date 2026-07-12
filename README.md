@@ -54,8 +54,8 @@ Solve problems like linear and nonlinear regression, sensor fusion, SLAM, bundle
 ## Benchmarks
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="benchmarks/pgo/chart-dark.svg">
-  <img alt="2x2 bar charts of per-step solve time on M3500, city10000, sphere2500 and parking-garage: arael is fastest on M3500 (3.1 ms), city10000 (10.0 ms) and sphere2500 (13.7 ms); g2o leads the parking garage (8.2 ms vs arael 10.2 ms)" src="benchmarks/pgo/chart-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/harakas/arael/v0.7.1/benchmarks/pgo/chart-dark.svg">
+  <img alt="2x2 bar charts of per-step solve time on M3500, city10000, sphere2500 and parking-garage: arael is fastest on M3500 (3.1 ms), city10000 (10.0 ms) and sphere2500 (13.7 ms); g2o leads the parking garage (8.2 ms vs arael 10.2 ms)" src="https://raw.githubusercontent.com/harakas/arael/v0.7.1/benchmarks/pgo/chart-light.svg">
 </picture>
 
 Per-step solve time on the four canonical pose-graph datasets, 2D and
@@ -73,8 +73,8 @@ monocular SLAM benchmark (six factor types, seven systems),
 including a Raspberry Pi edge run: [benchmarks/slam](benchmarks/slam/README.md).
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="benchmarks/chart-slam-loc-dark.svg">
-  <img alt="Two bar charts of per-iteration solve time: landmark SLAM at 300 poses on an Apple M4 Pro, and localization at 60 poses on a Raspberry Pi 5" src="benchmarks/chart-slam-loc-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/harakas/arael/v0.7.1/benchmarks/chart-slam-loc-dark.svg">
+  <img alt="Two bar charts of per-iteration solve time: landmark SLAM at 300 poses on an Apple M4 Pro, and localization at 60 poses on a Raspberry Pi 5" src="https://raw.githubusercontent.com/harakas/arael/v0.7.1/benchmarks/chart-slam-loc-light.svg">
 </picture>
 
 The same per-iteration metric on the landmark-SLAM benchmark and on
@@ -173,7 +173,7 @@ fn main() {
 
 The robust fit ignores outliers while tracking the inlier data:
 
-![Linear Regression](docs/linear_regression.png)
+![Linear Regression](https://raw.githubusercontent.com/harakas/arael/v0.7.1/docs/linear_regression.png)
 
 See [docs/LINEAR.md](docs/LINEAR.md) for the full walkthrough. Full source: [examples/linear_demo.rs](examples/linear_demo.rs).
 
@@ -318,7 +318,7 @@ The $\gamma$ value follows from the saturation requirement: as $|x| \to \infty$,
 - $\alpha'(0) = 1$, so near the optimum the loss is indistinguishable from plain $r^2$.
 - $\alpha(x)^2 \to \Delta S_{\max}$ as $|x| \to \infty$ -- no single residual can push the sum by more than $\Delta S_{\max}$.
 
-![Starship suppression function](docs/starship/capper.png)
+![Starship suppression function](https://raw.githubusercontent.com/harakas/arael/v0.7.1/docs/starship/capper.png)
 
 Left: $\alpha(x)$ (green) bends away from the identity $x$ (purple) once $|x|$ moves past a few sigmas. Right: the *squared* contribution -- the unbounded $x^2$ parabola vs the saturating $\alpha(x)^2$, capped at $\Delta S_{\max}$. The cap is also smooth; Gauss-Newton still sees a well-defined Jacobian everywhere.
 
@@ -602,7 +602,7 @@ cargo expand --example slam_demo | sed -n '/fn __compute_blocks/,/^    fn /p'
 
 An interactive constraint-based 2D sketch editor built on the arael optimization framework. Draw geometry, apply constraints, and the solver keeps everything consistent in real time.
 
-[![Sketch Editor](docs/sketch.png)](https://sketch.mare.ee/)
+[![Sketch Editor](https://raw.githubusercontent.com/harakas/arael/v0.7.1/docs/sketch.png)](https://sketch.mare.ee/)
 
 [Try it in the browser](https://sketch.mare.ee/)
 
@@ -694,7 +694,7 @@ See [arael-sketch-backend/docs/COMMANDS.md](arael-sketch-backend/docs/COMMANDS.m
 
 The sketch editor embeds an MCP (Model Context Protocol) server, enabling AI agents like Claude Code to create and modify sketches programmatically. The AI sends sketch commands and reads state through the standard MCP tool interface.
 
-![Dark mode with AI-drawn geometry](arael-sketch/docs/dark.png)
+![Dark mode with AI-drawn geometry](https://raw.githubusercontent.com/harakas/arael/v0.7.1/arael-sketch/docs/dark.png)
 
 *Dark mode with parameters panel, command history showing MCP agent connection, and geometry drawn by Claude Code.*
 
