@@ -19,3 +19,6 @@
  * There is no need to add #[arael(skip)] on every non-parameter bool, f32/f64, String, etc. They just clutter the code and reduce readability.
  * When modifying arael-sym with new features and docs -- also update docs/SYM.md
  * When adding/changing features that might have performance impacts, run before and after benchmarks to compare, reject regressions in performance, and flag improvements.
+ * When benchmark numbers change, regenerate the charts (`benchmarks/make_slam_loc_chart.py`, `benchmarks/pgo/make_chart.py`)
+ * Charts contain release version, so need to be updated when they have changed for a new release
+ * Image URLs in README.md and src/lib.rs are absolute and pinned to a release tag -- never `master`, never relative -- they need to be updated on releases.
