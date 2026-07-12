@@ -2654,6 +2654,47 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         // reduction degenerate into an ordinary full-system factorization:
         // one code path, always correct, only the route changes.
         let t_schur_symbolic = lap(vb);
+
+        // The reduction is a GEMM loop over pairs of observers, and the tile
+        // shapes it needs come from the model's block widths. The common ones
+        // have a fully unrolled kernel; anything else runs a generic loop at
+        // roughly half the speed. Say so -- the model author is the only one
+        // who can act on it, and nothing else in the output would ever reveal
+        // it.
+        if vb {
+            let shapes = schur.gemm_shapes();
+            let total: usize = shapes.iter().map(|(_, n)| n).sum();
+            let mut slow: Vec<_> = shapes
+                .iter()
+                .filter(|((wa, we, wb), _)| !arael_faer::schur::has_fixed_kernel(*wa, *we, *wb))
+                .collect();
+            if !slow.is_empty() && total > 0 {
+                slow.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
+                let slow_pairs: usize = slow.iter().map(|(_, n)| n).sum();
+                let listed = slow
+                    .iter()
+                    .take(4)
+                    .map(|((wa, we, wb), n)| {
+                        std::format!("({},{},{}) {} pairs", wa, we, wb, n)
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                warn!(
+                    "schur: {:.0}% of the reduction runs the GENERIC gemm -- \
+                     no unrolled kernel for {}{}. It is about 2x slower than a \
+                     kernel. Add the shape to FIXED_SHAPES in arael-faer \
+                     (src/schur.rs) if this model matters.",
+                    100.0 * slow_pairs as f64 / total as f64,
+                    listed,
+                    if slow.len() > 4 {
+                        std::format!(" and {} more shapes", slow.len() - 4)
+                    } else {
+                        String::new()
+                    },
+                );
+            }
+        }
+
         let mut fill_ratio = None;
         let band = if eliminated.is_empty() { 0 } else { schur.kept_bandwidth() };
         let flop_ratio = match self.policy {
