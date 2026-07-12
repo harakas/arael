@@ -413,12 +413,12 @@ fn extract_constraint_label(tokens: &[proc_macro2::TokenTree]) -> Option<String>
 ///   atan2 for every occurrence in residuals, gradients, Hessians, and
 ///   Jacobians. Derivatives are unaffected (they are the exact rational
 ///   forms either way).
-/// - `eliminate_first(field, ...)` -- marks landmark-style fields (small
+/// - `marginalize(field, ...)` -- marks landmark-style fields (small
 ///   parameter blocks coupled to other parameters but never to each
 ///   other) for the sparse solver to eliminate first. Generates
-///   `RootProblem::elimination_hint()` with the fields' parameter
+///   `RootProblem::marginalize_hint()` with the fields' parameter
 ///   ranges; `solve_sparse` feeds it to
-///   `SparseFaer::with_eliminate_first`, which orders those parameters
+///   `SparseFaer::with_marginalize`, which orders those parameters
 ///   first in the factorization (replacing AMD).
 ///
 /// ## `#[arael(skip_self_block)]`
@@ -1036,7 +1036,7 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
     let mut serialize_size_stmts: Vec<TokenStream2> = Vec::new();
     let mut param_symbols_stmts: Vec<TokenStream2> = Vec::new();
     // Param-bearing fields in serialize order, with their size expression --
-    // consumed by the eliminate_first root keyword to compute param ranges
+    // consumed by the marginalize root keyword to compute param ranges
     // with exactly the serialize walk's field selection.
     // (field, size expr, element type name). The type name is what the
     // Schur detector's coupling graph is built over.
@@ -1431,14 +1431,14 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
         if let Some(proc_macro2::TokenTree::Ident(id)) = tvec.first() {
             if *id != "root" { return None; }
             // Parse optional keywords after comma: f32/f64, extended,
-            // jacobian, fast_atan, eliminate_first(fields). Unknown
+            // jacobian, fast_atan, marginalize(fields). Unknown
             // keywords are hard errors: a silently ignored typo
             // (`jacobain`) or a combined `fit(...)` would otherwise no-op.
             let mut precision = "f64".to_string();
             let mut custom = false;
             let mut jacobian = false;
             let mut fast_atan = false;
-            let mut eliminate_first: Vec<syn::Ident> = Vec::new();
+            let mut marginalize: Vec<syn::Ident> = Vec::new();
             let mut pos = 1;
             while pos < tvec.len() {
                 match &tvec[pos] {
@@ -1458,25 +1458,25 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                             jacobian = true;
                         } else if kw_str == "fast_atan" {
                             fast_atan = true;
-                        } else if kw_str == "eliminate_first" {
+                        } else if kw_str == "marginalize" {
                             // Takes a parenthesized field list:
-                            // eliminate_first(landmarks) or (a, b).
+                            // marginalize(landmarks) or (a, b).
                             pos += 1;
                             let Some(proc_macro2::TokenTree::Group(g)) = tvec.get(pos) else {
                                 return Some(Err(syn::Error::new(kw.span(),
-                                    "eliminate_first requires a field list: eliminate_first(field, ...)")));
+                                    "marginalize requires a field list: marginalize(field, ...)")));
                             };
                             for t in g.stream() {
                                 match t {
-                                    proc_macro2::TokenTree::Ident(f) => eliminate_first.push(f),
+                                    proc_macro2::TokenTree::Ident(f) => marginalize.push(f),
                                     proc_macro2::TokenTree::Punct(p) if p.as_char() == ',' => {}
                                     other => return Some(Err(syn::Error::new(other.span(),
-                                        "eliminate_first expects a comma-separated list of field names"))),
+                                        "marginalize expects a comma-separated list of field names"))),
                                 }
                             }
-                            if eliminate_first.is_empty() {
+                            if marginalize.is_empty() {
                                 return Some(Err(syn::Error::new(g.span(),
-                                    "eliminate_first requires at least one field name")));
+                                    "marginalize requires at least one field name")));
                             }
                             pos += 1;
                             continue;
@@ -1485,7 +1485,7 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                                 "fit(...) cannot be combined with root; use a separate #[arael(fit(...))] attribute")));
                         } else {
                             return Some(Err(syn::Error::new(kw.span(),
-                                format!("unknown root keyword `{}`, expected `f32`, `f64`, `extended`, `jacobian`, `fast_atan`, or `eliminate_first(...)`", kw_str))));
+                                format!("unknown root keyword `{}`, expected `f32`, `f64`, `extended`, `jacobian`, `fast_atan`, or `marginalize(...)`", kw_str))));
                         }
                         pos += 1;
                         // Skip a group following a keyword (e.g. a stray
@@ -1500,7 +1500,7 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                     None => {} // trailing comma
                 }
             }
-            return Some(Ok((precision, custom, jacobian, fast_atan, eliminate_first)));
+            return Some(Ok((precision, custom, jacobian, fast_atan, marginalize)));
         }
         None
     });
@@ -1536,7 +1536,7 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
     // TripletBlock roots emit nothing: their Hessian pattern is only known
     // after a compute pass, so no static claim about coupling is possible
     // (the Schur backend refuses those models anyway).
-    let elimination_candidates_fn = if root_precision.is_some() && !has_triplet_block {
+    let marginalize_candidates_fn = if root_precision.is_some() && !has_triplet_block {
         let cross = registry_cross_pairs();
         // Graph nodes are ENTITY types only: those owning a SelfBlock, i.e.
         // a diagonal Hessian block. Constraint structs (an Odo holding a
@@ -1624,7 +1624,7 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                 }
             }).collect();
             Some(quote! {
-                fn elimination_candidates(&self) -> std::vec::Vec<std::vec::Vec<std::ops::Range<usize>>> {
+                fn marginalize_candidates(&self) -> std::vec::Vec<std::vec::Vec<std::ops::Range<usize>>> {
                     let mut __out = std::vec::Vec::new();
                     #(#per_candidate)*
                     __out
@@ -1635,16 +1635,16 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
         None
     };
 
-    // eliminate_first(fields): generate the RootProblem::elimination_hint
+    // marginalize(fields): generate the RootProblem::marginalize_hint
     // override. Ranges come from the same field walk serialize uses, so
     // fixed params and nested models are counted identically.
-    let elimination_hint_fn = if root_eliminate.is_empty() {
+    let marginalize_hint_fn = if root_eliminate.is_empty() {
         None
     } else {
         for id in &root_eliminate {
             if !size_walk.iter().any(|(f, _, _)| f == id) {
                 return Err(syn::Error::new(id.span(), format!(
-                    "eliminate_first: `{}` is not a parameter-bearing field of this struct", id)));
+                    "marginalize: `{}` is not a parameter-bearing field of this struct", id)));
             }
         }
         // Walk fields in serialize order up to the last marked one.
@@ -1662,7 +1662,7 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
             }
         }).collect();
         Some(quote! {
-            fn elimination_hint(&self) -> std::vec::Vec<std::ops::Range<usize>> {
+            fn marginalize_hint(&self) -> std::vec::Vec<std::ops::Range<usize>> {
                 let mut __out = std::vec::Vec::new();
                 let mut __off = 0usize;
                 #(#stmts)*
@@ -1673,7 +1673,7 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
 
     let constraint_impls = if let Some(ref precision) = root_precision {
         constraint::generate_root_methods(name, fields, precision, root_custom, root_jacobian,
-            root_fast_atan, &elimination_hint_fn, &elimination_candidates_fn, has_triplet_block)?
+            root_fast_atan, &marginalize_hint_fn, &marginalize_candidates_fn, has_triplet_block)?
     } else {
         quote! {}
     };

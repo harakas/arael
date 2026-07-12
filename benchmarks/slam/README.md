@@ -120,10 +120,11 @@ strategy, which is tuning, not implementation.
 
 arael runs f64 and f32; its residuals and SymForce's are code-generated
 (SymForce from `symforce_gen.py`, flattened C++ under `cpp/symforce_gen/`).
-The arael models mark `eliminate_first(landmarks)`; the arael rows solve
-through the Schur-complement backend (landmarks marginalized on every
-damped solve, only the reduced pose system factorized --
-`SLAM_ARAEL_SOLVER` selects the alternatives).
+The arael rows marginalize the landmarks on every damped solve and
+factorize only the reduced pose system. Nothing marks them: the solver
+finds them in the model's coupling graph and decides for itself that
+marginalizing them pays (`SLAM_ARAEL_SOLVER` selects the alternatives --
+`faer` factorizes the whole system instead).
 Ceres runs three linear solvers: the two exact factorizations
 (`sparse_normal_cholesky`, `sparse_schur`) are the like-for-like per-step
 rows; `iterative_schur` is matrix-free preconditioned CG -- cheaper per

@@ -1836,8 +1836,8 @@ pub fn generate_root_methods(
     custom: bool,
     jacobian: bool,
     fast_atan: bool,
-    elimination_hint_fn: &Option<TokenStream2>,
-    elimination_candidates_fn: &Option<TokenStream2>,
+    marginalize_hint_fn: &Option<TokenStream2>,
+    marginalize_candidates_fn: &Option<TokenStream2>,
     has_triplet_block: bool,
 ) -> syn::Result<TokenStream2> {
     let stashed = crate::registry_constraints();
@@ -4538,7 +4538,7 @@ pub fn generate_root_methods(
                 arael::model::Model::collect_param_blocks(self, &mut __out);
                 __out
             }
-            #elimination_hint_fn
+            #marginalize_hint_fn
         }
 
         impl #root_name {
@@ -4638,8 +4638,8 @@ pub fn generate_root_methods(
         #(#summary_docs)*
         impl arael::simple_lm::LmProblem<#prec_type> for #root_name {
             fn hessian_pattern_requires_compute(&self) -> bool { #requires_compute }
-            #elimination_hint_fn
-            #elimination_candidates_fn
+            #marginalize_hint_fn
+            #marginalize_candidates_fn
             fn collect_hessian_cells(&self, out: &mut std::vec::Vec<(u32, u32)>) {
                 arael::model::Model::#cells_method(self, out)
             }

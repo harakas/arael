@@ -81,29 +81,47 @@ half-bandwidth `kd`:
 let result = model.solve_with(&mut Band::new(kd), &cfg);
 ```
 
-**Eliminate landmark-style blocks first.** On landmark SLAM structures --
+**Marginalize landmark-style blocks.** On landmark SLAM structures --
 many small parameter blocks coupled to poses but never to each other --
-eliminating those columns first is a reordering that fills in far less
-than AMD's pose/landmark interleaving, cutting the sparse factorization
-sharply (-25% per iteration on the 300-pose SLAM benchmark). Mark the
-field on the model and `solve_sparse` handles the rest:
+those blocks can be eliminated before the factorization (a Schur
+complement), leaving only the poses to factorize and recovering the
+landmarks by back-substitution afterwards.
+
+`solve_sparse` does this by itself. Nothing has to be marked: the macro
+hands the backend the model's type coupling graph, `SparseFaer` reads the
+marginalizable families off it, and decides from the block structure
+whether marginalizing them is actually faster than factorizing the whole
+system -- it is not always, and on Ladybug-1723 (1723 cameras) it is 1.6x
+slower. Ask what it did with `LmResult::solver`.
+
+Name the blocks yourself when you know better than the graph does:
 
 ```rust,ignore
-#[arael(root, eliminate_first(landmarks))]
+#[arael(root, marginalize(landmarks))]
 ```
 
-or hand the parameter ranges to the backend explicitly:
+or on the backend, as parameter ranges:
 
 ```rust,ignore
-let mut solver = SparseFaer::new().with_eliminate_first(pose_params..n);
+let mut solver = SparseFaer::new().with_marginalize(lm_params..n);
 let result = model.solve_with(&mut solver, &cfg);
 ```
 
-The hinted ordering replaces AMD outright, so mark only genuinely
-landmark-like fields and measure: on structures where AMD is already
-near-optimal (bundle adjustment, where the points vastly outnumber the
-cameras and AMD eliminates them early on its own), a hint can make the
-factorization worse instead of better.
+A named set is used as given, and it must be legal -- the blocks in it may
+not couple to each other, or marginalizing them is not defined and the
+solve is rejected. Whether it PAYS is still weighed; `with_policy` settles
+that by hand:
+
+```rust,ignore
+SchurPolicy::Auto { .. }  // default: decide from the structure
+SchurPolicy::Force        // marginalize, no questions asked
+SchurPolicy::Never        // factorize the whole system
+```
+
+Under `Never` a named set is not wasted: it becomes the factorization's
+ordering instead ("marginalized parameters first"), which is the same
+elimination performed inside the factorization rather than before it.
+`with_ordering` controls that directly -- see `FaerOrdering`.
 
 **Manage the parameter vector yourself.** The generated methods own the
 serialize -> solve -> deserialize round trip. Drop to the free `solve_*`

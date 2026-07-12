@@ -1,4 +1,4 @@
-//! eliminate_first must name a parameter-bearing field of the root
+//! marginalize must name a parameter-bearing field of the root
 //! struct -- a typo or a plain-data field name is a hard error, not a
 //! silently empty hint.
 
@@ -6,7 +6,7 @@
 use arael::model::{Model, Param, SelfBlock};
 
 #[arael::model]
-#[arael(root, eliminate_first(landmark))]
+#[arael(root, marginalize(landmark))]
 struct R {
     x: Param<f64>,
     landmarks: arael::refs::Vec<L>,

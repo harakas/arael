@@ -1,14 +1,17 @@
-// The eliminate_first root keyword: `#[arael(root, eliminate_first(field))]`
-// marks landmark-style fields (small blocks coupled to other parameters but
-// never to each other). The macro generates RootProblem::elimination_hint
-// with the fields' parameter ranges -- computed by the same field walk
-// serialize uses, so fixed params shift the ranges correctly -- and
-// solve_sparse feeds them to SparseFaer::with_eliminate_first, which orders
-// those columns first in the factorization (replacing AMD).
+// The marginalize root keyword: `#[arael(root, marginalize(field))]` marks
+// landmark-style fields (small blocks coupled to other parameters but never
+// to each other). The macro generates RootProblem::marginalize_hint with the
+// fields' parameter ranges -- computed by the same field walk serialize uses,
+// so fixed params shift the ranges correctly -- and SparseFaer reads the hint
+// off the model itself.
+//
+// A named set is marginalized when that pays, and ordered first in the
+// factorization when it does not. SchurPolicy::Never pins the second
+// behaviour, which is what the ordering cases below exercise.
 
 use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::refs::{self, Ref};
-use arael::simple_lm::{lm_solve, LmConfig, LmProblem, RootProblem, SparseFaer};
+use arael::simple_lm::{lm_solve, LmConfig, LmProblem, RootProblem, SchurPolicy, SparseFaer};
 
 #[arael::model]
 #[arael(constraint(hb, {
@@ -58,7 +61,7 @@ struct Obs {
 }
 
 #[arael::model]
-#[arael(root, eliminate_first(landmarks))]
+#[arael(root, marginalize(landmarks))]
 struct World {
     poses: refs::Vec<Pose>,
     landmarks: refs::Vec<Landmark>,
@@ -132,7 +135,7 @@ fn build(off: f64) -> World {
 #[test]
 fn hint_range_matches_layout() {
     let w = build(0.0);
-    let hint = RootProblem::elimination_hint(&w);
+    let hint = RootProblem::marginalize_hint(&w);
     assert_eq!(hint, vec![2 * N_POSES..2 * (N_POSES + N_LANDMARKS)]);
 }
 
@@ -143,7 +146,7 @@ fn hint_range_respects_fixed_params() {
     let mut w = build(0.0);
     w.poses[Ref::<Pose>::new(0)].x = Param::fixed(0.0);
     w.landmarks[Ref::<Landmark>::new(0)].y = Param::fixed(1.0);
-    let hint = RootProblem::elimination_hint(&w);
+    let hint = RootProblem::marginalize_hint(&w);
     let pose_params = 2 * N_POSES - 1;
     let lm_params = 2 * N_LANDMARKS - 1;
     assert_eq!(hint, vec![pose_params..pose_params + lm_params]);
@@ -193,9 +196,9 @@ fn explicit_hints_are_safe() {
         let mut w = build(0.05);
         let mut params = Vec::new();
         RootProblem::serialize(&mut w, &mut params);
-        let mut solver = SparseFaer::new();
+        let mut solver = SparseFaer::new().with_policy(SchurPolicy::Never);
         for r in ranges.clone() {
-            solver = solver.with_eliminate_first(r);
+            solver = solver.with_marginalize(r);
         }
         let result = lm_solve(&params, &mut solver, &mut w, &cfg);
         assert!(result.end_cost < 1e-14,

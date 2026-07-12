@@ -1,5 +1,0 @@
-error: eliminate_first: `landmark` is not a parameter-bearing field of this struct
- --> tests/constraint_attr_errors/eliminate_first_bad_field.rs:9:31
-  |
-9 | #[arael(root, eliminate_first(landmark))]
-  |                               ^^^^^^^^

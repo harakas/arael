@@ -1,0 +1,5 @@
+error: marginalize: `landmark` is not a parameter-bearing field of this struct
+ --> tests/constraint_attr_errors/marginalize_bad_field.rs:9:27
+  |
+9 | #[arael(root, marginalize(landmark))]
+  |                           ^^^^^^^^

@@ -1,6 +1,6 @@
 //! Factorization of the Schur-reduced system S: where the 23 ms goes and
 //! whether faer can be pushed. Builds S from the slam problem (same path
-//! as SparseFaerSchur), then factorizes it every way faer offers --
+//! as SparseFaer), then factorizes it every way faer offers --
 //! sparse LLT across orderings and supernodal/simplicial regimes, and a
 //! dense LLT for the roofline -- reporting one-time and per-iteration
 //! cost for each. Every variant's solution is checked against the same
@@ -99,7 +99,7 @@ fn main() {
             h.vals_mut()[base + k * (w + 1)] *= 1.0 + 1e-8;
         }
     }
-    let hint = RootProblem::elimination_hint(&path);
+    let hint = RootProblem::marginalize_hint(&path);
     let eliminated: Vec<usize> = (0..nblk)
         .filter(|&b| hint.iter().any(|r| r.start <= partition[b] && partition[b + 1] <= r.end))
         .collect();

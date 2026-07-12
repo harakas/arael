@@ -251,11 +251,11 @@ pub trait RootProblem<T: Float> {
     /// raw vector; the `solve_*` entry points call it for you.
     fn deserialize(&mut self, data: &[T]);
     /// Parameter index ranges of fields marked `#[arael(root,
-    /// eliminate_first(field))]`: small mutually uncoupled blocks
+    /// marginalize(field))]`: small mutually uncoupled blocks
     /// (landmark-style entities) that a sparse backend may eliminate
-    /// first (see [`SparseFaer::with_eliminate_first`]). Empty by
+    /// first (see [`SparseFaer::with_marginalize`]). Empty by
     /// default; the macro overrides it for marked fields.
-    fn elimination_hint(&self) -> std::vec::Vec<std::ops::Range<usize>> {
+    fn marginalize_hint(&self) -> std::vec::Vec<std::ops::Range<usize>> {
         std::vec::Vec::new()
     }
     /// Entity parameter blocks as `(offset, width)` spans of the flat
@@ -566,15 +566,15 @@ pub trait LmProblem<T> {
     fn collect_param_block_spans(&self, _out: &mut std::vec::Vec<(u32, u32)>) {}
 
     /// The model's OWN elimination hint -- the ranges named by
-    /// `#[arael(root, eliminate_first(...))]`, if any. The sparse backends
+    /// `#[arael(root, marginalize(...))]`, if any. The sparse backends
     /// read this themselves at the first compute, so declaring it on the
     /// model is all that is needed: no caller has to carry it from the model
     /// into the solver. An explicit
-    /// [`SparseFaerSchur::with_eliminate_first`] still overrides it.
+    /// [`SparseFaer::with_marginalize`] still overrides it.
     ///
     /// Default: no hint (and then the Schur backend detects what it can --
-    /// see [`elimination_candidates`](Self::elimination_candidates)).
-    fn elimination_hint(&self) -> std::vec::Vec<std::ops::Range<usize>> {
+    /// see [`marginalize_candidates`](Self::marginalize_candidates)).
+    fn marginalize_hint(&self) -> std::vec::Vec<std::ops::Range<usize>> {
         std::vec::Vec::new()
     }
 
@@ -584,47 +584,36 @@ pub trait LmProblem<T> {
     /// Derived by the macro from the model's coupling graph: a set of entity
     /// types with no `CrossBlock` among them can carry no Hessian tile
     /// joining two of its members, so its blocks are mutually uncoupled --
-    /// exactly what [`SparseFaerSchur`] needs. Several candidates are
+    /// exactly what [`SparseFaer`] needs. Several candidates are
     /// normal: in bundle adjustment cameras and points couple only to each
     /// other, so both are legal, and only the instance counts (unknown until
     /// runtime) say which one is worth eliminating.
     ///
-    /// Legality, not profitability -- see [`SparseFaerSchur`] for the
+    /// Legality, not profitability -- see [`SparseFaer`] for the
     /// decision that follows. Default: no candidates (the caller must supply
     /// a hint).
-    fn elimination_candidates(&self) -> std::vec::Vec<std::vec::Vec<std::ops::Range<usize>>> {
+    fn marginalize_candidates(&self) -> std::vec::Vec<std::vec::Vec<std::ops::Range<usize>>> {
         std::vec::Vec::new()
     }
 
-    /// Solve with the indexed sparse faer backend ([`SparseFaer`], pure
-    /// Rust) -- the default choice for anything non-trivial. Convenience
-    /// over [`solve_with`](Self::solve_with). The model's
-    /// [`elimination hint`](RootProblem::elimination_hint) (from
-    /// `#[arael(root, eliminate_first(field))]`) is wired into the solver
-    /// automatically.
+    /// Solve with the sparse faer backend ([`SparseFaer`], pure Rust) --
+    /// the default choice for anything non-trivial. Convenience over
+    /// [`solve_with`](Self::solve_with).
+    ///
+    /// Nothing needs wiring: the solver reads the model's own
+    /// `#[arael(root, marginalize(field))]` hint
+    /// ([`marginalize_hint`](Self::marginalize_hint)), and finds the
+    /// marginalizable blocks itself when there is no hint
+    /// ([`marginalize_candidates`](Self::marginalize_candidates)). Whether
+    /// marginalizing them actually pays is then decided from the model's
+    /// structure -- see [`SparseFaer`].
     fn solve_sparse(&mut self, config: &LmConfig<T>) -> LmResult<T>
     where
         Self: RootProblem<T> + Sized,
         T: Float,
         SparseFaer<T>: LmSolver<T>,
     {
-        // No hint plumbing: SparseFaer reads the model's eliminate_first(..)
-        // itself (LmProblem::elimination_hint).
         self.solve_with(&mut SparseFaer::<T>::new(), config)
-    }
-
-    /// Solve with the Schur-complement faer backend ([`SparseFaerSchur`]):
-    /// the model's `eliminate_first` blocks are marginalized on every
-    /// damped solve and only the reduced system is factorized. Requires
-    /// the hint and a statically-knowable Hessian pattern -- see
-    /// [`SparseFaerSchur`] for the exact contract.
-    fn solve_sparse_schur(&mut self, config: &LmConfig<T>) -> LmResult<T>
-    where
-        Self: RootProblem<T> + Sized,
-        T: Float,
-        SparseFaerSchur<T>: LmSolver<T>,
-    {
-        self.solve_with(&mut SparseFaerSchur::<T>::new(), config)
     }
 }
 
@@ -786,7 +775,7 @@ pub struct LmResult<T> {
     /// The damping parameter lambda at exit. Seeds a warm restart or a
     /// follow-up solve that wants to resume from the same damping.
     pub final_lambda: T,
-    /// What the linear solver did -- e.g. whether [`SparseFaerSchur`]
+    /// What the linear solver did -- e.g. whether [`SparseFaer`]
     /// marginalized anything and on what evidence. `None` for backends that
     /// report nothing. Survives the convenience entry points
     /// (`solve_sparse_schur` and friends), which own their solver and would
@@ -1845,80 +1834,6 @@ pub fn solve_sparse_direct(x0: &[f64], problem: &mut impl LmProblem<f64>, config
     lm_solve(x0, &mut SparseDirect::new(), problem, config)
 }
 
-// ---------------------------------------------------------------------------
-// SparseFaer — sparse Cholesky via faer crate
-// ---------------------------------------------------------------------------
-
-/// Sparse Cholesky solver via faer crate (f64).
-pub struct SparseFaer<T = f64> {
-    symbolic: Option<faer::sparse::linalg::cholesky::SymbolicCholesky<usize>>,
-    positions: Option<Vec<usize>>,
-    // Buffers reused across solve_damped calls (every iteration and every
-    // lambda retry). The sparsity pattern is fixed after the first call, so
-    // the usize copy of the row indices, the L-factor storage, and both
-    // faer scratch buffers are sized once and reused.
-    row_idx_usize: Vec<usize>,
-    l_vals: Vec<T>,
-    factor_mem: Vec<std::mem::MaybeUninit<u8>>,
-    solve_mem: Vec<std::mem::MaybeUninit<u8>>,
-    // Elimination hint (see with_eliminate_first) and the custom
-    // permutation built from it for the symbolic factorization.
-    eliminate_first: Vec<std::ops::Range<usize>>,
-    // The MODEL's own hint, read at the first compute. Callers do not carry
-    // it from the model into the solver; the solver asks. An explicit
-    // with_eliminate_first overrides it.
-    model_hint: Vec<std::ops::Range<usize>>,
-    perm_fwd: Vec<usize>,
-    perm_inv: Vec<usize>,
-    // From LmConfig via configure().
-    verbose: bool,
-}
-
-/// Alias of [`SparseFaer<f32>`].
-pub type SparseFaerF32 = SparseFaer<f32>;
-
-impl<T> Default for SparseFaer<T> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl<T> SparseFaer<T> {
-    pub fn new() -> Self {
-        SparseFaer {
-            symbolic: None,
-            positions: None,
-            row_idx_usize: Vec::new(),
-            l_vals: Vec::new(),
-            factor_mem: Vec::new(),
-            solve_mem: Vec::new(),
-            eliminate_first: Vec::new(),
-            model_hint: Vec::new(),
-            perm_fwd: Vec::new(),
-            perm_inv: Vec::new(),
-            verbose: false,
-        }
-    }
-
-    /// Eliminate the parameters in `range` first: the factorization orders
-    /// them ahead of everything else (which keeps its natural order),
-    /// replacing the default AMD ordering. Intended for landmark-style
-    /// entities -- small blocks coupled to other parameters but never to
-    /// each other -- where this ordering fills in far less than AMD's
-    /// interleaving. The hint is used as given: a poor choice degrades the
-    /// factorization, so mark only genuinely landmark-like fields and
-    /// measure.
-    ///
-    /// Call repeatedly to add several ranges. `#[arael(root,
-    /// eliminate_first(field))]` generates the ranges on the model and
-    /// [`LmProblem::solve_sparse`] wires them in automatically; this method
-    /// is the explicit path for hand-built solvers.
-    pub fn with_eliminate_first(mut self, range: std::ops::Range<usize>) -> Self {
-        self.eliminate_first.push(range);
-        self
-    }
-}
-
 /// First Hessian assembly of a solve, shared by every scalar-CSC backend
 /// (faer, Eigen, CHOLMOD). Models whose pattern is knowable before any
 /// compute -- see [`LmProblem::hessian_pattern_requires_compute`] -- get
@@ -1967,188 +1882,6 @@ fn assemble_first_csc<T: Float>(
     (cost, positions)
 }
 
-impl<T: crate::utils::Float + faer::traits::RealField> LmSolver<T> for SparseFaer<T> {
-    type Matrix = SparseMatrix<T>;
-    fn matrix_nonfinite_count(&self, matrix: &SparseMatrix<T>) -> usize {
-        matrix.csc.vals.iter().filter(|v| !v.is_finite()).count()
-    }
-    fn reset(&mut self) {
-        self.positions = None;
-        self.symbolic = None;
-        self.model_hint.clear();
-        // Buffer allocations are kept; they are resized when the next
-        // symbolic factorization is created. An explicitly configured hint
-        // is configuration, not cache, and survives.
-    }
-
-    fn configure(&mut self, config: &LmConfig<T>) {
-        self.verbose = config.verbose;
-    }
-
-    fn new_matrix(&self, n: usize) -> SparseMatrix<T> {
-        SparseMatrix { csc: CscMatrix::empty(n) }
-    }
-
-    fn compute(&mut self, problem: &mut dyn LmProblem<T>, params: &[T], grad: &mut [T], matrix: &mut SparseMatrix<T>) -> T {
-        if let Some(positions) = &self.positions {
-            return problem.calc_grad_hessian_sparse_indexed(params, grad, &mut matrix.csc.vals, positions);
-        }
-        // First call: the model's own hint, if it declared one. The caller
-        // does not carry it over -- the solver asks.
-        if self.eliminate_first.is_empty() {
-            self.model_hint = problem.elimination_hint();
-        }
-        let (cost, positions) = assemble_first_csc(problem, params, grad, &mut matrix.csc);
-        self.positions = Some(positions);
-        cost
-    }
-
-    fn extract_diagonal(&self, matrix: &SparseMatrix<T>, diagonal: &mut [T]) {
-        for i in 0..diagonal.len() {
-            diagonal[i] = matrix.csc.vals[matrix.csc.diag_pos[i]];
-        }
-    }
-
-    fn solve_damped(&mut self, n: usize, matrix: &mut SparseMatrix<T>, diagonal: &[T], lambda: T, grad: &[T], delta: &mut [T]) -> bool {
-        for i in 0..n { matrix.csc.vals[matrix.csc.diag_pos[i]] = (T::one() + lambda) * diagonal[i]; }
-        use faer::sparse::linalg::cholesky::*;
-
-        // First call: convert the pattern to faer's usize row indices, run
-        // the symbolic factorization, and size the reusable buffers.
-        if self.symbolic.is_none() {
-            self.row_idx_usize.clear();
-            self.row_idx_usize.extend(matrix.csc.row_idx.iter().map(|&r| r as usize));
-            let symbolic_ref = faer::sparse::SymbolicSparseColMatRef::new_checked(
-                n, n,
-                &matrix.csc.col_ptr,
-                None,
-                &self.row_idx_usize,
-            );
-            // Elimination ordering, from the hint alone -- used as given, no
-            // comparison against AMD.
-            //
-            // The model can say which blocks are marginalizable
-            // (LmProblem::elimination_candidates), so this could pick the
-            // ordering itself. It deliberately does not. The only cheap way
-            // to choose is to compare the two factors' SIZES, and fill does
-            // not predict time here: on Ladybug-49 ordering the points first
-            // leaves 9% LESS fill and runs 6% SLOWER (5 of 5 interleaved
-            // runs), because it chops the factor into thousands of 3-column
-            // supernodes that use BLAS3 far worse than AMD's larger panels.
-            // The comparison also costs a second symbolic factorization on
-            // every solve. Callers who know their problem pass the hint;
-            // callers who do not are better served by SparseFaerSchur, which
-            // decides on evidence that does hold up.
-            let ranges: Vec<std::ops::Range<usize>> = if self.eliminate_first.is_empty() {
-                self.model_hint.clone()
-            } else {
-                self.eliminate_first.clone()
-            };
-            let ordering = if ranges.is_empty() {
-                SymmetricOrdering::Amd
-            } else {
-                self.perm_fwd.clear();
-                let mut first = vec![false; n];
-                for r in &ranges {
-                    for i in r.clone().filter(|&i| i < n) {
-                        if !first[i] {
-                            first[i] = true;
-                            self.perm_fwd.push(i);
-                        }
-                    }
-                }
-                for i in 0..n {
-                    if !first[i] {
-                        self.perm_fwd.push(i);
-                    }
-                }
-                self.perm_inv.resize(n, 0);
-                for (new, &old) in self.perm_fwd.iter().enumerate() {
-                    self.perm_inv[old] = new;
-                }
-                SymmetricOrdering::Custom(faer::perm::PermRef::new_checked(
-                    &self.perm_fwd, &self.perm_inv, n))
-            };
-            let t_sym = std::time::Instant::now();
-            let sym = factorize_symbolic_cholesky(
-                symbolic_ref,
-                faer::Side::Upper,
-                ordering,
-                CholeskySymbolicParams::default(),
-            );
-            match sym {
-                Ok(s) => self.symbolic = Some(s),
-                Err(_) => return false,
-            }
-            let symbolic = self.symbolic.as_ref().unwrap();
-            if self.verbose {
-                info!(
-                    "sparse: {} params, symbolic factorization {:.1} ms, L holds {} values",
-                    n,
-                    t_sym.elapsed().as_secs_f64() * 1e3,
-                    symbolic.len_val(),
-                );
-            }
-            self.l_vals.resize(symbolic.len_val(), T::zero());
-            let factor_scratch = symbolic.factorize_numeric_llt_scratch::<T>(
-                faer::Par::Seq,
-                faer::Spec::default(),
-            );
-            self.factor_mem.resize(factor_scratch.unaligned_bytes_required(), std::mem::MaybeUninit::uninit());
-            let solve_scratch = symbolic.solve_in_place_scratch::<T>(1, faer::Par::Seq);
-            self.solve_mem.resize(solve_scratch.unaligned_bytes_required(), std::mem::MaybeUninit::uninit());
-        }
-        let symbolic = self.symbolic.as_ref().unwrap();
-
-        // The pattern is fixed after the first call; reconstructing the ref
-        // from the cached indices costs one validation scan, no allocation.
-        let symbolic_ref = faer::sparse::SymbolicSparseColMatRef::new_checked(
-            n, n,
-            &matrix.csc.col_ptr,
-            None,
-            &self.row_idx_usize,
-        );
-        let mat_ref = faer::sparse::SparseColMatRef::new(symbolic_ref, &matrix.csc.vals);
-
-        // Numeric factorization into the cached buffers. faer fully
-        // overwrites l_vals, so no re-zeroing is needed between calls.
-        let stack = faer::dyn_stack::MemStack::new(&mut self.factor_mem);
-        let llt = symbolic.factorize_numeric_llt(
-            &mut self.l_vals,
-            mat_ref,
-            faer::Side::Upper,
-            faer::linalg::cholesky::llt::factor::LltRegularization::default(),
-            faer::Par::Seq,
-            stack,
-            faer::Spec::default(),
-        );
-
-        let llt = match llt {
-            Ok(l) => l,
-            Err(_) => return false,
-        };
-
-        // Solve
-        delta.copy_from_slice(grad);
-        let rhs = faer::col::ColMut::from_slice_mut(delta);
-        let solve_stack = faer::dyn_stack::MemStack::new(&mut self.solve_mem);
-
-        llt.solve_in_place_with_conj(
-            faer::Conj::No,
-            rhs.as_mat_mut(),
-            faer::Par::Seq,
-            solve_stack,
-        );
-
-        true
-    }
-}
-
-/// Solve with faer sparse Cholesky backend (f64).
-pub fn solve_sparse_faer(x0: &[f64], problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> LmResult<f64> {
-    lm_solve(x0, &mut SparseFaer::new(), problem, config)
-}
-
 /// Fill-reducing ordering, but only where there is fill to reduce.
 /// Marginalizing shared landmarks makes the reduced system dense (69% of
 /// the upper triangle at slam-300), and on such a matrix AMD finds nothing
@@ -2169,37 +1902,19 @@ fn ordering_for<'a>(
     }
 }
 
-/// Matrix storage for [`SparseFaerSchur`]: the Hessian in block form
-/// (arael-faer block CSC) over the model's entity partition.
-pub struct SchurBlockMatrix<T> {
+/// Matrix storage for [`SparseFaer`]. The Hessian lives in exactly one of
+/// the two forms, decided on the first assembly of a solve.
+pub struct FaerMatrix<T> {
     n: usize,
-    /// The Hessian in block form -- the reduction's working storage. `None`
-    /// when the reduction was declined: there is then nothing to marginalize
-    /// and the block layout buys nothing, so the Hessian is assembled
-    /// straight into the scalar CSC below, exactly as [`SparseFaer`] does.
+    /// Block form (arael-faer block CSC) over the model's entity
+    /// partition. This is what the reduction works on, and it is only
+    /// built when the solver is going to reduce.
     h: Option<arael_faer::bsc::SparseBlockColMat<usize, T>>,
-    /// The scalar CSC the declined route assembles into and factorizes.
+    /// Scalar CSC -- what the whole system is assembled into and
+    /// factorized from when it is not reduced.
     csc: Option<CscMatrix<T>>,
 }
 
-/// Schur-complement solver backend (pure Rust). Assembles the Hessian
-/// in block form over the model's entity partition; every damped solve
-/// then eliminates the hinted blocks (typically landmarks) via
-/// [`arael_faer::schur`], factors only the REDUCED system with faer's
-/// sparse LLT, and recovers the eliminated blocks by back-substitution.
-/// The elimination hint is trusted as given, like
-/// [`SparseFaer::with_eliminate_first`].
-///
-/// Requirements, checked on the first compute of a solve:
-/// - a statically-knowable Hessian pattern
-///   ([`LmProblem::hessian_pattern_requires_compute`] is `false`; no
-///   TripletBlock / extended-constraint models);
-/// - a non-empty elimination hint
-///   ([`with_eliminate_first`](Self::with_eliminate_first), auto-wired
-///   from `#[arael(root, eliminate_first(...))]` by
-///   [`LmProblem::solve_sparse_schur`]);
-/// - the hinted blocks must be mutually uncoupled (no constraint joins
-///   two of them) -- anything else is rejected loudly.
 /// What the linear solver did during a solve -- the backend's side of
 /// [`LmResult`], for callers who want to know which route was taken and
 /// why, not just the answer.
@@ -2207,26 +1922,35 @@ pub struct SchurBlockMatrix<T> {
 /// Backends that have nothing to say report `None`.
 #[derive(Clone, Copy, Debug)]
 pub enum SolverReport {
-    /// [`SparseFaerSchur`]: whether the reduction was used, what it
+    /// [`SparseFaer`]: whether the reduction was used, what it
     /// marginalized, and the fill evidence behind an
     /// [`SchurPolicy::Auto`] decision.
     Schur(SchurPlan),
 }
 
-/// How [`SparseFaerSchur`] decides whether to actually marginalize the
+/// How [`SparseFaer`] decides whether to actually marginalize the
 /// blocks it was given (or detected).
 ///
-/// Marginalizing is not always a win: it forces "eliminated variables
+/// Marginalizing is not always a win: it forces "marginalized variables
 /// first" as the elimination order, and on a large kept system a general
 /// fill-reducing ordering of the WHOLE matrix can do better. Measured on
 /// BAL Ladybug-1723 (1723 cameras), eliminating the points -- the legal,
-/// obvious choice -- is 1.6x SLOWER than factorizing the full system.
+/// obvious choice -- is 1.6x SLOWER than factorizing the whole system.
 #[derive(Clone, Copy, Debug)]
 pub enum SchurPolicy {
+    /// Never reduce: assemble the whole system as one scalar CSC and
+    /// factorize that. The plain sparse Cholesky, and the only route a
+    /// model with no block structure (hand-built problems, TripletBlock /
+    /// extended constraints) can take anyway.
+    ///
+    /// A marginalize set is still honoured here -- not as a reduction, but
+    /// as the factorization's ordering (see [`FaerOrdering`]): ordering
+    /// those parameters first IS the same elimination, done inside the
+    /// factorization instead of before it.
+    Never,
     /// Marginalize what was hinted or detected, unconditionally. No
     /// analysis, no fallback -- what a caller who already knows their
-    /// problem wants, and what [`SparseFaerSchur::with_eliminate_first`]
-    /// selects. Panics if there is nothing to eliminate.
+    /// problem wants. Panics if there is nothing to marginalize.
     Force,
     /// Keep the reduction only if it pays: compare the fill of the reduced
     /// system's factor against the fill of the full system under AMD, and
@@ -2276,8 +2000,48 @@ impl Default for SchurPolicy {
     }
 }
 
-/// What [`SparseFaerSchur`]'s first compute decided. Read it with
-/// [`SparseFaerSchur::plan`].
+/// Which elimination ordering [`SparseFaer`] hands the factorization.
+///
+/// This is about the system that actually gets factorized -- the whole
+/// Hessian when there is no reduction, the reduced system when there is.
+/// It does not decide WHETHER to reduce; [`SchurPolicy`] does.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FaerOrdering {
+    /// Default, and what every measurement here was taken with:
+    ///
+    /// * whole system, with a marginalize set the caller or the model
+    ///   named -- those parameters first, everything else in natural
+    ///   order (`MarginalizeFirst`);
+    /// * whole system otherwise -- AMD;
+    /// * reduced system -- AMD, unless the reduction left it dense enough
+    ///   (over a quarter of the upper triangle) that AMD has nothing to
+    ///   find, where it is the natural order.
+    ///
+    /// Note what Auto does NOT do: use a set the solver DETECTED itself as
+    /// an ordering. Detection says which blocks are marginalizable, not
+    /// that ordering them first is a good idea -- on Ladybug-49 it leaves
+    /// 9% less fill and runs 6% slower, because it chops the factor into
+    /// thousands of 3-column supernodes. A set the caller named is an
+    /// instruction; a set we guessed is not.
+    Auto,
+    /// Approximate minimum degree, always.
+    Amd,
+    /// The marginalized parameters first, everything else in natural
+    /// order. Falls back to AMD when there is no marginalize set to put
+    /// first.
+    MarginalizeFirst,
+    /// Natural order, no permutation.
+    Natural,
+}
+
+impl Default for FaerOrdering {
+    fn default() -> Self {
+        FaerOrdering::Auto
+    }
+}
+
+/// What [`SparseFaer`]'s first compute decided. Read it with
+/// [`SparseFaer::plan`].
 #[derive(Clone, Copy, Debug)]
 pub struct SchurPlan {
     /// Whether the reduction was used at all. `false` means the full system
@@ -2302,10 +2066,47 @@ pub struct SchurPlan {
     pub flop_ratio: Option<f64>,
 }
 
-pub struct SparseFaerSchur<T = f64> {
-    // Elimination hint (scalar parameter ranges; see with_eliminate_first).
-    eliminate_first: Vec<std::ops::Range<usize>>,
+/// Sparse Cholesky via faer, pure Rust -- the default backend.
+///
+/// It factorizes the whole Hessian, or marginalizes the model's
+/// landmark-like blocks first (a Schur complement) and factorizes only
+/// what is left, recovering the marginalized blocks by back-substitution.
+/// Which of the two, it decides itself, from the model's structure:
+///
+/// 1. **What can be marginalized.** A block is marginalizable when nothing
+///    couples it to another one -- landmarks seen from many poses, points
+///    seen from many cameras. The macro hands over the model's type
+///    coupling graph, so this is a graph question, not a guess, and a
+///    model can have several such families at once (bundle adjustment has
+///    two). Name a set yourself with
+///    [`with_marginalize`](Self::with_marginalize) or
+///    `#[arael(root, marginalize(field))]` and it is used as given.
+/// 2. **Whether marginalizing pays.** It does not always: it forces
+///    "marginalized first" as the elimination order, and on a big enough
+///    kept system a fill-reducing ordering of the whole matrix wins
+///    instead (Ladybug-1723 is 1.6x slower reduced). So a cheap filter
+///    settles the obvious cases from the block structure alone, and only
+///    the unclear ones pay for the exact comparison -- see
+///    [`SchurPolicy::Auto`].
+///
+/// Neither step needs anything from the caller, and a model with no
+/// marginalizable blocks (a pose graph, a localization problem) skips both
+/// and costs exactly what a plain sparse Cholesky costs. Models with no
+/// block structure at all -- hand-built [`LmProblem`]s, TripletBlock and
+/// extended-constraint models -- take the same plain route, discovering
+/// their pattern by a COO pass on the first assembly.
+///
+/// [`SchurPolicy`] overrides the decision, [`FaerOrdering`] the ordering,
+/// and [`plan`](Self::plan) (or [`LmResult::solver`]) reports what
+/// happened.
+pub struct SparseFaer<T = f64> {
+    // The blocks to marginalize, as scalar parameter ranges: named by the
+    // caller (with_marginalize) or by the model (marginalize_hint), and
+    // empty when the solver is left to detect them itself.
+    marginalize: Vec<std::ops::Range<usize>>,
+    model_hint: Vec<std::ops::Range<usize>>,
     policy: SchurPolicy,
+    ordering: FaerOrdering,
     plan: Option<SchurPlan>,
     // From LmConfig via configure(): explain the decisions below.
     verbose: bool,
@@ -2323,27 +2124,34 @@ pub struct SparseFaerSchur<T = f64> {
     s_col_ptr: Vec<usize>,
     s_row_idx: Vec<usize>,
     s_vals: Vec<T>,
-    // faer LLT state on the reduced system, sized once.
+    // The "marginalized parameters first" permutation, when that is the
+    // ordering (FaerOrdering::MarginalizeFirst, or Auto with a named set).
+    perm_fwd: Vec<usize>,
+    perm_inv: Vec<usize>,
+    // faer LLT state on the system actually factorized -- the reduced one,
+    // or the whole one. Sized once.
     llt_symbolic: Option<faer::sparse::linalg::cholesky::SymbolicCholesky<usize>>,
     l_vals: Vec<T>,
     factor_mem: Vec<std::mem::MaybeUninit<u8>>,
     solve_mem: Vec<std::mem::MaybeUninit<u8>>,
 }
 
-/// Alias of [`SparseFaerSchur<f32>`].
-pub type SparseFaerSchurF32 = SparseFaerSchur<f32>;
+/// Alias of [`SparseFaer<f32>`].
+pub type SparseFaerF32 = SparseFaer<f32>;
 
-impl<T> Default for SparseFaerSchur<T> {
+impl<T> Default for SparseFaer<T> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<T> SparseFaerSchur<T> {
+impl<T> SparseFaer<T> {
     pub fn new() -> Self {
-        SparseFaerSchur {
-            eliminate_first: Vec::new(),
+        SparseFaer {
+            marginalize: Vec::new(),
+            model_hint: Vec::new(),
             policy: SchurPolicy::default(),
+            ordering: FaerOrdering::default(),
             plan: None,
             verbose: false,
             positions: None,
@@ -2356,6 +2164,8 @@ impl<T> SparseFaerSchur<T> {
             s_col_ptr: Vec::new(),
             s_row_idx: Vec::new(),
             s_vals: Vec::new(),
+            perm_fwd: Vec::new(),
+            perm_inv: Vec::new(),
             llt_symbolic: None,
             l_vals: Vec::new(),
             factor_mem: Vec::new(),
@@ -2365,7 +2175,7 @@ impl<T> SparseFaerSchur<T> {
 
     /// Marginalize the parameter blocks fully inside `range`, instead of the
     /// ones the model's coupling graph would offer
-    /// ([`LmProblem::elimination_candidates`]). May be called several times
+    /// ([`LmProblem::marginalize_candidates`]). May be called several times
     /// for several ranges.
     ///
     /// This says WHICH blocks, not WHETHER marginalizing them is a good idea
@@ -2375,16 +2185,24 @@ impl<T> SparseFaerSchur<T> {
     /// does not (Ladybug-1723 is 1.6x slower reduced), and the check is free
     /// on the problems where the answer is obvious. Add
     /// `.with_policy(SchurPolicy::Force)` to skip it anyway.
-    pub fn with_eliminate_first(mut self, range: std::ops::Range<usize>) -> Self {
-        self.eliminate_first.push(range);
+    pub fn with_marginalize(mut self, range: std::ops::Range<usize>) -> Self {
+        self.marginalize.push(range);
         self
     }
 
-    /// Override the decision policy. `with_policy(SchurPolicy::Force)` means
-    /// "marginalize the blocks -- hinted or detected -- no matter what the
-    /// analysis says".
+    /// Override the decision policy: [`SchurPolicy::Force`] to marginalize
+    /// no matter what the analysis says, [`SchurPolicy::Never`] to
+    /// factorize the whole system and not marginalize at all.
     pub fn with_policy(mut self, policy: SchurPolicy) -> Self {
         self.policy = policy;
+        self
+    }
+
+    /// Override the elimination ordering of whichever system gets
+    /// factorized. See [`FaerOrdering`] -- the default picks it from the
+    /// system in hand.
+    pub fn with_ordering(mut self, ordering: FaerOrdering) -> Self {
+        self.ordering = ordering;
         self
     }
 
@@ -2394,9 +2212,199 @@ impl<T> SparseFaerSchur<T> {
     }
 }
 
-impl<T: crate::utils::Float + faer::traits::RealField> SparseFaerSchur<T> {
+impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
+    /// The marginalize set somebody NAMED: the caller's, or failing that the
+    /// model's own `marginalize(..)`. Empty means nobody named one and the
+    /// solver is free to detect its own -- a distinction that matters,
+    /// because a named set is also trusted as an ordering and a detected one
+    /// is not (see [`FaerOrdering::Auto`]).
+    fn named_marginalize(&self) -> Vec<std::ops::Range<usize>> {
+        if self.marginalize.is_empty() {
+            self.model_hint.clone()
+        } else {
+            self.marginalize.clone()
+        }
+    }
+
+    /// Factorize the WHOLE system: assemble it as one scalar CSC, order it,
+    /// symbolically factorize it. Every route that does not reduce ends up
+    /// here -- nothing marginalizable, [`SchurPolicy::Never`], a model with
+    /// no block structure, or an analysis that declined.
+    ///
+    /// `structure` is the model's block partition and Hessian cells when it
+    /// has them: passing them in builds the pattern straight from the block
+    /// structure and spares a second structure walk. `None` means discover
+    /// the pattern the slow way, with a COO pass.
+    ///
+    /// `prebuilt` is the pattern and symbolic factorization the reduction
+    /// analysis already paid for when it declined -- exactly what this route
+    /// needs next, and at BAL scale seconds of work not to repeat.
+    #[allow(clippy::too_many_arguments)]
+    fn setup_full(
+        &mut self,
+        problem: &mut dyn LmProblem<T>,
+        params: &[T],
+        grad: &mut [T],
+        matrix: &mut FaerMatrix<T>,
+        n: usize,
+        structure: Option<(&[usize], &[(u32, u32)])>,
+        prebuilt: Option<(
+            (Vec<usize>, Vec<usize>),
+            faer::sparse::linalg::cholesky::SymbolicCholesky<usize>,
+        )>,
+        vb: bool,
+    ) -> T {
+        // No block storage on this route, and nothing left over from a
+        // reduction that was considered and dropped.
+        matrix.h = None;
+        self.schur = None;
+        self.s = None;
+        self.s_vals = Vec::new();
+        self.bdiag_pos = Vec::new();
+        self.rhs_kept = Vec::new();
+        self.x_kept = Vec::new();
+
+        // The Hessian, its pattern and the scatter map into it.
+        let (mut csc, positions, coo_cost) = match structure {
+            Some((partition, cells)) => {
+                let (csc, mut resolver) = csc_from_cells::<T>(partition, cells);
+                let mut positions = std::vec::Vec::new();
+                problem
+                    .accumulate_hessian_positions(&mut |i, j| resolver.resolve(i, j), &mut positions);
+                (csc, positions, None)
+            }
+            None => {
+                let mut csc = CscMatrix::empty(n);
+                let (cost, positions) = assemble_first_csc(problem, params, grad, &mut csc);
+                (csc, positions, Some(cost))
+            }
+        };
+
+        // faer wants usize row indices; the analysis may already have them.
+        let reused = prebuilt.is_some();
+        let llt = match prebuilt {
+            Some(((col_ptr, row_idx), llt)) => {
+                self.s_col_ptr = col_ptr;
+                self.s_row_idx = row_idx;
+                llt
+            }
+            None => {
+                self.s_col_ptr.clear();
+                self.s_col_ptr.extend_from_slice(&csc.col_ptr);
+                self.s_row_idx.clear();
+                self.s_row_idx.extend(csc.row_idx.iter().map(|&r| r as usize));
+                self.full_symbolic(n, vb)
+            }
+        };
+        if vb && reused {
+            info!(
+                "sparse: whole system {} params, its factor holds {} values",
+                n,
+                llt.len_val(),
+            );
+        }
+        self.size_llt_buffers(&llt);
+        self.llt_symbolic = Some(llt);
+
+        matrix.csc = Some(std::mem::replace(&mut csc, CscMatrix::empty(0)));
+        let csc = matrix.csc.as_mut().unwrap();
+        let cost = match coo_cost {
+            // The COO route filled the values on its way to the pattern.
+            Some(cost) => cost,
+            None => problem.calc_grad_hessian_sparse_indexed(params, grad, &mut csc.vals, &positions),
+        };
+        self.positions = Some(positions);
+        cost
+    }
+
+    /// Symbolic factorization of the whole system, under the ordering
+    /// [`FaerOrdering`] asks for. Reads the pattern from `s_col_ptr` /
+    /// `s_row_idx`, which the caller has just filled.
+    fn full_symbolic(
+        &mut self,
+        n: usize,
+        vb: bool,
+    ) -> faer::sparse::linalg::cholesky::SymbolicCholesky<usize> {
+        use faer::sparse::linalg::cholesky::*;
+
+        // "Marginalized parameters first, everything else in natural order"
+        // is the same elimination the reduction performs, handed to the
+        // factorization instead of done before it. Only a NAMED set earns
+        // it: a set we detected ourselves says the blocks are marginalizable,
+        // not that ordering them first is a good idea (see FaerOrdering).
+        let named = self.named_marginalize();
+        let first = match self.ordering {
+            FaerOrdering::MarginalizeFirst => !named.is_empty(),
+            FaerOrdering::Auto => !named.is_empty(),
+            FaerOrdering::Amd | FaerOrdering::Natural => false,
+        };
+        if first {
+            self.perm_fwd.clear();
+            let mut taken = vec![false; n];
+            for r in &named {
+                for i in r.clone().filter(|&i| i < n) {
+                    if !taken[i] {
+                        taken[i] = true;
+                        self.perm_fwd.push(i);
+                    }
+                }
+            }
+            for (i, &t) in taken.iter().enumerate() {
+                if !t {
+                    self.perm_fwd.push(i);
+                }
+            }
+            self.perm_inv.clear();
+            self.perm_inv.resize(n, 0);
+            for (new, &old) in self.perm_fwd.iter().enumerate() {
+                self.perm_inv[old] = new;
+            }
+        }
+        let ordering = if first {
+            SymmetricOrdering::Custom(faer::perm::PermRef::new_checked(
+                &self.perm_fwd,
+                &self.perm_inv,
+                n,
+            ))
+        } else {
+            match self.ordering {
+                FaerOrdering::Natural => SymmetricOrdering::Identity,
+                _ => SymmetricOrdering::Amd,
+            }
+        };
+        let name = if first {
+            "marginalized parameters first"
+        } else if matches!(self.ordering, FaerOrdering::Natural) {
+            "natural order"
+        } else {
+            "AMD"
+        };
+        let t0 = std::time::Instant::now();
+        let sym_ref = faer::sparse::SymbolicSparseColMatRef::new_checked(
+            n, n, &self.s_col_ptr, None, &self.s_row_idx,
+        );
+        let llt = factorize_symbolic_cholesky(
+            sym_ref,
+            faer::Side::Upper,
+            ordering,
+            CholeskySymbolicParams::default(),
+        )
+        .expect("symbolic factorization of the whole system failed");
+        if vb {
+            info!(
+                "sparse: whole system {} params, ordered by {}, symbolic \
+                 factorization {:.1} ms, its factor holds {} values",
+                n,
+                name,
+                t0.elapsed().as_secs_f64() * 1e3,
+                llt.len_val(),
+            );
+        }
+        llt
+    }
+
     /// Size the factor and scratch buffers for a symbolic factorization
-    /// (the reduced system's, or the full system's on a declined reduction).
+    /// (the reduced system's, or the whole system's when it is not reduced).
     fn size_llt_buffers(
         &mut self,
         llt: &faer::sparse::linalg::cholesky::SymbolicCholesky<usize>,
@@ -2412,11 +2420,11 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaerSchur<T> {
 }
 
 impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::SchurReal> LmSolver<T>
-    for SparseFaerSchur<T>
+    for SparseFaer<T>
 {
-    type Matrix = SchurBlockMatrix<T>;
+    type Matrix = FaerMatrix<T>;
 
-    fn matrix_nonfinite_count(&self, matrix: &SchurBlockMatrix<T>) -> usize {
+    fn matrix_nonfinite_count(&self, matrix: &FaerMatrix<T>) -> usize {
         let block = matrix.h.as_ref().map(|h| h.vals().iter().filter(|v| !v.is_finite()).count());
         let scalar = matrix.csc.as_ref().map(|c| c.vals.iter().filter(|v| !v.is_finite()).count());
         block.or(scalar).unwrap_or(0)
@@ -2441,11 +2449,11 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         self.verbose = config.verbose;
     }
 
-    fn new_matrix(&self, n: usize) -> SchurBlockMatrix<T> {
-        SchurBlockMatrix { n, h: None, csc: None }
+    fn new_matrix(&self, n: usize) -> FaerMatrix<T> {
+        FaerMatrix { n, h: None, csc: None }
     }
 
-    fn compute(&mut self, problem: &mut dyn LmProblem<T>, params: &[T], grad: &mut [T], matrix: &mut SchurBlockMatrix<T>) -> T {
+    fn compute(&mut self, problem: &mut dyn LmProblem<T>, params: &[T], grad: &mut [T], matrix: &mut FaerMatrix<T>) -> T {
         if let Some(positions) = &self.positions {
             if let Some(h) = matrix.h.as_mut() {
                 return problem.calc_grad_hessian_sparse_indexed(params, grad, h.vals_mut(), positions);
@@ -2456,12 +2464,6 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         }
         let n = matrix.n;
 
-        // First call: block structure from the model's structure walks.
-        assert!(
-            !problem.hessian_pattern_requires_compute(),
-            "SparseFaerSchur requires a statically-knowable Hessian pattern \
-             (TripletBlock / extended-constraint models are not supported)"
-        );
         // Verbose mode narrates the one-time structural work below: what was
         // detected, how the reduction was decided, and what each analysis
         // cost -- the phases that make a first iteration expensive.
@@ -2475,38 +2477,47 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             ms
         };
 
+        // The model's own marginalize(..), when the caller named nothing.
+        // Nobody has to carry the hint from the model into the solver: the
+        // solver asks the model for it.
+        if self.marginalize.is_empty() {
+            self.model_hint = problem.marginalize_hint();
+        }
+
+        // The model's block structure -- what everything below is decided
+        // from. A model that has none (hand-built problems) or whose pattern
+        // only a compute can reveal (TripletBlock, extended constraints) has
+        // no blocks to marginalize either: whole system, pattern discovered
+        // the slow way.
         let mut cells = std::vec::Vec::new();
-        problem.collect_hessian_cells(&mut cells);
         let mut spans = std::vec::Vec::new();
-        problem.collect_param_block_spans(&mut spans);
-        assert!(
-            !cells.is_empty() && !spans.is_empty(),
-            "SparseFaerSchur requires the model structure walks (macro-generated \
-             models; hand-built problems are not supported)"
-        );
+        if !problem.hessian_pattern_requires_compute() {
+            problem.collect_hessian_cells(&mut cells);
+            problem.collect_param_block_spans(&mut spans);
+        }
+        if cells.is_empty() || spans.is_empty() {
+            assert!(
+                !matches!(self.policy, SchurPolicy::Force),
+                "SparseFaer: SchurPolicy::Force, but this model has no block \
+                 structure to marginalize -- it is hand-built, or its Hessian \
+                 pattern is only knowable after a compute (TripletBlock / \
+                 extended constraints). Use SchurPolicy::Auto or Never."
+            );
+            if vb {
+                info!("schur: not reducing -- the model has no block structure");
+            }
+            self.plan = Some(SchurPlan {
+                reduced: false,
+                eliminated_blocks: 0,
+                eliminated_params: 0,
+                kept_params: n,
+                fill_ratio: None,
+                flop_ratio: None,
+            });
+            return self.setup_full(problem, params, grad, matrix, n, None, None, vb);
+        }
         let partition = block_partition_from_spans(&spans, n);
         let nblk = partition.len() - 1;
-        let (hsym, _) = arael_faer::bsc::SymbolicSparseBlockColMat::from_scalar_coords(
-            partition.clone(),
-            partition.clone(),
-            cells.len(),
-            |k| (cells[k].0 as usize, cells[k].1 as usize),
-        );
-        // Scalar diagonal positions inside the diagonal tiles (damping
-        // and extract_diagonal read/write through these).
-        self.bdiag_pos.clear();
-        self.bdiag_pos.resize(n, usize::MAX);
-        for b in 0..nblk {
-            let w = partition[b + 1] - partition[b];
-            let diag = hsym
-                .col_range(b)
-                .find(|&x| hsym.blk_row(x) == b)
-                .unwrap_or_else(|| panic!("parameter block {} has no diagonal Hessian tile", b));
-            let base = hsym.val_range(diag).start;
-            for k in 0..w {
-                self.bdiag_pos[partition[b] + k] = base + k * (w + 1);
-            }
-        }
 
         // Which blocks to marginalize. An explicit hint is one candidate,
         // trusted; otherwise the model's coupling graph supplies the legal
@@ -2522,21 +2533,16 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 .collect()
         };
         // Where the blocks come from, in order of authority: an explicit
-        // with_eliminate_first on this solver, then the model's own
-        // eliminate_first(..) keyword, then -- if the model named nothing --
-        // the coupling graph's candidates. Nobody has to carry the model's
-        // hint into the solver: the solver asks the model for it.
-        let hint = if self.eliminate_first.is_empty() {
-            problem.elimination_hint()
-        } else {
-            self.eliminate_first.clone()
-        };
+        // with_marginalize on this solver, then the model's own
+        // marginalize(..) keyword, then -- if the model named nothing -- the
+        // coupling graph's candidates.
+        let hint = self.named_marginalize();
         let hinted = !hint.is_empty();
         let candidates: Vec<Vec<usize>> = if hinted {
             vec![blocks_in(&hint)]
         } else {
             problem
-                .elimination_candidates()
+                .marginalize_candidates()
                 .iter()
                 .map(|ranges| blocks_in(ranges))
                 .collect()
@@ -2550,20 +2556,18 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             .max_by_key(|ids| params_of(ids))
             .unwrap_or_default();
 
-        if eliminated.is_empty() {
-            assert!(
-                !matches!(self.policy, SchurPolicy::Force),
-                "SparseFaerSchur: nothing to marginalize. The model exposes no \
-                 eliminable blocks (every entity type couples to itself or to \
-                 another candidate) and no hint was given, but the policy is \
-                 Force. Supply with_eliminate_first(..) or use SchurPolicy::Auto."
-            );
-        }
+        assert!(
+            !eliminated.is_empty() || !matches!(self.policy, SchurPolicy::Force),
+            "SparseFaer: nothing to marginalize. The model exposes no \
+             marginalizable blocks (every entity type couples to itself or to \
+             another candidate) and none were named, but the policy is Force. \
+             Supply with_marginalize(..) or use SchurPolicy::Auto."
+        );
         let t_block = lap(vb);
-        if vb {
+        if vb && !eliminated.is_empty() {
             let elim_params: usize =
                 eliminated.iter().map(|&b| partition[b + 1] - partition[b]).sum();
-            let source = if hinted { "hinted" } else { "detected" };
+            let source = if hinted { "named" } else { "detected" };
             info!(
                 "schur: {} {} marginalizable blocks ({} of {} parameters)",
                 source,
@@ -2572,12 +2576,68 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 n,
             );
         }
+
+        // Nothing to marginalize, or told not to: the whole system, and not
+        // one byte of the block machinery. This is the route a pose graph or
+        // a localization problem takes, and it must cost them nothing.
+        if eliminated.is_empty() || matches!(self.policy, SchurPolicy::Never) {
+            if vb {
+                info!(
+                    "schur: not reducing -- {}",
+                    if eliminated.is_empty() {
+                        "the model has no marginalizable blocks"
+                    } else {
+                        "SchurPolicy::Never"
+                    },
+                );
+            }
+            self.plan = Some(SchurPlan {
+                reduced: false,
+                eliminated_blocks: 0,
+                eliminated_params: 0,
+                kept_params: n,
+                fill_ratio: None,
+                flop_ratio: None,
+            });
+            return self.setup_full(
+                problem, params, grad, matrix, n, Some((&partition, &cells)), None, vb,
+            );
+        }
+
+        // The block Hessian, and the scalar diagonal positions inside its
+        // diagonal tiles (damping and extract_diagonal read and write
+        // through those). Only the reducing route needs either.
+        let (hsym, _) = arael_faer::bsc::SymbolicSparseBlockColMat::from_scalar_coords(
+            partition.clone(),
+            partition.clone(),
+            cells.len(),
+            |k| (cells[k].0 as usize, cells[k].1 as usize),
+        );
+        self.bdiag_pos.clear();
+        self.bdiag_pos.resize(n, usize::MAX);
+        for b in 0..nblk {
+            let w = partition[b + 1] - partition[b];
+            let diag = hsym
+                .col_range(b)
+                .find(|&x| hsym.blk_row(x) == b)
+                .unwrap_or_else(|| panic!("parameter block {} has no diagonal Hessian tile", b));
+            let base = hsym.val_range(diag).start;
+            for k in 0..w {
+                self.bdiag_pos[partition[b] + k] = base + k * (w + 1);
+            }
+        }
+
         let schur = match arael_faer::schur::schur_symbolic(&hsym, &eliminated) {
             Ok(s) => s,
             Err(e) => panic!(
-                "Schur elimination rejected ({:?}): the marginalized blocks must be \
-                 mutually uncoupled and each needs a diagonal Hessian tile",
-                e
+                "cannot marginalize the {} blocks {} ({:?}): they must be mutually \
+                 uncoupled -- no constraint may join two of them -- and each needs a \
+                 diagonal Hessian tile. To order these parameters first in the \
+                 factorization WITHOUT marginalizing them (which has no such \
+                 requirement), use .with_policy(SchurPolicy::Never).",
+                eliminated.len(),
+                if hinted { "you named" } else { "detected" },
+                e,
             ),
         };
 
@@ -2719,20 +2779,15 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             flop_ratio,
         });
 
-        let (col_ptr, row_idx) = match declined_pat {
-            Some(p) => p,
-            None => schur.s.csc_pattern(),
-        };
-        self.s_col_ptr = col_ptr;
-        self.s_row_idx = row_idx;
-        let nk = if reduced { schur.s.nrows() } else { n };
-
-        // A DECLINED reduction has nothing to marginalize, so the block
-        // layout buys nothing: assemble the Hessian straight into the scalar
-        // CSC and factorize that -- byte for byte what SparseFaer does, with
-        // no block storage, no S, no reduce, no back-substitution. The
-        // symbolic factorization is the one the gate already paid for.
+        // A DECLINED reduction marginalizes nothing, so the block layout
+        // buys nothing: the whole system goes down the plain scalar route,
+        // reusing the pattern and the symbolic factorization the comparison
+        // already paid for.
         if !reduced {
+            let prebuilt = match (declined_pat, declined_llt) {
+                (Some(pat), Some(llt)) => Some((pat, llt)),
+                _ => None,
+            };
             // Release the block machinery first. It is all dead now -- the
             // block symbolic and the reduction's structure, including its
             // observer-pair targets -- and holding it while the scalar CSC
@@ -2740,37 +2795,11 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             // both large) only makes that build fight for memory.
             drop(schur);
             drop(hsym);
-            self.s = None;
-            self.schur = None;
-            self.s_vals = Vec::new();
-            self.bdiag_pos = Vec::new();
-
-            let (csc, mut resolver) = csc_from_cells::<T>(&partition, &cells);
-            let mut scalar_positions = std::vec::Vec::new();
-            problem.accumulate_hessian_positions(
-                &mut |i, j| resolver.resolve(i, j),
-                &mut scalar_positions,
+            let cost = self.setup_full(
+                problem, params, grad, matrix, n, Some((&partition, &cells)), prebuilt, vb,
             );
-            let llt_symbolic = declined_llt.unwrap_or_else(|| {
-                use faer::sparse::linalg::cholesky::*;
-                let sym_ref = faer::sparse::SymbolicSparseColMatRef::new_checked(
-                    n, n, &self.s_col_ptr, None, &self.s_row_idx,
-                );
-                factorize_symbolic_cholesky(
-                    sym_ref,
-                    faer::Side::Upper,
-                    SymmetricOrdering::Amd,
-                    CholeskySymbolicParams::default(),
-                )
-                .expect("symbolic factorization of the full system failed")
-            });
             if vb {
                 let rest = lap(true);
-                info!(
-                    "schur: whole system {} params, its factor holds {} values",
-                    n,
-                    llt_symbolic.len_val(),
-                );
                 info!(
                     "schur: setup {:.1} ms = finding the blocks {:.1} + finding the \
                      reduction {:.1} (thrown away with it) + weighing it {:.1}{} + CSC \
@@ -2783,20 +2812,13 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                     rest,
                 );
             }
-            self.size_llt_buffers(&llt_symbolic);
-            self.llt_symbolic = Some(llt_symbolic);
-            self.rhs_kept = Vec::new();
-            self.x_kept = Vec::new();
-
-            matrix.h = None;
-            matrix.csc = Some(csc);
-            let csc = matrix.csc.as_mut().unwrap();
-            let cost = problem.calc_grad_hessian_sparse_indexed(
-                params, grad, &mut csc.vals, &scalar_positions,
-            );
-            self.positions = Some(scalar_positions);
             return cost;
         }
+
+        let (col_ptr, row_idx) = schur.s.csc_pattern();
+        self.s_col_ptr = col_ptr;
+        self.s_row_idx = row_idx;
+        let nk = schur.s.nrows();
 
         // Reduced route: the block position map (scatter targets into the
         // block Hessian) is built here, now that the reduction is going ahead.
@@ -2866,7 +2888,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         cost
     }
 
-    fn extract_diagonal(&self, matrix: &SchurBlockMatrix<T>, diagonal: &mut [T]) {
+    fn extract_diagonal(&self, matrix: &FaerMatrix<T>, diagonal: &mut [T]) {
         if let Some(csc) = matrix.csc.as_ref() {
             for (i, d) in diagonal.iter_mut().enumerate() {
                 *d = csc.vals[csc.diag_pos[i]];
@@ -2879,7 +2901,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         }
     }
 
-    fn solve_damped(&mut self, n: usize, matrix: &mut SchurBlockMatrix<T>, diagonal: &[T], lambda: T, grad: &[T], delta: &mut [T]) -> bool {
+    fn solve_damped(&mut self, n: usize, matrix: &mut FaerMatrix<T>, diagonal: &[T], lambda: T, grad: &[T], delta: &mut [T]) -> bool {
         let damped = T::one() + lambda;
 
         // Declined reduction: the Hessian is already the scalar CSC we
@@ -2961,11 +2983,10 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
     }
 }
 
-/// Solve with the Schur-complement faer backend (f64); the eliminated
-/// ranges come from the model's elimination hint, wired by
-/// [`LmProblem::solve_sparse_schur`].
-pub fn solve_sparse_faer_schur(x0: &[f64], problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> LmResult<f64> {
-    lm_solve(x0, &mut SparseFaerSchur::new(), problem, config)
+/// Solve with the faer sparse backend (f64). Marginalizes what the model
+/// offers when that pays -- see [`SparseFaer`].
+pub fn solve_sparse_faer(x0: &[f64], problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> LmResult<f64> {
+    lm_solve(x0, &mut SparseFaer::new(), problem, config)
 }
 
 /// Solve with faer sparse Cholesky backend (f32).

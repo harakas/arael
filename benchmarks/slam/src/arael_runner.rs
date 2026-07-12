@@ -450,18 +450,25 @@ fn solve64(params: &[f64], path: &mut Path, cfg: &arael::simple_lm::LmConfig<f64
             panic!("SLAM_ARAEL_SOLVER=cholmod_gpl requires building with --features cholmod-gpl");
         }
         Ok("faer") => {
-            // Plain sparse faer. The model's eliminate_first(landmarks) is
-            // picked up by the solver itself -- landmarks ordered first in
-            // the full-system factorization.
-            arael::simple_lm::solve_sparse_faer(params, path, cfg)
-        }
-        _ => {
-            // Default: Schur-complement backend -- landmarks marginalized
-            // every damped solve, only the reduced pose system factorized.
-            // Again the model's hint needs no carrying over.
+            // Plain sparse faer: the whole system, factorized as one. The
+            // policy is what pins it there -- left to itself the backend
+            // would find the landmarks and marginalize them, which is the
+            // other row.
             arael::simple_lm::lm_solve(
                 params,
-                &mut arael::simple_lm::SparseFaerSchur::new(),
+                &mut arael::simple_lm::SparseFaer::new()
+                    .with_policy(arael::simple_lm::SchurPolicy::Never),
+                path,
+                cfg,
+            )
+        }
+        _ => {
+            // Default: the backend decides for itself. It finds the
+            // landmarks in the model's coupling graph and marginalizes them,
+            // factorizing only the reduced pose system.
+            arael::simple_lm::lm_solve(
+                params,
+                &mut arael::simple_lm::SparseFaer::new(),
                 path,
                 cfg,
             )
@@ -579,10 +586,15 @@ fn solve32(params: &[f32], path: &mut PathF, cfg: &arael::simple_lm::LmConfig<f3
     -> arael::simple_lm::LmResult<f32> {
     if std::env::var("SLAM_ARAEL_SOLVER").as_deref() == Ok("faer") {
         return arael::simple_lm::lm_solve(
-            params, &mut arael::simple_lm::SparseFaerF32::new(), path, cfg);
+            params,
+            &mut arael::simple_lm::SparseFaerF32::new()
+                .with_policy(arael::simple_lm::SchurPolicy::Never),
+            path,
+            cfg,
+        );
     }
     arael::simple_lm::lm_solve(
-        params, &mut arael::simple_lm::SparseFaerSchurF32::new(), path, cfg)
+        params, &mut arael::simple_lm::SparseFaerF32::new(), path, cfg)
 }
 
 // Capped single solve (no timing) -- used for peak-memory measurement.

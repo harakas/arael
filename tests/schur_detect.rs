@@ -11,7 +11,7 @@
 
 use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::refs::{self, Ref};
-use arael::simple_lm::{LmConfig, LmProblem, RootProblem, SchurPolicy, SparseFaerSchur};
+use arael::simple_lm::{LmConfig, LmProblem, RootProblem, SchurPolicy, SparseFaer};
 
 // 2-parameter pose
 #[arael::model]
@@ -208,7 +208,7 @@ fn build() -> World {
 #[test]
 fn detects_both_landmark_types() {
     let w = build();
-    let candidates = LmProblem::elimination_candidates(&w);
+    let candidates = LmProblem::marginalize_candidates(&w);
     assert_eq!(candidates.len(), 1, "expected one maximal candidate set, got {:?}", candidates);
 
     // serialize order: poses_a | points | poses_b | lines
@@ -237,7 +237,7 @@ fn auto_schur_matches_dense() {
     let mut wq = build();
     let mut params = Vec::new();
     RootProblem::serialize(&mut wq, &mut params);
-    let mut solver = SparseFaerSchur::new(); // no hint, no policy
+    let mut solver = SparseFaer::new(); // no hint, no policy
     let rq = wq.solve_with(&mut solver, &cfg);
 
     let plan = solver.plan().expect("the first compute must record a plan");
@@ -280,7 +280,7 @@ fn forced_schur_matches_dense() {
     let mut wq = build();
     let mut params = Vec::new();
     RootProblem::serialize(&mut wq, &mut params);
-    let mut solver = SparseFaerSchur::new().with_policy(SchurPolicy::Force);
+    let mut solver = SparseFaer::new().with_policy(SchurPolicy::Force);
     let rq = wq.solve_with(&mut solver, &cfg);
 
     let plan = solver.plan().unwrap();
@@ -303,7 +303,7 @@ fn declined_schur_falls_back_to_full_system() {
     let mut params = Vec::new();
     RootProblem::serialize(&mut wq, &mut params);
     let mut solver =
-        SparseFaerSchur::new().with_policy(SchurPolicy::Auto {
+        SparseFaer::new().with_policy(SchurPolicy::Auto {
             fill_ratio_max: 0.0,
             obvious_flop_ratio: 0.0, // never short-circuit: force the comparison
         });
@@ -331,10 +331,10 @@ fn solve_reports_what_the_backend_did() {
     let cfg = LmConfig { max_iters: 60, ..Default::default() };
 
     let mut w = build();
-    let r = w.solve_sparse_schur(&cfg); // constructs and drops its own solver
+    let r = w.solve_sparse(&cfg); // constructs and drops its own solver
 
     let Some(SolverReport::Schur(plan)) = r.solver else {
-        panic!("solve_sparse_schur must report what it did, got {:?}", r.solver);
+        panic!("solve_sparse must report what it did, got {:?}", r.solver);
     };
     assert!(plan.reduced);
     assert_eq!(plan.eliminated_blocks, N_POINTS + N_LINES);

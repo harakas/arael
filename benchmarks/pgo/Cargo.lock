@@ -24,6 +24,7 @@ dependencies = [
 name = "arael"
 version = "0.7.0"
 dependencies = [
+ "arael-faer",
  "arael-macros",
  "arael-sym",
  "faer 0.24.4",
@@ -35,6 +36,13 @@ dependencies = [
  "rand_distr",
  "serde",
  "web-time",
+]
+
+[[package]]
+name = "arael-faer"
+version = "0.7.0"
+dependencies = [
+ "faer 0.24.4",
 ]
 
 [[package]]
