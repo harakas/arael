@@ -19,15 +19,22 @@
 #             [(label, ms_per_iter, kind)])
 # kind: "arael" solid blue bar, "other" neutral bar.
 PANELS = [
-    ("Landmark SLAM -- 300 poses, 5.4k params (Apple M4 Pro)", 200.0, 50.0, 1, [
-        ("arael (f32)", 36.07, "arael"),
-        ("arael (f64)", 50.51, "arael"),
-        ("g2o (LM)", 78.66, "other"),
-        ("Ceres (LM)", 102.70, "other"),
-        ("SymForce (f64)", 121.84, "other"),
-        ("factrs (LM)", 158.67, "other"),
-        ("GTSAM (LM)", 176.27, "other"),
+    # full-iter: one complete iteration, t(2 iters) - t(1 iter), so the one-time
+    # setup cancels (2026-07-13, min of 32 rounds). Best validated configuration
+    # per system: Ceres is sparse_schur (iterative_schur is inexact and misses
+    # the gate), SymForce is f64 (its f32 falls short at this size).
+    ("Landmark SLAM -- 300 poses, 5.4k params (Apple M4 Pro)", 170.0, 50.0, 1, [
+        ("arael (f32)", 32.23, "arael"),
+        ("arael (f64)", 44.96, "arael"),
+        ("g2o (LM)", 61.28, "other"),
+        ("Ceres (LM)", 82.89, "other"),
+        ("SymForce (f64)", 135.08, "other"),
+        ("factrs (LM)", 144.76, "other"),
+        ("GTSAM (LM)", 160.41, "other"),
     ]),
+    # STALE: still ms/iter from the pre-harness runs. loc is not on the shared
+    # harness yet, so this panel does not measure the same thing the one above
+    # does. Re-run on the Pi once loc is migrated, then update.
     ("Localization -- 60 poses, 360 params (Raspberry Pi 5)", 20.0, 5.0, 2, [
         ("arael (f32)", 1.03, "arael"),
         ("arael (f64)", 1.09, "arael"),
