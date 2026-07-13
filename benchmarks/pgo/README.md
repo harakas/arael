@@ -309,7 +309,7 @@ carries the settings that produced it):
 | `PGO_ONLY` | run only datasets whose name contains this substring (case-sensitive) |
 | `GTSAM_PYTHON` | python with GTSAM; `sudo apt install python3-gtsam` and point it at `/usr/bin/python3` |
 | `RUN_TINY` | include tiny-solver (off by default: an order of magnitude slower than the field) |
-| `SKIP_ISAM` | drop the GTSAM ISAM2 row (incremental, not comparable to the batch rows) |
+| `RUN_ISAM` | include the GTSAM ISAM2 row (off by default: incremental, so not comparable to the batch rows) |
 | `VERBOSE` | arael's per-iteration solver trace |
 | `TIMING` | arael's per-solve breakdown (assembly / linear solve) |
 | `ARAEL_LAMBDA0`, `CERES_RADIUS0`, `G2O_LAMBDA_INIT`, `TINY_RADIUS0`, `GTSAM_LAMBDA0`, `SYMFORCE_LAMBDA0` | initial damping, per system |

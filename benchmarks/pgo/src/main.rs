@@ -389,10 +389,11 @@ fn skip_tiny() -> bool {
     std::env::var("RUN_TINY").is_err()
 }
 
-/// SKIP_ISAM=1 drops the GTSAM ISAM2 row: it is slow, and it answers the
-/// incremental question rather than the batch one this benchmark asks.
+/// GTSAM's ISAM2 is off by default (RUN_ISAM=1 brings it back). It answers the
+/// incremental question -- one update per pose -- rather than the batch one this
+/// benchmark asks, so its row is not comparable to the others, and it is slow.
 fn skip_isam() -> bool {
-    std::env::var("SKIP_ISAM").is_ok()
+    std::env::var("RUN_ISAM").is_err()
 }
 
 // The run's configuration, printed at startup so a pasted result carries the
@@ -410,7 +411,7 @@ fn print_header(rounds: usize, only: &Option<String>) {
     println!("datasets          : {} [PGO_ONLY]",
         only.as_deref().unwrap_or("all"));
     let on_off = |skipped: bool| if skipped { "skipped" } else { "run" };
-    println!("optional systems  : tiny-solver {} [RUN_TINY], isam {} [SKIP_ISAM]",
+    println!("optional systems  : tiny-solver {} [RUN_TINY], isam {} [RUN_ISAM]",
         on_off(skip_tiny()), on_off(skip_isam()));
     println!("arael lambda0     : {:e} (2D), {:e} (3D) [ARAEL_LAMBDA0]",
         arael_pipeline::lambda0::<arael_runner::Graph>(),
