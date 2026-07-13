@@ -12,6 +12,8 @@
 // initial damping (default 1e-10 per the README's initial-damping
 // policy; SymForce ships 1.0).
 
+#include <algorithm>
+#include <type_traits>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -29,6 +31,9 @@
 
 #include "symforce_gen/between_factor.h"
 #include "symforce_gen/prior_factor.h"
+
+// Kept in step with src/probe.rs.
+static const int PROBE_SUBROUNDS = 2;
 
 struct PoseIn {
     double x, y, th;
@@ -113,6 +118,13 @@ RunResult solve(const std::vector<PoseIn>& poses, const std::vector<EdgeIn>& edg
         params.initial_lambda = atof(l);
     }
 
+    // The linear system is solved in Scalar too: SymForce's Optimizer defaults
+    // to LevenbergMarquardtSolver<Scalar>, whose solver is
+    // SparseCholeskySolver<Eigen::SparseMatrix<Scalar>>. An f32 run is single
+    // precision end to end -- residuals, Hessian and Cholesky alike.
+    static_assert(
+        std::is_same<typename sym::Optimizer<Scalar>::MatrixType::Scalar, Scalar>::value,
+        "SymForce optimizer must factorize in the same precision it linearizes in");
     sym::Optimizer<Scalar> optimizer(params, std::move(factors));
     auto t0 = std::chrono::steady_clock::now();
     auto stats = optimizer.Optimize(values);
@@ -130,7 +142,10 @@ RunResult solve(const std::vector<PoseIn>& poses, const std::vector<EdgeIn>& edg
                                (double)p.Rotation().ToAngle(sym::kDefaultEpsilon<Scalar>)};
         }
     }
-    return RunResult{ms, accepted, (int)stats.iterations.size()};
+    // SymForce records the initial error state as an entry with iteration = -1,
+    // before any step is taken. It is not an attempt; discount it so accepted
+    // and total mean the same here as in every other runner.
+    return RunResult{ms, accepted, std::max(0, (int)stats.iterations.size() - 1)};
 }
 
 template <typename Scalar>
@@ -139,7 +154,21 @@ void run(const char* g2o, const char* poses_out, bool unit) {
     std::vector<EdgeIn> edges;
     parse_g2o(g2o, unit, poses, edges);
 
+    // The first solve in a process pays cold allocator and cache costs the
+    // later ones do not; discard it so the one- and two-iteration probes are
+    // timed on equal footing.
+    (void)solve<Scalar>(poses, edges, 1, nullptr);
+    // Sub-rounds: a complete iteration is read off as t(2 iters) - t(1 iter),
+    // and differencing two noisy measurements amplifies the noise, so each
+    // probe is the fastest of PROBE_SUBROUNDS runs of itself.
     RunResult first = solve<Scalar>(poses, edges, 1, nullptr);
+    RunResult two = solve<Scalar>(poses, edges, 2, nullptr);
+    for (int i = 1; i < PROBE_SUBROUNDS; ++i) {
+        RunResult f = solve<Scalar>(poses, edges, 1, nullptr);
+        if (f.ms < first.ms) first = f;
+        RunResult t = solve<Scalar>(poses, edges, 2, nullptr);
+        if (t.ms < two.ms) two = t;
+    }
     std::vector<PoseIn> result;
     RunResult full = solve<Scalar>(poses, edges, 100, &result);
 
@@ -155,8 +184,8 @@ void run(const char* g2o, const char* poses_out, bool unit) {
             cpus = l.substr(l.find_last_of(" \t") + 1);
         }
     }
-    printf("{\"solve_ms\": %.3f, \"first_iter_ms\": %.3f, \"iterations\": %d, \"accepted\": %d, \"cpus_allowed\": \"%s\"}\n",
-           full.ms, first.ms, full.total, full.accepted, cpus.c_str());
+    printf("{\"solve_ms\": %.3f, \"first_iter_ms\": %.3f, \"second_run_ms\": %.3f, \"second_accepted\": %d, \"first_attempts\": %d, \"first_accepted\": %d, \"iterations\": %d, \"accepted\": %d, \"cpus_allowed\": \"%s\"}\n",
+           full.ms, first.ms, two.ms, two.accepted, first.total, first.accepted, full.total, full.accepted, cpus.c_str());
 }
 
 int main(int argc, char** argv) {

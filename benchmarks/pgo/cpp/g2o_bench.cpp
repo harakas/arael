@@ -22,6 +22,9 @@
 #include <string>
 #include <vector>
 
+// Kept in step with src/probe.rs.
+static const int PROBE_SUBROUNDS = 2;
+
 struct PoseIn {
     double x, y, th;
 };
@@ -56,7 +59,23 @@ static void parse_g2o(const char* path, bool unit, std::vector<PoseIn>& poses, s
 
 struct RunResult {
     double ms;
-    int iterations;
+    int iterations;   // accepted outer iterations
+    int attempts;     // accepted + damping retries
+};
+
+// g2o keeps its damping retries inside OptimizationAlgorithmLevenberg::solve()
+// and reports the count only for the round just finished (levenbergIteration()
+// is reset every round), so summing them from a post-iteration action is the
+// one way to see the attempts from outside. Gauss-Newton has no retry loop, so
+// there attempts always equal iterations.
+struct TrialCounter : public g2o::HyperGraphAction {
+    g2o::OptimizationAlgorithmLevenberg* lev = nullptr;
+    int trials = 0;
+    g2o::HyperGraphAction* operator()(const g2o::HyperGraph*,
+                                      Parameters* = 0) override {
+        if (lev) trials += lev->levenbergIteration();
+        return this;
+    }
 };
 
 static RunResult solve(const std::vector<PoseIn>& poses, const std::vector<EdgeIn>& edges,
@@ -65,6 +84,7 @@ static RunResult solve(const std::vector<PoseIn>& poses, const std::vector<EdgeI
     auto linear = std::make_unique<g2o::LinearSolverCholmod<BlockSolver::PoseMatrixType>>();
     auto block = std::make_unique<BlockSolver>(std::move(linear));
     g2o::OptimizationAlgorithm* algo;
+    auto* counter = new TrialCounter();
     if (lm) {
         auto* lev = new g2o::OptimizationAlgorithmLevenberg(std::move(block));
         // Problem-appropriate initial lambda (g2o's auto heuristic,
@@ -75,6 +95,7 @@ static RunResult solve(const std::vector<PoseIn>& poses, const std::vector<EdgeI
         if (const char* li = getenv("G2O_LAMBDA_INIT")) lambda0 = atof(li);
         lev->setUserLambdaInit(lambda0);
         algo = lev;
+        counter->lev = lev;
     } else {
         algo = new g2o::OptimizationAlgorithmGaussNewton(std::move(block));
     }
@@ -120,6 +141,7 @@ static RunResult solve(const std::vector<PoseIn>& poses, const std::vector<EdgeI
     terminate->setGainThreshold(gain);
     terminate->setMaxIterations(max_iters);
     opt.addPostIterationAction(terminate);
+    opt.addPostIterationAction(counter);
 
     auto t0 = std::chrono::steady_clock::now();
     opt.initializeOptimization();
@@ -134,7 +156,7 @@ static RunResult solve(const std::vector<PoseIn>& poses, const std::vector<EdgeI
                                v->estimate().rotation().angle()};
         }
     }
-    return RunResult{ms, iters};
+    return RunResult{ms, iters, lm ? counter->trials : iters};
 }
 
 int main(int argc, char** argv) {
@@ -145,7 +167,21 @@ int main(int argc, char** argv) {
     std::vector<EdgeIn> edges;
     parse_g2o(argv[1], unit, poses, edges);
 
+    // The first solve in a process pays cold allocator and cache costs the
+    // later ones do not; discard it so the one- and two-iteration probes are
+    // timed on equal footing.
+    (void)solve(poses, edges, lm, 1, nullptr);
+    // Sub-rounds: a complete iteration is read off as t(2 iters) - t(1 iter),
+    // and differencing two noisy measurements amplifies the noise, so each
+    // probe is the fastest of PROBE_SUBROUNDS runs of itself.
     RunResult first = solve(poses, edges, lm, 1, nullptr);
+    RunResult two = solve(poses, edges, lm, 2, nullptr);
+    for (int i = 1; i < PROBE_SUBROUNDS; ++i) {
+        RunResult f = solve(poses, edges, lm, 1, nullptr);
+        if (f.ms < first.ms) first = f;
+        RunResult t = solve(poses, edges, lm, 2, nullptr);
+        if (t.ms < two.ms) two = t;
+    }
     std::vector<PoseIn> result;
     RunResult full = solve(poses, edges, lm, 100, &result);
 
@@ -162,7 +198,8 @@ int main(int argc, char** argv) {
             cpus = l.substr(l.find_last_of(" \t") + 1);
         }
     }
-    printf("{\"solve_ms\": %.3f, \"first_iter_ms\": %.3f, \"iterations\": %d, \"cpus_allowed\": \"%s\"}\n",
-           full.ms, first.ms, full.iterations, cpus.c_str());
+    printf("{\"solve_ms\": %.3f, \"first_iter_ms\": %.3f, \"second_run_ms\": %.3f, \"second_accepted\": %d, "
+           "\"iterations\": %d, \"accepted\": %d, \"first_attempts\": %d, \"cpus_allowed\": \"%s\"}\n",
+           full.ms, first.ms, two.ms, two.iterations, full.attempts, full.iterations, first.attempts, cpus.c_str());
     return 0;
 }

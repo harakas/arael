@@ -24,6 +24,51 @@ import time
 import gtsam
 
 
+# Kept in step with src/probe.rs.
+PROBE_SUBROUNDS = 2
+
+
+def probe(make_opt, max_iterations):
+    """Fastest of PROBE_SUBROUNDS runs of a capped solve, plus its iteration
+    count. A discarded warmup runs first: the first solve in a process pays
+    cold allocator and cache costs the later ones do not, and timing the one-
+    and two-iteration probes as they come would charge that cost to the
+    one-iteration probe alone and inflate the difference between them -- which
+    is exactly the complete iteration the harness reads off as t(2) - t(1)."""
+    make_opt(max_iterations).optimize()  # warmup, discarded
+    best = float("inf")
+    iterations = 0
+    for _ in range(PROBE_SUBROUNDS):
+        opt = make_opt(max_iterations)
+        t0 = time.perf_counter()
+        opt.optimize()
+        best = min(best, (time.perf_counter() - t0) * 1e3)
+        iterations = opt.iterations()
+    return best, iterations
+
+
+def protocol(solve_ms, first_iter_ms, iterations, two_ms, two_iterations):
+    """The benchmark's stdout protocol line. GTSAM counts an LM iteration only
+    once a step is accepted (its lambda retries live inside iterate()), so
+    two_iterations >= 2 means the second step really was accepted and the
+    difference is a complete iteration rather than a retry."""
+    cpus = "?"
+    with open("/proc/self/status") as f:
+        for line in f:
+            if line.startswith("Cpus_allowed_list"):
+                cpus = line.split()[1]
+    out = {
+        "solve_ms": solve_ms,
+        "first_iter_ms": first_iter_ms,
+        "iterations": iterations,
+        "cpus_allowed": cpus,
+    }
+    if two_iterations >= 2:
+        out["second_run_ms"] = two_ms
+        out["second_accepted"] = two_iterations
+    return json.dumps(out)
+
+
 def make_optimizer(kind, graph, initial, max_iterations):
     if kind == "lm":
         params = gtsam.LevenbergMarquardtParams()
@@ -137,10 +182,9 @@ def run_3d(g2o_file, kind, poses_out):
     prior = gtsam.noiseModel.Diagonal.Sigmas([1.0] * 6)
     graph.add(gtsam.PriorFactorPose3(0, initial.atPose3(0), prior))
 
-    opt = make_optimizer(kind, graph, initial, 1)
-    t0 = time.perf_counter()
-    opt.optimize()
-    first_iter_ms = (time.perf_counter() - t0) * 1e3
+    make_opt = lambda n: make_optimizer(kind, graph, initial, n)
+    first_iter_ms, _ = probe(make_opt, 1)
+    two_ms, two_iterations = probe(make_opt, 2)
 
     opt = make_optimizer(kind, graph, initial, 100)
     t0 = time.perf_counter()
@@ -155,17 +199,7 @@ def run_3d(g2o_file, kind, poses_out):
             q = p.rotation().toQuaternion()
             f.write(f"{t[0]} {t[1]} {t[2]} {q.x()} {q.y()} {q.z()} {q.w()}\n")
 
-    cpus = "?"
-    with open("/proc/self/status") as f:
-        for line in f:
-            if line.startswith("Cpus_allowed_list"):
-                cpus = line.split()[1]
-    print(json.dumps({
-        "solve_ms": solve_ms,
-        "first_iter_ms": first_iter_ms,
-        "iterations": iterations,
-        "cpus_allowed": cpus,
-    }))
+    print(protocol(solve_ms, first_iter_ms, iterations, two_ms, two_iterations))
 
 
 def readg2o_unit_2d(g2o_file):
@@ -219,10 +253,9 @@ def main():
     prior = gtsam.noiseModel.Diagonal.Sigmas([1.0, 1.0, 1.0])
     graph.add(gtsam.PriorFactorPose2(0, initial.atPose2(0), prior))
 
-    opt = make_optimizer(kind, graph, initial, 1)
-    t0 = time.perf_counter()
-    opt.optimize()
-    first_iter_ms = (time.perf_counter() - t0) * 1e3
+    make_opt = lambda n: make_optimizer(kind, graph, initial, n)
+    first_iter_ms, _ = probe(make_opt, 1)
+    two_ms, two_iterations = probe(make_opt, 2)
 
     opt = make_optimizer(kind, graph, initial, 100)
     t0 = time.perf_counter()
@@ -235,17 +268,7 @@ def main():
             p = result.atPose2(i)
             f.write(f"{p.x()} {p.y()} {p.theta()}\n")
 
-    cpus = "?"
-    with open("/proc/self/status") as f:
-        for line in f:
-            if line.startswith("Cpus_allowed_list"):
-                cpus = line.split()[1]
-    print(json.dumps({
-        "solve_ms": solve_ms,
-        "first_iter_ms": first_iter_ms,
-        "iterations": iterations,
-        "cpus_allowed": cpus,
-    }))
+    print(protocol(solve_ms, first_iter_ms, iterations, two_ms, two_iterations))
 
 
 if __name__ == "__main__":

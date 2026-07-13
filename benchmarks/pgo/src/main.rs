@@ -11,6 +11,8 @@
 
 mod arael_runner;
 mod arael_runner3;
+mod factrs_counting;
+mod probe;
 mod factrs_runner;
 mod factrs_runner3;
 mod g2o;
@@ -27,6 +29,9 @@ struct Cell {
     // Accepted steps, for systems that report it (arael). Displayed as
     // "accepted(total)"; total includes damping retries.
     accepted: Option<usize>,
+    /// One complete iteration, measured as t(2 iters) - t(1 iter). `None` when
+    /// the system does not report it, or when its second step was rejected.
+    full_ms: Option<f64>,
     poses: Vec<PoseIn>,
     cost: f64,
 }
@@ -45,26 +50,44 @@ fn gtsam_available() -> Option<String> {
 // line {solve_ms, first_iter_ms, iterations, accepted?, cpus_allowed}
 // on stdout, "x y theta" lines in poses_out. Asserts the subprocess
 // inherited the single-core pin.
-fn run_external(mut cmd: std::process::Command, poses_out: &str, n_poses: usize) -> (f64, f64, usize, Option<usize>, Vec<PoseIn>) {
+fn run_external(mut cmd: std::process::Command, poses_out: &str, n_poses: usize) -> (f64, f64, usize, Option<usize>, Option<f64>, Vec<PoseIn>) {
     let out = cmd.output().unwrap_or_else(|e| panic!("failed to run {:?}: {}", cmd, e));
     assert!(out.status.success(), "{:?} failed: {}", cmd, String::from_utf8_lossy(&out.stderr));
     let text = String::from_utf8(out.stdout).unwrap();
     let line = text.lines().rev().find(|l| l.contains("solve_ms"))
         .unwrap_or_else(|| panic!("no protocol line from {:?}", cmd));
-    let get = |key: &str| -> Option<f64> {
-        let i = line.find(key)?;
-        let rest = &line[i + key.len() + 2..];
-        rest.trim_start_matches(':').trim()
-            .split(|c: char| c == ',' || c == '}')
-            .next().unwrap().trim().parse().ok()
-    };
+    let json: serde_json::Value = serde_json::from_str(line)
+        .unwrap_or_else(|e| panic!("bad protocol line from {:?}: {} -- {}", cmd, e, line));
+    let get = |key: &str| -> Option<f64> { json.get(key)?.as_f64() };
     let solve_ms = get("solve_ms").expect("solve_ms");
     let first_iter_ms = get("first_iter_ms").expect("first_iter_ms");
-    let iterations = get("\"iterations\"").expect("iterations") as usize;
+    let iterations = get("iterations").expect("iterations") as usize;
     let accepted = get("accepted").map(|v| v as usize);
+    // A complete iteration, measured: t(2 iterations) - t(1 iteration), the
+    // setup cancelling out. Only meaningful if that second step was ACCEPTED --
+    // a rejected one only redoes the linear solve and is not an iteration.
+    // t(2 iterations), raw. One iteration is this minus first_iter_ms, but the
+    // minima over rounds have to be taken BEFORE the subtraction: differencing
+    // two noisy cold runs can come out negative.
+    // A first-iteration time is only meaningful if that iteration WAS one clean
+    // iteration: a single attempt, accepted. A runner that rejected a step in
+    // it (g2o at the wrong damping burned six trials there) reports a number
+    // that is mostly wasted factorizations, and every quantity derived from it
+    // -- full-iter above all, which is t(2) - t(1) -- inherits the lie. Runners
+    // that report the counts get held to them; the number is dropped otherwise.
+    let first_iter_clean = match (get("first_attempts"), get("first_accepted")) {
+        (Some(a), Some(ok)) => a as usize == 1 && ok as usize == 1,
+        _ => true, // runner does not report it; nothing to check against
+    };
+    let full_ms = match (get("second_run_ms"), get("second_accepted")) {
+        (Some(ms), Some(acc)) if acc as usize >= 2 && first_iter_clean => Some(ms),
+        _ => None,
+    };
+    // NaN travels through the min-of-rounds plumbing and prints as "-".
+    let first_iter_ms = if first_iter_clean { first_iter_ms } else { f64::NAN };
     // Active check: the subprocess must have inherited the pin.
     let core = std::env::var("PGO_BENCH_CORE").unwrap();
-    assert!(line.contains(&format!("\"cpus_allowed\": \"{}\"", core)),
+    assert!(json["cpus_allowed"].as_str() == Some(core.as_str()),
         "{:?} not pinned to CPU {}: {}", cmd, core, line);
     let poses: Vec<PoseIn> = std::fs::read_to_string(poses_out).unwrap()
         .lines()
@@ -74,10 +97,10 @@ fn run_external(mut cmd: std::process::Command, poses_out: &str, n_poses: usize)
         })
         .collect();
     assert_eq!(poses.len(), n_poses);
-    (solve_ms, first_iter_ms, iterations, accepted, poses)
+    (solve_ms, first_iter_ms, iterations, accepted, full_ms, poses)
 }
 
-fn run_gtsam(python: &str, ds_path: &str, kind: &str, weighted: bool, n_poses: usize) -> (f64, f64, usize, Option<usize>, Vec<PoseIn>) {
+fn run_gtsam(python: &str, ds_path: &str, kind: &str, weighted: bool, n_poses: usize) -> (f64, f64, usize, Option<usize>, Option<f64>, Vec<PoseIn>) {
     let poses_out = format!("/tmp/gtsam_poses_{}.txt", kind);
     let weights = if weighted { "info" } else { "unit" };
     let mut cmd = std::process::Command::new(python);
@@ -85,7 +108,7 @@ fn run_gtsam(python: &str, ds_path: &str, kind: &str, weighted: bool, n_poses: u
     run_external(cmd, &poses_out, n_poses)
 }
 
-fn run_ceres(ds_path: &str, weighted: bool, n_poses: usize) -> (f64, f64, usize, Option<usize>, Vec<PoseIn>) {
+fn run_ceres(ds_path: &str, weighted: bool, n_poses: usize) -> (f64, f64, usize, Option<usize>, Option<f64>, Vec<PoseIn>) {
     let mut cmd = std::process::Command::new("cpp/build/ceres_bench");
     cmd.args([ds_path, "/tmp/ceres_poses.txt", if weighted { "info" } else { "unit" }]);
     run_external(cmd, "/tmp/ceres_poses.txt", n_poses)
@@ -96,7 +119,7 @@ fn run_ceres(ds_path: &str, weighted: bool, n_poses: usize) -> (f64, f64, usize,
 // definiteness at 30000 parameters and its lambda floor of 1e-10 cannot
 // regularize it). A crashed run is a reportable outcome, not a harness
 // failure.
-fn run_factrs32(ds_path: &str, kind: &str, weighted: bool, n_poses: usize) -> Option<(f64, f64, usize, Option<usize>, Vec<PoseIn>)> {
+fn run_factrs32(ds_path: &str, kind: &str, weighted: bool, n_poses: usize) -> Option<(f64, f64, usize, Option<usize>, Option<f64>, Vec<PoseIn>)> {
     let poses_out = format!("/tmp/factrs32_poses_{}.txt", kind);
     let mut probe = std::process::Command::new("factrs32/target/release/factrs32-bench");
     probe.args([ds_path, kind, &poses_out, if weighted { "info" } else { "unit" }]);
@@ -109,14 +132,46 @@ fn run_factrs32(ds_path: &str, kind: &str, weighted: bool, n_poses: usize) -> Op
     Some(run_external(cmd, &poses_out, n_poses))
 }
 
-fn run_symforce(ds_path: &str, prec: &str, weighted: bool, n_poses: usize) -> (f64, f64, usize, Option<usize>, Vec<PoseIn>) {
+// Same for the SE3 datasets. The graph is the parent crate's SE3 runner
+// compiled against factrs's f32 dtype (see factrs32/src/main3.rs).
+fn run_factrs32_3d(ds_path: &str, kind: &str, n_poses: usize)
+    -> Option<(f64, f64, usize, Option<usize>, Option<f64>, Vec<g2o3::Pose3In>)> {
+    let poses_out = format!("/tmp/factrs32_3d_poses_{}.txt", kind);
+    let bin = "factrs32/target/release/factrs32-bench3";
+    let mut probe = std::process::Command::new(bin);
+    probe.args([ds_path, kind, &poses_out]);
+    if !probe.output().ok()?.status.success() {
+        return None;
+    }
+    Some(run_external3_checked(
+        std::process::Command::new(bin),
+        &[ds_path, kind, &poses_out], &poses_out, n_poses, None, &|_| {}))
+}
+
+// g2o's initial damping, per dataset. sphere2500 needs far more than the rest:
+// at 1e-12 its first Levenberg iteration burns six trials (five rejected, each
+// a full factorization) before it finds a step, and the solve keeps retrying all
+// the way down. At 1e-6 the first iteration is a single clean attempt and the
+// retries stop. On the other datasets 1e-6 is much too strong -- it triples
+// parking-garage's iteration count -- so they keep 1e-12.
+fn g2o_lambda(dataset: &str) -> &'static str {
+    if dataset.contains("sphere") { "1e-6" } else { "1e-12" }
+}
+
+// A measured millisecond value, or "-" when the harness could not measure it
+// cleanly (see first_iter_clean).
+fn fmt1(v: f64) -> String {
+    if v.is_finite() { format!("{:.1}", v) } else { "-".to_string() }
+}
+
+fn run_symforce(ds_path: &str, prec: &str, weighted: bool, n_poses: usize) -> (f64, f64, usize, Option<usize>, Option<f64>, Vec<PoseIn>) {
     let poses_out = format!("/tmp/symforce_poses_{}.txt", prec);
     let mut cmd = std::process::Command::new("cpp/build/symforce_bench");
     cmd.args([ds_path, prec, &poses_out, if weighted { "info" } else { "unit" }]);
     run_external(cmd, &poses_out, n_poses)
 }
 
-fn run_g2o(ds_path: &str, kind: &str, weighted: bool, n_poses: usize) -> (f64, f64, usize, Option<usize>, Vec<PoseIn>) {
+fn run_g2o(ds_path: &str, kind: &str, weighted: bool, n_poses: usize) -> (f64, f64, usize, Option<usize>, Option<f64>, Vec<PoseIn>) {
     let poses_out = format!("/tmp/g2o_poses_{}.txt", kind);
     let mut cmd = std::process::Command::new("cpp/build/g2o_bench");
     cmd.args([ds_path, kind, &poses_out, if weighted { "info" } else { "unit" }]);
@@ -162,29 +217,41 @@ fn enforce_single_core() {
 // cost function's value.
 fn run_external3_checked(mut cmd: std::process::Command, args: &[&str], poses_out: &str,
                          n_poses: usize, cost_key: Option<&str>, check: &dyn Fn(f64))
-    -> (f64, f64, usize, Option<usize>, Vec<g2o3::Pose3In>) {
+    -> (f64, f64, usize, Option<usize>, Option<f64>, Vec<g2o3::Pose3In>) {
     cmd.args(args);
     let out = cmd.output().unwrap_or_else(|e| panic!("failed to run {:?}: {}", cmd, e));
     assert!(out.status.success(), "{:?} failed: {}", cmd, String::from_utf8_lossy(&out.stderr));
     let text = String::from_utf8(out.stdout).unwrap();
     let line = text.lines().rev().find(|l| l.contains("solve_ms"))
         .unwrap_or_else(|| panic!("no protocol line from {:?}", cmd));
-    let get = |key: &str| -> Option<f64> {
-        let i = line.find(key)?;
-        let rest = &line[i + key.len() + 2..];
-        rest.trim_start_matches(':').trim()
-            .split(|c: char| c == ',' || c == '}')
-            .next().unwrap().trim().parse().ok()
-    };
+    let json: serde_json::Value = serde_json::from_str(line)
+        .unwrap_or_else(|e| panic!("bad protocol line from {:?}: {} -- {}", cmd, e, line));
+    let get = |key: &str| -> Option<f64> { json.get(key)?.as_f64() };
     let solve_ms = get("solve_ms").expect("solve_ms");
     let first_iter_ms = get("first_iter_ms").expect("first_iter_ms");
-    let iterations = get("\"iterations\"").expect("iterations") as usize;
-    let accepted = get("\"accepted\"").map(|v| v as usize);
+    let iterations = get("iterations").expect("iterations") as usize;
+    let accepted = get("accepted").map(|v| v as usize);
+    // A first-iteration time is only meaningful if that iteration WAS one clean
+    // iteration: a single attempt, accepted. A runner that rejected a step in
+    // it (g2o at the wrong damping burned six trials there) reports a number
+    // that is mostly wasted factorizations, and every quantity derived from it
+    // -- full-iter above all, which is t(2) - t(1) -- inherits the lie. Runners
+    // that report the counts get held to them; the number is dropped otherwise.
+    let first_iter_clean = match (get("first_attempts"), get("first_accepted")) {
+        (Some(a), Some(ok)) => a as usize == 1 && ok as usize == 1,
+        _ => true, // runner does not report it; nothing to check against
+    };
+    let full_ms = match (get("second_run_ms"), get("second_accepted")) {
+        (Some(ms), Some(acc)) if acc as usize >= 2 && first_iter_clean => Some(ms),
+        _ => None,
+    };
+    // NaN travels through the min-of-rounds plumbing and prints as "-".
+    let first_iter_ms = if first_iter_clean { first_iter_ms } else { f64::NAN };
     if let Some(key) = cost_key {
         check(get(key).unwrap_or_else(|| panic!("missing {} from {:?}", key, cmd)));
     }
     let core = std::env::var("PGO_BENCH_CORE").unwrap();
-    assert!(line.contains(&format!("\"cpus_allowed\": \"{}\"", core)),
+    assert!(json["cpus_allowed"].as_str() == Some(core.as_str()),
         "{:?} not pinned to CPU {}: {}", cmd, core, line);
     let poses: Vec<g2o3::Pose3In> = std::fs::read_to_string(poses_out).unwrap()
         .lines()
@@ -197,7 +264,7 @@ fn run_external3_checked(mut cmd: std::process::Command, args: &[&str], poses_ou
         })
         .collect();
     assert_eq!(poses.len(), n_poses);
-    (solve_ms, first_iter_ms, iterations, accepted, poses)
+    (solve_ms, first_iter_ms, iterations, accepted, full_ms, poses)
 }
 
 // 3D (SE3) datasets: arael f64/f32, tiny-solver, factrs, Ceres and g2o;
@@ -215,6 +282,9 @@ fn run_dataset3(name: &str, path: &str, rounds: usize, f32_floor_note: Option<&s
         first_iter_ms: f64,
         iterations: usize,
         accepted: Option<usize>,
+        /// One complete iteration, measured as t(2 iters) - t(1 iter). `None`
+        /// when the system does not report it, or its second step was rejected.
+        full_ms: Option<f64>,
         poses: Vec<g2o3::Pose3In>,
         cost: f64,
     }
@@ -225,6 +295,13 @@ fn run_dataset3(name: &str, path: &str, rounds: usize, f32_floor_note: Option<&s
 
     let cpp3_available = std::path::Path::new("cpp/build/ceres_bench3").exists()
         && std::path::Path::new("cpp/build/g2o_bench3").exists();
+    let factrs32_3d_available =
+        std::path::Path::new("factrs32/target/release/factrs32-bench3").exists();
+    if !factrs32_3d_available {
+        eprintln!("WARNING: factrs32 SE3 runner missing (cargo build -r in factrs32/); \
+                   skipping factrs f32 rows");
+    }
+    let mut f32_failed: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     if !cpp3_available {
         eprintln!("WARNING: cpp/build 3D runners missing (cmake -B cpp/build cpp && cmake --build cpp/build); skipping ceres/g2o rows");
     }
@@ -232,38 +309,59 @@ fn run_dataset3(name: &str, path: &str, rounds: usize, f32_floor_note: Option<&s
 
     let mut cells: Vec<(String, Cell3)> = Vec::new();
     let record = |label: &str, solve_ms: f64, first_iter_ms: f64,
-                  iterations: usize, accepted: Option<usize>,
+                  iterations: usize, accepted: Option<usize>, full_ms: Option<f64>,
                   poses: Vec<g2o3::Pose3In>, cells: &mut Vec<(String, Cell3)>,
                   ds: &g2o3::Dataset3| {
         let cost = g2o3::reference_cost3(ds, &poses);
         if let Some((_, prev)) = cells.iter_mut().find(|(l, _)| l == label) {
             prev.solve_ms = prev.solve_ms.min(solve_ms);
             prev.first_iter_ms = prev.first_iter_ms.min(first_iter_ms);
+            // t(2) must be minimized over rounds like t(1) is: full-iter is
+            // their difference, and mixing a single sample with a minimum
+            // biases it (badly enough to go negative).
+            prev.full_ms = match (prev.full_ms, full_ms) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
         } else {
             cells.push((label.to_string(),
-                Cell3 { solve_ms, first_iter_ms, iterations, accepted, poses, cost }));
+                Cell3 { solve_ms, first_iter_ms, iterations, accepted, full_ms, poses, cost }));
         }
     };
 
     for round in 0..rounds {
         let a64 = arael_runner3::run_f64(&ds);
         record("arael LM f64", a64.solve_ms, a64.first_iter_ms, a64.iterations,
-            Some(a64.accepted), a64.poses, &mut cells, &ds);
+            Some(a64.accepted), a64.two_iter_ms, a64.poses, &mut cells, &ds);
         let a32 = arael_runner3::run_f32(&ds);
         record("arael LM f32", a32.solve_ms, a32.first_iter_ms, a32.iterations,
-            Some(a32.accepted), a32.poses, &mut cells, &ds);
-        let tgn = tiny_runner3::run_gn(&ds);
-        record("tiny-solver GN", tgn.solve_ms, tgn.first_iter_ms, tgn.iterations,
-            None, tgn.poses, &mut cells, &ds);
-        let tlm = tiny_runner3::run_lm(&ds);
-        record("tiny-solver LM", tlm.solve_ms, tlm.first_iter_ms, tlm.iterations,
-            None, tlm.poses, &mut cells, &ds);
+            Some(a32.accepted), a32.two_iter_ms, a32.poses, &mut cells, &ds);
+        if !skip_tiny() {
+            let tgn = tiny_runner3::run_gn(&ds);
+            record("tiny-solver GN", tgn.solve_ms, tgn.first_iter_ms, tgn.iterations,
+                None, None, tgn.poses, &mut cells, &ds);
+            let tlm = tiny_runner3::run_lm(&ds);
+            record("tiny-solver LM", tlm.solve_ms, tlm.first_iter_ms, tlm.iterations,
+                None, None, tlm.poses, &mut cells, &ds);
+        }
         let fgn = factrs_runner3::run_gn(&ds);
         record("factrs GN", fgn.solve_ms, fgn.first_iter_ms, fgn.iterations,
-            None, fgn.poses, &mut cells, &ds);
+            Some(fgn.accepted), fgn.two_iter_ms, fgn.poses, &mut cells, &ds);
         let flm = factrs_runner3::run_lm(&ds);
         record("factrs LM", flm.solve_ms, flm.first_iter_ms, flm.iterations,
-            None, flm.poses, &mut cells, &ds);
+            Some(flm.accepted), flm.two_iter_ms, flm.poses, &mut cells, &ds);
+        if factrs32_3d_available {
+            for (kind, label) in [("gn", "factrs GN f32"), ("lm", "factrs LM f32")] {
+                match run_factrs32_3d(path, kind, ds.poses.len()) {
+                    Some((ms, fi, it, acc, full, poses)) =>
+                        record(label, ms, fi, it, acc, full, poses, &mut cells, &ds),
+                    None => {
+                        f32_failed.insert(format!(
+                            "{}: solver crashed (f32 Cholesky non-positive pivot)", label));
+                    }
+                }
+            }
+        }
         let symforce3_available = std::path::Path::new("cpp/build/symforce_bench3").exists();
         if cpp3_available {
             let check = |line_cost: f64| {
@@ -271,28 +369,30 @@ fn run_dataset3(name: &str, path: &str, rounds: usize, f32_floor_note: Option<&s
                     "external initial cost {} disagrees with reference {}",
                     line_cost, initial_cost);
             };
-            let (ms, fi, it, acc, poses) = run_external3_checked(
+            let (ms, fi, it, acc, full, poses) = run_external3_checked(
                 std::process::Command::new("cpp/build/ceres_bench3"),
                 &[path, "/tmp/ceres3_poses.txt"], "/tmp/ceres3_poses.txt",
                 ds.poses.len(), Some("initial_cost"), &check);
-            record("ceres LM", ms, fi, it, acc, poses, &mut cells, &ds);
+            record("ceres LM", ms, fi, it, acc, full, poses, &mut cells, &ds);
             for kind in ["lm", "gn"] {
                 let poses_out = format!("/tmp/g2o3_poses_{}.txt", kind);
-                let (ms, fi, it, acc, poses) = run_external3_checked(
-                    std::process::Command::new("cpp/build/g2o_bench3"),
+                let mut g2o_cmd = std::process::Command::new("cpp/build/g2o_bench3");
+                g2o_cmd.env("G2O_LAMBDA_INIT", g2o_lambda(name));
+                let (ms, fi, it, acc, full, poses) = run_external3_checked(
+                    g2o_cmd,
                     &[path, kind, &poses_out], &poses_out,
                     ds.poses.len(), Some("initial_chi2"), &check);
-                record(&format!("g2o {}", kind.to_uppercase()), ms, fi, it, acc, poses, &mut cells, &ds);
+                record(&format!("g2o {}", kind.to_uppercase()), ms, fi, it, acc, full, poses, &mut cells, &ds);
             }
             if symforce3_available {
                 for prec in ["f64", "f32"] {
                     let poses_out = format!("/tmp/symforce3_poses_{}.txt", prec);
-                    let (ms, fi, it, acc, poses) = run_external3_checked(
+                    let (ms, fi, it, acc, full, poses) = run_external3_checked(
                         std::process::Command::new("cpp/build/symforce_bench3"),
                         &[path, prec, &poses_out], &poses_out,
                         ds.poses.len(), Some("initial_cost"), &check);
                     let label = if prec == "f32" { "symforce LM f32" } else { "symforce LM" };
-                    record(label, ms, fi, it, acc, poses, &mut cells, &ds);
+                    record(label, ms, fi, it, acc, full, poses, &mut cells, &ds);
                 }
             }
         }
@@ -304,11 +404,11 @@ fn run_dataset3(name: &str, path: &str, rounds: usize, f32_floor_note: Option<&s
         if let Some(py) = gtsam_available() {
             for kind in ["lm", "gn"] {
                 let poses_out = format!("/tmp/gtsam3_poses_{}.txt", kind);
-                let (ms, fi, it, acc, poses) = run_external3_checked(
+                let (ms, fi, it, acc, full, poses) = run_external3_checked(
                     std::process::Command::new(&py),
                     &["gtsam_bench.py", path, kind, &poses_out], &poses_out,
                     ds.poses.len(), None, &|_| {});
-                record(&format!("gtsam {}", kind.to_uppercase()), ms, fi, it, acc, poses, &mut cells, &ds);
+                record(&format!("gtsam {}", kind.to_uppercase()), ms, fi, it, acc, full, poses, &mut cells, &ds);
             }
         }
         eprintln!("  round {}/{} done", round + 1, rounds);
@@ -327,17 +427,35 @@ fn run_dataset3(name: &str, path: &str, rounds: usize, f32_floor_note: Option<&s
             && g2o3::aligned_rmse3(&best_poses, &c.poses) < 0.05
     };
 
-    println!("\n{:<18} {:>10} {:>9} {:>10} {:>12} {:>14}",
-        "system", "total ms", "iters", "ms/iter", "1st-iter ms", "final cost");
+    // ms/iter divides the whole solve by every ATTEMPT. A rejected attempt only
+    // redoes the linear solve -- there is no reassembly -- so it is cheaper than
+    // a real iteration and drags the average DOWN.
+    //
+    // full-iter is what one COMPLETE iteration costs: one assembly plus one
+    // linear solve. That cannot be recovered by dividing the total by anything
+    // (dividing by accepted charges the retries to the accepted steps, which
+    // drags it UP instead), so it comes from the solver's own phase timings.
+    // Only arael reports those; a system with no retries has ms/iter == a full
+    // iteration by definition, and where neither holds the cell is blank.
+    println!("\n{:<18} {:>10} {:>9} {:>10} {:>10} {:>12} {:>14}",
+        "system", "total ms", "iters", "ms/iter", "full-iter", "1st-iter ms", "final cost");
     for (label, c) in &cells {
         let iters = match c.accepted {
             Some(a) => format!("{}({})", a, c.iterations),
             None => format!("{}", c.iterations),
         };
-        println!("{:<18} {:>10.1} {:>9} {:>10.2} {:>12.1} {:>14.4}{}",
+        // One complete iteration = min t(2 iters) - min t(1 iter). Both runs
+        // pay the same setup, so it cancels; the minima are taken first so a
+        // noisy pair cannot difference into nonsense.
+        let full = match c.full_ms {
+            Some(two) if two > c.first_iter_ms => format!("{:.2}", two - c.first_iter_ms),
+            _ => "-".to_string(),
+        };
+        println!("{:<18} {:>10.1} {:>9} {:>10.2} {:>10} {:>12} {:>14.4}{}",
             label, c.solve_ms, iters,
             c.solve_ms / c.iterations.max(1) as f64,
-            c.first_iter_ms, c.cost,
+            full,
+            fmt1(c.first_iter_ms), c.cost,
             if converged(c) {
                 String::new()
             } else {
@@ -347,6 +465,7 @@ fn run_dataset3(name: &str, path: &str, rounds: usize, f32_floor_note: Option<&s
     }
 
     let mut notes: Vec<String> = Vec::new();
+    notes.extend(f32_failed.iter().cloned());
     for (label, c) in &cells {
         if label == "arael LM f64" {
             assert!(converged(c), "{} failed to converge: {} vs best {} (aligned RMSE {:.4})",
@@ -374,14 +493,64 @@ fn run_dataset3(name: &str, path: &str, rounds: usize, f32_floor_note: Option<&s
         conv, cells.len(), best, external_agree);
 }
 
+/// tiny-solver is off by default (RUN_TINY=1 brings it back). It is slow
+/// enough to stretch the whole run without earning a place in the charts,
+/// where it would only compress the scale the other systems are read on.
+fn skip_tiny() -> bool {
+    std::env::var("RUN_TINY").is_err()
+}
+
+/// SKIP_ISAM=1 drops the GTSAM ISAM2 row: it is slow, and it answers the
+/// incremental question rather than the batch one this benchmark asks.
+fn skip_isam() -> bool {
+    std::env::var("SKIP_ISAM").is_ok()
+}
+
+// The run's configuration, printed at startup so a pasted result carries the
+// settings that produced it. Values are read back from the actual config
+// objects and env accessors the runners use, so the header cannot drift from
+// what was run; the env var that changes each one is named in brackets.
+fn print_header(rounds: usize, only: &Option<String>) {
+    let c64 = arael_runner::cfg64(0);
+    let nielsen = arael_runner::nielsen();
+    let ordering = arael_runner::ordering();
+
+    println!("=== pgo-bench configuration ===");
+    println!("rounds            : {} [ROUNDS], {} probe sub-rounds per round",
+        rounds, probe::PROBE_SUBROUNDS);
+    println!("datasets          : {} [PGO_ONLY]",
+        only.as_deref().unwrap_or("all"));
+    let on_off = |skipped: bool| if skipped { "skipped" } else { "run" };
+    println!("optional systems  : tiny-solver {} [RUN_TINY], isam {} [SKIP_ISAM]",
+        on_off(skip_tiny()), on_off(skip_isam()));
+    println!("arael lambda0     : {:e} (2D), {:e} (3D) [ARAEL_LAMBDA0]",
+        arael_runner::lambda0(), arael_runner3::lambda0_3d());
+    println!("arael damping     : {} [PGO_DRIVER: default|nielsen]",
+        if nielsen { "Nielsen gain-ratio driver" } else { "fixed ladder (default driver)" });
+    // Auto is not a third ordering -- on a pose graph there is nothing to
+    // marginalize, so there is no reduced system and it factorizes under AMD.
+    let resolves_to = match ordering {
+        arael::simple_lm::FaerOrdering::Auto => " -- AMD here (no marginalizable blocks)",
+        _ => "",
+    };
+    println!("arael ordering    : {:?}{} [PGO_ORDERING: auto|nd]", ordering, resolves_to);
+    println!("arael termination : abs {:e}, rel {:e}, patience {}, min_iters {}",
+        c64.abs_precision, c64.rel_precision, c64.patience, c64.min_iters);
+    println!("solver verbose    : {} [VERBOSE], per-solve timing {} [TIMING]",
+        if c64.verbose { "on" } else { "off" },
+        if std::env::var("TIMING").is_ok() { "on" } else { "off" });
+    println!("pinned to core    : {} (all thread pools forced to 1)",
+        std::env::var("PGO_BENCH_CORE").unwrap_or_else(|_| "?".to_string()));
+}
+
 fn main() {
     enforce_single_core();
     tiny_runner::install_iter_counter();
     let bench_dir = std::env::current_dir().unwrap();
-    // (name, file, use the file's information matrices?). The unweighted
-    // M3500 row is the configuration tiny-solver's shipped benchmark runs.
+    // (name, file, use the file's information matrices?). Every system is fed
+    // the files' information matrices; the unit-weight path stays wired up
+    // (pass false) but no dataset uses it.
     let datasets = [
-        ("M3500 unweighted", bench_dir.join("datasets/input_M3500_g2o.g2o"), false),
         ("M3500", bench_dir.join("datasets/input_M3500_g2o.g2o"), true),
         ("city10000", bench_dir.join("datasets/city10000.g2o"), true),
     ];
@@ -390,6 +559,7 @@ fn main() {
     // PGO_ONLY=<substring> runs only the datasets whose name contains it.
     let only = std::env::var("PGO_ONLY").ok();
     let selected = |name: &str| only.as_deref().map_or(true, |f| name.contains(f));
+    print_header(rounds, &only);
     let python = gtsam_available();
     if python.is_none() {
         eprintln!("WARNING: GTSAM python not found (set GTSAM_PYTHON); skipping GTSAM rows");
@@ -422,37 +592,49 @@ fn main() {
         // One measured cell per system; times are min-of-N interleaved.
         let mut cells: Vec<(String, Cell)> = Vec::new();
         let mut failed_notes: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-        let record = |label: &str, out: (f64, f64, usize, Option<usize>, Vec<PoseIn>), cells: &mut Vec<(String, Cell)>| {
-            let (solve_ms, first_iter_ms, iterations, accepted, poses) = out;
+        let record = |label: &str,
+                      out: (f64, f64, usize, Option<usize>, Option<f64>, Vec<PoseIn>),
+                      cells: &mut Vec<(String, Cell)>| {
+            let (solve_ms, first_iter_ms, iterations, accepted, full_ms, poses) = out;
             let cost = g2o::reference_cost(&ds, &poses);
             if let Some((_, prev)) = cells.iter_mut().find(|(l, _)| l == label) {
                 prev.solve_ms = prev.solve_ms.min(solve_ms);
                 prev.first_iter_ms = prev.first_iter_ms.min(first_iter_ms);
+                prev.full_ms = match (prev.full_ms, full_ms) {
+                    (Some(a), Some(b)) => Some(a.min(b)),
+                    (a, b) => a.or(b),
+                };
             } else {
                 cells.push((label.to_string(),
-                    Cell { solve_ms, first_iter_ms, iterations, accepted, poses, cost }));
+                    Cell { solve_ms, first_iter_ms, iterations, accepted, full_ms, poses, cost }));
             }
         };
 
         for round in 0..rounds {
             let a64 = arael_runner::run_f64(&ds);
-            record("arael LM f64", (a64.solve_ms, a64.first_iter_ms, a64.iterations, Some(a64.accepted), a64.poses), &mut cells);
+            record("arael LM f64", (a64.solve_ms, a64.first_iter_ms, a64.iterations, Some(a64.accepted), a64.two_iter_ms, a64.poses), &mut cells);
             let a32 = arael_runner::run_f32(&ds);
-            record("arael LM f32", (a32.solve_ms, a32.first_iter_ms, a32.iterations, Some(a32.accepted), a32.poses), &mut cells);
-            let tgn = tiny_runner::run_gn(&ds);
-            record("tiny-solver GN", (tgn.solve_ms, tgn.first_iter_ms, tgn.iterations, None, tgn.poses), &mut cells);
-            let tlm = tiny_runner::run_lm(&ds);
-            record("tiny-solver LM", (tlm.solve_ms, tlm.first_iter_ms, tlm.iterations, None, tlm.poses), &mut cells);
+            record("arael LM f32", (a32.solve_ms, a32.first_iter_ms, a32.iterations, Some(a32.accepted), a32.two_iter_ms, a32.poses), &mut cells);
+            if !skip_tiny() {
+                let tgn = tiny_runner::run_gn(&ds);
+                record("tiny-solver GN", (tgn.solve_ms, tgn.first_iter_ms, tgn.iterations, None, None, tgn.poses), &mut cells);
+                let tlm = tiny_runner::run_lm(&ds);
+                record("tiny-solver LM", (tlm.solve_ms, tlm.first_iter_ms, tlm.iterations, None, None, tlm.poses), &mut cells);
+            }
             let fgn = factrs_runner::run_gn(&ds);
-            record("factrs GN", (fgn.solve_ms, fgn.first_iter_ms, fgn.iterations, None, fgn.poses), &mut cells);
+            record("factrs GN", (fgn.solve_ms, fgn.first_iter_ms, fgn.iterations,
+                Some(fgn.accepted), fgn.two_iter_ms, fgn.poses), &mut cells);
             let flm = factrs_runner::run_lm(&ds);
-            record("factrs LM", (flm.solve_ms, flm.first_iter_ms, flm.iterations, None, flm.poses), &mut cells);
+            record("factrs LM", (flm.solve_ms, flm.first_iter_ms, flm.iterations,
+                Some(flm.accepted), flm.two_iter_ms, flm.poses), &mut cells);
             if factrs32_available {
-                match run_factrs32(path, "gn", *weighted, ds.poses.len()) {
-                    Some(out) => record("factrs GN f32", out, &mut cells),
-                    None => {
-                        failed_notes.insert(
-                            "factrs GN f32: solver crashed (f32 Cholesky non-positive pivot)".to_string());
+                for (kind, label) in [("gn", "factrs GN f32"), ("lm", "factrs LM f32")] {
+                    match run_factrs32(path, kind, *weighted, ds.poses.len()) {
+                        Some(out) => record(label, out, &mut cells),
+                        None => {
+                            failed_notes.insert(format!(
+                                "{}: solver crashed (f32 Cholesky non-positive pivot)", label));
+                        }
                     }
                 }
             }
@@ -477,7 +659,9 @@ fn main() {
         // different algorithm answering the online-estimation question;
         // listed for context, timed once, "iters" = incremental updates.
         if let Some(py) = &python {
-            record("gtsam ISAM2 (incr)", run_gtsam(py, path, "isam2", *weighted, ds.poses.len()), &mut cells);
+            if !skip_isam() {
+                record("gtsam ISAM2 (incr)", run_gtsam(py, path, "isam2", *weighted, ds.poses.len()), &mut cells);
+            }
         }
 
         // Convergence is judged against the best solution by BOTH cost
@@ -503,17 +687,25 @@ fn main() {
         // iters column: "accepted(total)" where the system reports both;
         // total includes damping retries. Other systems report only their
         // outer iteration count.
-        println!("\n{:<18} {:>10} {:>9} {:>10} {:>12} {:>14}",
-            "system", "total ms", "iters", "ms/iter", "1st-iter ms", "final cost");
+        println!("\n{:<18} {:>10} {:>9} {:>10} {:>10} {:>12} {:>14}",
+            "system", "total ms", "iters", "ms/iter", "full-iter", "1st-iter ms", "final cost");
         for (label, c) in &cells {
             let iters = match c.accepted {
                 Some(a) => format!("{}({})", a, c.iterations),
                 None => format!("{}", c.iterations),
             };
-            println!("{:<18} {:>10.1} {:>9} {:>10.2} {:>12.1} {:>14.4}{}",
+            // One complete iteration = min t(2 iters) - min t(1 iter). Both runs
+            // pay the same setup, so it cancels; the minima are taken first so a
+            // noisy pair cannot difference into nonsense.
+            let full = match c.full_ms {
+                Some(two) if two > c.first_iter_ms => format!("{:.2}", two - c.first_iter_ms),
+                _ => "-".to_string(),
+            };
+            println!("{:<18} {:>10.1} {:>9} {:>10.2} {:>10} {:>12} {:>14.4}{}",
                 label, c.solve_ms, iters,
                 c.solve_ms / c.iterations.max(1) as f64,
-                c.first_iter_ms, c.cost,
+                full,
+                fmt1(c.first_iter_ms), c.cost,
                 if converged(c) { "" } else { "  <- did not reach the common optimum" });
         }
 

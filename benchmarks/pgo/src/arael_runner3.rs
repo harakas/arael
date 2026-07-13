@@ -1,15 +1,16 @@
 // arael 3D (SE3) runners: identical model in f64 and f32.
 //
-// Pose rotation is an EulerAngleParam: three delta angles composed with
+// Pose rotation is a QuaternionParam: a rotation-vector delta composed with
 // a reference rotation that re-centers after every accepted step, so
 // the parameterization never leaves its small-angle sweet spot even on
 // arbitrarily oriented graphs (the sphere). The constraint body is the
 // canonical quaternion-vector between residual (see g2o3.rs), weighted
 // by the edge's upper-triangular 6x6 sqrt-information blocks.
 
-use crate::g2o3::{matrix_to_quat, Dataset3, Pose3In};
+use crate::g2o3::{Dataset3, Pose3In};
 use arael::matrix::{matrix3d, matrix3f};
-use arael::model::{CrossBlock, EulerAngleParam, Param, SelfBlock};
+use arael::model::{CrossBlock, Param, QuaternionParam, SelfBlock};
+use arael::quatern::{quaternd, quaternf};
 use arael::refs::{self, Ref};
 use arael::vect::{vect3d, vect3f};
 
@@ -27,9 +28,10 @@ use arael::vect::{vect3d, vect3f};
      s[0].z / denom,
      s[1].x / denom]
 }))]
+#[derive(Clone)]
 struct Pose3 {
     pos: Param<vect3d>,
-    ea: EulerAngleParam<f64>,
+    ea: QuaternionParam<f64>,
     prior: vect3d,
     prior_rot_t: matrix3d,
     has_prior: bool,
@@ -48,6 +50,7 @@ struct Pose3 {
     let wr = edge3.u_rr * rrot;
     [wt.x, wt.y, wt.z, wr.x, wr.y, wr.z]
 }))]
+#[derive(Clone)]
 struct Edge3 {
     #[arael(ref = root.poses)]
     a: Ref<Pose3>,
@@ -63,6 +66,7 @@ struct Edge3 {
 
 #[arael::model]
 #[arael(root)]
+#[derive(Clone)]
 struct Graph3 {
     poses: refs::Vec<Pose3>,
     edges: std::vec::Vec<Edge3>,
@@ -82,9 +86,10 @@ struct Graph3 {
      s[0].z / denom,
      s[1].x / denom]
 }))]
+#[derive(Clone)]
 struct Pose3F {
     pos: Param<vect3f>,
-    ea: EulerAngleParam<f32>,
+    ea: QuaternionParam<f32>,
     prior: vect3f,
     prior_rot_t: matrix3f,
     has_prior: bool,
@@ -103,6 +108,7 @@ struct Pose3F {
     let wr = edge3f.u_rr * rrot;
     [wt.x, wt.y, wt.z, wr.x, wr.y, wr.z]
 }))]
+#[derive(Clone)]
 struct Edge3F {
     #[arael(ref = root.poses)]
     a: Ref<Pose3F>,
@@ -118,6 +124,7 @@ struct Edge3F {
 
 #[arael::model]
 #[arael(root, f32)]
+#[derive(Clone)]
 struct Graph3F {
     poses: refs::Vec<Pose3F>,
     edges: std::vec::Vec<Edge3F>,
@@ -131,7 +138,7 @@ fn build_f64(ds: &Dataset3) -> Graph3 {
         let rot = p.rot();
         g.poses.push(Pose3 {
             pos: Param::new(p.t),
-            ea: EulerAngleParam::new(rot.get_euler_angles()),
+            ea: QuaternionParam::new(quaternd::from_rotation_matrix(rot)),
             prior: p.t,
             prior_rot_t: rot.transpose(),
             has_prior: i == 0,
@@ -163,7 +170,7 @@ fn build_f32(ds: &Dataset3) -> Graph3F {
         g.poses.push(Pose3F {
             pos: Param::new(vect3f::from(p.t)),
             // Extract the euler angles in f64, cast the result.
-            ea: EulerAngleParam::new(vect3f::from(rot.get_euler_angles())),
+            ea: QuaternionParam::new(quaternf::from_rotation_matrix(matrix3f::from(rot))),
             prior: vect3f::from(p.t),
             prior_rot_t: matrix3f::from(rot.transpose()),
             has_prior: i == 0,
@@ -194,7 +201,7 @@ fn build_f32(ds: &Dataset3) -> Graph3F {
 // with damping rejections and an early plateau stop 6.5 cm short of
 // the optimum; 1e-10 converges cleanly in 5 steps. sphere2500 is
 // insensitive to the choice.
-fn lambda0_3d() -> f64 {
+pub(crate) fn lambda0_3d() -> f64 {
     std::env::var("ARAEL_LAMBDA0").ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(1e-10)
@@ -205,6 +212,10 @@ pub struct RunOut3 {
     pub first_iter_ms: f64,
     pub iterations: usize,
     pub accepted: usize,
+    /// One assembly plus one linear solve -- what a COMPLETE iteration costs.
+    /// See `arael_runner::RunOut::full_iter_ms` for why it cannot be had by
+    /// dividing the total by anything.
+    pub two_iter_ms: Option<f64>,
     pub poses: Vec<Pose3In>,
 }
 
@@ -213,9 +224,14 @@ pub fn run_f64(ds: &Dataset3) -> RunOut3 {
     let mut params: Vec<f64> = Vec::new();
     g.serialize64(&mut params);
 
-    let t0 = std::time::Instant::now();
-    let _ = crate::arael_runner::solve_f64(&params, &mut g, &crate::arael_runner::cfg64_with_lambda(1, lambda0_3d()));
-    let first_iter_ms = t0.elapsed().as_secs_f64() * 1e3;
+    let (first_ms, first) = crate::arael_runner::timed_f64(&params, &g, &crate::arael_runner::cfg64_with_lambda(1, lambda0_3d()));
+    let first_iter_ms = crate::probe::first_iter_ms(
+        first_ms, first.iterations, first.accepted_iterations);
+
+    // ... and a fresh two-iteration solve: the difference is one complete
+    // iteration, with the setup cancelled out.
+    let (two_ms, two) = crate::arael_runner::timed_f64(&params, &g, &crate::arael_runner::cfg64_with_lambda(2, lambda0_3d()));
+    let two_iter_ms = crate::probe::two_iter_ms(two_ms, first_iter_ms, two.accepted_iterations);
 
     let t0 = std::time::Instant::now();
     let result = crate::arael_runner::solve_f64(&params, &mut g, &crate::arael_runner::cfg64_with_lambda(100, lambda0_3d()));
@@ -224,13 +240,14 @@ pub fn run_f64(ds: &Dataset3) -> RunOut3 {
     let poses = g.poses.iter()
         .map(|p| Pose3In {
             t: p.pos.value,
-            q: matrix_to_quat(matrix3d::rotation_from_euler_angles(p.ea.value)),
+            q: [p.ea.value.v.x, p.ea.value.v.y, p.ea.value.v.z, p.ea.value.t],
         })
         .collect();
     RunOut3 {
         solve_ms, first_iter_ms,
         iterations: result.iterations,
         accepted: result.accepted_iterations,
+        two_iter_ms,
         poses,
     }
 }
@@ -346,9 +363,14 @@ pub fn run_f32(ds: &Dataset3) -> RunOut3 {
     let mut params: Vec<f32> = Vec::new();
     g.serialize32(&mut params);
 
-    let t0 = std::time::Instant::now();
-    let _ = crate::arael_runner::solve_f32(&params, &mut g, &crate::arael_runner::cfg32_with_lambda(1, lambda0_3d() as f32));
-    let first_iter_ms = t0.elapsed().as_secs_f64() * 1e3;
+    let (first_ms, first) = crate::arael_runner::timed_f32(&params, &g, &crate::arael_runner::cfg32_with_lambda(1, lambda0_3d() as f32));
+    let first_iter_ms = crate::probe::first_iter_ms(
+        first_ms, first.iterations, first.accepted_iterations);
+
+    // ... and a fresh two-iteration solve: the difference is one complete
+    // iteration, with the setup cancelled out.
+    let (two_ms, two) = crate::arael_runner::timed_f32(&params, &g, &crate::arael_runner::cfg32_with_lambda(2, lambda0_3d() as f32));
+    let two_iter_ms = crate::probe::two_iter_ms(two_ms, first_iter_ms, two.accepted_iterations);
 
     let t0 = std::time::Instant::now();
     let result = crate::arael_runner::solve_f32(&params, &mut g, &crate::arael_runner::cfg32_with_lambda(100, lambda0_3d() as f32));
@@ -357,14 +379,15 @@ pub fn run_f32(ds: &Dataset3) -> RunOut3 {
     let poses = g.poses.iter()
         .map(|p| Pose3In {
             t: vect3d::from(p.pos.value),
-            q: matrix_to_quat(matrix3d::from(
-                matrix3f::rotation_from_euler_angles(p.ea.value))),
+            q: [p.ea.value.v.x as f64, p.ea.value.v.y as f64,
+                p.ea.value.v.z as f64, p.ea.value.t as f64],
         })
         .collect();
     RunOut3 {
         solve_ms, first_iter_ms,
         iterations: result.iterations,
         accepted: result.accepted_iterations,
+        two_iter_ms,
         poses,
     }
 }

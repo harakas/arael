@@ -11,8 +11,7 @@
 // the reference cost.
 
 use core::fmt;
-use std::sync::atomic::{AtomicUsize, Ordering};
-
+use crate::factrs_counting::{counts, since, CountingSolver, StepCounter};
 use crate::g2o3::{Dataset3, Pose3In};
 use arael::vect::vect3d;
 use factrs::assign_symbols;
@@ -20,21 +19,13 @@ use factrs::core::{GaussNewton, Graph, LevenMarquardt, Values};
 use factrs::dtype;
 use factrs::fac;
 use factrs::linalg::{Const, ForwardProp, Numeric, Vector3, VectorX};
-use factrs::optimizers::{BaseOptParams, LevenParams, OptError, OptObserver};
+use factrs::optimizers::{BaseOptParams, LevenParams, OptError};
 use factrs::residuals::{Residual1, Residual2};
 use factrs::traits::Optimizer;
 use factrs::variables::{SE3, SO3};
 
 assign_symbols!(Y: SE3);
 
-static STEPS: AtomicUsize = AtomicUsize::new(0);
-
-struct StepCounter;
-impl OptObserver for StepCounter {
-    fn on_step(&self, _values: &Values, _time: i64) {
-        STEPS.fetch_add(1, Ordering::Relaxed);
-    }
-}
 
 // Hamilton product (a * b) on (x, y, z, w) component tuples.
 fn quat_mul<T: Numeric>(a: &[T; 4], b: &[T; 4]) -> [T; 4] {
@@ -167,10 +158,14 @@ impl Residual1 for CanonicalPriorSE3 {
     }
 }
 
+// The dataset is f64; factrs's scalar is whatever `dtype` the crate was
+// built with. The casts are what let this file compile under both, so the
+// f32 runner is the same code and not a second implementation of it.
 fn se3_of(p: &Pose3In) -> SE3 {
     SE3::from_rot_trans(
-        SO3::from_xyzw(p.q[0], p.q[1], p.q[2], p.q[3]),
-        Vector3::new(p.t.x, p.t.y, p.t.z),
+        SO3::from_xyzw(
+            p.q[0] as dtype, p.q[1] as dtype, p.q[2] as dtype, p.q[3] as dtype),
+        Vector3::new(p.t.x as dtype, p.t.y as dtype, p.t.z as dtype),
     )
 }
 
@@ -184,9 +179,9 @@ fn build(ds: &Dataset3) -> (Graph, Values) {
         // The sqrt-info is inside the residual; unit noise here.
         graph.add_factor(fac![
             CanonicalBetweenSE3 {
-                dt: [e.dt.x, e.dt.y, e.dt.z],
-                dq: e.dq,
-                u: e.u,
+                dt: [e.dt.x as dtype, e.dt.y as dtype, e.dt.z as dtype],
+                dq: e.dq.map(|v| v as dtype),
+                u: e.u.map(|row| row.map(|v| v as dtype)),
             },
             (Y(e.a), Y(e.b)),
             1.0 as std
@@ -194,7 +189,10 @@ fn build(ds: &Dataset3) -> (Graph, Values) {
     }
     let p0 = &ds.poses[0];
     graph.add_factor(fac![
-        CanonicalPriorSE3 { t: [p0.t.x, p0.t.y, p0.t.z], q: p0.q },
+        CanonicalPriorSE3 {
+            t: [p0.t.x as dtype, p0.t.y as dtype, p0.t.z as dtype],
+            q: p0.q.map(|v| v as dtype),
+        },
         Y(0),
         1.0 as std
     ]);
@@ -204,7 +202,13 @@ fn build(ds: &Dataset3) -> (Graph, Values) {
 pub struct RunOut3 {
     pub solve_ms: f64,
     pub first_iter_ms: f64,
+    /// Attempts: accepted steps plus factrs's in-step damping retries, each of
+    /// which costs a factorization. Recovered by counting linear solves.
     pub iterations: usize,
+    pub accepted: usize,
+    /// t(2 iterations), for the caller to difference against t(1). `None` when
+    /// the second step was rejected, which would make the difference a retry.
+    pub two_iter_ms: Option<f64>,
     pub poses: Vec<Pose3In>,
 }
 
@@ -217,43 +221,68 @@ fn base_params(max_iterations: usize) -> BaseOptParams {
     }
 }
 
-fn run(ds: &Dataset3, gn: bool) -> RunOut3 {
-    let optimize = |max_iter: usize| -> (f64, usize, Values) {
-        let (graph, init) = build(ds);
-        let before = STEPS.load(Ordering::Relaxed);
-        let t0 = std::time::Instant::now();
-        let result = if gn {
-            let mut opt = GaussNewton::new(base_params(max_iter), graph);
-            opt.observers_mut().add(StepCounter);
-            opt.optimize(init)
-        } else {
-            let params = LevenParams { base: base_params(max_iter), ..Default::default() };
-            let mut opt = LevenMarquardt::new(params, graph);
-            opt.observers_mut().add(StepCounter);
-            opt.optimize(init)
-        };
-        let ms = t0.elapsed().as_secs_f64() * 1e3;
-        let values = match result {
-            Ok(v) => v,
-            Err(OptError::MaxIterations(v)) => v,
-            Err(e) => panic!("factrs failed: {:?}", e),
-        };
-        (ms, STEPS.load(Ordering::Relaxed) - before, values)
+// (elapsed ms, accepted steps, attempts, values)
+fn optimize(ds: &Dataset3, gn: bool, max_iter: usize) -> (f64, usize, usize, Values) {
+    let (graph, init) = build(ds);
+    let before = counts();
+    let t0 = std::time::Instant::now();
+    let result = if gn {
+        let mut opt = GaussNewton::new(base_params(max_iter), graph);
+        opt.set_solver(CountingSolver::default());
+        opt.observers_mut().add(StepCounter);
+        opt.optimize(init)
+    } else {
+        let params = LevenParams { base: base_params(max_iter), ..Default::default() };
+        let mut opt = LevenMarquardt::new(params, graph);
+        opt.set_solver(CountingSolver::default());
+        opt.observers_mut().add(StepCounter);
+        opt.optimize(init)
     };
+    let ms = t0.elapsed().as_secs_f64() * 1e3;
+    let values = match result {
+        Ok(v) => v,
+        Err(OptError::MaxIterations(v)) => v,
+        Err(e) => panic!("factrs failed: {:?}", e),
+    };
+    let (accepted, attempts) = since(before);
+    (ms, accepted, attempts, values)
+}
 
-    let (first_iter_ms, _, _) = optimize(1);
-    let (solve_ms, iterations, values) = optimize(100);
+// Fastest of PROBE_SUBROUNDS runs of the same probe, with its accepted step
+// and attempt counts.
+fn probe(ds: &Dataset3, gn: bool, max_iter: usize) -> (f64, usize, usize) {
+    let mut best = f64::INFINITY;
+    let (mut accepted, mut attempts) = (0, 0);
+    for _ in 0..crate::probe::PROBE_SUBROUNDS {
+        let (ms, acc, att, _) = optimize(ds, gn, max_iter);
+        best = best.min(ms);
+        accepted = acc;
+        attempts = att;
+    }
+    (best, accepted, attempts)
+}
+
+fn run(ds: &Dataset3, gn: bool) -> RunOut3 {
+    // The first solve in a process pays cold allocator and cache costs the
+    // later ones do not; discard it so the probes are timed on equal footing.
+    let _ = optimize(ds, gn, 1);
+    let (first_ms, first_accepted, first_attempts) = probe(ds, gn, 1);
+    let first_iter_ms = crate::probe::first_iter_ms(first_ms, first_attempts, first_accepted);
+    let (two_ms, two_accepted, _) = probe(ds, gn, 2);
+    let two_iter_ms = crate::probe::two_iter_ms(two_ms, first_iter_ms, two_accepted);
+    let (solve_ms, accepted, iterations, values) = optimize(ds, gn, 100);
     let poses = (0..ds.poses.len())
         .map(|i| {
             let p: &SE3 = values.get(Y(i as u32)).expect("missing pose");
             let r = p.rot();
             Pose3In {
-                t: vect3d::new(p.xyz()[0], p.xyz()[1], p.xyz()[2]),
-                q: [r.x(), r.y(), r.z(), r.w()],
+                t: vect3d::new(
+                    p.xyz()[0] as f64, p.xyz()[1] as f64, p.xyz()[2] as f64),
+                q: [r.x() as f64, r.y() as f64, r.z() as f64, r.w() as f64],
             }
         })
         .collect();
-    RunOut3 { solve_ms, first_iter_ms, iterations, poses }
+    RunOut3 { solve_ms, first_iter_ms, iterations, accepted, two_iter_ms, poses }
 }
 
 pub fn run_gn(ds: &Dataset3) -> RunOut3 {

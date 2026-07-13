@@ -2,6 +2,7 @@
 // the precision is a compile-time property of the generated code).
 
 use crate::g2o::{Dataset, PoseIn};
+use crate::probe::PROBE_SUBROUNDS;
 use arael::model::{Param, SelfBlock, CrossBlock};
 use arael::refs::{self, Ref};
 use arael::vect::{vect2d, vect2f};
@@ -14,6 +15,7 @@ use arael::vect::{vect2d, vect2f};
      pose2.pos.y - pose2.prior.y,
      pose2.th - pose2.prior_th]
 }))]
+#[derive(Clone)]
 struct Pose2 {
     pos: Param<vect2d>,
     th: Param<f64>,
@@ -31,6 +33,7 @@ struct Pose2 {
      local.y * edge.wt,
      rad_diff(a.th + edge.dth, b.th) * edge.wr]
 }))]
+#[derive(Clone)]
 struct Edge {
     #[arael(ref = root.poses)]
     a: Ref<Pose2>,
@@ -45,6 +48,7 @@ struct Edge {
 
 #[arael::model]
 #[arael(root)]
+#[derive(Clone)]
 struct Graph {
     poses: refs::Vec<Pose2>,
     edges: std::vec::Vec<Edge>,
@@ -58,6 +62,7 @@ struct Graph {
      pose2f.pos.y - pose2f.prior.y,
      pose2f.th - pose2f.prior_th]
 }))]
+#[derive(Clone)]
 struct Pose2F {
     pos: Param<vect2f>,
     th: Param<f32>,
@@ -75,6 +80,7 @@ struct Pose2F {
      local.y * edgef.wt,
      rad_diff(a.th + edgef.dth, b.th) * edgef.wr]
 }))]
+#[derive(Clone)]
 struct EdgeF {
     #[arael(ref = root.poses)]
     a: Ref<Pose2F>,
@@ -89,6 +95,7 @@ struct EdgeF {
 
 #[arael::model]
 #[arael(root, f32)]
+#[derive(Clone)]
 struct GraphF {
     poses: refs::Vec<Pose2F>,
     edges: std::vec::Vec<EdgeF>,
@@ -156,7 +163,7 @@ fn build_f32(ds: &Dataset) -> GraphF {
 /// ordering instead of AMD. On parking-garage -- a 3D pose graph dense enough
 /// that AMD's ordering leaves faer no supernodes worth having -- it is worth a
 /// lot; on the sparser graphs it is not. Default stays AMD.
-fn ordering() -> arael::simple_lm::FaerOrdering {
+pub(crate) fn ordering() -> arael::simple_lm::FaerOrdering {
     if std::env::var("PGO_ORDERING").as_deref() == Ok("nd") {
         arael::simple_lm::FaerOrdering::NestedDissection
     } else {
@@ -164,13 +171,21 @@ fn ordering() -> arael::simple_lm::FaerOrdering {
     }
 }
 
-pub fn solve_f64<P: arael::simple_lm::LmProblem<f64>>(
-    params: &[f64],
-    p: &mut P,
-    cfg: &arael::simple_lm::LmConfig<f64>,
-) -> arael::simple_lm::LmResult<f64> {
-    let mut solver = arael::simple_lm::SparseFaer::new().with_ordering(ordering());
-    let r = arael::simple_lm::lm_solve(params, &mut solver, p, cfg);
+/// TIMING=1 prints arael's internal breakdown for every solve it runs. That
+/// includes the probes, so one round of one system emits several lines: the
+/// discarded warmup plus PROBE_SUBROUNDS passes of the one- and two-iteration
+/// probes, then the real solve.
+///
+/// Only the printing is gated. `gather_timing` stays on either way, so the
+/// timing numbers do not depend on whether they are being looked at.
+fn timing_enabled() -> bool {
+    std::env::var("TIMING").is_ok()
+}
+
+fn print_timing<T>(r: &arael::simple_lm::LmResult<T>) {
+    if !timing_enabled() {
+        return;
+    }
     if let Some(t) = &r.timing {
         eprintln!(
             "  [timing] total {:.1} ms = assembly {:.1} + linear solve {:.1} (first assembly {:.1}), {} iters",
@@ -181,7 +196,60 @@ pub fn solve_f64<P: arael::simple_lm::LmProblem<f64>>(
             r.iterations,
         );
     }
+}
+
+pub fn solve_f64<P: arael::simple_lm::LmProblem<f64>>(
+    params: &[f64],
+    p: &mut P,
+    cfg: &arael::simple_lm::LmConfig<f64>,
+) -> arael::simple_lm::LmResult<f64> {
+    let mut solver = arael::simple_lm::SparseFaer::new().with_ordering(ordering());
+    let r = arael::simple_lm::lm_solve(params, &mut solver, p, cfg);
+    print_timing(&r);
     r
+}
+
+/// Times a probe solve on throwaway copies of the model, fastest of
+/// [`PROBE_SUBROUNDS`].
+///
+/// A discarded warmup runs first: the first solve in a process pays cold
+/// allocator and cache costs the later ones do not (the symbolic factorization
+/// alone runs a fifth slower), so timing the one- and two-iteration probes as
+/// they come would charge that cost to the one-iteration probe alone and
+/// inflate the difference between them.
+///
+/// The copies keep the probe from mutating the model: re-supplying the initial
+/// parameter vector does not reset parametrization state held outside it, such
+/// as the reference rotation an `EulerAngleParam` re-centres on after a step.
+pub fn timed_f64<P: arael::simple_lm::LmProblem<f64> + Clone>(
+    params: &[f64],
+    p: &P,
+    cfg: &arael::simple_lm::LmConfig<f64>,
+) -> (f64, arael::simple_lm::LmResult<f64>) {
+    let mut r = solve_f64(params, &mut p.clone(), cfg); // warmup, discarded
+    let mut best = f64::INFINITY;
+    for _ in 0..PROBE_SUBROUNDS {
+        let t0 = std::time::Instant::now();
+        r = solve_f64(params, &mut p.clone(), cfg);
+        best = best.min(t0.elapsed().as_secs_f64() * 1e3);
+    }
+    (best, r)
+}
+
+/// See [`timed_f64`].
+pub fn timed_f32<P: arael::simple_lm::LmProblem<f32> + Clone>(
+    params: &[f32],
+    p: &P,
+    cfg: &arael::simple_lm::LmConfig<f32>,
+) -> (f64, arael::simple_lm::LmResult<f32>) {
+    let mut r = solve_f32(params, &mut p.clone(), cfg); // warmup, discarded
+    let mut best = f64::INFINITY;
+    for _ in 0..PROBE_SUBROUNDS {
+        let t0 = std::time::Instant::now();
+        r = solve_f32(params, &mut p.clone(), cfg);
+        best = best.min(t0.elapsed().as_secs_f64() * 1e3);
+    }
+    (best, r)
 }
 
 pub fn solve_f32<P: arael::simple_lm::LmProblem<f32>>(
@@ -190,7 +258,9 @@ pub fn solve_f32<P: arael::simple_lm::LmProblem<f32>>(
     cfg: &arael::simple_lm::LmConfig<f32>,
 ) -> arael::simple_lm::LmResult<f32> {
     let mut solver = arael::simple_lm::SparseFaerF32::new().with_ordering(ordering());
-    arael::simple_lm::lm_solve(params, &mut solver, p, cfg)
+    let r = arael::simple_lm::lm_solve(params, &mut solver, p, cfg);
+    print_timing(&r);
+    r
 }
 
 pub struct RunOut {
@@ -201,6 +271,12 @@ pub struct RunOut {
     /// damping retries. Other systems report only their outer iteration
     /// count, so their tables carry a single number.
     pub accepted: usize,
+    /// Wall clock of a fresh TWO-iteration solve. One complete iteration is
+    /// this minus `first_iter_ms` -- both pay the same setup, so it cancels --
+    /// but the subtraction must happen on the MINIMA over rounds, not on a
+    /// single pair: differencing two noisy cold runs can even come out
+    /// negative. `None` if the second step was rejected.
+    pub two_iter_ms: Option<f64>,
     pub poses: Vec<PoseIn>,
 }
 
@@ -221,16 +297,35 @@ pub(crate) fn cfg64(max_iters: usize) -> arael::simple_lm::LmConfig<f64> {
     cfg64_with_lambda(max_iters, lambda0())
 }
 
+/// PGO_DRIVER=nielsen swaps the fixed damping schedule for the gain-ratio
+/// driver: lambda then follows how well the quadratic model predicted the step
+/// actually taken, instead of a fixed up/down ladder. It changes the iteration
+/// count, not the cost per iteration -- so it moves the total, and the
+/// per-iteration comparison stays honest either way.
+pub(crate) fn nielsen() -> bool {
+    std::env::var("PGO_DRIVER").as_deref() == Ok("nielsen")
+}
+
 pub(crate) fn cfg64_with_lambda(max_iters: usize, initial_lambda: f64) -> arael::simple_lm::LmConfig<f64> {
-    arael::simple_lm::LmConfig {
-        verbose: std::env::var("PGO_VERBOSE").is_ok(),
-        gather_timing: std::env::var("PGO_TIMING").is_ok(),
+    let cfg = arael::simple_lm::LmConfig {
+        verbose: std::env::var("VERBOSE").is_ok(),
+        gather_timing: true,
         abs_precision: 1e-5,
         rel_precision: 1e-5,
+        // Stop as soon as the tolerance test says converged, the way Ceres and
+        // g2o do. The library defaults (min_iters 5, patience 3) put a floor
+        // under the iteration count, which on a problem that converges in four
+        // iterations would time a fifth that improves the cost by 4e-14.
         patience: 1,
+        min_iters: 1,
         max_iters,
         initial_lambda,
         ..Default::default()
+    };
+    if nielsen() {
+        cfg.with_driver(arael::simple_lm::NielsenLambdaDriver::default())
+    } else {
+        cfg
     }
 }
 
@@ -239,13 +334,25 @@ pub(crate) fn cfg32(max_iters: usize) -> arael::simple_lm::LmConfig<f32> {
 }
 
 pub(crate) fn cfg32_with_lambda(max_iters: usize, initial_lambda: f32) -> arael::simple_lm::LmConfig<f32> {
-    arael::simple_lm::LmConfig {
+    let cfg = arael::simple_lm::LmConfig {
+        verbose: std::env::var("VERBOSE").is_ok(),
+        gather_timing: true,
         abs_precision: 1e-5,
         rel_precision: 1e-5,
+        // Stop as soon as the tolerance test says converged, the way Ceres and
+        // g2o do. The library defaults (min_iters 5, patience 3) put a floor
+        // under the iteration count, which on a problem that converges in four
+        // iterations would time a fifth that improves the cost by 4e-14.
         patience: 1,
+        min_iters: 1,
         max_iters,
         initial_lambda,
         ..Default::default()
+    };
+    if nielsen() {
+        cfg.with_driver(arael::simple_lm::NielsenLambdaDriver::default())
+    } else {
+        cfg
     }
 }
 
@@ -256,9 +363,14 @@ pub fn run_f64(ds: &Dataset) -> RunOut {
 
     // First-iteration time: a fresh solve capped at one iteration
     // (setup + first assembly + symbolic + numeric factorization + step).
-    let t0 = std::time::Instant::now();
-    let _ = solve_f64(&params, &mut g, &cfg64(1));
-    let first_iter_ms = t0.elapsed().as_secs_f64() * 1e3;
+    let (first_ms, first) = timed_f64(&params, &g, &cfg64(1));
+    let first_iter_ms = crate::probe::first_iter_ms(
+        first_ms, first.iterations, first.accepted_iterations);
+
+    // ... and a fresh two-iteration solve. The difference is one complete
+    // iteration with the setup cancelled out; see second_iter_ms.
+    let (two_ms, two) = timed_f64(&params, &g, &cfg64(2));
+    let two_iter_ms = crate::probe::two_iter_ms(two_ms, first_iter_ms, two.accepted_iterations);
 
     let t0 = std::time::Instant::now();
     let result = solve_f64(&params, &mut g, &cfg64(100));
@@ -271,6 +383,7 @@ pub fn run_f64(ds: &Dataset) -> RunOut {
         solve_ms, first_iter_ms,
         iterations: result.iterations,
         accepted: result.accepted_iterations,
+        two_iter_ms,
         poses,
     }
 }
@@ -280,9 +393,14 @@ pub fn run_f32(ds: &Dataset) -> RunOut {
     let mut params: Vec<f32> = Vec::new();
     g.serialize32(&mut params);
 
-    let t0 = std::time::Instant::now();
-    let _ = solve_f32(&params, &mut g, &cfg32(1));
-    let first_iter_ms = t0.elapsed().as_secs_f64() * 1e3;
+    let (first_ms, first) = timed_f32(&params, &g, &cfg32(1));
+    let first_iter_ms = crate::probe::first_iter_ms(
+        first_ms, first.iterations, first.accepted_iterations);
+
+    // ... and a fresh two-iteration solve. The difference is one complete
+    // iteration with the setup cancelled out; see second_iter_ms.
+    let (two_ms, two) = timed_f32(&params, &g, &cfg32(2));
+    let two_iter_ms = crate::probe::two_iter_ms(two_ms, first_iter_ms, two.accepted_iterations);
 
     let t0 = std::time::Instant::now();
     let result = solve_f32(&params, &mut g, &cfg32(100));
@@ -295,6 +413,7 @@ pub fn run_f32(ds: &Dataset) -> RunOut {
         solve_ms, first_iter_ms,
         iterations: result.iterations,
         accepted: result.accepted_iterations,
+        two_iter_ms,
         poses,
     }
 }

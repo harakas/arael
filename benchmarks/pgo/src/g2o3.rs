@@ -71,6 +71,7 @@ pub fn quat_to_matrix(q: [f64; 4]) -> matrix3d {
 
 /// Rotation matrix to (x, y, z, w) components via the runtime
 /// quaternion type.
+#[allow(dead_code)] // used by the tests and by runners that hold rotations as matrices
 pub fn matrix_to_quat(m: matrix3d) -> [f64; 4] {
     let q = quaternd::from_rotation_matrix(m);
     [q.v.x, q.v.y, q.v.z, q.t]

@@ -8,8 +8,20 @@ publish = false
 # feature -- both precisions cannot coexist in one build graph.
 [workspace]
 
+[[bin]]
+name = "factrs32-bench"
+path = "src/main.rs"
+
+# SE3 datasets. Shares the parent crate's g2o3 parser and SE3 residual by
+# path include, so f32 and f64 run the same graph.
+[[bin]]
+name = "factrs32-bench3"
+path = "src/main3.rs"
+
 [dependencies]
 factrs = { version = "0.3.0", features = ["f32"] }
+faer23 = { package = "faer", version = "0.23.2", default-features = false, features = ["std", "sparse-linalg"] }
+arael = { path = "../../.." }
 
 [profile.release]
 debug = false
