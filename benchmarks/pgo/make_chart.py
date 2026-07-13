@@ -19,56 +19,57 @@
 # star to the value (arael f32 where it does not pass the geometric
 # validation gate -- see footnote). None ms -> italic text row.
 PANELS = [
+    # full-iter: one complete iteration, t(2 iters) - t(1 iter), so the one-time
+    # setup cancels (2026-07-13, min of 16 rounds). Each bar is the system's best
+    # validated configuration by total time.
     ("M3500 (2D, 10.5k params)", 15.0, 5.0, [
-        ("arael (f32)", 3.08, "arael"),
-        ("arael (f64)", 3.28, "arael"),
-        ("g2o (GN)", 4.07, "other"),
-        ("SymForce (f32)", 4.94, "other"),
-        ("Ceres (LM)", 5.91, "other"),
-        ("factrs (GN)", 7.67, "other"),
-        ("GTSAM (GN)", 13.25, "other"),
+        ("arael (f32)", 1.86, "arael"),
+        ("arael (f64)", 2.02, "arael"),
+        ("g2o (GN)", 3.36, "other"),
+        ("SymForce (f32)", 3.50, "other"),
+        ("Ceres (LM)", 4.48, "other"),
+        ("factrs (GN)", 6.37, "other"),
+        ("GTSAM (GN)", 13.29, "other"),
     ]),
-    ("city10000 (2D, 30k params)", 32.0, 10.0, [
-        ("arael (f32)", 10.00, "arael"),
-        ("arael (f64)", 12.15, "arael"),
-        ("g2o (GN)", 19.69, "other"),
-        ("Ceres (LM)", 25.29, "other"),
-        ("SymForce (f64)", 27.56, "other"),
-        ("factrs (GN)", 30.43, "other"),
+    ("city10000 (2D, 30k params)", 26.0, 10.0, [
+        ("arael (f32)", 8.26, "arael"),
+        ("arael (f64)", 10.36, "arael"),
+        ("g2o (GN)", 16.18, "other"),
+        ("SymForce (f64)", 20.64, "other"),
+        ("Ceres (LM)", 22.05, "other"),
+        ("factrs (GN)", 24.88, "other"),
         ("GTSAM", None, "other"),  # did not converge; text row
     ]),
-    ("sphere2500 (3D, 15k params)", 70.0, 20.0, [
-        ("arael (f32)", 13.69, "arael"),
-        ("arael (f64)", 18.62, "arael"),
-        ("Ceres (LM)", 25.05, "other"),
-        ("g2o (LM)", 26.97, "other"),
-        ("GTSAM (GN)", 27.93, "other"),
-        ("factrs (GN)", 39.13, "other"),
-        ("SymForce (f32)", 66.74, "other"),
+    ("sphere2500 (3D, 15k params)", 75.0, 20.0, [
+        ("arael (f32)", 11.98, "arael"),
+        ("arael (f64)", 16.66, "arael"),
+        ("g2o (LM)", 18.80, "other"),
+        ("Ceres (LM)", 22.68, "other"),
+        ("GTSAM (GN)", 28.03, "other"),
+        ("factrs (GN)", 35.77, "other"),
+        ("SymForce (f32)", 71.45, "other"),
     ]),
-    ("parking-garage (3D, 10k params)", 40.0, 10.0, [
-        ("g2o (GN)", 8.16, "other"),
-        ("arael (f32)", 9.85, "arael*"),
-        ("arael (f64)", 10.18, "arael"),
-        ("SymForce (f64)", 12.30, "other"),
-        ("GTSAM (GN)", 13.71, "other"),
-        ("Ceres (LM)", 14.30, "other"),
-        ("factrs (GN)", 37.35, "other"),
+    ("parking-garage (3D, 10k params)", 34.0, 10.0, [
+        ("arael (f32)", 4.07, "arael*"),
+        ("arael (f64)", 4.62, "arael"),
+        ("g2o (GN)", 6.49, "other"),
+        ("SymForce (f64)", 8.63, "other"),
+        ("Ceres (LM)", 12.20, "other"),
+        ("GTSAM (GN)", 13.58, "other"),
+        ("factrs (GN)", 32.40, "other"),
     ]),
 ]
 
-TITLE = "Pose-graph optimization: time per solver step"
-SUBTITLE = ("Four datasets, eight systems, single thread (Apple M4 Pro); "
+TITLE = "Pose-graph optimization: time per iteration"
+SUBTITLE = ("Four datasets, seven systems, single thread (Apple M4 Pro); "
             "best validated configuration per system, both arael "
             "precisions. Lower is better.")
 FOOT = [
+    ("Excludes setup -- assembly, ordering and symbolic factorization -- "
+     "which every system pays once, during its first iteration."),
     ("Every bar is validated against its dataset's common optimum "
      "(cost within 1%, rigid-aligned RMSE under 5 cm)."),
-    ("tiny-solver omitted for scale: 20.1 / 80.6 / 84.9 / 95.8 ms per "
-     "step across the four panels (4.6-9.4x arael)."),
-    ("GTSAM (batch) did not converge on city10000; its incremental "
-     "ISAM2 solves it in 9.2 s."),
-    ("* arael f32 on the parking garage passes the cost gate (0.03% "
+    ("* arael f32 on the parking garage passes the cost gate (0.02% "
      "above the optimum) but not the geometric one -- a "
      "single-precision floor shared by SymForce's f32."),
 ]
