@@ -55,15 +55,15 @@ Solve problems like linear and nonlinear regression, sensor fusion, SLAM, bundle
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/charts/v0.7.1/pgo-dark.svg">
-  <img alt="2x2 bar charts of per-step solve time on M3500, city10000, sphere2500 and parking-garage: arael is fastest on M3500 (3.1 ms), city10000 (10.0 ms) and sphere2500 (13.7 ms); g2o leads the parking garage (8.2 ms vs arael 10.2 ms)" src="benchmarks/charts/v0.7.1/pgo-light.svg">
+  <img alt="2x2 bar charts of per-iteration solve time on the M3500, city10000, sphere2500 and parking-garage pose graphs, comparing arael in f32 and f64 against g2o, Ceres, SymForce, factrs and GTSAM" src="benchmarks/charts/v0.7.1/pgo-light.svg">
 </picture>
 
-Per-step solve time on the four canonical pose-graph datasets, 2D and
-3D. Per-step is the clean cross-system number -- one linearize +
-assemble + factorize + solve over the identical validated cost function,
-the same work in every system, independent of each solver's damping
-schedule -- with proper starting conditions all systems usually take the
-same number of iterations to reach a solution.
+Time per iteration on the four canonical pose-graph datasets, 2D and
+3D. One iteration is one linearize + assemble + factorize + solve over
+the identical validated cost function -- the same work in every system,
+independent of each solver's damping schedule -- measured as the
+difference between a two-iteration and a one-iteration solve, so the
+one-time setup cancels out.
 
 Full methodology, the initial-damping policy, and the cross-system
 validation harness: [benchmarks/pgo](benchmarks/pgo/README.md). A
