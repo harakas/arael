@@ -14,59 +14,93 @@
 #
 # Pure stdlib, no dependencies.
 
-# Per panel: (title, x_max, tick step, [(label, ms_per_step, kind)])
-# kind: "arael" solid blue bar, "other" neutral bar; "arael*" adds a
-# star to the value (arael f32 where it does not pass the geometric
-# validation gate -- see footnote). None ms -> italic text row.
+# Per panel: (title, [ (label, full_iter_ms, first_iter_ms, kind) ]).
+# full-iter is one complete iteration (t(2 iters) - t(1 iter), setup cancelled).
+# first-iter is that same iteration plus the setup paid once. Their difference
+# is the setup, which the second chart draws. 2026-07-13, min of 32 rounds; one
+# row per system, its best validated configuration by total time.
+# kind: "arael" solid blue, "other" neutral, "arael*" adds a star to the value.
+# full_iter None -> italic text row (did not converge).
 PANELS = [
-    # full-iter: one complete iteration, t(2 iters) - t(1 iter), so the one-time
-    # setup cancels (2026-07-13, min of 16 rounds). Each bar is the system's best
-    # validated configuration by total time.
-    ("M3500 (2D, 10.5k params)", 15.0, 5.0, [
-        ("arael (f32)", 1.86, "arael"),
-        ("arael (f64)", 2.02, "arael"),
-        ("g2o (GN)", 3.36, "other"),
-        ("SymForce (f32)", 3.50, "other"),
-        ("Ceres (LM)", 4.48, "other"),
-        ("factrs (GN)", 6.37, "other"),
-        ("GTSAM (GN)", 13.29, "other"),
+    ("M3500 (2D, 10.5k params)", [
+        ("arael (f32)", 1.86, 4.1, "arael"),
+        ("arael (f64)", 2.02, 4.5, "arael"),
+        ("g2o (GN)", 3.36, 7.2, "other"),
+        ("SymForce (f32)", 3.50, 17.9, "other"),
+        ("Ceres (LM)", 4.48, 12.3, "other"),
+        ("factrs (GN)", 6.37, 12.0, "other"),
+        ("GTSAM (GN)", 13.29, 14.0, "other"),
     ]),
-    ("city10000 (2D, 30k params)", 26.0, 10.0, [
-        ("arael (f32)", 8.26, "arael"),
-        ("arael (f64)", 10.36, "arael"),
-        ("g2o (GN)", 16.18, "other"),
-        ("SymForce (f64)", 20.64, "other"),
-        ("Ceres (LM)", 22.05, "other"),
-        ("factrs (GN)", 24.88, "other"),
-        ("GTSAM", None, "other"),  # did not converge; text row
+    ("city10000 (2D, 30k params)", [
+        ("arael (f32)", 8.26, 17.0, "arael"),
+        ("arael (f64)", 10.36, 20.0, "arael"),
+        ("g2o (GN)", 16.18, 32.2, "other"),
+        ("SymForce (f64)", 20.64, 89.0, "other"),
+        ("Ceres (LM)", 22.05, 46.8, "other"),
+        ("factrs (GN)", 24.88, 47.0, "other"),
+        ("GTSAM", None, None, "other"),
     ]),
-    ("sphere2500 (3D, 15k params)", 75.0, 20.0, [
-        ("arael (f32)", 11.98, "arael"),
-        ("arael (f64)", 16.66, "arael"),
-        ("g2o (LM)", 18.80, "other"),
-        ("Ceres (LM)", 22.68, "other"),
-        ("GTSAM (GN)", 28.03, "other"),
-        ("factrs (GN)", 35.77, "other"),
-        ("SymForce (f32)", 71.45, "other"),
+    ("sphere2500 (3D, 15k params)", [
+        ("arael (f32)", 11.98, 16.6, "arael"),
+        ("arael (f64)", 16.66, 22.3, "arael"),
+        ("g2o (LM)", 18.80, 23.2, "other"),
+        ("Ceres (LM)", 22.68, 35.2, "other"),
+        ("GTSAM (GN)", 28.03, 27.3, "other"),
+        ("factrs (GN)", 35.77, 53.2, "other"),
+        ("SymForce (f32)", 71.45, 93.7, "other"),
     ]),
-    ("parking-garage (3D, 10k params)", 34.0, 10.0, [
-        ("arael (f32)", 4.07, "arael*"),
-        ("arael (f64)", 4.62, "arael"),
-        ("g2o (GN)", 6.49, "other"),
-        ("SymForce (f64)", 8.63, "other"),
-        ("Ceres (LM)", 12.20, "other"),
-        ("GTSAM (GN)", 13.58, "other"),
-        ("factrs (GN)", 32.40, "other"),
+    ("parking-garage (3D, 10k params)", [
+        ("arael (f32)", 4.07, 8.1, "arael*"),
+        ("arael (f64)", 4.62, 8.9, "arael"),
+        ("g2o (GN)", 6.49, 12.2, "other"),
+        ("SymForce (f64)", 8.63, 30.6, "other"),
+        ("Ceres (LM)", 12.20, 26.7, "other"),
+        ("GTSAM (GN)", 13.58, 13.6, "other"),
+        ("factrs (GN)", 32.40, 56.4, "other"),
     ]),
 ]
 
-TITLE = "Pose-graph optimization: time per iteration"
-SUBTITLE = ("Four datasets, seven systems, single thread (Apple M4 Pro); "
-            "best validated configuration per system, both arael "
-            "precisions. Lower is better.")
+# Axis per panel, per chart: the two charts plot different quantities, so they
+# do not share a scale. (x_max, tick), in PANELS order.
+AXES = {
+    "iter":  [(15.0, 5.0), (26.0, 10.0), (75.0, 20.0), (34.0, 10.0)],
+    "setup": [(20.0, 5.0), (90.0, 30.0), (100.0, 25.0), (60.0, 20.0)],
+}
+
+# The two charts. "iter" is the front-page one: one bar, the durable
+# cross-system number. "setup" decomposes the first iteration into that same
+# iteration plus the one-time setup, which is a busier read -- it lives in
+# benchmarks/pgo/README.md, not on the front page.
+CHARTS = {
+    "iter": {
+        "file": "pgo",
+        "value_w": 18,
+        "title": "Pose-graph optimization: time per iteration",
+        "subtitle": ("Four datasets, seven systems, single thread (Apple M4 Pro); "
+                     "best validated configuration per system, both arael "
+                     "precisions. Lower is better."),
+        "foot": [
+            ("Excludes setup -- assembly, ordering and symbolic factorization -- "
+             "which every system pays once, during its first iteration."),
+        ],
+    },
+    "setup": {
+        "file": "pgo-setup",
+        "value_w": 60,
+        "title": "Pose-graph optimization: per-iteration cost and one-time setup",
+        "subtitle": ("Solid: one complete iteration. Faded: the setup, paid once. "
+                     "Together they are what the first iteration costs. Single "
+                     "thread (Apple M4 Pro)."),
+        "foot": [
+            ("Setup is assembly, ordering and symbolic factorization: done once, "
+             "reused by every later iteration. GTSAM redoes it each time, so shows "
+             "none."),
+        ],
+    },
+}
+
+# Appended to both charts.
 FOOT = [
-    ("Excludes setup -- assembly, ordering and symbolic factorization -- "
-     "which every system pays once, during its first iteration."),
     ("Every bar is validated against its dataset's common optimum "
      "(cost within 1%, rigid-aligned RMSE under 5 cm)."),
     ("* arael f32 on the parking garage passes the cost gate (0.02% "
@@ -90,13 +124,16 @@ THEMES = {
 FONT = ("ui-sans-serif, system-ui, -apple-system, 'Segoe UI', "
         "Helvetica, Arial, sans-serif")
 
-W = 880
+W = 984
 MARGIN = 24
-COL_GAP = 34
-PANEL_W = (W - 2 * MARGIN - COL_GAP) // 2   # 399
-LABEL_W = 104                                # row labels, right-aligned
-VALUE_W = 42                                 # value labels after bars
-PLOT_W = PANEL_W - LABEL_W - VALUE_W
+COL_GAP = 6
+PANEL_W = (W - 2 * MARGIN - COL_GAP) // 2
+# The gap between the columns is COL_GAP plus whatever LABEL_W and VALUE_W
+# reserve and do not use -- those two reserves dominate it, so they are cut to
+# what the widest label actually needs, and the plots take the width back.
+LABEL_W = 92                                 # row labels ('SymForce (f32)')
+# VALUE_W (space after the bar for its value label) is per chart: "12.0"
+# needs less room than "12.0 + 4.6". PLOT_W follows from it.
 BAR_H = 12
 PITCH = 19
 PANEL_TITLE_H = 20
@@ -114,7 +151,7 @@ def bar_path(x0, y, w, h, r):
             f"L{x0},{y + h} Z")
 
 
-def render_panel(s, c, px, py, title, x_max, tick, rows):
+def render_panel(s, c, px, py, title, x_max, tick, rows, with_setup, plot_w):
     plot_x = px + LABEL_W
     plot_top = py + PANEL_TITLE_H
     plot_h = ROWS * PITCH
@@ -123,7 +160,7 @@ def render_panel(s, c, px, py, title, x_max, tick, rows):
     # gridlines + ticks
     t = 0.0
     while t <= x_max + 1e-9:
-        x = plot_x + t / x_max * PLOT_W
+        x = plot_x + t / x_max * plot_w
         s.append(f'<line x1="{x:.1f}" y1="{plot_top}" x2="{x:.1f}" '
                  f'y2="{plot_top + plot_h + 3}" stroke="{c["grid"]}" '
                  f'stroke-width="1"/>')
@@ -132,7 +169,7 @@ def render_panel(s, c, px, py, title, x_max, tick, rows):
                  f'font-size="10" text-anchor="middle" '
                  f'fill="{c["muted"]}">{label}</text>')
         t += tick
-    for i, (label, ms, kind) in enumerate(rows):
+    for i, (label, full, first, kind) in enumerate(rows):
         is_arael = kind.startswith("arael")
         y = plot_top + i * PITCH + (PITCH - BAR_H) / 2
         ty = y + BAR_H / 2 + 3.5
@@ -140,18 +177,29 @@ def render_panel(s, c, px, py, title, x_max, tick, rows):
         name_ink = c["ink"] if is_arael else c["secondary"]
         s.append(f'<text x="{plot_x - 8}" y="{ty:.1f}" font-size="11.5" '
                  f'text-anchor="end"{weight} fill="{name_ink}">{label}</text>')
-        if ms is None:
+        if full is None:
             s.append(f'<text x="{plot_x + 4}" y="{ty:.1f}" font-size="10.5" '
                      f'font-style="italic" fill="{c["muted"]}">did not '
                      f'converge</text>')
             continue
-        w = ms / x_max * PLOT_W
         fill = c["arael"] if is_arael else c["other"]
-        s.append(f'<path d="{bar_path(plot_x, y, w, BAR_H, 3)}" fill="{fill}"/>')
         star = "*" if kind.endswith("*") else ""
-        s.append(f'<text x="{plot_x + w + 6:.1f}" y="{ty:.1f}" '
-                 f'font-size="10.5"{weight} fill="{c["ink"]}">{ms:.1f}{star}</text>')
-
+        w = full / x_max * plot_w
+        s.append(f'<path d="{bar_path(plot_x, y, w, BAR_H, 3)}" fill="{fill}"/>')
+        end, value = plot_x + w, f"{full:.1f}{star}"
+        if with_setup:
+            # Setup is a measured difference, so on a system that has none it can
+            # land marginally below zero (GTSAM rebuilds it every iteration).
+            setup = max(0.0, first - full)
+            w2 = setup / x_max * plot_w
+            if w2 > 0.5:
+                x2 = plot_x + w + 2   # 2px surface gap between the segments
+                s.append(f'<path d="{bar_path(x2, y, w2, BAR_H, 3)}" '
+                         f'fill="{fill}" fill-opacity="0.38"/>')
+            end = plot_x + w + 2 + w2
+            value = f"{full:.1f}{star} + {setup:.1f}"
+        s.append(f'<text x="{end + 6:.1f}" y="{ty:.1f}" font-size="10.5"'
+                 f'{weight} fill="{c["ink"]}">{value}</text>')
 
 
 def arael_version():
@@ -177,10 +225,12 @@ def arael_version():
     raise SystemExit("cannot find the arael version in any parent Cargo.toml")
 
 
-def render(theme):
+def render(theme, chart):
     c = THEMES[theme]
+    cfg = CHARTS[chart]
+    foot = cfg["foot"] + FOOT
     foot_y = HEADER_H + 2 * PANEL_H + ROW_GAP + 18
-    height = foot_y + len(FOOT) * 14 + 10
+    height = foot_y + len(foot) * 14 + 10
 
     s = []
     s.append(f'<svg xmlns="http://www.w3.org/2000/svg" width="{W}" '
@@ -189,20 +239,22 @@ def render(theme):
     s.append(f'<rect x="0.5" y="0.5" width="{W - 1}" height="{height - 1}" '
              f'rx="8" fill="{c["surface"]}" stroke="{c["border"]}"/>')
     s.append(f'<text x="{MARGIN}" y="30" font-size="15" font-weight="600" '
-             f'fill="{c["ink"]}">{TITLE}</text>')
+             f'fill="{c["ink"]}">{cfg["title"]}</text>')
     # The version that produced these numbers, on the image itself: a chart
     # gets copied out of the README and has to carry its own provenance.
     s.append(f'<text x="{W - MARGIN}" y="30" font-size="11.5" text-anchor="end" '
              f'fill="{c["muted"]}">arael {arael_version()}</text>')
     s.append(f'<text x="{MARGIN}" y="48" font-size="11.5" '
-             f'fill="{c["secondary"]}">{SUBTITLE}</text>')
+             f'fill="{c["secondary"]}">{cfg["subtitle"]}</text>')
 
-    for k, (title, x_max, tick, rows) in enumerate(PANELS):
+    for k, (title, rows) in enumerate(PANELS):
         px = MARGIN + (k % 2) * (PANEL_W + COL_GAP)
         py = HEADER_H + (k // 2) * (PANEL_H + ROW_GAP)
-        render_panel(s, c, px, py, title, x_max, tick, rows)
+        x_max, tick = AXES[chart][k]
+        render_panel(s, c, px, py, title, x_max, tick, rows,
+                     chart == "setup", PANEL_W - LABEL_W - cfg["value_w"])
 
-    for i, line in enumerate(FOOT):
+    for i, line in enumerate(foot):
         s.append(f'<text x="{MARGIN}" y="{foot_y + i * 14}" font-size="10.5" '
                  f'fill="{c["muted"]}">{line}</text>')
     s.append("</svg>")
@@ -214,21 +266,13 @@ def main():
     here = os.path.dirname(os.path.abspath(__file__))
     out = os.path.join(here, os.pardir, "charts", f"v{arael_version()}")
     os.makedirs(out, exist_ok=True)
-    for theme in THEMES:
-        path = os.path.join(out, f"pgo-{theme}.svg")
-        with open(path, "w") as f:
-            f.write(render(theme))
-        print(f"wrote {os.path.normpath(path)}")
+    for chart in CHARTS:
+        for theme in THEMES:
+            path = os.path.join(out, f"{CHARTS[chart]['file']}-{theme}.svg")
+            with open(path, "w") as f:
+                f.write(render(theme, chart))
+            print(f"wrote {os.path.normpath(path)}")
 
 
 if __name__ == "__main__":
     main()
-# Charts are written to benchmarks/charts/v<version>/ -- a new directory each
-# release. The path carries the version, so a chart URL never changes meaning:
-# crates.io rewrites the README's relative paths against the default branch, and
-# a versioned path still resolves to the numbers that version shipped with.
-#
-# The four charts at the old unversioned paths (benchmarks/chart-slam-loc-*.svg,
-# benchmarks/pgo/chart-*.svg) are FROZEN. Crates published up to 0.7.0 reference
-# them and their READMEs can never be changed. Do not regenerate them.
-
