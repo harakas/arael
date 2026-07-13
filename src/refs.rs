@@ -97,7 +97,7 @@ impl<T> ExactSizeIterator for RefIter<T> {}
 /// elements. Accessing an invalidated `Ref` panics, or silently resolves to a
 /// different element once its index is reused. This is by design; use
 /// [`Arena`] to hold `Ref`s across deletions.
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Vec<T> {
     inner: std::vec::Vec<T>,
 }

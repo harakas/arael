@@ -79,7 +79,7 @@ impl ParamType for crate::vect::vect3<f32> {
 /// iterations, and an `index` into the flat parameter vector. When
 /// `optimize` is false the parameter is fixed and excluded from the
 /// parameter vector.
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Param<T: ParamType> {
     #[serde(default = "default_true")]
     pub optimize: bool,
@@ -1422,6 +1422,7 @@ fn tri_idx(n: usize, i: usize, j: usize) -> usize {
 /// `N` equals `A::PARAM_COUNT`. `T` is the float type (f32 or f64, default f64).
 ///
 /// Created by generated constraint code; users rarely construct these manually.
+#[derive(Clone)]
 pub struct SelfBlock<A: Model, const N: usize, const M: usize, T: crate::utils::Float = f64> {
     indices: [u32; N],
     hessian: [T; M], // upper triangle, M = N(N+1)/2 (the macro sizes this)
@@ -1763,6 +1764,7 @@ impl<A: Model, const N: usize, const M: usize, T: crate::utils::Float> BoxedSelf
 /// `NA = A::PARAM_COUNT`, `NB = B::PARAM_COUNT`. Internal Hessian storage
 /// is NA×NB row-major (one entry per cross pair). No grad, no A-A, no B-B.
 /// `T` is the float type (f32 or f64, default f64).
+#[derive(Clone)]
 pub struct CrossBlock<A: Model, B: Model, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float = f64> {
     indices_a: [u32; NA],
     indices_b: [u32; NB],
@@ -2119,6 +2121,7 @@ impl<A: Model, B: Model, const NA: usize, const NB: usize, const P: usize, T: cr
 ///   emitted N-ary constraints where each participating entity has its own
 ///   SelfBlock holding its grad+diagonal: stores ONLY across-entity pairs,
 ///   using the `entity_offsets` span list to skip within-entity pairs.
+#[derive(Clone)]
 pub struct TripletBlock<T: crate::utils::Float = f64> {
     /// Hessian entries: upper-triangle (lo, hi, 2·dr_i·dr_j). Only cross-
     /// entity pairs are stored (within-entity pairs live in each entity's
