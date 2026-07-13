@@ -237,7 +237,7 @@ struct PosePairF {
 #[arael::model]
 #[arael(root, f32)]
 #[derive(Clone)]
-struct PathF {
+pub struct PathF {
     poses: refs::Vec<PoseF>,
     landmarks: refs::Vec<PointLandmarkF>,
     pose_pairs: std::vec::Vec<PosePairF>,

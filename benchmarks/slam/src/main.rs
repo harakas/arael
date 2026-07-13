@@ -10,6 +10,42 @@ mod tiny_runner;
 
 use scene::{Scene, SceneConfig, Solution};
 
+
+/// The settings this run used, printed before anything else: a pasted result has
+/// to carry them. Values come from the objects the run actually uses, so the
+/// header cannot drift from what ran.
+fn print_header(cfg: &SceneConfig, rounds: usize, skip_tiny: bool,
+                systems_filter: &Option<String>, ceres_solvers: &[String]) {
+    use bench_harness::header::{on_off, Header};
+    let arael_cfg = bench_harness::arael::config::<arael_runner::Path>(
+        &scene::generate(cfg), 0);
+    Header::new("slam-bench")
+        .rounds(rounds)
+        .line("scene", format!("{} poses, {} landmarks, seed {} [SLAM_POSES]",
+            cfg.num_poses, cfg.num_landmarks, cfg.seed))
+        .line("systems", format!("{} [SLAM_SYSTEMS]",
+            systems_filter.as_deref().unwrap_or("all")))
+        .line("optional systems", format!("tiny-solver {} [RUN_TINY]", on_off(skip_tiny)))
+        .line("ceres solvers", format!("{} [CERES_SOLVERS]", ceres_solvers.join(", ")))
+        .line("arael lambda0", format!("{:e} (f64), {:e} (f32) [ARAEL_LAMBDA0]",
+            bench_harness::arael::lambda0::<arael_runner::Path>(&scene::generate(cfg)),
+            bench_harness::arael::lambda0::<arael_runner::PathF>(&scene::generate(cfg))))
+        .line("arael damping", format!("{} [DRIVER: default|nielsen]",
+            if bench_harness::arael::nielsen() { "Nielsen gain-ratio driver" }
+            else { "fixed ladder (default driver)" }))
+        .line("arael backend", format!("{} [SLAM_ARAEL_SOLVER: schur|faer|cholmod]",
+            std::env::var("SLAM_ARAEL_SOLVER").unwrap_or_else(|_| "schur".to_string())))
+        .line("arael termination", format!("abs {:e}, rel {:e}, patience {}, min_iters {}",
+            arael_cfg.abs_precision, arael_cfg.rel_precision,
+            arael_cfg.patience, arael_cfg.min_iters))
+        .line("solver verbose", format!("{} [VERBOSE]",
+            if arael_cfg.verbose { "on" } else { "off" }))
+        .line("memory pass", format!("{} [SLAM_NO_MEM]",
+            if std::env::var("SLAM_NO_MEM").is_err() { "on" } else { "off" }))
+        .core()
+        .print();
+}
+
 fn config() -> SceneConfig {
     let mut cfg = SceneConfig::default();
     if let Ok(n) = std::env::var("SLAM_POSES") {
@@ -58,6 +94,26 @@ fn measure_peak_mb(which: &str, poses: usize) -> f64 {
 fn main() {
     bench_harness::pin::enforce_single_core();
     let cfg = config();
+    let rounds: usize = std::env::var("ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
+    // Ceres calls it SPARSE_NORMAL_CHOLESKY; the table says what it is.
+    fn ceres_label(solver: &str) -> String {
+        let short = solver.strip_prefix("sparse_normal_").map_or(solver, |_| "sparse_cholesky");
+        format!("ceres {}", short)
+    }
+    let ceres_solvers: Vec<String> = std::env::var("CERES_SOLVERS")
+        .unwrap_or_else(|_| "sparse_normal_cholesky,sparse_schur,iterative_schur".into())
+        .split(',').map(|s| s.to_string()).collect();
+    // tiny-solver is off by default (RUN_TINY=1 brings it back): it is an order
+    // of magnitude slower than the field and only compresses the scale the other
+    // systems are read on. The harness runs and validates it exactly as it does
+    // the others.
+    let skip_tiny = std::env::var("RUN_TINY").is_err();
+    // SLAM_SYSTEMS=<comma-separated substrings> runs only the matching rows
+    // (e.g. SLAM_SYSTEMS=arael). Unset runs everything. A filtered run
+    // validates only against whatever ran -- for iterating, not publishing.
+    let systems_filter = std::env::var("SLAM_SYSTEMS").ok();
+    print_header(&cfg, rounds, skip_tiny, &systems_filter, &ceres_solvers);
+
     let scene = scene::generate(&cfg);
 
     // Memory-measurement mode: run one solver, print peak RSS, exit.
@@ -112,7 +168,6 @@ fn main() {
     }
 
     tiny_runner::install_iter_counter();
-    let rounds: usize = std::env::var("ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
 
     let geo = Geo(&scene);
     let mut t = bench_harness::table::Table::new(&geo);
@@ -124,9 +179,6 @@ fn main() {
     if !ceres_ok {
         eprintln!("WARNING: cpp/build/ceres_slam missing (cmake -B cpp/build cpp && cmake --build cpp/build); skipping Ceres");
     }
-    let ceres_solvers: Vec<String> = std::env::var("CERES_SOLVERS")
-        .unwrap_or_else(|_| "sparse_normal_cholesky,sparse_schur,iterative_schur".into())
-        .split(',').map(|s| s.to_string()).collect();
     // Peaks reported by subprocess solvers (Ceres, SymForce, g2o), keyed by
     // row label; they measure their own VmHWM, so no re-solve is needed.
     let symforce_ok = std::path::Path::new("cpp/build/symforce_slam").exists();
@@ -142,15 +194,6 @@ fn main() {
         eprintln!("WARNING: cpp/build/gtsam_slam missing (needs libgtsam-dev); skipping GTSAM");
     }
 
-    // tiny-solver is off by default (RUN_TINY=1 brings it back): it is an order
-    // of magnitude slower than the field and only compresses the scale the other
-    // systems are read on. The harness runs and validates it exactly as it does
-    // the others.
-    let skip_tiny = std::env::var("RUN_TINY").is_err();
-    // SLAM_SYSTEMS=<comma-separated substrings> runs only the matching rows
-    // (e.g. SLAM_SYSTEMS=arael). Unset runs everything. A filtered run
-    // validates only against whatever ran -- for iterating, not publishing.
-    let systems_filter = std::env::var("SLAM_SYSTEMS").ok();
     let want = |label: &str| -> bool {
         systems_filter.as_deref().is_none_or(|f| {
             f.split(',').any(|pat| label.contains(pat.trim()))
@@ -177,14 +220,14 @@ fn main() {
         }
         if ceres_ok {
             for solver in &ceres_solvers {
-                if !want(&format!("ceres {}", solver)) {
+                if !want(&ceres_label(solver)) {
                     continue;
                 }
                 let c = run_ceres(scene_path, solver, scene.poses.len(), scene.landmarks_init.len());
                 let rel = ((c.initial_cost - initial_cost) / initial_cost).abs();
                 assert!(rel < 1e-9, "ceres initial cost {} vs reference {} (rel {:.2e})",
                     c.initial_cost, initial_cost, rel);
-                t.record(&format!("ceres {}", solver), c.row);
+                t.record(&ceres_label(solver), c.row);
             }
         }
         if symforce_ok {

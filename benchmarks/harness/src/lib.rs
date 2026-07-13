@@ -12,6 +12,7 @@
 
 pub mod arael;
 pub mod external;
+pub mod header;
 #[cfg(feature = "factrs")]
 pub mod factrs;
 pub mod mem;

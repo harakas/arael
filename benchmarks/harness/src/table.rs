@@ -143,6 +143,7 @@ impl<'a, G: Geometry> Table<'a, G> {
             (cost - best) / best < 1e-2 && G::distance(&best_solution, &row.solution) < 0.05
         };
 
+        let w = self.cells.iter().map(|(l, _, _)| l.len()).max().unwrap_or(18).max(6);
         let any_mem = self.cells.iter().any(|(_, r, _)| r.peak_mb.is_some());
         let mem_head = if any_mem { format!("{:>9}", "peak MB") } else { String::new() };
         // ms/iter divides the whole solve by every ATTEMPT, so it carries the
@@ -151,9 +152,9 @@ impl<'a, G: Geometry> Table<'a, G> {
         // t(1 iter), the minima taken before the subtraction so a noisy pair
         // cannot difference into nonsense. It is blank where t(1) was not one
         // clean accepted iteration.
-        println!("\n{:<18} {:>10} {:>9} {:>10} {:>10} {:>12}{} {:>14}",
+        println!("\n{:<w$} {:>10} {:>9} {:>10} {:>10} {:>12}{} {:>14}",
             "system", "total ms", "iters", "ms/iter", "full-iter", "1st-iter ms",
-            mem_head, "final cost");
+            mem_head, "final cost", w = w);
         for (label, row, cost) in &self.cells {
             let iters = match row.accepted {
                 Some(a) => format!("{}({})", a, row.iterations),
@@ -179,10 +180,10 @@ impl<'a, G: Geometry> Table<'a, G> {
                 format!("  <- did not reach the common optimum (distance {:.4} m)",
                     G::distance(&best_solution, &row.solution))
             };
-            println!("{:<18} {:>10.1} {:>9} {:>10.2} {:>10} {:>12}{} {:>14.4}{}",
+            println!("{:<w$} {:>10.1} {:>9} {:>10.2} {:>10} {:>12}{} {:>14.4}{}",
                 label, row.solve_ms, iters,
                 row.solve_ms / row.iterations.max(1) as f64,
-                full, fmt1(row.first_iter_ms), mem, cost, miss);
+                full, fmt1(row.first_iter_ms), mem, cost, miss, w = w);
         }
 
         let mut notes = self.notes.clone();
@@ -203,7 +204,7 @@ impl<'a, G: Geometry> Table<'a, G> {
             "no external system confirms the best cost {} -- cannot validate", best);
 
         for note in &notes {
-            println!("{:<18} {}", "", note);
+            println!("{:<w$} {}", "", note, w = w);
         }
         let conv = self.cells.iter().filter(|(_, r, c)| converged(r, *c)).count();
         println!("validation: {}/{} systems at the common optimum ({:.4}: cost within \
