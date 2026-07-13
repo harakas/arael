@@ -70,6 +70,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
+name = "bench-harness"
+version = "0.1.0"
+dependencies = [
+ "arael",
+ "libc",
+ "num",
+ "serde_json",
+]
+
+[[package]]
 name = "bitflags"
 version = "2.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -265,6 +275,7 @@ name = "factrs32-bench"
 version = "0.1.0"
 dependencies = [
  "arael",
+ "bench-harness",
  "factrs",
  "faer 0.23.2",
 ]
@@ -822,6 +833,12 @@ checksum = "a4f0c30c76f2f4ccee3fe55a2435f691ca00c0e4bd87abe4f4a851b1d4dac39b"
 dependencies = [
  "rustversion",
 ]
+
+[[package]]
+name = "itoa"
+version = "1.0.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
 name = "js-sys"
@@ -1510,6 +1527,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_json"
+version = "1.0.150"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e8014e44b4736ed0538adeecded0fce2a272f22dc9578a7eb6b2d9993c74cfb9"
+dependencies = [
+ "itoa",
+ "memchr",
+ "serde",
+ "serde_core",
+ "zmij",
+]
+
+[[package]]
 name = "simba"
 version = "0.9.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1751,3 +1781,9 @@ dependencies = [
  "quote",
  "syn 2.0.118",
 ]
+
+[[package]]
+name = "zmij"
+version = "1.0.23"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "29666d0abbfad1e3dc4dcf6144730dd3a3ab225bbbdac83319345b1b44ccfc1b"

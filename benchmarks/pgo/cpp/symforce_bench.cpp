@@ -12,6 +12,7 @@
 // initial damping (default 1e-10 per the README's initial-damping
 // policy; SymForce ships 1.0).
 
+#include "../../cpp/bench.h"
 #include <algorithm>
 #include <type_traits>
 #include <chrono>
@@ -32,8 +33,6 @@
 #include "symforce_gen/between_factor.h"
 #include "symforce_gen/prior_factor.h"
 
-// Kept in step with src/probe.rs.
-static const int PROBE_SUBROUNDS = 2;
 
 struct PoseIn {
     double x, y, th;
@@ -67,13 +66,8 @@ static void parse_g2o(const char* path, bool unit, std::vector<PoseIn>& poses, s
     }
 }
 
-struct RunResult {
-    double ms;
-    int accepted, total;
-};
-
 template <typename Scalar>
-RunResult solve(const std::vector<PoseIn>& poses, const std::vector<EdgeIn>& edges,
+bench::Result solve(const std::vector<PoseIn>& poses, const std::vector<EdgeIn>& edges,
                 int max_iters, std::vector<PoseIn>* out) {
     sym::Values<Scalar> values;
     for (size_t i = 0; i < poses.size(); i++) {
@@ -145,7 +139,7 @@ RunResult solve(const std::vector<PoseIn>& poses, const std::vector<EdgeIn>& edg
     // SymForce records the initial error state as an entry with iteration = -1,
     // before any step is taken. It is not an attempt; discount it so accepted
     // and total mean the same here as in every other runner.
-    return RunResult{ms, accepted, std::max(0, (int)stats.iterations.size() - 1)};
+    return bench::Result{ms, accepted, std::max(0, (int)stats.iterations.size() - 1)};
 }
 
 template <typename Scalar>
@@ -154,38 +148,15 @@ void run(const char* g2o, const char* poses_out, bool unit) {
     std::vector<EdgeIn> edges;
     parse_g2o(g2o, unit, poses, edges);
 
-    // The first solve in a process pays cold allocator and cache costs the
-    // later ones do not; discard it so the one- and two-iteration probes are
-    // timed on equal footing.
-    (void)solve<Scalar>(poses, edges, 1, nullptr);
-    // Sub-rounds: a complete iteration is read off as t(2 iters) - t(1 iter),
-    // and differencing two noisy measurements amplifies the noise, so each
-    // probe is the fastest of PROBE_SUBROUNDS runs of itself.
-    RunResult first = solve<Scalar>(poses, edges, 1, nullptr);
-    RunResult two = solve<Scalar>(poses, edges, 2, nullptr);
-    for (int i = 1; i < PROBE_SUBROUNDS; ++i) {
-        RunResult f = solve<Scalar>(poses, edges, 1, nullptr);
-        if (f.ms < first.ms) first = f;
-        RunResult t = solve<Scalar>(poses, edges, 2, nullptr);
-        if (t.ms < two.ms) two = t;
-    }
     std::vector<PoseIn> result;
-    RunResult full = solve<Scalar>(poses, edges, 100, &result);
+    bench::report(
+        [&](int n) { return solve<Scalar>(poses, edges, n, nullptr); },
+        [&]() { return solve<Scalar>(poses, edges, 100, &result); });
 
     std::ofstream out(poses_out);
     for (const PoseIn& p : result) {
         out << p.x << " " << p.y << " " << p.th << "\n";
     }
-    std::string cpus = "?";
-    std::ifstream st("/proc/self/status");
-    std::string l;
-    while (std::getline(st, l)) {
-        if (l.rfind("Cpus_allowed_list:", 0) == 0) {
-            cpus = l.substr(l.find_last_of(" \t") + 1);
-        }
-    }
-    printf("{\"solve_ms\": %.3f, \"first_iter_ms\": %.3f, \"second_run_ms\": %.3f, \"second_accepted\": %d, \"first_attempts\": %d, \"first_accepted\": %d, \"iterations\": %d, \"accepted\": %d, \"cpus_allowed\": \"%s\"}\n",
-           full.ms, first.ms, two.ms, two.accepted, first.total, first.accepted, full.total, full.accepted, cpus.c_str());
 }
 
 int main(int argc, char** argv) {

@@ -7,7 +7,8 @@
 // canonical quaternion-vector between residual (see g2o3.rs), weighted
 // by the edge's upper-triangular 6x6 sqrt-information blocks.
 
-use crate::arael_pipeline::{run, Model as Pipeline, RunOut as Out};
+use bench_harness::arael::{run, Model as Pipeline};
+use bench_harness::table::Row;
 use crate::g2o3::{Dataset3, Pose3In};
 use arael::matrix::{matrix3d, matrix3f};
 use arael::model::{CrossBlock, Param, QuaternionParam, SelfBlock};
@@ -205,13 +206,13 @@ const LAMBDA0_3D: f64 = 1e-10;
 
 impl Pipeline for Graph3 {
     type Scalar = f64;
-    type Dataset = Dataset3;
-    type Pose = Pose3In;
+    type Input = Dataset3;
+    type Solution = Vec<Pose3In>;
     fn lambda0() -> f64 { LAMBDA0_3D }
     fn build(ds: &Dataset3) -> Self { build_f64(ds) }
     fn serialize(&mut self, out: &mut Vec<f64>) { self.serialize64(out); }
     fn deserialize(&mut self, x: &[f64]) { self.deserialize64(x); }
-    fn poses(&self) -> Vec<Pose3In> {
+    fn solution(&self) -> Vec<Pose3In> {
         self.poses.iter()
             .map(|p| Pose3In {
                 t: p.pos.value,
@@ -227,13 +228,13 @@ impl Pipeline for Graph3 {
 
 impl Pipeline for Graph3F {
     type Scalar = f32;
-    type Dataset = Dataset3;
-    type Pose = Pose3In;
+    type Input = Dataset3;
+    type Solution = Vec<Pose3In>;
     fn lambda0() -> f64 { LAMBDA0_3D }
     fn build(ds: &Dataset3) -> Self { build_f32(ds) }
     fn serialize(&mut self, out: &mut Vec<f32>) { self.serialize32(out); }
     fn deserialize(&mut self, x: &[f32]) { self.deserialize32(x); }
-    fn poses(&self) -> Vec<Pose3In> {
+    fn solution(&self) -> Vec<Pose3In> {
         self.poses.iter()
             .map(|p| Pose3In {
                 t: vect3d::from(p.pos.value),
@@ -248,7 +249,7 @@ impl Pipeline for Graph3F {
     }
 }
 
-pub type RunOut3 = Out<Pose3In>;
+pub type RunOut3 = Row<Vec<Pose3In>>;
 
 pub fn run_f64(ds: &Dataset3) -> RunOut3 { run::<Graph3>(ds) }
 pub fn run_f32(ds: &Dataset3) -> RunOut3 { run::<Graph3F>(ds) }
@@ -349,12 +350,12 @@ pub(crate) mod tests {
         assert!(reference_cost3(&ds, &ds.poses) > 1e-2);
 
         let out = run_f64(&ds);
-        assert!(reference_cost3(&ds, &out.poses) < 1e-8,
-            "f64 did not reach the optimum: {}", reference_cost3(&ds, &out.poses));
-        assert!(aligned_rmse3(&out.poses, &truth) < 1e-4);
+        assert!(reference_cost3(&ds, &out.solution) < 1e-8,
+            "f64 did not reach the optimum: {}", reference_cost3(&ds, &out.solution));
+        assert!(aligned_rmse3(&out.solution, &truth) < 1e-4);
 
         let out32 = run_f32(&ds);
-        assert!(reference_cost3(&ds, &out32.poses) < 1e-4,
-            "f32 did not reach the optimum: {}", reference_cost3(&ds, &out32.poses));
+        assert!(reference_cost3(&ds, &out32.solution) < 1e-4,
+            "f32 did not reach the optimum: {}", reference_cost3(&ds, &out32.solution));
     }
 }

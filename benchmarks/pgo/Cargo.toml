@@ -10,6 +10,7 @@ publish = false
 
 [dependencies]
 arael = { path = "../.." }
+bench-harness = { path = "../harness" }
 tiny-solver = "0.18.0"
 serde_json = "1"
 num = "0.4"

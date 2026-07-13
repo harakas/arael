@@ -14,9 +14,6 @@
 #[path = "../../src/factrs_counting.rs"]
 mod factrs_counting;
 
-#[path = "../../src/probe.rs"]
-mod probe;
-
 #[path = "../../src/g2o.rs"]
 mod g2o;
 
@@ -35,11 +32,12 @@ fn main() {
     };
 
     let mut text = String::new();
-    for p in &out.poses {
+    for p in &out.solution {
         text.push_str(&format!("{} {} {}\n", p.x, p.y, p.th));
     }
     std::fs::write(poses_out, text).unwrap();
 
     println!("{}", factrs_counting::protocol_line(
-        out.solve_ms, out.first_iter_ms, out.iterations, out.accepted, out.two_iter_ms));
+        out.solve_ms, out.first_iter_ms, out.iterations,
+        out.accepted.unwrap_or(out.iterations), out.full_ms));
 }

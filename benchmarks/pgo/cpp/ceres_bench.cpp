@@ -6,6 +6,7 @@
 // Timing wraps only ceres::Solve. Single-threaded by option; the CPU
 // pin is inherited from the harness and reported back for the assert.
 
+#include "../../cpp/bench.h"
 #include <ceres/ceres.h>
 #include <cmath>
 #include <cstdio>
@@ -14,8 +15,6 @@
 #include <string>
 #include <vector>
 
-// Kept in step with src/probe.rs.
-static const int PROBE_SUBROUNDS = 2;
 
 struct Pose {
     double x, y, th;
@@ -101,12 +100,7 @@ static void parse_g2o(const char* path, bool unit, std::vector<Pose>& poses, std
     }
 }
 
-struct RunResult {
-    double ms;
-    int accepted, total;
-};
-
-static RunResult solve(std::vector<Pose> poses, const std::vector<Edge>& edges,
+static bench::Result solve(std::vector<Pose> poses, const std::vector<Edge>& edges,
                        const Pose& prior, int max_iters, std::vector<Pose>* out) {
     // Parameter layout follows the Ceres example: separate (x, y) and
     // yaw blocks, yaw on an angle manifold.
@@ -158,7 +152,7 @@ static RunResult solve(std::vector<Pose> poses, const std::vector<Edge>& edges,
     // -- as a successful step. It is not one; discount it so accepted/total
     // mean the same here as in every other runner.
     const int accepted = std::max(0, (int)summary.num_successful_steps - 1);
-    return RunResult{ms, accepted,
+    return bench::Result{ms, accepted,
                      accepted + (int)summary.num_unsuccessful_steps};
 }
 
@@ -170,38 +164,13 @@ int main(int argc, char** argv) {
     parse_g2o(argv[1], unit, poses, edges);
     Pose prior = poses[0];
 
-    // The first solve in a process pays cold allocator and cache costs the
-    // later ones do not; discard it so the one- and two-iteration probes are
-    // timed on equal footing.
-    (void)solve(poses, edges, prior, 1, nullptr);
-    // Sub-rounds: a complete iteration is read off as t(2 iters) - t(1 iter),
-    // and differencing two noisy measurements amplifies the noise, so each
-    // probe is the fastest of PROBE_SUBROUNDS runs of itself.
-    RunResult first = solve(poses, edges, prior, 1, nullptr);
-    RunResult two = solve(poses, edges, prior, 2, nullptr);
-    for (int i = 1; i < PROBE_SUBROUNDS; ++i) {
-        RunResult f = solve(poses, edges, prior, 1, nullptr);
-        if (f.ms < first.ms) first = f;
-        RunResult t = solve(poses, edges, prior, 2, nullptr);
-        if (t.ms < two.ms) two = t;
-    }
     std::vector<Pose> result;
-    RunResult full = solve(poses, edges, prior, 100, &result);
+    bench::report(
+        [&](int n) { return solve(poses, edges, prior, n, nullptr); },
+        [&]() { return solve(poses, edges, prior, 100, &result); });
 
     std::ofstream out(argv[2]);
-    for (const Pose& p : result) {
-        out << p.x << " " << p.y << " " << p.th << "\n";
-    }
+    for (const Pose& p : result) out << p.x << " " << p.y << " " << p.th << "\n";
 
-    std::string cpus = "?";
-    std::ifstream st("/proc/self/status");
-    std::string l;
-    while (std::getline(st, l)) {
-        if (l.rfind("Cpus_allowed_list:", 0) == 0) {
-            cpus = l.substr(l.find_last_of(" \t") + 1);
-        }
-    }
-    printf("{\"solve_ms\": %.3f, \"first_iter_ms\": %.3f, \"second_run_ms\": %.3f, \"second_accepted\": %d, \"first_attempts\": %d, \"first_accepted\": %d, \"iterations\": %d, \"accepted\": %d, \"cpus_allowed\": \"%s\"}\n",
-           full.ms, first.ms, two.ms, two.accepted, first.total, first.accepted, full.total, full.accepted, cpus.c_str());
     return 0;
 }

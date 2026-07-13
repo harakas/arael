@@ -17,6 +17,7 @@
 // prints JSON {solve_ms, first_iter_ms, iterations, initial_chi2,
 // cpus_allowed}, writes "x y z qx qy qz qw" lines.
 
+#include "../../cpp/bench.h"
 #include <g2o/core/block_solver.h>
 #include <g2o/core/optimization_algorithm_gauss_newton.h>
 #include <g2o/core/optimization_algorithm_levenberg.h>
@@ -33,8 +34,6 @@
 #include <string>
 #include <vector>
 
-// Kept in step with src/probe.rs.
-static const int PROBE_SUBROUNDS = 2;
 
 struct PoseIn {
     Eigen::Vector3d t;
@@ -86,12 +85,7 @@ static void parse_g2o(const char* path, std::vector<PoseIn>& poses, std::vector<
     }
 }
 
-struct RunResult {
-    double ms;
-    int iterations;   // accepted outer iterations
-    int attempts;     // accepted + damping retries
-    double initial_chi2;
-};
+
 
 // g2o keeps its damping retries inside OptimizationAlgorithmLevenberg::solve()
 // and reports the count only for the round just finished (levenbergIteration()
@@ -108,7 +102,7 @@ struct TrialCounter : public g2o::HyperGraphAction {
     }
 };
 
-static RunResult solve(const std::vector<PoseIn>& poses, const std::vector<EdgeIn>& edges,
+static bench::Result solve(const std::vector<PoseIn>& poses, const std::vector<EdgeIn>& edges,
                        bool lm, int max_iters, std::vector<PoseIn>* out) {
     using BlockSolver = g2o::BlockSolver<g2o::BlockSolverTraits<-1, -1>>;
     auto linear = std::make_unique<g2o::LinearSolverCholmod<BlockSolver::PoseMatrixType>>();
@@ -191,7 +185,7 @@ static RunResult solve(const std::vector<PoseIn>& poses, const std::vector<EdgeI
             (*out)[i].q = Eigen::Quaterniond(v->estimate().rotation());
         }
     }
-    return RunResult{ms, iters, lm ? counter->trials : iters, initial_chi2};
+    return bench::Result{ms, iters, lm ? counter->trials : iters, initial_chi2};
 }
 
 int main(int argc, char** argv) {
@@ -201,42 +195,15 @@ int main(int argc, char** argv) {
     std::vector<EdgeIn> edges;
     parse_g2o(argv[1], poses, edges);
 
-    // The first solve in a process pays cold allocator and cache costs the
-    // later ones do not; discard it so the one- and two-iteration probes are
-    // timed on equal footing.
-    (void)solve(poses, edges, lm, 1, nullptr);
-    // Sub-rounds: a complete iteration is read off as t(2 iters) - t(1 iter),
-    // and differencing two noisy measurements amplifies the noise, so each
-    // probe is the fastest of PROBE_SUBROUNDS runs of itself.
-    RunResult first = solve(poses, edges, lm, 1, nullptr);
-    RunResult two = solve(poses, edges, lm, 2, nullptr);
-    for (int i = 1; i < PROBE_SUBROUNDS; ++i) {
-        RunResult f = solve(poses, edges, lm, 1, nullptr);
-        if (f.ms < first.ms) first = f;
-        RunResult t = solve(poses, edges, lm, 2, nullptr);
-        if (t.ms < two.ms) two = t;
-    }
     std::vector<PoseIn> result;
-    RunResult full = solve(poses, edges, lm, 100, &result);
+    bench::report(
+        [&](int n) { return solve(poses, edges, lm, n, nullptr); },
+        [&]() { return solve(poses, edges, lm, 100, &result); });
 
     std::ofstream out(argv[3]);
     for (const PoseIn& p : result) {
         out << p.t.x() << " " << p.t.y() << " " << p.t.z() << " "
             << p.q.x() << " " << p.q.y() << " " << p.q.z() << " " << p.q.w() << "\n";
     }
-
-    std::string cpus = "?";
-    std::ifstream st("/proc/self/status");
-    std::string l;
-    while (std::getline(st, l)) {
-        if (l.rfind("Cpus_allowed_list:", 0) == 0) {
-            cpus = l.substr(l.find_last_of(" \t") + 1);
-        }
-    }
-    printf("{\"solve_ms\": %.3f, \"first_iter_ms\": %.3f, \"second_run_ms\": %.3f, \"second_accepted\": %d, "
-           "\"iterations\": %d, \"accepted\": %d, \"first_attempts\": %d, "
-           "\"initial_chi2\": %.6f, \"cpus_allowed\": \"%s\"}\n",
-           full.ms, first.ms, two.ms, two.iterations, full.attempts, full.iterations, first.attempts,
-           full.initial_chi2, cpus.c_str());
     return 0;
 }

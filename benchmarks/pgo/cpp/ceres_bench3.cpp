@@ -11,6 +11,7 @@
 // initial_cost, cpus_allowed}, writes "x y z qx qy qz qw" lines.
 // The 3D datasets always use the file's information matrices.
 
+#include "../../cpp/bench.h"
 #include <ceres/ceres.h>
 #include <Eigen/Dense>
 #include <cstdio>
@@ -19,8 +20,6 @@
 #include <string>
 #include <vector>
 
-// Kept in step with src/probe.rs.
-static const int PROBE_SUBROUNDS = 2;
 
 struct PoseIn {
     Eigen::Vector3d t;
@@ -112,13 +111,7 @@ struct PriorError3 {
     PoseIn p_;
 };
 
-struct RunResult {
-    double ms;
-    int accepted, total;
-    double initial_cost; // full (non-halved) cost, comparable to the reference
-};
-
-static RunResult solve(const std::vector<PoseIn>& poses_in, const std::vector<EdgeIn>& edges,
+static bench::Result solve(const std::vector<PoseIn>& poses_in, const std::vector<EdgeIn>& edges,
                        int max_iters, std::vector<PoseIn>* out) {
     std::vector<double> t(poses_in.size() * 3), q(poses_in.size() * 4);
     for (size_t i = 0; i < poses_in.size(); i++) {
@@ -168,10 +161,9 @@ static RunResult solve(const std::vector<PoseIn>& poses_in, const std::vector<Ed
     // -- as a successful step. It is not one; discount it so accepted/total
     // mean the same here as in every other runner.
     const int accepted = std::max(0, summary.num_successful_steps - 1);
-    return RunResult{summary.total_time_in_seconds * 1e3,
-                     accepted,
-                     accepted + summary.num_unsuccessful_steps,
-                     2.0 * summary.initial_cost};
+    return bench::Result{summary.total_time_in_seconds * 1e3, accepted,
+                         accepted + summary.num_unsuccessful_steps,
+                         2.0 * summary.initial_cost};
 }
 
 int main(int argc, char** argv) {
@@ -180,23 +172,10 @@ int main(int argc, char** argv) {
     std::vector<EdgeIn> edges;
     parse_g2o(argv[1], poses, edges);
 
-    // The first solve in a process pays cold allocator and cache costs the
-    // later ones do not; discard it so the one- and two-iteration probes are
-    // timed on equal footing.
-    (void)solve(poses, edges, 1, nullptr);
-    // Sub-rounds: a complete iteration is read off as t(2 iters) - t(1 iter),
-    // and differencing two noisy measurements amplifies the noise, so each
-    // probe is the fastest of PROBE_SUBROUNDS runs of itself.
-    RunResult first = solve(poses, edges, 1, nullptr);
-    RunResult two = solve(poses, edges, 2, nullptr);
-    for (int i = 1; i < PROBE_SUBROUNDS; ++i) {
-        RunResult f = solve(poses, edges, 1, nullptr);
-        if (f.ms < first.ms) first = f;
-        RunResult t = solve(poses, edges, 2, nullptr);
-        if (t.ms < two.ms) two = t;
-    }
     std::vector<PoseIn> result;
-    RunResult full = solve(poses, edges, 100, &result);
+    bench::report(
+        [&](int n) { return solve(poses, edges, n, nullptr); },
+        [&]() { return solve(poses, edges, 100, &result); });
 
     std::ofstream out(argv[2]);
     for (const PoseIn& p : result) {
@@ -204,16 +183,5 @@ int main(int argc, char** argv) {
             << p.q.x() << " " << p.q.y() << " " << p.q.z() << " " << p.q.w() << "\n";
     }
 
-    std::string cpus = "?";
-    std::ifstream st("/proc/self/status");
-    std::string l;
-    while (std::getline(st, l)) {
-        if (l.rfind("Cpus_allowed_list:", 0) == 0) {
-            cpus = l.substr(l.find_last_of(" \t") + 1);
-        }
-    }
-    printf("{\"solve_ms\": %.3f, \"first_iter_ms\": %.3f, \"second_run_ms\": %.3f, \"second_accepted\": %d, \"first_attempts\": %d, \"first_accepted\": %d, \"iterations\": %d, "
-           "\"accepted\": %d, \"initial_cost\": %.6f, \"cpus_allowed\": \"%s\"}\n",
-           full.ms, first.ms, two.ms, two.accepted, first.total, first.accepted, full.total, full.accepted, full.initial_cost, cpus.c_str());
     return 0;
 }

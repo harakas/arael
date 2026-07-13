@@ -9,12 +9,9 @@
 // - all systems stop on the same criterion class (abs/rel improvement
 //   below 1e-5 -- the tiny-solver and GTSAM defaults).
 
-mod arael_pipeline;
-mod table;
 mod arael_runner;
 mod arael_runner3;
 mod factrs_counting;
-mod probe;
 mod factrs_runner;
 mod factrs_runner3;
 mod g2o;
@@ -39,45 +36,9 @@ fn gtsam_available() -> Option<String> {
 // line {solve_ms, first_iter_ms, iterations, accepted?, cpus_allowed}
 // on stdout, "x y theta" lines in poses_out. Asserts the subprocess
 // inherited the single-core pin.
-fn run_external(mut cmd: std::process::Command, poses_out: &str, n_poses: usize) -> (f64, f64, usize, Option<usize>, Option<f64>, Vec<PoseIn>) {
-    let out = cmd.output().unwrap_or_else(|e| panic!("failed to run {:?}: {}", cmd, e));
-    assert!(out.status.success(), "{:?} failed: {}", cmd, String::from_utf8_lossy(&out.stderr));
-    let text = String::from_utf8(out.stdout).unwrap();
-    let line = text.lines().rev().find(|l| l.contains("solve_ms"))
-        .unwrap_or_else(|| panic!("no protocol line from {:?}", cmd));
-    let json: serde_json::Value = serde_json::from_str(line)
-        .unwrap_or_else(|e| panic!("bad protocol line from {:?}: {} -- {}", cmd, e, line));
-    let get = |key: &str| -> Option<f64> { json.get(key)?.as_f64() };
-    let solve_ms = get("solve_ms").expect("solve_ms");
-    let first_iter_ms = get("first_iter_ms").expect("first_iter_ms");
-    let iterations = get("iterations").expect("iterations") as usize;
-    let accepted = get("accepted").map(|v| v as usize);
-    // A complete iteration, measured: t(2 iterations) - t(1 iteration), the
-    // setup cancelling out. Only meaningful if that second step was ACCEPTED --
-    // a rejected one only redoes the linear solve and is not an iteration.
-    // t(2 iterations), raw. One iteration is this minus first_iter_ms, but the
-    // minima over rounds have to be taken BEFORE the subtraction: differencing
-    // two noisy cold runs can come out negative.
-    // A first-iteration time is only meaningful if that iteration WAS one clean
-    // iteration: a single attempt, accepted. A runner that rejected a step in
-    // it (g2o at the wrong damping burned six trials there) reports a number
-    // that is mostly wasted factorizations, and every quantity derived from it
-    // -- full-iter above all, which is t(2) - t(1) -- inherits the lie. Runners
-    // that report the counts get held to them; the number is dropped otherwise.
-    let first_iter_clean = match (get("first_attempts"), get("first_accepted")) {
-        (Some(a), Some(ok)) => a as usize == 1 && ok as usize == 1,
-        _ => true, // runner does not report it; nothing to check against
-    };
-    let full_ms = match (get("second_run_ms"), get("second_accepted")) {
-        (Some(ms), Some(acc)) if acc as usize >= 2 && first_iter_clean => Some(ms),
-        _ => None,
-    };
-    // NaN travels through the min-of-rounds plumbing and prints as "-".
-    let first_iter_ms = if first_iter_clean { first_iter_ms } else { f64::NAN };
-    // Active check: the subprocess must have inherited the pin.
-    let core = std::env::var("PGO_BENCH_CORE").unwrap();
-    assert!(json["cpus_allowed"].as_str() == Some(core.as_str()),
-        "{:?} not pinned to CPU {}: {}", cmd, core, line);
+fn run_external(cmd: std::process::Command, poses_out: &str, n_poses: usize)
+    -> bench_harness::table::Row<Vec<PoseIn>> {
+    let p = bench_harness::external::run(cmd);
     let poses: Vec<PoseIn> = std::fs::read_to_string(poses_out).unwrap()
         .lines()
         .map(|l| {
@@ -86,10 +47,15 @@ fn run_external(mut cmd: std::process::Command, poses_out: &str, n_poses: usize)
         })
         .collect();
     assert_eq!(poses.len(), n_poses);
-    (solve_ms, first_iter_ms, iterations, accepted, full_ms, poses)
+    let mut row = bench_harness::table::Row::new(
+        p.solve_ms, p.first_iter_ms, p.iterations, poses);
+    row.accepted = p.accepted;
+    row.full_ms = p.full_ms;
+    row.peak_mb = p.json.get("peak_mb").and_then(|v| v.as_f64());
+    row
 }
 
-fn run_gtsam(python: &str, ds_path: &str, kind: &str, weighted: bool, n_poses: usize) -> (f64, f64, usize, Option<usize>, Option<f64>, Vec<PoseIn>) {
+fn run_gtsam(python: &str, ds_path: &str, kind: &str, weighted: bool, n_poses: usize) -> bench_harness::table::Row<Vec<PoseIn>> {
     let poses_out = format!("/tmp/gtsam_poses_{}.txt", kind);
     let weights = if weighted { "info" } else { "unit" };
     let mut cmd = std::process::Command::new(python);
@@ -97,7 +63,7 @@ fn run_gtsam(python: &str, ds_path: &str, kind: &str, weighted: bool, n_poses: u
     run_external(cmd, &poses_out, n_poses)
 }
 
-fn run_ceres(ds_path: &str, weighted: bool, n_poses: usize) -> (f64, f64, usize, Option<usize>, Option<f64>, Vec<PoseIn>) {
+fn run_ceres(ds_path: &str, weighted: bool, n_poses: usize) -> bench_harness::table::Row<Vec<PoseIn>> {
     let mut cmd = std::process::Command::new("cpp/build/ceres_bench");
     cmd.args([ds_path, "/tmp/ceres_poses.txt", if weighted { "info" } else { "unit" }]);
     run_external(cmd, "/tmp/ceres_poses.txt", n_poses)
@@ -108,7 +74,7 @@ fn run_ceres(ds_path: &str, weighted: bool, n_poses: usize) -> (f64, f64, usize,
 // definiteness at 30000 parameters and its lambda floor of 1e-10 cannot
 // regularize it). A crashed run is a reportable outcome, not a harness
 // failure.
-fn run_factrs32(ds_path: &str, kind: &str, weighted: bool, n_poses: usize) -> Option<(f64, f64, usize, Option<usize>, Option<f64>, Vec<PoseIn>)> {
+fn run_factrs32(ds_path: &str, kind: &str, weighted: bool, n_poses: usize) -> Option<bench_harness::table::Row<Vec<PoseIn>>> {
     let poses_out = format!("/tmp/factrs32_poses_{}.txt", kind);
     let mut probe = std::process::Command::new("factrs32/target/release/factrs32-bench");
     probe.args([ds_path, kind, &poses_out, if weighted { "info" } else { "unit" }]);
@@ -124,7 +90,7 @@ fn run_factrs32(ds_path: &str, kind: &str, weighted: bool, n_poses: usize) -> Op
 // Same for the SE3 datasets. The graph is the parent crate's SE3 runner
 // compiled against factrs's f32 dtype (see factrs32/src/main3.rs).
 fn run_factrs32_3d(ds_path: &str, kind: &str, n_poses: usize)
-    -> Option<(f64, f64, usize, Option<usize>, Option<f64>, Vec<g2o3::Pose3In>)> {
+    -> Option<bench_harness::table::Row<Vec<g2o3::Pose3In>>> {
     let poses_out = format!("/tmp/factrs32_3d_poses_{}.txt", kind);
     let bin = "factrs32/target/release/factrs32-bench3";
     let mut probe = std::process::Command::new(bin);
@@ -147,57 +113,25 @@ fn g2o_lambda(dataset: &str) -> &'static str {
     if dataset.contains("sphere") { "1e-6" } else { "1e-12" }
 }
 
-// A measured millisecond value, or "-" when the harness could not measure it
-// cleanly (see first_iter_clean).
-fn fmt1(v: f64) -> String {
-    if v.is_finite() { format!("{:.1}", v) } else { "-".to_string() }
+
+fn run_g2o(ds_path: &str, kind: &str, weighted: bool, n_poses: usize)
+    -> bench_harness::table::Row<Vec<PoseIn>> {
+    let poses_out = format!("/tmp/g2o_poses_{}.txt", kind);
+    let mut cmd = std::process::Command::new("cpp/build/g2o_bench");
+    cmd.args([ds_path, kind, &poses_out, if weighted { "info" } else { "unit" }]);
+    // g2o's own initial chi2 equals the reference cost bit-for-bit (the edges
+    // carry the conjugated information); the 2D table checks it in the runner.
+    cmd.env("G2O_LAMBDA_INIT", g2o_lambda(ds_path));
+    run_external(cmd, &poses_out, n_poses)
 }
 
-fn run_symforce(ds_path: &str, prec: &str, weighted: bool, n_poses: usize) -> (f64, f64, usize, Option<usize>, Option<f64>, Vec<PoseIn>) {
+fn run_symforce(ds_path: &str, prec: &str, weighted: bool, n_poses: usize) -> bench_harness::table::Row<Vec<PoseIn>> {
     let poses_out = format!("/tmp/symforce_poses_{}.txt", prec);
     let mut cmd = std::process::Command::new("cpp/build/symforce_bench");
     cmd.args([ds_path, prec, &poses_out, if weighted { "info" } else { "unit" }]);
     run_external(cmd, &poses_out, n_poses)
 }
 
-fn run_g2o(ds_path: &str, kind: &str, weighted: bool, n_poses: usize) -> (f64, f64, usize, Option<usize>, Option<f64>, Vec<PoseIn>) {
-    let poses_out = format!("/tmp/g2o_poses_{}.txt", kind);
-    let mut cmd = std::process::Command::new("cpp/build/g2o_bench");
-    cmd.args([ds_path, kind, &poses_out, if weighted { "info" } else { "unit" }]);
-    run_external(cmd, &poses_out, n_poses)
-}
-
-// Single-core enforcement, applied before any thread pool can spawn:
-// every known threading knob is forced to 1 (OpenMP, BLAS flavors, TBB,
-// rayon) and the process is pinned to CPU 0 -- child processes (the GTSAM
-// runner) inherit both the environment and the affinity mask, and the
-// GTSAM runner reports its allowed-CPU list back so the pin is verified,
-// not assumed.
-fn enforce_single_core() {
-    for var in [
-        "RAYON_NUM_THREADS",
-        "OMP_NUM_THREADS",
-        "OPENBLAS_NUM_THREADS",
-        "MKL_NUM_THREADS",
-        "TBB_NUM_THREADS",
-        "VECLIB_MAXIMUM_THREADS",
-        "NUMEXPR_NUM_THREADS",
-    ] {
-        std::env::set_var(var, "1");
-    }
-    // Pin to the LAST core: core 0 preferentially receives timer ticks
-    // and IRQs, so a benchmark pinned there shares its core with kernel
-    // housekeeping.
-    let last_core = std::thread::available_parallelism().map(|n| n.get() - 1).unwrap_or(0);
-    unsafe {
-        let mut set: libc::cpu_set_t = std::mem::zeroed();
-        libc::CPU_ZERO(&mut set);
-        libc::CPU_SET(last_core, &mut set);
-        let rc = libc::sched_setaffinity(0, std::mem::size_of::<libc::cpu_set_t>(), &set);
-        assert_eq!(rc, 0, "sched_setaffinity failed");
-    }
-    std::env::set_var("PGO_BENCH_CORE", last_core.to_string());
-}
 
 // Run an external 3D benchmark process: same JSON protocol, poses file
 // carries "x y z qx qy qz qw" lines. `cost_key` names the JSON field
@@ -206,42 +140,16 @@ fn enforce_single_core() {
 // cost function's value.
 fn run_external3_checked(mut cmd: std::process::Command, args: &[&str], poses_out: &str,
                          n_poses: usize, cost_key: Option<&str>, check: &dyn Fn(f64))
-    -> (f64, f64, usize, Option<usize>, Option<f64>, Vec<g2o3::Pose3In>) {
+    -> bench_harness::table::Row<Vec<g2o3::Pose3In>> {
     cmd.args(args);
-    let out = cmd.output().unwrap_or_else(|e| panic!("failed to run {:?}: {}", cmd, e));
-    assert!(out.status.success(), "{:?} failed: {}", cmd, String::from_utf8_lossy(&out.stderr));
-    let text = String::from_utf8(out.stdout).unwrap();
-    let line = text.lines().rev().find(|l| l.contains("solve_ms"))
-        .unwrap_or_else(|| panic!("no protocol line from {:?}", cmd));
-    let json: serde_json::Value = serde_json::from_str(line)
-        .unwrap_or_else(|e| panic!("bad protocol line from {:?}: {} -- {}", cmd, e, line));
-    let get = |key: &str| -> Option<f64> { json.get(key)?.as_f64() };
-    let solve_ms = get("solve_ms").expect("solve_ms");
-    let first_iter_ms = get("first_iter_ms").expect("first_iter_ms");
-    let iterations = get("iterations").expect("iterations") as usize;
-    let accepted = get("accepted").map(|v| v as usize);
-    // A first-iteration time is only meaningful if that iteration WAS one clean
-    // iteration: a single attempt, accepted. A runner that rejected a step in
-    // it (g2o at the wrong damping burned six trials there) reports a number
-    // that is mostly wasted factorizations, and every quantity derived from it
-    // -- full-iter above all, which is t(2) - t(1) -- inherits the lie. Runners
-    // that report the counts get held to them; the number is dropped otherwise.
-    let first_iter_clean = match (get("first_attempts"), get("first_accepted")) {
-        (Some(a), Some(ok)) => a as usize == 1 && ok as usize == 1,
-        _ => true, // runner does not report it; nothing to check against
-    };
-    let full_ms = match (get("second_run_ms"), get("second_accepted")) {
-        (Some(ms), Some(acc)) if acc as usize >= 2 && first_iter_clean => Some(ms),
-        _ => None,
-    };
-    // NaN travels through the min-of-rounds plumbing and prints as "-".
-    let first_iter_ms = if first_iter_clean { first_iter_ms } else { f64::NAN };
+    let p = bench_harness::external::run(cmd);
+    // The system's OWN code reports the cost of the initial estimate; the
+    // harness asserts it equals the reference cost. That is what proves every
+    // system is minimizing the same objective, not merely converging to it.
     if let Some(key) = cost_key {
-        check(get(key).unwrap_or_else(|| panic!("missing {} from {:?}", key, cmd)));
+        check(p.json.get(key).and_then(|v| v.as_f64())
+            .unwrap_or_else(|| panic!("missing {} from the runner", key)));
     }
-    let core = std::env::var("PGO_BENCH_CORE").unwrap();
-    assert!(json["cpus_allowed"].as_str() == Some(core.as_str()),
-        "{:?} not pinned to CPU {}: {}", cmd, core, line);
     let poses: Vec<g2o3::Pose3In> = std::fs::read_to_string(poses_out).unwrap()
         .lines()
         .map(|l| {
@@ -253,32 +161,28 @@ fn run_external3_checked(mut cmd: std::process::Command, args: &[&str], poses_ou
         })
         .collect();
     assert_eq!(poses.len(), n_poses);
-    (solve_ms, first_iter_ms, iterations, accepted, full_ms, poses)
+    let mut row = bench_harness::table::Row::new(
+        p.solve_ms, p.first_iter_ms, p.iterations, poses);
+    row.accepted = p.accepted;
+    row.full_ms = p.full_ms;
+    row.peak_mb = p.json.get("peak_mb").and_then(|v| v.as_f64());
+    row
 }
 
-// 3D (SE3) datasets: arael f64/f32, tiny-solver, factrs, Ceres and g2o;
-// the GTSAM and SymForce 3D runners come in a later pass. Same
-// methodology: one loader, one reference cost, one validation,
-// min-of-N interleaved timing. The g2o and Ceres runners additionally
-// report the canonical cost of the initial estimate computed by THEIR
-// code (g2o's chi2 with the conjugated information, Ceres's 2x
-// initial_cost); the harness asserts both equal the reference cost
-// function's value -- a bit-level cross-implementation check of the
-// cost every system minimizes.
 // The two geometries the table is generic over: how to score a solution, and
 // how to compare two of them.
 struct Geo2<'a>(&'a g2o::Dataset);
-impl table::Geometry for Geo2<'_> {
-    type Pose = g2o::PoseIn;
-    fn cost(&self, poses: &[g2o::PoseIn]) -> f64 { g2o::reference_cost(self.0, poses) }
-    fn aligned_rmse(a: &[g2o::PoseIn], b: &[g2o::PoseIn]) -> f64 { g2o::aligned_rmse(a, b) }
+impl bench_harness::table::Geometry for Geo2<'_> {
+    type Solution = Vec<g2o::PoseIn>;
+    fn cost(&self, poses: &Vec<g2o::PoseIn>) -> f64 { g2o::reference_cost(self.0, poses) }
+    fn distance(a: &Vec<g2o::PoseIn>, b: &Vec<g2o::PoseIn>) -> f64 { g2o::aligned_rmse(a, b) }
 }
 
 struct Geo3<'a>(&'a g2o3::Dataset3);
-impl table::Geometry for Geo3<'_> {
-    type Pose = g2o3::Pose3In;
-    fn cost(&self, poses: &[g2o3::Pose3In]) -> f64 { g2o3::reference_cost3(self.0, poses) }
-    fn aligned_rmse(a: &[g2o3::Pose3In], b: &[g2o3::Pose3In]) -> f64 { g2o3::aligned_rmse3(a, b) }
+impl bench_harness::table::Geometry for Geo3<'_> {
+    type Solution = Vec<g2o3::Pose3In>;
+    fn cost(&self, poses: &Vec<g2o3::Pose3In>) -> f64 { g2o3::reference_cost3(self.0, poses) }
+    fn distance(a: &Vec<g2o3::Pose3In>, b: &Vec<g2o3::Pose3In>) -> f64 { g2o3::aligned_rmse3(a, b) }
 }
 
 fn run_dataset3(name: &str, path: &str, rounds: usize, f32_floor_note: Option<&str>) {
@@ -301,28 +205,27 @@ fn run_dataset3(name: &str, path: &str, rounds: usize, f32_floor_note: Option<&s
     }
 
     let geo = Geo3(&ds);
-    let mut t = table::Table::with_f32_floor(&geo, f32_floor_note);
+    let mut t = bench_harness::table::Table::with_f32_floor(&geo, f32_floor_note);
 
     for round in 0..rounds {
         let a64 = arael_runner3::run_f64(&ds);
-        t.record("arael LM f64", (a64.solve_ms, a64.first_iter_ms, a64.iterations, Some(a64.accepted), a64.two_iter_ms, a64.poses));
+        t.record("arael LM f64", a64);
         let a32 = arael_runner3::run_f32(&ds);
-        t.record("arael LM f32", (a32.solve_ms, a32.first_iter_ms, a32.iterations, Some(a32.accepted), a32.two_iter_ms, a32.poses));
+        t.record("arael LM f32", a32);
         if !skip_tiny() {
             let tgn = tiny_runner3::run_gn(&ds);
-            t.record("tiny-solver GN", (tgn.solve_ms, tgn.first_iter_ms, tgn.iterations, None, None, tgn.poses));
+            t.record("tiny-solver GN", tgn);
             let tlm = tiny_runner3::run_lm(&ds);
-            t.record("tiny-solver LM", (tlm.solve_ms, tlm.first_iter_ms, tlm.iterations, None, None, tlm.poses));
+            t.record("tiny-solver LM", tlm);
         }
         let fgn = factrs_runner3::run_gn(&ds);
-        t.record("factrs GN", (fgn.solve_ms, fgn.first_iter_ms, fgn.iterations, Some(fgn.accepted), fgn.two_iter_ms, fgn.poses));
+        t.record("factrs GN", fgn);
         let flm = factrs_runner3::run_lm(&ds);
-        t.record("factrs LM", (flm.solve_ms, flm.first_iter_ms, flm.iterations, Some(flm.accepted), flm.two_iter_ms, flm.poses));
+        t.record("factrs LM", flm);
         if factrs32_3d_available {
             for (kind, label) in [("gn", "factrs GN f32"), ("lm", "factrs LM f32")] {
                 match run_factrs32_3d(path, kind, ds.poses.len()) {
-                    Some((ms, fi, it, acc, full, poses)) =>
-                        t.record(label, (ms, fi, it, acc, full, poses)),
+                    Some(row) => t.record(label, row),
                     None => {
                         t.notes.insert(format!(
                             "{}: solver crashed (f32 Cholesky non-positive pivot)", label));
@@ -337,30 +240,30 @@ fn run_dataset3(name: &str, path: &str, rounds: usize, f32_floor_note: Option<&s
                     "external initial cost {} disagrees with reference {}",
                     line_cost, initial_cost);
             };
-            let (ms, fi, it, acc, full, poses) = run_external3_checked(
+            let row = run_external3_checked(
                 std::process::Command::new("cpp/build/ceres_bench3"),
                 &[path, "/tmp/ceres3_poses.txt"], "/tmp/ceres3_poses.txt",
                 ds.poses.len(), Some("initial_cost"), &check);
-            t.record("ceres LM", (ms, fi, it, acc, full, poses));
+            t.record("ceres LM", row);
             for kind in ["lm", "gn"] {
                 let poses_out = format!("/tmp/g2o3_poses_{}.txt", kind);
                 let mut g2o_cmd = std::process::Command::new("cpp/build/g2o_bench3");
                 g2o_cmd.env("G2O_LAMBDA_INIT", g2o_lambda(name));
-                let (ms, fi, it, acc, full, poses) = run_external3_checked(
+                let row = run_external3_checked(
                     g2o_cmd,
                     &[path, kind, &poses_out], &poses_out,
-                    ds.poses.len(), Some("initial_chi2"), &check);
-                t.record(&format!("g2o {}", kind.to_uppercase()), (ms, fi, it, acc, full, poses));
+                    ds.poses.len(), Some("initial_cost"), &check);
+                t.record(&format!("g2o {}", kind.to_uppercase()), row);
             }
             if symforce3_available {
                 for prec in ["f64", "f32"] {
                     let poses_out = format!("/tmp/symforce3_poses_{}.txt", prec);
-                    let (ms, fi, it, acc, full, poses) = run_external3_checked(
+                    let row = run_external3_checked(
                         std::process::Command::new("cpp/build/symforce_bench3"),
                         &[path, prec, &poses_out], &poses_out,
                         ds.poses.len(), Some("initial_cost"), &check);
                     let label = if prec == "f32" { "symforce LM f32" } else { "symforce LM" };
-                    t.record(label, (ms, fi, it, acc, full, poses));
+                    t.record(label, row);
                 }
             }
         }
@@ -372,16 +275,20 @@ fn run_dataset3(name: &str, path: &str, rounds: usize, f32_floor_note: Option<&s
         if let Some(py) = gtsam_available() {
             for kind in ["lm", "gn"] {
                 let poses_out = format!("/tmp/gtsam3_poses_{}.txt", kind);
-                let (ms, fi, it, acc, full, poses) = run_external3_checked(
+                let row = run_external3_checked(
                     std::process::Command::new(&py),
                     &["gtsam_bench.py", path, kind, &poses_out], &poses_out,
                     ds.poses.len(), None, &|_| {});
-                t.record(&format!("gtsam {}", kind.to_uppercase()), (ms, fi, it, acc, full, poses));
+                t.record(&format!("gtsam {}", kind.to_uppercase()), row);
             }
         }
         eprintln!("  round {}/{} done", round + 1, rounds);
     }
 
+    for (label, mb) in measure_in_process_memory(path, true, true,
+        &["arael LM f64", "arael LM f32", "factrs GN", "factrs LM"]) {
+        t.set_peak_mb(&label, mb);
+    }
     t.print();
 }
 
@@ -401,21 +308,21 @@ fn skip_isam() -> bool {
 // objects and env accessors the runners use, so the header cannot drift from
 // what was run; the env var that changes each one is named in brackets.
 fn print_header(rounds: usize, only: &Option<String>) {
-    let c64 = arael_pipeline::config::<arael_runner::Graph>(0);
-    let nielsen = arael_pipeline::nielsen();
+    let c64 = bench_harness::arael::config::<arael_runner::Graph>(0);
+    let nielsen = bench_harness::arael::nielsen();
     let ordering = arael_runner::ordering();
 
     println!("=== pgo-bench configuration ===");
     println!("rounds            : {} [ROUNDS], {} probe sub-rounds per round",
-        rounds, probe::PROBE_SUBROUNDS);
+        rounds, bench_harness::probe::PROBE_SUBROUNDS);
     println!("datasets          : {} [PGO_ONLY]",
         only.as_deref().unwrap_or("all"));
     let on_off = |skipped: bool| if skipped { "skipped" } else { "run" };
     println!("optional systems  : tiny-solver {} [RUN_TINY], isam {} [RUN_ISAM]",
         on_off(skip_tiny()), on_off(skip_isam()));
     println!("arael lambda0     : {:e} (2D), {:e} (3D) [ARAEL_LAMBDA0]",
-        arael_pipeline::lambda0::<arael_runner::Graph>(),
-        arael_pipeline::lambda0::<arael_runner3::Graph3>());
+        bench_harness::arael::lambda0::<arael_runner::Graph>(),
+        bench_harness::arael::lambda0::<arael_runner3::Graph3>());
     println!("arael damping     : {} [PGO_DRIVER: default|nielsen]",
         if nielsen { "Nielsen gain-ratio driver" } else { "fixed ladder (default driver)" });
     // Auto is not a third ordering -- on a pose graph there is nothing to
@@ -431,11 +338,63 @@ fn print_header(rounds: usize, only: &Option<String>) {
         if c64.verbose { "on" } else { "off" },
         if std::env::var("TIMING").is_ok() { "on" } else { "off" });
     println!("pinned to core    : {} (all thread pools forced to 1)",
-        std::env::var("PGO_BENCH_CORE").unwrap_or_else(|_| "?".to_string()));
+        std::env::var("BENCH_CORE").unwrap_or_else(|_| "?".to_string()));
+}
+
+// Peak memory for the in-process rows.
+//
+// VmHWM is a high-water mark for the whole PROCESS, so arael, factrs and
+// tiny-solver sharing one would each report the largest peak anything before
+// them reached. Each is therefore run alone, in a process of its own, doing
+// nothing but the solve.
+fn mem_pass() -> bool {
+    let Ok(which) = std::env::var("PGO_MEM") else { return false };
+    let path = std::env::var("PGO_MEM_DATASET").expect("PGO_MEM_DATASET");
+    let weighted = std::env::var("PGO_MEM_WEIGHTED").is_ok();
+    let three_d = std::env::var("PGO_MEM_3D").is_ok();
+    if three_d {
+        let ds = g2o3::load3(&path);
+        match which.as_str() {
+            "arael LM f64" => { arael_runner3::run_f64(&ds); }
+            "arael LM f32" => { arael_runner3::run_f32(&ds); }
+            "factrs GN" => { factrs_runner3::run_gn(&ds); }
+            "factrs LM" => { factrs_runner3::run_lm(&ds); }
+            other => panic!("unknown system for the memory pass: {}", other),
+        }
+    } else {
+        let ds = g2o::load(&path, !weighted);
+        match which.as_str() {
+            "arael LM f64" => { arael_runner::run_f64(&ds); }
+            "arael LM f32" => { arael_runner::run_f32(&ds); }
+            "factrs GN" => { factrs_runner::run_gn(&ds); }
+            "factrs LM" => { factrs_runner::run_lm(&ds); }
+            other => panic!("unknown system for the memory pass: {}", other),
+        }
+    }
+    bench_harness::mem::report_peak();
+    true
+}
+
+/// The in-process systems, measured one process each.
+fn measure_in_process_memory(path: &str, weighted: bool, three_d: bool, labels: &[&str])
+    -> Vec<(String, f64)> {
+    let mut out = Vec::new();
+    for label in labels {
+        let mut extra: Vec<(&str, &str)> = vec![("PGO_MEM_DATASET", path)];
+        if weighted { extra.push(("PGO_MEM_WEIGHTED", "1")); }
+        if three_d { extra.push(("PGO_MEM_3D", "1")); }
+        if let Some(mb) = bench_harness::mem::measure("PGO_MEM", label, &extra) {
+            out.push((label.to_string(), mb));
+        }
+    }
+    out
 }
 
 fn main() {
-    enforce_single_core();
+    bench_harness::pin::enforce_single_core();
+    if mem_pass() {
+        return;
+    }
     tiny_runner::install_iter_counter();
     let bench_dir = std::env::current_dir().unwrap();
     // (name, file, use the file's information matrices?). Every system is fed
@@ -481,25 +440,23 @@ fn main() {
         println!("initial reference cost: {:.3}", initial_cost);
 
         let geo = Geo2(&ds);
-        let mut t = table::Table::new(&geo);
+        let mut t = bench_harness::table::Table::new(&geo);
 
         for round in 0..rounds {
             let a64 = arael_runner::run_f64(&ds);
-            t.record("arael LM f64", (a64.solve_ms, a64.first_iter_ms, a64.iterations, Some(a64.accepted), a64.two_iter_ms, a64.poses));
+            t.record("arael LM f64", a64);
             let a32 = arael_runner::run_f32(&ds);
-            t.record("arael LM f32", (a32.solve_ms, a32.first_iter_ms, a32.iterations, Some(a32.accepted), a32.two_iter_ms, a32.poses));
+            t.record("arael LM f32", a32);
             if !skip_tiny() {
                 let tgn = tiny_runner::run_gn(&ds);
-                t.record("tiny-solver GN", (tgn.solve_ms, tgn.first_iter_ms, tgn.iterations, None, None, tgn.poses));
+                t.record("tiny-solver GN", tgn);
                 let tlm = tiny_runner::run_lm(&ds);
-                t.record("tiny-solver LM", (tlm.solve_ms, tlm.first_iter_ms, tlm.iterations, None, None, tlm.poses));
+                t.record("tiny-solver LM", tlm);
             }
             let fgn = factrs_runner::run_gn(&ds);
-            t.record("factrs GN", (fgn.solve_ms, fgn.first_iter_ms, fgn.iterations,
-                Some(fgn.accepted), fgn.two_iter_ms, fgn.poses));
+            t.record("factrs GN", fgn);
             let flm = factrs_runner::run_lm(&ds);
-            t.record("factrs LM", (flm.solve_ms, flm.first_iter_ms, flm.iterations,
-                Some(flm.accepted), flm.two_iter_ms, flm.poses));
+            t.record("factrs LM", flm);
             if factrs32_available {
                 for (kind, label) in [("gn", "factrs GN f32"), ("lm", "factrs LM f32")] {
                     match run_factrs32(path, kind, *weighted, ds.poses.len()) {
@@ -542,6 +499,11 @@ fn main() {
         // best solution) -- the cost surface has near-flat directions
         // where a plateau 0.9% above the optimum can sit meters away
         // geometrically (observed with g2o LM on the weighted M3500).
+        for (label, mb) in measure_in_process_memory(
+            path, *weighted, false,
+            &["arael LM f64", "arael LM f32", "factrs GN", "factrs LM"]) {
+            t.set_peak_mb(&label, mb);
+        }
         t.print();
     }
 

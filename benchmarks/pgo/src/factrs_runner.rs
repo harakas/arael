@@ -9,6 +9,7 @@
 
 use crate::factrs_counting::{since, counts, CountingSolver, StepCounter};
 use crate::g2o::{Dataset, PoseIn};
+use bench_harness::table::Row;
 use factrs::assign_symbols;
 use factrs::core::{BetweenResidual, GaussianNoise, GaussNewton, Graph, LevenMarquardt, PriorResidual, Values, SE2};
 use factrs::dtype;
@@ -49,18 +50,8 @@ fn build(ds: &Dataset) -> (Graph, Values) {
     (graph, values)
 }
 
-pub struct RunOut {
-    pub solve_ms: f64,
-    pub first_iter_ms: f64,
-    /// Attempts: accepted steps plus factrs's in-step damping retries, each of
-    /// which costs a factorization. Recovered by counting linear solves.
-    pub iterations: usize,
-    pub accepted: usize,
-    /// t(2 iterations), for the caller to difference against t(1). `None` when
-    /// the second step was rejected, which would make the difference a retry.
-    pub two_iter_ms: Option<f64>,
-    pub poses: Vec<PoseIn>,
-}
+pub type RunOut = Row<Vec<PoseIn>>;
+
 
 fn base_params(max_iterations: usize) -> BaseOptParams {
     BaseOptParams {
@@ -107,7 +98,7 @@ fn optimize(ds: &Dataset, gn: bool, max_iter: usize) -> (f64, usize, usize, Valu
 fn probe(ds: &Dataset, gn: bool, max_iter: usize) -> (f64, usize, usize) {
     let mut best = f64::INFINITY;
     let (mut accepted, mut attempts) = (0, 0);
-    for _ in 0..crate::probe::PROBE_SUBROUNDS {
+    for _ in 0..bench_harness::probe::PROBE_SUBROUNDS {
         let (ms, acc, att, _) = optimize(ds, gn, max_iter);
         best = best.min(ms);
         accepted = acc;
@@ -121,9 +112,9 @@ fn run(ds: &Dataset, gn: bool) -> RunOut {
     // later ones do not; discard it so the probes are timed on equal footing.
     let _ = optimize(ds, gn, 1);
     let (first_ms, first_accepted, first_attempts) = probe(ds, gn, 1);
-    let first_iter_ms = crate::probe::first_iter_ms(first_ms, first_attempts, first_accepted);
+    let first_iter_ms = bench_harness::probe::first_iter_ms(first_ms, first_attempts, first_accepted);
     let (two_ms, two_accepted, _) = probe(ds, gn, 2);
-    let two_iter_ms = crate::probe::two_iter_ms(two_ms, first_iter_ms, two_accepted);
+    let two_iter_ms = bench_harness::probe::two_iter_ms(two_ms, first_iter_ms, two_accepted);
     let (solve_ms, accepted, iterations, values) = optimize(ds, gn, 100);
     let poses = (0..ds.poses.len())
         .map(|i| {
@@ -131,7 +122,9 @@ fn run(ds: &Dataset, gn: bool) -> RunOut {
             PoseIn { x: p.x() as f64, y: p.y() as f64, th: p.theta() as f64 }
         })
         .collect();
-    RunOut { solve_ms, first_iter_ms, iterations, accepted, two_iter_ms, poses }
+    Row::new(solve_ms, first_iter_ms, iterations, poses)
+        .accepted(accepted)
+        .full_ms(two_iter_ms)
 }
 
 pub fn run_gn(ds: &Dataset) -> RunOut {

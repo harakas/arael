@@ -1,7 +1,8 @@
 // arael runners: identical model in f64 and f32 (separate structs --
 // the precision is a compile-time property of the generated code).
 
-use crate::arael_pipeline::{run, Model as Pipeline, RunOut as Out};
+use bench_harness::arael::{run, Model as Pipeline};
+use bench_harness::table::Row;
 use crate::g2o::{Dataset, PoseIn};
 use arael::model::{Param, SelfBlock, CrossBlock};
 use arael::refs::{self, Ref};
@@ -229,13 +230,13 @@ const LAMBDA0_2D: f64 = 1e-8;
 
 impl Pipeline for Graph {
     type Scalar = f64;
-    type Dataset = Dataset;
-    type Pose = PoseIn;
+    type Input = Dataset;
+    type Solution = Vec<PoseIn>;
     fn lambda0() -> f64 { LAMBDA0_2D }
     fn build(ds: &Dataset) -> Self { build_f64(ds) }
     fn serialize(&mut self, out: &mut Vec<f64>) { self.serialize64(out); }
     fn deserialize(&mut self, x: &[f64]) { self.deserialize64(x); }
-    fn poses(&self) -> Vec<PoseIn> {
+    fn solution(&self) -> Vec<PoseIn> {
         self.poses.iter()
             .map(|p| PoseIn { x: p.pos.value.x, y: p.pos.value.y, th: p.th.value })
             .collect()
@@ -246,13 +247,13 @@ impl Pipeline for Graph {
 
 impl Pipeline for GraphF {
     type Scalar = f32;
-    type Dataset = Dataset;
-    type Pose = PoseIn;
+    type Input = Dataset;
+    type Solution = Vec<PoseIn>;
     fn lambda0() -> f64 { LAMBDA0_2D }
     fn build(ds: &Dataset) -> Self { build_f32(ds) }
     fn serialize(&mut self, out: &mut Vec<f32>) { self.serialize32(out); }
     fn deserialize(&mut self, x: &[f32]) { self.deserialize32(x); }
-    fn poses(&self) -> Vec<PoseIn> {
+    fn solution(&self) -> Vec<PoseIn> {
         self.poses.iter()
             .map(|p| PoseIn {
                 x: p.pos.value.x as f64,
@@ -265,7 +266,7 @@ impl Pipeline for GraphF {
         -> arael::simple_lm::LmResult<f32> { solve_f32(params, m, cfg) }
 }
 
-pub type RunOut = Out<PoseIn>;
+pub type RunOut = Row<Vec<PoseIn>>;
 
 pub fn run_f64(ds: &Dataset) -> RunOut { run::<Graph>(ds) }
 pub fn run_f32(ds: &Dataset) -> RunOut { run::<GraphF>(ds) }

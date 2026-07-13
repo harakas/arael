@@ -92,6 +92,7 @@ pub fn protocol_line(
     };
     format!(
         "{{\"solve_ms\": {:.3}, \"first_iter_ms\": {:.3}, \"iterations\": {}, \
-         \"accepted\": {}{}, \"cpus_allowed\": \"{}\"}}",
-        solve_ms, first_iter_ms, iterations, accepted, second, cpus)
+         \"accepted\": {}{}, \"peak_mb\": {:.1}, \"cpus_allowed\": \"{}\"}}",
+        solve_ms, first_iter_ms, iterations, accepted, second,
+        bench_harness::mem::peak_rss_mb(), cpus)
 }

@@ -57,10 +57,16 @@ def protocol(solve_ms, first_iter_ms, iterations, two_ms, two_iterations):
         for line in f:
             if line.startswith("Cpus_allowed_list"):
                 cpus = line.split()[1]
+    peak_mb = 0.0
+    with open("/proc/self/status") as f:
+        for line in f:
+            if line.startswith("VmHWM:"):
+                peak_mb = float(line.split()[1]) / 1024.0
     out = {
         "solve_ms": solve_ms,
         "first_iter_ms": first_iter_ms,
         "iterations": iterations,
+        "peak_mb": peak_mb,
         "cpus_allowed": cpus,
     }
     if two_iterations >= 2:

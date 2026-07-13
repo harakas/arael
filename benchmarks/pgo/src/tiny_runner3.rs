@@ -167,12 +167,8 @@ fn extract(ds: &Dataset3, values: &HashMap<String, na::DVector<f64>>) -> Vec<Pos
         .collect()
 }
 
-pub struct RunOut3 {
-    pub solve_ms: f64,
-    pub first_iter_ms: f64,
-    pub iterations: usize,
-    pub poses: Vec<Pose3In>,
-}
+pub type RunOut3 = bench_harness::table::Row<Vec<Pose3In>>;
+
 
 fn run(ds: &Dataset3, gn: bool) -> RunOut3 {
     let (problem, init) = build(ds);
@@ -196,7 +192,7 @@ fn run(ds: &Dataset3, gn: bool) -> RunOut3 {
     let (first_iter_ms, _, _) = optimize(1);
     let (solve_ms, iterations, result) = optimize(100);
     let values = result.expect("tiny-solver returned None");
-    RunOut3 { solve_ms, first_iter_ms, iterations, poses: extract(ds, &values) }
+    bench_harness::table::Row::new(solve_ms, first_iter_ms, iterations, extract(ds, &values))
 }
 
 pub fn run_gn(ds: &Dataset3) -> RunOut3 {
