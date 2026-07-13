@@ -7,7 +7,7 @@
 // factrs's LM starts at lambda = 1e-10 with diagonal damping --
 // problem-appropriate by default under the initial-damping policy.
 
-use crate::factrs_counting::{since, counts, CountingSolver, StepCounter};
+use bench_harness::factrs::{counts, since, CountingSolver, StepCounter};
 use crate::g2o::{Dataset, PoseIn};
 use bench_harness::table::Row;
 use factrs::assign_symbols;
@@ -64,10 +64,9 @@ fn base_params(max_iterations: usize) -> BaseOptParams {
 }
 
 // (elapsed ms, accepted steps, attempts, values)
-fn optimize(ds: &Dataset, gn: bool, max_iter: usize) -> (f64, usize, usize, Values) {
+fn optimize_counted(ds: &Dataset, gn: bool, max_iter: usize) -> (usize, usize, Values) {
     let (graph, init) = build(ds);
     let before = counts();
-    let t0 = std::time::Instant::now();
     let result = if gn {
         let mut opt = GaussNewton::new(base_params(max_iter), graph);
         opt.set_solver(CountingSolver::default());
@@ -80,7 +79,6 @@ fn optimize(ds: &Dataset, gn: bool, max_iter: usize) -> (f64, usize, usize, Valu
         opt.observers_mut().add(StepCounter);
         opt.optimize(init)
     };
-    let ms = t0.elapsed().as_secs_f64() * 1e3;
     // Hitting the iteration cap is a reportable outcome (the values
     // ride along in the error), not a harness failure -- the
     // validation stage judges the solution.
@@ -90,41 +88,27 @@ fn optimize(ds: &Dataset, gn: bool, max_iter: usize) -> (f64, usize, usize, Valu
         Err(e) => panic!("factrs failed: {:?}", e),
     };
     let (accepted, attempts) = since(before);
-    (ms, accepted, attempts, values)
+    (accepted, attempts, values)
 }
 
-// Fastest of PROBE_SUBROUNDS runs of the same probe, with its accepted step
-// and attempt counts.
-fn probe(ds: &Dataset, gn: bool, max_iter: usize) -> (f64, usize, usize) {
-    let mut best = f64::INFINITY;
-    let (mut accepted, mut attempts) = (0, 0);
-    for _ in 0..bench_harness::probe::PROBE_SUBROUNDS {
-        let (ms, acc, att, _) = optimize(ds, gn, max_iter);
-        best = best.min(ms);
-        accepted = acc;
-        attempts = att;
-    }
-    (best, accepted, attempts)
-}
-
-fn run(ds: &Dataset, gn: bool) -> RunOut {
-    // The first solve in a process pays cold allocator and cache costs the
-    // later ones do not; discard it so the probes are timed on equal footing.
-    let _ = optimize(ds, gn, 1);
-    let (first_ms, first_accepted, first_attempts) = probe(ds, gn, 1);
-    let first_iter_ms = bench_harness::probe::first_iter_ms(first_ms, first_attempts, first_accepted);
-    let (two_ms, two_accepted, _) = probe(ds, gn, 2);
-    let two_iter_ms = bench_harness::probe::two_iter_ms(two_ms, first_iter_ms, two_accepted);
-    let (solve_ms, accepted, iterations, values) = optimize(ds, gn, 100);
-    let poses = (0..ds.poses.len())
+fn solution_of(ds: &Dataset, values: &Values) -> Vec<PoseIn> {
+    (0..ds.poses.len())
         .map(|i| {
             let p: &SE2 = values.get(X(i as u32)).expect("missing pose");
             PoseIn { x: p.x() as f64, y: p.y() as f64, th: p.theta() as f64 }
         })
-        .collect();
-    Row::new(solve_ms, first_iter_ms, iterations, poses)
-        .accepted(accepted)
-        .full_ms(two_iter_ms)
+        .collect()
+}
+
+fn run(ds: &Dataset, gn: bool) -> RunOut {
+    bench_harness::solver::run(100, |max_iter| {
+        let (accepted, attempts, values) = optimize_counted(ds, gn, max_iter);
+        bench_harness::solver::Outcome {
+            accepted,
+            attempts,
+            solution: solution_of(ds, &values),
+        }
+    })
 }
 
 pub fn run_gn(ds: &Dataset) -> RunOut {

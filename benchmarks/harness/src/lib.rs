@@ -12,7 +12,10 @@
 
 pub mod arael;
 pub mod external;
+#[cfg(feature = "factrs")]
+pub mod factrs;
 pub mod mem;
 pub mod pin;
 pub mod probe;
+pub mod solver;
 pub mod table;

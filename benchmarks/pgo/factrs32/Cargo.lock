@@ -74,6 +74,8 @@ name = "bench-harness"
 version = "0.1.0"
 dependencies = [
  "arael",
+ "factrs",
+ "faer 0.23.2",
  "libc",
  "num",
  "serde_json",

@@ -11,9 +11,6 @@
 // this binary calls.
 #![allow(dead_code)]
 
-#[path = "../../src/factrs_counting.rs"]
-mod factrs_counting;
-
 #[path = "../../src/g2o.rs"]
 mod g2o;
 
@@ -37,7 +34,5 @@ fn main() {
     }
     std::fs::write(poses_out, text).unwrap();
 
-    println!("{}", factrs_counting::protocol_line(
-        out.solve_ms, out.first_iter_ms, out.iterations,
-        out.accepted.unwrap_or(out.iterations), out.full_ms));
+    println!("{}", bench_harness::external::protocol_line(&out));
 }

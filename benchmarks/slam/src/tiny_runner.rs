@@ -304,12 +304,8 @@ pub fn initial_cost(scene: &Scene) -> f64 {
     cost
 }
 
-pub struct RunOut {
-    pub solve_ms: f64,
-    pub first_iter_ms: f64,
-    pub iterations: usize,
-    pub solution: Solution,
-}
+pub type RunOut = bench_harness::table::Row<Solution>;
+
 
 fn options(max_iteration: usize) -> tiny_solver::OptimizerOptions {
     // tiny-solver's LM has no inner retry loop: a rejected step leaves the
@@ -333,21 +329,25 @@ fn options(max_iteration: usize) -> tiny_solver::OptimizerOptions {
 // converges. Initial trust radius env-overridable (TINY_RADIUS0).
 pub fn run_lm(scene: &Scene) -> RunOut {
     let (problem, init) = build(scene);
-    // Problem-appropriate initial trust region (large -> near-Gauss-Newton
-    // on this well-initialized graph), matching the pgo benchmark policy.
+    // Problem-appropriate initial trust region (large -> near-Gauss-Newton on
+    // this well-initialized graph), matching the pgo benchmark policy.
     let radius = std::env::var("TINY_RADIUS0").ok()
         .and_then(|v| v.parse().ok()).unwrap_or(1e12);
-    let optimize = |max_iter: usize| -> (f64, usize, HashMap<String, na::DVector<f64>>) {
-        let before = ITER_COUNT.load(Ordering::Relaxed);
-        let t0 = std::time::Instant::now();
-        let result = tiny_solver::LevenbergMarquardtOptimizer::new(1e-6, 1e32, radius)
-            .optimize(&problem, &init, Some(options(max_iter)));
-        let ms = t0.elapsed().as_secs_f64() * 1e3;
-        (ms, ITER_COUNT.load(Ordering::Relaxed) - before, result.expect("tiny returned None"))
-    };
     let max_iter = std::env::var("TINY_MAXITER").ok()
         .and_then(|v| v.parse().ok()).unwrap_or(200);
-    let (first_iter_ms, _, _) = optimize(1);
-    let (solve_ms, iterations, values) = optimize(max_iter);
-    RunOut { solve_ms, first_iter_ms, iterations, solution: extract(scene, &values) }
+
+    bench_harness::solver::run(max_iter, |n| {
+        let before = ITER_COUNT.load(Ordering::Relaxed);
+        let values = tiny_solver::LevenbergMarquardtOptimizer::new(1e-6, 1e32, radius)
+            .optimize(&problem, &init, Some(options(n)))
+            .expect("tiny returned None");
+        // tiny-solver reports outer iterations only; its damping retries, if
+        // any, are not exposed.
+        let iterations = ITER_COUNT.load(Ordering::Relaxed) - before;
+        bench_harness::solver::Outcome {
+            accepted: iterations,
+            attempts: iterations,
+            solution: extract(scene, &values),
+        }
+    })
 }

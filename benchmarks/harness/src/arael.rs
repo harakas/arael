@@ -9,7 +9,6 @@
 use ::arael::simple_lm::{LmConfig, LmProblem, LmResult};
 use ::arael::utils::Float;
 
-use crate::probe::{first_iter_ms, two_iter_ms, PROBE_SUBROUNDS};
 use crate::table::Row;
 
 pub trait Model: Clone + LmProblem<Self::Scalar> {
@@ -87,53 +86,24 @@ pub fn config<M: Model>(input: &M::Input, max_iters: usize) -> LmConfig<M::Scala
     }
 }
 
-/// Times a probe solve on throwaway copies of the model, fastest of
-/// [`PROBE_SUBROUNDS`].
-///
-/// A discarded warmup runs first: the first solve in a process pays cold
-/// allocator and cache costs the later ones do not (the symbolic factorization
-/// alone runs a fifth slower), so timing the one- and two-iteration probes as
-/// they come would charge that cost to the one-iteration probe alone and inflate
-/// the difference between them.
-///
-/// The copies keep the probe from mutating the model: re-supplying the initial
+/// The probes run on throwaway copies of the model: re-supplying the initial
 /// parameter vector does not reset parametrization state held outside it, such
 /// as the reference rotation a QuaternionParam re-centres on after a step. A
 /// probe that ran on the real model left it half-advanced, and the solve that
 /// followed inherited a warm start it never asked for.
-fn timed<M: Model>(
-    params: &[M::Scalar],
-    model: &M,
-    cfg: &LmConfig<M::Scalar>,
-) -> (f64, LmResult<M::Scalar>) {
-    let mut r = M::solve(params, &mut model.clone(), cfg); // warmup, discarded
-    let mut best = f64::INFINITY;
-    for _ in 0..PROBE_SUBROUNDS {
-        let t0 = std::time::Instant::now();
-        r = M::solve(params, &mut model.clone(), cfg);
-        best = best.min(t0.elapsed().as_secs_f64() * 1e3);
-    }
-    (best, r)
-}
-
 pub fn run<M: Model>(input: &M::Input) -> Row<M::Solution> {
     let mut model = M::build(input);
     let mut params: Vec<M::Scalar> = Vec::new();
     model.serialize(&mut params);
 
-    // One iteration, and two, each on a fresh copy. Their difference is one
-    // complete iteration with the setup cancelled out.
-    let (first_ms, first) = timed::<M>(&params, &model, &config::<M>(input, 1));
-    let first_ms = first_iter_ms(first_ms, first.iterations, first.accepted_iterations);
-    let (two_ms, two) = timed::<M>(&params, &model, &config::<M>(input, 2));
-    let two_ms = two_iter_ms(two_ms, first_ms, two.accepted_iterations);
-
-    let t0 = std::time::Instant::now();
-    let result = M::solve(&params, &mut model, &config::<M>(input, 100));
-    let solve_ms = t0.elapsed().as_secs_f64() * 1e3;
-    model.deserialize(&result.x);
-
-    Row::new(solve_ms, first_ms, result.iterations, model.solution())
-        .accepted(result.accepted_iterations)
-        .full_ms(two_ms)
+    crate::solver::run(100, |max_iters| {
+        let mut m = model.clone();
+        let r = M::solve(&params, &mut m, &config::<M>(input, max_iters));
+        m.deserialize(&r.x);
+        crate::solver::Outcome {
+            accepted: r.accepted_iterations,
+            attempts: r.iterations,
+            solution: m.solution(),
+        }
+    })
 }

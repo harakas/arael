@@ -511,29 +511,6 @@ pub fn write_hessian_bitmap(scene: &Scene, out: &str) {
     }
 }
 
-type Solve64 = fn(&[f64], &mut Path, &arael::simple_lm::LmConfig<f64>)
-    -> arael::simple_lm::LmResult<f64>;
-
-// SLAM_TIMING=1: per-phase breakdown of a solve (steady-state mean per
-// call, first call apart -- the first also pays the one-time
-// structure/symbolic costs).
-fn print_timing(label: &str, timing: Option<&arael::simple_lm::LmTiming>) {
-    if let Some(t) = timing {
-        let ms = |d: std::time::Duration| d.as_secs_f64() * 1e3;
-        let m = |o: Option<std::time::Duration>| o.map_or(f64::NAN, ms);
-        eprintln!(
-            "timing {} ms/call (first): assembly {:.2} ({:.2})  linear_solve {:.2} ({:.2})  cost_eval {:.2} ({:.2})  advance {:.3} ({:.3})",
-            label,
-            m(t.mean_assembly()), ms(t.first_assembly),
-            m(t.mean_linear_solve()), ms(t.first_linear_solve),
-            m(t.mean_cost_eval()), ms(t.first_cost_eval),
-            m(t.mean_advance()), ms(t.first_advance),
-        );
-    }
-}
-
-
-
 fn cfg32(max_iters: usize, poses: usize) -> arael::simple_lm::LmConfig<f32> {
     // Problem-appropriate initial damping, per pose count. At the small
     // (60-pose) size the f32 solution lands a hair above the 1e-5 stop

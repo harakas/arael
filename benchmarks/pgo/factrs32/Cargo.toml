@@ -22,7 +22,7 @@ path = "src/main3.rs"
 factrs = { version = "0.3.0", features = ["f32"] }
 faer23 = { package = "faer", version = "0.23.2", default-features = false, features = ["std", "sparse-linalg"] }
 arael = { path = "../../.." }
-bench-harness = { path = "../../harness" }
+bench-harness = { path = "../../harness", features = ["factrs"] }
 
 [profile.release]
 debug = false

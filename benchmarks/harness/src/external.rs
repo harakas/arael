@@ -66,3 +66,34 @@ pub fn run(mut cmd: Command) -> Protocol {
         json,
     }
 }
+
+/// The protocol line a Rust subprocess runner prints -- the twin of what
+/// benchmarks/cpp/bench.h prints for the C++ ones. `full_ms` is omitted when
+/// the probes could not produce a trustworthy one, which the parser above reads
+/// as "not measurable".
+pub fn protocol_line<S>(row: &crate::table::Row<S>) -> String {
+    let cpus = std::fs::read_to_string("/proc/self/status")
+        .unwrap()
+        .lines()
+        .find(|l| l.starts_with("Cpus_allowed_list"))
+        .map(|l| l.split_whitespace().last().unwrap().to_string())
+        .unwrap_or_else(|| "?".to_string());
+    let second = match row.full_ms {
+        Some(ms) => format!(", \"second_run_ms\": {:.3}, \"second_accepted\": 2", ms),
+        None => String::new(),
+    };
+    // A first iteration that was not one clean accepted step reports nothing:
+    // NaN would not survive JSON, and a number would be a lie.
+    let first = if row.first_iter_ms.is_finite() {
+        format!(", \"first_iter_ms\": {:.3}, \"first_attempts\": 1, \"first_accepted\": 1",
+            row.first_iter_ms)
+    } else {
+        ", \"first_iter_ms\": 0, \"first_attempts\": 2, \"first_accepted\": 1".to_string()
+    };
+    format!(
+        "{{\"solve_ms\": {:.3}{}, \"iterations\": {}, \"accepted\": {}{}, \
+         \"peak_mb\": {:.1}, \"cpus_allowed\": \"{}\"}}",
+        row.solve_ms, first, row.iterations,
+        row.accepted.unwrap_or(row.iterations), second,
+        crate::mem::peak_rss_mb(), cpus)
+}

@@ -1,4 +1,4 @@
-// Attempt counting for factrs, shared by the SE2 and SE3 runners.
+// Attempt counting for factrs, shared by every benchmark that runs it.
 //
 // factrs's LM keeps its damping retry loop INSIDE step(): a rejected step
 // multiplies lambda and re-solves the damped system -- another full
@@ -65,34 +65,4 @@ pub fn counts() -> (usize, usize) {
 pub fn since(before: (usize, usize)) -> (usize, usize) {
     let (steps, solves) = counts();
     (steps - before.0, solves - before.1)
-}
-
-/// The benchmark's stdout protocol line, shared by the f32 subprocess runners.
-/// Unused in the in-process f64 harness, which reads the runners' structs.
-/// `second_run_ms`/`second_accepted` let the harness form one complete
-/// iteration as t(2) - t(1); it drops the number when the second step was a
-/// retry rather than an accepted step.
-#[allow(dead_code)]
-pub fn protocol_line(
-    solve_ms: f64,
-    first_iter_ms: f64,
-    iterations: usize,
-    accepted: usize,
-    two_iter_ms: Option<f64>,
-) -> String {
-    let cpus = std::fs::read_to_string("/proc/self/status")
-        .unwrap()
-        .lines()
-        .find(|l| l.starts_with("Cpus_allowed_list"))
-        .map(|l| l.split_whitespace().last().unwrap().to_string())
-        .unwrap_or_else(|| "?".to_string());
-    let second = match two_iter_ms {
-        Some(ms) => format!(", \"second_run_ms\": {:.3}, \"second_accepted\": 2", ms),
-        None => String::new(),
-    };
-    format!(
-        "{{\"solve_ms\": {:.3}, \"first_iter_ms\": {:.3}, \"iterations\": {}, \
-         \"accepted\": {}{}, \"peak_mb\": {:.1}, \"cpus_allowed\": \"{}\"}}",
-        solve_ms, first_iter_ms, iterations, accepted, second,
-        bench_harness::mem::peak_rss_mb(), cpus)
 }

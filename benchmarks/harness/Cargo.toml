@@ -12,3 +12,11 @@ arael = { path = "../.." }
 serde_json = "1"
 libc = "0.2"
 num = "0.4"
+
+# factrs is optional: bal does not run it, and pulling it in would cost that
+# benchmark a dependency tree it has no use for.
+factrs = { version = "0.3.0", optional = true }
+faer23 = { package = "faer", version = "0.23.2", default-features = false, features = ["std", "sparse-linalg"], optional = true }
+
+[features]
+factrs = ["dep:factrs", "dep:faer23"]

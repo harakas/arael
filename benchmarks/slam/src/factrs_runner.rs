@@ -8,17 +8,17 @@
 // residual equals scene::reference_cost. Whitening is baked into the
 // residual (plain Gaussian, no robust kernel); factors carry unit noise.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::scene::{Scene, Solution};
 use arael::matrix::matrix3f;
 use arael::vect::{vect3d, vect3f};
+use bench_harness::factrs::{counts, since, CountingSolver, StepCounter};
 use factrs::assign_symbols;
 use factrs::core::{Graph, LevenMarquardt, Values};
 use factrs::dtype;
 use factrs::fac;
 use factrs::linalg::{Const, ForwardProp, Matrix3, Numeric, Vector3, VectorX};
-use factrs::optimizers::{BaseOptParams, LevenParams, OptError, OptObserver};
+use factrs::optimizers::{BaseOptParams, LevenParams, OptError};
 use factrs::residuals::{Residual1, Residual2};
 use factrs::traits::Optimizer;
 use factrs::variables::{VectorVar, VectorVar3, VectorVar6};
@@ -184,11 +184,6 @@ impl Residual2 for OdoRes {
     }
 }
 
-static STEPS: AtomicUsize = AtomicUsize::new(0);
-struct StepCounter;
-impl OptObserver for StepCounter {
-    fn on_step(&self, _v: &Values, _t: i64) { STEPS.fetch_add(1, Ordering::Relaxed); }
-}
 
 fn pv(pos: vect3f, ea: vect3f) -> VectorVar6 {
     VectorVar(factrs::linalg::Vector::<6, dtype>::new(
@@ -240,12 +235,8 @@ fn extract(scene: &Scene, v: &Values) -> Solution {
     }
 }
 
-pub struct RunOut {
-    pub solve_ms: f64,
-    pub first_iter_ms: f64,
-    pub iterations: usize,
-    pub solution: Solution,
-}
+pub type RunOut = bench_harness::table::Row<Solution>;
+
 
 fn base(max_iterations: usize) -> BaseOptParams {
     // 1e-5 relative/absolute -- the shared termination class. factrs's
@@ -303,23 +294,27 @@ pub fn initial_cost(scene: &Scene) -> f64 {
 }
 
 pub fn run(scene: &Scene) -> RunOut {
-    let optimize = |max_iter: usize| -> (f64, usize, Values) {
+    bench_harness::solver::run(200, |max_iter| {
         let (graph, init) = build(scene);
-        let before = STEPS.load(Ordering::Relaxed);
+        let before = counts();
         let params = LevenParams { base: base(max_iter), ..Default::default() };
         let mut opt = LevenMarquardt::new(params, graph);
+        // factrs keeps its damping retries inside step(): a rejected step
+        // multiplies lambda and re-solves the damped system -- another full
+        // factorization -- without ever returning. Counting the linear solves
+        // recovers them; its observer sees accepted steps only.
+        opt.set_solver(CountingSolver::default());
         opt.observers_mut().add(StepCounter);
-        let t0 = std::time::Instant::now();
-        let result = opt.optimize(init);
-        let ms = t0.elapsed().as_secs_f64() * 1e3;
-        let values = match result {
+        let values = match opt.optimize(init) {
             Ok(v) => v,
             Err(OptError::MaxIterations(v)) => v,
             Err(e) => panic!("factrs failed: {:?}", e),
         };
-        (ms, STEPS.load(Ordering::Relaxed) - before, values)
-    };
-    let (first_iter_ms, _, _) = optimize(1);
-    let (solve_ms, iterations, values) = optimize(200);
-    RunOut { solve_ms, first_iter_ms, iterations, solution: extract(scene, &values) }
+        let (accepted, attempts) = since(before);
+        bench_harness::solver::Outcome {
+            accepted,
+            attempts,
+            solution: extract(scene, &values),
+        }
+    })
 }

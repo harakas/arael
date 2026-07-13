@@ -142,7 +142,11 @@ fn main() {
         eprintln!("WARNING: cpp/build/gtsam_slam missing (needs libgtsam-dev); skipping GTSAM");
     }
 
-    let skip_tiny = std::env::var("SLAM_SKIP_TINY").map_or(false, |v| v == "1");
+    // tiny-solver is off by default (RUN_TINY=1 brings it back): it is an order
+    // of magnitude slower than the field and only compresses the scale the other
+    // systems are read on. The harness runs and validates it exactly as it does
+    // the others.
+    let skip_tiny = std::env::var("RUN_TINY").is_err();
     // SLAM_SYSTEMS=<comma-separated substrings> runs only the matching rows
     // (e.g. SLAM_SYSTEMS=arael). Unset runs everything. A filtered run
     // validates only against whatever ran -- for iterating, not publishing.
@@ -166,16 +170,10 @@ fn main() {
         t.record("arael LM f32", a32);
         }
         if !skip_tiny && want("tiny-solver LM") {
-            let ti = tiny_runner::run_lm(&scene);
-            let row = bench_harness::table::Row::new(
-                ti.solve_ms, ti.first_iter_ms, ti.iterations, ti.solution);
-            t.record("tiny-solver LM", row);
+            t.record("tiny-solver LM", tiny_runner::run_lm(&scene));
         }
         if want("factrs LM") {
-        let fa = factrs_runner::run(&scene);
-        let row = bench_harness::table::Row::new(
-            fa.solve_ms, fa.first_iter_ms, fa.iterations, fa.solution);
-        t.record("factrs LM", row);
+        t.record("factrs LM", factrs_runner::run(&scene));
         }
         if ceres_ok {
             for solver in &ceres_solvers {
@@ -236,10 +234,6 @@ fn main() {
     }
     t.print();
     let _ = &init_sol;
-}
-
-fn last_core() -> usize {
-    std::env::var("SLAM_CORE").ok().and_then(|v| v.parse().ok()).unwrap_or(0)
 }
 
 /// One external runner: the harness parses its protocol line and asserts the

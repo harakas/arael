@@ -130,30 +130,31 @@ pub type RunOut = bench_harness::table::Row<Vec<PoseIn>>;
 
 fn run(ds: &Dataset, gn: bool) -> RunOut {
     let (problem, init) = build(ds);
+    let radius = std::env::var("TINY_RADIUS0").ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(1e12);
 
-    let optimize = |max_iter: usize| -> (f64, usize, Option<HashMap<String, na::DVector<f64>>>) {
+    bench_harness::solver::run(100, |max_iter| {
         let before = ITER_COUNT.load(Ordering::Relaxed);
-        let t0 = std::time::Instant::now();
         let result = if gn {
-            tiny_solver::GaussNewtonOptimizer::new().optimize(&problem, &init, Some(options(max_iter)))
+            tiny_solver::GaussNewtonOptimizer::new()
+                .optimize(&problem, &init, Some(options(max_iter)))
         } else {
-            // Problem-appropriate initial trust region (shipped default
-            // 1e4 over-damps and triggers its terminate-on-rejected-step
-            // behavior; see the README's initial-damping policy).
-            let radius = std::env::var("TINY_RADIUS0").ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(1e12);
+            // Problem-appropriate initial trust region: the shipped default of
+            // 1e4 over-damps and trips its terminate-on-rejected-step behavior.
             tiny_solver::LevenbergMarquardtOptimizer::new(1e-6, 1e32, radius)
                 .optimize(&problem, &init, Some(options(max_iter)))
         };
-        let ms = t0.elapsed().as_secs_f64() * 1e3;
-        (ms, ITER_COUNT.load(Ordering::Relaxed) - before, result)
-    };
-
-    let (first_iter_ms, _, _) = optimize(1);
-    let (solve_ms, iterations, result) = optimize(100);
-    let values = result.expect("tiny-solver returned None");
-    bench_harness::table::Row::new(solve_ms, first_iter_ms, iterations, extract(ds, &values))
+        let values = result.expect("tiny-solver returned None");
+        // tiny-solver reports outer iterations only; damping retries, if any,
+        // are not exposed by its API.
+        let iterations = ITER_COUNT.load(Ordering::Relaxed) - before;
+        bench_harness::solver::Outcome {
+            accepted: iterations,
+            attempts: iterations,
+            solution: extract(ds, &values),
+        }
+    })
 }
 
 pub fn run_gn(ds: &Dataset) -> RunOut {

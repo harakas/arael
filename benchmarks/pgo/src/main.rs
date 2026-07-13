@@ -11,7 +11,6 @@
 
 mod arael_runner;
 mod arael_runner3;
-mod factrs_counting;
 mod factrs_runner;
 mod factrs_runner3;
 mod g2o;
