@@ -308,7 +308,7 @@ fn skip_isam() -> bool {
 // objects and env accessors the runners use, so the header cannot drift from
 // what was run; the env var that changes each one is named in brackets.
 fn print_header(rounds: usize, only: &Option<String>) {
-    let c64 = bench_harness::arael::config::<arael_runner::Graph>(0);
+    let c64 = bench_harness::arael::config::<arael_runner::Graph>(&g2o::Dataset::default(), 0);
     let nielsen = bench_harness::arael::nielsen();
     let ordering = arael_runner::ordering();
 
@@ -321,8 +321,8 @@ fn print_header(rounds: usize, only: &Option<String>) {
     println!("optional systems  : tiny-solver {} [RUN_TINY], isam {} [RUN_ISAM]",
         on_off(skip_tiny()), on_off(skip_isam()));
     println!("arael lambda0     : {:e} (2D), {:e} (3D) [ARAEL_LAMBDA0]",
-        bench_harness::arael::lambda0::<arael_runner::Graph>(),
-        bench_harness::arael::lambda0::<arael_runner3::Graph3>());
+        arael_runner::LAMBDA0_2D,
+        arael_runner3::LAMBDA0_3D);
     println!("arael damping     : {} [PGO_DRIVER: default|nielsen]",
         if nielsen { "Nielsen gain-ratio driver" } else { "fixed ladder (default driver)" });
     // Auto is not a third ordering -- on a pose graph there is nothing to

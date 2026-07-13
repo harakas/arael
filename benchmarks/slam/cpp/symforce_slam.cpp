@@ -20,6 +20,7 @@
 // SYMFORCE_LAMBDA0 overrides the initial damping (default 1e-10, a
 // problem-appropriate near-Gauss-Newton value; SymForce ships 1.0).
 
+#include "../../cpp/bench.h"
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -162,10 +163,8 @@ static double initial_cost(const Scene& s) {
     return cost;
 }
 
-struct RunResult { double ms; int accepted, total; };
-
 template <typename Scalar>
-static RunResult solve(const Scene& s, int max_iters, std::vector<double>* pose_out,
+static bench::Result solve(const Scene& s, int max_iters, std::vector<double>* pose_out,
                        std::vector<double>* lm_out) {
     using V6 = Eigen::Matrix<Scalar, 6, 1>;
     using V3 = Eigen::Matrix<Scalar, 3, 1>;
@@ -272,7 +271,10 @@ static RunResult solve(const Scene& s, int max_iters, std::vector<double>* pose_
         }
     }
     (void)sizeof(V2);
-    return RunResult{ms, accepted, (int)stats.iterations.size()};
+    // SymForce records the initial error state as an entry with iteration = -1,
+    // before any step is taken. It is not an attempt; discount it so accepted and
+    // attempts mean the same here as in every other runner.
+    return bench::Result{ms, accepted, std::max(0, (int)stats.iterations.size() - 1)};
 }
 
 static long peak_rss_kb() {
@@ -287,9 +289,18 @@ template <typename Scalar>
 static void run(const Scene& s, const char* solution_out) {
     int max_iters = 200;
     if (const char* m = getenv("SYMFORCE_MAXITER")) max_iters = atoi(m);
-    RunResult first = solve<Scalar>(s, 1, nullptr, nullptr);
     std::vector<double> poses, lms;
-    RunResult full = solve<Scalar>(s, max_iters, &poses, &lms);
+    bench::report(
+        [&](int n) { return solve<Scalar>(s, n, nullptr, nullptr); },
+        [&]() {
+            bench::Result r = solve<Scalar>(s, 200, &poses, &lms);
+            // The cross-check the harness asserts: SymForce's own generated
+            // residuals, in double, must value the initial estimate at the
+            // reference cost -- which is what proves it minimizes the same
+            // objective as everyone else.
+            r.initial_cost = initial_cost(s);
+            return r;
+        });
 
     std::ofstream out(solution_out);
     out.precision(17);
@@ -298,21 +309,11 @@ static void run(const Scene& s, const char* solution_out) {
     for (int j = 0; j < s.n_landmarks; j++)
         for (int k = 0; k < 3; k++) out << lms[3 * j + k] << (k == 2 ? "\n" : " ");
 
-    std::string cpus = "?";
-    std::ifstream st("/proc/self/status");
-    std::string l;
-    while (std::getline(st, l))
-        if (l.rfind("Cpus_allowed_list:", 0) == 0)
-            cpus = l.substr(l.find_last_of(" \t") + 1);
-
-    printf("{\"solve_ms\": %.3f, \"first_iter_ms\": %.3f, \"iterations\": %d, "
-           "\"accepted\": %d, \"initial_cost\": %.6f, \"peak_rss_kb\": %ld, \"cpus_allowed\": \"%s\"}\n",
-           full.ms, first.ms, full.total, full.accepted, initial_cost(s), peak_rss_kb(), cpus.c_str());
 }
 
 int main(int argc, char** argv) {
-    // Silence SymForce's atexit profiling table (it would interleave
-    // with the JSON protocol line on stdout).
+    // Silence SymForce's atexit profiling table (it would interleave with the
+    // JSON protocol line on stdout).
     setenv("SYMFORCE_TIC_TOC_QUIET", "1", 0);
     if (argc < 4) { fprintf(stderr, "usage: %s <scene.txt> <f64|f32> <solution_out>\n", argv[0]); return 1; }
     Scene s = load(argv[1]);

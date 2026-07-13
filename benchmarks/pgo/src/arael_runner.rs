@@ -226,13 +226,13 @@ pub fn solve_f32<P: arael::simple_lm::LmProblem<f32>>(
 // Initial damping, problem-appropriate for well-initialized 2D pose graphs (the
 // LmConfig docs recommend a small initial_lambda for these); see the README's
 // initial-damping policy.
-const LAMBDA0_2D: f64 = 1e-8;
+pub const LAMBDA0_2D: f64 = 1e-8;
 
 impl Pipeline for Graph {
     type Scalar = f64;
     type Input = Dataset;
     type Solution = Vec<PoseIn>;
-    fn lambda0() -> f64 { LAMBDA0_2D }
+    fn lambda0(_: &Dataset) -> f64 { LAMBDA0_2D }
     fn build(ds: &Dataset) -> Self { build_f64(ds) }
     fn serialize(&mut self, out: &mut Vec<f64>) { self.serialize64(out); }
     fn deserialize(&mut self, x: &[f64]) { self.deserialize64(x); }
@@ -249,7 +249,7 @@ impl Pipeline for GraphF {
     type Scalar = f32;
     type Input = Dataset;
     type Solution = Vec<PoseIn>;
-    fn lambda0() -> f64 { LAMBDA0_2D }
+    fn lambda0(_: &Dataset) -> f64 { LAMBDA0_2D }
     fn build(ds: &Dataset) -> Self { build_f32(ds) }
     fn serialize(&mut self, out: &mut Vec<f32>) { self.serialize32(out); }
     fn deserialize(&mut self, x: &[f32]) { self.deserialize32(x); }

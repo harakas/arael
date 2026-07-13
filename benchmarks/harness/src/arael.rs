@@ -21,8 +21,9 @@ pub trait Model: Clone + LmProblem<Self::Scalar> {
 
     /// Problem-appropriate initial damping, before the ARAEL_LAMBDA0 override.
     /// Solver benchmarks give each algorithm the damping the problem wants, not
-    /// the one it ships with; see the benchmark READMEs' damping policy.
-    fn lambda0() -> f64;
+    /// the one it ships with; see the benchmark READMEs' damping policy. It sees
+    /// the input because the right value can depend on the problem's size.
+    fn lambda0(input: &Self::Input) -> f64;
 
     fn build(input: &Self::Input) -> Self;
     fn serialize(&mut self, out: &mut Vec<Self::Scalar>);
@@ -44,11 +45,11 @@ pub trait Model: Clone + LmProblem<Self::Scalar> {
 }
 
 /// ARAEL_LAMBDA0 overrides the model's damping, for experiments.
-pub fn lambda0<M: Model>() -> f64 {
+pub fn lambda0<M: Model>(input: &M::Input) -> f64 {
     std::env::var("ARAEL_LAMBDA0")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or_else(M::lambda0)
+        .unwrap_or_else(|| M::lambda0(input))
 }
 
 /// DRIVER=nielsen swaps the fixed damping schedule for the gain-ratio driver:
@@ -59,7 +60,7 @@ pub fn nielsen() -> bool {
     std::env::var("DRIVER").as_deref() == Ok("nielsen")
 }
 
-pub fn config<M: Model>(max_iters: usize) -> LmConfig<M::Scalar> {
+pub fn config<M: Model>(input: &M::Input, max_iters: usize) -> LmConfig<M::Scalar> {
     // Float: num::NumCast, so a literal reaches either scalar the same way.
     let f = |v: f64| <M::Scalar as num::NumCast>::from(v).unwrap();
     let mut cfg = LmConfig {
@@ -75,7 +76,7 @@ pub fn config<M: Model>(max_iters: usize) -> LmConfig<M::Scalar> {
         patience: 1,
         min_iters: 1,
         max_iters,
-        initial_lambda: f(lambda0::<M>()),
+        initial_lambda: f(lambda0::<M>(input)),
         ..Default::default()
     };
     M::tune(&mut cfg);
@@ -122,13 +123,13 @@ pub fn run<M: Model>(input: &M::Input) -> Row<M::Solution> {
 
     // One iteration, and two, each on a fresh copy. Their difference is one
     // complete iteration with the setup cancelled out.
-    let (first_ms, first) = timed::<M>(&params, &model, &config::<M>(1));
+    let (first_ms, first) = timed::<M>(&params, &model, &config::<M>(input, 1));
     let first_ms = first_iter_ms(first_ms, first.iterations, first.accepted_iterations);
-    let (two_ms, two) = timed::<M>(&params, &model, &config::<M>(2));
+    let (two_ms, two) = timed::<M>(&params, &model, &config::<M>(input, 2));
     let two_ms = two_iter_ms(two_ms, first_ms, two.accepted_iterations);
 
     let t0 = std::time::Instant::now();
-    let result = M::solve(&params, &mut model, &config::<M>(100));
+    let result = M::solve(&params, &mut model, &config::<M>(input, 100));
     let solve_ms = t0.elapsed().as_secs_f64() * 1e3;
     model.deserialize(&result.x);
 

@@ -23,6 +23,7 @@ pub struct EdgeIn {
     pub wr: f64, // sqrt(I33)
 }
 
+#[derive(Default)]
 pub struct Dataset {
     pub poses: Vec<PoseIn>,
     pub edges: Vec<EdgeIn>,

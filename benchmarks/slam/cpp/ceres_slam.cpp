@@ -15,6 +15,7 @@
 // peak_rss_kb, cpus_allowed} on stdout; solution_out carries one pose
 // per line (6 values) then one landmark per line (3 values).
 
+#include "../../cpp/bench.h"
 #include <ceres/ceres.h>
 #include <Eigen/Dense>
 #include <cstdio>
@@ -177,9 +178,7 @@ struct OdoCost {
     }
 };
 
-struct RunResult { double ms; int accepted, total; double initial_cost; };
-
-static RunResult solve(Scene& s, ceres::LinearSolverType linsolver, int max_iters,
+static bench::Result solve(Scene& s, ceres::LinearSolverType linsolver, int max_iters,
                        std::vector<double>* pose_out, std::vector<double>* lm_out) {
     std::vector<double> poses = s.pose_init;
     std::vector<double> lms = s.lm_init;
@@ -224,9 +223,13 @@ static RunResult solve(Scene& s, ceres::LinearSolverType linsolver, int max_iter
     ceres::Solve(options, &problem, &summary);
     if (pose_out) *pose_out = poses;
     if (lm_out) *lm_out = lms;
-    return RunResult{summary.total_time_in_seconds * 1e3,
-                     summary.num_successful_steps,
-                     summary.num_successful_steps + summary.num_unsuccessful_steps,
+        // Ceres records iteration 0 -- the initial cost evaluation, before any
+    // step -- as a successful step. It is not one; discount it so accepted
+    // and attempts mean the same here as in every other runner.
+    const int accepted = std::max(0, summary.num_successful_steps - 1);
+    return bench::Result{summary.total_time_in_seconds * 1e3,
+                     accepted,
+                         accepted + summary.num_unsuccessful_steps,
                      2.0 * summary.initial_cost};
 }
 
@@ -251,9 +254,10 @@ int main(int argc, char** argv) {
         else if (t != "sparse_normal_cholesky") { fprintf(stderr, "unknown linsolver %s\n", t.c_str()); return 1; }
     }
 
-    RunResult first = solve(s, linsolver, 1, nullptr, nullptr);
     std::vector<double> poses, lms;
-    RunResult full = solve(s, linsolver, 200, &poses, &lms);
+    bench::report(
+        [&](int n) { return solve(s, linsolver, n, nullptr, nullptr); },
+        [&]() { return solve(s, linsolver, 200, &poses, &lms); });
 
     std::ofstream out(argv[2]);
     out.precision(17);
@@ -271,8 +275,5 @@ int main(int argc, char** argv) {
         if (l.rfind("Cpus_allowed_list:", 0) == 0)
             cpus = l.substr(l.find_last_of(" \t") + 1);
 
-    printf("{\"solve_ms\": %.3f, \"first_iter_ms\": %.3f, \"iterations\": %d, "
-           "\"accepted\": %d, \"initial_cost\": %.6f, \"peak_rss_kb\": %ld, \"cpus_allowed\": \"%s\"}\n",
-           full.ms, first.ms, full.total, full.accepted, full.initial_cost, peak_rss_kb(), cpus.c_str());
     return 0;
 }

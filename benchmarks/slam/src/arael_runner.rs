@@ -35,6 +35,7 @@ use arael::vect::{vect2d, vect2f, vect3d, vect3f};
     [(pose.ea.x - pose.tilt_roll) * path.tilt_isigma,
      (pose.ea.y - pose.tilt_pitch) * path.tilt_isigma]
 }))]
+#[derive(Clone)]
 struct Pose {
     pos: Param<vect3d>,
     ea: SimpleEulerAngleParam<f64>,
@@ -56,6 +57,7 @@ struct Pose {
      d.y * path.drift_lm_isigma,
      d.z * path.drift_lm_isigma]
 }))]
+#[derive(Clone)]
 struct PointLandmark {
     pos: Param<vect3d>,
     prior_pos: vect3d,
@@ -76,6 +78,7 @@ struct PointLandmark {
     [atan2(r_f.y, r_f.x) * frine.isigma.x * path.frine_isigma_scale,
      atan2(r_f.z, r_f.x) * frine.isigma.y * path.frine_isigma_scale]
 }))]
+#[derive(Clone)]
 struct Frine {
     #[arael(ref = root.poses)]
     pose: Ref<Pose>,
@@ -105,6 +108,7 @@ struct Frine {
      ea_w.y * posepair.ea_cov_isigma.y,
      ea_w.z * posepair.ea_cov_isigma.z]
 }))]
+#[derive(Clone)]
 struct PosePair {
     #[arael(ref = root.poses)]
     prev: Ref<Pose>,
@@ -121,6 +125,7 @@ struct PosePair {
 
 #[arael::model]
 #[arael(root)]
+#[derive(Clone)]
 pub struct Path {
     poses: refs::Vec<Pose>,
     landmarks: refs::Vec<PointLandmark>,
@@ -153,6 +158,7 @@ pub struct Path {
     [(posef.ea.x - posef.tilt_roll) * pathf.tilt_isigma,
      (posef.ea.y - posef.tilt_pitch) * pathf.tilt_isigma]
 }))]
+#[derive(Clone)]
 struct PoseF {
     pos: Param<vect3f>,
     ea: SimpleEulerAngleParam<f32>,
@@ -171,6 +177,7 @@ struct PoseF {
     let d = pointlandmarkf.pos - pointlandmarkf.prior_pos;
     [d.x * pathf.drift_lm_isigma, d.y * pathf.drift_lm_isigma, d.z * pathf.drift_lm_isigma]
 }))]
+#[derive(Clone)]
 struct PointLandmarkF {
     pos: Param<vect3f>,
     prior_pos: vect3f,
@@ -187,6 +194,7 @@ struct PointLandmarkF {
     [atan2(r_f.y, r_f.x) * frinef.isigma.x * pathf.frine_isigma_scale,
      atan2(r_f.z, r_f.x) * frinef.isigma.y * pathf.frine_isigma_scale]
 }))]
+#[derive(Clone)]
 struct FrineF {
     #[arael(ref = root.poses)]
     pose: Ref<PoseF>,
@@ -211,6 +219,7 @@ struct FrineF {
      pos_w.z * posepairf.pos_cov_isigma.z, ea_w.x * posepairf.ea_cov_isigma.x,
      ea_w.y * posepairf.ea_cov_isigma.y, ea_w.z * posepairf.ea_cov_isigma.z]
 }))]
+#[derive(Clone)]
 struct PosePairF {
     #[arael(ref = root.poses)]
     prev: Ref<PoseF>,
@@ -227,6 +236,7 @@ struct PosePairF {
 
 #[arael::model]
 #[arael(root, f32)]
+#[derive(Clone)]
 struct PathF {
     poses: refs::Vec<PoseF>,
     landmarks: refs::Vec<PointLandmarkF>,
@@ -385,14 +395,6 @@ fn extract_f32(path: &PathF) -> Solution {
     }
 }
 
-pub struct RunOut {
-    pub solve_ms: f64,
-    pub first_iter_ms: f64,
-    pub iterations: usize,
-    pub accepted: usize,
-    pub solution: Solution,
-}
-
 // The plain fixed schedule with a problem-appropriate initial damping is
 // the default (this well-initialized graph needs no adaptive driver -- no
 // step is ever rejected, so a gain-ratio schedule only over-damps and
@@ -530,33 +532,7 @@ fn print_timing(label: &str, timing: Option<&arael::simple_lm::LmTiming>) {
     }
 }
 
-fn run_with(scene: &Scene, solve: Solve64) -> RunOut {
-    let mut path = build(scene);
-    let mut params: Vec<f64> = Vec::new();
-    path.serialize64(&mut params);
 
-    let t0 = std::time::Instant::now();
-    let _ = solve(&params, &mut path, &cfg(1));
-    let first_iter_ms = t0.elapsed().as_secs_f64() * 1e3;
-
-    let t0 = std::time::Instant::now();
-    let result = solve(&params, &mut path, &cfg(200));
-    let solve_ms = t0.elapsed().as_secs_f64() * 1e3;
-    path.deserialize64(&result.x);
-
-    print_timing("f64", result.timing.as_ref());
-
-    RunOut {
-        solve_ms, first_iter_ms,
-        iterations: result.iterations,
-        accepted: result.accepted_iterations,
-        solution: extract(&path),
-    }
-}
-
-pub fn run(scene: &Scene) -> RunOut {
-    run_with(scene, solve64)
-}
 
 fn cfg32(max_iters: usize, poses: usize) -> arael::simple_lm::LmConfig<f32> {
     // Problem-appropriate initial damping, per pose count. At the small
@@ -616,26 +592,44 @@ pub fn run_f32_capped(scene: &Scene, max_iters: usize) -> Solution {
     extract_f32(&path)
 }
 
-pub fn run_f32(scene: &Scene) -> RunOut {
-    let mut path = build_f32(scene);
-    let mut params: Vec<f32> = Vec::new();
-    path.serialize32(&mut params);
 
-    let t0 = std::time::Instant::now();
-    let _ = solve32(&params, &mut path, &cfg32(1, scene.poses.len()));
-    let first_iter_ms = t0.elapsed().as_secs_f64() * 1e3;
+// ---------------------------------------------------------------- pipeline
 
-    let t0 = std::time::Instant::now();
-    let result = solve32(&params, &mut path, &cfg32(200, scene.poses.len()));
-    let solve_ms = t0.elapsed().as_secs_f64() * 1e3;
-    path.deserialize32(&result.x);
-
-    print_timing("f32", result.timing.as_ref());
-
-    RunOut {
-        solve_ms, first_iter_ms,
-        iterations: result.iterations,
-        accepted: result.accepted_iterations,
-        solution: extract_f32(&path),
-    }
+// Problem-appropriate initial damping. The f32 build wants more of it at the
+// small size: at 60 poses the f32 solution lands a hair above the 1e-5 stop
+// threshold at 1e-8 and then bounces in the f32 noise floor -- a
+// termination/precision interaction, not divergence -- and 1e-7 makes the last
+// step small enough to stop cleanly. The larger sizes are clean at 1e-8 (1e-7
+// would grind there instead; no single value is clean at every size).
+impl bench_harness::arael::Model for Path {
+    type Scalar = f64;
+    type Input = Scene;
+    type Solution = Solution;
+    fn lambda0(_: &Scene) -> f64 { 1e-8 }
+    fn build(scene: &Scene) -> Self { build(scene) }
+    fn serialize(&mut self, out: &mut Vec<f64>) { self.serialize64(out); }
+    fn deserialize(&mut self, x: &[f64]) { self.deserialize64(x); }
+    fn solution(&self) -> Solution { extract(self) }
+    fn solve(params: &[f64], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f64>)
+        -> arael::simple_lm::LmResult<f64> { solve64(params, m, cfg) }
 }
+
+impl bench_harness::arael::Model for PathF {
+    type Scalar = f32;
+    type Input = Scene;
+    type Solution = Solution;
+    fn lambda0(scene: &Scene) -> f64 {
+        if scene.poses.len() <= 60 { 1e-7 } else { 1e-8 }
+    }
+    fn build(scene: &Scene) -> Self { build_f32(scene) }
+    fn serialize(&mut self, out: &mut Vec<f32>) { self.serialize32(out); }
+    fn deserialize(&mut self, x: &[f32]) { self.deserialize32(x); }
+    fn solution(&self) -> Solution { extract_f32(self) }
+    fn solve(params: &[f32], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f32>)
+        -> arael::simple_lm::LmResult<f32> { solve32(params, m, cfg) }
+}
+
+pub type RunOut = bench_harness::table::Row<Solution>;
+
+pub fn run(scene: &Scene) -> RunOut { bench_harness::arael::run::<Path>(scene) }
+pub fn run_f32(scene: &Scene) -> RunOut { bench_harness::arael::run::<PathF>(scene) }

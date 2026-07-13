@@ -202,13 +202,13 @@ fn build_f32(ds: &Dataset3) -> Graph3F {
 // leave 1e-8 over-damped -- it converges with damping rejections and an early
 // plateau stop 6.5 cm short of the optimum; 1e-10 converges cleanly. sphere2500
 // is insensitive to the choice.
-const LAMBDA0_3D: f64 = 1e-10;
+pub const LAMBDA0_3D: f64 = 1e-10;
 
 impl Pipeline for Graph3 {
     type Scalar = f64;
     type Input = Dataset3;
     type Solution = Vec<Pose3In>;
-    fn lambda0() -> f64 { LAMBDA0_3D }
+    fn lambda0(_: &Dataset3) -> f64 { LAMBDA0_3D }
     fn build(ds: &Dataset3) -> Self { build_f64(ds) }
     fn serialize(&mut self, out: &mut Vec<f64>) { self.serialize64(out); }
     fn deserialize(&mut self, x: &[f64]) { self.deserialize64(x); }
@@ -230,7 +230,7 @@ impl Pipeline for Graph3F {
     type Scalar = f32;
     type Input = Dataset3;
     type Solution = Vec<Pose3In>;
-    fn lambda0() -> f64 { LAMBDA0_3D }
+    fn lambda0(_: &Dataset3) -> f64 { LAMBDA0_3D }
     fn build(ds: &Dataset3) -> Self { build_f32(ds) }
     fn serialize(&mut self, out: &mut Vec<f32>) { self.serialize32(out); }
     fn deserialize(&mut self, x: &[f32]) { self.deserialize32(x); }

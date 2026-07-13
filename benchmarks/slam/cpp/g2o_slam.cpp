@@ -22,6 +22,7 @@
 // near-Gauss-Newton); G2O_GAIN overrides the terminate gain (default
 // 1e-5, the shared termination class).
 
+#include "../../cpp/bench.h"
 #include <g2o/core/base_binary_edge.h>
 #include <g2o/core/base_unary_edge.h>
 #include <g2o/core/base_vertex.h>
@@ -369,16 +370,30 @@ static double fd_edge(g2o::OptimizableGraph::Edge* e, const Eigen::MatrixXd& Jan
     return (Jan - Jfd).cwiseAbs().maxCoeff();
 }
 
-struct RunResult { double ms; int iterations; double initial_cost; };
+// g2o keeps its damping retries inside OptimizationAlgorithmLevenberg::solve()
+// and reports the count only for the round just finished (levenbergIteration()
+// is reset every round), so summing them from a post-iteration action is the one
+// way to see the attempts from outside. Gauss-Newton has no retry loop.
+struct TrialCounter : public g2o::HyperGraphAction {
+    g2o::OptimizationAlgorithmLevenberg* lev = nullptr;
+    int trials = 0;
+    g2o::HyperGraphAction* operator()(const g2o::HyperGraph*,
+                                      Parameters* = 0) override {
+        if (lev) trials += lev->levenbergIteration();
+        return this;
+    }
+};
 
-static RunResult solve(const Scene& s, bool lm, int max_iters,
+static bench::Result solve(const Scene& s, bool lm, int max_iters,
                        std::vector<double>* pose_out, std::vector<double>* lm_out) {
     using BlockSolver = g2o::BlockSolver<g2o::BlockSolverTraits<-1, -1>>;
     auto linear = std::make_unique<g2o::LinearSolverCholmod<BlockSolver::PoseMatrixType>>();
     auto block = std::make_unique<BlockSolver>(std::move(linear));
+    auto* counter = new TrialCounter();
     g2o::OptimizationAlgorithm* algo;
     if (lm) {
         auto* lev = new g2o::OptimizationAlgorithmLevenberg(std::move(block));
+        counter->lev = lev;
         double lambda0 = 1e-9;
         if (const char* li = getenv("G2O_LAMBDA_INIT")) lambda0 = atof(li);
         lev->setUserLambdaInit(lambda0);
@@ -464,6 +479,7 @@ static RunResult solve(const Scene& s, bool lm, int max_iters,
     terminate->setGainThreshold(gain);
     terminate->setMaxIterations(max_iters);
     opt.addPostIterationAction(terminate);
+    opt.addPostIterationAction(counter);
 
     auto t0 = std::chrono::steady_clock::now();
     opt.initializeOptimization();
@@ -537,7 +553,7 @@ static RunResult solve(const Scene& s, bool lm, int max_iters,
             for (int k = 0; k < 3; k++) (*lm_out)[3 * j + k] = e[k];
         }
     }
-    return RunResult{ms, iters, initial_cost};
+    return bench::Result{ms, iters, lm ? counter->trials : iters, initial_cost};
 }
 
 static long peak_rss_kb() {
@@ -553,9 +569,10 @@ int main(int argc, char** argv) {
     bool lm = std::string(argv[2]) == "lm";
     Scene s = load(argv[1]);
 
-    RunResult first = solve(s, lm, 1, nullptr, nullptr);
     std::vector<double> poses, lms;
-    RunResult full = solve(s, lm, 200, &poses, &lms);
+    bench::report(
+        [&](int n) { return solve(s, lm, n, nullptr, nullptr); },
+        [&]() { return solve(s, lm, 200, &poses, &lms); });
 
     std::ofstream out(argv[3]);
     out.precision(17);
@@ -571,8 +588,5 @@ int main(int argc, char** argv) {
         if (l.rfind("Cpus_allowed_list:", 0) == 0)
             cpus = l.substr(l.find_last_of(" \t") + 1);
 
-    printf("{\"solve_ms\": %.3f, \"first_iter_ms\": %.3f, \"iterations\": %d, "
-           "\"accepted\": %d, \"initial_cost\": %.6f, \"peak_rss_kb\": %ld, \"cpus_allowed\": \"%s\"}\n",
-           full.ms, first.ms, full.iterations, full.iterations, full.initial_cost, peak_rss_kb(), cpus.c_str());
     return 0;
 }

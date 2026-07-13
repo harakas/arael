@@ -76,6 +76,7 @@ pub struct Scene {
 }
 
 /// One system's answer, evaluated by [`reference_cost`].
+#[derive(Clone)]
 pub struct Solution {
     pub poses: Vec<(vect3d, vect3d)>, // (pos, euler)
     pub landmarks: Vec<vect3d>,

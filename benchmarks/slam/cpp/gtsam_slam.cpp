@@ -20,6 +20,7 @@
 // line (6 values) then one landmark per line (3 values).
 // GTSAM_LAMBDA0 overrides the LM initial damping (default 1e-9).
 
+#include "../../cpp/bench.h"
 #include <gtsam/base/numericalDerivative.h>
 #include <gtsam/inference/Symbol.h>
 #include <gtsam/nonlinear/LevenbergMarquardtOptimizer.h>
@@ -332,9 +333,7 @@ static void verify_jacobians(const Scene& s, const gtsam::Values& v) {
     if (worst > 1e-4) { fprintf(stderr, "JACOBIAN MISMATCH\n"); exit(2); }
 }
 
-struct RunResult { double ms; int iterations; double initial_cost; };
-
-static RunResult solve(const Scene& s, int max_iters, std::vector<double>* pose_out,
+static bench::Result solve(const Scene& s, int max_iters, std::vector<double>* pose_out,
                        std::vector<double>* lm_out) {
     gtsam::NonlinearFactorGraph graph;
     gtsam::Values init;
@@ -369,7 +368,10 @@ static RunResult solve(const Scene& s, int max_iters, std::vector<double>* pose_
             for (int k = 0; k < 3; k++) (*lm_out)[3 * j + k] = p[k];
         }
     }
-    return RunResult{ms, (int)optimizer.iterations(), initial_cost};
+    // GTSAM keeps its damping retries inside iterate() and its API exposes no
+    // way to count them: accepted steps are all it reports.
+    const int iters = (int)optimizer.iterations();
+    return bench::Result{ms, iters, iters, initial_cost};
 }
 
 static long peak_rss_kb() {
@@ -389,9 +391,10 @@ int main(int argc, char** argv) {
         verify_jacobians(s, v);
     }
 
-    RunResult first = solve(s, 1, nullptr, nullptr);
     std::vector<double> poses, lms;
-    RunResult full = solve(s, 200, &poses, &lms);
+    bench::report(
+        [&](int n) { return solve(s, n, nullptr, nullptr); },
+        [&]() { return solve(s, 200, &poses, &lms); });
 
     std::ofstream out(argv[3]);
     out.precision(17);
@@ -407,8 +410,5 @@ int main(int argc, char** argv) {
         if (l.rfind("Cpus_allowed_list:", 0) == 0)
             cpus = l.substr(l.find_last_of(" \t") + 1);
 
-    printf("{\"solve_ms\": %.3f, \"first_iter_ms\": %.3f, \"iterations\": %d, "
-           "\"accepted\": %d, \"initial_cost\": %.6f, \"peak_rss_kb\": %ld, \"cpus_allowed\": \"%s\"}\n",
-           full.ms, first.ms, full.iterations, full.iterations, full.initial_cost, peak_rss_kb(), cpus.c_str());
     return 0;
 }
