@@ -9,6 +9,8 @@
 // - all systems stop on the same criterion class (abs/rel improvement
 //   below 1e-5 -- the tiny-solver and GTSAM defaults).
 
+mod arael_pipeline;
+mod table;
 mod arael_runner;
 mod arael_runner3;
 mod factrs_counting;
@@ -22,19 +24,6 @@ mod tiny_runner3;
 
 use g2o::PoseIn;
 
-struct Cell {
-    solve_ms: f64,
-    first_iter_ms: f64,
-    iterations: usize,
-    // Accepted steps, for systems that report it (arael). Displayed as
-    // "accepted(total)"; total includes damping retries.
-    accepted: Option<usize>,
-    /// One complete iteration, measured as t(2 iters) - t(1 iter). `None` when
-    /// the system does not report it, or when its second step was rejected.
-    full_ms: Option<f64>,
-    poses: Vec<PoseIn>,
-    cost: f64,
-}
 
 // GTSAM runs through its Python wheel: create a venv anywhere, `pip
 // install gtsam`, and point GTSAM_PYTHON at its python3 (default:
@@ -276,87 +265,66 @@ fn run_external3_checked(mut cmd: std::process::Command, args: &[&str], poses_ou
 // initial_cost); the harness asserts both equal the reference cost
 // function's value -- a bit-level cross-implementation check of the
 // cost every system minimizes.
+// The two geometries the table is generic over: how to score a solution, and
+// how to compare two of them.
+struct Geo2<'a>(&'a g2o::Dataset);
+impl table::Geometry for Geo2<'_> {
+    type Pose = g2o::PoseIn;
+    fn cost(&self, poses: &[g2o::PoseIn]) -> f64 { g2o::reference_cost(self.0, poses) }
+    fn aligned_rmse(a: &[g2o::PoseIn], b: &[g2o::PoseIn]) -> f64 { g2o::aligned_rmse(a, b) }
+}
+
+struct Geo3<'a>(&'a g2o3::Dataset3);
+impl table::Geometry for Geo3<'_> {
+    type Pose = g2o3::Pose3In;
+    fn cost(&self, poses: &[g2o3::Pose3In]) -> f64 { g2o3::reference_cost3(self.0, poses) }
+    fn aligned_rmse(a: &[g2o3::Pose3In], b: &[g2o3::Pose3In]) -> f64 { g2o3::aligned_rmse3(a, b) }
+}
+
 fn run_dataset3(name: &str, path: &str, rounds: usize, f32_floor_note: Option<&str>) {
-    struct Cell3 {
-        solve_ms: f64,
-        first_iter_ms: f64,
-        iterations: usize,
-        accepted: Option<usize>,
-        /// One complete iteration, measured as t(2 iters) - t(1 iter). `None`
-        /// when the system does not report it, or its second step was rejected.
-        full_ms: Option<f64>,
-        poses: Vec<g2o3::Pose3In>,
-        cost: f64,
-    }
     let ds = g2o3::load3(path);
     println!("\n=== {} : {} poses, {} edges, {} parameters ===",
         name, ds.poses.len(), ds.edges.len(), ds.poses.len() * 6);
-    println!("initial reference cost: {:.3}", g2o3::reference_cost3(&ds, &ds.poses));
+    let initial_cost = g2o3::reference_cost3(&ds, &ds.poses);
+    println!("initial reference cost: {:.3}", initial_cost);
 
     let cpp3_available = std::path::Path::new("cpp/build/ceres_bench3").exists()
         && std::path::Path::new("cpp/build/g2o_bench3").exists();
+    if !cpp3_available {
+        eprintln!("WARNING: cpp/build 3D runners missing (cmake -B cpp/build cpp && cmake --build cpp/build); skipping those rows");
+    }
     let factrs32_3d_available =
         std::path::Path::new("factrs32/target/release/factrs32-bench3").exists();
     if !factrs32_3d_available {
         eprintln!("WARNING: factrs32 SE3 runner missing (cargo build -r in factrs32/); \
                    skipping factrs f32 rows");
     }
-    let mut f32_failed: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    if !cpp3_available {
-        eprintln!("WARNING: cpp/build 3D runners missing (cmake -B cpp/build cpp && cmake --build cpp/build); skipping ceres/g2o rows");
-    }
-    let initial_cost = g2o3::reference_cost3(&ds, &ds.poses);
 
-    let mut cells: Vec<(String, Cell3)> = Vec::new();
-    let record = |label: &str, solve_ms: f64, first_iter_ms: f64,
-                  iterations: usize, accepted: Option<usize>, full_ms: Option<f64>,
-                  poses: Vec<g2o3::Pose3In>, cells: &mut Vec<(String, Cell3)>,
-                  ds: &g2o3::Dataset3| {
-        let cost = g2o3::reference_cost3(ds, &poses);
-        if let Some((_, prev)) = cells.iter_mut().find(|(l, _)| l == label) {
-            prev.solve_ms = prev.solve_ms.min(solve_ms);
-            prev.first_iter_ms = prev.first_iter_ms.min(first_iter_ms);
-            // t(2) must be minimized over rounds like t(1) is: full-iter is
-            // their difference, and mixing a single sample with a minimum
-            // biases it (badly enough to go negative).
-            prev.full_ms = match (prev.full_ms, full_ms) {
-                (Some(a), Some(b)) => Some(a.min(b)),
-                (a, b) => a.or(b),
-            };
-        } else {
-            cells.push((label.to_string(),
-                Cell3 { solve_ms, first_iter_ms, iterations, accepted, full_ms, poses, cost }));
-        }
-    };
+    let geo = Geo3(&ds);
+    let mut t = table::Table::with_f32_floor(&geo, f32_floor_note);
 
     for round in 0..rounds {
         let a64 = arael_runner3::run_f64(&ds);
-        record("arael LM f64", a64.solve_ms, a64.first_iter_ms, a64.iterations,
-            Some(a64.accepted), a64.two_iter_ms, a64.poses, &mut cells, &ds);
+        t.record("arael LM f64", (a64.solve_ms, a64.first_iter_ms, a64.iterations, Some(a64.accepted), a64.two_iter_ms, a64.poses));
         let a32 = arael_runner3::run_f32(&ds);
-        record("arael LM f32", a32.solve_ms, a32.first_iter_ms, a32.iterations,
-            Some(a32.accepted), a32.two_iter_ms, a32.poses, &mut cells, &ds);
+        t.record("arael LM f32", (a32.solve_ms, a32.first_iter_ms, a32.iterations, Some(a32.accepted), a32.two_iter_ms, a32.poses));
         if !skip_tiny() {
             let tgn = tiny_runner3::run_gn(&ds);
-            record("tiny-solver GN", tgn.solve_ms, tgn.first_iter_ms, tgn.iterations,
-                None, None, tgn.poses, &mut cells, &ds);
+            t.record("tiny-solver GN", (tgn.solve_ms, tgn.first_iter_ms, tgn.iterations, None, None, tgn.poses));
             let tlm = tiny_runner3::run_lm(&ds);
-            record("tiny-solver LM", tlm.solve_ms, tlm.first_iter_ms, tlm.iterations,
-                None, None, tlm.poses, &mut cells, &ds);
+            t.record("tiny-solver LM", (tlm.solve_ms, tlm.first_iter_ms, tlm.iterations, None, None, tlm.poses));
         }
         let fgn = factrs_runner3::run_gn(&ds);
-        record("factrs GN", fgn.solve_ms, fgn.first_iter_ms, fgn.iterations,
-            Some(fgn.accepted), fgn.two_iter_ms, fgn.poses, &mut cells, &ds);
+        t.record("factrs GN", (fgn.solve_ms, fgn.first_iter_ms, fgn.iterations, Some(fgn.accepted), fgn.two_iter_ms, fgn.poses));
         let flm = factrs_runner3::run_lm(&ds);
-        record("factrs LM", flm.solve_ms, flm.first_iter_ms, flm.iterations,
-            Some(flm.accepted), flm.two_iter_ms, flm.poses, &mut cells, &ds);
+        t.record("factrs LM", (flm.solve_ms, flm.first_iter_ms, flm.iterations, Some(flm.accepted), flm.two_iter_ms, flm.poses));
         if factrs32_3d_available {
             for (kind, label) in [("gn", "factrs GN f32"), ("lm", "factrs LM f32")] {
                 match run_factrs32_3d(path, kind, ds.poses.len()) {
                     Some((ms, fi, it, acc, full, poses)) =>
-                        record(label, ms, fi, it, acc, full, poses, &mut cells, &ds),
+                        t.record(label, (ms, fi, it, acc, full, poses)),
                     None => {
-                        f32_failed.insert(format!(
+                        t.notes.insert(format!(
                             "{}: solver crashed (f32 Cholesky non-positive pivot)", label));
                     }
                 }
@@ -373,7 +341,7 @@ fn run_dataset3(name: &str, path: &str, rounds: usize, f32_floor_note: Option<&s
                 std::process::Command::new("cpp/build/ceres_bench3"),
                 &[path, "/tmp/ceres3_poses.txt"], "/tmp/ceres3_poses.txt",
                 ds.poses.len(), Some("initial_cost"), &check);
-            record("ceres LM", ms, fi, it, acc, full, poses, &mut cells, &ds);
+            t.record("ceres LM", (ms, fi, it, acc, full, poses));
             for kind in ["lm", "gn"] {
                 let poses_out = format!("/tmp/g2o3_poses_{}.txt", kind);
                 let mut g2o_cmd = std::process::Command::new("cpp/build/g2o_bench3");
@@ -382,7 +350,7 @@ fn run_dataset3(name: &str, path: &str, rounds: usize, f32_floor_note: Option<&s
                     g2o_cmd,
                     &[path, kind, &poses_out], &poses_out,
                     ds.poses.len(), Some("initial_chi2"), &check);
-                record(&format!("g2o {}", kind.to_uppercase()), ms, fi, it, acc, full, poses, &mut cells, &ds);
+                t.record(&format!("g2o {}", kind.to_uppercase()), (ms, fi, it, acc, full, poses));
             }
             if symforce3_available {
                 for prec in ["f64", "f32"] {
@@ -392,7 +360,7 @@ fn run_dataset3(name: &str, path: &str, rounds: usize, f32_floor_note: Option<&s
                         &[path, prec, &poses_out], &poses_out,
                         ds.poses.len(), Some("initial_cost"), &check);
                     let label = if prec == "f32" { "symforce LM f32" } else { "symforce LM" };
-                    record(label, ms, fi, it, acc, full, poses, &mut cells, &ds);
+                    t.record(label, (ms, fi, it, acc, full, poses));
                 }
             }
         }
@@ -408,94 +376,15 @@ fn run_dataset3(name: &str, path: &str, rounds: usize, f32_floor_note: Option<&s
                     std::process::Command::new(&py),
                     &["gtsam_bench.py", path, kind, &poses_out], &poses_out,
                     ds.poses.len(), None, &|_| {});
-                record(&format!("gtsam {}", kind.to_uppercase()), ms, fi, it, acc, full, poses, &mut cells, &ds);
+                t.record(&format!("gtsam {}", kind.to_uppercase()), (ms, fi, it, acc, full, poses));
             }
         }
         eprintln!("  round {}/{} done", round + 1, rounds);
     }
 
-    // Same validation gates as 2D: within 1% of the best cost AND within
-    // 5 cm rigid-aligned RMSE of the best solution; arael rows must
-    // converge and at least one external system must agree.
-    let best_idx = (0..cells.len())
-        .min_by(|&i, &j| cells[i].1.cost.partial_cmp(&cells[j].1.cost).unwrap())
-        .unwrap();
-    let best = cells[best_idx].1.cost;
-    let best_poses = cells[best_idx].1.poses.clone();
-    let converged = |c: &Cell3| {
-        (c.cost - best) / best < 1e-2
-            && g2o3::aligned_rmse3(&best_poses, &c.poses) < 0.05
-    };
-
-    // ms/iter divides the whole solve by every ATTEMPT. A rejected attempt only
-    // redoes the linear solve -- there is no reassembly -- so it is cheaper than
-    // a real iteration and drags the average DOWN.
-    //
-    // full-iter is what one COMPLETE iteration costs: one assembly plus one
-    // linear solve. That cannot be recovered by dividing the total by anything
-    // (dividing by accepted charges the retries to the accepted steps, which
-    // drags it UP instead), so it comes from the solver's own phase timings.
-    // Only arael reports those; a system with no retries has ms/iter == a full
-    // iteration by definition, and where neither holds the cell is blank.
-    println!("\n{:<18} {:>10} {:>9} {:>10} {:>10} {:>12} {:>14}",
-        "system", "total ms", "iters", "ms/iter", "full-iter", "1st-iter ms", "final cost");
-    for (label, c) in &cells {
-        let iters = match c.accepted {
-            Some(a) => format!("{}({})", a, c.iterations),
-            None => format!("{}", c.iterations),
-        };
-        // One complete iteration = min t(2 iters) - min t(1 iter). Both runs
-        // pay the same setup, so it cancels; the minima are taken first so a
-        // noisy pair cannot difference into nonsense.
-        let full = match c.full_ms {
-            Some(two) if two > c.first_iter_ms => format!("{:.2}", two - c.first_iter_ms),
-            _ => "-".to_string(),
-        };
-        println!("{:<18} {:>10.1} {:>9} {:>10.2} {:>10} {:>12} {:>14.4}{}",
-            label, c.solve_ms, iters,
-            c.solve_ms / c.iterations.max(1) as f64,
-            full,
-            fmt1(c.first_iter_ms), c.cost,
-            if converged(c) {
-                String::new()
-            } else {
-                format!("  <- did not reach the common optimum (aligned RMSE {:.4} m)",
-                    g2o3::aligned_rmse3(&best_poses, &c.poses))
-            });
-    }
-
-    let mut notes: Vec<String> = Vec::new();
-    notes.extend(f32_failed.iter().cloned());
-    for (label, c) in &cells {
-        if label == "arael LM f64" {
-            assert!(converged(c), "{} failed to converge: {} vs best {} (aligned RMSE {:.4})",
-                label, c.cost, best, g2o3::aligned_rmse3(&best_poses, &c.poses));
-        }
-        if label == "arael LM f32" && !converged(c) {
-            match f32_floor_note {
-                Some(n) => notes.push(format!("arael LM f32: {}", n)),
-                None => panic!("{} failed to converge: {} vs best {} (aligned RMSE {:.4})",
-                    label, c.cost, best, g2o3::aligned_rmse3(&best_poses, &c.poses)),
-            }
-        }
-    }
-    let external_agree = cells.iter()
-        .filter(|(l, c)| !l.starts_with("arael") && converged(c))
-        .count();
-    assert!(external_agree >= 1,
-        "no external system confirms the best cost {} -- cannot validate", best);
-    for note in &notes {
-        println!("{:<18} {}", "", note);
-    }
-    let conv = cells.iter().filter(|(_, c)| converged(c)).count();
-    println!("validation: {}/{} systems at the common optimum ({:.4}: cost within 1%, \
-              aligned RMSE to best < 5 cm), anchored by {} external system(s)",
-        conv, cells.len(), best, external_agree);
+    t.print();
 }
 
-/// tiny-solver is off by default (RUN_TINY=1 brings it back). It is slow
-/// enough to stretch the whole run without earning a place in the charts,
-/// where it would only compress the scale the other systems are read on.
 fn skip_tiny() -> bool {
     std::env::var("RUN_TINY").is_err()
 }
@@ -511,8 +400,8 @@ fn skip_isam() -> bool {
 // objects and env accessors the runners use, so the header cannot drift from
 // what was run; the env var that changes each one is named in brackets.
 fn print_header(rounds: usize, only: &Option<String>) {
-    let c64 = arael_runner::cfg64(0);
-    let nielsen = arael_runner::nielsen();
+    let c64 = arael_pipeline::config::<arael_runner::Graph>(0);
+    let nielsen = arael_pipeline::nielsen();
     let ordering = arael_runner::ordering();
 
     println!("=== pgo-bench configuration ===");
@@ -524,7 +413,8 @@ fn print_header(rounds: usize, only: &Option<String>) {
     println!("optional systems  : tiny-solver {} [RUN_TINY], isam {} [SKIP_ISAM]",
         on_off(skip_tiny()), on_off(skip_isam()));
     println!("arael lambda0     : {:e} (2D), {:e} (3D) [ARAEL_LAMBDA0]",
-        arael_runner::lambda0(), arael_runner3::lambda0_3d());
+        arael_pipeline::lambda0::<arael_runner::Graph>(),
+        arael_pipeline::lambda0::<arael_runner3::Graph3>());
     println!("arael damping     : {} [PGO_DRIVER: default|nielsen]",
         if nielsen { "Nielsen gain-ratio driver" } else { "fixed ladder (default driver)" });
     // Auto is not a third ordering -- on a pose graph there is nothing to
@@ -589,67 +479,49 @@ fn main() {
         let initial_cost = g2o::reference_cost(&ds, &ds.poses);
         println!("initial reference cost: {:.3}", initial_cost);
 
-        // One measured cell per system; times are min-of-N interleaved.
-        let mut cells: Vec<(String, Cell)> = Vec::new();
-        let mut failed_notes: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-        let record = |label: &str,
-                      out: (f64, f64, usize, Option<usize>, Option<f64>, Vec<PoseIn>),
-                      cells: &mut Vec<(String, Cell)>| {
-            let (solve_ms, first_iter_ms, iterations, accepted, full_ms, poses) = out;
-            let cost = g2o::reference_cost(&ds, &poses);
-            if let Some((_, prev)) = cells.iter_mut().find(|(l, _)| l == label) {
-                prev.solve_ms = prev.solve_ms.min(solve_ms);
-                prev.first_iter_ms = prev.first_iter_ms.min(first_iter_ms);
-                prev.full_ms = match (prev.full_ms, full_ms) {
-                    (Some(a), Some(b)) => Some(a.min(b)),
-                    (a, b) => a.or(b),
-                };
-            } else {
-                cells.push((label.to_string(),
-                    Cell { solve_ms, first_iter_ms, iterations, accepted, full_ms, poses, cost }));
-            }
-        };
+        let geo = Geo2(&ds);
+        let mut t = table::Table::new(&geo);
 
         for round in 0..rounds {
             let a64 = arael_runner::run_f64(&ds);
-            record("arael LM f64", (a64.solve_ms, a64.first_iter_ms, a64.iterations, Some(a64.accepted), a64.two_iter_ms, a64.poses), &mut cells);
+            t.record("arael LM f64", (a64.solve_ms, a64.first_iter_ms, a64.iterations, Some(a64.accepted), a64.two_iter_ms, a64.poses));
             let a32 = arael_runner::run_f32(&ds);
-            record("arael LM f32", (a32.solve_ms, a32.first_iter_ms, a32.iterations, Some(a32.accepted), a32.two_iter_ms, a32.poses), &mut cells);
+            t.record("arael LM f32", (a32.solve_ms, a32.first_iter_ms, a32.iterations, Some(a32.accepted), a32.two_iter_ms, a32.poses));
             if !skip_tiny() {
                 let tgn = tiny_runner::run_gn(&ds);
-                record("tiny-solver GN", (tgn.solve_ms, tgn.first_iter_ms, tgn.iterations, None, None, tgn.poses), &mut cells);
+                t.record("tiny-solver GN", (tgn.solve_ms, tgn.first_iter_ms, tgn.iterations, None, None, tgn.poses));
                 let tlm = tiny_runner::run_lm(&ds);
-                record("tiny-solver LM", (tlm.solve_ms, tlm.first_iter_ms, tlm.iterations, None, None, tlm.poses), &mut cells);
+                t.record("tiny-solver LM", (tlm.solve_ms, tlm.first_iter_ms, tlm.iterations, None, None, tlm.poses));
             }
             let fgn = factrs_runner::run_gn(&ds);
-            record("factrs GN", (fgn.solve_ms, fgn.first_iter_ms, fgn.iterations,
-                Some(fgn.accepted), fgn.two_iter_ms, fgn.poses), &mut cells);
+            t.record("factrs GN", (fgn.solve_ms, fgn.first_iter_ms, fgn.iterations,
+                Some(fgn.accepted), fgn.two_iter_ms, fgn.poses));
             let flm = factrs_runner::run_lm(&ds);
-            record("factrs LM", (flm.solve_ms, flm.first_iter_ms, flm.iterations,
-                Some(flm.accepted), flm.two_iter_ms, flm.poses), &mut cells);
+            t.record("factrs LM", (flm.solve_ms, flm.first_iter_ms, flm.iterations,
+                Some(flm.accepted), flm.two_iter_ms, flm.poses));
             if factrs32_available {
                 for (kind, label) in [("gn", "factrs GN f32"), ("lm", "factrs LM f32")] {
                     match run_factrs32(path, kind, *weighted, ds.poses.len()) {
-                        Some(out) => record(label, out, &mut cells),
+                        Some(out) => t.record(label, out),
                         None => {
-                            failed_notes.insert(format!(
+                            t.notes.insert(format!(
                                 "{}: solver crashed (f32 Cholesky non-positive pivot)", label));
                         }
                     }
                 }
             }
             if let Some(py) = &python {
-                record("gtsam LM", run_gtsam(py, path, "lm", *weighted, ds.poses.len()), &mut cells);
-                record("gtsam GN", run_gtsam(py, path, "gn", *weighted, ds.poses.len()), &mut cells);
+                t.record("gtsam LM", run_gtsam(py, path, "lm", *weighted, ds.poses.len()));
+                t.record("gtsam GN", run_gtsam(py, path, "gn", *weighted, ds.poses.len()));
             }
             if symforce_available {
-                record("symforce LM", run_symforce(path, "f64", *weighted, ds.poses.len()), &mut cells);
-                record("symforce LM f32", run_symforce(path, "f32", *weighted, ds.poses.len()), &mut cells);
+                t.record("symforce LM", run_symforce(path, "f64", *weighted, ds.poses.len()));
+                t.record("symforce LM f32", run_symforce(path, "f32", *weighted, ds.poses.len()));
             }
             if cpp_available {
-                record("ceres LM", run_ceres(path, *weighted, ds.poses.len()), &mut cells);
-                record("g2o LM", run_g2o(path, "lm", *weighted, ds.poses.len()), &mut cells);
-                record("g2o GN", run_g2o(path, "gn", *weighted, ds.poses.len()), &mut cells);
+                t.record("ceres LM", run_ceres(path, *weighted, ds.poses.len()));
+                t.record("g2o LM", run_g2o(path, "lm", *weighted, ds.poses.len()));
+                t.record("g2o GN", run_g2o(path, "gn", *weighted, ds.poses.len()));
             }
             eprintln!("  round {}/{} done", round + 1, rounds);
         }
@@ -660,7 +532,7 @@ fn main() {
         // listed for context, timed once, "iters" = incremental updates.
         if let Some(py) = &python {
             if !skip_isam() {
-                record("gtsam ISAM2 (incr)", run_gtsam(py, path, "isam2", *weighted, ds.poses.len()), &mut cells);
+                t.record("gtsam ISAM2 (incr)", run_gtsam(py, path, "isam2", *weighted, ds.poses.len()));
             }
         }
 
@@ -669,63 +541,7 @@ fn main() {
         // best solution) -- the cost surface has near-flat directions
         // where a plateau 0.9% above the optimum can sit meters away
         // geometrically (observed with g2o LM on the weighted M3500).
-        // Failures to reach the common optimum are real, reportable
-        // solver behavior (see README), not benchmark errors -- but
-        // arael rows must always converge, and at least one external
-        // system must agree so correctness is anchored by an
-        // independent implementation.
-        let best_idx = (0..cells.len())
-            .min_by(|&i, &j| cells[i].1.cost.partial_cmp(&cells[j].1.cost).unwrap())
-            .unwrap();
-        let best = cells[best_idx].1.cost;
-        let best_poses = cells[best_idx].1.poses.clone();
-        let converged = |c: &Cell| {
-            (c.cost - best) / best < 1e-2
-                && g2o::aligned_rmse(&best_poses, &c.poses) < 0.05
-        };
-
-        // iters column: "accepted(total)" where the system reports both;
-        // total includes damping retries. Other systems report only their
-        // outer iteration count.
-        println!("\n{:<18} {:>10} {:>9} {:>10} {:>10} {:>12} {:>14}",
-            "system", "total ms", "iters", "ms/iter", "full-iter", "1st-iter ms", "final cost");
-        for (label, c) in &cells {
-            let iters = match c.accepted {
-                Some(a) => format!("{}({})", a, c.iterations),
-                None => format!("{}", c.iterations),
-            };
-            // One complete iteration = min t(2 iters) - min t(1 iter). Both runs
-            // pay the same setup, so it cancels; the minima are taken first so a
-            // noisy pair cannot difference into nonsense.
-            let full = match c.full_ms {
-                Some(two) if two > c.first_iter_ms => format!("{:.2}", two - c.first_iter_ms),
-                _ => "-".to_string(),
-            };
-            println!("{:<18} {:>10.1} {:>9} {:>10.2} {:>10} {:>12} {:>14.4}{}",
-                label, c.solve_ms, iters,
-                c.solve_ms / c.iterations.max(1) as f64,
-                full,
-                fmt1(c.first_iter_ms), c.cost,
-                if converged(c) { "" } else { "  <- did not reach the common optimum" });
-        }
-
-        for (label, c) in &cells {
-            if label.starts_with("arael") {
-                assert!(converged(c), "{} failed to converge: {} vs best {}", label, c.cost, best);
-            }
-        }
-        let external_agree = cells.iter()
-            .filter(|(l, c)| !l.starts_with("arael") && converged(c))
-            .count();
-        assert!(external_agree >= 1,
-            "no external system confirms the best cost {} -- cannot validate", best);
-        for note in &failed_notes {
-            println!("{:<18} {}", "", note);
-        }
-        let conv = cells.iter().filter(|(_, c)| converged(c)).count();
-        println!("validation: {}/{} systems at the common optimum ({:.4}: cost within 1%, \
-                  aligned RMSE to best < 5 cm), anchored by {} external system(s)",
-            conv, cells.len(), best, external_agree);
+        t.print();
     }
 
     // 3D (SE3) datasets, weighted with the files' full 6x6 information.

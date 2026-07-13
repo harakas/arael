@@ -1,8 +1,8 @@
 // arael runners: identical model in f64 and f32 (separate structs --
 // the precision is a compile-time property of the generated code).
 
+use crate::arael_pipeline::{run, Model as Pipeline, RunOut as Out};
 use crate::g2o::{Dataset, PoseIn};
-use crate::probe::PROBE_SUBROUNDS;
 use arael::model::{Param, SelfBlock, CrossBlock};
 use arael::refs::{self, Ref};
 use arael::vect::{vect2d, vect2f};
@@ -49,7 +49,7 @@ struct Edge {
 #[arael::model]
 #[arael(root)]
 #[derive(Clone)]
-struct Graph {
+pub struct Graph {
     poses: refs::Vec<Pose2>,
     edges: std::vec::Vec<Edge>,
 }
@@ -198,6 +198,8 @@ fn print_timing<T>(r: &arael::simple_lm::LmResult<T>) {
     }
 }
 
+/// The two solvers, one per scalar. This is the one thing the generic pipeline
+/// cannot pick for itself.
 pub fn solve_f64<P: arael::simple_lm::LmProblem<f64>>(
     params: &[f64],
     p: &mut P,
@@ -207,49 +209,6 @@ pub fn solve_f64<P: arael::simple_lm::LmProblem<f64>>(
     let r = arael::simple_lm::lm_solve(params, &mut solver, p, cfg);
     print_timing(&r);
     r
-}
-
-/// Times a probe solve on throwaway copies of the model, fastest of
-/// [`PROBE_SUBROUNDS`].
-///
-/// A discarded warmup runs first: the first solve in a process pays cold
-/// allocator and cache costs the later ones do not (the symbolic factorization
-/// alone runs a fifth slower), so timing the one- and two-iteration probes as
-/// they come would charge that cost to the one-iteration probe alone and
-/// inflate the difference between them.
-///
-/// The copies keep the probe from mutating the model: re-supplying the initial
-/// parameter vector does not reset parametrization state held outside it, such
-/// as the reference rotation an `EulerAngleParam` re-centres on after a step.
-pub fn timed_f64<P: arael::simple_lm::LmProblem<f64> + Clone>(
-    params: &[f64],
-    p: &P,
-    cfg: &arael::simple_lm::LmConfig<f64>,
-) -> (f64, arael::simple_lm::LmResult<f64>) {
-    let mut r = solve_f64(params, &mut p.clone(), cfg); // warmup, discarded
-    let mut best = f64::INFINITY;
-    for _ in 0..PROBE_SUBROUNDS {
-        let t0 = std::time::Instant::now();
-        r = solve_f64(params, &mut p.clone(), cfg);
-        best = best.min(t0.elapsed().as_secs_f64() * 1e3);
-    }
-    (best, r)
-}
-
-/// See [`timed_f64`].
-pub fn timed_f32<P: arael::simple_lm::LmProblem<f32> + Clone>(
-    params: &[f32],
-    p: &P,
-    cfg: &arael::simple_lm::LmConfig<f32>,
-) -> (f64, arael::simple_lm::LmResult<f32>) {
-    let mut r = solve_f32(params, &mut p.clone(), cfg); // warmup, discarded
-    let mut best = f64::INFINITY;
-    for _ in 0..PROBE_SUBROUNDS {
-        let t0 = std::time::Instant::now();
-        r = solve_f32(params, &mut p.clone(), cfg);
-        best = best.min(t0.elapsed().as_secs_f64() * 1e3);
-    }
-    (best, r)
 }
 
 pub fn solve_f32<P: arael::simple_lm::LmProblem<f32>>(
@@ -263,157 +222,51 @@ pub fn solve_f32<P: arael::simple_lm::LmProblem<f32>>(
     r
 }
 
-pub struct RunOut {
-    pub solve_ms: f64,
-    pub first_iter_ms: f64,
-    pub iterations: usize,
-    /// Accepted (cost-decreasing) steps; `iterations` additionally counts
-    /// damping retries. Other systems report only their outer iteration
-    /// count, so their tables carry a single number.
-    pub accepted: usize,
-    /// Wall clock of a fresh TWO-iteration solve. One complete iteration is
-    /// this minus `first_iter_ms` -- both pay the same setup, so it cancels --
-    /// but the subtraction must happen on the MINIMA over rounds, not on a
-    /// single pair: differencing two noisy cold runs can even come out
-    /// negative. `None` if the second step was rejected.
-    pub two_iter_ms: Option<f64>,
-    pub poses: Vec<PoseIn>,
-}
+// Initial damping, problem-appropriate for well-initialized 2D pose graphs (the
+// LmConfig docs recommend a small initial_lambda for these); see the README's
+// initial-damping policy.
+const LAMBDA0_2D: f64 = 1e-8;
 
-// Termination: same criterion class and thresholds as the tiny-solver and
-// GTSAM defaults (stop when a step improves the cost by less than 1e-5
-// absolute or 1e-5 relative). patience = 1 so ONE small step terminates,
-// matching how both other systems check it.
-// Initial damping, problem-appropriate for well-initialized pose graphs
-// (the LmConfig docs recommend small initial_lambda for these); see the
-// README's initial-damping policy. Env-overridable for experiments.
-pub(crate) fn lambda0() -> f64 {
-    std::env::var("ARAEL_LAMBDA0").ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(1e-8)
-}
-
-pub(crate) fn cfg64(max_iters: usize) -> arael::simple_lm::LmConfig<f64> {
-    cfg64_with_lambda(max_iters, lambda0())
-}
-
-/// PGO_DRIVER=nielsen swaps the fixed damping schedule for the gain-ratio
-/// driver: lambda then follows how well the quadratic model predicted the step
-/// actually taken, instead of a fixed up/down ladder. It changes the iteration
-/// count, not the cost per iteration -- so it moves the total, and the
-/// per-iteration comparison stays honest either way.
-pub(crate) fn nielsen() -> bool {
-    std::env::var("PGO_DRIVER").as_deref() == Ok("nielsen")
-}
-
-pub(crate) fn cfg64_with_lambda(max_iters: usize, initial_lambda: f64) -> arael::simple_lm::LmConfig<f64> {
-    let cfg = arael::simple_lm::LmConfig {
-        verbose: std::env::var("VERBOSE").is_ok(),
-        gather_timing: true,
-        abs_precision: 1e-5,
-        rel_precision: 1e-5,
-        // Stop as soon as the tolerance test says converged, the way Ceres and
-        // g2o do. The library defaults (min_iters 5, patience 3) put a floor
-        // under the iteration count, which on a problem that converges in four
-        // iterations would time a fifth that improves the cost by 4e-14.
-        patience: 1,
-        min_iters: 1,
-        max_iters,
-        initial_lambda,
-        ..Default::default()
-    };
-    if nielsen() {
-        cfg.with_driver(arael::simple_lm::NielsenLambdaDriver::default())
-    } else {
-        cfg
+impl Pipeline for Graph {
+    type Scalar = f64;
+    type Dataset = Dataset;
+    type Pose = PoseIn;
+    fn lambda0() -> f64 { LAMBDA0_2D }
+    fn build(ds: &Dataset) -> Self { build_f64(ds) }
+    fn serialize(&mut self, out: &mut Vec<f64>) { self.serialize64(out); }
+    fn deserialize(&mut self, x: &[f64]) { self.deserialize64(x); }
+    fn poses(&self) -> Vec<PoseIn> {
+        self.poses.iter()
+            .map(|p| PoseIn { x: p.pos.value.x, y: p.pos.value.y, th: p.th.value })
+            .collect()
     }
+    fn solve(params: &[f64], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f64>)
+        -> arael::simple_lm::LmResult<f64> { solve_f64(params, m, cfg) }
 }
 
-pub(crate) fn cfg32(max_iters: usize) -> arael::simple_lm::LmConfig<f32> {
-    cfg32_with_lambda(max_iters, lambda0() as f32)
-}
-
-pub(crate) fn cfg32_with_lambda(max_iters: usize, initial_lambda: f32) -> arael::simple_lm::LmConfig<f32> {
-    let cfg = arael::simple_lm::LmConfig {
-        verbose: std::env::var("VERBOSE").is_ok(),
-        gather_timing: true,
-        abs_precision: 1e-5,
-        rel_precision: 1e-5,
-        // Stop as soon as the tolerance test says converged, the way Ceres and
-        // g2o do. The library defaults (min_iters 5, patience 3) put a floor
-        // under the iteration count, which on a problem that converges in four
-        // iterations would time a fifth that improves the cost by 4e-14.
-        patience: 1,
-        min_iters: 1,
-        max_iters,
-        initial_lambda,
-        ..Default::default()
-    };
-    if nielsen() {
-        cfg.with_driver(arael::simple_lm::NielsenLambdaDriver::default())
-    } else {
-        cfg
+impl Pipeline for GraphF {
+    type Scalar = f32;
+    type Dataset = Dataset;
+    type Pose = PoseIn;
+    fn lambda0() -> f64 { LAMBDA0_2D }
+    fn build(ds: &Dataset) -> Self { build_f32(ds) }
+    fn serialize(&mut self, out: &mut Vec<f32>) { self.serialize32(out); }
+    fn deserialize(&mut self, x: &[f32]) { self.deserialize32(x); }
+    fn poses(&self) -> Vec<PoseIn> {
+        self.poses.iter()
+            .map(|p| PoseIn {
+                x: p.pos.value.x as f64,
+                y: p.pos.value.y as f64,
+                th: p.th.value as f64,
+            })
+            .collect()
     }
+    fn solve(params: &[f32], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f32>)
+        -> arael::simple_lm::LmResult<f32> { solve_f32(params, m, cfg) }
 }
 
-pub fn run_f64(ds: &Dataset) -> RunOut {
-    let mut g = build_f64(ds);
-    let mut params: Vec<f64> = Vec::new();
-    g.serialize64(&mut params);
+pub type RunOut = Out<PoseIn>;
 
-    // First-iteration time: a fresh solve capped at one iteration
-    // (setup + first assembly + symbolic + numeric factorization + step).
-    let (first_ms, first) = timed_f64(&params, &g, &cfg64(1));
-    let first_iter_ms = crate::probe::first_iter_ms(
-        first_ms, first.iterations, first.accepted_iterations);
+pub fn run_f64(ds: &Dataset) -> RunOut { run::<Graph>(ds) }
+pub fn run_f32(ds: &Dataset) -> RunOut { run::<GraphF>(ds) }
 
-    // ... and a fresh two-iteration solve. The difference is one complete
-    // iteration with the setup cancelled out; see second_iter_ms.
-    let (two_ms, two) = timed_f64(&params, &g, &cfg64(2));
-    let two_iter_ms = crate::probe::two_iter_ms(two_ms, first_iter_ms, two.accepted_iterations);
-
-    let t0 = std::time::Instant::now();
-    let result = solve_f64(&params, &mut g, &cfg64(100));
-    let solve_ms = t0.elapsed().as_secs_f64() * 1e3;
-    g.deserialize64(&result.x);
-    let poses = g.poses.iter()
-        .map(|p| PoseIn { x: p.pos.value.x, y: p.pos.value.y, th: p.th.value })
-        .collect();
-    RunOut {
-        solve_ms, first_iter_ms,
-        iterations: result.iterations,
-        accepted: result.accepted_iterations,
-        two_iter_ms,
-        poses,
-    }
-}
-
-pub fn run_f32(ds: &Dataset) -> RunOut {
-    let mut g = build_f32(ds);
-    let mut params: Vec<f32> = Vec::new();
-    g.serialize32(&mut params);
-
-    let (first_ms, first) = timed_f32(&params, &g, &cfg32(1));
-    let first_iter_ms = crate::probe::first_iter_ms(
-        first_ms, first.iterations, first.accepted_iterations);
-
-    // ... and a fresh two-iteration solve. The difference is one complete
-    // iteration with the setup cancelled out; see second_iter_ms.
-    let (two_ms, two) = timed_f32(&params, &g, &cfg32(2));
-    let two_iter_ms = crate::probe::two_iter_ms(two_ms, first_iter_ms, two.accepted_iterations);
-
-    let t0 = std::time::Instant::now();
-    let result = solve_f32(&params, &mut g, &cfg32(100));
-    let solve_ms = t0.elapsed().as_secs_f64() * 1e3;
-    g.deserialize32(&result.x);
-    let poses = g.poses.iter()
-        .map(|p| PoseIn { x: p.pos.value.x as f64, y: p.pos.value.y as f64, th: p.th.value as f64 })
-        .collect();
-    RunOut {
-        solve_ms, first_iter_ms,
-        iterations: result.iterations,
-        accepted: result.accepted_iterations,
-        two_iter_ms,
-        poses,
-    }
-}

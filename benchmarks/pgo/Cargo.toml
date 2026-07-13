@@ -12,6 +12,7 @@ publish = false
 arael = { path = "../.." }
 tiny-solver = "0.18.0"
 serde_json = "1"
+num = "0.4"
 factrs = "0.3.0"
 # factrs resolves faer 0.23 while arael is on 0.24; the counting solver
 # implements factrs's LinearSolver trait, so it must speak factrs's faer.

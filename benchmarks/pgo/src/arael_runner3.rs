@@ -7,6 +7,7 @@
 // canonical quaternion-vector between residual (see g2o3.rs), weighted
 // by the edge's upper-triangular 6x6 sqrt-information blocks.
 
+use crate::arael_pipeline::{run, Model as Pipeline, RunOut as Out};
 use crate::g2o3::{Dataset3, Pose3In};
 use arael::matrix::{matrix3d, matrix3f};
 use arael::model::{CrossBlock, Param, QuaternionParam, SelfBlock};
@@ -67,7 +68,7 @@ struct Edge3 {
 #[arael::model]
 #[arael(root)]
 #[derive(Clone)]
-struct Graph3 {
+pub struct Graph3 {
     poses: refs::Vec<Pose3>,
     edges: std::vec::Vec<Edge3>,
 }
@@ -195,62 +196,62 @@ fn build_f32(ds: &Dataset3) -> Graph3F {
     g
 }
 
-// Initial damping, problem-appropriate for the 3D datasets (same
-// policy knob as 2D, env ARAEL_LAMBDA0 overrides): the parking garage's
-// weak real-world information matrices leave the 2D default of 1e-8
-// with damping rejections and an early plateau stop 6.5 cm short of
-// the optimum; 1e-10 converges cleanly in 5 steps. sphere2500 is
-// insensitive to the choice.
-pub(crate) fn lambda0_3d() -> f64 {
-    std::env::var("ARAEL_LAMBDA0").ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(1e-10)
-}
 
-pub struct RunOut3 {
-    pub solve_ms: f64,
-    pub first_iter_ms: f64,
-    pub iterations: usize,
-    pub accepted: usize,
-    /// One assembly plus one linear solve -- what a COMPLETE iteration costs.
-    /// See `arael_runner::RunOut::full_iter_ms` for why it cannot be had by
-    /// dividing the total by anything.
-    pub two_iter_ms: Option<f64>,
-    pub poses: Vec<Pose3In>,
-}
+// Initial damping for the 3D graphs. parking-garage's weak information matrices
+// leave 1e-8 over-damped -- it converges with damping rejections and an early
+// plateau stop 6.5 cm short of the optimum; 1e-10 converges cleanly. sphere2500
+// is insensitive to the choice.
+const LAMBDA0_3D: f64 = 1e-10;
 
-pub fn run_f64(ds: &Dataset3) -> RunOut3 {
-    let mut g = build_f64(ds);
-    let mut params: Vec<f64> = Vec::new();
-    g.serialize64(&mut params);
-
-    let (first_ms, first) = crate::arael_runner::timed_f64(&params, &g, &crate::arael_runner::cfg64_with_lambda(1, lambda0_3d()));
-    let first_iter_ms = crate::probe::first_iter_ms(
-        first_ms, first.iterations, first.accepted_iterations);
-
-    // ... and a fresh two-iteration solve: the difference is one complete
-    // iteration, with the setup cancelled out.
-    let (two_ms, two) = crate::arael_runner::timed_f64(&params, &g, &crate::arael_runner::cfg64_with_lambda(2, lambda0_3d()));
-    let two_iter_ms = crate::probe::two_iter_ms(two_ms, first_iter_ms, two.accepted_iterations);
-
-    let t0 = std::time::Instant::now();
-    let result = crate::arael_runner::solve_f64(&params, &mut g, &crate::arael_runner::cfg64_with_lambda(100, lambda0_3d()));
-    let solve_ms = t0.elapsed().as_secs_f64() * 1e3;
-    g.deserialize64(&result.x);
-    let poses = g.poses.iter()
-        .map(|p| Pose3In {
-            t: p.pos.value,
-            q: [p.ea.value.v.x, p.ea.value.v.y, p.ea.value.v.z, p.ea.value.t],
-        })
-        .collect();
-    RunOut3 {
-        solve_ms, first_iter_ms,
-        iterations: result.iterations,
-        accepted: result.accepted_iterations,
-        two_iter_ms,
-        poses,
+impl Pipeline for Graph3 {
+    type Scalar = f64;
+    type Dataset = Dataset3;
+    type Pose = Pose3In;
+    fn lambda0() -> f64 { LAMBDA0_3D }
+    fn build(ds: &Dataset3) -> Self { build_f64(ds) }
+    fn serialize(&mut self, out: &mut Vec<f64>) { self.serialize64(out); }
+    fn deserialize(&mut self, x: &[f64]) { self.deserialize64(x); }
+    fn poses(&self) -> Vec<Pose3In> {
+        self.poses.iter()
+            .map(|p| Pose3In {
+                t: p.pos.value,
+                q: [p.ea.value.v.x, p.ea.value.v.y, p.ea.value.v.z, p.ea.value.t],
+            })
+            .collect()
+    }
+    fn solve(params: &[f64], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f64>)
+        -> arael::simple_lm::LmResult<f64> {
+        crate::arael_runner::solve_f64(params, m, cfg)
     }
 }
+
+impl Pipeline for Graph3F {
+    type Scalar = f32;
+    type Dataset = Dataset3;
+    type Pose = Pose3In;
+    fn lambda0() -> f64 { LAMBDA0_3D }
+    fn build(ds: &Dataset3) -> Self { build_f32(ds) }
+    fn serialize(&mut self, out: &mut Vec<f32>) { self.serialize32(out); }
+    fn deserialize(&mut self, x: &[f32]) { self.deserialize32(x); }
+    fn poses(&self) -> Vec<Pose3In> {
+        self.poses.iter()
+            .map(|p| Pose3In {
+                t: vect3d::from(p.pos.value),
+                q: [p.ea.value.v.x as f64, p.ea.value.v.y as f64,
+                    p.ea.value.v.z as f64, p.ea.value.t as f64],
+            })
+            .collect()
+    }
+    fn solve(params: &[f32], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f32>)
+        -> arael::simple_lm::LmResult<f32> {
+        crate::arael_runner::solve_f32(params, m, cfg)
+    }
+}
+
+pub type RunOut3 = Out<Pose3In>;
+
+pub fn run_f64(ds: &Dataset3) -> RunOut3 { run::<Graph3>(ds) }
+pub fn run_f32(ds: &Dataset3) -> RunOut3 { run::<Graph3F>(ds) }
 
 #[cfg(test)]
 pub(crate) mod tests {
@@ -355,39 +356,5 @@ pub(crate) mod tests {
         let out32 = run_f32(&ds);
         assert!(reference_cost3(&ds, &out32.poses) < 1e-4,
             "f32 did not reach the optimum: {}", reference_cost3(&ds, &out32.poses));
-    }
-}
-
-pub fn run_f32(ds: &Dataset3) -> RunOut3 {
-    let mut g = build_f32(ds);
-    let mut params: Vec<f32> = Vec::new();
-    g.serialize32(&mut params);
-
-    let (first_ms, first) = crate::arael_runner::timed_f32(&params, &g, &crate::arael_runner::cfg32_with_lambda(1, lambda0_3d() as f32));
-    let first_iter_ms = crate::probe::first_iter_ms(
-        first_ms, first.iterations, first.accepted_iterations);
-
-    // ... and a fresh two-iteration solve: the difference is one complete
-    // iteration, with the setup cancelled out.
-    let (two_ms, two) = crate::arael_runner::timed_f32(&params, &g, &crate::arael_runner::cfg32_with_lambda(2, lambda0_3d() as f32));
-    let two_iter_ms = crate::probe::two_iter_ms(two_ms, first_iter_ms, two.accepted_iterations);
-
-    let t0 = std::time::Instant::now();
-    let result = crate::arael_runner::solve_f32(&params, &mut g, &crate::arael_runner::cfg32_with_lambda(100, lambda0_3d() as f32));
-    let solve_ms = t0.elapsed().as_secs_f64() * 1e3;
-    g.deserialize32(&result.x);
-    let poses = g.poses.iter()
-        .map(|p| Pose3In {
-            t: vect3d::from(p.pos.value),
-            q: [p.ea.value.v.x as f64, p.ea.value.v.y as f64,
-                p.ea.value.v.z as f64, p.ea.value.t as f64],
-        })
-        .collect();
-    RunOut3 {
-        solve_ms, first_iter_ms,
-        iterations: result.iterations,
-        accepted: result.accepted_iterations,
-        two_iter_ms,
-        poses,
     }
 }

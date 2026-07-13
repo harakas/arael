@@ -1440,6 +1440,7 @@ dependencies = [
  "libc",
  "log",
  "nalgebra 0.33.3",
+ "num",
  "serde_json",
  "tiny-solver",
 ]
