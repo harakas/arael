@@ -64,21 +64,25 @@ fn base_params(max_iterations: usize) -> BaseOptParams {
 }
 
 // (elapsed ms, accepted steps, attempts, values)
-fn optimize_counted(ds: &Dataset, gn: bool, max_iter: usize) -> (usize, usize, Values) {
+fn optimize_counted(ds: &Dataset, gn: bool, max_iter: usize) -> (f64, usize, usize, Values) {
+    // Building the graph is the probe's reset, not the solve -- the clock starts
+    // at the optimize() below, the same boundary the C++ runners draw.
     let (graph, init) = build(ds);
     let before = counts();
-    let result = if gn {
-        let mut opt = GaussNewton::new(base_params(max_iter), graph);
-        opt.set_solver(CountingSolver::default());
-        opt.observers_mut().add(StepCounter);
-        opt.optimize(init)
-    } else {
-        let params = LevenParams { base: base_params(max_iter), ..Default::default() };
-        let mut opt = LevenMarquardt::new(params, graph);
-        opt.set_solver(CountingSolver::default());
-        opt.observers_mut().add(StepCounter);
-        opt.optimize(init)
-    };
+    let (ms, result) = bench_harness::solver::timed(|| {
+        if gn {
+            let mut opt = GaussNewton::new(base_params(max_iter), graph);
+            opt.set_solver(CountingSolver::default());
+            opt.observers_mut().add(StepCounter);
+            opt.optimize(init)
+        } else {
+            let params = LevenParams { base: base_params(max_iter), ..Default::default() };
+            let mut opt = LevenMarquardt::new(params, graph);
+            opt.set_solver(CountingSolver::default());
+            opt.observers_mut().add(StepCounter);
+            opt.optimize(init)
+        }
+    });
     // Hitting the iteration cap is a reportable outcome (the values
     // ride along in the error), not a harness failure -- the
     // validation stage judges the solution.
@@ -88,7 +92,7 @@ fn optimize_counted(ds: &Dataset, gn: bool, max_iter: usize) -> (usize, usize, V
         Err(e) => panic!("factrs failed: {:?}", e),
     };
     let (accepted, attempts) = since(before);
-    (accepted, attempts, values)
+    (ms, accepted, attempts, values)
 }
 
 fn solution_of(ds: &Dataset, values: &Values) -> Vec<PoseIn> {
@@ -102,8 +106,9 @@ fn solution_of(ds: &Dataset, values: &Values) -> Vec<PoseIn> {
 
 fn run(ds: &Dataset, gn: bool) -> RunOut {
     bench_harness::solver::run(100, |max_iter| {
-        let (accepted, attempts, values) = optimize_counted(ds, gn, max_iter);
+        let (ms, accepted, attempts, values) = optimize_counted(ds, gn, max_iter);
         bench_harness::solver::Outcome {
+            ms,
             accepted,
             attempts,
             solution: solution_of(ds, &values),

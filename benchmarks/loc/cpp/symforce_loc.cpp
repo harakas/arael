@@ -13,10 +13,13 @@
 // residuals, so every residual equals scene::reference_cost.
 //
 //   symforce_loc <scene.txt> <f64|f32> <solution_out>
-// JSON {solve_ms, first_iter_ms, iterations, accepted, initial_cost,
-// peak_rss_kb, cpus_allowed} on stdout; solution_out carries one pose per line
-// (6 values). Landmarks are fixed and not written.
-// SYMFORCE_LAMBDA0 overrides the initial damping (default 1e-10).
+// The shared benchmark protocol line on stdout (see ../../cpp/bench.h);
+// solution_out carries one pose per line (6 values). Landmarks are fixed and
+// not written.
+// SYMFORCE_LAMBDA0 overrides the initial damping (default 1e-10, a
+// problem-appropriate near-Gauss-Newton value; SymForce ships 1.0).
+
+#include "../../cpp/bench.h"
 
 #include <chrono>
 #include <cstdio>
@@ -139,10 +142,9 @@ static double initial_cost(const Scene& s) {
     return cost;
 }
 
-struct RunResult { double ms; int accepted, total; };
 
 template <typename Scalar>
-static RunResult solve(const Scene& s, int max_iters, std::vector<double>* pose_out) {
+static bench::Result solve(const Scene& s, int max_iters, std::vector<double>* pose_out) {
     using V6 = Eigen::Matrix<Scalar, 6, 1>;
 
     sym::Values<Scalar> v;
@@ -221,40 +223,33 @@ static RunResult solve(const Scene& s, int max_iters, std::vector<double>* pose_
             for (int k = 0; k < 6; k++) (*pose_out)[6 * i + k] = double(p[k]);
         }
     }
-    return RunResult{ms, accepted, (int)stats.iterations.size()};
-}
-
-static long peak_rss_kb() {
-    std::ifstream st("/proc/self/status");
-    std::string l;
-    while (std::getline(st, l))
-        if (l.rfind("VmHWM:", 0) == 0) return atol(l.c_str() + 6);
-    return 0;
+    // SymForce records the initial error state as an entry with iteration = -1,
+    // before any step is taken. It is not an attempt; discount it so accepted and
+    // attempts mean the same here as in every other runner.
+    return bench::Result{ms, accepted, std::max(0, (int)stats.iterations.size() - 1)};
 }
 
 template <typename Scalar>
 static void run(const Scene& s, const char* solution_out) {
     int max_iters = 200;
     if (const char* m = getenv("SYMFORCE_MAXITER")) max_iters = atoi(m);
-    RunResult first = solve<Scalar>(s, 1, nullptr);
     std::vector<double> poses;
-    RunResult full = solve<Scalar>(s, max_iters, &poses);
+    bench::report(
+        [&](int n) { return solve<Scalar>(s, n, nullptr); },
+        [&]() {
+            bench::Result r = solve<Scalar>(s, max_iters, &poses);
+            // The cross-check the harness asserts: SymForce's own generated
+            // residuals, in double, must value the initial estimate at the
+            // reference cost -- which is what proves it minimizes the same
+            // objective as everyone else.
+            r.initial_cost = initial_cost(s);
+            return r;
+        });
 
     std::ofstream out(solution_out);
     out.precision(17);
     for (int i = 0; i < s.n_poses; i++)
         for (int k = 0; k < 6; k++) out << poses[6 * i + k] << (k == 5 ? "\n" : " ");
-
-    std::string cpus = "?";
-    std::ifstream st("/proc/self/status");
-    std::string l;
-    while (std::getline(st, l))
-        if (l.rfind("Cpus_allowed_list:", 0) == 0)
-            cpus = l.substr(l.find_last_of(" \t") + 1);
-
-    printf("{\"solve_ms\": %.3f, \"first_iter_ms\": %.3f, \"iterations\": %d, "
-           "\"accepted\": %d, \"initial_cost\": %.6f, \"peak_rss_kb\": %ld, \"cpus_allowed\": \"%s\"}\n",
-           full.ms, first.ms, full.total, full.accepted, initial_cost(s), peak_rss_kb(), cpus.c_str());
 }
 
 int main(int argc, char** argv) {

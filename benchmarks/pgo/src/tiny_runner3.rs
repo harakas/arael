@@ -178,20 +178,24 @@ fn run(ds: &Dataset3, gn: bool) -> RunOut3 {
 
     bench_harness::solver::run(100, |max_iter| {
         let before = crate::tiny_runner::iter_count();
-        let result = if gn {
-            tiny_solver::GaussNewtonOptimizer::new()
-                .optimize(&problem, &init, Some(options(max_iter)))
-        } else {
-            // Problem-appropriate initial trust region: the shipped default of
-            // 1e4 over-damps and trips its terminate-on-rejected-step behavior.
-            tiny_solver::LevenbergMarquardtOptimizer::new(1e-6, 1e32, radius)
-                .optimize(&problem, &init, Some(options(max_iter)))
-        };
+        let (ms, result) = bench_harness::solver::timed(|| {
+            if gn {
+                tiny_solver::GaussNewtonOptimizer::new()
+                    .optimize(&problem, &init, Some(options(max_iter)))
+            } else {
+                // Problem-appropriate initial trust region: the shipped default
+                // of 1e4 over-damps and trips its terminate-on-rejected-step
+                // behavior.
+                tiny_solver::LevenbergMarquardtOptimizer::new(1e-6, 1e32, radius)
+                    .optimize(&problem, &init, Some(options(max_iter)))
+            }
+        });
         let values = result.expect("tiny-solver returned None");
         // tiny-solver reports outer iterations only; damping retries, if any,
         // are not exposed by its API.
         let iterations = crate::tiny_runner::iter_count() - before;
         bench_harness::solver::Outcome {
+            ms,
             accepted: iterations,
             attempts: iterations,
             solution: extract(ds, &values),

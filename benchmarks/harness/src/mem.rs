@@ -20,8 +20,17 @@ pub fn peak_rss_mb() -> f64 {
 /// Run this executable again in memory-measurement mode and read back the peak
 /// it printed. `env` names the variable the child checks to know which system to
 /// run alone.
+///
+/// BENCH_MEM_EXE=<path> measures with a different binary instead of this one. A
+/// build with optional C backends linked in (Eigen, CHOLMOD and their BLAS/
+/// LAPACK/gfortran stack) carries a few MB of shared-library baseline in every
+/// row's VmHWM that a pure-Rust deployment would not, so a feature build sources
+/// its Rust rows' memory from a clean default build.
 pub fn measure(env: &str, which: &str, extra: &[(&str, &str)]) -> Option<f64> {
-    let exe = std::env::current_exe().ok()?;
+    let exe = match std::env::var("BENCH_MEM_EXE") {
+        Ok(alt) => std::path::PathBuf::from(alt),
+        Err(_) => std::env::current_exe().ok()?,
+    };
     let mut cmd = std::process::Command::new(exe);
     cmd.env(env, which);
     for (k, v) in extra {

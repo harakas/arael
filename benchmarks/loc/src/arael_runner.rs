@@ -33,6 +33,7 @@ use arael::vect::{vect2d, vect2f, vect3d, vect3f};
     [(pose.ea.x - pose.tilt_roll) * path.tilt_isigma,
      (pose.ea.y - pose.tilt_pitch) * path.tilt_isigma]
 }))]
+#[derive(Clone)]
 struct Pose {
     pos: Param<vect3d>,
     ea: SimpleEulerAngleParam<f64>,
@@ -55,6 +56,7 @@ struct Pose {
     [atan2(r_f.y, r_f.x) * frine.isigma.x * path.frine_isigma_scale,
      atan2(r_f.z, r_f.x) * frine.isigma.y * path.frine_isigma_scale]
 }))]
+#[derive(Clone)]
 struct Frine {
     #[arael(ref = root.poses)]
     pose: Ref<Pose>,
@@ -66,6 +68,7 @@ struct Frine {
 #[arael::model]
 // Known landmark -- fixed position, not optimized. Holds the observations of
 // it; the constraint block lives on the observing pose.
+#[derive(Clone)]
 struct PointLandmark {
     pos: vect3d,
     frines: std::vec::Vec<Frine>,
@@ -90,6 +93,7 @@ struct PointLandmark {
      ea_w.y * posepair.ea_cov_isigma.y,
      ea_w.z * posepair.ea_cov_isigma.z]
 }))]
+#[derive(Clone)]
 struct PosePair {
     #[arael(ref = root.poses)]
     prev: Ref<Pose>,
@@ -106,7 +110,8 @@ struct PosePair {
 
 #[arael::model]
 #[arael(root, fast_atan)]
-struct Path {
+#[derive(Clone)]
+pub struct Path {
     poses: refs::Vec<Pose>,
     landmarks: refs::Vec<PointLandmark>,
     pose_pairs: std::vec::Vec<PosePair>,
@@ -130,6 +135,7 @@ struct Path {
     [(posef.ea.x - posef.tilt_roll) * pathf.tilt_isigma,
      (posef.ea.y - posef.tilt_pitch) * pathf.tilt_isigma]
 }))]
+#[derive(Clone)]
 struct PoseF {
     pos: Param<vect3f>,
     ea: SimpleEulerAngleParam<f32>,
@@ -149,6 +155,7 @@ struct PoseF {
     [atan2(r_f.y, r_f.x) * frinef.isigma.x * pathf.frine_isigma_scale,
      atan2(r_f.z, r_f.x) * frinef.isigma.y * pathf.frine_isigma_scale]
 }))]
+#[derive(Clone)]
 struct FrineF {
     #[arael(ref = root.poses)]
     pose: Ref<PoseF>,
@@ -158,6 +165,7 @@ struct FrineF {
 }
 
 #[arael::model]
+#[derive(Clone)]
 struct PointLandmarkF {
     pos: vect3f,
     frines: std::vec::Vec<FrineF>,
@@ -178,6 +186,7 @@ struct PointLandmarkF {
      pos_w.z * posepairf.pos_cov_isigma.z, ea_w.x * posepairf.ea_cov_isigma.x,
      ea_w.y * posepairf.ea_cov_isigma.y, ea_w.z * posepairf.ea_cov_isigma.z]
 }))]
+#[derive(Clone)]
 struct PosePairF {
     #[arael(ref = root.poses)]
     prev: Ref<PoseF>,
@@ -194,7 +203,8 @@ struct PosePairF {
 
 #[arael::model]
 #[arael(root, f32, fast_atan)]
-struct PathF {
+#[derive(Clone)]
+pub struct PathF {
     poses: refs::Vec<PoseF>,
     landmarks: refs::Vec<PointLandmarkF>,
     pose_pairs: std::vec::Vec<PosePairF>,
@@ -333,47 +343,6 @@ fn extract_f32(path: &PathF) -> Solution {
 
 // ---------------------------------------------------------------- solve
 
-pub struct RunOut {
-    pub solve_ms: f64,
-    pub first_iter_ms: f64,
-    pub iterations: usize,
-    pub accepted: usize,
-    /// Cost of one FULL accepted iteration -- the solver's steady-state
-    /// per-phase means (assembly + damped solve + trial cost + advance,
-    /// first calls excluded: they carry one-time structure costs) summed.
-    /// Undiluted by rejected attempts, which skip the re-linearization.
-    /// 0.0 when a phase has no steady-state sample (fewer than 2 calls).
-    pub full_iter_ms: f64,
-    pub solution: Solution,
-}
-
-fn full_iter_ms(timing: Option<&arael::simple_lm::LmTiming>) -> f64 {
-    let Some(t) = timing else { return 0.0 };
-    match (t.mean_assembly(), t.mean_linear_solve(), t.mean_cost_eval(), t.mean_advance()) {
-        (Some(a), Some(l), Some(c), Some(adv)) => (a + l + c + adv).as_secs_f64() * 1e3,
-        _ => 0.0,
-    }
-}
-
-fn nielsen() -> bool {
-    std::env::var("LOC_DRIVER").map_or(false, |v| v == "nielsen")
-}
-
-fn cfg(max_iters: usize) -> arael::simple_lm::LmConfig<f64> {
-    let cfg = arael::simple_lm::LmConfig {
-        abs_precision: 1e-5,
-        rel_precision: 1e-5,
-        patience: 1,
-        min_iters: 1,
-        max_iters,
-        initial_lambda: std::env::var("LOC_LAMBDA0").ok().and_then(|v| v.parse().ok()).unwrap_or(1e-8),
-        verbose: std::env::var("LOC_VERBOSE").map_or(false, |v| v == "1"),
-        gather_timing: true, // per-phase times for the full-iteration column
-        ..Default::default()
-    };
-    if nielsen() { cfg.with_driver(arael::simple_lm::NielsenLambdaDriver::default()) } else { cfg }
-}
-
 // Localization is block-tridiagonal: poses couple only through consecutive
 // odometry, and the bearings hit FIXED landmarks so they add no pose-to-pose
 // coupling. The default solver is therefore arael's band Cholesky with
@@ -381,29 +350,71 @@ fn cfg(max_iters: usize) -> arael::simple_lm::LmConfig<f64> {
 // LOC_ARAEL_SOLVER=faer overrides with the general sparse solver.
 const BAND_KD: usize = 11;
 
+fn faer() -> bool {
+    std::env::var("LOC_ARAEL_SOLVER").as_deref() == Ok("faer")
+}
+
+/// The backend this run resolved to, for the config header.
+pub fn backend() -> String {
+    if faer() { "faer".to_string() } else { format!("band kd={}", BAND_KD) }
+}
+
 fn solve64(params: &[f64], path: &mut Path, cfg: &arael::simple_lm::LmConfig<f64>)
     -> arael::simple_lm::LmResult<f64> {
-    match std::env::var("LOC_ARAEL_SOLVER").as_deref() {
-        Ok("faer") => arael::simple_lm::solve_sparse_faer(params, path, cfg),
-        _ => arael::simple_lm::solve_band(params, BAND_KD, path, cfg),
+    if faer() {
+        arael::simple_lm::solve_sparse_faer(params, path, cfg)
+    } else {
+        arael::simple_lm::solve_band(params, BAND_KD, path, cfg)
     }
 }
 
-/// One-line report of the effective arael configuration (solver, driver,
-/// per-precision initial lambda) for the harness's config banner --
-/// whatever the env knobs resolved to, not just their raw values.
-pub fn config_report(poses: usize) -> String {
-    let solver = match std::env::var("LOC_ARAEL_SOLVER").as_deref() {
-        Ok("faer") => "faer".to_string(),
-        _ => format!("band kd={}", BAND_KD),
-    };
-    format!("arael: solver={}, driver={}, lambda0 f64={:e} f32={:e}{}",
-        solver,
-        if nielsen() { "nielsen" } else { "fixed" },
-        cfg(0).initial_lambda,
-        cfg32(0, poses).initial_lambda,
-        if std::env::var("LOC_LAMBDA0").is_ok() { " (LOC_LAMBDA0)" } else { " (default)" })
+fn solve32(params: &[f32], path: &mut PathF, cfg: &arael::simple_lm::LmConfig<f32>)
+    -> arael::simple_lm::LmResult<f32> {
+    if faer() {
+        arael::simple_lm::solve_sparse_faer_f32(params, path, cfg)
+    } else {
+        arael::simple_lm::solve_band_f32(params, BAND_KD, path, cfg)
+    }
 }
+
+impl bench_harness::arael::Model for Path {
+    type Scalar = f64;
+    type Input = Scene;
+    type Solution = Solution;
+    fn lambda0(_: &Scene) -> f64 { 1e-8 }
+    fn build(scene: &Scene) -> Self { build(scene) }
+    fn serialize(&mut self, out: &mut Vec<f64>) { self.serialize64(out); }
+    fn deserialize(&mut self, x: &[f64]) { self.deserialize64(x); }
+    fn solution(&self) -> Solution { extract(self) }
+    fn solve(params: &[f64], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f64>)
+        -> arael::simple_lm::LmResult<f64> { solve64(params, m, cfg) }
+}
+
+impl bench_harness::arael::Model for PathF {
+    type Scalar = f32;
+    type Input = Scene;
+    type Solution = Solution;
+    /// The f32 build wants heavier damping at the small size: at 60 poses the
+    /// f32 solution lands a hair above the 1e-5 stop threshold at 1e-8 and then
+    /// bounces in the f32 noise floor -- a termination/precision interaction,
+    /// not divergence -- and 1e-7 makes the last step small enough to stop
+    /// cleanly. The larger sizes are clean at 1e-8 (1e-7 would grind there
+    /// instead; no single value is clean at every size).
+    fn lambda0(scene: &Scene) -> f64 {
+        if scene.poses.len() <= 60 { 1e-7 } else { 1e-8 }
+    }
+    fn build(scene: &Scene) -> Self { build_f32(scene) }
+    fn serialize(&mut self, out: &mut Vec<f32>) { self.serialize32(out); }
+    fn deserialize(&mut self, x: &[f32]) { self.deserialize32(x); }
+    fn solution(&self) -> Solution { extract_f32(self) }
+    fn solve(params: &[f32], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f32>)
+        -> arael::simple_lm::LmResult<f32> { solve32(params, m, cfg) }
+}
+
+pub type RunOut = bench_harness::table::Row<Solution>;
+
+pub fn run(scene: &Scene) -> RunOut { bench_harness::arael::run::<Path>(scene) }
+pub fn run_f32(scene: &Scene) -> RunOut { bench_harness::arael::run::<PathF>(scene) }
 
 /// The arael model cost at the initial estimate -- for the harness to
 /// cross-check against scene::reference_cost.
@@ -415,111 +426,41 @@ pub fn initial_cost(scene: &Scene) -> f64 {
     path.calc_cost(&params)
 }
 
-pub fn run(scene: &Scene) -> RunOut {
-    let mut path = build(scene);
-    let mut params: Vec<f64> = Vec::new();
-    path.serialize64(&mut params);
-
-    let t0 = std::time::Instant::now();
-    let _ = solve64(&params, &mut path, &cfg(1));
-    let first_iter_ms = t0.elapsed().as_secs_f64() * 1e3;
-
-    let t0 = std::time::Instant::now();
-    let result = solve64(&params, &mut path, &cfg(200));
-    let solve_ms = t0.elapsed().as_secs_f64() * 1e3;
-    path.deserialize64(&result.x);
-
-    RunOut {
-        solve_ms, first_iter_ms,
-        iterations: result.iterations,
-        accepted: result.accepted_iterations,
-        full_iter_ms: full_iter_ms(result.timing.as_ref()),
-        solution: extract(&path),
-    }
-}
-
-fn cfg32(max_iters: usize, poses: usize) -> arael::simple_lm::LmConfig<f32> {
-    let default_lambda = if poses <= 60 { 1e-7 } else { 1e-8 };
-    let cfg = arael::simple_lm::LmConfig {
-        abs_precision: 1e-5,
-        rel_precision: 1e-5,
-        patience: 1,
-        min_iters: 1,
-        max_iters,
-        initial_lambda: std::env::var("LOC_LAMBDA0").ok()
-            .and_then(|v| v.parse().ok()).unwrap_or(default_lambda),
-        verbose: std::env::var("LOC_VERBOSE").map_or(false, |v| v == "1"),
-        gather_timing: true, // per-phase times for the full-iteration column
-        ..Default::default()
-    };
-    if nielsen() { cfg.with_driver(arael::simple_lm::NielsenLambdaDriver::default()) } else { cfg }
-}
-
-fn solve32(params: &[f32], path: &mut PathF, cfg: &arael::simple_lm::LmConfig<f32>)
-    -> arael::simple_lm::LmResult<f32> {
-    match std::env::var("LOC_ARAEL_SOLVER").as_deref() {
-        Ok("faer") => arael::simple_lm::solve_sparse_faer_f32(params, path, cfg),
-        _ => arael::simple_lm::solve_band_f32(params, BAND_KD, path, cfg),
-    }
-}
-
-/// One full solve with per-phase timing gathered (LOC_TIMING mode).
-pub fn run_timed_once(scene: &Scene) -> arael::simple_lm::LmTiming {
-    let mut path = build(scene);
-    let mut params: Vec<f64> = Vec::new();
-    path.serialize64(&mut params);
-    let mut c = cfg(200);
-    c.gather_timing = true;
-    solve64(&params, &mut path, &c).timing.unwrap()
-}
-
-/// One full f32 solve with per-phase timing gathered (LOC_TIMING mode).
-pub fn run_timed_once_f32(scene: &Scene) -> arael::simple_lm::LmTiming {
-    let mut path = build_f32(scene);
-    let mut params: Vec<f32> = Vec::new();
-    path.serialize32(&mut params);
-    let mut c = cfg32(200, scene.poses.len());
-    c.gather_timing = true;
-    solve32(&params, &mut path, &c).timing.unwrap()
-}
-
+// Capped single solve (no timing) -- the peak-memory pass, which runs one
+// system alone in a process of its own.
 pub fn run_capped(scene: &Scene, max_iters: usize) -> Solution {
-    let mut path = build(scene);
-    let mut params: Vec<f64> = Vec::new();
-    path.serialize64(&mut params);
-    let result = solve64(&params, &mut path, &cfg(max_iters));
-    path.deserialize64(&result.x);
-    extract(&path)
+    solve_capped::<Path>(scene, max_iters)
 }
 
 pub fn run_f32_capped(scene: &Scene, max_iters: usize) -> Solution {
-    let mut path = build_f32(scene);
-    let mut params: Vec<f32> = Vec::new();
-    path.serialize32(&mut params);
-    let result = solve32(&params, &mut path, &cfg32(max_iters, scene.poses.len()));
-    path.deserialize32(&result.x);
-    extract_f32(&path)
+    solve_capped::<PathF>(scene, max_iters)
 }
 
-pub fn run_f32(scene: &Scene) -> RunOut {
-    let mut path = build_f32(scene);
-    let mut params: Vec<f32> = Vec::new();
-    path.serialize32(&mut params);
+fn solve_capped<M: bench_harness::arael::Model<Input = Scene, Solution = Solution>>(
+    scene: &Scene, max_iters: usize) -> Solution {
+    let mut model = M::build(scene);
+    let mut params: Vec<M::Scalar> = Vec::new();
+    model.serialize(&mut params);
+    let cfg = bench_harness::arael::config::<M>(scene, max_iters);
+    let result = M::solve(&params, &mut model, &cfg);
+    model.deserialize(&result.x);
+    model.solution()
+}
 
-    let t0 = std::time::Instant::now();
-    let _ = solve32(&params, &mut path, &cfg32(1, scene.poses.len()));
-    let first_iter_ms = t0.elapsed().as_secs_f64() * 1e3;
+/// One full solve, reporting arael's per-phase breakdown (LOC_PHASES mode).
+pub fn run_timed_once(scene: &Scene) -> arael::simple_lm::LmTiming {
+    timed_once::<Path>(scene)
+}
 
-    let t0 = std::time::Instant::now();
-    let result = solve32(&params, &mut path, &cfg32(200, scene.poses.len()));
-    let solve_ms = t0.elapsed().as_secs_f64() * 1e3;
-    path.deserialize32(&result.x);
+pub fn run_timed_once_f32(scene: &Scene) -> arael::simple_lm::LmTiming {
+    timed_once::<PathF>(scene)
+}
 
-    RunOut {
-        solve_ms, first_iter_ms,
-        iterations: result.iterations,
-        accepted: result.accepted_iterations,
-        full_iter_ms: full_iter_ms(result.timing.as_ref()),
-        solution: extract_f32(&path),
-    }
+fn timed_once<M: bench_harness::arael::Model<Input = Scene>>(
+    scene: &Scene) -> arael::simple_lm::LmTiming {
+    let mut model = M::build(scene);
+    let mut params: Vec<M::Scalar> = Vec::new();
+    model.serialize(&mut params);
+    let cfg = bench_harness::arael::config::<M>(scene, 200);
+    M::solve(&params, &mut model, &cfg).timing.expect("gather_timing is on")
 }

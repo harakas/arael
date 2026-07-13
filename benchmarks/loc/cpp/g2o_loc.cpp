@@ -12,18 +12,18 @@
 // G2O_VERIFY_JAC=1 (verification only, never in the timed solve).
 //
 //   g2o_loc <scene.txt> <lm|gn> <solution_out>
-// JSON {solve_ms, first_iter_ms, iterations, accepted, initial_cost,
-// peak_rss_kb, cpus_allowed} on stdout -- iterations counts every damped
-// lambda trial (from an untimed statistics pass), accepted the outer
-// iterations; solution_out carries one pose per line (6 values). Landmarks
-// are fixed and not written.
+// The shared benchmark protocol line on stdout (see ../../cpp/bench.h) --
+// iterations counts every damped lambda trial, accepted the outer iterations;
+// solution_out carries one pose per line (6 values). Landmarks are fixed and
+// not written.
 // G2O_LAMBDA_INIT overrides the LM initial damping (default 1e-9); G2O_GAIN
 // overrides the terminate gain (default 1e-5, the shared termination class).
+
+#include "../../cpp/bench.h"
 
 #include <g2o/core/base_binary_edge.h>
 #include <g2o/core/base_unary_edge.h>
 #include <g2o/core/base_vertex.h>
-#include <g2o/core/batch_stats.h>
 #include <g2o/core/block_solver.h>
 #include <g2o/core/jacobian_workspace.h>
 #include <g2o/core/optimization_algorithm_gauss_newton.h>
@@ -305,24 +305,34 @@ static double fd_edge(g2o::OptimizableGraph::Edge* e, const Eigen::MatrixXd& Jan
     return (Jan - Jfd).cwiseAbs().maxCoeff();
 }
 
-struct RunResult {
-    double ms;
-    int iterations; // outer iterations (each ends with an accepted step)
-    // Total damped trials: sum of levenbergIterations over the outer
-    // iterations (from the untimed statistics pass) -- the count
-    // comparable to the other systems' attempts.
-    int attempts;
-    double initial_cost;
+// g2o keeps its damping retries inside OptimizationAlgorithmLevenberg::solve()
+// and reports the count only for the round just finished (levenbergIteration()
+// is reset every round), so summing them from a post-iteration action is the one
+// way to see the attempts from outside. Gauss-Newton has no retry loop.
+//
+// The alternative -- g2o's batch statistics -- costs ~14% of the solve, so it
+// cannot run inside a timed one; a probe that has to be timed AND counted (the
+// first-iteration purity check needs both) can only be served this way.
+struct TrialCounter : public g2o::HyperGraphAction {
+    g2o::OptimizationAlgorithmLevenberg* lev = nullptr;
+    int trials = 0;
+    g2o::HyperGraphAction* operator()(const g2o::HyperGraph*,
+                                      Parameters* = 0) override {
+        if (lev) trials += lev->levenbergIteration();
+        return this;
+    }
 };
 
-static RunResult solve(const Scene& s, bool lm, int max_iters, std::vector<double>* pose_out,
-                       bool stats) {
+static bench::Result solve(const Scene& s, bool lm, int max_iters,
+                           std::vector<double>* pose_out) {
     using BlockSolver = g2o::BlockSolver<g2o::BlockSolverTraits<-1, -1>>;
     auto linear = std::make_unique<g2o::LinearSolverCholmod<BlockSolver::PoseMatrixType>>();
     auto block = std::make_unique<BlockSolver>(std::move(linear));
+    auto* counter = new TrialCounter();
     g2o::OptimizationAlgorithm* algo;
     if (lm) {
         auto* lev = new g2o::OptimizationAlgorithmLevenberg(std::move(block));
+        counter->lev = lev;
         double lambda0 = 1e-9;
         if (const char* li = getenv("G2O_LAMBDA_INIT")) lambda0 = atof(li);
         lev->setUserLambdaInit(lambda0);
@@ -332,9 +342,6 @@ static RunResult solve(const Scene& s, bool lm, int max_iters, std::vector<doubl
     }
     g2o::SparseOptimizer opt;
     opt.setVerbose(false);
-    // Batch statistics cost ~14% of the solve (measured at 300 poses), so
-    // they are gathered in a separate UNTIMED solve, never in the timed one.
-    opt.setComputeBatchStatistics(stats);
     opt.setAlgorithm(algo);
 
     for (int i = 0; i < s.n_poses; i++) {
@@ -390,6 +397,7 @@ static RunResult solve(const Scene& s, bool lm, int max_iters, std::vector<doubl
     terminate->setGainThreshold(gain);
     terminate->setMaxIterations(max_iters);
     opt.addPostIterationAction(terminate);
+    opt.addPostIterationAction(counter);
 
     auto t0 = std::chrono::steady_clock::now();
     opt.initializeOptimization();
@@ -419,15 +427,6 @@ static RunResult solve(const Scene& s, bool lm, int max_iters, std::vector<doubl
     int iters = opt.optimize(max_iters);
     double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 
-    int attempts = 0;
-    if (stats) {
-        for (const auto& st : opt.batchStatistics()) {
-            if (st.iteration < 0) continue;
-            attempts += st.levenbergIterations;
-        }
-    }
-    if (attempts < iters) attempts = iters; // stats off / GN -- never undercount
-
     if (pose_out) {
         pose_out->resize(6 * s.n_poses);
         for (int i = 0; i < s.n_poses; i++) {
@@ -435,15 +434,7 @@ static RunResult solve(const Scene& s, bool lm, int max_iters, std::vector<doubl
             for (int k = 0; k < 6; k++) (*pose_out)[6 * i + k] = e[k];
         }
     }
-    return RunResult{ms, iters, attempts, initial_cost};
-}
-
-static long peak_rss_kb() {
-    std::ifstream st("/proc/self/status");
-    std::string l;
-    while (std::getline(st, l))
-        if (l.rfind("VmHWM:", 0) == 0) return atol(l.c_str() + 6);
-    return 0;
+    return bench::Result{ms, iters, lm ? counter->trials : iters, initial_cost};
 }
 
 int main(int argc, char** argv) {
@@ -451,27 +442,14 @@ int main(int argc, char** argv) {
     bool lm = std::string(argv[2]) == "lm";
     Scene s = load(argv[1]);
 
-    RunResult first = solve(s, lm, 1, nullptr, false);
     std::vector<double> poses;
-    RunResult full = solve(s, lm, 200, &poses, false);
-    // Untimed statistics pass: the damped-trial (attempts) count.
-    RunResult st_run = solve(s, lm, 200, nullptr, true);
-    full.attempts = st_run.attempts;
+    bench::report(
+        [&](int n) { return solve(s, lm, n, nullptr); },
+        [&]() { return solve(s, lm, 200, &poses); });
 
     std::ofstream out(argv[3]);
     out.precision(17);
     for (int i = 0; i < s.n_poses; i++)
         for (int k = 0; k < 6; k++) out << poses[6 * i + k] << (k == 5 ? "\n" : " ");
-
-    std::string cpus = "?";
-    std::ifstream st("/proc/self/status");
-    std::string l;
-    while (std::getline(st, l))
-        if (l.rfind("Cpus_allowed_list:", 0) == 0)
-            cpus = l.substr(l.find_last_of(" \t") + 1);
-
-    printf("{\"solve_ms\": %.3f, \"first_iter_ms\": %.3f, \"iterations\": %d, "
-           "\"accepted\": %d, \"initial_cost\": %.6f, \"peak_rss_kb\": %ld, \"cpus_allowed\": \"%s\"}\n",
-           full.ms, first.ms, full.attempts, full.iterations, full.initial_cost, peak_rss_kb(), cpus.c_str());
     return 0;
 }

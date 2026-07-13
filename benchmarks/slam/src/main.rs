@@ -14,11 +14,10 @@ use scene::{Scene, SceneConfig, Solution};
 /// The settings this run used, printed before anything else: a pasted result has
 /// to carry them. Values come from the objects the run actually uses, so the
 /// header cannot drift from what ran.
-fn print_header(cfg: &SceneConfig, rounds: usize, skip_tiny: bool,
+fn print_header(scene: &Scene, cfg: &SceneConfig, rounds: usize, skip_tiny: bool,
                 systems_filter: &Option<String>, ceres_solvers: &[String]) {
     use bench_harness::header::{on_off, Header};
-    let arael_cfg = bench_harness::arael::config::<arael_runner::Path>(
-        &scene::generate(cfg), 0);
+    let arael_cfg = bench_harness::arael::config::<arael_runner::Path>(scene, 0);
     Header::new("slam-bench")
         .rounds(rounds)
         .line("scene", format!("{} poses, {} landmarks, seed {} [SLAM_POSES]",
@@ -28,8 +27,8 @@ fn print_header(cfg: &SceneConfig, rounds: usize, skip_tiny: bool,
         .line("optional systems", format!("tiny-solver {} [RUN_TINY]", on_off(skip_tiny)))
         .line("ceres solvers", format!("{} [CERES_SOLVERS]", ceres_solvers.join(", ")))
         .line("arael lambda0", format!("{:e} (f64), {:e} (f32) [ARAEL_LAMBDA0]",
-            bench_harness::arael::lambda0::<arael_runner::Path>(&scene::generate(cfg)),
-            bench_harness::arael::lambda0::<arael_runner::PathF>(&scene::generate(cfg))))
+            bench_harness::arael::lambda0::<arael_runner::Path>(scene),
+            bench_harness::arael::lambda0::<arael_runner::PathF>(scene)))
         .line("arael damping", format!("{} [DRIVER: default|nielsen]",
             if bench_harness::arael::nielsen() { "Nielsen gain-ratio driver" }
             else { "fixed ladder (default driver)" }))
@@ -38,8 +37,9 @@ fn print_header(cfg: &SceneConfig, rounds: usize, skip_tiny: bool,
         .line("arael termination", format!("abs {:e}, rel {:e}, patience {}, min_iters {}",
             arael_cfg.abs_precision, arael_cfg.rel_precision,
             arael_cfg.patience, arael_cfg.min_iters))
-        .line("solver verbose", format!("{} [VERBOSE]",
-            if arael_cfg.verbose { "on" } else { "off" }))
+        .line("solver verbose", format!("{} [VERBOSE], per-solve timing {} [TIMING]",
+            if arael_cfg.verbose { "on" } else { "off" },
+            if std::env::var("TIMING").is_ok() { "on" } else { "off" }))
         .line("memory pass", format!("{} [SLAM_NO_MEM]",
             if std::env::var("SLAM_NO_MEM").is_err() { "on" } else { "off" }))
         .core()
@@ -57,42 +57,39 @@ fn config() -> SceneConfig {
     cfg
 }
 
-fn peak_rss_kb() -> u64 {
-    std::fs::read_to_string("/proc/self/status").unwrap_or_default()
-        .lines().find_map(|l| l.strip_prefix("VmHWM:"))
-        .and_then(|v| v.trim().trim_end_matches("kB").trim().parse().ok())
-        .unwrap_or(0)
-}
-
-// Peak resident memory of one solver, measured in a FRESH process
-// (SLAM_MEMSOLVER selects which; the process runs only that solver and
-// prints its VmHWM). Isolating each solver in its own process gives a
-// clean peak -- no allocator retention from a previous solver, and the
-// same measurement basis as the Ceres subprocess.
+// Peak memory for the in-process rows.
 //
-// A feature build (eigen/cholmod/cholmod-gpl) links C libraries that
-// inflate every row's VmHWM by a few MB of shared-library baseline a
-// pure-Rust deployment would not carry. SLAM_MEM_EXE=<path to a default
-// build> sources the rows' memory from that clean binary instead; the
-// default build self-measures cleanly (the output records which).
-fn measure_peak_mb(which: &str, poses: usize) -> f64 {
-    let exe = match std::env::var("SLAM_MEM_EXE") {
-        Ok(alt) => std::path::PathBuf::from(alt),
-        _ => std::env::current_exe().unwrap(),
-    };
-    let out = std::process::Command::new(exe)
-        .env("SLAM_MEMSOLVER", which)
-        .env("SLAM_POSES", poses.to_string())
-        .env("SLAM_MEM_ITERS", "3") // peak fill-in is reached in the first factorization
-        .output().unwrap();
-    String::from_utf8_lossy(&out.stdout).lines()
-        .find_map(|l| l.strip_prefix("PEAK_RSS_KB:"))
-        .and_then(|v| v.trim().parse::<f64>().ok())
-        .map(|kb| kb / 1024.0).unwrap_or(0.0)
+// VmHWM is a high-water mark for the whole PROCESS, so arael, factrs and
+// tiny-solver sharing one would each report the largest peak anything before
+// them reached. Each is therefore run alone, in a process of its own, doing
+// nothing but the solve. The subprocess systems report their own.
+fn mem_pass() -> bool {
+    let Ok(which) = std::env::var("SLAM_MEM") else { return false };
+    let scene = scene::generate(&config());
+    // The peak fill-in is reached in the first factorization, so a capped solve
+    // measures the same high-water mark as the full one, faster.
+    let iters: usize = std::env::var("SLAM_MEM_ITERS").ok()
+        .and_then(|v| v.parse().ok()).unwrap_or(3);
+    match which.as_str() {
+        "arael LM f64" => { std::hint::black_box(arael_runner::run_capped(&scene, iters)); }
+        "arael LM f32" => { std::hint::black_box(arael_runner::run_f32_capped(&scene, iters)); }
+        "tiny-solver LM" => {
+            std::env::set_var("TINY_MAXITER", iters.to_string());
+            tiny_runner::install_iter_counter();
+            std::hint::black_box(tiny_runner::run_lm(&scene).solution);
+        }
+        "factrs LM" => { std::hint::black_box(factrs_runner::run(&scene).solution); }
+        other => panic!("unknown system for the memory pass: {}", other),
+    }
+    bench_harness::mem::report_peak();
+    true
 }
 
 fn main() {
     bench_harness::pin::enforce_single_core();
+    if mem_pass() {
+        return;
+    }
     let cfg = config();
     let rounds: usize = std::env::var("ROUNDS").ok().and_then(|v| v.parse().ok()).unwrap_or(3);
     // Ceres calls it SPARSE_NORMAL_CHOLESKY; the table says what it is.
@@ -112,28 +109,10 @@ fn main() {
     // (e.g. SLAM_SYSTEMS=arael). Unset runs everything. A filtered run
     // validates only against whatever ran -- for iterating, not publishing.
     let systems_filter = std::env::var("SLAM_SYSTEMS").ok();
-    print_header(&cfg, rounds, skip_tiny, &systems_filter, &ceres_solvers);
 
     let scene = scene::generate(&cfg);
+    print_header(&scene, &cfg, rounds, skip_tiny, &systems_filter, &ceres_solvers);
 
-    // Memory-measurement mode: run one solver, print peak RSS, exit.
-    if let Ok(which) = std::env::var("SLAM_MEMSOLVER") {
-        let iters: usize = std::env::var("SLAM_MEM_ITERS").ok()
-            .and_then(|v| v.parse().ok()).unwrap_or(200);
-        match which.as_str() {
-            "arael_f64" => { std::hint::black_box(arael_runner::run_capped(&scene, iters)); }
-            "arael_f32" => { std::hint::black_box(arael_runner::run_f32_capped(&scene, iters)); }
-            "tiny" => {
-                std::env::set_var("TINY_MAXITER", iters.to_string());
-                tiny_runner::install_iter_counter();
-                std::hint::black_box(tiny_runner::run_lm(&scene).solution);
-            }
-            "factrs" => { std::hint::black_box(factrs_runner::run(&scene).solution); }
-            other => { eprintln!("unknown SLAM_MEMSOLVER {}", other); }
-        }
-        println!("PEAK_RSS_KB: {}", peak_rss_kb());
-        return;
-    }
     let init_sol = initial_solution(&scene);
     let initial_cost = scene::reference_cost(&scene, &init_sol);
     println!("scene: {} poses, {} landmarks, {} frines, {} odometry pairs, {} parameters",
@@ -258,19 +237,14 @@ fn main() {
         }
     }
 
-    // The in-process solvers each get a process of their own: VmHWM is a
-    // process-wide high water mark, so sharing one they would each report the
-    // largest peak anything before them reached. The subprocess rows already
-    // carry their own.
     if std::env::var("SLAM_NO_MEM").is_err() {
-        for (label, which) in [
-            ("arael LM f64", "arael_f64"),
-            ("arael LM f32", "arael_f32"),
-            ("tiny-solver LM", "tiny"),
-            ("factrs LM", "factrs"),
-        ] {
-            let mb = measure_peak_mb(which, scene.poses.len());
-            if mb > 0.0 {
+        let poses = scene.poses.len().to_string();
+        for label in ["arael LM f64", "arael LM f32", "tiny-solver LM", "factrs LM"] {
+            if !want(label) || (skip_tiny && label == "tiny-solver LM") {
+                continue;
+            }
+            if let Some(mb) = bench_harness::mem::measure(
+                "SLAM_MEM", label, &[("SLAM_POSES", poses.as_str())]) {
                 t.set_peak_mb(label, mb);
             }
         }

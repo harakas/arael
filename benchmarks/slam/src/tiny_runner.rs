@@ -338,13 +338,16 @@ pub fn run_lm(scene: &Scene) -> RunOut {
 
     bench_harness::solver::run(max_iter, |n| {
         let before = ITER_COUNT.load(Ordering::Relaxed);
-        let values = tiny_solver::LevenbergMarquardtOptimizer::new(1e-6, 1e32, radius)
-            .optimize(&problem, &init, Some(options(n)))
-            .expect("tiny returned None");
+        let (ms, values) = bench_harness::solver::timed(|| {
+            tiny_solver::LevenbergMarquardtOptimizer::new(1e-6, 1e32, radius)
+                .optimize(&problem, &init, Some(options(n)))
+                .expect("tiny returned None")
+        });
         // tiny-solver reports outer iterations only; its damping retries, if
         // any, are not exposed.
         let iterations = ITER_COUNT.load(Ordering::Relaxed) - before;
         bench_harness::solver::Outcome {
+            ms,
             accepted: iterations,
             attempts: iterations,
             solution: extract(scene, &values),

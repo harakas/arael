@@ -86,6 +86,30 @@ pub fn config<M: Model>(input: &M::Input, max_iters: usize) -> LmConfig<M::Scala
     }
 }
 
+/// TIMING=1 prints arael's internal breakdown for every solve it runs. That
+/// includes the probes, so one round of one system emits several lines: the
+/// discarded warmup plus PROBE_SUBROUNDS passes of the one- and two-iteration
+/// probes, then the real solve.
+///
+/// Only the printing is gated. `gather_timing` stays on either way, so the
+/// timing numbers do not depend on whether they are being looked at.
+pub fn print_timing<T>(r: &LmResult<T>) {
+    if std::env::var("TIMING").is_err() {
+        return;
+    }
+    if let Some(t) = &r.timing {
+        eprintln!(
+            "  [timing] total {:.1} ms = assembly {:.1} + linear solve {:.1} \
+             (first assembly {:.1}), {} iters",
+            t.total.as_secs_f64() * 1e3,
+            t.assembly.as_secs_f64() * 1e3,
+            t.linear_solve.as_secs_f64() * 1e3,
+            t.first_assembly.as_secs_f64() * 1e3,
+            r.iterations,
+        );
+    }
+}
+
 /// The probes run on throwaway copies of the model: re-supplying the initial
 /// parameter vector does not reset parametrization state held outside it, such
 /// as the reference rotation a QuaternionParam re-centres on after a step. A
@@ -97,10 +121,15 @@ pub fn run<M: Model>(input: &M::Input) -> Row<M::Solution> {
     model.serialize(&mut params);
 
     crate::solver::run(100, |max_iters| {
+        // The clone and the config are the probe's reset, not the solve: the
+        // clock starts below.
         let mut m = model.clone();
-        let r = M::solve(&params, &mut m, &config::<M>(input, max_iters));
+        let cfg = config::<M>(input, max_iters);
+        let (ms, r) = crate::solver::timed(|| M::solve(&params, &mut m, &cfg));
+        print_timing(&r);
         m.deserialize(&r.x);
         crate::solver::Outcome {
+            ms,
             accepted: r.accepted_iterations,
             attempts: r.iterations,
             solution: m.solution(),

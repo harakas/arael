@@ -65,6 +65,7 @@ pub struct Scene {
 
 /// One system's answer, evaluated by [`reference_cost`]. Landmarks are fixed,
 /// so the solution is the pose trajectory only.
+#[derive(Clone)]
 pub struct Solution {
     pub poses: Vec<(vect3d, vect3d)>, // (pos, euler)
 }

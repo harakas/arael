@@ -1,6 +1,6 @@
 // Scalar FP microbench: is f32 faster than f64 for the ops that dominate
 // the loc iteration? atan2 (libm), sqrt, div, and mul-add chains. Companion
-// to the LOC_TIMING=1 per-phase mode -- run both on a target core (e.g. the
+// to the LOC_PHASES=1 per-phase mode -- run both on a target core (e.g. the
 // Raspberry Pi 5) to attribute an f32-vs-f64 gap to libm vs the FPU:
 //
 //   cargo run -r --bin fpbench

@@ -9,9 +9,11 @@
 //
 //   ceres_loc <scene.txt> <solution_out> [dense_schur|sparse_schur|
 //             sparse_normal_cholesky|iterative_schur]
-// JSON {solve_ms, first_iter_ms, iterations, accepted, initial_cost,
-// peak_rss_kb, cpus_allowed} on stdout; solution_out carries one pose per
-// line (6 values). Landmarks are fixed and not written.
+// The shared benchmark protocol line on stdout (see ../../cpp/bench.h);
+// solution_out carries one pose per line (6 values). Landmarks are fixed and
+// not written.
+
+#include "../../cpp/bench.h"
 
 #include <ceres/ceres.h>
 #include <Eigen/Dense>
@@ -153,10 +155,8 @@ struct OdoCost {
     }
 };
 
-struct RunResult { double ms; int accepted, total; double initial_cost; };
-
-static RunResult solve(Scene& s, ceres::LinearSolverType linsolver, int max_iters,
-                       std::vector<double>* pose_out) {
+static bench::Result solve(Scene& s, ceres::LinearSolverType linsolver, int max_iters,
+                           std::vector<double>* pose_out) {
     std::vector<double> poses = s.pose_init;
     ceres::Problem problem;
     for (int i = 0; i < s.n_poses; i++) {
@@ -184,25 +184,22 @@ static RunResult solve(Scene& s, ceres::LinearSolverType linsolver, int max_iter
     options.max_num_iterations = max_iters;
     options.num_threads = 1;
     options.function_tolerance = 1e-5;  // shared termination class
+    // Problem-appropriate initial trust region (large -> near-Gauss-Newton on
+    // this well-initialized graph), matching the pgo benchmark policy.
     options.initial_trust_region_radius = 1e12;
     if (const char* r = getenv("CERES_RADIUS0")) options.initial_trust_region_radius = atof(r);
 
     ceres::Solver::Summary summary;
     ceres::Solve(options, &problem, &summary);
     if (pose_out) *pose_out = poses;
-    return RunResult{summary.total_time_in_seconds * 1e3,
-                     summary.num_successful_steps,
-                     summary.num_successful_steps + summary.num_unsuccessful_steps,
-                     2.0 * summary.initial_cost};
-}
-
-static long peak_rss_kb() {
-    std::ifstream st("/proc/self/status");
-    std::string l;
-    while (std::getline(st, l))
-        if (l.rfind("VmHWM:", 0) == 0)
-            return atol(l.c_str() + 6);
-    return 0;
+    // Ceres records iteration 0 -- the initial cost evaluation, before any step
+    // -- as a successful step. It is not one; discount it so accepted and
+    // attempts mean the same here as in every other runner.
+    const int accepted = std::max(0, summary.num_successful_steps - 1);
+    return bench::Result{summary.total_time_in_seconds * 1e3,
+                         accepted,
+                         accepted + summary.num_unsuccessful_steps,
+                         2.0 * summary.initial_cost};
 }
 
 int main(int argc, char** argv) {
@@ -217,25 +214,15 @@ int main(int argc, char** argv) {
         else if (t != "sparse_normal_cholesky") { fprintf(stderr, "unknown linsolver %s\n", t.c_str()); return 1; }
     }
 
-    RunResult first = solve(s, linsolver, 1, nullptr);
     std::vector<double> poses;
-    RunResult full = solve(s, linsolver, 200, &poses);
+    bench::report(
+        [&](int n) { return solve(s, linsolver, n, nullptr); },
+        [&]() { return solve(s, linsolver, 200, &poses); });
 
     std::ofstream out(argv[2]);
     out.precision(17);
     for (int i = 0; i < s.n_poses; i++) {
         for (int k = 0; k < 6; k++) out << poses[6 * i + k] << (k == 5 ? "\n" : " ");
     }
-
-    std::string cpus = "?";
-    std::ifstream st("/proc/self/status");
-    std::string l;
-    while (std::getline(st, l))
-        if (l.rfind("Cpus_allowed_list:", 0) == 0)
-            cpus = l.substr(l.find_last_of(" \t") + 1);
-
-    printf("{\"solve_ms\": %.3f, \"first_iter_ms\": %.3f, \"iterations\": %d, "
-           "\"accepted\": %d, \"initial_cost\": %.6f, \"peak_rss_kb\": %ld, \"cpus_allowed\": \"%s\"}\n",
-           full.ms, first.ms, full.total, full.accepted, full.initial_cost, peak_rss_kb(), cpus.c_str());
     return 0;
 }

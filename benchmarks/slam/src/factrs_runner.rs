@@ -295,23 +295,29 @@ pub fn initial_cost(scene: &Scene) -> f64 {
 
 pub fn run(scene: &Scene) -> RunOut {
     bench_harness::solver::run(200, |max_iter| {
+        // Building the graph is the probe's reset, not the solve -- the clock
+        // starts at the optimize() below, the same boundary the C++ runners draw.
         let (graph, init) = build(scene);
         let before = counts();
-        let params = LevenParams { base: base(max_iter), ..Default::default() };
-        let mut opt = LevenMarquardt::new(params, graph);
-        // factrs keeps its damping retries inside step(): a rejected step
-        // multiplies lambda and re-solves the damped system -- another full
-        // factorization -- without ever returning. Counting the linear solves
-        // recovers them; its observer sees accepted steps only.
-        opt.set_solver(CountingSolver::default());
-        opt.observers_mut().add(StepCounter);
-        let values = match opt.optimize(init) {
+        let (ms, result) = bench_harness::solver::timed(|| {
+            let params = LevenParams { base: base(max_iter), ..Default::default() };
+            let mut opt = LevenMarquardt::new(params, graph);
+            // factrs keeps its damping retries inside step(): a rejected step
+            // multiplies lambda and re-solves the damped system -- another full
+            // factorization -- without ever returning. Counting the linear solves
+            // recovers them; its observer sees accepted steps only.
+            opt.set_solver(CountingSolver::default());
+            opt.observers_mut().add(StepCounter);
+            opt.optimize(init)
+        });
+        let values = match result {
             Ok(v) => v,
             Err(OptError::MaxIterations(v)) => v,
             Err(e) => panic!("factrs failed: {:?}", e),
         };
         let (accepted, attempts) = since(before);
         bench_harness::solver::Outcome {
+            ms,
             accepted,
             attempts,
             solution: extract(scene, &values),

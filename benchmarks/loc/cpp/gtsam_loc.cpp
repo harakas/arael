@@ -12,10 +12,12 @@
 // GTSAM_VERIFY_JAC=1 (verification only, never in the timed solve).
 //
 //   gtsam_loc <scene.txt> <lm> <solution_out>
-// JSON {solve_ms, first_iter_ms, iterations, accepted, initial_cost,
-// peak_rss_kb, cpus_allowed} on stdout; solution_out carries one pose per line
-// (6 values). Landmarks are fixed and not written.
+// The shared benchmark protocol line on stdout (see ../../cpp/bench.h);
+// solution_out carries one pose per line (6 values). Landmarks are fixed and
+// not written.
 // GTSAM_LAMBDA0 overrides the LM initial damping (default 1e-9).
+
+#include "../../cpp/bench.h"
 
 #include <gtsam/base/numericalDerivative.h>
 #include <gtsam/inference/Symbol.h>
@@ -273,9 +275,7 @@ static void verify_jacobians(const Scene& s, const gtsam::Values& v) {
     if (worst > 1e-4) { fprintf(stderr, "JACOBIAN MISMATCH\n"); exit(2); }
 }
 
-struct RunResult { double ms; int iterations; double initial_cost; };
-
-static RunResult solve(const Scene& s, int max_iters, std::vector<double>* pose_out) {
+static bench::Result solve(const Scene& s, int max_iters, std::vector<double>* pose_out) {
     gtsam::NonlinearFactorGraph graph;
     gtsam::Values init;
     build(s, graph, init);
@@ -302,15 +302,10 @@ static RunResult solve(const Scene& s, int max_iters, std::vector<double>* pose_
             for (int k = 0; k < 6; k++) (*pose_out)[6 * i + k] = p[k];
         }
     }
-    return RunResult{ms, (int)optimizer.iterations(), initial_cost};
-}
-
-static long peak_rss_kb() {
-    std::ifstream st("/proc/self/status");
-    std::string l;
-    while (std::getline(st, l))
-        if (l.rfind("VmHWM:", 0) == 0) return atol(l.c_str() + 6);
-    return 0;
+    // GTSAM keeps its damping retries inside the iteration and exposes no count
+    // of them, so attempts can only be reported as the accepted steps.
+    const int iters = (int)optimizer.iterations();
+    return bench::Result{ms, iters, iters, initial_cost};
 }
 
 int main(int argc, char** argv) {
@@ -322,24 +317,14 @@ int main(int argc, char** argv) {
         verify_jacobians(s, v);
     }
 
-    RunResult first = solve(s, 1, nullptr);
     std::vector<double> poses;
-    RunResult full = solve(s, 200, &poses);
+    bench::report(
+        [&](int n) { return solve(s, n, nullptr); },
+        [&]() { return solve(s, 200, &poses); });
 
     std::ofstream out(argv[3]);
     out.precision(17);
     for (int i = 0; i < s.n_poses; i++)
         for (int k = 0; k < 6; k++) out << poses[6 * i + k] << (k == 5 ? "\n" : " ");
-
-    std::string cpus = "?";
-    std::ifstream st("/proc/self/status");
-    std::string l;
-    while (std::getline(st, l))
-        if (l.rfind("Cpus_allowed_list:", 0) == 0)
-            cpus = l.substr(l.find_last_of(" \t") + 1);
-
-    printf("{\"solve_ms\": %.3f, \"first_iter_ms\": %.3f, \"iterations\": %d, "
-           "\"accepted\": %d, \"initial_cost\": %.6f, \"peak_rss_kb\": %ld, \"cpus_allowed\": \"%s\"}\n",
-           full.ms, first.ms, full.iterations, full.iterations, full.initial_cost, peak_rss_kb(), cpus.c_str());
     return 0;
 }

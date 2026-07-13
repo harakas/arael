@@ -32,9 +32,9 @@ PANELS = [
         ("factrs (LM)", 144.76, "other"),
         ("GTSAM (LM)", 160.41, "other"),
     ]),
-    # STALE: still ms/iter from the pre-harness runs. loc is not on the shared
-    # harness yet, so this panel does not measure the same thing the one above
-    # does. Re-run on the Pi once loc is migrated, then update.
+    # STALE: still ms/iter from the pre-harness runs, so this panel does not
+    # measure the same thing the one above does. loc now runs on the shared
+    # harness; re-run it on the Pi and replace these with its full-iter column.
     ("Localization -- 60 poses, 360 params (Raspberry Pi 5)", 20.0, 5.0, 2, [
         ("arael (f32)", 1.03, "arael"),
         ("arael (f64)", 1.09, "arael"),

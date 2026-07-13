@@ -172,44 +172,15 @@ pub(crate) fn ordering() -> arael::simple_lm::FaerOrdering {
     }
 }
 
-/// TIMING=1 prints arael's internal breakdown for every solve it runs. That
-/// includes the probes, so one round of one system emits several lines: the
-/// discarded warmup plus PROBE_SUBROUNDS passes of the one- and two-iteration
-/// probes, then the real solve.
-///
-/// Only the printing is gated. `gather_timing` stays on either way, so the
-/// timing numbers do not depend on whether they are being looked at.
-fn timing_enabled() -> bool {
-    std::env::var("TIMING").is_ok()
-}
-
-fn print_timing<T>(r: &arael::simple_lm::LmResult<T>) {
-    if !timing_enabled() {
-        return;
-    }
-    if let Some(t) = &r.timing {
-        eprintln!(
-            "  [timing] total {:.1} ms = assembly {:.1} + linear solve {:.1} (first assembly {:.1}), {} iters",
-            t.total.as_secs_f64() * 1e3,
-            t.assembly.as_secs_f64() * 1e3,
-            t.linear_solve.as_secs_f64() * 1e3,
-            t.first_assembly.as_secs_f64() * 1e3,
-            r.iterations,
-        );
-    }
-}
-
 /// The two solvers, one per scalar. This is the one thing the generic pipeline
-/// cannot pick for itself.
+/// cannot pick for itself. The per-solve TIMING breakdown is the harness's.
 pub fn solve_f64<P: arael::simple_lm::LmProblem<f64>>(
     params: &[f64],
     p: &mut P,
     cfg: &arael::simple_lm::LmConfig<f64>,
 ) -> arael::simple_lm::LmResult<f64> {
     let mut solver = arael::simple_lm::SparseFaer::new().with_ordering(ordering());
-    let r = arael::simple_lm::lm_solve(params, &mut solver, p, cfg);
-    print_timing(&r);
-    r
+    arael::simple_lm::lm_solve(params, &mut solver, p, cfg)
 }
 
 pub fn solve_f32<P: arael::simple_lm::LmProblem<f32>>(
@@ -218,9 +189,7 @@ pub fn solve_f32<P: arael::simple_lm::LmProblem<f32>>(
     cfg: &arael::simple_lm::LmConfig<f32>,
 ) -> arael::simple_lm::LmResult<f32> {
     let mut solver = arael::simple_lm::SparseFaerF32::new().with_ordering(ordering());
-    let r = arael::simple_lm::lm_solve(params, &mut solver, p, cfg);
-    print_timing(&r);
-    r
+    arael::simple_lm::lm_solve(params, &mut solver, p, cfg)
 }
 
 // Initial damping, problem-appropriate for well-initialized 2D pose graphs (the
