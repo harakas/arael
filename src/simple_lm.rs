@@ -1137,6 +1137,12 @@ impl LmSolver<f32> for BandLapack {
 /// decrement plus a separate epsilon clamp whose interaction put the
 /// real f64 floor anywhere in [2e-13, 1e-12] depending on approach
 /// path. Overridable per solve via `LmConfig::lambda_floor`.
+///
+/// Damping is applied as `(1 + lambda) * diagonal[i]`, so a lambda below the
+/// scalar's epsilon rounds straight back to `diagonal[i]`: it damps nothing,
+/// and a retry ladder climbing from it refactorizes a bit-identical matrix.
+/// Every lambda the drivers hand out, the starting one included, is held at
+/// or above this floor.
 fn default_lambda_floor<T: Float>() -> T {
     T::from(1e-12).unwrap().max(T::epsilon())
 }
@@ -1254,7 +1260,7 @@ impl<T: Float> Default for DefaultLambdaDriver<T> {
 impl<T: Float> LambdaDriver<T> for DefaultLambdaDriver<T> {
     fn start(&mut self, config: &LmConfig<T>, _state: &LambdaState<T>) -> T {
         self.floor = config.lambda_floor.max(T::epsilon());
-        config.initial_lambda
+        config.initial_lambda.max(self.floor)
     }
     fn accepted(&mut self, step: &LambdaStep<T>) -> T {
         lambda_after_accept(step.lambda, self.down, self.floor)
@@ -1316,7 +1322,7 @@ impl<T: Float> LambdaDriver<T> for NielsenLambdaDriver<T> {
     fn start(&mut self, config: &LmConfig<T>, _state: &LambdaState<T>) -> T {
         self.floor = config.lambda_floor.max(T::epsilon());
         self.nu = T::from(2.0).unwrap();
-        config.initial_lambda
+        config.initial_lambda.max(self.floor)
     }
     fn accepted(&mut self, step: &LambdaStep<T>) -> T {
         self.nu = T::from(2.0).unwrap();
@@ -4124,6 +4130,38 @@ mod tests {
         assert_eq!(plain.end_cost, driven.end_cost);
         assert_eq!(plain.iterations, driven.iterations);
         assert_eq!(plain.accepted_iterations, driven.accepted_iterations);
+    }
+
+    // A lambda below the scalar's epsilon cannot damp anything: the damping is
+    // (1 + lambda) * diagonal[i], and in f32 (1.0 + 1e-10) IS 1.0. A driver
+    // that started there would refactorize a bit-identical matrix on every
+    // rejection until the ladder climbed past epsilon.
+    #[test]
+    fn initial_lambda_below_epsilon_is_raised_to_a_representable_one() {
+        let diagonal = [3.7f32, 1.0, 0.5];
+        let grad = [0.0f32; 3];
+        let state = LambdaState { cost: 1.0f32, grad: &grad, diagonal: &diagonal };
+        let config = LmConfig::<f32> { initial_lambda: 1e-10, ..Default::default() };
+
+        for lambda in [
+            DefaultLambdaDriver::<f32>::default().start(&config, &state),
+            NielsenLambdaDriver::<f32>::default().start(&config, &state),
+        ] {
+            assert!(lambda >= f32::EPSILON, "lambda {:e} rounds away in f32", lambda);
+            // The damped diagonal must actually differ from the undamped one.
+            for &d in &diagonal {
+                assert!((1.0f32 + lambda) * d != d,
+                    "lambda {:e} leaves diagonal entry {} unchanged", lambda, d);
+            }
+        }
+
+        // f64 can represent 1e-10 damping, so it is left alone.
+        let d64 = [3.7f64];
+        let g64 = [0.0f64];
+        let state64 = LambdaState { cost: 1.0f64, grad: &g64, diagonal: &d64 };
+        let config64 = LmConfig::<f64> { initial_lambda: 1e-10, ..Default::default() };
+        let lambda64 = DefaultLambdaDriver::<f64>::default().start(&config64, &state64);
+        assert_eq!(lambda64, 1e-10);
     }
 
     // A NielsenLambdaDriver attached via with_driver must reach the same
