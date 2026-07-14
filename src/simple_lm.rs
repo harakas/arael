@@ -153,6 +153,33 @@ pub struct LmConfig<T: Float> {
     /// to disable (only terminate via precision/patience). Useful when you
     /// know the target cost (e.g. constraint satisfaction where 0 is perfect).
     pub cost_threshold: T,
+    /// Stop when the gradient is flat: `max|g_i| <= gradient_tolerance`.
+    /// `None` (the default) disables the test.
+    ///
+    /// This is the only criterion that tests for an actual STATIONARY POINT.
+    /// The cost tests (`abs_precision` / `rel_precision`) only say the cost has
+    /// stopped improving, which can happen while the solve is still drifting
+    /// along a near-null direction -- a gauge freedom is exactly that.
+    ///
+    /// NOTE the factor of two. arael minimizes `sum r^2`, so its gradient is
+    /// `2 J^T r`. A solver that minimizes `1/2 sum r^2` (Ceres does) has
+    /// gradient `J^T r`, so the same tolerance value means something twice as
+    /// tight there. Checked after each assembly, and it respects `min_iters`.
+    pub gradient_tolerance: Option<T>,
+    /// Stop when the parameters stop moving:
+    /// `|step|_2 <= parameter_tolerance * (|x|_2 + parameter_tolerance)`.
+    /// `None` (the default) disables the test.
+    ///
+    /// Relative to the size of the parameters, so it is scale-free; the
+    /// trailing `+ parameter_tolerance` keeps it sane as `|x|` approaches zero.
+    /// It is a different question from "has the cost stopped improving": the
+    /// cost can plateau while the step is still doing real work, and the step
+    /// can vanish while the cost is still creeping.
+    ///
+    /// Checked on an ACCEPTED step (a rejected one does not move the
+    /// parameters), before `advance()` re-centers them -- re-centering zeroes
+    /// the rotation deltas, which would understate `|x|`. Respects `min_iters`.
+    pub parameter_tolerance: Option<T>,
     /// Wall-clock budget for the whole solve. `None` (the default) means no
     /// limit, and the solver never reads the clock for it.
     ///
@@ -212,6 +239,8 @@ impl<T: Float> Default for LmConfig<T> {
             patience: 3,
             initial_lambda: T::from(1e-4).unwrap(),
             cost_threshold: T::zero(),
+            gradient_tolerance: None,
+            parameter_tolerance: None,
             time_limit: None,
             lambda_floor: default_lambda_floor::<T>(),
             verbose: false,
@@ -683,6 +712,13 @@ pub enum LmStatus {
     CostThreshold,
     /// Hit [`LmConfig::max_iters`] without meeting a convergence criterion.
     MaxIterations,
+    /// The gradient went flat: `max|g_i| <= `[`LmConfig::gradient_tolerance`].
+    /// The only status that means "this is a stationary point" rather than
+    /// "the cost stopped moving".
+    GradientTolerance,
+    /// The step went to nothing:
+    /// `|step| <= tol * (|x| + tol)`, [`LmConfig::parameter_tolerance`].
+    ParameterTolerance,
     /// The damping driver gave up -- lambda would pass its ceiling and no
     /// step could be accepted ([`LambdaDriver::rejected`] returned `None`).
     LambdaCeiling,
@@ -1518,6 +1554,24 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
                     timing: gather.then_some(timing), solver: solver.report() };
             }
         }
+
+        // Gradient test: the only criterion here that asks whether this is a
+        // stationary point, rather than whether the cost has stopped moving.
+        // The gradient is fresh from the assembly above.
+        if let Some(gtol) = config.gradient_tolerance
+            && iter >= config.min_iters
+        {
+            let gmax = grad.iter().fold(T::zero(), |m, g| m.max(g.abs()));
+            if gmax <= gtol {
+                if config.verbose {
+                    info!("LM terminated: gradient flat (max|g| = {} <= {})",
+                        G(gmax.to_f64().unwrap()), G(gtol.to_f64().unwrap()));
+                }
+                status = LmStatus::GradientTolerance;
+                break;
+            }
+        }
+
         solver.extract_diagonal(&matrix, &mut diagonal);
         // A non-positive diagonal cannot be rescued by multiplicative
         // damping ((1 + lambda) * 0 stays 0): the matrix is singular, no
@@ -1648,6 +1702,21 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
                     grad: &grad, diagonal: &diagonal, delta: &delta,
                 });
                 cur_x.copy_from_slice(&try_x);
+
+                // Step test, measured on the step just taken and the parameters
+                // it produced -- BEFORE advance() re-centers them, because
+                // re-centering zeroes the rotation deltas and would understate
+                // |x|. Rejected steps never get here: they do not move anything.
+                let step_is_nothing = match config.parameter_tolerance {
+                    Some(ptol) if iter >= config.min_iters => {
+                        let norm = |v: &[T]| {
+                            v.iter().fold(T::zero(), |a, e| a + *e * *e).sqrt()
+                        };
+                        norm(&delta) <= ptol * (norm(&cur_x) + ptol)
+                    }
+                    _ => false,
+                };
+
                 let t_adv = gather.then(Instant::now);
                 problem.advance(&mut cur_x);
                 if let Some(t) = t_adv {
@@ -1673,6 +1742,18 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
                 if iter >= config.min_iters && new_cost <= config.cost_threshold {
                     end_cost = new_cost;
                     status = LmStatus::CostThreshold;
+                    done = true;
+                    break;
+                }
+
+                // The parameters have stopped moving. The step is kept -- it was
+                // an improvement, it is just a negligible one in x.
+                if step_is_nothing {
+                    end_cost = new_cost;
+                    if config.verbose {
+                        info!("LM terminated: step is negligible against |x|");
+                    }
+                    status = LmStatus::ParameterTolerance;
                     done = true;
                     break;
                 }

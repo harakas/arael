@@ -1063,6 +1063,8 @@
 //! | `patience` | `3` | consecutive small steps required to terminate |
 //! | `initial_lambda` | `1e-4` | starting LM damping; small ≈ Gauss-Newton, large ≈ gradient descent |
 //! | `cost_threshold` | `0.0` | terminate immediately when cost ≤ this (`0.0` disables) |
+//! | `gradient_tolerance` | `None` | stop when `max|g_i| <= tol`. The only test for a stationary point |
+//! | `parameter_tolerance` | `None` | stop when `|step| <= tol * (|x| + tol)` -- the parameters stopped moving |
 //! | `time_limit` | `None` | wall-clock budget for the whole solve. Overrides `min_iters` |
 //! | `verbose` | `false` | per-iteration line on stderr. **Turn on first whenever debugging** |
 //! | `gather_timing` | `false` | gather per-phase timing into `LmResult::timing` (`Some` when on, `None` when off) |
@@ -1071,6 +1073,16 @@
 //! current step is "small" (below both `abs_precision` and
 //! `rel_precision`), and the preceding `patience` steps were also
 //! small. Or on any of `iter >= max_iters` / `cost <= cost_threshold`.
+//!
+//! `gradient_tolerance` and `parameter_tolerance` are off unless you set them,
+//! and they ask questions the cost test cannot. The cost test only says the cost
+//! has stopped improving; the gradient test says you are at a stationary point
+//! (a solve drifting along a gauge freedom has a flat cost and a live gradient),
+//! and the step test says the parameters have stopped moving (which can happen
+//! while the cost still creeps, and fail to happen while it plateaus). Both are
+//! convergence criteria, so `min_iters` holds them open like the others. Note
+//! arael minimizes `sum r^2`, so its gradient is `2 J^T r` -- a solver that
+//! minimizes `1/2 sum r^2` reads the same tolerance twice as tight.
 //!
 //! `time_limit` is the exception to `min_iters`: a budget is a budget, so a
 //! spent one stops the solve wherever it is (`LmStatus::TimeLimit`), returning

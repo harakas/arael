@@ -385,3 +385,147 @@ fn a_generous_budget_does_not_change_the_answer() {
     assert_eq!(limited.iterations, unlimited.iterations);
     assert_eq!(limited.end_cost, unlimited.end_cost);
 }
+
+// ---------------------------------------------------------------------------
+// LmConfig::gradient_tolerance and ::parameter_tolerance -- both Option, both
+// off by default. They ask different questions from the cost test: "am I at a
+// stationary point" and "have I stopped moving", not "has the cost stopped
+// improving".
+// ---------------------------------------------------------------------------
+
+#[test]
+fn tolerances_are_off_by_default() {
+    // Absent unless asked for: a default solve must be bit-identical to one
+    // that names them as None.
+    let mut a = build_chain();
+    let base = a.solve_sparse(&LmConfig { max_iters: 200, ..Default::default() });
+
+    let mut b = build_chain();
+    let explicit = b.solve_sparse(&LmConfig::<f64> {
+        max_iters: 200,
+        gradient_tolerance: None,
+        parameter_tolerance: None,
+        ..Default::default()
+    });
+    assert_eq!(base.status, explicit.status);
+    assert_eq!(base.iterations, explicit.iterations);
+    assert_eq!(base.end_cost, explicit.end_cost);
+    assert_eq!(base.status, LmStatus::Converged);
+}
+
+#[test]
+fn gradient_tolerance_stops_the_solve() {
+    // A tolerance so loose the gradient is "flat" on the first look: the solve
+    // stops on it rather than on the cost, and says so.
+    let mut c = build_chain();
+    let r = c.solve_sparse(&LmConfig::<f64> {
+        gradient_tolerance: Some(1e30),
+        min_iters: 0, max_iters: 200, ..Default::default()
+    });
+    assert_eq!(r.status, LmStatus::GradientTolerance);
+
+    // And a tolerance so tight it can never fire leaves the solve alone.
+    let mut c = build_chain();
+    let tight = c.solve_sparse(&LmConfig::<f64> {
+        gradient_tolerance: Some(0.0),
+        min_iters: 0, max_iters: 200, ..Default::default()
+    });
+    assert_eq!(tight.status, LmStatus::Converged, "an impossible tolerance must not fire");
+}
+
+#[test]
+fn gradient_tolerance_is_a_different_question_from_the_cost_test() {
+    // Turn the cost test off entirely (thresholds it can never meet) so the
+    // ONLY thing that can stop this solve short of max_iters is the gradient.
+    let cfg = |gtol| LmConfig::<f64> {
+        abs_precision: 0.0, rel_precision: 0.0,   // cost test can never fire
+        gradient_tolerance: gtol,
+        min_iters: 0, max_iters: 200, ..Default::default()
+    };
+    let mut a = build_chain();
+    let without = a.solve_sparse(&cfg(None));
+    let mut b = build_chain();
+    let with = b.solve_sparse(&cfg(Some(1e-4)));
+
+    assert_ne!(without.status, LmStatus::GradientTolerance);
+    assert_eq!(with.status, LmStatus::GradientTolerance);
+    assert!(
+        with.iterations < without.iterations,
+        "the gradient test should stop it earlier: {} vs {}",
+        with.iterations, without.iterations
+    );
+    // It stopped because the gradient was flat, so it is genuinely converged --
+    // not stopped early at a worse cost.
+    assert!(
+        with.end_cost <= without.end_cost * 1.01,
+        "gradient-stopped cost {} should be no worse than {}",
+        with.end_cost, without.end_cost
+    );
+}
+
+#[test]
+fn parameter_tolerance_stops_the_solve() {
+    // Loose enough that the first accepted step is already "negligible".
+    let mut c = build_chain();
+    let r = c.solve_sparse(&LmConfig::<f64> {
+        parameter_tolerance: Some(1e30),
+        min_iters: 0, max_iters: 200, ..Default::default()
+    });
+    assert_eq!(r.status, LmStatus::ParameterTolerance);
+    assert_eq!(r.accepted_iterations, 1, "should stop on the first accepted step");
+    // The step is kept: it was an improvement, just a small one in x.
+    assert!(r.end_cost < r.start_cost);
+
+    // Zero can never be met (|step| <= 0 * (|x| + 0) = 0), so it must not fire.
+    let mut c = build_chain();
+    let tight = c.solve_sparse(&LmConfig::<f64> {
+        parameter_tolerance: Some(0.0),
+        min_iters: 0, max_iters: 200, ..Default::default()
+    });
+    assert_eq!(tight.status, LmStatus::Converged, "an impossible tolerance must not fire");
+}
+
+#[test]
+fn parameter_tolerance_is_a_different_question_from_the_cost_test() {
+    // Cost test disabled; only the step-norm test can stop this early.
+    let cfg = |ptol| LmConfig::<f64> {
+        abs_precision: 0.0, rel_precision: 0.0,
+        parameter_tolerance: ptol,
+        min_iters: 0, max_iters: 200, ..Default::default()
+    };
+    let mut a = build_chain();
+    let without = a.solve_sparse(&cfg(None));
+    let mut b = build_chain();
+    let with = b.solve_sparse(&cfg(Some(1e-6)));
+
+    assert_ne!(without.status, LmStatus::ParameterTolerance);
+    assert_eq!(with.status, LmStatus::ParameterTolerance);
+    assert!(
+        with.iterations < without.iterations,
+        "the step test should stop it earlier: {} vs {}",
+        with.iterations, without.iterations
+    );
+}
+
+#[test]
+fn both_tolerances_respect_min_iters() {
+    // They are convergence criteria, so min_iters holds them open like the
+    // others -- unlike time_limit, which is a budget and overrides it.
+    for cfg in [
+        LmConfig::<f64> {
+            gradient_tolerance: Some(1e30), min_iters: 6, max_iters: 200,
+            ..Default::default()
+        },
+        LmConfig::<f64> {
+            parameter_tolerance: Some(1e30), min_iters: 6, max_iters: 200,
+            ..Default::default()
+        },
+    ] {
+        let mut c = build_chain();
+        let r = c.solve_sparse(&cfg);
+        assert!(
+            r.iterations >= 6,
+            "min_iters 6 not honoured, stopped at {} with {:?}", r.iterations, r.status
+        );
+    }
+}

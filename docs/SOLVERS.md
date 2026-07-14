@@ -147,6 +147,8 @@ LmConfig {
     patience:        3,      // this many consecutive small steps → stop
     initial_lambda:  1e-4,   // starting LM damping
     cost_threshold:  0.0,    // stop when cost ≤ this (0.0 disables)
+    gradient_tolerance: None,   // stop when max|g_i| <= tol
+    parameter_tolerance: None,  // stop when |step| <= tol * (|x| + tol)
     time_limit:      None,   // wall-clock budget; None = no limit
     verbose:         false,  // print per-iteration trace to stderr
     gather_timing:   false,  // collect per-phase timing into LmResult::timing
@@ -162,6 +164,8 @@ LmConfig {
 | `patience` | `3` | consecutive small steps before termination. Prevents premature termination from one lucky step |
 | `initial_lambda` | `1e-4` | starting damping. Small ≈ Gauss-Newton (fast, may overshoot), large ≈ gradient descent (slow, stable) |
 | `cost_threshold` | `0.0` | terminate immediately when cost drops to or below this. Useful for feasibility-style problems with a known target |
+| `gradient_tolerance` | `None` | `Option<T>`. Stop when `max|g_i| <= tol`. **The only criterion that tests for a stationary point** -- the cost tests only say the cost stopped improving, which also happens while drifting along a gauge freedom. arael minimizes `sum r^2`, so its gradient is `2 J^T r`; a solver minimizing `1/2 sum r^2` (Ceres) reads the same number twice as tight. Respects `min_iters` |
+| `parameter_tolerance` | `None` | `Option<T>`. Stop when `\|step\|_2 <= tol * (\|x\|_2 + tol)` -- the parameters have stopped moving. A different question from the cost test: the cost can plateau while the step still does real work, and the step can vanish while the cost still creeps. Checked on an accepted step, before `advance()` re-centers. Respects `min_iters` |
 | `time_limit` | `None` | `Option<Duration>` wall-clock budget for the whole solve. **Overrides `min_iters`** -- a spent budget stops the solve wherever it is, returning the last accepted step (`LmStatus::TimeLimit`). Checked before each assembly and each damped attempt, so the overrun is bounded by one linear solve, not one iteration. It cannot preempt a single factorization. `None` = no limit, and the clock is never read |
 | `verbose` | `false` | per-iteration line on stderr. **Turn on first whenever debugging** |
 | `gather_timing` | `false` | gather per-phase wall-clock timing into `LmResult::timing` (`Some` when on, `None` when off). Off = the clock is never read |
@@ -413,6 +417,8 @@ pub enum LmStatus {
     Converged,             // patience small steps / noise floor / zero start cost
     CostThreshold,         // reached LmConfig::cost_threshold
     MaxIterations,         // hit LmConfig::max_iters
+    GradientTolerance,     // max|g_i| <= LmConfig::gradient_tolerance
+    ParameterTolerance,    // |step| <= tol * (|x| + tol)
     TimeLimit,             // spent LmConfig::time_limit
     DriverTerminated,      // LambdaDriver::accepted returned None -- step KEPT
     LambdaCeiling,         // driver gave up: lambda past its ceiling
