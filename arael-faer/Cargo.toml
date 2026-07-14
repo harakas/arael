@@ -3,9 +3,12 @@ name = "arael-faer"
 version = "0.7.1"
 edition = "2024"
 authors = ["Indrek Mandre <indrek@mare.ee>"]
-description = "faer extensions staged for upstreaming: variable-block sparse matrix storage (block CSC) and Schur-complement reduction"
+description = "faer extensions: variable-block sparse matrix storage (block CSC), Schur-complement reduction, and a nested-dissection ordering"
 license = "MIT"
+repository = "https://github.com/harakas/arael"
 readme = "README.md"
+keywords = ["sparse", "linear-algebra", "cholesky", "schur-complement", "nested-dissection"]
+categories = ["mathematics", "science", "algorithms"]
 
 [dependencies]
 faer = { version = "0.24", default-features = false, features = ["std", "sparse-linalg"] }

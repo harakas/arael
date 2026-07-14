@@ -594,7 +594,7 @@ fn gemm_sub_fixed_trans<T: SchurReal, const WA: usize, const WE: usize, const WB
 /// leaves the widths -- and so the loop bounds and the vectorization -- to run
 /// time, and costs roughly 2x for it.
 ///
-/// This is the same list [`fixed_shapes`] dispatches on; a test walks every
+/// This is the same list the `fixed_shapes!` macro dispatches on; a test walks every
 /// shape up to 9x9x9 and checks the two agree, so they cannot drift apart.
 /// [`SchurSymbolic::gemm_shapes`] reports what a given problem actually needs,
 /// which is how a caller finds out it is paying the 2x.

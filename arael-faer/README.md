@@ -1,10 +1,10 @@
 # arael-faer
 
-faer extensions, staged for upstreaming. Everything here is built on faer's
-public API and laid out the way it would sit in faer itself; arael depends on
-it, but nothing in it is arael-specific.
+faer extensions. Everything here is built on faer's public API and laid out the
+way it would sit in faer itself; arael depends on it, but nothing in it is
+arael-specific.
 
-Two things faer does not ship:
+Three things faer does not ship:
 
 - **Block CSC** (`bsc`) -- sparse matrix storage over a *variable* block
   partition. A Hessian assembled from entities (6-wide poses, 3-wide points)
@@ -14,6 +14,9 @@ Two things faer does not ship:
   blocks from a block-CSC matrix and factorize only what is left. This is the
   landmark/point marginalization that makes bundle adjustment and SLAM
   tractable, and it needs the block structure to be cheap.
+- **Nested dissection** (`nd`) -- a fill-reducing ordering for matrices with no
+  band and no small degrees, where minimum degree has nothing to chew on. faer
+  offers AMD, natural, or a custom permutation; this computes the custom one.
 
 ## bsc -- block CSC
 
@@ -30,6 +33,40 @@ upper triangle.
 | `PositionResolver` | scalar (i, j) -> offset in the value array; build a scatter map once, assemble by index forever after |
 | `csc_pattern` / `csc_vals_into` / `to_csc` | hand the matrix to a scalar sparse factorization |
 | `to_dense` | expand, for tests and debugging |
+
+## nd -- nested dissection
+
+A fill-reducing ordering. Cholesky fill spreads along paths in the matrix's
+graph; nested dissection cuts them -- find a set of vertices whose removal
+splits the graph in two, order each half first and the separator last, and no
+fill can reach from one half to the other. Recurse.
+
+```text
+order(V) = order(A) ++ order(B) ++ S      S separates A from B
+```
+
+This is what bundle adjustment needs and minimum degree cannot give it: a 3D
+point seen by k cameras makes a k-clique among them, and AMD drowns in cliques.
+On the 1723-camera Ladybug problem AMD leaves 83.1M values in the factor and
+faer takes 4.7 s over it; this ordering leaves 46.9M and takes 2.3 s.
+
+`NestedDissection::of_blocks` dissects the graph of BLOCKS -- one node per
+camera, not per parameter -- so a block's parameters stay contiguous and the
+factor keeps its supernodes; the graph is also 9x smaller, and the ordering runs
+in 50 ms instead of 916. It returns a permutation faer takes as-is
+(`SymmetricOrdering::Custom`).
+
+It is NOT a general win, and the caller must know which matrix it has:
+
+- **banded** (a SLAM trajectory's reduced system) -- the natural order is
+  already at the fill limit, and dissecting it is 3.4x SLOWER.
+- **very sparse graphs** (a pose graph) -- AMD wins outright.
+- **cliquey, no band** (bundle adjustment) -- this is the one.
+
+Nested dissection normally comes from METIS, a C library -- it is what CHOLMOD
+uses. faer's `SymmetricOrdering` offers `Amd`, `Identity` and `Custom` and
+nothing else, so there was no Rust route to this ordering. So a pure Rust
+implementation was written here; it computes the `Custom` permutation.
 
 ## schur -- Schur complement
 

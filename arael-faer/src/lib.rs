@@ -1,7 +1,7 @@
-//! faer extensions, staged for upstreaming. Everything here is built on
-//! faer's public API and laid out the way it would sit in faer itself.
+//! faer extensions. Everything here is built on faer's public API and laid out
+//! the way it would sit in faer itself.
 //!
-//! Two things faer does not ship:
+//! Three things faer does not ship:
 //!
 //! - **Block CSC** ([`bsc`]) -- sparse matrix storage over a *variable* block
 //!   partition. A Hessian assembled from entities (6-wide poses, 3-wide
@@ -13,6 +13,10 @@
 //!   left. This is the landmark/point marginalization that makes bundle
 //!   adjustment and SLAM tractable, and it needs the block structure to be
 //!   cheap.
+//! - **Nested dissection** ([`nd`]) -- a fill-reducing ordering for matrices
+//!   with no band and no small degrees, where minimum degree has nothing to
+//!   chew on. faer offers AMD, natural, or a custom permutation; this computes
+//!   the custom one.
 //!
 //! # bsc -- block CSC
 //!
@@ -40,11 +44,15 @@
 //! bundle adjustment, where every 3D point makes a clique of the cameras that
 //! see it and minimum degree drowns in them. It dissects the BLOCK graph, so a
 //! block's parameters stay contiguous and the factor keeps its supernodes.
-//! [`NestedDissection::of_blocks`] gives a permutation faer takes as-is
-//! (`SymmetricOrdering::Custom`).
+//! [`NestedDissection::of_blocks`](nd::NestedDissection::of_blocks) gives a
+//! permutation faer takes as-is (`SymmetricOrdering::Custom`).
 //!
 //! Not a general win: a banded system (a SLAM trajectory) is 3.4x SLOWER
 //! dissected, and a pose graph prefers AMD. The caller must know its matrix.
+//!
+//! Nested dissection normally comes from METIS, a C library -- it is what
+//! CHOLMOD uses, and faer's `SymmetricOrdering` offers `Amd`, `Identity` and
+//! `Custom` and nothing else. So a pure Rust implementation was written here.
 //!
 //! # schur -- Schur complement
 //!
