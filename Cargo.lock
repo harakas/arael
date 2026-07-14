@@ -250,6 +250,7 @@ name = "arael-faer"
 version = "0.7.2"
 dependencies = [
  "faer",
+ "nano-gemm",
 ]
 
 [[package]]

@@ -41,19 +41,130 @@ pub trait SchurReal:
 {
     const ZERO: Self;
     fn sqrt(self) -> Self;
+
+    /// `dst -= C_a * Z_b` for a tile shape with no unrolled kernel (see
+    /// [`FIXED_SHAPES`]). nano-gemm takes the widths at run time, so it covers every
+    /// shape, and on the shapes it is asked for it is up to 4x faster than the plain
+    /// loop it replaces, and never slower (`--example gemmbench`). It does NOT beat
+    /// the unrolled kernels, which is why those still take the shapes they cover:
+    /// nano-gemm reaches its microkernel through a function pointer, and at these
+    /// sizes that indirect call costs more than the arithmetic it dispatches.
+    ///
+    /// The plan is built per call and NOT cached. It depends only on the shape, so
+    /// caching it looks obvious -- but a plan is four lookups into a const
+    /// microkernel table plus a branch chain, into a struct that stays on the stack,
+    /// and a cache has to be searched before it can save that. Measured: a
+    /// thread-local hash map costs ~25 ns against a GEMM that takes 15, which made
+    /// this fallback SLOWER than the plain loop it replaces; a thread-local linear
+    /// scan over the few live shapes comes out level with just rebuilding. Level is
+    /// not worth the state, so there is none.
+    fn gemm_sub_nano(
+        dst: &mut [Self],
+        ca: &[Self],
+        trans: bool,
+        wa: usize,
+        we: usize,
+        zb: &[Self],
+        wb: usize,
+    );
 }
-impl SchurReal for f32 {
-    const ZERO: Self = 0.0;
-    fn sqrt(self) -> Self {
-        f32::sqrt(self)
-    }
+
+/// The [`SchurReal`] impl for one scalar. nano-gemm's constructors are inherent
+/// methods on the concrete scalar, not a trait, so the impl is generated per type.
+macro_rules! impl_schur_real {
+    ($t:ty, $colmajor:ident, $strided:ident) => {
+        impl SchurReal for $t {
+            const ZERO: Self = 0.0;
+            fn sqrt(self) -> Self {
+                <$t>::sqrt(self)
+            }
+
+            fn gemm_sub_nano(
+                dst: &mut [Self],
+                ca: &[Self],
+                trans: bool,
+                wa: usize,
+                we: usize,
+                zb: &[Self],
+                wb: usize,
+            ) {
+                // nano-gemm's whole execution API is unsafe -- it takes raw
+                // pointers and strides and trusts them. These three assertions are
+                // what make the call below sound, so they are not debug_assert:
+                // the reduction's tile slices come from a symbolic structure, and
+                // a structure/width mismatch would otherwise be a buffer overrun
+                // rather than a panic.
+                assert_eq!(dst.len(), wa * wb, "dst is not the wa x wb tile");
+                assert_eq!(ca.len(), wa * we, "C_a is not the wa x we tile");
+                assert_eq!(zb.len(), we * wb, "Z_b is not the we x wb tile");
+
+                // The lhs is C_a (wa x we). Stored directly it is column-major;
+                // stored transposed the tile holds C_a^T (we x wa), so C_a[i, k]
+                // is at ca[k + i * we] -- a stride swap, not a copy.
+                let (lhs_rs, lhs_cs) = if trans {
+                    (we as isize, 1isize)
+                } else {
+                    (1isize, wa as isize)
+                };
+
+                // dst is always column-major; the lhs only when untransposed, so the
+                // transposed case needs the general-stride plan.
+                let plan = if trans {
+                    nano_gemm::Plan::<$t>::$strided(wa, wb, we)
+                } else {
+                    nano_gemm::Plan::<$t>::$colmajor(wa, wb, we)
+                };
+
+                // SAFETY: nano-gemm requires (a) the plan's (m, n, k) to equal the
+                // ones passed here, (b) any strides the plan pinned to equal the ones
+                // passed here, and (c) every element it reads or writes to be in
+                // bounds of the three buffers.
+                //
+                // (a) The plan is built two lines up from the same wa, wb, we, with
+                //     m = wa, n = wb, k = we in both places. It cannot disagree.
+                // (b) The `colmajor` constructor pins dst and lhs to column-major
+                //     (rs = 1, cs = nrows), which is what is passed: dst (1, wa),
+                //     lhs (1, wa). The `strided` constructor pins nothing, and it is
+                //     the one used for the transposed lhs.
+                // (c) The assertions above fix the three lengths. The largest offset
+                //     touched is then, for each buffer:
+                //       dst: 1*(wa-1) + wa*(wb-1)       = wa*wb - 1 < dst.len()
+                //       zb : 1*(we-1) + we*(wb-1)       = we*wb - 1 < zb.len()
+                //       ca (direct):     1*(wa-1) + wa*(we-1) = wa*we - 1 < ca.len()
+                //       ca (transposed): we*(wa-1) + 1*(we-1) = wa*we - 1 < ca.len()
+                //     so every access is within the slice it came from, in both
+                //     orientations. All three pointers are derived from live slices,
+                //     and dst is a &mut so it does not alias ca or zb.
+                //
+                // nano-gemm computes dst = alpha*dst + beta*(lhs*rhs); ours is
+                // dst -= C_a * Z_b, so alpha = 1 and beta = -1.
+                unsafe {
+                    plan.execute_unchecked(
+                        wa,
+                        wb,
+                        we,
+                        dst.as_mut_ptr(),
+                        1,
+                        wa as isize,
+                        ca.as_ptr(),
+                        lhs_rs,
+                        lhs_cs,
+                        zb.as_ptr(),
+                        1,
+                        we as isize,
+                        1.0,
+                        -1.0,
+                        false,
+                        false,
+                    );
+                }
+            }
+        }
+    };
 }
-impl SchurReal for f64 {
-    const ZERO: Self = 0.0;
-    fn sqrt(self) -> Self {
-        f64::sqrt(self)
-    }
-}
+
+impl_schur_real!(f32, new_colmajor_lhs_and_dst_f32, new_f32);
+impl_schur_real!(f64, new_colmajor_lhs_and_dst_f64, new_f64);
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum SchurError {
@@ -124,10 +235,10 @@ impl<I: Index> SchurSymbolic<I> {
         self.pair_dst.len()
     }
     /// The GEMM tile shapes this reduction needs, `((wa, we, wb), pairs)`, in
-    /// no particular order. A shape not in [`FIXED_SHAPES`] runs the generic
-    /// loop and costs roughly 2x, so a caller that cares about speed should
-    /// look here -- and the pair count says how much of the reduction is on
-    /// the slow path.
+    /// no particular order. A shape not in [`FIXED_SHAPES`] goes to the
+    /// nano-gemm fallback, which costs about 1.2-1.4x the unrolled kernel, so a
+    /// caller that cares about the last of it should look here -- and the pair
+    /// count says how much of the reduction is off the unrolled path.
     pub fn gemm_shapes(&self) -> &[((usize, usize, usize), usize)] {
         &self.shapes
     }
@@ -345,7 +456,7 @@ pub fn schur_symbolic<I: Index>(
         // Which GEMM shapes this problem actually needs, and how many pair
         // contributions each carries. The widths are in hand here, so the
         // census is free; a caller uses it to see whether the reduction is
-        // running on unrolled kernels or on the generic loop.
+        // running on unrolled kernels or on the nano-gemm fallback.
         for (bi, &(_, _, ob)) in list.iter().enumerate() {
             let wb = h.col_span(ob.zx()).len();
             for &(_, _, oa) in list.iter().take(bi + 1) {
@@ -590,9 +701,9 @@ fn gemm_sub_fixed_trans<T: SchurReal, const WA: usize, const WE: usize, const WB
 }
 
 /// The `(observer, marginalized, observer)` tile shapes that have a fully
-/// unrolled GEMM kernel. Every other shape works, through a generic loop that
-/// leaves the widths -- and so the loop bounds and the vectorization -- to run
-/// time, and costs roughly 2x for it.
+/// unrolled GEMM kernel. Every other shape works, through the nano-gemm
+/// fallback, which takes the widths at run time and costs about 1.2-1.4x the
+/// unrolled kernel on these sizes (`--example gemmbench`).
 ///
 /// This is the same list the `fixed_shapes!` macro dispatches on; a test walks every
 /// shape up to 9x9x9 and checks the two agree, so they cannot drift apart.
@@ -626,16 +737,16 @@ pub const FIXED_SHAPES: [(usize, usize, usize); 11] = [
     // SfmCamera = PinholeCamera<Cal3Bundler>, and a 9-dof NavState
 ];
 
-/// Does this tile shape have an unrolled kernel, or does it fall to the
-/// generic loop? See [`FIXED_SHAPES`].
+/// Does this tile shape have an unrolled kernel, or does it fall to nano-gemm?
+/// See [`FIXED_SHAPES`].
 pub fn has_fixed_kernel(wa: usize, we: usize, wb: usize) -> bool {
     FIXED_SHAPES.contains(&(wa, we, wb))
 }
 
-/// Counts calls that reached an unrolled kernel. Whether the dispatch fires
-/// is invisible in the output -- the generic loop computes the same thing --
-/// so without this a broken match arm would silently cost 2x and no test
-/// would notice. Compiled out of every non-test build.
+/// Counts calls that reached an unrolled kernel. Whether the dispatch fires is
+/// invisible in the output -- the fallback computes the same thing -- so without
+/// this a broken match arm would silently take the slower path and no test would
+/// notice. Compiled out of every non-test build.
 #[cfg(test)]
 thread_local! {
     static FIXED_KERNEL_HITS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
@@ -652,9 +763,10 @@ fn note_fixed_kernel() {
 fn note_fixed_kernel() {}
 
 /// The tile shapes that get a fully unrolled kernel, as
-/// `(observer, marginalized, observer)` widths. Every other shape falls to
-/// the generic loop below, which is correct but leaves the widths -- and so
-/// the loop bounds and the vectorization -- to run time.
+/// `(observer, marginalized, observer)` widths. Every other shape falls to the
+/// nano-gemm fallback ([`SchurReal::gemm_sub_nano`]), which is correct for any
+/// shape but reaches its microkernel through a function pointer -- at these
+/// sizes that indirect call costs more than the arithmetic it dispatches.
 ///
 /// The list is what arael's own models produce:
 ///
@@ -712,31 +824,13 @@ fn gemm_sub<T: SchurReal>(
 ) {
     if !trans {
         fixed_shapes!(gemm_sub_fixed, dst, ca, zb, wa, we, wb);
-        for c in 0..wb {
-            for k in 0..we {
-                let z = zb[k + c * we];
-                let dcol = &mut dst[c * wa..(c + 1) * wa];
-                let acol = &ca[k * wa..(k + 1) * wa];
-                for i in 0..wa {
-                    dcol[i] = dcol[i] - acol[i] * z;
-                }
-            }
-        }
     } else {
         fixed_shapes!(gemm_sub_fixed_trans, dst, ca, zb, wa, we, wb);
-        // stored tile is C_a^T (we x wa): C_a[i, k] = ca[k + i * we]
-        for c in 0..wb {
-            for i in 0..wa {
-                let mut s = T::ZERO;
-                let arow = &ca[i * we..(i + 1) * we];
-                let zcol = &zb[c * we..(c + 1) * we];
-                for k in 0..we {
-                    s = s + arow[k] * zcol[k];
-                }
-                dst[i + c * wa] = dst[i + c * wa] - s;
-            }
-        }
     }
+    // No unrolled kernel for this shape: nano-gemm, which takes the widths at
+    // run time. Both macros above `return` on a hit, so reaching here IS the
+    // fallback.
+    T::gemm_sub_nano(dst, ca, trans, wa, we, zb, wb);
 }
 
 /// numeric Schur reduction: fills `s` (allocated via
@@ -1213,11 +1307,10 @@ mod tests {
         run_and_compare(&[5]); // eliminated last, all couplings direct
     }
 
-    const NOT_LISTED: (usize, usize, usize) = (5, 3, 7);
 
     /// FIXED_SHAPES advertises which shapes are fast; fixed_shapes! decides
     /// which ones actually are. Nothing in the OUTPUT distinguishes them --
-    /// the generic loop computes the same values -- so a match arm that never
+    /// the fallback computes the same values -- so a match arm that never
     /// fires, or a list that promises a kernel nobody wrote, would cost 2x in
     /// silence. Walk every shape up to 9x9x9 and demand the two agree, in
     /// both orientations. This is the only test that can see the property.
@@ -1253,8 +1346,14 @@ mod tests {
     /// invisible on the models that do not use that shape.
     #[test]
     fn fixed_shape_kernels_match_the_generic_loop() {
-        let shapes: Vec<(usize, usize, usize)> =
-            FIXED_SHAPES.iter().copied().chain([NOT_LISTED]).collect();
+        // Every shape up to 9x9x9, not just the listed ones: an unrolled kernel
+        // with a wrong arm and the nano-gemm fallback with wrong strides are both
+        // invisible until someone checks the values. The fallback carries the
+        // transposed lhs as a stride swap rather than a copy, which is exactly the
+        // kind of thing that is right for square tiles and wrong for the rest.
+        let shapes: Vec<(usize, usize, usize)> = (1..=9)
+            .flat_map(|wa| (1..=9).flat_map(move |we| (1..=9).map(move |wb| (wa, we, wb))))
+            .collect();
         for (wa, we, wb) in shapes {
             for trans in [false, true] {
                 let mut rng = 12345u64;

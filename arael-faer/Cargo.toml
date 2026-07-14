@@ -10,5 +10,15 @@ readme = "README.md"
 keywords = ["sparse", "linear-algebra", "cholesky", "schur-complement", "nested-dissection"]
 categories = ["mathematics", "science", "algorithms"]
 
+[features]
+# nano-gemm's AVX-512 microkernels (x86 only). Without it nano-gemm picks AVX2 by
+# itself; this is what its published numbers are measured with. `--example
+# gemmbench` reports which path it actually took.
+x86-v4 = ["nano-gemm/x86-v4"]
+
 [dependencies]
 faer = { version = "0.24", default-features = false, features = ["std", "sparse-linalg"] }
+# The GEMM fallback for tile shapes with no unrolled kernel -- see schur.rs. Its
+# execution API is unsafe (raw pointers and strides); the one call site proves
+# and asserts its preconditions.
+nano-gemm = "0.2.2"
