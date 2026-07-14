@@ -45,10 +45,14 @@ pub trait SchurReal:
     /// `dst -= C_a * Z_b` for a tile shape with no unrolled kernel (see
     /// [`FIXED_SHAPES`]). nano-gemm takes the widths at run time, so it covers every
     /// shape, and on the shapes it is asked for it is up to 4x faster than the plain
-    /// loop it replaces, and never slower (`--example gemmbench`). It does NOT beat
-    /// the unrolled kernels, which is why those still take the shapes they cover:
-    /// nano-gemm reaches its microkernel through a function pointer, and at these
-    /// sizes that indirect call costs more than the arithmetic it dispatches.
+    /// loop it replaces (`--example gemmbench`). It does NOT beat the unrolled
+    /// kernels, which is why those still take the shapes they cover: nano-gemm
+    /// reaches its microkernel through a function pointer, and at these sizes that
+    /// indirect call costs more than the arithmetic it dispatches.
+    ///
+    /// A transposed `C_a` is transposed here, into a stack buffer, rather than handed
+    /// to nano-gemm as a strided lhs -- see the body for why that matters, and
+    /// `TRANS_PACK_MAX` for the size at which it stops being worth it.
     ///
     /// The plan is built per call and NOT cached. It depends only on the shape, so
     /// caching it looks obvious -- but a plan is four lookups into a const
@@ -68,6 +72,13 @@ pub trait SchurReal:
         wb: usize,
     );
 }
+
+/// How big a transposed `C_a` tile [`SchurReal::gemm_sub_nano`] will transpose into
+/// a stack buffer rather than hand to nano-gemm as a strided lhs. 12x12 -- one
+/// dimension past the widest entity anything here builds (a 9-dof BAL camera), and
+/// 1152 bytes of f64, so the buffer is a couple of cache lines and not a stack
+/// problem.
+const TRANS_PACK_MAX: usize = 12 * 12;
 
 /// The [`SchurReal`] impl for one scalar. nano-gemm's constructors are inherent
 /// methods on the concrete scalar, not a trait, so the impl is generated per type.
@@ -98,21 +109,49 @@ macro_rules! impl_schur_real {
                 assert_eq!(ca.len(), wa * we, "C_a is not the wa x we tile");
                 assert_eq!(zb.len(), we * wb, "Z_b is not the we x wb tile");
 
-                // The lhs is C_a (wa x we). Stored directly it is column-major;
-                // stored transposed the tile holds C_a^T (we x wa), so C_a[i, k]
-                // is at ca[k + i * we] -- a stride swap, not a copy.
-                let (lhs_rs, lhs_cs) = if trans {
-                    (we as isize, 1isize)
+                // The lhs is C_a (wa x we). Stored directly it is column-major and
+                // nano-gemm reads it in place. Stored transposed the tile holds
+                // C_a^T (we x wa), so C_a[i, k] is at ca[k + i * we]: expressing
+                // that as a row stride of `we` is correct, and it is a trap.
+                // nano-gemm answers ANY lhs with a row stride other than 1 by
+                // packing it -- `copy_millikernel` declares two 64 KB stack buffers
+                // and copies into them. That cost is flat, so on a small tile it is
+                // all there is: on x86 f64 it is ~60 ns whatever the widths, which
+                // is more than the whole GEMM. So transpose it here instead, into a
+                // buffer that fits in a cache line or two, and hand nano-gemm a
+                // column-major lhs it can read in place.
+                //
+                // Above the cap the strided plan stands: packing is O(wa * we)
+                // against O(wa * we * wb) of arithmetic, so a flat cost stops
+                // mattering once the tile is big enough to amortize it.
+                // MaybeUninit, not [0.0; TRANS_PACK_MAX]: zeroing the whole buffer
+                // is 1152 bytes of memset on every call, which measured as a flat
+                // ~64 ns -- worse than the packing it was meant to avoid. Uninit
+                // costs nothing; it is stack space and no instructions.
+                let mut packed = [const { core::mem::MaybeUninit::<$t>::uninit() }; TRANS_PACK_MAX];
+                let pack = trans && wa * we <= TRANS_PACK_MAX;
+                if pack {
+                    for i in 0..wa {
+                        for k in 0..we {
+                            packed[i + k * wa].write(ca[k + i * we]);
+                        }
+                    }
+                }
+
+                let (lhs, lhs_rs, lhs_cs): (*const $t, isize, isize) = if !trans {
+                    (ca.as_ptr(), 1, wa as isize)
+                } else if pack {
+                    (packed.as_ptr().cast::<$t>(), 1, wa as isize)
                 } else {
-                    (1isize, wa as isize)
+                    (ca.as_ptr(), we as isize, 1)
                 };
 
-                // dst is always column-major; the lhs only when untransposed, so the
-                // transposed case needs the general-stride plan.
-                let plan = if trans {
-                    nano_gemm::Plan::<$t>::$strided(wa, wb, we)
-                } else {
+                // dst is always column-major, and so is the lhs unless it is an
+                // oversized transposed tile -- only that case needs general strides.
+                let plan = if lhs_rs == 1 {
                     nano_gemm::Plan::<$t>::$colmajor(wa, wb, we)
+                } else {
+                    nano_gemm::Plan::<$t>::$strided(wa, wb, we)
                 };
 
                 // SAFETY: nano-gemm requires (a) the plan's (m, n, k) to equal the
@@ -123,18 +162,29 @@ macro_rules! impl_schur_real {
                 // (a) The plan is built two lines up from the same wa, wb, we, with
                 //     m = wa, n = wb, k = we in both places. It cannot disagree.
                 // (b) The `colmajor` constructor pins dst and lhs to column-major
-                //     (rs = 1, cs = nrows), which is what is passed: dst (1, wa),
-                //     lhs (1, wa). The `strided` constructor pins nothing, and it is
-                //     the one used for the transposed lhs.
-                // (c) The assertions above fix the three lengths. The largest offset
-                //     touched is then, for each buffer:
+                //     (rs = 1, cs = nrows), and it is chosen exactly when lhs_rs = 1,
+                //     which is what is then passed: dst (1, wa), lhs (1, wa). The
+                //     `strided` constructor pins nothing, and it takes the only case
+                //     that is not column-major, the oversized transposed tile.
+                // (c) The assertions above fix the lengths of dst, ca and zb. The
+                //     largest offset touched is then:
                 //       dst: 1*(wa-1) + wa*(wb-1)       = wa*wb - 1 < dst.len()
                 //       zb : 1*(we-1) + we*(wb-1)       = we*wb - 1 < zb.len()
-                //       ca (direct):     1*(wa-1) + wa*(we-1) = wa*we - 1 < ca.len()
-                //       ca (transposed): we*(wa-1) + 1*(we-1) = wa*we - 1 < ca.len()
-                //     so every access is within the slice it came from, in both
-                //     orientations. All three pointers are derived from live slices,
-                //     and dst is a &mut so it does not alias ca or zb.
+                //       lhs (rs=1, cs=wa):  1*(wa-1) + wa*(we-1) = wa*we - 1
+                //       lhs (rs=we, cs=1): we*(wa-1) +  1*(we-1) = wa*we - 1
+                //     `lhs` points at either ca, which the assertion fixes at wa * we
+                //     long, or at `packed`, which is TRANS_PACK_MAX long and is only
+                //     used when wa * we <= TRANS_PACK_MAX. Either way the reads land
+                //     inside it.
+                // (d) Every element read from `packed` is initialized. With rs = 1
+                //     and cs = wa, nano-gemm reads exactly the offsets
+                //     { i + k*wa : i < wa, k < we }, and the pack loop writes exactly
+                //     that set. Nothing outside it is read, so the untouched tail of
+                //     the buffer stays uninit and unobserved.
+                //
+                // All three pointers are derived from live locals, and dst is a &mut
+                // so it does not alias lhs or zb -- `packed` is a fresh local, so it
+                // cannot alias anything.
                 //
                 // nano-gemm computes dst = alpha*dst + beta*(lhs*rhs); ours is
                 // dst -= C_a * Z_b, so alpha = 1 and beta = -1.
@@ -146,7 +196,7 @@ macro_rules! impl_schur_real {
                         dst.as_mut_ptr(),
                         1,
                         wa as isize,
-                        ca.as_ptr(),
+                        lhs,
                         lhs_rs,
                         lhs_cs,
                         zb.as_ptr(),
@@ -1348,11 +1398,26 @@ mod tests {
     fn fixed_shape_kernels_match_the_generic_loop() {
         // Every shape up to 9x9x9, not just the listed ones: an unrolled kernel
         // with a wrong arm and the nano-gemm fallback with wrong strides are both
-        // invisible until someone checks the values. The fallback carries the
-        // transposed lhs as a stride swap rather than a copy, which is exactly the
-        // kind of thing that is right for square tiles and wrong for the rest.
+        // invisible until someone checks the values. A transposed lhs is where that
+        // bites -- it is the kind of thing that is right for square tiles and wrong
+        // for the rest.
+        //
+        // The tail crosses TRANS_PACK_MAX. A transposed tile at or under the cap is
+        // transposed into a stack buffer and passed column-major; over the cap it
+        // stays put and is passed with a row stride. Two code paths, one of which
+        // the 9x9x9 sweep never reaches (81 < 144), so the boundary is walked here:
+        // 143 and 144 pack, 145 and up do not.
         let shapes: Vec<(usize, usize, usize)> = (1..=9)
             .flat_map(|wa| (1..=9).flat_map(move |we| (1..=9).map(move |wb| (wa, we, wb))))
+            .chain([
+                (12, 12, 3), // 144: the cap exactly, still packed
+                (11, 13, 3), // 143: just under
+                (13, 12, 3), // 156: just over, strided
+                (12, 13, 2), // 156: just over the other way
+                (16, 16, 4), // 256: well over
+                (20, 3, 5),  // 60: wide but under the cap
+                (3, 20, 5),  // 60: tall but under the cap
+            ])
             .collect();
         for (wa, we, wb) in shapes {
             for trans in [false, true] {

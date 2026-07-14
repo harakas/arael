@@ -23,17 +23,24 @@
 //! ```
 //!
 //! On x86, nano-gemm picks AVX2 by itself; its AVX-512 microkernels are behind
-//! a feature, and that is where its published numbers come from:
+//! the `x86-v4` feature:
 //!
 //! ```text
 //! RUSTFLAGS="-C target-cpu=native" \
 //!     cargo run --release -p arael-faer --features x86-v4 --example gemmbench
 //! ```
 //!
+//! On the one x86 machine measured so far that feature made things WORSE -- see
+//! the note on it in Cargo.toml -- so run both and compare rather than assuming
+//! the wider kernel is the faster one. The last line of output says which SIMD
+//! path was actually taken, which is the only way to tell the two runs apart.
+//!
 //! The interesting column is `nano vs fixed`: above 1.0 the unrolled kernel
 //! wins and the fallback should stay a fallback; below 1.0 on the hot shapes
 //! ((6,3,6) for SLAM, (9,3,9) for bundle adjustment) nano-gemm would be worth
-//! taking over the whole path on that machine.
+//! taking over the whole path on that machine. Check BOTH orientations before
+//! concluding anything: the reduction uses each, and nano-gemm is much weaker on
+//! a transposed lhs, so a shape it wins direct can still lose overall.
 
 use std::time::Instant;
 
@@ -53,6 +60,17 @@ const SHAPES: &[(usize, usize, usize, &str)] = &[
     (5, 3, 7, "no fixed kernel"),
 ];
 
+/// Mirrors `schur::TRANS_PACK_MAX`. A transposed tile at or under this many
+/// elements is transposed into a stack buffer and handed to nano-gemm column-major;
+/// over it, it is passed with a row stride instead.
+const TRANS_PACK_MAX: usize = 12 * 12;
+
+/// Will this call hand nano-gemm a lhs whose row stride is not 1? That is the only
+/// thing that decides which plan -- and which millikernel -- it gets.
+fn strided_lhs(trans: bool, wa: usize, we: usize) -> bool {
+    trans && wa * we > TRANS_PACK_MAX
+}
+
 /// The scalar: arael solves in both, and the SIMD width -- so the verdict --
 /// differs between them.
 trait Real: Copy + std::ops::Add<Output = Self> + std::ops::Sub<Output = Self> + std::ops::Mul<Output = Self> {
@@ -61,8 +79,9 @@ trait Real: Copy + std::ops::Add<Output = Self> + std::ops::Sub<Output = Self> +
     const NEG_ONE: Self;
     fn of(x: f64) -> Self;
     fn abs_diff(self, other: Self) -> f64;
-    /// dst column-major always; lhs column-major only when untransposed.
-    fn plan(m: usize, n: usize, k: usize, trans: bool) -> nano_gemm::Plan<Self>
+    /// dst is column-major always. So is the lhs, unless it is an oversized
+    /// transposed tile -- only then is the general-stride plan needed.
+    fn plan(m: usize, n: usize, k: usize, strided: bool) -> nano_gemm::Plan<Self>
     where
         Self: Sized;
 }
@@ -77,8 +96,8 @@ impl Real for f64 {
     fn abs_diff(self, o: Self) -> f64 {
         (self - o).abs()
     }
-    fn plan(m: usize, n: usize, k: usize, trans: bool) -> nano_gemm::Plan<Self> {
-        if trans {
+    fn plan(m: usize, n: usize, k: usize, strided: bool) -> nano_gemm::Plan<Self> {
+        if strided {
             nano_gemm::Plan::<f64>::new_f64(m, n, k)
         } else {
             nano_gemm::Plan::<f64>::new_colmajor_lhs_and_dst_f64(m, n, k)
@@ -96,8 +115,8 @@ impl Real for f32 {
     fn abs_diff(self, o: Self) -> f64 {
         (self - o).abs() as f64
     }
-    fn plan(m: usize, n: usize, k: usize, trans: bool) -> nano_gemm::Plan<Self> {
-        if trans {
+    fn plan(m: usize, n: usize, k: usize, strided: bool) -> nano_gemm::Plan<Self> {
+        if strided {
             nano_gemm::Plan::<f32>::new_f32(m, n, k)
         } else {
             nano_gemm::Plan::<f32>::new_colmajor_lhs_and_dst_f32(m, n, k)
@@ -174,7 +193,13 @@ fn runtime<T: Real>(dst: &mut [T], ca: &[T], trans: bool, wa: usize, we: usize, 
 }
 
 /// nano-gemm: `dst = alpha*dst + beta*(lhs*rhs)`, so ours is alpha=1, beta=-1.
-/// A transposed lhs is a stride swap, not a copy.
+///
+/// Copied from `SchurReal::gemm_sub_nano`, packing and all. A transposed lhs COULD
+/// be expressed as a stride swap -- it is the same matrix read differently, no copy
+/// needed -- but nano-gemm answers any lhs with a row stride other than 1 by packing
+/// it into two 64 KB stack buffers, a cost that is flat and therefore ruinous on a
+/// small tile. So the transpose is done here, into a buffer the size of the tile,
+/// and nano-gemm gets a column-major lhs it can read in place.
 #[inline]
 fn nano<T: Real>(
     plan: &nano_gemm::Plan<T>,
@@ -186,12 +211,31 @@ fn nano<T: Real>(
     zb: &[T],
     wb: usize,
 ) {
-    let (lhs_rs, lhs_cs) = if trans { (we as isize, 1) } else { (1, wa as isize) };
+    // MaybeUninit, not [T::ZERO; TRANS_PACK_MAX]: zeroing the whole buffer is 1152
+    // bytes of memset per call, which measured as a flat ~64 ns -- worse than the
+    // packing it exists to avoid. The library makes the same choice for the same
+    // reason, and this has to match it or the benchmark is measuring fiction.
+    let mut packed = [const { std::mem::MaybeUninit::<T>::uninit() }; TRANS_PACK_MAX];
+    let pack = trans && wa * we <= TRANS_PACK_MAX;
+    if pack {
+        for i in 0..wa {
+            for k in 0..we {
+                packed[i + k * wa].write(ca[k + i * we]);
+            }
+        }
+    }
+    let (lhs, lhs_rs, lhs_cs): (*const T, isize, isize) = if !trans {
+        (ca.as_ptr(), 1, wa as isize)
+    } else if pack {
+        (packed.as_ptr().cast::<T>(), 1, wa as isize)
+    } else {
+        (ca.as_ptr(), we as isize, 1)
+    };
     unsafe {
         plan.execute_unchecked(
             wa, wb, we,
             dst.as_mut_ptr(), 1, wa as isize,
-            ca.as_ptr(), lhs_rs, lhs_cs,
+            lhs, lhs_rs, lhs_cs,
             zb.as_ptr(), 1, we as isize,
             T::ONE, T::NEG_ONE,
             false, false,
@@ -235,7 +279,7 @@ fn bench<T: Real + std::fmt::Debug>(scalar: &str, trans: bool) {
         );
         // Built once per shape: the reduction hits the same few shapes thousands
         // of times, so this is the fair comparison (and the library caches them).
-        let plan = T::plan(wa, wb, we, trans);
+        let plan = T::plan(wa, wb, we, strided_lhs(trans, wa, we));
 
         macro_rules! call_fixed {
             ($dst:expr) => {

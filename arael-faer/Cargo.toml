@@ -12,8 +12,14 @@ categories = ["mathematics", "science", "algorithms"]
 
 [features]
 # nano-gemm's AVX-512 microkernels (x86 only). Without it nano-gemm picks AVX2 by
-# itself; this is what its published numbers are measured with. `--example
-# gemmbench` reports which path it actually took.
+# itself. `--example gemmbench` reports which path it actually took.
+#
+# On the one x86 machine measured so far this HURTS: nano-gemm takes its AVX-512
+# kernel only above a width threshold (m > 4 for f64, m > 8 for f32), and every
+# tile shape above that threshold got 1.2-2.7x slower, while every shape below it
+# was unchanged. At tile widths of 3 to 12 a 512-bit kernel is the wrong shape of
+# hammer. The feature stays because that is one machine and one nano-gemm version:
+# measure on yours with `gemmbench` before believing either result.
 x86-v4 = ["nano-gemm/x86-v4"]
 
 [dependencies]
