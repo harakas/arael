@@ -147,6 +147,7 @@ LmConfig {
     patience:        3,      // this many consecutive small steps → stop
     initial_lambda:  1e-4,   // starting LM damping
     cost_threshold:  0.0,    // stop when cost ≤ this (0.0 disables)
+    time_limit:      None,   // wall-clock budget; None = no limit
     verbose:         false,  // print per-iteration trace to stderr
     gather_timing:   false,  // collect per-phase timing into LmResult::timing
 }
@@ -161,6 +162,7 @@ LmConfig {
 | `patience` | `3` | consecutive small steps before termination. Prevents premature termination from one lucky step |
 | `initial_lambda` | `1e-4` | starting damping. Small ≈ Gauss-Newton (fast, may overshoot), large ≈ gradient descent (slow, stable) |
 | `cost_threshold` | `0.0` | terminate immediately when cost drops to or below this. Useful for feasibility-style problems with a known target |
+| `time_limit` | `None` | `Option<Duration>` wall-clock budget for the whole solve. **Overrides `min_iters`** -- a spent budget stops the solve wherever it is, returning the last accepted step (`LmStatus::TimeLimit`). Checked before each assembly and each damped attempt, so the overrun is bounded by one linear solve, not one iteration. It cannot preempt a single factorization. `None` = no limit, and the clock is never read |
 | `verbose` | `false` | per-iteration line on stderr. **Turn on first whenever debugging** |
 | `gather_timing` | `false` | gather per-phase wall-clock timing into `LmResult::timing` (`Some` when on, `None` when off). Off = the clock is never read |
 
@@ -411,6 +413,8 @@ pub enum LmStatus {
     Converged,             // patience small steps / noise floor / zero start cost
     CostThreshold,         // reached LmConfig::cost_threshold
     MaxIterations,         // hit LmConfig::max_iters
+    TimeLimit,             // spent LmConfig::time_limit
+    DriverTerminated,      // LambdaDriver::accepted returned None -- step KEPT
     LambdaCeiling,         // driver gave up: lambda past its ceiling
     RetryBudgetExhausted,  // 20 inner retries with no accepted step
     DegenerateDiagonal { param: usize },  // non-positive Hessian diagonal
@@ -419,8 +423,10 @@ pub enum LmStatus {
 
 `LambdaCeiling` and `RetryBudgetExhausted` both mean "no step could be
 accepted," but distinguish the driver hitting its damping ceiling from the
-hard inner-retry cap. `DegenerateDiagonal` returns the best parameters found
-so far rather than panicking. `LmResult` derives `Clone`/`Debug`.
+hard inner-retry cap. `DriverTerminated` is the opposite case: the driver
+stopped the solve on a step it *liked*, and that step is kept. `TimeLimit`,
+`DriverTerminated` and `DegenerateDiagonal` all return the best parameters
+found so far rather than panicking. `LmResult` derives `Clone`/`Debug`.
 
 ## Profiling a solve -- `LmTiming`
 
@@ -534,9 +540,23 @@ be chosen from the problem's actual scale.
   canonical case; see benchmarks/bal).
 
 Custom drivers implement the four-method trait (`start`, `accepted`,
-`rejected`, `factorization_failed` -- the latter also receives the
-current `LambdaState`); returning `None` from `rejected`
-abandons the solve like an exhausted retry budget. A driver is a
-`#[derive(Clone)]` type; attach it to the config with
+`rejected`, `factorization_failed` -- the latter two also receive the
+current `LambdaState`). All three step hooks return `Option<T>`, and
+**`None` always means "stop the solve"**. Which status comes back says
+whether a step survived:
+
+| Hook returns `None` | Status | The step |
+|---|---|---|
+| `accepted` | `DriverTerminated` | **kept** -- it is already in the parameters and the cost |
+| `rejected` | `LambdaCeiling` | none was produced; the last accepted one comes back |
+| `factorization_failed` | `LambdaCeiling` | none was produced; the last accepted one comes back |
+
+`accepted -> None` is the hook for a stopping rule the config cannot
+express: a step-norm test (`step.delta`), a gradient-norm test
+(`step.grad`), an external deadline, a good-enough cost. It is the only
+way to stop on a *good* step, and it beats `min_iters` -- the driver's
+rule wins over the config's. The built-in schedules never use it.
+
+A driver is a `#[derive(Clone)]` type; attach it to the config with
 `LmConfig::with_driver(...)` and every solve entry point (`lm_solve`,
 `solve_sparse_faer`, ...) picks it up from `config.driver`.

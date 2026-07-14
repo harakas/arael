@@ -153,6 +153,25 @@ pub struct LmConfig<T: Float> {
     /// to disable (only terminate via precision/patience). Useful when you
     /// know the target cost (e.g. constraint satisfaction where 0 is perfect).
     pub cost_threshold: T,
+    /// Wall-clock budget for the whole solve. `None` (the default) means no
+    /// limit, and the solver never reads the clock for it.
+    ///
+    /// This is a hard ceiling and it OVERRIDES `min_iters`: when the budget
+    /// is spent the solve stops wherever it is, with
+    /// [`LmStatus::TimeLimit`]. The parameters returned are the last
+    /// ACCEPTED step -- a rejected trial never reaches `LmResult::x` -- so
+    /// the result is always a usable answer, just not a converged one.
+    ///
+    /// The budget is checked before each assembly and before each damped
+    /// attempt, so the overrun is bounded by one linear solve, not by one
+    /// full iteration. It cannot preempt a single factorization: on a
+    /// problem whose first factorization already exceeds the budget, the
+    /// solve returns after it, having done one assembly and no steps.
+    ///
+    /// For a fixed-rate system (`Some(Duration::from_millis(200))` on a 4 Hz
+    /// loop) this is the difference between a late answer and a missed
+    /// frame.
+    pub time_limit: Option<Duration>,
     /// Minimum damping lambda: LM never decreases lambda below this after
     /// an accepted step (clamped from below to machine epsilon). The
     /// default 1e-12 effectively means "no floor" for well-posed problems.
@@ -193,6 +212,7 @@ impl<T: Float> Default for LmConfig<T> {
             patience: 3,
             initial_lambda: T::from(1e-4).unwrap(),
             cost_threshold: T::zero(),
+            time_limit: None,
             lambda_floor: default_lambda_floor::<T>(),
             verbose: false,
             driver: Box::new(DefaultLambdaDriver::default()),
@@ -666,6 +686,17 @@ pub enum LmStatus {
     /// The damping driver gave up -- lambda would pass its ceiling and no
     /// step could be accepted ([`LambdaDriver::rejected`] returned `None`).
     LambdaCeiling,
+    /// The damping driver stopped the solve on an ACCEPTED step
+    /// ([`LambdaDriver::accepted`] returned `None`). The step is kept: the
+    /// returned parameters and cost include it. This is the driver's own
+    /// stopping rule -- a step-norm test, an external deadline, a
+    /// good-enough check -- not a failure.
+    DriverTerminated,
+    /// Ran out of wall-clock budget ([`LmConfig::time_limit`]). The solve
+    /// returned the best parameters found so far, which is the last
+    /// ACCEPTED step -- a rejected trial never reaches the returned `x`.
+    /// Overrides `min_iters`: a budget is a budget.
+    TimeLimit,
     /// 20 consecutive damped attempts failed to produce a cost-decreasing
     /// step (the hard inner-retry budget, distinct from `LambdaCeiling`).
     RetryBudgetExhausted,
@@ -1201,17 +1232,32 @@ pub trait LambdaDriver<T: Float>: LambdaDriverClone<T> {
     /// returns the initial lambda.
     fn start(&mut self, config: &LmConfig<T>, state: &LambdaState<T>) -> T;
     /// The step was accepted (cost decreased); returns the lambda for the
-    /// next iteration.
-    fn accepted(&mut self, step: &LambdaStep<T>) -> T;
+    /// next iteration, or `None` to stop the solve here.
+    ///
+    /// The accepted step is KEPT when you return `None`: it is already
+    /// folded into the parameters and the cost, and the solve ends with
+    /// [`LmStatus::DriverTerminated`]. This is the hook for a stopping rule
+    /// the config cannot express -- a step-norm test (`step.delta`), a
+    /// gradient-norm test (`step.grad`), an external deadline, a
+    /// good-enough cost -- and it is the only way to stop on a GOOD step.
+    /// (`rejected` returning `None` stops on a bad one.)
+    fn accepted(&mut self, step: &LambdaStep<T>) -> Option<T>;
     /// The step was rejected (cost did not decrease); returns the lambda
     /// for the retry, or `None` to abandon the solve (the schedule sees
     /// no viable damping left -- the loop terminates as if its retry
-    /// budget were exhausted).
+    /// budget were exhausted, with [`LmStatus::LambdaCeiling`]).
     fn rejected(&mut self, step: &LambdaStep<T>) -> Option<T>;
     /// The damped normal equations could not be factorized at `lambda`
-    /// (not positive definite); returns the lambda for the retry.
-    fn factorization_failed(&mut self, lambda: T, state: &LambdaState<T>) -> T;
+    /// (not positive definite); returns the lambda for the retry, or `None`
+    /// to abandon the solve ([`LmStatus::LambdaCeiling`], as for `rejected`
+    /// -- no step was produced, so the last accepted one is returned).
+    fn factorization_failed(&mut self, lambda: T, state: &LambdaState<T>) -> Option<T>;
 }
+
+// `None` means "stop" from all three hooks. Which status you get says whether a
+// step survived: `accepted` -> DriverTerminated and the step is kept;
+// `rejected` / `factorization_failed` -> LambdaCeiling and the last accepted
+// step is what comes back.
 
 /// Clone helper that lets the boxed driver an [`LmConfig`] carries be
 /// cloned (each solve works on a fresh clone, leaving the shared config
@@ -1262,15 +1308,19 @@ impl<T: Float> LambdaDriver<T> for DefaultLambdaDriver<T> {
         self.floor = config.lambda_floor.max(T::epsilon());
         config.initial_lambda.max(self.floor)
     }
-    fn accepted(&mut self, step: &LambdaStep<T>) -> T {
-        lambda_after_accept(step.lambda, self.down, self.floor)
+    fn accepted(&mut self, step: &LambdaStep<T>) -> Option<T> {
+        // Never stops on a good step -- the schedule has no opinion about
+        // when the solve is done, only about lambda.
+        Some(lambda_after_accept(step.lambda, self.down, self.floor))
     }
     fn rejected(&mut self, step: &LambdaStep<T>) -> Option<T> {
         let next = step.lambda * self.up;
         if next > self.ceiling { None } else { Some(next) }
     }
-    fn factorization_failed(&mut self, lambda: T, _state: &LambdaState<T>) -> T {
-        lambda * self.up
+    fn factorization_failed(&mut self, lambda: T, _state: &LambdaState<T>) -> Option<T> {
+        // The fixed schedule escalates without limit here; only `rejected`
+        // consults the ceiling.
+        Some(lambda * self.up)
     }
 }
 
@@ -1324,7 +1374,7 @@ impl<T: Float> LambdaDriver<T> for NielsenLambdaDriver<T> {
         self.nu = T::from(2.0).unwrap();
         config.initial_lambda.max(self.floor)
     }
-    fn accepted(&mut self, step: &LambdaStep<T>) -> T {
+    fn accepted(&mut self, step: &LambdaStep<T>) -> Option<T> {
         self.nu = T::from(2.0).unwrap();
         // The linear model's predicted cost reduction. grad and the
         // Hessian diagonal are the true derivatives of the cost (the
@@ -1348,14 +1398,15 @@ impl<T: Float> LambdaDriver<T> for NielsenLambdaDriver<T> {
         };
         let x = T::from(2.0).unwrap() * rho - T::one();
         let factor = (T::one() - x * x * x).max(T::from(1.0 / 3.0).unwrap());
-        (step.lambda * factor).max(self.floor)
+        // Never stops on a good step, like the default schedule.
+        Some((step.lambda * factor).max(self.floor))
     }
     fn rejected(&mut self, step: &LambdaStep<T>) -> Option<T> {
         let next = self.escalate(step.lambda);
         if next > self.ceiling { None } else { Some(next) }
     }
-    fn factorization_failed(&mut self, lambda: T, _state: &LambdaState<T>) -> T {
-        self.escalate(lambda)
+    fn factorization_failed(&mut self, lambda: T, _state: &LambdaState<T>) -> Option<T> {
+        Some(self.escalate(lambda))
     }
 }
 
@@ -1413,7 +1464,10 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
     let mut iter = 0usize;
     let mut accepted = 0usize;
     let mut first = true;
-    let mut timer = Instant::now();
+    // Only read the clock when the verbose trace will actually print it. The
+    // wasm build has no working clock, so an unconditional Instant::now() here
+    // would fault a solve that never asked for timing.
+    let mut timer = config.verbose.then(Instant::now);
 
     // Per-phase timing. Only read the clock when the caller asked for it
     // (config.gather_timing) -- otherwise `gather.then(Instant::now)` is None
@@ -1422,7 +1476,26 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
     let mut timing = LmTiming::default();
     let solve_start = gather.then(Instant::now);
 
+    // Wall-clock budget (config.time_limit). Same discipline as the timing
+    // above: the clock is only read when a limit was actually set, so a solve
+    // without one makes no clock calls at all.
+    let budget = config.time_limit;
+    let budget_clock = budget.map(|_| Instant::now());
+    let over_budget = |clock: Option<Instant>| match (clock, budget) {
+        (Some(c), Some(limit)) => c.elapsed() >= limit,
+        _ => false,
+    };
+
     while iter < config.max_iters && !done {
+        // Budget check BEFORE the assembly, so a spent budget does not buy one
+        // more Hessian. Skipped while `first`, because the first assembly is
+        // what produces start_cost -- without it the result would report a
+        // start cost of zero and a solve that never looked at the problem.
+        if !first && over_budget(budget_clock) {
+            status = LmStatus::TimeLimit;
+            break;
+        }
+
         let t_asm = gather.then(Instant::now);
         let computed_cost = solver.compute(problem, &cur_x, &mut grad, &mut matrix);
         if let Some(t) = t_asm {
@@ -1483,6 +1556,16 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
         const INNER_LOOPS: usize = 20;
 
         while inner < INNER_LOOPS && iter < config.max_iters {
+            // And again before each damped attempt: a long run of rejected
+            // retries is exactly the case a deadline exists to cut short, and
+            // each retry is another factorization. Bounds the overrun at one
+            // linear solve rather than one whole iteration.
+            if over_budget(budget_clock) {
+                status = LmStatus::TimeLimit;
+                done = true;
+                break;
+            }
+
             iter += 1;
 
             let t_ls = gather.then(Instant::now);
@@ -1500,8 +1583,8 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
                     cost: end_cost, grad: &grad, diagonal: &diagonal,
                 });
                 if config.verbose {
-                    let step_us = timer.elapsed().as_micros();
-                    timer = Instant::now();
+                    let step_us = timer.map_or(0, |t| t.elapsed().as_micros());
+                    timer = Some(Instant::now());
                     let n_nan_g = grad.iter().filter(|v| !v.is_finite()).count();
                     let n_nan_d = diagonal.iter().filter(|v| !v.is_finite()).count();
                     let n_nan_x = cur_x.iter().filter(|v| !v.is_finite()).count();
@@ -1512,10 +1595,20 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
                     info!("{}/{}: Cholesky failed (damped matrix not positive-definite), lambda={} -> {} (step={}) [non-finite: grad={} diag={} x={} matrix={}]",
                         iter, inner,
                         G(lambda.to_f64().unwrap()),
-                        G(next_lambda.to_f64().unwrap()),
+                        match next_lambda {
+                            Some(l) => G(l.to_f64().unwrap()).to_string(),
+                            None => "give up".to_string(),
+                        },
                         step_us,
                         n_nan_g, n_nan_d, n_nan_x, n_nan_m);
                 }
+                // The driver has no damping left to try. No step was produced,
+                // so cur_x still holds the last accepted one.
+                let Some(next_lambda) = next_lambda else {
+                    status = LmStatus::LambdaCeiling;
+                    done = true;
+                    break;
+                };
                 lambda = next_lambda;
                 inner += 1;
                 continue;
@@ -1535,8 +1628,8 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
             }
 
             if config.verbose {
-                let step_us = timer.elapsed().as_micros();
-                timer = Instant::now();
+                let step_us = timer.map_or(0, |t| t.elapsed().as_micros());
+                timer = Some(Instant::now());
                 info!("{}/{}: {}->{} / {}, lambda={} (step={})",
                     iter, inner,
                     G(end_cost.to_f64().unwrap()), G(new_cost.to_f64().unwrap()),
@@ -1550,7 +1643,7 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
 
             if new_cost.is_finite() && new_cost < end_cost {
                 accepted += 1;
-                lambda = driver.accepted(&LambdaStep {
+                let next_lambda = driver.accepted(&LambdaStep {
                     lambda, cost: end_cost, new_cost,
                     grad: &grad, diagonal: &diagonal, delta: &delta,
                 });
@@ -1563,6 +1656,18 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
                     timing.advance += dt;
                     timing.advance_count += 1;
                 }
+
+                // The driver stopped us on a GOOD step. Keep it: cur_x and
+                // advance() are already done above, so all that is left is to
+                // commit the cost. Deliberately ahead of the threshold and
+                // patience tests -- the driver's rule wins over the config's.
+                let Some(next_lambda) = next_lambda else {
+                    end_cost = new_cost;
+                    status = LmStatus::DriverTerminated;
+                    done = true;
+                    break;
+                };
+                lambda = next_lambda;
 
                 // Cost reached target threshold -- terminate (respects min_iters)
                 if iter >= config.min_iters && new_cost <= config.cost_threshold {
@@ -1610,10 +1715,12 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
             }) {
                 Some(next) => lambda = next,
                 None => {
-                    // The driver gave up (lambda past its ceiling):
-                    // terminate like an exhausted retry budget.
+                    // The driver gave up (lambda past its ceiling). Exit via
+                    // `done`, not by forcing `inner` to the cap: the cap's
+                    // branch below would log "20 consecutive inner steps
+                    // without improvement", which is not what happened.
                     status = LmStatus::LambdaCeiling;
-                    inner = INNER_LOOPS;
+                    done = true;
                     break;
                 }
             }
@@ -2528,7 +2635,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
         } else {
             "AMD"
         };
-        let t0 = std::time::Instant::now();
+        let t0 = vb.then(Instant::now);
         let sym_ref = faer::sparse::SymbolicSparseColMatRef::new_checked(
             n, n, &self.s_col_ptr, None, &self.s_row_idx,
         );
@@ -2545,7 +2652,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
                  factorization {:.1} ms, its factor holds {} values",
                 n,
                 name,
-                t0.elapsed().as_secs_f64() * 1e3,
+                t0.map_or(0.0, |t| t.elapsed().as_secs_f64() * 1e3),
                 llt.len_val(),
             );
         }
@@ -2617,11 +2724,11 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         // detected, how the reduction was decided, and what each analysis
         // cost -- the phases that make a first iteration expensive.
         let vb = self.verbose;
-        let mut clock = std::time::Instant::now();
+        let mut clock = vb.then(Instant::now);
         let mut lap = move |on: bool| -> f64 {
-            let ms = clock.elapsed().as_secs_f64() * 1e3;
+            let ms = clock.map_or(0.0, |c| c.elapsed().as_secs_f64() * 1e3);
             if on {
-                clock = std::time::Instant::now();
+                clock = Some(Instant::now());
             }
             ms
         };
@@ -2908,16 +3015,16 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             let s_pat = schur.s.csc_pattern();
             let h_pat = hsym.csc_pattern();
             let nk = schur.s.nrows();
-            let t0 = std::time::Instant::now();
+            let t0 = vb.then(Instant::now);
             let s_ord = match &nd {
                 Some(nd) => SymmetricOrdering::Custom(nd.perm()),
                 None => ordering_for(&s_pat.0, nk, band).faer(),
             };
             let s_llt = analyze(&s_pat.0, &s_pat.1, nk, s_ord);
-            t_sym_reduced = t0.elapsed().as_secs_f64() * 1e3;
-            let t0 = std::time::Instant::now();
+            t_sym_reduced = t0.map_or(0.0, |t| t.elapsed().as_secs_f64() * 1e3);
+            let t0 = vb.then(Instant::now);
             let h_llt = analyze(&h_pat.0, &h_pat.1, n, SymmetricOrdering::Amd);
-            t_amd_full = t0.elapsed().as_secs_f64() * 1e3;
+            t_amd_full = t0.map_or(0.0, |t| t.elapsed().as_secs_f64() * 1e3);
             if let (Some(sl), Some(hl)) = (s_llt, h_llt)
                 && hl.len_val() > 0
             {
@@ -4221,17 +4328,20 @@ mod tests {
         // Perfectly modeled step (rho = 1, predicted = 1, actual = 1):
         // lambda cut by 1/3, nu reset.
         let c = ctx(8e-2);
-        let l = a.accepted(&mk(&c, 8e-2, 10.0, 9.0));
+        let l = a.accepted(&mk(&c, 8e-2, 10.0, 9.0))
+            .expect("the built-in schedule never stops on a good step");
         assert!((l - 8e-2 / 3.0).abs() < 1e-12, "l = {}", l);
         let c = ctx(l);
         assert_eq!(a.rejected(&mk(&c, l, 9.0, 9.5)), Some(l * 2.0));
         // Barely useful step (rho ~ 0): lambda raised (factor -> 2).
         let c = ctx(1e-2);
-        let l2 = a.accepted(&mk(&c, 1e-2, 10.0, 9.999999));
+        let l2 = a.accepted(&mk(&c, 1e-2, 10.0, 9.999999))
+            .expect("the built-in schedule never stops on a good step");
         assert!(l2 > 1e-2 && l2 <= 2e-2 + 1e-12, "l2 = {}", l2);
         // Floor respected on strong decreases.
         let c = ctx(1.5e-6);
-        let lf = a.accepted(&mk(&c, 1.5e-6, 10.0, 9.0));
+        let lf = a.accepted(&mk(&c, 1.5e-6, 10.0, 9.0))
+            .expect("the built-in schedule never stops on a good step");
         assert_eq!(lf, 1e-6);
         // Give up above the ceiling.
         let c = ctx(1e10);

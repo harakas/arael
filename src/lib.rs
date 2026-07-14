@@ -1023,6 +1023,12 @@
 //! `LmConfig::with_driver(NielsenLambdaDriver::default())`; every solve
 //! entry point uses `config.driver`.
 //!
+//! A driver can also stop the solve: its step hooks return `Option`, and `None`
+//! means stop -- for a rule the config cannot express, such as a step-norm test
+//! or an external deadline. From `accepted` the step is kept
+//! (`LmStatus::DriverTerminated`); from `rejected` or `factorization_failed` the
+//! last accepted one comes back (`LmStatus::LambdaCeiling`).
+//!
 //! ## Basic usage
 //!
 //! ```
@@ -1057,6 +1063,7 @@
 //! | `patience` | `3` | consecutive small steps required to terminate |
 //! | `initial_lambda` | `1e-4` | starting LM damping; small ≈ Gauss-Newton, large ≈ gradient descent |
 //! | `cost_threshold` | `0.0` | terminate immediately when cost ≤ this (`0.0` disables) |
+//! | `time_limit` | `None` | wall-clock budget for the whole solve. Overrides `min_iters` |
 //! | `verbose` | `false` | per-iteration line on stderr. **Turn on first whenever debugging** |
 //! | `gather_timing` | `false` | gather per-phase timing into `LmResult::timing` (`Some` when on, `None` when off) |
 //!
@@ -1064,6 +1071,14 @@
 //! current step is "small" (below both `abs_precision` and
 //! `rel_precision`), and the preceding `patience` steps were also
 //! small. Or on any of `iter >= max_iters` / `cost <= cost_threshold`.
+//!
+//! `time_limit` is the exception to `min_iters`: a budget is a budget, so a
+//! spent one stops the solve wherever it is (`LmStatus::TimeLimit`), returning
+//! the last accepted step. It is checked before each assembly and before each
+//! damped attempt, so the overrun is bounded by one linear solve. Set it for a
+//! fixed-rate system -- `Some(Duration::from_millis(200))` on a 4 Hz loop --
+//! where a late answer is a missed frame. When it is `None` (the default) the
+//! solver never reads the clock.
 //!
 //! ## Tuning for performance vs quality
 //!

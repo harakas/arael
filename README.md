@@ -446,8 +446,16 @@ adjustment. The driver lives on the config -- select one with
 `LmConfig::with_driver(NielsenLambdaDriver::default())`; every solve
 entry point uses `config.driver`.
 
+A driver can also stop the solve: its step hooks return `Option`, and `None`
+means stop -- for a rule the config cannot express, such as a step-norm test
+or an external deadline. From `accepted` the step is kept
+(`LmStatus::DriverTerminated`); from `rejected` or `factorization_failed` the
+last accepted one comes back (`LmStatus::LambdaCeiling`).
+
 `LmConfig` controls the solve -- convergence tolerances, iteration
-caps, initial lambda, and `verbose` (turn it on first when
+caps, initial lambda, `time_limit` (an optional wall-clock budget; it
+overrides `min_iters`, because a budget is a budget), and `verbose` (turn
+it on first when
 debugging). Defaults are a safe middle ground; production solves
 usually want `max_iters` and `rel_precision` tuned for the
 performance/quality trade-off that actually matters for the
