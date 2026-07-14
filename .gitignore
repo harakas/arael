@@ -3,3 +3,4 @@
 *.swo
 arael-sketch/dist/
 tmp/
+__pycache__
