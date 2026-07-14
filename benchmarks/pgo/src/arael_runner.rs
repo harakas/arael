@@ -210,7 +210,7 @@ impl Pipeline for Graph {
             .map(|p| PoseIn { x: p.pos.value.x, y: p.pos.value.y, th: p.th.value })
             .collect()
     }
-    fn solve(params: &[f64], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f64>)
+    fn solve(_: &Self::Input, params: &[f64], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f64>)
         -> arael::simple_lm::LmResult<f64> { solve_f64(params, m, cfg) }
 }
 
@@ -231,7 +231,7 @@ impl Pipeline for GraphF {
             })
             .collect()
     }
-    fn solve(params: &[f32], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f32>)
+    fn solve(_: &Self::Input, params: &[f32], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f32>)
         -> arael::simple_lm::LmResult<f32> { solve_f32(params, m, cfg) }
 }
 

@@ -308,7 +308,7 @@ fn skip_isam() -> bool {
 // what was run; the env var that changes each one is named in brackets.
 fn print_header(rounds: usize, only: &Option<String>) {
     let c64 = bench_harness::arael::config::<arael_runner::Graph>(&g2o::Dataset::default(), 0);
-    let nielsen = bench_harness::arael::nielsen();
+    let nielsen = bench_harness::arael::nielsen::<arael_runner::Graph>();
     let ordering = arael_runner::ordering();
 
     println!("=== pgo-bench configuration ===");

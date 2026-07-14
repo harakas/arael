@@ -587,7 +587,7 @@ impl bench_harness::arael::Model for Path {
     fn serialize(&mut self, out: &mut Vec<f64>) { self.serialize64(out); }
     fn deserialize(&mut self, x: &[f64]) { self.deserialize64(x); }
     fn solution(&self) -> Solution { extract(self) }
-    fn solve(params: &[f64], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f64>)
+    fn solve(_: &Self::Input, params: &[f64], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f64>)
         -> arael::simple_lm::LmResult<f64> { solve64(params, m, cfg) }
 }
 
@@ -602,7 +602,7 @@ impl bench_harness::arael::Model for PathF {
     fn serialize(&mut self, out: &mut Vec<f32>) { self.serialize32(out); }
     fn deserialize(&mut self, x: &[f32]) { self.deserialize32(x); }
     fn solution(&self) -> Solution { extract_f32(self) }
-    fn solve(params: &[f32], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f32>)
+    fn solve(_: &Self::Input, params: &[f32], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f32>)
         -> arael::simple_lm::LmResult<f32> { solve32(params, m, cfg) }
 }
 

@@ -14,7 +14,9 @@ use crate::table::Row;
 pub trait Model: Clone + LmProblem<Self::Scalar> {
     type Scalar: Float;
     /// Whatever the benchmark builds its model from: a parsed dataset, a
-    /// generated scene.
+    /// generated scene. It also carries whatever else distinguishes one row from
+    /// another over the same model -- bundle adjustment runs the same camera/point
+    /// model through two different linear solvers, and that choice lives here.
     type Input;
     type Solution;
 
@@ -24,6 +26,13 @@ pub trait Model: Clone + LmProblem<Self::Scalar> {
     /// the input because the right value can depend on the problem's size.
     fn lambda0(input: &Self::Input) -> f64;
 
+    /// Whether this problem wants the gain-ratio damping driver by default. The
+    /// pose graphs do not -- they are well-initialized and every step is accepted,
+    /// so an adaptive schedule only over-damps. Bundle adjustment does: it is far
+    /// less linear, and the fixed ladder walks into damping spirals there. DRIVER
+    /// overrides either way.
+    const NIELSEN: bool = false;
+
     fn build(input: &Self::Input) -> Self;
     fn serialize(&mut self, out: &mut Vec<Self::Scalar>);
     fn deserialize(&mut self, x: &[Self::Scalar]);
@@ -31,8 +40,10 @@ pub trait Model: Clone + LmProblem<Self::Scalar> {
 
     /// The scalar picks the solver (`SparseFaer` / `SparseFaerF32`, or a band
     /// solver), which is the one thing a generic function cannot choose for
-    /// itself.
+    /// itself. It sees the input too, so a benchmark can run one model through
+    /// several linear solvers and get a row for each.
     fn solve(
+        input: &Self::Input,
         params: &[Self::Scalar],
         model: &mut Self,
         cfg: &LmConfig<Self::Scalar>,
@@ -51,12 +62,18 @@ pub fn lambda0<M: Model>(input: &M::Input) -> f64 {
         .unwrap_or_else(|| M::lambda0(input))
 }
 
-/// DRIVER=nielsen swaps the fixed damping schedule for the gain-ratio driver:
-/// lambda then follows how well the quadratic model predicted the step actually
-/// taken, instead of a fixed up/down ladder. It changes the iteration count, not
-/// the cost per iteration.
-pub fn nielsen() -> bool {
-    std::env::var("DRIVER").as_deref() == Ok("nielsen")
+/// Which damping driver this run uses. The gain-ratio (Nielsen) driver follows
+/// how well the quadratic model predicted the step actually taken; the fixed
+/// ladder walks lambda up and down by a constant factor. It changes the iteration
+/// count, not the cost per iteration.
+///
+/// DRIVER=nielsen|fixed overrides the problem's own default ([`Model::NIELSEN`]).
+pub fn nielsen<M: Model>() -> bool {
+    match std::env::var("DRIVER").as_deref() {
+        Ok("nielsen") => true,
+        Ok("fixed") => false,
+        _ => M::NIELSEN,
+    }
 }
 
 pub fn config<M: Model>(input: &M::Input, max_iters: usize) -> LmConfig<M::Scalar> {
@@ -79,7 +96,7 @@ pub fn config<M: Model>(input: &M::Input, max_iters: usize) -> LmConfig<M::Scala
         ..Default::default()
     };
     M::tune(&mut cfg);
-    if nielsen() {
+    if nielsen::<M>() {
         cfg.with_driver(::arael::simple_lm::NielsenLambdaDriver::default())
     } else {
         cfg
@@ -125,7 +142,7 @@ pub fn run<M: Model>(input: &M::Input) -> Row<M::Solution> {
         // clock starts below.
         let mut m = model.clone();
         let cfg = config::<M>(input, max_iters);
-        let (ms, r) = crate::solver::timed(|| M::solve(&params, &mut m, &cfg));
+        let (ms, r) = crate::solver::timed(|| M::solve(input, &params, &mut m, &cfg));
         print_timing(&r);
         m.deserialize(&r.x);
         crate::solver::Outcome {

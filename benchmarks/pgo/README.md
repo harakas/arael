@@ -342,7 +342,7 @@ wasted factorizations, and every number derived from it inherits that.
 
 Each dataset carries its own notes below.
 
-### M3500 (10500 parameters, information matrices applied)
+### M3500 (10500 parameters)
 | system          | total ms |  iters | ms/iter | full-iter | 1st-iter ms | final cost |
 |-----------------|---------:|-------:|--------:|----------:|------------:|-----------:|
 | arael LM f64    |     15.3 |   6(6) |    2.55 |      2.02 |         4.5 |   137.9130 |
@@ -361,7 +361,7 @@ Each dataset carries its own notes below.
 
 All 13 rows reach the common optimum, both precisions included.
 
-### city10000 (30000 parameters, information matrices applied)
+### city10000 (30000 parameters)
 | system          | total ms |  iters | ms/iter | full-iter | 1st-iter ms | final cost |
 |-----------------|---------:|-------:|--------:|----------:|------------:|-----------:|
 | arael LM f64    |     83.8 |   7(7) |   11.97 |     10.36 |        20.0 |   511.9852 |
@@ -411,7 +411,7 @@ g2o is damped at 1e-6 here, not the 1e-12 the other datasets use: at
 step and the solve retries all the way down (12 accepted of 17 attempts,
 310 ms). See the initial-damping policy.
 
-### parking-garage (3D, 9966 parameters, full 6x6 information)
+### parking-garage (3D, 9966 parameters)
 | system          | total ms |  iters | ms/iter | full-iter | 1st-iter ms | final cost |
 |-----------------|---------:|-------:|--------:|----------:|------------:|-----------:|
 | arael LM f64    |     23.1 |   4(4) |    5.78 |      4.62 |         8.9 |     1.2684 |

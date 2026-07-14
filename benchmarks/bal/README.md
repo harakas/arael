@@ -12,11 +12,12 @@ heritage), CHOLMOD on the reduced camera system, the residual
 autodiffed with g2o's bundled AD. With unit information g2o's chi2 IS
 the reference cost, asserted at the initial estimate like the others.
 
-Same methodology as [benchmarks/pgo](../pgo/README.md): one loader,
-one reference cost function evaluating every system's final
-parameters, Ceres's self-reported initial cost ASSERTED against the
-reference on every run, min-of-N interleaved timing, verified
-single-core pinning.
+It runs on the shared [benchmarks/harness](../harness) -- the same probes,
+timing rules, table and core pin as [pgo](../pgo/README.md),
+[slam](../slam/README.md) and [loc](../loc/README.md). What is local to this
+benchmark is its problem: the BAL loader, the one reference cost function every
+system's final parameters are scored by, the initial cost ASSERTED against it on
+every run, and a validation gate that has to cope with a 7-DOF gauge.
 
 ## Problem
 
@@ -55,234 +56,241 @@ which fail the cost gate too).
 
 ## Damping
 
-arael runs the gain-ratio `NielsenLambdaDriver` here (the benchmark
-default; `ARAEL_DRIVER=fixed` selects the classic fixed-multiplier
-schedule). This benchmark is what drove the `LambdaDriver` abstraction
-into arael (see docs/SOLVERS.md): under the fixed schedule no
-(lambda0, floor) pair fits all sizes -- on Ladybug-138 the default
-floor let lambda decay until the gauge-singular damped system lost
-positive definiteness (Cholesky failures, a catastrophic +23000-cost
-rejected step, a give-up 2.8% above the optimum), while the 1e-4 floor
-that fixed it forced 54 crawling steps and pushed Ladybug-49's f32
-into the iteration cap. The Nielsen driver dissolves all of it: zero
-rejections on Ladybug-49 (22 accepted steps -- exactly Ceres's count),
-Ladybug-138 converging in 20 steps to a cost marginally BELOW
-Ceres's, and the damping floor rendered moot (measured identical at
-1e-12 and 1e-6; the library default stays).
+arael runs the gain-ratio `NielsenLambdaDriver` here, not the fixed-multiplier
+ladder the pose-graph benchmarks use (`DRIVER=fixed` selects that one).
 
-Initial lambda is per-dataset (harness table, env `ARAEL_LAMBDA0`):
-1e-3 on Ladybug-138 (1e-4 plateaus 1.4% high there), 1e-4 elsewhere.
-Ceres runs its shipped trust-region defaults -- BAL is the problem
-family they were tuned on. g2o runs its auto lambda heuristic, which
-scales the initial damping to each problem (`G2O_LAMBDA_INIT`
-overrides). `ARAEL_VERBOSE=1` prints the solver's per-iteration trace.
+The initial damping is per dataset, and per system: each is tuned so that the
+system's first two iterations are single accepted steps. That is what the
+per-iteration measurement needs -- full-iter is t(2 iterations) - t(1 iteration),
+and a rejected step in either of them makes it unreportable. `BAL_LAMBDAS` sweeps
+the values (see Running).
 
-## Results (Ladybug problems, aarch64 VM, single core, min of 5 rounds; arael rows use the Nielsen driver)
+| dataset | arael `ARAEL_LAMBDA0` | Ceres `CERES_RADIUS0` |
+|---|---|---|
+| Ladybug-49 | 5e-5 | 1e4 (Ceres's own default) |
+| Ladybug-138 | 1e-3 | 1e2 |
+| Ladybug-372 | 1e-4 | 1e4, `iterative_schur` 1e2 |
+| Ladybug-1723 | 1e-1 | 1e1 |
 
-`iters` is accepted(attempts) for every system -- g2o's attempts come
-from its batch statistics (it retries lambda inside an iteration, so
-its bare iteration count used to hide them). `full-it ms` and `peak MB`
-are defined under Running. The two arael routes are the full-system
-sparse solve (`sparse`) and the Schur-complement solve (`schur`, points
-marginalized every damped solve, only the camera system factorized) --
-they reach the same optimum by construction, so the rows compare linear
-solvers directly.
+g2o runs its auto lambda heuristic, which scales the initial damping to each
+problem and already lands both steps (`G2O_LAMBDA_INIT` overrides it).
+
+## What is measured
+
+**One iteration.** Linearize, assemble, factorize, solve -- the pipeline every
+system runs on every step, over the identical validated cost function. It is
+measured as t(2 iterations) - t(1 iteration), so the one-time setup (first
+assembly, ordering, symbolic factorization) cancels out, and it is reported only
+when the first iteration was one accepted step, so a rejected step's wasted
+factorization cannot leak into it.
+
+This is the number that compares across systems.\* **Total time and iteration count
+do not**, and reading them as a ranking will mislead you: they are set by each
+system's damping schedule and its termination rule. The tables report them
+because they are facts about the run, not because they are comparable.
+
+\* Ceres's `iterative_schur` solves the step equation with a conjugate-gradient
+method rather than by factorization, so its iterations cannot be compared one on
+one with the others'. It never forms the reduced camera system, only multiplies by
+it, which is why its memory is the lowest in the field, and its per-iteration cost
+moves with the damping.
+
+The two arael routes are the full-system sparse solve (`sparse`) and the
+Schur-complement solve (`schur`: points marginalized on every damped solve, only
+the camera system factorized). They reach the same optimum by construction, so
+the rows compare linear solvers directly.
+
+## Results (2026-07-14, Apple M4 Pro, single core enforced by the harness, min of 32 interleaved rounds)
+
+What each column means:
+
+| column | meaning |
+|--------|---------|
+| **total ms** | the whole solve: setup plus every iteration, retries included. |
+| **iters** | `accepted(attempts)`. An attempt is one linear solve; a rejected step raises the damping and costs a factorization. |
+| **ms/iter** | total ms divided by attempts -- an average, and it carries the one-time setup amortized over however many iterations the solver took. |
+| **full-iter** | one complete iteration. Measured as t(2 iterations) - t(1 iteration), so the setup cancels. The durable cross-system number. |
+| **1st-iter ms** | one iteration plus the setup the others do not pay again. |
+| **peak MB** | process high-water mark (`VmHWM`), each solver measured in a process of its own. |
+| **final cost** | evaluated by the one reference cost function for every system. |
+
+full-iter and 1st-iter are dropped ("-") for any system whose first iteration was
+not a single accepted step: such an iteration is mostly wasted factorizations,
+and every number derived from it inherits that.
 
 ### Ladybug-49 (23769 parameters)
 
-| system                   | total ms |  iters  | ms/iter | full-it ms | 1st-iter ms | peak MB | final cost |
-|--------------------------|---------:|--------:|--------:|-----------:|------------:|--------:|-----------:|
-| arael LM f64 sparse      |    536.3 |  21(22) |   24.38 |      23.48 |        45.9 |    70.9 | 26689.4804 |
-| arael LM f32 sparse      |    470.5 |  18(23) |   20.46 |      20.06 |        41.9 |    63.0 | 26692.4865 |
-| arael LM f64 schur       |    249.4 |  21(22) |   11.33 |      11.19 |        18.0 |    37.6 | 26689.4804 |
-| arael LM f32 schur       |    172.4 |  16(20) |    8.62 |       8.90 |        13.6 |    28.1 | 26693.2360 |
-| ceres dense_schur        |    443.7 |  22(22) |   20.17 |      18.02 |        42.6 |    38.4 | 26689.7174 |
-| ceres sparse_schur       |    462.8 |  22(22) |   21.04 |      18.52 |        54.2 |    41.6 | 26689.7174 |
-| ceres iterative_schur    |    670.2 |  24(24) |   27.93 |      25.81 |        38.6 |    37.0 | 26689.5841 |
-| g2o LM (schur)           |    983.5 |  42(58) |   16.96 |      19.86 |        35.8 |    45.3 | 26714.5561 |
+| system                | total ms |  iters | ms/iter | full-iter | 1st-iter ms | peak MB | final cost |
+|-----------------------|---------:|-------:|--------:|----------:|------------:|--------:|-----------:|
+| arael LM f64 sparse   |    497.4 | 21(21) |   23.69 |     22.76 |        44.2 |    70.7 | 26689.2948 |
+| arael LM f32 sparse   |    479.7 | 19(25) |   19.19 |     19.32 |        32.8 |    59.4 | 26691.0378 |
+| arael LM f64 schur    |    236.2 | 21(21) |   11.25 |     10.76 |        15.5 |    38.4 | 26689.2948 |
+| arael LM f32 schur    |    216.7 | 19(27) |    8.03 |      8.84 |        13.1 |    28.4 | 26692.2399 |
+| ceres dense_schur     |    439.8 | 21(21) |   20.94 |     18.52 |        37.6 |    38.3 | 26689.7174 |
+| ceres sparse_schur    |    436.8 | 21(21) |   20.80 |     18.73 |        47.8 |    41.7 | 26689.7174 |
+| ceres iterative_schur\* |    644.1 | 23(23) |   28.00 |     29.63 |        34.2 |    36.9 | 26689.5841 |
+| g2o LM (schur)        |    946.1 | 42(58) |   16.31 |     19.78 |        33.0 |    45.2 | 26714.5561 |
 
 ### Ladybug-138 (60876 parameters)
 
-| system                   | total ms |  iters  | ms/iter | full-it ms | 1st-iter ms | peak MB |  final cost |
-|--------------------------|---------:|--------:|--------:|-----------:|------------:|--------:|------------:|
-| arael LM f64 sparse      |   1846.6 |  20(21) |   87.93 |      82.00 |       206.2 |   183.3 | 119055.9961 |
-| arael LM f32 sparse      |   1512.1 |  19(20) |   75.61 |      69.73 |       187.8 |   161.4 | 119054.9134 |
-| arael LM f64 schur       |   1038.4 |  20(21) |   49.45 |      48.63 |        71.1 |   112.2 | 119055.9961 |
-| arael LM f32 schur       |    718.2 |  20(21) |   34.20 |      33.56 |        49.5 |    80.1 | 119055.5616 |
-| ceres dense_schur        |   1901.0 |  22(25) |   76.04 |      72.43 |       150.5 |    98.0 | 119056.2145 |
-| ceres sparse_schur       |   1741.8 |  22(25) |   69.67 |      65.07 |       180.5 |   105.6 | 119056.2145 |
-| ceres iterative_schur    |   3274.1 |  43(62) |   52.81 |      54.71 |       116.8 |    84.4 | 190424.2644 |
-| g2o LM (schur)           |   3495.5 |  40(59) |   59.25 |      68.97 |       130.1 |   120.9 | 118904.3429 |
-
-`iterative_schur` does not reach the common optimum on Ladybug-138: its
-inexact CG solve stalls at 190424 (60% above the 118904 optimum, camera
-RMSE 1.38e-2). The other six validate; g2o's 118904 is the deepest.
+| system                | total ms |  iters | ms/iter | full-iter | 1st-iter ms | peak MB |  final cost |
+|-----------------------|---------:|-------:|--------:|----------:|------------:|--------:|------------:|
+| arael LM f64 sparse   |   1982.4 | 21(24) |   82.60 |     78.91 |       199.9 |   183.2 | 119055.9244 |
+| arael LM f32 sparse   |   1682.6 | 21(24) |   70.11 |     63.85 |       179.5 |   151.4 | 119054.8981 |
+| arael LM f64 schur    |   1016.6 | 21(24) |   42.36 |     41.02 |        66.6 |   115.2 | 119055.9244 |
+| arael LM f32 schur    |    729.0 | 21(24) |   30.38 |     29.90 |        48.2 |    81.7 | 119055.3497 |
+| ceres dense_schur     |   1790.0 | 22(23) |   77.83 |     72.60 |       134.1 |    97.9 | 119056.6359 |
+| ceres sparse_schur    |   1631.4 | 22(23) |   70.93 |     65.98 |       162.0 |   105.6 | 119056.6359 |
+| ceres iterative_schur\* |   2416.7 | 22(26) |   92.95 |     51.48 |       111.9 |    85.3 | 118753.5001 |
+| g2o LM (schur)        |   3390.7 | 40(59) |   57.47 |     65.69 |       121.9 |   120.3 | 118904.3429 |
 
 ### Ladybug-372 (145617 parameters)
 
-| system                   | total ms |  iters  | ms/iter | full-it ms | 1st-iter ms | peak MB |  final cost |
-|--------------------------|---------:|--------:|--------:|-----------:|------------:|--------:|------------:|
-| arael LM f64 sparse      |   3462.8 |   5(11) |  314.80 |     294.78 |       627.9 |   473.7 | 225577.5976 |
-| arael LM f32 sparse      |   4022.5 |   8(17) |  236.62 |     227.02 |       535.6 |   392.2 | 225464.4215 |
-| arael LM f64 schur       |   3520.8 |   5(11) |  320.07 |     322.48 |       411.3 |   399.1 | 225577.5976 |
-| arael LM f32 schur       |   5216.9 |  16(27) |  193.22 |     197.54 |       267.0 |   270.2 | 225629.5986 |
-| ceres dense_schur        |   7514.3 |  10(17) |  442.02 |     447.77 |       692.0 |   285.4 | 225447.1709 |
-| ceres sparse_schur       |   4307.5 |  10(17) |  253.38 |     255.63 |       600.4 |   287.2 | 225447.1709 |
-| ceres iterative_schur    |   3329.9 |  15(26) |  128.07 |     137.15 |       331.7 |   190.0 | 225798.8928 |
-| g2o LM (schur)           |   9179.6 |  28(35) |  262.27 |     274.54 |       445.9 |   358.8 | 226586.4232 |
+| system                | total ms |  iters | ms/iter | full-iter | 1st-iter ms | peak MB |  final cost |
+|-----------------------|---------:|-------:|--------:|----------:|------------:|--------:|------------:|
+| arael LM f64 sparse   |   5657.6 | 10(19) |  297.77 |    286.37 |       625.9 |   471.7 | 225431.3936 |
+| arael LM f32 sparse   |   4176.5 | 10(18) |  232.03 |    220.60 |       531.5 |   367.6 | 225488.7411 |
+| arael LM f64 schur    |   3824.5 | 10(19) |  201.29 |    206.66 |       303.8 |   350.1 | 225431.3936 |
+| arael LM f32 schur    |   2105.8 |  9(16) |  131.61 |    134.60 |       209.7 |   239.7 | 225509.7227 |
+| ceres dense_schur     |   7434.9 |  9(16) |  464.68 |    453.13 |       657.9 |   285.4 | 225447.1709 |
+| ceres sparse_schur    |   4291.7 |  9(16) |  268.23 |    256.99 |       567.9 |   287.2 | 225447.1709 |
+| ceres iterative_schur\* |   2288.6 | 12(16) |  143.04 |    148.36 |       319.2 |   191.9 | 225696.1695 |
+| g2o LM (schur)        |   9291.8 | 28(35) |  265.48 |    277.01 |       434.1 |   357.7 | 226586.4232 |
 
-Every row validates on Ladybug-49 and 372 (8/8). On Ladybug-138 seven
-of eight validate -- Ceres's `iterative_schur` is the exception
-(above). One Ceres reference point measured outside the tables on
-Ladybug-49 (same run protocol): `sparse_normal_cholesky`, the
-full-system strategy arael's `sparse` rows use, at ~39 ms/step (~1.6x
-their per-step). Fixed-schedule arael
-numbers for comparison (ARAEL_DRIVER=fixed, per-dataset floors): 821 /
-4968 / 3242 ms -- the Nielsen driver is worth ~1.5x on Ladybug-49,
-~2.7x on Ladybug-138, and a lower-cost stop on Ladybug-372.
+All eight rows validate on all three datasets.
 
 ### Ladybug-1723 (485k parameters, exploratory: `BAL_ONLY=1723`)
 
-With the shared 1e-5 tolerances NEITHER system converges -- they stop
-at different plateaus of a long descent, so the mutual validation gate
-cannot pass and the problem is excluded from the default suite pending
-a tighter shared termination criterion. The exploratory numbers
-(Nielsen): arael f64 sparse 84.4 s / 16(26) steps / 3246 ms/step
-reaching cost 766181; Ceres sparse_schur 71.6 s / 14(24) / 2984 ms/step
-stopping at 776854 -- 1.4% HIGHER than arael's plateau. arael f32
-fails at this scale before the first step: the f32 ASSEMBLY produces a
-NaN Hessian diagonal (single-precision range overflow accumulating
-J^T J at 485k parameters), and the solve terminates loudly.
+**Not a validated result, and the table below is not a ranking.** With the damping
+in the Damping section the iterations are measurable -- the four rows that run
+report a full-iter -- but no system reaches the shared 1e-5 tolerances here. They
+stop on different plateaus of a long descent, 765376 to 772215, a 0.9% spread, so
+the mutual validation gate cannot pass and the run has nothing to anchor against.
+The dataset is excluded from the default suite until it has a termination
+criterion the systems can share. `full-iter` is the only column here that means
+what it means elsewhere; `total ms`, `iters` and `final cost` are each reporting a
+different, arbitrary stopping point.
 
-The Schur route is the WRONG choice at this size and shows it: 5306
-ms/step (1.6x the full-system route) and a 1.9 GB peak, reaching the
-identical cost in the identical 16(26) steps. The reduced camera system
-is 15,507 parameters and only 8.1% dense, but faer's AMD ordering
-leaves a factor of ~83M values -- 69% of a dense triangle -- costing
-4755 ms to factorize on its own. Ceres factorizes the same S in ~2.5 s
-(its whole linear solve is 2586 ms, from its own stats), so the gap is
-fill, not kernel speed: the two factorization kernels measure at parity
-elsewhere (see benchmarks/slam). For reference, Ceres's DENSE Schur
-does degrade here exactly as the arithmetic demands -- 28.3 s per
-linear solve -- so nobody escapes a dense S; the question is only how
-much fill the ordering leaves.
+| system                | total ms |   iters | ms/iter | full-iter | 1st-iter ms | peak MB |  final cost |
+|-----------------------|---------:|--------:|--------:|----------:|------------:|--------:|------------:|
+| arael LM f64 sparse   |  88469.0 |  20(30) | 2948.97 |   2910.07 |      3925.5 |  1818.2 |  769222.381 |
+| arael LM f64 schur    |  54161.6 |  20(30) | 1805.39 |   1805.54 |      2198.2 |  1345.0 |  769222.381 |
+| ceres sparse_schur    |  89710.9 |  24(31) | 2893.90 |   2813.32 |      4057.8 |  1250.1 |  766134.386 |
+| ceres iterative_schur\* |   8706.3 |  16(23) |  378.53 |    397.21 |      1191.1 |   621.3 |  772215.452 |
+| g2o LM (schur)        | 364393.4 | 84(112) | 3253.51 |   2318.33 |      2942.3 |  1540.0 |  765376.644 |
 
-## Reading the results
+The Schur route still has the cheaper iteration here (1806 vs 2910 ms), on the
+largest reduced system in the suite -- 15,507 parameters. That holds only under
+nested dissection; see the section below.
 
-Which arael route to use is the whole story, and it turns on the size
-of the camera system:
+`iterative_schur`'s result suggests that on larger systems a conjugate-gradient
+method is likely the more viable route than a factorization. Its iteration against
+arael's Schur route, across the suite: 2.8x more expensive at Ladybug-49, 1.3x at
+138, then 1.4x CHEAPER at 372 and 4.5x cheaper here. It crosses over, and the lead
+grows with the problem. It stops on a plateau like everything else on this
+dataset, so read it as a direction, not a measurement.
 
-1. **Ladybug-49 goes to arael's Schur route, decisively** -- f32 schur
-   at 172 ms and f64 schur at 249 ms, against 444 ms for the closest
-   C++ system (Ceres dense-Schur). Every exact solver takes the same
-   21-22 rejection-free steps to the same optimum, so the 1.8x is
-   entirely per-step cost: 11.2 ms/full-it against Ceres's 18.0 and
-   g2o's 19.9.
-2. **Ladybug-138 likewise: arael f32 schur wins outright** at 718 ms --
-   2.4x faster than the next system (Ceres sparse-Schur, 1742 ms) -- and
-   f64 schur (1038 ms) beats every C++ solver too. g2o alone descends
-   deeper (118904, 0.13% below the cluster) but takes 3.5 s to do it.
-3. **Ladybug-372 goes to Ceres's inexact-CG `iterative_schur`** (3.33 s,
-   128 ms/iter, stopping at a slightly higher but still-converged
-   225799). The exact solvers cluster behind it: arael f64 sparse
-   3.46 s, arael f64 schur 3.52 s, Ceres sparse-Schur 4.31 s. arael f32
-   schur has the cheapest exact step of that group (193 ms/iter) but
-   spends it on 16 accepted steps instead of 5, so its total lands last.
-   Run-to-run step counts vary (5-16) here; min-of-rounds applies to
-   every system equally.
-4. **Per full iteration, arael's Schur step is the cheapest exact step
-   in the field at 49 and 138** (11.2 and 48.6 ms/full-it, against Ceres
-   sparse-Schur's 18.5 and 65.1 and g2o's 19.9 and 69.0), while its
-   full-system step tracks Ceres's sparse-Schur within 15-27% (23.5/18.5
-   -> 82.0/65.1 -> 294.8/255.6 ms). This CORRECTS an earlier reading of
-   this benchmark, taken before arael had an explicit Schur backend:
-   marginalizing the points is decisive after all -- but only while the
-   camera system stays small (finding 7).
-5. **arael's f32 solves bundle adjustment and validates on 49, 138 and
-   372** (Ceres offers no f32 mode at all) and wins both smaller
-   datasets. It fails at 485k parameters (NaN in f32 assembly, above).
-   Its peak memory saving over f64 is real but modest -- 11-17% on the
-   full-system rows (63/71 -> 161/183 -> 392/474 MB), 25-32% on the
-   Schur rows (28/38 -> 80/112 -> 270/399) -- not the halving the value
-   size alone would suggest.
-6. **g2o's full iteration (19.9 / 69.0 / 274.5 ms, on its Schur-reduced
-   camera system) is cheaper than arael's full-system step but no longer
-   cheaper than arael's Schur step** (11.2 / 48.6 / 322.5), **and it
-   lands 1.8-2.7x behind arael's full-system totals and 2.6-3.9x behind
-   its Schur totals** because it needs roughly twice
-   the accepted steps (42 / 40 / 28), plus internal lambda retries the
-   bare iteration count used to hide (58 / 59 / 35 damped attempts).
-   We have not established why. One confirmed code-level difference is
-   the damping form: g2o adds a single lambda to every Hessian diagonal
-   (plain Levenberg, H + lambda*I, block_solver.hpp), whereas arael
-   scales by curvature (Marquardt, H + lambda*diag(H)) and Ceres does
-   the equivalent through its default Jacobi column scaling. On BAL's
-   badly scaled blocks -- camera focal/rotation/translation and point
-   coordinates span orders of magnitude -- a single global lambda may
-   possibly not damp all scales at once, so this could contribute to
-   the extra iterations. That is a hypothesis only: it is not isolated
-   by experiment, and g2o's initial-lambda heuristic, termination
-   criteria, or step-acceptance trials could matter as much. The lambda
-   schedule is probably not the cause -- g2o's LM carries gain-ratio
-   fields (`_goodStepLowerScale` / `_ni`), so it appears to run a
-   Nielsen-style schedule like arael's rather than a fixed-multiplier
-   one -- but we have not read its update code to confirm. The flip
-   side: on Ladybug-138 those extra iterations grind to the deepest
-   stop of the run (118904, 0.13% below everyone else's).
-7. **The Schur route wins big while the camera system stays small, and
-   stops winning as it grows.** Marginalizing the points costs 2.1x
-   less per step than factorizing the full system on Ladybug-49 (11.3
-   vs 24.4 ms/iter, f32 8.6 vs 20.5) and 1.8x less on Ladybug-138
-   (49.5 vs 87.9), with the same steps to the same cost -- but on
-   Ladybug-372 it is a wash for f64 (320.1 vs 314.8). The reduced
-   system S is camera-camera: 441 parameters at 49 cameras but 3,348 at
-   372, and factorizing it costs roughly cubically in that size
-   (measured: 0.9 / 14.3 / 228.4 ms across the three datasets --
-   `cargo run -r --bin schur_stats` reports S's size, density and cost
-   split per dataset). Beyond the suite the trend continues: on the
-   exploratory Ladybug-1723 the Schur route is 1.6x SLOWER (5306 vs
-   3246 ms/iter) because S reaches 15,507 parameters. This is why the
-   Schur backend is an explicit opt-in per model, never an automatic
-   choice.
-8. **Memory follows the same shape.** The Schur route roughly halves
-   arael's peak on the sizes where it wins (37.6 vs 70.9 MB on
-   Ladybug-49, 112 vs 183 on Ladybug-138), because it never forms the
-   full camera+point factor. The full-system rows remain the heaviest
-   in the field at the larger sizes (183 MB on 138, 474 on 372 -- 1.6x
-   Ceres sparse-Schur's 287, 2.5x iterative_schur's 190).
+**arael's f32 rows cannot run here at all** (0 accepted steps). The input data is
+bad: 199 observations lie behind the camera and fourteen sit on the optical centre
+(`pc.z` down to 3.65e-9). In f32 those cancel to exactly zero and the perspective
+divide becomes 0/0, which arrives as a NaN on the Hessian diagonal. f64 has the
+digits to survive it; f32 does not, and no damping value changes that. Running f32
+here would need the data fixed and/or a loss function that tolerates a degenerate
+projection. The smaller datasets carry no such observation, which is why f32
+solves them.
+
+## The Schur reduction, and the ordering it needs
+
+**Marginalizing the points is automatic.** arael's sparse backend defaults to
+`SchurPolicy::Auto`: it finds the eliminable blocks in the model's coupling graph
+and decides for itself, declining the reduction when the reduced factor would hold
+relatively more fill than the full one. It takes the reduction on all four BAL
+datasets, and on the two largest the fill check runs and passes with room to spare
+(0.47 on Ladybug-372, 0.55 on Ladybug-1723, against a decline threshold of 0.8).
+The two arael rows in the tables exist because the benchmark OVERRIDES that policy
+in both directions -- `Never` for the `sparse` rows, `Force` for the `schur` ones
+-- so that it measures the two routes rather than the policy's verdict about them.
+
+**The ordering is the opt-in, and it is what makes the reduction pay.** The
+reduced system S is camera-camera, and a 3D point makes a CLIQUE of every camera
+that sees it, so S is a union of cliques -- the structure AMD is worst at. The
+benchmark therefore orders S with nested dissection (`BAL_ORDERING=amd` goes back
+to AMD, which is arael's own default). It is not a small effect: `cargo run -r
+--bin schur_stats` measures S under AMD and reports 4716 ms to factorize it on
+Ladybug-1723, where under nested dissection the WHOLE Schur iteration -- assembly,
+reduction, factorization, solve -- takes 1806 ms. The same swap moves the fill
+ratio the policy decides on from 1.21 to 0.55, which is the difference between
+declining the reduction and taking it.
+
+With that ordering the Schur route has the cheaper iteration on every dataset in
+the suite, including the 1723 exploratory one (1806 ms against the full system's
+2910). `schur_stats` reports S's size, density, fill and the split between forming
+it and factorizing it, per dataset.
 
 ## Running
 
 ```sh
-./fetch_datasets.sh
-cmake -B cpp/build cpp && cmake --build cpp/build
-export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1   # thread caps before load
+./fetch_datasets.sh                                  # Ladybug-49 is vendored
+cmake -B cpp/build cpp && cmake --build cpp/build    # Ceres, g2o (+ cholmod)
+export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1      # before load; see below
 ROUNDS=5 cargo run --release
+BAL_ONLY=1723 cargo run --release                    # the exploratory dataset
+cargo run -r --bin schur_stats                       # S's size, density, cost split
 ```
 
-`--features cholmod-gpl` adds an `arael LM f64 cholmod-gpl` row solving
-the full system with CHOLMOD's supernodal backend (it is not in the
-tables above, which come from a default build). That module is
-GPL-licensed, so the resulting binary is subject to the GPL -- enable
-knowingly. Measured earlier on this benchmark, it is SLOWER than faer
-at every size, so it is not the row to reach for here.
+The run prints all of its settings in a header, so a pasted result carries what
+produced it.
 
-The `peak MB` column is each solver's peak RSS (VmHWM): arael rows from
-a fresh subprocess running only that solver (`BAL_NO_MEM=1` skips the
-re-solves), external rows self-reported. A cholmod-gpl build links a
-BLAS/LAPACK stack that inflates the arael rows with its shared-library
-baseline; point `BAL_MEM_EXE` at a default-build binary to source them
-from a clean build instead.
+| env | effect |
+|-----|--------|
+| `ROUNDS` | interleaved rounds; the reported time is the minimum over them |
+| `BAL_ONLY` | substring; runs only the matching datasets (`1723` reaches the exploratory one) |
+| `BAL_SYSTEMS` | comma-separated substrings; runs only the matching rows (a filtered run cannot validate across systems) |
+| `ARAEL_LAMBDA0`, `G2O_LAMBDA_INIT`, `CERES_RADIUS0` | initial damping, per system |
+| `BAL_LAMBDAS` | comma-separated damping values: sweep them instead of running the benchmark (below) |
+| `DRIVER=fixed` | arael's fixed damping ladder instead of the gain-ratio driver it defaults to here |
+| `BAL_ORDERING=amd` | AMD on the reduced camera system instead of nested dissection |
+| `BAL_SCHUR_POLICY=auto` | let the fill analysis decide the reduction instead of forcing it |
+| `VERBOSE` | arael's per-iteration solver trace |
+| `TIMING` | arael's per-solve phase breakdown |
+| `BAL_NO_MEM` | skip the peak-memory pass |
 
-The `full-it ms` column is the cost of one FULL accepted iteration
-(linearize + factorize/solve + trial cost). `ms/iter` divides total
-time by all damped attempts, and rejected attempts skip the
-re-linearization, so heavy damping deflates it; `full-it ms` is immune
-to that. Per system: arael sums the solver's steady-state per-phase
-means (assembly, damped solve, trial cost, advance; first calls
-excluded -- they carry one-time structure costs like the symbolic
-factorization), Ceres sums its Summary's per-phase totals over call
-counts (jacobian, linear solve, residual; firsts amortized in), g2o
-averages whole-iteration times over iterations that ran exactly one
-lambda trial, first iteration excluded. `-` when a system had too few
-clean iterations to measure.
+The thread caps must be exported **before** the process starts: OpenBLAS sizes
+its pool when its shared library loads, ahead of any code that could set them,
+and those early threads escape the single-core pin.
+
+### Tuning the damping
+
+`BAL_LAMBDAS` sweeps damping values instead of running the benchmark. For each
+selected row and each value it runs ONE solve capped at 1 iteration and one
+capped at 2 -- no warmup, no sub-rounds, no full solve, no memory pass -- and
+says whether those two iterations were clean:
+
+```sh
+BAL_ONLY=1723 BAL_SYSTEMS="f64 schur" BAL_LAMBDAS=1e-2,1e-1,1 cargo run --release
+```
+
+```
+system                     damping    t(1) acc/att     t(2)   acc  full-iter    cost after 2
+arael LM f64 schur            1e-2    2199   1/1     4019   1/-          -      21104621.5   <- first two iterations not clean
+arael LM f64 schur            1e-1    2210   1/1     4031   2/-       1821       7300667.1
+arael LM f64 schur             1e0    2224   1/1     4042   2/-       1818       8545466.9
+```
+
+That is all the per-iteration number needs -- full-iter is t(2) - t(1), reported
+only when the first iteration was a single accepted step -- and it is the
+difference between seconds and hours on Ladybug-1723. The values are arael's
+initial lambda for the arael rows, Ceres's trust-region radius for its rows, and
+g2o's initial lambda for g2o (which normally runs its own auto heuristic, so
+forcing a value there is usually the wrong move). The external runners are held
+to the same two iterations by `BENCH_QUICK`, which never belongs in a
+measurement.
+
+`--features cholmod-gpl` adds an `arael LM f64 cholmod-gpl` row solving the full
+system with CHOLMOD's supernodal backend (not in the tables above, which come
+from a default build). That module is GPL-licensed, so the resulting binary is
+subject to the GPL -- enable knowingly. Measured earlier on this benchmark, it is
+SLOWER than faer at every size, so it is not the row to reach for here. Such a
+build also links a BLAS/LAPACK stack whose shared-library baseline inflates every
+arael row's peak memory; `BENCH_MEM_EXE=<default-build binary>` sources those
+rows from a clean build instead.

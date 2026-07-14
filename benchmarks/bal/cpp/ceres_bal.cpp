@@ -6,10 +6,11 @@
 // problems. Protocol:
 //   ceres_bal <problem.txt> <params_out> [dense_schur|sparse_schur|
 //             iterative_schur|sparse_normal_cholesky]
-// prints JSON {solve_ms, first_iter_ms, iterations, accepted,
-// initial_cost, full_iter_ms, peak_rss_kb, cpus_allowed}; params_out
-// carries one camera per line (9 values) followed by one point per
-// line (3 values).
+// prints the shared benchmark protocol line (see ../../cpp/bench.h);
+// params_out carries one camera per line (9 values) followed by one
+// point per line (3 values).
+
+#include "../../cpp/bench.h"
 
 #include <ceres/ceres.h>
 #include <ceres/rotation.h>
@@ -70,18 +71,8 @@ struct SnavelyReprojectionError {
     double ox, oy;
 };
 
-struct RunResult {
-    double ms;
-    int accepted, total;
-    double initial_cost; // full (non-halved) cost, comparable to the reference
-    // Mean cost of one full iteration (jacobian eval + linear solve +
-    // residual eval, each phase's total over its call count), undiluted
-    // by rejected steps that skip the re-linearization. -1 if unavailable.
-    double full_iter_ms;
-};
-
-static RunResult solve(Bal b, ceres::LinearSolverType linsolver, int max_iters,
-                       std::vector<double>* cams_out, std::vector<double>* points_out) {
+static bench::Result solve(Bal b, ceres::LinearSolverType linsolver, int max_iters,
+                           std::vector<double>* cams_out, std::vector<double>* points_out) {
     ceres::Problem problem;
     for (int i = 0; i < b.n_obs; i++) {
         problem.AddResidualBlock(
@@ -106,7 +97,6 @@ static RunResult solve(Bal b, ceres::LinearSolverType linsolver, int max_iters,
 
     if (cams_out) *cams_out = b.cameras;
     if (points_out) *points_out = b.points;
-    double full_iter_ms = -1.0;
     if (getenv("CERES_STATS")) {
         fprintf(stderr, "ceres stats: linear_solver %.1f ms/solve (%d solves), "
                 "jacobian %.1f ms, residual %.1f ms, total %.1f s\n",
@@ -116,18 +106,14 @@ static RunResult solve(Bal b, ceres::LinearSolverType linsolver, int max_iters,
                 1e3 * summary.residual_evaluation_time_in_seconds / std::max(1, summary.num_residual_evaluations),
                 summary.total_time_in_seconds);
     }
-    if (summary.num_jacobian_evaluations > 0 && summary.num_linear_solves > 0 &&
-        summary.num_residual_evaluations > 0) {
-        full_iter_ms = 1e3 *
-            (summary.jacobian_evaluation_time_in_seconds / summary.num_jacobian_evaluations +
-             summary.linear_solver_time_in_seconds / summary.num_linear_solves +
-             summary.residual_evaluation_time_in_seconds / summary.num_residual_evaluations);
-    }
-    return RunResult{summary.total_time_in_seconds * 1e3,
-                     summary.num_successful_steps,
-                     summary.num_successful_steps + summary.num_unsuccessful_steps,
-                     2.0 * summary.initial_cost,
-                     full_iter_ms};
+    // Ceres records iteration 0 -- the initial cost evaluation, before any step
+    // -- as a successful step. It is not one; discount it so accepted and
+    // attempts mean the same here as in every other runner.
+    const int accepted = std::max(0, summary.num_successful_steps - 1);
+    return bench::Result{summary.total_time_in_seconds * 1e3,
+                         accepted,
+                         accepted + summary.num_unsuccessful_steps,
+                         2.0 * summary.initial_cost};
 }
 
 int main(int argc, char** argv) {
@@ -142,9 +128,10 @@ int main(int argc, char** argv) {
         else if (s != "dense_schur") { fprintf(stderr, "unknown linsolver %s\n", s.c_str()); return 1; }
     }
 
-    RunResult first = solve(b, linsolver, 1, nullptr, nullptr);
     std::vector<double> cams, points;
-    RunResult full = solve(b, linsolver, 100, &cams, &points);
+    bench::report(
+        [&](int n) { return solve(b, linsolver, n, nullptr, nullptr); },
+        [&]() { return solve(b, linsolver, bench::full_iters(100), &cams, &points); });
 
     std::ofstream out(argv[2]);
     out.precision(17);
@@ -154,21 +141,5 @@ int main(int argc, char** argv) {
     for (int i = 0; i < b.n_points; i++) {
         for (int k = 0; k < 3; k++) out << points[3 * i + k] << (k == 2 ? "\n" : " ");
     }
-
-    std::string cpus = "?";
-    long peak_rss_kb = 0;
-    std::ifstream st("/proc/self/status");
-    std::string l;
-    while (std::getline(st, l)) {
-        if (l.rfind("Cpus_allowed_list:", 0) == 0) {
-            cpus = l.substr(l.find_last_of(" \t") + 1);
-        }
-        if (l.rfind("VmHWM:", 0) == 0) peak_rss_kb = atol(l.c_str() + 6);
-    }
-    printf("{\"solve_ms\": %.3f, \"first_iter_ms\": %.3f, \"iterations\": %d, "
-           "\"accepted\": %d, \"initial_cost\": %.6f, \"full_iter_ms\": %.3f, "
-           "\"peak_rss_kb\": %ld, \"cpus_allowed\": \"%s\"}\n",
-           full.ms, first.ms, full.total, full.accepted, full.initial_cost,
-           full.full_iter_ms, peak_rss_kb, cpus.c_str());
     return 0;
 }

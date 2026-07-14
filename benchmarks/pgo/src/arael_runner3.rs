@@ -220,7 +220,7 @@ impl Pipeline for Graph3 {
             })
             .collect()
     }
-    fn solve(params: &[f64], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f64>)
+    fn solve(_: &Self::Input, params: &[f64], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f64>)
         -> arael::simple_lm::LmResult<f64> {
         crate::arael_runner::solve_f64(params, m, cfg)
     }
@@ -243,7 +243,7 @@ impl Pipeline for Graph3F {
             })
             .collect()
     }
-    fn solve(params: &[f32], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f32>)
+    fn solve(_: &Self::Input, params: &[f32], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f32>)
         -> arael::simple_lm::LmResult<f32> {
         crate::arael_runner::solve_f32(params, m, cfg)
     }

@@ -6,6 +6,10 @@
 //!
 //!     cargo run -r --bin schur_stats
 
+// The included modules are the benchmark's, and expose more than this binary
+// calls.
+#![allow(dead_code)]
+
 #[path = "../bal.rs"]
 mod bal;
 #[path = "../arael_runner.rs"]

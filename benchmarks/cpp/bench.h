@@ -19,6 +19,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <fstream>
 #include <string>
 
@@ -67,10 +68,21 @@ inline double peak_rss_mb() {
     return 0;
 }
 
+// BENCH_QUICK: the damping sweep's mode. No warmup, one sub-round, and the full
+// solve held to two iterations -- enough to see whether the first two iterations
+// are CLEAN, which is all full-iter needs, without paying for a converged solve
+// on a problem that takes minutes. Never set it for a measurement.
+inline bool quick() { return getenv("BENCH_QUICK") != nullptr; }
+
+// How many iterations the reported solve runs. The runner passes what the
+// benchmark wants; the sweep cuts it to two.
+inline int full_iters(int wanted) { return quick() ? 2 : wanted; }
+
 // Fastest of PROBE_SUBROUNDS runs of the same capped solve, after a discarded
 // warmup. Solve is any callable: Result(int max_iters).
 template <typename Solve>
 Result probe(Solve solve, int max_iters) {
+    if (quick()) return solve(max_iters);
     solve(max_iters);  // warmup, discarded
     Result best = solve(max_iters);
     for (int i = 1; i < PROBE_SUBROUNDS; i++) {

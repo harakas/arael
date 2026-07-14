@@ -8,17 +8,16 @@
 // information, so g2o's chi2 IS the reference cost -- asserted by the
 // harness at the initial estimate. Protocol:
 //   g2o_bal <problem.txt> <params_out>
-// prints JSON {solve_ms, first_iter_ms, iterations, accepted, initial_chi2,
-// final_chi2, full_iter_ms, peak_rss_kb, cpus_allowed} -- iterations counts
-// every damped lambda trial (from the batch statistics), accepted the outer
-// Levenberg iterations, matching the other systems' accepted(attempts);
-// params_out carries one camera per line (9 values) followed by one point
-// per line (3 values).
+// prints the shared benchmark protocol line (see ../../cpp/bench.h) --
+// iterations counts every damped lambda trial, accepted the outer Levenberg
+// iterations; params_out carries one camera per line (9 values) followed by
+// one point per line (3 values).
+
+#include "../../cpp/bench.h"
 
 #include <g2o/core/auto_differentiation.h>
 #include <g2o/core/base_binary_edge.h>
 #include <g2o/core/base_vertex.h>
-#include <g2o/core/batch_stats.h>
 #include <g2o/core/block_solver.h>
 #include <g2o/core/optimization_algorithm_levenberg.h>
 #include <g2o/core/sparse_optimizer.h>
@@ -135,25 +134,26 @@ public:
     G2O_MAKE_AUTO_AD_FUNCTIONS
 };
 
-struct RunResult {
-    double ms;
-    int iterations; // outer Levenberg iterations (each ends with an accepted step)
-    // Total damped trials: sum of levenbergIterations over the outer
-    // iterations -- each trial is a factorization + solve + cost eval, so
-    // this is the count comparable to the other systems' "iterations".
-    int attempts;
-    double initial_chi2;
-    double final_chi2;
-    // Mean whole-iteration time over iterations that ran exactly one
-    // lambda trial (levenbergIterations == 1), first iteration excluded
-    // (it carries the symbolic decomposition) -- the cost of one full
-    // accepted iteration, undiluted by internal damping retries. -1 if
-    // no iteration qualifies.
-    double full_iter_ms;
+// g2o keeps its damping retries inside OptimizationAlgorithmLevenberg::solve()
+// and reports the count only for the round just finished (levenbergIteration() is
+// reset every round), so summing them from a post-iteration action is the one way
+// to see the attempts from outside.
+//
+// The alternative -- g2o's batch statistics -- costs measurable time, so it
+// cannot run inside a timed solve; a probe that has to be timed AND counted (the
+// first-iteration purity check needs both) can only be served this way.
+struct TrialCounter : public g2o::HyperGraphAction {
+    g2o::OptimizationAlgorithmLevenberg* lev = nullptr;
+    int trials = 0;
+    g2o::HyperGraphAction* operator()(const g2o::HyperGraph*,
+                                      Parameters* = 0) override {
+        if (lev) trials += lev->levenbergIteration();
+        return this;
+    }
 };
 
-static RunResult solve(const Bal& b, int max_iters, std::vector<double>* cams_out,
-                       std::vector<double>* points_out, bool stats) {
+static bench::Result solve(const Bal& b, int max_iters, std::vector<double>* cams_out,
+                           std::vector<double>* points_out) {
     using BlockSolver = g2o::BlockSolver<g2o::BlockSolverTraits<9, 3>>;
     auto linear = std::make_unique<g2o::LinearSolverCholmod<BlockSolver::PoseMatrixType>>();
     auto block = std::make_unique<BlockSolver>(std::move(linear));
@@ -161,13 +161,13 @@ static RunResult solve(const Bal& b, int max_iters, std::vector<double>* cams_ou
     // g2o's auto lambda heuristic by default -- BA is the problem family
     // it was built for. Env-overridable like the other runners.
     if (const char* li = getenv("G2O_LAMBDA_INIT")) lev->setUserLambdaInit(atof(li));
+    auto* counter = new TrialCounter();
+    counter->lev = lev;
 
     g2o::SparseOptimizer opt;
     opt.setVerbose(false);
-    // Batch statistics carry measurable overhead (~14% on the loc
-    // benchmark), so they are gathered in a separate UNTIMED solve.
-    opt.setComputeBatchStatistics(stats);
     opt.setAlgorithm(lev);
+    opt.addPostIterationAction(counter);
 
     std::vector<VertexCameraBAL*> cams(b.n_cams);
     for (int i = 0; i < b.n_cams; i++) {
@@ -217,24 +217,6 @@ static RunResult solve(const Bal& b, int max_iters, std::vector<double>* cams_ou
     double initial_chi2 = opt.chi2();
     int iters = opt.optimize(max_iters);
     double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
-    opt.computeActiveErrors();
-    double final_chi2 = opt.chi2();
-
-    double full_iter_ms = -1.0;
-    int attempts = 0;
-    if (stats) {
-        double sum = 0.0;
-        int n = 0;
-        for (const auto& st : opt.batchStatistics()) {
-            if (st.iteration < 0) continue;
-            attempts += st.levenbergIterations;
-            if (st.iteration == 0 || st.levenbergIterations != 1) continue;
-            sum += st.timeIteration;
-            n++;
-        }
-        if (n > 0) full_iter_ms = 1e3 * sum / n;
-    }
-    if (attempts < iters) attempts = iters; // stats off -- never undercount
 
     if (cams_out) {
         cams_out->resize(9 * b.n_cams);
@@ -250,20 +232,17 @@ static RunResult solve(const Bal& b, int max_iters, std::vector<double>* cams_ou
             m = pts[i]->estimate();
         }
     }
-    return RunResult{ms, iters, attempts, initial_chi2, final_chi2, full_iter_ms};
+    return bench::Result{ms, iters, counter->trials, initial_chi2};
 }
 
 int main(int argc, char** argv) {
     if (argc < 3) { fprintf(stderr, "usage: %s <problem.txt> <params_out>\n", argv[0]); return 1; }
     Bal b = load(argv[1]);
 
-    RunResult first = solve(b, 1, nullptr, nullptr, false);
     std::vector<double> cams, points;
-    RunResult full = solve(b, 100, &cams, &points, false);
-    // Untimed statistics pass: attempts + single-trial full-iteration mean.
-    RunResult st_run = solve(b, 100, nullptr, nullptr, true);
-    full.attempts = st_run.attempts;
-    full.full_iter_ms = st_run.full_iter_ms;
+    bench::report(
+        [&](int n) { return solve(b, n, nullptr, nullptr); },
+        [&]() { return solve(b, bench::full_iters(100), &cams, &points); });
 
     std::ofstream out(argv[2]);
     out.precision(17);
@@ -273,21 +252,5 @@ int main(int argc, char** argv) {
     for (int i = 0; i < b.n_points; i++) {
         for (int k = 0; k < 3; k++) out << points[3 * i + k] << (k == 2 ? "\n" : " ");
     }
-
-    std::string cpus = "?";
-    long peak_rss_kb = 0;
-    std::ifstream st("/proc/self/status");
-    std::string l;
-    while (std::getline(st, l)) {
-        if (l.rfind("Cpus_allowed_list:", 0) == 0) {
-            cpus = l.substr(l.find_last_of(" \t") + 1);
-        }
-        if (l.rfind("VmHWM:", 0) == 0) peak_rss_kb = atol(l.c_str() + 6);
-    }
-    printf("{\"solve_ms\": %.3f, \"first_iter_ms\": %.3f, \"iterations\": %d, "
-           "\"accepted\": %d, \"initial_chi2\": %.6f, \"final_chi2\": %.6f, "
-           "\"full_iter_ms\": %.3f, \"peak_rss_kb\": %ld, \"cpus_allowed\": \"%s\"}\n",
-           full.ms, first.ms, full.attempts, full.iterations, full.initial_chi2,
-           full.final_chi2, full.full_iter_ms, peak_rss_kb, cpus.c_str());
     return 0;
 }

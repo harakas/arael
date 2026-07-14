@@ -386,7 +386,7 @@ impl bench_harness::arael::Model for Path {
     fn serialize(&mut self, out: &mut Vec<f64>) { self.serialize64(out); }
     fn deserialize(&mut self, x: &[f64]) { self.deserialize64(x); }
     fn solution(&self) -> Solution { extract(self) }
-    fn solve(params: &[f64], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f64>)
+    fn solve(_: &Self::Input, params: &[f64], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f64>)
         -> arael::simple_lm::LmResult<f64> { solve64(params, m, cfg) }
 }
 
@@ -407,7 +407,7 @@ impl bench_harness::arael::Model for PathF {
     fn serialize(&mut self, out: &mut Vec<f32>) { self.serialize32(out); }
     fn deserialize(&mut self, x: &[f32]) { self.deserialize32(x); }
     fn solution(&self) -> Solution { extract_f32(self) }
-    fn solve(params: &[f32], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f32>)
+    fn solve(_: &Self::Input, params: &[f32], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f32>)
         -> arael::simple_lm::LmResult<f32> { solve32(params, m, cfg) }
 }
 
@@ -442,7 +442,7 @@ fn solve_capped<M: bench_harness::arael::Model<Input = Scene, Solution = Solutio
     let mut params: Vec<M::Scalar> = Vec::new();
     model.serialize(&mut params);
     let cfg = bench_harness::arael::config::<M>(scene, max_iters);
-    let result = M::solve(&params, &mut model, &cfg);
+    let result = M::solve(scene, &params, &mut model, &cfg);
     model.deserialize(&result.x);
     model.solution()
 }
@@ -462,5 +462,5 @@ fn timed_once<M: bench_harness::arael::Model<Input = Scene>>(
     let mut params: Vec<M::Scalar> = Vec::new();
     model.serialize(&mut params);
     let cfg = bench_harness::arael::config::<M>(scene, 200);
-    M::solve(&params, &mut model, &cfg).timing.expect("gather_timing is on")
+    M::solve(scene, &params, &mut model, &cfg).timing.expect("gather_timing is on")
 }

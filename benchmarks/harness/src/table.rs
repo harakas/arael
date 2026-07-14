@@ -70,10 +70,18 @@ pub trait Geometry {
     /// The one reference cost function every system's solution is scored by, so
     /// the costs in the table are directly comparable.
     fn cost(&self, solution: &Self::Solution) -> f64;
-    /// Distance between two solutions, in metres. The cost surface has near-flat
-    /// directions where a plateau under 1% above the optimum can sit metres away,
-    /// so cost alone cannot validate a row.
+    /// Distance between two solutions. The cost surface has near-flat directions
+    /// where a plateau under 1% above the optimum can sit far away, so cost alone
+    /// cannot validate a row.
     fn distance(a: &Self::Solution, b: &Self::Solution) -> f64;
+    /// How far apart two solutions may be and still count as the same optimum.
+    /// The pose benchmarks measure metres against a fixed frame. Bundle
+    /// adjustment cannot: it has a 7-DOF gauge and arbitrary units, so it aligns
+    /// the two solutions first and measures a relative figure -- a different
+    /// quantity, needing a different gate.
+    const DISTANCE_GATE: f64 = 0.05;
+    /// The gate in words, for the validation line.
+    const DISTANCE_GATE_NAME: &'static str = "distance to best < 5 cm";
 }
 
 pub struct Table<'a, G: Geometry> {
@@ -140,7 +148,8 @@ impl<'a, G: Geometry> Table<'a, G> {
         let best = self.cells[best_i].2;
         let best_solution = self.cells[best_i].1.solution.clone();
         let converged = |row: &Row<G::Solution>, cost: f64| {
-            (cost - best) / best < 1e-2 && G::distance(&best_solution, &row.solution) < 0.05
+            (cost - best) / best < 1e-2
+                && G::distance(&best_solution, &row.solution) < G::DISTANCE_GATE
         };
 
         let w = self.cells.iter().map(|(l, _, _)| l.len()).max().unwrap_or(18).max(6);
@@ -177,7 +186,7 @@ impl<'a, G: Geometry> Table<'a, G> {
             let miss = if converged(row, *cost) {
                 String::new()
             } else {
-                format!("  <- did not reach the common optimum (distance {:.4} m)",
+                format!("  <- did not reach the common optimum (distance {:.2e})",
                     G::distance(&best_solution, &row.solution))
             };
             println!("{:<w$} {:>10.1} {:>9} {:>10.2} {:>10} {:>12}{} {:>14.4}{}",
@@ -191,9 +200,11 @@ impl<'a, G: Geometry> Table<'a, G> {
             if converged(row, *cost) || !label.starts_with("arael") {
                 continue;
             }
-            match (label.ends_with("f32"), &self.f32_floor_note) {
+            // The label carries the precision ("arael LM f32", "arael LM f32 schur"),
+            // so match on it rather than on how the label happens to end.
+            match (label.contains("f32"), &self.f32_floor_note) {
                 (true, Some(n)) => { notes.insert(format!("{}: {}", label, n)); }
-                _ => panic!("{} failed to converge: {} vs best {} (distance {:.4} m)",
+                _ => panic!("{} failed to converge: {} vs best {} (distance {:.2e})",
                     label, cost, best, G::distance(&best_solution, &row.solution)),
             }
         }
@@ -208,7 +219,7 @@ impl<'a, G: Geometry> Table<'a, G> {
         }
         let conv = self.cells.iter().filter(|(_, r, c)| converged(r, *c)).count();
         println!("validation: {}/{} systems at the common optimum ({:.4}: cost within \
-                  1%, distance to best < 5 cm), anchored by {} external system(s)",
-            conv, self.cells.len(), best, external_agree);
+                  1%, {}), anchored by {} external system(s)",
+            conv, self.cells.len(), best, G::DISTANCE_GATE_NAME, external_agree);
     }
 }

@@ -17,6 +17,7 @@ use arael::vect::{vect2d, vect2f, vect3d, vect3f};
 // ---------------------------------------------------------------- f64
 
 #[arael::model]
+#[derive(Clone)]
 struct Camera {
     t: Param<vect3d>,
     ea: EulerAngleParam<f64>, // world-to-camera
@@ -25,6 +26,7 @@ struct Camera {
 }
 
 #[arael::model]
+#[derive(Clone)]
 struct Point {
     pos: Param<vect3d>,
     hb: SelfBlock<Point>,
@@ -40,6 +42,7 @@ struct Point {
     [cam.intr.x * d * px - obs.xy.x,
      cam.intr.x * d * py - obs.xy.y]
 }))]
+#[derive(Clone)]
 struct Obs {
     #[arael(ref = root.cameras)]
     cam: Ref<Camera>,
@@ -51,6 +54,7 @@ struct Obs {
 
 #[arael::model]
 #[arael(root)]
+#[derive(Clone)]
 pub struct Scene {
     cameras: refs::Vec<Camera>,
     points: refs::Vec<Point>,
@@ -60,6 +64,7 @@ pub struct Scene {
 // ---------------------------------------------------------------- f32
 
 #[arael::model]
+#[derive(Clone)]
 struct CameraF {
     t: Param<vect3f>,
     ea: EulerAngleParam<f32>,
@@ -68,6 +73,7 @@ struct CameraF {
 }
 
 #[arael::model]
+#[derive(Clone)]
 struct PointF {
     pos: Param<vect3f>,
     hb: SelfBlock<PointF, f32>,
@@ -83,6 +89,7 @@ struct PointF {
     [cam.intr.x * d * px - obsf.xy.x,
      cam.intr.x * d * py - obsf.xy.y]
 }))]
+#[derive(Clone)]
 struct ObsF {
     #[arael(ref = root.cameras)]
     cam: Ref<CameraF>,
@@ -94,7 +101,8 @@ struct ObsF {
 
 #[arael::model]
 #[arael(root, f32)]
-struct SceneF {
+#[derive(Clone)]
+pub struct SceneF {
     cameras: refs::Vec<CameraF>,
     points: refs::Vec<PointF>,
     observations: std::vec::Vec<ObsF>,
@@ -162,37 +170,45 @@ fn build_f32(ds: &Dataset) -> SceneF {
     s
 }
 
-pub struct RunOut {
-    pub solve_ms: f64,
-    pub first_iter_ms: f64,
-    pub iterations: usize,
-    pub accepted: usize,
-    /// Cost of one FULL accepted iteration -- the solver's steady-state
-    /// per-phase means (assembly + damped solve + trial cost + advance,
-    /// first calls excluded: they carry one-time structure costs) summed.
-    /// Undiluted by rejected attempts, which skip the re-linearization.
-    /// 0.0 when a phase has no steady-state sample (fewer than 2 calls).
-    pub full_iter_ms: f64,
-    pub cameras: Vec<CameraIn>,
-    pub points: Vec<vect3d>,
+/// What the benchmark hands the pipeline: the problem, the damping it wants, and
+/// WHICH linear solver this row is measuring. The route belongs here because it
+/// is what distinguishes one arael row from another over the identical model --
+/// the same cameras and points, factorized two different ways.
+pub struct Problem {
+    /// Shared, not copied: the four arael rows are the same dataset factorized
+    /// four ways, and Ladybug-1723 is 156k points.
+    pub ds: std::rc::Rc<Dataset>,
+    /// Per-dataset initial damping (see the table in main.rs). ARAEL_LAMBDA0
+    /// overrides it.
+    pub lambda0: f64,
+    pub route: Route,
 }
 
-fn full_iter_ms(timing: Option<&arael::simple_lm::LmTiming>) -> f64 {
-    let Some(t) = timing else { return 0.0 };
-    match (t.mean_assembly(), t.mean_linear_solve(), t.mean_cost_eval(), t.mean_advance()) {
-        (Some(a), Some(l), Some(c), Some(adv)) => (a + l + c + adv).as_secs_f64() * 1e3,
-        _ => 0.0,
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Route {
+    /// The whole camera+point system, factorized as one. No elimination hint:
+    /// ordering the points first was measured to HURT on BAL, unlike slam.
+    Sparse,
+    /// The points marginalized on every damped solve, factorizing only the
+    /// reduced camera system.
+    Schur,
+    /// CHOLMOD's supernodal factorization of the Schur-reduced system (GPL
+    /// module; see the cholmod-gpl feature warning in the arael Cargo.toml).
+    #[cfg(feature = "cholmod-gpl")]
+    CholmodGpl,
+}
+
+impl Route {
+    /// The row label this route runs under.
+    pub fn label(self, precision: &str) -> String {
+        let route = match self {
+            Route::Sparse => "sparse",
+            Route::Schur => "schur",
+            #[cfg(feature = "cholmod-gpl")]
+            Route::CholmodGpl => "cholmod-gpl",
+        };
+        format!("arael LM {} {}", precision, route)
     }
-}
-
-// Initial damping: bundle adjustment is far less linear than the pose
-// graphs, so the pose-graph values (1e-8 .. 1e-10) are not appropriate;
-// 1e-4 is in the range trust-region defaults were tuned for on BAL.
-// Env-overridable for experiments.
-fn lambda0() -> f64 {
-    std::env::var("ARAEL_LAMBDA0").ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(1e-4)
 }
 
 // Damping floor (env ARAEL_LAMBDA_FLOOR, library default 1e-12). Under
@@ -204,20 +220,6 @@ fn lambda_floor() -> f64 {
     std::env::var("ARAEL_LAMBDA_FLOOR").ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(1e-12)
-}
-
-// ARAEL_VERBOSE=1 prints the solver's per-iteration trace (cost,
-// lambda, accepted/rejected) to stderr.
-fn verbose() -> bool {
-    std::env::var("ARAEL_VERBOSE").map_or(false, |v| v == "1")
-}
-
-// The benchmark defaults to the gain-ratio NielsenLambdaDriver -- on
-// bundle adjustment it eliminates the fixed schedule's damping
-// rejections and the Ladybug-138 gauge spiral outright.
-// ARAEL_DRIVER=fixed selects the classic fixed-multiplier schedule.
-fn nielsen() -> bool {
-    std::env::var("ARAEL_DRIVER").map_or(true, |v| v != "fixed")
 }
 
 // The two arael linear-solver routes the benchmark compares.
@@ -287,174 +289,156 @@ fn solve32_schur(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmConfi
     arael::simple_lm::lm_solve(params, &mut solver, s, cfg)
 }
 
-fn cfg64(max_iters: usize) -> arael::simple_lm::LmConfig<f64> {
-    let cfg = arael::simple_lm::LmConfig {
-        abs_precision: 1e-5,
-        rel_precision: 1e-5,
-        patience: 1,
-        max_iters,
-        initial_lambda: lambda0(),
-        lambda_floor: lambda_floor(),
-        verbose: verbose(),
-        gather_timing: true, // per-phase times for the full-iteration column
-        ..Default::default()
-    };
-    if nielsen() { cfg.with_driver(arael::simple_lm::NielsenLambdaDriver::default()) } else { cfg }
-}
-
-fn cfg32(max_iters: usize) -> arael::simple_lm::LmConfig<f32> {
-    let cfg = arael::simple_lm::LmConfig {
-        abs_precision: 1e-5,
-        rel_precision: 1e-5,
-        patience: 1,
-        max_iters,
-        initial_lambda: lambda0() as f32,
-        lambda_floor: lambda_floor() as f32,
-        verbose: verbose(),
-        gather_timing: true,
-        ..Default::default()
-    };
-    if nielsen() { cfg.with_driver(arael::simple_lm::NielsenLambdaDriver::default()) } else { cfg }
-}
-
 fn rodrigues_of(m: arael::matrix::matrix3d) -> vect3d {
     let (axis, angle) = quaternd::from_rotation_matrix(m).get_axis_angle();
     axis * angle
 }
 
-type Solve64 = fn(&[f64], &mut Scene, &arael::simple_lm::LmConfig<f64>)
-    -> arael::simple_lm::LmResult<f64>;
+/// One system's answer: the cameras and the points. Scored by
+/// [`crate::bal::reference_cost`], and compared to the best solution by
+/// similarity-aligned camera centres -- bundle adjustment has a 7-DOF gauge, so
+/// absolute positions are not comparable across systems.
+#[derive(Clone)]
+pub struct Solution {
+    pub cameras: Vec<CameraIn>,
+    pub points: Vec<vect3d>,
+}
 
-fn run_f64_with(ds: &Dataset, solve: Solve64) -> RunOut {
-    let mut s = build_f64(ds);
-    let mut params: Vec<f64> = Vec::new();
-    s.serialize64(&mut params);
+pub type RunOut = bench_harness::table::Row<Solution>;
 
-    let t0 = std::time::Instant::now();
-    let _ = solve(&params, &mut s, &cfg64(1));
-    let first_iter_ms = t0.elapsed().as_secs_f64() * 1e3;
-
-    let t0 = std::time::Instant::now();
-    let result = solve(&params, &mut s, &cfg64(100));
-    let solve_ms = t0.elapsed().as_secs_f64() * 1e3;
-    s.deserialize64(&result.x);
-    let cameras = s.cameras.iter()
-        .map(|c| CameraIn {
-            rodrigues: rodrigues_of(arael::matrix::matrix3d::rotation_from_euler_angles(c.ea.value)),
-            t: c.t.value,
-            f: c.intr.value.x,
-            k1: c.intr.value.y,
-            k2: c.intr.value.z,
-        })
-        .collect();
-    let points = s.points.iter().map(|p| p.pos.value).collect();
-    RunOut {
-        solve_ms, first_iter_ms,
-        iterations: result.iterations,
-        accepted: result.accepted_iterations,
-        full_iter_ms: full_iter_ms(result.timing.as_ref()),
-        cameras, points,
+impl bench_harness::arael::Model for Scene {
+    type Scalar = f64;
+    type Input = Problem;
+    type Solution = Solution;
+    // Bundle adjustment is far less linear than a pose graph, and the fixed
+    // ladder walks into damping spirals on it (Ladybug-138 gauge spiral). The
+    // gain-ratio driver does not.
+    const NIELSEN: bool = true;
+    fn lambda0(p: &Problem) -> f64 { p.lambda0 }
+    fn build(p: &Problem) -> Self { build_f64(&p.ds) }
+    fn serialize(&mut self, out: &mut Vec<f64>) { self.serialize64(out); }
+    fn deserialize(&mut self, x: &[f64]) { self.deserialize64(x); }
+    fn tune(cfg: &mut arael::simple_lm::LmConfig<f64>) { cfg.lambda_floor = lambda_floor(); }
+    fn solution(&self) -> Solution {
+        Solution {
+            cameras: self.cameras.iter()
+                .map(|c| CameraIn {
+                    rodrigues: rodrigues_of(
+                        arael::matrix::matrix3d::rotation_from_euler_angles(c.ea.value)),
+                    t: c.t.value,
+                    f: c.intr.value.x,
+                    k1: c.intr.value.y,
+                    k2: c.intr.value.z,
+                })
+                .collect(),
+            points: self.points.iter().map(|p| p.pos.value).collect(),
+        }
+    }
+    fn solve(p: &Problem, params: &[f64], m: &mut Self,
+             cfg: &arael::simple_lm::LmConfig<f64>) -> arael::simple_lm::LmResult<f64> {
+        match p.route {
+            Route::Sparse => solve64(params, m, cfg),
+            Route::Schur => solve64_schur(params, m, cfg),
+            #[cfg(feature = "cholmod-gpl")]
+            Route::CholmodGpl =>
+                arael::simple_lm::solve_sparse_cholmod_supernodal(params, m, cfg),
+        }
     }
 }
 
-pub fn run_f64(ds: &Dataset) -> RunOut {
-    run_f64_with(ds, solve64)
+impl bench_harness::arael::Model for SceneF {
+    type Scalar = f32;
+    type Input = Problem;
+    type Solution = Solution;
+    const NIELSEN: bool = true;
+    fn lambda0(p: &Problem) -> f64 { p.lambda0 }
+    fn build(p: &Problem) -> Self { build_f32(&p.ds) }
+    fn serialize(&mut self, out: &mut Vec<f32>) { self.serialize32(out); }
+    fn deserialize(&mut self, x: &[f32]) { self.deserialize32(x); }
+    fn tune(cfg: &mut arael::simple_lm::LmConfig<f32>) { cfg.lambda_floor = lambda_floor() as f32; }
+    fn solution(&self) -> Solution {
+        Solution {
+            cameras: self.cameras.iter()
+                .map(|c| {
+                    let m = arael::matrix::matrix3f::rotation_from_euler_angles(c.ea.value);
+                    let (axis, angle) = quaternf::from_rotation_matrix(m).get_axis_angle();
+                    CameraIn {
+                        rodrigues: vect3d::from(axis * angle),
+                        t: vect3d::from(c.t.value),
+                        f: c.intr.value.x as f64,
+                        k1: c.intr.value.y as f64,
+                        k2: c.intr.value.z as f64,
+                    }
+                })
+                .collect(),
+            points: self.points.iter().map(|p| vect3d::from(p.pos.value)).collect(),
+        }
+    }
+    fn solve(p: &Problem, params: &[f32], m: &mut Self,
+             cfg: &arael::simple_lm::LmConfig<f32>) -> arael::simple_lm::LmResult<f32> {
+        match p.route {
+            Route::Sparse => solve32(params, m, cfg),
+            Route::Schur => solve32_schur(params, m, cfg),
+            // CHOLMOD's supernodal module is double-precision only.
+            #[cfg(feature = "cholmod-gpl")]
+            Route::CholmodGpl => unreachable!("cholmod-gpl is an f64-only row"),
+        }
+    }
 }
 
-pub fn run_f64_schur(ds: &Dataset) -> RunOut {
-    run_f64_with(ds, solve64_schur)
+pub fn run_f64(p: &Problem) -> RunOut { bench_harness::arael::run::<Scene>(p) }
+pub fn run_f32(p: &Problem) -> RunOut { bench_harness::arael::run::<SceneF>(p) }
+
+// Capped single solves (no probes) -- the peak-memory pass, which runs one
+// system alone in a process of its own. The peak fill-in is reached in the first
+// factorization, so a few iterations measure the same high-water mark.
+pub fn run_f64_capped(p: &Problem, max_iters: usize) -> Solution {
+    solve_capped::<Scene>(p, max_iters)
 }
 
-/// The CHOLMOD-supernodal row (GPL-licensed module; see the cholmod-gpl
-/// feature warning in the arael Cargo.toml).
-#[cfg(feature = "cholmod-gpl")]
-pub fn run_f64_supernodal(ds: &Dataset) -> RunOut {
-    run_f64_with(ds, |p, s, cfg| arael::simple_lm::solve_sparse_cholmod_supernodal(p, s, cfg))
+pub fn run_f32_capped(p: &Problem, max_iters: usize) -> Solution {
+    solve_capped::<SceneF>(p, max_iters)
 }
 
-// Single capped solves for the peak-memory measurement (no warm-up pass;
-// peak fill-in is reached in the first factorization).
-
-pub fn run_f64_capped(ds: &Dataset, max_iters: usize) -> Vec<f64> {
-    let mut s = build_f64(ds);
-    let mut params: Vec<f64> = Vec::new();
-    s.serialize64(&mut params);
-    solve64(&params, &mut s, &cfg64(max_iters)).x
+fn solve_capped<M: bench_harness::arael::Model<Input = Problem, Solution = Solution>>(
+    p: &Problem, max_iters: usize) -> Solution {
+    probe_capped::<M>(p, max_iters).solution
 }
 
-pub fn run_f64_schur_capped(ds: &Dataset, max_iters: usize) -> Vec<f64> {
-    let mut s = build_f64(ds);
-    let mut params: Vec<f64> = Vec::new();
-    s.serialize64(&mut params);
-    solve64_schur(&params, &mut s, &cfg64(max_iters)).x
+/// What one capped solve did, for the damping probe: no warmup, no sub-rounds,
+/// no full solve. The point is to see whether the first iterations are CLEAN --
+/// one attempt each, accepted -- because a rejected step there is what denies the
+/// benchmark its per-iteration number.
+pub struct Probe {
+    pub ms: f64,
+    pub accepted: usize,
+    pub attempts: usize,
+    pub solution: Solution,
 }
 
-#[cfg(feature = "cholmod-gpl")]
-pub fn run_f64_supernodal_capped(ds: &Dataset, max_iters: usize) -> Vec<f64> {
-    let mut s = build_f64(ds);
-    let mut params: Vec<f64> = Vec::new();
-    s.serialize64(&mut params);
-    arael::simple_lm::solve_sparse_cholmod_supernodal(&params, &mut s, &cfg64(max_iters)).x
+pub fn probe_f64(p: &Problem, max_iters: usize) -> Probe {
+    probe_capped::<Scene>(p, max_iters)
 }
 
-pub fn run_f32_capped(ds: &Dataset, max_iters: usize) -> Vec<f32> {
-    let mut s = build_f32(ds);
-    let mut params: Vec<f32> = Vec::new();
-    s.serialize32(&mut params);
-    solve32(&params, &mut s, &cfg32(max_iters)).x
+pub fn probe_f32(p: &Problem, max_iters: usize) -> Probe {
+    probe_capped::<SceneF>(p, max_iters)
 }
 
-pub fn run_f32_schur_capped(ds: &Dataset, max_iters: usize) -> Vec<f32> {
-    let mut s = build_f32(ds);
-    let mut params: Vec<f32> = Vec::new();
-    s.serialize32(&mut params);
-    solve32_schur(&params, &mut s, &cfg32(max_iters)).x
-}
-
-type Solve32 = fn(&[f32], &mut SceneF, &arael::simple_lm::LmConfig<f32>)
-    -> arael::simple_lm::LmResult<f32>;
-
-pub fn run_f32(ds: &Dataset) -> RunOut {
-    run_f32_with(ds, solve32)
-}
-
-pub fn run_f32_schur(ds: &Dataset) -> RunOut {
-    run_f32_with(ds, solve32_schur)
-}
-
-fn run_f32_with(ds: &Dataset, solve: Solve32) -> RunOut {
-    let mut s = build_f32(ds);
-    let mut params: Vec<f32> = Vec::new();
-    s.serialize32(&mut params);
-
-    let t0 = std::time::Instant::now();
-    let _ = solve(&params, &mut s, &cfg32(1));
-    let first_iter_ms = t0.elapsed().as_secs_f64() * 1e3;
-
-    let t0 = std::time::Instant::now();
-    let result = solve(&params, &mut s, &cfg32(100));
-    let solve_ms = t0.elapsed().as_secs_f64() * 1e3;
-    s.deserialize32(&result.x);
-    let cameras = s.cameras.iter()
-        .map(|c| {
-            let m = arael::matrix::matrix3f::rotation_from_euler_angles(c.ea.value);
-            let (axis, angle) = quaternf::from_rotation_matrix(m).get_axis_angle();
-            CameraIn {
-                rodrigues: vect3d::from(axis * angle),
-                t: vect3d::from(c.t.value),
-                f: c.intr.value.x as f64,
-                k1: c.intr.value.y as f64,
-                k2: c.intr.value.z as f64,
-            }
-        })
-        .collect();
-    let points = s.points.iter().map(|p| vect3d::from(p.pos.value)).collect();
-    RunOut {
-        solve_ms, first_iter_ms,
-        iterations: result.iterations,
+fn probe_capped<M: bench_harness::arael::Model<Input = Problem, Solution = Solution>>(
+    p: &Problem, max_iters: usize) -> Probe {
+    let mut model = M::build(p);
+    let mut params: Vec<M::Scalar> = Vec::new();
+    model.serialize(&mut params);
+    let cfg = bench_harness::arael::config::<M>(p, max_iters);
+    // The build is the reset, not the solve -- the clock starts here, as it does
+    // everywhere else in the harness.
+    let (ms, result) = bench_harness::solver::timed(|| M::solve(p, &params, &mut model, &cfg));
+    model.deserialize(&result.x);
+    Probe {
+        ms,
         accepted: result.accepted_iterations,
-        full_iter_ms: full_iter_ms(result.timing.as_ref()),
-        cameras, points,
+        attempts: result.iterations,
+        solution: model.solution(),
     }
 }
 
