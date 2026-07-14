@@ -57,6 +57,142 @@ fn zero_diagonal_terminates_immediately() {
     assert_eq!(result.start_cost, 1.0);
 }
 
+// LmConfig::min_diagonal floors the DAMPING scale, so a parameter with no
+// curvature gets lambda * min_diagonal instead of (1 + lambda) * 0 = 0. The
+// factorization then succeeds and that parameter simply does not move.
+
+/// Parameter 1 is untouched: zero gradient, zero Hessian row. Parameter 0 is a
+/// plain quadratic with its minimum at 1.0.
+fn zero_diagonal_problem() -> FnProblem<
+    impl Fn(&[f64]) -> f64,
+    impl Fn(&[f64], &mut [f64], &mut [f64]) -> f64,
+> {
+    FnProblem {
+        cost: |x: &[f64]| (x[0] - 1.0).powi(2),
+        grad_hessian: |x: &[f64], g: &mut [f64], h: &mut [f64]| {
+            g[0] = 2.0 * (x[0] - 1.0);
+            g[1] = 0.0;
+            h[0] = 2.0; h[1] = 0.0; h[2] = 0.0; h[3] = 0.0;
+            (x[0] - 1.0).powi(2)
+        },
+    }
+}
+
+#[test]
+fn min_diagonal_lets_a_zero_diagonal_solve() {
+    let mut p = zero_diagonal_problem();
+    let cfg = LmConfig::<f64> {
+        min_diagonal: Some(1e-6),
+        max_iters: 100,
+        min_iters: 0,
+        ..Default::default()
+    };
+    let result = simple_lm::solve(&[0.0, 0.0], &mut p, &cfg);
+
+    assert_ne!(
+        result.status,
+        arael::simple_lm::LmStatus::DegenerateDiagonal { param: 1 },
+        "the floor should have damped through it"
+    );
+    assert!(result.iterations > 0, "it should actually iterate now");
+    // The parameter that HAS curvature reaches its minimum...
+    assert!(
+        (result.x[0] - 1.0).abs() < 1e-6,
+        "x0 should converge to 1.0, got {}", result.x[0]
+    );
+    // ...and the one that has none does not move: its gradient is zero too, so
+    // the damped system leaves it exactly where it started.
+    assert_eq!(result.x[1], 0.0, "a parameter with no curvature must not drift");
+    assert!(result.end_cost < 1e-12, "cost should go to zero: {}", result.end_cost);
+}
+
+#[test]
+fn without_the_floor_the_same_problem_still_dies() {
+    // The contrast: None is the default and is unchanged.
+    let mut p = zero_diagonal_problem();
+    let result = simple_lm::solve(&[0.0, 0.0], &mut p, &LmConfig::default());
+    assert_eq!(result.status, arael::simple_lm::LmStatus::DegenerateDiagonal { param: 1 });
+    assert_eq!(result.iterations, 0);
+}
+
+#[test]
+fn min_diagonal_does_not_rescue_a_negative_diagonal() {
+    // J^T J's diagonal is a sum of squares, so a negative one means the assembly
+    // is poisoned. Flooring it would hide the bug, so it stays fatal.
+    let mut p = FnProblem {
+        cost: |x: &[f64]| (x[0] - 1.0).powi(2),
+        grad_hessian: |x: &[f64], g: &mut [f64], h: &mut [f64]| {
+            g[0] = 2.0 * (x[0] - 1.0);
+            g[1] = 0.0;
+            h[0] = 2.0; h[1] = 0.0; h[2] = 0.0; h[3] = -1.0; // impossible
+            (x[0] - 1.0).powi(2)
+        },
+    };
+    let cfg = LmConfig::<f64> { min_diagonal: Some(1e-6), ..Default::default() };
+    let result = simple_lm::solve(&[0.0, 0.0], &mut p, &cfg);
+    assert_eq!(
+        result.status,
+        arael::simple_lm::LmStatus::DegenerateDiagonal { param: 1 },
+        "a negative diagonal must stay fatal even with a floor"
+    );
+}
+
+/// The three fatal cases must be told apart in the LOG, not just in the status.
+/// A NaN reported as a "zero" would send the reader to `min_diagonal`, which
+/// floors a zero and does nothing for a NaN. Every comparison against NaN is
+/// false, so a `d < 0` test lets it fall through -- which it did.
+#[test]
+fn a_nan_diagonal_is_not_reported_as_a_zero() {
+    use std::sync::{Arc, Mutex};
+    let seen: Arc<Mutex<std::vec::Vec<String>>> = Arc::new(Mutex::new(std::vec::Vec::new()));
+    let sink = Arc::clone(&seen);
+    arael::log::set_sink(move |_, msg| sink.lock().unwrap().push(msg.to_string()));
+
+    let mut p = FnProblem {
+        cost: |x: &[f64]| (x[0] - 1.0).powi(2),
+        grad_hessian: |x: &[f64], g: &mut [f64], h: &mut [f64]| {
+            g[0] = 2.0 * (x[0] - 1.0);
+            g[1] = 0.0;
+            h[0] = 2.0; h[1] = 0.0; h[2] = 0.0; h[3] = f64::NAN;
+            (x[0] - 1.0).powi(2)
+        },
+    };
+    // No floor -- this is the arm the first version of the message got wrong.
+    let result = simple_lm::solve(&[0.0, 0.0], &mut p, &LmConfig::default());
+    assert_eq!(result.status, arael::simple_lm::LmStatus::DegenerateDiagonal { param: 1 });
+
+    let msgs = seen.lock().unwrap().join("\n");
+    arael::log::reset_sink();
+    assert!(
+        msgs.contains("not a number"),
+        "a NaN diagonal must be named as one:\n{msgs}"
+    );
+    assert!(
+        !msgs.contains("min_diagonal"),
+        "and must NOT advise min_diagonal, which cannot floor a NaN:\n{msgs}"
+    );
+}
+
+#[test]
+fn min_diagonal_does_not_rescue_a_nan_diagonal() {
+    let mut p = FnProblem {
+        cost: |x: &[f64]| (x[0] - 1.0).powi(2),
+        grad_hessian: |x: &[f64], g: &mut [f64], h: &mut [f64]| {
+            g[0] = 2.0 * (x[0] - 1.0);
+            g[1] = 0.0;
+            h[0] = 2.0; h[1] = 0.0; h[2] = 0.0; h[3] = f64::NAN;
+            (x[0] - 1.0).powi(2)
+        },
+    };
+    let cfg = LmConfig::<f64> { min_diagonal: Some(1e-6), ..Default::default() };
+    let result = simple_lm::solve(&[0.0, 0.0], &mut p, &cfg);
+    assert_eq!(
+        result.status,
+        arael::simple_lm::LmStatus::DegenerateDiagonal { param: 1 },
+        "a NaN diagonal must stay fatal even with a floor"
+    );
+}
+
 // Pattern drift: the indexed (cached-pattern) assembly must detect a sparsity
 // pattern that changed mid-solve. The position map is built from the
 // first iteration's entry sequence; a TripletBlock emitting fewer

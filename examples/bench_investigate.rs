@@ -504,10 +504,12 @@ fn main() {
 
         solver.extract_diagonal(&matrix, &mut diagonal);
 
-        // First solve (includes symbolic factorization for sparse solvers)
+        // First solve (includes symbolic factorization for sparse solvers).
+        // No min_diagonal floor here, so the damping scale IS the diagonal --
+        // both parameters are shared refs, so the same slice serves for both.
         let t0 = std::time::Instant::now();
-        
-        solver.solve_damped(n, &mut matrix, &diagonal, 0.001, &grad, &mut delta);
+
+        solver.solve_damped(n, &mut matrix, &diagonal, &diagonal, 0.001, &grad, &mut delta);
         let solve1_us = t0.elapsed().as_micros();
 
         // Second assembly (indexed for sparse, flat for dense)
@@ -519,8 +521,8 @@ fn main() {
 
         // Second solve (numeric only, symbolic cached)
         let t0 = std::time::Instant::now();
-        
-        solver.solve_damped(n, &mut matrix, &diagonal, 0.001, &grad, &mut delta);
+
+        solver.solve_damped(n, &mut matrix, &diagonal, &diagonal, 0.001, &grad, &mut delta);
         let solve2_us = t0.elapsed().as_micros();
 
         println!("  {:>12}  asm1={:>7}us  asm2={:>7}us  solve1={:>7}us  solve2={:>7}us",

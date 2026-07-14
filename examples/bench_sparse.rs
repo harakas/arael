@@ -403,8 +403,10 @@ fn main() {
             // Warmup: one full compute+solve to initialize symbolic factorization
             solver.compute(problem, x0, &mut grad, &mut matrix);
             solver.extract_diagonal(&matrix, &mut diagonal);
-            
-            solver.solve_damped(n, &mut matrix, &diagonal, 0.001, &grad, &mut delta);
+
+            // No min_diagonal floor here, so the damping scale IS the diagonal --
+            // both parameters are shared refs, so the same slice serves for both.
+            solver.solve_damped(n, &mut matrix, &diagonal, &diagonal, 0.001, &grad, &mut delta);
 
             // Measure: assembly (compute)
             let mut assembly_us = Vec::new();
@@ -421,8 +423,8 @@ fn main() {
             let mut solve_us = Vec::new();
             for _ in 0..runs {
                 let t0 = std::time::Instant::now();
-                
-                solver.solve_damped(n, &mut matrix, &diagonal, 0.001, &grad, &mut delta);
+
+                solver.solve_damped(n, &mut matrix, &diagonal, &diagonal, 0.001, &grad, &mut delta);
                 solve_us.push(t0.elapsed().as_nanos() as f64 / 1000.0);
             }
 

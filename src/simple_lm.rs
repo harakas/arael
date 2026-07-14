@@ -162,9 +162,10 @@ pub struct LmConfig<T: Float> {
     /// along a near-null direction -- a gauge freedom is exactly that.
     ///
     /// NOTE the factor of two. arael minimizes `sum r^2`, so its gradient is
-    /// `2 J^T r`. A solver that minimizes `1/2 sum r^2` (Ceres does) has
-    /// gradient `J^T r`, so the same tolerance value means something twice as
-    /// tight there. Checked after each assembly, and it respects `min_iters`.
+    /// `2 J^T r`. A solver that minimizes `1/2 sum r^2` has gradient `J^T r`, so
+    /// the same tolerance value means something twice as tight there -- do not
+    /// carry a number across without halving it. Checked after each assembly, and
+    /// it respects `min_iters`.
     pub gradient_tolerance: Option<T>,
     /// Stop when the parameters stop moving:
     /// `|step|_2 <= parameter_tolerance * (|x|_2 + parameter_tolerance)`.
@@ -199,6 +200,32 @@ pub struct LmConfig<T: Float> {
     /// loop) this is the difference between a late answer and a missed
     /// frame.
     pub time_limit: Option<Duration>,
+    /// Floor under the damping scale: `H[i,i] + lambda * max(H[i,i], min_diagonal)`.
+    /// `None` (the default) leaves the scale at `H[i,i]`, which is the classic
+    /// multiplicative damping `(1 + lambda) * H[i,i]`.
+    ///
+    /// With a floor, a parameter of zero curvature still gets `lambda *
+    /// min_diagonal` of damping, so the system stays positive definite and the
+    /// parameter simply does not move (its gradient is zero too). Without one the
+    /// damped diagonal is `(1 + lambda) * 0 = 0` and the solve ends with
+    /// [`LmStatus::DegenerateDiagonal`].
+    ///
+    /// **A zero diagonal means the system is badly formulated: a parameter that
+    /// nothing constrains. This is a bandaid, and it should be avoided.** It lets
+    /// such a solve finish instead of stopping, but the parameter it damps through
+    /// is unconstrained and its value is meaningless -- the floor does not
+    /// determine it, it only stops it from taking the solve down. Fix the model:
+    /// constrain the parameter, hold it fixed (`Param::fixed`), or leave the entity
+    /// out. Reach for this only when the alternative is worse, e.g. a residual that
+    /// switches itself off (a `branch` guarding an undefined observation, a
+    /// saturated robustifier) can leave an entity with nothing reaching it for one
+    /// iteration and pick it up again on the next.
+    ///
+    /// 1e-6 is a reasonable value.
+    ///
+    /// Rescues a ZERO diagonal only. NEGATIVE and NaN stay fatal: `J^T J`'s
+    /// diagonal is a sum of squares, so either one means the assembly is poisoned.
+    pub min_diagonal: Option<T>,
     /// Minimum damping lambda: LM never decreases lambda below this after
     /// an accepted step (clamped from below to machine epsilon). The
     /// default 1e-12 effectively means "no floor" for well-posed problems.
@@ -241,6 +268,7 @@ impl<T: Float> Default for LmConfig<T> {
             cost_threshold: T::zero(),
             gradient_tolerance: None,
             parameter_tolerance: None,
+            min_diagonal: None,
             time_limit: None,
             lambda_floor: default_lambda_floor::<T>(),
             verbose: false,
@@ -1297,9 +1325,28 @@ pub trait LmSolver<T: Float> {
     /// Extract all diagonal elements from the matrix.
     fn extract_diagonal(&self, matrix: &Self::Matrix, diagonal: &mut [T]);
 
-    /// Apply LM damping and solve: sets diagonal to (1+lambda)*saved_diag, then solves.
-    /// Returns false if the system is not positive definite.
-    fn solve_damped(&mut self, n: usize, matrix: &mut Self::Matrix, diagonal: &[T], lambda: T, grad: &[T], delta: &mut [T]) -> bool;
+    /// Apply LM damping and solve. Returns false if the system is not positive
+    /// definite.
+    ///
+    /// Sets the matrix diagonal to `diagonal[i] + lambda * damp[i]`, where
+    /// `diagonal` is the undamped Gauss-Newton diagonal (captured once per
+    /// linearization by [`extract_diagonal`](Self::extract_diagonal)) and `damp`
+    /// is the scale the damping is applied at.
+    ///
+    /// The two differ only under [`LmConfig::min_diagonal`], which floors `damp`
+    /// so a parameter with no curvature still gets damped and the factorization
+    /// can succeed. Without it `damp` IS `diagonal` and this is the classic
+    /// `(1 + lambda) * diagonal[i]`.
+    fn solve_damped(
+        &mut self,
+        n: usize,
+        matrix: &mut Self::Matrix,
+        diagonal: &[T],
+        damp: &[T],
+        lambda: T,
+        grad: &[T],
+        delta: &mut [T],
+    ) -> bool;
 
     /// Count non-finite (NaN / inf) entries in the matrix. Used by the
     /// main loop for diagnostic output when Cholesky rejects a solve.
@@ -1367,8 +1414,8 @@ impl LmSolver<f64> for Dense {
         let n = diagonal.len();
         for i in 0..n { diagonal[i] = matrix[i * n + i]; }
     }
-    fn solve_damped(&mut self, n: usize, matrix: &mut Vec<f64>, diagonal: &[f64], lambda: f64, grad: &[f64], delta: &mut [f64]) -> bool {
-        for i in 0..n { matrix[i * n + i] = (1.0 + lambda) * diagonal[i]; }
+    fn solve_damped(&mut self, n: usize, matrix: &mut Vec<f64>, diagonal: &[f64], damp: &[f64], lambda: f64, grad: &[f64], delta: &mut [f64]) -> bool {
+        for i in 0..n { matrix[i * n + i] = diagonal[i] + lambda * damp[i]; }
         solve_spd(n, matrix, grad, delta)
     }
     fn matrix_nonfinite_count(&self, matrix: &Vec<f64>) -> usize {
@@ -1387,8 +1434,8 @@ impl LmSolver<f32> for Dense {
         let n = diagonal.len();
         for i in 0..n { diagonal[i] = matrix[i * n + i]; }
     }
-    fn solve_damped(&mut self, n: usize, matrix: &mut Vec<f32>, diagonal: &[f32], lambda: f32, grad: &[f32], delta: &mut [f32]) -> bool {
-        for i in 0..n { matrix[i * n + i] = (1.0 + lambda) * diagonal[i]; }
+    fn solve_damped(&mut self, n: usize, matrix: &mut Vec<f32>, diagonal: &[f32], damp: &[f32], lambda: f32, grad: &[f32], delta: &mut [f32]) -> bool {
+        for i in 0..n { matrix[i * n + i] = diagonal[i] + lambda * damp[i]; }
         solve_spd_f32(n, matrix, grad, delta)
     }
     fn matrix_nonfinite_count(&self, matrix: &Vec<f32>) -> usize {
@@ -1427,13 +1474,13 @@ impl LmSolver<f64> for Band {
         let ldab = self.kd + 1;
         for i in 0..diagonal.len() { diagonal[i] = matrix[self.kd + i * ldab]; }
     }
-    fn solve_damped(&mut self, n: usize, matrix: &mut Vec<f64>, diagonal: &[f64], lambda: f64, grad: &[f64], delta: &mut [f64]) -> bool {
+    fn solve_damped(&mut self, n: usize, matrix: &mut Vec<f64>, diagonal: &[f64], damp: &[f64], lambda: f64, grad: &[f64], delta: &mut [f64]) -> bool {
         // Band Cholesky destroys the matrix, so factor a copy -- in the
         // reused scratch buffer, not a fresh allocation per retry.
         let ldab = self.kd + 1;
         self.scratch64.resize(matrix.len(), 0.0);
         self.scratch64.copy_from_slice(matrix);
-        for i in 0..n { self.scratch64[self.kd + i * ldab] = (1.0 + lambda) * diagonal[i]; }
+        for i in 0..n { self.scratch64[self.kd + i * ldab] = diagonal[i] + lambda * damp[i]; }
         delta.copy_from_slice(grad);
         solve_spd_band(n, self.kd, &mut self.scratch64, delta)
     }
@@ -1454,11 +1501,11 @@ impl LmSolver<f32> for Band {
         let ldab = self.kd + 1;
         for i in 0..diagonal.len() { diagonal[i] = matrix[self.kd + i * ldab]; }
     }
-    fn solve_damped(&mut self, n: usize, matrix: &mut Vec<f32>, diagonal: &[f32], lambda: f32, grad: &[f32], delta: &mut [f32]) -> bool {
+    fn solve_damped(&mut self, n: usize, matrix: &mut Vec<f32>, diagonal: &[f32], damp: &[f32], lambda: f32, grad: &[f32], delta: &mut [f32]) -> bool {
         let ldab = self.kd + 1;
         self.scratch32.resize(matrix.len(), 0.0);
         self.scratch32.copy_from_slice(matrix);
-        for i in 0..n { self.scratch32[self.kd + i * ldab] = (1.0 + lambda) * diagonal[i]; }
+        for i in 0..n { self.scratch32[self.kd + i * ldab] = diagonal[i] + lambda * damp[i]; }
         delta.copy_from_slice(grad);
         solve_spd_band_f32(n, self.kd, &mut self.scratch32, delta)
     }
@@ -1498,11 +1545,11 @@ impl LmSolver<f64> for BandLapack {
         let ldab = self.kd + 1;
         for i in 0..diagonal.len() { diagonal[i] = matrix[self.kd + i * ldab]; }
     }
-    fn solve_damped(&mut self, n: usize, matrix: &mut Vec<f64>, diagonal: &[f64], lambda: f64, grad: &[f64], delta: &mut [f64]) -> bool {
+    fn solve_damped(&mut self, n: usize, matrix: &mut Vec<f64>, diagonal: &[f64], damp: &[f64], lambda: f64, grad: &[f64], delta: &mut [f64]) -> bool {
         let ldab = self.kd + 1;
         self.scratch64.resize(matrix.len(), 0.0);
         self.scratch64.copy_from_slice(matrix);
-        for i in 0..n { self.scratch64[self.kd + i * ldab] = (1.0 + lambda) * diagonal[i]; }
+        for i in 0..n { self.scratch64[self.kd + i * ldab] = diagonal[i] + lambda * damp[i]; }
         delta.copy_from_slice(grad);
         solve_spd_band_lapack(n, self.kd, &mut self.scratch64, delta)
     }
@@ -1524,11 +1571,11 @@ impl LmSolver<f32> for BandLapack {
         let ldab = self.kd + 1;
         for i in 0..diagonal.len() { diagonal[i] = matrix[self.kd + i * ldab]; }
     }
-    fn solve_damped(&mut self, n: usize, matrix: &mut Vec<f32>, diagonal: &[f32], lambda: f32, grad: &[f32], delta: &mut [f32]) -> bool {
+    fn solve_damped(&mut self, n: usize, matrix: &mut Vec<f32>, diagonal: &[f32], damp: &[f32], lambda: f32, grad: &[f32], delta: &mut [f32]) -> bool {
         let ldab = self.kd + 1;
         self.scratch32.resize(matrix.len(), 0.0);
         self.scratch32.copy_from_slice(matrix);
-        for i in 0..n { self.scratch32[self.kd + i * ldab] = (1.0 + lambda) * diagonal[i]; }
+        for i in 0..n { self.scratch32[self.kd + i * ldab] = diagonal[i] + lambda * damp[i]; }
         delta.copy_from_slice(grad);
         solve_spd_band_lapack_f32(n, self.kd, &mut self.scratch32, delta)
     }
@@ -1825,6 +1872,11 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
     let mut grad = vec![T::zero(); n];
     let mut matrix = solver.new_matrix(n);
     let mut diagonal = vec![T::zero(); n];
+    // The scale the damping is applied at: the Gauss-Newton diagonal, floored by
+    // config.min_diagonal. Without a floor it IS the diagonal, so nothing is
+    // allocated and nothing is copied -- `diagonal` is passed for both.
+    let floor = config.min_diagonal;
+    let mut damp = if floor.is_some() { vec![T::zero(); n] } else { Vec::new() };
     let mut delta = vec![T::zero(); n];
 
     let eight = T::from(8.0).unwrap();
@@ -1948,29 +2000,52 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
         };
 
         solver.extract_diagonal(&matrix, &mut diagonal);
-        // A non-positive diagonal cannot be rescued by multiplicative
-        // damping ((1 + lambda) * 0 stays 0): the matrix is singular, no
-        // step can ever be accepted, and the iteration would burn all its
-        // inner failures against max_iters with no error indication. The
-        // Gauss-Newton diagonal is a sum of squares, so zero means no
-        // active constraint curvature touches the parameter at this
-        // linearization point; NaN means poisoned assembly. !(d > 0)
-        // catches both. This is a runtime value condition (a guard or
-        // saturated robustifier can produce it from data), so it
-        // terminates the solve loudly instead of panicking; structural
-        // degeneracy (missing diagonal ENTRY) panics at CSC build time.
-        // Reported as LmStatus::DegenerateDiagonal on the returned result.
+
+        // What the damping is applied at. Multiplicative damping cannot rescue a
+        // ZERO diagonal ((1 + lambda) * 0 stays 0), so a parameter that no active
+        // constraint reaches makes the matrix singular and no step can ever be
+        // accepted. config.min_diagonal floors the damping scale so it can:
+        // the damped diagonal becomes lambda * min_diagonal, the factorization
+        // succeeds, and the parameter does not move -- its gradient is zero too.
+        //
+        // A NEGATIVE or NaN diagonal is never rescued, floor or no floor. The
+        // Gauss-Newton diagonal is a sum of squares; either value means the
+        // assembly is poisoned, and flooring it would hide the bug.
+        //
+        // This is a runtime value condition (a guard or a saturated robustifier
+        // can produce it from data), so it terminates the solve loudly rather than
+        // panicking. Structural degeneracy -- a missing diagonal ENTRY -- panics at
+        // CSC build time instead.
         for (i, d) in diagonal.iter().enumerate() {
-            if !(*d > T::zero()) {
-                error!("arael::lm_solve: parameter {} has non-positive Hessian \
-                        diagonal ({:?}) at iteration {}; no active constraint \
-                        curvature touches it (degenerate model) -- terminating solve",
-                    i, d.to_f64(), iter);
+            let fatal = match floor {
+                // Zero is fine with a floor; the damping carries it. NaN fails
+                // `>=` and a negative fails it too, so both are still caught.
+                Some(_) => !(*d >= T::zero()),
+                None => !(*d > T::zero()),
+            };
+            if fatal {
+                // NaN first: every comparison against it is false, so a `d < 0`
+                // test would let it fall through and be reported as a zero -- and
+                // then advise min_diagonal, which floors a zero and does nothing
+                // for a NaN.
+                let why = if !(*d == *d) {
+                    "not a number -- the assembly is poisoned (a residual or a derivative went NaN)"
+                } else if *d < T::zero() {
+                    "negative -- J^T J's diagonal is a sum of squares, so the assembly is poisoned"
+                } else {
+                    "zero -- no active constraint curvature reaches it (set LmConfig::min_diagonal to damp through it)"
+                };
+                error!("arael::lm_solve: parameter {} has a bad Hessian diagonal ({:?}) \
+                        at iteration {}: {} -- terminating solve",
+                    i, d.to_f64(), iter, why);
                 if let Some(s) = solve_start { timing.total = s.elapsed(); }
                 return LmResult { x: cur_x, start_cost, end_cost, iterations: iter,
                     accepted_iterations: accepted,
                     status: LmStatus::DegenerateDiagonal { param: i }, final_lambda: lambda,
                     timing: gather.then_some(timing), solver: solver.report() };
+            }
+            if let Some(m) = floor {
+                damp[i] = d.max(m);
             }
         }
 
@@ -2002,7 +2077,10 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
             let t_step = gather.then(Instant::now);
 
             let t_ls = gather.then(Instant::now);
-            let solved = solver.solve_damped(n, &mut matrix, &diagonal, lambda, &grad, &mut delta);
+            // Both are shared refs, so with no floor the same slice serves for both.
+            let scale: &[T] = if floor.is_some() { &damp } else { &diagonal };
+            let solved =
+                solver.solve_damped(n, &mut matrix, &diagonal, scale, lambda, &grad, &mut delta);
             let mut ls_dt = Duration::ZERO;
             if let Some(t) = t_ls {
                 let dt = t.elapsed();
@@ -2388,8 +2466,8 @@ impl LmSolver<f64> for Sparse {
         }
     }
 
-    fn solve_damped(&mut self, n: usize, matrix: &mut SparseMatrix<f64>, diagonal: &[f64], lambda: f64, grad: &[f64], delta: &mut [f64]) -> bool {
-        for i in 0..n { matrix.csc.vals[matrix.csc.diag_pos[i]] = (1.0 + lambda) * diagonal[i]; }
+    fn solve_damped(&mut self, n: usize, matrix: &mut SparseMatrix<f64>, diagonal: &[f64], damp: &[f64], lambda: f64, grad: &[f64], delta: &mut [f64]) -> bool {
+        for i in 0..n { matrix.csc.vals[matrix.csc.diag_pos[i]] = diagonal[i] + lambda * damp[i]; }
         let mut dense = vec![0.0f64; n * n];
         for j in 0..n {
             for k in matrix.csc.col_ptr[j]..matrix.csc.col_ptr[j + 1] {
@@ -2463,8 +2541,8 @@ impl LmSolver<f64> for SparseDirect {
         }
     }
 
-    fn solve_damped(&mut self, n: usize, matrix: &mut SparseMatrix<f64>, diagonal: &[f64], lambda: f64, grad: &[f64], delta: &mut [f64]) -> bool {
-        for i in 0..n { matrix.csc.vals[matrix.csc.diag_pos[i]] = (1.0 + lambda) * diagonal[i]; }
+    fn solve_damped(&mut self, n: usize, matrix: &mut SparseMatrix<f64>, diagonal: &[f64], damp: &[f64], lambda: f64, grad: &[f64], delta: &mut [f64]) -> bool {
+        for i in 0..n { matrix.csc.vals[matrix.csc.diag_pos[i]] = diagonal[i] + lambda * damp[i]; }
         // Use dense fallback for now
         let mut dense = vec![0.0f64; n * n];
         for j in 0..n {
@@ -3827,15 +3905,13 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         }
     }
 
-    fn solve_damped(&mut self, n: usize, matrix: &mut FaerMatrix<T>, diagonal: &[T], lambda: T, grad: &[T], delta: &mut [T]) -> bool {
-        let damped = T::one() + lambda;
-
+    fn solve_damped(&mut self, n: usize, matrix: &mut FaerMatrix<T>, diagonal: &[T], damp: &[T], lambda: T, grad: &[T], delta: &mut [T]) -> bool {
         // Declined reduction: the Hessian is already the scalar CSC we
         // factorize. Damp it and solve -- no block storage, no reduce, no
         // back-substitution. This is the plain sparse route.
         if let Some(csc) = matrix.csc.as_mut() {
             for i in 0..n {
-                csc.vals[csc.diag_pos[i]] = damped * diagonal[i];
+                csc.vals[csc.diag_pos[i]] = diagonal[i] + lambda * damp[i];
             }
             let sym_ref = faer::sparse::SymbolicSparseColMatRef::new_checked(
                 n, n, &self.s_col_ptr, None, &self.s_row_idx,
@@ -3865,7 +3941,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         {
             let vals = h.vals_mut();
             for i in 0..n {
-                vals[self.bdiag_pos[i]] = damped * diagonal[i];
+                vals[self.bdiag_pos[i]] = diagonal[i] + lambda * damp[i];
             }
         }
 
@@ -4073,8 +4149,8 @@ impl<T: EigenScalar + crate::utils::Float> LmSolver<T> for SparseEigen<T> {
     fn extract_diagonal(&self, matrix: &SparseMatrix<T>, diagonal: &mut [T]) {
         for i in 0..diagonal.len() { diagonal[i] = matrix.csc.vals[matrix.csc.diag_pos[i]]; }
     }
-    fn solve_damped(&mut self, n: usize, matrix: &mut SparseMatrix<T>, diagonal: &[T], lambda: T, grad: &[T], delta: &mut [T]) -> bool {
-        for i in 0..n { matrix.csc.vals[matrix.csc.diag_pos[i]] = (T::one() + lambda) * diagonal[i]; }
+    fn solve_damped(&mut self, n: usize, matrix: &mut SparseMatrix<T>, diagonal: &[T], damp: &[T], lambda: T, grad: &[T], delta: &mut [T]) -> bool {
+        for i in 0..n { matrix.csc.vals[matrix.csc.diag_pos[i]] = diagonal[i] + lambda * damp[i]; }
         eigen_ffi_solve(T::LLT_SOLVE, self.handle, &matrix.csc, grad, delta)
     }
 }
@@ -4122,8 +4198,8 @@ impl LmSolver<f64> for SparseCholmod {
     fn extract_diagonal(&self, matrix: &SparseMatrix<f64>, diagonal: &mut [f64]) {
         for i in 0..diagonal.len() { diagonal[i] = matrix.csc.vals[matrix.csc.diag_pos[i]]; }
     }
-    fn solve_damped(&mut self, n: usize, matrix: &mut SparseMatrix<f64>, diagonal: &[f64], lambda: f64, grad: &[f64], delta: &mut [f64]) -> bool {
-        for i in 0..n { matrix.csc.vals[matrix.csc.diag_pos[i]] = (1.0 + lambda) * diagonal[i]; }
+    fn solve_damped(&mut self, n: usize, matrix: &mut SparseMatrix<f64>, diagonal: &[f64], damp: &[f64], lambda: f64, grad: &[f64], delta: &mut [f64]) -> bool {
+        for i in 0..n { matrix.csc.vals[matrix.csc.diag_pos[i]] = diagonal[i] + lambda * damp[i]; }
         eigen_ffi_solve(eigen_cholmod_f64_solve, self.handle, &matrix.csc, grad, delta)
     }
 }
@@ -4193,8 +4269,8 @@ impl LmSolver<f64> for SparseCholmodSupernodal {
     fn extract_diagonal(&self, matrix: &SparseMatrix<f64>, diagonal: &mut [f64]) {
         for i in 0..diagonal.len() { diagonal[i] = matrix.csc.vals[matrix.csc.diag_pos[i]]; }
     }
-    fn solve_damped(&mut self, n: usize, matrix: &mut SparseMatrix<f64>, diagonal: &[f64], lambda: f64, grad: &[f64], delta: &mut [f64]) -> bool {
-        for i in 0..n { matrix.csc.vals[matrix.csc.diag_pos[i]] = (1.0 + lambda) * diagonal[i]; }
+    fn solve_damped(&mut self, n: usize, matrix: &mut SparseMatrix<f64>, diagonal: &[f64], damp: &[f64], lambda: f64, grad: &[f64], delta: &mut [f64]) -> bool {
+        for i in 0..n { matrix.csc.vals[matrix.csc.diag_pos[i]] = diagonal[i] + lambda * damp[i]; }
         eigen_ffi_solve(eigen_cholmod_supernodal_f64_solve, self.handle, &matrix.csc, grad, delta)
     }
 }

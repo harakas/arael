@@ -1065,6 +1065,7 @@
 //! | `cost_threshold` | `0.0` | terminate immediately when cost ≤ this (`0.0` disables) |
 //! | `gradient_tolerance` | `None` | stop when `max|g_i| <= tol`. The only test for a stationary point |
 //! | `parameter_tolerance` | `None` | stop when `|step| <= tol * (|x| + tol)` -- the parameters stopped moving |
+//! | `min_diagonal` | `None` | floor under the damping scale, so a parameter with no curvature does not end the solve |
 //! | `time_limit` | `None` | wall-clock budget for the whole solve. Overrides `min_iters` |
 //! | `verbose` | `false` | per-iteration line on stderr. **Turn on first whenever debugging** |
 //! | `gather_timing` | `false` | gather per-phase timing AND the per-iteration timeline into `LmResult::timing` (`Some` when on, `None` when off) |
@@ -1083,6 +1084,22 @@
 //! convergence criteria, so `min_iters` holds them open like the others. Note
 //! arael minimizes `sum r^2`, so its gradient is `2 J^T r` -- a solver that
 //! minimizes `1/2 sum r^2` reads the same tolerance twice as tight.
+//!
+//! `min_diagonal` is not a termination rule but belongs with them, because
+//! without it a parameter of zero curvature ENDS the solve
+//! (`LmStatus::DegenerateDiagonal`). Damping is
+//! `H[i,i] + lambda * max(H[i,i], min_diagonal)`, so the floor keeps the damped
+//! system positive definite and the untouched parameter simply does not move.
+//!
+//! **A zero diagonal means the system is badly formulated: a parameter that
+//! nothing constrains. The floor is a bandaid and should be avoided.** It lets the
+//! solve finish, but the parameter it damps through stays unconstrained and its
+//! value is meaningless. Fix the model instead -- constrain the parameter, hold it
+//! fixed (`Param::fixed`), or leave the entity out. Reach for the floor only when
+//! a residual can legitimately switch itself off (a `branch` guarding an undefined
+//! observation, a saturated robustifier) and an entity can end one iteration with
+//! nothing reaching it. A NEGATIVE or NaN diagonal is fatal regardless: `J^T J`'s
+//! diagonal is a sum of squares, so either one means the assembly is poisoned.
 //!
 //! `time_limit` is the exception to `min_iters`: a budget is a budget, so a
 //! spent one stops the solve wherever it is (`LmStatus::TimeLimit`), returning

@@ -270,7 +270,7 @@ impl LmSolver<f64> for NeverFactorizes {
         <Dense as LmSolver<f64>>::extract_diagonal(&self.0, m, d)
     }
     fn solve_damped(
-        &mut self, _n: usize, _m: &mut Vec<f64>, _d: &[f64],
+        &mut self, _n: usize, _m: &mut Vec<f64>, _d: &[f64], _damp: &[f64],
         _lambda: f64, _g: &[f64], _delta: &mut [f64],
     ) -> bool {
         false // "not positive definite", every time
