@@ -46,15 +46,21 @@ use std::time::Instant;
 
 /// (wa, we, wb, what it is). The first block is what `FIXED_SHAPES` covers; the
 /// second has no unrolled kernel and goes to the fallback.
+/// Every shape in `FIXED_SHAPES`, plus three with no unrolled kernel. All eleven
+/// listed shapes are here: the transpose-first rule routes real shipped shapes, so
+/// none of them may go unmeasured.
 const SHAPES: &[(usize, usize, usize, &str)] = &[
     (3, 3, 3, "pgo 2D"),
     (6, 3, 6, "slam pose x point"),
     (6, 6, 6, "pgo 3D pose x pose"),
     (9, 3, 9, "bal camera x point"),
     (6, 1, 6, "slam, 1-wide elim"),
-    (7, 3, 7, ""),
-    (3, 2, 3, ""),
-    (2, 3, 2, ""),
+    (6, 2, 6, "slam, bearing"),
+    (6, 4, 6, "slam, line/plane"),
+    (7, 3, 7, "sim3 x point"),
+    (3, 2, 3, "2D pose x 2D point"),
+    (3, 4, 3, "2D pose x segment"),
+    (2, 3, 2, "mirror: 2-wide obs"),
     (12, 3, 12, "no fixed kernel"),
     (9, 6, 9, "no fixed kernel"),
     (5, 3, 7, "no fixed kernel"),
@@ -162,6 +168,46 @@ fn fixed<T: Real, const WA: usize, const WE: usize, const WB: usize>(
     }
 }
 
+/// The transposed unrolled kernel, but transposing FIRST. `fixed`'s transposed body
+/// computes a horizontal dot product per (i, c); its direct body is an axpy down a
+/// contiguous column, which is the shape the machine wants. So pay a WA x WE
+/// transpose into a stack buffer -- 18 elements for (6,3,6) -- and then run the
+/// direct body on it.
+///
+/// `[[T; WA]; WE]` needs no `generic_const_exprs`: it is nested arrays, not an array
+/// of length `WA * WE`. Each `a[k]` is then exactly the contiguous column the direct
+/// body wants.
+///
+/// The zero-init is free and needs no `MaybeUninit`: the array is exactly WA x WE and
+/// every element is written before it is read, so the stores are dead and LLVM drops
+/// them -- measured identical to a `MaybeUninit` version. The nano-gemm fallback
+/// cannot do this, because there the widths are run-time values, the buffer has to be
+/// worst-case, and the part that is never written still gets zeroed.
+#[inline]
+fn fixed_packed<T: Real, const WA: usize, const WE: usize, const WB: usize>(
+    dst: &mut [T],
+    ca: &[T],
+    zb: &[T],
+) {
+    // ca holds C_a^T (WE x WA): C_a[i, k] is at ca[k + i * WE].
+    let mut a = [[T::ZERO; WA]; WE];
+    for i in 0..WA {
+        for k in 0..WE {
+            a[k][i] = ca[k + i * WE];
+        }
+    }
+    for c in 0..WB {
+        for k in 0..WE {
+            let z = zb[k + c * WE];
+            let dcol = &mut dst[c * WA..(c + 1) * WA];
+            let acol = &a[k];
+            for i in 0..WA {
+                dcol[i] = dcol[i] - acol[i] * z;
+            }
+        }
+    }
+}
+
 /// The loop the fallback used to be: the same code with the widths at run time,
 /// so the trip counts -- and the vectorization -- are unknown to the compiler.
 #[inline]
@@ -243,15 +289,25 @@ fn nano<T: Real>(
     }
 }
 
-/// Best of `rounds`, each of `reps` GEMMs. Returns ns per GEMM.
-fn best_ns(rounds: usize, reps: usize, mut f: impl FnMut()) -> f64 {
-    let mut best = f64::INFINITY;
+/// Best-of-`rounds` for each contender, each round `reps` GEMMs, with the rounds
+/// INTERLEAVED: one round of each contender, then the next round of each. Returns ns
+/// per GEMM, in the order given.
+///
+/// Running them back-to-back instead lets a frequency or thermal drift land entirely
+/// on whichever contender happened to be executing. That is not hypothetical here:
+/// back-to-back, (6,3,6) transposed came out 12.8 ns on one run and 16.5 ns on the
+/// next, which is the difference between a 1.3x win and no win at all. Interleaved,
+/// a drift hits every contender equally and the comparison survives it.
+fn best_ns_each(rounds: usize, reps: usize, fs: &mut [&mut dyn FnMut()]) -> Vec<f64> {
+    let mut best = vec![f64::INFINITY; fs.len()];
     for _ in 0..rounds {
-        let t = Instant::now();
-        for _ in 0..reps {
-            f();
+        for (slot, f) in core::iter::zip(best.iter_mut(), fs.iter_mut()) {
+            let t = Instant::now();
+            for _ in 0..reps {
+                f();
+            }
+            *slot = slot.min(t.elapsed().as_secs_f64() * 1e9 / reps as f64);
         }
-        best = best.min(t.elapsed().as_secs_f64() * 1e9 / reps as f64);
     }
     best
 }
@@ -264,10 +320,18 @@ fn bench<T: Real + std::fmt::Debug>(scalar: &str, trans: bool) {
         "\n=== {scalar}, lhs {} ===",
         if trans { "transposed (stride swap)" } else { "direct" }
     );
-    println!(
-        "{:<12} {:>20} {:>9} {:>9} {:>9}  {:>13}",
-        "(wa,we,wb)", "what it is", "fixed", "runtime", "nano", "nano vs fixed"
-    );
+    // `fixed+T` only means anything transposed: it IS the direct kernel there.
+    if trans {
+        println!(
+            "{:<12} {:>20} {:>9} {:>9} {:>9} {:>9}  {:>13}",
+            "(wa,we,wb)", "what it is", "fixed", "fixed+T", "runtime", "nano", "nano vs fixed"
+        );
+    } else {
+        println!(
+            "{:<12} {:>20} {:>9} {:>9} {:>9}  {:>13}",
+            "(wa,we,wb)", "what it is", "fixed", "runtime", "nano", "nano vs fixed"
+        );
+    }
 
     for &(wa, we, wb, what) in SHAPES {
         let ca: Vec<T> = (0..wa * we).map(|i| T::of(1.0 + i as f64 * 0.01)).collect();
@@ -281,22 +345,35 @@ fn bench<T: Real + std::fmt::Debug>(scalar: &str, trans: bool) {
         // of times, so this is the fair comparison (and the library caches them).
         let plan = T::plan(wa, wb, we, strided_lhs(trans, wa, we));
 
-        macro_rules! call_fixed {
-            ($dst:expr) => {
+        macro_rules! on_shape {
+            ($f:ident, $dst:expr $(, $extra:expr)*) => {
                 match (wa, we, wb) {
-                    (3, 3, 3) => fixed::<T, 3, 3, 3>($dst, &ca, &zb, trans),
-                    (6, 3, 6) => fixed::<T, 6, 3, 6>($dst, &ca, &zb, trans),
-                    (6, 6, 6) => fixed::<T, 6, 6, 6>($dst, &ca, &zb, trans),
-                    (9, 3, 9) => fixed::<T, 9, 3, 9>($dst, &ca, &zb, trans),
-                    (6, 1, 6) => fixed::<T, 6, 1, 6>($dst, &ca, &zb, trans),
-                    (7, 3, 7) => fixed::<T, 7, 3, 7>($dst, &ca, &zb, trans),
-                    (3, 2, 3) => fixed::<T, 3, 2, 3>($dst, &ca, &zb, trans),
-                    (2, 3, 2) => fixed::<T, 2, 3, 2>($dst, &ca, &zb, trans),
-                    (12, 3, 12) => fixed::<T, 12, 3, 12>($dst, &ca, &zb, trans),
-                    (9, 6, 9) => fixed::<T, 9, 6, 9>($dst, &ca, &zb, trans),
-                    (5, 3, 7) => fixed::<T, 5, 3, 7>($dst, &ca, &zb, trans),
+                    (3, 3, 3) => $f::<T, 3, 3, 3>($dst, &ca, &zb $(, $extra)*),
+                    (6, 3, 6) => $f::<T, 6, 3, 6>($dst, &ca, &zb $(, $extra)*),
+                    (6, 6, 6) => $f::<T, 6, 6, 6>($dst, &ca, &zb $(, $extra)*),
+                    (9, 3, 9) => $f::<T, 9, 3, 9>($dst, &ca, &zb $(, $extra)*),
+                    (6, 1, 6) => $f::<T, 6, 1, 6>($dst, &ca, &zb $(, $extra)*),
+                    (6, 2, 6) => $f::<T, 6, 2, 6>($dst, &ca, &zb $(, $extra)*),
+                    (6, 4, 6) => $f::<T, 6, 4, 6>($dst, &ca, &zb $(, $extra)*),
+                    (7, 3, 7) => $f::<T, 7, 3, 7>($dst, &ca, &zb $(, $extra)*),
+                    (3, 2, 3) => $f::<T, 3, 2, 3>($dst, &ca, &zb $(, $extra)*),
+                    (3, 4, 3) => $f::<T, 3, 4, 3>($dst, &ca, &zb $(, $extra)*),
+                    (2, 3, 2) => $f::<T, 2, 3, 2>($dst, &ca, &zb $(, $extra)*),
+                    (12, 3, 12) => $f::<T, 12, 3, 12>($dst, &ca, &zb $(, $extra)*),
+                    (9, 6, 9) => $f::<T, 9, 6, 9>($dst, &ca, &zb $(, $extra)*),
+                    (5, 3, 7) => $f::<T, 5, 3, 7>($dst, &ca, &zb $(, $extra)*),
                     _ => unreachable!(),
                 }
+            };
+        }
+        macro_rules! call_fixed {
+            ($dst:expr) => {
+                on_shape!(fixed, $dst, trans)
+            };
+        }
+        macro_rules! call_fixed_packed {
+            ($dst:expr) => {
+                on_shape!(fixed_packed, $dst)
             };
         }
 
@@ -310,21 +387,59 @@ fn bench<T: Real + std::fmt::Debug>(scalar: &str, trans: bool) {
                 && d1.iter().zip(&d3).all(|(a, b)| a.abs_diff(*b) < tol),
             "({wa},{we},{wb}) trans={trans} disagree: fixed {d1:?} nano {d3:?}"
         );
+        let mut d4 = vec![T::ZERO; wa * wb];
+        if trans {
+            call_fixed_packed!(&mut d4);
+            assert!(
+                d1.iter().zip(&d4).all(|(a, b)| a.abs_diff(*b) < tol),
+                "({wa},{we},{wb}) fixed+T disagrees: {d1:?} vs {d4:?}"
+            );
+        }
 
-        let t_fixed = best_ns(ROUNDS, REPS, || {
+        // Interleaved, not back-to-back: see `best_ns_each`. `fixed_packed` reads ca
+        // as C_a^T, so it is only in the race when the tile really is transposed.
+        let mut f_fixed = || {
             call_fixed!(&mut d1);
             std::hint::black_box(&d1);
-        });
-        let t_rt = best_ns(ROUNDS, REPS, || {
+        };
+        let mut f_rt = || {
             runtime(&mut d2, &ca, trans, wa, we, &zb, wb);
             std::hint::black_box(&d2);
-        });
-        let t_nano = best_ns(ROUNDS, REPS, || {
+        };
+        let mut f_nano = || {
             nano(&plan, &mut d3, &ca, trans, wa, we, &zb, wb);
             std::hint::black_box(&d3);
-        });
+        };
+        let mut f_packed = || {
+            call_fixed_packed!(&mut d4);
+            std::hint::black_box(&d4);
+        };
 
-        let ratio = t_nano / t_fixed;
+        let mut contenders: Vec<&mut dyn FnMut()> = vec![&mut f_fixed, &mut f_rt, &mut f_nano];
+        if trans {
+            contenders.push(&mut f_packed);
+        }
+        let t = best_ns_each(ROUNDS, REPS, &mut contenders);
+        let (t_fixed, t_rt, t_nano) = (t[0], t[1], t[2]);
+        let t_packed = if trans { t[3] } else { t_fixed };
+
+        // The best of ours is what nano-gemm actually has to beat.
+        let best_ours = if trans { t_fixed.min(t_packed) } else { t_fixed };
+        let ratio = t_nano / best_ours;
+        if trans {
+            println!(
+                "{:<12} {:>20} {:>8.1}n {:>8.1}n {:>8.1}n {:>8.1}n  {:>12.2}x{}",
+                format!("({wa},{we},{wb})"),
+                what,
+                t_fixed,
+                t_packed,
+                t_rt,
+                t_nano,
+                ratio,
+                if ratio < 0.95 { "  <- nano wins" } else { "" }
+            );
+            continue;
+        }
         println!(
             "{:<12} {:>20} {:>8.1}n {:>8.1}n {:>8.1}n  {:>12.2}x{}",
             format!("({wa},{we},{wb})"),
@@ -437,44 +552,56 @@ fn plan_strategy() {
     for &(wa, we, wb, _) in SHAPES {
         let ca = vec![1.0f64; wa * we];
         let zb = vec![0.5f64; we * wb];
-        let mut d = vec![0.0f64; wa * wb];
         let plan = <f64 as Real>::plan(wa, wb, we, false);
+        // One dst each: interleaving needs the contenders to be independent closures.
+        let (mut d1, mut d2, mut d3, mut d4, mut d5) = (
+            vec![0.0f64; wa * wb],
+            vec![0.0f64; wa * wb],
+            vec![0.0f64; wa * wb],
+            vec![0.0f64; wa * wb],
+            vec![0.0f64; wa * wb],
+        );
 
         // The floor: the plan is already in hand. Unreachable through nano-gemm's
         // API here -- its plan fields are private, so there is nothing to hoist the
         // build into -- but it bounds what any scheme could win back.
-        let hoisted = best_ns(ROUNDS, REPS, || {
-            nano(&plan, &mut d, &ca, false, wa, we, &zb, wb);
-            std::hint::black_box(&d);
-        });
+        let mut f_hoisted = || {
+            nano(&plan, &mut d1, &ca, false, wa, we, &zb, wb);
+            std::hint::black_box(&d1);
+        };
         // What the fallback used to be.
-        let loops = best_ns(ROUNDS, REPS, || {
-            runtime(&mut d, &ca, false, wa, we, &zb, wb);
-            std::hint::black_box(&d);
-        });
-        let fresh = best_ns(ROUNDS, REPS, || {
-            plan_source::fresh(&mut d, &ca, wa, we, &zb, wb);
-            std::hint::black_box(&d);
-        });
-        let cached = best_ns(ROUNDS, REPS, || {
-            plan_source::cached(&mut d, &ca, wa, we, &zb, wb);
-            std::hint::black_box(&d);
-        });
+        let mut f_loops = || {
+            runtime(&mut d2, &ca, false, wa, we, &zb, wb);
+            std::hint::black_box(&d2);
+        };
+        let mut f_fresh = || {
+            plan_source::fresh(&mut d3, &ca, wa, we, &zb, wb);
+            std::hint::black_box(&d3);
+        };
+        let mut f_cached = || {
+            plan_source::cached(&mut d4, &ca, wa, we, &zb, wb);
+            std::hint::black_box(&d4);
+        };
         // What the library actually ships: whichever of the two won, plus the three
         // length assertions that make its `unsafe` sound. The gap to that column is
         // what the assertions cost.
-        let trait_ = best_ns(ROUNDS, REPS, || {
-            <f64 as SchurReal>::gemm_sub_nano(&mut d, &ca, false, wa, we, &zb, wb);
-            std::hint::black_box(&d);
-        });
+        let mut f_trait = || {
+            <f64 as SchurReal>::gemm_sub_nano(&mut d5, &ca, false, wa, we, &zb, wb);
+            std::hint::black_box(&d5);
+        };
+        let t = best_ns_each(
+            ROUNDS,
+            REPS,
+            &mut [&mut f_hoisted, &mut f_loops, &mut f_fresh, &mut f_cached, &mut f_trait],
+        );
         println!(
             "{:<12} {:>10.1}n {:>9.1}n {:>8.1}n {:>8.1}n {:>10.1}n",
             format!("({wa},{we},{wb})"),
-            hoisted,
-            loops,
-            fresh,
-            cached,
-            trait_
+            t[0],
+            t[1],
+            t[2],
+            t[3],
+            t[4]
         );
     }
 }

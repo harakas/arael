@@ -728,8 +728,42 @@ fn gemm_sub_fixed<T: SchurReal, const WA: usize, const WE: usize, const WB: usiz
     }
 }
 
+/// Is it cheaper to transpose a `WA x WE` tile than to multiply through it in place?
+///
+/// [`gemm_sub_fixed`] is an axpy down a contiguous column, which vectorizes.
+/// [`gemm_sub_fixed_trans`] is a horizontal dot product per output element, which does
+/// not. So for a transposed tile there is a choice: multiply in place with the worse
+/// loop shape, or pay a `WA x WE` transpose and then use the better one. The transpose
+/// wins once there is enough of a column to vectorize (`WA`) and few enough columns to
+/// copy (`WE`).
+///
+/// Measured with `--example gemmbench` on aarch64/NEON, which is the tighter
+/// constraint -- on x86/AVX2 transposing first wins on every shape tested, so anything
+/// that pays there pays here. Both scalars agree. Transposed, `fixed` -> `fixed+T`:
+///
+/// ```text
+///                     f64 (aarch64)   f32 (aarch64)
+///   (6,1,6)  in         1.87x           2.11x
+///   (6,2,6)  in         1.75x           1.99x
+///   (6,3,6)  in         1.31x           1.20x      <- the SLAM workhorse
+///   (6,4,6)  in         1.13x           1.21x
+///   (9,3,9)  in         1.22x           1.69x      <- BAL
+///   (7,3,7)  in         1.34x           1.10x
+///   (6,6,6)  out        1.01x           0.99x      <- WE = 6: the copy stops paying
+///   (9,6,9)  out        0.95x           0.98x
+///   (3,3,3)  out        0.85x           0.90x      <- WA = 3: no column to vectorize
+///   (3,4,3)  out        0.83x           0.79x
+///   (2,3,2)  out        0.64x           0.65x
+/// ```
+const fn transpose_first(wa: usize, we: usize) -> bool {
+    wa >= 5 && we <= 4
+}
+
 /// [`gemm_sub_fixed`] for a transposed-stored lhs: `ca` holds `C_a^T`
-/// (`WE x WA` column-major), so each output element is a WE-term dot
+/// (`WE x WA` column-major), so each output element is a WE-term dot -- unless
+/// [`transpose_first`] says the tile is worth transposing, in which case it is, and the
+/// direct kernel's loop runs instead. The predicate is const, so only one of the two
+/// bodies is ever generated for a given shape.
 #[inline]
 fn gemm_sub_fixed_trans<T: SchurReal, const WA: usize, const WE: usize, const WB: usize>(
     dst: &mut [T],
@@ -737,6 +771,32 @@ fn gemm_sub_fixed_trans<T: SchurReal, const WA: usize, const WE: usize, const WB
     zb: &[T],
 ) {
     note_fixed_kernel();
+    if transpose_first(WA, WE) {
+        // C_a^T is WE x WA, so C_a[i, k] is at ca[k + i * WE]. `a[k]` is then the
+        // k-th column of C_a, contiguous, which is what the axpy below wants.
+        //
+        // `[[T; WA]; WE]` needs no generic_const_exprs -- it is nested arrays, not an
+        // array of length WA * WE. The zero-init is free: every element is written
+        // before it is read, so the stores are dead and get dropped (measured
+        // identical to a MaybeUninit version).
+        let mut a = [[T::ZERO; WA]; WE];
+        for i in 0..WA {
+            for k in 0..WE {
+                a[k][i] = ca[k + i * WE];
+            }
+        }
+        for c in 0..WB {
+            for k in 0..WE {
+                let z = zb[k + c * WE];
+                let dcol = &mut dst[c * WA..(c + 1) * WA];
+                let acol = &a[k];
+                for i in 0..WA {
+                    dcol[i] = dcol[i] - acol[i] * z;
+                }
+            }
+        }
+        return;
+    }
     for c in 0..WB {
         for i in 0..WA {
             let arow = &ca[i * WE..(i + 1) * WE];
