@@ -14,7 +14,7 @@ publish = false
 cholmod-gpl = ["arael/cholmod-gpl"]
 
 [dependencies]
-arael = { path = "../.." }
+arael = { path = "../..", features = ["rayon"] }
 arael-faer = { path = "../../arael-faer" }
 bench-harness = { path = "../harness" }
 

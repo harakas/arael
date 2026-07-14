@@ -235,6 +235,18 @@ pub struct LmConfig<T: Float> {
     /// non-positive-definite damped systems and catastrophic Gauss-Newton
     /// overshoots along the near-null directions.
     pub lambda_floor: T,
+    /// Threads for the linear solve. `1` (the default) is sequential; `n > 1`
+    /// uses `n`; `0` uses every core.
+    ///
+    /// Requires the `rayon` cargo feature. Without it, anything other than 1 is
+    /// ignored with a warning and the solve stays sequential.
+    ///
+    /// Threading has overhead: whether it helps, and by how much, depends on the
+    /// model and its number of parameters.
+    ///
+    /// Only the sparse factorization and triangular solve (`SparseFaer`) honour
+    /// it -- assembly, the Schur reduction and every other backend are sequential.
+    pub num_threads: usize,
     /// Print per-iteration cost, lambda, and timing to stderr. Very useful
     /// for understanding how the solver behaves with a given parameter set --
     /// check the output to validate convergence and tune the config.
@@ -271,6 +283,7 @@ impl<T: Float> Default for LmConfig<T> {
             min_diagonal: None,
             time_limit: None,
             lambda_floor: default_lambda_floor::<T>(),
+            num_threads: 1,
             verbose: false,
             driver: Box::new(DefaultLambdaDriver::default()),
             gather_timing: false,
@@ -2861,6 +2874,32 @@ impl Default for FaerOrdering {
     }
 }
 
+/// [`LmConfig::num_threads`] as a `faer::Par`. 1 is sequential, `n > 1` uses n,
+/// 0 uses every core. The whole cfg dance lives here so no call site repeats it.
+///
+/// Without the `rayon` feature faer has no `Par::Rayon` variant at all, so a
+/// request for threads cannot be honoured -- it warns and stays sequential
+/// rather than silently pretending.
+#[cfg(feature = "rayon")]
+fn faer_par(num_threads: usize) -> faer::Par {
+    match num_threads {
+        1 => faer::Par::Seq,
+        n => faer::Par::rayon(n), // 0 = rayon::current_num_threads()
+    }
+}
+
+#[cfg(not(feature = "rayon"))]
+fn faer_par(num_threads: usize) -> faer::Par {
+    if num_threads != 1 {
+        warn!(
+            "LmConfig::num_threads is {}, but arael was built without the `rayon` \
+             feature -- solving sequentially. Rebuild with --features rayon.",
+            num_threads
+        );
+    }
+    faer::Par::Seq
+}
+
 /// What [`SparseFaer`]'s first compute decided. Read it with
 /// [`SparseFaer::plan`].
 #[derive(Clone, Copy, Debug)]
@@ -2941,6 +2980,11 @@ pub struct SparseFaer<T = f64> {
     // Read the clock at all? Set from LmConfig::gather_timing by configure().
     // Nothing here reads it otherwise -- the wasm build has no working clock.
     measure: bool,
+    // Threads for the factorization and the triangular solve, from
+    // LmConfig::num_threads via configure(). configure() runs before the first
+    // compute, which matters: the scratch buffers are sized for this Par, and a
+    // rayon factorization needs a different amount than a sequential one.
+    par: faer::Par,
     // How much of the last compute() was model assembly; the solver takes the
     // rest to be structural analysis. Only meaningful on a compute that did any,
     // which is what did_setup records -- otherwise the trait call's own overhead
@@ -2993,6 +3037,7 @@ impl<T> SparseFaer<T> {
             plan: None,
             verbose: false,
             measure: false,
+            par: faer::Par::Seq,
             assembly_time: Duration::ZERO,
             did_setup: false,
             positions: None,
@@ -3304,11 +3349,13 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
         &mut self,
         llt: &faer::sparse::linalg::cholesky::SymbolicCholesky<usize>,
     ) {
+        // Sized for self.par, NOT for Par::Seq: a rayon factorization asks for a
+        // different amount of scratch, and sizing for the wrong one under-allocates.
         self.l_vals.resize(llt.len_val(), T::zero());
-        let factor = llt.factorize_numeric_llt_scratch::<T>(faer::Par::Seq, faer::Spec::default());
+        let factor = llt.factorize_numeric_llt_scratch::<T>(self.par, faer::Spec::default());
         self.factor_mem
             .resize(factor.unaligned_bytes_required(), std::mem::MaybeUninit::uninit());
-        let solve = llt.solve_in_place_scratch::<T>(1, faer::Par::Seq);
+        let solve = llt.solve_in_place_scratch::<T>(1, self.par);
         self.solve_mem
             .resize(solve.unaligned_bytes_required(), std::mem::MaybeUninit::uninit());
     }
@@ -3344,6 +3391,9 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         self.verbose = config.verbose;
         // The clock is only read when the caller asked for timing.
         self.measure = config.gather_timing;
+        // Before the first compute, so size_llt_buffers sizes the scratch for
+        // the same Par the factorization will run at.
+        self.par = faer_par(config.num_threads);
     }
 
     fn assembly_time(&self) -> Option<Duration> {
@@ -3906,6 +3956,9 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
     }
 
     fn solve_damped(&mut self, n: usize, matrix: &mut FaerMatrix<T>, diagonal: &[T], damp: &[T], lambda: T, grad: &[T], delta: &mut [T]) -> bool {
+        // Copied out so the scratch buffers below can be borrowed mutably.
+        let par = self.par;
+
         // Declined reduction: the Hessian is already the scalar CSC we
         // factorize. Damp it and solve -- no block storage, no reduce, no
         // back-substitution. This is the plain sparse route.
@@ -3923,7 +3976,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 mat_ref,
                 faer::Side::Upper,
                 faer::linalg::cholesky::llt::factor::LltRegularization::default(),
-                faer::Par::Seq,
+                par,
                 stack,
                 faer::Spec::default(),
             ) {
@@ -3933,7 +3986,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             delta.copy_from_slice(grad);
             let rhs = faer::col::ColMut::from_slice_mut(delta);
             let solve_stack = faer::dyn_stack::MemStack::new(&mut self.solve_mem);
-            llt.solve_in_place_with_conj(faer::Conj::No, rhs.as_mat_mut(), faer::Par::Seq, solve_stack);
+            llt.solve_in_place_with_conj(faer::Conj::No, rhs.as_mat_mut(), par, solve_stack);
             return true;
         }
 
@@ -3966,7 +4019,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             mat_ref,
             faer::Side::Upper,
             faer::linalg::cholesky::llt::factor::LltRegularization::default(),
-            faer::Par::Seq,
+            par,
             stack,
             faer::Spec::default(),
         ) {
@@ -3976,7 +4029,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         self.x_kept.copy_from_slice(&self.rhs_kept);
         let rhs = faer::col::ColMut::from_slice_mut(&mut self.x_kept);
         let solve_stack = faer::dyn_stack::MemStack::new(&mut self.solve_mem);
-        llt.solve_in_place_with_conj(faer::Conj::No, rhs.as_mat_mut(), faer::Par::Seq, solve_stack);
+        llt.solve_in_place_with_conj(faer::Conj::No, rhs.as_mat_mut(), par, solve_stack);
 
         // Recover the eliminated blocks into the full-length delta.
         let schur = self.schur.as_ref().unwrap();

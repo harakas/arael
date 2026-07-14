@@ -462,6 +462,15 @@ performance/quality trade-off that actually matters for the
 problem. See [docs/SOLVERS.md](docs/SOLVERS.md) for the full field
 reference and a recipe for picking them.
 
+Arael is single-threaded. The sparse factorization and triangular solve can
+optionally run on rayon's thread pool -- enable the `rayon` feature and set
+`LmConfig::num_threads` (1 = sequential, the default; `n` = n threads; 0 = every
+core).
+
+Threading has overhead: whether it helps, and by how much, depends on the model
+and its number of parameters. Only the sparse factorization and triangular solve
+are threaded. See [docs/SOLVERS.md](docs/SOLVERS.md#threads).
+
 ## Runtime Differentiation
 
 Compile-time differentiation generates optimized Rust code with CSE at build time -- ideal when the model structure is fixed. But many applications need equations that are only known at runtime: user-typed formulas in a CAD parametric dimension, configuration-driven curve fitting, or symbolic constraints loaded from a file.

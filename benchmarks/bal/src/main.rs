@@ -279,7 +279,7 @@ fn report_sweep(label: &str, lambda: f64, one: (f64, usize, usize),
 }
 
 fn main() {
-    bench_harness::pin::enforce_single_core();
+    bench_harness::pin::enforce_cores();
     if mem_pass() {
         return;
     }

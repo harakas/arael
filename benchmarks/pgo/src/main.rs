@@ -390,7 +390,7 @@ fn measure_in_process_memory(path: &str, weighted: bool, three_d: bool, labels: 
 }
 
 fn main() {
-    bench_harness::pin::enforce_single_core();
+    bench_harness::pin::enforce_cores();
     if mem_pass() {
         return;
     }

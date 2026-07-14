@@ -1066,6 +1066,7 @@
 //! | `gradient_tolerance` | `None` | stop when `max|g_i| <= tol`. The only test for a stationary point |
 //! | `parameter_tolerance` | `None` | stop when `|step| <= tol * (|x| + tol)` -- the parameters stopped moving |
 //! | `min_diagonal` | `None` | floor under the damping scale, so a parameter with no curvature does not end the solve |
+//! | `num_threads` | `1` | threads for the sparse factorization (needs the `rayon` feature). Measure first -- see below |
 //! | `time_limit` | `None` | wall-clock budget for the whole solve. Overrides `min_iters` |
 //! | `verbose` | `false` | per-iteration line on stderr. **Turn on first whenever debugging** |
 //! | `gather_timing` | `false` | gather per-phase timing AND the per-iteration timeline into `LmResult::timing` (`Some` when on, `None` when off) |
@@ -1108,6 +1109,29 @@
 //! fixed-rate system -- `Some(Duration::from_millis(200))` on a 4 Hz loop --
 //! where a late answer is a missed frame. When it is `None` (the default) the
 //! solver never reads the clock.
+//!
+//! ## Threads
+//!
+//! Arael is single-threaded. The sparse factorization and triangular solve can
+//! optionally run on rayon's global pool:
+//!
+//! ```toml
+//! arael = { version = "0.7", features = ["rayon"] }
+//! ```
+//!
+//! ```no_run
+//! # use arael::simple_lm::LmConfig;
+//! let cfg = LmConfig::<f64> {
+//!     num_threads: 4,   // 1 = sequential (default), n = n threads, 0 = every core
+//!     ..Default::default()
+//! };
+//! ```
+//!
+//! Without the feature, anything but 1 warns and stays sequential.
+//!
+//! Threading has overhead: whether it helps, and by how much, depends on the
+//! model and its number of parameters. Only the sparse factorization and
+//! triangular solve are threaded.
 //!
 //! ## Tuning for performance vs quality
 //!

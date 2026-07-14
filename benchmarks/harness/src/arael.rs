@@ -82,6 +82,11 @@ pub fn config<M: Model>(input: &M::Input, max_iters: usize) -> LmConfig<M::Scala
     let mut cfg = LmConfig {
         verbose: std::env::var("VERBOSE").is_ok(),
         gather_timing: true,
+        // The same count every other system's pool was capped at (BENCH_THREADS,
+        // resolved by pin::enforce_cores), so a threaded run stays a fair race.
+        // Needs arael built with the `rayon` feature, or it warns and runs
+        // sequentially.
+        num_threads: crate::pin::threads(),
         // The termination class every system in these benchmarks is held to.
         abs_precision: f(1e-5),
         rel_precision: f(1e-5),
