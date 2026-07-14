@@ -346,16 +346,17 @@ A Cholesky rejection gets a longer diagnostic line (commit
 `6c72586`):
 
 ```
-5/0: Cholesky failed (damped matrix not positive-definite), lambda=1.6e-7 -> 1.6e-6 (step=177) [non-finite: grad=0 diag=0 x=0 matrix=0] [diag<=0: 0]
+5/0: Cholesky failed (damped matrix not positive-definite), lambda=1.6e-7 -> 1.6e-6 (step=177) [non-finite: grad=0 diag=0 x=0 matrix=0]
 ```
 
 | Field | What it says |
 |---|---|
 | `lambda=1.6e-7 -> 1.6e-6` | the bump λ gets on the retry (×10) |
 | `non-finite: grad=N diag=N x=N matrix=N` | NaN/Inf counts in each scratch buffer. All zero means the matrix is fully finite, the problem is structural |
-| `diag<=0: N` | count of Hessian-diagonal entries ≤ 0. Any non-zero count means some parameter is untouched by every constraint (indices left at `u32::MAX`) or a negative contribution leaked in -- both are bugs, not rounding noise |
 
-When all four non-finite counts are 0 and `diag<=0` is 0, the
+A non-positive diagonal is not printed here: it is caught before the inner loop and terminates the solve with `LmStatus::DegenerateDiagonal { param }`, naming the parameter that no constraint reaches.
+
+When all four non-finite counts are 0, the
 rejection is f32 accumulation noise at tiny λ (see commit context in
 `loc_global_demo` fix). When any are non-zero, stop and fix the
 model -- the solver can't tell you more.
@@ -434,6 +435,63 @@ stopped the solve on a step it *liked*, and that step is kept. `TimeLimit`,
 `DriverTerminated` and `DegenerateDiagonal` all return the best parameters
 found so far rather than panicking. `LmResult` derives `Clone`/`Debug`.
 
+## Where the log goes
+
+`arael::log` sets the level and the destination of every `info!` / `warn!` /
+`error!` arael emits -- the `verbose` trace, the backend's report of what it
+chose, and the warnings from saturated guards.
+
+```rust,ignore
+use arael::log::{self, Level};
+
+log::silence();                  // emit nothing
+log::set_level(Level::Error);    // errors only
+log::set_sink(|level, msg| {     // route them anywhere
+    my_logger::write(level.tag(), msg);
+});
+log::reset_sink();               // back to stderr
+```
+
+`Level` is ordered `Off < Error < Warn < Info`. The check happens at the call
+site before the message is formatted, so a silenced arael allocates nothing.
+
+## Reporting a solve -- `LmResult::print`
+
+```rust,ignore
+let r = model.solve_sparse(&cfg);
+
+r.print();          // plain ASCII, to stdout
+r.pretty_print();   // colour and glyphs, to stdout
+
+let s: String = r.report();          // the same text print() writes
+let s: String = r.pretty_report();   // the same text pretty_print() writes
+let s: String = r.render(Style { colour: true, unicode: false });  // pick both
+println!("{r}");    // Display is report()
+```
+
+`report()` is pure ASCII with no escape sequences, so it is safe in a log or a
+file. `pretty_report()` carries ANSI colour and box glyphs and is for a terminal.
+Both draw the same facts:
+
+```text
+LM converged in 12 iterations (9 accepted, 3 retried)
+  ----------------------------------------------------------
+  cost      8129.39 -> 0.000925674  (100.00% down)
+  lambda    2.56e-10 at exit
+  time      21.40 ms
+    assembly          8.20 ms   38.3%  ########............    9 calls, first 3.10 ms
+    linear solve      9.91 ms   46.3%  #########...........   12 calls, first 4.00 ms
+    cost eval         2.10 ms    9.8%  ##..................   12 calls, first 0.20 ms
+    advance           0.01 ms    0.1%  ....................    9 calls, first 0.00 ms
+    steps         +++-+x++-+++
+                  + accepted   - rejected   x not positive definite
+  backend   Schur: 480 blocks / 1440 params eliminated, 360 kept
+            fill ratio 0.45, ordered by Amd
+```
+
+The timing block appears only when `gather_timing` was set, and the backend line
+only when the backend reported a plan.
+
 ## Profiling a solve -- `LmTiming`
 
 Set `gather_timing: true` to find out where a solve spends its time. The
@@ -443,17 +501,82 @@ is never read):
 ```rust,ignore
 pub struct LmTiming {
     pub total: Duration,          // whole solve
+    pub analysis: Duration,       // the backend's ONE-TIME structural work
     pub assembly: Duration,       // residual + Jacobian + Hessian, all iters
-    pub first_assembly: Duration, //   ...of which the first (also builds the pattern)
-    pub linear_solve: Duration,   // damped factorization + solve, all attempts
-    pub first_linear_solve: Duration,  // ...of which the first (also symbolic factorization)
+    pub first_assembly: Duration, //   ...of which the first
+    pub linear_solve: Duration,   // damped NUMERIC factorization + solve, all attempts
+    pub first_linear_solve: Duration,  // ...of which the first
     pub cost_eval: Duration,      // trial-point cost (residual only)
     pub first_cost_eval: Duration,
     pub advance: Duration,        // post-step re-centering
     pub first_advance: Duration,
     // plus a *_count for each phase
+
+    pub steps: Vec<LmStep>,       // the per-iteration timeline -- see below
 }
 ```
+
+### What the setup costs -- `LmTiming::analysis`
+
+Before the backend can factorize anything it discovers the sparsity pattern and
+the value-position map, detects the marginalizable blocks, weighs the Schur
+reduction (two trial symbolic factorizations), chooses the fill-reducing ordering,
+and factorizes symbolically. All of it runs inside the first `compute`, and
+`analysis` is what it cost.
+
+`assembly` is then the model's residual and Jacobian work, on every iteration
+including the first. The split is exact: a backend reports how much of its
+`compute` was assembly, and the solver takes the remainder.
+
+```text
+    analysis          0.08 ms   14.4%  ###.................    1 call
+    assembly          0.05 ms   10.0%  ##..................   10 calls, first 0.01 ms
+```
+
+A seventh of a small solve. On a large one it can dominate: Ladybug-1723's
+ordering comparison alone runs into seconds.
+
+The symbolic factorization is here, not in `linear_solve` -- `solve_damped` only
+ever factorizes numerically, against the symbolic factorization `compute` made
+once.
+
+### The timeline -- `LmTiming::steps`
+
+One record per **attempt**, damping retries included, so
+`steps.len() == LmResult::iterations`. The totals bucket a rejected attempt and
+an accepted one together; the timeline keeps them apart.
+
+```rust,ignore
+pub struct LmStep {
+    pub iter: usize,          // 1-based, counts retries -- matches the verbose trace
+    pub inner: usize,         // retry index at THIS linearization; 0 = first attempt
+    pub accepted: bool,
+    pub factorization_failed: bool,   // damped Cholesky said not positive definite
+
+    pub lambda: f64,          // the damping this attempt used
+    pub cost: f64,            // before
+    pub new_cost: f64,        // at the trial point; NaN if the factorization failed
+    pub step_norm: f64,       // |delta|_2 -- how far it proposed to move
+    pub grad_max: f64,        // max|g_i| here; constant across the retries that share it
+
+    pub time: Duration,           // the whole attempt (NOT including `assembly`/`analysis`)
+    pub assembly: Duration,       // charged to inner == 0 only; a retry re-factorizes,
+                                  //   it does not re-assemble
+    pub analysis: Duration,       // the one-time structural work; non-zero on iter 1 only
+    pub linear_solve: Duration,   // damped factorization + solve, this attempt
+    pub cost_eval: Duration,      // trial-point cost; zero if the factorization failed
+    pub advance: Duration,        // re-centering; zero unless the step was kept
+}
+```
+
+The scalars are `f64` at any solve precision (an `f32` converts exactly), which
+keeps `LmTiming` free of a type parameter. The per-step phases sum to the
+aggregate totals above.
+
+A run of increasing `inner` at a rising `lambda` is a solve retrying its own
+step; `assembly` is charged only to `inner == 0`, so the timeline shows what each
+retry actually cost.
+
 
 Every phase records `{total, first, count}`. The first call is broken out
 because the first iteration carries a one-time structure cost the steady

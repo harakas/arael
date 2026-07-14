@@ -503,20 +503,42 @@ Full source: [examples/runtime_fit_demo.rs](examples/runtime_fit_demo.rs).
 
 ### My solve doesn't converge. What do I check?
 
-0. **Turn on solver verbose mode first.** Set `verbose: true` on `LmConfig` and every LM step prints cost, lambda, and the step outcome. On a Cholesky rejection the line also reports non-finite counts for grad / diagonal / cur_x / matrix and a count of non-positive diagonal entries -- four quick signals that narrow the problem before any deeper digging:
+0. **Turn on solver verbose mode first.** Set `verbose: true` on `LmConfig` and every LM step prints one line: iteration / retry, cost before -> after, the improvement, the damping lambda, and the microseconds it took.
 
     ```rust,ignore
-    let cfg = arael::simple_lm::LmConfig::<f32> { verbose: true, ..Default::default() };
-    let result = arael::simple_lm::solve_sparse_faer_f32(&x0, &mut model, &cfg);
+    let cfg = LmConfig::<f32> { verbose: true, gather_timing: true, ..Default::default() };
+    let result = model.solve_sparse(&cfg);
+    result.pretty_print();
     ```
 
-    A healthy pass looks like steady cost drops with rising / stabilising step sizes and no Cholesky rejections -- see [examples/slam_demo.rs](examples/slam_demo.rs) for a reference trace. If verbose already reports NaN / Inf or `diag<=0`, skip to steps 2 / 3 below; otherwise continue to the cost-by-label breakdown.
+    ```text
+    [arael INFO] 1/0: 264639->131839 / 132800, lambda=1e-4 (step=197)
+    [arael INFO] 2/0: 131839->26411.6 / 105428, lambda=2e-5 (step=53)
+    [arael INFO] 3/0: 26411.6->4182.65 / 22229, lambda=4e-6 (step=49)
+    [arael INFO] 4/0: 4182.65->188975 / -184793, lambda=8e-7 (step=43)   <- worse: rejected
+    [arael INFO] 5/1: 4182.65->186852 / -182669, lambda=8e-6 (step=39)   <- retry, lambda climbs
+    ```
+
+    The pair is `iteration/retry`. A negative improvement is a rejected step: the parameters stay put, lambda goes up, and the next line retries from the same linearization.
+
+    On a Cholesky rejection the line also reports non-finite counts for grad / diagonal / cur_x / matrix -- four quick signals that narrow the problem before any deeper digging. (A non-positive diagonal is caught before the inner loop and ends the solve with `LmStatus::DegenerateDiagonal`, naming the parameter.)
+
+    `gather_timing` also makes the result print itself -- status, cost, where the time went, and every attempt in order:
+
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/harakas/arael/master/docs/report-dark.svg">
+      <img alt="arael LM report: converged in 14 iterations, cost 264639 down to 148.738, a per-phase timing breakdown with bars, the accept/reject timeline, and the Schur plan" src="docs/report-light.svg">
+    </picture>
+
+    That is `pretty_print()`, straight from [examples/slam2d_simple_demo.rs](examples/slam2d_simple_demo.rs). `print()` writes the same thing in plain ASCII -- safe in a log or a file -- and `report()` / `pretty_report()` hand it back as a `String` instead of writing it.
+
+    A healthy pass is steady cost drops with no Cholesky rejections. A run of rejections in the timeline means the step size is being fought over -- try the gain-ratio `NielsenLambdaDriver`. If verbose reports NaN / Inf, or the solve ends in `LmStatus::DegenerateDiagonal`, skip to steps 2 / 3 below; otherwise continue to the cost-by-label breakdown.
 
 1. **Cost breakdown by label.** Name your constraint attributes with `#[arael(constraint(hb, name = "drift", { ... }))]` so each group shows up under its own label in the sum-of-squares. Call `model.calc_cost_table(&params)` for a `HashMap<&'static str, T>` and log it. A single label dominating the total is usually the culprit -- either an overly tight sigma, bad initial values for its inputs, or a constraint that's mathematically unsatisfiable.
 
 2. **NaN or Inf residuals / derivatives.** The verbose-mode output from step 0 already tells you whether grad / matrix / params contain non-finite values at the failing step. If they do, walk `model.calc_jacobian(&params).rows` to find the specific row. A NaN residual or partial derivative usually means a `sqrt`, `acos`, `asin`, or `atan2` saw a degenerate input (zero-length vector, both-zero arguments, `|x| > 1` for asin/acos). `arael-sym` ships `safe_sqrt`, `safe_asin`, `safe_acos`, `safe_atan2` that clamp / regularise at the singular point and produce non-diverging derivatives. **Before reaching for them, prefer to redesign the constraint so the singularity can't be hit.** A `safe_*` wrapper hides the degeneracy from the solver and may leave the residual insensitive to the parameters that should drive it out of the singular region; an equivalent constraint formulated on the right geometric quantity avoids the singularity entirely. E.g. match 3D landmarks to features in 3D space (compare world-frame directions or positions) instead of projecting through a camera model and computing 2D image-plane residuals -- the 3D formulation is simpler, better conditioned, and has no pixel-wraparound / behind-camera pathology.
 
-3. **Non-positive diagonal.** The verbose-mode `diag<=0: N` counter at a Cholesky rejection is the loudest possible signal that some parameter is untouched by every constraint (indices left at `u32::MAX`) or is receiving a negative contribution. Either outcome is a bug distinct from f32 accumulation noise.
+3. **Non-positive diagonal.** A solve that ends in `LmStatus::DegenerateDiagonal { param }` names the offending parameter and is the loudest possible signal that some parameter is untouched by every constraint (indices left at `u32::MAX`) or is receiving a negative contribution. Either outcome is a bug distinct from f32 accumulation noise.
 
 4. **Gradient magnitude.** After `calc_grad_hessian_dense`, the maximum absolute gradient component should be small relative to the cost scale at a local minimum. A huge gradient with tiny cost means the parameter scaling is off -- one parameter moves cost several orders of magnitude more than another, which destabilises Levenberg-Marquardt.
 

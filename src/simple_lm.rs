@@ -754,16 +754,25 @@ pub struct LmTiming {
     /// Gradient + Hessian assembly (residual, Jacobian, accumulation) summed
     /// over every iteration.
     pub assembly: Duration,
-    /// The first assembly alone. It also discovers the sparsity pattern and
-    /// builds the value-position map -- a one-time structure cost the steady
-    /// state does not pay.
+    /// The first assembly alone. Recorded apart because the steady-state mean
+    /// drops it uniformly with the other phases.
     pub first_assembly: Duration,
+    /// The backend's one-time structural analysis, run inside the first
+    /// `compute`: sparsity pattern and value-position map, Schur detection, the
+    /// fill/flop decision (two trial symbolic factorizations), the fill-reducing
+    /// ordering, and the symbolic factorization.
+    ///
+    /// Disjoint from `assembly`, which is the model's residual and Jacobian work.
+    /// Zero for a backend that does no analysis (`Dense`, `Band`) or does not
+    /// report it.
+    pub analysis: Duration,
     /// Damped linear solve (factorization + triangular solve) summed over
     /// every inner attempt.
     pub linear_solve: Duration,
-    /// The first damped solve alone. It also runs the symbolic factorization
-    /// (fill-reducing ordering + elimination-tree structure) -- a one-time
-    /// cost the steady state does not pay.
+    /// The first damped solve alone. Recorded apart so the steady-state mean can
+    /// drop the first iteration uniformly with the other phases. NOTE it does NOT
+    /// carry the symbolic factorization: that runs inside `compute` and is
+    /// reported as `analysis`. `solve_damped` only ever factorizes numerically.
     pub first_linear_solve: Duration,
     /// Trial-point cost evaluation (residual only, no Jacobian) summed over
     /// every inner attempt.
@@ -778,6 +787,10 @@ pub struct LmTiming {
     pub first_advance: Duration,
     /// Number of assembly calls (one per outer iteration).
     pub assembly_count: usize,
+    /// Number of computes that did structural analysis. Normally 1 -- the
+    /// analysis is one-time -- and more only if the structure changed and had to
+    /// be rebuilt.
+    pub analysis_count: usize,
     /// Number of damped-solve attempts (one per inner iteration that reached
     /// factorization).
     pub linear_solve_count: usize,
@@ -785,6 +798,70 @@ pub struct LmTiming {
     pub cost_eval_count: usize,
     /// Number of `advance` calls (one per accepted step).
     pub advance_count: usize,
+    /// One record per attempted step, in order. A damping retry is an attempt, so
+    /// rejected steps and failed factorizations get a record too, and
+    /// `steps.len()` equals [`LmResult::iterations`].
+    ///
+    /// Populated only when [`LmConfig::gather_timing`] is set; empty otherwise,
+    /// and nothing is computed for it.
+    pub steps: std::vec::Vec<LmStep>,
+}
+
+/// One attempted LM step. The per-iteration timeline in [`LmTiming::steps`].
+///
+/// The scalars are `f64` at any solve precision (an `f32` converts exactly),
+/// which keeps [`LmTiming`] free of a type parameter.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LmStep {
+    /// Attempt number, 1-based, counting damping retries. Matches the first
+    /// figure of the verbose trace and [`LmResult::iterations`].
+    pub iter: usize,
+    /// Retry index within this linearization: 0 is the first attempt at this
+    /// point, 1 the first re-damped retry, and so on.
+    pub inner: usize,
+    /// Did the step reduce the cost and get kept?
+    pub accepted: bool,
+    /// Did the damped Cholesky report the system not positive definite? Then no
+    /// step was produced: `new_cost` is NaN and `step_norm` is zero.
+    pub factorization_failed: bool,
+    /// The damping this attempt used.
+    pub lambda: f64,
+    /// Cost before the attempt.
+    pub cost: f64,
+    /// Cost at the trial point. NaN when the factorization failed.
+    pub new_cost: f64,
+    /// `|delta|_2` -- how far the attempt proposed to move.
+    pub step_norm: f64,
+    /// `max|g_i|` at this linearization point. Constant across the retries that
+    /// share it, since a rejected step does not re-linearize.
+    pub grad_max: f64,
+
+    /// Wall time for the whole attempt: the damped solve, the trial cost
+    /// evaluation, and (if the step was kept) the re-centering. Excludes
+    /// `assembly` and `analysis`. The phases below sum to slightly under it, the
+    /// remainder being the loop's own book-keeping.
+    pub time: Duration,
+    /// The assembly that produced this linearization -- residual, Jacobian, and
+    /// the `J^T J` / `J^T r` accumulation.
+    ///
+    /// Charged to the first attempt at each point (`inner == 0`), zero on every
+    /// retry: a retry re-damps the diagonal and re-factorizes, it does not
+    /// re-assemble.
+    pub assembly: Duration,
+    /// The backend's structural analysis, if this attempt's `compute` did any --
+    /// see [`LmTiming::analysis`]. Non-zero on the first attempt, and on any
+    /// later one whose structure had to be rebuilt.
+    pub analysis: Duration,
+    /// The damped NUMERIC factorization and triangular solve for this attempt.
+    /// The symbolic factorization is not here -- it runs inside `compute` and is
+    /// reported as `analysis`.
+    pub linear_solve: Duration,
+    /// The trial-point cost evaluation (residual only, no Jacobian). Zero when
+    /// the factorization failed -- there was no trial point to evaluate.
+    pub cost_eval: Duration,
+    /// Post-step re-centering (`LmProblem::advance`). Zero unless the step was
+    /// accepted.
+    pub advance: Duration,
 }
 
 /// Mean of a phase's per-call time with the first call removed:
@@ -851,6 +928,255 @@ pub struct LmResult<T> {
     /// Per-phase wall-clock timing: `Some` iff [`LmConfig::gather_timing`]
     /// was set, `None` otherwise (see [`LmTiming`]).
     pub timing: Option<LmTiming>,
+}
+
+/// How a report is drawn. [`LmResult::report`] uses [`Style::PLAIN`],
+/// [`LmResult::pretty_report`] uses [`Style::PRETTY`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Style {
+    /// Colour the output with ANSI escapes.
+    pub colour: bool,
+    /// Draw with box and marker glyphs outside ASCII.
+    pub unicode: bool,
+}
+
+impl Style {
+    /// ASCII, no colour. Safe to write to a file or a log.
+    pub const PLAIN: Style = Style { colour: false, unicode: false };
+    /// Colour and glyphs, for a terminal.
+    pub const PRETTY: Style = Style { colour: true, unicode: true };
+
+    fn paint(self, code: &str, text: &str) -> String {
+        if self.colour {
+            format!("\x1b[{code}m{text}\x1b[0m")
+        } else {
+            text.to_string()
+        }
+    }
+    /// (accepted, rejected, factorization failed)
+    fn markers(self) -> (&'static str, &'static str, &'static str) {
+        if self.unicode {
+            ("\u{2713}", "\u{2717}", "\u{2298}") // check, ballot X, circled slash
+        } else {
+            ("+", "-", "x")
+        }
+    }
+    fn rule(self, n: usize) -> String {
+        if self.unicode { "\u{2500}".repeat(n) } else { "-".repeat(n) }
+    }
+    fn bar(self, filled: usize, width: usize) -> String {
+        let f = filled.min(width);
+        if self.unicode {
+            format!("{}{}", "\u{2588}".repeat(f), "\u{2591}".repeat(width - f))
+        } else {
+            format!("{}{}", "#".repeat(f), ".".repeat(width - f))
+        }
+    }
+}
+
+impl LmStatus {
+    /// The status as a short word, for a report line.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            LmStatus::Converged => "converged",
+            LmStatus::CostThreshold => "cost threshold reached",
+            LmStatus::MaxIterations => "hit max_iters",
+            LmStatus::GradientTolerance => "gradient flat",
+            LmStatus::ParameterTolerance => "step negligible",
+            LmStatus::TimeLimit => "out of time",
+            LmStatus::DriverTerminated => "driver stopped it",
+            LmStatus::LambdaCeiling => "damping exhausted",
+            LmStatus::RetryBudgetExhausted => "retry budget exhausted",
+            LmStatus::DegenerateDiagonal { .. } => "degenerate diagonal",
+        }
+    }
+    /// Did the solve reach a minimum, as opposed to running out of something?
+    pub fn is_success(&self) -> bool {
+        matches!(
+            self,
+            LmStatus::Converged
+                | LmStatus::CostThreshold
+                | LmStatus::GradientTolerance
+                | LmStatus::ParameterTolerance
+                | LmStatus::DriverTerminated
+        )
+    }
+}
+
+impl<T: Float> LmResult<T> {
+    /// A plain-text summary of the solve: status, cost, iterations, damping,
+    /// plus the timing breakdown and the backend's plan when it has them.
+    ///
+    /// This is what [`print`](Self::print) writes, and what `Display` produces.
+    pub fn report(&self) -> String {
+        self.render(Style::PLAIN)
+    }
+
+    /// [`report`](Self::report) with colour and box-drawing glyphs, for a
+    /// terminal. Same content; do not write it to a file or a log.
+    pub fn pretty_report(&self) -> String {
+        self.render(Style::PRETTY)
+    }
+
+    /// Write [`report`](Self::report) to stdout.
+    pub fn print(&self) {
+        println!("{}", self.report());
+    }
+
+    /// Write [`pretty_report`](Self::pretty_report) to stdout.
+    pub fn pretty_print(&self) {
+        println!("{}", self.pretty_report());
+    }
+
+    /// The report drawn in an explicit [`Style`] -- for a caller who wants
+    /// colour without glyphs, or the reverse.
+    pub fn render(&self, style: Style) -> String {
+        let f = |v: T| G(v.to_f64().unwrap_or(f64::NAN)).to_string();
+        let mut out = String::new();
+
+        // -- headline ------------------------------------------------------
+        let head = if self.status.is_success() {
+            style.paint("32;1", self.status.as_str()) // green
+        } else {
+            style.paint("33;1", self.status.as_str()) // yellow: it stopped, it did not fail
+        };
+        let retries = self.iterations.saturating_sub(self.accepted_iterations);
+        out.push_str(&format!(
+            "LM {head} in {} iterations ({} accepted, {} retried)\n",
+            self.iterations, self.accepted_iterations, retries
+        ));
+        if let LmStatus::DegenerateDiagonal { param } = self.status {
+            out.push_str(&format!(
+                "  {}  parameter {param} has no curvature: no constraint reaches it\n",
+                style.paint("31;1", "!!") // red
+            ));
+        }
+        out.push_str(&format!("  {}\n", style.rule(58)));
+
+        // -- cost ----------------------------------------------------------
+        let s = self.start_cost.to_f64().unwrap_or(f64::NAN);
+        let e = self.end_cost.to_f64().unwrap_or(f64::NAN);
+        let drop = if s > 0.0 && s.is_finite() && e.is_finite() {
+            format!("  ({:.2}% down)", 100.0 * (s - e) / s)
+        } else {
+            String::new()
+        };
+        out.push_str(&format!(
+            "  cost      {} -> {}{}\n",
+            f(self.start_cost),
+            style.paint("1", &f(self.end_cost)),
+            drop
+        ));
+        out.push_str(&format!("  lambda    {} at exit\n", f(self.final_lambda)));
+
+        if let Some(t) = &self.timing {
+            out.push_str(&self.render_timing(t, style));
+        }
+        if let Some(SolverReport::Schur(plan)) = &self.solver {
+            out.push_str(&render_plan(plan, style));
+        }
+        out
+    }
+
+    fn render_timing(&self, t: &LmTiming, style: Style) -> String {
+        let total = t.total.as_secs_f64() * 1e3;
+        let mut out = format!("  time      {total:.2} ms\n");
+        let pct = |d: Duration| {
+            if total > 0.0 {
+                100.0 * d.as_secs_f64() * 1e3 / total
+            } else {
+                0.0
+            }
+        };
+        let row = |name: &str, d: Duration, first: Duration, n: usize| {
+            // With one call the "first" is the whole thing.
+            let tail = if n == 1 {
+                "  1 call".to_string()
+            } else {
+                format!("{n:>3} calls, first {:.2} ms", first.as_secs_f64() * 1e3)
+            };
+            format!(
+                "    {:<13} {:>8.2} ms  {:>5.1}%  {}  {}\n",
+                name,
+                d.as_secs_f64() * 1e3,
+                pct(d),
+                style.bar((pct(d) / 5.0).round() as usize, 20),
+                tail,
+            )
+        };
+        if t.analysis_count > 0 {
+            out.push_str(&row("analysis", t.analysis, t.analysis, t.analysis_count));
+        }
+        out.push_str(&row("assembly", t.assembly, t.first_assembly, t.assembly_count));
+        out.push_str(&row(
+            "linear solve",
+            t.linear_solve,
+            t.first_linear_solve,
+            t.linear_solve_count,
+        ));
+        out.push_str(&row("cost eval", t.cost_eval, t.first_cost_eval, t.cost_eval_count));
+        out.push_str(&row("advance", t.advance, t.first_advance, t.advance_count));
+
+        // One marker per attempt, wrapped -- a long solve is hundreds of them.
+        if !t.steps.is_empty() {
+            const PER_LINE: usize = 50;
+            let (acc, rej, fail) = style.markers();
+            for (chunk, steps) in t.steps.chunks(PER_LINE).enumerate() {
+                let mut line = String::new();
+                for s in steps {
+                    line.push_str(&if s.factorization_failed {
+                        style.paint("31", fail) // red
+                    } else if s.accepted {
+                        style.paint("32", acc) // green
+                    } else {
+                        style.paint("33", rej) // yellow
+                    });
+                }
+                let label = if chunk == 0 { "steps" } else { "" };
+                out.push_str(&format!("    {label:<13} {line}\n"));
+            }
+            out.push_str(&format!(
+                "                  {acc} accepted   {rej} rejected   {fail} not positive definite\n"
+            ));
+        }
+        out
+    }
+}
+
+fn render_plan(plan: &SchurPlan, style: Style) -> String {
+    if !plan.reduced {
+        return format!(
+            "  backend   {} (factorized the whole system)\n",
+            style.paint("2", "no Schur reduction")
+        );
+    }
+    let mut out = format!(
+        "  backend   Schur: {} blocks / {} params eliminated, {} kept\n",
+        plan.eliminated_blocks, plan.eliminated_params, plan.kept_params
+    );
+    let mut why = std::vec::Vec::new();
+    if let Some(r) = plan.fill_ratio {
+        why.push(format!("fill ratio {r:.2}"));
+    }
+    if let Some(r) = plan.flop_ratio {
+        why.push(format!("flop ratio {r:.1}"));
+    }
+    if let Some(o) = plan.ordering {
+        why.push(format!("ordered by {o:?}"));
+    }
+    if plan.kept_bandwidth > 0 {
+        why.push(format!("half-bandwidth {}", plan.kept_bandwidth));
+    }
+    if !why.is_empty() {
+        out.push_str(&format!("            {}\n", style.paint("2", &why.join(", "))));
+    }
+    out
+}
+
+impl<T: Float> fmt::Display for LmResult<T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.report())
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1003,6 +1329,24 @@ pub trait LmSolver<T: Float> {
     /// verbosity is set: no separate builder call to forget or contradict.
     /// Default: ignore it.
     fn configure(&mut self, _config: &LmConfig<T>) {}
+
+    /// How much of the LAST [`compute`](Self::compute) was model assembly --
+    /// residuals, Jacobian, and the `J^T J` / `J^T r` accumulation.
+    ///
+    /// The rest of `compute` is the backend's one-time structural analysis:
+    /// sparsity pattern, marginalizable-block detection, the Schur decision, the
+    /// fill-reducing ordering, the symbolic factorization. The solver subtracts
+    /// this from the measured `compute` time and reports the remainder as
+    /// [`LmTiming::analysis`].
+    ///
+    /// `None` when the last `compute` did no analysis (the steady state, where the
+    /// whole call is assembly), from a backend that does not measure it, and from
+    /// any backend when [`LmConfig::gather_timing`] is off. `Some` on a
+    /// steady-state compute would charge the trait call's own overhead to
+    /// analysis on every iteration.
+    fn assembly_time(&self) -> Option<Duration> {
+        None
+    }
 }
 
 /// Dense Cholesky solver (nalgebra).
@@ -1534,11 +1878,31 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
 
         let t_asm = gather.then(Instant::now);
         let computed_cost = solver.compute(problem, &cur_x, &mut grad, &mut matrix);
+        // Kept for this linearization's first LmStep. A retry does not
+        // re-assemble, so it must not be charged for one.
+        let mut asm_dt = Duration::ZERO;
+        let mut ana_dt = Duration::ZERO;
         if let Some(t) = t_asm {
             let dt = t.elapsed();
-            if timing.assembly_count == 0 { timing.first_assembly = dt; }
-            timing.assembly += dt;
+            // Split what compute() just did: the backend reports the assembly, and
+            // the rest of the call is its structural analysis. A backend that
+            // reports nothing -- or a steady-state compute, where the whole call
+            // is assembly -- yields a zero analysis.
+            match solver.assembly_time() {
+                Some(a) => {
+                    asm_dt = a.min(dt);
+                    ana_dt = dt - asm_dt;
+                }
+                None => asm_dt = dt, // no analysis on this compute
+            }
+
+            if timing.assembly_count == 0 { timing.first_assembly = asm_dt; }
+            timing.assembly += asm_dt;
             timing.assembly_count += 1;
+            if !ana_dt.is_zero() {
+                timing.analysis += ana_dt;
+                timing.analysis_count += 1;
+            }
         }
         if first {
             // The cost is a free byproduct of assembly; using it here
@@ -1571,6 +1935,17 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
                 break;
             }
         }
+
+        // Constant across every retry at this linearization point, so it is
+        // computed once here rather than per attempt.
+        let grad_max = if gather {
+            grad.iter()
+                .fold(T::zero(), |m, g| m.max(g.abs()))
+                .to_f64()
+                .unwrap_or(f64::NAN)
+        } else {
+            0.0
+        };
 
         solver.extract_diagonal(&matrix, &mut diagonal);
         // A non-positive diagonal cannot be rescued by multiplicative
@@ -1622,8 +1997,13 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
 
             iter += 1;
 
+            // Clock for this attempt as a whole -- the damped solve, the trial
+            // cost, and the re-centering if it is kept.
+            let t_step = gather.then(Instant::now);
+
             let t_ls = gather.then(Instant::now);
             let solved = solver.solve_damped(n, &mut matrix, &diagonal, lambda, &grad, &mut delta);
+            let mut ls_dt = Duration::ZERO;
             if let Some(t) = t_ls {
                 let dt = t.elapsed();
                 // The first solve also runs the symbolic factorization
@@ -1631,6 +2011,7 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
                 if timing.linear_solve_count == 0 { timing.first_linear_solve = dt; }
                 timing.linear_solve += dt;
                 timing.linear_solve_count += 1;
+                ls_dt = dt;
             }
             if !solved {
                 let next_lambda = driver.factorization_failed(lambda, &LambdaState {
@@ -1656,6 +2037,26 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
                         step_us,
                         n_nan_g, n_nan_d, n_nan_x, n_nan_m);
                 }
+                if gather {
+                    timing.steps.push(LmStep {
+                        iter,
+                        inner,
+                        accepted: false,
+                        factorization_failed: true,
+                        lambda: lambda.to_f64().unwrap_or(f64::NAN),
+                        cost: end_cost.to_f64().unwrap_or(f64::NAN),
+                        new_cost: f64::NAN, // no trial point was produced
+                        step_norm: 0.0,
+                        grad_max,
+                        time: t_step.map_or(Duration::ZERO, |t| t.elapsed()),
+                        assembly: if inner == 0 { asm_dt } else { Duration::ZERO },
+                        analysis: if inner == 0 { ana_dt } else { Duration::ZERO },
+                        linear_solve: ls_dt,
+                        cost_eval: Duration::ZERO, // no trial point to evaluate
+                        advance: Duration::ZERO,
+                    });
+                }
+
                 // The driver has no damping left to try. No step was produced,
                 // so cur_x still holds the last accepted one.
                 let Some(next_lambda) = next_lambda else {
@@ -1674,11 +2075,13 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
 
             let t_cost = gather.then(Instant::now);
             let new_cost = problem.calc_cost(&try_x);
+            let mut cost_dt = Duration::ZERO;
             if let Some(t) = t_cost {
                 let dt = t.elapsed();
                 if timing.cost_eval_count == 0 { timing.first_cost_eval = dt; }
                 timing.cost_eval += dt;
                 timing.cost_eval_count += 1;
+                cost_dt = dt;
             }
 
             if config.verbose {
@@ -1694,6 +2097,18 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
             // At machine precision, cost differences are just rounding noise
             let at_precision = new_cost.is_finite()
                 && (end_cost - new_cost).abs() < eight * T::epsilon() * end_cost.abs();
+
+            // Wanted by both outcomes below, and by the parameter-tolerance test.
+            let step_norm = if gather {
+                delta
+                    .iter()
+                    .fold(T::zero(), |a, e| a + *e * *e)
+                    .sqrt()
+                    .to_f64()
+                    .unwrap_or(f64::NAN)
+            } else {
+                0.0
+            };
 
             if new_cost.is_finite() && new_cost < end_cost {
                 accepted += 1;
@@ -1719,11 +2134,33 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
 
                 let t_adv = gather.then(Instant::now);
                 problem.advance(&mut cur_x);
+                let mut adv_dt = Duration::ZERO;
                 if let Some(t) = t_adv {
                     let dt = t.elapsed();
                     if timing.advance_count == 0 { timing.first_advance = dt; }
                     timing.advance += dt;
                     timing.advance_count += 1;
+                    adv_dt = dt;
+                }
+
+                if gather {
+                    // `lambda` is still this attempt's, not the driver's next.
+                    timing.steps.push(LmStep {
+                        iter, inner,
+                        accepted: true,
+                        factorization_failed: false,
+                        lambda: lambda.to_f64().unwrap_or(f64::NAN),
+                        cost: end_cost.to_f64().unwrap_or(f64::NAN),
+                        new_cost: new_cost.to_f64().unwrap_or(f64::NAN),
+                        step_norm,
+                        grad_max,
+                        time: t_step.map_or(Duration::ZERO, |t| t.elapsed()),
+                        assembly: if inner == 0 { asm_dt } else { Duration::ZERO },
+                        analysis: if inner == 0 { ana_dt } else { Duration::ZERO },
+                        linear_solve: ls_dt,
+                        cost_eval: cost_dt,
+                        advance: adv_dt,
+                    });
                 }
 
                 // The driver stopped us on a GOOD step. Keep it: cur_x and
@@ -1782,6 +2219,25 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
                 }
                 end_cost = new_cost;
                 break;
+            }
+
+            if gather {
+                timing.steps.push(LmStep {
+                    iter, inner,
+                    accepted: false,
+                    factorization_failed: false,
+                    lambda: lambda.to_f64().unwrap_or(f64::NAN),
+                    cost: end_cost.to_f64().unwrap_or(f64::NAN),
+                    new_cost: new_cost.to_f64().unwrap_or(f64::NAN),
+                    step_norm,
+                    grad_max,
+                    time: t_step.map_or(Duration::ZERO, |t| t.elapsed()),
+                    assembly: if inner == 0 { asm_dt } else { Duration::ZERO },
+                    analysis: if inner == 0 { ana_dt } else { Duration::ZERO },
+                    linear_solve: ls_dt,
+                    cost_eval: cost_dt,
+                    advance: Duration::ZERO, // rejected: nothing to re-center
+                });
             }
 
             if at_precision {
@@ -2404,6 +2860,15 @@ pub struct SparseFaer<T = f64> {
     plan: Option<SchurPlan>,
     // From LmConfig via configure(): explain the decisions below.
     verbose: bool,
+    // Read the clock at all? Set from LmConfig::gather_timing by configure().
+    // Nothing here reads it otherwise -- the wasm build has no working clock.
+    measure: bool,
+    // How much of the last compute() was model assembly; the solver takes the
+    // rest to be structural analysis. Only meaningful on a compute that did any,
+    // which is what did_setup records -- otherwise the trait call's own overhead
+    // reads as analysis on every iteration.
+    assembly_time: Duration,
+    did_setup: bool,
     // Structure, built on the first compute of a solve and reused for
     // every following iteration and damping retry.
     positions: Option<Vec<usize>>,
@@ -2449,6 +2914,9 @@ impl<T> SparseFaer<T> {
             supernodal: true,
             plan: None,
             verbose: false,
+            measure: false,
+            assembly_time: Duration::ZERO,
+            did_setup: false,
             positions: None,
             bdiag_pos: Vec::new(),
             schur: None,
@@ -2585,7 +3053,11 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
             }
             None => {
                 let mut csc = CscMatrix::empty(n);
+                let t_a = self.measure.then(Instant::now);
                 let (cost, positions) = assemble_first_csc(problem, params, grad, &mut csc);
+                if let Some(t) = t_a {
+                    self.assembly_time += t.elapsed();
+                }
                 (csc, positions, Some(cost))
             }
         };
@@ -2638,11 +3110,19 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
 
         matrix.csc = Some(std::mem::replace(&mut csc, CscMatrix::empty(0)));
         let csc = matrix.csc.as_mut().unwrap();
+        let t_a = self.measure.then(Instant::now);
         let cost = match coo_cost {
             // The COO route filled the values on its way to the pattern.
             Some(cost) => cost,
             None => problem.calc_grad_hessian_sparse_indexed(params, grad, &mut csc.vals, &positions),
         };
+        if let Some(t) = t_a {
+            // The COO path already charged itself above; only the indexed pass is
+            // new here.
+            if coo_cost.is_none() {
+                self.assembly_time += t.elapsed();
+            }
+        }
         self.positions = Some(positions);
         cost
     }
@@ -2784,6 +3264,12 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
 
     fn configure(&mut self, config: &LmConfig<T>) {
         self.verbose = config.verbose;
+        // The clock is only read when the caller asked for timing.
+        self.measure = config.gather_timing;
+    }
+
+    fn assembly_time(&self) -> Option<Duration> {
+        (self.measure && self.did_setup).then_some(self.assembly_time)
     }
 
     fn new_matrix(&self, n: usize) -> FaerMatrix<T> {
@@ -2791,14 +3277,31 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
     }
 
     fn compute(&mut self, problem: &mut dyn LmProblem<T>, params: &[T], grad: &mut [T], matrix: &mut FaerMatrix<T>) -> T {
+        // Report how much of this call was assembly; the solver takes the rest to
+        // be structural analysis. In the steady state the whole call is assembly.
+        self.assembly_time = Duration::ZERO;
+        self.did_setup = false;
+        let t_a = self.measure.then(Instant::now);
         if let Some(positions) = &self.positions {
             if let Some(h) = matrix.h.as_mut() {
-                return problem.calc_grad_hessian_sparse_indexed(params, grad, h.vals_mut(), positions);
+                let cost =
+                    problem.calc_grad_hessian_sparse_indexed(params, grad, h.vals_mut(), positions);
+                if let Some(t) = t_a {
+                    self.assembly_time = t.elapsed();
+                }
+                return cost;
             }
             if let Some(csc) = matrix.csc.as_mut() {
-                return problem.calc_grad_hessian_sparse_indexed(params, grad, &mut csc.vals, positions);
+                let cost = problem
+                    .calc_grad_hessian_sparse_indexed(params, grad, &mut csc.vals, positions);
+                if let Some(t) = t_a {
+                    self.assembly_time = t.elapsed();
+                }
+                return cost;
             }
         }
+        // Past the fast path: this compute is doing the structural work.
+        self.did_setup = true;
         let n = matrix.n;
 
         // Verbose mode narrates the one-time structural work below: what was
@@ -3299,9 +3802,13 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         self.s = Some(s);
         self.schur = Some(schur);
 
-        // First numeric fill.
+        // First numeric fill. Everything above it in this call was analysis.
         let mut h = arael_faer::bsc::SparseBlockColMat::zeroed(hsym);
+        let t_a = self.measure.then(Instant::now);
         let cost = problem.calc_grad_hessian_sparse_indexed(params, grad, h.vals_mut(), &positions);
+        if let Some(t) = t_a {
+            self.assembly_time = t.elapsed();
+        }
         matrix.h = Some(h);
         self.positions = Some(positions);
         cost

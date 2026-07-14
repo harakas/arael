@@ -1067,7 +1067,7 @@
 //! | `parameter_tolerance` | `None` | stop when `|step| <= tol * (|x| + tol)` -- the parameters stopped moving |
 //! | `time_limit` | `None` | wall-clock budget for the whole solve. Overrides `min_iters` |
 //! | `verbose` | `false` | per-iteration line on stderr. **Turn on first whenever debugging** |
-//! | `gather_timing` | `false` | gather per-phase timing into `LmResult::timing` (`Some` when on, `None` when off) |
+//! | `gather_timing` | `false` | gather per-phase timing AND the per-iteration timeline into `LmResult::timing` (`Some` when on, `None` when off) |
 //!
 //! The solver terminates when **all of** `iter >= min_iters`, the
 //! current step is "small" (below both `abs_precision` and
@@ -1247,14 +1247,13 @@
 //! A Cholesky rejection prints a longer diagnostic line:
 //!
 //! ```text
-//! 5/0: Cholesky failed (damped matrix not positive-definite), lambda=1.6e-7 -> 1.6e-6 (step=177) [non-finite: grad=0 diag=0 x=0 matrix=0] [diag<=0: 0]
+//! 5/0: Cholesky failed (damped matrix not positive-definite), lambda=1.6e-7 -> 1.6e-6 (step=177) [non-finite: grad=0 diag=0 x=0 matrix=0]
 //! ```
 //!
 //! | Field | What it says |
 //! |---|---|
 //! | `lambda=1.6e-7 -> 1.6e-6` | new λ for the retry (×10) |
 //! | `non-finite: grad=N diag=N x=N matrix=N` | NaN/Inf counts in each scratch buffer. All zero → matrix is fully finite; any non-zero → find the bad residual or derivative |
-//! | `diag<=0: N` | count of Hessian-diagonal entries ≤ 0. Non-zero means some parameter is untouched by every constraint (indices left at `u32::MAX`) or a negative contribution leaked in -- both are bugs, not rounding noise |
 //!
 //! When all counts are 0, the rejection is f32 accumulation noise at
 //! tiny λ -- LM recovers by bumping λ. When any are non-zero, stop
@@ -1376,11 +1375,12 @@
 //!    3D formulation is simpler, better conditioned, and has no
 //!    pixel-wraparound / behind-camera pathology.
 //!
-//! 3. **Non-positive diagonal.** The verbose-mode `diag<=0: N`
-//!    counter at a Cholesky rejection is the loudest possible signal
-//!    that some parameter is untouched by every constraint (indices
-//!    left at `u32::MAX`) or is receiving a negative contribution.
-//!    Either outcome is a bug distinct from f32 accumulation noise.
+//! 3. **Non-positive diagonal.** A solve that ends in
+//!    `LmStatus::DegenerateDiagonal { param }` is the loudest possible
+//!    signal that some parameter is untouched by every constraint
+//!    (indices left at `u32::MAX`) or is receiving a negative
+//!    contribution. The status names the parameter. Either outcome is a
+//!    bug distinct from f32 accumulation noise.
 //!
 //! 4. **Gradient magnitude.** After
 //!    [`simple_lm::LmProblem::calc_grad_hessian_dense`], the maximum
@@ -1824,7 +1824,7 @@
 //! - `arael` (this crate) -- runtime: model traits, solvers, geometry, vectors
 
 #[macro_use]
-mod log;
+pub mod log;
 /// Numeric traits (`Float`).
 pub mod utils;
 /// 2D and 3D vector types.

@@ -529,3 +529,389 @@ fn both_tolerances_respect_min_iters() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// LmTiming::steps -- the per-iteration timeline (C15), and arael::log (C16).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn steps_are_empty_unless_timing_was_asked_for() {
+    let mut c = build_chain();
+    let r = c.solve_sparse(&LmConfig { max_iters: 200, ..Default::default() });
+    assert!(r.timing.is_none(), "no timing unless gather_timing");
+}
+
+#[test]
+fn one_step_record_per_attempt_including_damping_retries() {
+    // A damping retry is an iteration here, so the timeline has one record per
+    // ATTEMPT -- rejects and failed factorizations included.
+    let mut c = build_chain();
+    let r = c.solve_sparse(&LmConfig {
+        max_iters: 200, gather_timing: true, ..Default::default()
+    });
+    let t = r.timing.as_ref().expect("gather_timing was set");
+
+    assert_eq!(
+        t.steps.len(), r.iterations,
+        "one record per attempt: {} records vs {} iterations",
+        t.steps.len(), r.iterations
+    );
+    assert_eq!(
+        t.steps.iter().filter(|s| s.accepted).count(), r.accepted_iterations,
+        "accepted records must match accepted_iterations"
+    );
+
+    // iter is 1-based and dense; inner restarts at 0 on each new linearization.
+    for (k, s) in t.steps.iter().enumerate() {
+        assert_eq!(s.iter, k + 1, "iter should be 1-based and contiguous");
+        assert!(s.lambda > 0.0, "lambda should be live, got {}", s.lambda);
+        assert!(s.grad_max.is_finite());
+        if s.factorization_failed {
+            assert!(s.new_cost.is_nan(), "a failed factorization has no trial point");
+            assert_eq!(s.step_norm, 0.0);
+        } else {
+            assert!(s.step_norm >= 0.0);
+        }
+    }
+    // An accepted step is exactly one that lowered the cost.
+    for s in t.steps.iter().filter(|s| !s.factorization_failed) {
+        assert_eq!(s.accepted, s.new_cost < s.cost, "accepted iff the cost fell");
+    }
+    // The first attempt of a linearization has inner 0; a retry has inner > 0.
+    assert_eq!(t.steps[0].inner, 0);
+}
+
+#[test]
+fn each_step_carries_its_own_phase_breakdown() {
+    let mut c = build_chain();
+    let r = c.solve_sparse(&LmConfig {
+        max_iters: 200, gather_timing: true, ..Default::default()
+    });
+    let t = r.timing.as_ref().unwrap();
+
+    for s in &t.steps {
+        // Assembly is charged to the attempt that caused it and to no other. A
+        // retry re-damps and re-factorizes; it does NOT re-assemble, and that
+        // asymmetry is why a rejected step is cheaper than an accepted one.
+        if s.inner > 0 {
+            assert_eq!(
+                s.assembly, std::time::Duration::ZERO,
+                "retry (iter {}, inner {}) must not be charged for an assembly",
+                s.iter, s.inner
+            );
+        }
+        // Re-centering only happens on a step that was kept.
+        if !s.accepted {
+            assert_eq!(s.advance, std::time::Duration::ZERO);
+        }
+        // A failed factorization has no trial point to evaluate.
+        if s.factorization_failed {
+            assert_eq!(s.cost_eval, std::time::Duration::ZERO);
+        }
+        // The phases inside the attempt cannot exceed the attempt. (assembly is
+        // excluded from `time` by construction -- it precedes the attempt.)
+        assert!(
+            s.linear_solve + s.cost_eval + s.advance <= s.time,
+            "phases {:?}+{:?}+{:?} exceed the attempt's {:?}",
+            s.linear_solve, s.cost_eval, s.advance, s.time
+        );
+    }
+
+    // The per-step phases must add up to the aggregate totals the solver keeps
+    // independently -- if they disagree, one of the two is lying.
+    let sum = |f: fn(&arael::simple_lm::LmStep) -> std::time::Duration| {
+        t.steps.iter().map(f).sum::<std::time::Duration>()
+    };
+    assert_eq!(sum(|s| s.assembly), t.assembly, "assembly");
+    assert_eq!(sum(|s| s.analysis), t.analysis, "analysis");
+    assert_eq!(sum(|s| s.linear_solve), t.linear_solve, "linear_solve");
+    assert_eq!(sum(|s| s.cost_eval), t.cost_eval, "cost_eval");
+    assert_eq!(sum(|s| s.advance), t.advance, "advance");
+
+    // ...and the counts too. Count by what HAPPENED, not by a non-zero duration:
+    // advance is a no-op on this model (no rotation params to re-center), so it
+    // genuinely measures zero, and a zero duration does not mean it did not run.
+    assert_eq!(t.steps.iter().filter(|s| s.inner == 0).count(), t.assembly_count);
+    assert_eq!(t.steps.iter().filter(|s| s.accepted).count(), t.advance_count);
+    assert_eq!(t.steps.iter().filter(|s| !s.factorization_failed).count(), t.cost_eval_count);
+    assert_eq!(t.steps.len(), t.linear_solve_count);
+}
+
+#[test]
+fn the_timeline_shows_the_cost_coming_down() {
+    let mut c = build_chain();
+    let r = c.solve_sparse(&LmConfig {
+        max_iters: 200, gather_timing: true, ..Default::default()
+    });
+    let t = r.timing.unwrap();
+    let accepted: std::vec::Vec<_> = t.steps.iter().filter(|s| s.accepted).collect();
+    assert!(accepted.len() >= 2);
+    // Each accepted step starts where the previous one ended.
+    for w in accepted.windows(2) {
+        assert!(
+            w[1].cost <= w[0].new_cost + 1e-12,
+            "accepted steps should chain: {} -> {} then start at {}",
+            w[0].cost, w[0].new_cost, w[1].cost
+        );
+    }
+    assert_eq!(accepted[0].cost, r.start_cost);
+    assert_eq!(accepted.last().unwrap().new_cost, r.end_cost);
+}
+
+#[test]
+fn logging_can_be_piped_and_silenced() {
+    use arael::log::{self, Level};
+    use std::sync::{Arc, Mutex};
+
+    // Pipe: a verbose solve's trace lands in our buffer, not on stderr.
+    let seen: Arc<Mutex<std::vec::Vec<(Level, String)>>> = Arc::new(Mutex::new(std::vec::Vec::new()));
+    let sink = Arc::clone(&seen);
+    log::set_sink(move |level, msg| sink.lock().unwrap().push((level, msg.to_string())));
+
+    let mut c = build_chain();
+    let _ = c.solve_sparse(&LmConfig { max_iters: 200, verbose: true, ..Default::default() });
+
+    // Tests in this binary run concurrently and the sink is global, so assert on
+    // what MUST be there rather than on the buffer being pure -- a stray warn!
+    // from another test is not this test's business.
+    let info_lines = seen.lock().unwrap().iter().filter(|(l, _)| *l == Level::Info).count();
+    assert!(info_lines > 0, "the verbose trace should have reached the sink");
+
+    // Silence: nothing more arrives, and the level check happens before the
+    // message is even formatted.
+    seen.lock().unwrap().clear();
+    log::silence();
+    assert_eq!(log::level(), Level::Off);
+    assert!(!log::enabled(Level::Error), "Off must drop even errors");
+
+    let mut c = build_chain();
+    let _ = c.solve_sparse(&LmConfig { max_iters: 200, verbose: true, ..Default::default() });
+    assert_eq!(seen.lock().unwrap().len(), 0, "a silenced arael emits nothing");
+
+    // Put the world back for any other test in this binary.
+    log::set_level(Level::Info);
+    log::reset_sink();
+    assert_eq!(log::level(), Level::Info);
+}
+
+// ---------------------------------------------------------------------------
+// LmResult::report / print / pretty_report / pretty_print.
+// ---------------------------------------------------------------------------
+
+use arael::simple_lm::{LmResult, LmStep, LmTiming, Style};
+
+/// A result with one of each kind of attempt, so the timeline has all three
+/// markers. Built by hand -- the spring chain is too well behaved to reject a
+/// step on demand.
+fn synthetic_result() -> LmResult<f64> {
+    let step = |iter, inner, accepted, failed| LmStep {
+        iter,
+        inner,
+        accepted,
+        factorization_failed: failed,
+        lambda: 1e-4,
+        cost: 100.0,
+        new_cost: if failed { f64::NAN } else { 90.0 },
+        step_norm: 0.5,
+        grad_max: 12.0,
+        time: Duration::from_micros(300),
+        assembly: if inner == 0 { Duration::from_micros(120) } else { Duration::ZERO },
+        analysis: if iter == 1 { Duration::from_micros(200) } else { Duration::ZERO },
+        linear_solve: Duration::from_micros(150),
+        cost_eval: if failed { Duration::ZERO } else { Duration::from_micros(20) },
+        advance: if accepted { Duration::from_micros(10) } else { Duration::ZERO },
+    };
+    LmResult {
+        x: std::vec![1.0, 2.0],
+        start_cost: 100.0,
+        end_cost: 2.5,
+        iterations: 3,
+        accepted_iterations: 1,
+        status: LmStatus::Converged,
+        final_lambda: 1e-6,
+        solver: None,
+        timing: Some(LmTiming {
+            total: Duration::from_micros(900),
+            assembly: Duration::from_micros(120),
+            first_assembly: Duration::from_micros(120),
+            analysis: Duration::from_micros(200),
+            linear_solve: Duration::from_micros(450),
+            first_linear_solve: Duration::from_micros(150),
+            cost_eval: Duration::from_micros(40),
+            first_cost_eval: Duration::from_micros(20),
+            advance: Duration::from_micros(10),
+            first_advance: Duration::from_micros(10),
+            assembly_count: 1,
+            analysis_count: 1,
+            linear_solve_count: 3,
+            cost_eval_count: 2,
+            advance_count: 1,
+            steps: std::vec![
+                step(1, 0, false, true),   // factorization failed
+                step(2, 1, false, false),  // rejected
+                step(3, 2, true, false),   // accepted
+            ],
+        }),
+    }
+}
+
+#[test]
+fn report_is_ascii_and_has_no_escapes() {
+    let r = synthetic_result();
+    let s = r.report();
+
+    // print() is the ASCII version: it must be safe to put in a log or a file.
+    assert!(s.is_ascii(), "report() must be pure ASCII:\n{s}");
+    assert!(!s.contains('\x1b'), "report() must carry no ANSI escapes:\n{s}");
+
+    assert!(s.contains("converged"));
+    assert!(s.contains("3 iterations"));
+    assert!(s.contains("1 accepted"));
+    assert!(s.contains("2 retried"), "iterations - accepted = retried");
+    // The three ASCII markers, one per attempt, in order: failed, rejected, ok.
+    assert!(s.contains("x-+"), "the timeline should read x-+ :\n{s}");
+    assert!(s.contains("97.50% down"), "cost 100 -> 2.5:\n{s}");
+}
+
+#[test]
+fn pretty_report_carries_colour_and_glyphs() {
+    let r = synthetic_result();
+    let s = r.pretty_report();
+
+    assert!(!s.is_ascii(), "pretty_report() is where the glyphs live");
+    assert!(s.contains('\x1b'), "pretty_report() should be coloured");
+    assert!(s.contains('\u{2713}'), "check mark for an accepted step");
+    assert!(s.contains('\u{2717}'), "ballot X for a rejected one");
+    assert!(s.contains('\u{2298}'), "circled slash for a failed factorization");
+    // Failed, rejected, accepted -- in that order, once the colour is stripped.
+    assert!(strip_ansi(&s).contains("\u{2298}\u{2717}\u{2713}"), "the timeline, in order");
+
+    // Same facts, different clothes.
+    assert!(s.contains("3 iterations"));
+    assert!(s.contains("97.50% down"));
+}
+
+#[test]
+fn render_takes_an_explicit_style() {
+    let r = synthetic_result();
+    assert_eq!(r.render(Style::PLAIN), r.report());
+    assert_eq!(r.render(Style::PRETTY), r.pretty_report());
+
+    // Colour without glyphs, for a terminal that cannot draw them.
+    let s = r.render(Style { colour: true, unicode: false });
+    assert!(s.contains('\x1b'), "coloured");
+    assert!(s.is_ascii(), "but no glyphs -- ANSI escapes are themselves ASCII");
+    // Each marker is wrapped in its own escape, so they are only adjacent once
+    // the colour is stripped back out.
+    assert!(strip_ansi(&s).contains("x-+"), "still the ASCII markers:\n{s}");
+}
+
+/// Drop ANSI colour sequences, leaving the text.
+fn strip_ansi(s: &str) -> String {
+    let mut out = String::new();
+    let mut chars = s.chars();
+    while let Some(c) = chars.next() {
+        if c == '\x1b' {
+            for c in chars.by_ref() {
+                if c == 'm' {
+                    break;
+                }
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+#[test]
+fn display_is_the_plain_report() {
+    let r = synthetic_result();
+    assert_eq!(format!("{r}"), r.report());
+}
+
+#[test]
+fn a_real_solve_reports_itself() {
+    let mut c = build_chain();
+    let r = c.solve_sparse(&LmConfig {
+        max_iters: 200, gather_timing: true, ..Default::default()
+    });
+    let s = r.report();
+    assert!(s.is_ascii());
+    assert!(s.contains("converged"));
+    assert!(s.contains("assembly"));
+    assert!(s.contains("linear solve"));
+
+    // Without gather_timing there is no timing block, and the report still works.
+    let mut c = build_chain();
+    let bare = c.solve_sparse(&LmConfig { max_iters: 200, ..Default::default() });
+    let s = bare.report();
+    assert!(s.contains("converged"));
+    assert!(!s.contains("assembly"), "no timing was gathered, so none is reported");
+}
+
+#[test]
+fn a_degenerate_solve_says_which_parameter() {
+    let mut r = synthetic_result();
+    r.status = LmStatus::DegenerateDiagonal { param: 17 };
+    let s = r.report();
+    assert!(s.contains("degenerate diagonal"));
+    assert!(s.contains("parameter 17"), "the report must name it:\n{s}");
+    assert!(!r.status.is_success());
+}
+
+// ---------------------------------------------------------------------------
+// LmTiming::analysis -- the backend's one-time structural work, reported apart
+// from the model assembly it used to hide inside.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_structural_analysis_is_reported_apart_from_the_assembly() {
+    let mut c = build_chain();
+    let r = c.solve_sparse(&LmConfig {
+        max_iters: 200, gather_timing: true, ..Default::default()
+    });
+    let t = r.timing.as_ref().unwrap();
+
+    // The sparse backend discovers the pattern, decides the Schur reduction,
+    // picks an ordering and factorizes symbolically -- all inside the first
+    // compute(). It is one-time.
+    assert_eq!(t.analysis_count, 1, "the analysis runs once, not once per iteration");
+    assert!(t.analysis > std::time::Duration::ZERO, "and it costs something");
+
+    // It is charged to the attempt that caused it, and to no other.
+    let with_analysis: std::vec::Vec<_> =
+        t.steps.iter().filter(|s| s.analysis > std::time::Duration::ZERO).collect();
+    assert_eq!(with_analysis.len(), 1);
+    assert_eq!(with_analysis[0].iter, 1, "it happens on the very first attempt");
+    assert_eq!(t.steps.iter().map(|s| s.analysis).sum::<std::time::Duration>(), t.analysis);
+
+    // Disjoint from assembly: `assembly` is the model's residual and Jacobian
+    // work, on every iteration including the first. If the analysis leaked into
+    // it, the first assembly would tower over a steady one.
+    let steady = t.steps.iter().filter(|s| s.inner == 0 && s.iter > 1);
+    let typical = steady.map(|s| s.assembly).max().unwrap();
+    assert!(
+        t.first_assembly <= typical * 4,
+        "first_assembly {:?} should be the same order as a steady one {:?} -- \
+         if it is not, the analysis is still being charged to it",
+        t.first_assembly, typical
+    );
+}
+
+#[test]
+fn a_backend_that_does_no_analysis_reports_none() {
+    // Dense has no pattern to discover and no ordering to choose. Its whole
+    // compute() is assembly, so the analysis phase must be empty rather than
+    // picking up the trait call's own overhead on every iteration.
+    let mut c = build_chain();
+    let r = c.solve_dense(&LmConfig {
+        max_iters: 200, gather_timing: true, ..Default::default()
+    });
+    let t = r.timing.as_ref().unwrap();
+    assert_eq!(t.analysis_count, 0);
+    assert_eq!(t.analysis, std::time::Duration::ZERO);
+    assert!(t.steps.iter().all(|s| s.analysis == std::time::Duration::ZERO));
+    // ...and assembly still accounts for every outer iteration.
+    assert_eq!(t.assembly_count, t.steps.iter().filter(|s| s.inner == 0).count());
+}

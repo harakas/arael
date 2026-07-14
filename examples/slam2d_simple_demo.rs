@@ -348,14 +348,21 @@ fn main() {
     // lambda = confident near-Gauss-Newton steps; lambda grows when a step
     // is rejected. With this seed you can see the cost spike and lambda
     // climb mid-run before convergence resumes.
-    let lm_cfg = LmConfig::<f32> { verbose: true, ..Default::default() };
+    //
+    // gather_timing fills result.timing: the per-phase totals, and one record
+    // per attempt (damping retries included) in LmTiming::steps.
+    let lm_cfg = LmConfig::<f32> { verbose: true, gather_timing: true, ..Default::default() };
     // One call runs the whole Levenberg-Marquardt solve (indexed sparse
     // faer backend): it flattens the params, repeatedly linearizes the
     // constraints and takes damped steps, then writes the optimized values
     // straight back into the pose/landmark structs.
     let result = path.solve_sparse(&lm_cfg);
-    println!("\n{} iterations, cost {:.4} -> {:.4}",
-        result.iterations, result.start_cost, result.end_cost);
+
+    // The result prints itself: status, cost, where the time went, and the
+    // accept/reject timeline. pretty_print() is the colour-and-glyphs version;
+    // print() is the same text in plain ASCII, for a log or a file.
+    println!();
+    result.pretty_print();
 
     // Per-pose errors. The first pose is held at the ground-truth origin, so
     // comparing absolute positions against ground truth is meaningful.
