@@ -926,6 +926,49 @@ pub fn pow(base: impl Into<E>, exponent: impl Into<E>) -> E {
 }
 
 // ---------------------------------------------------------------------------
+// Robust loss kernels
+//
+// Each takes the block's squared residual norm s = |r|^2 and returns rho(s),
+// the robustified cost that replaces s. The scale (k, c) is on the residual-
+// norm axis (sqrt(s)); for whitened residuals that is a sigma count. All three
+// reduce to plain least squares near zero (rho(s) ~ s, so the weight
+// rho'(s) -> 1), so inliers are untouched. Composed from existing primitives,
+// so differentiation, CSE and codegen work without new node types.
+// ---------------------------------------------------------------------------
+
+/// Huber loss on the squared norm. Quadratic for |r| <= k, linear beyond.
+/// `rho(s) = s` for `s <= k^2`, else `2k*sqrt(s) - k^2`. Weight
+/// `rho'(s)` is `1` then `k/sqrt(s)`. Convex, never fully rejects.
+pub fn loss_huber(s: E, k: E) -> E {
+    let k2 = k.clone() * k.clone();
+    branch(
+        k2.clone() - s.clone(),
+        s.clone(),
+        c(2.0) * k * sqrt(s) - k2,
+    )
+}
+
+/// Cauchy (Lorentzian) loss on the squared norm.
+/// `rho(s) = c^2 * ln(1 + s/c^2)`, weight `rho'(s) = c^2/(c^2 + s)`.
+/// Smooth everywhere, redescends slowly (weight never reaches zero).
+pub fn loss_cauchy(s: E, cc: E) -> E {
+    let c2 = cc.clone() * cc;
+    c2.clone() * ln(c(1.0) + s / c2)
+}
+
+/// Tukey biweight loss on the squared norm. Redescending: an observation
+/// with `s >= c^2` gets weight exactly zero and drops out.
+/// `rho(s) = (c^2/3)(1 - (1 - s/c^2)^3)` for `s <= c^2`, else the constant
+/// `c^2/3`. Weight `rho'(s) = (1 - s/c^2)^2` then `0`.
+pub fn loss_tukey(s: E, cc: E) -> E {
+    let c2 = cc.clone() * cc;
+    let u = c(1.0) - s.clone() / c2.clone(); // 1 - s/c^2
+    let cube = u.clone() * u.clone() * u;
+    let third = c2.clone() / c(3.0);
+    branch(c2 - s, third.clone() * (c(1.0) - cube), third)
+}
+
+// ---------------------------------------------------------------------------
 // Name-based function lookup
 //
 // Users that parse an expression tree (for example arael-macros turning a
@@ -984,6 +1027,10 @@ pub const FUNCTIONS: &[(&str, FunctionRef)] = &[
     ("fast_atan2", FunctionRef::Binary(fast_atan2)),
     ("rad_diff", FunctionRef::Binary(rad_diff)),
     ("rad_sum", FunctionRef::Binary(rad_sum)),
+    // Robust loss kernels: (squared-norm, scale) -> robustified cost
+    ("loss_huber", FunctionRef::Binary(loss_huber)),
+    ("loss_cauchy", FunctionRef::Binary(loss_cauchy)),
+    ("loss_tukey", FunctionRef::Binary(loss_tukey)),
     // Ternary
     ("clamp", FunctionRef::Ternary(clamp)),
     ("branch", FunctionRef::Ternary(branch)),
@@ -1904,6 +1951,74 @@ mod tests {
         let vars: HashMap<&str, f64> = [("y", 0.5), ("x", 2.0)].into();
         let expected = 2.0 / (2.0 * 2.0 + 0.5 * 0.5);
         assert!((d.eval(&vars).unwrap() - expected).abs() < 1e-12);
+    }
+
+    // Evaluate an expression at a single-variable point.
+    fn at(e: &E, s: f64) -> f64 {
+        let vars: HashMap<&str, f64> = [("s", s)].into();
+        e.eval(&vars).unwrap()
+    }
+
+    #[test]
+    fn loss_huber_value_weight_and_continuity() {
+        let (s, k) = (symbol("s"), constant(2.0)); // k^2 = 4
+        let rho = loss_huber(s.clone(), k);
+        let w = rho.diff("s");
+        // Inlier arm rho(s) = s, weight 1.
+        assert!((at(&rho, 1.0) - 1.0).abs() < 1e-12);
+        assert!((at(&w, 1.0) - 1.0).abs() < 1e-12);
+        // Outlier arm: 2k*sqrt(s) - k^2, weight k/sqrt(s).
+        assert!((at(&rho, 9.0) - 8.0).abs() < 1e-12); // 2*2*3 - 4
+        assert!((at(&w, 9.0) - 2.0 / 3.0).abs() < 1e-12);
+        // C1 at the knot s = k^2: both arms and both weights agree.
+        assert!((at(&rho, 4.0) - 4.0).abs() < 1e-12);
+        assert!((at(&w, 4.0) - 1.0).abs() < 1e-12);
+        // Reduces to plain least squares near zero.
+        assert!((at(&rho, 1e-8) - 1e-8).abs() < 1e-14);
+    }
+
+    #[test]
+    fn loss_cauchy_value_and_weight() {
+        let (s, c) = (symbol("s"), constant(2.0)); // c^2 = 4
+        let rho = loss_cauchy(s.clone(), c);
+        let w = rho.diff("s");
+        assert!((at(&rho, 0.0)).abs() < 1e-12);
+        assert!((at(&w, 0.0) - 1.0).abs() < 1e-12);
+        assert!((at(&rho, 4.0) - 4.0 * 2f64.ln()).abs() < 1e-12);
+        assert!((at(&w, 4.0) - 0.5).abs() < 1e-12); // c^2/(c^2+s) = 4/8
+        assert!((at(&w, 12.0) - 0.25).abs() < 1e-12);
+        assert!((at(&rho, 1e-8) - 1e-8).abs() < 1e-14);
+    }
+
+    #[test]
+    fn loss_tukey_redescends_to_zero() {
+        let (s, c) = (symbol("s"), constant(3.0)); // c^2 = 9
+        let rho = loss_tukey(s.clone(), c);
+        let w = rho.diff("s");
+        assert!((at(&rho, 0.0)).abs() < 1e-12);
+        assert!((at(&w, 0.0) - 1.0).abs() < 1e-12);
+        // Half scale: u = 0.5, weight u^2 = 0.25.
+        assert!((at(&w, 4.5) - 0.25).abs() < 1e-12);
+        assert!((at(&rho, 4.5) - 2.625).abs() < 1e-12);
+        // Beyond c^2 the cost is constant and the weight is exactly zero:
+        // the observation drops out.
+        assert!((at(&rho, 9.0) - 3.0).abs() < 1e-12);
+        assert!((at(&rho, 20.0) - 3.0).abs() < 1e-12);
+        assert!(at(&w, 9.0).abs() < 1e-12);
+        assert!(at(&w, 20.0).abs() < 1e-12);
+        assert!((at(&rho, 1e-8) - 1e-8).abs() < 1e-13);
+    }
+
+    #[test]
+    fn loss_kernels_resolve_by_name() {
+        // The constraint interpreter dispatches through function_by_name, so
+        // the loss kernels must be reachable there and match the direct call.
+        for name in ["loss_huber", "loss_cauchy", "loss_tukey"] {
+            match function_by_name(name) {
+                Some(FunctionRef::Binary(_)) => {}
+                other => panic!("{name} not a binary function: {}", other.is_some()),
+            }
+        }
     }
 
     #[test]

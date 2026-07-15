@@ -1538,6 +1538,25 @@ impl<A: Model, const N: usize, const M: usize, T: crate::utils::Float> SelfBlock
         }
     }
 
+    /// Like [`add_residual`](Self::add_residual) but scales both the gradient
+    /// and Hessian contribution by a robust weight `w` (the loss derivative
+    /// `rho'(s)` at the block's squared norm). `w = 1` is bit-identical to
+    /// `add_residual`.
+    pub fn add_residual_with_loss(&mut self, w: T, r: T, dr: &[T; N], grad: &mut [T]) {
+        let two_w = T::two() * w;
+        let wr = two_w * r;
+        for i in 0..N {
+            let gi = self.indices[i];
+            if gi == u32::MAX { continue; }
+            grad[gi as usize] += wr * dr[i];
+            let tdi = two_w * dr[i];
+            for j in i..N {
+                if self.indices[j] == u32::MAX { continue; }
+                self.hessian[tri_idx(N, i, j)] += tdi * dr[j];
+            }
+        }
+    }
+
     /// Accumulate this block's Hessian into the full dense symmetric hessian.
     pub fn accumulate_hessian(&self, hessian: &mut [T]) {
         let n_total = (hessian.len() as f64).sqrt() as usize;
@@ -1715,6 +1734,12 @@ impl<A: Model, const N: usize, const M: usize, T: crate::utils::Float> BoxedSelf
         if let Some(b) = &mut self.inner { b.add_residual(r, dr, grad); }
     }
 
+    /// Robust-weighted residual add (see [`SelfBlock::add_residual_with_loss`]).
+    /// No-op when unallocated.
+    pub fn add_residual_with_loss(&mut self, w: T, r: T, dr: &[T; N], grad: &mut [T]) {
+        if let Some(b) = &mut self.inner { b.add_residual_with_loss(w, r, dr, grad); }
+    }
+
     pub fn accumulate_hessian(&self, hessian: &mut [T]) {
         if let Some(b) = &self.inner { b.accumulate_hessian(hessian); }
     }
@@ -1835,6 +1860,22 @@ impl<A: Model, B: Model, const NA: usize, const NB: usize, const P: usize, T: cr
             let row = i * NB;
             for j in 0..NB {
                 self.cross_hessian[row + j] += two * dai * dr_b[j];
+            }
+        }
+    }
+
+    /// Robust-weighted variant of [`add_residual_cross`](Self::add_residual_cross):
+    /// scales the cross Hessian by the loss weight `w`. `w = 1` is bit-identical.
+    /// `_r` is ignored (the gradient goes through the SelfBlocks); it is present
+    /// so the macro can route every accumulation call uniformly.
+    pub fn add_residual_cross_with_loss(&mut self, w: T, _r: T, dr_a: &[T; NA], dr_b: &[T; NB]) {
+        let two_w = T::two() * w;
+        for i in 0..NA {
+            let dai = dr_a[i];
+            if dai == T::zero() { continue; }
+            let row = i * NB;
+            for j in 0..NB {
+                self.cross_hessian[row + j] += two_w * dai * dr_b[j];
             }
         }
     }
@@ -2056,6 +2097,12 @@ impl<A: Model, B: Model, const NA: usize, const NB: usize, const P: usize, T: cr
         if let Some(b) = &mut self.inner { b.add_residual_cross(r, dr_a, dr_b); }
     }
 
+    /// Robust-weighted cross add (see [`CrossBlock::add_residual_cross_with_loss`]).
+    /// No-op when unallocated.
+    pub fn add_residual_cross_with_loss(&mut self, w: T, r: T, dr_a: &[T; NA], dr_b: &[T; NB]) {
+        if let Some(b) = &mut self.inner { b.add_residual_cross_with_loss(w, r, dr_a, dr_b); }
+    }
+
     pub fn accumulate_hessian(&self, hessian: &mut [T]) {
         if let Some(b) = &self.inner { b.accumulate_hessian(hessian); }
     }
@@ -2175,6 +2222,29 @@ impl<T: crate::utils::Float> TripletBlock<T> {
         }
     }
 
+    /// Robust-weighted variant of [`add_residual`](Self::add_residual): scales
+    /// the gradient and Hessian pairs by the loss weight `w`. `w = 1` is
+    /// bit-identical.
+    pub fn add_residual_with_loss(&mut self, w: T, r: T, indices: &[u32], dr: &[T], grad: &mut [T]) {
+        let two_w = T::two() * w;
+        let wr = two_w * r;
+        let n = indices.len();
+        for i in 0..n {
+            if indices[i] == u32::MAX { continue; }
+            let gi = indices[i] as usize;
+            grad[gi] += wr * dr[i];
+            for j in i..n {
+                if indices[j] == u32::MAX { continue; }
+                let (lo, hi) = if indices[i] <= indices[j] {
+                    (indices[i], indices[j])
+                } else {
+                    (indices[j], indices[i])
+                };
+                self.hessian.push((lo, hi, two_w * dr[i] * dr[j]));
+            }
+        }
+    }
+
     /// Macro-emission entry for N-ary constraints where each participating
     /// entity has its own `SelfBlock<Self>` holding its grad + within-entity
     /// Hessian diagonal. Stores ONLY across-entity pairs — within-entity
@@ -2211,6 +2281,39 @@ impl<T: crate::utils::Float> TripletBlock<T> {
                 // span_i == span_j above already excluded within-entity
                 // diagonals). The symmetric pair collapses to one diagonal
                 // cell, which needs both contributions.
+                let v = if lo == hi { v + v } else { v };
+                self.hessian.push((lo, hi, v));
+            }
+        }
+    }
+
+    /// Robust-weighted variant of
+    /// [`add_residual_cross`](Self::add_residual_cross): scales the
+    /// across-entity Hessian pairs by the loss weight `w`. `w = 1` is
+    /// bit-identical. `_r` is ignored (present for uniform macro routing).
+    pub fn add_residual_cross_with_loss(&mut self, w: T, _r: T, indices: &[u32], dr: &[T], entity_offsets: &[u32]) {
+        let two_w = T::two() * w;
+        let n = indices.len();
+        let span_of = |i: u32| -> u32 {
+            let mut k = 0u32;
+            for (idx, &off) in entity_offsets.iter().enumerate() {
+                if off <= i { k = idx as u32; } else { break; }
+            }
+            k
+        };
+        for i in 0..n {
+            if indices[i] == u32::MAX { continue; }
+            let span_i = span_of(i as u32);
+            for j in (i + 1)..n {
+                if indices[j] == u32::MAX { continue; }
+                let span_j = span_of(j as u32);
+                if span_i == span_j { continue; }
+                let (lo, hi) = if indices[i] <= indices[j] {
+                    (indices[i], indices[j])
+                } else {
+                    (indices[j], indices[i])
+                };
+                let v = two_w * dr[i] * dr[j];
                 let v = if lo == hi { v + v } else { v };
                 self.hessian.push((lo, hi, v));
             }

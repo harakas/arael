@@ -539,6 +539,24 @@ Why `epsilon_for(xc)` and not the nullary `epsilon()`? The constant machine epsi
 
 The same pattern -- `simple_func*_derivs` plus `clamp` and/or `epsilon_for`-regularisation in the derivative -- is how `safe_acos`, `safe_sqrt`, `safe_atan2`, and similar are implemented.
 
+## Robust loss kernels
+
+`loss_huber`, `loss_cauchy`, and `loss_tukey` take the squared residual norm `s = |r|^2` and return the robustified cost that replaces it. The scale (`k`, `c`) is on the residual-norm axis (`sqrt(s)`); for whitened residuals that is a count of standard deviations. All three equal `s` near zero, so an inlier is left as plain least squares, and their weight `rho'(s)` is what a solver multiplies the block's gradient and Hessian by.
+
+| Kernel | `rho(s)` | Weight `rho'(s)` | Behaviour |
+|---|---|---|---|
+| `loss_huber(s, k)` | `s` if `s <= k^2`, else `2k*sqrt(s) - k^2` | `1`, then `k/sqrt(s)` | convex, never rejects |
+| `loss_cauchy(s, c)` | `c^2 * ln(1 + s/c^2)` | `c^2/(c^2 + s)` | smooth, redescends slowly |
+| `loss_tukey(s, c)` | `(c^2/3)(1 - (1 - s/c^2)^3)`, capped at `c^2/3` | `(1 - s/c^2)^2`, then `0` | rejects `s >= c^2` outright |
+
+They are composed from `branch`, `sqrt`, and `ln`, so they differentiate, CSE, and generate code with no special handling.
+
+```rust
+let s = symbol("s");
+let rho = loss_huber(s.clone(), constant(1.5));
+let w = rho.diff("s");                   // the weight, k/sqrt(s) past the knot
+```
+
 ## Parsing
 
 `parse(input)` reads an expression in standard infix notation: arithmetic, parentheses, function calls, the `^` operator for power, and the named constants `pi` and `e`. Numeric literals accept an optional scientific exponent (`1e-12`, `2.5E+2`). Anything else becomes a free symbol.

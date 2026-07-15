@@ -1329,6 +1329,28 @@
 //! value each pass -- the constraint body reads the current value, so
 //! the sigma you see is always the sigma in effect.
 //!
+//! ## Block-level loss
+//!
+//! The Starship wrapper is applied to each residual element by hand. A
+//! `loss` modifier robustifies the whole residual block instead: it
+//! takes the squared norm `s = |r|^2` and replaces it with `rho(s)`,
+//! scaling the block's gradient and Hessian by the weight `rho'(s)`.
+//!
+//! ```ignore
+//! #[arael(constraint(hb, loss = |s| loss_huber(s, self.k), {
+//!     [(obs.u - proj.u) * obs.iw, (obs.v - proj.v) * obs.iw]
+//! }))]
+//! ```
+//!
+//! The closure argument is the block squared norm; the scale (`k`, `c`)
+//! is on the norm axis, a sigma count for whitened residuals. Kernels
+//! `loss_huber`, `loss_cauchy`, and `loss_tukey` ship, or write any
+//! differentiable expression (`|s| s` is plain least squares). Unlike
+//! the per-element wrapper this is a standard M-estimator: the
+//! down-weighting depends only on the block norm, so it is invariant to
+//! the residual axis orientation. Scaling by `rho'(s)` keeps the Hessian
+//! positive semidefinite. Formulas in `docs/SYM.md`.
+//!
 //! # Instrumentation & Debugging
 //!
 //! When a model fails to converge or the solution is wrong, the usual

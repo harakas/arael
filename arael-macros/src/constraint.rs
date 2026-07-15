@@ -937,6 +937,7 @@ pub struct ConstraintAttr {
     pub block_fields: Vec<String>,
     pub parent_name: Option<String>,  // e.g. "lm" for parent=lm
     pub guard: Option<String>,        // runtime guard expression, e.g. "self.info.gps.is_some()"
+    pub loss: Option<String>,         // robust loss closure, e.g. "|s| loss_huber(s, self.k)"
     pub name: Option<String>,         // optional label for Jacobian rows, e.g. name = "sweep"
     pub vars: Vec<ConstraintVar>,     // explicit variables (legacy, may be empty)
     pub body_stmts: Vec<Stmt>,
@@ -990,6 +991,7 @@ fn parse_constraint_inner_impl(
     let mut block_fields: Vec<String> = Vec::new();
     let mut parent_name: Option<String> = None;
     let mut guard: Option<String> = None;
+    let mut loss: Option<String> = None;
     let mut name_label: Option<String> = None;
     let mut vars: Vec<ConstraintVar> = Vec::new();
     // Track the first-token span of each positional block field so we
@@ -1075,6 +1077,23 @@ fn parse_constraint_inner_impl(
                             }
                             let guard_ts: proc_macro2::TokenStream = guard_tokens.into_iter().collect();
                             guard = Some(guard_ts.to_string());
+                        } else if name == "loss" {
+                            // A robust-loss closure `|s| <expr>`. Collect its
+                            // tokens up to the comma before the body, with the
+                            // same final-brace guard as `guard` (a trailing
+                            // `{ body }` with no comma terminates it).
+                            let mut loss_tokens = Vec::new();
+                            while pos < tokens.len() {
+                                match &tokens[pos] {
+                                    proc_macro2::TokenTree::Punct(p) if p.as_char() == ',' => break,
+                                    proc_macro2::TokenTree::Group(g)
+                                        if g.delimiter() == proc_macro2::Delimiter::Brace
+                                            && pos + 1 == tokens.len() => break,
+                                    t => { loss_tokens.push(t.clone()); pos += 1; }
+                                }
+                            }
+                            let loss_ts: proc_macro2::TokenStream = loss_tokens.into_iter().collect();
+                            loss = Some(loss_ts.to_string());
                         } else if name == "name" {
                             // Expect a string literal
                             if let Some(proc_macro2::TokenTree::Literal(lit)) = tokens.get(pos) {
@@ -1096,7 +1115,7 @@ fn parse_constraint_inner_impl(
                             // `gaurd = ...` would compile as an unguarded,
                             // always-active constraint.
                             return Err(syn::Error::new(ident_span,
-                                format!("unknown constraint attribute key `{}`, expected `parent`, `guard`, or `name`", name)));
+                                format!("unknown constraint attribute key `{}`, expected `parent`, `guard`, `loss`, or `name`", name)));
                         }
                     }
                     Some(proc_macro2::TokenTree::Punct(p)) if p.as_char() == ':' => {
@@ -1186,6 +1205,7 @@ fn parse_constraint_inner_impl(
         block_fields,
         parent_name,
         guard,
+        loss,
         name: name_label,
         vars,
         body_stmts: block.stmts,
@@ -2486,7 +2506,7 @@ pub fn generate_root_methods(
         // Re-process constraint body to get residual-only code and full code
         // We need the symbolic expressions again
         let root_name_str = root_name.to_string();
-        let (residual_exprs, param_symbols) = interpret_constraint_body(
+        let (residual_exprs, param_symbols, loss_expr) = interpret_constraint_body(
             &struct_ident, &fields.named, &constraint, &root_name_str)
             .map_err(|e| syn::Error::new(e.span(),
                 format!("{}:{}: {}", sc.attr_file, sc.attr_line, e)))?;
@@ -2733,6 +2753,52 @@ pub fn generate_root_methods(
             None
         };
 
+        // --- Robust loss setup ---
+        // With a loss the block accumulates its squared residual norm into
+        // __block_cost, then contributes rho(s) to __cost and scales every
+        // Hessian/gradient write by the weight __w = rho'(s). Without a loss,
+        // every token below is empty and the emission is byte-identical.
+        let loss_present = loss_expr.is_some();
+        let (m_add, m_cross): (TokenStream2, TokenStream2) = if loss_present {
+            (quote! { add_residual_with_loss }, quote! { add_residual_cross_with_loss })
+        } else {
+            (quote! { add_residual }, quote! { add_residual_cross })
+        };
+        // Build the finalize statements (compute rho, and for the gh path the
+        // weight) from the loss expression, sharing the residual pipeline:
+        // differentiate for the weight, then substitute + fast_atan + CSE.
+        let block_cost_decl: TokenStream2 = if loss_present {
+            quote! { let mut __block_cost = 0.0 as #cast_type; }
+        } else { quote! {} };
+        let emit_loss = |want_weight: bool| -> syn::Result<TokenStream2> {
+            let Some(loss_e) = &loss_expr else { return Ok(quote! {}); };
+            let mut exprs = vec![loss_e.clone()];
+            if want_weight { exprs.push(loss_e.diff(LOSS_ARG_SYM)); }
+            apply_substitutions(&mut exprs, &all_subs);
+            if fast_atan { replace_atan_fast(&mut exprs); }
+            let (ints, simplified) = arael_sym::cse(&exprs);
+            let mut stmts = Vec::new();
+            for (name, expr) in &ints {
+                let ni = syn::Ident::new(name, proc_macro2::Span::call_site());
+                let code: Expr = parse_sym_code(&expr.to_rust(""))?;
+                stmts.push(quote! { let #ni = #code; });
+            }
+            let rho_code: Expr = parse_sym_code(&simplified[0].to_rust(""))?;
+            let weight_stmt = if want_weight {
+                let w_code: Expr = parse_sym_code(&simplified[1].to_rust(""))?;
+                quote! { let __w = (#w_code) as #cast_type; }
+            } else { quote! {} };
+            Ok(quote! {
+                #(#stmts)*
+                #weight_stmt
+                __cost += (#rho_code) as #cast_type;
+            })
+        };
+        let loss_cost_finalize = emit_loss(false)?;
+        let loss_gh_finalize = emit_loss(true)?;
+        // Per-row cost accumulator: into __block_cost under a loss, else __cost.
+        let cost_acc: TokenStream2 = if loss_present { quote! { __block_cost } } else { quote! { __cost } };
+
         // --- Cost-only code: differentiate FIRST, then apply substitutions, then CSE ---
         // Apply substitutions to residuals (cost-only, no derivatives)
         let mut cost_exprs = residual_exprs.clone();
@@ -2740,6 +2806,7 @@ pub fn generate_root_methods(
         if fast_atan { replace_atan_fast(&mut cost_exprs); }
         let (cost_intermediates, cost_simplified) = arael_sym::cse(&cost_exprs);
         let mut cost_stmts = Vec::new();
+        cost_stmts.push(block_cost_decl.clone());
         for (name, expr) in &cost_intermediates {
             let name_ident = syn::Ident::new(name, proc_macro2::Span::call_site());
             let code: Expr = parse_sym_code(&expr.to_rust(""))?;
@@ -2750,9 +2817,10 @@ pub fn generate_root_methods(
             let r_expr: Expr = parse_sym_code(&r.to_rust(""))?;
             cost_stmts.push(quote! {
                 let #r_ident= #r_expr;
-                __cost += (#r_ident as #cast_type) * (#r_ident as #cast_type);
+                #cost_acc += (#r_ident as #cast_type) * (#r_ident as #cast_type);
             });
         }
+        cost_stmts.push(loss_cost_finalize);
 
         // --- Grad+hessian code with CSE ---
         // Collect all expressions: residuals + all derivatives (from originals, before substitution)
@@ -2769,6 +2837,7 @@ pub fn generate_root_methods(
         let (gh_intermediates, gh_simplified) = arael_sym::cse(&all_gh_exprs);
 
         let mut gh_stmts = Vec::new();
+        gh_stmts.push(block_cost_decl.clone());
 
         // Cross-block write targets: mutable access paths taken fresh at
         // every add_residual call (a temporary exclusive borrow, ending at
@@ -2889,7 +2958,9 @@ pub fn generate_root_methods(
         // remote-only: extending deferral to the other families regressed
         // the sparse bench, so they keep the interleaved compute/write
         // shape with per-row rereads.
-        let defer_writes = is_remote_block;
+        // A loss forces deferral: every write is scaled by __w = rho'(s),
+        // which is only known once __block_cost has summed all rows.
+        let defer_writes = is_remote_block || loss_present;
         let mut deferred_writes: Vec<TokenStream2> = Vec::new();
         for ri in 0..n_residuals {
             // Residual rows interleave reads (residual + derivative
@@ -2905,12 +2976,20 @@ pub fn generate_root_methods(
             // Accumulate the cost alongside the derivatives: the residual
             // value is already in hand, so the fused calc_cost_grad_hessian_*
             // entry points get the cost for free (saves a separate cost-only
-            // model evaluation in the LM loop).
+            // model evaluation in the LM loop). Under a loss this sums into
+            // __block_cost = |r|^2 instead, and rho(s) is added to __cost once.
             gh_stmts.push(quote! {
                 let #r_ident= #r_expr;
-                __cost += (#r_ident as #cast_type) * (#r_ident as #cast_type);
+                #cost_acc += (#r_ident as #cast_type) * (#r_ident as #cast_type);
             });
             idx += 1;
+            // The leading argument every accumulation call passes: the residual
+            // cast to the block type, prefixed by the weight when a loss is on.
+            let wr: TokenStream2 = if loss_present {
+                quote! { __w, #r_ident as #cast_type }
+            } else {
+                quote! { #r_ident as #cast_type }
+            };
 
             // Structurally-zero derivatives (residual does not touch the
             // parameter) are known post-simplify: skip their declarations,
@@ -2954,7 +3033,7 @@ pub fn generate_root_methods(
                     let _ = type_id;
                     triplet_calls.push(quote! {
                         #access.#hb_ident
-                            .add_residual(#r_ident as #cast_type, &[#(#entity_dr),*], grad);
+                            .#m_add(#wr, &[#(#entity_dr),*], grad);
                     });
                 }
                 // Cross pairs need two live spans: with <= 1 nonzero span
@@ -2963,8 +3042,8 @@ pub fn generate_root_methods(
                     .filter(|(_, _, start, count)| !span_zero(*start, *count))
                     .count();
                 let cross_call = if nonzero_spans <= 1 { quote! {} } else { quote! {
-                    __frine.#block_ident.add_residual_cross(
-                        #r_ident as #cast_type,
+                    __frine.#block_ident.#m_cross(
+                        #wr,
                         &__all_idx,
                         &[#(#dr_f64),*],
                         &__entity_offsets,
@@ -3009,7 +3088,7 @@ pub fn generate_root_methods(
                         let hb_ident = syn::Ident::new(&hb, proc_macro2::Span::call_site());
                         self_block_calls.push(quote! {
                             self.#hb_ident
-                                .add_residual(#r_ident as #cast_type, &[#(#entity_dr),*], grad);
+                                .#m_add(#wr, &[#(#entity_dr),*], grad);
                         });
                         continue;
                     }
@@ -3017,7 +3096,7 @@ pub fn generate_root_methods(
                         // Remote primary: write through the remote target path.
                         let rtw = remote_target_write.as_ref().unwrap();
                         remote_self_block_call = Some(quote! {
-                            #rtw.add_residual(#r_ident as #cast_type, &[#(#entity_dr),*], grad);
+                            #rtw.#m_add(#wr, &[#(#entity_dr),*], grad);
                         });
                         continue;
                     }
@@ -3029,7 +3108,7 @@ pub fn generate_root_methods(
                     let access = entity_access_expr(&var_id.to_string())?;
                     self_block_calls.push(quote! {
                         #access.#hb_ident
-                            .add_residual(#r_ident as #cast_type, &[#(#entity_dr),*], grad);
+                            .#m_add(#wr, &[#(#entity_dr),*], grad);
                     });
                 }
                 let mut cross_block_calls: Vec<TokenStream2> = Vec::new();
@@ -3042,8 +3121,8 @@ pub fn generate_root_methods(
                     let dr_b: Vec<TokenStream2> = dr_f64.iter()
                         .skip(route.b_start).take(route.b_count).cloned().collect();
                     cross_block_calls.push(quote! {
-                        __frine.#block.add_residual_cross(
-                            #r_ident as #cast_type,
+                        __frine.#block.#m_cross(
+                            #wr,
                             &[#(#dr_a),*],
                             &[#(#dr_b),*],
                         );
@@ -3059,7 +3138,7 @@ pub fn generate_root_methods(
                 if !all_zero {
                     let rtw = remote_target_write.as_ref().unwrap();
                     deferred_writes.push(quote! {
-                        #rtw.add_residual(#r_ident as #cast_type, &[#(#dr_f64),*], grad);
+                        #rtw.#m_add(#wr, &[#(#dr_f64),*], grad);
                     });
                 }
             } else if is_self_block {
@@ -3089,17 +3168,17 @@ pub fn generate_root_methods(
                     let self_zero = span_zero(0, self_count);
                     let root_zero = span_zero(root_start, root_count);
                     let self_call = if self_zero { quote! {} } else { quote! {
-                        __item.#block_ident.add_residual(#r_ident as #cast_type, &[#(#dr_self),*], grad);
+                        __item.#block_ident.#m_add(#wr, &[#(#dr_self),*], grad);
                     }};
                     let root_call = if root_zero { quote! {} } else { quote! {
                         self.#root_hb_ident
-                            .add_residual(#r_ident as #cast_type, &[#(#dr_root),*], grad);
+                            .#m_add(#wr, &[#(#dr_root),*], grad);
                     }};
                     // The (self, root) cross pairs need both spans live.
                     let cross_call = if self_zero || root_zero { quote! {} } else { quote! {
                         self.#triplet_ident
-                            .add_residual_cross(
-                                #r_ident as #cast_type,
+                            .#m_cross(
+                                #wr,
                                 &__all_idx,
                                 &[#(#dr_f64),*],
                                 &__entity_offsets,
@@ -3113,7 +3192,7 @@ pub fn generate_root_methods(
                     if defer_writes { deferred_writes.push(writes); } else { gh_stmts.push(writes); }
                 } else if !all_zero {
                     let writes = quote! {
-                        __item.#block_ident.add_residual(#r_ident as #cast_type, &[#(#dr_f64),*], grad);
+                        __item.#block_ident.#m_add(#wr, &[#(#dr_f64),*], grad);
                     };
                     if defer_writes { deferred_writes.push(writes); } else { gh_stmts.push(writes); }
                 }
@@ -3130,13 +3209,13 @@ pub fn generate_root_methods(
                 let a_target = a_write_target.as_ref().unwrap();
                 let b_target = b_write_target.as_ref().unwrap();
                 let a_call = if a_zero { quote! {} } else { quote! {
-                    #a_target.add_residual(#r_ident as #cast_type, &[#(#dr_a),*], grad);
+                    #a_target.#m_add(#wr, &[#(#dr_a),*], grad);
                 }};
                 let b_call = if b_zero { quote! {} } else { quote! {
-                    #b_target.add_residual(#r_ident as #cast_type, &[#(#dr_b),*], grad);
+                    #b_target.#m_add(#wr, &[#(#dr_b),*], grad);
                 }};
                 let cross_call = if a_zero || b_zero { quote! {} } else { quote! {
-                    __frine.#block_ident.add_residual_cross(#r_ident as #cast_type, &[#(#dr_a),*], &[#(#dr_b),*]);
+                    __frine.#block_ident.#m_cross(#wr, &[#(#dr_a),*], &[#(#dr_b),*]);
                 }};
                 let writes = quote! {
                     #a_call
@@ -3147,6 +3226,9 @@ pub fn generate_root_methods(
             }
         }
 
+        // Finalize the loss before the deferred writes: __cost += rho(s) and
+        // let __w = rho'(s), which every deferred write below scales by.
+        gh_stmts.push(loss_gh_finalize);
         if !deferred_writes.is_empty() {
             gh_stmts.push(quote! { #(#deferred_writes)* });
         }
@@ -4736,13 +4818,20 @@ pub fn generate_root_methods(
     Ok(tokens)
 }
 
-/// Interpret constraint body and return (residual expressions, param symbols).
+/// The synthetic symbol the loss closure's argument binds to. The loss
+/// codegen accumulates the block's squared residual norm into a local of this
+/// name, and the loss/weight expressions read it back by rendering the symbol
+/// verbatim.
+pub const LOSS_ARG_SYM: &str = "__block_cost";
+
+/// Interpret constraint body and return (residual expressions, param symbols,
+/// optional robust-loss expression rho(s) in terms of [`LOSS_ARG_SYM`]).
 fn interpret_constraint_body(
     struct_name: &syn::Ident,
     fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
     constraint: &ConstraintAttr,
     root_type_name: &str,
-) -> syn::Result<(Vec<E>, Vec<String>)> {
+) -> syn::Result<(Vec<E>, Vec<String>, Option<E>)> {
     let is_remote = constraint.primary_block_field().contains('.');
     let (a_type, b_type) = if is_remote {
         // Remote block: e.g. "pose.hb_pose" — target type from Ref field
@@ -4998,7 +5087,42 @@ fn interpret_constraint_body(
         }
     }
 
-    Ok((residuals, param_symbols))
+    // Optional robust loss: a closure `|s| <expr>` over the block's squared
+    // residual norm. Evaluate its body against the same ctx as the residuals
+    // (so field reads like `self.k` / `parent.gamma` resolve identically),
+    // with the argument bound to the synthetic LOSS_ARG_SYM symbol.
+    let loss_expr = if let Some(loss_src) = &constraint.loss {
+        let mut closure: syn::ExprClosure = syn::parse_str(loss_src)
+            .map_err(|e| syn::Error::new_spanned(struct_name,
+                format!("constraint `loss` must be a closure `|s| <expr>`: {}", e)))?;
+        if closure.inputs.len() != 1 {
+            return Err(syn::Error::new_spanned(struct_name,
+                "constraint `loss` closure takes exactly one argument (the squared residual norm)"));
+        }
+        let arg = match &closure.inputs[0] {
+            syn::Pat::Ident(pi) => pi.ident.to_string(),
+            syn::Pat::Type(pt) => match &*pt.pat {
+                syn::Pat::Ident(pi) => pi.ident.to_string(),
+                _ => return Err(syn::Error::new_spanned(struct_name,
+                    "constraint `loss` argument must be a plain identifier")),
+            },
+            _ => return Err(syn::Error::new_spanned(struct_name,
+                "constraint `loss` argument must be a plain identifier")),
+        };
+        // Mirror the body's `self` rewrite so field reads resolve the same way.
+        rewrite_guard_self(&mut closure.body, &struct_name.to_string().to_lowercase());
+        ctx.bindings.insert(arg.clone(), SymVal::Scalar(arael_sym::symbol(LOSS_ARG_SYM)));
+        ctx.lets.insert(arg);
+        match eval_expr(&closure.body, &mut ctx)? {
+            SymVal::Scalar(e) => Some(e),
+            other => return Err(syn::Error::new_spanned(struct_name,
+                format!("constraint `loss` must evaluate to a scalar, got {}", other.type_name()))),
+        }
+    } else {
+        None
+    };
+
+    Ok((residuals, param_symbols, loss_expr))
 }
 
 /// Zero-cost source-origin marker: emits a doc-attribute on a nested dummy

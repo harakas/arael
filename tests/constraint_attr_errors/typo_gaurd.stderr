@@ -1,4 +1,4 @@
-error: $DIR/tests/constraint_attr_errors/typo_gaurd.rs:9: unknown constraint attribute key `gaurd`, expected `parent`, `guard`, or `name`
+error: $DIR/tests/constraint_attr_errors/typo_gaurd.rs:9: unknown constraint attribute key `gaurd`, expected `parent`, `guard`, `loss`, or `name`
  --> tests/constraint_attr_errors/typo_gaurd.rs:7:1
   |
 7 | #[arael::model]

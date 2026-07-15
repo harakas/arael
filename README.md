@@ -30,7 +30,7 @@ Solve problems like linear and nonlinear regression, sensor fusion, SLAM, bundle
 
 - **Symbolic math** -- expression trees with automatic differentiation, simplification, expansion, LaTeX/Rust code generation
 - **Compile-time constraint code generation** -- write constraints symbolically, get compiled derivative code with CSE
-- **Levenberg-Marquardt solver** -- with robust error suppression via the [Starship method (US12346118)](https://patents.google.com/patent/US12346118) `gamma * atan(r / gamma)` and switchable constraints (`guard = expr`)
+- **Levenberg-Marquardt solver** -- with robust error suppression via the [Starship method (US12346118)](https://patents.google.com/patent/US12346118) `gamma * atan(r / gamma)`, block-level robust loss (`loss = |s| loss_huber(s, k)`), and switchable constraints (`guard = expr`)
 - **Multiple solver backends** via `LmSolver` trait:
   - **Dense Cholesky** (nalgebra) -- fixed-size dispatch up to 9x9, dynamic for larger
   - **Band Cholesky** -- pure Rust O(n*kd^2) for block-tridiagonal systems (9.4x faster than dense at 500 poses)
@@ -346,6 +346,18 @@ The symbolic-differentiation pipeline handles `atan`'s derivative automatically;
 Gauss-Newton (and Levenberg-Marquardt) is a local method: each step linearises the cost around the current $M$ and moves in the direction that linearisation suggests. For any loss, you need a starting $M_0$ close enough to the optimum that the linearisation is informative.
 
 Starship makes this requirement stricter. The gradient falls off as $\alpha'(r) = 1 / (1 + \pi^2 r^2 / (4 \Delta S_{\max}))$, so at the recommended $\Delta S_{\max} = 25$ a residual at $5\sigma$ still carries about 29% of its least-squares pull and a $10\sigma$ residual about 9% -- still usable. Once you get out to $20\sigma$ and beyond it drops under 3% and those residuals are effectively frozen. If $M_0$ puts many residuals that far out, the solver has nothing to work with and stalls. The usual remedy is **graduated optimisation**: start with a large $\Delta S_{\max}$ (loose cap, everything in the informative regime), solve, then shrink it across passes down to the target value. The SLAM demo does this via a `frine_isigma_scale` field stepped per pass.
+
+### Block-level loss
+
+The Starship wrapper above is applied to each residual *element* by hand. A `loss` modifier on the constraint instead robustifies the whole residual block at once: it takes the squared norm $s = \lVert r \rVert^2$ and replaces it with $\rho(s)$, scaling the block's gradient and Hessian by the weight $\rho'(s)$.
+
+```rust
+#[arael(constraint(hb, loss = |s| loss_huber(s, self.k), {
+    [(obs.u - proj.u) * obs.iw, (obs.v - proj.v) * obs.iw]
+}))]
+```
+
+The closure argument is the block squared norm; the scale (`k`, `c`) is on the norm axis, a sigma count for whitened residuals. Three kernels ship (`loss_huber`, `loss_cauchy`, `loss_tukey`), or write any differentiable expression -- `|s| loss_cauchy(s, self.c)`, `|s| s` (plain least squares). Unlike the per-element wrapper this is a standard M-estimator: the down-weighting depends only on the block norm, so it is invariant to how the residual axes are oriented. Scaling by $\rho'(s)$ keeps the Hessian positive semidefinite. See [docs/SYM.md](docs/SYM.md#robust-loss-kernels) for the kernel formulas.
 
 ## Localization Demo
 
