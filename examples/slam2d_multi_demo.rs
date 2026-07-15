@@ -21,6 +21,7 @@
 //! Run:
 //!     cargo run -r --example slam2d_multi_demo
 
+use arael::covariance::Covariance;
 use arael::model::{Model, Param, SelfBlock, CrossBlock};
 use arael::simple_lm::LmProblem;
 use arael::vect::vect2f;
@@ -288,9 +289,8 @@ fn main() {
         print_stats("  lm pos   ", "m", &lm_errs);
     }
 
-    // 95% confidence ellipses from the Gauss-Newton Hessian inverse (Cov =
-    // 2 H^-1; the factor 2 comes from add_residual). GPS pins the gauge, so the
-    // raw per-landmark covariance block is meaningful.
+    // 95% confidence ellipses from the per-landmark parameter covariance. GPS
+    // pins the gauge, so the raw covariance block is meaningful.
     let ellipses = compute_landmark_ellipses(&mut map);
 
     let out = "slam2d_multi.eps";
@@ -318,20 +318,10 @@ fn print_stats(label: &str, unit: &str, v: &[f32]) {
 // angle_rad) from the 2x2 diagonal block of the parameter covariance. 95% in 2D
 // is chi^2(0.95, df=2) = 5.991, so the semi-axes are sqrt(5.991 * eigenvalue).
 fn compute_landmark_ellipses(map: &mut Map) -> std::vec::Vec<(vect2f, f32, f32, f32)> {
-    let mut params: std::vec::Vec<f32> = std::vec::Vec::new();
-    map.serialize32(&mut params);
-    let n = params.len();
-    let mut grad = vec![0.0_f32; n];
-    let mut hessian = vec![0.0_f32; n * n];
-    map.calc_grad_hessian_dense(&params, &mut grad, &mut hessian);
-
-    // f32 -> f64 for a stable Cholesky on the full system.
-    let h64: std::vec::Vec<f64> = hessian.iter().map(|&x| x as f64).collect();
-    let h_mat = nalgebra::DMatrix::from_row_slice(n, n, &h64);
-    let cov = match nalgebra::linalg::Cholesky::new(h_mat) {
-        Some(chol) => chol.inverse() * 2.0,
-        None => {
-            println!("\nHessian not positive-definite -- skipping uncertainty ellipses.");
+    let cov = match map.assemble_covariance() {
+        Ok(cov) => cov,
+        Err(e) => {
+            println!("\n{e} -- skipping uncertainty ellipses.");
             return std::vec::Vec::new();
         }
     };
@@ -339,8 +329,7 @@ fn compute_landmark_ellipses(map: &mut Map) -> std::vec::Vec<(vect2f, f32, f32, 
     let chi2_95 = 5.991_f64;
     let mut out = std::vec::Vec::with_capacity(map.landmarks.len());
     for lm in map.landmarks.iter() {
-        let k = lm.pos.index() as usize;
-        let cll = cov.fixed_view::<2, 2>(k, k).clone_owned();
+        let cll = cov.marginal_cov(lm);
         let eig = nalgebra::SymmetricEigen::new(cll);
         let (i0, i1) = if eig.eigenvalues[0] >= eig.eigenvalues[1] { (0, 1) } else { (1, 0) };
         let semi_a = (eig.eigenvalues[i0].max(0.0) * chi2_95).sqrt() as f32;

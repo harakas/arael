@@ -396,13 +396,9 @@ fn main() {
         println!("  mean: |d|={:.4}m", lm_sum / n_l as f32);
     }
 
-    // Parameter covariance via inverse of the Gauss-Newton Hessian.
-    //   H_ours = 2 * J^T J  (the factor of 2 comes from add_residual).
-    //   Cov = (J^T J)^{-1} = 2 * H^{-1}.
-    // The first pose is held fixed, so uncertainties are relative to a known
-    // reference and the covariance is meaningful (with nothing held fixed the
-    // whole map could slide or rotate freely and H would not be invertible);
-    // each landmark's 2x2 diagonal block is its own positional uncertainty.
+    // Per-landmark positional uncertainty from the parameter covariance. The
+    // first pose is held fixed, so the map cannot slide or rotate freely and the
+    // Hessian is invertible; each landmark's 2x2 block is its own uncertainty.
     let ellipses = compute_landmark_ellipses(&mut path);
 
     let out = "slam2d_simple.eps";
@@ -414,20 +410,10 @@ fn main() {
 // 95% in 2D corresponds to chi^2(0.95, df=2) = 5.991, so the semi-axes are
 // sqrt(5.991 * eigenvalue) of the 2x2 position covariance block.
 fn compute_landmark_ellipses(path: &mut Path) -> std::vec::Vec<(vect2f, f32, f32, f32)> {
-    let mut params: std::vec::Vec<f32> = std::vec::Vec::new();
-    path.serialize32(&mut params);
-    let n = params.len();
-    let mut grad = vec![0.0_f32; n];
-    let mut hessian = vec![0.0_f32; n * n];
-    path.calc_grad_hessian_dense(&params, &mut grad, &mut hessian);
-
-    // f32 -> f64 for stable Cholesky on the full system.
-    let h64: std::vec::Vec<f64> = hessian.iter().map(|&x| x as f64).collect();
-    let h_mat = nalgebra::DMatrix::from_row_slice(n, n, &h64);
-    let cov = match nalgebra::linalg::Cholesky::new(h_mat) {
-        Some(chol) => chol.inverse() * 2.0,
-        None => {
-            println!("\nHessian not positive-definite -- skipping uncertainty.");
+    let cov = match path.assemble_covariance() {
+        Ok(cov) => cov,
+        Err(e) => {
+            println!("\n{e} -- skipping uncertainty.");
             return std::vec::Vec::new();
         }
     };
@@ -435,8 +421,8 @@ fn compute_landmark_ellipses(path: &mut Path) -> std::vec::Vec<(vect2f, f32, f32
     let chi2_95 = 5.991_f64;
     let mut out = std::vec::Vec::with_capacity(path.landmarks.len());
     for lm in path.landmarks.iter() {
-        let k = lm.pos.index() as usize;
-        let cll = cov.fixed_view::<2, 2>(k, k).clone_owned();
+        // 2x2 positional covariance of this landmark, in tangent coordinates.
+        let cll = cov.marginal_cov(lm);
         let eig = nalgebra::SymmetricEigen::new(cll);
         // Sort descending so the major axis comes first.
         let (i0, i1) = if eig.eigenvalues[0] >= eig.eigenvalues[1] { (0, 1) } else { (1, 0) };

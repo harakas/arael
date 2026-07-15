@@ -42,6 +42,7 @@
 //!
 //! Run:  cargo run -r --example slam2d_align_demo
 
+use arael::covariance::Covariance;
 use arael::model::{Param, SelfBlock, CrossBlock};
 use arael::simple_lm::{LmConfig, LmProblem};
 use arael::vect::{vect2f, vect3f};
@@ -245,28 +246,16 @@ fn stage1(cfg: &Cfg, rm: &scene2d::RunMeas, gps_isigma: f32,
 
     path.solve_sparse(&LmConfig::<f32>::default());
 
-    // Covariance = 2 H^-1.
-    let mut params: std::vec::Vec<f32> = std::vec::Vec::new();
-    path.serialize32(&mut params);
-    let n = params.len();
-    let mut grad = vec![0.0_f32; n];
-    let mut hess = vec![0.0_f32; n * n];
-    path.calc_grad_hessian_dense(&params, &mut grad, &mut hess);
-    let h64: std::vec::Vec<f64> = hess.iter().map(|&x| x as f64).collect();
-    let cov = nalgebra::linalg::Cholesky::new(nalgebra::DMatrix::from_row_slice(n, n, &h64))
-        .expect("stage-1 Hessian not PD").inverse() * 2.0;
+    // Parameter covariance at the stage-1 solution.
+    let cov = path.assemble_covariance().expect("stage-1 Hessian not PD");
 
     // Centre = middle pose; its position is the correction pivot, its 3x3
-    // (x, y, gamma) covariance is the frame prior.
+    // (x, y, gamma) MARGINAL covariance is the frame prior.
     let mid = path.poses.len() / 2;
-    let (center, _cg) = { let p = &path.poses[mid]; (p.pos.value, p.gamma.value) };
-    let (px, pg) = {
-        let p = &path.poses[mid];
-        (p.pos.index() as usize, p.gamma.index() as usize)
-    };
-    let idx = [px, px + 1, pg];
+    let center = path.poses[mid].pos.value;
+    let cm = cov.marginal_cov(&path.poses[mid]);
     let mut c3 = [[0.0_f64; 3]; 3];
-    for a in 0..3 { for b in 0..3 { c3[a][b] = cov[(idx[a], idx[b])]; } }
+    for a in 0..3 { for b in 0..3 { c3[a][b] = cm[(a, b)]; } }
     let (ccov_r, ccov_isigma) = whitening_factors3(c3);
 
     let lm_world: std::vec::Vec<vect2f> = path.landmarks.iter().map(|l| l.pos.value).collect();
@@ -274,18 +263,11 @@ fn stage1(cfg: &Cfg, rm: &scene2d::RunMeas, gps_isigma: f32,
     let mut cov_r = std::vec::Vec::new();
     let mut cov_isigma = std::vec::Vec::new();
     for lm in path.landmarks.iter() {
-        let k = lm.pos.index() as usize;
         // Landmark covariance with the poses held FIXED (conditional, not
-        // marginal): invert the landmark's own 2x2 Hessian block. Landmarks
-        // share no factor, so H_ll is block-diagonal and this block IS the
-        // pose-fixed information. The pose/frame uncertainty is carried by the
-        // centre prior; taking a block of the full inverse instead would fold
-        // the pose position uncertainty back in and inflate the ellipse
-        // isotropically (double-counting it).
-        let hll = nalgebra::Matrix2::new(
-            hess[k * n + k] as f64, hess[k * n + k + 1] as f64,
-            hess[(k + 1) * n + k] as f64, hess[(k + 1) * n + k + 1] as f64);
-        let c2 = hll.try_inverse().expect("stage-1 landmark Hessian block singular") * 2.0;
+        // marginal): the pose/frame uncertainty is carried by the centre prior,
+        // so folding it back in via the marginal would double-count it and
+        // inflate the ellipse isotropically.
+        let c2 = cov.conditional_cov(lm);
         let c = matrix2f::from_elements(c2[(0, 0)] as f32, c2[(0, 1)] as f32,
                                         c2[(1, 0)] as f32, c2[(1, 1)] as f32);
         let (r, isig) = whitening_factors2(c);

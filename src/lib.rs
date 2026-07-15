@@ -1919,6 +1919,8 @@ pub use arael_sym as sym;
 pub mod model;
 /// Levenberg-Marquardt solver with dense, band, and sparse backends.
 pub mod simple_lm;
+/// Parameter covariance recovery (`Sigma = 2 H^-1`) at the solution.
+pub mod covariance;
 /// Camera model and geometric utilities.
 pub mod geometry;
 
@@ -1953,6 +1955,7 @@ pub mod prelude {
         ExtendedModel, JacobianModel, Model, Param, QuaternionParam,
         SelfBlock, SimpleEulerAngleParam, TripletBlock,
     };
+    pub use crate::covariance::{CovAssembly, CovError, Covariance};
     pub use crate::refs::{self, Ref};
     pub use crate::simple_lm::{
         FitProblem, LmConfig, LmProblem, LmResult, LmSolver, NielsenLambdaDriver,
