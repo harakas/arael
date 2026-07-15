@@ -1814,6 +1814,12 @@
 //!   (US12346118), same robustifier used by the feature constraints
 //!   in loc/SLAM. Minimal single-struct model + LM fit, compared
 //!   against plain closed-form least squares.
+//! - **[`robust_curve_fitting`](https://github.com/harakas/arael/blob/master/examples/robust_curve_fitting.rs)**
+//!   -- fit `y = exp(m*x + c)` to data with two gross outliers: a
+//!   plain fit against a block Cauchy loss (`loss = |s|
+//!   loss_cauchy(s, 0.5)`) and the per-element starship wrapper. The
+//!   robust fits recover the true parameters; the plain fit is
+//!   dragged off. Ports Ceres's robust_curve_fitting example.
 //! - **[`loc_demo`](https://github.com/harakas/arael/blob/master/examples/loc_demo.rs)**
 //!   -- localisation with fixed known landmarks (no gauge freedom).
 //!   Block-tridiagonal Hessian + band solver. Graduated-isigma

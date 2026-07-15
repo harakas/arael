@@ -1,5 +1,36 @@
 # TODO
 
+- **`loss = |s| ...` in `fit(...)`**. Block-level robust loss lives on the
+  `constraint(...)` attribute (arael-macros/src/constraint.rs). The `fit(...)`
+  form has its own codegen (`generate_fit_impl` in lib.rs) and does not go
+  through it, so a robust curve fit currently needs a hand-written constraint
+  model. `fit` residuals are scalar (one per data element), so the block is
+  just `s = r^2` -- add `loss = |s| <expr>` parsing to `parse_fit_inner` and the
+  block_cost/weight emission (from the constraint path) to `generate_fit_impl`.
+  This is the canonical robust-curve-fitting case (Ceres's robust_curve_fitting
+  example is a fit with CauchyLoss).
+
+- **Nested child contributing to its parent's params**. A constraint on an
+  entity nested in a parameter-bearing entity cannot write to the parent's
+  block. A remote block needs a `Ref` field on the constraint struct; a `Ref`
+  into the containing entity makes the entity graph cyclic; and there is no
+  spelling for "the parent's block" (`curve.hb` always means "the `hb` on the
+  `curve` Ref field"). Also `Ref<T>` only targets a collection
+  (Vec/Deque/Arena), so a single shared entity cannot be a `Ref` target either.
+  Consequence: "one shared parameter set, many observations" (curve fit, global
+  calibration) forces a separate container entity plus a collection-of-one for
+  the params -- the observations cannot nest directly under the entity whose
+  params they fit. See examples/robust_curve_fitting.rs (the `Batch` container
+  exists only to break this). Wanted: a way for a nested entity to target its
+  parent's block, or a `Ref` (or direct binding) to a single non-collection
+  entity.
+
+- **Macro must reject a cyclic entity graph, not crash**. When entity A holds a
+  collection of B and B references A (`ref = root.<a-collection>`), the macro's
+  graph traversal recurses without bound and SIGSEGVs rustc (a stack overflow
+  during expansion, no diagnostic). Detect the cycle during registry/graph
+  build and emit a clear compile error instead.
+
 - **Automatic marginalize detection** -- DONE (2026-07-12). The macro hands the
   solver the model's type-coupling graph and `SparseFaer` reads the
   marginalizable families off it, so no hint is needed. The quality guard this
