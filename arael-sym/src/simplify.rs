@@ -118,10 +118,20 @@ fn add_term_cmp(a: &E, b: &E) -> Ordering {
 // Mul normalization helpers
 // ---------------------------------------------------------------------------
 
-/// Extract (base, const_exponent) from a factor.
+/// Extract (base, const_exponent) from a factor. Nested constant powers
+/// collapse via `(x^a)^b = x^(a*b)`, so `(cc^2)^2` reports base `cc`,
+/// exponent `4` and cancels against a `cc^4` elsewhere. Folding is limited
+/// to integer exponents: for a fractional exponent over a possibly-negative
+/// base the two forms differ (`(x^2)^0.5 = |x| != x`).
 fn base_and_exp(e: &E) -> (E, f64) {
     if let Expr::Pow(base, exp) = e.as_ref()
         && let Expr::Const(n) = exp.as_ref() {
+            if n.fract() == 0.0 {
+                let (inner_base, inner_exp) = base_and_exp(base);
+                if inner_exp.fract() == 0.0 {
+                    return (inner_base, inner_exp * *n);
+                }
+            }
             return (base.clone(), *n);
         }
     (e.clone(), 1.0)
@@ -636,6 +646,14 @@ impl Expr {
                 // (0^0 = 1) and b < 0 (0^b = inf). Constant b is already
                 // folded by the Const/Const branch above.
                 if is_const(&a, 1.0) { return constant(1.0); }
+                // (x^m)^n = x^(m*n), integer exponents only (sign-safe -- see
+                // base_and_exp). Collapses nested powers a later pass or the
+                // Const/Const branch above then folds further.
+                if let (Expr::Const(n), Expr::Pow(inner, ie)) = (b.as_ref(), a.as_ref())
+                    && let Expr::Const(m) = ie.as_ref()
+                    && n.fract() == 0.0 && m.fract() == 0.0 {
+                        return E::new(Expr::Pow(inner.clone(), constant(m * n)));
+                }
                 E::new(Expr::Pow(a, b))
             }
 

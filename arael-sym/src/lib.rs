@@ -2010,6 +2010,30 @@ mod tests {
     }
 
     #[test]
+    fn nested_integer_powers_collapse_and_cancel() {
+        let x = symbol("x");
+        // (x^2)^2 = x^4 (standalone).
+        assert_eq!(format!("{}", pow(pow(x.clone(), c(2.0)), c(2.0))), "x^4");
+        // x^4 / (x^2)^2 cancels to 1 -- the case that left the Cauchy weight
+        // as cc^4/(cc^2)^2 before base_and_exp flattened nested powers.
+        let ratio = pow(x.clone(), c(4.0)) / pow(pow(x.clone(), c(2.0)), c(2.0));
+        assert_eq!(format!("{}", ratio), "1");
+        // Fractional outer exponent must NOT fold: (x^2)^0.5 = |x| != x.
+        let root = pow(pow(x.clone(), c(2.0)), c(0.5));
+        assert_ne!(format!("{}", root), "x");
+        let vars: HashMap<&str, f64> = [("x", -3.0)].into();
+        assert!((root.eval(&vars).unwrap() - 3.0).abs() < 1e-12); // |−3|, not −3
+    }
+
+    #[test]
+    fn cauchy_weight_simplifies_to_reciprocal() {
+        // rho'(s) for Cauchy is 1/(1 + s/c^2); the redundant c^4/c^4 must cancel.
+        let (s, c) = (symbol("s"), symbol("c"));
+        let w = loss_cauchy(s, c).diff("s");
+        assert_eq!(format!("{}", w), "1 / (s / c^2 + 1)");
+    }
+
+    #[test]
     fn loss_kernels_resolve_by_name() {
         // The constraint interpreter dispatches through function_by_name, so
         // the loss kernels must be reachable there and match the direct call.
