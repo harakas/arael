@@ -1857,8 +1857,8 @@
 //!   via `optimize = false` on its params (the fixed reference that makes
 //!   the solution unique -- all measurements are relative). Constraint
 //!   bodies use the symbolic
-//!   `matrix2sym::rotation(angle)` surface. After the LM fit it computes
-//!   the parameter covariance from the dense Hessian and writes
+//!   `matrix2sym::rotation(angle)` surface. After the LM fit it recovers
+//!   each landmark's covariance (`assemble_covariance`) and writes
 //!   `slam2d_simple.eps` -- a colour-per-landmark plot of the trajectory,
 //!   the bearing fan, ground-truth shadows, the GT-vs-estimate error
 //!   lines, and 95% confidence ellipses around each landmark (visibly
