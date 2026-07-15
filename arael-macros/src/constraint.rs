@@ -3497,6 +3497,20 @@ pub fn generate_root_methods(
 
             let marker = source_marker(sc);
 
+            // A guard (`self` already rewritten to `__frine`, the loop item)
+            // wraps the residual statements so a filtered instance contributes
+            // nothing to cost, gradient or Hessian.
+            let remote_guarded_cost = if let Some(ref guard) = guard_expr {
+                quote! { if #guard { #(#cost_stmts)* } }
+            } else {
+                quote! { #(#cost_stmts)* }
+            };
+            let remote_guarded_gh = if let Some(ref guard) = guard_expr {
+                quote! { if #guard { #(#gh_stmts)* } }
+            } else {
+                quote! { { #(#gh_stmts)* } }
+            };
+
             // Cost loop: iterate parent -> frines, resolve refs, evaluate
             cost_loops.push(quote! {
                 {
@@ -3506,7 +3520,7 @@ pub fn generate_root_methods(
                             #(#resolve_stmts)*
                             let #parent_ident = __lm;
                             let #root_var_ident = &*__self_ref;
-                            #(#cost_stmts)*
+                            #remote_guarded_cost
                         }
                     }
                 }
@@ -3566,7 +3580,7 @@ pub fn generate_root_methods(
                             for __frine in __lm.#frines_ident.iter_mut() {
                                 #(#entity_index_copies)*
                                 #(#resolve_reread_stmts)*
-                                { #(#gh_stmts)* }
+                                #remote_guarded_gh
                             }
                         }
                     }
@@ -3582,7 +3596,7 @@ pub fn generate_root_methods(
                             for __frine in &__lm.#frines_ident {
                                 #(#entity_index_copies)*
                                 #(#resolve_reread_stmts)*
-                                { #(#gh_stmts)* }
+                                #remote_guarded_gh
                             }
                         }
                     }
@@ -3914,6 +3928,13 @@ pub fn generate_root_methods(
             let self_var = syn::Ident::new(&a_type.to_lowercase(), proc_macro2::Span::call_site());
             let marker = source_marker(sc);
 
+            // Honor an optional guard: `self` was already rewritten to
+            // `__frine` in guard_expr, matching the loop variable here.
+            let nested_cost_body = if let Some(ref guard) = guard_expr {
+                quote! { if #guard { #(#cost_stmts)* } }
+            } else {
+                quote! { #(#cost_stmts)* }
+            };
             let nested_cost = quote! {
                 {
                     #marker
@@ -3921,7 +3942,7 @@ pub fn generate_root_methods(
                     for __frine in &__item.#frines_ident {
                         #(#resolve_stmts)*
                         let #root_var_ident = &*__self_ref;
-                        #(#cost_stmts)*
+                        #nested_cost_body
                     }
                 }
             };
@@ -3930,13 +3951,18 @@ pub fn generate_root_methods(
             // from the iterated frines field); root reads go through
             // `self`; entity writes are temporary borrows built into
             // gh_stmts. No alias bindings remain.
+            let nested_gh_body = if let Some(ref guard) = guard_expr {
+                quote! { if #guard { #(#gh_stmts)* } }
+            } else {
+                quote! { { #(#gh_stmts)* } }
+            };
             let nested_gh = quote! {
                 {
                     #marker
                     for __frine in __item.#frines_ident.iter_mut() {
                         #(#entity_index_copies)*
                         #(#resolve_reread_stmts)*
-                        { #(#gh_stmts)* }
+                        #nested_gh_body
                     }
                 }
             };
@@ -3949,6 +3975,24 @@ pub fn generate_root_methods(
                 let resolve_stmts_j = resolve_stmts.clone();
                 let b_idx_stmts_j = b_idx_stmts.clone();
                 let marker_j = marker.clone();
+                // Emit rows only for constraint instances the guard admits.
+                let jac_body = quote! {
+                    let __jac_idx: std::vec::Vec<u32> = {
+                        let mut __b_idx = [0u32; #b_param_count];
+                        #(#b_idx_stmts_j)*
+                        let mut __v = std::vec::Vec::with_capacity(#a_param_count + #b_param_count);
+                        __v.extend_from_slice(&__jac_a_idx);
+                        __v.extend_from_slice(&__b_idx);
+                        __v
+                    };
+                    #(#jac_stmts)*
+                    __jac_cid += 1;
+                };
+                let jac_body = if let Some(ref guard) = guard_expr {
+                    quote! { if #guard { #jac_body } }
+                } else {
+                    quote! { #jac_body }
+                };
                 Some(quote! {
                     {
                         #marker_j
@@ -3956,16 +4000,7 @@ pub fn generate_root_methods(
                         for __frine in &__item.#frines_ident {
                             #(#resolve_stmts_j)*
                             let #root_var_ident = &*__self_ref;
-                            let __jac_idx: std::vec::Vec<u32> = {
-                                let mut __b_idx = [0u32; #b_param_count];
-                                #(#b_idx_stmts_j)*
-                                let mut __v = std::vec::Vec::with_capacity(#a_param_count + #b_param_count);
-                                __v.extend_from_slice(&__jac_a_idx);
-                                __v.extend_from_slice(&__b_idx);
-                                __v
-                            };
-                            #(#jac_stmts)*
-                            __jac_cid += 1;
+                            #jac_body
                         }
                     }
                 })
