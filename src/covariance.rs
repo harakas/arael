@@ -6,11 +6,10 @@
 //! already minimal 3-DOF retractions, `Sigma` is in local tangent coordinates
 //! -- no manifold projection is needed.
 //!
-//! [`Covariance::assemble_covariance`] factors `H` sparsely at the solution and
-//! keeps the factorization. Each query then solves for only the requested
-//! entity's columns, so the dense inverse is never formed -- it scales to large
-//! problems. Query per-entity blocks through the entity itself: any `Model`
-//! reports its parameter span via `collect_param_blocks`.
+//! [`Covariance::assemble_covariance`] re-assembles `H` at the solution and
+//! prepares it for querying. The dense inverse is never formed. Query per-entity
+//! blocks through the entity itself: any `Model` reports its parameter span via
+//! `collect_param_blocks`.
 //!
 //! ```ignore
 //! use arael::covariance::{Covariance, CovMode};
@@ -29,16 +28,21 @@
 //!   entry inside the factor's sparsity pattern in one `O(fill)` pass -- so every
 //!   marginal and coupled cross block becomes a lookup. Best for many/all
 //!   marginals.
+//! - [`CovMode::TriDiagonal`] is for a block-tridiagonal `H` (localization: a
+//!   pose chain with a fixed map, no loop closures). It runs a forward Schur pass
+//!   over the band -- no factorization at all -- so the last pose's covariance is
+//!   `2 S_last^-1`, computed front to back. Querying an interior pose runs a
+//!   backward pass once (cached); marginals are then `2 (S_i + R_i - D_i)^-1`.
 //!
 //! Either way, **conditional** covariance (`conditional_cov`) just inverts the
-//! entity's own `H_ee` block (`O(dof^3)`, no factor solve), and out-of-pattern
-//! cross blocks fall back to a solve.
+//! entity's own `H_ee` block (`O(dof^3)`, no factor solve).
 
 use crate::model::Model;
 use crate::simple_lm::{CooMatrix, CscMatrix, LmProblem, RootProblem};
 use crate::utils::Float;
 use faer::sparse::linalg::cholesky as fchol;
 use nalgebra::DMatrix;
+use std::cell::OnceCell;
 use std::mem::MaybeUninit;
 
 /// Why a covariance could not be assembled.
@@ -50,6 +54,10 @@ pub enum CovError {
     NotPositiveDefinite,
     /// The model has no optimizable parameters.
     Empty,
+    /// [`CovMode::TriDiagonal`] was requested but `H` is not block-tridiagonal in
+    /// serialization order: some off-band block couples non-adjacent entities (a
+    /// loop closure or a free landmark). Use `PerQuery` / `AllMarginals` instead.
+    NotTriDiagonal,
 }
 
 impl std::fmt::Display for CovError {
@@ -58,6 +66,8 @@ impl std::fmt::Display for CovError {
             CovError::NotPositiveDefinite => write!(f,
                 "Hessian is not positive definite (unfixed gauge? add an anchor or a prior)"),
             CovError::Empty => write!(f, "model has no optimizable parameters"),
+            CovError::NotTriDiagonal => write!(f,
+                "Hessian is not block-tridiagonal (loop closure or free landmark?); use PerQuery or AllMarginals"),
         }
     }
 }
@@ -75,24 +85,203 @@ pub enum CovMode {
     /// simplicial factor), so every marginal and coupled cross block is a lookup.
     /// Choose this when you need many or all marginals (e.g. an ellipse per pose).
     AllMarginals,
+    /// Forward Schur pass over a block-tridiagonal `H` (a localization pose chain:
+    /// fixed map, no loop closures). The last pose's covariance is then free
+    /// (forward only); an interior pose triggers a backward pass once. No
+    /// factorization. Errors with `NotTriDiagonal` if `H` is not banded.
+    TriDiagonal,
 }
 
-/// A factored covariance at the solution. Build it with
+/// A covariance prepared at the solution. Build it with
 /// [`Covariance::assemble_covariance`], then query per-entity blocks. An owned
 /// value: querying does not borrow the problem, so
-/// `let cov = p.assemble_covariance()?;` followed by
+/// `let cov = p.assemble_covariance(mode)?;` followed by
 /// `cov.marginal_cov(&p.landmarks[0])` borrow-checks.
-///
-/// Holds the sparse Cholesky factor of `H` and the CSC `H` itself (for
-/// conditional queries). Covariance blocks are solved for on demand; assembling
-/// with [`CovMode::AllMarginals`] fills a selected-inverse cache so marginals
-/// become lookups.
 pub struct CovAssembly {
     n: usize,
-    symbolic: fchol::SymbolicCholesky<usize>,
-    l_vals: Vec<f64>,
-    h: CscMatrix<f64>,
-    sel: Option<SelInv>,
+    backend: Backend,
+}
+
+enum Backend {
+    // faer sparse Cholesky: PerQuery solves on demand, AllMarginals also holds a
+    // selected-inverse cache. `h` (the CSC upper triangle) serves conditional_cov.
+    Factored {
+        symbolic: fchol::SymbolicCholesky<usize>,
+        l_vals: Vec<f64>,
+        h: CscMatrix<f64>,
+        sel: Option<SelInv>,
+    },
+    // Block-tridiagonal forward/backward Schur blocks. The diagonal blocks serve
+    // conditional_cov, so no CSC is kept.
+    Band(BandData),
+}
+
+// The block-tridiagonal representation, in serialization (chain) order. `fwd`
+// holds the forward Schur info blocks S_i (S_0 = D_0, S_i = D_i - B_{i-1}
+// S_{i-1}^-1 B_{i-1}^T); `bwd` the backward blocks R_i, filled lazily on the
+// first interior-pose query. `off[i]` is H[block i, block i+1].
+struct BandData {
+    spans: Vec<(usize, usize)>,
+    diag: Vec<DMatrix<f64>>,
+    off: Vec<DMatrix<f64>>,
+    fwd: Vec<DMatrix<f64>>,
+    bwd: OnceCell<Vec<DMatrix<f64>>>,
+}
+
+impl BandData {
+    // Block index of an entity from its (contiguous) parameter span.
+    fn block_index(&self, idx: &[usize]) -> usize {
+        let offset = *idx.iter().min().expect("non-empty entity");
+        self.spans
+            .iter()
+            .position(|&(o, w)| o == offset && w == idx.len())
+            .unwrap_or_else(|| {
+                panic!(
+                    "TriDiagonal covariance: entity (offset {offset}, width {}) does not align to a single block",
+                    idx.len()
+                )
+            })
+    }
+
+    // Marginal covariance of block bi: last block is forward-only; an interior
+    // block triggers the backward pass (cached), then combines both sides.
+    fn marginal(&self, bi: usize) -> DMatrix<f64> {
+        let nb = self.spans.len();
+        let info = if bi == nb - 1 {
+            self.fwd[bi].clone()
+        } else {
+            let bwd = self.bwd.get_or_init(|| self.compute_backward());
+            &self.fwd[bi] + &bwd[bi] - &self.diag[bi]
+        };
+        let k = info.nrows();
+        info.try_inverse()
+            .map(|inv| inv * 2.0)
+            .unwrap_or_else(|| DMatrix::from_element(k, k, f64::INFINITY))
+    }
+
+    // Backward Schur: R_{n-1} = D_{n-1}, R_i = D_i - B_i R_{i+1}^-1 B_i^T.
+    fn compute_backward(&self) -> Vec<DMatrix<f64>> {
+        let nb = self.spans.len();
+        let mut bwd: Vec<DMatrix<f64>> = self.diag.clone();
+        for i in (0..nb - 1).rev() {
+            let r_inv = bwd[i + 1]
+                .clone()
+                .try_inverse()
+                .expect("TriDiagonal: backward Schur block not invertible");
+            let b = &self.off[i]; // H[i, i+1]
+            bwd[i] = &self.diag[i] - b * &r_inv * b.transpose();
+        }
+        bwd
+    }
+}
+
+impl CovAssembly {
+    /// Number of optimized scalar parameters.
+    pub fn dim(&self) -> usize {
+        self.n
+    }
+
+    /// Scalar parameter indices covered by a model (an entity's contiguous
+    /// live-parameter ranges, or every element's for a collection).
+    fn indices<M: Model + ?Sized>(m: &M) -> Vec<usize> {
+        let mut spans: Vec<(u32, u32)> = Vec::new();
+        m.collect_param_blocks(&mut spans);
+        let mut idx = Vec::new();
+        for (off, width) in spans {
+            for i in off..off + width {
+                idx.push(i as usize);
+            }
+        }
+        idx
+    }
+
+    /// Marginal covariance of a model: one entity for its own covariance, or a
+    /// whole collection for the joint over all its entities. In tangent
+    /// coordinates.
+    pub fn marginal_cov<M: Model + ?Sized>(&self, m: &M) -> DMatrix<f64> {
+        let idx = Self::indices(m);
+        match &self.backend {
+            Backend::Factored { .. } => self.factored_block(&idx, &idx),
+            Backend::Band(b) => b.marginal(b.block_index(&idx)),
+        }
+    }
+
+    /// Conditional covariance of a model: its uncertainty with every *other*
+    /// parameter held fixed. This is `2 (H_ee)^-1` -- the inverse of the
+    /// entity's own information block -- distinct from the marginal (which folds
+    /// in the uncertainty of the variables it couples to) and never larger than
+    /// it. An entity with no self-information yields infinities.
+    pub fn conditional_cov<M: Model + ?Sized>(&self, m: &M) -> DMatrix<f64> {
+        let idx = Self::indices(m);
+        let k = idx.len();
+        let hb = match &self.backend {
+            Backend::Factored { h, .. } => {
+                let mut hb = DMatrix::zeros(k, k);
+                for (r, &i) in idx.iter().enumerate() {
+                    for (c, &j) in idx.iter().enumerate() {
+                        hb[(r, c)] = h.get_sym(i, j);
+                    }
+                }
+                hb
+            }
+            // The entity's own diagonal block is exactly H_ee.
+            Backend::Band(b) => b.diag[b.block_index(&idx)].clone(),
+        };
+        hb.try_inverse()
+            .map(|inv| inv * 2.0)
+            .unwrap_or_else(|| DMatrix::from_element(k, k, f64::INFINITY))
+    }
+
+    /// Standard deviations: the square root of the marginal covariance
+    /// diagonal, one per scalar parameter of the model.
+    pub fn std_dev<M: Model + ?Sized>(&self, m: &M) -> Vec<f64> {
+        let idx = Self::indices(m);
+        let block = match &self.backend {
+            Backend::Factored { .. } => self.factored_block(&idx, &idx),
+            Backend::Band(b) => b.marginal(b.block_index(&idx)),
+        };
+        (0..idx.len()).map(|i| block[(i, i)].sqrt()).collect()
+    }
+
+    /// Cross-covariance block between two models (the off-diagonal `A x B`
+    /// block of the joint covariance). Not available in [`CovMode::TriDiagonal`].
+    pub fn cross_cov<A: Model + ?Sized, B: Model + ?Sized>(&self, a: &A, b: &B) -> DMatrix<f64> {
+        let ia = Self::indices(a);
+        let ib = Self::indices(b);
+        match &self.backend {
+            Backend::Factored { .. } => self.factored_block(&ia, &ib),
+            Backend::Band(_) => {
+                panic!("TriDiagonal covariance: cross_cov is not supported; use CovMode::AllMarginals")
+            }
+        }
+    }
+
+    // Sigma[rows, cols] = 2 (H^-1)[rows, cols] for the factored backends. A
+    // selected-inverse hit needs no solve; a miss (out-of-pattern cross block)
+    // falls through to a column solve.
+    fn factored_block(&self, rows: &[usize], cols: &[usize]) -> DMatrix<f64> {
+        let Backend::Factored { symbolic, l_vals, sel, .. } = &self.backend else {
+            unreachable!("factored_block on a band backend")
+        };
+        if let Some(s) = sel {
+            if let Some(m) = s.try_block(rows, cols) {
+                return m;
+            }
+        }
+        let k = cols.len();
+        let mut e = vec![0.0_f64; self.n * k]; // column-major n x k
+        for (c, &j) in cols.iter().enumerate() {
+            e[c * self.n + j] = 1.0;
+        }
+        solve_cols(symbolic, l_vals, self.n, &mut e, k);
+        let mut m = DMatrix::zeros(rows.len(), k);
+        for c in 0..k {
+            for (r, &i) in rows.iter().enumerate() {
+                m[(r, c)] = 2.0 * e[c * self.n + i];
+            }
+        }
+        m
+    }
 }
 
 // The selected inverse: the entries of Sigma = 2 H^-1 that lie inside the factor
@@ -115,7 +304,6 @@ impl SelInv {
         if r == c {
             return Some(self.vals[cs]);
         }
-        // Off-diagonal row indices within a column are unsorted -> linear scan.
         for p in (cs + 1)..self.col_ptr[c + 1] {
             if self.row_idx[p] == r {
                 return Some(self.vals[p]);
@@ -151,156 +339,55 @@ fn sel_read(vals: &[f64], col_ptr: &[usize], row_idx: &[usize], r: usize, c: usi
     panic!("selected inverse: entry ({r}, {c}) outside factor pattern");
 }
 
-impl CovAssembly {
-    /// Number of optimized scalar parameters.
-    pub fn dim(&self) -> usize {
-        self.n
-    }
-
-    /// Scalar parameter indices covered by a model (an entity's contiguous
-    /// live-parameter ranges, or every element's for a collection).
-    fn indices<M: Model + ?Sized>(m: &M) -> Vec<usize> {
-        let mut spans: Vec<(u32, u32)> = Vec::new();
-        m.collect_param_blocks(&mut spans);
-        let mut idx = Vec::new();
-        for (off, width) in spans {
-            for i in off..off + width {
-                idx.push(i as usize);
-            }
+// The Takahashi recursion runs backward over the simplicial factor, filling
+// every Sigma entry inside the factor pattern in one O(fill) pass.
+fn selected_inverse(symbolic: &fchol::SymbolicCholesky<usize>, l_vals: &[f64], n: usize) -> SelInv {
+    let (col_ptr, row_idx) = match symbolic.raw() {
+        fchol::SymbolicCholeskyRaw::Simplicial(s) => (s.col_ptr().to_vec(), s.row_idx().to_vec()),
+        fchol::SymbolicCholeskyRaw::Supernodal(_) => {
+            unreachable!("assemble_covariance forces a simplicial factorization")
         }
-        idx
-    }
+    };
+    let inv: Vec<usize> = symbolic
+        .perm()
+        .map(|p| p.arrays().1.to_vec())
+        .unwrap_or_else(|| (0..n).collect());
 
-    // Solve H X = E in place (E is column-major n x k), leaving X = H^-1 E.
-    fn solve_cols(&self, e: &mut [f64], k: usize) {
-        let llt = fchol::LltRef::new(&self.symbolic, &self.l_vals);
-        let req = self.symbolic.solve_in_place_scratch::<f64>(k, faer::Par::Seq);
-        let mut mem: Vec<MaybeUninit<u8>> = vec![MaybeUninit::uninit(); req.unaligned_bytes_required()];
-        let stack = faer::dyn_stack::MemStack::new(&mut mem);
-        let rhs = faer::mat::MatMut::from_column_major_slice_mut(e, self.n, k);
-        llt.solve_in_place_with_conj(faer::Conj::No, rhs, faer::Par::Seq, stack);
-    }
-
-    // The covariance sub-block Sigma[rows, cols] = 2 (H^-1)[rows, cols].
-    fn sigma_block(&self, rows: &[usize], cols: &[usize]) -> DMatrix<f64> {
-        // Selected-inverse cache: a hit needs no solve. A miss (out-of-pattern
-        // cross block) falls through to a column solve.
-        if let Some(sel) = &self.sel {
-            if let Some(m) = sel.try_block(rows, cols) {
-                return m;
+    // Sigma_ij for i >= j inside the pattern, from H = L L^T:
+    //   Sigma_ij = -(1/L_jj) sum_{k>j} L_kj Sigma_ik        (i > j)
+    //   Sigma_jj = 1/L_jj^2 - (1/L_jj) sum_{k>j} L_kj Sigma_kj
+    // Both indices of every Sigma_ik touched exceed j, so it is already done.
+    let mut vals = vec![0.0_f64; l_vals.len()];
+    for j in (0..n).rev() {
+        let (cs, ce) = (col_ptr[j], col_ptr[j + 1]);
+        let inv_ljj = 1.0 / l_vals[cs];
+        for p in (cs + 1)..ce {
+            let i = row_idx[p];
+            let mut acc = 0.0;
+            for q in (cs + 1)..ce {
+                let k = row_idx[q];
+                let (r, c) = if i >= k { (i, k) } else { (k, i) };
+                acc += l_vals[q] * sel_read(&vals, &col_ptr, &row_idx, r, c);
             }
+            vals[p] = -inv_ljj * acc;
         }
-        // Solve for the requested columns of H^-1, then read the rows.
-        let k = cols.len();
-        let mut e = vec![0.0_f64; self.n * k]; // column-major n x k
-        for (c, &j) in cols.iter().enumerate() {
-            e[c * self.n + j] = 1.0;
+        let mut dacc = 0.0;
+        for q in (cs + 1)..ce {
+            dacc += l_vals[q] * vals[q];
         }
-        self.solve_cols(&mut e, k);
-        let mut m = DMatrix::zeros(rows.len(), k);
-        for c in 0..k {
-            for (r, &i) in rows.iter().enumerate() {
-                m[(r, c)] = 2.0 * e[c * self.n + i];
-            }
-        }
-        m
+        vals[cs] = inv_ljj * inv_ljj - inv_ljj * dacc;
     }
+    SelInv { col_ptr, row_idx, vals, inv }
+}
 
-    /// Marginal covariance of a model: one entity for its own covariance, or a
-    /// whole collection for the joint over all its entities. In tangent
-    /// coordinates.
-    pub fn marginal_cov<M: Model + ?Sized>(&self, m: &M) -> DMatrix<f64> {
-        let idx = Self::indices(m);
-        self.sigma_block(&idx, &idx)
-    }
-
-    /// Conditional covariance of a model: its uncertainty with every *other*
-    /// parameter held fixed. This is `2 (H_ee)^-1` -- the inverse of the
-    /// entity's own information block -- distinct from the marginal (which folds
-    /// in the uncertainty of the variables it couples to) and never larger than
-    /// it. Useful when a reference frame is already pinned elsewhere: an entity
-    /// that shares no factor with its peers (e.g. a landmark, given the poses)
-    /// has a block-diagonal `H_ee`, so this is its pose-fixed uncertainty. An
-    /// entity with no self-information yields infinities.
-    pub fn conditional_cov<M: Model + ?Sized>(&self, m: &M) -> DMatrix<f64> {
-        let idx = Self::indices(m);
-        let k = idx.len();
-        let mut hb = DMatrix::zeros(k, k);
-        for (r, &i) in idx.iter().enumerate() {
-            for (c, &j) in idx.iter().enumerate() {
-                hb[(r, c)] = self.h.get_sym(i, j);
-            }
-        }
-        hb.try_inverse()
-            .map(|inv| inv * 2.0)
-            .unwrap_or_else(|| DMatrix::from_element(k, k, f64::INFINITY))
-    }
-
-    /// Standard deviations: the square root of the marginal covariance
-    /// diagonal, one per scalar parameter of the model.
-    pub fn std_dev<M: Model + ?Sized>(&self, m: &M) -> Vec<f64> {
-        let idx = Self::indices(m);
-        let block = self.sigma_block(&idx, &idx);
-        (0..idx.len()).map(|i| block[(i, i)].sqrt()).collect()
-    }
-
-    /// Cross-covariance block between two models (the off-diagonal `A x B`
-    /// block of the joint covariance).
-    pub fn cross_cov<A: Model + ?Sized, B: Model + ?Sized>(&self, a: &A, b: &B) -> DMatrix<f64> {
-        let ia = Self::indices(a);
-        let ib = Self::indices(b);
-        self.sigma_block(&ia, &ib)
-    }
-
-    // Selected inverse: the Takahashi recursion runs backward over the
-    // simplicial factor, filling every Sigma entry inside the factor pattern in
-    // one O(fill) pass. Requires a simplicial factor (AllMarginals forces one).
-    fn build_selected_inverse(&mut self) {
-        let n = self.n;
-        // Factor pattern (permuted ordering). First row of each column is the
-        // diagonal; the values in `l_vals` align 1:1 with these row indices.
-        let (col_ptr, row_idx) = match self.symbolic.raw() {
-            fchol::SymbolicCholeskyRaw::Simplicial(s) => (s.col_ptr().to_vec(), s.row_idx().to_vec()),
-            fchol::SymbolicCholeskyRaw::Supernodal(_) => {
-                unreachable!("assemble_covariance forces a simplicial factorization")
-            }
-        };
-        // original index -> permuted position.
-        let inv: Vec<usize> = self
-            .symbolic
-            .perm()
-            .map(|p| p.arrays().1.to_vec())
-            .unwrap_or_else(|| (0..n).collect());
-
-        // Sigma_ij for i >= j inside the pattern, from H = L L^T:
-        //   Sigma_ij = -(1/L_jj) sum_{k>j} L_kj Sigma_ik        (i > j)
-        //   Sigma_jj = 1/L_jj^2 - (1/L_jj) sum_{k>j} L_kj Sigma_kj
-        // Both indices of every Sigma_ik touched exceed j, so it is already done.
-        let mut vals = vec![0.0_f64; self.l_vals.len()];
-        {
-            let l = &self.l_vals;
-            for j in (0..n).rev() {
-                let (cs, ce) = (col_ptr[j], col_ptr[j + 1]);
-                let inv_ljj = 1.0 / l[cs];
-                for p in (cs + 1)..ce {
-                    let i = row_idx[p];
-                    let mut acc = 0.0;
-                    for q in (cs + 1)..ce {
-                        let k = row_idx[q];
-                        let (r, c) = if i >= k { (i, k) } else { (k, i) };
-                        acc += l[q] * sel_read(&vals, &col_ptr, &row_idx, r, c);
-                    }
-                    vals[p] = -inv_ljj * acc;
-                }
-                let mut dacc = 0.0;
-                for q in (cs + 1)..ce {
-                    dacc += l[q] * vals[q];
-                }
-                vals[cs] = inv_ljj * inv_ljj - inv_ljj * dacc;
-            }
-        }
-        self.sel = Some(SelInv { col_ptr, row_idx, vals, inv });
-    }
+// Solve H X = E in place (E is column-major n x k), leaving X = H^-1 E.
+fn solve_cols(symbolic: &fchol::SymbolicCholesky<usize>, l_vals: &[f64], n: usize, e: &mut [f64], k: usize) {
+    let llt = fchol::LltRef::new(symbolic, l_vals);
+    let req = symbolic.solve_in_place_scratch::<f64>(k, faer::Par::Seq);
+    let mut mem: Vec<MaybeUninit<u8>> = vec![MaybeUninit::uninit(); req.unaligned_bytes_required()];
+    let stack = faer::dyn_stack::MemStack::new(&mut mem);
+    let rhs = faer::mat::MatMut::from_column_major_slice_mut(e, n, k);
+    llt.solve_in_place_with_conj(faer::Conj::No, rhs, faer::Par::Seq, stack);
 }
 
 // Upper-triangle CSC symmetric lookup: H[i,j] with H stored for i <= j.
@@ -318,16 +405,79 @@ impl CscMatrix<f64> {
     }
 }
 
+// Half-bandwidth kd for a block-tridiagonal partition: the widest coupling is
+// the first parameter of a block to the last of the next (w_i + w_{i+1} - 1);
+// within a single block it is w_i - 1.
+fn band_half_width(spans: &[(usize, usize)]) -> usize {
+    let mut kd = spans.iter().map(|&(_, w)| w.saturating_sub(1)).max().unwrap_or(0);
+    for pair in spans.windows(2) {
+        kd = kd.max(pair[0].1 + pair[1].1 - 1);
+    }
+    kd
+}
+
+// Build the block-tridiagonal representation from the assembled upper-band
+// buffer (LAPACK layout: A[i,j], i <= j, at band[(kd + i - j) + j*(kd+1)]).
+// Extract the diagonal and first-off-diagonal blocks (a nonzero outside them is
+// not block-tridiagonal), then run the forward Schur pass.
+fn build_band<T: Float>(band: &[T], kd: usize, n: usize, spans: &[(usize, usize)]) -> Result<BandData, CovError> {
+    let nb = spans.len();
+    let ldab = kd + 1;
+    let mut coord_block = vec![usize::MAX; n];
+    for (bi, &(o, w)) in spans.iter().enumerate() {
+        for c in o..o + w {
+            coord_block[c] = bi;
+        }
+    }
+
+    let mut diag: Vec<DMatrix<f64>> = spans.iter().map(|&(_, w)| DMatrix::zeros(w, w)).collect();
+    let mut off: Vec<DMatrix<f64>> = (0..nb.saturating_sub(1))
+        .map(|i| DMatrix::zeros(spans[i].1, spans[i + 1].1))
+        .collect();
+
+    // Walk the band (i <= j). A structurally absent coupling is exactly zero.
+    for j in 0..n {
+        let bb = coord_block[j];
+        for p in 0..=kd {
+            let Some(i) = (j + p).checked_sub(kd) else { continue }; // i = j - kd + p
+            let val = band[p + j * ldab].to_f64().unwrap_or(f64::NAN);
+            if val == 0.0 {
+                continue;
+            }
+            let ba = coord_block[i];
+            if ba == bb {
+                let (lo, hi) = (i - spans[ba].0, j - spans[bb].0);
+                diag[ba][(lo, hi)] = val;
+                diag[ba][(hi, lo)] = val;
+            } else if bb - ba == 1 {
+                off[ba][(i - spans[ba].0, j - spans[bb].0)] = val;
+            } else {
+                return Err(CovError::NotTriDiagonal);
+            }
+        }
+    }
+
+    // Forward Schur: S_0 = D_0, S_i = D_i - B_{i-1} S_{i-1}^-1 B_{i-1}^T, where
+    // B_{i-1}^T = off[i-1] = H[i-1, i].
+    let mut fwd: Vec<DMatrix<f64>> = Vec::with_capacity(nb);
+    fwd.push(diag[0].clone());
+    for i in 1..nb {
+        let s_prev_inv = fwd[i - 1].clone().try_inverse().ok_or(CovError::NotPositiveDefinite)?;
+        let b = &off[i - 1];
+        fwd.push(&diag[i] - b.transpose() * &s_prev_inv * b);
+    }
+
+    Ok(BandData { spans: spans.to_vec(), diag, off, fwd, bwd: OnceCell::new() })
+}
+
 /// Post-solve covariance. Implemented for every `#[arael(root)]` model. Call
 /// with the trait in scope after the solution has been written into the model
 /// (i.e. after a `solve_*` / `deserialize`), since it reads the model's current
 /// parameters as the linearization point.
-pub trait Covariance<T: Float>: LmProblem<T> + RootProblem<T> {
-    /// Re-assemble `H` at the current parameters, factor it sparsely, and keep
-    /// the factorization for querying. The dense inverse is never formed. `mode`
-    /// picks the strategy: [`CovMode::PerQuery`] solves each query on demand;
-    /// [`CovMode::AllMarginals`] also computes the selected inverse up front so
-    /// marginals are lookups. `Err` if `H` is singular.
+pub trait Covariance<T: Float>: LmProblem<T> + RootProblem<T> + Model {
+    /// Re-assemble `H` at the current parameters and prepare it for querying, per
+    /// `mode`. The dense inverse is never formed. `Err` if `H` is singular, or
+    /// (for [`CovMode::TriDiagonal`]) not block-tridiagonal.
     fn assemble_covariance(&mut self, mode: CovMode) -> Result<CovAssembly, CovError> {
         let mut params: Vec<T> = Vec::new();
         self.serialize(&mut params);
@@ -336,6 +486,24 @@ pub trait Covariance<T: Float>: LmProblem<T> + RootProblem<T> {
             return Err(CovError::Empty);
         }
         let mut grad = vec![T::zero(); n];
+
+        // TriDiagonal: assemble straight into the band (no COO/CSC), extract the
+        // block-tridiagonal structure, run the forward Schur pass. A coupling
+        // beyond the band makes calc_grad_hessian_band fail -> not tridiagonal.
+        if mode == CovMode::TriDiagonal {
+            let mut spans_raw: Vec<(u32, u32)> = Vec::new();
+            self.collect_param_blocks(&mut spans_raw);
+            let mut spans: Vec<(usize, usize)> =
+                spans_raw.iter().map(|&(o, w)| (o as usize, w as usize)).collect();
+            spans.sort_by_key(|&(o, _)| o);
+            let kd = band_half_width(&spans);
+            let mut band = vec![T::zero(); (kd + 1) * n];
+            self.calc_grad_hessian_band(&params, &mut grad, &mut band, kd)
+                .map_err(|_| CovError::NotTriDiagonal)?;
+            let bd = build_band(&band, kd, n, &spans)?;
+            return Ok(CovAssembly { n, backend: Backend::Band(bd) });
+        }
+
         let mut coo = CooMatrix::new(n);
         self.calc_grad_hessian_sparse(&params, &mut grad, &mut coo);
         let csc_t = coo.to_csc();
@@ -387,12 +555,14 @@ pub trait Covariance<T: Float>: LmProblem<T> + RootProblem<T> {
             )
             .map_err(|_| CovError::NotPositiveDefinite)?;
 
-        let mut cov = CovAssembly { n, symbolic, l_vals, h, sel: None };
-        if mode == CovMode::AllMarginals {
-            cov.build_selected_inverse();
-        }
-        Ok(cov)
+        let sel = if mode == CovMode::AllMarginals {
+            Some(selected_inverse(&symbolic, &l_vals, n))
+        } else {
+            None
+        };
+
+        Ok(CovAssembly { n, backend: Backend::Factored { symbolic, l_vals, h, sel } })
     }
 }
 
-impl<T: Float, P: LmProblem<T> + RootProblem<T>> Covariance<T> for P {}
+impl<T: Float, P: LmProblem<T> + RootProblem<T> + Model> Covariance<T> for P {}

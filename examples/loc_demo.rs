@@ -9,6 +9,7 @@
 // Pose has parameters; landmarks contribute no derivatives.
 
 use arael::model::{Model, Param, SelfBlock, CrossBlock, SimpleEulerAngleParam};
+use arael::covariance::{Covariance, CovMode};
 use arael::simple_lm::LmProblem;
 use arael::vect::{vect3f, vect2f};
 use arael::matrix::matrix3f;
@@ -598,4 +599,22 @@ fn main() {
             mean, dea_rel_errs[n / 2], dea_rel_errs[0], dea_rel_errs[n - 1]);
     }
 
+    // Current (last) pose estimate with 1-sigma uncertainty. H is
+    // block-tridiagonal (fixed map, no loop closures), so CovMode::TriDiagonal
+    // recovers the last pose's covariance with a forward Schur pass over the band.
+    {
+        let last = path.poses.len() - 1;
+        let cov = path.assemble_covariance(CovMode::TriDiagonal).expect("last-pose covariance");
+        let sd = cov.std_dev(&path.poses[last]);
+        let pose = &path.poses[last];
+        let (p, e) = (pose.pos.value, pose.ea.value);
+
+        println!("\n--- Last pose ({last}) estimate +- 1 sigma ---");
+        println!("pos x:  {:8.4} +- {:.4} m", p.x, sd[0]);
+        println!("pos y:  {:8.4} +- {:.4} m", p.y, sd[1]);
+        println!("pos z:  {:8.4} +- {:.4} m", p.z, sd[2]);
+        println!("roll :  {:8.4} +- {:.4} deg", e.x.to_degrees(), sd[3].to_degrees());
+        println!("pitch:  {:8.4} +- {:.4} deg", e.y.to_degrees(), sd[4].to_degrees());
+        println!("yaw  :  {:8.4} +- {:.4} deg", e.z.to_degrees(), sd[5].to_degrees());
+    }
 }

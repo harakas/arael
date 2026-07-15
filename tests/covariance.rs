@@ -229,6 +229,90 @@ fn precompute_selected_inverse_denser_fill() {
 }
 
 #[test]
+fn tridiagonal_matches_solve() {
+    // A path chain is block-tridiagonal. Every marginal from the forward/backward
+    // Schur sweeps must match the per-query solve -- the last node forward-only,
+    // interior nodes via the (lazily triggered) backward pass.
+    let mut c = path_chain(8);
+    let solved = c.assemble_covariance(CovMode::PerQuery).unwrap();
+    let refm: std::vec::Vec<f64> = (0..8).map(|i| solved.marginal_cov(&c.nodes[i])[(0, 0)]).collect();
+
+    let band = c.assemble_covariance(CovMode::TriDiagonal).unwrap();
+    // Last node: the forward-only path.
+    let last = band.marginal_cov(&c.nodes[7])[(0, 0)];
+    assert!((last - refm[7]).abs() < 1e-9, "last: band {} vs solve {}", last, refm[7]);
+    // Interior nodes: trigger and reuse the backward pass.
+    for i in 0..8 {
+        let m = band.marginal_cov(&c.nodes[i])[(0, 0)];
+        assert!((m - refm[i]).abs() < 1e-9, "node {}: band {} vs solve {}", i, m, refm[i]);
+    }
+}
+
+#[test]
+fn tridiagonal_rejects_non_band() {
+    // A long-range tie (0 <-> 4) puts an off-band block into H.
+    let mut c = path_chain(6);
+    c.ties.push(Tie { a: Ref::new(0), b: Ref::new(4), isig: 1.0, hb: CrossBlock::new() });
+    assert_eq!(c.assemble_covariance(CovMode::TriDiagonal).err(), Some(CovError::NotTriDiagonal));
+}
+
+// A 2-DOF pose whose prior couples x and y (full 2x2 diagonal block), tied to its
+// neighbour so the coupling block H[i,i+1] is NON-symmetric -- which a 1-DOF chain
+// cannot exercise, so it guards the transpose orientation in the Schur sweeps.
+#[arael::model]
+#[arael(constraint(hb, { [pose2.x * pose2.pi, (pose2.x + pose2.y) * pose2.pi] }))]
+struct Pose2 {
+    x: Param<f64>,
+    y: Param<f64>,
+    pi: f64,
+    hb: SelfBlock<Pose2>,
+}
+
+#[arael::model]
+#[arael(constraint(hb, { [(a.x - b.x) * tie2.t, (a.y - b.x) * tie2.t] }))]
+struct Tie2 {
+    #[arael(ref = root.poses)]
+    a: Ref<Pose2>,
+    #[arael(ref = root.poses)]
+    b: Ref<Pose2>,
+    t: f64,
+    hb: CrossBlock<Pose2, Pose2>,
+}
+
+#[arael::model]
+#[arael(root)]
+struct Chain2 {
+    poses: refs::Vec<Pose2>,
+    ties: std::vec::Vec<Tie2>,
+}
+
+#[test]
+fn tridiagonal_2dof_matches_solve() {
+    let n = 6;
+    let mut c = Chain2 { poses: refs::Vec::new(), ties: std::vec::Vec::new() };
+    for _ in 0..n {
+        c.poses.push(Pose2 { x: Param::new(0.0), y: Param::new(0.0), pi: 1.0, hb: SelfBlock::new() });
+    }
+    for i in 0..n - 1 {
+        c.ties.push(Tie2 { a: Ref::new(i as u32), b: Ref::new((i + 1) as u32), t: 1.0, hb: CrossBlock::new() });
+    }
+
+    let solved = c.assemble_covariance(CovMode::PerQuery).unwrap();
+    let band = c.assemble_covariance(CovMode::TriDiagonal).unwrap();
+    for i in 0..n {
+        let s = solved.marginal_cov(&c.poses[i]);
+        let b = band.marginal_cov(&c.poses[i]);
+        assert_eq!((b.nrows(), b.ncols()), (2, 2));
+        for r in 0..2 {
+            for cc in 0..2 {
+                assert!((s[(r, cc)] - b[(r, cc)]).abs() < 1e-9,
+                    "pose {} [{},{}]: solve {} vs band {}", i, r, cc, s[(r, cc)], b[(r, cc)]);
+            }
+        }
+    }
+}
+
+#[test]
 fn empty_model_is_an_error() {
     let mut w = W { pts: refs::Vec::new() };
     assert_eq!(w.assemble_covariance(CovMode::PerQuery).err(), Some(CovError::Empty));
