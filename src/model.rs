@@ -1095,7 +1095,14 @@ macro_rules! impl_model_noop {
     };
 }
 
-impl_model_noop!(f32, f64, u32, i32, bool, usize, String);
+// Kept in step with impl_scalar_model_sym! below: a primitive field needs both
+// a no-op Model and a ModelSym to be usable without `#[arael(skip)]`.
+impl_model_noop!(
+    bool, char, String,
+    i8, i16, i32, i64, i128, isize,
+    u8, u16, u32, u64, u128, usize,
+    f32, f64,
+);
 
 macro_rules! impl_model_noop_generic {
     ($($ty:ty),* $(,)?) => {
@@ -2779,30 +2786,28 @@ pub trait ModelSym {
 
 use arael_sym::E;
 
-impl ModelSym for bool {
-    type Sym = E;
-    fn sym(base: &str) -> E { arael_sym::symbol(base) }
+// Leaf fields carry no symbolic structure: their Sym is a single named symbol.
+// A floating-point field reads as a symbolic constant inside a constraint body;
+// integer, bool, char and string fields normally appear only in guards
+// (evaluated at runtime), so every primitive works as a plain model field
+// without `#[arael(skip)]`.
+macro_rules! impl_scalar_model_sym {
+    ($($t:ty),* $(,)?) => {
+        $(
+            impl ModelSym for $t {
+                type Sym = E;
+                fn sym(base: &str) -> E { arael_sym::symbol(base) }
+            }
+        )*
+    };
 }
 
-impl ModelSym for u32 {
-    type Sym = E;
-    fn sym(base: &str) -> E { arael_sym::symbol(base) }
-}
-
-impl ModelSym for f32 {
-    type Sym = E;
-    fn sym(base: &str) -> E { arael_sym::symbol(base) }
-}
-
-impl ModelSym for f64 {
-    type Sym = E;
-    fn sym(base: &str) -> E { arael_sym::symbol(base) }
-}
-
-impl ModelSym for String {
-    type Sym = E;
-    fn sym(base: &str) -> E { arael_sym::symbol(base) }
-}
+impl_scalar_model_sym!(
+    bool, char, String,
+    i8, i16, i32, i64, i128, isize,
+    u8, u16, u32, u64, u128, usize,
+    f32, f64,
+);
 
 impl ModelSym for crate::vect::vect3f {
     type Sym = crate::vect::vect3sym;
