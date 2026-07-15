@@ -13,22 +13,26 @@
 //! reports its parameter span via `collect_param_blocks`.
 //!
 //! ```ignore
-//! use arael::covariance::Covariance;
+//! use arael::covariance::{Covariance, CovMode};
 //! path.solve_sparse(&cfg);              // solution written back into the model
-//! let cov = path.assemble_covariance()?;
+//! let cov = path.assemble_covariance(CovMode::PerQuery)?;
 //! let lm0  = cov.marginal_cov(&path.landmarks[0]);        // one landmark, solves for its columns
 //! let lmc  = cov.conditional_cov(&path.landmarks[0]);     // its own info block, others fixed
 //! let x    = cov.cross_cov(&path.poses[0], &path.landmarks[3]);
 //! ```
 //!
-//! Access patterns and their costs:
-//! - **conditional** of an entity (`conditional_cov`) -- invert its own `H_ee`
-//!   block, `O(dof^3)`, no factor solve.
-//! - **a few marginals** (`marginal_cov` per entity) -- one `O(fill)` solve each.
-//! - **all/many marginals** -- a selected inverse (Takahashi / Meurant / Schur)
-//!   computing every diagonal block in one `O(fill)` pass. Future work (COV.md);
-//!   it will land as an opt-in precompute behind the same query API, not a
-//!   second entry point.
+//! [`CovMode`] chosen at assembly picks the strategy:
+//! - [`CovMode::PerQuery`] factors `H` and answers each query by solving for its
+//!   columns (faer picks supernodal where it pays). Best for a few entities.
+//! - [`CovMode::AllMarginals`] also runs a selected inverse up front -- the
+//!   Takahashi recursion over a simplicial factor, computing every covariance
+//!   entry inside the factor's sparsity pattern in one `O(fill)` pass -- so every
+//!   marginal and coupled cross block becomes a lookup. Best for many/all
+//!   marginals.
+//!
+//! Either way, **conditional** covariance (`conditional_cov`) just inverts the
+//! entity's own `H_ee` block (`O(dof^3)`, no factor solve), and out-of-pattern
+//! cross blocks fall back to a solve.
 
 use crate::model::Model;
 use crate::simple_lm::{CooMatrix, CscMatrix, LmProblem, RootProblem};
@@ -60,6 +64,19 @@ impl std::fmt::Display for CovError {
 
 impl std::error::Error for CovError {}
 
+/// How much of the covariance to prepare when assembling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CovMode {
+    /// Factor `H` and answer each query by solving for its columns. faer may pick
+    /// a supernodal factor when it pays off, so a handful of entities are as fast
+    /// as possible. Choose this when you need a few covariances.
+    PerQuery,
+    /// Also compute the selected inverse up front (one `O(fill)` pass over a
+    /// simplicial factor), so every marginal and coupled cross block is a lookup.
+    /// Choose this when you need many or all marginals (e.g. an ellipse per pose).
+    AllMarginals,
+}
+
 /// A factored covariance at the solution. Build it with
 /// [`Covariance::assemble_covariance`], then query per-entity blocks. An owned
 /// value: querying does not borrow the problem, so
@@ -67,12 +84,71 @@ impl std::error::Error for CovError {}
 /// `cov.marginal_cov(&p.landmarks[0])` borrow-checks.
 ///
 /// Holds the sparse Cholesky factor of `H` and the CSC `H` itself (for
-/// conditional queries). Covariance blocks are solved for on demand.
+/// conditional queries). Covariance blocks are solved for on demand; assembling
+/// with [`CovMode::AllMarginals`] fills a selected-inverse cache so marginals
+/// become lookups.
 pub struct CovAssembly {
     n: usize,
     symbolic: fchol::SymbolicCholesky<usize>,
     l_vals: Vec<f64>,
     h: CscMatrix<f64>,
+    sel: Option<SelInv>,
+}
+
+// The selected inverse: the entries of Sigma = 2 H^-1 that lie inside the factor
+// pattern, stored in the factor's own lower-triangular CSC (permuted ordering),
+// values holding the raw H^-1 (the factor of 2 is applied on lookup). `inv` maps
+// an original scalar index to its permuted position.
+struct SelInv {
+    col_ptr: Vec<usize>,
+    row_idx: Vec<usize>,
+    vals: Vec<f64>,
+    inv: Vec<usize>,
+}
+
+impl SelInv {
+    // Raw H^-1 entry (a, b) in original indices, or None if outside the pattern.
+    fn get(&self, a: usize, b: usize) -> Option<f64> {
+        let (i, j) = (self.inv[a], self.inv[b]);
+        let (r, c) = if i >= j { (i, j) } else { (j, i) };
+        let cs = self.col_ptr[c];
+        if r == c {
+            return Some(self.vals[cs]);
+        }
+        // Off-diagonal row indices within a column are unsorted -> linear scan.
+        for p in (cs + 1)..self.col_ptr[c + 1] {
+            if self.row_idx[p] == r {
+                return Some(self.vals[p]);
+            }
+        }
+        None
+    }
+
+    // Sigma[rows, cols] from the cache, or None if any entry is out of pattern.
+    fn try_block(&self, rows: &[usize], cols: &[usize]) -> Option<DMatrix<f64>> {
+        let mut m = DMatrix::zeros(rows.len(), cols.len());
+        for (cc, &b) in cols.iter().enumerate() {
+            for (rr, &a) in rows.iter().enumerate() {
+                m[(rr, cc)] = 2.0 * self.get(a, b)?;
+            }
+        }
+        Some(m)
+    }
+}
+
+// Raw H^-1 entry (r, c), r >= c, from a partially built selected inverse in the
+// factor's own indexing. Every entry the recursion asks for is in the pattern.
+fn sel_read(vals: &[f64], col_ptr: &[usize], row_idx: &[usize], r: usize, c: usize) -> f64 {
+    let cs = col_ptr[c];
+    if r == c {
+        return vals[cs];
+    }
+    for p in (cs + 1)..col_ptr[c + 1] {
+        if row_idx[p] == r {
+            return vals[p];
+        }
+    }
+    panic!("selected inverse: entry ({r}, {c}) outside factor pattern");
 }
 
 impl CovAssembly {
@@ -107,6 +183,13 @@ impl CovAssembly {
 
     // The covariance sub-block Sigma[rows, cols] = 2 (H^-1)[rows, cols].
     fn sigma_block(&self, rows: &[usize], cols: &[usize]) -> DMatrix<f64> {
+        // Selected-inverse cache: a hit needs no solve. A miss (out-of-pattern
+        // cross block) falls through to a column solve.
+        if let Some(sel) = &self.sel {
+            if let Some(m) = sel.try_block(rows, cols) {
+                return m;
+            }
+        }
         // Solve for the requested columns of H^-1, then read the rows.
         let k = cols.len();
         let mut e = vec![0.0_f64; self.n * k]; // column-major n x k
@@ -168,6 +251,56 @@ impl CovAssembly {
         let ib = Self::indices(b);
         self.sigma_block(&ia, &ib)
     }
+
+    // Selected inverse: the Takahashi recursion runs backward over the
+    // simplicial factor, filling every Sigma entry inside the factor pattern in
+    // one O(fill) pass. Requires a simplicial factor (AllMarginals forces one).
+    fn build_selected_inverse(&mut self) {
+        let n = self.n;
+        // Factor pattern (permuted ordering). First row of each column is the
+        // diagonal; the values in `l_vals` align 1:1 with these row indices.
+        let (col_ptr, row_idx) = match self.symbolic.raw() {
+            fchol::SymbolicCholeskyRaw::Simplicial(s) => (s.col_ptr().to_vec(), s.row_idx().to_vec()),
+            fchol::SymbolicCholeskyRaw::Supernodal(_) => {
+                unreachable!("assemble_covariance forces a simplicial factorization")
+            }
+        };
+        // original index -> permuted position.
+        let inv: Vec<usize> = self
+            .symbolic
+            .perm()
+            .map(|p| p.arrays().1.to_vec())
+            .unwrap_or_else(|| (0..n).collect());
+
+        // Sigma_ij for i >= j inside the pattern, from H = L L^T:
+        //   Sigma_ij = -(1/L_jj) sum_{k>j} L_kj Sigma_ik        (i > j)
+        //   Sigma_jj = 1/L_jj^2 - (1/L_jj) sum_{k>j} L_kj Sigma_kj
+        // Both indices of every Sigma_ik touched exceed j, so it is already done.
+        let mut vals = vec![0.0_f64; self.l_vals.len()];
+        {
+            let l = &self.l_vals;
+            for j in (0..n).rev() {
+                let (cs, ce) = (col_ptr[j], col_ptr[j + 1]);
+                let inv_ljj = 1.0 / l[cs];
+                for p in (cs + 1)..ce {
+                    let i = row_idx[p];
+                    let mut acc = 0.0;
+                    for q in (cs + 1)..ce {
+                        let k = row_idx[q];
+                        let (r, c) = if i >= k { (i, k) } else { (k, i) };
+                        acc += l[q] * sel_read(&vals, &col_ptr, &row_idx, r, c);
+                    }
+                    vals[p] = -inv_ljj * acc;
+                }
+                let mut dacc = 0.0;
+                for q in (cs + 1)..ce {
+                    dacc += l[q] * vals[q];
+                }
+                vals[cs] = inv_ljj * inv_ljj - inv_ljj * dacc;
+            }
+        }
+        self.sel = Some(SelInv { col_ptr, row_idx, vals, inv });
+    }
 }
 
 // Upper-triangle CSC symmetric lookup: H[i,j] with H stored for i <= j.
@@ -191,9 +324,11 @@ impl CscMatrix<f64> {
 /// parameters as the linearization point.
 pub trait Covariance<T: Float>: LmProblem<T> + RootProblem<T> {
     /// Re-assemble `H` at the current parameters, factor it sparsely, and keep
-    /// the factorization for querying. The dense inverse is never formed; each
-    /// query solves for only the columns it needs. `Err` if `H` is singular.
-    fn assemble_covariance(&mut self) -> Result<CovAssembly, CovError> {
+    /// the factorization for querying. The dense inverse is never formed. `mode`
+    /// picks the strategy: [`CovMode::PerQuery`] solves each query on demand;
+    /// [`CovMode::AllMarginals`] also computes the selected inverse up front so
+    /// marginals are lookups. `Err` if `H` is singular.
+    fn assemble_covariance(&mut self, mode: CovMode) -> Result<CovAssembly, CovError> {
         let mut params: Vec<T> = Vec::new();
         self.serialize(&mut params);
         let n = params.len();
@@ -218,11 +353,20 @@ pub trait Covariance<T: Float>: LmProblem<T> + RootProblem<T> {
         // faer wants usize row indices.
         let row_usize: Vec<usize> = h.row_idx.iter().map(|&r| r as usize).collect();
         let sym_ref = faer::sparse::SymbolicSparseColMatRef::new_checked(n, n, &h.col_ptr, None, &row_usize);
+        // AllMarginals forces a simplicial factor: the selected inverse reads a
+        // plain column-major CSC `L` directly. PerQuery leaves faer's AUTO
+        // threshold, so it may pick a supernodal factor (faster dense-block
+        // solves) for the few-columns-at-a-time queries.
+        let mut chol_params = fchol::CholeskySymbolicParams::default();
+        if mode == CovMode::AllMarginals {
+            chol_params.supernodal_flop_ratio_threshold =
+                faer::sparse::linalg::SupernodalThreshold::FORCE_SIMPLICIAL;
+        }
         let symbolic = fchol::factorize_symbolic_cholesky(
             sym_ref,
             faer::Side::Upper,
             fchol::SymmetricOrdering::Amd,
-            Default::default(),
+            chol_params,
         )
         .map_err(|_| CovError::NotPositiveDefinite)?;
 
@@ -243,7 +387,11 @@ pub trait Covariance<T: Float>: LmProblem<T> + RootProblem<T> {
             )
             .map_err(|_| CovError::NotPositiveDefinite)?;
 
-        Ok(CovAssembly { n, symbolic, l_vals, h })
+        let mut cov = CovAssembly { n, symbolic, l_vals, h, sel: None };
+        if mode == CovMode::AllMarginals {
+            cov.build_selected_inverse();
+        }
+        Ok(cov)
     }
 }
 

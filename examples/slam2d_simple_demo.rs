@@ -410,7 +410,7 @@ fn main() {
 // 95% in 2D corresponds to chi^2(0.95, df=2) = 5.991, so the semi-axes are
 // sqrt(5.991 * eigenvalue) of the 2x2 position covariance block.
 fn compute_landmark_ellipses(path: &mut Path) -> std::vec::Vec<(vect2f, f32, f32, f32)> {
-    let cov = match path.assemble_covariance() {
+    let cov = match path.assemble_covariance(CovMode::AllMarginals) {
         Ok(cov) => cov,
         Err(e) => {
             println!("\n{e} -- skipping uncertainty.");

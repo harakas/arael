@@ -1955,7 +1955,7 @@ pub mod prelude {
         ExtendedModel, JacobianModel, Model, Param, QuaternionParam,
         SelfBlock, SimpleEulerAngleParam, TripletBlock,
     };
-    pub use crate::covariance::{CovAssembly, CovError, Covariance};
+    pub use crate::covariance::{CovAssembly, CovError, CovMode, Covariance};
     pub use crate::refs::{self, Ref};
     pub use crate::simple_lm::{
         FitProblem, LmConfig, LmProblem, LmResult, LmSolver, NielsenLambdaDriver,

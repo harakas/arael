@@ -21,7 +21,7 @@
 //! Run:
 //!     cargo run -r --example slam2d_multi_demo
 
-use arael::covariance::Covariance;
+use arael::covariance::{CovMode, Covariance};
 use arael::model::{Model, Param, SelfBlock, CrossBlock};
 use arael::simple_lm::LmProblem;
 use arael::vect::vect2f;
@@ -318,7 +318,7 @@ fn print_stats(label: &str, unit: &str, v: &[f32]) {
 // angle_rad) from the 2x2 diagonal block of the parameter covariance. 95% in 2D
 // is chi^2(0.95, df=2) = 5.991, so the semi-axes are sqrt(5.991 * eigenvalue).
 fn compute_landmark_ellipses(map: &mut Map) -> std::vec::Vec<(vect2f, f32, f32, f32)> {
-    let cov = match map.assemble_covariance() {
+    let cov = match map.assemble_covariance(CovMode::AllMarginals) {
         Ok(cov) => cov,
         Err(e) => {
             println!("\n{e} -- skipping uncertainty ellipses.");

@@ -42,7 +42,7 @@
 //!
 //! Run:  cargo run -r --example slam2d_align_demo
 
-use arael::covariance::Covariance;
+use arael::covariance::{CovMode, Covariance};
 use arael::model::{Param, SelfBlock, CrossBlock};
 use arael::simple_lm::{LmConfig, LmProblem};
 use arael::vect::{vect2f, vect3f};
@@ -247,7 +247,7 @@ fn stage1(cfg: &Cfg, rm: &scene2d::RunMeas, gps_isigma: f32,
     path.solve_sparse(&LmConfig::<f32>::default());
 
     // Parameter covariance at the stage-1 solution.
-    let cov = path.assemble_covariance().expect("stage-1 Hessian not PD");
+    let cov = path.assemble_covariance(CovMode::PerQuery).expect("stage-1 Hessian not PD");
 
     // Centre = middle pose; its position is the correction pivot, its 3x3
     // (x, y, gamma) MARGINAL covariance is the frame prior.

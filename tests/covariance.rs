@@ -2,7 +2,7 @@
 // scaled by `isig` has Gauss-Newton Hessian H = 2 isig^2 I, so the covariance
 // Sigma = 2 H^-1 = (1/isig^2) I -- an analytic value to check against.
 
-use arael::covariance::{CovError, Covariance};
+use arael::covariance::{CovError, CovMode, Covariance};
 use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::refs::{self, Ref};
 
@@ -37,7 +37,7 @@ fn world(isigs: &[f64]) -> W {
 fn marginal_cov_matches_analytic() {
     // isig = 0.5 -> Sigma = (1/0.25) I = diag(4, 4).
     let mut w = world(&[0.5]);
-    let cov = w.assemble_covariance().unwrap();
+    let cov = w.assemble_covariance(CovMode::PerQuery).unwrap();
     let c = cov.marginal_cov(&w.pts[0]);
     assert_eq!((c.nrows(), c.ncols()), (2, 2));
     assert!((c[(0, 0)] - 4.0).abs() < 1e-10, "c00 = {}", c[(0, 0)]);
@@ -57,7 +57,7 @@ fn marginal_cov_matches_analytic() {
 fn independent_points_have_zero_cross_covariance() {
     // isig = 1 -> each point Sigma = I; the two points share no measurement.
     let mut w = world(&[1.0, 1.0]);
-    let cov = w.assemble_covariance().unwrap();
+    let cov = w.assemble_covariance(CovMode::PerQuery).unwrap();
 
     let c0 = cov.marginal_cov(&w.pts[0]);
     assert!((c0[(0, 0)] - 1.0).abs() < 1e-10 && (c0[(1, 1)] - 1.0).abs() < 1e-10);
@@ -118,7 +118,7 @@ fn coupled_marginals_match_analytic() {
     c.nodes.push(Node { v: Param::new(0.0), prior_isig: 1.0, hb: SelfBlock::new() });
     c.ties.push(Tie { a: Ref::new(0), b: Ref::new(1), isig: 1.0, hb: CrossBlock::new() });
 
-    let cov = c.assemble_covariance().unwrap();
+    let cov = c.assemble_covariance(CovMode::PerQuery).unwrap();
 
     // Marginal of each node folds in the coupling to the other: 2/3.
     let m0 = cov.marginal_cov(&c.nodes[0]);
@@ -140,8 +140,96 @@ fn coupled_marginals_match_analytic() {
     assert!((cc[(0, 0)] - 0.5).abs() < 1e-9, "conditional = {}", cc[(0, 0)]);
 }
 
+// A path of `n` nodes: each node has a prior toward 0, consecutive nodes are
+// tied. H is banded (tridiagonal in the node blocks), so its factor carries real
+// fill -- a non-trivial pattern for the selected inverse to walk.
+fn path_chain(n: usize) -> Chain {
+    let mut c = Chain { nodes: refs::Vec::new(), ties: std::vec::Vec::new() };
+    for _ in 0..n {
+        c.nodes.push(Node { v: Param::new(0.0), prior_isig: 1.0, hb: SelfBlock::new() });
+    }
+    for i in 0..n - 1 {
+        c.ties.push(Tie { a: Ref::new(i as u32), b: Ref::new((i + 1) as u32), isig: 1.0, hb: CrossBlock::new() });
+    }
+    c
+}
+
+#[test]
+fn precompute_matches_analytic_coupled() {
+    // The two-node analytic case, now via the selected inverse.
+    let mut c = Chain { nodes: refs::Vec::new(), ties: std::vec::Vec::new() };
+    c.nodes.push(Node { v: Param::new(0.0), prior_isig: 1.0, hb: SelfBlock::new() });
+    c.nodes.push(Node { v: Param::new(0.0), prior_isig: 1.0, hb: SelfBlock::new() });
+    c.ties.push(Tie { a: Ref::new(0), b: Ref::new(1), isig: 1.0, hb: CrossBlock::new() });
+
+    let cov = c.assemble_covariance(CovMode::AllMarginals).unwrap();
+
+    assert!((cov.marginal_cov(&c.nodes[0])[(0, 0)] - 2.0 / 3.0).abs() < 1e-9);
+    // The tie couples the nodes, so the cross entry is inside the pattern.
+    assert!((cov.cross_cov(&c.nodes[0], &c.nodes[1])[(0, 0)] - 1.0 / 3.0).abs() < 1e-9);
+}
+
+#[test]
+fn precompute_selected_inverse_matches_solve() {
+    let mut c = path_chain(6);
+
+    // Reference: per-query solves.
+    let solved = c.assemble_covariance(CovMode::PerQuery).unwrap();
+    let ref_marg: std::vec::Vec<f64> = (0..6).map(|i| solved.marginal_cov(&c.nodes[i])[(0, 0)]).collect();
+    let ref_adjacent = solved.cross_cov(&c.nodes[2], &c.nodes[3])[(0, 0)];
+    let ref_distant = solved.cross_cov(&c.nodes[0], &c.nodes[5])[(0, 0)];
+
+    // Selected inverse: every marginal is a cache lookup.
+    let pc = c.assemble_covariance(CovMode::AllMarginals).unwrap();
+    for i in 0..6 {
+        let m = pc.marginal_cov(&c.nodes[i])[(0, 0)];
+        assert!((m - ref_marg[i]).abs() < 1e-9, "node {}: sel {} vs solve {}", i, m, ref_marg[i]);
+    }
+    // Adjacent nodes are connected in the factor -> in-pattern lookup.
+    let adj = pc.cross_cov(&c.nodes[2], &c.nodes[3])[(0, 0)];
+    assert!((adj - ref_adjacent).abs() < 1e-9, "adjacent cross: sel {} vs solve {}", adj, ref_adjacent);
+    // The endpoints share no factor entry -> out of pattern -> solve fallback,
+    // which must still return the correct (nonzero) coupling.
+    let dist = pc.cross_cov(&c.nodes[0], &c.nodes[5])[(0, 0)];
+    assert!((dist - ref_distant).abs() < 1e-9, "distant cross: sel {} vs solve {}", dist, ref_distant);
+    assert!(ref_distant.abs() > 1e-6, "endpoints should still be correlated");
+}
+
+#[test]
+fn precompute_selected_inverse_denser_fill() {
+    // 20 nodes, each tied to its next two neighbours: a pentadiagonal H whose
+    // factor fills in beyond the input band. Every marginal from the selected
+    // inverse must still match the per-query solve.
+    let n = 20;
+    let mut c = Chain { nodes: refs::Vec::new(), ties: std::vec::Vec::new() };
+    for _ in 0..n {
+        c.nodes.push(Node { v: Param::new(0.0), prior_isig: 1.0, hb: SelfBlock::new() });
+    }
+    for i in 0..n {
+        for step in [1usize, 2] {
+            if i + step < n {
+                c.ties.push(Tie {
+                    a: Ref::new(i as u32),
+                    b: Ref::new((i + step) as u32),
+                    isig: 1.0,
+                    hb: CrossBlock::new(),
+                });
+            }
+        }
+    }
+
+    let solved = c.assemble_covariance(CovMode::PerQuery).unwrap();
+    let ref_marg: std::vec::Vec<f64> = (0..n).map(|i| solved.marginal_cov(&c.nodes[i])[(0, 0)]).collect();
+
+    let pc = c.assemble_covariance(CovMode::AllMarginals).unwrap();
+    for i in 0..n {
+        let m = pc.marginal_cov(&c.nodes[i])[(0, 0)];
+        assert!((m - ref_marg[i]).abs() < 1e-9, "node {}: sel {} vs solve {}", i, m, ref_marg[i]);
+    }
+}
+
 #[test]
 fn empty_model_is_an_error() {
     let mut w = W { pts: refs::Vec::new() };
-    assert_eq!(w.assemble_covariance().err(), Some(CovError::Empty));
+    assert_eq!(w.assemble_covariance(CovMode::PerQuery).err(), Some(CovError::Empty));
 }
