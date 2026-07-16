@@ -303,6 +303,12 @@ fn main() {
 
     println!("\nIterations: {}, cost: {:.6} -> {:.6}", result.iterations, result.start_cost, result.end_cost);
 
+    // arael's covariance API -- `assemble_covariance` (see docs/COVARIANCE.md) --
+    // recovers this parameter covariance directly and is what you would normally
+    // use. We compute it by hand here to show the derivation from the Hessian, and
+    // to apply the reduced-chi-squared (Birge-ratio) scaling below, a correction
+    // the API deliberately leaves to the caller.
+    //
     // Parameter uncertainties from the inverse Hessian at the
     // solution. arael's `calc_grad_hessian_dense` writes the full
     // mathematical Hessian H = d2S/d theta2 = 2 JT J (under

@@ -23,6 +23,7 @@
 //     Pose. Cross pairs land in path.hbt (COO).
 // The rest (drift on raw params, odometry) is unchanged from loc_demo.
 
+use arael::covariance::{CovMode, Covariance};
 use arael::model::{Model, Param, SelfBlock, CrossBlock, TripletBlock, SimpleEulerAngleParam};
 use arael::simple_lm::LmProblem;
 use arael::vect::{vect3f, vect2f};
@@ -360,9 +361,13 @@ impl Path {
             pose.pos = Param::new(new_pos);
             pose.ea = SimpleEulerAngleParam::new(new_ea);
         }
-        // Reset global transform to identity and pivot to new centroid.
+        // Reset the global transform to identity and hold it fixed (Param::new
+        // re-enables optimization): a free global plus free poses makes H
+        // rank-deficient.
         self.global_delta = Param::new(vect3f::new(0.0, 0.0, 0.0));
         self.global_rot = SimpleEulerAngleParam::new(vect3f::new(0.0, 0.0, 0.0));
+        self.global_delta.optimize = false;
+        self.global_rot.optimize = false;
         let mut acc = vect3f::new(0.0, 0.0, 0.0);
         for pose in self.poses.iter() { acc = acc + pose.pos.value; }
         if self.poses.len() > 0 {
@@ -397,6 +402,13 @@ impl Path {
         println!("optimise_center: {} iterations, cost {:.4} -> {:.4}  globals: delta={:?} rot={:?}",
             result.iterations, result.start_cost, result.end_cost,
             self.global_delta.value, self.global_rot.value);
+
+        // Global transform uncertainty (Sigma = 2 H^-1). Poses are frozen, so
+        // std_dev over the root's own params -- the 6 globals -- is well-posed.
+        if let Some(sd) = self.assemble_covariance(CovMode::PerQuery).ok().map(|c| c.std_dev(self)) {
+            println!("optimise_center: global sigma  delta=({:.4}, {:.4}, {:.4})m  rot=({:.4}, {:.4}, {:.4})rad",
+                sd[0], sd[1], sd[2], sd[3], sd[4], sd[5]);
+        }
 
         self.recenter();
     }
@@ -711,11 +723,9 @@ fn main() {
             path.global_delta.value, path.global_rot.value);
     }
 
-    // Post-optimization grad/hess diagnostic on the globals: confirms
-    // the solver drove them to a true local minimum (grad ~ 0) and
-    // shows the Hessian diagonal so the strength of each direction is
-    // visible alongside the converged value.
-    {
+    // Grad/hess on the globals (grad ~ 0 confirms a minimum). Only applies while
+    // they are optimized; the pose-refinement passes hold them fixed.
+    if path.global_delta.optimize {
         let mut params: std::vec::Vec<f32> = std::vec::Vec::new();
         path.serialize32(&mut params);
         let n = params.len();
@@ -731,6 +741,8 @@ fn main() {
                     label, k, ag[start + k], ah[(start + k) * n + (start + k)]);
             }
         }
+    } else {
+        println!("\n--- Globals held fixed after centering (pose-only refinement) ---");
     }
 
     // Bake the soft-regularized global transform back into each pose,
@@ -749,9 +761,16 @@ fn main() {
         let cost = path.calc_cost(&params);
         println!("\nFinal cost: {:.4}", cost);
 
-        println!("\n--- Absolute pose errors ---");
+        println!("\n--- Absolute pose errors (with position 1-sigma from the covariance) ---");
+        // Per-pose position uncertainty (Sigma = 2 H^-1); the globals are held
+        // fixed, so H is positive definite. std_dev's first three are the position.
+        let cov = match path.assemble_covariance(CovMode::AllMarginals) {
+            Ok(c) => Some(c),
+            Err(e) => { println!("(covariance unavailable: {e})"); None }
+        };
         let mut pos_errs: std::vec::Vec<f32> = std::vec::Vec::new();
         let mut ea_errs_deg: std::vec::Vec<f32> = std::vec::Vec::new();
+        let mut pos_sigmas: std::vec::Vec<f64> = std::vec::Vec::new();
         let n = gt_poses.len().min(path.poses.len());
         for i in 0..n {
             let pose = &path.poses[i];
@@ -760,9 +779,16 @@ fn main() {
             let ed = pose.ea.value - gt_e;
             let pos_err = pd.norm();
             let ea_err_deg = ed.norm().to_degrees();
-            println!("Pose {:2}: |d|={:.4}m  ea={:.3}deg  pos=({:.3}, {:.3}, {:.3})",
-                i, pos_err, ea_err_deg,
-                pose.pos.value.x, pose.pos.value.y, pose.pos.value.z);
+            match cov.as_ref().map(|c| c.std_dev(pose)) {
+                Some(sd) => {
+                    println!("Pose {:2}: |d|={:.4}m  ea={:.3}deg  pos=({:.3}, {:.3}, {:.3})  sigma=({:.3}, {:.3}, {:.3})m",
+                        i, pos_err, ea_err_deg,
+                        pose.pos.value.x, pose.pos.value.y, pose.pos.value.z, sd[0], sd[1], sd[2]);
+                    pos_sigmas.push((sd[0] * sd[0] + sd[1] * sd[1] + sd[2] * sd[2]).sqrt());
+                }
+                None => println!("Pose {:2}: |d|={:.4}m  ea={:.3}deg  pos=({:.3}, {:.3}, {:.3})",
+                    i, pos_err, ea_err_deg, pose.pos.value.x, pose.pos.value.y, pose.pos.value.z),
+            }
             pos_errs.push(pos_err);
             ea_errs_deg.push(ea_err_deg);
         }
@@ -776,6 +802,13 @@ fn main() {
                 mean_pos, pos_errs[n / 2], pos_errs[0], pos_errs[n - 1]);
             println!("EA:  mean={:.3}deg  median={:.3}deg  min={:.3}deg  max={:.3}deg",
                 mean_ea, ea_errs_deg[n / 2], ea_errs_deg[0], ea_errs_deg[n - 1]);
+        }
+        if !pos_sigmas.is_empty() {
+            pos_sigmas.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            let m = pos_sigmas.len();
+            let mean: f64 = pos_sigmas.iter().sum::<f64>() / m as f64;
+            println!("Pos sigma: mean={:.4}m  median={:.4}m  min={:.4}m  max={:.4}m",
+                mean, pos_sigmas[m / 2], pos_sigmas[0], pos_sigmas[m - 1]);
         }
     }
 

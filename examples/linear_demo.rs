@@ -97,6 +97,9 @@ fn main() {
         result.iterations, result.start_cost, result.end_cost
     );
     println!("Robust fit: a={:.8}, b={:.8}", model.a.value, model.b.value);
+    if let Some(sd) = model.get_stdev() {
+        println!("Std dev:   a +/- {:.8}, b +/- {:.8}", sd[0], sd[1]);
+    }
 
     // Step 3: print comparison table
     println!("\nX Y LINEAR ROBUST");

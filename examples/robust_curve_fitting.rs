@@ -8,6 +8,7 @@
 // The fit parameters m, c live on Curve. Each Obs is nested in a Batch (the
 // container the root iterates) and targets Curve's Hessian block through its
 // `curve` reference (a remote block), so only m and c are optimized.
+use arael::covariance::{CovMode, Covariance};
 use arael::model::{Param, SelfBlock};
 use arael::refs::{self, Ref};
 use arael::simple_lm::{LmConfig, LmProblem};
@@ -85,7 +86,11 @@ fn build() -> Fit {
     fit
 }
 
-fn fit_mode(fit: &mut Fit, name: &str, mode: i32) -> (f64, f64) {
+// Returns (m, c, [sigma_m, sigma_c]). The std devs come from the covariance API
+// at the fit: Sigma = 2 H^-1 over Curve's m, c. The residuals here are not
+// whitened, so it is the unit-noise covariance (scale by the residual RMS for an
+// absolute interval); under the robust losses it is a local curvature interval.
+fn fit_mode(fit: &mut Fit, name: &str, mode: i32) -> (f64, f64, Option<Vec<f64>>) {
     // Label the verbose solver output so it is clear which fit it belongs to.
     eprintln!("\n=== solving: {name} ===");
     for b in fit.batches.iter_mut() {
@@ -102,7 +107,8 @@ fn fit_mode(fit: &mut Fit, name: &str, mode: i32) -> (f64, f64) {
     let cfg = LmConfig { verbose: true, initial_lambda: 1.0, ..Default::default() };
     let result = fit.solve_dense(&cfg);
     result.pretty_print();
-    (result.x[0], result.x[1])
+    let sd = fit.assemble_covariance(CovMode::PerQuery).ok().map(|cov| cov.std_dev(&fit.curves[0]));
+    (result.x[0], result.x[1], sd)
 }
 
 fn main() {
@@ -113,12 +119,16 @@ fn main() {
 
     let y = |(m, c): (f64, f64), x: f64| (m * x + c).exp();
     let truth = (0.3, 0.1);
+    let row = |name: &str, f: &(f64, f64, Option<Vec<f64>>)| match &f.2 {
+        Some(sd) => println!("  {name:<9} m={:.4} +/- {:.4}  c={:.4} +/- {:.4}", f.0, sd[0], f.1, sd[1]),
+        None => println!("  {name:<9} m={:.4}  c={:.4}", f.0, f.1),
+    };
 
-    println!("\nfit  y = exp(m*x + c):");
+    println!("\nfit  y = exp(m*x + c)  (+/- 1 sigma from the covariance API):");
     println!("  true      m={:.4}  c={:.4}", truth.0, truth.1);
-    println!("  naive     m={:.4}  c={:.4}", naive.0, naive.1);
-    println!("  cauchy    m={:.4}  c={:.4}", cauchy.0, cauchy.1);
-    println!("  starship  m={:.4}  c={:.4}", starship.0, starship.1);
+    row("naive", &naive);
+    row("cauchy", &cauchy);
+    row("starship", &starship);
 
     // Reading vs the true curve vs each fit, evaluated at the data points. The
     // two outliers (y ~ 5.5 near x = 1.4) drag the naive column up; cauchy and
@@ -127,7 +137,7 @@ fn main() {
     for &(x, reading) in DATA {
         println!(
             "  {:5.3}   {:6.3}   {:6.3}   {:6.3}   {:6.3}   {:6.3}",
-            x, reading, y(truth, x), y(naive, x), y(cauchy, x), y(starship, x)
+            x, reading, y(truth, x), y((naive.0, naive.1), x), y((cauchy.0, cauchy.1), x), y((starship.0, starship.1), x)
         );
     }
 }

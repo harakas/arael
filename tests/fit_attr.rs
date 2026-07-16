@@ -107,6 +107,32 @@ struct XY64 {
 }
 
 #[test]
+fn fit_covariance_matches_analytic() {
+    // Plain least-squares line fit, residual = a*x + b - y (unit noise). With
+    // symmetric x (sum x = 0) the Gauss-Newton information J^T J is diagonal:
+    // J^T J = diag(sum x^2, n), so Cov = 2 H^-1 = (J^T J)^-1 = diag(1/sum x^2, 1/n),
+    // and cov(a,b) = 0 -- an analytic value to check get_cov / get_stdev against.
+    let xs = [-2.0_f64, -1.0, 0.0, 1.0, 2.0];
+    let sum_x2: f64 = xs.iter().map(|x| x * x).sum(); // 10
+    let n = xs.len() as f64; // 5
+    let mut m = LinearModel64 {
+        a: Param::new(0.0),
+        b: Param::new(0.0),
+        data: xs.iter().map(|&x| XY64 { x, y: 2.0 * x - 1.0 }).collect(),
+    };
+    m.fit_with(&LmConfig::<f64> { max_iters: 50, ..Default::default() });
+
+    let cov = m.get_cov().expect("Hessian invertible");
+    assert!((cov[(0, 0)] - 1.0 / sum_x2).abs() < 1e-9, "var(a) = {} vs {}", cov[(0, 0)], 1.0 / sum_x2);
+    assert!((cov[(1, 1)] - 1.0 / n).abs() < 1e-9, "var(b) = {} vs {}", cov[(1, 1)], 1.0 / n);
+    assert!(cov[(0, 1)].abs() < 1e-9, "cov(a,b) = {} (should be ~0)", cov[(0, 1)]);
+
+    let sd = m.get_stdev().expect("Hessian invertible");
+    assert!((sd[0] - (1.0 / sum_x2).sqrt()).abs() < 1e-9, "sd(a) = {}", sd[0]);
+    assert!((sd[1] - (1.0 / n).sqrt()).abs() < 1e-9, "sd(b) = {}", sd[1]);
+}
+
+#[test]
 fn fit64_recovers_line() {
     let mut m = LinearModel64 {
         a: Param::new(0.0),

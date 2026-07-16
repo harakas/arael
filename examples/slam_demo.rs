@@ -36,6 +36,7 @@
 //   preventing parameters from diverging during early passes when feature
 //   constraints are scaled down.
 
+use arael::covariance::{CovMode, Covariance};
 use arael::model::{Model, Param, SimpleEulerAngleParam, SelfBlock, CrossBlock};
 use arael::simple_lm::LmProblem;
 use arael::vect::{vect3f, vect2f};
@@ -747,33 +748,13 @@ fn main() {
             mean, dea_rel_errs[n / 2], dea_rel_errs[0], dea_rel_errs[n - 1]);
     }
 
-    // Landmark uncertainty estimation via Hessian inverse.
-    //
-    // The Gauss-Newton Hessian H = 2*J^T*J is the information matrix (our
-    // add_residual accumulates the factor of 2). The parameter covariance is
-    // Cov = (J^T*J)^{-1} = 2*H^{-1}. For each landmark we extract the 3x3
-    // diagonal block of Cov and compute its eigendecomposition. The square
-    // roots of the eigenvalues are the semi-axis lengths of the 1-sigma
-    // uncertainty ellipsoid.
-    //
-    // The raw diagonal blocks of Cov give GLOBAL uncertainty which includes
-    // the shared gauge (GPS offset, yaw). To get useful per-landmark
-    // uncertainty we compute the covariance of (landmark - closest_pose):
-    // Cov_rel = C_ll - C_lp - C_pl + C_pp. This cancels the shared gauge
-    // and gives uncertainty relative to the pose, matching |d| shown beside
-    // it (the relative position error vs ground truth).
-    let cov = {
-        let mut params64: std::vec::Vec<f64> = std::vec::Vec::new();
-        path.serialize64(&mut params64);
-        let n = params64.len();
-        let mut grad = vec![0.0_f64; n];
-        let mut hessian = vec![0.0_f64; n * n];
-        path.calc_grad_hessian_dense(&params64, &mut grad, &mut hessian);
-        let h_mat = nalgebra::DMatrix::from_row_slice(n, n, &hessian);
-        match nalgebra::linalg::Cholesky::new(h_mat) {
-            Some(chol) => Some(chol.inverse() * 2.0),
-            None => { println!("Hessian not positive definite -- no covariance"); None }
-        }
+    // Landmark uncertainty from the parameter covariance (Sigma = 2 H^-1). The
+    // relative covariance Cov_rel = C_ll + C_pp - C_lp - C_pl over the landmark and
+    // pose POSITION blocks cancels the shared gauge (GPS offset, yaw), giving
+    // uncertainty relative to the pose. Ellipsoid semi-axes = sqrt of its eigenvalues.
+    let cov = match path.assemble_covariance(CovMode::AllMarginals) {
+        Ok(c) => Some(c),
+        Err(e) => { println!("Covariance unavailable: {e}"); None }
     };
 
     // Landmark errors: compare landmark-to-closest-pose vector (opt vs GT)
@@ -799,13 +780,12 @@ fn main() {
         let rel_pct = 100.0 * err / gt_dist;
 
         if let Some(ref cov) = cov {
-            let k = lm.pos.index() as usize;
-            let p = opt_pose.pos.index() as usize;
-            // Cov_rel = C_ll - C_lp - C_pl + C_pp (cancels shared gauge)
-            let c_ll = cov.fixed_view::<3, 3>(k, k);
-            let c_pp = cov.fixed_view::<3, 3>(p, p);
-            let c_lp = cov.fixed_view::<3, 3>(k, p);
-            let cov_rel = (c_ll + c_pp - c_lp - c_lp.transpose()).clone_owned();
+            // Pose position block = top-left 3x3 of its 6-DOF marginal (pos
+            // precedes rotation); cross = first 3 columns.
+            let c_ll = cov.marginal_cov(lm);
+            let c_pp = cov.marginal_cov(opt_pose).view((0, 0), (3, 3)).into_owned();
+            let c_lp = cov.cross_cov(lm, opt_pose).view((0, 0), (3, 3)).into_owned();
+            let cov_rel = &c_ll + &c_pp - &c_lp - c_lp.transpose();
             let eigen = nalgebra::SymmetricEigen::new(cov_rel);
             let mut sigmas = [
                 eigen.eigenvalues[0].max(0.0).sqrt(),
