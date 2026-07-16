@@ -59,6 +59,8 @@ impl Expr {
                     let vals: Result<Vec<f64>, _> = args.iter().map(|a| a.eval(vars)).collect();
                     Ok(f(&vals?))
                 } else {
+                    // INVARIANT: eval_fn() is None only for the Symbolic variants,
+                    // which always carry a body (Extern is the only eval_fn kind).
                     let body = kind.body().expect("FuncKind must have body or eval_fn");
                     super::expand_func(params, body, args).eval(vars)
                 }
