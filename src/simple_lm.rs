@@ -468,6 +468,8 @@ impl ScalarCscResolver {
         let key = ((self.blk_of[j] as u64) << 32) | self.blk_of[i] as u64;
         if key != self.memo_key {
             self.memo_key = key;
+            // INVARIANT: the pattern holds every cell the macro emits; a miss is
+            // a codegen bug, so fail loud rather than scatter into a wrong slot.
             let c = self.keys.binary_search(&key)
                 .expect("coordinate outside the built pattern");
             self.memo_prefix = self.prefix[c];
@@ -4083,6 +4085,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             }
             return;
         }
+        // INVARIANT: lm_solve calls compute() (which sets matrix.h) before this.
         let vals = matrix.h.as_ref().expect("compute before extract_diagonal").vals();
         for (i, d) in diagonal.iter_mut().enumerate() {
             *d = vals[self.bdiag_pos[i]];
@@ -4124,6 +4127,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             return true;
         }
 
+        // INVARIANT: lm_solve calls compute() (which sets matrix.h) before this.
         let h = matrix.h.as_mut().expect("compute before solve_damped");
         {
             let vals = h.vals_mut();

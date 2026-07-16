@@ -2652,6 +2652,7 @@ fn svd_dense_f64(m: usize, n: usize, dense: &[f64]) -> SvdResult {
         let j = nalgebra::DMatrix::from_row_slice(m, n, dense);
         let svd = j.svd(true, true);
         let singular_values: std::vec::Vec<f64> = svd.singular_values.iter().cloned().collect();
+        // INVARIANT: svd(true, true) above computes both U and V^t.
         let u_mat = svd.u.as_ref().expect("U requested");
         let vt_mat = svd.v_t.as_ref().expect("V^t requested");
         let mut u = vec![0.0f64; m * k];
