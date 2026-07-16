@@ -148,17 +148,38 @@ impl<T: Float> quatern<T> {
     }
 
     /// Extracts Euler angles (x=roll, y=pitch, z=yaw) from a unit quaternion.
+    /// At and near gimbal lock (|pitch| within ~sqrt(eps) of pi/2) only
+    /// roll -+ yaw is determined; the roll = 0 convention is used and yaw
+    /// carries the combined angle. The recomposition error is bounded by
+    /// ~sqrt(eps) everywhere. Matches `matrix3::get_euler_angles` for the same
+    /// rotation.
     pub fn get_euler_angles(self) -> vect3<T> {
-        let ea_x = T::atan2(T::two() * (self.t * self.v.x + self.v.y * self.v.z), T::one() - T::two() * (self.v.x * self.v.x + self.v.y * self.v.y));
-        let ea_z = T::atan2(T::two() * (self.t * self.v.z + self.v.x * self.v.y), T::one() - T::two() * (self.v.y * self.v.y + self.v.z * self.v.z));
-
-        let s = T::two() * (self.t * self.v.y - self.v.z * self.v.x);
-        if s >= T::one() {
-            vect3::<T>::new(ea_x, T::half_pi(), ea_z)
-        } else if s <= -T::one() {
-            vect3::<T>::new(ea_x, -T::half_pi(), ea_z)
+        let (t, v) = (self.t, self.v);
+        // sin(pitch); safe_asin clamps float noise just past +-1, where raw
+        // asin returns NaN and poisons all three angles.
+        let pitch = (T::two() * (t * v.y - v.z * v.x)).safe_asin();
+        // The roll/yaw split lives in entries scaled by cos(pitch); this sum of
+        // squares is cos(pitch)^2. Below eps (|cos(pitch)| below sqrt(eps)) the
+        // split is float noise, so switch to the lock convention. sqrt(eps) is
+        // where the main branch's eps/cos(pitch) amplification equals the lock
+        // branch's cos(pitch) truncation.
+        let roll_num = T::two() * (t * v.x + v.y * v.z); // m21
+        let roll_den = T::one() - T::two() * (v.x * v.x + v.y * v.y); // m22
+        let cp2 = roll_num * roll_num + roll_den * roll_den;
+        if cp2 > T::epsilon() {
+            vect3::<T>::new(
+                T::atan2(roll_num, roll_den),
+                pitch,
+                T::atan2(T::two() * (t * v.z + v.x * v.y), T::one() - T::two() * (v.y * v.y + v.z * v.z)),
+            )
         } else {
-            vect3::<T>::new(ea_x, s.asin(), ea_z)
+            // Gimbal lock: the combined angle sits in the well-conditioned
+            // m01/m11 entries -- m01 = 2(vx vy - t vz), m11 = 1 - 2(vx^2 + vz^2).
+            vect3::<T>::new(
+                T::zero(),
+                pitch,
+                T::atan2(T::two() * (t * v.z - v.x * v.y), T::one() - T::two() * (v.x * v.x + v.z * v.z)),
+            )
         }
     }
 
