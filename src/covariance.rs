@@ -131,18 +131,13 @@ struct BandData {
 }
 
 impl BandData {
-    // Block index of an entity from its (contiguous) parameter span.
-    fn block_index(&self, idx: &[usize]) -> usize {
-        let offset = *idx.iter().min().expect("non-empty entity");
-        self.spans
-            .iter()
-            .position(|&(o, w)| o == offset && w == idx.len())
-            .unwrap_or_else(|| {
-                panic!(
-                    "TriDiagonal covariance: entity (offset {offset}, width {}) does not align to a single block",
-                    idx.len()
-                )
-            })
+    // Block index of an entity from its (contiguous) parameter span, or None
+    // when the entity has no parameters or does not line up with a single band
+    // block. The TriDiagonal backend can only answer single-block queries; the
+    // caller turns None into the empty-matrix sentinel (see marginal_cov).
+    fn block_index(&self, idx: &[usize]) -> Option<usize> {
+        let offset = *idx.iter().min()?;
+        self.spans.iter().position(|&(o, w)| o == offset && w == idx.len())
     }
 
     // Marginal covariance of block bi: last block is forward-only; an interior
@@ -166,10 +161,16 @@ impl BandData {
         let nb = self.spans.len();
         let mut bwd: Vec<DMatrix<f64>> = self.diag.clone();
         for i in (0..nb - 1).rev() {
-            let r_inv = bwd[i + 1]
-                .clone()
-                .try_inverse()
-                .expect("TriDiagonal: backward Schur block not invertible");
+            let r = bwd[i + 1].clone();
+            let (rn, rc) = (r.nrows(), r.ncols());
+            // A singular tail block is unobservable. Fall back to the
+            // pseudo-inverse so the pass completes; a genuinely unobservable
+            // block then surfaces as INFINITY when `marginal` inverts the
+            // combined information, matching the singular handling there. The
+            // fast LU inverse still carries the healthy blocks.
+            let r_inv = r.clone().try_inverse().unwrap_or_else(|| {
+                r.pseudo_inverse(1e-12).unwrap_or_else(|_| DMatrix::zeros(rn, rc))
+            });
             let b = &self.off[i]; // H[i, i+1]
             bwd[i] = &self.diag[i] - b * &r_inv * b.transpose();
         }
@@ -200,11 +201,22 @@ impl CovAssembly {
     /// Marginal covariance of a model: one entity for its own covariance, or a
     /// whole collection for the joint over all its entities. In tangent
     /// coordinates.
+    ///
+    /// The [`CovMode::TriDiagonal`] backend answers only a single-band-block
+    /// query; a multi-block or empty query is unsupported there and returns an
+    /// empty (0x0) matrix after a warning -- use `AllMarginals` or `PerQuery`
+    /// for those. A singular (unobservable) block returns an INFINITY matrix.
     pub fn marginal_cov<M: Model + ?Sized>(&self, m: &M) -> DMatrix<f64> {
         let idx = Self::indices(m);
         match &self.backend {
             Backend::Factored { .. } => self.factored_block(&idx, &idx),
-            Backend::Band(b) => b.marginal(b.block_index(&idx)),
+            Backend::Band(b) => match b.block_index(&idx) {
+                Some(bi) => b.marginal(bi),
+                None => {
+                    Self::warn_unsupported_band("marginal_cov");
+                    DMatrix::zeros(0, 0)
+                }
+            },
         }
     }
 
@@ -213,6 +225,9 @@ impl CovAssembly {
     /// entity's own information block -- distinct from the marginal (which folds
     /// in the uncertainty of the variables it couples to) and never larger than
     /// it. An entity with no self-information yields infinities.
+    ///
+    /// Same TriDiagonal restriction as [`marginal_cov`](Self::marginal_cov): a
+    /// multi-block or empty query returns an empty (0x0) matrix after a warning.
     pub fn conditional_cov<M: Model + ?Sized>(&self, m: &M) -> DMatrix<f64> {
         let idx = Self::indices(m);
         let k = idx.len();
@@ -227,7 +242,13 @@ impl CovAssembly {
                 hb
             }
             // The entity's own diagonal block is exactly H_ee.
-            Backend::Band(b) => b.diag[b.block_index(&idx)].clone(),
+            Backend::Band(b) => match b.block_index(&idx) {
+                Some(bi) => b.diag[bi].clone(),
+                None => {
+                    Self::warn_unsupported_band("conditional_cov");
+                    return DMatrix::zeros(0, 0);
+                }
+            },
         };
         hb.try_inverse()
             .map(|inv| inv * 2.0)
@@ -236,26 +257,52 @@ impl CovAssembly {
 
     /// Standard deviations: the square root of the marginal covariance
     /// diagonal, one per scalar parameter of the model.
+    ///
+    /// Same TriDiagonal restriction as [`marginal_cov`](Self::marginal_cov): a
+    /// multi-block or empty query returns an empty vector after a warning.
     pub fn std_dev<M: Model + ?Sized>(&self, m: &M) -> Vec<f64> {
         let idx = Self::indices(m);
         let block = match &self.backend {
             Backend::Factored { .. } => self.factored_block(&idx, &idx),
-            Backend::Band(b) => b.marginal(b.block_index(&idx)),
+            Backend::Band(b) => match b.block_index(&idx) {
+                Some(bi) => b.marginal(bi),
+                None => {
+                    Self::warn_unsupported_band("std_dev");
+                    return Vec::new();
+                }
+            },
         };
         (0..idx.len()).map(|i| block[(i, i)].sqrt()).collect()
     }
 
     /// Cross-covariance block between two models (the off-diagonal `A x B`
-    /// block of the joint covariance). Not available in [`CovMode::TriDiagonal`].
+    /// block of the joint covariance). In tangent coordinates.
+    ///
+    /// Not available in [`CovMode::TriDiagonal`]: that backend stores only the
+    /// band, so an off-diagonal block returns an empty (0x0) matrix after a
+    /// warning -- use `AllMarginals` or `PerQuery`.
     pub fn cross_cov<A: Model + ?Sized, B: Model + ?Sized>(&self, a: &A, b: &B) -> DMatrix<f64> {
         let ia = Self::indices(a);
         let ib = Self::indices(b);
         match &self.backend {
             Backend::Factored { .. } => self.factored_block(&ia, &ib),
             Backend::Band(_) => {
-                panic!("TriDiagonal covariance: cross_cov is not supported; use CovMode::AllMarginals")
+                Self::warn_unsupported_band("cross_cov");
+                DMatrix::zeros(0, 0)
             }
         }
+    }
+
+    // The TriDiagonal backend answers only single-band-block entity queries. A
+    // multi-block, empty, or cross-block query has no answer here: warn, and the
+    // caller returns the empty (0x0) sentinel.
+    fn warn_unsupported_band(op: &str) {
+        crate::warn!(
+            "covariance: {} is unsupported on the TriDiagonal backend for this \
+             query (entity spans several blocks or none, or an off-diagonal \
+             block); returning empty -- use CovMode::AllMarginals or PerQuery",
+            op
+        );
     }
 
     // Sigma[rows, cols] = 2 (H^-1)[rows, cols] for the factored backends. A
@@ -263,6 +310,7 @@ impl CovAssembly {
     // falls through to a column solve.
     fn factored_block(&self, rows: &[usize], cols: &[usize]) -> DMatrix<f64> {
         let Backend::Factored { symbolic, l_vals, sel, .. } = &self.backend else {
+            // INVARIANT: every call site is inside a `Backend::Factored` arm.
             unreachable!("factored_block on a band backend")
         };
         if let Some(s) = sel {
@@ -340,6 +388,7 @@ fn selected_inverse_supernodal(symbolic: &fchol::SymbolicCholesky<usize>, l_vals
 
     let sup = match symbolic.raw() {
         fchol::SymbolicCholeskyRaw::Supernodal(s) => s,
+        // INVARIANT: AllMarginals sets FORCE_SUPERNODAL before this runs.
         fchol::SymbolicCholeskyRaw::Simplicial(_) => unreachable!("assemble_covariance forced supernodal"),
     };
     let inv: Vec<usize> = symbolic

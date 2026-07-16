@@ -358,3 +358,81 @@ fn empty_model_is_an_error() {
     let mut w = W { pts: refs::Vec::new() };
     assert_eq!(w.assemble_covariance(CovMode::PerQuery).err(), Some(CovError::Empty));
 }
+
+// A 2-DOF chain whose last pose leaves y unobservable: its prior weights y at
+// zero (piy = 0) and the ties couple only x. Every other pose is fully anchored,
+// so build_band's forward pass succeeds -- but the last raw diagonal block is
+// singular, so an interior marginal's backward pass inverts a singular block. It
+// must not panic (pseudo-inverse carries it), interior marginals stay finite,
+// and the unobservable direction reads INFINITY.
+#[arael::model]
+#[arael(constraint(hb, { [posey.x * posey.pix, posey.y * posey.piy] }))]
+struct PoseY {
+    x: Param<f64>,
+    y: Param<f64>,
+    pix: f64,
+    piy: f64,
+    hb: SelfBlock<PoseY>,
+}
+
+#[arael::model]
+#[arael(constraint(hb, { [(a.x - b.x) * tiey.t] }))]
+struct TieY {
+    #[arael(ref = root.poses)]
+    a: Ref<PoseY>,
+    #[arael(ref = root.poses)]
+    b: Ref<PoseY>,
+    t: f64,
+    hb: CrossBlock<PoseY, PoseY>,
+}
+
+#[arael::model]
+#[arael(root)]
+struct ChainY {
+    poses: refs::Vec<PoseY>,
+    ties: std::vec::Vec<TieY>,
+}
+
+#[test]
+fn tridiagonal_singular_backward_block_does_not_panic() {
+    let n = 4;
+    let mut c = ChainY { poses: refs::Vec::new(), ties: std::vec::Vec::new() };
+    for i in 0..n {
+        // Last pose: no y information anywhere, so its diagonal block is singular.
+        let piy = if i == n - 1 { 0.0 } else { 1.0 };
+        c.poses.push(PoseY { x: Param::new(0.0), y: Param::new(0.0), pix: 1.0, piy, hb: SelfBlock::new() });
+    }
+    for i in 0..n - 1 {
+        c.ties.push(TieY { a: Ref::new(i as u32), b: Ref::new((i + 1) as u32), t: 1.0, hb: CrossBlock::new() });
+    }
+
+    let band = c.assemble_covariance(CovMode::TriDiagonal).unwrap();
+    // An interior marginal triggers the backward pass, which inverts the singular
+    // last block. Before the fix this panicked; now it stays finite.
+    let m = band.marginal_cov(&c.poses[1]);
+    assert_eq!((m.nrows(), m.ncols()), (2, 2));
+    assert!(m[(0, 0)].is_finite() && m[(1, 1)].is_finite(), "interior pose stays finite: {:?}", m);
+    // The last pose's y is unobservable: infinite variance, not a panic.
+    let last = band.marginal_cov(&c.poses[n - 1]);
+    assert!(last[(1, 1)].is_infinite(), "unobservable y should be infinite: {}", last[(1, 1)]);
+}
+
+#[test]
+fn tridiagonal_cross_cov_returns_empty() {
+    let mut c = path_chain(6);
+    let band = c.assemble_covariance(CovMode::TriDiagonal).unwrap();
+    // cross_cov is unsupported on the band backend: empty matrix, not a panic.
+    let x = band.cross_cov(&c.nodes[0], &c.nodes[1]);
+    assert_eq!((x.nrows(), x.ncols()), (0, 0));
+}
+
+#[test]
+fn tridiagonal_multiblock_query_returns_empty() {
+    let mut c = path_chain(6);
+    let band = c.assemble_covariance(CovMode::TriDiagonal).unwrap();
+    // Querying the whole root spans every block; the band backend cannot answer
+    // that as a single marginal, so it returns empty rather than panicking.
+    let m = band.marginal_cov(&c);
+    assert_eq!((m.nrows(), m.ncols()), (0, 0));
+    assert!(band.std_dev(&c).is_empty());
+}

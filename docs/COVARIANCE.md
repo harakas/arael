@@ -75,7 +75,9 @@ solve already needs that pass). Querying an interior pose triggers a single
 backward pass, cached, after which interior marginals are `2 (S_i + R_i - D_i)^-1`.
 Assembling errors with `NotTriDiagonal` if any off-band block couples non-adjacent
 entities (a loop closure or a free landmark) -- use `PerQuery` or `AllMarginals`
-there. `cross_cov` is not available in this mode.
+there. This backend answers only single-block entity queries: `cross_cov`, and a
+query spanning several blocks or none, return an empty (0x0) matrix after a
+warning. A singular (unobservable) block returns an INFINITY matrix.
 
 The [loc benchmark](../benchmarks/loc/README.md) recovers the last pose (the
 localization query) in constant time as the trajectory grows, where the general
