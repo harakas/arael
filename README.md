@@ -18,6 +18,7 @@ Solve problems like linear and nonlinear regression, sensor fusion, SLAM, bundle
 - [Localization Demo](#localization-demo)
 - [Examples](#examples)
 - [Solvers](#solvers)
+- [Parameter Covariance](#parameter-covariance)
 - [Runtime Differentiation](#runtime-differentiation)
 - [Instrumentation and troubleshooting](#instrumentation-and-troubleshooting)
   - [My solve doesn't converge. What do I check?](#my-solve-doesnt-converge-what-do-i-check)
@@ -47,6 +48,7 @@ Solve problems like linear and nonlinear regression, sensor fusion, SLAM, bundle
 - **User-defined functions** -- plug custom symbolic or native-eval operators into constraint bodies with `#[arael::function]`.
 - **Hessian blocks** -- `SelfBlock<A>` and `CrossBlock<A, B>` for 1- and 2-entity constraints (packed dense); `TripletBlock` for 3+ entities (COO sparse). Heap-backed `BoxedSelfBlock`/`BoxedCrossBlock` variants allocate only the active blocks and can be freed between solves -- lighter when optimizing part of a large model tree
 - **Jacobian computation** -- `#[arael(root, jacobian)]` generates `calc_jacobian()` returning a sparse Jacobian matrix for DOF analysis and constraint diagnostics (see `examples/jacobian_demo.rs`)
+- **Parameter covariance** -- `assemble_covariance` recovers `Sigma = 2 H^-1` at the solution without forming the dense inverse; per-entity marginal / conditional / cross blocks and std devs, with a `PerQuery` / `AllMarginals` (selected inverse) / `TriDiagonal` (band, no factorization) mode per workload
 - **Gimbal-lock-free rotations** -- `EulerAngleParam` (euler-angle delta) and `QuaternionParam` (rotation-vector delta) optimize a small delta around a re-centered reference rotation
 - **Fast approximate atan** -- `#[arael(root, fast_atan)]` swaps every atan/atan2 in the generated code for polynomial approximations (max error < 1e-6 rad); or call `fast_atan`/`fast_atan2` per site. Derivatives stay the exact rational forms
 - **WASM/browser support** -- the sketch editor compiles to WebAssembly and runs in the browser via eframe/egui
@@ -483,6 +485,45 @@ core).
 Threading has overhead: whether it helps, and by how much, depends on the model
 and its number of parameters. Only the sparse factorization and triangular solve
 are threaded. See [docs/SOLVERS.md](docs/SOLVERS.md#threads).
+
+## Parameter Covariance
+
+Recover the covariance of the solved parameters, `Sigma = 2 H^-1`, without ever
+forming the dense inverse. Full reference:
+[docs/COVARIANCE.md](docs/COVARIANCE.md).
+
+**The entry point is `assemble_covariance` on the `Covariance` trait** -- it
+re-assembles `H` at the current solution and prepares it for querying. Read
+per-entity blocks through the entity itself: any `Model` reports its parameter
+span, so a pose, a landmark, or a whole collection is a valid query.
+
+```rust,ignore
+use arael::covariance::{Covariance, CovMode};
+model.solve_sparse(&cfg);                         // solution written back into the model
+let cov = model.assemble_covariance(CovMode::AllMarginals)?;
+let sd  = cov.std_dev(&model.poses[0]);           // one entity's 1-sigma (tangent coords)
+let s   = cov.marginal_cov(&model.landmarks[3]);  // its full covariance block
+let x   = cov.cross_cov(&model.poses[0], &model.landmarks[3]); // joint off-diagonal block
+```
+
+Covariances are in local tangent coordinates -- rotation deltas are minimal 3-DOF
+retractions, so no manifold projection is needed. `H` must be non-singular: an
+unfixed gauge (free-gauge SLAM, a similarity-free bundle problem) returns
+`NotPositiveDefinite`, so anchor a pose or add a prior first.
+
+`CovMode`, chosen at assembly, picks the strategy:
+
+| `CovMode` | What it does | When |
+|---|---|---|
+| **`PerQuery`** | factors `H`, solves for each queried entity's columns on demand | a few entities |
+| **`AllMarginals`** | also runs a selected inverse up front (block Takahashi over a supernodal factor), so every marginal and cross block is a lookup | many / all marginals |
+| **`TriDiagonal`** | forward/backward Schur pass over a block-tridiagonal `H` (localization: a pose chain, fixed map, no loop closures) -- no factorization; the last pose is free | band-structured localization |
+
+`marginal_cov` folds in the uncertainty of the variables an entity couples to;
+`conditional_cov` holds every other parameter fixed (`2 H_ee^-1`, never larger);
+`std_dev` is the marginal diagonal's square root. The `slam`, `loc` and `bal`
+benchmarks time covariance recovery against Ceres, GTSAM and g2o -- see the
+covariance section in each of their READMEs.
 
 ## Runtime Differentiation
 

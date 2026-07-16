@@ -22,6 +22,7 @@
 //! - [Runtime Differentiation](#runtime-differentiation)
 //! - [Model Structure](#model-structure)
 //! - [Solvers](#solvers)
+//! - [Parameter Covariance](#parameter-covariance)
 //! - [Instrumentation & Debugging](#instrumentation--debugging)
 //! - [2D Sketch Editor](#2d-sketch-editor)
 //! - [Starship robust error suppression](#starship-robust-error-suppression)
@@ -71,6 +72,11 @@
 //!   matrix for DOF analysis via SVD.
 //!   [`#[arael(constraint_index)]`](model::JacobianRow) tracks constraint
 //!   provenance per row. See `examples/jacobian_demo.rs`.
+//! - **Parameter covariance** -- [`assemble_covariance`](covariance::Covariance)
+//!   recovers `Sigma = 2 H^-1` at the solution without forming the dense inverse;
+//!   per-entity marginal / conditional / cross blocks and std devs, with a
+//!   `PerQuery` / `AllMarginals` (selected inverse) / `TriDiagonal` (band, no
+//!   factorization) mode per workload
 //! - **Gimbal-lock-free rotations** -- `EulerAngleParam` (euler-angle delta)
 //!   and `QuaternionParam` (rotation-vector delta) optimize a small delta
 //!   around a re-centered reference rotation
@@ -1350,6 +1356,36 @@
 //! down-weighting depends only on the block norm, so it is invariant to
 //! the residual axis orientation. Scaling by `rho'(s)` keeps the Hessian
 //! positive semidefinite. Formulas in `docs/SYM.md`.
+//!
+//! # Parameter Covariance
+//!
+//! After a solve, recover the covariance of the estimated parameters,
+//! `Sigma = 2 H^-1`, from the same Hessian the solver builds -- the dense inverse
+//! is never formed. [`assemble_covariance`](covariance::Covariance) on the
+//! [`Covariance`](covariance::Covariance) trait (every `#[arael(root)]` model
+//! implements it) re-linearizes `H` at the current solution and returns an owned
+//! [`CovAssembly`](covariance::CovAssembly) to query.
+//!
+//! ```rust,ignore
+//! use arael::covariance::{Covariance, CovMode};
+//! model.solve_sparse(&cfg);
+//! let cov = model.assemble_covariance(CovMode::AllMarginals)?;
+//! let sd  = cov.std_dev(&model.poses[0]);          // 1-sigma per scalar (tangent coords)
+//! let s   = cov.marginal_cov(&model.landmarks[3]); // full covariance block
+//! let x   = cov.cross_cov(&model.poses[0], &model.landmarks[3]);
+//! ```
+//!
+//! Query per-entity blocks by passing the entity itself: any [`Model`](model::Model)
+//! reports its parameter span, so a pose, a landmark, or a whole collection works.
+//! Covariances are in local tangent coordinates (rotation deltas are minimal 3-DOF
+//! retractions). [`CovMode`](covariance::CovMode) picks the strategy: `PerQuery`
+//! (factor, then solve per query -- a few entities), `AllMarginals` (a selected
+//! inverse up front -- many or all marginals), and `TriDiagonal` (a band
+//! forward/backward pass for a localization pose chain, no factorization).
+//!
+//! `H` must be non-singular: an unfixed gauge returns
+//! [`NotPositiveDefinite`](covariance::CovError) -- anchor a pose or add a prior.
+//! Full reference: `docs/COVARIANCE.md`.
 //!
 //! # Instrumentation & Debugging
 //!

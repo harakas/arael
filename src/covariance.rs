@@ -6,8 +6,9 @@
 //! already minimal 3-DOF retractions, `Sigma` is in local tangent coordinates
 //! -- no manifold projection is needed.
 //!
-//! [`Covariance::assemble_covariance`] re-assembles `H` at the solution and
-//! prepares it for querying. The dense inverse is never formed. Query per-entity
+//! [`assemble_covariance`](crate::covariance::Covariance::assemble_covariance)
+//! re-assembles `H` at the solution and prepares it for querying. The dense
+//! inverse is never formed. Query per-entity
 //! blocks through the entity itself: any `Model` reports its parameter span via
 //! `collect_param_blocks`.
 //!
@@ -20,15 +21,16 @@
 //! let x    = cov.cross_cov(&path.poses[0], &path.landmarks[3]);
 //! ```
 //!
-//! [`CovMode`] chosen at assembly picks the strategy:
-//! - [`CovMode::PerQuery`] factors `H` and answers each query by solving for its
-//!   columns (faer picks supernodal where it pays). Best for a few entities.
-//! - [`CovMode::AllMarginals`] also runs a selected inverse up front -- the
+//! [`CovMode`](crate::covariance::CovMode) chosen at assembly picks the strategy:
+//! - [`CovMode::PerQuery`](crate::covariance::CovMode::PerQuery) factors `H` and
+//!   answers each query by solving for its columns (faer picks supernodal where
+//!   it pays). Best for a few entities.
+//! - [`CovMode::AllMarginals`](crate::covariance::CovMode::AllMarginals) also runs a selected inverse up front -- the
 //!   block Takahashi recursion over a supernodal factor (BLAS-3 dense kernels),
 //!   computing every covariance entry inside the factor's sparsity pattern -- so
 //!   every marginal and coupled cross block becomes a lookup. Best for many/all
 //!   marginals.
-//! - [`CovMode::TriDiagonal`] is for a block-tridiagonal `H` (localization: a
+//! - [`CovMode::TriDiagonal`](crate::covariance::CovMode::TriDiagonal) is for a block-tridiagonal `H` (localization: a
 //!   pose chain with a fixed map, no loop closures). It runs a forward Schur pass
 //!   over the band -- no factorization at all -- so the last pose's covariance is
 //!   `2 S_last^-1`, computed front to back. Querying an interior pose runs a
