@@ -297,6 +297,7 @@ struct SelInv {
 
 impl SelInv {
     // Raw H^-1 entry (a, b) in original indices, or None if outside the pattern.
+    // Off-diagonal rows within a column are sorted, so binary search.
     fn get(&self, a: usize, b: usize) -> Option<f64> {
         let (i, j) = (self.inv[a], self.inv[b]);
         let (r, c) = if i >= j { (i, j) } else { (j, i) };
@@ -304,12 +305,10 @@ impl SelInv {
         if r == c {
             return Some(self.vals[cs]);
         }
-        for p in (cs + 1)..self.col_ptr[c + 1] {
-            if self.row_idx[p] == r {
-                return Some(self.vals[p]);
-            }
-        }
-        None
+        self.row_idx[cs + 1..self.col_ptr[c + 1]]
+            .binary_search(&r)
+            .ok()
+            .map(|off| self.vals[cs + 1 + off])
     }
 
     // Sigma[rows, cols] from the cache, or None if any entry is out of pattern.
@@ -325,24 +324,25 @@ impl SelInv {
 }
 
 // Raw H^-1 entry (r, c), r >= c, from a partially built selected inverse in the
-// factor's own indexing. Every entry the recursion asks for is in the pattern.
+// factor's own indexing. Off-diagonal rows within a column are sorted, so binary
+// search. Every entry the recursion asks for is in the pattern.
 fn sel_read(vals: &[f64], col_ptr: &[usize], row_idx: &[usize], r: usize, c: usize) -> f64 {
     let cs = col_ptr[c];
     if r == c {
         return vals[cs];
     }
-    for p in (cs + 1)..col_ptr[c + 1] {
-        if row_idx[p] == r {
-            return vals[p];
-        }
+    match row_idx[cs + 1..col_ptr[c + 1]].binary_search(&r) {
+        Ok(off) => vals[cs + 1 + off],
+        Err(_) => panic!("selected inverse: entry ({r}, {c}) outside factor pattern"),
     }
-    panic!("selected inverse: entry ({r}, {c}) outside factor pattern");
 }
 
 // The Takahashi recursion runs backward over the simplicial factor, filling
-// every Sigma entry inside the factor pattern in one O(fill) pass.
+// every Sigma entry inside the factor pattern in one O(fill) pass. faer leaves
+// each column's off-diagonal rows unsorted; sorting them once up front turns the
+// per-entry lookups from O(column length) into O(log) binary searches.
 fn selected_inverse(symbolic: &fchol::SymbolicCholesky<usize>, l_vals: &[f64], n: usize) -> SelInv {
-    let (col_ptr, row_idx) = match symbolic.raw() {
+    let (col_ptr, mut row_idx) = match symbolic.raw() {
         fchol::SymbolicCholeskyRaw::Simplicial(s) => (s.col_ptr().to_vec(), s.row_idx().to_vec()),
         fchol::SymbolicCholeskyRaw::Supernodal(_) => {
             unreachable!("assemble_covariance forces a simplicial factorization")
@@ -353,27 +353,42 @@ fn selected_inverse(symbolic: &fchol::SymbolicCholesky<usize>, l_vals: &[f64], n
         .map(|p| p.arrays().1.to_vec())
         .unwrap_or_else(|| (0..n).collect());
 
+    // Sort each column's off-diagonals by row (diagonal stays first), carrying
+    // the factor values along.
+    let mut lval = l_vals.to_vec();
+    let mut buf: Vec<(usize, f64)> = Vec::new();
+    for j in 0..n {
+        let (cs, ce) = (col_ptr[j], col_ptr[j + 1]);
+        buf.clear();
+        buf.extend((cs + 1..ce).map(|p| (row_idx[p], lval[p])));
+        buf.sort_unstable_by_key(|&(r, _)| r);
+        for (off, &(r, v)) in buf.iter().enumerate() {
+            row_idx[cs + 1 + off] = r;
+            lval[cs + 1 + off] = v;
+        }
+    }
+
     // Sigma_ij for i >= j inside the pattern, from H = L L^T:
     //   Sigma_ij = -(1/L_jj) sum_{k>j} L_kj Sigma_ik        (i > j)
     //   Sigma_jj = 1/L_jj^2 - (1/L_jj) sum_{k>j} L_kj Sigma_kj
     // Both indices of every Sigma_ik touched exceed j, so it is already done.
-    let mut vals = vec![0.0_f64; l_vals.len()];
+    let mut vals = vec![0.0_f64; lval.len()];
     for j in (0..n).rev() {
         let (cs, ce) = (col_ptr[j], col_ptr[j + 1]);
-        let inv_ljj = 1.0 / l_vals[cs];
+        let inv_ljj = 1.0 / lval[cs];
         for p in (cs + 1)..ce {
             let i = row_idx[p];
             let mut acc = 0.0;
             for q in (cs + 1)..ce {
                 let k = row_idx[q];
                 let (r, c) = if i >= k { (i, k) } else { (k, i) };
-                acc += l_vals[q] * sel_read(&vals, &col_ptr, &row_idx, r, c);
+                acc += lval[q] * sel_read(&vals, &col_ptr, &row_idx, r, c);
             }
             vals[p] = -inv_ljj * acc;
         }
         let mut dacc = 0.0;
         for q in (cs + 1)..ce {
-            dacc += l_vals[q] * vals[q];
+            dacc += lval[q] * vals[q];
         }
         vals[cs] = inv_ljj * inv_ljj - inv_ljj * dacc;
     }
