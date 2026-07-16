@@ -24,9 +24,9 @@
 //! - [`CovMode::PerQuery`] factors `H` and answers each query by solving for its
 //!   columns (faer picks supernodal where it pays). Best for a few entities.
 //! - [`CovMode::AllMarginals`] also runs a selected inverse up front -- the
-//!   Takahashi recursion over a simplicial factor, computing every covariance
-//!   entry inside the factor's sparsity pattern in one `O(fill)` pass -- so every
-//!   marginal and coupled cross block becomes a lookup. Best for many/all
+//!   block Takahashi recursion over a supernodal factor (BLAS-3 dense kernels),
+//!   computing every covariance entry inside the factor's sparsity pattern -- so
+//!   every marginal and coupled cross block becomes a lookup. Best for many/all
 //!   marginals.
 //! - [`CovMode::TriDiagonal`] is for a block-tridiagonal `H` (localization: a
 //!   pose chain with a fixed map, no loop closures). It runs a forward Schur pass
@@ -81,8 +81,8 @@ pub enum CovMode {
     /// a supernodal factor when it pays off, so a handful of entities are as fast
     /// as possible. Choose this when you need a few covariances.
     PerQuery,
-    /// Also compute the selected inverse up front (one `O(fill)` pass over a
-    /// simplicial factor), so every marginal and coupled cross block is a lookup.
+    /// Also compute the selected inverse up front (a block Takahashi pass over a
+    /// supernodal factor), so every marginal and coupled cross block is a lookup.
     /// Choose this when you need many or all marginals (e.g. an ellipse per pose).
     AllMarginals,
     /// Forward Schur pass over a block-tridiagonal `H` (a localization pose chain:
@@ -323,88 +323,159 @@ impl SelInv {
     }
 }
 
-// The Takahashi recursion runs backward over the simplicial factor, filling
-// every Sigma entry inside the factor pattern in one pass. For column j,
-//   Sigma(i,j) = -(1/L_jj) sum_{k in pat(j)} L_kj Sigma(i,k)   (i in pat(j))
-//   Sigma(j,j) =  1/L_jj^2 - (1/L_jj) sum_{k in pat(j)} L_kj Sigma(k,j)
-// where pat(j) is column j's off-diagonal rows. The inner sum is a symmetric
-// sparse matrix-vector product y = Sigma[pat(j), pat(j)] * L[pat(j), j], done
-// with a dense mark/value/accumulator workspace: one pass over the stored
-// Sigma(a,b) (each feeds both y[a] and y[b]) with O(1) row lookups -- no search,
-// half the reads. `row_idx` columns are sorted only so queries can binary-search.
-fn selected_inverse(symbolic: &fchol::SymbolicCholesky<usize>, l_vals: &[f64], n: usize) -> SelInv {
-    let (col_ptr, mut row_idx) = match symbolic.raw() {
-        fchol::SymbolicCholeskyRaw::Simplicial(s) => (s.col_ptr().to_vec(), s.row_idx().to_vec()),
-        fchol::SymbolicCholeskyRaw::Supernodal(_) => {
-            unreachable!("assemble_covariance forces a simplicial factorization")
-        }
+// Supernodal block selected inverse: the Takahashi recursion over faer's
+// supernodal factor, with BLAS-3 dense-block kernels. Per supernode J with
+// diagonal block L_JJ (sj x sj lower-tri) and below block L_RJ (sr x sj, rows R
+// = pattern):
+//   M    = L_RJ L_JJ^-1                    (triangular solve)
+//   S_RJ = -S_RR M                          (matmul; S_RR gathered from later supernodes)
+//   S_JJ =  L_JJ^-T L_JJ^-1 - S_RJ^T M      (matmul)
+// The result is flattened into the scalar-CSC SelInv used by the query path.
+fn selected_inverse_supernodal(symbolic: &fchol::SymbolicCholesky<usize>, l_vals: &[f64], n: usize) -> SelInv {
+    use faer::linalg::matmul::matmul;
+    use faer::linalg::triangular_solve::{solve_lower_triangular_in_place, solve_upper_triangular_in_place};
+    use faer::{Accum, Mat, MatRef, Par};
+
+    let sup = match symbolic.raw() {
+        fchol::SymbolicCholeskyRaw::Supernodal(s) => s,
+        fchol::SymbolicCholeskyRaw::Simplicial(_) => unreachable!("assemble_covariance forced supernodal"),
     };
     let inv: Vec<usize> = symbolic
         .perm()
         .map(|p| p.arrays().1.to_vec())
         .unwrap_or_else(|| (0..n).collect());
 
-    // Sort each column's off-diagonals by row (diagonal stays first), carrying
-    // the factor values along, so `SelInv::get` can binary-search.
-    let mut lval = l_vals.to_vec();
-    let mut buf: Vec<(usize, f64)> = Vec::new();
-    for j in 0..n {
-        let (cs, ce) = (col_ptr[j], col_ptr[j + 1]);
-        buf.clear();
-        buf.extend((cs + 1..ce).map(|p| (row_idx[p], lval[p])));
-        buf.sort_unstable_by_key(|&(r, _)| r);
-        for (off, &(r, v)) in buf.iter().enumerate() {
-            row_idx[cs + 1 + off] = r;
-            lval[cs + 1 + off] = v;
+    let ns = sup.n_supernodes();
+    let sbegin = sup.supernode_begin();
+    let send = sup.supernode_end();
+    let vptr = sup.col_ptr_for_val();
+
+    // Global column/row -> owning supernode (supernodes partition [0, n)).
+    let mut owner = vec![0usize; n];
+    for s in 0..ns {
+        for c in sbegin[s]..send[s] {
+            owner[c] = s;
         }
     }
 
-    let mut vals = vec![0.0_f64; lval.len()];
-    let mut mark = vec![false; n]; // row is in pat(j)
-    let mut vval = vec![0.0_f64; n]; // L[row, j] scattered by row
-    let mut yacc = vec![0.0_f64; n]; // (Sigma[pat,pat] * v) accumulator by row
-    for j in (0..n).rev() {
-        let (cs, ce) = (col_ptr[j], col_ptr[j + 1]);
-        let inv_ljj = 1.0 / lval[cs];
+    let mut sig = vec![0.0_f64; l_vals.len()]; // Sigma panels, same layout as l_vals
+    let mut rpos = vec![usize::MAX; n]; // global row -> local index in the current R
 
-        // Scatter pat(j): mark rows, load v = L[pat(j), j], clear the accumulator.
-        for p in (cs + 1)..ce {
-            let r = row_idx[p];
-            mark[r] = true;
-            vval[r] = lval[p];
-            yacc[r] = 0.0;
+    for s in (0..ns).rev() {
+        let start = sbegin[s];
+        let sj = send[s] - start;
+        let pattern = sup.supernode(s).pattern();
+        let sr = pattern.len();
+        let ld = sj + sr;
+        let v0 = vptr[s];
+
+        let lpanel = MatRef::from_column_major_slice(&l_vals[v0..vptr[s + 1]], ld, sj);
+        let (l_jj, l_rj) = lpanel.split_at_row(sj);
+
+        // Gather Sigma_RR (sr x sr symmetric) from the already-computed later
+        // supernodes: read column b (b in R) from its owning supernode's panel.
+        for (li, &r) in pattern.iter().enumerate() {
+            rpos[r] = li;
         }
-
-        // Symmetric SpMV over columns b in pat(j): the diagonal Sigma(b,b) and
-        // each stored Sigma(a,b) with a also in pat(j). Each unordered pair is
-        // seen once (at the smaller column) and feeds both outputs.
-        for p in (cs + 1)..ce {
-            let b = row_idx[p];
-            let vb = vval[b];
-            let bcs = col_ptr[b];
-            yacc[b] += vals[bcs] * vb;
-            for pp in (bcs + 1)..col_ptr[b + 1] {
-                let a = row_idx[pp];
-                if mark[a] {
-                    let sab = vals[pp];
-                    yacc[a] += sab * vb;
-                    yacc[b] += sab * vval[a];
+        let mut srr = Mat::<f64>::zeros(sr, sr);
+        for (lb, &b) in pattern.iter().enumerate() {
+            let sb = owner[b];
+            let sb_start = sbegin[sb];
+            let sb_sj = send[sb] - sb_start;
+            let sb_pat = sup.supernode(sb).pattern();
+            let sb_ld = sb_sj + sb_pat.len();
+            let base = vptr[sb] + (b - sb_start) * sb_ld;
+            for ro in 0..sb_ld {
+                let ga = if ro < sb_sj { sb_start + ro } else { sb_pat[ro - sb_sj] };
+                let la = rpos[ga];
+                if la != usize::MAX {
+                    let val = sig[base + ro];
+                    srr[(la, lb)] = val;
+                    srr[(lb, la)] = val;
                 }
             }
         }
+        for &r in pattern {
+            rpos[r] = usize::MAX;
+        }
 
-        // Sigma(i,j) = -(1/L_jj) y[i]; then clear the marks.
-        for p in (cs + 1)..ce {
-            let i = row_idx[p];
-            vals[p] = -inv_ljj * yacc[i];
-            mark[i] = false;
+        // M = L_RJ L_JJ^-1: solve L_JJ^T M^T = L_RJ^T.
+        let mut m = l_rj.to_owned();
+        if sr > 0 {
+            solve_upper_triangular_in_place(l_jj.transpose(), m.as_mut().transpose_mut(), Par::Seq);
         }
-        let mut dacc = 0.0;
-        for p in (cs + 1)..ce {
-            dacc += lval[p] * vals[p];
+
+        // Sigma_RJ = -Sigma_RR M.
+        let mut srj = Mat::<f64>::zeros(sr, sj);
+        if sr > 0 {
+            matmul(srj.as_mut(), Accum::Replace, srr.as_ref(), m.as_ref(), -1.0, Par::Seq);
         }
-        vals[cs] = inv_ljj * inv_ljj - inv_ljj * dacc;
+
+        // Sigma_JJ = L_JJ^-T L_JJ^-1 - Sigma_RJ^T M.
+        let mut linv = Mat::<f64>::identity(sj, sj);
+        solve_lower_triangular_in_place(l_jj, linv.as_mut(), Par::Seq); // linv = L_JJ^-1
+        let mut sjj = Mat::<f64>::zeros(sj, sj);
+        matmul(sjj.as_mut(), Accum::Replace, linv.as_ref().transpose(), linv.as_ref(), 1.0, Par::Seq);
+        if sr > 0 {
+            matmul(sjj.as_mut(), Accum::Add, srj.as_ref().transpose(), m.as_ref(), -1.0, Par::Seq);
+        }
+
+        // Write the Sigma panel: top = Sigma_JJ (full), bottom = Sigma_RJ.
+        for lc in 0..sj {
+            let base = v0 + lc * ld;
+            for ro in 0..sj {
+                sig[base + ro] = sjj[(ro, lc)];
+            }
+            for ro in 0..sr {
+                sig[base + sj + ro] = srj[(ro, lc)];
+            }
+        }
     }
+
+    // Flatten the Sigma panels into a lower-triangular scalar CSC: per column,
+    // the diagonal first, then the block rows below it, then the pattern rows
+    // (already ascending).
+    let mut col_ptr = vec![0usize; n + 1];
+    for s in 0..ns {
+        let start = sbegin[s];
+        let sj = send[s] - start;
+        let sr = sup.supernode(s).pattern().len();
+        for lc in 0..sj {
+            col_ptr[start + lc + 1] = 1 + (sj - 1 - lc) + sr;
+        }
+    }
+    for c in 0..n {
+        col_ptr[c + 1] += col_ptr[c];
+    }
+    let mut row_idx = vec![0usize; col_ptr[n]];
+    let mut vals = vec![0.0_f64; col_ptr[n]];
+    for s in 0..ns {
+        let start = sbegin[s];
+        let sj = send[s] - start;
+        let pattern = sup.supernode(s).pattern();
+        let sr = pattern.len();
+        let ld = sj + sr;
+        let v0 = vptr[s];
+        for lc in 0..sj {
+            let c = start + lc;
+            let base = v0 + lc * ld;
+            let mut p = col_ptr[c];
+            row_idx[p] = c;
+            vals[p] = sig[base + lc];
+            p += 1;
+            for ro in (lc + 1)..sj {
+                row_idx[p] = start + ro;
+                vals[p] = sig[base + ro];
+                p += 1;
+            }
+            for (i, &r) in pattern.iter().enumerate() {
+                row_idx[p] = r;
+                vals[p] = sig[base + sj + i];
+                p += 1;
+            }
+        }
+    }
+
     SelInv { col_ptr, row_idx, vals, inv }
 }
 
@@ -549,14 +620,13 @@ pub trait Covariance<T: Float>: LmProblem<T> + RootProblem<T> + Model {
         // faer wants usize row indices.
         let row_usize: Vec<usize> = h.row_idx.iter().map(|&r| r as usize).collect();
         let sym_ref = faer::sparse::SymbolicSparseColMatRef::new_checked(n, n, &h.col_ptr, None, &row_usize);
-        // AllMarginals forces a simplicial factor: the selected inverse reads a
-        // plain column-major CSC `L` directly. PerQuery leaves faer's AUTO
-        // threshold, so it may pick a supernodal factor (faster dense-block
-        // solves) for the few-columns-at-a-time queries.
+        // AllMarginals forces a supernodal factor: the block (BLAS-3) selected
+        // inverse reads its dense supernode panels. PerQuery leaves faer's AUTO
+        // threshold (it may pick either; the solve handles both).
         let mut chol_params = fchol::CholeskySymbolicParams::default();
         if mode == CovMode::AllMarginals {
             chol_params.supernodal_flop_ratio_threshold =
-                faer::sparse::linalg::SupernodalThreshold::FORCE_SIMPLICIAL;
+                faer::sparse::linalg::SupernodalThreshold::FORCE_SUPERNODAL;
         }
         let symbolic = fchol::factorize_symbolic_cholesky(
             sym_ref,
@@ -584,7 +654,7 @@ pub trait Covariance<T: Float>: LmProblem<T> + RootProblem<T> + Model {
             .map_err(|_| CovError::NotPositiveDefinite)?;
 
         let sel = if mode == CovMode::AllMarginals {
-            Some(selected_inverse(&symbolic, &l_vals, n))
+            Some(selected_inverse_supernodal(&symbolic, &l_vals, n))
         } else {
             None
         };

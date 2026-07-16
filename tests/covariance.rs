@@ -313,6 +313,47 @@ fn tridiagonal_2dof_matches_solve() {
 }
 
 #[test]
+fn all_marginals_dense_matches_solve() {
+    // A denser 2-DOF graph (each pose tied to its next three) fills the factor
+    // in, forming real supernodes -- exercises the block selected inverse and its
+    // Sigma_RR gather. Every marginal and a coupled cross block must match the
+    // per-query solve.
+    let n = 10;
+    let mut c = Chain2 { poses: refs::Vec::new(), ties: std::vec::Vec::new() };
+    for _ in 0..n {
+        c.poses.push(Pose2 { x: Param::new(0.0), y: Param::new(0.0), pi: 1.0, hb: SelfBlock::new() });
+    }
+    for i in 0..n {
+        for step in [1usize, 2, 3] {
+            if i + step < n {
+                c.ties.push(Tie2 { a: Ref::new(i as u32), b: Ref::new((i + step) as u32), t: 1.0, hb: CrossBlock::new() });
+            }
+        }
+    }
+    let solved = c.assemble_covariance(CovMode::PerQuery).unwrap();
+    let allm = c.assemble_covariance(CovMode::AllMarginals).unwrap();
+    for i in 0..n {
+        let s = solved.marginal_cov(&c.poses[i]);
+        let a = allm.marginal_cov(&c.poses[i]);
+        for r in 0..2 {
+            for cc in 0..2 {
+                assert!((s[(r, cc)] - a[(r, cc)]).abs() < 1e-9,
+                    "pose {} [{},{}]: solve {} vs allmarg {}", i, r, cc, s[(r, cc)], a[(r, cc)]);
+            }
+        }
+    }
+    // Coupled cross block: in the factor pattern, so AllMarginals answers it from
+    // the cache; it must match the solve.
+    let sc = solved.cross_cov(&c.poses[0], &c.poses[2]);
+    let ac = allm.cross_cov(&c.poses[0], &c.poses[2]);
+    for r in 0..2 {
+        for cc in 0..2 {
+            assert!((sc[(r, cc)] - ac[(r, cc)]).abs() < 1e-9, "cross [{},{}]: {} vs {}", r, cc, sc[(r, cc)], ac[(r, cc)]);
+        }
+    }
+}
+
+#[test]
 fn empty_model_is_an_error() {
     let mut w = W { pts: refs::Vec::new() };
     assert_eq!(w.assemble_covariance(CovMode::PerQuery).err(), Some(CovError::Empty));
