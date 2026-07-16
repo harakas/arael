@@ -171,7 +171,7 @@ fn hessian_formats_agree() {
     assert_eq!(densify_coo(&coo, n), h_dense, "COO assembly differs from dense");
 
     // Direct CSC (find_pos scatter into a pre-built structure).
-    let mut csc_direct = coo.to_csc();
+    let mut csc_direct = coo.to_csc().unwrap();
     csc_direct.vals.iter_mut().for_each(|v| *v = 0.0);
     let mut g_direct = vec![0.0; n];
     chain.calc_grad_hessian_sparse_direct(&params, &mut g_direct, &mut csc_direct);
@@ -179,7 +179,7 @@ fn hessian_formats_agree() {
     assert_eq!(densify_csc(&csc_direct), h_dense, "direct CSC assembly differs from dense");
 
     // Indexed CSC (cached position map, the production steady-state path).
-    let (csc, positions) = coo.to_csc_with_map();
+    let (csc, positions) = coo.to_csc_with_map().unwrap();
     let mut vals = vec![0.0; csc.vals.len()];
     let mut g_indexed = vec![0.0; n];
     chain.calc_grad_hessian_sparse_indexed(&params, &mut g_indexed, &mut vals, &positions);

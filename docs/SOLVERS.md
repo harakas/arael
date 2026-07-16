@@ -429,6 +429,7 @@ pub enum LmStatus {
     LambdaCeiling,         // driver gave up: lambda past its ceiling
     RetryBudgetExhausted,  // 20 inner retries with no accepted step
     DegenerateDiagonal { param: usize },  // non-positive Hessian diagonal
+    SetupFailed(SolveError),  // the linear system could not be built or factored
 }
 ```
 
@@ -438,6 +439,15 @@ hard inner-retry cap. `DriverTerminated` is the opposite case: the driver
 stopped the solve on a step it *liked*, and that step is kept. `TimeLimit`,
 `DriverTerminated` and `DegenerateDiagonal` all return the best parameters
 found so far rather than panicking. `LmResult` derives `Clone`/`Debug`.
+
+`SetupFailed(SolveError)` is a structural failure that stops the solve before
+any step: a band element outside the declared bandwidth, a parameter no
+constraint touches, a failed symbolic factorization, or an illegal
+marginalization. The solve returns the input parameters unchanged, `NaN`
+costs, and zero iterations -- it never panics. `SolveError` carries the
+specific reason (`BandOverflow`, `UnconstrainedParameter`,
+`SymbolicFactorization`, `CoupledMarginalization`, `MarginalizeMissingDiagonal`,
+`BadMarginalizeSet`).
 
 ## Threads
 

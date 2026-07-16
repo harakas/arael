@@ -7,8 +7,8 @@
 use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::refs::{self, Ref};
 use arael::simple_lm::{
-    lm_solve, CooMatrix, CscMatrix, FaerOrdering, LmConfig, LmProblem, RootProblem, SchurPolicy,
-    SolverReport, SparseFaer,
+    lm_solve, CooMatrix, CscMatrix, FaerOrdering, LmConfig, LmProblem, LmStatus, RootProblem,
+    SchurPolicy, SolveError, SolverReport, SparseFaer,
 };
 
 // --- a model with marginalizable blocks: poses seeing shared landmarks ---
@@ -212,17 +212,28 @@ fn every_ordering_of_the_whole_system_agrees() {
 }
 
 /// Naming blocks that couple to each other is a mistake in the model
-/// description, not a slow path: marginalizing them is not defined. It is
-/// rejected, and the message says how to get the ordering instead.
+/// description, not a slow path: marginalizing them is not defined. The solve
+/// fails at setup with a coupled-marginalization error rather than a panic.
 #[test]
-#[should_panic(expected = "mutually uncoupled")]
 fn naming_coupled_blocks_is_rejected() {
-    // The poses are joined to each other through the landmarks they share,
-    // so they are not a legal marginalize set.
+    // Odometry joins consecutive poses directly, so the poses are not a legal
+    // marginalize set.
     let mut solver = SparseFaer::new()
         .with_policy(SchurPolicy::Force)
         .with_marginalize(0..2 * N_POSES);
-    solved_params(&mut solver);
+    let cfg = LmConfig { max_iters: 60, ..Default::default() };
+    let mut w = build(0.05);
+    let mut params = Vec::new();
+    RootProblem::serialize(&mut w, &mut params);
+    let r = lm_solve(&params, &mut solver, &mut w, &cfg);
+    assert!(
+        matches!(r.status, LmStatus::SetupFailed(SolveError::CoupledMarginalization { .. })),
+        "expected a coupled-marginalization setup failure, got {:?}",
+        r.status
+    );
+    // The solve did not run: the parameters are untouched and the cost is NaN.
+    assert_eq!(r.iterations, 0);
+    assert!(r.end_cost.is_nan());
 }
 
 // --- a pose graph: every block couples to another one ---

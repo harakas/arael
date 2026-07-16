@@ -607,7 +607,7 @@ pub trait Covariance<T: Float>: LmProblem<T> + RootProblem<T> + Model {
 
         let mut coo = CooMatrix::new(n);
         self.calc_grad_hessian_sparse(&params, &mut grad, &mut coo);
-        let csc_t = coo.to_csc();
+        let csc_t = coo.to_csc().map_err(|_| CovError::NotPositiveDefinite)?;
 
         // Upper-triangle CSC of H in f64 (covariance is computed in f64
         // regardless of the model's precision).

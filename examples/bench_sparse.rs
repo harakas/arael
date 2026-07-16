@@ -376,7 +376,7 @@ fn main() {
             let mut coo = arael::simple_lm::CooMatrix::new(n);
             let mut grad = vec![0.0f64; n];
             path.calc_grad_hessian_sparse(&params, &mut grad, &mut coo);
-            let csc = coo.to_csc();
+            let csc = coo.to_csc().unwrap();
             let nnz = csc.nnz();
             let dense_upper = n * (n + 1) / 2;
             let fill_pct = nnz as f64 / dense_upper as f64 * 100.0;
@@ -401,7 +401,7 @@ fn main() {
             let mut delta = vec![0.0f64; n];
 
             // Warmup: one full compute+solve to initialize symbolic factorization
-            solver.compute(problem, x0, &mut grad, &mut matrix);
+            solver.compute(problem, x0, &mut grad, &mut matrix).unwrap();
             solver.extract_diagonal(&matrix, &mut diagonal);
 
             // No min_diagonal floor here, so the damping scale IS the diagonal --
@@ -412,7 +412,7 @@ fn main() {
             let mut assembly_us = Vec::new();
             for _ in 0..runs {
                 let t0 = std::time::Instant::now();
-                solver.compute(problem, x0, &mut grad, &mut matrix);
+                solver.compute(problem, x0, &mut grad, &mut matrix).unwrap();
                 assembly_us.push(t0.elapsed().as_nanos() as f64 / 1000.0);
             }
 

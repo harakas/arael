@@ -165,7 +165,7 @@ fn block_assembly_matches_scalar() {
     w.calc_grad_hessian_sparse(&params, &mut grad, &mut coo);
 
     // Scalar pipeline: CSC + positions, indexed refill.
-    let (mut csc, positions_scalar) = coo.to_csc_with_map();
+    let (mut csc, positions_scalar) = coo.to_csc_with_map().unwrap();
     let mut grad_s = vec![0.0; n];
     let mut vals_s = vec![0.0; csc.vals.len()];
     let cost_s = w.calc_grad_hessian_sparse_indexed(&params, &mut grad_s, &mut vals_s, &positions_scalar);
@@ -301,7 +301,7 @@ fn scalar_fast_path_matches_coo_route() {
     let mut grad = vec![0.0; n];
     let mut coo = CooMatrix::new(n);
     w.calc_grad_hessian_sparse(&params, &mut grad, &mut coo);
-    let (mut csc_ref, pos_ref) = coo.to_csc_with_map();
+    let (mut csc_ref, pos_ref) = coo.to_csc_with_map().unwrap();
     let mut vals = vec![0.0; csc_ref.vals.len()];
     w.calc_grad_hessian_sparse_indexed(&params, &mut grad, &mut vals, &pos_ref);
     csc_ref.vals = vals;
@@ -354,7 +354,7 @@ fn assert_routes_agree(w: &mut World) {
     let mut grad_ref = vec![0.0; n];
     let mut coo = CooMatrix::new(n);
     w.calc_grad_hessian_sparse(&params, &mut grad_ref, &mut coo);
-    let (mut csc_ref, pos_ref) = coo.to_csc_with_map();
+    let (mut csc_ref, pos_ref) = coo.to_csc_with_map().unwrap();
     let mut vals = vec![0.0; csc_ref.vals.len()];
     w.calc_grad_hessian_sparse_indexed(&params, &mut grad_ref, &mut vals, &pos_ref);
     csc_ref.vals = vals;

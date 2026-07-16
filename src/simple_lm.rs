@@ -323,6 +323,87 @@ impl std::fmt::Display for BandError {
     }
 }
 
+/// A structural failure that makes the linear system impossible to build or
+/// factor, so the solve cannot even be attempted. Reported through
+/// [`LmStatus::SetupFailed`]. Distinct from a numeric non-positive-definite
+/// step, which the loop re-damps and, if it cannot recover, reports through a
+/// different [`LmStatus`] (`LambdaCeiling` / `RetryBudgetExhausted` /
+/// `DegenerateDiagonal`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SolveError {
+    /// A Hessian element fell outside the band half-bandwidth `kd` declared for
+    /// the [`Band`] / [`BandLapack`] backend.
+    BandOverflow {
+        /// Row index of the offending element.
+        row: usize,
+        /// Column index of the offending element.
+        col: usize,
+        /// The declared half-bandwidth that was exceeded.
+        kd: usize,
+    },
+    /// A parameter is touched by no constraint: the Hessian has no diagonal
+    /// entry for it and the system is singular. `param` is its scalar index.
+    UnconstrainedParameter {
+        /// Scalar index of the unconstrained parameter.
+        param: usize,
+    },
+    /// The symbolic Cholesky factorization failed.
+    SymbolicFactorization {
+        /// `true` for the Schur reduced system, `false` for the whole system.
+        reduced: bool,
+    },
+    /// Two blocks selected for marginalization are joined by a constraint, so
+    /// they are not mutually uncoupled and cannot be eliminated together.
+    CoupledMarginalization {
+        /// Block row of the coupling tile.
+        row: usize,
+        /// Block column of the coupling tile.
+        col: usize,
+    },
+    /// A block selected for marginalization has no diagonal Hessian tile.
+    MarginalizeMissingDiagonal {
+        /// Index of the block missing its diagonal tile.
+        block: usize,
+    },
+    /// The set of blocks selected for marginalization is not a valid set of
+    /// whole parameter blocks.
+    BadMarginalizeSet,
+}
+
+impl std::fmt::Display for SolveError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SolveError::BandOverflow { row, col, kd } => write!(
+                f, "band overflow: element ({row}, {col}) exceeds bandwidth kd={kd}"
+            ),
+            SolveError::UnconstrainedParameter { param } => write!(
+                f, "parameter {param} has no Hessian diagonal entry: no constraint touches it"
+            ),
+            SolveError::SymbolicFactorization { reduced } => write!(
+                f, "symbolic factorization of the {} system failed",
+                if *reduced { "reduced" } else { "whole" }
+            ),
+            SolveError::CoupledMarginalization { row, col } => write!(
+                f, "cannot marginalize: blocks ({row}, {col}) are coupled by a constraint"
+            ),
+            SolveError::MarginalizeMissingDiagonal { block } => write!(
+                f, "cannot marginalize: block {block} has no diagonal Hessian tile"
+            ),
+            SolveError::BadMarginalizeSet => write!(
+                f, "the set of blocks selected for marginalization is not a valid whole-block set"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for SolveError {}
+
+impl From<BandError> for SolveError {
+    fn from(e: BandError) -> Self {
+        SolveError::BandOverflow { row: e.row, col: e.col, kd: e.kd }
+    }
+}
+
 /// Interface for optimization problems.
 ///
 /// Parameter round trip of an `#[arael(root)]` model: flatten the model's
@@ -811,6 +892,10 @@ pub enum LmStatus {
     /// active constraint curvature reaches it, or assembly was poisoned by
     /// NaN). The solve returned the best parameters found so far.
     DegenerateDiagonal { param: usize },
+    /// The linear system could not be built or factored, so the solve was
+    /// never attempted (see [`SolveError`]). `x` is the untouched input and
+    /// the costs are `NaN`.
+    SetupFailed(SolveError),
 }
 
 /// Per-phase wall-clock timing gathered during a solve. Produced only when
@@ -1059,6 +1144,7 @@ impl LmStatus {
             LmStatus::LambdaCeiling => "damping exhausted",
             LmStatus::RetryBudgetExhausted => "retry budget exhausted",
             LmStatus::DegenerateDiagonal { .. } => "degenerate diagonal",
+            LmStatus::SetupFailed(_) => "setup failed",
         }
     }
     /// Did the solve reach a minimum, as opposed to running out of something?
@@ -1108,6 +1194,8 @@ impl<T: Float> LmResult<T> {
         // -- headline ------------------------------------------------------
         let head = if self.status.is_success() {
             style.paint("32;1", self.status.as_str()) // green
+        } else if matches!(self.status, LmStatus::SetupFailed(_)) {
+            style.paint("31;1", self.status.as_str()) // red: the solve could not start
         } else {
             style.paint("33;1", self.status.as_str()) // yellow: it stopped, it did not fail
         };
@@ -1121,6 +1209,9 @@ impl<T: Float> LmResult<T> {
                 "  {}  parameter {param} has no curvature: no constraint reaches it\n",
                 style.paint("31;1", "!!") // red
             ));
+        }
+        if let LmStatus::SetupFailed(e) = self.status {
+            out.push_str(&format!("  {}  {e}\n", style.paint("31;1", "!!"))); // red
         }
         out.push_str(&format!("  {}\n", style.rule(58)));
 
@@ -1363,7 +1454,12 @@ pub trait LmSolver<T: Float> {
     /// Compute gradient and Hessian matrix from the problem. Returns the
     /// cost at `params` (a free byproduct of assembly); the LM loop uses
     /// it for the first evaluation of a solve.
-    fn compute(&mut self, problem: &mut dyn LmProblem<T>, params: &[T], grad: &mut [T], matrix: &mut Self::Matrix) -> T;
+    ///
+    /// Returns [`SolveError`] when the linear system cannot be built or its
+    /// structure factored (band overflow, an unconstrained parameter, a failed
+    /// symbolic factorization, an illegal marginalization). The loop turns that
+    /// into [`LmStatus::SetupFailed`] and stops without a step.
+    fn compute(&mut self, problem: &mut dyn LmProblem<T>, params: &[T], grad: &mut [T], matrix: &mut Self::Matrix) -> Result<T, SolveError>;
 
     /// Extract all diagonal elements from the matrix.
     fn extract_diagonal(&self, matrix: &Self::Matrix, diagonal: &mut [T]);
@@ -1450,8 +1546,8 @@ pub struct Dense;
 impl LmSolver<f64> for Dense {
     type Matrix = Vec<f64>;
     fn new_matrix(&self, n: usize) -> Vec<f64> { vec![0.0; n * n] }
-    fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], hessian: &mut Vec<f64>) -> f64 {
-        problem.calc_grad_hessian_dense(params, grad, hessian)
+    fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], hessian: &mut Vec<f64>) -> Result<f64, SolveError> {
+        Ok(problem.calc_grad_hessian_dense(params, grad, hessian))
     }
     fn extract_diagonal(&self, matrix: &Vec<f64>, diagonal: &mut [f64]) {
         let n = diagonal.len();
@@ -1470,8 +1566,8 @@ impl LmSolver<f64> for Dense {
 impl LmSolver<f32> for Dense {
     type Matrix = Vec<f32>;
     fn new_matrix(&self, n: usize) -> Vec<f32> { vec![0.0; n * n] }
-    fn compute(&mut self, problem: &mut dyn LmProblem<f32>, params: &[f32], grad: &mut [f32], hessian: &mut Vec<f32>) -> f32 {
-        problem.calc_grad_hessian_dense(params, grad, hessian)
+    fn compute(&mut self, problem: &mut dyn LmProblem<f32>, params: &[f32], grad: &mut [f32], hessian: &mut Vec<f32>) -> Result<f32, SolveError> {
+        Ok(problem.calc_grad_hessian_dense(params, grad, hessian))
     }
     fn extract_diagonal(&self, matrix: &Vec<f32>, diagonal: &mut [f32]) {
         let n = diagonal.len();
@@ -1509,9 +1605,8 @@ impl Band {
 impl LmSolver<f64> for Band {
     type Matrix = Vec<f64>;
     fn new_matrix(&self, n: usize) -> Vec<f64> { vec![0.0; (self.kd + 1) * n] }
-    fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], band: &mut Vec<f64>) -> f64 {
-        problem.calc_grad_hessian_band(params, grad, band, self.kd)
-            .expect("band assembly failed: element outside bandwidth")
+    fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], band: &mut Vec<f64>) -> Result<f64, SolveError> {
+        Ok(problem.calc_grad_hessian_band(params, grad, band, self.kd)?)
     }
     fn extract_diagonal(&self, matrix: &Vec<f64>, diagonal: &mut [f64]) {
         let ldab = self.kd + 1;
@@ -1536,9 +1631,8 @@ impl LmSolver<f64> for Band {
 impl LmSolver<f32> for Band {
     type Matrix = Vec<f32>;
     fn new_matrix(&self, n: usize) -> Vec<f32> { vec![0.0; (self.kd + 1) * n] }
-    fn compute(&mut self, problem: &mut dyn LmProblem<f32>, params: &[f32], grad: &mut [f32], band: &mut Vec<f32>) -> f32 {
-        problem.calc_grad_hessian_band(params, grad, band, self.kd)
-            .expect("band assembly failed: element outside bandwidth")
+    fn compute(&mut self, problem: &mut dyn LmProblem<f32>, params: &[f32], grad: &mut [f32], band: &mut Vec<f32>) -> Result<f32, SolveError> {
+        Ok(problem.calc_grad_hessian_band(params, grad, band, self.kd)?)
     }
     fn extract_diagonal(&self, matrix: &Vec<f32>, diagonal: &mut [f32]) {
         let ldab = self.kd + 1;
@@ -1580,9 +1674,8 @@ impl BandLapack {
 impl LmSolver<f64> for BandLapack {
     type Matrix = Vec<f64>;
     fn new_matrix(&self, n: usize) -> Vec<f64> { vec![0.0; (self.kd + 1) * n] }
-    fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], band: &mut Vec<f64>) -> f64 {
-        problem.calc_grad_hessian_band(params, grad, band, self.kd)
-            .expect("band assembly failed: element outside bandwidth")
+    fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], band: &mut Vec<f64>) -> Result<f64, SolveError> {
+        Ok(problem.calc_grad_hessian_band(params, grad, band, self.kd)?)
     }
     fn extract_diagonal(&self, matrix: &Vec<f64>, diagonal: &mut [f64]) {
         let ldab = self.kd + 1;
@@ -1606,9 +1699,8 @@ impl LmSolver<f64> for BandLapack {
 impl LmSolver<f32> for BandLapack {
     type Matrix = Vec<f32>;
     fn new_matrix(&self, n: usize) -> Vec<f32> { vec![0.0; (self.kd + 1) * n] }
-    fn compute(&mut self, problem: &mut dyn LmProblem<f32>, params: &[f32], grad: &mut [f32], band: &mut Vec<f32>) -> f32 {
-        problem.calc_grad_hessian_band(params, grad, band, self.kd)
-            .expect("band assembly failed: element outside bandwidth")
+    fn compute(&mut self, problem: &mut dyn LmProblem<f32>, params: &[f32], grad: &mut [f32], band: &mut Vec<f32>) -> Result<f32, SolveError> {
+        Ok(problem.calc_grad_hessian_band(params, grad, band, self.kd)?)
     }
     fn extract_diagonal(&self, matrix: &Vec<f32>, diagonal: &mut [f32]) {
         let ldab = self.kd + 1;
@@ -1972,7 +2064,20 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
         }
 
         let t_asm = gather.then(Instant::now);
-        let computed_cost = solver.compute(problem, &cur_x, &mut grad, &mut matrix);
+        let computed_cost = match solver.compute(problem, &cur_x, &mut grad, &mut matrix) {
+            Ok(c) => c,
+            Err(e) => {
+                // The linear system could not be built or factored, so no step
+                // is possible. On the first assembly nothing was evaluated:
+                // the costs are NaN and x stays the input.
+                if first {
+                    start_cost = T::nan();
+                    end_cost = T::nan();
+                }
+                status = LmStatus::SetupFailed(e);
+                break;
+            }
+        };
         // Kept for this linearization's first LmStep. A retry does not
         // re-assemble, so it must not be charged for one.
         let mut asm_dt = Duration::ZERO;
@@ -2491,7 +2596,7 @@ impl LmSolver<f64> for Sparse {
         SparseMatrix { csc: CscMatrix::empty(n) }
     }
 
-    fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], matrix: &mut SparseMatrix<f64>) -> f64 {
+    fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], matrix: &mut SparseMatrix<f64>) -> Result<f64, SolveError> {
         let n = matrix.csc.n;
         if self.coo.n != n {
             self.coo = CooMatrix::new(n);
@@ -2499,8 +2604,8 @@ impl LmSolver<f64> for Sparse {
             self.coo.clear();
         }
         let cost = problem.calc_grad_hessian_sparse(params, grad, &mut self.coo);
-        matrix.csc = self.coo.to_csc();
-        cost
+        matrix.csc = self.coo.to_csc()?;
+        Ok(cost)
     }
 
     fn extract_diagonal(&self, matrix: &SparseMatrix<f64>, diagonal: &mut [f64]) {
@@ -2561,20 +2666,20 @@ impl LmSolver<f64> for SparseDirect {
         SparseMatrix { csc: CscMatrix::empty(n) }
     }
 
-    fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], matrix: &mut SparseMatrix<f64>) -> f64 {
+    fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], matrix: &mut SparseMatrix<f64>) -> Result<f64, SolveError> {
         if !self.pattern_built {
             // First call: use COO to discover pattern
             let n = matrix.csc.n;
             let mut coo = CooMatrix::new(n);
             let cost = problem.calc_grad_hessian_sparse(params, grad, &mut coo);
-            matrix.csc = coo.to_csc();
+            matrix.csc = coo.to_csc()?;
             self.pattern_built = true;
-            cost
+            Ok(cost)
         } else {
             // Subsequent calls: direct accumulate into existing CSC structure
             // (the generated code zeroes csc.vals before accumulating, which
             // also clears the damped diagonal left behind by solve_damped)
-            problem.calc_grad_hessian_sparse_direct(params, grad, &mut matrix.csc)
+            Ok(problem.calc_grad_hessian_sparse_direct(params, grad, &mut matrix.csc))
         }
     }
 
@@ -2626,7 +2731,7 @@ fn assemble_first_csc<T: Float>(
     params: &[T],
     grad: &mut [T],
     csc: &mut CscMatrix<T>,
-) -> (T, std::vec::Vec<usize>) {
+) -> Result<(T, std::vec::Vec<usize>), SolveError> {
     let n = csc.n;
     if !problem.hessian_pattern_requires_compute() {
         let mut cells = std::vec::Vec::new();
@@ -2643,14 +2748,14 @@ fn assemble_first_csc<T: Float>(
             );
             *csc = built;
             let cost = problem.calc_grad_hessian_sparse_indexed(params, grad, &mut csc.vals, &positions);
-            return (cost, positions);
+            return Ok((cost, positions));
         }
     }
     let mut coo = CooMatrix::new(n);
     let cost = problem.calc_grad_hessian_sparse(params, grad, &mut coo);
-    let (built, positions) = coo.to_csc_with_map();
+    let (built, positions) = coo.to_csc_with_map()?;
     *csc = built;
-    (cost, positions)
+    Ok((cost, positions))
 }
 
 /// Fill-reducing ordering, but only where there is fill to reduce.
@@ -3184,7 +3289,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
             faer::sparse::linalg::cholesky::SymbolicCholesky<usize>,
         )>,
         vb: bool,
-    ) -> T {
+    ) -> Result<T, SolveError> {
         // No block storage on this route, and nothing left over from a
         // reduction that was considered and dropped.
         matrix.h = None;
@@ -3207,7 +3312,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
             None => {
                 let mut csc = CscMatrix::empty(n);
                 let t_a = self.measure.then(Instant::now);
-                let (cost, positions) = assemble_first_csc(problem, params, grad, &mut csc);
+                let (cost, positions) = assemble_first_csc(problem, params, grad, &mut csc)?;
                 if let Some(t) = t_a {
                     self.assembly_time += t.elapsed();
                 }
@@ -3248,7 +3353,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
                 self.s_col_ptr.extend_from_slice(&csc.col_ptr);
                 self.s_row_idx.clear();
                 self.s_row_idx.extend(csc.row_idx.iter().map(|&r| r as usize));
-                self.full_symbolic(n, vb, nd.as_ref())
+                self.full_symbolic(n, vb, nd.as_ref())?
             }
         };
         if vb && reused {
@@ -3277,7 +3382,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
             }
         }
         self.positions = Some(positions);
-        cost
+        Ok(cost)
     }
 
     /// Symbolic factorization of the whole system, under the ordering
@@ -3288,7 +3393,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
         n: usize,
         vb: bool,
         nd: Option<&arael_faer::nd::NestedDissection>,
-    ) -> faer::sparse::linalg::cholesky::SymbolicCholesky<usize> {
+    ) -> Result<faer::sparse::linalg::cholesky::SymbolicCholesky<usize>, SolveError> {
         use faer::sparse::linalg::cholesky::*;
 
         // "Marginalized parameters first, everything else in natural order"
@@ -3359,7 +3464,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
             ordering,
             chol_params(self.supernodal),
         )
-        .expect("symbolic factorization of the whole system failed");
+        .map_err(|_| SolveError::SymbolicFactorization { reduced: false })?;
         if vb {
             info!(
                 "sparse: whole system {} params, ordered by {}, symbolic \
@@ -3370,7 +3475,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
                 llt.len_val(),
             );
         }
-        llt
+        Ok(llt)
     }
 
     /// Size the factor and scratch buffers for a symbolic factorization
@@ -3434,7 +3539,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         FaerMatrix { n, h: None, csc: None }
     }
 
-    fn compute(&mut self, problem: &mut dyn LmProblem<T>, params: &[T], grad: &mut [T], matrix: &mut FaerMatrix<T>) -> T {
+    fn compute(&mut self, problem: &mut dyn LmProblem<T>, params: &[T], grad: &mut [T], matrix: &mut FaerMatrix<T>) -> Result<T, SolveError> {
         // Report how much of this call was assembly; the solver takes the rest to
         // be structural analysis. In the steady state the whole call is assembly.
         self.assembly_time = Duration::ZERO;
@@ -3447,7 +3552,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 if let Some(t) = t_a {
                     self.assembly_time = t.elapsed();
                 }
-                return cost;
+                return Ok(cost);
             }
             if let Some(csc) = matrix.csc.as_mut() {
                 let cost = problem
@@ -3455,7 +3560,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 if let Some(t) = t_a {
                     self.assembly_time = t.elapsed();
                 }
-                return cost;
+                return Ok(cost);
             }
         }
         // Past the fast path: this compute is doing the structural work.
@@ -3622,26 +3727,22 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             let diag = hsym
                 .col_range(b)
                 .find(|&x| hsym.blk_row(x) == b)
-                .unwrap_or_else(|| panic!("parameter block {} has no diagonal Hessian tile", b));
+                .ok_or(SolveError::UnconstrainedParameter { param: partition[b] })?;
             let base = hsym.val_range(diag).start;
             for k in 0..w {
                 self.bdiag_pos[partition[b] + k] = base + k * (w + 1);
             }
         }
 
-        let schur = match arael_faer::schur::schur_symbolic(&hsym, &eliminated) {
-            Ok(s) => s,
-            Err(e) => panic!(
-                "cannot marginalize the {} blocks {} ({:?}): they must be mutually \
-                 uncoupled -- no constraint may join two of them -- and each needs a \
-                 diagonal Hessian tile. To order these parameters first in the \
-                 factorization WITHOUT marginalizing them (which has no such \
-                 requirement), use .with_policy(SchurPolicy::Never).",
-                eliminated.len(),
-                if hinted { "you named" } else { "detected" },
-                e,
-            ),
-        };
+        let schur = arael_faer::schur::schur_symbolic(&hsym, &eliminated).map_err(|e| match e {
+            arael_faer::schur::SchurError::CoupledEliminated { row, col } => {
+                SolveError::CoupledMarginalization { row, col }
+            }
+            arael_faer::schur::SchurError::MissingDiagonal { block } => {
+                SolveError::MarginalizeMissingDiagonal { block }
+            }
+            _ => SolveError::BadMarginalizeSet,
+        })?;
 
         // Is the reduction worth it? Marginalizing forces "eliminated
         // blocks first" as the elimination order, and on a large kept
@@ -3907,22 +4008,25 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             if let Some(plan) = self.plan.as_mut() {
                 plan.ordering = Some(ord);
             }
-            let llt_symbolic = reduced_llt.unwrap_or_else(|| {
-                let sym_ref = faer::sparse::SymbolicSparseColMatRef::new_checked(
-                    nk, nk, &self.s_col_ptr, None, &self.s_row_idx,
-                );
-                let faer_ord = match &nd {
-                    Some(nd) => SymmetricOrdering::Custom(nd.perm()),
-                    None => ord.faer(),
-                };
-                factorize_symbolic_cholesky(
-                    sym_ref,
-                    faer::Side::Upper,
-                    faer_ord,
-                    chol_params(self.supernodal),
-                )
-                .expect("symbolic factorization of the reduced system failed")
-            });
+            let llt_symbolic = match reduced_llt {
+                Some(llt) => llt,
+                None => {
+                    let sym_ref = faer::sparse::SymbolicSparseColMatRef::new_checked(
+                        nk, nk, &self.s_col_ptr, None, &self.s_row_idx,
+                    );
+                    let faer_ord = match &nd {
+                        Some(nd) => SymmetricOrdering::Custom(nd.perm()),
+                        None => ord.faer(),
+                    };
+                    factorize_symbolic_cholesky(
+                        sym_ref,
+                        faer::Side::Upper,
+                        faer_ord,
+                        chol_params(self.supernodal),
+                    )
+                    .map_err(|_| SolveError::SymbolicFactorization { reduced: true })?
+                }
+            };
             if vb {
                 info!(
                     "schur: reduced system {} params ({:.0}% dense, half-bandwidth {}), \
@@ -3969,7 +4073,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         }
         matrix.h = Some(h);
         self.positions = Some(positions);
-        cost
+        Ok(cost)
     }
 
     fn extract_diagonal(&self, matrix: &FaerMatrix<T>, diagonal: &mut [T]) {
@@ -4221,13 +4325,13 @@ impl<T: EigenScalar + crate::utils::Float> LmSolver<T> for SparseEigen<T> {
     fn new_matrix(&self, n: usize) -> SparseMatrix<T> {
         SparseMatrix { csc: CscMatrix::empty(n) }
     }
-    fn compute(&mut self, problem: &mut dyn LmProblem<T>, params: &[T], grad: &mut [T], matrix: &mut SparseMatrix<T>) -> T {
+    fn compute(&mut self, problem: &mut dyn LmProblem<T>, params: &[T], grad: &mut [T], matrix: &mut SparseMatrix<T>) -> Result<T, SolveError> {
         if let Some(positions) = &self.positions {
-            return problem.calc_grad_hessian_sparse_indexed(params, grad, &mut matrix.csc.vals, positions);
+            return Ok(problem.calc_grad_hessian_sparse_indexed(params, grad, &mut matrix.csc.vals, positions));
         }
-        let (cost, positions) = assemble_first_csc(problem, params, grad, &mut matrix.csc);
+        let (cost, positions) = assemble_first_csc(problem, params, grad, &mut matrix.csc)?;
         self.positions = Some(positions);
-        cost
+        Ok(cost)
     }
     fn extract_diagonal(&self, matrix: &SparseMatrix<T>, diagonal: &mut [T]) {
         for i in 0..diagonal.len() { diagonal[i] = matrix.csc.vals[matrix.csc.diag_pos[i]]; }
@@ -4270,13 +4374,13 @@ impl LmSolver<f64> for SparseCholmod {
     fn new_matrix(&self, n: usize) -> SparseMatrix<f64> {
         SparseMatrix { csc: CscMatrix::empty(n) }
     }
-    fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], matrix: &mut SparseMatrix<f64>) -> f64 {
+    fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], matrix: &mut SparseMatrix<f64>) -> Result<f64, SolveError> {
         if let Some(positions) = &self.positions {
-            return problem.calc_grad_hessian_sparse_indexed(params, grad, &mut matrix.csc.vals, positions);
+            return Ok(problem.calc_grad_hessian_sparse_indexed(params, grad, &mut matrix.csc.vals, positions));
         }
-        let (cost, positions) = assemble_first_csc(problem, params, grad, &mut matrix.csc);
+        let (cost, positions) = assemble_first_csc(problem, params, grad, &mut matrix.csc)?;
         self.positions = Some(positions);
-        cost
+        Ok(cost)
     }
     fn extract_diagonal(&self, matrix: &SparseMatrix<f64>, diagonal: &mut [f64]) {
         for i in 0..diagonal.len() { diagonal[i] = matrix.csc.vals[matrix.csc.diag_pos[i]]; }
@@ -4341,13 +4445,13 @@ impl LmSolver<f64> for SparseCholmodSupernodal {
     fn new_matrix(&self, n: usize) -> SparseMatrix<f64> {
         SparseMatrix { csc: CscMatrix::empty(n) }
     }
-    fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], matrix: &mut SparseMatrix<f64>) -> f64 {
+    fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], matrix: &mut SparseMatrix<f64>) -> Result<f64, SolveError> {
         if let Some(positions) = &self.positions {
-            return problem.calc_grad_hessian_sparse_indexed(params, grad, &mut matrix.csc.vals, positions);
+            return Ok(problem.calc_grad_hessian_sparse_indexed(params, grad, &mut matrix.csc.vals, positions));
         }
-        let (cost, positions) = assemble_first_csc(problem, params, grad, &mut matrix.csc);
+        let (cost, positions) = assemble_first_csc(problem, params, grad, &mut matrix.csc)?;
         self.positions = Some(positions);
-        cost
+        Ok(cost)
     }
     fn extract_diagonal(&self, matrix: &SparseMatrix<f64>, diagonal: &mut [f64]) {
         for i in 0..diagonal.len() { diagonal[i] = matrix.csc.vals[matrix.csc.diag_pos[i]]; }
@@ -4409,7 +4513,7 @@ impl<T: Float> CooMatrix<T> {
 
     /// Convert to CSC format. Duplicate entries are summed.
     /// Returns upper-triangle CSC with cached diagonal positions.
-    pub fn to_csc(&self) -> CscMatrix<T> {
+    pub fn to_csc(&self) -> Result<CscMatrix<T>, SolveError> {
         let n = self.n;
         let nnz_raw = self.nnz();
 
@@ -4464,12 +4568,11 @@ impl<T: Float> CooMatrix<T> {
                 }
             }
             if !found {
-                panic!("parameter {} has no Hessian diagonal entry: no constraint \
-                        touches it (degenerate model)", j);
+                return Err(SolveError::UnconstrainedParameter { param: j });
             }
         }
 
-        CscMatrix { n, col_ptr, row_idx, vals, diag_pos }
+        Ok(CscMatrix { n, col_ptr, row_idx, vals, diag_pos })
     }
 
     /// Scatter COO values into an existing CSC with matching structure.
@@ -4520,7 +4623,7 @@ impl<T: Float> CooMatrix<T> {
     /// Convert to CSC and build scatter map in one pass using counting sort.
     /// Returns (CscMatrix, positions) where positions maps each COO entry to
     /// its CSC vals index for use with calc_grad_hessian_sparse_indexed.
-    pub fn to_csc_with_map(&self) -> (CscMatrix<T>, Vec<usize>) {
+    pub fn to_csc_with_map(&self) -> Result<(CscMatrix<T>, Vec<usize>), SolveError> {
         let n = self.n;
         let nnz_raw = self.nnz();
 
@@ -4601,12 +4704,11 @@ impl<T: Float> CooMatrix<T> {
                 }
             }
             if !found {
-                panic!("parameter {} has no Hessian diagonal entry: no constraint \
-                        touches it (degenerate model)", j);
+                return Err(SolveError::UnconstrainedParameter { param: j });
             }
         }
 
-        (CscMatrix { n, col_ptr: new_col_ptr, row_idx, vals, diag_pos }, map)
+        Ok((CscMatrix { n, col_ptr: new_col_ptr, row_idx, vals, diag_pos }, map))
     }
 }
 
@@ -5593,7 +5695,7 @@ mod tests {
         coo.push(1, 2, 2.0);
         coo.push(2, 2, 5.0);
 
-        let csc = coo.to_csc();
+        let csc = coo.to_csc().unwrap();
         assert_eq!(csc.n, 3);
         assert_eq!(csc.col_ptr, vec![0, 1, 3, 5]);
         assert_eq!(csc.row_idx, vec![0, 0, 1, 1, 2]);
@@ -5610,7 +5712,7 @@ mod tests {
         coo.push(0, 0, 2.0); // duplicate: 3+2=5
         coo.push(1, 1, 4.0);
 
-        let csc = coo.to_csc();
+        let csc = coo.to_csc().unwrap();
         assert_eq!(csc.vals, vec![5.0, 1.0, 4.0]);
     }
 
@@ -5623,7 +5725,7 @@ mod tests {
         coo.push(1, 2, 2.0);
         coo.push(2, 2, 5.0);
 
-        let csc = coo.to_csc();
+        let csc = coo.to_csc().unwrap();
         let scatter_map = coo.build_scatter_map(&csc);
 
         // Modify values and scatter
@@ -5892,7 +5994,7 @@ mod tests {
         coo.push(0, 0, 4.0);
         coo.push(0, 1, 1.0);
         coo.push(1, 1, 3.0);
-        let csc = coo.to_csc();
+        let csc = coo.to_csc().unwrap();
         let mut y = vec![0.0; 2];
         csc.symv(&[1.0, 2.0], &mut y);
         assert!((y[0] - 6.0).abs() < 1e-12);
@@ -5958,7 +6060,7 @@ mod tests {
         let mut grad_sparse = vec![0.0; n];
         let mut coo = CooMatrix::new(n);
         CoupledProblem.calc_grad_hessian_sparse(&x, &mut grad_sparse, &mut coo);
-        let csc = coo.to_csc();
+        let csc = coo.to_csc().unwrap();
 
         // Gradients must match
         for i in 0..n {

@@ -388,7 +388,7 @@ fn main() {
     let mut coo = arael::simple_lm::CooMatrix::new(n);
     let mut grad = vec![0.0f64; n];
     path.calc_grad_hessian_sparse(&params, &mut grad, &mut coo);
-    let csc = coo.to_csc();
+    let csc = coo.to_csc().unwrap();
     let nnz = csc.nnz();
     let dense_upper = n * (n + 1) / 2;
     let fill_pct = nnz as f64 / dense_upper as f64 * 100.0;
@@ -419,7 +419,7 @@ fn main() {
             let mut coo2 = arael::simple_lm::CooMatrix::new(n);
             let t0 = std::time::Instant::now();
             path.calc_grad_hessian_sparse(&params, &mut grad, &mut coo2);
-            let _csc2 = coo2.to_csc();
+            let _csc2 = coo2.to_csc().unwrap();
             coo_times.push(t0.elapsed().as_nanos() as f64 / 1000.0);
         }
 
@@ -429,7 +429,7 @@ fn main() {
             let mut coo2 = arael::simple_lm::CooMatrix::new(n);
             let mut grad = vec![0.0f64; n];
             path.calc_grad_hessian_sparse(&params, &mut grad, &mut coo2);
-            let mut csc2 = coo2.to_csc();
+            let mut csc2 = coo2.to_csc().unwrap();
             let scatter_map = coo2.build_scatter_map(&csc2);
             for _ in 0..runs {
                 coo2.clear();
@@ -446,7 +446,7 @@ fn main() {
             let mut coo2 = arael::simple_lm::CooMatrix::new(n);
             let mut grad = vec![0.0f64; n];
             path.calc_grad_hessian_sparse(&params, &mut grad, &mut coo2);
-            let mut csc2 = coo2.to_csc();
+            let mut csc2 = coo2.to_csc().unwrap();
             for _ in 0..runs {
                 let t0 = std::time::Instant::now();
                 path.calc_grad_hessian_sparse_direct(&params, &mut grad, &mut csc2);
@@ -460,7 +460,7 @@ fn main() {
             let mut coo2 = arael::simple_lm::CooMatrix::new(n);
             let mut grad = vec![0.0f64; n];
             path.calc_grad_hessian_sparse(&params, &mut grad, &mut coo2);
-            let csc2 = coo2.to_csc();
+            let csc2 = coo2.to_csc().unwrap();
             let positions = coo2.build_scatter_map(&csc2);
             let mut vals = vec![0.0f64; csc2.nnz()];
             for _ in 0..runs {
@@ -499,7 +499,7 @@ fn main() {
 
         // First assembly (COO + build for sparse, flat for dense)
         let t0 = std::time::Instant::now();
-        solver.compute(problem, x0, &mut grad, &mut matrix);
+        solver.compute(problem, x0, &mut grad, &mut matrix).unwrap();
         let asm1_us = t0.elapsed().as_micros();
 
         solver.extract_diagonal(&matrix, &mut diagonal);
@@ -514,7 +514,7 @@ fn main() {
 
         // Second assembly (indexed for sparse, flat for dense)
         let t0 = std::time::Instant::now();
-        solver.compute(problem, x0, &mut grad, &mut matrix);
+        solver.compute(problem, x0, &mut grad, &mut matrix).unwrap();
         let asm2_us = t0.elapsed().as_micros();
 
         solver.extract_diagonal(&matrix, &mut diagonal);

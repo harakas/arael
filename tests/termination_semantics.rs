@@ -155,7 +155,7 @@ fn status_reports_max_iterations() {
 // ---------------------------------------------------------------------------
 
 use arael::simple_lm::{
-    Dense, LambdaDriver, LambdaState, LambdaStep, LmSolver, SolverReport,
+    Dense, LambdaDriver, LambdaState, LambdaStep, LmSolver, SolveError, SolverReport,
 };
 use std::time::Duration;
 
@@ -263,7 +263,7 @@ impl LmSolver<f64> for NeverFactorizes {
     fn compute(
         &mut self, problem: &mut dyn LmProblem<f64>, params: &[f64],
         grad: &mut [f64], m: &mut Vec<f64>,
-    ) -> f64 {
+    ) -> Result<f64, SolveError> {
         <Dense as LmSolver<f64>>::compute(&mut self.0, problem, params, grad, m)
     }
     fn extract_diagonal(&self, m: &Vec<f64>, d: &mut [f64]) {

@@ -184,14 +184,14 @@ fn aliased_all_formats_agree() {
     assert_eq!(g_coo, g_dense);
     assert_eq!(densify_coo(&coo, n), h_dense, "COO differs from dense");
 
-    let mut csc_direct = coo.to_csc();
+    let mut csc_direct = coo.to_csc().unwrap();
     csc_direct.vals.iter_mut().for_each(|v| *v = 0.0);
     let mut g_direct = vec![0.0; n];
     m.calc_grad_hessian_sparse_direct(&params, &mut g_direct, &mut csc_direct);
     assert_eq!(g_direct, g_dense);
     assert_eq!(densify_csc(&csc_direct), h_dense, "direct CSC differs from dense");
 
-    let (csc, positions) = coo.to_csc_with_map();
+    let (csc, positions) = coo.to_csc_with_map().unwrap();
     let mut vals = vec![0.0; csc.vals.len()];
     let mut g_indexed = vec![0.0; n];
     m.calc_grad_hessian_sparse_indexed(&params, &mut g_indexed, &mut vals, &positions);
@@ -382,13 +382,13 @@ fn aliased_cross_equals_self_formulation() {
     // structure from COO; steady state replays via the cached position
     // map). Exercise both variants for both formulations.
     let run_csc = |w: &mut W, params: &[f64], coo: &CooMatrix<f64>, label: &str| {
-        let mut csc_direct = coo.to_csc();
+        let mut csc_direct = coo.to_csc().unwrap();
         csc_direct.vals.iter_mut().for_each(|v| *v = 0.0);
         let mut g = vec![0.0; n];
         w.calc_grad_hessian_sparse_direct(params, &mut g, &mut csc_direct);
         print_h(&format!("H {} via CSC direct (densified)", label), &densify_csc(&csc_direct), n);
 
-        let (csc, positions) = coo.to_csc_with_map();
+        let (csc, positions) = coo.to_csc_with_map().unwrap();
         let mut vals = vec![0.0; csc.vals.len()];
         let mut g2 = vec![0.0; n];
         w.calc_grad_hessian_sparse_indexed(params, &mut g2, &mut vals, &positions);

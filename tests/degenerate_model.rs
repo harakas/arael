@@ -1,42 +1,48 @@
 // Degenerate models -- a parameter with no Hessian diagonal entry -- must
-// fail fast with an actionable message.
+// fail fast, not corrupt data.
 //
-// Structural case: a CSC column without a stored diagonal left
-// diag_pos[j] = 0, so
-// extract_diagonal/solve_damped read and OVERWROTE vals[0] (an unrelated
-// entry) -- silent corruption surfacing as "Cholesky failed" far away.
+// Structural case: a CSC column with no stored diagonal. Left unchecked,
+// diag_pos[j] = 0 makes extract_diagonal/solve_damped read and overwrite
+// vals[0] (an unrelated entry), surfacing as a "Cholesky failed" far away.
+// to_csc / to_csc_with_map reject it with SolveError::UnconstrainedParameter,
+// which a solve surfaces as LmStatus::SetupFailed.
 //
 // Value case: a structurally present but zero diagonal cannot be rescued by
-// multiplicative damping ((1+lambda)*0 stays 0): the solver burned all 20
-// inner failures per outer iteration against max_iters and returned with
-// no error indication. It now terminates the solve immediately with an
-// error log (a runtime value condition -- guards or saturated
-// robustifiers can produce it from data -- so no panic; the structural
-// missing-ENTRY case panics at CSC build).
+// multiplicative damping ((1+lambda)*0 stays 0). The solver terminates the
+// solve immediately with LmStatus::DegenerateDiagonal (a runtime value
+// condition -- guards or saturated robustifiers can produce it from data).
 
-use arael::simple_lm::{self, CooMatrix, FnProblem, LmConfig};
+use arael::simple_lm::{self, BandError, CooMatrix, CscMatrix, FnProblem, LmConfig, LmStatus, SolveError};
 use arael::simple_lm::LmProblem;
 
+// The bad-diagonal diagnostic goes through arael's process-global log sink.
+// a_nan_diagonal_is_not_reported_as_a_zero installs a sink and reads it back,
+// so the tests that emit that diagnostic must not run at the same time. This
+// serializes them; unrelated tests stay parallel.
+static SINK_GUARD: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 #[test]
-#[should_panic(expected = "no Hessian diagonal")]
 fn missing_diagonal_rejected_in_to_csc() {
     let mut coo = CooMatrix::new(2);
     coo.push(0, 0, 2.0);
     coo.push(0, 1, 1.0); // column 1: off-diagonal only, no (1,1)
-    let _ = coo.to_csc();
+    assert_eq!(coo.to_csc().err(), Some(SolveError::UnconstrainedParameter { param: 1 }));
 }
 
 #[test]
-#[should_panic(expected = "no Hessian diagonal")]
 fn missing_diagonal_rejected_in_to_csc_with_map() {
     let mut coo = CooMatrix::new(2);
     coo.push(0, 0, 2.0);
     coo.push(0, 1, 1.0);
-    let _ = coo.to_csc_with_map();
+    assert_eq!(
+        coo.to_csc_with_map().err(),
+        Some(SolveError::UnconstrainedParameter { param: 1 })
+    );
 }
 
 #[test]
 fn zero_diagonal_terminates_immediately() {
+    let _g = SINK_GUARD.lock().unwrap_or_else(|e| e.into_inner());
     // Parameter 1 is never touched: gradient and Hessian row stay zero.
     let mut p = FnProblem {
         cost: |x: &[f64]| (x[0] - 1.0).powi(2),
@@ -108,6 +114,7 @@ fn min_diagonal_lets_a_zero_diagonal_solve() {
 
 #[test]
 fn without_the_floor_the_same_problem_still_dies() {
+    let _g = SINK_GUARD.lock().unwrap_or_else(|e| e.into_inner());
     // The contrast: None is the default and is unchanged.
     let mut p = zero_diagonal_problem();
     let result = simple_lm::solve(&[0.0, 0.0], &mut p, &LmConfig::default());
@@ -117,6 +124,7 @@ fn without_the_floor_the_same_problem_still_dies() {
 
 #[test]
 fn min_diagonal_does_not_rescue_a_negative_diagonal() {
+    let _g = SINK_GUARD.lock().unwrap_or_else(|e| e.into_inner());
     // J^T J's diagonal is a sum of squares, so a negative one means the assembly
     // is poisoned. Flooring it would hide the bug, so it stays fatal.
     let mut p = FnProblem {
@@ -143,6 +151,7 @@ fn min_diagonal_does_not_rescue_a_negative_diagonal() {
 /// false, so a `d < 0` test lets it fall through -- which it did.
 #[test]
 fn a_nan_diagonal_is_not_reported_as_a_zero() {
+    let _g = SINK_GUARD.lock().unwrap_or_else(|e| e.into_inner());
     use std::sync::{Arc, Mutex};
     let seen: Arc<Mutex<std::vec::Vec<String>>> = Arc::new(Mutex::new(std::vec::Vec::new()));
     let sink = Arc::clone(&seen);
@@ -175,6 +184,7 @@ fn a_nan_diagonal_is_not_reported_as_a_zero() {
 
 #[test]
 fn min_diagonal_does_not_rescue_a_nan_diagonal() {
+    let _g = SINK_GUARD.lock().unwrap_or_else(|e| e.into_inner());
     let mut p = FnProblem {
         cost: |x: &[f64]| (x[0] - 1.0).powi(2),
         grad_hessian: |x: &[f64], g: &mut [f64], h: &mut [f64]| {
@@ -243,7 +253,7 @@ fn pattern_drift_detected_in_indexed_assembly() {
     let mut grad = vec![0.0; n];
     let mut coo = simple_lm::CooMatrix::new(n);
     w.calc_grad_hessian_sparse(&params, &mut grad, &mut coo);
-    let (csc, positions) = coo.to_csc_with_map();
+    let (csc, positions) = coo.to_csc_with_map().unwrap();
 
     // Mid-solve structure change: the guard flips off, the TripletBlock
     // emits nothing this iteration.
@@ -252,4 +262,56 @@ fn pattern_drift_detected_in_indexed_assembly() {
     let mut vals = vec![0.0; csc.vals.len()];
     let mut g2 = vec![0.0; n];
     let _ = w.calc_grad_hessian_sparse_indexed(&params, &mut g2, &mut vals, &positions);
+}
+
+// A structural failure that reaches the solve (not just the CSC helper) must
+// surface as LmStatus::SetupFailed, with x untouched and NaN costs -- never a
+// panic or a fabricated cost.
+
+/// Band assembly reports an element outside the declared bandwidth.
+struct BandOverflowProblem;
+impl LmProblem<f64> for BandOverflowProblem {
+    fn calc_cost(&mut self, _x: &[f64]) -> f64 { 1.0 }
+    fn calc_grad_hessian_dense(&mut self, _x: &[f64], _g: &mut [f64], _h: &mut [f64]) -> f64 { 1.0 }
+    fn calc_grad_hessian_band(&mut self, _x: &[f64], _g: &mut [f64], _b: &mut [f64], kd: usize) -> Result<f64, BandError> {
+        Err(BandError { row: 0, col: 1, kd })
+    }
+    fn calc_grad_hessian_sparse(&mut self, _x: &[f64], _g: &mut [f64], _coo: &mut CooMatrix<f64>) -> f64 { unimplemented!() }
+    fn calc_grad_hessian_sparse_direct(&mut self, _x: &[f64], _g: &mut [f64], _csc: &mut CscMatrix<f64>) -> f64 { unimplemented!() }
+    fn calc_grad_hessian_sparse_indexed(&mut self, _x: &[f64], _g: &mut [f64], _v: &mut [f64], _p: &[usize]) -> f64 { unimplemented!() }
+}
+
+#[test]
+fn band_overflow_is_a_setup_failure() {
+    let mut p = BandOverflowProblem;
+    let r = simple_lm::solve_band(&[0.0, 0.0], 0, &mut p, &LmConfig::default());
+    assert_eq!(r.status, LmStatus::SetupFailed(SolveError::BandOverflow { row: 0, col: 1, kd: 0 }));
+    assert_eq!(r.iterations, 0);
+    assert_eq!(r.x, vec![0.0, 0.0], "params must be untouched");
+    assert!(r.start_cost.is_nan() && r.end_cost.is_nan());
+}
+
+/// Sparse assembly leaves parameter 1 with no diagonal entry.
+struct UnconstrainedSparseProblem;
+impl LmProblem<f64> for UnconstrainedSparseProblem {
+    fn calc_cost(&mut self, _x: &[f64]) -> f64 { 1.0 }
+    fn calc_grad_hessian_dense(&mut self, _x: &[f64], _g: &mut [f64], _h: &mut [f64]) -> f64 { unimplemented!() }
+    fn calc_grad_hessian_band(&mut self, _x: &[f64], _g: &mut [f64], _b: &mut [f64], _kd: usize) -> Result<f64, BandError> { unimplemented!() }
+    fn calc_grad_hessian_sparse(&mut self, _x: &[f64], g: &mut [f64], coo: &mut CooMatrix<f64>) -> f64 {
+        g[0] = 0.0; g[1] = 0.0;
+        coo.push(0, 0, 2.0); // param 0 has a diagonal; param 1 has none
+        1.0
+    }
+    fn calc_grad_hessian_sparse_direct(&mut self, _x: &[f64], _g: &mut [f64], _csc: &mut CscMatrix<f64>) -> f64 { unimplemented!() }
+    fn calc_grad_hessian_sparse_indexed(&mut self, _x: &[f64], _g: &mut [f64], _v: &mut [f64], _p: &[usize]) -> f64 { unimplemented!() }
+}
+
+#[test]
+fn unconstrained_parameter_is_a_setup_failure_through_solve() {
+    let mut p = UnconstrainedSparseProblem;
+    let r = simple_lm::solve_sparse(&[0.0, 0.0], &mut p, &LmConfig::default());
+    assert_eq!(r.status, LmStatus::SetupFailed(SolveError::UnconstrainedParameter { param: 1 }));
+    assert_eq!(r.iterations, 0);
+    assert_eq!(r.x, vec![0.0, 0.0], "params must be untouched");
+    assert!(r.start_cost.is_nan() && r.end_cost.is_nan());
 }
