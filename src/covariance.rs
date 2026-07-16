@@ -323,24 +323,15 @@ impl SelInv {
     }
 }
 
-// Raw H^-1 entry (r, c), r >= c, from a partially built selected inverse in the
-// factor's own indexing. Off-diagonal rows within a column are sorted, so binary
-// search. Every entry the recursion asks for is in the pattern.
-fn sel_read(vals: &[f64], col_ptr: &[usize], row_idx: &[usize], r: usize, c: usize) -> f64 {
-    let cs = col_ptr[c];
-    if r == c {
-        return vals[cs];
-    }
-    match row_idx[cs + 1..col_ptr[c + 1]].binary_search(&r) {
-        Ok(off) => vals[cs + 1 + off],
-        Err(_) => panic!("selected inverse: entry ({r}, {c}) outside factor pattern"),
-    }
-}
-
 // The Takahashi recursion runs backward over the simplicial factor, filling
-// every Sigma entry inside the factor pattern in one O(fill) pass. faer leaves
-// each column's off-diagonal rows unsorted; sorting them once up front turns the
-// per-entry lookups from O(column length) into O(log) binary searches.
+// every Sigma entry inside the factor pattern in one pass. For column j,
+//   Sigma(i,j) = -(1/L_jj) sum_{k in pat(j)} L_kj Sigma(i,k)   (i in pat(j))
+//   Sigma(j,j) =  1/L_jj^2 - (1/L_jj) sum_{k in pat(j)} L_kj Sigma(k,j)
+// where pat(j) is column j's off-diagonal rows. The inner sum is a symmetric
+// sparse matrix-vector product y = Sigma[pat(j), pat(j)] * L[pat(j), j], done
+// with a dense mark/value/accumulator workspace: one pass over the stored
+// Sigma(a,b) (each feeds both y[a] and y[b]) with O(1) row lookups -- no search,
+// half the reads. `row_idx` columns are sorted only so queries can binary-search.
 fn selected_inverse(symbolic: &fchol::SymbolicCholesky<usize>, l_vals: &[f64], n: usize) -> SelInv {
     let (col_ptr, mut row_idx) = match symbolic.raw() {
         fchol::SymbolicCholeskyRaw::Simplicial(s) => (s.col_ptr().to_vec(), s.row_idx().to_vec()),
@@ -354,7 +345,7 @@ fn selected_inverse(symbolic: &fchol::SymbolicCholesky<usize>, l_vals: &[f64], n
         .unwrap_or_else(|| (0..n).collect());
 
     // Sort each column's off-diagonals by row (diagonal stays first), carrying
-    // the factor values along.
+    // the factor values along, so `SelInv::get` can binary-search.
     let mut lval = l_vals.to_vec();
     let mut buf: Vec<(usize, f64)> = Vec::new();
     for j in 0..n {
@@ -368,27 +359,49 @@ fn selected_inverse(symbolic: &fchol::SymbolicCholesky<usize>, l_vals: &[f64], n
         }
     }
 
-    // Sigma_ij for i >= j inside the pattern, from H = L L^T:
-    //   Sigma_ij = -(1/L_jj) sum_{k>j} L_kj Sigma_ik        (i > j)
-    //   Sigma_jj = 1/L_jj^2 - (1/L_jj) sum_{k>j} L_kj Sigma_kj
-    // Both indices of every Sigma_ik touched exceed j, so it is already done.
     let mut vals = vec![0.0_f64; lval.len()];
+    let mut mark = vec![false; n]; // row is in pat(j)
+    let mut vval = vec![0.0_f64; n]; // L[row, j] scattered by row
+    let mut yacc = vec![0.0_f64; n]; // (Sigma[pat,pat] * v) accumulator by row
     for j in (0..n).rev() {
         let (cs, ce) = (col_ptr[j], col_ptr[j + 1]);
         let inv_ljj = 1.0 / lval[cs];
+
+        // Scatter pat(j): mark rows, load v = L[pat(j), j], clear the accumulator.
+        for p in (cs + 1)..ce {
+            let r = row_idx[p];
+            mark[r] = true;
+            vval[r] = lval[p];
+            yacc[r] = 0.0;
+        }
+
+        // Symmetric SpMV over columns b in pat(j): the diagonal Sigma(b,b) and
+        // each stored Sigma(a,b) with a also in pat(j). Each unordered pair is
+        // seen once (at the smaller column) and feeds both outputs.
+        for p in (cs + 1)..ce {
+            let b = row_idx[p];
+            let vb = vval[b];
+            let bcs = col_ptr[b];
+            yacc[b] += vals[bcs] * vb;
+            for pp in (bcs + 1)..col_ptr[b + 1] {
+                let a = row_idx[pp];
+                if mark[a] {
+                    let sab = vals[pp];
+                    yacc[a] += sab * vb;
+                    yacc[b] += sab * vval[a];
+                }
+            }
+        }
+
+        // Sigma(i,j) = -(1/L_jj) y[i]; then clear the marks.
         for p in (cs + 1)..ce {
             let i = row_idx[p];
-            let mut acc = 0.0;
-            for q in (cs + 1)..ce {
-                let k = row_idx[q];
-                let (r, c) = if i >= k { (i, k) } else { (k, i) };
-                acc += lval[q] * sel_read(&vals, &col_ptr, &row_idx, r, c);
-            }
-            vals[p] = -inv_ljj * acc;
+            vals[p] = -inv_ljj * yacc[i];
+            mark[i] = false;
         }
         let mut dacc = 0.0;
-        for q in (cs + 1)..ce {
-            dacc += lval[q] * vals[q];
+        for p in (cs + 1)..ce {
+            dacc += lval[p] * vals[p];
         }
         vals[cs] = inv_ljj * inv_ljj - inv_ljj * dacc;
     }
