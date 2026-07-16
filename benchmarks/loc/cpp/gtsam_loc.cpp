@@ -22,11 +22,13 @@
 #include <gtsam/base/numericalDerivative.h>
 #include <gtsam/inference/Symbol.h>
 #include <gtsam/nonlinear/LevenbergMarquardtOptimizer.h>
+#include <gtsam/nonlinear/Marginals.h>
 #include <gtsam/nonlinear/NonlinearFactor.h>
 #include <gtsam/nonlinear/NonlinearFactorGraph.h>
 #include <gtsam/nonlinear/Values.h>
 
 #include <Eigen/Dense>
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -308,9 +310,84 @@ static bench::Result solve(const Scene& s, int max_iters, std::vector<double>* p
     return bench::Result{ms, iters, iters, initial_cost};
 }
 
+// Covariance timing: for each N, the cold cost of building Marginals (factorize)
+// and querying N spread pose marginals, a fresh Marginals each rep. GTSAM
+// eliminates the graph into a Bayes tree and recovers marginals by
+// back-substitution (Cholesky, information form -- its fast path). Machine-
+// readable COV lines; a validation std-dev line for the last pose to stderr.
+static void cov_mode(const Scene& s) {
+    gtsam::NonlinearFactorGraph graph;
+    gtsam::Values init;
+    build(s, graph, init);
+
+    gtsam::LevenbergMarquardtParams params;
+    params.setVerbosityLM("SILENT");
+    params.setMaxIterations(200);
+    params.setRelativeErrorTol(1e-5);
+    params.setAbsoluteErrorTol(1e-5);
+    params.lambdaInitial = 1e-9;
+    if (const char* l = getenv("GTSAM_LAMBDA0")) params.lambdaInitial = atof(l);
+    gtsam::LevenbergMarquardtOptimizer optimizer(graph, init, params);
+    gtsam::Values result = optimizer.optimize();
+
+    double budget = getenv("COV_BUDGET_S") ? atof(getenv("COV_BUDGET_S")) : 5.0;
+    int cap = getenv("COV_CAP") ? atoi(getenv("COV_CAP")) : 2000;
+    double cell_cap = bench::cov_cell_cap_ms();
+
+    // Last pose (the localization query), timed separately.
+    {
+        int reps = 0;
+        double ms = bench::median_ms(budget, cap, &reps, [&] {
+            gtsam::Marginals marginals(graph, result, gtsam::Marginals::CHOLESKY);
+            marginals.marginalCovariance(P(s.n_poses - 1));
+        });
+        printf("COV last 1 %.3f %d\n", ms, reps);
+        fflush(stdout);
+    }
+
+    const int ns[] = {1, 2, 8, 32};
+    std::vector<int> queryN(ns, ns + 4);
+    queryN.push_back(s.n_poses);  // "all"
+    int prev_n = 0;
+    double prev_ms = 0;
+    for (int N : queryN) {
+        if (N > s.n_poses) continue;
+        if (bench::cov_project_ms(prev_n, prev_ms, N) > cell_cap) {
+            printf("COV pose %d toolong 0\n", N);
+            fflush(stdout);
+            continue;
+        }
+        std::vector<int> idx = bench::spread(0, s.n_poses, N);
+        std::vector<Key> keys;
+        for (int i : idx) keys.push_back(P(i));
+        int reps = 0;
+        double ms = bench::median_ms(budget, cap, &reps, [&] {
+            gtsam::Marginals marginals(graph, result, gtsam::Marginals::CHOLESKY);
+            for (const Key& k : keys) marginals.marginalCovariance(k);
+        });
+        if (ms > cell_cap) printf("COV pose %d toolong %d\n", N, reps);
+        else               printf("COV pose %d %.3f %d\n", N, ms, reps);
+        fflush(stdout);
+        prev_n = N;
+        prev_ms = ms;
+    }
+
+    // Validation: last-pose std dev.
+    gtsam::Marginals marg(graph, result, gtsam::Marginals::CHOLESKY);
+    Matrix c = marg.marginalCovariance(P(s.n_poses - 1));
+    fprintf(stderr, "gtsam pose[%d] std dev:", s.n_poses - 1);
+    for (int d = 0; d < 6; d++) fprintf(stderr, " %.4f", sqrt(c(d, d)));
+    fprintf(stderr, "\n");
+}
+
 int main(int argc, char** argv) {
-    if (argc < 4) { fprintf(stderr, "usage: %s <scene.txt> <lm> <solution_out>\n", argv[0]); return 1; }
+    if (argc < 3) { fprintf(stderr, "usage: %s <scene.txt> <lm|cov> [solution_out]\n", argv[0]); return 1; }
     Scene s = load(argv[1]);
+
+    if (std::string(argv[2]) == "cov") {
+        cov_mode(s);
+        return 0;
+    }
 
     if (getenv("GTSAM_VERIFY_JAC")) {
         gtsam::NonlinearFactorGraph g; gtsam::Values v; build(s, g, v);

@@ -377,6 +377,102 @@ fn solve32(params: &[f32], path: &mut PathF, cfg: &arael::simple_lm::LmConfig<f3
     }
 }
 
+// ----------------------------------------------------------- covariance
+
+use arael::covariance::{CovMode, Covariance};
+
+/// One covariance-scaling run: `(N, median_ms, reps)` per query count, for the
+/// band-specialized TriDiagonal and the general PerQuery, plus the AllMarginals
+/// bulk cost and the last-pose std dev (the localization query, a value check).
+pub struct CovScaling {
+    pub n_poses: usize,
+    pub tridiag_pose: Vec<(usize, f64, usize)>,
+    pub perquery_pose: Vec<(usize, f64, usize)>,
+    /// Just the last pose (the localization query), for TriDiagonal and PerQuery.
+    pub tridiag_last: (f64, usize),
+    pub perquery_last: (f64, usize),
+    pub allmarg_ms: f64,
+    pub allmarg_reps: usize,
+    pub last_pose: usize,
+    pub sd_last: Vec<f64>,
+}
+
+// Solve the loc scene (f64), then time pose-covariance recovery as the query
+// count scales. The map is fixed, so H is block-tridiagonal over the pose chain:
+// TriDiagonal is a band forward/backward Schur pass with no factorization,
+// PerQuery factors and solves, AllMarginals is the bulk selected inverse.
+pub fn cov_bench(scene: &Scene, budget_s: f64, cap: usize) -> CovScaling {
+    use bench_harness::cov::{cell_cap_s, query_counts, scale_counts, spread};
+    use bench_harness::probe::median_ms;
+    use std::hint::black_box;
+    use std::time::Duration;
+
+    let mut path = build(scene);
+    let mut params: Vec<f64> = Vec::new();
+    path.serialize64(&mut params);
+    let cfg = bench_harness::arael::config::<Path>(scene, 200);
+    let result = solve64(&params, &mut path, &cfg);
+    path.deserialize64(&result.x);
+    let np = path.poses.len();
+    let last = np - 1;
+    let budget = Duration::from_secs_f64(budget_s);
+    let cap_s = cell_cap_s();
+
+    // Validation: last-pose std dev (the localization query).
+    let sd_last = {
+        let cov = path.assemble_covariance(CovMode::TriDiagonal).unwrap();
+        let m = cov.marginal_cov(&path.poses[last]);
+        (0..6).map(|k| m[(k, k)].sqrt()).collect()
+    };
+
+    // The localization query: just the last pose. TriDiagonal gets it from the
+    // forward Schur pass alone (no backward recursion), so it is the cheapest cell.
+    let tridiag_last = median_ms(budget, cap, || {
+        let cov = path.assemble_covariance(CovMode::TriDiagonal).unwrap();
+        black_box(cov.marginal_cov(&path.poses[last]));
+    });
+    let perquery_last = median_ms(budget, cap, || {
+        let cov = path.assemble_covariance(CovMode::PerQuery).unwrap();
+        black_box(cov.marginal_cov(&path.poses[last]));
+    });
+
+    let tridiag_pose = scale_counts(query_counts(np, true), cap_s, |n| {
+        let idx = spread(0, np, n);
+        median_ms(budget, cap, || {
+            let cov = path.assemble_covariance(CovMode::TriDiagonal).unwrap();
+            for &i in &idx {
+                black_box(cov.marginal_cov(&path.poses[i]));
+            }
+        })
+    });
+    let perquery_pose = scale_counts(query_counts(np, true), cap_s, |n| {
+        let idx = spread(0, np, n);
+        median_ms(budget, cap, || {
+            let cov = path.assemble_covariance(CovMode::PerQuery).unwrap();
+            for &i in &idx {
+                black_box(cov.marginal_cov(&path.poses[i]));
+            }
+        })
+    });
+
+    // AllMarginals: bulk selected inverse over the whole band -- every pose.
+    let (allmarg_ms, allmarg_reps) = median_ms(budget, cap, || {
+        black_box(path.assemble_covariance(CovMode::AllMarginals).unwrap());
+    });
+
+    CovScaling {
+        n_poses: np,
+        tridiag_pose,
+        perquery_pose,
+        tridiag_last,
+        perquery_last,
+        allmarg_ms,
+        allmarg_reps,
+        last_pose: last,
+        sd_last,
+    }
+}
+
 impl bench_harness::arael::Model for Path {
     type Scalar = f64;
     type Input = Scene;

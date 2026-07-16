@@ -319,6 +319,11 @@ fn main() {
     };
     print_header(rounds, &only, &systems, &probe);
 
+    if std::env::var("BAL_COV").is_ok() {
+        cov_benchmark(&selected, &bench_dir);
+        return;
+    }
+
     let ceres_ok = std::path::Path::new("cpp/build/ceres_bal").exists();
     if !ceres_ok {
         eprintln!("WARNING: cpp/build/ceres_bal missing (cmake -B cpp/build cpp && cmake --build cpp/build); skipping Ceres");
@@ -452,6 +457,84 @@ fn run_g2o(path: &str, ds: &Dataset) -> Ext {
     let params_out = "/tmp/g2o_bal.txt";
     run_ext(std::process::Command::new("cpp/build/g2o_bal"),
         &[path, params_out], params_out, ds)
+}
+
+// ---- Covariance-scaling benchmark (BAL_COV=1) ------------------------------
+
+use bench_harness::cov::{fmt_cell, print_table, run_cov_cpp};
+
+fn cov_benchmark(selected: &[&Bench], bench_dir: &std::path::Path) {
+    let ceres = std::path::Path::new("cpp/build/ceres_bal").exists();
+    let g2o = std::path::Path::new("cpp/build/g2o_bal").exists();
+    let budget = std::env::var("COV_BUDGET_S").unwrap_or_else(|_| "5".into());
+    let cap_s = bench_harness::cov::cell_cap_s();
+    println!("\ncovariance scaling: 6-DOF camera pose + 3-DOF point marginals.");
+    println!("gauge = cameras 0,1 fixed; intrinsics fixed (known calibration).");
+    println!("arael and Ceres build cold (assemble + factor + query); g2o reuses its solve factor (warm).");
+    println!("cells: median ms (reps); budget {budget}s [COV_BUDGET_S]; - not covered; * over the {cap_s:.0}s cap [COV_CELL_CAP_S].");
+    if !ceres {
+        eprintln!("WARNING: cpp/build/ceres_bal missing; skipping Ceres");
+    }
+    if !g2o {
+        eprintln!("WARNING: cpp/build/g2o_bal missing; skipping g2o");
+    }
+
+    for b in selected {
+        let path_buf = bench_dir.join(b.path);
+        if !path_buf.exists() {
+            eprintln!("NOTE: {} missing ({}); run ./fetch_datasets.sh", b.name, b.path);
+            continue;
+        }
+        let path = path_buf.to_str().unwrap();
+        let ds = Rc::new(bal::load(path));
+        let p = Problem { ds: ds.clone(), lambda0: b.lambda0, route: Route::Schur };
+        println!("\n=== {} : {} cameras, {} points ===", b.name, ds.cameras.len(), ds.points.len());
+
+        let ar = arael_runner::cov_bench(&p);
+        let cc = ceres.then(|| run_cov_cpp(std::process::Command::new("cpp/build/ceres_bal"), &[path, "cov"]));
+        let gc = g2o.then(|| run_cov_cpp(std::process::Command::new("cpp/build/g2o_bal"), &[path, "cov"]));
+
+        // Validation: camera[2] pose std dev, each system independently.
+        let s = ar.sd_cam2;
+        println!("  std dev camera[2]: arael  t=({:.4},{:.4},{:.4}) rot=({:.5},{:.5},{:.5})",
+            s[0], s[1], s[2], s[3], s[4], s[5]);
+        if let Some(l) = cc.as_ref().and_then(|c| c.stddev.as_ref()) {
+            println!("                     {l}");
+        }
+        if let Some(l) = gc.as_ref().and_then(|c| c.stddev.as_ref()) {
+            println!("                     {l}");
+        }
+
+        let ceres_cell = |ent: &str, n: usize| cc.as_ref().and_then(|c| c.cell(ent, n));
+        let g2o_cell = |ent: &str, n: usize| gc.as_ref().and_then(|c| c.cell(ent, n));
+        let all_marg = format!("{:.1} ({})", ar.allmarg_ms, ar.allmarg_reps);
+
+        // Camera pose table. Columns are arael's query counts (1,2,8,32,all).
+        let cam_ns: Vec<usize> = ar.perquery_cam.iter().map(|&(n, ..)| n).collect();
+        let last = *cam_ns.last().unwrap();
+        let cam_headers: Vec<String> =
+            cam_ns.iter().map(|&n| if n == last { "all".into() } else { n.to_string() }).collect();
+        println!("  camera pose (6-DOF):");
+        print_table(&cam_headers, &[
+            ("arael PerQuery", ar.perquery_cam.iter().map(|&(_, ms, r)| fmt_cell(Some(&(ms, r)))).collect()),
+            ("arael AllMarginals", cam_ns.iter().map(|&n| if n == last { all_marg.clone() } else { "-".into() }).collect()),
+            ("Ceres SPARSE_QR", cam_ns.iter().map(|&n| fmt_cell(ceres_cell("cam", n))).collect()),
+            ("g2o Marginals", cam_ns.iter().map(|&n| fmt_cell(g2o_cell("cam", n))).collect()),
+        ]);
+
+        // Point table. Columns are arael's point query counts (1,2,8,32,all).
+        let pt_ns: Vec<usize> = ar.perquery_point.iter().map(|&(n, ..)| n).collect();
+        let pt_last = *pt_ns.last().unwrap();
+        let pt_headers: Vec<String> =
+            pt_ns.iter().map(|&n| if n == pt_last { "all".into() } else { n.to_string() }).collect();
+        println!("  point (3-DOF):");
+        print_table(&pt_headers, &[
+            ("arael PerQuery", ar.perquery_point.iter().map(|&(_, ms, r)| fmt_cell(Some(&(ms, r)))).collect()),
+            ("arael AllMarginals", pt_ns.iter().map(|&n| if n == pt_last { all_marg.clone() } else { "-".into() }).collect()),
+            ("Ceres SPARSE_QR", pt_ns.iter().map(|&n| fmt_cell(ceres_cell("point", n))).collect()),
+        ]);
+        println!("  g2o marginalizes points -> camera poses only. AllMarginals covers all cameras AND points at once.");
+    }
 }
 
 /// 9-value camera lines, then 3-value point lines.

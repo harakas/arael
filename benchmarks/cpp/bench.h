@@ -22,6 +22,7 @@
 #include <cstdlib>
 #include <fstream>
 #include <string>
+#include <vector>
 
 namespace bench {
 
@@ -66,6 +67,53 @@ inline double peak_rss_mb() {
         }
     }
     return 0;
+}
+
+// Repeat `f` until `budget_s` seconds elapse (at least once, at most `cap`
+// times); return the median wall-clock milliseconds and write the count to
+// `*reps`. Mirrors harness/src/probe.rs median_ms -- covariance costs span
+// microseconds (one marginal) to seconds (a dense cross-library solve), so a
+// time budget adapts where a fixed rep count cannot, and the count shows how
+// many samples back the median.
+template <typename F>
+double median_ms(double budget_s, int cap, int* reps, F f) {
+    std::vector<double> s;
+    double start = now_ms();
+    while ((int)s.size() < cap) {
+        double t = now_ms();
+        f();
+        s.push_back(now_ms() - t);
+        if ((now_ms() - start) / 1e3 >= budget_s) break;
+    }
+    std::sort(s.begin(), s.end());
+    *reps = (int)s.size();
+    size_t mid = s.size() / 2;
+    return s.empty() ? 0.0 : (s.size() % 2 == 0 ? (s[mid - 1] + s[mid]) / 2.0 : s[mid]);
+}
+
+// Per-cell wall-time cap in ms (COV_CELL_CAP_S, default 120 s). A covariance
+// cell projected or measured past it is left un-run and reported "toolong" (the
+// Rust harness renders `*`), so nothing waits longer than this.
+inline double cov_cell_cap_ms() {
+    return getenv("COV_CELL_CAP_S") ? atof(getenv("COV_CELL_CAP_S")) * 1e3 : 120e3;
+}
+
+// Projected wall time (ms) for a cell at count n, from the previous completed
+// (prev_n, prev_ms), assuming ~linear per-query cost. 0 with no prior.
+inline double cov_project_ms(int prev_n, double prev_ms, int n) {
+    return prev_n > 0 ? prev_ms * (double)n / prev_n : 0.0;
+}
+
+// A spread of `n` indices over [base, base+count): evenly sampled, or all of them
+// when n >= count. Used to pick which cameras/points to query.
+inline std::vector<int> spread(int base, int count, int n) {
+    std::vector<int> idx;
+    if (n >= count) {
+        for (int i = 0; i < count; i++) idx.push_back(base + i);
+    } else {
+        for (int i = 0; i < n; i++) idx.push_back(base + (int)((long)i * count / n));
+    }
+    return idx;
 }
 
 // BENCH_QUICK: the damping sweep's mode. No warmup, one sub-round, and the full

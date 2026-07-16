@@ -28,12 +28,14 @@
 #include <g2o/core/jacobian_workspace.h>
 #include <g2o/core/optimization_algorithm_gauss_newton.h>
 #include <g2o/core/optimization_algorithm_levenberg.h>
+#include <g2o/core/sparse_block_matrix.h>
 #include <g2o/core/sparse_optimizer.h>
 #include <g2o/core/sparse_optimizer_terminate_action.h>
 #include <g2o/solvers/cholmod/linear_solver_cholmod.h>
 
 #include <Eigen/Dense>
 #include <chrono>
+#include <functional>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -324,7 +326,8 @@ struct TrialCounter : public g2o::HyperGraphAction {
 };
 
 static bench::Result solve(const Scene& s, bool lm, int max_iters,
-                           std::vector<double>* pose_out) {
+                           std::vector<double>* pose_out,
+                           const std::function<void(g2o::SparseOptimizer&)>& after = {}) {
     using BlockSolver = g2o::BlockSolver<g2o::BlockSolverTraits<-1, -1>>;
     auto linear = std::make_unique<g2o::LinearSolverCholmod<BlockSolver::PoseMatrixType>>();
     auto block = std::make_unique<BlockSolver>(std::move(linear));
@@ -434,13 +437,76 @@ static bench::Result solve(const Scene& s, bool lm, int max_iters,
             for (int k = 0; k < 6; k++) (*pose_out)[6 * i + k] = e[k];
         }
     }
+    if (after) after(opt);
     return bench::Result{ms, iters, lm ? counter->trials : iters, initial_cost};
 }
 
+// Covariance timing: computeMarginals over pose vertices, for the last pose (the
+// localization query) and N spread poses. g2o recovers the marginal by a sparse
+// selected inverse over its CHOLMOD factor. Machine-readable COV lines; a
+// validation std-dev line for the last pose to stderr.
+static void cov_mode(const Scene& s) {
+    double budget = getenv("COV_BUDGET_S") ? atof(getenv("COV_BUDGET_S")) : 5.0;
+    int cap = getenv("COV_CAP") ? atoi(getenv("COV_CAP")) : 2000;
+    double cell_cap = bench::cov_cell_cap_ms();
+    int last = s.n_poses - 1;
+    solve(s, true, bench::full_iters(200), nullptr, [&](g2o::SparseOptimizer& opt) {
+        auto marg = [&](const std::vector<int>& idx, int& reps) {
+            g2o::OptimizableGraph::VertexContainer q;
+            for (int i : idx) q.push_back(opt.vertex(i));
+            return bench::median_ms(budget, cap, &reps, [&] {
+                g2o::SparseBlockMatrix<Eigen::MatrixXd> spinv;
+                opt.computeMarginals(spinv, q);
+            });
+        };
+        // Last pose (the localization query).
+        int reps = 0;
+        double ms = marg({last}, reps);
+        printf("COV last 1 %.3f %d\n", ms, reps);
+        fflush(stdout);
+        // Spread of N poses.
+        const int ns[] = {1, 2, 8, 32};
+        std::vector<int> queryN(ns, ns + 4);
+        queryN.push_back(s.n_poses);
+        int prev_n = 0;
+        double prev_ms = 0;
+        for (int N : queryN) {
+            if (N > s.n_poses) continue;
+            if (bench::cov_project_ms(prev_n, prev_ms, N) > cell_cap) {
+                printf("COV pose %d toolong 0\n", N);
+                fflush(stdout);
+                continue;
+            }
+            ms = marg(bench::spread(0, s.n_poses, N), reps);
+            if (ms > cell_cap) printf("COV pose %d toolong %d\n", N, reps);
+            else               printf("COV pose %d %.3f %d\n", N, ms, reps);
+            fflush(stdout);
+            prev_n = N;
+            prev_ms = ms;
+        }
+        // Validation: last-pose std dev.
+        g2o::SparseBlockMatrix<Eigen::MatrixXd> spinv;
+        g2o::OptimizableGraph::VertexContainer one{opt.vertex(last)};
+        if (opt.computeMarginals(spinv, one)) {
+            auto* v = static_cast<VertexPose*>(opt.vertex(last));
+            const Eigen::MatrixXd* c = spinv.block(v->hessianIndex(), v->hessianIndex());
+            if (c) {
+                fprintf(stderr, "g2o pose[%d] std dev:", last);
+                for (int d = 0; d < 6; d++) fprintf(stderr, " %.4f", sqrt((*c)(d, d)));
+                fprintf(stderr, "\n");
+            }
+        }
+    });
+}
+
 int main(int argc, char** argv) {
-    if (argc < 4) { fprintf(stderr, "usage: %s <scene.txt> <lm|gn> <solution_out>\n", argv[0]); return 1; }
-    bool lm = std::string(argv[2]) == "lm";
+    if (argc < 3) { fprintf(stderr, "usage: %s <scene.txt> <lm|gn|cov> [solution_out]\n", argv[0]); return 1; }
     Scene s = load(argv[1]);
+    if (std::string(argv[2]) == "cov") {
+        cov_mode(s);
+        return 0;
+    }
+    bool lm = std::string(argv[2]) == "lm";
 
     std::vector<double> poses;
     bench::report(

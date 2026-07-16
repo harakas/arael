@@ -227,6 +227,72 @@ the suite, including the 1723 exploratory one (1806 ms against the full system's
 2910). `schur_stats` reports S's size, density, fill and the split between forming
 it and factorizing it, per dataset.
 
+## Covariance recovery (2026-07-16, Apple M4 Pro, single core)
+
+Parameter covariance at the solution, `Sigma = 2 H^-1`, recovered without
+inverting `H`. Intrinsics are held (known calibration), so a camera marginal is
+its 6-DOF pose; the gauge is fixed by holding cameras 0 and 1. Three arael methods,
+and the cost of scaling from one marginal to all of them:
+
+- **`PerQuery`** factors `H` once, then solves for each queried block -- cheap for
+  a few, linear in the count.
+- **`AllMarginals`** runs one bulk selected inverse over the factor: every camera
+  AND point marginal at once, at a cost that does not grow with how many you read.
+- **Ceres** (`SPARSE_QR`) and **g2o** (`computeMarginals`) recover the same
+  marginals for comparison. arael and Ceres build cold (assemble + factor +
+  query); g2o reuses the factor from the solve it just ran (warm). All agree on the
+  std devs to four figures.
+
+BAL is rank-deficient at the solution (weakly triangulated point depths), which
+Ceres's QR does not invert without a small anchoring prior on the points; arael
+and g2o (Cholesky) factor through it and need none. g2o marginalizes the points,
+so it recovers camera poses only.
+
+Time to recover N marginals from the solved state, median ms (reps). `all` is
+every free camera / every point; `-` a count a method does not cover; `*` a cell
+past the 120 s cap (`COV_CELL_CAP_S`).
+
+Camera pose (6-DOF):
+
+| method | 1 | 2 | 8 | 32 | all |
+|--------|--:|--:|--:|--:|--:|
+| **Ladybug-49** (all=47) | | | | | |
+| arael PerQuery | 44.5 (113) | 46.9 (107) | 60.3 (83) | 112.5 (45) | 145.0 (35) |
+| arael AllMarginals | - | - | - | - | 76.8 (65) |
+| Ceres SPARSE_QR | 276.4 (19) | 279.4 (18) | 296.2 (17) | 356.7 (15) | 395.1 (13) |
+| g2o computeMarginals | 12.9 (200) | 12.9 (200) | 19.1 (200) | 20.9 (200) | 21.5 (200) |
+| **Ladybug-138** (all=136) | | | | | |
+| arael PerQuery | 184.7 (27) | 190.6 (27) | 227.1 (22) | 377.8 (14) | 1020.3 (5) |
+| arael AllMarginals | - | - | - | - | 330.1 (16) |
+| Ceres SPARSE_QR | 1740.2 (3) | 1795.0 (3) | 1834.4 (3) | 3134.3 (2) | 3068.9 (2) |
+| g2o computeMarginals | 17.4 (200) | 54.6 (92) | 281.7 (18) | 294.4 (17) | 293.7 (18) |
+| **Ladybug-372** (all=370) | | | | | |
+| arael PerQuery | 541.4 (10) | 552.1 (10) | 649.3 (8) | 1061.4 (5) | 6745.3 (1) |
+| arael AllMarginals | - | - | - | - | 1488.8 (4) |
+| Ceres SPARSE_QR | 15594 (1) | 15057 (1) | 15281 (1) | 16006 (1) | * |
+| g2o computeMarginals | 345.0 (16) | 3540.6 (2) | 3519.3 (2) | 6817.4 (1) | 7004.9 (1) |
+
+Point (3-DOF). `AllMarginals` is the same bulk pass as above (it returns cameras
+and points together):
+
+| method | 1 | 2 | 8 | 32 | all |
+|--------|--:|--:|--:|--:|--:|
+| **Ladybug-49** (all=7776) | | | | | |
+| arael PerQuery | 44.1 (114) | 45.6 (110) | 54.2 (93) | 87.9 (57) | 10903 (1) |
+| arael AllMarginals | - | - | - | - | 76.8 (65) |
+| Ceres SPARSE_QR | 276.0 (19) | 278.5 (18) | 290.5 (18) | 342.0 (15) | 16049 (1) |
+| **Ladybug-138** (all=19878) | | | | | |
+| arael PerQuery | 183.1 (28) | 186.1 (27) | 210.3 (24) | 302.3 (17) | * |
+| arael AllMarginals | - | - | - | - | 330.1 (16) |
+| Ceres SPARSE_QR | 1779.2 (3) | 1790.5 (3) | 1842.6 (3) | 1992.3 (3) | * |
+| **Ladybug-372** (all=47423) | | | | | |
+| arael PerQuery | 528.5 (10) | 536.3 (10) | 601.4 (9) | 861.4 (6) | * |
+| arael AllMarginals | - | - | - | - | 1488.8 (4) |
+| Ceres SPARSE_QR | 15096 (1) | 15066 (1) | 15136 (1) | 15690 (1) | * |
+
+`BAL_COV=1 cargo run --release` reproduces this (`COV_BUDGET_S` the per-cell
+budget, `COV_CELL_CAP_S` the cap).
+
 ## Running
 
 ```sh
@@ -235,6 +301,7 @@ cmake -B cpp/build cpp && cmake --build cpp/build    # Ceres, g2o (+ cholmod)
 export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1      # before load; see below
 ROUNDS=5 cargo run --release
 BAL_ONLY=1723 cargo run --release                    # the exploratory dataset
+BAL_COV=1 cargo run --release                        # covariance recovery (above)
 cargo run -r --bin schur_stats                       # S's size, density, cost split
 ```
 
@@ -245,6 +312,7 @@ produced it.
 |-----|--------|
 | `ROUNDS` | interleaved rounds; the reported time is the minimum over them |
 | `BAL_ONLY` | substring; runs only the matching datasets (`1723` reaches the exploratory one) |
+| `BAL_COV` | covariance-recovery benchmark instead of the solve (`COV_BUDGET_S` sets the per-cell budget) |
 | `BAL_SYSTEMS` | comma-separated substrings; runs only the matching rows (a filtered run cannot validate across systems) |
 | `ARAEL_LAMBDA0`, `G2O_LAMBDA_INIT`, `CERES_RADIUS0` | initial damping, per system |
 | `BAL_LAMBDAS` | comma-separated damping values: sweep them instead of running the benchmark (below) |

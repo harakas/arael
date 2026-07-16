@@ -16,7 +16,11 @@
 #include "../../cpp/bench.h"
 
 #include <ceres/ceres.h>
+#include <ceres/covariance.h>
 #include <Eigen/Dense>
+#include <algorithm>
+#include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -155,10 +159,10 @@ struct OdoCost {
     }
 };
 
-static bench::Result solve(Scene& s, ceres::LinearSolverType linsolver, int max_iters,
-                           std::vector<double>* pose_out) {
-    std::vector<double> poses = s.pose_init;
-    ceres::Problem problem;
+// Build the four factor types into `problem` over `poses` (initialized from the
+// scene). The residual blocks point into `poses`, which must outlive `problem`.
+static void build_problem(Scene& s, std::vector<double>& poses, ceres::Problem& problem) {
+    poses = s.pose_init;
     for (int i = 0; i < s.n_poses; i++) {
         double* p = &poses[6 * i];
         problem.AddResidualBlock(new ceres::AutoDiffCostFunction<DriftCost, 6, 6>(
@@ -178,6 +182,13 @@ static bench::Result solve(Scene& s, ceres::LinearSolverType linsolver, int max_
                         &s.o_ecr[9 * i], &s.o_eci[3 * i]}),
             nullptr, &poses[6 * s.o_prev[i]], &poses[6 * s.o_cur[i]]);
     }
+}
+
+static bench::Result solve(Scene& s, ceres::LinearSolverType linsolver, int max_iters,
+                           std::vector<double>* pose_out) {
+    std::vector<double> poses;
+    ceres::Problem problem;
+    build_problem(s, poses, problem);
 
     ceres::Solver::Options options;
     options.linear_solver_type = linsolver;
@@ -202,9 +213,102 @@ static bench::Result solve(Scene& s, ceres::LinearSolverType linsolver, int max_
                          2.0 * summary.initial_cost};
 }
 
+// Covariance timing: for each N, the cold cost of Covariance::Compute over N
+// spread pose blocks (SPARSE_QR over SuiteSparse), a fresh Covariance each rep.
+// Machine-readable COV lines for the Rust harness; a validation std-dev line for
+// the last pose (the localization query) to stderr.
+static void cov_mode(Scene& s) {
+    std::vector<double> poses;
+    ceres::Problem problem;
+    build_problem(s, poses, problem);
+
+    ceres::Solver::Options options;
+    options.linear_solver_type = ceres::SPARSE_NORMAL_CHOLESKY;
+    options.max_num_iterations = 200;
+    options.num_threads = 1;
+    options.function_tolerance = 1e-5;
+    options.initial_trust_region_radius = 1e12;
+    if (const char* r = getenv("CERES_RADIUS0")) options.initial_trust_region_radius = atof(r);
+    ceres::Solver::Summary summary;
+    ceres::Solve(options, &problem, &summary);
+
+    ceres::Covariance::Options cov_opts;
+    cov_opts.algorithm_type = ceres::SPARSE_QR;
+    cov_opts.sparse_linear_algebra_library_type = ceres::SUITE_SPARSE;
+    cov_opts.num_threads = 1;
+    {
+        double* p = &poses[0];
+        std::vector<std::pair<const double*, const double*>> b{{p, p}};
+        ceres::Covariance probe(cov_opts);
+        if (!probe.Compute(b, &problem)) cov_opts.sparse_linear_algebra_library_type = ceres::EIGEN_SPARSE;
+    }
+
+    double budget = getenv("COV_BUDGET_S") ? atof(getenv("COV_BUDGET_S")) : 5.0;
+    int cap = getenv("COV_CAP") ? atoi(getenv("COV_CAP")) : 2000;
+    double cell_cap = bench::cov_cell_cap_ms();
+
+    // Last pose (the localization query), timed separately.
+    {
+        double* lp = &poses[6 * (s.n_poses - 1)];
+        std::vector<std::pair<const double*, const double*>> b{{lp, lp}};
+        int reps = 0;
+        double ms = bench::median_ms(budget, cap, &reps, [&] {
+            ceres::Covariance cov(cov_opts);
+            cov.Compute(b, &problem);
+        });
+        printf("COV last 1 %.3f %d\n", ms, reps);
+        fflush(stdout);
+    }
+
+    const int ns[] = {1, 2, 8, 32};
+    std::vector<int> queryN(ns, ns + 4);
+    queryN.push_back(s.n_poses);  // "all"
+    int prev_n = 0;
+    double prev_ms = 0;
+    for (int N : queryN) {
+        if (N > s.n_poses) continue;
+        if (bench::cov_project_ms(prev_n, prev_ms, N) > cell_cap) {
+            printf("COV pose %d toolong 0\n", N);
+            fflush(stdout);
+            continue;
+        }
+        std::vector<int> idx = bench::spread(0, s.n_poses, N);
+        std::vector<std::pair<const double*, const double*>> blocks;
+        for (int i : idx) blocks.emplace_back(&poses[6 * i], &poses[6 * i]);
+        bool ok = true;
+        int reps = 0;
+        double ms = bench::median_ms(budget, cap, &reps, [&] {
+            ceres::Covariance cov(cov_opts);
+            if (!cov.Compute(blocks, &problem)) ok = false;
+        });
+        if (!ok)                printf("COV pose %d nan 0\n", N);
+        else if (ms > cell_cap) printf("COV pose %d toolong %d\n", N, reps);
+        else                    printf("COV pose %d %.3f %d\n", N, ms, reps);
+        fflush(stdout);
+        prev_n = N;
+        prev_ms = ms;
+    }
+
+    // Validation: last-pose std dev.
+    double* last = &poses[6 * (s.n_poses - 1)];
+    ceres::Covariance covl(cov_opts);
+    std::pair<const double*, const double*> bl{last, last};
+    if (covl.Compute({bl}, &problem)) {
+        double c[36];
+        covl.GetCovarianceBlock(last, last, c);
+        fprintf(stderr, "ceres pose[%d] std dev:", s.n_poses - 1);
+        for (int d = 0; d < 6; d++) fprintf(stderr, " %.4f", sqrt(c[d * 6 + d]));
+        fprintf(stderr, "\n");
+    }
+}
+
 int main(int argc, char** argv) {
-    if (argc < 3) { fprintf(stderr, "usage: %s <scene.txt> <solution_out> [linsolver]\n", argv[0]); return 1; }
+    if (argc < 3) { fprintf(stderr, "usage: %s <scene.txt> <solution_out|cov> [linsolver]\n", argv[0]); return 1; }
     Scene s = load(argv[1]);
+    if (std::string(argv[2]) == "cov") {
+        cov_mode(s);
+        return 0;
+    }
     ceres::LinearSolverType linsolver = ceres::SPARSE_NORMAL_CHOLESKY;
     if (argc > 3) {
         std::string t = argv[3];

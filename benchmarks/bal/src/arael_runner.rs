@@ -346,6 +346,92 @@ impl bench_harness::arael::Model for Scene {
     }
 }
 
+/// One covariance-scaling run: `(N, median_ms, reps)` per query count.
+pub struct CovScaling {
+    pub perquery_cam: Vec<(usize, f64, usize)>,
+    pub perquery_point: Vec<(usize, f64, usize)>,
+    pub allmarg_ms: f64,
+    pub allmarg_reps: usize,
+    pub sd_cam2: [f64; 6],
+}
+
+// Solve the gauge-fixed problem, then time covariance recovery as the query count
+// scales. Known calibration: intrinsics (f,k1,k2) held constant, so camera
+// marginals are 6-DOF poses; points are 3-DOF. PerQuery times the full cold cost
+// (assemble H + factor + query N marginals) each rep; AllMarginals is the bulk
+// selected inverse over the whole factor (every camera and point at once).
+pub fn cov_bench(problem: &Problem) -> CovScaling {
+    use arael::covariance::{CovMode, Covariance};
+    use bench_harness::cov::{query_counts, scale_counts, spread};
+    use bench_harness::probe::median_ms;
+    use std::hint::black_box;
+    use std::time::Duration;
+
+    let mut scene = build_f64(&problem.ds);
+    // Known calibration: intrinsics are near-unconstrained when a camera's points
+    // cluster near the image center, so holding them constant keeps H positive
+    // definite and recovers 6-DOF pose covariance.
+    for c in &mut scene.cameras {
+        c.intr.optimize = false;
+    }
+    // Gauge fix (BAL is a similarity): hold cameras 0 and 1 fully constant.
+    scene.cameras[0].t.optimize = false;
+    scene.cameras[0].ea.optimize = false;
+    if scene.cameras.len() > 1 {
+        scene.cameras[1].t.optimize = false;
+        scene.cameras[1].ea.optimize = false;
+    }
+    let mut params: Vec<f64> = Vec::new();
+    scene.serialize64(&mut params);
+    let cfg = bench_harness::arael::config::<Scene>(problem, 100);
+    let result = solve64_schur(&params, &mut scene, &cfg);
+    scene.deserialize64(&result.x);
+
+    let (ncam, npt) = (scene.cameras.len(), scene.points.len());
+    let free = ncam - 2; // cameras 0 and 1 are the fixed gauge
+    let budget = Duration::from_secs_f64(
+        std::env::var("COV_BUDGET_S").ok().and_then(|v| v.parse().ok()).unwrap_or(5.0));
+    let cap: usize = std::env::var("COV_CAP").ok().and_then(|v| v.parse().ok()).unwrap_or(200);
+    let cap_s = bench_harness::cov::cell_cap_s();
+
+    // Validation: camera 2's 6-DOF pose std dev (translation, then rotation).
+    let sd_cam2 = {
+        let cov = scene.assemble_covariance(CovMode::PerQuery).expect("gauge-fixed H is PD");
+        let m = cov.marginal_cov(&scene.cameras[2]);
+        std::array::from_fn(|d| m[(d, d)].sqrt())
+    };
+
+    // PerQuery camera poses: 1, 2, 8, 32, all.
+    let perquery_cam = scale_counts(query_counts(free, true), cap_s, |n| {
+        let idx = spread(2, free, n);
+        median_ms(budget, cap, || {
+            let cov = scene.assemble_covariance(CovMode::PerQuery).unwrap();
+            for &i in &idx {
+                black_box(cov.marginal_cov(&scene.cameras[i]));
+            }
+        })
+    });
+
+    // PerQuery points: 1, 2, 8, 32, all -- "all" via per-query usually hits the
+    // cap (that is AllMarginals' job), which the table shows as `*`.
+    let perquery_point = scale_counts(query_counts(npt, true), cap_s, |n| {
+        let idx = spread(0, npt, n);
+        median_ms(budget, cap, || {
+            let cov = scene.assemble_covariance(CovMode::PerQuery).unwrap();
+            for &i in &idx {
+                black_box(cov.marginal_cov(&scene.points[i]));
+            }
+        })
+    });
+
+    // AllMarginals: bulk selected inverse -- every camera and point at once.
+    let (allmarg_ms, allmarg_reps) = median_ms(budget, cap, || {
+        black_box(scene.assemble_covariance(CovMode::AllMarginals).unwrap());
+    });
+
+    CovScaling { perquery_cam, perquery_point, allmarg_ms, allmarg_reps, sd_cam2 }
+}
+
 impl bench_harness::arael::Model for SceneF {
     type Scalar = f32;
     type Input = Problem;

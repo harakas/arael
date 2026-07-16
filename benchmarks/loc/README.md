@@ -179,6 +179,37 @@ SLAM panel from `benchmarks/slam`'s 300-pose rows. After re-running either
 benchmark, update `PANELS` (full-iter and 1st-iter per system) and re-run the
 script.
 
+## Covariance recovery (2026-07-16, Apple M4 Pro, single core)
+
+Pose covariance at the solution, `Sigma = 2 H^-1`. The map is fixed, so `H` is
+block-tridiagonal over the pose chain, and three arael methods apply:
+
+- **`TriDiagonal`** runs the band forward/backward Schur recursion, no
+  factorization -- the last pose (the localization query) falls out of the
+  forward pass the solve already computes.
+- **`PerQuery`** factors `H` and solves per query; **`AllMarginals`** is one bulk
+  selected inverse over the factor.
+- **Ceres** (`SPARSE_QR`), **GTSAM** (`Marginals`) and **g2o** (`computeMarginals`)
+  recover the same marginals for comparison; Ceres and GTSAM build cold, g2o reuses
+  the factor from the solve it just ran (warm). All agree on the std devs to four
+  figures.
+
+Cost to recover N pose marginals from the solved state, 300 poses, median ms
+(reps). `1 (last)` is the last pose (the localization query); the other columns
+spread N poses over the trajectory.
+
+| method | 1 (last) | 1 | 2 | 8 | 32 | all (300) |
+|--------|--:|--:|--:|--:|--:|--:|
+| arael TriDiagonal | 2.2 (2000) | 2.4 (2000) | 2.3 (2000) | 2.3 (2000) | 2.3 (2000) | 2.4 (2000) |
+| arael PerQuery | 2.8 (1744) | 2.8 (1793) | 2.8 (1750) | 3.2 (1570) | 4.5 (1090) | 19.6 (254) |
+| arael AllMarginals | - | - | - | - | - | 2.8 (1773) |
+| Ceres SPARSE_QR | 39.8 (124) | 39.8 (126) | 40.3 (122) | 42.7 (116) | 43.3 (115) | 74.0 (68) |
+| GTSAM Marginals | 22.5 (215) | 23.5 (211) | 23.1 (214) | 22.9 (218) | 23.1 (216) | 24.2 (206) |
+| g2o computeMarginals | 1.1 (2000) | 0.2 (2000) | 0.6 (2000) | 1.0 (2000) | 1.1 (2000) | 1.3 (2000) |
+
+`LOC_COV=1 cargo run --release` reproduces this (`LOC_POSES` sets the size,
+`COV_BUDGET_S` the per-cell budget).
+
 ## Running
 
 ```sh
@@ -188,6 +219,7 @@ cmake -B cpp/build cpp && cmake --build cpp/build   # Ceres, g2o, GTSAM
 export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1     # before load; see below
 ROUNDS=10 cargo run --release                       # 60 poses (default)
 LOC_POSES=300 ROUNDS=5 cargo run --release          # larger tier
+LOC_COV=1 cargo run --release                       # covariance recovery (above)
 RUN_TINY=1 cargo run --release                      # include tiny-solver (off by default)
 VERBOSE=1 cargo run --release                       # arael per-iteration trace
 G2O_VERIFY_JAC=1 cpp/build/g2o_loc scene.txt lm out.txt     # check g2o Jacobians
@@ -200,6 +232,7 @@ what produced it.
 | env | effect |
 |-----|--------|
 | `LOC_POSES` | scene size (60 default; landmarks scale as 4N) |
+| `LOC_COV` | covariance-recovery benchmark instead of the solve (`COV_BUDGET_S`, `COV_CELL_CAP_S`) |
 | `ROUNDS` | interleaved rounds; the reported time is the minimum over them |
 | `RUN_TINY` | include tiny-solver (off by default: an order of magnitude slower than the field) |
 | `LOC_SYSTEMS` | comma-separated substrings; runs only the matching rows (a filtered run cannot validate across systems) |

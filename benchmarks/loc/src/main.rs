@@ -200,6 +200,11 @@ fn main() {
         println!("{} initial cost matches reference to {:.2e}", name, rel);
     }
 
+    if std::env::var("LOC_COV").is_ok() {
+        cov_benchmark(&scene);
+        return;
+    }
+
     if std::env::var("LOC_PHASES").is_ok() {
         phase_timing(&scene, rounds);
         return;
@@ -357,6 +362,80 @@ fn run_gtsam(scene_path: &str, n_poses: usize) -> Ext {
     let sol_out = "/tmp/loc_gtsam_sol.txt";
     run_ext(std::process::Command::new("cpp/build/gtsam_loc"),
         &[scene_path, "lm", sol_out], sol_out, n_poses)
+}
+
+// ---- Covariance-scaling benchmark (LOC_COV=1) ------------------------------
+
+use bench_harness::cov::{fmt_cell, print_table, run_cov_cpp};
+
+// Pose-covariance recovery cost as the query count scales: arael's band-
+// specialized TriDiagonal, general PerQuery and AllMarginals, against Ceres and
+// GTSAM. Validates that the last pose's std dev (the localization query) agrees.
+fn cov_benchmark(scene: &Scene) {
+    let budget: f64 = std::env::var("COV_BUDGET_S").ok().and_then(|v| v.parse().ok()).unwrap_or(5.0);
+    let cap: usize = std::env::var("COV_CAP").ok().and_then(|v| v.parse().ok()).unwrap_or(2000);
+    let ceres = std::path::Path::new("cpp/build/ceres_loc").exists();
+    let gtsam = std::path::Path::new("cpp/build/gtsam_loc").exists();
+    let g2o = std::path::Path::new("cpp/build/g2o_loc").exists();
+    let scene_path = "/tmp/loc_scene.txt";
+    scene::write_scene(scene, scene_path);
+
+    let cap_s = bench_harness::cov::cell_cap_s();
+    println!("\ncovariance scaling: 6-DOF pose marginals (fixed map -> block-tridiagonal H).");
+    println!("`1 (last)` is the last pose, the localization query; other columns spread N poses over the trajectory.");
+    println!("TriDiagonal is a band forward/backward pass, no factorization; PerQuery, AllMarginals, Ceres and GTSAM factor cold; g2o reuses its solve factor (warm).");
+    println!("cells: median ms (reps); budget {budget}s [COV_BUDGET_S]; - not covered; * over the {cap_s:.0}s cap [COV_CELL_CAP_S].");
+    for (ok, name) in [(ceres, "ceres_loc"), (gtsam, "gtsam_loc"), (g2o, "g2o_loc")] {
+        if !ok {
+            eprintln!("WARNING: cpp/build/{name} missing; skipping it");
+        }
+    }
+
+    let ar = arael_runner::cov_bench(scene, budget, cap);
+    let cc = ceres.then(|| run_cov_cpp(std::process::Command::new("cpp/build/ceres_loc"), &[scene_path, "cov"]));
+    let gc = gtsam.then(|| run_cov_cpp(std::process::Command::new("cpp/build/gtsam_loc"), &[scene_path, "cov"]));
+    let g2 = g2o.then(|| run_cov_cpp(std::process::Command::new("cpp/build/g2o_loc"), &[scene_path, "cov"]));
+
+    println!("\n=== {} poses ===", ar.n_poses);
+    print!("  std dev pose[{}] (last): arael ", ar.last_pose);
+    for v in &ar.sd_last {
+        print!(" {v:.4}");
+    }
+    println!();
+    for c in [&cc, &gc, &g2] {
+        if let Some(l) = c.as_ref().and_then(|c| c.stddev.as_ref()) {
+            println!("                          {l}");
+        }
+    }
+
+    let all_marg = format!("{:.1} ({})", ar.allmarg_ms, ar.allmarg_reps);
+    let ns: Vec<usize> = ar.tridiag_pose.iter().map(|&(n, ..)| n).collect();
+    let last = *ns.last().unwrap();
+    let mut headers = vec!["1 (last)".to_string()];
+    headers.extend(ns.iter().map(|&n| if n == last { "all".into() } else { n.to_string() }));
+
+    // Each row: the last-pose cell, then the spread cells.
+    let ext = |cpp: &Option<bench_harness::cov::CovCpp>| -> Vec<String> {
+        let mut row = vec![fmt_cell(cpp.as_ref().and_then(|c| c.cell("last", 1)))];
+        row.extend(ns.iter().map(|&n| fmt_cell(cpp.as_ref().and_then(|c| c.cell("pose", n)))));
+        row
+    };
+    let mut tridiag = vec![fmt_cell(Some(&ar.tridiag_last))];
+    tridiag.extend(ar.tridiag_pose.iter().map(|&(_, ms, r)| fmt_cell(Some(&(ms, r)))));
+    let mut perquery = vec![fmt_cell(Some(&ar.perquery_last))];
+    perquery.extend(ar.perquery_pose.iter().map(|&(_, ms, r)| fmt_cell(Some(&(ms, r)))));
+    let mut allmarg = vec!["-".to_string()];
+    allmarg.extend(ns.iter().map(|&n| if n == last { all_marg.clone() } else { "-".into() }));
+
+    println!("  pose (6-DOF):");
+    print_table(&headers, &[
+        ("arael TriDiagonal", tridiag),
+        ("arael PerQuery", perquery),
+        ("arael AllMarginals", allmarg),
+        ("Ceres SPARSE_QR", ext(&cc)),
+        ("GTSAM Marginals", ext(&gc)),
+        ("g2o computeMarginals", ext(&g2)),
+    ]);
 }
 
 // The geometry the shared table is generic over.

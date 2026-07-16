@@ -1,5 +1,34 @@
 // Timing probes, and the rules for when a probe's number means anything.
 
+use std::time::{Duration, Instant};
+
+/// Repeat `f` until `budget` elapses -- at least once, never more than `cap`
+/// times -- and return the median wall-clock milliseconds together with the
+/// repetition count. Covariance measurements span microseconds (one marginal) to
+/// seconds (a cross-library dense solve), so a fixed rep count either wastes time
+/// or rests the median on a single noisy sample; a time budget adapts, and
+/// reporting the count lets the reader see how many samples back each number.
+pub fn median_ms(budget: Duration, cap: usize, mut f: impl FnMut()) -> (f64, usize) {
+    let mut samples: Vec<f64> = Vec::new();
+    let start = Instant::now();
+    while samples.len() < cap {
+        let t = Instant::now();
+        f();
+        samples.push(t.elapsed().as_secs_f64() * 1e3);
+        if start.elapsed() >= budget {
+            break;
+        }
+    }
+    samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let mid = samples.len() / 2;
+    let median = if samples.len() % 2 == 0 {
+        (samples[mid - 1] + samples[mid]) / 2.0
+    } else {
+        samples[mid]
+    };
+    (median, samples.len())
+}
+
 /// Sub-rounds per probe: the reported time is the fastest of these.
 ///
 /// One complete iteration is read off as t(2 iterations) - t(1 iteration).

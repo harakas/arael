@@ -610,3 +610,83 @@ pub type RunOut = bench_harness::table::Row<Solution>;
 
 pub fn run(scene: &Scene) -> RunOut { bench_harness::arael::run::<Path>(scene) }
 pub fn run_f32(scene: &Scene) -> RunOut { bench_harness::arael::run::<PathF>(scene) }
+
+// ----------------------------------------------------------- covariance
+
+use arael::covariance::{CovMode, Covariance};
+
+/// One covariance-scaling run: `(N, median_ms, reps)` per query count, for poses
+/// and landmarks, plus the AllMarginals bulk cost and a validation std dev.
+pub struct CovScaling {
+    pub n_poses: usize,
+    pub n_landmarks: usize,
+    pub perquery_pose: Vec<(usize, f64, usize)>,
+    pub perquery_lm: Vec<(usize, f64, usize)>,
+    pub allmarg_ms: f64,
+    pub allmarg_reps: usize,
+    pub mid_pose: usize,
+    pub sd_mid_pose: Vec<f64>,
+}
+
+// Solve the slam scene (f64), then time covariance recovery as the query count
+// scales, for poses (6-DOF) and landmarks. PerQuery times the full cold cost
+// (assemble H + factor + query N marginals) each rep; AllMarginals is the bulk
+// selected inverse over the whole factor (every pose and landmark at once).
+pub fn cov_bench(scene: &Scene, budget_s: f64, cap: usize) -> CovScaling {
+    use bench_harness::cov::{cell_cap_s, query_counts, scale_counts, spread};
+    use bench_harness::probe::median_ms;
+    use std::hint::black_box;
+    use std::time::Duration;
+
+    let mut path = build(scene);
+    let mut params: Vec<f64> = Vec::new();
+    path.serialize64(&mut params);
+    let result = solve64(&params, &mut path, &cfg(200));
+    path.deserialize64(&result.x);
+    let (np, nl) = (path.poses.len(), path.landmarks.len());
+    let budget = Duration::from_secs_f64(budget_s);
+    let cap_s = cell_cap_s();
+
+    // Validation: middle-pose std dev (a shared value-check anchor).
+    let mid_pose = np / 2;
+    let sd_mid_pose = path.assemble_covariance(CovMode::PerQuery).unwrap().std_dev(&path.poses[mid_pose]);
+
+    // PerQuery poses: 1, 2, 8, 32, all.
+    let perquery_pose = scale_counts(query_counts(np, true), cap_s, |n| {
+        let idx = spread(0, np, n);
+        median_ms(budget, cap, || {
+            let cov = path.assemble_covariance(CovMode::PerQuery).unwrap();
+            for &i in &idx {
+                black_box(cov.marginal_cov(&path.poses[i]));
+            }
+        })
+    });
+
+    // PerQuery landmarks: 1, 2, 8, 32, all -- "all" via per-query usually hits the
+    // cap (that is AllMarginals' job), which the table shows as `*`.
+    let perquery_lm = scale_counts(query_counts(nl, true), cap_s, |n| {
+        let idx = spread(0, nl, n);
+        median_ms(budget, cap, || {
+            let cov = path.assemble_covariance(CovMode::PerQuery).unwrap();
+            for &i in &idx {
+                black_box(cov.marginal_cov(&path.landmarks[i]));
+            }
+        })
+    });
+
+    // AllMarginals: bulk selected inverse -- every pose and landmark at once.
+    let (allmarg_ms, allmarg_reps) = median_ms(budget, cap, || {
+        black_box(path.assemble_covariance(CovMode::AllMarginals).unwrap());
+    });
+
+    CovScaling {
+        n_poses: np,
+        n_landmarks: nl,
+        perquery_pose,
+        perquery_lm,
+        allmarg_ms,
+        allmarg_reps,
+        mid_pose,
+        sd_mid_pose,
+    }
+}

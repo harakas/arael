@@ -11,6 +11,7 @@
 // which systems to run. Everything else lives here.
 
 pub mod arael;
+pub mod cov;
 pub mod external;
 pub mod header;
 #[cfg(feature = "factrs")]

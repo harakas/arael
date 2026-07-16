@@ -17,7 +17,11 @@
 
 #include "../../cpp/bench.h"
 #include <ceres/ceres.h>
+#include <ceres/covariance.h>
 #include <Eigen/Dense>
+#include <algorithm>
+#include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
@@ -178,11 +182,12 @@ struct OdoCost {
     }
 };
 
-static bench::Result solve(Scene& s, ceres::LinearSolverType linsolver, int max_iters,
-                       std::vector<double>* pose_out, std::vector<double>* lm_out) {
-    std::vector<double> poses = s.pose_init;
-    std::vector<double> lms = s.lm_init;
-    ceres::Problem problem;
+// Build the six factor types into `problem` over `poses`/`lms` (initialized
+// from the scene). Blocks point into those vectors, which must outlive `problem`.
+static void build_problem(Scene& s, std::vector<double>& poses, std::vector<double>& lms,
+                          ceres::Problem& problem) {
+    poses = s.pose_init;
+    lms = s.lm_init;
     for (int i = 0; i < s.n_poses; i++) {
         double* p = &poses[6 * i];
         problem.AddResidualBlock(new ceres::AutoDiffCostFunction<GpsCost, 3, 6>(
@@ -208,6 +213,13 @@ static bench::Result solve(Scene& s, ceres::LinearSolverType linsolver, int max_
                         &s.o_ecr[9 * i], &s.o_eci[3 * i]}),
             nullptr, &poses[6 * s.o_prev[i]], &poses[6 * s.o_cur[i]]);
     }
+}
+
+static bench::Result solve(Scene& s, ceres::LinearSolverType linsolver, int max_iters,
+                       std::vector<double>* pose_out, std::vector<double>* lm_out) {
+    std::vector<double> poses, lms;
+    ceres::Problem problem;
+    build_problem(s, poses, lms, problem);
 
     ceres::Solver::Options options;
     options.linear_solver_type = linsolver;
@@ -242,9 +254,95 @@ static long peak_rss_kb() {
     return 0;
 }
 
+// Covariance timing: for each entity (pose 6-DOF, landmark 3-DOF) and each N, the
+// cold cost of Covariance::Compute over N spread blocks (a fresh Covariance each
+// rep -- Ceres has no separable factor-then-extract). Machine-readable COV lines
+// for the Rust harness; a validation std-dev line goes to stderr. SLAM's GPS
+// priors anchor the gauge, so no prior is needed.
+static void cov_mode(Scene& s) {
+    std::vector<double> poses, lms;
+    ceres::Problem problem;
+    build_problem(s, poses, lms, problem);
+
+    ceres::Solver::Options options;
+    options.linear_solver_type = ceres::SPARSE_NORMAL_CHOLESKY;
+    options.max_num_iterations = 200;
+    options.num_threads = 1;
+    options.function_tolerance = 1e-5;
+    options.initial_trust_region_radius = 1e12;
+    if (const char* r = getenv("CERES_RADIUS0")) options.initial_trust_region_radius = atof(r);
+    ceres::Solver::Summary summary;
+    ceres::Solve(options, &problem, &summary);
+
+    ceres::Covariance::Options opts;
+    opts.algorithm_type = ceres::SPARSE_QR;
+    opts.sparse_linear_algebra_library_type = ceres::SUITE_SPARSE;
+    opts.num_threads = 1;
+    {
+        const double* p = &poses[0];
+        std::vector<std::pair<const double*, const double*>> b{{p, p}};
+        ceres::Covariance probe(opts);
+        if (!probe.Compute(b, &problem)) opts.sparse_linear_algebra_library_type = ceres::EIGEN_SPARSE;
+    }
+
+    double budget = getenv("COV_BUDGET_S") ? atof(getenv("COV_BUDGET_S")) : 5.0;
+    int cap = getenv("COV_CAP") ? atoi(getenv("COV_CAP")) : 2000;
+    double cell_cap = bench::cov_cell_cap_ms();
+    const int ns[] = {1, 2, 8, 32};
+    for (int e = 0; e < 2; e++) {
+        const char* name = (e == 0) ? "pose" : "landmark";
+        int count = (e == 0) ? s.n_poses : s.n_landmarks;
+        int stride = (e == 0) ? 6 : 3;
+        double* blk = (e == 0) ? poses.data() : lms.data();
+        std::vector<int> queryN(ns, ns + 4);
+        queryN.push_back(count);  // "all"
+        int prev_n = 0;
+        double prev_ms = 0;
+        for (int N : queryN) {
+            if (N > count) continue;
+            if (bench::cov_project_ms(prev_n, prev_ms, N) > cell_cap) {
+                printf("COV %s %d toolong 0\n", name, N);
+                fflush(stdout);
+                continue;
+            }
+            std::vector<int> idx = bench::spread(0, count, N);
+            std::vector<std::pair<const double*, const double*>> blocks;
+            for (int i : idx) blocks.emplace_back(&blk[stride * i], &blk[stride * i]);
+            bool ok = true;
+            int reps = 0;
+            double ms = bench::median_ms(budget, cap, &reps, [&] {
+                ceres::Covariance cov(opts);
+                if (!cov.Compute(blocks, &problem)) ok = false;
+            });
+            if (!ok)                printf("COV %s %d nan 0\n", name, N);
+            else if (ms > cell_cap) printf("COV %s %d toolong %d\n", name, N, reps);
+            else                    printf("COV %s %d %.3f %d\n", name, N, ms, reps);
+            fflush(stdout);
+            prev_n = N;
+            prev_ms = ms;
+        }
+    }
+
+    // Validation: middle-pose std dev.
+    int mid = s.n_poses / 2;
+    ceres::Covariance covm(opts);
+    std::pair<const double*, const double*> bm{&poses[6 * mid], &poses[6 * mid]};
+    if (covm.Compute({bm}, &problem)) {
+        double c[36];
+        covm.GetCovarianceBlock(&poses[6 * mid], &poses[6 * mid], c);
+        fprintf(stderr, "ceres pose[%d] std dev:", mid);
+        for (int d = 0; d < 6; d++) fprintf(stderr, " %.4f", sqrt(c[d * 6 + d]));
+        fprintf(stderr, "\n");
+    }
+}
+
 int main(int argc, char** argv) {
-    if (argc < 3) { fprintf(stderr, "usage: %s <scene.txt> <solution_out> [linsolver]\n", argv[0]); return 1; }
+    if (argc < 3) { fprintf(stderr, "usage: %s <scene.txt> <solution_out|cov> [linsolver]\n", argv[0]); return 1; }
     Scene s = load(argv[1]);
+    if (std::string(argv[2]) == "cov") {
+        cov_mode(s);
+        return 0;
+    }
     ceres::LinearSolverType linsolver = ceres::SPARSE_NORMAL_CHOLESKY;
     if (argc > 3) {
         std::string t = argv[3];

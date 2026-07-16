@@ -439,6 +439,45 @@ The SLAM panel of the bar chart embedded in the top-level README
 column above; after re-running the benchmark, update its `PANELS`
 table from the results and re-run it.
 
+## Covariance recovery (2026-07-16, Apple M4 Pro, single core)
+
+Parameter covariance at the solution, `Sigma = 2 H^-1`, for poses (6-DOF) and
+landmarks (3-DOF):
+
+- **`PerQuery`** factors `H` once, then solves for each queried block.
+- **`AllMarginals`** runs one bulk selected inverse over the factor: every pose
+  AND landmark marginal at once, at a cost independent of how many you read.
+- **Ceres** (`SPARSE_QR`), **GTSAM** (`Marginals`) and **g2o** (`computeMarginals`)
+  recover the same marginals for comparison; Ceres and GTSAM build cold, g2o reuses
+  the factor from the solve it just ran (warm). g2o marginalizes the landmarks, so
+  it recovers poses only. All agree on the std devs to four figures.
+
+Time to recover N marginals from the solved state, 300 poses / 1200 landmarks,
+median ms (reps). `-` a count a method does not cover; `*` a cell past the 120 s
+cap (`COV_CELL_CAP_S`).
+
+Pose (6-DOF):
+
+| method | 1 | 2 | 8 | 32 | all (300) |
+|--------|--:|--:|--:|--:|--:|
+| arael PerQuery | 132.1 (38) | 136.5 (37) | 158.8 (32) | 249.2 (21) | 1290.1 (4) |
+| arael AllMarginals | - | - | - | - | 484.6 (11) |
+| Ceres SPARSE_QR | 4060 (2) | 4098 (2) | 4185 (2) | 4406 (2) | 7176 (1) |
+| GTSAM Marginals | 198.3 (25) | 1330.8 (4) | 2030.0 (3) | 4862.6 (2) | 37268.5 (1) |
+| g2o computeMarginals | 2912.4 (2) | 2733.5 (2) | 3493.5 (2) | 4013.4 (2) | 4285.6 (2) |
+
+Landmark (3-DOF). `AllMarginals` is the same bulk pass (poses and landmarks together):
+
+| method | 1 | 2 | 8 | 32 | all (1200) |
+|--------|--:|--:|--:|--:|--:|
+| arael PerQuery | 130.7 (39) | 132.8 (38) | 147.1 (34) | 201.3 (25) | 2899.3 (2) |
+| arael AllMarginals | - | - | - | - | 484.6 (11) |
+| Ceres SPARSE_QR | 4083 (2) | 4100 (2) | 4144 (2) | 4331 (2) | * |
+| GTSAM Marginals | 471.6 (11) | 660.6 (8) | 2090.7 (3) | 4987.4 (2) | * |
+
+`SLAM_COV=1 cargo run --release` reproduces this (`SLAM_POSES` sets the size,
+`COV_BUDGET_S` the per-cell budget).
+
 ## Running
 
 ```sh
@@ -451,6 +490,7 @@ cmake -B cpp/build cpp && cmake --build cpp/build   # Ceres, g2o, GTSAM
 export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1     # before load; see Methodology
 ROUNDS=32 cargo run --release                       # 60 poses (default)
 SLAM_POSES=300 ROUNDS=32 cargo run --release
+SLAM_POSES=300 SLAM_COV=1 cargo run --release       # covariance recovery (above)
 RUN_TINY=1 cargo run --release                      # include tiny-solver (off by default)
 VERBOSE=1 cargo run --release                       # arael per-iteration trace
 G2O_VERIFY_JAC=1 cpp/build/g2o_slam scene.txt lm out.txt     # check g2o Jacobians
@@ -463,6 +503,7 @@ what produced it.
 | env | effect |
 |-----|--------|
 | `SLAM_POSES` | scene size (60 default; 120, 300) |
+| `SLAM_COV` | covariance-recovery benchmark instead of the solve (`COV_BUDGET_S`, `COV_CELL_CAP_S`) |
 | `ROUNDS` | interleaved rounds; the reported time is the minimum over them |
 | `RUN_TINY` | include tiny-solver (off by default: an order of magnitude slower than the field) |
 | `SLAM_SYSTEMS` | comma-separated substrings; runs only the matching rows (a filtered run cannot validate across systems) |
