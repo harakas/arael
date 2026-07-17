@@ -90,6 +90,40 @@ fn fit_with_custom_config() {
         "should recover the line, got a={} b={}", m.a.value, m.b.value);
 }
 
+// Block M-estimator on fit(...): `loss = |s| rho(s)` over the squared residual
+// s = r^2, distinct from the per-element Starship wrap above. Bare-expr body
+// plus a trailing loss.
+#[arael::model]
+#[arael(fit(data, |e| a * e.x + b - e.y, loss = |s| loss_cauchy(s, k)))]
+struct CauchyModel {
+    a: Param<f32>,
+    b: Param<f32>,
+    data: Vec<Pt>,
+    k: f32,
+}
+
+#[test]
+fn block_loss_cauchy_ignores_outliers() {
+    // True line y = 2x - 1 plus two gross outliers. The Cauchy block loss
+    // tracks the inliers; plain OLS is dragged off.
+    let xs: Vec<f32> = (0..20).map(|i| i as f32 * 0.5 - 5.0).collect();
+    let mut data = line_data(2.0, -1.0, &xs);
+    data.push(Pt { x: 4.0, y: 40.0 });
+    data.push(Pt { x: -4.0, y: 40.0 });
+
+    let (a_ols, b_ols) = ols(&data);
+    let mut m = CauchyModel { a: Param::new(0.0), b: Param::new(0.0), data, k: 0.5 };
+    let r = m.fit_with(&LmConfig { max_iters: 100, ..Default::default() });
+    assert!(r.end_cost < r.start_cost);
+
+    let robust_err = (m.a.value - 2.0).abs() + (m.b.value + 1.0).abs();
+    let ols_err = (a_ols - 2.0).abs() + (b_ols + 1.0).abs();
+    assert!(robust_err < 0.2,
+        "robust should recover the true line, err {} (a={} b={})", robust_err, m.a.value, m.b.value);
+    assert!(robust_err < ols_err * 0.5,
+        "robust (err {}) should clearly beat OLS (err {})", robust_err, ols_err);
+}
+
 // fit64: the f64 variant of the fit attribute -- same shorthand, f64
 // parameters, config, and result throughout.
 #[arael::model]

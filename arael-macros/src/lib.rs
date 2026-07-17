@@ -381,6 +381,17 @@ fn extract_constraint_label(tokens: &[proc_macro2::TokenTree]) -> Option<String>
 /// }
 /// ```
 ///
+/// A trailing `loss = |s| rho(s)` applies a block M-estimator to each point's
+/// squared residual `s = r^2`: the cost becomes `sum rho(s)` and each point's
+/// gradient and Gauss-Newton Hessian are scaled by the weight `rho'(s)`. Use a
+/// built-in `loss_huber` / `loss_cauchy` / `loss_tukey`, or any arael-sym
+/// expression in `s`:
+///
+/// ```ignore
+/// #[arael(fit(data, |e| a * e.x + b - e.y, loss = |s| loss_cauchy(s, k)))]
+/// struct RobustLine { a: Param<f32>, b: Param<f32>, data: Vec<Pt>, k: f32 }
+/// ```
+///
 /// ## `#[arael(root)]` / `#[arael(root, f32)]`
 ///
 /// Mark this struct as the optimization root. Triggers code generation for
@@ -2057,6 +2068,9 @@ struct FitAttr {
     body_stmts: Vec<Stmt>,
     /// "f32" for `fit(...)`, "f64" for `fit64(...)`.
     precision: &'static str,
+    /// Optional robust-loss closure `|s| <expr>` over the squared residual, e.g.
+    /// "|s| loss_cauchy(s, gamma)". Stored as source, parsed at codegen.
+    loss: Option<String>,
 }
 
 /// Parse `#[arael(fit(data, |e| { ... }))]` from struct-level attributes.
@@ -2174,10 +2188,36 @@ fn parse_fit_inner(
     }
     pos += 1;
 
-    // Either { block } or remaining expression tokens
-    let body_stmts = match tokens.get(pos) {
+    // Split off an optional trailing `, loss = |s| <expr>`. A residual body has
+    // no top-level comma (call-argument commas sit inside group tokens), so the
+    // first top-level comma followed by `loss` is the separator.
+    let mut loss: Option<String> = None;
+    let mut body_end = tokens.len();
+    for i in pos..tokens.len() {
+        if let proc_macro2::TokenTree::Punct(p) = &tokens[i] {
+            if p.as_char() == ','
+                && matches!(tokens.get(i + 1), Some(proc_macro2::TokenTree::Ident(id)) if id == "loss")
+            {
+                body_end = i;
+                match tokens.get(i + 2) {
+                    Some(proc_macro2::TokenTree::Punct(p)) if p.as_char() == '=' => {}
+                    _ => return Err(syn::Error::new_spanned(err_span, "expected `loss = |s| <expr>`")),
+                }
+                let loss_ts: TokenStream2 = tokens[i + 3..].iter().cloned().collect();
+                if loss_ts.is_empty() {
+                    return Err(syn::Error::new_spanned(err_span, "expected a closure after `loss =`"));
+                }
+                loss = Some(loss_ts.to_string());
+                break;
+            }
+        }
+    }
+
+    let body_tokens = &tokens[pos..body_end];
+    // Either { block } or a direct expression.
+    let body_stmts = match body_tokens.first() {
         Some(proc_macro2::TokenTree::Group(g))
-            if g.delimiter() == proc_macro2::Delimiter::Brace =>
+            if body_tokens.len() == 1 && g.delimiter() == proc_macro2::Delimiter::Brace =>
         {
             let block_tokens =
                 proc_macro2::TokenStream::from(proc_macro2::TokenTree::Group(g.clone()));
@@ -2185,8 +2225,7 @@ fn parse_fit_inner(
             block.stmts
         }
         _ => {
-            // Remaining tokens form a direct expression
-            let remaining: TokenStream2 = tokens[pos..].iter().cloned().collect();
+            let remaining: TokenStream2 = body_tokens.iter().cloned().collect();
             let expr: Expr = syn::parse2(remaining)?;
             vec![Stmt::Expr(expr, None)]
         }
@@ -2197,6 +2236,7 @@ fn parse_fit_inner(
         loop_var,
         body_stmts,
         precision,
+        loss,
     }))
 }
 
@@ -2468,6 +2508,36 @@ fn generate_fit_impl(
         )
     })?;
 
+    // Optional robust loss `|s| rho(s)` over the squared residual s = r^2. The
+    // body is evaluated against the same ctx as the residual (constants like
+    // `gamma` resolve identically), with the argument bound to the synthetic
+    // LOSS_ARG_SYM symbol. rho(s) contributes to the cost; the weight rho'(s)
+    // scales that point's gradient and Gauss-Newton Hessian.
+    let loss_rho: Option<arael_sym::E> = if let Some(loss_src) = &fit.loss {
+        let closure: syn::ExprClosure = syn::parse_str(loss_src).map_err(|e| {
+            syn::Error::new_spanned(&fit.data_field,
+                format!("fit `loss` must be a closure `|s| <expr>`: {e}"))
+        })?;
+        if closure.inputs.len() != 1 {
+            return Err(syn::Error::new_spanned(&fit.data_field,
+                "fit `loss` closure takes exactly one argument (the squared residual)"));
+        }
+        let arg = match &closure.inputs[0] {
+            Pat::Ident(pi) => pi.ident.to_string(),
+            Pat::Type(pt) => match &*pt.pat {
+                Pat::Ident(pi) => pi.ident.to_string(),
+                _ => return Err(syn::Error::new_spanned(&fit.data_field,
+                    "fit `loss` argument must be a plain identifier")),
+            },
+            _ => return Err(syn::Error::new_spanned(&fit.data_field,
+                "fit `loss` argument must be a plain identifier")),
+        };
+        ctx.let_bindings.insert(arg, arael_sym::symbol(constraint::LOSS_ARG_SYM));
+        Some(syn_expr_to_sym(&closure.body, &mut ctx)?)
+    } else {
+        None
+    };
+
     // 3. Differentiate w.r.t. each param
     let n = param_names.len();
     let derivatives: Vec<arael_sym::E> = param_names
@@ -2553,12 +2623,57 @@ fn generate_fit_impl(
         })
         .collect();
 
+    // Robust-loss fragments. `s = __block_cost = r^2`; the loss contributes
+    // rho(s) to the cost and its weight rho'(s) scales every gradient/Hessian
+    // write. Without a loss every piece is empty and the emission is
+    // byte-identical to the plain least-squares form.
+    let loss_arg_id = proc_macro2::Ident::new(constraint::LOSS_ARG_SYM, proc_macro2::Span::call_site());
+    let emit_loss = |want_weight: bool| -> syn::Result<(TokenStream2, Expr)> {
+        let rho = loss_rho.as_ref().unwrap();
+        let mut exprs = vec![rho.clone()];
+        if want_weight {
+            exprs.push(rho.diff(constraint::LOSS_ARG_SYM));
+        }
+        let (ints, simplified) = arael_sym::cse(&exprs);
+        let mut stmts = vec![quote! { let #loss_arg_id: #prec_type = __r * __r; }];
+        for (nm, e) in &ints {
+            let id = proc_macro2::Ident::new(nm, proc_macro2::Span::call_site());
+            let code: Expr = syn::parse_str(&e.to_rust(prec))?;
+            stmts.push(quote! { let #id = #code; });
+        }
+        if want_weight {
+            let w_code: Expr = syn::parse_str(&simplified[1].to_rust(prec))?;
+            stmts.push(quote! { let __w: #prec_type = #w_code; });
+        }
+        let rho_code: Expr = syn::parse_str(&simplified[0].to_rust(prec))?;
+        Ok((quote! { #(#stmts)* }, rho_code))
+    };
+    let (cost_loss_setup, cost_add, gh_loss_setup, gh_cost_add, weight_mul):
+        (TokenStream2, TokenStream2, TokenStream2, TokenStream2, TokenStream2) = if loss_rho.is_some() {
+        let (cost_setup, cost_rho) = emit_loss(false)?;
+        let (gh_setup, gh_rho) = emit_loss(true)?;
+        (
+            cost_setup,
+            quote! { __cost += (#cost_rho) as #prec_type; },
+            gh_setup,
+            quote! { __cost += (#gh_rho) as #prec_type; },
+            quote! { __w * },
+        )
+    } else {
+        (
+            quote! {}, quote! { __cost += __r * __r; },
+            quote! {}, quote! { __cost += __r * __r; },
+            quote! {},
+        )
+    };
+
     // Gradient accumulation
     let grad_accum: Vec<TokenStream2> = (0..n)
         .map(|i| {
             let dr_id = &dr_idents[i];
             let prec_type = &prec_type;
-            quote! { grad[#i] += (2.0 as #prec_type) * __r * #dr_id; }
+            let weight_mul = &weight_mul;
+            quote! { grad[#i] += (2.0 as #prec_type) * #weight_mul __r * #dr_id; }
         })
         .collect();
 
@@ -2567,11 +2682,12 @@ fn generate_fit_impl(
         .flat_map(|i| {
             let dr_idents = &dr_idents;
             let prec_type = &prec_type;
+            let weight_mul = &weight_mul;
             (i..n).map(move |j| {
                 let idx = i * n + j;
                 let dr_i = &dr_idents[i];
                 let dr_j = &dr_idents[j];
-                quote! { hessian[#idx] += (2.0 as #prec_type) * #dr_i * #dr_j; }
+                quote! { hessian[#idx] += (2.0 as #prec_type) * #weight_mul #dr_i * #dr_j; }
             })
         })
         .collect();
@@ -2598,7 +2714,8 @@ fn generate_fit_impl(
                 for #loop_var_id in &self.#data_field_id {
                     #(#data_bind)*
                     let __r: #prec_type = #r_expr;
-                    __cost += __r * __r;
+                    #cost_loss_setup
+                    #cost_add
                 }
                 __cost
             }
@@ -2617,7 +2734,8 @@ fn generate_fit_impl(
                 for #loop_var_id in &self.#data_field_id {
                     #(#data_bind)*
                     let __r: #prec_type = #r_expr;
-                    __cost += __r * __r;
+                    #gh_loss_setup
+                    #gh_cost_add
                     #(#dr_bindings)*
                     #(#grad_accum)*
                     #(#hessian_accum)*

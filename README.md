@@ -130,7 +130,7 @@ You describe the model as a Rust struct and the residual as an arael-sym express
 
 - `#[arael::model]` auto-implements the `Model` trait for the struct: serialize / deserialize / update of every optimizable parameter, flat indexing into the residual vector, and all the hooks the solver needs.
 - Every `Param<T>` field is an optimization variable. Plain fields (`data`, `sigma`, `gamma` here) are constants.
-- `#[arael(fit(data, |e| ...))]` declares a least-squares fit: one residual per element of `data`, body written as a symbolic expression referencing model fields and the current data entry. The macro compiles the body into residual + gradient + Hessian code with symbolic differentiation and CSE.
+- `#[arael(fit(data, |e| ...))]` declares a least-squares fit: one residual per element of `data`, body written as a symbolic expression referencing model fields and the current data entry. The macro compiles the body into residual + gradient + Hessian code with symbolic differentiation and CSE. A trailing `loss = |s| rho(s)` (e.g. `loss_cauchy(s, k)`) applies a robust M-estimator over each point's squared residual.
 
 The `gamma * atan(plain_r / gamma)` wrapper is the [Starship robust error-suppression method](https://patents.google.com/patent/US12346118) -- residuals up to ~gamma pass through linearly, beyond that they saturate, suppressing outlier influence while staying smoothly differentiable.
 
