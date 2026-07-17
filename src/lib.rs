@@ -1657,6 +1657,21 @@
 //! cargo expand --example slam_demo | sed -n '/fn __compute_blocks/,/^    fn /p'
 //! ```
 //!
+//! ## Builds are slow
+//!
+//! Model code generation runs inside the `arael` proc-macros at compile
+//! time, and a dev build compiles those macros unoptimized -- so a large
+//! model can spend a long time expanding. Run just the macro crates in
+//! release mode, without optimizing your own debug build, by adding to your
+//! `Cargo.toml`:
+//!
+//! ```toml
+//! [profile.dev.package.arael-macros]
+//! opt-level = 3
+//! [profile.dev.package.arael-sym]
+//! opt-level = 3
+//! ```
+//!
 //! # 2D Sketch Editor
 //!
 //! The `arael-sketch` crate provides an interactive constraint-based 2D sketch
