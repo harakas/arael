@@ -157,6 +157,79 @@ fn replace(e: &E, target: &E, replacement: &E) -> E {
     }
 }
 
+/// Apply many `target -> replacement` substitutions to `e` in one memoized
+/// traversal. A node structurally equal to a target is replaced wholesale;
+/// other nodes are rebuilt around their substituted children. A per-node
+/// pointer memo makes each shared subtree cost once, so this does the work of N
+/// separate [`replace`] passes in a single walk.
+///
+/// `subs` is an ordered list: on a duplicate target the first pair wins, as if
+/// the substitutions were applied in sequence. Targets match by exact
+/// structural equality -- a `Mul` target needing factor-subset matching must go
+/// through [`replace_pub`].
+pub fn replace_many(e: &E, subs: &[(E, E)]) -> E {
+    if subs.is_empty() {
+        return e.clone();
+    }
+    let mut map: HashMap<&E, &E> = HashMap::with_capacity(subs.len());
+    for (from, to) in subs {
+        // or_insert, not insert: a repeated target keeps its FIRST replacement,
+        // so the result matches applying `subs` in order. Rotation identities
+        // make some targets structurally equal (e.g. dR[i][j]/d.. equals a plain
+        // R[k][l]), and both replacement fields carry the same runtime value.
+        map.entry(from).or_insert(to);
+    }
+    let mut memo: HashMap<*const Expr, E> = HashMap::new();
+    replace_many_inner(e, &map, &mut memo)
+}
+
+fn replace_many_inner(e: &E, map: &HashMap<&E, &E>, memo: &mut HashMap<*const Expr, E>) -> E {
+    let ptr = e.as_ref() as *const Expr;
+    if let Some(r) = memo.get(&ptr) {
+        return r.clone();
+    }
+    let rec = replace_many_inner;
+    // A whole-node match takes precedence over descending into it.
+    let result = if let Some(to) = map.get(e) {
+        (*to).clone()
+    } else {
+        match e.as_ref() {
+            Expr::Sym(_) | Expr::Const(_) | Expr::NamedConst { .. } => e.clone(),
+            Expr::Neg(a) => E::new(Expr::Neg(rec(a, map, memo))),
+            Expr::Sin(a) => E::new(Expr::Sin(rec(a, map, memo))),
+            Expr::Cos(a) => E::new(Expr::Cos(rec(a, map, memo))),
+            Expr::Tan(a) => E::new(Expr::Tan(rec(a, map, memo))),
+            Expr::Asin(a) => E::new(Expr::Asin(rec(a, map, memo))),
+            Expr::Acos(a) => E::new(Expr::Acos(rec(a, map, memo))),
+            Expr::Atan(a) => E::new(Expr::Atan(rec(a, map, memo))),
+            Expr::Sinh(a) => E::new(Expr::Sinh(rec(a, map, memo))),
+            Expr::Cosh(a) => E::new(Expr::Cosh(rec(a, map, memo))),
+            Expr::Tanh(a) => E::new(Expr::Tanh(rec(a, map, memo))),
+            Expr::Exp(a) => E::new(Expr::Exp(rec(a, map, memo))),
+            Expr::Ln(a) => E::new(Expr::Ln(rec(a, map, memo))),
+            Expr::Log2(a) => E::new(Expr::Log2(rec(a, map, memo))),
+            Expr::Log10(a) => E::new(Expr::Log10(rec(a, map, memo))),
+            Expr::Sqrt(a) => E::new(Expr::Sqrt(rec(a, map, memo))),
+            Expr::Abs(a) => E::new(Expr::Abs(rec(a, map, memo))),
+            Expr::Heaviside(a) => E::new(Expr::Heaviside(rec(a, map, memo))),
+            Expr::Add(a, b) => E::new(Expr::Add(rec(a, map, memo), rec(b, map, memo))),
+            Expr::Sub(a, b) => E::new(Expr::Sub(rec(a, map, memo), rec(b, map, memo))),
+            Expr::Mul(a, b) => E::new(Expr::Mul(rec(a, map, memo), rec(b, map, memo))),
+            Expr::Div(a, b) => E::new(Expr::Div(rec(a, map, memo), rec(b, map, memo))),
+            Expr::Pow(a, b) => E::new(Expr::Pow(rec(a, map, memo), rec(b, map, memo))),
+            Expr::Atan2(a, b) => E::new(Expr::Atan2(rec(a, map, memo), rec(b, map, memo))),
+            Expr::Clamp(a, b, c) => E::new(Expr::Clamp(rec(a, map, memo), rec(b, map, memo), rec(c, map, memo))),
+            Expr::Branch(a, b, c) => E::new(Expr::Branch(rec(a, map, memo), rec(b, map, memo), rec(c, map, memo))),
+            Expr::Func { name, params, kind, args } => {
+                let new_args = args.iter().map(|a| rec(a, map, memo)).collect();
+                E::new(Expr::Func { name: name.clone(), params: params.clone(), kind: kind.clone(), args: new_args })
+            }
+        }
+    };
+    memo.insert(ptr, result.clone());
+    result
+}
+
 /// Flatten a Mul tree into coefficient + list of non-constant factors.
 fn flatten_mul_factors(e: &E) -> (f64, Vec<E>) {
     match e.as_ref() {
@@ -423,4 +496,53 @@ fn topo_sort_intermediates(intermediates: Vec<(String, E)>) -> Vec<(String, E)> 
         "CSE topological sort dropped definitions: dependency cycle among intermediates");
 
     sorted.into_iter().map(|i| intermediates[i].clone()).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{symbol, cached};
+
+    #[test]
+    fn replace_many_agrees_with_sequential() {
+        let (x, y, z) = (symbol("x"), symbol("y"), symbol("z"));
+        let (a, b) = (symbol("a"), symbol("b"));
+        // A shared cached() subtree plus a bare symbol, both substitution targets.
+        let cxy = cached(x.clone() * y.clone());
+        let expr = cxy.clone() * z.clone() + cxy.clone() / z.clone();
+
+        let subs = [(cxy.clone(), a.clone()), (z.clone(), b.clone())];
+        let got = replace_many(&expr, &subs);
+
+        // Sequential reference: the two replace_pub passes the old code did.
+        let seq = replace_pub(&replace_pub(&expr, &cxy, &a), &z, &b);
+        assert_eq!(got, seq);
+        assert!(!format!("{}", got).contains("cached"));
+    }
+
+    #[test]
+    fn replace_many_whole_node_match_does_not_descend() {
+        // cached(x) matches as a whole; the inner x is not separately rewritten.
+        let x = symbol("x");
+        let cx = cached(x.clone());
+        let subs = [(cx.clone(), symbol("field")), (x.clone(), symbol("wrong"))];
+        assert_eq!(replace_many(&cx, &subs), symbol("field"));
+    }
+
+    #[test]
+    fn replace_many_first_duplicate_target_wins() {
+        // A target repeated with different replacements keeps the first, matching
+        // sequential application in list order. Rotation identities make some
+        // matrix entries and derivative entries structurally equal, so this case
+        // is real.
+        let x = symbol("x");
+        let subs = [(x.clone(), symbol("first")), (x.clone(), symbol("second"))];
+        assert_eq!(replace_many(&x, &subs), symbol("first"));
+    }
+
+    #[test]
+    fn replace_many_empty_is_identity() {
+        let e = symbol("x") + symbol("y");
+        assert_eq!(replace_many(&e, &[]), e);
+    }
 }

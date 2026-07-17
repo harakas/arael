@@ -1399,10 +1399,11 @@ fn build_universal_rotvec_substitutions(var_base: &str, field_name: &str) -> Vec
 
 /// Apply substitutions to a list of expressions. Returns the modified expressions.
 fn apply_substitutions(exprs: &mut Vec<arael_sym::E>, subs: &[(arael_sym::E, arael_sym::E)]) {
-    for (from, to) in subs {
-        for e in exprs.iter_mut() {
-            *e = arael_sym::cse::replace_pub(e, from, to);
-        }
+    // Every target is a cached()/symbol node matched by exact structural
+    // equality; replace_many resolves them all in one memoized pass, applying
+    // subs in list order (first mapping wins on a duplicate target).
+    for e in exprs.iter_mut() {
+        *e = arael_sym::cse::replace_many(e, subs);
     }
 }
 
