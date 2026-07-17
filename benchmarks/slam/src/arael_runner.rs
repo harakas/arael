@@ -589,6 +589,10 @@ impl bench_harness::arael::Model for Path {
     fn solution(&self) -> Solution { extract(self) }
     fn solve(_: &Self::Input, params: &[f64], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f64>)
         -> arael::simple_lm::LmResult<f64> { solve64(params, m, cfg) }
+    fn tune(cfg: &mut arael::simple_lm::LmConfig<f64>) {
+        cfg.gradient_tolerance = std::env::var("SLAM_GTOL").ok().and_then(|v| v.parse().ok());
+        cfg.predicted_reduction_tolerance = std::env::var("SLAM_PRED_TOL").ok().and_then(|v| v.parse().ok());
+    }
 }
 
 impl bench_harness::arael::Model for PathF {
@@ -604,6 +608,10 @@ impl bench_harness::arael::Model for PathF {
     fn solution(&self) -> Solution { extract_f32(self) }
     fn solve(_: &Self::Input, params: &[f32], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f32>)
         -> arael::simple_lm::LmResult<f32> { solve32(params, m, cfg) }
+    fn tune(cfg: &mut arael::simple_lm::LmConfig<f32>) {
+        cfg.gradient_tolerance = std::env::var("SLAM_GTOL").ok().and_then(|v| v.parse().ok());
+        cfg.predicted_reduction_tolerance = std::env::var("SLAM_PRED_TOL").ok().and_then(|v| v.parse().ok());
+    }
 }
 
 pub type RunOut = bench_harness::table::Row<Solution>;

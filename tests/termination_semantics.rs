@@ -387,10 +387,11 @@ fn a_generous_budget_does_not_change_the_answer() {
 }
 
 // ---------------------------------------------------------------------------
-// LmConfig::gradient_tolerance and ::parameter_tolerance -- both Option, both
-// off by default. They ask different questions from the cost test: "am I at a
-// stationary point" and "have I stopped moving", not "has the cost stopped
-// improving".
+// LmConfig::gradient_tolerance, ::parameter_tolerance and
+// ::predicted_reduction_tolerance -- all Option, all off by default. They ask
+// different questions from the cost test: "am I at a stationary point", "have I
+// stopped moving", and "does the model expect anything more", not "has the cost
+// stopped improving".
 // ---------------------------------------------------------------------------
 
 #[test]
@@ -405,6 +406,7 @@ fn tolerances_are_off_by_default() {
         max_iters: 200,
         gradient_tolerance: None,
         parameter_tolerance: None,
+        predicted_reduction_tolerance: None,
         ..Default::default()
     });
     assert_eq!(base.status, explicit.status);
@@ -508,6 +510,59 @@ fn parameter_tolerance_is_a_different_question_from_the_cost_test() {
 }
 
 #[test]
+fn predicted_reduction_stops_the_solve() {
+    // A tolerance so loose the model's predicted gain is "negligible" on the
+    // first accepted step: the solve stops on it and keeps that step.
+    let mut c = build_chain();
+    let r = c.solve_sparse(&LmConfig::<f64> {
+        predicted_reduction_tolerance: Some(1e30),
+        min_iters: 0, max_iters: 200, ..Default::default()
+    });
+    assert_eq!(r.status, LmStatus::PredictedReduction);
+    assert_eq!(r.accepted_iterations, 1, "should stop on the first accepted step");
+    assert!(r.end_cost < r.start_cost, "the triggering step is kept");
+
+    // Zero can never be met: a valid accepted step has a strictly positive
+    // predicted reduction, so `predicted <= 0` never fires.
+    let mut c = build_chain();
+    let tight = c.solve_sparse(&LmConfig::<f64> {
+        predicted_reduction_tolerance: Some(0.0),
+        min_iters: 0, max_iters: 200, ..Default::default()
+    });
+    assert_eq!(tight.status, LmStatus::Converged, "an impossible tolerance must not fire");
+}
+
+#[test]
+fn predicted_reduction_is_a_forward_looking_test() {
+    // Cost test disabled; only the predicted-reduction test can stop this early.
+    // It asks what the model expects to gain NEXT, not what the last step gained.
+    let cfg = |rtol| LmConfig::<f64> {
+        abs_precision: 0.0, rel_precision: 0.0,
+        predicted_reduction_tolerance: rtol,
+        min_iters: 0, max_iters: 200, ..Default::default()
+    };
+    let mut a = build_chain();
+    let without = a.solve_sparse(&cfg(None));
+    let mut b = build_chain();
+    let with = b.solve_sparse(&cfg(Some(1e-8)));
+
+    assert_ne!(without.status, LmStatus::PredictedReduction);
+    assert_eq!(with.status, LmStatus::PredictedReduction);
+    assert!(
+        with.iterations < without.iterations,
+        "the predicted test should stop it earlier: {} vs {}",
+        with.iterations, without.iterations
+    );
+    // It stopped because the model saw nothing worth taking, so it is genuinely
+    // converged -- not stopped early at a worse cost.
+    assert!(
+        with.end_cost <= without.end_cost * 1.01,
+        "predicted-stopped cost {} should be no worse than {}",
+        with.end_cost, without.end_cost
+    );
+}
+
+#[test]
 fn both_tolerances_respect_min_iters() {
     // They are convergence criteria, so min_iters holds them open like the
     // others -- unlike time_limit, which is a budget and overrides it.
@@ -518,6 +573,10 @@ fn both_tolerances_respect_min_iters() {
         },
         LmConfig::<f64> {
             parameter_tolerance: Some(1e30), min_iters: 6, max_iters: 200,
+            ..Default::default()
+        },
+        LmConfig::<f64> {
+            predicted_reduction_tolerance: Some(1e30), min_iters: 6, max_iters: 200,
             ..Default::default()
         },
     ] {

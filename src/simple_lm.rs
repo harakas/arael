@@ -153,19 +153,20 @@ pub struct LmConfig<T: Float> {
     /// to disable (only terminate via precision/patience). Useful when you
     /// know the target cost (e.g. constraint satisfaction where 0 is perfect).
     pub cost_threshold: T,
-    /// Stop when the gradient is flat: `max|g_i| <= gradient_tolerance`.
-    /// `None` (the default) disables the test.
+    /// Stop at a stationary point: `max_i |g_i| / sqrt(H_ii) <= gradient_tolerance`,
+    /// the Jacobi-scaled gradient max-norm. `None` (the default) disables the test.
     ///
     /// This is the only criterion that tests for an actual STATIONARY POINT.
     /// The cost tests (`abs_precision` / `rel_precision`) only say the cost has
     /// stopped improving, which can happen while the solve is still drifting
     /// along a near-null direction -- a gauge freedom is exactly that.
     ///
-    /// NOTE the factor of two. arael minimizes `sum r^2`, so its gradient is
-    /// `2 J^T r`. A solver that minimizes `1/2 sum r^2` has gradient `J^T r`, so
-    /// the same tolerance value means something twice as tight there -- do not
-    /// carry a number across without halving it. Checked after each assembly, and
-    /// it respects `min_iters`.
+    /// Each component is divided by the square root of its Hessian diagonal (the
+    /// column norm of J), so the tolerance is invariant to how the parameters
+    /// are scaled -- reparametrize a pose from metres to millimetres and the
+    /// same value still means the same thing, and a value transfers across
+    /// problems rather than riding with their units. Checked after each
+    /// assembly; respects `min_iters`.
     pub gradient_tolerance: Option<T>,
     /// Stop when the parameters stop moving:
     /// `|step|_2 <= parameter_tolerance * (|x|_2 + parameter_tolerance)`.
@@ -181,6 +182,20 @@ pub struct LmConfig<T: Float> {
     /// parameters), before `advance()` re-centers them -- re-centering zeroes
     /// the rotation deltas, which would understate `|x|`. Respects `min_iters`.
     pub parameter_tolerance: Option<T>,
+    /// Stop when the LM model predicts no meaningful improvement is left:
+    /// `predicted_reduction <= predicted_reduction_tolerance * cost`.
+    /// `None` (the default) disables the test.
+    ///
+    /// The predicted reduction is the linear model's own estimate of the cost
+    /// drop the step will produce, `(delta.g + lambda delta.D.delta) / 2` -- the
+    /// same quantity the gain ratio divides by. Unlike the cost tests, which
+    /// look back at what a step actually did, this looks forward: near the
+    /// optimum the model expects almost nothing, so the solve stops one
+    /// iteration before the confirming step would.
+    ///
+    /// Checked on an ACCEPTED step (where lambda was appropriate, so the model
+    /// is trustworthy), and it respects `min_iters`.
+    pub predicted_reduction_tolerance: Option<T>,
     /// Wall-clock budget for the whole solve. `None` (the default) means no
     /// limit, and the solver never reads the clock for it.
     ///
@@ -280,6 +295,7 @@ impl<T: Float> Default for LmConfig<T> {
             cost_threshold: T::zero(),
             gradient_tolerance: None,
             parameter_tolerance: None,
+            predicted_reduction_tolerance: None,
             min_diagonal: None,
             time_limit: None,
             lambda_floor: default_lambda_floor::<T>(),
@@ -866,13 +882,18 @@ pub enum LmStatus {
     CostThreshold,
     /// Hit [`LmConfig::max_iters`] without meeting a convergence criterion.
     MaxIterations,
-    /// The gradient went flat: `max|g_i| <= `[`LmConfig::gradient_tolerance`].
-    /// The only status that means "this is a stationary point" rather than
-    /// "the cost stopped moving".
+    /// The gradient went flat: the Jacobi-scaled gradient max-norm fell to
+    /// [`LmConfig::gradient_tolerance`]. The only status that means "this is a
+    /// stationary point" rather than "the cost stopped moving".
     GradientTolerance,
     /// The step went to nothing:
     /// `|step| <= tol * (|x| + tol)`, [`LmConfig::parameter_tolerance`].
     ParameterTolerance,
+    /// The model predicts no meaningful improvement is left:
+    /// `predicted_reduction <= tol * cost`, [`LmConfig::predicted_reduction_tolerance`].
+    /// Reported on the accepted step whose model prediction fell below the
+    /// tolerance; the step is kept.
+    PredictedReduction,
     /// The damping driver gave up -- lambda would pass its ceiling and no
     /// step could be accepted ([`LambdaDriver::rejected`] returned `None`).
     LambdaCeiling,
@@ -1141,6 +1162,7 @@ impl LmStatus {
             LmStatus::MaxIterations => "hit max_iters",
             LmStatus::GradientTolerance => "gradient flat",
             LmStatus::ParameterTolerance => "step negligible",
+            LmStatus::PredictedReduction => "predicted gain negligible",
             LmStatus::TimeLimit => "out of time",
             LmStatus::DriverTerminated => "driver stopped it",
             LmStatus::LambdaCeiling => "damping exhausted",
@@ -1157,6 +1179,7 @@ impl LmStatus {
                 | LmStatus::CostThreshold
                 | LmStatus::GradientTolerance
                 | LmStatus::ParameterTolerance
+                | LmStatus::PredictedReduction
                 | LmStatus::DriverTerminated
         )
     }
@@ -1890,6 +1913,20 @@ impl<T: Float> LambdaDriver<T> for DefaultLambdaDriver<T> {
 
 /// Gain-ratio adaptive damping (the Nielsen update).
 ///
+/// The LM linear model's predicted cost reduction for a step: with
+/// `(H + lambda D) delta = g` and `x_new = x - delta` the model predicts the
+/// cost drops by `(delta.g + lambda delta.D.delta) / 2`. `grad` and `diagonal`
+/// are the true cost derivatives (blocks accumulate `2 J^T r` / `2 J^T J` for
+/// `cost = sum r^2`). Non-negative for a valid LM step, and the denominator of
+/// the gain ratio.
+fn model_predicted_reduction<T: Float>(delta: &[T], grad: &[T], diagonal: &[T], lambda: T) -> T {
+    let mut predicted = T::zero();
+    for i in 0..delta.len() {
+        predicted = predicted + delta[i] * (grad[i] + lambda * diagonal[i] * delta[i]);
+    }
+    predicted * T::from(0.5).unwrap()
+}
+
 /// After every accepted step the gain ratio
 /// `rho = actual reduction / predicted reduction` measures how well the
 /// linear model predicted reality, and lambda is scaled by
@@ -1940,18 +1977,7 @@ impl<T: Float> LambdaDriver<T> for NielsenLambdaDriver<T> {
     }
     fn accepted(&mut self, step: &LambdaStep<T>) -> Option<T> {
         self.nu = T::from(2.0).unwrap();
-        // The linear model's predicted cost reduction. grad and the
-        // Hessian diagonal are the true derivatives of the cost (the
-        // generated blocks accumulate 2 J^T r / 2 J^T J for
-        // cost = sum r^2), so with (H + lambda D) delta = g and
-        // x_new = x - delta the model predicts a drop of
-        // (delta.g + lambda delta.D.delta) / 2.
-        let mut predicted = T::zero();
-        for i in 0..step.delta.len() {
-            predicted += step.delta[i]
-                * (step.grad[i] + step.lambda * step.diagonal[i] * step.delta[i]);
-        }
-        predicted = predicted * T::from(0.5).unwrap();
+        let predicted = model_predicted_reduction(step.delta, step.grad, step.diagonal, step.lambda);
         // Guard degenerate model predictions (zero or negative predicted
         // reduction on an ACCEPTED step is numerical noise near the
         // optimum): treat as a perfectly modeled step.
@@ -2121,23 +2147,6 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
             }
         }
 
-        // Gradient test: the only criterion here that asks whether this is a
-        // stationary point, rather than whether the cost has stopped moving.
-        // The gradient is fresh from the assembly above.
-        if let Some(gtol) = config.gradient_tolerance
-            && iter >= config.min_iters
-        {
-            let gmax = grad.iter().fold(T::zero(), |m, g| m.max(g.abs()));
-            if gmax <= gtol {
-                if config.verbose {
-                    info!("LM terminated: gradient flat (max|g| = {} <= {})",
-                        G(gmax.to_f64().unwrap()), G(gtol.to_f64().unwrap()));
-                }
-                status = LmStatus::GradientTolerance;
-                break;
-            }
-        }
-
         // Constant across every retry at this linearization point, so it is
         // computed once here rather than per attempt.
         let grad_max = if gather {
@@ -2196,6 +2205,29 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
             }
             if let Some(m) = floor {
                 damp[i] = d.max(m);
+            }
+        }
+
+        // Gradient test: the only criterion here that asks whether this is a
+        // stationary point, rather than whether the cost has stopped moving. The
+        // gradient is Jacobi-scaled -- each component divided by the square root
+        // of its Hessian diagonal (the column norm of J) -- so the tolerance is
+        // invariant to how the parameters are scaled and transfers across
+        // problems. A zero diagonal is an unreached parameter, whose gradient is
+        // zero too, so it contributes nothing.
+        if let Some(gtol) = config.gradient_tolerance
+            && iter >= config.min_iters
+        {
+            let gmax = grad.iter().zip(diagonal.iter()).fold(T::zero(), |m, (g, d)| {
+                if *d > T::zero() { m.max(g.abs() / d.sqrt()) } else { m }
+            });
+            if gmax <= gtol {
+                if config.verbose {
+                    info!("LM terminated: gradient flat (scaled max|g| = {} <= {})",
+                        G(gmax.to_f64().unwrap()), G(gtol.to_f64().unwrap()));
+                }
+                status = LmStatus::GradientTolerance;
+                break;
             }
         }
 
@@ -2340,6 +2372,10 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
 
             if new_cost.is_finite() && new_cost < end_cost {
                 accepted += 1;
+                // This attempt's lambda -- captured because `lambda` is
+                // reassigned to the driver's next value below, but the predicted
+                // reduction is a property of the step just solved.
+                let step_lambda = lambda;
                 let next_lambda = driver.accepted(&LambdaStep {
                     lambda, cost: end_cost, new_cost,
                     grad: &grad, diagonal: &diagonal, delta: &delta,
@@ -2421,6 +2457,24 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
                     status = LmStatus::ParameterTolerance;
                     done = true;
                     break;
+                }
+
+                // The model predicts almost nothing more to gain. `end_cost` is
+                // still the pre-step cost here; the accepted step is kept.
+                if let Some(rtol) = config.predicted_reduction_tolerance
+                    && iter >= config.min_iters
+                {
+                    let predicted = model_predicted_reduction(&delta, &grad, &diagonal, step_lambda);
+                    if predicted <= rtol * end_cost {
+                        end_cost = new_cost;
+                        if config.verbose {
+                            info!("LM terminated: predicted gain negligible ({} <= {} * cost)",
+                                G(predicted.to_f64().unwrap()), G(rtol.to_f64().unwrap()));
+                        }
+                        status = LmStatus::PredictedReduction;
+                        done = true;
+                        break;
+                    }
                 }
 
                 let abs_improve = end_cost - new_cost;
