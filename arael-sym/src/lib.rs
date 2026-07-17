@@ -284,11 +284,18 @@
 //! Built-in [`rad_diff`] and [`rad_sum`] are extern functions with
 //! rollover-safe angle normalization to \[-pi, pi\].
 //!
-//! ## Heaviside and clamp
+//! ## Piecewise functions
 //!
 //! Pragmatic functions for optimization near numerical boundaries.
 //! `heaviside` has derivative 0 everywhere (not Dirac delta).
 //! `clamp` has pass-through derivative (as if clamping were not there).
+//! `branch(q, a, b)` picks `a` when `q >= 0` else `b`, and evaluates
+//! only the taken side; its derivative is the taken side's.
+//!
+//! `min`, `max`, and `sign` build on these. `min` and `max` return the
+//! smaller/larger of two arguments and differentiate the taken side; at a
+//! tie they return the first argument and use its derivative. `sign(x)` is
+//! `-1`/`0`/`+1` for negative/zero/positive `x` with derivative 0 everywhere.
 //!
 //! ```
 //! use arael_sym::*;
@@ -918,6 +925,27 @@ pub fn clamp(val: impl Into<E>, lo: impl Into<E>, hi: impl Into<E>) -> E {
 pub fn branch(q: impl Into<E>, a: impl Into<E>, b: impl Into<E>) -> E {
     E::new(Expr::Branch(q.into(), a.into(), b.into()))
 }
+/// Symbolic minimum, the smaller of `a` and `b`. Built on [`branch`], so it is
+/// differentiable away from the kink -- the derivative is the taken side's. At a
+/// tie (`a == b`) it returns `a` and uses `a`'s derivative. Accepts `impl Into<E>`.
+pub fn min(a: impl Into<E>, b: impl Into<E>) -> E {
+    let (a, b) = (a.into(), b.into());
+    branch(b.clone() - a.clone(), a, b)
+}
+/// Symbolic maximum, the larger of `a` and `b`. Built on [`branch`], so it is
+/// differentiable away from the kink. At a tie (`a == b`) it returns `a` and uses
+/// `a`'s derivative. Accepts `impl Into<E>`.
+pub fn max(a: impl Into<E>, b: impl Into<E>) -> E {
+    let (a, b) = (a.into(), b.into());
+    branch(a.clone() - b.clone(), a, b)
+}
+/// Symbolic sign: `-1` for `x < 0`, `+1` for `x > 0`, `0` at `x == 0`. Built on
+/// [`heaviside`], so its derivative is `0` everywhere (the jump is ignored, as
+/// for `heaviside`). Accepts `impl Into<E>`.
+pub fn sign(x: impl Into<E>) -> E {
+    let x = x.into();
+    heaviside(x.clone()) - heaviside(-x)
+}
 /// Symbolic power function. Auto-simplifies (e.g. x^0 = 1, x^1 = x).
 /// Accepts `impl Into<E>` for both args so bare numeric literals
 /// compose naturally: `pow(x, 2.0)`, `pow(x, 3)`.
@@ -1011,6 +1039,7 @@ pub const FUNCTIONS: &[(&str, FunctionRef)] = &[
     ("sqrt", FunctionRef::Unary(sqrt)),
     ("abs", FunctionRef::Unary(abs)),
     ("heaviside", FunctionRef::Unary(heaviside)),
+    ("sign", FunctionRef::Unary(sign)),
     // Unary "safe" variants
     ("identity", FunctionRef::Unary(identity)),
     ("cached", FunctionRef::Unary(cached)),
@@ -1027,6 +1056,9 @@ pub const FUNCTIONS: &[(&str, FunctionRef)] = &[
     ("fast_atan2", FunctionRef::Binary(fast_atan2)),
     ("rad_diff", FunctionRef::Binary(rad_diff)),
     ("rad_sum", FunctionRef::Binary(rad_sum)),
+    // Piecewise -- subgradient at the kink (see the fn docs)
+    ("min", FunctionRef::Binary(min)),
+    ("max", FunctionRef::Binary(max)),
     // Robust loss kernels: (squared-norm, scale) -> robustified cost
     ("loss_huber", FunctionRef::Binary(loss_huber)),
     ("loss_cauchy", FunctionRef::Binary(loss_cauchy)),
@@ -3016,6 +3048,65 @@ mod tests {
         let f = parse("clamp(x, 0, 1)").unwrap();
         assert_eq!(format!("{}", f), "clamp(x, 0, 1)");
         assert_eq!(format!("{}", f.diff("x")), "1");
+    }
+
+    // --- min / max / sign tests ---
+
+    #[test]
+    fn min_max_eval() {
+        sym! {
+            let (x, y) = (symbol("x"), symbol("y"));
+            let mn = min(x.clone(), y.clone());
+            let mx = max(x, y);
+            let at = |a: f64, b: f64| HashMap::from([("x", a), ("y", b)]);
+            assert_eq!(mn.eval(&at(2.0, 5.0)).unwrap(), 2.0);
+            assert_eq!(mn.eval(&at(5.0, 2.0)).unwrap(), 2.0);
+            assert_eq!(mn.eval(&at(3.0, 3.0)).unwrap(), 3.0); // tie
+            assert_eq!(mx.eval(&at(2.0, 5.0)).unwrap(), 5.0);
+            assert_eq!(mx.eval(&at(5.0, 2.0)).unwrap(), 5.0);
+            assert_eq!(mx.eval(&at(3.0, 3.0)).unwrap(), 3.0); // tie
+        }
+    }
+
+    #[test]
+    fn min_max_diff_selects_taken_side() {
+        sym! {
+            let (x, y) = (symbol("x"), symbol("y"));
+            let at = |a: f64, b: f64| HashMap::from([("x", a), ("y", b)]);
+            let dmn = min(x.clone(), y.clone()).diff("x");
+            // min = x for x < y (d/dx = 1), min = y for x > y (d/dx = 0).
+            assert_eq!(dmn.eval(&at(0.0, 5.0)).unwrap(), 1.0);
+            assert_eq!(dmn.eval(&at(5.0, 0.0)).unwrap(), 0.0);
+            // At a tie the derivative takes the a side: d/dx = 1.
+            assert_eq!(dmn.eval(&at(3.0, 3.0)).unwrap(), 1.0);
+            let dmx = max(x, y).diff("x");
+            assert_eq!(dmx.eval(&at(5.0, 0.0)).unwrap(), 1.0);
+            assert_eq!(dmx.eval(&at(0.0, 5.0)).unwrap(), 0.0);
+            assert_eq!(dmx.eval(&at(3.0, 3.0)).unwrap(), 1.0);
+        }
+    }
+
+    #[test]
+    fn sign_eval_and_diff() {
+        sym! {
+            let x = symbol("x");
+            let s = sign(x.clone());
+            assert_eq!(s.eval(&HashMap::from([("x", -2.0)])).unwrap(), -1.0);
+            assert_eq!(s.eval(&HashMap::from([("x", 0.0)])).unwrap(), 0.0);
+            assert_eq!(s.eval(&HashMap::from([("x", 2.0)])).unwrap(), 1.0);
+            // Piecewise-constant: derivative is zero everywhere.
+            assert_eq!(format!("{}", sign(x).diff("x")), "0");
+        }
+    }
+
+    #[test]
+    fn parse_min_max_sign() {
+        for src in ["min(x, y)", "max(x, y)", "sign(x)"] {
+            assert!(parse(src).is_ok(), "should parse {src}");
+        }
+        let dm = parse("min(x, y)").unwrap().diff("x");
+        assert_eq!(dm.eval(&HashMap::from([("x", 0.0), ("y", 5.0)])).unwrap(), 1.0);
+        assert_eq!(dm.eval(&HashMap::from([("x", 5.0), ("y", 0.0)])).unwrap(), 0.0);
     }
 
     // --- Named constant tests ---

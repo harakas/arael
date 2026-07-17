@@ -473,7 +473,7 @@ the exact rational forms. Usable directly in constraint bodies by
 name; the `#[arael(root, fast_atan)]` macro keyword rewrites every
 plain `atan`/`atan2` in a model onto them via `replace_function`.
 
-## Switching and Clamping: `heaviside`, `clamp`, `branch`
+## Switching and Clamping: `heaviside`, `clamp`, `branch`, `min`, `max`, `sign`
 
 ### `heaviside(x)`
 
@@ -482,6 +482,14 @@ The Heaviside step function: 0 for `x < 0`, 1 for `x >= 0`, and 0 for NaN (inter
 ### `branch(q, a, b)`
 
 Selects between two subexpressions on the sign of a third: `branch(q, a, b) = q >= 0 ? a : b`, with the same `>= 0` / NaN sense as `heaviside` (a NaN condition selects `b`). It compiles to `if q >= 0.0 { a } else { b }` and interprets the same way, so **only the taken side is evaluated** -- the untaken arm may be undefined (a division by zero, a `ln` of a negative) without poisoning the result. Differentiation selects the taken side's derivative: `d/dvar branch(q, a, b) = branch(q, d a/dvar, d b/dvar)`. The switch `q` contributes nothing (the jump at `q = 0` is dropped, as with `heaviside`), so `branch` gives a piecewise residual the correct one-sided gradient with no spurious boundary term. Use it for asymmetric penalties, one-sided barriers, or guarding an inner computation valid on only one side of a condition.
+
+### `min(a, b)`, `max(a, b)`, `sign(x)`
+
+`min` and `max` return the smaller and larger of two arguments. They are built on `branch` (`min(a, b) = branch(b - a, a, b)`, `max(a, b) = branch(a - b, a, b)`), so they are differentiable away from the kink -- the derivative is the taken side's. At a tie (`a == b`) both return `a` and use `a`'s derivative.
+
+`sign(x)` is `-1` for `x < 0`, `0` at `x == 0`, and `+1` for `x > 0`. It is built on `heaviside` (`sign(x) = heaviside(x) - heaviside(-x)`), so its derivative is 0 everywhere -- the jumps are dropped, as with `heaviside`.
+
+All three accept `impl Into<E>`, so bare numeric arguments compose: `max(x, 0.0)` is a one-sided ramp.
 
 ### `clamp(value, lo, hi)`
 
@@ -568,7 +576,7 @@ let g = parse("exp(sin(x)) * cos(x)").unwrap();
 println!("d/dx = {}", g.diff("x")); // cos(x)^2 * exp(sin(x)) - exp(sin(x)) * sin(x)
 ```
 
-Built-in functions recognised: `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `sinh`, `cosh`, `tanh`, `exp`, `ln`, `log2`, `log10`, `sqrt`, `abs`, `heaviside` (alias `H`), `clamp`, `pow`, `rad_diff`, `rad_sum`, `safe_atan2`, `safe_sqrt`, `safe_asin`, `safe_acos`, `fast_atan`, `fast_atan2`, `epsilon_for`, `cached`, `identity`. The full list is also enumerable at runtime via `function_names()` / `FUNCTIONS`.
+Built-in functions recognised: `sin`, `cos`, `tan`, `asin`, `acos`, `atan`, `atan2`, `sinh`, `cosh`, `tanh`, `exp`, `ln`, `log2`, `log10`, `sqrt`, `abs`, `heaviside` (alias `H`), `clamp`, `min`, `max`, `sign`, `pow`, `rad_diff`, `rad_sum`, `safe_atan2`, `safe_sqrt`, `safe_asin`, `safe_acos`, `fast_atan`, `fast_atan2`, `epsilon_for`, `cached`, `identity`. The full list is also enumerable at runtime via `function_names()` / `FUNCTIONS`.
 
 ### User-defined functions: `parse_with_functions` + `FunctionBag`
 
