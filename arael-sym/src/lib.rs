@@ -2241,10 +2241,14 @@ mod tests {
         sym! {
             let x = symbol("x");
             // Value/codegen is an identity, but STICKY under differentiation:
-            // d(cached(g))/dx = cached(dg/dx), so the barrier survives.
+            // d(cached(g))/dx = cached(dg/dx), so the barrier survives for a
+            // non-constant derivative. A derivative that simplifies to a
+            // constant needs no barrier (nothing to precompute) and folds away.
+            let y = symbol("y");
             let vars = HashMap::from([("x", 5.0)]);
             assert_eq!(cached(x.clone()).eval(&vars).unwrap(), 5.0);
-            assert_eq!(format!("{}", cached(x.clone()).diff("x")), "cached(1)");
+            assert_eq!(format!("{}", cached(x.clone() * y.clone()).diff("x")), "cached(y)");
+            assert_eq!(format!("{}", cached(x.clone()).diff("x")), "1");
             // Barrier like identity: the wrapped subtraction stays intact and
             // codegen inlines it in parentheses (evaluation order preserved).
             assert_eq!(cached(x.clone() - c(1.0)).to_rust(""), "(x - 1.0)");
