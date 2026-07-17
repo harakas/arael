@@ -24,3 +24,8 @@ libc = "0.2"
 
 [profile.release]
 debug = false
+
+[profile.dev.package.arael-macros]
+opt-level = 3
+[profile.dev.package.arael-sym]
+opt-level = 3
