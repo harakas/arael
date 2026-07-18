@@ -921,9 +921,10 @@ macro_rules! fixed_shapes {
 
 /// `dst -= C_a * Z_b` where `dst` is `wa x wb` column-major, `Z_b` is
 /// `we x wb` column-major, and `C_a` is `wa x we` -- stored directly
-/// (`trans == false`) or as its transpose `we x wa` (`trans == true`)
+/// (`trans == false`) or as its transpose `we x wa` (`trans == true`).
+/// Dispatches an unrolled kernel for [`FIXED_SHAPES`], else nano-gemm.
 #[inline]
-fn gemm_sub<T: SchurReal>(
+pub(crate) fn gemm_sub<T: SchurReal>(
     dst: &mut [T],
     ca: &[T],
     trans: bool,

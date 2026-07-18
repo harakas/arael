@@ -4,7 +4,7 @@ faer extensions. Everything here is built on faer's public API and laid out the
 way it would sit in faer itself; arael depends on it, but nothing in it is
 arael-specific.
 
-Three things faer does not ship:
+The block-structured pieces a large sparse solve needs:
 
 - **Block CSC** (`bsc`) -- sparse matrix storage over a *variable* block
   partition. A Hessian assembled from entities (6-wide poses, 3-wide points)
@@ -14,6 +14,10 @@ Three things faer does not ship:
   blocks from a block-CSC matrix and factorize only what is left. This is the
   landmark/point marginalization that makes bundle adjustment and SLAM
   tractable, and it needs the block structure to be cheap.
+- **Band Cholesky** (`band`) -- factorize a block-CSC matrix that is banded in
+  natural order directly in block form, fill confined to each column's
+  envelope. A trajectory's Hessian, and its reduced pose system, are banded, so
+  this needs no fill-reducing ordering and no symbolic phase.
 - **Nested dissection** (`nd`) -- a fill-reducing ordering for matrices with no
   band and no small degrees, where minimum degree has nothing to chew on. faer
   offers AMD, natural, or a custom permutation; this computes the custom one.
@@ -95,6 +99,27 @@ error, only slower, and `gemm_shapes` will say so.
 The caller factorizes S itself (`csc_pattern` + faer's sparse Cholesky, or any
 other solver), then calls `schur_backsub`. See `arael::simple_lm::SparseFaer`
 for the whole loop.
+
+## band -- narrow-band Cholesky
+
+Given a symmetric positive-definite block-CSC matrix banded in natural order,
+factor `R^T R = S` in block form. Cholesky preserves each column's envelope
+(George-Liu), so fill stays inside the band: no fill-reducing ordering, no
+symbolic analysis, no scalar-CSC round trip. Works on the whole Hessian (a pose
+graph or localization system) or on a reduced Schur system -- anything banded
+in its natural order.
+
+| | |
+|---|---|
+| `BandSymbolic::new(sym)` | analyse once: the factor's envelope pattern and the map back to the matrix's values. The half-bandwidth falls out of the block structure; the caller supplies none |
+| `band_factorize(sym, s, factor)` | numeric: `R^T R = S` into a factor buffer. Left-looking by block column, reusing schur's unrolled tile kernels |
+| `band_solve(sym, factor, rhs)` | solve `S x = rhs` in place from the factor |
+| `BandError` | the matrix was not positive definite |
+
+Worth it only when the band is narrow: in benchmarks a wide band factorizes
+faster as a general sparse matrix (faer's supernodal Cholesky).
+`SparseFaer::with_narrow_band` wires it into the LM loop and warns when the band
+is too wide to pay.
 
 ## License
 
