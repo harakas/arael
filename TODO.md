@@ -1,6 +1,10 @@
 # TODO
 
-- **`loss = |s| ...` in `fit(...)`**. Block-level robust loss lives on the
+- **`loss = |s| ...` in `fit(...)`** -- DONE (2026-07-17, REVIEW3 item 7).
+  `fit(...)`/`fit64(...)` accept a trailing `loss = |s| rho(s)` block
+  M-estimator over each point's squared residual; reuses the constraint loss
+  pipeline; no-loss codegen byte-identical. Test:
+  tests/fit_attr.rs::block_loss_cauchy_ignores_outliers. Original entry:
   `constraint(...)` attribute (arael-macros/src/constraint.rs). The `fit(...)`
   form has its own codegen (`generate_fit_impl` in lib.rs) and does not go
   through it, so a robust curve fit currently needs a hand-written constraint
@@ -45,7 +49,12 @@
   route whenever the model has something to marginalize. It is not a separate
   backend: `SparseFaer` reduces or factorizes the whole system, and picks.
 
-- **SparseFaer::with_threads(n): opt-in multithreaded faer solve**
+- **SparseFaer::with_threads(n): opt-in multithreaded faer solve** -- DONE
+  (shipped as `LmConfig::num_threads` + the `rayon` cargo feature; the
+  factorization and triangular solve thread, assembly does not). Note the
+  shipped form reversed this entry's "backend builder, NOT an LmConfig field"
+  call: config-level won because `configure()` hands it to the backend and
+  the other backends ignore it. Original entry:
   (discussed 2026-07). faer threads via rayon: every heavy call takes a
   `faer::Par` (`Par::Seq` / `Par::rayon(nthreads)`, 0 = all cores), and
   `SparseFaer::solve_damped` currently hard-codes `Par::Seq` at its four
@@ -67,7 +76,11 @@
   BAL-372+ the real case). Benchmarking it needs the `RAYON_NUM_THREADS=1`
   cap in the run.sh scripts lifted deliberately for that row.
 
-- **lm_resolve(): warm re-solve for arael-sketch dragging** (design agreed
+- **lm_resolve(): warm re-solve for arael-sketch dragging** -- DONE
+  (2026-07-18, superseded by `LmSession` -- see the SHIPPED entry further
+  down; the matrix storage moved into the session instead of the solver, so
+  the trait kept its shape). The sketch-integration notes below still apply
+  to the pending sketch adoption. Original entry: (design agreed
   2026-07, shelved -- fringe for now; sketch systems are sub-millisecond
   today, so this is headroom, not a rescue). Adds
   `lm_resolve(x0, &mut solver, problem, cfg)` alongside `lm_solve`: same
@@ -239,18 +252,45 @@
 
 - **Schur: S is stored twice** -- once as blocks (what `schur_reduce` writes) and once as the scalar CSC values faer factorizes, ~260 MB each at 6000 slam poses. Tried removing the block form: give every S tile a strided view into the CSC values (a tile's rows are contiguous, its columns one block-column of nonzeros apart) so the reduction accumulates straight into the array the factorization reads. It works and is exact, but it is SLOWER, consistently, and was rejected: the GEMM's destination tile stops being contiguous, and the 6 columns of a 6x6 tile land ~14 KB apart. Interleaved A/B at 6000 poses -- f64 2310 -> 2344 ms/iter, f32 1612 -> 1721 (+6.8%); at 300 poses f64 49.2 -> 50.2. Memory did fall (f64 peak 2476 -> 2247 MB) but only for f64; the f32 peak did not move at all, because it is set during the symbolic phase, before S exists. The double storage is the price of handing S to a SCALAR sparse factorization, so the way out is not a cleverer copy -- it is the band/block solver above, which factorizes S in the block form the reduction already produces and needs no scalar CSC at all.
 
-- **arael**: `LmConfig` presets instead of `Default`. Replace the `Default` impl with named constructors the user must choose from -- `conservative`, `well_conditioned`, `continue_from(&LmResult)`, etc. -- each setting lambda, patience, tolerances and floors to fit that regime (e.g. `well_conditioned` starts lambda low and drops it fast; `continue_from` seeds lambda and the trust state from a prior solve so a re-solve does not restart cold). Making the choice explicit stops a caller silently inheriting settings tuned for a different problem. Requested by the user 2026-07-16.
+- **arael**: `LmConfig` presets instead of `Default` -- DONE (2026-07-18,
+  f26fe6d): `conservative()` (the `Default`), WIP `well_conditioned()` /
+  `ill_conditioned()` modeled on the slam / BAL benchmarks, `continue_from`,
+  `with_nielsen`, per-field `with_*` builders. Examples and docs adopted the
+  presets via the builder form (8333c28).
 
-- **arael**: predictive, Ceres-style termination. Add a flag to stop on the PREDICTED cost decrease (the gain-ratio model's expected reduction falling below a threshold) rather than only on the measured relative/absolute change between accepted steps. Catches convergence one iteration earlier when the model is trusted, without a wasted step to confirm the plateau. Requested by the user 2026-07-16.
+- **arael**: predictive, Ceres-style termination -- DONE (2026-07-17,
+  REVIEW3 item 8): `LmConfig::predicted_reduction_tolerance: Option<T>`
+  (default None), checked on accepted steps, reports
+  `LmStatus::PredictedReduction`, respects `min_iters`. Tests in
+  tests/termination_semantics.rs.
 
-- **arael**: audit every panic / unwrap / expect on the solve path and turn recoverable failures into a proper `Result` the caller can handle -- a singular factorization, a non-finite residual, or a backend error should return an error, not abort the process. Breaks the API (solve entry points would return `Result`), but the current panicking behavior is bad for a library; the churn is worth it. Requested by the user 2026-07-16.
+- **arael**: audit every panic / unwrap / expect on the solve path -- DONE
+  (2026-07-16, REVIEW3 item 5), shipped WITHOUT the API break this entry
+  expected: the seven structural panics surface as
+  `LmStatus::SetupFailed(SolveError)` on the ordinary `LmResult` (parameters
+  unchanged, NaN costs, zero iterations), entry points unchanged.
+  `LmSolver::compute` and `CooMatrix::to_csc{_with_map}` return `Result`
+  internally. Tests: tests/degenerate_model.rs, tests/sparse_faer_routes.rs.
 
-- **arael macro**: a multi-output constraint (a residual block returning several components) appears to run CSE separately per output. Unify CSE across all outputs of one constraint so shared subexpressions are computed once -- possible codegen and runtime win. Verify the current behavior first, then measure before/after. Requested by the user 2026-07-16.
+- **arael macro**: multi-output constraint CSE -- RESOLVED (2026-07-16,
+  REVIEW3 pre-check): the premise was wrong -- CSE already runs once across
+  all outputs of a multi-output constraint. No change needed.
 
 - **arael**: landmark-folding Schur for covariance. The `SparseFaer` solver already marginalizes landmark-like blocks (a Schur complement) when it is faster; `assemble_covariance` does not -- it factors the whole system. Investigate reducing over the landmarks for covariance too, so camera/pose marginals come from the smaller reduced factor (as g2o's `computeMarginals` does in the bal/slam benchmarks). Requested by the user 2026-07-16.
 
-- **arael**: a single generic `model.solve(solver, &cfg)` taking a solver-type enum instead of the family of `solve_sparse` / `solve_dense` / `solve_band` / `solve_with(backend)` methods -- one entry point, the backend chosen by value. Pairs with the `LmConfig` presets item above; both are the same "make the solve call explicit and uniform" cleanup. Requested by the user 2026-07-16.
+- **arael**: a single generic `model.solve(solver, &cfg)` -- DONE
+  (2026-07-18, b313ef8): `SolverKind` enum (Dense / Band / BandLapack /
+  Sparse(SparseFaerOptions) / Eigen / Cholmod / CholmodSupernodal),
+  `LmProblem::solve(kind, &cfg)` via `BackendScalar` per-scalar dispatch;
+  a backend not compiled in (or CHOLMOD at f32) returns
+  `SolveError::SolverUnavailable` instead of failing to build. The old
+  entry points remain.
 
 - **arael-sym**: piecewise builtins beyond `min`/`max`/`sign`. `min`, `max`, and `sign` are implemented (branch/heaviside-based, in `FUNCTIONS`). REVIEW3 item 11 also listed `floor`, `ceil`, `round`, `hypot`, `powi`, `cbrt`, `rem`. Not done: `floor`/`ceil`/`round`/`rem` are piecewise-constant or discontinuous with a subgradient story that needs its own design (a plain 0 derivative is wrong for `rem`), and `hypot`/`cbrt`/`powi` are smooth conveniences that duplicate existing `sqrt`/`pow` compositions with no user having asked for them yet. Add on demand.
 
-- **benchmarks/pgo + arael macro**: the SE3 model compiles 3x slower under `QuaternionParam` than under `EulerAngleParam` (pgo bench crate: 32 s -> 92 s incremental, measured 2026-07-13). The switch was made because the euler-angle delta undershoots on large initial rotation errors: on sphere2500 arael's first step cut the cost by 5% where factrs's exponential-map retraction cut it by 75%, costing arael a whole extra iteration (7 vs 6). `QuaternionParam` closed that gap exactly. The compile cost is the macro symbolically differentiating `QuaternionParam::rotation_matrix()` -- a much larger expression tree than the euler composition -- for every residual component against all 12 parameters of a pose-pose edge, twice (f64 and f32 models). Worth investigating whether the generated derivative can be shrunk: the rotation-vector retraction has a lot of shared structure (the delta is small by construction, and `ref_rotation` is a constant within an iteration), so common-subexpression extraction or treating `ref_rotation` as a factored-out constant may cut the tree substantially. 3x compile time for a 6-DOF pose model is steep enough that a user could reasonably choose the worse retraction to avoid it.
+- **benchmarks/pgo + arael macro**: SE3 QuaternionParam compile time -- DONE
+  (2026-07-17, c3dbee7 + 9c647db): not by shrinking the derivative but by
+  making its construction cheap -- single-pass cached() substitution
+  (cse::replace_many) and E::diff building raw with one identity-preserving
+  simplify() at the end. pgo SE3 macro expansion ~37s -> ~7s, generated code
+  byte-identical. Original entry: the SE3 model compiles 3x slower under `QuaternionParam` than under `EulerAngleParam` (pgo bench crate: 32 s -> 92 s incremental, measured 2026-07-13). The switch was made because the euler-angle delta undershoots on large initial rotation errors: on sphere2500 arael's first step cut the cost by 5% where factrs's exponential-map retraction cut it by 75%, costing arael a whole extra iteration (7 vs 6). `QuaternionParam` closed that gap exactly. The compile cost is the macro symbolically differentiating `QuaternionParam::rotation_matrix()` -- a much larger expression tree than the euler composition -- for every residual component against all 12 parameters of a pose-pose edge, twice (f64 and f32 models). Worth investigating whether the generated derivative can be shrunk: the rotation-vector retraction has a lot of shared structure (the delta is small by construction, and `ref_rotation` is a constant within an iteration), so common-subexpression extraction or treating `ref_rotation` as a factored-out constant may cut the tree substantially. 3x compile time for a 6-DOF pose model is steep enough that a user could reasonably choose the worse retraction to avoid it.
