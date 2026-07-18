@@ -2852,12 +2852,35 @@ pub enum ReducedOrdering {
     Nd,
 }
 
+/// Half-bandwidth (in scalars) past which the narrow-band Cholesky
+/// ([`SparseFaer::with_narrow_band`]) tends to lose to faer's supernodal
+/// factorization -- narrow bands win, wide ones do not. Measured crossover on
+/// SLAM reduced systems is around here (hardware-dependent); it only gates a
+/// warning, never the route itself.
+const NARROW_BAND_WIDE_KD: usize = 128;
+
+/// Scalar half-bandwidth of a block matrix in natural order: the largest
+/// distance from a stored tile's first scalar row to its block-column's last
+/// scalar column. O(block columns). The whole-system analog of
+/// [`arael_faer::schur::SchurSymbolic::kept_bandwidth`].
+fn block_half_bandwidth(hsym: &arael_faer::bsc::SymbolicSparseBlockColMat<usize>) -> usize {
+    let mut b = 0usize;
+    for j in 0..hsym.nblk_cols() {
+        let col_end = hsym.col_span(j).end;
+        if let Some(first) = hsym.col_range(j).next() {
+            let row_start = hsym.row_span(hsym.blk_row(first)).start;
+            b = b.max(col_end - row_start);
+        }
+    }
+    b
+}
+
 /// Fill-reducing ordering, but only where there is fill to reduce.
 ///
 /// `band` is S's half-bandwidth ([`arael_faer::schur::SchurSymbolic::kept_bandwidth`]),
 /// which the symbolic pass hands over for free.
-fn ordering_for(col_ptr: &[usize], n: usize, band: usize) -> ReducedOrdering {
-    let nnz = col_ptr.last().copied().unwrap_or(0) as f64;
+fn ordering_for(nnz: usize, n: usize, band: usize) -> ReducedOrdering {
+    let nnz = nnz as f64;
     let density = nnz / (n as f64 * (n as f64 + 1.0) / 2.0);
     if density > 0.25 {
         ReducedOrdering::NaturalDense
@@ -3121,6 +3144,10 @@ pub struct SchurPlan {
     /// S's half-bandwidth -- the structural fact the ordering is chosen from.
     /// 0 when there was no reduction.
     pub kept_bandwidth: usize,
+    /// Whether the reduced system was factorized by the narrow-band Cholesky
+    /// ([`SparseFaer::with_narrow_band`]) instead of faer's general sparse Cholesky.
+    /// Only ever `true` for a banded reduction with the route enabled.
+    pub narrow_band: bool,
 }
 
 /// Sparse Cholesky via faer, pure Rust -- the default backend.
@@ -3206,6 +3233,16 @@ pub struct SparseFaer<T = f64> {
     l_vals: Vec<T>,
     factor_mem: Vec<std::mem::MaybeUninit<u8>>,
     solve_mem: Vec<std::mem::MaybeUninit<u8>>,
+    // Opt-in narrow-band Cholesky for a banded reduced Schur system, an
+    // alternative to the faer factorization of S that skips the symbolic
+    // phase and the scalar-CSC round trip. narrow_band_enabled is the config
+    // (with_narrow_band); narrow_band_active is whether this solve actually
+    // took the route (only when the reduction is banded). narrow_band_sym and
+    // narrow_band_factor are the envelope structure and factor buffer, sized once.
+    narrow_band_enabled: bool,
+    narrow_band_active: bool,
+    narrow_band_sym: Option<arael_faer::band::BandSymbolic>,
+    narrow_band_factor: Vec<T>,
 }
 
 /// Alias of [`SparseFaer<f32>`].
@@ -3247,6 +3284,10 @@ impl<T> SparseFaer<T> {
             l_vals: Vec::new(),
             factor_mem: Vec::new(),
             solve_mem: Vec::new(),
+            narrow_band_enabled: false,
+            narrow_band_active: false,
+            narrow_band_sym: None,
+            narrow_band_factor: Vec::new(),
         }
     }
 
@@ -3295,6 +3336,34 @@ impl<T> SparseFaer<T> {
     /// it is the default. Turn it off to hand the choice back to faer.
     pub fn with_supernodal(mut self, on: bool) -> Self {
         self.supernodal = on;
+        self
+    }
+
+    /// Factor a banded system with a narrow-band Cholesky instead of faer's
+    /// general sparse Cholesky. Off by default. Applies to whichever system
+    /// this backend factorizes -- the reduced Schur system when it reduces,
+    /// the whole Hessian when it does not.
+    ///
+    /// A trajectory with local features is banded in natural order (the whole
+    /// pose system for a localization or pose graph, the reduced pose system
+    /// after landmarks are marginalized). A narrow-band factorization confines
+    /// fill to the band by construction and skips the symbolic analysis,
+    /// ordering, and scalar-CSC round trip the general sparse route needs -- a
+    /// win when the band is narrow, growing on the first iteration where the
+    /// symbolic work lives.
+    ///
+    /// This is the caller's explicit choice: whenever the system to factorize
+    /// is banded ([`ReducedOrdering::NaturalBanded`]), the narrow-band route is
+    /// used, whatever the bandwidth. Past roughly a hundred scalars of
+    /// half-bandwidth faer's supernodal factorization is faster, and enabling
+    /// this on such a system logs a warning. A non-banded system always stays
+    /// on the faer route.
+    ///
+    /// Distinct from the whole-system scalar band solver ([`Band`]): that
+    /// factorizes the entire Hessian in LAPACK band storage with a caller-given
+    /// bandwidth; this works in block form and finds the bandwidth itself.
+    pub fn with_narrow_band(mut self, on: bool) -> Self {
+        self.narrow_band_enabled = on;
         self
     }
 
@@ -3441,6 +3510,99 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
         Ok(cost)
     }
 
+    /// Set up the whole Hessian (no reduction) for the block band Cholesky:
+    /// the block form is kept and factored directly, skipping the scalar CSC
+    /// and faer's symbolic analysis. Reached from `compute` when
+    /// `with_narrow_band` is on and the whole system is banded.
+    fn setup_whole_band(
+        &mut self,
+        problem: &mut dyn LmProblem<T>,
+        params: &[T],
+        grad: &mut [T],
+        matrix: &mut FaerMatrix<T>,
+        partition: &[usize],
+        hsym: arael_faer::bsc::SymbolicSparseBlockColMat<usize>,
+        band: usize,
+        vb: bool,
+    ) -> Result<T, SolveError> {
+        let n = *partition.last().unwrap();
+        let nblk = partition.len() - 1;
+        // No scalar CSC, no Schur, no faer factorization on this route.
+        matrix.csc = None;
+        self.schur = None;
+        self.s = None;
+        self.s_vals = Vec::new();
+        self.rhs_kept = Vec::new();
+        self.x_kept = Vec::new();
+
+        // Scalar diagonal positions inside the block Hessian's diagonal tiles
+        // (damping and extract_diagonal read and write through these).
+        self.bdiag_pos.clear();
+        self.bdiag_pos.resize(n, usize::MAX);
+        for b in 0..nblk {
+            let w = partition[b + 1] - partition[b];
+            let diag = hsym
+                .col_range(b)
+                .find(|&x| hsym.blk_row(x) == b)
+                .ok_or(SolveError::UnconstrainedParameter { param: partition[b] })?;
+            let base = hsym.val_range(diag).start;
+            for k in 0..w {
+                self.bdiag_pos[partition[b] + k] = base + k * (w + 1);
+            }
+        }
+
+        // Band factorization structure over the whole Hessian, and the scatter
+        // map into the block Hessian.
+        let bsym = arael_faer::band::BandSymbolic::new(&hsym);
+        self.narrow_band_factor.resize(bsym.factor_val_count(), T::zero());
+        self.narrow_band_active = true;
+        if vb {
+            info!(
+                "band: whole system {} params (half-bandwidth {}), factoring with a \
+                 narrow-band Cholesky ({} factor values)",
+                n, band, bsym.factor_val_count(),
+            );
+        }
+        if band > NARROW_BAND_WIDE_KD {
+            warn!(
+                "with_narrow_band: whole-system half-bandwidth is {}, wider than ~{}; \
+                 faer's supernodal factorization is likely faster here -- drop \
+                 with_narrow_band to use it.",
+                band, NARROW_BAND_WIDE_KD,
+            );
+        }
+        self.narrow_band_sym = Some(bsym);
+        let mut resolver = arael_faer::bsc::PositionResolver::new(&hsym);
+        let mut positions = std::vec::Vec::new();
+        problem.accumulate_hessian_positions(
+            &mut |i, j| resolver.resolve(i as usize, j as usize),
+            &mut positions,
+        );
+
+        self.plan = Some(SchurPlan {
+            reduced: false,
+            eliminated_blocks: 0,
+            eliminated_params: 0,
+            kept_params: n,
+            fill_ratio: None,
+            flop_ratio: None,
+            ordering: Some(ReducedOrdering::NaturalBanded),
+            kept_bandwidth: band,
+            narrow_band: true,
+        });
+
+        // First numeric fill. Everything above it was analysis.
+        let mut h = arael_faer::bsc::SparseBlockColMat::zeroed(hsym);
+        let t_a = self.measure.then(Instant::now);
+        let cost = problem.calc_grad_hessian_sparse_indexed(params, grad, h.vals_mut(), &positions);
+        if let Some(t) = t_a {
+            self.assembly_time = t.elapsed();
+        }
+        matrix.h = Some(h);
+        self.positions = Some(positions);
+        Ok(cost)
+    }
+
     /// Symbolic factorization of the whole system, under the ordering
     /// [`FaerOrdering`] asks for. Reads the pattern from `s_col_ptr` /
     /// `s_row_idx`, which the caller has just filled.
@@ -3568,6 +3730,8 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         self.schur = None;
         self.s = None;
         self.llt_symbolic = None;
+        self.narrow_band_sym = None;
+        self.narrow_band_active = false;
         self.plan = None;
         // Buffer allocations are kept; they are resized when the next
         // structure is built. The elimination hint and the policy are
@@ -3621,6 +3785,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         }
         // Past the fast path: this compute is doing the structural work.
         self.did_setup = true;
+        self.narrow_band_active = false;
         let n = matrix.n;
 
         // Verbose mode narrates the one-time structural work below: what was
@@ -3674,6 +3839,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 flop_ratio: None,
                 ordering: None,
                 kept_bandwidth: 0,
+                narrow_band: false,
             });
             return self.setup_full(problem, params, grad, matrix, n, None, None, vb);
         }
@@ -3752,6 +3918,21 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                     },
                 );
             }
+            // Whole-system narrow-band route: the caller asked for it and the
+            // whole Hessian is banded in natural order, so factor it with the
+            // block band Cholesky instead of faer's general sparse Cholesky.
+            if self.narrow_band_enabled {
+                let (hsym, _) = arael_faer::bsc::SymbolicSparseBlockColMat::from_scalar_coords(
+                    partition.clone(),
+                    partition.clone(),
+                    cells.len(),
+                    |k| (cells[k].0 as usize, cells[k].1 as usize),
+                );
+                let band = block_half_bandwidth(&hsym);
+                if matches!(ordering_for(hsym.val_count(), n, band), ReducedOrdering::NaturalBanded) {
+                    return self.setup_whole_band(problem, params, grad, matrix, &partition, hsym, band, vb);
+                }
+            }
             self.plan = Some(SchurPlan {
                 reduced: false,
                 eliminated_blocks: 0,
@@ -3761,6 +3942,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 flop_ratio: None,
                 ordering: None,
                 kept_bandwidth: 0,
+                narrow_band: false,
             });
             return self.setup_full(
                 problem, params, grad, matrix, n, Some((&partition, &cells)), None, vb,
@@ -3917,7 +4099,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             let t0 = vb.then(Instant::now);
             let s_ord = match &nd {
                 Some(nd) => SymmetricOrdering::Custom(nd.perm()),
-                None => ordering_for(&s_pat.0, nk, band).faer(),
+                None => ordering_for(s_pat.0.last().copied().unwrap_or(0), nk, band).faer(),
             };
             let s_llt = analyze(&s_pat.0, &s_pat.1, nk, s_ord);
             t_sym_reduced = t0.map_or(0.0, |t| t.elapsed().as_secs_f64() * 1e3);
@@ -3999,6 +4181,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             // to report it would cost a pass over every nonzero in S.
             ordering: None,
             kept_bandwidth: if reduced { band } else { 0 },
+            narrow_band: false,
         });
 
         // A DECLINED reduction marginalizes nothing, so the block layout
@@ -4037,10 +4220,32 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             return cost;
         }
 
-        let (col_ptr, row_idx) = schur.s.csc_pattern();
-        self.s_col_ptr = col_ptr;
-        self.s_row_idx = row_idx;
         let nk = schur.s.nrows();
+
+        // Ordering, and the opt-in narrow-band route, are decided from S's
+        // block structure: nnz straight off the symbolic (no scalar CSC yet),
+        // band from the symbolic pass.
+        let ord = match &nd {
+            Some(_) => ReducedOrdering::Nd,
+            None => ordering_for(schur.s.val_count(), nk, band),
+        };
+        self.narrow_band_active = self.narrow_band_enabled && matches!(ord, ReducedOrdering::NaturalBanded);
+        if let Some(plan) = self.plan.as_mut() {
+            plan.ordering = Some(ord);
+            plan.narrow_band = self.narrow_band_active;
+        }
+        // The caller asked for the narrow-band route and the system is banded,
+        // so it is used -- but past roughly this half-bandwidth faer's
+        // supernodal factorization is faster (crossover is hardware-dependent),
+        // so say so rather than silently taking the slower route.
+        if self.narrow_band_active && band > NARROW_BAND_WIDE_KD {
+            warn!(
+                "with_narrow_band: reduced system half-bandwidth is {}, wider than \
+                 ~{}; faer's supernodal factorization is likely faster here -- drop \
+                 with_narrow_band to use it.",
+                band, NARROW_BAND_WIDE_KD,
+            );
+        }
 
         // Reduced route: the block position map (scatter targets into the
         // block Hessian) is built here, now that the reduction is going ahead.
@@ -4051,19 +4256,33 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             &mut positions,
         );
 
-        // S storage and faer's symbolic factorization of the reduced
-        // system -- all one-time.
-        self.s_vals.resize(self.s_row_idx.len(), T::zero());
         let s = schur.alloc_s::<T>();
-        {
-            use faer::sparse::linalg::cholesky::*;
-            let ord = match &nd {
-                Some(_) => ReducedOrdering::Nd,
-                None => ordering_for(&self.s_col_ptr, nk, band),
-            };
-            if let Some(plan) = self.plan.as_mut() {
-                plan.ordering = Some(ord);
+        if self.narrow_band_active {
+            // Narrow-band Cholesky: factor S directly in block form -- no
+            // scalar CSC, no faer symbolic analysis, fill confined to the band.
+            let bsym = arael_faer::band::BandSymbolic::new(&schur.s);
+            self.narrow_band_factor.resize(bsym.factor_val_count(), T::zero());
+            if vb {
+                info!(
+                    "schur: reduced system {} params ({:.0}% dense, half-bandwidth {}), \
+                     factoring with a narrow-band Cholesky ({} factor values)",
+                    nk,
+                    100.0 * schur.s.val_count() as f64
+                        / (nk as f64 * (nk as f64 + 1.0) / 2.0),
+                    band,
+                    bsym.factor_val_count(),
+                );
             }
+            self.narrow_band_sym = Some(bsym);
+        } else {
+            // General sparse route: S flattened to scalar CSC and factorized
+            // by faer, under the chosen ordering.
+            use faer::sparse::linalg::cholesky::*;
+            self.narrow_band_sym = None;
+            let (col_ptr, row_idx) = schur.s.csc_pattern();
+            self.s_col_ptr = col_ptr;
+            self.s_row_idx = row_idx;
+            self.s_vals.resize(self.s_row_idx.len(), T::zero());
             let llt_symbolic = match reduced_llt {
                 Some(llt) => llt,
                 None => {
@@ -4097,23 +4316,21 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                     ord.why(nk, self.s_row_idx.len(), band),
                 );
             }
-            if vb {
-                let rest = lap(true);
-                info!(
-                    "schur: setup {:.1} ms = finding the blocks {:.1} + finding the \
-                     reduction {:.1} + weighing it {:.1}{} + CSC pattern, scatter map \
-                     and symbolic factorization {:.1}",
-                    t_block + t_schur_symbolic + t_gate + rest,
-                    t_block,
-                    t_schur_symbolic,
-                    t_gate,
-                    decision_detail,
-                    rest,
-                );
-            }
-
             self.size_llt_buffers(&llt_symbolic);
             self.llt_symbolic = Some(llt_symbolic);
+        }
+        if vb {
+            let rest = lap(true);
+            info!(
+                "schur: setup {:.1} ms = finding the blocks {:.1} + finding the \
+                 reduction {:.1} + weighing it {:.1}{} + factor setup {:.1}",
+                t_block + t_schur_symbolic + t_gate + rest,
+                t_block,
+                t_schur_symbolic,
+                t_gate,
+                decision_detail,
+                rest,
+            );
         }
         self.rhs_kept.resize(nk, T::zero());
         self.x_kept.resize(nk, T::zero());
@@ -4190,38 +4407,65 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             }
         }
 
+        // Whole-system band route: no reduction, factor the damped H directly
+        // and solve. Distinguished from the reduced route by the absence of a
+        // Schur symbolic (matrix.h is block form only in these two cases).
+        if self.schur.is_none() {
+            let bsym = self.narrow_band_sym.as_ref().unwrap();
+            if arael_faer::band::band_factorize(bsym, h, &mut self.narrow_band_factor).is_err() {
+                return false;
+            }
+            delta.copy_from_slice(grad);
+            arael_faer::band::band_solve(bsym, &self.narrow_band_factor, delta);
+            return true;
+        }
+
         // Reduce: S and the reduced rhs from the damped H.
         let nk = self.rhs_kept.len();
-        let schur = self.schur.as_ref().unwrap();
-        let s = self.s.as_mut().unwrap();
-        if arael_faer::schur::schur_reduce(schur, h, grad, &mut self.ctx, s, &mut self.rhs_kept)
-            .is_err()
         {
-            return false;
+            let schur = self.schur.as_ref().unwrap();
+            let s = self.s.as_mut().unwrap();
+            if arael_faer::schur::schur_reduce(schur, h, grad, &mut self.ctx, s, &mut self.rhs_kept)
+                .is_err()
+            {
+                return false;
+            }
         }
+
         // Factor the reduced system and solve for the kept blocks.
-        s.csc_vals_into(&mut self.s_vals);
-        let sym_ref = faer::sparse::SymbolicSparseColMatRef::new_checked(
-            nk, nk, &self.s_col_ptr, None, &self.s_row_idx,
-        );
-        let mat_ref = faer::sparse::SparseColMatRef::new(sym_ref, &self.s_vals);
-        let stack = faer::dyn_stack::MemStack::new(&mut self.factor_mem);
-        let llt = match self.llt_symbolic.as_ref().unwrap().factorize_numeric_llt(
-            &mut self.l_vals,
-            mat_ref,
-            faer::Side::Upper,
-            faer::linalg::cholesky::llt::factor::LltRegularization::default(),
-            par,
-            stack,
-            faer::Spec::default(),
-        ) {
-            Ok(l) => l,
-            Err(_) => return false,
-        };
-        self.x_kept.copy_from_slice(&self.rhs_kept);
-        let rhs = faer::col::ColMut::from_slice_mut(&mut self.x_kept);
-        let solve_stack = faer::dyn_stack::MemStack::new(&mut self.solve_mem);
-        llt.solve_in_place_with_conj(faer::Conj::No, rhs.as_mat_mut(), par, solve_stack);
+        if self.narrow_band_active {
+            // Narrow-band Cholesky on S in block form: no scalar CSC round trip.
+            let bsym = self.narrow_band_sym.as_ref().unwrap();
+            let s = self.s.as_ref().unwrap();
+            if arael_faer::band::band_factorize(bsym, s, &mut self.narrow_band_factor).is_err() {
+                return false;
+            }
+            self.x_kept.copy_from_slice(&self.rhs_kept);
+            arael_faer::band::band_solve(bsym, &self.narrow_band_factor, &mut self.x_kept);
+        } else {
+            self.s.as_ref().unwrap().csc_vals_into(&mut self.s_vals);
+            let sym_ref = faer::sparse::SymbolicSparseColMatRef::new_checked(
+                nk, nk, &self.s_col_ptr, None, &self.s_row_idx,
+            );
+            let mat_ref = faer::sparse::SparseColMatRef::new(sym_ref, &self.s_vals);
+            let stack = faer::dyn_stack::MemStack::new(&mut self.factor_mem);
+            let llt = match self.llt_symbolic.as_ref().unwrap().factorize_numeric_llt(
+                &mut self.l_vals,
+                mat_ref,
+                faer::Side::Upper,
+                faer::linalg::cholesky::llt::factor::LltRegularization::default(),
+                par,
+                stack,
+                faer::Spec::default(),
+            ) {
+                Ok(l) => l,
+                Err(_) => return false,
+            };
+            self.x_kept.copy_from_slice(&self.rhs_kept);
+            let rhs = faer::col::ColMut::from_slice_mut(&mut self.x_kept);
+            let solve_stack = faer::dyn_stack::MemStack::new(&mut self.solve_mem);
+            llt.solve_in_place_with_conj(faer::Conj::No, rhs.as_mat_mut(), par, solve_stack);
+        }
 
         // Recover the eliminated blocks into the full-length delta.
         let schur = self.schur.as_ref().unwrap();
@@ -5024,8 +5268,9 @@ mod tests {
             let rows = (j + 1).min(band + 1);
             col_ptr.push(col_ptr[j] + rows);
         }
+        let nnz = *col_ptr.last().unwrap();
         assert_eq!(
-            ordering_for(&col_ptr, n, band),
+            ordering_for(nnz, n, band),
             ReducedOrdering::NaturalBanded,
             "a narrow band is already at the fill limit; AMD only costs symbolic time"
         );
@@ -5033,24 +5278,22 @@ mod tests {
         // The same matrix, but a landmark reaches across the whole trajectory
         // (a loop closure): the band is gone and AMD earns its keep.
         assert_eq!(
-            ordering_for(&col_ptr, n, n - 1),
+            ordering_for(nnz, n, n - 1),
             ReducedOrdering::Amd,
             "no band -- a fill-reducing ordering must run"
         );
 
         // Dense enough that there is no fill to reduce.
         let dense_nnz = (0.7 * (n as f64) * (n as f64 + 1.0) / 2.0) as usize;
-        let dense = vec![0usize, dense_nnz];
         assert_eq!(
-            ordering_for(&dense, 1, dense_nnz),
+            ordering_for(dense_nnz, 1, dense_nnz),
             ReducedOrdering::NaturalDense,
         );
 
         // The pose-graph shape: very sparse, no band. This is the case where
         // guessing natural costs 48x, so it must come out AMD.
         let sparse_nnz = 3 * n;
-        let sparse = vec![0usize, sparse_nnz];
-        assert_eq!(ordering_for(&sparse, n, n - 1), ReducedOrdering::Amd);
+        assert_eq!(ordering_for(sparse_nnz, n, n - 1), ReducedOrdering::Amd);
     }
 
     use super::*;
