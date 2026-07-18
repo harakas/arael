@@ -54,6 +54,15 @@ fn config() -> SceneConfig {
             cfg.num_landmarks = 4 * n;
         }
     }
+    // SLAM_SPAN=N caps every landmark to a narrow visibility span (and drops
+    // the wide fraction), making the reduced Schur system narrow-banded -- the
+    // regime the narrow-band Cholesky wins. span = 2*range+1.
+    if let Ok(s) = std::env::var("SLAM_SPAN") {
+        if let Ok(s) = s.parse::<usize>() {
+            cfg.lm_visibility_range = s / 2;
+            cfg.wide_fraction = 0.0;
+        }
+    }
     cfg
 }
 

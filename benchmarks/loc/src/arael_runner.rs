@@ -350,30 +350,39 @@ fn extract_f32(path: &PathF) -> Solution {
 // LOC_ARAEL_SOLVER=faer overrides with the general sparse solver.
 const BAND_KD: usize = 11;
 
-fn faer() -> bool {
-    std::env::var("LOC_ARAEL_SOLVER").as_deref() == Ok("faer")
+// LOC_ARAEL_SOLVER selects the backend: band (default -- scalar LAPACK-band
+// Cholesky, kd=11), faer (general sparse), or narrow_band (block band Cholesky
+// on the whole banded Hessian, via SparseFaer::with_narrow_band).
+fn solver_kind() -> String {
+    std::env::var("LOC_ARAEL_SOLVER").unwrap_or_else(|_| "band".to_string())
 }
 
 /// The backend this run resolved to, for the config header.
 pub fn backend() -> String {
-    if faer() { "faer".to_string() } else { format!("band kd={}", BAND_KD) }
+    match solver_kind().as_str() {
+        "faer" => "faer".to_string(),
+        "narrow_band" => "narrow_band (block, whole system)".to_string(),
+        _ => format!("band kd={}", BAND_KD),
+    }
 }
 
 fn solve64(params: &[f64], path: &mut Path, cfg: &arael::simple_lm::LmConfig<f64>)
     -> arael::simple_lm::LmResult<f64> {
-    if faer() {
-        arael::simple_lm::solve_sparse_faer(params, path, cfg)
-    } else {
-        arael::simple_lm::solve_band(params, BAND_KD, path, cfg)
+    match solver_kind().as_str() {
+        "faer" => arael::simple_lm::solve_sparse_faer(params, path, cfg),
+        "narrow_band" => arael::simple_lm::lm_solve(
+            params, &mut arael::simple_lm::SparseFaer::new().with_narrow_band(true), path, cfg),
+        _ => arael::simple_lm::solve_band(params, BAND_KD, path, cfg),
     }
 }
 
 fn solve32(params: &[f32], path: &mut PathF, cfg: &arael::simple_lm::LmConfig<f32>)
     -> arael::simple_lm::LmResult<f32> {
-    if faer() {
-        arael::simple_lm::solve_sparse_faer_f32(params, path, cfg)
-    } else {
-        arael::simple_lm::solve_band_f32(params, BAND_KD, path, cfg)
+    match solver_kind().as_str() {
+        "faer" => arael::simple_lm::solve_sparse_faer_f32(params, path, cfg),
+        "narrow_band" => arael::simple_lm::lm_solve(
+            params, &mut arael::simple_lm::SparseFaerF32::new().with_narrow_band(true), path, cfg),
+        _ => arael::simple_lm::solve_band_f32(params, BAND_KD, path, cfg),
     }
 }
 

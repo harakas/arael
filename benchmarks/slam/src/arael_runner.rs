@@ -430,6 +430,12 @@ fn cfg(max_iters: usize) -> arael::simple_lm::LmConfig<f64> {
 // cholmod-gpl -- GPL-licensed module, see the arael Cargo.toml warning).
 // The f32 row is always pure Rust: schur by default, faer on
 // SLAM_ARAEL_SOLVER=faer.
+// SLAM_NARROW_BAND=1 routes a banded reduced Schur system through the narrow-band
+// Cholesky instead of faer's general sparse Cholesky (opt-in, off by default).
+fn narrow_band_enabled() -> bool {
+    std::env::var("SLAM_NARROW_BAND").map_or(false, |v| v == "1")
+}
+
 fn solve64(params: &[f64], path: &mut Path, cfg: &arael::simple_lm::LmConfig<f64>)
     -> arael::simple_lm::LmResult<f64> {
     match std::env::var("SLAM_ARAEL_SOLVER").as_deref() {
@@ -470,7 +476,7 @@ fn solve64(params: &[f64], path: &mut Path, cfg: &arael::simple_lm::LmConfig<f64
             // factorizing only the reduced pose system.
             arael::simple_lm::lm_solve(
                 params,
-                &mut arael::simple_lm::SparseFaer::new(),
+                &mut arael::simple_lm::SparseFaer::new().with_narrow_band(narrow_band_enabled()),
                 path,
                 cfg,
             )
@@ -547,7 +553,7 @@ fn solve32(params: &[f32], path: &mut PathF, cfg: &arael::simple_lm::LmConfig<f3
         );
     }
     arael::simple_lm::lm_solve(
-        params, &mut arael::simple_lm::SparseFaerF32::new(), path, cfg)
+        params, &mut arael::simple_lm::SparseFaerF32::new().with_narrow_band(narrow_band_enabled()), path, cfg)
 }
 
 // Capped single solve (no timing) -- used for peak-memory measurement.
