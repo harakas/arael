@@ -138,7 +138,7 @@ reach:
 |---|---|---|
 | **`SelfBlock<T>`** | grad + upper-triangular Hessian for entity T's own params | **mandatory on every params-having struct.** Holds the per-entity gradient and the (T, T) block of the Hessian |
 | **`CrossBlock<A, B>`** | rectangular (A, B) cross Hessian only | **default for cross-entity Hessian pairs.** Packed in-place writes, cheap to assemble. One entry per unordered (A, B) entity pair in a constraint; (A, A) / (B, B) diagonals stay on each entity's SelfBlock |
-| **`TripletBlock<T>`** | COO across-entity pairs | **always placed on the root** (declare one `hbt: TripletBlock<T>` on the root struct; constraints reach it via the `root.<field>` block spec). Two canonical uses: (1) the root has its own `Param` fields and constraints couple entity params with root params -- the (entity, root) cross pair lives in the root's TripletBlock; (2) runtime-parsed residuals via `ExtendedModel` that can't enumerate per-pair CrossBlocks statically -- `extended_compute*` writes into the root's TripletBlock directly. Never on a non-root struct. **Noticeably slower to assemble** than a multi-CrossBlock because every entry is a `Vec` push |
+| **`TripletBlock<T>`** | COO across-entity pairs | **always placed on the root** (declare one `hbt: TripletBlock<T>` on the root struct; constraints reach it via the `root.<field>` block spec). Two canonical uses: (1) the root has its own `Param` fields and constraints couple entity params with root params -- the (entity, root) cross pair lives in the root's TripletBlock; (2) runtime-parsed residuals via `ExtendedModel` that can't enumerate per-pair CrossBlocks statically -- `extended_compute*` writes into the root's TripletBlock directly. Never on a non-root struct. **Noticeably slower to assemble** than a multi-CrossBlock because every entry is a `Vec` push. When the constraint touches ONLY root params (the entity is pure data), skip the triplet entirely: name the root's SelfBlock as the primary block, `constraint(root.hb, ...)` -- dense writes, no COO |
 
 `SelfBlock<Self>` is required on every Model that has parameters --
 failing to declare it is a compile-time error. Grad and diagonal
@@ -389,6 +389,7 @@ any Model struct:
 #[arael(constraint([hb_ab, hb_ac, hb_bc], { body }))]   // bracketed multi-block (N ≥ 2)
 #[arael(constraint(pose.hb_pose, { body }))]            // remote SelfBlock (reach into Ref target)
 #[arael(constraint([hb_pose, root.hbt], { body }))]     // self-primary + root-owned TripletBlock
+#[arael(constraint(root.hb, { body }))]                 // root's own SelfBlock (root params only)
 ```
 
 The positional form carries a single block only. Any N ≥ 2 block
@@ -407,6 +408,15 @@ segment:
 - **`root.<triplet>`** -- (keyword `root`) point at a `TripletBlock`
   field on the root struct. The across-entity pair for
   (this entity, root) routes into the root's TripletBlock in COO.
+- **`root.<selfblock>`** as the PRIMARY block -- the constraint writes
+  the root's own `SelfBlock<Self>` directly. For the "one shared
+  parameter set, many observations" shape: the entity carries only
+  data (no `Param`, no blocks), every param in the body is the
+  root's, and the writes take the dense SelfBlock path (no COO). An
+  entity with its own `Param` fields is rejected -- its (entity, root)
+  cross pairs need the `[hb, root.<triplet>]` form. In bodies `root`
+  names the root (`root.a`), as does the lowercased root type name.
+  See examples/root_fit_demo.rs.
 
 ```rust,ignore
 // Remote SelfBlock: PointFrine lives on PointLandmark but writes
@@ -519,9 +529,11 @@ code. The dialect:
 - **Variables**: the constraint's own entity -- reachable by the
   struct's lowercase name (e.g. `pose2` inside `Pose2`'s constraint) or
   by `self`, the same way a guard names it -- plus its `Ref` field
-  names (`a`, `b`, ...), the `parent =` name if given, and `path`-style
-  root access. `let` bindings shadow everything, constants included
-  (Rust semantics).
+  names (`a`, `b`, ...), the `parent =` name if given, and the root --
+  reachable by the root type's lowercase name or by the `root` keyword
+  (`root.a` and `path.a` are the same param; a `Ref` field literally
+  named `root` keeps its own meaning). `let` bindings shadow
+  everything, constants included (Rust semantics).
 - **Constants**: `pi`, `e`, `epsilon` resolve as named constants when
   not shadowed by a `let`.
 - **`<field>_value`**: the last-committed value of a param field as a

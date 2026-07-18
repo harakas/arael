@@ -14,9 +14,15 @@
   This is the canonical robust-curve-fitting case (Ceres's robust_curve_fitting
   example is a fit with CauchyLoss).
 
-- **Nested child contributing to its parent's params**. A constraint on an
-  entity nested in a parameter-bearing entity cannot write to the parent's
-  block. A remote block needs a `Ref` field on the constraint struct; a `Ref`
+- **Nested child contributing to its parent's params**. PARTLY DONE
+  (2026-07-19): the ROOT-parent case is solved -- a data-only entity's
+  constraint can name the root's own SelfBlock as its primary block
+  (`constraint(root.hb, ...)`, dense writes, `root` usable in bodies; see
+  examples/root_fit_demo.rs and tests/root_self_block.rs), which is the
+  "one shared parameter set, many observations" fit shape. Still open for a
+  NON-root parent (the general nested case below). Original entry: A
+  constraint on an entity nested in a parameter-bearing entity cannot write
+  to the parent's block. A remote block needs a `Ref` field on the constraint struct; a `Ref`
   into the containing entity makes the entity graph cyclic; and there is no
   spelling for "the parent's block" (`curve.hb` always means "the `hb` on the
   `curve` Ref field"). Also `Ref<T>` only targets a collection

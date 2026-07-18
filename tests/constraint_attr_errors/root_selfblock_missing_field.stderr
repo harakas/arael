@@ -1,0 +1,15 @@
+error: $DIR/tests/constraint_attr_errors/root_selfblock_missing_field.rs:6: constraint names `root.nosuch` but root `Fit` has no field `nosuch`
+  --> tests/constraint_attr_errors/root_selfblock_missing_field.rs:12:1
+   |
+12 | #[arael::model]
+   | ^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused imports: `Param` and `SelfBlock`
+ --> tests/constraint_attr_errors/root_selfblock_missing_field.rs:3:20
+  |
+3 | use arael::model::{Param, SelfBlock};
+  |                    ^^^^^  ^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

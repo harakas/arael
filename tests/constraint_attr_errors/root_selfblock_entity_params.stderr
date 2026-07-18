@@ -1,0 +1,7 @@
+error: $DIR/tests/constraint_attr_errors/root_selfblock_entity_params.rs:8: `E` has its own Param fields, so a `root.hb` constraint would drop the (entity, root) cross pairs -- declare a `SelfBlock<E>` on `E` and route through a root-owned TripletBlock: `constraint([<self_block>, root.<triplet>], ...)`
+  --> tests/constraint_attr_errors/root_selfblock_entity_params.rs:16:1
+   |
+16 | #[arael::model]
+   | ^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)

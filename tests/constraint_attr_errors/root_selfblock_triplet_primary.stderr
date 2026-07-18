@@ -1,0 +1,15 @@
+error: $DIR/tests/constraint_attr_errors/root_selfblock_triplet_primary.rs:7: `root.hbt` is a TripletBlock -- a root-owned TripletBlock is a secondary block: use `constraint([<local_self_block>, root.hbt], ...)`
+  --> tests/constraint_attr_errors/root_selfblock_triplet_primary.rs:13:1
+   |
+13 | #[arael::model]
+   | ^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused imports: `Param`, `SelfBlock`, and `TripletBlock`
+ --> tests/constraint_attr_errors/root_selfblock_triplet_primary.rs:4:20
+  |
+4 | use arael::model::{Param, SelfBlock, TripletBlock};
+  |                    ^^^^^  ^^^^^^^^^  ^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
