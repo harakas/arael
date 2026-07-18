@@ -88,10 +88,9 @@ fn main() {
     println!("Linear regression: a={:.8}, b={:.8}", lin_a, lin_b);
 
     // Step 2: robust nonlinear fit with suppressed residuals
-    let result = model.fit_with(&LmConfig {
-        verbose: true,
-        ..Default::default()
-    });
+    // A clean linear fit from a sane start: the well_conditioned preset
+    // (near-Gauss-Newton first step, no iteration floor).
+    let result = model.fit_with(&LmConfig::well_conditioned().with_verbose(true));
     println!(
         "\nIterations: {}, cost: {:.6} -> {:.6}",
         result.iterations, result.start_cost, result.end_cost

@@ -642,11 +642,9 @@ fn main() {
         let _n = params64.len();
 
         println!("\nPass {} (isigma scale={}):", pass + 1, scale);
-        let config = arael::simple_lm::LmConfig::<f64> {
-            verbose: true,
-            rel_precision: 1e-6,
-            ..Default::default()
-        };
+        let config = arael::simple_lm::LmConfig::well_conditioned()
+            .with_verbose(true)
+            .with_rel_precision(1e-6);
         let result = match solver_name.as_str() {
             "dense" => arael::simple_lm::solve(&params64, &mut path, &config),
             "faer" => arael::simple_lm::solve_sparse_faer(&params64, &mut path, &config),

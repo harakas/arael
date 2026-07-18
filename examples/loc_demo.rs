@@ -488,10 +488,7 @@ fn main() {
         path.serialize32(&mut params);
 
         println!("\nPass {} (isigma scale={}):", pass + 1, scale);
-        let config = arael::simple_lm::LmConfig::<f32> {
-            verbose: true,
-            ..Default::default()
-        };
+        let config = arael::simple_lm::LmConfig::well_conditioned().with_verbose(true);
         // kd = 2*6 - 1 = 11 (block-tridiagonal with 6-param poses)
         let result = arael::simple_lm::solve_band_f32(&params, 11, &mut path, &config);
         path.deserialize32(&result.x);

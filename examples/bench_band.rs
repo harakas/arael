@@ -330,7 +330,9 @@ fn main() {
 
     for &num_poses in &[20, 50, 100, 200, 500] {
         let cfg = SceneConfig { num_poses, num_landmarks: num_poses * 2, ..Default::default() };
-        let solve_config = arael::simple_lm::LmConfig::<f32> { verbose: false, ..Default::default() };
+        // conservative (the Default): the timing comparison wants the same
+        // fixed iteration behavior on every solver, not the fastest exit.
+        let solve_config = arael::simple_lm::LmConfig::conservative();
         let kd = 11;
         let runs = if num_poses <= 50 { 20 } else if num_poses <= 200 { 5 } else { 3 };
 

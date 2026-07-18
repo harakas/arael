@@ -86,10 +86,7 @@ fn main() {
         );
     }
 
-    let config = LmConfig::<f64> {
-        verbose: true,
-        ..Default::default()
-    };
+    let config = LmConfig::well_conditioned().with_verbose(true);
     let result = simple_lm::solve(&params, &mut m, &config);
     m.deserialize64(&result.x);
 

@@ -214,10 +214,8 @@ fn main() {
     graph.serialize64(&mut params);
     println!("parameters: {}", params.len());
 
-    let cfg = arael::simple_lm::LmConfig::<f64> {
-        verbose: std::env::var("VERBOSE").is_ok(),
-        ..Default::default()
-    };
+    let cfg = arael::simple_lm::LmConfig::well_conditioned()
+        .with_verbose(std::env::var("VERBOSE").is_ok());
     let start = std::time::Instant::now();
     let result = arael::simple_lm::solve_sparse_faer(&params, &mut graph, &cfg);
     let elapsed = start.elapsed();

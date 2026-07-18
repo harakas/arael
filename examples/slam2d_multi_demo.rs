@@ -232,7 +232,7 @@ fn main() {
     println!("Parameters: {} (Pose={}, Landmark={})\n",
         params.len(), Pose::PARAM_COUNT, Landmark::PARAM_COUNT);
 
-    let lm_cfg = arael::simple_lm::LmConfig::<f32> { verbose: true, ..Default::default() };
+    let lm_cfg = arael::simple_lm::LmConfig::well_conditioned().with_verbose(true);
     let result = map.solve_sparse(&lm_cfg);
     println!("\n{} iterations, cost {:.4} -> {:.4}",
         result.iterations, result.start_cost, result.end_cost);

@@ -39,7 +39,7 @@ the optimized values back in:
 ```rust,ignore
 use arael::simple_lm::{LmConfig, LmProblem};   // or `use arael::prelude::*;`
 
-let cfg = LmConfig::<f32> { verbose: true, ..Default::default() };
+let cfg = LmConfig::conservative().with_verbose(true);
 let result = model.solve_sparse(&cfg);   // indexed sparse faer -- the default backend
 println!("{} iterations: {:.4} -> {:.4}",
     result.iterations, result.start_cost, result.end_cost);
@@ -68,8 +68,7 @@ to the problem is where the performance is (see
 [Damping-schedule drivers](#damping-schedule-drivers)):
 
 ```rust,ignore
-let cfg = LmConfig::<f64> { initial_lambda: 1e-6, ..Default::default() }
-    .with_driver(NielsenLambdaDriver::default());
+let cfg = LmConfig::ill_conditioned().with_initial_lambda(1e-6);
 let result = model.solve_sparse(&cfg);
 ```
 
@@ -137,6 +136,13 @@ model.deserialize32(&result.x);
 ```
 
 ## `LmConfig` -- every field, with defaults
+
+Named presets cover the common regimes; start from one and override fields as
+needed. `LmConfig::conservative()` is the `Default`; `well_conditioned()`
+fits a good start (near-Gauss-Newton first step, no iteration floor);
+`ill_conditioned()` brings the gain-ratio damping driver;
+`continue_from(&result)` resumes a capped solve at its ending lambda. See
+their rustdoc for the exact settings.
 
 ```rust,ignore
 LmConfig {
@@ -461,10 +467,8 @@ arael = { version = "0.7", features = ["rayon"] }
 ```
 
 ```rust,ignore
-let cfg = LmConfig::<f64> {
-    num_threads: 4,   // 1 = sequential (the default), n = n threads, 0 = every core
-    ..Default::default()
-};
+// 1 = sequential (the default), n = n threads, 0 = every core
+let cfg = LmConfig::conservative().with_num_threads(4);
 let result = model.solve_sparse(&cfg);
 ```
 

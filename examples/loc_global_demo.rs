@@ -393,10 +393,7 @@ impl Path {
 
         let mut params: std::vec::Vec<f32> = std::vec::Vec::new();
         self.serialize32(&mut params);
-        let config = arael::simple_lm::LmConfig::<f32> {
-            verbose: true,
-            ..Default::default()
-        };
+        let config = arael::simple_lm::LmConfig::well_conditioned().with_verbose(true);
         let result = arael::simple_lm::solve_sparse_faer_f32(&params, self, &config);
         self.deserialize32(&result.x);
         println!("optimise_center: {} iterations, cost {:.4} -> {:.4}  globals: delta={:?} rot={:?}",
@@ -712,10 +709,7 @@ fn main() {
         path.serialize32(&mut params);
 
         println!("\nPass {} (isigma scale={}):", pass + 1, scale);
-        let config = arael::simple_lm::LmConfig::<f32> {
-            verbose: true,
-            ..Default::default()
-        };
+        let config = arael::simple_lm::LmConfig::well_conditioned().with_verbose(true);
         let result = arael::simple_lm::solve_sparse_faer_f32(&params, &mut path, &config);
         path.deserialize32(&result.x);
         println!("  {} iterations, cost {:.4} -> {:.4}  globals: delta={:?} rot={:?}",

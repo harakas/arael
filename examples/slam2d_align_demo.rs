@@ -244,7 +244,7 @@ fn stage1(cfg: &Cfg, rm: &scene2d::RunMeas, gps_isigma: f32,
         gt_ids.push(gid);
     }
 
-    path.solve_sparse(&LmConfig::<f32>::default());
+    path.solve_sparse(&LmConfig::well_conditioned());
 
     // Parameter covariance at the stage-1 solution.
     let cov = path.assemble_covariance(CovMode::PerQuery).expect("stage-1 Hessian not PD");
@@ -464,7 +464,7 @@ fn main() {
     println!("\n== Stage 2: fuse (corrections + centre priors + landmark obs) ==");
     println!("  {} paths, {} consensus landmarks, {} observations",
         amap.paths.len(), amap.landmarks.len(), amap.frines.len());
-    let result = amap.solve_sparse(&LmConfig::<f32>::default());
+    let result = amap.solve_sparse(&LmConfig::well_conditioned());
     println!("  {} iters, cost {:.4} -> {:.4}", result.iterations, result.start_cost, result.end_cost);
     for (r, fr) in amap.paths.iter().enumerate() {
         println!("  run {}: correction rotation={:+.3}deg translation=({:+.3},{:+.3})",

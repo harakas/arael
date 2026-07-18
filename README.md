@@ -169,7 +169,7 @@ fn main() {
     println!("Linear regression: y = {}*x + {}", model.a.value, model.b.value);
 
     // Robust nonlinear fit -- suppresses outlier influence
-    let result = model.fit_with(&LmConfig { verbose: true, ..Default::default() });
+    let result = model.fit_with(&LmConfig::well_conditioned().with_verbose(true));
     println!("Robust fit: y = {}*x + {}", model.a.value, model.b.value);
 }
 ```
@@ -267,7 +267,7 @@ values back into the structs:
 
 ```rust
 let (mut path, ..) = build_path(&Cfg::default());  // synthetic arc + noisy bearings
-let cfg = LmConfig::<f32> { verbose: true, ..Default::default() };
+let cfg = LmConfig::well_conditioned().with_verbose(true);
 let result = path.solve_sparse(&cfg);
 println!("{} iterations, cost {:.1} -> {:.1}",
     result.iterations, result.start_cost, result.end_cost);
@@ -570,7 +570,7 @@ Full source: [examples/runtime_fit_demo.rs](examples/runtime_fit_demo.rs).
 0. **Turn on solver verbose mode first.** Set `verbose: true` on `LmConfig` and every LM step prints one line: iteration / retry, cost before -> after, the improvement, the damping lambda, and the microseconds it took.
 
     ```rust,ignore
-    let cfg = LmConfig::<f32> { verbose: true, gather_timing: true, ..Default::default() };
+    let cfg = LmConfig::conservative().with_verbose(true).with_gather_timing(true);
     let result = model.solve_sparse(&cfg);
     result.pretty_print();
     ```

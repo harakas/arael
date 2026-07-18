@@ -79,11 +79,7 @@ fn main() {
     m.serialize64(&mut params);
     info!("Start x = {:.6}, cost = {:.6}", params[0], m.calc_cost(&params));
 
-    let config = LmConfig::<f64> {
-        verbose: true,
-        max_iters: 50,
-        ..Default::default()
-    };
+    let config = LmConfig::conservative().with_verbose(true).with_max_iters(50);
     let result = simple_lm::solve(&params, &mut m, &config);
     m.deserialize64(&result.x);
 

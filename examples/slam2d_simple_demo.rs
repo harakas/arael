@@ -351,7 +351,7 @@ fn main() {
     //
     // gather_timing fills result.timing: the per-phase totals, and one record
     // per attempt (damping retries included) in LmTiming::steps.
-    let lm_cfg = LmConfig::<f32> { verbose: true, gather_timing: true, ..Default::default() };
+    let lm_cfg = LmConfig::well_conditioned().with_verbose(true).with_gather_timing(true);
     // One call runs the whole Levenberg-Marquardt solve (indexed sparse
     // faer backend): it flattens the params, repeatedly linearizes the
     // constraints and takes damped steps, then writes the optimized values

@@ -104,7 +104,10 @@ fn fit_mode(fit: &mut Fit, name: &str, mode: i32) -> (f64, f64, Option<Vec<f64>>
         c.c = Param::new(0.0);
     }
     // Start well-damped: m=c=0 is far from the solution.
-    let cfg = LmConfig { verbose: true, initial_lambda: 1.0, ..Default::default() };
+    // conservative, with a high starting lambda: robust losses flatten the
+    // cost surface around outliers, and small first steps keep the naive fit
+    // from chasing them.
+    let cfg = LmConfig::conservative().with_verbose(true).with_initial_lambda(1.0);
     let result = fit.solve_dense(&cfg);
     result.pretty_print();
     let sd = fit.assemble_covariance(CovMode::PerQuery).ok().map(|cov| cov.std_dev(&fit.curves[0]));

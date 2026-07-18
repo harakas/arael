@@ -301,7 +301,7 @@
 //!
 //! ```ignore
 //! let (mut path, ..) = build_path(&Cfg::default());  // synthetic arc + noisy bearings
-//! let result = path.solve_sparse(&LmConfig::<f32> { verbose: true, ..Default::default() });
+//! let result = path.solve_sparse(&LmConfig::well_conditioned().with_verbose(true));
 //! ```
 //!
 //! Full runnable demo:
@@ -1049,7 +1049,7 @@
 //! # let mut model = M { x: Param::new(0.0), hb: SelfBlock::new() };
 //! use arael::simple_lm::{LmConfig, LmProblem};
 //!
-//! let cfg = LmConfig::<f32> { verbose: false, ..Default::default() };
+//! let cfg = LmConfig::conservative();
 //! // solve_sparse reads the params from the model, runs LM, and writes the
 //! // optimized values back into it (LmProblem provides the solve methods).
 //! let result = model.solve_sparse(&cfg);
@@ -1130,10 +1130,8 @@
 //!
 //! ```no_run
 //! # use arael::simple_lm::LmConfig;
-//! let cfg = LmConfig::<f64> {
-//!     num_threads: 4,   // 1 = sequential (default), n = n threads, 0 = every core
-//!     ..Default::default()
-//! };
+//! // 1 = sequential (default), n = n threads, 0 = every core
+//! let cfg = LmConfig::<f64>::conservative().with_num_threads(4);
 //! ```
 //!
 //! Without the feature, anything but 1 warns and stays sequential.
@@ -1418,7 +1416,7 @@
 //!    that narrow the problem before any deeper digging:
 //!
 //!    ```ignore
-//!    let cfg = arael::simple_lm::LmConfig::<f32> { verbose: true, ..Default::default() };
+//!    let cfg = arael::simple_lm::LmConfig::conservative().with_verbose(true);
 //!    let result = arael::simple_lm::solve_sparse_faer_f32(&x0, &mut model, &cfg);
 //!    ```
 //!

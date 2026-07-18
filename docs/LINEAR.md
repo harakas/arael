@@ -81,28 +81,20 @@ The ordinary least squares fit is strongly influenced by the outliers, giving a 
 ### Step 2: Robust nonlinear fit
 
 ```rust
-let result = model.fit_with(&LmConfig {
-    abs_precision: 0.01,
-    max_iters: 100,
-    initial_lambda: 0.001,
-    verbose: true,
-    ..Default::default()
-});
+let result = model.fit_with(&LmConfig::well_conditioned().with_verbose(true));
 ```
 
 Output:
 ```
-1/0: 95.0849->60.4124 / 34.6725, lambda=0.001
-2/0: 60.4124->60.2542 / 0.158112, lambda=0.0002
-3/0: 60.2542->60.2525 / 0.00171661, lambda=4e-5
-4/0: 60.2525->60.2525 / 2.67029e-5, lambda=8e-6
-5/0: 60.2525->60.2525 / -3.8147e-6, lambda=1.6e-6
+1/0: 95.0849->60.4112 / 34.6737, lambda=1.19209e-7
+2/0: 60.4112->60.2542 / 0.15696, lambda=1.19209e-7
+3/0: 60.2542->60.2525 / 0.00169373, lambda=1.19209e-7
 
-Iterations: 5, cost: 95.084900 -> 60.252499
-Robust fit: a=0.05899305, b=-0.08699960
+Iterations: 3, cost: 95.084900 -> 60.252522
+Robust fit: a=0.05912567, b=-0.08700039
 ```
 
-The robust fit converges in 5 iterations. The slope drops from 0.175 to 0.059 -- the outliers are suppressed, and the fit tracks the majority of the data.
+The robust fit converges in 3 iterations. The slope drops from 0.175 to 0.059 -- the outliers are suppressed, and the fit tracks the majority of the data.
 
 ### Step 3: Comparison
 

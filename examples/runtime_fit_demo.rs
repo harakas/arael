@@ -295,7 +295,9 @@ fn main() {
     let result = {
         let mut params = Vec::new();
         model.serialize64(&mut params);
-        let config = LmConfig { verbose: true, ..Default::default() };
+        // conservative: a runtime-parsed user expression with no informed
+        // starting values has unknown conditioning.
+        let config = LmConfig::conservative().with_verbose(true);
         let result = arael::simple_lm::solve_sparse_faer(&params, &mut model, &config);
         model.deserialize64(&result.x);
         result

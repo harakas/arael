@@ -10,7 +10,7 @@
 use arael::model::{CrossBlock, EulerAngleParam, Param, SelfBlock};
 use arael::matrix::matrix3d;
 use arael::refs::{self, Ref};
-use arael::simple_lm::{LmConfig, LmProblem, NielsenLambdaDriver};
+use arael::simple_lm::{LmConfig, LmProblem};
 use arael::vect::{vect2d, vect3d};
 
 // ---------------------------------------------------------------------------
@@ -133,16 +133,16 @@ fn main() {
     // Gain-ratio (Nielsen) schedule -- the right default for the ill-
     // conditioned, gauge-free BA problem. No gauge prior: the 7-DOF gauge is
     // left to LM damping, as BAL is conventionally run.
-    let cfg = LmConfig::<f64> {
-        verbose: true, // print the per-iteration LM trace
-        max_iters: 30,
-        initial_lambda: 1e-4,
-        abs_precision: 1e-5,
-        rel_precision: 1e-5,
-        patience: 1,
-        ..Default::default()
-    }
-    .with_driver(NielsenLambdaDriver::default());
+    // Bundle adjustment is the regime the ill_conditioned preset is modeled
+    // on: it brings the gain-ratio (Nielsen) damping driver. The overrides
+    // tighten it for a short demo run.
+    let cfg = LmConfig::ill_conditioned()
+        .with_verbose(true) // print the per-iteration LM trace
+        .with_max_iters(30)
+        .with_initial_lambda(1e-4)
+        .with_abs_precision(1e-5)
+        .with_rel_precision(1e-5)
+        .with_patience(1);
 
     let result = scene.solve_sparse(&cfg);
 
