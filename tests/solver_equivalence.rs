@@ -16,9 +16,12 @@
 // TripletBlock band-format equivalence is covered by unit tests in
 // src/model.rs (tripletblock_band_matches_*).
 
-use arael::model::{Model, Param, SelfBlock, CrossBlock};
-use arael::simple_lm::{self, LmProblem, LmConfig, CooMatrix, CscMatrix};
-use arael::vect::vect2d;
+use arael::model::{Param, SelfBlock, CrossBlock};
+use arael::simple_lm::{
+    self, CooMatrix, CscMatrix, LmConfig, LmProblem, LmStatus, SolveError, SolverKind,
+    SparseFaerOptions,
+};
+use arael::vect::{vect2d, vect2f};
 use arael::refs::{self, Ref};
 
 #[arael::model]
@@ -306,4 +309,116 @@ fn generated_solve_methods_match_manual_dance() {
     let r = chain.solve_sparse(&nielsen_cfg);
     assert_eq!(r.x, free_nielsen,
         "solve_sparse must route config.driver (Nielsen) like the free faer solve");
+}
+
+// The runtime SolverKind dispatch (LmProblem::solve) must route to the same
+// backend the free function uses, and reach the same minimizer.
+#[test]
+fn solver_kind_dispatches_to_the_named_backend() {
+    let cfg = LmConfig::<f64> {
+        abs_precision: 1e-14,
+        rel_precision: 1e-12,
+        max_iters: 200,
+        ..Default::default()
+    };
+    let free = |run: &dyn Fn(&[f64], &mut Chain) -> simple_lm::LmResult<f64>| {
+        let mut c = build();
+        let mut p = std::vec::Vec::new();
+        c.serialize64(&mut p);
+        run(&p, &mut c).x
+    };
+    let cases: [(SolverKind, std::vec::Vec<f64>); 3] = [
+        (SolverKind::Dense, free(&|p, c| simple_lm::solve(p, c, &cfg))),
+        (SolverKind::Band { kd: KD }, free(&|p, c| simple_lm::solve_band(p, KD, c, &cfg))),
+        (
+            SolverKind::Sparse(SparseFaerOptions::auto()),
+            free(&|p, c| simple_lm::solve_sparse_faer(p, c, &cfg)),
+        ),
+    ];
+    for (kind, reference) in cases {
+        let mut chain = build();
+        let r = chain.solve(kind.clone(), &cfg);
+        for i in 0..reference.len() {
+            assert!(
+                (r.x[i] - reference[i]).abs() < 1e-12,
+                "{kind:?} disagrees with the free function at param {i}: {} vs {}",
+                r.x[i], reference[i]
+            );
+        }
+        // The solution is written back into the model.
+        let mut back = std::vec::Vec::new();
+        chain.serialize64(&mut back);
+        assert_eq!(back, r.x, "{kind:?}: solve must write the solution back into the model");
+    }
+}
+
+// SparseFaerOptions::auto() is the same configuration as SparseFaer::new(), so
+// dispatching through it is bit-for-bit the free faer solve.
+#[test]
+fn sparse_auto_options_equal_default_faer() {
+    let cfg = LmConfig::<f64> { max_iters: 200, ..Default::default() };
+    let free = {
+        let mut c = build();
+        let mut p = std::vec::Vec::new();
+        c.serialize64(&mut p);
+        simple_lm::solve_sparse_faer(&p, &mut c, &cfg).x
+    };
+    let mut chain = build();
+    let r = chain.solve(SolverKind::Sparse(SparseFaerOptions::auto()), &cfg);
+    assert_eq!(r.x, free, "SolverKind::Sparse(auto) must equal free solve_sparse_faer");
+}
+
+// A minimal f32 model (Chain is f64-only), to exercise the f32 dispatch.
+#[arael::model]
+#[arael(constraint(hb, { [anchor.pos.x, anchor.pos.y] }))]
+struct Anchor {
+    pos: Param<vect2f>,
+    hb: SelfBlock<Anchor, f32>,
+}
+
+#[arael::model]
+#[arael(root, f32)]
+struct Root32 {
+    anchors: refs::Vec<Anchor>,
+}
+
+fn build32() -> Root32 {
+    let mut r = Root32 { anchors: refs::Vec::new() };
+    r.anchors.push(Anchor { pos: Param::new(vect2f::new(1.0, 2.0)), hb: SelfBlock::new() });
+    r
+}
+
+// CHOLMOD is f64-only, so requesting it at f32 is always unavailable, whatever
+// features are built: the solve reports SolverUnavailable and leaves the
+// parameters untouched.
+#[test]
+fn f32_cholmod_is_unavailable() {
+    let cfg = LmConfig::<f32>::default();
+    let mut m = build32();
+    let mut before = std::vec::Vec::new();
+    m.serialize32(&mut before);
+    let r = m.solve(SolverKind::Cholmod, &cfg);
+    assert!(
+        matches!(r.status, LmStatus::SetupFailed(SolveError::SolverUnavailable { .. })),
+        "status = {:?}", r.status
+    );
+    let mut after = std::vec::Vec::new();
+    m.serialize32(&mut after);
+    assert_eq!(before, after, "an unavailable solve must not touch the parameters");
+}
+
+// A backend whose feature is not compiled in is unavailable at f64 too. In the
+// default build CHOLMOD is off.
+#[cfg(not(feature = "cholmod"))]
+#[test]
+fn uncompiled_backend_is_unavailable() {
+    let cfg = LmConfig::<f64>::default();
+    let mut chain = build();
+    let r = chain.solve(SolverKind::Cholmod, &cfg);
+    match r.status {
+        LmStatus::SetupFailed(SolveError::SolverUnavailable { solver, .. }) => {
+            assert_eq!(solver, "Cholmod");
+        }
+        other => panic!("expected SolverUnavailable, got {other:?}"),
+    }
 }

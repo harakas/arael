@@ -532,6 +532,16 @@ pub enum SolveError {
     /// The set of blocks selected for marginalization is not a valid set of
     /// whole parameter blocks.
     BadMarginalizeSet,
+    /// The requested [`SolverKind`] is not available: its cargo feature is not
+    /// compiled in, or it does not support this scalar type. Reported by
+    /// [`LmProblem::solve`] before any solve is attempted, so the parameters
+    /// are returned unchanged.
+    SolverUnavailable {
+        /// The solver that was requested.
+        solver: &'static str,
+        /// Why it is unavailable (a missing feature, or an unsupported scalar).
+        reason: &'static str,
+    },
 }
 
 impl std::fmt::Display for SolveError {
@@ -555,6 +565,9 @@ impl std::fmt::Display for SolveError {
             ),
             SolveError::BadMarginalizeSet => write!(
                 f, "the set of blocks selected for marginalization is not a valid whole-block set"
+            ),
+            SolveError::SolverUnavailable { solver, reason } => write!(
+                f, "solver {solver} is not available: {reason}"
             ),
         }
     }
@@ -981,6 +994,19 @@ pub trait LmProblem<T> {
         SparseFaer<T>: LmSolver<T>,
     {
         self.solve_with(&mut SparseFaer::<T>::new(), config)
+    }
+
+    /// Solve with a backend chosen at run time by [`SolverKind`]. A backend
+    /// that is not compiled in, or does not support this scalar, returns an
+    /// [`LmResult`] whose status is
+    /// [`SetupFailed`](LmStatus::SetupFailed)([`SolverUnavailable`](SolveError::SolverUnavailable))
+    /// with the parameters unchanged, instead of failing to build.
+    fn solve(&mut self, kind: SolverKind, config: &LmConfig<T>) -> LmResult<T>
+    where
+        Self: RootProblem<T> + Sized,
+        T: BackendScalar,
+    {
+        T::dispatch(&kind, self, config)
     }
 }
 
@@ -3236,6 +3262,245 @@ impl Default for FaerOrdering {
     }
 }
 
+/// Configuration for the [`SparseFaer`] backend as plain data: which system to
+/// factorize and how. Build one and hand it to [`SolverKind::Sparse`], or turn
+/// it into a solver with [`SparseFaer::from_options`].
+#[derive(Clone, Debug)]
+pub struct SparseFaerOptions {
+    /// Whether and when to marginalize -- see [`SchurPolicy`].
+    pub policy: SchurPolicy,
+    /// Elimination ordering of the factorized system -- see [`FaerOrdering`].
+    pub ordering: FaerOrdering,
+    /// Factorize supernodally (dense panels, BLAS3). On by default.
+    pub supernodal: bool,
+    /// Factor a banded system with the narrow-band Cholesky instead of faer's
+    /// general sparse route. Off by default.
+    pub narrow_band: bool,
+    /// Parameter ranges to marginalize, named explicitly rather than left to
+    /// the policy to detect.
+    pub marginalize: Vec<std::ops::Range<usize>>,
+}
+
+impl Default for SparseFaerOptions {
+    fn default() -> Self {
+        Self::auto()
+    }
+}
+
+impl SparseFaerOptions {
+    /// Let the analysis decide whether to marginalize ([`SchurPolicy::Auto`]).
+    pub fn auto() -> Self {
+        SparseFaerOptions {
+            policy: SchurPolicy::default(),
+            ordering: FaerOrdering::default(),
+            supernodal: true,
+            narrow_band: false,
+            marginalize: Vec::new(),
+        }
+    }
+
+    /// Never marginalize: factorize the whole system ([`SchurPolicy::Never`]).
+    pub fn whole_system() -> Self {
+        SparseFaerOptions { policy: SchurPolicy::Never, ..Self::auto() }
+    }
+
+    /// Marginalize unconditionally ([`SchurPolicy::Force`]).
+    pub fn forced_schur() -> Self {
+        SparseFaerOptions { policy: SchurPolicy::Force, ..Self::auto() }
+    }
+
+    pub fn with_policy(mut self, policy: SchurPolicy) -> Self {
+        self.policy = policy;
+        self
+    }
+    pub fn with_ordering(mut self, ordering: FaerOrdering) -> Self {
+        self.ordering = ordering;
+        self
+    }
+    pub fn with_supernodal(mut self, on: bool) -> Self {
+        self.supernodal = on;
+        self
+    }
+    pub fn with_narrow_band(mut self, on: bool) -> Self {
+        self.narrow_band = on;
+        self
+    }
+    /// Add a parameter range to marginalize (may be called several times).
+    pub fn with_marginalize(mut self, range: std::ops::Range<usize>) -> Self {
+        self.marginalize.push(range);
+        self
+    }
+}
+
+/// Which linear-solver backend [`LmProblem::solve`] runs. Each variant maps to
+/// a concrete backend. Variants behind a cargo feature, and the f64-only
+/// CHOLMOD variants asked for at f32, return
+/// [`SolveError::SolverUnavailable`] at run time rather than failing to
+/// compile, so a caller can offer every backend and let the build decide which
+/// exist.
+#[derive(Clone, Debug)]
+pub enum SolverKind {
+    /// Dense nalgebra Cholesky ([`Dense`]).
+    Dense,
+    /// Block-band Cholesky ([`Band`]).
+    Band {
+        /// Half-bandwidth (superdiagonals).
+        kd: usize,
+    },
+    /// LAPACK band Cholesky ([`BandLapack`], feature `lapack`).
+    BandLapack {
+        /// Half-bandwidth (superdiagonals).
+        kd: usize,
+    },
+    /// faer sparse Cholesky ([`SparseFaer`]), configured by the options.
+    Sparse(SparseFaerOptions),
+    /// Eigen sparse Cholesky ([`SparseEigen`], feature `eigen`).
+    Eigen,
+    /// CHOLMOD, simplicial ([`SparseCholmod`], feature `cholmod`, f64 only).
+    Cholmod,
+    /// CHOLMOD, supernodal ([`SparseCholmodSupernodal`], feature `cholmod-gpl`,
+    /// f64 only).
+    CholmodSupernodal,
+}
+
+/// Per-scalar backend dispatch for [`LmProblem::solve`]. [`LmSolver`] carries
+/// an associated matrix type, so there is no `dyn LmSolver` and a
+/// scalar-generic solve cannot pick a backend at run time; each scalar's impl
+/// does it for the concrete backends that exist at that scalar. Implemented for
+/// `f32` and `f64`.
+pub trait BackendScalar: Float {
+    /// Run `kind` on `problem`. A backend not compiled in, or one that does not
+    /// support this scalar, returns [`SolveError::SolverUnavailable`] through
+    /// [`LmStatus::SetupFailed`] with the parameters left untouched.
+    fn dispatch<P>(kind: &SolverKind, problem: &mut P, config: &LmConfig<Self>) -> LmResult<Self>
+    where
+        P: LmProblem<Self> + RootProblem<Self>;
+}
+
+/// An [`LmResult`] for a solve that never ran: the parameters read back
+/// unchanged, [`SolveError::SolverUnavailable`] as the status.
+fn solver_unavailable<T: Float, P>(
+    problem: &mut P,
+    solver: &'static str,
+    reason: &'static str,
+) -> LmResult<T>
+where
+    P: LmProblem<T> + RootProblem<T>,
+{
+    let mut x = Vec::new();
+    problem.serialize(&mut x);
+    let cost = problem.calc_cost(&x);
+    LmResult {
+        x,
+        start_cost: cost,
+        end_cost: cost,
+        iterations: 0,
+        accepted_iterations: 0,
+        status: LmStatus::SetupFailed(SolveError::SolverUnavailable { solver, reason }),
+        final_lambda: T::zero(),
+        solver: None,
+        timing: None,
+    }
+}
+
+impl BackendScalar for f64 {
+    fn dispatch<P>(kind: &SolverKind, problem: &mut P, config: &LmConfig<f64>) -> LmResult<f64>
+    where
+        P: LmProblem<f64> + RootProblem<f64>,
+    {
+        match kind {
+            SolverKind::Dense => problem.solve_with(&mut Dense, config),
+            SolverKind::Band { kd } => problem.solve_with(&mut Band::new(*kd), config),
+            SolverKind::BandLapack { kd } => {
+                #[cfg(feature = "lapack")]
+                {
+                    problem.solve_with(&mut BandLapack::new(*kd), config)
+                }
+                #[cfg(not(feature = "lapack"))]
+                {
+                    let _ = kd;
+                    solver_unavailable(problem, "BandLapack", "not compiled in; rebuild with --features lapack")
+                }
+            }
+            SolverKind::Sparse(opts) => {
+                problem.solve_with(&mut SparseFaer::<f64>::from_options(opts), config)
+            }
+            SolverKind::Eigen => {
+                #[cfg(feature = "eigen")]
+                {
+                    problem.solve_with(&mut SparseEigen::<f64>::new(), config)
+                }
+                #[cfg(not(feature = "eigen"))]
+                {
+                    solver_unavailable(problem, "Eigen", "not compiled in; rebuild with --features eigen")
+                }
+            }
+            SolverKind::Cholmod => {
+                #[cfg(feature = "cholmod")]
+                {
+                    problem.solve_with(&mut SparseCholmod::new(), config)
+                }
+                #[cfg(not(feature = "cholmod"))]
+                {
+                    solver_unavailable(problem, "Cholmod", "not compiled in; rebuild with --features cholmod")
+                }
+            }
+            SolverKind::CholmodSupernodal => {
+                #[cfg(feature = "cholmod-gpl")]
+                {
+                    problem.solve_with(&mut SparseCholmodSupernodal::new(), config)
+                }
+                #[cfg(not(feature = "cholmod-gpl"))]
+                {
+                    solver_unavailable(problem, "CholmodSupernodal", "not compiled in; rebuild with --features cholmod-gpl")
+                }
+            }
+        }
+    }
+}
+
+impl BackendScalar for f32 {
+    fn dispatch<P>(kind: &SolverKind, problem: &mut P, config: &LmConfig<f32>) -> LmResult<f32>
+    where
+        P: LmProblem<f32> + RootProblem<f32>,
+    {
+        match kind {
+            SolverKind::Dense => problem.solve_with(&mut Dense, config),
+            SolverKind::Band { kd } => problem.solve_with(&mut Band::new(*kd), config),
+            SolverKind::BandLapack { kd } => {
+                #[cfg(feature = "lapack")]
+                {
+                    problem.solve_with(&mut BandLapack::new(*kd), config)
+                }
+                #[cfg(not(feature = "lapack"))]
+                {
+                    let _ = kd;
+                    solver_unavailable(problem, "BandLapack", "not compiled in; rebuild with --features lapack")
+                }
+            }
+            SolverKind::Sparse(opts) => {
+                problem.solve_with(&mut SparseFaer::<f32>::from_options(opts), config)
+            }
+            SolverKind::Eigen => {
+                #[cfg(feature = "eigen")]
+                {
+                    problem.solve_with(&mut SparseEigen::<f32>::new(), config)
+                }
+                #[cfg(not(feature = "eigen"))]
+                {
+                    solver_unavailable(problem, "Eigen", "not compiled in; rebuild with --features eigen")
+                }
+            }
+            SolverKind::Cholmod => {
+                solver_unavailable(problem, "Cholmod", "CHOLMOD supports only f64")
+            }
+            SolverKind::CholmodSupernodal => {
+                solver_unavailable(problem, "CholmodSupernodal", "CHOLMOD supports only f64")
+            }
+        }
+    }
+}
+
 /// [`LmConfig::num_threads`] as a `faer::Par`. 1 is sequential, `n > 1` uses n,
 /// 0 uses every core. The whole cfg dance lives here so no call site repeats it.
 ///
@@ -3518,6 +3783,19 @@ impl<T> SparseFaer<T> {
     /// What the first compute decided (`None` before the first compute).
     pub fn plan(&self) -> Option<SchurPlan> {
         self.plan
+    }
+
+    /// Build a solver from a [`SparseFaerOptions`], applying every field.
+    pub fn from_options(opts: &SparseFaerOptions) -> Self {
+        let mut solver = SparseFaer::new()
+            .with_policy(opts.policy)
+            .with_ordering(opts.ordering)
+            .with_supernodal(opts.supernodal)
+            .with_narrow_band(opts.narrow_band);
+        for range in &opts.marginalize {
+            solver = solver.with_marginalize(range.clone());
+        }
+        solver
     }
 }
 
