@@ -1696,8 +1696,10 @@ pub trait LmSolver<T: Float> {
     /// factorizations, position maps) so the solver behaves like a
     /// freshly constructed one. Called by `lm_solve` at entry, making
     /// solver reuse across solves safe: caches are only ever valid
-    /// within one solve. No default -- every backend must state what
-    /// it caches, so a future cache cannot silently outlive a solve.
+    /// within one solve. [`LmSession`] is the exception -- it skips the
+    /// entry reset on purpose and manages cache validity itself. No
+    /// default -- every backend must state what it caches, so a future
+    /// cache cannot silently outlive a solve.
     fn reset(&mut self);
 
     /// What this backend did during the solve, surfaced in
@@ -2174,6 +2176,17 @@ impl<T: Float> LambdaDriver<T> for NielsenLambdaDriver<T> {
     }
 }
 
+/// The result of a solve on zero parameters: nothing to do, Converged.
+fn lm_empty_result<T: Float>(x0: &[T], config: &LmConfig<T>) -> LmResult<T> {
+    LmResult {
+        x: x0.to_vec(), start_cost: T::zero(), end_cost: T::zero(),
+        iterations: 0, accepted_iterations: 0,
+        status: LmStatus::Converged, final_lambda: T::zero(),
+        timing: config.gather_timing.then(LmTiming::default),
+        solver: None,
+    }
+}
+
 /// Run Levenberg-Marquardt optimization with the given solver backend.
 /// The damping schedule comes from `config.driver` (see [`LambdaDriver`];
 /// defaults to [`DefaultLambdaDriver`], set another with
@@ -2184,30 +2197,40 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
     problem: &mut impl LmProblem<T>,
     config: &LmConfig<T>,
 ) -> LmResult<T> {
+    if x0.is_empty() {
+        return lm_empty_result(x0, config);
+    }
+    // Solver caches (sparsity pattern, symbolic factorization) are only
+    // valid within a single solve; drop them so reused solver instances
+    // behave identically to fresh ones. No-op on a fresh solver. Solving
+    // through an [`LmSession`] is the exception: it keeps the caches and
+    // skips this reset.
+    solver.reset();
+    let mut matrix = solver.new_matrix(x0.len());
+    lm_solve_on(x0, solver, &mut matrix, problem, config)
+}
+
+/// The solve loop proper, on caller-owned matrix storage and WITHOUT the
+/// entry reset: whatever structure the solver has cached (and the pattern
+/// held in `matrix`) is reused as-is. [`lm_solve`] clears both first;
+/// [`LmSession`] deliberately does not. `x0` must not be empty.
+fn lm_solve_on<T: Float, S: LmSolver<T>>(
+    x0: &[T],
+    solver: &mut S,
+    matrix: &mut S::Matrix,
+    problem: &mut impl LmProblem<T>,
+    config: &LmConfig<T>,
+) -> LmResult<T> {
     // Drivers are stateful per solve; clone the config's prototype so the
     // shared config is untouched and a reused config starts each solve clean.
     let mut driver = config.driver.clone_box();
     let n = x0.len();
-    if n == 0 {
-        return LmResult {
-            x: x0.to_vec(), start_cost: T::zero(), end_cost: T::zero(),
-            iterations: 0, accepted_iterations: 0,
-            status: LmStatus::Converged, final_lambda: T::zero(),
-            timing: config.gather_timing.then(LmTiming::default),
-            solver: None,
-        };
-    }
-
-    // Solver caches (sparsity pattern, symbolic factorization) are only
-    // valid within a single solve; drop them so reused solver instances
-    // behave identically to fresh ones. No-op on a fresh solver.
-    solver.reset();
+    debug_assert!(n > 0);
     solver.configure(config);
 
     let mut cur_x = x0.to_vec();
     let mut try_x = vec![T::zero(); n];
     let mut grad = vec![T::zero(); n];
-    let mut matrix = solver.new_matrix(n);
     let mut diagonal = vec![T::zero(); n];
     // The scale the damping is applied at: the Gauss-Newton diagonal, floored by
     // config.min_diagonal. Without a floor it IS the diagonal, so nothing is
@@ -2266,7 +2289,7 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
         }
 
         let t_asm = gather.then(Instant::now);
-        let computed_cost = match solver.compute(problem, &cur_x, &mut grad, &mut matrix) {
+        let computed_cost = match solver.compute(problem, &cur_x, &mut grad, matrix) {
             Ok(c) => c,
             Err(e) => {
                 // The linear system could not be built or factored, so no step
@@ -2332,7 +2355,7 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
             0.0
         };
 
-        solver.extract_diagonal(&matrix, &mut diagonal);
+        solver.extract_diagonal(matrix, &mut diagonal);
 
         // What the damping is applied at. Multiplicative damping cannot rescue a
         // ZERO diagonal ((1 + lambda) * 0 stays 0), so a parameter that no active
@@ -2436,7 +2459,7 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
             // Both are shared refs, so with no floor the same slice serves for both.
             let scale: &[T] = if floor.is_some() { &damp } else { &diagonal };
             let solved =
-                solver.solve_damped(n, &mut matrix, &diagonal, scale, lambda, &grad, &mut delta);
+                solver.solve_damped(n, matrix, &diagonal, scale, lambda, &grad, &mut delta);
             let mut ls_dt = Duration::ZERO;
             if let Some(t) = t_ls {
                 let dt = t.elapsed();
@@ -2457,7 +2480,7 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
                     let n_nan_g = grad.iter().filter(|v| !v.is_finite()).count();
                     let n_nan_d = diagonal.iter().filter(|v| !v.is_finite()).count();
                     let n_nan_x = cur_x.iter().filter(|v| !v.is_finite()).count();
-                    let n_nan_m = solver.matrix_nonfinite_count(&matrix);
+                    let n_nan_m = solver.matrix_nonfinite_count(matrix);
                     // Non-positive diagonals are ruled out by the explicit
                     // check before the inner loop, so a failure here is
                     // off-diagonal indefiniteness or tiny-lambda rounding.
@@ -2782,6 +2805,115 @@ pub fn solve_band_lapack(x0: &[f64], kd: usize, problem: &mut impl LmProblem<f64
 #[cfg(feature = "lapack")]
 pub fn solve_band_lapack_f32(x0: &[f32], kd: usize, problem: &mut impl LmProblem<f32>, config: &LmConfig<f32>) -> LmResult<f32> {
     lm_solve(x0, &mut BandLapack::new(kd), problem, config)
+}
+
+// ---------------------------------------------------------------------------
+// LmSession -- warm re-solve: keep the learned structure across solves
+// ---------------------------------------------------------------------------
+
+/// A reusable solving context: a backend plus everything it learns about one
+/// problem's structure -- the sparsity pattern, position map, fill-reducing
+/// ordering, symbolic factorization, and Schur plan. A plain solve rebuilds
+/// all of that every call; a solve through a session keeps it, so every solve
+/// after the first skips the structural analysis and goes straight to
+/// assembly and numerics. The reused state is pure structure (no parameter
+/// value enters it), so a warm solve computes exactly what a cold one would.
+///
+/// One session serves one problem structure. Changing parameter VALUES
+/// between solves is what the session is for. The structure -- the parameter
+/// count and everything the sparsity pattern is built from (the constraints,
+/// their couplings, the block layout) -- must NOT change between solves:
+/// solving warm through a changed structure is undefined behavior, anywhere
+/// from silently wrong results (values scattered through a stale position
+/// map) to a panic. After any structural change, call
+/// [`invalidate`](Self::invalidate) (or drop the session).
+///
+/// A changed parameter count is caught as a backstop (the caches are dropped
+/// and that solve runs cold), but that is a heuristic, not a structure
+/// comparison: a change that keeps the count -- a constraint added or
+/// removed, a different problem of the same size -- passes it undetected.
+/// Do not rely on it; call `invalidate` on every structural change.
+///
+/// The config is re-read on every solve, so tolerances, iteration caps, or
+/// the damping driver may differ per call.
+///
+/// ```ignore
+/// let mut session = LmSession::new(SparseFaer::new());
+/// let r1 = session.solve(&mut model, &cfg); // cold: full analysis
+/// let r2 = session.solve(&mut model, &cfg); // warm: assembly + numerics
+/// ```
+pub struct LmSession<T: Float, S: LmSolver<T>> {
+    solver: S,
+    // The pattern-holding storage, kept alive between solves. None before
+    // the first solve and after invalidate.
+    matrix: Option<S::Matrix>,
+    // Parameter count the caches were built for; a solve at any other count
+    // invalidates first and runs cold.
+    n: usize,
+}
+
+impl<T: Float, S: LmSolver<T>> LmSession<T, S> {
+    /// Wrap a configured backend. Nothing is analyzed until the first solve.
+    pub fn new(solver: S) -> Self {
+        LmSession { solver, matrix: None, n: 0 }
+    }
+
+    /// Solve the model through the session: serialize -> optimize ->
+    /// deserialize, like [`LmProblem::solve_with`]. The first call runs the
+    /// full structural analysis; later calls reuse it (see the type docs for
+    /// when that is valid).
+    pub fn solve<P>(&mut self, model: &mut P, config: &LmConfig<T>) -> LmResult<T>
+    where
+        P: LmProblem<T> + RootProblem<T>,
+    {
+        let mut params = Vec::new();
+        model.serialize(&mut params);
+        let result = self.solve_x0(&params, model, config);
+        model.deserialize(&result.x);
+        result
+    }
+
+    /// The raw-parameter form of [`solve`](Self::solve), for problems built
+    /// by hand (the [`lm_solve`] shape): parameters in, optimized parameters
+    /// in the result, nothing written back to the problem.
+    pub fn solve_x0(
+        &mut self,
+        x0: &[T],
+        problem: &mut impl LmProblem<T>,
+        config: &LmConfig<T>,
+    ) -> LmResult<T> {
+        let n = x0.len();
+        if n != self.n {
+            // A different parameter count cannot be the same structure:
+            // drop the caches and run cold. A backstop, not a structure
+            // check -- same-count changes pass through (see the type docs).
+            self.invalidate();
+            self.n = n;
+        }
+        if n == 0 {
+            return lm_empty_result(x0, config);
+        }
+        let mut matrix = self.matrix.take().unwrap_or_else(|| self.solver.new_matrix(n));
+        let result = lm_solve_on(x0, &mut self.solver, &mut matrix, problem, config);
+        self.matrix = Some(matrix);
+        result
+    }
+
+    /// Drop the learned structure: the next solve runs cold. Required after
+    /// ANY structural change to the problem (see the type docs -- solving
+    /// warm through a changed structure is undefined behavior). Never needed
+    /// for parameter value changes.
+    pub fn invalidate(&mut self) {
+        self.solver.reset();
+        self.matrix = None;
+        self.n = 0;
+    }
+
+    /// The backend, e.g. to read its [`report`](LmSolver::report) after a
+    /// solve.
+    pub fn solver(&self) -> &S {
+        &self.solver
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -4174,7 +4306,18 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         self.measure = config.gather_timing;
         // Before the first compute, so size_llt_buffers sizes the scratch for
         // the same Par the factorization will run at.
-        self.par = faer_par(config.num_threads);
+        let par = faer_par(config.num_threads);
+        if par != self.par {
+            self.par = par;
+            // A warm re-solve (LmSession) can change num_threads between
+            // solves after the scratch was sized; re-size it from the kept
+            // symbolic so the factorization never runs on scratch sized for
+            // another Par.
+            if let Some(llt) = self.llt_symbolic.take() {
+                self.size_llt_buffers(&llt);
+                self.llt_symbolic = Some(llt);
+            }
+        }
     }
 
     fn assembly_time(&self) -> Option<Duration> {

@@ -55,6 +55,9 @@
 //!   `SchurPolicy` overrides
 //! - **Indexed sparse assembly** -- precomputed position lists for
 //!   zero-overhead hessian assembly after first iteration
+//! - **Warm re-solve** -- `LmSession` keeps what a solve learns about the
+//!   problem's structure (pattern, ordering, symbolic factorization) so
+//!   repeated solves of the same problem skip the analysis
 //! - **f32 and f64 precision** -- `#[arael(root)]` for f64,
 //!   `#[arael(root, f32)]` for f32 throughout
 //! - **Model trait** -- hierarchical serialize/deserialize/update protocol
