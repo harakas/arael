@@ -85,10 +85,9 @@ step, so a rejected step's wasted factorization cannot leak into it.
 
 This is the number that compares across systems.\* **Total time and
 iteration count do not**, and reading them as a ranking will mislead you:
-they are set by each system's damping schedule and its termination rule
-(Ceres stops on the decrease it PREDICTS for the next step; arael on the
-decrease the last step delivered). The tables report them because they
-are facts about the run, not because they are comparable.
+they are set by each system's damping schedule.
+
+> DEPRECATED: numbers below pending regeneration before release.
 
 \* Ceres's `iterative_schur` uses a different algorithm, so its iterations
 cannot be compared one on one.

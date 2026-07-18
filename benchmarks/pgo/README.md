@@ -63,10 +63,8 @@ step, so a rejected step's wasted factorization cannot leak into it.
 This is the number the chart shows, and it is the one that compares
 across systems. **Total time and iteration count do not**, and reading
 them as a ranking will mislead you: they are set by each system's damping
-schedule, its termination rule (Ceres stops on the decrease it PREDICTS
-for the next step; arael on the decrease the last step delivered), and
-its rotation retraction -- which decides how much of a large correction a
-single step actually lands. Damping in particular is per-problem and its
+schedule and its rotation retraction -- which decides how much of a large
+correction a single step actually lands. Damping in particular is per-problem and its
 effect is close to arbitrary; the tables report totals and iterations
 because they are facts about the run, not because they are comparable.
 
@@ -263,11 +261,7 @@ under the problem-appropriate policy above.
 
 ### Behaviors that persist, and shape the numbers you are reading
 
-- **Ceres LM** stops on the decrease its linear model PREDICTS for the
-  next step, not the decrease the last step actually produced, so it ends
-  one step short of the systems that test what they took (sphere2500: 5
-  steps to cost 1351.2182, against arael's 6 to 1351.2157) while still
-  paying for the factorization of the step it declines.
+- DEPRECATED: numbers here pending regeneration before release.
 
 - **gtsam's ms/iter** counts accepted steps only: it keeps its damping
   retries inside `iterate()` and its API exposes no way to count them.

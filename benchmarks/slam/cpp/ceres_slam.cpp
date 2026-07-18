@@ -230,18 +230,25 @@ static bench::Result solve(Scene& s, ceres::LinearSolverType linsolver, int max_
     // on this well-initialized graph), matching the pgo benchmark policy.
     options.initial_trust_region_radius = 1e12;
     if (const char* r = getenv("CERES_RADIUS0")) options.initial_trust_region_radius = atof(r);
+    // CERES_VERBOSE=1: per-iteration progress (cost, |gradient|, |step|) and
+    // the full report, which names the termination criterion and its tolerance.
+    if (getenv("CERES_VERBOSE")) options.minimizer_progress_to_stdout = true;
 
     ceres::Solver::Summary summary;
     ceres::Solve(options, &problem, &summary);
+    if (getenv("CERES_VERBOSE")) fprintf(stderr, "%s\n", summary.FullReport().c_str());
     if (pose_out) *pose_out = poses;
     if (lm_out) *lm_out = lms;
-        // Ceres records iteration 0 -- the initial cost evaluation, before any
-    // step -- as a successful step. It is not one; discount it so accepted
-    // and attempts mean the same here as in every other runner.
-    const int accepted = std::max(0, summary.num_successful_steps - 1);
+    // Count LINEAR SOLVES (factorizations), the unit the parenthesised total
+    // reports. num_successful_steps is NOT that count: it includes iteration 0
+    // (the initial cost eval, which does no solve) and omits the final
+    // convergence-detecting solve. num_linear_solves is the true total; the
+    // ones that did not reduce cost are num_unsuccessful_steps.
+    const int attempts = summary.num_linear_solves;
+    const int accepted = attempts - summary.num_unsuccessful_steps;
     return bench::Result{summary.total_time_in_seconds * 1e3,
                      accepted,
-                         accepted + summary.num_unsuccessful_steps,
+                     attempts,
                      2.0 * summary.initial_cost};
 }
 

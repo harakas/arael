@@ -89,6 +89,8 @@ do not**, and reading them as a ranking will mislead you: they are set by each
 system's damping schedule and its termination rule. The tables report them
 because they are facts about the run, not because they are comparable.
 
+> DEPRECATED: numbers below pending regeneration before release.
+
 \* Ceres's `iterative_schur` solves the step equation with a conjugate-gradient
 method rather than by factorization, so its iterations cannot be compared one on
 one with the others'. It never forms the reduced camera system, only multiplies by

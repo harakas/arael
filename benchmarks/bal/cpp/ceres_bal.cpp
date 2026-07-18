@@ -109,10 +109,12 @@ static bench::Result solve(Bal b, ceres::LinearSolverType linsolver, int max_ite
                 1e3 * summary.residual_evaluation_time_in_seconds / std::max(1, summary.num_residual_evaluations),
                 summary.total_time_in_seconds);
     }
-    // Ceres records iteration 0 -- the initial cost evaluation, before any step
-    // -- as a successful step. It is not one; discount it so accepted and
-    // attempts mean the same here as in every other runner.
-    const int accepted = std::max(0, summary.num_successful_steps - 1);
+    // Count linear solves (factorizations), the unit the parenthesised total
+    // reports. num_successful_steps is not that count: it includes iteration 0
+    // (the initial eval, which does no solve) and omits the final convergence-
+    // detecting solve. num_linear_solves is the true total; num_unsuccessful_steps
+    // are the ones that did not reduce cost.
+    const int accepted = summary.num_linear_solves - summary.num_unsuccessful_steps;
     return bench::Result{summary.total_time_in_seconds * 1e3,
                          accepted,
                          accepted + summary.num_unsuccessful_steps,

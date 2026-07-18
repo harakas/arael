@@ -148,10 +148,12 @@ static bench::Result solve(std::vector<Pose> poses, const std::vector<Edge>& edg
             (*out)[i] = Pose{xy[2 * i], xy[2 * i + 1], yaw[i]};
         }
     }
-    // Ceres records iteration 0 -- the initial cost evaluation, before any step
-    // -- as a successful step. It is not one; discount it so accepted/total
-    // mean the same here as in every other runner.
-    const int accepted = std::max(0, (int)summary.num_successful_steps - 1);
+    // Count linear solves (factorizations), the unit the parenthesised total
+    // reports. num_successful_steps is not that count: it includes iteration 0
+    // (the initial eval, which does no solve) and omits the final convergence-
+    // detecting solve. num_linear_solves is the true total; num_unsuccessful_steps
+    // are the ones that did not reduce cost.
+    const int accepted = (int)summary.num_linear_solves - (int)summary.num_unsuccessful_steps;
     return bench::Result{ms, accepted,
                      accepted + (int)summary.num_unsuccessful_steps};
 }
