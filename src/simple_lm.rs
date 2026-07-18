@@ -284,7 +284,25 @@ pub struct LmConfig<T: Float> {
 }
 
 impl<T: Float> Default for LmConfig<T> {
+    /// The [`conservative`](LmConfig::conservative) preset.
     fn default() -> Self {
+        Self::conservative()
+    }
+}
+
+impl<T: Float> LmConfig<T> {
+    /// General-purpose defaults: moderate initial damping, no early-termination
+    /// tests, no floors. The starting point when nothing is known about the
+    /// problem's conditioning. [`Default`] returns this.
+    ///
+    /// Sets: `abs_precision` 1e-6, `rel_precision` 1e-4, `max_iters` 100,
+    /// `min_iters` 5, `patience` 3, `initial_lambda` 1e-4, `lambda_floor` 1e-12
+    /// (f64) or `f32::EPSILON` ~1.2e-7 (f32), the fixed-ladder
+    /// [`DefaultLambdaDriver`]. All
+    /// tolerances (`gradient_tolerance`, `parameter_tolerance`,
+    /// `predicted_reduction_tolerance`) and `min_diagonal` are off; `num_threads`
+    /// 1.
+    pub fn conservative() -> Self {
         LmConfig {
             abs_precision: T::from(1e-6).unwrap(),
             rel_precision: T::from(1e-4).unwrap(),
@@ -305,15 +323,145 @@ impl<T: Float> Default for LmConfig<T> {
             gather_timing: false,
         }
     }
-}
 
-impl<T: Float> LmConfig<T> {
-    /// Set the damping-schedule driver, returning the config for chaining:
-    /// `LmConfig { initial_lambda: 1e-6, ..Default::default() }
-    /// .with_driver(NielsenLambdaDriver::default())`. The driver still
-    /// reads `initial_lambda` / `lambda_floor` from this config.
+    /// WIP: the gradient-termination threshold is provisional, not yet
+    /// validated against a benchmark.
+    ///
+    /// For a good starting estimate near a quadratic minimum, modeled on the
+    /// well-conditioned slam benchmark: near-Gauss-Newton damping, a gradient
+    /// stop, and low iteration floors so it stops as soon as it has converged.
+    /// Fast, but less forgiving of a poor initialization.
+    ///
+    /// Changes from [`conservative`](Self::conservative): `initial_lambda` 1e-8
+    /// (the damping the slam benchmark runs at -- `lambda` scales the diagonal,
+    /// so this is a fraction of it, not an absolute), `gradient_tolerance` 1e-4
+    /// (provisional), `min_iters` 1, `patience` 1.
+    pub fn well_conditioned() -> Self {
+        LmConfig {
+            initial_lambda: T::from(1e-8).unwrap(),
+            gradient_tolerance: Some(T::from(1e-4).unwrap()),
+            min_iters: 1,
+            patience: 1,
+            ..Self::conservative()
+        }
+    }
+
+    /// WIP: modeled on BAL, not yet validated as a general preset.
+    ///
+    /// For stiff, far-from-solution, or gauge-degenerate problems, modeled on
+    /// the BAL bundle-adjustment benchmark: the gain-ratio
+    /// [`NielsenLambdaDriver`] adapts damping to how well each step's quadratic
+    /// model held. Robust, but slower than
+    /// [`well_conditioned`](Self::well_conditioned).
+    ///
+    /// Changes from [`conservative`](Self::conservative): the Nielsen driver.
+    /// BAL needs no raised `lambda_floor` (measured identical to the default,
+    /// since the gain ratio never marches lambda that low) and no
+    /// `min_diagonal`. `initial_lambda` stays at 1e-4, BAL's default; the
+    /// driver adapts it, so tune it to the problem only if the first steps
+    /// stall.
+    pub fn ill_conditioned() -> Self {
+        LmConfig {
+            driver: Box::new(NielsenLambdaDriver::default()),
+            ..Self::conservative()
+        }
+    }
+
+    /// Seed a warm restart from a previous solve: takes the ending damping
+    /// ([`LmResult::final_lambda`]) as the new `initial_lambda`, leaving every
+    /// other field untouched. Pair with the previous result's `x` as the new
+    /// starting point.
+    pub fn continue_from(mut self, result: &LmResult<T>) -> Self {
+        self.initial_lambda = result.final_lambda;
+        self
+    }
+
+    /// Use the adaptive gain-ratio [`NielsenLambdaDriver`] instead of the
+    /// default fixed ladder. Helps when steps are frequently rejected; the
+    /// fixed ladder is faster when they are not.
+    pub fn with_nielsen(self) -> Self {
+        self.with_driver(NielsenLambdaDriver::default())
+    }
+
+    /// Set the damping-schedule driver, returning the config for chaining. The
+    /// driver reads `initial_lambda` / `lambda_floor` from this config at start.
     pub fn with_driver(mut self, driver: impl LambdaDriver<T> + 'static) -> Self {
         self.driver = Box::new(driver);
+        self
+    }
+
+    // Per-field builders, for tuning a preset: `LmConfig::well_conditioned()
+    // .with_max_iters(50).with_verbose(true)`.
+
+    pub fn with_max_iters(mut self, n: usize) -> Self {
+        self.max_iters = n;
+        self
+    }
+    pub fn with_min_iters(mut self, n: usize) -> Self {
+        self.min_iters = n;
+        self
+    }
+    pub fn with_patience(mut self, n: usize) -> Self {
+        self.patience = n;
+        self
+    }
+    pub fn with_initial_lambda(mut self, v: T) -> Self {
+        self.initial_lambda = v;
+        self
+    }
+    pub fn with_lambda_floor(mut self, v: T) -> Self {
+        self.lambda_floor = v;
+        self
+    }
+    pub fn with_cost_threshold(mut self, v: T) -> Self {
+        self.cost_threshold = v;
+        self
+    }
+    pub fn with_abs_precision(mut self, v: T) -> Self {
+        self.abs_precision = v;
+        self
+    }
+    pub fn with_rel_precision(mut self, v: T) -> Self {
+        self.rel_precision = v;
+        self
+    }
+    pub fn with_num_threads(mut self, n: usize) -> Self {
+        self.num_threads = n;
+        self
+    }
+    pub fn with_verbose(mut self, on: bool) -> Self {
+        self.verbose = on;
+        self
+    }
+    pub fn with_gather_timing(mut self, on: bool) -> Self {
+        self.gather_timing = on;
+        self
+    }
+
+    /// Enable the Jacobi-scaled gradient stopping test (`None` in the presets
+    /// that leave it off).
+    pub fn with_gradient_tolerance(mut self, tol: T) -> Self {
+        self.gradient_tolerance = Some(tol);
+        self
+    }
+    /// Enable the step-norm stopping test.
+    pub fn with_parameter_tolerance(mut self, tol: T) -> Self {
+        self.parameter_tolerance = Some(tol);
+        self
+    }
+    /// Enable the predicted-reduction stopping test.
+    pub fn with_predicted_reduction_tolerance(mut self, tol: T) -> Self {
+        self.predicted_reduction_tolerance = Some(tol);
+        self
+    }
+    /// Set the damping-scale diagonal floor (rescues a zero pivot).
+    pub fn with_min_diagonal(mut self, v: T) -> Self {
+        self.min_diagonal = Some(v);
+        self
+    }
+    /// Set a wall-clock budget for the whole solve.
+    pub fn with_time_limit(mut self, budget: Duration) -> Self {
+        self.time_limit = Some(budget);
         self
     }
 }
