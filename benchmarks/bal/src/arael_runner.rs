@@ -518,7 +518,9 @@ fn probe_capped<M: bench_harness::arael::Model<Input = Problem, Solution = Solut
     let cfg = bench_harness::arael::config::<M>(p, max_iters);
     // The build is the reset, not the solve -- the clock starts here, as it does
     // everywhere else in the harness.
-    let (ms, result) = bench_harness::solver::timed(|| M::solve(p, &params, &mut model, &cfg));
+    let (ms, result) = bench_harness::solver::timed(|| {
+        <M as bench_harness::arael::Model>::solve(p, &params, &mut model, &cfg)
+    });
     model.deserialize(&result.x);
     Probe {
         ms,

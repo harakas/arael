@@ -147,7 +147,9 @@ pub fn run<M: Model>(input: &M::Input) -> Row<M::Solution> {
         // clock starts below.
         let mut m = model.clone();
         let cfg = config::<M>(input, max_iters);
-        let (ms, r) = crate::solver::timed(|| M::solve(input, &params, &mut m, &cfg));
+        // Qualified: `M::solve` alone is ambiguous against `LmProblem::solve`
+        // (the SolverKind entry point), which Model also carries.
+        let (ms, r) = crate::solver::timed(|| <M as Model>::solve(input, &params, &mut m, &cfg));
         print_timing(&r);
         m.deserialize(&r.x);
         crate::solver::Outcome {

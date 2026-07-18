@@ -68,7 +68,7 @@ fn main() {
 
     // scalar: CSC + position map
     let (t_scalar_map, (csc, positions_scalar)) =
-        min_ms(rounds, || coo.to_csc_with_map());
+        min_ms(rounds, || coo.to_csc_with_map().expect("valid COO"));
 
     // block: entity partition, then structure + position map
     let (t_spans, partition) = min_ms(rounds, || {
@@ -157,7 +157,7 @@ fn main() {
     });
     // second reference: direct CSC accumulation (binary search per
     // write, no position map) -- what indexing buys
-    let mut csc_direct = coo.to_csc();
+    let mut csc_direct = coo.to_csc().expect("valid COO");
     let (t_fill_direct, _) = min_ms(rounds, || {
         path.calc_grad_hessian_sparse_direct(&params, &mut grad, &mut csc_direct)
     });

@@ -547,7 +547,7 @@ fn solve_capped<M: bench_harness::arael::Model<Input = Scene, Solution = Solutio
     let mut params: Vec<M::Scalar> = Vec::new();
     model.serialize(&mut params);
     let cfg = bench_harness::arael::config::<M>(scene, max_iters);
-    let result = M::solve(scene, &params, &mut model, &cfg);
+    let result = <M as bench_harness::arael::Model>::solve(scene, &params, &mut model, &cfg);
     model.deserialize(&result.x);
     model.solution()
 }
@@ -567,5 +567,7 @@ fn timed_once<M: bench_harness::arael::Model<Input = Scene>>(
     let mut params: Vec<M::Scalar> = Vec::new();
     model.serialize(&mut params);
     let cfg = bench_harness::arael::config::<M>(scene, 200);
-    M::solve(scene, &params, &mut model, &cfg).timing.expect("gather_timing is on")
+    <M as bench_harness::arael::Model>::solve(scene, &params, &mut model, &cfg)
+        .timing
+        .expect("gather_timing is on")
 }
