@@ -1000,18 +1000,12 @@ pub fn schur_reduce<I: Index, T: SchurReal>(
     let mut t = SchurTiming::default();
     let mut sw = Stopwatch::new(gather);
 
-    // stage 1: seed S with Hkk and rhs_out with the kept rhs
+    // stage 1: zero S and rhs_out. Hkk and the kept rhs are folded in at
+    // stage 2.5, after the coupling terms have accumulated, so f32 sums the
+    // many small contributions among themselves before meeting the large
+    // diagonal once, instead of rounding each contribution against it.
     s.vals_mut().iter_mut().for_each(|v| *v = T::ZERO);
-    for (hb, sb) in core::iter::zip(&sym.copy_src, &sym.copy_dst) {
-        let src = hs.val_range(hb.zx());
-        let dst = sym.s.val_range(sb.zx());
-        s.vals_mut()[dst].copy_from_slice(&h.vals()[src]);
-    }
-    for (k, &orig) in sym.kept.iter().enumerate() {
-        let src = hs.col_span(orig.zx());
-        let dst = sym.s.col_span(k);
-        rhs_out[dst].copy_from_slice(&rhs[src]);
-    }
+    rhs_out.iter_mut().for_each(|v| *v = T::ZERO);
     sw.lap(&mut t.seed);
 
     // stage 2: one eliminated block at a time
@@ -1096,6 +1090,29 @@ pub fn schur_reduce<I: Index, T: SchurReal>(
         }
         sw.lap(&mut t.rhs);
     }
+
+    // stage 2.5: fold Hkk and the kept rhs on top of the accumulated pot.
+    // The (large) diagonal blocks land once, after the (small) coupling
+    // contributions have summed among themselves. Diagonal tiles are
+    // upper-only in H, so only S's upper triangle is touched; stage 3 clears
+    // the lower.
+    for (hb, sb) in core::iter::zip(&sym.copy_src, &sym.copy_dst) {
+        let src = hs.val_range(hb.zx());
+        let dst = sym.s.val_range(sb.zx());
+        let hsrc = &h.vals()[src];
+        let sdst = &mut s.vals_mut()[dst];
+        for (d, &v) in core::iter::zip(sdst.iter_mut(), hsrc) {
+            *d = *d + v;
+        }
+    }
+    for (k, &orig) in sym.kept.iter().enumerate() {
+        let src = hs.col_span(orig.zx());
+        let dst = sym.s.col_span(k);
+        for (d, &v) in core::iter::zip(rhs_out[dst].iter_mut(), &rhs[src]) {
+            *d = *d + v;
+        }
+    }
+    sw.lap(&mut t.seed);
 
     // stage 3: diagonal-pair GEMMs wrote full tiles; restore the
     // upper-only-within-tile convention on S's kept diagonal
