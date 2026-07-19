@@ -3,25 +3,29 @@
 // VertexPlane landmarks, EdgeSE3 odometry, EdgeSE3PlaneSensorCalib plane
 // observations with the sensor offset vertex fixed at identity.
 //
-//   g2o_plane <scene.txt> [solution_out] [max_iters]
+//   g2o_plane <scene.txt> <solution_out>
 //
-// Prints initial/final chi2, iterations and wall time; writes the solution
-// as N pose lines "tx ty tz qw qx qy qz" then M plane lines "nx ny nz c".
+// Probes + protocol line via ../../cpp/bench.h. G2O_LAMBDA_INIT overrides the
+// initial damping (default 1e-9, near-Gauss-Newton); G2O_GAIN overrides the
+// terminate gain (default 1e-5, the shared termination class).
 
-#include <chrono>
+#include <cstdlib>
 #include <fstream>
-#include <iostream>
 #include <memory>
 #include <sstream>
 #include <string>
 #include <vector>
 
 #include <g2o/core/block_solver.h>
+#include <g2o/core/hyper_graph_action.h>
 #include <g2o/core/optimization_algorithm_levenberg.h>
 #include <g2o/core/sparse_optimizer.h>
+#include <g2o/core/sparse_optimizer_terminate_action.h>
 #include <g2o/solvers/eigen/linear_solver_eigen.h>
 #include <g2o/types/slam3d/types_slam3d.h>
 #include <g2o/types/slam3d_addons/types_slam3d_addons.h>
+
+#include "../../cpp/bench.h"
 
 using namespace g2o;
 
@@ -59,57 +63,82 @@ struct ScenePose { Eigen::Vector3d t; Eigen::Quaterniond q; };
 struct SceneOdo { int i, j; ScenePose rel; double info[6]; };
 struct SceneObs { int p, l; Eigen::Vector4d plane; double info[3]; };
 
-int main(int argc, char** argv) {
-    if (argc < 2) { fprintf(stderr, "usage: %s <scene.txt> [solution_out] [max_iters]\n", argv[0]); return 1; }
-    int max_iters = argc > 3 ? atoi(argv[3]) : 100;
-
+struct Scene {
     std::vector<ScenePose> poses;
     std::vector<Eigen::Vector4d> planes;
     std::vector<SceneOdo> odo;
     std::vector<SceneObs> obs;
-    {
-        std::ifstream in(argv[1]);
-        if (!in) { fprintf(stderr, "cannot read %s\n", argv[1]); return 1; }
-        std::string line;
-        while (std::getline(in, line)) {
-            std::istringstream ss(line);
-            std::string tag; ss >> tag;
-            if (tag == "pose") {
-                ScenePose p; double qw, qx, qy, qz;
-                ss >> p.t.x() >> p.t.y() >> p.t.z() >> qw >> qx >> qy >> qz;
-                p.q = Eigen::Quaterniond(qw, qx, qy, qz).normalized();
-                poses.push_back(p);
-            } else if (tag == "plane") {
-                Eigen::Vector4d v; ss >> v(0) >> v(1) >> v(2) >> v(3);
-                planes.push_back(v);
-            } else if (tag == "odom") {
-                SceneOdo o; double qw, qx, qy, qz;
-                ss >> o.i >> o.j >> o.rel.t.x() >> o.rel.t.y() >> o.rel.t.z() >> qw >> qx >> qy >> qz;
-                for (double& v : o.info) ss >> v;
-                o.rel.q = Eigen::Quaterniond(qw, qx, qy, qz).normalized();
-                odo.push_back(o);
-            } else if (tag == "obs") {
-                SceneObs b;
-                ss >> b.p >> b.l >> b.plane(0) >> b.plane(1) >> b.plane(2) >> b.plane(3);
-                for (double& v : b.info) ss >> v;
-                obs.push_back(b);
-            }
+};
+
+static Scene load(const char* path) {
+    Scene s;
+    std::ifstream in(path);
+    if (!in) { fprintf(stderr, "cannot read %s\n", path); exit(1); }
+    std::string line;
+    while (std::getline(in, line)) {
+        std::istringstream ss(line);
+        std::string tag; ss >> tag;
+        if (tag == "pose") {
+            ScenePose p; double qw, qx, qy, qz;
+            ss >> p.t.x() >> p.t.y() >> p.t.z() >> qw >> qx >> qy >> qz;
+            p.q = Eigen::Quaterniond(qw, qx, qy, qz).normalized();
+            s.poses.push_back(p);
+        } else if (tag == "plane") {
+            Eigen::Vector4d v; ss >> v(0) >> v(1) >> v(2) >> v(3);
+            s.planes.push_back(v);
+        } else if (tag == "odom") {
+            SceneOdo o; double qw, qx, qy, qz;
+            ss >> o.i >> o.j >> o.rel.t.x() >> o.rel.t.y() >> o.rel.t.z() >> qw >> qx >> qy >> qz;
+            for (double& v : o.info) ss >> v;
+            o.rel.q = Eigen::Quaterniond(qw, qx, qy, qz).normalized();
+            s.odo.push_back(o);
+        } else if (tag == "obs") {
+            SceneObs b;
+            ss >> b.p >> b.l >> b.plane(0) >> b.plane(1) >> b.plane(2) >> b.plane(3);
+            for (double& v : b.info) ss >> v;
+            s.obs.push_back(b);
         }
     }
-    const int n = (int)poses.size(), m = (int)planes.size();
-    fprintf(stderr, "scene: %d poses, %d planes, %zu odom, %zu obs\n", n, m, odo.size(), obs.size());
+    return s;
+}
+
+// g2o keeps its damping retries inside OptimizationAlgorithmLevenberg::solve()
+// and reports the count only for the round just finished (levenbergIteration()
+// is reset every round), so summing them from a post-iteration action is the
+// one way to see the attempts from outside.
+struct TrialCounter : public g2o::HyperGraphAction {
+    g2o::OptimizationAlgorithmLevenberg* lev = nullptr;
+    int trials = 0;
+    g2o::HyperGraphAction* operator()(const g2o::HyperGraph*,
+                                      Parameters* = 0) override {
+        if (lev) trials += lev->levenbergIteration();
+        return this;
+    }
+};
+
+static bench::Result solve(const Scene& s, int max_iters,
+                           std::vector<double>* pose_out,
+                           std::vector<double>* plane_out) {
+    const int n = (int)s.poses.size(), m = (int)s.planes.size();
+    using LS = LinearSolverEigen<BlockSolverX::PoseMatrixType>;
+    auto* lev = new OptimizationAlgorithmLevenberg(
+        std::make_unique<BlockSolverX>(std::make_unique<LS>()));
+    // Problem-appropriate initial damping (near-Gauss-Newton on this
+    // well-initialized graph), matching the sibling benchmark policy.
+    double lambda0 = 1e-9;
+    if (const char* li = getenv("G2O_LAMBDA_INIT")) lambda0 = atof(li);
+    lev->setUserLambdaInit(lambda0);
 
     SparseOptimizer opt;
-    using LS = LinearSolverEigen<BlockSolverX::PoseMatrixType>;
-    opt.setAlgorithm(new OptimizationAlgorithmLevenberg(
-        std::make_unique<BlockSolverX>(std::make_unique<LS>())));
+    opt.setVerbose(getenv("G2O_VERBOSE") != nullptr);
+    opt.setAlgorithm(lev);
 
     for (int i = 0; i < n; i++) {
         auto* v = new VertexSE3();
         v->setId(i);
         Eigen::Isometry3d T = Eigen::Isometry3d::Identity();
-        T.linear() = poses[i].q.toRotationMatrix();
-        T.translation() = poses[i].t;
+        T.linear() = s.poses[i].q.toRotationMatrix();
+        T.translation() = s.poses[i].t;
         v->setEstimate(T);
         if (i == 0) v->setFixed(true);
         opt.addVertex(v);
@@ -117,7 +146,7 @@ int main(int argc, char** argv) {
     for (int j = 0; j < m; j++) {
         auto* v = new VertexPlane();
         v->setId(n + j);
-        v->setEstimate(Plane3D(planes[j]));
+        v->setEstimate(Plane3D(s.planes[j]));
         opt.addVertex(v);
     }
     auto* offset = new VertexSE3();
@@ -126,7 +155,7 @@ int main(int argc, char** argv) {
     offset->setFixed(true);
     opt.addVertex(offset);
 
-    for (const auto& o : odo) {
+    for (const auto& o : s.odo) {
         auto* e = new EdgeOdo();
         e->setVertex(0, opt.vertex(o.i));
         e->setVertex(1, opt.vertex(o.j));
@@ -139,7 +168,7 @@ int main(int argc, char** argv) {
         e->setInformation(info);
         opt.addEdge(e);
     }
-    for (const auto& b : obs) {
+    for (const auto& b : s.obs) {
         auto* e = new EdgeSE3PlaneSensorCalib();
         e->setVertex(0, opt.vertex(b.p));
         e->setVertex(1, opt.vertex(n + b.l));
@@ -151,33 +180,58 @@ int main(int argc, char** argv) {
         opt.addEdge(e);
     }
 
-    opt.setVerbose(true);
+    auto* counter = new TrialCounter();
+    counter->lev = lev;
+    opt.addPostIterationAction(counter);
+    auto* terminate = new g2o::SparseOptimizerTerminateAction();
+    double gain = 1e-5;  // shared termination class
+    if (const char* g = getenv("G2O_GAIN")) gain = atof(g);
+    terminate->setGainThreshold(gain);
+    terminate->setMaxIterations(max_iters);
+    opt.addPostIterationAction(terminate);
+
     opt.initializeOptimization();
     opt.computeActiveErrors();
     double chi0 = opt.activeChi2();
-    auto t0 = std::chrono::steady_clock::now();
+    double t0 = bench::now_ms();
     int iters = opt.optimize(max_iters);
-    auto t1 = std::chrono::steady_clock::now();
-    opt.computeActiveErrors();
-    printf("chi2 %.6f -> %.6f in %d iterations, %.1f ms\n",
-        chi0, opt.activeChi2(), iters,
-        std::chrono::duration<double, std::milli>(t1 - t0).count());
+    double ms = bench::now_ms() - t0;
 
-    if (argc > 2) {
-        std::ofstream out(argv[2]);
-        out.precision(17);
+    if (pose_out) {
         for (int i = 0; i < n; i++) {
             auto* v = static_cast<VertexSE3*>(opt.vertex(i));
             Eigen::Quaterniond q(v->estimate().linear());
             Eigen::Vector3d t = v->estimate().translation();
-            out << t.x() << " " << t.y() << " " << t.z() << " "
-                << q.w() << " " << q.x() << " " << q.y() << " " << q.z() << "\n";
+            double vals[7] = {t.x(), t.y(), t.z(), q.w(), q.x(), q.y(), q.z()};
+            pose_out->insert(pose_out->end(), vals, vals + 7);
         }
         for (int j = 0; j < m; j++) {
             auto* v = static_cast<VertexPlane*>(opt.vertex(n + j));
             Eigen::Vector4d c = v->estimate().toVector();
-            out << c(0) << " " << c(1) << " " << c(2) << " " << c(3) << "\n";
+            double vals[4] = {c(0), c(1), c(2), c(3)};
+            plane_out->insert(plane_out->end(), vals, vals + 4);
         }
     }
+    return bench::Result{ms, iters, counter->trials, chi0};
+}
+
+int main(int argc, char** argv) {
+    if (argc < 3) { fprintf(stderr, "usage: %s <scene.txt> <solution_out>\n", argv[0]); return 1; }
+    Scene s = load(argv[1]);
+
+    std::vector<double> poses, planes;
+    bench::report(
+        [&](int iters) { return solve(s, iters, nullptr, nullptr); },
+        [&]() { return solve(s, bench::full_iters(200), &poses, &planes); });
+
+    std::ofstream out(argv[2]);
+    out.precision(17);
+    for (size_t i = 0; i + 6 < poses.size(); i += 7)
+        out << poses[i] << " " << poses[i + 1] << " " << poses[i + 2] << " "
+            << poses[i + 3] << " " << poses[i + 4] << " " << poses[i + 5] << " "
+            << poses[i + 6] << "\n";
+    for (size_t j = 0; j + 3 < planes.size(); j += 4)
+        out << planes[j] << " " << planes[j + 1] << " " << planes[j + 2] << " "
+            << planes[j + 3] << "\n";
     return 0;
 }

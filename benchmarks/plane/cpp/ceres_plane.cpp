@@ -3,9 +3,11 @@
 // with the distance coefficient as its own scalar block. Residuals are the
 // benchmark's shared definitions (see g2o_plane.cpp), autodiffed.
 //
-//   ceres_plane <scene.txt> [solution_out] [max_iters]
-// Prints one JSON line: {"start_cost":..,"end_cost":..,"iterations":..,
-// "accepted":..,"solve_ms":..} with costs as chi2 (2x Ceres's).
+//   ceres_plane <scene.txt> <solution_out>
+//
+// Probes + protocol line via ../../cpp/bench.h; costs reported as chi2
+// (2x Ceres's). CERES_RADIUS0 overrides the initial trust region radius;
+// CERES_VERBOSE=1 prints per-iteration progress and the full report.
 
 #include <ceres/ceres.h>
 #include <ceres/rotation.h>
@@ -13,6 +15,8 @@
 #include <fstream>
 #include <sstream>
 #include <vector>
+
+#include "../../cpp/bench.h"
 
 struct Odo {
     double tm[3], rm[9]; // R_m row-major
@@ -70,53 +74,69 @@ struct Obs {
     }
 };
 
-int main(int argc, char** argv) {
-    if (argc < 2) { fprintf(stderr, "usage: %s <scene.txt> [sol] [iters]\n", argv[0]); return 1; }
-    int max_iters = argc > 3 ? atoi(argv[3]) : 100;
-
+struct Scene {
     std::vector<std::array<double, 3>> t;
     std::vector<std::array<double, 4>> q; // x,y,z,w (Eigen manifold layout)
     std::vector<std::array<double, 3>> pn;
     std::vector<double> pc;
-    ceres::Problem prob;
-    std::ifstream in(argv[1]);
-    std::string line;
     struct O { int i, j; Odo f; };
     struct B { int p, l; Obs f; };
-    std::vector<O> odos; std::vector<B> obss;
+    std::vector<O> odos;
+    std::vector<B> obss;
+};
+
+static Scene load(const char* path) {
+    Scene s;
+    std::ifstream in(path);
+    if (!in) { fprintf(stderr, "cannot read %s\n", path); exit(1); }
+    std::string line;
     while (std::getline(in, line)) {
         std::istringstream ss(line);
         std::string tag; ss >> tag;
         if (tag == "pose") {
             double x, y, z, qw, qx, qy, qz;
             ss >> x >> y >> z >> qw >> qx >> qy >> qz;
-            t.push_back({x, y, z});
-            q.push_back({qx, qy, qz, qw});
+            s.t.push_back({x, y, z});
+            s.q.push_back({qx, qy, qz, qw});
         } else if (tag == "plane") {
             double nx, ny, nz, c;
             ss >> nx >> ny >> nz >> c;
-            double s = 1.0 / sqrt(nx * nx + ny * ny + nz * nz);
-            pn.push_back({nx * s, ny * s, nz * s});
-            pc.push_back(c * s);
+            double sc = 1.0 / sqrt(nx * nx + ny * ny + nz * nz);
+            s.pn.push_back({nx * sc, ny * sc, nz * sc});
+            s.pc.push_back(c * sc);
         } else if (tag == "odom") {
-            O o; double x, y, z, qw, qx, qy, qz, it_, ir;
+            Scene::O o; double x, y, z, qw, qx, qy, qz, it_, ir;
             ss >> o.i >> o.j >> x >> y >> z >> qw >> qx >> qy >> qz;
             ss >> it_ >> it_ >> it_ >> ir >> ir >> ir;
             o.f.tm[0] = x; o.f.tm[1] = y; o.f.tm[2] = z;
             Eigen::Matrix3d R = Eigen::Quaterniond(qw, qx, qy, qz).toRotationMatrix();
             for (int r = 0; r < 3; r++) for (int c = 0; c < 3; c++) o.f.rm[3 * r + c] = R(r, c);
             o.f.wt = sqrt(it_); o.f.wr = sqrt(ir);
-            odos.push_back(o);
+            s.odos.push_back(o);
         } else if (tag == "obs") {
-            B b; double nx, ny, nz, c, ia, ie, id;
+            Scene::B b; double nx, ny, nz, c, ia, ie, id;
             ss >> b.p >> b.l >> nx >> ny >> nz >> c >> ia >> ie >> id;
-            double s = 1.0 / sqrt(nx * nx + ny * ny + nz * nz);
-            b.f.nm[0] = nx * s; b.f.nm[1] = ny * s; b.f.nm[2] = nz * s;
-            b.f.cm = c * s;
+            double sc = 1.0 / sqrt(nx * nx + ny * ny + nz * nz);
+            b.f.nm[0] = nx * sc; b.f.nm[1] = ny * sc; b.f.nm[2] = nz * sc;
+            b.f.cm = c * sc;
             b.f.waz = sqrt(ia); b.f.wel = sqrt(ie); b.f.wd = sqrt(id);
-            obss.push_back(b);
+            s.obss.push_back(b);
         }
     }
+    return s;
+}
+
+static bench::Result solve(const Scene& scene, int max_iters,
+                           std::vector<std::array<double, 3>>* t_out,
+                           std::vector<std::array<double, 4>>* q_out,
+                           std::vector<std::array<double, 3>>* pn_out,
+                           std::vector<double>* pc_out) {
+    // Fresh copies: the probe's reset, outside the timed solve.
+    auto t = scene.t;
+    auto q = scene.q;
+    auto pn = scene.pn;
+    auto pc = scene.pc;
+    ceres::Problem prob;
     const int n = (int)t.size(), m = (int)pn.size();
     for (int i = 0; i < n; i++) {
         prob.AddParameterBlock(t[i].data(), 3);
@@ -128,34 +148,55 @@ int main(int argc, char** argv) {
     }
     prob.SetParameterBlockConstant(t[0].data());
     prob.SetParameterBlockConstant(q[0].data());
-    for (auto& o : odos)
+    for (const auto& o : scene.odos)
         prob.AddResidualBlock(new ceres::AutoDiffCostFunction<Odo, 6, 3, 4, 3, 4>(new Odo(o.f)),
             nullptr, t[o.i].data(), q[o.i].data(), t[o.j].data(), q[o.j].data());
-    for (auto& b : obss)
+    for (const auto& b : scene.obss)
         prob.AddResidualBlock(new ceres::AutoDiffCostFunction<Obs, 3, 3, 4, 3, 1>(new Obs(b.f)),
             nullptr, t[b.p].data(), q[b.p].data(), pn[b.l].data(), &pc[b.l]);
 
-    ceres::Solver::Options opt;
-    opt.linear_solver_type = ceres::SPARSE_NORMAL_CHOLESKY;
-    opt.max_num_iterations = max_iters;
-    opt.num_threads = 1;
-    opt.function_tolerance = 1e-8;
-    ceres::Solver::Summary sum;
-    ceres::Solve(opt, &prob, &sum);
-    int accepted = (int)sum.num_linear_solves - (int)sum.num_unsuccessful_steps;
-    printf("{\"start_cost\": %.6f, \"end_cost\": %.6f, \"iterations\": %d, \"accepted\": %d, \"solve_ms\": %.1f}\n",
-        2.0 * sum.initial_cost, 2.0 * sum.final_cost,
-        accepted + (int)sum.num_unsuccessful_steps, accepted,
-        sum.total_time_in_seconds * 1e3);
+    ceres::Solver::Options options;
+    options.linear_solver_type = ceres::SPARSE_NORMAL_CHOLESKY;
+    options.max_num_iterations = max_iters;
+    options.num_threads = 1;
+    options.function_tolerance = 1e-5;  // shared termination class
+    // Problem-appropriate initial trust region (large -> near-Gauss-Newton
+    // on this well-initialized graph), matching the sibling benchmark policy.
+    options.initial_trust_region_radius = 1e12;
+    if (const char* r = getenv("CERES_RADIUS0")) options.initial_trust_region_radius = atof(r);
+    if (getenv("CERES_VERBOSE")) options.minimizer_progress_to_stdout = true;
 
-    if (argc > 2) {
-        std::ofstream out(argv[2]);
-        out.precision(17);
-        for (int i = 0; i < n; i++)
-            out << t[i][0] << " " << t[i][1] << " " << t[i][2] << " "
-                << q[i][3] << " " << q[i][0] << " " << q[i][1] << " " << q[i][2] << "\n";
-        for (int j = 0; j < m; j++)
-            out << pn[j][0] << " " << pn[j][1] << " " << pn[j][2] << " " << pc[j] << "\n";
-    }
+    ceres::Solver::Summary summary;
+    ceres::Solve(options, &prob, &summary);
+    if (getenv("CERES_VERBOSE")) fprintf(stderr, "%s\n", summary.FullReport().c_str());
+    if (t_out) { *t_out = t; *q_out = q; *pn_out = pn; *pc_out = pc; }
+    // Count LINEAR SOLVES (factorizations), the unit the parenthesised total
+    // reports; the ones that did not reduce cost are num_unsuccessful_steps.
+    const int attempts = (int)summary.num_linear_solves;
+    const int accepted = attempts - (int)summary.num_unsuccessful_steps;
+    return bench::Result{summary.total_time_in_seconds * 1e3,
+                         accepted,
+                         attempts,
+                         2.0 * summary.initial_cost};
+}
+
+int main(int argc, char** argv) {
+    if (argc < 3) { fprintf(stderr, "usage: %s <scene.txt> <solution_out>\n", argv[0]); return 1; }
+    Scene scene = load(argv[1]);
+
+    std::vector<std::array<double, 3>> t, pn;
+    std::vector<std::array<double, 4>> q;
+    std::vector<double> pc;
+    bench::report(
+        [&](int iters) { return solve(scene, iters, nullptr, nullptr, nullptr, nullptr); },
+        [&]() { return solve(scene, bench::full_iters(200), &t, &q, &pn, &pc); });
+
+    std::ofstream out(argv[2]);
+    out.precision(17);
+    for (size_t i = 0; i < t.size(); i++)
+        out << t[i][0] << " " << t[i][1] << " " << t[i][2] << " "
+            << q[i][3] << " " << q[i][0] << " " << q[i][1] << " " << q[i][2] << "\n";
+    for (size_t j = 0; j < pn.size(); j++)
+        out << pn[j][0] << " " << pn[j][1] << " " << pn[j][2] << " " << pc[j] << "\n";
     return 0;
 }

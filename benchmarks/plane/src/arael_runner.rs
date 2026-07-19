@@ -1,0 +1,504 @@
+// The arael runner. The S^2 plane-normal parameterization is a USER-DEFINED
+// component: declared here with #[arael(component)], lifecycle via the
+// Component trait, chart cached with compute=, embed via chained symbolic=
+// fields -- the full macro path, nothing arael-internal.
+//
+// The f32 model is a type-for-type twin (the macro bakes the scalar into the
+// generated code, so the two are different types), sharing the constraint
+// bodies verbatim.
+
+use arael::model::{Component, CrossBlock, Param, QuaternionParam, SelfBlock};
+use arael::refs::Ref;
+use arael::simple_lm::{lm_solve, LmConfig, LmResult, SparseFaer};
+use arael::matrix::{matrix3d, matrix3f};
+use arael::quatern::{quaternd, quaternf};
+use arael::vect::{vect2d, vect2f, vect3d, vect3f};
+
+use crate::scene::{Plane, Pose, RawScene, Solution};
+
+/// Unit direction on S^2: reference quaternion chart (x-axis = direction),
+/// 2-DOF body-frame delta about the frame's y/z. The embed is the rotated
+/// first column of the small-rotation matrix of (1, (0, d.x, d.y)/2)
+/// normalized -- exact on the sphere for every trial delta.
+#[arael::model]
+#[arael(component)]
+#[derive(Clone)]
+struct UnitVec {
+    // Concrete type names throughout: the macro classifies fields by the
+    // type's last path segment, so aliases would read as opaque structs.
+    ref_q: quaternd,
+    #[arael(compute = self.ref_q.rotation_matrix())]
+    rot: matrix3d,
+    d: Param<vect2d>,
+    #[arael(symbolic = 1.0 + (d.x * d.x + d.y * d.y) * 0.25)]
+    s2: f64,
+    #[arael(symbolic = vect3sym::from_components(
+        1.0 - (d.x * d.x + d.y * d.y) / (2.0 * s2), d.y / s2, 0.0 - d.x / s2))]
+    local: vect3d,
+    #[arael(symbolic = rot * local)]
+    unit: vect3d,
+}
+
+impl UnitVec {
+    fn ex() -> vect3d {
+        vect3d::new(1.0, 0.0, 0.0)
+    }
+    fn new(dir: vect3d) -> UnitVec {
+        let mut u = UnitVec {
+            ref_q: quaternd::identity(),
+            rot: matrix3d::identity(),
+            d: Param::new(vect2d::new(0.0, 0.0)),
+            s2: 0.0,
+            local: vect3d::new(0.0, 0.0, 0.0),
+            unit: dir,
+        };
+        Component::start(&mut u);
+        u
+    }
+}
+
+impl Component for UnitVec {
+    fn start(&mut self) {
+        self.unit = self.unit.unit();
+        self.ref_q = quaternd::from_two_vectors(Self::ex(), self.unit);
+        self.d.value = vect2d::new(0.0, 0.0);
+    }
+    fn update(&mut self) {
+        let dq = quaternd::from_rotation_vector_small(
+            vect3d::new(0.0, self.d.value.x, self.d.value.y));
+        self.ref_q = (self.ref_q * dq).unit();
+        self.d.value = vect2d::new(0.0, 0.0);
+    }
+    fn finish(&mut self) {
+        let dq = quaternd::from_rotation_vector_small(
+            vect3d::new(0.0, self.d.value.x, self.d.value.y));
+        self.unit = (self.ref_q * dq).rotate(Self::ex());
+    }
+}
+
+#[arael::model]
+#[derive(Clone)]
+struct PoseV {
+    pos: Param<vect3d>,
+    q: QuaternionParam<f64>,
+    hb: SelfBlock<PoseV>,
+}
+
+#[arael::model]
+#[derive(Clone)]
+struct PlaneLm {
+    n: UnitVec,
+    c: Param<f64>,
+    hb: SelfBlock<PlaneLm>,
+}
+
+// Odometry between-residual, identical to the g2o runner's custom edge:
+//   err_t = R_a^T (t_b - t_a) - t_m;  err_r = vee((R_m^T R_a^T R_b - .^T)/2)
+#[arael::model]
+#[arael(constraint(hb, {
+    let ra = a.q.rotation_matrix();
+    let rb = b.q.rotation_matrix();
+    let dt = ra.transpose() * (b.pos - a.pos) - odov.tm;
+    let dr = odov.rm_t * (ra.transpose() * rb);
+    let c1 = dr * vect3sym::from_components(1.0, 0.0, 0.0);
+    let c2 = dr * vect3sym::from_components(0.0, 1.0, 0.0);
+    let c3 = dr * vect3sym::from_components(0.0, 0.0, 1.0);
+    [dt.x * odov.wt, dt.y * odov.wt, dt.z * odov.wt,
+     (c2.z - c3.y) * 0.5 * odov.wr,
+     (c3.x - c1.z) * 0.5 * odov.wr,
+     (c1.y - c2.x) * 0.5 * odov.wr]
+}, parent = odov))]
+#[derive(Clone)]
+struct Odov {
+    #[arael(ref = root.poses)]
+    a: Ref<PoseV>,
+    #[arael(ref = root.poses)]
+    b: Ref<PoseV>,
+    tm: vect3d,
+    rm_t: matrix3d,
+    wt: f64,
+    wr: f64,
+    hb: CrossBlock<PoseV, PoseV>,
+}
+
+// Plane observation: g2o's EdgeSE3PlaneSensorCalib error (Plane3D::ominus),
+// written algebraically. Predicted local plane (n_l, c_l) from the world
+// plane through the pose; error = (azimuth, elevation) of the measured
+// normal in the frame aligning n_l with e1, plus the distance difference.
+#[arael::model]
+#[arael(constraint(hb, {
+    let rp = p.q.rotation_matrix();
+    let nw = l.n.unit;
+    let nl = rp.transpose() * nw;
+    let cl = l.c + p.pos * nw;
+    let h = sqrt(nl.x * nl.x + nl.y * nl.y);
+    let mx = nl * obsv.nm;
+    let my = (obsv.nm.y * nl.x - obsv.nm.x * nl.y) / h;
+    let mz = (obsv.nm.z * (nl.x * nl.x + nl.y * nl.y)
+        - nl.z * (nl.x * obsv.nm.x + nl.y * obsv.nm.y)) / h;
+    [atan2(my, mx) * obsv.waz,
+     atan2(mz, sqrt(mx * mx + my * my)) * obsv.wel,
+     (obsv.cm - cl) * obsv.wd]
+}, parent = obsv))]
+#[derive(Clone)]
+struct Obsv {
+    #[arael(ref = root.poses)]
+    p: Ref<PoseV>,
+    #[arael(ref = root.planes)]
+    l: Ref<PlaneLm>,
+    nm: vect3d,
+    cm: f64,
+    waz: f64,
+    wel: f64,
+    wd: f64,
+    hb: CrossBlock<PoseV, PlaneLm>,
+}
+
+#[arael::model]
+#[arael(root)]
+#[derive(Clone)]
+pub struct World {
+    poses: arael::refs::Vec<PoseV>,
+    planes: arael::refs::Vec<PlaneLm>,
+    odos: std::vec::Vec<Odov>,
+    obs: std::vec::Vec<Obsv>,
+}
+
+fn build(raw: &RawScene) -> World {
+    let mut world = World {
+        poses: arael::refs::Vec::new(),
+        planes: arael::refs::Vec::new(),
+        odos: std::vec::Vec::new(),
+        obs: std::vec::Vec::new(),
+    };
+    for (k, p) in raw.poses.iter().enumerate() {
+        let fixed = k == 0;
+        world.poses.push(PoseV {
+            pos: if fixed { Param::fixed(p.t) } else { Param::new(p.t) },
+            q: if fixed { QuaternionParam::fixed(p.q) } else { QuaternionParam::new(p.q) },
+            hb: SelfBlock::new(),
+        });
+    }
+    for pl in &raw.planes {
+        world.planes.push(PlaneLm {
+            n: UnitVec::new(pl.n),
+            c: Param::new(pl.c),
+            hb: SelfBlock::new(),
+        });
+    }
+    for &(i, j, ref rel, wt, wr) in &raw.odos {
+        world.odos.push(Odov {
+            a: world.poses.ref_at(i as u32),
+            b: world.poses.ref_at(j as u32),
+            tm: rel.t,
+            rm_t: rel.q.rotation_matrix().transpose(),
+            wt, wr,
+            hb: CrossBlock::new(),
+        });
+    }
+    for &(p, l, ref pl, waz, wel, wd) in &raw.obs {
+        world.obs.push(Obsv {
+            p: world.poses.ref_at(p as u32),
+            l: world.planes.ref_at(l as u32),
+            nm: pl.n,
+            cm: pl.c,
+            waz, wel, wd,
+            hb: CrossBlock::new(),
+        });
+    }
+    world
+}
+
+fn extract(world: &World) -> Solution {
+    Solution {
+        poses: world.poses.iter()
+            .map(|p| Pose { q: p.q.value, t: p.pos.value }).collect(),
+        planes: world.planes.iter()
+            .map(|pl| Plane { n: pl.n.unit, c: pl.c.value }).collect(),
+    }
+}
+
+/// The arael model cost at the initial estimate -- for the harness to
+/// cross-check against scene::reference_cost.
+pub fn initial_cost(raw: &RawScene) -> f64 {
+    use arael::simple_lm::LmProblem;
+    let mut world = build(raw);
+    let mut params: Vec<f64> = Vec::new();
+    world.serialize64(&mut params);
+    world.calc_cost(&params)
+}
+
+impl bench_harness::arael::Model for World {
+    type Scalar = f64;
+    type Input = RawScene;
+    type Solution = Solution;
+    // Near-Gauss-Newton start: clean Gaussian noise from a good odometry
+    // init, same policy as the other pose benchmarks.
+    fn lambda0(_: &RawScene) -> f64 { 1e-8 }
+    // The unanchored loop has a slow global bending mode; the fixed ladder
+    // oscillates around its optimal damping in that tail, the gain-ratio
+    // driver holds it.
+    const NIELSEN: bool = true;
+    fn build(raw: &RawScene) -> Self { build(raw) }
+    fn serialize(&mut self, out: &mut Vec<f64>) { self.serialize64(out); }
+    fn deserialize(&mut self, x: &[f64]) { self.deserialize64(x); }
+    fn solution(&self) -> Solution { extract(self) }
+    fn solve(_: &RawScene, params: &[f64], m: &mut Self, cfg: &LmConfig<f64>)
+        -> LmResult<f64> {
+        lm_solve(params, &mut SparseFaer::<f64>::new(), m, cfg)
+    }
+}
+
+pub type RunOut = bench_harness::table::Row<Solution>;
+
+pub fn run(raw: &RawScene) -> RunOut { bench_harness::arael::run::<World>(raw) }
+pub fn run_f32(raw: &RawScene) -> RunOut { bench_harness::arael::run::<WorldF>(raw) }
+
+// Capped single solves (no timing) -- for the peak-memory pass.
+pub fn run_capped(raw: &RawScene, max_iters: usize) -> Solution {
+    let mut world = build(raw);
+    let mut params: Vec<f64> = Vec::new();
+    world.serialize64(&mut params);
+    let cfg = bench_harness::arael::config::<World>(raw, max_iters);
+    let r = lm_solve(&params, &mut SparseFaer::<f64>::new(), &mut world, &cfg);
+    world.deserialize64(&r.x);
+    extract(&world)
+}
+
+pub fn run_f32_capped(raw: &RawScene, max_iters: usize) -> Solution {
+    let mut world = build_f32(raw);
+    let mut params: Vec<f32> = Vec::new();
+    world.serialize32(&mut params);
+    let cfg = bench_harness::arael::config::<WorldF>(raw, max_iters);
+    let r = lm_solve(&params, &mut SparseFaer::<f32>::new(), &mut world, &cfg);
+    world.deserialize32(&r.x);
+    extract_f32(&world)
+}
+
+// ------------------------------------------------------------ the f32 twin
+
+#[arael::model]
+#[arael(component)]
+#[derive(Clone)]
+struct UnitVecF {
+    ref_q: quaternf,
+    #[arael(compute = self.ref_q.rotation_matrix())]
+    rot: matrix3f,
+    d: Param<vect2f>,
+    #[arael(symbolic = 1.0 + (d.x * d.x + d.y * d.y) * 0.25)]
+    s2: f32,
+    #[arael(symbolic = vect3sym::from_components(
+        1.0 - (d.x * d.x + d.y * d.y) / (2.0 * s2), d.y / s2, 0.0 - d.x / s2))]
+    local: vect3f,
+    #[arael(symbolic = rot * local)]
+    unit: vect3f,
+}
+
+impl UnitVecF {
+    fn ex() -> vect3f {
+        vect3f::new(1.0, 0.0, 0.0)
+    }
+    fn new(dir: vect3f) -> UnitVecF {
+        let mut u = UnitVecF {
+            ref_q: quaternf::identity(),
+            rot: matrix3f::identity(),
+            d: Param::new(vect2f::new(0.0, 0.0)),
+            s2: 0.0,
+            local: vect3f::new(0.0, 0.0, 0.0),
+            unit: dir,
+        };
+        Component::start(&mut u);
+        u
+    }
+}
+
+impl Component for UnitVecF {
+    fn start(&mut self) {
+        self.unit = self.unit.unit();
+        self.ref_q = quaternf::from_two_vectors(Self::ex(), self.unit);
+        self.d.value = vect2f::new(0.0, 0.0);
+    }
+    fn update(&mut self) {
+        let dq = quaternf::from_rotation_vector_small(
+            vect3f::new(0.0, self.d.value.x, self.d.value.y));
+        self.ref_q = (self.ref_q * dq).unit();
+        self.d.value = vect2f::new(0.0, 0.0);
+    }
+    fn finish(&mut self) {
+        let dq = quaternf::from_rotation_vector_small(
+            vect3f::new(0.0, self.d.value.x, self.d.value.y));
+        self.unit = (self.ref_q * dq).rotate(Self::ex());
+    }
+}
+
+#[arael::model]
+#[derive(Clone)]
+struct PoseVF {
+    pos: Param<vect3f>,
+    q: QuaternionParam<f32>,
+    hb: SelfBlock<PoseVF, f32>,
+}
+
+#[arael::model]
+#[derive(Clone)]
+struct PlaneLmF {
+    n: UnitVecF,
+    c: Param<f32>,
+    hb: SelfBlock<PlaneLmF, f32>,
+}
+
+#[arael::model]
+#[arael(constraint(hb, {
+    let ra = a.q.rotation_matrix();
+    let rb = b.q.rotation_matrix();
+    let dt = ra.transpose() * (b.pos - a.pos) - odovf.tm;
+    let dr = odovf.rm_t * (ra.transpose() * rb);
+    let c1 = dr * vect3sym::from_components(1.0, 0.0, 0.0);
+    let c2 = dr * vect3sym::from_components(0.0, 1.0, 0.0);
+    let c3 = dr * vect3sym::from_components(0.0, 0.0, 1.0);
+    [dt.x * odovf.wt, dt.y * odovf.wt, dt.z * odovf.wt,
+     (c2.z - c3.y) * 0.5 * odovf.wr,
+     (c3.x - c1.z) * 0.5 * odovf.wr,
+     (c1.y - c2.x) * 0.5 * odovf.wr]
+}, parent = odovf))]
+#[derive(Clone)]
+struct OdovF {
+    #[arael(ref = root.poses)]
+    a: Ref<PoseVF>,
+    #[arael(ref = root.poses)]
+    b: Ref<PoseVF>,
+    tm: vect3f,
+    rm_t: matrix3f,
+    wt: f32,
+    wr: f32,
+    hb: CrossBlock<PoseVF, PoseVF, f32>,
+}
+
+#[arael::model]
+#[arael(constraint(hb, {
+    let rp = p.q.rotation_matrix();
+    let nw = l.n.unit;
+    let nl = rp.transpose() * nw;
+    let cl = l.c + p.pos * nw;
+    let h = sqrt(nl.x * nl.x + nl.y * nl.y);
+    let mx = nl * obsvf.nm;
+    let my = (obsvf.nm.y * nl.x - obsvf.nm.x * nl.y) / h;
+    let mz = (obsvf.nm.z * (nl.x * nl.x + nl.y * nl.y)
+        - nl.z * (nl.x * obsvf.nm.x + nl.y * obsvf.nm.y)) / h;
+    [atan2(my, mx) * obsvf.waz,
+     atan2(mz, sqrt(mx * mx + my * my)) * obsvf.wel,
+     (obsvf.cm - cl) * obsvf.wd]
+}, parent = obsvf))]
+#[derive(Clone)]
+struct ObsvF {
+    #[arael(ref = root.poses)]
+    p: Ref<PoseVF>,
+    #[arael(ref = root.planes)]
+    l: Ref<PlaneLmF>,
+    nm: vect3f,
+    cm: f32,
+    waz: f32,
+    wel: f32,
+    wd: f32,
+    hb: CrossBlock<PoseVF, PlaneLmF, f32>,
+}
+
+#[arael::model]
+#[arael(root, f32)]
+#[derive(Clone)]
+pub struct WorldF {
+    poses: arael::refs::Vec<PoseVF>,
+    planes: arael::refs::Vec<PlaneLmF>,
+    odos: std::vec::Vec<OdovF>,
+    obs: std::vec::Vec<ObsvF>,
+}
+
+fn v3f(v: vect3d) -> vect3f {
+    vect3f::new(v.x as f32, v.y as f32, v.z as f32)
+}
+fn qf(q: quaternd) -> quaternf {
+    quaternf::new(q.t as f32, v3f(q.v)).unit()
+}
+
+fn build_f32(raw: &RawScene) -> WorldF {
+    let mut world = WorldF {
+        poses: arael::refs::Vec::new(),
+        planes: arael::refs::Vec::new(),
+        odos: std::vec::Vec::new(),
+        obs: std::vec::Vec::new(),
+    };
+    for (k, p) in raw.poses.iter().enumerate() {
+        let fixed = k == 0;
+        world.poses.push(PoseVF {
+            pos: if fixed { Param::fixed(v3f(p.t)) } else { Param::new(v3f(p.t)) },
+            q: if fixed { QuaternionParam::fixed(qf(p.q)) } else { QuaternionParam::new(qf(p.q)) },
+            hb: SelfBlock::new(),
+        });
+    }
+    for pl in &raw.planes {
+        world.planes.push(PlaneLmF {
+            n: UnitVecF::new(v3f(pl.n)),
+            c: Param::new(pl.c as f32),
+            hb: SelfBlock::new(),
+        });
+    }
+    for &(i, j, ref rel, wt, wr) in &raw.odos {
+        world.odos.push(OdovF {
+            a: world.poses.ref_at(i as u32),
+            b: world.poses.ref_at(j as u32),
+            tm: v3f(rel.t),
+            rm_t: qf(rel.q).rotation_matrix().transpose(),
+            wt: wt as f32,
+            wr: wr as f32,
+            hb: CrossBlock::new(),
+        });
+    }
+    for &(p, l, ref pl, waz, wel, wd) in &raw.obs {
+        world.obs.push(ObsvF {
+            p: world.poses.ref_at(p as u32),
+            l: world.planes.ref_at(l as u32),
+            nm: v3f(pl.n),
+            cm: pl.c as f32,
+            waz: waz as f32,
+            wel: wel as f32,
+            wd: wd as f32,
+            hb: CrossBlock::new(),
+        });
+    }
+    world
+}
+
+fn extract_f32(world: &WorldF) -> Solution {
+    Solution {
+        poses: world.poses.iter()
+            .map(|p| Pose {
+                q: quaternd::new(p.q.value.t as f64,
+                    vect3d::new(p.q.value.v.x as f64, p.q.value.v.y as f64,
+                        p.q.value.v.z as f64)).unit(),
+                t: vect3d::new(p.pos.value.x as f64, p.pos.value.y as f64,
+                    p.pos.value.z as f64),
+            })
+            .collect(),
+        planes: world.planes.iter()
+            .map(|pl| Plane::normalized(
+                vect3d::new(pl.n.unit.x as f64, pl.n.unit.y as f64, pl.n.unit.z as f64),
+                pl.c.value as f64))
+            .collect(),
+    }
+}
+
+impl bench_harness::arael::Model for WorldF {
+    type Scalar = f32;
+    type Input = RawScene;
+    type Solution = Solution;
+    fn lambda0(_: &RawScene) -> f64 { 1e-8 }
+    const NIELSEN: bool = true;
+    fn build(raw: &RawScene) -> Self { build_f32(raw) }
+    fn serialize(&mut self, out: &mut Vec<f32>) { self.serialize32(out); }
+    fn deserialize(&mut self, x: &[f32]) { self.deserialize32(x); }
+    fn solution(&self) -> Solution { extract_f32(self) }
+    fn solve(_: &RawScene, params: &[f32], m: &mut Self, cfg: &LmConfig<f32>)
+        -> LmResult<f32> {
+        lm_solve(params, &mut SparseFaer::<f32>::new(), m, cfg)
+    }
+}

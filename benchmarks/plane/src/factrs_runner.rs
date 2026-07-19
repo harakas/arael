@@ -17,7 +17,9 @@ use factrs::residuals::Residual2;
 use factrs::traits::Optimizer;
 use factrs::variables::{VectorVar3, SE3, SO3};
 
-use crate::{Plane, Pose, Q, V3};
+use crate::scene::{Plane, Pose, RawScene, Solution};
+use arael::quatern::quaternd;
+use arael::vect::vect3d;
 
 assign_symbols!(A: SE3; B: VectorVar3);
 
@@ -158,112 +160,146 @@ impl factrs::residuals::Residual1 for PriorSE3Res {
     }
 }
 
-pub struct FactrsResult {
-    pub ms: f64,
-    pub accepted: usize,
-    pub attempts: usize,
-    pub poses: Vec<Pose>,
-    pub planes: Vec<Plane>,
+fn se3_of(p: &Pose) -> SE3 {
+    SE3::from_rot_trans(
+        SO3::from_xyzw(p.q.v.x, p.q.v.y, p.q.v.z, p.q.t),
+        Vector3::new(p.t.x, p.t.y, p.t.z),
+    )
 }
 
-pub fn solve_factrs(
-    poses: &[Pose],
-    planes: &[Plane],
-    odos: &[(usize, usize, Pose, f64, f64)],
-    obs: &[(usize, usize, Plane, f64, f64, f64)],
-    max_iter: usize,
-) -> FactrsResult {
+/// Plane chart anchors: the initial normal's frame, baked into each
+/// observation residual (and needed again to read the solution back).
+fn anchors(raw: &RawScene) -> Vec<quaternd> {
+    raw.planes.iter()
+        .map(|pl| quaternd::from_two_vectors(vect3d::new(1.0, 0.0, 0.0), pl.n.unit()))
+        .collect()
+}
+
+fn odo_res(rel: &Pose, wt: f64, wr: f64) -> OdoRes {
+    OdoRes {
+        tm: [rel.t.x, rel.t.y, rel.t.z],
+        qm: [rel.q.v.x, rel.q.v.y, rel.q.v.z, rel.q.t],
+        wt, wr,
+    }
+}
+
+fn obs_res(anchor: &quaternd, pl: &Plane, waz: f64, wel: f64, wd: f64) -> ObsRes {
+    let r = anchor.rotation_matrix();
+    let s = 1.0 / pl.n.norm();
+    ObsRes {
+        anchor: [[r[0].x, r[0].y, r[0].z], [r[1].x, r[1].y, r[1].z], [r[2].x, r[2].y, r[2].z]],
+        nm: [pl.n.x * s, pl.n.y * s, pl.n.z * s],
+        cm: pl.c * s,
+        w: [waz, wel, wd],
+    }
+}
+
+fn prior_res(p0: &Pose) -> PriorSE3Res {
+    PriorSE3Res {
+        t: [p0.t.x, p0.t.y, p0.t.z],
+        q: [p0.q.v.x, p0.q.v.y, p0.q.v.z, p0.q.t],
+        w: 1e6,
+    }
+}
+
+/// The factrs residuals' cost at the initial estimate -- for the harness to
+/// cross-check against scene::reference_cost. The gauge prior sits at the
+/// start pose, so it contributes zero here.
+pub fn initial_cost(raw: &RawScene) -> f64 {
+    use factrs::residuals::Residual1;
+    let sq = |r: VectorX<f64>| r.iter().map(|x| x * x).sum::<f64>();
+    let anch = anchors(raw);
+    let mut cost = 0.0;
+    for &(i, j, ref rel, wt, wr) in &raw.odos {
+        cost += sq(odo_res(rel, wt, wr)
+            .residual2(se3_of(&raw.poses[i]), se3_of(&raw.poses[j])));
+    }
+    for &(p, l, ref pl, waz, wel, wd) in &raw.obs {
+        let s = 1.0 / raw.planes[l].n.norm();
+        cost += sq(obs_res(&anch[l], pl, waz, wel, wd)
+            .residual2(se3_of(&raw.poses[p]), VectorVar3::new(0.0, 0.0, raw.planes[l].c * s)));
+    }
+    cost += sq(prior_res(&raw.poses[0]).residual1(se3_of(&raw.poses[0])));
+    cost
+}
+
+fn build(raw: &RawScene) -> (Graph, Values) {
     let mut graph = Graph::new();
     let mut init = Values::new();
-    for (i, p) in poses.iter().enumerate() {
-        init.insert(
-            A(i as u32),
-            SE3::from_rot_trans(
-                SO3::from_xyzw(p.q.v.x, p.q.v.y, p.q.v.z, p.q.t),
-                Vector3::new(p.t.x, p.t.y, p.t.z),
-            ),
-        );
+    let anch = anchors(raw);
+    for (i, p) in raw.poses.iter().enumerate() {
+        init.insert(A(i as u32), se3_of(p));
     }
-    // Plane chart anchors: the initial normal's frame.
-    let anchors: Vec<Q> = planes.iter()
-        .map(|pl| Q::from_two_vectors(V3::new(1.0, 0.0, 0.0), pl.n.unit()))
-        .collect();
-    for (j, pl) in planes.iter().enumerate() {
+    for (j, pl) in raw.planes.iter().enumerate() {
         let s = 1.0 / pl.n.norm();
         init.insert(B(j as u32), VectorVar3::new(0.0, 0.0, pl.c * s));
     }
-    for &(i, j, ref rel, wt, wr) in odos {
-        graph.add_factor(fac![
-            OdoRes {
-                tm: [rel.t.x, rel.t.y, rel.t.z],
-                qm: [rel.q.v.x, rel.q.v.y, rel.q.v.z, rel.q.t],
-                wt, wr,
-            },
-            (A(i as u32), A(j as u32)),
-            1.0 as std
-        ]);
+    for &(i, j, ref rel, wt, wr) in &raw.odos {
+        graph.add_factor(fac![odo_res(rel, wt, wr), (A(i as u32), A(j as u32)), 1.0 as std]);
     }
-    for &(p, l, ref pl, waz, wel, wd) in obs {
-        let r = anchors[l].rotation_matrix();
-        let s = 1.0 / pl.n.norm();
-        graph.add_factor(fac![
-            ObsRes {
-                anchor: [[r[0].x, r[0].y, r[0].z], [r[1].x, r[1].y, r[1].z], [r[2].x, r[2].y, r[2].z]],
-                nm: [pl.n.x * s, pl.n.y * s, pl.n.z * s],
-                cm: pl.c * s,
-                w: [waz, wel, wd],
-            },
-            (A(p as u32), B(l as u32)),
-            1.0 as std
-        ]);
+    for &(p, l, ref pl, waz, wel, wd) in &raw.obs {
+        graph.add_factor(fac![obs_res(&anch[l], pl, waz, wel, wd),
+            (A(p as u32), B(l as u32)), 1.0 as std]);
     }
-    let p0 = &poses[0];
-    graph.add_factor(fac![
-        PriorSE3Res {
-            t: [p0.t.x, p0.t.y, p0.t.z],
-            q: [p0.q.v.x, p0.q.v.y, p0.q.v.z, p0.q.t],
-            w: 1e6,
-        },
-        A(0),
-        1.0 as std
-    ]);
+    graph.add_factor(fac![prior_res(&raw.poses[0]), A(0), 1.0 as std]);
+    (graph, init)
+}
 
-    let before = counts();
-    let t0 = std::time::Instant::now();
-    let params = LevenParams {
-        base: BaseOptParams { max_iterations: max_iter, ..Default::default() },
-        ..Default::default()
-    };
-    let mut opt = LevenMarquardt::new(params, graph);
-    opt.set_solver(CountingSolver::default());
-    opt.observers_mut().add(StepCounter);
-    let result = opt.optimize(init);
-    let ms = t0.elapsed().as_secs_f64() * 1e3;
-    let values = match result {
-        Ok(v) => v,
-        Err(OptError::MaxIterations(v)) => v,
-        Err(e) => panic!("factrs failed: {:?}", e),
-    };
-    let (accepted, attempts) = since(before);
-
-    let out_poses: Vec<Pose> = (0..poses.len())
+fn extract(raw: &RawScene, values: &Values) -> Solution {
+    let anch = anchors(raw);
+    let poses: Vec<Pose> = (0..raw.poses.len())
         .map(|i| {
             let p: &SE3 = values.get(A(i as u32)).expect("pose");
             let r = p.rot();
             Pose {
-                q: Q::new(r.w(), V3::new(r.x(), r.y(), r.z())).unit(),
-                t: V3::new(p.xyz()[0], p.xyz()[1], p.xyz()[2]),
+                q: quaternd::new(r.w(), vect3d::new(r.x(), r.y(), r.z())).unit(),
+                t: vect3d::new(p.xyz()[0], p.xyz()[1], p.xyz()[2]),
             }
         })
         .collect();
-    let out_planes: Vec<Plane> = (0..planes.len())
+    let planes: Vec<Plane> = (0..raw.planes.len())
         .map(|j| {
             let x: &VectorVar3 = values.get(B(j as u32)).expect("plane");
             let (dy, dz, c) = (x.0[0], x.0[1], x.0[2]);
-            let dq = Q::from_rotation_vector_small(V3::new(0.0, dy, dz));
-            let n = (anchors[j] * dq).rotate(V3::new(1.0, 0.0, 0.0));
+            let dq = quaternd::from_rotation_vector_small(vect3d::new(0.0, dy, dz));
+            let n = (anch[j] * dq).rotate(vect3d::new(1.0, 0.0, 0.0));
             Plane { n, c }
         })
         .collect();
-    FactrsResult { ms, accepted, attempts, poses: out_poses, planes: out_planes }
+    Solution { poses, planes }
+}
+
+pub fn run(raw: &RawScene) -> crate::arael_runner::RunOut {
+    bench_harness::solver::run(200, |max_iter| {
+        // Building the graph is the probe's reset, not the solve -- the clock
+        // starts at the optimize() below, the same boundary the C++ runners
+        // draw.
+        let (graph, init) = build(raw);
+        let before = counts();
+        let (ms, result) = bench_harness::solver::timed(|| {
+            let params = LevenParams {
+                base: BaseOptParams { max_iterations: max_iter, ..Default::default() },
+                ..Default::default()
+            };
+            let mut opt = LevenMarquardt::new(params, graph);
+            // factrs keeps its damping retries inside step(): counting the
+            // linear solves recovers them; its observer sees accepted steps
+            // only.
+            opt.set_solver(CountingSolver::default());
+            opt.observers_mut().add(StepCounter);
+            opt.optimize(init)
+        });
+        let values = match result {
+            Ok(v) => v,
+            Err(OptError::MaxIterations(v)) => v,
+            Err(e) => panic!("factrs failed: {:?}", e),
+        };
+        let (accepted, attempts) = since(before);
+        bench_harness::solver::Outcome {
+            ms,
+            accepted,
+            attempts,
+            solution: extract(raw, &values),
+        }
+    })
 }

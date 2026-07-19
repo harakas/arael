@@ -1287,6 +1287,8 @@ dependencies = [
  "arael",
  "bench-harness",
  "factrs",
+ "rand",
+ "rand_distr",
 ]
 
 [[package]]
