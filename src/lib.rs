@@ -1887,6 +1887,16 @@
 //!   root-owned `TripletBlock` named via the `root.<field>` block
 //!   spec) and a `Path::optimise_center` pass that freezes pose
 //!   params and optimises only the globals before the main sweep.
+//! - **[`plane_slam_demo`](https://github.com/harakas/arael/blob/master/examples/plane_slam_demo.rs)**
+//!   -- plane SLAM with a USER-DEFINED component: `UnitVec`, a 2-DOF
+//!   unit direction on the sphere, built inside the example from
+//!   public pieces -- `#[arael(component)]`, the `Component`
+//!   lifecycle trait, a cached chart (`compute =`), a `symbolic =`
+//!   embed with `let` intermediates, and a declared Jacobian cache
+//!   (`deriv =`). SE3 poses and plane landmarks (unit normal +
+//!   distance) with odometry and plane observations; the same model
+//!   `benchmarks/plane` races against g2o, Ceres, GTSAM, SymForce
+//!   and factrs.
 //! - **[`model_demo`](https://github.com/harakas/arael/blob/master/examples/model_demo.rs)**
 //!   -- minimal `#[arael::model]` walk-through showing how
 //!   `Param`, `SimpleEulerAngleParam`, and the update cycle fit
