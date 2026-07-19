@@ -1,0 +1,14 @@
+[package]
+name = "plane-bench"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+arael = { path = "../.." }
+bench-harness = { path = "../harness", features = ["factrs"] }
+factrs = "0.3.0"
+
+[workspace]
+
+[profile.release]
+debug = false
