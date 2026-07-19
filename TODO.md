@@ -312,18 +312,22 @@
   degenerate all-visible env for the Schur-gate stress case meanwhile.
 
 - **arael: Schur Auto gate misfires when a small block family is observed
-  by everyone** (found by benchmarks/plane PLANE_SHARED=1: 6 planes seen by
-  all poses -> S 100% dense, arael 4.7 ms/iter vs 0.6 on the sparse scene).
-  The `obvious_flop_ratio` shortcut compares worst-case S factorization
-  against the REDUCTION's own cost only (simple_lm.rs ~4646); when the
-  reduction itself is expensive (dense couplings), the ratio comes out
-  under the 15x bar and the whole-system comparison is skipped -- the one
-  comparison that would have declined. Fix: (1) the shortcut must also
-  require S to be structurally sparse -- its density is known cheaply from
-  SchurSymbolic before any factorization; dense-ish S (say fill fraction
-  over ~0.5) always falls through to the real comparison. (2) Make the
-  comparison a flop crossover, not just factor-size fill_ratio: reduced
-  route = reduce_flops + factor_flops(S symbolic) vs full route =
-  factor_flops(H symbolic), factor flops as sum of squared column counts.
-  Regression tests: the PLANE_SHARED shape must DECLINE; slam/BAL
-  decisions must not change.
+  by everyone** -- DONE (2026-07-19). The shortcut now prices the
+  alternative: it fires only when the reduced route (reduction +
+  worst-case S factorization) stays within `obvious_flop_ratio` (25) of a
+  fill-free floor under any whole-system factorization,
+  `max(nnz(H), nnz(H)^2/n)`; and the exact comparison is a flop crossover,
+  `reduce_flops + factor_flops(L_S) > flop_margin * factor_flops(L_H)`
+  (sum-of-squared-column-counts from the symbolic factors; `flop_margin`
+  1.5 replaces `fill_ratio_max`). The shared-plane scene declines (arael
+  4.8 -> 0.5 ms/iter, slowest of 8 systems to fastest); slam and BAL
+  routes unchanged, measured ratios in the SchurPolicy docs. Also fixed
+  en route: block CSC patterns overcount the scalar triangle by the
+  diagonal tiles' lower halves (the "101% dense" print) --
+  `scalar_upper_nnz()` corrects every density the gate reads. Test:
+  tests/selection.rs a_small_global_family_is_declined. Original entry:
+  the `obvious_flop_ratio` shortcut compared worst-case S factorization
+  against the reduction's own cost only, treating the reduction as sunk;
+  a small family observed by everyone made both expensive while H stayed
+  nearly banded, and the one comparison that would have declined was
+  skipped.

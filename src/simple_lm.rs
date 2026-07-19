@@ -1516,6 +1516,9 @@ fn render_plan(plan: &SchurPlan, style: Style) -> String {
         plan.eliminated_blocks, plan.eliminated_params, plan.kept_params
     );
     let mut why = std::vec::Vec::new();
+    if let Some((red, full)) = plan.route_flops {
+        why.push(format!("route flops {red:.2e} vs {full:.2e}"));
+    }
     if let Some(r) = plan.fill_ratio {
         why.push(format!("fill ratio {r:.2}"));
     }
@@ -3169,6 +3172,40 @@ const NARROW_BAND_WIDE_KD: usize = 128;
 /// distance from a stored tile's first scalar row to its block-column's last
 /// scalar column. O(block columns). The whole-system analog of
 /// [`arael_faer::schur::SchurSymbolic::kept_bandwidth`].
+/// Factorization flops of a symbolic Cholesky factor: the exact
+/// sum-of-squared-column-counts, the unit the Schur gate's route comparison
+/// is priced in. For a supernodal factor, column `j` of a supernode of
+/// width `w` with `p` sub-diagonal rows holds `(w - j) + p` entries.
+fn symbolic_factor_flops(sym: &faer::sparse::linalg::cholesky::SymbolicCholesky<usize>) -> f64 {
+    use faer::sparse::linalg::cholesky::SymbolicCholeskyRaw;
+    match sym.raw() {
+        SymbolicCholeskyRaw::Simplicial(s) => {
+            let cp = s.col_ptr();
+            let mut flops = 0.0;
+            for j in 0..s.nrows() {
+                let c = (cp[j + 1] - cp[j]) as f64;
+                flops += c * c;
+            }
+            flops
+        }
+        SymbolicCholeskyRaw::Supernodal(s) => {
+            let begin = s.supernode_begin();
+            let end = s.supernode_end();
+            let cp = s.col_ptr_for_row_idx();
+            let mut flops = 0.0;
+            for sn in 0..s.n_supernodes() {
+                let w = (end[sn] - begin[sn]) as f64;
+                let p = (cp[sn + 1] - cp[sn]) as f64;
+                // sum over k = 1..=w of (k + p)^2
+                flops += w * (w + 1.0) * (2.0 * w + 1.0) / 6.0
+                    + p * w * (w + 1.0)
+                    + w * p * p;
+            }
+            flops
+        }
+    }
+}
+
 fn block_half_bandwidth(hsym: &arael_faer::bsc::SymbolicSparseBlockColMat<usize>) -> usize {
     let mut b = 0usize;
     for j in 0..hsym.nblk_cols() {
@@ -3294,51 +3331,66 @@ pub enum SchurPolicy {
     /// analysis, no fallback -- what a caller who already knows their
     /// problem wants. Panics if there is nothing to marginalize.
     Force,
-    /// Keep the reduction only if it pays: compare the fill of the reduced
-    /// system's factor against the fill of the full system under AMD, and
-    /// decline when the reduction leaves relatively more
-    /// (`fill(L_S) / fill(L_H) > fill_ratio_max`). Declining means
-    /// factorizing the full system instead, so the solve is always correct;
-    /// only the route changes. Costs one extra symbolic factorization.
-    ///
-    /// The default `fill_ratio_max` of 0.8 ranks every problem measured so
-    /// far correctly (slam 60/300 at 0.45/0.54 and BAL 49/138 at 0.16/0.47
-    /// all win; BAL-372 at 0.84 is a wash; BAL-1723 at 1.21 loses).
+    /// Keep the reduction only if it pays: weigh what one iteration costs
+    /// down each route -- reduced, `reduce_flops + factor_flops(L_S)`;
+    /// full, `factor_flops(L_H)` under AMD -- and decline when
+    /// `reduced > flop_margin * full`. Factor flops are the exact
+    /// sum-of-squared-column-counts of each symbolic factor. Declining
+    /// means factorizing the full system instead, so the solve is always
+    /// correct; only the route changes. Costs one extra symbolic
+    /// factorization.
     ///
     /// That comparison needs a fill-reducing ordering of the WHOLE matrix,
     /// which is the expensive part (17.6 ms at slam-300) -- so it is skipped
     /// when the reduction is obviously right, by `obvious_flop_ratio` below.
     Auto {
-        fill_ratio_max: f64,
-        /// Skip the comparison entirely when the reduction is obviously worth
-        /// it: when factorizing the reduced system -- at the WORST it could
-        /// cost -- would still cost no more than this multiple of the
-        /// reduction we are committed to anyway.
+        /// Decline when the reduced route costs more than this multiple of
+        /// the full route. 1.0 is the break-even point in flops; the
+        /// default of 1.5 leaves slack toward reducing, because the
+        /// reduction's GEMM flops stream through unrolled kernels while
+        /// the sparse factor's flops do not -- a reduced-route flop is
+        /// cheaper than a full-route flop. The one measured problem inside
+        /// the slack band, BAL-372 at 1.1, is a wash on the clock, which
+        /// is what break-even should look like.
+        flop_margin: f64,
+        /// Skip the comparison entirely when the reduction is obviously
+        /// worth it: when the whole reduced route -- the reduction plus the
+        /// reduced factorization at the WORST it could cost -- stays within
+        /// this multiple of a floor under ANY whole-system factorization.
         ///
-        /// The worst case is the cheaper of two bounds, both free:
+        /// The worst case for the reduced factor is the cheaper of two
+        /// bounds, both free:
         /// * dense -- the reduced system's factor cannot exceed `n^3 / 3`;
         /// * banded -- nor can it spill outside the system's own bandwidth,
         ///   `n * b^2`. This is the bound that matters on a trajectory: a
         ///   landmark is seen from a bounded stretch of it, so the reduced
-        ///   pose system is banded and the dense bound is wildly pessimistic
-        ///   (at 6000 slam poses it overstates the cost 500x, which used to
-        ///   send every large problem down the expensive comparison).
+        ///   pose system is banded and the dense bound is wildly pessimistic.
         ///
-        /// Measured, worst-case-over-reduction: 0.5 (BAL-49), 1.3 (slam-60),
-        /// 3.2 (BAL-138), 4.7 (slam-6000), 7.7 (slam-300) -- all reductions
-        /// that win; 24 (BAL-372, a wash) and 681 (BAL-1723, a loss). The
-        /// default of 15 fires on every win and defers on the rest.
+        /// The floor under the full route is fill-free: a factor holds at
+        /// least its matrix's nonzeros, and sum-of-squared-column-counts is
+        /// at least `nnz^2 / n` (Cauchy-Schwarz) -- so
+        /// `max(nnz(H), nnz(H)^2 / n)` undercuts any ordering. Both sides
+        /// are pessimistic in the full route's favor, so a small ratio
+        /// means the reduction cannot lose, however the orderings come out.
         ///
-        /// Deferring is safe -- the exact comparison then decides -- so the
-        /// only real risk is firing on a problem the reduction loses, and the
-        /// margin to the nearest non-win is wide. Set to 0 to always compare.
+        /// Measured: BAL-49 at 2.5, slam-60 at 3.1, BAL-138 at 8.7,
+        /// slam-2000 at 14.4 and slam-300 at 18.2 are reductions the exact
+        /// comparison would confirm anyway, so the bar of 25 fires on all
+        /// of them; BAL-372 at 56 and BAL-1723 at 1614 defer (both reduce
+        /// after pricing), and the plane benchmark's shared-plane scene --
+        /// a small block family observed by everyone, the shape where
+        /// reducing LOSES 14x -- lands at 248 and is declined by the
+        /// pricing it falls through to. Deferring is safe (the exact
+        /// comparison decides); firing wrongly is the only real risk, and
+        /// the nearest defer sits at over twice the bar. Set to 0 to
+        /// always compare.
         obvious_flop_ratio: f64,
     },
 }
 
 impl Default for SchurPolicy {
     fn default() -> Self {
-        SchurPolicy::Auto { fill_ratio_max: 0.8, obvious_flop_ratio: 15.0 }
+        SchurPolicy::Auto { flop_margin: 1.5, obvious_flop_ratio: 25.0 }
     }
 }
 
@@ -3671,17 +3723,22 @@ pub struct SchurPlan {
     /// Parameters marginalized, and parameters left in the reduced system.
     pub eliminated_params: usize,
     pub kept_params: usize,
-    /// `fill(L_S) / fill(L_H)` -- the ordering comparison's verdict. `Some`
-    /// only when that comparison actually ran: it is skipped when the cheap
-    /// `flop_ratio` below already settles the question, and never runs under
-    /// [`SchurPolicy::Force`].
+    /// `fill(L_S) / fill(L_H)` -- the two factors' relative size, recorded
+    /// when the exact comparison ran (the decision itself is `route_flops`).
+    /// `None` when the comparison was skipped: the cheap `flop_ratio` below
+    /// settled the question, or the policy was [`SchurPolicy::Force`].
     pub fill_ratio: Option<f64>,
-    /// The cheap statistic: what factorizing the reduced system would cost if
-    /// it came out fully dense, over what the reduction costs. `Some`
-    /// whenever the policy was [`SchurPolicy::Auto`]. Below the policy's
-    /// `obvious_flop_ratio` the reduction is taken on this alone and
-    /// `fill_ratio` stays `None` -- so between the two fields the plan says
-    /// exactly which test decided.
+    /// Per-iteration flops down each route, `(reduced, full)`: the reduction
+    /// plus the reduced factor, against the whole system's factor -- the
+    /// exact comparison's verdict (decline when
+    /// `reduced > flop_margin * full`). `Some` exactly when `fill_ratio` is.
+    pub route_flops: Option<(f64, f64)>,
+    /// The cheap statistic: the reduced route with its factorization priced
+    /// at the worst it could cost, over a fill-free floor under any
+    /// whole-system factorization. `Some` whenever the policy was
+    /// [`SchurPolicy::Auto`]. Below the policy's `obvious_flop_ratio` the
+    /// reduction is taken on this alone and `fill_ratio` stays `None` -- so
+    /// between the fields the plan says exactly which test decided.
     pub flop_ratio: Option<f64>,
     /// How the reduced system was ordered, and which rule chose it. `None`
     /// when there was no reduction. See [`ReducedOrdering`].
@@ -4143,6 +4200,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
             eliminated_params: 0,
             kept_params: n,
             fill_ratio: None,
+            route_flops: None,
             flop_ratio: None,
             ordering: Some(ReducedOrdering::NaturalBanded),
             kept_bandwidth: band,
@@ -4405,6 +4463,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 eliminated_params: 0,
                 kept_params: n,
                 fill_ratio: None,
+                route_flops: None,
                 flop_ratio: None,
                 ordering: None,
                 kept_bandwidth: 0,
@@ -4508,6 +4567,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 eliminated_params: 0,
                 kept_params: n,
                 fill_ratio: None,
+                route_flops: None,
                 flop_ratio: None,
                 ordering: None,
                 kept_bandwidth: 0,
@@ -4618,6 +4678,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         }
 
         let mut fill_ratio = None;
+        let mut route_flops = None;
         let band = if eliminated.is_empty() { 0 } else { schur.kept_bandwidth() };
         let flop_ratio = match self.policy {
             SchurPolicy::Auto { .. } if !eliminated.is_empty() => {
@@ -4627,7 +4688,15 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 // the reduced system is banded, as a trajectory's is -- the
                 // band, whichever is smaller.
                 let worst = (nk * nk * nk / 3.0).min(nk * b * b);
-                Some(worst / schur.reduce_flops().max(1.0))
+                // Floor under ANY whole-system factorization: fill only adds
+                // entries, so L holds at least the pattern's nonzeros, and
+                // sum-of-squared-column-counts is at least nnz^2/n
+                // (Cauchy-Schwarz). Reduced route at its worst over full
+                // route at its unreachable best: small means the reduction
+                // cannot lose, however the orderings come out.
+                let h_nnz = hsym.scalar_upper_nnz() as f64;
+                let floor = h_nnz.max(h_nnz * h_nnz / n as f64).max(1.0);
+                Some((schur.reduce_flops() + worst) / floor)
             }
             _ => None,
         };
@@ -4643,13 +4712,14 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         // Verbose accounting of the one-time work, phase by phase.
         let mut t_sym_reduced = 0.0;
         let mut t_amd_full = 0.0;
-        if let SchurPolicy::Auto { fill_ratio_max, obvious_flop_ratio } = self.policy
+        if let SchurPolicy::Auto { flop_margin, obvious_flop_ratio } = self.policy
             && !eliminated.is_empty()
-            // Cheap pre-filter: is the reduction obviously right? Worst case
-            // for it is a fully dense reduced system; if even that costs no
-            // more than a few times the reduction itself, the reduction has
-            // plainly made the problem smaller and the ordering comparison --
-            // whose fill-reducing pass over the whole matrix is the expensive
+            // Cheap pre-filter: is the reduction obviously right? When the
+            // whole reduced route, with its factorization priced at the
+            // WORST it could cost, stays within a few multiples of a
+            // fill-free floor no whole-system factorization can beat, the
+            // reduction cannot lose and the ordering comparison -- whose
+            // fill-reducing pass over the whole matrix is the expensive
             // part -- is not worth running.
             && flop_ratio.is_some_and(|r| r > obvious_flop_ratio)
         {
@@ -4678,9 +4748,14 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             if let (Some(sl), Some(hl)) = (s_llt, h_llt)
                 && hl.len_val() > 0
             {
-                let ratio = sl.len_val() as f64 / hl.len_val() as f64;
-                fill_ratio = Some(ratio);
-                if ratio > fill_ratio_max {
+                fill_ratio = Some(sl.len_val() as f64 / hl.len_val() as f64);
+                // The exact crossover: what one iteration costs down each
+                // route. Reduced pays the reduction GEMMs and the reduced
+                // factor; full pays its factor alone.
+                let reduced_route = schur.reduce_flops() + symbolic_factor_flops(&sl);
+                let full_route = symbolic_factor_flops(&hl);
+                route_flops = Some((reduced_route, full_route));
+                if reduced_route > flop_margin * full_route {
                     // Decline: factorize the full system instead. Keep the
                     // pattern and the symbolic factorization the gate just
                     // built -- the declined route needs exactly those, and
@@ -4707,31 +4782,31 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             )
         };
         if vb {
-            match (flop_ratio, fill_ratio) {
+            let bar = match self.policy {
+                SchurPolicy::Auto { obvious_flop_ratio, .. } => obvious_flop_ratio,
+                _ => 0.0,
+            };
+            match (flop_ratio, route_flops) {
                 (Some(flop), None) => info!(
-                    "schur: REDUCING -- clearly worth it. Factorizing the reduced \
-                     system, at the worst it could possibly cost, is still only \
-                     {:.1}x the reduction itself (bar: {:.0}x), so there was no \
-                     need to weigh it against factorizing the whole system",
-                    flop,
-                    match self.policy {
-                        SchurPolicy::Auto { obvious_flop_ratio, .. } => obvious_flop_ratio,
-                        _ => 0.0,
-                    },
+                    "schur: REDUCING -- clearly worth it. The reduced route, its \
+                     factorization priced at the worst it could possibly cost, \
+                     is still only {:.1}x a floor no whole-system factorization \
+                     can beat (bar: {:.0}x), so there was no need to weigh the \
+                     routes exactly",
+                    flop, bar,
                 ),
-                (Some(flop), Some(fill)) => info!(
-                    "schur: {} -- worst case for the reduction was {:.1}x its own \
-                     cost (over the {:.0}x bar), so both routes were analysed: the \
-                     reduced system's factor holds {:.2}x the values the whole \
-                     system's does under AMD -- {}",
+                (Some(flop), Some((red, full))) => info!(
+                    "schur: {} -- not obviously right ({:.1}x the whole system's \
+                     floor, bar {:.0}x), so both routes were priced exactly: \
+                     reduction + reduced factor {:.2e} flops/iter vs whole \
+                     factor {:.2e} -- {} (factor sizes {:.2}x)",
                     if reduced { "REDUCING" } else { "NOT reducing, factorizing the whole system" },
                     flop,
-                    match self.policy {
-                        SchurPolicy::Auto { obvious_flop_ratio, .. } => obvious_flop_ratio,
-                        _ => 0.0,
-                    },
-                    fill,
-                    if reduced { "the smaller factor wins" } else { "AMD's is smaller" },
+                    bar,
+                    red,
+                    full,
+                    if reduced { "the reduced route wins" } else { "the whole system is cheaper" },
+                    fill_ratio.unwrap_or(f64::NAN),
                 ),
                 _ => info!("schur: REDUCING -- forced, nothing analysed"),
             }
@@ -4744,6 +4819,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             // the reduction we did NOT take, so its size is not the answer.
             kept_params: if reduced { schur.s.nrows() } else { n },
             fill_ratio,
+            route_flops,
             flop_ratio,
             // Filled in below, once the reduced system's pattern exists: the
             // ordering is chosen from it, and rebuilding the pattern here just
@@ -4836,7 +4912,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                     "schur: reduced system {} params ({:.0}% dense, half-bandwidth {}), \
                      factoring with a narrow-band Cholesky ({} factor values)",
                     nk,
-                    100.0 * schur.s.val_count() as f64
+                    100.0 * schur.s.scalar_upper_nnz() as f64
                         / (nk as f64 * (nk as f64 + 1.0) / 2.0),
                     band,
                     bsym.factor_val_count(),
@@ -4876,7 +4952,8 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                     "schur: reduced system {} params ({:.0}% dense, half-bandwidth {}), \
                      L holds {} values",
                     nk,
-                    100.0 * self.s_row_idx.len() as f64 / (nk as f64 * (nk as f64 + 1.0) / 2.0),
+                    100.0 * schur.s.scalar_upper_nnz() as f64
+                        / (nk as f64 * (nk as f64 + 1.0) / 2.0),
                     band,
                     llt_symbolic.len_val(),
                 );

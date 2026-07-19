@@ -303,6 +303,22 @@ impl<I: Index> SymbolicSparseBlockColMat<I> {
         &self.col_part
     }
 
+    /// scalar nonzeros of the tile expansion's upper triangle: the stored
+    /// slots minus the strictly-lower half of each stored diagonal block.
+    /// Diagonal tiles are stored square, so [`Self::val_count`] (and the
+    /// [`Self::csc_pattern`] length) overcount the triangle by exactly
+    /// those halves.
+    pub fn scalar_upper_nnz(&self) -> usize {
+        let mut extra = 0usize;
+        for j in 0..self.nblk_cols() {
+            if self.col_range(j).any(|b| self.blk_row(b) == j) {
+                let w = self.col_span(j).len();
+                extra += w * (w - 1) / 2;
+            }
+        }
+        self.val_count() - extra
+    }
+
     /// scalar-CSC pattern of the tile expansion (the structure half of
     /// [`SparseBlockColMat::to_csc`]): `(col_ptr, row_idx)`, rows
     /// sorted within each column. blocks are sorted by block-row and

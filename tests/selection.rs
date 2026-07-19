@@ -237,6 +237,36 @@ fn globally_visible_landmarks_leave_a_dense_reduced_system() {
     );
 }
 
+/// The inverse shape: a HANDFUL of globally visible landmarks under a long
+/// odometry chain (the plane benchmark's shared-plane scene). Eliminating
+/// them couples every pose to every other -- a dense reduced system and an
+/// expensive reduction -- while the whole system is nearly banded and cheap.
+/// Auto must decline: taking this reduction cost 14x per iteration before
+/// the gate priced the whole-system route.
+#[test]
+fn a_small_global_family_is_declined() {
+    let plan = decide(
+        &Scene { poses: 120, landmarks: 6, span: 0, odometry: true },
+        SchurPolicy::default(),
+    );
+    assert!(
+        !plan.reduced,
+        "6 global landmarks leave a dense reduced system over an almost-banded \
+         whole system; the reduction must be declined: {:?}",
+        plan
+    );
+    assert_eq!(plan.eliminated_blocks, 0, "a decline marginalizes nothing");
+    assert!(
+        plan.flop_ratio.is_some(),
+        "the cheap filter ran and could not call it obvious"
+    );
+    assert!(
+        plan.route_flops.is_some_and(|(red, full)| red > full),
+        "the exact pricing is the evidence: {:?}",
+        plan.route_flops
+    );
+}
+
 // --- benchmarks/bal: cameras and points, no trajectory --------------------
 //
 // A separate model, because detection reads the model's TYPE coupling graph,

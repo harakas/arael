@@ -316,7 +316,7 @@ fn declined_schur_falls_back_to_full_system() {
     RootProblem::serialize(&mut wq, &mut params);
     let mut solver =
         SparseFaer::new().with_policy(SchurPolicy::Auto {
-            fill_ratio_max: 0.0,
+            flop_margin: 0.0,
             obvious_flop_ratio: 0.0, // never short-circuit: force the comparison
         });
     let rq = wq.solve_with(&mut solver, &cfg);
