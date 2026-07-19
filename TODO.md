@@ -300,3 +300,30 @@
   (cse::replace_many) and E::diff building raw with one identity-preserving
   simplify() at the end. pgo SE3 macro expansion ~37s -> ~7s, generated code
   byte-identical. Original entry: the SE3 model compiles 3x slower under `QuaternionParam` than under `EulerAngleParam` (pgo bench crate: 32 s -> 92 s incremental, measured 2026-07-13). The switch was made because the euler-angle delta undershoots on large initial rotation errors: on sphere2500 arael's first step cut the cost by 5% where factrs's exponential-map retraction cut it by 75%, costing arael a whole extra iteration (7 vs 6). `QuaternionParam` closed that gap exactly. The compile cost is the macro symbolically differentiating `QuaternionParam::rotation_matrix()` -- a much larger expression tree than the euler composition -- for every residual component against all 12 parameters of a pose-pose edge, twice (f64 and f32 models). Worth investigating whether the generated derivative can be shrunk: the rotation-vector retraction has a lot of shared structure (the delta is small by construction, and `ref_rotation` is a constant within an iteration), so common-subexpression extraction or treating `ref_rotation` as a factored-out constant may cut the tree substantially. 3x compile time for a 6-DOF pose model is steep enough that a user could reasonably choose the worse retraction to avoid it.
+
+- **benchmarks/plane + arael**: sensor-extrinsic calibration example, ported
+  faithfully from g2o's plane_slam demo (its actual subject: 3 orthogonal
+  always-visible planes, wiggle trajectory, sensor SE3 offset optimized from
+  a large initial error, offset marginal covariance as the output). Deferred
+  because the observation becomes a THREE-variable constraint (pose, plane,
+  offset) and component params are still guarded off in multi-block/triplet
+  span builders -- lift that guard first, then build the example (also a
+  natural showcase for assemble_covariance). The plane benchmark keeps a
+  degenerate all-visible env for the Schur-gate stress case meanwhile.
+
+- **arael: Schur Auto gate misfires when a small block family is observed
+  by everyone** (found by benchmarks/plane PLANE_SHARED=1: 6 planes seen by
+  all poses -> S 100% dense, arael 4.7 ms/iter vs 0.6 on the sparse scene).
+  The `obvious_flop_ratio` shortcut compares worst-case S factorization
+  against the REDUCTION's own cost only (simple_lm.rs ~4646); when the
+  reduction itself is expensive (dense couplings), the ratio comes out
+  under the 15x bar and the whole-system comparison is skipped -- the one
+  comparison that would have declined. Fix: (1) the shortcut must also
+  require S to be structurally sparse -- its density is known cheaply from
+  SchurSymbolic before any factorization; dense-ish S (say fill fraction
+  over ~0.5) always falls through to the real comparison. (2) Make the
+  comparison a flop crossover, not just factor-size fill_ratio: reduced
+  route = reduce_flops + factor_flops(S symbolic) vs full route =
+  factor_flops(H symbolic), factor flops as sum of squared column counts.
+  Regression tests: the PLANE_SHARED shape must DECLINE; slam/BAL
+  decisions must not change.

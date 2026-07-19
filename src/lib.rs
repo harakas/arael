@@ -1969,6 +1969,7 @@ pub use inventory;
 pub use arael_sym as sym;
 /// Model trait, parameter types, and Hessian blocks.
 pub mod model;
+pub mod unitvec;
 /// Levenberg-Marquardt solver with dense, band, and sparse backends.
 pub mod simple_lm;
 /// Parameter covariance recovery (`Sigma = 2 H^-1`) at the solution.

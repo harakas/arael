@@ -77,6 +77,14 @@ struct SymLayout {
     euler_angle_fields: Vec<String>,  // field names detected as SimpleEulerAngleParam
     universal_euler_angle_fields: Vec<String>, // field names detected as EulerAngleParam
     universal_rotvec_fields: Vec<String>, // field names detected as QuaternionParam (rotation-vector delta)
+    /// `#[arael(symbolic = <expr>)]` fields: (field name, expression source).
+    /// Body reads of the field expand to the expression, evaluated over the
+    /// struct's OWN fields (params as param symbols) -- a derivative-carrying
+    /// computed field. Declaration order; later entries may read earlier ones.
+    symbolic_fields: Vec<(String, String)>,
+    /// `#[arael(component)]`: this struct is a compound parameter whose
+    /// Params fold into the owning struct's span.
+    component: bool,
     /// Field name of `#[arael(constraint_index)]` u32 field, if present.
     constraint_index_field: Option<String>,
     /// Field name of the struct's `SelfBlock<Self>` — detected automatically
@@ -85,6 +93,28 @@ struct SymLayout {
     /// the single home for that entity's gradient + A-A Hessian diagonal,
     /// so cross constraints need to know the field name to write to it.
     self_block_field: Option<String>,
+}
+
+/// Total optimizable scalars of a registered type, following
+/// `#[arael(component)]` struct fields recursively.
+fn registry_param_total(type_name: &str) -> u32 {
+    let Some(l) = registry_lookup(type_name) else { return 0 };
+    let mut n = 0u32;
+    for (f, sft) in &l.fields {
+        if l.param_fields.contains(f) {
+            n += match sft {
+                SymFieldType::Scalar => 1,
+                SymFieldType::Vec2 => 2,
+                SymFieldType::Vec3 => 3,
+                _ => 0,
+            };
+        } else if let SymFieldType::Struct(inner) = sft
+            && registry_lookup(inner).map(|x| x.component).unwrap_or(false)
+        {
+            n += registry_param_total(inner);
+        }
+    }
+    n
 }
 
 /// Stashed constraint: struct name + raw attribute tokens + source-location
@@ -230,6 +260,48 @@ fn registry_store(name: &str, layout: SymLayout) -> Result<(), String> {
 fn registry_lookup(name: &str) -> Option<SymLayout> {
     let guard = SYM_REGISTRY.lock().unwrap_or_else(|p| p.into_inner());
     guard.as_ref().and_then(|reg| reg.layouts.get(name).cloned())
+        .or_else(|| builtin_component_layout(name))
+}
+
+/// Layouts of the in-tree components (defined in arael's own source, so
+/// they are never expanded in a downstream crate's macro session). The
+/// runtime halves live in the arael crate; these give the macro the same
+/// knowledge a `#[arael(component)]` expansion would have registered.
+fn builtin_component_layout(name: &str) -> Option<SymLayout> {
+    match name {
+        // S^2 direction: reference quaternion frame (x-axis = direction),
+        // 2-DOF body-frame delta about the frame's y/z axes. The embed is
+        // the first column of the small-rotation matrix of the normalized
+        // quaternion (1, (0, d.x, d.y)/2), rotated by the cached reference
+        // rotation -- exact on the sphere for every delta.
+        "UnitVecParam" => Some(SymLayout {
+            fields: vec![
+                ("rot".to_string(), SymFieldType::Mat3),
+                ("d".to_string(), SymFieldType::Vec2),
+                ("s2".to_string(), SymFieldType::Scalar),
+                ("local".to_string(), SymFieldType::Vec3),
+                ("unit".to_string(), SymFieldType::Vec3),
+            ],
+            collection_fields: Vec::new(),
+            param_fields: vec!["d".to_string()],
+            ref_paths: Vec::new(),
+            euler_angle_fields: Vec::new(),
+            universal_euler_angle_fields: Vec::new(),
+            universal_rotvec_fields: Vec::new(),
+            symbolic_fields: vec![
+                ("s2".to_string(),
+                 "1.0 + (d.x * d.x + d.y * d.y) * 0.25".to_string()),
+                ("local".to_string(),
+                 "vect3sym::from_components(1.0 - (d.x * d.x + d.y * d.y) / (2.0 * s2), \
+                  d.y / s2, 0.0 - d.x / s2)".to_string()),
+                ("unit".to_string(), "rot * local".to_string()),
+            ],
+            component: true,
+            constraint_index_field: None,
+            self_block_field: None,
+        }),
+        _ => None,
+    }
 }
 
 fn registry_stash_constraint(c: StashedConstraint) {
@@ -569,6 +641,7 @@ fn model_attribute(input: &mut syn::DeriveInput) -> syn::Result<TokenStream2> {
     let mut euler_angle_fields_reg: Vec<String> = Vec::new();
     let mut universal_euler_angle_fields_reg: Vec<String> = Vec::new();
     let mut universal_rotvec_fields_reg: Vec<String> = Vec::new();
+    let mut symbolic_fields_reg: Vec<(String, String)> = Vec::new();
     let mut constraint_index_field_reg: Option<String> = None;
     // Detect SelfBlock<Self> field — this struct's canonical grad+diag home.
     let mut self_block_field_reg: Option<String> = None;
@@ -597,6 +670,11 @@ fn model_attribute(input: &mut syn::DeriveInput) -> syn::Result<TokenStream2> {
                     sym_fields.push((field_name, SymFieldType::Skip));
                     continue;
                 }
+                AraelAttr::Symbolic(expr_tokens) => {
+                    // The field stays an ordinary data field (classified
+                    // below); only its body-read meaning changes.
+                    symbolic_fields_reg.push((field_name.clone(), expr_tokens.to_string()));
+                }
                 _ => {}
             }
         }
@@ -608,6 +686,16 @@ fn model_attribute(input: &mut syn::DeriveInput) -> syn::Result<TokenStream2> {
                 "universal_rotvec" => universal_rotvec_fields_reg.push(field_name.clone()),
                 _ => {}
             }
+        }
+        // Component-typed fields fold their params into this struct's count
+        // (the component is registered before its owner, top-down rule).
+        if !is_param_type(&field.ty)
+            && let syn::Type::Path(tp) = &field.ty
+            && let Some(seg) = tp.path.segments.last()
+            && matches!(seg.arguments, syn::PathArguments::None)
+            && registry_lookup(&seg.ident.to_string()).map(|l| l.component).unwrap_or(false)
+        {
+            param_count += registry_param_total(&seg.ident.to_string());
         }
         if is_param_type(&field.ty) {
             param_count += param_type_size(&field.ty);
@@ -652,7 +740,33 @@ fn model_attribute(input: &mut syn::DeriveInput) -> syn::Result<TokenStream2> {
     //   via direct path (no self-constraints, no cross/triplet usage).
     let has_fit = parse_fit_attr(&input.attrs)?.is_some();
     let has_skip_self_block = has_struct_attr_ident(&input.attrs, "skip_self_block");
-    if param_count > 0 && self_block_field_reg.is_none() && !has_fit && !has_skip_self_block {
+    // `#[arael(component)]`: a compound parameter. Its Params fold into the
+    // OWNING struct's span, so it has no SelfBlock of its own, carries no
+    // constraints, and holds no collections. Runtime lifecycle comes from
+    // the `arael::model::Component` trait the user implements.
+    let is_component = has_struct_attr_ident(&input.attrs, "component");
+    if is_component {
+        if self_block_field_reg.is_some() {
+            return Err(syn::Error::new_spanned(name,
+                format!("`{}` is a component -- its params fold into the owning \
+                         struct's block, so it must not declare a SelfBlock<Self>", name)));
+        }
+        if !collection_fields_reg.is_empty() {
+            return Err(syn::Error::new_spanned(name,
+                format!("`{}` is a component and may not hold collections", name)));
+        }
+        for attr in &input.attrs {
+            if attr.path().is_ident("arael")
+                && let Ok(content) = attr.parse_args::<TokenStream2>()
+                && content.clone().into_iter().next().map(|t| t.to_string() == "constraint").unwrap_or(false) {
+                return Err(syn::Error::new_spanned(name,
+                    format!("`{}` is a component and may not carry constraints -- \
+                             residuals belong to the entities that own it", name)));
+            }
+        }
+    }
+    if param_count > 0 && self_block_field_reg.is_none() && !has_fit && !has_skip_self_block
+        && !is_component {
         return Err(syn::Error::new_spanned(name,
             format!("`{}` has {} parameter{} but no `SelfBlock<Self>` field — \
                      add e.g. `hb: arael::model::SelfBlock<Self>` so its grad \
@@ -680,6 +794,8 @@ fn model_attribute(input: &mut syn::DeriveInput) -> syn::Result<TokenStream2> {
         euler_angle_fields: euler_angle_fields_reg.clone(),
         universal_euler_angle_fields: universal_euler_angle_fields_reg.clone(),
         universal_rotvec_fields: universal_rotvec_fields_reg.clone(),
+        symbolic_fields: symbolic_fields_reg,
+        component: is_component,
         constraint_index_field: constraint_index_field_reg,
         self_block_field: self_block_field_reg,
     }).map_err(|msg| syn::Error::new_spanned(name, msg))?;
@@ -748,6 +864,8 @@ fn emit_trivial_model_for_enum(input: &mut syn::DeriveInput) -> syn::Result<Toke
         euler_angle_fields: Vec::new(),
         universal_euler_angle_fields: Vec::new(),
         universal_rotvec_fields: Vec::new(),
+        symbolic_fields: Vec::new(),
+        component: false,
         constraint_index_field: None,
         self_block_field: None,
     }).map_err(|msg| syn::Error::new_spanned(name, msg))?;
@@ -1000,6 +1118,15 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
         _ => return Err(syn::Error::new_spanned(input, "Model derive requires a struct")),
     };
 
+    // Component role (registered by model_attribute before this runs):
+    // wraps this struct's Model impl in the Component lifecycle calls.
+    let is_component_struct = registry_lookup(&name.to_string())
+        .map(|l| l.component).unwrap_or(false);
+    // The per-Param slice writeback the component's advance needs after
+    // Component::update reset the values.
+    let mut comp_writeback32: Vec<TokenStream2> = Vec::new();
+    let mut comp_writeback64: Vec<TokenStream2> = Vec::new();
+
     // Pass 1: identify Param<T> fields
     let mut param_field_names: HashSet<String> = HashSet::new();
     for field in fields {
@@ -1077,7 +1204,10 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                 let substituted = substitute_param_idents(expr_tokens, &param_field_names);
                 compute_stmts.push(quote! { self.#ident = #substituted; });
             }
-            Some(AraelAttr::RefResolve(_)) | Some(AraelAttr::Cross(_)) | None => {
+            // Symbolic fields stay ordinary data fields at runtime; only
+            // their constraint-body reads differ.
+            Some(AraelAttr::RefResolve(_)) | Some(AraelAttr::Cross(_))
+            | Some(AraelAttr::Symbolic(_)) | None => {
                 // HessianBlock fields: skip serialize, handle in zero/accumulate
                 if is_hessian_block_type(&field.ty) {
                     if let syn::Type::Path(tp) = &field.ty
@@ -1190,6 +1320,38 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                             &format!("{}.{}", base, #field_name), out
                         );
                     });
+                    if is_component_struct && is_euler_angle_param_type(ty).is_none() {
+                        comp_writeback32.push(quote! {
+                            if self.#ident.index() != u32::MAX {
+                                let __i = self.#ident.index() as usize;
+                                let __n = <#ty as arael::model::Model>::PARAM_COUNT as usize;
+                                arael::model::ParamType::write_to32(&self.#ident.value, &mut params[__i..__i + __n]);
+                            }
+                        });
+                        comp_writeback64.push(quote! {
+                            if self.#ident.index() != u32::MAX {
+                                let __i = self.#ident.index() as usize;
+                                let __n = <#ty as arael::model::Model>::PARAM_COUNT as usize;
+                                arael::model::ParamType::write_to64(&self.#ident.value, &mut params[__i..__i + __n]);
+                            }
+                        });
+                    }
+                } else if let syn::Type::Path(tp) = ty
+                    && let Some(seg) = tp.path.segments.last()
+                    && registry_lookup(&seg.ident.to_string()).map(|l| l.component).unwrap_or(false)
+                {
+                    // A component-typed field: its params fold into this
+                    // struct's span (serialize recursion below carries them;
+                    // the count and symbol walk must too).
+                    param_count_terms.push(quote! {
+                        <#ty as arael::model::Model>::PARAM_COUNT
+                    });
+                    let field_name = ident.to_string();
+                    param_symbols_stmts.push(quote! {
+                        <#ty as arael::model::Model>::param_symbols(
+                            &format!("{}.{}", base, #field_name), out
+                        );
+                    });
                 }
 
                 // All param types (Param, SimpleEulerAngleParam, EulerAngleParam)
@@ -1292,13 +1454,40 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
         }
     }
 
+    // Component lifecycle wrapping: seed the chart before the params are
+    // read, write the user-facing value back after deserialize, and at the
+    // advance point pull the accepted step in, re-center, and push the reset
+    // values back out to the slice.
+    let comp_start = if is_component_struct {
+        quote! { arael::model::Component::start(self); }
+    } else { quote! {} };
+    let comp_finish = if is_component_struct {
+        quote! { arael::model::Component::finish(self); }
+    } else { quote! {} };
+    let comp_advance32 = if is_component_struct {
+        quote! {
+            arael::model::Model::deserialize_params32(self, params);
+            arael::model::Component::update(self);
+            #(#comp_writeback32)*
+        }
+    } else { quote! {} };
+    let comp_advance64 = if is_component_struct {
+        quote! {
+            arael::model::Model::deserialize_params64(self, params);
+            arael::model::Component::update(self);
+            #(#comp_writeback64)*
+        }
+    } else { quote! {} };
+
     let model_impl = quote! {
         impl #impl_generics arael::model::Model for #name #ty_generics #where_clause {
             fn serialize_params32(&mut self, data: &mut std::vec::Vec<f32>) {
+                #comp_start
                 #(#serialize_stmts)*
             }
             fn deserialize_params32(&mut self, data: &[f32]) {
                 #(#deserialize_stmts)*
+                #comp_finish
             }
             fn update32(&mut self, data: &[f32]) {
                 #(#update_phase1)*
@@ -1311,10 +1500,12 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                 #(#euler_compute_stmts)*
             }
             fn serialize_params64(&mut self, data: &mut std::vec::Vec<f64>) {
+                #comp_start
                 #(#serialize64_stmts)*
             }
             fn deserialize_params64(&mut self, data: &[f64]) {
                 #(#deserialize64_stmts)*
+                #comp_finish
             }
             fn update64(&mut self, data: &[f64]) {
                 #(#update64_phase1)*
@@ -1323,9 +1514,11 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
             }
             fn advance_params32(&mut self, params: &mut [f32]) {
                 #(#advance32_stmts)*
+                #comp_advance32
             }
             fn advance_params64(&mut self, params: &mut [f64]) {
                 #(#advance64_stmts)*
+                #comp_advance64
             }
             const PARAM_COUNT: u32 = 0 #(+ #param_count_terms)*;
             fn serialize_size(&self) -> u32 {
@@ -1912,6 +2105,9 @@ fn generate_sym_impl(
 pub(crate) enum AraelAttr {
     Skip,
     Compute(TokenStream2),
+    /// `#[arael(symbolic = <expr>)]`: constraint-body reads of this data
+    /// field expand to the expression (a derivative-carrying computed field).
+    Symbolic(TokenStream2),
     RefResolve(String),  // resolution path, e.g. "root.poses"
     ConstraintIndex,     // marks a u32 field as constraint index
     /// Ref-pair binding for a CrossBlock field on a constraint struct:
@@ -1971,6 +2167,24 @@ pub(crate) fn parse_arael_attr(attrs: &[syn::Attribute]) -> syn::Result<Option<A
                         "expected `compute = <expression>`",
                     ));
                 }
+                if kw == "symbolic" {
+                    if tokens.len() >= 3
+                        && let proc_macro2::TokenTree::Punct(ref p) = tokens[1]
+                            && p.as_char() == '=' {
+                                let expr_tokens: TokenStream2 =
+                                    tokens[2..].iter().cloned().collect();
+                                // Validate now so a malformed expression errors
+                                // at the field, not deep in body resolution.
+                                syn::parse2::<syn::Expr>(expr_tokens.clone())
+                                    .map_err(|e| syn::Error::new_spanned(&tokens[0],
+                                        format!("symbolic = expression does not parse: {}", e)))?;
+                                return Ok(Some(AraelAttr::Symbolic(expr_tokens)));
+                            }
+                    return Err(syn::Error::new_spanned(
+                        &tokens[0],
+                        "expected `symbolic = <expression>`",
+                    ));
+                }
                 // #[arael(cross = (refA, refB))]
                 if kw == "cross" {
                     if tokens.len() >= 3
@@ -2002,7 +2216,7 @@ pub(crate) fn parse_arael_attr(attrs: &[syn::Attribute]) -> syn::Result<Option<A
 
             return Err(syn::Error::new_spanned(
                 attr,
-                "unknown arael attribute, expected `skip`, `compute = <expr>`, `ref = <path>`, `constraint_index`, or `cross = (refA, refB)`",
+                "unknown arael attribute, expected `skip`, `compute = <expr>`, `symbolic = <expr>`, `ref = <path>`, `constraint_index`, or `cross = (refA, refB)`",
             ));
         }
     }

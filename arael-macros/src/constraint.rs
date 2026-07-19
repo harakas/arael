@@ -1422,7 +1422,81 @@ fn replace_atan_fast(exprs: &mut Vec<arael_sym::E>) {
 /// Recursively register sym bindings for a variable and all its nested struct fields.
 /// `key_prefix` is used for binding lookup (e.g. "pose.info.gps")
 /// `sym_prefix` is used for generated code (e.g. "pose.info.gps.as_ref().unwrap()")
-fn register_bindings_recursive(ctx: &mut ConstraintCtx, key_prefix: &str, sym_prefix: &str, type_name: &str) {
+/// One optimizable run of a type's flat layout, in serialize (field
+/// declaration) order: a direct Param field, or -- through a
+/// `#[arael(component)]` struct field -- a nested one. `path` is dotted
+/// relative to the type ("w", "dir.d").
+#[derive(Clone)]
+struct ParamSlot {
+    path: String,
+    sft: SymFieldType,
+    /// EulerAngleParam / QuaternionParam: symbol is `.delta`, not `.work()`.
+    universal_delta: bool,
+}
+
+fn param_slot_size(sft: &SymFieldType) -> usize {
+    match sft {
+        SymFieldType::Scalar => 1,
+        SymFieldType::Vec2 => 2,
+        SymFieldType::Vec3 => 3,
+        _ => 0,
+    }
+}
+
+fn collect_param_slots(type_name: &str, prefix: &str, out: &mut Vec<ParamSlot>) {
+    let Some(layout) = registry_lookup(type_name) else { return };
+    for (fname, sft) in &layout.fields {
+        let path = if prefix.is_empty() { fname.clone() } else { format!("{}.{}", prefix, fname) };
+        if layout.param_fields.contains(fname) {
+            if param_slot_size(sft) > 0 {
+                out.push(ParamSlot {
+                    path,
+                    sft: sft.clone(),
+                    universal_delta: layout.universal_euler_angle_fields.contains(fname)
+                        || layout.universal_rotvec_fields.contains(fname),
+                });
+            }
+        } else if let SymFieldType::Struct(inner) = sft
+            && registry_lookup(inner).map(|l| l.component).unwrap_or(false)
+        {
+            collect_param_slots(inner, &path, out);
+        }
+    }
+}
+
+fn param_slots(type_name: &str) -> Vec<ParamSlot> {
+    let mut v = Vec::new();
+    collect_param_slots(type_name, "", &mut v);
+    v
+}
+
+fn param_total(type_name: &str) -> usize {
+    param_slots(type_name).iter().map(|s| param_slot_size(&s.sft)).sum()
+}
+
+/// Whether any of the type's params live inside a component (a dotted slot
+/// path). The sites that still iterate `param_fields` directly reject such
+/// types until they are converted to the slot walk.
+fn has_component_params(type_name: &str) -> bool {
+    param_slots(type_name).iter().any(|s| s.path.contains('.'))
+}
+
+/// `base.dir.d` field-access tokens for a dotted slot path.
+fn slot_access(base: TokenStream2, path: &str) -> TokenStream2 {
+    let mut t = base;
+    for seg in path.split('.') {
+        let id = syn::Ident::new(seg, proc_macro2::Span::call_site());
+        t = quote! { #t.#id };
+    }
+    t
+}
+
+fn register_bindings_recursive(
+    ctx: &mut ConstraintCtx,
+    key_prefix: &str,
+    sym_prefix: &str,
+    type_name: &str,
+) -> syn::Result<()> {
     if let Some(layout) = registry_lookup(type_name) {
         for (field_name, sft) in &layout.fields {
             if matches!(sft, SymFieldType::Skip) { continue; }
@@ -1437,12 +1511,12 @@ fn register_bindings_recursive(ctx: &mut ConstraintCtx, key_prefix: &str, sym_pr
                 SymFieldType::Struct(inner_type) => {
                     let nested_key = format!("{}.{}", key_prefix, field_name);
                     let nested_sym = format!("{}.{}", sym_prefix, field_name);
-                    register_bindings_recursive(ctx, &nested_key, &nested_sym, inner_type);
+                    register_bindings_recursive(ctx, &nested_key, &nested_sym, inner_type)?;
                 }
                 SymFieldType::OptionalStruct(inner_type) => {
                     let nested_key = format!("{}.{}", key_prefix, field_name);
                     let nested_sym = format!("{}.{}.as_ref().unwrap()", sym_prefix, field_name);
-                    register_bindings_recursive(ctx, &nested_key, &nested_sym, inner_type);
+                    register_bindings_recursive(ctx, &nested_key, &nested_sym, inner_type)?;
                 }
                 _ => {
                     let is_universal_ea = is_param
@@ -1489,7 +1563,51 @@ fn register_bindings_recursive(ctx: &mut ConstraintCtx, key_prefix: &str, sym_pr
                 }
             }
         }
+
+        // Second pass: `#[arael(symbolic = <expr>)]` fields. Each expression
+        // is evaluated over the struct's OWN fields (bare names; params read
+        // as param symbols, data as constants, `<param>_value` as constants),
+        // and the result REPLACES the field's plain-constant binding -- body
+        // reads of the field then carry the expression's derivatives.
+        // Declaration order: a later symbolic field sees the earlier ones.
+        if !layout.symbolic_fields.is_empty() {
+            let mut scratch = ConstraintCtx::new();
+            for (field_name, sft) in &layout.fields {
+                if matches!(sft,
+                    SymFieldType::Skip
+                    | SymFieldType::Struct(_)
+                    | SymFieldType::OptionalStruct(_)) { continue; }
+                let is_param = layout.param_fields.contains(field_name);
+                let sym_base = if is_param {
+                    format!("{}.{}.work()", sym_prefix, field_name)
+                } else {
+                    format!("{}.{}", sym_prefix, field_name)
+                };
+                scratch.bindings.insert(field_name.clone(),
+                    ConstraintCtx::make_sym_val(&sym_base, sft));
+                if is_param {
+                    scratch.bindings.insert(format!("{}_value", field_name),
+                        ConstraintCtx::make_sym_val(
+                            &format!("{}.{}.value", sym_prefix, field_name), sft));
+                }
+            }
+            for (fname, expr_str) in &layout.symbolic_fields {
+                let parsed: Expr = syn::parse_str(expr_str).map_err(|e| {
+                    syn::Error::new(proc_macro2::Span::call_site(),
+                        format!("symbolic = expression on `{}.{}` does not parse: {}",
+                            type_name, fname, e))
+                })?;
+                let val = eval_expr(&parsed, &mut scratch).map_err(|e| {
+                    syn::Error::new(e.span(),
+                        format!("symbolic = expression on `{}.{}`: {}",
+                            type_name, fname, e))
+                })?;
+                scratch.bindings.insert(fname.clone(), val.clone());
+                ctx.bindings.insert(format!("{}.{}", key_prefix, fname), val);
+            }
+        }
     }
+    Ok(())
 }
 
 /// Walk a dotted field path through the registered layouts. Paths through
@@ -1881,25 +1999,20 @@ pub fn generate_root_methods(
         let root_layout = registry_lookup(&root_name.to_string());
         let root_hb_field = root_layout.as_ref().and_then(|l| l.self_block_field.clone());
         let root_param_fields = root_layout.as_ref().map(|l| l.param_fields.clone()).unwrap_or_default();
-        if let Some(hb) = root_hb_field.as_ref().filter(|_| !root_param_fields.is_empty()) {
+        let _ = &root_param_fields;
+        if let Some(hb) = root_hb_field.as_ref().filter(|_| param_total(&root_name.to_string()) > 0) {
             let hb_ident = syn::Ident::new(hb, proc_macro2::Span::call_site());
             let layout = root_layout.as_ref().unwrap();
             let mut count: usize = 0;
             let mut idx_stmts: Vec<TokenStream2> = Vec::new();
-            for pf in &root_param_fields {
-                let pf_ident = syn::Ident::new(pf, proc_macro2::Span::call_site());
-                let size = layout.fields.iter()
-                    .find(|(n, _)| n == pf)
-                    .map(|(_, sft)| match sft {
-                        SymFieldType::Scalar => 1usize,
-                        SymFieldType::Vec2 => 2,
-                        SymFieldType::Vec3 => 3,
-                        _ => 0,
-                    }).unwrap_or(0);
+            let _ = layout;
+            for slot in param_slots(&root_name.to_string()) {
+                let size = param_slot_size(&slot.sft);
                 let offset = count;
                 let end = offset + size;
+                let access = slot_access(quote! { self }, &slot.path);
                 idx_stmts.push(quote! {
-                    self.#pf_ident.write_indices(&mut __root_self_idx[#offset..#end]);
+                    #access.write_indices(&mut __root_self_idx[#offset..#end]);
                 });
                 count += size;
             }
@@ -2374,6 +2487,50 @@ pub fn generate_root_methods(
         } else { None };
         let is_root_triplet_self = root_triplet_field.is_some();
 
+        // Component params are folded on the SelfBlock/CrossBlock paths;
+        // the remaining span builders (triplet/multi-cross entity spans,
+        // root-coupled spans, the remote target) still walk direct
+        // param_fields and would silently mis-span a component-bearing
+        // type. Reject those combinations until they are converted.
+        {
+            let mut check: Vec<(String, &str)> = Vec::new();
+            if is_triplet {
+                check.push((sc.struct_name.clone(), "TripletBlock constraints"));
+                for f in fields.named.iter() {
+                    if let Some((_, inner)) = extract_wrapper_inner(&f.ty, "Ref") {
+                        check.push((inner.to_string(), "TripletBlock constraints"));
+                    }
+                }
+            }
+            if constraint.block_fields.len() > 1 && !is_self_block {
+                check.push((sc.struct_name.clone(), "multi-block constraints"));
+                for f in fields.named.iter() {
+                    if let Some((_, inner)) = extract_wrapper_inner(&f.ty, "Ref") {
+                        check.push((inner.to_string(), "multi-block constraints"));
+                    }
+                }
+                check.push((root_type_str.clone(), "multi-block constraints"));
+            }
+            if is_root_triplet_self {
+                check.push((sc.struct_name.clone(), "[hb, root.<triplet>] constraints"));
+                check.push((root_type_str.clone(), "[hb, root.<triplet>] constraints"));
+            }
+            if root_self_primary.is_some() {
+                check.push((root_type_str.clone(), "root.<selfblock> constraints"));
+            }
+            if let Some((_, _, ref target_type)) = remote_block_info {
+                check.push((target_type.clone(), "remote-block constraints"));
+            }
+            for (t, form) in check {
+                if has_component_params(&t) {
+                    return Err(syn::Error::new(proc_macro2::Span::call_site(),
+                        format!("{}:{}: `{}` has params inside a #[arael(component)] \
+                                 field -- components are not yet supported in {}",
+                            sc.attr_file, sc.attr_line, t, form)));
+                }
+            }
+        }
+
         // For SelfBlock: the struct itself is in a root collection
         // For CrossBlock: find parent collection + frines field
         let self_var_name = if is_self_block {
@@ -2776,16 +2933,8 @@ pub fn generate_root_methods(
         // use them. `param_symbols` is ordered A-first then B for cross
         // blocks; the first a_param_count derivatives correspond to A's
         // params, the next b_param_count to B's.
-        let a_param_count = registry_lookup(&a_type).map(|l| l.param_fields.iter().map(|pf| {
-            l.fields.iter().find(|(n, _)| n == pf).map(|(_, sft)| match sft {
-                SymFieldType::Scalar => 1usize, SymFieldType::Vec2 => 2, SymFieldType::Vec3 => 3, _ => 0,
-            }).unwrap_or(0)
-        }).sum::<usize>()).unwrap_or(0);
-        let b_param_count = b_type.as_ref().and_then(|b| registry_lookup(b)).map(|l| l.param_fields.iter().map(|pf| {
-            l.fields.iter().find(|(n, _)| n == pf).map(|(_, sft)| match sft {
-                SymFieldType::Scalar => 1usize, SymFieldType::Vec2 => 2, SymFieldType::Vec3 => 3, _ => 0,
-            }).unwrap_or(0)
-        }).sum::<usize>()).unwrap_or(0);
+        let a_param_count = param_total(&a_type);
+        let b_param_count = b_type.as_ref().map(|b| param_total(b)).unwrap_or(0);
 
         // Resolve the A- and B-var idents for CrossBlock's 3-call emission.
         let a_var_ident_for_block: Option<syn::Ident> = if is_self_block {
@@ -3362,43 +3511,37 @@ pub fn generate_root_methods(
             }
         }
 
-        // Build index setup code — separate A (parent) and B (ref) indices
+        // Build index setup code — separate A (parent) and B (ref) indices.
+        // The slot walk folds `#[arael(component)]` params in serialize order.
         let mut a_idx_stmts = Vec::new();
         let mut b_idx_stmts = Vec::new();
-        if let Some(a_layout) = registry_lookup(&a_type) {
+        {
+            let a_item = if is_self_block {
+                syn::Ident::new("__item", proc_macro2::Span::call_site())
+            } else if is_root_level_cross {
+                // For root-level cross, A-type ref is the first Ref<A> field on the constraint struct
+                let struct_layout = registry_lookup(&sc.struct_name);
+                let a_ref_field = struct_layout.as_ref().and_then(|l| {
+                    l.ref_paths.iter().find(|(field_name, _)| {
+                        fields.named.iter().any(|f| {
+                            f.ident.as_ref().map(|i| i.to_string()) == Some(field_name.clone())
+                                && extract_wrapper_inner(&f.ty, "Ref")
+                                    .map(|(_, id)| *id == a_type)
+                                    .unwrap_or(false)
+                        })
+                    }).map(|(name, _)| name.clone())
+                }).unwrap_or_else(|| a_type.to_lowercase());
+                syn::Ident::new(&a_ref_field, proc_macro2::Span::call_site())
+            } else {
+                syn::Ident::new("__item", proc_macro2::Span::call_site())
+            };
             let mut offset = 0usize;
-            for pf in &a_layout.param_fields {
-                let pf_ident = syn::Ident::new(pf, proc_macro2::Span::call_site());
-                let size = a_layout.fields.iter()
-                    .find(|(n, _)| n == pf)
-                    .map(|(_, sft)| match sft {
-                        SymFieldType::Scalar => 1usize,
-                        SymFieldType::Vec2 => 2,
-                        SymFieldType::Vec3 => 3,
-                        _ => 0,
-                    }).unwrap_or(0);
+            for slot in param_slots(&a_type) {
+                let size = param_slot_size(&slot.sft);
                 let end = offset + size;
-                let a_item = if is_self_block {
-                    syn::Ident::new("__item", proc_macro2::Span::call_site())
-                } else if is_root_level_cross {
-                    // For root-level cross, A-type ref is the first Ref<A> field on the constraint struct
-                    let struct_layout = registry_lookup(&sc.struct_name);
-                    let a_ref_field = struct_layout.as_ref().and_then(|l| {
-                        l.ref_paths.iter().find(|(field_name, _)| {
-                            fields.named.iter().any(|f| {
-                                f.ident.as_ref().map(|i| i.to_string()) == Some(field_name.clone())
-                                    && extract_wrapper_inner(&f.ty, "Ref")
-                                        .map(|(_, id)| *id == a_type)
-                                        .unwrap_or(false)
-                            })
-                        }).map(|(name, _)| name.clone())
-                    }).unwrap_or_else(|| a_type.to_lowercase());
-                    syn::Ident::new(&a_ref_field, proc_macro2::Span::call_site())
-                } else {
-                    syn::Ident::new("__item", proc_macro2::Span::call_site())
-                };
+                let access = slot_access(quote! { #a_item }, &slot.path);
                 a_idx_stmts.push(quote! {
-                    #a_item.#pf_ident.write_indices(&mut __a_idx[#offset..#end]);
+                    #access.write_indices(&mut __a_idx[#offset..#end]);
                 });
                 offset = end;
             }
@@ -3426,36 +3569,22 @@ pub fn generate_root_methods(
                 });
                 if let Some((b_field_name, _)) = b_ref_field {
                     let b_var_ident = syn::Ident::new(b_field_name, proc_macro2::Span::call_site());
+                    let _ = &b_layout;
                     let mut offset = 0usize;
-                    for pf in &b_layout.param_fields {
-                        let pf_ident = syn::Ident::new(pf, proc_macro2::Span::call_site());
-                        let size = b_layout.fields.iter()
-                            .find(|(n, _)| n == pf)
-                            .map(|(_, sft)| match sft {
-                                SymFieldType::Scalar => 1usize,
-                                SymFieldType::Vec2 => 2,
-                                SymFieldType::Vec3 => 3,
-                                _ => 0,
-                            }).unwrap_or(0);
+                    for slot in param_slots(b_type_name) {
+                        let size = param_slot_size(&slot.sft);
                         let end = offset + size;
+                        let access = slot_access(quote! { #b_var_ident }, &slot.path);
                         b_idx_stmts.push(quote! {
-                            #b_var_ident.#pf_ident.write_indices(&mut __b_idx[#offset..#end]);
+                            #access.write_indices(&mut __b_idx[#offset..#end]);
                         });
                         offset = end;
                     }
                 }
             }
 
-        let a_param_count = registry_lookup(&a_type).map(|l| l.param_fields.iter().map(|pf| {
-            l.fields.iter().find(|(n, _)| n == pf).map(|(_, sft)| match sft {
-                SymFieldType::Scalar => 1usize, SymFieldType::Vec2 => 2, SymFieldType::Vec3 => 3, _ => 0,
-            }).unwrap_or(0)
-        }).sum::<usize>()).unwrap_or(0);
-        let b_param_count = b_type.as_ref().and_then(|b| registry_lookup(b)).map(|l| l.param_fields.iter().map(|pf| {
-            l.fields.iter().find(|(n, _)| n == pf).map(|(_, sft)| match sft {
-                SymFieldType::Scalar => 1usize, SymFieldType::Vec2 => 2, SymFieldType::Vec3 => 3, _ => 0,
-            }).unwrap_or(0)
-        }).sum::<usize>()).unwrap_or(0);
+        let a_param_count = param_total(&a_type);
+        let b_param_count = b_type.as_ref().map(|b| param_total(b)).unwrap_or(0);
 
         // TripletBlock: build flat index array from all ref fields.
         // Entity span layout is computed above for gh_stmts; here we emit the
@@ -4288,20 +4417,13 @@ pub fn generate_root_methods(
             let hb_ident = syn::Ident::new(&hb_field, proc_macro2::Span::call_site());
             let mut a_idx_stmts: Vec<TokenStream2> = Vec::new();
             let mut offset = 0usize;
-            for pf in &layout.param_fields {
-                let pf_ident = syn::Ident::new(pf, proc_macro2::Span::call_site());
-                let size = layout.fields.iter()
-                    .find(|(n, _)| n == pf)
-                    .map(|(_, sft)| match sft {
-                        SymFieldType::Scalar => 1usize,
-                        SymFieldType::Vec2 => 2,
-                        SymFieldType::Vec3 => 3,
-                        _ => 0,
-                    }).unwrap_or(0);
+            for slot in param_slots(&type_name) {
+                let size = param_slot_size(&slot.sft);
                 if size == 0 { continue; }
                 let end = offset + size;
+                let access = slot_access(quote! { __item }, &slot.path);
                 a_idx_stmts.push(quote! {
-                    __item.#pf_ident.write_indices(&mut __a_idx[#offset..#end]);
+                    #access.write_indices(&mut __a_idx[#offset..#end]);
                 });
                 offset = end;
             }
@@ -4340,20 +4462,13 @@ pub fn generate_root_methods(
             let hb_ident = syn::Ident::new(&hb_field, proc_macro2::Span::call_site());
             let mut idx_stmts: Vec<TokenStream2> = Vec::new();
             let mut offset = 0usize;
-            for pf in &layout.param_fields {
-                let pf_ident = syn::Ident::new(pf, proc_macro2::Span::call_site());
-                let size = layout.fields.iter()
-                    .find(|(n, _)| n == pf)
-                    .map(|(_, sft)| match sft {
-                        SymFieldType::Scalar => 1usize,
-                        SymFieldType::Vec2 => 2,
-                        SymFieldType::Vec3 => 3,
-                        _ => 0,
-                    }).unwrap_or(0);
+            for slot in param_slots(&type_name) {
+                let size = param_slot_size(&slot.sft);
                 if size == 0 { continue; }
                 let end = offset + size;
+                let access = slot_access(quote! { self.#field_ident }, &slot.path);
                 idx_stmts.push(quote! {
-                    self.#field_ident.#pf_ident.write_indices(&mut __d_idx[#offset..#end]);
+                    #access.write_indices(&mut __d_idx[#offset..#end]);
                 });
                 offset = end;
             }
@@ -4391,19 +4506,13 @@ pub fn generate_root_methods(
             let hb_ident = syn::Ident::new(&hb_field, proc_macro2::Span::call_site());
             let mut a_idx_stmts: Vec<TokenStream2> = Vec::new();
             let mut offset = 0usize;
-            for pf in &layout.param_fields {
-                let pf_ident = syn::Ident::new(pf, proc_macro2::Span::call_site());
-                let size = layout.fields.iter().find(|(n, _)| n == pf)
-                    .map(|(_, sft)| match sft {
-                        SymFieldType::Scalar => 1usize,
-                        SymFieldType::Vec2 => 2,
-                        SymFieldType::Vec3 => 3,
-                        _ => 0,
-                    }).unwrap_or(0);
+            for slot in param_slots(type_name) {
+                let size = param_slot_size(&slot.sft);
                 if size == 0 { continue; }
                 let end = offset + size;
+                let access = slot_access(quote! { __item }, &slot.path);
                 a_idx_stmts.push(quote! {
-                    __item.#pf_ident.write_indices(&mut __a_idx[#offset..#end]);
+                    #access.write_indices(&mut __a_idx[#offset..#end]);
                 });
                 offset = end;
             }
@@ -5072,7 +5181,7 @@ fn interpret_constraint_body(
                         var_name, prev, type_name)));
             }
         ctx.entity_vars.insert(var_name.clone(), type_name.clone());
-        register_bindings_recursive(&mut ctx, var_name, var_name, type_name);
+        register_bindings_recursive(&mut ctx, var_name, var_name, type_name)?;
     }
 
     // `root` aliases the root variable in constraint bodies, matching the
@@ -5085,7 +5194,7 @@ fn interpret_constraint_body(
     {
         let root_var = root_type_name.to_lowercase();
         ctx.entity_vars.insert("root".to_string(), root_type_name.to_string());
-        register_bindings_recursive(&mut ctx, "root", &root_var, root_type_name);
+        register_bindings_recursive(&mut ctx, "root", &root_var, root_type_name)?;
     }
 
     // Register the constraint struct's own non-Ref fields
@@ -5096,7 +5205,7 @@ fn interpret_constraint_body(
         // Derive self-reference name from struct: PosePair -> "posepair"
         let self_var = struct_name.to_string().to_lowercase();
         ctx.entity_vars.entry(self_var.clone()).or_insert_with(|| struct_name.to_string());
-        register_bindings_recursive(&mut ctx, &self_var, "__frine", &struct_name.to_string());
+        register_bindings_recursive(&mut ctx, &self_var, "__frine", &struct_name.to_string())?;
     }
 
     // Collect param symbols
@@ -5153,56 +5262,43 @@ fn interpret_constraint_body(
                 .map(|(vn, _)| vn.clone()).unwrap_or(parent_name.clone())
         };
 
-        if let Some(a_layout) = registry_lookup(&a_type) {
-            for pf in &a_layout.param_fields {
-                let sym_base = if a_layout.universal_euler_angle_fields.contains(pf)
-                    || a_layout.universal_rotvec_fields.contains(pf) {
-                    format!("{}.{}.delta", a_var_name, pf)
+        for slot in param_slots(&a_type) {
+            let sym_base = if slot.universal_delta {
+                format!("{}.{}.delta", a_var_name, slot.path)
+            } else {
+                format!("{}.{}.work()", a_var_name, slot.path)
+            };
+            add_param_symbols(&sym_base, &slot.sft, &mut param_symbols);
+        }
+        if let Some(ref b_type_name) = b_type {
+            let b_var = var_infos.iter().find(|(vn, tn)| {
+                tn == b_type_name && *vn != a_var_name
+            }).or_else(|| var_infos.iter().find(|(_, tn)| tn == b_type_name))
+                .map(|(vn, _)| vn.clone()).unwrap_or_else(|| b_type_name.to_lowercase());
+            for slot in param_slots(b_type_name) {
+                let sym_base = if slot.universal_delta {
+                    format!("{}.{}.delta", b_var, slot.path)
                 } else {
-                    format!("{}.{}.work()", a_var_name, pf)
+                    format!("{}.{}.work()", b_var, slot.path)
                 };
-                add_param_symbols(&sym_base,
-                    a_layout.fields.iter().find(|(n, _)| n == pf).map(|(_, t)| t).unwrap(),
-                    &mut param_symbols);
+                add_param_symbols(&sym_base, &slot.sft, &mut param_symbols);
             }
         }
-        if let Some(ref b_type_name) = b_type
-            && let Some(b_layout) = registry_lookup(b_type_name) {
-                let b_var = var_infos.iter().find(|(vn, tn)| {
-                    tn == b_type_name && *vn != a_var_name
-                }).or_else(|| var_infos.iter().find(|(_, tn)| tn == b_type_name))
-                    .map(|(vn, _)| vn.clone()).unwrap_or_else(|| b_type_name.to_lowercase());
-                for pf in &b_layout.param_fields {
-                    let sym_base = if b_layout.universal_euler_angle_fields.contains(pf)
-                        || b_layout.universal_rotvec_fields.contains(pf) {
-                        format!("{}.{}.delta", b_var, pf)
-                    } else {
-                        format!("{}.{}.work()", b_var, pf)
-                    };
-                    add_param_symbols(&sym_base,
-                        b_layout.fields.iter().find(|(n, _)| n == pf).map(|(_, t)| t).unwrap(),
-                        &mut param_symbols);
-                }
-            }
 
         // `root.<selfblock>` primary: the residuals read the root's params,
         // bound as the lowercased root type (the same name the root-triplet
         // form uses). The entity contributes no params of its own.
-        if is_root_self_primary
-            && let Some(root_layout) = registry_lookup(root_type_name) {
-                let root_var = root_type_name.to_lowercase();
-                for pf in &root_layout.param_fields {
-                    let sym_base = if root_layout.universal_euler_angle_fields.contains(pf)
-                        || root_layout.universal_rotvec_fields.contains(pf) {
-                        format!("{}.{}.delta", root_var, pf)
-                    } else {
-                        format!("{}.{}.work()", root_var, pf)
-                    };
-                    add_param_symbols(&sym_base,
-                        root_layout.fields.iter().find(|(n, _)| n == pf).map(|(_, t)| t).unwrap(),
-                        &mut param_symbols);
-                }
+        if is_root_self_primary {
+            let root_var = root_type_name.to_lowercase();
+            for slot in param_slots(root_type_name) {
+                let sym_base = if slot.universal_delta {
+                    format!("{}.{}.delta", root_var, slot.path)
+                } else {
+                    format!("{}.{}.work()", root_var, slot.path)
+                };
+                add_param_symbols(&sym_base, &slot.sft, &mut param_symbols);
             }
+        }
     }
 
     // Interpret body. Only `let` bindings and one final residual
@@ -5695,6 +5791,8 @@ mod nested_path_tests {
             euler_angle_fields: Vec::new(),
             universal_euler_angle_fields: Vec::new(),
             universal_rotvec_fields: Vec::new(),
+            symbolic_fields: Vec::new(),
+            component: false,
             constraint_index_field: None,
             self_block_field: None,
         }
