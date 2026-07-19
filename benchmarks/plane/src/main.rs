@@ -79,10 +79,10 @@ fn pose_rmse(a: &Solution, b: &Solution) -> f64 {
 /// One external runner: the harness parses its protocol line and asserts the
 /// core pin; the initial-cost cross-check stays here, because it is what
 /// proves the system minimizes the same objective.
-fn run_ext(cmd: &str, scene_path: &str, sol_out: &str, n_poses: usize,
+fn run_ext(cmd: &str, args: &[&str], sol_out: &str, n_poses: usize,
            initial_cost: f64) -> bench_harness::table::Row<Solution> {
     let mut c = std::process::Command::new(cmd);
-    c.args([scene_path, sol_out]);
+    c.args(args);
     let p = bench_harness::external::run(c);
     let reported = p.json.get("initial_cost").and_then(|v| v.as_f64())
         .expect("runner reported no initial_cost");
@@ -149,6 +149,14 @@ fn main() {
     if !ceres_ok {
         eprintln!("WARNING: cpp/build/ceres_plane missing (cmake -B cpp/build cpp && cmake --build cpp/build); skipping Ceres");
     }
+    let gtsam_ok = std::path::Path::new("cpp/build/gtsam_plane").exists();
+    if !gtsam_ok {
+        eprintln!("WARNING: cpp/build/gtsam_plane missing (needs libgtsam-dev); skipping GTSAM");
+    }
+    let symforce_ok = std::path::Path::new("cpp/build/symforce_plane").exists();
+    if !symforce_ok {
+        eprintln!("WARNING: cpp/build/symforce_plane missing (build with -DSYMFORCE_DIR=...); skipping SymForce");
+    }
 
     let want = |label: &str| -> bool {
         systems_filter.as_deref().is_none_or(|f| {
@@ -170,12 +178,30 @@ fn main() {
             t.record("factrs LM", factrs_runner::run(raw));
         }
         if g2o_ok && want("g2o LM") {
-            t.record("g2o LM", run_ext("cpp/build/g2o_plane", scene_path,
+            t.record("g2o LM", run_ext("cpp/build/g2o_plane",
+                &[scene_path, "/tmp/plane_g2o_sol.txt"],
                 "/tmp/plane_g2o_sol.txt", raw.poses.len(), initial_cost));
         }
         if ceres_ok && want("ceres LM") {
-            t.record("ceres LM", run_ext("cpp/build/ceres_plane", scene_path,
+            t.record("ceres LM", run_ext("cpp/build/ceres_plane",
+                &[scene_path, "/tmp/plane_ceres_sol.txt"],
                 "/tmp/plane_ceres_sol.txt", raw.poses.len(), initial_cost));
+        }
+        if gtsam_ok && want("gtsam LM") {
+            t.record("gtsam LM", run_ext("cpp/build/gtsam_plane",
+                &[scene_path, "/tmp/plane_gtsam_sol.txt"],
+                "/tmp/plane_gtsam_sol.txt", raw.poses.len(), initial_cost));
+        }
+        if symforce_ok {
+            for (precision, label) in [("f64", "symforce LM f64"), ("f32", "symforce LM f32")] {
+                if !want(label) {
+                    continue;
+                }
+                let sol = format!("/tmp/plane_symforce_sol_{}.txt", precision);
+                t.record(label, run_ext("cpp/build/symforce_plane",
+                    &[scene_path, precision, &sol],
+                    &sol, raw.poses.len(), initial_cost));
+            }
         }
     }
 
