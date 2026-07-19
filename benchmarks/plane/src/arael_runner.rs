@@ -85,45 +85,69 @@ impl Component for UnitVec {
 #[arael::model]
 #[derive(Clone)]
 struct PoseV {
+    /// Position in the world frame.
     pos: Param<vect3d>,
+    /// Rotation body-to-world.
     q: QuaternionParam<f64>,
+    /// This pose's Hessian tile (gradient + diagonal block of J^T J).
     hb: SelfBlock<PoseV>,
 }
 
 #[arael::model]
 #[derive(Clone)]
 struct PlaneLm {
+    /// Unit normal of the plane (2-DOF component).
     n: UnitVec,
+    /// Distance coefficient: the plane is n.x + c = 0, distance = -c.
     c: Param<f64>,
+    /// This plane's Hessian tile.
     hb: SelfBlock<PlaneLm>,
 }
 
-// Odometry between-residual, identical to the g2o runner's custom edge:
-//   err_t = R_a^T (t_b - t_a) - t_m;  err_r = vee((R_m^T R_a^T R_b - .^T)/2)
+// Odometry between-residual, identical to the g2o runner's custom edge.
+// Translation: err_t = R_a^T (b.pos - a.pos) - measured_translation.
+// Rotation: the error rotation dR = R_m^T R_a^T R_b (measured relative
+// rotation inverted, composed with the estimated one) should be identity;
+// the residual is its skew part read as a vector,
+//   err_r = vee((dR - dR^T)/2) = sin(angle) * axis,
+// zero exactly when measurement and estimate agree. vee() maps a
+// skew-symmetric matrix to its 3-vector: vee(M) = (M[2][1], M[0][2],
+// M[1][0]) -- the c1/c2/c3 column arithmetic in the body.
 #[arael::model]
 #[arael(constraint(hb, {
     let ra = a.q.rotation_matrix();
     let rb = b.q.rotation_matrix();
-    let dt = ra.transpose() * (b.pos - a.pos) - odov.tm;
-    let dr = odov.rm_t * (ra.transpose() * rb);
+    let dt = ra.transpose() * (b.pos - a.pos) - odov.measured_translation;
+    let dr = odov.measured_rotation_transposed * (ra.transpose() * rb);
     let c1 = dr * vect3sym::from_components(1.0, 0.0, 0.0);
     let c2 = dr * vect3sym::from_components(0.0, 1.0, 0.0);
     let c3 = dr * vect3sym::from_components(0.0, 0.0, 1.0);
-    [dt.x * odov.wt, dt.y * odov.wt, dt.z * odov.wt,
-     (c2.z - c3.y) * 0.5 * odov.wr,
-     (c3.x - c1.z) * 0.5 * odov.wr,
-     (c1.y - c2.x) * 0.5 * odov.wr]
+    [dt.x * odov.translation_weight, dt.y * odov.translation_weight, dt.z * odov.translation_weight,
+     (c2.z - c3.y) * 0.5 * odov.rotation_weight,
+     (c3.x - c1.z) * 0.5 * odov.rotation_weight,
+     (c1.y - c2.x) * 0.5 * odov.rotation_weight]
 }, parent = odov))]
 #[derive(Clone)]
 struct Odov {
+    /// The earlier pose: the measurement is expressed in ITS frame.
     #[arael(ref = root.poses)]
     a: Ref<PoseV>,
+    /// The later pose the measurement leads to.
     #[arael(ref = root.poses)]
     b: Ref<PoseV>,
-    tm: vect3d,
-    rm_t: matrix3d,
-    wt: f64,
-    wr: f64,
+    /// Measured relative translation: where odometry says `b` sits in
+    /// `a`'s frame; compared against R_a^T (b.pos - a.pos).
+    measured_translation: vect3d,
+    /// TRANSPOSE of the measured relative rotation, R_m^T -- stored
+    /// pre-transposed because the residual only ever uses it that way
+    /// (dR = R_m^T R_a^T R_b).
+    measured_rotation_transposed: matrix3d,
+    /// Whitening weight (1/sigma, per axis) of the translation residual.
+    translation_weight: f64,
+    /// Whitening weight (1/sigma, per axis) of the rotation residual.
+    rotation_weight: f64,
+    /// The a-b coupling tile of J^T J this constraint accumulates into
+    /// (named as the primary block in the constraint attribute above).
     hb: CrossBlock<PoseV, PoseV>,
 }
 
@@ -138,25 +162,33 @@ struct Odov {
     let nl = rp.transpose() * nw;
     let cl = l.c + p.pos * nw;
     let h = sqrt(nl.x * nl.x + nl.y * nl.y);
-    let mx = nl * obsv.nm;
-    let my = (obsv.nm.y * nl.x - obsv.nm.x * nl.y) / h;
-    let mz = (obsv.nm.z * (nl.x * nl.x + nl.y * nl.y)
-        - nl.z * (nl.x * obsv.nm.x + nl.y * obsv.nm.y)) / h;
-    [atan2(my, mx) * obsv.waz,
-     atan2(mz, sqrt(mx * mx + my * my)) * obsv.wel,
-     (obsv.cm - cl) * obsv.wd]
+    let mx = nl * obsv.measured_normal;
+    let my = (obsv.measured_normal.y * nl.x - obsv.measured_normal.x * nl.y) / h;
+    let mz = (obsv.measured_normal.z * (nl.x * nl.x + nl.y * nl.y)
+        - nl.z * (nl.x * obsv.measured_normal.x + nl.y * obsv.measured_normal.y)) / h;
+    [atan2(my, mx) * obsv.azimuth_weight,
+     atan2(mz, sqrt(mx * mx + my * my)) * obsv.elevation_weight,
+     (obsv.measured_c - cl) * obsv.distance_weight]
 }, parent = obsv))]
 #[derive(Clone)]
 struct Obsv {
+    /// The observing pose.
     #[arael(ref = root.poses)]
     p: Ref<PoseV>,
+    /// The observed plane landmark.
     #[arael(ref = root.planes)]
     l: Ref<PlaneLm>,
-    nm: vect3d,
-    cm: f64,
-    waz: f64,
-    wel: f64,
-    wd: f64,
+    /// Measured plane normal (unit) in the sensor frame.
+    measured_normal: vect3d,
+    /// Measured distance coefficient of the local plane (n.x + c = 0).
+    measured_c: f64,
+    /// Whitening weight (1/sigma) of the azimuth residual.
+    azimuth_weight: f64,
+    /// Whitening weight (1/sigma) of the elevation residual.
+    elevation_weight: f64,
+    /// Whitening weight (1/sigma) of the distance residual.
+    distance_weight: f64,
+    /// The pose-plane coupling tile of J^T J.
     hb: CrossBlock<PoseV, PlaneLm>,
 }
 
@@ -192,23 +224,24 @@ fn build(raw: &RawScene) -> World {
             hb: SelfBlock::new(),
         });
     }
-    for &(i, j, ref rel, wt, wr) in &raw.odos {
+    for &(i, j, ref rel, translation_weight, rotation_weight) in &raw.odos {
         world.odos.push(Odov {
             a: world.poses.ref_at(i as u32),
             b: world.poses.ref_at(j as u32),
-            tm: rel.t,
-            rm_t: rel.q.rotation_matrix().transpose(),
-            wt, wr,
+            measured_translation: rel.t,
+            measured_rotation_transposed: rel.q.rotation_matrix().transpose(),
+            translation_weight,
+            rotation_weight,
             hb: CrossBlock::new(),
         });
     }
-    for &(p, l, ref pl, waz, wel, wd) in &raw.obs {
+    for &(p, l, ref pl, azimuth_weight, elevation_weight, distance_weight) in &raw.obs {
         world.obs.push(Obsv {
             p: world.poses.ref_at(p as u32),
             l: world.planes.ref_at(l as u32),
-            nm: pl.n,
-            cm: pl.c,
-            waz, wel, wd,
+            measured_normal: pl.n,
+            measured_c: pl.c,
+            azimuth_weight, elevation_weight, distance_weight,
             hb: CrossBlock::new(),
         });
     }
@@ -358,15 +391,15 @@ struct PlaneLmF {
 #[arael(constraint(hb, {
     let ra = a.q.rotation_matrix();
     let rb = b.q.rotation_matrix();
-    let dt = ra.transpose() * (b.pos - a.pos) - odovf.tm;
-    let dr = odovf.rm_t * (ra.transpose() * rb);
+    let dt = ra.transpose() * (b.pos - a.pos) - odovf.measured_translation;
+    let dr = odovf.measured_rotation_transposed * (ra.transpose() * rb);
     let c1 = dr * vect3sym::from_components(1.0, 0.0, 0.0);
     let c2 = dr * vect3sym::from_components(0.0, 1.0, 0.0);
     let c3 = dr * vect3sym::from_components(0.0, 0.0, 1.0);
-    [dt.x * odovf.wt, dt.y * odovf.wt, dt.z * odovf.wt,
-     (c2.z - c3.y) * 0.5 * odovf.wr,
-     (c3.x - c1.z) * 0.5 * odovf.wr,
-     (c1.y - c2.x) * 0.5 * odovf.wr]
+    [dt.x * odovf.translation_weight, dt.y * odovf.translation_weight, dt.z * odovf.translation_weight,
+     (c2.z - c3.y) * 0.5 * odovf.rotation_weight,
+     (c3.x - c1.z) * 0.5 * odovf.rotation_weight,
+     (c1.y - c2.x) * 0.5 * odovf.rotation_weight]
 }, parent = odovf))]
 #[derive(Clone)]
 struct OdovF {
@@ -374,10 +407,10 @@ struct OdovF {
     a: Ref<PoseVF>,
     #[arael(ref = root.poses)]
     b: Ref<PoseVF>,
-    tm: vect3f,
-    rm_t: matrix3f,
-    wt: f32,
-    wr: f32,
+    measured_translation: vect3f,
+    measured_rotation_transposed: matrix3f,
+    translation_weight: f32,
+    rotation_weight: f32,
     hb: CrossBlock<PoseVF, PoseVF, f32>,
 }
 
@@ -388,13 +421,13 @@ struct OdovF {
     let nl = rp.transpose() * nw;
     let cl = l.c + p.pos * nw;
     let h = sqrt(nl.x * nl.x + nl.y * nl.y);
-    let mx = nl * obsvf.nm;
-    let my = (obsvf.nm.y * nl.x - obsvf.nm.x * nl.y) / h;
-    let mz = (obsvf.nm.z * (nl.x * nl.x + nl.y * nl.y)
-        - nl.z * (nl.x * obsvf.nm.x + nl.y * obsvf.nm.y)) / h;
-    [atan2(my, mx) * obsvf.waz,
-     atan2(mz, sqrt(mx * mx + my * my)) * obsvf.wel,
-     (obsvf.cm - cl) * obsvf.wd]
+    let mx = nl * obsvf.measured_normal;
+    let my = (obsvf.measured_normal.y * nl.x - obsvf.measured_normal.x * nl.y) / h;
+    let mz = (obsvf.measured_normal.z * (nl.x * nl.x + nl.y * nl.y)
+        - nl.z * (nl.x * obsvf.measured_normal.x + nl.y * obsvf.measured_normal.y)) / h;
+    [atan2(my, mx) * obsvf.azimuth_weight,
+     atan2(mz, sqrt(mx * mx + my * my)) * obsvf.elevation_weight,
+     (obsvf.measured_c - cl) * obsvf.distance_weight]
 }, parent = obsvf))]
 #[derive(Clone)]
 struct ObsvF {
@@ -402,11 +435,11 @@ struct ObsvF {
     p: Ref<PoseVF>,
     #[arael(ref = root.planes)]
     l: Ref<PlaneLmF>,
-    nm: vect3f,
-    cm: f32,
-    waz: f32,
-    wel: f32,
-    wd: f32,
+    measured_normal: vect3f,
+    measured_c: f32,
+    azimuth_weight: f32,
+    elevation_weight: f32,
+    distance_weight: f32,
     hb: CrossBlock<PoseVF, PlaneLmF, f32>,
 }
 
@@ -449,26 +482,26 @@ fn build_f32(raw: &RawScene) -> WorldF {
             hb: SelfBlock::new(),
         });
     }
-    for &(i, j, ref rel, wt, wr) in &raw.odos {
+    for &(i, j, ref rel, translation_weight, rotation_weight) in &raw.odos {
         world.odos.push(OdovF {
             a: world.poses.ref_at(i as u32),
             b: world.poses.ref_at(j as u32),
-            tm: v3f(rel.t),
-            rm_t: qf(rel.q).rotation_matrix().transpose(),
-            wt: wt as f32,
-            wr: wr as f32,
+            measured_translation: v3f(rel.t),
+            measured_rotation_transposed: qf(rel.q).rotation_matrix().transpose(),
+            translation_weight: translation_weight as f32,
+            rotation_weight: rotation_weight as f32,
             hb: CrossBlock::new(),
         });
     }
-    for &(p, l, ref pl, waz, wel, wd) in &raw.obs {
+    for &(p, l, ref pl, azimuth_weight, elevation_weight, distance_weight) in &raw.obs {
         world.obs.push(ObsvF {
             p: world.poses.ref_at(p as u32),
             l: world.planes.ref_at(l as u32),
-            nm: v3f(pl.n),
-            cm: pl.c as f32,
-            waz: waz as f32,
-            wel: wel as f32,
-            wd: wd as f32,
+            measured_normal: v3f(pl.n),
+            measured_c: pl.c as f32,
+            azimuth_weight: azimuth_weight as f32,
+            elevation_weight: elevation_weight as f32,
+            distance_weight: distance_weight as f32,
             hb: CrossBlock::new(),
         });
     }
