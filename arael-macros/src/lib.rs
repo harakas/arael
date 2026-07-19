@@ -82,6 +82,10 @@ struct SymLayout {
     /// struct's OWN fields (params as param symbols) -- a derivative-carrying
     /// computed field. Declaration order; later entries may read earlier ones.
     symbolic_fields: Vec<(String, String)>,
+    /// `#[arael(deriv = <of>, by = <param>)]` fields: (field name, of, by).
+    /// Declared Jacobian caches, filled by the symbolic precompute and read
+    /// by constraint Jacobians in place of the re-derived expression.
+    deriv_fields: Vec<(String, String, String)>,
     /// `#[arael(component)]`: this struct is a compound parameter whose
     /// Params fold into the owning struct's span.
     component: bool,
@@ -278,8 +282,6 @@ fn builtin_component_layout(name: &str) -> Option<SymLayout> {
             fields: vec![
                 ("rot".to_string(), SymFieldType::Mat3),
                 ("d".to_string(), SymFieldType::Vec2),
-                ("s2".to_string(), SymFieldType::Scalar),
-                ("local".to_string(), SymFieldType::Vec3),
                 ("unit".to_string(), SymFieldType::Vec3),
             ],
             collection_fields: Vec::new(),
@@ -289,13 +291,14 @@ fn builtin_component_layout(name: &str) -> Option<SymLayout> {
             universal_euler_angle_fields: Vec::new(),
             universal_rotvec_fields: Vec::new(),
             symbolic_fields: vec![
-                ("s2".to_string(),
-                 "1.0 + (d.x * d.x + d.y * d.y) * 0.25".to_string()),
-                ("local".to_string(),
-                 "vect3sym::from_components(1.0 - (d.x * d.x + d.y * d.y) / (2.0 * s2), \
-                  d.y / s2, 0.0 - d.x / s2)".to_string()),
-                ("unit".to_string(), "rot * local".to_string()),
+                ("unit".to_string(),
+                 "{ let s2 = 1.0 + (d.x * d.x + d.y * d.y) * 0.25; \
+                    let local = vect3sym::from_components(\
+                        1.0 - (d.x * d.x + d.y * d.y) / (2.0 * s2), \
+                        d.y / s2, 0.0 - d.x / s2); \
+                    rot * local }".to_string()),
             ],
+            deriv_fields: std::vec::Vec::new(),
             component: true,
             constraint_index_field: None,
             self_block_field: None,
@@ -642,6 +645,8 @@ fn model_attribute(input: &mut syn::DeriveInput) -> syn::Result<TokenStream2> {
     let mut universal_euler_angle_fields_reg: Vec<String> = Vec::new();
     let mut universal_rotvec_fields_reg: Vec<String> = Vec::new();
     let mut symbolic_fields_reg: Vec<(String, String)> = Vec::new();
+    // (deriv field name, of = symbolic field, by = param field)
+    let mut deriv_fields_reg: Vec<(String, String, String)> = Vec::new();
     let mut constraint_index_field_reg: Option<String> = None;
     // Detect SelfBlock<Self> field — this struct's canonical grad+diag home.
     let mut self_block_field_reg: Option<String> = None;
@@ -674,6 +679,14 @@ fn model_attribute(input: &mut syn::DeriveInput) -> syn::Result<TokenStream2> {
                     // The field stays an ordinary data field (classified
                     // below); only its body-read meaning changes.
                     symbolic_fields_reg.push((field_name.clone(), expr_tokens.to_string()));
+                }
+                AraelAttr::Deriv { of, by } => {
+                    // A declared Jacobian cache: plain storage to the
+                    // runtime (skip), meaningful only to the symbolic
+                    // precompute and the constraint substitutions.
+                    deriv_fields_reg.push((field_name.clone(), of, by));
+                    sym_fields.push((field_name, SymFieldType::Skip));
+                    continue;
                 }
                 _ => {}
             }
@@ -795,6 +808,7 @@ fn model_attribute(input: &mut syn::DeriveInput) -> syn::Result<TokenStream2> {
         universal_euler_angle_fields: universal_euler_angle_fields_reg.clone(),
         universal_rotvec_fields: universal_rotvec_fields_reg.clone(),
         symbolic_fields: symbolic_fields_reg,
+        deriv_fields: deriv_fields_reg,
         component: is_component,
         constraint_index_field: constraint_index_field_reg,
         self_block_field: self_block_field_reg,
@@ -865,6 +879,7 @@ fn emit_trivial_model_for_enum(input: &mut syn::DeriveInput) -> syn::Result<Toke
         universal_euler_angle_fields: Vec::new(),
         universal_rotvec_fields: Vec::new(),
         symbolic_fields: Vec::new(),
+        deriv_fields: Vec::new(),
         component: false,
         constraint_index_field: None,
         self_block_field: None,
@@ -1199,7 +1214,9 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
             // Cross is a constraint-struct-only attribute for CrossBlock
             // fields; treated like the default path here (no param, no
             // compute, just a block field).
-            Some(AraelAttr::Skip) | Some(AraelAttr::ConstraintIndex) => continue,
+            // Deriv caches are plain storage to the runtime walks, like Skip.
+            Some(AraelAttr::Skip) | Some(AraelAttr::ConstraintIndex)
+            | Some(AraelAttr::Deriv { .. }) => continue,
             Some(AraelAttr::Compute(expr_tokens)) => {
                 let substituted = substitute_param_idents(expr_tokens, &param_field_names);
                 compute_stmts.push(quote! { self.#ident = #substituted; });
@@ -1479,6 +1496,32 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
         }
     } else { quote! {} };
 
+    // `symbolic =` fields (and their declared `deriv =` caches) get a
+    // generated numeric refresh, called wherever computed fields refresh.
+    // The layout was registered by the attribute pass before this runs; a
+    // bare-derive struct without one simply has no symbolic fields.
+    let precompute_impl = match crate::registry_lookup(&name.to_string()) {
+        Some(l) if !l.symbolic_fields.is_empty() =>
+            crate::constraint::generate_symbolic_precompute(
+                &name.to_string(), &l.fields, &l.param_fields,
+                &l.symbolic_fields, &l.deriv_fields)?,
+        _ => TokenStream2::new(),
+    };
+    let precompute_call: TokenStream2 = if precompute_impl.is_empty() {
+        quote! {}
+    } else {
+        quote! { self.__precompute_symbolic(); }
+    };
+    let precompute_block: TokenStream2 = if precompute_impl.is_empty() {
+        quote! {}
+    } else {
+        quote! {
+            impl #impl_generics #name #ty_generics #where_clause {
+                #precompute_impl
+            }
+        }
+    };
+
     let model_impl = quote! {
         impl #impl_generics arael::model::Model for #name #ty_generics #where_clause {
             fn serialize_params32(&mut self, data: &mut std::vec::Vec<f32>) {
@@ -1488,16 +1531,19 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
             fn deserialize_params32(&mut self, data: &[f32]) {
                 #(#deserialize_stmts)*
                 #comp_finish
+                #precompute_call
             }
             fn update32(&mut self, data: &[f32]) {
                 #(#update_phase1)*
                 #(#compute_stmts)*
                 #(#euler_compute_stmts)*
+                #precompute_call
             }
             fn update_self(&mut self) {
                 #(#update_self_phase1)*
                 #(#compute_stmts)*
                 #(#euler_compute_stmts)*
+                #precompute_call
             }
             fn serialize_params64(&mut self, data: &mut std::vec::Vec<f64>) {
                 #comp_start
@@ -1506,11 +1552,13 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
             fn deserialize_params64(&mut self, data: &[f64]) {
                 #(#deserialize64_stmts)*
                 #comp_finish
+                #precompute_call
             }
             fn update64(&mut self, data: &[f64]) {
                 #(#update64_phase1)*
                 #(#compute_stmts)*
                 #(#euler_compute_stmts)*
+                #precompute_call
             }
             fn advance_params32(&mut self, params: &mut [f32]) {
                 #(#advance32_stmts)*
@@ -1884,6 +1932,7 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
 
     Ok(quote! {
         #model_impl
+        #precompute_block
         #sym_impl
         #fit_impl
         #constraint_impls
@@ -2037,7 +2086,8 @@ fn generate_sym_impl(
 
         // Skip fields with #[arael(skip)], #[arael(compute = ...)], or #[arael(constraint_index)]
         match parse_arael_attr(&field.attrs)? {
-            Some(AraelAttr::Skip) | Some(AraelAttr::Compute(_)) | Some(AraelAttr::ConstraintIndex) => continue,
+            Some(AraelAttr::Skip) | Some(AraelAttr::Compute(_)) | Some(AraelAttr::ConstraintIndex)
+            | Some(AraelAttr::Deriv { .. }) => continue,
             _ => {}
         }
 
@@ -2108,6 +2158,12 @@ pub(crate) enum AraelAttr {
     /// `#[arael(symbolic = <expr>)]`: constraint-body reads of this data
     /// field expand to the expression (a derivative-carrying computed field).
     Symbolic(TokenStream2),
+    /// `#[arael(deriv = <symbolic field>, by = <param field>)]`: this field
+    /// is the declared Jacobian cache `d(of)/d(by)` -- an array with one
+    /// entry per component of `by`, each shaped like `of`. Filled by the
+    /// generated symbolic precompute; constraint Jacobians read it instead
+    /// of re-deriving the expression per observation.
+    Deriv { of: String, by: String },
     RefResolve(String),  // resolution path, e.g. "root.poses"
     ConstraintIndex,     // marks a u32 field as constraint index
     /// Ref-pair binding for a CrossBlock field on a constraint struct:
@@ -2183,6 +2239,30 @@ pub(crate) fn parse_arael_attr(attrs: &[syn::Attribute]) -> syn::Result<Option<A
                     return Err(syn::Error::new_spanned(
                         &tokens[0],
                         "expected `symbolic = <expression>`",
+                    ));
+                }
+                // #[arael(deriv = <field>, by = <param field>)]
+                if kw == "deriv" {
+                    let parts: Vec<String> = tokens.iter().skip(1)
+                        .filter_map(|t| match t {
+                            proc_macro2::TokenTree::Ident(id) => Some(id.to_string()),
+                            _ => None,
+                        })
+                        .collect();
+                    if tokens.len() >= 3
+                        && matches!(&tokens[1],
+                            proc_macro2::TokenTree::Punct(p) if p.as_char() == '=')
+                        && parts.len() == 3
+                        && parts[1] == "by"
+                    {
+                        return Ok(Some(AraelAttr::Deriv {
+                            of: parts[0].clone(),
+                            by: parts[2].clone(),
+                        }));
+                    }
+                    return Err(syn::Error::new_spanned(
+                        &tokens[0],
+                        "expected `deriv = <symbolic field>, by = <param field>`",
                     ));
                 }
                 // #[arael(cross = (refA, refB))]
@@ -2663,7 +2743,7 @@ fn generate_fit_impl(
         let ident = field.ident.as_ref().unwrap();
         let field_name = ident.to_string();
         let attr = parse_arael_attr(&field.attrs)?;
-        if matches!(attr, Some(AraelAttr::Skip) | Some(AraelAttr::Compute(_))) {
+        if matches!(attr, Some(AraelAttr::Skip) | Some(AraelAttr::Compute(_)) | Some(AraelAttr::Deriv { .. })) {
             continue;
         }
         if is_param_type(&field.ty) {

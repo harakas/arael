@@ -24,19 +24,26 @@ use crate::scene::{Plane, Pose, RawScene, Solution};
 #[arael(component)]
 #[derive(Clone)]
 struct UnitVec {
-    // Concrete type names throughout: the macro classifies fields by the
-    // type's last path segment, so aliases would read as opaque structs.
+    // Rotation that takes unit vector (1, 0, 0) into "unit".
     ref_q: quaternd,
     #[arael(compute = self.ref_q.rotation_matrix())]
     rot: matrix3d,
+    // d forms a rotation vector axis*angle = (0, dx, dy). We can construct a first-order rotation quaternion
+    //    q = (1, 0, d.x/2, d.y/2) / sqrt(s2)
+    // where the normalization coefficient is
+    //    s2 = 1 + d.x^2 / 4 + d.y^2 / 4
+    // we derive the rotation matrix for q -- but rotation of (1, 0, 0) is equal to its first column:
+    //    [1 - 2*(y^2+z^2), 2*(x*y+ w*z), 2*(x*z-w*y)] -- we never have to calculate 1/sqrt(s2) as it is always squared
     d: Param<vect2d>,
-    #[arael(symbolic = 1.0 + (d.x * d.x + d.y * d.y) * 0.25)]
-    s2: f64,
-    #[arael(symbolic = vect3sym::from_components(
-        1.0 - (d.x * d.x + d.y * d.y) / (2.0 * s2), d.y / s2, 0.0 - d.x / s2))]
-    local: vect3d,
-    #[arael(symbolic = rot * local)]
+    #[arael(symbolic = {
+        let s2 = 1.0 + (d.x * d.x + d.y * d.y) * 0.25;
+        let local = vect3sym::from_components(
+            1.0 - (d.x * d.x + d.y * d.y) / (2.0 * s2), d.y / s2, 0.0 - d.x / s2);
+        rot * local
+    })]
     unit: vect3d,
+    #[arael(deriv = unit, by = d)]
+    unit_d: [vect3d; 2],
 }
 
 impl UnitVec {
@@ -48,9 +55,8 @@ impl UnitVec {
             ref_q: quaternd::identity(),
             rot: matrix3d::identity(),
             d: Param::new(vect2d::new(0.0, 0.0)),
-            s2: 0.0,
-            local: vect3d::new(0.0, 0.0, 0.0),
             unit: dir,
+            unit_d: [vect3d::new(0.0, 0.0, 0.0); 2],
         };
         Component::start(&mut u);
         u
@@ -285,13 +291,15 @@ struct UnitVecF {
     #[arael(compute = self.ref_q.rotation_matrix())]
     rot: matrix3f,
     d: Param<vect2f>,
-    #[arael(symbolic = 1.0 + (d.x * d.x + d.y * d.y) * 0.25)]
-    s2: f32,
-    #[arael(symbolic = vect3sym::from_components(
-        1.0 - (d.x * d.x + d.y * d.y) / (2.0 * s2), d.y / s2, 0.0 - d.x / s2))]
-    local: vect3f,
-    #[arael(symbolic = rot * local)]
+    #[arael(symbolic = {
+        let s2 = 1.0 + (d.x * d.x + d.y * d.y) * 0.25;
+        let local = vect3sym::from_components(
+            1.0 - (d.x * d.x + d.y * d.y) / (2.0 * s2), d.y / s2, 0.0 - d.x / s2);
+        rot * local
+    })]
     unit: vect3f,
+    #[arael(deriv = unit, by = d)]
+    unit_d: [vect3f; 2],
 }
 
 impl UnitVecF {
@@ -303,9 +311,8 @@ impl UnitVecF {
             ref_q: quaternf::identity(),
             rot: matrix3f::identity(),
             d: Param::new(vect2f::new(0.0, 0.0)),
-            s2: 0.0,
-            local: vect3f::new(0.0, 0.0, 0.0),
             unit: dir,
+            unit_d: [vect3f::new(0.0, 0.0, 0.0); 2],
         };
         Component::start(&mut u);
         u

@@ -49,6 +49,162 @@ impl SymVal {
 // Constraint context
 // ---------------------------------------------------------------------------
 
+/// Generated body of `__precompute_symbolic`: numeric evaluation of every
+/// `#[arael(symbolic = ...)]` field and every declared `#[arael(deriv = ...)]`
+/// cache, shared through one CSE pass. Called wherever the model refreshes
+/// its computed fields, so generated constraint code can read the fields
+/// (and their deriv caches) instead of re-deriving the expressions per
+/// observation.
+pub(crate) fn generate_symbolic_precompute(
+    type_name: &str,
+    fields: &[(String, SymFieldType)],
+    param_fields: &[String],
+    symbolic_fields: &[(String, String)],
+    deriv_fields: &[(String, String, String)],
+) -> syn::Result<TokenStream2> {
+    if symbolic_fields.is_empty() {
+        return Ok(TokenStream2::new());
+    }
+    let sp = proc_macro2::Span::call_site();
+    let mut scratch = ConstraintCtx::new();
+    for (fname, sft) in fields {
+        if matches!(sft,
+            SymFieldType::Skip
+            | SymFieldType::Struct(_)
+            | SymFieldType::OptionalStruct(_)) { continue; }
+        let is_param = param_fields.iter().any(|p| p == fname);
+        let base = if is_param {
+            format!("self.{}.work()", fname)
+        } else {
+            format!("self.{}", fname)
+        };
+        scratch.bindings.insert(fname.clone(), ConstraintCtx::make_sym_val(&base, sft));
+        if is_param {
+            scratch.bindings.insert(format!("{}_value", fname),
+                ConstraintCtx::make_sym_val(&format!("self.{}.value", fname), sft));
+        }
+    }
+    // (assignment target, component expression, Some(by-param) for
+    // deriv-cache entries), values in declaration order then deriv-cache
+    // entries. Everything stays fully inline (no reads of the just-written
+    // fields), so the CSE below owns all the sharing and the emission order
+    // cannot go stale.
+    let mut assigns: Vec<(String, E, Option<String>)> = Vec::new();
+    let mut sym_vals: Vec<(String, SymVal)> = Vec::new();
+    for (fname, expr_str) in symbolic_fields {
+        let parsed: Expr = syn::parse_str(expr_str).map_err(|e| {
+            syn::Error::new(sp, format!(
+                "symbolic = expression on `{}.{}` does not parse: {}",
+                type_name, fname, e))
+        })?;
+        let val = eval_expr(&parsed, &mut scratch).map_err(|e| {
+            syn::Error::new(e.span(), format!(
+                "symbolic = expression on `{}.{}`: {}", type_name, fname, e))
+        })?;
+        let comps = symval_components(&val).ok_or_else(|| syn::Error::new(sp,
+            format!("symbolic field `{}.{}`: only scalar, vec2 and vec3 \
+                     shapes can be precomputed", type_name, fname)))?;
+        for (suffix, e) in &comps {
+            assigns.push((format!("self.{}{}", fname, suffix), e.clone(), None));
+        }
+        sym_vals.push((fname.clone(), val.clone()));
+        scratch.bindings.insert(fname.clone(), val);
+    }
+    for (dfield, of, by) in deriv_fields {
+        let Some((_, of_val)) = sym_vals.iter().find(|(n, _)| n == of) else {
+            return Err(syn::Error::new(sp, format!(
+                "`{}.{}`: deriv `of = {}` must name a `symbolic =` field",
+                type_name, dfield, of)));
+        };
+        let by_sft = fields.iter()
+            .find(|(n, _)| n == by)
+            .filter(|_| param_fields.iter().any(|p| p == by))
+            .map(|(_, t)| t);
+        let with = |names: &[&str]| -> Vec<String> {
+            names.iter().map(|c| format!("self.{}.work().{}", by, c)).collect()
+        };
+        let dvars: Vec<String> = match by_sft {
+            Some(SymFieldType::Scalar) => vec![format!("self.{}.work()", by)],
+            Some(SymFieldType::Vec2) => with(&["x", "y"]),
+            Some(SymFieldType::Vec3) => with(&["x", "y", "z"]),
+            _ => return Err(syn::Error::new(sp, format!(
+                "`{}.{}`: deriv `by = {}` must name a scalar, vec2 or vec3 \
+                 param field", type_name, dfield, by))),
+        };
+        let comps = symval_components(of_val).expect("of is a precomputed shape");
+        for (k, dvar) in dvars.iter().enumerate() {
+            for (suffix, e) in &comps {
+                assigns.push((format!("self.{}[{}]{}", dfield, k, suffix),
+                    e.diff(dvar.as_str()), Some(by.clone())));
+            }
+        }
+    }
+    let exprs: Vec<E> = assigns.iter().map(|(_, e, _)| e.clone()).collect();
+    let (inters, outs) = arael_sym::cse(&exprs);
+    let mut stmts: Vec<TokenStream2> = Vec::new();
+    for (iname, e) in &inters {
+        let id = syn::Ident::new(iname, sp);
+        let code = parse_sym_code(&e.to_rust(""))?;
+        stmts.push(quote! { let #id = #code; });
+    }
+    // Values unconditionally; deriv-cache stores grouped per `by` param and
+    // guarded on it being optimized -- a fixed param's Jacobian entries are
+    // never read, so filling its cache would be pure waste.
+    let mut guarded: std::collections::BTreeMap<String, Vec<TokenStream2>> =
+        std::collections::BTreeMap::new();
+    for ((lhs, _, by), out) in assigns.iter().zip(&outs) {
+        let lhs_expr: Expr = syn::parse_str(lhs).map_err(|e| syn::Error::new(sp,
+            format!("internal: bad precompute target `{}`: {}", lhs, e)))?;
+        let code = parse_sym_code(&out.to_rust(""))?;
+        let assign = quote! { #lhs_expr = #code; };
+        match by {
+            None => stmts.push(assign),
+            Some(b) => guarded.entry(b.clone()).or_default().push(assign),
+        }
+    }
+    for (by, group) in guarded {
+        let by_id = syn::Ident::new(&by, sp);
+        stmts.push(quote! {
+            if self.#by_id.index() != u32::MAX {
+                #(#group)*
+            }
+        });
+    }
+    Ok(quote! {
+        /// Refresh `symbolic =` field values and declared `deriv =` caches
+        /// from the current parameters. Generated; called by the update and
+        /// deserialize paths.
+        #[doc(hidden)]
+        pub fn __precompute_symbolic(&mut self) {
+            #(#stmts)*
+        }
+    })
+}
+
+/// The scalar components of a symbolic value, each with the suffix its
+/// field-read symbol carries ("" for a scalar). None for shapes the
+/// symbolic-field cache does not support yet.
+fn symval_components(v: &SymVal) -> Option<Vec<(&'static str, E)>> {
+    Some(match v {
+        SymVal::Scalar(e) => vec![("", e.clone())],
+        SymVal::Vec2(v2) => vec![(".x", v2.x.clone()), (".y", v2.y.clone())],
+        SymVal::Vec3(v3) => vec![(".x", v3.x.clone()), (".y", v3.y.clone()), (".z", v3.z.clone())],
+        _ => return None,
+    })
+}
+
+/// Rebuild a symbolic value of `shape`'s kind from replacement components.
+fn symval_from_components(shape: &SymVal, mut comps: Vec<E>) -> SymVal {
+    match shape {
+        SymVal::Scalar(_) => SymVal::Scalar(comps.remove(0)),
+        SymVal::Vec2(_) => SymVal::Vec2(vect2sym::from_components(
+            comps[0].clone(), comps[1].clone())),
+        SymVal::Vec3(_) => SymVal::Vec3(vect3sym::from_components(
+            comps[0].clone(), comps[1].clone(), comps[2].clone())),
+        _ => unreachable!("guarded by symval_components"),
+    }
+}
+
 struct ConstraintCtx {
     // variable name -> SymVal
     bindings: HashMap<String, SymVal>,
@@ -62,6 +218,11 @@ struct ConstraintCtx {
     // (Rust semantics), so field lookup consults these before the dotted
     // binding table.
     lets: std::collections::HashSet<String>,
+    // Substitutions collected while registering bindings: cached() units of
+    // symbolic component fields (values and declared deriv caches), resolved
+    // after differentiation to precomputed field reads -- the same pattern
+    // as the rotation-matrix substitutions.
+    subs: Vec<(arael_sym::E, arael_sym::E)>,
 }
 
 impl ConstraintCtx {
@@ -70,6 +231,7 @@ impl ConstraintCtx {
             bindings: HashMap::new(),
             entity_vars: HashMap::new(),
             lets: std::collections::HashSet::new(),
+            subs: Vec::new(),
         }
     }
 
@@ -96,6 +258,54 @@ impl ConstraintCtx {
 
 fn eval_expr(expr: &Expr, ctx: &mut ConstraintCtx) -> Result<SymVal, syn::Error> {
     match expr {
+        // Block with `let` intermediates and one final expression -- the
+        // constraint-body grammar, usable anywhere an expression is (a
+        // `symbolic =` chain, most usefully). The bindings are scoped to
+        // the block: shadowed values are restored and new names removed on
+        // exit, so intermediates cannot leak into sibling expressions.
+        Expr::Block(blk) => {
+            let mut saved: Vec<(String, Option<SymVal>, bool)> = Vec::new();
+            let mut result: Option<SymVal> = None;
+            let n = blk.block.stmts.len();
+            for (si, stmt) in blk.block.stmts.iter().enumerate() {
+                match stmt {
+                    Stmt::Local(local) => {
+                        let name = match &local.pat {
+                            Pat::Ident(pi) => pi.ident.to_string(),
+                            _ => return Err(syn::Error::new_spanned(&local.pat,
+                                "simple let binding required")),
+                        };
+                        let init = local.init.as_ref().ok_or_else(||
+                            syn::Error::new_spanned(local, "initializer required"))?;
+                        let val = eval_expr(&init.expr, ctx)?;
+                        let prev = ctx.bindings.insert(name.clone(), val);
+                        let newly = ctx.lets.insert(name.clone());
+                        saved.push((name, prev, newly));
+                    }
+                    Stmt::Expr(e, semi) => {
+                        if si + 1 != n || semi.is_some() {
+                            return Err(syn::Error::new_spanned(e,
+                                "a block expression holds `let` bindings and ONE final \
+                                 expression, no trailing semicolon"));
+                        }
+                        result = Some(eval_expr(e, ctx)?);
+                    }
+                    other => return Err(syn::Error::new_spanned(other,
+                        "only `let` bindings may precede the final expression")),
+                }
+            }
+            for (name, prev, newly) in saved.into_iter().rev() {
+                match prev {
+                    Some(v) => { ctx.bindings.insert(name.clone(), v); }
+                    None => { ctx.bindings.remove(&name); }
+                }
+                if newly {
+                    ctx.lets.remove(&name);
+                }
+            }
+            result.ok_or_else(|| syn::Error::new_spanned(expr,
+                "empty block: a final expression is required"))
+        }
         // Variable reference
         Expr::Path(ep) if ep.qself.is_none() => {
             if let Some(ident) = ep.path.get_ident() {
@@ -1602,6 +1812,52 @@ fn register_bindings_recursive(
                         format!("symbolic = expression on `{}.{}`: {}",
                             type_name, fname, e))
                 })?;
+                // Wrap each component in cached() -- a sticky substitution
+                // barrier -- so bodies and sibling expressions carry
+                // matchable units. After differentiation the value units
+                // resolve to reads of the precomputed field, and (for
+                // declared `deriv =` caches) the derivative units to reads
+                // of the cache array -- the rotation-matrix pattern.
+                let val = if let Some(comps) = symval_components(&val) {
+                    let mut wrapped = std::vec::Vec::new();
+                    for (suffix, e) in &comps {
+                        let ce = arael_sym::cached(e.clone());
+                        ctx.subs.push((ce.clone(), arael_sym::symbol(
+                            &format!("{}.{}{}", sym_prefix, fname, suffix))));
+                        wrapped.push(ce);
+                    }
+                    for (dfield, of, by) in &layout.deriv_fields {
+                        if of != fname { continue; }
+                        let by_sft = layout.fields.iter()
+                            .find(|(n, _)| n == by).map(|(_, t)| t);
+                        let comps_of = |names: &[&str]| -> std::vec::Vec<String> {
+                            names.iter().map(|c|
+                                format!("{}.{}.work().{}", sym_prefix, by, c)).collect()
+                        };
+                        let dvars: std::vec::Vec<String> = match by_sft {
+                            Some(SymFieldType::Scalar) =>
+                                vec![format!("{}.{}.work()", sym_prefix, by)],
+                            Some(SymFieldType::Vec2) => comps_of(&["x", "y"]),
+                            Some(SymFieldType::Vec3) => comps_of(&["x", "y", "z"]),
+                            _ => return Err(syn::Error::new(
+                                proc_macro2::Span::call_site(),
+                                format!("`{}.{}`: deriv `by = {}` must name a \
+                                         scalar, vec2 or vec3 param field",
+                                    type_name, dfield, by))),
+                        };
+                        for (k, dvar) in dvars.iter().enumerate() {
+                            for (suffix, e) in &comps {
+                                ctx.subs.push((
+                                    arael_sym::cached(e.diff(dvar.as_str())),
+                                    arael_sym::symbol(&format!("{}.{}[{}]{}",
+                                        sym_prefix, dfield, k, suffix))));
+                            }
+                        }
+                    }
+                    symval_from_components(&val, wrapped)
+                } else {
+                    val
+                };
                 scratch.bindings.insert(fname.clone(), val.clone());
                 ctx.bindings.insert(format!("{}.{}", key_prefix, fname), val);
             }
@@ -2729,7 +2985,7 @@ pub fn generate_root_methods(
         // Re-process constraint body to get residual-only code and full code
         // We need the symbolic expressions again
         let root_name_str = root_name.to_string();
-        let (residual_exprs, param_symbols, loss_expr) = interpret_constraint_body(
+        let (residual_exprs, param_symbols, loss_expr, component_subs) = interpret_constraint_body(
             &struct_ident, &fields.named, &constraint, &root_name_str)
             .map_err(|e| syn::Error::new(e.span(),
                 format!("{}:{}: {}", sc.attr_file, sc.attr_line, e)))?;
@@ -2737,6 +2993,9 @@ pub fn generate_root_methods(
 
         // Apply euler_angles substitutions from all referenced types
         let mut all_subs: Vec<(arael_sym::E, arael_sym::E)> = Vec::new();
+        // Symbolic component-field units (values + declared deriv caches),
+        // collected while the bindings were registered.
+        all_subs.extend(component_subs);
         // Build var_infos to know which variables reference which types
         let struct_layout_for_subs = registry_lookup(&sc.struct_name);
         let ref_paths_for_subs = struct_layout_for_subs.as_ref()
@@ -5083,7 +5342,7 @@ fn interpret_constraint_body(
     fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
     constraint: &ConstraintAttr,
     root_type_name: &str,
-) -> syn::Result<(Vec<E>, Vec<String>, Option<E>)> {
+) -> syn::Result<(Vec<E>, Vec<String>, Option<E>, Vec<(E, E)>)> {
     // `root.<selfblock>` primary: the entity supplies only data, every param
     // is the root's. Deep validation lives in the traversal side (which sees
     // the real field types); here it only shapes the symbol environment.
@@ -5399,7 +5658,7 @@ fn interpret_constraint_body(
         None
     };
 
-    Ok((residuals, param_symbols, loss_expr))
+    Ok((residuals, param_symbols, loss_expr, ctx.subs))
 }
 
 /// Zero-cost source-origin marker: emits a doc-attribute on a nested dummy
@@ -5792,6 +6051,7 @@ mod nested_path_tests {
             universal_euler_angle_fields: Vec::new(),
             universal_rotvec_fields: Vec::new(),
             symbolic_fields: Vec::new(),
+            deriv_fields: Vec::new(),
             component: false,
             constraint_index_field: None,
             self_block_field: None,

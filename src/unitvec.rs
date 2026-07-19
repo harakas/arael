@@ -43,7 +43,8 @@ pub struct UnitVecParam {
     /// fix it to freeze the direction.
     pub d: Param<vect2<f64>>,
     /// User-facing direction: set it (any nonzero length) before a solve,
-    /// read it after `deserialize`.
+    /// read it after `deserialize`. During a solve it holds the embed at the
+    /// current delta, refreshed by the update paths.
     pub unit: vect3<f64>,
 }
 
@@ -57,6 +58,7 @@ impl UnitVecParam {
             unit: dir,
         };
         Component::start(&mut p);
+        p.__precompute_symbolic();
         p
     }
 
@@ -73,6 +75,21 @@ impl UnitVecParam {
 
     fn refresh(&mut self) {
         self.rot = self.ref_q.rotation_matrix();
+    }
+
+    /// The hand-written twin of the generated symbolic precompute: the
+    /// chart embed at the current delta, into the fields the generated
+    /// constraint code reads.
+    #[doc(hidden)]
+    pub fn __precompute_symbolic(&mut self) {
+        let d = self.d.work();
+        let s2 = 1.0 + (d.x * d.x + d.y * d.y) * 0.25;
+        let local = vect3::new(
+            1.0 - (d.x * d.x + d.y * d.y) / (2.0 * s2),
+            d.y / s2,
+            -d.x / s2,
+        );
+        self.unit = self.rot * local;
     }
 }
 
@@ -127,12 +144,15 @@ impl Model for UnitVecParam {
     fn deserialize_params32(&mut self, data: &[f32]) {
         Model::deserialize_params32(&mut self.d, data);
         Component::finish(self);
+        self.__precompute_symbolic();
     }
     fn update32(&mut self, data: &[f32]) {
         Model::update32(&mut self.d, data);
+        self.__precompute_symbolic();
     }
     fn update_self(&mut self) {
         Model::update_self(&mut self.d);
+        self.__precompute_symbolic();
     }
 
     fn serialize_params64(&mut self, data: &mut std::vec::Vec<f64>) {
@@ -142,9 +162,11 @@ impl Model for UnitVecParam {
     fn deserialize_params64(&mut self, data: &[f64]) {
         Model::deserialize_params64(&mut self.d, data);
         Component::finish(self);
+        self.__precompute_symbolic();
     }
     fn update64(&mut self, data: &[f64]) {
         Model::update64(&mut self.d, data);
+        self.__precompute_symbolic();
     }
 
     fn serialize_size(&self) -> u32 {
