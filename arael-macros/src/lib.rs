@@ -278,6 +278,44 @@ fn builtin_component_layout(name: &str) -> Option<SymLayout> {
         // the first column of the small-rotation matrix of the normalized
         // quaternion (1, (0, d.x, d.y)/2), rotated by the cached reference
         // rotation -- exact on the sphere for every delta.
+        // A rigid transform: reference frame plus a coupled 6-DOF step.
+        // The translation half of the step is carried through the rotation
+        // happening alongside it (see crate::se3).
+        "TransformParam" | "TransformParamF" => Some(SymLayout {
+            fields: vec![
+                ("ref_rotation".to_string(), SymFieldType::Mat3),
+                ("ref_translation".to_string(), SymFieldType::Vec3),
+                ("w".to_string(), SymFieldType::Vec3),
+                ("d".to_string(), SymFieldType::Vec3),
+                ("rotation_matrix".to_string(), SymFieldType::Mat3),
+                ("translation".to_string(), SymFieldType::Vec3),
+                ("rotation_matrix_dw".to_string(), SymFieldType::Skip),
+                ("translation_dd".to_string(), SymFieldType::Skip),
+                ("translation_dw".to_string(), SymFieldType::Skip),
+            ],
+            collection_fields: Vec::new(),
+            param_fields: vec!["w".to_string(), "d".to_string()],
+            ref_paths: Vec::new(),
+            euler_angle_fields: Vec::new(),
+            universal_euler_angle_fields: Vec::new(),
+            universal_rotvec_fields: Vec::new(),
+            symbolic_fields: vec![
+                ("rotation_matrix".to_string(),
+                 "ref_rotation * matrix3sym::from_rotation_vector_small(w)".to_string()),
+                ("translation".to_string(),
+                 "{ let carried = d + (w % d) * 0.5 \
+                    + (w % (w % d)) * 0.16666666666666666; \
+                    ref_translation + ref_rotation * carried }".to_string()),
+            ],
+            deriv_fields: vec![
+                ("rotation_matrix_dw".to_string(), "rotation_matrix".to_string(), "w".to_string()),
+                ("translation_dd".to_string(), "translation".to_string(), "d".to_string()),
+                ("translation_dw".to_string(), "translation".to_string(), "w".to_string()),
+            ],
+            component: true,
+            constraint_index_field: None,
+            self_block_field: None,
+        }),
         "UnitVecParam" | "UnitVecParamF" => Some(SymLayout {
             fields: vec![
                 ("rot".to_string(), SymFieldType::Mat3),

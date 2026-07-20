@@ -1993,6 +1993,8 @@ pub use inventory;
 pub use arael_sym as sym;
 /// Model trait, parameter types, and Hessian blocks.
 pub mod model;
+pub mod se3;
+pub mod transform;
 pub mod unitvec;
 /// Levenberg-Marquardt solver with dense, band, and sparse backends.
 pub mod simple_lm;

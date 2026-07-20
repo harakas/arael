@@ -1,15 +1,18 @@
-// The arael runner. Plane normals use arael's builtin UnitVecParam (the
-// S^2 direction component); examples/plane_slam_demo.rs carries the same
-// model with the component spelled out as a user-defined
-// #[arael(component)] -- the two are equivalent by construction and by
-// test (tests/unitvec_param.rs::builtin_matches_the_macro_component).
+// The arael runner. Poses use arael's builtin TransformParam (translation
+// and rotation optimized together, stepping in twist coordinates) and plane normals its
+// UnitVecParam (the S^2 direction component);
+// examples/plane_slam_demo.rs carries the same model with the direction
+// component spelled out as a user-defined #[arael(component)] -- the two
+// are equivalent by construction and by test
+// (tests/unitvec_param.rs::builtin_matches_the_macro_component).
 //
 // The f32 model is a type-for-type twin (the macro bakes the scalar into the
 // generated code, so the two are different types), sharing the constraint
 // bodies verbatim.
 
-use arael::model::{CrossBlock, Param, QuaternionParam, SelfBlock};
+use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::refs::Ref;
+use arael::transform::{TransformParam, TransformParamF};
 use arael::unitvec::{UnitVecParam, UnitVecParamF};
 use arael::simple_lm::{lm_solve, LmConfig, LmResult, SparseFaer};
 use arael::matrix::{matrix3d, matrix3f};
@@ -21,10 +24,8 @@ use crate::scene::{Plane, Pose, RawScene, Solution};
 #[arael::model]
 #[derive(Clone)]
 struct PoseV {
-    /// Position in the world frame.
-    pos: Param<vect3d>,
-    /// Rotation body-to-world.
-    q: QuaternionParam<f64>,
+    /// The pose: reference (robot) frame into world.
+    r2w: TransformParam,
     /// This pose's Hessian tile (gradient + diagonal block of J^T J).
     hb: SelfBlock<PoseV>,
 }
@@ -41,7 +42,7 @@ struct PlaneLm {
 }
 
 // Odometry between-residual, identical to the g2o runner's custom edge.
-// Translation: err_t = R_a^T (b.pos - a.pos) - measured_translation.
+// Translation: err_t = R_a^T (b.r2w.translation - a.r2w.translation) - measured_translation.
 // Rotation: the error rotation dR = R_m^T R_a^T R_b (measured relative
 // rotation inverted, composed with the estimated one) should be identity;
 // the residual is its skew part read as a vector,
@@ -51,9 +52,9 @@ struct PlaneLm {
 // M[1][0]) -- the c1/c2/c3 column arithmetic in the body.
 #[arael::model]
 #[arael(constraint(hb, {
-    let ra = a.q.rotation_matrix();
-    let rb = b.q.rotation_matrix();
-    let dt = ra.transpose() * (b.pos - a.pos) - odov.measured_translation;
+    let ra = a.r2w.rotation_matrix;
+    let rb = b.r2w.rotation_matrix;
+    let dt = ra.transpose() * (b.r2w.translation - a.r2w.translation) - odov.measured_translation;
     let dr = odov.measured_rotation_transposed * (ra.transpose() * rb);
     let c1 = dr * vect3sym::from_components(1.0, 0.0, 0.0);
     let c2 = dr * vect3sym::from_components(0.0, 1.0, 0.0);
@@ -72,7 +73,7 @@ struct Odov {
     #[arael(ref = root.poses)]
     b: Ref<PoseV>,
     /// Measured relative translation: where odometry says `b` sits in
-    /// `a`'s frame; compared against R_a^T (b.pos - a.pos).
+    /// `a`'s frame; compared against R_a^T (b.r2w.translation - a.r2w.translation).
     measured_translation: vect3d,
     /// TRANSPOSE of the measured relative rotation, R_m^T -- stored
     /// pre-transposed because the residual only ever uses it that way
@@ -93,10 +94,10 @@ struct Odov {
 // normal in the frame aligning n_l with e1, plus the distance difference.
 #[arael::model]
 #[arael(constraint(hb, {
-    let rp = p.q.rotation_matrix();
+    let rp = p.r2w.rotation_matrix;
     let nw = l.n.unit;
     let nl = rp.transpose() * nw;
-    let cl = l.c + p.pos * nw;
+    let cl = l.c + p.r2w.translation * nw;
     let h = sqrt(nl.x * nl.x + nl.y * nl.y);
     let mx = nl * obsv.measured_normal;
     let my = (obsv.measured_normal.y * nl.x - obsv.measured_normal.x * nl.y) / h;
@@ -146,10 +147,8 @@ fn build(raw: &RawScene) -> World {
         obs: std::vec::Vec::new(),
     };
     for (k, p) in raw.poses.iter().enumerate() {
-        let fixed = k == 0;
         world.poses.push(PoseV {
-            pos: if fixed { Param::fixed(p.t) } else { Param::new(p.t) },
-            q: if fixed { QuaternionParam::fixed(p.q) } else { QuaternionParam::new(p.q) },
+            r2w: if k == 0 { TransformParam::fixed(p.t, p.q) } else { TransformParam::new(p.t, p.q) },
             hb: SelfBlock::new(),
         });
     }
@@ -187,7 +186,7 @@ fn build(raw: &RawScene) -> World {
 fn extract(world: &World) -> Solution {
     Solution {
         poses: world.poses.iter()
-            .map(|p| Pose { q: p.q.value, t: p.pos.value }).collect(),
+            .map(|p| Pose { q: p.r2w.rotation, t: p.r2w.translation }).collect(),
         planes: world.planes.iter()
             .map(|pl| Plane { n: pl.n.unit, c: pl.c.value }).collect(),
     }
@@ -255,8 +254,7 @@ pub fn run_f32_capped(raw: &RawScene, max_iters: usize) -> Solution {
 #[arael::model]
 #[derive(Clone)]
 struct PoseVF {
-    pos: Param<vect3f>,
-    q: QuaternionParam<f32>,
+    r2w: TransformParamF,
     hb: SelfBlock<PoseVF, f32>,
 }
 
@@ -270,9 +268,9 @@ struct PlaneLmF {
 
 #[arael::model]
 #[arael(constraint(hb, {
-    let ra = a.q.rotation_matrix();
-    let rb = b.q.rotation_matrix();
-    let dt = ra.transpose() * (b.pos - a.pos) - odovf.measured_translation;
+    let ra = a.r2w.rotation_matrix;
+    let rb = b.r2w.rotation_matrix;
+    let dt = ra.transpose() * (b.r2w.translation - a.r2w.translation) - odovf.measured_translation;
     let dr = odovf.measured_rotation_transposed * (ra.transpose() * rb);
     let c1 = dr * vect3sym::from_components(1.0, 0.0, 0.0);
     let c2 = dr * vect3sym::from_components(0.0, 1.0, 0.0);
@@ -297,10 +295,10 @@ struct OdovF {
 
 #[arael::model]
 #[arael(constraint(hb, {
-    let rp = p.q.rotation_matrix();
+    let rp = p.r2w.rotation_matrix;
     let nw = l.n.unit;
     let nl = rp.transpose() * nw;
-    let cl = l.c + p.pos * nw;
+    let cl = l.c + p.r2w.translation * nw;
     let h = sqrt(nl.x * nl.x + nl.y * nl.y);
     let mx = nl * obsvf.measured_normal;
     let my = (obsvf.measured_normal.y * nl.x - obsvf.measured_normal.x * nl.y) / h;
@@ -349,10 +347,9 @@ fn build_f32(raw: &RawScene) -> WorldF {
         obs: std::vec::Vec::new(),
     };
     for (k, p) in raw.poses.iter().enumerate() {
-        let fixed = k == 0;
         world.poses.push(PoseVF {
-            pos: if fixed { Param::fixed(v3f(p.t)) } else { Param::new(v3f(p.t)) },
-            q: if fixed { QuaternionParam::fixed(qf(p.q)) } else { QuaternionParam::new(qf(p.q)) },
+            r2w: if k == 0 { TransformParamF::fixed(v3f(p.t), qf(p.q)) }
+                 else { TransformParamF::new(v3f(p.t), qf(p.q)) },
             hb: SelfBlock::new(),
         });
     }
@@ -393,11 +390,11 @@ fn extract_f32(world: &WorldF) -> Solution {
     Solution {
         poses: world.poses.iter()
             .map(|p| Pose {
-                q: quaternd::new(p.q.value.t as f64,
-                    vect3d::new(p.q.value.v.x as f64, p.q.value.v.y as f64,
-                        p.q.value.v.z as f64)).unit(),
-                t: vect3d::new(p.pos.value.x as f64, p.pos.value.y as f64,
-                    p.pos.value.z as f64),
+                q: quaternd::new(p.r2w.rotation.t as f64,
+                    vect3d::new(p.r2w.rotation.v.x as f64, p.r2w.rotation.v.y as f64,
+                        p.r2w.rotation.v.z as f64)).unit(),
+                t: vect3d::new(p.r2w.translation.x as f64, p.r2w.translation.y as f64,
+                    p.r2w.translation.z as f64),
             })
             .collect(),
         planes: world.planes.iter()
