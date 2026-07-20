@@ -119,6 +119,9 @@
 //! A heterogeneous monocular SLAM benchmark (six factor types, seven
 //! systems), including a Raspberry Pi edge run:
 //! [benchmarks/slam](https://github.com/harakas/arael/tree/master/benchmarks/slam).
+//! A plane-landmark SLAM benchmark, where six systems each parameterize the
+//! plane normal differently:
+//! [benchmarks/plane](https://github.com/harakas/arael/tree/master/benchmarks/plane).
 //!
 //! <picture>
 //!   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/charts/v0.7.1/slam-loc-dark.svg">

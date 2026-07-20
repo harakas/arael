@@ -76,6 +76,8 @@ bundle-adjustment benchmark on the BAL Ladybug problems (arael vs Ceres
 and g2o): [benchmarks/bal](benchmarks/bal/README.md). A heterogeneous
 monocular SLAM benchmark (six factor types, seven systems),
 including a Raspberry Pi edge run: [benchmarks/slam](benchmarks/slam/README.md).
+A plane-landmark SLAM benchmark, where six systems each parameterize the
+plane normal differently: [benchmarks/plane](benchmarks/plane/README.md).
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/charts/v0.7.1/slam-loc-dark.svg">
