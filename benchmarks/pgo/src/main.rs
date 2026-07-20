@@ -184,7 +184,7 @@ impl bench_harness::table::Geometry for Geo3<'_> {
     fn distance(a: &Vec<g2o3::Pose3In>, b: &Vec<g2o3::Pose3In>) -> f64 { g2o3::aligned_rmse3(a, b) }
 }
 
-fn run_dataset3(name: &str, path: &str, rounds: usize, f32_floor_note: Option<&str>) {
+fn run_dataset3(name: &str, path: &str, rounds: usize) {
     let ds = g2o3::load3(path);
     println!("\n=== {} : {} poses, {} edges, {} parameters ===",
         name, ds.poses.len(), ds.edges.len(), ds.poses.len() * 6);
@@ -204,7 +204,7 @@ fn run_dataset3(name: &str, path: &str, rounds: usize, f32_floor_note: Option<&s
     }
 
     let geo = Geo3(&ds);
-    let mut t = bench_harness::table::Table::with_f32_floor(&geo, f32_floor_note);
+    let mut t = bench_harness::table::Table::new(&geo);
 
     for round in 0..rounds {
         let a64 = arael_runner3::run_f64(&ds);
@@ -322,7 +322,7 @@ fn print_header(rounds: usize, only: &Option<String>) {
     println!("arael lambda0     : {:e} (2D), {:e} (3D) [ARAEL_LAMBDA0]",
         arael_runner::LAMBDA0_2D,
         arael_runner3::LAMBDA0_3D);
-    println!("arael damping     : {} [PGO_DRIVER: default|nielsen]",
+    println!("arael damping     : {} [PGO_DRIVER: fixed|nielsen]",
         if nielsen { "Nielsen gain-ratio driver" } else { "fixed ladder (default driver)" });
     // Auto is not a third ordering -- on a pose graph there is nothing to
     // marginalize, so there is no reduced system and it factorizes under AMD.
@@ -513,16 +513,13 @@ fn main() {
     // per-step cost decrease is below single-precision evaluation noise
     // (optimum cost 1.27 spread over 6275 edges).
     let datasets3 = [
-        ("sphere2500", bench_dir.join("datasets/sphere2500.g2o"), None),
-        ("parking-garage", bench_dir.join("datasets/parking-garage.g2o"),
-            Some("stops 0.2-0.3 m short along the near-flat directions; the cost-decrease \
-                  signal is below f32 evaluation noise on this dataset (verified by probe; \
-                  SymForce's f32 lands on the same floor)")),
+        ("sphere2500", bench_dir.join("datasets/sphere2500.g2o")),
+        ("parking-garage", bench_dir.join("datasets/parking-garage.g2o")),
     ];
-    for (name, path, f32_note) in &datasets3 {
+    for (name, path) in &datasets3 {
         if !selected(name) {
             continue;
         }
-        run_dataset3(name, path.to_str().unwrap(), rounds, *f32_note);
+        run_dataset3(name, path.to_str().unwrap(), rounds);
     }
 }

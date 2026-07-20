@@ -29,7 +29,7 @@ fn print_header(scene: &Scene, cfg: &SceneConfig, rounds: usize, skip_tiny: bool
         .line("arael lambda0", format!("{:e} (f64), {:e} (f32) [ARAEL_LAMBDA0]",
             bench_harness::arael::lambda0::<arael_runner::Path>(scene),
             bench_harness::arael::lambda0::<arael_runner::PathF>(scene)))
-        .line("arael damping", format!("{} [DRIVER: default|nielsen]",
+        .line("arael damping", format!("{} [DRIVER: fixed|nielsen]",
             if bench_harness::arael::nielsen::<arael_runner::Path>() { "Nielsen gain-ratio driver" }
             else { "fixed ladder (default driver)" }))
         .line("arael backend", format!("{} [SLAM_ARAEL_SOLVER: schur|faer|cholmod]",

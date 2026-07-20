@@ -67,11 +67,14 @@ pub fn lambda0<M: Model>(input: &M::Input) -> f64 {
 /// ladder walks lambda up and down by a constant factor. It changes the iteration
 /// count, not the cost per iteration.
 ///
-/// DRIVER=nielsen|fixed overrides the problem's own default ([`Model::NIELSEN`]).
+/// DRIVER=nielsen|fixed overrides the problem's own default
+/// ([`Model::NIELSEN`]). `default` is accepted as a synonym for `fixed`:
+/// the fixed ladder is arael's own `DefaultLambdaDriver`, and the headers
+/// spell it that way.
 pub fn nielsen<M: Model>() -> bool {
     match std::env::var("DRIVER").as_deref() {
         Ok("nielsen") => true,
-        Ok("fixed") => false,
+        Ok("fixed") | Ok("default") => false,
         _ => M::NIELSEN,
     }
 }
