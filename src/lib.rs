@@ -1841,25 +1841,6 @@
 //! The `examples/` directory is the primary place to see the API in use.
 //! Each file is a runnable `cargo run --release --example <name>`.
 //!
-//! - **[`bench_band`](https://github.com/harakas/arael/blob/master/examples/bench_band.rs)**
-//!   -- benchmarks the band Cholesky backend against dense on the
-//!   localisation model at increasing pose counts. Prints timing +
-//!   speedup.
-//! - **[`bench_investigate`](https://github.com/harakas/arael/blob/master/examples/bench_investigate.rs)**
-//!   -- deeper comparison of sparse backends on the
-//!   SLAM model, with assembly vs solve breakdown and numeric
-//!   cross-check of the solutions.
-//! - **[`bench_sparse`](https://github.com/harakas/arael/blob/master/examples/bench_sparse.rs)**
-//!   -- sparse Cholesky backends (faer) vs dense on SLAM.
-//! - **[`calc_demo`](https://github.com/harakas/arael/blob/master/examples/calc_demo.rs)**
-//!   -- `bc`-style REPL calculator built on `arael-sym`. Shows
-//!   `parse_with_functions` + `FunctionBag` for user-defined
-//!   functions, persistent history via rustyline.
-//! - **[`jacobian_demo`](https://github.com/harakas/arael/blob/master/examples/jacobian_demo.rs)**
-//!   -- `#[arael(root, jacobian)]`, `#[arael(constraint_index)]`, and
-//!   `calc_jacobian` / `calc_cost_table` walk-through. End-to-end
-//!   reference for the instrumentation features referenced from
-//!   "My solve doesn't converge".
 //! - **[`linear_demo`](https://github.com/harakas/arael/blob/master/examples/linear_demo.rs)**
 //!   -- robust linear regression on noisy 2D data. Residual wrapped
 //!   in `gamma * atan(r / gamma)` -- the Starship method
@@ -1872,6 +1853,38 @@
 //!   loss_cauchy(s, 0.5)`) and the per-element starship wrapper. The
 //!   robust fits recover the true parameters; the plain fit is
 //!   dragged off. Ports Ceres's robust_curve_fitting example.
+//! - **[`slam2d_simple_demo`](https://github.com/harakas/arael/blob/master/examples/slam2d_simple_demo.rs)**
+//!   -- minimal pedagogical 2D SLAM: pose = (x, y, gamma), single
+//!   forward-facing camera reporting a bearing per landmark, diagonal
+//!   odometry covariance, first pose held fixed at the origin facing east
+//!   via `optimize = false` on its params (the fixed reference that makes
+//!   the solution unique -- all measurements are relative). Constraint
+//!   bodies use the symbolic
+//!   `matrix2sym::rotation(angle)` surface. After the LM fit it recovers
+//!   each landmark's covariance (`assemble_covariance`) and writes
+//!   `slam2d_simple.eps` -- a colour-per-landmark plot of the trajectory,
+//!   the bearing fan, ground-truth shadows, the GT-vs-estimate error
+//!   lines, and 95% confidence ellipses around each landmark (visibly
+//!   elongated along the radial direction, illustrating that depth is
+//!   the unobservable dimension of bearing-only SLAM).
+//! - **[`slam2d_multi_demo`](https://github.com/harakas/arael/blob/master/examples/slam2d_multi_demo.rs)**
+//!   -- multi-run merge on a nested model tree
+//!   (`Map { paths: Vec<Path>, landmarks }`): three GPS-anchored runs
+//!   fused in one solve via bearings onto shared root-level landmarks
+//!   (`ref = root.landmarks`, run-local odometry via
+//!   `ref = parent.poses`). Writes `slam2d_multi.eps` with 95%
+//!   ellipses.
+//! - **[`slam2d_align_demo`](https://github.com/harakas/arael/blob/master/examples/slam2d_align_demo.rs)**
+//!   -- builds one map from three runs the cheap, two-step way: each
+//!   run is solved on its own, then a small second step lines the runs
+//!   up with each other. Same scene as `slam2d_multi_demo` (which solves
+//!   everything at once), so the two results can be compared; writes
+//!   `slam2d_align.eps`.
+//! - **[`slam_demo`](https://github.com/harakas/arael/blob/master/examples/slam_demo.rs)**
+//!   -- synthetic monocular SLAM: S-curve trajectory, 20 poses,
+//!   40 landmarks, odometry + tilt + GPS + feature observations.
+//!   Full verbose-LM trace across graduated isigma passes -- the
+//!   reference for what a healthy solver run looks like.
 //! - **[`loc_demo`](https://github.com/harakas/arael/blob/master/examples/loc_demo.rs)**
 //!   -- localisation with fixed known landmarks (no gauge freedom).
 //!   Block-tridiagonal Hessian + band solver. Graduated-isigma
@@ -1888,65 +1901,66 @@
 //!   spec) and a `Path::optimise_center` pass that freezes pose
 //!   params and optimises only the globals before the main sweep.
 //! - **[`plane_slam_demo`](https://github.com/harakas/arael/blob/master/examples/plane_slam_demo.rs)**
-//!   -- plane SLAM with a USER-DEFINED component: `UnitVec`, a 2-DOF
-//!   unit direction on the sphere, built inside the example from
-//!   public pieces -- `#[arael(component)]`, the `Component`
-//!   lifecycle trait, a cached chart (`compute =`), a `symbolic =`
-//!   embed with `let` intermediates, and a declared Jacobian cache
-//!   (`deriv =`). SE3 poses and plane landmarks (unit normal +
-//!   distance) with odometry and plane observations; the same model
-//!   `benchmarks/plane` races against g2o, Ceres, GTSAM, SymForce
-//!   and factrs.
+//!   -- plane SLAM with a user-defined component: `UnitVec`, a 2-DOF
+//!   unit direction on the sphere, demonstrating
+//!   `#[arael(component)]`.
+//! - **[`m3500_demo`](https://github.com/harakas/arael/blob/master/examples/m3500_demo.rs)**
+//!   -- the classic M3500 Manhattan-world pose-graph benchmark
+//!   (Olson 2006): 3500 SE2 poses and 5453 relative-pose constraints
+//!   from a g2o file, the between-factor written symbolically, solved
+//!   with sparse faer LM. The same model backs `benchmarks/pgo`.
+//! - **[`bal_demo`](https://github.com/harakas/arael/blob/master/examples/bal_demo.rs)**
+//!   -- bundle adjustment on a real Bundle-Adjustment-in-the-Large
+//!   Ladybug problem (49 cameras, 7776 points, 31843 observations,
+//!   from the vendored file). The Snavely reprojection residual
+//!   written symbolically; verbose LM with the Nielsen driver drives
+//!   the cost 1.70M -> 26.7k and the reprojection RMS 7.3 px ->
+//!   0.92 px in 22 steps, reaching the same optimum as Ceres. Same
+//!   model as `benchmarks/bal`.
 //! - **[`model_demo`](https://github.com/harakas/arael/blob/master/examples/model_demo.rs)**
 //!   -- minimal `#[arael::model]` walk-through showing how
 //!   `Param`, `SimpleEulerAngleParam`, and the update cycle fit
 //!   together.
-//! - **[`refs_demo`](https://github.com/harakas/arael/blob/master/examples/refs_demo.rs)**
-//!   -- `Ref<T>`, `refs::Vec`, `refs::Deque`, and `refs::Arena`
-//!   behaviour: insertion, iteration, stable handles.
-//! - **[`runtime_fit_demo`](https://github.com/harakas/arael/blob/master/examples/runtime_fit_demo.rs)**
-//!   -- curve fitting where the residual equation is a string parsed
-//!   at runtime. Demonstrates `ExtendedModel` + robust loss on top
-//!   of the symbolic front end.
 //! - **[`single_root_demo`](https://github.com/harakas/arael/blob/master/examples/single_root_demo.rs)**
 //!   -- single-struct model-and-root + a direct-composed sub-model,
 //!   each carrying its own `SelfBlock<Self>`. The smallest example
 //!   that exercises the "root has its own params" path.
-//! - **[`slam2d_simple_demo`](https://github.com/harakas/arael/blob/master/examples/slam2d_simple_demo.rs)**
-//!   -- minimal pedagogical 2D SLAM: pose = (x, y, gamma), single
-//!   forward-facing camera reporting a bearing per landmark, diagonal
-//!   odometry covariance, first pose held fixed at the origin facing east
-//!   via `optimize = false` on its params (the fixed reference that makes
-//!   the solution unique -- all measurements are relative). Constraint
-//!   bodies use the symbolic
-//!   `matrix2sym::rotation(angle)` surface. After the LM fit it recovers
-//!   each landmark's covariance (`assemble_covariance`) and writes
-//!   `slam2d_simple.eps` -- a colour-per-landmark plot of the trajectory,
-//!   the bearing fan, ground-truth shadows, the GT-vs-estimate error
-//!   lines, and 95% confidence ellipses around each landmark (visibly
-//!   elongated along the radial direction, illustrating that depth is
-//!   the unobservable dimension of bearing-only SLAM).
-//! - **[`slam2d_align_demo`](https://github.com/harakas/arael/blob/master/examples/slam2d_align_demo.rs)**
-//!   -- builds one map from three runs the cheap, two-step way: each
-//!   run is solved on its own, then a small second step lines the runs
-//!   up with each other. Same scene as `slam2d_multi_demo` (which solves
-//!   everything at once), so the two results can be compared; writes
-//!   `slam2d_align.eps`.
-//! - **[`slam_demo`](https://github.com/harakas/arael/blob/master/examples/slam_demo.rs)**
-//!   -- synthetic monocular SLAM: S-curve trajectory, 20 poses,
-//!   40 landmarks, odometry + tilt + GPS + feature observations.
-//!   Full verbose-LM trace across graduated isigma passes -- the
-//!   reference for what a healthy solver run looks like.
-//! - **[`sym_demo`](https://github.com/harakas/arael/blob/master/examples/sym_demo.rs)**
-//!   -- symbolic-math tour: expression building, automatic
-//!   differentiation, CSE, pretty printing, parsing. No solver
-//!   involvement; pure `arael-sym`.
+//! - **[`refs_demo`](https://github.com/harakas/arael/blob/master/examples/refs_demo.rs)**
+//!   -- `Ref<T>`, `refs::Vec`, `refs::Deque`, and `refs::Arena`
+//!   behaviour: insertion, iteration, stable handles.
+//! - **[`jacobian_demo`](https://github.com/harakas/arael/blob/master/examples/jacobian_demo.rs)**
+//!   -- `#[arael(root, jacobian)]`, `#[arael(constraint_index)]`, and
+//!   `calc_jacobian` / `calc_cost_table` walk-through. End-to-end
+//!   reference for the instrumentation features referenced from
+//!   "My solve doesn't converge".
+//! - **[`runtime_fit_demo`](https://github.com/harakas/arael/blob/master/examples/runtime_fit_demo.rs)**
+//!   -- curve fitting where the residual equation is a string parsed
+//!   at runtime. Demonstrates `ExtendedModel` + robust loss on top
+//!   of the symbolic front end.
 //! - **[`user_function_demo`](https://github.com/harakas/arael/blob/master/examples/user_function_demo.rs)**
 //!   -- `#[arael::function]` for user-defined operators in
 //!   constraint bodies. Form A purely symbolic
 //!   `sigmoid(x) = 1 / (1 + exp(-x))` and Form B opaque numerical
 //!   `my_safe_asin` with a closed-form symbolic derivative, both
 //!   used in a single two-residual LM fit.
+//! - **[`sym_demo`](https://github.com/harakas/arael/blob/master/examples/sym_demo.rs)**
+//!   -- symbolic-math tour: expression building, automatic
+//!   differentiation, CSE, pretty printing, parsing. No solver
+//!   involvement; pure `arael-sym`.
+//! - **[`calc_demo`](https://github.com/harakas/arael/blob/master/examples/calc_demo.rs)**
+//!   -- `bc`-style REPL calculator built on `arael-sym`. Shows
+//!   `parse_with_functions` + `FunctionBag` for user-defined
+//!   functions, persistent history via rustyline.
+//! - **[`bench_band`](https://github.com/harakas/arael/blob/master/examples/bench_band.rs)**
+//!   -- benchmarks the band Cholesky backend against dense on the
+//!   localisation model at increasing pose counts. Prints timing +
+//!   speedup.
+//! - **[`bench_sparse`](https://github.com/harakas/arael/blob/master/examples/bench_sparse.rs)**
+//!   -- sparse Cholesky backends (faer) vs dense on SLAM.
+//! - **[`bench_investigate`](https://github.com/harakas/arael/blob/master/examples/bench_investigate.rs)**
+//!   -- deeper comparison of sparse backends on the
+//!   SLAM model, with assembly vs solve breakdown and numeric
+//!   cross-check of the solutions.
 //!
 //! # Crate structure
 //!
