@@ -123,9 +123,11 @@ static bench::Result solve(const Scene& s, int max_iters,
     using LS = LinearSolverEigen<BlockSolverX::PoseMatrixType>;
     auto* lev = new OptimizationAlgorithmLevenberg(
         std::make_unique<BlockSolverX>(std::make_unique<LS>()));
-    // Problem-appropriate initial damping (near-Gauss-Newton on this
-    // well-initialized graph), matching the sibling benchmark policy.
-    double lambda0 = 1e-9;
+    // Problem-appropriate initial damping. The threshold is sharp: at 900
+    // poses a trial at 1e-3 is rejected and the retry at 2e-3 accepted, so
+    // starting here saves that wasted factorization and every size below
+    // is unchanged.
+    double lambda0 = 2e-3;
     if (const char* li = getenv("G2O_LAMBDA_INIT")) lambda0 = atof(li);
     lev->setUserLambdaInit(lambda0);
 
@@ -184,8 +186,8 @@ static bench::Result solve(const Scene& s, int max_iters,
     counter->lev = lev;
     opt.addPostIterationAction(counter);
     auto* terminate = new g2o::SparseOptimizerTerminateAction();
-    double gain = 1e-5;  // shared termination class
-    if (const char* g = getenv("G2O_GAIN")) gain = atof(g);
+    double gain = 1e-7;  // shared termination class
+    if (const char* g = getenv("PLANE_TOL")) gain = atof(g);
     terminate->setGainThreshold(gain);
     terminate->setMaxIterations(max_iters);
     opt.addPostIterationAction(terminate);

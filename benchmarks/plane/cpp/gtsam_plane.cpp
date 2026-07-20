@@ -1,10 +1,10 @@
 // GTSAM runner for the plane SLAM benchmark. Builds the benchmark's shared
 // residuals as CUSTOM NoiseModelFactorN subclasses with ANALYTIC Jacobians
 // -- no numeric differentiation, so GTSAM runs at full performance, on
-// parity with the autodiff/codegen systems. Poses are a gtsam::Point3
-// translation (additive) plus a gtsam::Rot3 rotation (expmap retract,
-// right perturbation) -- the same separate-blocks class as arael and
-// Ceres. A plane is a Vector3 (dy, dz, c) fixed tangent chart around its
+// parity with the autodiff/codegen systems. Poses are gtsam::Pose3, the
+// library's own pose type, so its retraction is GTSAM's (the SE(3)
+// exponential) and each pose is one variable rather than two. A plane is
+// a Vector3 (dy, dz, c) fixed tangent chart around its
 // initial normal, the anchor rotation baked into each observation -- the
 // same formulation as the factrs and SymForce runners. The gauge is a
 // strong prior on pose 0 (zero at the start point). With unit noise
@@ -20,6 +20,7 @@
 #include "../../cpp/bench.h"
 
 #include <gtsam/base/numericalDerivative.h>
+#include <gtsam/geometry/Pose3.h>
 #include <gtsam/geometry/Rot3.h>
 #include <gtsam/inference/Symbol.h>
 #include <gtsam/nonlinear/LevenbergMarquardtOptimizer.h>
@@ -38,13 +39,13 @@
 
 using gtsam::Key;
 using gtsam::Matrix;
+using gtsam::Pose3;
 using gtsam::Rot3;
 using gtsam::Vector;
 using V3 = gtsam::Vector3;
 using M3 = Eigen::Matrix3d;
 
-static Key T(int i) { return gtsam::Symbol('t', i); }
-static Key R(int i) { return gtsam::Symbol('r', i); }
+static Key X(int i) { return gtsam::Symbol('x', i); }
 static Key L(int j) { return gtsam::Symbol('l', j); }
 
 static M3 skew(const V3& v) {
@@ -55,6 +56,15 @@ static M3 skew(const V3& v) {
 static V3 vee_half(const M3& m) {  // vee((m - m^T)/2)
     return V3(0.5 * (m(2, 1) - m(1, 2)), 0.5 * (m(0, 2) - m(2, 0)),
               0.5 * (m(1, 0) - m(0, 1)));
+}
+
+// GTSAM takes its Jacobian outputs as OptionalJacobian, which a ternary
+// cannot mix with a raw pointer -- build it explicitly instead. A
+// default-constructed one means "not wanted", which is what the
+// cost-only evaluations pass.
+template <int R, int C>
+static gtsam::OptionalJacobian<R, C> opt(bool want, Eigen::Matrix<double, R, C>& m) {
+    return want ? gtsam::OptionalJacobian<R, C>(m) : gtsam::OptionalJacobian<R, C>();
 }
 
 // The chart embed and its derivative: local direction from (dy, dz),
@@ -78,34 +88,39 @@ static V3 chart_local(double dy, double dz, Eigen::Matrix<double, 3, 2>* dl) {
 //    model is unit; analytic Jacobians) --
 
 // err_t = R_i^T (t_j - t_i) - t_m; err_r = vee((R_m^T R_i^T R_j - .^T)/2).
-struct OdoFactor : public gtsam::NoiseModelFactorN<V3, Rot3, V3, Rot3> {
+//
+// Both halves are functions of the RELATIVE pose alone -- its translation
+// is R_i^T (t_j - t_i) and its rotation R_i^T R_j -- so `between` supplies
+// the chain rule back to the two poses and only the small derivative of
+// the residual with respect to the relative pose is hand-written.
+struct OdoFactor : public gtsam::NoiseModelFactorN<Pose3, Pose3> {
     V3 tm; M3 rm_t; double wt, wr;
-    OdoFactor(Key ti, Key ri, Key tj, Key rj, const V3& tm_, const M3& rmt, double wt_, double wr_)
-        : NoiseModelFactorN<V3, Rot3, V3, Rot3>(gtsam::noiseModel::Unit::Create(6), ti, ri, tj, rj),
+    OdoFactor(Key a, Key b, const V3& tm_, const M3& rmt, double wt_, double wr_)
+        : NoiseModelFactorN<Pose3, Pose3>(gtsam::noiseModel::Unit::Create(6), a, b),
           tm(tm_), rm_t(rmt), wt(wt_), wr(wr_) {}
-    Vector evaluateError(const V3& ti, const Rot3& Ri, const V3& tj, const Rot3& Rj,
+    Vector evaluateError(const Pose3& a, const Pose3& b,
                          boost::optional<Matrix&> H1 = boost::none,
-                         boost::optional<Matrix&> H2 = boost::none,
-                         boost::optional<Matrix&> H3 = boost::none,
-                         boost::optional<Matrix&> H4 = boost::none) const override {
-        M3 ri = Ri.matrix(), rj = Rj.matrix();
-        V3 a = ri.transpose() * (tj - ti);
-        M3 dR = rm_t * ri.transpose() * rj;
+                         boost::optional<Matrix&> H2 = boost::none) const override {
+        const bool want = H1 || H2;
+        gtsam::Matrix6 Ha, Hb;
+        Pose3 rel = a.between(b, opt(want, Ha), opt(want, Hb));
+
+        gtsam::Matrix36 Ht, Hr;
+        V3 t = rel.translation(opt(want, Ht));
+        M3 dR = rm_t * rel.rotation(opt(want, Hr)).matrix();
+
         gtsam::Vector6 e;
-        e.head<3>() = (a - tm) * wt;
+        e.head<3>() = (t - tm) * wt;
         e.tail<3>() = vee_half(dR) * wr;
-        // d vee((A-A^T)/2) for A -> A(I + [w]x) is (tr(A) I - A^T) w / 2;
-        // for A -> (I - [u]x) A with u = rm_t w it is -(tr(A) I - A) rm_t w / 2.
-        if (H1) { *H1 = Matrix::Zero(6, 3); H1->topRows<3>() = -wt * ri.transpose(); }
-        if (H2) {
-            *H2 = Matrix::Zero(6, 3);
-            H2->topRows<3>() = wt * skew(a);
-            H2->bottomRows<3>() = -0.5 * wr * (dR.trace() * M3::Identity() - dR) * rm_t;
-        }
-        if (H3) { *H3 = Matrix::Zero(6, 3); H3->topRows<3>() = wt * ri.transpose(); }
-        if (H4) {
-            *H4 = Matrix::Zero(6, 3);
-            H4->bottomRows<3>() = 0.5 * wr * (dR.trace() * M3::Identity() - dR.transpose());
+
+        if (want) {
+            // d vee((A - A^T)/2) for A -> A(I + [w]x) is (tr(A) I - A^T) w / 2.
+            gtsam::Matrix6 J;
+            J.topRows<3>() = wt * Ht;
+            J.bottomRows<3>() =
+                0.5 * wr * (dR.trace() * M3::Identity() - dR.transpose()) * Hr;
+            if (H1) *H1 = J * Ha;
+            if (H2) *H2 = J * Hb;
         }
         return e;
     }
@@ -114,20 +129,24 @@ struct OdoFactor : public gtsam::NoiseModelFactorN<V3, Rot3, V3, Rot3> {
 // The shared plane observation: azimuth/elevation of the measured normal
 // in the frame aligning the predicted local normal with e1, plus the
 // distance difference. The plane variable is the (dy, dz, c) chart.
-struct ObsFactor : public gtsam::NoiseModelFactorN<V3, Rot3, V3> {
+struct ObsFactor : public gtsam::NoiseModelFactorN<Pose3, V3> {
     M3 anchor; V3 nm; double cm, waz, wel, wd;
-    ObsFactor(Key tp, Key rp, Key lp, const M3& a, const V3& nm_, double cm_,
+    ObsFactor(Key p, Key l, const M3& a, const V3& nm_, double cm_,
               double waz_, double wel_, double wd_)
-        : NoiseModelFactorN<V3, Rot3, V3>(gtsam::noiseModel::Unit::Create(3), tp, rp, lp),
+        : NoiseModelFactorN<Pose3, V3>(gtsam::noiseModel::Unit::Create(3), p, l),
           anchor(a), nm(nm_), cm(cm_), waz(waz_), wel(wel_), wd(wd_) {}
-    Vector evaluateError(const V3& tp, const Rot3& Rp, const V3& x,
+    Vector evaluateError(const Pose3& pose, const V3& x,
                          boost::optional<Matrix&> H1 = boost::none,
-                         boost::optional<Matrix&> H2 = boost::none,
-                         boost::optional<Matrix&> H3 = boost::none) const override {
+                         boost::optional<Matrix&> H2 = boost::none) const override {
+        const bool want = H1 || H2;
         Eigen::Matrix<double, 3, 2> dl;
-        V3 l = chart_local(x[0], x[1], (H1 || H2 || H3) ? &dl : nullptr);
+        V3 l = chart_local(x[0], x[1], want ? &dl : nullptr);
         V3 nw = anchor * l;
-        M3 rp = Rp.matrix();
+
+        gtsam::Matrix36 Ht, Hr;
+        V3 tp = pose.translation(opt(want, Ht));
+        M3 rp = pose.rotation(opt(want, Hr)).matrix();
+
         V3 nl = rp.transpose() * nw;
         double cl = x[2] + tp.dot(nw);
         double h = sqrt(nl.x() * nl.x() + nl.y() * nl.y());
@@ -137,8 +156,9 @@ struct ObsFactor : public gtsam::NoiseModelFactorN<V3, Rot3, V3> {
                      - nl.z() * (nl.x() * nm.x() + nl.y() * nm.y())) / h;
         double g = sqrt(mx * mx + my * my);
         V3 e(atan2(my, mx) * waz, atan2(mz, g) * wel, (cm - cl) * wd);
-        if (H1 || H2 || H3) {
-            // Rows of d(mx, my, mz)/d nl.
+
+        if (want) {
+            // Rows of d(mx, my, mz)/d nl, then the two atan2.
             V3 dh(nl.x() / h, nl.y() / h, 0.0);
             V3 dmx = nm;
             V3 dp(nm.y(), -nm.x(), 0.0);
@@ -147,31 +167,30 @@ struct ObsFactor : public gtsam::NoiseModelFactorN<V3, Rot3, V3> {
                   2.0 * nm.z() * nl.y() - nl.z() * nm.y(),
                   -(nl.x() * nm.x() + nl.y() * nm.y()));
             V3 dmz = (dq - mz * dh) / h;
-            // Rows of d(r0, r1)/d nl through the two atan2.
             V3 dr0 = waz * (mx * dmy - my * dmx) / (mx * mx + my * my);
             V3 dg = (mx * dmx + my * dmy) / g;
             V3 dr1 = wel * (g * dmz - mz * dg) / (g * g + mz * mz);
-            // nl responds to the rotation tangent as [nl]x and to the chart
-            // as R^T anchor dl; cl responds to tp as nw and to the chart as
-            // tp^T anchor dl.
-            Eigen::Matrix<double, 3, 2> dnw = anchor * dl;
-            Eigen::Matrix<double, 3, 2> dnl = rp.transpose() * dnw;
+
             if (H1) {
-                *H1 = Matrix::Zero(3, 3);
-                H1->row(2) = -wd * nw.transpose();
+                // nl responds to a rotation of the pose as [nl]x; cl to a
+                // translation as nw. Both come back through GTSAM's own
+                // pose Jacobians.
+                *H1 = Matrix::Zero(3, 6);
+                M3 sk = skew(nl);
+                H1->row(0) = dr0.transpose() * sk * Hr;
+                H1->row(1) = dr1.transpose() * sk * Hr;
+                H1->row(2) = -wd * nw.transpose() * Ht;
             }
             if (H2) {
+                // The chart moves the world normal, which moves both the
+                // local normal and the distance.
+                Eigen::Matrix<double, 3, 2> dnw = anchor * dl;
+                Eigen::Matrix<double, 3, 2> dnl = rp.transpose() * dnw;
                 *H2 = Matrix::Zero(3, 3);
-                M3 sk = skew(nl);
-                H2->row(0) = dr0.transpose() * sk;
-                H2->row(1) = dr1.transpose() * sk;
-            }
-            if (H3) {
-                *H3 = Matrix::Zero(3, 3);
-                H3->block<1, 2>(0, 0) = dr0.transpose() * dnl;
-                H3->block<1, 2>(1, 0) = dr1.transpose() * dnl;
-                H3->block<1, 2>(2, 0) = -wd * (tp.transpose() * dnw);
-                (*H3)(2, 2) = -wd;
+                H2->block<1, 2>(0, 0) = dr0.transpose() * dnl;
+                H2->block<1, 2>(1, 0) = dr1.transpose() * dnl;
+                H2->block<1, 2>(2, 0) = -wd * (tp.transpose() * dnw);
+                (*H2)(2, 2) = -wd;
             }
         }
         return e;
@@ -179,25 +198,29 @@ struct ObsFactor : public gtsam::NoiseModelFactorN<V3, Rot3, V3> {
 };
 
 // Strong gauge prior on pose 0 (zero at the start point).
-struct PriorTFactor : public gtsam::NoiseModelFactorN<V3> {
-    V3 t0; double w;
-    PriorTFactor(Key k, const V3& t0_, double w_)
-        : NoiseModelFactorN<V3>(gtsam::noiseModel::Unit::Create(3), k), t0(t0_), w(w_) {}
-    Vector evaluateError(const V3& t, boost::optional<Matrix&> H = boost::none) const override {
-        if (H) *H = w * Matrix::Identity(3, 3);
-        return w * (t - t0);
-    }
-};
-
-struct PriorRFactor : public gtsam::NoiseModelFactorN<Rot3> {
-    M3 r0_t; double w;
-    PriorRFactor(Key k, const Rot3& r0, double w_)
-        : NoiseModelFactorN<Rot3>(gtsam::noiseModel::Unit::Create(3), k),
-          r0_t(r0.matrix().transpose()), w(w_) {}
-    Vector evaluateError(const Rot3& r, boost::optional<Matrix&> H = boost::none) const override {
-        M3 dR = r0_t * r.matrix();
-        if (H) *H = 0.5 * w * (dR.trace() * M3::Identity() - dR.transpose());
-        return w * vee_half(dR);
+struct PriorFactor : public gtsam::NoiseModelFactorN<Pose3> {
+    Pose3 prior; double w;
+    PriorFactor(Key k, const Pose3& p0, double w_)
+        : NoiseModelFactorN<Pose3>(gtsam::noiseModel::Unit::Create(6), k),
+          prior(p0), w(w_) {}
+    Vector evaluateError(const Pose3& p,
+                         boost::optional<Matrix&> H = boost::none) const override {
+        gtsam::Matrix6 Hb;
+        Pose3 rel = prior.between(p, {}, opt(bool(H), Hb));
+        gtsam::Matrix36 Ht, Hr;
+        V3 t = rel.translation(opt(bool(H), Ht));
+        M3 dR = rel.rotation(opt(bool(H), Hr)).matrix();
+        gtsam::Vector6 e;
+        e.head<3>() = t * w;
+        e.tail<3>() = vee_half(dR) * w;
+        if (H) {
+            gtsam::Matrix6 J;
+            J.topRows<3>() = w * Ht;
+            J.bottomRows<3>() =
+                0.5 * w * (dR.trace() * M3::Identity() - dR.transpose()) * Hr;
+            *H = J * Hb;
+        }
+        return e;
     }
 };
 
@@ -259,67 +282,57 @@ static Scene load(const char* path) {
 
 static void build(const Scene& s, gtsam::NonlinearFactorGraph& graph, gtsam::Values& init) {
     const int n = (int)s.t.size(), m = (int)s.anchor.size();
-    for (int i = 0; i < n; i++) {
-        init.insert(T(i), s.t[i]);
-        init.insert(R(i), Rot3(s.q[i]));
-    }
+    for (int i = 0; i < n; i++) init.insert(X(i), Pose3(Rot3(s.q[i]), s.t[i]));
     for (int j = 0; j < m; j++) init.insert(L(j), V3(0, 0, s.pc[j]));
     for (const auto& o : s.odos)
-        graph.emplace_shared<OdoFactor>(T(o.i), R(o.i), T(o.j), R(o.j), o.tm, o.rm_t, o.wt, o.wr);
+        graph.emplace_shared<OdoFactor>(X(o.i), X(o.j), o.tm, o.rm_t, o.wt, o.wr);
     for (const auto& b : s.obss)
-        graph.emplace_shared<ObsFactor>(T(b.p), R(b.p), L(b.l), s.anchor[b.l], b.nm,
+        graph.emplace_shared<ObsFactor>(X(b.p), L(b.l), s.anchor[b.l], b.nm,
                                         b.cm, b.waz, b.wel, b.wd);
-    graph.emplace_shared<PriorTFactor>(T(0), s.t[0], 1e6);
-    graph.emplace_shared<PriorRFactor>(R(0), Rot3(s.q[0]), 1e6);
+    graph.emplace_shared<PriorFactor>(X(0), Pose3(Rot3(s.q[0]), s.t[0]), 1e6);
 }
 
 // GTSAM_VERIFY_JAC=1: check the analytic Jacobians against gtsam's numeric
 // differentiation on the first few factors of each kind.
 static void verify_jacobians(const Scene& s) {
-    using gtsam::numericalDerivative41;
-    using gtsam::numericalDerivative42;
-    using gtsam::numericalDerivative43;
-    using gtsam::numericalDerivative44;
-    using gtsam::numericalDerivative31;
-    using gtsam::numericalDerivative32;
-    using gtsam::numericalDerivative33;
+    using gtsam::numericalDerivative21;
+    using gtsam::numericalDerivative22;
     double worst = 0.0;
-    for (int k = 0; k < std::min<int>(4, s.odos.size()); k++) {
+    for (int k = 0; k < std::min<int>(4, (int)s.odos.size()); k++) {
         const auto& o = s.odos[k];
-        OdoFactor f(T(o.i), R(o.i), T(o.j), R(o.j), o.tm, o.rm_t, o.wt, o.wr);
-        V3 ti = s.t[o.i], tj = s.t[o.j];
-        Rot3 Ri(s.q[o.i]), Rj(s.q[o.j]);
-        Matrix H1, H2, H3, H4;
-        f.evaluateError(ti, Ri, tj, Rj, H1, H2, H3, H4);
-        auto fn = [&](const V3& a, const Rot3& b, const V3& c, const Rot3& d) {
-            return Vector(f.evaluateError(a, b, c, d));
+        OdoFactor f(X(o.i), X(o.j), o.tm, o.rm_t, o.wt, o.wr);
+        Pose3 a(Rot3(s.q[o.i]), s.t[o.i]), b(Rot3(s.q[o.j]), s.t[o.j]);
+        Matrix H1, H2;
+        f.evaluateError(a, b, H1, H2);
+        auto fn = [&](const Pose3& x, const Pose3& y) {
+            return Vector(f.evaluateError(x, y));
         };
-        worst = std::max(worst, (H1 - numericalDerivative41<Vector, V3, Rot3, V3, Rot3>(fn, ti, Ri, tj, Rj)).cwiseAbs().maxCoeff());
-        worst = std::max(worst, (H2 - numericalDerivative42<Vector, V3, Rot3, V3, Rot3>(fn, ti, Ri, tj, Rj)).cwiseAbs().maxCoeff());
-        worst = std::max(worst, (H3 - numericalDerivative43<Vector, V3, Rot3, V3, Rot3>(fn, ti, Ri, tj, Rj)).cwiseAbs().maxCoeff());
-        worst = std::max(worst, (H4 - numericalDerivative44<Vector, V3, Rot3, V3, Rot3>(fn, ti, Ri, tj, Rj)).cwiseAbs().maxCoeff());
+        worst = std::max(worst,
+            (H1 - numericalDerivative21<Vector, Pose3, Pose3>(fn, a, b)).cwiseAbs().maxCoeff());
+        worst = std::max(worst,
+            (H2 - numericalDerivative22<Vector, Pose3, Pose3>(fn, a, b)).cwiseAbs().maxCoeff());
     }
-    for (int k = 0; k < std::min<int>(6, s.obss.size()); k++) {
+    for (int k = 0; k < std::min<int>(6, (int)s.obss.size()); k++) {
         const auto& b = s.obss[k];
-        ObsFactor f(T(b.p), R(b.p), L(b.l), s.anchor[b.l], b.nm, b.cm, b.waz, b.wel, b.wd);
-        V3 tp = s.t[b.p], x(0.03, -0.02, s.pc[b.l]);  // off chart center
-        Rot3 Rp(s.q[b.p]);
-        Matrix H1, H2, H3;
-        f.evaluateError(tp, Rp, x, H1, H2, H3);
-        auto fn = [&](const V3& a, const Rot3& b_, const V3& c) {
-            return Vector(f.evaluateError(a, b_, c));
-        };
-        worst = std::max(worst, (H1 - numericalDerivative31<Vector, V3, Rot3, V3>(fn, tp, Rp, x)).cwiseAbs().maxCoeff());
-        worst = std::max(worst, (H2 - numericalDerivative32<Vector, V3, Rot3, V3>(fn, tp, Rp, x)).cwiseAbs().maxCoeff());
-        worst = std::max(worst, (H3 - numericalDerivative33<Vector, V3, Rot3, V3>(fn, tp, Rp, x)).cwiseAbs().maxCoeff());
+        ObsFactor f(X(b.p), L(b.l), s.anchor[b.l], b.nm, b.cm, b.waz, b.wel, b.wd);
+        Pose3 p(Rot3(s.q[b.p]), s.t[b.p]);
+        V3 x(0.03, -0.02, s.pc[b.l]);  // off the chart centre
+        Matrix H1, H2;
+        f.evaluateError(p, x, H1, H2);
+        auto fn = [&](const Pose3& a, const V3& c) { return Vector(f.evaluateError(a, c)); };
+        worst = std::max(worst,
+            (H1 - numericalDerivative21<Vector, Pose3, V3>(fn, p, x)).cwiseAbs().maxCoeff());
+        worst = std::max(worst,
+            (H2 - numericalDerivative22<Vector, Pose3, V3>(fn, p, x)).cwiseAbs().maxCoeff());
     }
     {
-        PriorRFactor f(R(0), Rot3(s.q[0]), 1.0);
-        Rot3 Rp(s.q[3 % (int)s.q.size()]);
+        PriorFactor f(X(0), Pose3(Rot3(s.q[0]), s.t[0]), 1.0);
+        Pose3 p(Rot3(s.q[3 % (int)s.q.size()]), s.t[3 % (int)s.t.size()]);
         Matrix H;
-        f.evaluateError(Rp, H);
-        auto fn = [&](const Rot3& r) { return Vector(f.evaluateError(r)); };
-        worst = std::max(worst, (H - gtsam::numericalDerivative11<Vector, Rot3>(fn, Rp)).cwiseAbs().maxCoeff());
+        f.evaluateError(p, H);
+        auto fn = [&](const Pose3& a) { return Vector(f.evaluateError(a)); };
+        worst = std::max(worst,
+            (H - gtsam::numericalDerivative11<Vector, Pose3>(fn, p)).cwiseAbs().maxCoeff());
     }
     fprintf(stderr, "gtsam jac check (odo/obs/prior) max|analytic-numeric| = %.3e\n", worst);
     if (worst > 1e-4) { fprintf(stderr, "JACOBIAN MISMATCH\n"); exit(2); }
@@ -335,8 +348,10 @@ static bench::Result solve(const Scene& s, int max_iters,
     gtsam::LevenbergMarquardtParams params;
     params.setVerbosityLM("SILENT");
     params.setMaxIterations(max_iters);
-    params.setRelativeErrorTol(1e-5);  // shared termination class
-    params.setAbsoluteErrorTol(1e-5);
+    double tol = 1e-7;  // shared termination class
+    if (const char* t = getenv("PLANE_TOL")) tol = atof(t);
+    params.setRelativeErrorTol(tol);
+    params.setAbsoluteErrorTol(tol);
     // Problem-appropriate initial damping (near-Gauss-Newton on this
     // well-initialized graph), matching the sibling benchmark policy.
     params.lambdaInitial = 1e-9;
@@ -354,8 +369,9 @@ static bench::Result solve(const Scene& s, int max_iters,
     if (pose_out) {
         pose_out->clear();
         for (int i = 0; i < n; i++) {
-            V3 t = result.at<V3>(T(i));
-            Eigen::Quaterniond q(result.at<Rot3>(R(i)).matrix());
+            Pose3 p = result.at<Pose3>(X(i));
+            Eigen::Quaterniond q(p.rotation().matrix());
+            V3 t = p.translation();
             double vals[7] = {t.x(), t.y(), t.z(), q.w(), q.x(), q.y(), q.z()};
             pose_out->insert(pose_out->end(), vals, vals + 7);
         }

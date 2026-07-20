@@ -139,6 +139,27 @@ pub struct World {
     obs: std::vec::Vec<Obsv>,
 }
 
+/// Termination class for this benchmark, shared by every system in the
+/// table (see the C++ runners' matching constants).
+///
+/// Tighter than the harness default of 1e-5, because these costs are
+/// large: 1e-5 RELATIVE at a cost of 12000 means "stop once a step gains
+/// less than 0.12", which leaves a solve short of the table's 5 cm
+/// agreement gate. PLANE_TOL overrides.
+pub fn tolerance() -> f64 {
+    std::env::var("PLANE_TOL").ok().and_then(|v| v.parse().ok()).unwrap_or(1e-7)
+}
+
+/// The same class for single-precision rows, which cannot be held to the
+/// double-precision one: f32 epsilon is 1.2e-7, so a relative test at or
+/// below that is measuring rounding noise rather than progress. A solver
+/// asked to chase it spends its time on rejected steps -- at 900 poses
+/// SymForce took 30 attempts for 6 accepted steps at 1e-7, and 7 for 7
+/// here.
+pub fn tolerance_f32() -> f64 {
+    std::env::var("PLANE_TOL_F32").ok().and_then(|v| v.parse().ok()).unwrap_or(1e-5)
+}
+
 fn build(raw: &RawScene) -> World {
     let mut world = World {
         poses: arael::refs::Vec::new(),
@@ -220,6 +241,10 @@ impl bench_harness::arael::Model for World {
     fn solve(_: &RawScene, params: &[f64], m: &mut Self, cfg: &LmConfig<f64>)
         -> LmResult<f64> {
         lm_solve(params, &mut SparseFaer::<f64>::new(), m, cfg)
+    }
+    fn tune(cfg: &mut LmConfig<f64>) {
+        cfg.abs_precision = tolerance();
+        cfg.rel_precision = tolerance();
     }
 }
 
@@ -418,5 +443,9 @@ impl bench_harness::arael::Model for WorldF {
     fn solve(_: &RawScene, params: &[f32], m: &mut Self, cfg: &LmConfig<f32>)
         -> LmResult<f32> {
         lm_solve(params, &mut SparseFaer::<f32>::new(), m, cfg)
+    }
+    fn tune(cfg: &mut LmConfig<f32>) {
+        cfg.abs_precision = tolerance_f32() as f32;
+        cfg.rel_precision = tolerance_f32() as f32;
     }
 }

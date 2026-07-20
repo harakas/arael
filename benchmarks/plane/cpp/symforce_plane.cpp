@@ -180,11 +180,18 @@ static bench::Result solve(const Scene& s, int max_iters,
 
     auto params = sym::DefaultOptimizerParams();
     params.iterations = max_iters;
-    params.early_exit_min_reduction = 1e-5;  // shared termination class
-    // Problem-appropriate initial damping (near-Gauss-Newton on this
-    // well-initialized graph), matching the sibling benchmark policy;
-    // SymForce ships 1.0 (SYMFORCE_LAMBDA0 overrides).
-    params.initial_lambda = 1e-10;
+    // Shared termination class, per precision: f32 epsilon is 1.2e-7, so a
+    // relative test at the double-precision class measures rounding noise
+    // and costs rejected steps (30 attempts for 6 accepted, against 8 for
+    // 5 here).
+    params.early_exit_min_reduction = std::is_same<Scalar, double>::value ? 1e-7 : 1e-5;
+    if (const char* t = getenv(std::is_same<Scalar, double>::value ? "PLANE_TOL" : "PLANE_TOL_F32"))
+        params.early_exit_min_reduction = atof(t);
+    // Problem-appropriate initial damping. SymForce ships 1.0;
+    // near-Gauss-Newton values spend damping retries on the long loops,
+    // where this accepts every step (7 of 7 at 900 poses against 18
+    // attempts at 1e-10). Nothing below 300 poses moves.
+    params.initial_lambda = 3e-3;
     if (const char* l = getenv("SYMFORCE_LAMBDA0")) params.initial_lambda = atof(l);
 
     sym::Optimizer<Scalar> optimizer(params, std::move(factors));

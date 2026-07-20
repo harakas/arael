@@ -278,7 +278,13 @@ pub fn run(raw: &RawScene) -> crate::arael_runner::RunOut {
         let before = counts();
         let (ms, result) = bench_harness::solver::timed(|| {
             let params = LevenParams {
-                base: BaseOptParams { max_iterations: max_iter, ..Default::default() },
+                base: BaseOptParams {
+                    max_iterations: max_iter,
+                    // The benchmark's shared termination class.
+                    error_tol_relative: crate::arael_runner::tolerance(),
+                    error_tol_absolute: crate::arael_runner::tolerance(),
+                    ..Default::default()
+                },
                 ..Default::default()
             };
             let mut opt = LevenMarquardt::new(params, graph);

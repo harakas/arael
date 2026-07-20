@@ -159,10 +159,17 @@ static bench::Result solve(const Scene& scene, int max_iters,
     options.linear_solver_type = ceres::SPARSE_NORMAL_CHOLESKY;
     options.max_num_iterations = max_iters;
     options.num_threads = 1;
-    options.function_tolerance = 1e-5;  // shared termination class
-    // Problem-appropriate initial trust region (large -> near-Gauss-Newton
-    // on this well-initialized graph), matching the sibling benchmark policy.
-    options.initial_trust_region_radius = 1e12;
+    // Shared termination class for this benchmark (see the arael
+    // runner's tolerance()); tighter than the sibling benchmarks because
+    // these costs are large and the relative test is what bites.
+    options.function_tolerance = 1e-7;
+    if (const char* f = getenv("PLANE_TOL")) options.function_tolerance = atof(f);
+    // Problem-appropriate initial trust region: near-Gauss-Newton on this
+    // well-initialized graph, but not so large that the first steps
+    // overshoot on the long loops. At 900 poses 1e12 costs 43 iterations
+    // and 1e10 rejects five steps; this takes 11 with one rejection.
+    // Nothing below 300 poses moves.
+    options.initial_trust_region_radius = 1e7;
     if (const char* r = getenv("CERES_RADIUS0")) options.initial_trust_region_radius = atof(r);
     if (getenv("CERES_VERBOSE")) options.minimizer_progress_to_stdout = true;
 
