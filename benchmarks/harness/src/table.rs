@@ -9,7 +9,7 @@
 
 use std::collections::BTreeSet;
 
-use crate::probe::fmt1;
+use crate::probe::fmt_ms;
 
 /// What one system's run reports.
 pub struct Row<S> {
@@ -192,10 +192,10 @@ impl<'a, G: Geometry> Table<'a, G> {
             } else {
                 String::new()
             };
-            println!("{:<w$} {:>10.1} {:>9} {:>10.2} {:>10} {:>12}{} {:>14.4}{}",
+            println!("{:<w$} {:>10.2} {:>9} {:>10.2} {:>10} {:>12}{} {:>14.4}{}",
                 label, row.solve_ms, iters,
                 row.solve_ms / row.iterations.max(1) as f64,
-                full, fmt1(row.first_iter_ms), mem, cost, miss, w = w);
+                full, fmt_ms(row.first_iter_ms), mem, cost, miss, w = w);
         }
 
         // A row that missed is marked on its own line above and counted in

@@ -54,7 +54,9 @@ pub fn two_iter_ms(ms: f64, first_iter_ms: f64, two_accepted: usize) -> Option<f
 }
 
 /// A measured millisecond value, or "-" when the harness could not measure it
-/// cleanly.
-pub fn fmt1(v: f64) -> String {
-    if v.is_finite() { format!("{:.1}", v) } else { "-".to_string() }
+/// cleanly. Two decimals, like ms/iter and full-iter: on the small scenes a
+/// whole column of solves lands under a millisecond, where one decimal
+/// rounds distinct systems onto the same number.
+pub fn fmt_ms(v: f64) -> String {
+    if v.is_finite() { format!("{:.2}", v) } else { "-".to_string() }
 }
