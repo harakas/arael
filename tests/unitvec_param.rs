@@ -201,7 +201,7 @@ struct Lm2 {
 
 #[arael::model]
 #[arael(root)]
-struct MRoot {
+struct M2 {
     lms: arael::refs::Vec<Lm2>,
 }
 
@@ -221,7 +221,7 @@ fn builtin_matches_the_macro_component() {
         isigma: 1.5,
         hb: SelfBlock::new(),
     });
-    let mut macro_m = MRoot { lms };
+    let mut macro_m = M2 { lms };
 
     let cfg = LmConfig::conservative();
     let rb = builtin.solve_dense(&cfg);

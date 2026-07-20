@@ -1927,18 +1927,35 @@ fn validate_entity_path(type_name: &str, var_head: &str, rest: &str, span: &Expr
 /// `&mut` item or `self`, so the emission needs no whole-struct alias
 /// binding (the old `&*(self as *const Self)` laundering was undefined
 /// behavior under Stacked/Tree Borrows).
+/// Renames only identifiers in VARIABLE position. An identifier directly
+/// after `.` (a field or method) or after `:` (a path segment) names
+/// something inside another value and has nothing to do with the binding
+/// being renamed -- a model field named like the root type's lowercase
+/// (`m2` under root `M2`) or like the constraint struct's own lowercase
+/// otherwise turned into `self` / `__item` mid-path.
 fn rename_ident(ts: TokenStream2, from: &str, to: &str) -> TokenStream2 {
-    ts.into_iter().map(|tt| match tt {
-        proc_macro2::TokenTree::Ident(id) if id == from => {
-            proc_macro2::TokenTree::Ident(proc_macro2::Ident::new(to, id.span()))
-        }
-        proc_macro2::TokenTree::Group(g) => {
-            let mut ng = proc_macro2::Group::new(g.delimiter(), rename_ident(g.stream(), from, to));
-            ng.set_span(g.span());
-            proc_macro2::TokenTree::Group(ng)
-        }
-        other => other,
-    }).collect()
+    let mut out = TokenStream2::new();
+    let mut after_selector = false;
+    for tt in ts {
+        let selector = matches!(&tt,
+            proc_macro2::TokenTree::Punct(p) if p.as_char() == '.' || p.as_char() == ':');
+        let renamable = !after_selector;
+        after_selector = selector;
+        out.extend(std::iter::once(match tt {
+            proc_macro2::TokenTree::Ident(id) if renamable && id == from => {
+                proc_macro2::TokenTree::Ident(proc_macro2::Ident::new(to, id.span()))
+            }
+            proc_macro2::TokenTree::Group(g) => {
+                // A group opens a fresh expression: its first token is never
+                // in selector position.
+                let mut ng = proc_macro2::Group::new(g.delimiter(), rename_ident(g.stream(), from, to));
+                ng.set_span(g.span());
+                proc_macro2::TokenTree::Group(ng)
+            }
+            other => other,
+        }));
+    }
+    out
 }
 
 fn rewrite_guard_self(e: &mut syn::Expr, replacement: &str) {

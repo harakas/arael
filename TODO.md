@@ -332,14 +332,16 @@
   nearly banded, and the one comparison that would have declined was
   skipped.
 
-- **arael-macros: the `root` body alias shadows same-named field segments
-  in dotted paths** (found 2026-07-20 by tests/unitvec_param.rs). The
-  root.selfblock feature registers the root under its LOWERCASED type name;
-  a constraint body reading `entity.<field>` where `<field>` equals that
-  name (e.g. field `m2` under a root struct `M2`) resolves the field
-  segment against the root alias and emits the root's `self` access base
-  (`__item.self.x`, rustc E0609 at the owner). Trigger is purely the name
-  coincidence. Fix: field-segment resolution must consult the dotted
-  binding of the ENTITY's layout before any bare alias; regression test =
-  a model with a field named like its lowercased root type. Workaround
-  meanwhile: rename one of the two (the test uses root `MRoot`).
+- **arael-macros: a model field named like the root type (or like its own
+  struct) broke emission** -- DONE (2026-07-20). The cause was NOT binding
+  resolution as first filed: `rename_ident` (constraint.rs), which maps
+  body-binding names to the emitted access (`<root_lc>` -> `self`,
+  `<struct_lc>` -> `__item`), renamed EVERY matching identifier token,
+  including ones in field position. A field `m2` under root `M2` emitted
+  `__item.self.x` (rustc E0609 at the owner); a field named like its own
+  struct's lowercase would have emitted `__item.__item.x`. Fixed by
+  renaming only identifiers in VARIABLE position -- not after `.` (field
+  or method) or `:` (path segment). Verified a no-op for existing models:
+  generated code is byte-identical for the plane benchmark, loc_global_demo
+  (root params + TripletBlock), slam_demo, m3500_demo and root_fit_demo.
+  Test: tests/name_collisions.rs.
