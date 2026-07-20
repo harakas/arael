@@ -23,7 +23,9 @@ treated as a constant.
 | `Param<vect3<T>>` | 3 | 3D position, velocity, linear vector |
 | `SimpleEulerAngleParam<T>` | 3 | three independent Euler angles (roll, pitch, yaw) stored directly |
 | `EulerAngleParam<T>` | 3 | "universal" Euler angles: parameters are a delta composed with a fixed reference rotation, avoiding parameterisation singularities for large-angle motion |
-| `QuaternionParam<T>` | 3 | same 3-angle delta as `EulerAngleParam`, but the reference is a unit quaternion (renormalised on every re-center, so it never drifts off SO(3)) |
+| `QuaternionParam<T>` | 3 | a rotation-vector delta (not euler angles) composed with a unit-quaternion reference, renormalised on every re-center so it never drifts off SO(3) |
+| `TransformParam<T>` | 6 | a rigid transform, such as a robot pose: a translation and a rotation moved together; the optimized delta is represented as a twist (se(3)), so a rotation correction carries the translation with it. Clear `optimize_translation` or `optimize_rotation` to hold either half |
+| `UnitVecParam<T>` | 2 | a direction on the unit sphere, such as the normal of a mapped plane landmark: read and write `unit`, which stays unit length because the two parameters rotate a reference direction rather than move its components |
 
 The three SO(3) parameterizations reach the same optimum; they differ only in
 residual/Jacobian assembly cost (the linear solve is identical). Each pose

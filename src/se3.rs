@@ -30,9 +30,10 @@
 //! there, and convert back -- there is no direct formula for composing
 //! them.
 //!
-//! [`SE3Param`](crate::se3param::SE3Param) steps a pose in these
-//! coordinates: it holds a reference frame and folds each accepted step
-//! into it, so the step is always expressed in the pose's own frame.
+//! [`TransformParam`](crate::transform::TransformParam) steps a transform
+//! in these coordinates: it holds a reference frame and folds each
+//! accepted step into it, so the step is always expressed in the
+//! transform's own frame.
 
 use crate::quatern::quatern;
 use crate::utils::Float;

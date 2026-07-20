@@ -870,9 +870,9 @@ impl<T: crate::utils::Float> Model for EulerAngleParam<T> where vect3<T>: ParamT
 /// the reference is kept as a unit quaternion (renormalized on every re-center)
 /// rather than a rotation matrix, so it never drifts off SO(3).
 ///
-/// It serializes to the same three delta angles and exposes the same reference
-/// rotation matrix (`ref_rotation`) and composed rotation as `EulerAngleParam`,
-/// so constraints consume it identically.
+/// Its delta is a rotation vector rather than euler angles, but it exposes the
+/// same reference rotation matrix (`ref_rotation`) and composed rotation as
+/// `EulerAngleParam`, so constraints consume it identically.
 ///
 /// `value` is the initial orientation going in and the optimized orientation
 /// coming out: the solver keeps its working state in an internal reference

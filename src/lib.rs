@@ -83,6 +83,12 @@
 //! - **Gimbal-lock-free rotations** -- `EulerAngleParam` (euler-angle delta)
 //!   and `QuaternionParam` (rotation-vector delta) optimize a small delta
 //!   around a re-centered reference rotation
+//! - **Rigid transforms** -- `TransformParam` optimizes a translation and a
+//!   rotation as one 6-DOF parameter. The optimized delta is represented
+//!   as a twist (se(3)), so a rotation correction carries the translation
+//!   with it
+//! - **Unit directions** -- `UnitVecParam` optimizes a direction with 2
+//!   degrees of freedom
 //! - **Fast approximate atan** -- `#[arael(root, fast_atan)]` swaps every
 //!   atan/atan2 in the generated code for polynomial approximations (max
 //!   error < 1e-6 rad); or call `fast_atan`/`fast_atan2` per site.
@@ -391,7 +397,9 @@
 //! | [`Param<vect3<T>>`](vect::vect3) | 3 | 3D position, velocity, linear vector |
 //! | [`SimpleEulerAngleParam<T>`](model::SimpleEulerAngleParam) | 3 | three direct Euler angles (roll, pitch, yaw) |
 //! | [`EulerAngleParam<T>`](model::EulerAngleParam) | 3 | "universal" delta composed with a fixed reference rotation; avoids parameterisation singularities for large-angle motion |
-//! | [`QuaternionParam<T>`](model::QuaternionParam) | 3 | same 3-angle delta as `EulerAngleParam`, but the reference is a unit quaternion (renormalised each re-center, never drifts off SO(3)) |
+//! | [`QuaternionParam<T>`](model::QuaternionParam) | 3 | a rotation-vector delta (not euler angles) composed with a unit-quaternion reference, renormalised each re-center so it never drifts off SO(3) |
+//! | [`TransformParam<T>`](transform::TransformParam) | 6 | a rigid transform, such as a robot pose: a translation and a rotation moved together; the optimized delta is represented as a twist (se(3)), so a rotation correction carries the translation with it |
+//! | [`UnitVecParam<T>`](unitvec::UnitVecParam) | 2 | a direction on the unit sphere, such as the normal of a mapped plane landmark: read and write `unit`, which stays unit length because the two parameters rotate a reference direction rather than move its components |
 //!
 //! ```ignore
 //! #[arael::model]
@@ -2040,6 +2048,8 @@ pub mod prelude {
         FitProblem, LmConfig, LmProblem, LmResult, LmSolver, NielsenLambdaDriver,
         RootProblem,
     };
+    pub use crate::transform::{TransformParam, TransformParamF};
+    pub use crate::unitvec::{UnitVecParam, UnitVecParamF};
     pub use crate::matrix::{matrix2d, matrix2f, matrix3d, matrix3f};
     pub use crate::quatern::{quaternd, quaternf};
     pub use crate::vect::{vect2d, vect2f, vect3d, vect3f};
