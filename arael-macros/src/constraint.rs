@@ -182,26 +182,47 @@ pub(crate) fn generate_symbolic_precompute(
 }
 
 /// The scalar components of a symbolic value, each with the suffix its
-/// field-read symbol carries ("" for a scalar). None for shapes the
-/// symbolic-field cache does not support yet.
+/// field-read symbol carries ("" for a scalar) -- the same suffixes the
+/// runtime type indexes by, so a component doubles as an assignment
+/// target (`self.rot[0].x`). None for shapes the symbolic-field cache
+/// does not support.
 fn symval_components(v: &SymVal) -> Option<Vec<(&'static str, E)>> {
     Some(match v {
         SymVal::Scalar(e) => vec![("", e.clone())],
         SymVal::Vec2(v2) => vec![(".x", v2.x.clone()), (".y", v2.y.clone())],
         SymVal::Vec3(v3) => vec![(".x", v3.x.clone()), (".y", v3.y.clone()), (".z", v3.z.clone())],
-        _ => return None,
+        SymVal::Mat2(m) => vec![
+            ("[0].x", m.rows[0].x.clone()), ("[0].y", m.rows[0].y.clone()),
+            ("[1].x", m.rows[1].x.clone()), ("[1].y", m.rows[1].y.clone()),
+        ],
+        SymVal::Mat3(m) => vec![
+            ("[0].x", m.rows[0].x.clone()), ("[0].y", m.rows[0].y.clone()), ("[0].z", m.rows[0].z.clone()),
+            ("[1].x", m.rows[1].x.clone()), ("[1].y", m.rows[1].y.clone()), ("[1].z", m.rows[1].z.clone()),
+            ("[2].x", m.rows[2].x.clone()), ("[2].y", m.rows[2].y.clone()), ("[2].z", m.rows[2].z.clone()),
+        ],
+        SymVal::Quat(q) => vec![
+            (".t", q.t.clone()),
+            (".v.x", q.v.x.clone()), (".v.y", q.v.y.clone()), (".v.z", q.v.z.clone()),
+        ],
+        SymVal::UniversalEulerAngles { .. } => return None,
     })
 }
 
 /// Rebuild a symbolic value of `shape`'s kind from replacement components.
 fn symval_from_components(shape: &SymVal, mut comps: Vec<E>) -> SymVal {
+    let c = |i: usize| comps[i].clone();
     match shape {
         SymVal::Scalar(_) => SymVal::Scalar(comps.remove(0)),
-        SymVal::Vec2(_) => SymVal::Vec2(vect2sym::from_components(
-            comps[0].clone(), comps[1].clone())),
-        SymVal::Vec3(_) => SymVal::Vec3(vect3sym::from_components(
-            comps[0].clone(), comps[1].clone(), comps[2].clone())),
-        _ => unreachable!("guarded by symval_components"),
+        SymVal::Vec2(_) => SymVal::Vec2(vect2sym::from_components(c(0), c(1))),
+        SymVal::Vec3(_) => SymVal::Vec3(vect3sym::from_components(c(0), c(1), c(2))),
+        SymVal::Mat2(_) => SymVal::Mat2(matrix2sym::from_elements(c(0), c(1), c(2), c(3))),
+        SymVal::Mat3(_) => SymVal::Mat3(matrix3sym::from_elements(
+            c(0), c(1), c(2), c(3), c(4), c(5), c(6), c(7), c(8))),
+        SymVal::Quat(_) => SymVal::Quat(quaternsym {
+            t: c(0),
+            v: vect3sym::from_components(c(1), c(2), c(3)),
+        }),
+        SymVal::UniversalEulerAngles { .. } => unreachable!("guarded by symval_components"),
     }
 }
 
@@ -1081,6 +1102,14 @@ fn eval_static_constructor(ty: &str, func: &str, args: Vec<SymVal>, span: &Expr)
         ("matrix3sym", "rotation_from_axis_angle") => {
             arity(2)?;
             Ok(SymVal::Mat3(matrix3sym::rotation_from_axis_angle(&vec3(0)?, scalar(1)?)))
+        }
+        // The rotation of the normalized first-order quaternion
+        // (1, v/2) -- rational (no trig), exact for every v, and the same
+        // retraction `QuaternionParam` applies internally. A component
+        // that owns its own rotation delta builds its chart with this.
+        ("matrix3sym", "from_rotation_vector_small") => {
+            arity(1)?;
+            Ok(SymVal::Mat3(matrix3sym::from_rotation_vector_small(&vec3(0)?)))
         }
         ("vect2sym", "from_components") => {
             arity(2)?;
@@ -4686,7 +4715,12 @@ pub fn generate_root_methods(
             let type_name = match inner_name { Some(s) => s, None => continue };
             if !reachable.contains(&type_name) { continue; }
             let layout = match registry_lookup(&type_name) { Some(l) => l, None => continue };
-            if layout.param_fields.is_empty() { continue; }
+            // No `param_fields.is_empty()` pre-filter here: it counts only
+            // DIRECT Param fields, so an entity whose params live entirely
+            // inside an #[arael(component)] was skipped and its SelfBlock
+            // never got indices -- every gradient and Hessian contribution
+            // to it silently dropped. `param_slots` below walks components,
+            // and the `offset == 0` guard covers the param-less case.
             let hb_field = match layout.self_block_field.clone() {
                 Some(s) => s, None => continue,
             };
@@ -4731,7 +4765,12 @@ pub fn generate_root_methods(
             { seg.ident.to_string() } else { continue };
             if !reachable.contains(&type_name) { continue; }
             let layout = match registry_lookup(&type_name) { Some(l) => l, None => continue };
-            if layout.param_fields.is_empty() { continue; }
+            // No `param_fields.is_empty()` pre-filter here: it counts only
+            // DIRECT Param fields, so an entity whose params live entirely
+            // inside an #[arael(component)] was skipped and its SelfBlock
+            // never got indices -- every gradient and Hessian contribution
+            // to it silently dropped. `param_slots` below walks components,
+            // and the `offset == 0` guard covers the param-less case.
             let hb_field = match layout.self_block_field.clone() {
                 Some(s) => s, None => continue,
             };
@@ -4777,7 +4816,12 @@ pub fn generate_root_methods(
                 .collect::<Vec<_>>().join(".");
             if wired.contains(&joined) { continue; }
             let layout = match registry_lookup(type_name) { Some(l) => l, None => continue };
-            if layout.param_fields.is_empty() { continue; }
+            // No `param_fields.is_empty()` pre-filter here: it counts only
+            // DIRECT Param fields, so an entity whose params live entirely
+            // inside an #[arael(component)] was skipped and its SelfBlock
+            // never got indices -- every gradient and Hessian contribution
+            // to it silently dropped. `param_slots` below walks components,
+            // and the `offset == 0` guard covers the param-less case.
             let hb_field = match layout.self_block_field.clone() { Some(s) => s, None => continue };
             let hb_ident = syn::Ident::new(&hb_field, proc_macro2::Span::call_site());
             let mut a_idx_stmts: Vec<TokenStream2> = Vec::new();

@@ -6,8 +6,9 @@
 // `finish` writes the user-facing value back. The body reads `off.c`, whose
 // `symbolic =` expansion carries d(c)/d(delta) = 1 through the constraint.
 
-use arael::model::{Component, Param, SelfBlock};
+use arael::model::{Component, CrossBlock, Param, SelfBlock};
 use arael::simple_lm::{LmConfig, LmProblem};
+use arael::vect::vect3d;
 
 #[arael::model]
 #[arael(component)]
@@ -242,5 +243,133 @@ fn deriv_cache_and_values_are_fresh_after_solve() {
         // was correct along the way.
         let g = 2.0 * (it.sq.c2 - it.obs) * (2.0 * c) + 0.5 * (c - it.prior);
         assert!(g.abs() < 1e-6, "stationarity residual {}", g);
+    }
+}
+
+// --- an entity whose params come ENTIRELY from a component ----------------
+//
+// The self-block index emission used to pre-filter on the entity's DIRECT
+// Param fields, so an entity that carries no Param of its own -- all of
+// them inside a component -- never had its SelfBlock indexed. The residual
+// still evaluated, but every gradient and Hessian contribution routed
+// through that block went nowhere: a silently zero system.
+
+#[arael::model]
+#[arael(component)]
+struct Off3 {
+    ref_p: vect3d,
+    d: Param<vect3d>,
+    #[arael(symbolic = ref_p + d)]
+    p: vect3d,
+}
+
+impl Component for Off3 {
+    fn start(&mut self) {
+        self.ref_p = self.p;
+        self.d.value = vect3d::new(0.0, 0.0, 0.0);
+    }
+    fn update(&mut self) {
+        self.ref_p = self.ref_p + self.d.value;
+        self.d.value = vect3d::new(0.0, 0.0, 0.0);
+    }
+    fn finish(&mut self) {
+        self.p = self.ref_p + self.d.value;
+    }
+}
+
+fn off3(p: vect3d) -> Off3 {
+    let mut o = Off3 { ref_p: p, d: Param::new(vect3d::new(0.0, 0.0, 0.0)), p };
+    Component::start(&mut o);
+    o
+}
+
+#[arael::model]
+struct Node {
+    /// The only param source on this entity.
+    o: Off3,
+    hb: SelfBlock<Node>,
+}
+
+#[arael::model]
+#[arael(constraint(hb, {
+    let dp = b.o.p - a.o.p - link.measured;
+    [dp.x, dp.y, dp.z]
+}, parent = link))]
+struct Link {
+    #[arael(ref = root.nodes)]
+    a: arael::refs::Ref<Node>,
+    #[arael(ref = root.nodes)]
+    b: arael::refs::Ref<Node>,
+    measured: vect3d,
+    hb: CrossBlock<Node, Node>,
+}
+
+#[arael::model]
+#[arael(root)]
+struct Chain {
+    nodes: arael::refs::Vec<Node>,
+    links: std::vec::Vec<Link>,
+}
+
+fn build_chain() -> Chain {
+    let mut c = Chain { nodes: arael::refs::Vec::new(), links: std::vec::Vec::new() };
+    for p in [vect3d::new(0.0, 0.0, 0.0),
+              vect3d::new(0.9, 0.1, 0.0),
+              vect3d::new(2.2, -0.1, 0.0)] {
+        c.nodes.push(Node { o: off3(p), hb: SelfBlock::new() });
+    }
+    // Node 0 is the gauge.
+    c.nodes[0].o.d = Param::fixed(vect3d::new(0.0, 0.0, 0.0));
+    for i in 0..2u32 {
+        c.links.push(Link {
+            a: arael::refs::Ref::new(i),
+            b: arael::refs::Ref::new(i + 1),
+            measured: vect3d::new(1.0, 0.0, 0.0),
+            hb: CrossBlock::new(),
+        });
+    }
+    c
+}
+
+#[test]
+fn component_only_entity_gets_a_live_system() {
+    let mut c = build_chain();
+    let mut params = Vec::new();
+    c.serialize64(&mut params);
+    assert_eq!(params.len(), 6, "two free nodes, 3 params each");
+
+    let n = params.len();
+    let mut g = vec![0.0; n];
+    let mut h = vec![0.0; n * n];
+    c.calc_grad_hessian_dense(&params, &mut g, &mut h);
+
+    // The whole point: a system that is not silently zero.
+    assert!((0..n).all(|i| h[i * n + i] > 0.0),
+        "zero Hessian diagonal -- the SelfBlock never got its indices: {:?}",
+        (0..n).map(|i| h[i * n + i]).collect::<Vec<_>>());
+    assert!(g.iter().any(|v| v.abs() > 1e-9), "gradient is entirely zero: {:?}", g);
+
+    let eps = 1e-6;
+    for i in 0..n {
+        let mut pp = params.clone();
+        pp[i] += eps;
+        let cp = c.calc_cost(&pp);
+        pp[i] -= 2.0 * eps;
+        let cm = c.calc_cost(&pp);
+        let ng = (cp - cm) / (2.0 * eps);
+        assert!((g[i] - ng).abs() < 1e-5, "grad[{}]: {} vs {}", i, g[i], ng);
+    }
+}
+
+#[test]
+fn component_only_entity_solves() {
+    let mut c = build_chain();
+    let r = c.solve_dense(&LmConfig::conservative());
+    assert!(r.status.is_success(), "{:?}", r.status);
+    // Exact chain: node k lands at k units along x.
+    for (k, node) in c.nodes.iter().enumerate() {
+        let want = vect3d::new(k as f64, 0.0, 0.0);
+        assert!((node.o.p - want).norm() < 1e-9,
+            "node {} at {:?}", k, (node.o.p.x, node.o.p.y, node.o.p.z));
     }
 }
