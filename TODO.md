@@ -311,6 +311,17 @@
   natural showcase for assemble_covariance). The plane benchmark keeps a
   degenerate all-visible env for the Schur-gate stress case meanwhile.
 
+  The remote-block form of this guard is lifted (2026-07-20). The cause is
+  the same in all three forms: the parameter walk is hand-rolled per form,
+  iterating `layout.param_fields` (direct fields only) and emitting
+  `#var.#field.write_indices(..)` with a single identifier, so a param
+  inside a component is unreachable -- and the inline size match returns 0
+  for any field type it does not name, so the entity's span silently
+  measures 0. `param_slots` / `param_slot_size` / `slot_access` already do
+  this correctly and are what self- and cross-blocks use. The triplet /
+  multi-cross builder still carries its own copy; replacing it with those
+  three helpers is the same edit made for remote blocks.
+
 - **arael: Schur Auto gate misfires when a small block family is observed
   by everyone** -- DONE (2026-07-19). The shortcut now prices the
   alternative: it fires only when the reduced route (reduction +

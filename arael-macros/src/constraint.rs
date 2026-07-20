@@ -2820,9 +2820,6 @@ pub fn generate_root_methods(
             if root_self_primary.is_some() {
                 check.push((root_type_str.clone(), "root.<selfblock> constraints"));
             }
-            if let Some((_, _, ref target_type)) = remote_block_info {
-                check.push((target_type.clone(), "remote-block constraints"));
-            }
             for (t, form) in check {
                 if has_component_params(&t) {
                     return Err(syn::Error::new(proc_macro2::Span::call_site(),
@@ -3998,28 +3995,21 @@ pub fn generate_root_methods(
             let target_coll_ident = target_coll.map(|(name, _)|
                 syn::Ident::new(&name, proc_macro2::Span::call_site()));
 
-            // Build index setup for target type's params
-            let target_layout = registry_lookup(target_type);
-            let target_param_count = target_layout.as_ref().map(|l| l.param_fields.iter().map(|pf| {
-                l.fields.iter().find(|(n, _)| n == pf).map(|(_, sft)| match sft {
-                    SymFieldType::Scalar => 1usize, SymFieldType::Vec2 => 2, SymFieldType::Vec3 => 3, _ => 0,
-                }).unwrap_or(0)
-            }).sum::<usize>()).unwrap_or(0);
+            // Index setup for the target type's params. `param_slots` walks
+            // into `#[arael(component)]` fields, so a component's params sit
+            // in the target's span exactly as they do for a self/cross block.
+            let target_param_count = param_total(target_type);
 
             let mut target_idx_stmts = Vec::new();
-            if let Some(ref tl) = target_layout {
-                let mut offset = 0usize;
-                for pf in &tl.param_fields {
-                    let pf_ident = syn::Ident::new(pf, proc_macro2::Span::call_site());
-                    let size = tl.fields.iter().find(|(n, _)| n == pf).map(|(_, sft)| match sft {
-                        SymFieldType::Scalar => 1usize, SymFieldType::Vec2 => 2, SymFieldType::Vec3 => 3, _ => 0,
-                    }).unwrap_or(0);
-                    let end = offset + size;
-                    target_idx_stmts.push(quote! {
-                        __target_ref.#pf_ident.write_indices(&mut __a_idx[#offset..#end]);
-                    });
-                    offset = end;
-                }
+            let mut offset = 0usize;
+            for slot in param_slots(target_type) {
+                let size = param_slot_size(&slot.sft);
+                let end = offset + size;
+                let access = slot_access(quote! { __target_ref }, &slot.path);
+                target_idx_stmts.push(quote! {
+                    #access.write_indices(&mut __a_idx[#offset..#end]);
+                });
+                offset = end;
             }
 
             let marker = source_marker(sc);
