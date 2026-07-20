@@ -1,86 +1,22 @@
-// The arael runner. The S^2 plane-normal parameterization is a USER-DEFINED
-// component: declared here with #[arael(component)], lifecycle via the
-// Component trait, chart cached with compute=, embed via chained symbolic=
-// fields -- the full macro path, nothing arael-internal.
+// The arael runner. Plane normals use arael's builtin UnitVecParam (the
+// S^2 direction component); examples/plane_slam_demo.rs carries the same
+// model with the component spelled out as a user-defined
+// #[arael(component)] -- the two are equivalent by construction and by
+// test (tests/unitvec_param.rs::builtin_matches_the_macro_component).
 //
 // The f32 model is a type-for-type twin (the macro bakes the scalar into the
 // generated code, so the two are different types), sharing the constraint
 // bodies verbatim.
 
-use arael::model::{Component, CrossBlock, Param, QuaternionParam, SelfBlock};
+use arael::model::{CrossBlock, Param, QuaternionParam, SelfBlock};
 use arael::refs::Ref;
+use arael::unitvec::{UnitVecParam, UnitVecParamF};
 use arael::simple_lm::{lm_solve, LmConfig, LmResult, SparseFaer};
 use arael::matrix::{matrix3d, matrix3f};
 use arael::quatern::{quaternd, quaternf};
-use arael::vect::{vect2d, vect2f, vect3d, vect3f};
+use arael::vect::{vect3d, vect3f};
 
 use crate::scene::{Plane, Pose, RawScene, Solution};
-
-/// Unit direction on S^2: reference quaternion chart (x-axis = direction),
-/// 2-DOF body-frame delta about the frame's y/z. The embed is the rotated
-/// first column of the small-rotation matrix of (1, (0, d.x, d.y)/2)
-/// normalized -- exact on the sphere for every trial delta.
-#[arael::model]
-#[arael(component)]
-#[derive(Clone)]
-struct UnitVec {
-    // Rotation that takes unit vector (1, 0, 0) into "unit".
-    ref_q: quaternd,
-    #[arael(compute = self.ref_q.rotation_matrix())]
-    rot: matrix3d,
-    // d forms a rotation vector axis*angle = (0, dx, dy). We can construct a first-order rotation quaternion
-    //    q = (1, 0, d.x/2, d.y/2) / sqrt(s2)
-    // where the normalization coefficient is
-    //    s2 = 1 + d.x^2 / 4 + d.y^2 / 4
-    // we derive the rotation matrix for q -- but rotation of (1, 0, 0) is equal to its first column:
-    //    [1 - 2*(y^2+z^2), 2*(x*y+ w*z), 2*(x*z-w*y)] -- we never have to calculate 1/sqrt(s2) as it is always squared
-    d: Param<vect2d>,
-    #[arael(symbolic = {
-        let s2 = 1.0 + (d.x * d.x + d.y * d.y) * 0.25;
-        let local = vect3sym::from_components(
-            1.0 - (d.x * d.x + d.y * d.y) / (2.0 * s2), d.y / s2, 0.0 - d.x / s2);
-        rot * local
-    })]
-    unit: vect3d,
-    #[arael(deriv = unit, by = d)]
-    unit_d: [vect3d; 2],
-}
-
-impl UnitVec {
-    fn ex() -> vect3d {
-        vect3d::new(1.0, 0.0, 0.0)
-    }
-    fn new(dir: vect3d) -> UnitVec {
-        let mut u = UnitVec {
-            ref_q: quaternd::identity(),
-            rot: matrix3d::identity(),
-            d: Param::new(vect2d::new(0.0, 0.0)),
-            unit: dir,
-            unit_d: [vect3d::new(0.0, 0.0, 0.0); 2],
-        };
-        Component::start(&mut u);
-        u
-    }
-}
-
-impl Component for UnitVec {
-    fn start(&mut self) {
-        self.unit = self.unit.unit();
-        self.ref_q = quaternd::from_two_vectors(Self::ex(), self.unit);
-        self.d.value = vect2d::new(0.0, 0.0);
-    }
-    fn update(&mut self) {
-        let dq = quaternd::from_rotation_vector_small(
-            vect3d::new(0.0, self.d.value.x, self.d.value.y));
-        self.ref_q = (self.ref_q * dq).unit();
-        self.d.value = vect2d::new(0.0, 0.0);
-    }
-    fn finish(&mut self) {
-        let dq = quaternd::from_rotation_vector_small(
-            vect3d::new(0.0, self.d.value.x, self.d.value.y));
-        self.unit = (self.ref_q * dq).rotate(Self::ex());
-    }
-}
 
 #[arael::model]
 #[derive(Clone)]
@@ -97,7 +33,7 @@ struct PoseV {
 #[derive(Clone)]
 struct PlaneLm {
     /// Unit normal of the plane (2-DOF component).
-    n: UnitVec,
+    n: UnitVecParam,
     /// Distance coefficient: the plane is n.x + c = 0, distance = -c.
     c: Param<f64>,
     /// This plane's Hessian tile.
@@ -219,7 +155,7 @@ fn build(raw: &RawScene) -> World {
     }
     for pl in &raw.planes {
         world.planes.push(PlaneLm {
-            n: UnitVec::new(pl.n),
+            n: UnitVecParam::new(pl.n),
             c: Param::new(pl.c),
             hb: SelfBlock::new(),
         });
@@ -317,61 +253,6 @@ pub fn run_f32_capped(raw: &RawScene, max_iters: usize) -> Solution {
 // ------------------------------------------------------------ the f32 twin
 
 #[arael::model]
-#[arael(component)]
-#[derive(Clone)]
-struct UnitVecF {
-    ref_q: quaternf,
-    #[arael(compute = self.ref_q.rotation_matrix())]
-    rot: matrix3f,
-    d: Param<vect2f>,
-    #[arael(symbolic = {
-        let s2 = 1.0 + (d.x * d.x + d.y * d.y) * 0.25;
-        let local = vect3sym::from_components(
-            1.0 - (d.x * d.x + d.y * d.y) / (2.0 * s2), d.y / s2, 0.0 - d.x / s2);
-        rot * local
-    })]
-    unit: vect3f,
-    #[arael(deriv = unit, by = d)]
-    unit_d: [vect3f; 2],
-}
-
-impl UnitVecF {
-    fn ex() -> vect3f {
-        vect3f::new(1.0, 0.0, 0.0)
-    }
-    fn new(dir: vect3f) -> UnitVecF {
-        let mut u = UnitVecF {
-            ref_q: quaternf::identity(),
-            rot: matrix3f::identity(),
-            d: Param::new(vect2f::new(0.0, 0.0)),
-            unit: dir,
-            unit_d: [vect3f::new(0.0, 0.0, 0.0); 2],
-        };
-        Component::start(&mut u);
-        u
-    }
-}
-
-impl Component for UnitVecF {
-    fn start(&mut self) {
-        self.unit = self.unit.unit();
-        self.ref_q = quaternf::from_two_vectors(Self::ex(), self.unit);
-        self.d.value = vect2f::new(0.0, 0.0);
-    }
-    fn update(&mut self) {
-        let dq = quaternf::from_rotation_vector_small(
-            vect3f::new(0.0, self.d.value.x, self.d.value.y));
-        self.ref_q = (self.ref_q * dq).unit();
-        self.d.value = vect2f::new(0.0, 0.0);
-    }
-    fn finish(&mut self) {
-        let dq = quaternf::from_rotation_vector_small(
-            vect3f::new(0.0, self.d.value.x, self.d.value.y));
-        self.unit = (self.ref_q * dq).rotate(Self::ex());
-    }
-}
-
-#[arael::model]
 #[derive(Clone)]
 struct PoseVF {
     pos: Param<vect3f>,
@@ -382,7 +263,7 @@ struct PoseVF {
 #[arael::model]
 #[derive(Clone)]
 struct PlaneLmF {
-    n: UnitVecF,
+    n: UnitVecParamF,
     c: Param<f32>,
     hb: SelfBlock<PlaneLmF, f32>,
 }
@@ -477,7 +358,7 @@ fn build_f32(raw: &RawScene) -> WorldF {
     }
     for pl in &raw.planes {
         world.planes.push(PlaneLmF {
-            n: UnitVecF::new(v3f(pl.n)),
+            n: UnitVecParamF::new(v3f(pl.n)),
             c: Param::new(pl.c as f32),
             hb: SelfBlock::new(),
         });

@@ -331,3 +331,15 @@
   a small family observed by everyone made both expensive while H stayed
   nearly banded, and the one comparison that would have declined was
   skipped.
+
+- **arael-macros: the `root` body alias shadows same-named field segments
+  in dotted paths** (found 2026-07-20 by tests/unitvec_param.rs). The
+  root.selfblock feature registers the root under its LOWERCASED type name;
+  a constraint body reading `entity.<field>` where `<field>` equals that
+  name (e.g. field `m2` under a root struct `M2`) resolves the field
+  segment against the root alias and emits the root's `self` access base
+  (`__item.self.x`, rustc E0609 at the owner). Trigger is purely the name
+  coincidence. Fix: field-segment resolution must consult the dotted
+  binding of the ENTITY's layout before any bare alias; regression test =
+  a model with a field named like its lowercased root type. Workaround
+  meanwhile: rename one of the two (the test uses root `MRoot`).

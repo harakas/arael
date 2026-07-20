@@ -118,3 +118,125 @@ fn fixed_direction_stays_put() {
     assert!(r.status.is_success(), "{:?}", r.status);
     assert!((m.lms[0].dir.unit - start).norm() < 1e-12);
 }
+
+// --- equivalence with a user-defined macro component -----------------------
+//
+// The builtin UnitVecParam is documented as the hand-written twin of a
+// user-defined #[arael(component)] with the same fields. Prove it: the same
+// problem built with a macro-expanded twin must solve identically -- same
+// cost trajectory endpoint, same optimized direction, and the same
+// precomputed unit / unit_d caches at the solution.
+
+use arael::matrix::matrix3d;
+use arael::model::Component;
+use arael::quatern::quaternd;
+use arael::vect::{vect2d, vect3d};
+
+#[arael::model]
+#[arael(component)]
+struct UnitVecMacro {
+    ref_q: quaternd,
+    #[arael(compute = self.ref_q.rotation_matrix())]
+    rot: matrix3d,
+    d: Param<vect2d>,
+    #[arael(symbolic = {
+        let s2 = 1.0 + (d.x * d.x + d.y * d.y) * 0.25;
+        let local = vect3sym::from_components(
+            1.0 - (d.x * d.x + d.y * d.y) / (2.0 * s2), d.y / s2, 0.0 - d.x / s2);
+        rot * local
+    })]
+    unit: vect3d,
+    #[arael(deriv = unit, by = d)]
+    unit_d: [vect3d; 2],
+}
+
+impl UnitVecMacro {
+    fn new(dir: vect3d) -> UnitVecMacro {
+        let mut u = UnitVecMacro {
+            ref_q: quaternd::identity(),
+            rot: matrix3d::identity(),
+            d: Param::new(vect2d::new(0.0, 0.0)),
+            unit: dir,
+            unit_d: [vect3d::new(0.0, 0.0, 0.0); 2],
+        };
+        Component::start(&mut u);
+        u
+    }
+}
+
+impl Component for UnitVecMacro {
+    fn start(&mut self) {
+        self.unit = self.unit.unit();
+        self.ref_q = quaternd::from_two_vectors(vect3d::new(1.0, 0.0, 0.0), self.unit);
+        self.d.value = vect2d::new(0.0, 0.0);
+    }
+    fn update(&mut self) {
+        let dq = quaternd::from_rotation_vector_small(
+            vect3d::new(0.0, self.d.value.x, self.d.value.y));
+        self.ref_q = (self.ref_q * dq).unit();
+        self.d.value = vect2d::new(0.0, 0.0);
+    }
+    fn finish(&mut self) {
+        let dq = quaternd::from_rotation_vector_small(
+            vect3d::new(0.0, self.d.value.x, self.d.value.y));
+        self.unit = (self.ref_q * dq).rotate(vect3d::new(1.0, 0.0, 0.0));
+    }
+}
+
+#[arael::model]
+#[arael(constraint(hb, {
+    let u = lm2.dir.unit;
+    [(u.x - lm2.m1.x) * lm2.isigma, (u.y - lm2.m1.y) * lm2.isigma, (u.z - lm2.m1.z) * lm2.isigma,
+     (u.x - lm2.m2.x) * lm2.isigma, (u.y - lm2.m2.y) * lm2.isigma, (u.z - lm2.m2.z) * lm2.isigma,
+     (lm2.w - u.z) * 0.5]
+}))]
+struct Lm2 {
+    dir: UnitVecMacro,
+    w: Param<f64>,
+    m1: vect3<f64>,
+    m2: vect3<f64>,
+    isigma: f64,
+    hb: SelfBlock<Lm2>,
+}
+
+#[arael::model]
+#[arael(root)]
+struct MRoot {
+    lms: arael::refs::Vec<Lm2>,
+}
+
+#[test]
+fn builtin_matches_the_macro_component() {
+    let start = vect3::new(0.3, -0.8, 0.51);
+    let mut builtin = build(start);
+
+    let m1 = vect3::new(0.6, 0.64, 0.48).unit();
+    let m2 = vect3::new(0.8, 0.36, 0.48).unit();
+    let mut lms = arael::refs::Vec::new();
+    lms.push(Lm2 {
+        dir: UnitVecMacro::new(start),
+        w: Param::new(0.0),
+        m1,
+        m2,
+        isigma: 1.5,
+        hb: SelfBlock::new(),
+    });
+    let mut macro_m = MRoot { lms };
+
+    let cfg = LmConfig::conservative();
+    let rb = builtin.solve_dense(&cfg);
+    let rm = macro_m.solve_dense(&cfg);
+
+    assert!((rb.end_cost - rm.end_cost).abs() < 1e-12 * (1.0 + rb.end_cost),
+        "cost: builtin {} vs macro {}", rb.end_cost, rm.end_cost);
+    assert_eq!(rb.iterations, rm.iterations, "same damping trajectory");
+
+    let b = &builtin.lms[0].dir;
+    let m = &macro_m.lms[0].dir;
+    assert!((b.unit - m.unit).norm() < 1e-12,
+        "unit: {:?} vs {:?}", b.unit, m.unit);
+    for k in 0..2 {
+        assert!((b.unit_d[k] - m.unit_d[k]).norm() < 1e-12,
+            "unit_d[{}]: {:?} vs {:?}", k, b.unit_d[k], m.unit_d[k]);
+    }
+}

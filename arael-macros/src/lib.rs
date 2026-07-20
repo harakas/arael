@@ -278,11 +278,12 @@ fn builtin_component_layout(name: &str) -> Option<SymLayout> {
         // the first column of the small-rotation matrix of the normalized
         // quaternion (1, (0, d.x, d.y)/2), rotated by the cached reference
         // rotation -- exact on the sphere for every delta.
-        "UnitVecParam" => Some(SymLayout {
+        "UnitVecParam" | "UnitVecParamF" => Some(SymLayout {
             fields: vec![
                 ("rot".to_string(), SymFieldType::Mat3),
                 ("d".to_string(), SymFieldType::Vec2),
                 ("unit".to_string(), SymFieldType::Vec3),
+                ("unit_d".to_string(), SymFieldType::Skip),
             ],
             collection_fields: Vec::new(),
             param_fields: vec!["d".to_string()],
@@ -298,7 +299,9 @@ fn builtin_component_layout(name: &str) -> Option<SymLayout> {
                         d.y / s2, 0.0 - d.x / s2); \
                     rot * local }".to_string()),
             ],
-            deriv_fields: std::vec::Vec::new(),
+            deriv_fields: vec![
+                ("unit_d".to_string(), "unit".to_string(), "d".to_string()),
+            ],
             component: true,
             constraint_index_field: None,
             self_block_field: None,
@@ -1512,6 +1515,15 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
     } else {
         quote! { self.__precompute_symbolic(); }
     };
+    // The deserialize paths run after a solve, when the params' WORKING
+    // copies still hold the last trial state: sync them (update_self does,
+    // and then precomputes) or the refreshed fields would be evaluated at
+    // a stale delta, disagreeing with what Component::finish wrote.
+    let precompute_deser: TokenStream2 = if precompute_impl.is_empty() {
+        quote! {}
+    } else {
+        quote! { arael::model::Model::update_self(self); }
+    };
     let precompute_block: TokenStream2 = if precompute_impl.is_empty() {
         quote! {}
     } else {
@@ -1531,7 +1543,7 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
             fn deserialize_params32(&mut self, data: &[f32]) {
                 #(#deserialize_stmts)*
                 #comp_finish
-                #precompute_call
+                #precompute_deser
             }
             fn update32(&mut self, data: &[f32]) {
                 #(#update_phase1)*
@@ -1552,7 +1564,7 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
             fn deserialize_params64(&mut self, data: &[f64]) {
                 #(#deserialize64_stmts)*
                 #comp_finish
-                #precompute_call
+                #precompute_deser
             }
             fn update64(&mut self, data: &[f64]) {
                 #(#update64_phase1)*
