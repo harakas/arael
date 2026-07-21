@@ -657,27 +657,58 @@ fn remove_axis_distance(sketch: &mut Sketch, a: &DimensionEndpoint, b: &Dimensio
     }
 }
 
+/// The entity an action added, for a caller that has to act on it next --
+/// an auto-coincident against whatever the new point snapped to, say. The
+/// arena chooses the slot, so a freed slot gets refilled and the new entity
+/// is not the last one; only the value `add_*` returned identifies it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Created {
+    #[default]
+    Nothing,
+    Point(Ref<Point>),
+    Line(Ref<Line>),
+    Arc(Ref<Arc>),
+}
+
+impl Created {
+    /// The added point, if this action added one.
+    pub fn point(self) -> Option<Ref<Point>> {
+        if let Created::Point(r) = self { Some(r) } else { None }
+    }
+    /// The added line, if this action added one.
+    pub fn line(self) -> Option<Ref<Line>> {
+        if let Created::Line(r) = self { Some(r) } else { None }
+    }
+    /// The added arc, if this action added one.
+    pub fn arc(self) -> Option<Ref<Arc>> {
+        if let Created::Arc(r) = self { Some(r) } else { None }
+    }
+}
+
 impl Action {
-    /// Apply the action, then solve.
-    pub fn apply(&self, sketch: &mut Sketch) {
-        let needs_expr_update = self.apply_without_solve(sketch);
+    /// Apply the action, then solve. Returns what it added.
+    pub fn apply(&self, sketch: &mut Sketch) -> Created {
+        let (needs_expr_update, created) = self.apply_without_solve(sketch);
         sketch.assign_constraint_names();
         sketch.solve();
         if needs_expr_update {
             sketch.update_expr_dim_values();
         }
+        created
     }
 
-    /// Apply the action's mutation without solving.
-    /// Returns true if `update_expr_dim_values` should be called after solving.
-    pub fn apply_without_solve(&self, sketch: &mut Sketch) -> bool {
+    /// Apply the action's mutation without solving. Returns whether
+    /// `update_expr_dim_values` should be called after solving, and what the
+    /// action added.
+    pub fn apply_without_solve(&self, sketch: &mut Sketch) -> (bool, Created) {
         sketch.cached_dof = None;
+        let mut created = Created::Nothing;
         match self {
-            Action::AddPoint { pos } => { sketch.add_point(*pos); }
-            Action::AddLine { p1, p2 } => { sketch.add_line(*p1, *p2); }
+            Action::AddPoint { pos } => { created = Created::Point(sketch.add_point(*pos)); }
+            Action::AddLine { p1, p2 } => { created = Created::Line(sketch.add_line(*p1, *p2)); }
             Action::AddCircle { center, edge } => {
                 let r = ((edge.x - center.x).powi(2) + (edge.y - center.y).powi(2)).sqrt();
-                sketch.add_arc(*center, r, 0.0, std::f64::consts::TAU, true);
+                created = Created::Arc(sketch.add_arc(*center, r, 0.0, std::f64::consts::TAU, true));
             }
             Action::AddEllipse { center, rx, ry, rotation } => {
                 sketch.add_ellipse(*center, *rx, *ry, *rotation, true);
@@ -1025,7 +1056,7 @@ impl Action {
                 // push: `rebuild_expr_constraints` synthesises the barrier
                 // residual on every solve from `dim.range`.
                 if let Some(rb) = range {
-                    if expr.is_some() || *derived { return false; }
+                    if expr.is_some() || *derived { return (false, created); }
                     let name = format!("d{}", sketch.next_dimension_id);
                     sketch.next_dimension_id += 1;
                     sketch.dimensions.push(Dimension {
@@ -1038,7 +1069,7 @@ impl Action {
                         derived: false,
                         range: Some(rb.clone()),
                     });
-                    return false;
+                    return (false, created);
                 }
                 // Expression dimension: delegate to add_expr_dimension
                 if let Some(expr_str) = expr {
@@ -1046,7 +1077,7 @@ impl Action {
                         vect2d::new(0.0, 1.0), 0.0);
                     if *derived
                         && let Some(d) = sketch.dimensions.last_mut() { d.derived = true; }
-                    return false;
+                    return (false, created);
                 }
                 let name = format!("d{}", sketch.next_dimension_id);
                 sketch.next_dimension_id += 1;
@@ -1131,7 +1162,7 @@ impl Action {
                             && !sketch.arcs[*a].is_ellipse
                             && !sketch.arcs[*b].is_ellipse;
                         if !valid_arcs {
-                            return false;
+                            return (false, created);
                         }
                         let init_diff = sketch.arcs[*b].radius.value
                                       - sketch.arcs[*a].radius.value;
@@ -1173,7 +1204,7 @@ impl Action {
                             else { (ax * by - ay * bx).abs() / (alen * blen) < 1e-6 }
                         };
                         if !valid_lines || !parallel_present {
-                            return false;
+                            return (false, created);
                         }
                         // Reuse the point-to-line distance constraint:
                         // anchor line B's p1 to line A at the target gap.
@@ -1195,7 +1226,7 @@ impl Action {
                 });
             }
             Action::UpdateDimension { index, value, expr, range } => {
-                if *index >= sketch.dimensions.len() { return false; }
+                if *index >= sketch.dimensions.len() { return (false, created); }
                 // Same normalisation as AddDimension -- keeps the stored
                 // value and the effective target in canonical range when
                 // the user overwrites an xangle numeric dim.
@@ -1223,7 +1254,7 @@ impl Action {
                         dim.expr_str = None;
                         dim.broken = false;
                     }
-                    return true;
+                    return (true, created);
                 }
                 // Range -> numeric (or expression) transition: clear the
                 // `range` marker so `rebuild_expr_constraints` stops
@@ -1398,7 +1429,7 @@ impl Action {
                     if dim.expr_str.is_some() {
                         let desc_prefix = format!("{} = ", dim.name);
                         sketch.expr_constraints.retain(|ec| !ec.description.starts_with(&desc_prefix));
-                        return false;  // skip normal constraint removal
+                        return (false, created);  // skip normal constraint removal
                     }
                     // Remove the underlying constraint
                     match dim.kind {
@@ -1465,7 +1496,7 @@ impl Action {
                     name: name.clone(), expr_str: expr_str.clone(),
                     value, broken: false,
                 });
-                return true;
+                return (true, created);
             }
             Action::UpdateUserParam { index, name, expr_str } => {
                 if *index < sketch.user_params.len() {
@@ -1493,13 +1524,13 @@ impl Action {
                                     }
                         }
                     }
-                    return true;
+                    return (true, created);
                 }
             }
             Action::RemoveUserParam { index } => {
                 if *index < sketch.user_params.len() {
                     sketch.user_params.remove(*index);
-                    return true;
+                    return (true, created);
                 }
             }
             Action::DeleteConstraint { id } => {
@@ -1602,6 +1633,6 @@ impl Action {
                 *sketch = bincode::deserialize(snapshot).unwrap();
             }
         }
-        false
+        (false, created)
     }
 }

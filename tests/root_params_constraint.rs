@@ -61,15 +61,15 @@ fn build_model() -> (TestModel, Vec<f64>) {
     items_b.push(ItemB { b: Param::new(2.1), hb: SelfBlock::new() });
     let mut couples = arael::refs::Vec::new();
     couples.push(TripleCouple {
-        a: arael::refs::Ref::new(0),
-        b: arael::refs::Ref::new(0),
+        a: items_a.ref_at(0),
+        b: items_b.ref_at(0),
         hb_ab: CrossBlock::new(),
         hb_ar: CrossBlock::new(),
         hb_br: CrossBlock::new(),
     });
     couples.push(TripleCouple {
-        a: arael::refs::Ref::new(1),
-        b: arael::refs::Ref::new(1),
+        a: items_a.ref_at(1),
+        b: items_b.ref_at(1),
         hb_ab: CrossBlock::new(),
         hb_ar: CrossBlock::new(),
         hb_br: CrossBlock::new(),

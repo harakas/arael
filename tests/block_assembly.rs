@@ -95,8 +95,8 @@ fn build() -> World {
     }
     for i in 1..N_POSES {
         w.odos.push(Odo {
-            a: Ref::new((i - 1) as u32),
-            b: Ref::new(i as u32),
+            a: w.poses.ref_at(i - 1),
+            b: w.poses.ref_at(i),
             dx: 1.0,
             dy: 0.0,
             hb: CrossBlock::new(),
@@ -105,8 +105,8 @@ fn build() -> World {
     for j in 0..N_LANDMARKS {
         for pi in [j % N_POSES, (j + 1) % N_POSES] {
             w.obs.push(Obs {
-                p: Ref::new(pi as u32),
-                l: Ref::new(j as u32),
+                p: w.poses.ref_at(pi),
+                l: w.landmarks.ref_at(j),
                 dx: 0.3,
                 dy: 1.0,
                 hb: CrossBlock::new(),
@@ -252,7 +252,7 @@ fn two_scan_matches_coo_route() {
 
     // and a fixed param reshapes both routes identically
     let mut w = build();
-    w.landmarks[Ref::<Landmark>::new(2)].x = Param::fixed(1.2);
+    w.landmarks[2].x = Param::fixed(1.2);
     let mut params = Vec::new();
     RootProblem::serialize(&mut w, &mut params);
     let n = params.len();
@@ -411,8 +411,8 @@ fn assert_routes_agree(w: &mut World) {
 #[test]
 fn fixed_param_partial_entities() {
     let mut w = build();
-    w.poses[Ref::<Pose>::new(1)].y = Param::fixed(0.1);
-    w.landmarks[Ref::<Landmark>::new(3)].x = Param::fixed(1.8);
+    w.poses[1].y = Param::fixed(0.1);
+    w.landmarks[3].x = Param::fixed(1.8);
     let mut spans = Vec::new();
     {
         let mut p = Vec::new();
@@ -430,10 +430,10 @@ fn fixed_param_partial_entities() {
 #[test]
 fn fixed_whole_entities() {
     let mut w = build();
-    w.poses[Ref::<Pose>::new(2)].x = Param::fixed(2.0);
-    w.poses[Ref::<Pose>::new(2)].y = Param::fixed(0.2);
-    w.landmarks[Ref::<Landmark>::new(0)].x = Param::fixed(0.0);
-    w.landmarks[Ref::<Landmark>::new(0)].y = Param::fixed(1.0);
+    w.poses[2].x = Param::fixed(2.0);
+    w.poses[2].y = Param::fixed(0.2);
+    w.landmarks[0].x = Param::fixed(0.0);
+    w.landmarks[0].y = Param::fixed(1.0);
     let mut spans = Vec::new();
     {
         let mut p = Vec::new();
@@ -453,8 +453,8 @@ fn fixed_params_solve_matches_dense() {
     let cfg = LmConfig { max_iters: 50, ..Default::default() };
 
     let fix = |w: &mut World| {
-        w.poses[Ref::<Pose>::new(0)].x = Param::fixed(0.25);
-        w.landmarks[Ref::<Landmark>::new(4)].y = Param::fixed(1.3);
+        w.poses[0].x = Param::fixed(0.25);
+        w.landmarks[4].y = Param::fixed(1.3);
     };
 
     let mut wd = build();
@@ -467,12 +467,12 @@ fn fixed_params_solve_matches_dense() {
 
     assert!((rd.end_cost - rs.end_cost).abs() <= 1e-12 * (1.0 + rd.end_cost),
         "dense {} vs sparse {}", rd.end_cost, rs.end_cost);
-    assert_eq!(ws.poses[Ref::<Pose>::new(0)].x.value, 0.25);
-    assert_eq!(ws.landmarks[Ref::<Landmark>::new(4)].y.value, 1.3);
+    assert_eq!(ws.poses[0].x.value, 0.25);
+    assert_eq!(ws.landmarks[4].y.value, 1.3);
     for j in 0..N_LANDMARKS {
         let (a, b) = (
-            &wd.landmarks[Ref::<Landmark>::new(j as u32)],
-            &ws.landmarks[Ref::<Landmark>::new(j as u32)],
+            &wd.landmarks[j as usize],
+            &ws.landmarks[j as usize],
         );
         assert!((a.x.value - b.x.value).abs() < 1e-8, "landmark {} x", j);
         assert!((a.y.value - b.y.value).abs() < 1e-8, "landmark {} y", j);
@@ -488,15 +488,15 @@ fn fixed_params_solve_matches_dense() {
 fn fixed_param_full_matrix() {
     let mut w = build();
     // poses: 0 full, 1 first-fixed, 2 second-fixed, 3 both-fixed
-    w.poses[Ref::<Pose>::new(1)].x = Param::fixed(1.0);
-    w.poses[Ref::<Pose>::new(2)].y = Param::fixed(0.2);
-    w.poses[Ref::<Pose>::new(3)].x = Param::fixed(3.0);
-    w.poses[Ref::<Pose>::new(3)].y = Param::fixed(0.3);
+    w.poses[1].x = Param::fixed(1.0);
+    w.poses[2].y = Param::fixed(0.2);
+    w.poses[3].x = Param::fixed(3.0);
+    w.poses[3].y = Param::fixed(0.3);
     // landmarks: same pattern
-    w.landmarks[Ref::<Landmark>::new(1)].x = Param::fixed(0.6);
-    w.landmarks[Ref::<Landmark>::new(2)].y = Param::fixed(1.1);
-    w.landmarks[Ref::<Landmark>::new(3)].x = Param::fixed(1.8);
-    w.landmarks[Ref::<Landmark>::new(3)].y = Param::fixed(1.15);
+    w.landmarks[1].x = Param::fixed(0.6);
+    w.landmarks[2].y = Param::fixed(1.1);
+    w.landmarks[3].x = Param::fixed(1.8);
+    w.landmarks[3].y = Param::fixed(1.15);
 
     let mut spans = Vec::new();
     {
@@ -521,23 +521,23 @@ fn fixed_param_full_matrix() {
     let cfg = LmConfig { max_iters: 50, ..Default::default() };
     let rd = {
         let mut wd = build();
-        wd.poses[Ref::<Pose>::new(1)].x = Param::fixed(1.0);
-        wd.poses[Ref::<Pose>::new(2)].y = Param::fixed(0.2);
-        wd.poses[Ref::<Pose>::new(3)].x = Param::fixed(3.0);
-        wd.poses[Ref::<Pose>::new(3)].y = Param::fixed(0.3);
-        wd.landmarks[Ref::<Landmark>::new(1)].x = Param::fixed(0.6);
-        wd.landmarks[Ref::<Landmark>::new(2)].y = Param::fixed(1.1);
-        wd.landmarks[Ref::<Landmark>::new(3)].x = Param::fixed(1.8);
-        wd.landmarks[Ref::<Landmark>::new(3)].y = Param::fixed(1.15);
+        wd.poses[1].x = Param::fixed(1.0);
+        wd.poses[2].y = Param::fixed(0.2);
+        wd.poses[3].x = Param::fixed(3.0);
+        wd.poses[3].y = Param::fixed(0.3);
+        wd.landmarks[1].x = Param::fixed(0.6);
+        wd.landmarks[2].y = Param::fixed(1.1);
+        wd.landmarks[3].x = Param::fixed(1.8);
+        wd.landmarks[3].y = Param::fixed(1.15);
         wd.solve_dense(&cfg)
     };
     let rs = w.solve_sparse(&cfg);
     assert!((rd.end_cost - rs.end_cost).abs() <= 1e-12 * (1.0 + rd.end_cost),
         "dense {} vs sparse {}", rd.end_cost, rs.end_cost);
-    assert_eq!(w.poses[Ref::<Pose>::new(3)].x.value, 3.0);
-    assert_eq!(w.poses[Ref::<Pose>::new(3)].y.value, 0.3);
-    assert_eq!(w.landmarks[Ref::<Landmark>::new(3)].x.value, 1.8);
-    assert_eq!(w.landmarks[Ref::<Landmark>::new(3)].y.value, 1.15);
+    assert_eq!(w.poses[3].x.value, 3.0);
+    assert_eq!(w.poses[3].y.value, 0.3);
+    assert_eq!(w.landmarks[3].x.value, 1.8);
+    assert_eq!(w.landmarks[3].y.value, 1.15);
 }
 
 /// The Schur-complement backend (landmarks eliminated every damped
@@ -565,14 +565,14 @@ fn schur_solve_matches_sparse() {
         rq.end_cost
     );
     for i in 0..N_POSES {
-        let (a, b) = (&ws.poses[Ref::<Pose>::new(i as u32)], &wq.poses[Ref::<Pose>::new(i as u32)]);
+        let (a, b) = (&ws.poses[i as usize], &wq.poses[i as usize]);
         assert!((a.x.value - b.x.value).abs() < 1e-8, "pose {} x", i);
         assert!((a.y.value - b.y.value).abs() < 1e-8, "pose {} y", i);
     }
     for j in 0..N_LANDMARKS {
         let (a, b) = (
-            &ws.landmarks[Ref::<Landmark>::new(j as u32)],
-            &wq.landmarks[Ref::<Landmark>::new(j as u32)],
+            &ws.landmarks[j as usize],
+            &wq.landmarks[j as usize],
         );
         assert!((a.x.value - b.x.value).abs() < 1e-8, "landmark {} x", j);
         assert!((a.y.value - b.y.value).abs() < 1e-8, "landmark {} y", j);
@@ -587,8 +587,8 @@ fn schur_solve_with_fixed_params() {
     let cfg = LmConfig { max_iters: 50, ..Default::default() };
 
     let fix = |w: &mut World| {
-        w.poses[Ref::<Pose>::new(0)].x = Param::fixed(0.25);
-        w.landmarks[Ref::<Landmark>::new(4)].y = Param::fixed(1.3);
+        w.poses[0].x = Param::fixed(0.25);
+        w.landmarks[4].y = Param::fixed(1.3);
     };
 
     let mut wd = build();
@@ -609,12 +609,12 @@ fn schur_solve_with_fixed_params() {
         rd.end_cost,
         rq.end_cost
     );
-    assert_eq!(wq.poses[Ref::<Pose>::new(0)].x.value, 0.25);
-    assert_eq!(wq.landmarks[Ref::<Landmark>::new(4)].y.value, 1.3);
+    assert_eq!(wq.poses[0].x.value, 0.25);
+    assert_eq!(wq.landmarks[4].y.value, 1.3);
     for j in 0..N_LANDMARKS {
         let (a, b) = (
-            &wd.landmarks[Ref::<Landmark>::new(j as u32)],
-            &wq.landmarks[Ref::<Landmark>::new(j as u32)],
+            &wd.landmarks[j as usize],
+            &wq.landmarks[j as usize],
         );
         assert!((a.x.value - b.x.value).abs() < 1e-8, "landmark {} x", j);
         assert!((a.y.value - b.y.value).abs() < 1e-8, "landmark {} y", j);

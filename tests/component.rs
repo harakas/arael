@@ -322,8 +322,8 @@ fn build_chain() -> Chain {
     c.nodes[0].o.d = Param::fixed(vect3d::new(0.0, 0.0, 0.0));
     for i in 0..2u32 {
         c.links.push(Link {
-            a: arael::refs::Ref::new(i),
-            b: arael::refs::Ref::new(i + 1),
+            a: c.nodes.ref_at(i),
+            b: c.nodes.ref_at(i + 1),
             measured: vect3d::new(1.0, 0.0, 0.0),
             hb: CrossBlock::new(),
         });

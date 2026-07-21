@@ -71,8 +71,8 @@ fn main() {
         }
         for e in &ds.edges {
             g.edges.push(Edge {
-                a: Ref::new(e.a as u32),
-                b: Ref::new(e.b as u32),
+                a: g.poses.ref_at(e.a),
+                b: g.poses.ref_at(e.b),
                 dx: e.dx,
                 dy: e.dy,
                 dtheta: e.dth,

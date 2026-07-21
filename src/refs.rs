@@ -32,8 +32,12 @@ impl<T> std::hash::Hash for Ref<T> {
 }
 
 impl<T> Ref<T> {
-    /// Creates a new ref from a raw u32 index.
-    pub fn new(index: u32) -> Self {
+    /// Creates a ref from a raw index. Crate-internal on purpose: a ref is
+    /// only meaningful against the collection that issued it, so it is
+    /// handed out by `push`/`alloc`/`ref_at` and never forged from a bare
+    /// number. Keep a `Ref` (it is `Copy + Hash + Eq`) rather than storing
+    /// an index and rebuilding one.
+    pub(crate) fn new(index: u32) -> Self {
         Ref(index, PhantomData)
     }
 
@@ -745,15 +749,6 @@ impl<T> Arena<T> {
         })
     }
 
-    /// Returns the `Ref` of the `pos`-th live element (panics if out of
-    /// range). O(slots) because freed slots are skipped; prefer holding the
-    /// `Ref` returned by [`push`](Self::push) where you can. Accepts any
-    /// integer index (`u32`, `usize`, ...) so callers never cast.
-    pub fn ref_at(&self, pos: impl TryInto<usize>) -> Ref<T> {
-        let pos: usize = pos.try_into().ok().expect("ref_at: index out of usize range");
-        self.refs().nth(pos)
-            .unwrap_or_else(|| panic!("ref_at: position {pos} out of range (len {})", self.count))
-    }
 }
 
 impl<T: serde::Serialize> serde::Serialize for Arena<T> {
@@ -1590,9 +1585,9 @@ mod tests {
         let collected: std::vec::Vec<(Ref<i32>, i32)> =
             a.iter_refs().map(|(r, &x)| (r, x)).collect();
         assert_eq!(collected, vec![(r0, 10), (r2, 30)]);
-        // ref_at indexes live elements, skipping the removed slot.
-        assert_eq!(a.ref_at(0), r0);
-        assert_eq!(a.ref_at(1), r2);
+        // Iteration skips the removed slot and yields the live refs in order.
+        let live: std::vec::Vec<Ref<i32>> = a.refs().collect();
+        assert_eq!(live, vec![r0, r2]);
         for (_, x) in a.iter_refs_mut() {
             *x += 1;
         }

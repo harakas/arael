@@ -4561,15 +4561,15 @@ fn cmd_select(ctx: &mut CommandContext, args: &str) -> CommandResult {
 /// Select all entities connected via coincident endpoint constraints, recursively.
 fn cmd_select_chain(ctx: &mut CommandContext, seed: &str) -> CommandResult {
     // Resolve seed to a line or arc index
-    let mut line_set: std::collections::HashSet<u32> = std::collections::HashSet::new();
-    let mut arc_set: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut line_set: std::collections::HashSet<Ref<Line>> = std::collections::HashSet::new();
+    let mut arc_set: std::collections::HashSet<Ref<Arc>> = std::collections::HashSet::new();
 
     if seed.starts_with('L') {
         let r = match resolve_line(&ctx.sketch, seed) { Ok(r) => r, Err(e) => return err(e) };
-        line_set.insert(r.index());
+        line_set.insert(r);
     } else if is_arc_name(seed) {
         let r = match resolve_arc(&ctx.sketch, seed) { Ok(r) => r, Err(e) => return err(e) };
-        arc_set.insert(r.index());
+        arc_set.insert(r);
     } else {
         return err("chain requires a line or arc");
     }
@@ -4578,40 +4578,40 @@ fn cmd_select_chain(ctx: &mut CommandContext, seed: &str) -> CommandResult {
     loop {
         let before = line_set.len() + arc_set.len();
         // LL coincident
-        for c in &ctx.sketch.coincident_ll11 { if line_set.contains(&c.a.index()) { line_set.insert(c.b.index()); } if line_set.contains(&c.b.index()) { line_set.insert(c.a.index()); } }
-        for c in &ctx.sketch.coincident_ll12 { if line_set.contains(&c.a.index()) { line_set.insert(c.b.index()); } if line_set.contains(&c.b.index()) { line_set.insert(c.a.index()); } }
-        for c in &ctx.sketch.coincident_ll21 { if line_set.contains(&c.a.index()) { line_set.insert(c.b.index()); } if line_set.contains(&c.b.index()) { line_set.insert(c.a.index()); } }
-        for c in &ctx.sketch.coincident_ll22 { if line_set.contains(&c.a.index()) { line_set.insert(c.b.index()); } if line_set.contains(&c.b.index()) { line_set.insert(c.a.index()); } }
+        for c in &ctx.sketch.coincident_ll11 { if line_set.contains(&c.a) { line_set.insert(c.b); } if line_set.contains(&c.b) { line_set.insert(c.a); } }
+        for c in &ctx.sketch.coincident_ll12 { if line_set.contains(&c.a) { line_set.insert(c.b); } if line_set.contains(&c.b) { line_set.insert(c.a); } }
+        for c in &ctx.sketch.coincident_ll21 { if line_set.contains(&c.a) { line_set.insert(c.b); } if line_set.contains(&c.b) { line_set.insert(c.a); } }
+        for c in &ctx.sketch.coincident_ll22 { if line_set.contains(&c.a) { line_set.insert(c.b); } if line_set.contains(&c.b) { line_set.insert(c.a); } }
         // Line-Arc coincident
-        for c in &ctx.sketch.coincident_lp1_arc_start { if line_set.contains(&c.line.index()) { arc_set.insert(c.arc.index()); } if arc_set.contains(&c.arc.index()) { line_set.insert(c.line.index()); } }
-        for c in &ctx.sketch.coincident_lp2_arc_start { if line_set.contains(&c.line.index()) { arc_set.insert(c.arc.index()); } if arc_set.contains(&c.arc.index()) { line_set.insert(c.line.index()); } }
-        for c in &ctx.sketch.coincident_lp1_arc_end { if line_set.contains(&c.line.index()) { arc_set.insert(c.arc.index()); } if arc_set.contains(&c.arc.index()) { line_set.insert(c.line.index()); } }
-        for c in &ctx.sketch.coincident_lp2_arc_end { if line_set.contains(&c.line.index()) { arc_set.insert(c.arc.index()); } if arc_set.contains(&c.arc.index()) { line_set.insert(c.line.index()); } }
-        for c in &ctx.sketch.coincident_lp1_arc_center { if line_set.contains(&c.line.index()) { arc_set.insert(c.arc.index()); } if arc_set.contains(&c.arc.index()) { line_set.insert(c.line.index()); } }
-        for c in &ctx.sketch.coincident_lp2_arc_center { if line_set.contains(&c.line.index()) { arc_set.insert(c.arc.index()); } if arc_set.contains(&c.arc.index()) { line_set.insert(c.line.index()); } }
+        for c in &ctx.sketch.coincident_lp1_arc_start { if line_set.contains(&c.line) { arc_set.insert(c.arc); } if arc_set.contains(&c.arc) { line_set.insert(c.line); } }
+        for c in &ctx.sketch.coincident_lp2_arc_start { if line_set.contains(&c.line) { arc_set.insert(c.arc); } if arc_set.contains(&c.arc) { line_set.insert(c.line); } }
+        for c in &ctx.sketch.coincident_lp1_arc_end { if line_set.contains(&c.line) { arc_set.insert(c.arc); } if arc_set.contains(&c.arc) { line_set.insert(c.line); } }
+        for c in &ctx.sketch.coincident_lp2_arc_end { if line_set.contains(&c.line) { arc_set.insert(c.arc); } if arc_set.contains(&c.arc) { line_set.insert(c.line); } }
+        for c in &ctx.sketch.coincident_lp1_arc_center { if line_set.contains(&c.line) { arc_set.insert(c.arc); } if arc_set.contains(&c.arc) { line_set.insert(c.line); } }
+        for c in &ctx.sketch.coincident_lp2_arc_center { if line_set.contains(&c.line) { arc_set.insert(c.arc); } if arc_set.contains(&c.arc) { line_set.insert(c.line); } }
         // Arc-Arc coincident
-        for c in &ctx.sketch.coincident_arc_center_start { if arc_set.contains(&c.a.index()) { arc_set.insert(c.b.index()); } if arc_set.contains(&c.b.index()) { arc_set.insert(c.a.index()); } }
-        for c in &ctx.sketch.coincident_arc_center_end { if arc_set.contains(&c.a.index()) { arc_set.insert(c.b.index()); } if arc_set.contains(&c.b.index()) { arc_set.insert(c.a.index()); } }
-        for c in &ctx.sketch.coincident_arc_start_center { if arc_set.contains(&c.a.index()) { arc_set.insert(c.b.index()); } if arc_set.contains(&c.b.index()) { arc_set.insert(c.a.index()); } }
-        for c in &ctx.sketch.coincident_arc_end_center { if arc_set.contains(&c.a.index()) { arc_set.insert(c.b.index()); } if arc_set.contains(&c.b.index()) { arc_set.insert(c.a.index()); } }
-        for c in &ctx.sketch.coincident_arc_start_start { if arc_set.contains(&c.a.index()) { arc_set.insert(c.b.index()); } if arc_set.contains(&c.b.index()) { arc_set.insert(c.a.index()); } }
-        for c in &ctx.sketch.coincident_arc_start_end { if arc_set.contains(&c.a.index()) { arc_set.insert(c.b.index()); } if arc_set.contains(&c.b.index()) { arc_set.insert(c.a.index()); } }
-        for c in &ctx.sketch.coincident_arc_end_start { if arc_set.contains(&c.a.index()) { arc_set.insert(c.b.index()); } if arc_set.contains(&c.b.index()) { arc_set.insert(c.a.index()); } }
-        for c in &ctx.sketch.coincident_arc_end_end { if arc_set.contains(&c.a.index()) { arc_set.insert(c.b.index()); } if arc_set.contains(&c.b.index()) { arc_set.insert(c.a.index()); } }
+        for c in &ctx.sketch.coincident_arc_center_start { if arc_set.contains(&c.a) { arc_set.insert(c.b); } if arc_set.contains(&c.b) { arc_set.insert(c.a); } }
+        for c in &ctx.sketch.coincident_arc_center_end { if arc_set.contains(&c.a) { arc_set.insert(c.b); } if arc_set.contains(&c.b) { arc_set.insert(c.a); } }
+        for c in &ctx.sketch.coincident_arc_start_center { if arc_set.contains(&c.a) { arc_set.insert(c.b); } if arc_set.contains(&c.b) { arc_set.insert(c.a); } }
+        for c in &ctx.sketch.coincident_arc_end_center { if arc_set.contains(&c.a) { arc_set.insert(c.b); } if arc_set.contains(&c.b) { arc_set.insert(c.a); } }
+        for c in &ctx.sketch.coincident_arc_start_start { if arc_set.contains(&c.a) { arc_set.insert(c.b); } if arc_set.contains(&c.b) { arc_set.insert(c.a); } }
+        for c in &ctx.sketch.coincident_arc_start_end { if arc_set.contains(&c.a) { arc_set.insert(c.b); } if arc_set.contains(&c.b) { arc_set.insert(c.a); } }
+        for c in &ctx.sketch.coincident_arc_end_start { if arc_set.contains(&c.a) { arc_set.insert(c.b); } if arc_set.contains(&c.b) { arc_set.insert(c.a); } }
+        for c in &ctx.sketch.coincident_arc_end_end { if arc_set.contains(&c.a) { arc_set.insert(c.b); } if arc_set.contains(&c.b) { arc_set.insert(c.a); } }
         // Concentric
-        for c in &ctx.sketch.concentric { if arc_set.contains(&c.a.index()) { arc_set.insert(c.b.index()); } if arc_set.contains(&c.b.index()) { arc_set.insert(c.a.index()); } }
+        for c in &ctx.sketch.concentric { if arc_set.contains(&c.a) { arc_set.insert(c.b); } if arc_set.contains(&c.b) { arc_set.insert(c.a); } }
         if line_set.len() + arc_set.len() == before { break; }
     }
 
     ctx.selection.clear();
     let mut names = Vec::new();
-    for idx in &line_set {
-        let r = Ref::new(*idx);
+    for r in &line_set {
+        let r = *r;
         ctx.selection.push(Selection::Line(r));
         names.push(ctx.sketch.lines[r].name.clone());
     }
-    for idx in &arc_set {
-        let r = Ref::new(*idx);
+    for r in &arc_set {
+        let r = *r;
         ctx.selection.push(Selection::Arc(r));
         names.push(ctx.sketch.arcs[r].name.clone());
     }
@@ -4622,15 +4622,15 @@ fn cmd_select_chain(ctx: &mut CommandContext, seed: &str) -> CommandResult {
 /// Select all entities sharing any constraint relationship, recursively.
 fn cmd_select_linked(ctx: &mut CommandContext, seed: &str) -> CommandResult {
     // Start with seed entity
-    let mut line_set: std::collections::HashSet<u32> = std::collections::HashSet::new();
-    let mut arc_set: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    let mut line_set: std::collections::HashSet<Ref<Line>> = std::collections::HashSet::new();
+    let mut arc_set: std::collections::HashSet<Ref<Arc>> = std::collections::HashSet::new();
 
     if seed.starts_with('L') {
         let r = match resolve_line(&ctx.sketch, seed) { Ok(r) => r, Err(e) => return err(e) };
-        line_set.insert(r.index());
+        line_set.insert(r);
     } else if is_arc_name(seed) {
         let r = match resolve_arc(&ctx.sketch, seed) { Ok(r) => r, Err(e) => return err(e) };
-        arc_set.insert(r.index());
+        arc_set.insert(r);
     } else {
         return err("linked requires a line or arc");
     }
@@ -4644,8 +4644,8 @@ fn cmd_select_linked(ctx: &mut CommandContext, seed: &str) -> CommandResult {
         macro_rules! link_ll {
             ($vec:expr) => {
                 for c in &$vec {
-                    if line_set.contains(&c.a.index()) { line_set.insert(c.b.index()); }
-                    if line_set.contains(&c.b.index()) { line_set.insert(c.a.index()); }
+                    if line_set.contains(&c.a) { line_set.insert(c.b); }
+                    if line_set.contains(&c.b) { line_set.insert(c.a); }
                 }
             };
         }
@@ -4662,8 +4662,8 @@ fn cmd_select_linked(ctx: &mut CommandContext, seed: &str) -> CommandResult {
         macro_rules! link_aa {
             ($vec:expr) => {
                 for c in &$vec {
-                    if arc_set.contains(&c.a.index()) { arc_set.insert(c.b.index()); }
-                    if arc_set.contains(&c.b.index()) { arc_set.insert(c.a.index()); }
+                    if arc_set.contains(&c.a) { arc_set.insert(c.b); }
+                    if arc_set.contains(&c.b) { arc_set.insert(c.a); }
                 }
             };
         }
@@ -4681,14 +4681,14 @@ fn cmd_select_linked(ctx: &mut CommandContext, seed: &str) -> CommandResult {
 
         // Line-Arc constraints
         for c in &ctx.sketch.tangent_la {
-            if line_set.contains(&c.line.index()) { arc_set.insert(c.arc.index()); }
-            if arc_set.contains(&c.arc.index()) { line_set.insert(c.line.index()); }
+            if line_set.contains(&c.line) { arc_set.insert(c.arc); }
+            if arc_set.contains(&c.arc) { line_set.insert(c.line); }
         }
         macro_rules! link_la {
             ($vec:expr, $l:ident, $a:ident) => {
                 for c in &$vec {
-                    if line_set.contains(&c.$l.index()) { arc_set.insert(c.$a.index()); }
-                    if arc_set.contains(&c.$a.index()) { line_set.insert(c.$l.index()); }
+                    if line_set.contains(&c.$l) { arc_set.insert(c.$a); }
+                    if arc_set.contains(&c.$a) { line_set.insert(c.$l); }
                 }
             };
         }
@@ -4701,14 +4701,14 @@ fn cmd_select_linked(ctx: &mut CommandContext, seed: &str) -> CommandResult {
 
         // Symmetry
         for c in &ctx.sketch.symmetry_ll {
-            let has = line_set.contains(&c.a.index()) || line_set.contains(&c.b.index()) || line_set.contains(&c.c.index());
-            if has { line_set.insert(c.a.index()); line_set.insert(c.b.index()); line_set.insert(c.c.index()); }
+            let has = line_set.contains(&c.a) || line_set.contains(&c.b) || line_set.contains(&c.c);
+            if has { line_set.insert(c.a); line_set.insert(c.b); line_set.insert(c.c); }
         }
 
         // Angle constraints
         for c in &ctx.sketch.angle {
-            if line_set.contains(&c.a.index()) { line_set.insert(c.b.index()); }
-            if line_set.contains(&c.b.index()) { line_set.insert(c.a.index()); }
+            if line_set.contains(&c.a) { line_set.insert(c.b); }
+            if line_set.contains(&c.b) { line_set.insert(c.a); }
         }
 
         if line_set.len() + arc_set.len() == before { break; }
@@ -4716,13 +4716,13 @@ fn cmd_select_linked(ctx: &mut CommandContext, seed: &str) -> CommandResult {
 
     ctx.selection.clear();
     let mut names = Vec::new();
-    for idx in &line_set {
-        let r = Ref::new(*idx);
+    for r in &line_set {
+        let r = *r;
         ctx.selection.push(Selection::Line(r));
         names.push(ctx.sketch.lines[r].name.clone());
     }
-    for idx in &arc_set {
-        let r = Ref::new(*idx);
+    for r in &arc_set {
+        let r = *r;
         ctx.selection.push(Selection::Arc(r));
         names.push(ctx.sketch.arcs[r].name.clone());
     }
@@ -11850,7 +11850,7 @@ mod tests {
         run_ok(&mut ctx, "add_line 0,0 5,0");
         run_ok(&mut ctx, "horizontal L0");
         run_ok(&mut ctx, "delete L0 horizontal");
-        assert!(!ctx.sketch.lines[arael::refs::Ref::new(0)].constraints.horizontal);
+        assert!(!ctx.sketch.lines.iter().next().unwrap().constraints.horizontal);
     }
 
     #[test]
@@ -11859,7 +11859,7 @@ mod tests {
         run_ok(&mut ctx, "add_line 0,0 0,5");
         run_ok(&mut ctx, "vertical L0");
         run_ok(&mut ctx, "delete L0 vertical");
-        assert!(!ctx.sketch.lines[arael::refs::Ref::new(0)].constraints.vertical);
+        assert!(!ctx.sketch.lines.iter().next().unwrap().constraints.vertical);
     }
 
     #[test]
@@ -12049,7 +12049,7 @@ mod tests {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_line 0,0 @1,0 @0,1");
         assert_eq!(ctx.sketch.lines.len(), 2);
-        let l1 = ctx.sketch.lines[arael::refs::Ref::new(1)].p2.value;
+        let l1 = ctx.sketch.lines.iter().nth(1).unwrap().p2.value;
         assert!((l1.x - 1.0).abs() < 0.01 && (l1.y - 1.0).abs() < 0.01,
             "L1.p2 should be (1,1), got ({},{})", l1.x, l1.y);
     }
@@ -12064,7 +12064,7 @@ mod tests {
         assert!(ctx.session_names.contains_key("c"));
         // Use alias in constraint
         run_ok(&mut ctx, "horizontal a");
-        assert!(ctx.sketch.lines[arael::refs::Ref::new(0)].constraints.horizontal);
+        assert!(ctx.sketch.lines.iter().next().unwrap().constraints.horizontal);
     }
 
     #[test]
@@ -12273,9 +12273,9 @@ mod tests {
         let primary_name = ctx.sketch.dimensions[0].name.clone();
         assert_eq!(ctx.sketch.dimensions[1].expr_str.as_deref(), Some(primary_name.as_str()));
         // L0 trimmed to x=4.5, L1 trimmed to y=0.5.
-        let l0 = &ctx.sketch.lines[Ref::<Line>::new(0)];
+        let l0 = ctx.sketch.lines.iter().next().unwrap();
         assert!((l0.p2.value.x - 4.5).abs() < 1e-6);
-        let l1 = &ctx.sketch.lines[Ref::<Line>::new(1)];
+        let l1 = ctx.sketch.lines.iter().nth(1).unwrap();
         assert!((l1.p1.value.y - 0.5).abs() < 1e-6);
     }
 
@@ -12344,10 +12344,10 @@ mod tests {
         // Radius dimension added.
         assert_eq!(ctx.sketch.dimensions.len(), 1);
         // Lines trimmed: L0.p2 was at x=5, now at x=4.5.
-        let l0 = &ctx.sketch.lines[Ref::<Line>::new(0)];
+        let l0 = ctx.sketch.lines.iter().next().unwrap();
         assert!((l0.p2.value.x - 4.5).abs() < 1e-6,
             "L0.p2.x should be 4.5, got {}", l0.p2.value.x);
-        let l1 = &ctx.sketch.lines[Ref::<Line>::new(1)];
+        let l1 = ctx.sketch.lines.iter().nth(1).unwrap();
         assert!((l1.p1.value.y - 0.5).abs() < 1e-6,
             "L1.p1.y should be 0.5, got {}", l1.p1.value.y);
     }
@@ -13110,8 +13110,8 @@ mod tests {
         let mut ctx = CommandContext::new();
         run_ok(&mut ctx, "add_line 0,-5 0,5; add_circle -3,0 1; add_circle 3,0 2");
         run_ok(&mut ctx, "symmetry A0 L0 A1");
-        let r0 = ctx.sketch.arcs[arael::refs::Ref::new(0)].radius.value;
-        let r1 = ctx.sketch.arcs[arael::refs::Ref::new(1)].radius.value;
+        let r0 = ctx.sketch.arcs.iter().next().unwrap().radius.value;
+        let r1 = ctx.sketch.arcs.iter().nth(1).unwrap().radius.value;
         assert!((r0 - r1).abs() < 0.01, "radii should be equal: {} vs {}", r0, r1);
     }
 

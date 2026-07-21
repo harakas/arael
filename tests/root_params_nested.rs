@@ -63,15 +63,15 @@ fn build_model() -> (TestModel, Vec<f64>) {
     landmarks.push(Landmark {
         offset_tag: 0.1,
         frines: vec![
-            Frine { pose: arael::refs::Ref::new(0), hb_root: CrossBlock::new() },
-            Frine { pose: arael::refs::Ref::new(1), hb_root: CrossBlock::new() },
+            Frine { pose: poses.ref_at(0), hb_root: CrossBlock::new() },
+            Frine { pose: poses.ref_at(1), hb_root: CrossBlock::new() },
         ],
     });
     landmarks.push(Landmark {
         offset_tag: -0.2,
         frines: vec![
-            Frine { pose: arael::refs::Ref::new(1), hb_root: CrossBlock::new() },
-            Frine { pose: arael::refs::Ref::new(2), hb_root: CrossBlock::new() },
+            Frine { pose: poses.ref_at(1), hb_root: CrossBlock::new() },
+            Frine { pose: poses.ref_at(2), hb_root: CrossBlock::new() },
         ],
     });
     let mut model = TestModel {

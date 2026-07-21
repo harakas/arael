@@ -227,14 +227,14 @@ fn cross_block_loss_scales_the_cross_hessian() {
     let mut plain = CrossPlain { nodes: refs::Vec::new(), links: std::vec::Vec::new() };
     plain.nodes.push(Node { x: Param::new(n0.0), y: Param::new(n0.1), hb: SelfBlock::new() });
     plain.nodes.push(Node { x: Param::new(n1.0), y: Param::new(n1.1), hb: SelfBlock::new() });
-    plain.links.push(Lp { a: Ref::new(0), b: Ref::new(1), dx: 0.0, dy: 0.0, hb: CrossBlock::new() });
+    plain.links.push(Lp { a: plain.nodes.ref_at(0), b: plain.nodes.ref_at(1), dx: 0.0, dy: 0.0, hb: CrossBlock::new() });
     let mut pp = Vec::new();
     plain.serialize64(&mut pp);
 
     let mut cauchy = CrossCauchy { nodes: refs::Vec::new(), links: std::vec::Vec::new() };
     cauchy.nodes.push(Node { x: Param::new(n0.0), y: Param::new(n0.1), hb: SelfBlock::new() });
     cauchy.nodes.push(Node { x: Param::new(n1.0), y: Param::new(n1.1), hb: SelfBlock::new() });
-    cauchy.links.push(Lc { a: Ref::new(0), b: Ref::new(1), dx: 0.0, dy: 0.0, cc: CC, hb: CrossBlock::new() });
+    cauchy.links.push(Lc { a: cauchy.nodes.ref_at(0), b: cauchy.nodes.ref_at(1), dx: 0.0, dy: 0.0, cc: CC, hb: CrossBlock::new() });
     let mut cp = Vec::new();
     cauchy.serialize64(&mut cp);
 

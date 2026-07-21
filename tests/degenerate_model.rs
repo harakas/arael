@@ -257,7 +257,7 @@ fn pattern_drift_detected_in_indexed_assembly() {
 
     // Mid-solve structure change: the guard flips off, the TripletBlock
     // emits nothing this iteration.
-    w.items[refs::Ref::<Item10>::new(0)].active = false;
+    w.items[0].active = false;
 
     let mut vals = vec![0.0; csc.vals.len()];
     let mut g2 = vec![0.0; n];

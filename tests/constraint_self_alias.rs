@@ -59,7 +59,7 @@ fn build() -> (World, Vec<f64>) {
     w.nodes.push(Node { pos: Param::new(vect2d::new(0.6, -0.8)), target: 0.3, w: 1.5, hb: SelfBlock::new() });
     w.points.push(Pt { pos: Param::new(vect2d::new(2.0, 1.0)), hb: SelfBlock::new() });
     w.points.push(Pt { pos: Param::new(vect2d::new(0.5, -0.5)), hb: SelfBlock::new() });
-    w.links.push(Link { a: Ref::new(0), b: Ref::new(1), offset: 0.4, w: 2.0, hb: CrossBlock::new() });
+    w.links.push(Link { a: w.points.ref_at(0), b: w.points.ref_at(1), offset: 0.4, w: 2.0, hb: CrossBlock::new() });
     let mut params = Vec::new();
     w.serialize64(&mut params);
     (w, params)

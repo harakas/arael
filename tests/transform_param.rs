@@ -206,7 +206,7 @@ fn build_builtin() -> WorldB {
     for (i, (t, r)) in links.iter().enumerate() {
         let (a, b) = if i < 4 { (i as u32, i as u32 + 1) } else { (4, 0) };
         w.links.push(LinkB {
-            a: Ref::new(a), b: Ref::new(b),
+            a: w.frames.ref_at(a), b: w.frames.ref_at(b),
             measured_translation: *t, measured_rotation_transposed: *r,
             hb: CrossBlock::new(),
         });
@@ -228,7 +228,7 @@ fn build_macro() -> WorldM {
     for (i, (t, r)) in links.iter().enumerate() {
         let (a, b) = if i < 4 { (i as u32, i as u32 + 1) } else { (4, 0) };
         w.links.push(LinkM {
-            a: Ref::new(a), b: Ref::new(b),
+            a: w.frames.ref_at(a), b: w.frames.ref_at(b),
             measured_translation: *t, measured_rotation_transposed: *r,
             hb: CrossBlock::new(),
         });

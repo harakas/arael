@@ -1050,7 +1050,7 @@ fn test_expr_dim_reference() {
     sketch.next_dimension_id = 1;
 
     // Expression dimension on L1: length = d0
-    let l1_ref = arael::refs::Ref::<Line>::new(1);
+    let l1_ref = sketch.lines.refs().nth(1).unwrap();
     sketch.add_expr_dimension(
         DimensionKind::LineLength(l1_ref), "d0",
         vect2d::new(0.0, 1.0), 0.0,
@@ -1080,7 +1080,7 @@ fn test_expr_dim_arithmetic() {
     });
     sketch.next_dimension_id = 1;
 
-    let l1_ref = arael::refs::Ref::<Line>::new(1);
+    let l1_ref = sketch.lines.refs().nth(1).unwrap();
     sketch.add_expr_dimension(
         DimensionKind::LineLength(l1_ref), "d0 * 2 + 3",
         vect2d::new(0.0, 1.0), 0.0,
@@ -1100,7 +1100,7 @@ fn test_expr_dim_derived_property() {
     sketch.add_line(vect2d::new(0.0, 0.0), vect2d::new(3.0, 4.0)); // L0, length=5
     sketch.add_line(vect2d::new(5.0, 0.0), vect2d::new(8.0, 0.0)); // L1, length=3
 
-    let l1_ref = arael::refs::Ref::<Line>::new(1);
+    let l1_ref = sketch.lines.refs().nth(1).unwrap();
     sketch.add_expr_dimension(
         DimensionKind::LineLength(l1_ref), "L0.length",
         vect2d::new(0.0, 1.0), 0.0,
@@ -1109,7 +1109,7 @@ fn test_expr_dim_derived_property() {
     let result = sketch.solve();
     assert!(result.end_cost < 1.0, "solver failed: cost={}", result.end_cost);
 
-    let l0 = &sketch.lines[arael::refs::Ref::<Line>::new(0)];
+    let l0 = sketch.lines.iter().nth(0).unwrap();
     let l1 = &sketch.lines[l1_ref];
     let l0_len = (l0.p2.value - l0.p1.value).norm();
     let l1_len = (l1.p2.value - l1.p1.value).norm();
@@ -1153,7 +1153,7 @@ fn test_expr_dim_locked_line() {
     sketch.lines[l0].p2 = Param::fixed(vect2d::new(3.0, 4.0));
     let _l1 = sketch.add_line(vect2d::new(5.0, 0.0), vect2d::new(8.0, 0.0));
 
-    let l1_ref = arael::refs::Ref::<Line>::new(1);
+    let l1_ref = sketch.lines.refs().nth(1).unwrap();
     sketch.add_expr_dimension(
         DimensionKind::LineLength(l1_ref), "L0.length",
         vect2d::new(0.0, 1.0), 0.0,

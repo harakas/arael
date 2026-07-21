@@ -1230,17 +1230,17 @@ impl Sketch {
         let helper_refs: std::vec::Vec<Ref<Point>> = self.points.refs()
             .filter(|r| self.points[*r].helper)
             .collect();
-        let mut merged = std::collections::HashMap::<u32, Ref<Point>>::new(); // old -> canonical
+        let mut merged = std::collections::HashMap::<Ref<Point>, Ref<Point>>::new(); // old -> canonical
         for i in 0..helper_refs.len() {
             let ri = helper_refs[i];
-            if merged.contains_key(&ri.index()) { continue; }
+            if merged.contains_key(&ri) { continue; }
             let pi = self.points[ri].pos.value;
             for j in (i+1)..helper_refs.len() {
                 let rj = helper_refs[j];
-                if merged.contains_key(&rj.index()) { continue; }
+                if merged.contains_key(&rj) { continue; }
                 let pj = self.points[rj].pos.value;
                 if (pi.x - pj.x).abs() < 1e-9 && (pi.y - pj.y).abs() < 1e-9 {
-                    merged.insert(rj.index(), ri);
+                    merged.insert(rj, ri);
                     eprintln!("INFO: merging duplicate helper point {} into {}", rj.index(), ri.index());
                 }
             }
@@ -1248,7 +1248,7 @@ impl Sketch {
         if !merged.is_empty() {
             // Rewrite all point refs in constraints
             let remap = |r: &mut Ref<Point>| {
-                if let Some(canonical) = merged.get(&r.index()) { *r = *canonical; }
+                if let Some(canonical) = merged.get(r) { *r = *canonical; }
             };
             for c in &mut self.coincident_pp { remap(&mut c.a); remap(&mut c.b); }
             for c in &mut self.coincident_lp1 { remap(&mut c.point); }
@@ -1275,7 +1275,7 @@ impl Sketch {
             for c in &mut self.distance_lp1 { remap(&mut c.point); }
             for c in &mut self.distance_lp2 { remap(&mut c.point); }
             // Remove merged points
-            for old in merged.keys() { self.points.remove(Ref::new(*old)); }
+            for old in merged.keys() { self.points.remove(*old); }
             // Dedup again after remapping
             self.dedup_constraints();
         }

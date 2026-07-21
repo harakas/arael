@@ -87,7 +87,7 @@ fn build_s(deltas: &[matrix3d], n: usize) -> (SkyS, Vec<f64>) {
     sky.poses.push(PoseS { ea: SimpleEulerAngleParam::fixed(vect3d::new(0.0, 0.0, 0.0)), hb: SelfBlock::new() });
     for _ in 1..n { sky.poses.push(PoseS { ea: SimpleEulerAngleParam::new(vect3d::new(0.0, 0.0, 0.0)), hb: SelfBlock::new() }); }
     for (i, d) in deltas.iter().enumerate() {
-        sky.pairs.push(PairS { prev: Ref::new(i as u32), cur: Ref::new(i as u32 + 1), delta: *d, hb: CrossBlock::new() });
+        sky.pairs.push(PairS { prev: sky.poses.ref_at(i), cur: sky.poses.ref_at(i + 1), delta: *d, hb: CrossBlock::new() });
     }
     let mut params = Vec::new();
     sky.serialize64(&mut params);
@@ -123,7 +123,7 @@ fn build_e(deltas: &[matrix3d], n: usize) -> (SkyE, Vec<f64>) {
     sky.poses.push(PoseE { ea: EulerAngleParam::fixed(vect3d::new(0.0, 0.0, 0.0)), hb: SelfBlock::new() });
     for _ in 1..n { sky.poses.push(PoseE { ea: EulerAngleParam::new(vect3d::new(0.0, 0.0, 0.0)), hb: SelfBlock::new() }); }
     for (i, d) in deltas.iter().enumerate() {
-        sky.pairs.push(PairE { prev: Ref::new(i as u32), cur: Ref::new(i as u32 + 1), delta: *d, hb: CrossBlock::new() });
+        sky.pairs.push(PairE { prev: sky.poses.ref_at(i), cur: sky.poses.ref_at(i + 1), delta: *d, hb: CrossBlock::new() });
     }
     let mut params = Vec::new();
     sky.serialize64(&mut params);
@@ -159,7 +159,7 @@ fn build_q(deltas: &[matrix3d], n: usize) -> (SkyQ, Vec<f64>) {
     sky.poses.push(PoseQ { ea: QuaternionParam::fixed(quaternd::identity()), hb: SelfBlock::new() });
     for _ in 1..n { sky.poses.push(PoseQ { ea: QuaternionParam::new(quaternd::identity()), hb: SelfBlock::new() }); }
     for (i, d) in deltas.iter().enumerate() {
-        sky.pairs.push(PairQ { prev: Ref::new(i as u32), cur: Ref::new(i as u32 + 1), delta: *d, hb: CrossBlock::new() });
+        sky.pairs.push(PairQ { prev: sky.poses.ref_at(i), cur: sky.poses.ref_at(i + 1), delta: *d, hb: CrossBlock::new() });
     }
     let mut params = Vec::new();
     sky.serialize64(&mut params);

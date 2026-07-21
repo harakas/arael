@@ -162,7 +162,7 @@ fn arena_passive_entity_is_wired() {
     let mut w = base_model();
     w.anchors.push(AnchorPt { x: Param::new(0.0), target: 2.0, hb: SelfBlock::new() });
     let pt = w.pts.push(ArenaPt { x: Param::new(0.0), hb: SelfBlock::new() });
-    w.ties.push(Tie { anchor: Ref::new(0), pt, gap: 1.5, hb: CrossBlock::new() });
+    w.ties.push(Tie { anchor: w.anchors.ref_at(0), pt, gap: 1.5, hb: CrossBlock::new() });
     let mut params = Vec::new();
     w.serialize64(&mut params);
     // Pre-fix, the Arena entity's SelfBlock kept u32::MAX indices: its
@@ -172,6 +172,6 @@ fn arena_passive_entity_is_wired() {
     assert!(result.end_cost < 1e-12, "cost={} iters={}", result.end_cost, result.iterations);
     assert!(result.iterations > 0, "solve must actually iterate");
     w.deserialize64(&result.x);
-    let a = w.anchors[Ref::<AnchorPt>::new(0)].x.value;
+    let a = w.anchors[0].x.value;
     assert!((a - 2.0).abs() < 1e-6, "anchor={}", a);
 }

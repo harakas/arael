@@ -90,8 +90,8 @@ fn make_cross_model(active: bool) -> (TestModel, Vec<f64>) {
         constraint_isigma: 1000.0,
     };
     model.guarded_cross.push(GuardedCross {
-        a: arael::refs::Ref::new(0),
-        b: arael::refs::Ref::new(1),
+        a: model.points.ref_at(0),
+        b: model.points.ref_at(1),
         active,
         hb: CrossBlock::new(),
     });
@@ -109,9 +109,9 @@ fn make_triplet_model(active: bool) -> (TestModel, Vec<f64>) {
         constraint_isigma: 1000.0,
     };
     model.guarded_triplet.push(GuardedTriplet {
-        a: arael::refs::Ref::new(0),
-        b: arael::refs::Ref::new(1),
-        c: arael::refs::Ref::new(2),
+        a: model.points.ref_at(0),
+        b: model.points.ref_at(1),
+        c: model.points.ref_at(2),
         active,
         hb: TripletBlock::new(),
     });

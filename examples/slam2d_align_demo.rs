@@ -452,11 +452,11 @@ fn main() {
             e.0 = e.0 + rm.lm_world[i]; e.1 += 1.0;
         }
     }
-    for (idx, (sum, cnt)) in &acc { amap.landmarks[Ref::new(*idx)].pos.value = *sum * (1.0 / cnt); }
+    for (idx, (sum, cnt)) in &acc { amap.landmarks[*idx as usize].pos.value = *sum * (1.0 / cnt); }
     for (r, rm) in runs.iter().enumerate() {
         for (i, &gid) in rm.gt_ids.iter().enumerate() {
             amap.frines.push(LandmarkInstance {
-                path: Ref::new(r as u32), landmark: Ref::new(gid_to_lm[&gid]),
+                path: amap.paths.ref_at(r), landmark: amap.landmarks.ref_at(gid_to_lm[&gid]),
                 mu: rm.mu[i], cov_r: rm.cov_r[i], cov_isigma: rm.cov_isigma[i], hb: CrossBlock::new() });
         }
     }
@@ -476,7 +476,7 @@ fn main() {
     let mut est = std::vec::Vec::new();
     let mut tru = std::vec::Vec::new();
     for (&gid, &idx) in &gid_to_lm {
-        est.push(amap.landmarks[Ref::new(idx)].pos.value);
+        est.push(amap.landmarks[idx as usize].pos.value);
         tru.push(scene.gt_lms[gid]);
     }
     let (ath, at) = umeyama(&tru, &est);
@@ -502,12 +502,12 @@ fn main() {
 
     let run_poses: std::vec::Vec<_> = runs.iter().map(|rm| rm.poses.clone()).collect();
     let mut consensus: std::vec::Vec<(vect2f, usize)> = gid_to_lm.iter()
-        .map(|(&gid, &idx)| (amap.landmarks[Ref::new(idx)].pos.value, gid)).collect();
+        .map(|(&gid, &idx)| (amap.landmarks[idx as usize].pos.value, gid)).collect();
     consensus.sort_by_key(|&(_, g)| g);
     let ellipses: std::vec::Vec<(vect2f, f32, f32, f32)> = match &scov {
         None => { println!("Stage-2 Hessian not PD -- skipping ellipses."); std::vec::Vec::new() }
         Some(cov) => consensus.iter().map(|&(c, gid)| {
-            let k = amap.landmarks[Ref::new(gid_to_lm[&gid])].pos.index() as usize;
+            let k = amap.landmarks[gid_to_lm[&gid] as usize].pos.index() as usize;
             let e = nalgebra::SymmetricEigen::new(cov.fixed_view::<2, 2>(k, k).clone_owned());
             let (i0, i1) = if e.eigenvalues[0] >= e.eigenvalues[1] { (0, 1) } else { (1, 0) };
             let a = (e.eigenvalues[i0].max(0.0) * 5.991).sqrt() as f32;

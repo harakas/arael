@@ -87,14 +87,14 @@ fn run_simple() -> (usize, usize, f64, f64) {
         sky.poses.push(PoseS { ea: SimpleEulerAngleParam::new(vect3d::new(0.0, 0.0, 0.0)), hb: SelfBlock::new() });
     }
     for (i, d) in deltas.iter().enumerate() {
-        sky.pairs.push(PairS { prev: Ref::new(i as u32), cur: Ref::new(i as u32 + 1), delta: *d, hb: CrossBlock::new() });
+        sky.pairs.push(PairS { prev: sky.poses.ref_at(i), cur: sky.poses.ref_at(i as u32 + 1), delta: *d, hb: CrossBlock::new() });
     }
     let mut params = Vec::new();
     sky.serialize64(&mut params);
     let r = solve_once(&mut sky, &params);
     sky.deserialize64(&r.x);
     let rots: Vec<matrix3d> = (0..truth.len())
-        .map(|i| matrix3d::rotation_from_euler_angles(sky.poses[Ref::<PoseS>::new(i as u32)].ea.value)).collect();
+        .map(|i| matrix3d::rotation_from_euler_angles(sky.poses[i as usize].ea.value)).collect();
     (r.iterations, r.accepted_iterations, r.end_cost, max_pose_err(&rots, &truth))
 }
 
@@ -130,14 +130,14 @@ fn run_euler() -> (usize, usize, f64, f64) {
         sky.poses.push(PoseE { ea: EulerAngleParam::new(vect3d::new(0.0, 0.0, 0.0)), hb: SelfBlock::new() });
     }
     for (i, d) in deltas.iter().enumerate() {
-        sky.pairs.push(PairE { prev: Ref::new(i as u32), cur: Ref::new(i as u32 + 1), delta: *d, hb: CrossBlock::new() });
+        sky.pairs.push(PairE { prev: sky.poses.ref_at(i), cur: sky.poses.ref_at(i as u32 + 1), delta: *d, hb: CrossBlock::new() });
     }
     let mut params = Vec::new();
     sky.serialize64(&mut params);
     let r = solve_once(&mut sky, &params);
     sky.deserialize64(&r.x);
     let rots: Vec<matrix3d> = (0..truth.len())
-        .map(|i| matrix3d::rotation_from_euler_angles(sky.poses[Ref::<PoseE>::new(i as u32)].ea.value)).collect();
+        .map(|i| matrix3d::rotation_from_euler_angles(sky.poses[i as usize].ea.value)).collect();
     (r.iterations, r.accepted_iterations, r.end_cost, max_pose_err(&rots, &truth))
 }
 
@@ -173,14 +173,14 @@ fn run_quat() -> (usize, usize, f64, f64) {
         sky.poses.push(PoseQ { ea: QuaternionParam::new(quaternd::identity()), hb: SelfBlock::new() });
     }
     for (i, d) in deltas.iter().enumerate() {
-        sky.pairs.push(PairQ { prev: Ref::new(i as u32), cur: Ref::new(i as u32 + 1), delta: *d, hb: CrossBlock::new() });
+        sky.pairs.push(PairQ { prev: sky.poses.ref_at(i), cur: sky.poses.ref_at(i as u32 + 1), delta: *d, hb: CrossBlock::new() });
     }
     let mut params = Vec::new();
     sky.serialize64(&mut params);
     let r = solve_once(&mut sky, &params);
     sky.deserialize64(&r.x);
     let rots: Vec<matrix3d> = (0..truth.len())
-        .map(|i| sky.poses[Ref::<PoseQ>::new(i as u32)].ea.value.rotation_matrix()).collect();
+        .map(|i| sky.poses[i as usize].ea.value.rotation_matrix()).collect();
     (r.iterations, r.accepted_iterations, r.end_cost, max_pose_err(&rots, &truth))
 }
 

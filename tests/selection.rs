@@ -131,8 +131,8 @@ impl Scene {
         if self.odometry {
             for i in 1..self.poses {
                 w.odos.push(Odo {
-                    a: Ref::new((i - 1) as u32),
-                    b: Ref::new(i as u32),
+                    a: w.poses.ref_at((i - 1)),
+                    b: w.poses.ref_at(i),
                     dx: 1.0,
                     dy: 0.0,
                     dth: 0.0,
@@ -153,8 +153,8 @@ impl Scene {
             for i in first..last {
                 let (lx, ly) = (j as f64 * 0.5, 1.0);
                 w.obs.push(Obs {
-                    p: Ref::new(i as u32),
-                    l: Ref::new(j as u32),
+                    p: w.poses.ref_at(i),
+                    l: w.landmarks.ref_at(j),
                     dx: lx - i as f64,
                     dy: ly,
                     hb: CrossBlock::new(),
@@ -338,8 +338,8 @@ fn decide_bal(cameras: usize, points: usize) -> SchurPlan {
     for i in 0..cameras {
         for j in 0..points {
             b.views.push(View {
-                cam: Ref::new(i as u32),
-                pt: Ref::new(j as u32),
+                cam: b.cameras.ref_at(i),
+                pt: b.points.ref_at(j),
                 u: (j as f64 * 0.5 - i as f64),
                 v: 1.0,
                 hb: CrossBlock::new(),

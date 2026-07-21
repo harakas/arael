@@ -105,8 +105,8 @@ fn build(off: f64, win: usize) -> World {
         for p in s..s + win {
             let (px, py) = pose_true(p);
             w.obs.push(Obs {
-                p: Ref::new(p as u32),
-                l: Ref::new(lm),
+                p: w.poses.ref_at(p),
+                l: w.landmarks.ref_at(lm),
                 dx: lx - px,
                 dy: ly - py,
                 hb: CrossBlock::new(),
@@ -118,8 +118,8 @@ fn build(off: f64, win: usize) -> World {
         let (ax, ay) = pose_true(i - 1);
         let (bx, by) = pose_true(i);
         w.odos.push(Odo {
-            a: Ref::new((i - 1) as u32),
-            b: Ref::new(i as u32),
+            a: w.poses.ref_at((i - 1)),
+            b: w.poses.ref_at(i),
             dx: bx - ax,
             dy: by - ay,
             hb: CrossBlock::new(),
@@ -222,8 +222,8 @@ fn build_chain(off: f64) -> World {
         let (ax, ay) = pose_true(i - 1);
         let (bx, by) = pose_true(i);
         w.odos.push(Odo {
-            a: Ref::new((i - 1) as u32),
-            b: Ref::new(i as u32),
+            a: w.poses.ref_at((i - 1)),
+            b: w.poses.ref_at(i),
             dx: bx - ax,
             dy: by - ay,
             hb: CrossBlock::new(),

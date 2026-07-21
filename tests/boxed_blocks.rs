@@ -91,12 +91,13 @@ fn build_inline() -> Chain {
         points: refs::Vec::new(), links: std::vec::Vec::new(),
         anchor: 100.0, drift: 0.01, spring: 1.0,
     };
+    let mut pts = std::vec::Vec::new();
     for i in 0..N {
-        c.points.push(Point { pos: Param::new(init_pos(i)), is_anchor: i == 0, hb: SelfBlock::new() });
+        pts.push(c.points.push(Point { pos: Param::new(init_pos(i)), is_anchor: i == 0, hb: SelfBlock::new() }));
     }
     for i in 1..N {
-        let a = c.points.ref_at(i - 1);
-        let b = c.points.ref_at(i);
+        let a = pts[i - 1];
+        let b = pts[i];
         c.links.push(Link { a, b, rest: 1.1, hb: CrossBlock::new() });
     }
     c
@@ -107,12 +108,13 @@ fn build_boxed() -> BChain {
         points: refs::Arena::new(), links: std::vec::Vec::new(),
         anchor: 100.0, drift: 0.01, spring: 1.0,
     };
+    let mut pts = std::vec::Vec::new();
     for i in 0..N {
-        c.points.push(BPoint { pos: Param::new(init_pos(i)), is_anchor: i == 0, hb: BoxedSelfBlock::new() });
+        pts.push(c.points.push(BPoint { pos: Param::new(init_pos(i)), is_anchor: i == 0, hb: BoxedSelfBlock::new() }));
     }
     for i in 1..N {
-        let a = c.points.ref_at(i - 1);
-        let b = c.points.ref_at(i);
+        let a = pts[i - 1];
+        let b = pts[i];
         c.links.push(BLink { a, b, rest: 1.1, hb: BoxedCrossBlock::new() });
     }
     c
@@ -143,13 +145,13 @@ fn build_boxed_fixed(fixed_upto: usize) -> BChain {
         points: refs::Arena::new(), links: std::vec::Vec::new(),
         anchor: 100.0, drift: 0.01, spring: 1.0,
     };
+    let mut pts = std::vec::Vec::new();
     for i in 0..N {
         let pos = if i < fixed_upto { Param::fixed(init_pos(i)) } else { Param::new(init_pos(i)) };
-        c.points.push(BPoint { pos, is_anchor: i == 0, hb: BoxedSelfBlock::new() });
+        pts.push(c.points.push(BPoint { pos, is_anchor: i == 0, hb: BoxedSelfBlock::new() }));
     }
     for i in 1..N {
-        let a = c.points.ref_at(i - 1);
-        let b = c.points.ref_at(i);
+        let (a, b) = (pts[i - 1], pts[i]);
         c.links.push(BLink { a, b, rest: 1.1, hb: BoxedCrossBlock::new() });
     }
     c
@@ -192,10 +194,12 @@ fn boxed_blocks_partial_optimization_allocates_only_active() {
     // so the frozen sub-tree stays unallocated -- that is the memory win.
     const FIXED: usize = 3;
     let mut c = build_boxed_fixed(FIXED);
+    // Arena order is the creation order here (nothing is removed).
+    let pts: std::vec::Vec<_> = c.points.refs().collect();
 
     // Snapshot frozen positions to assert they never move.
     let frozen: std::vec::Vec<vect2d> =
-        (0..FIXED).map(|i| c.points[c.points.ref_at(i)].pos.value).collect();
+        (0..FIXED).map(|i| c.points[pts[i]].pos.value).collect();
 
     // The gated partial solve must match an inline partial solve bit-for-bit
     // (exercises mixed active/fixed cross-blocks, e.g. the link into point 2).
@@ -205,7 +209,7 @@ fn boxed_blocks_partial_optimization_allocates_only_active() {
 
     // Self-blocks: allocated iff the point is active (index >= FIXED).
     for i in 0..N {
-        let allocated = c.points[c.points.ref_at(i)].hb.is_allocated();
+        let allocated = c.points[pts[i]].hb.is_allocated();
         assert_eq!(allocated, i >= FIXED,
             "point {i}: expected allocated={}, got {allocated}", i >= FIXED);
     }
@@ -220,7 +224,7 @@ fn boxed_blocks_partial_optimization_allocates_only_active() {
 
     // Frozen points must not have moved.
     for i in 0..FIXED {
-        let p = c.points[c.points.ref_at(i)].pos.value;
+        let p = c.points[pts[i]].pos.value;
         assert_eq!((p.x, p.y), (frozen[i].x, frozen[i].y), "frozen point {i} moved");
     }
 }
@@ -231,32 +235,34 @@ fn boxed_blocks_allocation_follows_activity_across_solves() {
     // active, and that is re-decided on every solve. If the solver flow ever
     // stopped gating allocation on activity this would fail.
     let mut c = build_boxed(); // all active
+    // Arena order is the creation order here (nothing is removed).
+    let pts: std::vec::Vec<_> = c.points.refs().collect();
     c.solve_sparse(&cfg());
     for i in 0..N {
-        let r = c.points.ref_at(i);
+        let r = pts[i];
         assert!(c.points[r].hb.is_allocated(), "point {i} allocated while active");
     }
 
     // Freeze the first three points and re-solve: their self-blocks must be
     // released by set_indices (all-fixed indices), active ones stay allocated.
     for i in 0..3 {
-        let r = c.points.ref_at(i);
+        let r = pts[i];
         c.points[r].pos.optimize = false;
     }
     c.solve_sparse(&cfg());
     for i in 0..N {
-        let r = c.points.ref_at(i);
+        let r = pts[i];
         assert_eq!(c.points[r].hb.is_allocated(), i >= 3, "point {i} allocation must track activity");
     }
 
     // Unfreeze: re-solving must re-allocate every block.
     for i in 0..3 {
-        let r = c.points.ref_at(i);
+        let r = pts[i];
         c.points[r].pos.optimize = true;
     }
     c.solve_sparse(&cfg());
     for i in 0..N {
-        let r = c.points.ref_at(i);
+        let r = pts[i];
         assert!(c.points[r].hb.is_allocated(), "point {i} must re-allocate when active again");
     }
 }

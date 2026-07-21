@@ -92,8 +92,8 @@ fn build() -> Chain {
     }
     for i in 1..N_POINTS {
         chain.links.push(Link {
-            a: Ref::new((i - 1) as u32),
-            b: Ref::new(i as u32),
+            a: chain.points.ref_at((i - 1)),
+            b: chain.points.ref_at(i),
             rest: 1.1,
             hb: CrossBlock::new(),
         });

@@ -82,8 +82,8 @@ fn bearing(pos: vect2f, gamma: f32, lm: vect2f) -> f32 {
 // odometry deltas; each pose observes both landmarks. `fix_first` pins pose 0.
 // `init_jitter` offsets the initial pose/landmark guesses so the solve has real
 // work to do (and cannot pass by starting at the answer).
-fn build_run(truth: &[vect2f], gt_lms: &[vect2f], map_lm: &[u32],
-             fix_first: bool, init_jitter: vect2f) -> (Path, Vec<(usize, u32)>) {
+fn build_run(truth: &[vect2f], gt_lms: &[vect2f], map_lm: &[Ref<Landmark>],
+             fix_first: bool, init_jitter: vect2f) -> (Path, Vec<(usize, Ref<Landmark>)>) {
     let mut path = Path {
         poses: refs::Deque::new(),
         pose_pairs: std::vec::Vec::new(),
@@ -119,7 +119,7 @@ fn build_run(truth: &[vect2f], gt_lms: &[vect2f], map_lm: &[u32],
         for (li, &gl) in gt_lms.iter().enumerate() {
             path.frines.push(Frine {
                 pose: path.poses.ref_at(pi),
-                lm: Ref::new(map_lm[li]),
+                lm: map_lm[li],
                 bearing: bearing(t, 0.0, gl),
                 isigma: 500.0,
                 hb: CrossBlock::new(),
@@ -144,11 +144,10 @@ where
     let mut map_lm = Vec::new();
     for &gl in &gt_lms {
         // Initialise off-truth so the solve must actually triangulate/merge.
-        map_lm.push(map.landmarks.len() as u32);
-        map.landmarks.push(Landmark {
+        map_lm.push(map.landmarks.push(Landmark {
             pos: Param::new(gl + vect2f::new(1.5, -1.0)),
             hb: SelfBlock::new(),
-        });
+        }));
     }
 
     let (path_a, _) = build_run(&run_a_truth, &gt_lms, &map_lm, true, vect2f::new(0.6, 0.4));

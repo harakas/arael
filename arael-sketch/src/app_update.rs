@@ -1520,9 +1520,8 @@ impl eframe::App for EditorApp {
                         let snap = self.find_snap_target(mouse_sketch, hit_threshold);
                         let pos = snap.map_or(mouse_sketch, |(p, _)| p);
                         let action = Action::AddPoint { pos };
-                        self.exec(action);
-                        let new_point = Ref::new(self.sketch.points.slot_count() as u32 - 1);
-                        if let Some((_, snap_target)) = snap {
+                        let new_point = self.exec(action).point();
+                        if let (Some((_, snap_target)), Some(new_point)) = (snap, new_point) {
                             self.apply_snap_coincident_point(snap_target, new_point);
                         }
                     }
@@ -1631,8 +1630,7 @@ impl eframe::App for EditorApp {
                             } else {
 
                             let action = Action::AddLine { p1: state.start, p2: end_pos };
-                            self.exec(action);
-                            let new_line = Ref::new(self.sketch.lines.slot_count() as u32 - 1);
+                            let Some(new_line) = self.exec(action).line() else { return; };
 
                             // Auto-coincident for start snap
                             if let Some(snap) = state.snap_start {
@@ -1700,8 +1698,8 @@ impl eframe::App for EditorApp {
                             // Second click: edge point
                             let snap = self.find_snap_target(mouse_sketch, hit_threshold);
                             let edge = snap.map_or(mouse_sketch, |(p, _)| p);
-                            self.exec(Action::AddCircle { center: state.center, edge });
-                            let new_arc = Ref::new(self.sketch.arcs.slot_count() as u32 - 1);
+                            let Some(new_arc) = self.exec(Action::AddCircle { center: state.center, edge }).arc()
+                            else { return; };
 
                             // Auto-coincident for center
                             if let Some(s) = state.snap_center {
@@ -1735,8 +1733,8 @@ impl eframe::App for EditorApp {
                         if let Some(state) = self.arc_draw.take() {
                             if let Some((end, snap_end)) = state.end {
                                 // Third click: mid point on arc, create it
-                                self.exec(Action::AddArc { start: state.start, end, mid: pos });
-                                let new_arc = Ref::new(self.sketch.arcs.slot_count() as u32 - 1);
+                                let Some(new_arc) = self.exec(Action::AddArc { start: state.start, end, mid: pos }).arc()
+                                else { return; };
 
                                 // Arc start_angle always corresponds to start click,
                                 // end_angle to end click (direction stored in ccw flag)
@@ -1794,12 +1792,13 @@ impl eframe::App for EditorApp {
                                 let tl = vect2d::new(state.corner.x, p2.y);
                                 let corners = [bl, br, tr, tl];
 
-                                let mut lines = [Ref::<Line>::new(0); 4];
+                                let mut lines: std::vec::Vec<Ref<Line>> = std::vec::Vec::with_capacity(4);
                                 for i in 0..4 {
                                     let a = corners[i];
                                     let b = corners[(i + 1) % 4];
-                                    self.exec(Action::AddLine { p1: a, p2: b });
-                                    lines[i] = Ref::new(self.sketch.lines.slot_count() as u32 - 1);
+                                    let Some(r) = self.exec(Action::AddLine { p1: a, p2: b }).line()
+                                    else { return; };
+                                    lines.push(r);
                                 }
 
                                 // Corner coincidents: L(i).p2 = L(i+1).p1

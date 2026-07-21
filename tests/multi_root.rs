@@ -76,7 +76,7 @@ fn shared_entity_optimizes_under_both_roots() {
     let rb = simple_lm::solve(&params, &mut beta, &LmConfig::default());
     assert!(rb.end_cost < 1e-12, "shared under Beta, cost={}", rb.end_cost);
     beta.deserialize64(&rb.x);
-    assert!((beta.shareds[Ref::<Shared>::new(0)].x.value + 3.0).abs() < 1e-6);
+    assert!((beta.shareds[0].x.value + 3.0).abs() < 1e-6);
 }
 
 #[test]
@@ -88,7 +88,7 @@ fn first_root_optimizes() {
     let result = simple_lm::solve(&params, &mut alpha, &LmConfig::default());
     assert!(result.end_cost < 1e-12, "cost={}", result.end_cost);
     alpha.deserialize64(&result.x);
-    assert!((alpha.items[Ref::<AItem>::new(0)].x.value - 5.0).abs() < 1e-6);
+    assert!((alpha.items[0].x.value - 5.0).abs() < 1e-6);
 }
 
 #[test]
@@ -101,5 +101,5 @@ fn second_root_optimizes() {
     assert!(result.end_cost < 1e-12,
         "second root must generate a working solver, cost={}", result.end_cost);
     beta.deserialize64(&result.x);
-    assert!((beta.items[Ref::<BItem>::new(0)].x.value - 5.0).abs() < 1e-6);
+    assert!((beta.items[0].x.value - 5.0).abs() < 1e-6);
 }

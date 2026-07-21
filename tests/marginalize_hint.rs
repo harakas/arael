@@ -106,8 +106,8 @@ fn build(off: f64) -> World {
         let (ax, ay) = pose_true(i - 1);
         let (bx, by) = pose_true(i);
         w.odos.push(Odo {
-            a: Ref::new((i - 1) as u32),
-            b: Ref::new(i as u32),
+            a: w.poses.ref_at((i - 1)),
+            b: w.poses.ref_at(i),
             dx: bx - ax,
             dy: by - ay,
             hb: CrossBlock::new(),
@@ -119,8 +119,8 @@ fn build(off: f64) -> World {
         for pi in [j % N_POSES, (j + 1) % N_POSES] {
             let (px, py) = pose_true(pi);
             w.obs.push(Obs {
-                p: Ref::new(pi as u32),
-                l: Ref::new(j as u32),
+                p: w.poses.ref_at(pi),
+                l: w.landmarks.ref_at(j),
                 dx: lx - px,
                 dy: ly - py,
                 hb: CrossBlock::new(),
@@ -144,8 +144,8 @@ fn hint_range_matches_layout() {
 #[test]
 fn hint_range_respects_fixed_params() {
     let mut w = build(0.0);
-    w.poses[Ref::<Pose>::new(0)].x = Param::fixed(0.0);
-    w.landmarks[Ref::<Landmark>::new(0)].y = Param::fixed(1.0);
+    w.poses[0].x = Param::fixed(0.0);
+    w.landmarks[0].y = Param::fixed(1.0);
     let hint = RootProblem::marginalize_hint(&w);
     let pose_params = 2 * N_POSES - 1;
     let lm_params = 2 * N_LANDMARKS - 1;
@@ -168,8 +168,8 @@ fn hinted_sparse_matches_dense() {
 
     for j in 0..N_LANDMARKS {
         let (a, b) = (
-            &wd.landmarks[Ref::<Landmark>::new(j as u32)],
-            &ws.landmarks[Ref::<Landmark>::new(j as u32)],
+            &wd.landmarks[j as usize],
+            &ws.landmarks[j as usize],
         );
         assert!((a.x.value - b.x.value).abs() < 1e-8, "landmark {} x", j);
         assert!((a.y.value - b.y.value).abs() < 1e-8, "landmark {} y", j);

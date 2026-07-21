@@ -116,7 +116,7 @@ fn coupled_marginals_match_analytic() {
     let mut c = Chain { nodes: refs::Vec::new(), ties: std::vec::Vec::new() };
     c.nodes.push(Node { v: Param::new(0.0), prior_isig: 1.0, hb: SelfBlock::new() });
     c.nodes.push(Node { v: Param::new(0.0), prior_isig: 1.0, hb: SelfBlock::new() });
-    c.ties.push(Tie { a: Ref::new(0), b: Ref::new(1), isig: 1.0, hb: CrossBlock::new() });
+    c.ties.push(Tie { a: c.nodes.ref_at(0), b: c.nodes.ref_at(1), isig: 1.0, hb: CrossBlock::new() });
 
     let cov = c.assemble_covariance(CovMode::PerQuery).unwrap();
 
@@ -149,7 +149,7 @@ fn path_chain(n: usize) -> Chain {
         c.nodes.push(Node { v: Param::new(0.0), prior_isig: 1.0, hb: SelfBlock::new() });
     }
     for i in 0..n - 1 {
-        c.ties.push(Tie { a: Ref::new(i as u32), b: Ref::new((i + 1) as u32), isig: 1.0, hb: CrossBlock::new() });
+        c.ties.push(Tie { a: c.nodes.ref_at(i), b: c.nodes.ref_at((i + 1)), isig: 1.0, hb: CrossBlock::new() });
     }
     c
 }
@@ -160,7 +160,7 @@ fn precompute_matches_analytic_coupled() {
     let mut c = Chain { nodes: refs::Vec::new(), ties: std::vec::Vec::new() };
     c.nodes.push(Node { v: Param::new(0.0), prior_isig: 1.0, hb: SelfBlock::new() });
     c.nodes.push(Node { v: Param::new(0.0), prior_isig: 1.0, hb: SelfBlock::new() });
-    c.ties.push(Tie { a: Ref::new(0), b: Ref::new(1), isig: 1.0, hb: CrossBlock::new() });
+    c.ties.push(Tie { a: c.nodes.ref_at(0), b: c.nodes.ref_at(1), isig: 1.0, hb: CrossBlock::new() });
 
     let cov = c.assemble_covariance(CovMode::AllMarginals).unwrap();
 
@@ -209,8 +209,8 @@ fn precompute_selected_inverse_denser_fill() {
         for step in [1usize, 2] {
             if i + step < n {
                 c.ties.push(Tie {
-                    a: Ref::new(i as u32),
-                    b: Ref::new((i + step) as u32),
+                    a: c.nodes.ref_at(i),
+                    b: c.nodes.ref_at((i + step)),
                     isig: 1.0,
                     hb: CrossBlock::new(),
                 });
@@ -252,7 +252,7 @@ fn tridiagonal_matches_solve() {
 fn tridiagonal_rejects_non_band() {
     // A long-range tie (0 <-> 4) puts an off-band block into H.
     let mut c = path_chain(6);
-    c.ties.push(Tie { a: Ref::new(0), b: Ref::new(4), isig: 1.0, hb: CrossBlock::new() });
+    c.ties.push(Tie { a: c.nodes.ref_at(0), b: c.nodes.ref_at(4), isig: 1.0, hb: CrossBlock::new() });
     assert_eq!(c.assemble_covariance(CovMode::TriDiagonal).err(), Some(CovError::NotTriDiagonal));
 }
 
@@ -294,7 +294,7 @@ fn tridiagonal_2dof_matches_solve() {
         c.poses.push(Pose2 { x: Param::new(0.0), y: Param::new(0.0), pi: 1.0, hb: SelfBlock::new() });
     }
     for i in 0..n - 1 {
-        c.ties.push(Tie2 { a: Ref::new(i as u32), b: Ref::new((i + 1) as u32), t: 1.0, hb: CrossBlock::new() });
+        c.ties.push(Tie2 { a: c.poses.ref_at(i), b: c.poses.ref_at((i + 1)), t: 1.0, hb: CrossBlock::new() });
     }
 
     let solved = c.assemble_covariance(CovMode::PerQuery).unwrap();
@@ -326,7 +326,7 @@ fn all_marginals_dense_matches_solve() {
     for i in 0..n {
         for step in [1usize, 2, 3] {
             if i + step < n {
-                c.ties.push(Tie2 { a: Ref::new(i as u32), b: Ref::new((i + step) as u32), t: 1.0, hb: CrossBlock::new() });
+                c.ties.push(Tie2 { a: c.poses.ref_at(i), b: c.poses.ref_at((i + step)), t: 1.0, hb: CrossBlock::new() });
             }
         }
     }
@@ -403,7 +403,7 @@ fn tridiagonal_singular_backward_block_does_not_panic() {
         c.poses.push(PoseY { x: Param::new(0.0), y: Param::new(0.0), pix: 1.0, piy, hb: SelfBlock::new() });
     }
     for i in 0..n - 1 {
-        c.ties.push(TieY { a: Ref::new(i as u32), b: Ref::new((i + 1) as u32), t: 1.0, hb: CrossBlock::new() });
+        c.ties.push(TieY { a: c.poses.ref_at(i), b: c.poses.ref_at((i + 1)), t: 1.0, hb: CrossBlock::new() });
     }
 
     let band = c.assemble_covariance(CovMode::TriDiagonal).unwrap();

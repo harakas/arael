@@ -1,0 +1,10 @@
+error[E0624]: associated function `new` is private
+  --> tests/ref_forging/forge_from_index.rs:10:34
+   |
+10 |     let forged: Ref<Item> = Ref::new(0);
+   |                                  ^^^ private associated function
+   |
+  ::: src/refs.rs
+   |
+   |     pub(crate) fn new(index: u32) -> Self {
+   |     ------------------------------------- private associated function defined here

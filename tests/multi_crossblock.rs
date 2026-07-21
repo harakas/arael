@@ -113,9 +113,9 @@ fn make_triplet_model() -> (TestModel, Vec<f64>) {
         constraint_isigma: 10.0,
     };
     model.triplet_coupling.push(TripletCoupling {
-        a: arael::refs::Ref::new(0),
-        b: arael::refs::Ref::new(1),
-        c: arael::refs::Ref::new(2),
+        a: model.points.ref_at(0),
+        b: model.points.ref_at(1),
+        c: model.points.ref_at(2),
         hb: TripletBlock::new(),
     });
     let mut params = Vec::new();
@@ -132,9 +132,9 @@ fn make_multi_cross_model() -> (TestModel, Vec<f64>) {
         constraint_isigma: 10.0,
     };
     model.multi_cross_coupling.push(MultiCrossCoupling {
-        a: arael::refs::Ref::new(0),
-        b: arael::refs::Ref::new(1),
-        c: arael::refs::Ref::new(2),
+        a: model.points.ref_at(0),
+        b: model.points.ref_at(1),
+        c: model.points.ref_at(2),
         hb_ab: CrossBlock::new(),
         hb_ac: CrossBlock::new(),
         hb_bc: CrossBlock::new(),

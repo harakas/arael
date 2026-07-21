@@ -47,10 +47,10 @@ fn fixed_euler_angle_param_does_not_panic_in_advance() {
     let result = simple_lm::solve(&params, &mut w, &LmConfig::default());
     w.deserialize64(&result.x);
 
-    let free = &w.nodes[Ref::<Node>::new(0)];
+    let free = &w.nodes[0];
     assert!((free.ea.value - vect3d::new(0.3, -0.2, 0.4)).norm() < 1e-6,
         "free EA must reach its target, got {:?}", free.ea.value);
-    let fixed = &w.nodes[Ref::<Node>::new(1)];
+    let fixed = &w.nodes[1];
     assert!((fixed.ea.value - frozen).norm() < 1e-12,
         "fixed EA must not move, got {:?}", fixed.ea.value);
 }
@@ -241,8 +241,8 @@ fn aerobatics_slam_barrel_roll_and_immelmann() {
     }
     for (i, d) in deltas.iter().enumerate() {
         sky.pairs.push(PairE {
-            prev: Ref::new(i as u32),
-            cur: Ref::new(i as u32 + 1),
+            prev: sky.poses.ref_at(i),
+            cur: sky.poses.ref_at(i as u32 + 1),
             delta: *d,
             hb: CrossBlock::new(),
         });
@@ -277,7 +277,7 @@ fn aerobatics_slam_barrel_roll_and_immelmann() {
     // beyond the gimbal where the triple is not unique.
     for (i, t) in truth.iter().enumerate() {
         let m = matrix3d::rotation_from_euler_angles(
-            sky.poses[Ref::<PoseE>::new(i as u32)].ea.value);
+            sky.poses[i as usize].ea.value);
         let err: f64 = (0..3).map(|r| (0..3).map(|c| (m[r][c] - t[r][c]).abs()).sum::<f64>()).sum();
         assert!(err < 1e-4, "pose {} orientation error {}", i, err);
     }
@@ -346,8 +346,8 @@ fn aerobatics_slam_f32() {
     }
     for (i, d) in deltas.iter().enumerate() {
         sky.pairs.push(PairF {
-            prev: Ref::new(i as u32),
-            cur: Ref::new(i as u32 + 1),
+            prev: sky.poses.ref_at(i),
+            cur: sky.poses.ref_at(i as u32 + 1),
             delta: *d,
             hb: CrossBlock::new(),
         });
@@ -370,7 +370,7 @@ fn aerobatics_slam_f32() {
         "conditioning regression: {} iterations (expected ~88)", result.iterations);
     for (i, t) in truth.iter().enumerate() {
         let m = matrix3f::rotation_from_euler_angles(
-            sky.poses[Ref::<PoseF>::new(i as u32)].ea.value);
+            sky.poses[i as usize].ea.value);
         let err: f32 = (0..3).map(|r| (0..3).map(|c| (m[r][c] - t[r][c]).abs()).sum::<f32>()).sum();
         assert!(err < 3e-3, "pose {} orientation error {} (f32 bound)", i, err);
     }

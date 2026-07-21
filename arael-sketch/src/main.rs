@@ -607,11 +607,11 @@ impl EditorApp {
         /// bare Point).
         #[derive(PartialEq, Eq, Hash, Clone, Copy)]
         enum Ep {
-            Point(u32),
-            LineP1(u32),
-            LineP2(u32),
-            ArcStart(u32),
-            ArcEnd(u32),
+            Point(Ref<Point>),
+            LineP1(Ref<Line>),
+            LineP2(Ref<Line>),
+            ArcStart(Ref<Arc>),
+            ArcEnd(Ref<Arc>),
         }
 
         // ---- Build equivalence classes via union-find ----
@@ -650,18 +650,18 @@ impl EditorApp {
         // walk's visitable set.
         for r in self.sketch.lines.refs() {
             if self.sketch.lines[r].construction { continue; }
-            ensure(&mut parent, Ep::LineP1(r.index()));
-            ensure(&mut parent, Ep::LineP2(r.index()));
+            ensure(&mut parent, Ep::LineP1(r));
+            ensure(&mut parent, Ep::LineP2(r));
         }
         for r in self.sketch.arcs.refs() {
             if self.sketch.arcs[r].closed { continue; }
             if self.sketch.arcs[r].construction { continue; }
-            ensure(&mut parent, Ep::ArcStart(r.index()));
-            ensure(&mut parent, Ep::ArcEnd(r.index()));
+            ensure(&mut parent, Ep::ArcStart(r));
+            ensure(&mut parent, Ep::ArcEnd(r));
         }
         for r in self.sketch.points.refs() {
             if self.sketch.points[r].helper { continue; }
-            ensure(&mut parent, Ep::Point(r.index()));
+            ensure(&mut parent, Ep::Point(r));
         }
         // Skip construction-tied coincidents below via these
         // predicates so unions never touch a construction entity.
@@ -671,93 +671,93 @@ impl EditorApp {
         // Line-line coincidents.
         for c in &self.sketch.coincident_ll11 {
             if line_ok(c.a) && line_ok(c.b) {
-                union(&mut parent, Ep::LineP1(c.a.index()), Ep::LineP1(c.b.index()));
+                union(&mut parent, Ep::LineP1(c.a), Ep::LineP1(c.b));
             }
         }
         for c in &self.sketch.coincident_ll12 {
             if line_ok(c.a) && line_ok(c.b) {
-                union(&mut parent, Ep::LineP1(c.a.index()), Ep::LineP2(c.b.index()));
+                union(&mut parent, Ep::LineP1(c.a), Ep::LineP2(c.b));
             }
         }
         for c in &self.sketch.coincident_ll21 {
             if line_ok(c.a) && line_ok(c.b) {
-                union(&mut parent, Ep::LineP2(c.a.index()), Ep::LineP1(c.b.index()));
+                union(&mut parent, Ep::LineP2(c.a), Ep::LineP1(c.b));
             }
         }
         for c in &self.sketch.coincident_ll22 {
             if line_ok(c.a) && line_ok(c.b) {
-                union(&mut parent, Ep::LineP2(c.a.index()), Ep::LineP2(c.b.index()));
+                union(&mut parent, Ep::LineP2(c.a), Ep::LineP2(c.b));
             }
         }
         // Line endpoint <-> bare point.
         for c in &self.sketch.coincident_lp1 {
             if line_ok(c.line) && !self.sketch.points[c.point].helper {
-                union(&mut parent, Ep::LineP1(c.line.index()), Ep::Point(c.point.index()));
+                union(&mut parent, Ep::LineP1(c.line), Ep::Point(c.point));
             }
         }
         for c in &self.sketch.coincident_lp2 {
             if line_ok(c.line) && !self.sketch.points[c.point].helper {
-                union(&mut parent, Ep::LineP2(c.line.index()), Ep::Point(c.point.index()));
+                union(&mut parent, Ep::LineP2(c.line), Ep::Point(c.point));
             }
         }
         // Point-point coincidents keep a junction "one" node even if
         // the sketch author used two separate points.
         for c in &self.sketch.coincident_pp {
             if !self.sketch.points[c.a].helper && !self.sketch.points[c.b].helper {
-                union(&mut parent, Ep::Point(c.a.index()), Ep::Point(c.b.index()));
+                union(&mut parent, Ep::Point(c.a), Ep::Point(c.b));
             }
         }
         // Line endpoint <-> arc endpoint (direct).
         for c in &self.sketch.coincident_lp1_arc_start {
             if line_ok(c.line) && arc_ok(c.arc) {
-                union(&mut parent, Ep::LineP1(c.line.index()), Ep::ArcStart(c.arc.index()));
+                union(&mut parent, Ep::LineP1(c.line), Ep::ArcStart(c.arc));
             }
         }
         for c in &self.sketch.coincident_lp2_arc_start {
             if line_ok(c.line) && arc_ok(c.arc) {
-                union(&mut parent, Ep::LineP2(c.line.index()), Ep::ArcStart(c.arc.index()));
+                union(&mut parent, Ep::LineP2(c.line), Ep::ArcStart(c.arc));
             }
         }
         for c in &self.sketch.coincident_lp1_arc_end {
             if line_ok(c.line) && arc_ok(c.arc) {
-                union(&mut parent, Ep::LineP1(c.line.index()), Ep::ArcEnd(c.arc.index()));
+                union(&mut parent, Ep::LineP1(c.line), Ep::ArcEnd(c.arc));
             }
         }
         for c in &self.sketch.coincident_lp2_arc_end {
             if line_ok(c.line) && arc_ok(c.arc) {
-                union(&mut parent, Ep::LineP2(c.line.index()), Ep::ArcEnd(c.arc.index()));
+                union(&mut parent, Ep::LineP2(c.line), Ep::ArcEnd(c.arc));
             }
         }
         // Arc endpoint <-> bare point.
         for c in &self.sketch.coincident_arc_start {
             if arc_ok(c.arc) && !self.sketch.points[c.point].helper {
-                union(&mut parent, Ep::ArcStart(c.arc.index()), Ep::Point(c.point.index()));
+                union(&mut parent, Ep::ArcStart(c.arc), Ep::Point(c.point));
             }
         }
         for c in &self.sketch.coincident_arc_end {
             if arc_ok(c.arc) && !self.sketch.points[c.point].helper {
-                union(&mut parent, Ep::ArcEnd(c.arc.index()), Ep::Point(c.point.index()));
+                union(&mut parent, Ep::ArcEnd(c.arc), Ep::Point(c.point));
             }
         }
         // Arc-arc endpoint unions (direct).
         for c in &self.sketch.coincident_arc_start_start {
             if arc_ok(c.a) && arc_ok(c.b) {
-                union(&mut parent, Ep::ArcStart(c.a.index()), Ep::ArcStart(c.b.index()));
+                union(&mut parent, Ep::ArcStart(c.a), Ep::ArcStart(c.b));
             }
         }
         for c in &self.sketch.coincident_arc_start_end {
             if arc_ok(c.a) && arc_ok(c.b) {
-                union(&mut parent, Ep::ArcStart(c.a.index()), Ep::ArcEnd(c.b.index()));
+                union(&mut parent, Ep::ArcStart(c.a), Ep::ArcEnd(c.b));
             }
         }
         for c in &self.sketch.coincident_arc_end_start {
             if arc_ok(c.a) && arc_ok(c.b) {
-                union(&mut parent, Ep::ArcEnd(c.a.index()), Ep::ArcStart(c.b.index()));
+                union(&mut parent, Ep::ArcEnd(c.a), Ep::ArcStart(c.b));
             }
         }
         for c in &self.sketch.coincident_arc_end_end {
             if arc_ok(c.a) && arc_ok(c.b) {
-                union(&mut parent, Ep::ArcEnd(c.a.index()), Ep::ArcEnd(c.b.index()));
+                union(&mut parent, Ep::ArcEnd(c.a), Ep::ArcEnd(c.b));
             }
         }
 
@@ -767,7 +767,7 @@ impl EditorApp {
         // Points aren't entities in the chain sense -- they're
         // junctions or fixtures.
         #[derive(PartialEq, Eq, Hash, Clone, Copy)]
-        enum EntKey { Line(u32), Arc(u32) }
+        enum EntKey { Line(Ref<Line>), Arc(Ref<Arc>) }
 
         let all_eps: Vec<Ep> = parent.keys().copied().collect();
         // Resolve every ep to its root and collect class members.
@@ -803,14 +803,14 @@ impl EditorApp {
         };
 
         let seed_key = match seed {
-            Selection::Line(r) => EntKey::Line(r.index()),
+            Selection::Line(r) => EntKey::Line(r),
             Selection::Arc(r) => {
                 if self.sketch.arcs[r].closed {
                     // Closed arcs aren't chainable; just select this one.
                     if !self.selection.contains(&seed) { self.selection.push(seed); }
                     return;
                 }
-                EntKey::Arc(r.index())
+                EntKey::Arc(r)
             }
             _ => return,
         };
@@ -821,10 +821,13 @@ impl EditorApp {
                 EntKey::Arc(i) => [Ep::ArcStart(i), Ep::ArcEnd(i)],
             }
         };
+        // EntKey carries the raw slot index because the BFS keys on it;
+        // resolving back to a Selection goes through the arena, so a stale
+        // index yields nothing instead of a ref to whatever now occupies it.
         let key_to_selection = |k: EntKey| -> Selection {
             match k {
-                EntKey::Line(i) => Selection::Line(Ref::new(i)),
-                EntKey::Arc(i) => Selection::Arc(Ref::new(i)),
+                EntKey::Line(r) => Selection::Line(r),
+                EntKey::Arc(r) => Selection::Arc(r),
             }
         };
 
@@ -2067,7 +2070,11 @@ impl EditorApp {
     // Execute an action: apply to sketch and record in history.
     // For constraint actions: validates by solving and checking cost.
     // Rejects constraints that make a healthy sketch unsolvable.
-    pub fn exec(&mut self, action: Action) {
+    /// Apply an action. Returns what it added, so a caller acting on the new
+    /// entity uses the ref the arena actually issued.
+    pub fn exec(&mut self, action: Action) -> arael_sketch_backend::actions::Created {
+        use arael_sketch_backend::actions::Created;
+        let mut created = Created::Nothing;
         self.status_error = None;
         self.show_hints = false;
 
@@ -2087,11 +2094,12 @@ impl EditorApp {
                 }
             }
         } else {
-            action.apply(&mut self.sketch);
+            created = action.apply(&mut self.sketch);
             self.sketch.dedup_constraints();
             self.history.push(action, &self.sketch, arael_sketch_backend::history::CursorState { pos: self.command_cursor, tangent: self.command_cursor_tangent });
         }
         self.compute_dof_async();
+        created
     }
 
     /// Apply a user parameter change with solve and cost check.

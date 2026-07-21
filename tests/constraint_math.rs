@@ -257,8 +257,8 @@ fn build() -> (Space, Vec<f64>) {
         hb: SelfBlock::new(),
     });
     space.links.push(V3Link {
-        a: Ref::new(0),
-        b: Ref::new(1),
+        a: space.points.ref_at(0),
+        b: space.points.ref_at(1),
         hb: CrossBlock::new(),
     });
     space.planars.push(Planar {

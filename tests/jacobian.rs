@@ -89,8 +89,8 @@ fn make_test_model() -> (TestModel, Vec<f64>) {
         hb: SelfBlock::new(),
     });
     model.coincidents.push(Coincident {
-        a: arael::refs::Ref::new(0),
-        b: arael::refs::Ref::new(1),
+        a: model.points.ref_at(0),
+        b: model.points.ref_at(1),
         ci: 0,
         hb: CrossBlock::new(),
     });
@@ -181,10 +181,10 @@ fn jacobian_constraint_ids() {
     assert_eq!(coinc_ids, vec![3, 3], "coincident constraint IDs: {:?}", coinc_ids);
 
     // Verify constraint_index fields on structs match
-    assert_eq!(model.points[arael::refs::Ref::new(0)].ci, 0);
-    assert_eq!(model.points[arael::refs::Ref::new(1)].ci, 1);
-    assert_eq!(model.points[arael::refs::Ref::new(2)].ci, 2);
-    assert_eq!(model.coincidents[arael::refs::Ref::new(0)].ci, 3);
+    assert_eq!(model.points[0].ci, 0);
+    assert_eq!(model.points[1].ci, 1);
+    assert_eq!(model.points[2].ci, 2);
+    assert_eq!(model.coincidents[0].ci, 3);
 }
 
 #[test]
@@ -208,8 +208,8 @@ fn jacobian_fixed_params() {
         ci: 0, hb: SelfBlock::new(),
     });
     model.coincidents.push(Coincident {
-        a: arael::refs::Ref::new(0),
-        b: arael::refs::Ref::new(1),
+        a: model.points.ref_at(0),
+        b: model.points.ref_at(1),
         ci: 0, hb: CrossBlock::new(),
     });
     let mut params = Vec::new();
@@ -246,15 +246,15 @@ fn jacobian_guarded_constraints() {
     assert_eq!(j.num_residuals(), 8);
 
     // Enable fix_x on point 0
-    model.points[arael::refs::Ref::new(0)].constraints.has_fix_x = true;
-    model.points[arael::refs::Ref::new(0)].constraints.fix_x = 1.0;
+    model.points[0].constraints.has_fix_x = true;
+    model.points[0].constraints.fix_x = 1.0;
     let j = model.calc_jacobian(&params);
     // 8 + 1 fix_x = 9
     assert_eq!(j.num_residuals(), 9);
 
     // Enable fix_y on point 0 too
-    model.points[arael::refs::Ref::new(0)].constraints.has_fix_y = true;
-    model.points[arael::refs::Ref::new(0)].constraints.fix_y = 2.0;
+    model.points[0].constraints.has_fix_y = true;
+    model.points[0].constraints.fix_y = 2.0;
     let j = model.calc_jacobian(&params);
     // 8 + 1 fix_x + 1 fix_y = 10
     assert_eq!(j.num_residuals(), 10);

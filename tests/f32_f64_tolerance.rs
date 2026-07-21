@@ -73,8 +73,8 @@ fn f32_and_f64_agree_within_tolerance() {
     c32.solve_sparse(&LmConfig { max_iters: 200, ..Default::default() });
 
     for i in 0..N {
-        let p64 = c64.points[c64.points.ref_at(i)].pos.value;
-        let p32 = c32.points[c32.points.ref_at(i)].pos.value;
+        let p64 = c64.points[i].pos.value;
+        let p32 = c32.points[i].pos.value;
         let dx = (p64.x - p32.x as f64).abs();
         let dy = (p64.y - p32.y as f64).abs();
         assert!(dx < 1e-3 && dy < 1e-3,

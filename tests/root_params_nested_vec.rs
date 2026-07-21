@@ -61,8 +61,8 @@ fn build_model() -> (TestModel, Vec<f64>) {
     landmarks.push(Landmark {
         anchor: vect2d::new(2.0, 1.0),
         frines: vec![
-            Frine { pose: arael::refs::Ref::new(0), hb_root: CrossBlock::new() },
-            Frine { pose: arael::refs::Ref::new(1), hb_root: CrossBlock::new() },
+            Frine { pose: poses.ref_at(0), hb_root: CrossBlock::new() },
+            Frine { pose: poses.ref_at(1), hb_root: CrossBlock::new() },
         ],
     });
     let mut model = TestModel {

@@ -61,8 +61,8 @@ fn build() -> (M, Vec<f64>) {
     for &x in &[0.5, 1.3, -0.7] {
         m.pts.push(Pt { x: Param::new(x), hb: SelfBlock::new() });
     }
-    m.pairs.push(Pair { a: Ref::new(0), b: Ref::new(0), hb: CrossBlock::new() });
-    m.pairs.push(Pair { a: Ref::new(1), b: Ref::new(2), hb: CrossBlock::new() });
+    m.pairs.push(Pair { a: m.pts.ref_at(0), b: m.pts.ref_at(0), hb: CrossBlock::new() });
+    m.pairs.push(Pair { a: m.pts.ref_at(1), b: m.pts.ref_at(2), hb: CrossBlock::new() });
     let mut params = Vec::new();
     m.serialize64(&mut params);
     (m, params)
@@ -213,7 +213,7 @@ fn aliased_pair_converges() {
         isigma: 1.0,
     };
     m.pts.push(Pt { x: Param::new(0.5), hb: SelfBlock::new() });
-    m.pairs.push(Pair { a: Ref::new(0), b: Ref::new(0), hb: CrossBlock::new() });
+    m.pairs.push(Pair { a: m.pts.ref_at(0), b: m.pts.ref_at(0), hb: CrossBlock::new() });
     let mut params = Vec::new();
     m.serialize64(&mut params);
     let result = simple_lm::solve(&params, &mut m, &LmConfig::default());
@@ -225,7 +225,7 @@ fn aliased_pair_converges() {
     m.serialize64(&mut params);
     m.calc_grad_hessian_dense(&params, &mut grad, &mut h);
     // Analytic stationary point of (x^2-4)^2 + x^2: x = sqrt(3.5).
-    let x = m.pts[Ref::<Pt>::new(0)].x.value;
+    let x = m.pts[0].x.value;
     assert!((x - 3.5_f64.sqrt()).abs() < 1e-4,
         "expected x = sqrt(3.5) = {}, got {}", 3.5_f64.sqrt(), x);
     assert!(grad.iter().all(|g| g.abs() < 1e-4),
@@ -243,7 +243,7 @@ fn distinct_entities_still_solve() {
     };
     m.pts.push(Pt { x: Param::new(0.9), hb: SelfBlock::new() });
     m.pts.push(Pt { x: Param::new(1.8), hb: SelfBlock::new() });
-    m.pairs.push(Pair { a: Ref::new(0), b: Ref::new(1), hb: CrossBlock::new() });
+    m.pairs.push(Pair { a: m.pts.ref_at(0), b: m.pts.ref_at(1), hb: CrossBlock::new() });
     let mut params = Vec::new();
     m.serialize64(&mut params);
     let result = simple_lm::solve(&params, &mut m, &LmConfig::default());
@@ -336,7 +336,7 @@ fn aliased_cross_equals_self_formulation() {
         pairs: std::vec::Vec::new(), k: 2.0, isigma: 1.3,
     };
     wc.q2s.push(Q2 { x: Param::new(x), y: Param::new(y), hb: SelfBlock::new() });
-    wc.pairs.push(PairQ { a: Ref::new(0), b: Ref::new(0), hb: CrossBlock::new() });
+    wc.pairs.push(PairQ { a: wc.q2s.ref_at(0), b: wc.q2s.ref_at(0), hb: CrossBlock::new() });
     let mut params_c = Vec::new();
     wc.serialize64(&mut params_c);
     assert_eq!(params_c.len(), n);

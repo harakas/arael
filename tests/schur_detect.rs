@@ -170,8 +170,8 @@ fn build() -> World {
     // and its line observations -- two genuinely different pose groups)
     for i in 1..N_A {
         w.odos.push(Odo {
-            a: Ref::new((i - 1) as u32),
-            b: Ref::new(i as u32),
+            a: w.poses_a.ref_at((i - 1)),
+            b: w.poses_a.ref_at(i),
             dx: 1.0,
             dy: 0.0,
             hb: CrossBlock::new(),
@@ -181,8 +181,8 @@ fn build() -> World {
     for j in 0..N_POINTS {
         for pi in [j % N_A, (j + 2) % N_A] {
             w.pobs.push(PointObs {
-                pose: Ref::new(pi as u32),
-                p: Ref::new(j as u32),
+                pose: w.poses_a.ref_at(pi),
+                p: w.points.ref_at(j),
                 dx: 0.4,
                 dy: 0.9,
                 hb: CrossBlock::new(),
@@ -193,8 +193,8 @@ fn build() -> World {
     for k in 0..N_LINES {
         for pi in [k % N_B, (k + 1) % N_B] {
             w.lobs.push(LineObs {
-                pose: Ref::new(pi as u32),
-                l: Ref::new(k as u32),
+                pose: w.poses_a.ref_at(pi),
+                l: w.lines.ref_at(k),
                 d: 1.2,
                 hb: CrossBlock::new(),
             });
@@ -253,7 +253,7 @@ fn auto_schur_matches_dense() {
         rq.end_cost
     );
     for j in 0..N_POINTS {
-        let (a, b) = (&wd.points[Ref::<Point>::new(j as u32)], &wq.points[Ref::<Point>::new(j as u32)]);
+        let (a, b) = (&wd.points[j as usize], &wq.points[j as usize]);
         assert!((a.x.value - b.x.value).abs() < 1e-6, "point {} x", j);
         assert!((a.y.value - b.y.value).abs() < 1e-6, "point {} y", j);
     }
@@ -270,12 +270,12 @@ fn auto_schur_matches_dense() {
         rq.end_cost
     );
     for k in 0..N_LINES {
-        let (a, b) = (&wd.lines[Ref::<Line>::new(k as u32)], &wq.lines[Ref::<Line>::new(k as u32)]);
+        let (a, b) = (&wd.lines[k as usize], &wq.lines[k as usize]);
         assert!((a.a.value - b.a.value).abs() < 1e-6, "line {} a", k);
         assert!((a.c.value - b.c.value).abs() < 1e-6, "line {} c", k);
     }
     for i in 0..N_B {
-        let (a, b) = (&wd.poses_b[Ref::<Pose>::new(i as u32)], &wq.poses_b[Ref::<Pose>::new(i as u32)]);
+        let (a, b) = (&wd.poses_b[i as usize], &wq.poses_b[i as usize]);
         assert!((a.x.value - b.x.value).abs() < 1e-6, "pose_b {} x", i);
     }
 }

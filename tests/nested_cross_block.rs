@@ -80,7 +80,8 @@ struct Map {
 // Build one path: nodes initialized at 0, chained by exact deltas, with an
 // observation of `anchor_idx` from node `obs_node`. `truth` is the true node
 // positions used to synthesize exact measurements.
-fn build_path(truth: &[f32], anchors_truth: &[f32], obs: &[(usize, usize)]) -> Path {
+fn build_path(truth: &[f32], anchors_truth: &[f32], obs: &[(usize, usize)],
+              anchor_refs: &[Ref<Anchor>]) -> Path {
     let mut path = Path {
         nodes: refs::Vec::new(),
         links: std::vec::Vec::new(),
@@ -99,7 +100,7 @@ fn build_path(truth: &[f32], anchors_truth: &[f32], obs: &[(usize, usize)]) -> P
     for &(node_i, anchor_i) in obs {
         path.obs.push(Obs {
             node: path.nodes.ref_at(node_i),
-            anchor: Ref::new(anchor_i as u32),
+            anchor: anchor_refs[anchor_i],
             measured: anchors_truth[anchor_i] - truth[node_i],
             isigma: 1.0,
             hb: CrossBlock::new(),
@@ -113,18 +114,19 @@ fn build_map() -> (Map, Vec<Vec<f32>>) {
     // are pulled into.
     let anchors_truth = [0.0_f32, 10.0];
     let mut anchors = refs::Vec::new();
+    let mut anchor_refs = Vec::new();
     for &a in &anchors_truth {
         let mut anc = Anchor { x: Param::new(a), hb: SelfBlock::new() };
         anc.x.optimize = false; // fixed reference
-        anchors.push(anc);
+        anchor_refs.push(anchors.push(anc));
     }
 
     // Two paths with different true node positions, each observing both anchors
     // from different nodes -- so the shared anchors merge the two runs.
     let path_truth = vec![vec![1.0_f32, 2.0, 3.0], vec![1.5_f32, 4.0, 6.5]];
     let paths = vec![
-        build_path(&path_truth[0], &anchors_truth, &[(0, 0), (2, 1)]),
-        build_path(&path_truth[1], &anchors_truth, &[(0, 0), (2, 1)]),
+        build_path(&path_truth[0], &anchors_truth, &[(0, 0), (2, 1)], &anchor_refs),
+        build_path(&path_truth[1], &anchors_truth, &[(0, 0), (2, 1)], &anchor_refs),
     ];
 
     (Map { paths, anchors }, path_truth)
@@ -144,8 +146,8 @@ fn nested_cross_and_cross_level_converge_dense() {
         }
     }
     // Anchors held fixed.
-    assert_eq!(map.anchors[Ref::new(0)].x.value, 0.0);
-    assert_eq!(map.anchors[Ref::new(1)].x.value, 10.0);
+    assert_eq!(map.anchors[0].x.value, 0.0);
+    assert_eq!(map.anchors[1].x.value, 10.0);
 }
 
 #[test]

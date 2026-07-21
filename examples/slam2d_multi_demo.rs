@@ -196,14 +196,13 @@ fn build_map(cfg: &Cfg) -> (Map, Gt) {
         let (p0, g0) = scene.runs[s0.run].est[s0.pose];
         let world_b = g0 + s0.bearing;
         let init = p0 + vect2f::new(cfg.init_range * world_b.cos(), cfg.init_range * world_b.sin());
-        let map_lm_idx = map.landmarks.len() as u32;
-        map.landmarks.push(Landmark { pos: Param::new(init), hb: SelfBlock::new() });
+        let map_lm = map.landmarks.push(Landmark { pos: Param::new(init), hb: SelfBlock::new() });
         lm_to_gt.push(gid);
         for s in group {
             let pose_ref = paths[s.run].poses.ref_at(s.pose);
             paths[s.run].frines.push(Frine {
                 pose: pose_ref,
-                lm: Ref::new(map_lm_idx),
+                lm: map_lm,
                 bearing: s.bearing,
                 isigma: 1.0 / cfg.bearing_sigma,
                 hb: CrossBlock::new(),
