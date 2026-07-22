@@ -677,19 +677,30 @@ fn model_attribute(input: &mut syn::DeriveInput) -> syn::Result<TokenStream2> {
         _ => return Err(syn::Error::new_spanned(input, "arael::model requires a struct or enum")),
     };
 
-    // `#[arael(component)]` structs may be generic over exactly one scalar
+    // A `#[arael::model]` struct may be generic over exactly one scalar
     // type parameter bounded by `Float`; the layout registry stores shapes
-    // only, so one registration covers every instantiation. Other generics
-    // (lifetimes, const params, several type params, entity structs) are
-    // not supported.
+    // only, so one registration covers every instantiation. The root must
+    // be concrete -- it is where all generated solver code becomes real,
+    // and its f32/f64 marker drives that. `fit(...)` structs have their
+    // own codegen path and stay concrete too.
     let is_component = has_struct_attr_ident(&input.attrs, "component");
     let mut scalar_generic: Option<String> = None;
-    if !input.generics.params.is_empty() && is_component {
+    if !input.generics.params.is_empty() {
+        if has_struct_attr_ident(&input.attrs, "root") {
+            return Err(syn::Error::new_spanned(&input.generics,
+                format!("`{}`: a #[arael(root)] struct must be concrete -- \
+                         instantiate generic entities in a concrete root \
+                         (e.g. `poses: refs::Vec<Pose<f32>>`)", name)));
+        }
+        if has_struct_attr_ident(&input.attrs, "fit") {
+            return Err(syn::Error::new_spanned(&input.generics,
+                format!("`{}`: a #[arael(fit(...))] struct must be concrete", name)));
+        }
         if input.generics.lifetimes().next().is_some()
             || input.generics.const_params().next().is_some()
             || input.generics.type_params().count() != 1 {
             return Err(syn::Error::new_spanned(&input.generics,
-                format!("generic component `{}`: exactly one type parameter is \
+                format!("generic model `{}`: exactly one type parameter is \
                          supported, bounded by `Float` (e.g. `struct {}<T: Float>`)",
                         name, name)));
         }
@@ -699,7 +710,7 @@ fn model_attribute(input: &mut syn::DeriveInput) -> syn::Result<TokenStream2> {
                 if t.path.segments.last().map(|s| s.ident == "Float").unwrap_or(false)));
         if !has_float_bound {
             return Err(syn::Error::new_spanned(tp,
-                format!("generic component `{}`: the type parameter `{}` must carry \
+                format!("generic model `{}`: the type parameter `{}` must carry \
                          an inline `Float` bound (`{}: arael::utils::Float`)",
                         name, tp.ident, tp.ident)));
         }
@@ -972,29 +983,7 @@ fn emit_trivial_model_for_enum(input: &mut syn::DeriveInput) -> syn::Result<Toke
             fn sym(_base: &str) -> #sym_name { #sym_name }
         }
 
-        impl #impl_generics arael::model::Model for #name #ty_generics #where_clause {
-            fn serialize_params32(&mut self, _data: &mut std::vec::Vec<f32>) {}
-            fn deserialize_params32(&mut self, _data: &[f32]) {}
-            fn update32(&mut self, _data: &[f32]) {}
-            fn update_self(&mut self) {}
-            fn serialize_params64(&mut self, _data: &mut std::vec::Vec<f64>) {}
-            fn deserialize_params64(&mut self, _data: &[f64]) {}
-            fn update64(&mut self, _data: &[f64]) {}
-            const PARAM_COUNT: u32 = 0;
-            fn serialize_size(&self) -> u32 { 0 }
-            fn param_symbols(_base: &str, _out: &mut std::vec::Vec<String>) {}
-            fn zero_blocks(&mut self) {}
-            fn accumulate_hessian32(&self, _hessian: &mut [f32]) {}
-            fn accumulate_hessian64(&self, _hessian: &mut [f64]) {}
-            fn accumulate_hessian_band32(&self, _band: &mut [f32], _kd: usize) -> Result<(), arael::simple_lm::BandError> { Ok(()) }
-            fn accumulate_hessian_band64(&self, _band: &mut [f64], _kd: usize) -> Result<(), arael::simple_lm::BandError> { Ok(()) }
-            fn accumulate_hessian_sparse32(&self, _coo: &mut arael::simple_lm::CooMatrix<f32>) {}
-            fn accumulate_hessian_sparse64(&self, _coo: &mut arael::simple_lm::CooMatrix<f64>) {}
-            fn accumulate_hessian_sparse_direct32(&self, _csc: &mut arael::simple_lm::CscMatrix<f32>) {}
-            fn accumulate_hessian_sparse_direct64(&self, _csc: &mut arael::simple_lm::CscMatrix<f64>) {}
-            fn accumulate_hessian_sparse_indexed32(&self, _vals: &mut [f32], _positions: &[usize], _cursor: &mut usize) {}
-            fn accumulate_hessian_sparse_indexed64(&self, _vals: &mut [f64], _positions: &[usize], _cursor: &mut usize) {}
-        }
+        impl #impl_generics arael::model::Model for #name #ty_generics #where_clause {}
     })
 }
 
@@ -1206,7 +1195,6 @@ pub fn derive_model(input: TokenStream) -> TokenStream {
 
 fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
     let name = &input.ident;
-    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
 
     let fields = match &input.data {
         syn::Data::Struct(data) => match &data.fields {
@@ -1215,6 +1203,26 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
         },
         _ => return Err(syn::Error::new_spanned(input, "Model derive requires a struct")),
     };
+
+    // A generic struct's block fields need explicit Model bounds: block
+    // Model impls exist per precision (that is the routing), so
+    // `SelfBlock<A<T>, ..., T>: Model` holds only at each concrete
+    // instantiation and the generated impls must say so.
+    let mut generics = input.generics.clone();
+    if generics.type_params().next().is_some() {
+        for field in fields {
+            let ty = if let Some((inner, _)) = extract_wrapper_inner(&field.ty, "Option") {
+                inner
+            } else {
+                &field.ty
+            };
+            if is_hessian_block_type(ty) {
+                generics.make_where_clause().predicates.push(
+                    syn::parse_quote! { #ty: arael::model::Model });
+            }
+        }
+    }
+    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
 
     // Component role (registered by model_attribute before this runs):
     // wraps this struct's Model impl in the Component lifecycle calls.
@@ -1326,105 +1334,18 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
             // their constraint-body reads differ.
             Some(AraelAttr::RefResolve(_)) | Some(AraelAttr::Cross(_))
             | Some(AraelAttr::Symbolic(_)) | None => {
-                // HessianBlock fields: skip serialize, handle in zero/accumulate
-                if is_hessian_block_type(&field.ty) {
-                    if let syn::Type::Path(tp) = &field.ty
-                        && let Some(seg) = tp.path.segments.last()
-                            && seg.ident == "TripletBlock" {
-                                has_triplet_block = true;
-                            }
-                    zero_blocks_stmts.push(quote! { self.#ident.zero(); });
-                    release_blocks_stmts.push(quote! { self.#ident.release(); });
-                    if is_self_block_type(&field.ty) {
-                        collect_param_blocks_stmts.push(quote! {
-                            self.#ident.collect_param_block(out);
-                        });
-                    }
-                    let acc_dense = quote! { self.#ident.accumulate_hessian(hessian); };
-                    let acc_band = quote! { self.#ident.accumulate_hessian_band(band, kd)?; };
-                    let acc_sparse = quote! { self.#ident.accumulate_hessian_sparse(coo); };
-                    let acc_sparse_direct = quote! { self.#ident.accumulate_hessian_sparse_direct(csc); };
-                    let acc_sparse_indexed = quote! { self.#ident.accumulate_hessian_sparse_indexed(vals, positions, cursor); };
-                    let cells = quote! { self.#ident.collect_hessian_cells(out); };
-                    let posns = quote! { self.#ident.accumulate_hessian_positions(resolve, out); };
-                    if block_is_f32(&field.ty) {
-                        collect_cells32_stmts.push(cells.clone());
-                        positions32_stmts.push(posns.clone());
-                    } else {
-                        collect_cells64_stmts.push(cells.clone());
-                        positions64_stmts.push(posns.clone());
-                    }
-                    if block_is_f32(&field.ty) {
-                        accumulate_hessian32_stmts.push(acc_dense);
-                        accumulate_hessian_band32_stmts.push(acc_band);
-                        accumulate_hessian_sparse32_stmts.push(acc_sparse);
-                        accumulate_hessian_sparse_direct32_stmts.push(acc_sparse_direct);
-                        accumulate_hessian_sparse_indexed32_stmts.push(acc_sparse_indexed);
-                    } else {
-                        accumulate_hessian64_stmts.push(acc_dense);
-                        accumulate_hessian_band64_stmts.push(acc_band);
-                        accumulate_hessian_sparse64_stmts.push(acc_sparse);
-                        accumulate_hessian_sparse_direct64_stmts.push(acc_sparse_direct);
-                        accumulate_hessian_sparse_indexed64_stmts.push(acc_sparse_indexed);
-                    }
-                    continue;
-                }
-                // Option<HessianBlock> fields: skip serialize, handle in zero/accumulate
-                if is_option_hessian_block(&field.ty) {
-                    zero_blocks_stmts.push(quote! {
-                        if let Some(ref mut __hb) = self.#ident { __hb.zero(); }
-                    });
-                    if is_self_block_type(&field.ty) {
-                        collect_param_blocks_stmts.push(quote! {
-                            if let Some(ref __hb) = self.#ident { __hb.collect_param_block(out); }
-                        });
-                    }
-                    release_blocks_stmts.push(quote! {
-                        if let Some(ref mut __hb) = self.#ident { __hb.release(); }
-                    });
-                    let acc_dense = quote! {
-                        if let Some(ref __hb) = self.#ident { __hb.accumulate_hessian(hessian); }
-                    };
-                    let acc_band = quote! {
-                        if let Some(ref __hb) = self.#ident { __hb.accumulate_hessian_band(band, kd)?; }
-                    };
-                    let acc_sparse = quote! {
-                        if let Some(ref __hb) = self.#ident { __hb.accumulate_hessian_sparse(coo); }
-                    };
-                    let acc_sparse_direct = quote! {
-                        if let Some(ref __hb) = self.#ident { __hb.accumulate_hessian_sparse_direct(csc); }
-                    };
-                    let acc_sparse_indexed = quote! {
-                        if let Some(ref __hb) = self.#ident { __hb.accumulate_hessian_sparse_indexed(vals, positions, cursor); }
-                    };
-                    let cells = quote! {
-                        if let Some(ref __hb) = self.#ident { __hb.collect_hessian_cells(out); }
-                    };
-                    let posns = quote! {
-                        if let Some(ref __hb) = self.#ident { __hb.accumulate_hessian_positions(resolve, out); }
-                    };
-                    if block_is_f32(&field.ty) {
-                        collect_cells32_stmts.push(cells.clone());
-                        positions32_stmts.push(posns.clone());
-                    } else {
-                        collect_cells64_stmts.push(cells.clone());
-                        positions64_stmts.push(posns.clone());
-                    }
-                    if block_is_f32(&field.ty) {
-                        accumulate_hessian32_stmts.push(acc_dense);
-                        accumulate_hessian_band32_stmts.push(acc_band);
-                        accumulate_hessian_sparse32_stmts.push(acc_sparse);
-                        accumulate_hessian_sparse_direct32_stmts.push(acc_sparse_direct);
-                        accumulate_hessian_sparse_indexed32_stmts.push(acc_sparse_indexed);
-                    } else {
-                        accumulate_hessian64_stmts.push(acc_dense);
-                        accumulate_hessian_band64_stmts.push(acc_band);
-                        accumulate_hessian_sparse64_stmts.push(acc_sparse);
-                        accumulate_hessian_sparse_direct64_stmts.push(acc_sparse_direct);
-                        accumulate_hessian_sparse_indexed64_stmts.push(acc_sparse_indexed);
-                    }
-                    continue;
-                }
+                // Block fields walk through the same uniform Model
+                // recursion as every other field: each block's Model impl
+                // participates in exactly its own precision's walks (the
+                // other family is the trait's no-op default), so the
+                // precision sort happens at monomorphization -- which is
+                // what lets a generic struct's `SelfBlock<A, T>` sort
+                // itself per instantiation.
+                if let syn::Type::Path(tp) = &field.ty
+                    && let Some(seg) = tp.path.segments.last()
+                        && seg.ident == "TripletBlock" {
+                            has_triplet_block = true;
+                        }
 
                 let ty = &field.ty;
 
@@ -2075,30 +1996,6 @@ fn is_euler_angle_param_type(ty: &syn::Type) -> Option<&'static str> {
     None
 }
 
-/// Check if a block type (SelfBlock or CrossBlock) has explicit f32 as its last type arg.
-/// SelfBlock<A, f32> or CrossBlock<A, B, f32> -> true. Default (no float arg) -> false.
-/// Also handles Option<SelfBlock<..., f32>>.
-fn block_is_f32(ty: &syn::Type) -> bool {
-    if let syn::Type::Path(tp) = ty
-        && let Some(seg) = tp.path.segments.last() {
-            // Unwrap Option<...> if needed
-            if seg.ident == "Option" {
-                if let syn::PathArguments::AngleBracketed(args) = &seg.arguments
-                    && let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
-                        return block_is_f32(inner_ty);
-                    }
-                return false;
-            }
-            // SelfBlock or CrossBlock: check if last type arg is f32
-            if let syn::PathArguments::AngleBracketed(args) = &seg.arguments
-                && let Some(syn::GenericArgument::Type(syn::Type::Path(last))) = args.args.last()
-                    && let Some(last_seg) = last.path.segments.last() {
-                        return last_seg.ident == "f32";
-                    }
-        }
-    false
-}
-
 /// Check if a type is `SelfBlock<...>` or `CrossBlock<...>`.
 fn is_hessian_block_type(ty: &syn::Type) -> bool {
     if let syn::Type::Path(tp) = ty
@@ -2106,24 +2003,6 @@ fn is_hessian_block_type(ty: &syn::Type) -> bool {
             let name = seg.ident.to_string();
             return matches!(name.as_str(),
                 "SelfBlock" | "CrossBlock" | "TripletBlock" | "BoxedSelfBlock" | "BoxedCrossBlock");
-        }
-    false
-}
-
-/// Check if a type is `SelfBlock`/`BoxedSelfBlock` (unwrapping `Option`) --
-/// the blocks that carry per-entity parameter spans.
-fn is_self_block_type(ty: &syn::Type) -> bool {
-    if let syn::Type::Path(tp) = ty
-        && let Some(seg) = tp.path.segments.last() {
-            if seg.ident == "Option" {
-                if let syn::PathArguments::AngleBracketed(args) = &seg.arguments
-                    && let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
-                        return is_self_block_type(inner_ty);
-                    }
-                return false;
-            }
-            let name = seg.ident.to_string();
-            return matches!(name.as_str(), "SelfBlock" | "BoxedSelfBlock");
         }
     false
 }

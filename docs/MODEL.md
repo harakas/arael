@@ -356,6 +356,20 @@ struct Path {
 | `#[arael(fit(coll, \|e\| body))]` / `fit64(...)` | shorthand: sum-of-squares fit of a residual body over one collection (f32; `fit64` is f64). Implements `FitProblem`, whose `fit()` / `fit_with()` run the dense LM round trip |
 | `#[arael(skip_self_block)]` | opt out of the mandatory `SelfBlock<Self>`. Reserved for Models whose parameters only appear inside constraints declared elsewhere (rare) |
 
+### Generic models
+
+Any `#[arael::model]` struct except the root (and `fit` structs) may
+take exactly one type parameter with an inline `Float` bound. Fields
+are spelled generically -- `Param<vect2<T>>`, `quatern<T>`, bare
+`Param<T>`, `SelfBlock<Pose<T>, T>`, `CrossBlock<Pose<T>, Lm<T>, T>` --
+and one definition then serves f64 and f32 models alike. The root stays
+concrete and picks the precision by instantiating the entities
+(`poses: refs::Vec<Pose<f32>>`); a root must spell every use of an
+entity identically (one instantiation per root). See
+`examples/plane_slam_demo.rs` for a generic component and
+`tests/generic_entity.rs` for a generic entity/constraint model with
+f64 and f32 roots.
+
 Constraints can also appear on the root itself -- useful for
 regularising root-level parameters (see `global_delta_drift` and
 `global_rot_drift` on `Path` in `loc_global_demo.rs`).

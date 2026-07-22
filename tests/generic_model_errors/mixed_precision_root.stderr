@@ -1,0 +1,13 @@
+error: root holds `Pt` both as `Pt<f32>` and `Pt<f64>` -- entities are resolved by bare type name, so a root must spell every use of `Pt` identically (one instantiation per root)
+  --> tests/generic_model_errors/mixed_precision_root.rs:22:5
+   |
+22 |     pts64: refs::Vec<Pt<f64>>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `arael::refs`
+ --> tests/generic_model_errors/mixed_precision_root.rs:5:5
+  |
+5 | use arael::refs;
+  |     ^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

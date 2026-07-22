@@ -1,15 +1,16 @@
 # TODO
 
-- **Generics beyond components**. `#[arael::model]` generics are supported
-  only on `#[arael(component)]` structs, and only as one scalar type
-  parameter bounded by `Float` (more than one, or a missing bound, is a
-  macro error). Entity/constraint/root structs with type parameters remain
-  unsupported and unvalidated: the layout registry is keyed by bare struct
-  name and constraint code is emitted per root with concrete field access,
-  so generic entities would need per-instantiation registration. Not
-  implemented because no use case needed it -- precision is the only axis
-  models vary on, and that is covered by the component support plus the
-  f32/f64 twin method families on `Model`.
+- **Generic models** -- DONE (2026-07-22) for components, entities and
+  constraint structs: one scalar type parameter bounded by `Float`, one
+  instantiation per entity name per root (mixing `Vec<Pose<f32>>` and
+  `Vec<Pose<f64>>` in one root is a macro error). Blocks route their
+  precision at monomorphization through per-precision `Model` impls, so
+  `SelfBlock<Pose<T>, T>` sorts itself per instantiation. Still concrete
+  by design: `#[arael(root)]` (the root is where generated solver code
+  becomes real, at one precision) and `#[arael(fit(...))]` (separate
+  codegen path, unaudited for generics -- extend if a use case appears).
+  Tests: tests/generic_component.rs, tests/generic_entity.rs,
+  tests/generic_model_errors.rs.
 
 - **`loss = |s| ...` in `fit(...)`** -- DONE (2026-07-17, REVIEW3 item 7).
   `fit(...)`/`fit64(...)` accept a trailing `loss = |s| rho(s)` block

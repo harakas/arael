@@ -142,14 +142,14 @@ impl<T: ParamType + std::fmt::Debug> std::fmt::Debug for Param<T> {
 ///   Gradient is written directly into a global slice by each constraint,
 ///   not routed through these methods.
 pub trait Model {
-    fn serialize_params32(&mut self, data: &mut std::vec::Vec<f32>);
-    fn deserialize_params32(&mut self, data: &[f32]);
-    fn update32(&mut self,data: &[f32]);
-    fn update_self(&mut self);
+    fn serialize_params32(&mut self, _data: &mut std::vec::Vec<f32>) {}
+    fn deserialize_params32(&mut self, _data: &[f32]) {}
+    fn update32(&mut self, _data: &[f32]) {}
+    fn update_self(&mut self) {}
 
-    fn serialize_params64(&mut self, data: &mut std::vec::Vec<f64>);
-    fn deserialize_params64(&mut self, data: &[f64]);
-    fn update64(&mut self, data: &[f64]);
+    fn serialize_params64(&mut self, _data: &mut std::vec::Vec<f64>) {}
+    fn deserialize_params64(&mut self, _data: &[f64]) {}
+    fn update64(&mut self, _data: &[f64]) {}
 
     const PARAM_COUNT: u32 = 0;
     fn serialize_size(&self) -> u32 { 0 }
@@ -324,11 +324,12 @@ pub trait Model {
 /// `#[arael(symbolic = ...)]` field attributes (which the macro
 /// differentiates at expansion time -- a trait method body cannot be).
 ///
-/// A component may be generic over its scalar: exactly one type
-/// parameter, bounded inline by `Float` (`struct Dir<T: Float>`), with
-/// fields spelled generically (`quatern<T>`, `Param<vect2<T>>`, bare
-/// `Param<T>`). One definition then serves f64 and f32 models alike --
-/// see `examples/plane_slam_demo.rs`.
+/// Like any non-root model struct, a component may be generic over its
+/// scalar: exactly one type parameter, bounded inline by `Float`
+/// (`struct Dir<T: Float>`), with fields spelled generically
+/// (`quatern<T>`, `Param<vect2<T>>`, bare `Param<T>`). One definition
+/// then serves f64 and f32 models alike -- see
+/// `examples/plane_slam_demo.rs`.
 ///
 /// All methods default to no-ops: a stateless reparameterization
 /// implements nothing.
@@ -1090,24 +1091,16 @@ impl<T: crate::utils::Float> Model for QuaternionParam<T> where vect3<T>: ParamT
 // No-op Model impls for leaf types
 // ---------------------------------------------------------------------------
 
+// Every Model method defaults to a no-op, so a leaf type participates
+// with an empty impl. Kept in step with impl_scalar_model_sym! below: a
+// primitive field needs both a Model and a ModelSym to be usable without
+// `#[arael(skip)]`.
 macro_rules! impl_model_noop {
     ($($ty:ty),* $(,)?) => {
-        $(
-            impl Model for $ty {
-                fn serialize_params32(&mut self, _data: &mut std::vec::Vec<f32>) {}
-                fn deserialize_params32(&mut self, _data: &[f32]) {}
-                fn update32(&mut self,_data: &[f32]) {}
-                fn update_self(&mut self) {}
-                fn serialize_params64(&mut self, _data: &mut std::vec::Vec<f64>) {}
-                fn deserialize_params64(&mut self, _data: &[f64]) {}
-                fn update64(&mut self, _data: &[f64]) {}
-            }
-        )*
+        $( impl Model for $ty {} )*
     };
 }
 
-// Kept in step with impl_scalar_model_sym! below: a primitive field needs both
-// a no-op Model and a ModelSym to be usable without `#[arael(skip)]`.
 impl_model_noop!(
     bool, char, String,
     i8, i16, i32, i64, i128, isize,
@@ -1117,17 +1110,7 @@ impl_model_noop!(
 
 macro_rules! impl_model_noop_generic {
     ($($m:ident :: $t:ident),* $(,)?) => {
-        $(
-            impl<F: crate::utils::Float> Model for crate::$m::$t<F> {
-                fn serialize_params32(&mut self, _data: &mut std::vec::Vec<f32>) {}
-                fn deserialize_params32(&mut self, _data: &[f32]) {}
-                fn update32(&mut self,_data: &[f32]) {}
-                fn update_self(&mut self) {}
-                fn serialize_params64(&mut self, _data: &mut std::vec::Vec<f64>) {}
-                fn deserialize_params64(&mut self, _data: &[f64]) {}
-                fn update64(&mut self, _data: &[f64]) {}
-            }
-        )*
+        $( impl<F: crate::utils::Float> Model for crate::$m::$t<F> {} )*
     };
 }
 
@@ -1137,15 +1120,7 @@ impl_model_noop_generic!(
     quatern::quatern,
 );
 
-impl<T> Model for crate::refs::Ref<T> {
-    fn serialize_params32(&mut self, _data: &mut std::vec::Vec<f32>) {}
-    fn deserialize_params32(&mut self, _data: &[f32]) {}
-    fn update32(&mut self,_data: &[f32]) {}
-    fn update_self(&mut self) {}
-    fn serialize_params64(&mut self, _data: &mut std::vec::Vec<f64>) {}
-    fn deserialize_params64(&mut self, _data: &[f64]) {}
-    fn update64(&mut self, _data: &[f64]) {}
-}
+impl<T> Model for crate::refs::Ref<T> {}
 
 // ---------------------------------------------------------------------------
 // Collection Model impls — iterate and recurse
@@ -1439,17 +1414,17 @@ fn tri_idx(n: usize, i: usize, j: usize) -> usize {
 ///
 /// Created by generated constraint code; users rarely construct these manually.
 #[derive(Clone)]
-pub struct SelfBlock<A: Model, const N: usize, const M: usize, T: crate::utils::Float = f64> {
+pub struct SelfBlock<A, const N: usize, const M: usize, T: crate::utils::Float = f64> {
     indices: [u32; N],
     hessian: [T; M], // upper triangle, M = N(N+1)/2 (the macro sizes this)
     _marker: std::marker::PhantomData<(A, T)>,
 }
 
-impl<A: Model, const N: usize, const M: usize, T: crate::utils::Float> Default for SelfBlock<A, N, M, T> {
+impl<A, const N: usize, const M: usize, T: crate::utils::Float> Default for SelfBlock<A, N, M, T> {
     fn default() -> Self { Self::new() }
 }
 
-impl<A: Model, const N: usize, const M: usize, T: crate::utils::Float> SelfBlock<A, N, M, T> {
+impl<A, const N: usize, const M: usize, T: crate::utils::Float> SelfBlock<A, N, M, T> {
     /// Compile-time guard that `M` matches `N` (the macro sets both; a
     /// hand-written mismatch fails here rather than corrupting silently).
     const CHECK_M: () = assert!(M == N * (N + 1) / 2, "SelfBlock: M must equal N*(N+1)/2");
@@ -1678,15 +1653,15 @@ impl<A: Model, const N: usize, const M: usize, T: crate::utils::Float> SelfBlock
 /// reclaim all transient Hessian memory between solves via the root's
 /// generated `release_blocks()`. Otherwise prefer [`SelfBlock`], which never
 /// allocates. `N`/`M` are supplied by the macro, exactly as for `SelfBlock`.
-pub struct BoxedSelfBlock<A: Model, const N: usize, const M: usize, T: crate::utils::Float = f64> {
+pub struct BoxedSelfBlock<A, const N: usize, const M: usize, T: crate::utils::Float = f64> {
     inner: Option<std::boxed::Box<SelfBlock<A, N, M, T>>>,
 }
 
-impl<A: Model, const N: usize, const M: usize, T: crate::utils::Float> Default for BoxedSelfBlock<A, N, M, T> {
+impl<A, const N: usize, const M: usize, T: crate::utils::Float> Default for BoxedSelfBlock<A, N, M, T> {
     fn default() -> Self { Self::new() }
 }
 
-impl<A: Model, const N: usize, const M: usize, T: crate::utils::Float> BoxedSelfBlock<A, N, M, T> {
+impl<A, const N: usize, const M: usize, T: crate::utils::Float> BoxedSelfBlock<A, N, M, T> {
     /// Create an empty (released) block. Storage is allocated by the first
     /// `set_indices` call that finds the block active.
     pub fn new() -> Self {
@@ -1806,18 +1781,18 @@ impl<A: Model, const N: usize, const M: usize, T: crate::utils::Float> BoxedSelf
 /// is NA×NB row-major (one entry per cross pair). No grad, no A-A, no B-B.
 /// `T` is the float type (f32 or f64, default f64).
 #[derive(Clone)]
-pub struct CrossBlock<A: Model, B: Model, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float = f64> {
+pub struct CrossBlock<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float = f64> {
     indices_a: [u32; NA],
     indices_b: [u32; NB],
     cross_hessian: [T; P],    // NA*NB row-major (the macro sizes this)
     _marker: std::marker::PhantomData<(A, B, T)>,
 }
 
-impl<A: Model, B: Model, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float> Default for CrossBlock<A, B, NA, NB, P, T> {
+impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float> Default for CrossBlock<A, B, NA, NB, P, T> {
     fn default() -> Self { Self::new() }
 }
 
-impl<A: Model, B: Model, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float> CrossBlock<A, B, NA, NB, P, T> {
+impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float> CrossBlock<A, B, NA, NB, P, T> {
     /// Compile-time guard that `P` matches `NA*NB` (set by the macro).
     const CHECK_P: () = assert!(P == NA * NB, "CrossBlock: P must equal NA*NB");
     /// Create a new zeroed cross-block.
@@ -2044,15 +2019,15 @@ impl<A: Model, B: Model, const NA: usize, const NB: usize, const P: usize, T: cr
 /// be released between solves and re-allocated on demand. `None` = released;
 /// `Some` = one heap block. Every method delegates to the inline
 /// [`CrossBlock`]. See [`BoxedSelfBlock`] for when to opt in.
-pub struct BoxedCrossBlock<A: Model, B: Model, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float = f64> {
+pub struct BoxedCrossBlock<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float = f64> {
     inner: Option<std::boxed::Box<CrossBlock<A, B, NA, NB, P, T>>>,
 }
 
-impl<A: Model, B: Model, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float> Default for BoxedCrossBlock<A, B, NA, NB, P, T> {
+impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float> Default for BoxedCrossBlock<A, B, NA, NB, P, T> {
     fn default() -> Self { Self::new() }
 }
 
-impl<A: Model, B: Model, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float> BoxedCrossBlock<A, B, NA, NB, P, T> {
+impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float> BoxedCrossBlock<A, B, NA, NB, P, T> {
     /// Create an empty (released) block. Storage is allocated by the first
     /// `set_indices` call that finds the block active.
     pub fn new() -> Self {
@@ -2423,6 +2398,147 @@ impl<T: crate::utils::Float> TripletBlock<T> {
             *cursor += 1;
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Model impls for the block types
+// ---------------------------------------------------------------------------
+//
+// A block is a node of the model tree like any other field: generated code
+// walks it through the same uniform `Model::` recursion. Each block
+// implements ONLY its own precision's walk family (the other family stays
+// the trait's no-op default), so a walk visits exactly the blocks of its
+// precision -- resolved at monomorphization, which is what lets a generic
+// struct's `SelfBlock<A, N, M, T>` sort itself per instantiation.
+
+macro_rules! block_model_methods {
+    (f32) => {
+        #[inline]
+        fn zero_blocks(&mut self) { self.zero(); }
+        #[inline]
+        fn release_blocks(&mut self) { self.release(); }
+        #[inline]
+        fn accumulate_hessian32(&self, hessian: &mut [f32]) {
+            self.accumulate_hessian(hessian);
+        }
+        #[inline]
+        fn accumulate_hessian_band32(&self, band: &mut [f32], kd: usize)
+            -> Result<(), crate::simple_lm::BandError> {
+            self.accumulate_hessian_band(band, kd)
+        }
+        #[inline]
+        fn accumulate_hessian_sparse32(&self, coo: &mut crate::simple_lm::CooMatrix<f32>) {
+            self.accumulate_hessian_sparse(coo);
+        }
+        #[inline]
+        fn accumulate_hessian_sparse_direct32(&self, csc: &mut crate::simple_lm::CscMatrix<f32>) {
+            self.accumulate_hessian_sparse_direct(csc);
+        }
+        #[inline]
+        fn accumulate_hessian_sparse_indexed32(&self, vals: &mut [f32], positions: &[usize], cursor: &mut usize) {
+            self.accumulate_hessian_sparse_indexed(vals, positions, cursor);
+        }
+        #[inline]
+        fn collect_hessian_cells32(&self, out: &mut std::vec::Vec<(u32, u32)>) {
+            self.collect_hessian_cells(out);
+        }
+        #[inline]
+        fn accumulate_hessian_positions32(
+            &self,
+            resolve: &mut dyn FnMut(u32, u32) -> usize,
+            out: &mut std::vec::Vec<usize>,
+        ) {
+            self.accumulate_hessian_positions(resolve, out);
+        }
+    };
+    (f64) => {
+        #[inline]
+        fn zero_blocks(&mut self) { self.zero(); }
+        #[inline]
+        fn release_blocks(&mut self) { self.release(); }
+        #[inline]
+        fn accumulate_hessian64(&self, hessian: &mut [f64]) {
+            self.accumulate_hessian(hessian);
+        }
+        #[inline]
+        fn accumulate_hessian_band64(&self, band: &mut [f64], kd: usize)
+            -> Result<(), crate::simple_lm::BandError> {
+            self.accumulate_hessian_band(band, kd)
+        }
+        #[inline]
+        fn accumulate_hessian_sparse64(&self, coo: &mut crate::simple_lm::CooMatrix<f64>) {
+            self.accumulate_hessian_sparse(coo);
+        }
+        #[inline]
+        fn accumulate_hessian_sparse_direct64(&self, csc: &mut crate::simple_lm::CscMatrix<f64>) {
+            self.accumulate_hessian_sparse_direct(csc);
+        }
+        #[inline]
+        fn accumulate_hessian_sparse_indexed64(&self, vals: &mut [f64], positions: &[usize], cursor: &mut usize) {
+            self.accumulate_hessian_sparse_indexed(vals, positions, cursor);
+        }
+        #[inline]
+        fn collect_hessian_cells64(&self, out: &mut std::vec::Vec<(u32, u32)>) {
+            self.collect_hessian_cells(out);
+        }
+        #[inline]
+        fn accumulate_hessian_positions64(
+            &self,
+            resolve: &mut dyn FnMut(u32, u32) -> usize,
+            out: &mut std::vec::Vec<usize>,
+        ) {
+            self.accumulate_hessian_positions(resolve, out);
+        }
+    };
+}
+
+/// The self blocks also carry the entity's param-block span.
+macro_rules! collect_param_block_method {
+    () => {
+        #[inline]
+        fn collect_param_blocks(&self, out: &mut std::vec::Vec<(u32, u32)>) {
+            self.collect_param_block(out);
+        }
+    };
+}
+
+impl<A, const N: usize, const M: usize> Model for SelfBlock<A, N, M, f32> {
+    block_model_methods!(f32);
+    collect_param_block_method!();
+}
+impl<A, const N: usize, const M: usize> Model for SelfBlock<A, N, M, f64> {
+    block_model_methods!(f64);
+    collect_param_block_method!();
+}
+impl<A, const N: usize, const M: usize> Model for BoxedSelfBlock<A, N, M, f32> {
+    block_model_methods!(f32);
+    collect_param_block_method!();
+}
+impl<A, const N: usize, const M: usize> Model for BoxedSelfBlock<A, N, M, f64> {
+    block_model_methods!(f64);
+    collect_param_block_method!();
+}
+impl<A, B, const NA: usize, const NB: usize, const P: usize> Model
+    for CrossBlock<A, B, NA, NB, P, f32> {
+    block_model_methods!(f32);
+}
+impl<A, B, const NA: usize, const NB: usize, const P: usize> Model
+    for CrossBlock<A, B, NA, NB, P, f64> {
+    block_model_methods!(f64);
+}
+impl<A, B, const NA: usize, const NB: usize, const P: usize> Model
+    for BoxedCrossBlock<A, B, NA, NB, P, f32> {
+    block_model_methods!(f32);
+}
+impl<A, B, const NA: usize, const NB: usize, const P: usize> Model
+    for BoxedCrossBlock<A, B, NA, NB, P, f64> {
+    block_model_methods!(f64);
+}
+impl Model for TripletBlock<f32> {
+    block_model_methods!(f32);
+}
+impl Model for TripletBlock<f64> {
+    block_model_methods!(f64);
 }
 
 // ---------------------------------------------------------------------------

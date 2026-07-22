@@ -2534,6 +2534,28 @@ pub fn generate_root_methods(
     // missing layout here is always an error, never an external type.
     {
         let root_fields_ordered: syn::FieldsNamed = syn::parse2(quote! { { #root_fields } })?;
+        // The registry and the emitted access paths key entities by BARE
+        // type name, so one root cannot hold two instantiations of the
+        // same generic entity (`Vec<Pose<f32>>` next to `Vec<Pose<f64>>`)
+        // -- nor two spellings of one instantiation. name -> full spelling.
+        let mut spellings: std::collections::HashMap<String, String> =
+            std::collections::HashMap::new();
+        let mut check_spelling = |field: &syn::Field, name: &str, ty: &syn::Type|
+            -> syn::Result<()> {
+            let spelled = quote! { #ty }.to_string()
+                .replace(" < ", "<").replace(" > ", ">").replace(" >", ">");
+            match spellings.get(name) {
+                Some(prev) if *prev != spelled => Err(syn::Error::new_spanned(field,
+                    format!("root holds `{}` both as `{}` and `{}` -- entities are \
+                             resolved by bare type name, so a root must spell every \
+                             use of `{}` identically (one instantiation per root)",
+                            name, prev, spelled, name))),
+                _ => {
+                    spellings.insert(name.to_string(), spelled);
+                    Ok(())
+                }
+            }
+        };
         for field in &root_fields_ordered.named {
             let skipped = field.attrs.iter().any(|a| {
                 a.path().is_ident("arael")
@@ -2543,16 +2565,25 @@ pub fn generate_root_methods(
             });
             if skipped { continue; }
             if let syn::Type::Path(tp) = &field.ty
-                && let Some(seg) = tp.path.segments.last()
-                && matches!(seg.ident.to_string().as_str(), "Vec" | "Deque" | "Arena")
-                && let syn::PathArguments::AngleBracketed(args) = &seg.arguments
-                && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
-                && let Ok(name) = type_ident_name(inner)
-                && registry_lookup(&name).is_none() {
-                    return Err(syn::Error::new_spanned(field,
-                        format!("collection element type `{}` has no registered #[arael::model] \
-                                 layout: define it BEFORE the root struct (macro expansion is \
-                                 top-down file order) and in the same crate", name)));
+                && let Some(seg) = tp.path.segments.last() {
+                    if matches!(seg.ident.to_string().as_str(), "Vec" | "Deque" | "Arena")
+                        && let syn::PathArguments::AngleBracketed(args) = &seg.arguments
+                        && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
+                        && let Ok(name) = type_ident_name(inner) {
+                            if registry_lookup(&name).is_none() {
+                                return Err(syn::Error::new_spanned(field,
+                                    format!("collection element type `{}` has no registered #[arael::model] \
+                                             layout: define it BEFORE the root struct (macro expansion is \
+                                             top-down file order) and in the same crate", name)));
+                            }
+                            check_spelling(field, &name, inner)?;
+                    } else {
+                        // Direct struct-typed field of a registered entity.
+                        let name = seg.ident.to_string();
+                        if registry_lookup(&name).is_some() {
+                            check_spelling(field, &name, &field.ty)?;
+                        }
+                    }
                 }
         }
     }
@@ -2716,18 +2747,30 @@ pub fn generate_root_methods(
                     format!("field '{}' is not a Ref<T>", ref_field_name)))?;
             let target_type = ref_type_ident.to_string();
 
-            // Find the parent struct that contains this constraint struct
-            let parent_type = {
-                let guard = crate::SYM_REGISTRY.lock().unwrap_or_else(|p| p.into_inner());
-                guard.as_ref().and_then(|reg| {
-                    reg.layouts.iter().find(|(_, layout)| {
-                        layout.fields.iter().any(|(_, sft)| {
-                            if let SymFieldType::Struct(s) = sft { *s == sc.struct_name } else { false }
-                        })
-                    }).map(|(name, _)| name.clone())
-                })
-            }.ok_or_else(|| syn::Error::new(proc_macro2::Span::call_site(),
-                format!("cannot find parent struct containing {}", sc.struct_name)))?;
+            // Find the parent struct that contains this constraint struct.
+            // The CURRENT root wins when it holds the collection directly
+            // (root-level observations): the global scan is alphabetical
+            // and another root holding the same collection would hijack
+            // the resolution.
+            let current_root_holds = registry_lookup(&root_name.to_string())
+                .map(|l| l.fields.iter().any(|(_, sft)|
+                    matches!(sft, SymFieldType::Struct(s) if *s == sc.struct_name)))
+                .unwrap_or(false);
+            let parent_type = if current_root_holds {
+                root_name.to_string()
+            } else {
+                {
+                    let guard = crate::SYM_REGISTRY.lock().unwrap_or_else(|p| p.into_inner());
+                    guard.as_ref().and_then(|reg| {
+                        reg.layouts.iter().find(|(_, layout)| {
+                            layout.fields.iter().any(|(_, sft)| {
+                                if let SymFieldType::Struct(s) = sft { *s == sc.struct_name } else { false }
+                            })
+                        }).map(|(name, _)| name.clone())
+                    })
+                }.ok_or_else(|| syn::Error::new(proc_macro2::Span::call_site(),
+                    format!("cannot find parent struct containing {}", sc.struct_name)))?
+            };
 
             (parent_type, None, Some((ref_field_name.to_string(), target_block_field.to_string(), target_type)))
         } else {
@@ -2873,6 +2916,8 @@ pub fn generate_root_methods(
             None => continue,
         };
         if !is_self_block
+            && !(is_remote_block
+                && matches!(entity_location, EntityLocation::RootSelf))
             && !matches!(entity_location,
                 EntityLocation::Collection { .. } | EntityLocation::Nested { .. }) {
             // TripletBlock / CrossBlock constraints whose A-type is neither a
@@ -2880,7 +2925,9 @@ pub fn generate_root_methods(
             // direct-composed (single-instance) sub-models with cross-block
             // constraints are not yet supported. The cross emission drives its
             // own iteration from the constraint-struct location (cross_prefix),
-            // so a Nested A-type is fine here.
+            // so a Nested A-type is fine here. A remote-block constraint whose
+            // parent IS the root (a root-level observation collection) passes:
+            // its sweep is a single loop over that collection.
             continue;
         }
         // `coll_ident(_str)` is only consumed by the Collection SelfBlock path and the
@@ -4003,6 +4050,11 @@ pub fn generate_root_methods(
             // but write to a block on the referenced struct (e.g. pose.hb_pose)
             let frines_ident = frines_ident.unwrap();
             let parent_ident = parent_ident.unwrap();
+            // Parent IS the root: the constraint structs live in a
+            // root-level collection, so the sweep is one loop directly
+            // over it and the parent binding is the root itself.
+            let parent_is_root = matches!(entity_location, EntityLocation::RootSelf);
+            let parent_rename_to = if parent_is_root { "self" } else { "__lm" };
             let (ref_field_name, _, target_type) = remote_block_info.as_ref().unwrap();
             let ref_field_ident = syn::Ident::new(ref_field_name, proc_macro2::Span::call_site());
             let _target_type_ident = syn::Ident::new(target_type, proc_macro2::Span::call_site());
@@ -4046,19 +4098,34 @@ pub fn generate_root_methods(
             };
 
             // Cost loop: iterate parent -> frines, resolve refs, evaluate
-            cost_loops.push(quote! {
-                {
-                    #marker
-                    for __lm in self.#coll_ident.iter() {
-                        for __frine in &__lm.#frines_ident {
+            if parent_is_root {
+                cost_loops.push(quote! {
+                    {
+                        #marker
+                        for __frine in &self.#frines_ident {
                             #(#resolve_stmts)*
-                            let #parent_ident = __lm;
+                            #[allow(unused_variables)]
+                            let #parent_ident = &*__self_ref;
                             let #root_var_ident = &*__self_ref;
                             #remote_guarded_cost
                         }
                     }
-                }
-            });
+                });
+            } else {
+                cost_loops.push(quote! {
+                    {
+                        #marker
+                        for __lm in self.#coll_ident.iter() {
+                            for __frine in &__lm.#frines_ident {
+                                #(#resolve_stmts)*
+                                let #parent_ident = __lm;
+                                let #root_var_ident = &*__self_ref;
+                                #remote_guarded_cost
+                            }
+                        }
+                    }
+                });
+            }
 
             // Grad+hessian loop: same traversal but get mutable access
             // to target block. When is_multi_cross also holds (primary
@@ -4106,39 +4173,38 @@ pub fn generate_root_methods(
             // a temporary exclusive borrow per call -- disjoint from the
             // parent collection this loop iterates. Parent reads are
             // `__lm.*` field projections; root reads go through `self`.
-            if is_multi_cross {
-                let gh_loop = quote! {
+            let gh_body = quote! {
+                #(#entity_index_copies)*
+                #(#resolve_reread_stmts)*
+                #remote_guarded_gh
+            };
+            let gh_loop = match (parent_is_root, is_multi_cross) {
+                (true, true) => quote! {
+                    { #marker_gh for __frine in self.#frines_ident.iter_mut() { #gh_body } }
+                },
+                (true, false) => quote! {
+                    { #marker_gh for __frine in &self.#frines_ident { #gh_body } }
+                },
+                (false, true) => quote! {
                     {
                         #marker_gh
                         for __lm in self.#coll_ident.iter_mut() {
-                            for __frine in __lm.#frines_ident.iter_mut() {
-                                #(#entity_index_copies)*
-                                #(#resolve_reread_stmts)*
-                                #remote_guarded_gh
-                            }
+                            for __frine in __lm.#frines_ident.iter_mut() { #gh_body }
                         }
                     }
-                };
-                let gh_loop = rename_ident(
-                    rename_ident(gh_loop, &parent_name, "__lm"), &root_var_name, "self");
-                grad_hessian_loops.push(gh_loop);
-            } else {
-                let gh_loop = quote! {
+                },
+                (false, false) => quote! {
                     {
                         #marker_gh
                         for __lm in self.#coll_ident.iter() {
-                            for __frine in &__lm.#frines_ident {
-                                #(#entity_index_copies)*
-                                #(#resolve_reread_stmts)*
-                                #remote_guarded_gh
-                            }
+                            for __frine in &__lm.#frines_ident { #gh_body }
                         }
                     }
-                };
-                let gh_loop = rename_ident(
-                    rename_ident(gh_loop, &parent_name, "__lm"), &root_var_name, "self");
-                grad_hessian_loops.push(gh_loop);
-            }
+                },
+            };
+            let gh_loop = rename_ident(
+                rename_ident(gh_loop, &parent_name, parent_rename_to), &root_var_name, "self");
+            grad_hessian_loops.push(gh_loop);
 
             if is_multi_cross {
                 // Multi-cross remote: emit per-CrossBlock set_indices on
@@ -4155,41 +4221,51 @@ pub fn generate_root_methods(
                     }
                 }).collect();
                 let rtw = remote_target_write.as_ref().unwrap();
-                let sbi_loop = quote! {
-                    for __lm in self.#coll_ident.iter_mut() {
-                        for __frine in __lm.#frines_ident.iter_mut() {
-                            #(#entity_index_copies)*
-                            #(#resolve_stmts)*
-                            let __target_ref = #ref_field_ident;
-                            let mut __a_idx = [0u32; #target_param_count];
-                            #(#target_idx_stmts)*
-                            let mut __all_idx = [0u32; #tp_remote];
-                            #(#triplet_idx_stmts_remote)*
-                            #rtw.set_indices(&__a_idx);
-                            #(#entity_self_indices)*
-                            #(#mcb_calls)*
+                let sbi_body = quote! {
+                    #(#entity_index_copies)*
+                    #(#resolve_stmts)*
+                    let __target_ref = #ref_field_ident;
+                    let mut __a_idx = [0u32; #target_param_count];
+                    #(#target_idx_stmts)*
+                    let mut __all_idx = [0u32; #tp_remote];
+                    #(#triplet_idx_stmts_remote)*
+                    #rtw.set_indices(&__a_idx);
+                    #(#entity_self_indices)*
+                    #(#mcb_calls)*
+                };
+                let sbi_loop = if parent_is_root {
+                    quote! { for __frine in self.#frines_ident.iter_mut() { #sbi_body } }
+                } else {
+                    quote! {
+                        for __lm in self.#coll_ident.iter_mut() {
+                            for __frine in __lm.#frines_ident.iter_mut() { #sbi_body }
                         }
                     }
                 };
                 let sbi_loop = rename_ident(
-                    rename_ident(sbi_loop, &parent_name, "__lm"), &root_var_name, "self");
+                    rename_ident(sbi_loop, &parent_name, parent_rename_to), &root_var_name, "self");
                 set_block_indices_loops.push(sbi_loop);
             } else {
                 let rtw = remote_target_write.as_ref().unwrap();
-                let sbi_loop = quote! {
-                    for __lm in self.#coll_ident.iter() {
-                        for __frine in &__lm.#frines_ident {
-                            #(#entity_index_copies)*
-                            #(#resolve_stmts)*
-                            let __target_ref = #ref_field_ident;
-                            let mut __a_idx = [0u32; #target_param_count];
-                            #(#target_idx_stmts)*
-                            #rtw.set_indices(&__a_idx);
+                let sbi_body = quote! {
+                    #(#entity_index_copies)*
+                    #(#resolve_stmts)*
+                    let __target_ref = #ref_field_ident;
+                    let mut __a_idx = [0u32; #target_param_count];
+                    #(#target_idx_stmts)*
+                    #rtw.set_indices(&__a_idx);
+                };
+                let sbi_loop = if parent_is_root {
+                    quote! { for __frine in &self.#frines_ident { #sbi_body } }
+                } else {
+                    quote! {
+                        for __lm in self.#coll_ident.iter() {
+                            for __frine in &__lm.#frines_ident { #sbi_body }
                         }
                     }
                 };
                 let sbi_loop = rename_ident(
-                    rename_ident(sbi_loop, &parent_name, "__lm"), &root_var_name, "self");
+                    rename_ident(sbi_loop, &parent_name, parent_rename_to), &root_var_name, "self");
                 set_block_indices_loops.push(sbi_loop);
             }
         } else if is_self_block {
@@ -4766,9 +4842,10 @@ pub fn generate_root_methods(
                 Some(i) => i.clone(),
                 None => continue,
             };
+            // Generic args are ignored: `pose: Pose<f32>` resolves the
+            // same layout as `pose: Pose` (shapes are precision-free).
             let type_name = if let syn::Type::Path(tp) = &field.ty
                 && let Some(seg) = tp.path.segments.last()
-                && matches!(seg.arguments, syn::PathArguments::None)
             { seg.ident.to_string() } else { continue };
             if !reachable.contains(&type_name) { continue; }
             let layout = match registry_lookup(&type_name) { Some(l) => l, None => continue };
@@ -5429,17 +5506,27 @@ fn interpret_constraint_body(
         let (_, inner) = extract_wrapper_inner(&ref_field.ty, "Ref")
             .ok_or_else(|| syn::Error::new_spanned(struct_name,
                 format!("field '{}' is not Ref<T>", ref_field_name)))?;
-        // Find the parent struct (who contains this constraint struct)
-        let parent_type = {
-            let guard = crate::SYM_REGISTRY.lock().unwrap_or_else(|p| p.into_inner());
-            guard.as_ref().and_then(|reg| {
-                reg.layouts.iter().find(|(_, layout)| {
-                    layout.fields.iter().any(|(_, sft)| {
-                        if let SymFieldType::Struct(s) = sft { *s == struct_name.to_string() } else { false }
-                    })
-                }).map(|(name, _)| name.clone())
-            })
-        }.unwrap_or_else(|| inner.to_string());
+        // Find the parent struct (who contains this constraint struct).
+        // The current root wins when it holds the collection directly --
+        // see the identical preference in the traversal side.
+        let current_root_holds = registry_lookup(root_type_name)
+            .map(|l| l.fields.iter().any(|(_, sft)|
+                matches!(sft, SymFieldType::Struct(s) if *s == struct_name.to_string())))
+            .unwrap_or(false);
+        let parent_type = if current_root_holds {
+            root_type_name.to_string()
+        } else {
+            {
+                let guard = crate::SYM_REGISTRY.lock().unwrap_or_else(|p| p.into_inner());
+                guard.as_ref().and_then(|reg| {
+                    reg.layouts.iter().find(|(_, layout)| {
+                        layout.fields.iter().any(|(_, sft)| {
+                            if let SymFieldType::Struct(s) = sft { *s == struct_name.to_string() } else { false }
+                        })
+                    }).map(|(name, _)| name.clone())
+                })
+            }.unwrap_or_else(|| inner.to_string())
+        };
         (parent_type, Some(inner.to_string()))
     } else {
         let block_field = fields.iter().find(|f| {
@@ -5861,12 +5948,12 @@ fn resolve_entity_location(
     if let Some((field, _container)) = find_root_collection(root_fields, type_name) {
         return Some(EntityLocation::Collection { field });
     }
-    // Look for a plain struct-typed field whose type name matches.
+    // Look for a plain struct-typed field whose type name matches (generic
+    // args ignored -- `pose: Pose<f32>` is a direct `Pose` field).
     for field in root_fields {
         let field_name = field.ident.as_ref()?.to_string();
         if let syn::Type::Path(tp) = &field.ty
             && let Some(seg) = tp.path.segments.last()
-                && matches!(seg.arguments, syn::PathArguments::None)
                 && seg.ident == type_name {
                     return Some(EntityLocation::DirectField { field: field_name });
                 }

@@ -1,0 +1,19 @@
+error: generic model `Pair`: exactly one type parameter is supported, bounded by `Float` (e.g. `struct Pair<T: Float>`)
+ --> tests/generic_model_errors/two_type_params.rs:8:12
+  |
+8 | struct Pair<T: Float, U: Float> {
+  |            ^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `arael::model::Param`
+ --> tests/generic_model_errors/two_type_params.rs:3:5
+  |
+3 | use arael::model::Param;
+  |     ^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `arael::utils::Float`
+ --> tests/generic_model_errors/two_type_params.rs:4:5
+  |
+4 | use arael::utils::Float;
+  |     ^^^^^^^^^^^^^^^^^^^
