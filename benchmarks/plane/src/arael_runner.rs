@@ -6,39 +6,38 @@
 // are equivalent by construction and by test
 // (tests/unitvec_param.rs::builtin_matches_the_macro_component).
 //
-// The f32 model is a type-for-type twin (the macro bakes the scalar into the
-// generated code, so the two are different types), sharing the constraint
-// bodies verbatim.
+// The entities are generic over the scalar; the two concrete roots
+// (`World` f64, `WorldF` f32) instantiate one shared model.
 
 use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::refs::Ref;
-use arael::transform::{TransformParam, TransformParamF};
-use arael::unitvec::{UnitVecParam, UnitVecParamF};
+use arael::transform::TransformParam;
+use arael::unitvec::UnitVecParam;
 use arael::simple_lm::{lm_solve, LmConfig, LmResult, SparseFaer};
-use arael::matrix::{matrix3d, matrix3f};
-use arael::quatern::{quaternd, quaternf};
-use arael::vect::{vect3d, vect3f};
+use arael::matrix::matrix3;
+use arael::utils::Float;
+use arael::vect::vect3;
 
 use crate::scene::{Plane, Pose, RawScene, Solution};
 
 #[arael::model]
 #[derive(Clone)]
-struct PoseV {
+struct PoseV<T: Float> {
     /// The pose: reference (robot) frame into world.
-    r2w: TransformParam,
+    r2w: TransformParam<T>,
     /// This pose's Hessian tile (gradient + diagonal block of J^T J).
-    hb: SelfBlock<PoseV>,
+    hb: SelfBlock<PoseV<T>, T>,
 }
 
 #[arael::model]
 #[derive(Clone)]
-struct PlaneLm {
+struct PlaneLm<T: Float> {
     /// Unit normal of the plane (2-DOF component).
-    n: UnitVecParam,
+    n: UnitVecParam<T>,
     /// Distance coefficient: the plane is n.x + c = 0, distance = -c.
-    c: Param<f64>,
+    c: Param<T>,
     /// This plane's Hessian tile.
-    hb: SelfBlock<PlaneLm>,
+    hb: SelfBlock<PlaneLm<T>, T>,
 }
 
 // Odometry between-residual, identical to the g2o runner's custom edge.
@@ -65,27 +64,27 @@ struct PlaneLm {
      (c1.y - c2.x) * 0.5 * odov.rotation_weight]
 }, parent = odov))]
 #[derive(Clone)]
-struct Odov {
+struct Odov<T: Float> {
     /// The earlier pose: the measurement is expressed in ITS frame.
     #[arael(ref = root.poses)]
-    a: Ref<PoseV>,
+    a: Ref<PoseV<T>>,
     /// The later pose the measurement leads to.
     #[arael(ref = root.poses)]
-    b: Ref<PoseV>,
+    b: Ref<PoseV<T>>,
     /// Measured relative translation: where odometry says `b` sits in
     /// `a`'s frame; compared against R_a^T (b.r2w.translation - a.r2w.translation).
-    measured_translation: vect3d,
+    measured_translation: vect3<T>,
     /// TRANSPOSE of the measured relative rotation, R_m^T -- stored
     /// pre-transposed because the residual only ever uses it that way
     /// (dR = R_m^T R_a^T R_b).
-    measured_rotation_transposed: matrix3d,
+    measured_rotation_transposed: matrix3<T>,
     /// Whitening weight (1/sigma, per axis) of the translation residual.
-    translation_weight: f64,
+    translation_weight: T,
     /// Whitening weight (1/sigma, per axis) of the rotation residual.
-    rotation_weight: f64,
+    rotation_weight: T,
     /// The a-b coupling tile of J^T J this constraint accumulates into
     /// (named as the primary block in the constraint attribute above).
-    hb: CrossBlock<PoseV, PoseV>,
+    hb: CrossBlock<PoseV<T>, PoseV<T>, T>,
 }
 
 // Plane observation: g2o's EdgeSE3PlaneSensorCalib error (Plane3D::ominus),
@@ -108,35 +107,35 @@ struct Odov {
      (obsv.measured_c - cl) * obsv.distance_weight]
 }, parent = obsv))]
 #[derive(Clone)]
-struct Obsv {
+struct Obsv<T: Float> {
     /// The observing pose.
     #[arael(ref = root.poses)]
-    p: Ref<PoseV>,
+    p: Ref<PoseV<T>>,
     /// The observed plane landmark.
     #[arael(ref = root.planes)]
-    l: Ref<PlaneLm>,
+    l: Ref<PlaneLm<T>>,
     /// Measured plane normal (unit) in the sensor frame.
-    measured_normal: vect3d,
+    measured_normal: vect3<T>,
     /// Measured distance coefficient of the local plane (n.x + c = 0).
-    measured_c: f64,
+    measured_c: T,
     /// Whitening weight (1/sigma) of the azimuth residual.
-    azimuth_weight: f64,
+    azimuth_weight: T,
     /// Whitening weight (1/sigma) of the elevation residual.
-    elevation_weight: f64,
+    elevation_weight: T,
     /// Whitening weight (1/sigma) of the distance residual.
-    distance_weight: f64,
+    distance_weight: T,
     /// The pose-plane coupling tile of J^T J.
-    hb: CrossBlock<PoseV, PlaneLm>,
+    hb: CrossBlock<PoseV<T>, PlaneLm<T>, T>,
 }
 
 #[arael::model]
 #[arael(root)]
 #[derive(Clone)]
 pub struct World {
-    poses: arael::refs::Vec<PoseV>,
-    planes: arael::refs::Vec<PlaneLm>,
-    odos: std::vec::Vec<Odov>,
-    obs: std::vec::Vec<Obsv>,
+    poses: arael::refs::Vec<PoseV<f64>>,
+    planes: arael::refs::Vec<PlaneLm<f64>>,
+    odos: std::vec::Vec<Odov<f64>>,
+    obs: std::vec::Vec<Obsv<f64>>,
 }
 
 /// Termination class for this benchmark, shared by every system in the
@@ -160,57 +159,94 @@ pub fn tolerance_f32() -> f64 {
     std::env::var("PLANE_TOL_F32").ok().and_then(|v| v.parse().ok()).unwrap_or(1e-5)
 }
 
-fn build(raw: &RawScene) -> World {
-    let mut world = World {
-        poses: arael::refs::Vec::new(),
-        planes: arael::refs::Vec::new(),
-        odos: std::vec::Vec::new(),
-        obs: std::vec::Vec::new(),
-    };
+/// The entity collections at any precision (`cast` is the identity at
+/// f64 here -- the scene is f64 -- and the rounding conversion at f32).
+/// Quaternions are re-normalized after the cast, as the f32 build always
+/// did.
+fn build_parts<T: Float>(raw: &RawScene) -> (
+    arael::refs::Vec<PoseV<T>>,
+    arael::refs::Vec<PlaneLm<T>>,
+    std::vec::Vec<Odov<T>>,
+    std::vec::Vec<Obsv<T>>,
+) {
+    let c = |x: f64| T::from(x).unwrap();
+    let mut poses = arael::refs::Vec::new();
     for (k, p) in raw.poses.iter().enumerate() {
-        world.poses.push(PoseV {
-            r2w: if k == 0 { TransformParam::fixed(p.t, p.q) } else { TransformParam::new(p.t, p.q) },
+        let (t, q) = (p.t.cast(), p.q.cast().unit());
+        poses.push(PoseV {
+            r2w: if k == 0 { TransformParam::fixed(t, q) } else { TransformParam::new(t, q) },
             hb: SelfBlock::new(),
         });
     }
+    let mut planes = arael::refs::Vec::new();
     for pl in &raw.planes {
-        world.planes.push(PlaneLm {
-            n: UnitVecParam::new(pl.n),
-            c: Param::new(pl.c),
+        planes.push(PlaneLm {
+            n: UnitVecParam::new(pl.n.cast()),
+            c: Param::new(c(pl.c)),
             hb: SelfBlock::new(),
         });
     }
+    let mut odos = std::vec::Vec::new();
     for &(i, j, ref rel, translation_weight, rotation_weight) in &raw.odos {
-        world.odos.push(Odov {
-            a: world.poses.ref_at(i as u32),
-            b: world.poses.ref_at(j as u32),
-            measured_translation: rel.t,
-            measured_rotation_transposed: rel.q.rotation_matrix().transpose(),
-            translation_weight,
-            rotation_weight,
+        odos.push(Odov {
+            a: poses.ref_at(i as u32),
+            b: poses.ref_at(j as u32),
+            measured_translation: rel.t.cast(),
+            measured_rotation_transposed: rel.q.cast().unit().rotation_matrix().transpose(),
+            translation_weight: c(translation_weight),
+            rotation_weight: c(rotation_weight),
             hb: CrossBlock::new(),
         });
     }
+    let mut obs = std::vec::Vec::new();
     for &(p, l, ref pl, azimuth_weight, elevation_weight, distance_weight) in &raw.obs {
-        world.obs.push(Obsv {
-            p: world.poses.ref_at(p as u32),
-            l: world.planes.ref_at(l as u32),
-            measured_normal: pl.n,
-            measured_c: pl.c,
-            azimuth_weight, elevation_weight, distance_weight,
+        obs.push(Obsv {
+            p: poses.ref_at(p as u32),
+            l: planes.ref_at(l as u32),
+            measured_normal: pl.n.cast(),
+            measured_c: c(pl.c),
+            azimuth_weight: c(azimuth_weight),
+            elevation_weight: c(elevation_weight),
+            distance_weight: c(distance_weight),
             hb: CrossBlock::new(),
         });
     }
-    world
+    (poses, planes, odos, obs)
+}
+
+fn build(raw: &RawScene) -> World {
+    let (poses, planes, odos, obs) = build_parts(raw);
+    World { poses, planes, odos, obs }
+}
+
+fn build_f32(raw: &RawScene) -> WorldF {
+    let (poses, planes, odos, obs) = build_parts(raw);
+    WorldF { poses, planes, odos, obs }
+}
+
+fn extract_parts<T: Float>(
+    poses: &arael::refs::Vec<PoseV<T>>,
+    planes: &arael::refs::Vec<PlaneLm<T>>,
+) -> Solution {
+    Solution {
+        poses: poses.iter()
+            .map(|p| Pose {
+                q: p.r2w.rotation.cast().unit(),
+                t: p.r2w.translation.cast(),
+            })
+            .collect(),
+        planes: planes.iter()
+            .map(|pl| Plane::normalized(pl.n.unit.cast(), pl.c.value.to_f64().unwrap()))
+            .collect(),
+    }
 }
 
 fn extract(world: &World) -> Solution {
-    Solution {
-        poses: world.poses.iter()
-            .map(|p| Pose { q: p.r2w.rotation, t: p.r2w.translation }).collect(),
-        planes: world.planes.iter()
-            .map(|pl| Plane { n: pl.n.unit, c: pl.c.value }).collect(),
-    }
+    extract_parts(&world.poses, &world.planes)
+}
+
+fn extract_f32(world: &WorldF) -> Solution {
+    extract_parts(&world.poses, &world.planes)
 }
 
 /// The arael model cost at the initial estimate -- for the harness to
@@ -274,160 +310,16 @@ pub fn run_f32_capped(raw: &RawScene, max_iters: usize) -> Solution {
     extract_f32(&world)
 }
 
-// ------------------------------------------------------------ the f32 twin
-
-#[arael::model]
-#[derive(Clone)]
-struct PoseVF {
-    r2w: TransformParamF,
-    hb: SelfBlock<PoseVF, f32>,
-}
-
-#[arael::model]
-#[derive(Clone)]
-struct PlaneLmF {
-    n: UnitVecParamF,
-    c: Param<f32>,
-    hb: SelfBlock<PlaneLmF, f32>,
-}
-
-#[arael::model]
-#[arael(constraint(hb, {
-    let ra = a.r2w.rotation_matrix;
-    let rb = b.r2w.rotation_matrix;
-    let dt = ra.transpose() * (b.r2w.translation - a.r2w.translation) - odovf.measured_translation;
-    let dr = odovf.measured_rotation_transposed * (ra.transpose() * rb);
-    let c1 = dr * vect3sym::from_components(1.0, 0.0, 0.0);
-    let c2 = dr * vect3sym::from_components(0.0, 1.0, 0.0);
-    let c3 = dr * vect3sym::from_components(0.0, 0.0, 1.0);
-    [dt.x * odovf.translation_weight, dt.y * odovf.translation_weight, dt.z * odovf.translation_weight,
-     (c2.z - c3.y) * 0.5 * odovf.rotation_weight,
-     (c3.x - c1.z) * 0.5 * odovf.rotation_weight,
-     (c1.y - c2.x) * 0.5 * odovf.rotation_weight]
-}, parent = odovf))]
-#[derive(Clone)]
-struct OdovF {
-    #[arael(ref = root.poses)]
-    a: Ref<PoseVF>,
-    #[arael(ref = root.poses)]
-    b: Ref<PoseVF>,
-    measured_translation: vect3f,
-    measured_rotation_transposed: matrix3f,
-    translation_weight: f32,
-    rotation_weight: f32,
-    hb: CrossBlock<PoseVF, PoseVF, f32>,
-}
-
-#[arael::model]
-#[arael(constraint(hb, {
-    let rp = p.r2w.rotation_matrix;
-    let nw = l.n.unit;
-    let nl = rp.transpose() * nw;
-    let cl = l.c + p.r2w.translation * nw;
-    let h = sqrt(nl.x * nl.x + nl.y * nl.y);
-    let mx = nl * obsvf.measured_normal;
-    let my = (obsvf.measured_normal.y * nl.x - obsvf.measured_normal.x * nl.y) / h;
-    let mz = (obsvf.measured_normal.z * (nl.x * nl.x + nl.y * nl.y)
-        - nl.z * (nl.x * obsvf.measured_normal.x + nl.y * obsvf.measured_normal.y)) / h;
-    [atan2(my, mx) * obsvf.azimuth_weight,
-     atan2(mz, sqrt(mx * mx + my * my)) * obsvf.elevation_weight,
-     (obsvf.measured_c - cl) * obsvf.distance_weight]
-}, parent = obsvf))]
-#[derive(Clone)]
-struct ObsvF {
-    #[arael(ref = root.poses)]
-    p: Ref<PoseVF>,
-    #[arael(ref = root.planes)]
-    l: Ref<PlaneLmF>,
-    measured_normal: vect3f,
-    measured_c: f32,
-    azimuth_weight: f32,
-    elevation_weight: f32,
-    distance_weight: f32,
-    hb: CrossBlock<PoseVF, PlaneLmF, f32>,
-}
+// ------------------------------------------------------------ the f32 root
 
 #[arael::model]
 #[arael(root, f32)]
 #[derive(Clone)]
 pub struct WorldF {
-    poses: arael::refs::Vec<PoseVF>,
-    planes: arael::refs::Vec<PlaneLmF>,
-    odos: std::vec::Vec<OdovF>,
-    obs: std::vec::Vec<ObsvF>,
-}
-
-fn v3f(v: vect3d) -> vect3f {
-    vect3f::new(v.x as f32, v.y as f32, v.z as f32)
-}
-fn qf(q: quaternd) -> quaternf {
-    quaternf::new(q.t as f32, v3f(q.v)).unit()
-}
-
-fn build_f32(raw: &RawScene) -> WorldF {
-    let mut world = WorldF {
-        poses: arael::refs::Vec::new(),
-        planes: arael::refs::Vec::new(),
-        odos: std::vec::Vec::new(),
-        obs: std::vec::Vec::new(),
-    };
-    for (k, p) in raw.poses.iter().enumerate() {
-        world.poses.push(PoseVF {
-            r2w: if k == 0 { TransformParamF::fixed(v3f(p.t), qf(p.q)) }
-                 else { TransformParamF::new(v3f(p.t), qf(p.q)) },
-            hb: SelfBlock::new(),
-        });
-    }
-    for pl in &raw.planes {
-        world.planes.push(PlaneLmF {
-            n: UnitVecParamF::new(v3f(pl.n)),
-            c: Param::new(pl.c as f32),
-            hb: SelfBlock::new(),
-        });
-    }
-    for &(i, j, ref rel, translation_weight, rotation_weight) in &raw.odos {
-        world.odos.push(OdovF {
-            a: world.poses.ref_at(i as u32),
-            b: world.poses.ref_at(j as u32),
-            measured_translation: v3f(rel.t),
-            measured_rotation_transposed: qf(rel.q).rotation_matrix().transpose(),
-            translation_weight: translation_weight as f32,
-            rotation_weight: rotation_weight as f32,
-            hb: CrossBlock::new(),
-        });
-    }
-    for &(p, l, ref pl, azimuth_weight, elevation_weight, distance_weight) in &raw.obs {
-        world.obs.push(ObsvF {
-            p: world.poses.ref_at(p as u32),
-            l: world.planes.ref_at(l as u32),
-            measured_normal: v3f(pl.n),
-            measured_c: pl.c as f32,
-            azimuth_weight: azimuth_weight as f32,
-            elevation_weight: elevation_weight as f32,
-            distance_weight: distance_weight as f32,
-            hb: CrossBlock::new(),
-        });
-    }
-    world
-}
-
-fn extract_f32(world: &WorldF) -> Solution {
-    Solution {
-        poses: world.poses.iter()
-            .map(|p| Pose {
-                q: quaternd::new(p.r2w.rotation.t as f64,
-                    vect3d::new(p.r2w.rotation.v.x as f64, p.r2w.rotation.v.y as f64,
-                        p.r2w.rotation.v.z as f64)).unit(),
-                t: vect3d::new(p.r2w.translation.x as f64, p.r2w.translation.y as f64,
-                    p.r2w.translation.z as f64),
-            })
-            .collect(),
-        planes: world.planes.iter()
-            .map(|pl| Plane::normalized(
-                vect3d::new(pl.n.unit.x as f64, pl.n.unit.y as f64, pl.n.unit.z as f64),
-                pl.c.value as f64))
-            .collect(),
-    }
+    poses: arael::refs::Vec<PoseV<f32>>,
+    planes: arael::refs::Vec<PlaneLm<f32>>,
+    odos: std::vec::Vec<Odov<f32>>,
+    obs: std::vec::Vec<Obsv<f32>>,
 }
 
 impl bench_harness::arael::Model for WorldF {
