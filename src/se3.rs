@@ -43,6 +43,7 @@ use crate::vect::vect3;
 /// one unit step. See the module docs.
 #[derive(Clone, Copy, Debug)]
 #[allow(non_camel_case_types)]
+#[derive(serde::Serialize, serde::Deserialize)]
 pub struct se3<T: Float> {
     /// Rate of translation. The distance actually travelled is not this
     /// -- the frame turns as it moves; see the module docs.

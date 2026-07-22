@@ -2,7 +2,9 @@
 //! once it can no longer mean what it meant: the element was removed and
 //! its place reused, or the ref belongs to a different collection.
 
+use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::refs::{self, Ref};
+use arael::vect::vect3d;
 
 // ------------------------------------------------------------------ Arena
 // The arena keeps a generation per slot, so a removal invalidates exactly
@@ -278,4 +280,106 @@ fn an_arena_clone_shares_its_origin_refs() {
     assert_eq!(copy.get(r1), Some(&20));
     assert_eq!(copy.get(r0), None);
     assert_eq!(copy.len(), a.len());
+}
+
+// --------------------------------------------------------------- round trip
+// A model persisted and reloaded must still resolve its refs. The
+// generations travel with the collections, so a Ref stored in a constraint
+// keeps naming the same element.
+
+#[arael::model]
+#[arael(constraint(hb, { [(rtpose.pos - rtpose.prior).x * 10.0] }))]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct RtPose {
+    pos: Param<vect3d>,
+    prior: vect3d,
+    #[serde(skip)]
+    hb: SelfBlock<RtPose>,
+}
+
+#[arael::model]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct RtLandmark {
+    pos: Param<vect3d>,
+    frines: std::vec::Vec<RtFrine>,
+    #[serde(skip)]
+    hb: SelfBlock<RtLandmark>,
+}
+
+#[arael::model]
+#[arael(constraint(hb, parent = lm, {
+    let d = lm.pos - rtpose.pos;
+    [(d.x - rtfrine.dx) * 5.0, (d.y - rtfrine.dy) * 5.0, (d.z - rtfrine.dz) * 5.0]
+}))]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct RtFrine {
+    #[arael(ref = root.poses)]
+    rtpose: Ref<RtPose>,
+    dx: f64, dy: f64, dz: f64,
+    #[serde(skip)]
+    hb: CrossBlock<RtLandmark, RtPose>,
+}
+
+/// The slam demo's shape: poses in a Deque, landmarks in an Arena, and
+/// observations holding refs into both.
+#[arael::model]
+#[arael(root)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+struct RtPath {
+    poses: refs::Deque<RtPose>,
+    landmarks: refs::Arena<RtLandmark>,
+}
+
+fn build_rt_path() -> RtPath {
+    let mut p = RtPath { poses: refs::Deque::new(), landmarks: refs::Arena::new() };
+    let prs: Vec<_> = (0..6).map(|i| p.poses.push_back(RtPose {
+        pos: Param::new(vect3d::new(i as f64, 0.2 * i as f64, 0.0)),
+        prior: vect3d::new(i as f64, 0.0, 0.0),
+        hb: SelfBlock::new(),
+    })).collect();
+    for j in 0..3 {
+        let frines = (0..6).map(|i| RtFrine {
+            rtpose: prs[i], dx: 1.0 + j as f64, dy: 2.0, dz: 0.5, hb: CrossBlock::new(),
+        }).collect();
+        p.landmarks.push(RtLandmark {
+            pos: Param::new(vect3d::new(j as f64, 1.0, 0.5)),
+            frines,
+            hb: SelfBlock::new(),
+        });
+    }
+    p
+}
+
+#[test]
+fn a_model_solves_the_same_after_a_round_trip() {
+    use arael::model::Model;
+    use arael::simple_lm::{LmConfig, LmProblem};
+
+    let mut a = build_rt_path();
+    let json = serde_json::to_string(&a).unwrap();
+    let mut b: RtPath = serde_json::from_str(&json).unwrap();
+
+    let ra = a.solve_sparse(&LmConfig::default());
+    let rb = b.solve_sparse(&LmConfig::default());
+    assert!(ra.iterations > 1, "the model must actually solve");
+    assert_eq!(ra.iterations, rb.iterations);
+    assert!((ra.start_cost - rb.start_cost).abs() < 1e-12,
+        "start {} vs {}", ra.start_cost, rb.start_cost);
+    assert!((ra.end_cost - rb.end_cost).abs() < 1e-12,
+        "end {} vs {}", ra.end_cost, rb.end_cost);
+}
+
+#[test]
+fn a_removed_element_stays_removed_after_a_round_trip() {
+    let mut p = build_rt_path();
+    let lm: Vec<_> = p.landmarks.refs().collect();
+    p.landmarks.remove(lm[1]);
+
+    let json = serde_json::to_string(&p).unwrap();
+    let back: RtPath = serde_json::from_str(&json).unwrap();
+
+    assert_eq!(back.landmarks.len(), 2);
+    assert!(back.landmarks.get(lm[1]).is_none(), "the hole survives the trip");
+    assert!(back.landmarks.get(lm[0]).is_some(), "the survivors do not");
+    assert!(back.landmarks.get(lm[2]).is_some());
 }

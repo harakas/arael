@@ -15,7 +15,7 @@ use crate::utils::atan2;
 ///
 /// Supports addition, subtraction, negation, scalar multiplication, matrix-matrix
 /// multiplication, and matrix-vector multiplication. Indexable by `usize` to get rows.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct matrix3<T : Float>
 {
     pub rows : [vect3<T>; 3]
@@ -483,7 +483,7 @@ impl<T: Float> Similar for matrix3<T> {
 ///
 /// Supports addition, subtraction, negation, scalar multiplication, matrix-matrix
 /// multiplication, and matrix-vector multiplication. Indexable by `usize` to get rows.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, serde::Serialize, serde::Deserialize)]
 pub struct matrix2<T : Float>
 {
     pub rows : [vect2<T>; 2]

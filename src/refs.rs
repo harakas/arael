@@ -417,7 +417,7 @@ impl<T: fmt::Debug> fmt::Debug for Vec<T> {
 /// The position space is 24 bits, so a ref held across 16,777,216 pushes can
 /// name a live element again. The generation a deque stamps into its refs is
 /// fixed for its lifetime, so a `Ref` from a different deque is rejected.
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Deque<T> {
     first_index: u32,
     inner: std::collections::VecDeque<T>,

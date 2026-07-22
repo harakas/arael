@@ -456,3 +456,69 @@ mod tests {
         assert!(data.is_empty(), "a fixed transform serializes no params");
     }
 }
+
+// ---------------------------------------------------------------------------
+// serde: the transform and its two flags, nothing else. The reference frame,
+// the step, and every Jacobian cache are rebuilt on load exactly as `new`
+// builds them -- they are derived from the transform, and a file carrying
+// them would only be a way to disagree with it.
+// ---------------------------------------------------------------------------
+
+impl<T: Float> serde::Serialize for TransformParam<T>
+where
+    vect3<T>: ParamType,
+    T: serde::Serialize,
+{
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut st = s.serialize_struct("TransformParam", 4)?;
+        st.serialize_field("translation", &self.translation)?;
+        st.serialize_field("rotation", &self.rotation)?;
+        st.serialize_field("optimize_translation", &self.optimize_translation)?;
+        st.serialize_field("optimize_rotation", &self.optimize_rotation)?;
+        st.end()
+    }
+}
+
+impl<'de, T: Float + serde::Deserialize<'de>> serde::Deserialize<'de> for TransformParam<T>
+where
+    vect3<T>: ParamType,
+{
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::{self, MapAccess, Visitor};
+        struct V<U>(std::marker::PhantomData<U>);
+        impl<'de2, U: Float + serde::Deserialize<'de2>> Visitor<'de2> for V<U>
+        where
+            vect3<U>: ParamType,
+        {
+            type Value = TransformParam<U>;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("TransformParam")
+            }
+            fn visit_map<A: MapAccess<'de2>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let (mut t, mut r, mut ot, mut orr) = (None, None, None, None);
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "translation" => t = Some(map.next_value()?),
+                        "rotation" => r = Some(map.next_value()?),
+                        "optimize_translation" => ot = Some(map.next_value()?),
+                        "optimize_rotation" => orr = Some(map.next_value()?),
+                        _ => { let _ = map.next_value::<de::IgnoredAny>()?; }
+                    }
+                }
+                let translation = t.unwrap_or_else(||
+                    vect3::new(U::zero(), U::zero(), U::zero()));
+                let rotation = r.unwrap_or_else(quatern::<U>::identity).unit();
+                let mut p = TransformParam::new(translation, rotation);
+                // Set before re-centring: the flags decide which half of the
+                // step is live, and the caches follow from that.
+                p.optimize_translation = ot.unwrap_or(true);
+                p.optimize_rotation = orr.unwrap_or(true);
+                Component::start(&mut p);
+                p.__precompute_symbolic();
+                Ok(p)
+            }
+        }
+        d.deserialize_map(V(std::marker::PhantomData))
+    }
+}

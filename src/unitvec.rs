@@ -315,3 +315,61 @@ mod tests {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// serde: the direction, and whether it is optimized. The chart quaternion,
+// its matrix, the tangent delta and the Jacobian cache are all rebuilt from
+// the direction on load -- the delta is zero at rest, and the rest follow.
+// ---------------------------------------------------------------------------
+
+impl<T: Float> serde::Serialize for UnitVecParam<T>
+where
+    vect2<T>: ParamType,
+    T: serde::Serialize,
+{
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        let mut st = s.serialize_struct("UnitVecParam", 2)?;
+        st.serialize_field("unit", &self.unit)?;
+        st.serialize_field("optimize", &self.d.optimize)?;
+        st.end()
+    }
+}
+
+impl<'de, T: Float + serde::Deserialize<'de>> serde::Deserialize<'de> for UnitVecParam<T>
+where
+    vect2<T>: ParamType,
+{
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::{self, MapAccess, Visitor};
+        struct V<U>(std::marker::PhantomData<U>);
+        impl<'de2, U: Float + serde::Deserialize<'de2>> Visitor<'de2> for V<U>
+        where
+            vect2<U>: ParamType,
+        {
+            type Value = UnitVecParam<U>;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("UnitVecParam")
+            }
+            fn visit_map<A: MapAccess<'de2>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+                let (mut u, mut opt) = (None, None);
+                while let Some(key) = map.next_key::<String>()? {
+                    match key.as_str() {
+                        "unit" => u = Some(map.next_value()?),
+                        "optimize" => opt = Some(map.next_value()?),
+                        _ => { let _ = map.next_value::<de::IgnoredAny>()?; }
+                    }
+                }
+                let dir = u.unwrap_or_else(||
+                    vect3::new(U::one(), U::zero(), U::zero()));
+                let mut p = UnitVecParam::new(dir);
+                p.d.optimize = opt.unwrap_or(true);
+                // The Jacobian cache is skipped while the delta is frozen,
+                // so refresh after setting the flag.
+                p.__precompute_symbolic();
+                Ok(p)
+            }
+        }
+        d.deserialize_map(V(std::marker::PhantomData))
+    }
+}
