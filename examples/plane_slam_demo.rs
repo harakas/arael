@@ -227,7 +227,7 @@ struct Observation {
 #[arael(root)]
 struct World {
     poses: refs::Vec<Pose>,
-    planes: refs::Vec<PlaneLandmark>,
+    planes: refs::Arena<PlaneLandmark>,
     odometry: std::vec::Vec<Odometry>,
     observations: std::vec::Vec<Observation>,
 }
@@ -383,7 +383,7 @@ fn build_world() -> (World, Vec<SE3>, Vec<ScenePlane>) {
 
     let mut world = World {
         poses: refs::Vec::new(),
-        planes: refs::Vec::new(),
+        planes: refs::Arena::new(),
         odometry: std::vec::Vec::new(),
         observations: std::vec::Vec::new(),
     };
@@ -397,13 +397,14 @@ fn build_world() -> (World, Vec<SE3>, Vec<ScenePlane>) {
             hb: SelfBlock::new(),
         });
     }
-    for plane in &init_planes {
+    // Keep the handle each push hands back: an arena chooses the slot.
+    let plane_refs: std::vec::Vec<Ref<PlaneLandmark>> = init_planes.iter().map(|plane| {
         world.planes.push(PlaneLandmark {
             normal: UnitVec::new(plane.normal),
             c: Param::new(plane.c),
             hb: SelfBlock::new(),
-        });
-    }
+        })
+    }).collect();
     for &(i, rel) in &measurements {
         world.odometry.push(Odometry {
             a: world.poses.ref_at(i as u32),
@@ -418,7 +419,7 @@ fn build_world() -> (World, Vec<SE3>, Vec<ScenePlane>) {
     for &(i, j, local) in &observations {
         world.observations.push(Observation {
             p: world.poses.ref_at(i as u32),
-            l: world.planes.ref_at(j as u32),
+            l: plane_refs[j],
             measured_normal: local.normal,
             measured_c: local.c,
             azimuth_weight: 1.0 / SIGMA_OBS_ANG,

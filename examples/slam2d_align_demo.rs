@@ -163,8 +163,8 @@ struct LandmarkInstance {
 #[arael::model]
 #[arael(root, f32)]
 struct Map {
-    paths: refs::Vec<PathInstance>,
-    landmarks: refs::Vec<MergedLandmark>,
+    paths: refs::Arena<PathInstance>,
+    landmarks: refs::Arena<MergedLandmark>,
     frines: std::vec::Vec<LandmarkInstance>,
 }
 
@@ -432,31 +432,30 @@ fn main() {
 
     // Stage 2: build the fuse. GPS already put every run in the world frame, so
     // corrections start at identity; the centre prior + shared landmarks refine.
-    let mut amap = Map { paths: refs::Vec::new(), landmarks: refs::Vec::new(), frines: std::vec::Vec::new() };
-    for rm in &runs {
+    let mut amap = Map { paths: refs::Arena::new(), landmarks: refs::Arena::new(), frines: std::vec::Vec::new() };
+    // Keep the handle each push hands back: an arena chooses the slot.
+    let path_refs: std::vec::Vec<Ref<PathInstance>> = runs.iter().map(|rm| {
         amap.paths.push(PathInstance {
             translation: Param::new(vect2f::new(0.0, 0.0)), rotation: Param::new(0.0),
-            center: rm.center, ccov_r: rm.ccov_r, ccov_isigma: rm.ccov_isigma, hb: SelfBlock::new() });
-    }
+            center: rm.center, ccov_r: rm.ccov_r, ccov_isigma: rm.ccov_isigma, hb: SelfBlock::new() })
+    }).collect();
     // Consensus landmarks: one per GT id, init = mean of the runs' world estimates.
-    let mut gid_to_lm: std::collections::HashMap<usize, u32> = std::collections::HashMap::new();
-    let mut acc: std::collections::HashMap<u32, (vect2f, f32)> = std::collections::HashMap::new();
+    let mut gid_to_lm: std::collections::HashMap<usize, Ref<MergedLandmark>> = std::collections::HashMap::new();
+    let mut acc: std::collections::HashMap<Ref<MergedLandmark>, (vect2f, f32)> = std::collections::HashMap::new();
     for rm in &runs {
         for (i, &gid) in rm.gt_ids.iter().enumerate() {
             let idx = *gid_to_lm.entry(gid).or_insert_with(|| {
-                let id = amap.landmarks.len() as u32;
-                amap.landmarks.push(MergedLandmark { pos: Param::new(vect2f::new(0.0, 0.0)), hb: SelfBlock::new() });
-                id
+                amap.landmarks.push(MergedLandmark { pos: Param::new(vect2f::new(0.0, 0.0)), hb: SelfBlock::new() })
             });
             let e = acc.entry(idx).or_insert((vect2f::new(0.0, 0.0), 0.0));
             e.0 = e.0 + rm.lm_world[i]; e.1 += 1.0;
         }
     }
-    for (idx, (sum, cnt)) in &acc { amap.landmarks[*idx as usize].pos.value = *sum * (1.0 / cnt); }
+    for (idx, (sum, cnt)) in &acc { amap.landmarks[*idx].pos.value = *sum * (1.0 / cnt); }
     for (r, rm) in runs.iter().enumerate() {
         for (i, &gid) in rm.gt_ids.iter().enumerate() {
             amap.frines.push(LandmarkInstance {
-                path: amap.paths.ref_at(r), landmark: amap.landmarks.ref_at(gid_to_lm[&gid]),
+                path: path_refs[r], landmark: gid_to_lm[&gid],
                 mu: rm.mu[i], cov_r: rm.cov_r[i], cov_isigma: rm.cov_isigma[i], hb: CrossBlock::new() });
         }
     }
@@ -476,7 +475,7 @@ fn main() {
     let mut est = std::vec::Vec::new();
     let mut tru = std::vec::Vec::new();
     for (&gid, &idx) in &gid_to_lm {
-        est.push(amap.landmarks[idx as usize].pos.value);
+        est.push(amap.landmarks[idx].pos.value);
         tru.push(scene.gt_lms[gid]);
     }
     let (ath, at) = umeyama(&tru, &est);
@@ -502,12 +501,12 @@ fn main() {
 
     let run_poses: std::vec::Vec<_> = runs.iter().map(|rm| rm.poses.clone()).collect();
     let mut consensus: std::vec::Vec<(vect2f, usize)> = gid_to_lm.iter()
-        .map(|(&gid, &idx)| (amap.landmarks[idx as usize].pos.value, gid)).collect();
+        .map(|(&gid, &idx)| (amap.landmarks[idx].pos.value, gid)).collect();
     consensus.sort_by_key(|&(_, g)| g);
     let ellipses: std::vec::Vec<(vect2f, f32, f32, f32)> = match &scov {
         None => { println!("Stage-2 Hessian not PD -- skipping ellipses."); std::vec::Vec::new() }
         Some(cov) => consensus.iter().map(|&(c, gid)| {
-            let k = amap.landmarks[gid_to_lm[&gid] as usize].pos.index() as usize;
+            let k = amap.landmarks[gid_to_lm[&gid]].pos.index() as usize;
             let e = nalgebra::SymmetricEigen::new(cov.fixed_view::<2, 2>(k, k).clone_owned());
             let (i0, i1) = if e.eigenvalues[0] >= e.eigenvalues[1] { (0, 1) } else { (1, 0) };
             let a = (e.eigenvalues[i0].max(0.0) * 5.991).sqrt() as f32;

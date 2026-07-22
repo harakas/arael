@@ -142,7 +142,7 @@ struct PosePair {
 #[arael(root)]
 struct Path {
     poses: refs::Deque<Pose>,
-    landmarks: refs::Vec<PointLandmark>,
+    landmarks: refs::Arena<PointLandmark>,
     pose_pairs: std::vec::Vec<PosePair>,
     gamma: f32,
     drift_pos_isigma: f32,
@@ -246,7 +246,7 @@ fn build_path(cfg: &SceneConfig) -> Path {
     }
 
     let mut path = Path {
-        poses: refs::Deque::new(), landmarks: refs::Vec::new(),
+        poses: refs::Deque::new(), landmarks: refs::Arena::new(),
         pose_pairs: Vec::new(),
         gamma: 2.0 * (25.0_f32).sqrt() / std::f32::consts::PI,
         drift_pos_isigma: 1.0 / 1000.0,

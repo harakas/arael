@@ -9,7 +9,7 @@
 //!
 //! The model is a NESTED tree -- the merge lives in the shape:
 //!
-//!     Map { paths: Vec<Path>, landmarks }        // root; landmarks are SHARED
+//!     Map { paths, landmarks }                   // root; landmarks are SHARED
 //!     Path { poses, pose_pairs, frines }         // one run
 //!
 //! Each run owns its poses and its own odometry/bearing constraints, but the
@@ -132,8 +132,8 @@ struct Path {
 #[arael::model]
 #[arael(root, f32)]
 struct Map {
-    paths: std::vec::Vec<Path>,
-    landmarks: refs::Vec<Landmark>,
+    paths: refs::Arena<Path>,
+    landmarks: refs::Arena<Landmark>,
 }
 
 // ---------------------------------------------------------------------------
@@ -183,7 +183,7 @@ fn build_map(cfg: &Cfg) -> (Map, Gt) {
 
     // Consensus landmarks: one per GT id seen by >= 2 sightings across all runs;
     // sightings are contiguous by gt_id in the shared scene.
-    let mut map = Map { paths: std::vec::Vec::new(), landmarks: refs::Vec::new() };
+    let mut map = Map { paths: refs::Arena::new(), landmarks: refs::Arena::new() };
     let mut lm_to_gt: std::vec::Vec<usize> = std::vec::Vec::new();
     let mut i = 0;
     while i < scene.sightings.len() {
