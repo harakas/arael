@@ -54,8 +54,8 @@ where
     pub unit_d: [vect3<T>; 2],
 }
 
-/// The f32 twin, by name: the macro classifies fields by the type path's
-/// last segment, so f32 models spell the alias.
+/// Shorthand for the f32 instantiation; `UnitVecParam<f32>` works
+/// spelled out too.
 pub type UnitVecParamF = UnitVecParam<f32>;
 
 fn c<T: Float>(x: f64) -> T {

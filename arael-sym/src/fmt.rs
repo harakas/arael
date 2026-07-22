@@ -55,6 +55,19 @@ fn fmt_const(f: &mut fmt::Formatter<'_>, v: f64) -> fmt::Result {
 /// get a trailing `.0` so they cannot parse as integer literals), with
 /// the float-type suffix when one is requested. An empty `ft` emits an
 /// unsuffixed literal for type-inferred contexts (macro-generated code).
+/// Sentinel `float_type` selecting [`Expr::to_rust_generic`]'s literal
+/// wrapping; never a valid Rust type suffix.
+const GENERIC_FT: &str = "@generic";
+
+/// `__c(<lit>)`: a literal routed through the caller's generic conversion
+/// helper. The literal itself is emitted unsuffixed (f64 by inference of
+/// the helper's argument).
+fn push_wrapped_literal(buf: &mut String, v: f64) {
+    buf.push_str("__c(");
+    buf.push_str(&rust_float_literal(v, ""));
+    buf.push(')');
+}
+
 fn rust_float_literal(v: f64, ft: &str) -> String {
     if !v.is_finite() {
         // `{v}` prints inf/NaN, which are not Rust tokens. Suffixed
@@ -376,6 +389,17 @@ impl Expr {
         buf
     }
 
+    /// Generate Rust source code for a generic `T: Float` context, where
+    /// unsuffixed literals cannot infer their type: every numeric literal
+    /// is wrapped as `__c(<lit>)` and the zero in a branch comparison
+    /// becomes `__c(0.0)`. The caller must place a conversion helper
+    /// `fn __c<F: Float>(v: f64) -> F` in scope of the emitted code.
+    pub fn to_rust_generic(&self) -> String {
+        let mut buf = String::new();
+        self.write_rust(&mut buf, GENERIC_FT, 0);
+        buf
+    }
+
     // Precedence levels (matching Rust):
     // 0 = top level
     // 5 = Add, Sub
@@ -399,12 +423,16 @@ impl Expr {
         // (`2.2e-16.powf(2.0)` is an ambiguous numeric type), so the
         // subtree must become one literal that infers its precision from
         // the surrounding expression.
-        if ft.is_empty()
+        if (ft.is_empty() || ft == GENERIC_FT)
             && !matches!(self, Expr::Const(_) | Expr::Sym(_))
             && let e = crate::E::new(self.clone())
             && e.symbols().is_empty()
             && let Ok(v) = e.eval(&std::collections::HashMap::new())
             && v.is_finite() {
+                if ft == GENERIC_FT {
+                    push_wrapped_literal(buf, v);
+                    return;
+                }
                 let lit = rust_float_literal(v, "");
                 if v < 0.0 && parent_prec > 5 {
                     buf.push('(');
@@ -424,10 +452,18 @@ impl Expr {
 
         match self {
             Expr::Sym(name) => buf.push_str(name),
-            Expr::Const(v) => buf.push_str(&rust_float_literal(*v, ft)),
+            Expr::Const(v) => {
+                if ft == GENERIC_FT {
+                    push_wrapped_literal(buf, *v);
+                } else {
+                    buf.push_str(&rust_float_literal(*v, ft));
+                }
+            }
             Expr::NamedConst { rust_f32, rust_f64, value, .. } => {
                 if ft == "f32" {
                     buf.push_str(rust_f32);
+                } else if ft == GENERIC_FT {
+                    push_wrapped_literal(buf, *value);
                 } else if ft.is_empty() {
                     // Type-inferred context (macro-generated constraint
                     // code emits unsuffixed literals throughout): emit the
@@ -505,7 +541,11 @@ impl Expr {
                 // infers to the expression's float type from the comparison.
                 buf.push_str("(if ");
                 q.write_rust(buf, ft, 0);
-                buf.push_str(" >= 0.0 { ");
+                if ft == GENERIC_FT {
+                    buf.push_str(" >= __c(0.0) { ");
+                } else {
+                    buf.push_str(" >= 0.0 { ");
+                }
                 a.write_rust(buf, ft, 0);
                 buf.push_str(" } else { ");
                 b.write_rust(buf, ft, 0);

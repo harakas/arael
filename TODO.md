@@ -1,5 +1,16 @@
 # TODO
 
+- **Generics beyond components**. `#[arael::model]` generics are supported
+  only on `#[arael(component)]` structs, and only as one scalar type
+  parameter bounded by `Float` (more than one, or a missing bound, is a
+  macro error). Entity/constraint/root structs with type parameters remain
+  unsupported and unvalidated: the layout registry is keyed by bare struct
+  name and constraint code is emitted per root with concrete field access,
+  so generic entities would need per-instantiation registration. Not
+  implemented because no use case needed it -- precision is the only axis
+  models vary on, and that is covered by the component support plus the
+  f32/f64 twin method families on `Model`.
+
 - **`loss = |s| ...` in `fit(...)`** -- DONE (2026-07-17, REVIEW3 item 7).
   `fit(...)`/`fit64(...)` accept a trailing `loss = |s| rho(s)` block
   M-estimator over each point's squared residual; reuses the constraint loss

@@ -33,40 +33,22 @@ impl ParamType for f64 {
     fn read_from64(src: &[f64]) -> Self { src[0] }
 }
 
-impl ParamType for crate::vect::vect2<f64> {
+impl<T: crate::utils::Float> ParamType for crate::vect::vect2<T> {
     const SIZE: usize = 2;
     const SUFFIXES: &'static [&'static str] = &[".x", ".y"];
-    fn write_to32(&self, dst: &mut [f32]) { dst[0] = self.x as f32; dst[1] = self.y as f32; }
-    fn read_from32(src: &[f32]) -> Self { Self::new(src[0] as f64, src[1] as f64) }
-    fn write_to64(&self, dst: &mut [f64]) { dst[0] = self.x; dst[1] = self.y; }
-    fn read_from64(src: &[f64]) -> Self { Self::new(src[0], src[1]) }
+    fn write_to32(&self, dst: &mut [f32]) { dst[0] = self.x.to_f32().unwrap(); dst[1] = self.y.to_f32().unwrap(); }
+    fn read_from32(src: &[f32]) -> Self { Self::new(T::from(src[0]).unwrap(), T::from(src[1]).unwrap()) }
+    fn write_to64(&self, dst: &mut [f64]) { dst[0] = self.x.to_f64().unwrap(); dst[1] = self.y.to_f64().unwrap(); }
+    fn read_from64(src: &[f64]) -> Self { Self::new(T::from(src[0]).unwrap(), T::from(src[1]).unwrap()) }
 }
 
-impl ParamType for crate::vect::vect2<f32> {
-    const SIZE: usize = 2;
-    const SUFFIXES: &'static [&'static str] = &[".x", ".y"];
-    fn write_to32(&self, dst: &mut [f32]) { dst[0] = self.x; dst[1] = self.y; }
-    fn read_from32(src: &[f32]) -> Self { Self::new(src[0], src[1]) }
-    fn write_to64(&self, dst: &mut [f64]) { dst[0] = self.x as f64; dst[1] = self.y as f64; }
-    fn read_from64(src: &[f64]) -> Self { Self::new(src[0] as f32, src[1] as f32) }
-}
-
-impl ParamType for crate::vect::vect3<f64> {
+impl<T: crate::utils::Float> ParamType for crate::vect::vect3<T> {
     const SIZE: usize = 3;
     const SUFFIXES: &'static [&'static str] = &[".x", ".y", ".z"];
-    fn write_to32(&self, dst: &mut [f32]) { dst[0] = self.x as f32; dst[1] = self.y as f32; dst[2] = self.z as f32; }
-    fn read_from32(src: &[f32]) -> Self { Self::new(src[0] as f64, src[1] as f64, src[2] as f64) }
-    fn write_to64(&self, dst: &mut [f64]) { dst[0] = self.x; dst[1] = self.y; dst[2] = self.z; }
-    fn read_from64(src: &[f64]) -> Self { Self::new(src[0], src[1], src[2]) }
-}
-
-impl ParamType for crate::vect::vect3<f32> {
-    const SIZE: usize = 3;
-    const SUFFIXES: &'static [&'static str] = &[".x", ".y", ".z"];
-    fn write_to32(&self, dst: &mut [f32]) { dst[0] = self.x; dst[1] = self.y; dst[2] = self.z; }
-    fn read_from32(src: &[f32]) -> Self { Self::new(src[0], src[1], src[2]) }
-    fn write_to64(&self, dst: &mut [f64]) { dst[0] = self.x as f64; dst[1] = self.y as f64; dst[2] = self.z as f64; }
-    fn read_from64(src: &[f64]) -> Self { Self::new(src[0] as f32, src[1] as f32, src[2] as f32) }
+    fn write_to32(&self, dst: &mut [f32]) { dst[0] = self.x.to_f32().unwrap(); dst[1] = self.y.to_f32().unwrap(); dst[2] = self.z.to_f32().unwrap(); }
+    fn read_from32(src: &[f32]) -> Self { Self::new(T::from(src[0]).unwrap(), T::from(src[1]).unwrap(), T::from(src[2]).unwrap()) }
+    fn write_to64(&self, dst: &mut [f64]) { dst[0] = self.x.to_f64().unwrap(); dst[1] = self.y.to_f64().unwrap(); dst[2] = self.z.to_f64().unwrap(); }
+    fn read_from64(src: &[f64]) -> Self { Self::new(T::from(src[0]).unwrap(), T::from(src[1]).unwrap(), T::from(src[2]).unwrap()) }
 }
 
 // ---------------------------------------------------------------------------
@@ -341,6 +323,12 @@ pub trait Model {
 /// component's user-facing fields is given separately by
 /// `#[arael(symbolic = ...)]` field attributes (which the macro
 /// differentiates at expansion time -- a trait method body cannot be).
+///
+/// A component may be generic over its scalar: exactly one type
+/// parameter, bounded inline by `Float` (`struct Dir<T: Float>`), with
+/// fields spelled generically (`quatern<T>`, `Param<vect2<T>>`, bare
+/// `Param<T>`). One definition then serves f64 and f32 models alike --
+/// see `examples/plane_slam_demo.rs`.
 ///
 /// All methods default to no-ops: a stateless reparameterization
 /// implements nothing.
@@ -1128,9 +1116,9 @@ impl_model_noop!(
 );
 
 macro_rules! impl_model_noop_generic {
-    ($($ty:ty),* $(,)?) => {
+    ($($m:ident :: $t:ident),* $(,)?) => {
         $(
-            impl Model for $ty {
+            impl<F: crate::utils::Float> Model for crate::$m::$t<F> {
                 fn serialize_params32(&mut self, _data: &mut std::vec::Vec<f32>) {}
                 fn deserialize_params32(&mut self, _data: &[f32]) {}
                 fn update32(&mut self,_data: &[f32]) {}
@@ -1144,11 +1132,9 @@ macro_rules! impl_model_noop_generic {
 }
 
 impl_model_noop_generic!(
-    crate::vect::vect3f, crate::vect::vect3d,
-    crate::vect::vect2f, crate::vect::vect2d,
-    crate::matrix::matrix3f, crate::matrix::matrix3d,
-    crate::matrix::matrix2f, crate::matrix::matrix2d,
-    crate::quatern::quaternf, crate::quatern::quaternd,
+    vect::vect3, vect::vect2,
+    matrix::matrix3, matrix::matrix2,
+    quatern::quatern,
 );
 
 impl<T> Model for crate::refs::Ref<T> {
@@ -2833,55 +2819,26 @@ impl_scalar_model_sym!(
     f32, f64,
 );
 
-impl ModelSym for crate::vect::vect3f {
-    type Sym = crate::vect::vect3sym;
-    fn sym(base: &str) -> Self::Sym { crate::vect::vect3sym::new(base) }
+// One impl per math type family: the sym twin carries names and shapes
+// only, so every precision shares it.
+macro_rules! impl_math_model_sym {
+    ($($m:ident :: $t:ident => $sym:ident),* $(,)?) => {
+        $(
+            impl<F: crate::utils::Float> ModelSym for crate::$m::$t<F> {
+                type Sym = crate::$m::$sym;
+                fn sym(base: &str) -> Self::Sym { crate::$m::$sym::new(base) }
+            }
+        )*
+    };
 }
 
-impl ModelSym for crate::vect::vect3d {
-    type Sym = crate::vect::vect3sym;
-    fn sym(base: &str) -> Self::Sym { crate::vect::vect3sym::new(base) }
-}
-
-impl ModelSym for crate::vect::vect2f {
-    type Sym = crate::vect::vect2sym;
-    fn sym(base: &str) -> Self::Sym { crate::vect::vect2sym::new(base) }
-}
-
-impl ModelSym for crate::vect::vect2d {
-    type Sym = crate::vect::vect2sym;
-    fn sym(base: &str) -> Self::Sym { crate::vect::vect2sym::new(base) }
-}
-
-impl ModelSym for crate::matrix::matrix3f {
-    type Sym = crate::matrix::matrix3sym;
-    fn sym(base: &str) -> Self::Sym { crate::matrix::matrix3sym::new(base) }
-}
-
-impl ModelSym for crate::matrix::matrix3d {
-    type Sym = crate::matrix::matrix3sym;
-    fn sym(base: &str) -> Self::Sym { crate::matrix::matrix3sym::new(base) }
-}
-
-impl ModelSym for crate::matrix::matrix2f {
-    type Sym = crate::matrix::matrix2sym;
-    fn sym(base: &str) -> Self::Sym { crate::matrix::matrix2sym::new(base) }
-}
-
-impl ModelSym for crate::matrix::matrix2d {
-    type Sym = crate::matrix::matrix2sym;
-    fn sym(base: &str) -> Self::Sym { crate::matrix::matrix2sym::new(base) }
-}
-
-impl ModelSym for crate::quatern::quaternf {
-    type Sym = crate::quatern::quaternsym;
-    fn sym(base: &str) -> Self::Sym { crate::quatern::quaternsym::new(base) }
-}
-
-impl ModelSym for crate::quatern::quaternd {
-    type Sym = crate::quatern::quaternsym;
-    fn sym(base: &str) -> Self::Sym { crate::quatern::quaternsym::new(base) }
-}
+impl_math_model_sym!(
+    vect::vect3 => vect3sym,
+    vect::vect2 => vect2sym,
+    matrix::matrix3 => matrix3sym,
+    matrix::matrix2 => matrix2sym,
+    quatern::quatern => quaternsym,
+);
 
 impl<T: ParamType + ModelSym> ModelSym for Param<T> {
     type Sym = T::Sym;

@@ -6,6 +6,8 @@
 // cached field, a `symbolic =` embed with `let` intermediates, and a
 // declared `deriv =` Jacobian cache. Nothing about it is arael-internal;
 // a user crate can define its own manifold parameterizations the same way.
+// The component is generic over its scalar (`UnitVec<T: Float>`): defined
+// once, it drops into f64 and f32 models alike.
 //
 // The problem it is put to work on: SE3 poses on a loop with odometry
 // between neighbours, and plane landmarks (unit normal + distance
@@ -16,11 +18,12 @@
 // Run with: cargo run --release --example plane_slam_demo
 
 use arael::model::{Component, CrossBlock, Param, QuaternionParam, SelfBlock};
-use arael::matrix::matrix3d;
-use arael::quatern::quaternd;
+use arael::matrix::{matrix3, matrix3d};
+use arael::quatern::{quatern, quaternd};
 use arael::refs::{self, Ref};
 use arael::simple_lm::{LmConfig, LmProblem};
-use arael::vect::{vect2d, vect3d};
+use arael::utils::Float;
+use arael::vect::{vect2, vect3, vect3d};
 
 use rand::prelude::*;
 use rand::rngs::StdRng;
@@ -39,21 +42,26 @@ use rand_distr::StandardNormal;
 /// reaches the solver. Every accepted step folds the delta into the
 /// reference and re-centres it at zero (`Component::update`), the same
 /// contract as arael's own rotation parameters.
+///
+/// Generic over the scalar: a component may take exactly one type
+/// parameter bounded by `Float`. The `symbolic =` embed is written once
+/// with plain literals; the macro emits it for whatever `T` the owning
+/// model instantiates.
 #[arael::model]
 #[arael(component)]
-struct UnitVec {
+struct UnitVec<T: Float> {
     /// Rotation that takes the unit vector (1, 0, 0) into `unit`.
-    ref_q: quaternd,
+    ref_q: quatern<T>,
     /// Chart matrix, cached: refreshed from `ref_q` whenever the reference
     /// moves; a per-iteration CONSTANT in generated constraint code.
     #[arael(compute = self.ref_q.rotation_matrix())]
-    rot: matrix3d,
+    rot: matrix3<T>,
     /// The 2-DOF tangent delta. `d` forms a rotation vector
     /// axis*angle = (0, d.x, d.y); the first-order rotation quaternion is
     ///    q = (1, 0, d.x/2, d.y/2) / sqrt(s2),  s2 = 1 + (d.x^2 + d.y^2)/4.
     /// Normalizing makes q a genuine rotation for EVERY delta, so a trial
     /// step of any size stays on the sphere.
-    d: Param<vect2d>,
+    d: Param<vect2<T>>,
     /// What constraint bodies read. The expression is the first column of
     /// q's rotation matrix, [1 - 2(y^2+z^2), 2(xy + wz), 2(xz - wy)],
     /// rotated by the chart -- 1/sqrt(s2) never appears because every term
@@ -65,49 +73,49 @@ struct UnitVec {
             1.0 - (d.x * d.x + d.y * d.y) / (2.0 * s2), d.y / s2, 0.0 - d.x / s2);
         rot * local
     })]
-    unit: vect3d,
+    unit: vect3<T>,
     /// Declared Jacobian cache: [d(unit)/d(d.x), d(unit)/d(d.y)], filled by
     /// the generated precompute, read by constraint Jacobians instead of
     /// re-deriving the embed at every observation.
     #[arael(deriv = unit, by = d)]
-    unit_d: [vect3d; 2],
+    unit_d: [vect3<T>; 2],
 }
 
-impl UnitVec {
-    fn ex() -> vect3d {
-        vect3d::new(1.0, 0.0, 0.0)
+impl<T: Float> UnitVec<T> {
+    fn ex() -> vect3<T> {
+        vect3::new(T::one(), T::zero(), T::zero())
     }
-    fn new(direction: vect3d) -> UnitVec {
+    fn new(direction: vect3<T>) -> UnitVec<T> {
         let mut u = UnitVec {
-            ref_q: quaternd::identity(),
-            rot: matrix3d::identity(),
-            d: Param::new(vect2d::new(0.0, 0.0)),
+            ref_q: quatern::identity(),
+            rot: matrix3::identity(),
+            d: Param::new(vect2::new(T::zero(), T::zero())),
             unit: direction,
-            unit_d: [vect3d::new(0.0, 0.0, 0.0); 2],
+            unit_d: [vect3::new(T::zero(), T::zero(), T::zero()); 2],
         };
         Component::start(&mut u);
         u
     }
 }
 
-impl Component for UnitVec {
+impl<T: Float> Component for UnitVec<T> {
     /// User-facing value in: seed the chart from `unit`, zero the delta.
     fn start(&mut self) {
         self.unit = self.unit.unit();
-        self.ref_q = quaternd::from_two_vectors(Self::ex(), self.unit);
-        self.d.value = vect2d::new(0.0, 0.0);
+        self.ref_q = quatern::from_two_vectors(Self::ex(), self.unit);
+        self.d.value = vect2::new(T::zero(), T::zero());
     }
     /// Accepted step: fold the delta into the reference, re-centre at zero.
     fn update(&mut self) {
-        let dq = quaternd::from_rotation_vector_small(
-            vect3d::new(0.0, self.d.value.x, self.d.value.y));
+        let dq = quatern::from_rotation_vector_small(
+            vect3::new(T::zero(), self.d.value.x, self.d.value.y));
         self.ref_q = (self.ref_q * dq).unit();
-        self.d.value = vect2d::new(0.0, 0.0);
+        self.d.value = vect2::new(T::zero(), T::zero());
     }
     /// Solve done: optimized direction out.
     fn finish(&mut self) {
-        let dq = quaternd::from_rotation_vector_small(
-            vect3d::new(0.0, self.d.value.x, self.d.value.y));
+        let dq = quatern::from_rotation_vector_small(
+            vect3::new(T::zero(), self.d.value.x, self.d.value.y));
         self.unit = (self.ref_q * dq).rotate(Self::ex());
     }
 }
@@ -128,8 +136,8 @@ struct Pose {
 
 #[arael::model]
 struct PlaneLandmark {
-    /// Unit normal of the plane -- the component above.
-    normal: UnitVec,
+    /// Unit normal of the plane -- the component above, at f64.
+    normal: UnitVec<f64>,
     /// Distance coefficient: the plane is n.x + c = 0, distance = -c.
     c: Param<f64>,
     /// This plane's Hessian tile.

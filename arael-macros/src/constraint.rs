@@ -61,6 +61,7 @@ pub(crate) fn generate_symbolic_precompute(
     param_fields: &[String],
     symbolic_fields: &[(String, String)],
     deriv_fields: &[(String, String, String)],
+    scalar_generic: Option<&str>,
 ) -> syn::Result<TokenStream2> {
     if symbolic_fields.is_empty() {
         return Ok(TokenStream2::new());
@@ -141,10 +142,26 @@ pub(crate) fn generate_symbolic_precompute(
     }
     let exprs: Vec<E> = assigns.iter().map(|(_, e, _)| e.clone()).collect();
     let (inters, outs) = arael_sym::cse(&exprs);
+    // In a generic `T: Float` struct an unsuffixed literal cannot infer
+    // its type; emit every literal through a local conversion closure.
+    // The closure's explicit return type pins each `__c(lit)` to the
+    // scalar parameter -- a generic helper fn would leave `__c(x) * t`
+    // with an unresolved `?F: Mul<T>` obligation instead of `?F = T`.
+    let generic = scalar_generic.is_some();
+    let emit = |e: &E| -> syn::Result<Expr> {
+        parse_sym_code(&if generic { e.to_rust_generic() } else { e.to_rust("") })
+    };
     let mut stmts: Vec<TokenStream2> = Vec::new();
+    if let Some(sg) = scalar_generic {
+        let sg = syn::Ident::new(sg, sp);
+        stmts.push(quote! {
+            #[allow(unused_variables)]
+            let __c = |v: f64| -> #sg { #sg::from(v).unwrap() };
+        });
+    }
     for (iname, e) in &inters {
         let id = syn::Ident::new(iname, sp);
-        let code = parse_sym_code(&e.to_rust(""))?;
+        let code = emit(e)?;
         stmts.push(quote! { let #id = #code; });
     }
     // Values unconditionally; deriv-cache stores grouped per `by` param and
@@ -155,7 +172,7 @@ pub(crate) fn generate_symbolic_precompute(
     for ((lhs, _, by), out) in assigns.iter().zip(&outs) {
         let lhs_expr: Expr = syn::parse_str(lhs).map_err(|e| syn::Error::new(sp,
             format!("internal: bad precompute target `{}`: {}", lhs, e)))?;
-        let code = parse_sym_code(&out.to_rust(""))?;
+        let code = emit(out)?;
         let assign = quote! { #lhs_expr = #code; };
         match by {
             None => stmts.push(assign),

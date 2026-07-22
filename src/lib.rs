@@ -1912,7 +1912,7 @@
 //!   spec) and a `Path::optimise_center` pass that freezes pose
 //!   params and optimises only the globals before the main sweep.
 //! - **[`plane_slam_demo`](https://github.com/harakas/arael/blob/master/examples/plane_slam_demo.rs)**
-//!   -- plane SLAM with a user-defined component: `UnitVec`, a 2-DOF
+//!   -- plane SLAM with a user-defined component: `UnitVec<T>`, a 2-DOF
 //!   unit direction on the sphere, demonstrating
 //!   `#[arael(component)]`.
 //! - **[`m3500_demo`](https://github.com/harakas/arael/blob/master/examples/m3500_demo.rs)**

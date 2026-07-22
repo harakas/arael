@@ -677,6 +677,35 @@ fn model_attribute(input: &mut syn::DeriveInput) -> syn::Result<TokenStream2> {
         _ => return Err(syn::Error::new_spanned(input, "arael::model requires a struct or enum")),
     };
 
+    // `#[arael(component)]` structs may be generic over exactly one scalar
+    // type parameter bounded by `Float`; the layout registry stores shapes
+    // only, so one registration covers every instantiation. Other generics
+    // (lifetimes, const params, several type params, entity structs) are
+    // not supported.
+    let is_component = has_struct_attr_ident(&input.attrs, "component");
+    let mut scalar_generic: Option<String> = None;
+    if !input.generics.params.is_empty() && is_component {
+        if input.generics.lifetimes().next().is_some()
+            || input.generics.const_params().next().is_some()
+            || input.generics.type_params().count() != 1 {
+            return Err(syn::Error::new_spanned(&input.generics,
+                format!("generic component `{}`: exactly one type parameter is \
+                         supported, bounded by `Float` (e.g. `struct {}<T: Float>`)",
+                        name, name)));
+        }
+        let tp = input.generics.type_params().next().unwrap();
+        let has_float_bound = tp.bounds.iter().any(|b| matches!(b,
+            syn::TypeParamBound::Trait(t)
+                if t.path.segments.last().map(|s| s.ident == "Float").unwrap_or(false)));
+        if !has_float_bound {
+            return Err(syn::Error::new_spanned(tp,
+                format!("generic component `{}`: the type parameter `{}` must carry \
+                         an inline `Float` bound (`{}: arael::utils::Float`)",
+                        name, tp.ident, tp.ident)));
+        }
+        scalar_generic = Some(tp.ident.to_string());
+    }
+
     let mut param_count: u32 = 0;
     let mut sym_fields: Vec<(String, SymFieldType)> = Vec::new();
     let mut collection_fields_reg: Vec<String> = Vec::new();
@@ -743,18 +772,20 @@ fn model_attribute(input: &mut syn::DeriveInput) -> syn::Result<TokenStream2> {
         }
         // Component-typed fields fold their params into this struct's count
         // (the component is registered before its owner, top-down rule).
+        // Generic args are ignored: the registry is keyed by the bare type
+        // name and a component's layout is the same at every precision, so
+        // `UnitVec`, `UnitVec<f64>` and `UnitVec<f32>` all resolve.
         if !is_param_type(&field.ty)
             && let syn::Type::Path(tp) = &field.ty
             && let Some(seg) = tp.path.segments.last()
-            && matches!(seg.arguments, syn::PathArguments::None)
             && registry_lookup(&seg.ident.to_string()).map(|l| l.component).unwrap_or(false)
         {
             param_count += registry_param_total(&seg.ident.to_string());
         }
         if is_param_type(&field.ty) {
-            param_count += param_type_size(&field.ty);
+            param_count += param_type_size(&field.ty, scalar_generic.as_deref());
             param_field_names_for_reg.push(field_name.clone());
-            let sft = match param_type_size(&field.ty) {
+            let sft = match param_type_size(&field.ty, scalar_generic.as_deref()) {
                 1 => SymFieldType::Scalar,
                 2 => SymFieldType::Vec2,
                 3 => SymFieldType::Vec3,
@@ -775,7 +806,7 @@ fn model_attribute(input: &mut syn::DeriveInput) -> syn::Result<TokenStream2> {
                 sym_fields.push((field_name, SymFieldType::Skip));
             }
         } else {
-            let sft = classify_field_sym_type(&field.ty);
+            let sft = classify_field_sym_type(&field.ty, scalar_generic.as_deref());
             sym_fields.push((field_name, sft));
         }
     }
@@ -798,7 +829,6 @@ fn model_attribute(input: &mut syn::DeriveInput) -> syn::Result<TokenStream2> {
     // OWNING struct's span, so it has no SelfBlock of its own, carries no
     // constraints, and holds no collections. Runtime lifecycle comes from
     // the `arael::model::Component` trait the user implements.
-    let is_component = has_struct_attr_ident(&input.attrs, "component");
     if is_component {
         if self_block_field_reg.is_some() {
             return Err(syn::Error::new_spanned(name,
@@ -968,18 +998,24 @@ fn emit_trivial_model_for_enum(input: &mut syn::DeriveInput) -> syn::Result<Toke
     })
 }
 
-/// Classify a non-Param field's sym type from its type path.
-fn classify_field_sym_type(ty: &syn::Type) -> SymFieldType {
+/// Classify a non-Param field's sym type from its type path. The layout
+/// stores shapes, not precisions, so the generic spellings (`vect2<T>`,
+/// bare `T` when `T` is the struct's scalar type parameter, passed as
+/// `scalar_generic`) classify the same as the suffixed aliases.
+fn classify_field_sym_type(ty: &syn::Type, scalar_generic: Option<&str>) -> SymFieldType {
     if let syn::Type::Path(tp) = ty
         && let Some(seg) = tp.path.segments.last() {
             let name = seg.ident.to_string();
+            if scalar_generic == Some(name.as_str()) {
+                return SymFieldType::Scalar;
+            }
             return match name.as_str() {
                 "f32" | "f64" | "bool" | "u32" | "i32" | "usize" => SymFieldType::Scalar,
-                "vect2f" | "vect2d" => SymFieldType::Vec2,
-                "vect3f" | "vect3d" => SymFieldType::Vec3,
-                "matrix3f" | "matrix3d" => SymFieldType::Mat3,
-                "matrix2f" | "matrix2d" => SymFieldType::Mat2,
-                "quaternf" | "quaternd" => SymFieldType::Quat,
+                "vect2f" | "vect2d" | "vect2" => SymFieldType::Vec2,
+                "vect3f" | "vect3d" | "vect3" => SymFieldType::Vec3,
+                "matrix3f" | "matrix3d" | "matrix3" => SymFieldType::Mat3,
+                "matrix2f" | "matrix2d" | "matrix2" => SymFieldType::Mat2,
+                "quaternf" | "quaternd" | "quatern" => SymFieldType::Quat,
                 _ => {
                     // Check if it's a Ref<T> — extract inner type name
                     if let Some((_, inner_ident)) = extract_wrapper_inner(ty, "Ref") {
@@ -997,14 +1033,14 @@ fn classify_field_sym_type(ty: &syn::Type) -> SymFieldType {
 }
 
 /// Extract the SIZE of a Param<T> field's inner type.
-fn param_type_size(ty: &syn::Type) -> u32 {
+fn param_type_size(ty: &syn::Type, scalar_generic: Option<&str>) -> u32 {
     if let syn::Type::Path(tp) = ty
         && let Some(seg) = tp.path.segments.last() {
             let name = seg.ident.to_string();
             if name == "Param"
                 && let syn::PathArguments::AngleBracketed(args) = &seg.arguments
                     && let Some(syn::GenericArgument::Type(inner)) = args.args.first() {
-                        return inner_type_size(inner);
+                        return inner_type_size(inner, scalar_generic);
                     }
             if name == "SimpleEulerAngleParam" || name == "EulerAngleParam"
                 || name == "QuaternionParam" {
@@ -1031,14 +1067,20 @@ fn has_struct_attr_ident(attrs: &[syn::Attribute], ident: &str) -> bool {
     false
 }
 
-/// Return the ParamType::SIZE for known types.
-fn inner_type_size(ty: &syn::Type) -> u32 {
+/// Return the ParamType::SIZE for known types. `scalar_generic` names the
+/// owning struct's scalar type parameter, so `Param<T>` sizes like
+/// `Param<f64>` and `Param<vect2<T>>` like `Param<vect2d>`.
+fn inner_type_size(ty: &syn::Type, scalar_generic: Option<&str>) -> u32 {
     if let syn::Type::Path(tp) = ty
         && let Some(seg) = tp.path.segments.last() {
-            return match seg.ident.to_string().as_str() {
+            let name = seg.ident.to_string();
+            if scalar_generic == Some(name.as_str()) {
+                return 1;
+            }
+            return match name.as_str() {
                 "f32" | "f64" => 1,
-                "vect2f" | "vect2d" => 2,
-                "vect3f" | "vect3d" => 3,
+                "vect2f" | "vect2d" | "vect2" => 2,
+                "vect3f" | "vect3d" | "vect3" => 3,
                 _ => 0,
             };
         }
@@ -1247,9 +1289,27 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
     let mut positions32_stmts: Vec<TokenStream2> = Vec::new();
     let mut positions64_stmts: Vec<TokenStream2> = Vec::new();
 
+    // The struct's scalar type parameter, when generic: a bare `T` data
+    // field is excluded from the Model walks below -- for concrete scalars
+    // every Model method is a no-op, and emitting the calls would demand
+    // `T: Model` from a plain data field.
+    let scalar_generic_impl: Option<String> =
+        input.generics.type_params().next().map(|tp| tp.ident.to_string());
+
     for field in fields {
         let ident = field.ident.as_ref().unwrap();
         let attr = parse_arael_attr(&field.attrs)?;
+
+        if !is_param_type(&field.ty)
+            && let syn::Type::Path(tp) = &field.ty
+            && tp.qself.is_none()
+            && tp.path.segments.len() == 1
+            && let Some(seg) = tp.path.segments.first()
+            && matches!(seg.arguments, syn::PathArguments::None)
+            && scalar_generic_impl.as_deref() == Some(seg.ident.to_string().as_str())
+        {
+            continue;
+        }
 
         match attr {
             // Cross is a constraint-struct-only attribute for CrossBlock
@@ -1545,7 +1605,9 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
         Some(l) if !l.symbolic_fields.is_empty() =>
             crate::constraint::generate_symbolic_precompute(
                 &name.to_string(), &l.fields, &l.param_fields,
-                &l.symbolic_fields, &l.deriv_fields)?,
+                &l.symbolic_fields, &l.deriv_fields,
+                input.generics.type_params().next()
+                    .map(|tp| tp.ident.to_string()).as_deref())?,
         _ => TokenStream2::new(),
     };
     let precompute_call: TokenStream2 = if precompute_impl.is_empty() {
@@ -1687,7 +1749,7 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
     };
 
     // Generate *Sym companion struct and ModelSym impl
-    let sym_impl = generate_sym_impl(name, fields)?;
+    let sym_impl = generate_sym_impl(name, &input.generics, fields)?;
 
     // Check for #[arael(fit(...))] on the struct
     let fit_impl = match parse_fit_attr(&input.attrs)? {
@@ -2123,9 +2185,21 @@ fn to_collection_name(ident: &syn::Ident) -> String {
 /// Generate the `*Sym` companion struct and `ModelSym` impl.
 fn generate_sym_impl(
     name: &syn::Ident,
+    generics: &syn::Generics,
     fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
 ) -> syn::Result<TokenStream2> {
     let sym_name = syn::Ident::new(&format!("{}Sym", name), name.span());
+
+    // Sym twins are precision-independent, so a generic struct shares ONE
+    // non-generic companion: project field types to the f64 instantiation
+    // when naming their associated sym types.
+    let scalar_generic = generics.type_params().next().map(|tp| tp.ident.to_string());
+    let subst = |ty: &syn::Type| -> syn::Type {
+        match &scalar_generic {
+            Some(g) => subst_ident_f64(ty, g),
+            None => ty.clone(),
+        }
+    };
 
     let mut sym_fields: Vec<TokenStream2> = Vec::new();
     let mut sym_inits: Vec<TokenStream2> = Vec::new();
@@ -2151,6 +2225,7 @@ fn generate_sym_impl(
         // Ref<T>: resolve via collection lookup, e.g. "poses[base.pose]"
         if let Some((inner_ty, inner_ident)) = extract_wrapper_inner(ty, "Ref") {
             let collection = to_collection_name(inner_ident);
+            let inner_ty = subst(inner_ty);
             sym_fields.push(quote! {
                 pub #ident: <#inner_ty as arael::model::ModelSym>::Sym,
             });
@@ -2164,6 +2239,7 @@ fn generate_sym_impl(
 
         // Option<T>: unwrap via as_ref().unwrap(), e.g. "base.gps.as_ref().unwrap()"
         if let Some((inner_ty, _)) = extract_wrapper_inner(ty, "Option") {
+            let inner_ty = subst(inner_ty);
             sym_fields.push(quote! {
                 pub #ident: <#inner_ty as arael::model::ModelSym>::Sym,
             });
@@ -2176,6 +2252,7 @@ fn generate_sym_impl(
         }
 
         // Regular fields
+        let ty = subst(ty);
         sym_fields.push(quote! {
             pub #ident: <#ty as arael::model::ModelSym>::Sym,
         });
@@ -2185,13 +2262,14 @@ fn generate_sym_impl(
         });
     }
 
+    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
     Ok(quote! {
         #[derive(Clone)]
         pub struct #sym_name {
             #(#sym_fields)*
         }
 
-        impl arael::model::ModelSym for #name {
+        impl #impl_generics arael::model::ModelSym for #name #ty_generics #where_clause {
             type Sym = #sym_name;
             fn sym(base: &str) -> #sym_name {
                 #sym_name {
@@ -2200,6 +2278,29 @@ fn generate_sym_impl(
             }
         }
     })
+}
+
+/// Replace every occurrence of the bare ident `from` in a type's token
+/// stream with `f64`. Projects a generic struct's field types onto the
+/// f64 instantiation for its sym companion: sym twins are
+/// precision-independent, so any concrete instantiation names the same
+/// associated types.
+fn subst_ident_f64(ty: &syn::Type, from: &str) -> syn::Type {
+    fn walk(ts: TokenStream2, from: &str) -> TokenStream2 {
+        ts.into_iter().map(|tt| match tt {
+            proc_macro2::TokenTree::Ident(id) if id == from =>
+                proc_macro2::TokenTree::Ident(proc_macro2::Ident::new("f64", id.span())),
+            proc_macro2::TokenTree::Group(g) => {
+                let inner = walk(g.stream(), from);
+                let mut ng = proc_macro2::Group::new(g.delimiter(), inner);
+                ng.set_span(g.span());
+                proc_macro2::TokenTree::Group(ng)
+            }
+            other => other,
+        }).collect()
+    }
+    let tokens = walk(quote! { #ty }, from);
+    syn::parse2(tokens).expect("type with scalar generic substituted must reparse")
 }
 
 pub(crate) enum AraelAttr {

@@ -2091,6 +2091,29 @@ mod tests {
     }
 
     #[test]
+    fn generic_mode_wraps_every_literal() {
+        // Plain constants, folded constant subtrees, named constants and
+        // the branch comparison zero all route through the __c() helper --
+        // an unsuffixed literal cannot infer a generic T.
+        let f = symbol("x") * constant(0.25) + constant(1.0);
+        assert_eq!(f.to_rust_generic(), "__c(0.25) * x + __c(1.0)");
+        // A symbol-free subtree folds to one wrapped literal.
+        let g = symbol("x") * (constant(2.0) * constant(3.0));
+        assert_eq!(g.to_rust_generic(), "__c(6.0) * x");
+        // Named constants emit their numeric value, wrapped.
+        let h = symbol("x") + pi();
+        let code = h.to_rust_generic();
+        assert!(code.contains("__c(3.14"), "expected wrapped pi in `{}`", code);
+        // Branch comparison zero.
+        let b = branch(symbol("q"), symbol("a"), symbol("b"));
+        let code = b.to_rust_generic();
+        assert!(code.contains(">= __c(0.0)"), "expected wrapped zero in `{}`", code);
+        // Method-call arguments are wrapped too.
+        let p = pow(symbol("x"), constant(2.0) + symbol("y"));
+        assert_eq!(p.to_rust_generic(), "x.powf(y + __c(2.0))");
+    }
+
+    #[test]
     fn nonfinite_constants_emit_valid_rust() {
         // Constants folded to inf/NaN emitted `inf_f64` / `NaN_f64` --
         // not valid Rust tokens.

@@ -4,7 +4,7 @@
 ///
 /// Extends `num::Float` with degree/radian conversions, angle normalization,
 /// numeric constants, and a fast approximate atan.
-pub trait Float : num::Float + std::fmt::Debug + num::NumCast + std::ops::AddAssign + std::ops::MulAssign + 'static {
+pub trait Float : num::Float + std::fmt::Debug + num::NumCast + std::ops::AddAssign + std::ops::MulAssign + crate::model::ParamType + 'static {
     /// Convert degrees to radians.
     fn deg2rad(self) -> Self {
         self.to_radians()

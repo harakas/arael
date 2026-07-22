@@ -88,8 +88,8 @@ where
     ref_value: quatern<T>,
 }
 
-/// The f32 twin, by name: the macro classifies fields by the type path's
-/// last segment, so f32 models spell the alias.
+/// Shorthand for the f32 instantiation; `TransformParam<f32>` works
+/// spelled out too.
 pub type TransformParamF = TransformParam<f32>;
 
 impl<T: Float> TransformParam<T>
