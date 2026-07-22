@@ -128,7 +128,7 @@ struct PosePair {
 #[derive(Clone)]
 pub struct Path {
     poses: refs::Vec<Pose>,
-    landmarks: refs::Vec<PointLandmark>,
+    landmarks: refs::Arena<PointLandmark>,
     pose_pairs: std::vec::Vec<PosePair>,
     drift_pos_isigma: f64,
     drift_ea_isigma: f64,
@@ -239,7 +239,7 @@ struct PosePairF {
 #[derive(Clone)]
 pub struct PathF {
     poses: refs::Vec<PoseF>,
-    landmarks: refs::Vec<PointLandmarkF>,
+    landmarks: refs::Arena<PointLandmarkF>,
     pose_pairs: std::vec::Vec<PosePairF>,
     drift_pos_isigma: f32,
     drift_ea_isigma: f32,
@@ -251,7 +251,7 @@ pub struct PathF {
 pub fn build(scene: &Scene) -> Path {
     let mut path = Path {
         poses: refs::Vec::new(),
-        landmarks: refs::Vec::new(),
+        landmarks: refs::Arena::new(),
         pose_pairs: std::vec::Vec::new(),
         drift_pos_isigma: scene.drift_pos_isigma as f64,
         drift_ea_isigma: scene.drift_ea_isigma as f64,
@@ -325,7 +325,7 @@ fn extract(path: &Path) -> Solution {
 fn build_f32(scene: &Scene) -> PathF {
     let mut path = PathF {
         poses: refs::Vec::new(),
-        landmarks: refs::Vec::new(),
+        landmarks: refs::Arena::new(),
         pose_pairs: std::vec::Vec::new(),
         drift_pos_isigma: scene.drift_pos_isigma,
         drift_ea_isigma: scene.drift_ea_isigma,
@@ -405,6 +405,15 @@ fn nielsen() -> bool {
 }
 
 fn cfg(max_iters: usize) -> arael::simple_lm::LmConfig<f64> {
+    // SLAM_WC=1: use the well_conditioned preset (low lambda + gradient stop)
+    // instead of the hand-tuned config, to evaluate it as the default.
+    if std::env::var("SLAM_WC").map_or(false, |v| v == "1") {
+        let cfg = arael::simple_lm::LmConfig::well_conditioned()
+            .with_max_iters(max_iters)
+            .with_verbose(std::env::var("SLAM_VERBOSE").map_or(false, |v| v == "1"))
+            .with_gather_timing(std::env::var("SLAM_TIMING").map_or(false, |v| v == "1"));
+        return if nielsen() { cfg.with_nielsen() } else { cfg };
+    }
     let cfg = arael::simple_lm::LmConfig {
         abs_precision: 1e-5,
         rel_precision: 1e-5,
@@ -518,6 +527,13 @@ pub fn write_hessian_bitmap(scene: &Scene, out: &str) {
 }
 
 fn cfg32(max_iters: usize, poses: usize) -> arael::simple_lm::LmConfig<f32> {
+    if std::env::var("SLAM_WC").map_or(false, |v| v == "1") {
+        let cfg = arael::simple_lm::LmConfig::well_conditioned()
+            .with_max_iters(max_iters)
+            .with_verbose(std::env::var("SLAM_VERBOSE").map_or(false, |v| v == "1"))
+            .with_gather_timing(std::env::var("SLAM_TIMING").map_or(false, |v| v == "1"));
+        return if nielsen() { cfg.with_nielsen() } else { cfg };
+    }
     // Problem-appropriate initial damping, per pose count. At the small
     // (60-pose) size the f32 solution lands a hair above the 1e-5 stop
     // threshold at 1e-8 and then bounces in the f32 noise floor (a
@@ -678,12 +694,15 @@ pub fn cov_bench(scene: &Scene, budget_s: f64, cap: usize) -> CovScaling {
 
     // PerQuery landmarks: 1, 2, 8, 32, all -- "all" via per-query usually hits the
     // cap (that is AllMarginals' job), which the table shows as `*`.
+    // The arena has no positional indexing (a slot's position is an accident
+    // of the hole layout), so query by the refs it hands out.
+    let lm_refs: std::vec::Vec<_> = path.landmarks.refs().collect();
     let perquery_lm = scale_counts(query_counts(nl, true), cap_s, |n| {
         let idx = spread(0, nl, n);
         median_ms(budget, cap, || {
             let cov = path.assemble_covariance(CovMode::PerQuery).unwrap();
             for &i in &idx {
-                black_box(cov.marginal_cov(&path.landmarks[i]));
+                black_box(cov.marginal_cov(&path.landmarks[lm_refs[i]]));
             }
         })
     });
