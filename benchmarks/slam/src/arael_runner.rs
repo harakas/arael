@@ -1,14 +1,18 @@
-// Dedicated arael model for the heterogeneous SLAM benchmark (f64) --
-// a fresh implementation, not the examples/slam_demo.rs model: drift
-// regularizers use explicit stored priors (not `_value`), GPS is
-// unguarded (every pose has it), and there is no plotting/graduation
-// machinery. Six factor types, matching scene::reference_cost exactly.
+// Dedicated arael model for the heterogeneous SLAM benchmark -- a fresh
+// implementation, not the examples/slam_demo.rs model: drift regularizers
+// use explicit stored priors (not `_value`), GPS is unguarded (every pose
+// has it), and there is no plotting/graduation machinery. Six factor
+// types, matching scene::reference_cost exactly. The entities are generic
+// over the scalar; the two concrete roots (`Path` f64, `PathF` f32)
+// instantiate one shared model. Bodies reach the root's globals through
+// the `root` alias, which resolves under either root.
 
 use crate::scene::{Scene, Solution};
-use arael::matrix::{matrix3d, matrix3f};
+use arael::matrix::matrix3;
 use arael::model::{CrossBlock, Param, SelfBlock, SimpleEulerAngleParam};
 use arael::refs::{self, Ref};
-use arael::vect::{vect2d, vect2f, vect3d, vect3f};
+use arael::utils::Float;
+use arael::vect::{vect2, vect3};
 
 #[arael::model]
 // GPS (plain Gaussian, whitened by the covariance decomposition).
@@ -23,46 +27,46 @@ use arael::vect::{vect2d, vect2f, vect3d, vect3f};
 #[arael(constraint(hb_pose, {
     let pd = pose.pos - pose.prior_pos;
     let ed = pose.ea - pose.prior_ea;
-    [pd.x * path.drift_pos_isigma,
-     pd.y * path.drift_pos_isigma,
-     pd.z * path.drift_pos_isigma,
-     ed.x * path.drift_ea_isigma,
-     ed.y * path.drift_ea_isigma,
-     ed.z * path.drift_ea_isigma]
+    [pd.x * root.drift_pos_isigma,
+     pd.y * root.drift_pos_isigma,
+     pd.z * root.drift_pos_isigma,
+     ed.x * root.drift_ea_isigma,
+     ed.y * root.drift_ea_isigma,
+     ed.z * root.drift_ea_isigma]
 }))]
 // Tilt (accelerometer constrains roll + pitch).
 #[arael(constraint(hb_pose, {
-    [(pose.ea.x - pose.tilt_roll) * path.tilt_isigma,
-     (pose.ea.y - pose.tilt_pitch) * path.tilt_isigma]
+    [(pose.ea.x - pose.tilt_roll) * root.tilt_isigma,
+     (pose.ea.y - pose.tilt_pitch) * root.tilt_isigma]
 }))]
 #[derive(Clone)]
-struct Pose {
-    pos: Param<vect3d>,
-    ea: SimpleEulerAngleParam<f64>,
-    prior_pos: vect3d,
-    prior_ea: vect3d,
-    gps_pos: vect3d,
-    gps_cov_r: matrix3d,
-    gps_cov_isigma: vect3d,
-    tilt_roll: f64,
-    tilt_pitch: f64,
-    hb_pose: SelfBlock<Pose>,
+struct Pose<T: Float> {
+    pos: Param<vect3<T>>,
+    ea: SimpleEulerAngleParam<T>,
+    prior_pos: vect3<T>,
+    prior_ea: vect3<T>,
+    gps_pos: vect3<T>,
+    gps_cov_r: matrix3<T>,
+    gps_cov_isigma: vect3<T>,
+    tilt_roll: T,
+    tilt_pitch: T,
+    hb_pose: SelfBlock<Pose<T>, T>,
 }
 
 #[arael::model]
 // Landmark drift prior.
 #[arael(constraint(hb_drift, {
     let d = pointlandmark.pos - pointlandmark.prior_pos;
-    [d.x * path.drift_lm_isigma,
-     d.y * path.drift_lm_isigma,
-     d.z * path.drift_lm_isigma]
+    [d.x * root.drift_lm_isigma,
+     d.y * root.drift_lm_isigma,
+     d.z * root.drift_lm_isigma]
 }))]
 #[derive(Clone)]
-struct PointLandmark {
-    pos: Param<vect3d>,
-    prior_pos: vect3d,
-    frines: std::vec::Vec<Frine>,
-    hb_drift: SelfBlock<PointLandmark>,
+struct PointLandmark<T: Float> {
+    pos: Param<vect3<T>>,
+    prior_pos: vect3<T>,
+    frines: std::vec::Vec<Frine<T>>,
+    hb_drift: SelfBlock<PointLandmark<T>, T>,
 }
 
 #[arael::model]
@@ -75,17 +79,17 @@ struct PointLandmark {
     let lm_r = mr2w.transpose() * (lm.pos - pose.pos);
     let r_r = lm_r - frine.camera_pos;
     let r_f = frine.mf2r.transpose() * r_r;
-    [atan2(r_f.y, r_f.x) * frine.isigma.x * path.frine_isigma_scale,
-     atan2(r_f.z, r_f.x) * frine.isigma.y * path.frine_isigma_scale]
+    [atan2(r_f.y, r_f.x) * frine.isigma.x * root.frine_isigma_scale,
+     atan2(r_f.z, r_f.x) * frine.isigma.y * root.frine_isigma_scale]
 }))]
 #[derive(Clone)]
-struct Frine {
+struct Frine<T: Float> {
     #[arael(ref = root.poses)]
-    pose: Ref<Pose>,
-    mf2r: matrix3d,
-    camera_pos: vect3d,
-    isigma: vect2d,
-    hb: CrossBlock<PointLandmark, Pose>,
+    pose: Ref<Pose<T>>,
+    mf2r: matrix3<T>,
+    camera_pos: vect3<T>,
+    isigma: vect2<T>,
+    hb: CrossBlock<PointLandmark<T>, Pose<T>, T>,
 }
 
 #[arael::model]
@@ -109,27 +113,27 @@ struct Frine {
      ea_w.z * posepair.ea_cov_isigma.z]
 }))]
 #[derive(Clone)]
-struct PosePair {
+struct PosePair<T: Float> {
     #[arael(ref = root.poses)]
-    prev: Ref<Pose>,
+    prev: Ref<Pose<T>>,
     #[arael(ref = root.poses)]
-    cur: Ref<Pose>,
-    delta_pos: vect3d,
-    delta_ea: vect3d,
-    pos_cov_r: matrix3d,
-    pos_cov_isigma: vect3d,
-    ea_cov_r: matrix3d,
-    ea_cov_isigma: vect3d,
-    hb: CrossBlock<Pose, Pose>,
+    cur: Ref<Pose<T>>,
+    delta_pos: vect3<T>,
+    delta_ea: vect3<T>,
+    pos_cov_r: matrix3<T>,
+    pos_cov_isigma: vect3<T>,
+    ea_cov_r: matrix3<T>,
+    ea_cov_isigma: vect3<T>,
+    hb: CrossBlock<Pose<T>, Pose<T>, T>,
 }
 
 #[arael::model]
 #[arael(root)]
 #[derive(Clone)]
 pub struct Path {
-    poses: refs::Vec<Pose>,
-    landmarks: refs::Arena<PointLandmark>,
-    pose_pairs: std::vec::Vec<PosePair>,
+    poses: refs::Vec<Pose<f64>>,
+    landmarks: refs::Arena<PointLandmark<f64>>,
+    pose_pairs: std::vec::Vec<PosePair<f64>>,
     drift_pos_isigma: f64,
     drift_ea_isigma: f64,
     drift_lm_isigma: f64,
@@ -137,110 +141,13 @@ pub struct Path {
     frine_isigma_scale: f64,
 }
 
-// ------------------------------------------------------------------ f32
-// Identical model, f32 throughout (the demo's native precision).
-
-#[arael::model]
-#[arael(constraint(hb_pose, {
-    let raw = posef.pos - posef.gps_pos;
-    let rt = posef.gps_cov_r.transpose() * raw;
-    [rt.x * posef.gps_cov_isigma.x,
-     rt.y * posef.gps_cov_isigma.y,
-     rt.z * posef.gps_cov_isigma.z]
-}))]
-#[arael(constraint(hb_pose, {
-    let pd = posef.pos - posef.prior_pos;
-    let ed = posef.ea - posef.prior_ea;
-    [pd.x * pathf.drift_pos_isigma, pd.y * pathf.drift_pos_isigma, pd.z * pathf.drift_pos_isigma,
-     ed.x * pathf.drift_ea_isigma, ed.y * pathf.drift_ea_isigma, ed.z * pathf.drift_ea_isigma]
-}))]
-#[arael(constraint(hb_pose, {
-    [(posef.ea.x - posef.tilt_roll) * pathf.tilt_isigma,
-     (posef.ea.y - posef.tilt_pitch) * pathf.tilt_isigma]
-}))]
-#[derive(Clone)]
-struct PoseF {
-    pos: Param<vect3f>,
-    ea: SimpleEulerAngleParam<f32>,
-    prior_pos: vect3f,
-    prior_ea: vect3f,
-    gps_pos: vect3f,
-    gps_cov_r: matrix3f,
-    gps_cov_isigma: vect3f,
-    tilt_roll: f32,
-    tilt_pitch: f32,
-    hb_pose: SelfBlock<PoseF, f32>,
-}
-
-#[arael::model]
-#[arael(constraint(hb_drift, {
-    let d = pointlandmarkf.pos - pointlandmarkf.prior_pos;
-    [d.x * pathf.drift_lm_isigma, d.y * pathf.drift_lm_isigma, d.z * pathf.drift_lm_isigma]
-}))]
-#[derive(Clone)]
-struct PointLandmarkF {
-    pos: Param<vect3f>,
-    prior_pos: vect3f,
-    frines: std::vec::Vec<FrineF>,
-    hb_drift: SelfBlock<PointLandmarkF, f32>,
-}
-
-#[arael::model]
-#[arael(constraint(hb, parent = lm, {
-    let mr2w = pose.ea.rotation_matrix();
-    let lm_r = mr2w.transpose() * (lm.pos - pose.pos);
-    let r_r = lm_r - frinef.camera_pos;
-    let r_f = frinef.mf2r.transpose() * r_r;
-    [atan2(r_f.y, r_f.x) * frinef.isigma.x * pathf.frine_isigma_scale,
-     atan2(r_f.z, r_f.x) * frinef.isigma.y * pathf.frine_isigma_scale]
-}))]
-#[derive(Clone)]
-struct FrineF {
-    #[arael(ref = root.poses)]
-    pose: Ref<PoseF>,
-    mf2r: matrix3f,
-    camera_pos: vect3f,
-    isigma: vect2f,
-    hb: CrossBlock<PointLandmarkF, PoseF, f32>,
-}
-
-#[arael::model]
-#[arael(constraint(hb, {
-    let mr2w_prev = prev.ea.rotation_matrix();
-    let pos_diff = mr2w_prev.transpose() * (cur.pos - prev.pos);
-    let pos_err = pos_diff - posepairf.delta_pos;
-    let pos_w = posepairf.pos_cov_r.transpose() * pos_err;
-    let mr2w_cur = cur.ea.rotation_matrix();
-    let expected = mr2w_prev * posepairf.delta_ea.rotation_matrix();
-    let error_rot = expected.transpose() * mr2w_cur;
-    let ea_err = error_rot.get_euler_angles();
-    let ea_w = posepairf.ea_cov_r.transpose() * ea_err;
-    [pos_w.x * posepairf.pos_cov_isigma.x, pos_w.y * posepairf.pos_cov_isigma.y,
-     pos_w.z * posepairf.pos_cov_isigma.z, ea_w.x * posepairf.ea_cov_isigma.x,
-     ea_w.y * posepairf.ea_cov_isigma.y, ea_w.z * posepairf.ea_cov_isigma.z]
-}))]
-#[derive(Clone)]
-struct PosePairF {
-    #[arael(ref = root.poses)]
-    prev: Ref<PoseF>,
-    #[arael(ref = root.poses)]
-    cur: Ref<PoseF>,
-    delta_pos: vect3f,
-    delta_ea: vect3f,
-    pos_cov_r: matrix3f,
-    pos_cov_isigma: vect3f,
-    ea_cov_r: matrix3f,
-    ea_cov_isigma: vect3f,
-    hb: CrossBlock<PoseF, PoseF, f32>,
-}
-
 #[arael::model]
 #[arael(root, f32)]
 #[derive(Clone)]
 pub struct PathF {
-    poses: refs::Vec<PoseF>,
-    landmarks: refs::Arena<PointLandmarkF>,
-    pose_pairs: std::vec::Vec<PosePairF>,
+    poses: refs::Vec<Pose<f32>>,
+    landmarks: refs::Arena<PointLandmark<f32>>,
+    pose_pairs: std::vec::Vec<PosePair<f32>>,
     drift_pos_isigma: f32,
     drift_ea_isigma: f32,
     drift_lm_isigma: f32,
@@ -248,151 +155,110 @@ pub struct PathF {
     frine_isigma_scale: f32,
 }
 
+/// The entity collections at any precision (`cast` is the identity at
+/// f32, the exact widening at f64).
+fn build_parts<T: Float>(scene: &Scene)
+    -> (refs::Vec<Pose<T>>, refs::Arena<PointLandmark<T>>, std::vec::Vec<PosePair<T>>)
+{
+    let c = |x: f32| T::from(x).unwrap();
+    let mut poses = refs::Vec::new();
+    for p in &scene.poses {
+        let g = p.gps.as_ref().unwrap();
+        poses.push(Pose {
+            pos: Param::new(p.init_pos.cast()),
+            ea: SimpleEulerAngleParam::new(p.init_ea.cast()),
+            prior_pos: p.init_pos.cast(),
+            prior_ea: p.init_ea.cast(),
+            gps_pos: g.pos.cast(),
+            gps_cov_r: g.cov_r.cast(),
+            gps_cov_isigma: g.cov_isigma.cast(),
+            tilt_roll: c(p.tilt_roll),
+            tilt_pitch: c(p.tilt_pitch),
+            hb_pose: SelfBlock::new(),
+        });
+    }
+    // Frines are grouped by landmark.
+    let mut per_lm: Vec<Vec<Frine<T>>> = (0..scene.landmarks_init.len())
+        .map(|_| Vec::new()).collect();
+    for f in &scene.frines {
+        let pose = poses.ref_at(f.pose);
+        per_lm[f.landmark as usize].push(Frine {
+            pose,
+            mf2r: f.mf2r.cast(),
+            camera_pos: f.camera_pos.cast(),
+            isigma: f.isigma.cast(),
+            hb: CrossBlock::new(),
+        });
+    }
+    let mut landmarks = refs::Arena::new();
+    for (i, init) in scene.landmarks_init.iter().enumerate() {
+        landmarks.push(PointLandmark {
+            pos: Param::new(init.cast()),
+            prior_pos: init.cast(),
+            frines: std::mem::take(&mut per_lm[i]),
+            hb_drift: SelfBlock::new(),
+        });
+    }
+    let mut pose_pairs = std::vec::Vec::new();
+    for o in &scene.odo {
+        pose_pairs.push(PosePair {
+            prev: poses.ref_at(o.prev),
+            cur: poses.ref_at(o.cur),
+            delta_pos: o.delta_pos.cast(),
+            delta_ea: o.delta_ea.cast(),
+            pos_cov_r: o.pos_cov_r.cast(),
+            pos_cov_isigma: o.pos_cov_isigma.cast(),
+            ea_cov_r: o.ea_cov_r.cast(),
+            ea_cov_isigma: o.ea_cov_isigma.cast(),
+            hb: CrossBlock::new(),
+        });
+    }
+    (poses, landmarks, pose_pairs)
+}
+
 pub fn build(scene: &Scene) -> Path {
-    let mut path = Path {
-        poses: refs::Vec::new(),
-        landmarks: refs::Arena::new(),
-        pose_pairs: std::vec::Vec::new(),
+    let (poses, landmarks, pose_pairs) = build_parts(scene);
+    Path {
+        poses, landmarks, pose_pairs,
         drift_pos_isigma: scene.drift_pos_isigma as f64,
         drift_ea_isigma: scene.drift_ea_isigma as f64,
         drift_lm_isigma: scene.drift_lm_isigma as f64,
         tilt_isigma: scene.tilt_isigma as f64,
         frine_isigma_scale: scene.frine_isigma_scale as f64,
-    };
-    for p in &scene.poses {
-        let g = p.gps.as_ref().unwrap();
-        path.poses.push(Pose {
-            pos: Param::new(vect3d::from(p.init_pos)),
-            ea: SimpleEulerAngleParam::new(vect3d::from(p.init_ea)),
-            prior_pos: vect3d::from(p.init_pos),
-            prior_ea: vect3d::from(p.init_ea),
-            gps_pos: vect3d::from(g.pos),
-            gps_cov_r: matrix3d::from(g.cov_r),
-            gps_cov_isigma: vect3d::from(g.cov_isigma),
-            tilt_roll: p.tilt_roll as f64,
-            tilt_pitch: p.tilt_pitch as f64,
-            hb_pose: SelfBlock::new(),
-        });
-    }
-    // Frines are grouped by landmark.
-    let mut per_lm: Vec<Vec<Frine>> = (0..scene.landmarks_init.len())
-        .map(|_| Vec::new()).collect();
-    for f in &scene.frines {
-        let pose = path.poses.ref_at(f.pose);
-        per_lm[f.landmark as usize].push(Frine {
-            pose,
-            mf2r: matrix3d::from(f.mf2r),
-            camera_pos: vect3d::from(f.camera_pos),
-            isigma: vect2d::new(f.isigma.x as f64, f.isigma.y as f64),
-            hb: CrossBlock::new(),
-        });
-    }
-    for (i, init) in scene.landmarks_init.iter().enumerate() {
-        path.landmarks.push(PointLandmark {
-            pos: Param::new(vect3d::from(*init)),
-            prior_pos: vect3d::from(*init),
-            frines: std::mem::take(&mut per_lm[i]),
-            hb_drift: SelfBlock::new(),
-        });
-    }
-    for o in &scene.odo {
-        let prev = path.poses.ref_at(o.prev);
-        let cur = path.poses.ref_at(o.cur);
-        path.pose_pairs.push(PosePair {
-            prev,
-            cur,
-            delta_pos: vect3d::from(o.delta_pos),
-            delta_ea: vect3d::from(o.delta_ea),
-            pos_cov_r: matrix3d::from(o.pos_cov_r),
-            pos_cov_isigma: vect3d::from(o.pos_cov_isigma),
-            ea_cov_r: matrix3d::from(o.ea_cov_r),
-            ea_cov_isigma: vect3d::from(o.ea_cov_isigma),
-            hb: CrossBlock::new(),
-        });
-    }
-    path
-}
-
-fn extract(path: &Path) -> Solution {
-    Solution {
-        poses: path.poses.iter()
-            .map(|p| (p.pos.value, matrix3d::rotation_from_euler_angles(p.ea.value).get_euler_angles()))
-            .collect(),
-        landmarks: path.landmarks.iter().map(|l| l.pos.value).collect(),
     }
 }
 
 fn build_f32(scene: &Scene) -> PathF {
-    let mut path = PathF {
-        poses: refs::Vec::new(),
-        landmarks: refs::Arena::new(),
-        pose_pairs: std::vec::Vec::new(),
+    let (poses, landmarks, pose_pairs) = build_parts(scene);
+    PathF {
+        poses, landmarks, pose_pairs,
         drift_pos_isigma: scene.drift_pos_isigma,
         drift_ea_isigma: scene.drift_ea_isigma,
         drift_lm_isigma: scene.drift_lm_isigma,
         tilt_isigma: scene.tilt_isigma,
         frine_isigma_scale: scene.frine_isigma_scale,
-    };
-    for p in &scene.poses {
-        let g = p.gps.as_ref().unwrap();
-        path.poses.push(PoseF {
-            pos: Param::new(p.init_pos),
-            ea: SimpleEulerAngleParam::new(p.init_ea),
-            prior_pos: p.init_pos,
-            prior_ea: p.init_ea,
-            gps_pos: g.pos,
-            gps_cov_r: g.cov_r,
-            gps_cov_isigma: g.cov_isigma,
-            tilt_roll: p.tilt_roll,
-            tilt_pitch: p.tilt_pitch,
-            hb_pose: SelfBlock::new(),
-        });
     }
-    let mut per_lm: Vec<Vec<FrineF>> = (0..scene.landmarks_init.len()).map(|_| Vec::new()).collect();
-    for f in &scene.frines {
-        let pose = path.poses.ref_at(f.pose);
-        per_lm[f.landmark as usize].push(FrineF {
-            pose,
-            mf2r: f.mf2r,
-            camera_pos: f.camera_pos,
-            isigma: f.isigma,
-            hb: CrossBlock::new(),
-        });
+}
+
+fn extract_parts<T: Float>(
+    poses: &refs::Vec<Pose<T>>,
+    landmarks: &refs::Arena<PointLandmark<T>>,
+) -> Solution {
+    Solution {
+        poses: poses.iter()
+            .map(|p| (p.pos.value.cast(),
+                matrix3::rotation_from_euler_angles(p.ea.value).get_euler_angles().cast()))
+            .collect(),
+        landmarks: landmarks.iter().map(|l| l.pos.value.cast()).collect(),
     }
-    for (i, init) in scene.landmarks_init.iter().enumerate() {
-        path.landmarks.push(PointLandmarkF {
-            pos: Param::new(*init),
-            prior_pos: *init,
-            frines: std::mem::take(&mut per_lm[i]),
-            hb_drift: SelfBlock::new(),
-        });
-    }
-    for o in &scene.odo {
-        let prev = path.poses.ref_at(o.prev);
-        let cur = path.poses.ref_at(o.cur);
-        path.pose_pairs.push(PosePairF {
-            prev,
-            cur,
-            delta_pos: o.delta_pos,
-            delta_ea: o.delta_ea,
-            pos_cov_r: o.pos_cov_r,
-            pos_cov_isigma: o.pos_cov_isigma,
-            ea_cov_r: o.ea_cov_r,
-            ea_cov_isigma: o.ea_cov_isigma,
-            hb: CrossBlock::new(),
-        });
-    }
-    path
+}
+
+fn extract(path: &Path) -> Solution {
+    extract_parts(&path.poses, &path.landmarks)
 }
 
 fn extract_f32(path: &PathF) -> Solution {
-    Solution {
-        poses: path.poses.iter()
-            .map(|p| (vect3d::from(p.pos.value),
-                vect3d::from(matrix3f::rotation_from_euler_angles(p.ea.value).get_euler_angles())))
-            .collect(),
-        landmarks: path.landmarks.iter().map(|l| vect3d::from(l.pos.value)).collect(),
-    }
+    extract_parts(&path.poses, &path.landmarks)
 }
 
 // The plain fixed schedule with a problem-appropriate initial damping is
