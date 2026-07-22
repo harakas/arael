@@ -17,12 +17,13 @@
 #[path = "../g2o3.rs"]
 mod g2o3;
 
-use arael::matrix::{matrix3d, matrix3f};
+use arael::matrix::{matrix3, matrix3d, matrix3f};
 use arael::model::{
     CrossBlock, EulerAngleParam, Param, QuaternionParam, SelfBlock, SimpleEulerAngleParam,
 };
 use arael::refs::{self, Ref};
-use arael::vect::{vect3d, vect3f};
+use arael::utils::Float;
+use arael::vect::{vect3, vect3d};
 use g2o3::{aligned_rmse3, load3, matrix_to_quat, quat_to_matrix, reference_cost3, Dataset3, Pose3In};
 
 // Same LM knobs as the main arael 3D runner (arael_runner.rs::cfg64_with_lambda),
@@ -55,6 +56,10 @@ fn lambda0_3d() -> f64 {
     std::env::var("ARAEL_LAMBDA0").ok().and_then(|v| v.parse().ok()).unwrap_or(1e-10)
 }
 
+// Each parameterization is one generic model (the pose's rotation
+// primitive is the ONLY difference); the f64 and f32 roots instantiate
+// it. Bodies are shared; builders are generic with a per-pose closure.
+
 // ===================================================================== Simple
 
 #[arael::model]
@@ -69,13 +74,13 @@ fn lambda0_3d() -> f64 {
      s[0].z / denom,
      s[1].x / denom]
 }))]
-struct SPose3 {
-    pos: Param<vect3d>,
-    ea: SimpleEulerAngleParam<f64>,
-    prior: vect3d,
-    prior_rot_t: matrix3d,
+struct SPose3<T: Float> {
+    pos: Param<vect3<T>>,
+    ea: SimpleEulerAngleParam<T>,
+    prior: vect3<T>,
+    prior_rot_t: matrix3<T>,
     has_prior: bool,
-    hb: SelfBlock<SPose3>,
+    hb: SelfBlock<SPose3<T>, T>,
 }
 
 #[arael::model]
@@ -90,55 +95,66 @@ struct SPose3 {
     let wr = sedge3.u_rr * rrot;
     [wt.x, wt.y, wt.z, wr.x, wr.y, wr.z]
 }))]
-struct SEdge3 {
+struct SEdge3<T: Float> {
     #[arael(ref = root.poses)]
-    a: Ref<SPose3>,
+    a: Ref<SPose3<T>>,
     #[arael(ref = root.poses)]
-    b: Ref<SPose3>,
-    dt: vect3d,
-    rmeas_t: matrix3d,
-    u_tt: matrix3d,
-    u_tr: matrix3d,
-    u_rr: matrix3d,
-    hb: CrossBlock<SPose3, SPose3>,
+    b: Ref<SPose3<T>>,
+    dt: vect3<T>,
+    rmeas_t: matrix3<T>,
+    u_tt: matrix3<T>,
+    u_tr: matrix3<T>,
+    u_rr: matrix3<T>,
+    hb: CrossBlock<SPose3<T>, SPose3<T>, T>,
 }
 
 #[arael::model]
 #[arael(root)]
 struct SGraph3 {
-    poses: refs::Vec<SPose3>,
-    edges: std::vec::Vec<SEdge3>,
+    poses: refs::Vec<SPose3<f64>>,
+    edges: std::vec::Vec<SEdge3<f64>>,
 }
 
-fn build_s(ds: &Dataset3) -> SGraph3 {
-    let mut g = SGraph3 { poses: refs::Vec::new(), edges: std::vec::Vec::new() };
+#[arael::model]
+#[arael(root, f32)]
+struct SGraph3F {
+    poses: refs::Vec<SPose3<f32>>,
+    edges: std::vec::Vec<SEdge3<f32>>,
+}
+
+fn build_s_parts<T: Float>(ds: &Dataset3)
+    -> (refs::Vec<SPose3<T>>, std::vec::Vec<SEdge3<T>>)
+{
+    let mut poses = refs::Vec::new();
     for (i, p) in ds.poses.iter().enumerate() {
         let rot = p.rot();
-        g.poses.push(SPose3 {
-            pos: Param::new(p.t),
-            ea: SimpleEulerAngleParam::new(rot.get_euler_angles()),
-            prior: p.t,
-            prior_rot_t: rot.transpose(),
+        poses.push(SPose3 {
+            pos: Param::new(p.t.cast()),
+            ea: SimpleEulerAngleParam::new(rot.get_euler_angles().cast()),
+            prior: p.t.cast(),
+            prior_rot_t: rot.transpose().cast(),
             has_prior: i == 0,
             hb: SelfBlock::new(),
         });
     }
+    let mut edges = std::vec::Vec::new();
     for e in &ds.edges {
         let (u_tt, u_tr, u_rr) = e.u_blocks();
-        let a = g.poses.ref_at(e.a);
-        let b = g.poses.ref_at(e.b);
-        g.edges.push(SEdge3 {
-            a, b, dt: e.dt,
-            rmeas_t: quat_to_matrix(e.dq).transpose(),
-            u_tt, u_tr, u_rr,
+        edges.push(SEdge3 {
+            a: poses.ref_at(e.a),
+            b: poses.ref_at(e.b),
+            dt: e.dt.cast(),
+            rmeas_t: quat_to_matrix(e.dq).transpose().cast(),
+            u_tt: u_tt.cast(), u_tr: u_tr.cast(), u_rr: u_rr.cast(),
             hb: CrossBlock::new(),
         });
     }
-    g
+    (poses, edges)
 }
 
 fn run_s(ds: &Dataset3, lambda0: f64) -> RunOut {
-    let mut g = build_s(ds);
+    let (poses, edges) = build_s_parts(ds);
+    let mut g = SGraph3 { poses, edges };
     let mut params: Vec<f64> = Vec::new();
     g.serialize64(&mut params);
     let t0 = std::time::Instant::now();
@@ -152,6 +168,27 @@ fn run_s(ds: &Dataset3, lambda0: f64) -> RunOut {
         .map(|p| Pose3In {
             t: p.pos.value,
             q: matrix_to_quat(matrix3d::rotation_from_euler_angles(p.ea.value)),
+        })
+        .collect();
+    RunOut { solve_ms, first_ms, iters: result.iterations, accepted: result.accepted_iterations, poses }
+}
+
+fn run_s_f32(ds: &Dataset3, lambda0: f64) -> RunOut {
+    let (poses, edges) = build_s_parts(ds);
+    let mut g = SGraph3F { poses, edges };
+    let mut params: Vec<f32> = Vec::new();
+    g.serialize32(&mut params);
+    let t0 = std::time::Instant::now();
+    let _ = arael::simple_lm::solve_sparse_faer_f32(&params, &mut g, &cfg32(1, lambda0 as f32));
+    let first_ms = t0.elapsed().as_secs_f64() * 1e3;
+    let t0 = std::time::Instant::now();
+    let result = arael::simple_lm::solve_sparse_faer_f32(&params, &mut g, &cfg32(100, lambda0 as f32));
+    let solve_ms = t0.elapsed().as_secs_f64() * 1e3;
+    g.deserialize32(&result.x);
+    let poses = g.poses.iter()
+        .map(|p| Pose3In {
+            t: vect3d::from(p.pos.value),
+            q: matrix_to_quat(matrix3d::from(matrix3f::rotation_from_euler_angles(p.ea.value))),
         })
         .collect();
     RunOut { solve_ms, first_ms, iters: result.iterations, accepted: result.accepted_iterations, poses }
@@ -171,13 +208,13 @@ fn run_s(ds: &Dataset3, lambda0: f64) -> RunOut {
      s[0].z / denom,
      s[1].x / denom]
 }))]
-struct EPose3 {
-    pos: Param<vect3d>,
-    ea: EulerAngleParam<f64>,
-    prior: vect3d,
-    prior_rot_t: matrix3d,
+struct EPose3<T: Float> {
+    pos: Param<vect3<T>>,
+    ea: EulerAngleParam<T>,
+    prior: vect3<T>,
+    prior_rot_t: matrix3<T>,
     has_prior: bool,
-    hb: SelfBlock<EPose3>,
+    hb: SelfBlock<EPose3<T>, T>,
 }
 
 #[arael::model]
@@ -192,55 +229,66 @@ struct EPose3 {
     let wr = eedge3.u_rr * rrot;
     [wt.x, wt.y, wt.z, wr.x, wr.y, wr.z]
 }))]
-struct EEdge3 {
+struct EEdge3<T: Float> {
     #[arael(ref = root.poses)]
-    a: Ref<EPose3>,
+    a: Ref<EPose3<T>>,
     #[arael(ref = root.poses)]
-    b: Ref<EPose3>,
-    dt: vect3d,
-    rmeas_t: matrix3d,
-    u_tt: matrix3d,
-    u_tr: matrix3d,
-    u_rr: matrix3d,
-    hb: CrossBlock<EPose3, EPose3>,
+    b: Ref<EPose3<T>>,
+    dt: vect3<T>,
+    rmeas_t: matrix3<T>,
+    u_tt: matrix3<T>,
+    u_tr: matrix3<T>,
+    u_rr: matrix3<T>,
+    hb: CrossBlock<EPose3<T>, EPose3<T>, T>,
 }
 
 #[arael::model]
 #[arael(root)]
 struct EGraph3 {
-    poses: refs::Vec<EPose3>,
-    edges: std::vec::Vec<EEdge3>,
+    poses: refs::Vec<EPose3<f64>>,
+    edges: std::vec::Vec<EEdge3<f64>>,
 }
 
-fn build_e(ds: &Dataset3) -> EGraph3 {
-    let mut g = EGraph3 { poses: refs::Vec::new(), edges: std::vec::Vec::new() };
+#[arael::model]
+#[arael(root, f32)]
+struct EGraph3F {
+    poses: refs::Vec<EPose3<f32>>,
+    edges: std::vec::Vec<EEdge3<f32>>,
+}
+
+fn build_e_parts<T: Float>(ds: &Dataset3)
+    -> (refs::Vec<EPose3<T>>, std::vec::Vec<EEdge3<T>>)
+{
+    let mut poses = refs::Vec::new();
     for (i, p) in ds.poses.iter().enumerate() {
         let rot = p.rot();
-        g.poses.push(EPose3 {
-            pos: Param::new(p.t),
-            ea: EulerAngleParam::new(rot.get_euler_angles()),
-            prior: p.t,
-            prior_rot_t: rot.transpose(),
+        poses.push(EPose3 {
+            pos: Param::new(p.t.cast()),
+            ea: EulerAngleParam::new(rot.get_euler_angles().cast()),
+            prior: p.t.cast(),
+            prior_rot_t: rot.transpose().cast(),
             has_prior: i == 0,
             hb: SelfBlock::new(),
         });
     }
+    let mut edges = std::vec::Vec::new();
     for e in &ds.edges {
         let (u_tt, u_tr, u_rr) = e.u_blocks();
-        let a = g.poses.ref_at(e.a);
-        let b = g.poses.ref_at(e.b);
-        g.edges.push(EEdge3 {
-            a, b, dt: e.dt,
-            rmeas_t: quat_to_matrix(e.dq).transpose(),
-            u_tt, u_tr, u_rr,
+        edges.push(EEdge3 {
+            a: poses.ref_at(e.a),
+            b: poses.ref_at(e.b),
+            dt: e.dt.cast(),
+            rmeas_t: quat_to_matrix(e.dq).transpose().cast(),
+            u_tt: u_tt.cast(), u_tr: u_tr.cast(), u_rr: u_rr.cast(),
             hb: CrossBlock::new(),
         });
     }
-    g
+    (poses, edges)
 }
 
 fn run_e(ds: &Dataset3, lambda0: f64) -> RunOut {
-    let mut g = build_e(ds);
+    let (poses, edges) = build_e_parts(ds);
+    let mut g = EGraph3 { poses, edges };
     let mut params: Vec<f64> = Vec::new();
     g.serialize64(&mut params);
     let t0 = std::time::Instant::now();
@@ -254,6 +302,27 @@ fn run_e(ds: &Dataset3, lambda0: f64) -> RunOut {
         .map(|p| Pose3In {
             t: p.pos.value,
             q: matrix_to_quat(matrix3d::rotation_from_euler_angles(p.ea.value)),
+        })
+        .collect();
+    RunOut { solve_ms, first_ms, iters: result.iterations, accepted: result.accepted_iterations, poses }
+}
+
+fn run_e_f32(ds: &Dataset3, lambda0: f64) -> RunOut {
+    let (poses, edges) = build_e_parts(ds);
+    let mut g = EGraph3F { poses, edges };
+    let mut params: Vec<f32> = Vec::new();
+    g.serialize32(&mut params);
+    let t0 = std::time::Instant::now();
+    let _ = arael::simple_lm::solve_sparse_faer_f32(&params, &mut g, &cfg32(1, lambda0 as f32));
+    let first_ms = t0.elapsed().as_secs_f64() * 1e3;
+    let t0 = std::time::Instant::now();
+    let result = arael::simple_lm::solve_sparse_faer_f32(&params, &mut g, &cfg32(100, lambda0 as f32));
+    let solve_ms = t0.elapsed().as_secs_f64() * 1e3;
+    g.deserialize32(&result.x);
+    let poses = g.poses.iter()
+        .map(|p| Pose3In {
+            t: vect3d::from(p.pos.value),
+            q: matrix_to_quat(matrix3d::from(matrix3f::rotation_from_euler_angles(p.ea.value))),
         })
         .collect();
     RunOut { solve_ms, first_ms, iters: result.iterations, accepted: result.accepted_iterations, poses }
@@ -273,13 +342,13 @@ fn run_e(ds: &Dataset3, lambda0: f64) -> RunOut {
      s[0].z / denom,
      s[1].x / denom]
 }))]
-struct QPose3 {
-    pos: Param<vect3d>,
-    ea: QuaternionParam<f64>,
-    prior: vect3d,
-    prior_rot_t: matrix3d,
+struct QPose3<T: Float> {
+    pos: Param<vect3<T>>,
+    ea: QuaternionParam<T>,
+    prior: vect3<T>,
+    prior_rot_t: matrix3<T>,
     has_prior: bool,
-    hb: SelfBlock<QPose3>,
+    hb: SelfBlock<QPose3<T>, T>,
 }
 
 #[arael::model]
@@ -294,57 +363,68 @@ struct QPose3 {
     let wr = qedge3.u_rr * rrot;
     [wt.x, wt.y, wt.z, wr.x, wr.y, wr.z]
 }))]
-struct QEdge3 {
+struct QEdge3<T: Float> {
     #[arael(ref = root.poses)]
-    a: Ref<QPose3>,
+    a: Ref<QPose3<T>>,
     #[arael(ref = root.poses)]
-    b: Ref<QPose3>,
-    dt: vect3d,
-    rmeas_t: matrix3d,
-    u_tt: matrix3d,
-    u_tr: matrix3d,
-    u_rr: matrix3d,
-    hb: CrossBlock<QPose3, QPose3>,
+    b: Ref<QPose3<T>>,
+    dt: vect3<T>,
+    rmeas_t: matrix3<T>,
+    u_tt: matrix3<T>,
+    u_tr: matrix3<T>,
+    u_rr: matrix3<T>,
+    hb: CrossBlock<QPose3<T>, QPose3<T>, T>,
 }
 
 #[arael::model]
 #[arael(root)]
 struct QGraph3 {
-    poses: refs::Vec<QPose3>,
-    edges: std::vec::Vec<QEdge3>,
+    poses: refs::Vec<QPose3<f64>>,
+    edges: std::vec::Vec<QEdge3<f64>>,
 }
 
-fn build_q(ds: &Dataset3) -> QGraph3 {
-    let mut g = QGraph3 { poses: refs::Vec::new(), edges: std::vec::Vec::new() };
+#[arael::model]
+#[arael(root, f32)]
+struct QGraph3F {
+    poses: refs::Vec<QPose3<f32>>,
+    edges: std::vec::Vec<QEdge3<f32>>,
+}
+
+fn build_q_parts<T: Float>(ds: &Dataset3)
+    -> (refs::Vec<QPose3<T>>, std::vec::Vec<QEdge3<T>>)
+{
+    let mut poses = refs::Vec::new();
     for (i, p) in ds.poses.iter().enumerate() {
         let rot = p.rot();
-        g.poses.push(QPose3 {
-            pos: Param::new(p.t),
+        poses.push(QPose3 {
+            pos: Param::new(p.t.cast()),
             // Same initial orientation as the other two (euler extraction),
             // routed through the quaternion reference.
-            ea: QuaternionParam::from_euler_angles(rot.get_euler_angles()),
-            prior: p.t,
-            prior_rot_t: rot.transpose(),
+            ea: QuaternionParam::from_euler_angles(rot.get_euler_angles().cast()),
+            prior: p.t.cast(),
+            prior_rot_t: rot.transpose().cast(),
             has_prior: i == 0,
             hb: SelfBlock::new(),
         });
     }
+    let mut edges = std::vec::Vec::new();
     for e in &ds.edges {
         let (u_tt, u_tr, u_rr) = e.u_blocks();
-        let a = g.poses.ref_at(e.a);
-        let b = g.poses.ref_at(e.b);
-        g.edges.push(QEdge3 {
-            a, b, dt: e.dt,
-            rmeas_t: quat_to_matrix(e.dq).transpose(),
-            u_tt, u_tr, u_rr,
+        edges.push(QEdge3 {
+            a: poses.ref_at(e.a),
+            b: poses.ref_at(e.b),
+            dt: e.dt.cast(),
+            rmeas_t: quat_to_matrix(e.dq).transpose().cast(),
+            u_tt: u_tt.cast(), u_tr: u_tr.cast(), u_rr: u_rr.cast(),
             hb: CrossBlock::new(),
         });
     }
-    g
+    (poses, edges)
 }
 
 fn run_q(ds: &Dataset3, lambda0: f64) -> RunOut {
-    let mut g = build_q(ds);
+    let (poses, edges) = build_q_parts(ds);
+    let mut g = QGraph3 { poses, edges };
     let mut params: Vec<f64> = Vec::new();
     g.serialize64(&mut params);
     let t0 = std::time::Instant::now();
@@ -365,296 +445,9 @@ fn run_q(ds: &Dataset3, lambda0: f64) -> RunOut {
     RunOut { solve_ms, first_ms, iters: result.iterations, accepted: result.accepted_iterations, poses }
 }
 
-// ================================================================= Simple f32
-
-#[arael::model]
-#[arael(constraint(hb, guard = self.has_prior, {
-    let rerr = spose3f.prior_rot_t * spose3f.ea.rotation_matrix();
-    let s = rerr - rerr.transpose();
-    let denom = safe_sqrt(rerr[0].x + rerr[1].y + rerr[2].z + 1.0);
-    [spose3f.pos.x - spose3f.prior.x,
-     spose3f.pos.y - spose3f.prior.y,
-     spose3f.pos.z - spose3f.prior.z,
-     s[2].y / denom,
-     s[0].z / denom,
-     s[1].x / denom]
-}))]
-struct SPose3F {
-    pos: Param<vect3f>,
-    ea: SimpleEulerAngleParam<f32>,
-    prior: vect3f,
-    prior_rot_t: matrix3f,
-    has_prior: bool,
-    hb: SelfBlock<SPose3F, f32>,
-}
-
-#[arael::model]
-#[arael(constraint(hb, {
-    let ra = a.ea.rotation_matrix();
-    let rerr = sedge3f.rmeas_t * (ra.transpose() * b.ea.rotation_matrix());
-    let s = rerr - rerr.transpose();
-    let denom = safe_sqrt(rerr[0].x + rerr[1].y + rerr[2].z + 1.0);
-    let rrot = vect3sym::from_components(s[2].y / denom, s[0].z / denom, s[1].x / denom);
-    let terr = ra.transpose() * (b.pos - a.pos) - sedge3f.dt;
-    let wt = sedge3f.u_tt * terr + sedge3f.u_tr * rrot;
-    let wr = sedge3f.u_rr * rrot;
-    [wt.x, wt.y, wt.z, wr.x, wr.y, wr.z]
-}))]
-struct SEdge3F {
-    #[arael(ref = root.poses)]
-    a: Ref<SPose3F>,
-    #[arael(ref = root.poses)]
-    b: Ref<SPose3F>,
-    dt: vect3f,
-    rmeas_t: matrix3f,
-    u_tt: matrix3f,
-    u_tr: matrix3f,
-    u_rr: matrix3f,
-    hb: CrossBlock<SPose3F, SPose3F, f32>,
-}
-
-#[arael::model]
-#[arael(root, f32)]
-struct SGraph3F {
-    poses: refs::Vec<SPose3F>,
-    edges: std::vec::Vec<SEdge3F>,
-}
-
-// ================================================================== Euler f32
-
-#[arael::model]
-#[arael(constraint(hb, guard = self.has_prior, {
-    let rerr = epose3f.prior_rot_t * epose3f.ea.rotation_matrix();
-    let s = rerr - rerr.transpose();
-    let denom = safe_sqrt(rerr[0].x + rerr[1].y + rerr[2].z + 1.0);
-    [epose3f.pos.x - epose3f.prior.x,
-     epose3f.pos.y - epose3f.prior.y,
-     epose3f.pos.z - epose3f.prior.z,
-     s[2].y / denom,
-     s[0].z / denom,
-     s[1].x / denom]
-}))]
-struct EPose3F {
-    pos: Param<vect3f>,
-    ea: EulerAngleParam<f32>,
-    prior: vect3f,
-    prior_rot_t: matrix3f,
-    has_prior: bool,
-    hb: SelfBlock<EPose3F, f32>,
-}
-
-#[arael::model]
-#[arael(constraint(hb, {
-    let ra = a.ea.rotation_matrix();
-    let rerr = eedge3f.rmeas_t * (ra.transpose() * b.ea.rotation_matrix());
-    let s = rerr - rerr.transpose();
-    let denom = safe_sqrt(rerr[0].x + rerr[1].y + rerr[2].z + 1.0);
-    let rrot = vect3sym::from_components(s[2].y / denom, s[0].z / denom, s[1].x / denom);
-    let terr = ra.transpose() * (b.pos - a.pos) - eedge3f.dt;
-    let wt = eedge3f.u_tt * terr + eedge3f.u_tr * rrot;
-    let wr = eedge3f.u_rr * rrot;
-    [wt.x, wt.y, wt.z, wr.x, wr.y, wr.z]
-}))]
-struct EEdge3F {
-    #[arael(ref = root.poses)]
-    a: Ref<EPose3F>,
-    #[arael(ref = root.poses)]
-    b: Ref<EPose3F>,
-    dt: vect3f,
-    rmeas_t: matrix3f,
-    u_tt: matrix3f,
-    u_tr: matrix3f,
-    u_rr: matrix3f,
-    hb: CrossBlock<EPose3F, EPose3F, f32>,
-}
-
-#[arael::model]
-#[arael(root, f32)]
-struct EGraph3F {
-    poses: refs::Vec<EPose3F>,
-    edges: std::vec::Vec<EEdge3F>,
-}
-
-// ============================================================= Quaternion f32
-
-#[arael::model]
-#[arael(constraint(hb, guard = self.has_prior, {
-    let rerr = qpose3f.prior_rot_t * qpose3f.ea.rotation_matrix();
-    let s = rerr - rerr.transpose();
-    let denom = safe_sqrt(rerr[0].x + rerr[1].y + rerr[2].z + 1.0);
-    [qpose3f.pos.x - qpose3f.prior.x,
-     qpose3f.pos.y - qpose3f.prior.y,
-     qpose3f.pos.z - qpose3f.prior.z,
-     s[2].y / denom,
-     s[0].z / denom,
-     s[1].x / denom]
-}))]
-struct QPose3F {
-    pos: Param<vect3f>,
-    ea: QuaternionParam<f32>,
-    prior: vect3f,
-    prior_rot_t: matrix3f,
-    has_prior: bool,
-    hb: SelfBlock<QPose3F, f32>,
-}
-
-#[arael::model]
-#[arael(constraint(hb, {
-    let ra = a.ea.rotation_matrix();
-    let rerr = qedge3f.rmeas_t * (ra.transpose() * b.ea.rotation_matrix());
-    let s = rerr - rerr.transpose();
-    let denom = safe_sqrt(rerr[0].x + rerr[1].y + rerr[2].z + 1.0);
-    let rrot = vect3sym::from_components(s[2].y / denom, s[0].z / denom, s[1].x / denom);
-    let terr = ra.transpose() * (b.pos - a.pos) - qedge3f.dt;
-    let wt = qedge3f.u_tt * terr + qedge3f.u_tr * rrot;
-    let wr = qedge3f.u_rr * rrot;
-    [wt.x, wt.y, wt.z, wr.x, wr.y, wr.z]
-}))]
-struct QEdge3F {
-    #[arael(ref = root.poses)]
-    a: Ref<QPose3F>,
-    #[arael(ref = root.poses)]
-    b: Ref<QPose3F>,
-    dt: vect3f,
-    rmeas_t: matrix3f,
-    u_tt: matrix3f,
-    u_tr: matrix3f,
-    u_rr: matrix3f,
-    hb: CrossBlock<QPose3F, QPose3F, f32>,
-}
-
-#[arael::model]
-#[arael(root, f32)]
-struct QGraph3F {
-    poses: refs::Vec<QPose3F>,
-    edges: std::vec::Vec<QEdge3F>,
-}
-
-// f32 builders + runners. The dataset is f64; cast per-pose/edge to f32.
-
-fn build_s_f32(ds: &Dataset3) -> SGraph3F {
-    let mut g = SGraph3F { poses: refs::Vec::new(), edges: std::vec::Vec::new() };
-    for (i, p) in ds.poses.iter().enumerate() {
-        let rot = p.rot();
-        g.poses.push(SPose3F {
-            pos: Param::new(vect3f::from(p.t)),
-            ea: SimpleEulerAngleParam::new(vect3f::from(rot.get_euler_angles())),
-            prior: vect3f::from(p.t),
-            prior_rot_t: matrix3f::from(rot.transpose()),
-            has_prior: i == 0,
-            hb: SelfBlock::new(),
-        });
-    }
-    for e in &ds.edges {
-        let (u_tt, u_tr, u_rr) = e.u_blocks();
-        let a = g.poses.ref_at(e.a);
-        let b = g.poses.ref_at(e.b);
-        g.edges.push(SEdge3F {
-            a, b, dt: vect3f::from(e.dt),
-            rmeas_t: matrix3f::from(quat_to_matrix(e.dq).transpose()),
-            u_tt: matrix3f::from(u_tt), u_tr: matrix3f::from(u_tr), u_rr: matrix3f::from(u_rr),
-            hb: CrossBlock::new(),
-        });
-    }
-    g
-}
-
-fn build_e_f32(ds: &Dataset3) -> EGraph3F {
-    let mut g = EGraph3F { poses: refs::Vec::new(), edges: std::vec::Vec::new() };
-    for (i, p) in ds.poses.iter().enumerate() {
-        let rot = p.rot();
-        g.poses.push(EPose3F {
-            pos: Param::new(vect3f::from(p.t)),
-            ea: EulerAngleParam::new(vect3f::from(rot.get_euler_angles())),
-            prior: vect3f::from(p.t),
-            prior_rot_t: matrix3f::from(rot.transpose()),
-            has_prior: i == 0,
-            hb: SelfBlock::new(),
-        });
-    }
-    for e in &ds.edges {
-        let (u_tt, u_tr, u_rr) = e.u_blocks();
-        let a = g.poses.ref_at(e.a);
-        let b = g.poses.ref_at(e.b);
-        g.edges.push(EEdge3F {
-            a, b, dt: vect3f::from(e.dt),
-            rmeas_t: matrix3f::from(quat_to_matrix(e.dq).transpose()),
-            u_tt: matrix3f::from(u_tt), u_tr: matrix3f::from(u_tr), u_rr: matrix3f::from(u_rr),
-            hb: CrossBlock::new(),
-        });
-    }
-    g
-}
-
-fn build_q_f32(ds: &Dataset3) -> QGraph3F {
-    let mut g = QGraph3F { poses: refs::Vec::new(), edges: std::vec::Vec::new() };
-    for (i, p) in ds.poses.iter().enumerate() {
-        let rot = p.rot();
-        g.poses.push(QPose3F {
-            pos: Param::new(vect3f::from(p.t)),
-            ea: QuaternionParam::from_euler_angles(vect3f::from(rot.get_euler_angles())),
-            prior: vect3f::from(p.t),
-            prior_rot_t: matrix3f::from(rot.transpose()),
-            has_prior: i == 0,
-            hb: SelfBlock::new(),
-        });
-    }
-    for e in &ds.edges {
-        let (u_tt, u_tr, u_rr) = e.u_blocks();
-        let a = g.poses.ref_at(e.a);
-        let b = g.poses.ref_at(e.b);
-        g.edges.push(QEdge3F {
-            a, b, dt: vect3f::from(e.dt),
-            rmeas_t: matrix3f::from(quat_to_matrix(e.dq).transpose()),
-            u_tt: matrix3f::from(u_tt), u_tr: matrix3f::from(u_tr), u_rr: matrix3f::from(u_rr),
-            hb: CrossBlock::new(),
-        });
-    }
-    g
-}
-
-fn run_s_f32(ds: &Dataset3, lambda0: f64) -> RunOut {
-    let mut g = build_s_f32(ds);
-    let mut params: Vec<f32> = Vec::new();
-    g.serialize32(&mut params);
-    let t0 = std::time::Instant::now();
-    let _ = arael::simple_lm::solve_sparse_faer_f32(&params, &mut g, &cfg32(1, lambda0 as f32));
-    let first_ms = t0.elapsed().as_secs_f64() * 1e3;
-    let t0 = std::time::Instant::now();
-    let result = arael::simple_lm::solve_sparse_faer_f32(&params, &mut g, &cfg32(100, lambda0 as f32));
-    let solve_ms = t0.elapsed().as_secs_f64() * 1e3;
-    g.deserialize32(&result.x);
-    let poses = g.poses.iter()
-        .map(|p| Pose3In {
-            t: vect3d::from(p.pos.value),
-            q: matrix_to_quat(matrix3d::from(matrix3f::rotation_from_euler_angles(p.ea.value))),
-        })
-        .collect();
-    RunOut { solve_ms, first_ms, iters: result.iterations, accepted: result.accepted_iterations, poses }
-}
-
-fn run_e_f32(ds: &Dataset3, lambda0: f64) -> RunOut {
-    let mut g = build_e_f32(ds);
-    let mut params: Vec<f32> = Vec::new();
-    g.serialize32(&mut params);
-    let t0 = std::time::Instant::now();
-    let _ = arael::simple_lm::solve_sparse_faer_f32(&params, &mut g, &cfg32(1, lambda0 as f32));
-    let first_ms = t0.elapsed().as_secs_f64() * 1e3;
-    let t0 = std::time::Instant::now();
-    let result = arael::simple_lm::solve_sparse_faer_f32(&params, &mut g, &cfg32(100, lambda0 as f32));
-    let solve_ms = t0.elapsed().as_secs_f64() * 1e3;
-    g.deserialize32(&result.x);
-    let poses = g.poses.iter()
-        .map(|p| Pose3In {
-            t: vect3d::from(p.pos.value),
-            q: matrix_to_quat(matrix3d::from(matrix3f::rotation_from_euler_angles(p.ea.value))),
-        })
-        .collect();
-    RunOut { solve_ms, first_ms, iters: result.iterations, accepted: result.accepted_iterations, poses }
-}
-
 fn run_q_f32(ds: &Dataset3, lambda0: f64) -> RunOut {
-    let mut g = build_q_f32(ds);
+    let (poses, edges) = build_q_parts(ds);
+    let mut g = QGraph3F { poses, edges };
     let mut params: Vec<f32> = Vec::new();
     g.serialize32(&mut params);
     let t0 = std::time::Instant::now();
