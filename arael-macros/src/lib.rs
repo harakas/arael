@@ -1204,19 +1204,37 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
         _ => return Err(syn::Error::new_spanned(input, "Model derive requires a struct")),
     };
 
-    // A generic struct's block fields need explicit Model bounds: block
-    // Model impls exist per precision (that is the routing), so
-    // `SelfBlock<A<T>, ..., T>: Model` holds only at each concrete
-    // instantiation and the generated impls must say so.
+    // A generic struct's generated impls bound every walked field type on
+    // Model. Block Model impls exist per precision (that is the routing),
+    // so `SelfBlock<A<T>, ..., T>: Model` holds only at each concrete
+    // instantiation -- and the requirement must PROPAGATE: a collection of
+    // nested constraint structs (`Vec<Frine<T>>`) carries its element's
+    // block bounds in its own signature, so an owner naming the collection
+    // resolves them at its instantiation too.
     let mut generics = input.generics.clone();
-    if generics.type_params().next().is_some() {
+    if let Some(tp) = input.generics.type_params().next() {
+        let scalar = tp.ident.to_string();
+        let mentions_scalar = |ty: &syn::Type| {
+            quote!(#ty).into_iter().any(|t| token_stream_has_ident(t, &scalar))
+        };
         for field in fields {
-            let ty = if let Some((inner, _)) = extract_wrapper_inner(&field.ty, "Option") {
-                inner
-            } else {
-                &field.ty
-            };
-            if is_hessian_block_type(ty) {
+            match parse_arael_attr(&field.attrs)? {
+                Some(AraelAttr::Skip) | Some(AraelAttr::ConstraintIndex)
+                | Some(AraelAttr::Deriv { .. }) | Some(AraelAttr::Compute(_)) => continue,
+                _ => {}
+            }
+            // Bare scalar fields are excluded from the walks entirely.
+            if let syn::Type::Path(tp2) = &field.ty
+                && tp2.qself.is_none()
+                && tp2.path.segments.len() == 1
+                && tp2.path.segments[0].ident == scalar.as_str()
+                && matches!(tp2.path.segments[0].arguments, syn::PathArguments::None)
+                && !is_param_type(&field.ty)
+            {
+                continue;
+            }
+            let ty = &field.ty;
+            if mentions_scalar(ty) {
                 generics.make_where_clause().predicates.push(
                     syn::parse_quote! { #ty: arael::model::Model });
             }
@@ -2157,6 +2175,16 @@ fn generate_sym_impl(
             }
         }
     })
+}
+
+/// Whether a token tree contains the bare ident `name` at any depth.
+fn token_stream_has_ident(tt: proc_macro2::TokenTree, name: &str) -> bool {
+    match tt {
+        proc_macro2::TokenTree::Ident(id) => id == name,
+        proc_macro2::TokenTree::Group(g) =>
+            g.stream().into_iter().any(|t| token_stream_has_ident(t, name)),
+        _ => false,
+    }
 }
 
 /// Replace every occurrence of the bare ident `from` in a type's token

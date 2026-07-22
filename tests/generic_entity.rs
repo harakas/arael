@@ -43,11 +43,28 @@ struct Link<T: Float> {
     hb: CrossBlock<Pt<T>, Pt<T>, T>,
 }
 
-/// A unit-direction landmark (built-in component at `<T>`).
+/// A unit-direction landmark (built-in component at `<T>`) carrying
+/// nested cross-observations.
 #[arael::model]
 struct Lm<T: Float> {
     dir: UnitVecParam<T>,
+    obs: std::vec::Vec<LmObs<T>>,
     hb: SelfBlock<Lm<T>, T>,
+}
+
+/// Nested cross-observation: lives in a Vec ON the landmark and couples
+/// it to a point through a CrossBlock. The block's per-instantiation
+/// Model bound must propagate through `Vec<LmObs<T>>` into `Lm<T>`'s
+/// generated impl -- the owner names the collection, not the block.
+#[arael::model]
+#[arael(constraint(hb, parent = lm, {
+    [(lm.dir.unit.x * pt.pos.x + lm.dir.unit.y * pt.pos.y - lmobs.dot) * 0.01]
+}))]
+struct LmObs<T: Float> {
+    #[arael(ref = root.pts)]
+    pt: Ref<Pt<T>>,
+    dot: T,
+    hb: CrossBlock<Lm<T>, Pt<T>, T>,
 }
 
 /// Direction observation writing to the landmark's own block (the
@@ -121,8 +138,16 @@ macro_rules! build_world {
         }
         for k in 0..2 {
             let m = measured_dir(k);
+            // A weak nested cross-observation per landmark: dot of the
+            // direction's xy with the point's prior position.
+            let (tx, ty) = prior(k + 1);
             let lm = w.lms.push(Lm {
                 dir: UnitVecParam::new(vect3::new(1.0 as $t, 0.1 as $t, 0.0 as $t)),
+                obs: vec![LmObs {
+                    pt: pt_refs[k + 1],
+                    dot: (m.x * tx + m.y * ty) as $t,
+                    hb: CrossBlock::new(),
+                }],
                 hb: SelfBlock::new(),
             });
             w.dobs.push(DirObs {
@@ -169,13 +194,15 @@ fn f64_and_f32_roots_agree() {
             p64.pos.value.x, p64.pos.value.y, p32.pos.value.x, p32.pos.value.y);
     }
 
-    // The remote-block observations drive each landmark to its measured
-    // direction at both precisions.
+    // The remote-block observations drive each landmark near its measured
+    // direction (the weak nested cross-observation tugs it slightly), and
+    // the two precisions agree.
     for (k, (l64, l32)) in w64.lms.iter().zip(w32.lms.iter()).enumerate() {
         let m = measured_dir(k);
-        assert!((l64.dir.unit - m).norm() < 1e-6, "lm {k} f64 off target");
+        assert!((l64.dir.unit - m).norm() < 1e-2, "lm {k} f64 off target");
         let u32v = vect3f::new(l32.dir.unit.x, l32.dir.unit.y, l32.dir.unit.z);
-        let m32 = vect3f::new(m.x as f32, m.y as f32, m.z as f32);
-        assert!((u32v - m32).norm() < 1e-3, "lm {k} f32 off target");
+        let u64v = vect3f::new(l64.dir.unit.x as f32, l64.dir.unit.y as f32,
+            l64.dir.unit.z as f32);
+        assert!((u32v - u64v).norm() < 2e-3, "lm {k} f32 vs f64 disagree");
     }
 }
