@@ -1,4 +1,5 @@
-// arael BAL runners: identical model in f64 and f32.
+// arael BAL runners: one generic model, instantiated by the f64 and
+// f32 roots.
 //
 // Camera: 9 parameters -- world-to-camera rotation as an
 // EulerAngleParam (delta composed with a reference, re-centered per
@@ -12,24 +13,23 @@ use crate::bal::{CameraIn, Dataset};
 use arael::model::{CrossBlock, EulerAngleParam, Param, SelfBlock};
 use arael::quatern::{quaternd, quaternf};
 use arael::refs::{self, Ref};
-use arael::vect::{vect2d, vect2f, vect3d, vect3f};
-
-// ---------------------------------------------------------------- f64
+use arael::utils::Float;
+use arael::vect::{vect2, vect3, vect3d};
 
 #[arael::model]
 #[derive(Clone)]
-struct Camera {
-    t: Param<vect3d>,
-    ea: EulerAngleParam<f64>, // world-to-camera
-    intr: Param<vect3d>,      // (f, k1, k2)
-    hb: SelfBlock<Camera>,
+struct Camera<T: Float> {
+    t: Param<vect3<T>>,
+    ea: EulerAngleParam<T>, // world-to-camera
+    intr: Param<vect3<T>>,  // (f, k1, k2)
+    hb: SelfBlock<Camera<T>, T>,
 }
 
 #[arael::model]
 #[derive(Clone)]
-struct Point {
-    pos: Param<vect3d>,
-    hb: SelfBlock<Point>,
+struct Point<T: Float> {
+    pos: Param<vect3<T>>,
+    hb: SelfBlock<Point<T>, T>,
 }
 
 #[arael::model]
@@ -43,131 +43,72 @@ struct Point {
      cam.intr.x * d * py - obs.xy.y]
 }))]
 #[derive(Clone)]
-struct Obs {
+struct Obs<T: Float> {
     #[arael(ref = root.cameras)]
-    cam: Ref<Camera>,
+    cam: Ref<Camera<T>>,
     #[arael(ref = root.points)]
-    pt: Ref<Point>,
-    xy: vect2d,
-    hb: CrossBlock<Camera, Point>,
+    pt: Ref<Point<T>>,
+    xy: vect2<T>,
+    hb: CrossBlock<Camera<T>, Point<T>, T>,
 }
 
 #[arael::model]
 #[arael(root)]
 #[derive(Clone)]
 pub struct Scene {
-    cameras: refs::Vec<Camera>,
-    points: refs::Vec<Point>,
-    observations: std::vec::Vec<Obs>,
-}
-
-// ---------------------------------------------------------------- f32
-
-#[arael::model]
-#[derive(Clone)]
-struct CameraF {
-    t: Param<vect3f>,
-    ea: EulerAngleParam<f32>,
-    intr: Param<vect3f>,
-    hb: SelfBlock<CameraF, f32>,
-}
-
-#[arael::model]
-#[derive(Clone)]
-struct PointF {
-    pos: Param<vect3f>,
-    hb: SelfBlock<PointF, f32>,
-}
-
-#[arael::model]
-#[arael(constraint(hb, {
-    let pc = cam.ea.rotation_matrix() * pt.pos + cam.t;
-    let px = -pc.x / pc.z;
-    let py = -pc.y / pc.z;
-    let r2 = px * px + py * py;
-    let d = 1.0 + r2 * (cam.intr.y + cam.intr.z * r2);
-    [cam.intr.x * d * px - obsf.xy.x,
-     cam.intr.x * d * py - obsf.xy.y]
-}))]
-#[derive(Clone)]
-struct ObsF {
-    #[arael(ref = root.cameras)]
-    cam: Ref<CameraF>,
-    #[arael(ref = root.points)]
-    pt: Ref<PointF>,
-    xy: vect2f,
-    hb: CrossBlock<CameraF, PointF, f32>,
+    cameras: refs::Vec<Camera<f64>>,
+    points: refs::Vec<Point<f64>>,
+    observations: std::vec::Vec<Obs<f64>>,
 }
 
 #[arael::model]
 #[arael(root, f32)]
 #[derive(Clone)]
 pub struct SceneF {
-    cameras: refs::Vec<CameraF>,
-    points: refs::Vec<PointF>,
-    observations: std::vec::Vec<ObsF>,
+    cameras: refs::Vec<Camera<f32>>,
+    points: refs::Vec<Point<f32>>,
+    observations: std::vec::Vec<Obs<f32>>,
 }
 
 // ---------------------------------------------------------------- runners
 
-pub fn build_f64(ds: &Dataset) -> Scene {
-    let mut s = Scene {
-        cameras: refs::Vec::new(),
-        points: refs::Vec::new(),
-        observations: std::vec::Vec::new(),
-    };
+fn build_parts<T: Float>(ds: &Dataset)
+    -> (refs::Vec<Camera<T>>, refs::Vec<Point<T>>, std::vec::Vec<Obs<T>>)
+{
+    let c3 = |v: vect3d| -> vect3<T> { v.cast() };
+    let mut cameras = refs::Vec::new();
     for c in &ds.cameras {
-        s.cameras.push(Camera {
-            t: Param::new(c.t),
-            ea: EulerAngleParam::new(c.rot().get_euler_angles()),
-            intr: Param::new(vect3d::new(c.f, c.k1, c.k2)),
+        cameras.push(Camera {
+            t: Param::new(c3(c.t)),
+            ea: EulerAngleParam::new(c3(c.rot().get_euler_angles())),
+            intr: Param::new(c3(vect3d::new(c.f, c.k1, c.k2))),
             hb: SelfBlock::new(),
         });
     }
+    let mut points = refs::Vec::new();
     for p in &ds.points {
-        s.points.push(Point { pos: Param::new(*p), hb: SelfBlock::new() });
+        points.push(Point { pos: Param::new(c3(*p)), hb: SelfBlock::new() });
     }
+    let mut observations = std::vec::Vec::new();
     for o in &ds.observations {
-        let cam = s.cameras.ref_at(o.cam);
-        let pt = s.points.ref_at(o.point);
-        s.observations.push(Obs {
-            cam,
-            pt,
-            xy: o.xy,
+        observations.push(Obs {
+            cam: cameras.ref_at(o.cam),
+            pt: points.ref_at(o.point),
+            xy: o.xy.cast(),
             hb: CrossBlock::new(),
         });
     }
-    s
+    (cameras, points, observations)
+}
+
+pub fn build_f64(ds: &Dataset) -> Scene {
+    let (cameras, points, observations) = build_parts(ds);
+    Scene { cameras, points, observations }
 }
 
 fn build_f32(ds: &Dataset) -> SceneF {
-    let mut s = SceneF {
-        cameras: refs::Vec::new(),
-        points: refs::Vec::new(),
-        observations: std::vec::Vec::new(),
-    };
-    for c in &ds.cameras {
-        s.cameras.push(CameraF {
-            t: Param::new(vect3f::from(c.t)),
-            ea: EulerAngleParam::new(vect3f::from(c.rot().get_euler_angles())),
-            intr: Param::new(vect3f::new(c.f as f32, c.k1 as f32, c.k2 as f32)),
-            hb: SelfBlock::new(),
-        });
-    }
-    for p in &ds.points {
-        s.points.push(PointF { pos: Param::new(vect3f::from(*p)), hb: SelfBlock::new() });
-    }
-    for o in &ds.observations {
-        let cam = s.cameras.ref_at(o.cam);
-        let pt = s.points.ref_at(o.point);
-        s.observations.push(ObsF {
-            cam,
-            pt,
-            xy: vect2f::from(o.xy),
-            hb: CrossBlock::new(),
-        });
-    }
-    s
+    let (cameras, points, observations) = build_parts(ds);
+    SceneF { cameras, points, observations }
 }
 
 /// What the benchmark hands the pipeline: the problem, the damping it wants, and
