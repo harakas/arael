@@ -7,6 +7,6 @@ struct Item;
 fn main() {
     let mut items: refs::Vec<Item> = refs::Vec::new();
     items.push(Item);
-    let forged: Ref<Item> = Ref::new(0);
+    let forged: Ref<Item> = Ref::new_gen(0, 0);
     let _ = &items[forged];
 }

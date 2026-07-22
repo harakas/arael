@@ -193,7 +193,7 @@ fn build() -> World {
     for k in 0..N_LINES {
         for pi in [k % N_B, (k + 1) % N_B] {
             w.lobs.push(LineObs {
-                pose: w.poses_a.ref_at(pi),
+                pose: w.poses_b.ref_at(pi),
                 l: w.lines.ref_at(k),
                 d: 1.2,
                 hb: CrossBlock::new(),
