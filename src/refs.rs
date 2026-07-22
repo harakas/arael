@@ -691,6 +691,167 @@ struct Cell<T> {
     generation: u32,
 }
 
+/// Target size of one storage block. Blocks are a power-of-two count of
+/// cells, the largest that fits in this, so growth allocates a bounded
+/// amount whatever the element size.
+const BLOCK_TARGET_BYTES: usize = 64 * 1024;
+/// Fewest cells in a block, so a large element still gets a few per block.
+const MIN_BLOCK_SHIFT: u32 = 3;
+
+/// `log2` of the cells per block for this element type.
+fn block_shift<T>() -> u32 {
+    let size = std::mem::size_of::<Cell<T>>().max(1);
+    let mut shift = MIN_BLOCK_SHIFT;
+    while shift < 20 && (1usize << (shift + 1)) * size <= BLOCK_TARGET_BYTES {
+        shift += 1;
+    }
+    shift
+}
+
+/// Cell storage as fixed-size blocks rather than one growing run.
+///
+/// Growth allocates a block instead of reallocating and copying everything,
+/// so a large arena never pays a full copy and never needs the old and new
+/// storage live at once. Blocks are a power-of-two size, so addressing a
+/// cell is a shift and a mask.
+///
+/// `len` counts the cells handed out, not the cells allocated: a block is
+/// capacity, and a freshly allocated one does not make the arena look
+/// bigger. Blocks are never released -- an index range must not be reused
+/// by a later block, or the generations in it would restart and stale refs
+/// would match again.
+struct Blocks<T> {
+    blocks: std::vec::Vec<std::boxed::Box<[Cell<T>]>>,
+    len: usize,
+    shift: u32,
+}
+
+impl<T> Blocks<T> {
+    fn new() -> Self {
+        Blocks { blocks: std::vec::Vec::new(), len: 0, shift: block_shift::<T>() }
+    }
+
+    /// Storage with `1 << shift` cells per block.
+    fn with_shift(shift: u32) -> Self {
+        Blocks { blocks: std::vec::Vec::new(), len: 0, shift }
+    }
+
+    fn block_len(&self) -> usize { 1usize << self.shift }
+
+    fn len(&self) -> usize { self.len }
+
+    fn get(&self, i: usize) -> Option<&Cell<T>> {
+        if i >= self.len { return None; }
+        Some(&self.blocks[i >> self.shift][i & (self.block_len() - 1)])
+    }
+
+    fn get_mut(&mut self, i: usize) -> Option<&mut Cell<T>> {
+        if i >= self.len { return None; }
+        let (b, o) = (i >> self.shift, i & (self.block_len() - 1));
+        Some(&mut self.blocks[b][o])
+    }
+
+    /// Appends a cell, allocating a block when the last one is full.
+    fn push(&mut self, cell: Cell<T>) {
+        if self.len == self.blocks.len() * self.block_len() {
+            let g = cell.generation;
+            let block: std::vec::Vec<Cell<T>> = (0..self.block_len())
+                .map(|_| Cell { slot: Slot::Free { next: None }, generation: g })
+                .collect();
+            self.blocks.push(block.into_boxed_slice());
+        }
+        let i = self.len;
+        let (b, o) = (i >> self.shift, i & (self.block_len() - 1));
+        self.blocks[b][o] = cell;
+        self.len += 1;
+    }
+
+    /// Reserves room for `additional` more cells.
+    fn reserve(&mut self, additional: usize) {
+        let needed = self.len + additional;
+        let have = self.blocks.len() * self.block_len();
+        if needed > have {
+            let more = needed.div_ceil(self.block_len()) - self.blocks.len();
+            self.blocks.reserve(more);
+        }
+    }
+
+    /// Drops every live element and hands the cells back, keeping the blocks
+    /// as capacity.
+    fn clear(&mut self) {
+        for i in 0..self.len {
+            let (b, o) = (i >> self.shift, i & (self.block_len() - 1));
+            self.blocks[b][o].slot = Slot::Free { next: None };
+        }
+        self.len = 0;
+    }
+
+    fn iter(&self) -> BlockIter<'_, T> {
+        BlockIter { blocks: self.blocks.iter(), current: [].iter(), remaining: self.len }
+    }
+
+    fn iter_mut(&mut self) -> BlockIterMut<'_, T> {
+        BlockIterMut { blocks: self.blocks.iter_mut(), current: [].iter_mut(),
+                       remaining: self.len }
+    }
+}
+
+/// Walks the cells of a [`Blocks`] in index order, block by block.
+struct BlockIter<'a, T> {
+    blocks: std::slice::Iter<'a, std::boxed::Box<[Cell<T>]>>,
+    current: std::slice::Iter<'a, Cell<T>>,
+    remaining: usize,
+}
+
+impl<'a, T> Iterator for BlockIter<'a, T> {
+    type Item = &'a Cell<T>;
+    fn next(&mut self) -> Option<&'a Cell<T>> {
+        loop {
+            if self.remaining == 0 { return None; }
+            if let Some(c) = self.current.next() {
+                self.remaining -= 1;
+                return Some(c);
+            }
+            self.current = self.blocks.next()?.iter();
+        }
+    }
+
+    // Serialization needs an exact length up front (bincode refuses a
+    // sequence without one), and the walk knows it.
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
+    }
+}
+
+impl<T> ExactSizeIterator for BlockIter<'_, T> {}
+
+/// The mutable counterpart of [`BlockIter`].
+struct BlockIterMut<'a, T> {
+    blocks: std::slice::IterMut<'a, std::boxed::Box<[Cell<T>]>>,
+    current: std::slice::IterMut<'a, Cell<T>>,
+    remaining: usize,
+}
+
+impl<'a, T> Iterator for BlockIterMut<'a, T> {
+    type Item = &'a mut Cell<T>;
+    fn next(&mut self) -> Option<&'a mut Cell<T>> {
+        loop {
+            if self.remaining == 0 { return None; }
+            if let Some(c) = self.current.next() {
+                self.remaining -= 1;
+                return Some(c);
+            }
+            self.current = self.blocks.next()?.iter_mut();
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (self.remaining, Some(self.remaining))
+    }
+}
+
+impl<T> ExactSizeIterator for BlockIterMut<'_, T> {}
+
 /// Arena with stable `Ref`-based access: alloc/free without invalidating the
 /// `Ref`s to other elements.
 ///
@@ -708,7 +869,7 @@ struct Cell<T> {
 /// forever, but a stale `Ref` stays dead and fails loudly) when hunting
 /// use-after-remove bugs.
 pub struct Arena<T> {
-    slots: std::vec::Vec<Cell<T>>,
+    slots: Blocks<T>,
     free_head: Option<u32>,
     count: usize,
     reuse: bool,
@@ -718,9 +879,29 @@ pub struct Arena<T> {
 }
 
 impl<T> Arena<T> {
+    /// Creates an empty arena whose blocks hold `cells` elements each,
+    /// rounded up to a power of two (blocks are addressed by shift and mask).
+    ///
+    /// The default, from [`new`](Self::new), sizes a block to fit in 64 KB
+    /// for this element type. Set it larger to allocate less often, or
+    /// smaller when a lot of small arenas would each round up to a block
+    /// they never fill. It is fixed for the arena's life: it decides how an
+    /// index splits into block and offset, so changing it would move every
+    /// element.
+    pub fn with_block_size(cells: usize) -> Self {
+        let shift = cells.max(1).next_power_of_two().trailing_zeros();
+        Arena { slots: Blocks::with_shift(shift), free_head: None, count: 0,
+                reuse: true, base: next_generation_base() }
+    }
+
+    /// Cells per block. See [`with_block_size`](Self::with_block_size).
+    pub fn block_size(&self) -> usize {
+        self.slots.block_len()
+    }
+
     /// Creates an empty arena that reclaims freed slots (the default).
     pub fn new() -> Self {
-        Arena { slots: std::vec::Vec::new(), free_head: None, count: 0, reuse: true,
+        Arena { slots: Blocks::new(), free_head: None, count: 0, reuse: true,
                 base: next_generation_base() }
     }
 
@@ -730,13 +911,15 @@ impl<T> Arena<T> {
     /// with every insert -- for making use-after-remove bugs fail loud while
     /// debugging, not for production.
     pub fn no_reuse() -> Self {
-        Arena { slots: std::vec::Vec::new(), free_head: None, count: 0, reuse: false,
+        Arena { slots: Blocks::new(), free_head: None, count: 0, reuse: false,
                 base: next_generation_base() }
     }
 
     /// Creates an empty arena with room for at least `cap` slots.
     pub fn with_capacity(cap: usize) -> Self {
-        Arena { slots: std::vec::Vec::with_capacity(cap), free_head: None, count: 0, reuse: true,
+        let mut slots = Blocks::new();
+        slots.reserve(cap);
+        Arena { slots, free_head: None, count: 0, reuse: true,
                 base: next_generation_base() }
     }
 
@@ -744,8 +927,9 @@ impl<T> Arena<T> {
     pub fn from_vec(v: std::vec::Vec<T>) -> Self {
         let count = v.len();
         let base = next_generation_base();
-        Arena { slots: v.into_iter().map(|x| Cell { slot: Slot::Occupied(x), generation: base }).collect(),
-                free_head: None, count, reuse: true, base }
+        let mut slots = Blocks::new();
+        for x in v { slots.push(Cell { slot: Slot::Occupied(x), generation: base }); }
+        Arena { slots, free_head: None, count, reuse: true, base }
     }
 
     /// Reserves capacity for at least `additional` more slots.
@@ -759,14 +943,14 @@ impl<T> Arena<T> {
     pub fn push(&mut self, val: T) -> Ref<T> {
         if self.reuse {
             if let Some(idx) = self.free_head {
-                let next = match &self.slots[idx as usize].slot {
+                let next = match &self.slots.get(idx as usize).unwrap().slot {
                     Slot::Free { next } => *next,
                     Slot::Occupied(_) => unreachable!("free list points at an occupied slot"),
                 };
                 self.free_head = next;
-                self.slots[idx as usize].slot = Slot::Occupied(val);
+                self.slots.get_mut(idx as usize).unwrap().slot = Slot::Occupied(val);
                 self.count += 1;
-                return Ref::new_gen(idx, self.slots[idx as usize].generation);
+                return Ref::new_gen(idx, self.slots.get(idx as usize).unwrap().generation);
             }
         }
         let idx = self.slots.len() as u32;
@@ -774,7 +958,7 @@ impl<T> Arena<T> {
             "refs::Arena cannot hold more than {} slots", MAX_INDEX);
         self.slots.push(Cell { slot: Slot::Occupied(val), generation: self.base });
         self.count += 1;
-        Ref::new_gen(idx, self.slots[idx as usize].generation)
+        Ref::new_gen(idx, self.slots.get(idx as usize).unwrap().generation)
     }
 
     /// Removes the element at `r` and returns it, or `None` if already
@@ -804,10 +988,11 @@ impl<T> Arena<T> {
     /// element stays valid. Freed slots join the free list for reuse.
     pub fn retain(&mut self, mut f: impl FnMut(&T) -> bool) {
         for idx in 0..self.slots.len() {
-            let drop = matches!(&self.slots[idx].slot, Slot::Occupied(v) if !f(v));
+            let drop = matches!(&self.slots.get(idx).unwrap().slot, Slot::Occupied(v) if !f(v));
             if drop {
-                self.slots[idx].generation = (self.slots[idx].generation + 1) % GENERATIONS;
-                self.slots[idx].slot = Slot::Free { next: self.free_head };
+                let cell = self.slots.get_mut(idx).unwrap();
+                cell.generation = (cell.generation + 1) % GENERATIONS;
+                cell.slot = Slot::Free { next: self.free_head };
                 self.free_head = Some(idx as u32);
                 self.count -= 1;
             }
@@ -919,7 +1104,8 @@ impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for Arena<T> {
         // Generations come back as saved, so refs serialized with the arena
         // still resolve. A fresh base would invalidate every one of them.
         let base = next_generation_base();
-        let mut slots = std::vec::Vec::with_capacity(opts.len());
+        let mut slots = Blocks::new();
+        slots.reserve(opts.len());
         let mut free_head = None;
         for (o, generation) in opts {
             match o {
@@ -938,7 +1124,8 @@ impl<'de, T: serde::Deserialize<'de>> serde::Deserialize<'de> for Arena<T> {
 impl<T> ops::Index<Ref<T>> for Arena<T> {
     type Output = T;
     fn index(&self, r: Ref<T>) -> &T {
-        let cell = &self.slots[r.index() as usize];
+        let cell = self.slots.get(r.index() as usize)
+            .unwrap_or_else(|| panic!("Arena: index {} out of range", r.index()));
         if cell.generation != r.generation() { r.stale(cell.generation); }
         match &cell.slot {
             Slot::Occupied(v) => v,
@@ -949,8 +1136,10 @@ impl<T> ops::Index<Ref<T>> for Arena<T> {
 
 impl<T> ops::IndexMut<Ref<T>> for Arena<T> {
     fn index_mut(&mut self, r: Ref<T>) -> &mut T {
-        let cell = &mut self.slots[r.index() as usize];
-        if cell.generation != r.generation() { r.stale(cell.generation); }
+        let want = r.generation();
+        let cell = self.slots.get_mut(r.index() as usize)
+            .unwrap_or_else(|| panic!("Arena: index {} out of range", r.index()));
+        if cell.generation != want { r.stale(cell.generation); }
         match &mut cell.slot {
             Slot::Occupied(v) => v,
             Slot::Free { .. } => panic!("Arena: accessing removed slot"),
@@ -999,7 +1188,7 @@ impl<T> Default for Arena<T> {
 
 /// Iterator over references to the live elements of an [`Arena`].
 pub struct ArenaIter<'a, T> {
-    inner: std::slice::Iter<'a, Cell<T>>,
+    inner: BlockIter<'a, T>,
 }
 
 impl<'a, T> Iterator for ArenaIter<'a, T> {
@@ -1016,7 +1205,7 @@ impl<'a, T> Iterator for ArenaIter<'a, T> {
 
 /// Iterator over mutable references to the live elements of an [`Arena`].
 pub struct ArenaIterMut<'a, T> {
-    inner: std::slice::IterMut<'a, Cell<T>>,
+    inner: BlockIterMut<'a, T>,
 }
 
 impl<'a, T> Iterator for ArenaIterMut<'a, T> {
@@ -1034,7 +1223,7 @@ impl<'a, T> Iterator for ArenaIterMut<'a, T> {
 /// Iterator yielding `Ref<T>` for each live (non-removed) slot in an [`Arena`].
 pub struct ArenaRefIter<'a, T> {
     current: u32,
-    slots: &'a [Cell<T>],
+    slots: &'a Blocks<T>,
     _marker: PhantomData<T>,
 }
 
@@ -1044,8 +1233,9 @@ impl<'a, T> Iterator for ArenaRefIter<'a, T> {
         while (self.current as usize) < self.slots.len() {
             let idx = self.current;
             self.current += 1;
-            if matches!(self.slots[idx as usize].slot, Slot::Occupied(_)) {
-                return Some(Ref::new_gen(idx, self.slots[idx as usize].generation));
+            let cell = self.slots.get(idx as usize)?;
+            if matches!(cell.slot, Slot::Occupied(_)) {
+                return Some(Ref::new_gen(idx, cell.generation));
             }
         }
         None

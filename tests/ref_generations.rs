@@ -174,3 +174,94 @@ fn serde_roundtrip_keeps_refs_resolving() {
     assert_eq!(back.get(r1), Some(&20));
     assert_eq!(back.get(r0), None);
 }
+
+// ------------------------------------------------------------------ blocks
+// The arena stores cells in fixed-size blocks, so growth allocates a block
+// instead of copying everything into a larger run.
+
+#[test]
+fn arena_grows_past_many_blocks() {
+    // Enough elements to cross several blocks whatever the block size.
+    const N: usize = 200_000;
+    let mut a: refs::Arena<u64> = refs::Arena::new();
+    let rs: Vec<_> = (0..N as u64).map(|i| a.push(i)).collect();
+    assert_eq!(a.len(), N);
+    assert_eq!(a.slot_count(), N, "a block is capacity, not occupancy");
+    for (i, r) in rs.iter().enumerate() {
+        assert_eq!(a[*r], i as u64, "element {i} survived the growth");
+    }
+}
+
+#[test]
+fn arena_elements_do_not_move_when_it_grows() {
+    // A ref taken before the arena grew still names the same element after,
+    // across a block boundary.
+    let mut a: refs::Arena<u64> = refs::Arena::new();
+    let first = a.push(7);
+    for i in 0..100_000u64 { a.push(i); }
+    assert_eq!(a[first], 7);
+}
+
+#[test]
+fn arena_reuse_and_removal_still_work_across_blocks() {
+    const N: usize = 50_000;
+    let mut a: refs::Arena<u64> = refs::Arena::new();
+    let rs: Vec<_> = (0..N as u64).map(|i| a.push(i)).collect();
+    // Remove a spread of elements, including some deep in later blocks.
+    let removed: Vec<_> = (0..N).step_by(7_777).collect();
+    for &i in &removed { a.remove(rs[i]); }
+    assert_eq!(a.len(), N - removed.len());
+    for &i in &removed {
+        assert_eq!(a.get(rs[i]), None, "removed element {i} is gone");
+    }
+    // Refill: the freed slots come back, at a new generation.
+    for _ in &removed { a.push(999); }
+    assert_eq!(a.len(), N);
+    assert_eq!(a.slot_count(), N, "refill reused slots rather than growing");
+    for &i in &removed {
+        assert_eq!(a.get(rs[i]), None, "the old ref stays dead after refill");
+    }
+}
+
+#[test]
+fn arena_clear_then_refill_across_blocks() {
+    let mut a: refs::Arena<u64> = refs::Arena::new();
+    for i in 0..30_000u64 { a.push(i); }
+    a.clear();
+    assert_eq!(a.len(), 0);
+    let r = a.push(1);
+    assert_eq!(a[r], 1);
+    assert_eq!(a.len(), 1);
+}
+
+#[test]
+fn block_size_is_settable_at_construction() {
+    let mut a: refs::Arena<u64> = refs::Arena::with_block_size(64);
+    assert_eq!(a.block_size(), 64);
+    // Not a power of two: rounded up, since a block is addressed by shift
+    // and mask.
+    let b: refs::Arena<u64> = refs::Arena::with_block_size(100);
+    assert_eq!(b.block_size(), 128);
+
+    // A small block size just means more blocks; nothing else changes.
+    let rs: Vec<_> = (0..1000u64).map(|i| a.push(i)).collect();
+    assert_eq!(a.len(), 1000);
+    assert_eq!(a.slot_count(), 1000);
+    for (i, r) in rs.iter().enumerate() {
+        assert_eq!(a[*r], i as u64);
+    }
+    a.remove(rs[500]);
+    assert_eq!(a.get(rs[500]), None);
+    assert_eq!(a.get(rs[499]), Some(&499));
+}
+
+#[test]
+fn the_default_block_size_scales_with_the_element() {
+    // A block targets 64 KB, so a fat element gets fewer per block than a
+    // small one -- the point of sizing in bytes rather than a fixed count.
+    let small: refs::Arena<u8> = refs::Arena::new();
+    let fat: refs::Arena<[u64; 64]> = refs::Arena::new();
+    assert!(small.block_size() > fat.block_size(),
+        "small {} vs fat {}", small.block_size(), fat.block_size());
+    assert!(fat.block_size() >= 8, "a block never drops below the floor");
+}

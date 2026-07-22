@@ -356,3 +356,19 @@
   generated code is byte-identical for the plane benchmark, loc_global_demo
   (root params + TripletBlock), slam_demo, m3500_demo and root_fit_demo.
   Test: tests/name_collisions.rs.
+
+- **arael: `BArena` / `BRef` for collections past 16.7M elements** -- a
+  `Ref` packs a 24-bit index and an 8-bit generation into one `u32`
+  (`refs.rs`), so every collection tops out at `MAX_INDEX` = 16,777,215
+  elements and an `Arena` slot repeats its generation after 256 recycles.
+  Nothing in the tree is near either bound: the largest collections are
+  BAL's points and pgo's city10000 poses, orders of magnitude under. The
+  escape hatch, when something does need it, is a parallel `BRef` holding a
+  full `u32` index and a full `u32` generation -- 8 bytes, no wrap -- and a
+  `BArena` that uses it. Deferred because it is speculative and not free:
+  `arael-macros` keys on the literal type name `"Ref"` in about ten places
+  (`extract_wrapper_inner(ty, "Ref")` in lib.rs and constraint.rs), each of
+  which would have to accept `BRef` too, plus a parallel `Index`, iterator
+  and serde surface. Note the ceiling lands on `Vec` as well, and `Vec` is
+  what holds the large collections -- so if scale ever bites it is a `BVec`
+  that is wanted, built the same way.
