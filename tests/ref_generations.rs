@@ -265,3 +265,17 @@ fn the_default_block_size_scales_with_the_element() {
         "small {} vs fat {}", small.block_size(), fat.block_size());
     assert!(fat.block_size() >= 8, "a block never drops below the floor");
 }
+
+#[test]
+fn an_arena_clone_shares_its_origin_refs() {
+    let mut a: refs::Arena<u64> = refs::Arena::new();
+    let r0 = a.push(10);
+    let r1 = a.push(20);
+    a.remove(r0);
+    let copy = a.clone();
+    // Same logical data: live refs resolve against either, and the removed
+    // one stays dead in both.
+    assert_eq!(copy.get(r1), Some(&20));
+    assert_eq!(copy.get(r0), None);
+    assert_eq!(copy.len(), a.len());
+}

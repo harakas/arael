@@ -678,6 +678,7 @@ impl<T: fmt::Debug> fmt::Debug for Deque<T> {
 /// list (a "free list") -- the safe-Rust equivalent of a C pointer free list,
 /// the same technique the `slab` crate uses. The links live inside the
 /// vacated slots, so reclamation costs no extra memory.
+#[derive(Clone)]
 enum Slot<T> {
     Occupied(T),
     Free { next: Option<u32> },
@@ -686,6 +687,7 @@ enum Slot<T> {
 /// A slot and the generation it is currently at. Removing an element bumps
 /// its slot's generation, so a `Ref` issued before the removal no longer
 /// matches and cannot address whatever is allocated into the slot next.
+#[derive(Clone)]
 struct Cell<T> {
     slot: Slot<T>,
     generation: u32,
@@ -720,6 +722,7 @@ fn block_shift<T>() -> u32 {
 /// bigger. Blocks are never released -- an index range must not be reused
 /// by a later block, or the generations in it would restart and stale refs
 /// would match again.
+#[derive(Clone)]
 struct Blocks<T> {
     blocks: std::vec::Vec<std::boxed::Box<[Cell<T>]>>,
     len: usize,
@@ -868,6 +871,10 @@ impl<T> ExactSizeIterator for BlockIterMut<'_, T> {}
 /// [`no_reuse`](Self::no_reuse) to disable reclamation (slots then grow
 /// forever, but a stale `Ref` stays dead and fails loudly) when hunting
 /// use-after-remove bugs.
+///
+/// Cloning copies the generations too, so a `Ref` resolves against either
+/// copy -- they are the same logical data, as for [`Vec`].
+#[derive(Clone)]
 pub struct Arena<T> {
     slots: Blocks<T>,
     free_head: Option<u32>,
