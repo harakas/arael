@@ -579,6 +579,7 @@ fn print_usage() {
     eprintln!("  --loss <gm|cauchy>                   (default: gm)");
     eprintln!("  --poses <N>                          (default: 60)");
     eprintln!("  --landmarks <N>                      (default: 240)");
+    eprintln!("  --seed <N>                           (default: 42)");
 }
 
 // Env-gated Hessian sparsity bitmap: assemble J^T J at the current estimate and
@@ -609,6 +610,7 @@ fn main() {
     let mut loss_name = "gm".to_string();
     let mut num_poses: Option<usize> = None;
     let mut num_landmarks: Option<usize> = None;
+    let mut seed: Option<u64> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -617,6 +619,7 @@ fn main() {
             "--loss" => { i += 1; loss_name = args.get(i).cloned().unwrap_or_default(); }
             "--poses" => { i += 1; num_poses = args.get(i).and_then(|s| s.parse().ok()); }
             "--landmarks" => { i += 1; num_landmarks = args.get(i).and_then(|s| s.parse().ok()); }
+            "--seed" => { i += 1; seed = args.get(i).and_then(|s| s.parse().ok()); }
             "--help" | "-h" => { print_usage(); return; }
             other => { eprintln!("Unknown argument: {}", other); print_usage(); return; }
         }
@@ -626,9 +629,10 @@ fn main() {
     let mut cfg = SceneConfig::default();
     if let Some(p) = num_poses { cfg.num_poses = p; }
     if let Some(l) = num_landmarks { cfg.num_landmarks = l; }
+    if let Some(s) = seed { cfg.seed = s; }
 
-    println!("Solver: {}  Loss: {}  Poses: {}  Landmarks: {}",
-        solver_name, loss_name, cfg.num_poses, cfg.num_landmarks);
+    println!("Solver: {}  Loss: {}  Poses: {}  Landmarks: {}  Seed: {}",
+        solver_name, loss_name, cfg.num_poses, cfg.num_landmarks, cfg.seed);
     let (mut path, gt_poses, gt_landmarks) = build_path(&cfg);
 
     // Each family's measured-best threshold (32-seed sweep).
