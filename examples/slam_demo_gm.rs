@@ -8,11 +8,15 @@
 //
 // - slam_demo with the feature (bearing) residuals robustified by a
 //   Geman-McClure BLOCK loss (`loss = |s| loss_geman_mcclure(...)`) instead
-//   of slam_demo's per-component gamma*atan(r/gamma) wrap. Everything else
-//   identical. SINGLE_PASS=1 skips the graduated isigma ramp (single solve
-//   at full weight) -- and fails here: with half the observations wrong and
-//   landmarks initialized outside their inlier basins, the ramp is what
-//   carries them in.
+//   of slam_demo's per-component gamma*atan(r/gamma) wrap. SINGLE_PASS=1
+//   skips the graduated isigma ramp (single solve at full weight) -- and
+//   fails here: with half the observations wrong and landmarks initialized
+//   outside their inlier basins, the ramp is what carries them in.
+// - The pose is a single TransformParam (6-DOF rigid transform): the
+//   optimized step is an se(3) twist, so rotation corrections carry the
+//   translation, and constraint bodies read `r2w.rotation_matrix` /
+//   `r2w.translation` instead of composing position and euler-angle
+//   params (slam_demo keeps the decoupled pos + ea form).
 // - The ramp runs through one LmSession: only the non-param field
 //   `frine_isigma_scale` changes between passes, so the sparsity analysis
 //   is reused warm across all three solves.
@@ -30,8 +34,10 @@
 // (3 translation + 3 rotation) -- the solution can shift/rotate without
 // changing feature reprojection costs.
 //
-// - Tilt sensor (accelerometer) fixes roll (ea.x) and pitch (ea.y), making
-//   the path level. Without it the solution can tilt arbitrarily.
+// - Tilt sensor (accelerometer) observes the world up direction in the
+//   body frame (the third row of the rotation, yaw-free), fixing roll and
+//   pitch and making the path level. Without it the solution can tilt
+//   arbitrarily.
 //
 // - GPS fixes translation and yaw (ea.z). Even with a systematic offset
 //   (all readings biased by ~2.5m), it still constrains yaw because the
@@ -41,13 +47,16 @@
 //
 // - Odometry constrains relative motion between consecutive poses.
 //
-// - Drift constraints are weak regularizers (sigma=1000m pos, 1800deg ea)
-//   preventing parameters from diverging during early passes when feature
-//   constraints are scaled down.
+// - The landmark drift constraint is a weak regularizer (sigma=1000m)
+//   keeping unobservable landmarks from diverging during early passes when
+//   feature constraints are scaled down. Poses need none: GPS + odometry +
+//   tilt determine every pose at all ramp scales.
 
 use arael::covariance::{CovMode, Covariance};
-use arael::model::{Model, Param, SimpleEulerAngleParam, SelfBlock, CrossBlock};
+use arael::model::{Model, Param, SelfBlock, CrossBlock};
+use arael::quatern::quaternf;
 use arael::simple_lm::LmProblem;
+use arael::transform::TransformParamF;
 use arael::vect::{vect3f, vect2f};
 use arael::matrix::matrix3f;
 use arael::refs::{self, Ref};
@@ -85,15 +94,16 @@ struct GpsData {
 #[arael::model]
 struct PoseInfo {
     delta_pos: vect3f,
-    delta_ea: vect3f,
+    /// Measured relative rotation prev -> cur, as a matrix.
+    delta_rot: matrix3f,
     delta_pos_cov_r: matrix3f,
     delta_pos_cov_isigma: vect3f,
-    delta_ea_cov_r: matrix3f,
-    delta_ea_cov_isigma: vect3f,
+    delta_rot_cov_r: matrix3f,
+    delta_rot_cov_isigma: vect3f,
     gps: Option<GpsData>,
-    // Accelerometer tilt reading (roll and pitch)
-    tilt_roll: f32,
-    tilt_pitch: f32,
+    /// Accelerometer tilt reading: the world up direction seen in the
+    /// body frame (yaw-free by construction).
+    tilt_g: vect3f,
     features: refs::Vec<PointFeature>,
 }
 
@@ -107,11 +117,16 @@ fn decompose_cov(cov: matrix3f) -> (matrix3f, vect3f) {
     (r, isigma)
 }
 
-// Robot pose
+// Robot pose: one 6-DOF rigid transform (TransformParam). The optimized
+// step is an se(3) twist, so a rotation correction carries the translation
+// with it. slam_demo's pose drift regularizer is absent: the step params
+// reset every accepted step (no solve-start value to anchor to), and every
+// pose is fully determined by GPS + odometry + tilt at all ramp scales.
+// The landmark drift regularizer below is the load-bearing one and stays.
 #[arael::model]
 #[arael(constraint(hb_pose, guard = self.info.gps.is_some(), {
     let gamma = path.gamma;
-    let raw = pose.pos - pose.info.gps.pos;
+    let raw = pose.r2w.translation - pose.info.gps.pos;
     let rt_raw = pose.info.gps.cov_r.transpose() * raw;
     let p0 = rt_raw.x * pose.info.gps.cov_isigma.x;
     let p1 = rt_raw.y * pose.info.gps.cov_isigma.y;
@@ -121,22 +136,15 @@ fn decompose_cov(cov: matrix3f) -> (matrix3f, vect3f) {
      gamma * atan(p2 / gamma)]
 }))]
 #[arael(constraint(hb_pose, {
-    let pos_drift = pose.pos - pose.pos_value;
-    let ea_drift = pose.ea - pose.ea_value;
-    [pos_drift.x * path.drift_pos_isigma,
-     pos_drift.y * path.drift_pos_isigma,
-     pos_drift.z * path.drift_pos_isigma,
-     ea_drift.x * path.drift_ea_isigma,
-     ea_drift.y * path.drift_ea_isigma,
-     ea_drift.z * path.drift_ea_isigma]
-}))]
-#[arael(constraint(hb_pose, {
-    [(pose.ea.x - pose.info.tilt_roll) * path.tilt_isigma,
-     (pose.ea.y - pose.info.tilt_pitch) * path.tilt_isigma]
+    // The accelerometer observes the world up direction in the body
+    // frame -- the third row of the rotation. The raw difference of the
+    // two unit vectors is the chord: its length equals the angular error
+    // in radians to first order, so tilt_isigma whitens it directly.
+    let d = pose.r2w.rotation_matrix.row(2) - pose.info.tilt_g;
+    [d.x * path.tilt_isigma, d.y * path.tilt_isigma, d.z * path.tilt_isigma]
 }))]
 struct Pose {
-    pos: Param<vect3f>,
-    ea: SimpleEulerAngleParam<f32>,
+    r2w: TransformParamF,
     info: PoseInfo,
     hb_pose: SelfBlock<Pose>,
 }
@@ -156,8 +164,8 @@ struct PointLandmark {
 // Observation linking a landmark to a pose
 #[arael::model]
 #[arael(constraint(hb, parent=lm, loss = |s| loss_geman_mcclure(s, path.frine_c2), {
-    let mr2w = pose.ea.rotation_matrix();
-    let lm_r = mr2w.transpose() * (lm.pos - pose.pos);
+    let mr2w = pose.r2w.rotation_matrix;
+    let lm_r = mr2w.transpose() * (lm.pos - pose.r2w.translation);
     let r_r = lm_r - feature.camera_pos;
     let r_f = feature.mf2r.transpose() * r_r;
     let plain1 = atan2(r_f.y, r_f.x) * feature.isigma.x * path.frine_isigma_scale;
@@ -172,24 +180,25 @@ struct PointFrine {
     hb: CrossBlock<PointLandmark, Pose>,
 }
 
-// Odometry constraint between consecutive poses
+// Odometry constraint between consecutive poses. The rotation residual is
+// the small-rotation vector of the error rotation: vee of the antisymmetric
+// part of error_rot (= sin(theta) * axis, the rotation vector to first
+// order near identity) -- no euler angles anywhere in the residual.
 #[arael::model]
 #[arael(constraint(hb, {
-    let mr2w_prev = prev.ea.rotation_matrix();
-    let pos_diff = mr2w_prev.transpose() * (cur.pos - prev.pos);
+    let mr2w_prev = prev.r2w.rotation_matrix;
+    let pos_diff = mr2w_prev.transpose() * (cur.r2w.translation - prev.r2w.translation);
     let pos_err = pos_diff - cur.info.delta_pos;
     let pos_w = cur.info.delta_pos_cov_r.transpose() * pos_err;
-    let mr2w_cur = cur.ea.rotation_matrix();
-    let expected = mr2w_prev * cur.info.delta_ea.rotation_matrix();
-    let error_rot = expected.transpose() * mr2w_cur;
-    let ea_err = error_rot.get_euler_angles();
-    let ea_w = cur.info.delta_ea_cov_r.transpose() * ea_err;
+    let mr2w_cur = cur.r2w.rotation_matrix;
+    let error_rot = (mr2w_prev * cur.info.delta_rot).transpose() * mr2w_cur;
+    let rot_w = cur.info.delta_rot_cov_r.transpose() * error_rot.get_rotation_vector_small();
     [pos_w.x * cur.info.delta_pos_cov_isigma.x,
      pos_w.y * cur.info.delta_pos_cov_isigma.y,
      pos_w.z * cur.info.delta_pos_cov_isigma.z,
-     ea_w.x * cur.info.delta_ea_cov_isigma.x,
-     ea_w.y * cur.info.delta_ea_cov_isigma.y,
-     ea_w.z * cur.info.delta_ea_cov_isigma.z]
+     rot_w.x * cur.info.delta_rot_cov_isigma.x,
+     rot_w.y * cur.info.delta_rot_cov_isigma.y,
+     rot_w.z * cur.info.delta_rot_cov_isigma.z]
 }))]
 struct PosePair {
     #[arael(ref = root.poses)]
@@ -207,8 +216,6 @@ struct Path {
     landmarks: refs::Arena<PointLandmark>,
     pose_pairs: std::vec::Vec<PosePair>,
     gamma: f32,
-    drift_pos_isigma: f32,
-    drift_ea_isigma: f32,
     drift_lm_isigma: f32,
     tilt_isigma: f32,
     frine_isigma_scale: f32,
@@ -356,8 +363,6 @@ fn build_path(cfg: &SceneConfig) -> (Path, Vec<(vect3f, vect3f)>, Vec<(vect3f, u
     let gt_landmarks = generate_ground_truth_landmarks(cfg, &mut rng, &gt_poses);
     let cameras = create_cameras();
 
-    let drift_pos_sigma: f32 = 1000.0;    // meters
-    let drift_ea_sigma_deg: f32 = 1800.0;  // degrees
     let drift_lm_sigma: f32 = 1000.0;      // meters
     let tilt_sigma_deg: f32 = 0.25;         // accelerometer accuracy in degrees
     let tilt_sigma_rad = tilt_sigma_deg.to_radians();
@@ -370,8 +375,6 @@ fn build_path(cfg: &SceneConfig) -> (Path, Vec<(vect3f, vect3f)>, Vec<(vect3f, u
         // linearly, beyond that they saturate. With 25 expected inlier residuals,
         // gamma ~= 2*sqrt(25)/pi ~= 3.18.
         gamma: 2.0 * (25.0_f32).sqrt() / std::f32::consts::PI,
-        drift_pos_isigma: 1.0 / drift_pos_sigma,
-        drift_ea_isigma: 1.0 / drift_ea_sigma_deg.to_radians(),
         drift_lm_isigma: 1.0 / drift_lm_sigma,
         tilt_isigma: 1.0 / tilt_sigma_rad,
         frine_isigma_scale: 1.0,
@@ -387,26 +390,27 @@ fn build_path(cfg: &SceneConfig) -> (Path, Vec<(vect3f, vect3f)>, Vec<(vect3f, u
         let mr2w = matrix3f::rotation_from_euler_angles(ea);
 
         // Compute odometry deltas
-        let (delta_pos, delta_ea) = if pi == 0 {
-            (vect3f::new(0.0, 0.0, 0.0), vect3f::new(0.0, 0.0, 0.0))
+        let (delta_pos, delta_rot) = if pi == 0 {
+            (vect3f::new(0.0, 0.0, 0.0), matrix3f::identity())
         } else {
             let (prev_pos, prev_ea) = gt_poses[pi - 1];
             let prev_mr2w = matrix3f::rotation_from_euler_angles(prev_ea);
             let prev_mw2r = prev_mr2w.transpose();
             let dp = prev_mw2r * (pos - prev_pos);
-            let de = (prev_mw2r * mr2w).get_euler_angles();
-            (dp, de)
+            (dp, prev_mw2r * mr2w)
         };
 
-        // Odometry covariance proportional to motion
+        // Odometry covariance proportional to motion; the rotation angle
+        // comes from the trace identity cos(theta) = (tr - 1) / 2.
         let dp_norm = delta_pos.norm().max(0.01);
-        let de_norm = delta_ea.norm().max(0.001);
+        let tr = delta_rot[0].x + delta_rot[1].y + delta_rot[2].z;
+        let de_norm = ((tr - 1.0) * 0.5).clamp(-1.0, 1.0).acos().max(0.001);
         let pos_sigma = vect3f::new(
             cfg.odo_pos_k * dp_norm + cfg.odo_pos_base,
             (cfg.odo_pos_k * dp_norm + cfg.odo_pos_base) * 0.5, // lateral less noisy than forward
             (cfg.odo_pos_k * dp_norm + cfg.odo_pos_base) * 0.5,
         );
-        let ea_sigma = vect3f::new(
+        let rot_sigma = vect3f::new(
             cfg.odo_ea_k * de_norm + cfg.odo_ea_base,
             cfg.odo_ea_k * de_norm + cfg.odo_ea_base,
             cfg.odo_ea_k * de_norm + cfg.odo_ea_base,
@@ -417,10 +421,10 @@ fn build_path(cfg: &SceneConfig) -> (Path, Vec<(vect3f, vect3f)>, Vec<(vect3f, u
             0.0, pos_sigma.y * pos_sigma.y, 0.0,
             0.0, 0.0, pos_sigma.z * pos_sigma.z,
         );
-        let delta_ea_cov = matrix3f::from_elements(
-            ea_sigma.x * ea_sigma.x, 0.0, 0.0,
-            0.0, ea_sigma.y * ea_sigma.y, 0.0,
-            0.0, 0.0, ea_sigma.z * ea_sigma.z,
+        let delta_rot_cov = matrix3f::from_elements(
+            rot_sigma.x * rot_sigma.x, 0.0, 0.0,
+            0.0, rot_sigma.y * rot_sigma.y, 0.0,
+            0.0, 0.0, rot_sigma.z * rot_sigma.z,
         );
 
         // Generate features (only for landmarks visible from this pose)
@@ -499,19 +503,24 @@ fn build_path(cfg: &SceneConfig) -> (Path, Vec<(vect3f, vect3f)>, Vec<(vect3f, u
         );
 
         let (delta_pos_cov_r, delta_pos_cov_isigma) = decompose_cov(delta_pos_cov);
-        let (delta_ea_cov_r, delta_ea_cov_isigma) = decompose_cov(delta_ea_cov);
+        let (delta_rot_cov_r, delta_rot_cov_isigma) = decompose_cov(delta_rot_cov);
         let (gps_cov_r, gps_cov_isigma) = decompose_cov(gps_cov);
 
         path.poses.push_back(Pose {
-            pos: Param::new(noisy_pos),
-            ea: SimpleEulerAngleParam::new(noisy_ea),
+            r2w: TransformParamF::new(noisy_pos, quaternf::from_euler_angles(noisy_ea)),
             info: PoseInfo {
-                delta_pos, delta_ea,
+                delta_pos, delta_rot,
                 delta_pos_cov_r, delta_pos_cov_isigma,
-                delta_ea_cov_r, delta_ea_cov_isigma,
+                delta_rot_cov_r, delta_rot_cov_isigma,
                 gps: Some(GpsData { pos: gps_pos, cov_r: gps_cov_r, cov_isigma: gps_cov_isigma }),
-                tilt_roll: ea.x + tilt_sigma_rad * rng.sample(normal01) as f32,
-                tilt_pitch: ea.y + tilt_sigma_rad * rng.sample(normal01) as f32,
+                tilt_g: {
+                    // Sensor noise lives in angle space (roll/pitch); the
+                    // reading is stored as the up direction it implies:
+                    // (-sin p, cos p sin r, cos p cos r), row 2 of R.
+                    let r = ea.x + tilt_sigma_rad * rng.sample(normal01) as f32;
+                    let p = ea.y + tilt_sigma_rad * rng.sample(normal01) as f32;
+                    vect3f::new(-p.sin(), p.cos() * r.sin(), p.cos() * r.cos())
+                },
                 features,
             },
             hb_pose: SelfBlock::new(),
@@ -626,9 +635,10 @@ fn main() {
         if i >= path.poses.len() { continue; }
         let pose = &path.poses[i];
         let (gt_p, gt_e) = gt_poses[i];
+        let ea = pose.r2w.rotation.get_euler_angles();
         println!("Pose {:2}: pos=({:7.3}, {:7.3}, {:7.3}) ea=({:7.4}, {:7.4}, {:7.4})",
-            i, pose.pos.value.x, pose.pos.value.y, pose.pos.value.z,
-            pose.ea.value.x, pose.ea.value.y, pose.ea.value.z);
+            i, pose.r2w.translation.x, pose.r2w.translation.y, pose.r2w.translation.z,
+            ea.x, ea.y, ea.z);
         println!("      gt: pos=({:7.3}, {:7.3}, {:7.3}) ea=({:7.4}, {:7.4}, {:7.4})",
             gt_p.x, gt_p.y, gt_p.z, gt_e.x, gt_e.y, gt_e.z);
     }
@@ -689,8 +699,8 @@ fn main() {
         for i in 0..n {
             let pose = &path.poses[i];
             let (gt_p, gt_e) = gt_poses[i];
-            pos_err_sum += (pose.pos.value - gt_p).norm();
-            ea_err_sum += (pose.ea.value - gt_e).norm();
+            pos_err_sum += (pose.r2w.translation - gt_p).norm();
+            ea_err_sum += (pose.r2w.rotation.get_euler_angles() - gt_e).norm();
         }
         let mut params64: std::vec::Vec<f64> = std::vec::Vec::new();
         path.serialize64(&mut params64);
@@ -718,8 +728,8 @@ fn main() {
         let gt_delta_pos = gt_mr2w.transpose() * (gt_cur_pos - gt_prev_pos);
 
         // Optimized delta_pos in previous pose's local frame
-        let opt_mr2w_prev = matrix3f::rotation_from_euler_angles(prev.ea.value);
-        let opt_delta_pos = opt_mr2w_prev.transpose() * (pose.pos.value - prev.pos.value);
+        let opt_mr2w_prev = prev.r2w.rotation_matrix;
+        let opt_delta_pos = opt_mr2w_prev.transpose() * (pose.r2w.translation - prev.r2w.translation);
 
         let dpos_err = (opt_delta_pos - gt_delta_pos).norm();
         let gt_step = gt_delta_pos.norm();
@@ -730,7 +740,7 @@ fn main() {
         let gt_delta_ea = (gt_mr2w.transpose() * gt_mr2w_cur).get_euler_angles();
 
         // Optimized delta_ea
-        let opt_mr2w_cur = matrix3f::rotation_from_euler_angles(pose.ea.value);
+        let opt_mr2w_cur = pose.r2w.rotation_matrix;
         let opt_delta_ea = (opt_mr2w_prev.transpose() * opt_mr2w_cur).get_euler_angles();
 
         let dea_err = (opt_delta_ea - gt_delta_ea).norm();
@@ -790,18 +800,29 @@ fn main() {
         let gt_vec = gt_mr2w.transpose() * (gt_lm - gt_pose_pos);
         // Optimized vector from closest opt pose to opt landmark in opt pose's local frame
         let opt_pose = &path.poses[closest_idx];
-        let opt_mr2w = matrix3f::rotation_from_euler_angles(opt_pose.ea.value);
-        let opt_vec = opt_mr2w.transpose() * (lm.pos.value - opt_pose.pos.value);
+        let opt_mr2w = opt_pose.r2w.rotation_matrix;
+        let opt_vec = opt_mr2w.transpose() * (lm.pos.value - opt_pose.r2w.translation);
         let err = (opt_vec - gt_vec).norm();
         let gt_dist = gt_vec.norm();
         let rel_pct = 100.0 * err / gt_dist;
 
         if let Some(ref cov) = cov {
-            // Pose position block = top-left 3x3 of its 6-DOF marginal (pos
-            // precedes rotation); cross = first 3 columns.
+            // TransformParam marginal order is [w (rotation); d
+            // (translation)], with d measured in the pose's reference
+            // rotation frame: at convergence (w = 0) the world translation
+            // block is R * C_dd * R^T, and the landmark cross block picks
+            // the d columns and rotates on the pose side.
             let c_ll = cov.marginal_cov(lm);
-            let c_pp = cov.marginal_cov(opt_pose).view((0, 0), (3, 3)).into_owned();
-            let c_lp = cov.cross_cov(lm, opt_pose).view((0, 0), (3, 3)).into_owned();
+            let m = opt_mr2w;
+            let r = nalgebra::DMatrix::from_row_slice(3, 3, &[
+                m[0].x as f64, m[0].y as f64, m[0].z as f64,
+                m[1].x as f64, m[1].y as f64, m[1].z as f64,
+                m[2].x as f64, m[2].y as f64, m[2].z as f64,
+            ]);
+            let c_dd = cov.marginal_cov(opt_pose).view((3, 3), (3, 3)).into_owned();
+            let c_pp = &r * c_dd * r.transpose();
+            let c_lp = cov.cross_cov(lm, opt_pose).view((0, 3), (3, 3)).into_owned()
+                * r.transpose();
             let cov_rel = &c_ll + &c_pp - &c_lp - c_lp.transpose();
             let eigen = nalgebra::SymmetricEigen::new(cov_rel);
             let mut sigmas = [
