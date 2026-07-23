@@ -244,6 +244,11 @@ negate, and scale by a scalar (`m * k`, `k * m`).
 let m = matrix3sym::new("m");                 // 9 symbols
 let mt = m.transpose();
 let ea = m.get_euler_angles();                // -> vect3sym
+let c  = m.col(1);                            // column as vect3sym
+let r  = m.row(2);                            // row as vect3sym
+let w  = m.get_rotation_vector_small();       // vee((M - M^T)/2):
+                                              // sin(theta) * axis, the
+                                              // rotation vector near identity
 let mv = m.clone() * vect3sym::new("v");      // -> vect3sym
 let vm = vect3sym::new("v") * m.clone();      // vec * matrix = M^T v
 let mm = m.clone() * m.clone();               // -> matrix3sym

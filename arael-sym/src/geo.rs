@@ -302,6 +302,36 @@ impl matrix3sym {
         }
     }
 
+    /// Returns the row at the given index as a vector.
+    pub fn row(&self, index: usize) -> vect3sym {
+        match index {
+            0 | 1 | 2 => self.rows[index].clone(),
+            _ => panic!("matrix3sym: row index {} out of bounds (0..3)", index),
+        }
+    }
+
+    /// Returns the column at the given index as a vector.
+    pub fn col(&self, index: usize) -> vect3sym {
+        match index {
+            0 => vect3sym { x: self.rows[0].x.clone(), y: self.rows[1].x.clone(), z: self.rows[2].x.clone() },
+            1 => vect3sym { x: self.rows[0].y.clone(), y: self.rows[1].y.clone(), z: self.rows[2].y.clone() },
+            2 => vect3sym { x: self.rows[0].z.clone(), y: self.rows[1].z.clone(), z: self.rows[2].z.clone() },
+            _ => panic!("matrix3sym: column index {} out of bounds (0..3)", index),
+        }
+    }
+
+    /// Vee of the antisymmetric part, `(M - M^T)/2`: for a rotation matrix
+    /// exactly `sin(theta) * axis`, the rotation vector to first order near
+    /// identity. Use on error rotations, not full attitudes.
+    pub fn get_rotation_vector_small(&self) -> vect3sym {
+        let half = || crate::constant(0.5);
+        vect3sym {
+            x: (self.rows[2].y.clone() - self.rows[1].z.clone()) * half(),
+            y: (self.rows[0].z.clone() - self.rows[2].x.clone()) * half(),
+            z: (self.rows[1].x.clone() - self.rows[0].y.clone()) * half(),
+        }
+    }
+
     /// Return the transpose of this 3x3 matrix.
     pub fn transpose(&self) -> matrix3sym {
         matrix3sym {
@@ -1012,6 +1042,38 @@ mod tests {
                 assert!((ev(&m.rows[r].z) - ev(&q.rows[r].z)).abs() < 1e-12, "row {r} .z");
             }
         }
+    }
+
+    #[test]
+    fn mat3_col_and_rotation_vector_small() {
+        use std::collections::HashMap;
+        let m = matrix3sym::new("m");
+        // m[r] rows: entries m[r].x/.y/.z; bind a distinct value to each.
+        let mut vars = HashMap::new();
+        let mut val = 1.0;
+        for r in 0..3 {
+            for c in ["x", "y", "z"] {
+                vars.insert(format!("m[{r}].{c}"), val);
+                val += 1.0;
+            }
+        }
+        let vars: HashMap<&str, f64> =
+            vars.iter().map(|(k, v)| (k.as_str(), *v)).collect();
+        // Entries are 1..9 row-major: col(1) = (2, 5, 8), row(1) = (4, 5, 6).
+        let c1 = m.col(1);
+        assert_eq!(c1.x.eval(&vars).unwrap(), 2.0);
+        assert_eq!(c1.y.eval(&vars).unwrap(), 5.0);
+        assert_eq!(c1.z.eval(&vars).unwrap(), 8.0);
+        let r1 = m.row(1);
+        assert_eq!(r1.x.eval(&vars).unwrap(), 4.0);
+        assert_eq!(r1.y.eval(&vars).unwrap(), 5.0);
+        assert_eq!(r1.z.eval(&vars).unwrap(), 6.0);
+        // vee((M - M^T)/2) = ((m21-m12)/2, (m02-m20)/2, (m10-m01)/2)
+        //                  = ((8-6)/2, (3-7)/2, (4-2)/2).
+        let v = m.get_rotation_vector_small();
+        assert_eq!(v.x.eval(&vars).unwrap(), 1.0);
+        assert_eq!(v.y.eval(&vars).unwrap(), -2.0);
+        assert_eq!(v.z.eval(&vars).unwrap(), 1.0);
     }
 
     #[test]

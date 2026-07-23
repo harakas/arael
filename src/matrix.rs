@@ -195,6 +195,20 @@ impl<T: Float> matrix3<T>
         }
     }
 
+    /// Vee of the antisymmetric part, `(M - M^T)/2`: for a rotation matrix
+    /// exactly `sin(theta) * axis`, the rotation vector to first order near
+    /// identity. The extraction companion of
+    /// [`Self::from_rotation_vector_small`]; use on error rotations, not
+    /// full attitudes.
+    pub fn get_rotation_vector_small(self) -> vect3<T> {
+        let half = T::half();
+        vect3::<T>::new(
+            (self[2][1] - self[1][2]) * half,
+            (self[0][2] - self[2][0]) * half,
+            (self[1][0] - self[0][1]) * half,
+        )
+    }
+
     /// Returns the row at the given index as a vector.
     pub fn row(self, index: usize) -> vect3<T> {
         self[index]
@@ -742,6 +756,19 @@ pub use arael_sym::matrix2sym;
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn test_get_rotation_vector_small_round_trip() {
+        // For small w, from_rotation_vector_small and the vee extraction
+        // agree to O(|w|^3) (the extraction returns sin(theta) * axis).
+        let w = vect3d::new(0.01, -0.02, 0.015);
+        let r = matrix3d::from_rotation_vector_small(w);
+        let back = r.get_rotation_vector_small();
+        assert!((back - w).norm() < 1e-5, "back={:?}", back);
+        // Identity has a zero rotation vector.
+        let z = matrix3d::identity().get_rotation_vector_small();
+        assert_eq!(z.norm(), 0.0);
+    }
 
     #[test]
     fn test_get_euler_angles_noisy_gimbal_boundary() {

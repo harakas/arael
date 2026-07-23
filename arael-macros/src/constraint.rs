@@ -452,6 +452,29 @@ fn eval_expr(expr: &Expr, ctx: &mut ConstraintCtx) -> Result<SymVal, syn::Error>
                 (SymVal::Mat3(m), "get_euler_angles") => {
                     Ok(SymVal::Vec3(m.get_euler_angles()))
                 }
+                (SymVal::Mat3(m), "get_rotation_vector_small") => {
+                    Ok(SymVal::Vec3(m.get_rotation_vector_small()))
+                }
+                (SymVal::Mat3(m), "col") | (SymVal::Mat3(m), "row") => {
+                    let name = mc.method.to_string();
+                    if mc.args.len() != 1 {
+                        return Err(syn::Error::new_spanned(&mc.method,
+                            format!(".{}() requires 1 argument", name)));
+                    }
+                    let idx = match &mc.args[0] {
+                        syn::Expr::Lit(l) => match &l.lit {
+                            syn::Lit::Int(i) => i.base10_parse::<usize>().ok(),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    match idx {
+                        Some(i) if i < 3 => Ok(SymVal::Vec3(
+                            if name == "col" { m.col(i) } else { m.row(i) })),
+                        _ => Err(syn::Error::new_spanned(&mc.args[0],
+                            format!(".{}() index must be an integer literal 0, 1 or 2", name))),
+                    }
+                }
                 (SymVal::Mat2(m), "transpose") => {
                     Ok(SymVal::Mat2(m.transpose()))
                 }
