@@ -2,7 +2,7 @@
 //
 // Generates an S-curve trajectory (default 60 poses, 240 point landmarks) at
 // 5-30m distance. 5 cameras provide 360-degree coverage. Sensor data:
-// GPS (with systematic offset), wheel odometry, accelerometer tilt.
+// GPS, wheel odometry, accelerometer tilt.
 //
 // Key points:
 //
@@ -40,11 +40,10 @@
 //   pitch and making the path level. Without it the solution can tilt
 //   arbitrarily.
 //
-// - GPS fixes translation and yaw (ea.z). Even with a systematic offset
-//   (all readings biased by ~2.5m), it still constrains yaw because the
-//   offset is constant while poses move -- relative GPS positions define
-//   heading. The systematic offset just shifts everything, which is why
-//   mean pose error vs GT roughly equals GPS offset magnitude.
+// - GPS fixes translation and yaw (ea.z): relative GPS positions define
+//   heading. Its role is whole-path orientation and large-scale
+//   positioning -- the constraint covariance is inflated past the actual
+//   error so it does not compete with odometry and features locally.
 //
 // - Odometry constrains relative motion between consecutive poses.
 //
@@ -161,7 +160,8 @@ struct PointLandmark {
 
 // Observation linking a landmark to a pose
 #[arael::model]
-#[arael(constraint(hb, parent=lm, loss = |s| loss_geman_mcclure(s, path.frine_c2), {
+#[arael(constraint(hb, parent=lm, loss = |s| branch(path.frine_cauchy,
+    loss_cauchy(s, path.frine_c2), loss_geman_mcclure(s, path.frine_c2)), {
     let mr2w = pose.r2w.rotation_matrix;
     let lm_r = mr2w.transpose() * (lm.pos - pose.r2w.translation);
     let r_r = lm_r - feature.camera_pos;
@@ -216,11 +216,17 @@ struct Path {
     drift_lm_isigma: f32,
     tilt_isigma: f32,
     frine_isigma_scale: f32,
-    /// Geman-McClure squared threshold for the feature blocks. Half the
-    /// 2-DOF 0.95 quantile (5.99): the quantile logic assumes rare
-    /// outliers, but half the observations here are outliers, and the
-    /// tighter gate measures better (worst landmark 4.6m vs 11.2m).
+    /// Squared threshold for the feature blocks. Half the 2-DOF 0.95
+    /// quantile (5.99) for GM: the quantile logic assumes rare outliers,
+    /// but half the observations here are outliers, and the tighter gate
+    /// measures better (worst landmark 4.6m vs 11.2m). Cauchy prefers
+    /// tighter still (1.5).
     frine_c2: f32,
+    /// Feature loss selector: > 0 Cauchy, else Geman-McClure. The two
+    /// viable losses at this contamination level (32-seed sweep): GM has
+    /// the best mean, Cauchy the best worst-case bound; Huber (no
+    /// redescent) and Tukey (hard cutoff, brittle) both fail here.
+    frine_cauchy: f32,
     /// Geman-McClure squared threshold for the GPS blocks
     /// (chi-square 0.95 quantile, 3 DOF).
     gps_c2: f32,
@@ -242,7 +248,7 @@ struct SceneConfig {
     step_size: f32,
     // Noise parameters
     gps_sigma: f32,
-    gps_rel_noise: f32, // GPS relative noise (meters per meter from origin)
+    gps_sigma_inflate: f32,
     odo_pos_k: f32,    // position noise as fraction of distance
     odo_pos_base: f32, // base position noise (meters)
     odo_ea_k: f32,     // ea noise as fraction of rotation
@@ -262,8 +268,15 @@ impl Default for SceneConfig {
             s_amplitude: 1.5,       // S-curve lateral amplitude (meters)
             s_frequency: 0.8,       // S-curve angular frequency
             step_size: 0.25,        // distance between poses (meters)
-            gps_sigma: 2.5,         // GPS systematic offset sigma (meters)
-            gps_rel_noise: 0.02,    // GPS relative noise (meters per meter from origin)
+            gps_sigma: 0.3,         // GPS per-fix noise sigma (meters)
+            gps_sigma_inflate: 2.0, // the constraint models gps_sigma *
+                                    // inflate. GPS's role is whole-path
+                                    // orientation and large-scale
+                                    // positioning, not local motion
+                                    // correction -- that is odometry's
+                                    // and the features' job, and the
+                                    // loose covariance keeps GPS from
+                                    // competing with them locally
             odo_pos_k: 0.10,        // 10% of distance
             odo_pos_base: 0.03,     // 3cm base noise
             odo_ea_k: 0.01,
@@ -350,16 +363,9 @@ fn generate_ground_truth_landmarks(cfg: &SceneConfig, rng: &mut StdRng, poses: &
     landmarks
 }
 
-fn build_path(cfg: &SceneConfig) -> (Path, Vec<(vect3f, vect3f)>, Vec<(vect3f, usize)>, vect3f) {
+fn build_path(cfg: &SceneConfig) -> (Path, Vec<(vect3f, vect3f)>, Vec<(vect3f, usize)>) {
     let mut rng = StdRng::seed_from_u64(cfg.seed);
     let normal01 = Normal::new(0.0, 1.0).unwrap();
-
-    // Systematic GPS offset (same for all poses, ~2.5m random direction)
-    let gps_offset = vect3f::new(
-        cfg.gps_sigma * rng.sample(normal01) as f32,
-        cfg.gps_sigma * rng.sample(normal01) as f32,
-        cfg.gps_sigma * rng.sample(normal01) as f32,
-    );
 
     let gt_poses = generate_ground_truth_poses(cfg);
     let gt_landmarks = generate_ground_truth_landmarks(cfg, &mut rng, &gt_poses);
@@ -377,6 +383,7 @@ fn build_path(cfg: &SceneConfig) -> (Path, Vec<(vect3f, vect3f)>, Vec<(vect3f, u
         tilt_isigma: 1.0 / tilt_sigma_rad,
         frine_isigma_scale: 1.0,
         frine_c2: 2.99,
+        frine_cauchy: -1.0,
         gps_c2: 7.815,
     };
 
@@ -474,17 +481,18 @@ fn build_path(cfg: &SceneConfig) -> (Path, Vec<(vect3f, vect3f)>, Vec<(vect3f, u
             }
         }
 
-        // GPS: systematic offset (same for all poses) + relative noise
-        let rel_noise = cfg.gps_rel_noise * (pos - gt_poses[0].0).norm();
+        // GPS: iid per-fix noise; the constraint covariance is inflated
+        // past the actual error (see gps_sigma_inflate).
         let gps_pos = vect3f::new(
-            pos.x + gps_offset.x + rel_noise * rng.sample(normal01) as f32,
-            pos.y + gps_offset.y + rel_noise * rng.sample(normal01) as f32,
-            pos.z + gps_offset.z + rel_noise * rng.sample(normal01) as f32,
+            pos.x + cfg.gps_sigma * rng.sample(normal01) as f32,
+            pos.y + cfg.gps_sigma * rng.sample(normal01) as f32,
+            pos.z + cfg.gps_sigma * rng.sample(normal01) as f32,
         );
+        let ms = cfg.gps_sigma * cfg.gps_sigma_inflate;
         let gps_cov = matrix3f::from_elements(
-            cfg.gps_sigma * cfg.gps_sigma, 0.0, 0.0,
-            0.0, cfg.gps_sigma * cfg.gps_sigma, 0.0,
-            0.0, 0.0, cfg.gps_sigma * cfg.gps_sigma,
+            ms * ms, 0.0, 0.0,
+            0.0, ms * ms, 0.0,
+            0.0, 0.0, ms * ms,
         );
 
         // Noisy initial pose estimate
@@ -558,7 +566,7 @@ fn build_path(cfg: &SceneConfig) -> (Path, Vec<(vect3f, vect3f)>, Vec<(vect3f, u
         });
     }
 
-    (path, gt_poses, gt_landmarks, gps_offset)
+    (path, gt_poses, gt_landmarks)
 }
 
 // ---------------------------------------------------------------------------
@@ -568,6 +576,7 @@ fn build_path(cfg: &SceneConfig) -> (Path, Vec<(vect3f, vect3f)>, Vec<(vect3f, u
 fn print_usage() {
     eprintln!("Usage: slam_demo [OPTIONS]");
     eprintln!("  --solver <dense|faer|eigen|cholmod>  (default: faer)");
+    eprintln!("  --loss <gm|cauchy>                   (default: gm)");
     eprintln!("  --poses <N>                          (default: 60)");
     eprintln!("  --landmarks <N>                      (default: 240)");
 }
@@ -597,6 +606,7 @@ fn write_hessian_bitmap(path: &mut Path, out: &str) {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let mut solver_name = "faer".to_string();
+    let mut loss_name = "gm".to_string();
     let mut num_poses: Option<usize> = None;
     let mut num_landmarks: Option<usize> = None;
 
@@ -604,6 +614,7 @@ fn main() {
     while i < args.len() {
         match args[i].as_str() {
             "--solver" => { i += 1; solver_name = args.get(i).cloned().unwrap_or_default(); }
+            "--loss" => { i += 1; loss_name = args.get(i).cloned().unwrap_or_default(); }
             "--poses" => { i += 1; num_poses = args.get(i).and_then(|s| s.parse().ok()); }
             "--landmarks" => { i += 1; num_landmarks = args.get(i).and_then(|s| s.parse().ok()); }
             "--help" | "-h" => { print_usage(); return; }
@@ -616,8 +627,16 @@ fn main() {
     if let Some(p) = num_poses { cfg.num_poses = p; }
     if let Some(l) = num_landmarks { cfg.num_landmarks = l; }
 
-    println!("Solver: {}  Poses: {}  Landmarks: {}", solver_name, cfg.num_poses, cfg.num_landmarks);
-    let (mut path, gt_poses, gt_landmarks, gps_offset) = build_path(&cfg);
+    println!("Solver: {}  Loss: {}  Poses: {}  Landmarks: {}",
+        solver_name, loss_name, cfg.num_poses, cfg.num_landmarks);
+    let (mut path, gt_poses, gt_landmarks) = build_path(&cfg);
+
+    // Each family's measured-best threshold (32-seed sweep).
+    match loss_name.as_str() {
+        "gm" => { path.frine_cauchy = -1.0; path.frine_c2 = 2.99; }
+        "cauchy" => { path.frine_cauchy = 1.0; path.frine_c2 = 1.5; }
+        other => { eprintln!("Unknown loss: {}. Available: gm, cauchy", other); return; }
+    }
 
     let mut params = std::vec::Vec::new();
     path.serialize32(&mut params);
@@ -690,7 +709,7 @@ fn main() {
         _ => { eprintln!("Unknown solver: {}. Available: dense, faer, eigen, cholmod", solver_name); return; }
     }
 
-    // Mean absolute pose error vs GT (includes GPS systematic offset)
+    // Mean absolute pose error vs GT
     {
         let mut pos_err_sum = 0.0_f32;
         let mut ea_err_sum = 0.0_f32;
@@ -704,9 +723,8 @@ fn main() {
         let mut params64: std::vec::Vec<f64> = std::vec::Vec::new();
         path.serialize64(&mut params64);
         let cost = path.calc_cost(&params64);
-        println!("\nFinal cost: {:.4}  Simulated GPS systematic offset: ({:.3}, {:.3}, {:.3}) |{:.3}|m",
-            cost, gps_offset.x, gps_offset.y, gps_offset.z, gps_offset.norm());
-        println!("Mean pose error vs GT: pos={:.4}m  ea={:.3}deg  (dominated by GPS offset)",
+        println!("\nFinal cost: {:.4}", cost);
+        println!("Mean pose error vs GT: pos={:.4}m  ea={:.3}deg",
             pos_err_sum / n as f32, (ea_err_sum / n as f32).to_degrees());
     }
 
@@ -776,7 +794,7 @@ fn main() {
 
     // Landmark uncertainty from the parameter covariance (Sigma = 2 H^-1). The
     // relative covariance Cov_rel = C_ll + C_pp - C_lp - C_pl over the landmark and
-    // pose POSITION blocks cancels the shared gauge (GPS offset, yaw), giving
+    // pose POSITION blocks cancels the shared gauge uncertainty, giving
     // uncertainty relative to the pose. Ellipsoid semi-axes = sqrt of its eigenvalues.
     let cov = match path.assemble_covariance(CovMode::AllMarginals) {
         Ok(c) => Some(c),
