@@ -23,6 +23,11 @@
 //   is reused warm across all three solves.
 // - 50% of feature associations are completely wrong (outlier_fraction=0.5)
 //   with 30x pixel noise.
+// - Feature residuals are direction chords, not angles: the predicted
+//   unit direction minus the measured one in the feature frame, per-axis
+//   whitened. First-order identical to bearing angles; no trig anywhere
+//   in the model -- every residual is built from matrix products, sums,
+//   and one normalization.
 //
 // - Constraint expressions in #[arael(constraint(...))] are symbolically
 //   differentiated at compile time. No numeric Jacobians, no hand-coded
@@ -177,17 +182,27 @@ struct PointLandmark {
     hb_drift: SelfBlock<PointLandmark>,
 }
 
-// Observation linking a landmark to a pose
+// Observation linking a landmark to a pose. The residual is the CHORD
+// between the predicted unit direction and the measured one: in the
+// feature frame the measurement is (1, 0, 0), so the chord is
+// (u.x - 1, u.y, u.z). The perpendicular components equal the atan2
+// bearing angles to first order and carry the same per-axis whitening;
+// the radial component is second-order for inliers (-theta^2/2) but
+// keeps the antipode from being a spurious minimum (perpendicular
+// components alone are a SINE residual, zero again at 180 degrees).
+// No trig anywhere; smooth everywhere except a landmark exactly at the
+// camera.
 #[arael::model]
 #[arael(constraint(hb, parent=lm, loss = |s| branch(path.frine_cauchy,
     loss_cauchy(s, path.frine_c2), loss_geman_mcclure(s, path.frine_c2)), {
     let mr2w = pose.r2w.rotation_matrix;
     let cam_w = pose.r2w.translation + mr2w * feature.camera_pos;
     let ray_w = (lm.anchor - cam_w) * lm.rho + lm.dir.unit;
-    let r_f = feature.mf2r.transpose() * (mr2w.transpose() * ray_w);
-    let plain1 = atan2(r_f.y, r_f.x) * feature.isigma.x * path.frine_isigma_scale;
-    let plain2 = atan2(r_f.z, r_f.x) * feature.isigma.y * path.frine_isigma_scale;
-    [plain1, plain2]
+    let u = feature.mf2r.transpose() * (mr2w.transpose() * ray_w.unit());
+    let sc = path.frine_isigma_scale;
+    [(u.x - 1.0) * ((feature.isigma.x + feature.isigma.y) * 0.5) * sc,
+     u.y * feature.isigma.x * sc,
+     u.z * feature.isigma.y * sc]
 }))]
 struct PointFrine {
     #[arael(ref = root.poses)]
@@ -227,7 +242,7 @@ struct PosePair {
 
 // Root
 #[arael::model]
-#[arael(root, fast_atan)]
+#[arael(root)]
 struct Path {
     poses: refs::Deque<Pose>,
     landmarks: refs::Arena<PointLandmark>,
@@ -479,7 +494,7 @@ fn build_path(cfg: &SceneConfig) -> (Path, Vec<(vect3f, vect3f)>, Vec<(vect3f, u
                 );
                 // Build feature-to-robot frame (mf2r): col0 = view direction from
                 // pose toward feature, col1/col2 = perpendicular axes for measuring
-                // horizontal and vertical angular error via atan2.
+                // horizontal and vertical angular error.
                 let dir = cam.unproject_to_robot(noisy_pixel);
                 let cam_up = -(cam.mc2r.col(1));
                 let up_proj = cam_up - dir * (cam_up * dir);
