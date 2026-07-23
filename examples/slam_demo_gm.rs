@@ -47,16 +47,21 @@
 //
 // - Odometry constrains relative motion between consecutive poses.
 //
-// - The landmark drift constraint is a weak regularizer (sigma=1000m)
-//   keeping unobservable landmarks from diverging during early passes when
-//   feature constraints are scaled down. Poses need none: GPS + odometry +
-//   tilt determine every pose at all ramp scales.
+// - Landmarks use an anchored inverse-depth parameterization: a constant
+//   anchor point (the middlest observing pose, re-snapshotted between ramp
+//   passes), a UnitVecParam direction and an inverse range. The direction
+//   is measurement-pinned at init and depth enters the bearing linearly,
+//   so low-parallax landmarks stay well-conditioned; a weak prior on the
+//   inverse range alone replaces the old 3-DOF drift regularizer. Poses
+//   need none: GPS + odometry + tilt determine every pose at all ramp
+//   scales.
 
 use arael::covariance::{CovMode, Covariance};
 use arael::model::{Model, Param, SelfBlock, CrossBlock};
 use arael::quatern::quaternf;
 use arael::simple_lm::LmProblem;
 use arael::transform::TransformParamF;
+use arael::unitvec::UnitVecParamF;
 use arael::vect::{vect3f, vect2f};
 use arael::matrix::matrix3f;
 use arael::refs::{self, Ref};
@@ -146,14 +151,28 @@ struct Pose {
     hb_pose: SelfBlock<Pose>,
 }
 
-// A 3D landmark observed from multiple poses
+// A 3D landmark, anchored inverse-depth parameterization: `anchor` is a
+// CONSTANT world point (the middlest pose observing the landmark,
+// snapshotted at build and re-snapshotted between ramp passes), `dir`
+// the unit direction from the anchor toward the landmark, `rho` the
+// inverse range along it. The world position is anchor + dir/rho, but
+// no residual ever divides: bearings are scale-invariant, so the frine
+// reads the ray rho*(anchor - cam) + dir, polynomial in the params.
+// rho = 0 is a valid landmark at infinity. The direction is pinned by
+// its initializing measurement, so the drift regularizer reduces to a
+// weak prior on rho alone.
 #[arael::model]
 #[arael(constraint(hb_drift, {
-    let drift = pointlandmark.pos - pointlandmark.pos_value;
-    [drift.x * path.drift_lm_isigma, drift.y * path.drift_lm_isigma, drift.z * path.drift_lm_isigma]
+    [(pointlandmark.rho - pointlandmark.rho_value) * path.drift_rho_isigma]
 }))]
 struct PointLandmark {
-    pos: Param<vect3f>,
+    anchor: vect3f,
+    /// The observing pose the anchor is snapshotted from. Data only --
+    /// no constraint reads it, so the anchor stays constant in the solve.
+    #[arael(skip)]
+    anchor_pose: Ref<Pose>,
+    dir: UnitVecParamF,
+    rho: Param<f32>,
     frines: std::vec::Vec<PointFrine>,
     hb_drift: SelfBlock<PointLandmark>,
 }
@@ -163,9 +182,9 @@ struct PointLandmark {
 #[arael(constraint(hb, parent=lm, loss = |s| branch(path.frine_cauchy,
     loss_cauchy(s, path.frine_c2), loss_geman_mcclure(s, path.frine_c2)), {
     let mr2w = pose.r2w.rotation_matrix;
-    let lm_r = mr2w.transpose() * (lm.pos - pose.r2w.translation);
-    let r_r = lm_r - feature.camera_pos;
-    let r_f = feature.mf2r.transpose() * r_r;
+    let cam_w = pose.r2w.translation + mr2w * feature.camera_pos;
+    let ray_w = (lm.anchor - cam_w) * lm.rho + lm.dir.unit;
+    let r_f = feature.mf2r.transpose() * (mr2w.transpose() * ray_w);
     let plain1 = atan2(r_f.y, r_f.x) * feature.isigma.x * path.frine_isigma_scale;
     let plain2 = atan2(r_f.z, r_f.x) * feature.isigma.y * path.frine_isigma_scale;
     [plain1, plain2]
@@ -213,7 +232,7 @@ struct Path {
     poses: refs::Deque<Pose>,
     landmarks: refs::Arena<PointLandmark>,
     pose_pairs: std::vec::Vec<PosePair>,
-    drift_lm_isigma: f32,
+    drift_rho_isigma: f32,
     tilt_isigma: f32,
     frine_isigma_scale: f32,
     /// Squared threshold for the feature blocks. Half the 2-DOF 0.95
@@ -371,7 +390,10 @@ fn build_path(cfg: &SceneConfig) -> (Path, Vec<(vect3f, vect3f)>, Vec<(vect3f, u
     let gt_landmarks = generate_ground_truth_landmarks(cfg, &mut rng, &gt_poses);
     let cameras = create_cameras();
 
-    let drift_lm_sigma: f32 = 1000.0;      // meters
+    // Weak prior on each landmark's inverse range (1/m units): holds
+    // all-outlier landmarks at their initial ray instead of letting them
+    // wander; the direction needs none (pinned by its initializer).
+    let drift_rho_sigma: f32 = 1.0;
     let tilt_sigma_deg: f32 = 0.25;         // accelerometer accuracy in degrees
     let tilt_sigma_rad = tilt_sigma_deg.to_radians();
 
@@ -379,7 +401,7 @@ fn build_path(cfg: &SceneConfig) -> (Path, Vec<(vect3f, vect3f)>, Vec<(vect3f, u
         poses: refs::Deque::new(),
         landmarks: refs::Arena::new(),
         pose_pairs: std::vec::Vec::new(),
-        drift_lm_isigma: 1.0 / drift_lm_sigma,
+        drift_rho_isigma: 1.0 / drift_rho_sigma,
         tilt_isigma: 1.0 / tilt_sigma_rad,
         frine_isigma_scale: 1.0,
         frine_c2: 2.99,
@@ -538,20 +560,33 @@ fn build_path(cfg: &SceneConfig) -> (Path, Vec<(vect3f, vect3f)>, Vec<(vect3f, u
     // odometry.
     let pose_refs: std::vec::Vec<Ref<Pose>> = path.poses.refs().collect();
 
-    // Build landmarks with frines
+    // Build landmarks with frines. The anchor is the middlest observing
+    // pose (median of the observing pose indices), snapshotted at its
+    // initial position; direction and inverse range initialize from the
+    // noisy landmark guess.
     for (li, &(lm_pos, _)) in gt_landmarks.iter().enumerate() {
         let noisy_lm = vect3f::new(
             lm_pos.x + 0.5 * rng.sample(normal01) as f32,
             lm_pos.y + 0.5 * rng.sample(normal01) as f32,
             lm_pos.z + 0.3 * rng.sample(normal01) as f32,
         );
+        let obs: std::vec::Vec<usize> = frine_data.iter()
+            .filter(|(lmi, _, _)| *lmi == li)
+            .map(|(_, pose_i, _)| *pose_i)
+            .collect();
+        if obs.is_empty() { continue; } // skip landmarks with no observations
         let frines: std::vec::Vec<PointFrine> = frine_data.iter()
             .filter(|(lmi, _, _)| *lmi == li)
             .map(|(_, pose_i, feature)| PointFrine { pose: pose_refs[*pose_i], feature: *feature, hb: CrossBlock::new() })
             .collect();
-        if frines.is_empty() { continue; } // skip landmarks with no observations
+        let anchor_pose = pose_refs[obs[obs.len() / 2]];
+        let anchor = path.poses[anchor_pose].r2w.translation;
+        let d = noisy_lm - anchor;
         path.landmarks.push(PointLandmark {
-            pos: Param::new(noisy_lm),
+            anchor,
+            anchor_pose,
+            dir: UnitVecParamF::new(d),
+            rho: Param::new(1.0 / d.norm()),
             frines,
             hb_drift: SelfBlock::new(),
         });
@@ -673,9 +708,10 @@ fn main() {
     }
 
     // Graduated optimization: start with loose feature constraints, tighten.
-    // The ramp only changes `frine_isigma_scale` (a non-param field) between
-    // passes, so one LmSession carries the solves: the sparsity analysis
-    // from pass 1 is reused warm by the later passes.
+    // Between passes only non-param fields and param VALUES change (the
+    // isigma scale, and the landmark re-anchoring), so one LmSession
+    // carries the solves: the sparsity analysis from pass 1 is reused
+    // warm by the later passes.
     println!("--- Optimization ---");
     let isigma_scales: std::vec::Vec<f32> = if std::env::var("SINGLE_PASS").is_ok() {
         vec![1.0]
@@ -696,6 +732,28 @@ fn main() {
             let result = session.solve(path, &config);
             println!("  {} iterations, cost {:.4} -> {:.4}",
                 result.iterations, result.start_cost, result.end_cost);
+            if pass + 1 < scales.len() {
+                reanchor_landmarks(path);
+            }
+        }
+    }
+
+    // Move each landmark's anchor to its anchor pose's CURRENT position
+    // and re-express direction + inverse range there, so the anchor stays
+    // near the rays as the poses converge. Values only -- the session's
+    // structure is untouched. Landmarks at (near) infinity keep their ray.
+    fn reanchor_landmarks(path: &mut Path) {
+        let (poses, landmarks) = (&path.poses, &mut path.landmarks);
+        for lm in landmarks.iter_mut() {
+            if lm.rho.value.abs() < 1e-4 { continue; }
+            let world = lm.anchor + lm.dir.unit * (1.0 / lm.rho.value);
+            let c_new = poses[lm.anchor_pose].r2w.translation;
+            let d = world - c_new;
+            let n = d.norm();
+            if n < 1e-3 { continue; }
+            lm.anchor = c_new;
+            lm.dir.unit = d * (1.0 / n);
+            lm.rho.value = 1.0 / n;
         }
     }
 
@@ -822,18 +880,28 @@ fn main() {
         // Optimized vector from closest opt pose to opt landmark in opt pose's local frame
         let opt_pose = &path.poses[closest_idx];
         let opt_mr2w = opt_pose.r2w.rotation_matrix;
-        let opt_vec = opt_mr2w.transpose() * (lm.pos.value - opt_pose.r2w.translation);
+        let lm_world = lm.anchor + lm.dir.unit * (1.0 / lm.rho.value);
+        let opt_vec = opt_mr2w.transpose() * (lm_world - opt_pose.r2w.translation);
         let err = (opt_vec - gt_vec).norm();
         let gt_dist = gt_vec.norm();
         let rel_pct = 100.0 * err / gt_dist;
 
-        if let Some(ref cov) = cov {
-            // TransformParam marginal order is [w (rotation); d
-            // (translation)], with d measured in the pose's reference
-            // rotation frame: at convergence (w = 0) the world translation
-            // block is R * C_dd * R^T, and the landmark cross block picks
-            // the d columns and rotates on the pose side.
-            let c_ll = cov.marginal_cov(lm);
+        // The landmark marginal is [dir chart (2); rho]; map it to world
+        // position covariance with J = [unit_d / rho, -unit / rho^2] (the
+        // anchor is constant data). Near-infinity landmarks (rho ~ 0)
+        // have no finite position covariance and print without sigma.
+        // The pose marginal is TransformParam's [w (rotation); d
+        // (translation)], d in the reference rotation frame: the world
+        // translation block is R * C_dd * R^T.
+        let sigmas = cov.as_ref().filter(|_| lm.rho.value.abs() >= 1e-4).map(|cov| {
+            let rho = lm.rho.value as f64;
+            let (u, ud) = (lm.dir.unit, lm.dir.unit_d);
+            let j = nalgebra::DMatrix::from_row_slice(3, 3, &[
+                ud[0].x as f64 / rho, ud[1].x as f64 / rho, -(u.x as f64) / (rho * rho),
+                ud[0].y as f64 / rho, ud[1].y as f64 / rho, -(u.y as f64) / (rho * rho),
+                ud[0].z as f64 / rho, ud[1].z as f64 / rho, -(u.z as f64) / (rho * rho),
+            ]);
+            let c_ll = &j * cov.marginal_cov(lm) * j.transpose();
             let m = opt_mr2w;
             let r = nalgebra::DMatrix::from_row_slice(3, 3, &[
                 m[0].x as f64, m[0].y as f64, m[0].z as f64,
@@ -842,19 +910,22 @@ fn main() {
             ]);
             let c_dd = cov.marginal_cov(opt_pose).view((3, 3), (3, 3)).into_owned();
             let c_pp = &r * c_dd * r.transpose();
-            let c_lp = cov.cross_cov(lm, opt_pose).view((0, 3), (3, 3)).into_owned()
+            let c_lp = &j * cov.cross_cov(lm, opt_pose).view((0, 3), (3, 3)).into_owned()
                 * r.transpose();
             let cov_rel = &c_ll + &c_pp - &c_lp - c_lp.transpose();
             let eigen = nalgebra::SymmetricEigen::new(cov_rel);
-            let mut sigmas = [
+            let mut sg = [
                 eigen.eigenvalues[0].max(0.0).sqrt(),
                 eigen.eigenvalues[1].max(0.0).sqrt(),
                 eigen.eigenvalues[2].max(0.0).sqrt(),
             ];
-            sigmas.sort_by(|a, b| b.partial_cmp(a).unwrap());
+            sg.sort_by(|a, b| b.partial_cmp(a).unwrap());
+            sg
+        });
+        if let Some(sg) = sigmas {
             println!("LM {:3}: |d|={:.3}m  rel={:.2}%  dist={:.1}m  sigma=({:.3},{:.3},{:.3})m  frines={}",
-                i, err, rel_pct, gt_dist, sigmas[0], sigmas[1], sigmas[2], lm.frines.len());
-            max_sigmas.push(sigmas[0]);
+                i, err, rel_pct, gt_dist, sg[0], sg[1], sg[2], lm.frines.len());
+            max_sigmas.push(sg[0]);
         } else {
             println!("LM {:3}: |d|={:.3}m  rel={:.2}%  dist={:.1}m  frines={}",
                 i, err, rel_pct, gt_dist, lm.frines.len());
