@@ -780,6 +780,14 @@ and their Jacobians) and accumulate them into `SelfBlock` /
 
 See [examples/slam_demo.rs](../examples/slam_demo.rs).
 
+[examples/slam_demo_gm.rs](../examples/slam_demo_gm.rs) is the same
+scene on newer machinery: a Geman-McClure or Cauchy block loss
+(`--loss gm|cauchy`) on the feature and GPS residuals instead of the
+per-element starship wrap, a `TransformParam` pose, anchored
+inverse-depth landmarks (`UnitVecParam` direction + inverse range,
+re-anchored between ramp passes), trig-free chord residuals, and the
+graduated ramp run through one `LmSession`.
+
 For a stripped-down 2D variant used in teaching slides --
 `pose = (x, y, gamma)`, single bearing per landmark, first pose
 anchored at the origin -- see

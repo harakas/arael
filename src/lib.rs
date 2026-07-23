@@ -1944,6 +1944,13 @@
 //!   40 landmarks, odometry + tilt + GPS + feature observations.
 //!   Full verbose-LM trace across graduated isigma passes -- the
 //!   reference for what a healthy solver run looks like.
+//! - **[`slam_demo_gm`](https://github.com/harakas/arael/blob/master/examples/slam_demo_gm.rs)**
+//!   -- the same scene on newer machinery: selectable Geman-McClure /
+//!   Cauchy block loss (`--loss gm|cauchy`) instead of the per-element
+//!   starship wrap, a `TransformParam` pose, anchored inverse-depth
+//!   landmarks (`UnitVecParam` direction + inverse range, re-anchored
+//!   between ramp passes), trig-free chord residuals, and the
+//!   graduated ramp through one `LmSession`.
 //! - **[`loc_demo`](https://github.com/harakas/arael/blob/master/examples/loc_demo.rs)**
 //!   -- localisation with fixed known landmarks (no gauge freedom).
 //!   Block-tridiagonal Hessian + band solver. Graduated-isigma
