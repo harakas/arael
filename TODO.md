@@ -1,5 +1,17 @@
 # TODO
 
+- **Cross-crate export of `#[arael::function]` user functions**. The
+  model export bundle (`export_models!()` / `arael_import!()`) carries
+  structs and enums only; an imported constraint body calling a user
+  function defined in the model crate fails with the existing "unknown
+  function" error at the importing root. The same token-bundling
+  mechanism applies; not done because no exported model uses one yet.
+
+- **JSON sidecar emitter for model layouts**. The export bundle is Rust
+  tokens consumed by rustc; external (non-Rust) tooling that wants to
+  read model descriptions would need a serialized form of the layout
+  registry. Deferred until a tool needs it.
+
 - **Generic models** -- DONE (2026-07-22) for components, entities and
   constraint structs: one scalar type parameter bounded by `Float`, one
   instantiation per entity name per root (mixing `Vec<Pose<f32>>` and

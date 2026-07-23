@@ -1,4 +1,4 @@
-error: collection element type `Later` has no registered #[arael::model] layout: define it BEFORE the root struct (macro expansion is top-down file order) and in the same crate
+error: collection element type `Later` has no registered #[arael::model] layout: define it (or import its crate's arael_import! bundle) BEFORE the root struct -- macro expansion is top-down file order within one crate
   --> tests/constraint_attr_errors/root_before_entity.rs:12:5
    |
 12 |     items: refs::Vec<Later>,

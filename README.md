@@ -20,6 +20,7 @@ Solve problems like linear and nonlinear regression, sensor fusion, SLAM, bundle
 - [Solvers](#solvers)
 - [Parameter Covariance](#parameter-covariance)
 - [Runtime Differentiation](#runtime-differentiation)
+- [Cross-Crate Models](#cross-crate-models)
 - [Instrumentation and troubleshooting](#instrumentation-and-troubleshooting)
   - [My solve doesn't converge. What do I check?](#my-solve-doesnt-converge-what-do-i-check)
   - [Looking under the hood with `cargo expand`](#looking-under-the-hood-with-cargo-expand)
@@ -44,6 +45,7 @@ Solve problems like linear and nonlinear regression, sensor fusion, SLAM, bundle
 - **Warm re-solve** -- `LmSession` keeps what a solve learns about the problem's structure (pattern, ordering, symbolic factorization) so repeated solves of the same problem skip the analysis
 - **f32 and f64 precision** -- `#[arael(root)]` for f64, `#[arael(root, f32)]` for f32 throughout
 - **Model trait** -- hierarchical serialize/deserialize/update protocol for parameter optimization
+- **Cross-crate models** -- `arael::export_models!()` bundles a crate's pub models; the importing crate registers them all with one `arael_import!()` and builds its own models and roots over them
 - **Type-safe references** -- `Ref<T>`, `Vec<T>`, `Deque<T>`, `Arena<T>` for indexed collections with stable references
 - **Runtime differentiation** -- parse equations from strings at runtime, auto-differentiate symbolically, and optimize via `ExtendedModel` + `TripletBlock` (used by the sketch editor for parametric expression dimensions)
 - **User-defined functions** -- plug custom symbolic or native-eval operators into constraint bodies with `#[arael::function]`.
@@ -567,6 +569,48 @@ cargo run --example runtime_fit_demo -- "a * sin(x * b) + c"   # sinusoidal
 ```
 
 Full source: [examples/runtime_fit_demo.rs](examples/runtime_fit_demo.rs).
+
+## Cross-Crate Models
+
+A crate can share its models. After all `#[arael::model]` definitions
+(macro expansion is top-down -- the bottom of lib.rs is the natural
+place), emit the crate's import macro:
+
+```rust,ignore
+arael::export_models!();
+```
+
+Every `pub` model struct and enum defined above the invocation joins the
+bundle. An importing crate registers all of them in one line, before
+defining its own models over them:
+
+```rust,ignore
+use model_crate::{Pose, Frine};
+model_crate::arael_import!();
+```
+
+After that the imported types work like local ones: component fields,
+`Ref<Pose>` on local constraint structs, `CrossBlock<Pose, Local>`,
+local roots over imported entities, at either precision. Importing the
+same bundle twice (diamond dependencies) is harmless, and a model crate
+that imports another and calls `export_models!()` re-exports what it
+imported.
+
+Rules:
+
+- Exported structs need `pub` fields -- generated code in the importing
+  crate reads them directly. A `pub` struct with a non-pub field still
+  compiles but is excluded from the bundle; an importer that reaches for
+  it gets an error naming the field. `#[arael(skip)]` fields may stay
+  private.
+- Roots and `fit(...)` structs are not importable: their generated
+  solvers are already ordinary pub API.
+- An imported constraint struct keeps its `root.<field>` resolution
+  paths: the importing root must name its collections as the model
+  crate's constraints expect.
+- The bundle records each struct's param count; the importer recomputes
+  it from the same tokens and fails the build on mismatch (incompatible
+  arael-macros versions between the two crates).
 
 ## Instrumentation and troubleshooting
 

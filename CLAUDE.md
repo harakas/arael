@@ -5,6 +5,7 @@
  * We use following euler angles and coordinate system convention: x is roll, y is pitch, z is yaw. Axes are x=forward, y=left, z=up. And rotation=rot(ea.z)*rot(ea.y)*rot(ea.x).
  * When committing a sub-crate/component, prefix commit message with `<component name>: message`
  * When updating README.md also update src/lib.rs crate documentation -- and the other way around
+ * export-tests/ is a standalone mini-workspace (like benchmarks/) proving cross-crate model export/import; run `cargo test` inside it after macro or model-API changes.
  * Run `cargo audit` periodically to check dependencies for known vulnerabilities.
  * Arael-sketch has command interface and MCP server to allow outside agents to use it. It is documented in ./arael-sketch-backend/docs/COMMANDS.md -- when adding new ui features, also add commands to accomplish the same programmatically/by agent.
  * When leaving things unimplemented in the plan, add them into TODO.md with explanation why they weren't implemented.

@@ -370,6 +370,48 @@ entity identically (one instantiation per root). See
 `tests/generic_entity.rs` for a generic entity/constraint model with
 f64 and f32 roots.
 
+### Exporting models to other crates
+
+A crate can share its models. After all `#[arael::model]` definitions
+(macro expansion is top-down -- the bottom of lib.rs is the natural
+place), emit the crate's import macro:
+
+```rust,ignore
+arael::export_models!();
+```
+
+Every `pub` model struct and enum defined above the invocation joins the
+bundle. An importing crate registers all of them in one line, before
+defining its own models over them:
+
+```rust,ignore
+use model_crate::{Pose, Frine};
+model_crate::arael_import!();
+```
+
+After that the imported types work like local ones: component fields,
+`Ref<Pose>` on local constraint structs, `CrossBlock<Pose, Local>`,
+local roots over imported entities, at either precision. Importing the
+same bundle twice (diamond dependencies) is harmless, and a model crate
+that imports another and calls `export_models!()` re-exports what it
+imported.
+
+Rules:
+
+- Exported structs need `pub` fields -- generated code in the importing
+  crate reads them directly. A `pub` struct with a non-pub field still
+  compiles but is excluded from the bundle; an importer that reaches for
+  it gets an error naming the field. `#[arael(skip)]` fields may stay
+  private.
+- Roots and `fit(...)` structs are not importable: their generated
+  solvers are already ordinary pub API.
+- An imported constraint struct keeps its `root.<field>` resolution
+  paths: the importing root must name its collections as the model
+  crate's constraints expect.
+- The bundle records each struct's param count; the importer recomputes
+  it from the same tokens and fails the build on mismatch (incompatible
+  arael-macros versions between the two crates).
+
 Constraints can also appear on the root itself -- useful for
 regularising root-level parameters (see `global_delta_drift` and
 `global_rot_drift` on `Path` in `loc_global_demo.rs`).

@@ -195,6 +195,21 @@ impl UserFunction {
     }
 }
 
+/// One `pub` model struct's contribution to the crate's export bundle
+/// (`arael::export_models!()` -> the crate's `arael_import!` macro).
+#[derive(Clone)]
+struct ExportEntry {
+    name: String,
+    /// Original struct tokens, before block rewriting and attr stripping.
+    tokens: String,
+    /// Param count computed at definition time; the importer recomputes
+    /// from the tokens and cross-checks (catches macro version skew).
+    param_count: u32,
+    /// Why the struct is NOT importable (a non-pub field), if so. Carried
+    /// as a tombstone so the importer's failure names the reason.
+    excluded: Option<String>,
+}
+
 struct Registry {
     // BTreeMap: parent-struct scans iterate layouts to find the struct
     // containing a given child type; HashMap order made that pick (and
@@ -211,6 +226,17 @@ struct Registry {
     /// a set of types with no CrossBlock among them is provably
     /// uncoupled -- exactly what marginalization requires.
     cross_pairs: std::collections::BTreeSet<(String, String)>,
+    /// Export bundle accumulated in definition order (which IS dependency
+    /// order -- the crate could not compile otherwise). Drained into the
+    /// crate's `arael_import!` macro by `export_models!()`.
+    exports: Vec<ExportEntry>,
+    /// Names already imported via `__register_model!` this session --
+    /// a diamond import (the same bundle reached twice) re-validates the
+    /// layout but must not stash constraints or emit consts again.
+    imported: std::collections::HashSet<String>,
+    /// Tombstones: types that exist in an imported crate but were not
+    /// exported, with the reason. Lookup failures report these precisely.
+    excluded: HashMap<String, String>,
 }
 
 static SYM_REGISTRY: Mutex<Option<Registry>> = Mutex::new(None);
@@ -221,7 +247,43 @@ fn registry_init() -> Registry {
         constraints: Vec::new(),
         functions: HashMap::new(),
         cross_pairs: std::collections::BTreeSet::new(),
+        exports: Vec::new(),
+        imported: std::collections::HashSet::new(),
+        excluded: HashMap::new(),
     }
+}
+
+/// Append to the export bundle; a name already present (a transitively
+/// re-imported struct next to a direct import) keeps its first entry.
+fn registry_stash_export(entry: ExportEntry) {
+    let mut guard = SYM_REGISTRY.lock().unwrap_or_else(|p| p.into_inner());
+    let reg = guard.get_or_insert_with(registry_init);
+    if !reg.exports.iter().any(|e| e.name == entry.name) {
+        reg.exports.push(entry);
+    }
+}
+
+fn registry_exports() -> Vec<ExportEntry> {
+    let guard = SYM_REGISTRY.lock().unwrap_or_else(|p| p.into_inner());
+    guard.as_ref().map(|r| r.exports.clone()).unwrap_or_default()
+}
+
+/// Mark a type as imported; false if it already was (diamond import).
+fn registry_mark_imported(name: &str) -> bool {
+    let mut guard = SYM_REGISTRY.lock().unwrap_or_else(|p| p.into_inner());
+    let reg = guard.get_or_insert_with(registry_init);
+    reg.imported.insert(name.to_string())
+}
+
+fn registry_store_tombstone(name: &str, reason: &str) {
+    let mut guard = SYM_REGISTRY.lock().unwrap_or_else(|p| p.into_inner());
+    let reg = guard.get_or_insert_with(registry_init);
+    reg.excluded.entry(name.to_string()).or_insert_with(|| reason.to_string());
+}
+
+pub(crate) fn registry_excluded_reason(name: &str) -> Option<String> {
+    let guard = SYM_REGISTRY.lock().unwrap_or_else(|p| p.into_inner());
+    guard.as_ref().and_then(|r| r.excluded.get(name).cloned())
 }
 
 /// Record a `CrossBlock<A, B>` coupling (unordered; stored sorted).
@@ -635,6 +697,220 @@ pub fn model(_attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 }
 
+/// Emit this crate's `arael_import!` macro, carrying every `pub`
+/// `#[arael::model]` struct and enum defined ABOVE this invocation
+/// (macro expansion is top-down: place it after all model definitions,
+/// e.g. at the bottom of lib.rs). An importing crate then registers all
+/// of them in one line:
+///
+/// ```ignore
+/// use model_crate::{Pose, Frine};
+/// model_crate::arael_import!();   // before defining models over them
+/// ```
+///
+/// A `pub` struct with a non-pub field is carried as a tombstone: it
+/// cannot be used from another crate (generated code reads fields
+/// directly), and the importer's error says which field.
+#[proc_macro]
+pub fn export_models(input: TokenStream) -> TokenStream {
+    if !input.is_empty() {
+        return syn::Error::new(proc_macro2::Span::call_site(),
+            "export_models! takes no arguments").to_compile_error().into();
+    }
+    let entries = registry_exports();
+    let mut body = TokenStream2::new();
+    let mut names: Vec<String> = Vec::new();
+    for e in &entries {
+        let name_ident = syn::Ident::new(&e.name, proc_macro2::Span::call_site());
+        if let Some(reason) = &e.excluded {
+            body.extend(quote! {
+                ::arael::__register_model! { @excluded #name_ident #reason ; }
+            });
+        } else {
+            let toks: TokenStream2 = match e.tokens.parse() {
+                Ok(t) => t,
+                Err(err) => return syn::Error::new(proc_macro2::Span::call_site(),
+                    format!("internal: stashed tokens for `{}` do not re-parse: {}",
+                        e.name, err)).to_compile_error().into(),
+            };
+            let count = e.param_count as usize;
+            body.extend(quote! {
+                ::arael::__register_model! { @expect #name_ident #count ; #toks }
+            });
+            names.push(e.name.clone());
+        }
+    }
+    let doc = format!(
+        "Registers this crate's arael model layouts ({}) in the importing \
+         crate's macro session. Invoke before defining models over them.",
+        names.join(", "));
+    quote! {
+        #[doc = #doc]
+        #[macro_export]
+        macro_rules! arael_import {
+            () => { #body };
+        }
+    }.into()
+}
+
+/// Cross-crate registration: re-runs the registration half of
+/// `#[arael::model]` on a struct's original tokens inside the IMPORTING
+/// crate's macro session, emitting only the `<Name>_PARAM_COUNT` const
+/// (which block rewrites in the importing crate resolve). Invoked by the
+/// `arael_import!` macros that `export_models!()` generates.
+#[doc(hidden)]
+#[proc_macro]
+pub fn __register_model(input: TokenStream) -> TokenStream {
+    match register_model_import(input.into()) {
+        Ok(tokens) => tokens.into(),
+        Err(e) => e.to_compile_error().into(),
+    }
+}
+
+fn register_model_import(ts: TokenStream2) -> syn::Result<TokenStream2> {
+    let sp = proc_macro2::Span::call_site();
+    let mut iter = ts.into_iter().peekable();
+
+    // Optional header: `@expect Name COUNT ;` or `@excluded Name "reason" ;`
+    let mut expect: Option<(String, usize)> = None;
+    if matches!(iter.peek(), Some(proc_macro2::TokenTree::Punct(p)) if p.as_char() == '@') {
+        iter.next();
+        let kind = match iter.next() {
+            Some(proc_macro2::TokenTree::Ident(id)) => id.to_string(),
+            other => return Err(syn::Error::new(sp,
+                format!("expected `expect` or `excluded` after `@`, got {:?}", other))),
+        };
+        let name = match iter.next() {
+            Some(proc_macro2::TokenTree::Ident(id)) => id.to_string(),
+            other => return Err(syn::Error::new(sp,
+                format!("expected a type name, got {:?}", other))),
+        };
+        let payload = iter.next();
+        match iter.next() {
+            Some(proc_macro2::TokenTree::Punct(p)) if p.as_char() == ';' => {}
+            other => return Err(syn::Error::new(sp,
+                format!("expected `;` after the @{} header, got {:?}", kind, other))),
+        }
+        match kind.as_str() {
+            "excluded" => {
+                let reason = match payload {
+                    Some(proc_macro2::TokenTree::Literal(l)) =>
+                        syn::parse_str::<syn::LitStr>(&l.to_string())
+                            .map(|s| s.value())
+                            .unwrap_or_else(|_| l.to_string()),
+                    other => return Err(syn::Error::new(sp,
+                        format!("expected a reason string, got {:?}", other))),
+                };
+                registry_store_tombstone(&name, &reason);
+                registry_stash_export(ExportEntry {
+                    name, tokens: String::new(), param_count: 0,
+                    excluded: Some(reason),
+                });
+                return Ok(TokenStream2::new());
+            }
+            "expect" => {
+                let count = match payload {
+                    Some(proc_macro2::TokenTree::Literal(l)) =>
+                        l.to_string().trim_end_matches("usize").parse::<usize>()
+                            .map_err(|_| syn::Error::new(sp,
+                                format!("bad param count literal `{}`", l)))?,
+                    other => return Err(syn::Error::new(sp,
+                        format!("expected a param count, got {:?}", other))),
+                };
+                expect = Some((name, count));
+            }
+            other => return Err(syn::Error::new(sp,
+                format!("unknown @{} header", other))),
+        }
+    }
+
+    let rest: TokenStream2 = iter.collect();
+    let original_tokens = rest.to_string();
+    let mut input: syn::DeriveInput = syn::parse2(rest)?;
+    let name = input.ident.clone();
+
+    if has_struct_attr_ident(&input.attrs, "root") {
+        return Err(syn::Error::new_spanned(&input.ident,
+            format!("`{}` is a #[arael(root)] and cannot be imported -- its \
+                     generated solver is already ordinary pub API", name)));
+    }
+    if parse_fit_attr(&input.attrs)?.is_some() {
+        return Err(syn::Error::new_spanned(&input.ident,
+            format!("`{}` is a #[arael(fit(...))] struct and cannot be imported", name)));
+    }
+
+    // Diamond import: re-registration validates the layout is identical
+    // (registry_store errors otherwise) but must not stash constraints or
+    // emit the const again.
+    let newly = registry_mark_imported(&name.to_string());
+
+    if matches!(input.data, syn::Data::Enum(_)) {
+        register_enum_layout(&name)?;
+        return Ok(TokenStream2::new());
+    }
+
+    let param_count = register_model_layout(&input)?;
+    if let Some((exp_name, exp_count)) = &expect {
+        if *exp_name != name.to_string() || *exp_count != param_count as usize {
+            return Err(syn::Error::new_spanned(&input.ident,
+                format!("imported `{}` computes {} params but its defining crate \
+                         recorded {} -- the two crates were built with \
+                         incompatible arael-macros versions",
+                        name, param_count, exp_count)));
+        }
+    }
+    if !newly {
+        return Ok(TokenStream2::new());
+    }
+
+    // Defense in depth: the bundle only carries structs that passed the
+    // field check at export, but hand-written invocations reach here too.
+    if let syn::Data::Struct(data) = &input.data
+        && let syn::Fields::Named(named) = &data.fields {
+            for f in &named.named {
+                let skipped = matches!(parse_arael_attr(&f.attrs),
+                    Ok(Some(AraelAttr::Skip)));
+                if !skipped && !matches!(f.vis, syn::Visibility::Public(_)) {
+                    return Err(syn::Error::new_spanned(&input.ident,
+                        format!("cannot import `{}`: field `{}` is not pub -- \
+                                 generated code in this crate reads it directly",
+                                name, f.ident.as_ref().unwrap())));
+                }
+            }
+        }
+
+    // Rewrite block types on our copy: records CrossBlock coupling pairs
+    // in this session and makes the stashed constraint fields identical
+    // to what the defining crate's expansion stashed.
+    if let syn::Data::Struct(ref mut data) = input.data
+        && let syn::Fields::Named(ref mut named) = data.fields {
+            for field in named.named.iter_mut() {
+                rewrite_block_type(&mut field.ty);
+            }
+        }
+    if let syn::Data::Struct(data) = &input.data
+        && let syn::Fields::Named(named) = &data.fields {
+            stash_constraints(&name, &input.attrs, &named.named);
+        }
+
+    // Transitive export: a model crate that imports this bundle and calls
+    // export_models!() carries these structs along for ITS importers.
+    registry_stash_export(ExportEntry {
+        name: name.to_string(),
+        tokens: original_tokens,
+        param_count,
+        excluded: None,
+    });
+
+    let const_name = syn::Ident::new(&format!("{}_PARAM_COUNT", name), name.span());
+    let count_lit = param_count as usize;
+    Ok(quote! {
+        #[allow(non_upper_case_globals)]
+        #[doc(hidden)]
+        const #const_name: usize = #count_lit;
+    })
+}
+
 /// Register a user-defined function for use in `#[arael::model]`
 /// constraint bodies. Two forms:
 ///
@@ -658,6 +934,9 @@ pub fn function(attr: TokenStream, item: TokenStream) -> TokenStream {
 }
 
 fn model_attribute(input: &mut syn::DeriveInput) -> syn::Result<TokenStream2> {
+    // Original tokens, before block rewriting and attr stripping: what the
+    // export bundle carries for cross-crate re-registration.
+    let original_tokens = quote!(#input).to_string();
     let name = &input.ident;
 
     // Enums are treated as NOP leaves: zero params, trivial Model + ModelSym
@@ -667,6 +946,131 @@ fn model_attribute(input: &mut syn::DeriveInput) -> syn::Result<TokenStream2> {
     if matches!(input.data, syn::Data::Enum(_)) {
         return emit_trivial_model_for_enum(input);
     }
+
+    let param_count = register_model_layout(input)?;
+
+    // Every `pub` model struct joins the crate's export bundle
+    // (`arael::export_models!()` -> the crate's `arael_import!` macro).
+    // Roots and fit structs are not importable: their generated solvers
+    // are already ordinary pub API. A struct with a non-pub field rides
+    // along as a tombstone -- generated code in the importing crate reads
+    // fields directly, so it cannot be used there, and the tombstone lets
+    // the importer's failure say why.
+    if matches!(input.vis, syn::Visibility::Public(_))
+        && !has_struct_attr_ident(&input.attrs, "root")
+        && parse_fit_attr(&input.attrs)?.is_none()
+    {
+        let excluded = match &input.data {
+            syn::Data::Struct(data) => match &data.fields {
+                syn::Fields::Named(named) => named.named.iter().find_map(|f| {
+                    let skipped = matches!(parse_arael_attr(&f.attrs),
+                        Ok(Some(AraelAttr::Skip)));
+                    if skipped || matches!(f.vis, syn::Visibility::Public(_)) {
+                        None
+                    } else {
+                        Some(format!("field `{}` is not pub",
+                            f.ident.as_ref().unwrap()))
+                    }
+                }),
+                _ => None,
+            },
+            _ => None,
+        };
+        registry_stash_export(ExportEntry {
+            name: name.to_string(),
+            tokens: original_tokens,
+            param_count,
+            excluded,
+        });
+    }
+
+    // No field injection needed — SimpleEulerAngleParam/EulerAngleParam contain their own state.
+
+    // Re-read fields (no injection, but keep the pattern for compatibility)
+    let _fields = match &input.data {
+        syn::Data::Struct(data) => match &data.fields {
+            syn::Fields::Named(named) => &named.named,
+            _ => unreachable!(),
+        },
+        _ => unreachable!(),
+    };
+
+    // Rewrite SelfBlock<A> and CrossBlock<A, B> field types
+    if let syn::Data::Struct(ref mut data) = input.data
+        && let syn::Fields::Named(ref mut named) = data.fields {
+            for field in named.named.iter_mut() {
+                rewrite_block_type(&mut field.ty);
+            }
+        }
+
+    // Emit const
+    let const_name = syn::Ident::new(&format!("{}_PARAM_COUNT", name), name.span());
+    let param_count_lit = param_count as usize;
+
+    // Generate Model impl and friends using the (now-rewritten) struct
+    let model_impl = impl_model(input)?;
+
+    // Strip #[arael(...)] attributes from the emitted struct so they don't
+    // get re-interpreted as attribute macro invocations
+    input.attrs.retain(|attr| !attr.path().is_ident("arael"));
+    if let syn::Data::Struct(ref mut data) = input.data
+        && let syn::Fields::Named(ref mut named) = data.fields {
+            for field in named.named.iter_mut() {
+                field.attrs.retain(|attr| !attr.path().is_ident("arael"));
+            }
+        }
+
+    Ok(quote! {
+        #input
+        #[allow(non_upper_case_globals)]
+        const #const_name: usize = #param_count_lit;
+        #model_impl
+    })
+}
+
+
+/// Stash every `#[arael(constraint(...))]` on the struct for later
+/// generation at a root. Capture plain (file, line) data from span while
+/// we're still inside the originating invocation — Span itself doesn't
+/// survive the bridge but primitives do. Shared by the in-crate
+/// expansion and `__register_model!`; both call it with the
+/// block-REWRITTEN fields, so stashed content is identical either way.
+fn stash_constraints(
+    name: &syn::Ident,
+    attrs: &[syn::Attribute],
+    fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
+) {
+    let fields_ts = quote! { #fields };
+    for attr in attrs {
+        if !attr.path().is_ident("arael") { continue; }
+        let content: TokenStream2 = attr.parse_args().unwrap_or_default();
+        let tvec: Vec<proc_macro2::TokenTree> = content.into_iter().collect();
+        if tvec.is_empty() { continue; }
+        if let proc_macro2::TokenTree::Ident(ref id) = tvec[0]
+            && *id == "constraint" {
+                use syn::spanned::Spanned as _;
+                let attr_span = attr.span();
+                let label_hint = extract_constraint_label(&tvec)
+                    .unwrap_or_else(|| name.to_string());
+                let tokens: TokenStream2 = tvec.into_iter().collect();
+                registry_stash_constraint(StashedConstraint {
+                    struct_name: name.to_string(),
+                    attr_file: attr_span.file(),
+                    attr_line: attr_span.start().line as u32,
+                    label_hint,
+                    attr_tokens: tokens.to_string(),
+                    fields_tokens: fields_ts.to_string(),
+                });
+            }
+    }
+}
+
+/// The registration half of `#[arael::model]`: validate the struct,
+/// compute its layout, and store it in the session registry. Shared by
+/// the in-crate expansion and `__register_model!` (cross-crate import),
+/// which registers without emitting. Returns the struct's param count.
+fn register_model_layout(input: &syn::DeriveInput) -> syn::Result<u32> {
+    let name = &input.ident;
 
     // Compute PARAM_COUNT from Param<T> fields
     let fields = match &input.data {
@@ -779,6 +1183,30 @@ fn model_attribute(input: &mut syn::DeriveInput) -> syn::Result<TokenStream2> {
                 "universal" => universal_euler_angle_fields_reg.push(field_name.clone()),
                 "universal_rotvec" => universal_rotvec_fields_reg.push(field_name.clone()),
                 _ => {}
+            }
+        }
+        // A field whose type was TOMBSTONED by an imported bundle (a pub
+        // struct with non-pub fields) can never work here -- generated
+        // code reads its fields directly. Fail with the recorded reason
+        // instead of silently misclassifying it as plain data.
+        {
+            let mut inner_names: Vec<String> = Vec::new();
+            if let syn::Type::Path(tp) = &field.ty
+                && let Some(seg) = tp.path.segments.last() {
+                    inner_names.push(seg.ident.to_string());
+                }
+            for wrapper in ["Ref", "Vec", "Deque", "Arena", "Option"] {
+                if let Some((_, id)) = extract_wrapper_inner(&field.ty, wrapper) {
+                    inner_names.push(id.to_string());
+                }
+            }
+            for n in inner_names {
+                if registry_lookup(&n).is_none()
+                    && let Some(reason) = registry_excluded_reason(&n) {
+                        return Err(syn::Error::new_spanned(field,
+                            format!("`{}` was not exported by its defining \
+                                     crate: {}", n, reason)));
+                    }
             }
         }
         // Component-typed fields fold their params into this struct's count
@@ -896,62 +1324,16 @@ fn model_attribute(input: &mut syn::DeriveInput) -> syn::Result<TokenStream2> {
         self_block_field: self_block_field_reg,
     }).map_err(|msg| syn::Error::new_spanned(name, msg))?;
 
-    // No field injection needed — SimpleEulerAngleParam/EulerAngleParam contain their own state.
-
-    // Re-read fields (no injection, but keep the pattern for compatibility)
-    let _fields = match &input.data {
-        syn::Data::Struct(data) => match &data.fields {
-            syn::Fields::Named(named) => &named.named,
-            _ => unreachable!(),
-        },
-        _ => unreachable!(),
-    };
-
-    // Rewrite SelfBlock<A> and CrossBlock<A, B> field types
-    if let syn::Data::Struct(ref mut data) = input.data
-        && let syn::Fields::Named(ref mut named) = data.fields {
-            for field in named.named.iter_mut() {
-                rewrite_block_type(&mut field.ty);
-            }
-        }
-
-    // Emit const
-    let const_name = syn::Ident::new(&format!("{}_PARAM_COUNT", name), name.span());
-    let param_count_lit = param_count as usize;
-
-    // Generate Model impl and friends using the (now-rewritten) struct
-    let model_impl = impl_model(input)?;
-
-    // Strip #[arael(...)] attributes from the emitted struct so they don't
-    // get re-interpreted as attribute macro invocations
-    input.attrs.retain(|attr| !attr.path().is_ident("arael"));
-    if let syn::Data::Struct(ref mut data) = input.data
-        && let syn::Fields::Named(ref mut named) = data.fields {
-            for field in named.named.iter_mut() {
-                field.attrs.retain(|attr| !attr.path().is_ident("arael"));
-            }
-        }
-
-    Ok(quote! {
-        #input
-        #[allow(non_upper_case_globals)]
-        const #const_name: usize = #param_count_lit;
-        #model_impl
-    })
+    Ok(param_count)
 }
 
 /// Emit a trivial Model + ModelSym impl for a data-less enum. All Model
 /// methods are no-ops, PARAM_COUNT is 0, and the ModelSym companion is an
 /// empty struct. The enum itself is emitted unchanged (attributes stripped).
-fn emit_trivial_model_for_enum(input: &mut syn::DeriveInput) -> syn::Result<TokenStream2> {
-    let name = &input.ident;
-    let sym_name = syn::Ident::new(&format!("{}Sym", name), name.span());
-    let const_name = syn::Ident::new(&format!("{}_PARAM_COUNT", name), name.span());
-    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
-
-    // Register a zero-field sym layout so constraint macros that look up
-    // this type find an entry (important if the enum is ever used as a
-    // nested struct field type in constraint bodies).
+/// Register a zero-field sym layout so constraint macros that look up
+/// this type find an entry (important if the enum is ever used as a
+/// nested struct field type in constraint bodies).
+fn register_enum_layout(name: &syn::Ident) -> syn::Result<()> {
     registry_store(&name.to_string(), SymLayout {
         fields: Vec::new(),
         collection_fields: Vec::new(),
@@ -965,7 +1347,28 @@ fn emit_trivial_model_for_enum(input: &mut syn::DeriveInput) -> syn::Result<Toke
         component: false,
         constraint_index_field: None,
         self_block_field: None,
-    }).map_err(|msg| syn::Error::new_spanned(name, msg))?;
+    }).map_err(|msg| syn::Error::new_spanned(name, msg))
+}
+
+fn emit_trivial_model_for_enum(input: &mut syn::DeriveInput) -> syn::Result<TokenStream2> {
+    let original_tokens = quote!(#input).to_string();
+    let name = &input.ident;
+    let sym_name = syn::Ident::new(&format!("{}Sym", name), name.span());
+    let const_name = syn::Ident::new(&format!("{}_PARAM_COUNT", name), name.span());
+    let (impl_generics, ty_generics, where_clause) = input.generics.split_for_impl();
+
+    register_enum_layout(name)?;
+
+    // Pub enums join the export bundle like structs: an imported entity
+    // may carry a field of this enum type.
+    if matches!(input.vis, syn::Visibility::Public(_)) {
+        registry_stash_export(ExportEntry {
+            name: name.to_string(),
+            tokens: original_tokens,
+            param_count: 0,
+            excluded: None,
+        });
+    }
 
     // Strip any #[arael(...)] attributes from the emitted item.
     input.attrs.retain(|attr| !attr.path().is_ident("arael"));
@@ -1697,34 +2100,7 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
     };
 
     // Check for #[arael(constraint(...))] — stash ALL constraints for later generation.
-    // Capture plain (file, line) data from span while we're still inside the
-    // originating invocation — Span itself doesn't survive the bridge but
-    // primitives do.
-    {
-        let fields_ts = quote! { #fields };
-        for attr in &input.attrs {
-            if !attr.path().is_ident("arael") { continue; }
-            let content: TokenStream2 = attr.parse_args().unwrap_or_default();
-            let tvec: Vec<proc_macro2::TokenTree> = content.into_iter().collect();
-            if tvec.is_empty() { continue; }
-            if let proc_macro2::TokenTree::Ident(ref id) = tvec[0]
-                && *id == "constraint" {
-                    use syn::spanned::Spanned as _;
-                    let attr_span = attr.span();
-                    let label_hint = extract_constraint_label(&tvec)
-                        .unwrap_or_else(|| name.to_string());
-                    let tokens: TokenStream2 = tvec.into_iter().collect();
-                    registry_stash_constraint(StashedConstraint {
-                        struct_name: name.to_string(),
-                        attr_file: attr_span.file(),
-                        attr_line: attr_span.start().line as u32,
-                        label_hint,
-                        attr_tokens: tokens.to_string(),
-                        fields_tokens: fields_ts.to_string(),
-                    });
-                }
-        }
-    }
+    stash_constraints(name, &input.attrs, fields);
 
     // Check for #[arael(root)] or #[arael(root, f32)] — trigger generation of all stashed constraints
     let root_info = input.attrs.iter().find_map(|attr| {

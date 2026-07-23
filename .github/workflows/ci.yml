@@ -31,6 +31,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Run workspace tests
         run: cargo test --workspace
+      # Cross-crate model export/import is a two-crate property: the
+      # export-tests mini-workspace (outside the main workspace) is the
+      # only place it can be exercised.
+      - name: Run cross-crate export tests
+        run: cd export-tests && cargo test
 
   # Optional solver backends are behind cargo features and invisible to the
   # default build -- they must be compiled and tested explicitly (REVIEW.md

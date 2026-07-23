@@ -21,6 +21,7 @@
 //! - [Example: SLAM Constraints](#example-slam-constraints)
 //! - [Runtime Differentiation](#runtime-differentiation)
 //! - [Model Structure](#model-structure)
+//! - [Cross-Crate Models](#cross-crate-models)
 //! - [Solvers](#solvers)
 //! - [Parameter Covariance](#parameter-covariance)
 //! - [Instrumentation & Debugging](#instrumentation--debugging)
@@ -61,6 +62,9 @@
 //! - **f32 and f64 precision** -- `#[arael(root)]` for f64,
 //!   `#[arael(root, f32)]` for f32 throughout
 //! - **Model trait** -- hierarchical serialize/deserialize/update protocol
+//! - **Cross-crate models** -- `arael::export_models!()` bundles a
+//!   crate's pub models; the importing crate registers them all with one
+//!   `arael_import!()` and builds its own models and roots over them
 //! - **Type-safe references** -- `Ref<T>`, `Vec<T>`, `Deque<T>`, `Arena<T>`
 //! - **Runtime differentiation** -- parse equations from strings at runtime,
 //!   auto-differentiate symbolically, and optimize via `ExtendedModel` +
@@ -969,6 +973,48 @@
 //! [`examples/runtime_fit_demo.rs`](https://github.com/harakas/arael/blob/master/examples/runtime_fit_demo.rs)
 //! for the full pattern: runtime parse + compile-time differentiation
 //! of the parsed expression.
+//!
+//! # Cross-Crate Models
+//!
+//! A crate can share its models. After all `#[arael::model]`
+//! definitions (macro expansion is top-down -- the bottom of lib.rs is
+//! the natural place), emit the crate's import macro:
+//!
+//! ```ignore
+//! arael::export_models!();
+//! ```
+//!
+//! Every `pub` model struct and enum defined above the invocation joins
+//! the bundle. An importing crate registers all of them in one line,
+//! before defining its own models over them:
+//!
+//! ```ignore
+//! use model_crate::{Pose, Frine};
+//! model_crate::arael_import!();
+//! ```
+//!
+//! After that the imported types work like local ones: component
+//! fields, `Ref<Pose>` on local constraint structs,
+//! `CrossBlock<Pose, Local>`, local roots over imported entities, at
+//! either precision. Importing the same bundle twice (diamond
+//! dependencies) is harmless, and a model crate that imports another
+//! and calls `export_models!()` re-exports what it imported.
+//!
+//! Rules:
+//!
+//! - Exported structs need `pub` fields -- generated code in the
+//!   importing crate reads them directly. A `pub` struct with a non-pub
+//!   field still compiles but is excluded from the bundle; an importer
+//!   that reaches for it gets an error naming the field.
+//!   `#[arael(skip)]` fields may stay private.
+//! - Roots and `fit(...)` structs are not importable: their generated
+//!   solvers are already ordinary pub API.
+//! - An imported constraint struct keeps its `root.<field>` resolution
+//!   paths: the importing root must name its collections as the model
+//!   crate's constraints expect.
+//! - The bundle records each struct's param count; the importer
+//!   recomputes it from the same tokens and fails the build on mismatch
+//!   (incompatible arael-macros versions between the two crates).
 //!
 //! # Solvers
 //!
@@ -2024,6 +2070,12 @@ pub use arael_macros::Model;
 pub use arael_macros::model;
 /// Attribute macro: `#[arael::function]`.
 pub use arael_macros::function;
+/// Emit this crate's `arael_import!` macro carrying every `pub` model
+/// struct defined above the invocation; other crates register them all
+/// with `<crate>::arael_import!();`. See `docs/MODEL.md`.
+pub use arael_macros::export_models;
+#[doc(hidden)]
+pub use arael_macros::__register_model;
 
 /// One-stop imports for defining and solving models:
 /// `use arael::prelude::*;`.

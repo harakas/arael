@@ -1,0 +1,11 @@
+[package]
+name = "export-consumer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+arael = { path = "../.." }
+export-models = { path = "../models" }
+
+[dev-dependencies]
+trybuild = "1"

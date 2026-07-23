@@ -2571,10 +2571,16 @@ pub fn generate_root_methods(
                         && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
                         && let Ok(name) = type_ident_name(inner) {
                             if registry_lookup(&name).is_none() {
+                                if let Some(reason) = crate::registry_excluded_reason(&name) {
+                                    return Err(syn::Error::new_spanned(field,
+                                        format!("collection element type `{}` was not exported by its \
+                                                 defining crate: {}", name, reason)));
+                                }
                                 return Err(syn::Error::new_spanned(field,
                                     format!("collection element type `{}` has no registered #[arael::model] \
-                                             layout: define it BEFORE the root struct (macro expansion is \
-                                             top-down file order) and in the same crate", name)));
+                                             layout: define it (or import its crate's arael_import! bundle) \
+                                             BEFORE the root struct -- macro expansion is top-down file \
+                                             order within one crate", name)));
                             }
                             check_spelling(field, &name, inner)?;
                     } else {
