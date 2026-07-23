@@ -2,7 +2,7 @@
 // with two gross outliers. Three fits from one model, selected per solve by a
 // `mode` field that guards three constraints:
 //   0 naive     -- plain residual y - exp(m*x + c)
-//   1 cauchy    -- block loss loss_cauchy(s, 0.5)  (== Ceres CauchyLoss(0.5))
+//   1 cauchy    -- block loss loss_cauchy(s, 0.25)  (== Ceres CauchyLoss(0.5); the scale is squared)
 //   2 starship  -- per-element gamma*atan(r/gamma) wrapper
 //
 // The fit parameters m, c live on Curve. Each Obs is nested in a Batch (the
@@ -24,7 +24,7 @@ struct Curve {
 #[arael(constraint(curve.hb, parent = batch, guard = self.mode == 0, { // naive
     [obs.y - exp(curve.m * obs.x + curve.c)]
 }))]
-#[arael(constraint(curve.hb, parent = batch, guard = self.mode == 1, loss = |s| loss_cauchy(s, 0.5), { // cauchy
+#[arael(constraint(curve.hb, parent = batch, guard = self.mode == 1, loss = |s| loss_cauchy(s, 0.25), { // cauchy (squared scale)
     [obs.y - exp(curve.m * obs.x + curve.c)]
 }))]
 #[arael(constraint(curve.hb, parent = batch, guard = self.mode == 2, { // starship

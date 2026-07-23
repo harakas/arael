@@ -112,7 +112,7 @@ fn block_loss_cauchy_ignores_outliers() {
     data.push(Pt { x: -4.0, y: 40.0 });
 
     let (a_ols, b_ols) = ols(&data);
-    let mut m = CauchyModel { a: Param::new(0.0), b: Param::new(0.0), data, k: 0.5 };
+    let mut m = CauchyModel { a: Param::new(0.0), b: Param::new(0.0), data, k: 0.25 }; // squared scale (was norm-axis 0.5)
     let r = m.fit_with(&LmConfig { max_iters: 100, ..Default::default() });
     assert!(r.end_cost < r.start_cost);
 

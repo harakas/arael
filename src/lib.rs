@@ -1406,10 +1406,12 @@
 //! }))]
 //! ```
 //!
-//! The closure argument is the block squared norm; the scale (`k`, `c`)
-//! is on the norm axis, a sigma count for whitened residuals. Kernels
-//! `loss_huber`, `loss_cauchy`, and `loss_tukey` ship, or write any
-//! differentiable expression (`|s| s` is plain least squares). Unlike
+//! The closure argument is the block squared norm; the scale (`k2`,
+//! `c2`) is SQUARED, in the same chi-square units as `s` -- an inlier
+//! threshold like the chi-square quantile 7.815 goes in unchanged.
+//! Kernels `loss_huber`, `loss_cauchy`, `loss_tukey`, and
+//! `loss_geman_mcclure` ship, or write any differentiable expression
+//! (`|s| s` is plain least squares). Unlike
 //! the per-element wrapper this is a standard M-estimator: the
 //! down-weighting depends only on the block norm, so it is invariant to
 //! the residual axis orientation. Scaling by `rho'(s)` keeps the Hessian
@@ -1907,7 +1909,7 @@
 //! - **[`robust_curve_fitting`](https://github.com/harakas/arael/blob/master/examples/robust_curve_fitting.rs)**
 //!   -- fit `y = exp(m*x + c)` to data with two gross outliers: a
 //!   plain fit against a block Cauchy loss (`loss = |s|
-//!   loss_cauchy(s, 0.5)`) and the per-element starship wrapper. The
+//!   loss_cauchy(s, 0.25)`) and the per-element starship wrapper. The
 //!   robust fits recover the true parameters; the plain fit is
 //!   dragged off. Ports Ceres's robust_curve_fitting example.
 //! - **[`slam2d_simple_demo`](https://github.com/harakas/arael/blob/master/examples/slam2d_simple_demo.rs)**

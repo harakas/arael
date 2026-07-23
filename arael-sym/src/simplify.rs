@@ -718,6 +718,15 @@ impl Expr {
                     && n.fract() == 0.0 && m.fract() == 0.0 {
                         return E::new(Expr::Pow(inner.clone(), constant(m * n)));
                 }
+                // sqrt(x)^(2n) = x^n: exact wherever sqrt is defined
+                // (x >= 0); for x < 0 both sides are NaN territory. Kills
+                // the sqrt a squared norm-axis scale would otherwise
+                // compute at runtime (loss kernels given a field scale).
+                if let (Expr::Const(n), Expr::Sqrt(inner)) = (b2.as_ref(), a2.as_ref())
+                    && n.fract() == 0.0 && n.rem_euclid(2.0) == 0.0 && *n > 0.0 {
+                        if *n == 2.0 { return inner.clone().simplify_once(); }
+                        return E::new(Expr::Pow(inner.clone(), constant(n / 2.0)));
+                }
                 if std::rc::Rc::ptr_eq(&a2.0, &a.0) && std::rc::Rc::ptr_eq(&b2.0, &b.0) { orig.clone() } else { E::new(Expr::Pow(a2, b2)) }
             }
 

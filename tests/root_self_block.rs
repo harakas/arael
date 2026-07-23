@@ -170,7 +170,7 @@ fn paramless_triplet_form_matches_root_selfblock() {
 // --- guard + block loss on the new form ---
 
 #[arael::model]
-#[arael(constraint(root.hb, guard = e4.ok, loss = |s| loss_huber(s, 0.1), {
+#[arael(constraint(root.hb, guard = e4.ok, loss = |s| loss_huber(s, 0.01), {
     [e4.y - root.a * e4.x - root.b]
 }))]
 struct E4 {

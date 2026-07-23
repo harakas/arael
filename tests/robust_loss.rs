@@ -39,7 +39,7 @@ struct PtI {
 }
 
 #[arael::model]
-#[arael(constraint(hb, loss = |s| loss_cauchy(s, ptc.cc), {
+#[arael(constraint(hb, loss = |s| loss_cauchy(s, ptc.c2), {
     [ptc.x - ptc.mx, ptc.y - ptc.my]
 }))]
 struct PtC {
@@ -47,12 +47,12 @@ struct PtC {
     y: Param<f64>,
     mx: f64,
     my: f64,
-    cc: f64,
+    c2: f64,
     hb: SelfBlock<PtC>,
 }
 
 #[arael::model]
-#[arael(constraint(hb, loss = |s| loss_tukey(s, ptt.cc), {
+#[arael(constraint(hb, loss = |s| loss_tukey(s, ptt.c2), {
     [ptt.x - ptt.mx, ptt.y - ptt.my]
 }))]
 struct PtT {
@@ -60,8 +60,21 @@ struct PtT {
     y: Param<f64>,
     mx: f64,
     my: f64,
-    cc: f64,
+    c2: f64,
     hb: SelfBlock<PtT>,
+}
+
+#[arael::model]
+#[arael(constraint(hb, loss = |s| loss_geman_mcclure(s, ptg.c2), {
+    [ptg.x - ptg.mx, ptg.y - ptg.my]
+}))]
+struct PtG {
+    x: Param<f64>,
+    y: Param<f64>,
+    mx: f64,
+    my: f64,
+    c2: f64,
+    hb: SelfBlock<PtG>,
 }
 
 #[arael::model]
@@ -71,6 +84,7 @@ struct W {
     ident: refs::Vec<PtI>,
     cauchy: refs::Vec<PtC>,
     tukey: refs::Vec<PtT>,
+    gm: refs::Vec<PtG>,
 }
 
 // Shared residual for plain/ident/cauchy; tukey gets a gross outlier.
@@ -78,7 +92,7 @@ const X: f64 = 0.5;
 const Y: f64 = -0.3;
 const MX: f64 = 0.1;
 const MY: f64 = 0.2;
-const CC: f64 = 1.0;
+const C2: f64 = 1.0; // squared threshold (chi2 units)
 // s = (X-MX)^2 + (Y-MY)^2
 fn s_inlier() -> f64 {
     (X - MX) * (X - MX) + (Y - MY) * (Y - MY)
@@ -90,18 +104,20 @@ fn build_self() -> (W, Vec<f64>) {
         ident: refs::Vec::new(),
         cauchy: refs::Vec::new(),
         tukey: refs::Vec::new(),
+        gm: refs::Vec::new(),
     };
     w.plain.push(Pt { x: Param::new(X), y: Param::new(Y), mx: MX, my: MY, hb: SelfBlock::new() });
     w.ident.push(PtI { x: Param::new(X), y: Param::new(Y), mx: MX, my: MY, hb: SelfBlock::new() });
-    w.cauchy.push(PtC { x: Param::new(X), y: Param::new(Y), mx: MX, my: MY, cc: CC, hb: SelfBlock::new() });
-    // Outlier: residual (3, 0), s = 9 >> cc^2 = 1, so Tukey rejects it.
-    w.tukey.push(PtT { x: Param::new(3.0), y: Param::new(0.0), mx: 0.0, my: 0.0, cc: CC, hb: SelfBlock::new() });
+    w.cauchy.push(PtC { x: Param::new(X), y: Param::new(Y), mx: MX, my: MY, c2: C2, hb: SelfBlock::new() });
+    // Outlier: residual (3, 0), s = 9 >> c2 = 1, so Tukey rejects it.
+    w.tukey.push(PtT { x: Param::new(3.0), y: Param::new(0.0), mx: 0.0, my: 0.0, c2: C2, hb: SelfBlock::new() });
+    w.gm.push(PtG { x: Param::new(X), y: Param::new(Y), mx: MX, my: MY, c2: C2, hb: SelfBlock::new() });
     let mut params = Vec::new();
     w.serialize64(&mut params);
     (w, params)
 }
 
-// Param layout: plain(0,1), ident(2,3), cauchy(4,5), tukey(6,7).
+// Param layout: plain(0,1), ident(2,3), cauchy(4,5), tukey(6,7), gm(8,9).
 fn gh(root: &mut W, params: &[f64]) -> (Vec<f64>, Vec<f64>) {
     let n = params.len();
     let mut grad = vec![0.0_f64; n];
@@ -113,9 +129,9 @@ fn gh(root: &mut W, params: &[f64]) -> (Vec<f64>, Vec<f64>) {
 #[test]
 fn identity_loss_is_bit_identical_to_no_loss() {
     let (mut w, params) = build_self();
-    assert_eq!(params.len(), 8);
+    assert_eq!(params.len(), 10);
     let (grad, hess) = gh(&mut w, &params);
-    let n = 8;
+    let n = 10;
     // ident block (2,3) must equal plain block (0,1) exactly.
     assert_eq!(grad[2], grad[0]);
     assert_eq!(grad[3], grad[1]);
@@ -131,9 +147,9 @@ fn identity_loss_is_bit_identical_to_no_loss() {
 fn cauchy_scales_gradient_and_hessian_by_weight() {
     let (mut w, params) = build_self();
     let (grad, hess) = gh(&mut w, &params);
-    let n = 8;
+    let n = 10;
     let s = s_inlier();
-    let weight = CC * CC / (CC * CC + s); // rho'(s) for Cauchy
+    let weight = C2 / (C2 + s); // rho'(s) for Cauchy
     // cauchy block (4,5) == weight * plain block (0,1).
     assert!((grad[4] - weight * grad[0]).abs() < 1e-12, "grad_x {} vs {}", grad[4], weight * grad[0]);
     assert!((grad[5] - weight * grad[1]).abs() < 1e-12, "grad_y {} vs {}", grad[5], weight * grad[1]);
@@ -142,11 +158,26 @@ fn cauchy_scales_gradient_and_hessian_by_weight() {
 }
 
 #[test]
+fn geman_mcclure_scales_gradient_and_hessian_by_weight() {
+    let (mut w, params) = build_self();
+    let (grad, hess) = gh(&mut w, &params);
+    let n = 10;
+    let s = s_inlier();
+    let c2 = C2;
+    let weight = (c2 / (c2 + s)) * (c2 / (c2 + s)); // rho'(s) for GM
+    // gm block (8,9) == weight * plain block (0,1).
+    assert!((grad[8] - weight * grad[0]).abs() < 1e-12, "grad_x {} vs {}", grad[8], weight * grad[0]);
+    assert!((grad[9] - weight * grad[1]).abs() < 1e-12, "grad_y {} vs {}", grad[9], weight * grad[1]);
+    assert!((hess[8 * n + 8] - weight * hess[0 * n + 0]).abs() < 1e-12);
+    assert!((hess[9 * n + 9] - weight * hess[1 * n + 1]).abs() < 1e-12);
+}
+
+#[test]
 fn tukey_rejects_a_gross_outlier() {
     let (mut w, params) = build_self();
     let (grad, hess) = gh(&mut w, &params);
-    let n = 8;
-    // Outlier has s = 9 > cc^2 = 1, weight rho'(s) = 0: it leaves grad and
+    let n = 10;
+    // Outlier has s = 9 > c2 = 1, weight rho'(s) = 0: it leaves grad and
     // Hessian untouched.
     assert_eq!(grad[6], 0.0);
     assert_eq!(grad[7], 0.0);
@@ -159,10 +190,11 @@ fn total_cost_sums_the_robustified_blocks() {
     let (mut w, params) = build_self();
     let cost = w.calc_cost(&params);
     let s = s_inlier();
-    let rho_cauchy = CC * CC * (1.0 + s / (CC * CC)).ln();
-    let rho_tukey = CC * CC / 3.0; // fully redescended (capped)
-    // plain s + ident s + cauchy rho + tukey rho
-    let expected = s + s + rho_cauchy + rho_tukey;
+    let rho_cauchy = C2 * (1.0 + s / (C2)).ln();
+    let rho_tukey = C2 / 3.0; // fully redescended (capped)
+    let rho_gm = C2 * s / (C2 + s);
+    // plain s + ident s + cauchy rho + tukey rho + gm rho
+    let expected = s + s + rho_cauchy + rho_tukey + rho_gm;
     assert!((cost - expected).abs() < 1e-12, "cost {} vs {}", cost, expected);
 }
 
@@ -190,7 +222,7 @@ struct Lp {
 }
 
 #[arael::model]
-#[arael(constraint(hb, loss = |s| loss_cauchy(s, lc.cc), {
+#[arael(constraint(hb, loss = |s| loss_cauchy(s, lc.c2), {
     [b.x - a.x - lc.dx, b.y - a.y - lc.dy]
 }))]
 struct Lc {
@@ -200,7 +232,7 @@ struct Lc {
     b: Ref<Node>,
     dx: f64,
     dy: f64,
-    cc: f64,
+    c2: f64,
     hb: CrossBlock<Node, Node>,
 }
 
@@ -234,7 +266,7 @@ fn cross_block_loss_scales_the_cross_hessian() {
     let mut cauchy = CrossCauchy { nodes: refs::Vec::new(), links: std::vec::Vec::new() };
     cauchy.nodes.push(Node { x: Param::new(n0.0), y: Param::new(n0.1), hb: SelfBlock::new() });
     cauchy.nodes.push(Node { x: Param::new(n1.0), y: Param::new(n1.1), hb: SelfBlock::new() });
-    cauchy.links.push(Lc { a: cauchy.nodes.ref_at(0), b: cauchy.nodes.ref_at(1), dx: 0.0, dy: 0.0, cc: CC, hb: CrossBlock::new() });
+    cauchy.links.push(Lc { a: cauchy.nodes.ref_at(0), b: cauchy.nodes.ref_at(1), dx: 0.0, dy: 0.0, c2: C2, hb: CrossBlock::new() });
     let mut cp = Vec::new();
     cauchy.serialize64(&mut cp);
 
@@ -248,7 +280,7 @@ fn cross_block_loss_scales_the_cross_hessian() {
     cauchy.calc_grad_hessian_dense(&cp, &mut gc, &mut hc);
 
     let s = 0.4 * 0.4 + 0.5 * 0.5;
-    let weight = CC * CC / (CC * CC + s);
+    let weight = C2 / (C2 + s);
     // Every gradient entry and every Hessian entry (including the a-b cross
     // terms) is the plain value scaled by the loss weight.
     for i in 0..n {
@@ -262,6 +294,6 @@ fn cross_block_loss_scales_the_cross_hessian() {
     // vacuously if the cross Hessian were empty).
     assert!(hp[0 * n + 2].abs() > 1e-9, "expected a non-zero a-b cross term");
 
-    let rho = CC * CC * (1.0 + s / (CC * CC)).ln();
+    let rho = C2 * (1.0 + s / (C2)).ln();
     assert!((cauchy.calc_cost(&cp) - rho).abs() < 1e-12);
 }

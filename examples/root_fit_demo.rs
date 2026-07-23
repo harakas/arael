@@ -20,7 +20,7 @@ use arael::simple_lm::{LmConfig, LmProblem};
 // The Huber loss caps what a single bad point can contribute; the guard
 // drops measurements flagged invalid.
 #[arael::model]
-#[arael(constraint(root.hb, guard = e.ok, loss = |s| loss_huber(s, 0.1), {
+#[arael(constraint(root.hb, guard = e.ok, loss = |s| loss_huber(s, 0.01), {
     [e.y - root.a * e.x - root.b]
 }))]
 struct E {

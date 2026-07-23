@@ -549,20 +549,21 @@ The same pattern -- `simple_func*_derivs` plus `clamp` and/or `epsilon_for`-regu
 
 ## Robust loss kernels
 
-`loss_huber`, `loss_cauchy`, and `loss_tukey` take the squared residual norm `s = |r|^2` and return the robustified cost that replaces it. The scale (`k`, `c`) is on the residual-norm axis (`sqrt(s)`); for whitened residuals that is a count of standard deviations. All three equal `s` near zero, so an inlier is left as plain least squares, and their weight `rho'(s)` is what a solver multiplies the block's gradient and Hessian by.
+`loss_huber`, `loss_cauchy`, `loss_tukey`, and `loss_geman_mcclure` take the squared residual norm `s = |r|^2` and return the robustified cost that replaces it. The scale (`k2`, `c2`) is SQUARED, in the same chi-square units as `s` -- the units inlier thresholds are naturally quoted in (a chi-square quantile such as 7.815 goes in unchanged). All four equal `s` near zero, so an inlier is left as plain least squares, and their weight `rho'(s)` is what a solver multiplies the block's gradient and Hessian by.
 
 | Kernel | `rho(s)` | Weight `rho'(s)` | Behaviour |
 |---|---|---|---|
-| `loss_huber(s, k)` | `s` if `s <= k^2`, else `2k*sqrt(s) - k^2` | `1`, then `k/sqrt(s)` | convex, never rejects |
-| `loss_cauchy(s, c)` | `c^2 * ln(1 + s/c^2)` | `c^2/(c^2 + s)` | smooth, redescends slowly |
-| `loss_tukey(s, c)` | `(c^2/3)(1 - (1 - s/c^2)^3)`, capped at `c^2/3` | `(1 - s/c^2)^2`, then `0` | rejects `s >= c^2` outright |
+| `loss_huber(s, k2)` | `s` if `s <= k2`, else `2*sqrt(k2*s) - k2` | `1`, then `sqrt(k2/s)` | convex, never rejects |
+| `loss_cauchy(s, c2)` | `c2 * ln(1 + s/c2)` | `c2/(c2 + s)` | smooth, redescends slowly |
+| `loss_tukey(s, c2)` | `(c2/3)(1 - (1 - s/c2)^3)`, capped at `c2/3` | `(1 - s/c2)^2`, then `0` | rejects `s >= c2` outright |
+| `loss_geman_mcclure(s, c2)` | `c2*s/(c2 + s)`, saturating at `c2` | `(c2/(c2 + s))^2` | smooth, redescends fast: a gross outlier's cost is capped and its weight falls toward zero |
 
 They are composed from `branch`, `sqrt`, and `ln`, so they differentiate, CSE, and generate code with no special handling.
 
 ```rust
 let s = symbol("s");
-let rho = loss_huber(s.clone(), constant(1.5));
-let w = rho.diff("s");                   // the weight, k/sqrt(s) past the knot
+let rho = loss_huber(s.clone(), constant(2.25)); // k2 = 2.25 (norm-axis 1.5)
+let w = rho.diff("s");                   // the weight, sqrt(k2/s) past the knot
 ```
 
 ## Parsing
