@@ -1069,10 +1069,10 @@ pub const FUNCTIONS: &[(&str, FunctionRef)] = &[
     ("min", FunctionRef::Binary(min)),
     ("max", FunctionRef::Binary(max)),
     // Robust loss kernels: (squared-norm, scale) -> robustified cost
-    ("loss_huber", FunctionRef::Binary(loss_huber)),
-    ("loss_cauchy", FunctionRef::Binary(loss_cauchy)),
-    ("loss_tukey", FunctionRef::Binary(loss_tukey)),
     ("loss_geman_mcclure", FunctionRef::Binary(loss_geman_mcclure)),
+    ("loss_cauchy", FunctionRef::Binary(loss_cauchy)),
+    ("loss_huber", FunctionRef::Binary(loss_huber)),
+    ("loss_tukey", FunctionRef::Binary(loss_tukey)),
     // Ternary
     ("clamp", FunctionRef::Ternary(clamp)),
     ("branch", FunctionRef::Ternary(branch)),
@@ -2106,7 +2106,7 @@ mod tests {
     fn loss_kernels_resolve_by_name() {
         // The constraint interpreter dispatches through function_by_name, so
         // the loss kernels must be reachable there and match the direct call.
-        for name in ["loss_huber", "loss_cauchy", "loss_tukey", "loss_geman_mcclure"] {
+        for name in ["loss_geman_mcclure", "loss_cauchy", "loss_huber", "loss_tukey"] {
             match function_by_name(name) {
                 Some(FunctionRef::Binary(_)) => {}
                 other => panic!("{name} not a binary function: {}", other.is_some()),

@@ -1401,7 +1401,7 @@
 //! scaling the block's gradient and Hessian by the weight `rho'(s)`.
 //!
 //! ```ignore
-//! #[arael(constraint(hb, loss = |s| loss_huber(s, self.k), {
+//! #[arael(constraint(hb, loss = |s| loss_geman_mcclure(s, self.c2), {
 //!     [(obs.u - proj.u) * obs.iw, (obs.v - proj.v) * obs.iw]
 //! }))]
 //! ```
@@ -1409,8 +1409,8 @@
 //! The closure argument is the block squared norm; the scale (`k2`,
 //! `c2`) is SQUARED, in the same chi-square units as `s` -- an inlier
 //! threshold like the chi-square quantile 7.815 goes in unchanged.
-//! Kernels `loss_huber`, `loss_cauchy`, `loss_tukey`, and
-//! `loss_geman_mcclure` ship, or write any differentiable expression
+//! Kernels `loss_geman_mcclure`, `loss_cauchy`, `loss_huber`, and
+//! `loss_tukey` ship, or write any differentiable expression
 //! (`|s| s` is plain least squares). Unlike
 //! the per-element wrapper this is a standard M-estimator: the
 //! down-weighting depends only on the block norm, so it is invariant to

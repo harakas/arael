@@ -32,7 +32,7 @@ Solve problems like linear and nonlinear regression, sensor fusion, SLAM, bundle
 
 - **Symbolic math** -- expression trees with automatic differentiation, simplification, expansion, LaTeX/Rust code generation
 - **Compile-time constraint code generation** -- write constraints symbolically, get compiled derivative code with CSE
-- **Levenberg-Marquardt solver** -- with robust error suppression via the [Starship method (US12346118)](https://patents.google.com/patent/US12346118) `gamma * atan(r / gamma)`, block-level robust loss (`loss = |s| loss_huber(s, k)`), and switchable constraints (`guard = expr`)
+- **Levenberg-Marquardt solver** -- with robust error suppression via the [Starship method (US12346118)](https://patents.google.com/patent/US12346118) `gamma * atan(r / gamma)`, block-level robust loss (`loss = |s| loss_geman_mcclure(s, c2)`), and switchable constraints (`guard = expr`)
 - **Multiple solver backends** via `LmSolver` trait:
   - **Dense Cholesky** (nalgebra) -- fixed-size dispatch up to 9x9, dynamic for larger
   - **Band Cholesky** -- pure Rust O(n*kd^2) for block-tridiagonal systems (9.4x faster than dense at 500 poses)
@@ -137,7 +137,7 @@ You describe the model as a Rust struct and the residual as an arael-sym express
 
 - `#[arael::model]` auto-implements the `Model` trait for the struct: serialize / deserialize / update of every optimizable parameter, flat indexing into the residual vector, and all the hooks the solver needs.
 - Every `Param<T>` field is an optimization variable. Plain fields (`data`, `sigma`, `gamma` here) are constants.
-- `#[arael(fit(data, |e| ...))]` declares a least-squares fit: one residual per element of `data`, body written as a symbolic expression referencing model fields and the current data entry. The macro compiles the body into residual + gradient + Hessian code with symbolic differentiation and CSE. A trailing `loss = |s| rho(s)` (e.g. `loss_cauchy(s, k)`) applies a robust M-estimator over each point's squared residual.
+- `#[arael(fit(data, |e| ...))]` declares a least-squares fit: one residual per element of `data`, body written as a symbolic expression referencing model fields and the current data entry. The macro compiles the body into residual + gradient + Hessian code with symbolic differentiation and CSE. A trailing `loss = |s| rho(s)` (e.g. `loss_geman_mcclure(s, c2)`) applies a robust M-estimator over each point's squared residual.
 
 The `gamma * atan(plain_r / gamma)` wrapper is the [Starship robust error-suppression method](https://patents.google.com/patent/US12346118) -- residuals up to ~gamma pass through linearly, beyond that they saturate, suppressing outlier influence while staying smoothly differentiable.
 
@@ -361,12 +361,12 @@ Starship makes this requirement stricter. The gradient falls off as $\alpha'(r) 
 The Starship wrapper above is applied to each residual *element* by hand. A `loss` modifier on the constraint instead robustifies the whole residual block at once: it takes the squared norm $s = \lVert r \rVert^2$ and replaces it with $\rho(s)$, scaling the block's gradient and Hessian by the weight $\rho'(s)$.
 
 ```rust
-#[arael(constraint(hb, loss = |s| loss_huber(s, self.k), {
+#[arael(constraint(hb, loss = |s| loss_geman_mcclure(s, self.c2), {
     [(obs.u - proj.u) * obs.iw, (obs.v - proj.v) * obs.iw]
 }))]
 ```
 
-The closure argument is the block squared norm; the scale (`k`, `c`) is on the norm axis, a sigma count for whitened residuals. Three kernels ship (`loss_huber`, `loss_cauchy`, `loss_tukey`), or write any differentiable expression -- `|s| loss_cauchy(s, self.c)`, `|s| s` (plain least squares). Unlike the per-element wrapper this is a standard M-estimator: the down-weighting depends only on the block norm, so it is invariant to how the residual axes are oriented. Scaling by $\rho'(s)$ keeps the Hessian positive semidefinite. See [docs/SYM.md](docs/SYM.md#robust-loss-kernels) for the kernel formulas.
+The closure argument is the block squared norm; the scale (`k2`, `c2`) is squared, in the same chi-square units as `s` -- an inlier threshold like the chi-square quantile 7.815 goes in unchanged. Four kernels ship (`loss_geman_mcclure`, `loss_cauchy`, `loss_huber`, `loss_tukey`), or write any differentiable expression -- `|s| s` is plain least squares. Unlike the per-element wrapper this is a standard M-estimator: the down-weighting depends only on the block norm, so it is invariant to how the residual axes are oriented. Scaling by $\rho'(s)$ keeps the Hessian positive semidefinite. See [docs/SYM.md](docs/SYM.md#robust-loss-kernels) for the kernel formulas.
 
 ## Localization Demo
 
@@ -381,7 +381,7 @@ See [examples/loc_demo.rs](examples/loc_demo.rs).
 The `examples/` directory is the primary place to see the API in use. Each file is a runnable `cargo run --release --example <name>`.
 
 - **[linear_demo](examples/linear_demo.rs)** -- robust linear regression on noisy 2D data. Residual wrapped in `gamma * atan(r / gamma)` -- the [Starship method (US12346118)](https://patents.google.com/patent/US12346118), same robustifier used by the feature constraints in loc/SLAM. Minimal single-struct model + LM fit, compared against plain closed-form least squares.
-- **[robust_curve_fitting](examples/robust_curve_fitting.rs)** -- fit `y = exp(m*x + c)` to data with two gross outliers: a plain fit against a block Cauchy loss (`loss = |s| loss_cauchy(s, 0.5)`) and the per-element starship wrapper. The robust fits recover the true parameters; the plain fit is dragged off. Ports Ceres's robust_curve_fitting example.
+- **[robust_curve_fitting](examples/robust_curve_fitting.rs)** -- fit `y = exp(m*x + c)` to data with two gross outliers: a plain fit against a block Cauchy loss (`loss = |s| loss_cauchy(s, 0.25)`, matching Ceres `CauchyLoss(0.5)` -- the scale is squared) and the per-element starship wrapper. The robust fits recover the true parameters; the plain fit is dragged off. Ports Ceres's robust_curve_fitting example.
 - **[slam2d_simple_demo](examples/slam2d_simple_demo.rs)** -- minimal pedagogical 2D SLAM: bearing-only landmark observations, pose `(x, y, gamma)`, first pose fixed as the gauge. Writes `slam2d_simple.eps` with per-landmark 95% covariance ellipses -- elongated radially, showing depth is the unobservable dimension of bearing-only SLAM.
 - **[slam2d_multi_demo](examples/slam2d_multi_demo.rs)** -- multi-run merge on a nested model tree (`Map { paths: Vec<Path>, landmarks }`): three GPS-anchored runs fused in one solve via bearings onto shared root-level landmarks (`ref = root.landmarks`, run-local odometry via `ref = parent.poses`). Writes `slam2d_multi.eps` with 95% ellipses.
 - **[slam2d_align_demo](examples/slam2d_align_demo.rs)** -- builds one map from three runs the cheap, two-step way: each run is solved on its own, then a small second step lines the runs up with each other. Same scene as `slam2d_multi_demo` (which solves everything at once), so the two results can be compared; writes `slam2d_align.eps`.
