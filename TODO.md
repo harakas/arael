@@ -1,5 +1,32 @@
 # TODO
 
+- **Unscented-transform utility for covariance mapping**. Pushing a
+  parameter-space marginal through a nonlinear embedding currently
+  linearizes: slam_demo_gm maps its inverse-depth landmark marginal
+  (chart, rho) to world position via `J C J^T`, which pretends the
+  banana-shaped along-ray uncertainty is a symmetric ellipsoid. A small
+  utility -- 2n+1 scaled sigma points from (mean, cov) through a user
+  closure, mean and covariance reconstituted -- captures the mean shift
+  and the honest variance inflation. Shape:
+  `unscented(mean, cov, f: impl Fn(&[f64]) -> Vec<f64>) -> (mean, cov)`,
+  probably next to the covariance module. Not done yet because only
+  display code consumes the mapped covariance so far.
+
+- **Components in `root.<selfblock>` constraints**. A root whose params
+  live inside a `#[arael(component)]` field (e.g. `TransformParam`)
+  cannot be the target of a `constraint(root.hb, ...)` -- the macro
+  rejects it ("components are not yet supported in root.<selfblock>
+  constraints"). Hit 2026-07-23 by benchmarks/registration: one shared
+  SE(3) pose observed by thousands of data-only correspondence entities
+  is exactly the "one shared parameter set, many observations" shape the
+  root-SelfBlock path exists for, but the pose being a component forced
+  the workaround of wrapping it in a single-entry `refs::Vec<Frame>`
+  with remote `f.hb` constraints. Fix: teach the root-SelfBlock
+  constraint path the component embed/deriv machinery the entity path
+  already has (chart Jacobian chained into the block writes). Not done
+  yet because the guard predates a real use case; registration is now
+  that use case.
+
 - **Cross-crate export of `#[arael::function]` user functions**. The
   model export bundle (`export_models!()` / `arael_import!()`) carries
   structs and enums only; an imported constraint body calling a user
