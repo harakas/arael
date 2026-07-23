@@ -6,12 +6,13 @@
 //
 // Key points:
 //
-// - slam_demo with the feature (bearing) residuals robustified by a
-//   Geman-McClure BLOCK loss (`loss = |s| loss_geman_mcclure(...)`) instead
-//   of slam_demo's per-component gamma*atan(r/gamma) wrap. SINGLE_PASS=1
-//   skips the graduated isigma ramp (single solve at full weight) -- and
-//   fails here: with half the observations wrong and landmarks initialized
-//   outside their inlier basins, the ramp is what carries them in.
+// - slam_demo with the feature (bearing) and GPS residuals robustified by
+//   a Geman-McClure BLOCK loss (`loss = |s| loss_geman_mcclure(...)`)
+//   instead of slam_demo's per-component gamma*atan(r/gamma) wrap.
+//   SINGLE_PASS=1 skips the graduated isigma ramp (single solve at full
+//   weight) -- and fails here: with half the observations wrong and
+//   landmarks initialized outside their inlier basins, the ramp is what
+//   carries them in.
 // - The pose is a single TransformParam (6-DOF rigid transform): the
 //   optimized step is an se(3) twist, so rotation corrections carry the
 //   translation, and constraint bodies read `r2w.rotation_matrix` /
@@ -124,16 +125,13 @@ fn decompose_cov(cov: matrix3f) -> (matrix3f, vect3f) {
 // pose is fully determined by GPS + odometry + tilt at all ramp scales.
 // The landmark drift regularizer below is the load-bearing one and stays.
 #[arael::model]
-#[arael(constraint(hb_pose, guard = self.info.gps.is_some(), {
-    let gamma = path.gamma;
+#[arael(constraint(hb_pose, guard = self.info.gps.is_some(),
+    loss = |s| loss_geman_mcclure(s, path.gps_c2), {
     let raw = pose.r2w.translation - pose.info.gps.pos;
     let rt_raw = pose.info.gps.cov_r.transpose() * raw;
-    let p0 = rt_raw.x * pose.info.gps.cov_isigma.x;
-    let p1 = rt_raw.y * pose.info.gps.cov_isigma.y;
-    let p2 = rt_raw.z * pose.info.gps.cov_isigma.z;
-    [gamma * atan(p0 / gamma),
-     gamma * atan(p1 / gamma),
-     gamma * atan(p2 / gamma)]
+    [rt_raw.x * pose.info.gps.cov_isigma.x,
+     rt_raw.y * pose.info.gps.cov_isigma.y,
+     rt_raw.z * pose.info.gps.cov_isigma.z]
 }))]
 #[arael(constraint(hb_pose, {
     // The accelerometer observes the world up direction in the body
@@ -215,13 +213,17 @@ struct Path {
     poses: refs::Deque<Pose>,
     landmarks: refs::Arena<PointLandmark>,
     pose_pairs: std::vec::Vec<PosePair>,
-    gamma: f32,
     drift_lm_isigma: f32,
     tilt_isigma: f32,
     frine_isigma_scale: f32,
-    /// Geman-McClure squared threshold for the feature blocks
-    /// (chi-square 0.95 quantile, 2 DOF).
+    /// Geman-McClure squared threshold for the feature blocks. Half the
+    /// 2-DOF 0.95 quantile (5.99): the quantile logic assumes rare
+    /// outliers, but half the observations here are outliers, and the
+    /// tighter gate measures better (worst landmark 4.6m vs 11.2m).
     frine_c2: f32,
+    /// Geman-McClure squared threshold for the GPS blocks
+    /// (chi-square 0.95 quantile, 3 DOF).
+    gps_c2: f32,
 }
 
 // ---------------------------------------------------------------------------
@@ -371,14 +373,11 @@ fn build_path(cfg: &SceneConfig) -> (Path, Vec<(vect3f, vect3f)>, Vec<(vect3f, u
         poses: refs::Deque::new(),
         landmarks: refs::Arena::new(),
         pose_pairs: std::vec::Vec::new(),
-        // Robust suppression: gamma*atan(r/gamma). Residuals up to ~gamma pass
-        // linearly, beyond that they saturate. With 25 expected inlier residuals,
-        // gamma ~= 2*sqrt(25)/pi ~= 3.18.
-        gamma: 2.0 * (25.0_f32).sqrt() / std::f32::consts::PI,
         drift_lm_isigma: 1.0 / drift_lm_sigma,
         tilt_isigma: 1.0 / tilt_sigma_rad,
         frine_isigma_scale: 1.0,
         frine_c2: 2.99,
+        gps_c2: 7.815,
     };
 
     // (landmark index, observing-pose index, feature ref). The pose ref is
