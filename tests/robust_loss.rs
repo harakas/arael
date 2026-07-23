@@ -77,6 +77,23 @@ struct PtG {
     hb: SelfBlock<PtG>,
 }
 
+/// Mixed precision, the slam_demo shape: f32 storage, f64 solve and
+/// blocks (no `f32` root keyword). The loss reads an f32 field, so the
+/// block accumulator must take the rows' precision -- casts happen at
+/// the weight/cost boundaries.
+#[arael::model]
+#[arael(constraint(hb, loss = |s| loss_geman_mcclure(s, ptm.c2), {
+    [ptm.x - ptm.mx, ptm.y - ptm.my]
+}))]
+struct PtM {
+    x: Param<f32>,
+    y: Param<f32>,
+    mx: f32,
+    my: f32,
+    c2: f32,
+    hb: SelfBlock<PtM>,
+}
+
 #[arael::model]
 #[arael(root)]
 struct W {
@@ -85,6 +102,7 @@ struct W {
     cauchy: refs::Vec<PtC>,
     tukey: refs::Vec<PtT>,
     gm: refs::Vec<PtG>,
+    mixed: refs::Vec<PtM>,
 }
 
 // Shared residual for plain/ident/cauchy; tukey gets a gross outlier.
@@ -105,6 +123,7 @@ fn build_self() -> (W, Vec<f64>) {
         cauchy: refs::Vec::new(),
         tukey: refs::Vec::new(),
         gm: refs::Vec::new(),
+        mixed: refs::Vec::new(),
     };
     w.plain.push(Pt { x: Param::new(X), y: Param::new(Y), mx: MX, my: MY, hb: SelfBlock::new() });
     w.ident.push(PtI { x: Param::new(X), y: Param::new(Y), mx: MX, my: MY, hb: SelfBlock::new() });
@@ -112,12 +131,14 @@ fn build_self() -> (W, Vec<f64>) {
     // Outlier: residual (3, 0), s = 9 >> c2 = 1, so Tukey rejects it.
     w.tukey.push(PtT { x: Param::new(3.0), y: Param::new(0.0), mx: 0.0, my: 0.0, c2: C2, hb: SelfBlock::new() });
     w.gm.push(PtG { x: Param::new(X), y: Param::new(Y), mx: MX, my: MY, c2: C2, hb: SelfBlock::new() });
+    w.mixed.push(PtM { x: Param::new(X as f32), y: Param::new(Y as f32),
+        mx: MX as f32, my: MY as f32, c2: C2 as f32, hb: SelfBlock::new() });
     let mut params = Vec::new();
     w.serialize64(&mut params);
     (w, params)
 }
 
-// Param layout: plain(0,1), ident(2,3), cauchy(4,5), tukey(6,7), gm(8,9).
+// Param layout: plain(0,1), ident(2,3), cauchy(4,5), tukey(6,7), gm(8,9), mixed(10,11).
 fn gh(root: &mut W, params: &[f64]) -> (Vec<f64>, Vec<f64>) {
     let n = params.len();
     let mut grad = vec![0.0_f64; n];
@@ -129,9 +150,9 @@ fn gh(root: &mut W, params: &[f64]) -> (Vec<f64>, Vec<f64>) {
 #[test]
 fn identity_loss_is_bit_identical_to_no_loss() {
     let (mut w, params) = build_self();
-    assert_eq!(params.len(), 10);
+    assert_eq!(params.len(), 12);
     let (grad, hess) = gh(&mut w, &params);
-    let n = 10;
+    let n = 12;
     // ident block (2,3) must equal plain block (0,1) exactly.
     assert_eq!(grad[2], grad[0]);
     assert_eq!(grad[3], grad[1]);
@@ -147,7 +168,7 @@ fn identity_loss_is_bit_identical_to_no_loss() {
 fn cauchy_scales_gradient_and_hessian_by_weight() {
     let (mut w, params) = build_self();
     let (grad, hess) = gh(&mut w, &params);
-    let n = 10;
+    let n = 12;
     let s = s_inlier();
     let weight = C2 / (C2 + s); // rho'(s) for Cauchy
     // cauchy block (4,5) == weight * plain block (0,1).
@@ -161,7 +182,7 @@ fn cauchy_scales_gradient_and_hessian_by_weight() {
 fn geman_mcclure_scales_gradient_and_hessian_by_weight() {
     let (mut w, params) = build_self();
     let (grad, hess) = gh(&mut w, &params);
-    let n = 10;
+    let n = 12;
     let s = s_inlier();
     let c2 = C2;
     let weight = (c2 / (c2 + s)) * (c2 / (c2 + s)); // rho'(s) for GM
@@ -173,10 +194,24 @@ fn geman_mcclure_scales_gradient_and_hessian_by_weight() {
 }
 
 #[test]
+fn mixed_precision_gm_weight_applies() {
+    // f32 rows and an f32 scale field under an f64 solve: the same GM
+    // weight as the all-f64 block, to f32 accuracy.
+    let (mut w, params) = build_self();
+    let (grad, _hess) = gh(&mut w, &params);
+    let s = s_inlier();
+    let weight = (C2 / (C2 + s)) * (C2 / (C2 + s));
+    assert!((grad[10] - weight * grad[0]).abs() < 1e-5,
+        "grad_x {} vs {}", grad[10], weight * grad[0]);
+    assert!((grad[11] - weight * grad[1]).abs() < 1e-5,
+        "grad_y {} vs {}", grad[11], weight * grad[1]);
+}
+
+#[test]
 fn tukey_rejects_a_gross_outlier() {
     let (mut w, params) = build_self();
     let (grad, hess) = gh(&mut w, &params);
-    let n = 10;
+    let n = 12;
     // Outlier has s = 9 > c2 = 1, weight rho'(s) = 0: it leaves grad and
     // Hessian untouched.
     assert_eq!(grad[6], 0.0);
@@ -193,9 +228,11 @@ fn total_cost_sums_the_robustified_blocks() {
     let rho_cauchy = C2 * (1.0 + s / (C2)).ln();
     let rho_tukey = C2 / 3.0; // fully redescended (capped)
     let rho_gm = C2 * s / (C2 + s);
-    // plain s + ident s + cauchy rho + tukey rho + gm rho
-    let expected = s + s + rho_cauchy + rho_tukey + rho_gm;
-    assert!((cost - expected).abs() < 1e-12, "cost {} vs {}", cost, expected);
+    // plain s + ident s + cauchy rho + tukey rho + gm rho + mixed gm rho
+    let expected = s + s + rho_cauchy + rho_tukey + rho_gm + rho_gm;
+    // The mixed block computes its rho in f32, so the sum agrees only to
+    // single precision.
+    assert!((cost - expected).abs() < 1e-6, "cost {} vs {}", cost, expected);
 }
 
 // --- Cross-block models: identical residual, plain vs Cauchy ---

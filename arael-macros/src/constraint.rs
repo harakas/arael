@@ -3362,8 +3362,13 @@ pub fn generate_root_methods(
         // Build the finalize statements (compute rho, and for the gh path the
         // weight) from the loss expression, sharing the residual pipeline:
         // differentiate for the weight, then substitute + fast_atan + CSE.
+        // The block accumulator lives at RESIDUAL precision (inferred from
+        // the rows), not the block's: loss expressions mix it with model
+        // fields, and a model can store f32 fields while solving f64
+        // (blocks f64). Casts to #cast_type happen at the boundaries
+        // (__w, __cost) instead.
         let block_cost_decl: TokenStream2 = if loss_present {
-            quote! { let mut __block_cost = 0.0 as #cast_type; }
+            quote! { let mut __block_cost = 0.0; }
         } else { quote! {} };
         let emit_loss = |want_weight: bool| -> syn::Result<TokenStream2> {
             let Some(loss_e) = &loss_expr else { return Ok(quote! {}); };
@@ -3393,6 +3398,15 @@ pub fn generate_root_methods(
         let loss_gh_finalize = emit_loss(true)?;
         // Per-row cost accumulator: into __block_cost under a loss, else __cost.
         let cost_acc: TokenStream2 = if loss_present { quote! { __block_cost } } else { quote! { __cost } };
+        // Row-squared term for the accumulator: __cost is #cast_type, so
+        // rows cast; __block_cost stays at the rows' own precision.
+        let row_sq = |r_ident: &syn::Ident| -> TokenStream2 {
+            if loss_present {
+                quote! { #r_ident * #r_ident }
+            } else {
+                quote! { (#r_ident as #cast_type) * (#r_ident as #cast_type) }
+            }
+        };
 
         // --- Cost-only code: differentiate FIRST, then apply substitutions, then CSE ---
         // Apply substitutions to residuals (cost-only, no derivatives)
@@ -3410,9 +3424,10 @@ pub fn generate_root_methods(
         for (ri, r) in cost_simplified.iter().enumerate() {
             let r_ident = syn::Ident::new(&format!("__r_{}", ri), proc_macro2::Span::call_site());
             let r_expr: Expr = parse_sym_code(&r.to_rust(""))?;
+            let sq = row_sq(&r_ident);
             cost_stmts.push(quote! {
                 let #r_ident= #r_expr;
-                #cost_acc += (#r_ident as #cast_type) * (#r_ident as #cast_type);
+                #cost_acc += #sq;
             });
         }
         cost_stmts.push(loss_cost_finalize);
@@ -3573,9 +3588,10 @@ pub fn generate_root_methods(
             // entry points get the cost for free (saves a separate cost-only
             // model evaluation in the LM loop). Under a loss this sums into
             // __block_cost = |r|^2 instead, and rho(s) is added to __cost once.
+            let sq = row_sq(&r_ident);
             gh_stmts.push(quote! {
                 let #r_ident= #r_expr;
-                #cost_acc += (#r_ident as #cast_type) * (#r_ident as #cast_type);
+                #cost_acc += #sq;
             });
             idx += 1;
             // The leading argument every accumulation call passes: the residual
