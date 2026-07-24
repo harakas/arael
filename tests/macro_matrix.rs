@@ -871,3 +871,58 @@ fn root_level_optional_remote_prior() {
     let mut w = AFrineRemoteOpt { nodes, prior: None };
     check_model("Option remote prior None", &mut w, base);
 }
+
+// #[arael(skip)] on an entity collection: fully excluded -- no params
+// serialized AND no constraint sweep emitted. (The sweep used to run
+// anyway, evaluating never-updated params: cost included phantom
+// residuals at garbage values while the derivatives dropped them.)
+#[arael::model]
+#[arael(root)]
+struct ASkip {
+    live: std::vec::Vec<P>,
+    #[arael(skip)]
+    dead: std::vec::Vec<P>,
+}
+
+#[test]
+fn skipped_collection_is_fully_excluded() {
+    let mut w = ASkip {
+        live: vec![p(PDATA[0].0, PDATA[0].1, PDATA[0].2)],
+        dead: vec![p(9.0, 9.0, 9.0), p(8.0, 8.0, 8.0)],
+    };
+    let mut x = Vec::new();
+    RootProblem::serialize(&mut w, &mut x);
+    assert_eq!(x.len(), 2, "skipped params must not serialize");
+    check_model("skip collection", &mut w,
+        p_cost(PDATA[0].0, PDATA[0].1, PDATA[0].2));
+}
+
+// The same rule one level down: a skipped sub-collection inside an
+// entity (registry-side discovery must not route a sweep through it).
+#[arael::model]
+struct SkMid {
+    subs: std::vec::Vec<P>,
+    #[arael(skip)]
+    dead: std::vec::Vec<P>,
+}
+
+#[arael::model]
+#[arael(root)]
+struct ASkipNested {
+    mids: std::vec::Vec<SkMid>,
+}
+
+#[test]
+fn skipped_nested_collection_is_fully_excluded() {
+    let mut w = ASkipNested {
+        mids: vec![SkMid {
+            subs: vec![p(PDATA[1].0, PDATA[1].1, PDATA[1].2)],
+            dead: vec![p(9.0, 9.0, 9.0)],
+        }],
+    };
+    let mut x = Vec::new();
+    RootProblem::serialize(&mut w, &mut x);
+    assert_eq!(x.len(), 2, "nested skipped params must not serialize");
+    check_model("skip nested collection", &mut w,
+        p_cost(PDATA[1].0, PDATA[1].1, PDATA[1].2));
+}

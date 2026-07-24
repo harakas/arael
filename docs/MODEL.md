@@ -559,7 +559,7 @@ per residual group, mixed freely.
 | `#[arael(cross = (<refA>, <refB>))]` | `CrossBlock<T, T>` field | disambiguate *which* ref pair this CrossBlock serves when two local Refs share the same T |
 | `#[arael(compute = <expr>)]` | any data field | derived field: excluded from serialization, reassigned as `self.<field> = <expr>` on every `update()` (param names in the expression read their current working values). Example: `#[arael(compute = ea.rotation_matrix())]` caching a rotation matrix (see examples/model_demo.rs) |
 | `#[arael(constraint_index)]` | `u32` field | receives a unique row id per constraint instance, useful for building per-constraint diagnostics / logs |
-| `#[arael(skip)]` | any field | exclude from the Model's serialize / accumulate path. Use sparingly -- the macro already handles non-Param fields correctly |
+| `#[arael(skip)]` | any field | exclude from the model entirely: not serialized, not updated, and a skipped entity collection gets no constraint sweeps. Use sparingly -- the macro already handles non-Param fields correctly |
 
 ```rust,ignore
 #[arael::model]

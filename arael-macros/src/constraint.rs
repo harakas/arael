@@ -2701,13 +2701,7 @@ pub fn generate_root_methods(
             }
         };
         for field in &root_fields_ordered.named {
-            let skipped = field.attrs.iter().any(|a| {
-                a.path().is_ident("arael")
-                    && a.parse_args::<proc_macro2::TokenStream>().map_or(false, |ts| {
-                        ts.into_iter().next().is_some_and(|t| t.to_string() == "skip")
-                    })
-            });
-            if skipped { continue; }
+            if field_is_skipped(field) { continue; }
             if let syn::Type::Path(tp) = &field.ty
                 && let Some(seg) = tp.path.segments.last() {
                     if matches!(seg.ident.to_string().as_str(), "Vec" | "Deque" | "Arena")
@@ -6158,12 +6152,26 @@ enum ContainKind {
     Optional,
 }
 
+/// `#[arael(skip)]` on the field: excluded from the model entirely --
+/// not serialized, not updated, and (via [`root_containments`]) not a
+/// containment location, so no constraint sweep ever runs over it.
+fn field_is_skipped(field: &syn::Field) -> bool {
+    field.attrs.iter().any(|a| {
+        a.path().is_ident("arael")
+            && a.parse_args::<proc_macro2::TokenStream>().map_or(false, |ts| {
+                ts.into_iter().next().is_some_and(|t| t.to_string() == "skip")
+            })
+    })
+}
+
 /// THE one-hop containment walk: every root field holding `type_name`,
 /// in declaration order, with how it holds it. The single syntax-side
 /// authority on which root fields count as containment -- location
 /// resolution, collection lookup, and the duplicate-containment guard
 /// are all views of this list, so a containment rule (a new container
 /// kind, an attribute exclusion) is added exactly once.
+/// `#[arael(skip)]` fields are not containment: serialize/update ignore
+/// them, so a sweep over one would evaluate never-updated params.
 fn root_containments(
     root_fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
     type_name: &str,
@@ -6171,6 +6179,7 @@ fn root_containments(
     let mut out = Vec::new();
     for field in root_fields {
         let Some(ident) = field.ident.as_ref() else { continue };
+        if field_is_skipped(field) { continue; }
         if let syn::Type::Path(tp) = &field.ty
             && let Some(seg) = tp.path.segments.last() {
                 let container = seg.ident.to_string();
