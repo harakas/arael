@@ -63,8 +63,8 @@ fn main() {
         let mut g = Graph { poses: refs::Vec::new(), edges: std::vec::Vec::new() };
         for p in &ds.poses {
             g.poses.push(Pose {
-                x: Param::new(p.x),
-                y: Param::new(p.y),
+                x: Param::new(p.t.x),
+                y: Param::new(p.t.y),
                 theta: Param::new(p.th),
                 hb: SelfBlock::new(),
             });

@@ -97,6 +97,9 @@
 //!   atan/atan2 in the generated code for polynomial approximations (max
 //!   error < 1e-6 rad); or call `fast_atan`/`fast_atan2` per site.
 //!   Derivatives stay the exact rational forms
+//! - **.g2o file I/O** -- [`g2o`] reads and writes the standard pose-graph
+//!   interchange format (2D and 3D), with information matrices kept as
+//!   read and sqrt-info helpers
 //! - **WASM/browser support** -- compiles to WebAssembly; the `arael-sketch`
 //!   constraint editor runs in the browser via eframe/egui
 //!
@@ -2075,6 +2078,8 @@ pub mod simple_lm;
 pub mod covariance;
 /// Camera model and geometric utilities.
 pub mod geometry;
+/// .g2o pose-graph file I/O (SE2 and SE3:QUAT records).
+pub mod g2o;
 
 /// Re-export Jacobian types for convenient access.
 pub use model::{Jacobian, JacobianRow, jacobian_entries};

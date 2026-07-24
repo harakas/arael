@@ -26,7 +26,7 @@ fn build(ds: &Dataset) -> (Graph, Values) {
     let mut graph = Graph::new();
     let mut values = Values::new();
     for (i, p) in ds.poses.iter().enumerate() {
-        values.insert(X(i as u32), SE2::new(p.th as dtype, p.x as dtype, p.y as dtype));
+        values.insert(X(i as u32), SE2::new(p.th as dtype, p.t.x as dtype, p.t.y as dtype));
     }
     for e in &ds.edges {
         let delta = SE2::new(e.dth as dtype, e.dx as dtype, e.dy as dtype);
@@ -43,7 +43,7 @@ fn build(ds: &Dataset) -> (Graph, Values) {
     // Unit-weight gauge prior on pose 0 (same convention as every runner).
     let p0 = &ds.poses[0];
     graph.add_factor(fac![
-        PriorResidual::new(SE2::new(p0.th as dtype, p0.x as dtype, p0.y as dtype)),
+        PriorResidual::new(SE2::new(p0.th as dtype, p0.t.x as dtype, p0.t.y as dtype)),
         X(0),
         1.0 as std
     ]);
@@ -99,7 +99,10 @@ fn solution_of(ds: &Dataset, values: &Values) -> Vec<PoseIn> {
     (0..ds.poses.len())
         .map(|i| {
             let p: &SE2 = values.get(X(i as u32)).expect("missing pose");
-            PoseIn { x: p.x() as f64, y: p.y() as f64, th: p.theta() as f64 }
+            PoseIn {
+                t: arael::vect::vect2d::new(p.x() as f64, p.y() as f64),
+                th: p.theta() as f64,
+            }
         })
         .collect()
 }

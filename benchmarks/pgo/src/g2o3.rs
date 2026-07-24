@@ -77,81 +77,24 @@ pub fn matrix_to_quat(m: matrix3d) -> [f64; 4] {
     [q.v.x, q.v.y, q.v.z, q.t]
 }
 
-/// Upper Cholesky factor: a = u^T u. Panics if `a` is not positive
-/// definite -- an information matrix that fails here is a data error,
-/// not something to paper over.
-fn cholesky_upper6(a: [[f64; 6]; 6]) -> [[f64; 6]; 6] {
-    // Standard lower Cholesky a = l l^T, returned transposed.
-    let mut l = [[0.0f64; 6]; 6];
-    for i in 0..6 {
-        for j in 0..=i {
-            let mut s = a[i][j];
-            for k in 0..j {
-                s -= l[i][k] * l[j][k];
-            }
-            if i == j {
-                assert!(s > 0.0, "information matrix not positive definite (pivot {} = {})", i, s);
-                l[i][j] = s.sqrt();
-            } else {
-                l[i][j] = s / l[j][j];
-            }
-        }
-    }
-    let mut u = [[0.0f64; 6]; 6];
-    for i in 0..6 {
-        for j in 0..6 {
-            u[i][j] = l[j][i];
-        }
-    }
-    u
-}
-
+/// Load via `arael::g2o` and resolve each measurement's information
+/// matrix into its upper sqrt factor. Quaternions become (x, y, z, w)
+/// arrays -- the shape the external-system adapters consume.
 pub fn load3(path: &str) -> Dataset3 {
-    let text = std::fs::read_to_string(path)
-        .unwrap_or_else(|e| panic!("cannot read {}: {}", path, e));
-    let mut poses = Vec::new();
-    let mut edges = Vec::new();
-    for line in text.lines() {
-        let f: Vec<&str> = line.split_whitespace().collect();
-        match f.first().copied() {
-            Some("VERTEX_SE3:QUAT") => {
-                let id: usize = f[1].parse().unwrap();
-                assert_eq!(id, poses.len(), "vertices must be dense and ordered");
-                let v: Vec<f64> = f[2..9].iter().map(|t| t.parse().unwrap()).collect();
-                let n = (v[3] * v[3] + v[4] * v[4] + v[5] * v[5] + v[6] * v[6]).sqrt();
-                poses.push(Pose3In {
-                    t: vect3d::new(v[0], v[1], v[2]),
-                    q: [v[3] / n, v[4] / n, v[5] / n, v[6] / n],
-                });
-            }
-            Some("EDGE_SE3:QUAT") => {
-                let a: u32 = f[1].parse().unwrap();
-                let b: u32 = f[2].parse().unwrap();
-                let v: Vec<f64> = f[3..31].iter().map(|t| t.parse().unwrap()).collect();
-                let n = (v[3] * v[3] + v[4] * v[4] + v[5] * v[5] + v[6] * v[6]).sqrt();
-                // 21 upper-triangular information entries, row-major,
-                // row order (x y z qx qy qz).
-                let mut info = [[0.0f64; 6]; 6];
-                let mut k = 7;
-                for i in 0..6 {
-                    for j in i..6 {
-                        info[i][j] = v[k];
-                        info[j][i] = v[k];
-                        k += 1;
-                    }
-                }
-                edges.push(Edge3In {
-                    a,
-                    b,
-                    dt: vect3d::new(v[0], v[1], v[2]),
-                    dq: [v[3] / n, v[4] / n, v[5] / n, v[6] / n],
-                    u: cholesky_upper6(info),
-                });
-            }
-            _ => {}
-        }
+    let ds = arael::g2o::Dataset3::load(path).unwrap_or_else(|e| panic!("{}: {}", path, e));
+    Dataset3 {
+        poses: ds.poses.iter().map(|p| Pose3In {
+            t: p.t,
+            q: [p.q.v.x, p.q.v.y, p.q.v.z, p.q.t],
+        }).collect(),
+        edges: ds.deltas.iter().map(|d| Edge3In {
+            a: d.a,
+            b: d.b,
+            dt: d.dt,
+            dq: [d.dq.v.x, d.dq.v.y, d.dq.v.z, d.dq.t],
+            u: d.sqrt_info_upper(),
+        }).collect(),
     }
-    Dataset3 { poses, edges }
 }
 
 /// The smooth quaternion-vector rotation residual: 2 sin(theta/2) * axis

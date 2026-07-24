@@ -1,17 +1,13 @@
-// g2o loader and the reference cost function every system is validated
-// against.
+// The 2D dataset the runners consume, and the reference cost function
+// every system is validated against. Parsing is arael::g2o; this adapter
+// resolves the per-edge sqrt-information row weights up front. Only
+// diagonal information matrices with I11 == I22 are accepted -- true for
+// the canonical M3500 and city10000 files.
 
-/// One pose: (x, y, theta).
-#[derive(Clone, Copy, Debug)]
-pub struct PoseIn {
-    pub x: f64,
-    pub y: f64,
-    pub th: f64,
-}
+pub use arael::g2o::Pose2 as PoseIn;
 
-/// One relative SE2 measurement with sqrt-information row weights.
-/// Only diagonal information matrices with I11 == I22 are accepted --
-/// true for the canonical M3500 and city10000 files.
+/// One relative SE2 measurement with resolved sqrt-information row
+/// weights.
 #[derive(Clone, Copy, Debug)]
 pub struct EdgeIn {
     pub a: u32,
@@ -33,48 +29,17 @@ pub struct Dataset {
 /// (the configuration tiny-solver's shipped benchmark runs, since its g2o
 /// reader drops the info matrices).
 pub fn load(path: &str, unit_weights: bool) -> Dataset {
-    let text = std::fs::read_to_string(path)
-        .unwrap_or_else(|e| panic!("cannot read {}: {}", path, e));
-    let mut poses = Vec::new();
-    let mut edges = Vec::new();
-    for line in text.lines() {
-        let f: Vec<&str> = line.split_whitespace().collect();
-        match f.first().copied() {
-            Some("VERTEX_SE2") => {
-                let id: usize = f[1].parse().unwrap();
-                assert_eq!(id, poses.len(), "vertices must be dense and ordered");
-                poses.push(PoseIn {
-                    x: f[2].parse().unwrap(),
-                    y: f[3].parse().unwrap(),
-                    th: f[4].parse().unwrap(),
-                });
-            }
-            Some("EDGE_SE2") => {
-                let i11: f64 = f[6].parse().unwrap();
-                let i12: f64 = f[7].parse().unwrap();
-                let i13: f64 = f[8].parse().unwrap();
-                let i22: f64 = f[9].parse().unwrap();
-                let i23: f64 = f[10].parse().unwrap();
-                let i33: f64 = f[11].parse().unwrap();
-                assert!(
-                    i12.abs() < 1e-9 && i13.abs() < 1e-9 && i23.abs() < 1e-9,
-                    "non-diagonal information matrix in {}", path
-                );
-                assert!((i11 - i22).abs() < 1e-9, "anisotropic translation info in {}", path);
-                edges.push(EdgeIn {
-                    a: f[1].parse().unwrap(),
-                    b: f[2].parse().unwrap(),
-                    dx: f[3].parse().unwrap(),
-                    dy: f[4].parse().unwrap(),
-                    dth: f[5].parse().unwrap(),
-                    wt: if unit_weights { 1.0 } else { i11.sqrt() },
-                    wr: if unit_weights { 1.0 } else { i33.sqrt() },
-                });
-            }
-            _ => {}
-        }
-    }
-    Dataset { poses, edges }
+    let ds = arael::g2o::Dataset2::load(path).unwrap_or_else(|e| panic!("{}: {}", path, e));
+    let edges = ds.deltas.iter().map(|d| {
+        let (wt, wr) = if unit_weights {
+            (1.0, 1.0)
+        } else {
+            d.iso_sqrt_info()
+                .unwrap_or_else(|| panic!("non-isotropic information matrix in {}", path))
+        };
+        EdgeIn { a: d.a, b: d.b, dx: d.dt.x, dy: d.dt.y, dth: d.dth, wt, wr }
+    }).collect();
+    Dataset { poses: ds.poses, edges }
 }
 
 /// Sum of squared weighted residuals (no 1/2 factor), over the between
@@ -89,8 +54,8 @@ pub fn reference_cost(ds: &Dataset, sol: &[PoseIn]) -> f64 {
         let b = sol[e.b as usize];
         let (sa, ca) = a.th.sin_cos();
         let (sb, cb) = b.th.sin_cos();
-        let gx = a.x + ca * e.dx - sa * e.dy - b.x;
-        let gy = a.y + sa * e.dx + ca * e.dy - b.y;
+        let gx = a.t.x + ca * e.dx - sa * e.dy - b.t.x;
+        let gy = a.t.y + sa * e.dx + ca * e.dy - b.t.y;
         let r0 = (cb * gx + sb * gy) * e.wt;
         let r1 = (-sb * gx + cb * gy) * e.wt;
         let r2 = arael::utils::rad_diff(a.th + e.dth, b.th) * e.wr;
@@ -98,7 +63,7 @@ pub fn reference_cost(ds: &Dataset, sol: &[PoseIn]) -> f64 {
     }
     let p0 = sol[0];
     let g0 = ds.poses[0];
-    cost += (p0.x - g0.x).powi(2) + (p0.y - g0.y).powi(2) + (p0.th - g0.th).powi(2);
+    cost += (p0.t.x - g0.t.x).powi(2) + (p0.t.y - g0.t.y).powi(2) + (p0.th - g0.th).powi(2);
     cost
 }
 
@@ -106,13 +71,13 @@ pub fn reference_cost(ds: &Dataset, sol: &[PoseIn]) -> f64 {
 /// translation) alignment -- gauge-independent geometric agreement.
 pub fn aligned_rmse(a: &[PoseIn], b: &[PoseIn]) -> f64 {
     let n = a.len() as f64;
-    let (max, may) = a.iter().fold((0.0, 0.0), |(x, y), p| (x + p.x, y + p.y));
-    let (mbx, mby) = b.iter().fold((0.0, 0.0), |(x, y), p| (x + p.x, y + p.y));
+    let (max, may) = a.iter().fold((0.0, 0.0), |(x, y), p| (x + p.t.x, y + p.t.y));
+    let (mbx, mby) = b.iter().fold((0.0, 0.0), |(x, y), p| (x + p.t.x, y + p.t.y));
     let (max, may, mbx, mby) = (max / n, may / n, mbx / n, mby / n);
     let (mut sxx, mut sxy, mut syx, mut syy) = (0.0, 0.0, 0.0, 0.0);
     for (pa, pb) in a.iter().zip(b.iter()) {
-        let (ax, ay) = (pa.x - max, pa.y - may);
-        let (bx, by) = (pb.x - mbx, pb.y - mby);
+        let (ax, ay) = (pa.t.x - max, pa.t.y - may);
+        let (bx, by) = (pb.t.x - mbx, pb.t.y - mby);
         sxx += ax * bx;
         sxy += ax * by;
         syx += ay * bx;
@@ -122,8 +87,8 @@ pub fn aligned_rmse(a: &[PoseIn], b: &[PoseIn]) -> f64 {
     let (s, c) = th.sin_cos();
     let mut err = 0.0;
     for (pa, pb) in a.iter().zip(b.iter()) {
-        let (ax, ay) = (pa.x - max, pa.y - may);
-        let (bx, by) = (pb.x - mbx, pb.y - mby);
+        let (ax, ay) = (pa.t.x - max, pa.t.y - may);
+        let (bx, by) = (pb.t.x - mbx, pb.t.y - mby);
         let (rx, ry) = (c * ax - s * ay, s * ax + c * ay);
         err += (rx - bx).powi(2) + (ry - by).powi(2);
     }

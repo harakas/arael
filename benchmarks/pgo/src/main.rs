@@ -42,7 +42,7 @@ fn run_external(cmd: std::process::Command, poses_out: &str, n_poses: usize)
         .lines()
         .map(|l| {
             let v: Vec<f64> = l.split_whitespace().map(|t| t.parse().unwrap()).collect();
-            PoseIn { x: v[0], y: v[1], th: v[2] }
+            PoseIn { t: arael::vect::vect2d::new(v[0], v[1]), th: v[2] }
         })
         .collect();
     assert_eq!(poses.len(), n_poses);

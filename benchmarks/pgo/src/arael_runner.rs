@@ -71,9 +71,9 @@ fn build_parts<T: Float>(ds: &Dataset)
     let mut poses = refs::Vec::new();
     for (i, p) in ds.poses.iter().enumerate() {
         poses.push(Pose2 {
-            pos: Param::new(vect2::new(c(p.x), c(p.y))),
+            pos: Param::new(vect2::new(c(p.t.x), c(p.t.y))),
             th: Param::new(c(p.th)),
-            prior: vect2::new(c(p.x), c(p.y)),
+            prior: vect2::new(c(p.t.x), c(p.t.y)),
             prior_th: c(p.th),
             has_prior: i == 0,
             hb: SelfBlock::new(),
@@ -97,8 +97,10 @@ fn build_parts<T: Float>(ds: &Dataset)
 fn solution_parts<T: Float>(poses: &refs::Vec<Pose2<T>>) -> Vec<PoseIn> {
     poses.iter()
         .map(|p| PoseIn {
-            x: p.pos.value.x.to_f64().unwrap(),
-            y: p.pos.value.y.to_f64().unwrap(),
+            t: arael::vect::vect2d::new(
+                p.pos.value.x.to_f64().unwrap(),
+                p.pos.value.y.to_f64().unwrap(),
+            ),
             th: p.th.value.to_f64().unwrap(),
         })
         .collect()

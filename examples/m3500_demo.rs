@@ -67,66 +67,35 @@ struct Graph {
 }
 
 fn load_g2o(path: &str, weighted: bool) -> Graph {
+    let ds = arael::g2o::Dataset2::load(path).unwrap_or_else(|e| panic!("{}: {}", path, e));
     let mut graph = Graph { poses: refs::Vec::new(), edges: std::vec::Vec::new() };
-    let text = std::fs::read_to_string(path)
-        .unwrap_or_else(|e| panic!("cannot read {}: {}", path, e));
-    for line in text.lines() {
-        let f: Vec<&str> = line.split_whitespace().collect();
-        match f.first().copied() {
-            Some("VERTEX_SE2") => {
-                // VERTEX_SE2 id x y theta
-                let x: f64 = f[2].parse().unwrap();
-                let y: f64 = f[3].parse().unwrap();
-                let th: f64 = f[4].parse().unwrap();
-                let id: usize = f[1].parse().unwrap();
-                assert_eq!(id, graph.poses.len(), "vertices must be dense and ordered");
-                graph.poses.push(Pose2 {
-                    pos: Param::new(vect2d::new(x, y)),
-                    th: Param::new(th),
-                    prior: vect2d::new(x, y),
-                    prior_th: th,
-                    has_prior: id == 0,
-                    hb: SelfBlock::new(),
-                });
-            }
-            Some("EDGE_SE2") => {
-                // EDGE_SE2 id_a id_b dx dy dtheta <info upper-triangle...>
-                let ia: u32 = f[1].parse().unwrap();
-                let ib: u32 = f[2].parse().unwrap();
-                let dx: f64 = f[3].parse().unwrap();
-                let dy: f64 = f[4].parse().unwrap();
-                let dth: f64 = f[5].parse().unwrap();
-                // Info matrix upper triangle: I11 I12 I13 I22 I23 I33.
-                // M3500 is diagonal with I11 == I22; sqrt-info weighting
-                // then reduces to two per-edge row scales.
-                let (mut wt, mut wr) = (1.0, 1.0);
-                if weighted && f.len() >= 12 {
-                    let i11: f64 = f[6].parse().unwrap();
-                    let i12: f64 = f[7].parse().unwrap();
-                    let i13: f64 = f[8].parse().unwrap();
-                    let i22: f64 = f[9].parse().unwrap();
-                    let i23: f64 = f[10].parse().unwrap();
-                    let i33: f64 = f[11].parse().unwrap();
-                    assert!(i12.abs() < 1e-9 && i13.abs() < 1e-9 && i23.abs() < 1e-9,
-                        "only diagonal information matrices are supported");
-                    assert!((i11 - i22).abs() < 1e-9, "anisotropic translation info unsupported");
-                    wt = i11.sqrt();
-                    wr = i33.sqrt();
-                }
-                let a = graph.poses.ref_at(ia);
-                let b = graph.poses.ref_at(ib);
-                graph.edges.push(Edge {
-                    a,
-                    b,
-                    delta: vect2d::new(dx, dy),
-                    dth,
-                    wt,
-                    wr,
-                    hb: CrossBlock::new(),
-                });
-            }
-            _ => {}
-        }
+    for (id, p) in ds.poses.iter().enumerate() {
+        graph.poses.push(Pose2 {
+            pos: Param::new(p.t),
+            th: Param::new(p.th),
+            prior: p.t,
+            prior_th: p.th,
+            has_prior: id == 0,
+            hb: SelfBlock::new(),
+        });
+    }
+    for d in &ds.deltas {
+        // M3500 is diagonal with I11 == I22; sqrt-info weighting then
+        // reduces to two per-edge row scales.
+        let (wt, wr) = if weighted {
+            d.iso_sqrt_info().expect("only diagonal isotropic information matrices are supported")
+        } else {
+            (1.0, 1.0)
+        };
+        graph.edges.push(Edge {
+            a: graph.poses.ref_at(d.a),
+            b: graph.poses.ref_at(d.b),
+            delta: d.dt,
+            dth: d.dth,
+            wt,
+            wr,
+            hb: CrossBlock::new(),
+        });
     }
     graph
 }

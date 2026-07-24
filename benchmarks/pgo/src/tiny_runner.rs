@@ -85,7 +85,7 @@ fn build(ds: &Dataset) -> (tiny_solver::Problem, HashMap<String, na::DVector<f64
     let mut problem = tiny_solver::Problem::new();
     let mut init = HashMap::new();
     for (i, p) in ds.poses.iter().enumerate() {
-        init.insert(format!("x{}", i), na::DVector::from_vec(vec![p.th, p.x, p.y]));
+        init.insert(format!("x{}", i), na::DVector::from_vec(vec![p.th, p.t.x, p.t.y]));
     }
     for e in &ds.edges {
         problem.add_residual_block(
@@ -103,7 +103,7 @@ fn build(ds: &Dataset) -> (tiny_solver::Problem, HashMap<String, na::DVector<f64
     problem.add_residual_block(
         3,
         &["x0"],
-        Box::new(tiny_solver::factors::PriorFactor { v: na::DVector::from_vec(vec![p0.th, p0.x, p0.y]) }),
+        Box::new(tiny_solver::factors::PriorFactor { v: na::DVector::from_vec(vec![p0.th, p0.t.x, p0.t.y]) }),
         None,
     );
     (problem, init)
@@ -120,7 +120,7 @@ fn extract(ds: &Dataset, values: &HashMap<String, na::DVector<f64>>) -> Vec<Pose
     (0..ds.poses.len())
         .map(|i| {
             let v = &values[&format!("x{}", i)];
-            PoseIn { x: v[1], y: v[2], th: v[0] }
+            PoseIn { t: arael::vect::vect2d::new(v[1], v[2]), th: v[0] }
         })
         .collect()
 }
