@@ -273,6 +273,24 @@ impl ConstraintCtx {
         }
     }
 
+    /// The bindings a constraint body may start a path from, for error
+    /// messages: entity variables with their types (the self alias is
+    /// the lowercased struct name), then user `let`s.
+    fn available_bindings_hint(&self) -> String {
+        let mut vars: Vec<String> = self.entity_vars.iter()
+            .map(|(name, ty)| format!("{} ({})", name, ty))
+            .collect();
+        vars.sort();
+        let mut lets: Vec<&str> = self.lets.iter().map(|s| s.as_str()).collect();
+        lets.sort();
+        vars.extend(lets.into_iter().map(|l| format!("{} (let)", l)));
+        if vars.is_empty() {
+            "none".to_string()
+        } else {
+            vars.join(", ")
+        }
+    }
+
     /// Create a SymVal for a struct field, given the field's sym type and a base name.
     fn make_sym_val(base: &str, sft: &SymFieldType) -> SymVal {
         match sft {
@@ -362,7 +380,8 @@ fn eval_expr(expr: &Expr, ctx: &mut ConstraintCtx) -> Result<SymVal, syn::Error>
                     _ => {}
                 }
                 return Err(syn::Error::new_spanned(ident,
-                    format!("unknown variable '{}' in constraint", name)));
+                    format!("unknown variable '{}' in constraint; available bindings: {}",
+                        name, ctx.available_bindings_hint())));
             }
             Err(syn::Error::new_spanned(expr, "unsupported path in constraint"))
         }
@@ -424,6 +443,18 @@ fn eval_expr(expr: &Expr, ctx: &mut ConstraintCtx) -> Result<SymVal, syn::Error>
                 let head = path.split('.').next().unwrap();
                 if let Some(type_name) = ctx.entity_vars.get(head).cloned() {
                     validate_entity_path(&type_name, head, &path[head.len() + 1..], expr)?;
+                } else if !ctx.entity_vars.is_empty() {
+                    // In a constraint body every path must start at a
+                    // binding: an unknown head is a typo (usually the
+                    // self alias, which is the LOWERCASED STRUCT NAME).
+                    // It used to be spliced verbatim into generated code
+                    // and surface as a bare rustc "cannot find value"
+                    // pointing at the whole macro. (Symbolic-precompute
+                    // contexts have no entity vars and keep the
+                    // passthrough for component field reads.)
+                    return Err(syn::Error::new_spanned(expr,
+                        format!("unknown binding '{}' in `{}`; available bindings: {}",
+                            head, path, ctx.available_bindings_hint())));
                 }
                 return Ok(SymVal::Scalar(arael_sym::symbol(path)));
             }

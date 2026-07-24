@@ -1,0 +1,15 @@
+error: $DIR/tests/constraint_body_errors/unknown_binding.rs:17: unknown binding 'tie' in `tie.d`; available bindings: a (N), b (N), n (N), root (W), tiev (TieV), w (W)
+  --> tests/constraint_body_errors/unknown_binding.rs:29:1
+   |
+29 | #[arael::model]
+   | ^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused import: `self`
+ --> tests/constraint_body_errors/unknown_binding.rs:8:19
+  |
+8 | use arael::refs::{self, Ref};
+  |                   ^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
