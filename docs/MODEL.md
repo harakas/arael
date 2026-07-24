@@ -322,6 +322,17 @@ Wrap entities in these when you have many of them:
 A Model struct is "directly composed" if a child Model appears as a
 plain field (e.g. `sub: Sub` -- see `single_root_demo.rs`). It's
 "collection-composed" if it's wrapped in one of the containers above.
+An `Option<T>` field holds zero or one entity: when `Some` its params
+and constraints participate like any other entity, when `None` it
+contributes nothing (like an empty collection). This works for
+constraint entities too -- an optional per-pose observation
+(`gps: Option<GpsObs>` on a pose) or an optional root-level constraint
+(`loop_closure: Option<Tie>`) fires only when present. Whether the
+Option is Some or None must not change during a solve (it shapes the
+sparsity pattern, like a guard); flipping it between solves is fine.
+A cross/triplet constraint struct as a PLAIN direct field is rejected
+at compile time (hold it in a collection or an Option), as is the same
+entity type held in more than one location.
 
 Composition nests to any depth: a root may hold `Vec<Path>` where each
 `Path` is a Model with its own collections of entities and constraints.

@@ -17,23 +17,31 @@ use arael::model::{Param, SelfBlock, CrossBlock};
 use arael::refs::{self, Ref};
 use arael::vect::vect2d;
 
-// A 2D pose. The prior constraint fires only on the pose that anchors
-// the gauge (has_prior), pulling it toward its initial value with unit
-// weight -- without it, any rigid motion of the whole graph would leave
-// the cost unchanged and the Hessian singular.
+// A 2D pose.
 #[arael::model]
-#[arael(constraint(hb, guard = self.has_prior, {
-    [pose2.pos.x - pose2.prior.x,
-     pose2.pos.y - pose2.prior.y,
-     pose2.th - pose2.prior_th]
-}))]
 struct Pose2 {
     pos: Param<vect2d>,
     th: Param<f64>,
-    prior: vect2d,
-    prior_th: f64,
-    has_prior: bool,
     hb: SelfBlock<Pose2>,
+}
+
+// The gauge anchor: ONE optional prior on the root instead of prior
+// fields carried by every pose. It pulls the referenced pose toward a
+// fixed value with unit weight -- without it, any rigid motion of the
+// whole graph would leave the cost unchanged and the Hessian singular.
+// The residuals write into the pose's own block (`p.hb`); when the
+// Option is None the constraint simply does not exist.
+#[arael::model]
+#[arael(constraint(p.hb, {
+    [p.pos.x - prior.pos.x,
+     p.pos.y - prior.pos.y,
+     p.th - prior.th]
+}))]
+struct Prior {
+    #[arael(ref = root.poses)]
+    p: Ref<Pose2>,
+    pos: vect2d,
+    th: f64,
 }
 
 // One relative SE2 measurement between two poses. wt/wr are the
@@ -64,20 +72,26 @@ struct Edge {
 struct Graph {
     poses: refs::Vec<Pose2>,
     edges: std::vec::Vec<Edge>,
+    prior: Option<Prior>,
 }
 
 fn load_g2o(path: &str, weighted: bool) -> Graph {
     let ds = arael::g2o::Dataset2::load(path).unwrap_or_else(|e| panic!("{}: {}", path, e));
-    let mut graph = Graph { poses: refs::Vec::new(), edges: std::vec::Vec::new() };
-    for (id, p) in ds.poses.iter().enumerate() {
-        graph.poses.push(Pose2 {
+    let mut graph = Graph {
+        poses: refs::Vec::new(),
+        edges: std::vec::Vec::new(),
+        prior: None,
+    };
+    for p in &ds.poses {
+        let r = graph.poses.push(Pose2 {
             pos: Param::new(p.t),
             th: Param::new(p.th),
-            prior: p.t,
-            prior_th: p.th,
-            has_prior: id == 0,
             hb: SelfBlock::new(),
         });
+        // The first pose anchors the gauge.
+        if graph.prior.is_none() {
+            graph.prior = Some(Prior { p: r, pos: p.t, th: p.th });
+        }
     }
     for d in &ds.deltas {
         // M3500 is diagonal with I11 == I22; sqrt-info weighting then
@@ -125,14 +139,13 @@ fn metrics(graph: &Graph) -> (f64, f64) {
             arael::utils::rad_diff(a.th.value + e.dth, b.th.value) * e.wr,
         ]);
     }
-    for p in graph.poses.iter() {
-        if p.has_prior {
-            block([
-                p.pos.value.x - p.prior.x,
-                p.pos.value.y - p.prior.y,
-                p.th.value - p.prior_th,
-            ]);
-        }
+    if let Some(prior) = &graph.prior {
+        let p = &graph.poses[prior.p];
+        block([
+            p.pos.value.x - prior.pos.x,
+            p.pos.value.y - prior.pos.y,
+            p.th.value - prior.th,
+        ]);
     }
     (ls, huber)
 }

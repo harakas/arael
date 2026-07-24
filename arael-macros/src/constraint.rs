@@ -2616,6 +2616,9 @@ pub fn generate_root_methods(
     struct SingleInstanceGroup {
         accessor_read: TokenStream2,
         accessor_write: TokenStream2,
+        /// An Option<Entity> location: the accessors yield Option refs and
+        /// every emitted block is wrapped in `if let Some(__item) = ...`.
+        optional: bool,
         self_var: syn::Ident,
         root_var_ident: syn::Ident,
         a_param_count: usize,
@@ -2899,9 +2902,13 @@ pub fn generate_root_methods(
             // (root-level observations): the global scan is alphabetical
             // and another root holding the same collection would hijack
             // the resolution.
+            // Option<Frine> counts as containment here too (it iterates
+            // as a zero-or-one collection in the emitted sweeps).
+            let holds = |sft: &SymFieldType| matches!(sft,
+                SymFieldType::Struct(s) | SymFieldType::OptionalStruct(s)
+                    if *s == sc.struct_name);
             let current_root_holds = registry_lookup(&root_name.to_string())
-                .map(|l| l.fields.iter().any(|(_, sft)|
-                    matches!(sft, SymFieldType::Struct(s) if *s == sc.struct_name)))
+                .map(|l| l.fields.iter().any(|(_, sft)| holds(sft)))
                 .unwrap_or(false);
             let parent_type = if current_root_holds {
                 root_name.to_string()
@@ -2910,9 +2917,7 @@ pub fn generate_root_methods(
                     let guard = crate::SYM_REGISTRY.lock().unwrap_or_else(|p| p.into_inner());
                     guard.as_ref().and_then(|reg| {
                         reg.layouts.iter().find(|(_, layout)| {
-                            layout.fields.iter().any(|(_, sft)| {
-                                if let SymFieldType::Struct(s) = sft { *s == sc.struct_name } else { false }
-                            })
+                            layout.fields.iter().any(|(_, sft)| holds(sft))
                         }).map(|(name, _)| name.clone())
                     })
                 }.ok_or_else(|| syn::Error::new(proc_macro2::Span::call_site(),
@@ -3099,17 +3104,32 @@ pub fn generate_root_methods(
         if !is_self_block
             && !(is_remote_block
                 && matches!(entity_location, EntityLocation::RootSelf))
+            // An Option-held triplet/multi-cross constraint struct is fine:
+            // Option iterates as a zero-or-one collection. (For a plain
+            // cross, entity_location is the TARGET type's location, so
+            // Optional there means an Option-held parent entity -- an
+            // unsupported iteration shape, rejected below.)
+            && !(matches!(entity_location, EntityLocation::OptionalField { .. })
+                && (is_triplet || is_multi_cross))
             && !matches!(entity_location,
                 EntityLocation::Collection { .. } | EntityLocation::Nested { .. }) {
-            // TripletBlock / CrossBlock constraints whose A-type is neither a
-            // root collection nor a nested collection fall through --
-            // direct-composed (single-instance) sub-models with cross-block
-            // constraints are not yet supported. The cross emission drives its
-            // own iteration from the constraint-struct location (cross_prefix),
-            // so a Nested A-type is fine here. A remote-block constraint whose
-            // parent IS the root (a root-level observation collection) passes:
-            // its sweep is a single loop over that collection.
-            continue;
+            // TripletBlock / CrossBlock constraints drive their iteration
+            // from the constraint struct's containing collection, so a
+            // single-instance location (direct field, Option field, the
+            // root itself without a remote block) has no loop to emit.
+            // Rejected loudly -- a silent skip here would drop the
+            // constraint. (A remote-block constraint whose parent IS the
+            // root passes above: its sweep is a single loop over that
+            // collection; a Nested A-type is fine, cross emission wraps
+            // its own prefix loops.)
+            return Err(syn::Error::new(proc_macro2::Span::call_site(),
+                format!("{}:{}: cross/triplet constraint on `{}` needs the \
+                         constraint struct to live in a collection \
+                         (Vec/Deque/Arena) on the root; it is a single \
+                         instance here, so its sweep has no loop to iterate \
+                         -- put it in a collection (a collection of one is \
+                         fine)",
+                    sc.attr_file, sc.attr_line, sc.struct_name)));
         }
         // `coll_ident(_str)` is only consumed by the Collection SelfBlock path and the
         // nested CrossBlock path (both of which require a Collection). For DirectField
@@ -3127,7 +3147,8 @@ pub fn generate_root_methods(
                 nested_prefix = segments[..segments.len() - 1].to_vec();
                 (last.field.clone(), syn::Ident::new(&last.field, proc_macro2::Span::call_site()))
             }
-            EntityLocation::DirectField { field } => {
+            EntityLocation::DirectField { field }
+            | EntityLocation::OptionalField { field } => {
                 (String::new(), syn::Ident::new(field, proc_macro2::Span::call_site()))
             }
             EntityLocation::RootSelf => {
@@ -3167,11 +3188,16 @@ pub fn generate_root_methods(
         let mut cross_prefix: Vec<AccessSegment> = Vec::new();
 
         if is_triplet || is_multi_cross || (!is_self_block || is_remote_block) {
-            // First try: constraint struct nested under A-type (e.g. PointFrine under PointLandmark)
+            // First try: constraint struct nested under A-type (e.g. PointFrine
+            // under PointLandmark). An `Option<Frine>` field works the same --
+            // Option iterates as a zero-or-one collection, so the emitted
+            // loops need no special casing.
             let parent_layout = registry_lookup(&a_type);
             let frines_field = parent_layout.as_ref().and_then(|l| {
                 l.fields.iter().find(|(_, sft)| {
-                    if let SymFieldType::Struct(s) = sft { s == &sc.struct_name } else { false }
+                    matches!(sft,
+                        SymFieldType::Struct(s) | SymFieldType::OptionalStruct(s)
+                            if s == &sc.struct_name)
                 }).map(|(name, _)| name.clone())
             });
 
@@ -3189,6 +3215,26 @@ pub fn generate_root_methods(
                         Some(EntityLocation::Nested { segments }) => {
                             let last = segments.last().expect("Nested has >= 1 segment");
                             (last.field.clone(), segments[..segments.len() - 1].to_vec())
+                        }
+                        // An Option<Frine> iterates as a zero-or-one
+                        // collection (Option's iter/iter_mut), so the
+                        // emitted loops handle it unchanged.
+                        Some(EntityLocation::OptionalField { field }) => {
+                            (field.clone(), Vec::new())
+                        }
+                        // A plain direct field has no iteration at all:
+                        // skipping would silently drop the constraint.
+                        // (A `None` resolution is different -- the type is
+                        // not contained in this root at all, e.g. another
+                        // root's constraint struct reachable through a Ref
+                        // edge -- and stays skipped.)
+                        Some(EntityLocation::DirectField { field }) => {
+                            return Err(syn::Error::new(proc_macro2::Span::call_site(),
+                                format!("{}:{}: cross/triplet constraint struct `{}` is held \
+                                         as a plain single-instance field (root field `{}`); \
+                                         its sweep needs something to iterate -- hold it in \
+                                         a Vec/Deque/Arena or an Option",
+                                    sc.attr_file, sc.attr_line, sc.struct_name, field)));
                         }
                         _ => continue,
                     },
@@ -4299,7 +4345,7 @@ pub fn generate_root_methods(
                 cost_loops.push(quote! {
                     {
                         #marker
-                        for __frine in &self.#frines_ident {
+                        for __frine in self.#frines_ident.iter() {
                             #(#resolve_stmts)*
                             #[allow(unused_variables)]
                             let #parent_ident = &*__self_ref;
@@ -4313,7 +4359,7 @@ pub fn generate_root_methods(
                     {
                         #marker
                         for __lm in self.#coll_ident.iter() {
-                            for __frine in &__lm.#frines_ident {
+                            for __frine in __lm.#frines_ident.iter() {
                                 #(#resolve_stmts)*
                                 let #parent_ident = __lm;
                                 let #root_var_ident = &*__self_ref;
@@ -4380,7 +4426,7 @@ pub fn generate_root_methods(
                     { #marker_gh for __frine in self.#frines_ident.iter_mut() { #gh_body } }
                 },
                 (true, false) => quote! {
-                    { #marker_gh for __frine in &self.#frines_ident { #gh_body } }
+                    { #marker_gh for __frine in self.#frines_ident.iter() { #gh_body } }
                 },
                 (false, true) => quote! {
                     {
@@ -4394,7 +4440,7 @@ pub fn generate_root_methods(
                     {
                         #marker_gh
                         for __lm in self.#coll_ident.iter() {
-                            for __frine in &__lm.#frines_ident { #gh_body }
+                            for __frine in __lm.#frines_ident.iter() { #gh_body }
                         }
                     }
                 },
@@ -4453,11 +4499,11 @@ pub fn generate_root_methods(
                     #rtw.set_indices(&__a_idx);
                 };
                 let sbi_loop = if parent_is_root {
-                    quote! { for __frine in &self.#frines_ident { #sbi_body } }
+                    quote! { for __frine in self.#frines_ident.iter() { #sbi_body } }
                 } else {
                     quote! {
                         for __lm in self.#coll_ident.iter() {
-                            for __frine in &__lm.#frines_ident { #sbi_body }
+                            for __frine in __lm.#frines_ident.iter() { #sbi_body }
                         }
                     }
                 };
@@ -4548,7 +4594,9 @@ pub fn generate_root_methods(
                         if let Some(ref je) = jac_entry { group.jac_entries.push(je.clone()); }
                     }
                 }
-                EntityLocation::RootSelf | EntityLocation::DirectField { .. } => {
+                EntityLocation::RootSelf
+                | EntityLocation::DirectField { .. }
+                | EntityLocation::OptionalField { .. } => {
                     if root_self_primary.is_some() {
                         // The single-instance emission writes through the
                         // ENTITY's block field, which this form does not have.
@@ -4560,14 +4608,17 @@ pub fn generate_root_methods(
                                 sc.attr_file, sc.attr_line,
                                 constraint.primary_block_field().strip_prefix("root.").unwrap())));
                     }
-                    // SelfBlock on the root itself or on a direct-composed sub-model:
-                    // emit a single evaluation (no loop). Group by access path so
-                    // multiple constraints on the same entity merge into one block.
-                    let (group_key, accessor_read, accessor_write) = match &entity_location {
+                    // SelfBlock on the root itself, on a direct-composed
+                    // sub-model, or on an Option<Entity>: emit a single
+                    // evaluation (no loop; if-let-wrapped for Option). Group
+                    // by access path so multiple constraints on the same
+                    // entity merge into one block.
+                    let (group_key, accessor_read, accessor_write, optional) = match &entity_location {
                         EntityLocation::RootSelf => (
                             "self".to_string(),
                             quote! { &*__self_ref },
                             quote! { &mut *self },
+                            false,
                         ),
                         EntityLocation::DirectField { field } => {
                             let fi = syn::Ident::new(field, proc_macro2::Span::call_site());
@@ -4575,6 +4626,16 @@ pub fn generate_root_methods(
                                 format!("self.{}", field),
                                 quote! { &self.#fi },
                                 quote! { &mut self.#fi },
+                                false,
+                            )
+                        }
+                        EntityLocation::OptionalField { field } => {
+                            let fi = syn::Ident::new(field, proc_macro2::Span::call_site());
+                            (
+                                format!("self.{}", field),
+                                quote! { __self_ref.#fi.as_ref() },
+                                quote! { self.#fi.as_mut() },
+                                true,
                             )
                         }
                         _ => unreachable!(),
@@ -4586,6 +4647,7 @@ pub fn generate_root_methods(
                     let group = single_instance_groups.entry(group_key).or_insert_with(|| SingleInstanceGroup {
                         accessor_read,
                         accessor_write,
+                        optional,
                         self_var: self_var.clone(),
                         root_var_ident: root_var_ident.clone(),
                         a_param_count,
@@ -5169,51 +5231,51 @@ pub fn generate_root_methods(
             quote! { __item.#fi = __cid; }
         });
 
-        merged_cost.push(quote! {
-            {
-                let __item = #accessor_read;
-                let #self_var = __item;
-                let #root_var = &*__self_ref;
-                #(#cost_entries)*
+        // An Option<Entity> location evaluates only when Some -- a None
+        // contributes nothing anywhere, like an empty collection (__cid /
+        // __jac_cid advance only for the live instance, consistently
+        // across the cost / gh / jac / set-indices passes).
+        let wrap = |accessor: &TokenStream2, body: TokenStream2| -> TokenStream2 {
+            if group.optional {
+                quote! { if let Some(__item) = #accessor { #body } }
+            } else {
+                quote! { { let __item = #accessor; #body } }
             }
-        });
+        };
 
-        merged_gh.push(quote! {
-            {
-                let __item = #accessor_write;
-                #(#gh_entries)*
-            }
-        });
+        merged_cost.push(wrap(accessor_read, quote! {
+            let #self_var = __item;
+            let #root_var = &*__self_ref;
+            #(#cost_entries)*
+        }));
+
+        merged_gh.push(wrap(accessor_write, quote! {
+            #(#gh_entries)*
+        }));
 
         if !jac_entries.is_empty() {
-            merged_jac.push(quote! {
-                {
-                    let __item = #accessor_read;
-                    let #self_var = __item;
-                    let #root_var = &*__self_ref;
-                    let __jac_idx: std::vec::Vec<u32> = {
-                        let mut __a_idx = [0u32; #a_count];
-                        #(#a_idx_stmts)*
-                        __a_idx.to_vec()
-                    };
-                    let __jac_a_idx = __jac_idx.clone();
-                    let _ = &__jac_a_idx;
-                    #(#jac_entries)*
-                    __jac_cid += 1;
-                }
-            });
+            merged_jac.push(wrap(accessor_read, quote! {
+                let #self_var = __item;
+                let #root_var = &*__self_ref;
+                let __jac_idx: std::vec::Vec<u32> = {
+                    let mut __a_idx = [0u32; #a_count];
+                    #(#a_idx_stmts)*
+                    __a_idx.to_vec()
+                };
+                let __jac_a_idx = __jac_idx.clone();
+                let _ = &__jac_a_idx;
+                #(#jac_entries)*
+                __jac_cid += 1;
+            }));
         }
 
-        merged_sbi.push(quote! {
-            {
-                let __item = #accessor_write;
-                let mut __a_idx = [0u32; #a_count];
-                #(#a_idx_stmts)*
-                __item.#block_ident.set_indices(&__a_idx);
-                #ci_set
-                __cid += 1;
-            }
-        });
+        merged_sbi.push(wrap(accessor_write, quote! {
+            let mut __a_idx = [0u32; #a_count];
+            #(#a_idx_stmts)*
+            __item.#block_ident.set_indices(&__a_idx);
+            #ci_set
+            __cid += 1;
+        }));
     }
 
     // Emit merged cross-constraint loops (one per collection, all attributes inside)
@@ -5722,10 +5784,15 @@ fn interpret_constraint_body(
                 format!("field '{}' is not Ref<T>", ref_field_name)))?;
         // Find the parent struct (who contains this constraint struct).
         // The current root wins when it holds the collection directly --
-        // see the identical preference in the traversal side.
+        // see the identical preference in the traversal side. Option<T>
+        // containment counts (an Option frine iterates as a zero-or-one
+        // collection); missing it here would fall back to the TARGET type
+        // as parent and pollute the param span with a phantom alias.
+        let holds = |sft: &SymFieldType| matches!(sft,
+            SymFieldType::Struct(s) | SymFieldType::OptionalStruct(s)
+                if *s == struct_name.to_string());
         let current_root_holds = registry_lookup(root_type_name)
-            .map(|l| l.fields.iter().any(|(_, sft)|
-                matches!(sft, SymFieldType::Struct(s) if *s == struct_name.to_string())))
+            .map(|l| l.fields.iter().any(|(_, sft)| holds(sft)))
             .unwrap_or(false);
         let parent_type = if current_root_holds {
             root_type_name.to_string()
@@ -5734,9 +5801,7 @@ fn interpret_constraint_body(
                 let guard = crate::SYM_REGISTRY.lock().unwrap_or_else(|p| p.into_inner());
                 guard.as_ref().and_then(|reg| {
                     reg.layouts.iter().find(|(_, layout)| {
-                        layout.fields.iter().any(|(_, sft)| {
-                            if let SymFieldType::Struct(s) = sft { *s == struct_name.to_string() } else { false }
-                        })
+                        layout.fields.iter().any(|(_, sft)| holds(sft))
                     }).map(|(name, _)| name.clone())
                 })
             }.unwrap_or_else(|| inner.to_string())
@@ -6134,6 +6199,15 @@ fn root_location_fields(
                                 && inner_name == type_name {
                                     out.push((ident.to_string(), true));
                                 }
+                } else if container == "Option" {
+                    // Option<T> counts as a (single-instance) containment
+                    // location, so the duplicate guard sees it.
+                    if let syn::PathArguments::AngleBracketed(args) = &seg.arguments
+                        && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
+                            && let Ok(inner_name) = type_ident_name(inner)
+                                && inner_name == type_name {
+                                    out.push((ident.to_string(), false));
+                                }
                 } else if seg.ident == type_name {
                     out.push((ident.to_string(), false));
                 }
@@ -6171,6 +6245,9 @@ enum EntityLocation {
     Collection { field: String },
     /// Plain struct-typed field on root (e.g. `sub: Sub`). Single instance.
     DirectField { field: String },
+    /// Option<T> field on root. Zero or one instance; sweeps are wrapped
+    /// in `if let Some(..)` so a None contributes nothing.
+    OptionalField { field: String },
     /// The constraint's entity type is the root struct itself. Single instance, accessor is `self`.
     RootSelf,
     /// Entity reachable two or more hops below the root through a chain of
@@ -6192,14 +6269,23 @@ fn resolve_entity_location(
         return Some(EntityLocation::Collection { field });
     }
     // Look for a plain struct-typed field whose type name matches (generic
-    // args ignored -- `pose: Pose<f32>` is a direct `Pose` field).
+    // args ignored -- `pose: Pose<f32>` is a direct `Pose` field), or an
+    // `Option<T>` wrapping it.
     for field in root_fields {
         let field_name = field.ident.as_ref()?.to_string();
         if let syn::Type::Path(tp) = &field.ty
-            && let Some(seg) = tp.path.segments.last()
-                && seg.ident == type_name {
+            && let Some(seg) = tp.path.segments.last() {
+                if seg.ident == type_name {
                     return Some(EntityLocation::DirectField { field: field_name });
                 }
+                if seg.ident == "Option"
+                    && let syn::PathArguments::AngleBracketed(args) = &seg.arguments
+                    && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
+                    && let Ok(inner_name) = type_ident_name(inner)
+                    && inner_name == type_name {
+                        return Some(EntityLocation::OptionalField { field: field_name });
+                }
+            }
     }
     // Not a direct child of the root: walk the registry for a deeper
     // containment path (e.g. root -> Vec<Path> -> Deque<Pose>).

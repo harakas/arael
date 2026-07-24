@@ -24,4 +24,6 @@ fn constraint_attr_compile_errors() {
     t.compile_fail("tests/constraint_attr_errors/root_selfblock_triplet_primary.rs");
     t.compile_fail("tests/constraint_attr_errors/root_selfblock_entity_params.rs");
     t.compile_fail("tests/constraint_attr_errors/duplicate_containment.rs");
+    t.compile_fail("tests/constraint_attr_errors/optional_duplicate_containment.rs");
+    t.compile_fail("tests/constraint_attr_errors/cross_on_single_instance.rs");
 }
