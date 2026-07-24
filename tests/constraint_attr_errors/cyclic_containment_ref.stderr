@@ -1,0 +1,15 @@
+error: $DIR/tests/constraint_attr_errors/cyclic_containment_ref.rs:12: `B` is contained under `aa` (via aa.bs) and its ref field `a1` targets that same collection -- the sweep would iterate `aa` mutably while writing into it. Hold `B` outside the referenced collection (e.g. a root-level collection)
+  --> tests/constraint_attr_errors/cyclic_containment_ref.rs:35:1
+   |
+35 | #[arael::model]
+   | ^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused import: `self`
+ --> tests/constraint_attr_errors/cyclic_containment_ref.rs:9:19
+  |
+9 | use arael::refs::{self, Ref};
+  |                   ^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

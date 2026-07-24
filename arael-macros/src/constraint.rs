@@ -1776,6 +1776,41 @@ fn register_bindings_recursive(
     sym_prefix: &str,
     type_name: &str,
 ) -> syn::Result<()> {
+    let mut stack = Vec::new();
+    register_bindings_guarded(ctx, key_prefix, sym_prefix, type_name, &mut stack)
+}
+
+/// The recursive body of [`register_bindings_recursive`], with a
+/// type-name path stack. Binding registration follows Ref fields on
+/// purpose (a body reads `tie.a.v` through the ref), so a containment +
+/// ref cycle (A holds B, B refs A) would recurse forever without the
+/// guard -- it used to overflow rustc's stack (SIGSEGV, no diagnostic).
+/// A type already on the CURRENT path stops: bindings deeper than one
+/// cycle turn are unreachable in any finite body, while the same type
+/// on parallel branches (a diamond) still registers on each.
+fn register_bindings_guarded(
+    ctx: &mut ConstraintCtx,
+    key_prefix: &str,
+    sym_prefix: &str,
+    type_name: &str,
+    stack: &mut Vec<String>,
+) -> syn::Result<()> {
+    if stack.iter().any(|s| s == type_name) {
+        return Ok(());
+    }
+    stack.push(type_name.to_string());
+    let result = register_bindings_body(ctx, key_prefix, sym_prefix, type_name, stack);
+    stack.pop();
+    result
+}
+
+fn register_bindings_body(
+    ctx: &mut ConstraintCtx,
+    key_prefix: &str,
+    sym_prefix: &str,
+    type_name: &str,
+    stack: &mut Vec<String>,
+) -> syn::Result<()> {
     if let Some(layout) = registry_lookup(type_name) {
         for (field_name, sft) in &layout.fields {
             if matches!(sft, SymFieldType::Skip) { continue; }
@@ -1790,12 +1825,12 @@ fn register_bindings_recursive(
                 SymFieldType::Struct(inner_type) => {
                     let nested_key = format!("{}.{}", key_prefix, field_name);
                     let nested_sym = format!("{}.{}", sym_prefix, field_name);
-                    register_bindings_recursive(ctx, &nested_key, &nested_sym, inner_type)?;
+                    register_bindings_guarded(ctx, &nested_key, &nested_sym, inner_type, stack)?;
                 }
                 SymFieldType::OptionalStruct(inner_type) => {
                     let nested_key = format!("{}.{}", key_prefix, field_name);
                     let nested_sym = format!("{}.{}.as_ref().unwrap()", sym_prefix, field_name);
-                    register_bindings_recursive(ctx, &nested_key, &nested_sym, inner_type)?;
+                    register_bindings_guarded(ctx, &nested_key, &nested_sym, inner_type, stack)?;
                 }
                 _ => {
                     let is_universal_ea = is_param
@@ -3069,6 +3104,36 @@ pub fn generate_root_methods(
                 None
             }
         };
+        // Aliasing guard: a constraint entity contained under the SAME
+        // root collection one of its refs targets (A holds B, B refs
+        // root.aa) would make the sweep iterate `self.aa` mutably while
+        // writing ref-target blocks into `self.aa` -- unsound, and the
+        // generated code fails with a bare E0502 pointing at the macro.
+        // (This containment+ref cycle used to overflow rustc during
+        // binding registration before the cycle guard there.) Reject it
+        // with the shape named. `parent.`-scoped refs are fine: they
+        // resolve into sibling fields of the iterated entity.
+        if !is_self_block
+            && let Some(layout) = registry_lookup(&sc.struct_name) {
+                let struct_paths = containment_paths(root_fields, &root_name.to_string(), &sc.struct_name);
+                for (rf, rpath) in &layout.ref_paths {
+                    let Some(rest) = rpath.strip_prefix("root.") else { continue };
+                    let target_root_field = rest.split('.').next().unwrap_or(rest);
+                    for path in &struct_paths {
+                        if path.first().is_some_and(|s| s.field == target_root_field) {
+                            return Err(syn::Error::new(proc_macro2::Span::call_site(),
+                                format!("{}:{}: `{}` is contained under `{}` (via {}) and its \
+                                         ref field `{}` targets that same collection -- the \
+                                         sweep would iterate `{}` mutably while writing into \
+                                         it. Hold `{}` outside the referenced collection \
+                                         (e.g. a root-level collection)",
+                                    sc.attr_file, sc.attr_line, sc.struct_name,
+                                    target_root_field, path_display(path), rf,
+                                    target_root_field, sc.struct_name)));
+                        }
+                    }
+                }
+            }
         if let Some((dup_type, paths)) = reject {
             let names: Vec<String> = paths.iter().map(|p| path_display(p)).collect();
             return Err(syn::Error::new(proc_macro2::Span::call_site(),
