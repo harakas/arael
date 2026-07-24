@@ -545,7 +545,7 @@ pub fn cov_bench(scene: &Scene, budget_s: f64, cap: usize) -> CovScaling {
 
     // Validation: middle-pose std dev (a shared value-check anchor).
     let mid_pose = np / 2;
-    let sd_mid_pose = path.assemble_covariance(CovMode::PerQuery).unwrap().std_dev(&path.poses[mid_pose]);
+    let sd_mid_pose = path.assemble_covariance(CovMode::PerQuery).unwrap().std_dev(&path.poses[mid_pose]).unwrap();
 
     // PerQuery poses: 1, 2, 8, 32, all.
     let perquery_pose = scale_counts(query_counts(np, true), cap_s, |n| {
@@ -553,7 +553,7 @@ pub fn cov_bench(scene: &Scene, budget_s: f64, cap: usize) -> CovScaling {
         median_ms(budget, cap, || {
             let cov = path.assemble_covariance(CovMode::PerQuery).unwrap();
             for &i in &idx {
-                black_box(cov.marginal_cov(&path.poses[i]));
+                black_box(cov.marginal_cov(&path.poses[i]).unwrap());
             }
         })
     });
@@ -568,7 +568,7 @@ pub fn cov_bench(scene: &Scene, budget_s: f64, cap: usize) -> CovScaling {
         median_ms(budget, cap, || {
             let cov = path.assemble_covariance(CovMode::PerQuery).unwrap();
             for &i in &idx {
-                black_box(cov.marginal_cov(&path.landmarks[lm_refs[i]]));
+                black_box(cov.marginal_cov(&path.landmarks[lm_refs[i]]).unwrap());
             }
         })
     });

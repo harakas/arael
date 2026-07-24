@@ -780,9 +780,9 @@ fn main() {
         if let Some(ref cov) = cov {
             // Pose position block = top-left 3x3 of its 6-DOF marginal (pos
             // precedes rotation); cross = first 3 columns.
-            let c_ll = cov.marginal_cov(lm);
-            let c_pp = cov.marginal_cov(opt_pose).view((0, 0), (3, 3)).into_owned();
-            let c_lp = cov.cross_cov(lm, opt_pose).view((0, 0), (3, 3)).into_owned();
+            let c_ll = cov.marginal_cov(lm).unwrap();
+            let c_pp = cov.marginal_cov(opt_pose).unwrap().view((0, 0), (3, 3)).into_owned();
+            let c_lp = cov.cross_cov(lm, opt_pose).unwrap().view((0, 0), (3, 3)).into_owned();
             let cov_rel = &c_ll + &c_pp - &c_lp - c_lp.transpose();
             let eigen = nalgebra::SymmetricEigen::new(cov_rel);
             let mut sigmas = [

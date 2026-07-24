@@ -338,7 +338,7 @@ pub fn cov_bench(problem: &Problem) -> CovScaling {
     // Validation: camera 2's 6-DOF pose std dev (translation, then rotation).
     let sd_cam2 = {
         let cov = scene.assemble_covariance(CovMode::PerQuery).expect("gauge-fixed H is PD");
-        let m = cov.marginal_cov(&scene.cameras[2]);
+        let m = cov.marginal_cov(&scene.cameras[2]).unwrap();
         std::array::from_fn(|d| m[(d, d)].sqrt())
     };
 
@@ -348,7 +348,7 @@ pub fn cov_bench(problem: &Problem) -> CovScaling {
         median_ms(budget, cap, || {
             let cov = scene.assemble_covariance(CovMode::PerQuery).unwrap();
             for &i in &idx {
-                black_box(cov.marginal_cov(&scene.cameras[i]));
+                black_box(cov.marginal_cov(&scene.cameras[i]).unwrap());
             }
         })
     });
@@ -360,7 +360,7 @@ pub fn cov_bench(problem: &Problem) -> CovScaling {
         median_ms(budget, cap, || {
             let cov = scene.assemble_covariance(CovMode::PerQuery).unwrap();
             for &i in &idx {
-                black_box(cov.marginal_cov(&scene.points[i]));
+                black_box(cov.marginal_cov(&scene.points[i]).unwrap());
             }
         })
     });

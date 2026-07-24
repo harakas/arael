@@ -1430,8 +1430,8 @@
 //! use arael::covariance::{Covariance, CovMode};
 //! model.solve_sparse(&cfg);
 //! let cov = model.assemble_covariance(CovMode::AllMarginals)?;
-//! let sd  = cov.std_dev(&model.poses[0]);          // 1-sigma per scalar (tangent coords)
-//! let s   = cov.marginal_cov(&model.landmarks[3]); // full covariance block
+//! let sd  = cov.std_dev(&model.poses[0])?;          // 1-sigma per scalar (tangent coords)
+//! let s   = cov.marginal_cov(&model.landmarks[3])?; // full covariance block
 //! let x   = cov.cross_cov(&model.poses[0], &model.landmarks[3]);
 //! ```
 //!

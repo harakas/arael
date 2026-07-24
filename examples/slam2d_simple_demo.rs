@@ -422,7 +422,7 @@ fn compute_landmark_ellipses(path: &mut Path) -> std::vec::Vec<(vect2f, f32, f32
     let mut out = std::vec::Vec::with_capacity(path.landmarks.len());
     for lm in path.landmarks.iter() {
         // 2x2 positional covariance of this landmark, in tangent coordinates.
-        let cll = cov.marginal_cov(lm);
+        let cll = cov.marginal_cov(lm).unwrap();
         let eig = nalgebra::SymmetricEigen::new(cll);
         // Sort descending so the major axis comes first.
         let (i0, i1) = if eig.eigenvalues[0] >= eig.eigenvalues[1] { (0, 1) } else { (1, 0) };

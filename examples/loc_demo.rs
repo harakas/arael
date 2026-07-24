@@ -602,7 +602,7 @@ fn main() {
     {
         let last = path.poses.len() - 1;
         let cov = path.assemble_covariance(CovMode::TriDiagonal).expect("last-pose covariance");
-        let sd = cov.std_dev(&path.poses[last]);
+        let sd = cov.std_dev(&path.poses[last]).unwrap();
         let pose = &path.poses[last];
         let (p, e) = (pose.pos.value, pose.ea.value);
 

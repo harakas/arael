@@ -328,7 +328,7 @@ fn compute_landmark_ellipses(map: &mut Map) -> std::vec::Vec<(vect2f, f32, f32, 
     let chi2_95 = 5.991_f64;
     let mut out = std::vec::Vec::with_capacity(map.landmarks.len());
     for lm in map.landmarks.iter() {
-        let cll = cov.marginal_cov(lm);
+        let cll = cov.marginal_cov(lm).unwrap();
         let eig = nalgebra::SymmetricEigen::new(cll);
         let (i0, i1) = if eig.eigenvalues[0] >= eig.eigenvalues[1] { (0, 1) } else { (1, 0) };
         let semi_a = (eig.eigenvalues[i0].max(0.0) * chi2_95).sqrt() as f32;

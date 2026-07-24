@@ -36,12 +36,16 @@ Query per-entity blocks by passing the entity itself. Any `Model` reports its
 live-parameter span (`collect_param_blocks`), so a single pose, a single
 landmark, or a whole `refs::Vec` collection are all valid arguments:
 
+Each query returns a `Result`: `Err(CovError::NotPositiveDefinite)` for a
+singular (unobservable) block, `Err(CovError::UnsupportedQuery)` for a
+query the assembled mode cannot answer.
+
 ```rust,ignore
-let sd = cov.std_dev(&model.poses[0]);            // Vec<f64>, one per scalar param
-let m  = cov.marginal_cov(&model.landmarks[3]);   // DMatrix<f64>, its covariance block
-let c  = cov.conditional_cov(&model.poses[0]);    // DMatrix<f64>, others held fixed
-let x  = cov.cross_cov(&model.poses[0], &model.landmarks[3]); // joint off-diagonal
-let n  = cov.dim();                               // number of optimized scalars
+let sd = cov.std_dev(&model.poses[0])?;            // Vec<f64>, one per scalar param
+let m  = cov.marginal_cov(&model.landmarks[3])?;   // DMatrix<f64>, its covariance block
+let c  = cov.conditional_cov(&model.poses[0])?;    // DMatrix<f64>, others held fixed
+let x  = cov.cross_cov(&model.poses[0], &model.landmarks[3])?; // joint off-diagonal
+let n  = cov.dim();                                // number of optimized scalars
 ```
 
 ## Modes
@@ -75,9 +79,10 @@ solve already needs that pass). Querying an interior pose triggers a single
 backward pass, cached, after which interior marginals are `2 (S_i + R_i - D_i)^-1`.
 Assembling errors with `NotTriDiagonal` if any off-band block couples non-adjacent
 entities (a loop closure or a free landmark) -- use `PerQuery` or `AllMarginals`
-there. This backend answers only single-block entity queries: `cross_cov`, and a
-query spanning several blocks or none, return an empty (0x0) matrix after a
-warning. A singular (unobservable) block returns an INFINITY matrix.
+there. This backend answers only single-block entity queries: `cross_cov`, and
+a query spanning several blocks or none, error with
+`CovError::UnsupportedQuery`. A singular (unobservable) block errors with
+`CovError::NotPositiveDefinite`.
 
 The [loc benchmark](../benchmarks/loc/README.md) recovers the last pose (the
 localization query) in constant time as the trajectory grows, where the general

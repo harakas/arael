@@ -320,7 +320,7 @@ pub fn cov_bench(scene: &Scene, budget_s: f64, cap: usize) -> CovScaling {
     // Validation: last-pose std dev (the localization query).
     let sd_last = {
         let cov = path.assemble_covariance(CovMode::TriDiagonal).unwrap();
-        let m = cov.marginal_cov(&path.poses[last]);
+        let m = cov.marginal_cov(&path.poses[last]).unwrap();
         (0..6).map(|k| m[(k, k)].sqrt()).collect()
     };
 
@@ -328,11 +328,11 @@ pub fn cov_bench(scene: &Scene, budget_s: f64, cap: usize) -> CovScaling {
     // forward Schur pass alone (no backward recursion), so it is the cheapest cell.
     let tridiag_last = median_ms(budget, cap, || {
         let cov = path.assemble_covariance(CovMode::TriDiagonal).unwrap();
-        black_box(cov.marginal_cov(&path.poses[last]));
+        black_box(cov.marginal_cov(&path.poses[last]).unwrap());
     });
     let perquery_last = median_ms(budget, cap, || {
         let cov = path.assemble_covariance(CovMode::PerQuery).unwrap();
-        black_box(cov.marginal_cov(&path.poses[last]));
+        black_box(cov.marginal_cov(&path.poses[last]).unwrap());
     });
 
     let tridiag_pose = scale_counts(query_counts(np, true), cap_s, |n| {
@@ -340,7 +340,7 @@ pub fn cov_bench(scene: &Scene, budget_s: f64, cap: usize) -> CovScaling {
         median_ms(budget, cap, || {
             let cov = path.assemble_covariance(CovMode::TriDiagonal).unwrap();
             for &i in &idx {
-                black_box(cov.marginal_cov(&path.poses[i]));
+                black_box(cov.marginal_cov(&path.poses[i]).unwrap());
             }
         })
     });
@@ -349,7 +349,7 @@ pub fn cov_bench(scene: &Scene, budget_s: f64, cap: usize) -> CovScaling {
         median_ms(budget, cap, || {
             let cov = path.assemble_covariance(CovMode::PerQuery).unwrap();
             for &i in &idx {
-                black_box(cov.marginal_cov(&path.poses[i]));
+                black_box(cov.marginal_cov(&path.poses[i]).unwrap());
             }
         })
     });

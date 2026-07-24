@@ -253,7 +253,7 @@ fn stage1(cfg: &Cfg, rm: &scene2d::RunMeas, gps_isigma: f32,
     // (x, y, gamma) MARGINAL covariance is the frame prior.
     let mid = path.poses.len() / 2;
     let center = path.poses[mid].pos.value;
-    let cm = cov.marginal_cov(&path.poses[mid]);
+    let cm = cov.marginal_cov(&path.poses[mid]).unwrap();
     let mut c3 = [[0.0_f64; 3]; 3];
     for a in 0..3 { for b in 0..3 { c3[a][b] = cm[(a, b)]; } }
     let (ccov_r, ccov_isigma) = whitening_factors3(c3);
@@ -267,7 +267,7 @@ fn stage1(cfg: &Cfg, rm: &scene2d::RunMeas, gps_isigma: f32,
         // marginal): the pose/frame uncertainty is carried by the centre prior,
         // so folding it back in via the marginal would double-count it and
         // inflate the ellipse isotropically.
-        let c2 = cov.conditional_cov(lm);
+        let c2 = cov.conditional_cov(lm).unwrap();
         let c = matrix2f::from_elements(c2[(0, 0)] as f32, c2[(0, 1)] as f32,
                                         c2[(1, 0)] as f32, c2[(1, 1)] as f32);
         let (r, isig) = whitening_factors2(c);

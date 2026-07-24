@@ -38,18 +38,18 @@ fn marginal_cov_matches_analytic() {
     // isig = 0.5 -> Sigma = (1/0.25) I = diag(4, 4).
     let mut w = world(&[0.5]);
     let cov = w.assemble_covariance(CovMode::PerQuery).unwrap();
-    let c = cov.marginal_cov(&w.pts[0]);
+    let c = cov.marginal_cov(&w.pts[0]).unwrap();
     assert_eq!((c.nrows(), c.ncols()), (2, 2));
     assert!((c[(0, 0)] - 4.0).abs() < 1e-10, "c00 = {}", c[(0, 0)]);
     assert!((c[(1, 1)] - 4.0).abs() < 1e-10, "c11 = {}", c[(1, 1)]);
     assert!(c[(0, 1)].abs() < 1e-12, "off-diagonal should be 0");
     // std_dev = sqrt of the diagonal.
-    let sd = cov.std_dev(&w.pts[0]);
+    let sd = cov.std_dev(&w.pts[0]).unwrap();
     assert!((sd[0] - 2.0).abs() < 1e-10 && (sd[1] - 2.0).abs() < 1e-10, "sd = {:?}", sd);
 
     // A single isolated entity shares no factor, so H is block-diagonal and its
     // conditional covariance equals its marginal.
-    let cc = cov.conditional_cov(&w.pts[0]);
+    let cc = cov.conditional_cov(&w.pts[0]).unwrap();
     assert!((cc[(0, 0)] - 4.0).abs() < 1e-10 && (cc[(1, 1)] - 4.0).abs() < 1e-10, "cc = {}", cc);
 }
 
@@ -59,16 +59,16 @@ fn independent_points_have_zero_cross_covariance() {
     let mut w = world(&[1.0, 1.0]);
     let cov = w.assemble_covariance(CovMode::PerQuery).unwrap();
 
-    let c0 = cov.marginal_cov(&w.pts[0]);
+    let c0 = cov.marginal_cov(&w.pts[0]).unwrap();
     assert!((c0[(0, 0)] - 1.0).abs() < 1e-10 && (c0[(1, 1)] - 1.0).abs() < 1e-10);
 
-    let cross = cov.cross_cov(&w.pts[0], &w.pts[1]);
+    let cross = cov.cross_cov(&w.pts[0], &w.pts[1]).unwrap();
     assert_eq!((cross.nrows(), cross.ncols()), (2, 2));
     assert!(cross.iter().all(|&v| v.abs() < 1e-12), "cross = {}", cross);
 
     // Querying the whole collection is the joint over all its entities: 4x4,
     // block-diagonal here (independent points).
-    let joint = cov.marginal_cov(&w.pts);
+    let joint = cov.marginal_cov(&w.pts).unwrap();
     assert_eq!((joint.nrows(), joint.ncols()), (4, 4));
     assert!((joint[(0, 0)] - 1.0).abs() < 1e-10 && (joint[(2, 2)] - 1.0).abs() < 1e-10);
     assert!(joint[(0, 2)].abs() < 1e-12, "cross block should be 0");
@@ -121,22 +121,22 @@ fn coupled_marginals_match_analytic() {
     let cov = c.assemble_covariance(CovMode::PerQuery).unwrap();
 
     // Marginal of each node folds in the coupling to the other: 2/3.
-    let m0 = cov.marginal_cov(&c.nodes[0]);
-    let m1 = cov.marginal_cov(&c.nodes[1]);
+    let m0 = cov.marginal_cov(&c.nodes[0]).unwrap();
+    let m1 = cov.marginal_cov(&c.nodes[1]).unwrap();
     assert!((m0[(0, 0)] - 2.0 / 3.0).abs() < 1e-9, "m0 = {}", m0[(0, 0)]);
     assert!((m1[(0, 0)] - 2.0 / 3.0).abs() < 1e-9, "m1 = {}", m1[(0, 0)]);
 
     // The nodes are correlated through the tie: cross = 1/3 (positive).
-    let x = cov.cross_cov(&c.nodes[0], &c.nodes[1]);
+    let x = cov.cross_cov(&c.nodes[0], &c.nodes[1]).unwrap();
     assert!((x[(0, 0)] - 1.0 / 3.0).abs() < 1e-9, "cross = {}", x[(0, 0)]);
 
     // Joint 2x2 over the whole collection: [[2/3, 1/3], [1/3, 2/3]].
-    let j = cov.marginal_cov(&c.nodes);
+    let j = cov.marginal_cov(&c.nodes).unwrap();
     assert_eq!((j.nrows(), j.ncols()), (2, 2));
     assert!((j[(0, 0)] - 2.0 / 3.0).abs() < 1e-9 && (j[(0, 1)] - 1.0 / 3.0).abs() < 1e-9, "joint = {}", j);
 
     // Conditional (node1 held fixed) is smaller than the marginal: 1/2 < 2/3.
-    let cc = cov.conditional_cov(&c.nodes[0]);
+    let cc = cov.conditional_cov(&c.nodes[0]).unwrap();
     assert!((cc[(0, 0)] - 0.5).abs() < 1e-9, "conditional = {}", cc[(0, 0)]);
 }
 
@@ -164,9 +164,9 @@ fn precompute_matches_analytic_coupled() {
 
     let cov = c.assemble_covariance(CovMode::AllMarginals).unwrap();
 
-    assert!((cov.marginal_cov(&c.nodes[0])[(0, 0)] - 2.0 / 3.0).abs() < 1e-9);
+    assert!((cov.marginal_cov(&c.nodes[0]).unwrap()[(0, 0)] - 2.0 / 3.0).abs() < 1e-9);
     // The tie couples the nodes, so the cross entry is inside the pattern.
-    assert!((cov.cross_cov(&c.nodes[0], &c.nodes[1])[(0, 0)] - 1.0 / 3.0).abs() < 1e-9);
+    assert!((cov.cross_cov(&c.nodes[0], &c.nodes[1]).unwrap()[(0, 0)] - 1.0 / 3.0).abs() < 1e-9);
 }
 
 #[test]
@@ -175,22 +175,22 @@ fn precompute_selected_inverse_matches_solve() {
 
     // Reference: per-query solves.
     let solved = c.assemble_covariance(CovMode::PerQuery).unwrap();
-    let ref_marg: std::vec::Vec<f64> = (0..6).map(|i| solved.marginal_cov(&c.nodes[i])[(0, 0)]).collect();
-    let ref_adjacent = solved.cross_cov(&c.nodes[2], &c.nodes[3])[(0, 0)];
-    let ref_distant = solved.cross_cov(&c.nodes[0], &c.nodes[5])[(0, 0)];
+    let ref_marg: std::vec::Vec<f64> = (0..6).map(|i| solved.marginal_cov(&c.nodes[i]).unwrap()[(0, 0)]).collect();
+    let ref_adjacent = solved.cross_cov(&c.nodes[2], &c.nodes[3]).unwrap()[(0, 0)];
+    let ref_distant = solved.cross_cov(&c.nodes[0], &c.nodes[5]).unwrap()[(0, 0)];
 
     // Selected inverse: every marginal is a cache lookup.
     let pc = c.assemble_covariance(CovMode::AllMarginals).unwrap();
     for i in 0..6 {
-        let m = pc.marginal_cov(&c.nodes[i])[(0, 0)];
+        let m = pc.marginal_cov(&c.nodes[i]).unwrap()[(0, 0)];
         assert!((m - ref_marg[i]).abs() < 1e-9, "node {}: sel {} vs solve {}", i, m, ref_marg[i]);
     }
     // Adjacent nodes are connected in the factor -> in-pattern lookup.
-    let adj = pc.cross_cov(&c.nodes[2], &c.nodes[3])[(0, 0)];
+    let adj = pc.cross_cov(&c.nodes[2], &c.nodes[3]).unwrap()[(0, 0)];
     assert!((adj - ref_adjacent).abs() < 1e-9, "adjacent cross: sel {} vs solve {}", adj, ref_adjacent);
     // The endpoints share no factor entry -> out of pattern -> solve fallback,
     // which must still return the correct (nonzero) coupling.
-    let dist = pc.cross_cov(&c.nodes[0], &c.nodes[5])[(0, 0)];
+    let dist = pc.cross_cov(&c.nodes[0], &c.nodes[5]).unwrap()[(0, 0)];
     assert!((dist - ref_distant).abs() < 1e-9, "distant cross: sel {} vs solve {}", dist, ref_distant);
     assert!(ref_distant.abs() > 1e-6, "endpoints should still be correlated");
 }
@@ -219,11 +219,11 @@ fn precompute_selected_inverse_denser_fill() {
     }
 
     let solved = c.assemble_covariance(CovMode::PerQuery).unwrap();
-    let ref_marg: std::vec::Vec<f64> = (0..n).map(|i| solved.marginal_cov(&c.nodes[i])[(0, 0)]).collect();
+    let ref_marg: std::vec::Vec<f64> = (0..n).map(|i| solved.marginal_cov(&c.nodes[i]).unwrap()[(0, 0)]).collect();
 
     let pc = c.assemble_covariance(CovMode::AllMarginals).unwrap();
     for i in 0..n {
-        let m = pc.marginal_cov(&c.nodes[i])[(0, 0)];
+        let m = pc.marginal_cov(&c.nodes[i]).unwrap()[(0, 0)];
         assert!((m - ref_marg[i]).abs() < 1e-9, "node {}: sel {} vs solve {}", i, m, ref_marg[i]);
     }
 }
@@ -235,15 +235,15 @@ fn tridiagonal_matches_solve() {
     // interior nodes via the (lazily triggered) backward pass.
     let mut c = path_chain(8);
     let solved = c.assemble_covariance(CovMode::PerQuery).unwrap();
-    let refm: std::vec::Vec<f64> = (0..8).map(|i| solved.marginal_cov(&c.nodes[i])[(0, 0)]).collect();
+    let refm: std::vec::Vec<f64> = (0..8).map(|i| solved.marginal_cov(&c.nodes[i]).unwrap()[(0, 0)]).collect();
 
     let band = c.assemble_covariance(CovMode::TriDiagonal).unwrap();
     // Last node: the forward-only path.
-    let last = band.marginal_cov(&c.nodes[7])[(0, 0)];
+    let last = band.marginal_cov(&c.nodes[7]).unwrap()[(0, 0)];
     assert!((last - refm[7]).abs() < 1e-9, "last: band {} vs solve {}", last, refm[7]);
     // Interior nodes: trigger and reuse the backward pass.
     for i in 0..8 {
-        let m = band.marginal_cov(&c.nodes[i])[(0, 0)];
+        let m = band.marginal_cov(&c.nodes[i]).unwrap()[(0, 0)];
         assert!((m - refm[i]).abs() < 1e-9, "node {}: band {} vs solve {}", i, m, refm[i]);
     }
 }
@@ -319,8 +319,8 @@ fn tridiagonal_2dof_matches_solve() {
     let solved = c.assemble_covariance(CovMode::PerQuery).unwrap();
     let band = c.assemble_covariance(CovMode::TriDiagonal).unwrap();
     for i in 0..n {
-        let s = solved.marginal_cov(&c.poses[i]);
-        let b = band.marginal_cov(&c.poses[i]);
+        let s = solved.marginal_cov(&c.poses[i]).unwrap();
+        let b = band.marginal_cov(&c.poses[i]).unwrap();
         assert_eq!((b.nrows(), b.ncols()), (2, 2));
         for r in 0..2 {
             for cc in 0..2 {
@@ -352,8 +352,8 @@ fn all_marginals_dense_matches_solve() {
     let solved = c.assemble_covariance(CovMode::PerQuery).unwrap();
     let allm = c.assemble_covariance(CovMode::AllMarginals).unwrap();
     for i in 0..n {
-        let s = solved.marginal_cov(&c.poses[i]);
-        let a = allm.marginal_cov(&c.poses[i]);
+        let s = solved.marginal_cov(&c.poses[i]).unwrap();
+        let a = allm.marginal_cov(&c.poses[i]).unwrap();
         for r in 0..2 {
             for cc in 0..2 {
                 assert!((s[(r, cc)] - a[(r, cc)]).abs() < 1e-9,
@@ -363,8 +363,8 @@ fn all_marginals_dense_matches_solve() {
     }
     // Coupled cross block: in the factor pattern, so AllMarginals answers it from
     // the cache; it must match the solve.
-    let sc = solved.cross_cov(&c.poses[0], &c.poses[2]);
-    let ac = allm.cross_cov(&c.poses[0], &c.poses[2]);
+    let sc = solved.cross_cov(&c.poses[0], &c.poses[2]).unwrap();
+    let ac = allm.cross_cov(&c.poses[0], &c.poses[2]).unwrap();
     for r in 0..2 {
         for cc in 0..2 {
             assert!((sc[(r, cc)] - ac[(r, cc)]).abs() < 1e-9, "cross [{},{}]: {} vs {}", r, cc, sc[(r, cc)], ac[(r, cc)]);
@@ -428,30 +428,33 @@ fn tridiagonal_singular_backward_block_does_not_panic() {
     let band = c.assemble_covariance(CovMode::TriDiagonal).unwrap();
     // An interior marginal triggers the backward pass, which inverts the singular
     // last block. Before the fix this panicked; now it stays finite.
-    let m = band.marginal_cov(&c.poses[1]);
+    let m = band.marginal_cov(&c.poses[1]).unwrap();
     assert_eq!((m.nrows(), m.ncols()), (2, 2));
     assert!(m[(0, 0)].is_finite() && m[(1, 1)].is_finite(), "interior pose stays finite: {:?}", m);
-    // The last pose's y is unobservable: infinite variance, not a panic.
-    let last = band.marginal_cov(&c.poses[n - 1]);
-    assert!(last[(1, 1)].is_infinite(), "unobservable y should be infinite: {}", last[(1, 1)]);
+    // The last pose's y is unobservable: its marginal has no finite
+    // answer and reports the singularity instead of an INFINITY fill.
+    assert_eq!(band.marginal_cov(&c.poses[n - 1]).err(),
+        Some(CovError::NotPositiveDefinite));
 }
 
 #[test]
-fn tridiagonal_cross_cov_returns_empty() {
+fn tridiagonal_cross_cov_is_unsupported() {
     let mut c = path_chain(6);
     let band = c.assemble_covariance(CovMode::TriDiagonal).unwrap();
-    // cross_cov is unsupported on the band backend: empty matrix, not a panic.
-    let x = band.cross_cov(&c.nodes[0], &c.nodes[1]);
-    assert_eq!((x.nrows(), x.ncols()), (0, 0));
+    // The band backend stores no off-diagonal blocks: a typed error, not
+    // a sentinel.
+    assert_eq!(band.cross_cov(&c.nodes[0], &c.nodes[1]).err(),
+        Some(CovError::UnsupportedQuery { op: "cross_cov" }));
 }
 
 #[test]
-fn tridiagonal_multiblock_query_returns_empty() {
+fn tridiagonal_multiblock_query_is_unsupported() {
     let mut c = path_chain(6);
     let band = c.assemble_covariance(CovMode::TriDiagonal).unwrap();
-    // Querying the whole root spans every block; the band backend cannot answer
-    // that as a single marginal, so it returns empty rather than panicking.
-    let m = band.marginal_cov(&c);
-    assert_eq!((m.nrows(), m.ncols()), (0, 0));
-    assert!(band.std_dev(&c).is_empty());
+    // Querying the whole root spans every block; the band backend cannot
+    // answer that as a single marginal.
+    assert_eq!(band.marginal_cov(&c).err(),
+        Some(CovError::UnsupportedQuery { op: "marginal_cov" }));
+    assert_eq!(band.std_dev(&c).err(),
+        Some(CovError::UnsupportedQuery { op: "std_dev" }));
 }

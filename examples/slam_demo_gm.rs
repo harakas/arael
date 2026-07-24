@@ -908,7 +908,9 @@ fn main() {
         // The pose marginal is TransformParam's [w (rotation); d
         // (translation)], d in the reference rotation frame: the world
         // translation block is R * C_dd * R^T.
-        let sigmas = cov.as_ref().filter(|_| lm.rho.value.abs() >= 1e-4).map(|cov| {
+        // A query can fail (singular marginal); such a landmark prints
+        // without a sigma, same as the near-infinity case.
+        let sigmas = cov.as_ref().filter(|_| lm.rho.value.abs() >= 1e-4).and_then(|cov| {
             let rho = lm.rho.value as f64;
             let (u, ud) = (lm.dir.unit, lm.dir.unit_d);
             let j = nalgebra::DMatrix::from_row_slice(3, 3, &[
@@ -916,16 +918,16 @@ fn main() {
                 ud[0].y as f64 / rho, ud[1].y as f64 / rho, -(u.y as f64) / (rho * rho),
                 ud[0].z as f64 / rho, ud[1].z as f64 / rho, -(u.z as f64) / (rho * rho),
             ]);
-            let c_ll = &j * cov.marginal_cov(lm) * j.transpose();
+            let c_ll = &j * cov.marginal_cov(lm).ok()? * j.transpose();
             let m = opt_mr2w;
             let r = nalgebra::DMatrix::from_row_slice(3, 3, &[
                 m[0].x as f64, m[0].y as f64, m[0].z as f64,
                 m[1].x as f64, m[1].y as f64, m[1].z as f64,
                 m[2].x as f64, m[2].y as f64, m[2].z as f64,
             ]);
-            let c_dd = cov.marginal_cov(opt_pose).view((3, 3), (3, 3)).into_owned();
+            let c_dd = cov.marginal_cov(opt_pose).ok()?.view((3, 3), (3, 3)).into_owned();
             let c_pp = &r * c_dd * r.transpose();
-            let c_lp = &j * cov.cross_cov(lm, opt_pose).view((0, 3), (3, 3)).into_owned()
+            let c_lp = &j * cov.cross_cov(lm, opt_pose).ok()?.view((0, 3), (3, 3)).into_owned()
                 * r.transpose();
             let cov_rel = &c_ll + &c_pp - &c_lp - c_lp.transpose();
             let eigen = nalgebra::SymmetricEigen::new(cov_rel);
@@ -935,7 +937,7 @@ fn main() {
                 eigen.eigenvalues[2].max(0.0).sqrt(),
             ];
             sg.sort_by(|a, b| b.partial_cmp(a).unwrap());
-            sg
+            Some(sg)
         });
         if let Some(sg) = sigmas {
             println!("LM {:3}: |d|={:.3}m  rel={:.2}%  dist={:.1}m  sigma=({:.3},{:.3},{:.3})m  frines={}",

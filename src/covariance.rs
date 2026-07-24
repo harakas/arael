@@ -60,6 +60,15 @@ pub enum CovError {
     /// serialization order: some off-band block couples non-adjacent entities (a
     /// loop closure or a free landmark). Use `PerQuery` / `AllMarginals` instead.
     NotTriDiagonal,
+    /// A query this assembly's backend cannot answer. The
+    /// [`CovMode::TriDiagonal`] backend stores only the band: it serves
+    /// single-band-block entity queries, so an entity spanning several
+    /// blocks or none, or any cross block, has no answer there. Assemble
+    /// with `PerQuery` or `AllMarginals` for those.
+    UnsupportedQuery {
+        /// The query that failed (`"marginal_cov"`, `"cross_cov"`, ...).
+        op: &'static str,
+    },
 }
 
 impl std::fmt::Display for CovError {
@@ -70,6 +79,8 @@ impl std::fmt::Display for CovError {
             CovError::Empty => write!(f, "model has no optimizable parameters"),
             CovError::NotTriDiagonal => write!(f,
                 "Hessian is not block-tridiagonal (loop closure or free landmark?); use PerQuery or AllMarginals"),
+            CovError::UnsupportedQuery { op } => write!(f,
+                "{} is unsupported on the TriDiagonal backend for this query                  (entity spans several band blocks or none, or an off-diagonal                  block); assemble with PerQuery or AllMarginals", op),
         }
     }
 }
@@ -142,7 +153,7 @@ impl BandData {
 
     // Marginal covariance of block bi: last block is forward-only; an interior
     // block triggers the backward pass (cached), then combines both sides.
-    fn marginal(&self, bi: usize) -> DMatrix<f64> {
+    fn marginal(&self, bi: usize) -> Result<DMatrix<f64>, CovError> {
         let nb = self.spans.len();
         let info = if bi == nb - 1 {
             self.fwd[bi].clone()
@@ -150,10 +161,9 @@ impl BandData {
             let bwd = self.bwd.get_or_init(|| self.compute_backward());
             &self.fwd[bi] + &bwd[bi] - &self.diag[bi]
         };
-        let k = info.nrows();
         info.try_inverse()
             .map(|inv| inv * 2.0)
-            .unwrap_or_else(|| DMatrix::from_element(k, k, f64::INFINITY))
+            .ok_or(CovError::NotPositiveDefinite)
     }
 
     // Backward Schur: R_{n-1} = D_{n-1}, R_i = D_i - B_i R_{i+1}^-1 B_i^T.
@@ -165,9 +175,9 @@ impl BandData {
             let (rn, rc) = (r.nrows(), r.ncols());
             // A singular tail block is unobservable. Fall back to the
             // pseudo-inverse so the pass completes; a genuinely unobservable
-            // block then surfaces as INFINITY when `marginal` inverts the
-            // combined information, matching the singular handling there. The
-            // fast LU inverse still carries the healthy blocks.
+            // block then surfaces as NotPositiveDefinite when `marginal`
+            // inverts the combined information, matching the singular
+            // handling there. The fast LU inverse carries the healthy blocks.
             let r_inv = r.clone().try_inverse().unwrap_or_else(|| {
                 r.pseudo_inverse(1e-12).unwrap_or_else(|_| DMatrix::zeros(rn, rc))
             });
@@ -202,20 +212,17 @@ impl CovAssembly {
     /// whole collection for the joint over all its entities. In tangent
     /// coordinates.
     ///
-    /// The [`CovMode::TriDiagonal`] backend answers only a single-band-block
-    /// query; a multi-block or empty query is unsupported there and returns an
-    /// empty (0x0) matrix after a warning -- use `AllMarginals` or `PerQuery`
-    /// for those. A singular (unobservable) block returns an INFINITY matrix.
-    pub fn marginal_cov<M: Model + ?Sized>(&self, m: &M) -> DMatrix<f64> {
+    /// Errors: [`CovError::UnsupportedQuery`] when the
+    /// [`CovMode::TriDiagonal`] backend is asked a non-single-band-block
+    /// query; [`CovError::NotPositiveDefinite`] when the block is singular
+    /// (unobservable).
+    pub fn marginal_cov<M: Model + ?Sized>(&self, m: &M) -> Result<DMatrix<f64>, CovError> {
         let idx = Self::indices(m);
         match &self.backend {
-            Backend::Factored { .. } => self.factored_block(&idx, &idx),
+            Backend::Factored { .. } => Ok(self.factored_block(&idx, &idx)),
             Backend::Band(b) => match b.block_index(&idx) {
                 Some(bi) => b.marginal(bi),
-                None => {
-                    Self::warn_unsupported_band("marginal_cov");
-                    DMatrix::zeros(0, 0)
-                }
+                None => Err(CovError::UnsupportedQuery { op: "marginal_cov" }),
             },
         }
     }
@@ -226,9 +233,8 @@ impl CovAssembly {
     /// in the uncertainty of the variables it couples to) and never larger than
     /// it. An entity with no self-information yields infinities.
     ///
-    /// Same TriDiagonal restriction as [`marginal_cov`](Self::marginal_cov): a
-    /// multi-block or empty query returns an empty (0x0) matrix after a warning.
-    pub fn conditional_cov<M: Model + ?Sized>(&self, m: &M) -> DMatrix<f64> {
+    /// Errors as [`marginal_cov`](Self::marginal_cov).
+    pub fn conditional_cov<M: Model + ?Sized>(&self, m: &M) -> Result<DMatrix<f64>, CovError> {
         let idx = Self::indices(m);
         let k = idx.len();
         let hb = match &self.backend {
@@ -244,65 +250,43 @@ impl CovAssembly {
             // The entity's own diagonal block is exactly H_ee.
             Backend::Band(b) => match b.block_index(&idx) {
                 Some(bi) => b.diag[bi].clone(),
-                None => {
-                    Self::warn_unsupported_band("conditional_cov");
-                    return DMatrix::zeros(0, 0);
-                }
+                None => return Err(CovError::UnsupportedQuery { op: "conditional_cov" }),
             },
         };
         hb.try_inverse()
             .map(|inv| inv * 2.0)
-            .unwrap_or_else(|| DMatrix::from_element(k, k, f64::INFINITY))
+            .ok_or(CovError::NotPositiveDefinite)
     }
 
     /// Standard deviations: the square root of the marginal covariance
     /// diagonal, one per scalar parameter of the model.
     ///
-    /// Same TriDiagonal restriction as [`marginal_cov`](Self::marginal_cov): a
-    /// multi-block or empty query returns an empty vector after a warning.
-    pub fn std_dev<M: Model + ?Sized>(&self, m: &M) -> Vec<f64> {
+    /// Errors as [`marginal_cov`](Self::marginal_cov).
+    pub fn std_dev<M: Model + ?Sized>(&self, m: &M) -> Result<Vec<f64>, CovError> {
         let idx = Self::indices(m);
         let block = match &self.backend {
             Backend::Factored { .. } => self.factored_block(&idx, &idx),
             Backend::Band(b) => match b.block_index(&idx) {
-                Some(bi) => b.marginal(bi),
-                None => {
-                    Self::warn_unsupported_band("std_dev");
-                    return Vec::new();
-                }
+                Some(bi) => b.marginal(bi)?,
+                None => return Err(CovError::UnsupportedQuery { op: "std_dev" }),
             },
         };
-        (0..idx.len()).map(|i| block[(i, i)].sqrt()).collect()
+        Ok((0..idx.len()).map(|i| block[(i, i)].sqrt()).collect())
     }
 
     /// Cross-covariance block between two models (the off-diagonal `A x B`
     /// block of the joint covariance). In tangent coordinates.
     ///
-    /// Not available in [`CovMode::TriDiagonal`]: that backend stores only the
-    /// band, so an off-diagonal block returns an empty (0x0) matrix after a
-    /// warning -- use `AllMarginals` or `PerQuery`.
-    pub fn cross_cov<A: Model + ?Sized, B: Model + ?Sized>(&self, a: &A, b: &B) -> DMatrix<f64> {
+    /// Errors: [`CovError::UnsupportedQuery`] on the
+    /// [`CovMode::TriDiagonal`] backend, which stores only the band and has
+    /// no off-diagonal blocks -- assemble with `AllMarginals` or `PerQuery`.
+    pub fn cross_cov<A: Model + ?Sized, B: Model + ?Sized>(&self, a: &A, b: &B) -> Result<DMatrix<f64>, CovError> {
         let ia = Self::indices(a);
         let ib = Self::indices(b);
         match &self.backend {
-            Backend::Factored { .. } => self.factored_block(&ia, &ib),
-            Backend::Band(_) => {
-                Self::warn_unsupported_band("cross_cov");
-                DMatrix::zeros(0, 0)
-            }
+            Backend::Factored { .. } => Ok(self.factored_block(&ia, &ib)),
+            Backend::Band(_) => Err(CovError::UnsupportedQuery { op: "cross_cov" }),
         }
-    }
-
-    // The TriDiagonal backend answers only single-band-block entity queries. A
-    // multi-block, empty, or cross-block query has no answer here: warn, and the
-    // caller returns the empty (0x0) sentinel.
-    fn warn_unsupported_band(op: &str) {
-        crate::warn!(
-            "covariance: {} is unsupported on the TriDiagonal backend for this \
-             query (entity spans several blocks or none, or an off-diagonal \
-             block); returning empty -- use CovMode::AllMarginals or PerQuery",
-            op
-        );
     }
 
     // Sigma[rows, cols] = 2 (H^-1)[rows, cols] for the factored backends. A

@@ -510,8 +510,8 @@ span, so a pose, a landmark, or a whole collection is a valid query.
 use arael::covariance::{Covariance, CovMode};
 model.solve_sparse(&cfg);                         // solution written back into the model
 let cov = model.assemble_covariance(CovMode::AllMarginals)?;
-let sd  = cov.std_dev(&model.poses[0]);           // one entity's 1-sigma (tangent coords)
-let s   = cov.marginal_cov(&model.landmarks[3]);  // its full covariance block
+let sd  = cov.std_dev(&model.poses[0])?;           // one entity's 1-sigma (tangent coords)
+let s   = cov.marginal_cov(&model.landmarks[3])?;  // its full covariance block
 let x   = cov.cross_cov(&model.poses[0], &model.landmarks[3]); // joint off-diagonal block
 ```
 

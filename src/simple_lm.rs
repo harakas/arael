@@ -864,30 +864,34 @@ pub trait FitProblem<T: Float>: LmProblem<T> + Sized {
     /// dense `p x p` matrix in f64 (in the parameters' serialize order). A fit
     /// optimizes a single small dense block, so this inverts the Hessian
     /// directly. Call it after [`fit`](Self::fit) to get the covariance at the
-    /// solution. `None` if the Hessian is singular (an under-determined fit).
+    /// solution. Errors: [`CovError::NotPositiveDefinite`] on a singular
+    /// Hessian (an under-determined fit), [`CovError::Empty`] on a fit with
+    /// no optimizable parameters.
     ///
     /// This assumes the residuals are whitened by their measurement noise, so it
     /// is `(J^T J)^-1`; if that noise scale is only a guess, scale by the reduced
     /// chi-squared `end_cost / (N - p)`. Under a robust loss the result is a local
     /// curvature interval, not a strict Gaussian covariance.
-    fn get_cov(&mut self) -> Option<nalgebra::DMatrix<f64>> {
+    fn cov(&mut self) -> Result<nalgebra::DMatrix<f64>, crate::covariance::CovError> {
         let mut params: Vec<T> = Vec::new();
         self.serialize(&mut params);
         let n = params.len();
         if n == 0 {
-            return None;
+            return Err(crate::covariance::CovError::Empty);
         }
         let mut grad = vec![T::zero(); n];
         let mut hess = vec![T::zero(); n * n];
         self.calc_grad_hessian_dense(&params, &mut grad, &mut hess);
         let h = nalgebra::DMatrix::<f64>::from_fn(n, n, |i, j| hess[i * n + j].to_f64().unwrap_or(f64::NAN));
-        h.try_inverse().map(|inv| inv * 2.0)
+        h.try_inverse()
+            .map(|inv| inv * 2.0)
+            .ok_or(crate::covariance::CovError::NotPositiveDefinite)
     }
 
-    /// Per-parameter standard deviations: the square root of the [`get_cov`](Self::get_cov)
-    /// diagonal, in serialize (field) order. `None` if the Hessian is singular.
-    fn get_stdev(&mut self) -> Option<Vec<f64>> {
-        self.get_cov().map(|c| (0..c.nrows()).map(|i| c[(i, i)].sqrt()).collect())
+    /// Per-parameter standard deviations: the square root of the [`cov`](Self::cov)
+    /// diagonal, in serialize (field) order. Errors as [`cov`](Self::cov).
+    fn std_dev(&mut self) -> Result<Vec<f64>, crate::covariance::CovError> {
+        self.cov().map(|c| (0..c.nrows()).map(|i| c[(i, i)].sqrt()).collect())
     }
 }
 

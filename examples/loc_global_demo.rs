@@ -402,7 +402,7 @@ impl Path {
 
         // Global transform uncertainty (Sigma = 2 H^-1). Poses are frozen, so
         // std_dev over the root's own params -- the 6 globals -- is well-posed.
-        if let Some(sd) = self.assemble_covariance(CovMode::PerQuery).ok().map(|c| c.std_dev(self)) {
+        if let Some(sd) = self.assemble_covariance(CovMode::PerQuery).ok().map(|c| c.std_dev(self).unwrap()) {
             println!("optimise_center: global sigma  delta=({:.4}, {:.4}, {:.4})m  rot=({:.4}, {:.4}, {:.4})rad",
                 sd[0], sd[1], sd[2], sd[3], sd[4], sd[5]);
         }
@@ -773,7 +773,7 @@ fn main() {
             let ed = pose.ea.value - gt_e;
             let pos_err = pd.norm();
             let ea_err_deg = ed.norm().to_degrees();
-            match cov.as_ref().map(|c| c.std_dev(pose)) {
+            match cov.as_ref().map(|c| c.std_dev(pose).unwrap()) {
                 Some(sd) => {
                     println!("Pose {:2}: |d|={:.4}m  ea={:.3}deg  pos=({:.3}, {:.3}, {:.3})  sigma=({:.3}, {:.3}, {:.3})m",
                         i, pos_err, ea_err_deg,

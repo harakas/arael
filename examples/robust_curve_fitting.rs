@@ -110,7 +110,7 @@ fn fit_mode(fit: &mut Fit, name: &str, mode: i32) -> (f64, f64, Option<Vec<f64>>
     let cfg = LmConfig::conservative().with_verbose(true).with_initial_lambda(1.0);
     let result = fit.solve_dense(&cfg);
     result.pretty_print();
-    let sd = fit.assemble_covariance(CovMode::PerQuery).ok().map(|cov| cov.std_dev(&fit.curves[0]));
+    let sd = fit.assemble_covariance(CovMode::PerQuery).ok().map(|cov| cov.std_dev(&fit.curves[0]).unwrap());
     (result.x[0], result.x[1], sd)
 }
 

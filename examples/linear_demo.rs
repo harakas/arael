@@ -96,7 +96,7 @@ fn main() {
         result.iterations, result.start_cost, result.end_cost
     );
     println!("Robust fit: a={:.8}, b={:.8}", model.a.value, model.b.value);
-    if let Some(sd) = model.get_stdev() {
+    if let Ok(sd) = model.std_dev() {
         println!("Std dev:   a +/- {:.8}, b +/- {:.8}", sd[0], sd[1]);
     }
 
