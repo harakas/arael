@@ -1,5 +1,15 @@
 # TODO
 
+- **validate(): extend the stale-ref walker to nested scopes.** The
+  generated `collect_ref_issues` covers the root's own ref fields, its
+  direct struct fields, and root-level collections (chains through
+  same-entity refs included). Refs held inside nested sub-model
+  collections and `parent.`-scoped resolution paths are not walked --
+  a stale ref there still panics inside validate's serialize call (with
+  the stale-Ref message) instead of becoming an `Issue::StaleRef`. Not
+  implemented because those scopes need the sweep machinery's nested
+  `__seg` iteration contexts, which the walker does not replicate yet.
+
 - **Guards that toggle during a solve break assembly -- emit zeros
   instead**. The contract today is that `guard =` values stay fixed for a
   solve's duration: the sparse pattern is discovered from the guards'

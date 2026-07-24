@@ -100,6 +100,11 @@
 //! - **.g2o file I/O** -- [`g2o`] reads and writes the standard pose-graph
 //!   interchange format (2D and 3D), with information matrices kept as
 //!   read and sqrt-info helpers
+//! - **Model validation** -- `model.validate()` reports every formulation
+//!   problem in one pass (non-finite parameters, stale refs,
+//!   unconstrained parameters, derivative mismatches);
+//!   `check_gradients()` compares assembled gradients against finite
+//!   differences
 //! - **WASM/browser support** -- compiles to WebAssembly; the `arael-sketch`
 //!   constraint editor runs in the browser via eframe/egui
 //!
@@ -1477,7 +1482,10 @@
 //!
 //! ## My solve doesn't converge. What do I check?
 //!
-//! 0. **Turn on solver verbose mode first.** Set `verbose: true` on
+//! 0. **Run `model.validate()` and turn on solver verbose mode first.**
+//!    `validate()` reports non-finite parameters, stale refs,
+//!    unconstrained parameters, and derivative mismatches in one pass.
+//!    Then set `verbose: true` on
 //!    `LmConfig` and every LM step prints cost, lambda, and the step
 //!    outcome. On a Cholesky rejection the line also reports
 //!    non-finite counts for grad / diagonal / cur_x / matrix and a
@@ -2080,6 +2088,8 @@ pub mod covariance;
 pub mod geometry;
 /// .g2o pose-graph file I/O (SE2 and SE3:QUAT records).
 pub mod g2o;
+/// Model validation report types (`Diagnostic`, `Issue`).
+pub mod validate;
 
 /// Re-export Jacobian types for convenient access.
 pub use model::{Jacobian, JacobianRow, jacobian_entries};

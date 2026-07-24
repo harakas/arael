@@ -57,6 +57,7 @@ Solve problems like linear and nonlinear regression, sensor fusion, SLAM, bundle
 - **Unit directions** -- `UnitVecParam` optimizes a direction with 2 degrees of freedom
 - **Fast approximate atan** -- `#[arael(root, fast_atan)]` swaps every atan/atan2 in the generated code for polynomial approximations (max error < 1e-6 rad); or call `fast_atan`/`fast_atan2` per site. Derivatives stay the exact rational forms
 - **.g2o file I/O** -- `arael::g2o` reads and writes the standard pose-graph interchange format (2D and 3D), with information matrices kept as read and sqrt-info helpers
+- **Model validation** -- `model.validate()` reports every formulation problem in one pass (non-finite parameters, stale refs, unconstrained parameters, derivative mismatches); `check_gradients()` compares assembled gradients against finite differences
 - **WASM/browser support** -- the sketch editor compiles to WebAssembly and runs in the browser via eframe/egui
 
 ## Benchmarks
@@ -624,7 +625,7 @@ Rules:
 
 ### My solve doesn't converge. What do I check?
 
-0. **Turn on solver verbose mode first.** Set `verbose: true` on `LmConfig` and every LM step prints one line: iteration / retry, cost before -> after, the improvement, the damping lambda, and the microseconds it took.
+0. **Run `model.validate()` and turn on solver verbose mode first.** `validate()` reports non-finite parameters, stale refs, unconstrained parameters, and derivative mismatches in one pass (see [docs/SOLVERS.md](docs/SOLVERS.md#validation----modelvalidate)). Then set `verbose: true` on `LmConfig` and every LM step prints one line: iteration / retry, cost before -> after, the improvement, the damping lambda, and the microseconds it took.
 
     ```rust,ignore
     let cfg = LmConfig::conservative().with_verbose(true).with_gather_timing(true);

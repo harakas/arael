@@ -733,6 +733,42 @@ pub trait RootProblem<T: Float> {
     fn param_block_spans(&self) -> std::vec::Vec<(u32, u32)> {
         std::vec::Vec::new()
     }
+    /// Report every `Ref` field that no longer resolves in its
+    /// collection (see [`Issue::StaleRef`](crate::validate::Issue)).
+    /// The macro overrides this for roots whose collections hold
+    /// entities with `Ref` fields; the default finds nothing. Covers
+    /// the root's own refs, direct struct fields, and root-level
+    /// collections; refs inside nested sub-model collections are not
+    /// walked. Called by [`validate`](LmProblem::validate).
+    fn collect_ref_issues(&self, _issues: &mut std::vec::Vec<crate::validate::Issue>) {}
+}
+
+/// Default gradient-check tolerance: `25 * cbrt(eps)` -- the scale of
+/// central-difference truncation plus roundoff error (about 1.5e-4 for
+/// f64, 0.12 for f32).
+fn default_gradient_tol<T: Float>() -> T {
+    T::epsilon().cbrt() * T::from(25.0).unwrap()
+}
+
+/// Push a [`GradientMismatch`](crate::validate::Issue) for every
+/// component where analytic and numeric disagree beyond
+/// `tol * (1 + max(|fd|, |g|))`.
+fn compare_gradients<T: Float>(
+    analytic: &[T],
+    numeric: &[T],
+    tol: T,
+    issues: &mut std::vec::Vec<crate::validate::Issue>,
+) {
+    for i in 0..analytic.len() {
+        let (g, fd) = (analytic[i], numeric[i]);
+        if (fd - g).abs() > tol * (T::one() + fd.abs().max(g.abs())) {
+            issues.push(crate::validate::Issue::GradientMismatch {
+                param: i,
+                analytic: g.to_f64().unwrap_or(f64::NAN),
+                numeric: fd.to_f64().unwrap_or(f64::NAN),
+            });
+        }
+    }
 }
 
 /// Scalar-coordinate -> CSC-position resolver over a tile-expanded
@@ -1007,6 +1043,129 @@ pub trait LmProblem<T> {
     /// Called after each accepted LM step to let the problem update internal state.
     /// Default: no-op.
     fn advance(&mut self, _params: &mut [T]) {}
+
+    /// The gradient of `calc_cost` at `params` by central finite
+    /// differences: `(cost(x + h e_i) - cost(x - h e_i)) / 2h` with
+    /// `h = cbrt(eps) * max(1, |x_i|)` per component. `2n` cost
+    /// evaluations -- a debugging tool, not a solver path.
+    fn numeric_gradient(&mut self, params: &[T]) -> Vec<T>
+    where
+        T: Float,
+        Self: Sized,
+    {
+        let h0 = T::epsilon().cbrt();
+        let mut x = params.to_vec();
+        let mut out = Vec::with_capacity(params.len());
+        for i in 0..params.len() {
+            let h = h0 * T::one().max(params[i].abs());
+            x[i] = params[i] + h;
+            let cp = self.calc_cost(&x);
+            x[i] = params[i] - h;
+            let cm = self.calc_cost(&x);
+            x[i] = params[i];
+            out.push((cp - cm) / (h + h));
+        }
+        out
+    }
+
+    /// Compare the assembled gradient against
+    /// [`numeric_gradient`](Self::numeric_gradient) with the default
+    /// tolerance and report every disagreeing component. Empty means
+    /// the derivatives agree -- the check that catches a wrong
+    /// hand-declared derivative (`#[arael::function]` `derivs`, a
+    /// `deriv =` cache). Uses the sparse assembly path.
+    fn check_gradients(&mut self, params: &[T]) -> crate::validate::Diagnostic
+    where
+        T: Float,
+        Self: Sized,
+    {
+        self.check_gradients_tol(params, default_gradient_tol::<T>())
+    }
+
+    /// [`check_gradients`](Self::check_gradients) with an explicit
+    /// tolerance: component `i` is reported when
+    /// `|fd_i - g_i| > tol * (1 + max(|fd_i|, |g_i|))`. Loosen it for
+    /// noisy f32 costs.
+    fn check_gradients_tol(&mut self, params: &[T], tol: T) -> crate::validate::Diagnostic
+    where
+        T: Float,
+        Self: Sized,
+    {
+        let mut grad = vec![T::zero(); params.len()];
+        let mut coo = CooMatrix::new(params.len());
+        self.calc_grad_hessian_sparse(params, &mut grad, &mut coo);
+        let numeric = self.numeric_gradient(params);
+        let mut issues = Vec::new();
+        compare_gradients(&grad, &numeric, tol, &mut issues);
+        crate::validate::Diagnostic { issues }
+    }
+
+    /// Validate the model: serialize it and run every check --
+    /// non-finite parameters, stale `Ref`s, structurally or numerically
+    /// unconstrained parameters, poisoned Hessian diagonals, and the
+    /// finite-difference gradient check -- reporting everything found.
+    /// A clean report means a solve will not fail on a formulation
+    /// problem at this state.
+    ///
+    /// The checks run in stages: stale refs are reported alone (nothing
+    /// else can even serialize past them), then non-finite parameters
+    /// (assembly would evaluate garbage), then the assembly-based
+    /// checks and the gradient comparison. Fix what a stage reports and
+    /// validate again. Costs one assembly plus `2n` cost evaluations --
+    /// a debugging tool, not something to run per solve.
+    fn validate(&mut self) -> crate::validate::Diagnostic
+    where
+        Self: RootProblem<T> + Sized,
+        T: Float,
+    {
+        use crate::validate::Issue;
+        let mut issues = Vec::new();
+        // Refs first: everything after this (serialize included -- cross
+        // blocks resolve refs to assign indices) panics on a stale ref.
+        self.collect_ref_issues(&mut issues);
+        if !issues.is_empty() {
+            return crate::validate::Diagnostic { issues };
+        }
+        let mut x = Vec::new();
+        self.serialize(&mut x);
+        for (i, v) in x.iter().enumerate() {
+            if !v.is_finite() {
+                issues.push(Issue::NonFiniteParam {
+                    param: i,
+                    value: v.to_f64().unwrap_or(f64::NAN),
+                });
+            }
+        }
+        if !issues.is_empty() {
+            return crate::validate::Diagnostic { issues };
+        }
+        let n = x.len();
+        let mut grad = vec![T::zero(); n];
+        let mut coo = CooMatrix::new(n);
+        self.calc_grad_hessian_sparse(&x, &mut grad, &mut coo);
+        let mut diag = vec![T::zero(); n];
+        let mut present = vec![false; n];
+        for k in 0..coo.rows.len() {
+            if coo.rows[k] == coo.cols[k] {
+                let i = coo.rows[k] as usize;
+                present[i] = true;
+                diag[i] += coo.vals[k];
+            }
+        }
+        for i in 0..n {
+            if !present[i] || diag[i] == T::zero() {
+                issues.push(Issue::UnconstrainedParam { param: i });
+            } else if !(diag[i] > T::zero()) {
+                issues.push(Issue::BadDiagonal {
+                    param: i,
+                    value: diag[i].to_f64().unwrap_or(f64::NAN),
+                });
+            }
+        }
+        let numeric = self.numeric_gradient(&x);
+        compare_gradients(&grad, &numeric, default_gradient_tol::<T>(), &mut issues);
+        crate::validate::Diagnostic { issues }
+    }
 
     /// Solve with the given [`LmSolver`] backend, wrapping the
     /// serialize -> optimize -> deserialize round trip: parameters are

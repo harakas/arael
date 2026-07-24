@@ -2292,6 +2292,124 @@ fn type_ident_name(ty: &syn::Type) -> syn::Result<String> {
     Err(syn::Error::new_spanned(ty, "expected a simple type name"))
 }
 
+/// Expression of type `Option<&Collection>` resolving a ref field's
+/// target collection, relative to `self` (the root) and the current
+/// entity `__e`. `root.`-rooted paths descend plain fields; a path
+/// whose head is another ref field of the same entity chains through
+/// that ref with `get()`. Returns `None` for shapes the walker does not
+/// handle (`parent.`-scoped refs in nested sub-models).
+fn ref_target_expr(
+    elem_ref_paths: &[(String, String)],
+    path: &str,
+) -> Option<TokenStream2> {
+    let (head, rest) = path.split_once('.')?;
+    let segs: Vec<syn::Ident> = rest
+        .split('.')
+        .map(|s| syn::Ident::new(s, proc_macro2::Span::call_site()))
+        .collect();
+    if head == "root" {
+        return Some(quote! { Some(&self.#(#segs).*) });
+    }
+    let head_path = &elem_ref_paths.iter().find(|(f, _)| f == head)?.1;
+    let head_expr = ref_target_expr(elem_ref_paths, head_path)?;
+    let head_ident = syn::Ident::new(head, proc_macro2::Span::call_site());
+    Some(quote! {
+        #head_expr.and_then(|__c| __c.get(__e.#head_ident)).map(|__p| &__p.#(#segs).*)
+    })
+}
+
+/// Stale-ref checks for one entity bound as `__e`: one `if` per ref
+/// field whose target the walker can resolve. `path_fmt` / `path_args`
+/// format the reported location (e.g. `"edges[{}].{}"` with the loop
+/// index).
+fn ref_checks_for_entity(
+    ref_paths: &[(String, String)],
+    path_fmt: &str,
+    path_args: &TokenStream2,
+) -> Vec<TokenStream2> {
+    let mut checks = Vec::new();
+    for (ref_field, path) in ref_paths {
+        let Some(target) = ref_target_expr(ref_paths, path) else { continue };
+        let ref_ident = syn::Ident::new(ref_field, proc_macro2::Span::call_site());
+        let ref_name = ref_field.clone();
+        checks.push(quote! {
+            if #target.map_or(true, |__c| __c.get(__e.#ref_ident).is_none()) {
+                __issues.push(arael::validate::Issue::StaleRef {
+                    path: format!(#path_fmt, #path_args #ref_name),
+                });
+            }
+        });
+    }
+    checks
+}
+
+/// The `RootProblem::collect_ref_issues` override: walk the root's own
+/// ref fields, its direct struct fields, and every root-level
+/// collection whose element type carries `#[arael(ref = ...)]` fields,
+/// reporting each ref that no longer resolves. `parent.`-scoped refs
+/// inside nested sub-models are not walked. Emits nothing when there is
+/// nothing to check (the trait default applies).
+fn generate_ref_issue_walker(root_name: &str) -> TokenStream2 {
+    let Some(root_layout) = registry_lookup(root_name) else {
+        return quote! {};
+    };
+    let mut body: Vec<TokenStream2> = Vec::new();
+    // The root's own ref fields.
+    {
+        let checks = ref_checks_for_entity(&root_layout.ref_paths, "{}", &quote! {});
+        if !checks.is_empty() {
+            body.push(quote! {
+                {
+                    let __e = &*self;
+                    #(#checks)*
+                }
+            });
+        }
+    }
+    for (field, sft) in &root_layout.fields {
+        let SymFieldType::Struct(elem) = sft else { continue };
+        // A ref field of the root itself is checked above, not descended.
+        if root_layout.ref_paths.iter().any(|(f, _)| f == field) {
+            continue;
+        }
+        let Some(elem_layout) = registry_lookup(elem) else { continue };
+        if elem_layout.ref_paths.is_empty() {
+            continue;
+        }
+        let field_ident = syn::Ident::new(field, proc_macro2::Span::call_site());
+        if root_layout.collection_fields.contains(field) {
+            let fmt = format!("{}[{{}}].{{}}", field);
+            let checks = ref_checks_for_entity(&elem_layout.ref_paths, &fmt, &quote! { __i, });
+            if !checks.is_empty() {
+                body.push(quote! {
+                    for (__i, __e) in self.#field_ident.iter().enumerate() {
+                        #(#checks)*
+                    }
+                });
+            }
+        } else {
+            let fmt = format!("{}.{{}}", field);
+            let checks = ref_checks_for_entity(&elem_layout.ref_paths, &fmt, &quote! {});
+            if !checks.is_empty() {
+                body.push(quote! {
+                    {
+                        let __e = &self.#field_ident;
+                        #(#checks)*
+                    }
+                });
+            }
+        }
+    }
+    if body.is_empty() {
+        return quote! {};
+    }
+    quote! {
+        fn collect_ref_issues(&self, __issues: &mut std::vec::Vec<arael::validate::Issue>) {
+            #(#body)*
+        }
+    }
+}
+
 fn add_param_symbols(base: &str, sft: &SymFieldType, out: &mut Vec<String>) {
     match sft {
         SymFieldType::Scalar => out.push(base.to_string()),
@@ -5354,6 +5472,8 @@ pub fn generate_root_methods(
         (quote! { collect_hessian_cells64 }, quote! { accumulate_hessian_positions64 })
     };
 
+    let ref_issue_walker = generate_ref_issue_walker(&root_name.to_string());
+
     let mut tokens = quote! {
         #(#constraint_impls)*
 
@@ -5370,6 +5490,7 @@ pub fn generate_root_methods(
                 __out
             }
             #marginalize_hint_fn
+            #ref_issue_walker
         }
 
         impl #root_name {

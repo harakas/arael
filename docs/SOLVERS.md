@@ -492,6 +492,52 @@ parameters, usable for diagnosis or a `LmConfig::continue_from` restart.
 implements `Display` and `std::error::Error`, so `?` works in
 `main() -> Result<(), Box<dyn Error>>`.
 
+## Validation -- `model.validate()`
+
+The model linter: one pass reports every formulation problem it can
+find, instead of a solve failing on the first one.
+
+```rust,ignore
+let d = model.validate();
+if !d.is_clean() {
+    println!("{}", d);        // one line per issue
+}
+assert!(model.validate().is_clean());   // the test / CI form
+```
+
+`validate()` returns an `arael::validate::Diagnostic` whose `issues`
+are:
+
+| Issue | Meaning |
+|---|---|
+| `NonFiniteParam { param, value }` | a parameter serialized to NaN / inf |
+| `StaleRef { path }` | a `Ref` whose slot was removed or replaced -- would panic during a solve; `path` names it (`ties[3].a`) |
+| `UnconstrainedParam { param }` | no constraint curvature reaches the parameter -- a solve would fail with `DegenerateDiagonal { fault: Zero }` |
+| `BadDiagonal { param, value }` | negative / NaN Hessian diagonal -- poisoned assembly |
+| `GradientMismatch { param, analytic, numeric }` | the assembled gradient disagrees with central finite differences of `calc_cost` -- a wrong hand-declared derivative (`#[arael::function]` `derivs`, a `deriv =` cache) |
+
+The checks run in stages: stale refs are reported alone (nothing else
+can even serialize past them), then non-finite parameters, then the
+assembly-based checks and the gradient comparison. Fix what a stage
+reports and validate again. The pass costs one assembly plus `2n` cost
+evaluations -- a debugging tool, not something to run per solve. The
+stale-ref walk covers the root's refs, direct struct fields, and
+root-level collections; refs inside nested sub-model collections still
+panic with the stale-Ref message instead of appearing as an issue.
+
+The gradient pieces stand alone too:
+
+```rust,ignore
+let fd = model.numeric_gradient(&params);        // central differences, 2n cost evals
+let d  = model.check_gradients(&params);         // fd vs assembled gradient, default tol
+let d  = model.check_gradients_tol(&params, 1e-3); // explicit tolerance (noisy f32 costs)
+```
+
+`check_gradients` is the check that catches a wrong `derivs = [...]` on
+an `#[arael::function]` or a wrong hand `deriv =` cache -- the cost is
+computed from the function values, the gradient from the declared
+derivatives, and only a finite-difference comparison sees them disagree.
+
 ## Threads
 
 Off by default: arael is a single-threaded solver. The one thing that can be
