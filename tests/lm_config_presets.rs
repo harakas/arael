@@ -5,7 +5,7 @@
 // near its minimum (1, 1) (the well-conditioned regime).
 
 use arael::simple_lm::{
-    solve, BandError, CooMatrix, CscMatrix, LmConfig, LmProblem, LmResult,
+    solve, BandOverflow, CooMatrix, CscMatrix, LmConfig, LmProblem, LmResult,
 };
 
 /// Rosenbrock as least squares: r = [10*(y - x^2), 1 - x], cost = 0.5*|r|^2,
@@ -38,7 +38,7 @@ impl LmProblem<f64> for Rosenbrock {
     }
 
     fn calc_grad_hessian_band(&mut self, _p: &[f64], _g: &mut [f64], _b: &mut [f64], _kd: usize)
-        -> Result<f64, BandError> {
+        -> Result<f64, BandOverflow> {
         unimplemented!("dense only")
     }
     fn calc_grad_hessian_sparse(&mut self, _p: &[f64], _g: &mut [f64], _c: &mut CooMatrix<f64>) -> f64 {

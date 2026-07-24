@@ -324,7 +324,7 @@ impl LmProblem<f64> for LineFit {
 
     fn calc_grad_hessian_band(
         &mut self, _p: &[f64], _g: &mut [f64], _b: &mut [f64], _kd: usize,
-    ) -> Result<f64, arael::simple_lm::BandError> {
+    ) -> Result<f64, arael::simple_lm::BandOverflow> {
         unimplemented!("dense/sparse only")
     }
 

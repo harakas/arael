@@ -8,7 +8,7 @@
 use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::refs::{self, Ref};
 use arael::simple_lm::{
-    lm_solve, Band, BandError, CooMatrix, CscMatrix, Dense, LmConfig, LmProblem, LmResult,
+    lm_solve, Band, BandOverflow, CooMatrix, CscMatrix, Dense, LmConfig, LmProblem, LmResult,
     LmSession, LmSolver, RootProblem, SchurPolicy, SparseFaer,
 };
 
@@ -262,7 +262,7 @@ impl LmProblem<f64> for Spy {
         unimplemented!("sparse only")
     }
     fn calc_grad_hessian_band(&mut self, _p: &[f64], _g: &mut [f64], _b: &mut [f64], _kd: usize)
-        -> Result<f64, BandError> {
+        -> Result<f64, BandOverflow> {
         unimplemented!("sparse only")
     }
     fn calc_grad_hessian_sparse_direct(&mut self, _p: &[f64], _g: &mut [f64], _c: &mut CscMatrix<f64>) -> f64 {

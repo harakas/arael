@@ -5503,7 +5503,7 @@ pub fn generate_root_methods(
                 __cost
             }
 
-            fn calc_grad_hessian_band(&mut self, params: &[#prec_type], grad: &mut [#prec_type], band: &mut [#prec_type], kd: usize) -> Result<#prec_type, arael::simple_lm::BandError> {
+            fn calc_grad_hessian_band(&mut self, params: &[#prec_type], grad: &mut [#prec_type], band: &mut [#prec_type], kd: usize) -> Result<#prec_type, arael::simple_lm::BandOverflow> {
                 grad.iter_mut().for_each(|g| *g = 0.0);
                 let mut __cost = self.__compute_blocks(params, grad);
                 #extended_cost_call

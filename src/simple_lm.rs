@@ -508,7 +508,7 @@ impl<T: Float> LmConfig<T> {
 
 /// Error when a block's indices exceed the declared bandwidth.
 #[derive(Debug)]
-pub struct BandError {
+pub struct BandOverflow {
     /// Row index of the offending element.
     pub row: usize,
     /// Column index of the offending element.
@@ -517,18 +517,19 @@ pub struct BandError {
     pub kd: usize,
 }
 
-impl std::fmt::Display for BandError {
+impl std::fmt::Display for BandOverflow {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "band overflow: element ({}, {}) exceeds bandwidth kd={}", self.row, self.col, self.kd)
     }
 }
 
+impl std::error::Error for BandOverflow {}
+
 /// A structural failure that makes the linear system impossible to build or
 /// factor, so the solve cannot even be attempted. Reported through
-/// [`LmStatus::SetupFailed`]. Distinct from a numeric non-positive-definite
-/// step, which the loop re-damps and, if it cannot recover, reports through a
-/// different [`LmStatus`] (`LambdaCeiling` / `RetryBudgetExhausted` /
-/// `DegenerateDiagonal`).
+/// [`SolveFailureKind::Setup`]. Distinct from a numeric non-positive-definite
+/// step, which the loop re-damps and, if it cannot recover, ends the solve
+/// with [`LmStatus::LambdaCeiling`] / [`LmStatus::RetryBudgetExhausted`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SolveError {
     /// A Hessian element fell outside the band half-bandwidth `kd` declared for
@@ -692,8 +693,8 @@ impl<T: std::fmt::Debug> std::error::Error for SolveFailure<T> {}
 /// or [`SolveFailure`] with the partial state when one exists.
 pub type SolveResult<T> = Result<LmResult<T>, SolveFailure<T>>;
 
-impl From<BandError> for SolveError {
-    fn from(e: BandError) -> Self {
+impl From<BandOverflow> for SolveError {
+    fn from(e: BandOverflow) -> Self {
         SolveError::BandOverflow { row: e.row, col: e.col, kd: e.kd }
     }
 }
@@ -993,7 +994,7 @@ pub trait LmProblem<T> {
     /// Assemble gradient and Hessian in upper-band format (column-major, (kd+1)*n).
     /// Returns the cost at `params`, or Err if any block exceeds the
     /// declared bandwidth kd.
-    fn calc_grad_hessian_band(&mut self, params: &[T], grad: &mut [T], band: &mut [T], kd: usize) -> Result<T, BandError>;
+    fn calc_grad_hessian_band(&mut self, params: &[T], grad: &mut [T], band: &mut [T], kd: usize) -> Result<T, BandOverflow>;
     /// Assemble gradient and upper-triangle Hessian as COO triplets.
     /// Returns the cost at `params`.
     fn calc_grad_hessian_sparse(&mut self, params: &[T], grad: &mut [T], coo: &mut CooMatrix<T>) -> T;
@@ -1151,7 +1152,7 @@ where
     fn calc_grad_hessian_dense(&mut self, params: &[T], grad: &mut [T], hessian: &mut [T]) -> T {
         (self.grad_hessian)(params, grad, hessian)
     }
-    fn calc_grad_hessian_band(&mut self, _params: &[T], _grad: &mut [T], _band: &mut [T], _kd: usize) -> Result<T, BandError> {
+    fn calc_grad_hessian_band(&mut self, _params: &[T], _grad: &mut [T], _band: &mut [T], _kd: usize) -> Result<T, BandOverflow> {
         unimplemented!("FnProblem does not support band assembly")
     }
     fn calc_grad_hessian_sparse(&mut self, _params: &[T], _grad: &mut [T], _coo: &mut CooMatrix<T>) -> T {
@@ -6133,7 +6134,7 @@ mod tests {
                 hessian.copy_from_slice(&[2.0, 0.0, 0.0, 2.0]);
                 self.calc_cost(p)
             }
-            fn calc_grad_hessian_band(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: usize) -> Result<f64, BandError> {
+            fn calc_grad_hessian_band(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: usize) -> Result<f64, BandOverflow> {
                 unreachable!("dense-only test problem")
             }
             fn calc_grad_hessian_sparse(&mut self, _: &[f64], _: &mut [f64], _: &mut CooMatrix<f64>) -> f64 {
@@ -6879,7 +6880,7 @@ mod tests {
                 hess[0] = 2.0; hess[1] = 0.0; hess[2] = 0.0; hess[3] = 2.0;
                 self.calc_cost(x)
             }
-            fn calc_grad_hessian_band(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: usize) -> Result<f64, BandError> {
+            fn calc_grad_hessian_band(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: usize) -> Result<f64, BandOverflow> {
                 unimplemented!()
             }
             fn calc_grad_hessian_sparse_direct(&mut self, _: &[f64], _: &mut [f64], _: &mut CscMatrix<f64>) -> f64 { unimplemented!() }
@@ -6916,7 +6917,7 @@ mod tests {
                 hess[0] = 2.0; hess[1] = 0.0; hess[2] = 0.0; hess[3] = 2.0;
                 self.calc_cost(x)
             }
-            fn calc_grad_hessian_band(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: usize) -> Result<f64, BandError> { unimplemented!() }
+            fn calc_grad_hessian_band(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: usize) -> Result<f64, BandOverflow> { unimplemented!() }
             fn calc_grad_hessian_sparse_direct(&mut self, _: &[f64], _: &mut [f64], _: &mut CscMatrix<f64>) -> f64 { unimplemented!() }
             fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], grad: &mut [f64], vals: &mut [f64], positions: &[usize]) -> f64 {
                 grad[0] = 2.0 * (x[0] - 3.0); grad[1] = 2.0 * (x[1] - 7.0);
@@ -6957,7 +6958,7 @@ mod tests {
                 (x[0] - 3.0) * (x[0] - 3.0) + (x[1] - 7.0) * (x[1] - 7.0)
             }
             fn calc_grad_hessian_dense(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64]) -> f64 { unimplemented!() }
-            fn calc_grad_hessian_band(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: usize) -> Result<f64, BandError> { unimplemented!() }
+            fn calc_grad_hessian_band(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: usize) -> Result<f64, BandOverflow> { unimplemented!() }
             fn calc_grad_hessian_sparse_direct(&mut self, x: &[f64], grad: &mut [f64], csc: &mut CscMatrix<f64>) -> f64 {
                 self.direct_calls += 1;
                 grad[0] = 2.0 * (x[0] - 3.0); grad[1] = 2.0 * (x[1] - 7.0);
@@ -7002,7 +7003,7 @@ mod tests {
                 (x[0] - 3.0) * (x[0] - 3.0) + (x[1] - 7.0) * (x[1] - 7.0)
             }
             fn calc_grad_hessian_dense(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64]) -> f64 { unimplemented!() }
-            fn calc_grad_hessian_band(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: usize) -> Result<f64, BandError> { unimplemented!() }
+            fn calc_grad_hessian_band(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: usize) -> Result<f64, BandOverflow> { unimplemented!() }
             fn calc_grad_hessian_sparse_direct(&mut self, x: &[f64], grad: &mut [f64], csc: &mut CscMatrix<f64>) -> f64 {
                 grad[0] = 2.0 * (x[0] - 3.0); grad[1] = 2.0 * (x[1] - 7.0);
                 csc.vals.iter_mut().for_each(|v| *v = 0.0);
@@ -7033,7 +7034,7 @@ mod tests {
                 (x[0] - 1.0).powi(2) + (x[1] - 2.0).powi(2) + (x[2] - 3.0).powi(2) + (x[0] - x[2]).powi(2)
             }
             fn calc_grad_hessian_dense(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64]) -> f64 { unimplemented!() }
-            fn calc_grad_hessian_band(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: usize) -> Result<f64, BandError> { unimplemented!() }
+            fn calc_grad_hessian_band(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: usize) -> Result<f64, BandOverflow> { unimplemented!() }
             fn calc_grad_hessian_sparse_direct(&mut self, _: &[f64], _: &mut [f64], _: &mut CscMatrix<f64>) -> f64 { unimplemented!() }
             fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], grad: &mut [f64], vals: &mut [f64], positions: &[usize]) -> f64 {
                 grad[0] = 2.0 * (x[0] - 1.0) + 2.0 * (x[0] - x[2]);
@@ -7150,7 +7151,7 @@ mod tests {
                 h[3*4+0]=0.0; h[3*4+1]=-2.0;h[3*4+2]=0.0;  h[3*4+3]=4.0;
                 self.calc_cost(x)
             }
-            fn calc_grad_hessian_band(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: usize) -> Result<f64, BandError> { unimplemented!() }
+            fn calc_grad_hessian_band(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: usize) -> Result<f64, BandOverflow> { unimplemented!() }
             fn calc_grad_hessian_sparse_direct(&mut self, _: &[f64], _: &mut [f64], _: &mut CscMatrix<f64>) -> f64 { unimplemented!() }
             fn calc_grad_hessian_sparse_indexed(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: &[usize]) -> f64 { unimplemented!() }
             fn calc_grad_hessian_sparse(&mut self, x: &[f64], g: &mut [f64], coo: &mut CooMatrix<f64>) -> f64 {
@@ -7234,7 +7235,7 @@ mod tests {
                 h[0]=2.0; h[1]=0.0; h[2]=0.0; h[3]=2.0;
                 self.calc_cost(x)
             }
-            fn calc_grad_hessian_band(&mut self,_:&[f64],_:&mut[f64],_:&mut[f64],_:usize)->Result<f64,BandError>{unimplemented!()}
+            fn calc_grad_hessian_band(&mut self,_:&[f64],_:&mut[f64],_:&mut[f64],_:usize)->Result<f64,BandOverflow>{unimplemented!()}
             fn calc_grad_hessian_sparse_direct(&mut self,_:&[f64],_:&mut[f64],_:&mut CscMatrix<f64>)->f64{unimplemented!()}
             fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], g: &mut [f64], vals: &mut [f64], pos: &[usize]) -> f64 {
                 g[0]=2.0*(x[0]-3.0); g[1]=2.0*(x[1]-7.0);
@@ -7274,7 +7275,7 @@ mod tests {
                 h[12]=0.0;h[13]=-2.0;h[14]=0.0;h[15]=4.0;
                 self.calc_cost(x)
             }
-            fn calc_grad_hessian_band(&mut self,_:&[f64],_:&mut[f64],_:&mut[f64],_:usize)->Result<f64,BandError>{unimplemented!()}
+            fn calc_grad_hessian_band(&mut self,_:&[f64],_:&mut[f64],_:&mut[f64],_:usize)->Result<f64,BandOverflow>{unimplemented!()}
             fn calc_grad_hessian_sparse_direct(&mut self,_:&[f64],_:&mut[f64],_:&mut CscMatrix<f64>)->f64{unimplemented!()}
             fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], g: &mut [f64], vals: &mut [f64], pos: &[usize]) -> f64 {
                 g[0]=2.0*(x[0]-1.0)+2.0*(x[0]-x[2]); g[1]=2.0*(x[1]-2.0)+2.0*(x[1]-x[3]);
@@ -7316,7 +7317,7 @@ mod tests {
                 h[0]=2.0; h[1]=0.0; h[2]=0.0; h[3]=2.0;
                 self.calc_cost(x)
             }
-            fn calc_grad_hessian_band(&mut self,_:&[f64],_:&mut[f64],_:&mut[f64],_:usize)->Result<f64,BandError>{unimplemented!()}
+            fn calc_grad_hessian_band(&mut self,_:&[f64],_:&mut[f64],_:&mut[f64],_:usize)->Result<f64,BandOverflow>{unimplemented!()}
             fn calc_grad_hessian_sparse_direct(&mut self,_:&[f64],_:&mut[f64],_:&mut CscMatrix<f64>)->f64{unimplemented!()}
             fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], g: &mut [f64], vals: &mut [f64], pos: &[usize]) -> f64 {
                 g[0]=2.0*(x[0]-3.0); g[1]=2.0*(x[1]-7.0);
@@ -7350,7 +7351,7 @@ mod tests {
                 h[0]=2.0; h[1]=0.0; h[2]=0.0; h[3]=2.0;
                 self.calc_cost(x)
             }
-            fn calc_grad_hessian_band(&mut self,_:&[f64],_:&mut[f64],_:&mut[f64],_:usize)->Result<f64,BandError>{unimplemented!()}
+            fn calc_grad_hessian_band(&mut self,_:&[f64],_:&mut[f64],_:&mut[f64],_:usize)->Result<f64,BandOverflow>{unimplemented!()}
             fn calc_grad_hessian_sparse_direct(&mut self,_:&[f64],_:&mut[f64],_:&mut CscMatrix<f64>)->f64{unimplemented!()}
             fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], g: &mut [f64], vals: &mut [f64], pos: &[usize]) -> f64 {
                 g[0]=2.0*(x[0]-3.0); g[1]=2.0*(x[1]-7.0);

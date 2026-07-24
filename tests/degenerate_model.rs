@@ -13,7 +13,7 @@
 // condition -- a branch or a saturated robustifier can produce it from
 // data), carrying the partial state.
 
-use arael::simple_lm::{self, BandError, CooMatrix, CscMatrix, DiagonalFault, FnProblem, LmConfig, SolveError, SolveFailureKind};
+use arael::simple_lm::{self, BandOverflow, CooMatrix, CscMatrix, DiagonalFault, FnProblem, LmConfig, SolveError, SolveFailureKind};
 use arael::simple_lm::LmProblem;
 
 // The bad-diagonal diagnostic goes through arael's process-global log sink.
@@ -273,8 +273,8 @@ struct BandOverflowProblem;
 impl LmProblem<f64> for BandOverflowProblem {
     fn calc_cost(&mut self, _x: &[f64]) -> f64 { 1.0 }
     fn calc_grad_hessian_dense(&mut self, _x: &[f64], _g: &mut [f64], _h: &mut [f64]) -> f64 { 1.0 }
-    fn calc_grad_hessian_band(&mut self, _x: &[f64], _g: &mut [f64], _b: &mut [f64], kd: usize) -> Result<f64, BandError> {
-        Err(BandError { row: 0, col: 1, kd })
+    fn calc_grad_hessian_band(&mut self, _x: &[f64], _g: &mut [f64], _b: &mut [f64], kd: usize) -> Result<f64, BandOverflow> {
+        Err(BandOverflow { row: 0, col: 1, kd })
     }
     fn calc_grad_hessian_sparse(&mut self, _x: &[f64], _g: &mut [f64], _coo: &mut CooMatrix<f64>) -> f64 { unimplemented!() }
     fn calc_grad_hessian_sparse_direct(&mut self, _x: &[f64], _g: &mut [f64], _csc: &mut CscMatrix<f64>) -> f64 { unimplemented!() }
@@ -296,7 +296,7 @@ struct UnconstrainedSparseProblem;
 impl LmProblem<f64> for UnconstrainedSparseProblem {
     fn calc_cost(&mut self, _x: &[f64]) -> f64 { 1.0 }
     fn calc_grad_hessian_dense(&mut self, _x: &[f64], _g: &mut [f64], _h: &mut [f64]) -> f64 { unimplemented!() }
-    fn calc_grad_hessian_band(&mut self, _x: &[f64], _g: &mut [f64], _b: &mut [f64], _kd: usize) -> Result<f64, BandError> { unimplemented!() }
+    fn calc_grad_hessian_band(&mut self, _x: &[f64], _g: &mut [f64], _b: &mut [f64], _kd: usize) -> Result<f64, BandOverflow> { unimplemented!() }
     fn calc_grad_hessian_sparse(&mut self, _x: &[f64], g: &mut [f64], coo: &mut CooMatrix<f64>) -> f64 {
         g[0] = 0.0; g[1] = 0.0;
         coo.push(0, 0, 2.0); // param 0 has a diagonal; param 1 has none

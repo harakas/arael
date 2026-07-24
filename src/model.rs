@@ -208,8 +208,8 @@ pub trait Model {
     // methods to do with grad.
     fn accumulate_hessian32(&self, _hessian: &mut [f32]) {}
     fn accumulate_hessian64(&self, _hessian: &mut [f64]) {}
-    fn accumulate_hessian_band32(&self, _band: &mut [f32], _kd: usize) -> Result<(), crate::simple_lm::BandError> { Ok(()) }
-    fn accumulate_hessian_band64(&self, _band: &mut [f64], _kd: usize) -> Result<(), crate::simple_lm::BandError> { Ok(()) }
+    fn accumulate_hessian_band32(&self, _band: &mut [f32], _kd: usize) -> Result<(), crate::simple_lm::BandOverflow> { Ok(()) }
+    fn accumulate_hessian_band64(&self, _band: &mut [f64], _kd: usize) -> Result<(), crate::simple_lm::BandOverflow> { Ok(()) }
     fn accumulate_hessian_sparse32(&self, _coo: &mut crate::simple_lm::CooMatrix<f32>) {}
     fn accumulate_hessian_sparse64(&self, _coo: &mut crate::simple_lm::CooMatrix<f64>) {}
     fn accumulate_hessian_sparse_direct32(&self, _csc: &mut crate::simple_lm::CscMatrix<f32>) {}
@@ -1198,11 +1198,11 @@ macro_rules! impl_model_collection {
             fn accumulate_hessian64(&self, hessian: &mut [f64]) {
                 for item in self.iter() { item.accumulate_hessian64(hessian); }
             }
-            fn accumulate_hessian_band32(&self, band: &mut [f32], kd: usize) -> Result<(), crate::simple_lm::BandError> {
+            fn accumulate_hessian_band32(&self, band: &mut [f32], kd: usize) -> Result<(), crate::simple_lm::BandOverflow> {
                 for item in self.iter() { item.accumulate_hessian_band32(band, kd)?; }
                 Ok(())
             }
-            fn accumulate_hessian_band64(&self, band: &mut [f64], kd: usize) -> Result<(), crate::simple_lm::BandError> {
+            fn accumulate_hessian_band64(&self, band: &mut [f64], kd: usize) -> Result<(), crate::simple_lm::BandOverflow> {
                 for item in self.iter() { item.accumulate_hessian_band64(band, kd)?; }
                 Ok(())
             }
@@ -1291,11 +1291,11 @@ impl<T: Model> Model for crate::refs::Arena<T> {
     fn accumulate_hessian64(&self, hessian: &mut [f64]) {
         for item in self.iter() { item.accumulate_hessian64(hessian); }
     }
-    fn accumulate_hessian_band32(&self, band: &mut [f32], kd: usize) -> Result<(), crate::simple_lm::BandError> {
+    fn accumulate_hessian_band32(&self, band: &mut [f32], kd: usize) -> Result<(), crate::simple_lm::BandOverflow> {
         for item in self.iter() { item.accumulate_hessian_band32(band, kd)?; }
         Ok(())
     }
-    fn accumulate_hessian_band64(&self, band: &mut [f64], kd: usize) -> Result<(), crate::simple_lm::BandError> {
+    fn accumulate_hessian_band64(&self, band: &mut [f64], kd: usize) -> Result<(), crate::simple_lm::BandOverflow> {
         for item in self.iter() { item.accumulate_hessian_band64(band, kd)?; }
         Ok(())
     }
@@ -1377,11 +1377,11 @@ impl<T: Model> Model for Option<T> {
     fn accumulate_hessian64(&self, hessian: &mut [f64]) {
         if let Some(inner) = self { inner.accumulate_hessian64(hessian); }
     }
-    fn accumulate_hessian_band32(&self, band: &mut [f32], kd: usize) -> Result<(), crate::simple_lm::BandError> {
+    fn accumulate_hessian_band32(&self, band: &mut [f32], kd: usize) -> Result<(), crate::simple_lm::BandOverflow> {
         if let Some(inner) = self { inner.accumulate_hessian_band32(band, kd)?; }
         Ok(())
     }
-    fn accumulate_hessian_band64(&self, band: &mut [f64], kd: usize) -> Result<(), crate::simple_lm::BandError> {
+    fn accumulate_hessian_band64(&self, band: &mut [f64], kd: usize) -> Result<(), crate::simple_lm::BandOverflow> {
         if let Some(inner) = self { inner.accumulate_hessian_band64(band, kd)?; }
         Ok(())
     }
@@ -1583,7 +1583,7 @@ impl<A, const N: usize, const M: usize, T: crate::utils::Float> SelfBlock<A, N, 
     /// Accumulate into upper-band format (column-major, (kd+1)*n).
     /// Returns Err if any element exceeds bandwidth kd.
     pub fn accumulate_hessian_band(&self, band: &mut [T], kd: usize)
-        -> Result<(), crate::simple_lm::BandError>
+        -> Result<(), crate::simple_lm::BandOverflow>
     {
         let ldab = kd + 1;
         for i in 0..N {
@@ -1596,7 +1596,7 @@ impl<A, const N: usize, const M: usize, T: crate::utils::Float> SelfBlock<A, N, 
                 let gj = gj as usize;
                 let (lo, hi) = if gi <= gj { (gi, gj) } else { (gj, gi) };
                 if hi - lo > kd {
-                    return Err(crate::simple_lm::BandError { row: lo, col: hi, kd });
+                    return Err(crate::simple_lm::BandOverflow { row: lo, col: hi, kd });
                 }
                 let val = self.hessian[tri_idx(N, i, j)];
                 band[(kd + lo - hi) + hi * ldab] += val;
@@ -1750,7 +1750,7 @@ impl<A, const N: usize, const M: usize, T: crate::utils::Float> BoxedSelfBlock<A
 
     /// Scatter this block into LAPACK upper-band storage with half-bandwidth `kd`.
     pub fn accumulate_hessian_band(&self, band: &mut [T], kd: usize)
-        -> Result<(), crate::simple_lm::BandError>
+        -> Result<(), crate::simple_lm::BandOverflow>
     {
         match &self.inner {
             Some(b) => b.accumulate_hessian_band(band, kd),
@@ -1911,7 +1911,7 @@ impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Fl
 
     /// Accumulate into upper-band format (column-major, (kd+1)*n).
     pub fn accumulate_hessian_band(&self, band: &mut [T], kd: usize)
-        -> Result<(), crate::simple_lm::BandError>
+        -> Result<(), crate::simple_lm::BandOverflow>
     {
         let ldab = kd + 1;
         for i in 0..NA {
@@ -1925,7 +1925,7 @@ impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Fl
                 let gj = gj as usize;
                 let (lo, hi) = if gi <= gj { (gi, gj) } else { (gj, gi) };
                 if hi - lo > kd {
-                    return Err(crate::simple_lm::BandError { row: lo, col: hi, kd });
+                    return Err(crate::simple_lm::BandOverflow { row: lo, col: hi, kd });
                 }
                 let val = self.cross_hessian[row + j];
                 // Aliased slots (same entity in both refs): the triangle
@@ -2120,7 +2120,7 @@ impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Fl
 
     /// Scatter this block into LAPACK upper-band storage with half-bandwidth `kd`.
     pub fn accumulate_hessian_band(&self, band: &mut [T], kd: usize)
-        -> Result<(), crate::simple_lm::BandError>
+        -> Result<(), crate::simple_lm::BandOverflow>
     {
         match &self.inner {
             Some(b) => b.accumulate_hessian_band(band, kd),
@@ -2354,13 +2354,13 @@ impl<T: crate::utils::Float> TripletBlock<T> {
     /// band[(kd + r - c) + c * ldab], matching SelfBlock/CrossBlock and
     /// the band solvers).
     pub fn accumulate_hessian_band(&self, band: &mut [T], kd: usize)
-        -> Result<(), crate::simple_lm::BandError>
+        -> Result<(), crate::simple_lm::BandOverflow>
     {
         let ldab = kd + 1;
         for &(row, col, v) in &self.hessian {
             let (r, c) = (row as usize, col as usize);
             if c < r || c - r > kd {
-                return Err(crate::simple_lm::BandError { row: r, col: c, kd });
+                return Err(crate::simple_lm::BandOverflow { row: r, col: c, kd });
             }
             band[(kd + r - c) + c * ldab] += v;
         }
@@ -2451,7 +2451,7 @@ macro_rules! block_model_methods {
         }
         #[inline]
         fn accumulate_hessian_band32(&self, band: &mut [f32], kd: usize)
-            -> Result<(), crate::simple_lm::BandError> {
+            -> Result<(), crate::simple_lm::BandOverflow> {
             self.accumulate_hessian_band(band, kd)
         }
         #[inline]
@@ -2490,7 +2490,7 @@ macro_rules! block_model_methods {
         }
         #[inline]
         fn accumulate_hessian_band64(&self, band: &mut [f64], kd: usize)
-            -> Result<(), crate::simple_lm::BandError> {
+            -> Result<(), crate::simple_lm::BandOverflow> {
             self.accumulate_hessian_band(band, kd)
         }
         #[inline]

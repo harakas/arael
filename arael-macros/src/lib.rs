@@ -2061,11 +2061,11 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
             fn accumulate_hessian64(&self, hessian: &mut [f64]) {
                 #(#accumulate_hessian64_stmts)*
             }
-            fn accumulate_hessian_band32(&self, band: &mut [f32], kd: usize) -> Result<(), arael::simple_lm::BandError> {
+            fn accumulate_hessian_band32(&self, band: &mut [f32], kd: usize) -> Result<(), arael::simple_lm::BandOverflow> {
                 #(#accumulate_hessian_band32_stmts)*
                 Ok(())
             }
-            fn accumulate_hessian_band64(&self, band: &mut [f64], kd: usize) -> Result<(), arael::simple_lm::BandError> {
+            fn accumulate_hessian_band64(&self, band: &mut [f64], kd: usize) -> Result<(), arael::simple_lm::BandOverflow> {
                 #(#accumulate_hessian_band64_stmts)*
                 Ok(())
             }
@@ -3478,7 +3478,7 @@ fn generate_fit_impl(
                 _grad: &mut [#prec_type],
                 _band: &mut [#prec_type],
                 _kd: usize,
-            ) -> Result<#prec_type, arael::simple_lm::BandError> {
+            ) -> Result<#prec_type, arael::simple_lm::BandOverflow> {
                 unimplemented!("fit models do not support band assembly")
             }
 
