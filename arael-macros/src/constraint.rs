@@ -1859,6 +1859,14 @@ fn register_bindings_body(
                     register_bindings_guarded(ctx, &nested_key, &nested_sym, inner_type, stack)?;
                 }
                 SymFieldType::OptionalStruct(inner_type) => {
+                    // CONTRACT (documented in MODEL.md, "Guards and
+                    // optional data"): a body reading through an Option
+                    // sub-struct must be guarded so it never evaluates
+                    // when the field is None -- the read is this unwrap.
+                    // A guard suppresses the body on every path (cost,
+                    // grad/Hessian, jacobian), so the unwrap is safe
+                    // under it; an unguarded read panics on the first
+                    // None at solve time.
                     let nested_key = format!("{}.{}", key_prefix, field_name);
                     let nested_sym = format!("{}.{}.as_ref().unwrap()", sym_prefix, field_name);
                     register_bindings_guarded(ctx, &nested_key, &nested_sym, inner_type, stack)?;

@@ -520,7 +520,7 @@ struct Pose { /* ... hb_pose: SelfBlock<Pose, f32> ... */ }
 |---|---|
 | `parent = <name>` | bind the parent iteration variable to `<name>` inside the body (default is `a_type.to_lowercase()`) |
 | `name = "label"` | label the residual group. Shows up in `calc_cost_table` and `JacobianRow::label`. Useful for cost-breakdown diagnostics |
-| `guard = <bool expr>` | evaluated once per iteration; when false the whole constraint is skipped for that iteration. Use for optional observations (has GPS this frame?) |
+| `guard = <bool expr>` | when false the whole constraint contributes nothing, on every path. Use for optional observations (has GPS this frame?). Must not change during a solve -- see [Guards and optional data](#guards-and-optional-data----the-contract) |
 | `<var>: <Type>` | declare an extra binding so the body can refer to `<var>` as typed `<Type>`. Resolved via `Ref` / collection lookup |
 
 ```rust,ignore
@@ -537,6 +537,54 @@ struct Pose { /* ... hb_pose: SelfBlock<Pose, f32> ... */ }
 ))]
 struct PointFrine { /* ... */ }
 ```
+
+### Guards and optional data -- the contract
+
+Two rules govern `guard =` and `Option` reads. Both exist because the
+solver discovers the sparsity pattern once, at the first assembly, and
+every later iteration writes into that pattern.
+
+**1. Guard values must not change during a solve.** A guard switches a
+constraint's cells in or out of the pattern, so a guard that flips
+mid-solve either writes outside the discovered pattern or leaves a
+zero-curvature parameter (the solve fails DegenerateDiagonal). Set
+guards before solving; flipping them BETWEEN solves is fine (call
+`invalidate()` on a warm `LmSession`). For a residual that must switch
+itself off numerically DURING a solve -- an observation that becomes
+undefined at the current iterate -- use `branch()` in the body instead:
+it changes the value, not the pattern.
+
+**2. A body that reads through an `Option` sub-struct must be guarded
+on it.** A residual is a number, so a `None` has no value to
+propagate: the generated read is an unwrap, and the guard is what
+keeps it from evaluating.
+
+```rust,ignore
+#[arael::model]
+struct Extra { off: f64 }
+
+#[arael::model]
+#[arael(constraint(hb, guard = self.has_extra, {
+    [(p.x - p.extra.off) * 2.0]     // read through the Option: guarded
+}))]
+struct P {
+    x: Param<f64>,
+    extra: Option<Extra>,
+    has_extra: bool,                 // = extra.is_some(), set when building
+    hb: SelfBlock<P>,
+}
+```
+
+A guarded constraint is fully protected: when the guard is false the
+body is not evaluated on ANY path (cost, gradient/Hessian, jacobian),
+so the `None` is never touched. An unguarded read panics at solve time
+on the first `None` (`Option::unwrap`). Note the guard field is plain
+data the model carries -- rule 1 applies to it like any guard.
+
+This contract is about reading Option DATA inside a body. Holding a
+whole ENTITY in an Option (`gps: Option<GpsObs>` -- see
+[Collection types](#collection-types)) needs no guard: the macro wraps
+that entity's sweeps itself, and a `None` contributes nothing.
 
 ### Constraint placement
 
@@ -628,10 +676,11 @@ code. The dialect:
   path suffix, so any spelling ending in `matrix3sym::rotation_from_
   axis_angle` works. Full surface: [SYM.md](SYM.md), "Geometric
   Primitives".
-- **Option fields**: reading through an `Option` struct field emits an
-  unguarded unwrap -- ALWAYS pair it with a
-  `guard = self.<field>.is_some()` modifier, or the first `None`
-  panics at solve time.
+- **Option fields**: reading through an `Option` struct field is an
+  unwrap -- the constraint must be guarded so the body never evaluates
+  when the field is `None`, or the first `None` panics at solve time.
+  Contract and worked example:
+  [Guards and optional data](#guards-and-optional-data----the-contract).
 - **Ordering rule**: every entity struct must be defined BEFORE the
   root struct, in top-down file order -- the root's expansion consumes
   the stashed constraints. Violations are a macro error ("define it
