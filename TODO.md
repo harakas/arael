@@ -298,15 +298,14 @@
   always-visible planes, wiggle trajectory, sensor SE3 offset optimized from
   a large initial error, offset marginal covariance as the output). Deferred
   because the observation becomes a THREE-variable constraint (pose, plane,
-  offset) and component params are still guarded off in multi-block/triplet
-  span builders. The triplet/multi-cross builder still hand-rolls its
-  parameter walk over direct param_fields, so a param inside a component
-  is unreachable and the span silently measures 0; the remote-block form
-  of this guard was lifted 2026-07-20 by switching to `param_slots` /
-  `param_slot_size` / `slot_access` -- the same edit applies here. Then
-  build the example (also a natural showcase for assemble_covariance).
-  The plane benchmark keeps a degenerate all-visible env for the
-  Schur-gate stress case meanwhile.
+  offset) and component params were guarded off in multi-block/triplet
+  span builders. That guard is LIFTED (2026-07-24: every span builder
+  walks `param_slots`, so component params work in triplet, multi-cross,
+  `root.<selfblock>` and `[hb, root.<triplet>]` forms --
+  tests/macro_matrix_components.rs), so the example is now buildable
+  (also a natural showcase for assemble_covariance). The plane benchmark
+  keeps a degenerate all-visible env for the Schur-gate stress case
+  meanwhile.
 
 - **arael: Schur Auto gate misfires when a small block family is observed
   by everyone** -- DONE (2026-07-19). The shortcut now prices the
