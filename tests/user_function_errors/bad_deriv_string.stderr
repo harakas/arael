@@ -1,0 +1,7 @@
+error: $DIR/tests/user_function_errors/bad_deriv_string.rs:15: arael::function `f`: derivs[0] `3.0 * * x` does not parse: parse error at position 6: unexpected token: Star
+  --> tests/user_function_errors/bad_deriv_string.rs:23:1
+   |
+23 | #[arael::model]
+   | ^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)

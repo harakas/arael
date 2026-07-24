@@ -707,7 +707,7 @@ fn build_dotted_path(expr: &Expr) -> Option<String> {
 /// placeholder derivs / bodies so all names resolve at parse time;
 /// the second pass re-parses under the full bag and replaces the
 /// stubs.
-fn build_user_function_bag() -> arael_sym::FunctionBag {
+fn build_user_function_bag() -> syn::Result<arael_sym::FunctionBag> {
     fn dummy_eval(_args: &[f64]) -> f64 { 0.0 }
     let all = crate::registry_all_functions();
     let mut bag = arael_sym::FunctionBag::new();
@@ -780,10 +780,13 @@ fn build_user_function_bag() -> arael_sym::FunctionBag {
                         }
                     }
                 }
-                let body_e = match arael_sym::parse_with_functions(body, &sub) {
-                    Ok(e) => e,
-                    Err(_) => continue,
-                };
+                // A body that does not parse must be reported HERE, with
+                // the function named -- skipping it used to surface as a
+                // misleading unknown-function error at some caller.
+                let body_e = arael_sym::parse_with_functions(body, &sub)
+                    .map_err(|err| syn::Error::new(proc_macro2::Span::call_site(),
+                        format!("arael::function `{}`: body does not parse: {}",
+                            sym_name, err)))?;
                 bag.add_symbolic(sym_name.clone(), param_names.clone(), body_e);
             }
             crate::UserFunction::Extern {
@@ -813,15 +816,17 @@ fn build_user_function_bag() -> arael_sym::FunctionBag {
                         }
                     }
                 }
+                // Same rule for deriv expressions: a malformed one is an
+                // error naming the function and the string, not a silent
+                // drop from the bag.
                 let mut derivs: Vec<arael_sym::E> = Vec::with_capacity(*arity);
-                let mut ok = true;
-                for s in deriv_strings {
-                    match arael_sym::parse_with_functions(s, &sub) {
-                        Ok(e) => derivs.push(e),
-                        Err(_) => { ok = false; break; }
-                    }
+                for (i, s) in deriv_strings.iter().enumerate() {
+                    let e = arael_sym::parse_with_functions(s, &sub)
+                        .map_err(|err| syn::Error::new(proc_macro2::Span::call_site(),
+                            format!("arael::function `{}`: derivs[{}] `{}` does not parse: {}",
+                                sym_name, i, s, err)))?;
+                    derivs.push(e);
                 }
-                if !ok { continue; }
                 bag.add_with_kind(
                     sym_name.clone(),
                     param_names.clone(),
@@ -834,7 +839,7 @@ fn build_user_function_bag() -> arael_sym::FunctionBag {
             }
         }
     }
-    bag
+    Ok(bag)
 }
 
 fn eval_function(name: &str, args: Vec<SymVal>, span: &Expr) -> Result<SymVal, syn::Error> {
@@ -895,7 +900,7 @@ fn eval_function(name: &str, args: Vec<SymVal>, span: &Expr) -> Result<SymVal, s
         // substituted with the actual arg expressions -- that keeps the
         // generated code pointing at the caller's binding (e.g. `m.x.work()`
         // rather than a naked `x`).
-        let bag = build_user_function_bag();
+        let bag = build_user_function_bag()?;
         let subs: Vec<(arael_sym::E, arael_sym::E)> = uf.param_names().iter().zip(arg_es.iter())
             .map(|(pname, e)| (arael_sym::symbol(pname), e.clone()))
             .collect();
@@ -923,7 +928,7 @@ fn eval_function(name: &str, args: Vec<SymVal>, span: &Expr) -> Result<SymVal, s
                     .zip(placeholder_param_syms.iter())
                     .map(|(u, p)| (u.clone(), p.clone())).collect();
 
-                let mut combined = build_user_function_bag();
+                let mut combined = build_user_function_bag()?;
                 for (pname, e) in uf.param_names().iter().zip(user_param_syms.iter()) {
                     combined.add_symbolic(pname.clone(), std::vec::Vec::<String>::new(), e.clone());
                 }

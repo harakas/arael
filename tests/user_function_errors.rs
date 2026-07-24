@@ -21,4 +21,5 @@ fn user_function_compile_errors() {
     t.compile_fail("tests/user_function_errors/same_name_form_b.rs");
     t.compile_fail("tests/user_function_errors/unknown_function_in_body.rs");
     t.compile_fail("tests/user_function_errors/arity_mismatch_at_call.rs");
+    t.compile_fail("tests/user_function_errors/bad_deriv_string.rs");
 }
