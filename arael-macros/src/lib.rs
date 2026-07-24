@@ -105,6 +105,20 @@ struct SymLayout {
     /// moment `held` turns out to be a registered model type (either
     /// definition order) expansion fails loudly instead.
     suspect_wrappers: Vec<(String, String, String)>,
+    /// Solve precision of this struct's block fields: `None` = no blocks,
+    /// otherwise (block field name, "f32" | "f64" | "generic"). "generic"
+    /// = the block scalar is the struct's own type parameter, resolved per
+    /// instantiation. Block precision must match the root's solve
+    /// precision; storage/Param precision is free (the walks cast at the
+    /// boundary). The root check reads this to reject mismatches with an
+    /// error naming the field instead of an E0308 in generated code.
+    block_precision: Option<(String, String)>,
+    /// Fields whose element type is spelled with an explicit float first
+    /// argument (`nodes: Vec<G<f32>>`, `g: G<f32>`): (field, element type,
+    /// "f32" | "f64"). For a generic model element this is its block
+    /// precision at this holding -- the layout alone loses the spelling,
+    /// so the root check resolves "generic" through these records.
+    inst_precisions: Vec<(String, String, String)>,
 }
 
 /// Total optimizable scalars of a registered type, following
@@ -409,6 +423,8 @@ fn builtin_component_layout(name: &str) -> Option<SymLayout> {
             constraint_index_field: None,
             self_block_field: None,
             suspect_wrappers: Vec::new(),
+            block_precision: None,
+            inst_precisions: Vec::new(),
         }),
         "UnitVecParam" | "UnitVecParamF" => Some(SymLayout {
             fields: vec![
@@ -438,6 +454,8 @@ fn builtin_component_layout(name: &str) -> Option<SymLayout> {
             constraint_index_field: None,
             self_block_field: None,
             suspect_wrappers: Vec::new(),
+            block_precision: None,
+            inst_precisions: Vec::new(),
         }),
         _ => None,
     }
@@ -1168,6 +1186,8 @@ fn register_model_layout(input: &syn::DeriveInput) -> syn::Result<u32> {
     // (field, wrapper, held) -- unrecognized generic wrappers naming a
     // not-yet-registered type; fires if the type registers later.
     let mut suspect_wrappers_reg: Vec<(String, String, String)> = Vec::new();
+    let mut block_precision_reg: Option<(String, String)> = None;
+    let mut inst_precisions_reg: Vec<(String, String, String)> = Vec::new();
     let mut constraint_index_field_reg: Option<String> = None;
     // Detect SelfBlock<Self> field — this struct's canonical grad+diag home.
     let mut self_block_field_reg: Option<String> = None;
@@ -1232,6 +1252,23 @@ fn register_model_layout(input: &syn::DeriveInput) -> syn::Result<u32> {
                 }
                 suspect_wrappers_reg.push((field_name.clone(), wrapper, held));
             }
+        }
+        // All of a struct's blocks solve at one precision; record it and
+        // reject a mix outright.
+        if let Some(p) = block_field_precision(&field.ty, scalar_generic.as_deref()) {
+            match &block_precision_reg {
+                Some((first_field, first_p)) if *first_p != p => {
+                    return Err(syn::Error::new_spanned(field, format!(
+                        "`{}` mixes block precisions: `{}` is {}, `{}` is {} -- \
+                         all block fields of a struct solve at one precision",
+                        name, first_field, first_p, field_name, p)));
+                }
+                Some(_) => {}
+                None => block_precision_reg = Some((field_name.clone(), p)),
+            }
+        }
+        if let Some((elem, fl)) = inst_precision_of(&field.ty) {
+            inst_precisions_reg.push((field_name.clone(), elem, fl));
         }
         // Detect euler angle param types by type name (in addition to attribute)
         if let Some(ea_kind) = is_euler_angle_param_type(&field.ty) {
@@ -1380,6 +1417,8 @@ fn register_model_layout(input: &syn::DeriveInput) -> syn::Result<u32> {
         constraint_index_field: constraint_index_field_reg,
         self_block_field: self_block_field_reg,
         suspect_wrappers: suspect_wrappers_reg,
+        block_precision: block_precision_reg,
+        inst_precisions: inst_precisions_reg,
     }).map_err(|msg| syn::Error::new_spanned(name, msg))?;
 
     Ok(param_count)
@@ -1406,6 +1445,8 @@ fn register_enum_layout(name: &syn::Ident) -> syn::Result<()> {
         constraint_index_field: None,
         self_block_field: None,
         suspect_wrappers: Vec::new(),
+        block_precision: None,
+        inst_precisions: Vec::new(),
     }).map_err(|msg| syn::Error::new_spanned(name, msg))
 }
 
@@ -2561,6 +2602,63 @@ fn collect_wrapper_suspects(
             for t in type_args { collect_type_idents(t, scalar_generic, &mut held); }
             for h in held { out.push((name.clone(), h)); }
         }
+    }
+}
+
+/// Solve precision of a block field's user-spelled type (pre-rewrite):
+/// `SelfBlock<A[, S]>` / `CrossBlock<A, B[, S]>` / `TripletBlock[<S>]`,
+/// Boxed and Option-wrapped variants included. None if not a block field
+/// or the scalar spelling is unrecognized. A missing scalar is the f64
+/// default; the struct's own type parameter reads as "generic".
+fn block_field_precision(ty: &syn::Type, scalar_generic: Option<&str>) -> Option<String> {
+    let ty = if let Some((inner, _)) = extract_wrapper_inner(ty, "Option") { inner } else { ty };
+    let syn::Type::Path(tp) = ty else { return None };
+    let seg = tp.path.segments.last()?;
+    let scalar_pos = match seg.ident.to_string().as_str() {
+        "TripletBlock" => 0,
+        "SelfBlock" | "BoxedSelfBlock" => 1,
+        "CrossBlock" | "BoxedCrossBlock" => 2,
+        _ => return None,
+    };
+    let type_args: Vec<&syn::Type> = match &seg.arguments {
+        syn::PathArguments::AngleBracketed(args) => args.args.iter()
+            .filter_map(|a| if let syn::GenericArgument::Type(t) = a { Some(t) } else { None })
+            .collect(),
+        _ => Vec::new(),
+    };
+    let Some(syn::Type::Path(stp)) = type_args.get(scalar_pos) else {
+        return Some("f64".to_string());
+    };
+    let scalar = stp.path.segments.last()?.ident.to_string();
+    match scalar.as_str() {
+        "f32" | "f64" => Some(scalar),
+        s if Some(s) == scalar_generic => Some("generic".to_string()),
+        _ => None,
+    }
+}
+
+/// Element instantiation with an explicit float first argument:
+/// `Vec<G<f32>>` / `Option<G<f32>>` / a bare `g: G<f32>` field. Returns
+/// (element type name, "f32" | "f64"). Blocks, params, and math types are
+/// not elements.
+fn inst_precision_of(ty: &syn::Type) -> Option<(String, String)> {
+    let elem = ["Vec", "Deque", "Arena", "Option"].iter()
+        .find_map(|w| extract_wrapper_inner(ty, w).map(|(t, _)| t))
+        .unwrap_or(ty);
+    let syn::Type::Path(tp) = elem else { return None };
+    let seg = tp.path.segments.last()?;
+    let name = seg.ident.to_string();
+    if is_never_model_name(&name) || is_param_type(elem) || is_hessian_block_type(elem) {
+        return None;
+    }
+    let syn::PathArguments::AngleBracketed(args) = &seg.arguments else { return None };
+    let first = args.args.iter().find_map(|a|
+        if let syn::GenericArgument::Type(t) = a { Some(t) } else { None })?;
+    let syn::Type::Path(ftp) = first else { return None };
+    let fname = ftp.path.segments.last()?.ident.to_string();
+    match fname.as_str() {
+        "f32" | "f64" => Some((name, fname)),
+        _ => None,
     }
 }
 

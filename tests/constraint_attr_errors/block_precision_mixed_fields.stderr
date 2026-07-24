@@ -1,0 +1,13 @@
+error: `W` mixes block precisions: `hb` is f32, `hbt` is f64 -- all block fields of a struct solve at one precision
+  --> tests/constraint_attr_errors/block_precision_mixed_fields.rs:11:5
+   |
+11 |     hbt: TripletBlock<f64>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `Param`, `SelfBlock`, and `TripletBlock`
+ --> tests/constraint_attr_errors/block_precision_mixed_fields.rs:4:20
+  |
+4 | use arael::model::{Param, SelfBlock, TripletBlock};
+  |                    ^^^^^  ^^^^^^^^^  ^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

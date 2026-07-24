@@ -2804,6 +2804,39 @@ pub fn generate_root_methods(
         }
     }
 
+    // Block precision must match the root's solve precision -- storage /
+    // Param precision is free (the walks cast at the boundary). Checked
+    // across every reachable type so the mismatch names the struct and
+    // block field instead of surfacing as an E0308 inside generated code.
+    // A "generic" block precision resolves per instantiation: the holder's
+    // recorded element spelling (`Vec<G<f32>>`) carries it.
+    {
+        let mut sorted: Vec<&String> = reachable.iter().collect();
+        sorted.sort();
+        for tn in sorted {
+            let Some(layout) = registry_lookup(tn) else { continue };
+            if let Some((bfield, bp)) = &layout.block_precision
+                && bp != "generic" && bp != precision {
+                    return Err(syn::Error::new(root_name.span(), format!(
+                        "`{}` declares block `{}` at {}, but root `{}` solves at {} -- \
+                         block precision must match the root; storage/Param precision \
+                         may differ (casts happen at the boundary)",
+                        tn, bfield, bp, root_name, precision)));
+                }
+            for (hfield, elem, fl) in &layout.inst_precisions {
+                if fl != precision && reachable.contains(elem)
+                    && registry_lookup(elem).and_then(|l| l.block_precision)
+                        .is_some_and(|(_, p)| p == "generic") {
+                    return Err(syn::Error::new(root_name.span(), format!(
+                        "`{}.{}` instantiates generic model `{}` at {}, but root `{}` \
+                         solves at {} -- the instantiation sets the block precision, \
+                         which must match the root",
+                        tn, hfield, elem, fl, root_name, precision)));
+                }
+            }
+        }
+    }
+
     // Count constraint attributes per struct (for default label naming).
     let mut attr_count_per_struct: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for sc in &stashed {

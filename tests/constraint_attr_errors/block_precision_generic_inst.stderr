@@ -1,0 +1,13 @@
+error: `W.nodes` instantiates generic model `G` at f32, but root `W` solves at f64 -- the instantiation sets the block precision, which must match the root
+  --> tests/constraint_attr_errors/block_precision_generic_inst.rs:20:8
+   |
+20 | struct W {
+   |        ^
+
+warning: unused import: `arael::refs`
+ --> tests/constraint_attr_errors/block_precision_generic_inst.rs:6:5
+  |
+6 | use arael::refs;
+  |     ^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

@@ -32,4 +32,9 @@ fn constraint_attr_compile_errors() {
     t.compile_fail("tests/constraint_attr_errors/parent_selfblock_root_parent.rs");
     t.compile_fail("tests/constraint_attr_errors/alias_container.rs");
     t.compile_fail("tests/constraint_attr_errors/alias_container_late.rs");
+    t.compile_fail("tests/constraint_attr_errors/block_precision_f32_under_f64.rs");
+    t.compile_fail("tests/constraint_attr_errors/block_precision_f64_under_f32.rs");
+    t.compile_fail("tests/constraint_attr_errors/block_precision_nested.rs");
+    t.compile_fail("tests/constraint_attr_errors/block_precision_generic_inst.rs");
+    t.compile_fail("tests/constraint_attr_errors/block_precision_mixed_fields.rs");
 }

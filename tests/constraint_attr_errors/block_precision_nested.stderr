@@ -1,0 +1,5 @@
+error: `Nf` declares block `hb` at f32, but root `W` solves at f64 -- block precision must match the root; storage/Param precision may differ (casts happen at the boundary)
+  --> tests/constraint_attr_errors/block_precision_nested.rs:24:8
+   |
+24 | struct W {
+   |        ^
