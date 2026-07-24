@@ -105,6 +105,24 @@ impl<T: Float> se3<T> {
     }
 }
 
+impl<T: Float> se3<T> {
+    /// Converts all components to another float type.
+    pub fn cast<K: Float>(self) -> se3<K> {
+        se3 { d: self.d.cast(), w: self.w.cast() }
+    }
+
+    /// Returns true if all components are finite (not NaN or infinity).
+    pub fn is_finite(self) -> bool {
+        self.d.is_finite() && self.w.is_finite()
+    }
+}
+
+impl<T: Float> crate::vect::Similar for se3<T> {
+    fn similar(self, other: Self) -> bool {
+        self.d.similar(other.d) && self.w.similar(other.w)
+    }
+}
+
 impl<T: Float> Default for se3<T> {
     fn default() -> Self {
         se3::zero()

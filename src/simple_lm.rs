@@ -290,6 +290,31 @@ impl<T: Float> Default for LmConfig<T> {
     }
 }
 
+impl<T: Float + std::fmt::Debug> std::fmt::Debug for LmConfig<T> {
+    /// Everything but the lambda driver (a `Box<dyn LambdaDriver>`, no
+    /// `Debug` of its own).
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LmConfig")
+            .field("abs_precision", &self.abs_precision)
+            .field("rel_precision", &self.rel_precision)
+            .field("max_iters", &self.max_iters)
+            .field("min_iters", &self.min_iters)
+            .field("patience", &self.patience)
+            .field("initial_lambda", &self.initial_lambda)
+            .field("cost_threshold", &self.cost_threshold)
+            .field("gradient_tolerance", &self.gradient_tolerance)
+            .field("parameter_tolerance", &self.parameter_tolerance)
+            .field("predicted_reduction_tolerance", &self.predicted_reduction_tolerance)
+            .field("min_diagonal", &self.min_diagonal)
+            .field("time_limit", &self.time_limit)
+            .field("lambda_floor", &self.lambda_floor)
+            .field("num_threads", &self.num_threads)
+            .field("verbose", &self.verbose)
+            .field("gather_timing", &self.gather_timing)
+            .finish_non_exhaustive()
+    }
+}
+
 impl<T: Float> LmConfig<T> {
     /// General-purpose defaults: moderate initial damping, no early-termination
     /// tests, no floors. The starting point when nothing is known about the
@@ -393,46 +418,57 @@ impl<T: Float> LmConfig<T> {
     // Per-field builders, for tuning a preset: `LmConfig::well_conditioned()
     // .with_max_iters(50).with_verbose(true)`.
 
+    /// Set the iteration cap ([`max_iters`](Self::max_iters)).
     pub fn with_max_iters(mut self, n: usize) -> Self {
         self.max_iters = n;
         self
     }
+    /// Set the minimum iterations before termination ([`min_iters`](Self::min_iters)).
     pub fn with_min_iters(mut self, n: usize) -> Self {
         self.min_iters = n;
         self
     }
+    /// Set the small-step patience ([`patience`](Self::patience)).
     pub fn with_patience(mut self, n: usize) -> Self {
         self.patience = n;
         self
     }
+    /// Set the initial damping ([`initial_lambda`](Self::initial_lambda)).
     pub fn with_initial_lambda(mut self, v: T) -> Self {
         self.initial_lambda = v;
         self
     }
+    /// Set the damping floor ([`lambda_floor`](Self::lambda_floor)).
     pub fn with_lambda_floor(mut self, v: T) -> Self {
         self.lambda_floor = v;
         self
     }
+    /// Set the early-exit cost ([`cost_threshold`](Self::cost_threshold)).
     pub fn with_cost_threshold(mut self, v: T) -> Self {
         self.cost_threshold = v;
         self
     }
+    /// Set the absolute improvement threshold ([`abs_precision`](Self::abs_precision)).
     pub fn with_abs_precision(mut self, v: T) -> Self {
         self.abs_precision = v;
         self
     }
+    /// Set the relative improvement threshold ([`rel_precision`](Self::rel_precision)).
     pub fn with_rel_precision(mut self, v: T) -> Self {
         self.rel_precision = v;
         self
     }
+    /// Set the factorization thread count ([`num_threads`](Self::num_threads)).
     pub fn with_num_threads(mut self, n: usize) -> Self {
         self.num_threads = n;
         self
     }
+    /// Toggle per-iteration logging ([`verbose`](Self::verbose)).
     pub fn with_verbose(mut self, on: bool) -> Self {
         self.verbose = on;
         self
     }
+    /// Toggle phase timing collection ([`gather_timing`](Self::gather_timing)).
     pub fn with_gather_timing(mut self, on: bool) -> Self {
         self.gather_timing = on;
         self
@@ -1275,8 +1311,8 @@ pub struct LmResult<T> {
     /// What the linear solver did -- e.g. whether [`SparseFaer`]
     /// marginalized anything and on what evidence. `None` for backends that
     /// report nothing. Survives the convenience entry points
-    /// (`solve_sparse_schur` and friends), which own their solver and would
-    /// otherwise drop the information.
+    /// ([`solve_sparse_faer`] and friends), which own their solver and
+    /// would otherwise drop the information.
     pub solver: Option<SolverReport>,
     /// Per-phase wall-clock timing: `Some` iff [`LmConfig::gather_timing`]
     /// was set, `None` otherwise (see [`LmTiming`]).
@@ -1745,6 +1781,7 @@ pub trait LmSolver<T: Float> {
 /// O(n^3) blocked factorization, and replacing nalgebra with a naive
 /// in-place scalar Cholesky to avoid it measured 5x SLOWER at n = 3000
 /// (P6 investigation) -- the allocation was never the cost.
+#[derive(Default)]
 pub struct Dense;
 
 impl LmSolver<f64> for Dense {
@@ -2937,6 +2974,7 @@ impl Default for Sparse {
 }
 
 impl Sparse {
+    /// Create the naive COO sparse solver.
     pub fn new() -> Self {
         Sparse { coo: CooMatrix::new(0) }
     }
@@ -3013,6 +3051,7 @@ impl Default for SparseDirect {
 }
 
 impl SparseDirect {
+    /// Create the direct-CSC sparse solver.
     pub fn new() -> Self {
         SparseDirect { pattern_built: false }
     }
@@ -3493,18 +3532,24 @@ impl SparseFaerOptions {
         SparseFaerOptions { policy: SchurPolicy::Force, ..Self::auto() }
     }
 
+    /// Set the marginalization policy ([`SchurPolicy`]).
     pub fn with_policy(mut self, policy: SchurPolicy) -> Self {
         self.policy = policy;
         self
     }
+    /// Set the elimination ordering ([`FaerOrdering`]).
     pub fn with_ordering(mut self, ordering: FaerOrdering) -> Self {
         self.ordering = ordering;
         self
     }
+    /// Toggle the supernodal factorization kernel (see
+    /// [`SparseFaer::with_supernodal`] for the reasoning).
     pub fn with_supernodal(mut self, on: bool) -> Self {
         self.supernodal = on;
         self
     }
+    /// Toggle the narrow-band route for banded systems (see
+    /// [`SparseFaer::with_narrow_band`]).
     pub fn with_narrow_band(mut self, on: bool) -> Self {
         self.narrow_band = on;
         self

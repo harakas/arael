@@ -209,6 +209,11 @@ impl<T: Float> matrix3<T>
         )
     }
 
+    /// Returns true if all elements are finite (not NaN or infinity).
+    pub fn is_finite(self) -> bool {
+        self.rows[0].is_finite() && self.rows[1].is_finite() && self.rows[2].is_finite()
+    }
+
     /// Returns the row at the given index as a vector.
     pub fn row(self, index: usize) -> vect3<T> {
         self[index]
@@ -692,6 +697,11 @@ impl<T: Float> matrix2<T>
     }
 
     /// Converts this matrix to a `matrix2<K>` of a different float type.
+    /// Returns true if all elements are finite (not NaN or infinity).
+    pub fn is_finite(self) -> bool {
+        self.rows[0].is_finite() && self.rows[1].is_finite()
+    }
+
     pub fn cast<K: Float>(self) -> matrix2<K> {
         matrix2::<K>::from_rows(
             self[0].cast::<K>(),

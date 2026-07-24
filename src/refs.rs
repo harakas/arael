@@ -265,6 +265,16 @@ impl<T> Vec<T> {
         self.inner.last()
     }
 
+    /// Returns the `Ref` of the first element, or `None` if empty.
+    pub fn first_ref(&self) -> Option<Ref<T>> {
+        (!self.inner.is_empty()).then(|| self.ref_at(0usize))
+    }
+
+    /// Returns the `Ref` of the last element, or `None` if empty.
+    pub fn last_ref(&self) -> Option<Ref<T>> {
+        (!self.inner.is_empty()).then(|| self.ref_at(self.inner.len() - 1))
+    }
+
     /// Returns a reference to the element at `r`, or `None` if `r` is out of
     /// bounds or belongs to a different vector.
     pub fn get(&self, r: Ref<T>) -> Option<&T> {
@@ -609,6 +619,25 @@ impl<T: Clone> Deque<T> {
     /// Creates a `Deque` by cloning elements from a slice.
     pub fn from_slice(s: &[T]) -> Self {
         Deque { first_index: 0, inner: std::collections::VecDeque::from(s.to_vec()), seed: next_generation_base() }
+    }
+}
+
+impl<T: Clone> Arena<T> {
+    /// Creates an arena by cloning elements from a slice.
+    pub fn from_slice(s: &[T]) -> Self {
+        Arena::from_vec(s.to_vec())
+    }
+}
+
+impl<T> From<std::vec::Vec<T>> for Arena<T> {
+    fn from(v: std::vec::Vec<T>) -> Self {
+        Arena::from_vec(v)
+    }
+}
+
+impl<T> From<std::vec::Vec<T>> for Deque<T> {
+    fn from(v: std::vec::Vec<T>) -> Self {
+        Deque { first_index: 0, inner: std::collections::VecDeque::from(v), seed: next_generation_base() }
     }
 }
 

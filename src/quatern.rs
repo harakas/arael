@@ -340,9 +340,20 @@ impl<T: Float> quatern<T> {
         from * (from.conj() * to).pow(f)
     }
 
+    /// Returns true if all components are finite (not NaN or infinity).
+    pub fn is_finite(self) -> bool {
+        self.t.is_finite() && self.v.is_finite()
+    }
+
     /// Returns true if `self` and `other` are approximately equal within floating-point tolerance.
     pub fn similar(self, other: quatern<T>) -> bool {
         (self.t - other.t).abs() < T::from(10).unwrap() * (self.t.abs() + other.t.abs() + T::epsilon()) * T::epsilon() && self.v.similar(other.v)
+    }
+}
+
+impl<T: Float> crate::vect::Similar for quatern<T> {
+    fn similar(self, other: Self) -> bool {
+        quatern::similar(self, other)
     }
 }
 

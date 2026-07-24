@@ -922,6 +922,14 @@ impl<T: crate::utils::Float> QuaternionParam<T> {
     pub fn from_euler_angles(ea: vect3<T>) -> Self {
         Self::new(crate::quatern::quatern::<T>::from_euler_angles(ea))
     }
+    /// Create from an initial axis-angle rotation (axis must be unit).
+    pub fn from_axis_angle(axis: vect3<T>, angle: T) -> Self {
+        Self::new(crate::quatern::quatern::<T>::from_axis_angle(axis, angle))
+    }
+    /// Create from an initial rotation matrix.
+    pub fn from_rotation_matrix(m: matrix3<T>) -> Self {
+        Self::new(crate::quatern::quatern::<T>::from_rotation_matrix(m))
+    }
     /// Return the current working-copy euler angles (derived from ref_rotation * delta).
     pub fn work(&self) -> vect3<T> { self.work }
     /// Return this parameter's index into the flat parameter vector, or `u32::MAX` if fixed.
@@ -1731,10 +1739,12 @@ impl<A, const N: usize, const M: usize, T: crate::utils::Float> BoxedSelfBlock<A
         if let Some(b) = &mut self.inner { b.add_residual_with_loss(w, r, dr, grad); }
     }
 
+    /// Scatter this block into a dense n x n Hessian.
     pub fn accumulate_hessian(&self, hessian: &mut [T]) {
         if let Some(b) = &self.inner { b.accumulate_hessian(hessian); }
     }
 
+    /// Scatter this block into LAPACK upper-band storage with half-bandwidth `kd`.
     pub fn accumulate_hessian_band(&self, band: &mut [T], kd: usize)
         -> Result<(), crate::simple_lm::BandError>
     {
@@ -1744,10 +1754,12 @@ impl<A, const N: usize, const M: usize, T: crate::utils::Float> BoxedSelfBlock<A
         }
     }
 
+    /// Append this block's upper-triangle (row, col) cells to `out` -- the pattern pass.
     pub fn collect_hessian_cells(&self, out: &mut std::vec::Vec<(u32, u32)>) {
         if let Some(b) = &self.inner { b.collect_hessian_cells(out); }
     }
 
+    /// Scatter this block into CSC values through a precomputed position map.
     pub fn accumulate_hessian_positions(
         &self,
         resolve: &mut dyn FnMut(u32, u32) -> usize,
@@ -1756,14 +1768,17 @@ impl<A, const N: usize, const M: usize, T: crate::utils::Float> BoxedSelfBlock<A
         if let Some(b) = &self.inner { b.accumulate_hessian_positions(resolve, out); }
     }
 
+    /// Scatter this block into COO triplets.
     pub fn accumulate_hessian_sparse(&self, coo: &mut crate::simple_lm::CooMatrix<T>) {
         if let Some(b) = &self.inner { b.accumulate_hessian_sparse(coo); }
     }
 
+    /// Scatter this block into a prebuilt CSC structure by position lookup.
     pub fn accumulate_hessian_sparse_direct(&self, csc: &mut crate::simple_lm::CscMatrix<T>) {
         if let Some(b) = &self.inner { b.accumulate_hessian_sparse_direct(csc); }
     }
 
+    /// Scatter this block into CSC values through cached positions.
     pub fn accumulate_hessian_sparse_indexed(&self, vals: &mut [T], positions: &[usize], cursor: &mut usize) {
         if let Some(b) = &self.inner {
             b.accumulate_hessian_sparse_indexed(vals, positions, cursor);
@@ -2094,10 +2109,12 @@ impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Fl
         if let Some(b) = &mut self.inner { b.add_residual_cross_with_loss(w, r, dr_a, dr_b); }
     }
 
+    /// Scatter this block into a dense n x n Hessian.
     pub fn accumulate_hessian(&self, hessian: &mut [T]) {
         if let Some(b) = &self.inner { b.accumulate_hessian(hessian); }
     }
 
+    /// Scatter this block into LAPACK upper-band storage with half-bandwidth `kd`.
     pub fn accumulate_hessian_band(&self, band: &mut [T], kd: usize)
         -> Result<(), crate::simple_lm::BandError>
     {
@@ -2107,10 +2124,12 @@ impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Fl
         }
     }
 
+    /// Append this block's upper-triangle (row, col) cells to `out` -- the pattern pass.
     pub fn collect_hessian_cells(&self, out: &mut std::vec::Vec<(u32, u32)>) {
         if let Some(b) = &self.inner { b.collect_hessian_cells(out); }
     }
 
+    /// Scatter this block into CSC values through a precomputed position map.
     pub fn accumulate_hessian_positions(
         &self,
         resolve: &mut dyn FnMut(u32, u32) -> usize,
@@ -2119,14 +2138,17 @@ impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Fl
         if let Some(b) = &self.inner { b.accumulate_hessian_positions(resolve, out); }
     }
 
+    /// Scatter this block into COO triplets.
     pub fn accumulate_hessian_sparse(&self, coo: &mut crate::simple_lm::CooMatrix<T>) {
         if let Some(b) = &self.inner { b.accumulate_hessian_sparse(coo); }
     }
 
+    /// Scatter this block into a prebuilt CSC structure by position lookup.
     pub fn accumulate_hessian_sparse_direct(&self, csc: &mut crate::simple_lm::CscMatrix<T>) {
         if let Some(b) = &self.inner { b.accumulate_hessian_sparse_direct(csc); }
     }
 
+    /// Scatter this block into CSC values through cached positions.
     pub fn accumulate_hessian_sparse_indexed(&self, vals: &mut [T], positions: &[usize], cursor: &mut usize) {
         if let Some(b) = &self.inner {
             b.accumulate_hessian_sparse_indexed(vals, positions, cursor);
@@ -2174,6 +2196,7 @@ impl<T: crate::utils::Float> Default for TripletBlock<T> {
 }
 
 impl<T: crate::utils::Float> TripletBlock<T> {
+    /// Create an empty triplet block.
     pub fn new() -> Self {
         TripletBlock { hessian: std::vec::Vec::new() }
     }
@@ -2368,6 +2391,7 @@ impl<T: crate::utils::Float> TripletBlock<T> {
         }
     }
 
+    /// Scatter this block into COO triplets.
     pub fn accumulate_hessian_sparse(&self, coo: &mut crate::simple_lm::CooMatrix<T>) {
         for &(i, j, v) in &self.hessian {
             coo.push(i, j, v);

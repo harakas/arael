@@ -2116,5 +2116,6 @@ pub mod prelude {
     pub use crate::unitvec::{UnitVecParam, UnitVecParamF};
     pub use crate::matrix::{matrix2d, matrix2f, matrix3d, matrix3f};
     pub use crate::quatern::{quaternd, quaternf};
-    pub use crate::vect::{vect2d, vect2f, vect3d, vect3f};
+    pub use crate::se3::{se3, se3d, se3f};
+    pub use crate::vect::{vect2d, vect2f, vect3d, vect3f, Similar};
 }
