@@ -22,7 +22,7 @@ Bring the trait into scope and assemble at the solution:
 ```rust,ignore
 use arael::covariance::{Covariance, CovMode};
 
-model.solve_sparse(&cfg);                        // solution written back into the model
+model.solve_sparse(&cfg)?;                       // solution written back into the model
 let cov = model.assemble_covariance(CovMode::AllMarginals)?;
 ```
 

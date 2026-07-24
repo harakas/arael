@@ -132,7 +132,7 @@ fn build_run(truth: &[vect2f], gt_lms: &[vect2f], map_lm: &[Ref<Landmark>],
 
 fn run_merge<F>(solve: F)
 where
-    F: Fn(&mut Map, &LmConfig<f32>) -> arael::simple_lm::LmResult<f32>,
+    F: Fn(&mut Map, &LmConfig<f32>) -> arael::simple_lm::SolveResult<f32>,
 {
     // Two shared landmarks with good parallax off a pair of parallel tracks.
     let gt_lms = [vect2f::new(3.0, 6.0), vect2f::new(6.0, -4.0)];
@@ -157,7 +157,7 @@ where
     map.paths.push(path_b);
 
     let cfg = LmConfig::<f32>::default();
-    let result = solve(&mut map, &cfg);
+    let result = solve(&mut map, &cfg).unwrap();
     assert!(result.end_cost < 1e-4, "did not converge: cost {}", result.end_cost);
 
     // Both runs recovered to the common frame.

@@ -51,7 +51,7 @@ fn fit_matches_closed_form_ols() {
     let data = line_data(2.0, -1.0, &xs);
     let (a_ols, b_ols) = ols(&data);
     let mut m = model(data, 1e6);
-    let r = m.fit();
+    let r = m.fit().unwrap();
     assert!(r.end_cost < r.start_cost);
     assert!((m.a.value - a_ols).abs() < 1e-3, "a: fit {} vs ols {}", m.a.value, a_ols);
     assert!((m.b.value - b_ols).abs() < 1e-3, "b: fit {} vs ols {}", m.b.value, b_ols);
@@ -69,7 +69,7 @@ fn starship_ignores_outlier() {
 
     let (a_ols, b_ols) = ols(&data);
     let mut m = model(data, 0.5); // tight gamma suppresses the outlier
-    let r = m.fit();
+    let r = m.fit().unwrap();
     assert!(r.end_cost < r.start_cost);
 
     let robust_err = (m.a.value - 2.0).abs() + (m.b.value + 1.0).abs();
@@ -84,7 +84,7 @@ fn fit_with_custom_config() {
     let xs: Vec<f32> = (0..10).map(|i| i as f32).collect();
     let data = line_data(1.5, 0.5, &xs);
     let mut m = model(data, 1e6);
-    let r = m.fit_with(&LmConfig { max_iters: 50, ..Default::default() });
+    let r = m.fit_with(&LmConfig { max_iters: 50, ..Default::default() }).unwrap();
     assert!(r.iterations <= 50);
     assert!((m.a.value - 1.5).abs() < 1e-2 && (m.b.value - 0.5).abs() < 1e-2,
         "should recover the line, got a={} b={}", m.a.value, m.b.value);
@@ -113,7 +113,7 @@ fn block_loss_cauchy_ignores_outliers() {
 
     let (a_ols, b_ols) = ols(&data);
     let mut m = CauchyModel { a: Param::new(0.0), b: Param::new(0.0), data, k: 0.25 }; // squared scale (was norm-axis 0.5)
-    let r = m.fit_with(&LmConfig { max_iters: 100, ..Default::default() });
+    let r = m.fit_with(&LmConfig { max_iters: 100, ..Default::default() }).unwrap();
     assert!(r.end_cost < r.start_cost);
 
     let robust_err = (m.a.value - 2.0).abs() + (m.b.value + 1.0).abs();
@@ -154,7 +154,7 @@ fn fit_covariance_matches_analytic() {
         b: Param::new(0.0),
         data: xs.iter().map(|&x| XY64 { x, y: 2.0 * x - 1.0 }).collect(),
     };
-    m.fit_with(&LmConfig::<f64> { max_iters: 50, ..Default::default() });
+    m.fit_with(&LmConfig::<f64> { max_iters: 50, ..Default::default() }).unwrap();
 
     let cov = m.cov().expect("Hessian invertible");
     assert!((cov[(0, 0)] - 1.0 / sum_x2).abs() < 1e-9, "var(a) = {} vs {}", cov[(0, 0)], 1.0 / sum_x2);
@@ -176,7 +176,7 @@ fn fit64_recovers_line() {
             XY64 { x, y: 2.0 * x - 1.0 }
         }).collect(),
     };
-    let r = m.fit_with(&LmConfig::<f64> { max_iters: 50, ..Default::default() });
+    let r = m.fit_with(&LmConfig::<f64> { max_iters: 50, ..Default::default() }).unwrap();
     assert!(r.end_cost < 1e-18, "cost {}", r.end_cost);
     assert!((m.a.value - 2.0).abs() < 1e-9, "a = {}", m.a.value);
     assert!((m.b.value + 1.0).abs() < 1e-9, "b = {}", m.b.value);

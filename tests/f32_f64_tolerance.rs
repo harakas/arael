@@ -68,9 +68,9 @@ fn build32() -> Chain32 {
 #[test]
 fn f32_and_f64_agree_within_tolerance() {
     let mut c64 = build64();
-    c64.solve_sparse(&LmConfig { max_iters: 200, ..Default::default() });
+    c64.solve_sparse(&LmConfig { max_iters: 200, ..Default::default() }).unwrap();
     let mut c32 = build32();
-    c32.solve_sparse(&LmConfig { max_iters: 200, ..Default::default() });
+    c32.solve_sparse(&LmConfig { max_iters: 200, ..Default::default() }).unwrap();
 
     for i in 0..N {
         let p64 = c64.points[i].pos.value;

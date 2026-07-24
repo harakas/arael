@@ -43,7 +43,7 @@ fn fields_named_like_the_root_and_struct_resolve() {
         hb: SelfBlock::new(),
     });
     let mut m = M2 { items };
-    let r = m.solve_dense(&LmConfig::conservative());
+    let r = m.solve_dense(&LmConfig::conservative()).unwrap();
     assert!(r.status.is_success(), "{:?}", r.status);
     let expect = (m2 * 4.0 + it) * (1.0 / 5.0);
     let p = m.items[0].p.value;

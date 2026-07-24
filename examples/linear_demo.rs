@@ -90,7 +90,7 @@ fn main() {
     // Step 2: robust nonlinear fit with suppressed residuals
     // A clean linear fit from a sane start: the well_conditioned preset
     // (near-Gauss-Newton first step, no iteration floor).
-    let result = model.fit_with(&LmConfig::well_conditioned().with_verbose(true));
+    let result = model.fit_with(&LmConfig::well_conditioned().with_verbose(true)).unwrap();
     println!(
         "\nIterations: {}, cost: {:.6} -> {:.6}",
         result.iterations, result.start_cost, result.end_cost

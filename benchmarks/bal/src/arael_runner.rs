@@ -175,7 +175,7 @@ fn solve64(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmConfig<f64>)
     // backend would marginalize the points itself -- that is the other row.
     let mut solver = arael::simple_lm::SparseFaer::new()
         .with_policy(arael::simple_lm::SchurPolicy::Never);
-    arael::simple_lm::lm_solve(params, &mut solver, s, cfg)
+    arael::simple_lm::lm_solve(params, &mut solver, s, cfg).unwrap()
 }
 
 fn solve64_schur(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmConfig<f64>) -> arael::simple_lm::LmResult<f64> {
@@ -201,7 +201,7 @@ fn solve64_schur(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmConfig
     let mut solver = arael::simple_lm::SparseFaer::new()
         .with_policy(policy)
         .with_ordering(ordering);
-    let r = arael::simple_lm::lm_solve(params, &mut solver, s, cfg);
+    let r = arael::simple_lm::lm_solve(params, &mut solver, s, cfg).unwrap();
     if std::env::var("BAL_SCHUR_PLAN").is_ok() {
         if let Some(p) = solver.plan() {
             eprintln!("schur plan: {:?}", p);
@@ -215,7 +215,7 @@ fn solve32(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmConfig<f32>
     // backend would marginalize the points itself -- that is the other row.
     let mut solver = arael::simple_lm::SparseFaerF32::new()
         .with_policy(arael::simple_lm::SchurPolicy::Never);
-    arael::simple_lm::lm_solve(params, &mut solver, s, cfg)
+    arael::simple_lm::lm_solve(params, &mut solver, s, cfg).unwrap()
 }
 
 fn solve32_schur(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmConfig<f32>) -> arael::simple_lm::LmResult<f32> {
@@ -227,7 +227,7 @@ fn solve32_schur(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmConfi
     let mut solver = arael::simple_lm::SparseFaerF32::new()
         .with_policy(arael::simple_lm::SchurPolicy::Force)
         .with_ordering(ordering);
-    arael::simple_lm::lm_solve(params, &mut solver, s, cfg)
+    arael::simple_lm::lm_solve(params, &mut solver, s, cfg).unwrap()
 }
 
 fn rodrigues_of(m: arael::matrix::matrix3d) -> vect3d {

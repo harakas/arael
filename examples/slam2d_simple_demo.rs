@@ -356,7 +356,7 @@ fn main() {
     // faer backend): it flattens the params, repeatedly linearizes the
     // constraints and takes damped steps, then writes the optimized values
     // straight back into the pose/landmark structs.
-    let result = path.solve_sparse(&lm_cfg);
+    let result = path.solve_sparse(&lm_cfg).unwrap();
 
     // The result prints itself: status, cost, where the time went, and the
     // accept/reject timeline. pretty_print() is the colour-and-glyphs version;

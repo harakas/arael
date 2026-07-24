@@ -456,7 +456,7 @@ fn main() {
         (drift / N_POSES as f64).sqrt());
 
     let cfg = LmConfig::well_conditioned().with_verbose(true);
-    let result = world.solve_sparse(&cfg);
+    let result = world.solve_sparse(&cfg).unwrap();
     println!("cost {:.4} -> {:.4} in {} iterations ({:?})",
         result.start_cost, result.end_cost, result.iterations, result.status);
 

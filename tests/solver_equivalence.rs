@@ -18,8 +18,8 @@
 
 use arael::model::{Param, SelfBlock, CrossBlock};
 use arael::simple_lm::{
-    self, CooMatrix, CscMatrix, LmConfig, LmProblem, LmStatus, SolveError, SolverKind,
-    SparseFaerOptions,
+    self, CooMatrix, CscMatrix, LmConfig, LmProblem, SolveError,
+    SolveFailureKind, SolverKind, SparseFaerOptions,
 };
 use arael::vect::{vect2d, vect2f};
 use arael::refs::{self, Ref};
@@ -224,6 +224,7 @@ fn solvers_reach_same_minimizer() {
             "faer" => simple_lm::solve_sparse(&p, &mut chain, &cfg),
             _ => unreachable!(),
         };
+        let r = r.unwrap();
         assert!(
             r.end_cost < r.start_cost,
             "{which}: no improvement ({} -> {})", r.start_cost, r.end_cost
@@ -258,12 +259,12 @@ fn band_lapack_matches_dense() {
     let mut chain = build();
     let mut p = std::vec::Vec::new();
     chain.serialize64(&mut p);
-    let reference = simple_lm::solve_dense(&p, &mut chain, &cfg).x;
+    let reference = simple_lm::solve_dense(&p, &mut chain, &cfg).unwrap().x;
 
     let mut chain = build();
     let mut p = std::vec::Vec::new();
     chain.serialize64(&mut p);
-    let r = simple_lm::solve_band_lapack(&p, KD, &mut chain, &cfg);
+    let r = simple_lm::solve_band_lapack(&p, KD, &mut chain, &cfg).unwrap();
     assert!(r.end_cost < r.start_cost, "lapack: no improvement");
     for i in 0..reference.len() {
         assert!((r.x[i] - reference[i]).abs() < 1e-6,
@@ -348,13 +349,13 @@ fn band_lapack_f32_matches_band() {
     let mut c = build_f32();
     let mut p = std::vec::Vec::new();
     c.serialize32(&mut p);
-    let reference = simple_lm::solve_band_f32(&p, kd, &mut c, &cfg);
+    let reference = simple_lm::solve_band_f32(&p, kd, &mut c, &cfg).unwrap();
     assert!(reference.end_cost < reference.start_cost, "band f32: no improvement");
 
     let mut c = build_f32();
     let mut p = std::vec::Vec::new();
     c.serialize32(&mut p);
-    let r = simple_lm::solve_band_lapack_f32(&p, kd, &mut c, &cfg);
+    let r = simple_lm::solve_band_lapack_f32(&p, kd, &mut c, &cfg).unwrap();
     assert!(r.end_cost < r.start_cost, "lapack f32: no improvement");
     for i in 0..reference.x.len() {
         assert!((r.x[i] - reference.x[i]).abs() < 1e-4,
@@ -379,7 +380,7 @@ fn threaded_faer_matches_single_thread() {
         let mut chain = build();
         let mut p = std::vec::Vec::new();
         chain.serialize64(&mut p);
-        let r = simple_lm::solve_sparse(&p, &mut chain, &cfg);
+        let r = simple_lm::solve_sparse(&p, &mut chain, &cfg).unwrap();
         assert!(r.end_cost < r.start_cost, "threads={threads}: no improvement");
         r.x
     };
@@ -410,12 +411,12 @@ fn generated_solve_methods_match_manual_dance() {
         let mut chain = build();
         let mut p = std::vec::Vec::new();
         chain.serialize64(&mut p);
-        simple_lm::solve_dense(&p, &mut chain, &cfg).x
+        simple_lm::solve_dense(&p, &mut chain, &cfg).unwrap().x
     };
 
     // solve_dense writes the solution back into the model.
     let mut chain = build();
-    let r = chain.solve_dense(&cfg);
+    let r = chain.solve_dense(&cfg).unwrap();
     let mut back = std::vec::Vec::new();
     chain.serialize64(&mut back);
     assert_eq!(back, r.x, "solve_dense must write the solution back into the model");
@@ -429,15 +430,15 @@ fn generated_solve_methods_match_manual_dance() {
         let mut chain = build();
         let mut p = std::vec::Vec::new();
         chain.serialize64(&mut p);
-        simple_lm::solve_sparse(&p, &mut chain, &cfg).x
+        simple_lm::solve_sparse(&p, &mut chain, &cfg).unwrap().x
     };
     let mut chain = build();
-    let r = chain.solve_sparse(&cfg);
+    let r = chain.solve_sparse(&cfg).unwrap();
     assert_eq!(r.x, faer, "solve_sparse must equal the free solve_sparse");
 
     // solve_with(Dense) is exactly solve_dense.
     let mut chain = build();
-    let r = chain.solve_with(&mut simple_lm::Dense, &cfg);
+    let r = chain.solve_with(&mut simple_lm::Dense, &cfg).unwrap();
     for i in 0..reference.len() {
         assert!((r.x[i] - reference[i]).abs() < 1e-12,
             "solve_with(Dense) disagrees with free solve at {i}: {} vs {}", r.x[i], reference[i]);
@@ -451,10 +452,10 @@ fn generated_solve_methods_match_manual_dance() {
         let mut chain = build();
         let mut p = std::vec::Vec::new();
         chain.serialize64(&mut p);
-        simple_lm::solve_sparse(&p, &mut chain, &nielsen_cfg).x
+        simple_lm::solve_sparse(&p, &mut chain, &nielsen_cfg).unwrap().x
     };
     let mut chain = build();
-    let r = chain.solve_sparse(&nielsen_cfg);
+    let r = chain.solve_sparse(&nielsen_cfg).unwrap();
     assert_eq!(r.x, free_nielsen,
         "solve_sparse must route config.driver (Nielsen) like the free faer solve");
 }
@@ -469,11 +470,11 @@ fn solver_kind_dispatches_to_the_named_backend() {
         max_iters: 200,
         ..Default::default()
     };
-    let free = |run: &dyn Fn(&[f64], &mut Chain) -> simple_lm::LmResult<f64>| {
+    let free = |run: &dyn Fn(&[f64], &mut Chain) -> simple_lm::SolveResult<f64>| {
         let mut c = build();
         let mut p = std::vec::Vec::new();
         c.serialize64(&mut p);
-        run(&p, &mut c).x
+        run(&p, &mut c).unwrap().x
     };
     let cases: [(SolverKind, std::vec::Vec<f64>); 3] = [
         (SolverKind::Dense, free(&|p, c| simple_lm::solve_dense(p, c, &cfg))),
@@ -485,7 +486,7 @@ fn solver_kind_dispatches_to_the_named_backend() {
     ];
     for (kind, reference) in cases {
         let mut chain = build();
-        let r = chain.solve(kind.clone(), &cfg);
+        let r = chain.solve(kind.clone(), &cfg).unwrap();
         for i in 0..reference.len() {
             assert!(
                 (r.x[i] - reference[i]).abs() < 1e-12,
@@ -509,10 +510,10 @@ fn sparse_auto_options_equal_default_faer() {
         let mut c = build();
         let mut p = std::vec::Vec::new();
         c.serialize64(&mut p);
-        simple_lm::solve_sparse(&p, &mut c, &cfg).x
+        simple_lm::solve_sparse(&p, &mut c, &cfg).unwrap().x
     };
     let mut chain = build();
-    let r = chain.solve(SolverKind::Sparse(SparseFaerOptions::auto()), &cfg);
+    let r = chain.solve(SolverKind::Sparse(SparseFaerOptions::auto()), &cfg).unwrap();
     assert_eq!(r.x, free, "SolverKind::Sparse(auto) must equal free solve_sparse");
 }
 
@@ -545,11 +546,13 @@ fn f32_cholmod_is_unavailable() {
     let mut m = build32();
     let mut before = std::vec::Vec::new();
     m.serialize32(&mut before);
-    let r = m.solve(SolverKind::Cholmod, &cfg);
+    let e = m.solve(SolverKind::Cholmod, &cfg)
+        .expect_err("cholmod at f32 must be unavailable");
     assert!(
-        matches!(r.status, LmStatus::SetupFailed(SolveError::SolverUnavailable { .. })),
-        "status = {:?}", r.status
+        matches!(e.kind, SolveFailureKind::Setup(SolveError::SolverUnavailable { .. })),
+        "kind = {:?}", e.kind
     );
+    assert!(e.partial.is_none(), "nothing ran");
     let mut after = std::vec::Vec::new();
     m.serialize32(&mut after);
     assert_eq!(before, after, "an unavailable solve must not touch the parameters");
@@ -562,9 +565,10 @@ fn f32_cholmod_is_unavailable() {
 fn uncompiled_backend_is_unavailable() {
     let cfg = LmConfig::<f64>::default();
     let mut chain = build();
-    let r = chain.solve(SolverKind::Cholmod, &cfg);
-    match r.status {
-        LmStatus::SetupFailed(SolveError::SolverUnavailable { solver, .. }) => {
+    let e = chain.solve(SolverKind::Cholmod, &cfg)
+        .expect_err("uncompiled backend must be unavailable");
+    match e.kind {
+        SolveFailureKind::Setup(SolveError::SolverUnavailable { solver, .. }) => {
             assert_eq!(solver, "Cholmod");
         }
         other => panic!("expected SolverUnavailable, got {other:?}"),

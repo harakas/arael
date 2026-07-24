@@ -62,7 +62,7 @@ fn main() {
         data,
     };
 
-    let r = m.solve_dense(&LmConfig::well_conditioned());
+    let r = m.solve_dense(&LmConfig::well_conditioned()).unwrap();
     println!(
         "fit: y = {:.4} * x + {:.4}   (truth 2, 1; one outlier suppressed, one reading guarded out)",
         m.a.value, m.b.value

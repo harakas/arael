@@ -294,8 +294,8 @@ fn a_model_of_these_params_solves_the_same_after_a_round_trip() {
 
     let mut a = build();
     let mut b: Pv = rt(&build());
-    let ra = a.solve_sparse(&LmConfig::default());
-    let rb = b.solve_sparse(&LmConfig::default());
+    let ra = a.solve_sparse(&LmConfig::default()).unwrap();
+    let rb = b.solve_sparse(&LmConfig::default()).unwrap();
 
     assert!(ra.iterations > 1, "the model must actually solve");
     assert_eq!(ra.iterations, rb.iterations);

@@ -2869,17 +2869,39 @@ impl Sketch {
                 ..Default::default()
             };
             let stage_result = if n >= 64 {
-                arael::simple_lm::solve_sparse_faer(&params, self, &config)
+                arael::simple_lm::solve_sparse(&params, self, &config)
             } else {
                 arael::simple_lm::solve(&params, self, &config)
             };
-            self.deserialize64(&stage_result.x);
-            total_iters += stage_result.iterations;
-            total_accepted += stage_result.accepted_iterations;
-            result.end_cost = stage_result.end_cost;
-            result.x = stage_result.x;
-            result.status = stage_result.status;
-            result.final_lambda = stage_result.final_lambda;
+            match stage_result {
+                Ok(r) => {
+                    self.deserialize64(&r.x);
+                    total_iters += r.iterations;
+                    total_accepted += r.accepted_iterations;
+                    result.end_cost = r.end_cost;
+                    result.x = r.x;
+                    result.status = r.status;
+                    result.final_lambda = r.final_lambda;
+                }
+                Err(e) => {
+                    // A broken stage (degenerate diagonal or setup
+                    // failure): keep the best accepted state when there is
+                    // one, report Aborted through the summary status, and
+                    // stop the ramp -- the interactive sketch must not
+                    // panic, and the previous committed values stand.
+                    eprintln!("sketch solve stage failed: {}", e);
+                    if let Some(p) = e.into_partial() {
+                        self.deserialize64(&p.x);
+                        total_iters += p.iterations;
+                        total_accepted += p.accepted_iterations;
+                        result.end_cost = p.end_cost;
+                        result.x = p.x;
+                        result.final_lambda = p.final_lambda;
+                    }
+                    result.status = arael::simple_lm::LmStatus::Aborted;
+                    break;
+                }
+            }
         }
 
         self.constraint_isigma = full_isigma;

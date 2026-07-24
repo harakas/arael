@@ -15,7 +15,7 @@ struct M {
 #[test]
 fn two_use_lines_suffice() {
     let mut m = M { x: Param::new(0.0), hb: SelfBlock::new() };
-    let result = m.solve_sparse(&LmConfig::default());
+    let result = m.solve_sparse(&LmConfig::default()).unwrap();
     assert!(result.end_cost < 1e-12);
     assert!((m.x.value - 3.0).abs() < 1e-6);
 }
@@ -38,7 +38,7 @@ mod via_prelude {
     fn one_glob_import_suffices() {
         let mut p = P { x: Param::new(0.0), y: Param::new(0.0),
                         t: vect2d::new(1.0, 2.0), hb: SelfBlock::new() };
-        let result = p.solve_sparse(&LmConfig::default());
+        let result = p.solve_sparse(&LmConfig::default()).unwrap();
         assert!(result.end_cost < 1e-12);
         assert!((p.x.value - 1.0).abs() < 1e-6 && (p.y.value - 2.0).abs() < 1e-6);
     }
@@ -93,7 +93,7 @@ mod compound_via_prelude {
             measured_direction: vect3d::new(SQRT_HALF, 0.0, SQRT_HALF),
             hb: SelfBlock::new(),
         };
-        let result = x.solve_sparse(&LmConfig::default());
+        let result = x.solve_sparse(&LmConfig::default()).unwrap();
         assert!(result.end_cost < 1e-12, "end cost {}", result.end_cost);
         assert!((x.pose.translation - x.measured_translation).norm() < 1e-6);
         assert!((x.pose.rotation.rotation_matrix() * vect3d::new(1.0, 0.0, 0.0)

@@ -178,11 +178,11 @@ fn f64_and_f32_roots_agree() {
     // The priors and springs genuinely conflict, so the optimum is a
     // nonzero equilibrium (~0.081); both precisions must find it.
     let mut w64 = build_world!(World64, f64);
-    let r64 = w64.solve_sparse(&LmConfig { max_iters: 100, ..Default::default() });
+    let r64 = w64.solve_sparse(&LmConfig { max_iters: 100, ..Default::default() }).unwrap();
     assert!(r64.end_cost < 0.1, "f64 cost {}", r64.end_cost);
 
     let mut w32 = build_world!(World32, f32);
-    let r32 = w32.solve_sparse(&LmConfig { max_iters: 100, ..Default::default() });
+    let r32 = w32.solve_sparse(&LmConfig { max_iters: 100, ..Default::default() }).unwrap();
     assert!((r32.end_cost as f64 - r64.end_cost).abs() < 1e-3,
         "f32 cost {} vs f64 {}", r32.end_cost, r64.end_cost);
 

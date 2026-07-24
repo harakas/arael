@@ -1,5 +1,19 @@
 # TODO
 
+- **Guards that toggle during a solve break assembly -- emit zeros
+  instead**. The contract today is that `guard =` values stay fixed for a
+  solve's duration: the sparse pattern is discovered from the guards'
+  first-assembly state, so a guard turning ON later writes outside the
+  discovered pattern (indexed/direct CSC), and a guard turning OFF leaves
+  a zero-curvature parameter that kills the solve
+  (`DiagonalFault::Zero`). Proposed fix: include guarded constraints'
+  cells in pattern discovery unconditionally and emit ZERO contributions
+  while the guard is false -- assembly stays in-pattern under any
+  toggling, at the cost of dormant cells in the factor. Would also relax
+  the LmSession validity contract (guard flips between warm solves).
+  Needs investigation across the assembly paths (dense/band are
+  value-only and unaffected; COO/CSC discovery is the work).
+
 - **Multiple containment locations: remaining shapes**. A
   SelfBlock-constrained entity held in several root collections now gets
   one constraint sweep per collection (was: first field only, the rest

@@ -611,6 +611,87 @@ impl std::fmt::Display for SolveError {
 
 impl std::error::Error for SolveError {}
 
+/// The three ways a Gauss-Newton diagonal entry can be bad (see
+/// [`SolveFailureKind::DegenerateDiagonal`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiagonalFault {
+    /// Not a number: the assembly is poisoned -- a residual or a
+    /// derivative evaluated to NaN.
+    Nan,
+    /// Negative: impossible for a sum of squares, so the assembly is
+    /// poisoned.
+    Negative,
+    /// Zero: no constraint curvature reaches the parameter at this
+    /// iterate. Guards are fixed for a solve's duration (the assembly
+    /// pattern depends on them), but a `branch` expression or a fully
+    /// saturated robustifier can zero a constraint's contribution
+    /// numerically. `LmConfig::min_diagonal` damps through the transient
+    /// case.
+    Zero,
+}
+
+/// What broke a solve (see [`SolveFailure`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SolveFailureKind {
+    /// The linear system could not be built or factored ([`SolveError`]).
+    Setup(SolveError),
+    /// A parameter's Gauss-Newton Hessian diagonal went bad -- the system
+    /// is degenerate at the current iterate.
+    DegenerateDiagonal {
+        /// Scalar index of the offending parameter.
+        param: usize,
+        /// How its diagonal was bad.
+        fault: DiagonalFault,
+    },
+}
+
+/// A failed solve: what broke, and the best ACCEPTED state before the
+/// break when there is one. `partial` is `None` when the very first
+/// assembly failed (nothing ran; the caller's parameters are untouched);
+/// otherwise it carries a full [`LmResult`] with
+/// [`LmStatus::Aborted`] -- usable for diagnosis or a warm
+/// [`LmConfig::continue_from`] restart.
+#[derive(Debug, Clone)]
+pub struct SolveFailure<T> {
+    /// What broke.
+    pub kind: SolveFailureKind,
+    /// Best accepted state before the break, if the solve got that far.
+    pub partial: Option<Box<LmResult<T>>>,
+}
+
+impl<T> SolveFailure<T> {
+    /// The partial result, consuming the failure. `None` when nothing ran.
+    pub fn into_partial(self) -> Option<LmResult<T>> {
+        self.partial.map(|b| *b)
+    }
+}
+
+impl<T> std::fmt::Display for SolveFailure<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.kind {
+            SolveFailureKind::Setup(e) => write!(f, "solve setup failed: {}", e)?,
+            SolveFailureKind::DegenerateDiagonal { param, fault } => {
+                let why = match fault {
+                    DiagonalFault::Nan => "NaN (poisoned assembly)",
+                    DiagonalFault::Negative => "negative (poisoned assembly)",
+                    DiagonalFault::Zero => "zero (no active curvature; see LmConfig::min_diagonal)",
+                };
+                write!(f, "degenerate Hessian diagonal at parameter {}: {}", param, why)?;
+            }
+        }
+        match &self.partial {
+            Some(p) => write!(f, " (after {} accepted steps)", p.accepted_iterations),
+            None => write!(f, " (nothing ran)"),
+        }
+    }
+}
+
+impl<T: std::fmt::Debug> std::error::Error for SolveFailure<T> {}
+
+/// What every solve entry point returns: the result of a completed solve,
+/// or [`SolveFailure`] with the partial state when one exists.
+pub type SolveResult<T> = Result<LmResult<T>, SolveFailure<T>>;
+
 impl From<BandError> for SolveError {
     fn from(e: BandError) -> Self {
         SolveError::BandOverflow { row: e.row, col: e.col, kd: e.kd }
@@ -841,19 +922,19 @@ pub trait FitProblem<T: Float>: LmProblem<T> + Sized {
     /// Least-squares fit with the given config, wrapping the
     /// serialize -> dense LM -> deserialize round trip: parameters are
     /// read from the model and the optimized values written back.
-    fn fit_with(&mut self, config: &LmConfig<T>) -> LmResult<T>
+    fn fit_with(&mut self, config: &LmConfig<T>) -> SolveResult<T>
     where
         Dense: LmSolver<T>,
     {
         let mut params = Vec::new();
         self.serialize(&mut params);
-        let result = lm_solve(&params, &mut Dense, self, config);
+        let result = lm_solve(&params, &mut Dense, self, config)?;
         self.deserialize(&result.x);
-        result
+        Ok(result)
     }
 
     /// [`fit_with`](Self::fit_with) under the default [`LmConfig`].
-    fn fit(&mut self) -> LmResult<T>
+    fn fit(&mut self) -> SolveResult<T>
     where
         Dense: LmSolver<T>,
     {
@@ -933,22 +1014,22 @@ pub trait LmProblem<T> {
     /// [`LmConfig::with_driver`]). For the common backends use
     /// [`solve_dense`](Self::solve_dense) or
     /// [`solve_sparse`](Self::solve_sparse).
-    fn solve_with<S: LmSolver<T>>(&mut self, solver: &mut S, config: &LmConfig<T>) -> LmResult<T>
+    fn solve_with<S: LmSolver<T>>(&mut self, solver: &mut S, config: &LmConfig<T>) -> SolveResult<T>
     where
         Self: RootProblem<T> + Sized,
         T: Float,
     {
         let mut params = Vec::new();
         self.serialize(&mut params);
-        let result = lm_solve(&params, solver, self, config);
+        let result = lm_solve(&params, solver, self, config)?;
         self.deserialize(&result.x);
-        result
+        Ok(result)
     }
 
     /// Solve with the dense nalgebra Cholesky backend ([`Dense`]) --
     /// low parameter counts or genuinely dense problems. Convenience
     /// over [`solve_with`](Self::solve_with).
-    fn solve_dense(&mut self, config: &LmConfig<T>) -> LmResult<T>
+    fn solve_dense(&mut self, config: &LmConfig<T>) -> SolveResult<T>
     where
         Self: RootProblem<T> + Sized,
         T: Float,
@@ -1027,7 +1108,7 @@ pub trait LmProblem<T> {
     /// ([`marginalize_candidates`](Self::marginalize_candidates)). Whether
     /// marginalizing them actually pays is then decided from the model's
     /// structure -- see [`SparseFaer`].
-    fn solve_sparse(&mut self, config: &LmConfig<T>) -> LmResult<T>
+    fn solve_sparse(&mut self, config: &LmConfig<T>) -> SolveResult<T>
     where
         Self: RootProblem<T> + Sized,
         T: Float,
@@ -1037,11 +1118,10 @@ pub trait LmProblem<T> {
     }
 
     /// Solve with a backend chosen at run time by [`SolverKind`]. A backend
-    /// that is not compiled in, or does not support this scalar, returns an
-    /// [`LmResult`] whose status is
-    /// [`SetupFailed`](LmStatus::SetupFailed)([`SolverUnavailable`](SolveError::SolverUnavailable))
-    /// with the parameters unchanged, instead of failing to build.
-    fn solve(&mut self, kind: SolverKind, config: &LmConfig<T>) -> LmResult<T>
+    /// that is not compiled in, or does not support this scalar, errors with
+    /// [`SolveError::SolverUnavailable`] and leaves the parameters
+    /// unchanged, instead of failing to build.
+    fn solve(&mut self, kind: SolverKind, config: &LmConfig<T>) -> SolveResult<T>
     where
         Self: RootProblem<T> + Sized,
         T: BackendScalar,
@@ -1125,14 +1205,10 @@ pub enum LmStatus {
     /// 20 consecutive damped attempts failed to produce a cost-decreasing
     /// step (the hard inner-retry budget, distinct from `LambdaCeiling`).
     RetryBudgetExhausted,
-    /// A parameter's Gauss-Newton Hessian diagonal was non-positive (no
-    /// active constraint curvature reaches it, or assembly was poisoned by
-    /// NaN). The solve returned the best parameters found so far.
-    DegenerateDiagonal { param: usize },
-    /// The linear system could not be built or factored, so the solve was
-    /// never attempted (see [`SolveError`]). `x` is the untouched input and
-    /// the costs are `NaN`.
-    SetupFailed(SolveError),
+    /// The solve did not terminate by a stopping rule: it broke, and this
+    /// result is the partial state inside a [`SolveFailure`] (whose `kind`
+    /// says what broke). Never returned in an `Ok` result.
+    Aborted,
 }
 
 /// Per-phase wall-clock timing gathered during a solve. Produced only when
@@ -1381,8 +1457,7 @@ impl LmStatus {
             LmStatus::DriverTerminated => "driver stopped it",
             LmStatus::LambdaCeiling => "damping exhausted",
             LmStatus::RetryBudgetExhausted => "retry budget exhausted",
-            LmStatus::DegenerateDiagonal { .. } => "degenerate diagonal",
-            LmStatus::SetupFailed(_) => "setup failed",
+            LmStatus::Aborted => "aborted",
         }
     }
     /// Did the solve reach a minimum, as opposed to running out of something?
@@ -1433,8 +1508,8 @@ impl<T: Float> LmResult<T> {
         // -- headline ------------------------------------------------------
         let head = if self.status.is_success() {
             style.paint("32;1", self.status.as_str()) // green
-        } else if matches!(self.status, LmStatus::SetupFailed(_)) {
-            style.paint("31;1", self.status.as_str()) // red: the solve could not start
+        } else if matches!(self.status, LmStatus::Aborted) {
+            style.paint("31;1", self.status.as_str()) // red: the solve broke
         } else {
             style.paint("33;1", self.status.as_str()) // yellow: it stopped, it did not fail
         };
@@ -1443,15 +1518,6 @@ impl<T: Float> LmResult<T> {
             "LM {head} in {} iterations ({} accepted, {} retried)\n",
             self.iterations, self.accepted_iterations, retries
         ));
-        if let LmStatus::DegenerateDiagonal { param } = self.status {
-            out.push_str(&format!(
-                "  {}  parameter {param} has no curvature: no constraint reaches it\n",
-                style.paint("31;1", "!!") // red
-            ));
-        }
-        if let LmStatus::SetupFailed(e) = self.status {
-            out.push_str(&format!("  {}  {e}\n", style.paint("31;1", "!!"))); // red
-        }
         out.push_str(&format!("  {}\n", style.rule(58)));
 
         // -- cost ----------------------------------------------------------
@@ -2240,9 +2306,9 @@ pub fn lm_solve<T: Float, S: LmSolver<T>>(
     solver: &mut S,
     problem: &mut impl LmProblem<T>,
     config: &LmConfig<T>,
-) -> LmResult<T> {
+) -> SolveResult<T> {
     if x0.is_empty() {
-        return lm_empty_result(x0, config);
+        return Ok(lm_empty_result(x0, config));
     }
     // Solver caches (sparsity pattern, symbolic factorization) are only
     // valid within a single solve; drop them so reused solver instances
@@ -2264,10 +2330,14 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
     matrix: &mut S::Matrix,
     problem: &mut impl LmProblem<T>,
     config: &LmConfig<T>,
-) -> LmResult<T> {
+) -> SolveResult<T> {
     // Drivers are stateful per solve; clone the config's prototype so the
     // shared config is untouched and a reused config starts each solve clean.
     let mut driver = config.driver.clone_box();
+    // Set when the loop breaks on a setup failure instead of a stopping
+    // rule; the tail then returns Err with the partial state (None when
+    // the FIRST assembly failed -- nothing ran).
+    let mut failure: Option<SolveFailureKind> = None;
     let n = x0.len();
     debug_assert!(n > 0);
     solver.configure(config);
@@ -2336,14 +2406,14 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
         let computed_cost = match solver.compute(problem, &cur_x, &mut grad, matrix) {
             Ok(c) => c,
             Err(e) => {
-                // The linear system could not be built or factored, so no step
-                // is possible. On the first assembly nothing was evaluated:
-                // the costs are NaN and x stays the input.
+                // The linear system could not be built or factored, so no
+                // step is possible. On the first assembly nothing was
+                // evaluated and there is no partial state.
+                failure = Some(SolveFailureKind::Setup(e));
                 if first {
                     start_cost = T::nan();
                     end_cost = T::nan();
                 }
-                status = LmStatus::SetupFailed(e);
                 break;
             }
         };
@@ -2382,9 +2452,9 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
             // Already at zero cost — nothing to do
             if start_cost == T::zero() {
                 if let Some(s) = solve_start { timing.total = s.elapsed(); }
-                return LmResult { x: cur_x, start_cost, end_cost, iterations: 0,
+                return Ok(LmResult { x: cur_x, start_cost, end_cost, iterations: 0,
                     accepted_iterations: 0, status: LmStatus::Converged, final_lambda: lambda,
-                    timing: gather.then_some(timing), solver: solver.report() };
+                    timing: gather.then_some(timing), solver: solver.report() });
             }
         }
 
@@ -2428,21 +2498,28 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
                 // test would let it fall through and be reported as a zero -- and
                 // then advise min_diagonal, which floors a zero and does nothing
                 // for a NaN.
-                let why = if !(*d == *d) {
-                    "not a number -- the assembly is poisoned (a residual or a derivative went NaN)"
+                let (fault, why) = if !(*d == *d) {
+                    (DiagonalFault::Nan,
+                     "not a number -- the assembly is poisoned (a residual or a derivative went NaN)")
                 } else if *d < T::zero() {
-                    "negative -- J^T J's diagonal is a sum of squares, so the assembly is poisoned"
+                    (DiagonalFault::Negative,
+                     "negative -- J^T J's diagonal is a sum of squares, so the assembly is poisoned")
                 } else {
-                    "zero -- no active constraint curvature reaches it (set LmConfig::min_diagonal to damp through it)"
+                    (DiagonalFault::Zero,
+                     "zero -- no active constraint curvature reaches it (set LmConfig::min_diagonal to damp through it)")
                 };
                 error!("arael::lm_solve: parameter {} has a bad Hessian diagonal ({:?}) \
                         at iteration {}: {} -- terminating solve",
                     i, d.to_f64(), iter, why);
                 if let Some(s) = solve_start { timing.total = s.elapsed(); }
-                return LmResult { x: cur_x, start_cost, end_cost, iterations: iter,
+                let partial = LmResult { x: cur_x, start_cost, end_cost, iterations: iter,
                     accepted_iterations: accepted,
-                    status: LmStatus::DegenerateDiagonal { param: i }, final_lambda: lambda,
+                    status: LmStatus::Aborted, final_lambda: lambda,
                     timing: gather.then_some(timing), solver: solver.report() };
+                return Err(SolveFailure {
+                    kind: SolveFailureKind::DegenerateDiagonal { param: i, fault },
+                    partial: Some(Box::new(partial)),
+                });
             }
             if let Some(m) = floor {
                 damp[i] = d.max(m);
@@ -2804,16 +2881,25 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
     }
 
     if let Some(s) = solve_start { timing.total = s.elapsed(); }
-    LmResult {
+    let result = LmResult {
         x: cur_x,
         start_cost,
         end_cost,
         iterations: iter,
         accepted_iterations: accepted,
-        status,
+        status: if failure.is_some() { LmStatus::Aborted } else { status },
         final_lambda: lambda,
         timing: gather.then_some(timing),
         solver: solver.report(),
+    };
+    match failure {
+        None => Ok(result),
+        Some(kind) => Err(SolveFailure {
+            // A first-assembly failure has no evaluated state to return.
+            partial: (result.iterations > 0 || result.accepted_iterations > 0
+                || result.start_cost.is_finite()).then(|| Box::new(result)),
+            kind,
+        }),
     }
 }
 
@@ -2825,7 +2911,7 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
 /// implement the sparse assembly paths -- macro-generated models always
 /// do; a hand-written dense-only [`LmProblem`] should call
 /// [`solve_dense`] instead.
-pub fn solve(x0: &[f64], problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> LmResult<f64> {
+pub fn solve(x0: &[f64], problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> SolveResult<f64> {
     if x0.len() <= 6 {
         solve_dense(x0, problem, config)
     } else {
@@ -2835,7 +2921,7 @@ pub fn solve(x0: &[f64], problem: &mut impl LmProblem<f64>, config: &LmConfig<f6
 
 /// Solve with an automatically chosen backend (f32): dense for <= 6
 /// params, [`SparseFaer`] otherwise.
-pub fn solve_f32(x0: &[f32], problem: &mut impl LmProblem<f32>, config: &LmConfig<f32>) -> LmResult<f32> {
+pub fn solve_f32(x0: &[f32], problem: &mut impl LmProblem<f32>, config: &LmConfig<f32>) -> SolveResult<f32> {
     if x0.len() <= 6 {
         solve_dense_f32(x0, problem, config)
     } else {
@@ -2844,34 +2930,34 @@ pub fn solve_f32(x0: &[f32], problem: &mut impl LmProblem<f32>, config: &LmConfi
 }
 
 /// Solve with the dense Cholesky backend (f64).
-pub fn solve_dense(x0: &[f64], problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> LmResult<f64> {
+pub fn solve_dense(x0: &[f64], problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> SolveResult<f64> {
     lm_solve(x0, &mut Dense, problem, config)
 }
 
 /// Solve with the dense Cholesky backend (f32).
-pub fn solve_dense_f32(x0: &[f32], problem: &mut impl LmProblem<f32>, config: &LmConfig<f32>) -> LmResult<f32> {
+pub fn solve_dense_f32(x0: &[f32], problem: &mut impl LmProblem<f32>, config: &LmConfig<f32>) -> SolveResult<f32> {
     lm_solve(x0, &mut Dense, problem, config)
 }
 
 /// Solve with pure-Rust band Cholesky backend (f64).
-pub fn solve_band(x0: &[f64], kd: usize, problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> LmResult<f64> {
+pub fn solve_band(x0: &[f64], kd: usize, problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> SolveResult<f64> {
     lm_solve(x0, &mut Band::new(kd), problem, config)
 }
 
 /// Solve with pure-Rust band Cholesky backend (f32).
-pub fn solve_band_f32(x0: &[f32], kd: usize, problem: &mut impl LmProblem<f32>, config: &LmConfig<f32>) -> LmResult<f32> {
+pub fn solve_band_f32(x0: &[f32], kd: usize, problem: &mut impl LmProblem<f32>, config: &LmConfig<f32>) -> SolveResult<f32> {
     lm_solve(x0, &mut Band::new(kd), problem, config)
 }
 
 /// Solve with LAPACK band Cholesky backend (f64).
 #[cfg(feature = "lapack")]
-pub fn solve_band_lapack(x0: &[f64], kd: usize, problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> LmResult<f64> {
+pub fn solve_band_lapack(x0: &[f64], kd: usize, problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> SolveResult<f64> {
     lm_solve(x0, &mut BandLapack::new(kd), problem, config)
 }
 
 /// Solve with LAPACK band Cholesky backend (f32).
 #[cfg(feature = "lapack")]
-pub fn solve_band_lapack_f32(x0: &[f32], kd: usize, problem: &mut impl LmProblem<f32>, config: &LmConfig<f32>) -> LmResult<f32> {
+pub fn solve_band_lapack_f32(x0: &[f32], kd: usize, problem: &mut impl LmProblem<f32>, config: &LmConfig<f32>) -> SolveResult<f32> {
     lm_solve(x0, &mut BandLapack::new(kd), problem, config)
 }
 
@@ -2930,15 +3016,15 @@ impl<T: Float, S: LmSolver<T>> LmSession<T, S> {
     /// deserialize, like [`LmProblem::solve_with`]. The first call runs the
     /// full structural analysis; later calls reuse it (see the type docs for
     /// when that is valid).
-    pub fn solve<P>(&mut self, model: &mut P, config: &LmConfig<T>) -> LmResult<T>
+    pub fn solve<P>(&mut self, model: &mut P, config: &LmConfig<T>) -> SolveResult<T>
     where
         P: LmProblem<T> + RootProblem<T>,
     {
         let mut params = Vec::new();
         model.serialize(&mut params);
-        let result = self.solve_x0(&params, model, config);
+        let result = self.solve_x0(&params, model, config)?;
         model.deserialize(&result.x);
-        result
+        Ok(result)
     }
 
     /// The raw-parameter form of [`solve`](Self::solve), for problems built
@@ -2949,7 +3035,7 @@ impl<T: Float, S: LmSolver<T>> LmSession<T, S> {
         x0: &[T],
         problem: &mut impl LmProblem<T>,
         config: &LmConfig<T>,
-    ) -> LmResult<T> {
+    ) -> SolveResult<T> {
         let n = x0.len();
         if n != self.n {
             // A different parameter count cannot be the same structure:
@@ -2959,7 +3045,7 @@ impl<T: Float, S: LmSolver<T>> LmSession<T, S> {
             self.n = n;
         }
         if n == 0 {
-            return lm_empty_result(x0, config);
+            return Ok(lm_empty_result(x0, config));
         }
         let mut matrix = self.matrix.take().unwrap_or_else(|| self.solver.new_matrix(n));
         let result = lm_solve_on(x0, &mut self.solver, &mut matrix, problem, config);
@@ -3068,7 +3154,7 @@ impl LmSolver<f64> for SparseCoo {
 /// Cholesky fallback (f64). A validation baseline.
 #[deprecated(since = "0.7.3", note = "validation baseline; use     `solve_sparse` or `model.solve_sparse(&cfg)`")]
 #[allow(deprecated)]
-pub fn solve_sparse_coo(x0: &[f64], problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> LmResult<f64> {
+pub fn solve_sparse_coo(x0: &[f64], problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> SolveResult<f64> {
     lm_solve(x0, &mut SparseCoo::new(), problem, config)
 }
 
@@ -3152,7 +3238,7 @@ impl LmSolver<f64> for SparseDirectCsc {
 /// Solve with direct CSC assembly sparse solver, dense Cholesky fallback (f64).
 #[deprecated(since = "0.7.3", note = "validation baseline; use     `solve_sparse` or `model.solve_sparse(&cfg)`")]
 #[allow(deprecated)]
-pub fn solve_sparse_direct_csc(x0: &[f64], problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> LmResult<f64> {
+pub fn solve_sparse_direct_csc(x0: &[f64], problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> SolveResult<f64> {
     lm_solve(x0, &mut SparseDirectCsc::new(), problem, config)
 }
 
@@ -3640,42 +3726,28 @@ pub enum SolverKind {
 /// does it for the concrete backends that exist at that scalar. Implemented for
 /// `f32` and `f64`.
 pub trait BackendScalar: Float {
-    /// Run `kind` on `problem`. A backend not compiled in, or one that does not
-    /// support this scalar, returns [`SolveError::SolverUnavailable`] through
-    /// [`LmStatus::SetupFailed`] with the parameters left untouched.
-    fn dispatch<P>(kind: &SolverKind, problem: &mut P, config: &LmConfig<Self>) -> LmResult<Self>
+    /// Run `kind` on `problem`. A backend not compiled in, or one that does
+    /// not support this scalar, errors with
+    /// [`SolveError::SolverUnavailable`], parameters left untouched.
+    fn dispatch<P>(kind: &SolverKind, problem: &mut P, config: &LmConfig<Self>) -> SolveResult<Self>
     where
         P: LmProblem<Self> + RootProblem<Self>;
 }
 
-/// An [`LmResult`] for a solve that never ran: the parameters read back
-/// unchanged, [`SolveError::SolverUnavailable`] as the status.
-fn solver_unavailable<T: Float, P>(
-    problem: &mut P,
+/// The failure for a backend that cannot run: nothing was attempted, the
+/// problem's parameters are untouched.
+fn solver_unavailable<T: Float>(
     solver: &'static str,
     reason: &'static str,
-) -> LmResult<T>
-where
-    P: LmProblem<T> + RootProblem<T>,
-{
-    let mut x = Vec::new();
-    problem.serialize(&mut x);
-    let cost = problem.calc_cost(&x);
-    LmResult {
-        x,
-        start_cost: cost,
-        end_cost: cost,
-        iterations: 0,
-        accepted_iterations: 0,
-        status: LmStatus::SetupFailed(SolveError::SolverUnavailable { solver, reason }),
-        final_lambda: T::zero(),
-        solver: None,
-        timing: None,
-    }
+) -> SolveResult<T> {
+    Err(SolveFailure {
+        kind: SolveFailureKind::Setup(SolveError::SolverUnavailable { solver, reason }),
+        partial: None,
+    })
 }
 
 impl BackendScalar for f64 {
-    fn dispatch<P>(kind: &SolverKind, problem: &mut P, config: &LmConfig<f64>) -> LmResult<f64>
+    fn dispatch<P>(kind: &SolverKind, problem: &mut P, config: &LmConfig<f64>) -> SolveResult<f64>
     where
         P: LmProblem<f64> + RootProblem<f64>,
     {
@@ -3690,7 +3762,7 @@ impl BackendScalar for f64 {
                 #[cfg(not(feature = "lapack"))]
                 {
                     let _ = kd;
-                    solver_unavailable(problem, "BandLapack", "not compiled in; rebuild with --features lapack")
+                    solver_unavailable("BandLapack", "not compiled in; rebuild with --features lapack")
                 }
             }
             SolverKind::Sparse(opts) => {
@@ -3703,7 +3775,7 @@ impl BackendScalar for f64 {
                 }
                 #[cfg(not(feature = "eigen"))]
                 {
-                    solver_unavailable(problem, "Eigen", "not compiled in; rebuild with --features eigen")
+                    solver_unavailable("Eigen", "not compiled in; rebuild with --features eigen")
                 }
             }
             SolverKind::Cholmod => {
@@ -3713,7 +3785,7 @@ impl BackendScalar for f64 {
                 }
                 #[cfg(not(feature = "cholmod"))]
                 {
-                    solver_unavailable(problem, "Cholmod", "not compiled in; rebuild with --features cholmod")
+                    solver_unavailable("Cholmod", "not compiled in; rebuild with --features cholmod")
                 }
             }
             SolverKind::CholmodSupernodal => {
@@ -3723,7 +3795,7 @@ impl BackendScalar for f64 {
                 }
                 #[cfg(not(feature = "cholmod-gpl"))]
                 {
-                    solver_unavailable(problem, "CholmodSupernodal", "not compiled in; rebuild with --features cholmod-gpl")
+                    solver_unavailable("CholmodSupernodal", "not compiled in; rebuild with --features cholmod-gpl")
                 }
             }
         }
@@ -3731,7 +3803,7 @@ impl BackendScalar for f64 {
 }
 
 impl BackendScalar for f32 {
-    fn dispatch<P>(kind: &SolverKind, problem: &mut P, config: &LmConfig<f32>) -> LmResult<f32>
+    fn dispatch<P>(kind: &SolverKind, problem: &mut P, config: &LmConfig<f32>) -> SolveResult<f32>
     where
         P: LmProblem<f32> + RootProblem<f32>,
     {
@@ -3746,7 +3818,7 @@ impl BackendScalar for f32 {
                 #[cfg(not(feature = "lapack"))]
                 {
                     let _ = kd;
-                    solver_unavailable(problem, "BandLapack", "not compiled in; rebuild with --features lapack")
+                    solver_unavailable("BandLapack", "not compiled in; rebuild with --features lapack")
                 }
             }
             SolverKind::Sparse(opts) => {
@@ -3759,14 +3831,14 @@ impl BackendScalar for f32 {
                 }
                 #[cfg(not(feature = "eigen"))]
                 {
-                    solver_unavailable(problem, "Eigen", "not compiled in; rebuild with --features eigen")
+                    solver_unavailable("Eigen", "not compiled in; rebuild with --features eigen")
                 }
             }
             SolverKind::Cholmod => {
-                solver_unavailable(problem, "Cholmod", "CHOLMOD supports only f64")
+                solver_unavailable("Cholmod", "CHOLMOD supports only f64")
             }
             SolverKind::CholmodSupernodal => {
-                solver_unavailable(problem, "CholmodSupernodal", "CHOLMOD supports only f64")
+                solver_unavailable("CholmodSupernodal", "CHOLMOD supports only f64")
             }
         }
     }
@@ -5210,24 +5282,24 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
 /// Solve with the default sparse backend ([`SparseFaer`], f64) -- the
 /// free-function twin of `model.solve_sparse(&cfg)`. Marginalizes what
 /// the model offers when that pays.
-pub fn solve_sparse(x0: &[f64], problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> LmResult<f64> {
+pub fn solve_sparse(x0: &[f64], problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> SolveResult<f64> {
     lm_solve(x0, &mut SparseFaer::new(), problem, config)
 }
 
 /// Solve with the default sparse backend ([`SparseFaer`], f32).
-pub fn solve_sparse_f32(x0: &[f32], problem: &mut impl LmProblem<f32>, config: &LmConfig<f32>) -> LmResult<f32> {
+pub fn solve_sparse_f32(x0: &[f32], problem: &mut impl LmProblem<f32>, config: &LmConfig<f32>) -> SolveResult<f32> {
     lm_solve(x0, &mut SparseFaerF32::new(), problem, config)
 }
 
 /// Renamed: the default sparse solve now carries the plain name.
 #[deprecated(since = "0.7.3", note = "renamed to `solve_sparse`")]
-pub fn solve_sparse_faer(x0: &[f64], problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> LmResult<f64> {
+pub fn solve_sparse_faer(x0: &[f64], problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> SolveResult<f64> {
     solve_sparse(x0, problem, config)
 }
 
 /// Renamed: the default sparse solve now carries the plain name.
 #[deprecated(since = "0.7.3", note = "renamed to `solve_sparse_f32`")]
-pub fn solve_sparse_faer_f32(x0: &[f32], problem: &mut impl LmProblem<f32>, config: &LmConfig<f32>) -> LmResult<f32> {
+pub fn solve_sparse_faer_f32(x0: &[f32], problem: &mut impl LmProblem<f32>, config: &LmConfig<f32>) -> SolveResult<f32> {
     solve_sparse_f32(x0, problem, config)
 }
 
@@ -5441,19 +5513,19 @@ impl LmSolver<f64> for SparseCholmod {
 
 /// Solve with Eigen SimplicialLLT sparse Cholesky backend (f64).
 #[cfg(feature = "eigen")]
-pub fn solve_sparse_eigen(x0: &[f64], problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> LmResult<f64> {
+pub fn solve_sparse_eigen(x0: &[f64], problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> SolveResult<f64> {
     lm_solve(x0, &mut SparseEigen::new(), problem, config)
 }
 
 /// Solve with Eigen SimplicialLLT sparse Cholesky backend (f32).
 #[cfg(feature = "eigen")]
-pub fn solve_sparse_eigen_f32(x0: &[f32], problem: &mut impl LmProblem<f32>, config: &LmConfig<f32>) -> LmResult<f32> {
+pub fn solve_sparse_eigen_f32(x0: &[f32], problem: &mut impl LmProblem<f32>, config: &LmConfig<f32>) -> SolveResult<f32> {
     lm_solve(x0, &mut SparseEigenF32::new(), problem, config)
 }
 
 /// Solve with CHOLMOD sparse Cholesky backend (f64).
 #[cfg(feature = "cholmod")]
-pub fn solve_sparse_cholmod(x0: &[f64], problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> LmResult<f64> {
+pub fn solve_sparse_cholmod(x0: &[f64], problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> SolveResult<f64> {
     lm_solve(x0, &mut SparseCholmod::new(), problem, config)
 }
 
@@ -5515,7 +5587,7 @@ impl LmSolver<f64> for SparseCholmodSupernodal {
 /// **WARNING (license):** the Supernodal module is **GPL-licensed**; a binary
 /// built with the `cholmod-gpl` feature is subject to the GPL.
 #[cfg(feature = "cholmod-gpl")]
-pub fn solve_sparse_cholmod_supernodal(x0: &[f64], problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> LmResult<f64> {
+pub fn solve_sparse_cholmod_supernodal(x0: &[f64], problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> SolveResult<f64> {
     lm_solve(x0, &mut SparseCholmodSupernodal::new(), problem, config)
 }
 
@@ -6075,7 +6147,7 @@ mod tests {
             }
         }
         let cfg = LmConfig::<f64>::default();
-        let r = solve(&[0.0, 0.0], &mut Quad, &cfg);
+        let r = solve(&[0.0, 0.0], &mut Quad, &cfg).unwrap();
         assert!(r.accepted_iterations > 0);
         assert!(r.accepted_iterations <= r.iterations);
         assert!((r.x[0] - 3.0).abs() < 1e-8 && (r.x[1] + 1.0).abs() < 1e-8);
@@ -6126,9 +6198,9 @@ mod tests {
             ..Default::default()
         };
         let x0 = [-1.9f64, 2.0];
-        let plain = lm_solve(&x0, &mut Dense, &mut rosenbrock_problem(), &base);
+        let plain = lm_solve(&x0, &mut Dense, &mut rosenbrock_problem(), &base).unwrap();
         let explicit = base.clone().with_driver(DefaultLambdaDriver::default());
-        let driven = lm_solve(&x0, &mut Dense, &mut rosenbrock_problem(), &explicit);
+        let driven = lm_solve(&x0, &mut Dense, &mut rosenbrock_problem(), &explicit).unwrap();
         assert_eq!(plain.x, driven.x);
         assert_eq!(plain.end_cost, driven.end_cost);
         assert_eq!(plain.iterations, driven.iterations);
@@ -6180,9 +6252,9 @@ mod tests {
             ..Default::default()
         };
         let x0 = [-1.9f64, 2.0];
-        let fixed = lm_solve(&x0, &mut Dense, &mut rosenbrock_problem(), &base);
+        let fixed = lm_solve(&x0, &mut Dense, &mut rosenbrock_problem(), &base).unwrap();
         let nielsen_cfg = base.clone().with_driver(NielsenLambdaDriver::default());
-        let arb = lm_solve(&x0, &mut Dense, &mut rosenbrock_problem(), &nielsen_cfg);
+        let arb = lm_solve(&x0, &mut Dense, &mut rosenbrock_problem(), &nielsen_cfg).unwrap();
         assert!(arb.end_cost < 1e-15, "nielsen end cost {}", arb.end_cost);
         assert!((arb.x[0] - 1.0).abs() < 1e-6 && (arb.x[1] - 1.0).abs() < 1e-6);
         assert!(arb.iterations <= fixed.iterations,
@@ -6337,7 +6409,7 @@ mod tests {
             &[0.0, 0.0],
             &mut p,
             &LmConfig { abs_precision: 1e-10, max_iters: 100, initial_lambda: 0.001, ..Default::default() },
-        );
+        ).unwrap();
 
         assert!((result.x[0] - 3.0).abs() < 1e-6, "x={}", result.x[0]);
         assert!((result.x[1] - 7.0).abs() < 1e-6, "y={}", result.x[1]);
@@ -6370,7 +6442,7 @@ mod tests {
             &[-1.0, 1.0],
             &mut p,
             &LmConfig { abs_precision: 1e-12, max_iters: 500, initial_lambda: 0.001, ..Default::default() },
-        );
+        ).unwrap();
 
         assert!((result.x[0] - 1.0).abs() < 1e-4, "x={}", result.x[0]);
         assert!((result.x[1] - 1.0).abs() < 1e-4, "y={}", result.x[1]);
@@ -6384,7 +6456,7 @@ mod tests {
         let result = solve(&[-1.2, 1.0], &mut p, &LmConfig {
             abs_precision: 1e-12, max_iters: 500, initial_lambda: 0.001,
             gather_timing: true, ..Default::default()
-        });
+        }).unwrap();
         let t = result.timing.as_ref().expect("timing gathered when enabled");
         // Every phase ran and was clocked.
         assert!(t.total > Duration::ZERO, "total not measured");
@@ -6424,7 +6496,7 @@ mod tests {
         let mut p = rosenbrock_problem();
         let result = solve(&[-1.2, 1.0], &mut p, &LmConfig {
             abs_precision: 1e-12, max_iters: 500, initial_lambda: 0.001, ..Default::default()
-        });
+        }).unwrap();
         assert!(result.timing.is_none());
     }
 
@@ -6444,7 +6516,7 @@ mod tests {
             &[0.0f32, 0.0],
             &mut p,
             &LmConfig { abs_precision: 1e-4, max_iters: 100, initial_lambda: 0.001, ..Default::default() },
-        );
+        ).unwrap();
 
         assert!((result.x[0] - 3.0).abs() < 1e-3, "x={}", result.x[0]);
         assert!((result.x[1] - 7.0).abs() < 1e-3, "y={}", result.x[1]);
@@ -6826,7 +6898,7 @@ mod tests {
             &[0.0, 0.0],
             &mut QuadProblem,
             &LmConfig { abs_precision: 1e-10, max_iters: 100, initial_lambda: 0.001, ..Default::default() },
-        );
+        ).unwrap();
         assert!((result.x[0] - 3.0).abs() < 1e-6, "x={}", result.x[0]);
         assert!((result.x[1] - 7.0).abs() < 1e-6, "y={}", result.x[1]);
         assert!(result.end_cost < 1e-10);
@@ -6867,7 +6939,7 @@ mod tests {
             &[0.0, 0.0],
             &mut QuadProblem,
             &LmConfig { abs_precision: 1e-10, max_iters: 100, initial_lambda: 0.001, ..Default::default() },
-        );
+        ).unwrap();
         assert!((result.x[0] - 3.0).abs() < 1e-6, "x={}", result.x[0]);
         assert!((result.x[1] - 7.0).abs() < 1e-6, "y={}", result.x[1]);
         assert!(result.end_cost < 1e-10);
@@ -6907,7 +6979,7 @@ mod tests {
 
         let mut problem = CountingProblem { coo_calls: 0, direct_calls: 0 };
         #[allow(deprecated)]
-        let result = solve_sparse_direct_csc(&[0.0, 0.0], &mut problem, &LmConfig::default());
+        let result = solve_sparse_direct_csc(&[0.0, 0.0], &mut problem, &LmConfig::default()).unwrap();
         assert!((result.x[0] - 3.0).abs() < 1e-6);
         assert!((result.x[1] - 7.0).abs() < 1e-6);
         assert_eq!(problem.coo_calls, 1, "COO assembly must run exactly once");
@@ -6990,13 +7062,13 @@ mod tests {
         let cfg = LmConfig::default();
         let mut solver = SparseFaer::new();
         // Same structure twice
-        let r1 = lm_solve(&[0.0, 0.0], &mut solver, &mut QP, &cfg);
-        let r2 = lm_solve(&[5.0, 5.0], &mut solver, &mut QP, &cfg);
+        let r1 = lm_solve(&[0.0, 0.0], &mut solver, &mut QP, &cfg).unwrap();
+        let r2 = lm_solve(&[5.0, 5.0], &mut solver, &mut QP, &cfg).unwrap();
         assert!((r1.x[0] - 3.0).abs() < 1e-6 && (r1.x[1] - 7.0).abs() < 1e-6);
         assert!((r2.x[0] - 3.0).abs() < 1e-6 && (r2.x[1] - 7.0).abs() < 1e-6);
         // Different structure with the same reused solver. Minimum of the
         // coupled quadratic is at (5/3, 2, 7/3) with cost 4/3.
-        let r3 = lm_solve(&[0.0, 0.0, 0.0], &mut solver, &mut QP3, &cfg);
+        let r3 = lm_solve(&[0.0, 0.0, 0.0], &mut solver, &mut QP3, &cfg).unwrap();
         assert!((r3.x[0] - 5.0 / 3.0).abs() < 1e-6, "x0={}", r3.x[0]);
         assert!((r3.x[1] - 2.0).abs() < 1e-6, "x1={}", r3.x[1]);
         assert!((r3.x[2] - 7.0 / 3.0).abs() < 1e-6, "x2={}", r3.x[2]);
@@ -7005,8 +7077,8 @@ mod tests {
         // Same exercise for SparseDirectCsc (pattern_built flag)
         #[allow(deprecated)]
         let mut direct = SparseDirectCsc::new();
-        let r4 = lm_solve(&[0.0, 0.0], &mut direct, &mut QP, &cfg);
-        let r5 = lm_solve(&[5.0, 5.0], &mut direct, &mut QP, &cfg);
+        let r4 = lm_solve(&[0.0, 0.0], &mut direct, &mut QP, &cfg).unwrap();
+        let r5 = lm_solve(&[5.0, 5.0], &mut direct, &mut QP, &cfg).unwrap();
         assert!((r4.x[0] - 3.0).abs() < 1e-6);
         assert!((r5.x[1] - 7.0).abs() < 1e-6);
     }
@@ -7140,9 +7212,9 @@ mod tests {
         // hand-written problem implements only the dense and COO paths,
         // so it exercises the explicit dense and COO-baseline entries.
         let config = LmConfig { abs_precision: 1e-10, max_iters: 100, initial_lambda: 0.001, ..Default::default() };
-        let r_dense = solve_dense(&x, &mut CoupledProblem, &config);
+        let r_dense = solve_dense(&x, &mut CoupledProblem, &config).unwrap();
         #[allow(deprecated)]
-        let r_sparse = solve_sparse_coo(&x, &mut CoupledProblem, &config);
+        let r_sparse = solve_sparse_coo(&x, &mut CoupledProblem, &config).unwrap();
         for i in 0..n {
             assert!((r_dense.x[i] - r_sparse.x[i]).abs() < 1e-6,
                 "x[{}]: dense={}, sparse={}", i, r_dense.x[i], r_sparse.x[i]);

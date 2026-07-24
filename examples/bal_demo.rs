@@ -144,7 +144,7 @@ fn main() {
         .with_rel_precision(1e-5)
         .with_patience(1);
 
-    let result = scene.solve_sparse(&cfg);
+    let result = scene.solve_sparse(&cfg).unwrap();
 
     // The cost is the summed squared pixel residual (2 per observation), so
     // the per-observation RMS reprojection error is sqrt(cost / n_obs).

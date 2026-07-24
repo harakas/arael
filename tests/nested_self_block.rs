@@ -49,7 +49,7 @@ fn nested_self_constraint_converges_dense() {
         ],
     };
     let cfg = LmConfig::<f32>::default();
-    let result = root.solve_dense(&cfg);
+    let result = root.solve_dense(&cfg).unwrap();
     assert!(result.end_cost < 1e-8, "cost did not converge: {}", result.end_cost);
 
     let expected: [&[f32]; 2] = [&[3.0, -2.0], &[5.0]];
@@ -72,7 +72,7 @@ fn nested_self_constraint_converges_sparse() {
         ],
     };
     let cfg = LmConfig::<f32>::default();
-    let result = root.solve_sparse(&cfg);
+    let result = root.solve_sparse(&cfg).unwrap();
     assert!(result.end_cost < 1e-8, "cost did not converge: {}", result.end_cost);
 
     let expected: [&[f32]; 3] = [&[1.5, -4.0, 2.0], &[-1.0], &[0.5, 7.0]];

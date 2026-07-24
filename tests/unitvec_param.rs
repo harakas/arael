@@ -80,7 +80,7 @@ fn grad_hessian_match_finite_differences() {
 #[test]
 fn solves_to_the_mean_direction() {
     let mut m = build(vect3::new(0.2, -0.5, 0.9));
-    let r = m.solve_dense(&LmConfig::conservative());
+    let r = m.solve_dense(&LmConfig::conservative()).unwrap();
     assert!(r.status.is_success(), "{:?}", r.status);
     let lm = &m.lms[0];
     let e = expected();
@@ -99,7 +99,7 @@ fn solves_to_the_mean_direction() {
 fn converges_from_far_start() {
     let e = expected();
     let mut m = build(vect3::new(-e.x, -e.y, -e.z + 0.2));
-    let r = m.solve_dense(&LmConfig::conservative().with_max_iters(300));
+    let r = m.solve_dense(&LmConfig::conservative().with_max_iters(300)).unwrap();
     assert!(r.status.is_success(), "{:?}", r.status);
     assert!((m.lms[0].dir.unit - e).norm() < 1e-6,
         "dir did not cross the sphere: {:?}", (m.lms[0].dir.unit.x, m.lms[0].dir.unit.y, m.lms[0].dir.unit.z));
@@ -114,7 +114,7 @@ fn fixed_direction_stays_put() {
     let mut params = Vec::new();
     m.serialize64(&mut params);
     assert_eq!(params.len(), 1, "only w remains");
-    let r = m.solve_dense(&LmConfig::conservative());
+    let r = m.solve_dense(&LmConfig::conservative()).unwrap();
     assert!(r.status.is_success(), "{:?}", r.status);
     assert!((m.lms[0].dir.unit - start).norm() < 1e-12);
 }
@@ -224,8 +224,8 @@ fn builtin_matches_the_macro_component() {
     let mut macro_m = M2 { lms };
 
     let cfg = LmConfig::conservative();
-    let rb = builtin.solve_dense(&cfg);
-    let rm = macro_m.solve_dense(&cfg);
+    let rb = builtin.solve_dense(&cfg).unwrap();
+    let rm = macro_m.solve_dense(&cfg).unwrap();
 
     assert!((rb.end_cost - rm.end_cost).abs() < 1e-12 * (1.0 + rb.end_cost),
         "cost: builtin {} vs macro {}", rb.end_cost, rm.end_cost);

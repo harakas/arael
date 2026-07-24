@@ -35,7 +35,7 @@ fn epsilon_for_in_constraint_f64() {
     let mut node = Node { x: Param::new(1.0), hb: SelfBlock::new() };
     let mut params = Vec::new();
     node.serialize64(&mut params);
-    let result = simple_lm::solve(&params, &mut node, &tight::<f64>());
+    let result = simple_lm::solve(&params, &mut node, &tight::<f64>()).unwrap();
     node.deserialize64(&result.x);
     assert!((node.x.value / f64::EPSILON - 1.0).abs() < 1e-3,
         "x should converge to f64::EPSILON ({:e}), got {:e}", f64::EPSILON, node.x.value);
@@ -56,7 +56,7 @@ fn epsilon_for_in_constraint_f32_resolves_to_f32_epsilon() {
     let mut node = NodeF { x: Param::new(1.0), hb: SelfBlock::new() };
     let mut params = Vec::new();
     node.serialize32(&mut params);
-    let result = simple_lm::solve_f32(&params, &mut node, &tight::<f32>());
+    let result = simple_lm::solve_f32(&params, &mut node, &tight::<f32>()).unwrap();
     node.deserialize32(&result.x);
     // The whole point: in an f32 model epsilon_for gives f32::EPSILON (~1.2e-7),
     // NOT the f64 value (~2.2e-16) that a folded literal would bake in.

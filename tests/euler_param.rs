@@ -44,7 +44,7 @@ fn fixed_euler_angle_param_does_not_panic_in_advance() {
 
     let mut params = Vec::new();
     w.serialize64(&mut params);
-    let result = simple_lm::solve(&params, &mut w, &LmConfig::default());
+    let result = simple_lm::solve(&params, &mut w, &LmConfig::default()).unwrap();
     w.deserialize64(&result.x);
 
     let free = &w.nodes[0];
@@ -83,7 +83,7 @@ fn fixed_euler_angle_param_drives_constraints() {
     let mut params = Vec::new();
     w.serialize64(&mut params);
     let result = simple_lm::solve(&params, &mut w,
-        &LmConfig { max_iters: 100, ..Default::default() });
+        &LmConfig { max_iters: 100, ..Default::default() }).unwrap();
     w.deserialize64(&result.x);
 
     let m = matrix3d::rotation_from_euler_angles(w.free_ea.value);
@@ -144,7 +144,7 @@ fn root_level_euler_angle_param_advances_through_gimbal() {
     let mut params = Vec::new();
     rig.serialize64(&mut params);
     let result = simple_lm::solve(&params, &mut rig,
-        &LmConfig { max_iters: 200, ..Default::default() });
+        &LmConfig { max_iters: 200, ..Default::default() }).unwrap();
     rig.deserialize64(&result.x);
 
     assert!(result.end_cost < 1e-12,
@@ -257,7 +257,7 @@ fn aerobatics_slam_barrel_roll_and_immelmann() {
             max_iters: 500,
             verbose: std::env::var("VERBOSE").is_ok(),
             ..Default::default()
-        });
+        }).unwrap();
     sky.deserialize64(&result.x);
 
     assert!(result.end_cost < 1e-10,
@@ -359,7 +359,7 @@ fn aerobatics_slam_f32() {
         max_iters: 500,
         verbose: std::env::var("VERBOSE").is_ok(),
         ..Default::default()
-    });
+    }).unwrap();
     sky.deserialize32(&result.x);
 
     // f32 floor: residuals of ~2 ulps per matrix element.

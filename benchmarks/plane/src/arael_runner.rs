@@ -276,7 +276,7 @@ impl bench_harness::arael::Model for World {
     fn solution(&self) -> Solution { extract(self) }
     fn solve(_: &RawScene, params: &[f64], m: &mut Self, cfg: &LmConfig<f64>)
         -> LmResult<f64> {
-        lm_solve(params, &mut SparseFaer::<f64>::new(), m, cfg)
+        lm_solve(params, &mut SparseFaer::<f64>::new(), m, cfg).unwrap()
     }
     fn tune(cfg: &mut LmConfig<f64>) {
         cfg.abs_precision = tolerance();
@@ -295,7 +295,7 @@ pub fn run_capped(raw: &RawScene, max_iters: usize) -> Solution {
     let mut params: Vec<f64> = Vec::new();
     world.serialize64(&mut params);
     let cfg = bench_harness::arael::config::<World>(raw, max_iters);
-    let r = lm_solve(&params, &mut SparseFaer::<f64>::new(), &mut world, &cfg);
+    let r = lm_solve(&params, &mut SparseFaer::<f64>::new(), &mut world, &cfg).unwrap();
     world.deserialize64(&r.x);
     extract(&world)
 }
@@ -305,7 +305,7 @@ pub fn run_f32_capped(raw: &RawScene, max_iters: usize) -> Solution {
     let mut params: Vec<f32> = Vec::new();
     world.serialize32(&mut params);
     let cfg = bench_harness::arael::config::<WorldF>(raw, max_iters);
-    let r = lm_solve(&params, &mut SparseFaer::<f32>::new(), &mut world, &cfg);
+    let r = lm_solve(&params, &mut SparseFaer::<f32>::new(), &mut world, &cfg).unwrap();
     world.deserialize32(&r.x);
     extract_f32(&world)
 }
@@ -334,7 +334,7 @@ impl bench_harness::arael::Model for WorldF {
     fn solution(&self) -> Solution { extract_f32(self) }
     fn solve(_: &RawScene, params: &[f32], m: &mut Self, cfg: &LmConfig<f32>)
         -> LmResult<f32> {
-        lm_solve(params, &mut SparseFaer::<f32>::new(), m, cfg)
+        lm_solve(params, &mut SparseFaer::<f32>::new(), m, cfg).unwrap()
     }
     fn tune(cfg: &mut LmConfig<f32>) {
         cfg.abs_precision = tolerance_f32() as f32;

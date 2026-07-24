@@ -78,7 +78,7 @@ fn gradient_carries_the_symbolic_derivative() {
 #[test]
 fn solves_the_reparameterized_fit() {
     let mut m = build();
-    let r = m.solve_dense(&LmConfig::conservative());
+    let r = m.solve_dense(&LmConfig::conservative()).unwrap();
     assert!(r.status.is_success(), "{:?}", r.status);
     assert!((m.curves[0].w.value - (5.0f64 / 2.0).ln()).abs() < 1e-8,
         "w0 = {}", m.curves[0].w.value);

@@ -217,7 +217,7 @@
 //! #                DataEntry { x: 2.0, y: 5.0 }],
 //! #     sigma: 1.0, gamma: 10.0,
 //! # };
-//! # let r = m.fit();
+//! # let r = m.fit().unwrap();
 //! # assert!(r.end_cost < r.start_cost);
 //! # assert!((m.a.value - 2.0).abs() < 1e-2 && (m.b.value - 1.0).abs() < 1e-2);
 //! ```
@@ -314,7 +314,7 @@
 //!
 //! ```ignore
 //! let (mut path, ..) = build_path(&Cfg::default());  // synthetic arc + noisy bearings
-//! let result = path.solve_sparse(&LmConfig::well_conditioned().with_verbose(true));
+//! let result = path.solve_sparse(&LmConfig::well_conditioned().with_verbose(true)).unwrap();
 //! ```
 //!
 //! Full runnable demo:
@@ -1038,10 +1038,17 @@
 //!
 //! ```rust,ignore
 //! use arael::simple_lm::LmProblem; // or `use arael::prelude::*;`
-//! let result = model.solve_with(&mut Band::new(11), &cfg); // any LmSolver backend
-//! let result = model.solve_sparse(&cfg); // = solve_with(SparseFaer): the default backend
-//! let result = model.solve_dense(&cfg);  // = solve_with(Dense)
+//! let result = model.solve_with(&mut Band::new(11), &cfg)?; // any LmSolver backend
+//! let result = model.solve_sparse(&cfg)?; // = solve_with(SparseFaer): the default backend
+//! let result = model.solve_dense(&cfg)?;  // = solve_with(Dense)
 //! ```
+//!
+//! Every solve returns [`SolveResult`](simple_lm::SolveResult) --
+//! `Ok(LmResult)` when the solve terminated by a stopping rule (including
+//! `MaxIterations` and `TimeLimit`), `Err(`[`SolveFailure`](simple_lm::SolveFailure)`)`
+//! when the system could not be built or factored or a Hessian diagonal
+//! went bad, with the best accepted state carried in the error when one
+//! exists.
 //!
 //! `solve_sparse` (indexed sparse faer) is the right default: for most
 //! real problems the Hessian is sparse enough for sparse Cholesky, and
@@ -1109,7 +1116,7 @@
 //! let cfg = LmConfig::conservative();
 //! // solve_sparse reads the params from the model, runs LM, and writes the
 //! // optimized values back into it (LmProblem provides the solve methods).
-//! let result = model.solve_sparse(&cfg);
+//! let result = model.solve_sparse(&cfg).unwrap();
 //! println!("{} iterations: {:.4} -> {:.4}",
 //!     result.iterations, result.start_cost, result.end_cost);
 //! # assert!((model.x.value - 3.0).abs() < 1e-3);
@@ -1153,8 +1160,8 @@
 //! minimizes `1/2 sum r^2` reads the same tolerance twice as tight.
 //!
 //! `min_diagonal` is not a termination rule but belongs with them, because
-//! without it a parameter of zero curvature ENDS the solve
-//! (`LmStatus::DegenerateDiagonal`). Damping is
+//! without it a parameter of zero curvature FAILS the solve
+//! (`Err` with [`SolveFailureKind::DegenerateDiagonal`](simple_lm::SolveFailureKind)). Damping is
 //! `H[i,i] + lambda * max(H[i,i], min_diagonal)`, so the floor keeps the damped
 //! system positive definite and the untouched parameter simply does not move.
 //!
@@ -1428,7 +1435,7 @@
 //!
 //! ```rust,ignore
 //! use arael::covariance::{Covariance, CovMode};
-//! model.solve_sparse(&cfg);
+//! model.solve_sparse(&cfg)?;
 //! let cov = model.assemble_covariance(CovMode::AllMarginals)?;
 //! let sd  = cov.std_dev(&model.poses[0])?;          // 1-sigma per scalar (tangent coords)
 //! let s   = cov.marginal_cov(&model.landmarks[3])?; // full covariance block
@@ -1534,11 +1541,11 @@
 //!    3D formulation is simpler, better conditioned, and has no
 //!    pixel-wraparound / behind-camera pathology.
 //!
-//! 3. **Non-positive diagonal.** A solve that ends in
-//!    `LmStatus::DegenerateDiagonal { param }` is the loudest possible
-//!    signal that some parameter is untouched by every constraint
+//! 3. **Non-positive diagonal.** A solve that fails with
+//!    `SolveFailureKind::DegenerateDiagonal { param, fault }` is the loudest
+//!    possible signal that some parameter is untouched by every constraint
 //!    (indices left at `u32::MAX`) or is receiving a negative
-//!    contribution. The status names the parameter. Either outcome is a
+//!    contribution. The error names the parameter. Either outcome is a
 //!    bug distinct from f32 accumulation noise.
 //!
 //! 4. **Gradient magnitude.** After

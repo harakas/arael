@@ -124,7 +124,7 @@ fn fast_model_solves_to_the_optimum() {
     let mut params = Vec::new();
     mf.serialize64(&mut params);
     let result = simple_lm::solve(&params, &mut mf,
-        &LmConfig { max_iters: 100, ..Default::default() });
+        &LmConfig { max_iters: 100, ..Default::default() }).unwrap();
     mf.deserialize64(&result.x);
 
     assert!(result.end_cost < 1e-14, "fast model must converge, cost={}", result.end_cost);

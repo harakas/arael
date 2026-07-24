@@ -69,7 +69,7 @@ fn build_chain() -> Chain {
 #[test]
 fn converges_before_max_iters() {
     let mut c = build_chain();
-    let r = c.solve_sparse(&LmConfig { max_iters: 200, ..Default::default() });
+    let r = c.solve_sparse(&LmConfig { max_iters: 200, ..Default::default() }).unwrap();
     assert!(r.iterations < 200, "should converge before the cap, took {}", r.iterations);
     assert!(r.end_cost < r.start_cost, "cost should decrease: {} -> {}", r.start_cost, r.end_cost);
     assert!(r.accepted_iterations >= 1);
@@ -79,7 +79,7 @@ fn converges_before_max_iters() {
 fn max_iters_is_respected() {
     for k in [1usize, 2, 5, 10] {
         let mut c = build_chain();
-        let r = c.solve_sparse(&LmConfig { max_iters: k, min_iters: 0, ..Default::default() });
+        let r = c.solve_sparse(&LmConfig { max_iters: k, min_iters: 0, ..Default::default() }).unwrap();
         assert!(r.iterations <= k, "iterations {} exceeded max_iters {}", r.iterations, k);
     }
 }
@@ -91,17 +91,17 @@ fn or_each_criterion_stops_independently() {
     let mut ca = build_chain();
     let ra = ca.solve_sparse(&LmConfig {
         abs_precision: 1e30, rel_precision: 0.0,
-        min_iters: 0, patience: 1, max_iters: 200, ..Default::default() });
+        min_iters: 0, patience: 1, max_iters: 200, ..Default::default() }).unwrap();
     // REL arm alone: abs_precision 0 can never fire.
     let mut cr = build_chain();
     let rr = cr.solve_sparse(&LmConfig {
         abs_precision: 0.0, rel_precision: 1e30,
-        min_iters: 0, patience: 1, max_iters: 200, ..Default::default() });
+        min_iters: 0, patience: 1, max_iters: 200, ..Default::default() }).unwrap();
     // Neither loose -> runs to real convergence.
     let mut ct = build_chain();
     let rt = ct.solve_sparse(&LmConfig {
         abs_precision: 1e-14, rel_precision: 1e-14,
-        min_iters: 0, patience: 3, max_iters: 200, ..Default::default() });
+        min_iters: 0, patience: 3, max_iters: 200, ..Default::default() }).unwrap();
 
     // Each single loose arm halts the solve well before convergence...
     assert!(ra.iterations < rt.iterations,
@@ -122,9 +122,9 @@ fn patience_controls_stop() {
         rel_precision: 1e30, abs_precision: 0.0,
         min_iters: 0, patience, max_iters: 200, ..Default::default() };
     let mut c2 = build_chain();
-    let r2 = c2.solve_sparse(&cfg(2));
+    let r2 = c2.solve_sparse(&cfg(2)).unwrap();
     let mut c8 = build_chain();
-    let r8 = c8.solve_sparse(&cfg(8));
+    let r8 = c8.solve_sparse(&cfg(8)).unwrap();
     assert!(r8.iterations > r2.iterations,
         "patience 8 ({}) should run longer than patience 2 ({})", r8.iterations, r2.iterations);
 }
@@ -133,7 +133,7 @@ fn patience_controls_stop() {
 fn status_reports_convergence() {
     // A normal solve stops via the small-step/noise-floor path (R11).
     let mut c = build_chain();
-    let r = c.solve_sparse(&LmConfig { max_iters: 200, ..Default::default() });
+    let r = c.solve_sparse(&LmConfig { max_iters: 200, ..Default::default() }).unwrap();
     assert_eq!(r.status, LmStatus::Converged, "normal solve should report Converged");
     assert!(r.final_lambda.is_finite(), "final_lambda should be finite, got {}", r.final_lambda);
 }
@@ -142,7 +142,7 @@ fn status_reports_convergence() {
 fn status_reports_max_iterations() {
     // A tight cap stops before convergence -> MaxIterations, not Converged.
     let mut c = build_chain();
-    let r = c.solve_sparse(&LmConfig { max_iters: 2, min_iters: 0, ..Default::default() });
+    let r = c.solve_sparse(&LmConfig { max_iters: 2, min_iters: 0, ..Default::default() }).unwrap();
     assert_eq!(r.status, LmStatus::MaxIterations, "capped solve should report MaxIterations");
     assert_eq!(r.iterations, 2);
 }
@@ -192,7 +192,7 @@ fn driver_can_stop_on_an_accepted_step() {
     let r = c.solve_sparse(
         &LmConfig { max_iters: 200, min_iters: 50, ..Default::default() }
             .with_driver(StopOnAccept { stop_after: 2, seen: 0 }),
-    );
+    ).unwrap();
     assert_eq!(r.status, LmStatus::DriverTerminated);
     assert_eq!(r.accepted_iterations, 2, "should stop on the 2nd accepted step");
     // The driver's rule beats the config's: min_iters 50 did not hold it open.
@@ -208,7 +208,7 @@ fn stopping_on_accept_keeps_the_step() {
     let r = c.solve_sparse(
         &LmConfig { max_iters: 200, min_iters: 0, ..Default::default() }
             .with_driver(StopOnAccept { stop_after: 1, seen: 0 }),
-    );
+    ).unwrap();
     assert_eq!(r.status, LmStatus::DriverTerminated);
     assert_eq!(r.accepted_iterations, 1);
     assert!(
@@ -233,7 +233,7 @@ fn stopping_on_accept_keeps_the_step() {
     let r2 = c2.solve_sparse(
         &LmConfig { max_iters: 200, min_iters: 0, ..Default::default() }
             .with_driver(StopOnAccept { stop_after: 2, seen: 0 }),
-    );
+    ).unwrap();
     assert_eq!(r2.accepted_iterations, 2);
     assert!(
         r2.end_cost < r.end_cost,
@@ -319,7 +319,7 @@ fn driver_can_stop_on_a_factorization_failure() {
         &mut NeverFactorizes(Dense),
         &LmConfig { max_iters: 200, min_iters: 0, ..Default::default() }
             .with_driver(GiveUpOnFactorization { tolerate: 3, seen: 0 }),
-    );
+    ).unwrap();
     // No step was ever produced, so the solve reports the same exhaustion
     // status as a driver that gives up on a rejection.
     assert_eq!(r.status, LmStatus::LambdaCeiling);
@@ -337,7 +337,7 @@ fn tolerating_factorization_failures_hits_the_retry_budget_instead() {
         &mut NeverFactorizes(Dense),
         &LmConfig { max_iters: 200, min_iters: 0, ..Default::default() }
             .with_driver(GiveUpOnFactorization { tolerate: usize::MAX, seen: 0 }),
-    );
+    ).unwrap();
     assert_eq!(r.status, LmStatus::RetryBudgetExhausted);
     assert_eq!(r.accepted_iterations, 0);
 }
@@ -357,7 +357,7 @@ fn a_spent_budget_stops_the_solve_and_overrides_min_iters() {
         max_iters: 200,
         min_iters: 50,
         ..Default::default()
-    });
+    }).unwrap();
     assert_eq!(r.status, LmStatus::TimeLimit);
     assert_eq!(r.accepted_iterations, 0, "no time to take a step");
     assert_eq!(r.end_cost, r.start_cost, "no step taken, so the cost cannot move");
@@ -372,13 +372,13 @@ fn a_generous_budget_does_not_change_the_answer() {
     let cfg = LmConfig::<f64> { max_iters: 200, ..Default::default() };
 
     let mut a = build_chain();
-    let unlimited = a.solve_sparse(&cfg);
+    let unlimited = a.solve_sparse(&cfg).unwrap();
 
     let mut b = build_chain();
     let limited = b.solve_sparse(&LmConfig::<f64> {
         time_limit: Some(Duration::from_secs(60)),
         ..cfg.clone()
-    });
+    }).unwrap();
 
     assert_eq!(limited.status, unlimited.status);
     assert_eq!(limited.status, LmStatus::Converged);
@@ -399,7 +399,7 @@ fn tolerances_are_off_by_default() {
     // Absent unless asked for: a default solve must be bit-identical to one
     // that names them as None.
     let mut a = build_chain();
-    let base = a.solve_sparse(&LmConfig { max_iters: 200, ..Default::default() });
+    let base = a.solve_sparse(&LmConfig { max_iters: 200, ..Default::default() }).unwrap();
 
     let mut b = build_chain();
     let explicit = b.solve_sparse(&LmConfig::<f64> {
@@ -408,7 +408,7 @@ fn tolerances_are_off_by_default() {
         parameter_tolerance: None,
         predicted_reduction_tolerance: None,
         ..Default::default()
-    });
+    }).unwrap();
     assert_eq!(base.status, explicit.status);
     assert_eq!(base.iterations, explicit.iterations);
     assert_eq!(base.end_cost, explicit.end_cost);
@@ -423,7 +423,7 @@ fn gradient_tolerance_stops_the_solve() {
     let r = c.solve_sparse(&LmConfig::<f64> {
         gradient_tolerance: Some(1e30),
         min_iters: 0, max_iters: 200, ..Default::default()
-    });
+    }).unwrap();
     assert_eq!(r.status, LmStatus::GradientTolerance);
 
     // And a tolerance so tight it can never fire leaves the solve alone.
@@ -431,7 +431,7 @@ fn gradient_tolerance_stops_the_solve() {
     let tight = c.solve_sparse(&LmConfig::<f64> {
         gradient_tolerance: Some(0.0),
         min_iters: 0, max_iters: 200, ..Default::default()
-    });
+    }).unwrap();
     assert_eq!(tight.status, LmStatus::Converged, "an impossible tolerance must not fire");
 }
 
@@ -445,9 +445,9 @@ fn gradient_tolerance_is_a_different_question_from_the_cost_test() {
         min_iters: 0, max_iters: 200, ..Default::default()
     };
     let mut a = build_chain();
-    let without = a.solve_sparse(&cfg(None));
+    let without = a.solve_sparse(&cfg(None)).unwrap();
     let mut b = build_chain();
-    let with = b.solve_sparse(&cfg(Some(1e-4)));
+    let with = b.solve_sparse(&cfg(Some(1e-4))).unwrap();
 
     assert_ne!(without.status, LmStatus::GradientTolerance);
     assert_eq!(with.status, LmStatus::GradientTolerance);
@@ -472,7 +472,7 @@ fn parameter_tolerance_stops_the_solve() {
     let r = c.solve_sparse(&LmConfig::<f64> {
         parameter_tolerance: Some(1e30),
         min_iters: 0, max_iters: 200, ..Default::default()
-    });
+    }).unwrap();
     assert_eq!(r.status, LmStatus::ParameterTolerance);
     assert_eq!(r.accepted_iterations, 1, "should stop on the first accepted step");
     // The step is kept: it was an improvement, just a small one in x.
@@ -483,7 +483,7 @@ fn parameter_tolerance_stops_the_solve() {
     let tight = c.solve_sparse(&LmConfig::<f64> {
         parameter_tolerance: Some(0.0),
         min_iters: 0, max_iters: 200, ..Default::default()
-    });
+    }).unwrap();
     assert_eq!(tight.status, LmStatus::Converged, "an impossible tolerance must not fire");
 }
 
@@ -496,9 +496,9 @@ fn parameter_tolerance_is_a_different_question_from_the_cost_test() {
         min_iters: 0, max_iters: 200, ..Default::default()
     };
     let mut a = build_chain();
-    let without = a.solve_sparse(&cfg(None));
+    let without = a.solve_sparse(&cfg(None)).unwrap();
     let mut b = build_chain();
-    let with = b.solve_sparse(&cfg(Some(1e-6)));
+    let with = b.solve_sparse(&cfg(Some(1e-6))).unwrap();
 
     assert_ne!(without.status, LmStatus::ParameterTolerance);
     assert_eq!(with.status, LmStatus::ParameterTolerance);
@@ -517,7 +517,7 @@ fn predicted_reduction_stops_the_solve() {
     let r = c.solve_sparse(&LmConfig::<f64> {
         predicted_reduction_tolerance: Some(1e30),
         min_iters: 0, max_iters: 200, ..Default::default()
-    });
+    }).unwrap();
     assert_eq!(r.status, LmStatus::PredictedReduction);
     assert_eq!(r.accepted_iterations, 1, "should stop on the first accepted step");
     assert!(r.end_cost < r.start_cost, "the triggering step is kept");
@@ -528,7 +528,7 @@ fn predicted_reduction_stops_the_solve() {
     let tight = c.solve_sparse(&LmConfig::<f64> {
         predicted_reduction_tolerance: Some(0.0),
         min_iters: 0, max_iters: 200, ..Default::default()
-    });
+    }).unwrap();
     assert_eq!(tight.status, LmStatus::Converged, "an impossible tolerance must not fire");
 }
 
@@ -542,9 +542,9 @@ fn predicted_reduction_is_a_forward_looking_test() {
         min_iters: 0, max_iters: 200, ..Default::default()
     };
     let mut a = build_chain();
-    let without = a.solve_sparse(&cfg(None));
+    let without = a.solve_sparse(&cfg(None)).unwrap();
     let mut b = build_chain();
-    let with = b.solve_sparse(&cfg(Some(1e-8)));
+    let with = b.solve_sparse(&cfg(Some(1e-8))).unwrap();
 
     assert_ne!(without.status, LmStatus::PredictedReduction);
     assert_eq!(with.status, LmStatus::PredictedReduction);
@@ -581,7 +581,7 @@ fn both_tolerances_respect_min_iters() {
         },
     ] {
         let mut c = build_chain();
-        let r = c.solve_sparse(&cfg);
+        let r = c.solve_sparse(&cfg).unwrap();
         assert!(
             r.iterations >= 6,
             "min_iters 6 not honoured, stopped at {} with {:?}", r.iterations, r.status
@@ -596,7 +596,7 @@ fn both_tolerances_respect_min_iters() {
 #[test]
 fn steps_are_empty_unless_timing_was_asked_for() {
     let mut c = build_chain();
-    let r = c.solve_sparse(&LmConfig { max_iters: 200, ..Default::default() });
+    let r = c.solve_sparse(&LmConfig { max_iters: 200, ..Default::default() }).unwrap();
     assert!(r.timing.is_none(), "no timing unless gather_timing");
 }
 
@@ -607,7 +607,7 @@ fn one_step_record_per_attempt_including_damping_retries() {
     let mut c = build_chain();
     let r = c.solve_sparse(&LmConfig {
         max_iters: 200, gather_timing: true, ..Default::default()
-    });
+    }).unwrap();
     let t = r.timing.as_ref().expect("gather_timing was set");
 
     assert_eq!(
@@ -645,7 +645,7 @@ fn each_step_carries_its_own_phase_breakdown() {
     let mut c = build_chain();
     let r = c.solve_sparse(&LmConfig {
         max_iters: 200, gather_timing: true, ..Default::default()
-    });
+    }).unwrap();
     let t = r.timing.as_ref().unwrap();
 
     for s in &t.steps {
@@ -701,7 +701,7 @@ fn the_timeline_shows_the_cost_coming_down() {
     let mut c = build_chain();
     let r = c.solve_sparse(&LmConfig {
         max_iters: 200, gather_timing: true, ..Default::default()
-    });
+    }).unwrap();
     let t = r.timing.unwrap();
     let accepted: std::vec::Vec<_> = t.steps.iter().filter(|s| s.accepted).collect();
     assert!(accepted.len() >= 2);
@@ -728,7 +728,7 @@ fn logging_can_be_piped_and_silenced() {
     log::set_sink(move |level, msg| sink.lock().unwrap().push((level, msg.to_string())));
 
     let mut c = build_chain();
-    let _ = c.solve_sparse(&LmConfig { max_iters: 200, verbose: true, ..Default::default() });
+    let _ = c.solve_sparse(&LmConfig { max_iters: 200, verbose: true, ..Default::default() }).unwrap();
 
     // Tests in this binary run concurrently and the sink is global, so assert on
     // what MUST be there rather than on the buffer being pure -- a stray warn!
@@ -744,7 +744,7 @@ fn logging_can_be_piped_and_silenced() {
     assert!(!log::enabled(Level::Error), "Off must drop even errors");
 
     let mut c = build_chain();
-    let _ = c.solve_sparse(&LmConfig { max_iters: 200, verbose: true, ..Default::default() });
+    let _ = c.solve_sparse(&LmConfig { max_iters: 200, verbose: true, ..Default::default() }).unwrap();
     assert_eq!(seen.lock().unwrap().len(), 0, "a silenced arael emits nothing");
 
     // Put the world back for any other test in this binary.
@@ -894,7 +894,7 @@ fn a_real_solve_reports_itself() {
     let mut c = build_chain();
     let r = c.solve_sparse(&LmConfig {
         max_iters: 200, gather_timing: true, ..Default::default()
-    });
+    }).unwrap();
     let s = r.report();
     assert!(s.is_ascii());
     assert!(s.contains("converged"));
@@ -903,19 +903,20 @@ fn a_real_solve_reports_itself() {
 
     // Without gather_timing there is no timing block, and the report still works.
     let mut c = build_chain();
-    let bare = c.solve_sparse(&LmConfig { max_iters: 200, ..Default::default() });
+    let bare = c.solve_sparse(&LmConfig { max_iters: 200, ..Default::default() }).unwrap();
     let s = bare.report();
     assert!(s.contains("converged"));
     assert!(!s.contains("assembly"), "no timing was gathered, so none is reported");
 }
 
 #[test]
-fn a_degenerate_solve_says_which_parameter() {
+fn an_aborted_partial_reports_aborted() {
+    // The Aborted status appears only inside SolveFailure::partial; its
+    // report labels it and it is never a success.
     let mut r = synthetic_result();
-    r.status = LmStatus::DegenerateDiagonal { param: 17 };
+    r.status = LmStatus::Aborted;
     let s = r.report();
-    assert!(s.contains("degenerate diagonal"));
-    assert!(s.contains("parameter 17"), "the report must name it:\n{s}");
+    assert!(s.contains("aborted"), "the report must label it:\n{s}");
     assert!(!r.status.is_success());
 }
 
@@ -929,7 +930,7 @@ fn the_structural_analysis_is_reported_apart_from_the_assembly() {
     let mut c = build_chain();
     let r = c.solve_sparse(&LmConfig {
         max_iters: 200, gather_timing: true, ..Default::default()
-    });
+    }).unwrap();
     let t = r.timing.as_ref().unwrap();
 
     // The sparse backend discovers the pattern, decides the Schur reduction,
@@ -966,7 +967,7 @@ fn a_backend_that_does_no_analysis_reports_none() {
     let mut c = build_chain();
     let r = c.solve_dense(&LmConfig {
         max_iters: 200, gather_timing: true, ..Default::default()
-    });
+    }).unwrap();
     let t = r.timing.as_ref().unwrap();
     assert_eq!(t.analysis_count, 0);
     assert_eq!(t.analysis, std::time::Duration::ZERO);

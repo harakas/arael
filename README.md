@@ -175,7 +175,7 @@ fn main() {
     println!("Linear regression: y = {}*x + {}", model.a.value, model.b.value);
 
     // Robust nonlinear fit -- suppresses outlier influence
-    let result = model.fit_with(&LmConfig::well_conditioned().with_verbose(true));
+    let result = model.fit_with(&LmConfig::well_conditioned().with_verbose(true)).unwrap();
     println!("Robust fit: y = {}*x + {}", model.a.value, model.b.value);
 }
 ```
@@ -274,7 +274,7 @@ values back into the structs:
 ```rust
 let (mut path, ..) = build_path(&Cfg::default());  // synthetic arc + noisy bearings
 let cfg = LmConfig::well_conditioned().with_verbose(true);
-let result = path.solve_sparse(&cfg);
+let result = path.solve_sparse(&cfg).unwrap();
 println!("{} iterations, cost {:.1} -> {:.1}",
     result.iterations, result.start_cost, result.end_cost);
 ```
@@ -421,10 +421,16 @@ solves over a raw parameter vector you manage yourself:
 
 ```rust,ignore
 use arael::simple_lm::LmProblem; // or `use arael::prelude::*;`
-let result = model.solve_with(&mut Band::new(11), &cfg); // any LmSolver backend
-let result = model.solve_sparse(&cfg); // = solve_with(SparseFaer): the default backend
-let result = model.solve_dense(&cfg);  // = solve_with(Dense)
+let result = model.solve_with(&mut Band::new(11), &cfg)?; // any LmSolver backend
+let result = model.solve_sparse(&cfg)?; // = solve_with(SparseFaer): the default backend
+let result = model.solve_dense(&cfg)?;  // = solve_with(Dense)
 ```
+
+Every solve returns `Result<LmResult, SolveFailure>`: `Ok` when the solve
+terminated by a stopping rule (including `MaxIterations` and `TimeLimit`),
+`Err` when the system could not be built or factored or a Hessian diagonal
+went bad -- with the best accepted state carried in the error when one
+exists. See [docs/SOLVERS.md](docs/SOLVERS.md#solve-failures).
 
 `solve_sparse` (indexed sparse faer) is the right default: for most
 real problems the Hessian is sparse enough for sparse Cholesky, and
@@ -508,7 +514,7 @@ span, so a pose, a landmark, or a whole collection is a valid query.
 
 ```rust,ignore
 use arael::covariance::{Covariance, CovMode};
-model.solve_sparse(&cfg);                         // solution written back into the model
+model.solve_sparse(&cfg)?;                        // solution written back into the model
 let cov = model.assemble_covariance(CovMode::AllMarginals)?;
 let sd  = cov.std_dev(&model.poses[0])?;           // one entity's 1-sigma (tangent coords)
 let s   = cov.marginal_cov(&model.landmarks[3])?;  // its full covariance block
@@ -621,7 +627,7 @@ Rules:
 
     ```rust,ignore
     let cfg = LmConfig::conservative().with_verbose(true).with_gather_timing(true);
-    let result = model.solve_sparse(&cfg);
+    let result = model.solve_sparse(&cfg).unwrap();
     result.pretty_print();
     ```
 
@@ -635,7 +641,7 @@ Rules:
 
     The pair is `iteration/retry`. A negative improvement is a rejected step: the parameters stay put, lambda goes up, and the next line retries from the same linearization.
 
-    On a Cholesky rejection the line also reports non-finite counts for grad / diagonal / cur_x / matrix -- four quick signals that narrow the problem before any deeper digging. (A non-positive diagonal is caught before the inner loop and ends the solve with `LmStatus::DegenerateDiagonal`, naming the parameter.)
+    On a Cholesky rejection the line also reports non-finite counts for grad / diagonal / cur_x / matrix -- four quick signals that narrow the problem before any deeper digging. (A non-positive diagonal is caught before the inner loop and fails the solve with `SolveFailureKind::DegenerateDiagonal`, naming the parameter.)
 
     `gather_timing` also makes the result print itself -- status, cost, where the time went, and every attempt in order:
 
@@ -646,13 +652,13 @@ Rules:
 
     That is `pretty_print()`, straight from [examples/slam2d_simple_demo.rs](examples/slam2d_simple_demo.rs). `print()` writes the same thing in plain ASCII -- safe in a log or a file -- and `report()` / `pretty_report()` hand it back as a `String` instead of writing it.
 
-    A healthy pass is steady cost drops with no Cholesky rejections. A run of rejections in the timeline means the step size is being fought over -- try the gain-ratio `NielsenLambdaDriver`. If verbose reports NaN / Inf, or the solve ends in `LmStatus::DegenerateDiagonal`, skip to steps 2 / 3 below; otherwise continue to the cost-by-label breakdown.
+    A healthy pass is steady cost drops with no Cholesky rejections. A run of rejections in the timeline means the step size is being fought over -- try the gain-ratio `NielsenLambdaDriver`. If verbose reports NaN / Inf, or the solve fails with `SolveFailureKind::DegenerateDiagonal`, skip to steps 2 / 3 below; otherwise continue to the cost-by-label breakdown.
 
 1. **Cost breakdown by label.** Name your constraint attributes with `#[arael(constraint(hb, name = "drift", { ... }))]` so each group shows up under its own label in the sum-of-squares. Call `model.calc_cost_table(&params)` for a `HashMap<&'static str, T>` and log it. A single label dominating the total is usually the culprit -- either an overly tight sigma, bad initial values for its inputs, or a constraint that's mathematically unsatisfiable.
 
 2. **NaN or Inf residuals / derivatives.** The verbose-mode output from step 0 already tells you whether grad / matrix / params contain non-finite values at the failing step. If they do, walk `model.calc_jacobian(&params).rows` to find the specific row. A NaN residual or partial derivative usually means a `sqrt`, `acos`, `asin`, or `atan2` saw a degenerate input (zero-length vector, both-zero arguments, `|x| > 1` for asin/acos). `arael-sym` ships `safe_sqrt`, `safe_asin`, `safe_acos`, `safe_atan2` that clamp / regularise at the singular point and produce non-diverging derivatives. **Before reaching for them, prefer to redesign the constraint so the singularity can't be hit.** A `safe_*` wrapper hides the degeneracy from the solver and may leave the residual insensitive to the parameters that should drive it out of the singular region; an equivalent constraint formulated on the right geometric quantity avoids the singularity entirely. E.g. match 3D landmarks to features in 3D space (compare world-frame directions or positions) instead of projecting through a camera model and computing 2D image-plane residuals -- the 3D formulation is simpler, better conditioned, and has no pixel-wraparound / behind-camera pathology.
 
-3. **Non-positive diagonal.** A solve that ends in `LmStatus::DegenerateDiagonal { param }` names the offending parameter and is the loudest possible signal that some parameter is untouched by every constraint (indices left at `u32::MAX`) or is receiving a negative contribution. Either outcome is a bug distinct from f32 accumulation noise.
+3. **Non-positive diagonal.** A solve that fails with `SolveFailureKind::DegenerateDiagonal { param, fault }` names the offending parameter and is the loudest possible signal that some parameter is untouched by every constraint (indices left at `u32::MAX`) or is receiving a negative contribution. Either outcome is a bug distinct from f32 accumulation noise.
 
 4. **Gradient magnitude.** After `calc_grad_hessian_dense`, the maximum absolute gradient component should be small relative to the cost scale at a local minimum. A huge gradient with tiny cost means the parameter scaling is off -- one parameter moves cost several orders of magnitude more than another, which destabilises Levenberg-Marquardt.
 

@@ -159,11 +159,11 @@ fn hinted_sparse_matches_dense() {
     let cfg = LmConfig { max_iters: 50, ..Default::default() };
 
     let mut wd = build(0.05);
-    let rd = wd.solve_dense(&cfg);
+    let rd = wd.solve_dense(&cfg).unwrap();
     assert!(rd.end_cost < 1e-14, "dense end_cost {}", rd.end_cost);
 
     let mut ws = build(0.05);
-    let rs = ws.solve_sparse(&cfg);
+    let rs = ws.solve_sparse(&cfg).unwrap();
     assert!(rs.end_cost < 1e-14, "sparse end_cost {}", rs.end_cost);
 
     for j in 0..N_LANDMARKS {
@@ -200,7 +200,7 @@ fn explicit_hints_are_safe() {
         for r in ranges.clone() {
             solver = solver.with_marginalize(r);
         }
-        let result = lm_solve(&params, &mut solver, &mut w, &cfg);
+        let result = lm_solve(&params, &mut solver, &mut w, &cfg).unwrap();
         assert!(result.end_cost < 1e-14,
             "hint {:?}: end_cost {}", ranges, result.end_cost);
     }

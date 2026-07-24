@@ -108,7 +108,7 @@ fn grad_hessian_match_finite_differences() {
 #[test]
 fn solves_and_recenters() {
     let mut m = build();
-    let r = m.solve_dense(&LmConfig::conservative());
+    let r = m.solve_dense(&LmConfig::conservative()).unwrap();
     assert!(r.status.is_success(), "{:?}", r.status);
     for (i, obs) in [(0usize, 3.0f64), (1, -1.0)] {
         let it = &m.items[i];
@@ -128,8 +128,8 @@ fn solves_and_recenters() {
 #[test]
 fn restart_is_consistent() {
     let mut m = build();
-    m.solve_dense(&LmConfig::conservative());
-    let r2 = m.solve_dense(&LmConfig::conservative());
+    m.solve_dense(&LmConfig::conservative()).unwrap();
+    let r2 = m.solve_dense(&LmConfig::conservative()).unwrap();
     assert!(r2.status.is_success());
     assert!((r2.start_cost - r2.end_cost).abs() < 1e-10,
         "second solve should start at the optimum: {} vs {}", r2.start_cost, r2.end_cost);
@@ -231,7 +231,7 @@ fn declared_deriv_cache_matches_finite_differences() {
 #[test]
 fn deriv_cache_and_values_are_fresh_after_solve() {
     let mut m = build_sq();
-    let r = m.solve_dense(&LmConfig::conservative());
+    let r = m.solve_dense(&LmConfig::conservative()).unwrap();
     assert!(r.status.is_success(), "{:?}", r.status);
     for it in m.items.iter() {
         let c = it.sq.c;
@@ -364,7 +364,7 @@ fn component_only_entity_gets_a_live_system() {
 #[test]
 fn component_only_entity_solves() {
     let mut c = build_chain();
-    let r = c.solve_dense(&LmConfig::conservative());
+    let r = c.solve_dense(&LmConfig::conservative()).unwrap();
     assert!(r.status.is_success(), "{:?}", r.status);
     // Exact chain: node k lands at k units along x.
     for (k, node) in c.nodes.iter().enumerate() {

@@ -658,6 +658,7 @@ fn main() {
             "cholmod" => { eprintln!("CHOLMOD solver requires --features cholmod"); return; }
             _ => { eprintln!("Unknown solver: {}. Available: dense, faer, eigen, cholmod", solver_name); return; }
         };
+        let result = result.unwrap();
         path.deserialize64(&result.x);
         println!("  {} iterations, cost {:.4} -> {:.4}", result.iterations, result.start_cost, result.end_cost);
     }

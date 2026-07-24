@@ -60,11 +60,11 @@ fn imported_param_counts() {
 #[test]
 fn imported_models_solve_in_both_roots() {
     let mut w64 = build_world!(World64, f64);
-    let r64 = w64.solve_sparse(&LmConfig { max_iters: 100, ..Default::default() });
+    let r64 = w64.solve_sparse(&LmConfig { max_iters: 100, ..Default::default() }).unwrap();
     assert!(matches!(r64.status, LmStatus::Converged), "{:?}", r64.status);
 
     let mut w32 = build_world!(World32, f32);
-    let r32 = w32.solve_sparse(&LmConfig { max_iters: 100, ..Default::default() });
+    let r32 = w32.solve_sparse(&LmConfig { max_iters: 100, ..Default::default() }).unwrap();
     assert!((r32.end_cost as f64 - r64.end_cost).abs() < 1e-3,
         "f32 cost {} vs f64 {}", r32.end_cost, r64.end_cost);
 

@@ -114,7 +114,7 @@ fn remote_block_reaches_component_params() {
         });
     }
 
-    let result = w.solve_sparse(&LmConfig::default());
+    let result = w.solve_sparse(&LmConfig::default()).unwrap();
     assert!(result.end_cost < 1e-16, "end cost {}", result.end_cost);
 
     let (t, q) = truth();
@@ -150,8 +150,8 @@ fn remote_block_matches_a_local_self_block() {
     });
 
     let cfg = LmConfig::default();
-    let r_remote = remote.solve_sparse(&cfg);
-    let r_local = local.solve_sparse(&cfg);
+    let r_remote = remote.solve_sparse(&cfg).unwrap();
+    let r_local = local.solve_sparse(&cfg).unwrap();
 
     // Same problem, same parameter span, so the whole trajectory matches --
     // a wrong index would put the same residuals on different parameters.
@@ -205,7 +205,7 @@ fn a_frozen_half_still_indexes_correctly() {
     w.serialize_params64(&mut params);
     assert_eq!(params.len(), 3, "only the translation is free");
 
-    let result = w.solve_sparse(&LmConfig::default());
+    let result = w.solve_sparse(&LmConfig::default()).unwrap();
     assert!(result.end_cost < 1e-16, "end cost {}", result.end_cost);
     assert!((w.poses[pose].r2w.translation - t).norm() < 1e-7);
 }

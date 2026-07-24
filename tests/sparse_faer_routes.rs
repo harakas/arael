@@ -6,8 +6,8 @@
 
 use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::refs::{self, Ref};
-use arael::simple_lm::{
-    lm_solve, CooMatrix, CscMatrix, FaerOrdering, LmConfig, LmProblem, LmStatus, RootProblem,
+use arael::simple_lm::{SolveFailureKind,
+    lm_solve, CooMatrix, CscMatrix, FaerOrdering, LmConfig, LmProblem, RootProblem,
     SchurPolicy, SolveError, SolverReport, SparseFaer,
 };
 
@@ -136,7 +136,7 @@ fn solved_params(solver: &mut SparseFaer<f64>) -> (Vec<f64>, f64) {
     let mut w = build(0.05);
     let mut params = Vec::new();
     RootProblem::serialize(&mut w, &mut params);
-    let r = lm_solve(&params, solver, &mut w, &cfg);
+    let r = lm_solve(&params, solver, &mut w, &cfg).unwrap();
     let mut out = Vec::new();
     RootProblem::serialize(&mut w, &mut out);
     (out, r.end_cost)
@@ -225,15 +225,15 @@ fn naming_coupled_blocks_is_rejected() {
     let mut w = build(0.05);
     let mut params = Vec::new();
     RootProblem::serialize(&mut w, &mut params);
-    let r = lm_solve(&params, &mut solver, &mut w, &cfg);
+    let e = lm_solve(&params, &mut solver, &mut w, &cfg)
+        .expect_err("coupled marginalization must fail at setup");
     assert!(
-        matches!(r.status, LmStatus::SetupFailed(SolveError::CoupledMarginalization { .. })),
+        matches!(e.kind, SolveFailureKind::Setup(SolveError::CoupledMarginalization { .. })),
         "expected a coupled-marginalization setup failure, got {:?}",
-        r.status
+        e.kind
     );
-    // The solve did not run: the parameters are untouched and the cost is NaN.
-    assert_eq!(r.iterations, 0);
-    assert!(r.end_cost.is_nan());
+    // The solve did not run: there is no partial state.
+    assert!(e.partial.is_none());
 }
 
 // --- a pose graph: every block couples to another one ---
@@ -281,7 +281,7 @@ fn a_pose_graph_is_never_reduced() {
     let mut params = Vec::new();
     RootProblem::serialize(&mut c, &mut params);
     let mut solver = SparseFaer::new();
-    let r = lm_solve(&params, &mut solver, &mut c, &cfg);
+    let r = lm_solve(&params, &mut solver, &mut c, &cfg).unwrap();
     assert!(r.end_cost < 1e-14, "end_cost {}", r.end_cost);
 
     let plan = solver.plan().expect("a plan");
@@ -381,7 +381,7 @@ fn hand_built_problem_solves_through_the_plain_route() {
     let mut p = LineFit { pts: vec![(0.0, 1.0), (1.0, 3.0), (2.0, 5.0)] };
     let cfg = LmConfig { max_iters: 40, ..Default::default() };
     let mut solver = SparseFaer::new();
-    let r = lm_solve(&[0.0, 0.0], &mut solver, &mut p, &cfg);
+    let r = lm_solve(&[0.0, 0.0], &mut solver, &mut p, &cfg).unwrap();
 
     // y = 2x + 1 fits the three points exactly.
     assert!((r.x[0] - 2.0).abs() < 1e-10, "slope {}", r.x[0]);
@@ -403,5 +403,5 @@ fn forcing_a_reduction_on_a_hand_built_problem_is_rejected() {
     let mut p = LineFit { pts: vec![(0.0, 1.0), (1.0, 3.0)] };
     let cfg = LmConfig { max_iters: 5, ..Default::default() };
     let mut solver = SparseFaer::new().with_policy(SchurPolicy::Force);
-    lm_solve(&[0.0, 0.0], &mut solver, &mut p, &cfg);
+    lm_solve(&[0.0, 0.0], &mut solver, &mut p, &cfg).unwrap();
 }

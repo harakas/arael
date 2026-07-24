@@ -161,7 +161,7 @@ fn run_s(ds: &Dataset3, lambda0: f64) -> RunOut {
     let _ = arael::simple_lm::solve_sparse(&params, &mut g, &cfg64(1, lambda0));
     let first_ms = t0.elapsed().as_secs_f64() * 1e3;
     let t0 = std::time::Instant::now();
-    let result = arael::simple_lm::solve_sparse(&params, &mut g, &cfg64(100, lambda0));
+    let result = arael::simple_lm::solve_sparse(&params, &mut g, &cfg64(100, lambda0)).unwrap();
     let solve_ms = t0.elapsed().as_secs_f64() * 1e3;
     g.deserialize64(&result.x);
     let poses = g.poses.iter()
@@ -182,7 +182,7 @@ fn run_s_f32(ds: &Dataset3, lambda0: f64) -> RunOut {
     let _ = arael::simple_lm::solve_sparse_f32(&params, &mut g, &cfg32(1, lambda0 as f32));
     let first_ms = t0.elapsed().as_secs_f64() * 1e3;
     let t0 = std::time::Instant::now();
-    let result = arael::simple_lm::solve_sparse_f32(&params, &mut g, &cfg32(100, lambda0 as f32));
+    let result = arael::simple_lm::solve_sparse_f32(&params, &mut g, &cfg32(100, lambda0 as f32)).unwrap();
     let solve_ms = t0.elapsed().as_secs_f64() * 1e3;
     g.deserialize32(&result.x);
     let poses = g.poses.iter()
@@ -295,7 +295,7 @@ fn run_e(ds: &Dataset3, lambda0: f64) -> RunOut {
     let _ = arael::simple_lm::solve_sparse(&params, &mut g, &cfg64(1, lambda0));
     let first_ms = t0.elapsed().as_secs_f64() * 1e3;
     let t0 = std::time::Instant::now();
-    let result = arael::simple_lm::solve_sparse(&params, &mut g, &cfg64(100, lambda0));
+    let result = arael::simple_lm::solve_sparse(&params, &mut g, &cfg64(100, lambda0)).unwrap();
     let solve_ms = t0.elapsed().as_secs_f64() * 1e3;
     g.deserialize64(&result.x);
     let poses = g.poses.iter()
@@ -316,7 +316,7 @@ fn run_e_f32(ds: &Dataset3, lambda0: f64) -> RunOut {
     let _ = arael::simple_lm::solve_sparse_f32(&params, &mut g, &cfg32(1, lambda0 as f32));
     let first_ms = t0.elapsed().as_secs_f64() * 1e3;
     let t0 = std::time::Instant::now();
-    let result = arael::simple_lm::solve_sparse_f32(&params, &mut g, &cfg32(100, lambda0 as f32));
+    let result = arael::simple_lm::solve_sparse_f32(&params, &mut g, &cfg32(100, lambda0 as f32)).unwrap();
     let solve_ms = t0.elapsed().as_secs_f64() * 1e3;
     g.deserialize32(&result.x);
     let poses = g.poses.iter()
@@ -431,7 +431,7 @@ fn run_q(ds: &Dataset3, lambda0: f64) -> RunOut {
     let _ = arael::simple_lm::solve_sparse(&params, &mut g, &cfg64(1, lambda0));
     let first_ms = t0.elapsed().as_secs_f64() * 1e3;
     let t0 = std::time::Instant::now();
-    let result = arael::simple_lm::solve_sparse(&params, &mut g, &cfg64(100, lambda0));
+    let result = arael::simple_lm::solve_sparse(&params, &mut g, &cfg64(100, lambda0)).unwrap();
     let solve_ms = t0.elapsed().as_secs_f64() * 1e3;
     g.deserialize64(&result.x);
     let poses = g.poses.iter()
@@ -454,7 +454,7 @@ fn run_q_f32(ds: &Dataset3, lambda0: f64) -> RunOut {
     let _ = arael::simple_lm::solve_sparse_f32(&params, &mut g, &cfg32(1, lambda0 as f32));
     let first_ms = t0.elapsed().as_secs_f64() * 1e3;
     let t0 = std::time::Instant::now();
-    let result = arael::simple_lm::solve_sparse_f32(&params, &mut g, &cfg32(100, lambda0 as f32));
+    let result = arael::simple_lm::solve_sparse_f32(&params, &mut g, &cfg32(100, lambda0 as f32)).unwrap();
     let solve_ms = t0.elapsed().as_secs_f64() * 1e3;
     g.deserialize32(&result.x);
     let poses = g.poses.iter()

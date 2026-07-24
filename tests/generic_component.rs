@@ -186,7 +186,7 @@ fn generic_component_solves_f64() {
         measured: target,
         hb: SelfBlock::new(),
     });
-    let r = w.solve_sparse(&LmConfig::default());
+    let r = w.solve_sparse(&LmConfig::default()).unwrap();
     assert!(r.end_cost < 1e-16, "cost {}", r.end_cost);
     let lm = w.lms.iter().next().unwrap();
     let fit = lm.dir.unit * lm.gain.g2;
@@ -205,7 +205,7 @@ fn generic_component_solves_f32() {
         measured: target,
         hb: SelfBlock::new(),
     });
-    let r = w.solve_sparse(&LmConfig::default());
+    let r = w.solve_sparse(&LmConfig::default()).unwrap();
     assert!(r.end_cost < 1e-9, "cost {}", r.end_cost);
     let lm = w.lms.iter().next().unwrap();
     let fit = lm.dir.unit * lm.gain.g2;
@@ -225,7 +225,7 @@ fn builtin_component_with_generic_args() {
         measured: target,
         hb: SelfBlock::new(),
     });
-    let r = w.solve_sparse(&LmConfig::default());
+    let r = w.solve_sparse(&LmConfig::default()).unwrap();
     assert!(r.end_cost < 1e-9, "cost {}", r.end_cost);
     let lm = w.lms.iter().next().unwrap();
     assert!((lm.v.unit - target).norm() < 1e-3,

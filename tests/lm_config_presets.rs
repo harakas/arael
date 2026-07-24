@@ -53,7 +53,7 @@ impl LmProblem<f64> for Rosenbrock {
 }
 
 fn run(cfg: &LmConfig<f64>, x0: [f64; 2]) -> LmResult<f64> {
-    solve(&x0, &mut Rosenbrock, cfg)
+    solve(&x0, &mut Rosenbrock, cfg).unwrap()
 }
 
 fn at_minimum(r: &LmResult<f64>) -> bool {
@@ -106,7 +106,7 @@ fn continue_from_resumes_a_capped_solve() {
     assert!(!at_minimum(&partial), "the cap should stop it short: x = {:?}", partial.x);
 
     let cfg = LmConfig::conservative().continue_from(&partial);
-    let full = solve(&partial.x, &mut Rosenbrock, &cfg.with_max_iters(200));
+    let full = solve(&partial.x, &mut Rosenbrock, &cfg.with_max_iters(200)).unwrap();
     assert!(at_minimum(&full), "resumed x = {:?}, status = {:?}", full.x, full.status);
 
     let one_shot = run(&LmConfig::conservative().with_max_iters(200), FAR);

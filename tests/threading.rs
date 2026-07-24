@@ -61,10 +61,10 @@ fn threads_do_not_change_the_answer() {
         max_iters: 200, num_threads, ..Default::default()
     };
     let mut a = build_chain(60);
-    let seq = a.solve_sparse(&cfg(1));
+    let seq = a.solve_sparse(&cfg(1)).unwrap();
 
     let mut b = build_chain(60);
-    let par = b.solve_sparse(&cfg(4));
+    let par = b.solve_sparse(&cfg(4)).unwrap();
 
     assert_eq!(seq.status, par.status);
     assert_eq!(seq.iterations, par.iterations, "same steps");
@@ -77,11 +77,11 @@ fn threads_do_not_change_the_answer() {
 #[test]
 fn zero_threads_means_all_cores() {
     let mut a = build_chain(60);
-    let seq = a.solve_sparse(&LmConfig::<f64> { max_iters: 200, ..Default::default() });
+    let seq = a.solve_sparse(&LmConfig::<f64> { max_iters: 200, ..Default::default() }).unwrap();
     let mut b = build_chain(60);
     let all = b.solve_sparse(&LmConfig::<f64> {
         max_iters: 200, num_threads: 0, ..Default::default()
-    });
+    }).unwrap();
     assert_eq!(seq.end_cost, all.end_cost);
     assert_eq!(seq.x, all.x);
 }

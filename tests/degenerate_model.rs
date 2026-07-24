@@ -5,14 +5,15 @@
 // diag_pos[j] = 0 makes extract_diagonal/solve_damped read and overwrite
 // vals[0] (an unrelated entry), surfacing as a "Cholesky failed" far away.
 // to_csc / to_csc_with_map reject it with SolveError::UnconstrainedParameter,
-// which a solve surfaces as LmStatus::SetupFailed.
+// which a solve surfaces as Err(SolveFailure::Setup).
 //
 // Value case: a structurally present but zero diagonal cannot be rescued by
-// multiplicative damping ((1+lambda)*0 stays 0). The solver terminates the
-// solve immediately with LmStatus::DegenerateDiagonal (a runtime value
-// condition -- guards or saturated robustifiers can produce it from data).
+// multiplicative damping ((1+lambda)*0 stays 0). The solver errs
+// immediately with SolveFailureKind::DegenerateDiagonal (a runtime value
+// condition -- a branch or a saturated robustifier can produce it from
+// data), carrying the partial state.
 
-use arael::simple_lm::{self, BandError, CooMatrix, CscMatrix, FnProblem, LmConfig, LmStatus, SolveError};
+use arael::simple_lm::{self, BandError, CooMatrix, CscMatrix, DiagonalFault, FnProblem, LmConfig, SolveError, SolveFailureKind};
 use arael::simple_lm::LmProblem;
 
 // The bad-diagonal diagnostic goes through arael's process-global log sink.
@@ -53,14 +54,18 @@ fn zero_diagonal_terminates_immediately() {
             (x[0] - 1.0).powi(2)
         },
     };
-    let result = simple_lm::solve(&[0.0, 0.0], &mut p, &LmConfig::default());
-    // Terminates before spending any iterations (the old behavior burned
-    // 20 inner failures per outer iteration until max_iters), returning
-    // the starting point untouched.
-    assert_eq!(result.iterations, 0, "must terminate before iterating");
-    assert_eq!(result.x, vec![0.0, 0.0], "params must be untouched");
-    assert_eq!(result.end_cost, result.start_cost);
-    assert_eq!(result.start_cost, 1.0);
+    let e = simple_lm::solve(&[0.0, 0.0], &mut p, &LmConfig::default())
+        .expect_err("a zero diagonal must fail the solve");
+    // Errs before spending any iterations (the old behavior burned
+    // 20 inner failures per outer iteration until max_iters); the partial
+    // state is the starting point, untouched.
+    assert_eq!(e.kind,
+        SolveFailureKind::DegenerateDiagonal { param: 1, fault: DiagonalFault::Zero });
+    let partial = e.into_partial().expect("first assembly succeeded");
+    assert_eq!(partial.iterations, 0, "must terminate before iterating");
+    assert_eq!(partial.x, vec![0.0, 0.0], "params must be untouched");
+    assert_eq!(partial.end_cost, partial.start_cost);
+    assert_eq!(partial.start_cost, 1.0);
 }
 
 // LmConfig::min_diagonal floors the DAMPING scale, so a parameter with no
@@ -93,13 +98,8 @@ fn min_diagonal_lets_a_zero_diagonal_solve() {
         min_iters: 0,
         ..Default::default()
     };
-    let result = simple_lm::solve(&[0.0, 0.0], &mut p, &cfg);
-
-    assert_ne!(
-        result.status,
-        arael::simple_lm::LmStatus::DegenerateDiagonal { param: 1 },
-        "the floor should have damped through it"
-    );
+    let result = simple_lm::solve(&[0.0, 0.0], &mut p, &cfg)
+        .expect("the floor should have damped through it");
     assert!(result.iterations > 0, "it should actually iterate now");
     // The parameter that HAS curvature reaches its minimum...
     assert!(
@@ -117,9 +117,11 @@ fn without_the_floor_the_same_problem_still_dies() {
     let _g = SINK_GUARD.lock().unwrap_or_else(|e| e.into_inner());
     // The contrast: None is the default and is unchanged.
     let mut p = zero_diagonal_problem();
-    let result = simple_lm::solve(&[0.0, 0.0], &mut p, &LmConfig::default());
-    assert_eq!(result.status, arael::simple_lm::LmStatus::DegenerateDiagonal { param: 1 });
-    assert_eq!(result.iterations, 0);
+    let e = simple_lm::solve(&[0.0, 0.0], &mut p, &LmConfig::default())
+        .expect_err("without the floor the zero diagonal is fatal");
+    assert_eq!(e.kind,
+        SolveFailureKind::DegenerateDiagonal { param: 1, fault: DiagonalFault::Zero });
+    assert_eq!(e.into_partial().unwrap().iterations, 0);
 }
 
 #[test]
@@ -137,12 +139,10 @@ fn min_diagonal_does_not_rescue_a_negative_diagonal() {
         },
     };
     let cfg = LmConfig::<f64> { min_diagonal: Some(1e-6), ..Default::default() };
-    let result = simple_lm::solve(&[0.0, 0.0], &mut p, &cfg);
-    assert_eq!(
-        result.status,
-        arael::simple_lm::LmStatus::DegenerateDiagonal { param: 1 },
-        "a negative diagonal must stay fatal even with a floor"
-    );
+    let e = simple_lm::solve(&[0.0, 0.0], &mut p, &cfg)
+        .expect_err("a negative diagonal must stay fatal even with a floor");
+    assert_eq!(e.kind,
+        SolveFailureKind::DegenerateDiagonal { param: 1, fault: DiagonalFault::Negative });
 }
 
 /// The three fatal cases must be told apart in the LOG, not just in the status.
@@ -167,8 +167,10 @@ fn a_nan_diagonal_is_not_reported_as_a_zero() {
         },
     };
     // No floor -- this is the arm the first version of the message got wrong.
-    let result = simple_lm::solve(&[0.0, 0.0], &mut p, &LmConfig::default());
-    assert_eq!(result.status, arael::simple_lm::LmStatus::DegenerateDiagonal { param: 1 });
+    let e = simple_lm::solve(&[0.0, 0.0], &mut p, &LmConfig::default())
+        .expect_err("a NaN diagonal is fatal");
+    assert_eq!(e.kind,
+        SolveFailureKind::DegenerateDiagonal { param: 1, fault: DiagonalFault::Nan });
 
     let msgs = seen.lock().unwrap().join("\n");
     arael::log::reset_sink();
@@ -195,12 +197,10 @@ fn min_diagonal_does_not_rescue_a_nan_diagonal() {
         },
     };
     let cfg = LmConfig::<f64> { min_diagonal: Some(1e-6), ..Default::default() };
-    let result = simple_lm::solve(&[0.0, 0.0], &mut p, &cfg);
-    assert_eq!(
-        result.status,
-        arael::simple_lm::LmStatus::DegenerateDiagonal { param: 1 },
-        "a NaN diagonal must stay fatal even with a floor"
-    );
+    let e = simple_lm::solve(&[0.0, 0.0], &mut p, &cfg)
+        .expect_err("a NaN diagonal must stay fatal even with a floor");
+    assert_eq!(e.kind,
+        SolveFailureKind::DegenerateDiagonal { param: 1, fault: DiagonalFault::Nan });
 }
 
 // Pattern drift: the indexed (cached-pattern) assembly must detect a sparsity
@@ -265,7 +265,7 @@ fn pattern_drift_detected_in_indexed_assembly() {
 }
 
 // A structural failure that reaches the solve (not just the CSC helper) must
-// surface as LmStatus::SetupFailed, with x untouched and NaN costs -- never a
+// surface as Err(SolveFailure::Setup) with no partial state -- never a
 // panic or a fabricated cost.
 
 /// Band assembly reports an element outside the declared bandwidth.
@@ -284,11 +284,11 @@ impl LmProblem<f64> for BandOverflowProblem {
 #[test]
 fn band_overflow_is_a_setup_failure() {
     let mut p = BandOverflowProblem;
-    let r = simple_lm::solve_band(&[0.0, 0.0], 0, &mut p, &LmConfig::default());
-    assert_eq!(r.status, LmStatus::SetupFailed(SolveError::BandOverflow { row: 0, col: 1, kd: 0 }));
-    assert_eq!(r.iterations, 0);
-    assert_eq!(r.x, vec![0.0, 0.0], "params must be untouched");
-    assert!(r.start_cost.is_nan() && r.end_cost.is_nan());
+    let e = simple_lm::solve_band(&[0.0, 0.0], 0, &mut p, &LmConfig::default())
+        .expect_err("band overflow must fail at setup");
+    assert_eq!(e.kind,
+        SolveFailureKind::Setup(SolveError::BandOverflow { row: 0, col: 1, kd: 0 }));
+    assert!(e.partial.is_none(), "nothing ran");
 }
 
 /// Sparse assembly leaves parameter 1 with no diagonal entry.
@@ -310,9 +310,9 @@ impl LmProblem<f64> for UnconstrainedSparseProblem {
 #[allow(deprecated)] // exercises the COO validation baseline
 fn unconstrained_parameter_is_a_setup_failure_through_solve() {
     let mut p = UnconstrainedSparseProblem;
-    let r = simple_lm::solve_sparse_coo(&[0.0, 0.0], &mut p, &LmConfig::default());
-    assert_eq!(r.status, LmStatus::SetupFailed(SolveError::UnconstrainedParameter { param: 1 }));
-    assert_eq!(r.iterations, 0);
-    assert_eq!(r.x, vec![0.0, 0.0], "params must be untouched");
-    assert!(r.start_cost.is_nan() && r.end_cost.is_nan());
+    let e = simple_lm::solve_sparse_coo(&[0.0, 0.0], &mut p, &LmConfig::default())
+        .expect_err("an unconstrained parameter must fail at setup");
+    assert_eq!(e.kind,
+        SolveFailureKind::Setup(SolveError::UnconstrainedParameter { param: 1 }));
+    assert!(e.partial.is_none(), "nothing ran");
 }

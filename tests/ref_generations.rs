@@ -359,8 +359,8 @@ fn a_model_solves_the_same_after_a_round_trip() {
     let json = serde_json::to_string(&a).unwrap();
     let mut b: RtPath = serde_json::from_str(&json).unwrap();
 
-    let ra = a.solve_sparse(&LmConfig::default());
-    let rb = b.solve_sparse(&LmConfig::default());
+    let ra = a.solve_sparse(&LmConfig::default()).unwrap();
+    let rb = b.solve_sparse(&LmConfig::default()).unwrap();
     assert!(ra.iterations > 1, "the model must actually solve");
     assert_eq!(ra.iterations, rb.iterations);
     assert!((ra.start_cost - rb.start_cost).abs() < 1e-12,

@@ -124,7 +124,7 @@ pub fn solve_f64<P: arael::simple_lm::LmProblem<f64>>(
     cfg: &arael::simple_lm::LmConfig<f64>,
 ) -> arael::simple_lm::LmResult<f64> {
     let mut solver = arael::simple_lm::SparseFaer::new().with_ordering(ordering());
-    arael::simple_lm::lm_solve(params, &mut solver, p, cfg)
+    arael::simple_lm::lm_solve(params, &mut solver, p, cfg).unwrap()
 }
 
 pub fn solve_f32<P: arael::simple_lm::LmProblem<f32>>(
@@ -133,7 +133,7 @@ pub fn solve_f32<P: arael::simple_lm::LmProblem<f32>>(
     cfg: &arael::simple_lm::LmConfig<f32>,
 ) -> arael::simple_lm::LmResult<f32> {
     let mut solver = arael::simple_lm::SparseFaerF32::new().with_ordering(ordering());
-    arael::simple_lm::lm_solve(params, &mut solver, p, cfg)
+    arael::simple_lm::lm_solve(params, &mut solver, p, cfg).unwrap()
 }
 
 // Initial damping, problem-appropriate for well-initialized 2D pose graphs (the

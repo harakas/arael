@@ -56,7 +56,7 @@ fn field_graduation_through_warm_session() {
 
     // Near-quadratic rung: the optimum is (close to) the contaminated
     // mean -- the outlier pulls with almost full weight.
-    let r = session.solve(&mut w, &cfg);
+    let r = session.solve(&mut w, &cfg).unwrap();
     assert!(r.end_cost <= r.start_cost);
     let contaminated_mean = MEASUREMENTS.iter().sum::<f64>() / MEASUREMENTS.len() as f64;
     assert!((w.x.value - contaminated_mean).abs() < 0.05,
@@ -66,14 +66,14 @@ fn field_graduation_through_warm_session() {
     // must take effect on every re-solve.
     for c2 in [100.0, 10.0, 1.0] {
         w.c2 = c2;
-        session.solve(&mut w, &cfg);
+        session.solve(&mut w, &cfg).unwrap();
     }
     assert!(w.x.value.abs() < 0.02, "robust rung x = {}", w.x.value);
 
     // The graduated result matches a cold solve at the final threshold
     // started inside the inlier basin.
     let mut cold = build(0.0, 1.0);
-    cold.solve_dense(&cfg);
+    cold.solve_dense(&cfg).unwrap();
     assert!((w.x.value - cold.x.value).abs() < 1e-6,
         "graduated {} vs cold {}", w.x.value, cold.x.value);
 }

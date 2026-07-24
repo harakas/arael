@@ -42,7 +42,7 @@ fn quaternion_param_advances_through_gimbal() {
     let mut params = Vec::new();
     rig.serialize64(&mut params);
     let result = simple_lm::solve(&params, &mut rig,
-        &LmConfig { max_iters: 200, ..Default::default() });
+        &LmConfig { max_iters: 200, ..Default::default() }).unwrap();
     rig.deserialize64(&result.x);
 
     assert!(result.end_cost < 1e-12,
@@ -74,7 +74,7 @@ fn value_syncs_only_on_deserialize() {
     let mut params = Vec::new();
     rig.serialize64(&mut params);
     let result = simple_lm::solve(&params, &mut rig,
-        &LmConfig { max_iters: 200, ..Default::default() });
+        &LmConfig { max_iters: 200, ..Default::default() }).unwrap();
     assert!(result.end_cost < 1e-12, "solve must converge, cost={}", result.end_cost);
 
     // Before deserialize, value still holds the initial guess untouched.
@@ -159,7 +159,7 @@ fn fixed_quaternion_param_drives_constraints() {
     let mut params = Vec::new();
     rig.serialize64(&mut params);
     let result = simple_lm::solve(&params, &mut rig,
-        &LmConfig { max_iters: 100, ..Default::default() });
+        &LmConfig { max_iters: 100, ..Default::default() }).unwrap();
     rig.deserialize64(&result.x);
 
     let m = rig.free_att.value.rotation_matrix();

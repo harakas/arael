@@ -173,7 +173,7 @@ fn decide(scene: &Scene, policy: SchurPolicy) -> SchurPlan {
     arael::simple_lm::RootProblem::serialize(&mut w, &mut params);
     let cfg = LmConfig { max_iters: 1, ..Default::default() };
     let mut solver = SparseFaer::new().with_policy(policy);
-    lm_solve(&params, &mut solver, &mut w, &cfg);
+    lm_solve(&params, &mut solver, &mut w, &cfg).unwrap();
     solver.plan().expect("the first compute must leave a plan")
 }
 
@@ -350,7 +350,7 @@ fn decide_bal(cameras: usize, points: usize) -> SchurPlan {
     arael::simple_lm::RootProblem::serialize(&mut b, &mut params);
     let cfg = LmConfig { max_iters: 1, ..Default::default() };
     let mut solver = SparseFaer::new();
-    lm_solve(&params, &mut solver, &mut b, &cfg);
+    lm_solve(&params, &mut solver, &mut b, &cfg).unwrap();
     solver.plan().expect("a plan")
 }
 

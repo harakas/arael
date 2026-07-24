@@ -232,13 +232,13 @@ fn auto_schur_matches_dense() {
     let cfg = LmConfig { max_iters: 60, ..Default::default() };
 
     let mut wd = build();
-    let rd = wd.solve_dense(&cfg);
+    let rd = wd.solve_dense(&cfg).unwrap();
 
     let mut wq = build();
     let mut params = Vec::new();
     RootProblem::serialize(&mut wq, &mut params);
     let mut solver = SparseFaer::new(); // no hint, no policy
-    let rq = wq.solve_with(&mut solver, &cfg);
+    let rq = wq.solve_with(&mut solver, &cfg).unwrap();
 
     let plan = solver.plan().expect("the first compute must record a plan");
     assert!(plan.reduced, "the reduction should have been kept: {:?}", plan);
@@ -287,13 +287,13 @@ fn forced_schur_matches_dense() {
     let cfg = LmConfig { max_iters: 60, ..Default::default() };
 
     let mut wd = build();
-    let rd = wd.solve_dense(&cfg);
+    let rd = wd.solve_dense(&cfg).unwrap();
 
     let mut wq = build();
     let mut params = Vec::new();
     RootProblem::serialize(&mut wq, &mut params);
     let mut solver = SparseFaer::new().with_policy(SchurPolicy::Force);
-    let rq = wq.solve_with(&mut solver, &cfg);
+    let rq = wq.solve_with(&mut solver, &cfg).unwrap();
 
     let plan = solver.plan().unwrap();
     assert!(plan.reduced);
@@ -309,7 +309,7 @@ fn declined_schur_falls_back_to_full_system() {
     let cfg = LmConfig { max_iters: 60, ..Default::default() };
 
     let mut wd = build();
-    let rd = wd.solve_dense(&cfg);
+    let rd = wd.solve_dense(&cfg).unwrap();
 
     let mut wq = build();
     let mut params = Vec::new();
@@ -319,7 +319,7 @@ fn declined_schur_falls_back_to_full_system() {
             flop_margin: 0.0,
             obvious_flop_ratio: 0.0, // never short-circuit: force the comparison
         });
-    let rq = wq.solve_with(&mut solver, &cfg);
+    let rq = wq.solve_with(&mut solver, &cfg).unwrap();
 
     let plan = solver.plan().unwrap();
     assert!(!plan.reduced, "the reduction should have been declined: {:?}", plan);
@@ -343,7 +343,7 @@ fn solve_reports_what_the_backend_did() {
     let cfg = LmConfig { max_iters: 60, ..Default::default() };
 
     let mut w = build();
-    let r = w.solve_sparse(&cfg); // constructs and drops its own solver
+    let r = w.solve_sparse(&cfg).unwrap(); // constructs and drops its own solver
 
     let Some(SolverReport::Schur(plan)) = r.solver else {
         panic!("solve_sparse must report what it did, got {:?}", r.solver);
@@ -364,5 +364,5 @@ fn solve_reports_what_the_backend_did() {
 
     // and the backend that has nothing to say says nothing
     let mut wd = build();
-    assert!(wd.solve_dense(&cfg).solver.is_none());
+    assert!(wd.solve_dense(&cfg).unwrap().solver.is_none());
 }

@@ -459,11 +459,11 @@ fn fixed_params_solve_matches_dense() {
 
     let mut wd = build();
     fix(&mut wd);
-    let rd = wd.solve_dense(&cfg);
+    let rd = wd.solve_dense(&cfg).unwrap();
 
     let mut ws = build();
     fix(&mut ws);
-    let rs = ws.solve_sparse(&cfg);
+    let rs = ws.solve_sparse(&cfg).unwrap();
 
     assert!((rd.end_cost - rs.end_cost).abs() <= 1e-12 * (1.0 + rd.end_cost),
         "dense {} vs sparse {}", rd.end_cost, rs.end_cost);
@@ -529,9 +529,9 @@ fn fixed_param_full_matrix() {
         wd.landmarks[2].y = Param::fixed(1.1);
         wd.landmarks[3].x = Param::fixed(1.8);
         wd.landmarks[3].y = Param::fixed(1.15);
-        wd.solve_dense(&cfg)
+        wd.solve_dense(&cfg).unwrap()
     };
-    let rs = w.solve_sparse(&cfg);
+    let rs = w.solve_sparse(&cfg).unwrap();
     assert!((rd.end_cost - rs.end_cost).abs() <= 1e-12 * (1.0 + rd.end_cost),
         "dense {} vs sparse {}", rd.end_cost, rs.end_cost);
     assert_eq!(w.poses[3].x.value, 3.0);
@@ -549,14 +549,14 @@ fn schur_solve_matches_sparse() {
     let cfg = LmConfig { max_iters: 50, ..Default::default() };
 
     let mut ws = build();
-    let rs = ws.solve_sparse(&cfg);
+    let rs = ws.solve_sparse(&cfg).unwrap();
 
     let mut wq = build();
     let mut params = Vec::new();
     RootProblem::serialize(&mut wq, &mut params); // populates block indices
     let lm_start = RootProblem::param_block_spans(&wq)[N_POSES].0 as usize;
     let mut solver = SparseFaer::new().with_marginalize(lm_start..params.len());
-    let rq = wq.solve_with(&mut solver, &cfg);
+    let rq = wq.solve_with(&mut solver, &cfg).unwrap();
 
     assert!(
         (rs.end_cost - rq.end_cost).abs() <= 1e-10 * (1.0 + rs.end_cost),
@@ -593,7 +593,7 @@ fn schur_solve_with_fixed_params() {
 
     let mut wd = build();
     fix(&mut wd);
-    let rd = wd.solve_dense(&cfg);
+    let rd = wd.solve_dense(&cfg).unwrap();
 
     let mut wq = build();
     fix(&mut wq);
@@ -601,7 +601,7 @@ fn schur_solve_with_fixed_params() {
     RootProblem::serialize(&mut wq, &mut params); // populates block indices
     let lm_start = RootProblem::param_block_spans(&wq)[N_POSES].0 as usize;
     let mut solver = SparseFaer::new().with_marginalize(lm_start..params.len());
-    let rq = wq.solve_with(&mut solver, &cfg);
+    let rq = wq.solve_with(&mut solver, &cfg).unwrap();
 
     assert!(
         (rd.end_cost - rq.end_cost).abs() <= 1e-10 * (1.0 + rd.end_cost),
@@ -633,12 +633,12 @@ fn eigen_backend_matches_dense() {
     let cfg = LmConfig { max_iters: 50, ..Default::default() };
 
     let mut wd = build();
-    let rd = wd.solve_dense(&cfg);
+    let rd = wd.solve_dense(&cfg).unwrap();
 
     let mut we = build();
     let mut params = Vec::new();
     RootProblem::serialize(&mut we, &mut params);
-    let re = solve_sparse_eigen(&params, &mut we, &cfg);
+    let re = solve_sparse_eigen(&params, &mut we, &cfg).unwrap();
 
     assert!(
         (rd.end_cost - re.end_cost).abs() <= 1e-10 * (1.0 + rd.end_cost),
@@ -655,12 +655,12 @@ fn cholmod_backend_matches_dense() {
     let cfg = LmConfig { max_iters: 50, ..Default::default() };
 
     let mut wd = build();
-    let rd = wd.solve_dense(&cfg);
+    let rd = wd.solve_dense(&cfg).unwrap();
 
     let mut wc = build();
     let mut params = Vec::new();
     RootProblem::serialize(&mut wc, &mut params);
-    let rc = solve_sparse_cholmod(&params, &mut wc, &cfg);
+    let rc = solve_sparse_cholmod(&params, &mut wc, &cfg).unwrap();
 
     assert!(
         (rd.end_cost - rc.end_cost).abs() <= 1e-10 * (1.0 + rd.end_cost),
@@ -677,12 +677,12 @@ fn cholmod_supernodal_backend_matches_dense() {
     let cfg = LmConfig { max_iters: 50, ..Default::default() };
 
     let mut wd = build();
-    let rd = wd.solve_dense(&cfg);
+    let rd = wd.solve_dense(&cfg).unwrap();
 
     let mut wc = build();
     let mut params = Vec::new();
     RootProblem::serialize(&mut wc, &mut params);
-    let rc = solve_sparse_cholmod_supernodal(&params, &mut wc, &cfg);
+    let rc = solve_sparse_cholmod_supernodal(&params, &mut wc, &cfg).unwrap();
 
     assert!(
         (rd.end_cost - rc.end_cost).abs() <= 1e-10 * (1.0 + rd.end_cost),

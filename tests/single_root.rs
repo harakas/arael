@@ -98,7 +98,7 @@ fn calc_jacobian_emits_all_three_residuals() {
 fn lm_solve_converges_to_fixed_values() {
     let (mut m, params) = make_model();
     let config = LmConfig::<f64> { verbose: false, ..Default::default() };
-    let result = simple_lm::solve(&params, &mut m, &config);
+    let result = simple_lm::solve(&params, &mut m, &config).unwrap();
     m.deserialize64(&result.x);
     assert!((m.x.value - 3.0).abs() < 1e-10, "x.value = {}", m.x.value);
     assert!((m.y.value - 4.0).abs() < 1e-10, "y.value = {}", m.y.value);

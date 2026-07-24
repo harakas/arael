@@ -51,7 +51,7 @@ fn root_level_remote_constraints_are_not_dropped() {
         w.obs.push(Obs { b: refs_v[i], m: vect2d::new(c.x - 0.5, c.y) });
         w.obs.push(Obs { b: refs_v[i], m: vect2d::new(c.x + 0.5, c.y) });
     }
-    let r = w.solve_sparse(&LmConfig::default());
+    let r = w.solve_sparse(&LmConfig::default()).unwrap();
     // 6 observations, each contributing (+-0.5, 0) at the optimum.
     assert!(matches!(r.status, LmStatus::Converged), "{:?}", r.status);
     assert!((r.end_cost - 6.0 * 0.25).abs() < 1e-9, "cost {}", r.end_cost);

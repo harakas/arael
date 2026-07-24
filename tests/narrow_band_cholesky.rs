@@ -133,7 +133,7 @@ fn solve(solver: &mut SparseFaer<f64>, win: usize) -> (Vec<f64>, f64) {
     let mut w = build(0.1, win);
     let mut params = Vec::new();
     RootProblem::serialize(&mut w, &mut params);
-    let r = lm_solve(&params, solver, &mut w, &cfg);
+    let r = lm_solve(&params, solver, &mut w, &cfg).unwrap();
     let mut out = Vec::new();
     RootProblem::serialize(&mut w, &mut out);
     (out, r.end_cost)
@@ -237,7 +237,7 @@ fn solve_chain(solver: &mut SparseFaer<f64>) -> (Vec<f64>, f64) {
     let mut w = build_chain(0.1);
     let mut params = Vec::new();
     RootProblem::serialize(&mut w, &mut params);
-    let r = lm_solve(&params, solver, &mut w, &cfg);
+    let r = lm_solve(&params, solver, &mut w, &cfg).unwrap();
     let mut out = Vec::new();
     RootProblem::serialize(&mut w, &mut out);
     (out, r.end_cost)

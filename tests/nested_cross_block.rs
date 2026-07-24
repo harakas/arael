@@ -136,7 +136,7 @@ fn build_map() -> (Map, Vec<Vec<f32>>) {
 fn nested_cross_and_cross_level_converge_dense() {
     let (mut map, truth) = build_map();
     let cfg = LmConfig::<f32>::default();
-    let result = map.solve_dense(&cfg);
+    let result = map.solve_dense(&cfg).unwrap();
     assert!(result.end_cost < 1e-6, "did not converge: cost {}", result.end_cost);
 
     for (p, t) in map.paths.iter().zip(truth.iter()) {
@@ -154,7 +154,7 @@ fn nested_cross_and_cross_level_converge_dense() {
 fn nested_cross_and_cross_level_converge_sparse() {
     let (mut map, truth) = build_map();
     let cfg = LmConfig::<f32>::default();
-    let result = map.solve_sparse(&cfg);
+    let result = map.solve_sparse(&cfg).unwrap();
     assert!(result.end_cost < 1e-6, "did not converge: cost {}", result.end_cost);
 
     for (p, t) in map.paths.iter().zip(truth.iter()) {

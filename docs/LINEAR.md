@@ -44,8 +44,8 @@ The macro auto-generates at compile time:
 - `calc_cost(&mut self, params) -> f32` -- sum of squared residuals
 - the `calc_grad_hessian_*` family (`_dense`, `_band`, `_sparse`, ...) --
   gradient and Gauss-Newton hessian per backend, returning the cost
-- `fit(&mut self) -> LmResult` -- runs the LM optimizer
-- `fit_with(&mut self, config) -> LmResult` -- with custom config
+- `fit(&mut self) -> SolveResult` -- runs the LM optimizer
+- `fit_with(&mut self, config) -> SolveResult` -- with custom config
 
 All derivatives are computed symbolically and compiled -- no runtime differentiation overhead.
 
@@ -81,7 +81,7 @@ The ordinary least squares fit is strongly influenced by the outliers, giving a 
 ### Step 2: Robust nonlinear fit
 
 ```rust
-let result = model.fit_with(&LmConfig::well_conditioned().with_verbose(true));
+let result = model.fit_with(&LmConfig::well_conditioned().with_verbose(true)).unwrap();
 ```
 
 Output:

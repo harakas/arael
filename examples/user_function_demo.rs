@@ -80,7 +80,7 @@ fn main() {
     info!("Start x = {:.6}, cost = {:.6}", params[0], m.calc_cost(&params));
 
     let config = LmConfig::conservative().with_verbose(true).with_max_iters(50);
-    let result = simple_lm::solve(&params, &mut m, &config);
+    let result = simple_lm::solve(&params, &mut m, &config).unwrap();
     m.deserialize64(&result.x);
 
     let r1 = sigmoid_f64(m.x.value) - 0.8;

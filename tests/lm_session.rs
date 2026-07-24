@@ -149,15 +149,15 @@ fn fingerprint(r: &LmResult<f64>) -> (Vec<f64>, f64, f64, usize, usize, f64) {
 fn warm_equals_cold<S: LmSolver<f64>>(mk: impl Fn() -> S, label: &str) {
     // The cold reference for the SECOND start point, on a fresh solver.
     let mut w_ref = build(0.15);
-    let cold = w_ref.solve_with(&mut mk(), &cfg());
+    let cold = w_ref.solve_with(&mut mk(), &cfg()).unwrap();
 
     let mut session = LmSession::new(mk());
     let mut w1 = build(0.05);
-    let first = session.solve(&mut w1, &cfg());
+    let first = session.solve(&mut w1, &cfg()).unwrap();
     assert!(first.status.is_success(), "{}: first solve failed: {:?}", label, first.status);
 
     let mut w2 = build(0.15);
-    let warm = session.solve(&mut w2, &cfg());
+    let warm = session.solve(&mut w2, &cfg()).unwrap();
 
     assert_eq!(fingerprint(&warm), fingerprint(&cold), "{}: warm != cold", label);
     assert_eq!(warm.status, cold.status, "{}", label);
@@ -191,7 +191,7 @@ fn warm_equals_cold_narrow_band() {
     // Prove the sweep exercised the narrow-band route, not a fallback.
     let mut session = LmSession::new(mk());
     let mut w = build(0.05);
-    session.solve(&mut w, &cfg());
+    session.solve(&mut w, &cfg()).unwrap();
     let plan = session.solver().plan().expect("a plan");
     assert!(plan.reduced && plan.narrow_band, "expected the narrow-band route: {:?}", plan);
 }
@@ -320,11 +320,11 @@ fn warm_solve_skips_discovery() {
     let mut spy = Spy::new(&TARGET3, &[(0, 1), (1, 2)]);
     let mut session = LmSession::new(SparseFaer::new());
 
-    let r1 = session.solve_x0(&[0.0; 3], &mut spy, &cfg());
+    let r1 = session.solve_x0(&[0.0; 3], &mut spy, &cfg()).unwrap();
     assert!(r1.status.is_success(), "{:?}", r1.status);
     assert_eq!(spy.coo_calls, 1, "the cold solve discovers the pattern once");
 
-    let r2 = session.solve_x0(&[5.0, -1.0, 2.5], &mut spy, &cfg());
+    let r2 = session.solve_x0(&[5.0, -1.0, 2.5], &mut spy, &cfg()).unwrap();
     assert!(r2.status.is_success(), "{:?}", r2.status);
     assert_eq!(spy.coo_calls, 1, "the warm solve must not rediscover");
     assert!(spy.indexed_calls > 0);
@@ -332,7 +332,7 @@ fn warm_solve_skips_discovery() {
     // ... and it still computes the right thing: bit-identical to a cold
     // solve of the same problem from the same start.
     let mut fresh = Spy::new(&TARGET3, &[(0, 1), (1, 2)]);
-    let cold = lm_solve(&[5.0, -1.0, 2.5], &mut SparseFaer::new(), &mut fresh, &cfg());
+    let cold = lm_solve(&[5.0, -1.0, 2.5], &mut SparseFaer::new(), &mut fresh, &cfg()).unwrap();
     assert_eq!(fingerprint(&r2), fingerprint(&cold));
 }
 
@@ -344,14 +344,14 @@ fn parameter_count_change_runs_cold() {
     let mut session = LmSession::new(SparseFaer::new());
 
     let mut p3 = Spy::new(&TARGET3, &[(0, 1)]);
-    session.solve_x0(&[0.0; 3], &mut p3, &cfg());
+    session.solve_x0(&[0.0; 3], &mut p3, &cfg()).unwrap();
 
     let mut p4 = Spy::new(&[1.0, 2.0, 3.0, 4.0], &[(0, 1), (2, 3)]);
-    let r = session.solve_x0(&[0.0; 4], &mut p4, &cfg());
+    let r = session.solve_x0(&[0.0; 4], &mut p4, &cfg()).unwrap();
     assert_eq!(p4.coo_calls, 1, "the size change must force a fresh discovery");
 
     let mut fresh = Spy::new(&[1.0, 2.0, 3.0, 4.0], &[(0, 1), (2, 3)]);
-    let cold = lm_solve(&[0.0; 4], &mut SparseFaer::new(), &mut fresh, &cfg());
+    let cold = lm_solve(&[0.0; 4], &mut SparseFaer::new(), &mut fresh, &cfg()).unwrap();
     assert_eq!(fingerprint(&r), fingerprint(&cold));
 }
 
@@ -362,16 +362,16 @@ fn invalidate_handles_a_same_size_structure_change() {
     let mut session = LmSession::new(SparseFaer::new());
 
     let mut p1 = Spy::new(&TARGET3, &[(0, 1), (1, 2)]);
-    session.solve_x0(&[0.0; 3], &mut p1, &cfg());
+    session.solve_x0(&[0.0; 3], &mut p1, &cfg()).unwrap();
 
     // Same parameter count, different coupling pattern.
     let mut p2 = Spy::new(&TARGET3, &[(0, 2)]);
     session.invalidate();
-    let r = session.solve_x0(&[0.0; 3], &mut p2, &cfg());
+    let r = session.solve_x0(&[0.0; 3], &mut p2, &cfg()).unwrap();
     assert_eq!(p2.coo_calls, 1, "invalidate must force a fresh discovery");
 
     let mut fresh = Spy::new(&TARGET3, &[(0, 2)]);
-    let cold = lm_solve(&[0.0; 3], &mut SparseFaer::new(), &mut fresh, &cfg());
+    let cold = lm_solve(&[0.0; 3], &mut SparseFaer::new(), &mut fresh, &cfg()).unwrap();
     assert_eq!(fingerprint(&r), fingerprint(&cold));
 }
 
@@ -380,7 +380,7 @@ fn invalidate_handles_a_same_size_structure_change() {
 fn empty_solve_is_a_no_op() {
     let mut spy = Spy::new(&[], &[]);
     let mut session = LmSession::new(SparseFaer::new());
-    let r = session.solve_x0(&[], &mut spy, &cfg());
+    let r = session.solve_x0(&[], &mut spy, &cfg()).unwrap();
     assert!(r.x.is_empty());
     assert!(r.status.is_success());
     assert_eq!(spy.coo_calls, 0);
@@ -394,15 +394,15 @@ fn empty_solve_is_a_no_op() {
 fn thread_count_change_between_warm_solves() {
     let mut session = LmSession::new(SparseFaer::new());
     let mut w1 = build(0.05);
-    session.solve(&mut w1, &cfg());
+    session.solve(&mut w1, &cfg()).unwrap();
 
     let mut w2 = build(0.15);
     let threaded = LmConfig { num_threads: 2, ..cfg() };
-    let warm = session.solve(&mut w2, &threaded);
+    let warm = session.solve(&mut w2, &threaded).unwrap();
     assert!(warm.status.is_success(), "{:?}", warm.status);
 
     let mut w_ref = build(0.15);
-    let cold = w_ref.solve_with(&mut SparseFaer::new(), &cfg());
+    let cold = w_ref.solve_with(&mut SparseFaer::new(), &cfg()).unwrap();
     for (i, (a, b)) in std::iter::zip(&warm.x, &cold.x).enumerate() {
         assert!((a - b).abs() < 1e-8, "param {}: {} vs {}", i, a, b);
     }

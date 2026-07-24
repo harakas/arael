@@ -244,8 +244,8 @@ fn builtin_matches_the_macro_component() {
     let cfg = LmConfig::conservative();
     let mut b = build_builtin();
     let mut m = build_macro();
-    let rb = b.solve_dense(&cfg);
-    let rm = m.solve_dense(&cfg);
+    let rb = b.solve_dense(&cfg).unwrap();
+    let rm = m.solve_dense(&cfg).unwrap();
 
     assert!(rb.status.is_success(), "builtin: {:?}", rb.status);
     assert!(rm.status.is_success(), "macro: {:?}", rm.status);

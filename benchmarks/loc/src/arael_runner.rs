@@ -263,7 +263,7 @@ fn solve64(params: &[f64], path: &mut Path, cfg: &arael::simple_lm::LmConfig<f64
         "narrow_band" => arael::simple_lm::lm_solve(
             params, &mut arael::simple_lm::SparseFaer::new().with_narrow_band(true), path, cfg),
         _ => arael::simple_lm::solve_band(params, BAND_KD, path, cfg),
-    }
+    }.unwrap()
 }
 
 fn solve32(params: &[f32], path: &mut PathF, cfg: &arael::simple_lm::LmConfig<f32>)
@@ -273,7 +273,7 @@ fn solve32(params: &[f32], path: &mut PathF, cfg: &arael::simple_lm::LmConfig<f3
         "narrow_band" => arael::simple_lm::lm_solve(
             params, &mut arael::simple_lm::SparseFaerF32::new().with_narrow_band(true), path, cfg),
         _ => arael::simple_lm::solve_band_f32(params, BAND_KD, path, cfg),
-    }
+    }.unwrap()
 }
 
 // ----------------------------------------------------------- covariance

@@ -316,19 +316,19 @@ fn solve64(params: &[f64], path: &mut Path, cfg: &arael::simple_lm::LmConfig<f64
     match std::env::var("SLAM_ARAEL_SOLVER").as_deref() {
         Ok("eigen") => {
             #[cfg(feature = "eigen")]
-            return arael::simple_lm::solve_sparse_eigen(params, path, cfg);
+            return arael::simple_lm::solve_sparse_eigen(params, path, cfg).unwrap();
             #[cfg(not(feature = "eigen"))]
             panic!("SLAM_ARAEL_SOLVER=eigen requires building with --features eigen");
         }
         Ok("cholmod") => {
             #[cfg(feature = "cholmod")]
-            return arael::simple_lm::solve_sparse_cholmod(params, path, cfg);
+            return arael::simple_lm::solve_sparse_cholmod(params, path, cfg).unwrap();
             #[cfg(not(feature = "cholmod"))]
             panic!("SLAM_ARAEL_SOLVER=cholmod requires building with --features cholmod");
         }
         Ok("cholmod_gpl") => {
             #[cfg(feature = "cholmod-gpl")]
-            return arael::simple_lm::solve_sparse_cholmod_supernodal(params, path, cfg);
+            return arael::simple_lm::solve_sparse_cholmod_supernodal(params, path, cfg).unwrap();
             #[cfg(not(feature = "cholmod-gpl"))]
             panic!("SLAM_ARAEL_SOLVER=cholmod_gpl requires building with --features cholmod-gpl");
         }
@@ -343,7 +343,7 @@ fn solve64(params: &[f64], path: &mut Path, cfg: &arael::simple_lm::LmConfig<f64
                     .with_policy(arael::simple_lm::SchurPolicy::Never),
                 path,
                 cfg,
-            )
+            ).unwrap()
         }
         _ => {
             // Default: the backend decides for itself. It finds the
@@ -354,7 +354,7 @@ fn solve64(params: &[f64], path: &mut Path, cfg: &arael::simple_lm::LmConfig<f64
                 &mut arael::simple_lm::SparseFaer::new().with_narrow_band(narrow_band_enabled()),
                 path,
                 cfg,
-            )
+            ).unwrap()
         }
     }
 }
@@ -432,10 +432,10 @@ fn solve32(params: &[f32], path: &mut PathF, cfg: &arael::simple_lm::LmConfig<f3
                 .with_policy(arael::simple_lm::SchurPolicy::Never),
             path,
             cfg,
-        );
+        ).unwrap();
     }
     arael::simple_lm::lm_solve(
-        params, &mut arael::simple_lm::SparseFaerF32::new().with_narrow_band(narrow_band_enabled()), path, cfg)
+        params, &mut arael::simple_lm::SparseFaerF32::new().with_narrow_band(narrow_band_enabled()), path, cfg).unwrap()
 }
 
 // Capped single solve (no timing) -- used for peak-memory measurement.

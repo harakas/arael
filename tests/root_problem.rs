@@ -5,7 +5,7 @@
 // methods on a concrete struct.
 
 use arael::model::{Model, Param, SelfBlock};
-use arael::simple_lm::{Band, LmConfig, LmProblem, LmResult, RootProblem};
+use arael::simple_lm::{Band, LmConfig, LmProblem, RootProblem, SolveResult};
 
 #[arael::model]
 #[arael(root)]
@@ -25,7 +25,7 @@ fn model() -> M {
 }
 
 // A generic helper over ANY root model -- the point of having the trait.
-fn optimize<T, P>(m: &mut P, cfg: &LmConfig<T>) -> LmResult<T>
+fn optimize<T, P>(m: &mut P, cfg: &LmConfig<T>) -> SolveResult<T>
 where
     T: arael::utils::Float,
     P: LmProblem<T> + RootProblem<T>,
@@ -39,15 +39,15 @@ fn solve_entry_points_via_traits() {
     let cfg = LmConfig { max_iters: 50, ..Default::default() };
 
     let mut m = model();
-    let r = m.solve_sparse(&cfg);
+    let r = m.solve_sparse(&cfg).unwrap();
     assert!(r.end_cost < 1e-9, "solve_sparse: {}", r.end_cost);
 
     let mut m = model();
-    let r = m.solve_dense(&cfg);
+    let r = m.solve_dense(&cfg).unwrap();
     assert!(r.end_cost < 1e-9, "solve_dense: {}", r.end_cost);
 
     let mut m = model();
-    let r = m.solve_with(&mut Band::new(1), &cfg);
+    let r = m.solve_with(&mut Band::new(1), &cfg).unwrap();
     assert!(r.end_cost < 1e-9, "solve_with(Band): {}", r.end_cost);
 
     // All three write the optimized values back into the model; the
@@ -60,7 +60,7 @@ fn solve_entry_points_via_traits() {
 fn generic_over_root_model() {
     let cfg = LmConfig { max_iters: 50, ..Default::default() };
     let mut m = model();
-    let r = optimize(&mut m, &cfg);
+    let r = optimize(&mut m, &cfg).unwrap();
     assert!(r.end_cost < 1e-9, "generic optimize: {}", r.end_cost);
 }
 

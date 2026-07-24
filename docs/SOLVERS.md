@@ -39,11 +39,18 @@ the optimized values back in:
 use arael::simple_lm::{LmConfig, LmProblem};   // or `use arael::prelude::*;`
 
 let cfg = LmConfig::conservative().with_verbose(true);
-let result = model.solve_sparse(&cfg);   // indexed sparse faer -- the default backend
+let result = model.solve_sparse(&cfg)?;  // indexed sparse faer -- the default backend
 println!("{} iterations: {:.4} -> {:.4}",
     result.iterations, result.start_cost, result.end_cost);
 // `model` now holds the optimized parameters.
 ```
+
+Every solve entry point returns [`SolveResult`](#solve-failures) --
+`Ok(LmResult)` when the solve terminated by a stopping rule (including
+`MaxIterations` and `TimeLimit`), `Err(SolveFailure)` when it broke: the
+system could not be built or factored, or a Hessian diagonal went
+NaN / negative / zero. The failure carries the best accepted state when
+one exists (see [Solve failures](#solve-failures)).
 
 The solve methods live on `LmProblem` as default methods (hence the
 `use`), gated on `RootProblem` -- the two-method parameter round trip
@@ -68,7 +75,7 @@ to the problem is where the performance is (see
 
 ```rust,ignore
 let cfg = LmConfig::ill_conditioned().with_initial_lambda(1e-6);
-let result = model.solve_sparse(&cfg);
+let result = model.solve_sparse(&cfg)?;
 ```
 
 **Use an explicit backend.** `solve_with` takes any `LmSolver` instance --
@@ -76,7 +83,7 @@ for backends that need construction, e.g. band Cholesky with a known
 half-bandwidth `kd`:
 
 ```rust,ignore
-let result = model.solve_with(&mut Band::new(kd), &cfg);
+let result = model.solve_with(&mut Band::new(kd), &cfg)?;
 ```
 
 **Marginalize landmark-style blocks.** On landmark SLAM structures --
@@ -102,7 +109,7 @@ or on the backend, as parameter ranges:
 
 ```rust,ignore
 let mut solver = SparseFaer::new().with_marginalize(lm_params..n);
-let result = model.solve_with(&mut solver, &cfg);
+let result = model.solve_with(&mut solver, &cfg)?;
 ```
 
 A named set is used as given, and it must be legal -- the blocks in it may
@@ -173,7 +180,7 @@ LmConfig {
 | `cost_threshold` | `0.0` | terminate immediately when cost drops to or below this. Useful for feasibility-style problems with a known target |
 | `gradient_tolerance` | `None` | `Option<T>`. Stop when `max|g_i| <= tol`. **The only criterion that tests for a stationary point** -- the cost tests only say the cost stopped improving, which also happens while drifting along a gauge freedom. arael minimizes `sum r^2`, so its gradient is `2 J^T r`; a solver minimizing `1/2 sum r^2` reads the same number twice as tight, so do not carry a tolerance across without halving it. Respects `min_iters` |
 | `parameter_tolerance` | `None` | `Option<T>`. Stop when `\|step\|_2 <= tol * (\|x\|_2 + tol)` -- the parameters have stopped moving. A different question from the cost test: the cost can plateau while the step still does real work, and the step can vanish while the cost still creeps. Checked on an accepted step, before `advance()` re-centers. Respects `min_iters` |
-| `min_diagonal` | `None` | `Option<T>`. Floor under the DAMPING scale: `H[i,i] + lambda * max(H[i,i], min_diagonal)`. `None` leaves the scale at `H[i,i]` -- the classic multiplicative damping `(1 + lambda) * H[i,i]`. **Without it a parameter of zero curvature ENDS the solve** (`LmStatus::DegenerateDiagonal`) -- `(1 + lambda) * 0` is still 0, so the system is singular and no step can ever be accepted. With it, that parameter gets `lambda * min_diagonal` of damping, the factorization succeeds, and it simply does not move (its gradient is zero too). **A zero diagonal means the system is badly formulated -- a parameter nothing constrains -- so this is a bandaid and should be avoided**; the parameter it damps through stays unconstrained and its value is meaningless. Fix the model first: constrain it, hold it fixed (`Param::fixed`), or leave the entity out. Reach for the floor only when a residual can legitimately switch itself off (a `branch` guarding an undefined observation, a saturated robustifier) and an entity can end one iteration with nothing reaching it. 1e-6 is reasonable. Rescues a ZERO diagonal only: NEGATIVE and NaN stay fatal, since `J^T J`'s diagonal is a sum of squares and either value means the assembly is poisoned |
+| `min_diagonal` | `None` | `Option<T>`. Floor under the DAMPING scale: `H[i,i] + lambda * max(H[i,i], min_diagonal)`. `None` leaves the scale at `H[i,i]` -- the classic multiplicative damping `(1 + lambda) * H[i,i]`. **Without it a parameter of zero curvature FAILS the solve** (`Err` with `SolveFailureKind::DegenerateDiagonal`) -- `(1 + lambda) * 0` is still 0, so the system is singular and no step can ever be accepted. With it, that parameter gets `lambda * min_diagonal` of damping, the factorization succeeds, and it simply does not move (its gradient is zero too). **A zero diagonal means the system is badly formulated -- a parameter nothing constrains -- so this is a bandaid and should be avoided**; the parameter it damps through stays unconstrained and its value is meaningless. Fix the model first: constrain it, hold it fixed (`Param::fixed`), or leave the entity out. Reach for the floor only when a residual can legitimately switch itself off (a `branch` guarding an undefined observation, a saturated robustifier) and an entity can end one iteration with nothing reaching it. 1e-6 is reasonable. Rescues a ZERO diagonal only: NEGATIVE and NaN stay fatal, since `J^T J`'s diagonal is a sum of squares and either value means the assembly is poisoned |
 | `time_limit` | `None` | `Option<Duration>` wall-clock budget for the whole solve. **Overrides `min_iters`** -- a spent budget stops the solve wherever it is, returning the last accepted step (`LmStatus::TimeLimit`). Checked before each assembly and each damped attempt, so the overrun is bounded by one linear solve, not one iteration. It cannot preempt a single factorization. `None` = no limit, and the clock is never read |
 | `num_threads` | `1` | threads for the sparse factorization and triangular solve. `1` sequential, `n` uses n, `0` uses every core. **Requires the `rayon` cargo feature**; without it anything but 1 warns and stays sequential. Threading has overhead: whether it helps depends on the model and its parameter count. See [Threads](#threads) |
 | `verbose` | `false` | per-iteration line on stderr. **Turn on first whenever debugging** |
@@ -363,7 +370,7 @@ A Cholesky rejection gets a longer diagnostic line (commit
 | `lambda=1.6e-7 -> 1.6e-6` | the bump λ gets on the retry (×10) |
 | `non-finite: grad=N diag=N x=N matrix=N` | NaN/Inf counts in each scratch buffer. All zero means the matrix is fully finite, the problem is structural |
 
-A non-positive diagonal is not printed here: it is caught before the inner loop and terminates the solve with `LmStatus::DegenerateDiagonal { param }`, naming the parameter that no constraint reaches.
+A non-positive diagonal is not printed here: it is caught before the inner loop and fails the solve with `SolveFailureKind::DegenerateDiagonal { param, fault }`, naming the parameter that no constraint reaches.
 
 When all four non-finite counts are 0, the
 rejection is f32 accumulation noise at tiny λ (see commit context in
@@ -429,30 +436,61 @@ pub enum LmStatus {
     MaxIterations,         // hit LmConfig::max_iters
     GradientTolerance,     // max|g_i| <= LmConfig::gradient_tolerance
     ParameterTolerance,    // |step| <= tol * (|x| + tol)
+    PredictedReduction,    // model predicts no meaningful improvement left
     TimeLimit,             // spent LmConfig::time_limit
     DriverTerminated,      // LambdaDriver::accepted returned None -- step KEPT
     LambdaCeiling,         // driver gave up: lambda past its ceiling
     RetryBudgetExhausted,  // 20 inner retries with no accepted step
-    DegenerateDiagonal { param: usize },  // non-positive Hessian diagonal
-    SetupFailed(SolveError),  // the linear system could not be built or factored
+    Aborted,               // partial state inside a SolveFailure -- never in Ok
 }
 ```
 
 `LambdaCeiling` and `RetryBudgetExhausted` both mean "no step could be
 accepted," but distinguish the driver hitting its damping ceiling from the
 hard inner-retry cap. `DriverTerminated` is the opposite case: the driver
-stopped the solve on a step it *liked*, and that step is kept. `TimeLimit`,
-`DriverTerminated` and `DegenerateDiagonal` all return the best parameters
-found so far rather than panicking. `LmResult` derives `Clone`/`Debug`.
+stopped the solve on a step it *liked*, and that step is kept. All of these
+are `Ok` terminations: the returned parameters are the best accepted ones.
+`Aborted` never appears in an `Ok` result -- it marks the partial state
+carried by a `SolveFailure` (below). `LmResult` derives `Clone`/`Debug`.
 
-`SetupFailed(SolveError)` is a structural failure that stops the solve before
-any step: a band element outside the declared bandwidth, a parameter no
-constraint touches, a failed symbolic factorization, or an illegal
-marginalization. The solve returns the input parameters unchanged, `NaN`
-costs, and zero iterations -- it never panics. `SolveError` carries the
-specific reason (`BandOverflow`, `UnconstrainedParameter`,
-`SymbolicFactorization`, `CoupledMarginalization`, `MarginalizeMissingDiagonal`,
-`BadMarginalizeSet`).
+## Solve failures
+
+Every solve entry point returns `SolveResult<T> = Result<LmResult<T>,
+SolveFailure<T>>`:
+
+```rust,ignore
+pub struct SolveFailure<T> {
+    pub kind: SolveFailureKind,           // what broke
+    pub partial: Option<Box<LmResult<T>>>, // best accepted state, if any
+}
+
+pub enum SolveFailureKind {
+    Setup(SolveError),  // the linear system could not be built or factored
+    DegenerateDiagonal { param: usize, fault: DiagonalFault },
+}
+
+pub enum DiagonalFault { Nan, Negative, Zero }
+```
+
+`Setup(SolveError)` is a structural failure: a band element outside the
+declared bandwidth, a parameter no constraint touches, a failed symbolic
+factorization, an illegal marginalization, or a backend compiled out
+(`SolverUnavailable`). When it strikes on the first assembly nothing ran:
+`partial` is `None` and the model's parameters are untouched.
+
+`DegenerateDiagonal` means a parameter's Gauss-Newton Hessian diagonal
+went bad at the current iterate: `Nan` and `Negative` mean the assembly
+is poisoned (the diagonal is a sum of squares, so neither can happen in
+healthy arithmetic); `Zero` means no constraint curvature reaches the
+parameter -- see `LmConfig::min_diagonal` for damping through the
+transient case.
+
+When the solve broke after accepted steps, `partial` carries a full
+`LmResult` with `status = LmStatus::Aborted` -- the best accepted
+parameters, usable for diagnosis or a `LmConfig::continue_from` restart.
+`into_partial()` consumes the failure and hands it over. `SolveFailure`
+implements `Display` and `std::error::Error`, so `?` works in
+`main() -> Result<(), Box<dyn Error>>`.
 
 ## Threads
 
@@ -468,7 +506,7 @@ arael = { version = "0.7", features = ["rayon"] }
 ```rust,ignore
 // 1 = sequential (the default), n = n threads, 0 = every core
 let cfg = LmConfig::conservative().with_num_threads(4);
-let result = model.solve_sparse(&cfg);
+let result = model.solve_sparse(&cfg)?;
 ```
 
 Without the feature, a `num_threads` other than 1 warns and runs sequentially --
@@ -506,7 +544,7 @@ site before the message is formatted, so a silenced arael allocates nothing.
 ## Reporting a solve -- `LmResult::print`
 
 ```rust,ignore
-let r = model.solve_sparse(&cfg);
+let r = model.solve_sparse(&cfg)?;
 
 r.print();          // plain ASCII, to stdout
 r.pretty_print();   // colour and glyphs, to stdout

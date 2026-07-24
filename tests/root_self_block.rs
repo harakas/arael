@@ -87,7 +87,7 @@ fn grad_hessian_match_finite_differences() {
 #[test]
 fn solves_to_the_exact_line() {
     let mut m = build();
-    let r = m.solve_dense(&LmConfig::conservative());
+    let r = m.solve_dense(&LmConfig::conservative()).unwrap();
     assert!(r.status.is_success(), "{:?}", r.status);
     assert!((m.a.value - 2.0).abs() < 1e-8, "a = {}", m.a.value);
     assert!((m.b.value - 1.0).abs() < 1e-8, "b = {}", m.b.value);
@@ -123,8 +123,8 @@ fn root_alias_and_type_name_agree() {
         hb: SelfBlock::new(),
         data: points().into_iter().map(|(x, y)| E2 { x, y }).collect(),
     };
-    let r1 = m1.solve_dense(&LmConfig::conservative());
-    let r2 = m2.solve_dense(&LmConfig::conservative());
+    let r1 = m1.solve_dense(&LmConfig::conservative()).unwrap();
+    let r2 = m2.solve_dense(&LmConfig::conservative()).unwrap();
     assert_eq!(r1.x, r2.x, "identical models must take identical steps");
     assert_eq!(r1.iterations, r2.iterations);
 }
@@ -162,8 +162,8 @@ fn paramless_triplet_form_matches_root_selfblock() {
         hbt: TripletBlock::new(),
         data: points().into_iter().map(|(x, y)| E3 { x, y, hb: SelfBlock::new() }).collect(),
     };
-    let r1 = m1.solve_dense(&LmConfig::conservative());
-    let r3 = m3.solve_dense(&LmConfig::conservative());
+    let r1 = m1.solve_dense(&LmConfig::conservative()).unwrap();
+    let r3 = m3.solve_dense(&LmConfig::conservative()).unwrap();
     assert_eq!(r1.x, r3.x, "same equations, same steps");
 }
 
@@ -196,7 +196,7 @@ fn guard_and_loss_apply() {
     data[9].ok = false; // invalid: guard removes it entirely
     data[9].y = -999.0;
     let mut m = Fit4 { a: Param::new(0.0), b: Param::new(0.0), hb: SelfBlock::new(), data };
-    let r = m.solve_dense(&LmConfig::conservative().with_max_iters(200));
+    let r = m.solve_dense(&LmConfig::conservative().with_max_iters(200)).unwrap();
     assert!(r.status.is_success(), "{:?}", r.status);
     assert!((m.a.value - 2.0).abs() < 0.05, "a = {} (outlier not suppressed?)", m.a.value);
     assert!((m.b.value - 1.0).abs() < 0.05, "b = {}", m.b.value);
@@ -231,7 +231,7 @@ fn f32_root_selfblock_solves() {
             E5 { x, y: 2.0 * x + 1.0 }
         }).collect(),
     };
-    let r = m.solve_dense(&LmConfig::<f32>::conservative());
+    let r = m.solve_dense(&LmConfig::<f32>::conservative()).unwrap();
     assert!(r.status.is_success(), "{:?}", r.status);
     assert!((m.a.value - 2.0).abs() < 1e-4, "a = {}", m.a.value);
     assert!((m.b.value - 1.0).abs() < 1e-4, "b = {}", m.b.value);

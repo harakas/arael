@@ -744,7 +744,7 @@ fn main() {
             let config = arael::simple_lm::LmConfig::well_conditioned()
                 .with_verbose(true)
                 .with_rel_precision(1e-6);
-            let result = session.solve(path, &config);
+            let result = session.solve(path, &config).unwrap();
             println!("  {} iterations, cost {:.4} -> {:.4}",
                 result.iterations, result.start_cost, result.end_cost);
             if pass + 1 < scales.len() {

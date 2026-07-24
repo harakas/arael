@@ -163,8 +163,8 @@ fn cfg() -> LmConfig<f64> {
 
 #[test]
 fn boxed_blocks_solve_identically_to_inline() {
-    let inline_x = build_inline().solve_sparse(&cfg()).x;
-    let boxed_x = build_boxed().solve_sparse(&cfg()).x;
+    let inline_x = build_inline().solve_sparse(&cfg()).unwrap().x;
+    let boxed_x = build_boxed().solve_sparse(&cfg()).unwrap().x;
     assert_eq!(inline_x, boxed_x, "boxed blocks must give a bit-identical solve");
 }
 
@@ -175,15 +175,15 @@ fn boxed_blocks_release_and_realloc() {
     // bit-identical to a plain solve -- release/realloc is transparent.
     let mut released = build_boxed();
     released.release_blocks();
-    let released_x = released.solve_sparse(&cfg()).x;
+    let released_x = released.solve_sparse(&cfg()).unwrap().x;
 
-    let plain_x = build_boxed().solve_sparse(&cfg()).x;
+    let plain_x = build_boxed().solve_sparse(&cfg()).unwrap().x;
     assert_eq!(released_x, plain_x, "release + auto-realloc must not change the solve");
 
     // Releasing again after a solve (frees the materialized Hessians) and
     // re-solving must not crash and must stay finite.
     released.release_blocks();
-    let r = released.solve_sparse(&cfg());
+    let r = released.solve_sparse(&cfg()).unwrap();
     assert!(r.end_cost.is_finite());
 }
 
@@ -203,8 +203,8 @@ fn boxed_blocks_partial_optimization_allocates_only_active() {
 
     // The gated partial solve must match an inline partial solve bit-for-bit
     // (exercises mixed active/fixed cross-blocks, e.g. the link into point 2).
-    let boxed_x = c.solve_sparse(&cfg()).x;
-    let inline_x = build_inline_fixed(FIXED).solve_sparse(&cfg()).x;
+    let boxed_x = c.solve_sparse(&cfg()).unwrap().x;
+    let inline_x = build_inline_fixed(FIXED).solve_sparse(&cfg()).unwrap().x;
     assert_eq!(boxed_x, inline_x, "gated partial solve must match inline");
 
     // Self-blocks: allocated iff the point is active (index >= FIXED).
@@ -237,7 +237,7 @@ fn boxed_blocks_allocation_follows_activity_across_solves() {
     let mut c = build_boxed(); // all active
     // Arena order is the creation order here (nothing is removed).
     let pts: std::vec::Vec<_> = c.points.refs().collect();
-    c.solve_sparse(&cfg());
+    c.solve_sparse(&cfg()).unwrap();
     for i in 0..N {
         let r = pts[i];
         assert!(c.points[r].hb.is_allocated(), "point {i} allocated while active");
@@ -249,7 +249,7 @@ fn boxed_blocks_allocation_follows_activity_across_solves() {
         let r = pts[i];
         c.points[r].pos.optimize = false;
     }
-    c.solve_sparse(&cfg());
+    c.solve_sparse(&cfg()).unwrap();
     for i in 0..N {
         let r = pts[i];
         assert_eq!(c.points[r].hb.is_allocated(), i >= 3, "point {i} allocation must track activity");
@@ -260,7 +260,7 @@ fn boxed_blocks_allocation_follows_activity_across_solves() {
         let r = pts[i];
         c.points[r].pos.optimize = true;
     }
-    c.solve_sparse(&cfg());
+    c.solve_sparse(&cfg()).unwrap();
     for i in 0..N {
         let r = pts[i];
         assert!(c.points[r].hb.is_allocated(), "point {i} must re-allocate when active again");

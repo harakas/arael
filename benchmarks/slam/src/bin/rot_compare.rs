@@ -467,7 +467,7 @@ fn build_qu(scene: &Scene) -> (QuPath, Vec<f64>) {
 }
 
 fn solve_and_time<P: LmProblem<f64>>(path: &mut P, params: &[f64]) -> (usize, usize, f64, LmTiming) {
-    let result = simple_lm::solve_sparse(params, path, &cfg());
+    let result = simple_lm::solve_sparse(params, path, &cfg()).unwrap();
     (result.iterations, result.accepted_iterations, result.end_cost,
      result.timing.expect("gather_timing is on"))
 }
