@@ -2902,27 +2902,9 @@ pub fn generate_root_methods(
             // (root-level observations): the global scan is alphabetical
             // and another root holding the same collection would hijack
             // the resolution.
-            // Option<Frine> counts as containment here too (it iterates
-            // as a zero-or-one collection in the emitted sweeps).
-            let holds = |sft: &SymFieldType| matches!(sft,
-                SymFieldType::Struct(s) | SymFieldType::OptionalStruct(s)
-                    if *s == sc.struct_name);
-            let current_root_holds = registry_lookup(&root_name.to_string())
-                .map(|l| l.fields.iter().any(|(_, sft)| holds(sft)))
-                .unwrap_or(false);
-            let parent_type = if current_root_holds {
-                root_name.to_string()
-            } else {
-                {
-                    let guard = crate::SYM_REGISTRY.lock().unwrap_or_else(|p| p.into_inner());
-                    guard.as_ref().and_then(|reg| {
-                        reg.layouts.iter().find(|(_, layout)| {
-                            layout.fields.iter().any(|(_, sft)| holds(sft))
-                        }).map(|(name, _)| name.clone())
-                    })
-                }.ok_or_else(|| syn::Error::new(proc_macro2::Span::call_site(),
-                    format!("cannot find parent struct containing {}", sc.struct_name)))?
-            };
+            let parent_type = find_containing_parent(&root_name.to_string(), &sc.struct_name)
+                .ok_or_else(|| syn::Error::new(proc_macro2::Span::call_site(),
+                    format!("cannot find parent struct containing {}", sc.struct_name)))?;
 
             (parent_type, None, Some((ref_field_name.to_string(), target_block_field.to_string(), target_type)))
         } else {
@@ -3074,13 +3056,13 @@ pub fn generate_root_methods(
         // mixed with a direct field, a cross/triplet CONSTRAINT struct in
         // two root fields, or a frines-style constraint under a duplicated
         // parent. Reject those loudly.
-        let containing = root_location_fields(root_fields, coll_type);
-        let reject: Option<(&str, Vec<(String, bool)>)> = if is_self_block {
-            let all_collections = containing.iter().all(|(_, is_coll)| *is_coll);
+        let containing = root_containments(root_fields, coll_type);
+        let reject: Option<(&str, Vec<(String, ContainKind)>)> = if is_self_block {
+            let all_collections = containing.iter().all(|(_, k)| *k == ContainKind::Collection);
             (containing.len() > 1 && !all_collections)
                 .then(|| (coll_type.as_str(), containing.clone()))
         } else {
-            let struct_containing = root_location_fields(root_fields, &sc.struct_name);
+            let struct_containing = root_containments(root_fields, &sc.struct_name);
             if struct_containing.len() > 1 {
                 Some((sc.struct_name.as_str(), struct_containing))
             } else if struct_containing.is_empty() && containing.len() > 1 {
@@ -3210,7 +3192,7 @@ pub fn generate_root_methods(
                 // root) or nested in a sub-model collection (PosePair in
                 // root.paths[k].pose_pairs). resolve_entity_location finds both.
                 let (rc_name, prefix) = match find_root_collection(root_fields, &sc.struct_name) {
-                    Some((name, _)) => (name, Vec::new()),
+                    Some(name) => (name, Vec::new()),
                     None => match resolve_entity_location(root_fields, &root_name.to_string(), &sc.struct_name) {
                         Some(EntityLocation::Nested { segments }) => {
                             let last = segments.last().expect("Nested has >= 1 segment");
@@ -4304,7 +4286,7 @@ pub fn generate_root_methods(
 
             // Find the root collection that contains the target type (for resolving the ref)
             let target_coll = find_root_collection(root_fields, target_type);
-            let target_coll_ident = target_coll.map(|(name, _)|
+            let target_coll_ident = target_coll.map(|name|
                 syn::Ident::new(&name, proc_macro2::Span::call_site()));
 
             // Index setup for the target type's params. `param_slots` walks
@@ -5782,30 +5764,12 @@ fn interpret_constraint_body(
         let (_, inner) = extract_wrapper_inner(&ref_field.ty, "Ref")
             .ok_or_else(|| syn::Error::new_spanned(struct_name,
                 format!("field '{}' is not Ref<T>", ref_field_name)))?;
-        // Find the parent struct (who contains this constraint struct).
-        // The current root wins when it holds the collection directly --
-        // see the identical preference in the traversal side. Option<T>
-        // containment counts (an Option frine iterates as a zero-or-one
-        // collection); missing it here would fall back to the TARGET type
-        // as parent and pollute the param span with a phantom alias.
-        let holds = |sft: &SymFieldType| matches!(sft,
-            SymFieldType::Struct(s) | SymFieldType::OptionalStruct(s)
-                if *s == struct_name.to_string());
-        let current_root_holds = registry_lookup(root_type_name)
-            .map(|l| l.fields.iter().any(|(_, sft)| holds(sft)))
-            .unwrap_or(false);
-        let parent_type = if current_root_holds {
-            root_type_name.to_string()
-        } else {
-            {
-                let guard = crate::SYM_REGISTRY.lock().unwrap_or_else(|p| p.into_inner());
-                guard.as_ref().and_then(|reg| {
-                    reg.layouts.iter().find(|(_, layout)| {
-                        layout.fields.iter().any(|(_, sft)| holds(sft))
-                    }).map(|(name, _)| name.clone())
-                })
-            }.unwrap_or_else(|| inner.to_string())
-        };
+        // Find the parent struct (who contains this constraint struct)
+        // through the same shared scan the traversal side uses. The
+        // fallback to the target type covers per-struct expansion phases
+        // where the parent is not registered yet.
+        let parent_type = find_containing_parent(root_type_name, &struct_name.to_string())
+            .unwrap_or_else(|| inner.to_string());
         (parent_type, Some(inner.to_string()))
     } else {
         let block_field = fields.iter().find(|f| {
@@ -6182,60 +6146,95 @@ fn params_from_registry_check(params: &[String]) -> bool {
 /// (`true`) or direct struct-typed fields (`false`) -- in declaration order.
 /// Multiple matches are supported only for SelfBlock-constrained entities in
 /// collections; the guard in `generate_root_methods` rejects the rest.
-fn root_location_fields(
+/// How a root field holds an entity type.
+#[derive(Clone, Copy, PartialEq)]
+enum ContainKind {
+    /// Vec / Deque / Arena -- multi-instance, iterated.
+    Collection,
+    /// Plain struct-typed field -- single instance.
+    Direct,
+    /// Option<T> -- zero or one instance; iterates as a zero-or-one
+    /// collection (frines) or is if-let wrapped (single-instance sweeps).
+    Optional,
+}
+
+/// THE one-hop containment walk: every root field holding `type_name`,
+/// in declaration order, with how it holds it. The single syntax-side
+/// authority on which root fields count as containment -- location
+/// resolution, collection lookup, and the duplicate-containment guard
+/// are all views of this list, so a containment rule (a new container
+/// kind, an attribute exclusion) is added exactly once.
+fn root_containments(
     root_fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
     type_name: &str,
-) -> Vec<(String, bool)> {
+) -> Vec<(String, ContainKind)> {
     let mut out = Vec::new();
     for field in root_fields {
         let Some(ident) = field.ident.as_ref() else { continue };
         if let syn::Type::Path(tp) = &field.ty
             && let Some(seg) = tp.path.segments.last() {
                 let container = seg.ident.to_string();
-                if container == "Vec" || container == "Deque" || container == "Arena" {
+                let wrapped_matches = || {
                     if let syn::PathArguments::AngleBracketed(args) = &seg.arguments
                         && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
-                            && let Ok(inner_name) = type_ident_name(inner)
-                                && inner_name == type_name {
-                                    out.push((ident.to_string(), true));
-                                }
-                } else if container == "Option" {
-                    // Option<T> counts as a (single-instance) containment
-                    // location, so the duplicate guard sees it.
-                    if let syn::PathArguments::AngleBracketed(args) = &seg.arguments
-                        && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
-                            && let Ok(inner_name) = type_ident_name(inner)
-                                && inner_name == type_name {
-                                    out.push((ident.to_string(), false));
-                                }
-                } else if seg.ident == type_name {
-                    out.push((ident.to_string(), false));
+                            && let Ok(inner_name) = type_ident_name(inner) {
+                                inner_name == type_name
+                            } else { false }
+                };
+                match container.as_str() {
+                    "Vec" | "Deque" | "Arena" => {
+                        if wrapped_matches() {
+                            out.push((ident.to_string(), ContainKind::Collection));
+                        }
+                    }
+                    "Option" => {
+                        if wrapped_matches() {
+                            out.push((ident.to_string(), ContainKind::Optional));
+                        }
+                    }
+                    _ => {
+                        if seg.ident == type_name {
+                            out.push((ident.to_string(), ContainKind::Direct));
+                        }
+                    }
                 }
             }
     }
     out
 }
 
+/// First root collection (Vec/Deque/Arena) holding `type_name`.
 fn find_root_collection(
     root_fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
     type_name: &str,
-) -> Option<(String, String)> {
-    // Find a field in root that is a collection (Vec/Deque) of the given type
-    for field in root_fields {
-        let field_name = field.ident.as_ref()?.to_string();
-        if let syn::Type::Path(tp) = &field.ty
-            && let Some(seg) = tp.path.segments.last() {
-                let container = seg.ident.to_string();
-                if (container == "Vec" || container == "Deque" || container == "Arena")
-                    && let syn::PathArguments::AngleBracketed(args) = &seg.arguments
-                        && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
-                            && let Ok(inner_name) = type_ident_name(inner)
-                                && inner_name == type_name {
-                                    return Some((field_name, container));
-                                }
-            }
+) -> Option<String> {
+    root_containments(root_fields, type_name).into_iter()
+        .find(|(_, k)| *k == ContainKind::Collection)
+        .map(|(f, _)| f)
+}
+
+/// The struct whose layout CONTAINS `struct_name` (a Struct or
+/// OptionalStruct field; a collection records its element type as
+/// Struct). The current root wins when it holds the struct directly --
+/// the global registry scan is alphabetical, and another root holding
+/// the same collection would hijack the resolution. Shared by the two
+/// remote-block resolution phases so they cannot drift.
+fn find_containing_parent(root_type_name: &str, struct_name: &str) -> Option<String> {
+    let holds = |sft: &SymFieldType| matches!(sft,
+        SymFieldType::Struct(s) | SymFieldType::OptionalStruct(s)
+            if s == struct_name);
+    let current_root_holds = registry_lookup(root_type_name)
+        .map(|l| l.fields.iter().any(|(_, sft)| holds(sft)))
+        .unwrap_or(false);
+    if current_root_holds {
+        return Some(root_type_name.to_string());
     }
-    None
+    let guard = crate::SYM_REGISTRY.lock().unwrap_or_else(|p| p.into_inner());
+    guard.as_ref().and_then(|reg| {
+        reg.layouts.iter().find(|(_, layout)| {
+            layout.fields.iter().any(|(_, sft)| holds(sft))
+        }).map(|(name, _)| name.clone())
+    })
 }
 
 /// Where on the root struct an entity of a given type lives.
@@ -6265,27 +6264,20 @@ fn resolve_entity_location(
     if type_name == root_name {
         return Some(EntityLocation::RootSelf);
     }
-    if let Some((field, _container)) = find_root_collection(root_fields, type_name) {
-        return Some(EntityLocation::Collection { field });
+    // One-hop containment from the shared walk. A collection wins over a
+    // single-instance holding whatever the declaration order (the
+    // duplicate guard rejects every mixed multi-holding shape anyway;
+    // this keeps the resolution stable for the legal ones).
+    let one_hop = root_containments(root_fields, type_name);
+    if let Some((field, _)) = one_hop.iter().find(|(_, k)| *k == ContainKind::Collection) {
+        return Some(EntityLocation::Collection { field: field.clone() });
     }
-    // Look for a plain struct-typed field whose type name matches (generic
-    // args ignored -- `pose: Pose<f32>` is a direct `Pose` field), or an
-    // `Option<T>` wrapping it.
-    for field in root_fields {
-        let field_name = field.ident.as_ref()?.to_string();
-        if let syn::Type::Path(tp) = &field.ty
-            && let Some(seg) = tp.path.segments.last() {
-                if seg.ident == type_name {
-                    return Some(EntityLocation::DirectField { field: field_name });
-                }
-                if seg.ident == "Option"
-                    && let syn::PathArguments::AngleBracketed(args) = &seg.arguments
-                    && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
-                    && let Ok(inner_name) = type_ident_name(inner)
-                    && inner_name == type_name {
-                        return Some(EntityLocation::OptionalField { field: field_name });
-                }
-            }
+    if let Some((field, kind)) = one_hop.into_iter().next() {
+        return Some(match kind {
+            ContainKind::Direct => EntityLocation::DirectField { field },
+            ContainKind::Optional => EntityLocation::OptionalField { field },
+            ContainKind::Collection => unreachable!(),
+        });
     }
     // Not a direct child of the root: walk the registry for a deeper
     // containment path (e.g. root -> Vec<Path> -> Deque<Pose>).
