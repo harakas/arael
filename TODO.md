@@ -1,5 +1,18 @@
 # TODO
 
+- **Multiple containment locations: remaining shapes**. A
+  SelfBlock-constrained entity held in several root collections now gets
+  one constraint sweep per collection (was: first field only, the rest
+  serialized params that silently contributed nothing -- found 2026-07-24
+  by the robust-loss test audit; regression-tested there and used by
+  tests/schur_detect.rs). Still emitted single-location and REJECTED by
+  the guard in `generate_root_methods` (trybuild-pinned in
+  tests/constraint_attr_errors/duplicate_containment.rs): a duplicated
+  cross/triplet constraint struct, a frines-style constraint under a
+  duplicated parent, and a self-block type mixed with a direct field.
+  Nested duplicate paths (`resolve_nested_path` returns the first) are
+  neither supported nor guarded.
+
 - **Unscented-transform utility for covariance mapping**. Pushing a
   parameter-space marginal through a nonlinear embedding currently
   linearizes: slam_demo_gm maps its inverse-depth landmark marginal

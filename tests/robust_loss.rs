@@ -6,6 +6,8 @@
 //   - `loss = |s| s` is bit-identical to no loss (w == 1).
 //   - Cauchy scales grad and Hessian by w = c^2/(c^2+s), cost = rho(s).
 //   - Tukey redescends: a gross outlier gets w == 0 and drops out.
+//   - Huber: w = sqrt(k2/s) beyond the threshold, exactly least squares
+//     inside it.
 //   - The same holds across a CrossBlock (cross Hessian scaled too).
 
 use arael::model::{CrossBlock, Param, SelfBlock};
@@ -94,6 +96,21 @@ struct PtM {
     hb: SelfBlock<PtM>,
 }
 
+/// Huber: convex, weight sqrt(k2/s) beyond the threshold, identity
+/// inside it.
+#[arael::model]
+#[arael(constraint(hb, loss = |s| loss_huber(s, pth.k2), {
+    [pth.x - pth.mx, pth.y - pth.my]
+}))]
+struct PtH {
+    x: Param<f64>,
+    y: Param<f64>,
+    mx: f64,
+    my: f64,
+    k2: f64,
+    hb: SelfBlock<PtH>,
+}
+
 #[arael::model]
 #[arael(root)]
 struct W {
@@ -103,6 +120,13 @@ struct W {
     tukey: refs::Vec<PtT>,
     gm: refs::Vec<PtG>,
     mixed: refs::Vec<PtM>,
+    // Same entity types as `plain` / `huber_out` deliberately: a type
+    // held in several root collections gets one constraint sweep per
+    // collection (regression: the second collection used to serialize
+    // params but silently contribute nothing).
+    plain_out: refs::Vec<Pt>,
+    huber_out: refs::Vec<PtH>,
+    huber_in: refs::Vec<PtH>,
 }
 
 // Shared residual for plain/ident/cauchy; tukey gets a gross outlier.
@@ -124,6 +148,9 @@ fn build_self() -> (W, Vec<f64>) {
         tukey: refs::Vec::new(),
         gm: refs::Vec::new(),
         mixed: refs::Vec::new(),
+        plain_out: refs::Vec::new(),
+        huber_out: refs::Vec::new(),
+        huber_in: refs::Vec::new(),
     };
     w.plain.push(Pt { x: Param::new(X), y: Param::new(Y), mx: MX, my: MY, hb: SelfBlock::new() });
     w.ident.push(PtI { x: Param::new(X), y: Param::new(Y), mx: MX, my: MY, hb: SelfBlock::new() });
@@ -133,12 +160,19 @@ fn build_self() -> (W, Vec<f64>) {
     w.gm.push(PtG { x: Param::new(X), y: Param::new(Y), mx: MX, my: MY, c2: C2, hb: SelfBlock::new() });
     w.mixed.push(PtM { x: Param::new(X as f32), y: Param::new(Y as f32),
         mx: MX as f32, my: MY as f32, c2: C2 as f32, hb: SelfBlock::new() });
+    // Huber outlier pair: the same gross residual (3, 0) plain and
+    // huber-wrapped; s = 9 > k2 = 1 selects huber's sqrt branch.
+    w.plain_out.push(Pt { x: Param::new(3.0), y: Param::new(0.0), mx: 0.0, my: 0.0, hb: SelfBlock::new() });
+    w.huber_out.push(PtH { x: Param::new(3.0), y: Param::new(0.0), mx: 0.0, my: 0.0, k2: C2, hb: SelfBlock::new() });
+    // Inside the threshold (s < k2) huber is exactly least squares.
+    w.huber_in.push(PtH { x: Param::new(X), y: Param::new(Y), mx: MX, my: MY, k2: C2, hb: SelfBlock::new() });
     let mut params = Vec::new();
     w.serialize64(&mut params);
     (w, params)
 }
 
-// Param layout: plain(0,1), ident(2,3), cauchy(4,5), tukey(6,7), gm(8,9), mixed(10,11).
+// Param layout: plain(0,1), ident(2,3), cauchy(4,5), tukey(6,7), gm(8,9),
+// mixed(10,11), plain_out(12,13), huber_out(14,15), huber_in(16,17).
 fn gh(root: &mut W, params: &[f64]) -> (Vec<f64>, Vec<f64>) {
     let n = params.len();
     let mut grad = vec![0.0_f64; n];
@@ -150,9 +184,9 @@ fn gh(root: &mut W, params: &[f64]) -> (Vec<f64>, Vec<f64>) {
 #[test]
 fn identity_loss_is_bit_identical_to_no_loss() {
     let (mut w, params) = build_self();
-    assert_eq!(params.len(), 12);
+    assert_eq!(params.len(), 18);
     let (grad, hess) = gh(&mut w, &params);
-    let n = 12;
+    let n = 18;
     // ident block (2,3) must equal plain block (0,1) exactly.
     assert_eq!(grad[2], grad[0]);
     assert_eq!(grad[3], grad[1]);
@@ -168,7 +202,7 @@ fn identity_loss_is_bit_identical_to_no_loss() {
 fn cauchy_scales_gradient_and_hessian_by_weight() {
     let (mut w, params) = build_self();
     let (grad, hess) = gh(&mut w, &params);
-    let n = 12;
+    let n = 18;
     let s = s_inlier();
     let weight = C2 / (C2 + s); // rho'(s) for Cauchy
     // cauchy block (4,5) == weight * plain block (0,1).
@@ -182,7 +216,7 @@ fn cauchy_scales_gradient_and_hessian_by_weight() {
 fn geman_mcclure_scales_gradient_and_hessian_by_weight() {
     let (mut w, params) = build_self();
     let (grad, hess) = gh(&mut w, &params);
-    let n = 12;
+    let n = 18;
     let s = s_inlier();
     let c2 = C2;
     let weight = (c2 / (c2 + s)) * (c2 / (c2 + s)); // rho'(s) for GM
@@ -208,10 +242,29 @@ fn mixed_precision_gm_weight_applies() {
 }
 
 #[test]
+fn huber_scales_gradient_and_hessian_beyond_threshold() {
+    let (mut w, params) = build_self();
+    let (grad, hess) = gh(&mut w, &params);
+    let n = 18;
+    let s = 9.0; // huber pair residual (3, 0)
+    let weight = (C2 / s).sqrt(); // rho'(s) for huber beyond k2
+    assert!((grad[14] - weight * grad[12]).abs() < 1e-12,
+        "grad_x {} vs {}", grad[14], weight * grad[12]);
+    assert!((grad[15] - weight * grad[13]).abs() < 1e-12);
+    assert!((hess[14 * n + 14] - weight * hess[12 * n + 12]).abs() < 1e-12);
+    assert!((hess[15 * n + 15] - weight * hess[13 * n + 13]).abs() < 1e-12);
+    // Inside the threshold huber IS least squares: bit-equal to plain.
+    assert_eq!(grad[16], grad[0]);
+    assert_eq!(grad[17], grad[1]);
+    assert_eq!(hess[16 * n + 16], hess[0]);
+    assert_eq!(hess[17 * n + 17], hess[1 * n + 1]);
+}
+
+#[test]
 fn tukey_rejects_a_gross_outlier() {
     let (mut w, params) = build_self();
     let (grad, hess) = gh(&mut w, &params);
-    let n = 12;
+    let n = 18;
     // Outlier has s = 9 > c2 = 1, weight rho'(s) = 0: it leaves grad and
     // Hessian untouched.
     assert_eq!(grad[6], 0.0);
@@ -228,8 +281,12 @@ fn total_cost_sums_the_robustified_blocks() {
     let rho_cauchy = C2 * (1.0 + s / (C2)).ln();
     let rho_tukey = C2 / 3.0; // fully redescended (capped)
     let rho_gm = C2 * s / (C2 + s);
+    let s_out = 9.0; // the huber pair's residual (3, 0)
+    let rho_huber = 2.0 * (C2 * s_out).sqrt() - C2;
     // plain s + ident s + cauchy rho + tukey rho + gm rho + mixed gm rho
-    let expected = s + s + rho_cauchy + rho_tukey + rho_gm + rho_gm;
+    // + plain outlier s + huber outlier rho + huber inlier s
+    let expected = s + s + rho_cauchy + rho_tukey + rho_gm + rho_gm
+        + s_out + rho_huber + s;
     // The mixed block computes its rho in f32, so the sum agrees only to
     // single precision.
     assert!((cost - expected).abs() < 1e-6, "cost {} vs {}", cost, expected);

@@ -23,4 +23,5 @@ fn constraint_attr_compile_errors() {
     t.compile_fail("tests/constraint_attr_errors/root_selfblock_missing_field.rs");
     t.compile_fail("tests/constraint_attr_errors/root_selfblock_triplet_primary.rs");
     t.compile_fail("tests/constraint_attr_errors/root_selfblock_entity_params.rs");
+    t.compile_fail("tests/constraint_attr_errors/duplicate_containment.rs");
 }

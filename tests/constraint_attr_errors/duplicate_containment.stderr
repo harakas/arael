@@ -1,0 +1,15 @@
+error: `Tie` is contained in multiple root fields (ties, more_ties); its constraints would only be evaluated for `ties`. Multiple containment locations are supported only for SelfBlock-constrained entities in collections -- wrap the others in distinct types
+  --> tests/constraint_attr_errors/duplicate_containment.rs:26:1
+   |
+26 | #[arael::model]
+   | ^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused import: `self`
+ --> tests/constraint_attr_errors/duplicate_containment.rs:8:19
+  |
+8 | use arael::refs::{self, Ref};
+  |                   ^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

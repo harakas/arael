@@ -2944,6 +2944,40 @@ pub fn generate_root_methods(
             Some(loc) => loc,
             None => continue,
         };
+        // Duplicate containment guard. SelfBlock sweeps handle a type held
+        // in several root collections (one sweep per collection, below).
+        // Everything else drives its iteration from a SINGLE resolved
+        // location and would silently skip the rest: a self-block type
+        // mixed with a direct field, a cross/triplet CONSTRAINT struct in
+        // two root fields, or a frines-style constraint under a duplicated
+        // parent. Reject those loudly.
+        let containing = root_location_fields(root_fields, coll_type);
+        let reject: Option<(&str, Vec<(String, bool)>)> = if is_self_block {
+            let all_collections = containing.iter().all(|(_, is_coll)| *is_coll);
+            (containing.len() > 1 && !all_collections)
+                .then(|| (coll_type.as_str(), containing.clone()))
+        } else {
+            let struct_containing = root_location_fields(root_fields, &sc.struct_name);
+            if struct_containing.len() > 1 {
+                Some((sc.struct_name.as_str(), struct_containing))
+            } else if struct_containing.is_empty() && containing.len() > 1 {
+                // Constraint struct not on the root: iteration goes through
+                // its parent (the A-type), which must be unique.
+                Some((coll_type.as_str(), containing.clone()))
+            } else {
+                None
+            }
+        };
+        if let Some((dup_type, fields)) = reject {
+            let names: Vec<&str> = fields.iter().map(|(f, _)| f.as_str()).collect();
+            return Err(syn::Error::new(proc_macro2::Span::call_site(),
+                format!("`{}` is contained in multiple root fields ({}); its \
+                    constraints would only be evaluated for `{}`. Multiple \
+                    containment locations are supported only for \
+                    SelfBlock-constrained entities in collections -- wrap \
+                    the others in distinct types",
+                    dup_type, names.join(", "), names[0])));
+        }
         if !is_self_block
             && !(is_remote_block
                 && matches!(entity_location, EntityLocation::RootSelf))
@@ -4351,36 +4385,50 @@ pub fn generate_root_methods(
 
             match &entity_location {
                 EntityLocation::Collection { .. } | EntityLocation::Nested { .. } => {
-                    // SelfBlock on a Vec/Deque/Arena (possibly nested below the
-                    // root): group by full access path for merged-loop emission.
-                    let group_key = group_key_path.clone();
-                    let group = collection_groups.entry(group_key).or_insert_with(|| CollectionGroup {
-                        coll_ident: coll_ident.clone(),
-                        prefix: nested_prefix.clone(),
-                        self_var: self_var.clone(),
-                        a_type_ident: a_type_ident.clone(),
-                        self_block: None,
-                        cost_entries: Vec::new(),
-                        gh_entries: Vec::new(),
-                        jac_entries: Vec::new(),
-                        nested_cost_loops: Vec::new(),
-                        nested_gh_loops: Vec::new(),
-                        nested_jac_loops: Vec::new(),
-                    });
-                    // A `root.<selfblock>` constraint has no entity block:
-                    // registering one would emit set_indices on a field the
-                    // entity does not have. The root's own SelfBlock is
-                    // wired unconditionally by root_self_block_prelude.
-                    if group.self_block.is_none() && root_self_primary.is_none() {
-                        group.self_block = Some(SelfBlockInfo {
-                            a_param_count,
-                            a_idx_stmts: a_idx_stmts.clone(),
-                            block_ident: block_ident.clone(),
+                    // SelfBlock on a Vec/Deque/Arena (possibly nested below
+                    // the root): group by full access path for merged-loop
+                    // emission. A type held in SEVERAL root collections gets
+                    // one sweep per collection -- same entries, distinct
+                    // groups (the entries reference `__item` and `self`
+                    // only, never the collection path).
+                    let locations: Vec<(syn::Ident, Vec<AccessSegment>, String)> =
+                        if matches!(entity_location, EntityLocation::Nested { .. }) {
+                            vec![(coll_ident.clone(), nested_prefix.clone(), group_key_path.clone())]
+                        } else {
+                            containing.iter().map(|(field, _)| {
+                                (syn::Ident::new(field, proc_macro2::Span::call_site()),
+                                 Vec::new(), field.clone())
+                            }).collect()
+                        };
+                    for (loc_ident, loc_prefix, loc_key) in locations {
+                        let group = collection_groups.entry(loc_key).or_insert_with(|| CollectionGroup {
+                            coll_ident: loc_ident.clone(),
+                            prefix: loc_prefix.clone(),
+                            self_var: self_var.clone(),
+                            a_type_ident: a_type_ident.clone(),
+                            self_block: None,
+                            cost_entries: Vec::new(),
+                            gh_entries: Vec::new(),
+                            jac_entries: Vec::new(),
+                            nested_cost_loops: Vec::new(),
+                            nested_gh_loops: Vec::new(),
+                            nested_jac_loops: Vec::new(),
                         });
+                        // A `root.<selfblock>` constraint has no entity block:
+                        // registering one would emit set_indices on a field the
+                        // entity does not have. The root's own SelfBlock is
+                        // wired unconditionally by root_self_block_prelude.
+                        if group.self_block.is_none() && root_self_primary.is_none() {
+                            group.self_block = Some(SelfBlockInfo {
+                                a_param_count,
+                                a_idx_stmts: a_idx_stmts.clone(),
+                                block_ident: block_ident.clone(),
+                            });
+                        }
+                        group.cost_entries.push(cost_entry.clone());
+                        group.gh_entries.push(gh_entry.clone());
+                        if let Some(ref je) = jac_entry { group.jac_entries.push(je.clone()); }
                     }
-                    group.cost_entries.push(cost_entry);
-                    group.gh_entries.push(gh_entry);
-                    if let Some(je) = jac_entry { group.jac_entries.push(je); }
                 }
                 EntityLocation::RootSelf | EntityLocation::DirectField { .. } => {
                     if root_self_primary.is_some() {
@@ -5942,6 +5990,35 @@ pub(crate) fn check_residual_coverage(
 
 fn params_from_registry_check(params: &[String]) -> bool {
     !params.is_empty()
+}
+
+/// Root fields containing `type_name` -- collections (Vec/Deque/Arena) of it
+/// (`true`) or direct struct-typed fields (`false`) -- in declaration order.
+/// Multiple matches are supported only for SelfBlock-constrained entities in
+/// collections; the guard in `generate_root_methods` rejects the rest.
+fn root_location_fields(
+    root_fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
+    type_name: &str,
+) -> Vec<(String, bool)> {
+    let mut out = Vec::new();
+    for field in root_fields {
+        let Some(ident) = field.ident.as_ref() else { continue };
+        if let syn::Type::Path(tp) = &field.ty
+            && let Some(seg) = tp.path.segments.last() {
+                let container = seg.ident.to_string();
+                if container == "Vec" || container == "Deque" || container == "Arena" {
+                    if let syn::PathArguments::AngleBracketed(args) = &seg.arguments
+                        && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
+                            && let Ok(inner_name) = type_ident_name(inner)
+                                && inner_name == type_name {
+                                    out.push((ident.to_string(), true));
+                                }
+                } else if seg.ident == type_name {
+                    out.push((ident.to_string(), false));
+                }
+            }
+    }
+    out
 }
 
 fn find_root_collection(
