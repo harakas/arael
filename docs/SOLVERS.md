@@ -8,8 +8,7 @@ brief.
 
 ## TL;DR -- which backend?
 
-**Default to `solve_sparse_faer_f32` (or `solve_sparse_faer` for
-f64).** For most real problems the Hessian is sparse enough that
+**Default to `solve_sparse_f32` (or `solve_sparse` for f64).** For most real problems the Hessian is sparse enough that
 sparse Cholesky is the right choice, and `faer` is the best-supported
 backend -- pure Rust, no external dependency, benchmarks cleanly, and
 handles the full sparsity pattern of a SLAM-like problem.
@@ -21,14 +20,14 @@ parameter vector.
 
 | Backend (`solve_with(&mut ..., &cfg)`) | Free function | When |
 |---|---|---|
-| **`SparseFaer::<T>::new()`** (`T` = `f64`/`f32`) | **`solve_sparse_faer[_f32]`** | **default** (= the root's `solve_sparse`). Any non-trivial problem -- SLAM, bundle adjustment, sketch solver, anything with > ~10 parameters or a sparse Hessian structure. Sparsity pattern discovered once, indexed assembly after |
-| `Dense` | `solve[_f32]` | dense nalgebra Cholesky (= the root's `solve_dense`): low parameter counts, or when the Hessian is actually dense and small |
+| **`SparseFaer::<T>::new()`** (`T` = `f64`/`f32`) | **`solve_sparse[_f32]`** | **default** (= the root's `solve_sparse`). Any non-trivial problem -- SLAM, bundle adjustment, sketch solver, anything with > ~10 parameters or a sparse Hessian structure. Sparsity pattern discovered once, indexed assembly after |
+| `Dense` | `solve_dense[_f32]` | dense nalgebra Cholesky (= the root's `solve_dense`): low parameter counts, or when the Hessian is actually dense and small. The free `solve[_f32]` picks by itself: dense for <= 6 params, SparseFaer otherwise |
 | `Band::new(kd)` | `solve_band[_f32]` | **only** when the Hessian is genuinely block-tridiagonal with a known half-bandwidth `kd` (pose-only localisation, smoother-like problems). ~10x faster than dense at 500 poses but hard-errors on any off-band element |
 | `BandLapack::new(kd)` | `solve_band_lapack[_f32]` | the same band solve through LAPACK `dpbsv`/`spbsv` (feature `lapack`) -- for LAPACK-standardised environments |
 | `SparseEigen::<T>::new()` | `solve_sparse_eigen[_f32]` | Eigen `SimplicialLLT` through a C++ shim (feature `eigen`) -- for Eigen interop/comparison; measured well behind faer |
 | `SparseCholmod::new()` | `solve_sparse_cholmod` | CHOLMOD simplicial Cholesky, LGPL (feature `cholmod`; f64 only) -- comparable to Eigen simplicial, behind faer |
 | `SparseCholmodSupernodal::new()` | `solve_sparse_cholmod_supernodal` | CHOLMOD supernodal Cholesky (feature `cholmod-gpl`; f64 only). **License warning: the Supernodal module is GPL**, unlike the LGPL simplicial one -- enabling it makes the binary subject to the GPL |
-| `Sparse::new()` / `SparseDirect::new()` | `solve_sparse` / `solve_sparse_direct` | COO / direct-CSC assembly over a DENSE solve -- validation baselines for the assembly paths, not for production. Note the free `solve_sparse` is this baseline; the root's `.solve_sparse()` method is faer |
+| `SparseCoo::new()` / `SparseDirectCsc::new()` | `solve_sparse_coo` / `solve_sparse_direct_csc` | COO / direct-CSC assembly over a DENSE solve -- validation baselines for the assembly paths, not for production. (the root's `.solve_sparse()` method is faer) |
 
 ## Basic usage
 
@@ -131,7 +130,7 @@ the first iteration on its own:
 ```rust,ignore
 let mut params = Vec::<f32>::new();
 model.serialize32(&mut params);
-let result = solve_sparse_faer_f32(&params, &mut model, &cfg);   // free function
+let result = solve_sparse_f32(&params, &mut model, &cfg);   // free function
 model.deserialize32(&result.x);
 ```
 
@@ -668,7 +667,7 @@ let plain1 = atan2(r_f.y, r_f.x) * feature.isigma.x * path.frine_isigma_scale;
 // main loop:
 for scale in [0.01, 0.1, 1.0] {
     path.frine_isigma_scale = scale;
-    let result = solve_sparse_faer_f32(&params, &mut path, &cfg);
+    let result = solve_sparse_f32(&params, &mut path, &cfg);
     // ...
 }
 ```
@@ -737,4 +736,4 @@ rule wins over the config's. The built-in schedules never use it.
 
 A driver is a `#[derive(Clone)]` type; attach it to the config with
 `LmConfig::with_driver(...)` and every solve entry point (`lm_solve`,
-`solve_sparse_faer`, ...) picks it up from `config.driver`.
+`solve_sparse`, ...) picks it up from `config.driver`.

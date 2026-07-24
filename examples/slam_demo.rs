@@ -647,7 +647,7 @@ fn main() {
             .with_rel_precision(1e-6);
         let result = match solver_name.as_str() {
             "dense" => arael::simple_lm::solve(&params64, &mut path, &config),
-            "faer" => arael::simple_lm::solve_sparse_faer(&params64, &mut path, &config),
+            "faer" => arael::simple_lm::solve_sparse(&params64, &mut path, &config),
             #[cfg(feature = "eigen")]
             "eigen" => arael::simple_lm::solve_sparse_eigen(&params64, &mut path, &config),
             #[cfg(not(feature = "eigen"))]

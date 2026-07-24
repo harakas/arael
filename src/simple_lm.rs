@@ -31,7 +31,7 @@
 //! let result = arael::simple_lm::solve_band(&params, 11, &mut path, &config);
 //!
 //! // Sparse solver (faer, pure Rust):
-//! let result = arael::simple_lm::solve_sparse_faer(&params, &mut path, &config);
+//! let result = arael::simple_lm::solve_sparse(&params, &mut path, &config);
 //!
 //! path.deserialize64(&result.x);
 //! println!("cost: {} -> {} in {} iterations",
@@ -1311,7 +1311,7 @@ pub struct LmResult<T> {
     /// What the linear solver did -- e.g. whether [`SparseFaer`]
     /// marginalized anything and on what evidence. `None` for backends that
     /// report nothing. Survives the convenience entry points
-    /// ([`solve_sparse_faer`] and friends), which own their solver and
+    /// ([`solve_sparse`] and friends), which own their solver and
     /// would otherwise drop the information.
     pub solver: Option<SolverReport>,
     /// Per-phase wall-clock timing: `Some` iff [`LmConfig::gather_timing`]
@@ -2815,13 +2815,37 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
 
 // Backward-compatible wrappers
 
-/// Solve with dense Cholesky backend (f64).
+/// Solve with an automatically chosen backend (f64): dense Cholesky for
+/// tiny problems (<= 6 params, where sparse bookkeeping costs more than
+/// it saves), [`SparseFaer`] otherwise. Above 6 params the problem must
+/// implement the sparse assembly paths -- macro-generated models always
+/// do; a hand-written dense-only [`LmProblem`] should call
+/// [`solve_dense`] instead.
 pub fn solve(x0: &[f64], problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> LmResult<f64> {
+    if x0.len() <= 6 {
+        solve_dense(x0, problem, config)
+    } else {
+        solve_sparse(x0, problem, config)
+    }
+}
+
+/// Solve with an automatically chosen backend (f32): dense for <= 6
+/// params, [`SparseFaer`] otherwise.
+pub fn solve_f32(x0: &[f32], problem: &mut impl LmProblem<f32>, config: &LmConfig<f32>) -> LmResult<f32> {
+    if x0.len() <= 6 {
+        solve_dense_f32(x0, problem, config)
+    } else {
+        solve_sparse_f32(x0, problem, config)
+    }
+}
+
+/// Solve with the dense Cholesky backend (f64).
+pub fn solve_dense(x0: &[f64], problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> LmResult<f64> {
     lm_solve(x0, &mut Dense, problem, config)
 }
 
-/// Solve with dense Cholesky backend (f32).
-pub fn solve_f32(x0: &[f32], problem: &mut impl LmProblem<f32>, config: &LmConfig<f32>) -> LmResult<f32> {
+/// Solve with the dense Cholesky backend (f32).
+pub fn solve_dense_f32(x0: &[f32], problem: &mut impl LmProblem<f32>, config: &LmConfig<f32>) -> LmResult<f32> {
     lm_solve(x0, &mut Dense, problem, config)
 }
 
@@ -2960,23 +2984,26 @@ impl<T: Float, S: LmSolver<T>> LmSession<T, S> {
 // Sparse LmSolver — COO assembly, CSC storage, dense fallback solve
 // ---------------------------------------------------------------------------
 
-/// Sparse solver using COO assembly and dense Cholesky solve (for validation).
-/// Use SparseFaer for actual sparse Cholesky.
-pub struct Sparse {
+/// Naive sparse solver: COO assembly, dense Cholesky solve. A reference
+/// implementation for validating the assembly paths.
+#[deprecated(since = "0.7.3", note = "validation baseline; use `SparseFaer`     (`solve_sparse` / `model.solve_sparse`)")]
+pub struct SparseCoo {
     // Reused across iterations; clear() keeps the allocated capacity.
     coo: CooMatrix<f64>,
 }
 
-impl Default for Sparse {
+#[allow(deprecated)]
+impl Default for SparseCoo {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Sparse {
+#[allow(deprecated)]
+impl SparseCoo {
     /// Create the naive COO sparse solver.
     pub fn new() -> Self {
-        Sparse { coo: CooMatrix::new(0) }
+        SparseCoo { coo: CooMatrix::new(0) }
     }
 }
 
@@ -2986,7 +3013,8 @@ pub struct SparseMatrix<T> {
     pub csc: CscMatrix<T>,
 }
 
-impl LmSolver<f64> for Sparse {
+#[allow(deprecated)]
+impl LmSolver<f64> for SparseCoo {
     type Matrix = SparseMatrix<f64>;
     fn matrix_nonfinite_count(&self, matrix: &SparseMatrix<f64>) -> usize {
         matrix.csc.vals.iter().filter(|v| !v.is_finite()).count()
@@ -3032,32 +3060,40 @@ impl LmSolver<f64> for Sparse {
     }
 }
 
-/// Solve with COO-assembly sparse solver, dense Cholesky fallback (f64).
-pub fn solve_sparse(x0: &[f64], problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> LmResult<f64> {
-    lm_solve(x0, &mut Sparse::new(), problem, config)
+/// Solve with the naive COO-assembly sparse backend ([`SparseCoo`]), dense
+/// Cholesky fallback (f64). A validation baseline.
+#[deprecated(since = "0.7.3", note = "validation baseline; use     `solve_sparse` or `model.solve_sparse(&cfg)`")]
+#[allow(deprecated)]
+pub fn solve_sparse_coo(x0: &[f64], problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> LmResult<f64> {
+    lm_solve(x0, &mut SparseCoo::new(), problem, config)
 }
+
 
 /// Sparse solver using direct CSC assembly (no COO intermediate after first iteration).
 /// First iteration: COO assembly to discover pattern, build CSC structure.
 /// Subsequent iterations: direct accumulate into CSC vals (with binary search lookup).
-pub struct SparseDirect {
+#[deprecated(since = "0.7.3", note = "validation baseline; use `SparseFaer`     (`solve_sparse` / `model.solve_sparse`)")]
+pub struct SparseDirectCsc {
     pattern_built: bool,
 }
 
-impl Default for SparseDirect {
+#[allow(deprecated)]
+impl Default for SparseDirectCsc {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl SparseDirect {
+#[allow(deprecated)]
+impl SparseDirectCsc {
     /// Create the direct-CSC sparse solver.
     pub fn new() -> Self {
-        SparseDirect { pattern_built: false }
+        SparseDirectCsc { pattern_built: false }
     }
 }
 
-impl LmSolver<f64> for SparseDirect {
+#[allow(deprecated)]
+impl LmSolver<f64> for SparseDirectCsc {
     type Matrix = SparseMatrix<f64>;
     fn matrix_nonfinite_count(&self, matrix: &SparseMatrix<f64>) -> usize {
         matrix.csc.vals.iter().filter(|v| !v.is_finite()).count()
@@ -3110,8 +3146,10 @@ impl LmSolver<f64> for SparseDirect {
 }
 
 /// Solve with direct CSC assembly sparse solver, dense Cholesky fallback (f64).
-pub fn solve_sparse_direct(x0: &[f64], problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> LmResult<f64> {
-    lm_solve(x0, &mut SparseDirect::new(), problem, config)
+#[deprecated(since = "0.7.3", note = "validation baseline; use     `solve_sparse` or `model.solve_sparse(&cfg)`")]
+#[allow(deprecated)]
+pub fn solve_sparse_direct_csc(x0: &[f64], problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> LmResult<f64> {
+    lm_solve(x0, &mut SparseDirectCsc::new(), problem, config)
 }
 
 /// First Hessian assembly of a solve, shared by every scalar-CSC backend
@@ -5165,15 +5203,28 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
     }
 }
 
-/// Solve with the faer sparse backend (f64). Marginalizes what the model
-/// offers when that pays -- see [`SparseFaer`].
-pub fn solve_sparse_faer(x0: &[f64], problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> LmResult<f64> {
+/// Solve with the default sparse backend ([`SparseFaer`], f64) -- the
+/// free-function twin of `model.solve_sparse(&cfg)`. Marginalizes what
+/// the model offers when that pays.
+pub fn solve_sparse(x0: &[f64], problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> LmResult<f64> {
     lm_solve(x0, &mut SparseFaer::new(), problem, config)
 }
 
-/// Solve with faer sparse Cholesky backend (f32).
-pub fn solve_sparse_faer_f32(x0: &[f32], problem: &mut impl LmProblem<f32>, config: &LmConfig<f32>) -> LmResult<f32> {
+/// Solve with the default sparse backend ([`SparseFaer`], f32).
+pub fn solve_sparse_f32(x0: &[f32], problem: &mut impl LmProblem<f32>, config: &LmConfig<f32>) -> LmResult<f32> {
     lm_solve(x0, &mut SparseFaerF32::new(), problem, config)
+}
+
+/// Renamed: the default sparse solve now carries the plain name.
+#[deprecated(since = "0.7.3", note = "renamed to `solve_sparse`")]
+pub fn solve_sparse_faer(x0: &[f64], problem: &mut impl LmProblem<f64>, config: &LmConfig<f64>) -> LmResult<f64> {
+    solve_sparse(x0, problem, config)
+}
+
+/// Renamed: the default sparse solve now carries the plain name.
+#[deprecated(since = "0.7.3", note = "renamed to `solve_sparse_f32`")]
+pub fn solve_sparse_faer_f32(x0: &[f32], problem: &mut impl LmProblem<f32>, config: &LmConfig<f32>) -> LmResult<f32> {
+    solve_sparse_f32(x0, problem, config)
 }
 
 // ---------------------------------------------------------------------------
@@ -6766,7 +6817,8 @@ mod tests {
             }
         }
 
-        let result = solve_sparse(
+        #[allow(deprecated)]
+        let result = solve_sparse_coo(
             &[0.0, 0.0],
             &mut QuadProblem,
             &LmConfig { abs_precision: 1e-10, max_iters: 100, initial_lambda: 0.001, ..Default::default() },
@@ -6807,7 +6859,7 @@ mod tests {
             }
         }
 
-        let result = solve_sparse_faer(
+        let result = solve_sparse(
             &[0.0, 0.0],
             &mut QuadProblem,
             &LmConfig { abs_precision: 1e-10, max_iters: 100, initial_lambda: 0.001, ..Default::default() },
@@ -6819,7 +6871,7 @@ mod tests {
 
     #[test]
     fn sparse_direct_uses_direct_path_after_first_iteration() {
-        // Regression: SparseDirect never set pattern_built, so its direct
+        // Regression: SparseDirectCsc never set pattern_built, so its direct
         // CSC assembly path was dead code and every iteration re-ran COO
         // assembly. Pin the intended behavior: COO exactly once (pattern
         // discovery), direct accumulation for all later iterations.
@@ -6850,7 +6902,8 @@ mod tests {
         }
 
         let mut problem = CountingProblem { coo_calls: 0, direct_calls: 0 };
-        let result = solve_sparse_direct(&[0.0, 0.0], &mut problem, &LmConfig::default());
+        #[allow(deprecated)]
+        let result = solve_sparse_direct_csc(&[0.0, 0.0], &mut problem, &LmConfig::default());
         assert!((result.x[0] - 3.0).abs() < 1e-6);
         assert!((result.x[1] - 7.0).abs() < 1e-6);
         assert_eq!(problem.coo_calls, 1, "COO assembly must run exactly once");
@@ -6945,8 +6998,9 @@ mod tests {
         assert!((r3.x[2] - 7.0 / 3.0).abs() < 1e-6, "x2={}", r3.x[2]);
         assert!((r3.end_cost - 4.0 / 3.0).abs() < 1e-9, "cost={}", r3.end_cost);
 
-        // Same exercise for SparseDirect (pattern_built flag)
-        let mut direct = SparseDirect::new();
+        // Same exercise for SparseDirectCsc (pattern_built flag)
+        #[allow(deprecated)]
+        let mut direct = SparseDirectCsc::new();
         let r4 = lm_solve(&[0.0, 0.0], &mut direct, &mut QP, &cfg);
         let r5 = lm_solve(&[5.0, 5.0], &mut direct, &mut QP, &cfg);
         assert!((r4.x[0] - 3.0).abs() < 1e-6);
@@ -7078,10 +7132,13 @@ mod tests {
             }
         }
 
-        // Also verify both solvers produce the same result
+        // Also verify both solvers produce the same result. This
+        // hand-written problem implements only the dense and COO paths,
+        // so it exercises the explicit dense and COO-baseline entries.
         let config = LmConfig { abs_precision: 1e-10, max_iters: 100, initial_lambda: 0.001, ..Default::default() };
-        let r_dense = solve(&x, &mut CoupledProblem, &config);
-        let r_sparse = solve_sparse(&x, &mut CoupledProblem, &config);
+        let r_dense = solve_dense(&x, &mut CoupledProblem, &config);
+        #[allow(deprecated)]
+        let r_sparse = solve_sparse_coo(&x, &mut CoupledProblem, &config);
         for i in 0..n {
             assert!((r_dense.x[i] - r_sparse.x[i]).abs() < 1e-6,
                 "x[{}]: dense={}, sparse={}", i, r_dense.x[i], r_sparse.x[i]);

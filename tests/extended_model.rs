@@ -97,7 +97,7 @@ fn extended_line_fit_matches_normal_equations() {
     let mut sparse = build();
     let mut p = Vec::new();
     sparse.serialize64(&mut p);
-    let r = simple_lm::solve_sparse_faer(&p, &mut sparse, &cfg);
+    let r = simple_lm::solve_sparse(&p, &mut sparse, &cfg);
     sparse.deserialize64(&r.x);
     assert!((sparse.coeffs[0].value.value - a_ref).abs() < 1e-8,
         "sparse a {} vs {}", sparse.coeffs[0].value.value, a_ref);

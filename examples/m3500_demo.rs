@@ -217,7 +217,7 @@ fn main() {
     let cfg = arael::simple_lm::LmConfig::well_conditioned()
         .with_verbose(std::env::var("VERBOSE").is_ok());
     let start = std::time::Instant::now();
-    let result = arael::simple_lm::solve_sparse_faer(&params, &mut graph, &cfg);
+    let result = arael::simple_lm::solve_sparse(&params, &mut graph, &cfg);
     let elapsed = start.elapsed();
     graph.deserialize64(&result.x);
 

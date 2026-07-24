@@ -9,7 +9,7 @@ use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::refs::{self, Ref};
 use arael::simple_lm::{
     lm_solve, Band, BandError, CooMatrix, CscMatrix, Dense, LmConfig, LmProblem, LmResult,
-    LmSession, LmSolver, RootProblem, SchurPolicy, SparseDirect, SparseFaer,
+    LmSession, LmSolver, RootProblem, SchurPolicy, SparseFaer,
 };
 
 // --- a model with marginalizable blocks: poses seeing nearby landmarks ---
@@ -207,8 +207,10 @@ fn warm_equals_cold_band() {
 }
 
 #[test]
+#[allow(deprecated)] // exercises the direct-CSC validation baseline
 fn warm_equals_cold_sparse_direct() {
-    warm_equals_cold(SparseDirect::new, "sparse direct");
+    use arael::simple_lm::SparseDirectCsc;
+    warm_equals_cold(SparseDirectCsc::new, "sparse direct");
 }
 
 // --- a hand-built problem that counts how it was assembled ---

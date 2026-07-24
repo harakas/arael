@@ -53,7 +53,7 @@ fn cfg() -> LmConfig<f64> {
 
 fn solve_timed<P: LmProblem<f64>>(path: &mut P, params: &[f64]) -> (usize, usize, f64, f64) {
     let t0 = Instant::now();
-    let r = simple_lm::solve_sparse_faer(params, path, &cfg());
+    let r = simple_lm::solve_sparse(params, path, &cfg());
     let ms = t0.elapsed().as_secs_f64() * 1e3;
     (r.iterations, r.accepted_iterations, r.end_cost, ms)
 }

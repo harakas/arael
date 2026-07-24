@@ -307,9 +307,10 @@ impl LmProblem<f64> for UnconstrainedSparseProblem {
 }
 
 #[test]
+#[allow(deprecated)] // exercises the COO validation baseline
 fn unconstrained_parameter_is_a_setup_failure_through_solve() {
     let mut p = UnconstrainedSparseProblem;
-    let r = simple_lm::solve_sparse(&[0.0, 0.0], &mut p, &LmConfig::default());
+    let r = simple_lm::solve_sparse_coo(&[0.0, 0.0], &mut p, &LmConfig::default());
     assert_eq!(r.status, LmStatus::SetupFailed(SolveError::UnconstrainedParameter { param: 1 }));
     assert_eq!(r.iterations, 0);
     assert_eq!(r.x, vec![0.0, 0.0], "params must be untouched");

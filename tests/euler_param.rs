@@ -250,7 +250,7 @@ fn aerobatics_slam_barrel_roll_and_immelmann() {
 
     let mut params = Vec::new();
     sky.serialize64(&mut params);
-    let result = simple_lm::solve_sparse_faer(&params, &mut sky,
+    let result = simple_lm::solve_sparse(&params, &mut sky,
         // VERBOSE=1 cargo test -r --test euler_param aerobatics -- --nocapture
         // prints the LM iteration trace.
         &LmConfig {
@@ -287,7 +287,7 @@ fn aerobatics_slam_barrel_roll_and_immelmann() {
 // The same maneuver in pure f32
 // ---------------------------------------------------------------------------
 //
-// Same trajectory, f32 root, f32 blocks, solve_sparse_faer_f32. Pins the
+// Same trajectory, f32 root, f32 blocks, solve_sparse_f32. Pins the
 // f32 model pipeline (previously untested end to end) and the f32
 // precision floor of the euler machinery: the solver satisfies every
 // relative-rotation constraint to ~2 ulps of f32 (cost floor ~2e-8) and
@@ -355,7 +355,7 @@ fn aerobatics_slam_f32() {
 
     let mut params = Vec::new();
     sky.serialize32(&mut params);
-    let result = simple_lm::solve_sparse_faer_f32(&params, &mut sky, &LmConfig {
+    let result = simple_lm::solve_sparse_f32(&params, &mut sky, &LmConfig {
         max_iters: 500,
         verbose: std::env::var("VERBOSE").is_ok(),
         ..Default::default()

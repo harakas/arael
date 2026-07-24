@@ -64,7 +64,9 @@ fn high_dimensional_quadratic() {
         },
     };
     let x0: Vec<f64> = vec![0.0; n];
-    let result = solve(&x0, &mut p, &LmConfig::default());
+    // FnProblem implements only the dense path; the adaptive `solve` would
+    // route 20 params to the sparse backend.
+    let result = solve_dense(&x0, &mut p, &LmConfig::default());
     assert!(result.end_cost < 1e-10, "cost={}", result.end_cost);
     assert!(result.iterations <= 30, "iters={}", result.iterations);
     for i in 0..n {

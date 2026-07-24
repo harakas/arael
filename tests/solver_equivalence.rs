@@ -6,8 +6,8 @@
 // (SelfBlock) -- is pushed through every LmProblem code path:
 //
 //   assembly: dense / band / COO sparse / direct CSC / indexed CSC
-//   solvers:  solve / solve_band / solve_sparse / solve_sparse_direct /
-//             solve_sparse_faer
+//   solvers:  solve / solve_band / solve_sparse_coo / solve_sparse_direct_csc /
+//             solve_sparse
 //
 // All assembly formats must produce the identical gradient and Hessian,
 // and all solvers must reach the same minimizer. One point is fixed
@@ -215,12 +215,13 @@ fn solvers_reach_same_minimizer() {
         let mut chain = build();
         let mut p = std::vec::Vec::new();
         chain.serialize64(&mut p);
+        #[allow(deprecated)] // the COO/direct baselines are the point here
         let r = match which {
-            "dense" => simple_lm::solve(&p, &mut chain, &cfg),
+            "dense" => simple_lm::solve_dense(&p, &mut chain, &cfg),
             "band" => simple_lm::solve_band(&p, KD, &mut chain, &cfg),
-            "sparse" => simple_lm::solve_sparse(&p, &mut chain, &cfg),
-            "direct" => simple_lm::solve_sparse_direct(&p, &mut chain, &cfg),
-            "faer" => simple_lm::solve_sparse_faer(&p, &mut chain, &cfg),
+            "sparse" => simple_lm::solve_sparse_coo(&p, &mut chain, &cfg),
+            "direct" => simple_lm::solve_sparse_direct_csc(&p, &mut chain, &cfg),
+            "faer" => simple_lm::solve_sparse(&p, &mut chain, &cfg),
             _ => unreachable!(),
         };
         assert!(
@@ -257,7 +258,7 @@ fn band_lapack_matches_dense() {
     let mut chain = build();
     let mut p = std::vec::Vec::new();
     chain.serialize64(&mut p);
-    let reference = simple_lm::solve(&p, &mut chain, &cfg).x;
+    let reference = simple_lm::solve_dense(&p, &mut chain, &cfg).x;
 
     let mut chain = build();
     let mut p = std::vec::Vec::new();
@@ -378,7 +379,7 @@ fn threaded_faer_matches_single_thread() {
         let mut chain = build();
         let mut p = std::vec::Vec::new();
         chain.serialize64(&mut p);
-        let r = simple_lm::solve_sparse_faer(&p, &mut chain, &cfg);
+        let r = simple_lm::solve_sparse(&p, &mut chain, &cfg);
         assert!(r.end_cost < r.start_cost, "threads={threads}: no improvement");
         r.x
     };
@@ -394,7 +395,7 @@ fn threaded_faer_matches_single_thread() {
 // solve_sparse) must match the hand-written serialize -> solve ->
 // deserialize dance, and leave the recovered parameters written back into
 // the model. solve_dense == free solve; solve_sparse == free
-// solve_sparse_faer; solve_with(Dense) == solve_dense.
+// solve_sparse; solve_with(Dense) == solve_dense.
 #[test]
 fn generated_solve_methods_match_manual_dance() {
     let cfg = LmConfig::<f64> {
@@ -409,7 +410,7 @@ fn generated_solve_methods_match_manual_dance() {
         let mut chain = build();
         let mut p = std::vec::Vec::new();
         chain.serialize64(&mut p);
-        simple_lm::solve(&p, &mut chain, &cfg).x
+        simple_lm::solve_dense(&p, &mut chain, &cfg).x
     };
 
     // solve_dense writes the solution back into the model.
@@ -428,11 +429,11 @@ fn generated_solve_methods_match_manual_dance() {
         let mut chain = build();
         let mut p = std::vec::Vec::new();
         chain.serialize64(&mut p);
-        simple_lm::solve_sparse_faer(&p, &mut chain, &cfg).x
+        simple_lm::solve_sparse(&p, &mut chain, &cfg).x
     };
     let mut chain = build();
     let r = chain.solve_sparse(&cfg);
-    assert_eq!(r.x, faer, "solve_sparse must equal the free solve_sparse_faer");
+    assert_eq!(r.x, faer, "solve_sparse must equal the free solve_sparse");
 
     // solve_with(Dense) is exactly solve_dense.
     let mut chain = build();
@@ -450,7 +451,7 @@ fn generated_solve_methods_match_manual_dance() {
         let mut chain = build();
         let mut p = std::vec::Vec::new();
         chain.serialize64(&mut p);
-        simple_lm::solve_sparse_faer(&p, &mut chain, &nielsen_cfg).x
+        simple_lm::solve_sparse(&p, &mut chain, &nielsen_cfg).x
     };
     let mut chain = build();
     let r = chain.solve_sparse(&nielsen_cfg);
@@ -475,11 +476,11 @@ fn solver_kind_dispatches_to_the_named_backend() {
         run(&p, &mut c).x
     };
     let cases: [(SolverKind, std::vec::Vec<f64>); 3] = [
-        (SolverKind::Dense, free(&|p, c| simple_lm::solve(p, c, &cfg))),
+        (SolverKind::Dense, free(&|p, c| simple_lm::solve_dense(p, c, &cfg))),
         (SolverKind::Band { kd: KD }, free(&|p, c| simple_lm::solve_band(p, KD, c, &cfg))),
         (
             SolverKind::Sparse(SparseFaerOptions::auto()),
-            free(&|p, c| simple_lm::solve_sparse_faer(p, c, &cfg)),
+            free(&|p, c| simple_lm::solve_sparse(p, c, &cfg)),
         ),
     ];
     for (kind, reference) in cases {
@@ -508,11 +509,11 @@ fn sparse_auto_options_equal_default_faer() {
         let mut c = build();
         let mut p = std::vec::Vec::new();
         c.serialize64(&mut p);
-        simple_lm::solve_sparse_faer(&p, &mut c, &cfg).x
+        simple_lm::solve_sparse(&p, &mut c, &cfg).x
     };
     let mut chain = build();
     let r = chain.solve(SolverKind::Sparse(SparseFaerOptions::auto()), &cfg);
-    assert_eq!(r.x, free, "SolverKind::Sparse(auto) must equal free solve_sparse_faer");
+    assert_eq!(r.x, free, "SolverKind::Sparse(auto) must equal free solve_sparse");
 }
 
 // A minimal f32 model (Chain is f64-only), to exercise the f32 dispatch.

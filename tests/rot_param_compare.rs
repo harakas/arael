@@ -44,7 +44,7 @@ fn cfg() -> LmConfig<f64> {
 }
 
 fn solve_once<P: LmProblem<f64>>(path: &mut P, params: &[f64]) -> arael::simple_lm::LmResult<f64> {
-    simple_lm::solve_sparse_faer(params, path, &cfg())
+    simple_lm::solve_sparse(params, path, &cfg())
 }
 
 // Largest per-pose recomposition error vs the flown trajectory (matrices, not
