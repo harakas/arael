@@ -219,6 +219,40 @@ pub trait Model {
 }
 
 // ---------------------------------------------------------------------------
+// Component -- compound-parameter lifecycle
+// ---------------------------------------------------------------------------
+
+/// Runtime lifecycle of a `#[arael(component)]` struct -- a compound
+/// parameter whose `Param` fields fold into the OWNING struct's span.
+/// The macro calls these around the solve; the symbolic meaning of the
+/// component's user-facing fields is given separately by
+/// `#[arael(symbolic = ...)]` field attributes (which the macro
+/// differentiates at expansion time -- a trait method body cannot be).
+///
+/// Like any non-root model struct, a component may be generic over its
+/// scalar: exactly one type parameter, bounded inline by `Float`
+/// (`struct Dir<T: Float>`), with fields spelled generically
+/// (`quatern<T>`, `Param<vect2<T>>`, bare `Param<T>`). One definition
+/// then serves f64 and f32 models alike -- see
+/// `examples/plane_slam_demo.rs`.
+///
+/// All methods default to no-ops: a stateless reparameterization
+/// implements nothing.
+pub trait Component {
+    /// Seed the reference/chart from the user-facing value. Runs at
+    /// serialize, before the component's params are read.
+    fn start(&mut self) {}
+    /// Re-center after an accepted step: the component's `Param` values
+    /// hold the accepted step; fold them into the reference and reset
+    /// them. Runs at the advance point; the macro writes the reset values
+    /// back into the parameter vector afterwards.
+    fn update(&mut self) {}
+    /// Write the user-facing value back from the reference/params. Runs
+    /// at deserialize.
+    fn finish(&mut self) {}
+}
+
+// ---------------------------------------------------------------------------
 // ExtendedModel -- user-defined constraint hook for root structs
 // ---------------------------------------------------------------------------
 
@@ -317,36 +351,6 @@ pub trait Model {
 /// See `examples/runtime_fit_demo.rs` for the complete working example,
 /// and `arael-sketch-solver` for a production use of this pattern with
 /// parametric expression dimensions.
-/// Runtime lifecycle of a `#[arael(component)]` struct -- a compound
-/// parameter whose `Param` fields fold into the OWNING struct's span.
-/// The macro calls these around the solve; the symbolic meaning of the
-/// component's user-facing fields is given separately by
-/// `#[arael(symbolic = ...)]` field attributes (which the macro
-/// differentiates at expansion time -- a trait method body cannot be).
-///
-/// Like any non-root model struct, a component may be generic over its
-/// scalar: exactly one type parameter, bounded inline by `Float`
-/// (`struct Dir<T: Float>`), with fields spelled generically
-/// (`quatern<T>`, `Param<vect2<T>>`, bare `Param<T>`). One definition
-/// then serves f64 and f32 models alike -- see
-/// `examples/plane_slam_demo.rs`.
-///
-/// All methods default to no-ops: a stateless reparameterization
-/// implements nothing.
-pub trait Component {
-    /// Seed the reference/chart from the user-facing value. Runs at
-    /// serialize, before the component's params are read.
-    fn start(&mut self) {}
-    /// Re-center after an accepted step: the component's `Param` values
-    /// hold the accepted step; fold them into the reference and reset
-    /// them. Runs at the advance point; the macro writes the reset values
-    /// back into the parameter vector afterwards.
-    fn update(&mut self) {}
-    /// Write the user-facing value back from the reference/params. Runs
-    /// at deserialize.
-    fn finish(&mut self) {}
-}
-
 pub trait ExtendedModel {
     /// Called after `deserialize64` writes optimized values back to `Param::value`.
     /// Use to sync derived persistent state (e.g. copy one param's value to another).
