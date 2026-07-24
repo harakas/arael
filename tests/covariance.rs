@@ -249,6 +249,25 @@ fn tridiagonal_matches_solve() {
 }
 
 #[test]
+fn tridiagonal_rejects_singular_hessian() {
+    // An untied first node with a zero-information prior contributes a
+    // zero diagonal block: the forward sweep cannot invert it when it
+    // reaches node 1, and the error must be NotPositiveDefinite, not a
+    // NaN-poisoned covariance.
+    let mut c = Chain { nodes: refs::Vec::new(), ties: std::vec::Vec::new() };
+    c.nodes.push(Node { v: Param::new(0.0), prior_isig: 0.0, hb: SelfBlock::new() });
+    for _ in 0..3 {
+        c.nodes.push(Node { v: Param::new(0.0), prior_isig: 1.0, hb: SelfBlock::new() });
+    }
+    for i in 1..3 {
+        c.ties.push(Tie { a: c.nodes.ref_at(i), b: c.nodes.ref_at((i + 1)),
+            isig: 1.0, hb: CrossBlock::new() });
+    }
+    assert_eq!(c.assemble_covariance(CovMode::TriDiagonal).err(),
+        Some(CovError::NotPositiveDefinite));
+}
+
+#[test]
 fn tridiagonal_rejects_non_band() {
     // A long-range tie (0 <-> 4) puts an off-band block into H.
     let mut c = path_chain(6);

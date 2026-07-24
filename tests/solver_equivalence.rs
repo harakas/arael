@@ -243,6 +243,153 @@ fn solvers_reach_same_minimizer() {
     }
 }
 
+/// The LAPACK band backend (dpbsv/spbsv) must reach the same minimizer as
+/// the dense reference, in both precisions.
+#[cfg(feature = "lapack")]
+#[test]
+fn band_lapack_matches_dense() {
+    let cfg = LmConfig::<f64> {
+        abs_precision: 1e-14,
+        rel_precision: 1e-12,
+        max_iters: 200,
+        ..Default::default()
+    };
+    let mut chain = build();
+    let mut p = std::vec::Vec::new();
+    chain.serialize64(&mut p);
+    let reference = simple_lm::solve(&p, &mut chain, &cfg).x;
+
+    let mut chain = build();
+    let mut p = std::vec::Vec::new();
+    chain.serialize64(&mut p);
+    let r = simple_lm::solve_band_lapack(&p, KD, &mut chain, &cfg);
+    assert!(r.end_cost < r.start_cost, "lapack: no improvement");
+    for i in 0..reference.len() {
+        assert!((r.x[i] - reference[i]).abs() < 1e-6,
+            "lapack disagrees with dense at param {i}: {} vs {}", r.x[i], reference[i]);
+    }
+
+}
+
+/// An f32 chain for the spbsv path (the f64 chain has no `LmProblem<f32>`).
+#[cfg(feature = "lapack")]
+mod lapack_f32 {
+    use super::*;
+
+    #[arael::model]
+    #[arael(constraint(hb, {
+        let d = pf.pos - pf.target;
+        [d.x * 2.0, d.y * 2.0]
+    }))]
+    pub struct Pf {
+        pub pos: Param<vect2f>,
+        pub target: vect2f,
+        pub hb: SelfBlock<Pf, f32>,
+    }
+
+    #[arael::model]
+    #[arael(constraint(hb, {
+        let d = b.pos - a.pos;
+        [(d.norm() - lf.rest) * 4.0]
+    }))]
+    pub struct Lf {
+        #[arael(ref = root.points)]
+        pub a: Ref<Pf>,
+        #[arael(ref = root.points)]
+        pub b: Ref<Pf>,
+        pub rest: f32,
+        pub hb: CrossBlock<Pf, Pf, f32>,
+    }
+
+    #[arael::model]
+    #[arael(root, f32)]
+    pub struct ChainF {
+        pub points: refs::Vec<Pf>,
+        pub links: std::vec::Vec<Lf>,
+    }
+
+    pub fn build_f32() -> ChainF {
+        let mut c = ChainF { points: refs::Vec::new(), links: std::vec::Vec::new() };
+        for i in 0..5u32 {
+            let x = i as f32 + ((i * 7 % 3) as f32 - 1.0) * 0.3;
+            let y = ((i * 5 % 3) as f32 - 1.0) * 0.2;
+            c.points.push(Pf {
+                pos: Param::new(vect2f::new(x, y)),
+                target: vect2f::new(i as f32, 0.1 * i as f32),
+                hb: SelfBlock::new(),
+            });
+        }
+        for i in 1..5usize {
+            c.links.push(Lf {
+                a: c.points.ref_at(i - 1),
+                b: c.points.ref_at(i),
+                rest: 1.05,
+                hb: CrossBlock::new(),
+            });
+        }
+        c
+    }
+}
+
+/// The f32 LAPACK band backend (spbsv) must match the pure-Rust f32 band
+/// backend on the same problem.
+#[cfg(feature = "lapack")]
+#[test]
+fn band_lapack_f32_matches_band() {
+    use lapack_f32::*;
+    let cfg = LmConfig::<f32> {
+        abs_precision: 1e-10,
+        rel_precision: 1e-7,
+        max_iters: 200,
+        ..Default::default()
+    };
+    let kd = 3;
+    let mut c = build_f32();
+    let mut p = std::vec::Vec::new();
+    c.serialize32(&mut p);
+    let reference = simple_lm::solve_band_f32(&p, kd, &mut c, &cfg);
+    assert!(reference.end_cost < reference.start_cost, "band f32: no improvement");
+
+    let mut c = build_f32();
+    let mut p = std::vec::Vec::new();
+    c.serialize32(&mut p);
+    let r = simple_lm::solve_band_lapack_f32(&p, kd, &mut c, &cfg);
+    assert!(r.end_cost < r.start_cost, "lapack f32: no improvement");
+    for i in 0..reference.x.len() {
+        assert!((r.x[i] - reference.x[i]).abs() < 1e-4,
+            "lapack f32 disagrees with band f32 at param {i}: {} vs {}",
+            r.x[i], reference.x[i]);
+    }
+}
+
+/// Threaded faer factorization (`num_threads > 1`, `rayon` feature) must
+/// reach the same minimizer as the single-threaded solve.
+#[cfg(feature = "rayon")]
+#[test]
+fn threaded_faer_matches_single_thread() {
+    let run = |threads: usize| -> std::vec::Vec<f64> {
+        let cfg = LmConfig::<f64> {
+            abs_precision: 1e-14,
+            rel_precision: 1e-12,
+            max_iters: 200,
+            num_threads: threads,
+            ..Default::default()
+        };
+        let mut chain = build();
+        let mut p = std::vec::Vec::new();
+        chain.serialize64(&mut p);
+        let r = simple_lm::solve_sparse_faer(&p, &mut chain, &cfg);
+        assert!(r.end_cost < r.start_cost, "threads={threads}: no improvement");
+        r.x
+    };
+    let single = run(1);
+    let multi = run(2);
+    for i in 0..single.len() {
+        assert!((multi[i] - single[i]).abs() < 1e-9,
+            "threaded solve disagrees at param {i}: {} vs {}", multi[i], single[i]);
+    }
+}
+
 // The generated root convenience methods (solve_with / solve_dense /
 // solve_sparse) must match the hand-written serialize -> solve ->
 // deserialize dance, and leave the recovered parameters written back into

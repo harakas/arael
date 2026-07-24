@@ -53,6 +53,7 @@ jobs:
           - "eigen"
           - "cholmod"
           - "lapack,cholmod"
+          - "rayon"
     steps:
       - uses: actions/checkout@v4
       - name: Install solver backend dependencies
@@ -65,8 +66,11 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: ${{ matrix.features }}
+      # Full test suite, not just --lib: the feature-gated integration
+      # assertions (BandLapack/eigen/cholmod/rayon equivalence) only run
+      # when the features are on.
       - name: Test arael with features
-        run: cargo test -p arael --lib --features ${{ matrix.features }}
+        run: cargo test -p arael --features ${{ matrix.features }}
       - name: Check tests and examples build with features
         run: cargo check -p arael --tests --examples --features ${{ matrix.features }}
 
