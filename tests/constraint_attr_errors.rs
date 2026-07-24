@@ -28,4 +28,6 @@ fn constraint_attr_compile_errors() {
     t.compile_fail("tests/constraint_attr_errors/cross_on_single_instance.rs");
     t.compile_fail("tests/constraint_attr_errors/nested_duplicate_containment.rs");
     t.compile_fail("tests/constraint_attr_errors/cyclic_containment_ref.rs");
+    t.compile_fail("tests/constraint_attr_errors/parent_selfblock_entity_params.rs");
+    t.compile_fail("tests/constraint_attr_errors/parent_selfblock_root_parent.rs");
 }

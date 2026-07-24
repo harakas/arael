@@ -459,6 +459,7 @@ any Model struct:
 #[arael(constraint(pose.hb_pose, { body }))]            // remote SelfBlock (reach into Ref target)
 #[arael(constraint([hb_pose, root.hbt], { body }))]     // self-primary + root-owned TripletBlock
 #[arael(constraint(root.hb, { body }))]                 // root's own SelfBlock (root params only)
+#[arael(constraint(parent.hb, { body }))]               // containing parent's SelfBlock (parent params only)
 ```
 
 The positional form carries a single block only. Any N ≥ 2 block
@@ -486,6 +487,16 @@ segment:
   cross pairs need the `[hb, root.<triplet>]` form. In bodies `root`
   names the root (`root.a`), as does the lowercased root type name.
   See examples/root_fit_demo.rs.
+- **`parent.<selfblock>`** as the PRIMARY block -- the same shape one
+  level down: the data-only entity nests in a collection (or Option)
+  INSIDE the parameter-bearing entity and writes the parent's own
+  `SelfBlock<Self>`. Every param in the body is the parent's, bound as
+  the lowercased parent type name (or a `parent = <alias>`); the sweep
+  iterates each parent instance's own observations, so every parent
+  fits its own data. The parent may live at any depth below the root.
+  If the containing parent turns out to be the root, use `root.hb`.
+  See examples/robust_curve_fitting.rs -- observations nest directly
+  under the `Curve` they fit, no container struct, no Ref.
 
 ```rust,ignore
 // Remote SelfBlock: PointFrine lives on PointLandmark but writes

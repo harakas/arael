@@ -1,4 +1,4 @@
-error: $DIR/tests/user_function_errors/unknown_function_in_body.rs:15: arael::function `bad_body` body parse: parse error at position 0: unknown function: totally_unknown_fn
+error: $DIR/tests/user_function_errors/unknown_function_in_body.rs:15: arael::function `bad_body`: body does not parse: parse error at position 0: unknown function: totally_unknown_fn
   --> tests/user_function_errors/unknown_function_in_body.rs:13:1
    |
 13 | #[arael::model]

@@ -2939,13 +2939,58 @@ pub fn generate_root_methods(
             Some(syn::Ident::new(&rest, proc_macro2::Span::call_site()))
         } else { None };
 
+        // `parent.<selfblock>` primary: the data-only entity is contained
+        // in a parameter-bearing entity (any depth below the root) and
+        // writes into THAT entity's SelfBlock -- the non-root analog of
+        // `root.<selfblock>`. (field ident, parent type name).
+        let parent_self_primary: Option<(syn::Ident, String)> = if let Some(rest) =
+            constraint.primary_block_field().strip_prefix("parent.")
+        {
+            let parent_type = find_containing_parent(&root_name.to_string(), &sc.struct_name)
+                .ok_or_else(|| syn::Error::new(proc_macro2::Span::call_site(),
+                    format!("{}:{}: `parent.{}`: no registered struct contains `{}`",
+                        sc.attr_file, sc.attr_line, rest, sc.struct_name)))?;
+            if parent_type == root_name.to_string() {
+                return Err(syn::Error::new(proc_macro2::Span::call_site(),
+                    format!("{}:{}: `{}`'s containing parent is the root -- use \
+                             `constraint(root.{}, ...)`",
+                        sc.attr_file, sc.attr_line, sc.struct_name, rest)));
+            }
+            let playout = registry_lookup(&parent_type)
+                .ok_or_else(|| syn::Error::new(proc_macro2::Span::call_site(),
+                    format!("{}:{}: parent type `{}` not in registry",
+                        sc.attr_file, sc.attr_line, parent_type)))?;
+            if playout.self_block_field.as_deref() != Some(rest) {
+                return Err(syn::Error::new(proc_macro2::Span::call_site(),
+                    format!("{}:{}: `parent.{}` does not name the `SelfBlock<Self>` field                              of the containing parent `{}` (which is {})",
+                        sc.attr_file, sc.attr_line, rest, parent_type,
+                        playout.self_block_field.as_deref()
+                            .map(|f| format!("`{}`", f))
+                            .unwrap_or_else(|| "missing".to_string()))));
+            }
+            // The constraint may touch ONLY parent params: the entity's own
+            // params would form (entity, parent) cross pairs this block
+            // cannot hold, and dropping them is never acceptable.
+            let entity_has_params = registry_lookup(&sc.struct_name)
+                .map(|l| !l.param_fields.is_empty()).unwrap_or(false);
+            if entity_has_params {
+                return Err(syn::Error::new(proc_macro2::Span::call_site(),
+                    format!("{}:{}: `{}` has its own Param fields, so a `parent.{}`                              constraint would drop the (entity, parent) cross pairs --                              declare a `SelfBlock<{}>` on `{}` and couple through a                              CrossBlock/TripletBlock instead",
+                        sc.attr_file, sc.attr_line, sc.struct_name, rest,
+                        sc.struct_name, sc.struct_name)));
+            }
+            Some((syn::Ident::new(rest, proc_macro2::Span::call_site()), parent_type))
+        } else { None };
+
         // Check if block_field is a dotted path (remote block, e.g. pose.hb_pose)
         let is_remote_block = constraint.primary_block_field().contains('.')
-            && root_self_primary.is_none();
+            && root_self_primary.is_none() && parent_self_primary.is_none();
 
-        let (a_type, b_type, remote_block_info) = if root_self_primary.is_some() {
-            // Iterate the entity's collection; every param is the root's, so
-            // there is no local block and no remote Ref target.
+        let (a_type, b_type, remote_block_info) = if root_self_primary.is_some()
+            || parent_self_primary.is_some() {
+            // Iterate the entity's containment; every param is the root's
+            // (or the containing parent's), so there is no local block and
+            // no remote Ref target.
             (sc.struct_name.clone(), None, None)
         } else if is_remote_block {
             // Remote block: e.g. "pose.hb_pose" means the block lives on a Ref<Pose>'s field
@@ -3404,6 +3449,10 @@ pub fn generate_root_methods(
             // The root's SelfBlock field. Only ever emitted through
             // `self.<field>` (the entity has no block of its own).
             root_hb.clone()
+        } else if let Some((parent_hb, _)) = &parent_self_primary {
+            // The parent's SelfBlock field, emitted through the prefix
+            // binding (the entity has no block of its own).
+            parent_hb.clone()
         } else if is_remote_block {
             // For remote blocks, the actual block field name is the last segment
             let parts: Vec<&str> = constraint.primary_block_field().split('.').collect();
@@ -3422,15 +3471,46 @@ pub fn generate_root_methods(
         //  entity param count).
         let mut triplet_entities: Vec<(syn::Ident, syn::Ident, usize, usize)> = Vec::new();
         let multi_cross_routing: Vec<MultiCrossRouting>;
-        // Root joins the entity list for both root-coupled self-primary
-        // forms; either span may be absent (a param-less entity pushes no
-        // self entry, and `root.<selfblock>` never has one).
-        let is_root_joined = is_root_triplet_self || root_self_primary.is_some();
+        // A `parent.<selfblock>` constraint entity must live in a
+        // collection (or Option) INSIDE its parent, so the sweep has the
+        // parent instance in scope as a prefix binding.
+        let parent_prefix: Option<Vec<AccessSegment>> = if parent_self_primary.is_some() {
+            match &entity_location {
+                EntityLocation::Nested { segments }
+                    if segments.last().is_some_and(|l| l.collection || l.optional)
+                        && segments.len() >= 2 =>
+                {
+                    Some(segments[..segments.len() - 1].to_vec())
+                }
+                _ => {
+                    return Err(syn::Error::new(proc_macro2::Span::call_site(),
+                        format!("{}:{}: a `parent.<selfblock>` constraint must live in a                                  collection (Vec/Deque/Arena) or an Option INSIDE its                                  parent entity",
+                            sc.attr_file, sc.attr_line)));
+                }
+            }
+        } else { None };
+        // The joined co-entity of a self-primary form: the root
+        // (`root.<selfblock>` / `[hb, root.<triplet>]`, accessed as
+        // `self`) or the containing parent (`parent.<selfblock>`,
+        // accessed as the innermost prefix binding).
+        let (joined_accessor, joined_type, joined_var): (TokenStream2, String, String) =
+            if let Some((_, ptype)) = &parent_self_primary {
+                let pvar = constraint.parent_name.clone()
+                    .unwrap_or_else(|| ptype.to_lowercase());
+                (nested_container(parent_prefix.as_deref().unwrap()), ptype.clone(), pvar)
+            } else {
+                (quote! { self }, root_type_str.clone(), root_type_str.to_lowercase())
+            };
+        // The co-entity joins the entity list for every self-primary
+        // form; either span may be absent (a param-less entity pushes no
+        // self entry, and root./parent.<selfblock> never has one).
+        let is_root_joined = is_root_triplet_self || root_self_primary.is_some()
+            || parent_self_primary.is_some();
         if is_root_joined {
-            // Entities are [self, root] in that order. Self is accessed
+            // Entities are [self, joined] in that order. Self is accessed
             // via `__item` (iter_mut item on the struct's collection);
-            // root is bound as `<root_lc>` from `let <root_lc> = &*__self_ref;`
-            // in the surrounding emission loop.
+            // the joined co-entity through its accessor (`self` for the
+            // root, the prefix binding for a parent).
             // param_total walks #[arael(component)] fields, so component
             // params count into the spans like direct ones.
             let self_count = param_total(&sc.struct_name);
@@ -3441,12 +3521,12 @@ pub fn generate_root_methods(
                     0, self_count,
                 ));
             }
-            let root_count = param_total(&root_type_str);
-            if root_count > 0 {
+            let joined_count = param_total(&joined_type);
+            if joined_count > 0 {
                 triplet_entities.push((
-                    syn::Ident::new(&root_type_str.to_lowercase(), proc_macro2::Span::call_site()),
-                    root_name.clone(),
-                    self_count, root_count,
+                    syn::Ident::new(&joined_var, proc_macro2::Span::call_site()),
+                    syn::Ident::new(&joined_type, proc_macro2::Span::call_site()),
+                    self_count, joined_count,
                 ));
             }
         } else if is_triplet || is_multi_cross {
@@ -3969,17 +4049,17 @@ pub fn generate_root_methods(
                         .find(|(v, _, _, _)| *v == "__item").cloned();
                     let root_entry = triplet_entities.iter()
                         .find(|(v, _, _, _)| *v != "__item").cloned();
-                    let root_hb = registry_lookup(&root_type_str)
+                    let joined_hb = registry_lookup(&joined_type)
                         .and_then(|l| l.self_block_field.clone())
                         .ok_or_else(|| syn::Error::new_spanned(&struct_ident,
-                            format!("root type `{}` must declare a `SelfBlock<Self>` field (required as root-coupled participant)", root_type_str)))?;
+                            format!("`{}` must declare a `SelfBlock<Self>` field (required as coupled participant)", joined_type)))?;
                     if let Some(named) = &root_self_primary
-                        && named.to_string() != root_hb {
+                        && named.to_string() != joined_hb {
                         return Err(syn::Error::new_spanned(&struct_ident,
                             format!("`root.{}` does not name the root's `SelfBlock<Self>` \
-                                     field (which is `{}`)", named, root_hb)));
+                                     field (which is `{}`)", named, joined_hb)));
                     }
-                    let root_hb_ident = syn::Ident::new(&root_hb, proc_macro2::Span::call_site());
+                    let joined_hb_ident = syn::Ident::new(&joined_hb, proc_macro2::Span::call_site());
                     let self_call = match &self_entry {
                         Some((_, _, s_start, s_count)) if !span_zero(*s_start, *s_count) => {
                             let dr_self: Vec<TokenStream2> = dr_f64.iter()
@@ -3992,7 +4072,7 @@ pub fn generate_root_methods(
                         Some((_, _, r_start, r_count)) if !span_zero(*r_start, *r_count) => {
                             let dr_root: Vec<TokenStream2> = dr_f64.iter()
                                 .skip(*r_start).take(*r_count).cloned().collect();
-                            quote! { self.#root_hb_ident.#m_add(#wr, &[#(#dr_root),*], grad); }
+                            quote! { #joined_accessor.#joined_hb_ident.#m_add(#wr, &[#(#dr_root),*], grad); }
                         }
                         _ => quote! {},
                     };
@@ -4482,6 +4562,14 @@ pub fn generate_root_methods(
             } else {
                 quote! { { #marker #(#cost_stmts)* } }
             };
+            // parent.<selfblock>: parent reads in the cost body resolve
+            // through the innermost prefix binding (the cost loop binds
+            // the self alias and root, but not the parent).
+            let cost_entry = match parent_prefix.as_ref() {
+                Some(p) => rename_ident(cost_entry, &joined_var,
+                    &format!("__seg{}", p.len() - 1)),
+                None => cost_entry,
+            };
 
             // Grad+hessian entries access the entity through `__item` (the
             // loop's `&mut` item) directly: reads are field projections,
@@ -4499,12 +4587,25 @@ pub fn generate_root_methods(
                     rename_ident(renamed, &root_var_name, "self")
                 } else { renamed }
             };
+            // parent.<selfblock>: the parent binding in body/write tokens
+            // becomes the innermost prefix binding of the nested sweep.
+            let parent_seg_rename: Option<(String, String)> = parent_prefix.as_ref()
+                .map(|p| (joined_var.clone(), format!("__seg{}", p.len() - 1)));
+            let gh_entry = match &parent_seg_rename {
+                Some((from, to)) => rename_ident(gh_entry, from, to),
+                None => gh_entry,
+            };
 
             let jac_entry = if !jac_stmts.is_empty() {
                 let entry = if let Some(ref guard) = guard_expr {
                     quote! { if #guard { #marker #(#jac_stmts)* } }
                 } else {
                     quote! { { #marker #(#jac_stmts)* } }
+                };
+                let entry = match parent_prefix.as_ref() {
+                    Some(p) => rename_ident(entry, &joined_var,
+                        &format!("__seg{}", p.len() - 1)),
+                    None => entry,
                 };
                 Some(entry)
             } else { None };
@@ -4540,11 +4641,13 @@ pub fn generate_root_methods(
                             nested_gh_loops: Vec::new(),
                             nested_jac_loops: Vec::new(),
                         });
-                        // A `root.<selfblock>` constraint has no entity block:
-                        // registering one would emit set_indices on a field the
-                        // entity does not have. The root's own SelfBlock is
-                        // wired unconditionally by root_self_block_prelude.
-                        if group.self_block.is_none() && root_self_primary.is_none() {
+                        // A root./parent.<selfblock> constraint has no entity
+                        // block: registering one would emit set_indices on a
+                        // field the entity does not have. (The root's own
+                        // SelfBlock is wired by root_self_block_prelude; a
+                        // parent's by the passive nested wiring.)
+                        if group.self_block.is_none() && root_self_primary.is_none()
+                            && parent_self_primary.is_none() {
                             group.self_block = Some(SelfBlockInfo {
                                 a_param_count,
                                 a_idx_stmts: a_idx_stmts.clone(),
@@ -4570,6 +4673,8 @@ pub fn generate_root_methods(
                                 sc.attr_file, sc.attr_line,
                                 constraint.primary_block_field().strip_prefix("root.").unwrap())));
                     }
+                    // (parent.<selfblock> single-instance shapes were already
+                    // rejected at the parent_prefix validation above.)
                     // SelfBlock on the root itself, on a direct-composed
                     // sub-model, or on an Option<Entity>: emit a single
                     // evaluation (no loop; if-let-wrapped for Option). Group
@@ -5730,8 +5835,12 @@ fn interpret_constraint_body(
     // is the root's. Deep validation lives in the traversal side (which sees
     // the real field types); here it only shapes the symbol environment.
     let is_root_self_primary = constraint.primary_block_field().starts_with("root.");
-    let is_remote = constraint.primary_block_field().contains('.') && !is_root_self_primary;
-    let (a_type, b_type) = if is_root_self_primary {
+    // `parent.<selfblock>` primary: like the root form, but the params
+    // belong to the entity CONTAINING this constraint struct.
+    let is_parent_self_primary = constraint.primary_block_field().starts_with("parent.");
+    let is_remote = constraint.primary_block_field().contains('.')
+        && !is_root_self_primary && !is_parent_self_primary;
+    let (a_type, b_type) = if is_root_self_primary || is_parent_self_primary {
         (struct_name.to_string(), None)
     } else if is_remote {
         // Remote block: e.g. "pose.hb_pose" — target type from Ref field
@@ -5795,7 +5904,17 @@ fn interpret_constraint_body(
             .any(|bf| bf.starts_with("root."));
         let is_pure_multi_cross =
             is_multi_cross_early && !is_remote && !has_root_triplet_block;
-        if a_type != "__triplet__" && !is_pure_multi_cross {
+        if is_parent_self_primary {
+            // Self alias binds the constraint struct; the `parent =`
+            // alias (default: the parent type, lowercased) binds the
+            // CONTAINING entity, whose params this block holds.
+            var_infos.push((struct_name.to_string().to_lowercase(), struct_name.to_string()));
+            let parent_type = find_containing_parent(root_type_name, &struct_name.to_string())
+                .unwrap_or_else(|| root_type_name.to_string());
+            let pvar = constraint.parent_name.clone()
+                .unwrap_or_else(|| parent_type.to_lowercase());
+            var_infos.push((pvar, parent_type));
+        } else if a_type != "__triplet__" && !is_pure_multi_cross {
             var_infos.push((parent_name.clone(), a_type.clone()));
         }
         let root_var = root_type_name.to_lowercase();
@@ -5929,6 +6048,23 @@ fn interpret_constraint_body(
                     format!("{}.{}.delta", root_var, slot.path)
                 } else {
                     format!("{}.{}.work()", root_var, slot.path)
+                };
+                add_param_symbols(&sym_base, &slot.sft, &mut param_symbols);
+            }
+        }
+
+        // `parent.<selfblock>` primary: every param is the containing
+        // entity's, read through the parent binding.
+        if is_parent_self_primary {
+            let parent_type = find_containing_parent(root_type_name, &struct_name.to_string())
+                .unwrap_or_else(|| root_type_name.to_string());
+            let pvar = constraint.parent_name.clone()
+                .unwrap_or_else(|| parent_type.to_lowercase());
+            for slot in param_slots(&parent_type) {
+                let sym_base = if slot.universal_delta {
+                    format!("{}.{}.delta", pvar, slot.path)
+                } else {
+                    format!("{}.{}.work()", pvar, slot.path)
                 };
                 add_param_symbols(&sym_base, &slot.sft, &mut param_symbols);
             }

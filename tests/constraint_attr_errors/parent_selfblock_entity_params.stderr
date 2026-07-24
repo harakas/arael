@@ -1,0 +1,16 @@
+error: `Obs` has 1 parameter but no `SelfBlock<Self>` field — add e.g. `hb: arael::model::SelfBlock<Self>` so its grad and Hessian diagonal have a home, or annotate the struct with `#[arael(skip_self_block)]` if its params are written exclusively by a parent's ExtendedModel
+  --> tests/constraint_attr_errors/parent_selfblock_entity_params.rs:11:8
+   |
+11 | struct Obs {
+   |        ^^^
+
+error[E0425]: cannot find type `Obs` in this scope
+  --> tests/constraint_attr_errors/parent_selfblock_entity_params.rs:20:24
+   |
+20 |     obs: std::vec::Vec<Obs>,
+   |                        ^^^ not found in this scope
+   |
+help: you might be missing a type parameter
+   |
+18 | struct Curve<Obs> {
+   |             +++++

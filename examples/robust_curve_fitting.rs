@@ -5,35 +5,27 @@
 //   1 cauchy    -- block loss loss_cauchy(s, 0.25)  (== Ceres CauchyLoss(0.5); the scale is squared)
 //   2 starship  -- per-element gamma*atan(r/gamma) wrapper
 //
-// The fit parameters m, c live on Curve. Each Obs is nested in a Batch (the
-// container the root iterates) and targets Curve's Hessian block through its
-// `curve` reference (a remote block), so only m and c are optimized.
+// The fit parameters m, c live on Curve; each data-only Obs nests DIRECTLY
+// under the Curve it fits and targets the parent's Hessian block
+// (`parent.hb`), so only m and c are optimized -- no container struct, no
+// Ref indirection.
 use arael::covariance::{CovMode, Covariance};
 use arael::model::{Param, SelfBlock};
-use arael::refs::{self, Ref};
+use arael::refs;
 use arael::simple_lm::{LmConfig, LmProblem};
 
 #[arael::model]
-struct Curve {
-    m: Param<f64>,
-    c: Param<f64>,
-    hb: SelfBlock<Curve>,
-}
-
-#[arael::model]
-#[arael(constraint(curve.hb, parent = batch, guard = self.mode == 0, { // naive
+#[arael(constraint(parent.hb, guard = self.mode == 0, { // naive
     [obs.y - exp(curve.m * obs.x + curve.c)]
 }))]
-#[arael(constraint(curve.hb, parent = batch, guard = self.mode == 1, loss = |s| loss_cauchy(s, 0.25), { // cauchy (squared scale)
+#[arael(constraint(parent.hb, guard = self.mode == 1, loss = |s| loss_cauchy(s, 0.25), { // cauchy (squared scale)
     [obs.y - exp(curve.m * obs.x + curve.c)]
 }))]
-#[arael(constraint(curve.hb, parent = batch, guard = self.mode == 2, { // starship
+#[arael(constraint(parent.hb, guard = self.mode == 2, { // starship
     let r = obs.y - exp(curve.m * obs.x + curve.c);
     [obs.gamma * atan(r / obs.gamma)]
 }))]
 struct Obs {
-    #[arael(ref = root.curves)]
-    curve: Ref<Curve>,
     x: f64,
     y: f64,
     gamma: f64,
@@ -41,15 +33,17 @@ struct Obs {
 }
 
 #[arael::model]
-struct Batch {
+struct Curve {
+    m: Param<f64>,
+    c: Param<f64>,
     obs: std::vec::Vec<Obs>,
+    hb: SelfBlock<Curve>,
 }
 
 #[arael::model]
 #[arael(root)]
 struct Fit {
     curves: refs::Vec<Curve>,
-    batches: refs::Vec<Batch>,
 }
 
 const DATA: &[(f64, f64)] = &[
@@ -77,12 +71,11 @@ const DATA: &[(f64, f64)] = &[
 const GAMMA: f64 = 0.5;
 
 fn build() -> Fit {
-    let mut fit = Fit { curves: refs::Vec::new(), batches: refs::Vec::new() };
-    let cref = fit.curves.push(Curve { m: Param::new(0.0), c: Param::new(0.0), hb: SelfBlock::new() });
+    let mut fit = Fit { curves: refs::Vec::new() };
     let obs = DATA.iter()
-        .map(|&(x, y)| Obs { curve: cref, x, y, gamma: GAMMA, mode: 0 })
+        .map(|&(x, y)| Obs { x, y, gamma: GAMMA, mode: 0 })
         .collect();
-    fit.batches.push(Batch { obs });
+    fit.curves.push(Curve { m: Param::new(0.0), c: Param::new(0.0), obs, hb: SelfBlock::new() });
     fit
 }
 
@@ -93,8 +86,8 @@ fn build() -> Fit {
 fn fit_mode(fit: &mut Fit, name: &str, mode: i32) -> (f64, f64, Option<Vec<f64>>) {
     // Label the verbose solver output so it is clear which fit it belongs to.
     eprintln!("\n=== solving: {name} ===");
-    for b in fit.batches.iter_mut() {
-        for o in b.obs.iter_mut() {
+    for c in fit.curves.iter_mut() {
+        for o in c.obs.iter_mut() {
             o.mode = mode;
         }
     }
