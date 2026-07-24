@@ -26,4 +26,5 @@ fn constraint_attr_compile_errors() {
     t.compile_fail("tests/constraint_attr_errors/duplicate_containment.rs");
     t.compile_fail("tests/constraint_attr_errors/optional_duplicate_containment.rs");
     t.compile_fail("tests/constraint_attr_errors/cross_on_single_instance.rs");
+    t.compile_fail("tests/constraint_attr_errors/nested_duplicate_containment.rs");
 }

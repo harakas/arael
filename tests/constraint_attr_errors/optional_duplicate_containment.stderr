@@ -1,4 +1,4 @@
-error: `P` is contained in multiple root fields (maybe, items); its constraints would only be evaluated for `maybe`. Multiple containment locations are supported only for SelfBlock-constrained entities in collections -- wrap the others in distinct types
+error: `P` is contained in multiple locations (maybe, items); its constraints would only be evaluated for `maybe`. Multiple containment locations are supported only for SelfBlock-constrained entities in collections -- wrap the others in distinct types
   --> tests/constraint_attr_errors/optional_duplicate_containment.rs:14:1
    |
 14 | #[arael::model]

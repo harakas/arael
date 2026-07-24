@@ -1,0 +1,15 @@
+error: `Tie` is contained in multiple locations (ba.ties, bb.ties); its constraints would only be evaluated for `ba.ties`. Multiple containment locations are supported only for SelfBlock-constrained entities in collections -- wrap the others in distinct types
+  --> tests/constraint_attr_errors/nested_duplicate_containment.rs:35:1
+   |
+35 | #[arael::model]
+   | ^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused import: `self`
+ --> tests/constraint_attr_errors/nested_duplicate_containment.rs:7:19
+  |
+7 | use arael::refs::{self, Ref};
+  |                   ^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

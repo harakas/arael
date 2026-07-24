@@ -3,7 +3,7 @@
 //! silently skipped; now rejected at expansion.
 
 use arael::model::{CrossBlock, Param, SelfBlock};
-use arael::refs::{Ref, Vec as RVec};
+use arael::refs::{self, Ref};
 
 #[arael::model]
 struct P {
@@ -24,7 +24,7 @@ struct Tie {
 #[arael::model]
 #[arael(root)]
 struct W {
-    points: RVec<P>,
+    points: refs::Vec<P>,
     the_tie: Tie,
 }
 

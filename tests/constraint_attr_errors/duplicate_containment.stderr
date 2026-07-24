@@ -1,4 +1,4 @@
-error: `Tie` is contained in multiple root fields (ties, more_ties); its constraints would only be evaluated for `ties`. Multiple containment locations are supported only for SelfBlock-constrained entities in collections -- wrap the others in distinct types
+error: `Tie` is contained in multiple locations (ties, more_ties); its constraints would only be evaluated for `ties`. Multiple containment locations are supported only for SelfBlock-constrained entities in collections -- wrap the others in distinct types
   --> tests/constraint_attr_errors/duplicate_containment.rs:26:1
    |
 26 | #[arael::model]

@@ -926,3 +926,83 @@ fn skipped_nested_collection_is_fully_excluded() {
     check_model("skip nested collection", &mut w,
         p_cost(PDATA[1].0, PDATA[1].1, PDATA[1].2));
 }
+
+// Multi-path containment: the same SelfBlock entity type reachable
+// through DIFFERENT nested paths, a duplicated intermediate
+// collection, and a root-level + nested mix -- one sweep per path.
+// (The nested cases used to sweep only the first path found.)
+
+#[arael::model]
+struct GroupA {
+    subs: std::vec::Vec<P>,
+}
+
+#[arael::model]
+struct GroupB {
+    subs: std::vec::Vec<P>,
+}
+
+#[arael::model]
+#[arael(root)]
+struct ANestedDup {
+    ga: std::vec::Vec<GroupA>,
+    gb: std::vec::Vec<GroupB>,
+}
+
+#[test]
+fn same_entity_under_two_nested_paths() {
+    let mut w = ANestedDup {
+        ga: vec![GroupA { subs: vec![p(PDATA[0].0, PDATA[0].1, PDATA[0].2)] }],
+        gb: vec![GroupB { subs: vec![p(PDATA[1].0, PDATA[1].1, PDATA[1].2)] }],
+    };
+    let manual = p_cost(PDATA[0].0, PDATA[0].1, PDATA[0].2)
+        + p_cost(PDATA[1].0, PDATA[1].1, PDATA[1].2);
+    check_model("two nested paths", &mut w, manual);
+}
+
+#[arael::model]
+struct GroupC {
+    subs: std::vec::Vec<P>,
+}
+
+#[arael::model]
+#[arael(root)]
+struct ADupIntermediate {
+    first: std::vec::Vec<GroupC>,
+    second: std::vec::Vec<GroupC>,
+}
+
+#[test]
+fn same_entity_under_a_duplicated_intermediate() {
+    // GroupC itself is legally duplicated (SelfBlock-less grouping
+    // struct in two collections); P below it must sweep through BOTH.
+    let mut w = ADupIntermediate {
+        first: vec![GroupC { subs: vec![p(PDATA[0].0, PDATA[0].1, PDATA[0].2)] }],
+        second: vec![GroupC { subs: vec![p(PDATA[1].0, PDATA[1].1, PDATA[1].2)],
+                    }, GroupC { subs: vec![p(PDATA[2].0, PDATA[2].1, PDATA[2].2)] }],
+    };
+    check_model("duplicated intermediate", &mut w, pdata_cost());
+}
+
+#[arael::model]
+struct GroupD {
+    subs: std::vec::Vec<P>,
+}
+
+#[arael::model]
+#[arael(root)]
+struct AMixedDepth {
+    direct: std::vec::Vec<P>,
+    groups: std::vec::Vec<GroupD>,
+}
+
+#[test]
+fn same_entity_at_root_level_and_nested() {
+    let mut w = AMixedDepth {
+        direct: vec![p(PDATA[0].0, PDATA[0].1, PDATA[0].2)],
+        groups: vec![GroupD { subs: vec![p(PDATA[1].0, PDATA[1].1, PDATA[1].2)] }],
+    };
+    let manual = p_cost(PDATA[0].0, PDATA[0].1, PDATA[0].2)
+        + p_cost(PDATA[1].0, PDATA[1].1, PDATA[1].2);
+    check_model("root + nested mix", &mut w, manual);
+}

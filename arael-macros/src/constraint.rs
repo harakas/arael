@@ -3043,34 +3043,36 @@ pub fn generate_root_methods(
             Some(loc) => loc,
             None => continue,
         };
-        // Duplicate containment guard. SelfBlock sweeps handle a type held
-        // in several root collections (one sweep per collection, below).
-        // Everything else drives its iteration from a SINGLE resolved
-        // location and would silently skip the rest: a self-block type
-        // mixed with a direct field, a cross/triplet CONSTRAINT struct in
-        // two root fields, or a frines-style constraint under a duplicated
-        // parent. Reject those loudly.
-        let containing = root_containments(root_fields, coll_type);
-        let reject: Option<(&str, Vec<(String, ContainKind)>)> = if is_self_block {
-            let all_collections = containing.iter().all(|(_, k)| *k == ContainKind::Collection);
-            (containing.len() > 1 && !all_collections)
-                .then(|| (coll_type.as_str(), containing.clone()))
+        // Duplicate containment guard, over EVERY containment path (one-hop
+        // and nested alike). SelfBlock sweeps handle a type held in several
+        // collections -- one sweep per path, below. Everything else drives
+        // its iteration from a SINGLE resolved location and would silently
+        // skip the rest: a self-block type mixed with a single-instance
+        // holding, a cross/triplet CONSTRAINT struct under two paths, or a
+        // frines-style constraint under a duplicated parent. Reject those
+        // loudly.
+        let containing_paths = containment_paths(root_fields, &root_name.to_string(), coll_type);
+        let reject: Option<(&str, Vec<Vec<AccessSegment>>)> = if is_self_block {
+            let all_collections = containing_paths.iter()
+                .all(|p| p.last().is_some_and(|s| s.collection));
+            (containing_paths.len() > 1 && !all_collections)
+                .then(|| (coll_type.as_str(), containing_paths.clone()))
         } else {
-            let struct_containing = root_containments(root_fields, &sc.struct_name);
-            if struct_containing.len() > 1 {
-                Some((sc.struct_name.as_str(), struct_containing))
-            } else if struct_containing.is_empty() && containing.len() > 1 {
+            let struct_paths = containment_paths(root_fields, &root_name.to_string(), &sc.struct_name);
+            if struct_paths.len() > 1 {
+                Some((sc.struct_name.as_str(), struct_paths))
+            } else if struct_paths.is_empty() && containing_paths.len() > 1 {
                 // Constraint struct not on the root: iteration goes through
                 // its parent (the A-type), which must be unique.
-                Some((coll_type.as_str(), containing.clone()))
+                Some((coll_type.as_str(), containing_paths.clone()))
             } else {
                 None
             }
         };
-        if let Some((dup_type, fields)) = reject {
-            let names: Vec<&str> = fields.iter().map(|(f, _)| f.as_str()).collect();
+        if let Some((dup_type, paths)) = reject {
+            let names: Vec<String> = paths.iter().map(|p| path_display(p)).collect();
             return Err(syn::Error::new(proc_macro2::Span::call_site(),
-                format!("`{}` is contained in multiple root fields ({}); its \
+                format!("`{}` is contained in multiple locations ({}); its \
                     constraints would only be evaluated for `{}`. Multiple \
                     containment locations are supported only for \
                     SelfBlock-constrained entities in collections -- wrap \
@@ -3110,8 +3112,8 @@ pub fn generate_root_methods(
         // `coll_ident(_str)` is only consumed by the Collection SelfBlock path and the
         // nested CrossBlock path (both of which require a Collection). For DirectField
         // / RootSelf we divert below and these placeholders are never read.
-        // Outer hops for a Nested entity (empty for every one-hop location).
-        let mut nested_prefix: Vec<AccessSegment> = Vec::new();
+        // (SelfBlock sweeps take their per-path idents/prefixes from
+        // `containing_paths`, not from here.)
         let (coll_ident_str, coll_ident) = match &entity_location {
             EntityLocation::Collection { field, .. } => {
                 (field.clone(), syn::Ident::new(field, proc_macro2::Span::call_site()))
@@ -3120,7 +3122,6 @@ pub fn generate_root_methods(
                 // Last segment holds the entity; earlier segments are the loops
                 // wrapped around it.
                 let last = segments.last().expect("Nested location has >= 1 segment");
-                nested_prefix = segments[..segments.len() - 1].to_vec();
                 (last.field.clone(), syn::Ident::new(&last.field, proc_macro2::Span::call_site()))
             }
             EntityLocation::DirectField { field }
@@ -3131,17 +3132,6 @@ pub fn generate_root_methods(
                 (String::new(), root_name.clone())
             }
         };
-        // Group key: joined access path so distinct nested locations that share
-        // a final collection name never merge. One-hop collapses to the field
-        // name (unchanged from before).
-        let group_key_path = if nested_prefix.is_empty() {
-            coll_ident_str.clone()
-        } else {
-            let mut p: Vec<String> = nested_prefix.iter().map(|s| s.field.clone()).collect();
-            p.push(coll_ident_str.clone());
-            p.join(".")
-        };
-
         // CrossBlock/remote: find frines field and build ref resolution
         let mut frines_ident = None;
         let mut resolve_stmts = Vec::new();
@@ -4527,19 +4517,19 @@ pub fn generate_root_methods(
                 EntityLocation::Collection { .. } | EntityLocation::Nested { .. } => {
                     // SelfBlock on a Vec/Deque/Arena (possibly nested below
                     // the root): group by full access path for merged-loop
-                    // emission. A type held in SEVERAL root collections gets
-                    // one sweep per collection -- same entries, distinct
-                    // groups (the entries reference `__item` and `self`
-                    // only, never the collection path).
+                    // emission. A type held in SEVERAL collections -- root
+                    // level or nested, in any mix -- gets one sweep per
+                    // containment path: same entries, distinct groups (the
+                    // entries reference `__item` and `self` only, never the
+                    // collection path). The guard above has already rejected
+                    // any non-collection path in the set.
                     let locations: Vec<(syn::Ident, Vec<AccessSegment>, String)> =
-                        if matches!(entity_location, EntityLocation::Nested { .. }) {
-                            vec![(coll_ident.clone(), nested_prefix.clone(), group_key_path.clone())]
-                        } else {
-                            containing.iter().map(|(field, _)| {
-                                (syn::Ident::new(field, proc_macro2::Span::call_site()),
-                                 Vec::new(), field.clone())
-                            }).collect()
-                        };
+                        containing_paths.iter().map(|segments| {
+                            let last = segments.last().expect("path has >= 1 segment");
+                            (syn::Ident::new(&last.field, proc_macro2::Span::call_site()),
+                             segments[..segments.len() - 1].to_vec(),
+                             path_display(segments))
+                        }).collect();
                     for (loc_ident, loc_prefix, loc_key) in locations {
                         let group = collection_groups.entry(loc_key).or_insert_with(|| CollectionGroup {
                             coll_ident: loc_ident.clone(),
@@ -6304,6 +6294,66 @@ struct AccessSegment {
     /// true = Vec/Deque/Arena (the emitter iterates it); false = a plain
     /// struct-typed field (single instance).
     collection: bool,
+}
+
+/// EVERY containment path from the root to `target`, shallowest first:
+/// the one-hop locations from the shared syntax walk
+/// ([`root_containments`], so `#[arael(skip)]` fields are excluded),
+/// then every distinct registry path of two or more hops -- a
+/// duplicated intermediate collection yields one path per holding
+/// field. The duplicate-containment guard and the per-path SelfBlock
+/// sweep emission both consume this list, so a path one of them sees,
+/// the other sees too.
+fn containment_paths(
+    root_fields: &syn::punctuated::Punctuated<syn::Field, syn::token::Comma>,
+    root_name: &str,
+    target: &str,
+) -> Vec<Vec<AccessSegment>> {
+    let mut out: Vec<Vec<AccessSegment>> = root_containments(root_fields, target)
+        .into_iter()
+        .map(|(field, kind)| vec![AccessSegment {
+            field,
+            collection: kind == ContainKind::Collection,
+        }])
+        .collect();
+    fn walk(
+        cur: &str,
+        target: &str,
+        path: &mut Vec<AccessSegment>,
+        stack: &mut Vec<String>,
+        out: &mut Vec<Vec<AccessSegment>>,
+    ) {
+        let Some(layout) = registry_lookup(cur) else { return };
+        if stack.iter().any(|s| s == cur) { return; } // cycle guard
+        stack.push(cur.to_string());
+        for (fname, sft) in &layout.fields {
+            // Ref<T> fields point at an entity, they do not CONTAIN it.
+            if layout.ref_paths.iter().any(|(rf, _)| rf == fname) { continue; }
+            let (child, collection) = match sft {
+                SymFieldType::Struct(c) =>
+                    (c.clone(), layout.collection_fields.iter().any(|f| f == fname)),
+                SymFieldType::OptionalStruct(c) => (c.clone(), false),
+                _ => continue,
+            };
+            path.push(AccessSegment { field: fname.clone(), collection });
+            // Depth-1 hits already came from the syntax walk above.
+            if child == target && path.len() >= 2 {
+                out.push(path.clone());
+            }
+            walk(&child, target, path, stack, out);
+            path.pop();
+        }
+        stack.pop();
+    }
+    let mut path = Vec::new();
+    let mut stack = Vec::new();
+    walk(root_name, target, &mut path, &mut stack, &mut out);
+    out
+}
+
+/// Dotted display form of a containment path (`ga.subs`).
+fn path_display(segments: &[AccessSegment]) -> String {
+    segments.iter().map(|s| s.field.as_str()).collect::<Vec<_>>().join(".")
 }
 
 /// Walk the type registry from `root_name` to find where a struct of

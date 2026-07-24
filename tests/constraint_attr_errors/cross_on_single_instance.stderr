@@ -1,34 +1,15 @@
-error[E0277]: the trait bound `arael::refs::Vec<P>: ModelSym` is not satisfied
+error: $DIR/tests/constraint_attr_errors/cross_on_single_instance.rs:15: cross/triplet constraint struct `Tie` is held as a plain single-instance field (root field `the_tie`); its sweep needs something to iterate -- hold it in a Vec/Deque/Arena or an Option
   --> tests/constraint_attr_errors/cross_on_single_instance.rs:24:1
    |
 24 | #[arael::model]
-   | ^^^^^^^^^^^^^^^ the trait `ModelSym` is not implemented for `arael::refs::Vec<P>`
+   | ^^^^^^^^^^^^^^^
    |
-   = help: the following other types implement trait `ModelSym`:
-             EulerAngleParam<T>
-             P
-             Param<T>
-             QuaternionParam<T>
-             SimpleEulerAngleParam<T>
-             String
-             Tie
-             TransformParam<T>
-           and $N others
    = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)
 
-error[E0277]: the trait bound `arael::refs::Vec<P>: ModelSym` is not satisfied
-  --> tests/constraint_attr_errors/cross_on_single_instance.rs:24:1
-   |
-24 | #[arael::model]
-   | ^^^^^^^^^^^^^^^ the trait `ModelSym` is not implemented for `arael::refs::Vec<P>`
-   |
-   = help: the following other types implement trait `ModelSym`:
-             EulerAngleParam<T>
-             P
-             Param<T>
-             QuaternionParam<T>
-             SimpleEulerAngleParam<T>
-             String
-             Tie
-             TransformParam<T>
-           and $N others
+warning: unused import: `self`
+ --> tests/constraint_attr_errors/cross_on_single_instance.rs:6:19
+  |
+6 | use arael::refs::{self, Ref};
+  |                   ^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
