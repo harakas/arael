@@ -1,42 +1,5 @@
 # TODO
 
-- **validate(): extend the stale-ref walker to nested scopes.** The
-  generated `collect_ref_issues` covers the root's own ref fields, its
-  direct struct fields, and root-level collections (chains through
-  same-entity refs included). Refs held inside nested sub-model
-  collections and `parent.`-scoped resolution paths are not walked --
-  a stale ref there still panics inside validate's serialize call (with
-  the stale-Ref message) instead of becoming an `Issue::StaleRef`. Not
-  implemented because those scopes need the sweep machinery's nested
-  `__seg` iteration contexts, which the walker does not replicate yet.
-
-- **Guards that toggle during a solve break assembly -- emit zeros
-  instead**. The contract today is that `guard =` values stay fixed for a
-  solve's duration: the sparse pattern is discovered from the guards'
-  first-assembly state, so a guard turning ON later writes outside the
-  discovered pattern (indexed/direct CSC), and a guard turning OFF leaves
-  a zero-curvature parameter that kills the solve
-  (`DiagonalFault::Zero`). Proposed fix: include guarded constraints'
-  cells in pattern discovery unconditionally and emit ZERO contributions
-  while the guard is false -- assembly stays in-pattern under any
-  toggling, at the cost of dormant cells in the factor. Would also relax
-  the LmSession validity contract (guard flips between warm solves).
-  Needs investigation across the assembly paths (dense/band are
-  value-only and unaffected; COO/CSC discovery is the work).
-
-- **Multiple containment locations: remaining shapes**. A
-  SelfBlock-constrained entity held in several root collections now gets
-  one constraint sweep per collection (was: first field only, the rest
-  serialized params that silently contributed nothing -- found 2026-07-24
-  by the robust-loss test audit; regression-tested there and used by
-  tests/schur_detect.rs). Still emitted single-location and REJECTED by
-  the guard in `generate_root_methods` (trybuild-pinned in
-  tests/constraint_attr_errors/duplicate_containment.rs): a duplicated
-  cross/triplet constraint struct, a frines-style constraint under a
-  duplicated parent, and a self-block type mixed with a direct field.
-  Nested duplicate paths (`resolve_nested_path` returns the first) are
-  neither supported nor guarded.
-
 - **Unscented-transform utility for covariance mapping**. Pushing a
   parameter-space marginal through a nonlinear embedding currently
   linearizes: slam_demo_gm maps its inverse-depth landmark marginal
@@ -48,33 +11,6 @@
   `unscented(mean, cov, f: impl Fn(&[f64]) -> Vec<f64>) -> (mean, cov)`,
   probably next to the covariance module. Not done yet because only
   display code consumes the mapped covariance so far.
-
-- **Components in `root.<selfblock>` constraints**. A root whose params
-  live inside a `#[arael(component)]` field (e.g. `TransformParam`)
-  cannot be the target of a `constraint(root.hb, ...)` -- the macro
-  rejects it ("components are not yet supported in root.<selfblock>
-  constraints"). Hit 2026-07-23 by benchmarks/registration: one shared
-  SE(3) pose observed by thousands of data-only correspondence entities
-  is exactly the "one shared parameter set, many observations" shape the
-  root-SelfBlock path exists for, but the pose being a component forced
-  the workaround of wrapping it in a single-entry `refs::Vec<Frame>`
-  with remote `f.hb` constraints. Fix: teach the root-SelfBlock
-  constraint path the component embed/deriv machinery the entity path
-  already has (chart Jacobian chained into the block writes). Not done
-  yet because the guard predates a real use case; registration is now
-  that use case.
-
-- **Cross-crate export of `#[arael::function]` user functions**. The
-  model export bundle (`export_models!()` / `arael_import!()`) carries
-  structs and enums only; an imported constraint body calling a user
-  function defined in the model crate fails with the existing "unknown
-  function" error at the importing root. The same token-bundling
-  mechanism applies; not done because no exported model uses one yet.
-
-- **JSON sidecar emitter for model layouts**. The export bundle is Rust
-  tokens consumed by rustc; external (non-Rust) tooling that wants to
-  read model descriptions would need a serialized form of the layout
-  registry. Deferred until a tool needs it.
 
 - **Generic models** -- DONE (2026-07-22) for components, entities and
   constraint structs: one scalar type parameter bounded by `Float`, one
@@ -101,33 +37,6 @@
   block_cost/weight emission (from the constraint path) to `generate_fit_impl`.
   This is the canonical robust-curve-fitting case (Ceres's robust_curve_fitting
   example is a fit with CauchyLoss).
-
-- **Nested child contributing to its parent's params**. PARTLY DONE
-  (2026-07-19): the ROOT-parent case is solved -- a data-only entity's
-  constraint can name the root's own SelfBlock as its primary block
-  (`constraint(root.hb, ...)`, dense writes, `root` usable in bodies; see
-  examples/root_fit_demo.rs and tests/root_self_block.rs), which is the
-  "one shared parameter set, many observations" fit shape. Still open for a
-  NON-root parent (the general nested case below). Original entry: A
-  constraint on an entity nested in a parameter-bearing entity cannot write
-  to the parent's block. A remote block needs a `Ref` field on the constraint struct; a `Ref`
-  into the containing entity makes the entity graph cyclic; and there is no
-  spelling for "the parent's block" (`curve.hb` always means "the `hb` on the
-  `curve` Ref field"). Also `Ref<T>` only targets a collection
-  (Vec/Deque/Arena), so a single shared entity cannot be a `Ref` target either.
-  Consequence: "one shared parameter set, many observations" (curve fit, global
-  calibration) forces a separate container entity plus a collection-of-one for
-  the params -- the observations cannot nest directly under the entity whose
-  params they fit. See examples/robust_curve_fitting.rs (the `Batch` container
-  exists only to break this). Wanted: a way for a nested entity to target its
-  parent's block, or a `Ref` (or direct binding) to a single non-collection
-  entity.
-
-- **Macro must reject a cyclic entity graph, not crash**. When entity A holds a
-  collection of B and B references A (`ref = root.<a-collection>`), the macro's
-  graph traversal recurses without bound and SIGSEGVs rustc (a stack overflow
-  during expansion, no diagnostic). Detect the cycle during registry/graph
-  build and emit a clear compile error instead.
 
 - **Automatic marginalize detection** -- DONE (2026-07-12). The macro hands the
   solver the model's type-coupling graph and `SparseFaer` reads the
@@ -248,9 +157,7 @@
 - **arael-sketch**: make language more real so that you can do vector algebra
 - **arael-sketch**: add keywords into language? stop assigning to anything?
 - **arael-sketch**: dimension: distance between concentric circles
-- **arael-macros**: support general func() syntax -- right now we have to describe all of them which is annoying..
 - **arael**: support single struct model+root. right now it does not function. -- DONE (SelfBlock<Self> on root + direct-composed sub-model fields now route through EntityLocation::RootSelf / EntityLocation::DirectField in arael-macros)
-- **arael**: support global optimization parameters with a triplet block, so a global param can be mixed with hessianblock, or efficiently omitted
 - **arael-sym**: parse_with_bag -- bag with functions and substitutions so func() gets current active function -- DONE
 - **arael-sym**: cli calculator demo app, better than bc, define functions, etc. -- DONE
 - **arael**: docs: document constraint has name= property
@@ -261,7 +168,6 @@
 - **arael-sketch**: hdimension/vdimension at creation when moving mouse far
 - **arael-sketch**: toggle tags like driven, quiet, construction during line creation
 - **arael-sketch**: robot.cmd scale to 0.1 takes us to "interesting" view
-- **arael-macros**: tighten the constraint attribute parser to reject the N-way positional multi-block form `constraint(hb_a, hb_b, hb_c, {body})`. The parser currently accepts it as a side effect of supporting `constraint(hb_pose, root.hbt, {body})` (self-primary + root-owned TripletBlock). N ≥ 2 regular multi-block should always be written with brackets -- `constraint([a, b, c], {body})` -- and the only positional form we genuinely need is the specific 2-item `(<local_self_block>, root.<triplet>)` case. Two parsers for the same thing is a surprise waiting to bite users.
 - **arael-sketch**: investigate chain misbehavior
 - **arael-sketch**: when selecting a line/point/arc/etc hilight/hover all the constraints associated with it
 
@@ -304,8 +210,6 @@
 - **security**: remove the RUSTSEC-2026-0194/0195 (quick-xml < 0.41 DoS) ignores from `.cargo/audit.toml` once `cargo update` can resolve quick-xml >= 0.41 across the tree. Blocked upstream as of 2026-07-04: wayland-scanner (latest 0.31.10) and zbus_xml (latest 5.1.1) both pin `^0.39`, and the zbus_xml 4.0 in our tree (via atspi/zbus-lockstep) pins 0.30. Exposure is build-time codegen and local-session-bus XML only, hence the ignore rather than a workaround.
 
 - **arael-macros**: nested struct support in the model tree -- DONE (06e8f15 + 8ffd8ed). Block-bearing entities and constraints now codegen at any depth below the root, through block-less grouping sub-models and collections-of-sub-models (`Map { paths: Vec<Path> }` with `Path { poses, pose_pairs, frines }`). `resolve_nested_path` walks the registry to a multi-segment `AccessSegment` path (`EntityLocation::Nested`); self-block / cross / set_block_indices emission wrap the per-entity loop in the nested prefix (`nested_container` / `wrap_in_prefix`); `parent.<coll>` refs resolve against the containing sub-model, `root.<coll>` against the root; passive nested entities get their SelfBlock wired. One-hop emission byte-identical (verified via cargo expand on all model examples + the full arael-sketch-solver lib). Tests: nested_self_block, nested_cross_block; demo: slam2d_multi_demo. Unblocks R6.
-
-- **arael-macros**: R6 block-precision check -- block precision must equal the root's precision, failing with the field name instead of the cryptic `expected f32, found f64` the mismatch produces deep in generated solve code. A registry-based macro-time check was built and reverted 2026-07-08 as half-baked: it only covered the root's DIRECT fields (single sub-models and collections), not entities nested behind a block-less grouping struct, because it did not recurse (and nested models did not compile at the time). Nested-struct support has since landed (06e8f15 + 8ffd8ed), so this is now actionable: redo with transitive coverage. Design that worked for the direct case (recoverable from the reverted diff): store `precision: u8` per struct in the registry `SymLayout` (0 = agnostic/no block, 1 = f32, 2 = f64), set from the struct's block; in `generate_root_methods` unwrap each field's element type (Vec/Deque/Arena/Option/Box), `registry_lookup` it, and return a spanned `syn::Error` when a block-bearing type's precision differs from the root -- returning the error before codegen suppresses the E0308. To extend to nesting, walk the registered `SymLayout.fields` (SymFieldType::Struct/OptionalStruct + collection inner types) recursively with a visited-set cycle guard. `Param` fields stay agnostic (they may differ from the root and are cast at the boundary).
 
 - **arael**: port the COO-free first iteration to the other scalar-CSC backends -- DONE 2026-07-11. The first-call assembly is now one shared function (`assemble_first_csc` in simple_lm), used by SparseFaer, SparseEigen, SparseCholmod and SparseCholmodSupernodal alike: models with a statically-knowable pattern build their CSC and position map from the block structure, everything else falls back to COO. Interleaved at slam-300, first iteration: eigen 431.6 -> 416.2 ms, cholmod 433.4 -> 420.9, cholmod-gpl 111.3 -> 105.2; steady-state ms/iter unchanged on all three, so the tile-expanded pattern's ~1.2% explicit zeros cost the CHOLMOD and Eigen factorizations nothing measurable (the open question when this was deferred). First-assembly means from SLAM_TIMING confirm the mechanism: 12.92 -> 7.69 ms (cholmod-gpl), 13.16 -> 9.72 (eigen). Tests: eigen/cholmod/cholmod-gpl backends each land on the dense optimum (tests/block_assembly.rs, feature-gated -- they had no tests at all before).
 
@@ -395,20 +299,14 @@
   a large initial error, offset marginal covariance as the output). Deferred
   because the observation becomes a THREE-variable constraint (pose, plane,
   offset) and component params are still guarded off in multi-block/triplet
-  span builders -- lift that guard first, then build the example (also a
-  natural showcase for assemble_covariance). The plane benchmark keeps a
-  degenerate all-visible env for the Schur-gate stress case meanwhile.
-
-  The remote-block form of this guard is lifted (2026-07-20). The cause is
-  the same in all three forms: the parameter walk is hand-rolled per form,
-  iterating `layout.param_fields` (direct fields only) and emitting
-  `#var.#field.write_indices(..)` with a single identifier, so a param
-  inside a component is unreachable -- and the inline size match returns 0
-  for any field type it does not name, so the entity's span silently
-  measures 0. `param_slots` / `param_slot_size` / `slot_access` already do
-  this correctly and are what self- and cross-blocks use. The triplet /
-  multi-cross builder still carries its own copy; replacing it with those
-  three helpers is the same edit made for remote blocks.
+  span builders. The triplet/multi-cross builder still hand-rolls its
+  parameter walk over direct param_fields, so a param inside a component
+  is unreachable and the span silently measures 0; the remote-block form
+  of this guard was lifted 2026-07-20 by switching to `param_slots` /
+  `param_slot_size` / `slot_access` -- the same edit applies here. Then
+  build the example (also a natural showcase for assemble_covariance).
+  The plane benchmark keeps a degenerate all-visible env for the
+  Schur-gate stress case meanwhile.
 
 - **arael: Schur Auto gate misfires when a small block family is observed
   by everyone** -- DONE (2026-07-19). The shortcut now prices the
