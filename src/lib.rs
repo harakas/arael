@@ -1110,6 +1110,13 @@
 //! (`LmStatus::DriverTerminated`); from `rejected` or `factorization_failed` the
 //! last accepted one comes back (`LmStatus::LambdaCeiling`).
 //!
+//! To watch a solve without touching the schedule, attach an
+//! [`LmObserver`](simple_lm::LmObserver) with `LmConfig::with_observer`
+//! (closures qualify): it is called once per damped attempt with the
+//! iteration state and the current best parameters, and can stop the
+//! solve (`LmStatus::ObserverTerminated`) -- progress reporting,
+//! cancellation flags, good-enough checks.
+//!
 //! ## Basic usage
 //!
 //! ```
@@ -1150,6 +1157,7 @@
 //! | `num_threads` | `1` | threads for the sparse factorization (needs the `rayon` feature). Measure first -- see below |
 //! | `time_limit` | `None` | wall-clock budget for the whole solve. Overrides `min_iters` |
 //! | `verbose` | `false` | per-iteration line on stderr. **Turn on first whenever debugging** |
+//! | `observer` | `None` | an [`LmObserver`](simple_lm::LmObserver) called once per damped attempt with the current state; can stop the solve. Set with `with_observer` |
 //! | `gather_timing` | `false` | gather per-phase timing AND the per-iteration timeline into `LmResult::timing` (`Some` when on, `None` when off) |
 //!
 //! The solver terminates when **all of** `iter >= min_iters`, the

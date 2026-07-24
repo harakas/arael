@@ -273,6 +273,11 @@ pub struct LmConfig<T: Float> {
     /// reads `initial_lambda` and `lambda_floor` from this config at solve
     /// start, so those two fields configure whichever driver is in place.
     pub driver: Box<dyn LambdaDriver<T>>,
+    /// Watch the solve: called once per damped attempt with an
+    /// [`LmIter`], and can stop the solve (see [`LmObserver`]). `None`
+    /// (the default) costs nothing. Set with
+    /// [`LmConfig::with_observer`].
+    pub observer: Option<Box<dyn LmObserver<T>>>,
     /// Gather per-phase wall-clock timing. When `true`, [`LmResult::timing`]
     /// is `Some(LmTiming)`; when `false` (the default) it is `None` and the
     /// solver never reads the clock -- zero overhead. Enable it to profile
@@ -345,6 +350,7 @@ impl<T: Float> LmConfig<T> {
             num_threads: 1,
             verbose: false,
             driver: Box::new(DefaultLambdaDriver::default()),
+            observer: None,
             gather_timing: false,
         }
     }
@@ -412,6 +418,14 @@ impl<T: Float> LmConfig<T> {
     /// driver reads `initial_lambda` / `lambda_floor` from this config at start.
     pub fn with_driver(mut self, driver: impl LambdaDriver<T> + 'static) -> Self {
         self.driver = Box::new(driver);
+        self
+    }
+
+    /// Attach an [`LmObserver`]: called once per damped attempt, can
+    /// stop the solve. Closures qualify --
+    /// `cfg.with_observer(|it: &LmIter<f64>| ControlFlow::Continue(()))`.
+    pub fn with_observer(mut self, observer: impl LmObserver<T> + 'static) -> Self {
+        self.observer = Some(Box::new(observer));
         self
     }
 
@@ -1357,6 +1371,12 @@ pub enum LmStatus {
     /// stopping rule -- a step-norm test, an external deadline, a
     /// good-enough check -- not a failure.
     DriverTerminated,
+    /// The observer stopped the solve ([`LmObserver::on_iteration`]
+    /// returned `Break`). The current best state is what comes back: an
+    /// accepted attempt's step is kept, a rejected one leaves the last
+    /// accepted state. A deliberate stop (cancellation, a good-enough
+    /// check), not a failure.
+    ObserverTerminated,
     /// Ran out of wall-clock budget ([`LmConfig::time_limit`]). The solve
     /// returned the best parameters found so far, which is the last
     /// ACCEPTED step -- a rejected trial never reaches the returned `x`.
@@ -1615,6 +1635,7 @@ impl LmStatus {
             LmStatus::PredictedReduction => "predicted gain negligible",
             LmStatus::TimeLimit => "out of time",
             LmStatus::DriverTerminated => "driver stopped it",
+            LmStatus::ObserverTerminated => "observer stopped it",
             LmStatus::LambdaCeiling => "damping exhausted",
             LmStatus::RetryBudgetExhausted => "retry budget exhausted",
             LmStatus::Aborted => "aborted",
@@ -1630,6 +1651,7 @@ impl LmStatus {
                 | LmStatus::ParameterTolerance
                 | LmStatus::PredictedReduction
                 | LmStatus::DriverTerminated
+                | LmStatus::ObserverTerminated
         )
     }
 }
@@ -2313,6 +2335,80 @@ impl<T: Float> Clone for Box<dyn LambdaDriver<T>> {
     }
 }
 
+/// What the solve loop reports to an [`LmObserver`] about one damped
+/// attempt. `params` borrows the solver's current best state -- valid
+/// only during the callback; copy out anything you keep.
+pub struct LmIter<'a, T> {
+    /// 1-based attempt counter, damping retries included (the same
+    /// count `LmResult::iterations` reports).
+    pub iter: usize,
+    /// Retry index within the current linearization (0 = first attempt).
+    pub inner: usize,
+    /// The attempt produced a cost decrease and was kept.
+    pub accepted: bool,
+    /// The damped system could not be factorized -- no trial point was
+    /// produced (`new_cost` is NaN).
+    pub factorization_failed: bool,
+    /// Best accepted cost before this attempt.
+    pub cost: T,
+    /// The attempt's trial cost (NaN when the factorization failed).
+    pub new_cost: T,
+    /// Damping used for this attempt.
+    pub lambda: T,
+    /// Accepted steps so far, this one included when `accepted`.
+    pub accepted_total: usize,
+    /// The current best parameters: after the step when `accepted`
+    /// (re-centered by `advance`), the last accepted state otherwise.
+    pub params: &'a [T],
+}
+
+/// Watch a solve from the outside: called once per damped attempt with
+/// the state in [`LmIter`]. Return `ControlFlow::Break(())` to stop the
+/// solve -- the current best state is kept and the solve ends with
+/// [`LmStatus::ObserverTerminated`] (an `Ok` termination). Independent
+/// of the damping schedule; attach one with [`LmConfig::with_observer`].
+///
+/// Observers are stateful per solve: each solve clones the config's
+/// prototype (like the lambda driver), so hold shared handles
+/// (channels, `Arc<AtomicBool>` cancel flags, `Rc<RefCell<..>>`) for
+/// state that must outlive the solve. Closures work too:
+/// `cfg.with_observer(|it: &LmIter<f64>| { ... ControlFlow::Continue(()) })`.
+pub trait LmObserver<T>: LmObserverClone<T> {
+    /// One damped attempt happened. `Break` stops the solve, keeping
+    /// the current best state.
+    fn on_iteration(&mut self, it: &LmIter<'_, T>) -> std::ops::ControlFlow<()>;
+}
+
+impl<T, F> LmObserver<T> for F
+where
+    F: FnMut(&LmIter<'_, T>) -> std::ops::ControlFlow<()> + Clone + 'static,
+    T: Float,
+{
+    fn on_iteration(&mut self, it: &LmIter<'_, T>) -> std::ops::ControlFlow<()> {
+        self(it)
+    }
+}
+
+/// Clone helper for the boxed observer an [`LmConfig`] carries, exactly
+/// like [`LambdaDriverClone`]. Auto-implemented for every `Clone`
+/// observer; just `#[derive(Clone)]` yours.
+pub trait LmObserverClone<T> {
+    /// Clone `self` into a fresh boxed observer.
+    fn clone_box(&self) -> Box<dyn LmObserver<T>>;
+}
+
+impl<T: Float, O: LmObserver<T> + Clone + 'static> LmObserverClone<T> for O {
+    fn clone_box(&self) -> Box<dyn LmObserver<T>> {
+        Box::new(self.clone())
+    }
+}
+
+impl<T: Float> Clone for Box<dyn LmObserver<T>> {
+    fn clone(&self) -> Self {
+        self.clone_box()
+    }
+}
+
 /// The classic fixed-multiplier schedule (the library default): divide
 /// lambda by 5 on acceptance (clamped to `LmConfig::lambda_floor`),
 /// multiply by 10 on rejection or factorization failure, and give up
@@ -2494,6 +2590,8 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
     // Drivers are stateful per solve; clone the config's prototype so the
     // shared config is untouched and a reused config starts each solve clean.
     let mut driver = config.driver.clone_box();
+    // The observer follows the same discipline.
+    let mut observer = config.observer.as_ref().map(|o| o.clone_box());
     // Set when the loop breaks on a setup failure instead of a stopping
     // rule; the tail then returns Err with the partial state (None when
     // the FIRST assembly failed -- nothing ran).
@@ -2795,6 +2893,21 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
                     });
                 }
 
+                // Also an event: cancellation must work while lambda climbs
+                // through failed factorizations. No trial point exists, so
+                // new_cost is NaN.
+                if let Some(obs) = observer.as_mut()
+                    && obs.on_iteration(&LmIter {
+                        iter, inner, accepted: false, factorization_failed: true,
+                        cost: end_cost, new_cost: T::nan(), lambda,
+                        accepted_total: accepted, params: &cur_x,
+                    }).is_break()
+                {
+                    status = LmStatus::ObserverTerminated;
+                    done = true;
+                    break;
+                }
+
                 // The driver has no damping left to try. No step was produced,
                 // so cur_x still holds the last accepted one.
                 let Some(next_lambda) = next_lambda else {
@@ -2905,6 +3018,22 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
                     });
                 }
 
+                // The step is committed (cur_x, advance); the observer sees
+                // it before any termination rule, so it observes every
+                // accepted step including the final one.
+                if let Some(obs) = observer.as_mut()
+                    && obs.on_iteration(&LmIter {
+                        iter, inner, accepted: true, factorization_failed: false,
+                        cost: end_cost, new_cost, lambda,
+                        accepted_total: accepted, params: &cur_x,
+                    }).is_break()
+                {
+                    end_cost = new_cost;
+                    status = LmStatus::ObserverTerminated;
+                    done = true;
+                    break;
+                }
+
                 // The driver stopped us on a GOOD step. Keep it: cur_x and
                 // advance() are already done above, so all that is left is to
                 // commit the cost. Deliberately ahead of the threshold and
@@ -2998,6 +3127,21 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
                     cost_eval: cost_dt,
                     advance: Duration::ZERO, // rejected: nothing to re-center
                 });
+            }
+
+            // The rejected attempt is still an event: a cancel flag must be
+            // able to cut a stall of rejected retries short. cur_x is the
+            // last accepted state.
+            if let Some(obs) = observer.as_mut()
+                && obs.on_iteration(&LmIter {
+                    iter, inner, accepted: false, factorization_failed: false,
+                    cost: end_cost, new_cost, lambda,
+                    accepted_total: accepted, params: &cur_x,
+                }).is_break()
+            {
+                status = LmStatus::ObserverTerminated;
+                done = true;
+                break;
             }
 
             if at_precision {

@@ -449,7 +449,7 @@ match the root's precision: on an `#[arael(root, f32)]` model they take
 | `SparseEigen::<T>::new()` | `solve_sparse_eigen[_f32]` | Eigen `SimplicialLLT` (feature `eigen`) |
 | `SparseCholmod::new()` | `solve_sparse_cholmod` | CHOLMOD simplicial Cholesky, LGPL (feature `cholmod`; f64 only) |
 | `SparseCholmodSupernodal::new()` | `solve_sparse_cholmod_supernodal` | CHOLMOD supernodal Cholesky, **GPL-licensed module** (feature `cholmod-gpl`; f64 only) |
-| `Sparse::new()` / `SparseDirect::new()` | `solve_sparse` / `solve_sparse_direct` | COO / direct-CSC assembly over a dense solve -- validation baselines, not for production. (The free `solve_sparse` is this baseline; the root's `.solve_sparse()` is faer) |
+| `SparseCoo::new()` / `SparseDirectCsc::new()` | `solve_sparse_coo` / `solve_sparse_direct_csc` | COO / direct-CSC assembly over a dense solve -- validation baselines, deprecated in favour of `SparseFaer` (the root's `.solve_sparse()`) |
 
 ### Damping-schedule drivers
 
@@ -483,6 +483,13 @@ means stop -- for a rule the config cannot express, such as a step-norm test
 or an external deadline. From `accepted` the step is kept
 (`LmStatus::DriverTerminated`); from `rejected` or `factorization_failed` the
 last accepted one comes back (`LmStatus::LambdaCeiling`).
+
+To watch a solve without touching the schedule, attach an `LmObserver`
+with `LmConfig::with_observer` (closures qualify): it is called once per
+damped attempt with the iteration state and the current best parameters,
+and can stop the solve (`LmStatus::ObserverTerminated`) -- progress
+reporting, cancellation flags, good-enough checks. See
+[docs/SOLVERS.md](docs/SOLVERS.md#iteration-observer).
 
 `LmConfig` controls the solve -- convergence tolerances, iteration
 caps, initial lambda, `time_limit` (an optional wall-clock budget; it

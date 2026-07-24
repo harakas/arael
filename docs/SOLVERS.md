@@ -184,6 +184,7 @@ LmConfig {
 | `time_limit` | `None` | `Option<Duration>` wall-clock budget for the whole solve. **Overrides `min_iters`** -- a spent budget stops the solve wherever it is, returning the last accepted step (`LmStatus::TimeLimit`). Checked before each assembly and each damped attempt, so the overrun is bounded by one linear solve, not one iteration. It cannot preempt a single factorization. `None` = no limit, and the clock is never read |
 | `num_threads` | `1` | threads for the sparse factorization and triangular solve. `1` sequential, `n` uses n, `0` uses every core. **Requires the `rayon` cargo feature**; without it anything but 1 warns and stays sequential. Threading has overhead: whether it helps depends on the model and its parameter count. See [Threads](#threads) |
 | `verbose` | `false` | per-iteration line on stderr. **Turn on first whenever debugging** |
+| `observer` | `None` | an [`LmObserver`](#iteration-observer) called once per damped attempt; can stop the solve. Set with `with_observer` |
 | `gather_timing` | `false` | gather per-phase wall-clock timing into `LmResult::timing` (`Some` when on, `None` when off). Off = the clock is never read |
 
 ## Tuning for performance vs quality
@@ -439,6 +440,7 @@ pub enum LmStatus {
     PredictedReduction,    // model predicts no meaningful improvement left
     TimeLimit,             // spent LmConfig::time_limit
     DriverTerminated,      // LambdaDriver::accepted returned None -- step KEPT
+    ObserverTerminated,    // LmObserver returned Break -- best state kept
     LambdaCeiling,         // driver gave up: lambda past its ceiling
     RetryBudgetExhausted,  // 20 inner retries with no accepted step
     Aborted,               // partial state inside a SolveFailure -- never in Ok
@@ -821,3 +823,52 @@ rule wins over the config's. The built-in schedules never use it.
 A driver is a `#[derive(Clone)]` type; attach it to the config with
 `LmConfig::with_driver(...)` and every solve entry point (`lm_solve`,
 `solve_sparse`, ...) picks it up from `config.driver`.
+
+## Iteration observer
+
+Watch a solve without touching the damping schedule: an `LmObserver`
+rides on the config and is called once per damped attempt -- accepted,
+rejected, and factorization-failed alike -- with an `LmIter`:
+
+```rust,ignore
+pub struct LmIter<'a, T> {
+    pub iter: usize,             // 1-based attempt counter (= LmResult::iterations)
+    pub inner: usize,            // retry index within this linearization
+    pub accepted: bool,
+    pub factorization_failed: bool, // no trial point; new_cost is NaN
+    pub cost: T,                 // best accepted cost before this attempt
+    pub new_cost: T,             // this attempt's trial cost
+    pub lambda: T,
+    pub accepted_total: usize,
+    pub params: &'a [T],         // current best state; copy out what you keep
+}
+```
+
+Return `ControlFlow::Break(())` to stop the solve: the current best
+state is kept and the result reports `LmStatus::ObserverTerminated`
+(an `Ok` termination, `is_success()`). Closures qualify:
+
+```rust,ignore
+use std::ops::ControlFlow;
+
+// Progress + cancellation for a UI thread.
+let cancel = Arc::new(AtomicBool::new(false));
+let c = cancel.clone();
+let cfg = LmConfig::conservative().with_observer(move |it: &LmIter<f64>| {
+    if it.accepted {
+        let _ = tx.send(it.params.to_vec());   // snapshot for redraw
+    }
+    if c.load(Ordering::Relaxed) { ControlFlow::Break(()) } else { ControlFlow::Continue(()) }
+});
+```
+
+`params` borrows the solver's state for the duration of the call --
+model geometry is redrawn by `deserialize`-ing a snapshot into a
+display copy of the model, not by touching the model mid-solve (the
+solver owns it). Observers are cloned per solve like the driver, so a
+shared config starts every solve with a fresh copy; state that must
+survive the solve lives behind a channel, `Arc`, or `Rc` handle.
+
+The observer is independent of the `LambdaDriver`: use the observer to
+watch or cancel, the driver to schedule damping -- combining a Nielsen
+driver with a progress observer needs no wrapper types.
