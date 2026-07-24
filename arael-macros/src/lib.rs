@@ -97,6 +97,14 @@ struct SymLayout {
     /// the single home for that entity's gradient + A-A Hessian diagonal,
     /// so cross constraints need to know the field name to write to it.
     self_block_field: Option<String>,
+    /// Fields whose type is an UNRECOGNIZED generic wrapper naming another
+    /// type: (field, wrapper, held type name). Containers are dispatched by
+    /// literal last-segment name, so an aliased container (`use refs::Vec
+    /// as RVec` + `pts: RVec<P>`) reads as an opaque field and `P` silently
+    /// stops being containment there. Recorded at classification; the
+    /// moment `held` turns out to be a registered model type (either
+    /// definition order) expansion fails loudly instead.
+    suspect_wrappers: Vec<(String, String, String)>,
 }
 
 /// Total optimizable scalars of a registered type, following
@@ -319,8 +327,31 @@ fn registry_store(name: &str, layout: SymLayout) -> Result<(), String> {
                 "a different #[arael::model] struct named `{}` is already registered \
                  (the registry is keyed by bare struct name; rename one of them)", name));
         }
+    // A suspect wrapper recorded earlier (an unrecognized container whose
+    // held type was not yet registered) naming THIS type is now proven to
+    // hold a model type -- that containment is silently dropped, so fail
+    // loudly. This catches the holder-expanded-first definition order; the
+    // holder's own expansion catches the other. The layout is still
+    // inserted so downstream expansions do not cascade secondary errors.
+    let suspect_hit = if layout.fields.is_empty() { None } else {
+        reg.layouts.iter()
+            .flat_map(|(holder, l)| l.suspect_wrappers.iter()
+                .map(move |s| (holder.as_str(), s)))
+            .chain(layout.suspect_wrappers.iter().map(|s| (name, s)))
+            .find(|(_, (_, _, held))| held == name)
+            .map(|(holder, (field, wrapper, _))| format!(
+                "`{}` is a model type, but field `{}` of `{}` holds it inside \
+                 unrecognized container `{}` -- containers are recognized by \
+                 literal name (Vec, Deque, Arena, Option, Ref), aliases are \
+                 invisible to the macro; spell the container literally, or mark \
+                 that field `#[arael(skip)]` if it is deliberately outside the \
+                 model", name, field, holder, wrapper))
+    };
     reg.layouts.insert(name.to_string(), layout);
-    Ok(())
+    match suspect_hit {
+        Some(msg) => Err(msg),
+        None => Ok(()),
+    }
 }
 
 fn registry_lookup(name: &str) -> Option<SymLayout> {
@@ -377,6 +408,7 @@ fn builtin_component_layout(name: &str) -> Option<SymLayout> {
             component: true,
             constraint_index_field: None,
             self_block_field: None,
+            suspect_wrappers: Vec::new(),
         }),
         "UnitVecParam" | "UnitVecParamF" => Some(SymLayout {
             fields: vec![
@@ -405,6 +437,7 @@ fn builtin_component_layout(name: &str) -> Option<SymLayout> {
             component: true,
             constraint_index_field: None,
             self_block_field: None,
+            suspect_wrappers: Vec::new(),
         }),
         _ => None,
     }
@@ -1132,6 +1165,9 @@ fn register_model_layout(input: &syn::DeriveInput) -> syn::Result<u32> {
     let mut symbolic_fields_reg: Vec<(String, String)> = Vec::new();
     // (deriv field name, of = symbolic field, by = param field)
     let mut deriv_fields_reg: Vec<(String, String, String)> = Vec::new();
+    // (field, wrapper, held) -- unrecognized generic wrappers naming a
+    // not-yet-registered type; fires if the type registers later.
+    let mut suspect_wrappers_reg: Vec<(String, String, String)> = Vec::new();
     let mut constraint_index_field_reg: Option<String> = None;
     // Detect SelfBlock<Self> field — this struct's canonical grad+diag home.
     let mut self_block_field_reg: Option<String> = None;
@@ -1174,6 +1210,27 @@ fn register_model_layout(input: &syn::DeriveInput) -> syn::Result<u32> {
                     continue;
                 }
                 _ => {}
+            }
+        }
+        // Containers are recognized by literal type name: an aliased
+        // container (`use refs::Vec as RVec`) reads as an opaque field and
+        // its contents silently stop being containment. Reject any
+        // unrecognized wrapper holding a registered model type;
+        // `#[arael(skip)]` documents a deliberate out-of-model holding.
+        {
+            let mut suspects = Vec::new();
+            collect_wrapper_suspects(&field.ty, scalar_generic.as_deref(), &mut suspects);
+            for (wrapper, held) in suspects {
+                if registry_lookup(&held).map_or(false, |l| !l.fields.is_empty()) {
+                    return Err(syn::Error::new_spanned(field, format!(
+                        "field `{}`: unrecognized container `{}` holds model type `{}` -- \
+                         containers are recognized by literal name (Vec, Deque, Arena, \
+                         Option, Ref), aliases are invisible to the macro; spell the \
+                         container literally, or mark the field `#[arael(skip)]` if it \
+                         is deliberately outside the model",
+                        field_name, wrapper, held)));
+                }
+                suspect_wrappers_reg.push((field_name.clone(), wrapper, held));
             }
         }
         // Detect euler angle param types by type name (in addition to attribute)
@@ -1322,6 +1379,7 @@ fn register_model_layout(input: &syn::DeriveInput) -> syn::Result<u32> {
         component: is_component,
         constraint_index_field: constraint_index_field_reg,
         self_block_field: self_block_field_reg,
+        suspect_wrappers: suspect_wrappers_reg,
     }).map_err(|msg| syn::Error::new_spanned(name, msg))?;
 
     Ok(param_count)
@@ -1347,6 +1405,7 @@ fn register_enum_layout(name: &syn::Ident) -> syn::Result<()> {
         component: false,
         constraint_index_field: None,
         self_block_field: None,
+        suspect_wrappers: Vec::new(),
     }).map_err(|msg| syn::Error::new_spanned(name, msg))
 }
 
@@ -2424,6 +2483,85 @@ fn is_sym_skip_type(ty: &syn::Type) -> bool {
             return matches!(name.as_str(), "Vec" | "Deque" | "Arena");
         }
     false
+}
+
+/// Names that can never be a registered model type -- filtered out of
+/// suspect-wrapper recording so `Vec<Pose<f32>>` seen before `Pose`'s own
+/// expansion records no noise.
+fn is_never_model_name(name: &str) -> bool {
+    matches!(name,
+        "f32" | "f64" | "bool" | "u8" | "u16" | "u32" | "u64" | "usize"
+        | "i8" | "i16" | "i32" | "i64" | "isize" | "char" | "String" | "str"
+        | "vect2f" | "vect2d" | "vect2" | "vect3f" | "vect3d" | "vect3"
+        | "matrix2f" | "matrix2d" | "matrix2" | "matrix3f" | "matrix3d" | "matrix3"
+        | "quaternf" | "quaternd" | "quatern")
+}
+
+/// Last-segment idents of every type mentioned in `ty`'s subtree, minus
+/// scalar/math names and the owning struct's scalar generic.
+fn collect_type_idents(ty: &syn::Type, scalar_generic: Option<&str>, out: &mut Vec<String>) {
+    match ty {
+        syn::Type::Path(tp) => {
+            if let Some(seg) = tp.path.segments.last() {
+                let name = seg.ident.to_string();
+                if Some(name.as_str()) != scalar_generic && !is_never_model_name(&name) {
+                    out.push(name);
+                }
+                if let syn::PathArguments::AngleBracketed(args) = &seg.arguments {
+                    for a in &args.args {
+                        if let syn::GenericArgument::Type(t) = a {
+                            collect_type_idents(t, scalar_generic, out);
+                        }
+                    }
+                }
+            }
+        }
+        syn::Type::Reference(r) => collect_type_idents(&r.elem, scalar_generic, out),
+        syn::Type::Tuple(t) => {
+            for e in &t.elems { collect_type_idents(e, scalar_generic, out); }
+        }
+        _ => {}
+    }
+}
+
+/// (wrapper, held) pairs where `held` sits inside a generic wrapper the
+/// macro does not recognize. Containers are dispatched by literal
+/// last-segment name, so `use refs::Vec as RVec` + `pts: RVec<P>` reads
+/// as an opaque data field: `P` silently stops being containment there.
+/// Recognized containers are recursed into (`Vec<RVec<P>>` still flags);
+/// block/param wrappers stop -- their model-type argument is legitimate.
+fn collect_wrapper_suspects(
+    ty: &syn::Type,
+    scalar_generic: Option<&str>,
+    out: &mut Vec<(String, String)>,
+) {
+    let syn::Type::Path(tp) = ty else { return };
+    let Some(seg) = tp.path.segments.last() else { return };
+    let syn::PathArguments::AngleBracketed(args) = &seg.arguments else { return };
+    let type_args: Vec<&syn::Type> = args.args.iter().filter_map(|a| match a {
+        syn::GenericArgument::Type(t) => Some(t),
+        _ => None,
+    }).collect();
+    if type_args.is_empty() { return; }
+    let name = seg.ident.to_string();
+    match name.as_str() {
+        "Vec" | "Deque" | "Arena" | "Option" | "Ref" => {
+            for t in type_args { collect_wrapper_suspects(t, scalar_generic, out); }
+        }
+        "SelfBlock" | "CrossBlock" | "TripletBlock" | "BoxedSelfBlock" | "BoxedCrossBlock"
+        | "Param" | "SimpleEulerAngleParam" | "EulerAngleParam" | "QuaternionParam"
+        | "PhantomData" => {}
+        _ => {
+            // A registered model type's own generics are its scalar
+            // parameter (`Pose<f32>`), not containment.
+            if Some(name.as_str()) == scalar_generic || registry_lookup(&name).is_some() {
+                return;
+            }
+            let mut held = Vec::new();
+            for t in type_args { collect_type_idents(t, scalar_generic, &mut held); }
+            for h in held { out.push((name.clone(), h)); }
+        }
+    }
 }
 
 /// Extract the inner type T from a generic wrapper like Ref<T> or Option<T>.

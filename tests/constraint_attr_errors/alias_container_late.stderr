@@ -1,0 +1,30 @@
+error: `P` is a model type, but field `ps` of `Holder` holds it inside unrecognized container `RVec` -- containers are recognized by literal name (Vec, Deque, Arena, Option, Ref), aliases are invisible to the macro; spell the container literally, or mark that field `#[arael(skip)]` if it is deliberately outside the model
+  --> tests/constraint_attr_errors/alias_container_late.rs:17:8
+   |
+17 | struct P {
+   |        ^
+
+error[E0425]: cannot find type `P` in this scope
+  --> tests/constraint_attr_errors/alias_container_late.rs:10:14
+   |
+10 |     ps: RVec<P>,
+   |              ^ not found in this scope
+   |
+help: you might be missing a type parameter
+   |
+ 9 | struct Holder<P> {
+   |              +++
+
+error[E0425]: cannot find type `P` in this scope
+  --> tests/constraint_attr_errors/alias_container_late.rs:10:14
+   |
+10 |     ps: RVec<P>,
+   |              ^ not found in this scope
+
+warning: unused imports: `Param` and `SelfBlock`
+ --> tests/constraint_attr_errors/alias_container_late.rs:5:20
+  |
+5 | use arael::model::{Param, SelfBlock};
+  |                    ^^^^^  ^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

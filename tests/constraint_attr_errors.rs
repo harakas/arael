@@ -30,4 +30,6 @@ fn constraint_attr_compile_errors() {
     t.compile_fail("tests/constraint_attr_errors/cyclic_containment_ref.rs");
     t.compile_fail("tests/constraint_attr_errors/parent_selfblock_entity_params.rs");
     t.compile_fail("tests/constraint_attr_errors/parent_selfblock_root_parent.rs");
+    t.compile_fail("tests/constraint_attr_errors/alias_container.rs");
+    t.compile_fail("tests/constraint_attr_errors/alias_container_late.rs");
 }

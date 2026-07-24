@@ -334,6 +334,17 @@ A cross/triplet constraint struct as a PLAIN direct field is rejected
 at compile time (hold it in a collection or an Option), as is the same
 entity type held in more than one location.
 
+Containers are recognized by their literal type name (`Vec`, `Deque`,
+`Arena`, `Option`, `Ref`), so they must be spelled out with the element
+type visible. An aliased container (`use refs::Vec as RVec` +
+`pts: RVec<P>`) would read as an opaque data field and silently drop
+`P`'s containment; the macro rejects any unrecognized generic wrapper
+holding a model type, in either definition order. To hold model-typed
+data deliberately outside the model (a stash, an undo buffer), mark the
+field `#[arael(skip)]`. A non-generic alias (`type Poses =
+refs::Vec<Pose>` + `poses: Poses`) hides the element type completely and
+cannot be detected -- do not alias container types.
+
 Composition nests to any depth: a root may hold `Vec<Path>` where each
 `Path` is a Model with its own collections of entities and constraints.
 The macro recurses serialize / accumulate / index-wiring through the

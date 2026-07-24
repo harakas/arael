@@ -1,0 +1,13 @@
+error: field `ps`: unrecognized container `RVec` holds model type `P` -- containers are recognized by literal name (Vec, Deque, Arena, Option, Ref), aliases are invisible to the macro; spell the container literally, or mark the field `#[arael(skip)]` if it is deliberately outside the model
+  --> tests/constraint_attr_errors/alias_container.rs:22:5
+   |
+22 |     ps: RVec<P>,
+   |     ^^^^^^^^^^^
+
+warning: unused import: `arael::refs::Vec as RVec`
+ --> tests/constraint_attr_errors/alias_container.rs:7:5
+  |
+7 | use arael::refs::Vec as RVec;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

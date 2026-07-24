@@ -1096,3 +1096,32 @@ fn frines_under_an_option_intermediate() {
     let mut w = AOptFrines { nodes, maybe: None };
     check_model("frines under Option None", &mut w, base);
 }
+
+// ---------------------------------------------------------------------------
+// #[arael(skip)] on an aliased container: containers are recognized by
+// literal type name, so `AliasVec<P>` is not containment -- without the
+// skip the expansion rejects it (see constraint_attr_errors). The skip
+// documents a deliberate out-of-model holding; the field must stay
+// completely inert: not serialized, never swept.
+
+use arael::refs::Vec as AliasVec;
+
+#[arael::model]
+#[arael(root)]
+struct AAliasSkip {
+    items: refs::Vec<P>,
+    #[arael(skip)]
+    stash: AliasVec<P>,
+}
+
+#[test]
+fn skipped_alias_container_is_inert() {
+    let mut items = refs::Vec::new();
+    let mut stash = AliasVec::new();
+    for &(x, y, t) in &PDATA {
+        items.push(p(x, y, t));
+        stash.push(p(x + 10.0, y - 3.0, t));
+    }
+    let mut w = AAliasSkip { items, stash };
+    check_model("skipped alias container", &mut w, pdata_cost());
+}
