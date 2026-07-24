@@ -6403,6 +6403,9 @@ struct AccessSegment {
     /// true = Vec/Deque/Arena (the emitter iterates it); false = a plain
     /// struct-typed field (single instance).
     collection: bool,
+    /// true = Option<T>: iterated like a zero-or-one collection, so a
+    /// None along the path contributes nothing.
+    optional: bool,
 }
 
 /// EVERY containment path from the root to `target`, shallowest first:
@@ -6423,6 +6426,7 @@ fn containment_paths(
         .map(|(field, kind)| vec![AccessSegment {
             field,
             collection: kind == ContainKind::Collection,
+            optional: kind == ContainKind::Optional,
         }])
         .collect();
     fn walk(
@@ -6438,13 +6442,13 @@ fn containment_paths(
         for (fname, sft) in &layout.fields {
             // Ref<T> fields point at an entity, they do not CONTAIN it.
             if layout.ref_paths.iter().any(|(rf, _)| rf == fname) { continue; }
-            let (child, collection) = match sft {
+            let (child, collection, optional) = match sft {
                 SymFieldType::Struct(c) =>
-                    (c.clone(), layout.collection_fields.iter().any(|f| f == fname)),
-                SymFieldType::OptionalStruct(c) => (c.clone(), false),
+                    (c.clone(), layout.collection_fields.iter().any(|f| f == fname), false),
+                SymFieldType::OptionalStruct(c) => (c.clone(), false, true),
                 _ => continue,
             };
-            path.push(AccessSegment { field: fname.clone(), collection });
+            path.push(AccessSegment { field: fname.clone(), collection, optional });
             // Depth-1 hits already came from the syntax walk above.
             if child == target && path.len() >= 2 {
                 out.push(path.clone());
@@ -6484,13 +6488,13 @@ fn resolve_nested_path(root_name: &str, target: &str) -> Option<Vec<AccessSegmen
         for (fname, sft) in &layout.fields {
             // Ref<T> fields point at an entity, they do not CONTAIN it.
             if layout.ref_paths.iter().any(|(rf, _)| rf == fname) { continue; }
-            let (child, collection) = match sft {
+            let (child, collection, optional) = match sft {
                 SymFieldType::Struct(c) =>
-                    (c.clone(), layout.collection_fields.iter().any(|f| f == fname)),
-                SymFieldType::OptionalStruct(c) => (c.clone(), false),
+                    (c.clone(), layout.collection_fields.iter().any(|f| f == fname), false),
+                SymFieldType::OptionalStruct(c) => (c.clone(), false, true),
                 _ => continue, // Scalar/Vec2/.../Skip: not a struct edge
             };
-            path.push(AccessSegment { field: fname.clone(), collection });
+            path.push(AccessSegment { field: fname.clone(), collection, optional });
             if child == target {
                 return Some(path.clone());
             }
@@ -6538,7 +6542,11 @@ fn wrap_in_prefix(prefix: &[AccessSegment], mutable: bool, inner: TokenStream2) 
             let pv = syn::Ident::new(&format!("__seg{}", i - 1), proc_macro2::Span::call_site());
             quote! { #pv }
         };
-        code = if seg.collection {
+        code = if seg.collection || seg.optional {
+            // An Option segment iterates as a zero-or-one collection: a
+            // None along the path contributes nothing, and the binding
+            // inside the loop is the CONTAINED struct, so later hops and
+            // the inner sweep are container-agnostic.
             if mutable { quote! { for #bind in #parent.#field.iter_mut() { #code } } }
             else       { quote! { for #bind in #parent.#field.iter()     { #code } } }
         } else if mutable {
@@ -6703,7 +6711,7 @@ mod nested_path_tests {
     }
 
     fn coll(field: &str) -> AccessSegment {
-        AccessSegment { field: field.to_string(), collection: true }
+        AccessSegment { field: field.to_string(), collection: true, optional: false }
     }
 
     #[test]

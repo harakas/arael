@@ -1006,3 +1006,93 @@ fn same_entity_at_root_level_and_nested() {
         + p_cost(PDATA[1].0, PDATA[1].1, PDATA[1].2);
     check_model("root + nested mix", &mut w, manual);
 }
+
+// Containment paths crossing an Option EDGE: a collection under an
+// Option intermediate, and an Option entity as the nested last
+// segment. Option segments iterate as zero-or-one collections, so a
+// None along the path contributes nothing.
+
+#[arael::model]
+struct OptSub {
+    items: std::vec::Vec<P>,
+}
+
+#[arael::model]
+#[arael(root)]
+struct AOptIntermediate {
+    maybe: Option<OptSub>,
+}
+
+#[test]
+fn collection_under_an_option_intermediate() {
+    let mut w = AOptIntermediate {
+        maybe: Some(OptSub { items: vec![
+            p(PDATA[0].0, PDATA[0].1, PDATA[0].2),
+            p(PDATA[1].0, PDATA[1].1, PDATA[1].2),
+        ]}),
+    };
+    let manual = p_cost(PDATA[0].0, PDATA[0].1, PDATA[0].2)
+        + p_cost(PDATA[1].0, PDATA[1].1, PDATA[1].2);
+    check_model("Option intermediate Some", &mut w, manual);
+
+    let mut w = AOptIntermediate { maybe: None };
+    let mut x = Vec::new();
+    RootProblem::serialize(&mut w, &mut x);
+    assert_eq!(x.len(), 0, "None path: nothing serialized, nothing swept");
+}
+
+#[arael::model]
+struct OptHolder {
+    maybe_p: Option<P>,
+}
+
+#[arael::model]
+#[arael(root)]
+struct ANestedOption {
+    groups: std::vec::Vec<OptHolder>,
+}
+
+#[test]
+fn option_entity_as_nested_last_segment() {
+    let mut w = ANestedOption {
+        groups: vec![
+            OptHolder { maybe_p: Some(p(PDATA[0].0, PDATA[0].1, PDATA[0].2)) },
+            OptHolder { maybe_p: None },
+            OptHolder { maybe_p: Some(p(PDATA[1].0, PDATA[1].1, PDATA[1].2)) },
+        ],
+    };
+    let manual = p_cost(PDATA[0].0, PDATA[0].1, PDATA[0].2)
+        + p_cost(PDATA[1].0, PDATA[1].1, PDATA[1].2);
+    check_model("nested Option entity", &mut w, manual);
+}
+
+#[arael::model]
+struct TieBundle {
+    ties: std::vec::Vec<Lc>,
+}
+
+#[arael::model]
+#[arael(root)]
+struct AOptFrines {
+    nodes: refs::Vec<N>,
+    maybe: Option<TieBundle>,
+}
+
+#[test]
+fn frines_under_an_option_intermediate() {
+    let mut nodes = refs::Vec::new();
+    let r0 = nodes.push(n(0.1, 0.0));
+    let r1 = nodes.push(n(1.3, 1.0));
+    let base = n_cost(0.1, 0.0) + n_cost(1.3, 1.0);
+
+    let mut w = AOptFrines { nodes,
+        maybe: Some(TieBundle { ties: vec![Lc { a: r0, b: r1, d: 1.0, hb: CrossBlock::new() }] }) };
+    check_model("frines under Option Some", &mut w,
+        base + ((1.3f64 - 0.1 - 1.0) * 1.5).powi(2));
+
+    let mut nodes = refs::Vec::new();
+    nodes.push(n(0.1, 0.0));
+    nodes.push(n(1.3, 1.0));
+    let mut w = AOptFrines { nodes, maybe: None };
+    check_model("frines under Option None", &mut w, base);
+}
