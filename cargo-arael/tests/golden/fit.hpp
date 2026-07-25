@@ -6,88 +6,41 @@
 #include <cmath>
 #include "arael/math.hpp"
 #include "arael/result.hpp"
+#include "arael/solver.hpp"
 
 namespace arael {
 
-/// Why a solve stopped. Non-negative codes come from the solver;
-/// SolverFailed carries text via last_error(), Panicked likewise.
-enum class LmStatus : int32_t {
-    Converged = 0,
-    CostThreshold = 1,
-    MaxIterations = 2,
-    GradientTolerance = 3,
-    ParameterTolerance = 4,
-    PredictedReduction = 5,
-    LambdaCeiling = 6,
-    DriverTerminated = 7,
-    ObserverTerminated = 8,
-    TimeLimit = 9,
-    RetryBudgetExhausted = 10,
-    Aborted = 11,
-    SolverFailed = -1,
-    Panicked = -2,
+/// Instantiations of the shared solver surface (arael/solver.hpp) at
+/// this model's precision, plus the config constructor that fetches
+/// the preset's actual Rust values through this root's FFI.
+using LmResult = LmResultT<double>;
+using SolveResult = SolveResultT<double>;
+
+struct LmConfig : LmConfigT<double> {
+    LmConfig(LmPreset p = LmPreset::Defaults);
+    static LmConfig defaults() { return LmConfig(LmPreset::Defaults); }
+    static LmConfig conservative() { return LmConfig(LmPreset::Conservative); }
+    static LmConfig well_conditioned() { return LmConfig(LmPreset::WellConditioned); }
 };
 
-/// Sentinel-based: fields left at UINT32_MAX / NaN keep the preset's
-/// value (preset 0 = solver defaults, 1 = conservative,
-/// 2 = well_conditioned).
-struct LmConfig {
-    uint32_t preset = 0;
-    uint32_t max_iters = UINT32_MAX;
-    uint32_t min_iters = UINT32_MAX;
-    uint32_t patience = UINT32_MAX;
-    double abs_precision = NAN;
-    double rel_precision = NAN;
-    double initial_lambda = NAN;
-    double cost_threshold = NAN;
-
-    static LmConfig defaults() { return LmConfig{}; }
-    static LmConfig conservative() { LmConfig c; c.preset = 1; return c; }
-    static LmConfig well_conditioned() { LmConfig c; c.preset = 2; return c; }
-};
-
-struct LmResult {
-    double start_cost;
-    double end_cost;
-    uint32_t iterations;
-    uint32_t accepted_iterations;
-    LmStatus status;
-    double lambda;
-};
-
-/// The Err side of a solve: SolverFailed or Panicked, with the text
-/// from last_error() (valid until the next call on the model).
-struct SolveError {
-    LmStatus status;
-    const char* message;
-};
-
-using SolveResult = result<LmResult, SolveError>;
-
-/// How much covariance to prepare (mirrors arael's CovMode).
-enum class CovMode : uint32_t {
-    PerQuery = 0,
-    AllMarginals = 1,
-    TriDiagonal = 2,
-};
-
-/// A failed covariance operation; message points at last_error().
-struct CovError {
-    const char* message;
-};
-
-/// Typed handle into the collection that issued it.
-struct Ref_GpsObs { uint32_t raw; };
-/// Typed handle into the collection that issued it.
-struct Ref_Info { uint32_t raw; };
-/// Typed handle into the collection that issued it.
-struct Ref_N { uint32_t raw; };
-/// Typed handle into the collection that issued it.
-struct Ref_Obs { uint32_t raw; };
-/// Typed handle into the collection that issued it.
-struct Ref_Pose { uint32_t raw; };
-/// Typed handle into the collection that issued it.
-struct Ref_Tie { uint32_t raw; };
+/// Typed handle into the collection that issued it -- the C++
+/// spelling of Rust's `Ref<GpsObs>`.
+struct GpsObsRef { uint32_t raw; };
+/// Typed handle into the collection that issued it -- the C++
+/// spelling of Rust's `Ref<Info>`.
+struct InfoRef { uint32_t raw; };
+/// Typed handle into the collection that issued it -- the C++
+/// spelling of Rust's `Ref<N>`.
+struct NRef { uint32_t raw; };
+/// Typed handle into the collection that issued it -- the C++
+/// spelling of Rust's `Ref<Obs>`.
+struct ObsRef { uint32_t raw; };
+/// Typed handle into the collection that issued it -- the C++
+/// spelling of Rust's `Ref<Pose>`.
+struct PoseRef { uint32_t raw; };
+/// Typed handle into the collection that issued it -- the C++
+/// spelling of Rust's `Ref<Tie>`.
+struct TieRef { uint32_t raw; };
 
 namespace ffi {
 struct Fit;
@@ -99,48 +52,48 @@ struct Pose;
 struct Tie;
 
 extern "C" {
-vect3d gps_obs_pos(const GpsObs*);
-void gps_obs_set_pos(GpsObs*, vect3d);
-float gps_obs_isigma(const GpsObs*);
-void gps_obs_set_isigma(GpsObs*, float);
-bool info_has_gps(const Info*);
-GpsObs* info_make_gps(Info*);
-void info_clear_gps(Info*);
-GpsObs* info_gps(Info*);
-double n_v(const N*);
-void n_set_v(N*, double);
-bool n_v_optimize(const N*);
-void n_v_set_optimize(N*, bool);
-double n_t(const N*);
-void n_set_t(N*, double);
-double n_w(const N*);
-void n_set_w(N*, double);
-double obs_x(const Obs*);
-void obs_set_x(Obs*, double);
-double obs_y(const Obs*);
-void obs_set_y(Obs*, double);
-vect3d pose_ea(const Pose*);
-void pose_set_ea(Pose*, vect3d);
-bool pose_ea_optimize(const Pose*);
-void pose_ea_set_optimize(Pose*, bool);
-vect3d pose_pos(const Pose*);
-void pose_set_pos(Pose*, vect3d);
-bool pose_pos_optimize(const Pose*);
-void pose_pos_set_optimize(Pose*, bool);
-vect3d pose_target(const Pose*);
-void pose_set_target(Pose*, vect3d);
-Info* pose_info_ptr(Pose*);
-uint32_t tie_a(const Tie*);
-void tie_set_a(Tie*, uint32_t);
-uint32_t tie_b(const Tie*);
-void tie_set_b(Tie*, uint32_t);
-vect3d tie_d(const Tie*);
-void tie_set_d(Tie*, vect3d);
-double tie_w(const Tie*);
-void tie_set_w(Tie*, double);
+vect3d fit_gps_obs_pos(const GpsObs*);
+void fit_gps_obs_set_pos(GpsObs*, vect3d);
+float fit_gps_obs_isigma(const GpsObs*);
+void fit_gps_obs_set_isigma(GpsObs*, float);
+bool fit_info_has_gps(const Info*);
+GpsObs* fit_info_make_gps(Info*);
+void fit_info_clear_gps(Info*);
+GpsObs* fit_info_gps(Info*);
+double fit_n_v(const N*);
+void fit_n_set_v(N*, double);
+bool fit_n_v_optimize(const N*);
+void fit_n_v_set_optimize(N*, bool);
+double fit_n_t(const N*);
+void fit_n_set_t(N*, double);
+double fit_n_w(const N*);
+void fit_n_set_w(N*, double);
+double fit_obs_x(const Obs*);
+void fit_obs_set_x(Obs*, double);
+double fit_obs_y(const Obs*);
+void fit_obs_set_y(Obs*, double);
+vect3d fit_pose_ea(const Pose*);
+void fit_pose_set_ea(Pose*, vect3d);
+bool fit_pose_ea_optimize(const Pose*);
+void fit_pose_ea_set_optimize(Pose*, bool);
+vect3d fit_pose_pos(const Pose*);
+void fit_pose_set_pos(Pose*, vect3d);
+bool fit_pose_pos_optimize(const Pose*);
+void fit_pose_pos_set_optimize(Pose*, bool);
+vect3d fit_pose_target(const Pose*);
+void fit_pose_set_target(Pose*, vect3d);
+Info* fit_pose_info_ptr(Pose*);
+uint32_t fit_tie_a(const Tie*);
+void fit_tie_set_a(Tie*, uint32_t);
+uint32_t fit_tie_b(const Tie*);
+void fit_tie_set_b(Tie*, uint32_t);
+vect3d fit_tie_d(const Tie*);
+void fit_tie_set_d(Tie*, vect3d);
+double fit_tie_w(const Tie*);
+void fit_tie_set_w(Tie*, double);
 int32_t fit_assemble_covariance(Fit*, uint32_t);
-int32_t n_marginal_cov(Fit*, const N*, double*, uint32_t);
-int32_t pose_marginal_cov(Fit*, const Pose*, double*, uint32_t);
+int32_t fit_n_marginal_cov(Fit*, const N*, double*, uint32_t);
+int32_t fit_pose_marginal_cov(Fit*, const Pose*, double*, uint32_t);
 double fit_m(const Fit*);
 void fit_set_m(Fit*, double);
 bool fit_m_optimize(const Fit*);
@@ -172,6 +125,7 @@ uint32_t fit_marks_len(const Fit*);
 uint32_t fit_marks_push(Fit*);
 bool fit_marks_remove(Fit*, uint32_t);
 N* fit_marks_get(Fit*, uint32_t);
+void fit_lm_config(uint32_t, LmConfig*);
 Fit* fit_new(void);
 void fit_free(Fit*);
 const char* fit_last_error(const Fit*);
@@ -181,123 +135,133 @@ int32_t fit_solve_sparse(Fit*, const LmConfig*, LmResult*);
 }
 } // namespace ffi
 
-/// A `GpsObs` in its owner's storage; thin pointer wrapper.
-class GpsObsRef {
+inline LmConfig::LmConfig(LmPreset p) {
+    ffi::fit_lm_config(uint32_t(p), this);
+}
+
+/// A `GpsObs` in its owner's storage; a thin pointer wrapper (validity
+/// follows the storage -- see the owning container).
+class GpsObs {
 public:
-    GpsObsRef() : h_(nullptr) {}
-    explicit GpsObsRef(ffi::GpsObs* p) : h_(p) {}
+    GpsObs() : h_(nullptr) {}
+    explicit GpsObs(ffi::GpsObs* p) : h_(p) {}
     /// False when default-constructed (e.g. inside an empty option).
     bool valid() const { return h_ != nullptr; }
-    /// The underlying C pointer (covariance queries take it).
+    /// The underlying C pointer -- the relaxed escape hatch.
     ffi::GpsObs* raw() const { return h_; }
-    vect3d pos() const { return ffi::gps_obs_pos(h_); }
-    void set_pos(vect3d v) { ffi::gps_obs_set_pos(h_, v); }
-    float isigma() const { return ffi::gps_obs_isigma(h_); }
-    void set_isigma(float v) { ffi::gps_obs_set_isigma(h_, v); }
+    vect3d pos() const { return ffi::fit_gps_obs_pos(h_); }
+    void set_pos(vect3d v) { ffi::fit_gps_obs_set_pos(h_, v); }
+    float isigma() const { return ffi::fit_gps_obs_isigma(h_); }
+    void set_isigma(float v) { ffi::fit_gps_obs_set_isigma(h_, v); }
 private:
     ffi::GpsObs* h_;
 };
 
-/// A `Info` in its owner's storage; thin pointer wrapper.
-class InfoRef {
+/// A `Info` in its owner's storage; a thin pointer wrapper (validity
+/// follows the storage -- see the owning container).
+class Info {
 public:
-    InfoRef() : h_(nullptr) {}
-    explicit InfoRef(ffi::Info* p) : h_(p) {}
+    Info() : h_(nullptr) {}
+    explicit Info(ffi::Info* p) : h_(p) {}
     /// False when default-constructed (e.g. inside an empty option).
     bool valid() const { return h_ != nullptr; }
-    /// The underlying C pointer (covariance queries take it).
+    /// The underlying C pointer -- the relaxed escape hatch.
     ffi::Info* raw() const { return h_; }
-    bool has_gps() const { return ffi::info_has_gps(h_); }
-    GpsObsRef make_gps() { return GpsObsRef(ffi::info_make_gps(h_)); }
-    void clear_gps() { ffi::info_clear_gps(h_); }
-    option<GpsObsRef> gps() {
-        ffi::GpsObs* p = ffi::info_gps(h_);
-        return p ? option<GpsObsRef>(GpsObsRef(p)) : option<GpsObsRef>();
+    bool has_gps() const { return ffi::fit_info_has_gps(h_); }
+    GpsObs make_gps() { return GpsObs(ffi::fit_info_make_gps(h_)); }
+    void clear_gps() { ffi::fit_info_clear_gps(h_); }
+    option<GpsObs> gps() {
+        ffi::GpsObs* p = ffi::fit_info_gps(h_);
+        return p ? option<GpsObs>(GpsObs(p)) : option<GpsObs>();
     }
     // field `note`: String -- opaque, no accessor generated
 private:
     ffi::Info* h_;
 };
 
-/// A `N` in its owner's storage; thin pointer wrapper.
-class NRef {
+/// A `N` in its owner's storage; a thin pointer wrapper (validity
+/// follows the storage -- see the owning container).
+class N {
 public:
-    NRef() : h_(nullptr) {}
-    explicit NRef(ffi::N* p) : h_(p) {}
+    N() : h_(nullptr) {}
+    explicit N(ffi::N* p) : h_(p) {}
     /// False when default-constructed (e.g. inside an empty option).
     bool valid() const { return h_ != nullptr; }
-    /// The underlying C pointer (covariance queries take it).
+    /// The underlying C pointer -- the relaxed escape hatch.
     ffi::N* raw() const { return h_; }
-    double v() const { return ffi::n_v(h_); }
-    void set_v(double v) { ffi::n_set_v(h_, v); }
-    bool v_optimize() const { return ffi::n_v_optimize(h_); }
-    void set_v_optimize(bool v) { ffi::n_v_set_optimize(h_, v); }
-    double t() const { return ffi::n_t(h_); }
-    void set_t(double v) { ffi::n_set_t(h_, v); }
-    double w() const { return ffi::n_w(h_); }
-    void set_w(double v) { ffi::n_set_w(h_, v); }
+    double v() const { return ffi::fit_n_v(h_); }
+    void set_v(double v) { ffi::fit_n_set_v(h_, v); }
+    bool v_optimize() const { return ffi::fit_n_v_optimize(h_); }
+    void set_v_optimize(bool v) { ffi::fit_n_v_set_optimize(h_, v); }
+    double t() const { return ffi::fit_n_t(h_); }
+    void set_t(double v) { ffi::fit_n_set_t(h_, v); }
+    double w() const { return ffi::fit_n_w(h_); }
+    void set_w(double v) { ffi::fit_n_set_w(h_, v); }
 private:
     ffi::N* h_;
 };
 
-/// A `Obs` in its owner's storage; thin pointer wrapper.
-class ObsRef {
+/// A `Obs` in its owner's storage; a thin pointer wrapper (validity
+/// follows the storage -- see the owning container).
+class Obs {
 public:
-    ObsRef() : h_(nullptr) {}
-    explicit ObsRef(ffi::Obs* p) : h_(p) {}
+    Obs() : h_(nullptr) {}
+    explicit Obs(ffi::Obs* p) : h_(p) {}
     /// False when default-constructed (e.g. inside an empty option).
     bool valid() const { return h_ != nullptr; }
-    /// The underlying C pointer (covariance queries take it).
+    /// The underlying C pointer -- the relaxed escape hatch.
     ffi::Obs* raw() const { return h_; }
-    double x() const { return ffi::obs_x(h_); }
-    void set_x(double v) { ffi::obs_set_x(h_, v); }
-    double y() const { return ffi::obs_y(h_); }
-    void set_y(double v) { ffi::obs_set_y(h_, v); }
+    double x() const { return ffi::fit_obs_x(h_); }
+    void set_x(double v) { ffi::fit_obs_set_x(h_, v); }
+    double y() const { return ffi::fit_obs_y(h_); }
+    void set_y(double v) { ffi::fit_obs_set_y(h_, v); }
 private:
     ffi::Obs* h_;
 };
 
-/// A `Pose` in its owner's storage; thin pointer wrapper.
-class PoseRef {
+/// A `Pose` in its owner's storage; a thin pointer wrapper (validity
+/// follows the storage -- see the owning container).
+class Pose {
 public:
-    PoseRef() : h_(nullptr) {}
-    explicit PoseRef(ffi::Pose* p) : h_(p) {}
+    Pose() : h_(nullptr) {}
+    explicit Pose(ffi::Pose* p) : h_(p) {}
     /// False when default-constructed (e.g. inside an empty option).
     bool valid() const { return h_ != nullptr; }
-    /// The underlying C pointer (covariance queries take it).
+    /// The underlying C pointer -- the relaxed escape hatch.
     ffi::Pose* raw() const { return h_; }
-    vect3d ea() const { return ffi::pose_ea(h_); }
-    void set_ea(vect3d v) { ffi::pose_set_ea(h_, v); }
-    bool ea_optimize() const { return ffi::pose_ea_optimize(h_); }
-    void set_ea_optimize(bool v) { ffi::pose_ea_set_optimize(h_, v); }
-    vect3d pos() const { return ffi::pose_pos(h_); }
-    void set_pos(vect3d v) { ffi::pose_set_pos(h_, v); }
-    bool pos_optimize() const { return ffi::pose_pos_optimize(h_); }
-    void set_pos_optimize(bool v) { ffi::pose_pos_set_optimize(h_, v); }
-    vect3d target() const { return ffi::pose_target(h_); }
-    void set_target(vect3d v) { ffi::pose_set_target(h_, v); }
-    InfoRef info() { return InfoRef(ffi::pose_info_ptr(h_)); }
+    vect3d ea() const { return ffi::fit_pose_ea(h_); }
+    void set_ea(vect3d v) { ffi::fit_pose_set_ea(h_, v); }
+    bool ea_optimize() const { return ffi::fit_pose_ea_optimize(h_); }
+    void set_ea_optimize(bool v) { ffi::fit_pose_ea_set_optimize(h_, v); }
+    vect3d pos() const { return ffi::fit_pose_pos(h_); }
+    void set_pos(vect3d v) { ffi::fit_pose_set_pos(h_, v); }
+    bool pos_optimize() const { return ffi::fit_pose_pos_optimize(h_); }
+    void set_pos_optimize(bool v) { ffi::fit_pose_pos_set_optimize(h_, v); }
+    vect3d target() const { return ffi::fit_pose_target(h_); }
+    void set_target(vect3d v) { ffi::fit_pose_set_target(h_, v); }
+    Info info() { return Info(ffi::fit_pose_info_ptr(h_)); }
 private:
     ffi::Pose* h_;
 };
 
-/// A `Tie` in its owner's storage; thin pointer wrapper.
-class TieRef {
+/// A `Tie` in its owner's storage; a thin pointer wrapper (validity
+/// follows the storage -- see the owning container).
+class Tie {
 public:
-    TieRef() : h_(nullptr) {}
-    explicit TieRef(ffi::Tie* p) : h_(p) {}
+    Tie() : h_(nullptr) {}
+    explicit Tie(ffi::Tie* p) : h_(p) {}
     /// False when default-constructed (e.g. inside an empty option).
     bool valid() const { return h_ != nullptr; }
-    /// The underlying C pointer (covariance queries take it).
+    /// The underlying C pointer -- the relaxed escape hatch.
     ffi::Tie* raw() const { return h_; }
-    Ref_Pose a() const { return Ref_Pose{ffi::tie_a(h_)}; }
-    void set_a(Ref_Pose r) { ffi::tie_set_a(h_, r.raw); }
-    Ref_Pose b() const { return Ref_Pose{ffi::tie_b(h_)}; }
-    void set_b(Ref_Pose r) { ffi::tie_set_b(h_, r.raw); }
-    vect3d d() const { return ffi::tie_d(h_); }
-    void set_d(vect3d v) { ffi::tie_set_d(h_, v); }
-    double w() const { return ffi::tie_w(h_); }
-    void set_w(double v) { ffi::tie_set_w(h_, v); }
+    PoseRef a() const { return PoseRef{ffi::fit_tie_a(h_)}; }
+    void set_a(PoseRef r) { ffi::fit_tie_set_a(h_, r.raw); }
+    PoseRef b() const { return PoseRef{ffi::fit_tie_b(h_)}; }
+    void set_b(PoseRef r) { ffi::fit_tie_set_b(h_, r.raw); }
+    vect3d d() const { return ffi::fit_tie_d(h_); }
+    void set_d(vect3d v) { ffi::fit_tie_set_d(h_, v); }
+    double w() const { return ffi::fit_tie_w(h_); }
+    void set_w(double v) { ffi::fit_tie_set_w(h_, v); }
 private:
     ffi::Tie* h_;
 };
@@ -309,14 +273,14 @@ class Covariance {
 public:
     Covariance() : h_(nullptr) {}
     explicit Covariance(ffi::Fit* h) : h_(h) {}
-    result<double, CovError> marginal(const NRef& e) {
+    result<double, CovError> marginal(const N& e) {
         double b[1];
-        if (ffi::n_marginal_cov(h_, e.raw(), b, 1) < 0) return fail<double>();
+        if (ffi::fit_n_marginal_cov(h_, e.raw(), b, 1) < 0) return fail<double>();
         return result<double, CovError>::ok(b[0]);
     }
     /// Row-major dim x dim into out; returns dim or a negative code.
-    int32_t marginal(const PoseRef& e, double* out, uint32_t cap) {
-        return ffi::pose_marginal_cov(h_, e.raw(), out, cap);
+    int32_t marginal(const Pose& e, double* out, uint32_t cap) {
+        return ffi::fit_pose_marginal_cov(h_, e.raw(), out, cap);
     }
 private:
     template<class T> result<T, CovError> fail() {
@@ -326,62 +290,62 @@ private:
 };
 
 /// `Fit.obs`. std::vec::Vec storage: pushes may MOVE elements -- re-fetch element refs after a push.
-class FitObsView {
+class FitObsVec {
 public:
-    explicit FitObsView(ffi::Fit* h) : h_(h) {}
+    explicit FitObsVec(ffi::Fit* h) : h_(h) {}
     uint32_t size() const { return ffi::fit_obs_len(h_); }
-    ObsRef push() { return ObsRef(ffi::fit_obs_push(h_)); }
-    ObsRef operator[](uint32_t i) { return ObsRef(ffi::fit_obs_at(h_, i)); }
+    Obs push() { return Obs(ffi::fit_obs_push(h_)); }
+    Obs operator[](uint32_t i) { return Obs(ffi::fit_obs_at(h_, i)); }
 private:
     ffi::Fit* h_;
 };
 
 /// `Fit.items`. Element pointers are STABLE across pushes (chunked storage).
-class FitItemsView {
+class FitItemsVec {
 public:
-    explicit FitItemsView(ffi::Fit* h) : h_(h) {}
+    explicit FitItemsVec(ffi::Fit* h) : h_(h) {}
     uint32_t size() const { return ffi::fit_items_len(h_); }
-    NRef push() { return NRef(ffi::fit_items_push(h_)); }
-    NRef operator[](uint32_t i) { return NRef(ffi::fit_items_at(h_, i)); }
-    Ref_N ref_at(uint32_t i) const { return Ref_N{ffi::fit_items_ref_at(h_, i)}; }
-    NRef get(Ref_N r) { return NRef(ffi::fit_items_get(h_, r.raw)); }
+    N push() { return N(ffi::fit_items_push(h_)); }
+    N operator[](uint32_t i) { return N(ffi::fit_items_at(h_, i)); }
+    NRef ref_at(uint32_t i) const { return NRef{ffi::fit_items_ref_at(h_, i)}; }
+    N get(NRef r) { return N(ffi::fit_items_get(h_, r.raw)); }
 private:
     ffi::Fit* h_;
 };
 
 /// `Fit.poses`. Element pointers are STABLE across pushes (chunked storage).
-class FitPosesView {
+class FitPosesDeque {
 public:
-    explicit FitPosesView(ffi::Fit* h) : h_(h) {}
+    explicit FitPosesDeque(ffi::Fit* h) : h_(h) {}
     uint32_t size() const { return ffi::fit_poses_len(h_); }
-    PoseRef push_back() { return PoseRef(ffi::fit_poses_push_back(h_)); }
-    PoseRef push_front() { return PoseRef(ffi::fit_poses_push_front(h_)); }
-    PoseRef operator[](uint32_t i) { return PoseRef(ffi::fit_poses_at(h_, i)); }
-    Ref_Pose ref_at(uint32_t i) const { return Ref_Pose{ffi::fit_poses_ref_at(h_, i)}; }
-    PoseRef get(Ref_Pose r) { return PoseRef(ffi::fit_poses_get(h_, r.raw)); }
+    Pose push_back() { return Pose(ffi::fit_poses_push_back(h_)); }
+    Pose push_front() { return Pose(ffi::fit_poses_push_front(h_)); }
+    Pose operator[](uint32_t i) { return Pose(ffi::fit_poses_at(h_, i)); }
+    PoseRef ref_at(uint32_t i) const { return PoseRef{ffi::fit_poses_ref_at(h_, i)}; }
+    Pose get(PoseRef r) { return Pose(ffi::fit_poses_get(h_, r.raw)); }
 private:
     ffi::Fit* h_;
 };
 
 /// `Fit.ties`. std::vec::Vec storage: pushes may MOVE elements -- re-fetch element refs after a push.
-class FitTiesView {
+class FitTiesVec {
 public:
-    explicit FitTiesView(ffi::Fit* h) : h_(h) {}
+    explicit FitTiesVec(ffi::Fit* h) : h_(h) {}
     uint32_t size() const { return ffi::fit_ties_len(h_); }
-    TieRef push() { return TieRef(ffi::fit_ties_push(h_)); }
-    TieRef operator[](uint32_t i) { return TieRef(ffi::fit_ties_at(h_, i)); }
+    Tie push() { return Tie(ffi::fit_ties_push(h_)); }
+    Tie operator[](uint32_t i) { return Tie(ffi::fit_ties_at(h_, i)); }
 private:
     ffi::Fit* h_;
 };
 
 /// `Fit.marks`. Element pointers are STABLE across pushes (chunked storage).
-class FitMarksView {
+class FitMarksArena {
 public:
-    explicit FitMarksView(ffi::Fit* h) : h_(h) {}
+    explicit FitMarksArena(ffi::Fit* h) : h_(h) {}
     uint32_t size() const { return ffi::fit_marks_len(h_); }
-    Ref_N push() { return Ref_N{ffi::fit_marks_push(h_)}; }
-    bool remove(Ref_N r) { return ffi::fit_marks_remove(h_, r.raw); }
-    NRef get(Ref_N r) { return NRef(ffi::fit_marks_get(h_, r.raw)); }
+    NRef push() { return NRef{ffi::fit_marks_push(h_)}; }
+    bool remove(NRef r) { return ffi::fit_marks_remove(h_, r.raw); }
+    N get(NRef r) { return N(ffi::fit_marks_get(h_, r.raw)); }
 private:
     ffi::Fit* h_;
 };
@@ -414,11 +378,11 @@ public:
     vect2d cal() const { return ffi::fit_cal(h_); }
     void set_cal(vect2d v) { ffi::fit_set_cal(h_, v); }
     // field `tag`: String -- opaque, no accessor generated
-    FitObsView obs() { return FitObsView(h_); }
-    FitItemsView items() { return FitItemsView(h_); }
-    FitPosesView poses() { return FitPosesView(h_); }
-    FitTiesView ties() { return FitTiesView(h_); }
-    FitMarksView marks() { return FitMarksView(h_); }
+    FitObsVec obs() { return FitObsVec(h_); }
+    FitItemsVec items() { return FitItemsVec(h_); }
+    FitPosesDeque poses() { return FitPosesDeque(h_); }
+    FitTiesVec ties() { return FitTiesVec(h_); }
+    FitMarksArena marks() { return FitMarksArena(h_); }
 
     /// Ok(LmResult) for every healthy termination, Err(SolveError) for
     /// a solve failure (-1) or a caught panic (-2) -- the same split

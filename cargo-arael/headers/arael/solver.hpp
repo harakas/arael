@@ -1,0 +1,99 @@
+// arael C++ solver surface, shared by every generated interface:
+// status and preset enums, the configuration and result layouts
+// (templated on the solve precision), and the error types. A generated
+// header instantiates these (`using LmResult = LmResultT<float>;`) and
+// wires LmConfig construction to its root's FFI, which copies the
+// preset's Rust values into the struct.
+#pragma once
+
+#include <cstdint>
+#include "result.hpp"
+
+namespace arael {
+
+/// Why a solve stopped. Non-negative codes come from the solver;
+/// SolverFailed carries text via last_error(), Panicked likewise.
+enum class LmStatus : int32_t {
+    Converged = 0,
+    CostThreshold = 1,
+    MaxIterations = 2,
+    GradientTolerance = 3,
+    ParameterTolerance = 4,
+    PredictedReduction = 5,
+    LambdaCeiling = 6,
+    DriverTerminated = 7,
+    ObserverTerminated = 8,
+    TimeLimit = 9,
+    RetryBudgetExhausted = 10,
+    Aborted = 11,
+    SolverFailed = -1,
+    Panicked = -2,
+};
+
+/// The base preset a config starts from; it also supplies the Rust
+/// fields the struct does not expose (lambda driver, observer,
+/// gather_timing).
+enum class LmPreset : uint32_t {
+    Defaults = 0,
+    Conservative = 1,
+    WellConditioned = 2,
+};
+
+/// The solver configuration, holding the preset's Rust values.
+/// Inspect them, edit them, pass the struct back whole; `option`
+/// fields mirror the Rust `Option` fields (assign a value or `{}`).
+/// Layout is part of the C ABI -- field order matters.
+template<class F>
+struct LmConfigT {
+    LmPreset preset;
+    uint32_t max_iters;
+    uint32_t min_iters;
+    uint32_t patience;
+    uint32_t num_threads;
+    bool verbose;
+    F abs_precision;
+    F rel_precision;
+    F initial_lambda;
+    F cost_threshold;
+    F lambda_floor;
+    option<F> gradient_tolerance;
+    option<F> parameter_tolerance;
+    option<F> predicted_reduction_tolerance;
+    option<F> min_diagonal;
+    /// Rust's `time_limit: Option<Duration>`, in seconds.
+    option<double> time_limit_seconds;
+};
+
+template<class F>
+struct LmResultT {
+    F start_cost;
+    F end_cost;
+    uint32_t iterations;
+    uint32_t accepted_iterations;
+    LmStatus status;
+    F final_lambda;
+};
+
+/// The Err side of a solve: SolverFailed or Panicked, with the text
+/// from last_error() (valid until the next call on the model).
+struct SolveError {
+    LmStatus status;
+    const char* message;
+};
+
+template<class F>
+using SolveResultT = result<LmResultT<F>, SolveError>;
+
+/// How much covariance to prepare (mirrors arael's CovMode).
+enum class CovMode : uint32_t {
+    PerQuery = 0,
+    AllMarginals = 1,
+    TriDiagonal = 2,
+};
+
+/// A failed covariance operation; message points at last_error().
+struct CovError {
+    const char* message;
+};
+
+} // namespace arael

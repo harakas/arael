@@ -318,7 +318,7 @@ int main() {
     }
 
     // Landmarks with at least two sightings; init on the first ray.
-    std::vector<Ref_Landmark> lm_refs;
+    std::vector<LandmarkRef> lm_refs;
     std::vector<int> lm_to_gt;
     std::vector<std::vector<Sighting>> lm_sightings;
     int n_frines = 0;
@@ -331,7 +331,7 @@ int main() {
         }
         if (sightings.size() < 2) continue;   // two rays to triangulate
 
-        Ref_Landmark r = path.landmarks().push();
+        LandmarkRef r = path.landmarks().push();
         auto lm = path.landmarks().get(r);
         size_t first_pi = sightings[0].pose;
         float first_b = sightings[0].bearing;

@@ -86,15 +86,19 @@ struct Cpp {
 fn collection_cpp(
     cpp: &mut Cpp,
     owner: &str,
+    sym_prefix: &str,
     owner_methods: &mut String,
     f: &Field,
 ) -> Result<(), String> {
     let field = &f.name;
     let elem = f.of.as_deref().ok_or("collection without element")?;
-    let prefix = format!("{}_{}", snake(owner), field);
+    let prefix = format!("{sym_prefix}_{field}");
     let container = f.container.as_deref().unwrap_or("vec");
     let refs_flavor = f.spelled.as_deref().unwrap_or("").contains("refs::");
-    let view = format!("{owner}{}View", camel(field));
+    // The view class is named by the container's nature -- nothing else
+    // about the wrapper says how it stores or behaves.
+    let kind = match container { "deque" => "Deque", "arena" => "Arena", _ => "Vec" };
+    let view = format!("{owner}{}{kind}", camel(field));
 
     cpp.ffi.push_str(&format!("uint32_t {prefix}_len(const {owner}*);\n"));
     let mut methods = format!(
@@ -104,8 +108,8 @@ fn collection_cpp(
             cpp.ffi.push_str(&format!(
                 "{elem}* {prefix}_push({owner}*);\n{elem}* {prefix}_at({owner}*, uint32_t);\n"));
             methods.push_str(&format!(
-                "    {elem}Ref push() {{ return {elem}Ref(ffi::{prefix}_push(h_)); }}\n\
-                 \x20   {elem}Ref operator[](uint32_t i) {{ return {elem}Ref(ffi::{prefix}_at(h_, i)); }}\n"));
+                "    {elem} push() {{ return {elem}(ffi::{prefix}_push(h_)); }}\n\
+                 \x20   {elem} operator[](uint32_t i) {{ return {elem}(ffi::{prefix}_at(h_, i)); }}\n"));
         }
         "deque" => {
             cpp.ffi.push_str(&format!(
@@ -113,16 +117,16 @@ fn collection_cpp(
                  {elem}* {prefix}_push_front({owner}*);\n\
                  {elem}* {prefix}_at({owner}*, uint32_t);\n"));
             methods.push_str(&format!(
-                "    {elem}Ref push_back() {{ return {elem}Ref(ffi::{prefix}_push_back(h_)); }}\n\
-                 \x20   {elem}Ref push_front() {{ return {elem}Ref(ffi::{prefix}_push_front(h_)); }}\n\
-                 \x20   {elem}Ref operator[](uint32_t i) {{ return {elem}Ref(ffi::{prefix}_at(h_, i)); }}\n"));
+                "    {elem} push_back() {{ return {elem}(ffi::{prefix}_push_back(h_)); }}\n\
+                 \x20   {elem} push_front() {{ return {elem}(ffi::{prefix}_push_front(h_)); }}\n\
+                 \x20   {elem} operator[](uint32_t i) {{ return {elem}(ffi::{prefix}_at(h_, i)); }}\n"));
         }
         "arena" => {
             cpp.ffi.push_str(&format!(
                 "uint32_t {prefix}_push({owner}*);\nbool {prefix}_remove({owner}*, uint32_t);\n"));
             methods.push_str(&format!(
-                "    Ref_{elem} push() {{ return Ref_{elem}{{ffi::{prefix}_push(h_)}}; }}\n\
-                 \x20   bool remove(Ref_{elem} r) {{ return ffi::{prefix}_remove(h_, r.raw); }}\n"));
+                "    {elem}Ref push() {{ return {elem}Ref{{ffi::{prefix}_push(h_)}}; }}\n\
+                 \x20   bool remove({elem}Ref r) {{ return ffi::{prefix}_remove(h_, r.raw); }}\n"));
         }
         other => return Err(format!("unknown container `{other}`")),
     }
@@ -133,12 +137,12 @@ fn collection_cpp(
             cpp.ffi.push_str(&format!(
                 "uint32_t {prefix}_ref_at(const {owner}*, uint32_t);\n"));
             methods.push_str(&format!(
-                "    Ref_{elem} ref_at(uint32_t i) const {{ return Ref_{elem}{{ffi::{prefix}_ref_at(h_, i)}}; }}\n"));
+                "    {elem}Ref ref_at(uint32_t i) const {{ return {elem}Ref{{ffi::{prefix}_ref_at(h_, i)}}; }}\n"));
         }
         cpp.ffi.push_str(&format!(
             "{elem}* {prefix}_get({owner}*, uint32_t);\n"));
         methods.push_str(&format!(
-            "    {elem}Ref get(Ref_{elem} r) {{ return {elem}Ref(ffi::{prefix}_get(h_, r.raw)); }}\n"));
+            "    {elem} get({elem}Ref r) {{ return {elem}(ffi::{prefix}_get(h_, r.raw)); }}\n"));
     }
     let stability = if refs_flavor {
         "Element pointers are STABLE across pushes (chunked storage)."
@@ -166,12 +170,12 @@ fn field_cpp(
     cpp: &mut Cpp,
     _model: &Model,
     owner: &str,
+    prefix: &str,
     owner_methods: &mut String,
     f: &Field,
 ) -> Result<(), String> {
     let name = &f.name;
     let of = f.of.as_deref().unwrap_or("");
-    let prefix = snake(owner);
     match f.kind.as_str() {
         "data" | "param" | "euler_param" => {
             if let Some(t) = value_type(f) {
@@ -228,13 +232,13 @@ fn field_cpp(
             _ => {
                 cpp.ffi.push_str(&format!("{of}* {prefix}_{name}_ptr({owner}*);\n"));
                 owner_methods.push_str(&format!(
-                    "    {of}Ref {name}() {{ return {of}Ref(ffi::{prefix}_{name}_ptr(h_)); }}\n"));
+                    "    {of} {name}() {{ return {of}(ffi::{prefix}_{name}_ptr(h_)); }}\n"));
             }
         },
         "struct" => {
             cpp.ffi.push_str(&format!("{of}* {prefix}_{name}_ptr({owner}*);\n"));
             owner_methods.push_str(&format!(
-                "    {of}Ref {name}() {{ return {of}Ref(ffi::{prefix}_{name}_ptr(h_)); }}\n"));
+                "    {of} {name}() {{ return {of}(ffi::{prefix}_{name}_ptr(h_)); }}\n"));
         }
         "optional" => {
             cpp.ffi.push_str(&format!(
@@ -244,11 +248,11 @@ fn field_cpp(
                  {of}* {prefix}_{name}({owner}*);\n"));
             owner_methods.push_str(&format!(
                 "    bool has_{name}() const {{ return ffi::{prefix}_has_{name}(h_); }}\n\
-                 \x20   {of}Ref make_{name}() {{ return {of}Ref(ffi::{prefix}_make_{name}(h_)); }}\n\
+                 \x20   {of} make_{name}() {{ return {of}(ffi::{prefix}_make_{name}(h_)); }}\n\
                  \x20   void clear_{name}() {{ ffi::{prefix}_clear_{name}(h_); }}\n\
-                 \x20   option<{of}Ref> {name}() {{\n\
+                 \x20   option<{of}> {name}() {{\n\
                  \x20       ffi::{of}* p = ffi::{prefix}_{name}(h_);\n\
-                 \x20       return p ? option<{of}Ref>({of}Ref(p)) : option<{of}Ref>();\n\
+                 \x20       return p ? option<{of}>({of}(p)) : option<{of}>();\n\
                  \x20   }}\n"));
         }
         "ref" => {
@@ -256,10 +260,10 @@ fn field_cpp(
                 "uint32_t {prefix}_{name}(const {owner}*);\n\
                  void {prefix}_set_{name}({owner}*, uint32_t);\n"));
             owner_methods.push_str(&format!(
-                "    Ref_{of} {name}() const {{ return Ref_{of}{{ffi::{prefix}_{name}(h_)}}; }}\n\
-                 \x20   void set_{name}(Ref_{of} r) {{ ffi::{prefix}_set_{name}(h_, r.raw); }}\n"));
+                "    {of}Ref {name}() const {{ return {of}Ref{{ffi::{prefix}_{name}(h_)}}; }}\n\
+                 \x20   void set_{name}({of}Ref r) {{ ffi::{prefix}_set_{name}(h_, r.raw); }}\n"));
         }
-        "collection" => collection_cpp(cpp, owner, owner_methods, f)?,
+        "collection" => collection_cpp(cpp, owner, prefix, owner_methods, f)?,
         "self_block" | "cross_block" | "triplet_block" | "skip" => {}
         "opaque" => {
             owner_methods.push_str(&format!(
@@ -291,7 +295,7 @@ pub fn emit(model: &Model) -> Result<String, String> {
     for (tn, _) in &surfaced {
         opaque_decls.push_str(&format!("struct {tn};\n"));
         ref_decls.push_str(&format!(
-            "/// Typed handle into the collection that issued it.\nstruct Ref_{tn} {{ uint32_t raw; }};\n"));
+            "/// Typed handle into the collection that issued it -- the C++\n/// spelling of Rust's `Ref<{tn}>`.\nstruct {tn}Ref {{ uint32_t raw; }};\n"));
     }
 
     // Children-first class order (containment is cycle-free).
@@ -306,18 +310,20 @@ pub fn emit(model: &Model) -> Result<String, String> {
         };
         let (tn, t) = remaining.remove(pos);
         let mut methods = String::new();
+        let prefix = format!("{root_sn}_{}", snake(tn));
         for f in &t.fields {
-            field_cpp(&mut cpp, model, tn, &mut methods, f)?;
+            field_cpp(&mut cpp, model, tn, &prefix, &mut methods, f)?;
         }
         cpp.body.push_str(&format!(
-"/// A `{tn}` in its owner's storage; thin pointer wrapper.
-class {tn}Ref {{
+"/// A `{tn}` in its owner's storage; a thin pointer wrapper (validity
+/// follows the storage -- see the owning container).
+class {tn} {{
 public:
-    {tn}Ref() : h_(nullptr) {{}}
-    explicit {tn}Ref(ffi::{tn}* p) : h_(p) {{}}
+    {tn}() : h_(nullptr) {{}}
+    explicit {tn}(ffi::{tn}* p) : h_(p) {{}}
     /// False when default-constructed (e.g. inside an empty option).
     bool valid() const {{ return h_ != nullptr; }}
-    /// The underlying C pointer (covariance queries take it).
+    /// The underlying C pointer -- the relaxed escape hatch.
     ffi::{tn}* raw() const {{ return h_; }}
 {methods}private:
     ffi::{tn}* h_;
@@ -337,25 +343,25 @@ public:
             if t.role != "entity" || t.param_count == 0 {
                 continue;
             }
-            let sn = snake(tn);
+            let sn = format!("{root_sn}_{}", snake(tn));
             cpp.ffi.push_str(&format!(
                 "int32_t {sn}_marginal_cov({root}*, const {tn}*, double*, uint32_t);\n"));
             match t.param_count {
                 1 => methods.push_str(&format!(
-"    result<double, CovError> marginal(const {tn}Ref& e) {{
+"    result<double, CovError> marginal(const {tn}& e) {{
         double b[1];
         if (ffi::{sn}_marginal_cov(h_, e.raw(), b, 1) < 0) return fail<double>();
         return result<double, CovError>::ok(b[0]);
     }}\n")),
                 2 => methods.push_str(&format!(
-"    result<matrix2d, CovError> marginal(const {tn}Ref& e) {{
+"    result<matrix2d, CovError> marginal(const {tn}& e) {{
         double b[4];
         if (ffi::{sn}_marginal_cov(h_, e.raw(), b, 4) < 0) return fail<matrix2d>();
         return result<matrix2d, CovError>::ok(
             matrix2d::from_elements(b[0], b[1], b[2], b[3]));
     }}\n")),
                 3 => methods.push_str(&format!(
-"    result<matrix3d, CovError> marginal(const {tn}Ref& e) {{
+"    result<matrix3d, CovError> marginal(const {tn}& e) {{
         double b[9];
         if (ffi::{sn}_marginal_cov(h_, e.raw(), b, 9) < 0) return fail<matrix3d>();
         return result<matrix3d, CovError>::ok(matrix3d::from_elements(
@@ -363,7 +369,7 @@ public:
     }}\n")),
                 _ => methods.push_str(&format!(
 "    /// Row-major dim x dim into out; returns dim or a negative code.
-    int32_t marginal(const {tn}Ref& e, double* out, uint32_t cap) {{
+    int32_t marginal(const {tn}& e, double* out, uint32_t cap) {{
         return ffi::{sn}_marginal_cov(h_, e.raw(), out, cap);
     }}\n")),
             }
@@ -390,10 +396,11 @@ public:
     let root_ty = model.types.get(root).ok_or("root type missing")?;
     let mut world_methods = String::new();
     for f in &root_ty.fields {
-        field_cpp(&mut cpp, model, root, &mut world_methods, f)?;
+        field_cpp(&mut cpp, model, root, &root_sn, &mut world_methods, f)?;
     }
     cpp.ffi.push_str(&format!(
-        "{root}* {root_sn}_new(void);\n\
+        "void {root_sn}_lm_config(uint32_t, LmConfig*);\n\
+         {root}* {root_sn}_new(void);\n\
          void {root_sn}_free({root}*);\n\
          const char* {root_sn}_last_error(const {root}*);\n\
          const char* {root_sn}_validate({root}*);\n\
@@ -411,74 +418,21 @@ public:
 #include <cmath>
 #include \"arael/math.hpp\"
 #include \"arael/result.hpp\"
+#include \"arael/solver.hpp\"
 
 namespace arael {{
 
-/// Why a solve stopped. Non-negative codes come from the solver;
-/// SolverFailed carries text via last_error(), Panicked likewise.
-enum class LmStatus : int32_t {{
-    Converged = 0,
-    CostThreshold = 1,
-    MaxIterations = 2,
-    GradientTolerance = 3,
-    ParameterTolerance = 4,
-    PredictedReduction = 5,
-    LambdaCeiling = 6,
-    DriverTerminated = 7,
-    ObserverTerminated = 8,
-    TimeLimit = 9,
-    RetryBudgetExhausted = 10,
-    Aborted = 11,
-    SolverFailed = -1,
-    Panicked = -2,
-}};
+/// Instantiations of the shared solver surface (arael/solver.hpp) at
+/// this model's precision, plus the config constructor that fetches
+/// the preset's actual Rust values through this root's FFI.
+using LmResult = LmResultT<{fp}>;
+using SolveResult = SolveResultT<{fp}>;
 
-/// Sentinel-based: fields left at UINT32_MAX / NaN keep the preset's
-/// value (preset 0 = solver defaults, 1 = conservative,
-/// 2 = well_conditioned).
-struct LmConfig {{
-    uint32_t preset = 0;
-    uint32_t max_iters = UINT32_MAX;
-    uint32_t min_iters = UINT32_MAX;
-    uint32_t patience = UINT32_MAX;
-    {fp} abs_precision = NAN;
-    {fp} rel_precision = NAN;
-    {fp} initial_lambda = NAN;
-    {fp} cost_threshold = NAN;
-
-    static LmConfig defaults() {{ return LmConfig{{}}; }}
-    static LmConfig conservative() {{ LmConfig c; c.preset = 1; return c; }}
-    static LmConfig well_conditioned() {{ LmConfig c; c.preset = 2; return c; }}
-}};
-
-struct LmResult {{
-    {fp} start_cost;
-    {fp} end_cost;
-    uint32_t iterations;
-    uint32_t accepted_iterations;
-    LmStatus status;
-    {fp} lambda;
-}};
-
-/// The Err side of a solve: SolverFailed or Panicked, with the text
-/// from last_error() (valid until the next call on the model).
-struct SolveError {{
-    LmStatus status;
-    const char* message;
-}};
-
-using SolveResult = result<LmResult, SolveError>;
-
-/// How much covariance to prepare (mirrors arael's CovMode).
-enum class CovMode : uint32_t {{
-    PerQuery = 0,
-    AllMarginals = 1,
-    TriDiagonal = 2,
-}};
-
-/// A failed covariance operation; message points at last_error().
-struct CovError {{
-    const char* message;
+struct LmConfig : LmConfigT<{fp}> {{
+    LmConfig(LmPreset p = LmPreset::Defaults);
+    static LmConfig defaults() {{ return LmConfig(LmPreset::Defaults); }}
+    static LmConfig conservative() {{ return LmConfig(LmPreset::Conservative); }}
+    static LmConfig well_conditioned() {{ return LmConfig(LmPreset::WellConditioned); }}
 }};
 
 {ref_decls}
@@ -487,6 +441,10 @@ namespace ffi {{
 extern \"C\" {{
 {ffi_decls}}}
 }} // namespace ffi
+
+inline LmConfig::LmConfig(LmPreset p) {{
+    ffi::{root_sn}_lm_config(uint32_t(p), this);
+}}
 
 {body}/// The `{root}` model. Owns the Rust-side object; move-only.
 class {root} {{

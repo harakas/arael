@@ -684,3 +684,30 @@ Settled:
    never required). AGREED.
 
 All questions settled; the plan is ready to execute.
+
+10. API naming review (2026-07-25, after the slam2d demo): entity
+    wrapper classes carry the model type's bare name (`Pose`), the
+    typed u32 handle is `{T}Ref` -- matching Rust's `Ref<Pose>`
+    exactly (the old `PoseRef`/`Ref_Pose` pair had the word "Ref" on
+    the wrong one). Collection views are suffixed by container nature
+    (`...Vec` / `...Deque` / `...Arena`). All C symbols carry the
+    root prefix (`path_pose_pos`) so several generated models link
+    into one binary. `LmResult.final_lambda` matches the Rust field;
+    `LmPreset` is a typed enum. LmConfig holds REAL values: an FFI
+    filler (`{root}_lm_config(preset, out)`) copies the preset's
+    actual Rust values into the repr(C) struct at C++ construction --
+    no sentinels, defaults inspectable from C++; the preset tag only
+    covers the fields the struct does not expose (lambda driver,
+    observer, gather_timing). Every other Rust LmConfig field IS
+    exposed, the Option ones as `arael::option<F>` crossing the ABI
+    as {has, value} mirrors (time_limit as option<double> seconds).
+    The precision-independent solver surface (LmStatus, LmPreset,
+    LmConfigT<F>, LmResultT<F>, SolveError, CovMode, CovError) lives
+    in the shared vendored `arael/solver.hpp`; a generated header
+    only instantiates aliases and wires the config ctor to its
+    root's FFI. Layout parity is pinned by the defaults comparison in
+    the parity test (field-exact vs Rust LmConfig::default()).
+    Caveat: per-root aliases still mean one generated header per
+    translation unit. Known gaps noted for later: arena
+    views cannot be iterated without retained refs (needs a cursor in
+    the C ABI), and there is no const view of the model.

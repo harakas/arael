@@ -139,34 +139,113 @@ fn panic_text(p: Box<dyn std::any::Any + Send>) -> String {
     }
 }
 
-/// Sentinel-based config: UINT32_MAX / NaN fields keep the preset's
-/// value (0 = defaults, 1 = conservative, 2 = well_conditioned).
+/// C mirror of `arael::option<T>` ({has, value}; layouts must match).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct COptF {
+    pub has: bool,
+    pub v: f32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct COptSeconds {
+    pub has: bool,
+    pub v: f64,
+}
+
+fn copt(o: Option<f32>) -> COptF {
+    match o {
+        Some(v) => COptF { has: true, v },
+        None => COptF { has: false, v: 0.0 },
+    }
+}
+
+fn opt_of(c: COptF) -> Option<f32> {
+    c.has.then_some(c.v)
+}
+
+/// The solver config as REAL values: constructed by
+/// path_lm_config (which copies them out of the actual Rust
+/// LmConfig preset), edited freely, passed back whole. The preset tag
+/// stays the base for the Rust fields this struct does not expose
+/// (lambda driver, observer, gather_timing). Field order is C ABI.
 #[repr(C)]
 pub struct CLmConfig {
     pub preset: u32,
     pub max_iters: u32,
     pub min_iters: u32,
     pub patience: u32,
+    pub num_threads: u32,
+    pub verbose: bool,
     pub abs_precision: f32,
     pub rel_precision: f32,
     pub initial_lambda: f32,
     pub cost_threshold: f32,
+    pub lambda_floor: f32,
+    pub gradient_tolerance: COptF,
+    pub parameter_tolerance: COptF,
+    pub predicted_reduction_tolerance: COptF,
+    pub min_diagonal: COptF,
+    pub time_limit_seconds: COptSeconds,
+}
+
+fn preset_config(preset: u32) -> LmConfig<f32> {
+    match preset {
+        1 => LmConfig::conservative(),
+        2 => LmConfig::well_conditioned(),
+        _ => LmConfig::default(),
+    }
+}
+
+/// Fill `out` with the preset's actual Rust values (0 = defaults,
+/// 1 = conservative, 2 = well_conditioned).
+#[no_mangle]
+pub unsafe extern "C" fn path_lm_config(preset: u32, out: *mut CLmConfig) {
+    let c = preset_config(preset);
+    *out = CLmConfig {
+        preset,
+        max_iters: c.max_iters as u32,
+        min_iters: c.min_iters as u32,
+        patience: c.patience as u32,
+        num_threads: c.num_threads as u32,
+        verbose: c.verbose,
+        abs_precision: c.abs_precision,
+        rel_precision: c.rel_precision,
+        initial_lambda: c.initial_lambda,
+        cost_threshold: c.cost_threshold,
+        lambda_floor: c.lambda_floor,
+        gradient_tolerance: copt(c.gradient_tolerance),
+        parameter_tolerance: copt(c.parameter_tolerance),
+        predicted_reduction_tolerance: copt(c.predicted_reduction_tolerance),
+        min_diagonal: copt(c.min_diagonal),
+        time_limit_seconds: match c.time_limit {
+            Some(d) => COptSeconds { has: true, v: d.as_secs_f64() },
+            None => COptSeconds { has: false, v: 0.0 },
+        },
+    };
 }
 
 impl CLmConfig {
     fn to_config(&self) -> LmConfig<f32> {
-        let mut c: LmConfig<f32> = match self.preset {
-            1 => LmConfig::conservative(),
-            2 => LmConfig::well_conditioned(),
-            _ => LmConfig::default(),
-        };
-        if self.max_iters != u32::MAX { c.max_iters = self.max_iters as usize; }
-        if self.min_iters != u32::MAX { c.min_iters = self.min_iters as usize; }
-        if self.patience != u32::MAX { c.patience = self.patience as usize; }
-        if !self.abs_precision.is_nan() { c.abs_precision = self.abs_precision; }
-        if !self.rel_precision.is_nan() { c.rel_precision = self.rel_precision; }
-        if !self.initial_lambda.is_nan() { c.initial_lambda = self.initial_lambda; }
-        if !self.cost_threshold.is_nan() { c.cost_threshold = self.cost_threshold; }
+        let mut c = preset_config(self.preset);
+        c.max_iters = self.max_iters as usize;
+        c.min_iters = self.min_iters as usize;
+        c.patience = self.patience as usize;
+        c.num_threads = self.num_threads as usize;
+        c.verbose = self.verbose;
+        c.abs_precision = self.abs_precision;
+        c.rel_precision = self.rel_precision;
+        c.initial_lambda = self.initial_lambda;
+        c.cost_threshold = self.cost_threshold;
+        c.lambda_floor = self.lambda_floor;
+        c.gradient_tolerance = opt_of(self.gradient_tolerance);
+        c.parameter_tolerance = opt_of(self.parameter_tolerance);
+        c.predicted_reduction_tolerance = opt_of(self.predicted_reduction_tolerance);
+        c.min_diagonal = opt_of(self.min_diagonal);
+        c.time_limit = self.time_limit_seconds.has.then(|| {
+            std::time::Duration::from_secs_f64(self.time_limit_seconds.v)
+        });
         c
     }
 }
@@ -178,7 +257,7 @@ pub struct CLmResult {
     pub iterations: u32,
     pub accepted_iterations: u32,
     pub status: i32,
-    pub lambda: f32,
+    pub final_lambda: f32,
 }
 
 #[no_mangle]
@@ -229,7 +308,7 @@ pub unsafe extern "C" fn path_solve_dense(
     let c = (*cfg).to_config();
     *out = CLmResult {
         start_cost: 0.0, end_cost: 0.0, iterations: 0,
-        accepted_iterations: 0, status: -1, lambda: 0.0,
+        accepted_iterations: 0, status: -1, final_lambda: 0.0,
     };
     match catch_unwind(AssertUnwindSafe(|| hh.model.solve_dense(&c))) {
         Ok(Ok(r)) => {
@@ -240,7 +319,7 @@ pub unsafe extern "C" fn path_solve_dense(
                 iterations: r.iterations as u32,
                 accepted_iterations: r.accepted_iterations as u32,
                 status: code,
-                lambda: r.final_lambda,
+                final_lambda: r.final_lambda,
             };
             set_text(hh, "");
             code
@@ -271,7 +350,7 @@ pub unsafe extern "C" fn path_solve_sparse(
     let c = (*cfg).to_config();
     *out = CLmResult {
         start_cost: 0.0, end_cost: 0.0, iterations: 0,
-        accepted_iterations: 0, status: -1, lambda: 0.0,
+        accepted_iterations: 0, status: -1, final_lambda: 0.0,
     };
     match catch_unwind(AssertUnwindSafe(|| hh.model.solve_sparse(&c))) {
         Ok(Ok(r)) => {
@@ -282,7 +361,7 @@ pub unsafe extern "C" fn path_solve_sparse(
                 iterations: r.iterations as u32,
                 accepted_iterations: r.accepted_iterations as u32,
                 status: code,
-                lambda: r.final_lambda,
+                final_lambda: r.final_lambda,
             };
             set_text(hh, "");
             code
@@ -334,7 +413,7 @@ pub unsafe extern "C" fn path_assemble_covariance(h: *mut PathHandle, mode: u32)
 /// dim, or -1 (error) / -2 (panic) / -3 (no assembly or buffer too
 /// small), text via path_last_error.
 #[no_mangle]
-pub unsafe extern "C" fn landmark_marginal_cov(
+pub unsafe extern "C" fn path_landmark_marginal_cov(
     h: *mut PathHandle,
     p: *const Landmark,
     out: *mut f64,
@@ -375,7 +454,7 @@ pub unsafe extern "C" fn landmark_marginal_cov(
 /// dim, or -1 (error) / -2 (panic) / -3 (no assembly or buffer too
 /// small), text via path_last_error.
 #[no_mangle]
-pub unsafe extern "C" fn pose_marginal_cov(
+pub unsafe extern "C" fn path_pose_marginal_cov(
     h: *mut PathHandle,
     p: *const Pose,
     out: *mut f64,
@@ -476,137 +555,137 @@ pub unsafe extern "C" fn path_landmarks_get(p: *mut PathHandle, r: u32) -> *mut 
     &mut m[arael::refs::Ref::from_raw(r)] as *mut Landmark
 }
 #[no_mangle]
-pub unsafe extern "C" fn frine_pose(p: *const Frine) -> u32 {
+pub unsafe extern "C" fn path_frine_pose(p: *const Frine) -> u32 {
     (*p).pose.to_raw()
 }
 #[no_mangle]
-pub unsafe extern "C" fn frine_set_pose(p: *mut Frine, v: u32) {
+pub unsafe extern "C" fn path_frine_set_pose(p: *mut Frine, v: u32) {
     (*p).pose = arael::refs::Ref::from_raw(v);
 }
 #[no_mangle]
-pub unsafe extern "C" fn frine_bearing(p: *const Frine) -> f32 {
+pub unsafe extern "C" fn path_frine_bearing(p: *const Frine) -> f32 {
     (*p).bearing
 }
 #[no_mangle]
-pub unsafe extern "C" fn frine_set_bearing(p: *mut Frine, v: f32) {
+pub unsafe extern "C" fn path_frine_set_bearing(p: *mut Frine, v: f32) {
     (*p).bearing = v;
 }
 #[no_mangle]
-pub unsafe extern "C" fn frine_isigma(p: *const Frine) -> f32 {
+pub unsafe extern "C" fn path_frine_isigma(p: *const Frine) -> f32 {
     (*p).isigma
 }
 #[no_mangle]
-pub unsafe extern "C" fn frine_set_isigma(p: *mut Frine, v: f32) {
+pub unsafe extern "C" fn path_frine_set_isigma(p: *mut Frine, v: f32) {
     (*p).isigma = v;
 }
 #[no_mangle]
-pub unsafe extern "C" fn landmark_pos(p: *const Landmark) -> CVec2F32 {
+pub unsafe extern "C" fn path_landmark_pos(p: *const Landmark) -> CVec2F32 {
     (*p).pos.value.into()
 }
 #[no_mangle]
-pub unsafe extern "C" fn landmark_set_pos(p: *mut Landmark, v: CVec2F32) {
+pub unsafe extern "C" fn path_landmark_set_pos(p: *mut Landmark, v: CVec2F32) {
     (*p).pos.value = v.into();
 }
 #[no_mangle]
-pub unsafe extern "C" fn landmark_pos_optimize(p: *const Landmark) -> bool {
+pub unsafe extern "C" fn path_landmark_pos_optimize(p: *const Landmark) -> bool {
     (*p).pos.optimize
 }
 #[no_mangle]
-pub unsafe extern "C" fn landmark_pos_set_optimize(p: *mut Landmark, v: bool) {
+pub unsafe extern "C" fn path_landmark_pos_set_optimize(p: *mut Landmark, v: bool) {
     (*p).pos.optimize = v;
 }
 #[no_mangle]
-pub unsafe extern "C" fn landmark_frines_len(p: *const Landmark) -> u32 {
+pub unsafe extern "C" fn path_landmark_frines_len(p: *const Landmark) -> u32 {
     (*p).frines.len() as u32
 }
 #[no_mangle]
-pub unsafe extern "C" fn landmark_frines_push(p: *mut Landmark) -> *mut Frine {
+pub unsafe extern "C" fn path_landmark_frines_push(p: *mut Landmark) -> *mut Frine {
     let m = &mut (*p).frines;
     m.push(Default::default());
     m.last_mut().unwrap() as *mut Frine
 }
 #[no_mangle]
-pub unsafe extern "C" fn landmark_frines_at(p: *mut Landmark, i: u32) -> *mut Frine {
+pub unsafe extern "C" fn path_landmark_frines_at(p: *mut Landmark, i: u32) -> *mut Frine {
     let m = &mut (*p).frines;
     &mut m[i as usize] as *mut Frine
 }
 #[no_mangle]
-pub unsafe extern "C" fn pose_pos(p: *const Pose) -> CVec2F32 {
+pub unsafe extern "C" fn path_pose_pos(p: *const Pose) -> CVec2F32 {
     (*p).pos.value.into()
 }
 #[no_mangle]
-pub unsafe extern "C" fn pose_set_pos(p: *mut Pose, v: CVec2F32) {
+pub unsafe extern "C" fn path_pose_set_pos(p: *mut Pose, v: CVec2F32) {
     (*p).pos.value = v.into();
 }
 #[no_mangle]
-pub unsafe extern "C" fn pose_pos_optimize(p: *const Pose) -> bool {
+pub unsafe extern "C" fn path_pose_pos_optimize(p: *const Pose) -> bool {
     (*p).pos.optimize
 }
 #[no_mangle]
-pub unsafe extern "C" fn pose_pos_set_optimize(p: *mut Pose, v: bool) {
+pub unsafe extern "C" fn path_pose_pos_set_optimize(p: *mut Pose, v: bool) {
     (*p).pos.optimize = v;
 }
 #[no_mangle]
-pub unsafe extern "C" fn pose_gamma(p: *const Pose) -> f32 {
+pub unsafe extern "C" fn path_pose_gamma(p: *const Pose) -> f32 {
     (*p).gamma.value
 }
 #[no_mangle]
-pub unsafe extern "C" fn pose_set_gamma(p: *mut Pose, v: f32) {
+pub unsafe extern "C" fn path_pose_set_gamma(p: *mut Pose, v: f32) {
     (*p).gamma.value = v;
 }
 #[no_mangle]
-pub unsafe extern "C" fn pose_gamma_optimize(p: *const Pose) -> bool {
+pub unsafe extern "C" fn path_pose_gamma_optimize(p: *const Pose) -> bool {
     (*p).gamma.optimize
 }
 #[no_mangle]
-pub unsafe extern "C" fn pose_gamma_set_optimize(p: *mut Pose, v: bool) {
+pub unsafe extern "C" fn path_pose_gamma_set_optimize(p: *mut Pose, v: bool) {
     (*p).gamma.optimize = v;
 }
 #[no_mangle]
-pub unsafe extern "C" fn pose_delta_pos(p: *const Pose) -> CVec2F32 {
+pub unsafe extern "C" fn path_pose_delta_pos(p: *const Pose) -> CVec2F32 {
     (*p).delta_pos.into()
 }
 #[no_mangle]
-pub unsafe extern "C" fn pose_set_delta_pos(p: *mut Pose, v: CVec2F32) {
+pub unsafe extern "C" fn path_pose_set_delta_pos(p: *mut Pose, v: CVec2F32) {
     (*p).delta_pos = v.into();
 }
 #[no_mangle]
-pub unsafe extern "C" fn pose_delta_gamma(p: *const Pose) -> f32 {
+pub unsafe extern "C" fn path_pose_delta_gamma(p: *const Pose) -> f32 {
     (*p).delta_gamma
 }
 #[no_mangle]
-pub unsafe extern "C" fn pose_set_delta_gamma(p: *mut Pose, v: f32) {
+pub unsafe extern "C" fn path_pose_set_delta_gamma(p: *mut Pose, v: f32) {
     (*p).delta_gamma = v;
 }
 #[no_mangle]
-pub unsafe extern "C" fn pose_delta_pos_isigma(p: *const Pose) -> f32 {
+pub unsafe extern "C" fn path_pose_delta_pos_isigma(p: *const Pose) -> f32 {
     (*p).delta_pos_isigma
 }
 #[no_mangle]
-pub unsafe extern "C" fn pose_set_delta_pos_isigma(p: *mut Pose, v: f32) {
+pub unsafe extern "C" fn path_pose_set_delta_pos_isigma(p: *mut Pose, v: f32) {
     (*p).delta_pos_isigma = v;
 }
 #[no_mangle]
-pub unsafe extern "C" fn pose_delta_gamma_isigma(p: *const Pose) -> f32 {
+pub unsafe extern "C" fn path_pose_delta_gamma_isigma(p: *const Pose) -> f32 {
     (*p).delta_gamma_isigma
 }
 #[no_mangle]
-pub unsafe extern "C" fn pose_set_delta_gamma_isigma(p: *mut Pose, v: f32) {
+pub unsafe extern "C" fn path_pose_set_delta_gamma_isigma(p: *mut Pose, v: f32) {
     (*p).delta_gamma_isigma = v;
 }
 #[no_mangle]
-pub unsafe extern "C" fn pose_pair_prev(p: *const PosePair) -> u32 {
+pub unsafe extern "C" fn path_pose_pair_prev(p: *const PosePair) -> u32 {
     (*p).prev.to_raw()
 }
 #[no_mangle]
-pub unsafe extern "C" fn pose_pair_set_prev(p: *mut PosePair, v: u32) {
+pub unsafe extern "C" fn path_pose_pair_set_prev(p: *mut PosePair, v: u32) {
     (*p).prev = arael::refs::Ref::from_raw(v);
 }
 #[no_mangle]
-pub unsafe extern "C" fn pose_pair_cur(p: *const PosePair) -> u32 {
+pub unsafe extern "C" fn path_pose_pair_cur(p: *const PosePair) -> u32 {
     (*p).cur.to_raw()
 }
 #[no_mangle]
-pub unsafe extern "C" fn pose_pair_set_cur(p: *mut PosePair, v: u32) {
+pub unsafe extern "C" fn path_pose_pair_set_cur(p: *mut PosePair, v: u32) {
     (*p).cur = arael::refs::Ref::from_raw(v);
 }

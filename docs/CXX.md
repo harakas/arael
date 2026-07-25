@@ -55,7 +55,7 @@ auto tie = fit.ties().push();
 tie.set_a(fit.poses().ref_at(0));       // typed refs
 tie.set_b(fit.poses().ref_at(1));
 
-LmConfig cfg;                            // defaults; fields override
+LmConfig cfg;                            // the Rust defaults; edit and pass
 cfg.max_iters = 50;
 SolveResult r = fit.solve_dense(cfg);    // result<LmResult, SolveError>
 if (r.is_err())
@@ -65,6 +65,13 @@ else
 ```
 
 ## The API surface
+
+Naming: an entity class carries the model type's own name (`Pose` is
+a thin stable pointer into its collection); `PoseRef` is the typed
+u32 handle -- the C++ spelling of Rust's `Ref<Pose>`. Collection
+views are named by their container's nature: `PathPosesDeque`,
+`PathLandmarksArena`, `LandmarkFrinesVec`.
+
 
 - **Math types** (`vect2/3`, `matrix2/3`, `quatern`, f/d suffixes)
   mirror the Rust types: `*` is dot, `%` is cross, euler is x=roll,
@@ -80,7 +87,14 @@ else
   takes it back). `refs::` element pointers are stable across pushes;
   `std::vec::Vec` ones are not -- re-fetch after a push.
 - **Option entities**: `has_x()` / `make_x()` / `clear_x()` and `x()`
-  returning `option<XRef>`.
+  returning `option<X>`.
+- **LmConfig** is a plain struct holding the chosen preset's
+  Rust values (fetched through the FFI at construction) -- inspect the
+  real defaults, edit fields, pass it back whole. Every Rust field is
+  there except the lambda driver, observer, and gather_timing (the
+  preset supplies those); Rust `Option` fields are `arael::option<F>`
+  (`cfg.gradient_tolerance = 1e-8;` or `= {};`), `time_limit` in
+  seconds. The shared solver surface lives in `arael/solver.hpp`.
 - **result / option** mirror Rust's shapes; reading the wrong side
   prints the failed check and aborts (`arael_assert_true` -- always
   on).

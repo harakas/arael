@@ -111,6 +111,24 @@ fn cxx_interface_matches_rust_exactly() {
     assert_eq!(g("obs3_y"), fit.obs[3].y);
     assert_eq!(g("item1_t"), fit.items[1].t);
 
+    // Config layout parity: the C++ defaults are the Rust defaults.
+    {
+        let d = LmConfig::<f64>::default();
+        assert_eq!(g("cfg_abs"), d.abs_precision);
+        assert_eq!(g("cfg_rel"), d.rel_precision);
+        assert_eq!(g("cfg_max_iters"), d.max_iters as f64);
+        assert_eq!(g("cfg_min_iters"), d.min_iters as f64);
+        assert_eq!(g("cfg_patience"), d.patience as f64);
+        assert_eq!(g("cfg_threads"), d.num_threads as f64);
+        assert_eq!(g("cfg_verbose"), d.verbose as u8 as f64);
+        assert_eq!(g("cfg_lambda"), d.initial_lambda);
+        assert_eq!(g("cfg_cost_threshold"), d.cost_threshold);
+        assert_eq!(g("cfg_lambda_floor"), d.lambda_floor);
+        assert_eq!(g("cfg_grad_has"), d.gradient_tolerance.is_some() as u8 as f64);
+        assert_eq!(g("cfg_time_has"), d.time_limit.is_some() as u8 as f64);
+        assert_eq!(g("cfg_wc_lambda"), LmConfig::<f64>::well_conditioned().initial_lambda);
+    }
+
     let r = fit.solve_dense(&cfg).unwrap();
     assert!(r.status.is_success(), "{:?}", r.status);
     assert_eq!(g("dense_status"), code(&r.status));

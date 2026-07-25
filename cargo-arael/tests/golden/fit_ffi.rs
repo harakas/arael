@@ -139,34 +139,113 @@ fn panic_text(p: Box<dyn std::any::Any + Send>) -> String {
     }
 }
 
-/// Sentinel-based config: UINT32_MAX / NaN fields keep the preset's
-/// value (0 = defaults, 1 = conservative, 2 = well_conditioned).
+/// C mirror of `arael::option<T>` ({has, value}; layouts must match).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct COptF {
+    pub has: bool,
+    pub v: f64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct COptSeconds {
+    pub has: bool,
+    pub v: f64,
+}
+
+fn copt(o: Option<f64>) -> COptF {
+    match o {
+        Some(v) => COptF { has: true, v },
+        None => COptF { has: false, v: 0.0 },
+    }
+}
+
+fn opt_of(c: COptF) -> Option<f64> {
+    c.has.then_some(c.v)
+}
+
+/// The solver config as REAL values: constructed by
+/// fit_lm_config (which copies them out of the actual Rust
+/// LmConfig preset), edited freely, passed back whole. The preset tag
+/// stays the base for the Rust fields this struct does not expose
+/// (lambda driver, observer, gather_timing). Field order is C ABI.
 #[repr(C)]
 pub struct CLmConfig {
     pub preset: u32,
     pub max_iters: u32,
     pub min_iters: u32,
     pub patience: u32,
+    pub num_threads: u32,
+    pub verbose: bool,
     pub abs_precision: f64,
     pub rel_precision: f64,
     pub initial_lambda: f64,
     pub cost_threshold: f64,
+    pub lambda_floor: f64,
+    pub gradient_tolerance: COptF,
+    pub parameter_tolerance: COptF,
+    pub predicted_reduction_tolerance: COptF,
+    pub min_diagonal: COptF,
+    pub time_limit_seconds: COptSeconds,
+}
+
+fn preset_config(preset: u32) -> LmConfig<f64> {
+    match preset {
+        1 => LmConfig::conservative(),
+        2 => LmConfig::well_conditioned(),
+        _ => LmConfig::default(),
+    }
+}
+
+/// Fill `out` with the preset's actual Rust values (0 = defaults,
+/// 1 = conservative, 2 = well_conditioned).
+#[no_mangle]
+pub unsafe extern "C" fn fit_lm_config(preset: u32, out: *mut CLmConfig) {
+    let c = preset_config(preset);
+    *out = CLmConfig {
+        preset,
+        max_iters: c.max_iters as u32,
+        min_iters: c.min_iters as u32,
+        patience: c.patience as u32,
+        num_threads: c.num_threads as u32,
+        verbose: c.verbose,
+        abs_precision: c.abs_precision,
+        rel_precision: c.rel_precision,
+        initial_lambda: c.initial_lambda,
+        cost_threshold: c.cost_threshold,
+        lambda_floor: c.lambda_floor,
+        gradient_tolerance: copt(c.gradient_tolerance),
+        parameter_tolerance: copt(c.parameter_tolerance),
+        predicted_reduction_tolerance: copt(c.predicted_reduction_tolerance),
+        min_diagonal: copt(c.min_diagonal),
+        time_limit_seconds: match c.time_limit {
+            Some(d) => COptSeconds { has: true, v: d.as_secs_f64() },
+            None => COptSeconds { has: false, v: 0.0 },
+        },
+    };
 }
 
 impl CLmConfig {
     fn to_config(&self) -> LmConfig<f64> {
-        let mut c: LmConfig<f64> = match self.preset {
-            1 => LmConfig::conservative(),
-            2 => LmConfig::well_conditioned(),
-            _ => LmConfig::default(),
-        };
-        if self.max_iters != u32::MAX { c.max_iters = self.max_iters as usize; }
-        if self.min_iters != u32::MAX { c.min_iters = self.min_iters as usize; }
-        if self.patience != u32::MAX { c.patience = self.patience as usize; }
-        if !self.abs_precision.is_nan() { c.abs_precision = self.abs_precision; }
-        if !self.rel_precision.is_nan() { c.rel_precision = self.rel_precision; }
-        if !self.initial_lambda.is_nan() { c.initial_lambda = self.initial_lambda; }
-        if !self.cost_threshold.is_nan() { c.cost_threshold = self.cost_threshold; }
+        let mut c = preset_config(self.preset);
+        c.max_iters = self.max_iters as usize;
+        c.min_iters = self.min_iters as usize;
+        c.patience = self.patience as usize;
+        c.num_threads = self.num_threads as usize;
+        c.verbose = self.verbose;
+        c.abs_precision = self.abs_precision;
+        c.rel_precision = self.rel_precision;
+        c.initial_lambda = self.initial_lambda;
+        c.cost_threshold = self.cost_threshold;
+        c.lambda_floor = self.lambda_floor;
+        c.gradient_tolerance = opt_of(self.gradient_tolerance);
+        c.parameter_tolerance = opt_of(self.parameter_tolerance);
+        c.predicted_reduction_tolerance = opt_of(self.predicted_reduction_tolerance);
+        c.min_diagonal = opt_of(self.min_diagonal);
+        c.time_limit = self.time_limit_seconds.has.then(|| {
+            std::time::Duration::from_secs_f64(self.time_limit_seconds.v)
+        });
         c
     }
 }
@@ -178,7 +257,7 @@ pub struct CLmResult {
     pub iterations: u32,
     pub accepted_iterations: u32,
     pub status: i32,
-    pub lambda: f64,
+    pub final_lambda: f64,
 }
 
 #[no_mangle]
@@ -229,7 +308,7 @@ pub unsafe extern "C" fn fit_solve_dense(
     let c = (*cfg).to_config();
     *out = CLmResult {
         start_cost: 0.0, end_cost: 0.0, iterations: 0,
-        accepted_iterations: 0, status: -1, lambda: 0.0,
+        accepted_iterations: 0, status: -1, final_lambda: 0.0,
     };
     match catch_unwind(AssertUnwindSafe(|| hh.model.solve_dense(&c))) {
         Ok(Ok(r)) => {
@@ -240,7 +319,7 @@ pub unsafe extern "C" fn fit_solve_dense(
                 iterations: r.iterations as u32,
                 accepted_iterations: r.accepted_iterations as u32,
                 status: code,
-                lambda: r.final_lambda,
+                final_lambda: r.final_lambda,
             };
             set_text(hh, "");
             code
@@ -271,7 +350,7 @@ pub unsafe extern "C" fn fit_solve_sparse(
     let c = (*cfg).to_config();
     *out = CLmResult {
         start_cost: 0.0, end_cost: 0.0, iterations: 0,
-        accepted_iterations: 0, status: -1, lambda: 0.0,
+        accepted_iterations: 0, status: -1, final_lambda: 0.0,
     };
     match catch_unwind(AssertUnwindSafe(|| hh.model.solve_sparse(&c))) {
         Ok(Ok(r)) => {
@@ -282,7 +361,7 @@ pub unsafe extern "C" fn fit_solve_sparse(
                 iterations: r.iterations as u32,
                 accepted_iterations: r.accepted_iterations as u32,
                 status: code,
-                lambda: r.final_lambda,
+                final_lambda: r.final_lambda,
             };
             set_text(hh, "");
             code
@@ -334,7 +413,7 @@ pub unsafe extern "C" fn fit_assemble_covariance(h: *mut FitHandle, mode: u32) -
 /// dim, or -1 (error) / -2 (panic) / -3 (no assembly or buffer too
 /// small), text via fit_last_error.
 #[no_mangle]
-pub unsafe extern "C" fn n_marginal_cov(
+pub unsafe extern "C" fn fit_n_marginal_cov(
     h: *mut FitHandle,
     p: *const N,
     out: *mut f64,
@@ -375,7 +454,7 @@ pub unsafe extern "C" fn n_marginal_cov(
 /// dim, or -1 (error) / -2 (panic) / -3 (no assembly or buffer too
 /// small), text via fit_last_error.
 #[no_mangle]
-pub unsafe extern "C" fn pose_marginal_cov(
+pub unsafe extern "C" fn fit_pose_marginal_cov(
     h: *mut FitHandle,
     p: *const Pose,
     out: *mut f64,
@@ -555,164 +634,164 @@ pub unsafe extern "C" fn fit_marks_get(p: *mut FitHandle, r: u32) -> *mut N {
     &mut m[arael::refs::Ref::from_raw(r)] as *mut N
 }
 #[no_mangle]
-pub unsafe extern "C" fn gps_obs_pos(p: *const GpsObs) -> CVec3F64 {
+pub unsafe extern "C" fn fit_gps_obs_pos(p: *const GpsObs) -> CVec3F64 {
     (*p).pos.into()
 }
 #[no_mangle]
-pub unsafe extern "C" fn gps_obs_set_pos(p: *mut GpsObs, v: CVec3F64) {
+pub unsafe extern "C" fn fit_gps_obs_set_pos(p: *mut GpsObs, v: CVec3F64) {
     (*p).pos = v.into();
 }
 #[no_mangle]
-pub unsafe extern "C" fn gps_obs_isigma(p: *const GpsObs) -> f32 {
+pub unsafe extern "C" fn fit_gps_obs_isigma(p: *const GpsObs) -> f32 {
     (*p).isigma
 }
 #[no_mangle]
-pub unsafe extern "C" fn gps_obs_set_isigma(p: *mut GpsObs, v: f32) {
+pub unsafe extern "C" fn fit_gps_obs_set_isigma(p: *mut GpsObs, v: f32) {
     (*p).isigma = v;
 }
 #[no_mangle]
-pub unsafe extern "C" fn info_has_gps(p: *const Info) -> bool {
+pub unsafe extern "C" fn fit_info_has_gps(p: *const Info) -> bool {
     (*p).gps.is_some()
 }
 #[no_mangle]
-pub unsafe extern "C" fn info_make_gps(p: *mut Info) -> *mut GpsObs {
+pub unsafe extern "C" fn fit_info_make_gps(p: *mut Info) -> *mut GpsObs {
     let a = &mut (*p).gps;
     *a = Some(Default::default());
     a.as_mut().unwrap() as *mut GpsObs
 }
 #[no_mangle]
-pub unsafe extern "C" fn info_clear_gps(p: *mut Info) {
+pub unsafe extern "C" fn fit_info_clear_gps(p: *mut Info) {
     (*p).gps = None;
 }
 #[no_mangle]
-pub unsafe extern "C" fn info_gps(p: *mut Info) -> *mut GpsObs {
+pub unsafe extern "C" fn fit_info_gps(p: *mut Info) -> *mut GpsObs {
     match &mut (*p).gps {
         Some(e) => e as *mut GpsObs,
         None => std::ptr::null_mut(),
     }
 }
 #[no_mangle]
-pub unsafe extern "C" fn n_v(p: *const N) -> f64 {
+pub unsafe extern "C" fn fit_n_v(p: *const N) -> f64 {
     (*p).v.value
 }
 #[no_mangle]
-pub unsafe extern "C" fn n_set_v(p: *mut N, v: f64) {
+pub unsafe extern "C" fn fit_n_set_v(p: *mut N, v: f64) {
     (*p).v.value = v;
 }
 #[no_mangle]
-pub unsafe extern "C" fn n_v_optimize(p: *const N) -> bool {
+pub unsafe extern "C" fn fit_n_v_optimize(p: *const N) -> bool {
     (*p).v.optimize
 }
 #[no_mangle]
-pub unsafe extern "C" fn n_v_set_optimize(p: *mut N, v: bool) {
+pub unsafe extern "C" fn fit_n_v_set_optimize(p: *mut N, v: bool) {
     (*p).v.optimize = v;
 }
 #[no_mangle]
-pub unsafe extern "C" fn n_t(p: *const N) -> f64 {
+pub unsafe extern "C" fn fit_n_t(p: *const N) -> f64 {
     (*p).t
 }
 #[no_mangle]
-pub unsafe extern "C" fn n_set_t(p: *mut N, v: f64) {
+pub unsafe extern "C" fn fit_n_set_t(p: *mut N, v: f64) {
     (*p).t = v;
 }
 #[no_mangle]
-pub unsafe extern "C" fn n_w(p: *const N) -> f64 {
+pub unsafe extern "C" fn fit_n_w(p: *const N) -> f64 {
     (*p).w
 }
 #[no_mangle]
-pub unsafe extern "C" fn n_set_w(p: *mut N, v: f64) {
+pub unsafe extern "C" fn fit_n_set_w(p: *mut N, v: f64) {
     (*p).w = v;
 }
 #[no_mangle]
-pub unsafe extern "C" fn obs_x(p: *const Obs) -> f64 {
+pub unsafe extern "C" fn fit_obs_x(p: *const Obs) -> f64 {
     (*p).x
 }
 #[no_mangle]
-pub unsafe extern "C" fn obs_set_x(p: *mut Obs, v: f64) {
+pub unsafe extern "C" fn fit_obs_set_x(p: *mut Obs, v: f64) {
     (*p).x = v;
 }
 #[no_mangle]
-pub unsafe extern "C" fn obs_y(p: *const Obs) -> f64 {
+pub unsafe extern "C" fn fit_obs_y(p: *const Obs) -> f64 {
     (*p).y
 }
 #[no_mangle]
-pub unsafe extern "C" fn obs_set_y(p: *mut Obs, v: f64) {
+pub unsafe extern "C" fn fit_obs_set_y(p: *mut Obs, v: f64) {
     (*p).y = v;
 }
 #[no_mangle]
-pub unsafe extern "C" fn pose_ea(p: *const Pose) -> CVec3F64 {
+pub unsafe extern "C" fn fit_pose_ea(p: *const Pose) -> CVec3F64 {
     (*p).ea.value.into()
 }
 #[no_mangle]
-pub unsafe extern "C" fn pose_set_ea(p: *mut Pose, v: CVec3F64) {
+pub unsafe extern "C" fn fit_pose_set_ea(p: *mut Pose, v: CVec3F64) {
     (*p).ea.value = v.into();
 }
 #[no_mangle]
-pub unsafe extern "C" fn pose_ea_optimize(p: *const Pose) -> bool {
+pub unsafe extern "C" fn fit_pose_ea_optimize(p: *const Pose) -> bool {
     (*p).ea.optimize
 }
 #[no_mangle]
-pub unsafe extern "C" fn pose_ea_set_optimize(p: *mut Pose, v: bool) {
+pub unsafe extern "C" fn fit_pose_ea_set_optimize(p: *mut Pose, v: bool) {
     (*p).ea.optimize = v;
 }
 #[no_mangle]
-pub unsafe extern "C" fn pose_pos(p: *const Pose) -> CVec3F64 {
+pub unsafe extern "C" fn fit_pose_pos(p: *const Pose) -> CVec3F64 {
     (*p).pos.value.into()
 }
 #[no_mangle]
-pub unsafe extern "C" fn pose_set_pos(p: *mut Pose, v: CVec3F64) {
+pub unsafe extern "C" fn fit_pose_set_pos(p: *mut Pose, v: CVec3F64) {
     (*p).pos.value = v.into();
 }
 #[no_mangle]
-pub unsafe extern "C" fn pose_pos_optimize(p: *const Pose) -> bool {
+pub unsafe extern "C" fn fit_pose_pos_optimize(p: *const Pose) -> bool {
     (*p).pos.optimize
 }
 #[no_mangle]
-pub unsafe extern "C" fn pose_pos_set_optimize(p: *mut Pose, v: bool) {
+pub unsafe extern "C" fn fit_pose_pos_set_optimize(p: *mut Pose, v: bool) {
     (*p).pos.optimize = v;
 }
 #[no_mangle]
-pub unsafe extern "C" fn pose_target(p: *const Pose) -> CVec3F64 {
+pub unsafe extern "C" fn fit_pose_target(p: *const Pose) -> CVec3F64 {
     (*p).target.into()
 }
 #[no_mangle]
-pub unsafe extern "C" fn pose_set_target(p: *mut Pose, v: CVec3F64) {
+pub unsafe extern "C" fn fit_pose_set_target(p: *mut Pose, v: CVec3F64) {
     (*p).target = v.into();
 }
 #[no_mangle]
-pub unsafe extern "C" fn pose_info_ptr(p: *mut Pose) -> *mut Info {
+pub unsafe extern "C" fn fit_pose_info_ptr(p: *mut Pose) -> *mut Info {
     let a = &mut (*p).info;
     a as *mut Info
 }
 #[no_mangle]
-pub unsafe extern "C" fn tie_a(p: *const Tie) -> u32 {
+pub unsafe extern "C" fn fit_tie_a(p: *const Tie) -> u32 {
     (*p).a.to_raw()
 }
 #[no_mangle]
-pub unsafe extern "C" fn tie_set_a(p: *mut Tie, v: u32) {
+pub unsafe extern "C" fn fit_tie_set_a(p: *mut Tie, v: u32) {
     (*p).a = arael::refs::Ref::from_raw(v);
 }
 #[no_mangle]
-pub unsafe extern "C" fn tie_b(p: *const Tie) -> u32 {
+pub unsafe extern "C" fn fit_tie_b(p: *const Tie) -> u32 {
     (*p).b.to_raw()
 }
 #[no_mangle]
-pub unsafe extern "C" fn tie_set_b(p: *mut Tie, v: u32) {
+pub unsafe extern "C" fn fit_tie_set_b(p: *mut Tie, v: u32) {
     (*p).b = arael::refs::Ref::from_raw(v);
 }
 #[no_mangle]
-pub unsafe extern "C" fn tie_d(p: *const Tie) -> CVec3F64 {
+pub unsafe extern "C" fn fit_tie_d(p: *const Tie) -> CVec3F64 {
     (*p).d.into()
 }
 #[no_mangle]
-pub unsafe extern "C" fn tie_set_d(p: *mut Tie, v: CVec3F64) {
+pub unsafe extern "C" fn fit_tie_set_d(p: *mut Tie, v: CVec3F64) {
     (*p).d = v.into();
 }
 #[no_mangle]
-pub unsafe extern "C" fn tie_w(p: *const Tie) -> f64 {
+pub unsafe extern "C" fn fit_tie_w(p: *const Tie) -> f64 {
     (*p).w
 }
 #[no_mangle]
-pub unsafe extern "C" fn tie_set_w(p: *mut Tie, v: f64) {
+pub unsafe extern "C" fn fit_tie_set_w(p: *mut Tie, v: f64) {
     (*p).w = v;
 }

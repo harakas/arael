@@ -508,34 +508,113 @@ fn panic_text(p: Box<dyn std::any::Any + Send>) -> String {{
     }}
 }}
 
-/// Sentinel-based config: UINT32_MAX / NaN fields keep the preset's
-/// value (0 = defaults, 1 = conservative, 2 = well_conditioned).
+/// C mirror of `arael::option<T>` ({{has, value}}; layouts must match).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct COptF {{
+    pub has: bool,
+    pub v: {fp},
+}}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct COptSeconds {{
+    pub has: bool,
+    pub v: f64,
+}}
+
+fn copt(o: Option<{fp}>) -> COptF {{
+    match o {{
+        Some(v) => COptF {{ has: true, v }},
+        None => COptF {{ has: false, v: 0.0 }},
+    }}
+}}
+
+fn opt_of(c: COptF) -> Option<{fp}> {{
+    c.has.then_some(c.v)
+}}
+
+/// The solver config as REAL values: constructed by
+/// {root_sn}_lm_config (which copies them out of the actual Rust
+/// LmConfig preset), edited freely, passed back whole. The preset tag
+/// stays the base for the Rust fields this struct does not expose
+/// (lambda driver, observer, gather_timing). Field order is C ABI.
 #[repr(C)]
 pub struct CLmConfig {{
     pub preset: u32,
     pub max_iters: u32,
     pub min_iters: u32,
     pub patience: u32,
+    pub num_threads: u32,
+    pub verbose: bool,
     pub abs_precision: {fp},
     pub rel_precision: {fp},
     pub initial_lambda: {fp},
     pub cost_threshold: {fp},
+    pub lambda_floor: {fp},
+    pub gradient_tolerance: COptF,
+    pub parameter_tolerance: COptF,
+    pub predicted_reduction_tolerance: COptF,
+    pub min_diagonal: COptF,
+    pub time_limit_seconds: COptSeconds,
+}}
+
+fn preset_config(preset: u32) -> LmConfig<{fp}> {{
+    match preset {{
+        1 => LmConfig::conservative(),
+        2 => LmConfig::well_conditioned(),
+        _ => LmConfig::default(),
+    }}
+}}
+
+/// Fill `out` with the preset's actual Rust values (0 = defaults,
+/// 1 = conservative, 2 = well_conditioned).
+#[no_mangle]
+pub unsafe extern \"C\" fn {root_sn}_lm_config(preset: u32, out: *mut CLmConfig) {{
+    let c = preset_config(preset);
+    *out = CLmConfig {{
+        preset,
+        max_iters: c.max_iters as u32,
+        min_iters: c.min_iters as u32,
+        patience: c.patience as u32,
+        num_threads: c.num_threads as u32,
+        verbose: c.verbose,
+        abs_precision: c.abs_precision,
+        rel_precision: c.rel_precision,
+        initial_lambda: c.initial_lambda,
+        cost_threshold: c.cost_threshold,
+        lambda_floor: c.lambda_floor,
+        gradient_tolerance: copt(c.gradient_tolerance),
+        parameter_tolerance: copt(c.parameter_tolerance),
+        predicted_reduction_tolerance: copt(c.predicted_reduction_tolerance),
+        min_diagonal: copt(c.min_diagonal),
+        time_limit_seconds: match c.time_limit {{
+            Some(d) => COptSeconds {{ has: true, v: d.as_secs_f64() }},
+            None => COptSeconds {{ has: false, v: 0.0 }},
+        }},
+    }};
 }}
 
 impl CLmConfig {{
     fn to_config(&self) -> LmConfig<{fp}> {{
-        let mut c: LmConfig<{fp}> = match self.preset {{
-            1 => LmConfig::conservative(),
-            2 => LmConfig::well_conditioned(),
-            _ => LmConfig::default(),
-        }};
-        if self.max_iters != u32::MAX {{ c.max_iters = self.max_iters as usize; }}
-        if self.min_iters != u32::MAX {{ c.min_iters = self.min_iters as usize; }}
-        if self.patience != u32::MAX {{ c.patience = self.patience as usize; }}
-        if !self.abs_precision.is_nan() {{ c.abs_precision = self.abs_precision; }}
-        if !self.rel_precision.is_nan() {{ c.rel_precision = self.rel_precision; }}
-        if !self.initial_lambda.is_nan() {{ c.initial_lambda = self.initial_lambda; }}
-        if !self.cost_threshold.is_nan() {{ c.cost_threshold = self.cost_threshold; }}
+        let mut c = preset_config(self.preset);
+        c.max_iters = self.max_iters as usize;
+        c.min_iters = self.min_iters as usize;
+        c.patience = self.patience as usize;
+        c.num_threads = self.num_threads as usize;
+        c.verbose = self.verbose;
+        c.abs_precision = self.abs_precision;
+        c.rel_precision = self.rel_precision;
+        c.initial_lambda = self.initial_lambda;
+        c.cost_threshold = self.cost_threshold;
+        c.lambda_floor = self.lambda_floor;
+        c.gradient_tolerance = opt_of(self.gradient_tolerance);
+        c.parameter_tolerance = opt_of(self.parameter_tolerance);
+        c.predicted_reduction_tolerance = opt_of(self.predicted_reduction_tolerance);
+        c.min_diagonal = opt_of(self.min_diagonal);
+        c.time_limit = self.time_limit_seconds.has.then(|| {{
+            std::time::Duration::from_secs_f64(self.time_limit_seconds.v)
+        }});
         c
     }}
 }}
@@ -547,7 +626,7 @@ pub struct CLmResult {{
     pub iterations: u32,
     pub accepted_iterations: u32,
     pub status: i32,
-    pub lambda: {fp},
+    pub final_lambda: {fp},
 }}
 
 #[no_mangle]
@@ -603,7 +682,7 @@ pub unsafe extern \"C\" fn {root_sn}_{method}(
     let c = (*cfg).to_config();
     *out = CLmResult {{
         start_cost: 0.0, end_cost: 0.0, iterations: 0,
-        accepted_iterations: 0, status: -1, lambda: 0.0,
+        accepted_iterations: 0, status: -1, final_lambda: 0.0,
     }};
     match catch_unwind(AssertUnwindSafe(|| hh.model.{method}(&c))) {{
         Ok(Ok(r)) => {{
@@ -614,7 +693,7 @@ pub unsafe extern \"C\" fn {root_sn}_{method}(
                 iterations: r.iterations as u32,
                 accepted_iterations: r.accepted_iterations as u32,
                 status: code,
-                lambda: r.final_lambda,
+                final_lambda: r.final_lambda,
             }};
             set_text(hh, \"\");
             code
@@ -671,7 +750,7 @@ pub unsafe extern \"C\" fn {root_sn}_assemble_covariance(h: *mut {handle}, mode:
         if t.role != "entity" || t.param_count == 0 {
             continue;
         }
-        let sn = snake(tn);
+        let sn = format!("{root_sn}_{}", snake(tn));
         out.push_str(&format!(
 "
 /// Row-major dim x dim marginal covariance (f64) of one `{tn}`; returns
@@ -723,9 +802,11 @@ pub unsafe extern \"C\" fn {sn}_marginal_cov(
         field_accessors(&mut out, model, &root_sn, &handle, "(*p).model", root, f)?;
     }
 
-    // Every surfaced type's fields over raw pointers.
+    // Every surfaced type's fields over raw pointers. Symbols carry
+    // the root prefix so several generated models link into one binary
+    // without collisions.
     for (tn, t) in surfaced_types(model) {
-        let sn = snake(tn);
+        let sn = format!("{root_sn}_{}", snake(tn));
         for f in &t.fields {
             field_accessors(&mut out, model, &sn, tn, "(*p)", tn, f)?;
         }

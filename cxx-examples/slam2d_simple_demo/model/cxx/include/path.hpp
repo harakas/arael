@@ -6,84 +6,35 @@
 #include <cmath>
 #include "arael/math.hpp"
 #include "arael/result.hpp"
+#include "arael/solver.hpp"
 
 namespace arael {
 
-/// Why a solve stopped. Non-negative codes come from the solver;
-/// SolverFailed carries text via last_error(), Panicked likewise.
-enum class LmStatus : int32_t {
-    Converged = 0,
-    CostThreshold = 1,
-    MaxIterations = 2,
-    GradientTolerance = 3,
-    ParameterTolerance = 4,
-    PredictedReduction = 5,
-    LambdaCeiling = 6,
-    DriverTerminated = 7,
-    ObserverTerminated = 8,
-    TimeLimit = 9,
-    RetryBudgetExhausted = 10,
-    Aborted = 11,
-    SolverFailed = -1,
-    Panicked = -2,
+/// Instantiations of the shared solver surface (arael/solver.hpp) at
+/// this model's precision, plus the config constructor that fetches
+/// the preset's actual Rust values through this root's FFI.
+using LmResult = LmResultT<float>;
+using SolveResult = SolveResultT<float>;
+
+struct LmConfig : LmConfigT<float> {
+    LmConfig(LmPreset p = LmPreset::Defaults);
+    static LmConfig defaults() { return LmConfig(LmPreset::Defaults); }
+    static LmConfig conservative() { return LmConfig(LmPreset::Conservative); }
+    static LmConfig well_conditioned() { return LmConfig(LmPreset::WellConditioned); }
 };
 
-/// Sentinel-based: fields left at UINT32_MAX / NaN keep the preset's
-/// value (preset 0 = solver defaults, 1 = conservative,
-/// 2 = well_conditioned).
-struct LmConfig {
-    uint32_t preset = 0;
-    uint32_t max_iters = UINT32_MAX;
-    uint32_t min_iters = UINT32_MAX;
-    uint32_t patience = UINT32_MAX;
-    float abs_precision = NAN;
-    float rel_precision = NAN;
-    float initial_lambda = NAN;
-    float cost_threshold = NAN;
-
-    static LmConfig defaults() { return LmConfig{}; }
-    static LmConfig conservative() { LmConfig c; c.preset = 1; return c; }
-    static LmConfig well_conditioned() { LmConfig c; c.preset = 2; return c; }
-};
-
-struct LmResult {
-    float start_cost;
-    float end_cost;
-    uint32_t iterations;
-    uint32_t accepted_iterations;
-    LmStatus status;
-    float lambda;
-};
-
-/// The Err side of a solve: SolverFailed or Panicked, with the text
-/// from last_error() (valid until the next call on the model).
-struct SolveError {
-    LmStatus status;
-    const char* message;
-};
-
-using SolveResult = result<LmResult, SolveError>;
-
-/// How much covariance to prepare (mirrors arael's CovMode).
-enum class CovMode : uint32_t {
-    PerQuery = 0,
-    AllMarginals = 1,
-    TriDiagonal = 2,
-};
-
-/// A failed covariance operation; message points at last_error().
-struct CovError {
-    const char* message;
-};
-
-/// Typed handle into the collection that issued it.
-struct Ref_Frine { uint32_t raw; };
-/// Typed handle into the collection that issued it.
-struct Ref_Landmark { uint32_t raw; };
-/// Typed handle into the collection that issued it.
-struct Ref_Pose { uint32_t raw; };
-/// Typed handle into the collection that issued it.
-struct Ref_PosePair { uint32_t raw; };
+/// Typed handle into the collection that issued it -- the C++
+/// spelling of Rust's `Ref<Frine>`.
+struct FrineRef { uint32_t raw; };
+/// Typed handle into the collection that issued it -- the C++
+/// spelling of Rust's `Ref<Landmark>`.
+struct LandmarkRef { uint32_t raw; };
+/// Typed handle into the collection that issued it -- the C++
+/// spelling of Rust's `Ref<Pose>`.
+struct PoseRef { uint32_t raw; };
+/// Typed handle into the collection that issued it -- the C++
+/// spelling of Rust's `Ref<PosePair>`.
+struct PosePairRef { uint32_t raw; };
 
 namespace ffi {
 struct Path;
@@ -93,42 +44,42 @@ struct Pose;
 struct PosePair;
 
 extern "C" {
-uint32_t frine_pose(const Frine*);
-void frine_set_pose(Frine*, uint32_t);
-float frine_bearing(const Frine*);
-void frine_set_bearing(Frine*, float);
-float frine_isigma(const Frine*);
-void frine_set_isigma(Frine*, float);
-vect2f landmark_pos(const Landmark*);
-void landmark_set_pos(Landmark*, vect2f);
-bool landmark_pos_optimize(const Landmark*);
-void landmark_pos_set_optimize(Landmark*, bool);
-uint32_t landmark_frines_len(const Landmark*);
-Frine* landmark_frines_push(Landmark*);
-Frine* landmark_frines_at(Landmark*, uint32_t);
-vect2f pose_pos(const Pose*);
-void pose_set_pos(Pose*, vect2f);
-bool pose_pos_optimize(const Pose*);
-void pose_pos_set_optimize(Pose*, bool);
-float pose_gamma(const Pose*);
-void pose_set_gamma(Pose*, float);
-bool pose_gamma_optimize(const Pose*);
-void pose_gamma_set_optimize(Pose*, bool);
-vect2f pose_delta_pos(const Pose*);
-void pose_set_delta_pos(Pose*, vect2f);
-float pose_delta_gamma(const Pose*);
-void pose_set_delta_gamma(Pose*, float);
-float pose_delta_pos_isigma(const Pose*);
-void pose_set_delta_pos_isigma(Pose*, float);
-float pose_delta_gamma_isigma(const Pose*);
-void pose_set_delta_gamma_isigma(Pose*, float);
-uint32_t pose_pair_prev(const PosePair*);
-void pose_pair_set_prev(PosePair*, uint32_t);
-uint32_t pose_pair_cur(const PosePair*);
-void pose_pair_set_cur(PosePair*, uint32_t);
+uint32_t path_frine_pose(const Frine*);
+void path_frine_set_pose(Frine*, uint32_t);
+float path_frine_bearing(const Frine*);
+void path_frine_set_bearing(Frine*, float);
+float path_frine_isigma(const Frine*);
+void path_frine_set_isigma(Frine*, float);
+vect2f path_landmark_pos(const Landmark*);
+void path_landmark_set_pos(Landmark*, vect2f);
+bool path_landmark_pos_optimize(const Landmark*);
+void path_landmark_pos_set_optimize(Landmark*, bool);
+uint32_t path_landmark_frines_len(const Landmark*);
+Frine* path_landmark_frines_push(Landmark*);
+Frine* path_landmark_frines_at(Landmark*, uint32_t);
+vect2f path_pose_pos(const Pose*);
+void path_pose_set_pos(Pose*, vect2f);
+bool path_pose_pos_optimize(const Pose*);
+void path_pose_pos_set_optimize(Pose*, bool);
+float path_pose_gamma(const Pose*);
+void path_pose_set_gamma(Pose*, float);
+bool path_pose_gamma_optimize(const Pose*);
+void path_pose_gamma_set_optimize(Pose*, bool);
+vect2f path_pose_delta_pos(const Pose*);
+void path_pose_set_delta_pos(Pose*, vect2f);
+float path_pose_delta_gamma(const Pose*);
+void path_pose_set_delta_gamma(Pose*, float);
+float path_pose_delta_pos_isigma(const Pose*);
+void path_pose_set_delta_pos_isigma(Pose*, float);
+float path_pose_delta_gamma_isigma(const Pose*);
+void path_pose_set_delta_gamma_isigma(Pose*, float);
+uint32_t path_pose_pair_prev(const PosePair*);
+void path_pose_pair_set_prev(PosePair*, uint32_t);
+uint32_t path_pose_pair_cur(const PosePair*);
+void path_pose_pair_set_cur(PosePair*, uint32_t);
 int32_t path_assemble_covariance(Path*, uint32_t);
-int32_t landmark_marginal_cov(Path*, const Landmark*, double*, uint32_t);
-int32_t pose_marginal_cov(Path*, const Pose*, double*, uint32_t);
+int32_t path_landmark_marginal_cov(Path*, const Landmark*, double*, uint32_t);
+int32_t path_pose_marginal_cov(Path*, const Pose*, double*, uint32_t);
 uint32_t path_poses_len(const Path*);
 Pose* path_poses_push_back(Path*);
 Pose* path_poses_push_front(Path*);
@@ -142,6 +93,7 @@ uint32_t path_landmarks_len(const Path*);
 uint32_t path_landmarks_push(Path*);
 bool path_landmarks_remove(Path*, uint32_t);
 Landmark* path_landmarks_get(Path*, uint32_t);
+void path_lm_config(uint32_t, LmConfig*);
 Path* path_new(void);
 void path_free(Path*);
 const char* path_last_error(const Path*);
@@ -151,96 +103,104 @@ int32_t path_solve_sparse(Path*, const LmConfig*, LmResult*);
 }
 } // namespace ffi
 
-/// A `Frine` in its owner's storage; thin pointer wrapper.
-class FrineRef {
+inline LmConfig::LmConfig(LmPreset p) {
+    ffi::path_lm_config(uint32_t(p), this);
+}
+
+/// A `Frine` in its owner's storage; a thin pointer wrapper (validity
+/// follows the storage -- see the owning container).
+class Frine {
 public:
-    FrineRef() : h_(nullptr) {}
-    explicit FrineRef(ffi::Frine* p) : h_(p) {}
+    Frine() : h_(nullptr) {}
+    explicit Frine(ffi::Frine* p) : h_(p) {}
     /// False when default-constructed (e.g. inside an empty option).
     bool valid() const { return h_ != nullptr; }
-    /// The underlying C pointer (covariance queries take it).
+    /// The underlying C pointer -- the relaxed escape hatch.
     ffi::Frine* raw() const { return h_; }
-    Ref_Pose pose() const { return Ref_Pose{ffi::frine_pose(h_)}; }
-    void set_pose(Ref_Pose r) { ffi::frine_set_pose(h_, r.raw); }
-    float bearing() const { return ffi::frine_bearing(h_); }
-    void set_bearing(float v) { ffi::frine_set_bearing(h_, v); }
-    float isigma() const { return ffi::frine_isigma(h_); }
-    void set_isigma(float v) { ffi::frine_set_isigma(h_, v); }
+    PoseRef pose() const { return PoseRef{ffi::path_frine_pose(h_)}; }
+    void set_pose(PoseRef r) { ffi::path_frine_set_pose(h_, r.raw); }
+    float bearing() const { return ffi::path_frine_bearing(h_); }
+    void set_bearing(float v) { ffi::path_frine_set_bearing(h_, v); }
+    float isigma() const { return ffi::path_frine_isigma(h_); }
+    void set_isigma(float v) { ffi::path_frine_set_isigma(h_, v); }
 private:
     ffi::Frine* h_;
 };
 
 /// `Landmark.frines`. std::vec::Vec storage: pushes may MOVE elements -- re-fetch element refs after a push.
-class LandmarkFrinesView {
+class LandmarkFrinesVec {
 public:
-    explicit LandmarkFrinesView(ffi::Landmark* h) : h_(h) {}
-    uint32_t size() const { return ffi::landmark_frines_len(h_); }
-    FrineRef push() { return FrineRef(ffi::landmark_frines_push(h_)); }
-    FrineRef operator[](uint32_t i) { return FrineRef(ffi::landmark_frines_at(h_, i)); }
+    explicit LandmarkFrinesVec(ffi::Landmark* h) : h_(h) {}
+    uint32_t size() const { return ffi::path_landmark_frines_len(h_); }
+    Frine push() { return Frine(ffi::path_landmark_frines_push(h_)); }
+    Frine operator[](uint32_t i) { return Frine(ffi::path_landmark_frines_at(h_, i)); }
 private:
     ffi::Landmark* h_;
 };
 
-/// A `Landmark` in its owner's storage; thin pointer wrapper.
-class LandmarkRef {
+/// A `Landmark` in its owner's storage; a thin pointer wrapper (validity
+/// follows the storage -- see the owning container).
+class Landmark {
 public:
-    LandmarkRef() : h_(nullptr) {}
-    explicit LandmarkRef(ffi::Landmark* p) : h_(p) {}
+    Landmark() : h_(nullptr) {}
+    explicit Landmark(ffi::Landmark* p) : h_(p) {}
     /// False when default-constructed (e.g. inside an empty option).
     bool valid() const { return h_ != nullptr; }
-    /// The underlying C pointer (covariance queries take it).
+    /// The underlying C pointer -- the relaxed escape hatch.
     ffi::Landmark* raw() const { return h_; }
-    vect2f pos() const { return ffi::landmark_pos(h_); }
-    void set_pos(vect2f v) { ffi::landmark_set_pos(h_, v); }
-    bool pos_optimize() const { return ffi::landmark_pos_optimize(h_); }
-    void set_pos_optimize(bool v) { ffi::landmark_pos_set_optimize(h_, v); }
-    LandmarkFrinesView frines() { return LandmarkFrinesView(h_); }
+    vect2f pos() const { return ffi::path_landmark_pos(h_); }
+    void set_pos(vect2f v) { ffi::path_landmark_set_pos(h_, v); }
+    bool pos_optimize() const { return ffi::path_landmark_pos_optimize(h_); }
+    void set_pos_optimize(bool v) { ffi::path_landmark_pos_set_optimize(h_, v); }
+    LandmarkFrinesVec frines() { return LandmarkFrinesVec(h_); }
 private:
     ffi::Landmark* h_;
 };
 
-/// A `Pose` in its owner's storage; thin pointer wrapper.
-class PoseRef {
+/// A `Pose` in its owner's storage; a thin pointer wrapper (validity
+/// follows the storage -- see the owning container).
+class Pose {
 public:
-    PoseRef() : h_(nullptr) {}
-    explicit PoseRef(ffi::Pose* p) : h_(p) {}
+    Pose() : h_(nullptr) {}
+    explicit Pose(ffi::Pose* p) : h_(p) {}
     /// False when default-constructed (e.g. inside an empty option).
     bool valid() const { return h_ != nullptr; }
-    /// The underlying C pointer (covariance queries take it).
+    /// The underlying C pointer -- the relaxed escape hatch.
     ffi::Pose* raw() const { return h_; }
-    vect2f pos() const { return ffi::pose_pos(h_); }
-    void set_pos(vect2f v) { ffi::pose_set_pos(h_, v); }
-    bool pos_optimize() const { return ffi::pose_pos_optimize(h_); }
-    void set_pos_optimize(bool v) { ffi::pose_pos_set_optimize(h_, v); }
-    float gamma() const { return ffi::pose_gamma(h_); }
-    void set_gamma(float v) { ffi::pose_set_gamma(h_, v); }
-    bool gamma_optimize() const { return ffi::pose_gamma_optimize(h_); }
-    void set_gamma_optimize(bool v) { ffi::pose_gamma_set_optimize(h_, v); }
-    vect2f delta_pos() const { return ffi::pose_delta_pos(h_); }
-    void set_delta_pos(vect2f v) { ffi::pose_set_delta_pos(h_, v); }
-    float delta_gamma() const { return ffi::pose_delta_gamma(h_); }
-    void set_delta_gamma(float v) { ffi::pose_set_delta_gamma(h_, v); }
-    float delta_pos_isigma() const { return ffi::pose_delta_pos_isigma(h_); }
-    void set_delta_pos_isigma(float v) { ffi::pose_set_delta_pos_isigma(h_, v); }
-    float delta_gamma_isigma() const { return ffi::pose_delta_gamma_isigma(h_); }
-    void set_delta_gamma_isigma(float v) { ffi::pose_set_delta_gamma_isigma(h_, v); }
+    vect2f pos() const { return ffi::path_pose_pos(h_); }
+    void set_pos(vect2f v) { ffi::path_pose_set_pos(h_, v); }
+    bool pos_optimize() const { return ffi::path_pose_pos_optimize(h_); }
+    void set_pos_optimize(bool v) { ffi::path_pose_pos_set_optimize(h_, v); }
+    float gamma() const { return ffi::path_pose_gamma(h_); }
+    void set_gamma(float v) { ffi::path_pose_set_gamma(h_, v); }
+    bool gamma_optimize() const { return ffi::path_pose_gamma_optimize(h_); }
+    void set_gamma_optimize(bool v) { ffi::path_pose_gamma_set_optimize(h_, v); }
+    vect2f delta_pos() const { return ffi::path_pose_delta_pos(h_); }
+    void set_delta_pos(vect2f v) { ffi::path_pose_set_delta_pos(h_, v); }
+    float delta_gamma() const { return ffi::path_pose_delta_gamma(h_); }
+    void set_delta_gamma(float v) { ffi::path_pose_set_delta_gamma(h_, v); }
+    float delta_pos_isigma() const { return ffi::path_pose_delta_pos_isigma(h_); }
+    void set_delta_pos_isigma(float v) { ffi::path_pose_set_delta_pos_isigma(h_, v); }
+    float delta_gamma_isigma() const { return ffi::path_pose_delta_gamma_isigma(h_); }
+    void set_delta_gamma_isigma(float v) { ffi::path_pose_set_delta_gamma_isigma(h_, v); }
 private:
     ffi::Pose* h_;
 };
 
-/// A `PosePair` in its owner's storage; thin pointer wrapper.
-class PosePairRef {
+/// A `PosePair` in its owner's storage; a thin pointer wrapper (validity
+/// follows the storage -- see the owning container).
+class PosePair {
 public:
-    PosePairRef() : h_(nullptr) {}
-    explicit PosePairRef(ffi::PosePair* p) : h_(p) {}
+    PosePair() : h_(nullptr) {}
+    explicit PosePair(ffi::PosePair* p) : h_(p) {}
     /// False when default-constructed (e.g. inside an empty option).
     bool valid() const { return h_ != nullptr; }
-    /// The underlying C pointer (covariance queries take it).
+    /// The underlying C pointer -- the relaxed escape hatch.
     ffi::PosePair* raw() const { return h_; }
-    Ref_Pose prev() const { return Ref_Pose{ffi::pose_pair_prev(h_)}; }
-    void set_prev(Ref_Pose r) { ffi::pose_pair_set_prev(h_, r.raw); }
-    Ref_Pose cur() const { return Ref_Pose{ffi::pose_pair_cur(h_)}; }
-    void set_cur(Ref_Pose r) { ffi::pose_pair_set_cur(h_, r.raw); }
+    PoseRef prev() const { return PoseRef{ffi::path_pose_pair_prev(h_)}; }
+    void set_prev(PoseRef r) { ffi::path_pose_pair_set_prev(h_, r.raw); }
+    PoseRef cur() const { return PoseRef{ffi::path_pose_pair_cur(h_)}; }
+    void set_cur(PoseRef r) { ffi::path_pose_pair_set_cur(h_, r.raw); }
 private:
     ffi::PosePair* h_;
 };
@@ -252,15 +212,15 @@ class Covariance {
 public:
     Covariance() : h_(nullptr) {}
     explicit Covariance(ffi::Path* h) : h_(h) {}
-    result<matrix2d, CovError> marginal(const LandmarkRef& e) {
+    result<matrix2d, CovError> marginal(const Landmark& e) {
         double b[4];
-        if (ffi::landmark_marginal_cov(h_, e.raw(), b, 4) < 0) return fail<matrix2d>();
+        if (ffi::path_landmark_marginal_cov(h_, e.raw(), b, 4) < 0) return fail<matrix2d>();
         return result<matrix2d, CovError>::ok(
             matrix2d::from_elements(b[0], b[1], b[2], b[3]));
     }
-    result<matrix3d, CovError> marginal(const PoseRef& e) {
+    result<matrix3d, CovError> marginal(const Pose& e) {
         double b[9];
-        if (ffi::pose_marginal_cov(h_, e.raw(), b, 9) < 0) return fail<matrix3d>();
+        if (ffi::path_pose_marginal_cov(h_, e.raw(), b, 9) < 0) return fail<matrix3d>();
         return result<matrix3d, CovError>::ok(matrix3d::from_elements(
             b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8]));
     }
@@ -272,38 +232,38 @@ private:
 };
 
 /// `Path.poses`. Element pointers are STABLE across pushes (chunked storage).
-class PathPosesView {
+class PathPosesDeque {
 public:
-    explicit PathPosesView(ffi::Path* h) : h_(h) {}
+    explicit PathPosesDeque(ffi::Path* h) : h_(h) {}
     uint32_t size() const { return ffi::path_poses_len(h_); }
-    PoseRef push_back() { return PoseRef(ffi::path_poses_push_back(h_)); }
-    PoseRef push_front() { return PoseRef(ffi::path_poses_push_front(h_)); }
-    PoseRef operator[](uint32_t i) { return PoseRef(ffi::path_poses_at(h_, i)); }
-    Ref_Pose ref_at(uint32_t i) const { return Ref_Pose{ffi::path_poses_ref_at(h_, i)}; }
-    PoseRef get(Ref_Pose r) { return PoseRef(ffi::path_poses_get(h_, r.raw)); }
+    Pose push_back() { return Pose(ffi::path_poses_push_back(h_)); }
+    Pose push_front() { return Pose(ffi::path_poses_push_front(h_)); }
+    Pose operator[](uint32_t i) { return Pose(ffi::path_poses_at(h_, i)); }
+    PoseRef ref_at(uint32_t i) const { return PoseRef{ffi::path_poses_ref_at(h_, i)}; }
+    Pose get(PoseRef r) { return Pose(ffi::path_poses_get(h_, r.raw)); }
 private:
     ffi::Path* h_;
 };
 
 /// `Path.pose_pairs`. std::vec::Vec storage: pushes may MOVE elements -- re-fetch element refs after a push.
-class PathPosePairsView {
+class PathPosePairsVec {
 public:
-    explicit PathPosePairsView(ffi::Path* h) : h_(h) {}
+    explicit PathPosePairsVec(ffi::Path* h) : h_(h) {}
     uint32_t size() const { return ffi::path_pose_pairs_len(h_); }
-    PosePairRef push() { return PosePairRef(ffi::path_pose_pairs_push(h_)); }
-    PosePairRef operator[](uint32_t i) { return PosePairRef(ffi::path_pose_pairs_at(h_, i)); }
+    PosePair push() { return PosePair(ffi::path_pose_pairs_push(h_)); }
+    PosePair operator[](uint32_t i) { return PosePair(ffi::path_pose_pairs_at(h_, i)); }
 private:
     ffi::Path* h_;
 };
 
 /// `Path.landmarks`. Element pointers are STABLE across pushes (chunked storage).
-class PathLandmarksView {
+class PathLandmarksArena {
 public:
-    explicit PathLandmarksView(ffi::Path* h) : h_(h) {}
+    explicit PathLandmarksArena(ffi::Path* h) : h_(h) {}
     uint32_t size() const { return ffi::path_landmarks_len(h_); }
-    Ref_Landmark push() { return Ref_Landmark{ffi::path_landmarks_push(h_)}; }
-    bool remove(Ref_Landmark r) { return ffi::path_landmarks_remove(h_, r.raw); }
-    LandmarkRef get(Ref_Landmark r) { return LandmarkRef(ffi::path_landmarks_get(h_, r.raw)); }
+    LandmarkRef push() { return LandmarkRef{ffi::path_landmarks_push(h_)}; }
+    bool remove(LandmarkRef r) { return ffi::path_landmarks_remove(h_, r.raw); }
+    Landmark get(LandmarkRef r) { return Landmark(ffi::path_landmarks_get(h_, r.raw)); }
 private:
     ffi::Path* h_;
 };
@@ -325,9 +285,9 @@ public:
         return *this;
     }
 
-    PathPosesView poses() { return PathPosesView(h_); }
-    PathPosePairsView pose_pairs() { return PathPosePairsView(h_); }
-    PathLandmarksView landmarks() { return PathLandmarksView(h_); }
+    PathPosesDeque poses() { return PathPosesDeque(h_); }
+    PathPosePairsVec pose_pairs() { return PathPosePairsVec(h_); }
+    PathLandmarksArena landmarks() { return PathLandmarksArena(h_); }
 
     /// Ok(LmResult) for every healthy termination, Err(SolveError) for
     /// a solve failure (-1) or a caught panic (-2) -- the same split

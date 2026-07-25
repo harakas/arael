@@ -34,6 +34,23 @@ int main() {
     p("obs3_y", fit.obs()[3].y());
     p("item1_t", fit.items()[1].t());
 
+    // The config holds the preset's actual Rust values -- print every
+    // field so the Rust side can verify the layout end to end.
+    LmConfig defs;
+    p("cfg_abs", defs.abs_precision);
+    p("cfg_rel", defs.rel_precision);
+    pi("cfg_max_iters", defs.max_iters);
+    pi("cfg_min_iters", defs.min_iters);
+    pi("cfg_patience", defs.patience);
+    pi("cfg_threads", defs.num_threads);
+    pi("cfg_verbose", defs.verbose ? 1 : 0);
+    p("cfg_lambda", defs.initial_lambda);
+    p("cfg_cost_threshold", defs.cost_threshold);
+    p("cfg_lambda_floor", defs.lambda_floor);
+    pi("cfg_grad_has", defs.gradient_tolerance.has_value() ? 1 : 0);
+    pi("cfg_time_has", defs.time_limit_seconds.has_value() ? 1 : 0);
+    p("cfg_wc_lambda", LmConfig::well_conditioned().initial_lambda);
+
     LmConfig cfg;
     cfg.max_iters = 50;
     LmResult r = fit.solve_dense(cfg).value();
@@ -77,7 +94,7 @@ int main() {
     auto p1 = f3.poses().push_back();
     auto p2 = f3.poses().push_back();
     auto p0 = f3.poses().push_front();
-    PoseRef ps[3] = {p0, p1, p2};
+    Pose ps[3] = {p0, p1, p2};
     for (int i = 0; i < 3; i++) {
         ps[i].set_target(targets[i]);
         ps[i].set_pos({0.1 * i, -0.1 * i, 0.05});
