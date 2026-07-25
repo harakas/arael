@@ -26,6 +26,10 @@ pub type matrix3f = matrix3<f32>;
 /// 3x3 matrix with f64 elements.
 pub type matrix3d = matrix3<f64>;
 
+impl<T: Float> Default for matrix3<T> {
+    fn default() -> Self { matrix3::zero_matrix() }
+}
+
 impl<T: Float> ops::Index<usize> for matrix3<T> {
     type Output = vect3<T>;
     fn index(&self, index: usize) -> &vect3<T> {
@@ -513,6 +517,10 @@ pub type matrix2f = matrix2<f32>;
 /// 2x2 matrix with f64 elements.
 pub type matrix2d = matrix2<f64>;
 
+impl<T: Float> Default for matrix2<T> {
+    fn default() -> Self { matrix2::zero_matrix() }
+}
+
 impl<T: Float> ops::Index<usize> for matrix2<T> {
     type Output = vect2<T>;
     fn index(&self, index: usize) -> &vect2<T> {
@@ -766,6 +774,22 @@ pub use arael_sym::matrix2sym;
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn test_default_is_zero() {
+        let m3 = matrix3d::default();
+        let m2 = matrix2d::default();
+        for r in 0..3 {
+            for c in 0..3 {
+                assert_eq!(m3[r][c], 0.0);
+            }
+        }
+        for r in 0..2 {
+            for c in 0..2 {
+                assert_eq!(m2[r][c], 0.0);
+            }
+        }
+    }
 
     #[test]
     fn test_get_rotation_vector_small_round_trip() {
