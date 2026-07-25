@@ -136,11 +136,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "cxx-mr"
+version = "0.1.0"
+dependencies = [
+ "arael",
+]
+
+[[package]]
+name = "cxx-mr-capi"
+version = "0.1.0"
+dependencies = [
+ "arael",
+ "cxx-mr",
+]
+
+[[package]]
 name = "cxx-runner"
 version = "0.1.0"
 dependencies = [
  "arael",
  "cxx-fit",
+ "cxx-mr",
 ]
 
 [[package]]

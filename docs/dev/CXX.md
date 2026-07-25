@@ -753,9 +753,17 @@ in priority order:
    `Covariance::conditional(entity, out, cap)`, exact parity.
 6. **calc_cost_table** -- per-constraint-family cost breakdown, over
    the FFI as name/value pairs. Debugging aid.
-7. **Coverage padding, via tests (not demos):** universal/rotvec
-   rotation params, user components end-to-end, multi-root capi --
-   extend the cxx-tests fixture/parity suite to exercise them.
+7. **Coverage padding, via tests (not demos):** DONE 2026-07-25.
+   The fixture's Rig entity exercises the universal euler param, the
+   quaternion param, and a user `#[arael(component)]` (manifold
+   lifecycle, symbolic field) with exact solve parity and a frozen-
+   param check. Multi-root landed as a feature + fixture: a crate
+   with several roots exports ONE capi (each root's shim in its own
+   module; symbols were already root-prefixed) and nested per-root
+   namespaces (`{ns}::{root_sn}`), proven by cxx-tests/mr -- an
+   f64 root and an f32 root solved from one translation unit
+   (runner/tests/multiroot.rs). `--root` still exports a single
+   root flat.
 8. **Feature-gated backends** (eigen/cholmod) -- would need a
    features pass-through in [package.metadata.arael]. Niche; faer +
    band cover the demos.

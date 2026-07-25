@@ -1,9 +1,7 @@
 [package]
-name = "cxx-runner"
+name = "cxx-mr"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
 arael = { path = "../.." }
-cxx-fit = { path = "../model" }
-cxx-mr = { path = "../mr" }

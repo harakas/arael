@@ -30,6 +30,13 @@ entity to fill), containers spelled `refs::Vec<..>` /
 Commit the generated files; `cargo arael check` fails when they are
 stale (run it in CI). Rerun `export` after model changes.
 
+Several roots in one crate work: the one capi crate carries every
+root's shim (symbols are root-prefixed), each root gets its own
+header, and the namespaces nest -- `mycrate::root_a` /
+`mycrate::root_b` -- so one translation unit can use both, even at
+different precisions. `--root <Name>` exports a single root with the
+flat single-root layout instead.
+
 ## C++ consumer
 
 ```cmake
@@ -93,7 +100,10 @@ views are named by their container's nature: `PathPosesDeque`,
   `QuaternionParam`); `TransformParam` exposes translation, rotation,
   and per-half optimize flags; `UnitVecParam` exposes `unit` and the
   read-only chart basis `unit_d0`/`unit_d1` (for covariance
-  Jacobians). Entity wrappers carry `static constexpr param_count`.
+  Jacobians). User `#[arael(component)]` structs surface like nested
+  sub-models: their fields (set-before / read-after values included)
+  behind an accessor. Entity wrappers carry
+  `static constexpr param_count`.
 - **Collections**: `push` (deque: `push_back`/`push_front`) returns an
   element wrapper; `refs::`-backed containers also give `ref_at(i)` /
   `get(ref)` / `contains(ref)` / `try_get(ref)` (an `option`, empty
