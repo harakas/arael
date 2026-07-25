@@ -935,14 +935,20 @@ pub fn csc_from_cells<T: Float>(
 /// full block partition of `0..n`: ascending scalar offsets with one
 /// entry per block boundary, first 0, last `n`. Parameters not covered
 /// by any entity span (e.g. `skip_self_block` models) become one block
-/// per gap. Panics if spans overlap or run backwards.
+/// per gap. Span ORDER is free: the generated walk emits each span at
+/// its block FIELD's declaration position while offsets follow the
+/// params' serialize positions (a root's `hb` declared after its
+/// collections arrives last with offset 0), so the spans are sorted
+/// here. Panics if spans overlap.
 pub fn block_partition_from_spans(spans: &[(u32, u32)], n: usize) -> std::vec::Vec<usize> {
+    let mut spans = spans.to_vec();
+    spans.sort_unstable();
     let mut part = std::vec::Vec::with_capacity(spans.len() + 2);
     part.push(0usize);
     let mut end = 0usize;
-    for &(off, width) in spans {
+    for &(off, width) in &spans {
         let off = off as usize;
-        assert!(off >= end, "param block spans overlap or are unsorted");
+        assert!(off >= end, "param block spans overlap");
         if off > end {
             // gap: params owned by no SelfBlock form their own block
             part.push(off);
