@@ -88,24 +88,19 @@ static float observe(const Cfg& cfg, vect2f pos, float gamma, vect2f lm) {
 
 // Per-landmark 95% confidence ellipse from the 2x2 position covariance:
 // chi^2(0.95, df=2) = 5.991, semi-axes are sqrt(5.991 * eigenvalue).
-// Closed-form symmetric 2x2 eigendecomposition -- no linear algebra
-// library needed.
 struct Ellipse {
     vect2f center;
     float semi_major, semi_minor, angle;
 };
 
 static Ellipse ellipse_from_cov(vect2f center, matrix2d c) {
-    double a = c.rows[0].x, b = c.rows[0].y, d = c.rows[1].y;
-    double half_tr = 0.5 * (a + d);
-    double disc = std::sqrt(0.25 * (a - d) * (a - d) + b * b);
-    double lam_major = std::max(half_tr + disc, 0.0);
-    double lam_minor = std::max(half_tr - disc, 0.0);
+    auto [r, d] = c.symmetric_eigen(); // ascending eigenvalues
     const double chi2_95 = 5.991;
+    vect2d major = r.col(1);
     return {center,
-            float(std::sqrt(lam_major * chi2_95)),
-            float(std::sqrt(lam_minor * chi2_95)),
-            0.5f * float(std::atan2(2.0 * b, a - d))};
+            float(std::sqrt(std::max(d.y, 0.0) * chi2_95)),
+            float(std::sqrt(std::max(d.x, 0.0) * chi2_95)),
+            float(std::atan2(major.y, major.x))};
 }
 
 // ---------------------------------------------------------------------------
@@ -272,6 +267,9 @@ static void write_eps(
 }
 
 int main() {
+    // Line-buffer stdout so our lines interleave correctly with the
+    // solver's verbose output (the Rust side flushes per line).
+    std::setvbuf(stdout, nullptr, _IOLBF, 0);
     Cfg cfg;
     std::mt19937 rng(cfg.seed);
     std::normal_distribution<float> nd(0.0f, 1.0f);
@@ -360,6 +358,7 @@ int main() {
         n_frines, frines_in_model);
 
     LmConfig cfg_lm = LmConfig::well_conditioned();
+    cfg_lm.verbose = true;
     SolveResult r = path.solve_sparse(cfg_lm);
     if (r.is_err()) {
         std::fprintf(stderr, "solve failed: %s\n", r.error().message);

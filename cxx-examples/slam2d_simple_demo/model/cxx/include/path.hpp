@@ -56,19 +56,31 @@ struct LmConfig : LmConfigT<float> {
 /// Typed handle into the collection that issued it -- the C++
 /// spelling of Rust's `Ref<Frine>`. Default-constructed it is the
 /// null sentinel (same as Rust `Ref::default()`).
-struct FrineRef { uint32_t raw = UINT32_MAX; };
+struct FrineRef {
+    uint32_t raw = UINT32_MAX;
+    bool valid() const { return raw != UINT32_MAX; }
+};
 /// Typed handle into the collection that issued it -- the C++
 /// spelling of Rust's `Ref<Landmark>`. Default-constructed it is the
 /// null sentinel (same as Rust `Ref::default()`).
-struct LandmarkRef { uint32_t raw = UINT32_MAX; };
+struct LandmarkRef {
+    uint32_t raw = UINT32_MAX;
+    bool valid() const { return raw != UINT32_MAX; }
+};
 /// Typed handle into the collection that issued it -- the C++
 /// spelling of Rust's `Ref<Pose>`. Default-constructed it is the
 /// null sentinel (same as Rust `Ref::default()`).
-struct PoseRef { uint32_t raw = UINT32_MAX; };
+struct PoseRef {
+    uint32_t raw = UINT32_MAX;
+    bool valid() const { return raw != UINT32_MAX; }
+};
 /// Typed handle into the collection that issued it -- the C++
 /// spelling of Rust's `Ref<PosePair>`. Default-constructed it is the
 /// null sentinel (same as Rust `Ref::default()`).
-struct PosePairRef { uint32_t raw = UINT32_MAX; };
+struct PosePairRef {
+    uint32_t raw = UINT32_MAX;
+    bool valid() const { return raw != UINT32_MAX; }
+};
 
 namespace ffi {
 struct Path;
@@ -118,6 +130,10 @@ void path_pose_pair_set_cur(PosePair*, uint32_t);
 int32_t path_assemble_covariance(Path*, uint32_t);
 int32_t path_landmark_marginal_cov(Path*, const Landmark*, double*, uint32_t);
 int32_t path_pose_marginal_cov(Path*, const Pose*, double*, uint32_t);
+int32_t path_landmark_landmark_cross_cov(Path*, const Landmark*, const Landmark*, double*, uint32_t);
+int32_t path_landmark_pose_cross_cov(Path*, const Landmark*, const Pose*, double*, uint32_t);
+int32_t path_pose_landmark_cross_cov(Path*, const Pose*, const Landmark*, double*, uint32_t);
+int32_t path_pose_pose_cross_cov(Path*, const Pose*, const Pose*, double*, uint32_t);
 uint32_t path_poses_len(const Path*);
 void path_poses_reserve(Path*, uint32_t);
 Pose* path_poses_push_back(Path*);
@@ -128,6 +144,8 @@ bool path_poses_pop_front(Path*);
 void path_poses_clear(Path*);
 void path_poses_truncate(Path*, uint32_t);
 uint32_t path_poses_ref_at(const Path*, uint32_t);
+uint32_t path_poses_front_ref(const Path*);
+uint32_t path_poses_back_ref(const Path*);
 Pose* path_poses_get(Path*, uint32_t);
 bool path_poses_contains(const Path*, uint32_t);
 Pose* path_poses_try_get(Path*, uint32_t);
@@ -150,6 +168,7 @@ uint32_t path_landmarks_first(const Path*);
 uint32_t path_landmarks_next(const Path*, uint32_t);
 uint32_t path_landmarks_last(const Path*);
 uint32_t path_landmarks_prev(const Path*, uint32_t);
+double path_cost(Path*);
 void path_lm_config(uint32_t, LmConfig*);
 Path* path_new(void);
 void path_free(Path*);
@@ -168,6 +187,8 @@ inline LmConfig::LmConfig(LmPreset p) {
 /// follows the storage -- see the owning container).
 class Frine {
 public:
+    /// Optimized parameters this entity contributes to the solve.
+    static constexpr uint32_t param_count = 0;
     Frine() : h_(nullptr) {}
     explicit Frine(ffi::Frine* p) : h_(p) {}
     /// False when default-constructed (e.g. inside an empty option).
@@ -261,6 +282,8 @@ private:
 /// follows the storage -- see the owning container).
 class Landmark {
 public:
+    /// Optimized parameters this entity contributes to the solve.
+    static constexpr uint32_t param_count = 2;
     Landmark() : h_(nullptr) {}
     explicit Landmark(ffi::Landmark* p) : h_(p) {}
     /// False when default-constructed (e.g. inside an empty option).
@@ -280,6 +303,8 @@ private:
 /// follows the storage -- see the owning container).
 class Pose {
 public:
+    /// Optimized parameters this entity contributes to the solve.
+    static constexpr uint32_t param_count = 3;
     Pose() : h_(nullptr) {}
     explicit Pose(ffi::Pose* p) : h_(p) {}
     /// False when default-constructed (e.g. inside an empty option).
@@ -310,6 +335,8 @@ private:
 /// follows the storage -- see the owning container).
 class PosePair {
 public:
+    /// Optimized parameters this entity contributes to the solve.
+    static constexpr uint32_t param_count = 0;
     PosePair() : h_(nullptr) {}
     explicit PosePair(ffi::PosePair* p) : h_(p) {}
     /// False when default-constructed (e.g. inside an empty option).
@@ -343,6 +370,26 @@ public:
         return result<matrix3d, CovError>::ok(matrix3d::from_elements(
             b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8]));
     }
+    /// Row-major Landmark::param_count x Landmark::param_count cross-covariance
+    /// into out; returns the row count or a negative code.
+    int32_t cross(const Landmark& a, const Landmark& b, double* out, uint32_t cap) {
+        return ffi::path_landmark_landmark_cross_cov(h_, a.raw(), b.raw(), out, cap);
+    }
+    /// Row-major Landmark::param_count x Pose::param_count cross-covariance
+    /// into out; returns the row count or a negative code.
+    int32_t cross(const Landmark& a, const Pose& b, double* out, uint32_t cap) {
+        return ffi::path_landmark_pose_cross_cov(h_, a.raw(), b.raw(), out, cap);
+    }
+    /// Row-major Pose::param_count x Landmark::param_count cross-covariance
+    /// into out; returns the row count or a negative code.
+    int32_t cross(const Pose& a, const Landmark& b, double* out, uint32_t cap) {
+        return ffi::path_pose_landmark_cross_cov(h_, a.raw(), b.raw(), out, cap);
+    }
+    /// Row-major Pose::param_count x Pose::param_count cross-covariance
+    /// into out; returns the row count or a negative code.
+    int32_t cross(const Pose& a, const Pose& b, double* out, uint32_t cap) {
+        return ffi::path_pose_pose_cross_cov(h_, a.raw(), b.raw(), out, cap);
+    }
 private:
     template<class T> result<T, CovError> fail() {
         return result<T, CovError>::err({ffi::path_last_error(h_)});
@@ -369,6 +416,9 @@ public:
     void clear() { ffi::path_poses_clear(h_); }
     void truncate(uint32_t n) { ffi::path_poses_truncate(h_, n); }
     PoseRef ref_at(uint32_t i) const { return PoseRef{ffi::path_poses_ref_at(h_, i)}; }
+    /// Ref of the first/last element; null when empty.
+    PoseRef front_ref() const { return PoseRef{ffi::path_poses_front_ref(h_)}; }
+    PoseRef back_ref() const { return PoseRef{ffi::path_poses_back_ref(h_)}; }
     Pose get(PoseRef r) { return Pose(ffi::path_poses_get(h_, r.raw)); }
     /// True while r addresses a live element here.
     bool contains(PoseRef r) const { return ffi::path_poses_contains(h_, r.raw); }
@@ -623,6 +673,8 @@ public:
         if (code >= 0) return SolveResult::ok(r);
         return SolveResult::err({static_cast<LmStatus>(code), last_error()});
     }
+    /// Total cost at the current parameter values (f64 evaluation).
+    double cost() { return ffi::path_cost(h_); }
     /// Prepare the covariance at the current (solved) parameters; query
     /// per-entity marginals on the returned view.
     result<Covariance, CovError> assemble_covariance(CovMode mode = CovMode::AllMarginals) {

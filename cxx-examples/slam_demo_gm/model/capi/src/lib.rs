@@ -7,7 +7,7 @@ use std::os::raw::c_char;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use arael::covariance::{CovAssembly, CovMode, Covariance};
 use arael::simple_lm::{LmConfig, LmProblem, LmStatus};
-use slam2d_simple::{Frine, Landmark, Path, Pose, PosePair};
+use slam_demo_gm::{GpsData, Path, PointFeature, PointFrine, PointLandmark, Pose, PoseInfo, PosePair};
 
 /// The opaque handle the C ABI hands out: the model, the error /
 /// diagnostic text buffer `last_error` points into, and the covariance
@@ -144,7 +144,7 @@ fn panic_text(p: Box<dyn std::any::Any + Send>) -> String {
 #[derive(Clone, Copy)]
 pub struct COptF {
     pub has: bool,
-    pub v: f32,
+    pub v: f64,
 }
 
 #[repr(C)]
@@ -154,14 +154,14 @@ pub struct COptSeconds {
     pub v: f64,
 }
 
-fn copt(o: Option<f32>) -> COptF {
+fn copt(o: Option<f64>) -> COptF {
     match o {
         Some(v) => COptF { has: true, v },
         None => COptF { has: false, v: 0.0 },
     }
 }
 
-fn opt_of(c: COptF) -> Option<f32> {
+fn opt_of(c: COptF) -> Option<f64> {
     c.has.then_some(c.v)
 }
 
@@ -178,11 +178,11 @@ pub struct CLmConfig {
     pub patience: u32,
     pub num_threads: u32,
     pub verbose: bool,
-    pub abs_precision: f32,
-    pub rel_precision: f32,
-    pub initial_lambda: f32,
-    pub cost_threshold: f32,
-    pub lambda_floor: f32,
+    pub abs_precision: f64,
+    pub rel_precision: f64,
+    pub initial_lambda: f64,
+    pub cost_threshold: f64,
+    pub lambda_floor: f64,
     pub gradient_tolerance: COptF,
     pub parameter_tolerance: COptF,
     pub predicted_reduction_tolerance: COptF,
@@ -190,7 +190,7 @@ pub struct CLmConfig {
     pub time_limit_seconds: COptSeconds,
 }
 
-fn preset_config(preset: u32) -> LmConfig<f32> {
+fn preset_config(preset: u32) -> LmConfig<f64> {
     match preset {
         1 => LmConfig::conservative(),
         2 => LmConfig::well_conditioned(),
@@ -227,7 +227,7 @@ pub unsafe extern "C" fn path_lm_config(preset: u32, out: *mut CLmConfig) {
 }
 
 impl CLmConfig {
-    fn to_config(&self) -> LmConfig<f32> {
+    fn to_config(&self) -> LmConfig<f64> {
         let mut c = preset_config(self.preset);
         c.max_iters = self.max_iters as usize;
         c.min_iters = self.min_iters as usize;
@@ -252,12 +252,12 @@ impl CLmConfig {
 
 #[repr(C)]
 pub struct CLmResult {
-    pub start_cost: f32,
-    pub end_cost: f32,
+    pub start_cost: f64,
+    pub end_cost: f64,
     pub iterations: u32,
     pub accepted_iterations: u32,
     pub status: i32,
-    pub final_lambda: f32,
+    pub final_lambda: f64,
 }
 
 #[no_mangle]
@@ -386,8 +386,8 @@ pub unsafe extern "C" fn path_solve_sparse(
 pub unsafe extern "C" fn path_cost(h: *mut PathHandle) -> f64 {
     let m = &mut (*h).model;
     let mut params = Vec::new();
-    m.serialize32(&mut params);
-    m.calc_cost(&params) as f64
+    m.serialize64(&mut params);
+    m.calc_cost(&params)
 }
 
 /// mode: 0 = PerQuery, 1 = AllMarginals, 2 = TriDiagonal. Returns 0,
@@ -419,13 +419,13 @@ pub unsafe extern "C" fn path_assemble_covariance(h: *mut PathHandle, mode: u32)
     }
 }
 
-/// Row-major dim x dim marginal covariance (f64) of one `Landmark`; returns
+/// Row-major dim x dim marginal covariance (f64) of one `PointLandmark`; returns
 /// dim, or -1 (error) / -2 (panic) / -3 (no assembly or buffer too
 /// small), text via path_last_error.
 #[no_mangle]
-pub unsafe extern "C" fn path_landmark_marginal_cov(
+pub unsafe extern "C" fn path_point_landmark_marginal_cov(
     h: *mut PathHandle,
-    p: *const Landmark,
+    p: *const PointLandmark,
     out: *mut f64,
     cap: u32,
 ) -> i32 {
@@ -501,14 +501,14 @@ pub unsafe extern "C" fn path_pose_marginal_cov(
     }
 }
 
-/// Row-major pa x pb cross-covariance (f64) between a `Landmark` and a
-/// `Landmark`; returns the row count, or -1 (error) / -2 (panic) / -3 (no
+/// Row-major pa x pb cross-covariance (f64) between a `PointLandmark` and a
+/// `PointLandmark`; returns the row count, or -1 (error) / -2 (panic) / -3 (no
 /// assembly or buffer too small), text via path_last_error.
 #[no_mangle]
-pub unsafe extern "C" fn path_landmark_landmark_cross_cov(
+pub unsafe extern "C" fn path_point_landmark_point_landmark_cross_cov(
     h: *mut PathHandle,
-    a: *const Landmark,
-    b: *const Landmark,
+    a: *const PointLandmark,
+    b: *const PointLandmark,
     out: *mut f64,
     cap: u32,
 ) -> i32 {
@@ -543,13 +543,13 @@ pub unsafe extern "C" fn path_landmark_landmark_cross_cov(
     }
 }
 
-/// Row-major pa x pb cross-covariance (f64) between a `Landmark` and a
+/// Row-major pa x pb cross-covariance (f64) between a `PointLandmark` and a
 /// `Pose`; returns the row count, or -1 (error) / -2 (panic) / -3 (no
 /// assembly or buffer too small), text via path_last_error.
 #[no_mangle]
-pub unsafe extern "C" fn path_landmark_pose_cross_cov(
+pub unsafe extern "C" fn path_point_landmark_pose_cross_cov(
     h: *mut PathHandle,
-    a: *const Landmark,
+    a: *const PointLandmark,
     b: *const Pose,
     out: *mut f64,
     cap: u32,
@@ -586,13 +586,13 @@ pub unsafe extern "C" fn path_landmark_pose_cross_cov(
 }
 
 /// Row-major pa x pb cross-covariance (f64) between a `Pose` and a
-/// `Landmark`; returns the row count, or -1 (error) / -2 (panic) / -3 (no
+/// `PointLandmark`; returns the row count, or -1 (error) / -2 (panic) / -3 (no
 /// assembly or buffer too small), text via path_last_error.
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_landmark_cross_cov(
+pub unsafe extern "C" fn path_pose_point_landmark_cross_cov(
     h: *mut PathHandle,
     a: *const Pose,
-    b: *const Landmark,
+    b: *const PointLandmark,
     out: *mut f64,
     cap: u32,
 ) -> i32 {
@@ -750,38 +750,6 @@ pub unsafe extern "C" fn path_poses_try_get(p: *mut PathHandle, r: u32) -> *mut 
     }
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_pairs_len(p: *const PathHandle) -> u32 {
-    (*p).model.pose_pairs.len() as u32
-}
-#[no_mangle]
-pub unsafe extern "C" fn path_pose_pairs_reserve(p: *mut PathHandle, additional: u32) {
-    (*p).model.pose_pairs.reserve(additional as usize);
-}
-#[no_mangle]
-pub unsafe extern "C" fn path_pose_pairs_push(p: *mut PathHandle) -> *mut PosePair {
-    let m = &mut (*p).model.pose_pairs;
-    m.push(Default::default());
-    m.last_mut().unwrap() as *mut PosePair
-}
-#[no_mangle]
-pub unsafe extern "C" fn path_pose_pairs_at(p: *mut PathHandle, i: u32) -> *mut PosePair {
-    let m = &mut (*p).model.pose_pairs;
-    &mut m[i as usize] as *mut PosePair
-}
-/// Drops the last element; false when already empty.
-#[no_mangle]
-pub unsafe extern "C" fn path_pose_pairs_pop(p: *mut PathHandle) -> bool {
-    (*p).model.pose_pairs.pop().is_some()
-}
-#[no_mangle]
-pub unsafe extern "C" fn path_pose_pairs_clear(p: *mut PathHandle) {
-    (*p).model.pose_pairs.clear();
-}
-#[no_mangle]
-pub unsafe extern "C" fn path_pose_pairs_truncate(p: *mut PathHandle, len: u32) {
-    (*p).model.pose_pairs.truncate(len as usize);
-}
-#[no_mangle]
 pub unsafe extern "C" fn path_landmarks_len(p: *const PathHandle) -> u32 {
     (*p).model.landmarks.len() as u32
 }
@@ -804,9 +772,9 @@ pub unsafe extern "C" fn path_landmarks_clear(p: *mut PathHandle) {
     (*p).model.landmarks.clear();
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_landmarks_get(p: *mut PathHandle, r: u32) -> *mut Landmark {
+pub unsafe extern "C" fn path_landmarks_get(p: *mut PathHandle, r: u32) -> *mut PointLandmark {
     let m = &mut (*p).model.landmarks;
-    &mut m[arael::refs::Ref::from_raw(r)] as *mut Landmark
+    &mut m[arael::refs::Ref::from_raw(r)] as *mut PointLandmark
 }
 /// True while `r` addresses a live element of this collection.
 #[no_mangle]
@@ -815,10 +783,10 @@ pub unsafe extern "C" fn path_landmarks_contains(p: *const PathHandle, r: u32) -
 }
 /// Like get, but null for a stale or foreign ref instead of a panic.
 #[no_mangle]
-pub unsafe extern "C" fn path_landmarks_try_get(p: *mut PathHandle, r: u32) -> *mut Landmark {
+pub unsafe extern "C" fn path_landmarks_try_get(p: *mut PathHandle, r: u32) -> *mut PointLandmark {
     let m = &mut (*p).model.landmarks;
     match m.get_mut(arael::refs::Ref::from_raw(r)) {
-        Some(e) => e as *mut Landmark,
+        Some(e) => e as *mut PointLandmark,
         None => std::ptr::null_mut(),
     }
 }
@@ -855,140 +823,420 @@ pub unsafe extern "C" fn path_landmarks_prev(p: *const PathHandle, r: u32) -> u3
     }
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_frine_pose(p: *const Frine) -> u32 {
-    (*p).pose.to_raw()
+pub unsafe extern "C" fn path_pose_pairs_len(p: *const PathHandle) -> u32 {
+    (*p).model.pose_pairs.len() as u32
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_frine_set_pose(p: *mut Frine, v: u32) {
-    (*p).pose = arael::refs::Ref::from_raw(v);
+pub unsafe extern "C" fn path_pose_pairs_reserve(p: *mut PathHandle, additional: u32) {
+    (*p).model.pose_pairs.reserve(additional as usize);
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_frine_bearing(p: *const Frine) -> f32 {
-    (*p).bearing
-}
-#[no_mangle]
-pub unsafe extern "C" fn path_frine_set_bearing(p: *mut Frine, v: f32) {
-    (*p).bearing = v;
-}
-#[no_mangle]
-pub unsafe extern "C" fn path_frine_isigma(p: *const Frine) -> f32 {
-    (*p).isigma
-}
-#[no_mangle]
-pub unsafe extern "C" fn path_frine_set_isigma(p: *mut Frine, v: f32) {
-    (*p).isigma = v;
-}
-#[no_mangle]
-pub unsafe extern "C" fn path_landmark_pos(p: *const Landmark) -> CVec2F32 {
-    (*p).pos.value.into()
-}
-#[no_mangle]
-pub unsafe extern "C" fn path_landmark_set_pos(p: *mut Landmark, v: CVec2F32) {
-    (*p).pos.value = v.into();
-}
-#[no_mangle]
-pub unsafe extern "C" fn path_landmark_pos_optimize(p: *const Landmark) -> bool {
-    (*p).pos.optimize
-}
-#[no_mangle]
-pub unsafe extern "C" fn path_landmark_pos_set_optimize(p: *mut Landmark, v: bool) {
-    (*p).pos.optimize = v;
-}
-#[no_mangle]
-pub unsafe extern "C" fn path_landmark_frines_len(p: *const Landmark) -> u32 {
-    (*p).frines.len() as u32
-}
-#[no_mangle]
-pub unsafe extern "C" fn path_landmark_frines_reserve(p: *mut Landmark, additional: u32) {
-    (*p).frines.reserve(additional as usize);
-}
-#[no_mangle]
-pub unsafe extern "C" fn path_landmark_frines_push(p: *mut Landmark) -> *mut Frine {
-    let m = &mut (*p).frines;
+pub unsafe extern "C" fn path_pose_pairs_push(p: *mut PathHandle) -> *mut PosePair {
+    let m = &mut (*p).model.pose_pairs;
     m.push(Default::default());
-    m.last_mut().unwrap() as *mut Frine
+    m.last_mut().unwrap() as *mut PosePair
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_landmark_frines_at(p: *mut Landmark, i: u32) -> *mut Frine {
-    let m = &mut (*p).frines;
-    &mut m[i as usize] as *mut Frine
+pub unsafe extern "C" fn path_pose_pairs_at(p: *mut PathHandle, i: u32) -> *mut PosePair {
+    let m = &mut (*p).model.pose_pairs;
+    &mut m[i as usize] as *mut PosePair
 }
 /// Drops the last element; false when already empty.
 #[no_mangle]
-pub unsafe extern "C" fn path_landmark_frines_pop(p: *mut Landmark) -> bool {
+pub unsafe extern "C" fn path_pose_pairs_pop(p: *mut PathHandle) -> bool {
+    (*p).model.pose_pairs.pop().is_some()
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_pose_pairs_clear(p: *mut PathHandle) {
+    (*p).model.pose_pairs.clear();
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_pose_pairs_truncate(p: *mut PathHandle, len: u32) {
+    (*p).model.pose_pairs.truncate(len as usize);
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_drift_rho_isigma(p: *const PathHandle) -> f32 {
+    (*p).model.drift_rho_isigma
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_set_drift_rho_isigma(p: *mut PathHandle, v: f32) {
+    (*p).model.drift_rho_isigma = v;
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_tilt_isigma(p: *const PathHandle) -> f32 {
+    (*p).model.tilt_isigma
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_set_tilt_isigma(p: *mut PathHandle, v: f32) {
+    (*p).model.tilt_isigma = v;
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_frine_isigma_scale(p: *const PathHandle) -> f32 {
+    (*p).model.frine_isigma_scale
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_set_frine_isigma_scale(p: *mut PathHandle, v: f32) {
+    (*p).model.frine_isigma_scale = v;
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_frine_c2(p: *const PathHandle) -> f32 {
+    (*p).model.frine_c2
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_set_frine_c2(p: *mut PathHandle, v: f32) {
+    (*p).model.frine_c2 = v;
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_frine_cauchy(p: *const PathHandle) -> f32 {
+    (*p).model.frine_cauchy
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_set_frine_cauchy(p: *mut PathHandle, v: f32) {
+    (*p).model.frine_cauchy = v;
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_gps_c2(p: *const PathHandle) -> f32 {
+    (*p).model.gps_c2
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_set_gps_c2(p: *mut PathHandle, v: f32) {
+    (*p).model.gps_c2 = v;
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_gps_data_pos(p: *const GpsData) -> CVec3F32 {
+    (*p).pos.into()
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_gps_data_set_pos(p: *mut GpsData, v: CVec3F32) {
+    (*p).pos = v.into();
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_gps_data_cov_r(p: *const GpsData) -> CMat3F32 {
+    (*p).cov_r.into()
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_gps_data_set_cov_r(p: *mut GpsData, v: CMat3F32) {
+    (*p).cov_r = v.into();
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_gps_data_cov_isigma(p: *const GpsData) -> CVec3F32 {
+    (*p).cov_isigma.into()
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_gps_data_set_cov_isigma(p: *mut GpsData, v: CVec3F32) {
+    (*p).cov_isigma = v.into();
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_point_feature_pixel(p: *const PointFeature) -> CVec2F32 {
+    (*p).pixel.into()
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_point_feature_set_pixel(p: *mut PointFeature, v: CVec2F32) {
+    (*p).pixel = v.into();
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_point_feature_mf2r(p: *const PointFeature) -> CMat3F32 {
+    (*p).mf2r.into()
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_point_feature_set_mf2r(p: *mut PointFeature, v: CMat3F32) {
+    (*p).mf2r = v.into();
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_point_feature_camera_pos(p: *const PointFeature) -> CVec3F32 {
+    (*p).camera_pos.into()
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_point_feature_set_camera_pos(p: *mut PointFeature, v: CVec3F32) {
+    (*p).camera_pos = v.into();
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_point_feature_isigma(p: *const PointFeature) -> CVec2F32 {
+    (*p).isigma.into()
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_point_feature_set_isigma(p: *mut PointFeature, v: CVec2F32) {
+    (*p).isigma = v.into();
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_point_frine_pose(p: *const PointFrine) -> u32 {
+    (*p).pose.to_raw()
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_point_frine_set_pose(p: *mut PointFrine, v: u32) {
+    (*p).pose = arael::refs::Ref::from_raw(v);
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_point_frine_feature(p: *const PointFrine) -> u32 {
+    (*p).feature.to_raw()
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_point_frine_set_feature(p: *mut PointFrine, v: u32) {
+    (*p).feature = arael::refs::Ref::from_raw(v);
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_point_landmark_anchor(p: *const PointLandmark) -> CVec3F32 {
+    (*p).anchor.into()
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_point_landmark_set_anchor(p: *mut PointLandmark, v: CVec3F32) {
+    (*p).anchor = v.into();
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_point_landmark_anchor_pose(p: *const PointLandmark) -> u32 {
+    (*p).anchor_pose.to_raw()
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_point_landmark_set_anchor_pose(p: *mut PointLandmark, v: u32) {
+    (*p).anchor_pose = arael::refs::Ref::from_raw(v);
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_point_landmark_dir_unit(p: *const PointLandmark) -> CVec3F32 {
+    (*p).dir.unit.into()
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_point_landmark_dir_set_unit(p: *mut PointLandmark, v: CVec3F32) {
+    (*p).dir.unit = v.into();
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_point_landmark_dir_unit_d0(p: *const PointLandmark) -> CVec3F32 {
+    (*p).dir.unit_d[0].into()
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_point_landmark_dir_unit_d1(p: *const PointLandmark) -> CVec3F32 {
+    (*p).dir.unit_d[1].into()
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_point_landmark_rho(p: *const PointLandmark) -> f32 {
+    (*p).rho.value
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_point_landmark_set_rho(p: *mut PointLandmark, v: f32) {
+    (*p).rho.value = v;
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_point_landmark_rho_optimize(p: *const PointLandmark) -> bool {
+    (*p).rho.optimize
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_point_landmark_rho_set_optimize(p: *mut PointLandmark, v: bool) {
+    (*p).rho.optimize = v;
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_point_landmark_frines_len(p: *const PointLandmark) -> u32 {
+    (*p).frines.len() as u32
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_point_landmark_frines_reserve(p: *mut PointLandmark, additional: u32) {
+    (*p).frines.reserve(additional as usize);
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_point_landmark_frines_push(p: *mut PointLandmark) -> *mut PointFrine {
+    let m = &mut (*p).frines;
+    m.push(Default::default());
+    m.last_mut().unwrap() as *mut PointFrine
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_point_landmark_frines_at(p: *mut PointLandmark, i: u32) -> *mut PointFrine {
+    let m = &mut (*p).frines;
+    &mut m[i as usize] as *mut PointFrine
+}
+/// Drops the last element; false when already empty.
+#[no_mangle]
+pub unsafe extern "C" fn path_point_landmark_frines_pop(p: *mut PointLandmark) -> bool {
     (*p).frines.pop().is_some()
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_landmark_frines_clear(p: *mut Landmark) {
+pub unsafe extern "C" fn path_point_landmark_frines_clear(p: *mut PointLandmark) {
     (*p).frines.clear();
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_landmark_frines_truncate(p: *mut Landmark, len: u32) {
+pub unsafe extern "C" fn path_point_landmark_frines_truncate(p: *mut PointLandmark, len: u32) {
     (*p).frines.truncate(len as usize);
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_pos(p: *const Pose) -> CVec2F32 {
-    (*p).pos.value.into()
+pub unsafe extern "C" fn path_pose_r2w_translation(p: *const Pose) -> CVec3F32 {
+    (*p).r2w.translation.into()
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_set_pos(p: *mut Pose, v: CVec2F32) {
-    (*p).pos.value = v.into();
+pub unsafe extern "C" fn path_pose_r2w_set_translation(p: *mut Pose, v: CVec3F32) {
+    (*p).r2w.translation = v.into();
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_pos_optimize(p: *const Pose) -> bool {
-    (*p).pos.optimize
+pub unsafe extern "C" fn path_pose_r2w_rotation(p: *const Pose) -> CQuatF32 {
+    (*p).r2w.rotation.into()
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_pos_set_optimize(p: *mut Pose, v: bool) {
-    (*p).pos.optimize = v;
+pub unsafe extern "C" fn path_pose_r2w_set_rotation(p: *mut Pose, v: CQuatF32) {
+    (*p).r2w.rotation = v.into();
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_gamma(p: *const Pose) -> f32 {
-    (*p).gamma.value
+pub unsafe extern "C" fn path_pose_r2w_optimize_translation(p: *const Pose) -> bool {
+    (*p).r2w.optimize_translation
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_set_gamma(p: *mut Pose, v: f32) {
-    (*p).gamma.value = v;
+pub unsafe extern "C" fn path_pose_r2w_set_optimize_translation(p: *mut Pose, v: bool) {
+    (*p).r2w.optimize_translation = v;
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_gamma_optimize(p: *const Pose) -> bool {
-    (*p).gamma.optimize
+pub unsafe extern "C" fn path_pose_r2w_optimize_rotation(p: *const Pose) -> bool {
+    (*p).r2w.optimize_rotation
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_gamma_set_optimize(p: *mut Pose, v: bool) {
-    (*p).gamma.optimize = v;
+pub unsafe extern "C" fn path_pose_r2w_set_optimize_rotation(p: *mut Pose, v: bool) {
+    (*p).r2w.optimize_rotation = v;
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_delta_pos(p: *const Pose) -> CVec2F32 {
+pub unsafe extern "C" fn path_pose_info_ptr(p: *mut Pose) -> *mut PoseInfo {
+    let a = &mut (*p).info;
+    a as *mut PoseInfo
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_pose_info_delta_pos(p: *const PoseInfo) -> CVec3F32 {
     (*p).delta_pos.into()
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_set_delta_pos(p: *mut Pose, v: CVec2F32) {
+pub unsafe extern "C" fn path_pose_info_set_delta_pos(p: *mut PoseInfo, v: CVec3F32) {
     (*p).delta_pos = v.into();
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_delta_gamma(p: *const Pose) -> f32 {
-    (*p).delta_gamma
+pub unsafe extern "C" fn path_pose_info_delta_rot(p: *const PoseInfo) -> CMat3F32 {
+    (*p).delta_rot.into()
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_set_delta_gamma(p: *mut Pose, v: f32) {
-    (*p).delta_gamma = v;
+pub unsafe extern "C" fn path_pose_info_set_delta_rot(p: *mut PoseInfo, v: CMat3F32) {
+    (*p).delta_rot = v.into();
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_delta_pos_isigma(p: *const Pose) -> f32 {
-    (*p).delta_pos_isigma
+pub unsafe extern "C" fn path_pose_info_delta_pos_cov_r(p: *const PoseInfo) -> CMat3F32 {
+    (*p).delta_pos_cov_r.into()
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_set_delta_pos_isigma(p: *mut Pose, v: f32) {
-    (*p).delta_pos_isigma = v;
+pub unsafe extern "C" fn path_pose_info_set_delta_pos_cov_r(p: *mut PoseInfo, v: CMat3F32) {
+    (*p).delta_pos_cov_r = v.into();
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_delta_gamma_isigma(p: *const Pose) -> f32 {
-    (*p).delta_gamma_isigma
+pub unsafe extern "C" fn path_pose_info_delta_pos_cov_isigma(p: *const PoseInfo) -> CVec3F32 {
+    (*p).delta_pos_cov_isigma.into()
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_set_delta_gamma_isigma(p: *mut Pose, v: f32) {
-    (*p).delta_gamma_isigma = v;
+pub unsafe extern "C" fn path_pose_info_set_delta_pos_cov_isigma(p: *mut PoseInfo, v: CVec3F32) {
+    (*p).delta_pos_cov_isigma = v.into();
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_pose_info_delta_rot_cov_r(p: *const PoseInfo) -> CMat3F32 {
+    (*p).delta_rot_cov_r.into()
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_pose_info_set_delta_rot_cov_r(p: *mut PoseInfo, v: CMat3F32) {
+    (*p).delta_rot_cov_r = v.into();
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_pose_info_delta_rot_cov_isigma(p: *const PoseInfo) -> CVec3F32 {
+    (*p).delta_rot_cov_isigma.into()
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_pose_info_set_delta_rot_cov_isigma(p: *mut PoseInfo, v: CVec3F32) {
+    (*p).delta_rot_cov_isigma = v.into();
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_pose_info_has_gps(p: *const PoseInfo) -> bool {
+    (*p).gps.is_some()
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_pose_info_make_gps(p: *mut PoseInfo) -> *mut GpsData {
+    let a = &mut (*p).gps;
+    *a = Some(Default::default());
+    a.as_mut().unwrap() as *mut GpsData
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_pose_info_clear_gps(p: *mut PoseInfo) {
+    (*p).gps = None;
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_pose_info_gps(p: *mut PoseInfo) -> *mut GpsData {
+    match &mut (*p).gps {
+        Some(e) => e as *mut GpsData,
+        None => std::ptr::null_mut(),
+    }
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_pose_info_tilt_g(p: *const PoseInfo) -> CVec3F32 {
+    (*p).tilt_g.into()
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_pose_info_set_tilt_g(p: *mut PoseInfo, v: CVec3F32) {
+    (*p).tilt_g = v.into();
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_pose_info_features_len(p: *const PoseInfo) -> u32 {
+    (*p).features.len() as u32
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_pose_info_features_reserve(p: *mut PoseInfo, additional: u32) {
+    (*p).features.reserve(additional as usize);
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_pose_info_features_push(p: *mut PoseInfo) -> *mut PointFeature {
+    let m = &mut (*p).features;
+    let r = m.push(Default::default());
+    &mut m[r] as *mut PointFeature
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_pose_info_features_at(p: *mut PoseInfo, i: u32) -> *mut PointFeature {
+    let m = &mut (*p).features;
+    &mut m[i as usize] as *mut PointFeature
+}
+/// Drops the last element; false when already empty.
+#[no_mangle]
+pub unsafe extern "C" fn path_pose_info_features_pop(p: *mut PoseInfo) -> bool {
+    (*p).features.pop().is_some()
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_pose_info_features_clear(p: *mut PoseInfo) {
+    (*p).features.clear();
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_pose_info_features_truncate(p: *mut PoseInfo, len: u32) {
+    (*p).features.truncate(len as usize);
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_pose_info_features_ref_at(p: *const PoseInfo, i: u32) -> u32 {
+    (*p).features.ref_at(i as usize).to_raw()
+}
+/// Ref of the first/last element, or u32::MAX when empty.
+#[no_mangle]
+pub unsafe extern "C" fn path_pose_info_features_first_ref(p: *const PoseInfo) -> u32 {
+    match (*p).features.first_ref() {
+        Some(r) => r.to_raw(),
+        None => u32::MAX,
+    }
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_pose_info_features_last_ref(p: *const PoseInfo) -> u32 {
+    match (*p).features.last_ref() {
+        Some(r) => r.to_raw(),
+        None => u32::MAX,
+    }
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_pose_info_features_get(p: *mut PoseInfo, r: u32) -> *mut PointFeature {
+    let m = &mut (*p).features;
+    &mut m[arael::refs::Ref::from_raw(r)] as *mut PointFeature
+}
+/// True while `r` addresses a live element of this collection.
+#[no_mangle]
+pub unsafe extern "C" fn path_pose_info_features_contains(p: *const PoseInfo, r: u32) -> bool {
+    (*p).features.contains_ref(arael::refs::Ref::from_raw(r))
+}
+/// Like get, but null for a stale or foreign ref instead of a panic.
+#[no_mangle]
+pub unsafe extern "C" fn path_pose_info_features_try_get(p: *mut PoseInfo, r: u32) -> *mut PointFeature {
+    let m = &mut (*p).features;
+    match m.get_mut(arael::refs::Ref::from_raw(r)) {
+        Some(e) => e as *mut PointFeature,
+        None => std::ptr::null_mut(),
+    }
 }
 #[no_mangle]
 pub unsafe extern "C" fn path_pose_pair_prev(p: *const PosePair) -> u32 {
