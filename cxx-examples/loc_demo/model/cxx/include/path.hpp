@@ -10,10 +10,10 @@
 #include "arael/result.hpp"
 #include "arael/solver.hpp"
 
-namespace slam_demo_gm {
+namespace loc_demo {
 
 /// The arael value vocabulary this interface uses, re-exported so a
-/// single `using namespace slam_demo_gm;` brings the model AND the math.
+/// single `using namespace loc_demo;` brings the model AND the math.
 using arael::vect2;
 using arael::vect3;
 using arael::matrix2;
@@ -43,23 +43,16 @@ using arael::CovError;
 /// Instantiations of the shared solver surface (arael/solver.hpp) at
 /// this model's precision, plus the config constructor that fetches
 /// the preset's actual Rust values through this root's FFI.
-using LmResult = LmResultT<double>;
-using SolveResult = SolveResultT<double>;
+using LmResult = LmResultT<float>;
+using SolveResult = SolveResultT<float>;
 
-struct LmConfig : LmConfigT<double> {
+struct LmConfig : LmConfigT<float> {
     LmConfig(LmPreset p = LmPreset::Defaults);
     static LmConfig defaults() { return LmConfig(LmPreset::Defaults); }
     static LmConfig conservative() { return LmConfig(LmPreset::Conservative); }
     static LmConfig well_conditioned() { return LmConfig(LmPreset::WellConditioned); }
 };
 
-/// Typed handle into the collection that issued it -- the C++
-/// spelling of Rust's `Ref<GpsData>`. Default-constructed it is the
-/// null sentinel (same as Rust `Ref::default()`).
-struct GpsDataRef {
-    uint32_t raw = UINT32_MAX;
-    bool valid() const { return raw != UINT32_MAX; }
-};
 /// Typed handle into the collection that issued it -- the C++
 /// spelling of Rust's `Ref<PointFeature>`. Default-constructed it is the
 /// null sentinel (same as Rust `Ref::default()`).
@@ -105,7 +98,6 @@ struct PosePairRef {
 
 namespace ffi {
 struct Path;
-struct GpsData;
 struct PointFeature;
 struct PointFrine;
 struct PointLandmark;
@@ -114,12 +106,6 @@ struct PoseInfo;
 struct PosePair;
 
 extern "C" {
-vect3f path_gps_data_pos(const GpsData*);
-void path_gps_data_set_pos(GpsData*, vect3f);
-matrix3f path_gps_data_cov_r(const GpsData*);
-void path_gps_data_set_cov_r(GpsData*, matrix3f);
-vect3f path_gps_data_cov_isigma(const GpsData*);
-void path_gps_data_set_cov_isigma(GpsData*, vect3f);
 vect2f path_point_feature_pixel(const PointFeature*);
 void path_point_feature_set_pixel(PointFeature*, vect2f);
 matrix3f path_point_feature_mf2r(const PointFeature*);
@@ -132,18 +118,8 @@ uint32_t path_point_frine_pose(const PointFrine*);
 void path_point_frine_set_pose(PointFrine*, uint32_t);
 uint32_t path_point_frine_feature(const PointFrine*);
 void path_point_frine_set_feature(PointFrine*, uint32_t);
-vect3f path_point_landmark_anchor(const PointLandmark*);
-void path_point_landmark_set_anchor(PointLandmark*, vect3f);
-uint32_t path_point_landmark_anchor_pose(const PointLandmark*);
-void path_point_landmark_set_anchor_pose(PointLandmark*, uint32_t);
-vect3f path_point_landmark_dir_unit(const PointLandmark*);
-void path_point_landmark_dir_set_unit(PointLandmark*, vect3f);
-vect3f path_point_landmark_dir_unit_d0(const PointLandmark*);
-vect3f path_point_landmark_dir_unit_d1(const PointLandmark*);
-float path_point_landmark_rho(const PointLandmark*);
-void path_point_landmark_set_rho(PointLandmark*, float);
-bool path_point_landmark_rho_optimize(const PointLandmark*);
-void path_point_landmark_rho_set_optimize(PointLandmark*, bool);
+vect3f path_point_landmark_pos(const PointLandmark*);
+void path_point_landmark_set_pos(PointLandmark*, vect3f);
 uint32_t path_point_landmark_frines_len(const PointLandmark*);
 void path_point_landmark_frines_reserve(PointLandmark*, uint32_t);
 PointFrine* path_point_landmark_frines_push(PointLandmark*);
@@ -153,22 +129,20 @@ void path_point_landmark_frines_clear(PointLandmark*);
 void path_point_landmark_frines_truncate(PointLandmark*, uint32_t);
 vect3f path_pose_info_delta_pos(const PoseInfo*);
 void path_pose_info_set_delta_pos(PoseInfo*, vect3f);
-matrix3f path_pose_info_delta_rot(const PoseInfo*);
-void path_pose_info_set_delta_rot(PoseInfo*, matrix3f);
+vect3f path_pose_info_delta_ea(const PoseInfo*);
+void path_pose_info_set_delta_ea(PoseInfo*, vect3f);
 matrix3f path_pose_info_delta_pos_cov_r(const PoseInfo*);
 void path_pose_info_set_delta_pos_cov_r(PoseInfo*, matrix3f);
 vect3f path_pose_info_delta_pos_cov_isigma(const PoseInfo*);
 void path_pose_info_set_delta_pos_cov_isigma(PoseInfo*, vect3f);
-matrix3f path_pose_info_delta_rot_cov_r(const PoseInfo*);
-void path_pose_info_set_delta_rot_cov_r(PoseInfo*, matrix3f);
-vect3f path_pose_info_delta_rot_cov_isigma(const PoseInfo*);
-void path_pose_info_set_delta_rot_cov_isigma(PoseInfo*, vect3f);
-bool path_pose_info_has_gps(const PoseInfo*);
-GpsData* path_pose_info_make_gps(PoseInfo*);
-void path_pose_info_clear_gps(PoseInfo*);
-GpsData* path_pose_info_gps(PoseInfo*);
-vect3f path_pose_info_tilt_g(const PoseInfo*);
-void path_pose_info_set_tilt_g(PoseInfo*, vect3f);
+matrix3f path_pose_info_delta_ea_cov_r(const PoseInfo*);
+void path_pose_info_set_delta_ea_cov_r(PoseInfo*, matrix3f);
+vect3f path_pose_info_delta_ea_cov_isigma(const PoseInfo*);
+void path_pose_info_set_delta_ea_cov_isigma(PoseInfo*, vect3f);
+float path_pose_info_tilt_roll(const PoseInfo*);
+void path_pose_info_set_tilt_roll(PoseInfo*, float);
+float path_pose_info_tilt_pitch(const PoseInfo*);
+void path_pose_info_set_tilt_pitch(PoseInfo*, float);
 uint32_t path_pose_info_features_len(const PoseInfo*);
 void path_pose_info_features_reserve(PoseInfo*, uint32_t);
 PointFeature* path_pose_info_features_push(PoseInfo*);
@@ -182,27 +156,22 @@ uint32_t path_pose_info_features_last_ref(const PoseInfo*);
 PointFeature* path_pose_info_features_get(PoseInfo*, uint32_t);
 bool path_pose_info_features_contains(const PoseInfo*, uint32_t);
 PointFeature* path_pose_info_features_try_get(PoseInfo*, uint32_t);
-vect3f path_pose_r2w_translation(const Pose*);
-void path_pose_r2w_set_translation(Pose*, vect3f);
-quaternf path_pose_r2w_rotation(const Pose*);
-void path_pose_r2w_set_rotation(Pose*, quaternf);
-bool path_pose_r2w_optimize_translation(const Pose*);
-void path_pose_r2w_set_optimize_translation(Pose*, bool);
-bool path_pose_r2w_optimize_rotation(const Pose*);
-void path_pose_r2w_set_optimize_rotation(Pose*, bool);
+vect3f path_pose_pos(const Pose*);
+void path_pose_set_pos(Pose*, vect3f);
+bool path_pose_pos_optimize(const Pose*);
+void path_pose_pos_set_optimize(Pose*, bool);
+vect3f path_pose_ea(const Pose*);
+void path_pose_set_ea(Pose*, vect3f);
+bool path_pose_ea_optimize(const Pose*);
+void path_pose_ea_set_optimize(Pose*, bool);
 PoseInfo* path_pose_info_ptr(Pose*);
 uint32_t path_pose_pair_prev(const PosePair*);
 void path_pose_pair_set_prev(PosePair*, uint32_t);
 uint32_t path_pose_pair_cur(const PosePair*);
 void path_pose_pair_set_cur(PosePair*, uint32_t);
 int32_t path_assemble_covariance(Path*, uint32_t);
-int32_t path_point_landmark_marginal_cov(Path*, const PointLandmark*, double*, uint32_t);
-int32_t path_point_landmark_std_dev(Path*, const PointLandmark*, double*, uint32_t);
 int32_t path_pose_marginal_cov(Path*, const Pose*, double*, uint32_t);
 int32_t path_pose_std_dev(Path*, const Pose*, double*, uint32_t);
-int32_t path_point_landmark_point_landmark_cross_cov(Path*, const PointLandmark*, const PointLandmark*, double*, uint32_t);
-int32_t path_point_landmark_pose_cross_cov(Path*, const PointLandmark*, const Pose*, double*, uint32_t);
-int32_t path_pose_point_landmark_cross_cov(Path*, const Pose*, const PointLandmark*, double*, uint32_t);
 int32_t path_pose_pose_cross_cov(Path*, const Pose*, const Pose*, double*, uint32_t);
 uint32_t path_poses_len(const Path*);
 void path_poses_reserve(Path*, uint32_t);
@@ -238,18 +207,16 @@ PosePair* path_pose_pairs_at(Path*, uint32_t);
 bool path_pose_pairs_pop(Path*);
 void path_pose_pairs_clear(Path*);
 void path_pose_pairs_truncate(Path*, uint32_t);
-float path_drift_rho_isigma(const Path*);
-void path_set_drift_rho_isigma(Path*, float);
+float path_gamma(const Path*);
+void path_set_gamma(Path*, float);
+float path_drift_pos_isigma(const Path*);
+void path_set_drift_pos_isigma(Path*, float);
+float path_drift_ea_isigma(const Path*);
+void path_set_drift_ea_isigma(Path*, float);
 float path_tilt_isigma(const Path*);
 void path_set_tilt_isigma(Path*, float);
 float path_frine_isigma_scale(const Path*);
 void path_set_frine_isigma_scale(Path*, float);
-float path_frine_c2(const Path*);
-void path_set_frine_c2(Path*, float);
-float path_frine_cauchy(const Path*);
-void path_set_frine_cauchy(Path*, float);
-float path_gps_c2(const Path*);
-void path_set_gps_c2(Path*, float);
 double path_cost(Path*);
 int32_t path_solve_band(Path*, uint32_t, const LmConfig*, LmResult*);
 void path_lm_config(uint32_t, LmConfig*);
@@ -265,28 +232,6 @@ int32_t path_solve_sparse(Path*, const LmConfig*, LmResult*);
 inline LmConfig::LmConfig(LmPreset p) {
     ffi::path_lm_config(uint32_t(p), this);
 }
-
-/// A `GpsData` in its owner's storage; a thin pointer wrapper (validity
-/// follows the storage -- see the owning container).
-class GpsData {
-public:
-    /// Optimized parameters this entity contributes to the solve.
-    static constexpr uint32_t param_count = 0;
-    GpsData() : h_(nullptr) {}
-    explicit GpsData(ffi::GpsData* p) : h_(p) {}
-    /// False when default-constructed (e.g. inside an empty option).
-    bool valid() const { return h_ != nullptr; }
-    /// The underlying C pointer -- the relaxed escape hatch.
-    ffi::GpsData* raw() const { return h_; }
-    vect3f pos() const { return ffi::path_gps_data_pos(h_); }
-    void set_pos(vect3f v) { ffi::path_gps_data_set_pos(h_, v); }
-    matrix3f cov_r() const { return ffi::path_gps_data_cov_r(h_); }
-    void set_cov_r(matrix3f v) { ffi::path_gps_data_set_cov_r(h_, v); }
-    vect3f cov_isigma() const { return ffi::path_gps_data_cov_isigma(h_); }
-    void set_cov_isigma(vect3f v) { ffi::path_gps_data_set_cov_isigma(h_, v); }
-private:
-    ffi::GpsData* h_;
-};
 
 /// A `PointFeature` in its owner's storage; a thin pointer wrapper (validity
 /// follows the storage -- see the owning container).
@@ -410,26 +355,15 @@ private:
 class PointLandmark {
 public:
     /// Optimized parameters this entity contributes to the solve.
-    static constexpr uint32_t param_count = 3;
+    static constexpr uint32_t param_count = 0;
     PointLandmark() : h_(nullptr) {}
     explicit PointLandmark(ffi::PointLandmark* p) : h_(p) {}
     /// False when default-constructed (e.g. inside an empty option).
     bool valid() const { return h_ != nullptr; }
     /// The underlying C pointer -- the relaxed escape hatch.
     ffi::PointLandmark* raw() const { return h_; }
-    vect3f anchor() const { return ffi::path_point_landmark_anchor(h_); }
-    void set_anchor(vect3f v) { ffi::path_point_landmark_set_anchor(h_, v); }
-    PoseRef anchor_pose() const { return PoseRef{ffi::path_point_landmark_anchor_pose(h_)}; }
-    void set_anchor_pose(PoseRef r) { ffi::path_point_landmark_set_anchor_pose(h_, r.raw); }
-    vect3f dir_unit() const { return ffi::path_point_landmark_dir_unit(h_); }
-    void set_dir_unit(vect3f v) { ffi::path_point_landmark_dir_set_unit(h_, v); }
-    /// Chart tangent basis: d unit / d chart, per chart param.
-    vect3f dir_unit_d0() const { return ffi::path_point_landmark_dir_unit_d0(h_); }
-    vect3f dir_unit_d1() const { return ffi::path_point_landmark_dir_unit_d1(h_); }
-    float rho() const { return ffi::path_point_landmark_rho(h_); }
-    void set_rho(float v) { ffi::path_point_landmark_set_rho(h_, v); }
-    bool rho_optimize() const { return ffi::path_point_landmark_rho_optimize(h_); }
-    void set_rho_optimize(bool v) { ffi::path_point_landmark_rho_set_optimize(h_, v); }
+    vect3f pos() const { return ffi::path_point_landmark_pos(h_); }
+    void set_pos(vect3f v) { ffi::path_point_landmark_set_pos(h_, v); }
     PointLandmarkFrinesVec frines() { return PointLandmarkFrinesVec(h_); }
 private:
     ffi::PointLandmark* h_;
@@ -534,25 +468,20 @@ public:
     ffi::PoseInfo* raw() const { return h_; }
     vect3f delta_pos() const { return ffi::path_pose_info_delta_pos(h_); }
     void set_delta_pos(vect3f v) { ffi::path_pose_info_set_delta_pos(h_, v); }
-    matrix3f delta_rot() const { return ffi::path_pose_info_delta_rot(h_); }
-    void set_delta_rot(matrix3f v) { ffi::path_pose_info_set_delta_rot(h_, v); }
+    vect3f delta_ea() const { return ffi::path_pose_info_delta_ea(h_); }
+    void set_delta_ea(vect3f v) { ffi::path_pose_info_set_delta_ea(h_, v); }
     matrix3f delta_pos_cov_r() const { return ffi::path_pose_info_delta_pos_cov_r(h_); }
     void set_delta_pos_cov_r(matrix3f v) { ffi::path_pose_info_set_delta_pos_cov_r(h_, v); }
     vect3f delta_pos_cov_isigma() const { return ffi::path_pose_info_delta_pos_cov_isigma(h_); }
     void set_delta_pos_cov_isigma(vect3f v) { ffi::path_pose_info_set_delta_pos_cov_isigma(h_, v); }
-    matrix3f delta_rot_cov_r() const { return ffi::path_pose_info_delta_rot_cov_r(h_); }
-    void set_delta_rot_cov_r(matrix3f v) { ffi::path_pose_info_set_delta_rot_cov_r(h_, v); }
-    vect3f delta_rot_cov_isigma() const { return ffi::path_pose_info_delta_rot_cov_isigma(h_); }
-    void set_delta_rot_cov_isigma(vect3f v) { ffi::path_pose_info_set_delta_rot_cov_isigma(h_, v); }
-    bool has_gps() const { return ffi::path_pose_info_has_gps(h_); }
-    GpsData make_gps() { return GpsData(ffi::path_pose_info_make_gps(h_)); }
-    void clear_gps() { ffi::path_pose_info_clear_gps(h_); }
-    option<GpsData> gps() {
-        ffi::GpsData* p = ffi::path_pose_info_gps(h_);
-        return p ? option<GpsData>(GpsData(p)) : option<GpsData>();
-    }
-    vect3f tilt_g() const { return ffi::path_pose_info_tilt_g(h_); }
-    void set_tilt_g(vect3f v) { ffi::path_pose_info_set_tilt_g(h_, v); }
+    matrix3f delta_ea_cov_r() const { return ffi::path_pose_info_delta_ea_cov_r(h_); }
+    void set_delta_ea_cov_r(matrix3f v) { ffi::path_pose_info_set_delta_ea_cov_r(h_, v); }
+    vect3f delta_ea_cov_isigma() const { return ffi::path_pose_info_delta_ea_cov_isigma(h_); }
+    void set_delta_ea_cov_isigma(vect3f v) { ffi::path_pose_info_set_delta_ea_cov_isigma(h_, v); }
+    float tilt_roll() const { return ffi::path_pose_info_tilt_roll(h_); }
+    void set_tilt_roll(float v) { ffi::path_pose_info_set_tilt_roll(h_, v); }
+    float tilt_pitch() const { return ffi::path_pose_info_tilt_pitch(h_); }
+    void set_tilt_pitch(float v) { ffi::path_pose_info_set_tilt_pitch(h_, v); }
     PoseInfoFeaturesVec features() { return PoseInfoFeaturesVec(h_); }
 private:
     ffi::PoseInfo* h_;
@@ -570,14 +499,14 @@ public:
     bool valid() const { return h_ != nullptr; }
     /// The underlying C pointer -- the relaxed escape hatch.
     ffi::Pose* raw() const { return h_; }
-    vect3f r2w_translation() const { return ffi::path_pose_r2w_translation(h_); }
-    void set_r2w_translation(vect3f v) { ffi::path_pose_r2w_set_translation(h_, v); }
-    quaternf r2w_rotation() const { return ffi::path_pose_r2w_rotation(h_); }
-    void set_r2w_rotation(quaternf v) { ffi::path_pose_r2w_set_rotation(h_, v); }
-    bool r2w_optimize_translation() const { return ffi::path_pose_r2w_optimize_translation(h_); }
-    void set_r2w_optimize_translation(bool v) { ffi::path_pose_r2w_set_optimize_translation(h_, v); }
-    bool r2w_optimize_rotation() const { return ffi::path_pose_r2w_optimize_rotation(h_); }
-    void set_r2w_optimize_rotation(bool v) { ffi::path_pose_r2w_set_optimize_rotation(h_, v); }
+    vect3f pos() const { return ffi::path_pose_pos(h_); }
+    void set_pos(vect3f v) { ffi::path_pose_set_pos(h_, v); }
+    bool pos_optimize() const { return ffi::path_pose_pos_optimize(h_); }
+    void set_pos_optimize(bool v) { ffi::path_pose_pos_set_optimize(h_, v); }
+    vect3f ea() const { return ffi::path_pose_ea(h_); }
+    void set_ea(vect3f v) { ffi::path_pose_set_ea(h_, v); }
+    bool ea_optimize() const { return ffi::path_pose_ea_optimize(h_); }
+    void set_ea_optimize(bool v) { ffi::path_pose_ea_set_optimize(h_, v); }
     PoseInfo info() { return PoseInfo(ffi::path_pose_info_ptr(h_)); }
 private:
     ffi::Pose* h_;
@@ -612,38 +541,12 @@ public:
     explicit Covariance(ffi::Path* h) : h_(h) {}
     /// Per-parameter standard deviations into out; returns the count
     /// or a negative code. Works on every CovMode incl. TriDiagonal.
-    int32_t std_dev(const PointLandmark& e, double* out, uint32_t cap) {
-        return ffi::path_point_landmark_std_dev(h_, e.raw(), out, cap);
-    }
-    result<matrix3d, CovError> marginal(const PointLandmark& e) {
-        double b[9];
-        if (ffi::path_point_landmark_marginal_cov(h_, e.raw(), b, 9) < 0) return fail<matrix3d>();
-        return result<matrix3d, CovError>::ok(matrix3d::from_elements(
-            b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8]));
-    }
-    /// Per-parameter standard deviations into out; returns the count
-    /// or a negative code. Works on every CovMode incl. TriDiagonal.
     int32_t std_dev(const Pose& e, double* out, uint32_t cap) {
         return ffi::path_pose_std_dev(h_, e.raw(), out, cap);
     }
     /// Row-major dim x dim into out; returns dim or a negative code.
     int32_t marginal(const Pose& e, double* out, uint32_t cap) {
         return ffi::path_pose_marginal_cov(h_, e.raw(), out, cap);
-    }
-    /// Row-major PointLandmark::param_count x PointLandmark::param_count cross-covariance
-    /// into out; returns the row count or a negative code.
-    int32_t cross(const PointLandmark& a, const PointLandmark& b, double* out, uint32_t cap) {
-        return ffi::path_point_landmark_point_landmark_cross_cov(h_, a.raw(), b.raw(), out, cap);
-    }
-    /// Row-major PointLandmark::param_count x Pose::param_count cross-covariance
-    /// into out; returns the row count or a negative code.
-    int32_t cross(const PointLandmark& a, const Pose& b, double* out, uint32_t cap) {
-        return ffi::path_point_landmark_pose_cross_cov(h_, a.raw(), b.raw(), out, cap);
-    }
-    /// Row-major Pose::param_count x PointLandmark::param_count cross-covariance
-    /// into out; returns the row count or a negative code.
-    int32_t cross(const Pose& a, const PointLandmark& b, double* out, uint32_t cap) {
-        return ffi::path_pose_point_landmark_cross_cov(h_, a.raw(), b.raw(), out, cap);
     }
     /// Row-major Pose::param_count x Pose::param_count cross-covariance
     /// into out; returns the row count or a negative code.
@@ -917,18 +820,16 @@ public:
     PathPosesDeque poses() { return PathPosesDeque(h_); }
     PathLandmarksArena landmarks() { return PathLandmarksArena(h_); }
     PathPosePairsVec pose_pairs() { return PathPosePairsVec(h_); }
-    float drift_rho_isigma() const { return ffi::path_drift_rho_isigma(h_); }
-    void set_drift_rho_isigma(float v) { ffi::path_set_drift_rho_isigma(h_, v); }
+    float gamma() const { return ffi::path_gamma(h_); }
+    void set_gamma(float v) { ffi::path_set_gamma(h_, v); }
+    float drift_pos_isigma() const { return ffi::path_drift_pos_isigma(h_); }
+    void set_drift_pos_isigma(float v) { ffi::path_set_drift_pos_isigma(h_, v); }
+    float drift_ea_isigma() const { return ffi::path_drift_ea_isigma(h_); }
+    void set_drift_ea_isigma(float v) { ffi::path_set_drift_ea_isigma(h_, v); }
     float tilt_isigma() const { return ffi::path_tilt_isigma(h_); }
     void set_tilt_isigma(float v) { ffi::path_set_tilt_isigma(h_, v); }
     float frine_isigma_scale() const { return ffi::path_frine_isigma_scale(h_); }
     void set_frine_isigma_scale(float v) { ffi::path_set_frine_isigma_scale(h_, v); }
-    float frine_c2() const { return ffi::path_frine_c2(h_); }
-    void set_frine_c2(float v) { ffi::path_set_frine_c2(h_, v); }
-    float frine_cauchy() const { return ffi::path_frine_cauchy(h_); }
-    void set_frine_cauchy(float v) { ffi::path_set_frine_cauchy(h_, v); }
-    float gps_c2() const { return ffi::path_gps_c2(h_); }
-    void set_gps_c2(float v) { ffi::path_set_gps_c2(h_, v); }
 
     /// Ok(LmResult) for every healthy termination, Err(SolveError) for
     /// a solve failure (-1) or a caught panic (-2) -- the same split
@@ -972,4 +873,4 @@ private:
     ffi::Path* h_;
 };
 
-} // namespace slam_demo_gm
+} // namespace loc_demo

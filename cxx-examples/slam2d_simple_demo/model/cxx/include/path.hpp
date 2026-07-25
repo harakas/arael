@@ -129,7 +129,9 @@ uint32_t path_pose_pair_cur(const PosePair*);
 void path_pose_pair_set_cur(PosePair*, uint32_t);
 int32_t path_assemble_covariance(Path*, uint32_t);
 int32_t path_landmark_marginal_cov(Path*, const Landmark*, double*, uint32_t);
+int32_t path_landmark_std_dev(Path*, const Landmark*, double*, uint32_t);
 int32_t path_pose_marginal_cov(Path*, const Pose*, double*, uint32_t);
+int32_t path_pose_std_dev(Path*, const Pose*, double*, uint32_t);
 int32_t path_landmark_landmark_cross_cov(Path*, const Landmark*, const Landmark*, double*, uint32_t);
 int32_t path_landmark_pose_cross_cov(Path*, const Landmark*, const Pose*, double*, uint32_t);
 int32_t path_pose_landmark_cross_cov(Path*, const Pose*, const Landmark*, double*, uint32_t);
@@ -169,6 +171,7 @@ uint32_t path_landmarks_next(const Path*, uint32_t);
 uint32_t path_landmarks_last(const Path*);
 uint32_t path_landmarks_prev(const Path*, uint32_t);
 double path_cost(Path*);
+int32_t path_solve_band(Path*, uint32_t, const LmConfig*, LmResult*);
 void path_lm_config(uint32_t, LmConfig*);
 Path* path_new(void);
 void path_free(Path*);
@@ -358,11 +361,21 @@ class Covariance {
 public:
     Covariance() : h_(nullptr) {}
     explicit Covariance(ffi::Path* h) : h_(h) {}
+    /// Per-parameter standard deviations into out; returns the count
+    /// or a negative code. Works on every CovMode incl. TriDiagonal.
+    int32_t std_dev(const Landmark& e, double* out, uint32_t cap) {
+        return ffi::path_landmark_std_dev(h_, e.raw(), out, cap);
+    }
     result<matrix2d, CovError> marginal(const Landmark& e) {
         double b[4];
         if (ffi::path_landmark_marginal_cov(h_, e.raw(), b, 4) < 0) return fail<matrix2d>();
         return result<matrix2d, CovError>::ok(
             matrix2d::from_elements(b[0], b[1], b[2], b[3]));
+    }
+    /// Per-parameter standard deviations into out; returns the count
+    /// or a negative code. Works on every CovMode incl. TriDiagonal.
+    int32_t std_dev(const Pose& e, double* out, uint32_t cap) {
+        return ffi::path_pose_std_dev(h_, e.raw(), out, cap);
     }
     result<matrix3d, CovError> marginal(const Pose& e) {
         double b[9];
@@ -670,6 +683,14 @@ public:
     SolveResult solve_sparse(const LmConfig& cfg = LmConfig{}) {
         LmResult r;
         int32_t code = ffi::path_solve_sparse(h_, &cfg, &r);
+        if (code >= 0) return SolveResult::ok(r);
+        return SolveResult::err({static_cast<LmStatus>(code), last_error()});
+    }
+    /// Band Cholesky solve for banded Hessians; kd is the half-bandwidth
+    /// in scalar parameters.
+    SolveResult solve_band(uint32_t kd, const LmConfig& cfg = LmConfig{}) {
+        LmResult r;
+        int32_t code = ffi::path_solve_band(h_, kd, &cfg, &r);
         if (code >= 0) return SolveResult::ok(r);
         return SolveResult::err({static_cast<LmStatus>(code), last_error()});
     }

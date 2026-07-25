@@ -7,7 +7,7 @@ use std::os::raw::c_char;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use arael::covariance::{CovAssembly, CovMode, Covariance};
 use arael::simple_lm::{LmConfig, LmProblem, LmStatus};
-use slam_demo_gm::{GpsData, Path, PointFeature, PointFrine, PointLandmark, Pose, PoseInfo, PosePair};
+use loc_demo::{Path, PointFeature, PointFrine, PointLandmark, Pose, PoseInfo, PosePair};
 
 /// The opaque handle the C ABI hands out: the model, the error /
 /// diagnostic text buffer `last_error` points into, and the covariance
@@ -144,7 +144,7 @@ fn panic_text(p: Box<dyn std::any::Any + Send>) -> String {
 #[derive(Clone, Copy)]
 pub struct COptF {
     pub has: bool,
-    pub v: f64,
+    pub v: f32,
 }
 
 #[repr(C)]
@@ -154,14 +154,14 @@ pub struct COptSeconds {
     pub v: f64,
 }
 
-fn copt(o: Option<f64>) -> COptF {
+fn copt(o: Option<f32>) -> COptF {
     match o {
         Some(v) => COptF { has: true, v },
         None => COptF { has: false, v: 0.0 },
     }
 }
 
-fn opt_of(c: COptF) -> Option<f64> {
+fn opt_of(c: COptF) -> Option<f32> {
     c.has.then_some(c.v)
 }
 
@@ -178,11 +178,11 @@ pub struct CLmConfig {
     pub patience: u32,
     pub num_threads: u32,
     pub verbose: bool,
-    pub abs_precision: f64,
-    pub rel_precision: f64,
-    pub initial_lambda: f64,
-    pub cost_threshold: f64,
-    pub lambda_floor: f64,
+    pub abs_precision: f32,
+    pub rel_precision: f32,
+    pub initial_lambda: f32,
+    pub cost_threshold: f32,
+    pub lambda_floor: f32,
     pub gradient_tolerance: COptF,
     pub parameter_tolerance: COptF,
     pub predicted_reduction_tolerance: COptF,
@@ -190,7 +190,7 @@ pub struct CLmConfig {
     pub time_limit_seconds: COptSeconds,
 }
 
-fn preset_config(preset: u32) -> LmConfig<f64> {
+fn preset_config(preset: u32) -> LmConfig<f32> {
     match preset {
         1 => LmConfig::conservative(),
         2 => LmConfig::well_conditioned(),
@@ -227,7 +227,7 @@ pub unsafe extern "C" fn path_lm_config(preset: u32, out: *mut CLmConfig) {
 }
 
 impl CLmConfig {
-    fn to_config(&self) -> LmConfig<f64> {
+    fn to_config(&self) -> LmConfig<f32> {
         let mut c = preset_config(self.preset);
         c.max_iters = self.max_iters as usize;
         c.min_iters = self.min_iters as usize;
@@ -252,12 +252,12 @@ impl CLmConfig {
 
 #[repr(C)]
 pub struct CLmResult {
-    pub start_cost: f64,
-    pub end_cost: f64,
+    pub start_cost: f32,
+    pub end_cost: f32,
     pub iterations: u32,
     pub accepted_iterations: u32,
     pub status: i32,
-    pub final_lambda: f64,
+    pub final_lambda: f32,
 }
 
 #[no_mangle]
@@ -398,9 +398,9 @@ pub unsafe extern "C" fn path_solve_band(
     };
     match catch_unwind(AssertUnwindSafe(|| {
         let mut x0 = Vec::new();
-        hh.model.serialize64(&mut x0);
-        arael::simple_lm::solve_band(&x0, kd as usize, &mut hh.model, &c).map(|r| {
-            hh.model.deserialize64(&r.x);
+        hh.model.serialize32(&mut x0);
+        arael::simple_lm::solve_band_f32(&x0, kd as usize, &mut hh.model, &c).map(|r| {
+            hh.model.deserialize32(&r.x);
             r
         })
     })) {
@@ -437,8 +437,8 @@ pub unsafe extern "C" fn path_solve_band(
 pub unsafe extern "C" fn path_cost(h: *mut PathHandle) -> f64 {
     let m = &mut (*h).model;
     let mut params = Vec::new();
-    m.serialize64(&mut params);
-    m.calc_cost(&params)
+    m.serialize32(&mut params);
+    m.calc_cost(&params) as f64
 }
 
 /// mode: 0 = PerQuery, 1 = AllMarginals, 2 = TriDiagonal. Returns 0,
@@ -464,85 +464,6 @@ pub unsafe extern "C" fn path_assemble_covariance(h: *mut PathHandle, mode: u32)
         }
         Err(p) => {
             let msg = panic_text(p);
-            set_text(hh, &msg);
-            -2
-        }
-    }
-}
-
-/// Row-major dim x dim marginal covariance (f64) of one `PointLandmark`; returns
-/// dim, or -1 (error) / -2 (panic) / -3 (no assembly or buffer too
-/// small), text via path_last_error.
-#[no_mangle]
-pub unsafe extern "C" fn path_point_landmark_marginal_cov(
-    h: *mut PathHandle,
-    p: *const PointLandmark,
-    out: *mut f64,
-    cap: u32,
-) -> i32 {
-    let hh = &mut *h;
-    let Some(cov) = hh.cov.as_ref() else {
-        set_text(hh, "marginal_cov: assemble_covariance was not called");
-        return -3;
-    };
-    match catch_unwind(AssertUnwindSafe(|| cov.marginal_cov(&*p))) {
-        Ok(Ok(m)) => {
-            let dim = m.nrows();
-            if (dim * dim) as u32 > cap {
-                set_text(hh, "marginal_cov: buffer too small");
-                return -3;
-            }
-            for r in 0..dim {
-                for c in 0..dim {
-                    *out.add(r * dim + c) = m[(r, c)];
-                }
-            }
-            dim as i32
-        }
-        Ok(Err(e)) => {
-            set_text(hh, &format!("{}", e));
-            -1
-        }
-        Err(p2) => {
-            let msg = panic_text(p2);
-            set_text(hh, &msg);
-            -2
-        }
-    }
-}
-/// Per-parameter standard deviations (sqrt of the marginal diagonal)
-/// of one `PointLandmark`; returns the count, or -1 (error) / -2 (panic) / -3
-/// (no assembly or buffer too small), text via path_last_error.
-/// Works on every CovMode, including TriDiagonal.
-#[no_mangle]
-pub unsafe extern "C" fn path_point_landmark_std_dev(
-    h: *mut PathHandle,
-    p: *const PointLandmark,
-    out: *mut f64,
-    cap: u32,
-) -> i32 {
-    let hh = &mut *h;
-    let Some(cov) = hh.cov.as_ref() else {
-        set_text(hh, "std_dev: assemble_covariance was not called");
-        return -3;
-    };
-    match catch_unwind(AssertUnwindSafe(|| cov.std_dev(&*p))) {
-        Ok(Ok(sd)) => {
-            if sd.len() as u32 > cap {
-                set_text(hh, "std_dev: buffer too small");
-                return -3;
-            }
-            for (i, v) in sd.iter().enumerate() {
-                *out.add(i) = *v;
-            }
-            sd.len() as i32
-        }
-        Ok(Err(e)) => {
-            set_text(hh, &format!("{}", e));
-            -1
-        }
-        Err(p2) => {
-            let msg = panic_text(p2);
             set_text(hh, &msg);
             -2
         }
@@ -615,132 +536,6 @@ pub unsafe extern "C" fn path_pose_std_dev(
                 *out.add(i) = *v;
             }
             sd.len() as i32
-        }
-        Ok(Err(e)) => {
-            set_text(hh, &format!("{}", e));
-            -1
-        }
-        Err(p2) => {
-            let msg = panic_text(p2);
-            set_text(hh, &msg);
-            -2
-        }
-    }
-}
-
-/// Row-major pa x pb cross-covariance (f64) between a `PointLandmark` and a
-/// `PointLandmark`; returns the row count, or -1 (error) / -2 (panic) / -3 (no
-/// assembly or buffer too small), text via path_last_error.
-#[no_mangle]
-pub unsafe extern "C" fn path_point_landmark_point_landmark_cross_cov(
-    h: *mut PathHandle,
-    a: *const PointLandmark,
-    b: *const PointLandmark,
-    out: *mut f64,
-    cap: u32,
-) -> i32 {
-    let hh = &mut *h;
-    let Some(cov) = hh.cov.as_ref() else {
-        set_text(hh, "cross_cov: assemble_covariance was not called");
-        return -3;
-    };
-    match catch_unwind(AssertUnwindSafe(|| cov.cross_cov(&*a, &*b))) {
-        Ok(Ok(m)) => {
-            let (rows, cols) = (m.nrows(), m.ncols());
-            if (rows * cols) as u32 > cap {
-                set_text(hh, "cross_cov: buffer too small");
-                return -3;
-            }
-            for r in 0..rows {
-                for c in 0..cols {
-                    *out.add(r * cols + c) = m[(r, c)];
-                }
-            }
-            rows as i32
-        }
-        Ok(Err(e)) => {
-            set_text(hh, &format!("{}", e));
-            -1
-        }
-        Err(p2) => {
-            let msg = panic_text(p2);
-            set_text(hh, &msg);
-            -2
-        }
-    }
-}
-
-/// Row-major pa x pb cross-covariance (f64) between a `PointLandmark` and a
-/// `Pose`; returns the row count, or -1 (error) / -2 (panic) / -3 (no
-/// assembly or buffer too small), text via path_last_error.
-#[no_mangle]
-pub unsafe extern "C" fn path_point_landmark_pose_cross_cov(
-    h: *mut PathHandle,
-    a: *const PointLandmark,
-    b: *const Pose,
-    out: *mut f64,
-    cap: u32,
-) -> i32 {
-    let hh = &mut *h;
-    let Some(cov) = hh.cov.as_ref() else {
-        set_text(hh, "cross_cov: assemble_covariance was not called");
-        return -3;
-    };
-    match catch_unwind(AssertUnwindSafe(|| cov.cross_cov(&*a, &*b))) {
-        Ok(Ok(m)) => {
-            let (rows, cols) = (m.nrows(), m.ncols());
-            if (rows * cols) as u32 > cap {
-                set_text(hh, "cross_cov: buffer too small");
-                return -3;
-            }
-            for r in 0..rows {
-                for c in 0..cols {
-                    *out.add(r * cols + c) = m[(r, c)];
-                }
-            }
-            rows as i32
-        }
-        Ok(Err(e)) => {
-            set_text(hh, &format!("{}", e));
-            -1
-        }
-        Err(p2) => {
-            let msg = panic_text(p2);
-            set_text(hh, &msg);
-            -2
-        }
-    }
-}
-
-/// Row-major pa x pb cross-covariance (f64) between a `Pose` and a
-/// `PointLandmark`; returns the row count, or -1 (error) / -2 (panic) / -3 (no
-/// assembly or buffer too small), text via path_last_error.
-#[no_mangle]
-pub unsafe extern "C" fn path_pose_point_landmark_cross_cov(
-    h: *mut PathHandle,
-    a: *const Pose,
-    b: *const PointLandmark,
-    out: *mut f64,
-    cap: u32,
-) -> i32 {
-    let hh = &mut *h;
-    let Some(cov) = hh.cov.as_ref() else {
-        set_text(hh, "cross_cov: assemble_covariance was not called");
-        return -3;
-    };
-    match catch_unwind(AssertUnwindSafe(|| cov.cross_cov(&*a, &*b))) {
-        Ok(Ok(m)) => {
-            let (rows, cols) = (m.nrows(), m.ncols());
-            if (rows * cols) as u32 > cap {
-                set_text(hh, "cross_cov: buffer too small");
-                return -3;
-            }
-            for r in 0..rows {
-                for c in 0..cols {
-                    *out.add(r * cols + c) = m[(r, c)];
-                }
-            }
-            rows as i32
         }
         Ok(Err(e)) => {
             set_text(hh, &format!("{}", e));
@@ -982,12 +777,28 @@ pub unsafe extern "C" fn path_pose_pairs_truncate(p: *mut PathHandle, len: u32) 
     (*p).model.pose_pairs.truncate(len as usize);
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_drift_rho_isigma(p: *const PathHandle) -> f32 {
-    (*p).model.drift_rho_isigma
+pub unsafe extern "C" fn path_gamma(p: *const PathHandle) -> f32 {
+    (*p).model.gamma
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_set_drift_rho_isigma(p: *mut PathHandle, v: f32) {
-    (*p).model.drift_rho_isigma = v;
+pub unsafe extern "C" fn path_set_gamma(p: *mut PathHandle, v: f32) {
+    (*p).model.gamma = v;
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_drift_pos_isigma(p: *const PathHandle) -> f32 {
+    (*p).model.drift_pos_isigma
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_set_drift_pos_isigma(p: *mut PathHandle, v: f32) {
+    (*p).model.drift_pos_isigma = v;
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_drift_ea_isigma(p: *const PathHandle) -> f32 {
+    (*p).model.drift_ea_isigma
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_set_drift_ea_isigma(p: *mut PathHandle, v: f32) {
+    (*p).model.drift_ea_isigma = v;
 }
 #[no_mangle]
 pub unsafe extern "C" fn path_tilt_isigma(p: *const PathHandle) -> f32 {
@@ -1004,54 +815,6 @@ pub unsafe extern "C" fn path_frine_isigma_scale(p: *const PathHandle) -> f32 {
 #[no_mangle]
 pub unsafe extern "C" fn path_set_frine_isigma_scale(p: *mut PathHandle, v: f32) {
     (*p).model.frine_isigma_scale = v;
-}
-#[no_mangle]
-pub unsafe extern "C" fn path_frine_c2(p: *const PathHandle) -> f32 {
-    (*p).model.frine_c2
-}
-#[no_mangle]
-pub unsafe extern "C" fn path_set_frine_c2(p: *mut PathHandle, v: f32) {
-    (*p).model.frine_c2 = v;
-}
-#[no_mangle]
-pub unsafe extern "C" fn path_frine_cauchy(p: *const PathHandle) -> f32 {
-    (*p).model.frine_cauchy
-}
-#[no_mangle]
-pub unsafe extern "C" fn path_set_frine_cauchy(p: *mut PathHandle, v: f32) {
-    (*p).model.frine_cauchy = v;
-}
-#[no_mangle]
-pub unsafe extern "C" fn path_gps_c2(p: *const PathHandle) -> f32 {
-    (*p).model.gps_c2
-}
-#[no_mangle]
-pub unsafe extern "C" fn path_set_gps_c2(p: *mut PathHandle, v: f32) {
-    (*p).model.gps_c2 = v;
-}
-#[no_mangle]
-pub unsafe extern "C" fn path_gps_data_pos(p: *const GpsData) -> CVec3F32 {
-    (*p).pos.into()
-}
-#[no_mangle]
-pub unsafe extern "C" fn path_gps_data_set_pos(p: *mut GpsData, v: CVec3F32) {
-    (*p).pos = v.into();
-}
-#[no_mangle]
-pub unsafe extern "C" fn path_gps_data_cov_r(p: *const GpsData) -> CMat3F32 {
-    (*p).cov_r.into()
-}
-#[no_mangle]
-pub unsafe extern "C" fn path_gps_data_set_cov_r(p: *mut GpsData, v: CMat3F32) {
-    (*p).cov_r = v.into();
-}
-#[no_mangle]
-pub unsafe extern "C" fn path_gps_data_cov_isigma(p: *const GpsData) -> CVec3F32 {
-    (*p).cov_isigma.into()
-}
-#[no_mangle]
-pub unsafe extern "C" fn path_gps_data_set_cov_isigma(p: *mut GpsData, v: CVec3F32) {
-    (*p).cov_isigma = v.into();
 }
 #[no_mangle]
 pub unsafe extern "C" fn path_point_feature_pixel(p: *const PointFeature) -> CVec2F32 {
@@ -1102,52 +865,12 @@ pub unsafe extern "C" fn path_point_frine_set_feature(p: *mut PointFrine, v: u32
     (*p).feature = arael::refs::Ref::from_raw(v);
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_point_landmark_anchor(p: *const PointLandmark) -> CVec3F32 {
-    (*p).anchor.into()
+pub unsafe extern "C" fn path_point_landmark_pos(p: *const PointLandmark) -> CVec3F32 {
+    (*p).pos.into()
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_point_landmark_set_anchor(p: *mut PointLandmark, v: CVec3F32) {
-    (*p).anchor = v.into();
-}
-#[no_mangle]
-pub unsafe extern "C" fn path_point_landmark_anchor_pose(p: *const PointLandmark) -> u32 {
-    (*p).anchor_pose.to_raw()
-}
-#[no_mangle]
-pub unsafe extern "C" fn path_point_landmark_set_anchor_pose(p: *mut PointLandmark, v: u32) {
-    (*p).anchor_pose = arael::refs::Ref::from_raw(v);
-}
-#[no_mangle]
-pub unsafe extern "C" fn path_point_landmark_dir_unit(p: *const PointLandmark) -> CVec3F32 {
-    (*p).dir.unit.into()
-}
-#[no_mangle]
-pub unsafe extern "C" fn path_point_landmark_dir_set_unit(p: *mut PointLandmark, v: CVec3F32) {
-    (*p).dir.unit = v.into();
-}
-#[no_mangle]
-pub unsafe extern "C" fn path_point_landmark_dir_unit_d0(p: *const PointLandmark) -> CVec3F32 {
-    (*p).dir.unit_d[0].into()
-}
-#[no_mangle]
-pub unsafe extern "C" fn path_point_landmark_dir_unit_d1(p: *const PointLandmark) -> CVec3F32 {
-    (*p).dir.unit_d[1].into()
-}
-#[no_mangle]
-pub unsafe extern "C" fn path_point_landmark_rho(p: *const PointLandmark) -> f32 {
-    (*p).rho.value
-}
-#[no_mangle]
-pub unsafe extern "C" fn path_point_landmark_set_rho(p: *mut PointLandmark, v: f32) {
-    (*p).rho.value = v;
-}
-#[no_mangle]
-pub unsafe extern "C" fn path_point_landmark_rho_optimize(p: *const PointLandmark) -> bool {
-    (*p).rho.optimize
-}
-#[no_mangle]
-pub unsafe extern "C" fn path_point_landmark_rho_set_optimize(p: *mut PointLandmark, v: bool) {
-    (*p).rho.optimize = v;
+pub unsafe extern "C" fn path_point_landmark_set_pos(p: *mut PointLandmark, v: CVec3F32) {
+    (*p).pos = v.into();
 }
 #[no_mangle]
 pub unsafe extern "C" fn path_point_landmark_frines_len(p: *const PointLandmark) -> u32 {
@@ -1182,36 +905,36 @@ pub unsafe extern "C" fn path_point_landmark_frines_truncate(p: *mut PointLandma
     (*p).frines.truncate(len as usize);
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_r2w_translation(p: *const Pose) -> CVec3F32 {
-    (*p).r2w.translation.into()
+pub unsafe extern "C" fn path_pose_pos(p: *const Pose) -> CVec3F32 {
+    (*p).pos.value.into()
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_r2w_set_translation(p: *mut Pose, v: CVec3F32) {
-    (*p).r2w.translation = v.into();
+pub unsafe extern "C" fn path_pose_set_pos(p: *mut Pose, v: CVec3F32) {
+    (*p).pos.value = v.into();
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_r2w_rotation(p: *const Pose) -> CQuatF32 {
-    (*p).r2w.rotation.into()
+pub unsafe extern "C" fn path_pose_pos_optimize(p: *const Pose) -> bool {
+    (*p).pos.optimize
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_r2w_set_rotation(p: *mut Pose, v: CQuatF32) {
-    (*p).r2w.rotation = v.into();
+pub unsafe extern "C" fn path_pose_pos_set_optimize(p: *mut Pose, v: bool) {
+    (*p).pos.optimize = v;
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_r2w_optimize_translation(p: *const Pose) -> bool {
-    (*p).r2w.optimize_translation
+pub unsafe extern "C" fn path_pose_ea(p: *const Pose) -> CVec3F32 {
+    (*p).ea.value.into()
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_r2w_set_optimize_translation(p: *mut Pose, v: bool) {
-    (*p).r2w.optimize_translation = v;
+pub unsafe extern "C" fn path_pose_set_ea(p: *mut Pose, v: CVec3F32) {
+    (*p).ea.value = v.into();
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_r2w_optimize_rotation(p: *const Pose) -> bool {
-    (*p).r2w.optimize_rotation
+pub unsafe extern "C" fn path_pose_ea_optimize(p: *const Pose) -> bool {
+    (*p).ea.optimize
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_r2w_set_optimize_rotation(p: *mut Pose, v: bool) {
-    (*p).r2w.optimize_rotation = v;
+pub unsafe extern "C" fn path_pose_ea_set_optimize(p: *mut Pose, v: bool) {
+    (*p).ea.optimize = v;
 }
 #[no_mangle]
 pub unsafe extern "C" fn path_pose_info_ptr(p: *mut Pose) -> *mut PoseInfo {
@@ -1227,12 +950,12 @@ pub unsafe extern "C" fn path_pose_info_set_delta_pos(p: *mut PoseInfo, v: CVec3
     (*p).delta_pos = v.into();
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_info_delta_rot(p: *const PoseInfo) -> CMat3F32 {
-    (*p).delta_rot.into()
+pub unsafe extern "C" fn path_pose_info_delta_ea(p: *const PoseInfo) -> CVec3F32 {
+    (*p).delta_ea.into()
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_info_set_delta_rot(p: *mut PoseInfo, v: CMat3F32) {
-    (*p).delta_rot = v.into();
+pub unsafe extern "C" fn path_pose_info_set_delta_ea(p: *mut PoseInfo, v: CVec3F32) {
+    (*p).delta_ea = v.into();
 }
 #[no_mangle]
 pub unsafe extern "C" fn path_pose_info_delta_pos_cov_r(p: *const PoseInfo) -> CMat3F32 {
@@ -1251,49 +974,36 @@ pub unsafe extern "C" fn path_pose_info_set_delta_pos_cov_isigma(p: *mut PoseInf
     (*p).delta_pos_cov_isigma = v.into();
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_info_delta_rot_cov_r(p: *const PoseInfo) -> CMat3F32 {
-    (*p).delta_rot_cov_r.into()
+pub unsafe extern "C" fn path_pose_info_delta_ea_cov_r(p: *const PoseInfo) -> CMat3F32 {
+    (*p).delta_ea_cov_r.into()
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_info_set_delta_rot_cov_r(p: *mut PoseInfo, v: CMat3F32) {
-    (*p).delta_rot_cov_r = v.into();
+pub unsafe extern "C" fn path_pose_info_set_delta_ea_cov_r(p: *mut PoseInfo, v: CMat3F32) {
+    (*p).delta_ea_cov_r = v.into();
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_info_delta_rot_cov_isigma(p: *const PoseInfo) -> CVec3F32 {
-    (*p).delta_rot_cov_isigma.into()
+pub unsafe extern "C" fn path_pose_info_delta_ea_cov_isigma(p: *const PoseInfo) -> CVec3F32 {
+    (*p).delta_ea_cov_isigma.into()
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_info_set_delta_rot_cov_isigma(p: *mut PoseInfo, v: CVec3F32) {
-    (*p).delta_rot_cov_isigma = v.into();
+pub unsafe extern "C" fn path_pose_info_set_delta_ea_cov_isigma(p: *mut PoseInfo, v: CVec3F32) {
+    (*p).delta_ea_cov_isigma = v.into();
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_info_has_gps(p: *const PoseInfo) -> bool {
-    (*p).gps.is_some()
+pub unsafe extern "C" fn path_pose_info_tilt_roll(p: *const PoseInfo) -> f32 {
+    (*p).tilt_roll
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_info_make_gps(p: *mut PoseInfo) -> *mut GpsData {
-    let a = &mut (*p).gps;
-    *a = Some(Default::default());
-    a.as_mut().unwrap() as *mut GpsData
+pub unsafe extern "C" fn path_pose_info_set_tilt_roll(p: *mut PoseInfo, v: f32) {
+    (*p).tilt_roll = v;
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_info_clear_gps(p: *mut PoseInfo) {
-    (*p).gps = None;
+pub unsafe extern "C" fn path_pose_info_tilt_pitch(p: *const PoseInfo) -> f32 {
+    (*p).tilt_pitch
 }
 #[no_mangle]
-pub unsafe extern "C" fn path_pose_info_gps(p: *mut PoseInfo) -> *mut GpsData {
-    match &mut (*p).gps {
-        Some(e) => e as *mut GpsData,
-        None => std::ptr::null_mut(),
-    }
-}
-#[no_mangle]
-pub unsafe extern "C" fn path_pose_info_tilt_g(p: *const PoseInfo) -> CVec3F32 {
-    (*p).tilt_g.into()
-}
-#[no_mangle]
-pub unsafe extern "C" fn path_pose_info_set_tilt_g(p: *mut PoseInfo, v: CVec3F32) {
-    (*p).tilt_g = v.into();
+pub unsafe extern "C" fn path_pose_info_set_tilt_pitch(p: *mut PoseInfo, v: f32) {
+    (*p).tilt_pitch = v;
 }
 #[no_mangle]
 pub unsafe extern "C" fn path_pose_info_features_len(p: *const PoseInfo) -> u32 {

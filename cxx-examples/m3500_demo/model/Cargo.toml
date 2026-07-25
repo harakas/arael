@@ -1,0 +1,7 @@
+[package]
+name = "m3500-demo"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+arael = { path = "../../.." }
