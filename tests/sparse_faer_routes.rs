@@ -405,3 +405,106 @@ fn forcing_a_reduction_on_a_hand_built_problem_is_rejected() {
     let mut solver = SparseFaer::new().with_policy(SchurPolicy::Force);
     lm_solve(&[0.0, 0.0], &mut solver, &mut p, &cfg).unwrap();
 }
+
+// --- the same pose/landmark shape on Deque and Arena containers ---
+// The route-equivalence harness above runs refs::Vec models only; the
+// containers change iteration and slot layout (front pushes, holes), so
+// the reduced and whole routes must agree here too.
+
+#[arael::model]
+#[arael(root)]
+struct WorldDA {
+    poses: refs::Deque<Pose>,
+    landmarks: refs::Arena<Landmark>,
+    odos: std::vec::Vec<Odo>,
+    obs: std::vec::Vec<Obs>,
+}
+
+const DA_POSES: usize = 4;
+const DA_LANDMARKS: usize = 5;
+
+/// Poses in a Deque with pose 0 pushed FRONT last; landmarks in an Arena
+/// with a removed slot between the live ones.
+fn build_da(off: f64) -> WorldDA {
+    let mut w = WorldDA {
+        poses: refs::Deque::new(),
+        landmarks: refs::Arena::new(),
+        odos: std::vec::Vec::new(),
+        obs: std::vec::Vec::new(),
+    };
+    let pose_true = |i: usize| (i as f64, 0.5 * i as f64);
+    let lm_true = |j: usize| (j as f64, 2.0 + j as f64);
+    let mut pose_refs = std::vec::Vec::new();
+    for i in 1..DA_POSES {
+        let (tx, ty) = pose_true(i);
+        pose_refs.push(w.poses.push_back(Pose {
+            x: Param::new(tx + off), y: Param::new(ty - off),
+            ax: tx, ay: ty, hb: SelfBlock::new(),
+        }));
+    }
+    let (tx, ty) = pose_true(0);
+    pose_refs.insert(0, w.poses.push_front(Pose {
+        x: Param::new(tx + off), y: Param::new(ty - off),
+        ax: tx, ay: ty, hb: SelfBlock::new(),
+    }));
+    let mut lm_refs = std::vec::Vec::new();
+    for j in 0..DA_LANDMARKS {
+        if j == 2 {
+            let dead = w.landmarks.push(Landmark {
+                x: Param::new(9.0), y: Param::new(9.0), hb: SelfBlock::new() });
+            w.landmarks.remove(dead).unwrap();
+        }
+        let (tx, ty) = lm_true(j);
+        lm_refs.push(w.landmarks.push(Landmark {
+            x: Param::new(tx - off), y: Param::new(ty + off), hb: SelfBlock::new(),
+        }));
+    }
+    for i in 1..DA_POSES {
+        let (ax, ay) = pose_true(i - 1);
+        let (bx, by) = pose_true(i);
+        w.odos.push(Odo {
+            a: pose_refs[i - 1], b: pose_refs[i],
+            dx: bx - ax, dy: by - ay, hb: CrossBlock::new(),
+        });
+    }
+    for i in 0..DA_POSES {
+        for j in 0..DA_LANDMARKS {
+            let (px, py) = pose_true(i);
+            let (lx, ly) = lm_true(j);
+            w.obs.push(Obs {
+                p: pose_refs[i], l: lm_refs[j],
+                dx: lx - px, dy: ly - py, hb: CrossBlock::new(),
+            });
+        }
+    }
+    w
+}
+
+fn solved_params_da(solver: &mut SparseFaer<f64>) -> (Vec<f64>, f64) {
+    let cfg = LmConfig { max_iters: 60, ..Default::default() };
+    let mut w = build_da(0.05);
+    let mut params = Vec::new();
+    RootProblem::serialize(&mut w, &mut params);
+    let r = lm_solve(&params, solver, &mut w, &cfg).unwrap();
+    let mut out = Vec::new();
+    RootProblem::serialize(&mut w, &mut out);
+    (out, r.end_cost)
+}
+
+#[test]
+fn deque_arena_world_reduced_and_whole_routes_agree() {
+    let mut auto_solver = SparseFaer::new();
+    let (reduced, c_reduced) = solved_params_da(&mut auto_solver);
+    assert!(c_reduced < 1e-14, "reduced end_cost {}", c_reduced);
+    let plan = auto_solver.plan().expect("a plan");
+    assert!(plan.reduced, "the landmarks should have been marginalized");
+    assert_eq!(plan.eliminated_blocks, DA_LANDMARKS);
+    assert_eq!(plan.kept_params, 2 * DA_POSES);
+
+    let mut never = SparseFaer::new().with_policy(SchurPolicy::Never);
+    let (whole, c_whole) = solved_params_da(&mut never);
+    assert!(c_whole < 1e-14, "whole end_cost {}", c_whole);
+    for (i, (a, b)) in std::iter::zip(&whole, &reduced).enumerate() {
+        assert!((a - b).abs() < 1e-8, "param {}: {} vs {}", i, a, b);
+    }
+}

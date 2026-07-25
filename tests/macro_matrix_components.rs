@@ -130,6 +130,70 @@ fn n_cost(c: f64, t: f64) -> f64 {
     ((c - t) * 0.3).powi(2)
 }
 
+// ------------------------------------- component owners in every container
+
+#[arael::model]
+#[arael(root)]
+struct WCompDeque {
+    nodes: refs::Deque<N>,
+}
+
+#[test]
+fn component_entities_in_a_deque_with_front_pushes() {
+    let mut nodes = refs::Deque::new();
+    nodes.push_back(n(1.2, 1.0));
+    nodes.push_back(n(2.3, 2.0));
+    nodes.push_front(n(0.1, 0.0));
+    let manual = n_cost(0.1, 0.0) + n_cost(1.2, 1.0) + n_cost(2.3, 2.0);
+    check_model("component Deque", &mut WCompDeque { nodes }, manual);
+}
+
+#[arael::model]
+#[arael(root)]
+struct WCompArena {
+    nodes: refs::Arena<N>,
+}
+
+#[test]
+fn component_entities_in_an_arena_with_a_hole() {
+    let mut nodes = refs::Arena::new();
+    nodes.push(n(0.1, 0.0));
+    let dead = nodes.push(n(9.0, 9.0));
+    nodes.push(n(2.3, 2.0));
+    nodes.remove(dead).unwrap();
+    let manual = n_cost(0.1, 0.0) + n_cost(2.3, 2.0);
+    check_model("component Arena", &mut WCompArena { nodes }, manual);
+}
+
+// One type may not be held in several single-instance locations (the
+// duplicate-containment guard), so direct and Option get separate roots.
+#[arael::model]
+#[arael(root)]
+struct WCompDirect {
+    first: N,
+}
+
+#[arael::model]
+#[arael(root)]
+struct WCompOpt {
+    maybe: Option<N>,
+}
+
+#[test]
+fn component_entity_as_direct_and_option_fields() {
+    let mut w = WCompDirect { first: n(0.1, 0.0) };
+    check_model("component direct", &mut w, n_cost(0.1, 0.0));
+
+    let mut w = WCompOpt { maybe: Some(n(1.2, 1.0)) };
+    check_model("component Option Some", &mut w, n_cost(1.2, 1.0));
+
+    let mut w = WCompOpt { maybe: None };
+    let mut x = Vec::new();
+    RootProblem::serialize(&mut w, &mut x);
+    assert!(x.is_empty(), "None must serialize no params");
+    assert_eq!(w.calc_cost(&x), 0.0);
+}
+
 #[arael::model]
 #[arael(constraint(hb, {
     [(a.off.c + b.off.c + cc.off.c - tri.s) * 1.1]

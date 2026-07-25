@@ -1115,6 +1115,165 @@ struct AAliasSkip {
 }
 
 // ---------------------------------------------------------------------------
+// Remote-block frines (primary = a Ref target's SelfBlock) on Deque and
+// Arena roots: only Vec-backed targets were exercised before.
+
+#[arael::model]
+#[arael(constraint(a.hb, {
+    [(a.v - remd.m) * 0.9]
+}))]
+struct RemD {
+    #[arael(ref = root.nodes)]
+    a: Ref<N>,
+    m: f64,
+}
+
+#[arael::model]
+#[arael(root)]
+struct CRemDeque {
+    nodes: refs::Deque<N>,
+    rems: std::vec::Vec<RemD>,
+}
+
+fn rem_cost(v: f64, m: f64) -> f64 {
+    ((v - m) * 0.9).powi(2)
+}
+
+#[test]
+fn remote_block_into_deque_targets() {
+    let mut nodes = refs::Deque::new();
+    let r1 = nodes.push_back(n(1.3, 1.0));
+    let r0 = nodes.push_front(n(0.1, 0.0));
+    let rems = vec![RemD { a: r0, m: 0.2 }, RemD { a: r1, m: 1.1 }];
+    let manual = n_cost(0.1, 0.0) + n_cost(1.3, 1.0)
+        + rem_cost(0.1, 0.2) + rem_cost(1.3, 1.1);
+    check_model("remote Deque", &mut CRemDeque { nodes, rems }, manual);
+}
+
+#[arael::model]
+#[arael(constraint(a.hb, {
+    [(a.v - rema.m) * 0.9]
+}))]
+struct RemA {
+    #[arael(ref = root.nodes)]
+    a: Ref<N>,
+    m: f64,
+}
+
+#[arael::model]
+#[arael(root)]
+struct CRemArena {
+    nodes: refs::Arena<N>,
+    rems: std::vec::Vec<RemA>,
+}
+
+#[test]
+fn remote_block_into_arena_targets_with_a_hole() {
+    let mut nodes = refs::Arena::new();
+    let r0 = nodes.push(n(0.1, 0.0));
+    let dead = nodes.push(n(9.0, 9.0));
+    let r2 = nodes.push(n(2.2, 2.0));
+    nodes.remove(dead).unwrap();
+    let rems = vec![RemA { a: r0, m: 0.2 }, RemA { a: r2, m: 2.1 }];
+    let manual = n_cost(0.1, 0.0) + n_cost(2.2, 2.0)
+        + rem_cost(0.1, 0.2) + rem_cost(2.2, 2.1);
+    check_model("remote Arena", &mut CRemArena { nodes, rems }, manual);
+}
+
+// Multi-cross frines (three refs, one CrossBlock per pair) on Deque and
+// Arena roots.
+
+fn link_cost(a: f64, b: f64, c: f64, d1: f64, d2: f64) -> f64 {
+    ((b - a - d1) * 1.5).powi(2) + ((c - b - d2) * 0.8).powi(2)
+}
+
+#[arael::model]
+#[arael(constraint([hb_ab, hb_ac, hb_bc], {
+    [(b.v - a.v - linkd.d1) * 1.5,
+     (cc.v - b.v - linkd.d2) * 0.8]
+}))]
+struct LinkD {
+    #[arael(ref = root.nodes)]
+    a: Ref<N>,
+    #[arael(ref = root.nodes)]
+    b: Ref<N>,
+    #[arael(ref = root.nodes)]
+    cc: Ref<N>,
+    d1: f64,
+    d2: f64,
+    #[arael(cross = (a, b))]
+    hb_ab: CrossBlock<N, N>,
+    #[arael(cross = (a, cc))]
+    hb_ac: CrossBlock<N, N>,
+    #[arael(cross = (b, cc))]
+    hb_bc: CrossBlock<N, N>,
+}
+
+#[arael::model]
+#[arael(root)]
+struct CMcDeque {
+    nodes: refs::Deque<N>,
+    links: std::vec::Vec<LinkD>,
+}
+
+#[test]
+fn multi_cross_on_a_deque_root() {
+    let mut nodes = refs::Deque::new();
+    let r1 = nodes.push_back(n(1.3, 1.0));
+    let r2 = nodes.push_back(n(2.2, 2.0));
+    let r0 = nodes.push_front(n(0.1, 0.0));
+    let links = vec![LinkD { a: r0, b: r1, cc: r2, d1: 1.0, d2: 1.0,
+        hb_ab: CrossBlock::new(), hb_ac: CrossBlock::new(), hb_bc: CrossBlock::new() }];
+    let manual = n_cost(0.1, 0.0) + n_cost(1.3, 1.0) + n_cost(2.2, 2.0)
+        + link_cost(0.1, 1.3, 2.2, 1.0, 1.0);
+    check_model("multi-cross Deque", &mut CMcDeque { nodes, links }, manual);
+}
+
+#[arael::model]
+#[arael(constraint([hb_ab, hb_ac, hb_bc], {
+    [(b.v - a.v - linka.d1) * 1.5,
+     (cc.v - b.v - linka.d2) * 0.8]
+}))]
+struct LinkA {
+    #[arael(ref = root.nodes)]
+    a: Ref<N>,
+    #[arael(ref = root.nodes)]
+    b: Ref<N>,
+    #[arael(ref = root.nodes)]
+    cc: Ref<N>,
+    d1: f64,
+    d2: f64,
+    #[arael(cross = (a, b))]
+    hb_ab: CrossBlock<N, N>,
+    #[arael(cross = (a, cc))]
+    hb_ac: CrossBlock<N, N>,
+    #[arael(cross = (b, cc))]
+    hb_bc: CrossBlock<N, N>,
+}
+
+#[arael::model]
+#[arael(root)]
+struct CMcArena {
+    nodes: refs::Arena<N>,
+    links: std::vec::Vec<LinkA>,
+}
+
+#[test]
+fn multi_cross_on_an_arena_root_with_a_hole() {
+    let mut nodes = refs::Arena::new();
+    let r0 = nodes.push(n(0.1, 0.0));
+    let dead = nodes.push(n(9.0, 9.0));
+    let r1 = nodes.push(n(1.3, 1.0));
+    let r2 = nodes.push(n(2.2, 2.0));
+    nodes.remove(dead).unwrap();
+    let links = vec![LinkA { a: r0, b: r1, cc: r2, d1: 1.0, d2: 1.0,
+        hb_ab: CrossBlock::new(), hb_ac: CrossBlock::new(), hb_bc: CrossBlock::new() }];
+    let manual = n_cost(0.1, 0.0) + n_cost(1.3, 1.0) + n_cost(2.2, 2.0)
+        + link_cost(0.1, 1.3, 2.2, 1.0, 1.0);
+    check_model("multi-cross Arena", &mut CMcArena { nodes, links }, manual);
+}
+
+// ---------------------------------------------------------------------------
 // Reads through an Option sub-struct: guarded reads never evaluate on
 // None; an unguarded read panics naming the field as the body spells it
 // (the contract in MODEL.md, "Guards and optional data").
