@@ -32,7 +32,8 @@ fn hpp_matches_golden() {
 fn unsupported_kinds_error_loudly() {
     let mut m = model();
     let t = m.types.get_mut("N").unwrap();
-    t.fields[0].kind = "euler_param".to_string();
+    t.fields[0].kind = "data".to_string();
+    t.fields[0].of = Some("SomethingWeird".to_string());
     let e = emit_ffi::emit(&m, "cxx_fit").unwrap_err();
     assert!(e.contains("not supported"), "{e}");
 }

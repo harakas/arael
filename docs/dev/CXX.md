@@ -569,13 +569,31 @@ FIELD's position, offsets follow the params'). Fixed by sorting in
 block_partition_from_spans; regression test
 tests/root_block_declared_late.rs.
 
-**Stage 3 -- full field coverage.**
-Math-typed fields and params; euler/quat/transform semantic accessors
-(the reference-reset idioms verified against Rust behavior, with
-parity tests per param kind); refs + typed C++ ref wrappers; Option
-entities; nested sub-models; Deque/Arena views (remove); components;
-opaque listing. Extend cxx-tests to an m3500-like PGO shape: load g2o
-data in C++, solve, match Rust's cost trajectory.
+**Stage 3 -- full field coverage. [DONE 2026-07-25, tail below]**
+Emitters now cover: math-typed data and params (repr(C) mirrors for
+vect2/3, matrix2/3, quatern at both precisions; C++ side passes the
+arael math types by value), rotation params via their documented
+set-before/read-after `.value` (simple/universal euler as vect3,
+rotvec as quatern) plus `optimize` flag accessors on every param,
+TransformParam (translation/rotation/flags) and UnitVecParam (unit)
+builtins, user components and nested sub-models (pointer accessor +
+own class), refs as packed-u32 transport (`Ref::to_raw/from_raw`
+added to arael -- the anti-forging fixture still holds; `Ref` and
+`Param` gained the Defaults the push contract needs), Option entities
+(has/make/clear/get, absent = invalid wrapper), and vec/deque/arena
+views at any owner (deque push_front/push_back; arena push->Ref,
+get, remove -- no ref_at, holes make index refs meaningless).
+C++ classes emit children-first (containment is cycle-free).
+The cxx-tests fixture grew a 3D pose chain in a Deque (front push),
+cross-block ties wired through ref_at, an Arena with a removal, a
+nested Info holding an Option GpsObs, vect2d root data, and a FIXED
+SimpleEulerAngleParam; the parity test compares every value exactly.
+
+Not yet exercised end-to-end (emitters support, fixture does not):
+universal/rotvec rotation params, Transform/UnitVec builtins, user
+components, entity-owned collections, f32 roots; multi-root capi
+generation is unimplemented (one root per crate for now). These fold
+into stage 4/5 test padding.
 
 **Stage 4 -- solve surface polish.**
 solve_sparse (+ band?), presets, target-cost early-out, panic-to-

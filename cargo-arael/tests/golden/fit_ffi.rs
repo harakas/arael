@@ -6,7 +6,7 @@ use std::ffi::CString;
 use std::os::raw::c_char;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use arael::simple_lm::{LmConfig, LmProblem, LmStatus};
-use cxx_fit::{Fit, N, Obs};
+use cxx_fit::{Fit, GpsObs, Info, N, Obs, Pose, Tie};
 
 /// The opaque handle the C ABI hands out: the model plus the error /
 /// diagnostic text buffer `last_error` points into.
@@ -14,6 +14,96 @@ pub struct FitHandle {
     model: Fit,
     text: CString,
 }
+
+macro_rules! c_vec2 {
+    ($name:ident, $t:ty) => {
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        pub struct $name { pub x: $t, pub y: $t }
+        impl From<arael::vect::vect2<$t>> for $name {
+            fn from(v: arael::vect::vect2<$t>) -> Self { Self { x: v.x, y: v.y } }
+        }
+        impl From<$name> for arael::vect::vect2<$t> {
+            fn from(v: $name) -> Self { arael::vect::vect2::new(v.x, v.y) }
+        }
+    };
+}
+macro_rules! c_vec3 {
+    ($name:ident, $t:ty) => {
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        pub struct $name { pub x: $t, pub y: $t, pub z: $t }
+        impl From<arael::vect::vect3<$t>> for $name {
+            fn from(v: arael::vect::vect3<$t>) -> Self { Self { x: v.x, y: v.y, z: v.z } }
+        }
+        impl From<$name> for arael::vect::vect3<$t> {
+            fn from(v: $name) -> Self { arael::vect::vect3::new(v.x, v.y, v.z) }
+        }
+    };
+}
+macro_rules! c_mat2 {
+    ($name:ident, $t:ty) => {
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        pub struct $name { pub m: [[$t; 2]; 2] }
+        impl From<arael::matrix::matrix2<$t>> for $name {
+            fn from(v: arael::matrix::matrix2<$t>) -> Self {
+                Self { m: [[v.rows[0].x, v.rows[0].y], [v.rows[1].x, v.rows[1].y]] }
+            }
+        }
+        impl From<$name> for arael::matrix::matrix2<$t> {
+            fn from(v: $name) -> Self {
+                arael::matrix::matrix2::from_elements(v.m[0][0], v.m[0][1], v.m[1][0], v.m[1][1])
+            }
+        }
+    };
+}
+macro_rules! c_mat3 {
+    ($name:ident, $t:ty) => {
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        pub struct $name { pub m: [[$t; 3]; 3] }
+        impl From<arael::matrix::matrix3<$t>> for $name {
+            fn from(v: arael::matrix::matrix3<$t>) -> Self {
+                Self { m: [
+                    [v.rows[0].x, v.rows[0].y, v.rows[0].z],
+                    [v.rows[1].x, v.rows[1].y, v.rows[1].z],
+                    [v.rows[2].x, v.rows[2].y, v.rows[2].z],
+                ] }
+            }
+        }
+        impl From<$name> for arael::matrix::matrix3<$t> {
+            fn from(v: $name) -> Self { arael::matrix::matrix3::from_array(v.m) }
+        }
+    };
+}
+macro_rules! c_quat {
+    ($name:ident, $t:ty) => {
+        #[repr(C)]
+        #[derive(Clone, Copy)]
+        pub struct $name { pub t: $t, pub x: $t, pub y: $t, pub z: $t }
+        impl From<arael::quatern::quatern<$t>> for $name {
+            fn from(q: arael::quatern::quatern<$t>) -> Self {
+                Self { t: q.t, x: q.v.x, y: q.v.y, z: q.v.z }
+            }
+        }
+        impl From<$name> for arael::quatern::quatern<$t> {
+            fn from(q: $name) -> Self {
+                arael::quatern::quatern::new(q.t, arael::vect::vect3::new(q.x, q.y, q.z))
+            }
+        }
+    };
+}
+c_vec2!(CVec2F32, f32);
+c_vec2!(CVec2F64, f64);
+c_vec3!(CVec3F32, f32);
+c_vec3!(CVec3F64, f64);
+c_mat2!(CMat2F32, f32);
+c_mat2!(CMat2F64, f64);
+c_mat3!(CMat3F32, f32);
+c_mat3!(CMat3F64, f64);
+c_quat!(CQuatF32, f32);
+c_quat!(CQuatF64, f64);
 
 fn status_code(s: &LmStatus) -> i32 {
     match s {
@@ -214,6 +304,14 @@ pub unsafe extern "C" fn fit_set_m(p: *mut FitHandle, v: f64) {
     (*p).model.m.value = v;
 }
 #[no_mangle]
+pub unsafe extern "C" fn fit_m_optimize(p: *const FitHandle) -> bool {
+    (*p).model.m.optimize
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_m_set_optimize(p: *mut FitHandle, v: bool) {
+    (*p).model.m.optimize = v;
+}
+#[no_mangle]
 pub unsafe extern "C" fn fit_c(p: *const FitHandle) -> f64 {
     (*p).model.c.value
 }
@@ -221,37 +319,161 @@ pub unsafe extern "C" fn fit_c(p: *const FitHandle) -> f64 {
 pub unsafe extern "C" fn fit_set_c(p: *mut FitHandle, v: f64) {
     (*p).model.c.value = v;
 }
-
 #[no_mangle]
-pub unsafe extern "C" fn fit_obs_len(h: *const FitHandle) -> u32 {
-    (*h).model.obs.len() as u32
+pub unsafe extern "C" fn fit_c_optimize(p: *const FitHandle) -> bool {
+    (*p).model.c.optimize
 }
 #[no_mangle]
-pub unsafe extern "C" fn fit_obs_push(h: *mut FitHandle) -> *mut Obs {
-    let m = &mut (*h).model;
-    m.obs.push(Default::default());
-    m.obs.last_mut().unwrap() as *mut Obs
+pub unsafe extern "C" fn fit_c_set_optimize(p: *mut FitHandle, v: bool) {
+    (*p).model.c.optimize = v;
 }
 #[no_mangle]
-pub unsafe extern "C" fn fit_obs_at(h: *mut FitHandle, i: u32) -> *mut Obs {
-    let m = &mut (*h).model;
-    &mut m.obs[i as usize] as *mut Obs
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn fit_items_len(h: *const FitHandle) -> u32 {
-    (*h).model.items.len() as u32
+pub unsafe extern "C" fn fit_cal(p: *const FitHandle) -> CVec2F64 {
+    (*p).model.cal.into()
 }
 #[no_mangle]
-pub unsafe extern "C" fn fit_items_push(h: *mut FitHandle) -> *mut N {
-    let m = &mut (*h).model;
-    let r = m.items.push(Default::default());
-    &mut m.items[r] as *mut N
+pub unsafe extern "C" fn fit_set_cal(p: *mut FitHandle, v: CVec2F64) {
+    (*p).model.cal = v.into();
 }
 #[no_mangle]
-pub unsafe extern "C" fn fit_items_at(h: *mut FitHandle, i: u32) -> *mut N {
-    let m = &mut (*h).model;
-    &mut m.items[i as usize] as *mut N
+pub unsafe extern "C" fn fit_obs_len(p: *const FitHandle) -> u32 {
+    (*p).model.obs.len() as u32
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_obs_push(p: *mut FitHandle) -> *mut Obs {
+    let m = &mut (*p).model.obs;
+    m.push(Default::default());
+    m.last_mut().unwrap() as *mut Obs
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_obs_at(p: *mut FitHandle, i: u32) -> *mut Obs {
+    let m = &mut (*p).model.obs;
+    &mut m[i as usize] as *mut Obs
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_items_len(p: *const FitHandle) -> u32 {
+    (*p).model.items.len() as u32
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_items_push(p: *mut FitHandle) -> *mut N {
+    let m = &mut (*p).model.items;
+    let r = m.push(Default::default());
+    &mut m[r] as *mut N
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_items_at(p: *mut FitHandle, i: u32) -> *mut N {
+    let m = &mut (*p).model.items;
+    &mut m[i as usize] as *mut N
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_items_ref_at(p: *const FitHandle, i: u32) -> u32 {
+    (*p).model.items.ref_at(i as usize).to_raw()
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_items_get(p: *mut FitHandle, r: u32) -> *mut N {
+    let m = &mut (*p).model.items;
+    &mut m[arael::refs::Ref::from_raw(r)] as *mut N
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_poses_len(p: *const FitHandle) -> u32 {
+    (*p).model.poses.len() as u32
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_poses_push_back(p: *mut FitHandle) -> *mut Pose {
+    let m = &mut (*p).model.poses;
+    let r = m.push_back(Default::default());
+    &mut m[r] as *mut Pose
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_poses_push_front(p: *mut FitHandle) -> *mut Pose {
+    let m = &mut (*p).model.poses;
+    let r = m.push_front(Default::default());
+    &mut m[r] as *mut Pose
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_poses_at(p: *mut FitHandle, i: u32) -> *mut Pose {
+    let m = &mut (*p).model.poses;
+    &mut m[i as usize] as *mut Pose
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_poses_ref_at(p: *const FitHandle, i: u32) -> u32 {
+    (*p).model.poses.ref_at(i as usize).to_raw()
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_poses_get(p: *mut FitHandle, r: u32) -> *mut Pose {
+    let m = &mut (*p).model.poses;
+    &mut m[arael::refs::Ref::from_raw(r)] as *mut Pose
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_ties_len(p: *const FitHandle) -> u32 {
+    (*p).model.ties.len() as u32
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_ties_push(p: *mut FitHandle) -> *mut Tie {
+    let m = &mut (*p).model.ties;
+    m.push(Default::default());
+    m.last_mut().unwrap() as *mut Tie
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_ties_at(p: *mut FitHandle, i: u32) -> *mut Tie {
+    let m = &mut (*p).model.ties;
+    &mut m[i as usize] as *mut Tie
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_marks_len(p: *const FitHandle) -> u32 {
+    (*p).model.marks.len() as u32
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_marks_push(p: *mut FitHandle) -> u32 {
+    let m = &mut (*p).model.marks;
+    m.push(Default::default()).to_raw()
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_marks_remove(p: *mut FitHandle, r: u32) -> bool {
+    let m = &mut (*p).model.marks;
+    m.remove(arael::refs::Ref::from_raw(r)).is_some()
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_marks_get(p: *mut FitHandle, r: u32) -> *mut N {
+    let m = &mut (*p).model.marks;
+    &mut m[arael::refs::Ref::from_raw(r)] as *mut N
+}
+#[no_mangle]
+pub unsafe extern "C" fn gps_obs_pos(p: *const GpsObs) -> CVec3F64 {
+    (*p).pos.into()
+}
+#[no_mangle]
+pub unsafe extern "C" fn gps_obs_set_pos(p: *mut GpsObs, v: CVec3F64) {
+    (*p).pos = v.into();
+}
+#[no_mangle]
+pub unsafe extern "C" fn gps_obs_isigma(p: *const GpsObs) -> f32 {
+    (*p).isigma
+}
+#[no_mangle]
+pub unsafe extern "C" fn gps_obs_set_isigma(p: *mut GpsObs, v: f32) {
+    (*p).isigma = v;
+}
+#[no_mangle]
+pub unsafe extern "C" fn info_has_gps(p: *const Info) -> bool {
+    (*p).gps.is_some()
+}
+#[no_mangle]
+pub unsafe extern "C" fn info_make_gps(p: *mut Info) -> *mut GpsObs {
+    let a = &mut (*p).gps;
+    *a = Some(Default::default());
+    a.as_mut().unwrap() as *mut GpsObs
+}
+#[no_mangle]
+pub unsafe extern "C" fn info_clear_gps(p: *mut Info) {
+    (*p).gps = None;
+}
+#[no_mangle]
+pub unsafe extern "C" fn info_gps(p: *mut Info) -> *mut GpsObs {
+    match &mut (*p).gps {
+        Some(e) => e as *mut GpsObs,
+        None => std::ptr::null_mut(),
+    }
 }
 #[no_mangle]
 pub unsafe extern "C" fn n_v(p: *const N) -> f64 {
@@ -260,6 +482,14 @@ pub unsafe extern "C" fn n_v(p: *const N) -> f64 {
 #[no_mangle]
 pub unsafe extern "C" fn n_set_v(p: *mut N, v: f64) {
     (*p).v.value = v;
+}
+#[no_mangle]
+pub unsafe extern "C" fn n_v_optimize(p: *const N) -> bool {
+    (*p).v.optimize
+}
+#[no_mangle]
+pub unsafe extern "C" fn n_v_set_optimize(p: *mut N, v: bool) {
+    (*p).v.optimize = v;
 }
 #[no_mangle]
 pub unsafe extern "C" fn n_t(p: *const N) -> f64 {
@@ -292,4 +522,81 @@ pub unsafe extern "C" fn obs_y(p: *const Obs) -> f64 {
 #[no_mangle]
 pub unsafe extern "C" fn obs_set_y(p: *mut Obs, v: f64) {
     (*p).y = v;
+}
+#[no_mangle]
+pub unsafe extern "C" fn pose_ea(p: *const Pose) -> CVec3F64 {
+    (*p).ea.value.into()
+}
+#[no_mangle]
+pub unsafe extern "C" fn pose_set_ea(p: *mut Pose, v: CVec3F64) {
+    (*p).ea.value = v.into();
+}
+#[no_mangle]
+pub unsafe extern "C" fn pose_ea_optimize(p: *const Pose) -> bool {
+    (*p).ea.optimize
+}
+#[no_mangle]
+pub unsafe extern "C" fn pose_ea_set_optimize(p: *mut Pose, v: bool) {
+    (*p).ea.optimize = v;
+}
+#[no_mangle]
+pub unsafe extern "C" fn pose_pos(p: *const Pose) -> CVec3F64 {
+    (*p).pos.value.into()
+}
+#[no_mangle]
+pub unsafe extern "C" fn pose_set_pos(p: *mut Pose, v: CVec3F64) {
+    (*p).pos.value = v.into();
+}
+#[no_mangle]
+pub unsafe extern "C" fn pose_pos_optimize(p: *const Pose) -> bool {
+    (*p).pos.optimize
+}
+#[no_mangle]
+pub unsafe extern "C" fn pose_pos_set_optimize(p: *mut Pose, v: bool) {
+    (*p).pos.optimize = v;
+}
+#[no_mangle]
+pub unsafe extern "C" fn pose_target(p: *const Pose) -> CVec3F64 {
+    (*p).target.into()
+}
+#[no_mangle]
+pub unsafe extern "C" fn pose_set_target(p: *mut Pose, v: CVec3F64) {
+    (*p).target = v.into();
+}
+#[no_mangle]
+pub unsafe extern "C" fn pose_info_ptr(p: *mut Pose) -> *mut Info {
+    let a = &mut (*p).info;
+    a as *mut Info
+}
+#[no_mangle]
+pub unsafe extern "C" fn tie_a(p: *const Tie) -> u32 {
+    (*p).a.to_raw()
+}
+#[no_mangle]
+pub unsafe extern "C" fn tie_set_a(p: *mut Tie, v: u32) {
+    (*p).a = arael::refs::Ref::from_raw(v);
+}
+#[no_mangle]
+pub unsafe extern "C" fn tie_b(p: *const Tie) -> u32 {
+    (*p).b.to_raw()
+}
+#[no_mangle]
+pub unsafe extern "C" fn tie_set_b(p: *mut Tie, v: u32) {
+    (*p).b = arael::refs::Ref::from_raw(v);
+}
+#[no_mangle]
+pub unsafe extern "C" fn tie_d(p: *const Tie) -> CVec3F64 {
+    (*p).d.into()
+}
+#[no_mangle]
+pub unsafe extern "C" fn tie_set_d(p: *mut Tie, v: CVec3F64) {
+    (*p).d = v.into();
+}
+#[no_mangle]
+pub unsafe extern "C" fn tie_w(p: *const Tie) -> f64 {
+    (*p).w
+}
+#[no_mangle]
+pub unsafe extern "C" fn tie_set_w(p: *mut Tie, v: f64) {
+    (*p).w = v;
 }

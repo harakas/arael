@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <cmath>
+#include "arael/math.hpp"
 
 namespace arael {
 
@@ -56,14 +57,41 @@ struct LmResult {
         && status != LmStatus::Aborted; }
 };
 
+/// Typed handle into the collection that issued it.
+struct Ref_GpsObs { uint32_t raw; };
+/// Typed handle into the collection that issued it.
+struct Ref_Info { uint32_t raw; };
+/// Typed handle into the collection that issued it.
+struct Ref_N { uint32_t raw; };
+/// Typed handle into the collection that issued it.
+struct Ref_Obs { uint32_t raw; };
+/// Typed handle into the collection that issued it.
+struct Ref_Pose { uint32_t raw; };
+/// Typed handle into the collection that issued it.
+struct Ref_Tie { uint32_t raw; };
+
 namespace ffi {
 struct Fit;
+struct GpsObs;
+struct Info;
 struct N;
 struct Obs;
+struct Pose;
+struct Tie;
 
 extern "C" {
+vect3d gps_obs_pos(const GpsObs*);
+void gps_obs_set_pos(GpsObs*, vect3d);
+float gps_obs_isigma(const GpsObs*);
+void gps_obs_set_isigma(GpsObs*, float);
+bool info_has_gps(const Info*);
+GpsObs* info_make_gps(Info*);
+void info_clear_gps(Info*);
+GpsObs* info_gps(Info*);
 double n_v(const N*);
 void n_set_v(N*, double);
+bool n_v_optimize(const N*);
+void n_v_set_optimize(N*, bool);
 double n_t(const N*);
 void n_set_t(N*, double);
 double n_w(const N*);
@@ -72,16 +100,56 @@ double obs_x(const Obs*);
 void obs_set_x(Obs*, double);
 double obs_y(const Obs*);
 void obs_set_y(Obs*, double);
+vect3d pose_ea(const Pose*);
+void pose_set_ea(Pose*, vect3d);
+bool pose_ea_optimize(const Pose*);
+void pose_ea_set_optimize(Pose*, bool);
+vect3d pose_pos(const Pose*);
+void pose_set_pos(Pose*, vect3d);
+bool pose_pos_optimize(const Pose*);
+void pose_pos_set_optimize(Pose*, bool);
+vect3d pose_target(const Pose*);
+void pose_set_target(Pose*, vect3d);
+Info* pose_info_ptr(Pose*);
+uint32_t tie_a(const Tie*);
+void tie_set_a(Tie*, uint32_t);
+uint32_t tie_b(const Tie*);
+void tie_set_b(Tie*, uint32_t);
+vect3d tie_d(const Tie*);
+void tie_set_d(Tie*, vect3d);
+double tie_w(const Tie*);
+void tie_set_w(Tie*, double);
 double fit_m(const Fit*);
 void fit_set_m(Fit*, double);
+bool fit_m_optimize(const Fit*);
+void fit_m_set_optimize(Fit*, bool);
 double fit_c(const Fit*);
 void fit_set_c(Fit*, double);
+bool fit_c_optimize(const Fit*);
+void fit_c_set_optimize(Fit*, bool);
+vect2d fit_cal(const Fit*);
+void fit_set_cal(Fit*, vect2d);
 uint32_t fit_obs_len(const Fit*);
 Obs* fit_obs_push(Fit*);
 Obs* fit_obs_at(Fit*, uint32_t);
 uint32_t fit_items_len(const Fit*);
 N* fit_items_push(Fit*);
 N* fit_items_at(Fit*, uint32_t);
+uint32_t fit_items_ref_at(const Fit*, uint32_t);
+N* fit_items_get(Fit*, uint32_t);
+uint32_t fit_poses_len(const Fit*);
+Pose* fit_poses_push_back(Fit*);
+Pose* fit_poses_push_front(Fit*);
+Pose* fit_poses_at(Fit*, uint32_t);
+uint32_t fit_poses_ref_at(const Fit*, uint32_t);
+Pose* fit_poses_get(Fit*, uint32_t);
+uint32_t fit_ties_len(const Fit*);
+Tie* fit_ties_push(Fit*);
+Tie* fit_ties_at(Fit*, uint32_t);
+uint32_t fit_marks_len(const Fit*);
+uint32_t fit_marks_push(Fit*);
+bool fit_marks_remove(Fit*, uint32_t);
+N* fit_marks_get(Fit*, uint32_t);
 Fit* fit_new(void);
 void fit_free(Fit*);
 const char* fit_last_error(const Fit*);
@@ -91,39 +159,110 @@ int32_t fit_solve_sparse(Fit*, const LmConfig*, LmResult*);
 }
 } // namespace ffi
 
-/// A `N` in its collection. Thin pointer wrapper -- validity
-/// follows the collection's storage (see the view).
+/// A `GpsObs` in its owner's storage; thin pointer wrapper.
+class GpsObsRef {
+public:
+    explicit GpsObsRef(ffi::GpsObs* p) : h_(p) {}
+    /// False for an absent Option entity.
+    bool valid() const { return h_ != nullptr; }
+    vect3d pos() const { return ffi::gps_obs_pos(h_); }
+    void set_pos(vect3d v) { ffi::gps_obs_set_pos(h_, v); }
+    float isigma() const { return ffi::gps_obs_isigma(h_); }
+    void set_isigma(float v) { ffi::gps_obs_set_isigma(h_, v); }
+private:
+    ffi::GpsObs* h_;
+};
+
+/// A `Info` in its owner's storage; thin pointer wrapper.
+class InfoRef {
+public:
+    explicit InfoRef(ffi::Info* p) : h_(p) {}
+    /// False for an absent Option entity.
+    bool valid() const { return h_ != nullptr; }
+    bool has_gps() const { return ffi::info_has_gps(h_); }
+    GpsObsRef make_gps() { return GpsObsRef(ffi::info_make_gps(h_)); }
+    void clear_gps() { ffi::info_clear_gps(h_); }
+    GpsObsRef gps() { return GpsObsRef(ffi::info_gps(h_)); }
+    // field `note`: String -- opaque, no accessor generated
+private:
+    ffi::Info* h_;
+};
+
+/// A `N` in its owner's storage; thin pointer wrapper.
 class NRef {
 public:
-    explicit NRef(ffi::N* p) : p_(p) {}
-    double v() const { return ffi::n_v(p_); }
-    void set_v(double v) { ffi::n_set_v(p_, v); }
-    double t() const { return ffi::n_t(p_); }
-    void set_t(double v) { ffi::n_set_t(p_, v); }
-    double w() const { return ffi::n_w(p_); }
-    void set_w(double v) { ffi::n_set_w(p_, v); }
+    explicit NRef(ffi::N* p) : h_(p) {}
+    /// False for an absent Option entity.
+    bool valid() const { return h_ != nullptr; }
+    double v() const { return ffi::n_v(h_); }
+    void set_v(double v) { ffi::n_set_v(h_, v); }
+    bool v_optimize() const { return ffi::n_v_optimize(h_); }
+    void set_v_optimize(bool v) { ffi::n_v_set_optimize(h_, v); }
+    double t() const { return ffi::n_t(h_); }
+    void set_t(double v) { ffi::n_set_t(h_, v); }
+    double w() const { return ffi::n_w(h_); }
+    void set_w(double v) { ffi::n_set_w(h_, v); }
 private:
-    ffi::N* p_;
+    ffi::N* h_;
 };
 
-/// A `Obs` in its collection. Thin pointer wrapper -- validity
-/// follows the collection's storage (see the view).
+/// A `Obs` in its owner's storage; thin pointer wrapper.
 class ObsRef {
 public:
-    explicit ObsRef(ffi::Obs* p) : p_(p) {}
-    double x() const { return ffi::obs_x(p_); }
-    void set_x(double v) { ffi::obs_set_x(p_, v); }
-    double y() const { return ffi::obs_y(p_); }
-    void set_y(double v) { ffi::obs_set_y(p_, v); }
+    explicit ObsRef(ffi::Obs* p) : h_(p) {}
+    /// False for an absent Option entity.
+    bool valid() const { return h_ != nullptr; }
+    double x() const { return ffi::obs_x(h_); }
+    void set_x(double v) { ffi::obs_set_x(h_, v); }
+    double y() const { return ffi::obs_y(h_); }
+    void set_y(double v) { ffi::obs_set_y(h_, v); }
 private:
-    ffi::Obs* p_;
+    ffi::Obs* h_;
 };
 
-/// `Fit.obs`. std::vec::Vec storage: pushes may MOVE elements -- re-fetch
-/// element refs after a push.
-class ObsView {
+/// A `Pose` in its owner's storage; thin pointer wrapper.
+class PoseRef {
 public:
-    explicit ObsView(ffi::Fit* h) : h_(h) {}
+    explicit PoseRef(ffi::Pose* p) : h_(p) {}
+    /// False for an absent Option entity.
+    bool valid() const { return h_ != nullptr; }
+    vect3d ea() const { return ffi::pose_ea(h_); }
+    void set_ea(vect3d v) { ffi::pose_set_ea(h_, v); }
+    bool ea_optimize() const { return ffi::pose_ea_optimize(h_); }
+    void set_ea_optimize(bool v) { ffi::pose_ea_set_optimize(h_, v); }
+    vect3d pos() const { return ffi::pose_pos(h_); }
+    void set_pos(vect3d v) { ffi::pose_set_pos(h_, v); }
+    bool pos_optimize() const { return ffi::pose_pos_optimize(h_); }
+    void set_pos_optimize(bool v) { ffi::pose_pos_set_optimize(h_, v); }
+    vect3d target() const { return ffi::pose_target(h_); }
+    void set_target(vect3d v) { ffi::pose_set_target(h_, v); }
+    InfoRef info() { return InfoRef(ffi::pose_info_ptr(h_)); }
+private:
+    ffi::Pose* h_;
+};
+
+/// A `Tie` in its owner's storage; thin pointer wrapper.
+class TieRef {
+public:
+    explicit TieRef(ffi::Tie* p) : h_(p) {}
+    /// False for an absent Option entity.
+    bool valid() const { return h_ != nullptr; }
+    Ref_Pose a() const { return Ref_Pose{ffi::tie_a(h_)}; }
+    void set_a(Ref_Pose r) { ffi::tie_set_a(h_, r.raw); }
+    Ref_Pose b() const { return Ref_Pose{ffi::tie_b(h_)}; }
+    void set_b(Ref_Pose r) { ffi::tie_set_b(h_, r.raw); }
+    vect3d d() const { return ffi::tie_d(h_); }
+    void set_d(vect3d v) { ffi::tie_set_d(h_, v); }
+    double w() const { return ffi::tie_w(h_); }
+    void set_w(double v) { ffi::tie_set_w(h_, v); }
+private:
+    ffi::Tie* h_;
+};
+
+/// `Fit.obs`. std::vec::Vec storage: pushes may MOVE elements -- re-fetch element refs after a push.
+class FitObsView {
+public:
+    explicit FitObsView(ffi::Fit* h) : h_(h) {}
     uint32_t size() const { return ffi::fit_obs_len(h_); }
     ObsRef push() { return ObsRef(ffi::fit_obs_push(h_)); }
     ObsRef operator[](uint32_t i) { return ObsRef(ffi::fit_obs_at(h_, i)); }
@@ -132,12 +271,51 @@ private:
 };
 
 /// `Fit.items`. Element pointers are STABLE across pushes (chunked storage).
-class ItemsView {
+class FitItemsView {
 public:
-    explicit ItemsView(ffi::Fit* h) : h_(h) {}
+    explicit FitItemsView(ffi::Fit* h) : h_(h) {}
     uint32_t size() const { return ffi::fit_items_len(h_); }
     NRef push() { return NRef(ffi::fit_items_push(h_)); }
     NRef operator[](uint32_t i) { return NRef(ffi::fit_items_at(h_, i)); }
+    Ref_N ref_at(uint32_t i) const { return Ref_N{ffi::fit_items_ref_at(h_, i)}; }
+    NRef get(Ref_N r) { return NRef(ffi::fit_items_get(h_, r.raw)); }
+private:
+    ffi::Fit* h_;
+};
+
+/// `Fit.poses`. Element pointers are STABLE across pushes (chunked storage).
+class FitPosesView {
+public:
+    explicit FitPosesView(ffi::Fit* h) : h_(h) {}
+    uint32_t size() const { return ffi::fit_poses_len(h_); }
+    PoseRef push_back() { return PoseRef(ffi::fit_poses_push_back(h_)); }
+    PoseRef push_front() { return PoseRef(ffi::fit_poses_push_front(h_)); }
+    PoseRef operator[](uint32_t i) { return PoseRef(ffi::fit_poses_at(h_, i)); }
+    Ref_Pose ref_at(uint32_t i) const { return Ref_Pose{ffi::fit_poses_ref_at(h_, i)}; }
+    PoseRef get(Ref_Pose r) { return PoseRef(ffi::fit_poses_get(h_, r.raw)); }
+private:
+    ffi::Fit* h_;
+};
+
+/// `Fit.ties`. std::vec::Vec storage: pushes may MOVE elements -- re-fetch element refs after a push.
+class FitTiesView {
+public:
+    explicit FitTiesView(ffi::Fit* h) : h_(h) {}
+    uint32_t size() const { return ffi::fit_ties_len(h_); }
+    TieRef push() { return TieRef(ffi::fit_ties_push(h_)); }
+    TieRef operator[](uint32_t i) { return TieRef(ffi::fit_ties_at(h_, i)); }
+private:
+    ffi::Fit* h_;
+};
+
+/// `Fit.marks`. Element pointers are STABLE across pushes (chunked storage).
+class FitMarksView {
+public:
+    explicit FitMarksView(ffi::Fit* h) : h_(h) {}
+    uint32_t size() const { return ffi::fit_marks_len(h_); }
+    Ref_N push() { return Ref_N{ffi::fit_marks_push(h_)}; }
+    bool remove(Ref_N r) { return ffi::fit_marks_remove(h_, r.raw); }
+    NRef get(Ref_N r) { return NRef(ffi::fit_marks_get(h_, r.raw)); }
 private:
     ffi::Fit* h_;
 };
@@ -161,11 +339,20 @@ public:
 
     double m() const { return ffi::fit_m(h_); }
     void set_m(double v) { ffi::fit_set_m(h_, v); }
+    bool m_optimize() const { return ffi::fit_m_optimize(h_); }
+    void set_m_optimize(bool v) { ffi::fit_m_set_optimize(h_, v); }
     double c() const { return ffi::fit_c(h_); }
     void set_c(double v) { ffi::fit_set_c(h_, v); }
-    ObsView obs() { return ObsView(h_); }
-    ItemsView items() { return ItemsView(h_); }
+    bool c_optimize() const { return ffi::fit_c_optimize(h_); }
+    void set_c_optimize(bool v) { ffi::fit_c_set_optimize(h_, v); }
+    vect2d cal() const { return ffi::fit_cal(h_); }
+    void set_cal(vect2d v) { ffi::fit_set_cal(h_, v); }
     // field `tag`: String -- opaque, no accessor generated
+    FitObsView obs() { return FitObsView(h_); }
+    FitItemsView items() { return FitItemsView(h_); }
+    FitPosesView poses() { return FitPosesView(h_); }
+    FitTiesView ties() { return FitTiesView(h_); }
+    FitMarksView marks() { return FitMarksView(h_); }
 
     LmResult solve_dense(const LmConfig& cfg = LmConfig{}) {
         LmResult r;

@@ -10,10 +10,30 @@
       "fields": [
         {"name": "m", "kind": "param", "of": "f64", "params": 1},
         {"name": "c", "kind": "param", "of": "f64", "params": 1},
+        {"name": "cal", "kind": "data", "of": "vect2d"},
         {"name": "tag", "kind": "opaque", "of": "String"},
         {"name": "obs", "kind": "collection", "container": "vec", "of": "Obs", "spelled": "std::vec::Vec<Obs>"},
         {"name": "items", "kind": "collection", "container": "vec", "of": "N", "spelled": "refs::Vec<N>"},
+        {"name": "poses", "kind": "collection", "container": "deque", "of": "Pose", "spelled": "refs::Deque<Pose>"},
+        {"name": "ties", "kind": "collection", "container": "vec", "of": "Tie", "spelled": "std::vec::Vec<Tie>"},
+        {"name": "marks", "kind": "collection", "container": "arena", "of": "N", "spelled": "refs::Arena<N>"},
         {"name": "hb", "kind": "self_block", "scalar": "f64"}
+      ]
+    },
+    "GpsObs": {
+      "role": "entity",
+      "param_count": 0,
+      "fields": [
+        {"name": "pos", "kind": "data", "of": "vect3d"},
+        {"name": "isigma", "kind": "data", "of": "f32"}
+      ]
+    },
+    "Info": {
+      "role": "entity",
+      "param_count": 0,
+      "fields": [
+        {"name": "gps", "kind": "optional", "of": "GpsObs"},
+        {"name": "note", "kind": "opaque", "of": "String"}
       ]
     },
     "N": {
@@ -34,10 +54,35 @@
         {"name": "x", "kind": "data", "of": "f64"},
         {"name": "y", "kind": "data", "of": "f64"}
       ]
+    },
+    "Pose": {
+      "role": "entity",
+      "param_count": 6,
+      "self_block": "hb",
+      "fields": [
+        {"name": "ea", "kind": "euler_param", "variant": "simple", "scalar": "f64", "params": 3},
+        {"name": "pos", "kind": "param", "of": "vect3d", "params": 3},
+        {"name": "target", "kind": "data", "of": "vect3d"},
+        {"name": "info", "kind": "struct", "of": "Info"},
+        {"name": "hb", "kind": "self_block", "scalar": "f64"}
+      ]
+    },
+    "Tie": {
+      "role": "entity",
+      "param_count": 0,
+      "fields": [
+        {"name": "a", "kind": "ref", "of": "Pose", "target": "root.poses"},
+        {"name": "b", "kind": "ref", "of": "Pose", "target": "root.poses"},
+        {"name": "d", "kind": "data", "of": "vect3d"},
+        {"name": "w", "kind": "data", "of": "f64"},
+        {"name": "hb", "kind": "cross_block", "a": "Pose", "b": "Pose", "scalar": "f64"}
+      ]
     }
   },
   "constraints": [
-    {"on": "Obs", "label": "Obs", "file": "model/src/lib.rs", "line": 12},
-    {"on": "N", "label": "N", "file": "model/src/lib.rs", "line": 23}
+    {"on": "Obs", "label": "Obs", "file": "model/src/lib.rs", "line": 15},
+    {"on": "N", "label": "N", "file": "model/src/lib.rs", "line": 26},
+    {"on": "Pose", "label": "Pose", "file": "model/src/lib.rs", "line": 40},
+    {"on": "Tie", "label": "Tie", "file": "model/src/lib.rs", "line": 72}
   ]
 }

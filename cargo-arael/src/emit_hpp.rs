@@ -1,9 +1,12 @@
 //! C++ header emitter: thin inline wrapper classes over the shim's C
-//! ABI. Entity views hold raw pointers (stable for refs::Vec-backed
-//! collections; std::vec::Vec-backed ones invalidate on push -- the
-//! view's comment says which).
+//! ABI, using the arael math headers for value types. Entity classes
+//! hold raw pointers (stable for refs-flavored containers;
+//! std::vec::Vec-backed ones invalidate on push -- each view's comment
+//! says which). Classes are emitted children-first (containment is
+//! cycle-free), so nested views can construct element wrappers inline.
 
-use crate::ir::{Field, Model, snake};
+use crate::emit_ffi::surfaced_types;
+use crate::ir::{Field, Model, Type, snake};
 
 fn scalar_cpp(of: &str) -> Option<&'static str> {
     Some(match of {
@@ -16,132 +19,315 @@ fn scalar_cpp(of: &str) -> Option<&'static str> {
     })
 }
 
+/// Math type -> the arael C++ math type (layout-matched to the shim's
+/// repr(C) mirrors).
+fn math_cpp(of: &str) -> Option<&'static str> {
+    Some(match of {
+        "vect2f" => "vect2f",
+        "vect2d" => "vect2d",
+        "vect3f" => "vect3f",
+        "vect3d" => "vect3d",
+        "matrix2f" => "matrix2f",
+        "matrix2d" => "matrix2d",
+        "matrix3f" => "matrix3f",
+        "matrix3d" => "matrix3d",
+        "quaternf" => "quaternf",
+        "quaternd" => "quaternd",
+        _ => return None,
+    })
+}
+
 fn float_cpp(precision: &str) -> &'static str {
     if precision == "f32" { "float" } else { "double" }
 }
 
-/// (ffi decls, class methods) for one accessor-bearing field.
-fn field_surface(
-    fn_prefix: &str,
-    ptr_ty: &str,
-    ptr_expr: &str,
-    f: &Field,
-) -> Option<(String, String)> {
-    let name = &f.name;
+fn camel(field: &str) -> String {
+    let mut out = String::new();
+    let mut up = true;
+    for c in field.chars() {
+        if c == '_' {
+            up = true;
+        } else if up {
+            out.push(c.to_ascii_uppercase());
+            up = false;
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Value type of a get/set field as (C++ type, ffi decl type) --
+/// identical strings here since the extern decls use the arael math
+/// types directly.
+fn value_type(f: &Field) -> Option<&'static str> {
     let of = f.of.as_deref().unwrap_or("");
     match f.kind.as_str() {
-        "data" | "param" => {
-            let c = scalar_cpp(of)?;
-            let decls = format!(
-                "{c} {fn_prefix}_{name}(const {ptr_ty}*);\nvoid {fn_prefix}_set_{name}({ptr_ty}*, {c});\n");
-            let methods = format!(
-                "    {c} {name}() const {{ return ffi::{fn_prefix}_{name}({ptr_expr}); }}\n\
-                 \x20   void set_{name}({c} v) {{ ffi::{fn_prefix}_set_{name}({ptr_expr}, v); }}\n");
-            Some((decls, methods))
+        "data" | "param" => scalar_cpp(of).or_else(|| math_cpp(of)),
+        "euler_param" => {
+            let s = f.scalar.as_deref().unwrap_or("f64");
+            Some(match (f.variant.as_deref().unwrap_or("simple"), s) {
+                ("rotvec", "f32") => "quaternf",
+                ("rotvec", _) => "quaternd",
+                (_, "f32") => "vect3f",
+                (_, _) => "vect3d",
+            })
         }
         _ => None,
     }
+}
+
+struct Cpp {
+    ffi: String,
+    body: String,
+}
+
+/// One collection field's view class + the owner method line.
+fn collection_cpp(
+    cpp: &mut Cpp,
+    owner: &str,
+    owner_methods: &mut String,
+    f: &Field,
+) -> Result<(), String> {
+    let field = &f.name;
+    let elem = f.of.as_deref().ok_or("collection without element")?;
+    let prefix = format!("{}_{}", snake(owner), field);
+    let container = f.container.as_deref().unwrap_or("vec");
+    let refs_flavor = f.spelled.as_deref().unwrap_or("").contains("refs::");
+    let view = format!("{owner}{}View", camel(field));
+
+    cpp.ffi.push_str(&format!("uint32_t {prefix}_len(const {owner}*);\n"));
+    let mut methods = format!(
+        "    uint32_t size() const {{ return ffi::{prefix}_len(h_); }}\n");
+    match container {
+        "vec" => {
+            cpp.ffi.push_str(&format!(
+                "{elem}* {prefix}_push({owner}*);\n{elem}* {prefix}_at({owner}*, uint32_t);\n"));
+            methods.push_str(&format!(
+                "    {elem}Ref push() {{ return {elem}Ref(ffi::{prefix}_push(h_)); }}\n\
+                 \x20   {elem}Ref operator[](uint32_t i) {{ return {elem}Ref(ffi::{prefix}_at(h_, i)); }}\n"));
+        }
+        "deque" => {
+            cpp.ffi.push_str(&format!(
+                "{elem}* {prefix}_push_back({owner}*);\n\
+                 {elem}* {prefix}_push_front({owner}*);\n\
+                 {elem}* {prefix}_at({owner}*, uint32_t);\n"));
+            methods.push_str(&format!(
+                "    {elem}Ref push_back() {{ return {elem}Ref(ffi::{prefix}_push_back(h_)); }}\n\
+                 \x20   {elem}Ref push_front() {{ return {elem}Ref(ffi::{prefix}_push_front(h_)); }}\n\
+                 \x20   {elem}Ref operator[](uint32_t i) {{ return {elem}Ref(ffi::{prefix}_at(h_, i)); }}\n"));
+        }
+        "arena" => {
+            cpp.ffi.push_str(&format!(
+                "uint32_t {prefix}_push({owner}*);\nbool {prefix}_remove({owner}*, uint32_t);\n"));
+            methods.push_str(&format!(
+                "    Ref_{elem} push() {{ return Ref_{elem}{{ffi::{prefix}_push(h_)}}; }}\n\
+                 \x20   bool remove(Ref_{elem} r) {{ return ffi::{prefix}_remove(h_, r.raw); }}\n"));
+        }
+        other => return Err(format!("unknown container `{other}`")),
+    }
+    if refs_flavor {
+        // An arena has holes, so index-based refs are meaningless there:
+        // refs come from push().
+        if container != "arena" {
+            cpp.ffi.push_str(&format!(
+                "uint32_t {prefix}_ref_at(const {owner}*, uint32_t);\n"));
+            methods.push_str(&format!(
+                "    Ref_{elem} ref_at(uint32_t i) const {{ return Ref_{elem}{{ffi::{prefix}_ref_at(h_, i)}}; }}\n"));
+        }
+        cpp.ffi.push_str(&format!(
+            "{elem}* {prefix}_get({owner}*, uint32_t);\n"));
+        methods.push_str(&format!(
+            "    {elem}Ref get(Ref_{elem} r) {{ return {elem}Ref(ffi::{prefix}_get(h_, r.raw)); }}\n"));
+    }
+    let stability = if refs_flavor {
+        "Element pointers are STABLE across pushes (chunked storage)."
+    } else {
+        "std::vec::Vec storage: pushes may MOVE elements -- re-fetch element refs after a push."
+    };
+    cpp.body.push_str(&format!(
+"/// `{owner}.{field}`. {stability}
+class {view} {{
+public:
+    explicit {view}(ffi::{owner}* h) : h_(h) {{}}
+{methods}private:
+    ffi::{owner}* h_;
+}};
+
+"));
+    owner_methods.push_str(&format!(
+        "    {view} {field}() {{ return {view}(h_); }}\n"));
+    Ok(())
+}
+
+/// Owner-class methods (+ ffi decls, + any view classes) for one field.
+/// `owner` names the opaque ffi pointer type the accessors take.
+fn field_cpp(
+    cpp: &mut Cpp,
+    model: &Model,
+    owner: &str,
+    owner_methods: &mut String,
+    f: &Field,
+) -> Result<(), String> {
+    let name = &f.name;
+    let of = f.of.as_deref().unwrap_or("");
+    let prefix = snake(owner);
+    match f.kind.as_str() {
+        "data" | "param" | "euler_param" => {
+            if let Some(t) = value_type(f) {
+                cpp.ffi.push_str(&format!(
+                    "{t} {prefix}_{name}(const {owner}*);\nvoid {prefix}_set_{name}({owner}*, {t});\n"));
+                owner_methods.push_str(&format!(
+                    "    {t} {name}() const {{ return ffi::{prefix}_{name}(h_); }}\n\
+                     \x20   void set_{name}({t} v) {{ ffi::{prefix}_set_{name}(h_, v); }}\n"));
+            } else {
+                return Err(format!("`{owner}.{name}`: unsupported {} of {of}", f.kind));
+            }
+            if f.kind != "data" {
+                cpp.ffi.push_str(&format!(
+                    "bool {prefix}_{name}_optimize(const {owner}*);\n\
+                     void {prefix}_{name}_set_optimize({owner}*, bool);\n"));
+                owner_methods.push_str(&format!(
+                    "    bool {name}_optimize() const {{ return ffi::{prefix}_{name}_optimize(h_); }}\n\
+                     \x20   void set_{name}_optimize(bool v) {{ ffi::{prefix}_{name}_set_optimize(h_, v); }}\n"));
+            }
+        }
+        "component" => match of {
+            "TransformParam" | "TransformParamF" => {
+                let (v3, q) = if of == "TransformParamF" {
+                    ("vect3f", "quaternf")
+                } else {
+                    ("vect3d", "quaternd")
+                };
+                for (part, t) in [("translation", v3), ("rotation", q)] {
+                    cpp.ffi.push_str(&format!(
+                        "{t} {prefix}_{name}_{part}(const {owner}*);\n\
+                         void {prefix}_{name}_set_{part}({owner}*, {t});\n"));
+                    owner_methods.push_str(&format!(
+                        "    {t} {name}_{part}() const {{ return ffi::{prefix}_{name}_{part}(h_); }}\n\
+                         \x20   void set_{name}_{part}({t} v) {{ ffi::{prefix}_{name}_set_{part}(h_, v); }}\n"));
+                }
+                for flag in ["optimize_translation", "optimize_rotation"] {
+                    cpp.ffi.push_str(&format!(
+                        "bool {prefix}_{name}_{flag}(const {owner}*);\n\
+                         void {prefix}_{name}_set_{flag}({owner}*, bool);\n"));
+                    owner_methods.push_str(&format!(
+                        "    bool {name}_{flag}() const {{ return ffi::{prefix}_{name}_{flag}(h_); }}\n\
+                         \x20   void set_{name}_{flag}(bool v) {{ ffi::{prefix}_{name}_set_{flag}(h_, v); }}\n"));
+                }
+            }
+            "UnitVecParam" | "UnitVecParamF" => {
+                let v3 = if of == "UnitVecParamF" { "vect3f" } else { "vect3d" };
+                cpp.ffi.push_str(&format!(
+                    "{v3} {prefix}_{name}_unit(const {owner}*);\n\
+                     void {prefix}_{name}_set_unit({owner}*, {v3});\n"));
+                owner_methods.push_str(&format!(
+                    "    {v3} {name}_unit() const {{ return ffi::{prefix}_{name}_unit(h_); }}\n\
+                     \x20   void set_{name}_unit({v3} v) {{ ffi::{prefix}_{name}_set_unit(h_, v); }}\n"));
+            }
+            _ => {
+                cpp.ffi.push_str(&format!("{of}* {prefix}_{name}_ptr({owner}*);\n"));
+                owner_methods.push_str(&format!(
+                    "    {of}Ref {name}() {{ return {of}Ref(ffi::{prefix}_{name}_ptr(h_)); }}\n"));
+            }
+        },
+        "struct" => {
+            cpp.ffi.push_str(&format!("{of}* {prefix}_{name}_ptr({owner}*);\n"));
+            owner_methods.push_str(&format!(
+                "    {of}Ref {name}() {{ return {of}Ref(ffi::{prefix}_{name}_ptr(h_)); }}\n"));
+        }
+        "optional" => {
+            cpp.ffi.push_str(&format!(
+                "bool {prefix}_has_{name}(const {owner}*);\n\
+                 {of}* {prefix}_make_{name}({owner}*);\n\
+                 void {prefix}_clear_{name}({owner}*);\n\
+                 {of}* {prefix}_{name}({owner}*);\n"));
+            owner_methods.push_str(&format!(
+                "    bool has_{name}() const {{ return ffi::{prefix}_has_{name}(h_); }}\n\
+                 \x20   {of}Ref make_{name}() {{ return {of}Ref(ffi::{prefix}_make_{name}(h_)); }}\n\
+                 \x20   void clear_{name}() {{ ffi::{prefix}_clear_{name}(h_); }}\n\
+                 \x20   {of}Ref {name}() {{ return {of}Ref(ffi::{prefix}_{name}(h_)); }}\n"));
+        }
+        "ref" => {
+            cpp.ffi.push_str(&format!(
+                "uint32_t {prefix}_{name}(const {owner}*);\n\
+                 void {prefix}_set_{name}({owner}*, uint32_t);\n"));
+            owner_methods.push_str(&format!(
+                "    Ref_{of} {name}() const {{ return Ref_{of}{{ffi::{prefix}_{name}(h_)}}; }}\n\
+                 \x20   void set_{name}(Ref_{of} r) {{ ffi::{prefix}_set_{name}(h_, r.raw); }}\n"));
+        }
+        "collection" => collection_cpp(cpp, owner, owner_methods, f)?,
+        "self_block" | "cross_block" | "triplet_block" | "skip" => {}
+        "opaque" => {
+            owner_methods.push_str(&format!(
+                "    // field `{name}`: {of} -- opaque, no accessor generated\n"));
+        }
+        other => return Err(format!("`{owner}.{name}`: unsupported kind `{other}`")),
+    }
+    Ok(())
+}
+
+/// Types this type's class depends on having been emitted first.
+fn deps(t: &Type) -> Vec<&str> {
+    t.fields.iter()
+        .filter(|f| matches!(f.kind.as_str(),
+            "struct" | "optional" | "collection" | "component"))
+        .filter_map(|f| f.of.as_deref())
+        .collect()
 }
 
 pub fn emit(model: &Model) -> Result<String, String> {
     let root = &model.root;
     let root_sn = snake(root);
     let fp = float_cpp(&model.precision);
-    let mut ffi_decls = String::new();
-    let mut classes = String::new();
+    let mut cpp = Cpp { ffi: String::new(), body: String::new() };
 
-    // Opaque C types: the handle plus every entity.
-    let mut opaque: Vec<String> = vec![root.clone()];
-    let mut entities: Vec<(&String, &crate::ir::Type)> = Vec::new();
-    for (tn, t) in &model.types {
-        if t.role == "entity" && !t.builtin {
-            opaque.push(tn.clone());
-            entities.push((tn, t));
-        }
+    let surfaced = surfaced_types(model);
+    let mut opaque_decls: String = format!("struct {root};\n");
+    let mut ref_decls = String::new();
+    for (tn, _) in &surfaced {
+        opaque_decls.push_str(&format!("struct {tn};\n"));
+        ref_decls.push_str(&format!(
+            "/// Typed handle into the collection that issued it.\nstruct Ref_{tn} {{ uint32_t raw; }};\n"));
     }
 
-    for (tn, t) in &entities {
-        let sn = snake(tn);
+    // Children-first class order (containment is cycle-free).
+    let mut remaining: Vec<(&String, &Type)> = surfaced.clone();
+    let mut done: Vec<&str> = Vec::new();
+    while !remaining.is_empty() {
+        let Some(pos) = remaining.iter().position(|(_, t)| {
+            deps(t).iter().all(|d| done.contains(d) || !model.types.contains_key(*d))
+        }) else {
+            return Err(format!("containment cycle among: {}",
+                remaining.iter().map(|(tn, _)| tn.as_str()).collect::<Vec<_>>().join(", ")));
+        };
+        let (tn, t) = remaining.remove(pos);
         let mut methods = String::new();
-        let mut opaque_note = String::new();
         for f in &t.fields {
-            if let Some((d, m)) = field_surface(&sn, tn, "p_", f) {
-                ffi_decls.push_str(&d);
-                methods.push_str(&m);
-            } else if f.kind == "opaque" {
-                opaque_note.push_str(&format!(
-                    "    // field `{}`: {} -- opaque, no accessor generated\n",
-                    f.name, f.of.as_deref().unwrap_or("?")));
-            }
+            field_cpp(&mut cpp, model, tn, &mut methods, f)?;
         }
-        classes.push_str(&format!(
-"/// A `{tn}` in its collection. Thin pointer wrapper -- validity
-/// follows the collection's storage (see the view).
+        cpp.body.push_str(&format!(
+"/// A `{tn}` in its owner's storage; thin pointer wrapper.
 class {tn}Ref {{
 public:
-    explicit {tn}Ref(ffi::{tn}* p) : p_(p) {{}}
-{methods}{opaque_note}private:
-    ffi::{tn}* p_;
+    explicit {tn}Ref(ffi::{tn}* p) : h_(p) {{}}
+    /// False for an absent Option entity.
+    bool valid() const {{ return h_ != nullptr; }}
+{methods}private:
+    ffi::{tn}* h_;
 }};
 
 "));
+        done.push(tn.as_str());
     }
 
-    // Root collections -> views; root scalar fields -> World methods.
+    // Root class: views + field methods + solve surface.
     let root_ty = model.types.get(root).ok_or("root type missing")?;
     let mut world_methods = String::new();
-    let mut world_opaque_note = String::new();
-    let mut views = String::new();
     for f in &root_ty.fields {
-        match f.kind.as_str() {
-            "collection" => {
-                let elem = f.of.as_deref().ok_or("collection without element")?;
-                let field = &f.name;
-                let prefix = format!("{root_sn}_{field}");
-                let stable = f.spelled.as_deref().unwrap_or("").starts_with("refs::");
-                let stability = if stable {
-                    "Element pointers are STABLE across pushes (chunked storage)."
-                } else {
-                    "std::vec::Vec storage: pushes may MOVE elements -- re-fetch\n/// element refs after a push."
-                };
-                ffi_decls.push_str(&format!(
-                    "uint32_t {prefix}_len(const {root}*);\n\
-                     {elem}* {prefix}_push({root}*);\n\
-                     {elem}* {prefix}_at({root}*, uint32_t);\n"));
-                let view = format!("{}View", camel(field));
-                views.push_str(&format!(
-"/// `{root}.{field}`. {stability}
-class {view} {{
-public:
-    explicit {view}(ffi::{root}* h) : h_(h) {{}}
-    uint32_t size() const {{ return ffi::{prefix}_len(h_); }}
-    {elem}Ref push() {{ return {elem}Ref(ffi::{prefix}_push(h_)); }}
-    {elem}Ref operator[](uint32_t i) {{ return {elem}Ref(ffi::{prefix}_at(h_, i)); }}
-private:
-    ffi::{root}* h_;
-}};
-
-"));
-                world_methods.push_str(&format!(
-                    "    {view} {field}() {{ return {view}(h_); }}\n"));
-            }
-            _ => {
-                if let Some((d, m)) = field_surface(&root_sn, root, "h_", f) {
-                    ffi_decls.push_str(&d);
-                    world_methods.push_str(&m);
-                } else if f.kind == "opaque" {
-                    world_opaque_note.push_str(&format!(
-                        "    // field `{}`: {} -- opaque, no accessor generated\n",
-                        f.name, f.of.as_deref().unwrap_or("?")));
-                }
-            }
-        }
+        field_cpp(&mut cpp, model, root, &mut world_methods, f)?;
     }
-
-    let opaque_decls: String = opaque.iter()
-        .map(|t| format!("struct {t};\n")).collect();
-
-    ffi_decls.push_str(&format!(
+    cpp.ffi.push_str(&format!(
         "{root}* {root_sn}_new(void);\n\
          void {root_sn}_free({root}*);\n\
          const char* {root_sn}_last_error(const {root}*);\n\
@@ -149,6 +335,8 @@ private:
          int32_t {root_sn}_solve_dense({root}*, const LmConfig*, LmResult*);\n\
          int32_t {root_sn}_solve_sparse({root}*, const LmConfig*, LmResult*);\n"));
 
+    let ffi_decls = &cpp.ffi;
+    let body = &cpp.body;
     Ok(format!(
 "// GENERATED by cargo-arael from the `{root}` model sidecar. Do not
 // edit; regenerate with `cargo arael export`.
@@ -156,6 +344,7 @@ private:
 
 #include <cstdint>
 #include <cmath>
+#include \"arael/math.hpp\"
 
 namespace arael {{
 
@@ -208,13 +397,14 @@ struct LmResult {{
         && status != LmStatus::Aborted; }}
 }};
 
+{ref_decls}
 namespace ffi {{
 {opaque_decls}
 extern \"C\" {{
 {ffi_decls}}}
 }} // namespace ffi
 
-{classes}{views}/// The `{root}` model. Owns the Rust-side object; move-only.
+{body}/// The `{root}` model. Owns the Rust-side object; move-only.
 class {root} {{
 public:
     {root}() : h_(ffi::{root_sn}_new()) {{}}
@@ -231,7 +421,7 @@ public:
         return *this;
     }}
 
-{world_methods}{world_opaque_note}
+{world_methods}
     LmResult solve_dense(const LmConfig& cfg = LmConfig{{}}) {{
         LmResult r;
         ffi::{root_sn}_solve_dense(h_, &cfg, &r);
@@ -254,21 +444,4 @@ private:
 
 }} // namespace arael
 "))
-}
-
-/// CamelCase of a snake field name for the view class: pose_ties -> PoseTies.
-fn camel(field: &str) -> String {
-    let mut out = String::new();
-    let mut up = true;
-    for c in field.chars() {
-        if c == '_' {
-            up = true;
-        } else if up {
-            out.push(c.to_ascii_uppercase());
-            up = false;
-        } else {
-            out.push(c);
-        }
-    }
-    out
 }

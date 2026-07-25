@@ -4,9 +4,10 @@
 // deterministic solver, so every printed value must round-trip
 // EXACTLY. Skipped with a note when no C++ compiler is available.
 
-use arael::model::{Param, SelfBlock};
+use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::simple_lm::{LmConfig, LmProblem, LmStatus, SolveFailureKind};
-use cxx_fit::{Fit, N, Obs};
+use arael::vect::{vect2d, vect3d};
+use cxx_fit::{Fit, GpsObs, N, Obs, Pose, Tie};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -133,6 +134,70 @@ fn cxx_interface_matches_rust_exactly() {
     assert_eq!(g("sparse_end"), r2.end_cost);
     assert_eq!(g("sparse_m"), fit2.m.value);
     assert_eq!(g("sparse_c"), fit2.c.value);
+
+    // Stage 3 surface, mirrored: deque chain, ties through refs, arena
+    // with a removal, Option entity, math data, fixed euler param.
+    let mut f3 = Fit::default();
+    fill(&mut f3);
+    f3.cal = vect2d::new(0.25, -0.5);
+    let targets = [
+        vect3d::new(0.0, 0.0, 0.0),
+        vect3d::new(1.0, 0.5, 0.0),
+        vect3d::new(2.0, 1.0, 0.0),
+    ];
+    f3.poses.push_back(Pose::default());
+    f3.poses.push_back(Pose::default());
+    f3.poses.push_front(Pose::default());
+    for i in 0..3 {
+        let p = &mut f3.poses[i];
+        p.target = targets[i];
+        p.pos.value = vect3d::new(0.1 * i as f64, -0.1 * i as f64, 0.05);
+        p.ea.value = vect3d::new(0.1, 0.2, 0.3 * i as f64);
+        p.ea.optimize = false;
+    }
+    f3.poses[0].info.gps = Some(GpsObs {
+        pos: vect3d::new(7.0, 8.0, 9.0),
+        isigma: 2.5,
+    });
+    f3.ties.push(Tie {
+        a: f3.poses.ref_at(0), b: f3.poses.ref_at(1),
+        d: vect3d::new(1.0, 0.4, 0.0), w: 3.0, hb: CrossBlock::new(),
+    });
+    f3.ties.push(Tie {
+        a: f3.poses.ref_at(1), b: f3.poses.ref_at(2),
+        d: vect3d::new(1.0, 0.6, 0.0), w: 3.0, hb: CrossBlock::new(),
+    });
+    let m0 = f3.marks.push(N { v: Param::default(), t: 0.4, w: 1.0, hb: SelfBlock::new() });
+    let m1 = f3.marks.push(N { v: Param::default(), t: 9.0, w: 1.0, hb: SelfBlock::new() });
+    let m2 = f3.marks.push(N { v: Param::default(), t: -0.6, w: 2.0, hb: SelfBlock::new() });
+    f3.marks.remove(m1).unwrap();
+
+    assert!(f3.validate().is_clean());
+    assert_eq!(g("s3_clean"), 1.0);
+    let r3 = f3.solve_dense(&cfg).unwrap();
+    assert!(r3.status.is_success(), "{:?}", r3.status);
+    assert_eq!(g("s3_status"), code(&r3.status));
+    assert_eq!(g("s3_end"), r3.end_cost);
+    assert_eq!(g("s3_cal_x"), f3.cal.x);
+    assert_eq!(g("s3_cal_y"), f3.cal.y);
+    for i in 0..3 {
+        let q = f3.poses[i].pos.value;
+        assert_eq!(g(&format!("s3_p{i}_x")), q.x, "p{i}.x");
+        assert_eq!(g(&format!("s3_p{i}_y")), q.y, "p{i}.y");
+        assert_eq!(g(&format!("s3_p{i}_z")), q.z, "p{i}.z");
+    }
+    // The fixed rotation neither moved nor was dropped.
+    assert_eq!(g("s3_ea0_z"), f3.poses[0].ea.value.z);
+    assert_eq!(g("s3_has_gps0"), 1.0);
+    assert_eq!(g("s3_has_gps1"), 0.0);
+    assert_eq!(g("s3_gps0_y"), 8.0);
+    assert_eq!(g("s3_gps0_isigma"), 2.5);
+    assert_eq!(g("s3_marks_len"), f3.marks.len() as f64);
+    assert_eq!(g("s3_mark0_v"), f3.marks[m0].v.value);
+    assert_eq!(g("s3_mark2_v"), f3.marks[m2].v.value);
+    // Marks solved to their targets; the removed slot is gone.
+    assert!((f3.marks[m0].v.value - 0.4).abs() < 1e-9);
+    assert_eq!(f3.marks.len(), 2);
 
     // The degenerate model (unconstrained root params, nonzero cost)
     // fails with DegenerateDiagonal in Rust and status -1 + text in C++.
