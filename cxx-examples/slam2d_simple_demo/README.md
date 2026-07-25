@@ -18,8 +18,10 @@ cmake --build build
 ./build/slam2d_simple_demo
 ```
 
-Prints per-pose and per-landmark errors against ground truth and
-writes `slam2d_simple_cxx.eps`, in the Rust example's plot style:
+Prints the solver's pretty report (status, cost, per-phase timing,
+the accept/reject timeline) plus per-pose and per-landmark errors
+against ground truth, and writes `slam2d_simple_cxx.eps`, in the Rust
+example's plot style:
 gray dashed chain and triangles = ground truth, dark triangles =
 solved poses, one hue per landmark for its dot, bearing-ray fan and
 95% uncertainty ellipse (from the covariance API), gray dots + error

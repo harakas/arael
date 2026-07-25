@@ -357,15 +357,20 @@ int main() {
         path.poses().size(), path.pose_pairs().size(), path.landmarks().size(),
         n_frines, frines_in_model);
 
+    // gather_timing fills the result's timing block, which the report
+    // below breaks down per phase.
     LmConfig cfg_lm = LmConfig::well_conditioned();
     cfg_lm.verbose = true;
+    cfg_lm.gather_timing = true;
     SolveResult r = path.solve_sparse(cfg_lm);
     if (r.is_err()) {
         std::fprintf(stderr, "solve failed: %s\n", r.error().message);
         return 1;
     }
-    std::printf("Solved: status %d, cost %.3f -> %.3f in %u iterations\n",
-        int(r->status), double(r->start_cost), double(r->end_cost), r->iterations);
+    // The result prints itself: status, cost, where the time went --
+    // rendered by the Rust side from the full solve result.
+    // last_report() is the same text in plain ASCII, for a log.
+    std::printf("\n%s\n", path.last_pretty_report());
 
     std::printf("\n-- Pose errors vs GT --\n");
     std::vector<std::pair<vect2f, float>> est_poses;
