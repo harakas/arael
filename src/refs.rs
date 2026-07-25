@@ -68,6 +68,15 @@ impl<T> std::hash::Hash for Ref<T> {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) { self.0.hash(state); }
 }
 
+/// A sentinel ref that addresses nothing: the state a
+/// generated-interface `push()` hands out before the field is set.
+/// Using it panics at the first lookup (out-of-range index).
+impl<T> Default for Ref<T> {
+    fn default() -> Self {
+        Ref(u32::MAX, PhantomData)
+    }
+}
+
 impl<T> Ref<T> {
     /// Packs an index and a generation. Crate-internal on purpose: a ref is
     /// only meaningful against the collection that issued it, so it is
@@ -82,6 +91,21 @@ impl<T> Ref<T> {
     /// The element index.
     pub fn index(&self) -> u32 {
         self.0 & INDEX_MASK
+    }
+
+    /// The packed index+generation, for FFI TRANSPORT only: carry it
+    /// across a language boundary and rebuild with [`Self::from_raw`].
+    /// It is not an index -- use [`Self::index`] for that.
+    pub fn to_raw(self) -> u32 {
+        self.0
+    }
+
+    /// Rebuild a ref from [`Self::to_raw`]'s value. For FFI transport
+    /// of a ref the collection issued earlier; a value it never issued
+    /// panics at first use through the generation check -- it cannot
+    /// cause memory unsafety.
+    pub fn from_raw(raw: u32) -> Self {
+        Ref(raw, PhantomData)
     }
 
     /// The generation this ref was issued at.
