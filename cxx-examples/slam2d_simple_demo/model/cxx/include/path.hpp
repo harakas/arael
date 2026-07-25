@@ -64,6 +64,18 @@ struct SolveError {
 
 using SolveResult = result<LmResult, SolveError>;
 
+/// How much covariance to prepare (mirrors arael's CovMode).
+enum class CovMode : uint32_t {
+    PerQuery = 0,
+    AllMarginals = 1,
+    TriDiagonal = 2,
+};
+
+/// A failed covariance operation; message points at last_error().
+struct CovError {
+    const char* message;
+};
+
 /// Typed handle into the collection that issued it.
 struct Ref_Frine { uint32_t raw; };
 /// Typed handle into the collection that issued it.
@@ -114,6 +126,9 @@ uint32_t pose_pair_prev(const PosePair*);
 void pose_pair_set_prev(PosePair*, uint32_t);
 uint32_t pose_pair_cur(const PosePair*);
 void pose_pair_set_cur(PosePair*, uint32_t);
+int32_t path_assemble_covariance(Path*, uint32_t);
+int32_t landmark_marginal_cov(Path*, const Landmark*, double*, uint32_t);
+int32_t pose_marginal_cov(Path*, const Pose*, double*, uint32_t);
 uint32_t path_poses_len(const Path*);
 Pose* path_poses_push_back(Path*);
 Pose* path_poses_push_front(Path*);
@@ -143,6 +158,8 @@ public:
     explicit FrineRef(ffi::Frine* p) : h_(p) {}
     /// False when default-constructed (e.g. inside an empty option).
     bool valid() const { return h_ != nullptr; }
+    /// The underlying C pointer (covariance queries take it).
+    ffi::Frine* raw() const { return h_; }
     Ref_Pose pose() const { return Ref_Pose{ffi::frine_pose(h_)}; }
     void set_pose(Ref_Pose r) { ffi::frine_set_pose(h_, r.raw); }
     float bearing() const { return ffi::frine_bearing(h_); }
@@ -171,6 +188,8 @@ public:
     explicit LandmarkRef(ffi::Landmark* p) : h_(p) {}
     /// False when default-constructed (e.g. inside an empty option).
     bool valid() const { return h_ != nullptr; }
+    /// The underlying C pointer (covariance queries take it).
+    ffi::Landmark* raw() const { return h_; }
     vect2f pos() const { return ffi::landmark_pos(h_); }
     void set_pos(vect2f v) { ffi::landmark_set_pos(h_, v); }
     bool pos_optimize() const { return ffi::landmark_pos_optimize(h_); }
@@ -187,6 +206,8 @@ public:
     explicit PoseRef(ffi::Pose* p) : h_(p) {}
     /// False when default-constructed (e.g. inside an empty option).
     bool valid() const { return h_ != nullptr; }
+    /// The underlying C pointer (covariance queries take it).
+    ffi::Pose* raw() const { return h_; }
     vect2f pos() const { return ffi::pose_pos(h_); }
     void set_pos(vect2f v) { ffi::pose_set_pos(h_, v); }
     bool pos_optimize() const { return ffi::pose_pos_optimize(h_); }
@@ -214,12 +235,40 @@ public:
     explicit PosePairRef(ffi::PosePair* p) : h_(p) {}
     /// False when default-constructed (e.g. inside an empty option).
     bool valid() const { return h_ != nullptr; }
+    /// The underlying C pointer (covariance queries take it).
+    ffi::PosePair* raw() const { return h_; }
     Ref_Pose prev() const { return Ref_Pose{ffi::pose_pair_prev(h_)}; }
     void set_prev(Ref_Pose r) { ffi::pose_pair_set_prev(h_, r.raw); }
     Ref_Pose cur() const { return Ref_Pose{ffi::pose_pair_cur(h_)}; }
     void set_cur(Ref_Pose r) { ffi::pose_pair_set_cur(h_, r.raw); }
 private:
     ffi::PosePair* h_;
+};
+
+/// Covariance prepared at the solution (root.assemble_covariance);
+/// queries answer per-entity marginal blocks. Valid until the model
+/// is dropped or reassembled.
+class Covariance {
+public:
+    Covariance() : h_(nullptr) {}
+    explicit Covariance(ffi::Path* h) : h_(h) {}
+    result<matrix2d, CovError> marginal(const LandmarkRef& e) {
+        double b[4];
+        if (ffi::landmark_marginal_cov(h_, e.raw(), b, 4) < 0) return fail<matrix2d>();
+        return result<matrix2d, CovError>::ok(
+            matrix2d::from_elements(b[0], b[1], b[2], b[3]));
+    }
+    result<matrix3d, CovError> marginal(const PoseRef& e) {
+        double b[9];
+        if (ffi::pose_marginal_cov(h_, e.raw(), b, 9) < 0) return fail<matrix3d>();
+        return result<matrix3d, CovError>::ok(matrix3d::from_elements(
+            b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8]));
+    }
+private:
+    template<class T> result<T, CovError> fail() {
+        return result<T, CovError>::err({ffi::path_last_error(h_)});
+    }
+    ffi::Path* h_;
 };
 
 /// `Path.poses`. Element pointers are STABLE across pushes (chunked storage).
@@ -294,6 +343,13 @@ public:
         int32_t code = ffi::path_solve_sparse(h_, &cfg, &r);
         if (code >= 0) return SolveResult::ok(r);
         return SolveResult::err({static_cast<LmStatus>(code), last_error()});
+    }
+    /// Prepare the covariance at the current (solved) parameters; query
+    /// per-entity marginals on the returned view.
+    result<Covariance, CovError> assemble_covariance(CovMode mode = CovMode::AllMarginals) {
+        if (ffi::path_assemble_covariance(h_, uint32_t(mode)) != 0)
+            return result<Covariance, CovError>::err({last_error()});
+        return result<Covariance, CovError>::ok(Covariance(h_));
     }
     /// Empty string when the model is clean, the Diagnostic text
     /// otherwise. The returned pointer is valid until the next call on

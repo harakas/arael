@@ -86,70 +86,188 @@ static float observe(const Cfg& cfg, vect2f pos, float gamma, vect2f lm) {
     return bearing;
 }
 
+// Per-landmark 95% confidence ellipse from the 2x2 position covariance:
+// chi^2(0.95, df=2) = 5.991, semi-axes are sqrt(5.991 * eigenvalue).
+// Closed-form symmetric 2x2 eigendecomposition -- no linear algebra
+// library needed.
+struct Ellipse {
+    vect2f center;
+    float semi_major, semi_minor, angle;
+};
+
+static Ellipse ellipse_from_cov(vect2f center, matrix2d c) {
+    double a = c.rows[0].x, b = c.rows[0].y, d = c.rows[1].y;
+    double half_tr = 0.5 * (a + d);
+    double disc = std::sqrt(0.25 * (a - d) * (a - d) + b * b);
+    double lam_major = std::max(half_tr + disc, 0.0);
+    double lam_minor = std::max(half_tr - disc, 0.0);
+    const double chi2_95 = 5.991;
+    return {center,
+            float(std::sqrt(lam_major * chi2_95)),
+            float(std::sqrt(lam_minor * chi2_95)),
+            0.5f * float(std::atan2(2.0 * b, a - d))};
+}
+
 // ---------------------------------------------------------------------------
-// EPS plot: ground truth vs estimate.
+// EPS plot -- the same layout as the Rust example's:
+//   * ground truth poses (gray dashed chain + gray triangles) first;
+//   * bearing rays from each optimized pose, tinted per landmark;
+//   * optimized pose chain (dashed) + dark filled triangles along gamma;
+//   * per-landmark 95% ellipses in the landmark's own hue;
+//   * landmark error lines + GT landmark dots above the ray bundles;
+//   * optimized landmarks as hued dots.
 // ---------------------------------------------------------------------------
+
+static void hsv_to_rgb(float h, float s, float v, float& r, float& g, float& b) {
+    float h6 = (h - std::floor(h)) * 6.0f;
+    float c = v * s;
+    float x = c * (1.0f - std::fabs(std::fmod(h6, 2.0f) - 1.0f));
+    switch (int(h6)) {
+        case 0: r = c; g = x; b = 0; break;
+        case 1: r = x; g = c; b = 0; break;
+        case 2: r = 0; g = c; b = x; break;
+        case 3: r = 0; g = x; b = c; break;
+        case 4: r = x; g = 0; b = c; break;
+        default: r = c; g = 0; b = x; break;
+    }
+    float m = v - c;
+    r += m; g += m; b += m;
+}
+
+// Evenly-spaced hues; rays get a washed-out tint of the landmark's hue.
+static void landmark_color(size_t i, size_t n, bool ray, float& r, float& g, float& b) {
+    float h = n == 0 ? 0.0f : float(i) / float(n);
+    hsv_to_rgb(h, ray ? 0.40f : 0.85f, ray ? 0.97f : 0.78f, r, g, b);
+}
+
+struct Sighting { size_t pose; float bearing; };
+
 static void write_eps(
     const char* file,
     const std::vector<std::pair<vect2f, float>>& gt_poses,
     const std::vector<vect2f>& gt_lms,
-    const std::vector<vect2f>& est_poses,
+    const std::vector<std::pair<vect2f, float>>& est_poses,
     const std::vector<vect2f>& est_lms,
-    const std::vector<int>& lm_to_gt)
+    const std::vector<std::vector<Sighting>>& lm_sightings,
+    const std::vector<int>& lm_to_gt,
+    const std::vector<Ellipse>& ellipses)
 {
-    float x0 = 1e9f, y0 = 1e9f, x1 = -1e9f, y1 = -1e9f;
+    // Bounding box across everything we plan to draw.
+    float xmin = 1e9f, ymin = 1e9f, xmax = -1e9f, ymax = -1e9f;
     auto grow = [&](vect2f p) {
-        x0 = std::min(x0, p.x); y0 = std::min(y0, p.y);
-        x1 = std::max(x1, p.x); y1 = std::max(y1, p.y);
+        xmin = std::min(xmin, p.x); ymin = std::min(ymin, p.y);
+        xmax = std::max(xmax, p.x); ymax = std::max(ymax, p.y);
     };
-    for (auto& [p, g] : gt_poses) grow(p);
-    for (auto& p : gt_lms) grow(p);
+    for (auto& [p, g] : est_poses) grow(p);
     for (auto& p : est_lms) grow(p);
-    float pad = 0.05f * std::max(x1 - x0, y1 - y0);
-    x0 -= pad; y0 -= pad; x1 += pad; y1 += pad;
-    const float w = 500.0f;
-    float s = w / std::max(x1 - x0, y1 - y0);
-    float h = (y1 - y0) * s;
-    auto X = [&](vect2f p) { return (p.x - x0) * s; };
-    auto Y = [&](vect2f p) { return (p.y - y0) * s; };
+    for (auto& [p, g] : gt_poses) grow(p);
+    for (int gi : lm_to_gt) grow(gt_lms[gi]);
+    xmin -= 3; xmax += 3; ymin -= 3; ymax += 3;
+
+    const float page_w = 540.0f, page_h = 420.0f, pad = 18.0f;
+    float s = std::min((page_w - 2 * pad) / (xmax - xmin),
+                       (page_h - 2 * pad) / (ymax - ymin));
+    float dx = (page_w - s * (xmax - xmin)) * 0.5f;
+    float dy = (page_h - s * (ymax - ymin)) * 0.5f;
+    auto X = [&](vect2f p) { return dx + (p.x - xmin) * s; };
+    auto Y = [&](vect2f p) { return dy + (p.y - ymin) * s; };
 
     FILE* f = std::fopen(file, "w");
     if (!f) { std::perror(file); return; }
-    std::fprintf(f, "%%!PS-Adobe-3.0 EPSF-3.0\n%%%%BoundingBox: 0 0 %d %d\n",
-        int(w) + 1, int(h) + 21);
-    std::fprintf(f, "/l { lineto } def /m { moveto } def\n");
+    std::fprintf(f, "%%!PS-Adobe-3.0 EPSF-3.0\n");
+    std::fprintf(f, "%%%%BoundingBox: 0 0 %d %d\n", int(page_w), int(page_h));
+    std::fprintf(f, "%%%%Creator: slam2d_simple_demo (C++)\n%%%%EndComments\n");
+    // Triangle marker `x y angle_deg size tri`: forward tip at (size, 0).
+    std::fprintf(f, "/tri { gsave 4 2 roll translate exch rotate "
+        "dup 0 moveto "
+        "dup -0.55 mul 1 index 0.45 mul lineto "
+        "dup -0.55 mul exch -0.45 mul lineto "
+        "closepath fill grestore } def\n");
+    std::fprintf(f, "/dot { newpath 0 360 arc fill } def\n");
 
-    auto polyline = [&](const std::vector<vect2f>& pts) {
+    auto polyline = [&](const std::vector<std::pair<vect2f, float>>& pts) {
+        std::fprintf(f, "newpath ");
         for (size_t i = 0; i < pts.size(); i++)
-            std::fprintf(f, "%.1f %.1f %s\n", X(pts[i]), Y(pts[i]), i ? "l" : "m");
+            std::fprintf(f, "%.2f %.2f %s ", X(pts[i].first), Y(pts[i].first),
+                i ? "lineto" : "moveto");
         std::fprintf(f, "stroke\n");
     };
-    std::vector<vect2f> gtp, estp;
-    for (auto& [p, g] : gt_poses) gtp.push_back(p);
-    estp = est_poses;
 
-    // Estimated landmark -> its ground truth, as faint links.
-    std::fprintf(f, "0.85 setgray 0.5 setlinewidth\n");
-    for (size_t i = 0; i < est_lms.size(); i++) {
-        vect2f a = est_lms[i], b = gt_lms[lm_to_gt[i]];
-        std::fprintf(f, "%.1f %.1f m %.1f %.1f l stroke\n", X(a), Y(a), X(b), Y(b));
+    // Ground-truth pose shadow (behind everything).
+    std::fprintf(f, "0.62 0.62 0.62 setrgbcolor 0.8 setlinewidth [3 2] 0 setdash\n");
+    polyline(gt_poses);
+    std::fprintf(f, "[] 0 setdash\n");
+    for (auto& [p, g] : gt_poses)
+        std::fprintf(f, "%.2f %.2f %.2f 8 tri\n", X(p), Y(p),
+            g * 180.0f / float(M_PI));
+
+    // Bearing rays from each optimized pose, world frame, 110%% of the
+    // pose->landmark distance so each ray reaches its landmark.
+    std::fprintf(f, "0.25 setlinewidth\n");
+    size_t n_lm = est_lms.size();
+    for (size_t li = 0; li < n_lm; li++) {
+        float r, g, b;
+        landmark_color(li, n_lm, true, r, g, b);
+        std::fprintf(f, "%.3f %.3f %.3f setrgbcolor\n", r, g, b);
+        for (auto& sight : lm_sightings[li]) {
+            vect2f pp = est_poses[sight.pose].first;
+            float world_dir = est_poses[sight.pose].second + sight.bearing;
+            float dist = (est_lms[li] - pp).norm() * 1.10f;
+            vect2f tip = pp + vect2f{dist * std::cos(world_dir),
+                                     dist * std::sin(world_dir)};
+            std::fprintf(f, "newpath %.2f %.2f moveto %.2f %.2f lineto stroke\n",
+                X(pp), Y(pp), X(tip), Y(tip));
+        }
     }
-    // Ground-truth path (gray) and landmarks (crosses).
-    std::fprintf(f, "0.6 setgray 1 setlinewidth\n");
-    polyline(gtp);
-    for (auto& p : gt_lms)
-        std::fprintf(f, "%.1f %.1f m -3 -3 rmoveto 6 6 rlineto -6 0 rmoveto 6 -6 rlineto stroke\n",
-            X(p), Y(p));
-    // Estimated path (blue) and landmarks (red dots).
-    std::fprintf(f, "0 0 0.8 setrgbcolor 1.5 setlinewidth\n");
-    polyline(estp);
-    std::fprintf(f, "0.8 0 0 setrgbcolor\n");
-    for (auto& p : est_lms)
-        std::fprintf(f, "%.1f %.1f 2.5 0 360 arc fill\n", X(p), Y(p));
-    std::fprintf(f, "0 setgray /Helvetica findfont 10 scalefont setfont\n");
-    std::fprintf(f, "4 %.1f m (gray: ground truth   blue: solved path   red: solved corners) show\n",
-        h + 8.0f);
-    std::fprintf(f, "showpage\n");
+
+    // Optimized pose chain (dashed) + filled triangles along gamma.
+    std::fprintf(f, "0.08 0.15 0.30 setrgbcolor 1.0 setlinewidth [4 2] 0 setdash\n");
+    polyline(est_poses);
+    std::fprintf(f, "[] 0 setdash 0.10 0.18 0.40 setrgbcolor\n");
+    for (auto& [p, g] : est_poses)
+        std::fprintf(f, "%.2f %.2f %.2f 6.5 tri\n", X(p), Y(p),
+            g * 180.0f / float(M_PI));
+
+    // 95%% confidence ellipses, each in its landmark's hue.
+    std::fprintf(f, "0.6 setlinewidth\n");
+    for (size_t i = 0; i < ellipses.size(); i++) {
+        auto& e = ellipses[i];
+        if (e.semi_major <= 0 || e.semi_minor <= 0) continue;
+        float r, g, b;
+        landmark_color(i, n_lm, false, r, g, b);
+        std::fprintf(f, "%.3f %.3f %.3f setrgbcolor\nnewpath ", r, g, b);
+        const int segs = 48;
+        float ct = std::cos(e.angle), st = std::sin(e.angle);
+        for (int j = 0; j <= segs; j++) {
+            float phi = 2.0f * float(M_PI) * float(j) / segs;
+            float lx = e.semi_major * std::cos(phi);
+            float ly = e.semi_minor * std::sin(phi);
+            vect2f w{e.center.x + ct * lx - st * ly,
+                     e.center.y + st * lx + ct * ly};
+            std::fprintf(f, "%.2f %.2f %s ", X(w), Y(w), j ? "lineto" : "moveto");
+        }
+        std::fprintf(f, "closepath stroke\n");
+    }
+
+    // Landmark error lines + GT landmark dots (above the ray bundles).
+    std::fprintf(f, "0.55 0.55 0.55 setrgbcolor 0.5 setlinewidth\n");
+    for (size_t i = 0; i < n_lm; i++) {
+        vect2f gt = gt_lms[lm_to_gt[i]];
+        std::fprintf(f, "newpath %.2f %.2f moveto %.2f %.2f lineto stroke\n",
+            X(est_lms[i]), Y(est_lms[i]), X(gt), Y(gt));
+    }
+    for (int gi : lm_to_gt)
+        std::fprintf(f, "%.2f %.2f 2.2 dot\n", X(gt_lms[gi]), Y(gt_lms[gi]));
+
+    // Optimized landmarks, one hue per landmark.
+    for (size_t i = 0; i < n_lm; i++) {
+        float r, g, b;
+        landmark_color(i, n_lm, false, r, g, b);
+        std::fprintf(f, "%.3f %.3f %.3f setrgbcolor %.2f %.2f 2.8 dot\n",
+            r, g, b, X(est_lms[i]), Y(est_lms[i]));
+    }
+
+    std::fprintf(f, "%%%%EOF\n");
     std::fclose(f);
 }
 
@@ -202,9 +320,10 @@ int main() {
     // Landmarks with at least two sightings; init on the first ray.
     std::vector<Ref_Landmark> lm_refs;
     std::vector<int> lm_to_gt;
+    std::vector<std::vector<Sighting>> lm_sightings;
     int n_frines = 0;
     for (size_t li = 0; li < gt_lms.size(); li++) {
-        std::vector<std::pair<size_t, float>> sightings;
+        std::vector<Sighting> sightings;
         for (size_t pi = 0; pi < gt_poses.size(); pi++) {
             float b = observe(cfg, gt_poses[pi].first, gt_poses[pi].second, gt_lms[li]);
             if (std::isnan(b)) continue;
@@ -214,20 +333,22 @@ int main() {
 
         Ref_Landmark r = path.landmarks().push();
         auto lm = path.landmarks().get(r);
-        auto [first_pi, first_b] = sightings[0];
+        size_t first_pi = sightings[0].pose;
+        float first_b = sightings[0].bearing;
         auto p0 = path.poses()[uint32_t(first_pi)];
         float world_b = p0.gamma() + first_b;
         lm.set_pos(p0.pos() + vect2f{cfg.init_range * std::cos(world_b),
                                      cfg.init_range * std::sin(world_b)});
-        for (auto [pi, b] : sightings) {
+        for (auto& sight : sightings) {
             auto fr = lm.frines().push();
-            fr.set_pose(path.poses().ref_at(uint32_t(pi)));
-            fr.set_bearing(b);
+            fr.set_pose(path.poses().ref_at(uint32_t(sight.pose)));
+            fr.set_bearing(sight.bearing);
             fr.set_isigma(1.0f / cfg.bearing_sigma);
             n_frines++;
         }
         lm_refs.push_back(r);
         lm_to_gt.push_back(int(li));
+        lm_sightings.push_back(std::move(sightings));
     }
 
     std::printf("Path: %u poses, %u pose_pairs, %u landmarks, %d frines\n",
@@ -243,12 +364,12 @@ int main() {
         int(r->status), double(r->start_cost), double(r->end_cost), r->iterations);
 
     std::printf("\n-- Pose errors vs GT --\n");
-    std::vector<vect2f> est_poses;
+    std::vector<std::pair<vect2f, float>> est_poses;
     float pos_sum = 0, g_sum = 0;
     for (size_t i = 0; i < gt_poses.size(); i++) {
         vect2f p = path.poses()[uint32_t(i)].pos();
         float g = path.poses()[uint32_t(i)].gamma();
-        est_poses.push_back(p);
+        est_poses.push_back({p, g});
         float pe = (p - gt_poses[i].first).norm();
         float ge = std::fabs(wrap_angle(g - gt_poses[i].second));
         std::printf("  pose %2zu: |dp|=%.3fm  |dgamma|=%.3fdeg\n",
@@ -274,8 +395,26 @@ int main() {
     if (!lm_refs.empty())
         std::printf("  mean: |d|=%.4fm\n", double(lm_sum) / lm_refs.size());
 
+    // Per-landmark uncertainty from the parameter covariance. The first
+    // pose is held fixed, so the Hessian is invertible; each landmark's
+    // 2x2 block is its own positional uncertainty.
+    std::vector<Ellipse> ellipses;
+    auto cov = path.assemble_covariance(CovMode::AllMarginals);
+    if (cov.is_err()) {
+        std::fprintf(stderr, "covariance: %s -- skipping uncertainty\n",
+            cov.error().message);
+    } else {
+        for (size_t i = 0; i < lm_refs.size(); i++) {
+            auto lm = path.landmarks().get(lm_refs[i]);
+            auto m = cov->marginal(lm);
+            if (m.is_err()) continue;
+            ellipses.push_back(ellipse_from_cov(lm.pos(), m.value()));
+        }
+        std::printf("\n%zu landmark uncertainty ellipses (95%%)\n", ellipses.size());
+    }
+
     const char* out = "slam2d_simple_cxx.eps";
-    write_eps(out, gt_poses, gt_lms, est_poses, est_lms, lm_to_gt);
+    write_eps(out, gt_poses, gt_lms, est_poses, est_lms, lm_sightings, lm_to_gt, ellipses);
     std::printf("\nMap plotted to %s\n", out);
     return 0;
 }
