@@ -77,6 +77,14 @@ pub struct Param<T: ParamType> {
 fn default_true() -> bool { true }
 fn inactive_index() -> u32 { u32::MAX }
 
+/// An optimizable parameter at the type's zero value -- the state a
+/// generated-interface `push()` hands out to fill.
+impl<T: ParamType> Default for Param<T> {
+    fn default() -> Self {
+        Param::new(T::default())
+    }
+}
+
 impl<T: ParamType> Param<T> {
     /// Create a new optimizable parameter with the given initial value.
     pub fn new(value: T) -> Self {
