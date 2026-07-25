@@ -3,10 +3,12 @@
 // artifacts, so this pins the generator without needing a model build.
 // Regenerate after intentional emitter changes:
 //   cp cxx-tests/model/capi/src/lib.rs cargo-arael/tests/golden/fit_ffi.rs
+//   cp cxx-tests/model/python/cxx_fit/fit.py cargo-arael/tests/golden/fit.py
+//   cp cxx-tests/model/python/cxx_fit/_fit_ffi.py cargo-arael/tests/golden/fit_ffi.py
 //   cp cxx-tests/model/cxx/include/fit.hpp cargo-arael/tests/golden/fit.hpp
 // (after `cargo arael export` in cxx-tests/model).
 
-use cargo_arael::{emit_ffi, emit_hpp, ir::Model};
+use cargo_arael::{emit_ffi, emit_hpp, emit_py, ir::Model};
 
 fn model() -> Model {
     Model::parse(include_str!("golden/fit.json")).unwrap()
@@ -26,6 +28,15 @@ fn hpp_matches_golden() {
     let want = include_str!("golden/fit.hpp");
     assert!(got == want,
         "hpp emitter drifted from golden (see file header for regeneration)");
+}
+
+#[test]
+fn py_matches_golden() {
+    let (ffi, api) = emit_py::emit(&model(), "cxx_fit_capi").unwrap();
+    assert!(ffi == include_str!("golden/fit_ffi.py"),
+        "python ffi emitter drifted from golden (see file header for regeneration)");
+    assert!(api == include_str!("golden/fit.py"),
+        "python api emitter drifted from golden (see file header for regeneration)");
 }
 
 #[test]

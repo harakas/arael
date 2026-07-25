@@ -769,7 +769,12 @@ in priority order:
    band cover the demos.
 9. **Custom lambda driver** -- preset-only today; callback-shaped
    like the observer if ever needed. Not planned.
-10. **Stage 6: the Python skin** -- the remaining plan stage.
+10. **Stage 6: the Python skin** -- SHIPPED 2026-07-25; the plan and
+    its as-built notes are docs/dev/PYTHON.md, the user-facing docs
+    docs/PYTHON.md. Same export, same parity standard (the full
+    fixture problem verified value-exact against the shared Rust
+    mirror), and every demo under cxx-examples/ carries a
+    python/ driver next to its cxx/ one.
 
 Fit-attribute models stay out (see TODO discussion), ExtendedModel is
 never exposed.

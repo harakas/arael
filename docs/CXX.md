@@ -26,6 +26,7 @@ entity to fill), containers spelled `refs::Vec<..>` /
 | `cxx/include/<root>.hpp` | the C++ interface |
 | `cxx/include/arael/*.hpp` | vendored math + support headers |
 | `cxx/CMakeLists.txt` | build glue |
+| `python/<ns>/` | the Python interface (docs/PYTHON.md) |
 
 Commit the generated files; `cargo arael check` fails when they are
 stale (run it in CI). Rerun `export` after model changes.
@@ -184,5 +185,5 @@ from `cross()`), `loc_demo` (localization against a known map on the
 band solver, TriDiagonal `std_dev`), and `m3500_demo` (pose graph
 from a g2o file, digit-for-digit with the Rust example).
 
-A Python interface over the same C ABI is planned; the design notes
-live in docs/dev/CXX.md.
+The Python interface over the same C ABI is docs/PYTHON.md -- the
+same export writes it, the same parity suite holds it.

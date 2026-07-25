@@ -1,0 +1,52 @@
+# arael Python geometry: pinhole Camera. Mirrors arael's
+# src/geometry.rs (intrinsics + extrinsics in robot frame, mc2r =
+# camera-to-robot rotation). f32 semantics via the f32 value types.
+
+from .math import matrix3f, vect2f, vect3f
+
+
+class Camera:
+    """Pinhole camera model with intrinsics and extrinsics."""
+
+    def __init__(self, fx, fy, cx, cy, width, height, camera_pos, mc2r):
+        self.fx = float(fx)
+        self.fy = float(fy)
+        self.cx = float(cx)
+        self.cy = float(cy)
+        self.width = int(width)
+        self.height = int(height)
+        self.camera_pos = (camera_pos if isinstance(camera_pos, vect3f)
+                           else vect3f(camera_pos))
+        self.mc2r = mc2r if isinstance(mc2r, matrix3f) else matrix3f(mc2r)
+
+    def project(self, p_cam):
+        """3D point in camera frame -> 2D pixel coordinates."""
+        return vect2f(self.fx * p_cam.x / p_cam.z + self.cx,
+                      self.fy * p_cam.y / p_cam.z + self.cy)
+
+    def unproject(self, px):
+        """Pixel -> unit direction in camera frame."""
+        d = vect3f((px[0] - self.cx) / self.fx, (px[1] - self.cy) / self.fy,
+                   1.0)
+        return d * (1.0 / d.norm())
+
+    def world_to_camera(self, p_world, robot_pos, mr2w):
+        """World point -> this camera's frame, given the robot pose."""
+        p_robot = mr2w.transpose() * (p_world - robot_pos)
+        return self.mc2r.transpose() * (p_robot - self.camera_pos)
+
+    def unproject_to_robot(self, px):
+        """Pixel -> unit direction in robot frame."""
+        return self.mc2r * self.unproject(px)
+
+    def pixel_angular_size(self, px):
+        """Angular size of one pixel at px, radians per axis."""
+        dx = px[0] - self.cx
+        dy = px[1] - self.cy
+        return vect2f(self.fx / (dx * dx + self.fx * self.fx),
+                      self.fy / (dy * dy + self.fy * self.fy))
+
+    def is_visible(self, px):
+        """Whether a pixel coordinate is inside the image bounds."""
+        return (0.0 <= px[0] < float(self.width)
+                and 0.0 <= px[1] < float(self.height))

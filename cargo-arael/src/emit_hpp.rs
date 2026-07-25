@@ -41,7 +41,7 @@ fn float_cpp(precision: &str) -> &'static str {
     if precision == "f32" { "float" } else { "double" }
 }
 
-fn camel(field: &str) -> String {
+pub fn camel(field: &str) -> String {
     let mut out = String::new();
     let mut up = true;
     for c in field.chars() {
@@ -432,7 +432,7 @@ fn field_cpp(
 }
 
 /// Types this type's class depends on having been emitted first.
-fn deps(t: &Type) -> Vec<&str> {
+pub fn deps(t: &Type) -> Vec<&str> {
     t.fields.iter()
         .filter(|f| matches!(f.kind.as_str(),
             "struct" | "optional" | "collection" | "component"))
