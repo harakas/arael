@@ -1114,6 +1114,77 @@ struct AAliasSkip {
     stash: AliasVec<P>,
 }
 
+// ---------------------------------------------------------------------------
+// Reads through an Option sub-struct: guarded reads never evaluate on
+// None; an unguarded read panics naming the field as the body spells it
+// (the contract in MODEL.md, "Guards and optional data").
+
+#[arael::model]
+struct OptData {
+    off: f64,
+}
+
+#[arael::model]
+#[arael(constraint(hb, guard = self.has_extra, {
+    [(pg.x - pg.extra.off) * 2.0]
+}))]
+#[arael(constraint(hb, {
+    [(pg.x - pg.t) * 0.5]
+}))]
+struct Pg {
+    x: Param<f64>,
+    t: f64,
+    has_extra: bool,
+    extra: Option<OptData>,
+    hb: SelfBlock<Pg>,
+}
+
+#[arael::model]
+#[arael(root)]
+struct AOptRead {
+    items: std::vec::Vec<Pg>,
+}
+
+#[test]
+fn guarded_option_read_skips_none() {
+    let mut w = AOptRead { items: vec![
+        Pg { x: Param::new(1.0), t: 0.2, has_extra: true,
+             extra: Some(OptData { off: 0.4 }), hb: SelfBlock::new() },
+        Pg { x: Param::new(2.0), t: 1.1, has_extra: false,
+             extra: None, hb: SelfBlock::new() },
+    ]};
+    let manual = ((1.0f64 - 0.4) * 2.0).powi(2) + ((1.0f64 - 0.2) * 0.5).powi(2)
+        + ((2.0f64 - 1.1) * 0.5).powi(2);
+    check_model("guarded Option read", &mut w, manual);
+}
+
+#[arael::model]
+#[arael(constraint(hb, {
+    [(pu.x - pu.extra.off) * 2.0]
+}))]
+struct Pu {
+    x: Param<f64>,
+    extra: Option<OptData>,
+    hb: SelfBlock<Pu>,
+}
+
+#[arael::model]
+#[arael(root)]
+struct AOptReadBare {
+    items: std::vec::Vec<Pu>,
+}
+
+#[test]
+#[should_panic(expected = "optional `pu.extra` is None -- guard the constraint")]
+fn unguarded_option_read_panics_with_field_name() {
+    let mut w = AOptReadBare { items: vec![
+        Pu { x: Param::new(1.0), extra: None, hb: SelfBlock::new() },
+    ]};
+    let mut x = Vec::new();
+    RootProblem::serialize(&mut w, &mut x);
+    let _ = w.calc_cost(&x);
+}
+
 #[test]
 fn skipped_alias_container_is_inert() {
     let mut items = refs::Vec::new();

@@ -1860,13 +1860,16 @@ fn register_bindings_body(
                     // CONTRACT (documented in MODEL.md, "Guards and
                     // optional data"): a body reading through an Option
                     // sub-struct must be guarded so it never evaluates
-                    // when the field is None -- the read is this unwrap.
+                    // when the field is None -- the read is this expect.
                     // A guard suppresses the body on every path (cost,
-                    // grad/Hessian, jacobian), so the unwrap is safe
-                    // under it; an unguarded read panics on the first
-                    // None at solve time.
+                    // grad/Hessian, jacobian), so the read is safe under
+                    // it; an unguarded read panics on the first None at
+                    // solve time, naming the field as the body spells it.
                     let nested_key = format!("{}.{}", key_prefix, field_name);
-                    let nested_sym = format!("{}.{}.as_ref().unwrap()", sym_prefix, field_name);
+                    let nested_sym = format!(
+                        "{}.{}.as_ref().expect(\"optional `{}` is None -- guard the \
+                         constraint reading it (see MODEL.md, Guards and optional data)\")",
+                        sym_prefix, field_name, nested_key);
                     register_bindings_guarded(ctx, &nested_key, &nested_sym, inner_type, stack)?;
                 }
                 _ => {

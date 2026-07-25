@@ -600,8 +600,10 @@ struct P {
 A guarded constraint is fully protected: when the guard is false the
 body is not evaluated on ANY path (cost, gradient/Hessian, jacobian),
 so the `None` is never touched. An unguarded read panics at solve time
-on the first `None` (`Option::unwrap`). Note the guard field is plain
-data the model carries -- rule 1 applies to it like any guard.
+on the first `None`, naming the field as the body spells it
+(``optional `p.extra` is None -- guard the constraint reading it``).
+Note the guard field is plain data the model carries -- rule 1 applies
+to it like any guard.
 
 This contract is about reading Option DATA inside a body. Holding a
 whole ENTITY in an Option (`gps: Option<GpsObs>` -- see
