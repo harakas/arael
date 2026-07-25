@@ -5,7 +5,7 @@ project(slam_demo_gm CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-add_subdirectory(model/cxx arael_gen)
+add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/../model/cxx arael_gen)
 
 add_executable(slam_demo_gm main.cpp)
 target_link_libraries(slam_demo_gm PRIVATE arael::slam_demo_gm)
