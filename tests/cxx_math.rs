@@ -131,6 +131,49 @@ fn golden() -> Vec<(String, f64)> {
     pv2(&mut out, "m2_mul_v", r2 * u);
     p(&mut out, "m2_det", r2.det());
 
+    // Symmetric eigen: eigenvalues directly; eigenvectors through the
+    // reconstruction R diag(d) R^T (sign/algorithm independent). The
+    // C++ twin runs its own Jacobi, so these agree to precision, not
+    // bits.
+    {
+        let s3 = matrix3d::from_elements(
+            4.0, 0.5, -0.3, 0.5, 2.5, 0.7, -0.3, 0.7, 1.2);
+        let (r, d) = s3.symmetric_eigen();
+        pv3(&mut out, "eig3_d", d);
+        pm3(&mut out, "eig3_recon", r * matrix3d::from_elements(
+            d.x, 0.0, 0.0, 0.0, d.y, 0.0, 0.0, 0.0, d.z) * r.transpose());
+        let s2 = matrix2d::from_elements(2.0, 0.6, 0.6, 1.1);
+        let (r2e, d2) = s2.symmetric_eigen();
+        pv2(&mut out, "eig2_d", d2);
+        pm2(&mut out, "eig2_recon", r2e * matrix2d::from_elements(d2.x, 0.0, 0.0, d2.y)
+            * r2e.transpose());
+    }
+
+    // Pinhole camera (f32, compared at f32 accuracy).
+    {
+        use arael::geometry::Camera;
+        use arael::matrix::matrix3f;
+        use arael::vect::{vect2f, vect3f};
+        let cam = Camera {
+            fx: 800.0, fy: 820.0, cx: 512.0, cy: 384.0, width: 1024, height: 768,
+            camera_pos: vect3f::new(0.1, -0.05, 0.3),
+            mc2r: matrix3f::rotation_from_euler_angles(vect3f::new(0.1, -0.2, 0.5)),
+        };
+        let px = vect2f::new(600.0, 300.0);
+        let v2d = |v: vect2f| vect2d::new(v.x as f64, v.y as f64);
+        let v3d = |v: vect3f| vect3d::new(v.x as f64, v.y as f64, v.z as f64);
+        pv2(&mut out, "f32_cam_proj", v2d(cam.project(vect3f::new(0.4, -0.3, 2.0))));
+        pv3(&mut out, "f32_cam_unproj", v3d(cam.unproject(px)));
+        pv3(&mut out, "f32_cam_w2c", v3d(cam.world_to_camera(
+            vect3f::new(3.0, 1.0, 0.5), vect3f::new(1.0, 0.2, 0.0),
+            matrix3f::rotation_from_euler_angles(vect3f::new(0.02, 0.05, 1.1)))));
+        pv3(&mut out, "f32_cam_unproj_robot", v3d(cam.unproject_to_robot(px)));
+        pv2(&mut out, "f32_cam_pixang", v2d(cam.pixel_angular_size(px)));
+        p(&mut out, "f32_cam_vis_in", if cam.is_visible(px) { 1.0 } else { 0.0 });
+        p(&mut out, "f32_cam_vis_out",
+            if cam.is_visible(vect2f::new(-1.0, 300.0)) { 1.0 } else { 0.0 });
+    }
+
     let eaf = vect3::<f32>::new(0.3, -0.7, 1.9);
     let eaf_back = quatern::<f32>::from_euler_angles(eaf).get_euler_angles();
     pv3(&mut out, "f32_ea_back",

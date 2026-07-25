@@ -2,6 +2,7 @@
 // operations as tests/cxx_math.rs from the same inputs and prints
 // "name value" lines. The Rust test compiles, runs, and compares.
 #include <arael/math.hpp>
+#include <arael/geometry.hpp>
 #include <cstdio>
 
 using namespace arael;
@@ -120,6 +121,40 @@ int main() {
     pm2("m2_mul", r2 * matrix2d::from_elements(1.2, -0.3, 0.5, 0.8));
     pv2("m2_mul_v", r2 * u);
     p("m2_det", r2.det());
+
+    // Symmetric eigen: eigenvalues directly; eigenvectors through the
+    // reconstruction R diag(d) R^T (sign/algorithm independent). The
+    // Rust twin runs nalgebra, so these agree to precision, not bits.
+    {
+        matrix3d s3 = matrix3d::from_elements(
+            4.0, 0.5, -0.3, 0.5, 2.5, 0.7, -0.3, 0.7, 1.2);
+        auto [r, d] = s3.symmetric_eigen();
+        pv3("eig3_d", d);
+        pm3("eig3_recon", r * matrix3d::from_elements(
+            d.x, 0.0, 0.0, 0.0, d.y, 0.0, 0.0, 0.0, d.z) * r.transpose());
+        matrix2d s2 = matrix2d::from_elements(2.0, 0.6, 0.6, 1.1);
+        auto [r2e, d2] = s2.symmetric_eigen();
+        pv2("eig2_d", d2);
+        pm2("eig2_recon", r2e * matrix2d::from_elements(d2.x, 0.0, 0.0, d2.y)
+            * r2e.transpose());
+    }
+
+    // Pinhole camera (f32, printed at double precision).
+    {
+        Camera cam{800.0f, 820.0f, 512.0f, 384.0f, 1024, 768,
+            vect3f{0.1f, -0.05f, 0.3f},
+            matrix3f::rotation_from_euler_angles({0.1f, -0.2f, 0.5f})};
+        vect2f px{600.0f, 300.0f};
+        vect2f proj = cam.project({0.4f, -0.3f, 2.0f});
+        pv2("f32_cam_proj", proj.cast<double>());
+        pv3("f32_cam_unproj", cam.unproject(px).cast<double>());
+        pv3("f32_cam_w2c", cam.world_to_camera({3.0f, 1.0f, 0.5f}, {1.0f, 0.2f, 0.0f},
+            matrix3f::rotation_from_euler_angles({0.02f, 0.05f, 1.1f})).cast<double>());
+        pv3("f32_cam_unproj_robot", cam.unproject_to_robot(px).cast<double>());
+        pv2("f32_cam_pixang", cam.pixel_angular_size(px).cast<double>());
+        p("f32_cam_vis_in", cam.is_visible(px) ? 1.0 : 0.0);
+        p("f32_cam_vis_out", cam.is_visible({-1.0f, 300.0f}) ? 1.0 : 0.0);
+    }
 
     // f32 smoke: euler round trip, printed at double precision.
     vect3<float> eaf{0.3f, -0.7f, 1.9f};
