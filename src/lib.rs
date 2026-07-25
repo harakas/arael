@@ -22,6 +22,7 @@
 //! - [Runtime Differentiation](#runtime-differentiation)
 //! - [Model Structure](#model-structure)
 //! - [Cross-Crate Models](#cross-crate-models)
+//! - [C++ and Python Interfaces](#c-and-python-interfaces)
 //! - [Solvers](#solvers)
 //! - [Parameter Covariance](#parameter-covariance)
 //! - [Instrumentation & Debugging](#instrumentation--debugging)
@@ -65,9 +66,11 @@
 //! - **Cross-crate models** -- `arael::export_models!()` bundles a
 //!   crate's pub models; the importing crate registers them all with one
 //!   `arael_import!()` and builds its own models and roots over them
-//! - **C++ interface generator** -- `cargo arael export` generates a C ABI
-//!   shim and C++ wrapper classes for a root model; see
+//! - **C++ and Python interfaces** -- `cargo arael export` generates full
+//!   bindings for a root model, exact solve parity against Rust; see
 //!   [docs/CXX.md](https://github.com/harakas/arael/blob/master/docs/CXX.md)
+//!   and
+//!   [docs/PYTHON.md](https://github.com/harakas/arael/blob/master/docs/PYTHON.md)
 //! - **Type-safe references** -- `Ref<T>`, `Vec<T>`, `Deque<T>`, `Arena<T>`
 //! - **Runtime differentiation** -- parse equations from strings at runtime,
 //!   auto-differentiate symbolically, and optimize via `ExtendedModel` +
@@ -1026,6 +1029,38 @@
 //! - The bundle records each struct's param count; the importer
 //!   recomputes it from the same tokens and fails the build on mismatch
 //!   (incompatible arael-macros versions between the two crates).
+//!
+//! # C++ and Python Interfaces
+//!
+//! A crate holding a root model exports to other languages with one
+//! command: `cargo install cargo-arael`, then `cargo arael export` in
+//! the model crate. This generates a C ABI shim crate (`capi/`, cdylib
+//! + staticlib), C++ wrapper classes with vendored math headers
+//! (`cxx/`, with CMake glue), and a pure-`ctypes` Python package
+//! (`python/`, stdlib only -- one cdylib serves every CPython 3.x).
+//!
+//! Both skins carry the full surface: composing the problem, all
+//! solvers (dense/sparse/band), robust losses, configs with the real
+//! Rust preset values, iteration observers, timing, solve reports, and
+//! the covariance queries.
+//!
+//! ```cpp
+//! Fit fit;                                  // C++
+//! auto p = fit.poses().push_back();
+//! p.set_pos({0, 0, 0});
+//! auto r = fit.solve_sparse(cfg);           // result<LmResult, SolveError>
+//! ```
+//!
+//! ```python
+//! f = fit.Fit()                             # Python
+//! p = f.poses.push_back()
+//! p.pos = (0, 0, 0)
+//! r = f.solve_sparse(cfg)                   # raises AraelError on failure
+//! ```
+//!
+//! See `docs/CXX.md` and `docs/PYTHON.md`;
+//! [`cxx-examples/`](https://github.com/harakas/arael/tree/master/cxx-examples)
+//! carries four demos with C++ and Python drivers over shared models.
 //!
 //! # Solvers
 //!

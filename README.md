@@ -21,6 +21,7 @@ Solve problems like linear and nonlinear regression, sensor fusion, SLAM, bundle
 - [Parameter Covariance](#parameter-covariance)
 - [Runtime Differentiation](#runtime-differentiation)
 - [Cross-Crate Models](#cross-crate-models)
+- [C++ and Python Interfaces](#c-and-python-interfaces)
 - [Instrumentation and troubleshooting](#instrumentation-and-troubleshooting)
   - [My solve doesn't converge. What do I check?](#my-solve-doesnt-converge-what-do-i-check)
   - [Looking under the hood with `cargo expand`](#looking-under-the-hood-with-cargo-expand)
@@ -46,7 +47,7 @@ Solve problems like linear and nonlinear regression, sensor fusion, SLAM, bundle
 - **f32 and f64 precision** -- `#[arael(root)]` for f64, `#[arael(root, f32)]` for f32 throughout
 - **Model trait** -- hierarchical serialize/deserialize/update protocol for parameter optimization
 - **Cross-crate models** -- `arael::export_models!()` bundles a crate's pub models; the importing crate registers them all with one `arael_import!()` and builds its own models and roots over them
-- **C++ interface generator** -- `cargo arael export` generates a C ABI shim and C++ wrapper classes for a root model (build the problem from C++, solve, read results). See [docs/CXX.md](docs/CXX.md)
+- **C++ and Python interfaces** -- `cargo arael export` generates full bindings for a root model, exact solve parity against Rust ([docs/CXX.md](docs/CXX.md), [docs/PYTHON.md](docs/PYTHON.md))
 - **Type-safe references** -- `Ref<T>`, `Vec<T>`, `Deque<T>`, `Arena<T>` for indexed collections with stable references
 - **Runtime differentiation** -- parse equations from strings at runtime, auto-differentiate symbolically, and optimize via `ExtendedModel` + `TripletBlock` (used by the sketch editor for parametric expression dimensions)
 - **User-defined functions** -- plug custom symbolic or native-eval operators into constraint bodies with `#[arael::function]`.
@@ -629,6 +630,43 @@ Rules:
   it from the same tokens and fails the build on mismatch (incompatible
   arael-macros versions between the two crates).
 
+## C++ and Python Interfaces
+
+A crate holding a root model exports to other languages with one
+command:
+
+```bash
+cargo install cargo-arael
+cd mymodel/ && cargo arael export
+```
+
+This generates, next to the model, a C ABI shim crate (`capi/`,
+cdylib + staticlib), C++ wrapper classes with vendored math headers
+(`cxx/`, with CMake glue), and a pure-`ctypes` Python package
+(`python/`, stdlib only -- one cdylib serves every CPython 3.x). Both
+skins carry the full surface: composing the problem, all solvers
+(dense/sparse/band), robust losses, configs with the real Rust preset
+values, iteration observers, timing, solve reports, and the
+covariance queries.
+
+```cpp
+Fit fit;                                  // C++
+auto p = fit.poses().push_back();
+p.set_pos({0, 0, 0});
+auto r = fit.solve_sparse(cfg);           // result<LmResult, SolveError>
+```
+
+```python
+f = fit.Fit()                             # Python
+p = f.poses.push_back()
+p.pos = (0, 0, 0)
+r = f.solve_sparse(cfg)                   # raises AraelError on failure
+```
+
+[`cxx-examples/`](cxx-examples/) carries four demos with C++ and
+Python drivers over shared models. See [docs/CXX.md](docs/CXX.md) and
+[docs/PYTHON.md](docs/PYTHON.md).
+
 ## Instrumentation and troubleshooting
 
 ### My solve doesn't converge. What do I check?
@@ -914,9 +952,9 @@ arael/              Main library (Levenberg-Marquardt solver + codegen)
     log.rs          info!/warn!/error! logging macros
   cpp/
     eigen_sparse.cpp  Eigen SimplicialLLT + CHOLMOD FFI bridge (optional)
-cargo-arael/        `cargo arael` subcommand: C ABI + C++ interface generator (docs/CXX.md)
+cargo-arael/        `cargo arael` subcommand: C ABI + C++ + Python interface generator (docs/CXX.md, docs/PYTHON.md)
 cxx-tests/          Generated-interface proof: fixture model, parity + CMake consumer tests
-cxx-examples/       C++ demos over generated interfaces (slam2d_simple_demo: Rust model, C++ composition + plotting)
+cxx-examples/       demos over generated interfaces: shared Rust models, C++ and Python drivers
 
 arael-faer/         faer extensions (block CSC + Schur complement), staged for upstreaming
   src/
