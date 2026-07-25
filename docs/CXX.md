@@ -87,6 +87,11 @@ else
 - **Failures**: a solve failure or a caught Rust panic comes back as
   `Err(SolveError{status, message})`; `validate()` returns the
   diagnostic text ("" when clean).
+- **Covariance**: `assemble_covariance(CovMode)` at the solution
+  returns a `Covariance` view; `cov->marginal(entity)` answers the
+  entity's marginal block, typed by size (1 param -> `double`, 2 ->
+  `matrix2d`, 3 -> `matrix3d`, larger via a caller buffer). Valid
+  until the model is dropped or reassembled.
 
 ## Contract
 

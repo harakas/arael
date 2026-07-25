@@ -464,14 +464,17 @@ pub fn emit(model: &Model, model_crate: &str) -> Result<String, String> {
 use std::ffi::CString;
 use std::os::raw::c_char;
 use std::panic::{{AssertUnwindSafe, catch_unwind}};
+use arael::covariance::{{CovAssembly, CovMode, Covariance}};
 use arael::simple_lm::{{LmConfig, LmProblem, LmStatus}};
 use {model_crate}::{{{}}};
 
-/// The opaque handle the C ABI hands out: the model plus the error /
-/// diagnostic text buffer `last_error` points into.
+/// The opaque handle the C ABI hands out: the model, the error /
+/// diagnostic text buffer `last_error` points into, and the covariance
+/// assembly once requested.
 pub struct {handle} {{
     model: {root},
     text: CString,
+    cov: Option<CovAssembly>,
 }}
 {MIRRORS}
 fn status_code(s: &LmStatus) -> i32 {{
@@ -552,6 +555,7 @@ pub extern \"C\" fn {root_sn}_new() -> *mut {handle} {{
     Box::into_raw(Box::new({handle} {{
         model: Default::default(),
         text: CString::default(),
+        cov: None,
     }}))
 }}
 
@@ -624,6 +628,88 @@ pub unsafe extern \"C\" fn {root_sn}_{method}(
             let msg = panic_text(p);
             set_text(hh, &msg);
             (*out).status = -2;
+            -2
+        }}
+    }}
+}}
+"));
+    }
+
+    // Covariance: assemble on the handle, then per-entity marginals.
+    out.push_str(&format!(
+"
+/// mode: 0 = PerQuery, 1 = AllMarginals, 2 = TriDiagonal. Returns 0,
+/// -1 (error, text via {root_sn}_last_error), -2 (panic).
+#[no_mangle]
+pub unsafe extern \"C\" fn {root_sn}_assemble_covariance(h: *mut {handle}, mode: u32) -> i32 {{
+    let hh = &mut *h;
+    let m = match mode {{
+        0 => CovMode::PerQuery,
+        2 => CovMode::TriDiagonal,
+        _ => CovMode::AllMarginals,
+    }};
+    hh.cov = None;
+    match catch_unwind(AssertUnwindSafe(|| hh.model.assemble_covariance(m))) {{
+        Ok(Ok(c)) => {{
+            hh.cov = Some(c);
+            set_text(hh, \"\");
+            0
+        }}
+        Ok(Err(e)) => {{
+            set_text(hh, &format!(\"{{}}\", e));
+            -1
+        }}
+        Err(p) => {{
+            let msg = panic_text(p);
+            set_text(hh, &msg);
+            -2
+        }}
+    }}
+}}
+"));
+    for (tn, t) in surfaced_types(model) {
+        if t.role != "entity" || t.param_count == 0 {
+            continue;
+        }
+        let sn = snake(tn);
+        out.push_str(&format!(
+"
+/// Row-major dim x dim marginal covariance (f64) of one `{tn}`; returns
+/// dim, or -1 (error) / -2 (panic) / -3 (no assembly or buffer too
+/// small), text via {root_sn}_last_error.
+#[no_mangle]
+pub unsafe extern \"C\" fn {sn}_marginal_cov(
+    h: *mut {handle},
+    p: *const {tn},
+    out: *mut f64,
+    cap: u32,
+) -> i32 {{
+    let hh = &mut *h;
+    let Some(cov) = hh.cov.as_ref() else {{
+        set_text(hh, \"marginal_cov: assemble_covariance was not called\");
+        return -3;
+    }};
+    match catch_unwind(AssertUnwindSafe(|| cov.marginal_cov(&*p))) {{
+        Ok(Ok(m)) => {{
+            let dim = m.nrows();
+            if (dim * dim) as u32 > cap {{
+                set_text(hh, \"marginal_cov: buffer too small\");
+                return -3;
+            }}
+            for r in 0..dim {{
+                for c in 0..dim {{
+                    *out.add(r * dim + c) = m[(r, c)];
+                }}
+            }}
+            dim as i32
+        }}
+        Ok(Err(e)) => {{
+            set_text(hh, &format!(\"{{}}\", e));
+            -1
+        }}
+        Err(p2) => {{
+            let msg = panic_text(p2);
+            set_text(hh, &msg);
             -2
         }}
     }}

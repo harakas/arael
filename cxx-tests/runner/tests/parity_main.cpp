@@ -49,6 +49,15 @@ int main() {
         p(name, fit.items()[i].v());
     }
 
+    // Covariance at the solution: the 1x1 marginal of the first item.
+    auto cov = fit.assemble_covariance(CovMode::AllMarginals);
+    pi("cov_ok", cov.is_ok() ? 1 : 0);
+    if (cov.is_ok()) {
+        auto m = cov->marginal(fit.items()[0]);
+        pi("cov_item0_ok", m.is_ok() ? 1 : 0);
+        p("cov_item0", m.value());
+    }
+
     Fit fit2;
     fill(fit2);
     LmResult r2 = fit2.solve_sparse(cfg).value();

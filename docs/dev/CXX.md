@@ -671,13 +671,15 @@ Settled:
    AGREED -- distribution and pipeline integration outweigh slower
    codegen iteration.
 
-7. v1 scope: covariance export, observer callbacks, band solve, and
-   ExtendedModel are OUT (both skins). AGREED. Covariance, observer
-   callbacks, and band solve are PLANNED FOR V2 -- the C ABI should
-   not paint them into a corner (an iteration-callback slot is a
-   function pointer + user data pointer; covariance is a bulk read
-   into a caller buffer; band is `solve_band(cfg, kd)` -- all fit the
-   existing conventions). ExtendedModel: probably never exposed.
+7. v1 scope, revised: COVARIANCE IS IN (pulled forward 2026-07-25) --
+   `assemble_covariance(mode)` stores the CovAssembly on the handle,
+   per-entity `_marginal_cov` bulk-reads into a caller buffer, and the
+   C++ `Covariance` view types the marginals by entity param count
+   (1 -> double, 2/3 -> matrix2d/3d, larger -> raw buffer). Exercised
+   by cxx-tests (exact 1x1 parity vs Rust) and the slam2d demo's
+   95% landmark ellipses. Observer callbacks and band solve stay V2
+   (function pointer + user data; `solve_band(cfg, kd)`).
+   ExtendedModel: probably never exposed.
 8. Python core stays stdlib-only (numpy accepted where sequences are,
    never required). AGREED.
 

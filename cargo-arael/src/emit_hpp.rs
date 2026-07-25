@@ -317,12 +317,73 @@ public:
     explicit {tn}Ref(ffi::{tn}* p) : h_(p) {{}}
     /// False when default-constructed (e.g. inside an empty option).
     bool valid() const {{ return h_ != nullptr; }}
+    /// The underlying C pointer (covariance queries take it).
+    ffi::{tn}* raw() const {{ return h_; }}
 {methods}private:
     ffi::{tn}* h_;
 }};
 
 "));
         done.push(tn.as_str());
+    }
+
+    // Covariance view: typed per-entity marginals (2x2 / 3x3 blocks as
+    // matrix2d / matrix3d, 1x1 as double, larger via a raw buffer).
+    {
+        let mut methods = String::new();
+        cpp.ffi.push_str(&format!(
+            "int32_t {root_sn}_assemble_covariance({root}*, uint32_t);\n"));
+        for (tn, t) in &surfaced {
+            if t.role != "entity" || t.param_count == 0 {
+                continue;
+            }
+            let sn = snake(tn);
+            cpp.ffi.push_str(&format!(
+                "int32_t {sn}_marginal_cov({root}*, const {tn}*, double*, uint32_t);\n"));
+            match t.param_count {
+                1 => methods.push_str(&format!(
+"    result<double, CovError> marginal(const {tn}Ref& e) {{
+        double b[1];
+        if (ffi::{sn}_marginal_cov(h_, e.raw(), b, 1) < 0) return fail<double>();
+        return result<double, CovError>::ok(b[0]);
+    }}\n")),
+                2 => methods.push_str(&format!(
+"    result<matrix2d, CovError> marginal(const {tn}Ref& e) {{
+        double b[4];
+        if (ffi::{sn}_marginal_cov(h_, e.raw(), b, 4) < 0) return fail<matrix2d>();
+        return result<matrix2d, CovError>::ok(
+            matrix2d::from_elements(b[0], b[1], b[2], b[3]));
+    }}\n")),
+                3 => methods.push_str(&format!(
+"    result<matrix3d, CovError> marginal(const {tn}Ref& e) {{
+        double b[9];
+        if (ffi::{sn}_marginal_cov(h_, e.raw(), b, 9) < 0) return fail<matrix3d>();
+        return result<matrix3d, CovError>::ok(matrix3d::from_elements(
+            b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8]));
+    }}\n")),
+                _ => methods.push_str(&format!(
+"    /// Row-major dim x dim into out; returns dim or a negative code.
+    int32_t marginal(const {tn}Ref& e, double* out, uint32_t cap) {{
+        return ffi::{sn}_marginal_cov(h_, e.raw(), out, cap);
+    }}\n")),
+            }
+        }
+        cpp.body.push_str(&format!(
+"/// Covariance prepared at the solution (root.assemble_covariance);
+/// queries answer per-entity marginal blocks. Valid until the model
+/// is dropped or reassembled.
+class Covariance {{
+public:
+    Covariance() : h_(nullptr) {{}}
+    explicit Covariance(ffi::{root}* h) : h_(h) {{}}
+{methods}private:
+    template<class T> result<T, CovError> fail() {{
+        return result<T, CovError>::err({{ffi::{root_sn}_last_error(h_)}});
+    }}
+    ffi::{root}* h_;
+}};
+
+"));
     }
 
     // Root class: views + field methods + solve surface.
@@ -408,6 +469,18 @@ struct SolveError {{
 
 using SolveResult = result<LmResult, SolveError>;
 
+/// How much covariance to prepare (mirrors arael's CovMode).
+enum class CovMode : uint32_t {{
+    PerQuery = 0,
+    AllMarginals = 1,
+    TriDiagonal = 2,
+}};
+
+/// A failed covariance operation; message points at last_error().
+struct CovError {{
+    const char* message;
+}};
+
 {ref_decls}
 namespace ffi {{
 {opaque_decls}
@@ -447,6 +520,13 @@ public:
         int32_t code = ffi::{root_sn}_solve_sparse(h_, &cfg, &r);
         if (code >= 0) return SolveResult::ok(r);
         return SolveResult::err({{static_cast<LmStatus>(code), last_error()}});
+    }}
+    /// Prepare the covariance at the current (solved) parameters; query
+    /// per-entity marginals on the returned view.
+    result<Covariance, CovError> assemble_covariance(CovMode mode = CovMode::AllMarginals) {{
+        if (ffi::{root_sn}_assemble_covariance(h_, uint32_t(mode)) != 0)
+            return result<Covariance, CovError>::err({{last_error()}});
+        return result<Covariance, CovError>::ok(Covariance(h_));
     }}
     /// Empty string when the model is clean, the Diagnostic text
     /// otherwise. The returned pointer is valid until the next call on

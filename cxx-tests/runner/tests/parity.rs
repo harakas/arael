@@ -127,6 +127,16 @@ fn cxx_interface_matches_rust_exactly() {
     assert!((fit.m.value - 2.0).abs() < 0.05, "m {}", fit.m.value);
     assert!((fit.c.value - 1.0).abs() < 0.1, "c {}", fit.c.value);
 
+    // Covariance parity: same assembly, same marginal, exact.
+    {
+        use arael::covariance::{CovMode, Covariance};
+        let cov = fit.assemble_covariance(CovMode::AllMarginals).unwrap();
+        let m = cov.marginal_cov(&fit.items[0]).unwrap();
+        assert_eq!(g("cov_ok"), 1.0);
+        assert_eq!(g("cov_item0_ok"), 1.0);
+        assert_eq!(g("cov_item0"), m[(0, 0)]);
+    }
+
     let mut fit2 = Fit::default();
     fill(&mut fit2);
     let r2 = fit2.solve_sparse(&cfg).unwrap();

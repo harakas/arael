@@ -64,6 +64,18 @@ struct SolveError {
 
 using SolveResult = result<LmResult, SolveError>;
 
+/// How much covariance to prepare (mirrors arael's CovMode).
+enum class CovMode : uint32_t {
+    PerQuery = 0,
+    AllMarginals = 1,
+    TriDiagonal = 2,
+};
+
+/// A failed covariance operation; message points at last_error().
+struct CovError {
+    const char* message;
+};
+
 /// Typed handle into the collection that issued it.
 struct Ref_GpsObs { uint32_t raw; };
 /// Typed handle into the collection that issued it.
@@ -126,6 +138,9 @@ vect3d tie_d(const Tie*);
 void tie_set_d(Tie*, vect3d);
 double tie_w(const Tie*);
 void tie_set_w(Tie*, double);
+int32_t fit_assemble_covariance(Fit*, uint32_t);
+int32_t n_marginal_cov(Fit*, const N*, double*, uint32_t);
+int32_t pose_marginal_cov(Fit*, const Pose*, double*, uint32_t);
 double fit_m(const Fit*);
 void fit_set_m(Fit*, double);
 bool fit_m_optimize(const Fit*);
@@ -173,6 +188,8 @@ public:
     explicit GpsObsRef(ffi::GpsObs* p) : h_(p) {}
     /// False when default-constructed (e.g. inside an empty option).
     bool valid() const { return h_ != nullptr; }
+    /// The underlying C pointer (covariance queries take it).
+    ffi::GpsObs* raw() const { return h_; }
     vect3d pos() const { return ffi::gps_obs_pos(h_); }
     void set_pos(vect3d v) { ffi::gps_obs_set_pos(h_, v); }
     float isigma() const { return ffi::gps_obs_isigma(h_); }
@@ -188,6 +205,8 @@ public:
     explicit InfoRef(ffi::Info* p) : h_(p) {}
     /// False when default-constructed (e.g. inside an empty option).
     bool valid() const { return h_ != nullptr; }
+    /// The underlying C pointer (covariance queries take it).
+    ffi::Info* raw() const { return h_; }
     bool has_gps() const { return ffi::info_has_gps(h_); }
     GpsObsRef make_gps() { return GpsObsRef(ffi::info_make_gps(h_)); }
     void clear_gps() { ffi::info_clear_gps(h_); }
@@ -207,6 +226,8 @@ public:
     explicit NRef(ffi::N* p) : h_(p) {}
     /// False when default-constructed (e.g. inside an empty option).
     bool valid() const { return h_ != nullptr; }
+    /// The underlying C pointer (covariance queries take it).
+    ffi::N* raw() const { return h_; }
     double v() const { return ffi::n_v(h_); }
     void set_v(double v) { ffi::n_set_v(h_, v); }
     bool v_optimize() const { return ffi::n_v_optimize(h_); }
@@ -226,6 +247,8 @@ public:
     explicit ObsRef(ffi::Obs* p) : h_(p) {}
     /// False when default-constructed (e.g. inside an empty option).
     bool valid() const { return h_ != nullptr; }
+    /// The underlying C pointer (covariance queries take it).
+    ffi::Obs* raw() const { return h_; }
     double x() const { return ffi::obs_x(h_); }
     void set_x(double v) { ffi::obs_set_x(h_, v); }
     double y() const { return ffi::obs_y(h_); }
@@ -241,6 +264,8 @@ public:
     explicit PoseRef(ffi::Pose* p) : h_(p) {}
     /// False when default-constructed (e.g. inside an empty option).
     bool valid() const { return h_ != nullptr; }
+    /// The underlying C pointer (covariance queries take it).
+    ffi::Pose* raw() const { return h_; }
     vect3d ea() const { return ffi::pose_ea(h_); }
     void set_ea(vect3d v) { ffi::pose_set_ea(h_, v); }
     bool ea_optimize() const { return ffi::pose_ea_optimize(h_); }
@@ -263,6 +288,8 @@ public:
     explicit TieRef(ffi::Tie* p) : h_(p) {}
     /// False when default-constructed (e.g. inside an empty option).
     bool valid() const { return h_ != nullptr; }
+    /// The underlying C pointer (covariance queries take it).
+    ffi::Tie* raw() const { return h_; }
     Ref_Pose a() const { return Ref_Pose{ffi::tie_a(h_)}; }
     void set_a(Ref_Pose r) { ffi::tie_set_a(h_, r.raw); }
     Ref_Pose b() const { return Ref_Pose{ffi::tie_b(h_)}; }
@@ -273,6 +300,29 @@ public:
     void set_w(double v) { ffi::tie_set_w(h_, v); }
 private:
     ffi::Tie* h_;
+};
+
+/// Covariance prepared at the solution (root.assemble_covariance);
+/// queries answer per-entity marginal blocks. Valid until the model
+/// is dropped or reassembled.
+class Covariance {
+public:
+    Covariance() : h_(nullptr) {}
+    explicit Covariance(ffi::Fit* h) : h_(h) {}
+    result<double, CovError> marginal(const NRef& e) {
+        double b[1];
+        if (ffi::n_marginal_cov(h_, e.raw(), b, 1) < 0) return fail<double>();
+        return result<double, CovError>::ok(b[0]);
+    }
+    /// Row-major dim x dim into out; returns dim or a negative code.
+    int32_t marginal(const PoseRef& e, double* out, uint32_t cap) {
+        return ffi::pose_marginal_cov(h_, e.raw(), out, cap);
+    }
+private:
+    template<class T> result<T, CovError> fail() {
+        return result<T, CovError>::err({ffi::fit_last_error(h_)});
+    }
+    ffi::Fit* h_;
 };
 
 /// `Fit.obs`. std::vec::Vec storage: pushes may MOVE elements -- re-fetch element refs after a push.
@@ -384,6 +434,13 @@ public:
         int32_t code = ffi::fit_solve_sparse(h_, &cfg, &r);
         if (code >= 0) return SolveResult::ok(r);
         return SolveResult::err({static_cast<LmStatus>(code), last_error()});
+    }
+    /// Prepare the covariance at the current (solved) parameters; query
+    /// per-entity marginals on the returned view.
+    result<Covariance, CovError> assemble_covariance(CovMode mode = CovMode::AllMarginals) {
+        if (ffi::fit_assemble_covariance(h_, uint32_t(mode)) != 0)
+            return result<Covariance, CovError>::err({last_error()});
+        return result<Covariance, CovError>::ok(Covariance(h_));
     }
     /// Empty string when the model is clean, the Diagnostic text
     /// otherwise. The returned pointer is valid until the next call on

@@ -5,14 +5,17 @@
 use std::ffi::CString;
 use std::os::raw::c_char;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use arael::covariance::{CovAssembly, CovMode, Covariance};
 use arael::simple_lm::{LmConfig, LmProblem, LmStatus};
 use cxx_fit::{Fit, GpsObs, Info, N, Obs, Pose, Tie};
 
-/// The opaque handle the C ABI hands out: the model plus the error /
-/// diagnostic text buffer `last_error` points into.
+/// The opaque handle the C ABI hands out: the model, the error /
+/// diagnostic text buffer `last_error` points into, and the covariance
+/// assembly once requested.
 pub struct FitHandle {
     model: Fit,
     text: CString,
+    cov: Option<CovAssembly>,
 }
 
 macro_rules! c_vec2 {
@@ -183,6 +186,7 @@ pub extern "C" fn fit_new() -> *mut FitHandle {
     Box::into_raw(Box::new(FitHandle {
         model: Default::default(),
         text: CString::default(),
+        cov: None,
     }))
 }
 
@@ -292,6 +296,117 @@ pub unsafe extern "C" fn fit_solve_sparse(
             let msg = panic_text(p);
             set_text(hh, &msg);
             (*out).status = -2;
+            -2
+        }
+    }
+}
+
+/// mode: 0 = PerQuery, 1 = AllMarginals, 2 = TriDiagonal. Returns 0,
+/// -1 (error, text via fit_last_error), -2 (panic).
+#[no_mangle]
+pub unsafe extern "C" fn fit_assemble_covariance(h: *mut FitHandle, mode: u32) -> i32 {
+    let hh = &mut *h;
+    let m = match mode {
+        0 => CovMode::PerQuery,
+        2 => CovMode::TriDiagonal,
+        _ => CovMode::AllMarginals,
+    };
+    hh.cov = None;
+    match catch_unwind(AssertUnwindSafe(|| hh.model.assemble_covariance(m))) {
+        Ok(Ok(c)) => {
+            hh.cov = Some(c);
+            set_text(hh, "");
+            0
+        }
+        Ok(Err(e)) => {
+            set_text(hh, &format!("{}", e));
+            -1
+        }
+        Err(p) => {
+            let msg = panic_text(p);
+            set_text(hh, &msg);
+            -2
+        }
+    }
+}
+
+/// Row-major dim x dim marginal covariance (f64) of one `N`; returns
+/// dim, or -1 (error) / -2 (panic) / -3 (no assembly or buffer too
+/// small), text via fit_last_error.
+#[no_mangle]
+pub unsafe extern "C" fn n_marginal_cov(
+    h: *mut FitHandle,
+    p: *const N,
+    out: *mut f64,
+    cap: u32,
+) -> i32 {
+    let hh = &mut *h;
+    let Some(cov) = hh.cov.as_ref() else {
+        set_text(hh, "marginal_cov: assemble_covariance was not called");
+        return -3;
+    };
+    match catch_unwind(AssertUnwindSafe(|| cov.marginal_cov(&*p))) {
+        Ok(Ok(m)) => {
+            let dim = m.nrows();
+            if (dim * dim) as u32 > cap {
+                set_text(hh, "marginal_cov: buffer too small");
+                return -3;
+            }
+            for r in 0..dim {
+                for c in 0..dim {
+                    *out.add(r * dim + c) = m[(r, c)];
+                }
+            }
+            dim as i32
+        }
+        Ok(Err(e)) => {
+            set_text(hh, &format!("{}", e));
+            -1
+        }
+        Err(p2) => {
+            let msg = panic_text(p2);
+            set_text(hh, &msg);
+            -2
+        }
+    }
+}
+
+/// Row-major dim x dim marginal covariance (f64) of one `Pose`; returns
+/// dim, or -1 (error) / -2 (panic) / -3 (no assembly or buffer too
+/// small), text via fit_last_error.
+#[no_mangle]
+pub unsafe extern "C" fn pose_marginal_cov(
+    h: *mut FitHandle,
+    p: *const Pose,
+    out: *mut f64,
+    cap: u32,
+) -> i32 {
+    let hh = &mut *h;
+    let Some(cov) = hh.cov.as_ref() else {
+        set_text(hh, "marginal_cov: assemble_covariance was not called");
+        return -3;
+    };
+    match catch_unwind(AssertUnwindSafe(|| cov.marginal_cov(&*p))) {
+        Ok(Ok(m)) => {
+            let dim = m.nrows();
+            if (dim * dim) as u32 > cap {
+                set_text(hh, "marginal_cov: buffer too small");
+                return -3;
+            }
+            for r in 0..dim {
+                for c in 0..dim {
+                    *out.add(r * dim + c) = m[(r, c)];
+                }
+            }
+            dim as i32
+        }
+        Ok(Err(e)) => {
+            set_text(hh, &format!("{}", e));
+            -1
+        }
+        Err(p2) => {
+            let msg = panic_text(p2);
+            set_text(hh, &msg);
             -2
         }
     }
