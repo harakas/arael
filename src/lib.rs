@@ -27,7 +27,7 @@
 //! - [Parameter Covariance](#parameter-covariance)
 //! - [Instrumentation & Debugging](#instrumentation--debugging)
 //! - [2D Sketch Editor](#2d-sketch-editor)
-//! - [Starship robust error suppression](#starship-robust-error-suppression)
+//! - [Robustness and loss functions](#robustness-and-loss-functions)
 //! - [Example: Localization](#example-localization)
 //! - [Examples](#examples)
 //! - [Crate structure](#crate-structure)
@@ -57,6 +57,10 @@
 //!   `SchurPolicy` overrides
 //! - **Indexed sparse assembly** -- precomputed position lists for
 //!   zero-overhead hessian assembly after first iteration
+//! - **Precomputed rotations** -- every rotation param caches its rotation
+//!   matrix and the matrix's Jacobian once per linearization; constraints
+//!   that differentiate through a rotation read them as constants instead
+//!   of rebuilding them per observation
 //! - **Warm re-solve** -- `LmSession` keeps what a solve learns about the
 //!   problem's structure (pattern, ordering, symbolic factorization) so
 //!   repeated solves of the same problem skip the analysis
@@ -1454,30 +1458,6 @@
 //! value each pass -- the constraint body reads the current value, so
 //! the sigma you see is always the sigma in effect.
 //!
-//! ## Block-level loss
-//!
-//! The Starship wrapper is applied to each residual element by hand. A
-//! `loss` modifier robustifies the whole residual block instead: it
-//! takes the squared norm `s = |r|^2` and replaces it with `rho(s)`,
-//! scaling the block's gradient and Hessian by the weight `rho'(s)`.
-//!
-//! ```ignore
-//! #[arael(constraint(hb, loss = |s| loss_geman_mcclure(s, self.c2), {
-//!     [(obs.u - proj.u) * obs.iw, (obs.v - proj.v) * obs.iw]
-//! }))]
-//! ```
-//!
-//! The closure argument is the block squared norm; the scale (`k2`,
-//! `c2`) is SQUARED, in the same chi-square units as `s` -- an inlier
-//! threshold like the chi-square quantile 7.815 goes in unchanged.
-//! Kernels `loss_geman_mcclure`, `loss_cauchy`, `loss_huber`, and
-//! `loss_tukey` ship, or write any differentiable expression
-//! (`|s| s` is plain least squares). Unlike
-//! the per-element wrapper this is a standard M-estimator: the
-//! down-weighting depends only on the block norm, so it is invariant to
-//! the residual axis orientation. Scaling by `rho'(s)` keeps the Hessian
-//! positive semidefinite. Formulas in `docs/SYM.md`.
-//!
 //! # Parameter Covariance
 //!
 //! After a solve, recover the covariance of the estimated parameters,
@@ -1819,30 +1799,21 @@
 //!
 //! ![Dark mode](https://raw.githubusercontent.com/harakas/arael/refs/heads/master/arael-sketch/docs/dark.png)
 //!
-//! # Starship robust error suppression
-//!
-//! Wrapping a residual $r$ in $\gamma \arctan(r / \gamma)$ is
-//! the **Starship method**
-//! ([US Patent 12,346,118](https://patents.google.com/patent/US12346118))
-//! -- a way to cap how much a single outlier can move the optimum without
-//! losing smooth differentiability. This section explains what it does and
-//! why.
-//!
-//! ## Setup
+//! # Robustness and loss functions
 //!
 //! Given sensor readings stacked into a vector $L$, model parameters $M$
 //! (poses, landmarks, etc.), and a prediction $\mu(M)$ of what the sensors
-//! should report given $M$, Bayesian inference with
-//! $L \mid M \sim \mathcal{N}(\mu(M), K_L)$ -- where $K_L$ is the sensor
-//! covariance matrix -- leads to minimising the sum
+//! should report given $M$, Bayesian inference with $L \mid M \sim
+//! \mathcal{N}(\mu(M), K_L)$ -- where $K_L$ is the sensor covariance
+//! matrix -- leads to minimising the sum
 //!
 //! $$
 //! S(M) = (L - \mu(M))^T K_L^{-1} (L - \mu(M)).
 //! $$
 //!
-//! **Whitening.** Diagonalising $K_L = R D R^T$ and substituting
-//! $L^D = R^T L$, $G(M) = R^T \mu(M)$ turns the quadratic form into a
-//! plain sum of squares in units of standard deviations:
+//! **Whitening.** Diagonalising $K_L = R D R^T$ and substituting $L^D =
+//! R^T L$, $G(M) = R^T \mu(M)$ turns the quadratic form into a plain sum
+//! of squares in units of standard deviations:
 //!
 //! $$
 //! S(M) = \sum_i r_i^2, \qquad r_i = \frac{L_i^D - G_i(M)}{\sigma_i}.
@@ -1851,27 +1822,66 @@
 //! The solver minimises $S(M)$ (the Gauss-Newton / LM step), and every
 //! inner term $r_i$ is dimensionless -- a pure sigma count.
 //!
-//! ## The outlier problem
+//! Each $r_i^2$ grows as the *square* of the measurement error. With
+//! proper covariances and no outliers a typical $|r_i|$ sits around $1$
+//! (the whitening divides by the noise scale, so inliers cluster near
+//! unity), and $\mathbb{E}[r_i^2] = 1$ per residual. A single bad
+//! association at $10\sigma$ already contributes $100$ to the sum; at
+//! $30\sigma$ it contributes $900$. A handful of bad measurements drown
+//! out the signal from hundreds of good ones and pull the optimum off.
 //!
-//! Each $r_i^2$ grows as the *square* of the measurement error. With proper
-//! covariances and no outliers a typical $|r_i|$ sits around $1$ (the
-//! whitening divides by the noise scale, so inliers cluster near unity),
-//! and $\mathbb{E}[r_i^2] = 1$ per residual. A single bad association at
-//! $10\sigma$ already contributes $100$ to the sum; at $30\sigma$ it
-//! contributes $900$. A handful of bad measurements drown out the signal
-//! from hundreds of good ones and pull the optimum off.
+//! Two mechanisms address this, freely combined per constraint: a block-
+//! level M-estimator loss attached to the constraint, and the per-element
+//! Starship wrapper written directly into the residual expression.
+//!
+//! ## Block-level loss
+//!
+//! A `loss` modifier on a constraint robustifies the whole residual block
+//! at once: it takes the squared norm $s = \lVert r \rVert^2$ and replaces
+//! it with $\rho(s)$, scaling the block's gradient and Hessian by the
+//! weight $\rho'(s)$.
+//!
+//! ```ignore
+//! #[arael(constraint(hb, loss = |s| loss_geman_mcclure(s, self.c2), {
+//!     [(obs.u - proj.u) * obs.iw, (obs.v - proj.v) * obs.iw]
+//! }))]
+//! ```
+//!
+//! The closure argument is the block squared norm; the scale (`k2`, `c2`)
+//! is squared, in the same chi-square units as `s` -- an inlier threshold
+//! like the chi-square quantile 7.815 goes in unchanged. Four kernels ship
+//! (`loss_geman_mcclure`, `loss_cauchy`, `loss_huber`, `loss_tukey`), or
+//! write any differentiable expression -- `|s| s` is plain least squares.
+//! Unlike the per-element Starship wrapper (next subsection) this is a
+//! standard M-estimator: the down-weighting depends only on the block
+//! norm, so it is invariant to how the residual axes are oriented. Scaling
+//! by $\rho'(s)$ keeps the Hessian positive semidefinite. See
+//! `docs/SYM.md` for the kernel formulas.
+//!
+//! `examples/slam_demo_gm.rs` is the worked showcase: a visual SLAM
+//! problem with 50% wrong feature associations, carried by a Geman-McClure
+//! block loss on the feature and GPS residuals (`--loss cauchy` switches
+//! the kernel).
+//!
+//! ## Starship robust error suppression
+//!
+//! Wrapping a residual $r$ in $\gamma \arctan(r / \gamma)$ is the
+//! **Starship method** ([US Patent
+//! 12,346,118](https://patents.google.com/patent/US12346118)) -- a way to
+//! cap how much a single outlier can move the optimum without losing
+//! smooth differentiability. This section explains what it does and why.
 //!
 //! The usual robust-loss fixes -- L1 ($|r|$) and Huber (quadratic near
 //! zero, linear past a threshold) -- replace $r^2$ with something that
 //! grows slower than quadratically, which limits but does not cap each
 //! residual's contribution; a single very bad outlier can still pull the
 //! solution. Their derivatives are also awkward: L1 has a kink at $r = 0$
-//! (undefined derivative there), Huber has a kink at the
-//! quadratic-to-linear transition (continuous but not smooth), and
-//! Gauss-Newton wants a smooth Jacobian. We want a loss that is both
-//! fully bounded and smooth everywhere.
+//! (undefined derivative there), Huber has a kink at the quadratic-to-
+//! linear transition (continuous but not smooth), and Gauss-Newton wants a
+//! smooth Jacobian. We want a loss that is both fully bounded and smooth
+//! everywhere.
 //!
-//! ## The cap
+//! ### The cap
 //!
 //! We look for a function $\alpha(x)$ that behaves like $x$ in the normal
 //! range but saturates for large inputs, so that $\alpha(x)^2$ contributes
@@ -1881,15 +1891,13 @@
 //! A clean choice is
 //!
 //! $$
-//! \alpha(x) = \gamma \arctan\frac{x}{\gamma}, \qquad
-//! \gamma = \frac{2 \sqrt{\Delta S_{\max}}}{\pi}.
+//! \alpha(x) = \gamma \arctan\frac{x}{\gamma}, \qquad \gamma = \frac{2 \sqrt{\Delta S_{\max}}}{\pi}.
 //! $$
 //!
-//! The $\gamma$ value follows from the saturation requirement: as
-//! $|x| \to \infty$, $\arctan(x/\gamma) \to \pm \pi/2$, so
-//! $\alpha(x)^2 \to (\gamma \pi / 2)^2$; setting that equal to
-//! $\Delta S_{\max}$ and solving gives the $\gamma$ above. Three further
-//! properties fall out:
+//! The $\gamma$ value follows from the saturation requirement: as $|x| \to
+//! \infty$, $\arctan(x/\gamma) \to \pm \pi/2$, so $\alpha(x)^2 \to (\gamma
+//! \pi / 2)^2$; setting that equal to $\Delta S_{\max}$ and solving gives
+//! the $\gamma$ above. Three further properties fall out:
 //!
 //! - $\alpha(x) \approx x$ for $|x| \sim 1$ -- small residuals pass
 //!   through unchanged.
@@ -1902,24 +1910,23 @@
 //!
 //! Left: $\alpha(x)$ (green) bends away from the identity $x$ (purple)
 //! once $|x|$ moves past a few sigmas. Right: the *squared* contribution
-//! -- the unbounded $x^2$ parabola vs the saturating $\alpha(x)^2$,
-//! capped at $\Delta S_{\max}$. The cap is also smooth; Gauss-Newton
-//! still sees a well-defined Jacobian everywhere.
+//! -- the unbounded $x^2$ parabola vs the saturating $\alpha(x)^2$, capped
+//! at $\Delta S_{\max}$. The cap is also smooth; Gauss-Newton still sees a
+//! well-defined Jacobian everywhere.
 //!
-//! ## Using it
+//! ### Using it
 //!
 //! Replace each $r_i$ in the sum with $\alpha(r_i)$:
 //!
 //! $$
-//! \hat{S}(M) = \sum_i \alpha(r_i)^2
-//! = \sum_i \left[ \gamma \arctan\frac{L_i^D - G_i(M)}{\gamma \sigma_i} \right]^2.
+//! \hat{S}(M) = \sum_i \alpha(r_i)^2 = \sum_i \left[ \gamma \arctan\frac{L_i^D - G_i(M)}{\gamma \sigma_i} \right]^2.
 //! $$
 //!
 //! In practice $\Delta S_{\max}$ in the range $[10, 25]$ (so $\gamma$
 //! between roughly $2$ and $3$) suppresses genuine outliers hard without
-//! biasing inlier-dominated regions. Since residuals are already
-//! sigma-scaled, this corresponds roughly to saying "residuals past $3$
-//! to $5\sigma$ stop mattering".
+//! biasing inlier-dominated regions. Since residuals are already sigma-
+//! scaled, this corresponds roughly to saying "residuals past $3$ to
+//! $5\sigma$ stop mattering".
 //!
 //! In arael this is exactly what you see in the demo constraint bodies:
 //!
@@ -1939,18 +1946,41 @@
 //! that linearisation suggests. For any loss, you need a starting $M_0$
 //! close enough to the optimum that the linearisation is informative.
 //!
-//! Starship makes this requirement stricter. The gradient falls off as
-//! $\alpha'(r) = 1 / (1 + \pi^2 r^2 / (4 \Delta S_{\max}))$, so at the
-//! recommended $\Delta S_{\max} = 25$ a residual at $5\sigma$ still
-//! carries about 29% of its least-squares pull and a $10\sigma$ residual
-//! about 9% -- still usable. Once you get out to $20\sigma$ and beyond
-//! it drops under 3% and those residuals are effectively frozen. If
-//! $M_0$ puts many residuals that far out, the solver has nothing to
-//! work with and stalls. The usual remedy is **graduated optimisation**:
-//! start with a large $\Delta S_{\max}$ (loose cap, everything in the
-//! informative regime), solve, then shrink it across passes down to the
-//! target value. The SLAM demo does this via a `frine_isigma_scale`
-//! field stepped per pass.
+//! Every robustifier makes this requirement stricter -- that is its
+//! purpose. The redescending block kernels (Geman-McClure, Tukey) and the
+//! Starship cap all shrink the gradient of far-out residuals; for Starship
+//! it falls off as $\alpha'(r) = 1 / (1 + \pi^2 r^2 / (4 \Delta
+//! S_{\max}))$, so at the recommended $\Delta S_{\max} = 25$ a residual at
+//! $5\sigma$ still carries about 29% of its least-squares pull and a
+//! $10\sigma$ residual about 9% -- still usable. Once you get out to
+//! $20\sigma$ and beyond it drops under 3% and those residuals are
+//! effectively frozen. If $M_0$ puts many residuals that far out --
+//! outliers by position, not by nature -- the solver has nothing to work
+//! with and stalls, whichever mechanism is doing the suppression.
+//!
+//! The usual remedy is **graduated optimisation**: start with the
+//! suppression loose (everything in the informative regime), solve, then
+//! tighten across passes down to the target. The SLAM demos do this via a
+//! `frine_isigma_scale` field stepped per pass -- `slam_demo` with the
+//! per-element wrapper, `slam_demo_gm` with the block loss (re-
+//! snapshotting landmark anchors between passes).
+//!
+//! ## What loss function should I use?
+//!
+//! Whichever works on your data -- there is no universally best kernel.
+//! The shipped kernels and the Starship wrapper differ in how hard they
+//! redescend, and the right choice depends on the contamination level, the
+//! residual dimensionality, and how good the initial guess is; the scale
+//! (`c2`, `gamma`) matters as much as the kernel itself. So experiment:
+//! kernels are one-line changes (and `branch()` switches them at runtime
+//! -- `slam_demo_gm --loss gm|cauchy` does exactly that), and measurements
+//! beat folklore.
+//!
+//! A loss is also not the whole story: pruning bad measurements outright
+//! (gating by residual, dropping associations that fail a validity check)
+//! and good initial conditions carry as much weight in reaching a good
+//! solution as the loss does. A robustifier can only down-weight what the
+//! initialisation puts within its reach.
 //!
 //! # Example: Localization
 //!
