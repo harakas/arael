@@ -34,6 +34,7 @@
 
 mod constraint;
 mod function;
+mod sidecar;
 
 use std::collections::{HashSet, HashMap};
 use std::sync::Mutex;
@@ -62,7 +63,7 @@ enum SymFieldType {
     Skip,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Default)]
 struct SymLayout {
     fields: Vec<(String, SymFieldType)>,
     /// Field names that are Vec/Deque/Arena collections of a struct. A
@@ -129,6 +130,12 @@ struct SymLayout {
     /// type that registers later yet is reachable from this root -- its
     /// constraints were silently dropped.
     is_root: bool,
+    /// Every declared field with its type spelling as written (normalized
+    /// whitespace), in declaration order. `fields` collapses data types
+    /// (`f64` / `bool` / `String` all read as Scalar or Struct), so this
+    /// is what the JSON sidecar emits for interface generators that need
+    /// real types. Injected fields (euler rotation caches) are absent.
+    spelled_types: Vec<(String, String)>,
 }
 
 /// Total optimizable scalars of a registered type, following
@@ -467,13 +474,7 @@ fn builtin_component_layout(name: &str) -> Option<SymLayout> {
                 ("translation_dw".to_string(), "translation".to_string(), "w".to_string()),
             ],
             component: true,
-            constraint_index_field: None,
-            self_block_field: None,
-            suspect_wrappers: Vec::new(),
-            block_precision: None,
-            inst_precisions: Vec::new(),
-            triplet_block_fields: Vec::new(),
-            is_root: false,
+            ..Default::default()
         }),
         "UnitVecParam" | "UnitVecParamF" => Some(SymLayout {
             fields: vec![
@@ -500,13 +501,7 @@ fn builtin_component_layout(name: &str) -> Option<SymLayout> {
                 ("unit_d".to_string(), "unit".to_string(), "d".to_string()),
             ],
             component: true,
-            constraint_index_field: None,
-            self_block_field: None,
-            suspect_wrappers: Vec::new(),
-            block_precision: None,
-            inst_precisions: Vec::new(),
-            triplet_block_fields: Vec::new(),
-            is_root: false,
+            ..Default::default()
         }),
         _ => None,
     }
@@ -1240,6 +1235,7 @@ fn register_model_layout(input: &syn::DeriveInput) -> syn::Result<u32> {
     let mut block_precision_reg: Option<(String, String)> = None;
     let mut inst_precisions_reg: Vec<(String, String, String)> = Vec::new();
     let mut triplet_block_fields_reg: Vec<String> = Vec::new();
+    let mut spelled_types_reg: Vec<(String, String)> = Vec::new();
     let mut constraint_index_field_reg: Option<String> = None;
     // Detect SelfBlock<Self> field — this struct's canonical grad+diag home.
     let mut self_block_field_reg: Option<String> = None;
@@ -1255,6 +1251,7 @@ fn register_model_layout(input: &syn::DeriveInput) -> syn::Result<u32> {
     }
     for field in fields {
         let field_name = field.ident.as_ref().unwrap().to_string();
+        spelled_types_reg.push((field_name.clone(), type_spelling(&field.ty)));
         // Check for #[arael(ref = ...)] or #[arael(constraint_index)] on this field
         if let Ok(Some(attr)) = parse_arael_attr(&field.attrs) {
             match attr {
@@ -1483,6 +1480,7 @@ fn register_model_layout(input: &syn::DeriveInput) -> syn::Result<u32> {
         inst_precisions: inst_precisions_reg,
         triplet_block_fields: triplet_block_fields_reg,
         is_root: has_struct_attr_ident(&input.attrs, "root"),
+        spelled_types: spelled_types_reg,
     }).map_err(|msg| syn::Error::new_spanned(name, msg))?;
 
     Ok(param_count)
@@ -1495,25 +1493,8 @@ fn register_model_layout(input: &syn::DeriveInput) -> syn::Result<u32> {
 /// this type find an entry (important if the enum is ever used as a
 /// nested struct field type in constraint bodies).
 fn register_enum_layout(name: &syn::Ident) -> syn::Result<()> {
-    registry_store(&name.to_string(), SymLayout {
-        fields: Vec::new(),
-        collection_fields: Vec::new(),
-        param_fields: Vec::new(),
-        ref_paths: Vec::new(),
-        euler_angle_fields: Vec::new(),
-        universal_euler_angle_fields: Vec::new(),
-        universal_rotvec_fields: Vec::new(),
-        symbolic_fields: Vec::new(),
-        deriv_fields: Vec::new(),
-        component: false,
-        constraint_index_field: None,
-        self_block_field: None,
-        suspect_wrappers: Vec::new(),
-        block_precision: None,
-        inst_precisions: Vec::new(),
-        triplet_block_fields: Vec::new(),
-        is_root: false,
-    }).map_err(|msg| syn::Error::new_spanned(name, msg))
+    registry_store(&name.to_string(), SymLayout::default())
+        .map_err(|msg| syn::Error::new_spanned(name, msg))
 }
 
 fn emit_trivial_model_for_enum(input: &mut syn::DeriveInput) -> syn::Result<TokenStream2> {
@@ -2590,6 +2571,18 @@ fn is_sym_skip_type(ty: &syn::Type) -> bool {
             return matches!(name.as_str(), "Vec" | "Deque" | "Arena");
         }
     false
+}
+
+/// A type's spelling as written, with token-stream whitespace removed
+/// around `::`, `<`, `>` and after commas: `refs :: Vec < Pose >` reads
+/// back as `refs::Vec<Pose>`. Recorded per field for the JSON sidecar.
+fn type_spelling(ty: &syn::Type) -> String {
+    quote! { #ty }.to_string()
+        .replace(" :: ", "::")
+        .replace(" < ", "<")
+        .replace(" > ", ">")
+        .replace(" >", ">")
+        .replace(" ,", ",")
 }
 
 /// Names that can never be a registered model type -- filtered out of

@@ -2833,6 +2833,18 @@ pub fn generate_root_methods(
         }
     }
 
+    // JSON model sidecar for interface generators (docs/SIDECAR.md),
+    // emitted here because the registry and the reachable set are
+    // complete for this root. Env-gated: `cargo arael export` sets the
+    // variable; manual use is `ARAEL_SIDECAR_DIR=out cargo build`.
+    if let Ok(dir) = std::env::var("ARAEL_SIDECAR_DIR") {
+        let mut sorted: Vec<String> = reachable.iter().cloned().collect();
+        sorted.sort();
+        crate::sidecar::emit(&dir, &root_name.to_string(), precision, &sorted)
+            .map_err(|e| syn::Error::new(root_name.span(),
+                format!("arael sidecar: {}", e)))?;
+    }
+
     // Count constraint attributes per struct (for default label naming).
     let mut attr_count_per_struct: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
     for sc in &stashed {
@@ -6838,16 +6850,7 @@ mod nested_path_tests {
         SymLayout {
             fields: fields.iter().map(|(n, t)| (n.to_string(), t.clone())).collect(),
             collection_fields: collections.iter().map(|s| s.to_string()).collect(),
-            param_fields: Vec::new(),
-            ref_paths: Vec::new(),
-            euler_angle_fields: Vec::new(),
-            universal_euler_angle_fields: Vec::new(),
-            universal_rotvec_fields: Vec::new(),
-            symbolic_fields: Vec::new(),
-            deriv_fields: Vec::new(),
-            component: false,
-            constraint_index_field: None,
-            self_block_field: None,
+            ..Default::default()
         }
     }
 
