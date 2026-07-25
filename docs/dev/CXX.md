@@ -617,11 +617,18 @@ Remaining stage-4/5 padding: end-to-end tests for universal/rotvec
 rotation params, Transform/UnitVec builtins, user components,
 entity-owned collections, f32 roots; multi-root capi generation.
 
-**Stage 5 -- build glue, docs, example.**
-`emit_cmake` (the self-contained CMakeLists + IMPORTED target),
-vendored-header copying, a cmake-gated integration test; `docs/CXX.md`
-user documentation (terse, plain English); a committed C++ example
-(curve fit or small PGO); README mention.
+**Stage 5 -- build glue, docs, example. [DONE 2026-07-25]**
+`emit_cmake`: a self-contained generated `cxx/CMakeLists.txt` --
+`add_custom_target` running cargo (cargo is its own dependency
+tracker), an IMPORTED staticlib with interface include dirs and
+platform link libs, exposed as `arael::<crate>`; guarded `project()`
+so it works standalone and under `add_subdirectory`. The cmake-gated
+integration test drives it exactly as a consumer: configure the
+checked-in `cmake_consumer` project (whose main.cpp is the readable
+curve-fit example) against the generated tree, `cmake --build` (which
+runs cargo), execute the smoke, verify the fit. Skips without cmake
+or a C++ compiler. `docs/CXX.md` user documentation written;
+README + lib.rs feature bullets and Project Structure entries added.
 
 **Stage 6 -- Python backend.**
 `emit_py` over the same IR; ctypes module, properties, AraelError,

@@ -80,10 +80,53 @@ arael = {arael_dep}
 ",
         root = model.root);
 
+    let lib_ident = format!("{}_capi", rust_ident);
+    let target = rust_ident.clone();
+    let cmake = format!(
+"# {MARKER}: build glue for the `{root}` model interface. Do not edit.
+", root = model.root) + &format!("
+#
+# Consumer usage:
+#   add_subdirectory(path/to/cxx)        # or FetchContent
+#   target_link_libraries(app PRIVATE arael::{target})
+#
+# Requires a Rust toolchain (cargo builds the capi staticlib; cargo is
+# its own dependency tracker, so the custom target always runs and
+# no-ops when nothing changed).
+cmake_minimum_required(VERSION 3.16)
+
+if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+  project({target}_capi NONE)
+endif()
+
+set(_arael_capi_dir \"${{CMAKE_CURRENT_SOURCE_DIR}}/../capi\")
+set(_arael_cargo_target \"${{CMAKE_CURRENT_BINARY_DIR}}/cargo\")
+set(_arael_capi_lib \"${{_arael_cargo_target}}/release/lib{lib_ident}.a\")
+
+add_custom_target({target}_capi_build
+  COMMAND cargo build --release
+          --manifest-path \"${{_arael_capi_dir}}/Cargo.toml\"
+          --target-dir \"${{_arael_cargo_target}}\"
+  BYPRODUCTS \"${{_arael_capi_lib}}\"
+  VERBATIM)
+
+add_library(arael_{target} STATIC IMPORTED GLOBAL)
+set_target_properties(arael_{target} PROPERTIES
+  IMPORTED_LOCATION \"${{_arael_capi_lib}}\"
+  INTERFACE_INCLUDE_DIRECTORIES \"${{CMAKE_CURRENT_SOURCE_DIR}}/include\")
+if(UNIX)
+  set_property(TARGET arael_{target} APPEND PROPERTY
+    INTERFACE_LINK_LIBRARIES pthread dl m)
+endif()
+add_dependencies(arael_{target} {target}_capi_build)
+add_library(arael::{target} ALIAS arael_{target})
+");
+
     let mut files = vec![
         (PathBuf::from("capi/Cargo.toml"), capi_toml),
         (PathBuf::from("capi/src/lib.rs"), ffi),
         (PathBuf::from(format!("cxx/include/{root_sn}.hpp")), hpp),
+        (PathBuf::from("cxx/CMakeLists.txt"), cmake),
     ];
     for (name, content) in MATH_HEADERS {
         // Vendored copy: the marker line makes it overwritable on

@@ -46,6 +46,7 @@ Solve problems like linear and nonlinear regression, sensor fusion, SLAM, bundle
 - **f32 and f64 precision** -- `#[arael(root)]` for f64, `#[arael(root, f32)]` for f32 throughout
 - **Model trait** -- hierarchical serialize/deserialize/update protocol for parameter optimization
 - **Cross-crate models** -- `arael::export_models!()` bundles a crate's pub models; the importing crate registers them all with one `arael_import!()` and builds its own models and roots over them
+- **C++ interface generator** -- `cargo arael export` generates a C ABI shim and C++ wrapper classes for a root model (build the problem from C++, solve, read results). See [docs/CXX.md](docs/CXX.md)
 - **Type-safe references** -- `Ref<T>`, `Vec<T>`, `Deque<T>`, `Arena<T>` for indexed collections with stable references
 - **Runtime differentiation** -- parse equations from strings at runtime, auto-differentiate symbolically, and optimize via `ExtendedModel` + `TripletBlock` (used by the sketch editor for parametric expression dimensions)
 - **User-defined functions** -- plug custom symbolic or native-eval operators into constraint bodies with `#[arael::function]`.
@@ -913,6 +914,8 @@ arael/              Main library (Levenberg-Marquardt solver + codegen)
     log.rs          info!/warn!/error! logging macros
   cpp/
     eigen_sparse.cpp  Eigen SimplicialLLT + CHOLMOD FFI bridge (optional)
+cargo-arael/        `cargo arael` subcommand: C ABI + C++ interface generator (docs/CXX.md)
+cxx-tests/          Generated-interface proof: fixture model, parity + CMake consumer tests
 
 arael-faer/         faer extensions (block CSC + Schur complement), staged for upstreaming
   src/

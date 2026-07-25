@@ -65,6 +65,9 @@
 //! - **Cross-crate models** -- `arael::export_models!()` bundles a
 //!   crate's pub models; the importing crate registers them all with one
 //!   `arael_import!()` and builds its own models and roots over them
+//! - **C++ interface generator** -- `cargo arael export` generates a C ABI
+//!   shim and C++ wrapper classes for a root model; see
+//!   [docs/CXX.md](https://github.com/harakas/arael/blob/master/docs/CXX.md)
 //! - **Type-safe references** -- `Ref<T>`, `Vec<T>`, `Deque<T>`, `Arena<T>`
 //! - **Runtime differentiation** -- parse equations from strings at runtime,
 //!   auto-differentiate symbolically, and optimize via `ExtendedModel` +
