@@ -614,8 +614,12 @@ observer callbacks): the trait surface has dense/sparse only, and
 `solve_band(cfg, kd)` passing kd through the C ABI.
 
 Remaining stage-4/5 padding: end-to-end tests for universal/rotvec
-rotation params, Transform/UnitVec builtins, user components,
-entity-owned collections, f32 roots; multi-root capi generation.
+rotation params, Transform/UnitVec builtins, user components;
+multi-root capi generation. Entity-owned collections, f32 roots,
+Param<vect2>, and the well_conditioned preset (config code 2) are
+now exercised by cxx-examples/slam2d_simple_demo -- the C++ twin of
+the Rust example (Rust model + solver; C++ composes, reads results,
+plots EPS; converges on the same shape with its own RNG).
 
 **Stage 5 -- build glue, docs, example. [DONE 2026-07-25]**
 `emit_cmake`: a self-contained generated `cxx/CMakeLists.txt` --

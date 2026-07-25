@@ -916,6 +916,7 @@ arael/              Main library (Levenberg-Marquardt solver + codegen)
     eigen_sparse.cpp  Eigen SimplicialLLT + CHOLMOD FFI bridge (optional)
 cargo-arael/        `cargo arael` subcommand: C ABI + C++ interface generator (docs/CXX.md)
 cxx-tests/          Generated-interface proof: fixture model, parity + CMake consumer tests
+cxx-examples/       C++ demos over generated interfaces (slam2d_simple_demo: Rust model, C++ composition + plotting)
 
 arael-faer/         faer extensions (block CSC + Schur complement), staged for upstreaming
   src/

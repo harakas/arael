@@ -137,7 +137,7 @@ fn panic_text(p: Box<dyn std::any::Any + Send>) -> String {
 }
 
 /// Sentinel-based config: UINT32_MAX / NaN fields keep the preset's
-/// value (0 = defaults, 1 = conservative).
+/// value (0 = defaults, 1 = conservative, 2 = well_conditioned).
 #[repr(C)]
 pub struct CLmConfig {
     pub preset: u32,
@@ -154,6 +154,7 @@ impl CLmConfig {
     fn to_config(&self) -> LmConfig<f64> {
         let mut c: LmConfig<f64> = match self.preset {
             1 => LmConfig::conservative(),
+            2 => LmConfig::well_conditioned(),
             _ => LmConfig::default(),
         };
         if self.max_iters != u32::MAX { c.max_iters = self.max_iters as usize; }

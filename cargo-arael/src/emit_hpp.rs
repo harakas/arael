@@ -373,7 +373,8 @@ enum class LmStatus : int32_t {{
 }};
 
 /// Sentinel-based: fields left at UINT32_MAX / NaN keep the preset's
-/// value (preset 0 = solver defaults, 1 = conservative).
+/// value (preset 0 = solver defaults, 1 = conservative,
+/// 2 = well_conditioned).
 struct LmConfig {{
     uint32_t preset = 0;
     uint32_t max_iters = UINT32_MAX;
@@ -386,6 +387,7 @@ struct LmConfig {{
 
     static LmConfig defaults() {{ return LmConfig{{}}; }}
     static LmConfig conservative() {{ LmConfig c; c.preset = 1; return c; }}
+    static LmConfig well_conditioned() {{ LmConfig c; c.preset = 2; return c; }}
 }};
 
 struct LmResult {{
