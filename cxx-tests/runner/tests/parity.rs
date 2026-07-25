@@ -304,6 +304,17 @@ fn cxx_interface_matches_rust_exactly() {
         f5.marks.remove(a5b);
         assert_eq!(g("cap_marks_stale_contains"), b(f5.marks.contains_ref(a5b)));
         assert_eq!(g("cap_marks_stale_try_get"), b(f5.marks.get(a5b).is_some()));
+        // End refs and the null sentinel on empty containers.
+        assert_eq!(g("cap_items_first_valid"), b(f5.items.first_ref().is_some()));
+        assert_eq!(g("cap_items_last_get"),
+            f5.items[f5.items.last_ref().unwrap()].t);
+        assert_eq!(g("cap_poses_front_ref_x"),
+            f5.poses[f5.poses.front_ref().unwrap()].pos.value.x);
+        assert_eq!(g("cap_poses_back_ref_x"),
+            f5.poses[f5.poses.back_ref().unwrap()].pos.value.x);
+        let f6 = Fit::default();
+        assert_eq!(g("cap_empty_first_valid"), b(f6.items.first_ref().is_some()));
+        assert_eq!(g("cap_empty_front_valid"), b(f6.poses.front_ref().is_some()));
     }
 
     // The degenerate model (unconstrained root params, nonzero cost)

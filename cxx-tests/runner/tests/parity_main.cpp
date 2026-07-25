@@ -256,6 +256,14 @@ int main() {
     f5.marks().remove(a5b);
     pi("cap_marks_stale_contains", f5.marks().contains(a5b) ? 1 : 0);
     pi("cap_marks_stale_try_get", f5.marks().try_get(a5b).has_value() ? 1 : 0);
+    // End refs and the null sentinel on empty containers.
+    pi("cap_items_first_valid", f5.items().first_ref().valid() ? 1 : 0);
+    p("cap_items_last_get", f5.items().get(f5.items().last_ref()).t());
+    p("cap_poses_front_ref_x", f5.poses().get(f5.poses().front_ref()).pos().x);
+    p("cap_poses_back_ref_x", f5.poses().get(f5.poses().back_ref()).pos().x);
+    Fit f6;
+    pi("cap_empty_first_valid", f6.items().first_ref().valid() ? 1 : 0);
+    pi("cap_empty_front_valid", f6.poses().front_ref().valid() ? 1 : 0);
 
     // Degenerate model: the root's m/c stay unconstrained (no obs)
     // while one item gives a nonzero cost, so assembly reaches the

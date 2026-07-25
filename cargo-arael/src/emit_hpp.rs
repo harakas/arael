@@ -165,6 +165,18 @@ fn collection_cpp(
                 "uint32_t {prefix}_ref_at(const {owner}*, uint32_t);\n"));
             methods.push_str(&format!(
                 "    {elem}Ref ref_at(uint32_t i) const {{ return {elem}Ref{{ffi::{prefix}_ref_at(h_, i)}}; }}\n"));
+            let (first, last) = if container == "deque" {
+                ("front_ref", "back_ref")
+            } else {
+                ("first_ref", "last_ref")
+            };
+            cpp.ffi.push_str(&format!(
+                "uint32_t {prefix}_{first}(const {owner}*);\n\
+                 uint32_t {prefix}_{last}(const {owner}*);\n"));
+            methods.push_str(&format!(
+                "    /// Ref of the first/last element; null when empty.\n\
+                 \x20   {elem}Ref {first}() const {{ return {elem}Ref{{ffi::{prefix}_{first}(h_)}}; }}\n\
+                 \x20   {elem}Ref {last}() const {{ return {elem}Ref{{ffi::{prefix}_{last}(h_)}}; }}\n"));
         }
         cpp.ffi.push_str(&format!(
             "{elem}* {prefix}_get({owner}*, uint32_t);\n\
@@ -364,10 +376,15 @@ fn field_cpp(
                 let v3 = if of == "UnitVecParamF" { "vect3f" } else { "vect3d" };
                 cpp.ffi.push_str(&format!(
                     "{v3} {prefix}_{name}_unit(const {owner}*);\n\
-                     void {prefix}_{name}_set_unit({owner}*, {v3});\n"));
+                     void {prefix}_{name}_set_unit({owner}*, {v3});\n\
+                     {v3} {prefix}_{name}_unit_d0(const {owner}*);\n\
+                     {v3} {prefix}_{name}_unit_d1(const {owner}*);\n"));
                 owner_methods.push_str(&format!(
                     "    {v3} {name}_unit() const {{ return ffi::{prefix}_{name}_unit(h_); }}\n\
-                     \x20   void set_{name}_unit({v3} v) {{ ffi::{prefix}_{name}_set_unit(h_, v); }}\n"));
+                     \x20   void set_{name}_unit({v3} v) {{ ffi::{prefix}_{name}_set_unit(h_, v); }}\n\
+                     \x20   /// Chart tangent basis: d unit / d chart, per chart param.\n\
+                     \x20   {v3} {name}_unit_d0() const {{ return ffi::{prefix}_{name}_unit_d0(h_); }}\n\
+                     \x20   {v3} {name}_unit_d1() const {{ return ffi::{prefix}_{name}_unit_d1(h_); }}\n"));
             }
             _ => {
                 cpp.ffi.push_str(&format!("{of}* {prefix}_{name}_ptr({owner}*);\n"));
@@ -435,15 +452,19 @@ pub fn emit(model: &Model, ns: &str) -> Result<String, String> {
     for (tn, _) in &surfaced {
         opaque_decls.push_str(&format!("struct {tn};\n"));
         ref_decls.push_str(&format!(
-            "/// Typed handle into the collection that issued it -- the C++\n/// spelling of Rust's `Ref<{tn}>`. Default-constructed it is the\n/// null sentinel (same as Rust `Ref::default()`).\nstruct {tn}Ref {{ uint32_t raw = UINT32_MAX; }};\n"));
+            "/// Typed handle into the collection that issued it -- the C++\n/// spelling of Rust's `Ref<{tn}>`. Default-constructed it is the\n/// null sentinel (same as Rust `Ref::default()`).\nstruct {tn}Ref {{\n    uint32_t raw = UINT32_MAX;\n    bool valid() const {{ return raw != UINT32_MAX; }}\n}};\n"));
     }
 
-    // Children-first class order (containment is cycle-free).
+    // Children-first class order (containment is cycle-free). Only
+    // types that get a class of their own gate the order -- builtin
+    // components (TransformParam, UnitVecParam, ...) are inlined as
+    // methods and never emitted.
+    let emitted: Vec<&str> = surfaced.iter().map(|(tn, _)| tn.as_str()).collect();
     let mut remaining: Vec<(&String, &Type)> = surfaced.clone();
     let mut done: Vec<&str> = Vec::new();
     while !remaining.is_empty() {
         let Some(pos) = remaining.iter().position(|(_, t)| {
-            deps(t).iter().all(|d| done.contains(d) || !model.types.contains_key(*d))
+            deps(t).iter().all(|d| done.contains(d) || !emitted.contains(d))
         }) else {
             return Err(format!("containment cycle among: {}",
                 remaining.iter().map(|(tn, _)| tn.as_str()).collect::<Vec<_>>().join(", ")));
@@ -459,6 +480,8 @@ pub fn emit(model: &Model, ns: &str) -> Result<String, String> {
 /// follows the storage -- see the owning container).
 class {tn} {{
 public:
+    /// Optimized parameters this entity contributes to the solve.
+    static constexpr uint32_t param_count = {pc};
     {tn}() : h_(nullptr) {{}}
     explicit {tn}(ffi::{tn}* p) : h_(p) {{}}
     /// False when default-constructed (e.g. inside an empty option).
@@ -469,7 +492,7 @@ public:
     ffi::{tn}* h_;
 }};
 
-"));
+", pc = t.param_count));
         done.push(tn.as_str());
     }
 
@@ -514,6 +537,24 @@ public:
     }}\n")),
             }
         }
+        let cov_entities: Vec<&String> = surfaced.iter()
+            .filter(|(_, t)| t.role == "entity" && t.param_count > 0)
+            .map(|(tn, _)| *tn)
+            .collect();
+        for an in &cov_entities {
+            for bn in &cov_entities {
+                let a_sn = snake(an);
+                let b_sn = snake(bn);
+                cpp.ffi.push_str(&format!(
+                    "int32_t {root_sn}_{a_sn}_{b_sn}_cross_cov({root}*, const {an}*, const {bn}*, double*, uint32_t);\n"));
+                methods.push_str(&format!(
+"    /// Row-major {an}::param_count x {bn}::param_count cross-covariance
+    /// into out; returns the row count or a negative code.
+    int32_t cross(const {an}& a, const {bn}& b, double* out, uint32_t cap) {{
+        return ffi::{root_sn}_{a_sn}_{b_sn}_cross_cov(h_, a.raw(), b.raw(), out, cap);
+    }}\n"));
+            }
+        }
         cpp.body.push_str(&format!(
 "/// Covariance prepared at the solution (root.assemble_covariance);
 /// queries answer per-entity marginal blocks. Valid until the model
@@ -539,7 +580,8 @@ public:
         field_cpp(&mut cpp, model, root, &root_sn, &mut world_methods, f)?;
     }
     cpp.ffi.push_str(&format!(
-        "void {root_sn}_lm_config(uint32_t, LmConfig*);\n\
+        "double {root_sn}_cost({root}*);\n\
+         void {root_sn}_lm_config(uint32_t, LmConfig*);\n\
          {root}* {root_sn}_new(void);\n\
          void {root_sn}_free({root}*);\n\
          const char* {root_sn}_last_error(const {root}*);\n\
@@ -649,6 +691,8 @@ public:
         if (code >= 0) return SolveResult::ok(r);
         return SolveResult::err({{static_cast<LmStatus>(code), last_error()}});
     }}
+    /// Total cost at the current parameter values (f64 evaluation).
+    double cost() {{ return ffi::{root_sn}_cost(h_); }}
     /// Prepare the covariance at the current (solved) parameters; query
     /// per-entity marginals on the returned view.
     result<Covariance, CovError> assemble_covariance(CovMode mode = CovMode::AllMarginals) {{

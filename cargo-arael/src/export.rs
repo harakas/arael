@@ -14,6 +14,7 @@ const MATH_HEADERS: &[(&str, &str)] = &[
     ("vect.hpp", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/headers/arael/vect.hpp"))),
     ("matrix.hpp", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/headers/arael/matrix.hpp"))),
     ("quatern.hpp", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/headers/arael/quatern.hpp"))),
+    ("geometry.hpp", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/headers/arael/geometry.hpp"))),
     ("math.hpp", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/headers/arael/math.hpp"))),
     ("result.hpp", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/headers/arael/result.hpp"))),
     ("assert.hpp", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/headers/arael/assert.hpp"))),
@@ -153,6 +154,28 @@ add_library(arael::{target} ALIAS arael_{target})
     Ok(files)
 }
 
+/// A workspace listing `model/capi` before the first export cannot
+/// even build the model crate (missing member). Stub the capi crate so
+/// the harvest build resolves; the real files overwrite it.
+fn stub_capi(dir: &Path, crate_name: &str) -> Result<(), String> {
+    let capi = dir.join("capi");
+    if capi.join("Cargo.toml").exists() {
+        return Ok(());
+    }
+    std::fs::create_dir_all(capi.join("src")).map_err(|e| format!("mkdir capi: {e}"))?;
+    std::fs::write(capi.join("Cargo.toml"), format!(
+"# {MARKER}: placeholder until the export completes. Do not edit.
+[package]
+name = \"{crate_name}-capi\"
+version = \"0.0.0\"
+edition = \"2021\"
+")).map_err(|e| format!("write capi stub: {e}"))?;
+    std::fs::write(capi.join("src/lib.rs"),
+        format!("// {MARKER}: placeholder until the export completes.\n"))
+        .map_err(|e| format!("write capi stub: {e}"))?;
+    Ok(())
+}
+
 /// Build the model crate with the sidecar enabled and read the JSONs.
 fn harvest(dir: &Path) -> Result<Vec<Model>, String> {
     // The env var is not in cargo's fingerprint: touch the sources so
@@ -207,6 +230,7 @@ fn pick<'m>(models: &'m [Model], root: Option<&str>) -> Result<&'m Model, String
 
 pub fn run_export(dir: &Path, root: Option<&str>) -> Result<(), String> {
     let (crate_name, arael_dep, ns) = scan_manifest(dir)?;
+    stub_capi(dir, &crate_name)?;
     let models = harvest(dir)?;
     let model = pick(&models, root)?;
     let files = generate(model, &crate_name, &arael_dep, ns.as_deref())?;

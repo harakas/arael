@@ -84,18 +84,24 @@ views are named by their container's nature: `PathPosesDeque`,
 - **Math types** (`vect2/3`, `matrix2/3`, `quatern`, f/d suffixes)
   mirror the Rust types: `*` is dot, `%` is cross, euler is x=roll,
   y=pitch, z=yaw with `R = R(z)R(y)R(x)`, quaternions store the
-  scalar part first.
+  scalar part first. `matrix2/3::symmetric_eigen()` matches the Rust
+  one (ascending eigenvalues, eigenvector columns) to precision, not
+  bits. `arael/geometry.hpp` carries the pinhole `Camera`.
 - **Params** read/write their value; `set_<p>_optimize(false)` fixes
   one. Rotation params take euler `vect3` (or a quaternion for
   `QuaternionParam`); `TransformParam` exposes translation, rotation,
-  and per-half optimize flags.
+  and per-half optimize flags; `UnitVecParam` exposes `unit` and the
+  read-only chart basis `unit_d0`/`unit_d1` (for covariance
+  Jacobians). Entity wrappers carry `static constexpr param_count`.
 - **Collections**: `push` (deque: `push_back`/`push_front`) returns an
   element wrapper; `refs::`-backed containers also give `ref_at(i)` /
   `get(ref)` / `contains(ref)` / `try_get(ref)` (an `option`, empty
   for a stale ref where `get` would abort), and an `Arena` `push`
   returns the ref itself (`remove` takes it back). A
   default-constructed ref is the null sentinel, same as Rust
-  `Ref::default()`. Every view has `size()`, `empty()`, and
+  `Ref::default()`; `ref.valid()` tests it. Vec gives
+  `first_ref()`/`last_ref()` and deque `front_ref()`/`back_ref()`
+  (null when empty). Every view has `size()`, `empty()`, and
   `reserve(n)`; vec and deque add `front()`/`back()` (empty container
   is UB, like the STL). Removal mirrors Rust: vec
   `pop`/`truncate`/`clear`, deque
@@ -127,14 +133,23 @@ views are named by their container's nature: `PathPosesDeque`,
 - **Covariance**: `assemble_covariance(CovMode)` at the solution
   returns a `Covariance` view; `cov->marginal(entity)` answers the
   entity's marginal block, typed by size (1 param -> `double`, 2 ->
-  `matrix2d`, 3 -> `matrix3d`, larger via a caller buffer). Valid
-  until the model is dropped or reassembled.
+  `matrix2d`, 3 -> `matrix3d`, larger via a caller buffer);
+  `cov->cross(a, b, out, cap)` the row-major pa x pb cross-covariance
+  between two entities (returns the row count or a negative code).
+  Valid until the model is dropped or reassembled.
+- **cost()** on the root evaluates the total cost at the current
+  parameter values (no solve).
 
 ## Contract
 
 One model, one thread. Wrappers are plain pointers: they die with the
 model (or an `Arena::remove`). Whatever validity discipline the Rust
 API enforces at compile time is the C++ caller's responsibility here.
+
+Worked examples live in `cxx-examples/`: `slam2d_simple_demo` (2D
+SLAM, plotting, covariance ellipses) and `slam_demo_gm` (visual-
+inertial SLAM with a robust loss, a graduated ramp, and relative
+covariance from `cross()`).
 
 A Python interface over the same C ABI is planned; the design notes
 live in docs/dev/CXX.md.

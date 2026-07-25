@@ -56,27 +56,45 @@ struct LmConfig : LmConfigT<double> {
 /// Typed handle into the collection that issued it -- the C++
 /// spelling of Rust's `Ref<GpsObs>`. Default-constructed it is the
 /// null sentinel (same as Rust `Ref::default()`).
-struct GpsObsRef { uint32_t raw = UINT32_MAX; };
+struct GpsObsRef {
+    uint32_t raw = UINT32_MAX;
+    bool valid() const { return raw != UINT32_MAX; }
+};
 /// Typed handle into the collection that issued it -- the C++
 /// spelling of Rust's `Ref<Info>`. Default-constructed it is the
 /// null sentinel (same as Rust `Ref::default()`).
-struct InfoRef { uint32_t raw = UINT32_MAX; };
+struct InfoRef {
+    uint32_t raw = UINT32_MAX;
+    bool valid() const { return raw != UINT32_MAX; }
+};
 /// Typed handle into the collection that issued it -- the C++
 /// spelling of Rust's `Ref<N>`. Default-constructed it is the
 /// null sentinel (same as Rust `Ref::default()`).
-struct NRef { uint32_t raw = UINT32_MAX; };
+struct NRef {
+    uint32_t raw = UINT32_MAX;
+    bool valid() const { return raw != UINT32_MAX; }
+};
 /// Typed handle into the collection that issued it -- the C++
 /// spelling of Rust's `Ref<Obs>`. Default-constructed it is the
 /// null sentinel (same as Rust `Ref::default()`).
-struct ObsRef { uint32_t raw = UINT32_MAX; };
+struct ObsRef {
+    uint32_t raw = UINT32_MAX;
+    bool valid() const { return raw != UINT32_MAX; }
+};
 /// Typed handle into the collection that issued it -- the C++
 /// spelling of Rust's `Ref<Pose>`. Default-constructed it is the
 /// null sentinel (same as Rust `Ref::default()`).
-struct PoseRef { uint32_t raw = UINT32_MAX; };
+struct PoseRef {
+    uint32_t raw = UINT32_MAX;
+    bool valid() const { return raw != UINT32_MAX; }
+};
 /// Typed handle into the collection that issued it -- the C++
 /// spelling of Rust's `Ref<Tie>`. Default-constructed it is the
 /// null sentinel (same as Rust `Ref::default()`).
-struct TieRef { uint32_t raw = UINT32_MAX; };
+struct TieRef {
+    uint32_t raw = UINT32_MAX;
+    bool valid() const { return raw != UINT32_MAX; }
+};
 
 namespace ffi {
 struct Fit;
@@ -130,6 +148,10 @@ void fit_tie_set_w(Tie*, double);
 int32_t fit_assemble_covariance(Fit*, uint32_t);
 int32_t fit_n_marginal_cov(Fit*, const N*, double*, uint32_t);
 int32_t fit_pose_marginal_cov(Fit*, const Pose*, double*, uint32_t);
+int32_t fit_n_n_cross_cov(Fit*, const N*, const N*, double*, uint32_t);
+int32_t fit_n_pose_cross_cov(Fit*, const N*, const Pose*, double*, uint32_t);
+int32_t fit_pose_n_cross_cov(Fit*, const Pose*, const N*, double*, uint32_t);
+int32_t fit_pose_pose_cross_cov(Fit*, const Pose*, const Pose*, double*, uint32_t);
 double fit_m(const Fit*);
 void fit_set_m(Fit*, double);
 bool fit_m_optimize(const Fit*);
@@ -155,6 +177,8 @@ bool fit_items_pop(Fit*);
 void fit_items_clear(Fit*);
 void fit_items_truncate(Fit*, uint32_t);
 uint32_t fit_items_ref_at(const Fit*, uint32_t);
+uint32_t fit_items_first_ref(const Fit*);
+uint32_t fit_items_last_ref(const Fit*);
 N* fit_items_get(Fit*, uint32_t);
 bool fit_items_contains(const Fit*, uint32_t);
 N* fit_items_try_get(Fit*, uint32_t);
@@ -168,6 +192,8 @@ bool fit_poses_pop_front(Fit*);
 void fit_poses_clear(Fit*);
 void fit_poses_truncate(Fit*, uint32_t);
 uint32_t fit_poses_ref_at(const Fit*, uint32_t);
+uint32_t fit_poses_front_ref(const Fit*);
+uint32_t fit_poses_back_ref(const Fit*);
 Pose* fit_poses_get(Fit*, uint32_t);
 bool fit_poses_contains(const Fit*, uint32_t);
 Pose* fit_poses_try_get(Fit*, uint32_t);
@@ -190,6 +216,7 @@ uint32_t fit_marks_first(const Fit*);
 uint32_t fit_marks_next(const Fit*, uint32_t);
 uint32_t fit_marks_last(const Fit*);
 uint32_t fit_marks_prev(const Fit*, uint32_t);
+double fit_cost(Fit*);
 void fit_lm_config(uint32_t, LmConfig*);
 Fit* fit_new(void);
 void fit_free(Fit*);
@@ -208,6 +235,8 @@ inline LmConfig::LmConfig(LmPreset p) {
 /// follows the storage -- see the owning container).
 class GpsObs {
 public:
+    /// Optimized parameters this entity contributes to the solve.
+    static constexpr uint32_t param_count = 0;
     GpsObs() : h_(nullptr) {}
     explicit GpsObs(ffi::GpsObs* p) : h_(p) {}
     /// False when default-constructed (e.g. inside an empty option).
@@ -226,6 +255,8 @@ private:
 /// follows the storage -- see the owning container).
 class Info {
 public:
+    /// Optimized parameters this entity contributes to the solve.
+    static constexpr uint32_t param_count = 0;
     Info() : h_(nullptr) {}
     explicit Info(ffi::Info* p) : h_(p) {}
     /// False when default-constructed (e.g. inside an empty option).
@@ -248,6 +279,8 @@ private:
 /// follows the storage -- see the owning container).
 class N {
 public:
+    /// Optimized parameters this entity contributes to the solve.
+    static constexpr uint32_t param_count = 1;
     N() : h_(nullptr) {}
     explicit N(ffi::N* p) : h_(p) {}
     /// False when default-constructed (e.g. inside an empty option).
@@ -270,6 +303,8 @@ private:
 /// follows the storage -- see the owning container).
 class Obs {
 public:
+    /// Optimized parameters this entity contributes to the solve.
+    static constexpr uint32_t param_count = 0;
     Obs() : h_(nullptr) {}
     explicit Obs(ffi::Obs* p) : h_(p) {}
     /// False when default-constructed (e.g. inside an empty option).
@@ -288,6 +323,8 @@ private:
 /// follows the storage -- see the owning container).
 class Pose {
 public:
+    /// Optimized parameters this entity contributes to the solve.
+    static constexpr uint32_t param_count = 6;
     Pose() : h_(nullptr) {}
     explicit Pose(ffi::Pose* p) : h_(p) {}
     /// False when default-constructed (e.g. inside an empty option).
@@ -313,6 +350,8 @@ private:
 /// follows the storage -- see the owning container).
 class Tie {
 public:
+    /// Optimized parameters this entity contributes to the solve.
+    static constexpr uint32_t param_count = 0;
     Tie() : h_(nullptr) {}
     explicit Tie(ffi::Tie* p) : h_(p) {}
     /// False when default-constructed (e.g. inside an empty option).
@@ -346,6 +385,26 @@ public:
     /// Row-major dim x dim into out; returns dim or a negative code.
     int32_t marginal(const Pose& e, double* out, uint32_t cap) {
         return ffi::fit_pose_marginal_cov(h_, e.raw(), out, cap);
+    }
+    /// Row-major N::param_count x N::param_count cross-covariance
+    /// into out; returns the row count or a negative code.
+    int32_t cross(const N& a, const N& b, double* out, uint32_t cap) {
+        return ffi::fit_n_n_cross_cov(h_, a.raw(), b.raw(), out, cap);
+    }
+    /// Row-major N::param_count x Pose::param_count cross-covariance
+    /// into out; returns the row count or a negative code.
+    int32_t cross(const N& a, const Pose& b, double* out, uint32_t cap) {
+        return ffi::fit_n_pose_cross_cov(h_, a.raw(), b.raw(), out, cap);
+    }
+    /// Row-major Pose::param_count x N::param_count cross-covariance
+    /// into out; returns the row count or a negative code.
+    int32_t cross(const Pose& a, const N& b, double* out, uint32_t cap) {
+        return ffi::fit_pose_n_cross_cov(h_, a.raw(), b.raw(), out, cap);
+    }
+    /// Row-major Pose::param_count x Pose::param_count cross-covariance
+    /// into out; returns the row count or a negative code.
+    int32_t cross(const Pose& a, const Pose& b, double* out, uint32_t cap) {
+        return ffi::fit_pose_pose_cross_cov(h_, a.raw(), b.raw(), out, cap);
     }
 private:
     template<class T> result<T, CovError> fail() {
@@ -444,6 +503,9 @@ public:
     void clear() { ffi::fit_items_clear(h_); }
     void truncate(uint32_t n) { ffi::fit_items_truncate(h_, n); }
     NRef ref_at(uint32_t i) const { return NRef{ffi::fit_items_ref_at(h_, i)}; }
+    /// Ref of the first/last element; null when empty.
+    NRef first_ref() const { return NRef{ffi::fit_items_first_ref(h_)}; }
+    NRef last_ref() const { return NRef{ffi::fit_items_last_ref(h_)}; }
     N get(NRef r) { return N(ffi::fit_items_get(h_, r.raw)); }
     /// True while r addresses a live element here.
     bool contains(NRef r) const { return ffi::fit_items_contains(h_, r.raw); }
@@ -528,6 +590,9 @@ public:
     void clear() { ffi::fit_poses_clear(h_); }
     void truncate(uint32_t n) { ffi::fit_poses_truncate(h_, n); }
     PoseRef ref_at(uint32_t i) const { return PoseRef{ffi::fit_poses_ref_at(h_, i)}; }
+    /// Ref of the first/last element; null when empty.
+    PoseRef front_ref() const { return PoseRef{ffi::fit_poses_front_ref(h_)}; }
+    PoseRef back_ref() const { return PoseRef{ffi::fit_poses_back_ref(h_)}; }
     Pose get(PoseRef r) { return Pose(ffi::fit_poses_get(h_, r.raw)); }
     /// True while r addresses a live element here.
     bool contains(PoseRef r) const { return ffi::fit_poses_contains(h_, r.raw); }
@@ -795,6 +860,8 @@ public:
         if (code >= 0) return SolveResult::ok(r);
         return SolveResult::err({static_cast<LmStatus>(code), last_error()});
     }
+    /// Total cost at the current parameter values (f64 evaluation).
+    double cost() { return ffi::fit_cost(h_); }
     /// Prepare the covariance at the current (solved) parameters; query
     /// per-entity marginals on the returned view.
     result<Covariance, CovError> assemble_covariance(CovMode mode = CovMode::AllMarginals) {

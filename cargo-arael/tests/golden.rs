@@ -29,6 +29,23 @@ fn hpp_matches_golden() {
 }
 
 #[test]
+fn builtin_component_types_do_not_block_class_order() {
+    // Builtin components (TransformParam, UnitVecParam, ...) appear in
+    // the sidecar's type table but are inlined as methods, never
+    // emitted as classes; the children-first ordering must not wait
+    // for them.
+    let mut v: serde_json::Value =
+        serde_json::from_str(include_str!("golden/fit.json")).unwrap();
+    v["types"]["TransformParamF"] = serde_json::json!({
+        "role": "component", "param_count": 6, "builtin": true, "fields": []
+    });
+    v["types"]["Pose"]["fields"].as_array_mut().unwrap().insert(0,
+        serde_json::json!({"name": "r2w", "kind": "component", "of": "TransformParamF"}));
+    let m = Model::parse(&v.to_string()).unwrap();
+    emit_hpp::emit(&m, "cxx_fit").expect("builtin component must not deadlock the topo order");
+}
+
+#[test]
 fn unsupported_kinds_error_loudly() {
     let mut m = model();
     let t = m.types.get_mut("N").unwrap();

@@ -3,10 +3,11 @@
 // src/matrix.rs: row-major storage (rows are vectors), same euler
 // convention (x=roll, y=pitch, z=yaw, R = R(z)*R(y)*R(x)), same
 // gimbal-lock handling. Header-only, C++17. The solver-internal
-// derivative and eigen helpers are not ported.
+// derivative helpers are not ported.
 #pragma once
 
 #include <limits>
+#include <utility>
 #include "vect.hpp"
 
 namespace arael {
@@ -108,6 +109,61 @@ struct matrix3 {
         return {T(0), y, std::atan2(-rows[0][1], rows[1][1])};
     }
 
+    /// Eigen-decomposition of a symmetric matrix: (R, d) with the
+    /// columns of R the eigenvectors of the eigenvalues in d,
+    /// ascending. R has orthonormal columns but is not necessarily a
+    /// proper rotation (e.g. covariance whitening); if a proper
+    /// rotation is needed, negate one column when det(R) < 0.
+    /// Non-finite input propagates: NaN in yields NaN out.
+    /// (Cyclic Jacobi in double; the Rust twin runs nalgebra --
+    /// results agree to precision, not bit-exactly.)
+    std::pair<matrix3, vect3<T>> symmetric_eigen() const {
+        double a[3][3], v[3][3];
+        for (int r = 0; r < 3; r++)
+            for (int c = 0; c < 3; c++) {
+                a[r][c] = double(rows[r][c]);
+                v[r][c] = r == c ? 1.0 : 0.0;
+            }
+        for (int sweep = 0; sweep < 64; sweep++) {
+            double off = std::abs(a[0][1]) + std::abs(a[0][2]) + std::abs(a[1][2]);
+            if (!(off > 1e-300)) break; // converged, zero, or NaN
+            for (int p = 0; p < 2; p++) {
+                for (int q = p + 1; q < 3; q++) {
+                    if (a[p][q] == 0.0) continue;
+                    double theta = (a[q][q] - a[p][p]) / (2.0 * a[p][q]);
+                    double t = (theta >= 0.0 ? 1.0 : -1.0)
+                        / (std::abs(theta) + std::sqrt(theta * theta + 1.0));
+                    double c = 1.0 / std::sqrt(t * t + 1.0), s = t * c;
+                    for (int k = 0; k < 3; k++) {
+                        double akp = a[k][p], akq = a[k][q];
+                        a[k][p] = c * akp - s * akq;
+                        a[k][q] = s * akp + c * akq;
+                    }
+                    for (int k = 0; k < 3; k++) {
+                        double apk = a[p][k], aqk = a[q][k];
+                        a[p][k] = c * apk - s * aqk;
+                        a[q][k] = s * apk + c * aqk;
+                    }
+                    for (int k = 0; k < 3; k++) {
+                        double vkp = v[k][p], vkq = v[k][q];
+                        v[k][p] = c * vkp - s * vkq;
+                        v[k][q] = s * vkp + c * vkq;
+                    }
+                }
+            }
+        }
+        int idx[3] = {0, 1, 2};
+        for (int i = 0; i < 2; i++)
+            for (int j = i + 1; j < 3; j++)
+                if (a[idx[j]][idx[j]] < a[idx[i]][idx[i]]) std::swap(idx[i], idx[j]);
+        vect3<T> d{T(a[idx[0]][idx[0]]), T(a[idx[1]][idx[1]]), T(a[idx[2]][idx[2]])};
+        matrix3 r = from_cols(
+            {T(v[0][idx[0]]), T(v[1][idx[0]]), T(v[2][idx[0]])},
+            {T(v[0][idx[1]]), T(v[1][idx[1]]), T(v[2][idx[1]])},
+            {T(v[0][idx[2]]), T(v[1][idx[2]]), T(v[2][idx[2]])});
+        return {r, d};
+    }
+
     vect3<T>& operator[](std::size_t i) { return rows[i]; }
     const vect3<T>& operator[](std::size_t i) const { return rows[i]; }
     matrix3 operator+(matrix3 m) const {
@@ -174,6 +230,26 @@ struct matrix2 {
         return from_rows({c, -s}, {s, c});
     }
     T get_rotation_angle() const { return std::atan2(rows[1][0], rows[0][0]); }
+
+    /// Eigen-decomposition of a symmetric matrix: (R, d) with the
+    /// columns of R the eigenvectors of the eigenvalues in d,
+    /// ascending. Same contract as matrix3::symmetric_eigen.
+    std::pair<matrix2, vect2<T>> symmetric_eigen() const {
+        double a = double(rows[0][0]), b = double(rows[0][1]), c = double(rows[1][1]);
+        double half = (a + c) * 0.5;
+        double disc = std::sqrt((a - c) * (a - c) * 0.25 + b * b);
+        double l0 = half - disc, l1 = half + disc;
+        // Eigenvector of l1 from the numerically larger residual row.
+        double vx, vy;
+        if (std::abs(l1 - a) >= std::abs(l1 - c)) { vx = b; vy = l1 - a; }
+        else { vx = l1 - c; vy = b; }
+        double n = std::sqrt(vx * vx + vy * vy);
+        if (n > 0.0) { vx /= n; vy /= n; }
+        else { vx = 1.0; vy = 0.0; } // diagonal input: axis-aligned
+        // Columns: eigenvector of l0 (perpendicular), then of l1.
+        matrix2 r = from_cols({T(-vy), T(vx)}, {T(vx), T(vy)});
+        return {r, vect2<T>{T(l0), T(l1)}};
+    }
 
     vect2<T>& operator[](std::size_t i) { return rows[i]; }
     const vect2<T>& operator[](std::size_t i) const { return rows[i]; }

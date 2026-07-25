@@ -218,11 +218,26 @@ pub unsafe extern \"C\" fn {fn_prefix}_try_get(p: *mut {owner}, r: u32) -> *mut 
     }}
 }}
 ");
-    let refs_extras = |out: &mut String| {
+    let refs_extras = |out: &mut String, first_name: &str, last_name: &str| {
         out.push_str(&format!(
 "#[no_mangle]
 pub unsafe extern \"C\" fn {fn_prefix}_ref_at(p: *const {owner}, i: u32) -> u32 {{
     {access}.{field}.ref_at(i as usize).to_raw()
+}}
+/// Ref of the first/last element, or u32::MAX when empty.
+#[no_mangle]
+pub unsafe extern \"C\" fn {fn_prefix}_{first_name}(p: *const {owner}) -> u32 {{
+    match {access}.{field}.{first_name}() {{
+        Some(r) => r.to_raw(),
+        None => u32::MAX,
+    }}
+}}
+#[no_mangle]
+pub unsafe extern \"C\" fn {fn_prefix}_{last_name}(p: *const {owner}) -> u32 {{
+    match {access}.{field}.{last_name}() {{
+        Some(r) => r.to_raw(),
+        None => u32::MAX,
+    }}
 }}
 "));
         out.push_str(&ref_get);
@@ -264,7 +279,7 @@ pub unsafe extern \"C\" fn {fn_prefix}_truncate(p: *mut {owner}, len: u32) {{
 }}
 "));
             if matches!(vec_flavor(f)?, Flavor::Refs) {
-                refs_extras(out);
+                refs_extras(out, "first_ref", "last_ref");
             }
         }
         "deque" => {
@@ -303,7 +318,7 @@ pub unsafe extern \"C\" fn {fn_prefix}_truncate(p: *mut {owner}, len: u32) {{
     {access}.{field}.truncate(len as usize);
 }}
 "));
-            refs_extras(out);
+            refs_extras(out, "front_ref", "back_ref");
         }
         "arena" => {
             out.push_str(&format!(
@@ -450,6 +465,16 @@ fn field_accessors(
                 rw(out, &format!("{fn_prefix}_{name}"), "unit", ptr_ty, access, v3,
                     &format!("{access}.{name}.unit.into()"),
                     &format!("{access}.{name}.unit = v.into();"));
+                // The chart tangent basis (read-only): d unit / d chart,
+                // one column per chart parameter.
+                for i in 0..2 {
+                    out.push_str(&format!(
+"#[no_mangle]
+pub unsafe extern \"C\" fn {fn_prefix}_{name}_unit_d{i}(p: *const {ptr_ty}) -> {v3} {{
+    {access}.{name}.unit_d[{i}].into()
+}}
+"));
+                }
             }
             _ => {
                 // A user component: expose a pointer, its own surface is
@@ -801,6 +826,25 @@ pub unsafe extern \"C\" fn {root_sn}_{method}(
 "));
     }
 
+    // Cost evaluation at the current parameter values.
+    let (ser, cast) = if fp == "f32" {
+        ("serialize32", " as f64")
+    } else {
+        ("serialize64", "")
+    };
+    out.push_str(&format!(
+"
+/// Total cost at the current parameter values (evaluated at the
+/// model's precision, returned as f64).
+#[no_mangle]
+pub unsafe extern \"C\" fn {root_sn}_cost(h: *mut {handle}) -> f64 {{
+    let m = &mut (*h).model;
+    let mut params = Vec::new();
+    m.{ser}(&mut params);
+    m.calc_cost(&params){cast}
+}}
+"));
+
     // Covariance: assemble on the handle, then per-entity marginals.
     out.push_str(&format!(
 "
@@ -881,6 +925,62 @@ pub unsafe extern \"C\" fn {sn}_marginal_cov(
     }}
 }}
 "));
+    }
+
+    // Cross-covariance for every ordered pair of parameterized entities.
+    let cov_entities: Vec<(&String, &crate::ir::Type)> = surfaced_types(model)
+        .into_iter()
+        .filter(|(_, t)| t.role == "entity" && t.param_count > 0)
+        .collect();
+    for (an, _) in &cov_entities {
+        for (bn, _) in &cov_entities {
+            let a_sn = snake(an);
+            let b_sn = snake(bn);
+            out.push_str(&format!(
+"
+/// Row-major pa x pb cross-covariance (f64) between a `{an}` and a
+/// `{bn}`; returns the row count, or -1 (error) / -2 (panic) / -3 (no
+/// assembly or buffer too small), text via {root_sn}_last_error.
+#[no_mangle]
+pub unsafe extern \"C\" fn {root_sn}_{a_sn}_{b_sn}_cross_cov(
+    h: *mut {handle},
+    a: *const {an},
+    b: *const {bn},
+    out: *mut f64,
+    cap: u32,
+) -> i32 {{
+    let hh = &mut *h;
+    let Some(cov) = hh.cov.as_ref() else {{
+        set_text(hh, \"cross_cov: assemble_covariance was not called\");
+        return -3;
+    }};
+    match catch_unwind(AssertUnwindSafe(|| cov.cross_cov(&*a, &*b))) {{
+        Ok(Ok(m)) => {{
+            let (rows, cols) = (m.nrows(), m.ncols());
+            if (rows * cols) as u32 > cap {{
+                set_text(hh, \"cross_cov: buffer too small\");
+                return -3;
+            }}
+            for r in 0..rows {{
+                for c in 0..cols {{
+                    *out.add(r * cols + c) = m[(r, c)];
+                }}
+            }}
+            rows as i32
+        }}
+        Ok(Err(e)) => {{
+            set_text(hh, &format!(\"{{}}\", e));
+            -1
+        }}
+        Err(p2) => {{
+            let msg = panic_text(p2);
+            set_text(hh, &msg);
+            -2
+        }}
+    }}
+}}
+"));
+        }
     }
 
     // Root fields through the handle.

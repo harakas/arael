@@ -357,3 +357,17 @@
   and serde surface. Note the ceiling lands on `Vec` as well, and `Vec` is
   what holds the large collections -- so if scale ever bites it is a `BVec`
   that is wanted, built the same way.
+
+- **cargo-arael: LmSession over the FFI.** The generated solve calls are
+  stateless, so a graduated ramp (cxx-examples/slam_demo_gm) re-analyzes
+  the sparsity every pass where the Rust demo carries one `LmSession`
+  warm across the solves. Needs a session object on the handle with an
+  explicit invalidate; deferred with the other v2 solver-surface items
+  (observer callbacks, band solve) in docs/dev/CXX.md.
+
+- **cargo-arael: no gradient/Hessian assembly surface.** The Rust
+  slam_demo_gm's env-gated Hessian-sparsity bitmap uses
+  `calc_grad_hessian_sparse`; the C++ twin drops that debug feature
+  because the generated API exposes solves and covariance only.
+  Exposing raw assembly over the FFI is a large surface for a debug
+  nicety -- revisit if a real consumer needs it.
