@@ -3129,6 +3129,71 @@ pub fn generate_root_methods(
                 })
         } else { None };
         let is_root_triplet_self = root_triplet_field.is_some();
+        // A `root.`-prefixed secondary that did not resolve above would
+        // otherwise fall through to codegen and die as an E0308 far from
+        // the attribute.
+        if is_self_block && !is_root_triplet_self
+            && let Some(rest) = constraint.block_fields.iter().skip(1)
+                .find_map(|bf| bf.strip_prefix("root.")) {
+            return Err(syn::Error::new(proc_macro2::Span::call_site(),
+                format!("{}:{}: `root.{}` does not name a `TripletBlock` field on the \
+                         root `{}` -- the (entity, root) cross pairs need one to live in",
+                    sc.attr_file, sc.attr_line, rest, root_name)));
+        }
+
+        // Self-primary + parent-owned TripletBlock shape:
+        //   #[arael(constraint([<local_self_block>, parent.<triplet>], {...}))]
+        // The non-root analog of `[hb, root.<triplet>]`: the entity has
+        // its own params (SelfBlock primary), the coupled co-entity is
+        // the CONTAINING parent, and the (entity, parent) cross pairs go
+        // to a TripletBlock field on that parent. (field ident, parent
+        // type name.)
+        let parent_triplet: Option<(syn::Ident, String)> = if is_self_block
+            && parent_self_primary.is_none() {
+            constraint.block_fields.iter().skip(1)
+                .filter_map(|bf| bf.strip_prefix("parent."))
+                .next()
+                .map(|rest| -> syn::Result<(syn::Ident, String)> {
+                    let parent_type = find_containing_parent(&root_name.to_string(), &sc.struct_name)
+                        .ok_or_else(|| syn::Error::new(proc_macro2::Span::call_site(),
+                            format!("{}:{}: `parent.{}`: no registered struct contains `{}`",
+                                sc.attr_file, sc.attr_line, rest, sc.struct_name)))?;
+                    if parent_type == root_name.to_string() {
+                        return Err(syn::Error::new(proc_macro2::Span::call_site(),
+                            format!("{}:{}: `{}`'s containing parent is the root -- use \
+                                     `constraint([{}, root.{}], ...)`",
+                                sc.attr_file, sc.attr_line, sc.struct_name,
+                                constraint.primary_block_field(), rest)));
+                    }
+                    let playout = registry_lookup(&parent_type)
+                        .ok_or_else(|| syn::Error::new(proc_macro2::Span::call_site(),
+                            format!("{}:{}: parent type `{}` not in registry",
+                                sc.attr_file, sc.attr_line, parent_type)))?;
+                    if !playout.triplet_block_fields.contains(&rest.to_string()) {
+                        return Err(syn::Error::new(proc_macro2::Span::call_site(),
+                            format!("{}:{}: `parent.{}` does not name a `TripletBlock` field \
+                                     on the containing parent `{}` -- the (entity, parent) \
+                                     cross pairs need one to live in",
+                                sc.attr_file, sc.attr_line, rest, parent_type)));
+                    }
+                    Ok((syn::Ident::new(rest, proc_macro2::Span::call_site()), parent_type))
+                })
+                .transpose()?
+        } else { None };
+        if parent_triplet.is_some() {
+            if is_root_triplet_self {
+                return Err(syn::Error::new(proc_macro2::Span::call_site(),
+                    format!("{}:{}: a constraint couples to at most one owned triplet -- \
+                             `root.<triplet>` and `parent.<triplet>` cannot be combined",
+                        sc.attr_file, sc.attr_line)));
+            }
+            if constraint.block_fields.len() != 2 {
+                return Err(syn::Error::new(proc_macro2::Span::call_site(),
+                    format!("{}:{}: a `parent.<triplet>` secondary allows exactly \
+                             `[<self_block>, parent.<triplet>]` -- {} block fields given",
+                        sc.attr_file, sc.attr_line, constraint.block_fields.len())));
+            }
+        }
 
         // For SelfBlock: the struct itself is in a root collection
         // For CrossBlock: find parent collection + frines field
@@ -3507,10 +3572,12 @@ pub fn generate_root_methods(
         //  entity param count).
         let mut triplet_entities: Vec<(syn::Ident, syn::Ident, usize, usize)> = Vec::new();
         let multi_cross_routing: Vec<MultiCrossRouting>;
-        // A `parent.<selfblock>` constraint entity must live in a
-        // collection (or Option) INSIDE its parent, so the sweep has the
-        // parent instance in scope as a prefix binding.
-        let parent_prefix: Option<Vec<AccessSegment>> = if parent_self_primary.is_some() {
+        // A `parent.`-coupled constraint entity (`parent.<selfblock>`
+        // primary or `[hb, parent.<triplet>]`) must live in a collection
+        // (or Option) INSIDE its parent, so the sweep has the parent
+        // instance in scope as a prefix binding.
+        let parent_prefix: Option<Vec<AccessSegment>> = if parent_self_primary.is_some()
+            || parent_triplet.is_some() {
             match &entity_location {
                 EntityLocation::Nested { segments }
                     if segments.last().is_some_and(|l| l.collection || l.optional)
@@ -3520,20 +3587,27 @@ pub fn generate_root_methods(
                 }
                 _ => {
                     return Err(syn::Error::new(proc_macro2::Span::call_site(),
-                        format!("{}:{}: a `parent.<selfblock>` constraint must live in a                                  collection (Vec/Deque/Arena) or an Option INSIDE its                                  parent entity",
+                        format!("{}:{}: a `parent.`-coupled constraint must live in a                                  collection (Vec/Deque/Arena) or an Option INSIDE its                                  parent entity",
                             sc.attr_file, sc.attr_line)));
                 }
             }
         } else { None };
         // The joined co-entity of a self-primary form: the root
         // (`root.<selfblock>` / `[hb, root.<triplet>]`, accessed as
-        // `self`) or the containing parent (`parent.<selfblock>`,
-        // accessed as the innermost prefix binding).
+        // `self`) or the containing parent (`parent.<selfblock>` /
+        // `[hb, parent.<triplet>]`, accessed as the innermost prefix
+        // binding). For `parent.<selfblock>` the `parent =` attribute
+        // names the parent binding (the entity keeps its own name); for
+        // `[hb, parent.<triplet>]` the parent binds as its lowercased
+        // type name, like the root does in the root forms.
         let (joined_accessor, joined_type, joined_var): (TokenStream2, String, String) =
             if let Some((_, ptype)) = &parent_self_primary {
                 let pvar = constraint.parent_name.clone()
                     .unwrap_or_else(|| ptype.to_lowercase());
                 (nested_container(parent_prefix.as_deref().unwrap()), ptype.clone(), pvar)
+            } else if let Some((_, ptype)) = &parent_triplet {
+                (nested_container(parent_prefix.as_deref().unwrap()), ptype.clone(),
+                 ptype.to_lowercase())
             } else {
                 (quote! { self }, root_type_str.clone(), root_type_str.to_lowercase())
             };
@@ -3541,7 +3615,7 @@ pub fn generate_root_methods(
         // form; either span may be absent (a param-less entity pushes no
         // self entry, and root./parent.<selfblock> never has one).
         let is_root_joined = is_root_triplet_self || root_self_primary.is_some()
-            || parent_self_primary.is_some();
+            || parent_self_primary.is_some() || parent_triplet.is_some();
         if is_root_joined {
             // Entities are [self, joined] in that order. Self is accessed
             // via `__item` (iter_mut item on the struct's collection);
@@ -3820,20 +3894,21 @@ pub fn generate_root_methods(
             gh_stmts.push(quote! { let #name_ident= #code; });
         }
 
-        // Pre-residual setup for is_root_triplet_self: build __all_idx
-        // (concatenation of entity param indices, self-first) and
+        // Pre-residual setup for the owned-triplet forms ([hb, root.hbt]
+        // and [hb, parent.hbt]): build __all_idx (concatenation of entity
+        // param indices, self-first, joined co-entity second) and
         // __entity_offsets once per __item iteration, so per-residual
         // TripletBlock.add_residual_cross calls can pass them directly.
-        if is_root_triplet_self {
+        if is_root_triplet_self || parent_triplet.is_some() {
             let self_layout = registry_lookup(&sc.struct_name)
                 .ok_or_else(|| syn::Error::new_spanned(&struct_ident,
                     format!("type `{}` not in registry", sc.struct_name)))?;
-            let root_layout = registry_lookup(&root_type_str)
+            let joined_layout = registry_lookup(&joined_type)
                 .ok_or_else(|| syn::Error::new_spanned(&struct_ident,
-                    format!("root type `{}` not in registry", root_type_str)))?;
+                    format!("coupled type `{}` not in registry", joined_type)))?;
             // param_slots walks #[arael(component)] fields, so component
             // params are wired into the span like direct ones.
-            let _ = (&self_layout, &root_layout);
+            let _ = (&self_layout, &joined_layout);
             let mut self_count = 0usize;
             let mut self_idx_stmts: Vec<TokenStream2> = Vec::new();
             for slot in param_slots(&sc.struct_name) {
@@ -3847,26 +3922,26 @@ pub fn generate_root_methods(
                 });
                 self_count += size;
             }
-            let mut root_count = 0usize;
-            let mut root_idx_stmts: Vec<TokenStream2> = Vec::new();
-            for slot in param_slots(&root_type_str) {
+            let mut joined_count = 0usize;
+            let mut joined_idx_stmts: Vec<TokenStream2> = Vec::new();
+            for slot in param_slots(&joined_type) {
                 let size = param_slot_size(&slot.sft);
                 if size == 0 { continue; }
-                let offset = self_count + root_count;
+                let offset = self_count + joined_count;
                 let end = offset + size;
-                let access = slot_access(quote! { self }, &slot.path);
-                root_idx_stmts.push(quote! {
+                let access = slot_access(joined_accessor.clone(), &slot.path);
+                joined_idx_stmts.push(quote! {
                     #access.write_indices(&mut __all_idx[#offset..#end]);
                 });
-                root_count += size;
+                joined_count += size;
             }
-            let total = self_count + root_count;
+            let total = self_count + joined_count;
             let sc_u32 = self_count as u32;
             let total_u32 = total as u32;
             gh_stmts.push(quote! {
                 let mut __all_idx = [0u32; #total];
                 #(#self_idx_stmts)*
-                #(#root_idx_stmts)*
+                #(#joined_idx_stmts)*
                 let __entity_offsets: [u32; 3] = [0u32, #sc_u32, #total_u32];
             });
         }
@@ -4112,12 +4187,15 @@ pub fn generate_root_methods(
                         }
                         _ => quote! {},
                     };
-                    // The (self, root) cross pairs need a declared triplet
-                    // and both spans live.
-                    let cross_call = match (&root_triplet_field, &self_entry, &root_entry) {
+                    // The (self, joined) cross pairs need a declared
+                    // triplet -- the root's or the parent's -- and both
+                    // spans live.
+                    let owned_triplet: Option<syn::Ident> = root_triplet_field.clone()
+                        .or_else(|| parent_triplet.as_ref().map(|(i, _)| i.clone()));
+                    let cross_call = match (&owned_triplet, &self_entry, &root_entry) {
                         (Some(triplet_ident), Some((_, _, ss, sc_)), Some((_, _, rs, rc)))
                             if !span_zero(*ss, *sc_) && !span_zero(*rs, *rc) => quote! {
-                                self.#triplet_ident
+                                #joined_accessor.#triplet_ident
                                     .#m_cross(
                                         #wr,
                                         &__all_idx,
@@ -5938,8 +6016,12 @@ fn interpret_constraint_body(
         // resolves `<self_lc>.*` in the body.
         let has_root_triplet_block = constraint.block_fields.iter()
             .any(|bf| bf.starts_with("root."));
-        let is_pure_multi_cross =
-            is_multi_cross_early && !is_remote && !has_root_triplet_block;
+        // `[hb, parent.<triplet>]`: a parent-owned triplet in the
+        // SECONDARY slot (a `parent.` primary is is_parent_self_primary).
+        let has_parent_triplet_block = !is_parent_self_primary
+            && constraint.block_fields.iter().any(|bf| bf.starts_with("parent."));
+        let is_pure_multi_cross = is_multi_cross_early && !is_remote
+            && !has_root_triplet_block && !has_parent_triplet_block;
         if is_parent_self_primary {
             // Self alias binds the constraint struct; the `parent =`
             // alias (default: the parent type, lowercased) binds the
@@ -5952,6 +6034,16 @@ fn interpret_constraint_body(
             var_infos.push((pvar, parent_type));
         } else if a_type != "__triplet__" && !is_pure_multi_cross {
             var_infos.push((parent_name.clone(), a_type.clone()));
+        }
+        if has_parent_triplet_block {
+            // The containing parent joins as a coupled entity, bound by
+            // its lowercased type name (like the root in the root forms;
+            // `parent =` renames the SELF alias here, not this binding).
+            // Pushed after the self alias so the param-symbol order is
+            // [self..., parent...], matching the entity spans.
+            let parent_type = find_containing_parent(root_type_name, &struct_name.to_string())
+                .unwrap_or_else(|| root_type_name.to_string());
+            var_infos.push((parent_type.to_lowercase(), parent_type));
         }
         let root_var = root_type_name.to_lowercase();
         var_infos.push((root_var, root_type_name.to_string()));

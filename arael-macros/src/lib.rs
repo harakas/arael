@@ -119,6 +119,11 @@ struct SymLayout {
     /// precision at this holding -- the layout alone loses the spelling,
     /// so the root check resolves "generic" through these records.
     inst_precisions: Vec<(String, String, String)>,
+    /// Names of `TripletBlock<T>` fields on this struct. Lets a child's
+    /// `[hb, parent.<field>]` block spec validate the named field against
+    /// the containing parent (block fields are `Skip` in `fields`, so the
+    /// name is otherwise unrecoverable from the layout).
+    triplet_block_fields: Vec<String>,
 }
 
 /// Total optimizable scalars of a registered type, following
@@ -425,6 +430,7 @@ fn builtin_component_layout(name: &str) -> Option<SymLayout> {
             suspect_wrappers: Vec::new(),
             block_precision: None,
             inst_precisions: Vec::new(),
+            triplet_block_fields: Vec::new(),
         }),
         "UnitVecParam" | "UnitVecParamF" => Some(SymLayout {
             fields: vec![
@@ -456,6 +462,7 @@ fn builtin_component_layout(name: &str) -> Option<SymLayout> {
             suspect_wrappers: Vec::new(),
             block_precision: None,
             inst_precisions: Vec::new(),
+            triplet_block_fields: Vec::new(),
         }),
         _ => None,
     }
@@ -1188,6 +1195,7 @@ fn register_model_layout(input: &syn::DeriveInput) -> syn::Result<u32> {
     let mut suspect_wrappers_reg: Vec<(String, String, String)> = Vec::new();
     let mut block_precision_reg: Option<(String, String)> = None;
     let mut inst_precisions_reg: Vec<(String, String, String)> = Vec::new();
+    let mut triplet_block_fields_reg: Vec<String> = Vec::new();
     let mut constraint_index_field_reg: Option<String> = None;
     // Detect SelfBlock<Self> field — this struct's canonical grad+diag home.
     let mut self_block_field_reg: Option<String> = None;
@@ -1269,6 +1277,16 @@ fn register_model_layout(input: &syn::DeriveInput) -> syn::Result<u32> {
         }
         if let Some((elem, fl)) = inst_precision_of(&field.ty) {
             inst_precisions_reg.push((field_name.clone(), elem, fl));
+        }
+        {
+            let bare = if let Some((inner, _)) = extract_wrapper_inner(&field.ty, "Option") {
+                inner
+            } else { &field.ty };
+            if let syn::Type::Path(tp) = bare
+                && let Some(seg) = tp.path.segments.last()
+                && seg.ident == "TripletBlock" {
+                    triplet_block_fields_reg.push(field_name.clone());
+                }
         }
         // Detect euler angle param types by type name (in addition to attribute)
         if let Some(ea_kind) = is_euler_angle_param_type(&field.ty) {
@@ -1419,6 +1437,7 @@ fn register_model_layout(input: &syn::DeriveInput) -> syn::Result<u32> {
         suspect_wrappers: suspect_wrappers_reg,
         block_precision: block_precision_reg,
         inst_precisions: inst_precisions_reg,
+        triplet_block_fields: triplet_block_fields_reg,
     }).map_err(|msg| syn::Error::new_spanned(name, msg))?;
 
     Ok(param_count)
@@ -1447,6 +1466,7 @@ fn register_enum_layout(name: &syn::Ident) -> syn::Result<()> {
         suspect_wrappers: Vec::new(),
         block_precision: None,
         inst_precisions: Vec::new(),
+        triplet_block_fields: Vec::new(),
     }).map_err(|msg| syn::Error::new_spanned(name, msg))
 }
 

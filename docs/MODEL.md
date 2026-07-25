@@ -140,7 +140,7 @@ reach:
 |---|---|---|
 | **`SelfBlock<T>`** | grad + upper-triangular Hessian for entity T's own params | **mandatory on every params-having struct.** Holds the per-entity gradient and the (T, T) block of the Hessian |
 | **`CrossBlock<A, B>`** | rectangular (A, B) cross Hessian only | **default for cross-entity Hessian pairs.** Packed in-place writes, cheap to assemble. One entry per unordered (A, B) entity pair in a constraint; (A, A) / (B, B) diagonals stay on each entity's SelfBlock |
-| **`TripletBlock<T>`** | COO across-entity pairs | **always placed on the root** (declare one `hbt: TripletBlock<T>` on the root struct; constraints reach it via the `root.<field>` block spec). Two canonical uses: (1) the root has its own `Param` fields and constraints couple entity params with root params -- the (entity, root) cross pair lives in the root's TripletBlock; (2) runtime-parsed residuals via `ExtendedModel` that can't enumerate per-pair CrossBlocks statically -- `extended_compute*` writes into the root's TripletBlock directly. Never on a non-root struct. **Noticeably slower to assemble** than a multi-CrossBlock because every entry is a `Vec` push. When the constraint touches ONLY root params (the entity is pure data), skip the triplet entirely: name the root's SelfBlock as the primary block, `constraint(root.hb, ...)` -- dense writes, no COO |
+| **`TripletBlock<T>`** | COO across-entity pairs | **placed on the coupled co-entity** -- usually the root (declare one `hbt: TripletBlock<T>` on the root struct; constraints reach it via the `root.<field>` block spec), or on a containing parent for the `[hb, parent.<field>]` form. Canonical uses: (1) the root (or parent) has its own `Param` fields and constraints couple entity params with them -- the cross pair lives in that TripletBlock; (2) runtime-parsed residuals via `ExtendedModel` that can't enumerate per-pair CrossBlocks statically -- `extended_compute*` writes into the root's TripletBlock directly. **Noticeably slower to assemble** than a multi-CrossBlock because every entry is a `Vec` push. When the constraint touches ONLY root params (the entity is pure data), skip the triplet entirely: name the root's SelfBlock as the primary block, `constraint(root.hb, ...)` -- dense writes, no COO |
 
 `SelfBlock<Self>` is required on every Model that has parameters --
 failing to declare it is a compile-time error. Grad and diagonal
@@ -471,6 +471,7 @@ any Model struct:
 #[arael(constraint([hb_pose, root.hbt], { body }))]     // self-primary + root-owned TripletBlock
 #[arael(constraint(root.hb, { body }))]                 // root's own SelfBlock (root params only)
 #[arael(constraint(parent.hb, { body }))]               // containing parent's SelfBlock (parent params only)
+#[arael(constraint([hb, parent.hbt], { body }))]        // self-primary + parent-owned TripletBlock
 ```
 
 The positional form carries a single block only. Any N ≥ 2 block
@@ -508,6 +509,14 @@ segment:
   If the containing parent turns out to be the root, use `root.hb`.
   See examples/robust_curve_fitting.rs -- observations nest directly
   under the `Curve` they fit, no container struct, no Ref.
+- **`parent.<triplet>`** in the SECONDARY slot (`[hb, parent.<field>]`)
+  -- the non-root analog of `[hb, root.<triplet>]`: the entity has its
+  OWN params (SelfBlock primary), the body also touches the containing
+  parent's params, and the (entity, parent) cross pairs go to a
+  `TripletBlock<T>` field on that parent. Diagonals land on each
+  side's own SelfBlock. The parent binds as its lowercased type name;
+  exactly two block fields are allowed in this form. If the containing
+  parent is the root, use `[hb, root.<field>]`.
 
 ```rust,ignore
 // Remote SelfBlock: PointFrine lives on PointLandmark but writes

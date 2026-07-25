@@ -1,0 +1,15 @@
+error: $DIR/tests/constraint_attr_errors/parent_triplet_root_parent.rs:7: `Obs`'s containing parent is the root -- use `constraint([hb, root.hbt], ...)`
+  --> tests/constraint_attr_errors/parent_triplet_root_parent.rs:17:1
+   |
+17 | #[arael::model]
+   | ^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused import: `TripletBlock`
+ --> tests/constraint_attr_errors/parent_triplet_root_parent.rs:4:38
+  |
+4 | use arael::model::{Param, SelfBlock, TripletBlock};
+  |                                      ^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

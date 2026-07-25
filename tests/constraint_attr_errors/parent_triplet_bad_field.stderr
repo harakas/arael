@@ -1,0 +1,7 @@
+error: $DIR/tests/constraint_attr_errors/parent_triplet_bad_field.rs:7: `parent.nosuch` does not name a `TripletBlock` field on the containing parent `Curve` -- the (entity, parent) cross pairs need one to live in
+  --> tests/constraint_attr_errors/parent_triplet_bad_field.rs:24:1
+   |
+24 | #[arael::model]
+   | ^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)

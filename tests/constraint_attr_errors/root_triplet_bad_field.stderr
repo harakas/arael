@@ -1,0 +1,15 @@
+error: $DIR/tests/constraint_attr_errors/root_triplet_bad_field.rs:7: `root.nosuch` does not name a `TripletBlock` field on the root `W` -- the (entity, root) cross pairs need one to live in
+  --> tests/constraint_attr_errors/root_triplet_bad_field.rs:16:1
+   |
+16 | #[arael::model]
+   | ^^^^^^^^^^^^^^^
+   |
+   = note: this error originates in the attribute macro `arael::model` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unused import: `TripletBlock`
+ --> tests/constraint_attr_errors/root_triplet_bad_field.rs:4:38
+  |
+4 | use arael::model::{Param, SelfBlock, TripletBlock};
+  |                                      ^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
