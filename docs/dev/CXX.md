@@ -543,13 +543,31 @@ compiles tests/cxx_math/main.cpp with `-ffp-contract=off` and compares
 relative error 1.6e-16 (~1 ulp; same libm); skips with a note when no
 C++ compiler is present.
 
-**Stage 2 -- cargo-arael skeleton, scalar-only end-to-end.**
-The crate, `export` driving the sidecar build, the JSON-to-IR parser,
-`check`, and the ffi/hpp emitters covering: root, one Vec collection,
-scalar data + scalar Param fields, solve_dense,
-LmConfig/LmResult/status, validate, last_error, generated capi crate
-scaffolding. `cxx-tests/` workspace with the cc-built parity test.
-This is the walking skeleton: everything after is more field kinds.
+**Stage 2 -- cargo-arael skeleton, scalar-only end-to-end. [DONE 2026-07-25]**
+The crate (lib + `cargo-arael` bin, workspace member), `export`
+driving the sidecar build (touches sources to defeat the fingerprint,
+scans Cargo.toml for the crate name + arael dep, rewrites relative
+path deps one level deeper), `check` (regenerate + diff, refuses to
+overwrite non-generated files; vendored math headers get a marker
+line), serde IR, ffi + hpp emitters covering: root, refs::Vec and
+std::vec::Vec collections (flavor from the spelling; ambiguous bare
+`Vec<` is a loud error), scalar data + scalar Param fields, opaque
+listing, solve_dense/solve_sparse with catch_unwind -> status codes,
+sentinel-based LmConfig (UINT32_MAX/NaN = keep preset), LmResult,
+validate, last_error. `Param<T>` gained `Default` in arael (blocks
+already had it) for the push()-returns-zeroed contract.
+`cxx-tests/` workspace: fixture model (root params + root.hb
+observations in std vec + own-param entities in refs::Vec + opaque
+String), committed generated tree, parity test comparing EVERY value
+(costs, params, statuses, iteration counts, failure path) exactly
+against the same problem driven from Rust, plus `check`-as-a-test.
+Golden-file tests in cargo-arael pin both emitters byte-exact.
+THE SKELETON'S FIRST CATCH: a real arael bug -- a root SelfBlock
+declared after its collections panicked every sparse solve ("param
+block spans overlap or are unsorted"; span emission follows the block
+FIELD's position, offsets follow the params'). Fixed by sorting in
+block_partition_from_spans; regression test
+tests/root_block_declared_late.rs.
 
 **Stage 3 -- full field coverage.**
 Math-typed fields and params; euler/quat/transform semantic accessors

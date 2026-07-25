@@ -1,0 +1,43 @@
+{
+  "schema": 1,
+  "root": "Fit",
+  "precision": "f64",
+  "types": {
+    "Fit": {
+      "role": "root",
+      "param_count": 2,
+      "self_block": "hb",
+      "fields": [
+        {"name": "m", "kind": "param", "of": "f64", "params": 1},
+        {"name": "c", "kind": "param", "of": "f64", "params": 1},
+        {"name": "tag", "kind": "opaque", "of": "String"},
+        {"name": "obs", "kind": "collection", "container": "vec", "of": "Obs", "spelled": "std::vec::Vec<Obs>"},
+        {"name": "items", "kind": "collection", "container": "vec", "of": "N", "spelled": "refs::Vec<N>"},
+        {"name": "hb", "kind": "self_block", "scalar": "f64"}
+      ]
+    },
+    "N": {
+      "role": "entity",
+      "param_count": 1,
+      "self_block": "hb",
+      "fields": [
+        {"name": "v", "kind": "param", "of": "f64", "params": 1},
+        {"name": "t", "kind": "data", "of": "f64"},
+        {"name": "w", "kind": "data", "of": "f64"},
+        {"name": "hb", "kind": "self_block", "scalar": "f64"}
+      ]
+    },
+    "Obs": {
+      "role": "entity",
+      "param_count": 0,
+      "fields": [
+        {"name": "x", "kind": "data", "of": "f64"},
+        {"name": "y", "kind": "data", "of": "f64"}
+      ]
+    }
+  },
+  "constraints": [
+    {"on": "Obs", "label": "Obs", "file": "model/src/lib.rs", "line": 12},
+    {"on": "N", "label": "N", "file": "model/src/lib.rs", "line": 23}
+  ]
+}

@@ -965,6 +965,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "cargo-arael"
+version = "0.7.2"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "cast"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

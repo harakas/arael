@@ -1,0 +1,18 @@
+[package]
+name = "cargo-arael"
+version = "0.7.2"
+edition = "2024"
+authors = ["Indrek Mandre <indrek@mare.ee>"]
+description = "Cargo subcommand generating C++/Python interfaces for arael root models"
+license = "MIT"
+repository = "https://github.com/harakas/arael"
+keywords = ["cargo", "ffi", "code-generation", "optimization"]
+categories = ["development-tools::cargo-plugins", "development-tools::ffi"]
+
+[[bin]]
+name = "cargo-arael"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
