@@ -4,3 +4,5 @@
 arael-sketch/dist/
 tmp/
 __pycache__
+benchmarks/robust_pgo/
+benchmarks/registration/
