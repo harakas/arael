@@ -36,6 +36,11 @@ jobs:
       # only place it can be exercised.
       - name: Run cross-crate export tests
         run: cd export-tests && cargo test
+      # The generated C++ interface: builds the committed capi crate,
+      # compiles the C++ parity program against it, and compares the
+      # solve against Rust exactly (cxx-tests/runner/tests/parity.rs).
+      - name: Run generated C++ interface tests
+        run: cd cxx-tests && cargo test
 
   # Optional solver backends are behind cargo features and invisible to the
   # default build -- they must be compiled and tested explicitly (REVIEW.md
