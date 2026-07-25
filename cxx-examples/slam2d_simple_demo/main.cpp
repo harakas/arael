@@ -19,7 +19,7 @@
 #include <utility>
 #include <vector>
 
-using namespace arael;
+using namespace slam2d_simple;
 
 struct Cfg {
     int n_poses = 20;

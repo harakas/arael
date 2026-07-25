@@ -5,7 +5,7 @@
 #include <cstring>
 #include <string>
 
-using namespace arael;
+using namespace cxx_fit;
 
 static void p(const char* n, double v) { std::printf("%s %.17e\n", n, v); }
 static void pi(const char* n, long v) { std::printf("%s %ld\n", n, v); }

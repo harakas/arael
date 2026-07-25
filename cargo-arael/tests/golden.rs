@@ -22,7 +22,7 @@ fn ffi_shim_matches_golden() {
 
 #[test]
 fn hpp_matches_golden() {
-    let got = emit_hpp::emit(&model()).unwrap();
+    let got = emit_hpp::emit(&model(), "cxx_fit").unwrap();
     let want = include_str!("golden/fit.hpp");
     assert!(got == want,
         "hpp emitter drifted from golden (see file header for regeneration)");

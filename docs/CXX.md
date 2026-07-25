@@ -44,7 +44,7 @@ alongside the C++17 compiler. Without CMake: compile against
 
 ```cpp
 #include <mymodel.hpp>
-using namespace arael;
+using namespace mymodel;   // the model AND the re-exported arael math
 
 Fit fit;
 auto p = fit.poses().push_back();       // stable pointer wrapper
@@ -65,6 +65,14 @@ else
 ```
 
 ## The API surface
+
+The generated interface lives in a namespace named after the MODEL
+CRATE (hyphens as underscores; override with `namespace = "..."`
+under `[package.metadata.arael]`) -- the model is the project's, not
+arael's. It re-exports the arael value types it uses, so one
+`using namespace mymodel;` brings both; the vendored headers
+themselves stay in `namespace arael`. Different generated models
+coexist in one translation unit and one binary.
 
 Naming: an entity class carries the model type's own name (`Pose` is
 a thin stable pointer into its collection); `PoseRef` is the typed

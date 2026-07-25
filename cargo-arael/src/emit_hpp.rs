@@ -283,7 +283,7 @@ fn deps(t: &Type) -> Vec<&str> {
         .collect()
 }
 
-pub fn emit(model: &Model) -> Result<String, String> {
+pub fn emit(model: &Model, ns: &str) -> Result<String, String> {
     let root = &model.root;
     let root_sn = snake(root);
     let fp = float_cpp(&model.precision);
@@ -420,7 +420,35 @@ public:
 #include \"arael/result.hpp\"
 #include \"arael/solver.hpp\"
 
-namespace arael {{
+namespace {ns} {{
+
+/// The arael value vocabulary this interface uses, re-exported so a
+/// single `using namespace {ns};` brings the model AND the math.
+using arael::vect2;
+using arael::vect3;
+using arael::matrix2;
+using arael::matrix3;
+using arael::quatern;
+using arael::vect2f;
+using arael::vect2d;
+using arael::vect3f;
+using arael::vect3d;
+using arael::matrix2f;
+using arael::matrix2d;
+using arael::matrix3f;
+using arael::matrix3d;
+using arael::quaternf;
+using arael::quaternd;
+using arael::option;
+using arael::result;
+using arael::LmStatus;
+using arael::LmPreset;
+using arael::LmConfigT;
+using arael::LmResultT;
+using arael::SolveResultT;
+using arael::SolveError;
+using arael::CovMode;
+using arael::CovError;
 
 /// Instantiations of the shared solver surface (arael/solver.hpp) at
 /// this model's precision, plus the config constructor that fetches
@@ -496,6 +524,6 @@ private:
     ffi::{root}* h_;
 }};
 
-}} // namespace arael
+}} // namespace {ns}
 "))
 }

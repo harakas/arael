@@ -707,7 +707,11 @@ All questions settled; the plan is ready to execute.
     only instantiates aliases and wires the config ctor to its
     root's FFI. Layout parity is pinned by the defaults comparison in
     the parity test (field-exact vs Rust LmConfig::default()).
-    Caveat: per-root aliases still mean one generated header per
-    translation unit. Known gaps noted for later: arena
+    The generated interface lives in a namespace named after the
+    model crate (override: [package.metadata.arael] namespace), with
+    the arael value types re-exported inside -- the model is the
+    project's, not arael's, and per-model namespaces dissolve the
+    old one-generated-header-per-TU caveat (C symbols were already
+    root-prefixed). Known gaps noted for later: arena
     views cannot be iterated without retained refs (needs a cursor in
     the C ABI), and there is no const view of the model.

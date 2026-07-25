@@ -3,7 +3,7 @@
 #include <fit.hpp>
 #include <cstdio>
 
-using namespace arael;
+using namespace cxx_fit;
 
 int main() {
     Fit fit;

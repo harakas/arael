@@ -20,14 +20,18 @@ const MATH_HEADERS: &[(&str, &str)] = &[
     ("solver.hpp", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/headers/arael/solver.hpp"))),
 ];
 
-/// Minimal Cargo.toml scan: `name = "..."` in [package], and the
-/// `arael = ...` dependency line from [dependencies].
-fn scan_manifest(dir: &Path) -> Result<(String, String), String> {
+/// Minimal Cargo.toml scan: `name = "..."` in [package], the
+/// `arael = ...` dependency line from [dependencies], and an optional
+/// `namespace = "..."` under [package.metadata.arael] (the C++
+/// namespace; defaults to the crate name with hyphens as
+/// underscores).
+fn scan_manifest(dir: &Path) -> Result<(String, String, Option<String>), String> {
     let text = std::fs::read_to_string(dir.join("Cargo.toml"))
         .map_err(|e| format!("read {}/Cargo.toml: {e}", dir.display()))?;
     let mut section = String::new();
     let mut name = None;
     let mut arael_dep = None;
+    let mut namespace = None;
     for line in text.lines() {
         let t = line.trim();
         if t.starts_with('[') {
@@ -39,6 +43,11 @@ fn scan_manifest(dir: &Path) -> Result<(String, String), String> {
                 name = Some(v.to_string());
             }
         }
+        if section == "[package.metadata.arael]" && t.starts_with("namespace") {
+            if let Some(v) = t.split('"').nth(1) {
+                namespace = Some(v.to_string());
+            }
+        }
         if section == "[dependencies]"
             && (t.starts_with("arael ") || t.starts_with("arael="))
         {
@@ -48,14 +57,20 @@ fn scan_manifest(dir: &Path) -> Result<(String, String), String> {
     }
     let name = name.ok_or("no [package] name in Cargo.toml")?;
     let arael_dep = arael_dep.ok_or("no `arael` entry under [dependencies]")?;
-    Ok((name, arael_dep))
+    Ok((name, arael_dep, namespace))
 }
 
 /// The generated files for one model, as (relative path, content).
-pub fn generate(model: &Model, crate_name: &str, arael_dep: &str) -> Result<Vec<(PathBuf, String)>, String> {
+pub fn generate(
+    model: &Model,
+    crate_name: &str,
+    arael_dep: &str,
+    namespace: Option<&str>,
+) -> Result<Vec<(PathBuf, String)>, String> {
     let rust_ident = crate_name.replace('-', "_");
+    let ns = namespace.map(str::to_string).unwrap_or_else(|| rust_ident.clone());
     let ffi = crate::emit_ffi::emit(model, &rust_ident)?;
-    let hpp = crate::emit_hpp::emit(model)?;
+    let hpp = crate::emit_hpp::emit(model, &ns)?;
     let root_sn = crate::ir::snake(&model.root);
 
     let arael_dep = if arael_dep.contains("path = \"") && !arael_dep.contains("path = \"/") {
@@ -191,10 +206,10 @@ fn pick<'m>(models: &'m [Model], root: Option<&str>) -> Result<&'m Model, String
 }
 
 pub fn run_export(dir: &Path, root: Option<&str>) -> Result<(), String> {
-    let (crate_name, arael_dep) = scan_manifest(dir)?;
+    let (crate_name, arael_dep, ns) = scan_manifest(dir)?;
     let models = harvest(dir)?;
     let model = pick(&models, root)?;
-    let files = generate(model, &crate_name, &arael_dep)?;
+    let files = generate(model, &crate_name, &arael_dep, ns.as_deref())?;
     for (rel, content) in &files {
         let path = dir.join(rel);
         if path.exists() {
@@ -215,10 +230,10 @@ pub fn run_export(dir: &Path, root: Option<&str>) -> Result<(), String> {
 }
 
 pub fn run_check(dir: &Path, root: Option<&str>) -> Result<(), String> {
-    let (crate_name, arael_dep) = scan_manifest(dir)?;
+    let (crate_name, arael_dep, ns) = scan_manifest(dir)?;
     let models = harvest(dir)?;
     let model = pick(&models, root)?;
-    let files = generate(model, &crate_name, &arael_dep)?;
+    let files = generate(model, &crate_name, &arael_dep, ns.as_deref())?;
     let mut stale = Vec::new();
     for (rel, content) in &files {
         let path = dir.join(rel);
