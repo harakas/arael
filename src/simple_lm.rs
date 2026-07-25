@@ -7553,7 +7553,7 @@ mod tests {
             }
         }
         let r = solve_sparse_eigen(&[0.0,0.0], &mut QP,
-            &LmConfig{abs_precision:1e-10, max_iters:100, initial_lambda:0.001, verbose:false, ..Default::default()});
+            &LmConfig{abs_precision:1e-10, max_iters:100, initial_lambda:0.001, verbose:false, ..Default::default()}).unwrap();
         assert!((r.x[0]-3.0).abs()<1e-6, "x={}", r.x[0]);
         assert!((r.x[1]-7.0).abs()<1e-6, "y={}", r.x[1]);
         assert!(r.end_cost < 1e-10);
@@ -7600,8 +7600,8 @@ mod tests {
             }
         }
         let cfg = LmConfig{abs_precision:1e-10, max_iters:100, initial_lambda:0.001, verbose:false, ..Default::default()};
-        let rd = solve(&[0.0;4], &mut CP, &cfg);
-        let re = solve_sparse_eigen(&[0.0;4], &mut CP, &cfg);
+        let rd = solve(&[0.0;4], &mut CP, &cfg).unwrap();
+        let re = solve_sparse_eigen(&[0.0;4], &mut CP, &cfg).unwrap();
         for i in 0..4 {
             assert!((rd.x[i]-re.x[i]).abs()<1e-6, "x[{}]: dense={}, eigen={}", i, rd.x[i], re.x[i]);
         }
@@ -7635,7 +7635,7 @@ mod tests {
             }
         }
         let r = solve_sparse_cholmod(&[0.0,0.0], &mut QP,
-            &LmConfig{abs_precision:1e-10, max_iters:100, initial_lambda:0.001, verbose:false, ..Default::default()});
+            &LmConfig{abs_precision:1e-10, max_iters:100, initial_lambda:0.001, verbose:false, ..Default::default()}).unwrap();
         assert!((r.x[0]-3.0).abs()<1e-6, "x={}", r.x[0]);
         assert!((r.x[1]-7.0).abs()<1e-6, "y={}", r.x[1]);
         assert!(r.end_cost < 1e-10);
@@ -7669,7 +7669,7 @@ mod tests {
             }
         }
         let r = solve_sparse_cholmod_supernodal(&[0.0,0.0], &mut QP,
-            &LmConfig{abs_precision:1e-10, max_iters:100, initial_lambda:0.001, verbose:false, ..Default::default()});
+            &LmConfig{abs_precision:1e-10, max_iters:100, initial_lambda:0.001, verbose:false, ..Default::default()}).unwrap();
         assert!((r.x[0]-3.0).abs()<1e-6, "x={}", r.x[0]);
         assert!((r.x[1]-7.0).abs()<1e-6, "y={}", r.x[1]);
         assert!(r.end_cost < 1e-10);
