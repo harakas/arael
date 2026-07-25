@@ -1111,6 +1111,52 @@ impl<T> Arena<T> {
         self.count = 0;
     }
 
+    /// The first live element's ref, or None when empty. With
+    /// [`Self::next_ref`], a resumable cursor over the live slots in
+    /// slot order -- the iteration shape FFI can carry.
+    pub fn first_ref(&self) -> Option<Ref<T>> {
+        self.next_ref_from(0)
+    }
+
+    /// The next live element after `r`'s slot, or None past the end.
+    /// `r` itself need not be live (its slot may have been removed
+    /// mid-walk).
+    pub fn next_ref(&self, r: Ref<T>) -> Option<Ref<T>> {
+        self.next_ref_from(r.index() as usize + 1)
+    }
+
+    fn next_ref_from(&self, start: usize) -> Option<Ref<T>> {
+        for i in start..self.slots.len() {
+            let cell = self.slots.get(i)?;
+            if matches!(cell.slot, Slot::Occupied(_)) {
+                return Some(Ref::new_gen(i as u32, cell.generation));
+            }
+        }
+        None
+    }
+
+    /// The last live element's ref, or None when empty -- the backward
+    /// cursor's starting point.
+    pub fn last_ref(&self) -> Option<Ref<T>> {
+        self.prev_ref_before(self.slots.len())
+    }
+
+    /// The previous live element before `r`'s slot, or None past the
+    /// front. Like [`Self::next_ref`], `r` itself need not be live.
+    pub fn prev_ref(&self, r: Ref<T>) -> Option<Ref<T>> {
+        self.prev_ref_before(r.index() as usize)
+    }
+
+    fn prev_ref_before(&self, end: usize) -> Option<Ref<T>> {
+        for i in (0..end.min(self.slots.len())).rev() {
+            let cell = self.slots.get(i)?;
+            if matches!(cell.slot, Slot::Occupied(_)) {
+                return Some(Ref::new_gen(i as u32, cell.generation));
+            }
+        }
+        None
+    }
+
     /// Returns an iterator over references to live elements, skipping freed slots.
     pub fn iter(&self) -> ArenaIter<'_, T> {
         ArenaIter { inner: self.slots.iter() }

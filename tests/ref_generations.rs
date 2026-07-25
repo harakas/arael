@@ -383,3 +383,32 @@ fn a_removed_element_stays_removed_after_a_round_trip() {
     assert!(back.landmarks.get(lm[0]).is_some(), "the survivors do not");
     assert!(back.landmarks.get(lm[2]).is_some());
 }
+
+#[test]
+fn arena_cursor_walks_live_slots() {
+    use arael::refs::Arena;
+    let mut a: Arena<i32> = Arena::new();
+    assert!(a.first_ref().is_none());
+    let r0 = a.push(10);
+    let r1 = a.push(20);
+    let r2 = a.push(30);
+    a.remove(r1).unwrap();
+
+    let f = a.first_ref().unwrap();
+    assert_eq!(f, r0);
+    let n = a.next_ref(f).unwrap();
+    assert_eq!(n, r2);
+    assert!(a.next_ref(n).is_none());
+
+    // Backward cursor mirrors the forward one.
+    assert_eq!(a.last_ref().unwrap(), r2);
+    assert_eq!(a.prev_ref(r2).unwrap(), r0);
+    assert!(a.prev_ref(r0).is_none());
+
+    // The cursor resumes past a slot removed mid-walk.
+    a.remove(r0).unwrap();
+    assert_eq!(a.first_ref().unwrap(), r2);
+    assert_eq!(a.next_ref(r0).unwrap(), r2);
+    assert_eq!(a.last_ref().unwrap(), r2);
+    assert_eq!(a.iter().count(), 1);
+}
