@@ -36,7 +36,7 @@ int main() {
 
     LmConfig cfg;
     cfg.max_iters = 50;
-    LmResult r = fit.solve_dense(cfg);
+    LmResult r = fit.solve_dense(cfg).value();
     pi("dense_status", long(r.status));
     p("dense_start", r.start_cost);
     p("dense_end", r.end_cost);
@@ -51,7 +51,7 @@ int main() {
 
     Fit fit2;
     fill(fit2);
-    LmResult r2 = fit2.solve_sparse(cfg);
+    LmResult r2 = fit2.solve_sparse(cfg).value();
     pi("sparse_status", long(r2.status));
     p("sparse_end", r2.end_cost);
     p("sparse_m", fit2.m());
@@ -102,7 +102,7 @@ int main() {
     f3.marks().remove(m1);
 
     pi("s3_clean", std::strlen(f3.validate()) == 0 ? 1 : 0);
-    LmResult r3 = f3.solve_dense(cfg);
+    LmResult r3 = f3.solve_dense(cfg).value();
     pi("s3_status", long(r3.status));
     p("s3_end", r3.end_cost);
     p("s3_cal_x", f3.cal().x);
@@ -120,8 +120,8 @@ int main() {
     p("s3_ea0_z", ea0.z);
     pi("s3_has_gps0", ps[0].info().has_gps() ? 1 : 0);
     pi("s3_has_gps1", ps[1].info().has_gps() ? 1 : 0);
-    p("s3_gps0_y", ps[0].info().gps().pos().y);
-    p("s3_gps0_isigma", double(ps[0].info().gps().isigma()));
+    p("s3_gps0_y", ps[0].info().gps()->pos().y);
+    p("s3_gps0_isigma", double(ps[0].info().gps()->isigma()));
     pi("s3_marks_len", f3.marks().size());
     p("s3_mark0_v", f3.marks().get(m0).v());
     p("s3_mark2_v", f3.marks().get(m2).v());
@@ -134,9 +134,9 @@ int main() {
     auto n = bad.items().push();
     n.set_t(1.0);
     n.set_w(1.0);
-    LmResult rb = bad.solve_dense(cfg);
-    pi("bad_status", long(rb.status));
-    pi("bad_has_error", std::strlen(bad.last_error()) > 0 ? 1 : 0);
+    SolveResult rb = bad.solve_dense(cfg);
+    pi("bad_status", long(rb.is_err() ? rb.error().status : rb.value().status));
+    pi("bad_has_error", rb.is_err() && std::strlen(rb.error().message) > 0 ? 1 : 0);
 
     return 0;
 }

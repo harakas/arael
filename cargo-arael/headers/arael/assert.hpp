@@ -1,0 +1,23 @@
+// arael_assert_true: an always-on invariant check. Unlike assert() it
+// is never compiled out -- a false expression prints the expression
+// text with its location to stderr and aborts.
+#pragma once
+
+#include <cstdio>
+#include <cstdlib>
+
+namespace arael {
+namespace detail {
+
+[[noreturn]] inline void assert_fail(const char* expr, const char* file, int line) {
+    std::fprintf(stderr, "arael: assertion failed: %s (%s:%d)\n", expr, file, line);
+    std::abort();
+}
+
+} // namespace detail
+} // namespace arael
+
+#define arael_assert_true(expr) \
+    do { \
+        if (!(expr)) ::arael::detail::assert_fail(#expr, __FILE__, __LINE__); \
+    } while (0)

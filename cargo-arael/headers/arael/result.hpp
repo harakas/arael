@@ -1,0 +1,68 @@
+// arael C++ support types: option<T> and result<R, E> -- the shapes
+// Rust's Option and Result take on the generated interface. Thin and
+// exception-free: reading the wrong side prints the failed check and
+// ABORTS (arael_assert_true -- always on, release builds included).
+// Both sides must be default-constructible (the interface uses PODs
+// and pointer wrappers).
+#pragma once
+
+#include "assert.hpp"
+
+namespace arael {
+
+/// Zero or one T, Rust-Option flavored.
+template<class T>
+class option {
+public:
+    option() : has_(false), v_() {}
+    option(T v) : has_(true), v_(v) {}
+    explicit operator bool() const { return has_; }
+    bool has_value() const { return has_; }
+    T& value() { arael_assert_true(has_); return v_; }
+    const T& value() const { arael_assert_true(has_); return v_; }
+    T& operator*() { return value(); }
+    const T& operator*() const { return value(); }
+    T* operator->() { arael_assert_true(has_); return &v_; }
+    const T* operator->() const { arael_assert_true(has_); return &v_; }
+
+private:
+    bool has_;
+    T v_;
+};
+
+/// Ok(R) or Err(E), Rust-Result flavored.
+template<class R, class E>
+class result {
+public:
+    static result ok(R v) {
+        result out;
+        out.ok_ = true;
+        out.r_ = v;
+        return out;
+    }
+    static result err(E e) {
+        result out;
+        out.ok_ = false;
+        out.e_ = e;
+        return out;
+    }
+    explicit operator bool() const { return ok_; }
+    bool is_ok() const { return ok_; }
+    bool is_err() const { return !ok_; }
+    R& value() { arael_assert_true(ok_); return r_; }
+    const R& value() const { arael_assert_true(ok_); return r_; }
+    E& error() { arael_assert_true(!ok_); return e_; }
+    const E& error() const { arael_assert_true(!ok_); return e_; }
+    R& operator*() { return value(); }
+    const R& operator*() const { return value(); }
+    R* operator->() { arael_assert_true(ok_); return &r_; }
+    const R* operator->() const { arael_assert_true(ok_); return &r_; }
+
+private:
+    result() : ok_(false), r_(), e_() {}
+    bool ok_;
+    R r_;
+    E e_;
+};
+
+} // namespace arael

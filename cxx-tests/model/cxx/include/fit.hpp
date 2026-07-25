@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <cmath>
 #include "arael/math.hpp"
+#include "arael/result.hpp"
 
 namespace arael {
 
@@ -50,12 +51,16 @@ struct LmResult {
     uint32_t accepted_iterations;
     LmStatus status;
     double lambda;
-
-    /// True for the healthy terminations (the solver returned a state
-    /// it stands behind).
-    bool ok() const { return static_cast<int32_t>(status) >= 0
-        && status != LmStatus::Aborted; }
 };
+
+/// The Err side of a solve: SolverFailed or Panicked, with the text
+/// from last_error() (valid until the next call on the model).
+struct SolveError {
+    LmStatus status;
+    const char* message;
+};
+
+using SolveResult = result<LmResult, SolveError>;
 
 /// Typed handle into the collection that issued it.
 struct Ref_GpsObs { uint32_t raw; };
@@ -162,8 +167,9 @@ int32_t fit_solve_sparse(Fit*, const LmConfig*, LmResult*);
 /// A `GpsObs` in its owner's storage; thin pointer wrapper.
 class GpsObsRef {
 public:
+    GpsObsRef() : h_(nullptr) {}
     explicit GpsObsRef(ffi::GpsObs* p) : h_(p) {}
-    /// False for an absent Option entity.
+    /// False when default-constructed (e.g. inside an empty option).
     bool valid() const { return h_ != nullptr; }
     vect3d pos() const { return ffi::gps_obs_pos(h_); }
     void set_pos(vect3d v) { ffi::gps_obs_set_pos(h_, v); }
@@ -176,13 +182,17 @@ private:
 /// A `Info` in its owner's storage; thin pointer wrapper.
 class InfoRef {
 public:
+    InfoRef() : h_(nullptr) {}
     explicit InfoRef(ffi::Info* p) : h_(p) {}
-    /// False for an absent Option entity.
+    /// False when default-constructed (e.g. inside an empty option).
     bool valid() const { return h_ != nullptr; }
     bool has_gps() const { return ffi::info_has_gps(h_); }
     GpsObsRef make_gps() { return GpsObsRef(ffi::info_make_gps(h_)); }
     void clear_gps() { ffi::info_clear_gps(h_); }
-    GpsObsRef gps() { return GpsObsRef(ffi::info_gps(h_)); }
+    option<GpsObsRef> gps() {
+        ffi::GpsObs* p = ffi::info_gps(h_);
+        return p ? option<GpsObsRef>(GpsObsRef(p)) : option<GpsObsRef>();
+    }
     // field `note`: String -- opaque, no accessor generated
 private:
     ffi::Info* h_;
@@ -191,8 +201,9 @@ private:
 /// A `N` in its owner's storage; thin pointer wrapper.
 class NRef {
 public:
+    NRef() : h_(nullptr) {}
     explicit NRef(ffi::N* p) : h_(p) {}
-    /// False for an absent Option entity.
+    /// False when default-constructed (e.g. inside an empty option).
     bool valid() const { return h_ != nullptr; }
     double v() const { return ffi::n_v(h_); }
     void set_v(double v) { ffi::n_set_v(h_, v); }
@@ -209,8 +220,9 @@ private:
 /// A `Obs` in its owner's storage; thin pointer wrapper.
 class ObsRef {
 public:
+    ObsRef() : h_(nullptr) {}
     explicit ObsRef(ffi::Obs* p) : h_(p) {}
-    /// False for an absent Option entity.
+    /// False when default-constructed (e.g. inside an empty option).
     bool valid() const { return h_ != nullptr; }
     double x() const { return ffi::obs_x(h_); }
     void set_x(double v) { ffi::obs_set_x(h_, v); }
@@ -223,8 +235,9 @@ private:
 /// A `Pose` in its owner's storage; thin pointer wrapper.
 class PoseRef {
 public:
+    PoseRef() : h_(nullptr) {}
     explicit PoseRef(ffi::Pose* p) : h_(p) {}
-    /// False for an absent Option entity.
+    /// False when default-constructed (e.g. inside an empty option).
     bool valid() const { return h_ != nullptr; }
     vect3d ea() const { return ffi::pose_ea(h_); }
     void set_ea(vect3d v) { ffi::pose_set_ea(h_, v); }
@@ -244,8 +257,9 @@ private:
 /// A `Tie` in its owner's storage; thin pointer wrapper.
 class TieRef {
 public:
+    TieRef() : h_(nullptr) {}
     explicit TieRef(ffi::Tie* p) : h_(p) {}
-    /// False for an absent Option entity.
+    /// False when default-constructed (e.g. inside an empty option).
     bool valid() const { return h_ != nullptr; }
     Ref_Pose a() const { return Ref_Pose{ffi::tie_a(h_)}; }
     void set_a(Ref_Pose r) { ffi::tie_set_a(h_, r.raw); }
@@ -354,15 +368,20 @@ public:
     FitTiesView ties() { return FitTiesView(h_); }
     FitMarksView marks() { return FitMarksView(h_); }
 
-    LmResult solve_dense(const LmConfig& cfg = LmConfig{}) {
+    /// Ok(LmResult) for every healthy termination, Err(SolveError) for
+    /// a solve failure (-1) or a caught panic (-2) -- the same split
+    /// Rust's SolveResult makes.
+    SolveResult solve_dense(const LmConfig& cfg = LmConfig{}) {
         LmResult r;
-        ffi::fit_solve_dense(h_, &cfg, &r);
-        return r;
+        int32_t code = ffi::fit_solve_dense(h_, &cfg, &r);
+        if (code >= 0) return SolveResult::ok(r);
+        return SolveResult::err({static_cast<LmStatus>(code), last_error()});
     }
-    LmResult solve_sparse(const LmConfig& cfg = LmConfig{}) {
+    SolveResult solve_sparse(const LmConfig& cfg = LmConfig{}) {
         LmResult r;
-        ffi::fit_solve_sparse(h_, &cfg, &r);
-        return r;
+        int32_t code = ffi::fit_solve_sparse(h_, &cfg, &r);
+        if (code >= 0) return SolveResult::ok(r);
+        return SolveResult::err({static_cast<LmStatus>(code), last_error()});
     }
     /// Empty string when the model is clean, the Diagnostic text
     /// otherwise. The returned pointer is valid until the next call on

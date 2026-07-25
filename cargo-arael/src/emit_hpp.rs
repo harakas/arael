@@ -164,7 +164,7 @@ public:
 /// `owner` names the opaque ffi pointer type the accessors take.
 fn field_cpp(
     cpp: &mut Cpp,
-    model: &Model,
+    _model: &Model,
     owner: &str,
     owner_methods: &mut String,
     f: &Field,
@@ -246,7 +246,10 @@ fn field_cpp(
                 "    bool has_{name}() const {{ return ffi::{prefix}_has_{name}(h_); }}\n\
                  \x20   {of}Ref make_{name}() {{ return {of}Ref(ffi::{prefix}_make_{name}(h_)); }}\n\
                  \x20   void clear_{name}() {{ ffi::{prefix}_clear_{name}(h_); }}\n\
-                 \x20   {of}Ref {name}() {{ return {of}Ref(ffi::{prefix}_{name}(h_)); }}\n"));
+                 \x20   option<{of}Ref> {name}() {{\n\
+                 \x20       ffi::{of}* p = ffi::{prefix}_{name}(h_);\n\
+                 \x20       return p ? option<{of}Ref>({of}Ref(p)) : option<{of}Ref>();\n\
+                 \x20   }}\n"));
         }
         "ref" => {
             cpp.ffi.push_str(&format!(
@@ -310,8 +313,9 @@ pub fn emit(model: &Model) -> Result<String, String> {
 "/// A `{tn}` in its owner's storage; thin pointer wrapper.
 class {tn}Ref {{
 public:
+    {tn}Ref() : h_(nullptr) {{}}
     explicit {tn}Ref(ffi::{tn}* p) : h_(p) {{}}
-    /// False for an absent Option entity.
+    /// False when default-constructed (e.g. inside an empty option).
     bool valid() const {{ return h_ != nullptr; }}
 {methods}private:
     ffi::{tn}* h_;
@@ -345,6 +349,7 @@ public:
 #include <cstdint>
 #include <cmath>
 #include \"arael/math.hpp\"
+#include \"arael/result.hpp\"
 
 namespace arael {{
 
@@ -390,12 +395,16 @@ struct LmResult {{
     uint32_t accepted_iterations;
     LmStatus status;
     {fp} lambda;
-
-    /// True for the healthy terminations (the solver returned a state
-    /// it stands behind).
-    bool ok() const {{ return static_cast<int32_t>(status) >= 0
-        && status != LmStatus::Aborted; }}
 }};
+
+/// The Err side of a solve: SolverFailed or Panicked, with the text
+/// from last_error() (valid until the next call on the model).
+struct SolveError {{
+    LmStatus status;
+    const char* message;
+}};
+
+using SolveResult = result<LmResult, SolveError>;
 
 {ref_decls}
 namespace ffi {{
@@ -422,15 +431,20 @@ public:
     }}
 
 {world_methods}
-    LmResult solve_dense(const LmConfig& cfg = LmConfig{{}}) {{
+    /// Ok(LmResult) for every healthy termination, Err(SolveError) for
+    /// a solve failure (-1) or a caught panic (-2) -- the same split
+    /// Rust's SolveResult makes.
+    SolveResult solve_dense(const LmConfig& cfg = LmConfig{{}}) {{
         LmResult r;
-        ffi::{root_sn}_solve_dense(h_, &cfg, &r);
-        return r;
+        int32_t code = ffi::{root_sn}_solve_dense(h_, &cfg, &r);
+        if (code >= 0) return SolveResult::ok(r);
+        return SolveResult::err({{static_cast<LmStatus>(code), last_error()}});
     }}
-    LmResult solve_sparse(const LmConfig& cfg = LmConfig{{}}) {{
+    SolveResult solve_sparse(const LmConfig& cfg = LmConfig{{}}) {{
         LmResult r;
-        ffi::{root_sn}_solve_sparse(h_, &cfg, &r);
-        return r;
+        int32_t code = ffi::{root_sn}_solve_sparse(h_, &cfg, &r);
+        if (code >= 0) return SolveResult::ok(r);
+        return SolveResult::err({{static_cast<LmStatus>(code), last_error()}});
     }}
     /// Empty string when the model is clean, the Diagnostic text
     /// otherwise. The returned pointer is valid until the next call on

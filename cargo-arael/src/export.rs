@@ -15,6 +15,8 @@ const MATH_HEADERS: &[(&str, &str)] = &[
     ("matrix.hpp", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/headers/arael/matrix.hpp"))),
     ("quatern.hpp", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/headers/arael/quatern.hpp"))),
     ("math.hpp", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/headers/arael/math.hpp"))),
+    ("result.hpp", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/headers/arael/result.hpp"))),
+    ("assert.hpp", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/headers/arael/assert.hpp"))),
 ];
 
 /// Minimal Cargo.toml scan: `name = "..."` in [package], and the

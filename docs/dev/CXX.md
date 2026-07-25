@@ -595,10 +595,27 @@ components, entity-owned collections, f32 roots; multi-root capi
 generation is unimplemented (one root per crate for now). These fold
 into stage 4/5 test padding.
 
-**Stage 4 -- solve surface polish.**
-solve_sparse (+ band?), presets, target-cost early-out, panic-to-
-status hardening, last_error coverage, iteration/status enum parity
-tests (every LmStatus mapped).
+**Stage 4 -- solve surface polish. [result/option DONE 2026-07-25]**
+`arael/result.hpp` (hand-written, vendored): `option<T>` and
+`result<R, E>`, Rust-flavored, exception-free. Wrong-side reads
+ABORT via `arael_assert_true` (`arael/assert.hpp`) -- an always-on
+check that prints the failed expression with its location to stderr;
+never compiled out. The generated API maps Rust's shapes directly:
+`solve_dense/solve_sparse` return `SolveResult =
+result<LmResult, SolveError>` (SolveError = status + last_error
+text), and Option entities read as `option<GpsObsRef>`; make/clear/
+has stay alongside. Wrapper classes gained a null default ctor for
+the empty option. Presets, target-cost early-out, panic-to-status,
+and last_error were already in; the status mapping is pinned by the
+exhaustive `code()` match in the parity test (a new LmStatus variant
+breaks it at compile time). Band solve is V2 (with covariance and
+observer callbacks): the trait surface has dense/sparse only, and
+`solve_band` needs a bandwidth argument -- v2 exposes it as
+`solve_band(cfg, kd)` passing kd through the C ABI.
+
+Remaining stage-4/5 padding: end-to-end tests for universal/rotvec
+rotation params, Transform/UnitVec builtins, user components,
+entity-owned collections, f32 roots; multi-root capi generation.
 
 **Stage 5 -- build glue, docs, example.**
 `emit_cmake` (the self-contained CMakeLists + IMPORTED target),
@@ -643,13 +660,13 @@ Settled:
    AGREED -- distribution and pipeline integration outweigh slower
    codegen iteration.
 
-7. v1 scope: covariance export, observer callbacks, and ExtendedModel
-   are OUT (both skins). AGREED. Covariance and observer callbacks
-   are PLANNED FOR V2 -- the C ABI should not paint them into a
-   corner (an iteration-callback slot is a function pointer + user
-   data pointer; covariance is a bulk read into a caller buffer --
-   both fit the existing conventions). ExtendedModel: probably never
-   exposed.
+7. v1 scope: covariance export, observer callbacks, band solve, and
+   ExtendedModel are OUT (both skins). AGREED. Covariance, observer
+   callbacks, and band solve are PLANNED FOR V2 -- the C ABI should
+   not paint them into a corner (an iteration-callback slot is a
+   function pointer + user data pointer; covariance is a bulk read
+   into a caller buffer; band is `solve_band(cfg, kd)` -- all fit the
+   existing conventions). ExtendedModel: probably never exposed.
 8. Python core stays stdlib-only (numpy accepted where sequences are,
    never required). AGREED.
 
