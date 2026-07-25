@@ -86,7 +86,8 @@ views are named by their container's nature: `PathPosesDeque`,
   y=pitch, z=yaw with `R = R(z)R(y)R(x)`, quaternions store the
   scalar part first. `matrix2/3::symmetric_eigen()` matches the Rust
   one (ascending eigenvalues, eigenvector columns) to precision, not
-  bits. `arael/geometry.hpp` carries the pinhole `Camera`.
+  bits. `arael/geometry.hpp` carries the pinhole `Camera`;
+  `arael/g2o.hpp` the SE2 pose-graph file reader.
 - **Params** read/write their value; `set_<p>_optimize(false)` fixes
   one. Rotation params take euler `vect3` (or a quaternion for
   `QuaternionParam`); `TransformParam` exposes translation, rotation,
@@ -135,10 +136,14 @@ views are named by their container's nature: `PathPosesDeque`,
   entity's marginal block, typed by size (1 param -> `double`, 2 ->
   `matrix2d`, 3 -> `matrix3d`, larger via a caller buffer);
   `cov->cross(a, b, out, cap)` the row-major pa x pb cross-covariance
-  between two entities (returns the row count or a negative code).
+  between two entities (returns the row count or a negative code);
+  `cov->std_dev(entity, out, cap)` the per-parameter standard
+  deviations (works on every CovMode, including TriDiagonal).
   Valid until the model is dropped or reassembled.
-- **cost()** on the root evaluates the total cost at the current
-  parameter values (no solve).
+- **Solves**: `solve_dense` / `solve_sparse` / `solve_band(kd)` --
+  band Cholesky for banded Hessians, `kd` the half-bandwidth in
+  scalar parameters. `cost()` on the root evaluates the total cost at
+  the current parameter values (no solve).
 
 ## Contract
 
@@ -147,9 +152,11 @@ model (or an `Arena::remove`). Whatever validity discipline the Rust
 API enforces at compile time is the C++ caller's responsibility here.
 
 Worked examples live in `cxx-examples/`: `slam2d_simple_demo` (2D
-SLAM, plotting, covariance ellipses) and `slam_demo_gm` (visual-
-inertial SLAM with a robust loss, a graduated ramp, and relative
-covariance from `cross()`).
+SLAM, plotting, covariance ellipses), `slam_demo_gm` (visual-inertial
+SLAM with a robust loss, a graduated ramp, and relative covariance
+from `cross()`), `loc_demo` (localization against a known map on the
+band solver, TriDiagonal `std_dev`), and `m3500_demo` (pose graph
+from a g2o file, digit-for-digit with the Rust example).
 
 A Python interface over the same C ABI is planned; the design notes
 live in docs/dev/CXX.md.

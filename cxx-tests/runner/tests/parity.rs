@@ -164,6 +164,26 @@ fn cxx_interface_matches_rust_exactly() {
     assert_eq!(g("sparse_m"), fit2.m.value);
     assert_eq!(g("sparse_c"), fit2.c.value);
 
+    // Band solve mirrored: kd spans the whole parameter vector.
+    let mut fitb = Fit::default();
+    fill(&mut fitb);
+    let mut x0 = std::vec::Vec::new();
+    fitb.serialize64(&mut x0);
+    let rb2 = arael::simple_lm::solve_band(&x0, 4, &mut fitb, &cfg).unwrap();
+    fitb.deserialize64(&rb2.x);
+    assert_eq!(g("band_status"), code(&rb2.status));
+    assert_eq!(g("band_end"), rb2.end_cost);
+    assert_eq!(g("band_m"), fitb.m.value);
+    assert_eq!(g("band_c"), fitb.c.value);
+    {
+        use arael::covariance::{CovMode, Covariance};
+        let cov = fitb.assemble_covariance(CovMode::AllMarginals).unwrap();
+        let sd = cov.std_dev(&fitb.items[0]).unwrap();
+        assert_eq!(g("band_cov_ok"), 1.0);
+        assert_eq!(g("band_sd_n"), sd.len() as f64);
+        assert_eq!(g("band_sd_item0"), sd[0]);
+    }
+
     // Stage 3 surface, mirrored: deque chain, ties through refs, arena
     // with a removal, Option entity, math data, fixed euler param.
     let mut f3 = Fit::default();

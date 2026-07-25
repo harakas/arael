@@ -174,6 +174,26 @@ fn golden() -> Vec<(String, f64)> {
             if cam.is_visible(vect2f::new(-1.0, 300.0)) { 1.0 } else { 0.0 });
     }
 
+    // g2o SE2 parsing (exact doubles through the text round trip).
+    {
+        let ds = arael::g2o::Dataset2::parse(
+            "VERTEX_SE2 0 0.25 -1.5 0.125\n\
+             VERTEX_SE2 1 1.75 0.5 -0.25\n\
+             FIX 0\n\
+             EDGE_SE2 0 1 1.5 2.0 -0.375 100 0 0 100 0 400\n").unwrap();
+        p(&mut out, "g2o_n_poses", ds.poses.len() as f64);
+        p(&mut out, "g2o_n_deltas", ds.deltas.len() as f64);
+        pv2(&mut out, "g2o_p1_t", ds.poses[1].t);
+        p(&mut out, "g2o_p1_th", ds.poses[1].th);
+        pv2(&mut out, "g2o_d0_dt", ds.deltas[0].dt);
+        p(&mut out, "g2o_d0_dth", ds.deltas[0].dth);
+        let iso = ds.deltas[0].iso_sqrt_info();
+        p(&mut out, "g2o_d0_iso", if iso.is_some() { 1.0 } else { 0.0 });
+        let (wt, wr) = iso.unwrap();
+        p(&mut out, "g2o_d0_wt", wt);
+        p(&mut out, "g2o_d0_wr", wr);
+    }
+
     let eaf = vect3::<f32>::new(0.3, -0.7, 1.9);
     let eaf_back = quatern::<f32>::from_euler_angles(eaf).get_euler_angles();
     pv3(&mut out, "f32_ea_back",

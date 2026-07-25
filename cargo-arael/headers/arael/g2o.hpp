@@ -1,0 +1,110 @@
+// arael C++ g2o pose-graph file I/O: the SE2 subset of arael's
+// src/g2o.rs (VERTEX_SE2 / EDGE_SE2; unknown record types are
+// skipped, vertex ids must be dense and ordered). Errors abort with
+// the offending line via arael_assert_true. Header-only, C++17.
+#pragma once
+
+#include <cstdint>
+#include <cstdio>
+#include <cmath>
+#include <string>
+#include <vector>
+#include "vect.hpp"
+#include "assert.hpp"
+
+namespace arael {
+namespace g2o {
+
+/// One 2D pose from a VERTEX_SE2 record.
+struct Pose2 {
+    vect2d t;
+    double th;
+};
+
+/// One relative SE2 measurement from an EDGE_SE2 record: pose `b` seen
+/// from pose `a`'s body frame.
+struct DeltaPose2 {
+    uint32_t a, b;
+    /// Measured translation in `a`'s frame.
+    vect2d dt;
+    /// Measured heading change.
+    double dth;
+    /// Information matrix upper triangle in file order:
+    /// I11 I12 I13 I22 I23 I33, rows ordered (x y theta).
+    double info[6];
+
+    /// Sqrt-information row weights (wt, wr) when the information
+    /// matrix is diagonal with equal translation entries; false when
+    /// it is anything else.
+    bool iso_sqrt_info(double& wt, double& wr) const {
+        if (std::abs(info[1]) < 1e-9 && std::abs(info[2]) < 1e-9
+            && std::abs(info[4]) < 1e-9 && std::abs(info[0] - info[3]) < 1e-9) {
+            wt = std::sqrt(info[0]);
+            wr = std::sqrt(info[5]);
+            return true;
+        }
+        return false;
+    }
+};
+
+/// A 2D pose graph: poses and the relative measurements between them.
+struct Dataset2 {
+    std::vector<Pose2> poses;
+    std::vector<DeltaPose2> deltas;
+
+    /// Parse a 2D pose graph from .g2o text. Aborts on malformed
+    /// records (with the 1-based line number).
+    static Dataset2 parse(const std::string& text) {
+        Dataset2 ds;
+        size_t pos = 0, line_no = 0;
+        while (pos < text.size()) {
+            size_t eol = text.find('\n', pos);
+            if (eol == std::string::npos) eol = text.size();
+            std::string line = text.substr(pos, eol - pos);
+            pos = eol + 1;
+            line_no++;
+
+            char tag[32];
+            if (std::sscanf(line.c_str(), "%31s", tag) != 1) continue;
+            if (std::string(tag) == "VERTEX_SE2") {
+                unsigned long id;
+                double x, y, th;
+                arael_assert_true(std::sscanf(line.c_str(),
+                    "%*s %lu %lf %lf %lf", &id, &x, &y, &th) == 4);
+                arael_assert_true(id == ds.poses.size()); // dense, ordered
+                ds.poses.push_back({{x, y}, th});
+            } else if (std::string(tag) == "EDGE_SE2") {
+                DeltaPose2 d;
+                unsigned long a, b;
+                arael_assert_true(std::sscanf(line.c_str(),
+                    "%*s %lu %lu %lf %lf %lf %lf %lf %lf %lf %lf %lf",
+                    &a, &b, &d.dt.x, &d.dt.y, &d.dth,
+                    &d.info[0], &d.info[1], &d.info[2],
+                    &d.info[3], &d.info[4], &d.info[5]) == 11);
+                d.a = uint32_t(a);
+                d.b = uint32_t(b);
+                ds.deltas.push_back(d);
+            }
+        }
+        for (const auto& d : ds.deltas)
+            arael_assert_true(d.a < ds.poses.size() && d.b < ds.poses.size());
+        return ds;
+    }
+
+    /// Read a 2D pose graph from a .g2o file. Aborts when the file
+    /// cannot be read or parsed.
+    static Dataset2 load(const char* path) {
+        std::FILE* f = std::fopen(path, "rb");
+        arael_assert_true(f != nullptr);
+        std::string text;
+        char buf[65536];
+        size_t n;
+        while ((n = std::fread(buf, 1, sizeof buf, f)) > 0)
+            text.append(buf, n);
+        std::fclose(f);
+        return parse(text);
+    }
+};
+
+} // namespace g2o
+} // namespace arael

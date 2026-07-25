@@ -147,7 +147,9 @@ double fit_tie_w(const Tie*);
 void fit_tie_set_w(Tie*, double);
 int32_t fit_assemble_covariance(Fit*, uint32_t);
 int32_t fit_n_marginal_cov(Fit*, const N*, double*, uint32_t);
+int32_t fit_n_std_dev(Fit*, const N*, double*, uint32_t);
 int32_t fit_pose_marginal_cov(Fit*, const Pose*, double*, uint32_t);
+int32_t fit_pose_std_dev(Fit*, const Pose*, double*, uint32_t);
 int32_t fit_n_n_cross_cov(Fit*, const N*, const N*, double*, uint32_t);
 int32_t fit_n_pose_cross_cov(Fit*, const N*, const Pose*, double*, uint32_t);
 int32_t fit_pose_n_cross_cov(Fit*, const Pose*, const N*, double*, uint32_t);
@@ -217,6 +219,7 @@ uint32_t fit_marks_next(const Fit*, uint32_t);
 uint32_t fit_marks_last(const Fit*);
 uint32_t fit_marks_prev(const Fit*, uint32_t);
 double fit_cost(Fit*);
+int32_t fit_solve_band(Fit*, uint32_t, const LmConfig*, LmResult*);
 void fit_lm_config(uint32_t, LmConfig*);
 Fit* fit_new(void);
 void fit_free(Fit*);
@@ -377,10 +380,20 @@ class Covariance {
 public:
     Covariance() : h_(nullptr) {}
     explicit Covariance(ffi::Fit* h) : h_(h) {}
+    /// Per-parameter standard deviations into out; returns the count
+    /// or a negative code. Works on every CovMode incl. TriDiagonal.
+    int32_t std_dev(const N& e, double* out, uint32_t cap) {
+        return ffi::fit_n_std_dev(h_, e.raw(), out, cap);
+    }
     result<double, CovError> marginal(const N& e) {
         double b[1];
         if (ffi::fit_n_marginal_cov(h_, e.raw(), b, 1) < 0) return fail<double>();
         return result<double, CovError>::ok(b[0]);
+    }
+    /// Per-parameter standard deviations into out; returns the count
+    /// or a negative code. Works on every CovMode incl. TriDiagonal.
+    int32_t std_dev(const Pose& e, double* out, uint32_t cap) {
+        return ffi::fit_pose_std_dev(h_, e.raw(), out, cap);
     }
     /// Row-major dim x dim into out; returns dim or a negative code.
     int32_t marginal(const Pose& e, double* out, uint32_t cap) {
@@ -857,6 +870,14 @@ public:
     SolveResult solve_sparse(const LmConfig& cfg = LmConfig{}) {
         LmResult r;
         int32_t code = ffi::fit_solve_sparse(h_, &cfg, &r);
+        if (code >= 0) return SolveResult::ok(r);
+        return SolveResult::err({static_cast<LmStatus>(code), last_error()});
+    }
+    /// Band Cholesky solve for banded Hessians; kd is the half-bandwidth
+    /// in scalar parameters.
+    SolveResult solve_band(uint32_t kd, const LmConfig& cfg = LmConfig{}) {
+        LmResult r;
+        int32_t code = ffi::fit_solve_band(h_, kd, &cfg, &r);
         if (code >= 0) return SolveResult::ok(r);
         return SolveResult::err({static_cast<LmStatus>(code), last_error()});
     }

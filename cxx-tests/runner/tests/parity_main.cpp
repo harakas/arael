@@ -83,6 +83,22 @@ int main() {
     p("sparse_m", fit2.m());
     p("sparse_c", fit2.c());
 
+    // Band solve: the fixture is not banded, so kd spans the whole
+    // parameter vector -- a dense band, numerically the same solve.
+    Fit fitb;
+    fill(fitb);
+    LmResult rb2 = fitb.solve_band(4, cfg).value();
+    pi("band_status", long(rb2.status));
+    p("band_end", rb2.end_cost);
+    p("band_m", fitb.m());
+    p("band_c", fitb.c());
+    // std_dev at the band solution (sqrt of the marginal diagonal).
+    auto covb = fitb.assemble_covariance(CovMode::AllMarginals);
+    pi("band_cov_ok", covb.is_ok() ? 1 : 0);
+    double sd1[1];
+    pi("band_sd_n", covb->std_dev(fitb.items()[0], sd1, 1));
+    p("band_sd_item0", sd1[0]);
+
     // Stage 3 surface: math types, deque pose chain with ties through
     // refs, arena with a removal, nested Info with an Option entity,
     // fixed euler param, param optimize flags.

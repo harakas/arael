@@ -380,6 +380,57 @@ pub unsafe extern "C" fn fit_solve_sparse(
     }
 }
 
+/// Band Cholesky solve; `kd` is the Hessian half-bandwidth in scalar
+/// parameters. Returns the status code (>= 0: LmStatus; -1: solve
+/// failure; -2: panic). Failure text via fit_last_error.
+#[no_mangle]
+pub unsafe extern "C" fn fit_solve_band(
+    h: *mut FitHandle,
+    kd: u32,
+    cfg: *const CLmConfig,
+    out: *mut CLmResult,
+) -> i32 {
+    let hh = &mut *h;
+    let c = (*cfg).to_config();
+    *out = CLmResult {
+        start_cost: 0.0, end_cost: 0.0, iterations: 0,
+        accepted_iterations: 0, status: -1, final_lambda: 0.0,
+    };
+    match catch_unwind(AssertUnwindSafe(|| {
+        let mut x0 = Vec::new();
+        hh.model.serialize64(&mut x0);
+        arael::simple_lm::solve_band(&x0, kd as usize, &mut hh.model, &c).map(|r| {
+            hh.model.deserialize64(&r.x);
+            r
+        })
+    })) {
+        Ok(Ok(r)) => {
+            let code = status_code(&r.status);
+            *out = CLmResult {
+                start_cost: r.start_cost,
+                end_cost: r.end_cost,
+                iterations: r.iterations as u32,
+                accepted_iterations: r.accepted_iterations as u32,
+                status: code,
+                final_lambda: r.final_lambda,
+            };
+            set_text(hh, "");
+            code
+        }
+        Ok(Err(f)) => {
+            set_text(hh, &format!("solve failure: {:?}", f.kind));
+            (*out).status = -1;
+            -1
+        }
+        Err(p) => {
+            let msg = panic_text(p);
+            set_text(hh, &msg);
+            (*out).status = -2;
+            -2
+        }
+    }
+}
+
 /// Total cost at the current parameter values (evaluated at the
 /// model's precision, returned as f64).
 #[no_mangle]
@@ -459,6 +510,44 @@ pub unsafe extern "C" fn fit_n_marginal_cov(
         }
     }
 }
+/// Per-parameter standard deviations (sqrt of the marginal diagonal)
+/// of one `N`; returns the count, or -1 (error) / -2 (panic) / -3
+/// (no assembly or buffer too small), text via fit_last_error.
+/// Works on every CovMode, including TriDiagonal.
+#[no_mangle]
+pub unsafe extern "C" fn fit_n_std_dev(
+    h: *mut FitHandle,
+    p: *const N,
+    out: *mut f64,
+    cap: u32,
+) -> i32 {
+    let hh = &mut *h;
+    let Some(cov) = hh.cov.as_ref() else {
+        set_text(hh, "std_dev: assemble_covariance was not called");
+        return -3;
+    };
+    match catch_unwind(AssertUnwindSafe(|| cov.std_dev(&*p))) {
+        Ok(Ok(sd)) => {
+            if sd.len() as u32 > cap {
+                set_text(hh, "std_dev: buffer too small");
+                return -3;
+            }
+            for (i, v) in sd.iter().enumerate() {
+                *out.add(i) = *v;
+            }
+            sd.len() as i32
+        }
+        Ok(Err(e)) => {
+            set_text(hh, &format!("{}", e));
+            -1
+        }
+        Err(p2) => {
+            let msg = panic_text(p2);
+            set_text(hh, &msg);
+            -2
+        }
+    }
+}
 
 /// Row-major dim x dim marginal covariance (f64) of one `Pose`; returns
 /// dim, or -1 (error) / -2 (panic) / -3 (no assembly or buffer too
@@ -488,6 +577,44 @@ pub unsafe extern "C" fn fit_pose_marginal_cov(
                 }
             }
             dim as i32
+        }
+        Ok(Err(e)) => {
+            set_text(hh, &format!("{}", e));
+            -1
+        }
+        Err(p2) => {
+            let msg = panic_text(p2);
+            set_text(hh, &msg);
+            -2
+        }
+    }
+}
+/// Per-parameter standard deviations (sqrt of the marginal diagonal)
+/// of one `Pose`; returns the count, or -1 (error) / -2 (panic) / -3
+/// (no assembly or buffer too small), text via fit_last_error.
+/// Works on every CovMode, including TriDiagonal.
+#[no_mangle]
+pub unsafe extern "C" fn fit_pose_std_dev(
+    h: *mut FitHandle,
+    p: *const Pose,
+    out: *mut f64,
+    cap: u32,
+) -> i32 {
+    let hh = &mut *h;
+    let Some(cov) = hh.cov.as_ref() else {
+        set_text(hh, "std_dev: assemble_covariance was not called");
+        return -3;
+    };
+    match catch_unwind(AssertUnwindSafe(|| cov.std_dev(&*p))) {
+        Ok(Ok(sd)) => {
+            if sd.len() as u32 > cap {
+                set_text(hh, "std_dev: buffer too small");
+                return -3;
+            }
+            for (i, v) in sd.iter().enumerate() {
+                *out.add(i) = *v;
+            }
+            sd.len() as i32
         }
         Ok(Err(e)) => {
             set_text(hh, &format!("{}", e));

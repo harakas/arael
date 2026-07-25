@@ -608,10 +608,11 @@ has stay alongside. Wrapper classes gained a null default ctor for
 the empty option. Presets, target-cost early-out, panic-to-status,
 and last_error were already in; the status mapping is pinned by the
 exhaustive `code()` match in the parity test (a new LmStatus variant
-breaks it at compile time). Band solve is V2 (with covariance and
-observer callbacks): the trait surface has dense/sparse only, and
-`solve_band` needs a bandwidth argument -- v2 exposes it as
-`solve_band(cfg, kd)` passing kd through the C ABI.
+breaks it at compile time). Band solve SHIPPED as `solve_band(kd,
+cfg)`: the shim serializes at the model precision, calls the
+`solve_band`/`solve_band_f32` free function, and deserializes the
+result (exercised by cxx-tests parity and cxx-examples/loc_demo).
+Observer callbacks stay V2.
 
 Remaining stage-4/5 padding: end-to-end tests for universal/rotvec
 rotation params, Transform/UnitVec builtins, user components;
@@ -677,8 +678,9 @@ Settled:
    C++ `Covariance` view types the marginals by entity param count
    (1 -> double, 2/3 -> matrix2d/3d, larger -> raw buffer). Exercised
    by cxx-tests (exact 1x1 parity vs Rust) and the slam2d demo's
-   95% landmark ellipses. Observer callbacks and band solve stay V2
-   (function pointer + user data; `solve_band(cfg, kd)`).
+   95% landmark ellipses. Band solve shipped as `solve_band(kd, cfg)`
+   with per-entity `std_dev` for the TriDiagonal mode (loc_demo).
+   Observer callbacks stay V2 (function pointer + user data).
    ExtendedModel: probably never exposed.
 8. Python core stays stdlib-only (numpy accepted where sequences are,
    never required). AGREED.

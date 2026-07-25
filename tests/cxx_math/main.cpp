@@ -3,6 +3,7 @@
 // "name value" lines. The Rust test compiles, runs, and compares.
 #include <arael/math.hpp>
 #include <arael/geometry.hpp>
+#include <arael/g2o.hpp>
 #include <cstdio>
 
 using namespace arael;
@@ -154,6 +155,25 @@ int main() {
         pv2("f32_cam_pixang", cam.pixel_angular_size(px).cast<double>());
         p("f32_cam_vis_in", cam.is_visible(px) ? 1.0 : 0.0);
         p("f32_cam_vis_out", cam.is_visible({-1.0f, 300.0f}) ? 1.0 : 0.0);
+    }
+
+    // g2o SE2 parsing (exact doubles through the text round trip).
+    {
+        arael::g2o::Dataset2 ds = arael::g2o::Dataset2::parse(
+            "VERTEX_SE2 0 0.25 -1.5 0.125\n"
+            "VERTEX_SE2 1 1.75 0.5 -0.25\n"
+            "FIX 0\n"
+            "EDGE_SE2 0 1 1.5 2.0 -0.375 100 0 0 100 0 400\n");
+        p("g2o_n_poses", double(ds.poses.size()));
+        p("g2o_n_deltas", double(ds.deltas.size()));
+        pv2("g2o_p1_t", ds.poses[1].t);
+        p("g2o_p1_th", ds.poses[1].th);
+        pv2("g2o_d0_dt", ds.deltas[0].dt);
+        p("g2o_d0_dth", ds.deltas[0].dth);
+        double wt = 0, wr = 0;
+        p("g2o_d0_iso", ds.deltas[0].iso_sqrt_info(wt, wr) ? 1.0 : 0.0);
+        p("g2o_d0_wt", wt);
+        p("g2o_d0_wr", wr);
     }
 
     // f32 smoke: euler round trip, printed at double precision.

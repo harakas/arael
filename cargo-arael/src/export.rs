@@ -15,6 +15,7 @@ const MATH_HEADERS: &[(&str, &str)] = &[
     ("matrix.hpp", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/headers/arael/matrix.hpp"))),
     ("quatern.hpp", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/headers/arael/quatern.hpp"))),
     ("geometry.hpp", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/headers/arael/geometry.hpp"))),
+    ("g2o.hpp", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/headers/arael/g2o.hpp"))),
     ("math.hpp", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/headers/arael/math.hpp"))),
     ("result.hpp", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/headers/arael/result.hpp"))),
     ("assert.hpp", include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/headers/arael/assert.hpp"))),

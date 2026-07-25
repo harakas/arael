@@ -508,7 +508,14 @@ public:
             }
             let sn = format!("{root_sn}_{}", snake(tn));
             cpp.ffi.push_str(&format!(
-                "int32_t {sn}_marginal_cov({root}*, const {tn}*, double*, uint32_t);\n"));
+                "int32_t {sn}_marginal_cov({root}*, const {tn}*, double*, uint32_t);\n\
+                 int32_t {sn}_std_dev({root}*, const {tn}*, double*, uint32_t);\n"));
+            methods.push_str(&format!(
+"    /// Per-parameter standard deviations into out; returns the count
+    /// or a negative code. Works on every CovMode incl. TriDiagonal.
+    int32_t std_dev(const {tn}& e, double* out, uint32_t cap) {{
+        return ffi::{sn}_std_dev(h_, e.raw(), out, cap);
+    }}\n"));
             match t.param_count {
                 1 => methods.push_str(&format!(
 "    result<double, CovError> marginal(const {tn}& e) {{
@@ -581,6 +588,7 @@ public:
     }
     cpp.ffi.push_str(&format!(
         "double {root_sn}_cost({root}*);\n\
+         int32_t {root_sn}_solve_band({root}*, uint32_t, const LmConfig*, LmResult*);\n\
          void {root_sn}_lm_config(uint32_t, LmConfig*);\n\
          {root}* {root_sn}_new(void);\n\
          void {root_sn}_free({root}*);\n\
@@ -688,6 +696,14 @@ public:
     SolveResult solve_sparse(const LmConfig& cfg = LmConfig{{}}) {{
         LmResult r;
         int32_t code = ffi::{root_sn}_solve_sparse(h_, &cfg, &r);
+        if (code >= 0) return SolveResult::ok(r);
+        return SolveResult::err({{static_cast<LmStatus>(code), last_error()}});
+    }}
+    /// Band Cholesky solve for banded Hessians; kd is the half-bandwidth
+    /// in scalar parameters.
+    SolveResult solve_band(uint32_t kd, const LmConfig& cfg = LmConfig{{}}) {{
+        LmResult r;
+        int32_t code = ffi::{root_sn}_solve_band(h_, kd, &cfg, &r);
         if (code >= 0) return SolveResult::ok(r);
         return SolveResult::err({{static_cast<LmStatus>(code), last_error()}});
     }}
