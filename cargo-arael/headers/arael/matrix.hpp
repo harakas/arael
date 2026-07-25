@@ -1,0 +1,205 @@
+// arael C++ math: matrix2<T>, matrix3<T>. Mirrors arael's
+// src/matrix.rs: row-major storage (rows are vectors), same euler
+// convention (x=roll, y=pitch, z=yaw, R = R(z)*R(y)*R(x)), same
+// gimbal-lock handling. Header-only, C++17. The solver-internal
+// derivative and eigen helpers are not ported.
+#pragma once
+
+#include <limits>
+#include "vect.hpp"
+
+namespace arael {
+
+/// 3x3 matrix, row-major.
+template<class T>
+struct matrix3 {
+    vect3<T> rows[3];
+
+    static matrix3 from_rows(vect3<T> r0, vect3<T> r1, vect3<T> r2) {
+        return {{r0, r1, r2}};
+    }
+    static matrix3 from_cols(vect3<T> c0, vect3<T> c1, vect3<T> c2) {
+        return {{{c0.x, c1.x, c2.x}, {c0.y, c1.y, c2.y}, {c0.z, c1.z, c2.z}}};
+    }
+    static matrix3 from_elements(T a00, T a01, T a02, T a10, T a11, T a12,
+                                 T a20, T a21, T a22) {
+        return {{{a00, a01, a02}, {a10, a11, a12}, {a20, a21, a22}}};
+    }
+    static matrix3 zero_matrix() {
+        return from_elements(T(0), T(0), T(0), T(0), T(0), T(0), T(0), T(0), T(0));
+    }
+    static matrix3 identity() {
+        return from_elements(T(1), T(0), T(0), T(0), T(1), T(0), T(0), T(0), T(1));
+    }
+
+    vect3<T> row(std::size_t i) const { return rows[i]; }
+    vect3<T> col(std::size_t i) const { return {rows[0][i], rows[1][i], rows[2][i]}; }
+    matrix3 transpose() const { return from_cols(rows[0], rows[1], rows[2]); }
+    T det() const {
+        return rows[0].x * (rows[1].y * rows[2].z - rows[1].z * rows[2].y)
+             - rows[0].y * (rows[1].x * rows[2].z - rows[1].z * rows[2].x)
+             + rows[0].z * (rows[1].x * rows[2].y - rows[1].y * rows[2].x);
+    }
+    bool is_finite() const {
+        return rows[0].is_finite() && rows[1].is_finite() && rows[2].is_finite();
+    }
+    template<class K> matrix3<K> cast() const {
+        return {{rows[0].template cast<K>(), rows[1].template cast<K>(),
+                 rows[2].template cast<K>()}};
+    }
+
+    /// Rotation from euler angles (x=roll, y=pitch, z=yaw).
+    static matrix3 rotation_from_euler_angles(vect3<T> ea) {
+        vect3<T> s, c;
+        ea.sincos(s, c);
+        return rotation_from_euler_angles_sincos(s, c);
+    }
+    static matrix3 rotation_from_euler_angles_sincos(vect3<T> s, vect3<T> c) {
+        return from_rows(
+            {c.y * c.z, -c.x * s.z + c.z * s.x * s.y, c.x * c.z * s.y + s.x * s.z},
+            {c.y * s.z, c.x * c.z + s.x * s.y * s.z, c.x * s.y * s.z - c.z * s.x},
+            {-s.y, c.y * s.x, c.x * c.y});
+    }
+
+    /// Rotation about a unit axis by phi radians.
+    static matrix3 rotation_from_axis_angle(vect3<T> axis, T phi) {
+        return rotation_from_axis_angle_sincos(axis, std::sin(phi), std::cos(phi));
+    }
+    static matrix3 rotation_from_axis_angle_sincos(vect3<T> a, T sp, T cp) {
+        T k = T(1) - cp;
+        return from_rows(
+            {cp + a.x * a.x * k, a.x * a.y * k - a.z * sp, a.x * a.z * k + a.y * sp},
+            {a.y * a.x * k + a.z * sp, cp + a.y * a.y * k, a.y * a.z * k - a.x * sp},
+            {a.z * a.x * k - a.y * sp, a.z * a.y * k + a.x * sp, cp + a.z * a.z * k});
+    }
+
+    /// Rotation matrix of the small-angle retraction normalize(1, v/2),
+    /// sqrt-free.
+    static matrix3 from_rotation_vector_small(vect3<T> v) {
+        T x = v.x * T(0.5), y = v.y * T(0.5), z = v.z * T(0.5);
+        T x2 = x * x, y2 = y * y, z2 = z * z;
+        T s = T(2) / (T(1) + x2 + y2 + z2);
+        return from_rows(
+            {T(1) - s * (y2 + z2), s * (x * y - z), s * (x * z + y)},
+            {s * (x * y + z), T(1) - s * (x2 + z2), s * (y * z - x)},
+            {s * (x * z - y), s * (y * z + x), T(1) - s * (x2 + y2)});
+    }
+
+    /// Rotation vector of a NEAR-IDENTITY rotation (the extraction
+    /// companion of from_rotation_vector_small; use on error rotations,
+    /// not full attitudes).
+    vect3<T> get_rotation_vector_small() const {
+        return {(rows[2][1] - rows[1][2]) * T(0.5),
+                (rows[0][2] - rows[2][0]) * T(0.5),
+                (rows[1][0] - rows[0][1]) * T(0.5)};
+    }
+
+    /// Euler angles (x=roll, y=pitch, z=yaw). At and near gimbal lock
+    /// only roll -+ yaw is determined; roll = 0 convention, yaw carries
+    /// the combined angle.
+    vect3<T> get_euler_angles() const {
+        T y = detail::safe_asin(-rows[2][0]);
+        T cp2 = rows[2][1] * rows[2][1] + rows[2][2] * rows[2][2];
+        if (cp2 > std::numeric_limits<T>::epsilon()) {
+            return {std::atan2(rows[2][1], rows[2][2]), y,
+                    std::atan2(rows[1][0], rows[0][0])};
+        }
+        return {T(0), y, std::atan2(-rows[0][1], rows[1][1])};
+    }
+
+    vect3<T>& operator[](std::size_t i) { return rows[i]; }
+    const vect3<T>& operator[](std::size_t i) const { return rows[i]; }
+    matrix3 operator+(matrix3 m) const {
+        return {{rows[0] + m.rows[0], rows[1] + m.rows[1], rows[2] + m.rows[2]}};
+    }
+    matrix3 operator-(matrix3 m) const {
+        return {{rows[0] - m.rows[0], rows[1] - m.rows[1], rows[2] - m.rows[2]}};
+    }
+    matrix3 operator-() const { return {{-rows[0], -rows[1], -rows[2]}}; }
+    vect3<T> operator*(vect3<T> v) const {
+        return {rows[0] * v, rows[1] * v, rows[2] * v};
+    }
+    matrix3 operator*(matrix3 m) const {
+        return from_rows(
+            {rows[0] * m.col(0), rows[0] * m.col(1), rows[0] * m.col(2)},
+            {rows[1] * m.col(0), rows[1] * m.col(1), rows[1] * m.col(2)},
+            {rows[2] * m.col(0), rows[2] * m.col(1), rows[2] * m.col(2)});
+    }
+    matrix3 operator*(T s) const {
+        return {{rows[0] * s, rows[1] * s, rows[2] * s}};
+    }
+};
+
+/// Row vector times matrix (v^T * M).
+template<class T>
+inline vect3<T> operator*(vect3<T> v, matrix3<T> m) {
+    return {v * m.col(0), v * m.col(1), v * m.col(2)};
+}
+
+template<class T>
+inline matrix3<T> vect3<T>::rotation_matrix() const {
+    return matrix3<T>::rotation_from_euler_angles(*this);
+}
+
+/// 2x2 matrix, row-major.
+template<class T>
+struct matrix2 {
+    vect2<T> rows[2];
+
+    static matrix2 from_rows(vect2<T> r0, vect2<T> r1) { return {{r0, r1}}; }
+    static matrix2 from_cols(vect2<T> c0, vect2<T> c1) {
+        return {{{c0.x, c1.x}, {c0.y, c1.y}}};
+    }
+    static matrix2 from_elements(T a00, T a01, T a10, T a11) {
+        return {{{a00, a01}, {a10, a11}}};
+    }
+    static matrix2 zero_matrix() { return from_elements(T(0), T(0), T(0), T(0)); }
+    static matrix2 identity() { return from_elements(T(1), T(0), T(0), T(1)); }
+
+    vect2<T> row(std::size_t i) const { return rows[i]; }
+    vect2<T> col(std::size_t i) const { return {rows[0][i], rows[1][i]}; }
+    matrix2 transpose() const { return from_cols(rows[0], rows[1]); }
+    T det() const { return rows[0].x * rows[1].y - rows[0].y * rows[1].x; }
+    bool is_finite() const { return rows[0].is_finite() && rows[1].is_finite(); }
+    template<class K> matrix2<K> cast() const {
+        return {{rows[0].template cast<K>(), rows[1].template cast<K>()}};
+    }
+
+    /// 2D rotation by angle radians (counterclockwise).
+    static matrix2 rotation(T angle) {
+        return rotation_from_sincos(std::sin(angle), std::cos(angle));
+    }
+    static matrix2 rotation_from_sincos(T s, T c) {
+        return from_rows({c, -s}, {s, c});
+    }
+    T get_rotation_angle() const { return std::atan2(rows[1][0], rows[0][0]); }
+
+    vect2<T>& operator[](std::size_t i) { return rows[i]; }
+    const vect2<T>& operator[](std::size_t i) const { return rows[i]; }
+    matrix2 operator+(matrix2 m) const {
+        return {{rows[0] + m.rows[0], rows[1] + m.rows[1]}};
+    }
+    matrix2 operator-(matrix2 m) const {
+        return {{rows[0] - m.rows[0], rows[1] - m.rows[1]}};
+    }
+    matrix2 operator-() const { return {{-rows[0], -rows[1]}}; }
+    vect2<T> operator*(vect2<T> v) const { return {rows[0] * v, rows[1] * v}; }
+    matrix2 operator*(matrix2 m) const {
+        return from_rows({rows[0] * m.col(0), rows[0] * m.col(1)},
+                         {rows[1] * m.col(0), rows[1] * m.col(1)});
+    }
+    matrix2 operator*(T s) const { return {{rows[0] * s, rows[1] * s}}; }
+};
+
+template<class T> inline matrix2<T> operator*(T s, matrix2<T> m) { return m * s; }
+template<class T> inline matrix3<T> operator*(T s, matrix3<T> m) { return m * s; }
+
+using matrix2f = matrix2<float>;
+using matrix2d = matrix2<double>;
+using matrix3f = matrix3<float>;
+using matrix3d = matrix3<double>;
+
+static_assert(sizeof(matrix3f) == 36 && sizeof(matrix3d) == 72, "matrix3 layout");
+static_assert(sizeof(matrix2f) == 16 && sizeof(matrix2d) == 32, "matrix2 layout");
+
+} // namespace arael

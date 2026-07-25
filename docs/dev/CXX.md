@@ -515,16 +515,33 @@ consumer code.
 
 ## 9. Staged implementation
 
-**Stage 0 -- JSON sidecar (P11).**
-Macro: `spelled_types` in SymLayout; env-gated emission at root
-expansion; schema v1; `docs/SIDECAR.md`. Tests: emission fixture +
-parsed-structure assertions. No behavior change anywhere else
-(expansion baselines byte-identical).
+**Stage 0 -- JSON sidecar (P11). [DONE 2026-07-25]**
+`spelled_types` in SymLayout (recorded at the top of classification so
+skip/deriv fields are included); `arael-macros/src/sidecar.rs` with a
+dependency-free JSON writer; env-gated emission at root expansion;
+schema v1 documented in `docs/SIDECAR.md`. Unit tests build registries
+by hand (the process-global-registry pattern; also fixed the
+SymLayout-literal test helper that had been silently broken since the
+P1 field additions -- `cargo test --tests` skips lib unit tests, so
+`cargo test -p arael-macros --lib` joins the verification list; the
+helper now uses `..Default::default()` so field additions cannot break
+it again). Real-model validation: loc_global_demo (deque/arena
+containers, dotted ref targets, cross-block pairs, euler params,
+triplet, skip fields) and m3500_demo (Option entity) both emit valid,
+correctly-kinded JSON. Baselines byte-identical with the variable
+unset.
 
-**Stage 1 -- math headers.**
-`cargo-arael/headers/arael/*`; API inventory from vect.rs /
-matrix.rs / quatern.rs; euler convention; golden parity tests against
-Rust (generated constants header). Deliverable is useful standalone.
+**Stage 1 -- math headers. [DONE 2026-07-25]**
+`cargo-arael/headers/arael/{vect,matrix,quatern,math}.hpp`, C++17
+header-only, formulas ported operation-for-operation (including
+safe_asin clamps, rad2rad wrap in get_axis_angle, both gimbal-lock
+branches, Shepperd's method, the exp-map Taylor branch, `%` = cross,
+left-side scalar muls). Omitted as solver-internal: the *_deriv
+families, symmetric_eigen, null_space. Parity: tests/cxx_math.rs
+compiles tests/cxx_math/main.cpp with `-ffp-contract=off` and compares
+221 named values against the same computations in Rust -- worst f64
+relative error 1.6e-16 (~1 ulp; same libm); skips with a note when no
+C++ compiler is present.
 
 **Stage 2 -- cargo-arael skeleton, scalar-only end-to-end.**
 The crate, `export` driving the sidecar build, the JSON-to-IR parser,
