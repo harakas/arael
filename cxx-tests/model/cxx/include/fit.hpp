@@ -57,6 +57,13 @@ struct LmConfig : LmConfigT<double> {
 };
 
 /// Typed handle into the collection that issued it -- the C++
+/// spelling of Rust's `Ref<Gain>`. Default-constructed it is the
+/// null sentinel (same as Rust `Ref::default()`).
+struct GainRef {
+    uint32_t raw = UINT32_MAX;
+    bool valid() const { return raw != UINT32_MAX; }
+};
+/// Typed handle into the collection that issued it -- the C++
 /// spelling of Rust's `Ref<GpsObs>`. Default-constructed it is the
 /// null sentinel (same as Rust `Ref::default()`).
 struct GpsObsRef {
@@ -92,6 +99,13 @@ struct PoseRef {
     bool valid() const { return raw != UINT32_MAX; }
 };
 /// Typed handle into the collection that issued it -- the C++
+/// spelling of Rust's `Ref<Rig>`. Default-constructed it is the
+/// null sentinel (same as Rust `Ref::default()`).
+struct RigRef {
+    uint32_t raw = UINT32_MAX;
+    bool valid() const { return raw != UINT32_MAX; }
+};
+/// Typed handle into the collection that issued it -- the C++
 /// spelling of Rust's `Ref<Tie>`. Default-constructed it is the
 /// null sentinel (same as Rust `Ref::default()`).
 struct TieRef {
@@ -101,14 +115,24 @@ struct TieRef {
 
 namespace ffi {
 struct Fit;
+struct Gain;
 struct GpsObs;
 struct Info;
 struct N;
 struct Obs;
 struct Pose;
+struct Rig;
 struct Tie;
 
 extern "C" {
+double fit_gain_ref_g(const Gain*);
+void fit_gain_set_ref_g(Gain*, double);
+double fit_gain_d(const Gain*);
+void fit_gain_set_d(Gain*, double);
+bool fit_gain_d_optimize(const Gain*);
+void fit_gain_d_set_optimize(Gain*, bool);
+double fit_gain_g(const Gain*);
+void fit_gain_set_g(Gain*, double);
 vect3d fit_gps_obs_pos(const GpsObs*);
 void fit_gps_obs_set_pos(GpsObs*, vect3d);
 float fit_gps_obs_isigma(const GpsObs*);
@@ -140,6 +164,25 @@ void fit_pose_pos_set_optimize(Pose*, bool);
 vect3d fit_pose_target(const Pose*);
 void fit_pose_set_target(Pose*, vect3d);
 Info* fit_pose_info_ptr(Pose*);
+vect3d fit_rig_ea_u(const Rig*);
+void fit_rig_set_ea_u(Rig*, vect3d);
+bool fit_rig_ea_u_optimize(const Rig*);
+void fit_rig_ea_u_set_optimize(Rig*, bool);
+quaternd fit_rig_q(const Rig*);
+void fit_rig_set_q(Rig*, quaternd);
+bool fit_rig_q_optimize(const Rig*);
+void fit_rig_q_set_optimize(Rig*, bool);
+Gain* fit_rig_gain_ptr(Rig*);
+vect3d fit_rig_target_u0(const Rig*);
+void fit_rig_set_target_u0(Rig*, vect3d);
+vect3d fit_rig_target_u2(const Rig*);
+void fit_rig_set_target_u2(Rig*, vect3d);
+vect3d fit_rig_target_q0(const Rig*);
+void fit_rig_set_target_q0(Rig*, vect3d);
+vect3d fit_rig_target_q2(const Rig*);
+void fit_rig_set_target_q2(Rig*, vect3d);
+double fit_rig_target_g(const Rig*);
+void fit_rig_set_target_g(Rig*, double);
 uint32_t fit_tie_a(const Tie*);
 void fit_tie_set_a(Tie*, uint32_t);
 uint32_t fit_tie_b(const Tie*);
@@ -155,10 +198,18 @@ int32_t fit_n_std_dev(Fit*, const N*, double*, uint32_t);
 int32_t fit_pose_marginal_cov(Fit*, const Pose*, double*, uint32_t);
 int32_t fit_pose_conditional_cov(Fit*, const Pose*, double*, uint32_t);
 int32_t fit_pose_std_dev(Fit*, const Pose*, double*, uint32_t);
+int32_t fit_rig_marginal_cov(Fit*, const Rig*, double*, uint32_t);
+int32_t fit_rig_conditional_cov(Fit*, const Rig*, double*, uint32_t);
+int32_t fit_rig_std_dev(Fit*, const Rig*, double*, uint32_t);
 int32_t fit_n_n_cross_cov(Fit*, const N*, const N*, double*, uint32_t);
 int32_t fit_n_pose_cross_cov(Fit*, const N*, const Pose*, double*, uint32_t);
+int32_t fit_n_rig_cross_cov(Fit*, const N*, const Rig*, double*, uint32_t);
 int32_t fit_pose_n_cross_cov(Fit*, const Pose*, const N*, double*, uint32_t);
 int32_t fit_pose_pose_cross_cov(Fit*, const Pose*, const Pose*, double*, uint32_t);
+int32_t fit_pose_rig_cross_cov(Fit*, const Pose*, const Rig*, double*, uint32_t);
+int32_t fit_rig_n_cross_cov(Fit*, const Rig*, const N*, double*, uint32_t);
+int32_t fit_rig_pose_cross_cov(Fit*, const Rig*, const Pose*, double*, uint32_t);
+int32_t fit_rig_rig_cross_cov(Fit*, const Rig*, const Rig*, double*, uint32_t);
 double fit_m(const Fit*);
 void fit_set_m(Fit*, double);
 bool fit_m_optimize(const Fit*);
@@ -223,6 +274,19 @@ uint32_t fit_marks_first(const Fit*);
 uint32_t fit_marks_next(const Fit*, uint32_t);
 uint32_t fit_marks_last(const Fit*);
 uint32_t fit_marks_prev(const Fit*, uint32_t);
+uint32_t fit_rigs_len(const Fit*);
+void fit_rigs_reserve(Fit*, uint32_t);
+Rig* fit_rigs_push(Fit*);
+Rig* fit_rigs_at(Fit*, uint32_t);
+bool fit_rigs_pop(Fit*);
+void fit_rigs_clear(Fit*);
+void fit_rigs_truncate(Fit*, uint32_t);
+uint32_t fit_rigs_ref_at(const Fit*, uint32_t);
+uint32_t fit_rigs_first_ref(const Fit*);
+uint32_t fit_rigs_last_ref(const Fit*);
+Rig* fit_rigs_get(Fit*, uint32_t);
+bool fit_rigs_contains(const Fit*, uint32_t);
+Rig* fit_rigs_try_get(Fit*, uint32_t);
 double fit_cost(Fit*);
 int32_t fit_solve_band(Fit*, uint32_t, const LmConfig*, LmResult*);
 void fit_lm_config(uint32_t, LmConfig*);
@@ -239,6 +303,30 @@ int32_t fit_solve_sparse(Fit*, const LmConfig*, LmResult*);
 inline LmConfig::LmConfig(LmPreset p) {
     ffi::fit_lm_config(uint32_t(p), this);
 }
+
+/// A `Gain` in its owner's storage; a thin pointer wrapper (validity
+/// follows the storage -- see the owning container).
+class Gain {
+public:
+    /// Optimized parameters this entity contributes to the solve.
+    static constexpr uint32_t param_count = 1;
+    Gain() : h_(nullptr) {}
+    explicit Gain(ffi::Gain* p) : h_(p) {}
+    /// False when default-constructed (e.g. inside an empty option).
+    bool valid() const { return h_ != nullptr; }
+    /// The underlying C pointer -- the relaxed escape hatch.
+    ffi::Gain* raw() const { return h_; }
+    double ref_g() const { return ffi::fit_gain_ref_g(h_); }
+    void set_ref_g(double v) { ffi::fit_gain_set_ref_g(h_, v); }
+    double d() const { return ffi::fit_gain_d(h_); }
+    void set_d(double v) { ffi::fit_gain_set_d(h_, v); }
+    bool d_optimize() const { return ffi::fit_gain_d_optimize(h_); }
+    void set_d_optimize(bool v) { ffi::fit_gain_d_set_optimize(h_, v); }
+    double g() const { return ffi::fit_gain_g(h_); }
+    void set_g(double v) { ffi::fit_gain_set_g(h_, v); }
+private:
+    ffi::Gain* h_;
+};
 
 /// A `GpsObs` in its owner's storage; a thin pointer wrapper (validity
 /// follows the storage -- see the owning container).
@@ -355,6 +443,41 @@ private:
     ffi::Pose* h_;
 };
 
+/// A `Rig` in its owner's storage; a thin pointer wrapper (validity
+/// follows the storage -- see the owning container).
+class Rig {
+public:
+    /// Optimized parameters this entity contributes to the solve.
+    static constexpr uint32_t param_count = 7;
+    Rig() : h_(nullptr) {}
+    explicit Rig(ffi::Rig* p) : h_(p) {}
+    /// False when default-constructed (e.g. inside an empty option).
+    bool valid() const { return h_ != nullptr; }
+    /// The underlying C pointer -- the relaxed escape hatch.
+    ffi::Rig* raw() const { return h_; }
+    vect3d ea_u() const { return ffi::fit_rig_ea_u(h_); }
+    void set_ea_u(vect3d v) { ffi::fit_rig_set_ea_u(h_, v); }
+    bool ea_u_optimize() const { return ffi::fit_rig_ea_u_optimize(h_); }
+    void set_ea_u_optimize(bool v) { ffi::fit_rig_ea_u_set_optimize(h_, v); }
+    quaternd q() const { return ffi::fit_rig_q(h_); }
+    void set_q(quaternd v) { ffi::fit_rig_set_q(h_, v); }
+    bool q_optimize() const { return ffi::fit_rig_q_optimize(h_); }
+    void set_q_optimize(bool v) { ffi::fit_rig_q_set_optimize(h_, v); }
+    Gain gain() { return Gain(ffi::fit_rig_gain_ptr(h_)); }
+    vect3d target_u0() const { return ffi::fit_rig_target_u0(h_); }
+    void set_target_u0(vect3d v) { ffi::fit_rig_set_target_u0(h_, v); }
+    vect3d target_u2() const { return ffi::fit_rig_target_u2(h_); }
+    void set_target_u2(vect3d v) { ffi::fit_rig_set_target_u2(h_, v); }
+    vect3d target_q0() const { return ffi::fit_rig_target_q0(h_); }
+    void set_target_q0(vect3d v) { ffi::fit_rig_set_target_q0(h_, v); }
+    vect3d target_q2() const { return ffi::fit_rig_target_q2(h_); }
+    void set_target_q2(vect3d v) { ffi::fit_rig_set_target_q2(h_, v); }
+    double target_g() const { return ffi::fit_rig_target_g(h_); }
+    void set_target_g(double v) { ffi::fit_rig_set_target_g(h_, v); }
+private:
+    ffi::Rig* h_;
+};
+
 /// A `Tie` in its owner's storage; a thin pointer wrapper (validity
 /// follows the storage -- see the owning container).
 class Tie {
@@ -415,6 +538,20 @@ public:
     int32_t marginal(const Pose& e, double* out, uint32_t cap) {
         return ffi::fit_pose_marginal_cov(h_, e.raw(), out, cap);
     }
+    /// Per-parameter standard deviations into out; returns the count
+    /// or a negative code. Works on every CovMode incl. TriDiagonal.
+    int32_t std_dev(const Rig& e, double* out, uint32_t cap) {
+        return ffi::fit_rig_std_dev(h_, e.raw(), out, cap);
+    }
+    /// Row-major dim x dim conditional covariance (all other
+    /// parameters held fixed) into out; returns dim or a negative code.
+    int32_t conditional(const Rig& e, double* out, uint32_t cap) {
+        return ffi::fit_rig_conditional_cov(h_, e.raw(), out, cap);
+    }
+    /// Row-major dim x dim into out; returns dim or a negative code.
+    int32_t marginal(const Rig& e, double* out, uint32_t cap) {
+        return ffi::fit_rig_marginal_cov(h_, e.raw(), out, cap);
+    }
     /// Row-major N::param_count x N::param_count cross-covariance
     /// into out; returns the row count or a negative code.
     int32_t cross(const N& a, const N& b, double* out, uint32_t cap) {
@@ -425,6 +562,11 @@ public:
     int32_t cross(const N& a, const Pose& b, double* out, uint32_t cap) {
         return ffi::fit_n_pose_cross_cov(h_, a.raw(), b.raw(), out, cap);
     }
+    /// Row-major N::param_count x Rig::param_count cross-covariance
+    /// into out; returns the row count or a negative code.
+    int32_t cross(const N& a, const Rig& b, double* out, uint32_t cap) {
+        return ffi::fit_n_rig_cross_cov(h_, a.raw(), b.raw(), out, cap);
+    }
     /// Row-major Pose::param_count x N::param_count cross-covariance
     /// into out; returns the row count or a negative code.
     int32_t cross(const Pose& a, const N& b, double* out, uint32_t cap) {
@@ -434,6 +576,26 @@ public:
     /// into out; returns the row count or a negative code.
     int32_t cross(const Pose& a, const Pose& b, double* out, uint32_t cap) {
         return ffi::fit_pose_pose_cross_cov(h_, a.raw(), b.raw(), out, cap);
+    }
+    /// Row-major Pose::param_count x Rig::param_count cross-covariance
+    /// into out; returns the row count or a negative code.
+    int32_t cross(const Pose& a, const Rig& b, double* out, uint32_t cap) {
+        return ffi::fit_pose_rig_cross_cov(h_, a.raw(), b.raw(), out, cap);
+    }
+    /// Row-major Rig::param_count x N::param_count cross-covariance
+    /// into out; returns the row count or a negative code.
+    int32_t cross(const Rig& a, const N& b, double* out, uint32_t cap) {
+        return ffi::fit_rig_n_cross_cov(h_, a.raw(), b.raw(), out, cap);
+    }
+    /// Row-major Rig::param_count x Pose::param_count cross-covariance
+    /// into out; returns the row count or a negative code.
+    int32_t cross(const Rig& a, const Pose& b, double* out, uint32_t cap) {
+        return ffi::fit_rig_pose_cross_cov(h_, a.raw(), b.raw(), out, cap);
+    }
+    /// Row-major Rig::param_count x Rig::param_count cross-covariance
+    /// into out; returns the row count or a negative code.
+    int32_t cross(const Rig& a, const Rig& b, double* out, uint32_t cap) {
+        return ffi::fit_rig_rig_cross_cov(h_, a.raw(), b.raw(), out, cap);
     }
 private:
     template<class T> result<T, CovError> fail() {
@@ -840,6 +1002,91 @@ private:
     ffi::Fit* h_;
 };
 
+/// `Fit.rigs`. Element pointers are STABLE across pushes (chunked storage).
+class FitRigsVec {
+public:
+    explicit FitRigsVec(ffi::Fit* h) : h_(h) {}
+    uint32_t size() const { return ffi::fit_rigs_len(h_); }
+    bool empty() const { return size() == 0; }
+    void reserve(uint32_t additional) { ffi::fit_rigs_reserve(h_, additional); }
+    Rig push() { return Rig(ffi::fit_rigs_push(h_)); }
+    Rig operator[](uint32_t i) { return Rig(ffi::fit_rigs_at(h_, i)); }
+    /// Front/back of a non-empty vec (empty = UB, like STL).
+    Rig front() { return (*this)[0]; }
+    Rig back() { return (*this)[size() - 1]; }
+    /// Drops the last element; false when already empty.
+    bool pop() { return ffi::fit_rigs_pop(h_); }
+    void clear() { ffi::fit_rigs_clear(h_); }
+    void truncate(uint32_t n) { ffi::fit_rigs_truncate(h_, n); }
+    RigRef ref_at(uint32_t i) const { return RigRef{ffi::fit_rigs_ref_at(h_, i)}; }
+    /// Ref of the first/last element; null when empty.
+    RigRef first_ref() const { return RigRef{ffi::fit_rigs_first_ref(h_)}; }
+    RigRef last_ref() const { return RigRef{ffi::fit_rigs_last_ref(h_)}; }
+    Rig get(RigRef r) { return Rig(ffi::fit_rigs_get(h_, r.raw)); }
+    /// True while r addresses a live element here.
+    bool contains(RigRef r) const { return ffi::fit_rigs_contains(h_, r.raw); }
+    /// Like get, but empty for a stale or foreign ref.
+    option<Rig> try_get(RigRef r) {
+        ffi::Rig* p = ffi::fit_rigs_try_get(h_, r.raw);
+        return p ? option<Rig>(Rig(p)) : option<Rig>();
+    }
+    /// Bidirectional iterator. Standard C++ contract: modifying the
+    /// container while iterating is undefined behavior. Dereference
+    /// yields a value wrapper (Rig), like vector<bool> --
+    /// reference is a value type.
+    class iterator {
+    public:
+        using iterator_category = std::bidirectional_iterator_tag;
+        using value_type = Rig;
+        using difference_type = std::ptrdiff_t;
+        using reference = Rig;
+        struct arrow { Rig v; Rig* operator->() { return &v; } };
+        using pointer = arrow;
+
+        iterator() : h_(nullptr), i_(0) {}
+        iterator(ffi::Fit* h, uint32_t i) : h_(h), i_(i) {}
+        Rig operator*() const { return Rig(ffi::fit_rigs_at(h_, i_)); }
+        arrow operator->() const { return arrow{**this}; }
+        iterator& operator++() { ++i_; return *this; }
+        iterator& operator--() { --i_; return *this; }
+        iterator operator++(int) { iterator t = *this; ++*this; return t; }
+        iterator operator--(int) { iterator t = *this; --*this; return t; }
+        bool operator==(const iterator& o) const { return i_ == o.i_; }
+        bool operator!=(const iterator& o) const { return i_ != o.i_; }
+    private:
+        ffi::Fit* h_;
+        uint32_t i_;
+    };
+    iterator begin() { return iterator(h_, 0); }
+    iterator end() { return iterator(h_, size()); }
+    class reverse_iterator {
+    public:
+        using iterator_category = std::bidirectional_iterator_tag;
+        using value_type = Rig;
+        using difference_type = std::ptrdiff_t;
+        using reference = Rig;
+        using pointer = iterator::arrow;
+
+        reverse_iterator() {}
+        explicit reverse_iterator(iterator base) : base_(base) {}
+        iterator base() const { return base_; }
+        Rig operator*() const { iterator t = base_; --t; return *t; }
+        pointer operator->() const { return pointer{**this}; }
+        reverse_iterator& operator++() { --base_; return *this; }
+        reverse_iterator& operator--() { ++base_; return *this; }
+        reverse_iterator operator++(int) { reverse_iterator t = *this; ++*this; return t; }
+        reverse_iterator operator--(int) { reverse_iterator t = *this; --*this; return t; }
+        bool operator==(const reverse_iterator& o) const { return base_ == o.base_; }
+        bool operator!=(const reverse_iterator& o) const { return base_ != o.base_; }
+    private:
+        iterator base_;
+    };
+    reverse_iterator rbegin() { return reverse_iterator(end()); }
+    reverse_iterator rend() { return reverse_iterator(begin()); }
+private:
+    ffi::Fit* h_;
+};
+
 /// The `Fit` model. Owns the Rust-side object; move-only.
 class Fit {
 public:
@@ -873,6 +1120,7 @@ public:
     FitPosesDeque poses() { return FitPosesDeque(h_); }
     FitTiesVec ties() { return FitTiesVec(h_); }
     FitMarksArena marks() { return FitMarksArena(h_); }
+    FitRigsVec rigs() { return FitRigsVec(h_); }
 
     /// Ok(LmResult) for every healthy termination, Err(SolveError) for
     /// a solve failure (-1) or a caught panic (-2) -- the same split

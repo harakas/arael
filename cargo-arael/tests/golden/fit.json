@@ -17,7 +17,17 @@
         {"name": "poses", "kind": "collection", "container": "deque", "of": "Pose", "spelled": "refs::Deque<Pose>"},
         {"name": "ties", "kind": "collection", "container": "vec", "of": "Tie", "spelled": "std::vec::Vec<Tie>"},
         {"name": "marks", "kind": "collection", "container": "arena", "of": "N", "spelled": "refs::Arena<N>"},
+        {"name": "rigs", "kind": "collection", "container": "vec", "of": "Rig", "spelled": "refs::Vec<Rig>"},
         {"name": "hb", "kind": "self_block", "scalar": "f64"}
+      ]
+    },
+    "Gain": {
+      "role": "component",
+      "param_count": 1,
+      "fields": [
+        {"name": "ref_g", "kind": "data", "of": "f64"},
+        {"name": "d", "kind": "param", "of": "f64", "params": 1},
+        {"name": "g", "kind": "data", "of": "f64", "symbolic": true}
       ]
     },
     "GpsObs": {
@@ -67,6 +77,22 @@
         {"name": "hb", "kind": "self_block", "scalar": "f64"}
       ]
     },
+    "Rig": {
+      "role": "entity",
+      "param_count": 7,
+      "self_block": "hb",
+      "fields": [
+        {"name": "ea_u", "kind": "euler_param", "variant": "universal", "scalar": "f64", "params": 3},
+        {"name": "q", "kind": "euler_param", "variant": "rotvec", "scalar": "f64", "params": 3},
+        {"name": "gain", "kind": "component", "of": "Gain"},
+        {"name": "target_u0", "kind": "data", "of": "vect3d"},
+        {"name": "target_u2", "kind": "data", "of": "vect3d"},
+        {"name": "target_q0", "kind": "data", "of": "vect3d"},
+        {"name": "target_q2", "kind": "data", "of": "vect3d"},
+        {"name": "target_g", "kind": "data", "of": "f64"},
+        {"name": "hb", "kind": "self_block", "scalar": "f64"}
+      ]
+    },
     "Tie": {
       "role": "entity",
       "param_count": 0,
@@ -80,9 +106,10 @@
     }
   },
   "constraints": [
-    {"on": "Obs", "label": "Obs", "file": "model/src/lib.rs", "line": 15},
-    {"on": "N", "label": "N", "file": "model/src/lib.rs", "line": 26},
-    {"on": "Pose", "label": "Pose", "file": "model/src/lib.rs", "line": 40},
-    {"on": "Tie", "label": "Tie", "file": "model/src/lib.rs", "line": 72}
+    {"on": "Obs", "label": "Obs", "file": "model/src/lib.rs", "line": 18},
+    {"on": "N", "label": "N", "file": "model/src/lib.rs", "line": 29},
+    {"on": "Pose", "label": "Pose", "file": "model/src/lib.rs", "line": 43},
+    {"on": "Tie", "label": "Tie", "file": "model/src/lib.rs", "line": 75},
+    {"on": "Rig", "label": "Rig", "file": "model/src/lib.rs", "line": 122}
   ]
 }

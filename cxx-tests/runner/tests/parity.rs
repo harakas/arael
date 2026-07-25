@@ -8,7 +8,7 @@ use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::refs::Ref;
 use arael::simple_lm::{LmConfig, LmProblem, LmStatus, SolveFailureKind};
 use arael::vect::{vect2d, vect3d};
-use cxx_fit::{Fit, GpsObs, N, Obs, Pose, Tie};
+use cxx_fit::{Fit, GpsObs, N, Obs, Pose, Rig, Tie};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -202,6 +202,63 @@ fn cxx_interface_matches_rust_exactly() {
             let cc = cov.conditional_cov(&f7.items[0]).unwrap();
             assert_eq!(g("cond_n"), cc.nrows() as f64);
             assert_eq!(g("cond_item0"), cc[(0, 0)]);
+        }
+
+        // Compound params mirrored: value fields set exactly like the
+        // FFI setters do (Default, then .value).
+        {
+            use arael::matrix::matrix3d;
+            use arael::quatern::quaternd;
+            let mut f10 = Fit::default();
+            fill(&mut f10);
+            let ea_a = vect3d::new(0.2, -0.3, 0.7);
+            let ea_b = vect3d::new(-0.4, 0.1, -1.2);
+            let rot_a = matrix3d::rotation_from_euler_angles(ea_a);
+            let rot_b = matrix3d::rotation_from_euler_angles(ea_b);
+            let mut rig = Rig::default();
+            rig.target_u0 = rot_a[0];
+            rig.target_u2 = rot_a[2];
+            rig.target_q0 = rot_b[0];
+            rig.target_q2 = rot_b[2];
+            rig.target_g = 1.75;
+            rig.ea_u.value = vect3d::new(0.15, -0.25, 0.6);
+            rig.q.value = quaternd::from_euler_angles(vect3d::new(-0.35, 0.05, -1.1));
+            rig.gain.g = 0.25;
+            let r0 = f10.rigs.push(rig);
+            let mut rig = Rig::default();
+            rig.target_u0 = rot_b[0];
+            rig.target_u2 = rot_b[2];
+            rig.target_q0 = rot_a[0];
+            rig.target_q2 = rot_a[2];
+            rig.target_g = -0.5;
+            rig.ea_u.value = ea_a;
+            rig.ea_u.optimize = false;
+            rig.q.value = quaternd::from_euler_angles(ea_a);
+            rig.gain.g = -0.75;
+            let r1 = f10.rigs.push(rig);
+            let r10 = f10.solve_dense(&cfg).unwrap();
+            assert_eq!(g("rig_status"), code(&r10.status));
+            assert_eq!(g("rig_end"), r10.end_cost);
+            let e0 = f10.rigs[r0].ea_u.value;
+            assert_eq!(g("rig0_ea_x"), e0.x);
+            assert_eq!(g("rig0_ea_y"), e0.y);
+            assert_eq!(g("rig0_ea_z"), e0.z);
+            let q0 = f10.rigs[r0].q.value;
+            assert_eq!(g("rig0_q_t"), q0.t);
+            assert_eq!(g("rig0_q_x"), q0.v.x);
+            assert_eq!(g("rig0_q_y"), q0.v.y);
+            assert_eq!(g("rig0_q_z"), q0.v.z);
+            assert_eq!(g("rig0_g"), f10.rigs[r0].gain.g);
+            // The solved values actually moved to their targets.
+            assert!((e0 - ea_a).norm() < 1e-9, "{:?}", e0);
+            assert!((f10.rigs[r0].gain.g - 1.75).abs() < 1e-9);
+            // The frozen euler param stayed put.
+            let e1 = f10.rigs[r1].ea_u.value;
+            assert!((e1 - ea_a).norm() == 0.0, "{:?}", e1);
+            assert_eq!(g("rig1_ea_x"), e1.x);
+            assert_eq!(g("rig1_ea_y"), e1.y);
+            assert_eq!(g("rig1_ea_z"), e1.z);
+            assert_eq!(g("rig1_g"), f10.rigs[r1].gain.g);
         }
 
         // Observer termination: Break stops the solve.

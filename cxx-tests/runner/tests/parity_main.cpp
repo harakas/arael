@@ -113,6 +113,47 @@ int main() {
     pi("cond_n", cov7.conditional(f7.items()[0], cc, 1));
     p("cond_item0", cc[0]);
 
+    // Compound params: the universal euler-angle param, the quaternion
+    // param, and a user component, pinned to rotation-row targets.
+    Fit f10;
+    fill(f10);
+    vect3d ea_a{0.2, -0.3, 0.7};
+    vect3d ea_b{-0.4, 0.1, -1.2};
+    matrix3d rot_a = matrix3d::rotation_from_euler_angles(ea_a);
+    matrix3d rot_b = matrix3d::rotation_from_euler_angles(ea_b);
+    auto rig0 = f10.rigs().push();
+    rig0.set_target_u0(rot_a.row(0));
+    rig0.set_target_u2(rot_a.row(2));
+    rig0.set_target_q0(rot_b.row(0));
+    rig0.set_target_q2(rot_b.row(2));
+    rig0.set_target_g(1.75);
+    rig0.set_ea_u({0.15, -0.25, 0.6});
+    rig0.set_q(quaternd::from_euler_angles({-0.35, 0.05, -1.1}));
+    rig0.gain().set_g(0.25);
+    // Second rig with the euler param frozen: it must stay put.
+    auto rig1 = f10.rigs().push();
+    rig1.set_target_u0(rot_b.row(0));
+    rig1.set_target_u2(rot_b.row(2));
+    rig1.set_target_q0(rot_a.row(0));
+    rig1.set_target_q2(rot_a.row(2));
+    rig1.set_target_g(-0.5);
+    rig1.set_ea_u(ea_a);
+    rig1.set_ea_u_optimize(false);
+    rig1.set_q(quaternd::from_euler_angles(ea_a));
+    rig1.gain().set_g(-0.75);
+    LmResult r10 = f10.solve_dense(cfg).value();
+    pi("rig_status", long(r10.status));
+    p("rig_end", r10.end_cost);
+    vect3d r0e = rig0.ea_u();
+    p("rig0_ea_x", r0e.x); p("rig0_ea_y", r0e.y); p("rig0_ea_z", r0e.z);
+    quaternd r0q = rig0.q();
+    p("rig0_q_t", r0q.t); p("rig0_q_x", r0q.v.x);
+    p("rig0_q_y", r0q.v.y); p("rig0_q_z", r0q.v.z);
+    p("rig0_g", rig0.gain().g());
+    vect3d r1e = rig1.ea_u();
+    p("rig1_ea_x", r1e.x); p("rig1_ea_y", r1e.y); p("rig1_ea_z", r1e.z);
+    p("rig1_g", rig1.gain().g());
+
     // Observer termination: false stops the solve.
     Fit f8;
     fill(f8);
