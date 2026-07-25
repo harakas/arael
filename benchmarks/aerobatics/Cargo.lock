@@ -20,7 +20,7 @@ dependencies = [
 
 [[package]]
 name = "arael"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "arael-faer",
  "arael-macros",
@@ -38,14 +38,15 @@ dependencies = [
 
 [[package]]
 name = "arael-faer"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "faer",
+ "nano-gemm",
 ]
 
 [[package]]
 name = "arael-macros"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "arael-sym",
  "arael-sym-macros",
@@ -56,14 +57,14 @@ dependencies = [
 
 [[package]]
 name = "arael-sym"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "arael-sym-macros",
 ]
 
 [[package]]
 name = "arael-sym-macros"
-version = "0.7.1"
+version = "0.8.0"
 dependencies = [
  "proc-macro2",
  "quote",
