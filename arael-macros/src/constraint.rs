@@ -2708,26 +2708,19 @@ pub fn generate_root_methods(
 
     let mut _generated_constraints_fn: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    // Collect all types reachable from this root (for multi-root support)
+    // Collect all types reachable from this root (for multi-root support).
+    // Seeded with the root alone: its layout was registered earlier in this
+    // same expansion, and every containment form (collections, Option,
+    // direct fields, Ref targets) is a Struct/OptionalStruct link there --
+    // and layouts are skip-aware by construction (`#[arael(skip)]` fields
+    // classify as Skip), so a skipped stash of model types does not leak
+    // into the set. (A syntax-side seed used to run here too; it pulled in
+    // skipped and non-containment wrapper args, which false-positived the
+    // reachable-set checks.)
     let reachable = {
         let mut set = std::collections::HashSet::new();
         let mut queue = Vec::new();
-        // Seed with the root itself — lets RootSelf constraints and direct-composed
-        // sub-models resolve through the BFS (root's layout Struct fields expand).
         queue.push(root_name.to_string());
-        // Seed with types directly in root fields (inner of Vec<T>, Deque<T>, etc.)
-        let root_fields_parsed: syn::FieldsNamed = syn::parse2(quote! { { #root_fields } })?;
-        for field in &root_fields_parsed.named {
-            if let syn::Type::Path(tp) = &field.ty
-                && let Some(seg) = tp.path.segments.last() {
-                    if let syn::PathArguments::AngleBracketed(args) = &seg.arguments
-                        && let Some(syn::GenericArgument::Type(inner)) = args.args.first()
-                            && let Ok(name) = type_ident_name(inner) {
-                                queue.push(name);
-                            }
-                }
-        }
-        // BFS through type registry
         while let Some(type_name) = queue.pop() {
             if !set.insert(type_name.clone()) { continue; }
             if let Some(layout) = registry_lookup(&type_name) {

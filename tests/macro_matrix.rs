@@ -1344,6 +1344,36 @@ fn unguarded_option_read_panics_with_field_name() {
     let _ = w.calc_cost(&x);
 }
 
+// A skipped stash must not leak into the root's reachable set: Nf32 has
+// f32 blocks, and the precision check would reject this f64 root if the
+// seed followed skipped fields (regression: it used to).
+#[arael::model]
+#[arael(constraint(hb, {
+    [(nf32.v - nf32.t) * 0.3]
+}))]
+struct Nf32 {
+    v: Param<f32>,
+    t: f32,
+    hb: SelfBlock<Nf32, f32>,
+}
+
+#[arael::model]
+#[arael(root)]
+struct ASkipStash {
+    items: std::vec::Vec<P>,
+    #[arael(skip)]
+    stash: std::vec::Vec<Nf32>,
+}
+
+#[test]
+fn skipped_stash_stays_outside_the_reachable_set() {
+    let mut w = ASkipStash {
+        items: PDATA.iter().map(|&(x, y, t)| p(x, y, t)).collect(),
+        stash: vec![Nf32 { v: Param::new(1.0), t: 0.5, hb: SelfBlock::new() }],
+    };
+    check_model("skip stash", &mut w, pdata_cost());
+}
+
 #[test]
 fn skipped_alias_container_is_inert() {
     let mut items = refs::Vec::new();

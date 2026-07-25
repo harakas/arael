@@ -4,10 +4,22 @@ error: collection element type `Later` has no registered #[arael::model] layout:
 12 |     items: refs::Vec<Later>,
    |     ^^^^^^^^^^^^^^^^^^^^^^^
 
+error: `Later` is reachable from root `R` but defined after it -- the root's expansion has already run, so `Later`'s constraints were dropped; define it (or import its crate's bundle) BEFORE the root
+  --> tests/constraint_attr_errors/root_before_entity.rs:19:8
+   |
+19 | struct Later {
+   |        ^^^^^
+
+warning: unused imports: `Param` and `SelfBlock`
+ --> tests/constraint_attr_errors/root_before_entity.rs:6:20
+  |
+6 | use arael::model::{Param, SelfBlock};
+  |                    ^^^^^  ^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
 warning: unused import: `arael::refs`
  --> tests/constraint_attr_errors/root_before_entity.rs:7:5
   |
 7 | use arael::refs;
   |     ^^^^^^^^^^^
-  |
-  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default

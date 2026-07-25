@@ -6,17 +6,17 @@
 use arael::model::{Model, Param, SelfBlock};
 
 #[arael::model]
+struct L {
+    p: Param<f64>,
+    hb: SelfBlock<L>,
+}
+
+#[arael::model]
 #[arael(root, marginalize(landmark))]
 struct R {
     x: Param<f64>,
     landmarks: arael::refs::Vec<L>,
     hb: SelfBlock<R>,
-}
-
-#[arael::model]
-struct L {
-    p: Param<f64>,
-    hb: SelfBlock<L>,
 }
 
 fn main() {}

@@ -717,8 +717,12 @@ code. The dialect:
 - **Ordering rule**: every entity struct must be defined BEFORE the
   root struct, in top-down file order -- the root's expansion consumes
   the stashed constraints. Violations are a macro error ("define it
-  BEFORE the root"). The same applies across modules within a crate
-  (expansion order follows item order); models cannot span crates.
+  BEFORE the root"), enforced for every containment form at any depth:
+  a type registering after a root that can reach it (through
+  collections, Option fields, or nested holders) fails its own
+  expansion naming that root. The same applies across modules within a
+  crate (expansion order follows item order); use `export_models!` /
+  `arael_import!` to share models across crates.
 - **Errors**: body and attribute diagnostics are prefixed with the
   constraint's `file:line` (spans do not survive the macro's stash
   round trip, so the error arrow points at the root struct -- read the

@@ -124,6 +124,11 @@ struct SymLayout {
     /// the containing parent (block fields are `Skip` in `fields`, so the
     /// name is otherwise unrecoverable from the layout).
     triplet_block_fields: Vec<String>,
+    /// `#[arael(root)]` struct. A root's expansion consumes the constraint
+    /// stash; the registration-time ordering guard errors on any model
+    /// type that registers later yet is reachable from this root -- its
+    /// constraints were silently dropped.
+    is_root: bool,
 }
 
 /// Total optimizable scalars of a registered type, following
@@ -366,8 +371,45 @@ fn registry_store(name: &str, layout: SymLayout) -> Result<(), String> {
                  that field `#[arael(skip)]` if it is deliberately outside the \
                  model", name, field, holder, wrapper))
     };
+    // Ordering guard, registration side: a type registering AFTER a root
+    // that can already reach it means that root's expansion consumed the
+    // constraint stash without this type -- its constraints were silently
+    // dropped (params still serialize through the runtime recursion, so
+    // the model would solve quietly wrong). BFS each expanded root's
+    // layout through Struct/OptionalStruct links; layouts are skip-aware
+    // by construction. Fieldless layouts (enums) carry nothing droppable;
+    // an identical re-registration passed this check the first time.
+    let ordering_hit = if layout.fields.is_empty() || reg.layouts.contains_key(name) {
+        None
+    } else {
+        let links = |l: &SymLayout| -> Vec<String> {
+            l.fields.iter().filter_map(|(_, sft)| match sft {
+                SymFieldType::Struct(s) | SymFieldType::OptionalStruct(s) => Some(s.clone()),
+                _ => None,
+            }).collect()
+        };
+        reg.layouts.iter()
+            .filter(|(rname, rl)| rl.is_root && rname.as_str() != name)
+            .find(|(_, rl)| {
+                let mut seen = std::collections::HashSet::new();
+                let mut queue = links(rl);
+                while let Some(t) = queue.pop() {
+                    if t == name { return true; }
+                    if !seen.insert(t.clone()) { continue; }
+                    if let Some(l) = reg.layouts.get(&t) {
+                        queue.extend(links(l));
+                    }
+                }
+                false
+            })
+            .map(|(rname, _)| format!(
+                "`{}` is reachable from root `{}` but defined after it -- the root's \
+                 expansion has already run, so `{}`'s constraints were dropped; define \
+                 it (or import its crate's bundle) BEFORE the root",
+                name, rname, name))
+    };
     reg.layouts.insert(name.to_string(), layout);
-    match suspect_hit {
+    match suspect_hit.or(ordering_hit) {
         Some(msg) => Err(msg),
         None => Ok(()),
     }
@@ -431,6 +473,7 @@ fn builtin_component_layout(name: &str) -> Option<SymLayout> {
             block_precision: None,
             inst_precisions: Vec::new(),
             triplet_block_fields: Vec::new(),
+            is_root: false,
         }),
         "UnitVecParam" | "UnitVecParamF" => Some(SymLayout {
             fields: vec![
@@ -463,6 +506,7 @@ fn builtin_component_layout(name: &str) -> Option<SymLayout> {
             block_precision: None,
             inst_precisions: Vec::new(),
             triplet_block_fields: Vec::new(),
+            is_root: false,
         }),
         _ => None,
     }
@@ -1438,6 +1482,7 @@ fn register_model_layout(input: &syn::DeriveInput) -> syn::Result<u32> {
         block_precision: block_precision_reg,
         inst_precisions: inst_precisions_reg,
         triplet_block_fields: triplet_block_fields_reg,
+        is_root: has_struct_attr_ident(&input.attrs, "root"),
     }).map_err(|msg| syn::Error::new_spanned(name, msg))?;
 
     Ok(param_count)
@@ -1467,6 +1512,7 @@ fn register_enum_layout(name: &syn::Ident) -> syn::Result<()> {
         block_precision: None,
         inst_precisions: Vec::new(),
         triplet_block_fields: Vec::new(),
+        is_root: false,
     }).map_err(|msg| syn::Error::new_spanned(name, msg))
 }
 
