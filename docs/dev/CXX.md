@@ -725,3 +725,43 @@ All questions settled; the plan is ready to execute.
     pinned by position-weighted sums (which also caught that the
     parity compile needed -ffp-contract=off, like cxx_math). Still
     open: no const view of the model.
+
+## 11. Remaining work (surveyed 2026-07-25)
+
+What the Rust surface has and the generated interface still drops,
+in priority order:
+
+1. **Iteration callback (observer).** SHIPPED 2026-07-25:
+   `bool (*observer)(void* user, const LmIterT<F>*)` + `void*
+   observer_user` on LmConfig; the shim wraps them in a forwarding
+   Clone observer; false return -> ObserverTerminated. LmIter carries
+   iter/inner, accepted, factorization_failed, cost, new_cost,
+   lambda, accepted_total, and the current params slice. Parity:
+   callback count == iterations, params length, early termination.
+2. **Timing.** SHIPPED 2026-07-25: `gather_timing` on the config;
+   `LmResult::timing` mirrored as seconds-doubles + counts
+   (`has_timing` flags validity; the per-step records stay
+   Rust-side). Counts are parity-pinned (deterministic), durations
+   as positivity.
+3. **report() / pretty_report().** SHIPPED 2026-07-25: the handle
+   keeps the last completed LmResult and `last_report(pretty)`
+   renders it Rust-side on demand (carrying SolverReport and timing
+   that the C mirror drops), exposed like last_error.
+4. **LmSession warm reuse** -- in TODO.md; the one real performance
+   gap (ramps re-analyze sparsity every pass).
+5. **conditional_cov** -- SHIPPED 2026-07-25 as
+   `Covariance::conditional(entity, out, cap)`, exact parity.
+6. **calc_cost_table** -- per-constraint-family cost breakdown, over
+   the FFI as name/value pairs. Debugging aid.
+7. **Coverage padding, via tests (not demos):** universal/rotvec
+   rotation params, user components end-to-end, multi-root capi --
+   extend the cxx-tests fixture/parity suite to exercise them.
+8. **Feature-gated backends** (eigen/cholmod) -- would need a
+   features pass-through in [package.metadata.arael]. Niche; faer +
+   band cover the demos.
+9. **Custom lambda driver** -- preset-only today; callback-shaped
+   like the observer if ever needed. Not planned.
+10. **Stage 6: the Python skin** -- the remaining plan stage.
+
+Fit-attribute models stay out (see TODO discussion), ExtendedModel is
+never exposed.

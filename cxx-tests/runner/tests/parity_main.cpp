@@ -83,6 +83,45 @@ int main() {
     p("sparse_m", fit2.m());
     p("sparse_c", fit2.c());
 
+    // Observer callback + timing + report + conditional covariance.
+    Fit f7;
+    pi("report_empty_before", std::strlen(f7.last_report()) == 0 ? 1 : 0);
+    fill(f7);
+    LmConfig cfg7 = cfg;
+    cfg7.gather_timing = true;
+    struct ObsState { uint32_t calls; uint32_t last_params_len; } obs{0, 0};
+    cfg7.observer = [](void* user, const LmIter* it) -> bool {
+        auto* s = static_cast<ObsState*>(user);
+        s->calls++;
+        s->last_params_len = it->params_len;
+        return true;
+    };
+    cfg7.observer_user = &obs;
+    LmResult r7 = f7.solve_dense(cfg7).value();
+    pi("obs_calls_eq_iters", obs.calls == r7.iterations ? 1 : 0);
+    pi("obs_params_len", obs.last_params_len);
+    p("obs_end", r7.end_cost);
+    pi("tm_has", r7.has_timing ? 1 : 0);
+    pi("tm_total_pos", r7.timing.total > 0.0 ? 1 : 0);
+    pi("tm_assembly_count", r7.timing.assembly_count);
+    pi("tm_solve_count", r7.timing.linear_solve_count);
+    pi("tm_cost_count", r7.timing.cost_eval_count);
+    pi("report_nonempty", std::strlen(f7.last_report()) > 0 ? 1 : 0);
+    pi("report_pretty_nonempty", std::strlen(f7.last_pretty_report()) > 0 ? 1 : 0);
+    auto cov7 = f7.assemble_covariance(CovMode::AllMarginals).value();
+    double cc[1];
+    pi("cond_n", cov7.conditional(f7.items()[0], cc, 1));
+    p("cond_item0", cc[0]);
+
+    // Observer termination: false stops the solve.
+    Fit f8;
+    fill(f8);
+    LmConfig cfg8 = cfg;
+    cfg8.observer = [](void*, const LmIter*) -> bool { return false; };
+    LmResult r8 = f8.solve_dense(cfg8).value();
+    pi("obs_stop_status", long(r8.status));
+    pi("obs_stop_iters", r8.iterations);
+
     // Band solve: the fixture is not banded, so kd spans the whole
     // parameter vector -- a dense band, numerically the same solve.
     Fit fitb;

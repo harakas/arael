@@ -581,12 +581,15 @@ use arael::simple_lm::{{LmConfig, LmProblem, LmStatus}};
 use {model_crate}::{{{}}};
 
 /// The opaque handle the C ABI hands out: the model, the error /
-/// diagnostic text buffer `last_error` points into, and the covariance
-/// assembly once requested.
+/// diagnostic text buffer `last_error` points into, the covariance
+/// assembly once requested, and the last completed solve result
+/// (`last_report` renders from it into `report`).
 pub struct {handle} {{
     model: {root},
     text: CString,
+    report: CString,
     cov: Option<CovAssembly>,
+    last: Option<arael::simple_lm::LmResult<{fp}>>,
 }}
 {MIRRORS}
 fn status_code(s: &LmStatus) -> i32 {{
@@ -646,11 +649,63 @@ fn opt_of(c: COptF) -> Option<{fp}> {{
     c.has.then_some(c.v)
 }}
 
+/// One damped attempt, as the observer callback sees it. Field order
+/// is C ABI. `params` points at the CURRENT parameter vector for this
+/// attempt; valid only during the callback.
+#[repr(C)]
+pub struct CLmIter {{
+    pub iter: u32,
+    pub inner: u32,
+    pub accepted: bool,
+    pub factorization_failed: bool,
+    pub cost: {fp},
+    pub new_cost: {fp},
+    pub lambda: {fp},
+    pub accepted_total: u32,
+    pub params: *const {fp},
+    pub params_len: u32,
+}}
+
+/// The C observer: called once per damped attempt; return false to
+/// stop the solve (status ObserverTerminated).
+type CObserverFn = extern \"C\" fn(*mut core::ffi::c_void, *const CLmIter) -> bool;
+
+#[derive(Clone)]
+struct CObserver {{
+    f: CObserverFn,
+    user: *mut core::ffi::c_void,
+}}
+
+impl arael::simple_lm::LmObserver<{fp}> for CObserver {{
+    fn on_iteration(
+        &mut self,
+        it: &arael::simple_lm::LmIter<'_, {fp}>,
+    ) -> std::ops::ControlFlow<()> {{
+        let c = CLmIter {{
+            iter: it.iter as u32,
+            inner: it.inner as u32,
+            accepted: it.accepted,
+            factorization_failed: it.factorization_failed,
+            cost: it.cost,
+            new_cost: it.new_cost,
+            lambda: it.lambda,
+            accepted_total: it.accepted_total as u32,
+            params: it.params.as_ptr(),
+            params_len: it.params.len() as u32,
+        }};
+        if (self.f)(self.user, &c) {{
+            std::ops::ControlFlow::Continue(())
+        }} else {{
+            std::ops::ControlFlow::Break(())
+        }}
+    }}
+}}
+
 /// The solver config as REAL values: constructed by
 /// {root_sn}_lm_config (which copies them out of the actual Rust
 /// LmConfig preset), edited freely, passed back whole. The preset tag
 /// stays the base for the Rust fields this struct does not expose
-/// (lambda driver, observer, gather_timing). Field order is C ABI.
+/// (lambda driver). Field order is C ABI.
 #[repr(C)]
 pub struct CLmConfig {{
     pub preset: u32,
@@ -659,6 +714,7 @@ pub struct CLmConfig {{
     pub patience: u32,
     pub num_threads: u32,
     pub verbose: bool,
+    pub gather_timing: bool,
     pub abs_precision: {fp},
     pub rel_precision: {fp},
     pub initial_lambda: {fp},
@@ -669,6 +725,8 @@ pub struct CLmConfig {{
     pub predicted_reduction_tolerance: COptF,
     pub min_diagonal: COptF,
     pub time_limit_seconds: COptSeconds,
+    pub observer: Option<CObserverFn>,
+    pub observer_user: *mut core::ffi::c_void,
 }}
 
 fn preset_config(preset: u32) -> LmConfig<{fp}> {{
@@ -691,6 +749,7 @@ pub unsafe extern \"C\" fn {root_sn}_lm_config(preset: u32, out: *mut CLmConfig)
         patience: c.patience as u32,
         num_threads: c.num_threads as u32,
         verbose: c.verbose,
+        gather_timing: c.gather_timing,
         abs_precision: c.abs_precision,
         rel_precision: c.rel_precision,
         initial_lambda: c.initial_lambda,
@@ -704,6 +763,8 @@ pub unsafe extern \"C\" fn {root_sn}_lm_config(preset: u32, out: *mut CLmConfig)
             Some(d) => COptSeconds {{ has: true, v: d.as_secs_f64() }},
             None => COptSeconds {{ has: false, v: 0.0 }},
         }},
+        observer: None,
+        observer_user: std::ptr::null_mut(),
     }};
 }}
 
@@ -715,6 +776,7 @@ impl CLmConfig {{
         c.patience = self.patience as usize;
         c.num_threads = self.num_threads as usize;
         c.verbose = self.verbose;
+        c.gather_timing = self.gather_timing;
         c.abs_precision = self.abs_precision;
         c.rel_precision = self.rel_precision;
         c.initial_lambda = self.initial_lambda;
@@ -727,8 +789,33 @@ impl CLmConfig {{
         c.time_limit = self.time_limit_seconds.has.then(|| {{
             std::time::Duration::from_secs_f64(self.time_limit_seconds.v)
         }});
+        if let Some(f) = self.observer {{
+            c = c.with_observer(CObserver {{ f, user: self.observer_user }});
+        }}
         c
     }}
+}}
+
+/// LmTiming mirror: per-phase wall-clock seconds plus call counts.
+/// The Rust per-step records (LmTiming::steps) stay Rust-side.
+#[repr(C)]
+#[derive(Default, Clone, Copy)]
+pub struct CLmTiming {{
+    pub total: f64,
+    pub assembly: f64,
+    pub first_assembly: f64,
+    pub analysis: f64,
+    pub linear_solve: f64,
+    pub first_linear_solve: f64,
+    pub cost_eval: f64,
+    pub first_cost_eval: f64,
+    pub advance: f64,
+    pub first_advance: f64,
+    pub assembly_count: u32,
+    pub analysis_count: u32,
+    pub linear_solve_count: u32,
+    pub cost_eval_count: u32,
+    pub advance_count: u32,
 }}
 
 #[repr(C)]
@@ -739,6 +826,52 @@ pub struct CLmResult {{
     pub accepted_iterations: u32,
     pub status: i32,
     pub final_lambda: {fp},
+    /// Valid iff has_timing (config.gather_timing was set).
+    pub timing: CLmTiming,
+    pub has_timing: bool,
+}}
+
+unsafe fn zero_result(out: *mut CLmResult) {{
+    *out = CLmResult {{
+        start_cost: 0.0, end_cost: 0.0, iterations: 0,
+        accepted_iterations: 0, status: -1, final_lambda: 0.0,
+        timing: CLmTiming::default(), has_timing: false,
+    }};
+}}
+
+unsafe fn fill_result(out: *mut CLmResult, r: &arael::simple_lm::LmResult<{fp}>) -> i32 {{
+    let code = status_code(&r.status);
+    let (timing, has_timing) = match &r.timing {{
+        Some(t) => (CLmTiming {{
+            total: t.total.as_secs_f64(),
+            assembly: t.assembly.as_secs_f64(),
+            first_assembly: t.first_assembly.as_secs_f64(),
+            analysis: t.analysis.as_secs_f64(),
+            linear_solve: t.linear_solve.as_secs_f64(),
+            first_linear_solve: t.first_linear_solve.as_secs_f64(),
+            cost_eval: t.cost_eval.as_secs_f64(),
+            first_cost_eval: t.first_cost_eval.as_secs_f64(),
+            advance: t.advance.as_secs_f64(),
+            first_advance: t.first_advance.as_secs_f64(),
+            assembly_count: t.assembly_count as u32,
+            analysis_count: t.analysis_count as u32,
+            linear_solve_count: t.linear_solve_count as u32,
+            cost_eval_count: t.cost_eval_count as u32,
+            advance_count: t.advance_count as u32,
+        }}, true),
+        None => (CLmTiming::default(), false),
+    }};
+    *out = CLmResult {{
+        start_cost: r.start_cost,
+        end_cost: r.end_cost,
+        iterations: r.iterations as u32,
+        accepted_iterations: r.accepted_iterations as u32,
+        status: code,
+        final_lambda: r.final_lambda,
+        timing,
+        has_timing,
+    }};
+    code
 }}
 
 #[no_mangle]
@@ -746,7 +879,9 @@ pub extern \"C\" fn {root_sn}_new() -> *mut {handle} {{
     Box::into_raw(Box::new({handle} {{
         model: Default::default(),
         text: CString::default(),
+        report: CString::default(),
         cov: None,
+        last: None,
     }}))
 }}
 
@@ -760,6 +895,22 @@ pub unsafe extern \"C\" fn {root_sn}_free(h: *mut {handle}) {{
 #[no_mangle]
 pub unsafe extern \"C\" fn {root_sn}_last_error(h: *const {handle}) -> *const c_char {{
     (*h).text.as_ptr()
+}}
+
+/// Text report of the last completed solve (status, cost, iterations,
+/// damping, plus the timing breakdown and the backend's plan when it
+/// has them). \"\" before the first solve or after a failed one.
+/// `pretty` adds colour and box-drawing glyphs. Valid until the next
+/// call to this function.
+#[no_mangle]
+pub unsafe extern \"C\" fn {root_sn}_last_report(h: *mut {handle}, pretty: bool) -> *const c_char {{
+    let hh = &mut *h;
+    let text = match &hh.last {{
+        Some(r) => if pretty {{ r.pretty_report() }} else {{ r.report() }},
+        None => String::new(),
+    }};
+    hh.report = CString::new(text).unwrap_or_default();
+    hh.report.as_ptr()
 }}
 
 /// Empty string when the model is clean, the Diagnostic text otherwise.
@@ -792,21 +943,12 @@ pub unsafe extern \"C\" fn {root_sn}_{method}(
 ) -> i32 {{
     let hh = &mut *h;
     let c = (*cfg).to_config();
-    *out = CLmResult {{
-        start_cost: 0.0, end_cost: 0.0, iterations: 0,
-        accepted_iterations: 0, status: -1, final_lambda: 0.0,
-    }};
+    zero_result(out);
+    hh.last = None;
     match catch_unwind(AssertUnwindSafe(|| hh.model.{method}(&c))) {{
         Ok(Ok(r)) => {{
-            let code = status_code(&r.status);
-            *out = CLmResult {{
-                start_cost: r.start_cost,
-                end_cost: r.end_cost,
-                iterations: r.iterations as u32,
-                accepted_iterations: r.accepted_iterations as u32,
-                status: code,
-                final_lambda: r.final_lambda,
-            }};
+            let code = fill_result(out, &r);
+            hh.last = Some(r);
             set_text(hh, \"\");
             code
         }}
@@ -847,10 +989,8 @@ pub unsafe extern \"C\" fn {root_sn}_solve_band(
 ) -> i32 {{
     let hh = &mut *h;
     let c = (*cfg).to_config();
-    *out = CLmResult {{
-        start_cost: 0.0, end_cost: 0.0, iterations: 0,
-        accepted_iterations: 0, status: -1, final_lambda: 0.0,
-    }};
+    zero_result(out);
+    hh.last = None;
     match catch_unwind(AssertUnwindSafe(|| {{
         let mut x0 = Vec::new();
         hh.model.{b_ser}(&mut x0);
@@ -860,15 +1000,8 @@ pub unsafe extern \"C\" fn {root_sn}_solve_band(
         }})
     }})) {{
         Ok(Ok(r)) => {{
-            let code = status_code(&r.status);
-            *out = CLmResult {{
-                start_cost: r.start_cost,
-                end_cost: r.end_cost,
-                iterations: r.iterations as u32,
-                accepted_iterations: r.accepted_iterations as u32,
-                status: code,
-                final_lambda: r.final_lambda,
-            }};
+            let code = fill_result(out, &r);
+            hh.last = Some(r);
             set_text(hh, \"\");
             code
         }}
@@ -965,6 +1098,47 @@ pub unsafe extern \"C\" fn {sn}_marginal_cov(
             let dim = m.nrows();
             if (dim * dim) as u32 > cap {{
                 set_text(hh, \"marginal_cov: buffer too small\");
+                return -3;
+            }}
+            for r in 0..dim {{
+                for c in 0..dim {{
+                    *out.add(r * dim + c) = m[(r, c)];
+                }}
+            }}
+            dim as i32
+        }}
+        Ok(Err(e)) => {{
+            set_text(hh, &format!(\"{{}}\", e));
+            -1
+        }}
+        Err(p2) => {{
+            let msg = panic_text(p2);
+            set_text(hh, &msg);
+            -2
+        }}
+    }}
+}}
+/// Row-major dim x dim conditional covariance (f64) of one `{tn}`
+/// (all other parameters held fixed); returns dim, or -1 (error) /
+/// -2 (panic) / -3 (no assembly or buffer too small), text via
+/// {root_sn}_last_error.
+#[no_mangle]
+pub unsafe extern \"C\" fn {sn}_conditional_cov(
+    h: *mut {handle},
+    p: *const {tn},
+    out: *mut f64,
+    cap: u32,
+) -> i32 {{
+    let hh = &mut *h;
+    let Some(cov) = hh.cov.as_ref() else {{
+        set_text(hh, \"conditional_cov: assemble_covariance was not called\");
+        return -3;
+    }};
+    match catch_unwind(AssertUnwindSafe(|| cov.conditional_cov(&*p))) {{
+        Ok(Ok(m)) => {{
+            let dim = m.nrows();
+            if (dim * dim) as u32 > cap {{
+                set_text(hh, \"conditional_cov: buffer too small\");
                 return -3;
             }}
             for r in 0..dim {{

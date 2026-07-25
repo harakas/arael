@@ -121,10 +121,24 @@ views are named by their container's nature: `PathPosesDeque`,
 - **LmConfig** is a plain struct holding the chosen preset's
   Rust values (fetched through the FFI at construction) -- inspect the
   real defaults, edit fields, pass it back whole. Every Rust field is
-  there except the lambda driver, observer, and gather_timing (the
-  preset supplies those); Rust `Option` fields are `arael::option<F>`
+  there except the lambda driver (the preset supplies it); Rust
+  `Option` fields are `arael::option<F>`
   (`cfg.gradient_tolerance = 1e-8;` or `= {};`), `time_limit` in
   seconds. The shared solver surface lives in `arael/solver.hpp`.
+- **Observer**: `cfg.observer` (+ `cfg.observer_user`, passed back as
+  its first argument) is called once per damped attempt with an
+  `LmIter` -- iteration counts, accepted flag, costs, lambda, and the
+  current parameter vector. Return false to stop the solve (status
+  `ObserverTerminated`, current best state kept). A capture-less
+  lambda converts directly.
+- **Timing**: set `cfg.gather_timing`; the result then carries
+  `timing` (per-phase wall-clock seconds plus call counts,
+  `has_timing` flags validity).
+- **last_report() / last_pretty_report()** on the root render the
+  Rust-side report of the last completed solve -- status, costs,
+  iterations, the timing breakdown, and the backend's plan (what the
+  sparse solver decided), which the plain result struct does not
+  carry.
 - **result / option** mirror Rust's shapes; reading the wrong side
   prints the failed check and aborts (`arael_assert_true` -- always
   on).
@@ -138,7 +152,9 @@ views are named by their container's nature: `PathPosesDeque`,
   `cov->cross(a, b, out, cap)` the row-major pa x pb cross-covariance
   between two entities (returns the row count or a negative code);
   `cov->std_dev(entity, out, cap)` the per-parameter standard
-  deviations (works on every CovMode, including TriDiagonal).
+  deviations (works on every CovMode, including TriDiagonal);
+  `cov->conditional(entity, out, cap)` the conditional covariance
+  (all other parameters held fixed).
   Valid until the model is dropped or reassembled.
 - **Solves**: `solve_dense` / `solve_sparse` / `solve_band(kd)` --
   band Cholesky for banded Hessians, `kd` the half-bandwidth in

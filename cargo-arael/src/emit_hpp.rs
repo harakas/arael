@@ -509,12 +509,18 @@ public:
             let sn = format!("{root_sn}_{}", snake(tn));
             cpp.ffi.push_str(&format!(
                 "int32_t {sn}_marginal_cov({root}*, const {tn}*, double*, uint32_t);\n\
+                 int32_t {sn}_conditional_cov({root}*, const {tn}*, double*, uint32_t);\n\
                  int32_t {sn}_std_dev({root}*, const {tn}*, double*, uint32_t);\n"));
             methods.push_str(&format!(
 "    /// Per-parameter standard deviations into out; returns the count
     /// or a negative code. Works on every CovMode incl. TriDiagonal.
     int32_t std_dev(const {tn}& e, double* out, uint32_t cap) {{
         return ffi::{sn}_std_dev(h_, e.raw(), out, cap);
+    }}
+    /// Row-major dim x dim conditional covariance (all other
+    /// parameters held fixed) into out; returns dim or a negative code.
+    int32_t conditional(const {tn}& e, double* out, uint32_t cap) {{
+        return ffi::{sn}_conditional_cov(h_, e.raw(), out, cap);
     }}\n"));
             match t.param_count {
                 1 => methods.push_str(&format!(
@@ -593,6 +599,7 @@ public:
          {root}* {root_sn}_new(void);\n\
          void {root_sn}_free({root}*);\n\
          const char* {root_sn}_last_error(const {root}*);\n\
+         const char* {root_sn}_last_report({root}*, bool);\n\
          const char* {root_sn}_validate({root}*);\n\
          int32_t {root_sn}_solve_dense({root}*, const LmConfig*, LmResult*);\n\
          int32_t {root_sn}_solve_sparse({root}*, const LmConfig*, LmResult*);\n"));
@@ -637,6 +644,8 @@ using arael::LmStatus;
 using arael::LmPreset;
 using arael::LmConfigT;
 using arael::LmResultT;
+using arael::LmIterT;
+using arael::LmTiming;
 using arael::SolveResultT;
 using arael::SolveError;
 using arael::CovMode;
@@ -646,6 +655,7 @@ using arael::CovError;
 /// this model's precision, plus the config constructor that fetches
 /// the preset's actual Rust values through this root's FFI.
 using LmResult = LmResultT<{fp}>;
+using LmIter = LmIterT<{fp}>;
 using SolveResult = SolveResultT<{fp}>;
 
 struct LmConfig : LmConfigT<{fp}> {{
@@ -721,6 +731,12 @@ public:
     /// this model.
     const char* validate() {{ return ffi::{root_sn}_validate(h_); }}
     const char* last_error() const {{ return ffi::{root_sn}_last_error(h_); }}
+    /// Text report of the last completed solve (status, cost,
+    /// iterations, timing and the backend's plan when gathered); \"\"
+    /// before the first solve. Valid until the next report call.
+    const char* last_report() {{ return ffi::{root_sn}_last_report(h_, false); }}
+    /// last_report() with colour and box-drawing glyphs.
+    const char* last_pretty_report() {{ return ffi::{root_sn}_last_report(h_, true); }}
 
 private:
     ffi::{root}* h_;

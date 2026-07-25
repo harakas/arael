@@ -35,6 +35,8 @@ using arael::LmStatus;
 using arael::LmPreset;
 using arael::LmConfigT;
 using arael::LmResultT;
+using arael::LmIterT;
+using arael::LmTiming;
 using arael::SolveResultT;
 using arael::SolveError;
 using arael::CovMode;
@@ -44,6 +46,7 @@ using arael::CovError;
 /// this model's precision, plus the config constructor that fetches
 /// the preset's actual Rust values through this root's FFI.
 using LmResult = LmResultT<double>;
+using LmIter = LmIterT<double>;
 using SolveResult = SolveResultT<double>;
 
 struct LmConfig : LmConfigT<double> {
@@ -110,6 +113,7 @@ double graph_prior_th(const Prior*);
 void graph_prior_set_th(Prior*, double);
 int32_t graph_assemble_covariance(Graph*, uint32_t);
 int32_t graph_pose2_marginal_cov(Graph*, const Pose2*, double*, uint32_t);
+int32_t graph_pose2_conditional_cov(Graph*, const Pose2*, double*, uint32_t);
 int32_t graph_pose2_std_dev(Graph*, const Pose2*, double*, uint32_t);
 int32_t graph_pose2_pose2_cross_cov(Graph*, const Pose2*, const Pose2*, double*, uint32_t);
 uint32_t graph_poses_len(const Graph*);
@@ -142,6 +146,7 @@ void graph_lm_config(uint32_t, LmConfig*);
 Graph* graph_new(void);
 void graph_free(Graph*);
 const char* graph_last_error(const Graph*);
+const char* graph_last_report(Graph*, bool);
 const char* graph_validate(Graph*);
 int32_t graph_solve_dense(Graph*, const LmConfig*, LmResult*);
 int32_t graph_solve_sparse(Graph*, const LmConfig*, LmResult*);
@@ -237,6 +242,11 @@ public:
     /// or a negative code. Works on every CovMode incl. TriDiagonal.
     int32_t std_dev(const Pose2& e, double* out, uint32_t cap) {
         return ffi::graph_pose2_std_dev(h_, e.raw(), out, cap);
+    }
+    /// Row-major dim x dim conditional covariance (all other
+    /// parameters held fixed) into out; returns dim or a negative code.
+    int32_t conditional(const Pose2& e, double* out, uint32_t cap) {
+        return ffi::graph_pose2_conditional_cov(h_, e.raw(), out, cap);
     }
     result<matrix3d, CovError> marginal(const Pose2& e) {
         double b[9];
@@ -478,6 +488,12 @@ public:
     /// this model.
     const char* validate() { return ffi::graph_validate(h_); }
     const char* last_error() const { return ffi::graph_last_error(h_); }
+    /// Text report of the last completed solve (status, cost,
+    /// iterations, timing and the backend's plan when gathered); ""
+    /// before the first solve. Valid until the next report call.
+    const char* last_report() { return ffi::graph_last_report(h_, false); }
+    /// last_report() with colour and box-drawing glyphs.
+    const char* last_pretty_report() { return ffi::graph_last_report(h_, true); }
 
 private:
     ffi::Graph* h_;

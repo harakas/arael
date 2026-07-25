@@ -40,10 +40,30 @@ enum class LmPreset : uint32_t {
     WellConditioned = 2,
 };
 
+/// One damped attempt, as the observer callback sees it. `params`
+/// points at the CURRENT parameter vector for this attempt; valid
+/// only during the callback.
+template<class F>
+struct LmIterT {
+    uint32_t iter;
+    uint32_t inner;
+    bool accepted;
+    bool factorization_failed;
+    F cost;
+    F new_cost;
+    F lambda;
+    uint32_t accepted_total;
+    const F* params;
+    uint32_t params_len;
+};
+
 /// The solver configuration, holding the preset's Rust values.
 /// Inspect them, edit them, pass the struct back whole; `option`
 /// fields mirror the Rust `Option` fields (assign a value or `{}`).
-/// Layout is part of the C ABI -- field order matters.
+/// `observer` (with `observer_user` passed back as its first
+/// argument) is called once per damped attempt; return false to stop
+/// the solve (status ObserverTerminated). Layout is part of the C
+/// ABI -- field order matters.
 template<class F>
 struct LmConfigT {
     LmPreset preset;
@@ -52,6 +72,7 @@ struct LmConfigT {
     uint32_t patience;
     uint32_t num_threads;
     bool verbose;
+    bool gather_timing;
     F abs_precision;
     F rel_precision;
     F initial_lambda;
@@ -63,6 +84,29 @@ struct LmConfigT {
     option<F> min_diagonal;
     /// Rust's `time_limit: Option<Duration>`, in seconds.
     option<double> time_limit_seconds;
+    bool (*observer)(void*, const LmIterT<F>*);
+    void* observer_user;
+};
+
+/// Per-phase wall-clock seconds plus call counts, gathered when
+/// LmConfigT::gather_timing is set (see Rust's LmTiming for the
+/// phase definitions; the per-step records stay Rust-side).
+struct LmTiming {
+    double total;
+    double assembly;
+    double first_assembly;
+    double analysis;
+    double linear_solve;
+    double first_linear_solve;
+    double cost_eval;
+    double first_cost_eval;
+    double advance;
+    double first_advance;
+    uint32_t assembly_count;
+    uint32_t analysis_count;
+    uint32_t linear_solve_count;
+    uint32_t cost_eval_count;
+    uint32_t advance_count;
 };
 
 template<class F>
@@ -73,6 +117,9 @@ struct LmResultT {
     uint32_t accepted_iterations;
     LmStatus status;
     F final_lambda;
+    /// Valid iff has_timing (config.gather_timing was set).
+    LmTiming timing;
+    bool has_timing;
 };
 
 /// The Err side of a solve: SolverFailed or Panicked, with the text

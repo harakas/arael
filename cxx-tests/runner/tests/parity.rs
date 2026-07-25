@@ -164,6 +164,57 @@ fn cxx_interface_matches_rust_exactly() {
     assert_eq!(g("sparse_m"), fit2.m.value);
     assert_eq!(g("sparse_c"), fit2.c.value);
 
+    // Observer + timing + report + conditional covariance mirrored.
+    {
+        use std::cell::Cell;
+        use std::ops::ControlFlow;
+        use std::rc::Rc;
+        let mut f7 = Fit::default();
+        fill(&mut f7);
+        let calls = Rc::new(Cell::new(0u32));
+        let plen = Rc::new(Cell::new(0u32));
+        let (c2, p2) = (calls.clone(), plen.clone());
+        let cfg7 = cfg.clone().with_gather_timing(true).with_observer(
+            move |it: &arael::simple_lm::LmIter<'_, f64>| {
+                c2.set(c2.get() + 1);
+                p2.set(it.params.len() as u32);
+                ControlFlow::Continue(())
+            });
+        let r7 = f7.solve_dense(&cfg7).unwrap();
+        assert_eq!(g("report_empty_before"), 1.0);
+        assert_eq!(g("obs_calls_eq_iters"),
+            (calls.get() == r7.iterations as u32) as i32 as f64);
+        assert_eq!(g("obs_params_len"), plen.get() as f64);
+        assert_eq!(g("obs_end"), r7.end_cost);
+        let t = r7.timing.as_ref().expect("timing gathered");
+        assert_eq!(g("tm_has"), 1.0);
+        assert_eq!(g("tm_total_pos"), 1.0);
+        assert!(t.total.as_secs_f64() > 0.0);
+        assert_eq!(g("tm_assembly_count"), t.assembly_count as f64);
+        assert_eq!(g("tm_solve_count"), t.linear_solve_count as f64);
+        assert_eq!(g("tm_cost_count"), t.cost_eval_count as f64);
+        assert!(!r7.report().is_empty());
+        assert_eq!(g("report_nonempty"), 1.0);
+        assert_eq!(g("report_pretty_nonempty"), 1.0);
+        {
+            use arael::covariance::{CovMode, Covariance};
+            let cov = f7.assemble_covariance(CovMode::AllMarginals).unwrap();
+            let cc = cov.conditional_cov(&f7.items[0]).unwrap();
+            assert_eq!(g("cond_n"), cc.nrows() as f64);
+            assert_eq!(g("cond_item0"), cc[(0, 0)]);
+        }
+
+        // Observer termination: Break stops the solve.
+        let mut f8 = Fit::default();
+        fill(&mut f8);
+        let cfg8 = cfg.clone().with_observer(
+            |_: &arael::simple_lm::LmIter<'_, f64>| ControlFlow::Break(()));
+        let r8 = f8.solve_dense(&cfg8).unwrap();
+        assert!(matches!(r8.status, LmStatus::ObserverTerminated), "{:?}", r8.status);
+        assert_eq!(g("obs_stop_status"), code(&r8.status));
+        assert_eq!(g("obs_stop_iters"), r8.iterations as f64);
+    }
+
     // Band solve mirrored: kd spans the whole parameter vector.
     let mut fitb = Fit::default();
     fill(&mut fitb);

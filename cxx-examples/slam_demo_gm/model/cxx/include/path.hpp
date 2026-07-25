@@ -35,6 +35,8 @@ using arael::LmStatus;
 using arael::LmPreset;
 using arael::LmConfigT;
 using arael::LmResultT;
+using arael::LmIterT;
+using arael::LmTiming;
 using arael::SolveResultT;
 using arael::SolveError;
 using arael::CovMode;
@@ -44,6 +46,7 @@ using arael::CovError;
 /// this model's precision, plus the config constructor that fetches
 /// the preset's actual Rust values through this root's FFI.
 using LmResult = LmResultT<double>;
+using LmIter = LmIterT<double>;
 using SolveResult = SolveResultT<double>;
 
 struct LmConfig : LmConfigT<double> {
@@ -197,8 +200,10 @@ uint32_t path_pose_pair_cur(const PosePair*);
 void path_pose_pair_set_cur(PosePair*, uint32_t);
 int32_t path_assemble_covariance(Path*, uint32_t);
 int32_t path_point_landmark_marginal_cov(Path*, const PointLandmark*, double*, uint32_t);
+int32_t path_point_landmark_conditional_cov(Path*, const PointLandmark*, double*, uint32_t);
 int32_t path_point_landmark_std_dev(Path*, const PointLandmark*, double*, uint32_t);
 int32_t path_pose_marginal_cov(Path*, const Pose*, double*, uint32_t);
+int32_t path_pose_conditional_cov(Path*, const Pose*, double*, uint32_t);
 int32_t path_pose_std_dev(Path*, const Pose*, double*, uint32_t);
 int32_t path_point_landmark_point_landmark_cross_cov(Path*, const PointLandmark*, const PointLandmark*, double*, uint32_t);
 int32_t path_point_landmark_pose_cross_cov(Path*, const PointLandmark*, const Pose*, double*, uint32_t);
@@ -256,6 +261,7 @@ void path_lm_config(uint32_t, LmConfig*);
 Path* path_new(void);
 void path_free(Path*);
 const char* path_last_error(const Path*);
+const char* path_last_report(Path*, bool);
 const char* path_validate(Path*);
 int32_t path_solve_dense(Path*, const LmConfig*, LmResult*);
 int32_t path_solve_sparse(Path*, const LmConfig*, LmResult*);
@@ -615,6 +621,11 @@ public:
     int32_t std_dev(const PointLandmark& e, double* out, uint32_t cap) {
         return ffi::path_point_landmark_std_dev(h_, e.raw(), out, cap);
     }
+    /// Row-major dim x dim conditional covariance (all other
+    /// parameters held fixed) into out; returns dim or a negative code.
+    int32_t conditional(const PointLandmark& e, double* out, uint32_t cap) {
+        return ffi::path_point_landmark_conditional_cov(h_, e.raw(), out, cap);
+    }
     result<matrix3d, CovError> marginal(const PointLandmark& e) {
         double b[9];
         if (ffi::path_point_landmark_marginal_cov(h_, e.raw(), b, 9) < 0) return fail<matrix3d>();
@@ -625,6 +636,11 @@ public:
     /// or a negative code. Works on every CovMode incl. TriDiagonal.
     int32_t std_dev(const Pose& e, double* out, uint32_t cap) {
         return ffi::path_pose_std_dev(h_, e.raw(), out, cap);
+    }
+    /// Row-major dim x dim conditional covariance (all other
+    /// parameters held fixed) into out; returns dim or a negative code.
+    int32_t conditional(const Pose& e, double* out, uint32_t cap) {
+        return ffi::path_pose_conditional_cov(h_, e.raw(), out, cap);
     }
     /// Row-major dim x dim into out; returns dim or a negative code.
     int32_t marginal(const Pose& e, double* out, uint32_t cap) {
@@ -967,6 +983,12 @@ public:
     /// this model.
     const char* validate() { return ffi::path_validate(h_); }
     const char* last_error() const { return ffi::path_last_error(h_); }
+    /// Text report of the last completed solve (status, cost,
+    /// iterations, timing and the backend's plan when gathered); ""
+    /// before the first solve. Valid until the next report call.
+    const char* last_report() { return ffi::path_last_report(h_, false); }
+    /// last_report() with colour and box-drawing glyphs.
+    const char* last_pretty_report() { return ffi::path_last_report(h_, true); }
 
 private:
     ffi::Path* h_;

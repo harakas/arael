@@ -35,6 +35,8 @@ using arael::LmStatus;
 using arael::LmPreset;
 using arael::LmConfigT;
 using arael::LmResultT;
+using arael::LmIterT;
+using arael::LmTiming;
 using arael::SolveResultT;
 using arael::SolveError;
 using arael::CovMode;
@@ -44,6 +46,7 @@ using arael::CovError;
 /// this model's precision, plus the config constructor that fetches
 /// the preset's actual Rust values through this root's FFI.
 using LmResult = LmResultT<double>;
+using LmIter = LmIterT<double>;
 using SolveResult = SolveResultT<double>;
 
 struct LmConfig : LmConfigT<double> {
@@ -147,8 +150,10 @@ double fit_tie_w(const Tie*);
 void fit_tie_set_w(Tie*, double);
 int32_t fit_assemble_covariance(Fit*, uint32_t);
 int32_t fit_n_marginal_cov(Fit*, const N*, double*, uint32_t);
+int32_t fit_n_conditional_cov(Fit*, const N*, double*, uint32_t);
 int32_t fit_n_std_dev(Fit*, const N*, double*, uint32_t);
 int32_t fit_pose_marginal_cov(Fit*, const Pose*, double*, uint32_t);
+int32_t fit_pose_conditional_cov(Fit*, const Pose*, double*, uint32_t);
 int32_t fit_pose_std_dev(Fit*, const Pose*, double*, uint32_t);
 int32_t fit_n_n_cross_cov(Fit*, const N*, const N*, double*, uint32_t);
 int32_t fit_n_pose_cross_cov(Fit*, const N*, const Pose*, double*, uint32_t);
@@ -224,6 +229,7 @@ void fit_lm_config(uint32_t, LmConfig*);
 Fit* fit_new(void);
 void fit_free(Fit*);
 const char* fit_last_error(const Fit*);
+const char* fit_last_report(Fit*, bool);
 const char* fit_validate(Fit*);
 int32_t fit_solve_dense(Fit*, const LmConfig*, LmResult*);
 int32_t fit_solve_sparse(Fit*, const LmConfig*, LmResult*);
@@ -385,6 +391,11 @@ public:
     int32_t std_dev(const N& e, double* out, uint32_t cap) {
         return ffi::fit_n_std_dev(h_, e.raw(), out, cap);
     }
+    /// Row-major dim x dim conditional covariance (all other
+    /// parameters held fixed) into out; returns dim or a negative code.
+    int32_t conditional(const N& e, double* out, uint32_t cap) {
+        return ffi::fit_n_conditional_cov(h_, e.raw(), out, cap);
+    }
     result<double, CovError> marginal(const N& e) {
         double b[1];
         if (ffi::fit_n_marginal_cov(h_, e.raw(), b, 1) < 0) return fail<double>();
@@ -394,6 +405,11 @@ public:
     /// or a negative code. Works on every CovMode incl. TriDiagonal.
     int32_t std_dev(const Pose& e, double* out, uint32_t cap) {
         return ffi::fit_pose_std_dev(h_, e.raw(), out, cap);
+    }
+    /// Row-major dim x dim conditional covariance (all other
+    /// parameters held fixed) into out; returns dim or a negative code.
+    int32_t conditional(const Pose& e, double* out, uint32_t cap) {
+        return ffi::fit_pose_conditional_cov(h_, e.raw(), out, cap);
     }
     /// Row-major dim x dim into out; returns dim or a negative code.
     int32_t marginal(const Pose& e, double* out, uint32_t cap) {
@@ -895,6 +911,12 @@ public:
     /// this model.
     const char* validate() { return ffi::fit_validate(h_); }
     const char* last_error() const { return ffi::fit_last_error(h_); }
+    /// Text report of the last completed solve (status, cost,
+    /// iterations, timing and the backend's plan when gathered); ""
+    /// before the first solve. Valid until the next report call.
+    const char* last_report() { return ffi::fit_last_report(h_, false); }
+    /// last_report() with colour and box-drawing glyphs.
+    const char* last_pretty_report() { return ffi::fit_last_report(h_, true); }
 
 private:
     ffi::Fit* h_;
