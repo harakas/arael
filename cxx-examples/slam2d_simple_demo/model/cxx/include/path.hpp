@@ -3,7 +3,9 @@
 #pragma once
 
 #include <cstdint>
+#include <cstddef>
 #include <cmath>
+#include <iterator>
 #include "arael/math.hpp"
 #include "arael/result.hpp"
 #include "arael/solver.hpp"
@@ -52,17 +54,21 @@ struct LmConfig : LmConfigT<float> {
 };
 
 /// Typed handle into the collection that issued it -- the C++
-/// spelling of Rust's `Ref<Frine>`.
-struct FrineRef { uint32_t raw; };
+/// spelling of Rust's `Ref<Frine>`. Default-constructed it is the
+/// null sentinel (same as Rust `Ref::default()`).
+struct FrineRef { uint32_t raw = UINT32_MAX; };
 /// Typed handle into the collection that issued it -- the C++
-/// spelling of Rust's `Ref<Landmark>`.
-struct LandmarkRef { uint32_t raw; };
+/// spelling of Rust's `Ref<Landmark>`. Default-constructed it is the
+/// null sentinel (same as Rust `Ref::default()`).
+struct LandmarkRef { uint32_t raw = UINT32_MAX; };
 /// Typed handle into the collection that issued it -- the C++
-/// spelling of Rust's `Ref<Pose>`.
-struct PoseRef { uint32_t raw; };
+/// spelling of Rust's `Ref<Pose>`. Default-constructed it is the
+/// null sentinel (same as Rust `Ref::default()`).
+struct PoseRef { uint32_t raw = UINT32_MAX; };
 /// Typed handle into the collection that issued it -- the C++
-/// spelling of Rust's `Ref<PosePair>`.
-struct PosePairRef { uint32_t raw; };
+/// spelling of Rust's `Ref<PosePair>`. Default-constructed it is the
+/// null sentinel (same as Rust `Ref::default()`).
+struct PosePairRef { uint32_t raw = UINT32_MAX; };
 
 namespace ffi {
 struct Path;
@@ -83,8 +89,12 @@ void path_landmark_set_pos(Landmark*, vect2f);
 bool path_landmark_pos_optimize(const Landmark*);
 void path_landmark_pos_set_optimize(Landmark*, bool);
 uint32_t path_landmark_frines_len(const Landmark*);
+void path_landmark_frines_reserve(Landmark*, uint32_t);
 Frine* path_landmark_frines_push(Landmark*);
 Frine* path_landmark_frines_at(Landmark*, uint32_t);
+bool path_landmark_frines_pop(Landmark*);
+void path_landmark_frines_clear(Landmark*);
+void path_landmark_frines_truncate(Landmark*, uint32_t);
 vect2f path_pose_pos(const Pose*);
 void path_pose_set_pos(Pose*, vect2f);
 bool path_pose_pos_optimize(const Pose*);
@@ -109,18 +119,37 @@ int32_t path_assemble_covariance(Path*, uint32_t);
 int32_t path_landmark_marginal_cov(Path*, const Landmark*, double*, uint32_t);
 int32_t path_pose_marginal_cov(Path*, const Pose*, double*, uint32_t);
 uint32_t path_poses_len(const Path*);
+void path_poses_reserve(Path*, uint32_t);
 Pose* path_poses_push_back(Path*);
 Pose* path_poses_push_front(Path*);
 Pose* path_poses_at(Path*, uint32_t);
+bool path_poses_pop_back(Path*);
+bool path_poses_pop_front(Path*);
+void path_poses_clear(Path*);
+void path_poses_truncate(Path*, uint32_t);
 uint32_t path_poses_ref_at(const Path*, uint32_t);
 Pose* path_poses_get(Path*, uint32_t);
+bool path_poses_contains(const Path*, uint32_t);
+Pose* path_poses_try_get(Path*, uint32_t);
 uint32_t path_pose_pairs_len(const Path*);
+void path_pose_pairs_reserve(Path*, uint32_t);
 PosePair* path_pose_pairs_push(Path*);
 PosePair* path_pose_pairs_at(Path*, uint32_t);
+bool path_pose_pairs_pop(Path*);
+void path_pose_pairs_clear(Path*);
+void path_pose_pairs_truncate(Path*, uint32_t);
 uint32_t path_landmarks_len(const Path*);
+void path_landmarks_reserve(Path*, uint32_t);
 uint32_t path_landmarks_push(Path*);
 bool path_landmarks_remove(Path*, uint32_t);
+void path_landmarks_clear(Path*);
 Landmark* path_landmarks_get(Path*, uint32_t);
+bool path_landmarks_contains(const Path*, uint32_t);
+Landmark* path_landmarks_try_get(Path*, uint32_t);
+uint32_t path_landmarks_first(const Path*);
+uint32_t path_landmarks_next(const Path*, uint32_t);
+uint32_t path_landmarks_last(const Path*);
+uint32_t path_landmarks_prev(const Path*, uint32_t);
 void path_lm_config(uint32_t, LmConfig*);
 Path* path_new(void);
 void path_free(Path*);
@@ -160,8 +189,70 @@ class LandmarkFrinesVec {
 public:
     explicit LandmarkFrinesVec(ffi::Landmark* h) : h_(h) {}
     uint32_t size() const { return ffi::path_landmark_frines_len(h_); }
+    bool empty() const { return size() == 0; }
+    void reserve(uint32_t additional) { ffi::path_landmark_frines_reserve(h_, additional); }
     Frine push() { return Frine(ffi::path_landmark_frines_push(h_)); }
     Frine operator[](uint32_t i) { return Frine(ffi::path_landmark_frines_at(h_, i)); }
+    /// Front/back of a non-empty vec (empty = UB, like STL).
+    Frine front() { return (*this)[0]; }
+    Frine back() { return (*this)[size() - 1]; }
+    /// Drops the last element; false when already empty.
+    bool pop() { return ffi::path_landmark_frines_pop(h_); }
+    void clear() { ffi::path_landmark_frines_clear(h_); }
+    void truncate(uint32_t n) { ffi::path_landmark_frines_truncate(h_, n); }
+    /// Bidirectional iterator. Standard C++ contract: modifying the
+    /// container while iterating is undefined behavior. Dereference
+    /// yields a value wrapper (Frine), like vector<bool> --
+    /// reference is a value type.
+    class iterator {
+    public:
+        using iterator_category = std::bidirectional_iterator_tag;
+        using value_type = Frine;
+        using difference_type = std::ptrdiff_t;
+        using reference = Frine;
+        struct arrow { Frine v; Frine* operator->() { return &v; } };
+        using pointer = arrow;
+
+        iterator() : h_(nullptr), i_(0) {}
+        iterator(ffi::Landmark* h, uint32_t i) : h_(h), i_(i) {}
+        Frine operator*() const { return Frine(ffi::path_landmark_frines_at(h_, i_)); }
+        arrow operator->() const { return arrow{**this}; }
+        iterator& operator++() { ++i_; return *this; }
+        iterator& operator--() { --i_; return *this; }
+        iterator operator++(int) { iterator t = *this; ++*this; return t; }
+        iterator operator--(int) { iterator t = *this; --*this; return t; }
+        bool operator==(const iterator& o) const { return i_ == o.i_; }
+        bool operator!=(const iterator& o) const { return i_ != o.i_; }
+    private:
+        ffi::Landmark* h_;
+        uint32_t i_;
+    };
+    iterator begin() { return iterator(h_, 0); }
+    iterator end() { return iterator(h_, size()); }
+    class reverse_iterator {
+    public:
+        using iterator_category = std::bidirectional_iterator_tag;
+        using value_type = Frine;
+        using difference_type = std::ptrdiff_t;
+        using reference = Frine;
+        using pointer = iterator::arrow;
+
+        reverse_iterator() {}
+        explicit reverse_iterator(iterator base) : base_(base) {}
+        iterator base() const { return base_; }
+        Frine operator*() const { iterator t = base_; --t; return *t; }
+        pointer operator->() const { return pointer{**this}; }
+        reverse_iterator& operator++() { --base_; return *this; }
+        reverse_iterator& operator--() { ++base_; return *this; }
+        reverse_iterator operator++(int) { reverse_iterator t = *this; ++*this; return t; }
+        reverse_iterator operator--(int) { reverse_iterator t = *this; --*this; return t; }
+        bool operator==(const reverse_iterator& o) const { return base_ == o.base_; }
+        bool operator!=(const reverse_iterator& o) const { return base_ != o.base_; }
+    private:
+        iterator base_;
+    };
+    reverse_iterator rbegin() { return reverse_iterator(end()); }
+    reverse_iterator rend() { return reverse_iterator(begin()); }
 private:
     ffi::Landmark* h_;
 };
@@ -264,11 +355,81 @@ class PathPosesDeque {
 public:
     explicit PathPosesDeque(ffi::Path* h) : h_(h) {}
     uint32_t size() const { return ffi::path_poses_len(h_); }
+    bool empty() const { return size() == 0; }
+    void reserve(uint32_t additional) { ffi::path_poses_reserve(h_, additional); }
     Pose push_back() { return Pose(ffi::path_poses_push_back(h_)); }
     Pose push_front() { return Pose(ffi::path_poses_push_front(h_)); }
     Pose operator[](uint32_t i) { return Pose(ffi::path_poses_at(h_, i)); }
+    /// Front/back of a non-empty deque (empty = UB, like STL).
+    Pose front() { return (*this)[0]; }
+    Pose back() { return (*this)[size() - 1]; }
+    /// Drop one end; false when already empty.
+    bool pop_back() { return ffi::path_poses_pop_back(h_); }
+    bool pop_front() { return ffi::path_poses_pop_front(h_); }
+    void clear() { ffi::path_poses_clear(h_); }
+    void truncate(uint32_t n) { ffi::path_poses_truncate(h_, n); }
     PoseRef ref_at(uint32_t i) const { return PoseRef{ffi::path_poses_ref_at(h_, i)}; }
     Pose get(PoseRef r) { return Pose(ffi::path_poses_get(h_, r.raw)); }
+    /// True while r addresses a live element here.
+    bool contains(PoseRef r) const { return ffi::path_poses_contains(h_, r.raw); }
+    /// Like get, but empty for a stale or foreign ref.
+    option<Pose> try_get(PoseRef r) {
+        ffi::Pose* p = ffi::path_poses_try_get(h_, r.raw);
+        return p ? option<Pose>(Pose(p)) : option<Pose>();
+    }
+    /// Bidirectional iterator. Standard C++ contract: modifying the
+    /// container while iterating is undefined behavior. Dereference
+    /// yields a value wrapper (Pose), like vector<bool> --
+    /// reference is a value type.
+    class iterator {
+    public:
+        using iterator_category = std::bidirectional_iterator_tag;
+        using value_type = Pose;
+        using difference_type = std::ptrdiff_t;
+        using reference = Pose;
+        struct arrow { Pose v; Pose* operator->() { return &v; } };
+        using pointer = arrow;
+
+        iterator() : h_(nullptr), i_(0) {}
+        iterator(ffi::Path* h, uint32_t i) : h_(h), i_(i) {}
+        Pose operator*() const { return Pose(ffi::path_poses_at(h_, i_)); }
+        arrow operator->() const { return arrow{**this}; }
+        iterator& operator++() { ++i_; return *this; }
+        iterator& operator--() { --i_; return *this; }
+        iterator operator++(int) { iterator t = *this; ++*this; return t; }
+        iterator operator--(int) { iterator t = *this; --*this; return t; }
+        bool operator==(const iterator& o) const { return i_ == o.i_; }
+        bool operator!=(const iterator& o) const { return i_ != o.i_; }
+    private:
+        ffi::Path* h_;
+        uint32_t i_;
+    };
+    iterator begin() { return iterator(h_, 0); }
+    iterator end() { return iterator(h_, size()); }
+    class reverse_iterator {
+    public:
+        using iterator_category = std::bidirectional_iterator_tag;
+        using value_type = Pose;
+        using difference_type = std::ptrdiff_t;
+        using reference = Pose;
+        using pointer = iterator::arrow;
+
+        reverse_iterator() {}
+        explicit reverse_iterator(iterator base) : base_(base) {}
+        iterator base() const { return base_; }
+        Pose operator*() const { iterator t = base_; --t; return *t; }
+        pointer operator->() const { return pointer{**this}; }
+        reverse_iterator& operator++() { --base_; return *this; }
+        reverse_iterator& operator--() { ++base_; return *this; }
+        reverse_iterator operator++(int) { reverse_iterator t = *this; ++*this; return t; }
+        reverse_iterator operator--(int) { reverse_iterator t = *this; --*this; return t; }
+        bool operator==(const reverse_iterator& o) const { return base_ == o.base_; }
+        bool operator!=(const reverse_iterator& o) const { return base_ != o.base_; }
+    private:
+        iterator base_;
+    };
+    reverse_iterator rbegin() { return reverse_iterator(end()); }
+    reverse_iterator rend() { return reverse_iterator(begin()); }
 private:
     ffi::Path* h_;
 };
@@ -278,8 +439,70 @@ class PathPosePairsVec {
 public:
     explicit PathPosePairsVec(ffi::Path* h) : h_(h) {}
     uint32_t size() const { return ffi::path_pose_pairs_len(h_); }
+    bool empty() const { return size() == 0; }
+    void reserve(uint32_t additional) { ffi::path_pose_pairs_reserve(h_, additional); }
     PosePair push() { return PosePair(ffi::path_pose_pairs_push(h_)); }
     PosePair operator[](uint32_t i) { return PosePair(ffi::path_pose_pairs_at(h_, i)); }
+    /// Front/back of a non-empty vec (empty = UB, like STL).
+    PosePair front() { return (*this)[0]; }
+    PosePair back() { return (*this)[size() - 1]; }
+    /// Drops the last element; false when already empty.
+    bool pop() { return ffi::path_pose_pairs_pop(h_); }
+    void clear() { ffi::path_pose_pairs_clear(h_); }
+    void truncate(uint32_t n) { ffi::path_pose_pairs_truncate(h_, n); }
+    /// Bidirectional iterator. Standard C++ contract: modifying the
+    /// container while iterating is undefined behavior. Dereference
+    /// yields a value wrapper (PosePair), like vector<bool> --
+    /// reference is a value type.
+    class iterator {
+    public:
+        using iterator_category = std::bidirectional_iterator_tag;
+        using value_type = PosePair;
+        using difference_type = std::ptrdiff_t;
+        using reference = PosePair;
+        struct arrow { PosePair v; PosePair* operator->() { return &v; } };
+        using pointer = arrow;
+
+        iterator() : h_(nullptr), i_(0) {}
+        iterator(ffi::Path* h, uint32_t i) : h_(h), i_(i) {}
+        PosePair operator*() const { return PosePair(ffi::path_pose_pairs_at(h_, i_)); }
+        arrow operator->() const { return arrow{**this}; }
+        iterator& operator++() { ++i_; return *this; }
+        iterator& operator--() { --i_; return *this; }
+        iterator operator++(int) { iterator t = *this; ++*this; return t; }
+        iterator operator--(int) { iterator t = *this; --*this; return t; }
+        bool operator==(const iterator& o) const { return i_ == o.i_; }
+        bool operator!=(const iterator& o) const { return i_ != o.i_; }
+    private:
+        ffi::Path* h_;
+        uint32_t i_;
+    };
+    iterator begin() { return iterator(h_, 0); }
+    iterator end() { return iterator(h_, size()); }
+    class reverse_iterator {
+    public:
+        using iterator_category = std::bidirectional_iterator_tag;
+        using value_type = PosePair;
+        using difference_type = std::ptrdiff_t;
+        using reference = PosePair;
+        using pointer = iterator::arrow;
+
+        reverse_iterator() {}
+        explicit reverse_iterator(iterator base) : base_(base) {}
+        iterator base() const { return base_; }
+        PosePair operator*() const { iterator t = base_; --t; return *t; }
+        pointer operator->() const { return pointer{**this}; }
+        reverse_iterator& operator++() { --base_; return *this; }
+        reverse_iterator& operator--() { ++base_; return *this; }
+        reverse_iterator operator++(int) { reverse_iterator t = *this; ++*this; return t; }
+        reverse_iterator operator--(int) { reverse_iterator t = *this; --*this; return t; }
+        bool operator==(const reverse_iterator& o) const { return base_ == o.base_; }
+        bool operator!=(const reverse_iterator& o) const { return base_ != o.base_; }
+    private:
+        iterator base_;
+    };
+    reverse_iterator rbegin() { return reverse_iterator(end()); }
+    reverse_iterator rend() { return reverse_iterator(begin()); }
 private:
     ffi::Path* h_;
 };
@@ -289,9 +512,77 @@ class PathLandmarksArena {
 public:
     explicit PathLandmarksArena(ffi::Path* h) : h_(h) {}
     uint32_t size() const { return ffi::path_landmarks_len(h_); }
+    bool empty() const { return size() == 0; }
+    void reserve(uint32_t additional) { ffi::path_landmarks_reserve(h_, additional); }
     LandmarkRef push() { return LandmarkRef{ffi::path_landmarks_push(h_)}; }
     bool remove(LandmarkRef r) { return ffi::path_landmarks_remove(h_, r.raw); }
+    void clear() { ffi::path_landmarks_clear(h_); }
     Landmark get(LandmarkRef r) { return Landmark(ffi::path_landmarks_get(h_, r.raw)); }
+    /// True while r addresses a live element here.
+    bool contains(LandmarkRef r) const { return ffi::path_landmarks_contains(h_, r.raw); }
+    /// Like get, but empty for a stale or foreign ref.
+    option<Landmark> try_get(LandmarkRef r) {
+        ffi::Landmark* p = ffi::path_landmarks_try_get(h_, r.raw);
+        return p ? option<Landmark>(Landmark(p)) : option<Landmark>();
+    }
+    /// Bidirectional iterator over the live slots. Standard C++
+    /// contract: modifying the container while iterating is undefined
+    /// behavior. Dereference yields a value wrapper (Landmark), like
+    /// vector<bool> -- reference is a value type.
+    class iterator {
+    public:
+        using iterator_category = std::bidirectional_iterator_tag;
+        using value_type = Landmark;
+        using difference_type = std::ptrdiff_t;
+        using reference = Landmark;
+        struct arrow { Landmark v; Landmark* operator->() { return &v; } };
+        using pointer = arrow;
+
+        iterator() : h_(nullptr), r_(UINT32_MAX) {}
+        iterator(ffi::Path* h, uint32_t r) : h_(h), r_(r) {}
+        Landmark operator*() const { return Landmark(ffi::path_landmarks_get(h_, r_)); }
+        arrow operator->() const { return arrow{**this}; }
+        LandmarkRef ref() const { return LandmarkRef{r_}; }
+        iterator& operator++() { r_ = ffi::path_landmarks_next(h_, r_); return *this; }
+        iterator& operator--() {
+            r_ = r_ == UINT32_MAX ? ffi::path_landmarks_last(h_)
+                                  : ffi::path_landmarks_prev(h_, r_);
+            return *this;
+        }
+        iterator operator++(int) { iterator t = *this; ++*this; return t; }
+        iterator operator--(int) { iterator t = *this; --*this; return t; }
+        bool operator==(const iterator& o) const { return r_ == o.r_; }
+        bool operator!=(const iterator& o) const { return r_ != o.r_; }
+    private:
+        ffi::Path* h_;
+        uint32_t r_;
+    };
+    iterator begin() { return iterator(h_, ffi::path_landmarks_first(h_)); }
+    iterator end() { return iterator(h_, UINT32_MAX); }
+    class reverse_iterator {
+    public:
+        using iterator_category = std::bidirectional_iterator_tag;
+        using value_type = Landmark;
+        using difference_type = std::ptrdiff_t;
+        using reference = Landmark;
+        using pointer = iterator::arrow;
+
+        reverse_iterator() {}
+        explicit reverse_iterator(iterator base) : base_(base) {}
+        iterator base() const { return base_; }
+        Landmark operator*() const { iterator t = base_; --t; return *t; }
+        pointer operator->() const { return pointer{**this}; }
+        reverse_iterator& operator++() { --base_; return *this; }
+        reverse_iterator& operator--() { ++base_; return *this; }
+        reverse_iterator operator++(int) { reverse_iterator t = *this; ++*this; return t; }
+        reverse_iterator operator--(int) { reverse_iterator t = *this; --*this; return t; }
+        bool operator==(const reverse_iterator& o) const { return base_ == o.base_; }
+        bool operator!=(const reverse_iterator& o) const { return base_ != o.base_; }
+    private:
+        iterator base_;
+    };
+    reverse_iterator rbegin() { return reverse_iterator(end()); }
+    reverse_iterator rend() { return reverse_iterator(begin()); }
 private:
     ffi::Path* h_;
 };

@@ -91,9 +91,24 @@ views are named by their container's nature: `PathPosesDeque`,
   and per-half optimize flags.
 - **Collections**: `push` (deque: `push_back`/`push_front`) returns an
   element wrapper; `refs::`-backed containers also give `ref_at(i)` /
-  `get(ref)`, and an `Arena` `push` returns the ref itself (`remove`
-  takes it back). `refs::` element pointers are stable across pushes;
-  `std::vec::Vec` ones are not -- re-fetch after a push.
+  `get(ref)` / `contains(ref)` / `try_get(ref)` (an `option`, empty
+  for a stale ref where `get` would abort), and an `Arena` `push`
+  returns the ref itself (`remove` takes it back). A
+  default-constructed ref is the null sentinel, same as Rust
+  `Ref::default()`. Every view has `size()`, `empty()`, and
+  `reserve(n)`; vec and deque add `front()`/`back()` (empty container
+  is UB, like the STL). Removal mirrors Rust: vec
+  `pop`/`truncate`/`clear`, deque
+  `pop_back`/`pop_front`/`truncate`/`clear`, arena
+  `remove`/`clear` (pops report whether anything was dropped; the
+  value itself is dropped in place). All views carry canonical
+  BIDIRECTIONAL iterators (`for (auto e : view)`, `++`/`--` pre and
+  post, `==`/`!=`, `->`, `rbegin()`/`rend()`, the std iterator
+  typedefs) -- the arena walks its live slots in both directions and
+  its iterator also exposes `.ref()`. Dereference yields a value wrapper (like
+  `vector<bool>`). Standard C++ contract: modifying a container while
+  iterating it is undefined behavior. `refs::` element pointers are stable across
+  pushes; `std::vec::Vec` ones are not -- re-fetch after a push.
 - **Option entities**: `has_x()` / `make_x()` / `clear_x()` and `x()`
   returning `option<X>`.
 - **LmConfig** is a plain struct holding the chosen preset's

@@ -192,12 +192,30 @@ fn collection_fns(
 pub unsafe extern \"C\" fn {fn_prefix}_len(p: *const {owner}) -> u32 {{
     {access}.{field}.len() as u32
 }}
+#[no_mangle]
+pub unsafe extern \"C\" fn {fn_prefix}_reserve(p: *mut {owner}, additional: u32) {{
+    {access}.{field}.reserve(additional as usize);
+}}
 "));
     let ref_get = format!(
 "#[no_mangle]
 pub unsafe extern \"C\" fn {fn_prefix}_get(p: *mut {owner}, r: u32) -> *mut {elem} {{
     let m = &mut {access}.{field};
     &mut m[arael::refs::Ref::from_raw(r)] as *mut {elem}
+}}
+/// True while `r` addresses a live element of this collection.
+#[no_mangle]
+pub unsafe extern \"C\" fn {fn_prefix}_contains(p: *const {owner}, r: u32) -> bool {{
+    {access}.{field}.contains_ref(arael::refs::Ref::from_raw(r))
+}}
+/// Like get, but null for a stale or foreign ref instead of a panic.
+#[no_mangle]
+pub unsafe extern \"C\" fn {fn_prefix}_try_get(p: *mut {owner}, r: u32) -> *mut {elem} {{
+    let m = &mut {access}.{field};
+    match m.get_mut(arael::refs::Ref::from_raw(r)) {{
+        Some(e) => e as *mut {elem},
+        None => std::ptr::null_mut(),
+    }}
 }}
 ");
     let refs_extras = |out: &mut String| {
@@ -231,6 +249,19 @@ pub unsafe extern \"C\" fn {fn_prefix}_at(p: *mut {owner}, i: u32) -> *mut {elem
     let m = &mut {access}.{field};
     &mut m[i as usize] as *mut {elem}
 }}
+/// Drops the last element; false when already empty.
+#[no_mangle]
+pub unsafe extern \"C\" fn {fn_prefix}_pop(p: *mut {owner}) -> bool {{
+    {access}.{field}.pop().is_some()
+}}
+#[no_mangle]
+pub unsafe extern \"C\" fn {fn_prefix}_clear(p: *mut {owner}) {{
+    {access}.{field}.clear();
+}}
+#[no_mangle]
+pub unsafe extern \"C\" fn {fn_prefix}_truncate(p: *mut {owner}, len: u32) {{
+    {access}.{field}.truncate(len as usize);
+}}
 "));
             if matches!(vec_flavor(f)?, Flavor::Refs) {
                 refs_extras(out);
@@ -253,6 +284,24 @@ pub unsafe extern \"C\" fn {fn_prefix}_at(p: *mut {owner}, i: u32) -> *mut {elem
     let m = &mut {access}.{field};
     &mut m[i as usize] as *mut {elem}
 }}
+/// Drops the back element; false when already empty.
+#[no_mangle]
+pub unsafe extern \"C\" fn {fn_prefix}_pop_back(p: *mut {owner}) -> bool {{
+    {access}.{field}.pop_back().is_some()
+}}
+/// Drops the front element; false when already empty.
+#[no_mangle]
+pub unsafe extern \"C\" fn {fn_prefix}_pop_front(p: *mut {owner}) -> bool {{
+    {access}.{field}.pop_front().is_some()
+}}
+#[no_mangle]
+pub unsafe extern \"C\" fn {fn_prefix}_clear(p: *mut {owner}) {{
+    {access}.{field}.clear();
+}}
+#[no_mangle]
+pub unsafe extern \"C\" fn {fn_prefix}_truncate(p: *mut {owner}, len: u32) {{
+    {access}.{field}.truncate(len as usize);
+}}
 "));
             refs_extras(out);
         }
@@ -268,10 +317,48 @@ pub unsafe extern \"C\" fn {fn_prefix}_remove(p: *mut {owner}, r: u32) -> bool {
     let m = &mut {access}.{field};
     m.remove(arael::refs::Ref::from_raw(r)).is_some()
 }}
+#[no_mangle]
+pub unsafe extern \"C\" fn {fn_prefix}_clear(p: *mut {owner}) {{
+    {access}.{field}.clear();
+}}
 "));
             // No ref_at: an arena has holes, so index-based refs are
-            // meaningless -- refs come from push().
+            // meaningless -- refs come from push() or the cursor.
             out.push_str(&ref_get);
+            out.push_str(&format!(
+"/// First live element's packed ref, or u32::MAX when empty.
+#[no_mangle]
+pub unsafe extern \"C\" fn {fn_prefix}_first(p: *const {owner}) -> u32 {{
+    match {access}.{field}.first_ref() {{
+        Some(r) => r.to_raw(),
+        None => u32::MAX,
+    }}
+}}
+/// The next live element after `r`'s slot, or u32::MAX past the end.
+#[no_mangle]
+pub unsafe extern \"C\" fn {fn_prefix}_next(p: *const {owner}, r: u32) -> u32 {{
+    match {access}.{field}.next_ref(arael::refs::Ref::from_raw(r)) {{
+        Some(n) => n.to_raw(),
+        None => u32::MAX,
+    }}
+}}
+/// Last live element's packed ref, or u32::MAX when empty.
+#[no_mangle]
+pub unsafe extern \"C\" fn {fn_prefix}_last(p: *const {owner}) -> u32 {{
+    match {access}.{field}.last_ref() {{
+        Some(r) => r.to_raw(),
+        None => u32::MAX,
+    }}
+}}
+/// The previous live element before `r`'s slot, or u32::MAX past the front.
+#[no_mangle]
+pub unsafe extern \"C\" fn {fn_prefix}_prev(p: *const {owner}, r: u32) -> u32 {{
+    match {access}.{field}.prev_ref(arael::refs::Ref::from_raw(r)) {{
+        Some(n) => n.to_raw(),
+        None => u32::MAX,
+    }}
+}}
+"));
         }
         other => return Err(format!("`{type_name}.{field}`: unknown container `{other}`")),
     }

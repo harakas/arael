@@ -351,8 +351,13 @@ int main() {
         lm_sightings.push_back(std::move(sightings));
     }
 
-    std::printf("Path: %u poses, %u pose_pairs, %u landmarks, %d frines\n",
-        path.poses().size(), path.pose_pairs().size(), path.landmarks().size(), n_frines);
+    // Range-for works on every container view (arena walks live slots).
+    int frines_in_model = 0;
+    for (auto lm : path.landmarks())
+        frines_in_model += int(lm.frines().size());
+    std::printf("Path: %u poses, %u pose_pairs, %u landmarks, %d frines (%d wired)\n",
+        path.poses().size(), path.pose_pairs().size(), path.landmarks().size(),
+        n_frines, frines_in_model);
 
     LmConfig cfg_lm = LmConfig::well_conditioned();
     SolveResult r = path.solve_sparse(cfg_lm);

@@ -100,33 +100,60 @@ fn collection_cpp(
     let kind = match container { "deque" => "Deque", "arena" => "Arena", _ => "Vec" };
     let view = format!("{owner}{}{kind}", camel(field));
 
-    cpp.ffi.push_str(&format!("uint32_t {prefix}_len(const {owner}*);\n"));
+    cpp.ffi.push_str(&format!(
+        "uint32_t {prefix}_len(const {owner}*);\n\
+         void {prefix}_reserve({owner}*, uint32_t);\n"));
     let mut methods = format!(
-        "    uint32_t size() const {{ return ffi::{prefix}_len(h_); }}\n");
+        "    uint32_t size() const {{ return ffi::{prefix}_len(h_); }}\n\
+         \x20   bool empty() const {{ return size() == 0; }}\n\
+         \x20   void reserve(uint32_t additional) {{ ffi::{prefix}_reserve(h_, additional); }}\n");
     match container {
         "vec" => {
             cpp.ffi.push_str(&format!(
                 "{elem}* {prefix}_push({owner}*);\n{elem}* {prefix}_at({owner}*, uint32_t);\n"));
+            cpp.ffi.push_str(&format!(
+                "bool {prefix}_pop({owner}*);\nvoid {prefix}_clear({owner}*);\n\
+                 void {prefix}_truncate({owner}*, uint32_t);\n"));
             methods.push_str(&format!(
                 "    {elem} push() {{ return {elem}(ffi::{prefix}_push(h_)); }}\n\
-                 \x20   {elem} operator[](uint32_t i) {{ return {elem}(ffi::{prefix}_at(h_, i)); }}\n"));
+                 \x20   {elem} operator[](uint32_t i) {{ return {elem}(ffi::{prefix}_at(h_, i)); }}\n\
+                 \x20   /// Front/back of a non-empty vec (empty = UB, like STL).\n\
+                 \x20   {elem} front() {{ return (*this)[0]; }}\n\
+                 \x20   {elem} back() {{ return (*this)[size() - 1]; }}\n\
+                 \x20   /// Drops the last element; false when already empty.\n\
+                 \x20   bool pop() {{ return ffi::{prefix}_pop(h_); }}\n\
+                 \x20   void clear() {{ ffi::{prefix}_clear(h_); }}\n\
+                 \x20   void truncate(uint32_t n) {{ ffi::{prefix}_truncate(h_, n); }}\n"));
         }
         "deque" => {
             cpp.ffi.push_str(&format!(
                 "{elem}* {prefix}_push_back({owner}*);\n\
                  {elem}* {prefix}_push_front({owner}*);\n\
                  {elem}* {prefix}_at({owner}*, uint32_t);\n"));
+            cpp.ffi.push_str(&format!(
+                "bool {prefix}_pop_back({owner}*);\nbool {prefix}_pop_front({owner}*);\n\
+                 void {prefix}_clear({owner}*);\nvoid {prefix}_truncate({owner}*, uint32_t);\n"));
             methods.push_str(&format!(
                 "    {elem} push_back() {{ return {elem}(ffi::{prefix}_push_back(h_)); }}\n\
                  \x20   {elem} push_front() {{ return {elem}(ffi::{prefix}_push_front(h_)); }}\n\
-                 \x20   {elem} operator[](uint32_t i) {{ return {elem}(ffi::{prefix}_at(h_, i)); }}\n"));
+                 \x20   {elem} operator[](uint32_t i) {{ return {elem}(ffi::{prefix}_at(h_, i)); }}\n\
+                 \x20   /// Front/back of a non-empty deque (empty = UB, like STL).\n\
+                 \x20   {elem} front() {{ return (*this)[0]; }}\n\
+                 \x20   {elem} back() {{ return (*this)[size() - 1]; }}\n\
+                 \x20   /// Drop one end; false when already empty.\n\
+                 \x20   bool pop_back() {{ return ffi::{prefix}_pop_back(h_); }}\n\
+                 \x20   bool pop_front() {{ return ffi::{prefix}_pop_front(h_); }}\n\
+                 \x20   void clear() {{ ffi::{prefix}_clear(h_); }}\n\
+                 \x20   void truncate(uint32_t n) {{ ffi::{prefix}_truncate(h_, n); }}\n"));
         }
         "arena" => {
             cpp.ffi.push_str(&format!(
                 "uint32_t {prefix}_push({owner}*);\nbool {prefix}_remove({owner}*, uint32_t);\n"));
+            cpp.ffi.push_str(&format!("void {prefix}_clear({owner}*);\n"));
             methods.push_str(&format!(
                 "    {elem}Ref push() {{ return {elem}Ref{{ffi::{prefix}_push(h_)}}; }}\n\
-                 \x20   bool remove({elem}Ref r) {{ return ffi::{prefix}_remove(h_, r.raw); }}\n"));
+                 \x20   bool remove({elem}Ref r) {{ return ffi::{prefix}_remove(h_, r.raw); }}\n\
+                 \x20   void clear() {{ ffi::{prefix}_clear(h_); }}\n"));
         }
         other => return Err(format!("unknown container `{other}`")),
     }
@@ -140,10 +167,123 @@ fn collection_cpp(
                 "    {elem}Ref ref_at(uint32_t i) const {{ return {elem}Ref{{ffi::{prefix}_ref_at(h_, i)}}; }}\n"));
         }
         cpp.ffi.push_str(&format!(
-            "{elem}* {prefix}_get({owner}*, uint32_t);\n"));
+            "{elem}* {prefix}_get({owner}*, uint32_t);\n\
+             bool {prefix}_contains(const {owner}*, uint32_t);\n\
+             {elem}* {prefix}_try_get({owner}*, uint32_t);\n"));
         methods.push_str(&format!(
-            "    {elem} get({elem}Ref r) {{ return {elem}(ffi::{prefix}_get(h_, r.raw)); }}\n"));
+            "    {elem} get({elem}Ref r) {{ return {elem}(ffi::{prefix}_get(h_, r.raw)); }}\n\
+             \x20   /// True while r addresses a live element here.\n\
+             \x20   bool contains({elem}Ref r) const {{ return ffi::{prefix}_contains(h_, r.raw); }}\n\
+             \x20   /// Like get, but empty for a stale or foreign ref.\n\
+             \x20   option<{elem}> try_get({elem}Ref r) {{\n\
+             \x20       ffi::{elem}* p = ffi::{prefix}_try_get(h_, r.raw);\n\
+             \x20       return p ? option<{elem}>({elem}(p)) : option<{elem}>();\n\
+             \x20   }}\n"));
     }
+    if container == "arena" {
+        cpp.ffi.push_str(&format!(
+            "uint32_t {prefix}_first(const {owner}*);\n\
+             uint32_t {prefix}_next(const {owner}*, uint32_t);\n\
+             uint32_t {prefix}_last(const {owner}*);\n\
+             uint32_t {prefix}_prev(const {owner}*, uint32_t);\n"));
+        methods.push_str(&format!(
+"    /// Bidirectional iterator over the live slots. Standard C++
+    /// contract: modifying the container while iterating is undefined
+    /// behavior. Dereference yields a value wrapper ({elem}), like
+    /// vector<bool> -- reference is a value type.
+    class iterator {{
+    public:
+        using iterator_category = std::bidirectional_iterator_tag;
+        using value_type = {elem};
+        using difference_type = std::ptrdiff_t;
+        using reference = {elem};
+        struct arrow {{ {elem} v; {elem}* operator->() {{ return &v; }} }};
+        using pointer = arrow;
+
+        iterator() : h_(nullptr), r_(UINT32_MAX) {{}}
+        iterator(ffi::{owner}* h, uint32_t r) : h_(h), r_(r) {{}}
+        {elem} operator*() const {{ return {elem}(ffi::{prefix}_get(h_, r_)); }}
+        arrow operator->() const {{ return arrow{{**this}}; }}
+        {elem}Ref ref() const {{ return {elem}Ref{{r_}}; }}
+        iterator& operator++() {{ r_ = ffi::{prefix}_next(h_, r_); return *this; }}
+        iterator& operator--() {{
+            r_ = r_ == UINT32_MAX ? ffi::{prefix}_last(h_)
+                                  : ffi::{prefix}_prev(h_, r_);
+            return *this;
+        }}
+        iterator operator++(int) {{ iterator t = *this; ++*this; return t; }}
+        iterator operator--(int) {{ iterator t = *this; --*this; return t; }}
+        bool operator==(const iterator& o) const {{ return r_ == o.r_; }}
+        bool operator!=(const iterator& o) const {{ return r_ != o.r_; }}
+    private:
+        ffi::{owner}* h_;
+        uint32_t r_;
+    }};
+    iterator begin() {{ return iterator(h_, ffi::{prefix}_first(h_)); }}
+    iterator end() {{ return iterator(h_, UINT32_MAX); }}\n"));
+    } else {
+        methods.push_str(&format!(
+"    /// Bidirectional iterator. Standard C++ contract: modifying the
+    /// container while iterating is undefined behavior. Dereference
+    /// yields a value wrapper ({elem}), like vector<bool> --
+    /// reference is a value type.
+    class iterator {{
+    public:
+        using iterator_category = std::bidirectional_iterator_tag;
+        using value_type = {elem};
+        using difference_type = std::ptrdiff_t;
+        using reference = {elem};
+        struct arrow {{ {elem} v; {elem}* operator->() {{ return &v; }} }};
+        using pointer = arrow;
+
+        iterator() : h_(nullptr), i_(0) {{}}
+        iterator(ffi::{owner}* h, uint32_t i) : h_(h), i_(i) {{}}
+        {elem} operator*() const {{ return {elem}(ffi::{prefix}_at(h_, i_)); }}
+        arrow operator->() const {{ return arrow{{**this}}; }}
+        iterator& operator++() {{ ++i_; return *this; }}
+        iterator& operator--() {{ --i_; return *this; }}
+        iterator operator++(int) {{ iterator t = *this; ++*this; return t; }}
+        iterator operator--(int) {{ iterator t = *this; --*this; return t; }}
+        bool operator==(const iterator& o) const {{ return i_ == o.i_; }}
+        bool operator!=(const iterator& o) const {{ return i_ != o.i_; }}
+    private:
+        ffi::{owner}* h_;
+        uint32_t i_;
+    }};
+    iterator begin() {{ return iterator(h_, 0); }}
+    iterator end() {{ return iterator(h_, size()); }}\n"));
+    }
+
+    // Reverse iteration, shared by every container kind: hand-rolled
+    // instead of std::reverse_iterator, whose C++17 operator-> takes
+    // the address of a temporary for proxy (value-reference)
+    // iterators.
+    methods.push_str(&format!(
+"    class reverse_iterator {{
+    public:
+        using iterator_category = std::bidirectional_iterator_tag;
+        using value_type = {elem};
+        using difference_type = std::ptrdiff_t;
+        using reference = {elem};
+        using pointer = iterator::arrow;
+
+        reverse_iterator() {{}}
+        explicit reverse_iterator(iterator base) : base_(base) {{}}
+        iterator base() const {{ return base_; }}
+        {elem} operator*() const {{ iterator t = base_; --t; return *t; }}
+        pointer operator->() const {{ return pointer{{**this}}; }}
+        reverse_iterator& operator++() {{ --base_; return *this; }}
+        reverse_iterator& operator--() {{ ++base_; return *this; }}
+        reverse_iterator operator++(int) {{ reverse_iterator t = *this; ++*this; return t; }}
+        reverse_iterator operator--(int) {{ reverse_iterator t = *this; --*this; return t; }}
+        bool operator==(const reverse_iterator& o) const {{ return base_ == o.base_; }}
+        bool operator!=(const reverse_iterator& o) const {{ return base_ != o.base_; }}
+    private:
+        iterator base_;
+    }};
+    reverse_iterator rbegin() {{ return reverse_iterator(end()); }}
+    reverse_iterator rend() {{ return reverse_iterator(begin()); }}\n"));
+
     let stability = if refs_flavor {
         "Element pointers are STABLE across pushes (chunked storage)."
     } else {
@@ -295,7 +435,7 @@ pub fn emit(model: &Model, ns: &str) -> Result<String, String> {
     for (tn, _) in &surfaced {
         opaque_decls.push_str(&format!("struct {tn};\n"));
         ref_decls.push_str(&format!(
-            "/// Typed handle into the collection that issued it -- the C++\n/// spelling of Rust's `Ref<{tn}>`.\nstruct {tn}Ref {{ uint32_t raw; }};\n"));
+            "/// Typed handle into the collection that issued it -- the C++\n/// spelling of Rust's `Ref<{tn}>`. Default-constructed it is the\n/// null sentinel (same as Rust `Ref::default()`).\nstruct {tn}Ref {{ uint32_t raw = UINT32_MAX; }};\n"));
     }
 
     // Children-first class order (containment is cycle-free).
@@ -415,7 +555,9 @@ public:
 #pragma once
 
 #include <cstdint>
+#include <cstddef>
 #include <cmath>
+#include <iterator>
 #include \"arael/math.hpp\"
 #include \"arael/result.hpp\"
 #include \"arael/solver.hpp\"

@@ -495,6 +495,10 @@ pub unsafe extern "C" fn path_poses_len(p: *const PathHandle) -> u32 {
     (*p).model.poses.len() as u32
 }
 #[no_mangle]
+pub unsafe extern "C" fn path_poses_reserve(p: *mut PathHandle, additional: u32) {
+    (*p).model.poses.reserve(additional as usize);
+}
+#[no_mangle]
 pub unsafe extern "C" fn path_poses_push_back(p: *mut PathHandle) -> *mut Pose {
     let m = &mut (*p).model.poses;
     let r = m.push_back(Default::default());
@@ -511,6 +515,24 @@ pub unsafe extern "C" fn path_poses_at(p: *mut PathHandle, i: u32) -> *mut Pose 
     let m = &mut (*p).model.poses;
     &mut m[i as usize] as *mut Pose
 }
+/// Drops the back element; false when already empty.
+#[no_mangle]
+pub unsafe extern "C" fn path_poses_pop_back(p: *mut PathHandle) -> bool {
+    (*p).model.poses.pop_back().is_some()
+}
+/// Drops the front element; false when already empty.
+#[no_mangle]
+pub unsafe extern "C" fn path_poses_pop_front(p: *mut PathHandle) -> bool {
+    (*p).model.poses.pop_front().is_some()
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_poses_clear(p: *mut PathHandle) {
+    (*p).model.poses.clear();
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_poses_truncate(p: *mut PathHandle, len: u32) {
+    (*p).model.poses.truncate(len as usize);
+}
 #[no_mangle]
 pub unsafe extern "C" fn path_poses_ref_at(p: *const PathHandle, i: u32) -> u32 {
     (*p).model.poses.ref_at(i as usize).to_raw()
@@ -520,9 +542,27 @@ pub unsafe extern "C" fn path_poses_get(p: *mut PathHandle, r: u32) -> *mut Pose
     let m = &mut (*p).model.poses;
     &mut m[arael::refs::Ref::from_raw(r)] as *mut Pose
 }
+/// True while `r` addresses a live element of this collection.
+#[no_mangle]
+pub unsafe extern "C" fn path_poses_contains(p: *const PathHandle, r: u32) -> bool {
+    (*p).model.poses.contains_ref(arael::refs::Ref::from_raw(r))
+}
+/// Like get, but null for a stale or foreign ref instead of a panic.
+#[no_mangle]
+pub unsafe extern "C" fn path_poses_try_get(p: *mut PathHandle, r: u32) -> *mut Pose {
+    let m = &mut (*p).model.poses;
+    match m.get_mut(arael::refs::Ref::from_raw(r)) {
+        Some(e) => e as *mut Pose,
+        None => std::ptr::null_mut(),
+    }
+}
 #[no_mangle]
 pub unsafe extern "C" fn path_pose_pairs_len(p: *const PathHandle) -> u32 {
     (*p).model.pose_pairs.len() as u32
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_pose_pairs_reserve(p: *mut PathHandle, additional: u32) {
+    (*p).model.pose_pairs.reserve(additional as usize);
 }
 #[no_mangle]
 pub unsafe extern "C" fn path_pose_pairs_push(p: *mut PathHandle) -> *mut PosePair {
@@ -535,9 +575,26 @@ pub unsafe extern "C" fn path_pose_pairs_at(p: *mut PathHandle, i: u32) -> *mut 
     let m = &mut (*p).model.pose_pairs;
     &mut m[i as usize] as *mut PosePair
 }
+/// Drops the last element; false when already empty.
+#[no_mangle]
+pub unsafe extern "C" fn path_pose_pairs_pop(p: *mut PathHandle) -> bool {
+    (*p).model.pose_pairs.pop().is_some()
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_pose_pairs_clear(p: *mut PathHandle) {
+    (*p).model.pose_pairs.clear();
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_pose_pairs_truncate(p: *mut PathHandle, len: u32) {
+    (*p).model.pose_pairs.truncate(len as usize);
+}
 #[no_mangle]
 pub unsafe extern "C" fn path_landmarks_len(p: *const PathHandle) -> u32 {
     (*p).model.landmarks.len() as u32
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_landmarks_reserve(p: *mut PathHandle, additional: u32) {
+    (*p).model.landmarks.reserve(additional as usize);
 }
 #[no_mangle]
 pub unsafe extern "C" fn path_landmarks_push(p: *mut PathHandle) -> u32 {
@@ -550,9 +607,59 @@ pub unsafe extern "C" fn path_landmarks_remove(p: *mut PathHandle, r: u32) -> bo
     m.remove(arael::refs::Ref::from_raw(r)).is_some()
 }
 #[no_mangle]
+pub unsafe extern "C" fn path_landmarks_clear(p: *mut PathHandle) {
+    (*p).model.landmarks.clear();
+}
+#[no_mangle]
 pub unsafe extern "C" fn path_landmarks_get(p: *mut PathHandle, r: u32) -> *mut Landmark {
     let m = &mut (*p).model.landmarks;
     &mut m[arael::refs::Ref::from_raw(r)] as *mut Landmark
+}
+/// True while `r` addresses a live element of this collection.
+#[no_mangle]
+pub unsafe extern "C" fn path_landmarks_contains(p: *const PathHandle, r: u32) -> bool {
+    (*p).model.landmarks.contains_ref(arael::refs::Ref::from_raw(r))
+}
+/// Like get, but null for a stale or foreign ref instead of a panic.
+#[no_mangle]
+pub unsafe extern "C" fn path_landmarks_try_get(p: *mut PathHandle, r: u32) -> *mut Landmark {
+    let m = &mut (*p).model.landmarks;
+    match m.get_mut(arael::refs::Ref::from_raw(r)) {
+        Some(e) => e as *mut Landmark,
+        None => std::ptr::null_mut(),
+    }
+}
+/// First live element's packed ref, or u32::MAX when empty.
+#[no_mangle]
+pub unsafe extern "C" fn path_landmarks_first(p: *const PathHandle) -> u32 {
+    match (*p).model.landmarks.first_ref() {
+        Some(r) => r.to_raw(),
+        None => u32::MAX,
+    }
+}
+/// The next live element after `r`'s slot, or u32::MAX past the end.
+#[no_mangle]
+pub unsafe extern "C" fn path_landmarks_next(p: *const PathHandle, r: u32) -> u32 {
+    match (*p).model.landmarks.next_ref(arael::refs::Ref::from_raw(r)) {
+        Some(n) => n.to_raw(),
+        None => u32::MAX,
+    }
+}
+/// Last live element's packed ref, or u32::MAX when empty.
+#[no_mangle]
+pub unsafe extern "C" fn path_landmarks_last(p: *const PathHandle) -> u32 {
+    match (*p).model.landmarks.last_ref() {
+        Some(r) => r.to_raw(),
+        None => u32::MAX,
+    }
+}
+/// The previous live element before `r`'s slot, or u32::MAX past the front.
+#[no_mangle]
+pub unsafe extern "C" fn path_landmarks_prev(p: *const PathHandle, r: u32) -> u32 {
+    match (*p).model.landmarks.prev_ref(arael::refs::Ref::from_raw(r)) {
+        Some(n) => n.to_raw(),
+        None => u32::MAX,
+    }
 }
 #[no_mangle]
 pub unsafe extern "C" fn path_frine_pose(p: *const Frine) -> u32 {
@@ -599,6 +706,10 @@ pub unsafe extern "C" fn path_landmark_frines_len(p: *const Landmark) -> u32 {
     (*p).frines.len() as u32
 }
 #[no_mangle]
+pub unsafe extern "C" fn path_landmark_frines_reserve(p: *mut Landmark, additional: u32) {
+    (*p).frines.reserve(additional as usize);
+}
+#[no_mangle]
 pub unsafe extern "C" fn path_landmark_frines_push(p: *mut Landmark) -> *mut Frine {
     let m = &mut (*p).frines;
     m.push(Default::default());
@@ -608,6 +719,19 @@ pub unsafe extern "C" fn path_landmark_frines_push(p: *mut Landmark) -> *mut Fri
 pub unsafe extern "C" fn path_landmark_frines_at(p: *mut Landmark, i: u32) -> *mut Frine {
     let m = &mut (*p).frines;
     &mut m[i as usize] as *mut Frine
+}
+/// Drops the last element; false when already empty.
+#[no_mangle]
+pub unsafe extern "C" fn path_landmark_frines_pop(p: *mut Landmark) -> bool {
+    (*p).frines.pop().is_some()
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_landmark_frines_clear(p: *mut Landmark) {
+    (*p).frines.clear();
+}
+#[no_mangle]
+pub unsafe extern "C" fn path_landmark_frines_truncate(p: *mut Landmark, len: u32) {
+    (*p).frines.truncate(len as usize);
 }
 #[no_mangle]
 pub unsafe extern "C" fn path_pose_pos(p: *const Pose) -> CVec2F32 {

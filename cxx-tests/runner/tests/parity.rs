@@ -5,6 +5,7 @@
 // EXACTLY. Skipped with a note when no C++ compiler is available.
 
 use arael::model::{CrossBlock, Param, SelfBlock};
+use arael::refs::Ref;
 use arael::simple_lm::{LmConfig, LmProblem, LmStatus, SolveFailureKind};
 use arael::vect::{vect2d, vect3d};
 use cxx_fit::{Fit, GpsObs, N, Obs, Pose, Tie};
@@ -77,7 +78,7 @@ fn cxx_interface_matches_rust_exactly() {
 
     let bin = Path::new(env!("CARGO_TARGET_TMPDIR")).join("cxx_parity");
     let status = Command::new(cc)
-        .arg("-std=c++17").arg("-O2")
+        .arg("-std=c++17").arg("-O2").arg("-ffp-contract=off")
         .arg("-I").arg(ws.join("model/cxx/include"))
         .arg(ws.join("runner/tests/parity_main.cpp"))
         .arg(ws.join("target/release/libcxx_fit_capi.a"))
@@ -221,11 +222,89 @@ fn cxx_interface_matches_rust_exactly() {
     assert_eq!(g("s3_gps0_y"), 8.0);
     assert_eq!(g("s3_gps0_isigma"), 2.5);
     assert_eq!(g("s3_marks_len"), f3.marks.len() as f64);
+    // Iteration parity over every container kind.
+    let it_obs: f64 = f3.obs.iter().map(|o| o.y).sum();
+    assert_eq!(g("it_obs_sum"), it_obs);
+    let it_pose: f64 = f3.poses.iter().map(|p| p.pos.value.x).sum();
+    assert_eq!(g("it_pose_sum"), it_pose);
+    let it_marks: f64 = f3.marks.iter().map(|n| n.t).sum();
+    assert_eq!(g("it_marks_sum"), it_marks);
+    assert_eq!(g("it_marks_n"), f3.marks.iter().count() as f64);
+    let it_arrow: f64 = f3.obs.iter().map(|o| o.x).sum::<f64>()
+        + f3.marks.iter().map(|n| n.w).sum::<f64>();
+    assert_eq!(g("it_arrow_sum"), it_arrow);
+    let back_obs: f64 = f3.obs.iter().rev().enumerate()
+        .map(|(k, o)| (k + 1) as f64 * o.y).sum();
+    assert_eq!(g("back_obs"), back_obs);
+    let back_marks: f64 = f3.marks.iter().collect::<Vec<_>>().iter().rev().enumerate()
+        .map(|(k, n)| (k + 1) as f64 * n.t).sum();
+    assert_eq!(g("back_marks"), back_marks);
+    assert_eq!(g("r_obs"), back_obs);
+    assert_eq!(g("r_marks"), back_marks);
     assert_eq!(g("s3_mark0_v"), f3.marks[m0].v.value);
     assert_eq!(g("s3_mark2_v"), f3.marks[m2].v.value);
     // Marks solved to their targets; the removed slot is gone.
     assert!((f3.marks[m0].v.value - 0.4).abs() < 1e-9);
     assert_eq!(f3.marks.len(), 2);
+
+    // Container removal ops mirror Rust exactly.
+    {
+        let mut f4 = Fit::default();
+        fill(&mut f4);
+        f4.obs.pop();
+        assert_eq!(g("ops_obs_after_pop"), f4.obs.len() as f64);
+        f4.obs.truncate(2);
+        assert_eq!(g("ops_obs_after_trunc"), f4.obs.len() as f64);
+        f4.obs.clear();
+        assert_eq!(g("ops_obs_after_clear"), 0.0);
+        f4.poses.push_back(Pose::default());
+        f4.poses.push_back(Pose::default());
+        f4.poses.push_front(Pose::default());
+        f4.poses.pop_front();
+        f4.poses.pop_back();
+        assert_eq!(g("ops_poses_left"), f4.poses.len() as f64);
+        assert_eq!(g("ops_pop_empty"), 0.0);
+        f4.marks.push(N::default());
+        f4.marks.push(N::default());
+        f4.marks.clear();
+        assert_eq!(g("ops_marks_after_clear"), f4.marks.len() as f64);
+    }
+
+    // reserve/empty/contains/try_get/front/back mirror Rust; a C++
+    // default-constructed ref is Rust's Ref::default() sentinel.
+    {
+        let b = |v: bool| v as i32 as f64;
+        let mut f5 = Fit::default();
+        f5.obs.reserve(64);
+        f5.items.reserve(64);
+        f5.poses.reserve(64);
+        f5.marks.reserve(64);
+        assert_eq!(g("cap_obs_empty"), b(f5.obs.is_empty()));
+        f5.items.push(N { t: 0.25, ..Default::default() });
+        f5.poses.push_back(Pose::default());
+        f5.poses.push_back(Pose::default());
+        f5.poses[0].pos.value.x = 1.5;
+        f5.poses[1].pos.value.x = 2.5;
+        let a5 = f5.marks.push(N::default());
+        f5.marks[a5].t = 0.75;
+        let a5b = f5.marks.push(N::default());
+        assert_eq!(g("cap_obs_still_empty"), b(f5.obs.is_empty()));
+        assert_eq!(g("cap_items_nonempty"), b(f5.items.is_empty()));
+        let i5r = f5.items.ref_at(0);
+        assert_eq!(g("cap_items_contains"), b(f5.items.contains_ref(i5r)));
+        assert_eq!(g("cap_items_contains_default"),
+            b(f5.items.contains_ref(Ref::default())));
+        assert_eq!(g("cap_items_try_get"), f5.items.get(i5r).unwrap().t);
+        assert_eq!(g("cap_poses_contains"),
+            b(f5.poses.contains_ref(f5.poses.ref_at(1))));
+        assert_eq!(g("cap_poses_front_x"), f5.poses.front().unwrap().pos.value.x);
+        assert_eq!(g("cap_poses_back_x"), f5.poses.back().unwrap().pos.value.x);
+        assert_eq!(g("cap_marks_contains"), b(f5.marks.contains_ref(a5)));
+        assert_eq!(g("cap_marks_try_get"), f5.marks.get(a5).unwrap().t);
+        f5.marks.remove(a5b);
+        assert_eq!(g("cap_marks_stale_contains"), b(f5.marks.contains_ref(a5b)));
+        assert_eq!(g("cap_marks_stale_try_get"), b(f5.marks.get(a5b).is_some()));
+    }
 
     // The degenerate model (unconstrained root params, nonzero cost)
     // fails with DegenerateDiagonal in Rust and status -1 + text in C++.

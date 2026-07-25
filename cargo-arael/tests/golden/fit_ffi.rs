@@ -535,6 +535,10 @@ pub unsafe extern "C" fn fit_obs_len(p: *const FitHandle) -> u32 {
     (*p).model.obs.len() as u32
 }
 #[no_mangle]
+pub unsafe extern "C" fn fit_obs_reserve(p: *mut FitHandle, additional: u32) {
+    (*p).model.obs.reserve(additional as usize);
+}
+#[no_mangle]
 pub unsafe extern "C" fn fit_obs_push(p: *mut FitHandle) -> *mut Obs {
     let m = &mut (*p).model.obs;
     m.push(Default::default());
@@ -545,9 +549,26 @@ pub unsafe extern "C" fn fit_obs_at(p: *mut FitHandle, i: u32) -> *mut Obs {
     let m = &mut (*p).model.obs;
     &mut m[i as usize] as *mut Obs
 }
+/// Drops the last element; false when already empty.
+#[no_mangle]
+pub unsafe extern "C" fn fit_obs_pop(p: *mut FitHandle) -> bool {
+    (*p).model.obs.pop().is_some()
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_obs_clear(p: *mut FitHandle) {
+    (*p).model.obs.clear();
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_obs_truncate(p: *mut FitHandle, len: u32) {
+    (*p).model.obs.truncate(len as usize);
+}
 #[no_mangle]
 pub unsafe extern "C" fn fit_items_len(p: *const FitHandle) -> u32 {
     (*p).model.items.len() as u32
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_items_reserve(p: *mut FitHandle, additional: u32) {
+    (*p).model.items.reserve(additional as usize);
 }
 #[no_mangle]
 pub unsafe extern "C" fn fit_items_push(p: *mut FitHandle) -> *mut N {
@@ -560,6 +581,19 @@ pub unsafe extern "C" fn fit_items_at(p: *mut FitHandle, i: u32) -> *mut N {
     let m = &mut (*p).model.items;
     &mut m[i as usize] as *mut N
 }
+/// Drops the last element; false when already empty.
+#[no_mangle]
+pub unsafe extern "C" fn fit_items_pop(p: *mut FitHandle) -> bool {
+    (*p).model.items.pop().is_some()
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_items_clear(p: *mut FitHandle) {
+    (*p).model.items.clear();
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_items_truncate(p: *mut FitHandle, len: u32) {
+    (*p).model.items.truncate(len as usize);
+}
 #[no_mangle]
 pub unsafe extern "C" fn fit_items_ref_at(p: *const FitHandle, i: u32) -> u32 {
     (*p).model.items.ref_at(i as usize).to_raw()
@@ -569,9 +603,27 @@ pub unsafe extern "C" fn fit_items_get(p: *mut FitHandle, r: u32) -> *mut N {
     let m = &mut (*p).model.items;
     &mut m[arael::refs::Ref::from_raw(r)] as *mut N
 }
+/// True while `r` addresses a live element of this collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_items_contains(p: *const FitHandle, r: u32) -> bool {
+    (*p).model.items.contains_ref(arael::refs::Ref::from_raw(r))
+}
+/// Like get, but null for a stale or foreign ref instead of a panic.
+#[no_mangle]
+pub unsafe extern "C" fn fit_items_try_get(p: *mut FitHandle, r: u32) -> *mut N {
+    let m = &mut (*p).model.items;
+    match m.get_mut(arael::refs::Ref::from_raw(r)) {
+        Some(e) => e as *mut N,
+        None => std::ptr::null_mut(),
+    }
+}
 #[no_mangle]
 pub unsafe extern "C" fn fit_poses_len(p: *const FitHandle) -> u32 {
     (*p).model.poses.len() as u32
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_poses_reserve(p: *mut FitHandle, additional: u32) {
+    (*p).model.poses.reserve(additional as usize);
 }
 #[no_mangle]
 pub unsafe extern "C" fn fit_poses_push_back(p: *mut FitHandle) -> *mut Pose {
@@ -590,6 +642,24 @@ pub unsafe extern "C" fn fit_poses_at(p: *mut FitHandle, i: u32) -> *mut Pose {
     let m = &mut (*p).model.poses;
     &mut m[i as usize] as *mut Pose
 }
+/// Drops the back element; false when already empty.
+#[no_mangle]
+pub unsafe extern "C" fn fit_poses_pop_back(p: *mut FitHandle) -> bool {
+    (*p).model.poses.pop_back().is_some()
+}
+/// Drops the front element; false when already empty.
+#[no_mangle]
+pub unsafe extern "C" fn fit_poses_pop_front(p: *mut FitHandle) -> bool {
+    (*p).model.poses.pop_front().is_some()
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_poses_clear(p: *mut FitHandle) {
+    (*p).model.poses.clear();
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_poses_truncate(p: *mut FitHandle, len: u32) {
+    (*p).model.poses.truncate(len as usize);
+}
 #[no_mangle]
 pub unsafe extern "C" fn fit_poses_ref_at(p: *const FitHandle, i: u32) -> u32 {
     (*p).model.poses.ref_at(i as usize).to_raw()
@@ -599,9 +669,27 @@ pub unsafe extern "C" fn fit_poses_get(p: *mut FitHandle, r: u32) -> *mut Pose {
     let m = &mut (*p).model.poses;
     &mut m[arael::refs::Ref::from_raw(r)] as *mut Pose
 }
+/// True while `r` addresses a live element of this collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_poses_contains(p: *const FitHandle, r: u32) -> bool {
+    (*p).model.poses.contains_ref(arael::refs::Ref::from_raw(r))
+}
+/// Like get, but null for a stale or foreign ref instead of a panic.
+#[no_mangle]
+pub unsafe extern "C" fn fit_poses_try_get(p: *mut FitHandle, r: u32) -> *mut Pose {
+    let m = &mut (*p).model.poses;
+    match m.get_mut(arael::refs::Ref::from_raw(r)) {
+        Some(e) => e as *mut Pose,
+        None => std::ptr::null_mut(),
+    }
+}
 #[no_mangle]
 pub unsafe extern "C" fn fit_ties_len(p: *const FitHandle) -> u32 {
     (*p).model.ties.len() as u32
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_ties_reserve(p: *mut FitHandle, additional: u32) {
+    (*p).model.ties.reserve(additional as usize);
 }
 #[no_mangle]
 pub unsafe extern "C" fn fit_ties_push(p: *mut FitHandle) -> *mut Tie {
@@ -614,9 +702,26 @@ pub unsafe extern "C" fn fit_ties_at(p: *mut FitHandle, i: u32) -> *mut Tie {
     let m = &mut (*p).model.ties;
     &mut m[i as usize] as *mut Tie
 }
+/// Drops the last element; false when already empty.
+#[no_mangle]
+pub unsafe extern "C" fn fit_ties_pop(p: *mut FitHandle) -> bool {
+    (*p).model.ties.pop().is_some()
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_ties_clear(p: *mut FitHandle) {
+    (*p).model.ties.clear();
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_ties_truncate(p: *mut FitHandle, len: u32) {
+    (*p).model.ties.truncate(len as usize);
+}
 #[no_mangle]
 pub unsafe extern "C" fn fit_marks_len(p: *const FitHandle) -> u32 {
     (*p).model.marks.len() as u32
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_marks_reserve(p: *mut FitHandle, additional: u32) {
+    (*p).model.marks.reserve(additional as usize);
 }
 #[no_mangle]
 pub unsafe extern "C" fn fit_marks_push(p: *mut FitHandle) -> u32 {
@@ -629,9 +734,59 @@ pub unsafe extern "C" fn fit_marks_remove(p: *mut FitHandle, r: u32) -> bool {
     m.remove(arael::refs::Ref::from_raw(r)).is_some()
 }
 #[no_mangle]
+pub unsafe extern "C" fn fit_marks_clear(p: *mut FitHandle) {
+    (*p).model.marks.clear();
+}
+#[no_mangle]
 pub unsafe extern "C" fn fit_marks_get(p: *mut FitHandle, r: u32) -> *mut N {
     let m = &mut (*p).model.marks;
     &mut m[arael::refs::Ref::from_raw(r)] as *mut N
+}
+/// True while `r` addresses a live element of this collection.
+#[no_mangle]
+pub unsafe extern "C" fn fit_marks_contains(p: *const FitHandle, r: u32) -> bool {
+    (*p).model.marks.contains_ref(arael::refs::Ref::from_raw(r))
+}
+/// Like get, but null for a stale or foreign ref instead of a panic.
+#[no_mangle]
+pub unsafe extern "C" fn fit_marks_try_get(p: *mut FitHandle, r: u32) -> *mut N {
+    let m = &mut (*p).model.marks;
+    match m.get_mut(arael::refs::Ref::from_raw(r)) {
+        Some(e) => e as *mut N,
+        None => std::ptr::null_mut(),
+    }
+}
+/// First live element's packed ref, or u32::MAX when empty.
+#[no_mangle]
+pub unsafe extern "C" fn fit_marks_first(p: *const FitHandle) -> u32 {
+    match (*p).model.marks.first_ref() {
+        Some(r) => r.to_raw(),
+        None => u32::MAX,
+    }
+}
+/// The next live element after `r`'s slot, or u32::MAX past the end.
+#[no_mangle]
+pub unsafe extern "C" fn fit_marks_next(p: *const FitHandle, r: u32) -> u32 {
+    match (*p).model.marks.next_ref(arael::refs::Ref::from_raw(r)) {
+        Some(n) => n.to_raw(),
+        None => u32::MAX,
+    }
+}
+/// Last live element's packed ref, or u32::MAX when empty.
+#[no_mangle]
+pub unsafe extern "C" fn fit_marks_last(p: *const FitHandle) -> u32 {
+    match (*p).model.marks.last_ref() {
+        Some(r) => r.to_raw(),
+        None => u32::MAX,
+    }
+}
+/// The previous live element before `r`'s slot, or u32::MAX past the front.
+#[no_mangle]
+pub unsafe extern "C" fn fit_marks_prev(p: *const FitHandle, r: u32) -> u32 {
+    match (*p).model.marks.prev_ref(arael::refs::Ref::from_raw(r)) {
+        Some(n) => n.to_raw(),
+        None => u32::MAX,
+    }
 }
 #[no_mangle]
 pub unsafe extern "C" fn fit_gps_obs_pos(p: *const GpsObs) -> CVec3F64 {

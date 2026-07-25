@@ -712,6 +712,14 @@ All questions settled; the plan is ready to execute.
     the arael value types re-exported inside -- the model is the
     project's, not arael's, and per-model namespaces dissolve the
     old one-generated-header-per-TU caveat (C symbols were already
-    root-prefixed). Known gaps noted for later: arena
-    views cannot be iterated without retained refs (needs a cursor in
-    the C ABI), and there is no const view of the model.
+    root-prefixed). Known gaps: iteration landed
+    2026-07-25 -- canonical bidirectional iterators on every view
+    (typedefs, pre/post ++/--, ==/!=, arrow proxy; dereference is a
+    value wrapper, vector<bool>-style), index-based for vec/deque and
+    live-slot cursors for arena (first_ref/next_ref/last_ref/prev_ref
+    on arael's Arena, _first/_next/_last/_prev in the C ABI; the
+    arena iterator also exposes .ref()), standard
+    modify-while-iterating-is-UB contract; backward-order parity is
+    pinned by position-weighted sums (which also caught that the
+    parity compile needed -ffp-contract=off, like cxx_math). Still
+    open: no const view of the model.

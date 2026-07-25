@@ -149,8 +149,113 @@ int main() {
     p("s3_gps0_y", ps[0].info().gps()->pos().y);
     p("s3_gps0_isigma", double(ps[0].info().gps()->isigma()));
     pi("s3_marks_len", f3.marks().size());
+    // Range-for over every container kind: vec, deque, and the arena
+    // cursor (which must skip the removed slot).
+    double it_obs = 0;
+    for (auto o : f3.obs()) it_obs += o.y();
+    p("it_obs_sum", it_obs);
+    double it_pose = 0;
+    for (auto q : f3.poses()) it_pose += q.pos().x;
+    p("it_pose_sum", it_pose);
+    double it_marks = 0;
+    uint32_t it_marks_n = 0;
+    for (auto mk : f3.marks()) { it_marks += mk.t(); it_marks_n++; }
+    p("it_marks_sum", it_marks);
+    pi("it_marks_n", it_marks_n);
+    // Manual iterators with operator->.
+    double it_arrow = 0;
+    for (auto it = f3.obs().begin(); it != f3.obs().end(); ++it)
+        it_arrow += it->x();
+    for (auto it = f3.marks().begin(); it != f3.marks().end(); ++it)
+        it_arrow += it->w();
+    p("it_arrow_sum", it_arrow);
+    // Backward walks: position-weighted sums pin the ORDER, not just
+    // the membership.
+    double back_obs = 0;
+    int k = 1;
+    for (auto it = f3.obs().end(); it != f3.obs().begin();) {
+        --it;
+        back_obs += k * it->y();
+        k++;
+    }
+    p("back_obs", back_obs);
+    double back_marks = 0;
+    k = 1;
+    for (auto it = f3.marks().end(); it != f3.marks().begin();) {
+        --it;
+        back_marks += k * it->t();
+        k++;
+    }
+    p("back_marks", back_marks);
+    // rbegin/rend with the arrow proxy, over vec and the holed arena.
+    double r_obs = 0;
+    k = 1;
+    for (auto rit = f3.obs().rbegin(); rit != f3.obs().rend(); ++rit) {
+        r_obs += k * rit->y();
+        k++;
+    }
+    p("r_obs", r_obs);
+    double r_marks = 0;
+    k = 1;
+    for (auto rit = f3.marks().rbegin(); rit != f3.marks().rend(); ++rit) {
+        r_marks += k * rit->t();
+        k++;
+    }
+    p("r_marks", r_marks);
     p("s3_mark0_v", f3.marks().get(m0).v());
     p("s3_mark2_v", f3.marks().get(m2).v());
+
+    // Container removal ops on a scratch model: vec pop/truncate/clear,
+    // deque pops from both ends, arena clear.
+    Fit f4;
+    fill(f4);
+    f4.obs().pop();
+    pi("ops_obs_after_pop", f4.obs().size());
+    f4.obs().truncate(2);
+    pi("ops_obs_after_trunc", f4.obs().size());
+    f4.obs().clear();
+    pi("ops_obs_after_clear", f4.obs().size());
+    f4.poses().push_back();
+    f4.poses().push_back();
+    f4.poses().push_front();
+    f4.poses().pop_front();
+    f4.poses().pop_back();
+    pi("ops_poses_left", f4.poses().size());
+    pi("ops_pop_empty", f4.obs().pop() ? 1 : 0);
+    f4.marks().push();
+    f4.marks().push();
+    f4.marks().clear();
+    pi("ops_marks_after_clear", f4.marks().size());
+
+    // reserve/empty/contains/try_get/front/back on a scratch model.
+    Fit f5;
+    f5.obs().reserve(64);
+    f5.items().reserve(64);
+    f5.poses().reserve(64);
+    f5.marks().reserve(64);
+    pi("cap_obs_empty", f5.obs().empty() ? 1 : 0);
+    auto i5 = f5.items().push();
+    i5.set_t(0.25);
+    auto d5 = f5.poses().push_back();
+    d5.set_pos(vect3d{1.5, 0, 0});
+    f5.poses().push_back().set_pos(vect3d{2.5, 0, 0});
+    auto a5 = f5.marks().push();
+    f5.marks().get(a5).set_t(0.75);
+    auto a5b = f5.marks().push();
+    pi("cap_obs_still_empty", f5.obs().empty() ? 1 : 0);
+    pi("cap_items_nonempty", f5.items().empty() ? 1 : 0);
+    NRef i5r = f5.items().ref_at(0);
+    pi("cap_items_contains", f5.items().contains(i5r) ? 1 : 0);
+    pi("cap_items_contains_default", f5.items().contains(NRef{}) ? 1 : 0);
+    p("cap_items_try_get", f5.items().try_get(i5r).value().t());
+    pi("cap_poses_contains", f5.poses().contains(f5.poses().ref_at(1)) ? 1 : 0);
+    p("cap_poses_front_x", f5.poses().front().pos().x);
+    p("cap_poses_back_x", f5.poses().back().pos().x);
+    pi("cap_marks_contains", f5.marks().contains(a5) ? 1 : 0);
+    p("cap_marks_try_get", f5.marks().try_get(a5).value().t());
+    f5.marks().remove(a5b);
+    pi("cap_marks_stale_contains", f5.marks().contains(a5b) ? 1 : 0);
+    pi("cap_marks_stale_try_get", f5.marks().try_get(a5b).has_value() ? 1 : 0);
 
     // Degenerate model: the root's m/c stay unconstrained (no obs)
     // while one item gives a nonzero cost, so assembly reaches the
