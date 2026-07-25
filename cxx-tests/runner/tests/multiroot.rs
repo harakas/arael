@@ -75,7 +75,12 @@ fn both_roots_from_one_translation_unit() {
             got.insert(n.to_string(), v.parse().unwrap());
         }
     }
-    let g = |n: &str| *got.get(n).unwrap_or_else(|| panic!("C++ output missing `{n}`"));
+    verify_mr(&got);
+}
+
+/// The Rust mirror both language twins are compared against.
+fn verify_mr(got: &HashMap<String, f64>) {
+    let g = |n: &str| *got.get(n).unwrap_or_else(|| panic!("output missing `{n}`"));
 
     // Root A (f64) mirrored.
     let mut line = Line::default();
@@ -110,6 +115,39 @@ fn both_roots_from_one_translation_unit() {
         let r = decay.cells.ref_at(i);
         assert_eq!(g(&format!("cell{i}")), decay.cells[r].v.value as f64);
     }
+}
+
+#[test]
+fn both_roots_from_one_python_interpreter() {
+    let ws: PathBuf = Path::new(env!("CARGO_MANIFEST_DIR")).join("..");
+    if !Command::new("python3").arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status().map(|s| s.success()).unwrap_or(false)
+    {
+        eprintln!("python multiroot: no python3 found, skipping");
+        return;
+    }
+    let status = Command::new("cargo")
+        .args(["build", "-p", "cxx-mr-capi", "--release"])
+        .current_dir(&ws)
+        .status().expect("cargo spawn");
+    assert!(status.success(), "capi build failed");
+
+    let out = Command::new("python3")
+        .arg(ws.join("runner/tests/multiroot_main.py"))
+        .env("ARAEL_CAPI", ws.join("target/release/libcxx_mr_capi.so"))
+        .output().expect("python spawn");
+    assert!(out.status.success(), "python run failed: {}",
+        String::from_utf8_lossy(&out.stderr));
+    let mut got: HashMap<String, f64> = HashMap::new();
+    for line in String::from_utf8(out.stdout).unwrap().lines() {
+        let mut it = line.split_whitespace();
+        if let (Some(n), Some(v)) = (it.next(), it.next()) {
+            got.insert(n.to_string(), v.parse().unwrap());
+        }
+    }
+    verify_mr(&got);
 }
 
 #[test]
