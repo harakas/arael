@@ -5106,12 +5106,12 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 )
             });
 
-        // The reduction is a GEMM loop over pairs of observers, and the tile
-        // shapes it needs come from the model's block widths. The common ones
-        // have a fully unrolled kernel; anything else runs a generic loop at
-        // roughly half the speed. Say so -- the model author is the only one
-        // who can act on it, and nothing else in the output would ever reveal
-        // it.
+        // The reduction is a GEMM loop over pairs of observers plus a
+        // one-column update per observer, and the tile shapes both need come
+        // from the model's block widths. The common ones have a fully unrolled
+        // kernel; anything else goes to the nano-gemm fallback. Say so -- the
+        // model author is the only one who can act on it, and nothing else in
+        // the output would ever reveal it.
         if vb {
             let shapes = schur.gemm_shapes();
             let total: usize = shapes.iter().map(|(_, n)| n).sum();
@@ -5121,21 +5121,20 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 .collect();
             if !slow.is_empty() && total > 0 {
                 slow.sort_by_key(|(_, n)| std::cmp::Reverse(*n));
-                let slow_pairs: usize = slow.iter().map(|(_, n)| n).sum();
+                let slow_calls: usize = slow.iter().map(|(_, n)| n).sum();
                 let listed = slow
                     .iter()
                     .take(4)
                     .map(|((wa, we, wb), n)| {
-                        std::format!("({},{},{}) {} pairs", wa, we, wb, n)
+                        std::format!("({},{},{}) {} calls", wa, we, wb, n)
                     })
                     .collect::<Vec<_>>()
                     .join(", ");
                 warn!(
-                    "schur: {:.0}% of the reduction runs the GENERIC gemm -- \
-                     no unrolled kernel for {}{}. It is about 2x slower than a \
-                     kernel. Add the shape to FIXED_SHAPES in arael-faer \
-                     (src/schur.rs) if this model matters.",
-                    100.0 * slow_pairs as f64 / total as f64,
+                    "schur: {:.0}% of the reduction runs the nano-gemm fallback -- \
+                     no unrolled kernel for {}{}. Add the shape to FIXED_SHAPES \
+                     in arael-faer (src/schur.rs) if this model matters.",
+                    100.0 * slow_calls as f64 / total as f64,
                     listed,
                     if slow.len() > 4 {
                         std::format!(" and {} more shapes", slow.len() - 4)

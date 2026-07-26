@@ -244,29 +244,50 @@ pub struct SchurSymbolic<I: Index> {
     copy_src: Vec<I>,
     copy_dst: Vec<I>,
     /// per eliminated block, in `eliminated` order: H block index of
-    /// its diagonal tile, plus ranges into the obs_* / pair_dst arrays
+    /// its diagonal tile, plus ranges into the obs_* / pair_off arrays
+    /// and the panel width (observer columns, without the rhs column)
     elim_diag: Vec<I>,
     elim_obs_ptr: Vec<I>,
     elim_pair_ptr: Vec<I>,
-    /// flattened observer lists: coupling tile's H block index, whether
-    /// it is stored transposed (tile (elim, kept) instead of
-    /// (kept, elim)), and the observer's original block id
-    obs_hblk: Vec<I>,
+    elim_ncols: Vec<I>,
+    /// per eliminated block, the observer width shared by all of its
+    /// observers, or 0 when they differ -- 0 also when they differ in
+    /// storage orientation, which [`gemm_tri`] needs constant too.
+    /// `elim_utrans` is that shared orientation.
+    elim_uw: Vec<I>,
+    elim_utrans: Vec<bool>,
+    /// flattened observer lists. Everything the numeric passes read per
+    /// observer is resolved here, so their inner loops index flat arrays
+    /// instead of walking H's and S's block structure:
+    ///
+    /// * `obs_trans` -- the coupling tile is stored transposed, i.e. as
+    ///   (elim, kept) rather than (kept, elim)
+    /// * `obs_ca_off` -- where its coupling tile starts in `h.vals()`
+    /// * `obs_w` -- its block width
+    /// * `obs_panel_col` -- its column offset inside the solve panel
+    /// * `obs_kept_off` -- where its span starts in the kept (S) scalar
+    ///   numbering, for the reduction's rhs update
+    /// * `obs_orig_off` -- where its span starts in the original scalar
+    ///   numbering, for back-substitution
     obs_trans: Vec<bool>,
-    obs_block: Vec<I>,
-    /// S block index of every observer-pair target: per eliminated
-    /// block, for each observer b (ascending) all pairs (a, b) with
-    /// a <= b, a ascending -- the numeric pass consumes it in this
-    /// exact order
-    pair_dst: Vec<I>,
+    obs_ca_off: Vec<I>,
+    obs_w: Vec<I>,
+    obs_panel_col: Vec<I>,
+    obs_kept_off: Vec<I>,
+    obs_orig_off: Vec<I>,
+    /// where every observer-pair target starts in S's value array: per
+    /// eliminated block, for each observer b (ascending) all pairs
+    /// (a, b) with a <= b, a ascending -- the numeric pass consumes it
+    /// in this exact order
+    pair_off: Vec<I>,
     /// S block indices of the kept diagonal tiles (for the final
     /// zero-lower pass -- diagonal tiles are upper-only by convention)
     s_diag: Vec<I>,
     /// workspace sizing: max panel elements / max eliminated width
     max_panel: usize,
     max_ew: usize,
-    /// every GEMM tile shape this reduction needs, with the number of pair
-    /// contributions carried by each -- see [`SchurSymbolic::gemm_shapes`]
+    /// every GEMM tile shape this reduction needs, with the number of calls
+    /// carried by each -- see [`SchurSymbolic::gemm_shapes`]
     shapes: Vec<((usize, usize, usize), usize)>,
     /// flops one [`schur_reduce`] costs: the observer-pair GEMMs, which
     /// dominate it. a caller weighing the reduction against factorizing the
@@ -282,13 +303,17 @@ impl<I: Index> SchurSymbolic<I> {
     /// number of observer-pair contributions per reduction (the flop
     /// driver: quadratic in observers-per-eliminated-block)
     pub fn pair_count(&self) -> usize {
-        self.pair_dst.len()
+        self.pair_off.len()
     }
-    /// The GEMM tile shapes this reduction needs, `((wa, we, wb), pairs)`, in
+    /// The GEMM tile shapes this reduction needs, `((wa, we, wb), calls)`, in
     /// no particular order. A shape not in [`FIXED_SHAPES`] goes to the
     /// nano-gemm fallback, which costs about 1.2-1.4x the unrolled kernel, so a
-    /// caller that cares about the last of it should look here -- and the pair
+    /// caller that cares about the last of it should look here -- and the call
     /// count says how much of the reduction is off the unrolled path.
+    ///
+    /// Covers every stage: the pair GEMMs, the reduction's `wb == 1` rhs
+    /// update, and [`schur_backsub`]'s `wb == 1` update -- the last two run
+    /// once per observer per eliminated block.
     pub fn gemm_shapes(&self) -> &[((usize, usize, usize), usize)] {
         &self.shapes
     }
@@ -334,8 +359,6 @@ pub struct SchurContext<T> {
     /// solve panel `Z = D^-1 [C^T | b_e]`, column-major, width
     /// `sum(observer widths) + 1`
     panel: Vec<T>,
-    /// (panel column offset, width) per observer of the current block
-    obs_col: Vec<(usize, usize)>,
     /// per-stage breakdown of the last [`schur_reduce`] call, gathered
     /// only when enabled (the clock is never read otherwise)
     timing: Option<SchurTiming>,
@@ -343,7 +366,7 @@ pub struct SchurContext<T> {
 
 impl<T> Default for SchurContext<T> {
     fn default() -> Self {
-        Self { dwork: Vec::new(), panel: Vec::new(), obs_col: Vec::new(), timing: None }
+        Self { dwork: Vec::new(), panel: Vec::new(), timing: None }
     }
 }
 
@@ -479,9 +502,17 @@ pub fn schur_symbolic<I: Index>(
     let mut elim_diag = Vec::with_capacity(ne);
     let mut elim_obs_ptr = Vec::with_capacity(ne + 1);
     let mut elim_pair_ptr = Vec::with_capacity(ne + 1);
+    let mut elim_ncols = Vec::with_capacity(ne);
+    let mut elim_uw = Vec::with_capacity(ne);
+    let mut elim_utrans = Vec::with_capacity(ne);
     let mut obs_hblk = Vec::new();
     let mut obs_trans = Vec::new();
     let mut obs_block = Vec::new();
+    let mut obs_ca_off = Vec::new();
+    let mut obs_w = Vec::new();
+    let mut obs_panel_col = Vec::new();
+    let mut obs_kept_off = Vec::new();
+    let mut obs_orig_off = Vec::new();
     let mut max_panel = 0usize;
     let mut max_ew = 0usize;
     let mut total_pairs = 0usize;
@@ -494,28 +525,54 @@ pub fn schur_symbolic<I: Index>(
         let d = diag[slot].ok_or(SchurError::MissingDiagonal { block: e })?;
         elim_diag.push(d);
         let list = &obs[slot];
-        let mut panel_cols = 1usize; // + the rhs column
+        let mut panel_cols = 0usize;
         for &(hb, tr, oblk) in list {
+            let span = h.col_span(oblk.zx());
             obs_hblk.push(hb);
             obs_trans.push(tr);
             obs_block.push(oblk);
-            panel_cols += h.col_span(oblk.zx()).len();
+            obs_ca_off.push(I::truncate(h.val_range(hb.zx()).start));
+            obs_w.push(I::truncate(span.len()));
+            obs_panel_col.push(I::truncate(panel_cols));
+            obs_orig_off.push(I::truncate(span.start));
+            obs_kept_off.push(I::truncate(kept_part[kept_of[oblk.zx()].zx()]));
+            panel_cols += span.len();
         }
+        elim_ncols.push(I::truncate(panel_cols));
+        panel_cols += 1; // + the rhs column
+        let uniform = list
+            .first()
+            .map(|&(_, tr, ob)| (h.col_span(ob.zx()).len(), tr))
+            .filter(|&(w, tr)| {
+                list.iter().all(|&(_, t, o)| t == tr && h.col_span(o.zx()).len() == w)
+            });
+        elim_uw.push(I::truncate(uniform.map_or(0, |(w, _)| w)));
+        elim_utrans.push(uniform.is_some_and(|(_, tr)| tr));
         total_pairs += list.len() * (list.len() + 1) / 2;
         let ew = h.col_span(e).len();
-        // Which GEMM shapes this problem actually needs, and how many pair
+        // Which GEMM shapes this problem actually needs, and how many
         // contributions each carries. The widths are in hand here, so the
         // census is free; a caller uses it to see whether the reduction is
-        // running on unrolled kernels or on the nano-gemm fallback.
+        // running on unrolled kernels or on the nano-gemm fallback. Every
+        // stage counts: the pair GEMMs, the reduction's one-column rhs
+        // update, and back-substitution's one-column update with the widths
+        // the other way round.
+        let mut count_shape = |wa: usize, we: usize, wb: usize| {
+            match shapes.iter_mut().find(|(k, _)| *k == (wa, we, wb)) {
+                Some((_, n)) => *n += 1,
+                None => shapes.push(((wa, we, wb), 1)),
+            }
+        };
         for (bi, &(_, _, ob)) in list.iter().enumerate() {
             let wb = h.col_span(ob.zx()).len();
             for &(_, _, oa) in list.iter().take(bi + 1) {
-                let wa = h.col_span(oa.zx()).len();
-                match shapes.iter_mut().find(|(k, _)| *k == (wa, ew, wb)) {
-                    Some((_, n)) => *n += 1,
-                    None => shapes.push(((wa, ew, wb), 1)),
-                }
+                count_shape(h.col_span(oa.zx()).len(), ew, wb);
             }
+        }
+        for &(_, _, oa) in list.iter() {
+            let wa = h.col_span(oa.zx()).len();
+            count_shape(wa, ew, 1);
+            count_shape(ew, wa, 1);
         }
         {
             // sum over pairs a <= b of 2 * w_a * ew * w_b, in closed form
@@ -628,6 +685,9 @@ pub fn schur_symbolic<I: Index>(
             }
         }
     }
+    // the pair loop wants the target's scalar start, not its block index:
+    // resolve it once here, while val_ptr is still in hand
+    let pair_off: Vec<I> = pair_dst.iter().map(|&b| val_ptr[b.zx()]).collect();
     let kp: Vec<I> = kept_part.iter().map(|&x| I::truncate(x)).collect();
     let s = SymbolicSparseBlockColMat::new_checked(
         kp.clone(),
@@ -647,10 +707,16 @@ pub fn schur_symbolic<I: Index>(
         elim_diag,
         elim_obs_ptr,
         elim_pair_ptr,
-        obs_hblk,
+        elim_ncols,
+        elim_uw,
+        elim_utrans,
         obs_trans,
-        obs_block,
-        pair_dst,
+        obs_ca_off,
+        obs_w,
+        obs_panel_col,
+        obs_kept_off,
+        obs_orig_off,
+        pair_off,
         s_diag,
         shapes,
         max_panel,
@@ -755,8 +821,12 @@ fn gemm_sub_fixed<T: SchurReal, const WA: usize, const WE: usize, const WB: usiz
 ///   (3,4,3)  out        0.83x           0.79x
 ///   (2,3,2)  out        0.64x           0.65x
 /// ```
-const fn transpose_first(wa: usize, we: usize) -> bool {
-    wa >= 5 && we <= 4
+///
+/// `WB` is the amortization: the copy is `WA * WE` elements and is paid once for all
+/// `WB` output columns. The rhs update is a single column, where the copy alone equals
+/// the whole multiply, so it never transposes.
+const fn transpose_first(wa: usize, we: usize, wb: usize) -> bool {
+    wa >= 5 && we <= 4 && wb > 1
 }
 
 /// [`gemm_sub_fixed`] for a transposed-stored lhs: `ca` holds `C_a^T`
@@ -771,7 +841,7 @@ fn gemm_sub_fixed_trans<T: SchurReal, const WA: usize, const WE: usize, const WB
     zb: &[T],
 ) {
     note_fixed_kernel();
-    if transpose_first(WA, WE) {
+    if transpose_first(WA, WE, WB) {
         // C_a^T is WE x WA, so C_a[i, k] is at ca[k + i * WE]. `a[k]` is then the
         // k-th column of C_a, contiguous, which is what the axpy below wants.
         //
@@ -810,10 +880,20 @@ fn gemm_sub_fixed_trans<T: SchurReal, const WA: usize, const WE: usize, const WB
     }
 }
 
-/// The `(observer, marginalized, observer)` tile shapes that have a fully
-/// unrolled GEMM kernel. Every other shape works, through the nano-gemm
-/// fallback, which takes the widths at run time and costs about 1.2-1.4x the
-/// unrolled kernel on these sizes (`--example gemmbench`).
+/// The tile shapes that have a fully unrolled GEMM kernel. Every other shape
+/// works, through the nano-gemm fallback, which takes the widths at run time and
+/// costs about 1.2-1.4x the unrolled kernel on these sizes (`--example
+/// gemmbench`).
+///
+/// Two families, both `(wa, we, wb)`:
+///
+/// * `wb > 1` -- the pair GEMMs, `(observer, marginalized, observer)`.
+/// * `wb == 1` -- the one-column updates, one per observer per eliminated
+///   block: the reduction's rhs `b'_a -= C_a z` at `(wa, we, 1)`, and
+///   [`schur_backsub`]'s `t -= C_a^T x_a` at the widths the other way round,
+///   `(we, wa, 1)`. Both run as often as there are observations, so they need
+///   kernels just as much: on the fallback each pays a nano-gemm plan for 27
+///   flops.
 ///
 /// This is the same list the `fixed_shapes!` macro dispatches on; a test walks every
 /// shape up to 9x9x9 and checks the two agree, so they cannot drift apart.
@@ -825,7 +905,7 @@ fn gemm_sub_fixed_trans<T: SchurReal, const WA: usize, const WE: usize, const WB
 /// are). Marginalized: 1 (inverse depth), 2 (a 2D point, or a bearing), 3 (a
 /// 3D point), 4 (a 3D line, or a 2D segment). Cross-checked against g2o's
 /// vertex dimensions and GTSAM's variable dimensions.
-pub const FIXED_SHAPES: [(usize, usize, usize); 11] = [
+pub const FIXED_SHAPES: [(usize, usize, usize); 29] = [
     // -- 2D --
     (3, 2, 3), // 2D pose (x, y, theta) through a 2D point. The slam2d demos,
     // g2o VertexSE2 + VertexPointXY, Victoria-Park-style range-bearing SLAM
@@ -845,6 +925,28 @@ pub const FIXED_SHAPES: [(usize, usize, usize); 11] = [
     // scale-aware loop closure)
     (9, 3, 9), // camera-with-intrinsics through a 3D point. BAL, GTSAM
     // SfmCamera = PinholeCamera<Cal3Bundler>, and a 9-dof NavState
+    // -- the reduction's rhs update: the same (wa, we), one column wide --
+    (3, 2, 1),
+    (3, 3, 1),
+    (3, 4, 1),
+    (2, 3, 1),
+    (6, 1, 1),
+    (6, 2, 1),
+    (6, 3, 1),
+    (6, 4, 1),
+    (6, 6, 1),
+    (7, 3, 1),
+    (9, 3, 1),
+    // -- back-substitution: the widths the other way round. The ones the list
+    // above already covers ((2,3,1), (3,3,1), (3,2,1), (6,6,1)) are not
+    // repeated.
+    (4, 3, 1),
+    (1, 6, 1),
+    (2, 6, 1),
+    (3, 6, 1),
+    (4, 6, 1),
+    (3, 7, 1),
+    (3, 9, 1),
 ];
 
 /// Does this tile shape have an unrolled kernel, or does it fall to nano-gemm?
@@ -871,6 +973,25 @@ fn note_fixed_kernel() {
 #[cfg(not(test))]
 #[inline(always)]
 fn note_fixed_kernel() {}
+
+/// Counts eliminated blocks that took the uniform triangular path. Like
+/// [`note_fixed_kernel`], the output cannot tell the two routes apart, so a
+/// missing dispatch arm would silently cost speed and no test would notice.
+/// Compiled out of every non-test build.
+#[cfg(test)]
+thread_local! {
+    static UNIFORM_RUN_HITS: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+#[inline]
+fn note_uniform_run() {
+    UNIFORM_RUN_HITS.with(|c| c.set(c.get() + 1));
+}
+
+#[cfg(not(test))]
+#[inline(always)]
+fn note_uniform_run() {}
 
 /// The tile shapes that get a fully unrolled kernel, as
 /// `(observer, marginalized, observer)` widths. Every other shape falls to the
@@ -914,9 +1035,126 @@ macro_rules! fixed_shapes {
             0x666 => return $kernel::<T, 6, 6, 6>($dst, $ca, $zb),
             0x737 => return $kernel::<T, 7, 3, 7>($dst, $ca, $zb),
             0x939 => return $kernel::<T, 9, 3, 9>($dst, $ca, $zb),
+            // the reduction's rhs update, one column wide
+            0x321 => return $kernel::<T, 3, 2, 1>($dst, $ca, $zb),
+            0x331 => return $kernel::<T, 3, 3, 1>($dst, $ca, $zb),
+            0x341 => return $kernel::<T, 3, 4, 1>($dst, $ca, $zb),
+            0x231 => return $kernel::<T, 2, 3, 1>($dst, $ca, $zb),
+            0x611 => return $kernel::<T, 6, 1, 1>($dst, $ca, $zb),
+            0x621 => return $kernel::<T, 6, 2, 1>($dst, $ca, $zb),
+            0x631 => return $kernel::<T, 6, 3, 1>($dst, $ca, $zb),
+            0x641 => return $kernel::<T, 6, 4, 1>($dst, $ca, $zb),
+            0x661 => return $kernel::<T, 6, 6, 1>($dst, $ca, $zb),
+            0x731 => return $kernel::<T, 7, 3, 1>($dst, $ca, $zb),
+            0x931 => return $kernel::<T, 9, 3, 1>($dst, $ca, $zb),
+            // back-substitution, the widths the other way round
+            0x431 => return $kernel::<T, 4, 3, 1>($dst, $ca, $zb),
+            0x161 => return $kernel::<T, 1, 6, 1>($dst, $ca, $zb),
+            0x261 => return $kernel::<T, 2, 6, 1>($dst, $ca, $zb),
+            0x361 => return $kernel::<T, 3, 6, 1>($dst, $ca, $zb),
+            0x461 => return $kernel::<T, 4, 6, 1>($dst, $ca, $zb),
+            0x371 => return $kernel::<T, 3, 7, 1>($dst, $ca, $zb),
+            0x391 => return $kernel::<T, 3, 9, 1>($dst, $ca, $zb),
             _ => {}
         }
     };
+}
+
+/// The pair shapes, as `(observer, marginalized)` -- the third width is the
+/// observer width again. What [`gemm_tri`] dispatches on, and the same list as
+/// the `wb > 1` half of [`FIXED_SHAPES`]; a test checks every one of those
+/// reaches the uniform path, so the two cannot drift apart.
+macro_rules! uniform_pair_shapes {
+    ($run:ident, $w:expr, $we:expr, $($arg:expr),*) => {
+        // widths are tile dimensions, far below 16
+        match ($w << 4) | $we {
+            0x32 => return $run!(3, 2, $($arg),*),
+            0x33 => return $run!(3, 3, $($arg),*),
+            0x34 => return $run!(3, 4, $($arg),*),
+            0x23 => return $run!(2, 3, $($arg),*),
+            0x61 => return $run!(6, 1, $($arg),*),
+            0x62 => return $run!(6, 2, $($arg),*),
+            0x63 => return $run!(6, 3, $($arg),*),
+            0x64 => return $run!(6, 4, $($arg),*),
+            0x66 => return $run!(6, 6, $($arg),*),
+            0x73 => return $run!(7, 3, $($arg),*),
+            0x93 => return $run!(9, 3, $($arg),*),
+            _ => {}
+        }
+    };
+}
+
+/// The whole triangular pair loop of one eliminated block whose observers all
+/// have the same width and storage orientation -- the ordinary case, since the
+/// entity marginalized out is usually seen by one kind of entity (poses through
+/// a landmark, cameras through a point). One dispatch covers every pair instead
+/// of one per pair, and the tile shape is a compile-time constant throughout.
+///
+/// `pair_off`, `ca_off` and `panel_col` are this block's slices: the pair
+/// targets in `s_vals` (b-major, a ascending, a <= b -- the symbolic emission
+/// order), and per observer its coupling tile in `h_vals` and its column in
+/// `panel`.
+#[inline]
+fn gemm_tri<T: SchurReal, I: Index, const W: usize, const WE: usize, const TRANS: bool>(
+    s_vals: &mut [T],
+    h_vals: &[T],
+    panel: &[T],
+    pair_off: &[I],
+    ca_off: &[I],
+    panel_col: &[I],
+) {
+    note_uniform_run();
+    let mut pair = 0usize;
+    for bi in 0..ca_off.len() {
+        let pc = panel_col[bi].zx() * WE;
+        let zb = &panel[pc..pc + WE * W];
+        for &off in &ca_off[..=bi] {
+            let d = pair_off[pair].zx();
+            let a = off.zx();
+            if TRANS {
+                gemm_sub_fixed_trans::<T, W, WE, W>(
+                    &mut s_vals[d..d + W * W],
+                    &h_vals[a..a + W * WE],
+                    zb,
+                );
+            } else {
+                gemm_sub_fixed::<T, W, WE, W>(
+                    &mut s_vals[d..d + W * W],
+                    &h_vals[a..a + W * WE],
+                    zb,
+                );
+            }
+            pair += 1;
+        }
+    }
+}
+
+/// [`gemm_tri`] for a width and orientation only known at run time. Returns
+/// false when the shape has no unrolled kernel, leaving the caller to run the
+/// pair-at-a-time loop.
+fn gemm_tri_dispatch<T: SchurReal, I: Index>(
+    w: usize,
+    we: usize,
+    trans: bool,
+    s_vals: &mut [T],
+    h_vals: &[T],
+    panel: &[T],
+    pair_off: &[I],
+    ca_off: &[I],
+    panel_col: &[I],
+) -> bool {
+    macro_rules! run {
+        ($w:literal, $we:literal, $tr:expr) => {{
+            if $tr {
+                gemm_tri::<T, I, $w, $we, true>(s_vals, h_vals, panel, pair_off, ca_off, panel_col);
+            } else {
+                gemm_tri::<T, I, $w, $we, false>(s_vals, h_vals, panel, pair_off, ca_off, panel_col);
+            }
+            true
+        }};
+    }
+    uniform_pair_shapes!(run, w, we, trans);
+    false
 }
 
 /// `dst -= C_a * Z_b` where `dst` is `wa x wb` column-major, `Z_b` is
@@ -1033,13 +1271,13 @@ pub fn schur_reduce<I: Index, T: SchurReal>(
         // 2b panel: gather [C^T | b_e], then Z = D_e^-1 [C^T | b_e]
         // via one forward + one backward triangular solve per column
         let orange = sym.elim_obs_ptr[slot].zx()..sym.elim_obs_ptr[slot + 1].zx();
-        let mut col = 0usize;
-        ctx.obs_col.clear();
+        let col = sym.elim_ncols[slot].zx();
         for o in orange.clone() {
-            let hb = sym.obs_hblk[o].zx();
-            let wo = hs.col_span(sym.obs_block[o].zx()).len();
-            let tile = &h.vals()[hs.val_range(hb)];
-            let dst = &mut ctx.panel[col * we..(col + wo) * we];
+            let wo = sym.obs_w[o].zx();
+            let ca = sym.obs_ca_off[o].zx();
+            let tile = &h.vals()[ca..ca + wo * we];
+            let ocol = sym.obs_panel_col[o].zx();
+            let dst = &mut ctx.panel[ocol * we..(ocol + wo) * we];
             if sym.obs_trans[o] {
                 // stored (e, kept): the tile IS C^T (we x wo)
                 dst.copy_from_slice(tile);
@@ -1051,28 +1289,49 @@ pub fn schur_reduce<I: Index, T: SchurReal>(
                     }
                 }
             }
-            ctx.obs_col.push((col, wo));
-            col += wo;
         }
         ctx.panel[col * we..col * we + we].copy_from_slice(&rhs[hs.col_span(e)]);
         llt_solve_panel(dwork, &mut ctx.panel[..(col + 1) * we], we, col + 1);
         sw.lap(&mut t.panel);
 
         // 2c gemm: S(a, b) -= C_a * Z_b for every pair a <= b, b-major
-        // (pair_dst is consumed sequentially in the symbolic emission
+        // (pair_off is consumed sequentially in the symbolic emission
         // order)
         let mut pair = sym.elim_pair_ptr[slot].zx();
-        for (bi, _o_b) in orange.clone().enumerate() {
-            let (bcol, wb) = ctx.obs_col[bi];
-            let zb = &ctx.panel[bcol * we..(bcol + wb) * we];
-            for o_a in orange.clone().take(bi + 1) {
-                let hb_a = sym.obs_hblk[o_a].zx();
-                let trans_a = sym.obs_trans[o_a];
-                let wa = hs.col_span(sym.obs_block[o_a].zx()).len();
-                let ca = &h.vals()[hs.val_range(hb_a)];
-                let dst = sym.s.val_range(sym.pair_dst[pair].zx());
-                gemm_sub(&mut s.vals_mut()[dst], ca, trans_a, wa, we, zb, wb);
-                pair += 1;
+        let s_vals = s.vals_mut();
+        let uw = sym.elim_uw[slot].zx();
+        let uniform = uw != 0
+            && gemm_tri_dispatch(
+                uw,
+                we,
+                sym.elim_utrans[slot],
+                s_vals,
+                h.vals(),
+                &ctx.panel,
+                &sym.pair_off[pair..pair + orange.len() * (orange.len() + 1) / 2],
+                &sym.obs_ca_off[orange.clone()],
+                &sym.obs_panel_col[orange.clone()],
+            );
+        if !uniform {
+            for o_b in orange.clone() {
+                let wb = sym.obs_w[o_b].zx();
+                let bcol = sym.obs_panel_col[o_b].zx();
+                let zb = &ctx.panel[bcol * we..(bcol + wb) * we];
+                for o_a in orange.start..=o_b {
+                    let wa = sym.obs_w[o_a].zx();
+                    let ca = sym.obs_ca_off[o_a].zx();
+                    let dst = sym.pair_off[pair].zx();
+                    gemm_sub(
+                        &mut s_vals[dst..dst + wa * wb],
+                        &h.vals()[ca..ca + wa * we],
+                        sym.obs_trans[o_a],
+                        wa,
+                        we,
+                        zb,
+                        wb,
+                    );
+                    pair += 1;
+                }
             }
         }
         sw.lap(&mut t.gemm);
@@ -1080,13 +1339,18 @@ pub fn schur_reduce<I: Index, T: SchurReal>(
         // 2d rhs: b'_a -= C_a * z for every observer
         let z = &ctx.panel[col * we..col * we + we];
         for o_a in orange.clone() {
-            let hb_a = sym.obs_hblk[o_a].zx();
-            let trans_a = sym.obs_trans[o_a];
-            let wa = hs.col_span(sym.obs_block[o_a].zx()).len();
-            let ca = &h.vals()[hs.val_range(hb_a)];
-            let ka = sym.kept_of[sym.obs_block[o_a].zx()].zx();
-            let out = &mut rhs_out[sym.s.col_span(ka)];
-            gemm_sub(out, ca, trans_a, wa, we, z, 1);
+            let wa = sym.obs_w[o_a].zx();
+            let ca = sym.obs_ca_off[o_a].zx();
+            let out = sym.obs_kept_off[o_a].zx();
+            gemm_sub(
+                &mut rhs_out[out..out + wa],
+                &h.vals()[ca..ca + wa * we],
+                sym.obs_trans[o_a],
+                wa,
+                we,
+                z,
+                1,
+            );
         }
         sw.lap(&mut t.rhs);
     }
@@ -1183,11 +1447,18 @@ pub fn schur_backsub<I: Index, T: SchurReal>(
         let t = &mut ctx.panel[..we];
         t.copy_from_slice(&rhs[hs.col_span(e)]);
         for o in sym.elim_obs_ptr[slot].zx()..sym.elim_obs_ptr[slot + 1].zx() {
-            let tile = &h.vals()[hs.val_range(sym.obs_hblk[o].zx())];
-            let a = sym.obs_block[o].zx();
-            let wa = hs.col_span(a).len();
-            let xa = &x_full[hs.col_span(a)];
-            gemm_sub(t, tile, !sym.obs_trans[o], we, wa, xa, 1);
+            let wa = sym.obs_w[o].zx();
+            let ca = sym.obs_ca_off[o].zx();
+            let xoff = sym.obs_orig_off[o].zx();
+            gemm_sub(
+                t,
+                &h.vals()[ca..ca + wa * we],
+                !sym.obs_trans[o],
+                we,
+                wa,
+                &x_full[xoff..xoff + wa],
+                1,
+            );
         }
 
         // x_e = D_e^-1 t (same two triangular solves as the reduction)
@@ -1591,6 +1862,74 @@ mod tests {
         let cells = [(0, 0), (1, 1), (2, 2), (0, 1), (1, 2), (0, 2)];
         let (h, rhs) = build_upper(&part, &cells, 7);
         check_vs_dense(&h, &rhs, &part, &[1]);
+    }
+
+    /// Every pair shape must reach [`gemm_tri`], not just the pair-at-a-time
+    /// loop: the two compute the same values, so nothing in the output would
+    /// show a missing arm in `uniform_pair_shapes!`.
+    #[test]
+    fn every_pair_shape_reaches_the_uniform_run() {
+        for &(wa, we, wb) in FIXED_SHAPES.iter() {
+            if wb == 1 {
+                continue; // a one-column update, not a pair shape
+            }
+            assert_eq!(wa, wb, "a pair shape has the observer width on both sides");
+            // Eliminating the LAST block leaves both coupling tiles stored
+            // (kept, elim); eliminating the FIRST one stores both the other
+            // way. Either way all observers agree, which is what the uniform
+            // path needs.
+            for elim_first in [false, true] {
+                let part = if elim_first {
+                    [0, we, we + wa, we + 2 * wa]
+                } else {
+                    [0, wa, 2 * wa, 2 * wa + we]
+                };
+                let elim = if elim_first { 0 } else { 2 };
+                let cells = [(0, 0), (1, 1), (2, 2), (0, 1), (0, 2), (1, 2)];
+                let (h, rhs) = build_upper(&part, &cells, 3);
+                UNIFORM_RUN_HITS.with(|c| c.set(0));
+                check_vs_dense(&h, &rhs, &part, &[elim]);
+                assert_eq!(
+                    UNIFORM_RUN_HITS.with(|c| c.get()),
+                    1,
+                    "({}, {}, {}) elim_first={} did not take the uniform run",
+                    wa, we, wb, elim_first
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mixed_observer_widths_skip_the_uniform_run() {
+        // widths [6, 3, 9]: eliminate the middle one and the two observers
+        // disagree, so the pair loop must run shape by shape and still match
+        // the dense reference.
+        let part = [0usize, 6, 9, 18];
+        let cells = [(0, 0), (1, 1), (2, 2), (0, 1), (1, 2), (0, 2)];
+        let (h, rhs) = build_upper(&part, &cells, 11);
+        UNIFORM_RUN_HITS.with(|c| c.set(0));
+        check_vs_dense(&h, &rhs, &part, &[1]);
+        assert_eq!(UNIFORM_RUN_HITS.with(|c| c.get()), 0);
+    }
+
+    #[test]
+    fn shape_census_covers_the_one_column_updates() {
+        // widths [6, 3, 6], eliminate the middle one: observers 0 and 2 give
+        // three pair GEMMs of (6, 3, 6), one reduction rhs update each at
+        // (6, 3, 1), and one back-substitution update each at (3, 6, 1).
+        let part = [0usize, 6, 9, 15];
+        let cells = [(0, 0), (1, 1), (2, 2), (0, 1), (1, 2), (0, 2)];
+        let (h, _) = build_upper(&part, &cells, 7);
+        let sym = schur_symbolic(h.symbolic(), &[1]).unwrap();
+        let mut got = sym.gemm_shapes().to_vec();
+        got.sort();
+        assert_eq!(got, vec![((3, 6, 1), 2), ((6, 3, 1), 2), ((6, 3, 6), 3)]);
+        // The one-column updates run once per observation, so they need a
+        // kernel as much as the pair GEMMs do. A census that skipped them
+        // would let those stages sit on the fallback unseen.
+        for &((wa, we, wb), _) in sym.gemm_shapes() {
+            assert!(has_fixed_kernel(wa, we, wb), "no kernel for ({}, {}, {})", wa, we, wb);
+        }
     }
 
     #[test]
