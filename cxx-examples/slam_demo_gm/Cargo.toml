@@ -1,3 +1,8 @@
 [workspace]
 resolver = "2"
 members = ["model", "model/capi"]
+
+[profile.release]
+# cgu=1: the solver is inlined generic code; a single codegen unit lets
+# LLVM optimize it whole, which measurably improves solve times.
+codegen-units = 1
