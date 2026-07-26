@@ -19,18 +19,17 @@
 # the setup, which the second chart draws.
 # kind: "arael" solid blue bar, "other" neutral bar.
 PANELS = [
-    # 2026-07-13, min of 32 rounds (benchmarks/slam README, 300-pose table). Best
+    # 2026-07-26, min of 16 rounds (benchmarks/slam README, 300-pose table). Best
     # validated configuration per system: Ceres is sparse_schur (iterative_schur
-    # is inexact and misses the gate), SymForce is f64 (its f32 falls short at
-    # this size).
+    # is inexact and misses the gate), SymForce is f64.
     ("Landmark SLAM -- 300 poses, 5.4k params (Apple M4 Pro)", 1, [
-        ("arael (f32)", 32.23, 42.2, "arael"),
-        ("arael (f64)", 44.96, 56.4, "arael"),
-        ("g2o (LM)", 61.28, 114.7, "other"),
-        ("Ceres (LM)", 82.89, 161.1, "other"),
-        ("SymForce (f64)", 135.08, 233.6, "other"),
-        ("factrs (LM)", 144.76, 200.7, "other"),
-        ("GTSAM (LM)", 160.41, 174.1, "other"),
+        ("arael (f32)", 31.04, 39.29, "arael"),
+        ("arael (f64)", 44.16, 53.55, "arael"),
+        ("g2o (LM)", 60.29, 111.83, "other"),
+        ("Ceres (LM)", 81.87, 157.95, "other"),
+        ("factrs (LM)", 120.73, 173.36, "other"),
+        ("SymForce (f64)", 132.51, 224.34, "other"),
+        ("GTSAM (LM)", 153.17, 167.10, "other"),
     ]),
     # 2026-07-26, min of 32 rounds (benchmarks/loc README, Pi 5 table). Best
     # validated configuration per system: Ceres is sparse_cholesky (a fixed
