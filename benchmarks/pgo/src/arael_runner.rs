@@ -11,19 +11,29 @@ use arael::utils::Float;
 use arael::vect::vect2;
 
 #[arael::model]
-#[arael(constraint(hb, guard = self.has_prior, {
-    [pose2.pos.x - pose2.prior.x,
-     pose2.pos.y - pose2.prior.y,
-     pose2.rot.angle - pose2.prior_th]
-}))]
 #[derive(Clone)]
 struct Pose2<T: Float> {
     pos: Param<vect2<T>>,
     rot: AngleParam<T>,
-    prior: vect2<T>,
-    prior_th: T,
-    has_prior: bool,
     hb: SelfBlock<Pose2<T>, T>,
+}
+
+// The gauge anchor: one prior on the root instead of prior fields on every
+// pose. It pulls the referenced pose toward a fixed value; the residuals
+// write into the pose's own block (`p.hb`). Without it any rigid motion of
+// the whole graph would leave the cost unchanged and the Hessian singular.
+#[arael::model]
+#[arael(constraint(p.hb, {
+    [p.pos.x - prior.pos.x,
+     p.pos.y - prior.pos.y,
+     p.rot.angle - prior.th]
+}))]
+#[derive(Clone)]
+struct Prior<T: Float> {
+    #[arael(ref = root.poses)]
+    p: Ref<Pose2<T>>,
+    pos: vect2<T>,
+    th: T,
 }
 
 #[arael::model]
@@ -53,6 +63,7 @@ struct Edge<T: Float> {
 pub struct Graph {
     poses: refs::Vec<Pose2<f64>>,
     edges: std::vec::Vec<Edge<f64>>,
+    prior: Option<Prior<f64>>,
 }
 
 #[arael::model]
@@ -61,22 +72,20 @@ pub struct Graph {
 struct GraphF {
     poses: refs::Vec<Pose2<f32>>,
     edges: std::vec::Vec<Edge<f32>>,
+    prior: Option<Prior<f32>>,
 }
 
 // ---------------------------------------------------------------- runners
 
 fn build_parts<T: Float>(ds: &Dataset)
-    -> (refs::Vec<Pose2<T>>, std::vec::Vec<Edge<T>>)
+    -> (refs::Vec<Pose2<T>>, std::vec::Vec<Edge<T>>, Option<Prior<T>>)
 {
     let c = |x: f64| T::from(x).unwrap();
     let mut poses = refs::Vec::new();
-    for (i, p) in ds.poses.iter().enumerate() {
+    for p in &ds.poses {
         poses.push(Pose2 {
             pos: Param::new(vect2::new(c(p.t.x), c(p.t.y))),
             rot: AngleParam::new(c(p.th)),
-            prior: vect2::new(c(p.t.x), c(p.t.y)),
-            prior_th: c(p.th),
-            has_prior: i == 0,
             hb: SelfBlock::new(),
         });
     }
@@ -92,7 +101,13 @@ fn build_parts<T: Float>(ds: &Dataset)
             hb: CrossBlock::new(),
         });
     }
-    (poses, edges)
+    // Anchor the first pose at its initial value.
+    let prior = ds.poses.first().map(|p| Prior {
+        p: poses.ref_at(0),
+        pos: vect2::new(c(p.t.x), c(p.t.y)),
+        th: c(p.th),
+    });
+    (poses, edges, prior)
 }
 
 fn solution_parts<T: Float>(poses: &refs::Vec<Pose2<T>>) -> Vec<PoseIn> {
@@ -150,8 +165,8 @@ impl Pipeline for Graph {
     type Solution = Vec<PoseIn>;
     fn lambda0(_: &Dataset) -> f64 { LAMBDA0_2D }
     fn build(ds: &Dataset) -> Self {
-        let (poses, edges) = build_parts(ds);
-        Graph { poses, edges }
+        let (poses, edges, prior) = build_parts(ds);
+        Graph { poses, edges, prior }
     }
     fn serialize(&mut self, out: &mut Vec<f64>) { self.serialize64(out); }
     fn deserialize(&mut self, x: &[f64]) { self.deserialize64(x); }
@@ -166,8 +181,8 @@ impl Pipeline for GraphF {
     type Solution = Vec<PoseIn>;
     fn lambda0(_: &Dataset) -> f64 { LAMBDA0_2D }
     fn build(ds: &Dataset) -> Self {
-        let (poses, edges) = build_parts(ds);
-        GraphF { poses, edges }
+        let (poses, edges, prior) = build_parts(ds);
+        GraphF { poses, edges, prior }
     }
     fn serialize(&mut self, out: &mut Vec<f32>) { self.serialize32(out); }
     fn deserialize(&mut self, x: &[f32]) { self.deserialize32(x); }
