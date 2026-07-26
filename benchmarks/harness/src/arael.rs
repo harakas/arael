@@ -124,10 +124,11 @@ pub fn print_timing<T>(r: &LmResult<T>) {
     }
     if let Some(t) = &r.timing {
         eprintln!(
-            "  [timing] total {:.1} ms = assembly {:.1} + linear solve {:.1} \
+            "  [timing] total {:.1} ms = assembly {:.1} + analysis {:.1} + linear solve {:.1} \
              (first assembly {:.1}), {} iters",
             t.total.as_secs_f64() * 1e3,
             t.assembly.as_secs_f64() * 1e3,
+            t.analysis.as_secs_f64() * 1e3,
             t.linear_solve.as_secs_f64() * 1e3,
             t.first_assembly.as_secs_f64() * 1e3,
             r.iterations,

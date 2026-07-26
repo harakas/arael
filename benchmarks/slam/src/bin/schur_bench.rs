@@ -82,16 +82,28 @@ fn main() {
     let mut grad = vec![0.0; n];
     path.calc_grad_hessian_sparse_indexed(&params, &mut grad, h.vals_mut(), &positions);
 
-    // eliminated block ids: blocks fully inside the elimination hint's
-    // scalar ranges (the landmark blocks)
-    let hint = RootProblem::marginalize_hint(&path);
+    // What the solver marginalizes: the model names nothing, so take the
+    // coupling graph's candidates and pick the biggest, exactly as SparseFaer
+    // does (the same derivation bal's schur_stats uses).
     let nblk = partition.len() - 1;
-    let eliminated: Vec<usize> = (0..nblk)
-        .filter(|&b| {
-            hint.iter().any(|r| r.start <= partition[b] && partition[b + 1] <= r.end)
-        })
-        .collect();
-    assert!(!eliminated.is_empty(), "no marginalize hint on the model");
+    let blocks_in = |ranges: &[std::ops::Range<usize>]| -> Vec<usize> {
+        (0..nblk)
+            .filter(|&b| {
+                ranges.iter().any(|r| r.start <= partition[b] && partition[b + 1] <= r.end)
+            })
+            .collect()
+    };
+    let hint = RootProblem::marginalize_hint(&path);
+    let candidates: Vec<Vec<usize>> = if hint.is_empty() {
+        LmProblem::marginalize_candidates(&path).iter().map(|r| blocks_in(r)).collect()
+    } else {
+        vec![blocks_in(&hint)]
+    };
+    let eliminated: Vec<usize> = candidates
+        .into_iter()
+        .filter(|ids| !ids.is_empty())
+        .max_by_key(|ids| ids.iter().map(|&b| partition[b + 1] - partition[b]).sum::<usize>())
+        .expect("nothing marginalizable in the slam scene");
 
     // -- symbolic (one-time) -------------------------------------------
     let (t_sym, sym) = min_ms(rounds, || schur_symbolic(h.symbolic(), &eliminated).unwrap());
