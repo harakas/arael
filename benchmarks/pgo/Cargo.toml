@@ -24,6 +24,10 @@ libc = "0.2"
 
 [profile.release]
 debug = false
+# cgu=1: the timed code is inlined generic solver code whose optimization
+# depends on how rustc partitions the crate, so timings otherwise shift with
+# unrelated code in the binary. Pins them; costs only compile time.
+codegen-units = 1
 
 [profile.dev.package.arael-macros]
 opt-level = 3
