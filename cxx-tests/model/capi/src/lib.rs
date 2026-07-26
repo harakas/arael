@@ -1863,6 +1863,26 @@ pub unsafe extern "C" fn fit_pose_ea_set_optimize(p: *mut Pose, v: bool) {
     (*p).ea.optimize = v;
 }
 #[no_mangle]
+pub unsafe extern "C" fn fit_pose_heading_angle(p: *const Pose) -> f64 {
+    (*p).heading.angle.value
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_pose_heading_set_angle(p: *mut Pose, v: f64) {
+    (*p).heading.angle.value = v;
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_pose_heading_angle_optimize(p: *const Pose) -> bool {
+    (*p).heading.angle.optimize
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_pose_heading_angle_set_optimize(p: *mut Pose, v: bool) {
+    (*p).heading.angle.optimize = v;
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_pose_heading_rotation_matrix(p: *const Pose) -> CMat2F64 {
+    (*p).heading.rotation_matrix().into()
+}
+#[no_mangle]
 pub unsafe extern "C" fn fit_pose_pos(p: *const Pose) -> CVec3F64 {
     (*p).pos.value.into()
 }
@@ -1885,6 +1905,14 @@ pub unsafe extern "C" fn fit_pose_target(p: *const Pose) -> CVec3F64 {
 #[no_mangle]
 pub unsafe extern "C" fn fit_pose_set_target(p: *mut Pose, v: CVec3F64) {
     (*p).target = v.into();
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_pose_target_dir(p: *const Pose) -> CVec2F64 {
+    (*p).target_dir.into()
+}
+#[no_mangle]
+pub unsafe extern "C" fn fit_pose_set_target_dir(p: *mut Pose, v: CVec2F64) {
+    (*p).target_dir = v.into();
 }
 #[no_mangle]
 pub unsafe extern "C" fn fit_pose_info_ptr(p: *mut Pose) -> *mut Info {

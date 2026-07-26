@@ -575,7 +575,8 @@ vect2/3, matrix2/3, quatern at both precisions; C++ side passes the
 arael math types by value), rotation params via their documented
 set-before/read-after `.value` (simple/universal euler as vect3,
 rotvec as quatern) plus `optimize` flag accessors on every param,
-TransformParam (translation/rotation/flags) and UnitVecParam (unit)
+TransformParam (translation/rotation/flags), UnitVecParam (unit), and
+AngleParam (angle + read-only rotation_matrix)
 builtins, user components and nested sub-models (pointer accessor +
 own class), refs as packed-u32 transport (`Ref::to_raw/from_raw`
 added to arael -- the anti-forging fixture still holds; `Ref` and
@@ -586,8 +587,9 @@ get, remove -- no ref_at, holes make index refs meaningless).
 C++ classes emit children-first (containment is cycle-free).
 The cxx-tests fixture grew a 3D pose chain in a Deque (front push),
 cross-block ties wired through ref_at, an Arena with a removal, a
-nested Info holding an Option GpsObs, vect2d root data, and a FIXED
-SimpleEulerAngleParam; the parity test compares every value exactly.
+nested Info holding an Option GpsObs, vect2d root data, a FIXED
+SimpleEulerAngleParam, and an AngleParam heading pinned through its
+computed `rotation_matrix`; the parity test compares every value exactly.
 
 Not yet exercised end-to-end (emitters support, fixture does not):
 universal/rotvec rotation params, Transform/UnitVec builtins, user

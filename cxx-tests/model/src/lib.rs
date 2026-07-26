@@ -6,6 +6,7 @@
 //! parity test builds the same problem from C++ and from Rust and
 //! compares the solves exactly.
 
+use arael::angle::AngleParam;
 use arael::model::{
     Component, CrossBlock, EulerAngleParam, Param, QuaternionParam, SelfBlock,
     SimpleEulerAngleParam,
@@ -38,18 +39,25 @@ pub struct N {
 }
 
 /// A pose with an optimized position, a FIXED rotation (storage only:
-/// `optimize` cleared from the interface), and a prior target.
+/// `optimize` cleared from the interface), a 2D heading (`AngleParam`),
+/// and prior targets. The heading residual pins the rotation matrix's
+/// first column to `target_dir`, exercising the computed `rotation_matrix`.
 #[arael::model]
 #[arael(constraint(hb, {
+    let hd = pose.heading.rotation_matrix.col(0) - pose.target_dir;
     [(pose.pos.x - pose.target.x) * 2.0,
      (pose.pos.y - pose.target.y) * 2.0,
-     (pose.pos.z - pose.target.z) * 2.0]
+     (pose.pos.z - pose.target.z) * 2.0,
+     hd.x * 1.5,
+     hd.y * 1.5]
 }))]
 #[derive(Default)]
 pub struct Pose {
     pub ea: SimpleEulerAngleParam<f64>,
+    pub heading: AngleParam<f64>,
     pub pos: Param<vect3d>,
     pub target: vect3d,
+    pub target_dir: vect2d,
     pub info: Info,
     pub hb: SelfBlock<Pose>,
 }

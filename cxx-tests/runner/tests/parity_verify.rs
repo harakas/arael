@@ -261,6 +261,9 @@ pub fn verify(got: &std::collections::HashMap<String, f64>) {
         p.pos.value = vect3d::new(0.1 * i as f64, -0.1 * i as f64, 0.05);
         p.ea.value = vect3d::new(0.1, 0.2, 0.3 * i as f64);
         p.ea.optimize = false;
+        // 2D heading: solves so R(heading).col(0) matches target_dir at th.
+        let th = 0.2 + 0.3 * i as f64;
+        p.target_dir = vect2d::new(th.cos(), th.sin());
     }
     f3.poses[0].info.gps = Some(GpsObs {
         pos: vect3d::new(7.0, 8.0, 9.0),
@@ -292,6 +295,8 @@ pub fn verify(got: &std::collections::HashMap<String, f64>) {
         assert_eq!(g(&format!("s3_p{i}_x")), q.x, "p{i}.x");
         assert_eq!(g(&format!("s3_p{i}_y")), q.y, "p{i}.y");
         assert_eq!(g(&format!("s3_p{i}_z")), q.z, "p{i}.z");
+        // The 2D heading solved through the computed rotation matrix.
+        assert_eq!(g(&format!("s3_p{i}_h")), f3.poses[i].heading.angle.value, "p{i}.h");
     }
     // The fixed rotation neither moved nor was dropped.
     assert_eq!(g("s3_ea0_z"), f3.poses[0].ea.value.z);

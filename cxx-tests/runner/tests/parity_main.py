@@ -2,6 +2,7 @@
 # (ctypes over the capi cdylib named by $ARAEL_CAPI), solves, and
 # prints "name value" lines for the Rust side to compare -- the same
 # protocol and names as parity_main.cpp.
+import math
 import os
 import sys
 
@@ -204,6 +205,8 @@ for i in range(3):
     ps[i].pos = (0.1 * i, -0.1 * i, 0.05)
     ps[i].ea = (0.1, 0.2, 0.3 * i)
     ps[i].ea_optimize = False
+    th = 0.2 + 0.3 * i
+    ps[i].target_dir = (math.cos(th), math.sin(th))
 gps = ps[0].info.make_gps()
 gps.pos = (7.0, 8.0, 9.0)
 gps.isigma = 2.5
@@ -241,6 +244,7 @@ for i in range(3):
     p("s3_p%d_x" % i, q.x)
     p("s3_p%d_y" % i, q.y)
     p("s3_p%d_z" % i, q.z)
+    p("s3_p%d_h" % i, f3.poses[i].heading_angle)
 p("s3_ea0_z", f3.poses[0].ea.z)
 pi("s3_has_gps0", 1 if ps[0].info.gps is not None else 0)
 pi("s3_has_gps1", 1 if ps[1].info.gps is not None else 0)

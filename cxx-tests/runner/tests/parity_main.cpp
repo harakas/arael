@@ -3,6 +3,7 @@
 #include <fit.hpp>
 #include <cstdio>
 #include <cstring>
+#include <cmath>
 #include <string>
 
 using namespace cxx_fit;
@@ -196,6 +197,8 @@ int main() {
         ps[i].set_pos({0.1 * i, -0.1 * i, 0.05});
         ps[i].set_ea({0.1, 0.2, 0.3 * i});
         ps[i].set_ea_optimize(false);
+        double th = 0.2 + 0.3 * i;
+        ps[i].set_target_dir({std::cos(th), std::sin(th)});
     }
     auto gps = ps[0].info().make_gps();
     gps.set_pos({7.0, 8.0, 9.0});
@@ -237,6 +240,7 @@ int main() {
         p((base + "_x").c_str(), q.x);
         p((base + "_y").c_str(), q.y);
         p((base + "_z").c_str(), q.z);
+        p((base + "_h").c_str(), f3.poses()[i].heading_angle());
     }
     vect3d ea0 = f3.poses()[0].ea();
     p("s3_ea0_z", ea0.z);
