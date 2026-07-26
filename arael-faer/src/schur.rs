@@ -505,14 +505,16 @@ pub fn schur_symbolic<I: Index>(
     let mut elim_ncols = Vec::with_capacity(ne);
     let mut elim_uw = Vec::with_capacity(ne);
     let mut elim_utrans = Vec::with_capacity(ne);
-    let mut obs_hblk = Vec::new();
-    let mut obs_trans = Vec::new();
-    let mut obs_block = Vec::new();
-    let mut obs_ca_off = Vec::new();
-    let mut obs_w = Vec::new();
-    let mut obs_panel_col = Vec::new();
-    let mut obs_kept_off = Vec::new();
-    let mut obs_orig_off = Vec::new();
+    // one entry per observation, and the count is already known: reserving
+    // keeps eight arrays from growing by doubling through it
+    let n_obs: usize = obs.iter().map(|l| l.len()).sum();
+    let mut obs_trans = Vec::with_capacity(n_obs);
+    let mut obs_block = Vec::with_capacity(n_obs);
+    let mut obs_ca_off = Vec::with_capacity(n_obs);
+    let mut obs_w = Vec::with_capacity(n_obs);
+    let mut obs_panel_col = Vec::with_capacity(n_obs);
+    let mut obs_kept_off = Vec::with_capacity(n_obs);
+    let mut obs_orig_off = Vec::with_capacity(n_obs);
     let mut max_panel = 0usize;
     let mut max_ew = 0usize;
     let mut total_pairs = 0usize;
@@ -528,7 +530,6 @@ pub fn schur_symbolic<I: Index>(
         let mut panel_cols = 0usize;
         for &(hb, tr, oblk) in list {
             let span = h.col_span(oblk.zx());
-            obs_hblk.push(hb);
             obs_trans.push(tr);
             obs_block.push(oblk);
             obs_ca_off.push(I::truncate(h.val_range(hb.zx()).start));
@@ -587,7 +588,7 @@ pub fn schur_symbolic<I: Index>(
         }
         max_ew = max_ew.max(ew);
         max_panel = max_panel.max(ew * panel_cols);
-        elim_obs_ptr.push(I::truncate(obs_hblk.len()));
+        elim_obs_ptr.push(I::truncate(obs_trans.len()));
         elim_pair_ptr.push(I::truncate(total_pairs));
     }
 
@@ -628,7 +629,7 @@ pub fn schur_symbolic<I: Index>(
     let mut blk_row_idx: Vec<I> = Vec::new();
     let mut val_ptr: Vec<I> = Vec::new();
     let mut copy_dst = vec![I::truncate(0); copy_kk.len()];
-    let mut pair_dst = vec![I::truncate(0); total_pairs];
+    let mut pair_off = vec![I::truncate(0); total_pairs];
     let mut s_diag = Vec::with_capacity(nk);
     blk_col_ptr.push(I::truncate(0));
     val_ptr.push(I::truncate(0));
@@ -681,13 +682,14 @@ pub fn schur_symbolic<I: Index>(
                 elim_pair_ptr[slot as usize].zx() + (bi as usize) * (bi as usize + 1) / 2;
             for ai in 0..=bi as usize {
                 let ka = kept_of[obs_block[start + ai].zx()].zx();
-                pair_dst[base + ai] = I::truncate(blk_at[ka] as usize);
+                // the numeric pass wants the target's scalar start, not its
+                // block index. Every block of this column has its val_ptr
+                // entry by now, so resolve it here rather than in a second
+                // pass over all the pairs.
+                pair_off[base + ai] = val_ptr[blk_at[ka] as usize];
             }
         }
     }
-    // the pair loop wants the target's scalar start, not its block index:
-    // resolve it once here, while val_ptr is still in hand
-    let pair_off: Vec<I> = pair_dst.iter().map(|&b| val_ptr[b.zx()]).collect();
     let kp: Vec<I> = kept_part.iter().map(|&x| I::truncate(x)).collect();
     let s = SymbolicSparseBlockColMat::new_checked(
         kp.clone(),
