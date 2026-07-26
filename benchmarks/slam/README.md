@@ -87,8 +87,6 @@ This is the number that compares across systems.\* **Total time and
 iteration count do not**, and reading them as a ranking will mislead you:
 they are set by each system's damping schedule.
 
-> DEPRECATED: numbers below pending regeneration before release.
-
 \* Ceres's `iterative_schur` uses a different algorithm, so its iterations
 cannot be compared one on one.
 
@@ -100,7 +98,7 @@ from a source checkout.
 
 | system | version |
 |--------|---------|
-| arael | 0.7.1 (this tree) |
+| arael | 0.8.0 (this tree) |
 | Ceres | 2.2.0 (libceres-dev) |
 | g2o | 2023-08-06 snapshot (libg2o-dev) |
 | GTSAM | 4.2.0 (libgtsam-dev) |
@@ -198,7 +196,7 @@ validation gate here. g2o factorizes with CHOLMOD (GPL); arael ships the
 permissive pure-Rust faer stack (CHOLMOD backends remain selectable via
 `SLAM_ARAEL_SOLVER` for the sparse-backend comparison below).
 
-## Results (2026-07-13, Apple M4 Pro, single core enforced by the harness, min of 32 interleaved rounds)
+## Results (2026-07-26, Apple M4 Pro, single core enforced by the harness, min of 32 interleaved rounds)
 
 What each column means:
 
@@ -255,7 +253,7 @@ as it does the others.
 
 9/10 at the common optimum.
 
-### 300 poses (1,200 landmarks, 41,433 observations, 5,400 parameters)
+### 300 poses (1,200 landmarks, 41,433 observations, 5,400 parameters; 16 rounds)
 
 | system                | total ms |  iters | ms/iter | full-iter | 1st-iter ms | peak MB | final cost |
 |-----------------------|---------:|-------:|--------:|----------:|------------:|--------:|-----------:|
@@ -343,6 +341,10 @@ tables, the edge panels the Pi 5 and Pi Zero W tables. After re-running
 the benchmark, update the `PANELS` data (full-iter and 1st-iter per
 system) and re-run it. The front-page cross-benchmark chart is
 `../make_slam_loc_chart.py` (its SLAM panel is the 300-pose table).
+
+> DEPRECATED: the sections below (rotation parameterization, sparse-backend
+> comparison, covariance recovery) still carry pre-0.8.0 numbers, pending
+> regeneration before release.
 
 ## Rotation parameterization: simple vs euler vs quaternion
 
