@@ -206,6 +206,7 @@ What each column means:
 | **iters** | `accepted(attempts)`. An attempt is one linear solve; a rejected step raises the damping and costs a factorization. |
 | **ms/iter** | total ms divided by attempts -- an average, and it carries the one-time setup amortized over however many iterations the solver took. |
 | **full-iter** | one complete iteration: linearize, assemble, factorize, solve. Measured as t(2 iterations) - t(1 iteration), so the setup cancels. The durable cross-system number. |
+| **full-norm** | the same full-iter normalized to the arael f64 row on that dataset (= 1.000) -- the row's per-iteration cost in units of an arael-f64 iteration. |
 | **1st-iter ms** | one iteration plus the setup the others do not pay again (first assembly, ordering, symbolic factorization). |
 | **peak MB** | process high-water mark (`VmHWM`), each solver measured in a process of its own. |
 | **final cost** | evaluated by the one reference cost function for every system, so the values are directly comparable. |
@@ -221,52 +222,52 @@ as it does the others.
 
 ### 60 poses (240 landmarks, 5,370 observations, 1,080 parameters)
 
-| system                | total ms |  iters | ms/iter | full-iter | 1st-iter ms | peak MB | final cost |
-|-----------------------|---------:|-------:|--------:|----------:|------------:|--------:|-----------:|
-| arael LM f64          |     6.99 |   3(3) |    2.33 |      2.12 |        2.80 |    12.3 |  3062.0482 |
-| arael LM f32          |     5.83 |   3(3) |    1.94 |      1.73 |        2.41 |     9.8 |  3062.0482 |
-| factrs LM             |    33.19 |   3(3) |   11.06 |      8.79 |       14.38 |    26.3 |  3062.0482 |
-| ceres sparse_cholesky |    18.84 |   3(3) |    6.28 |      5.08 |       10.03 |    16.9 |  3062.0482 |
-| ceres sparse_schur    |    19.29 |   3(3) |    6.43 |      5.13 |       10.73 |    16.4 |  3062.0482 |
-| ceres iterative_schur\* |  26.68 |   6(6) |    4.45 |      3.80 |        6.50 |    12.8 |  3067.3849 |
-| symforce LM f64       |    26.63 |   3(3) |    8.88 |      5.96 |       15.03 |    29.1 |  3062.0482 |
-| symforce LM f32       |    31.40 |   4(4) |    7.85 |      5.19 |       14.90 |    24.9 |  3062.0500 |
-| g2o LM                |    13.85 |   3(3) |    4.62 |      3.35 |        7.12 |    16.4 |  3062.0482 |
-| gtsam LM              |    31.05 |   3(3) |   10.35 |      9.80 |       11.60 |    47.5 |  3062.0482 |
+| system                | total ms |  iters | ms/iter | full-iter | full-norm | 1st-iter ms | peak MB | final cost |
+|-----------------------|---------:|-------:|--------:|----------:|----------:|------------:|--------:|-----------:|
+| arael LM f64          |     6.99 |   3(3) |    2.33 |      2.12 |     1.000 |        2.80 |    12.3 |  3062.0482 |
+| arael LM f32          |     5.83 |   3(3) |    1.94 |      1.73 |     0.816 |        2.41 |     9.8 |  3062.0482 |
+| factrs LM             |    33.19 |   3(3) |   11.06 |      8.79 |     4.146 |       14.38 |    26.3 |  3062.0482 |
+| ceres sparse_cholesky |    18.84 |   3(3) |    6.28 |      5.08 |     2.396 |       10.03 |    16.9 |  3062.0482 |
+| ceres sparse_schur    |    19.29 |   3(3) |    6.43 |      5.13 |     2.420 |       10.73 |    16.4 |  3062.0482 |
+| ceres iterative_schur\* |  26.68 |   6(6) |    4.45 |      3.80 |     1.792 |        6.50 |    12.8 |  3067.3849 |
+| symforce LM f64       |    26.63 |   3(3) |    8.88 |      5.96 |     2.811 |       15.03 |    29.1 |  3062.0482 |
+| symforce LM f32       |    31.40 |   4(4) |    7.85 |      5.19 |     2.448 |       14.90 |    24.9 |  3062.0500 |
+| g2o LM                |    13.85 |   3(3) |    4.62 |      3.35 |     1.580 |        7.12 |    16.4 |  3062.0482 |
+| gtsam LM              |    31.05 |   3(3) |   10.35 |      9.80 |     4.623 |       11.60 |    47.5 |  3062.0482 |
 
 9/10 at the common optimum.
 
 ### 120 poses (480 landmarks, 12,229 observations, 2,160 parameters)
 
-| system                | total ms |  iters | ms/iter | full-iter | 1st-iter ms | peak MB | final cost |
-|-----------------------|---------:|-------:|--------:|----------:|------------:|--------:|-----------:|
-| arael LM f64          |    19.79 |   3(3) |    6.60 |      5.88 |        7.84 |    25.0 |  7065.8807 |
-| arael LM f32          |    15.93 |   3(3) |    5.31 |      4.76 |        6.34 |    18.8 |  7065.8829 |
-| factrs LM             |    77.16 |   3(3) |   25.72 |     21.67 |       33.71 |    50.8 |  7065.8806 |
-| ceres sparse_cholesky |    47.88 |   3(3) |   15.96 |     13.97 |       24.18 |    28.4 |  7065.8809 |
-| ceres sparse_schur    |    53.86 |   3(3) |   17.95 |     14.69 |       29.32 |    27.9 |  7065.8809 |
-| ceres iterative_schur\* | 241.15 | 15(15) |   16.08 |      7.41 |       15.14 |    18.3 |  7066.3200 |
-| symforce LM f64       |    80.31 |   3(3) |   26.77 |     18.92 |       42.88 |    61.2 |  7065.8806 |
-| symforce LM f32       |   115.92 |   5(5) |   23.18 |     18.54 |       41.58 |    53.5 |  7065.8881 |
-| g2o LM                |    37.00 |   3(3) |   12.33 |      9.83 |       18.25 |    30.4 |  7065.8806 |
-| gtsam LM              |    82.37 |   3(3) |   27.46 |     26.02 |       29.73 |   107.3 |  7065.8806 |
+| system                | total ms |  iters | ms/iter | full-iter | full-norm | 1st-iter ms | peak MB | final cost |
+|-----------------------|---------:|-------:|--------:|----------:|----------:|------------:|--------:|-----------:|
+| arael LM f64          |    19.79 |   3(3) |    6.60 |      5.88 |     1.000 |        7.84 |    25.0 |  7065.8807 |
+| arael LM f32          |    15.93 |   3(3) |    5.31 |      4.76 |     0.810 |        6.34 |    18.8 |  7065.8829 |
+| factrs LM             |    77.16 |   3(3) |   25.72 |     21.67 |     3.685 |       33.71 |    50.8 |  7065.8806 |
+| ceres sparse_cholesky |    47.88 |   3(3) |   15.96 |     13.97 |     2.376 |       24.18 |    28.4 |  7065.8809 |
+| ceres sparse_schur    |    53.86 |   3(3) |   17.95 |     14.69 |     2.498 |       29.32 |    27.9 |  7065.8809 |
+| ceres iterative_schur\* | 241.15 | 15(15) |   16.08 |      7.41 |     1.260 |       15.14 |    18.3 |  7066.3200 |
+| symforce LM f64       |    80.31 |   3(3) |   26.77 |     18.92 |     3.218 |       42.88 |    61.2 |  7065.8806 |
+| symforce LM f32       |   115.92 |   5(5) |   23.18 |     18.54 |     3.153 |       41.58 |    53.5 |  7065.8881 |
+| g2o LM                |    37.00 |   3(3) |   12.33 |      9.83 |     1.672 |       18.25 |    30.4 |  7065.8806 |
+| gtsam LM              |    82.37 |   3(3) |   27.46 |     26.02 |     4.425 |       29.73 |   107.3 |  7065.8806 |
 
 9/10 at the common optimum.
 
 ### 300 poses (1,200 landmarks, 41,433 observations, 5,400 parameters; 16 rounds)
 
-| system                | total ms |  iters | ms/iter | full-iter | 1st-iter ms | peak MB | final cost |
-|-----------------------|---------:|-------:|--------:|----------:|------------:|--------:|-----------:|
-| arael LM f64          |   140.95 |   3(3) |   46.98 |     44.16 |       53.55 |   104.6 | 24243.9094 |
-| arael LM f32          |   102.37 |   3(3) |   34.12 |     31.04 |       39.29 |    73.7 | 24243.9102 |
-| factrs LM             |   419.00 |   3(3) |  139.67 |    120.73 |      173.36 |   188.3 | 24243.9094 |
-| ceres sparse_cholesky |   309.66 |   3(3) |  103.22 |     95.22 |      135.62 |   101.8 | 24243.9095 |
-| ceres sparse_schur    |   305.93 |   3(3) |  101.98 |     81.87 |      157.95 |    87.1 | 24243.9095 |
-| ceres iterative_schur\* | 525.30 |   9(9) |   58.37 |     30.96 |       57.54 |    41.1 | 24244.9863 |
-| symforce LM f64       |   483.73 |   3(3) |  161.24 |    132.51 |      224.34 |   177.1 | 24243.9094 |
-| symforce LM f32       |   825.79 |   6(6) |  137.63 |    120.79 |      212.86 |   139.4 | 24244.0803 |
-| g2o LM                |   235.26 |   3(3) |   78.42 |     60.29 |      111.83 |   114.2 | 24243.9094 |
-| gtsam LM              |   469.89 |   3(3) |  156.63 |    153.17 |      167.10 |   607.8 | 24243.9094 |
+| system                | total ms |  iters | ms/iter | full-iter | full-norm | 1st-iter ms | peak MB | final cost |
+|-----------------------|---------:|-------:|--------:|----------:|----------:|------------:|--------:|-----------:|
+| arael LM f64          |   140.95 |   3(3) |   46.98 |     44.16 |     1.000 |       53.55 |   104.6 | 24243.9094 |
+| arael LM f32          |   102.37 |   3(3) |   34.12 |     31.04 |     0.703 |       39.29 |    73.7 | 24243.9102 |
+| factrs LM             |   419.00 |   3(3) |  139.67 |    120.73 |     2.734 |      173.36 |   188.3 | 24243.9094 |
+| ceres sparse_cholesky |   309.66 |   3(3) |  103.22 |     95.22 |     2.156 |      135.62 |   101.8 | 24243.9095 |
+| ceres sparse_schur    |   305.93 |   3(3) |  101.98 |     81.87 |     1.854 |      157.95 |    87.1 | 24243.9095 |
+| ceres iterative_schur\* | 525.30 |   9(9) |   58.37 |     30.96 |     0.701 |       57.54 |    41.1 | 24244.9863 |
+| symforce LM f64       |   483.73 |   3(3) |  161.24 |    132.51 |     3.001 |      224.34 |   177.1 | 24243.9094 |
+| symforce LM f32       |   825.79 |   6(6) |  137.63 |    120.79 |     2.735 |      212.86 |   139.4 | 24244.0803 |
+| g2o LM                |   235.26 |   3(3) |   78.42 |     60.29 |     1.365 |      111.83 |   114.2 | 24243.9094 |
+| gtsam LM              |   469.89 |   3(3) |  156.63 |    153.17 |     3.469 |      167.10 |   607.8 | 24243.9094 |
 
 9/10 at the common optimum.
 
@@ -287,18 +288,18 @@ runs the 60-pose problem (240 landmarks, 5,370 observations, 1,080
 parameters) with the full field, C++ systems included:
 `SLAM_POSES=60 ROUNDS=32 cargo run --release`.
 
-| system                | total ms |  iters | ms/iter | full-iter | 1st-iter ms | peak MB | final cost |
-|-----------------------|---------:|-------:|--------:|----------:|------------:|--------:|-----------:|
-| arael LM f64          |    33.54 |   3(3) |   11.18 |      9.86 |       13.68 |    11.5 |  3062.0482 |
-| arael LM f32          |    25.61 |   3(3) |    8.54 |      7.56 |       10.50 |     9.5 |  3062.0482 |
-| factrs LM             |   125.81 |   3(3) |   41.94 |     35.11 |       55.67 |    23.9 |  3062.0482 |
-| ceres sparse_cholesky |    93.38 |   3(3) |   31.13 |     28.56 |       42.08 |    15.3 |  3062.0482 |
-| ceres sparse_schur    |    86.01 |   3(3) |   28.67 |     24.72 |       43.58 |    15.4 |  3062.0482 |
-| ceres iterative_schur\* |  90.41 |   6(6) |   15.07 |     12.71 |       23.01 |    11.6 |  3067.3849 |
-| symforce LM f64       |    88.43 |   3(3) |   29.48 |     17.61 |       53.09 |    29.1 |  3062.0482 |
-| symforce LM f32       |    97.29 |   4(4) |   24.32 |     16.80 |       47.43 |    26.0 |  3062.0500 |
-| g2o LM                |    62.82 |   3(3) |   20.94 |     16.40 |       29.63 |    15.7 |  3062.0482 |
-| gtsam LM              |   143.42 |   3(3) |   47.81 |     44.43 |       50.66 |    47.8 |  3062.0482 |
+| system                | total ms |  iters | ms/iter | full-iter | full-norm | 1st-iter ms | peak MB | final cost |
+|-----------------------|---------:|-------:|--------:|----------:|----------:|------------:|--------:|-----------:|
+| arael LM f64          |    33.54 |   3(3) |   11.18 |      9.86 |     1.000 |       13.68 |    11.5 |  3062.0482 |
+| arael LM f32          |    25.61 |   3(3) |    8.54 |      7.56 |     0.767 |       10.50 |     9.5 |  3062.0482 |
+| factrs LM             |   125.81 |   3(3) |   41.94 |     35.11 |     3.561 |       55.67 |    23.9 |  3062.0482 |
+| ceres sparse_cholesky |    93.38 |   3(3) |   31.13 |     28.56 |     2.897 |       42.08 |    15.3 |  3062.0482 |
+| ceres sparse_schur    |    86.01 |   3(3) |   28.67 |     24.72 |     2.507 |       43.58 |    15.4 |  3062.0482 |
+| ceres iterative_schur\* |  90.41 |   6(6) |   15.07 |     12.71 |     1.289 |       23.01 |    11.6 |  3067.3849 |
+| symforce LM f64       |    88.43 |   3(3) |   29.48 |     17.61 |     1.786 |       53.09 |    29.1 |  3062.0482 |
+| symforce LM f32       |    97.29 |   4(4) |   24.32 |     16.80 |     1.704 |       47.43 |    26.0 |  3062.0500 |
+| g2o LM                |    62.82 |   3(3) |   20.94 |     16.40 |     1.663 |       29.63 |    15.7 |  3062.0482 |
+| gtsam LM              |   143.42 |   3(3) |   47.81 |     44.43 |     4.506 |       50.66 |    47.8 |  3062.0482 |
 
 9/10 at the common optimum (\* the inexact `iterative_schur`, as on the
 desktop).
@@ -314,11 +315,11 @@ rustup target add arm-unknown-linux-musleabihf
 cargo build --release --target arm-unknown-linux-musleabihf
 ```
 
-| system       | total ms |  iters | ms/iter | full-iter | 1st-iter ms | peak MB | final cost |
-|--------------|---------:|-------:|--------:|----------:|------------:|--------:|-----------:|
-| arael LM f64 |  1150.76 |   3(3) |  383.59 |    368.06 |      427.77 |     9.1 |  3062.0484 |
-| arael LM f32 |   794.22 |   3(3) |  264.74 |    242.45 |      305.99 |     6.4 |  3062.0484 |
-| factrs LM    |  4063.63 |   3(3) | 1354.54 |   1258.46 |     1554.32 |    14.9 |  3062.0483 |
+| system       | total ms |  iters | ms/iter | full-iter | full-norm | 1st-iter ms | peak MB | final cost |
+|--------------|---------:|-------:|--------:|----------:|----------:|------------:|--------:|-----------:|
+| arael LM f64 |  1150.76 |   3(3) |  383.59 |    368.06 |     1.000 |      427.77 |     9.1 |  3062.0484 |
+| arael LM f32 |   794.22 |   3(3) |  264.74 |    242.45 |     0.659 |      305.99 |     6.4 |  3062.0484 |
+| factrs LM    |  4063.63 |   3(3) | 1354.54 |   1258.46 |     3.419 |     1554.32 |    14.9 |  3062.0483 |
 
 3/3 at the common optimum, anchored by one external system (factrs): the
 C++ stack is not cross-compiled for ARMv6, so it is the only non-arael row

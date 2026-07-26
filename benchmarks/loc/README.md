@@ -96,6 +96,7 @@ What each column means:
 | **iters** | `accepted(attempts)`. An attempt is one linear solve; a rejected step raises the damping and costs a factorization. |
 | **ms/iter** | total ms divided by attempts -- an average, and it carries the one-time setup amortized over however many iterations the solver took. |
 | **full-iter** | one complete iteration: linearize, assemble, factorize, solve. Measured as t(2 iterations) - t(1 iteration), so the setup cancels. The durable cross-system number. |
+| **full-norm** | the same full-iter normalized to the arael f64 row on that dataset (= 1.000) -- the row's per-iteration cost in units of an arael-f64 iteration. |
 | **1st-iter ms** | one iteration plus the setup the others do not pay again (first assembly, ordering, symbolic factorization). |
 | **peak MB** | process high-water mark (`VmHWM`), each solver measured in a process of its own. |
 | **final cost** | evaluated by the one reference cost function for every system, so the values are directly comparable. |
@@ -109,48 +110,48 @@ factorizations, and every number derived from it inherits that.
 
 ### 60 poses (240 landmarks, 5,357 frines, 360 parameters; `ARAEL_LAMBDA0=1e-5`)
 
-| system                | total ms |  iters | ms/iter | full-iter | 1st-iter ms | peak MB | final cost |
-|-----------------------|---------:|-------:|--------:|----------:|------------:|--------:|-----------:|
-| arael LM f64 (band)   |     0.71 |   3(3) |    0.24 |      0.25 |        0.23 |     4.9 |  3274.6025 |
-| arael LM f32 (band)   |     0.70 |   3(3) |    0.23 |      0.24 |        0.24 |     4.3 |  3274.6025 |
-| symforce LM f64       |     4.74 |   3(3) |    1.58 |      0.35 |        3.89 |    20.6 |  3274.6025 |
-| symforce LM f32       |     4.50 |   3(3) |    1.50 |      0.30 |        3.75 |    18.2 |  3274.6025 |
-| g2o LM                |     4.61 |   3(3) |    1.54 |      1.10 |        2.14 |    11.2 |  3274.6025 |
-| ceres sparse_cholesky |     6.24 |   3(3) |    2.08 |      1.83 |        3.90 |    12.9 |  3274.6025 |
-| ceres sparse_schur    |     6.33 |   3(3) |    2.11 |      2.11 |        3.86 |    12.9 |  3274.6025 |
-| ceres iterative_schur\* |   6.73 |   3(3) |    2.24 |      2.04 |        3.90 |    12.0 |  3274.6025 |
-| gtsam LM              |    10.54 |   3(3) |    3.51 |      3.50 |        3.79 |    14.6 |  3274.6025 |
-| factrs LM             |    12.42 |   3(3) |    4.14 |      3.12 |        5.48 |    11.9 |  3274.6025 |
+| system                | total ms |  iters | ms/iter | full-iter | full-norm | 1st-iter ms | peak MB | final cost |
+|-----------------------|---------:|-------:|--------:|----------:|----------:|------------:|--------:|-----------:|
+| arael LM f64 (band)   |     0.71 |   3(3) |    0.24 |      0.25 |     1.000 |        0.23 |     4.9 |  3274.6025 |
+| arael LM f32 (band)   |     0.70 |   3(3) |    0.23 |      0.24 |     0.960 |        0.24 |     4.3 |  3274.6025 |
+| symforce LM f64       |     4.74 |   3(3) |    1.58 |      0.35 |     1.400 |        3.89 |    20.6 |  3274.6025 |
+| symforce LM f32       |     4.50 |   3(3) |    1.50 |      0.30 |     1.200 |        3.75 |    18.2 |  3274.6025 |
+| g2o LM                |     4.61 |   3(3) |    1.54 |      1.10 |     4.400 |        2.14 |    11.2 |  3274.6025 |
+| ceres sparse_cholesky |     6.24 |   3(3) |    2.08 |      1.83 |     7.320 |        3.90 |    12.9 |  3274.6025 |
+| ceres sparse_schur    |     6.33 |   3(3) |    2.11 |      2.11 |     8.440 |        3.86 |    12.9 |  3274.6025 |
+| ceres iterative_schur\* |   6.73 |   3(3) |    2.24 |      2.04 |     8.160 |        3.90 |    12.0 |  3274.6025 |
+| gtsam LM              |    10.54 |   3(3) |    3.51 |      3.50 |    14.000 |        3.79 |    14.6 |  3274.6025 |
+| factrs LM             |    12.42 |   3(3) |    4.14 |      3.12 |    12.480 |        5.48 |    11.9 |  3274.6025 |
 
 ### 300 poses (1,200 landmarks, 41,323 frines, 1,800 parameters; `ARAEL_LAMBDA0=1e-5`)
 
-| system                | total ms |  iters | ms/iter | full-iter | 1st-iter ms | peak MB | final cost |
-|-----------------------|---------:|-------:|--------:|----------:|------------:|--------:|-----------:|
-| arael LM f64 (band)   |     7.33 |   3(3) |    2.44 |      2.40 |        2.46 |    13.6 | 25269.0409 |
-| arael LM f32 (band)   |     6.74 |   3(3) |    2.25 |      2.26 |        2.26 |    10.0 | 25269.0410 |
-| symforce LM f32       |    40.95 |   2(3) |   13.65 |      3.02 |       34.23 |   100.2 | 25269.0410 |
-| symforce LM f64       |    45.01 |   3(3) |   15.00 |      2.97 |       35.94 |   112.5 | 25269.0409 |
-| g2o LM                |    38.80 |   3(3) |   12.93 |      9.85 |       18.60 |    37.7 | 25269.0409 |
-| ceres sparse_cholesky |    51.06 |   3(3) |   17.02 |     14.70 |       31.86 |    42.2 | 25269.0409 |
-| ceres sparse_schur    |    51.46 |   3(3) |   17.15 |     15.12 |       31.02 |    37.1 | 25269.0409 |
-| ceres iterative_schur\* |  52.44 |   3(3) |   17.48 |     16.63 |       30.48 |    37.2 | 25269.0409 |
-| gtsam LM              |    86.38 |   3(3) |   28.79 |     27.92 |       32.41 |    58.9 | 25269.0409 |
-| factrs LM             |    91.50 |   3(3) |   30.50 |     24.22 |       42.51 |    64.9 | 25269.0409 |
+| system                | total ms |  iters | ms/iter | full-iter | full-norm | 1st-iter ms | peak MB | final cost |
+|-----------------------|---------:|-------:|--------:|----------:|----------:|------------:|--------:|-----------:|
+| arael LM f64 (band)   |     7.33 |   3(3) |    2.44 |      2.40 |     1.000 |        2.46 |    13.6 | 25269.0409 |
+| arael LM f32 (band)   |     6.74 |   3(3) |    2.25 |      2.26 |     0.942 |        2.26 |    10.0 | 25269.0410 |
+| symforce LM f32       |    40.95 |   2(3) |   13.65 |      3.02 |     1.258 |       34.23 |   100.2 | 25269.0410 |
+| symforce LM f64       |    45.01 |   3(3) |   15.00 |      2.97 |     1.238 |       35.94 |   112.5 | 25269.0409 |
+| g2o LM                |    38.80 |   3(3) |   12.93 |      9.85 |     4.104 |       18.60 |    37.7 | 25269.0409 |
+| ceres sparse_cholesky |    51.06 |   3(3) |   17.02 |     14.70 |     6.125 |       31.86 |    42.2 | 25269.0409 |
+| ceres sparse_schur    |    51.46 |   3(3) |   17.15 |     15.12 |     6.300 |       31.02 |    37.1 | 25269.0409 |
+| ceres iterative_schur\* |  52.44 |   3(3) |   17.48 |     16.63 |     6.929 |       30.48 |    37.2 | 25269.0409 |
+| gtsam LM              |    86.38 |   3(3) |   28.79 |     27.92 |    11.633 |       32.41 |    58.9 | 25269.0409 |
+| factrs LM             |    91.50 |   3(3) |   30.50 |     24.22 |    10.092 |       42.51 |    64.9 | 25269.0409 |
 
 ### Raspberry Pi 5 (Cortex-A76, single core, 60 poses; ROUNDS=32, ARAEL_LAMBDA0=1e-2, default damping)
 
-| system                | total ms |  iters | ms/iter | full-iter | 1st-iter ms | peak MB | final cost |
-|-----------------------|---------:|-------:|--------:|----------:|------------:|--------:|-----------:|
-| arael LM f32 (band)   |     3.06 |   3(3) |    1.02 |      1.02 |        1.02 |     4.3 |  3274.6025 |
-| arael LM f64 (band)   |     3.16 |   3(3) |    1.05 |      1.06 |        1.06 |     4.9 |  3274.6025 |
-| symforce LM f64       |    19.45 |   3(3) |    6.48 |      1.34 |       16.38 |    20.5 |  3274.6025 |
-| symforce LM f32       |    18.03 |   3(3) |    6.01 |      1.35 |       14.87 |    18.2 |  3274.6025 |
-| g2o LM                |    16.22 |   3(3) |    5.41 |      4.04 |        7.84 |    10.1 |  3274.6025 |
-| ceres sparse_cholesky |    18.56 |   3(3) |    6.19 |      5.34 |       11.42 |    11.5 |  3274.6025 |
-| ceres sparse_schur    |    19.78 |   3(3) |    6.59 |      5.73 |       11.82 |    11.3 |  3274.6025 |
-| ceres iterative_schur\* |  19.64 |   3(3) |    6.55 |      5.94 |       11.34 |    11.0 |  3274.6025 |
-| gtsam LM              |    44.29 |   3(3) |   14.76 |     13.74 |       16.34 |    15.4 |  3274.6025 |
-| factrs LM             |    46.16 |   3(3) |   15.39 |     13.06 |       20.47 |    12.1 |  3274.6025 |
+| system                | total ms |  iters | ms/iter | full-iter | full-norm | 1st-iter ms | peak MB | final cost |
+|-----------------------|---------:|-------:|--------:|----------:|----------:|------------:|--------:|-----------:|
+| arael LM f32 (band)   |     3.06 |   3(3) |    1.02 |      1.02 |     0.962 |        1.02 |     4.3 |  3274.6025 |
+| arael LM f64 (band)   |     3.16 |   3(3) |    1.05 |      1.06 |     1.000 |        1.06 |     4.9 |  3274.6025 |
+| symforce LM f64       |    19.45 |   3(3) |    6.48 |      1.34 |     1.264 |       16.38 |    20.5 |  3274.6025 |
+| symforce LM f32       |    18.03 |   3(3) |    6.01 |      1.35 |     1.274 |       14.87 |    18.2 |  3274.6025 |
+| g2o LM                |    16.22 |   3(3) |    5.41 |      4.04 |     3.811 |        7.84 |    10.1 |  3274.6025 |
+| ceres sparse_cholesky |    18.56 |   3(3) |    6.19 |      5.34 |     5.038 |       11.42 |    11.5 |  3274.6025 |
+| ceres sparse_schur    |    19.78 |   3(3) |    6.59 |      5.73 |     5.406 |       11.82 |    11.3 |  3274.6025 |
+| ceres iterative_schur\* |  19.64 |   3(3) |    6.55 |      5.94 |     5.604 |       11.34 |    11.0 |  3274.6025 |
+| gtsam LM              |    44.29 |   3(3) |   14.76 |     13.74 |    12.962 |       16.34 |    15.4 |  3274.6025 |
+| factrs LM             |    46.16 |   3(3) |   15.39 |     13.06 |    12.321 |       20.47 |    12.1 |  3274.6025 |
 
 ### Raspberry Pi Zero (ARM1176, ARMv6, single core, 60 poses; ROUNDS=10, ARAEL_LAMBDA0=1e-2)
 
@@ -161,11 +162,11 @@ default. factrs matches the reference initial cost to 1.1e-16, so the ARMv6
 build is bit-faithful; the arael rows go through `fast_atan` (4.4e-7, within
 the shared tolerance).
 
-| system                  | total ms |  iters | ms/iter | full-iter | 1st-iter ms | peak MB | final cost |
-|-------------------------|---------:|-------:|--------:|----------:|------------:|--------:|-----------:|
-| **arael LM f32 (band)** |    64.66 |   3(3) |   21.55 |     21.39 |       22.02 |     2.3 |  3274.6021 |
-| **arael LM f64 (band)** |    92.46 |   3(3) |   30.82 |     30.74 |       31.43 |     2.9 |  3274.6021 |
-| factrs LM               |  1202.02 |   3(3) |  400.67 |    353.35 |      491.62 |     7.2 |  3274.6021 |
+| system                  | total ms |  iters | ms/iter | full-iter | full-norm | 1st-iter ms | peak MB | final cost |
+|-------------------------|---------:|-------:|--------:|----------:|----------:|------------:|--------:|-----------:|
+| **arael LM f32 (band)** |    64.66 |   3(3) |   21.55 |     21.39 |     0.696 |       22.02 |     2.3 |  3274.6021 |
+| **arael LM f64 (band)** |    92.46 |   3(3) |   30.82 |     30.74 |     1.000 |       31.43 |     2.9 |  3274.6021 |
+| factrs LM               |  1202.02 |   3(3) |  400.67 |    353.35 |    11.495 |      491.62 |     7.2 |  3274.6021 |
 
 The four tables above, drawn as one iteration plus the setup it pays once, one
 cell per machine:
