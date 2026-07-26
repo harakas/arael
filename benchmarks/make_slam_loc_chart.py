@@ -32,18 +32,18 @@ PANELS = [
         ("factrs (LM)", 144.76, 200.7, "other"),
         ("GTSAM (LM)", 160.41, 174.1, "other"),
     ]),
-    # 2026-07-13, min of 20 rounds (benchmarks/loc README, Pi 5 table). Best
+    # 2026-07-26, min of 32 rounds (benchmarks/loc README, Pi 5 table). Best
     # validated configuration per system: Ceres is sparse_cholesky (a fixed
     # landmark map leaves nothing to marginalize, and iterative_schur is inexact),
     # SymForce is f64.
     ("Localization -- 60 poses, 360 params (Raspberry Pi 5)", 2, [
         ("arael (f32)", 1.02, 1.0, "arael"),
-        ("arael (f64)", 1.05, 1.1, "arael"),
-        ("SymForce (f64)", 1.42, 17.1, "other"),
-        ("g2o (LM)", 4.13, 7.9, "other"),
-        ("Ceres (LM)", 4.57, 10.0, "other"),
-        ("GTSAM (LM)", 13.97, 16.6, "other"),
-        ("factrs (LM)", 15.52, 23.8, "other"),
+        ("arael (f64)", 1.06, 1.1, "arael"),
+        ("SymForce (f64)", 1.34, 16.4, "other"),
+        ("g2o (LM)", 4.04, 7.8, "other"),
+        ("Ceres (LM)", 5.34, 11.4, "other"),
+        ("factrs (LM)", 13.06, 20.5, "other"),
+        ("GTSAM (LM)", 13.74, 16.3, "other"),
     ]),
 ]
 
