@@ -4,6 +4,7 @@
 use bench_harness::arael::{run, Model as Pipeline};
 use bench_harness::table::Row;
 use crate::g2o::{Dataset, PoseIn};
+use arael::angle::AngleParam;
 use arael::model::{Param, SelfBlock, CrossBlock};
 use arael::refs::{self, Ref};
 use arael::utils::Float;
@@ -13,12 +14,12 @@ use arael::vect::vect2;
 #[arael(constraint(hb, guard = self.has_prior, {
     [pose2.pos.x - pose2.prior.x,
      pose2.pos.y - pose2.prior.y,
-     pose2.th - pose2.prior_th]
+     pose2.rot.angle - pose2.prior_th]
 }))]
 #[derive(Clone)]
 struct Pose2<T: Float> {
     pos: Param<vect2<T>>,
-    th: Param<T>,
+    rot: AngleParam<T>,
     prior: vect2<T>,
     prior_th: T,
     has_prior: bool,
@@ -27,11 +28,11 @@ struct Pose2<T: Float> {
 
 #[arael::model]
 #[arael(constraint(hb, {
-    let local = matrix2sym::rotation(b.th).transpose()
-        * (a.pos + matrix2sym::rotation(a.th) * edge.delta - b.pos);
+    let local = b.rot.rotation_matrix.transpose()
+        * (a.pos + a.rot.rotation_matrix * edge.delta - b.pos);
     [local.x * edge.wt,
      local.y * edge.wt,
-     rad_diff(a.th + edge.dth, b.th) * edge.wr]
+     rad_diff(a.rot.angle + edge.dth, b.rot.angle) * edge.wr]
 }))]
 #[derive(Clone)]
 struct Edge<T: Float> {
@@ -72,7 +73,7 @@ fn build_parts<T: Float>(ds: &Dataset)
     for (i, p) in ds.poses.iter().enumerate() {
         poses.push(Pose2 {
             pos: Param::new(vect2::new(c(p.t.x), c(p.t.y))),
-            th: Param::new(c(p.th)),
+            rot: AngleParam::new(c(p.th)),
             prior: vect2::new(c(p.t.x), c(p.t.y)),
             prior_th: c(p.th),
             has_prior: i == 0,
@@ -101,7 +102,7 @@ fn solution_parts<T: Float>(poses: &refs::Vec<Pose2<T>>) -> Vec<PoseIn> {
                 p.pos.value.x.to_f64().unwrap(),
                 p.pos.value.y.to_f64().unwrap(),
             ),
-            th: p.th.value.to_f64().unwrap(),
+            th: p.rot.angle.value.to_f64().unwrap(),
         })
         .collect()
 }

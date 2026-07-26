@@ -316,6 +316,8 @@ fn print_header(rounds: usize, only: &Option<String>) {
         rounds, bench_harness::probe::PROBE_SUBROUNDS);
     println!("datasets          : {} [PGO_ONLY]",
         only.as_deref().unwrap_or("all"));
+    println!("systems           : {} [PGO_SYSTEMS]",
+        std::env::var("PGO_SYSTEMS").unwrap_or_else(|_| "all".to_string()));
     let on_off = |skipped: bool| if skipped { "skipped" } else { "run" };
     println!("optional systems  : tiny-solver {} [RUN_TINY], isam {} [RUN_ISAM]",
         on_off(skip_tiny()), on_off(skip_isam()));
@@ -338,6 +340,17 @@ fn print_header(rounds: usize, only: &Option<String>) {
         if std::env::var("TIMING").is_ok() { "on" } else { "off" });
     println!("pinned to core    : {} (all thread pools forced to 1)",
         std::env::var("BENCH_CORE").unwrap_or_else(|_| "?".to_string()));
+}
+
+// PGO_SYSTEMS=<substr>[,<substr>...] runs only the systems whose label
+// contains one of the substrings (default: all). Pairs with PGO_ONLY for
+// datasets -- e.g. `PGO_SYSTEMS=arael PGO_ONLY=M3500` for a fast
+// arael-only comparison.
+fn system_selected(label: &str) -> bool {
+    match std::env::var("PGO_SYSTEMS") {
+        Ok(v) => v.split(',').map(str::trim).any(|s| !s.is_empty() && label.contains(s)),
+        Err(_) => true,
+    }
 }
 
 // Peak memory for the in-process rows.
@@ -442,22 +455,33 @@ fn main() {
         let mut t = bench_harness::table::Table::new(&geo);
 
         for round in 0..rounds {
-            let a64 = arael_runner::run_f64(&ds);
-            t.record("arael LM f64", a64);
-            let a32 = arael_runner::run_f32(&ds);
-            t.record("arael LM f32", a32);
-            if !skip_tiny() {
+            if system_selected("arael LM f64") {
+                let a64 = arael_runner::run_f64(&ds);
+                t.record("arael LM f64", a64);
+            }
+            if system_selected("arael LM f32") {
+                let a32 = arael_runner::run_f32(&ds);
+                t.record("arael LM f32", a32);
+            }
+            if !skip_tiny() && system_selected("tiny-solver GN") {
                 let tgn = tiny_runner::run_gn(&ds);
                 t.record("tiny-solver GN", tgn);
+            }
+            if !skip_tiny() && system_selected("tiny-solver LM") {
                 let tlm = tiny_runner::run_lm(&ds);
                 t.record("tiny-solver LM", tlm);
             }
-            let fgn = factrs_runner::run_gn(&ds);
-            t.record("factrs GN", fgn);
-            let flm = factrs_runner::run_lm(&ds);
-            t.record("factrs LM", flm);
+            if system_selected("factrs GN") {
+                let fgn = factrs_runner::run_gn(&ds);
+                t.record("factrs GN", fgn);
+            }
+            if system_selected("factrs LM") {
+                let flm = factrs_runner::run_lm(&ds);
+                t.record("factrs LM", flm);
+            }
             if factrs32_available {
                 for (kind, label) in [("gn", "factrs GN f32"), ("lm", "factrs LM f32")] {
+                    if !system_selected(label) { continue; }
                     match run_factrs32(path, kind, *weighted, ds.poses.len()) {
                         Some(out) => t.record(label, out),
                         None => {
@@ -468,17 +492,31 @@ fn main() {
                 }
             }
             if let Some(py) = &python {
-                t.record("gtsam LM", run_gtsam(py, path, "lm", *weighted, ds.poses.len()));
-                t.record("gtsam GN", run_gtsam(py, path, "gn", *weighted, ds.poses.len()));
+                if system_selected("gtsam LM") {
+                    t.record("gtsam LM", run_gtsam(py, path, "lm", *weighted, ds.poses.len()));
+                }
+                if system_selected("gtsam GN") {
+                    t.record("gtsam GN", run_gtsam(py, path, "gn", *weighted, ds.poses.len()));
+                }
             }
             if symforce_available {
-                t.record("symforce LM", run_symforce(path, "f64", *weighted, ds.poses.len()));
-                t.record("symforce LM f32", run_symforce(path, "f32", *weighted, ds.poses.len()));
+                if system_selected("symforce LM") {
+                    t.record("symforce LM", run_symforce(path, "f64", *weighted, ds.poses.len()));
+                }
+                if system_selected("symforce LM f32") {
+                    t.record("symforce LM f32", run_symforce(path, "f32", *weighted, ds.poses.len()));
+                }
             }
             if cpp_available {
-                t.record("ceres LM", run_ceres(path, *weighted, ds.poses.len()));
-                t.record("g2o LM", run_g2o(path, "lm", *weighted, ds.poses.len()));
-                t.record("g2o GN", run_g2o(path, "gn", *weighted, ds.poses.len()));
+                if system_selected("ceres LM") {
+                    t.record("ceres LM", run_ceres(path, *weighted, ds.poses.len()));
+                }
+                if system_selected("g2o LM") {
+                    t.record("g2o LM", run_g2o(path, "lm", *weighted, ds.poses.len()));
+                }
+                if system_selected("g2o GN") {
+                    t.record("g2o GN", run_g2o(path, "gn", *weighted, ds.poses.len()));
+                }
             }
             eprintln!("  round {}/{} done", round + 1, rounds);
         }
@@ -498,9 +536,9 @@ fn main() {
         // best solution) -- the cost surface has near-flat directions
         // where a plateau 0.9% above the optimum can sit meters away
         // geometrically (observed with g2o LM on the weighted M3500).
-        for (label, mb) in measure_in_process_memory(
-            path, *weighted, false,
-            &["arael LM f64", "arael LM f32", "factrs GN", "factrs LM"]) {
+        let mem_labels: Vec<&str> = ["arael LM f64", "arael LM f32", "factrs GN", "factrs LM"]
+            .into_iter().filter(|l| system_selected(l)).collect();
+        for (label, mb) in measure_in_process_memory(path, *weighted, false, &mem_labels) {
             t.set_peak_mb(&label, mb);
         }
         t.print();
