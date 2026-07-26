@@ -103,6 +103,9 @@
 //!   with it
 //! - **Unit directions** -- `UnitVecParam` optimizes a direction with 2
 //!   degrees of freedom
+//! - **2D rotations** -- `AngleParam` optimizes a heading angle directly and
+//!   caches its rotation matrix, so 2D pose constraints read a cached
+//!   constant instead of rebuilding sin/cos per observation
 //! - **Fast approximate atan** -- `#[arael(root, fast_atan)]` swaps every
 //!   atan/atan2 in the generated code for polynomial approximations (max
 //!   error < 1e-6 rad); or call `fast_atan`/`fast_atan2` per site.
@@ -420,6 +423,7 @@
 //! | [`Param<f32>`](model::Param) / [`Param<f64>`](model::Param) | 1 | scalar parameter |
 //! | [`Param<vect2<T>>`](vect::vect2) | 2 | 2D point / direction |
 //! | [`Param<vect3<T>>`](vect::vect3) | 3 | 3D position, velocity, linear vector |
+//! | [`AngleParam<T>`](angle::AngleParam) | 1 | a 2D rotation (heading): the angle is optimized directly and its rotation matrix is cached, so constraints that rotate through it read a cached constant instead of recomputing sin/cos per observation |
 //! | [`SimpleEulerAngleParam<T>`](model::SimpleEulerAngleParam) | 3 | three direct Euler angles (roll, pitch, yaw) |
 //! | [`EulerAngleParam<T>`](model::EulerAngleParam) | 3 | "universal" delta composed with a fixed reference rotation; avoids parameterisation singularities for large-angle motion |
 //! | [`QuaternionParam<T>`](model::QuaternionParam) | 3 | a rotation-vector delta (not euler angles) composed with a unit-quaternion reference, renormalised each re-center so it never drifts off SO(3) |
@@ -1982,6 +1986,21 @@
 //! solution as the loss does. A robustifier can only down-weight what the
 //! initialisation puts within its reach.
 //!
+//! And a robust loss fixes one failure mode -- outliers, heavy tails in
+//! the noise -- and only that. It does nothing about **systematic error**:
+//! a constant sensor offset, a wrong scale, an unmodelled bias, a
+//! miscalibrated extrinsic. A systematic error is present in every
+//! measurement, so it reads as signal, not an outlier -- the loss
+//! down-weights nothing and the bias flows straight into the estimate. A
+//! redescending kernel can make it worse: if the bias pushes the true
+//! solution to large residuals, the loss rejects the measurements that
+//! carry the correction and settles into a wrong basin. The remedies are
+//! different in kind -- calibrate or repair the sensor, improve the
+//! measurement model, or add the offset as a parameter estimated jointly
+//! with the state (observable when the geometry constrains it
+//! independently). A loss is for a minority of bad measurements among
+//! unbiased good ones, not a substitute for a correct model.
+//!
 //! # Example: Localization
 //!
 //! Same model as SLAM but landmarks are fixed (known map). With only pose
@@ -2152,6 +2171,7 @@ pub use inventory;
 /// Re-export of the `arael-sym` symbolic math crate.
 pub use arael_sym as sym;
 /// Model trait, parameter types, and Hessian blocks.
+pub mod angle;
 pub mod model;
 pub mod se3;
 pub mod transform;
@@ -2210,6 +2230,7 @@ pub mod prelude {
         FitProblem, LmConfig, LmProblem, LmResult, LmSolver, NielsenLambdaDriver,
         RootProblem,
     };
+    pub use crate::angle::{AngleParam, AngleParamF};
     pub use crate::transform::{TransformParam, TransformParamF};
     pub use crate::unitvec::{UnitVecParam, UnitVecParamF};
     pub use crate::matrix::{matrix2d, matrix2f, matrix3d, matrix3f};

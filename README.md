@@ -58,6 +58,7 @@ Solve problems like linear and nonlinear regression, sensor fusion, SLAM, bundle
 - **Gimbal-lock-free rotations** -- `EulerAngleParam` (euler-angle delta) and `QuaternionParam` (rotation-vector delta) optimize a small delta around a re-centered reference rotation
 - **Rigid transforms** -- `TransformParam` optimizes a translation and a rotation as one 6-DOF parameter. The optimized delta is represented as a twist (se(3)), so a rotation correction carries the translation with it
 - **Unit directions** -- `UnitVecParam` optimizes a direction with 2 degrees of freedom
+- **2D rotations** -- `AngleParam` optimizes a heading angle directly and caches its rotation matrix, so 2D pose constraints read a cached constant instead of rebuilding sin/cos per observation
 - **Fast approximate atan** -- `#[arael(root, fast_atan)]` swaps every atan/atan2 in the generated code for polynomial approximations (max error < 1e-6 rad); or call `fast_atan`/`fast_atan2` per site. Derivatives stay the exact rational forms
 - **.g2o file I/O** -- `arael::g2o` reads and writes the standard pose-graph interchange format (2D and 3D), with information matrices kept as read and sqrt-info helpers
 - **Model validation** -- `model.validate()` reports every formulation problem in one pass (non-finite parameters, stale refs, unconstrained parameters, derivative mismatches); `check_gradients()` compares assembled gradients against finite differences
@@ -396,6 +397,20 @@ A loss is also not the whole story: pruning bad measurements outright
 and good initial conditions carry as much weight in reaching a good
 solution as the loss does. A robustifier can only down-weight what the
 initialisation puts within its reach.
+
+And a robust loss fixes one failure mode -- outliers, heavy tails in the
+noise -- and only that. It does nothing about **systematic error**: a
+constant sensor offset, a wrong scale, an unmodelled bias, a miscalibrated
+extrinsic. A systematic error is present in every measurement, so it reads
+as signal, not an outlier -- the loss down-weights nothing and the bias
+flows straight into the estimate. A redescending kernel can make it worse:
+if the bias pushes the true solution to large residuals, the loss rejects
+the measurements that carry the correction and settles into a wrong basin.
+The remedies are different in kind -- calibrate or repair the sensor,
+improve the measurement model, or add the offset as a parameter estimated
+jointly with the state (observable when the geometry constrains it
+independently). A loss is for a minority of bad measurements among unbiased
+good ones, not a substitute for a correct model.
 
 ## Localization Demo
 
