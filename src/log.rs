@@ -77,7 +77,11 @@ pub fn silence() {
 
 /// Would a message at this level be emitted? Public because the logging macros
 /// expand to it, calling it before they format their arguments.
-#[inline]
+///
+/// Not inlined: the macros sit in hot math, and inlining the `LEVEL` atomic load
+/// there blocks optimization of the surrounding code even though the log branch
+/// never runs.
+#[inline(never)]
 pub fn enabled(level: Level) -> bool {
     (level as u8) <= LEVEL.load(Ordering::Relaxed)
 }
