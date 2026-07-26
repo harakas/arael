@@ -342,11 +342,10 @@ the benchmark, update the `PANELS` data (full-iter and 1st-iter per
 system) and re-run it. The front-page cross-benchmark chart is
 `../make_slam_loc_chart.py` (its SLAM panel is the 300-pose table).
 
-> DEPRECATED: the sections below (rotation parameterization, sparse-backend
-> comparison, covariance recovery) still carry pre-0.8.0 numbers, pending
-> regeneration before release.
-
 ## Rotation parameterization: simple vs euler vs quaternion
+
+_Measured on arael 0.7.1; the numbers are arael-internal and the ranking is stable across versions._
+
 
 A standalone binary, `rot_compare`, isolates the cost of arael's three
 SO(3) parameterizations on this scene and solver: `SimpleEulerAngleParam`
@@ -415,8 +414,8 @@ POSES=300 ROUNDS=10 cargo run --release --bin rot_compare   # larger scene, fewe
 
 The arael rows run the Schur backend by default. `SLAM_ARAEL_SOLVER`
 swaps the f64 row's backend (the C++ ones need their cargo feature).
-Measured at 300 poses (5,400 parameters, 770k Hessian nonzeros), same
-optimum and iteration count on every backend:
+Measured at 300 poses (5,400 parameters, 770k Hessian nonzeros) on arael
+0.7.1, same optimum and iteration count on every backend:
 
 | backend (`SLAM_ARAEL_SOLVER=`)        | feature        | ms/iter |
 |---------------------------------------|----------------|--------:|
@@ -455,7 +454,7 @@ The SLAM panel of the bar chart embedded in the top-level README
 column above; after re-running the benchmark, update its `PANELS`
 table from the results and re-run it.
 
-## Covariance recovery (2026-07-16, Apple M4 Pro, single core)
+## Covariance recovery (2026-07-26, Apple M4 Pro, single core)
 
 Parameter covariance at the solution, `Sigma = 2 H^-1`, for poses (6-DOF) and
 landmarks (3-DOF):
@@ -476,23 +475,33 @@ Pose (6-DOF):
 
 | method | 1 | 2 | 8 | 32 | all (300) |
 |--------|--:|--:|--:|--:|--:|
-| arael PerQuery | 132.1 (38) | 136.5 (37) | 158.8 (32) | 249.2 (21) | 1290.1 (4) |
-| arael AllMarginals | - | - | - | - | 484.6 (11) |
-| Ceres SPARSE_QR | 4060 (2) | 4098 (2) | 4185 (2) | 4406 (2) | 7176 (1) |
-| GTSAM Marginals | 198.3 (25) | 1330.8 (4) | 2030.0 (3) | 4862.6 (2) | 37268.5 (1) |
-| g2o computeMarginals | 2912.4 (2) | 2733.5 (2) | 3493.5 (2) | 4013.4 (2) | 4285.6 (2) |
+| arael PerQuery | 124.6 (41) | 128.7 (39) | 151.4 (34) | 240.5 (21) | 1236.8 (5) |
+| arael AllMarginals | - | - | - | - | 476.3 (11) |
+| Ceres SPARSE_QR | 4035.0 (2) | 4043.1 (2) | 4122.4 (2) | 4371.7 (2) | 7031.4 (1) |
+| GTSAM Marginals | 195.9 (26) | 1324.0 (4) | 2033.9 (3) | 4908.1 (2) | 37411.5 (1) |
+| g2o computeMarginals | 2644.1 (2) | 2609.4 (2) | 3372.0 (2) | 4156.8 (2) | 4066.1 (2) |
 
 Landmark (3-DOF). `AllMarginals` is the same bulk pass (poses and landmarks together):
 
 | method | 1 | 2 | 8 | 32 | all (1200) |
 |--------|--:|--:|--:|--:|--:|
-| arael PerQuery | 130.7 (39) | 132.8 (38) | 147.1 (34) | 201.3 (25) | 2899.3 (2) |
-| arael AllMarginals | - | - | - | - | 484.6 (11) |
-| Ceres SPARSE_QR | 4083 (2) | 4100 (2) | 4144 (2) | 4331 (2) | * |
-| GTSAM Marginals | 471.6 (11) | 660.6 (8) | 2090.7 (3) | 4987.4 (2) | * |
+| arael PerQuery | 124.4 (41) | 125.9 (40) | 139.8 (36) | 193.5 (26) | 2812.9 (2) |
+| arael AllMarginals | - | - | - | - | 476.3 (11) |
+| Ceres SPARSE_QR | 4054.7 (2) | 4051.4 (2) | 4109.0 (2) | 4272.1 (2) | * |
+| GTSAM Marginals | 465.9 (11) | 658.1 (8) | 2093.0 (3) | 4948.9 (2) | * |
 
-`SLAM_COV=1 cargo run --release` reproduces this (`SLAM_POSES` sets the size,
-`COV_BUDGET_S` the per-cell budget).
+A single marginal and the whole set, poses and landmarks, one bar per
+system (each cell on its own axis):
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/charts/v0.8.0/cov-dark.svg">
+  <img alt="2x2 bar charts of covariance-recovery time: poses (top) and landmarks (bottom), a single marginal (left) and all of them (right), comparing arael against Ceres, GTSAM and g2o" src="../charts/v0.8.0/cov-light.svg">
+</picture>
+
+`SLAM_COV=1 cargo run --release --bin slam-bench` reproduces this
+(`SLAM_POSES` sets the size, `COV_BUDGET_S` the per-cell budget).
+`../make_cov_chart.py` (stdlib only) draws the chart from the two tables;
+update its `PANELS` and re-run after re-measuring.
 
 ## Running
 
@@ -504,11 +513,11 @@ cmake -B cpp/build cpp && cmake --build cpp/build   # Ceres, g2o, GTSAM
 # (regenerate its factor headers with:
 #  symforce-venv/bin/python3 symforce_gen.py cpp/symforce_gen)
 export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1     # before load; see Methodology
-ROUNDS=32 cargo run --release                       # 60 poses (default)
-SLAM_POSES=300 ROUNDS=32 cargo run --release
-SLAM_POSES=300 SLAM_COV=1 cargo run --release       # covariance recovery (above)
-RUN_TINY=1 cargo run --release                      # include tiny-solver (off by default)
-VERBOSE=1 cargo run --release                       # arael per-iteration trace
+ROUNDS=32 cargo run --release --bin slam-bench                       # 60 poses (default)
+SLAM_POSES=300 ROUNDS=32 cargo run --release --bin slam-bench
+SLAM_POSES=300 SLAM_COV=1 cargo run --release --bin slam-bench       # covariance recovery (above)
+RUN_TINY=1 cargo run --release --bin slam-bench                      # include tiny-solver (off by default)
+VERBOSE=1 cargo run --release --bin slam-bench                       # arael per-iteration trace
 G2O_VERIFY_JAC=1 cpp/build/g2o_slam scene.txt lm out.txt     # check g2o Jacobians
 GTSAM_VERIFY_JAC=1 cpp/build/gtsam_slam scene.txt lm out.txt # check GTSAM Jacobians
 ```
