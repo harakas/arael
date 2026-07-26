@@ -371,3 +371,15 @@
   because the generated API exposes solves and covariance only.
   Exposing raw assembly over the FFI is a large surface for a debug
   nicety -- revisit if a real consumer needs it.
+
+- **arael-macros: single-instance entity field (bare, non-Option).** A
+  constraint-bearing entity must live in an iterable container -- the
+  generated assembly enumerates instances with `.iter()` -- so the only
+  way to attach exactly one is `Option<Entity>` kept always `Some`, e.g.
+  the pgo/m3500 gauge prior `Option<Prior<T>>`. A bare `prior: Prior<T>`
+  field would read more honestly (the anchor always exists) but does not
+  compile (`no method named iter found for Prior<T>`). Deferred because it
+  is a core traversal change: the model walker, serialize/deserialize,
+  covariance block enumeration, and the sidecar/export each treat entity
+  fields as containers and would need to accept a directly-nested entity as
+  a one-element set. `Option<Entity>` is idiomatic meanwhile.
