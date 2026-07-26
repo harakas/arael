@@ -263,7 +263,12 @@ fn harvest(dir: &Path) -> Result<Vec<Model>, String> {
             }
         }
     }
-    let sidecar_dir = dir.join("target/arael-sidecar");
+    // Absolute path: the proc macro writes to it from rustc's CWD, which for
+    // a workspace member is the workspace root, not `dir`. An absolute target
+    // is CWD-independent, so the macro writes exactly where we read.
+    let sidecar_dir = std::fs::canonicalize(dir)
+        .unwrap_or_else(|_| dir.to_path_buf())
+        .join("target/arael-sidecar");
     let _ = std::fs::remove_dir_all(&sidecar_dir);
     let status = std::process::Command::new("cargo")
         .arg("build")

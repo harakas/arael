@@ -40,7 +40,7 @@ type name. Each entry:
 | `role` | `root`, `entity`, or `component` |
 | `param_count` | total optimizable scalars, components folded in |
 | `self_block` | name of the `SelfBlock<Self>` field, when one exists |
-| `builtin` | `true` for arael's built-in components (`TransformParam`, `UnitVecParam`); their `fields` are empty and generators special-case them by name |
+| `builtin` | `true` for arael's built-in components (`TransformParam`, `UnitVecParam`, `AngleParam`); their `fields` are empty and generators special-case them by name |
 | `fields` | declared fields, in declaration order |
 
 Each field has `name`, a `kind`, and kind-specific keys:

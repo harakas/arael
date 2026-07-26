@@ -441,7 +441,7 @@ class Pose:
     (validity follows the storage)."""
 
     __slots__ = ("_p",)
-    param_count = 6
+    param_count = 7
 
     def __init__(self, p):
         self._p = p
@@ -461,6 +461,27 @@ class Pose:
     @ea_optimize.setter
     def ea_optimize(self, v):
         _f.fit_pose_ea_set_optimize(self._p, bool(v))
+
+    @property
+    def heading_angle(self):
+        return _f.fit_pose_heading_angle(self._p)
+
+    @heading_angle.setter
+    def heading_angle(self, v):
+        _f.fit_pose_heading_set_angle(self._p, v)
+
+    @property
+    def heading_angle_optimize(self):
+        return _f.fit_pose_heading_angle_optimize(self._p)
+
+    @heading_angle_optimize.setter
+    def heading_angle_optimize(self, v):
+        _f.fit_pose_heading_angle_set_optimize(self._p, bool(v))
+
+    @property
+    def heading_rotation_matrix(self):
+        """Rotation matrix at the current angle (read-only)."""
+        return _f.fit_pose_heading_rotation_matrix(self._p)
 
     @property
     def pos(self):
@@ -485,6 +506,14 @@ class Pose:
     @target.setter
     def target(self, v):
         _f.fit_pose_set_target(self._p, v if isinstance(v, _m.vect3d) else _m.vect3d(v))
+
+    @property
+    def target_dir(self):
+        return _f.fit_pose_target_dir(self._p)
+
+    @target_dir.setter
+    def target_dir(self, v):
+        _f.fit_pose_set_target_dir(self._p, v if isinstance(v, _m.vect2d) else _m.vect2d(v))
 
     @property
     def info(self):
@@ -661,7 +690,7 @@ class Covariance:
         if isinstance(e, N):
             return (_shape_1)(_cov_query(self._h, _f.fit_n_marginal_cov, e._p, 1))
         if isinstance(e, Pose):
-            return (lambda b: _shape_n(b, 6))(_cov_query(self._h, _f.fit_pose_marginal_cov, e._p, 36))
+            return (lambda b: _shape_n(b, 7))(_cov_query(self._h, _f.fit_pose_marginal_cov, e._p, 49))
         if isinstance(e, Rig):
             return (lambda b: _shape_n(b, 7))(_cov_query(self._h, _f.fit_rig_marginal_cov, e._p, 49))
         raise TypeError("no marginal for %r" % (e,))
@@ -671,7 +700,7 @@ class Covariance:
         if isinstance(e, N):
             return (_shape_1)(_cov_query(self._h, _f.fit_n_conditional_cov, e._p, 1))
         if isinstance(e, Pose):
-            return (lambda b: _shape_n(b, 6))(_cov_query(self._h, _f.fit_pose_conditional_cov, e._p, 36))
+            return (lambda b: _shape_n(b, 7))(_cov_query(self._h, _f.fit_pose_conditional_cov, e._p, 49))
         if isinstance(e, Rig):
             return (lambda b: _shape_n(b, 7))(_cov_query(self._h, _f.fit_rig_conditional_cov, e._p, 49))
         raise TypeError("no conditional for %r" % (e,))
@@ -682,7 +711,7 @@ class Covariance:
         if isinstance(e, N):
             return list(_cov_query(self._h, _f.fit_n_std_dev, e._p, 1))
         if isinstance(e, Pose):
-            return list(_cov_query(self._h, _f.fit_pose_std_dev, e._p, 6))
+            return list(_cov_query(self._h, _f.fit_pose_std_dev, e._p, 7))
         if isinstance(e, Rig):
             return list(_cov_query(self._h, _f.fit_rig_std_dev, e._p, 7))
         raise TypeError("no std_dev for %r" % (e,))
@@ -694,11 +723,11 @@ class Covariance:
         return tuple(tuple(buf[r * 1 + c] for c in range(1))
                      for r in range(rows))
     def _cross_n_pose(self, a, b):
-        buf = (ctypes.c_double * 6)()
-        rows = _f.fit_n_pose_cross_cov(self._h, a._p, b._p, buf, 6)
+        buf = (ctypes.c_double * 7)()
+        rows = _f.fit_n_pose_cross_cov(self._h, a._p, b._p, buf, 7)
         if rows < 0:
             raise AraelError(rows, _err(self._h))
-        return tuple(tuple(buf[r * 6 + c] for c in range(6))
+        return tuple(tuple(buf[r * 7 + c] for c in range(7))
                      for r in range(rows))
     def _cross_n_rig(self, a, b):
         buf = (ctypes.c_double * 7)()
@@ -708,22 +737,22 @@ class Covariance:
         return tuple(tuple(buf[r * 7 + c] for c in range(7))
                      for r in range(rows))
     def _cross_pose_n(self, a, b):
-        buf = (ctypes.c_double * 6)()
-        rows = _f.fit_pose_n_cross_cov(self._h, a._p, b._p, buf, 6)
+        buf = (ctypes.c_double * 7)()
+        rows = _f.fit_pose_n_cross_cov(self._h, a._p, b._p, buf, 7)
         if rows < 0:
             raise AraelError(rows, _err(self._h))
         return tuple(tuple(buf[r * 1 + c] for c in range(1))
                      for r in range(rows))
     def _cross_pose_pose(self, a, b):
-        buf = (ctypes.c_double * 36)()
-        rows = _f.fit_pose_pose_cross_cov(self._h, a._p, b._p, buf, 36)
+        buf = (ctypes.c_double * 49)()
+        rows = _f.fit_pose_pose_cross_cov(self._h, a._p, b._p, buf, 49)
         if rows < 0:
             raise AraelError(rows, _err(self._h))
-        return tuple(tuple(buf[r * 6 + c] for c in range(6))
+        return tuple(tuple(buf[r * 7 + c] for c in range(7))
                      for r in range(rows))
     def _cross_pose_rig(self, a, b):
-        buf = (ctypes.c_double * 42)()
-        rows = _f.fit_pose_rig_cross_cov(self._h, a._p, b._p, buf, 42)
+        buf = (ctypes.c_double * 49)()
+        rows = _f.fit_pose_rig_cross_cov(self._h, a._p, b._p, buf, 49)
         if rows < 0:
             raise AraelError(rows, _err(self._h))
         return tuple(tuple(buf[r * 7 + c] for c in range(7))
@@ -736,11 +765,11 @@ class Covariance:
         return tuple(tuple(buf[r * 1 + c] for c in range(1))
                      for r in range(rows))
     def _cross_rig_pose(self, a, b):
-        buf = (ctypes.c_double * 42)()
-        rows = _f.fit_rig_pose_cross_cov(self._h, a._p, b._p, buf, 42)
+        buf = (ctypes.c_double * 49)()
+        rows = _f.fit_rig_pose_cross_cov(self._h, a._p, b._p, buf, 49)
         if rows < 0:
             raise AraelError(rows, _err(self._h))
-        return tuple(tuple(buf[r * 6 + c] for c in range(6))
+        return tuple(tuple(buf[r * 7 + c] for c in range(7))
                      for r in range(rows))
     def _cross_rig_rig(self, a, b):
         buf = (ctypes.c_double * 49)()

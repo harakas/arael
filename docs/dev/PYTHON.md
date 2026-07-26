@@ -142,6 +142,7 @@ print(f.last_report())
 | euler_param (rotvec) | quatern property + optimize |
 | TransformParam | `<f>_translation` / `<f>_rotation` props + per-half optimize |
 | UnitVecParam | `<f>_unit` property + read-only `<f>_unit_d0/d1` |
+| AngleParam | `<f>_angle` prop + optimize; read-only `<f>_rotation_matrix` |
 | user component / struct | sub-object property (fresh thin wrapper) |
 | optional | `make_<f>()` / `del`-style `clear_<f>()`; `<f>` returns the wrapper or `None` |
 | ref | typed `Ref` dataclass (raw u32, `valid`, `==`, hashable) |

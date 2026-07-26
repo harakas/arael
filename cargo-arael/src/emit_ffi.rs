@@ -476,6 +476,27 @@ pub unsafe extern \"C\" fn {fn_prefix}_{name}_unit_d{i}(p: *const {ptr_ty}) -> {
 "));
                 }
             }
+            "AngleParam" | "AngleParamF" => {
+                let (sc, m) = if of == "AngleParamF" {
+                    ("f32", "CMat2F32")
+                } else {
+                    ("f64", "CMat2F64")
+                };
+                // `angle` is the set-before / read-after scalar, plus its flag.
+                rw(out, &format!("{fn_prefix}_{name}"), "angle", ptr_ty, access, sc,
+                    &format!("{access}.{name}.angle.value"),
+                    &format!("{access}.{name}.angle.value = v;"));
+                rw(out, &format!("{fn_prefix}_{name}_angle"), "optimize", ptr_ty, access, "bool",
+                    &format!("{access}.{name}.angle.optimize"),
+                    &format!("{access}.{name}.angle.optimize = v;"));
+                // Rotation matrix at the current angle (read-only, computed).
+                out.push_str(&format!(
+"#[no_mangle]
+pub unsafe extern \"C\" fn {fn_prefix}_{name}_rotation_matrix(p: *const {ptr_ty}) -> {m} {{
+    {access}.{name}.rotation_matrix().into()
+}}
+"));
+            }
             _ => {
                 // A user component: expose a pointer, its own surface is
                 // emitted like an entity's.

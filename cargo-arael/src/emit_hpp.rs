@@ -386,6 +386,26 @@ fn field_cpp(
                      \x20   {v3} {name}_unit_d0() const {{ return ffi::{prefix}_{name}_unit_d0(h_); }}\n\
                      \x20   {v3} {name}_unit_d1() const {{ return ffi::{prefix}_{name}_unit_d1(h_); }}\n"));
             }
+            "AngleParam" | "AngleParamF" => {
+                let (sc, m) = if of == "AngleParamF" {
+                    ("float", "matrix2f")
+                } else {
+                    ("double", "matrix2d")
+                };
+                cpp.ffi.push_str(&format!(
+                    "{sc} {prefix}_{name}_angle(const {owner}*);\n\
+                     void {prefix}_{name}_set_angle({owner}*, {sc});\n\
+                     bool {prefix}_{name}_angle_optimize(const {owner}*);\n\
+                     void {prefix}_{name}_angle_set_optimize({owner}*, bool);\n\
+                     {m} {prefix}_{name}_rotation_matrix(const {owner}*);\n"));
+                owner_methods.push_str(&format!(
+                    "    {sc} {name}_angle() const {{ return ffi::{prefix}_{name}_angle(h_); }}\n\
+                     \x20   void set_{name}_angle({sc} v) {{ ffi::{prefix}_{name}_set_angle(h_, v); }}\n\
+                     \x20   bool {name}_angle_optimize() const {{ return ffi::{prefix}_{name}_angle_optimize(h_); }}\n\
+                     \x20   void set_{name}_angle_optimize(bool v) {{ ffi::{prefix}_{name}_angle_set_optimize(h_, v); }}\n\
+                     \x20   /// Rotation matrix at the current angle (read-only).\n\
+                     \x20   {m} {name}_rotation_matrix() const {{ return ffi::{prefix}_{name}_rotation_matrix(h_); }}\n"));
+            }
             _ => {
                 cpp.ffi.push_str(&format!("{of}* {prefix}_{name}_ptr({owner}*);\n"));
                 owner_methods.push_str(&format!(

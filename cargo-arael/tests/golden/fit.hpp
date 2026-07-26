@@ -157,12 +157,19 @@ vect3d fit_pose_ea(const Pose*);
 void fit_pose_set_ea(Pose*, vect3d);
 bool fit_pose_ea_optimize(const Pose*);
 void fit_pose_ea_set_optimize(Pose*, bool);
+double fit_pose_heading_angle(const Pose*);
+void fit_pose_heading_set_angle(Pose*, double);
+bool fit_pose_heading_angle_optimize(const Pose*);
+void fit_pose_heading_angle_set_optimize(Pose*, bool);
+matrix2d fit_pose_heading_rotation_matrix(const Pose*);
 vect3d fit_pose_pos(const Pose*);
 void fit_pose_set_pos(Pose*, vect3d);
 bool fit_pose_pos_optimize(const Pose*);
 void fit_pose_pos_set_optimize(Pose*, bool);
 vect3d fit_pose_target(const Pose*);
 void fit_pose_set_target(Pose*, vect3d);
+vect2d fit_pose_target_dir(const Pose*);
+void fit_pose_set_target_dir(Pose*, vect2d);
 Info* fit_pose_info_ptr(Pose*);
 vect3d fit_rig_ea_u(const Rig*);
 void fit_rig_set_ea_u(Rig*, vect3d);
@@ -421,7 +428,7 @@ private:
 class Pose {
 public:
     /// Optimized parameters this entity contributes to the solve.
-    static constexpr uint32_t param_count = 6;
+    static constexpr uint32_t param_count = 7;
     Pose() : h_(nullptr) {}
     explicit Pose(ffi::Pose* p) : h_(p) {}
     /// False when default-constructed (e.g. inside an empty option).
@@ -432,12 +439,20 @@ public:
     void set_ea(vect3d v) { ffi::fit_pose_set_ea(h_, v); }
     bool ea_optimize() const { return ffi::fit_pose_ea_optimize(h_); }
     void set_ea_optimize(bool v) { ffi::fit_pose_ea_set_optimize(h_, v); }
+    double heading_angle() const { return ffi::fit_pose_heading_angle(h_); }
+    void set_heading_angle(double v) { ffi::fit_pose_heading_set_angle(h_, v); }
+    bool heading_angle_optimize() const { return ffi::fit_pose_heading_angle_optimize(h_); }
+    void set_heading_angle_optimize(bool v) { ffi::fit_pose_heading_angle_set_optimize(h_, v); }
+    /// Rotation matrix at the current angle (read-only).
+    matrix2d heading_rotation_matrix() const { return ffi::fit_pose_heading_rotation_matrix(h_); }
     vect3d pos() const { return ffi::fit_pose_pos(h_); }
     void set_pos(vect3d v) { ffi::fit_pose_set_pos(h_, v); }
     bool pos_optimize() const { return ffi::fit_pose_pos_optimize(h_); }
     void set_pos_optimize(bool v) { ffi::fit_pose_pos_set_optimize(h_, v); }
     vect3d target() const { return ffi::fit_pose_target(h_); }
     void set_target(vect3d v) { ffi::fit_pose_set_target(h_, v); }
+    vect2d target_dir() const { return ffi::fit_pose_target_dir(h_); }
+    void set_target_dir(vect2d v) { ffi::fit_pose_set_target_dir(h_, v); }
     Info info() { return Info(ffi::fit_pose_info_ptr(h_)); }
 private:
     ffi::Pose* h_;

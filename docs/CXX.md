@@ -101,7 +101,8 @@ views are named by their container's nature: `PathPosesDeque`,
   `QuaternionParam`); `TransformParam` exposes translation, rotation,
   and per-half optimize flags; `UnitVecParam` exposes `unit` and the
   read-only chart basis `unit_d0`/`unit_d1` (for covariance
-  Jacobians). User `#[arael(component)]` structs surface like nested
+  Jacobians); `AngleParam` exposes `<f>_angle` (read/write + optimize)
+  and the read-only `<f>_rotation_matrix`. User `#[arael(component)]` structs surface like nested
   sub-models: their fields (set-before / read-after values included)
   behind an accessor. Entity wrappers carry
   `static constexpr param_count`.

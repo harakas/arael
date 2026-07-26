@@ -373,6 +373,38 @@ fn field_py(
 "));
                 }
             }
+            "AngleParam" | "AngleParamF" => {
+                let (sc, m) = if of == "AngleParamF" {
+                    ("ctypes.c_float", "_m.matrix2f")
+                } else {
+                    ("ctypes.c_double", "_m.matrix2d")
+                };
+                let p2 = format!("{prefix}_{name}");
+                // angle value (read/write) + optimize flag (read/write)
+                prop(py, owner_cls, &p2, "angle", &format!("{name}_angle"), sc, false);
+                sig(py, &format!("{p2}_angle_optimize"), &["ctypes.c_void_p"], "ctypes.c_bool");
+                sig(py, &format!("{p2}_angle_set_optimize"),
+                    &["ctypes.c_void_p", "ctypes.c_bool"], "None");
+                owner_cls.push_str(&format!(
+"    @property
+    def {name}_angle_optimize(self):
+        return _f.{p2}_angle_optimize(self._p)
+
+    @{name}_angle_optimize.setter
+    def {name}_angle_optimize(self, v):
+        _f.{p2}_angle_set_optimize(self._p, bool(v))
+
+"));
+                // rotation matrix at the current angle (read-only, computed)
+                sig(py, &format!("{p2}_rotation_matrix"), &["ctypes.c_void_p"], m);
+                owner_cls.push_str(&format!(
+"    @property
+    def {name}_rotation_matrix(self):
+        \"\"\"Rotation matrix at the current angle (read-only).\"\"\"
+        return _f.{p2}_rotation_matrix(self._p)
+
+"));
+            }
             _ => {
                 if !model.types.contains_key(of) {
                     return Err(format!("`{owner}.{name}`: unknown component {of}"));

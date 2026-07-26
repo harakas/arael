@@ -3,6 +3,12 @@
   "root": "Fit",
   "precision": "f64",
   "types": {
+    "AngleParam": {
+      "role": "component",
+      "param_count": 1,
+      "builtin": true,
+      "fields": []
+    },
     "Fit": {
       "role": "root",
       "param_count": 2,
@@ -67,12 +73,14 @@
     },
     "Pose": {
       "role": "entity",
-      "param_count": 6,
+      "param_count": 7,
       "self_block": "hb",
       "fields": [
         {"name": "ea", "kind": "euler_param", "variant": "simple", "scalar": "f64", "params": 3},
+        {"name": "heading", "kind": "component", "of": "AngleParam"},
         {"name": "pos", "kind": "param", "of": "vect3d", "params": 3},
         {"name": "target", "kind": "data", "of": "vect3d"},
+        {"name": "target_dir", "kind": "data", "of": "vect2d"},
         {"name": "info", "kind": "struct", "of": "Info"},
         {"name": "hb", "kind": "self_block", "scalar": "f64"}
       ]
@@ -106,10 +114,10 @@
     }
   },
   "constraints": [
-    {"on": "Obs", "label": "Obs", "file": "model/src/lib.rs", "line": 18},
-    {"on": "N", "label": "N", "file": "model/src/lib.rs", "line": 29},
-    {"on": "Pose", "label": "Pose", "file": "model/src/lib.rs", "line": 43},
-    {"on": "Tie", "label": "Tie", "file": "model/src/lib.rs", "line": 75},
-    {"on": "Rig", "label": "Rig", "file": "model/src/lib.rs", "line": 122}
+    {"on": "Obs", "label": "Obs", "file": "model/src/lib.rs", "line": 19},
+    {"on": "N", "label": "N", "file": "model/src/lib.rs", "line": 30},
+    {"on": "Pose", "label": "Pose", "file": "model/src/lib.rs", "line": 46},
+    {"on": "Tie", "label": "Tie", "file": "model/src/lib.rs", "line": 83},
+    {"on": "Rig", "label": "Rig", "file": "model/src/lib.rs", "line": 130}
   ]
 }
