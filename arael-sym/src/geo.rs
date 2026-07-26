@@ -620,6 +620,23 @@ impl matrix2sym {
         }
     }
 
+    /// Returns the row at the given index as a vector.
+    pub fn row(&self, index: usize) -> vect2sym {
+        match index {
+            0 | 1 => self.rows[index].clone(),
+            _ => panic!("matrix2sym: row index {} out of bounds (0..2)", index),
+        }
+    }
+
+    /// Returns the column at the given index as a vector.
+    pub fn col(&self, index: usize) -> vect2sym {
+        match index {
+            0 => vect2sym { x: self.rows[0].x.clone(), y: self.rows[1].x.clone() },
+            1 => vect2sym { x: self.rows[0].y.clone(), y: self.rows[1].y.clone() },
+            _ => panic!("matrix2sym: column index {} out of bounds (0..2)", index),
+        }
+    }
+
     /// Build a matrix from two row vectors.
     pub fn from_rows(r0: vect2sym, r1: vect2sym) -> matrix2sym {
         matrix2sym { rows: [r0, r1] }
@@ -1267,6 +1284,33 @@ mod tests {
         assert_eq!(format!("{}", rt.rows[0].y), "sin(a)");
         assert_eq!(format!("{}", rt.rows[1].x), "-sin(a)");
         assert_eq!(format!("{}", rt.rows[1].y), "cos(a)");
+    }
+
+    #[test]
+    fn matrix2sym_row_col_extract_entries() {
+        // R(a) = [[cos a, -sin a], [sin a, cos a]].
+        let r = matrix2sym::rotation(symbol("a"));
+        assert_eq!(format!("{}", r.row(0).x), "cos(a)");
+        assert_eq!(format!("{}", r.row(0).y), "-sin(a)");
+        assert_eq!(format!("{}", r.row(1).x), "sin(a)");
+        assert_eq!(format!("{}", r.col(0).y), "sin(a)");
+        assert_eq!(format!("{}", r.col(1).x), "-sin(a)");
+    }
+
+    #[test]
+    fn matrix2sym_deriv_is_row_shuffle_of_rotation() {
+        // dR/da = from_rows(-R.row(1), R.row(0)) matches entry-wise
+        // differentiation of R(a); the derivative reuses R's own entries.
+        let a = symbol("a");
+        let r = matrix2sym::rotation(a.clone());
+        let dr = matrix2sym::from_rows(-r.row(1), r.row(0));
+        for i in 0..2 {
+            for (lhs, rhs) in [(&dr.rows[i].x, &r.rows[i].x),
+                               (&dr.rows[i].y, &r.rows[i].y)] {
+                assert_eq!(format!("{}", lhs.clone().simplify()),
+                           format!("{}", rhs.diff("a").simplify()));
+            }
+        }
     }
 
     #[test]

@@ -230,6 +230,8 @@ let v  = vect2sym::new("v");
 let rv = r.clone() * v.clone();               // matrix * vec  -> vect2sym
 let vr = v * r.clone();                       // vec * matrix = M^T v
 let rr = r.clone() * rt;                      // matrix * matrix -> matrix2sym
+let r0 = r.row(0);                            // row as vect2sym
+let c1 = r.col(1);                            // column as vect2sym
 let a  = r.get_rotation_angle();              // E: atan2(m10, m00)
 let d  = r.det();                             // E
 ```
