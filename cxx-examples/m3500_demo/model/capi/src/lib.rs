@@ -943,20 +943,24 @@ pub unsafe extern "C" fn graph_pose2_pos_set_optimize(p: *mut Pose2, v: bool) {
     (*p).pos.optimize = v;
 }
 #[no_mangle]
-pub unsafe extern "C" fn graph_pose2_th(p: *const Pose2) -> f64 {
-    (*p).th.value
+pub unsafe extern "C" fn graph_pose2_rot_angle(p: *const Pose2) -> f64 {
+    (*p).rot.angle.value
 }
 #[no_mangle]
-pub unsafe extern "C" fn graph_pose2_set_th(p: *mut Pose2, v: f64) {
-    (*p).th.value = v;
+pub unsafe extern "C" fn graph_pose2_rot_set_angle(p: *mut Pose2, v: f64) {
+    (*p).rot.angle.value = v;
 }
 #[no_mangle]
-pub unsafe extern "C" fn graph_pose2_th_optimize(p: *const Pose2) -> bool {
-    (*p).th.optimize
+pub unsafe extern "C" fn graph_pose2_rot_angle_optimize(p: *const Pose2) -> bool {
+    (*p).rot.angle.optimize
 }
 #[no_mangle]
-pub unsafe extern "C" fn graph_pose2_th_set_optimize(p: *mut Pose2, v: bool) {
-    (*p).th.optimize = v;
+pub unsafe extern "C" fn graph_pose2_rot_angle_set_optimize(p: *mut Pose2, v: bool) {
+    (*p).rot.angle.optimize = v;
+}
+#[no_mangle]
+pub unsafe extern "C" fn graph_pose2_rot_rotation_matrix(p: *const Pose2) -> CMat2F64 {
+    (*p).rot.rotation_matrix().into()
 }
 #[no_mangle]
 pub unsafe extern "C" fn graph_prior_p(p: *const Prior) -> u32 {

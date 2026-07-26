@@ -239,20 +239,25 @@ class Pose2:
         _f.graph_pose2_pos_set_optimize(self._p, bool(v))
 
     @property
-    def th(self):
-        return _f.graph_pose2_th(self._p)
+    def rot_angle(self):
+        return _f.graph_pose2_rot_angle(self._p)
 
-    @th.setter
-    def th(self, v):
-        _f.graph_pose2_set_th(self._p, v)
+    @rot_angle.setter
+    def rot_angle(self, v):
+        _f.graph_pose2_rot_set_angle(self._p, v)
 
     @property
-    def th_optimize(self):
-        return _f.graph_pose2_th_optimize(self._p)
+    def rot_angle_optimize(self):
+        return _f.graph_pose2_rot_angle_optimize(self._p)
 
-    @th_optimize.setter
-    def th_optimize(self, v):
-        _f.graph_pose2_th_set_optimize(self._p, bool(v))
+    @rot_angle_optimize.setter
+    def rot_angle_optimize(self, v):
+        _f.graph_pose2_rot_angle_set_optimize(self._p, bool(v))
+
+    @property
+    def rot_rotation_matrix(self):
+        """Rotation matrix at the current angle (read-only)."""
+        return _f.graph_pose2_rot_rotation_matrix(self._p)
 
 
 class Prior:

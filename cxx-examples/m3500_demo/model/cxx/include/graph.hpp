@@ -101,10 +101,11 @@ vect2d graph_pose2_pos(const Pose2*);
 void graph_pose2_set_pos(Pose2*, vect2d);
 bool graph_pose2_pos_optimize(const Pose2*);
 void graph_pose2_pos_set_optimize(Pose2*, bool);
-double graph_pose2_th(const Pose2*);
-void graph_pose2_set_th(Pose2*, double);
-bool graph_pose2_th_optimize(const Pose2*);
-void graph_pose2_th_set_optimize(Pose2*, bool);
+double graph_pose2_rot_angle(const Pose2*);
+void graph_pose2_rot_set_angle(Pose2*, double);
+bool graph_pose2_rot_angle_optimize(const Pose2*);
+void graph_pose2_rot_angle_set_optimize(Pose2*, bool);
+matrix2d graph_pose2_rot_rotation_matrix(const Pose2*);
 uint32_t graph_prior_p(const Prior*);
 void graph_prior_set_p(Prior*, uint32_t);
 vect2d graph_prior_pos(const Prior*);
@@ -201,10 +202,12 @@ public:
     void set_pos(vect2d v) { ffi::graph_pose2_set_pos(h_, v); }
     bool pos_optimize() const { return ffi::graph_pose2_pos_optimize(h_); }
     void set_pos_optimize(bool v) { ffi::graph_pose2_pos_set_optimize(h_, v); }
-    double th() const { return ffi::graph_pose2_th(h_); }
-    void set_th(double v) { ffi::graph_pose2_set_th(h_, v); }
-    bool th_optimize() const { return ffi::graph_pose2_th_optimize(h_); }
-    void set_th_optimize(bool v) { ffi::graph_pose2_th_set_optimize(h_, v); }
+    double rot_angle() const { return ffi::graph_pose2_rot_angle(h_); }
+    void set_rot_angle(double v) { ffi::graph_pose2_rot_set_angle(h_, v); }
+    bool rot_angle_optimize() const { return ffi::graph_pose2_rot_angle_optimize(h_); }
+    void set_rot_angle_optimize(bool v) { ffi::graph_pose2_rot_angle_set_optimize(h_, v); }
+    /// Rotation matrix at the current angle (read-only).
+    matrix2d rot_rotation_matrix() const { return ffi::graph_pose2_rot_rotation_matrix(h_); }
 private:
     ffi::Pose2* h_;
 };

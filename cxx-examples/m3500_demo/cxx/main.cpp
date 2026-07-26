@@ -38,7 +38,7 @@ static void load_g2o(const char* path, bool weighted, Graph& graph) {
     for (const auto& p : ds.poses) {
         auto pose = graph.poses().push();
         pose.set_pos(p.t);
-        pose.set_th(p.th);
+        pose.set_rot_angle(p.th);
         // The first pose anchors the gauge.
         if (!graph.has_prior()) {
             auto prior = graph.make_prior();
@@ -77,21 +77,21 @@ static void metrics(Graph& graph, double& ls, double& huber) {
     for (auto e : graph.edges()) {
         auto a = graph.poses().get(e.a());
         auto b = graph.poses().get(e.b());
-        double sa = std::sin(a.th()), ca = std::cos(a.th());
-        double sb = std::sin(b.th()), cb = std::cos(b.th());
+        double sa = std::sin(a.rot_angle()), ca = std::cos(a.rot_angle());
+        double sb = std::sin(b.rot_angle()), cb = std::cos(b.rot_angle());
         vect2d delta = e.delta();
         double gx = a.pos().x + ca * delta.x - sa * delta.y - b.pos().x;
         double gy = a.pos().y + sa * delta.x + ca * delta.y - b.pos().y;
         block((cb * gx + sb * gy) * e.wt(),
               (-sb * gx + cb * gy) * e.wt(),
-              rad_diff(a.th() + e.dth(), b.th()) * e.wr());
+              rad_diff(a.rot_angle() + e.dth(), b.rot_angle()) * e.wr());
     }
     if (graph.has_prior()) {
         auto prior = graph.prior().value();
         auto p = graph.poses().get(prior.p());
         block(p.pos().x - prior.pos().x,
               p.pos().y - prior.pos().y,
-              p.th() - prior.th());
+              p.rot_angle() - prior.th());
     }
 }
 
@@ -175,7 +175,7 @@ int main(int argc, char** argv) {
         std::FILE* f = std::fopen(dump, "w");
         arael_assert_true(f != nullptr);
         for (auto p : graph.poses())
-            std::fprintf(f, "%.17g %.17g %.17g\n", p.pos().x, p.pos().y, p.th());
+            std::fprintf(f, "%.17g %.17g %.17g\n", p.pos().x, p.pos().y, p.rot_angle());
         std::fclose(f);
         std::printf("dumped poses to %s\n", dump);
     }
@@ -186,7 +186,7 @@ int main(int argc, char** argv) {
         if (idxs[k] < graph.poses().size()) {
             auto p = graph.poses()[idxs[k]];
             std::printf("%s: theta=%.6f x=%.6f y=%.6f\n",
-                labels[k], p.th(), p.pos().x, p.pos().y);
+                labels[k], p.rot_angle(), p.pos().x, p.pos().y);
         }
     }
     return 0;

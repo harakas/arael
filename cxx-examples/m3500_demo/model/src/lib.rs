@@ -5,16 +5,19 @@
 //! constraints here are the same, with pub fields and Defaults for the
 //! generated interface.
 
+use arael::angle::AngleParam;
 use arael::model::{Param, SelfBlock, CrossBlock};
 use arael::refs::{self, Ref};
 use arael::vect::vect2d;
 
-/// A 2D pose.
+/// A 2D pose. `rot` is an `AngleParam`: the heading is optimized directly,
+/// and its rotation matrix is built from cached sin/cos so the edge
+/// constraint reads them instead of recomputing trig per observation.
 #[arael::model]
 #[derive(Default)]
 pub struct Pose2 {
     pub pos: Param<vect2d>,
-    pub th: Param<f64>,
+    pub rot: AngleParam<f64>,
     pub hb: SelfBlock<Pose2>,
 }
 
@@ -28,7 +31,7 @@ pub struct Pose2 {
 #[arael(constraint(p.hb, {
     [p.pos.x - prior.pos.x,
      p.pos.y - prior.pos.y,
-     p.th - prior.th]
+     p.rot.angle - prior.th]
 }))]
 #[derive(Default)]
 pub struct Prior {
@@ -43,11 +46,11 @@ pub struct Prior {
 /// unweighted mode.
 #[arael::model]
 #[arael(constraint(hb, {
-    let local = matrix2sym::rotation(b.th).transpose()
-        * (a.pos + matrix2sym::rotation(a.th) * edge.delta - b.pos);
+    let local = b.rot.rotation_matrix.transpose()
+        * (a.pos + a.rot.rotation_matrix * edge.delta - b.pos);
     [local.x * edge.wt,
      local.y * edge.wt,
-     rad_diff(a.th + edge.dth, b.th) * edge.wr]
+     rad_diff(a.rot.angle + edge.dth, b.rot.angle) * edge.wr]
 }))]
 #[derive(Default)]
 pub struct Edge {

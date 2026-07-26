@@ -40,7 +40,7 @@ def load_g2o(path, weighted, graph):
     for p in ds.poses:
         pose = graph.poses.push()
         pose.pos = p.t
-        pose.th = p.th
+        pose.rot_angle = p.th
         if graph.prior is None:
             prior = graph.make_prior()
             prior.p = graph.poses.ref_at(0)
@@ -76,19 +76,19 @@ def metrics(graph):
     for e in graph.edges:
         a = graph.poses.get(e.a)
         b = graph.poses.get(e.b)
-        sa, ca = math.sin(a.th), math.cos(a.th)
-        sb, cb = math.sin(b.th), math.cos(b.th)
+        sa, ca = math.sin(a.rot_angle), math.cos(a.rot_angle)
+        sb, cb = math.sin(b.rot_angle), math.cos(b.rot_angle)
         delta = e.delta
         gx = a.pos.x + ca * delta.x - sa * delta.y - b.pos.x
         gy = a.pos.y + sa * delta.x + ca * delta.y - b.pos.y
         block((cb * gx + sb * gy) * e.wt,
               (-sb * gx + cb * gy) * e.wt,
-              rad_diff(a.th + e.dth, b.th) * e.wr)
+              rad_diff(a.rot_angle + e.dth, b.rot_angle) * e.wr)
     prior = graph.prior
     if prior is not None:
         p = graph.poses.get(prior.p)
         block(p.pos.x - prior.pos.x, p.pos.y - prior.pos.y,
-              p.th - prior.th)
+              p.rot_angle - prior.th)
     return ls, huber
 
 
@@ -158,14 +158,14 @@ def main():
     if dump:
         with open(dump, "w") as f:
             for p in graph.poses:
-                f.write("%.17g %.17g %.17g\n" % (p.pos.x, p.pos.y, p.th))
+                f.write("%.17g %.17g %.17g\n" % (p.pos.x, p.pos.y, p.rot_angle))
         print("dumped poses to %s" % dump)
 
     for label, idx in (("x0", 0), ("x1", 1), ("x3499", 3499)):
         if idx < len(graph.poses):
             p = graph.poses[idx]
             print("%s: theta=%.6f x=%.6f y=%.6f"
-                  % (label, p.th, p.pos.x, p.pos.y))
+                  % (label, p.rot_angle, p.pos.x, p.pos.y))
 
 
 if __name__ == "__main__":
