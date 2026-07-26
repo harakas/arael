@@ -509,6 +509,26 @@ fn eval_expr(expr: &Expr, ctx: &mut ConstraintCtx) -> Result<SymVal, syn::Error>
                 (SymVal::Mat2(m), "transpose") => {
                     Ok(SymVal::Mat2(m.transpose()))
                 }
+                (SymVal::Mat2(m), "col") | (SymVal::Mat2(m), "row") => {
+                    let name = mc.method.to_string();
+                    if mc.args.len() != 1 {
+                        return Err(syn::Error::new_spanned(&mc.method,
+                            format!(".{}() requires 1 argument", name)));
+                    }
+                    let idx = match &mc.args[0] {
+                        syn::Expr::Lit(l) => match &l.lit {
+                            syn::Lit::Int(i) => i.base10_parse::<usize>().ok(),
+                            _ => None,
+                        },
+                        _ => None,
+                    };
+                    match idx {
+                        Some(i) if i < 2 => Ok(SymVal::Vec2(
+                            if name == "col" { m.col(i) } else { m.row(i) })),
+                        _ => Err(syn::Error::new_spanned(&mc.args[0],
+                            format!(".{}() index must be an integer literal 0 or 1", name))),
+                    }
+                }
                 (SymVal::Mat2(m), "det") => Ok(SymVal::Scalar(m.det())),
                 (SymVal::Mat3(m), "det") => Ok(SymVal::Scalar(m.det())),
                 (SymVal::Mat2(m), "get_rotation_angle") => {
@@ -1962,39 +1982,81 @@ fn register_bindings_body(
                 // resolve to reads of the precomputed field, and (for
                 // declared `deriv =` caches) the derivative units to reads
                 // of the cache array -- the rotation-matrix pattern.
+                // Component derivative variables for a `by` param field --
+                // its scalar/vec components as their work symbols.
+                let dvars_for = |by: &str| -> syn::Result<std::vec::Vec<String>> {
+                    let by_sft = layout.fields.iter()
+                        .find(|(n, _)| n == by).map(|(_, t)| t);
+                    let comps_of = |names: &[&str]| -> std::vec::Vec<String> {
+                        names.iter().map(|c|
+                            format!("{}.{}.work().{}", sym_prefix, by, c)).collect()
+                    };
+                    match by_sft {
+                        Some(SymFieldType::Scalar) =>
+                            Ok(vec![format!("{}.{}.work()", sym_prefix, by)]),
+                        Some(SymFieldType::Vec2) => Ok(comps_of(&["x", "y"])),
+                        Some(SymFieldType::Vec3) => Ok(comps_of(&["x", "y", "z"])),
+                        _ => Err(syn::Error::new(proc_macro2::Span::call_site(),
+                            format!("`{}.{}`: `by = {}` must name a scalar, vec2 or \
+                                     vec3 param field", type_name, fname, by))),
+                    }
+                };
                 let val = if let Some(comps) = symval_components(&val) {
                     let mut wrapped = std::vec::Vec::new();
-                    for (suffix, e) in &comps {
-                        let ce = arael_sym::cached(e.clone());
-                        ctx.subs.push((ce.clone(), arael_sym::symbol(
-                            &format!("{}.{}{}", sym_prefix, fname, suffix))));
-                        wrapped.push(ce);
-                    }
-                    for (dfield, of, by) in &layout.deriv_fields {
-                        if of != fname { continue; }
-                        let by_sft = layout.fields.iter()
-                            .find(|(n, _)| n == by).map(|(_, t)| t);
-                        let comps_of = |names: &[&str]| -> std::vec::Vec<String> {
-                            names.iter().map(|c|
-                                format!("{}.{}.work().{}", sym_prefix, by, c)).collect()
-                        };
-                        let dvars: std::vec::Vec<String> = match by_sft {
-                            Some(SymFieldType::Scalar) =>
-                                vec![format!("{}.{}.work()", sym_prefix, by)],
-                            Some(SymFieldType::Vec2) => comps_of(&["x", "y"]),
-                            Some(SymFieldType::Vec3) => comps_of(&["x", "y", "z"]),
-                            _ => return Err(syn::Error::new(
-                                proc_macro2::Span::call_site(),
-                                format!("`{}.{}`: deriv `by = {}` must name a \
-                                         scalar, vec2 or vec3 param field",
-                                    type_name, dfield, by))),
-                        };
-                        for (k, dvar) in dvars.iter().enumerate() {
-                            for (suffix, e) in &comps {
-                                ctx.subs.push((
-                                    arael_sym::cached(e.diff(dvar.as_str())),
-                                    arael_sym::symbol(&format!("{}.{}[{}]{}",
-                                        sym_prefix, dfield, k, suffix))));
+                    if let Some((_, by, atoms)) =
+                        layout.atom_cached_fields.iter().find(|(n, _, _)| n == fname)
+                    {
+                        // The field is computed, not stored: replace its atoms
+                        // (sub-expressions like sin(angle)) with reads of the
+                        // scalar caches. Applied to each value component AND its
+                        // derivative, so both read the caches -- no field storage,
+                        // no re-derived trig. `substitute` carries the signs.
+                        let mut atom_map: std::vec::Vec<(arael_sym::E, arael_sym::E)> =
+                            std::vec::Vec::new();
+                        for (atom_src, cache_field) in atoms {
+                            let parsed: Expr = syn::parse_str(atom_src).map_err(|e| {
+                                syn::Error::new(proc_macro2::Span::call_site(),
+                                    format!("atom `{}` on `{}.{}` does not parse: {}",
+                                        atom_src, type_name, fname, e))
+                            })?;
+                            let atom_e = match eval_expr(&parsed, &mut scratch)? {
+                                SymVal::Scalar(e) => e,
+                                other => return Err(syn::Error::new(
+                                    proc_macro2::Span::call_site(),
+                                    format!("atom `{}` on `{}.{}` must be a scalar, got {}",
+                                        atom_src, type_name, fname, other.type_name()))),
+                            };
+                            atom_map.push((atom_e,
+                                arael_sym::symbol(&format!("{}.{}", sym_prefix, cache_field))));
+                        }
+                        let dvars = dvars_for(by)?;
+                        for (_, e) in &comps {
+                            let ce = arael_sym::cached(e.clone());
+                            ctx.subs.push((ce.clone(), e.substitute(&atom_map)));
+                            for dvar in &dvars {
+                                let de = e.diff(dvar.as_str());
+                                ctx.subs.push((arael_sym::cached(de.clone()),
+                                    de.substitute(&atom_map)));
+                            }
+                            wrapped.push(ce);
+                        }
+                    } else {
+                        for (suffix, e) in &comps {
+                            let ce = arael_sym::cached(e.clone());
+                            ctx.subs.push((ce.clone(), arael_sym::symbol(
+                                &format!("{}.{}{}", sym_prefix, fname, suffix))));
+                            wrapped.push(ce);
+                        }
+                        for (dfield, of, by) in &layout.deriv_fields {
+                            if of != fname { continue; }
+                            let dvars = dvars_for(by)?;
+                            for (k, dvar) in dvars.iter().enumerate() {
+                                for (suffix, e) in &comps {
+                                    ctx.subs.push((
+                                        arael_sym::cached(e.diff(dvar.as_str())),
+                                        arael_sym::symbol(&format!("{}.{}[{}]{}",
+                                            sym_prefix, dfield, k, suffix))));
+                                }
                             }
                         }
                     }

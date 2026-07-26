@@ -87,6 +87,14 @@ struct SymLayout {
     /// Declared Jacobian caches, filled by the symbolic precompute and read
     /// by constraint Jacobians in place of the re-derived expression.
     deriv_fields: Vec<(String, String, String)>,
+    /// Atom-cached symbolic fields: `(field, by_param, [(atom_expr, cache_field)])`.
+    /// The computed `field` is not stored; instead named sub-expressions of it
+    /// (its "atoms", e.g. `sin(angle)`, `cos(angle)`) are precomputed into
+    /// scalar `cache_field`s. Both the field's value reads AND its derivative
+    /// reads (by `by_param`) redirect to those scalar caches, so the field
+    /// needs no storage and no re-derived trig -- e.g. the 2x2 rotation matrix
+    /// and its Jacobian both read the two stored `sin`/`cos` scalars.
+    atom_cached_fields: Vec<(String, String, Vec<(String, String)>)>,
     /// `#[arael(component)]`: this struct is a compound parameter whose
     /// Params fold into the owning struct's span.
     component: bool,
@@ -472,6 +480,40 @@ fn builtin_component_layout(name: &str) -> Option<SymLayout> {
                 ("rotation_matrix_dw".to_string(), "rotation_matrix".to_string(), "w".to_string()),
                 ("translation_dd".to_string(), "translation".to_string(), "d".to_string()),
                 ("translation_dw".to_string(), "translation".to_string(), "w".to_string()),
+            ],
+            component: true,
+            ..Default::default()
+        }),
+        // 2D angle: optimized directly (no reference frame -- there is no
+        // gimbal lock in one dimension), with the rotation matrix and its
+        // derivative cached so a body that rotates through the angle reads
+        // constants instead of rebuilding sin/cos per observation.
+        "AngleParam" | "AngleParamF" => Some(SymLayout {
+            fields: vec![
+                ("angle".to_string(), SymFieldType::Scalar),
+                ("sin".to_string(), SymFieldType::Scalar),
+                ("cos".to_string(), SymFieldType::Scalar),
+            ],
+            collection_fields: Vec::new(),
+            param_fields: vec!["angle".to_string()],
+            ref_paths: Vec::new(),
+            euler_angle_fields: Vec::new(),
+            universal_euler_angle_fields: Vec::new(),
+            universal_rotvec_fields: Vec::new(),
+            symbolic_fields: vec![
+                ("rotation_matrix".to_string(),
+                 "matrix2sym::rotation(angle)".to_string()),
+            ],
+            deriv_fields: Vec::new(),
+            // The rotation matrix is computed, not stored: its sin/cos atoms
+            // are precomputed into the `sin`/`cos` scalars, and both its value
+            // and its Jacobian (by `angle`) read those two floats -- no stored
+            // matrix, no re-derived trig.
+            atom_cached_fields: vec![
+                ("rotation_matrix".to_string(), "angle".to_string(), vec![
+                    ("sin(angle)".to_string(), "sin".to_string()),
+                    ("cos(angle)".to_string(), "cos".to_string()),
+                ]),
             ],
             component: true,
             ..Default::default()
@@ -1472,6 +1514,7 @@ fn register_model_layout(input: &syn::DeriveInput) -> syn::Result<u32> {
         universal_rotvec_fields: universal_rotvec_fields_reg.clone(),
         symbolic_fields: symbolic_fields_reg,
         deriv_fields: deriv_fields_reg,
+        atom_cached_fields: Vec::new(),
         component: is_component,
         constraint_index_field: constraint_index_field_reg,
         self_block_field: self_block_field_reg,
