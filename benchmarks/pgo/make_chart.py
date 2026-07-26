@@ -17,54 +17,54 @@
 # Per panel: (title, [ (label, full_iter_ms, first_iter_ms, kind) ]).
 # full-iter is one complete iteration (t(2 iters) - t(1 iter), setup cancelled).
 # first-iter is that same iteration plus the setup paid once. Their difference
-# is the setup, which the second chart draws. 2026-07-13, min of 32 rounds; one
+# is the setup, which the second chart draws. 2026-07-26, min of 32 rounds; one
 # row per system, its best validated configuration by total time.
 # kind: "arael" solid blue, "other" neutral, "arael*" adds a star to the value.
 # full_iter None -> italic text row (did not converge).
 PANELS = [
     ("M3500 (2D, 10.5k params)", [
-        ("arael (f32)", 1.86, 4.1, "arael"),
-        ("arael (f64)", 2.02, 4.5, "arael"),
-        ("g2o (GN)", 3.36, 7.2, "other"),
-        ("SymForce (f32)", 3.50, 17.9, "other"),
-        ("Ceres (LM)", 4.48, 12.3, "other"),
-        ("factrs (GN)", 6.37, 12.0, "other"),
-        ("GTSAM (GN)", 13.29, 14.0, "other"),
+        ("arael (f32)", 1.60, 4.04, "arael"),
+        ("arael (f64)", 1.87, 4.37, "arael"),
+        ("SymForce (f32)", 3.48, 18.48, "other"),
+        ("g2o (GN)", 3.55, 7.43, "other"),
+        ("Ceres (LM)", 4.88, 12.47, "other"),
+        ("factrs (GN)", 6.16, 12.22, "other"),
+        ("GTSAM (GN)", 13.66, 14.49, "other"),
     ]),
     ("city10000 (2D, 30k params)", [
-        ("arael (f32)", 8.26, 17.0, "arael"),
-        ("arael (f64)", 10.36, 20.0, "arael"),
-        ("g2o (GN)", 16.18, 32.2, "other"),
-        ("SymForce (f64)", 20.64, 89.0, "other"),
-        ("Ceres (LM)", 22.05, 46.8, "other"),
-        ("factrs (GN)", 24.88, 47.0, "other"),
+        ("arael (f32)", 7.53, 16.82, "arael"),
+        ("arael (f64)", 9.54, 19.05, "arael"),
+        ("g2o (GN)", 17.39, 32.61, "other"),
+        ("Ceres (LM)", 21.64, 48.30, "other"),
+        ("SymForce (f64)", 21.82, 91.95, "other"),
+        ("factrs (GN)", 22.90, 45.23, "other"),
         ("GTSAM", None, None, "other"),
     ]),
     ("sphere2500 (3D, 15k params)", [
-        ("arael (f32)", 11.98, 16.6, "arael"),
-        ("arael (f64)", 16.66, 22.3, "arael"),
-        ("g2o (LM)", 18.80, 23.2, "other"),
-        ("Ceres (LM)", 22.68, 35.2, "other"),
-        ("GTSAM (GN)", 28.03, 27.3, "other"),
-        ("factrs (GN)", 35.77, 53.2, "other"),
-        ("SymForce (f32)", 71.45, 93.7, "other"),
+        ("arael (f32)", 11.18, 16.50, "arael"),
+        ("arael (f64)", 16.12, 21.80, "arael"),
+        ("g2o (LM)", 19.19, 23.58, "other"),
+        ("Ceres (LM)", 22.85, 35.75, "other"),
+        ("factrs (GN)", 26.41, 44.01, "other"),
+        ("GTSAM (GN)", 28.21, 28.24, "other"),
+        ("SymForce (f32)", 73.60, 95.56, "other"),
     ]),
     ("parking-garage (3D, 10k params)", [
-        ("arael (f32)", 4.07, 8.1, "arael*"),
-        ("arael (f64)", 4.62, 8.9, "arael"),
-        ("g2o (GN)", 6.49, 12.2, "other"),
-        ("SymForce (f64)", 8.63, 30.6, "other"),
-        ("Ceres (LM)", 12.20, 26.7, "other"),
-        ("GTSAM (GN)", 13.58, 13.6, "other"),
-        ("factrs (GN)", 32.40, 56.4, "other"),
+        ("arael (f32)", 3.82, 7.56, "arael*"),
+        ("arael (f64)", 4.33, 8.33, "arael"),
+        ("g2o (GN)", 6.32, 11.62, "other"),
+        ("SymForce (f32)", 9.29, 27.86, "other"),
+        ("Ceres (LM)", 12.08, 26.17, "other"),
+        ("GTSAM (GN)", 13.21, 13.37, "other"),
+        ("factrs (GN)", 20.17, 43.76, "other"),
     ]),
 ]
 
 # Axis per panel, per chart: the two charts plot different quantities, so they
 # do not share a scale. (x_max, tick), in PANELS order.
 AXES = {
-    "iter":  [(15.0, 5.0), (26.0, 10.0), (75.0, 20.0), (34.0, 10.0)],
-    "setup": [(20.0, 5.0), (90.0, 30.0), (100.0, 25.0), (60.0, 20.0)],
+    "iter":  [(15.0, 5.0), (26.0, 10.0), (75.0, 20.0), (22.0, 5.0)],
+    "setup": [(20.0, 5.0), (100.0, 30.0), (100.0, 25.0), (60.0, 20.0)],
 }
 
 # The two charts. "iter" is the front-page one: one bar, the durable

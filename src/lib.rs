@@ -124,8 +124,8 @@
 //! # Benchmarks
 //!
 //! <picture>
-//!   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/charts/v0.7.1/pgo-dark.svg">
-//!   <img alt="2x2 bar charts of per-iteration solve time on the M3500, city10000, sphere2500 and parking-garage pose graphs, comparing arael in f32 and f64 against g2o, Ceres, SymForce, factrs and GTSAM" src="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/charts/v0.7.1/pgo-light.svg">
+//!   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/charts/v0.8.0/pgo-dark.svg">
+//!   <img alt="2x2 bar charts of per-iteration solve time on the M3500, city10000, sphere2500 and parking-garage pose graphs, comparing arael in f32 and f64 against g2o, Ceres, SymForce, factrs and GTSAM" src="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/charts/v0.8.0/pgo-light.svg">
 //! </picture>
 //!
 //! Time per iteration on the four canonical pose-graph datasets, 2D and
@@ -149,8 +149,8 @@
 //! [benchmarks/plane](https://github.com/harakas/arael/tree/master/benchmarks/plane).
 //!
 //! <picture>
-//!   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/charts/v0.7.1/slam-loc-dark.svg">
-//!   <img alt="Two bar charts of per-iteration solve time: landmark SLAM at 300 poses on an Apple M4 Pro, and localization at 60 poses on a Raspberry Pi 5" src="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/charts/v0.7.1/slam-loc-light.svg">
+//!   <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/charts/v0.8.0/slam-loc-dark.svg">
+//!   <img alt="Two bar charts of per-iteration solve time: landmark SLAM at 300 poses on an Apple M4 Pro, and localization at 60 poses on a Raspberry Pi 5" src="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/charts/v0.8.0/slam-loc-light.svg">
 //! </picture>
 //!
 //! The same per-iteration metric on the landmark-SLAM benchmark and on
