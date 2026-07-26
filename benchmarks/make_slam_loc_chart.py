@@ -23,13 +23,13 @@ PANELS = [
     # validated configuration per system: Ceres is sparse_schur (iterative_schur
     # is inexact and misses the gate), SymForce is f64.
     ("Landmark SLAM -- 300 poses, 5.4k params (Apple M4 Pro)", 1, [
-        ("arael (f32)", 31.04, 39.29, "arael"),
-        ("arael (f64)", 44.16, 53.55, "arael"),
-        ("g2o (LM)", 60.29, 111.83, "other"),
-        ("Ceres (LM)", 81.87, 157.95, "other"),
-        ("factrs (LM)", 120.73, 173.36, "other"),
-        ("SymForce (f64)", 132.51, 224.34, "other"),
-        ("GTSAM (LM)", 153.17, 167.10, "other"),
+        ("arael (f32)", 27.82, 37.66, "arael"),
+        ("arael (f64)", 40.76, 59.56, "arael"),
+        ("g2o (LM)", 60.57, 111.16, "other"),
+        ("Ceres (LM)", 82.12, 157.01, "other"),
+        ("factrs (LM)", 122.27, 173.27, "other"),
+        ("SymForce (f64)", 128.78, 224.71, "other"),
+        ("GTSAM (LM)", 153.02, 164.91, "other"),
     ]),
     # 2026-07-26, min of 32 rounds (benchmarks/loc README, Pi 5 table). Best
     # validated configuration per system: Ceres is sparse_cholesky (a fixed
