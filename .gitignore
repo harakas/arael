@@ -1,6 +1,9 @@
-/target
+# Every workspace's build dir, not just the root one: benchmarks/, cxx-tests/,
+# cxx-examples/ and export-tests/ are workspaces of their own.
+target/
 *.swp
 *.swo
+*.log
 arael-sketch/dist/
 tmp/
 __pycache__
