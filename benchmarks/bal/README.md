@@ -212,6 +212,21 @@ here would need the data fixed and/or a loss function that tolerates a degenerat
 projection. The smaller datasets carry no such observation, which is why f32
 solves them.
 
+The four tables above, drawn as one iteration plus the setup it pays once,
+one cell per dataset:
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/charts/v0.8.0/bal-dark.svg">
+  <img alt="2x2 bar charts of bundle-adjustment solve time on the four Ladybug datasets: each system's bar split into one complete iteration and the setup it pays once" src="../charts/v0.8.0/bal-light.svg">
+</picture>
+
+`../make_bal_chart.py` (stdlib only) writes this 2x2 (`bal-*.svg`), one cell
+per results table, every row of every table a bar -- BAL compares linear
+solvers, so arael's two routes and Ceres's three each get one. The rows that
+cannot run (arael's f32 pair on Ladybug-1723) have no bar. After re-running
+the benchmark, update the `PANELS` data (full-iter and 1st-iter per row) and
+re-run it.
+
 ## The Schur reduction, and the ordering it needs
 
 **Marginalizing the points is automatic.** arael's sparse backend defaults to
