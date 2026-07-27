@@ -65,17 +65,27 @@ fn ceres_radius0(b: &Bench, linsolver: &str) -> f64 {
 
 /// Exploratory (BAL_ONLY=1723). It is not a result yet: with the shared 1e-5
 /// tolerances no system converges here, so the mutual validation gate cannot
-/// pass, and arael's f32 assembly overflows to a NaN Hessian diagonal at 485k
-/// parameters whatever the damping. What the damping below DOES buy is a
-/// measurable iteration -- the first two steps land, so full-iter exists.
+/// pass. What the damping below DOES buy is a measurable iteration -- the first
+/// two steps land, so full-iter exists.
+///
+/// f32 does not run the `-pre` file at all: 213 of its observations sit on or
+/// behind the optical centre, where the depth cancels to ~3e-8 and rounds to
+/// zero in single precision, so the perspective divide reaches the Hessian
+/// diagonal as a NaN. It is the data, not the parameter count -- `clean_bal.py`
+/// writes the filtered problem the `-clean` row below reads.
 ///
 /// Both values come from BAL_LAMBDAS (see `lambda_sweep`). 485k parameters need
 /// far heavier damping than the small problems: arael's second step is rejected
 /// at anything below 5e-2 (1e-1 keeps a margin), and Ceres's second step is
 /// rejected at its shipped 1e4 and at 1e2, landing at 1e1 for both of its rows.
 /// g2o keeps its own auto-lambda heuristic, which already lands both steps.
-const EXPLORATORY: [Bench; 1] = [
+///
+/// Neither file is vendored (both are large); a missing one is reported and
+/// skipped. `./fetch_datasets.sh` gets `-pre`, `clean_bal.py` derives `-clean`.
+const EXPLORATORY: [Bench; 2] = [
     Bench { name: "Ladybug-1723", path: "datasets/problem-1723-156502-pre.txt",
+            dense_schur: false, lambda0: 1e-1, ceres_radius0: 1e1 },
+    Bench { name: "Ladybug-1723-clean", path: "datasets/problem-1723-156502-clean.txt",
             dense_schur: false, lambda0: 1e-1, ceres_radius0: 1e1 },
 ];
 
@@ -87,6 +97,8 @@ fn routes() -> Vec<(Route, bool)> {
         (Route::Sparse, true),
         (Route::Schur, false),
         (Route::Schur, true),
+        (Route::SchurCg, false),
+        (Route::SchurCg, true),
     ];
     #[cfg(feature = "cholmod-gpl")]
     r.push((Route::CholmodGpl, false));
