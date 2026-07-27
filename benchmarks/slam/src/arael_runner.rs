@@ -311,24 +311,26 @@ fn narrow_band_enabled() -> bool {
     std::env::var("SLAM_NARROW_BAND").map_or(false, |v| v == "1")
 }
 
+type Solved<T> = Result<arael::simple_lm::LmResult<T>, arael::simple_lm::SolveFailure<T>>;
+
 fn solve64(params: &[f64], path: &mut Path, cfg: &arael::simple_lm::LmConfig<f64>)
-    -> arael::simple_lm::LmResult<f64> {
+    -> Solved<f64> {
     match std::env::var("SLAM_ARAEL_SOLVER").as_deref() {
         Ok("eigen") => {
             #[cfg(feature = "eigen")]
-            return arael::simple_lm::solve_sparse_eigen(params, path, cfg).unwrap();
+            return arael::simple_lm::solve_sparse_eigen(params, path, cfg);
             #[cfg(not(feature = "eigen"))]
             panic!("SLAM_ARAEL_SOLVER=eigen requires building with --features eigen");
         }
         Ok("cholmod") => {
             #[cfg(feature = "cholmod")]
-            return arael::simple_lm::solve_sparse_cholmod(params, path, cfg).unwrap();
+            return arael::simple_lm::solve_sparse_cholmod(params, path, cfg);
             #[cfg(not(feature = "cholmod"))]
             panic!("SLAM_ARAEL_SOLVER=cholmod requires building with --features cholmod");
         }
         Ok("cholmod_gpl") => {
             #[cfg(feature = "cholmod-gpl")]
-            return arael::simple_lm::solve_sparse_cholmod_supernodal(params, path, cfg).unwrap();
+            return arael::simple_lm::solve_sparse_cholmod_supernodal(params, path, cfg);
             #[cfg(not(feature = "cholmod-gpl"))]
             panic!("SLAM_ARAEL_SOLVER=cholmod_gpl requires building with --features cholmod-gpl");
         }
@@ -343,7 +345,7 @@ fn solve64(params: &[f64], path: &mut Path, cfg: &arael::simple_lm::LmConfig<f64
                     .with_policy(arael::simple_lm::SchurPolicy::Never),
                 path,
                 cfg,
-            ).unwrap()
+            )
         }
         _ => {
             // Default: the backend decides for itself. It finds the
@@ -354,7 +356,7 @@ fn solve64(params: &[f64], path: &mut Path, cfg: &arael::simple_lm::LmConfig<f64
                 &mut arael::simple_lm::SparseFaer::new().with_narrow_band(narrow_band_enabled()),
                 path,
                 cfg,
-            ).unwrap()
+            )
         }
     }
 }
@@ -424,7 +426,7 @@ fn cfg32(max_iters: usize, poses: usize) -> arael::simple_lm::LmConfig<f32> {
 }
 
 fn solve32(params: &[f32], path: &mut PathF, cfg: &arael::simple_lm::LmConfig<f32>)
-    -> arael::simple_lm::LmResult<f32> {
+    -> Solved<f32> {
     if std::env::var("SLAM_ARAEL_SOLVER").as_deref() == Ok("faer") {
         return arael::simple_lm::lm_solve(
             params,
@@ -432,10 +434,10 @@ fn solve32(params: &[f32], path: &mut PathF, cfg: &arael::simple_lm::LmConfig<f3
                 .with_policy(arael::simple_lm::SchurPolicy::Never),
             path,
             cfg,
-        ).unwrap();
+        );
     }
     arael::simple_lm::lm_solve(
-        params, &mut arael::simple_lm::SparseFaerF32::new().with_narrow_band(narrow_band_enabled()), path, cfg).unwrap()
+        params, &mut arael::simple_lm::SparseFaerF32::new().with_narrow_band(narrow_band_enabled()), path, cfg)
 }
 
 // Capped single solve (no timing) -- used for peak-memory measurement.
@@ -443,7 +445,7 @@ pub fn run_capped(scene: &Scene, max_iters: usize) -> Solution {
     let mut path = build(scene);
     let mut params: Vec<f64> = Vec::new();
     path.serialize64(&mut params);
-    let result = solve64(&params, &mut path, &cfg(max_iters));
+    let result = solve64(&params, &mut path, &cfg(max_iters)).expect("capped solve failed");
     path.deserialize64(&result.x);
     extract(&path)
 }
@@ -452,7 +454,8 @@ pub fn run_f32_capped(scene: &Scene, max_iters: usize) -> Solution {
     let mut path = build_f32(scene);
     let mut params: Vec<f32> = Vec::new();
     path.serialize32(&mut params);
-    let result = solve32(&params, &mut path, &cfg32(max_iters, scene.poses.len()));
+    let result = solve32(&params, &mut path, &cfg32(max_iters, scene.poses.len()))
+        .expect("capped solve failed");
     path.deserialize32(&result.x);
     extract_f32(&path)
 }
@@ -476,7 +479,7 @@ impl bench_harness::arael::Model for Path {
     fn deserialize(&mut self, x: &[f64]) { self.deserialize64(x); }
     fn solution(&self) -> Solution { extract(self) }
     fn solve(_: &Self::Input, params: &[f64], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f64>)
-        -> arael::simple_lm::LmResult<f64> { solve64(params, m, cfg) }
+        -> Solved<f64> { solve64(params, m, cfg) }
     fn tune(cfg: &mut arael::simple_lm::LmConfig<f64>) {
         cfg.gradient_tolerance = std::env::var("SLAM_GTOL").ok().and_then(|v| v.parse().ok());
         cfg.predicted_reduction_tolerance = std::env::var("SLAM_PRED_TOL").ok().and_then(|v| v.parse().ok());
@@ -495,14 +498,15 @@ impl bench_harness::arael::Model for PathF {
     fn deserialize(&mut self, x: &[f32]) { self.deserialize32(x); }
     fn solution(&self) -> Solution { extract_f32(self) }
     fn solve(_: &Self::Input, params: &[f32], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f32>)
-        -> arael::simple_lm::LmResult<f32> { solve32(params, m, cfg) }
+        -> Solved<f32> { solve32(params, m, cfg) }
     fn tune(cfg: &mut arael::simple_lm::LmConfig<f32>) {
         cfg.gradient_tolerance = std::env::var("SLAM_GTOL").ok().and_then(|v| v.parse().ok());
         cfg.predicted_reduction_tolerance = std::env::var("SLAM_PRED_TOL").ok().and_then(|v| v.parse().ok());
     }
 }
 
-pub type RunOut = bench_harness::table::Row<Solution>;
+/// `Err` is why the solve failed, for the table to show in place of the row.
+pub type RunOut = Result<bench_harness::table::Row<Solution>, String>;
 
 pub fn run(scene: &Scene) -> RunOut { bench_harness::arael::run::<Path>(scene) }
 pub fn run_f32(scene: &Scene) -> RunOut { bench_harness::arael::run::<PathF>(scene) }
@@ -537,7 +541,7 @@ pub fn cov_bench(scene: &Scene, budget_s: f64, cap: usize) -> CovScaling {
     let mut path = build(scene);
     let mut params: Vec<f64> = Vec::new();
     path.serialize64(&mut params);
-    let result = solve64(&params, &mut path, &cfg(200));
+    let result = solve64(&params, &mut path, &cfg(200)).expect("covariance solve failed");
     path.deserialize64(&result.x);
     let (np, nl) = (path.poses.len(), path.landmarks.len());
     let budget = Duration::from_secs_f64(budget_s);

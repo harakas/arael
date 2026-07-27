@@ -256,24 +256,26 @@ pub fn backend() -> String {
     }
 }
 
+type Solved<T> = Result<arael::simple_lm::LmResult<T>, arael::simple_lm::SolveFailure<T>>;
+
 fn solve64(params: &[f64], path: &mut Path, cfg: &arael::simple_lm::LmConfig<f64>)
-    -> arael::simple_lm::LmResult<f64> {
+    -> Solved<f64> {
     match solver_kind().as_str() {
         "faer" => arael::simple_lm::solve_sparse(params, path, cfg),
         "narrow_band" => arael::simple_lm::lm_solve(
             params, &mut arael::simple_lm::SparseFaer::new().with_narrow_band(true), path, cfg),
         _ => arael::simple_lm::solve_band(params, BAND_KD, path, cfg),
-    }.unwrap()
+    }
 }
 
 fn solve32(params: &[f32], path: &mut PathF, cfg: &arael::simple_lm::LmConfig<f32>)
-    -> arael::simple_lm::LmResult<f32> {
+    -> Solved<f32> {
     match solver_kind().as_str() {
         "faer" => arael::simple_lm::solve_sparse_f32(params, path, cfg),
         "narrow_band" => arael::simple_lm::lm_solve(
             params, &mut arael::simple_lm::SparseFaerF32::new().with_narrow_band(true), path, cfg),
         _ => arael::simple_lm::solve_band_f32(params, BAND_KD, path, cfg),
-    }.unwrap()
+    }
 }
 
 // ----------------------------------------------------------- covariance
@@ -310,7 +312,7 @@ pub fn cov_bench(scene: &Scene, budget_s: f64, cap: usize) -> CovScaling {
     let mut params: Vec<f64> = Vec::new();
     path.serialize64(&mut params);
     let cfg = bench_harness::arael::config::<Path>(scene, 200);
-    let result = solve64(&params, &mut path, &cfg);
+    let result = solve64(&params, &mut path, &cfg).expect("covariance solve failed");
     path.deserialize64(&result.x);
     let np = path.poses.len();
     let last = np - 1;
@@ -382,7 +384,7 @@ impl bench_harness::arael::Model for Path {
     fn deserialize(&mut self, x: &[f64]) { self.deserialize64(x); }
     fn solution(&self) -> Solution { extract(self) }
     fn solve(_: &Self::Input, params: &[f64], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f64>)
-        -> arael::simple_lm::LmResult<f64> { solve64(params, m, cfg) }
+        -> Solved<f64> { solve64(params, m, cfg) }
 }
 
 impl bench_harness::arael::Model for PathF {
@@ -403,10 +405,11 @@ impl bench_harness::arael::Model for PathF {
     fn deserialize(&mut self, x: &[f32]) { self.deserialize32(x); }
     fn solution(&self) -> Solution { extract_f32(self) }
     fn solve(_: &Self::Input, params: &[f32], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f32>)
-        -> arael::simple_lm::LmResult<f32> { solve32(params, m, cfg) }
+        -> Solved<f32> { solve32(params, m, cfg) }
 }
 
-pub type RunOut = bench_harness::table::Row<Solution>;
+/// `Err` is why the solve failed, for the table to show in place of the row.
+pub type RunOut = Result<bench_harness::table::Row<Solution>, String>;
 
 pub fn run(scene: &Scene) -> RunOut { bench_harness::arael::run::<Path>(scene) }
 pub fn run_f32(scene: &Scene) -> RunOut { bench_harness::arael::run::<PathF>(scene) }
@@ -437,7 +440,8 @@ fn solve_capped<M: bench_harness::arael::Model<Input = Scene, Solution = Solutio
     let mut params: Vec<M::Scalar> = Vec::new();
     model.serialize(&mut params);
     let cfg = bench_harness::arael::config::<M>(scene, max_iters);
-    let result = <M as bench_harness::arael::Model>::solve(scene, &params, &mut model, &cfg);
+    let result = <M as bench_harness::arael::Model>::solve(scene, &params, &mut model, &cfg)
+        .expect("capped solve failed");
     model.deserialize(&result.x);
     model.solution()
 }
@@ -458,6 +462,7 @@ fn timed_once<M: bench_harness::arael::Model<Input = Scene>>(
     model.serialize(&mut params);
     let cfg = bench_harness::arael::config::<M>(scene, 200);
     <M as bench_harness::arael::Model>::solve(scene, &params, &mut model, &cfg)
+        .expect("timed solve failed")
         .timing
         .expect("gather_timing is on")
 }

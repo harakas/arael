@@ -96,18 +96,57 @@ pub trait Geometry {
 pub struct Table<'a, G: Geometry> {
     geometry: &'a G,
     cells: Vec<(String, Row<G::Solution>, f64)>, // label, row, cost
+    /// Systems whose solve failed, label -> why. They still get a row, all
+    /// dashes, and still count against the validation total: a system that
+    /// could not run is a result, and dropping it silently hides it.
+    failed: Vec<(String, String)>,
+    /// Every label in the order it was first seen, across both of the above,
+    /// so a failed row prints where it belongs rather than at the end.
+    order: Vec<String>,
     /// Reported under the table: a system that crashed, a note about a row.
     pub notes: BTreeSet<String>,
 }
 
 impl<'a, G: Geometry> Table<'a, G> {
     pub fn new(geometry: &'a G) -> Self {
-        Table { geometry, cells: Vec::new(), notes: BTreeSet::new() }
+        Table {
+            geometry,
+            cells: Vec::new(),
+            failed: Vec::new(),
+            order: Vec::new(),
+            notes: BTreeSet::new(),
+        }
+    }
+
+    fn note_order(&mut self, label: &str) {
+        if !self.order.iter().any(|l| l == label) {
+            self.order.push(label.to_string());
+        }
+    }
+
+    /// Record whatever the arael runner came back with: a row, or why there
+    /// isn't one.
+    pub fn record_result(&mut self, label: &str, row: Result<Row<G::Solution>, String>) {
+        match row {
+            Ok(r) => self.record(label, r),
+            Err(why) => self.record_failure(label, why),
+        }
+    }
+
+    /// Record that this system could not produce a row, and why. Rounds after
+    /// the first keep the first reason -- the solve is deterministic, so they
+    /// all say the same thing.
+    pub fn record_failure(&mut self, label: &str, why: impl std::fmt::Display) {
+        self.note_order(label);
+        if !self.failed.iter().any(|(l, _)| l == label) {
+            self.failed.push((label.to_string(), why.to_string()));
+        }
     }
 
     /// Record one round of one system. Times are the minimum over rounds --
     /// contention only ever slows a run down.
     pub fn record(&mut self, label: &str, row: Row<G::Solution>) {
+        self.note_order(label);
         let cost = self.geometry.cost(&row.solution);
         if let Some((_, prev, _)) = self.cells.iter_mut().find(|(l, _, _)| l == label) {
             prev.solve_ms = prev.solve_ms.min(row.solve_ms);
@@ -140,6 +179,16 @@ impl<'a, G: Geometry> Table<'a, G> {
     /// Hard asserts: arael's f64 must converge, and at least one external system
     /// must agree on the optimum -- an independent-implementation anchor.
     pub fn print(&self) {
+        if self.cells.is_empty() {
+            // Nothing to compare against, so there is no optimum and no
+            // validation -- but the failures are still the result.
+            let w = self.order.iter().map(|l| l.len()).max().unwrap_or(18).max(6);
+            for (label, why) in &self.failed {
+                println!("{:<w$}  <- {}", label, why, w = w);
+            }
+            println!("validation: no system produced a row");
+            return;
+        }
         let best_i = (0..self.cells.len())
             .min_by(|&i, &j| self.cells[i].2.partial_cmp(&self.cells[j].2).unwrap())
             .expect("no rows recorded");
@@ -151,7 +200,7 @@ impl<'a, G: Geometry> Table<'a, G> {
                 && G::distance(&best_solution, &row.solution) < gate
         };
 
-        let w = self.cells.iter().map(|(l, _, _)| l.len()).max().unwrap_or(18).max(6);
+        let w = self.order.iter().map(|l| l.len()).max().unwrap_or(18).max(6);
         let any_mem = self.cells.iter().any(|(_, r, _)| r.peak_mb.is_some());
         let mem_head = if any_mem { format!("{:>9}", "peak MB") } else { String::new() };
         // ms/iter divides the whole solve by every ATTEMPT, so it carries the
@@ -163,7 +212,16 @@ impl<'a, G: Geometry> Table<'a, G> {
         println!("\n{:<w$} {:>10} {:>9} {:>10} {:>10} {:>12}{} {:>14}",
             "system", "total ms", "iters", "ms/iter", "full-iter", "1st-iter ms",
             mem_head, "final cost", w = w);
-        for (label, row, cost) in &self.cells {
+        for label in &self.order {
+            if let Some((_, why)) = self.failed.iter().find(|(l, _)| l == label) {
+                let mem = if any_mem { format!("{:>9}", "-") } else { String::new() };
+                println!("{:<w$} {:>10} {:>9} {:>10} {:>10} {:>12}{} {:>14}  <- {}",
+                    label, "-", "-", "-", "-", "-", mem, "-", why, w = w);
+                continue;
+            }
+            let (_, row, cost) = self.cells.iter().find(|(l, _, _)| l == label)
+                .expect("every ordered label is either a cell or a failure");
+            let cost = *cost;
             let iters = match row.accepted {
                 Some(a) => format!("{}({})", a, row.iterations),
                 None => format!("{}", row.iterations),
@@ -183,7 +241,7 @@ impl<'a, G: Geometry> Table<'a, G> {
                 String::new()
             };
             let dist = G::distance(&best_solution, &row.solution);
-            let miss = if !converged(label, row, *cost) {
+            let miss = if !converged(label, row, cost) {
                 format!("  <- did not reach the common optimum (distance {:.2e})", dist)
             } else if dist >= G::DISTANCE_GATE {
                 // Inside its own gate but outside the double-precision one:
@@ -213,10 +271,12 @@ impl<'a, G: Geometry> Table<'a, G> {
         for note in &notes {
             println!("{:<w$} {}", "", note, w = w);
         }
+        // The denominator is every system asked for, failures included: a row
+        // that could not run is one that did not reach the optimum.
         let conv = self.cells.iter().filter(|(l, r, c)| converged(l, r, *c)).count();
         println!("validation: {}/{} systems at the common optimum ({:.4}: cost within \
                   1%, {}; f32 rows {:.0}x that), anchored by {} external system(s)",
-            conv, self.cells.len(), best, G::DISTANCE_GATE_NAME,
+            conv, self.order.len(), best, G::DISTANCE_GATE_NAME,
             G::DISTANCE_GATE_F32 / G::DISTANCE_GATE, external_agree);
     }
 }

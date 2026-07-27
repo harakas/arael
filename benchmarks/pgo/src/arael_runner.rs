@@ -134,24 +134,26 @@ pub(crate) fn ordering() -> arael::simple_lm::FaerOrdering {
     }
 }
 
+pub type Solved<T> = Result<arael::simple_lm::LmResult<T>, arael::simple_lm::SolveFailure<T>>;
+
 /// The two solvers, one per scalar. This is the one thing the generic pipeline
 /// cannot pick for itself. The per-solve TIMING breakdown is the harness's.
 pub fn solve_f64<P: arael::simple_lm::LmProblem<f64>>(
     params: &[f64],
     p: &mut P,
     cfg: &arael::simple_lm::LmConfig<f64>,
-) -> arael::simple_lm::LmResult<f64> {
+) -> Solved<f64> {
     let mut solver = arael::simple_lm::SparseFaer::new().with_ordering(ordering());
-    arael::simple_lm::lm_solve(params, &mut solver, p, cfg).unwrap()
+    arael::simple_lm::lm_solve(params, &mut solver, p, cfg)
 }
 
 pub fn solve_f32<P: arael::simple_lm::LmProblem<f32>>(
     params: &[f32],
     p: &mut P,
     cfg: &arael::simple_lm::LmConfig<f32>,
-) -> arael::simple_lm::LmResult<f32> {
+) -> Solved<f32> {
     let mut solver = arael::simple_lm::SparseFaerF32::new().with_ordering(ordering());
-    arael::simple_lm::lm_solve(params, &mut solver, p, cfg).unwrap()
+    arael::simple_lm::lm_solve(params, &mut solver, p, cfg)
 }
 
 // Initial damping, problem-appropriate for well-initialized 2D pose graphs (the
@@ -172,7 +174,7 @@ impl Pipeline for Graph {
     fn deserialize(&mut self, x: &[f64]) { self.deserialize64(x); }
     fn solution(&self) -> Vec<PoseIn> { solution_parts(&self.poses) }
     fn solve(_: &Self::Input, params: &[f64], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f64>)
-        -> arael::simple_lm::LmResult<f64> { solve_f64(params, m, cfg) }
+        -> Solved<f64> { solve_f64(params, m, cfg) }
 }
 
 impl Pipeline for GraphF {
@@ -188,10 +190,11 @@ impl Pipeline for GraphF {
     fn deserialize(&mut self, x: &[f32]) { self.deserialize32(x); }
     fn solution(&self) -> Vec<PoseIn> { solution_parts(&self.poses) }
     fn solve(_: &Self::Input, params: &[f32], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f32>)
-        -> arael::simple_lm::LmResult<f32> { solve_f32(params, m, cfg) }
+        -> Solved<f32> { solve_f32(params, m, cfg) }
 }
 
-pub type RunOut = Row<Vec<PoseIn>>;
+/// `Err` is why the solve failed, for the table to show in place of the row.
+pub type RunOut = Result<Row<Vec<PoseIn>>, String>;
 
 pub fn run_f64(ds: &Dataset) -> RunOut { run::<Graph>(ds) }
 pub fn run_f32(ds: &Dataset) -> RunOut { run::<GraphF>(ds) }

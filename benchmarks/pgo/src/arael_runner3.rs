@@ -152,7 +152,7 @@ impl Pipeline for Graph3 {
     fn deserialize(&mut self, x: &[f64]) { self.deserialize64(x); }
     fn solution(&self) -> Vec<Pose3In> { solution_parts(&self.poses) }
     fn solve(_: &Self::Input, params: &[f64], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f64>)
-        -> arael::simple_lm::LmResult<f64> {
+        -> crate::arael_runner::Solved<f64> {
         crate::arael_runner::solve_f64(params, m, cfg)
     }
 }
@@ -167,12 +167,13 @@ impl Pipeline for Graph3F {
     fn deserialize(&mut self, x: &[f32]) { self.deserialize32(x); }
     fn solution(&self) -> Vec<Pose3In> { solution_parts(&self.poses) }
     fn solve(_: &Self::Input, params: &[f32], m: &mut Self, cfg: &arael::simple_lm::LmConfig<f32>)
-        -> arael::simple_lm::LmResult<f32> {
+        -> crate::arael_runner::Solved<f32> {
         crate::arael_runner::solve_f32(params, m, cfg)
     }
 }
 
-pub type RunOut3 = Row<Vec<Pose3In>>;
+/// `Err` is why the solve failed, for the table to show in place of the row.
+pub type RunOut3 = Result<Row<Vec<Pose3In>>, String>;
 
 pub fn run_f64(ds: &Dataset3) -> RunOut3 { run::<Graph3>(ds) }
 pub fn run_f32(ds: &Dataset3) -> RunOut3 { run::<Graph3F>(ds) }

@@ -199,11 +199,11 @@ fn main() {
     for _ in 0..rounds {
         if want("arael LM f64") {
         let a = arael_runner::run(&scene);
-        t.record("arael LM f64", a);
+        t.record_result("arael LM f64", a);
         }
         if want("arael LM f32") {
         let a32 = arael_runner::run_f32(&scene);
-        t.record("arael LM f32", a32);
+        t.record_result("arael LM f32", a32);
         }
         if !skip_tiny && want("tiny-solver LM") {
             t.record("tiny-solver LM", tiny_runner::run_lm(&scene));

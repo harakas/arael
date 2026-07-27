@@ -163,6 +163,8 @@ fn lambda_floor() -> f64 {
         .unwrap_or(1e-12)
 }
 
+type Solved<T> = Result<arael::simple_lm::LmResult<T>, arael::simple_lm::SolveFailure<T>>;
+
 // The two arael linear-solver routes the benchmark compares.
 //
 // `sparse` factorizes the full camera+point system with faer (no
@@ -170,15 +172,15 @@ fn lambda_floor() -> f64 {
 // BAL, unlike the slam benchmark). `schur` marginalizes the points on
 // every damped solve and factorizes only the camera system. Which wins
 // depends on the camera count -- see the README.
-fn solve64(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmConfig<f64>) -> arael::simple_lm::LmResult<f64> {
+fn solve64(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmConfig<f64>) -> Solved<f64> {
     // The plain row: the whole system, no reduction. Without the policy the
     // backend would marginalize the points itself -- that is the other row.
     let mut solver = arael::simple_lm::SparseFaer::new()
         .with_policy(arael::simple_lm::SchurPolicy::Never);
-    arael::simple_lm::lm_solve(params, &mut solver, s, cfg).unwrap()
+    arael::simple_lm::lm_solve(params, &mut solver, s, cfg)
 }
 
-fn solve64_schur(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmConfig<f64>) -> arael::simple_lm::LmResult<f64> {
+fn solve64_schur(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmConfig<f64>) -> Solved<f64> {
     // No hint: the eliminable blocks are detected from the model's coupling
     // graph. Forced, so the benchmark measures the reduction itself rather
     // than the policy's verdict about it.
@@ -201,7 +203,7 @@ fn solve64_schur(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmConfig
     let mut solver = arael::simple_lm::SparseFaer::new()
         .with_policy(policy)
         .with_ordering(ordering);
-    let r = arael::simple_lm::lm_solve(params, &mut solver, s, cfg).unwrap();
+    let r = arael::simple_lm::lm_solve(params, &mut solver, s, cfg);
     if std::env::var("BAL_SCHUR_PLAN").is_ok() {
         if let Some(p) = solver.plan() {
             eprintln!("schur plan: {:?}", p);
@@ -210,15 +212,15 @@ fn solve64_schur(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmConfig
     r
 }
 
-fn solve32(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmConfig<f32>) -> arael::simple_lm::LmResult<f32> {
+fn solve32(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmConfig<f32>) -> Solved<f32> {
     // The plain row: the whole system, no reduction. Without the policy the
     // backend would marginalize the points itself -- that is the other row.
     let mut solver = arael::simple_lm::SparseFaerF32::new()
         .with_policy(arael::simple_lm::SchurPolicy::Never);
-    arael::simple_lm::lm_solve(params, &mut solver, s, cfg).unwrap()
+    arael::simple_lm::lm_solve(params, &mut solver, s, cfg)
 }
 
-fn solve32_schur(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmConfig<f32>) -> arael::simple_lm::LmResult<f32> {
+fn solve32_schur(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmConfig<f32>) -> Solved<f32> {
     let ordering = if std::env::var("BAL_ORDERING").as_deref() == Ok("amd") {
         arael::simple_lm::FaerOrdering::Auto
     } else {
@@ -227,7 +229,7 @@ fn solve32_schur(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmConfi
     let mut solver = arael::simple_lm::SparseFaerF32::new()
         .with_policy(arael::simple_lm::SchurPolicy::Force)
         .with_ordering(ordering);
-    arael::simple_lm::lm_solve(params, &mut solver, s, cfg).unwrap()
+    arael::simple_lm::lm_solve(params, &mut solver, s, cfg)
 }
 
 fn rodrigues_of(m: arael::matrix::matrix3d) -> vect3d {
@@ -245,7 +247,8 @@ pub struct Solution {
     pub points: Vec<vect3d>,
 }
 
-pub type RunOut = bench_harness::table::Row<Solution>;
+/// `Err` is why the solve failed, for the table to show in place of the row.
+pub type RunOut = Result<bench_harness::table::Row<Solution>, String>;
 
 impl bench_harness::arael::Model for Scene {
     type Scalar = f64;
@@ -276,7 +279,7 @@ impl bench_harness::arael::Model for Scene {
         }
     }
     fn solve(p: &Problem, params: &[f64], m: &mut Self,
-             cfg: &arael::simple_lm::LmConfig<f64>) -> arael::simple_lm::LmResult<f64> {
+             cfg: &arael::simple_lm::LmConfig<f64>) -> Solved<f64> {
         match p.route {
             Route::Sparse => solve64(params, m, cfg),
             Route::Schur => solve64_schur(params, m, cfg),
@@ -325,7 +328,7 @@ pub fn cov_bench(problem: &Problem) -> CovScaling {
     let mut params: Vec<f64> = Vec::new();
     scene.serialize64(&mut params);
     let cfg = bench_harness::arael::config::<Scene>(problem, 100);
-    let result = solve64_schur(&params, &mut scene, &cfg);
+    let result = solve64_schur(&params, &mut scene, &cfg).expect("covariance solve failed");
     scene.deserialize64(&result.x);
 
     let (ncam, npt) = (scene.cameras.len(), scene.points.len());
@@ -402,7 +405,7 @@ impl bench_harness::arael::Model for SceneF {
         }
     }
     fn solve(p: &Problem, params: &[f32], m: &mut Self,
-             cfg: &arael::simple_lm::LmConfig<f32>) -> arael::simple_lm::LmResult<f32> {
+             cfg: &arael::simple_lm::LmConfig<f32>) -> Solved<f32> {
         match p.route {
             Route::Sparse => solve32(params, m, cfg),
             Route::Schur => solve32_schur(params, m, cfg),
@@ -429,7 +432,7 @@ pub fn run_f32_capped(p: &Problem, max_iters: usize) -> Solution {
 
 fn solve_capped<M: bench_harness::arael::Model<Input = Problem, Solution = Solution>>(
     p: &Problem, max_iters: usize) -> Solution {
-    probe_capped::<M>(p, max_iters).solution
+    probe_capped::<M>(p, max_iters).expect("capped solve failed").solution
 }
 
 /// What one capped solve did, for the damping probe: no warmup, no sub-rounds,
@@ -443,16 +446,16 @@ pub struct Probe {
     pub solution: Solution,
 }
 
-pub fn probe_f64(p: &Problem, max_iters: usize) -> Probe {
+pub fn probe_f64(p: &Problem, max_iters: usize) -> Option<Probe> {
     probe_capped::<Scene>(p, max_iters)
 }
 
-pub fn probe_f32(p: &Problem, max_iters: usize) -> Probe {
+pub fn probe_f32(p: &Problem, max_iters: usize) -> Option<Probe> {
     probe_capped::<SceneF>(p, max_iters)
 }
 
 fn probe_capped<M: bench_harness::arael::Model<Input = Problem, Solution = Solution>>(
-    p: &Problem, max_iters: usize) -> Probe {
+    p: &Problem, max_iters: usize) -> Option<Probe> {
     let mut model = M::build(p);
     let mut params: Vec<M::Scalar> = Vec::new();
     model.serialize(&mut params);
@@ -462,13 +465,14 @@ fn probe_capped<M: bench_harness::arael::Model<Input = Problem, Solution = Solut
     let (ms, result) = bench_harness::solver::timed(|| {
         <M as bench_harness::arael::Model>::solve(p, &params, &mut model, &cfg)
     });
+    let result = result.ok()?;
     model.deserialize(&result.x);
-    Probe {
+    Some(Probe {
         ms,
         accepted: result.accepted_iterations,
         attempts: result.iterations,
         solution: model.solution(),
-    }
+    })
 }
 
 #[cfg(test)]

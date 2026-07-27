@@ -249,10 +249,10 @@ fn main() {
     let n_poses = scene.poses.len();
     for _ in 0..rounds {
         if want("arael LM f64") {
-            t.record("arael LM f64", arael_runner::run(&scene));
+            t.record_result("arael LM f64", arael_runner::run(&scene));
         }
         if want("arael LM f32") {
-            t.record("arael LM f32", arael_runner::run_f32(&scene));
+            t.record_result("arael LM f32", arael_runner::run_f32(&scene));
         }
         if !skip_tiny && want("tiny-solver LM") {
             t.record("tiny-solver LM", tiny_runner::run_lm(&scene));

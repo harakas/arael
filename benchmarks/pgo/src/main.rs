@@ -208,9 +208,9 @@ fn run_dataset3(name: &str, path: &str, rounds: usize) {
 
     for round in 0..rounds {
         let a64 = arael_runner3::run_f64(&ds);
-        t.record("arael LM f64", a64);
+        t.record_result("arael LM f64", a64);
         let a32 = arael_runner3::run_f32(&ds);
-        t.record("arael LM f32", a32);
+        t.record_result("arael LM f32", a32);
         if !skip_tiny() {
             let tgn = tiny_runner3::run_gn(&ds);
             t.record("tiny-solver GN", tgn);
@@ -457,11 +457,11 @@ fn main() {
         for round in 0..rounds {
             if system_selected("arael LM f64") {
                 let a64 = arael_runner::run_f64(&ds);
-                t.record("arael LM f64", a64);
+                t.record_result("arael LM f64", a64);
             }
             if system_selected("arael LM f32") {
                 let a32 = arael_runner::run_f32(&ds);
-                t.record("arael LM f32", a32);
+                t.record_result("arael LM f32", a32);
             }
             if !skip_tiny() && system_selected("tiny-solver GN") {
                 let tgn = tiny_runner::run_gn(&ds);

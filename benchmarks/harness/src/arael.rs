@@ -6,7 +6,7 @@
 // all of them, and keeping a copy per model is how one benchmark's f32 config
 // lost the verbose flag its f64 twin had.
 
-use ::arael::simple_lm::{LmConfig, LmProblem, LmResult};
+use ::arael::simple_lm::{LmConfig, LmProblem, LmResult, SolveFailure};
 use ::arael::utils::Float;
 
 use crate::table::Row;
@@ -42,12 +42,17 @@ pub trait Model: Clone + LmProblem<Self::Scalar> {
     /// solver), which is the one thing a generic function cannot choose for
     /// itself. It sees the input too, so a benchmark can run one model through
     /// several linear solvers and get a row for each.
+    ///
+    /// Hand the failure back rather than unwrapping it. A solve CAN fail on a
+    /// real dataset -- arael's f32 rows hit a NaN Hessian diagonal on
+    /// Ladybug-1723, from observations sitting on the optical centre -- and a
+    /// benchmark that panics there loses every other row in the run.
     fn solve(
         input: &Self::Input,
         params: &[Self::Scalar],
         model: &mut Self,
         cfg: &LmConfig<Self::Scalar>,
-    ) -> LmResult<Self::Scalar>;
+    ) -> Result<LmResult<Self::Scalar>, SolveFailure<Self::Scalar>>;
 
     /// Anything else this benchmark wants on the config. The defaults below are
     /// the ones every benchmark has agreed on so far.
@@ -141,19 +146,48 @@ pub fn print_timing<T>(r: &LmResult<T>) {
 /// as the reference rotation a QuaternionParam re-centres on after a step. A
 /// probe that ran on the real model left it half-advanced, and the solve that
 /// followed inherited a warm start it never asked for.
-pub fn run<M: Model>(input: &M::Input) -> Row<M::Solution> {
+///
+/// `Err` carries why the solve failed, for the caller to put in the table.
+/// Every probe runs the same solve, so the first failure ends the row: there is
+/// no partial row worth reporting, and re-running it would only repeat itself.
+pub fn run<M: Model>(input: &M::Input) -> Result<Row<M::Solution>, String> {
     let mut model = M::build(input);
     let mut params: Vec<M::Scalar> = Vec::new();
     model.serialize(&mut params);
 
-    crate::solver::run(100, |max_iters| {
+    let mut failure: Option<String> = None;
+    let row = crate::solver::run(100, |max_iters| {
         // The clone and the config are the probe's reset, not the solve: the
         // clock starts below.
         let mut m = model.clone();
+        if failure.is_some() {
+            // Already broken. The driver still wants its remaining probes;
+            // re-running a solve that fails deterministically only costs time.
+            return crate::solver::Outcome {
+                ms: f64::INFINITY,
+                accepted: 0,
+                attempts: 1,
+                solution: m.solution(),
+            };
+        }
         let cfg = config::<M>(input, max_iters);
         // Qualified: `M::solve` alone is ambiguous against `LmProblem::solve`
         // (the SolverKind entry point), which Model also carries.
         let (ms, r) = crate::solver::timed(|| <M as Model>::solve(input, &params, &mut m, &cfg));
+        let r = match r {
+            Ok(r) => r,
+            Err(e) => {
+                failure.get_or_insert_with(|| describe(&e));
+                // The driver needs an Outcome to carry on with. Nothing reads
+                // it: the caller drops the row the moment `failure` is set.
+                return crate::solver::Outcome {
+                    ms: f64::INFINITY,
+                    accepted: 0,
+                    attempts: 1,
+                    solution: m.solution(),
+                };
+            }
+        };
         print_timing(&r);
         m.deserialize(&r.x);
         crate::solver::Outcome {
@@ -162,5 +196,15 @@ pub fn run<M: Model>(input: &M::Input) -> Row<M::Solution> {
             attempts: r.iterations,
             solution: m.solution(),
         }
-    })
+    });
+    match failure {
+        Some(why) => Err(why),
+        None => Ok(row),
+    }
+}
+
+/// One line naming the fault, for a table cell: `SolveFailure`'s Display, which
+/// is the short form. Its Debug carries the partial result.
+pub fn describe<T>(e: &SolveFailure<T>) -> String {
+    e.to_string()
 }

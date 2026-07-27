@@ -171,10 +171,10 @@ fn main() {
     }
     for _ in 0..rounds {
         if want("arael LM f64") {
-            t.record("arael LM f64", arael_runner::run(raw));
+            t.record_result("arael LM f64", arael_runner::run(raw));
         }
         if want("arael LM f32") {
-            t.record("arael LM f32", arael_runner::run_f32(raw));
+            t.record_result("arael LM f32", arael_runner::run_f32(raw));
         }
         if want("factrs LM") {
             t.record("factrs LM", factrs_runner::run(raw));

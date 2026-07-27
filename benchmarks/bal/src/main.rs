@@ -214,6 +214,10 @@ fn lambda_sweep(b: &Bench, ds: &Rc<Dataset>, lambdas: &[f64],
                       else { arael_runner::probe_f64(&p, 1) };
             let two = if f32_row { arael_runner::probe_f32(&p, 2) }
                       else { arael_runner::probe_f64(&p, 2) };
+            let (Some(one), Some(two)) = (one, two) else {
+                println!("{:<24} {:>9.0e}  solve failed at this damping", label, lambda0);
+                continue;
+            };
             report_sweep(&label, lambda0, (one.ms, one.accepted, one.attempts),
                 (two.ms, two.accepted),
                 bal::reference_cost(ds, &two.solution.cameras, &two.solution.points));
@@ -255,7 +259,13 @@ fn sweep_external(label: &str, lambda: f64, mut cmd: std::process::Command,
     cmd.args(args);
     let p = bench_harness::external::run(cmd);
     let get = |k: &str| p.json.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0);
-    let sol = read_solution(params_out, ds.cameras.len(), ds.points.len());
+    let sol = match read_solution(params_out, ds.cameras.len(), ds.points.len()) {
+        Ok(s) => s,
+        Err(why) => {
+            println!("{:<24} {:>9.0e}  {}", label, lambda, why);
+            return;
+        }
+    };
     report_sweep(label, lambda,
         (p.first_iter_ms, get("first_accepted") as usize, get("first_attempts") as usize),
         (get("second_run_ms"), get("second_accepted") as usize),
@@ -368,7 +378,7 @@ fn main() {
                 } else {
                     arael_runner::run_f64(&p)
                 };
-                t.record(&label, row);
+                t.record_result(&label, row);
             }
             if ceres_ok {
                 for linsolver in ceres_linsolvers(b) {
@@ -376,15 +386,23 @@ fn main() {
                     if !want(&label) {
                         continue;
                     }
-                    let e = run_ceres(path, linsolver, ceres_radius0(b, linsolver), &ds);
-                    check_initial(&label, e.initial_cost, initial_cost);
-                    t.record(&label, e.row);
+                    match run_ceres(path, linsolver, ceres_radius0(b, linsolver), &ds) {
+                        Ok(e) => {
+                            check_initial(&label, e.initial_cost, initial_cost);
+                            t.record(&label, e.row);
+                        }
+                        Err(why) => t.record_failure(&label, why),
+                    }
                 }
             }
             if g2o_ok && want("g2o LM (schur)") {
-                let e = run_g2o(path, &ds);
-                check_initial("g2o LM (schur)", e.initial_cost, initial_cost);
-                t.record("g2o LM (schur)", e.row);
+                match run_g2o(path, &ds) {
+                    Ok(e) => {
+                        check_initial("g2o LM (schur)", e.initial_cost, initial_cost);
+                        t.record("g2o LM (schur)", e.row);
+                    }
+                    Err(why) => t.record_failure("g2o LM (schur)", why),
+                }
             }
         }
 
@@ -425,23 +443,23 @@ struct Ext {
 /// minimizes the same objective. Ceres reports a cost and g2o a chi2 -- with unit
 /// information they are the same number, and both report it as `initial_cost`.
 fn run_ext(mut cmd: std::process::Command, args: &[&str], params_out: &str,
-           ds: &Dataset) -> Ext {
+           ds: &Dataset) -> Result<Ext, String> {
     cmd.args(args);
     let p = bench_harness::external::run(cmd);
-    let solution = read_solution(params_out, ds.cameras.len(), ds.points.len());
+    let solution = read_solution(params_out, ds.cameras.len(), ds.points.len())?;
     let mut row = bench_harness::table::Row::new(
         p.solve_ms, p.first_iter_ms, p.iterations, solution);
     row.accepted = p.accepted;
     row.full_ms = p.full_ms;
     row.peak_mb = p.json.get("peak_mb").and_then(|v| v.as_f64());
-    Ext {
+    Ok(Ext {
         row,
         initial_cost: p.json.get("initial_cost").and_then(|v| v.as_f64())
             .expect("runner reported no initial_cost"),
-    }
+    })
 }
 
-fn run_ceres(path: &str, linsolver: &str, radius0: f64, ds: &Dataset) -> Ext {
+fn run_ceres(path: &str, linsolver: &str, radius0: f64, ds: &Dataset) -> Result<Ext, String> {
     let params_out = format!("/tmp/ceres_bal_{}.txt", linsolver);
     let mut cmd = std::process::Command::new("cpp/build/ceres_bal");
     // The dataset's radius, unless the caller set one -- their override wins.
@@ -453,7 +471,7 @@ fn run_ceres(path: &str, linsolver: &str, radius0: f64, ds: &Dataset) -> Ext {
 
 /// g2o's own BA configuration (its bal_example): marginalized point vertices ->
 /// Schur elimination, CHOLMOD on the reduced camera system.
-fn run_g2o(path: &str, ds: &Dataset) -> Ext {
+fn run_g2o(path: &str, ds: &Dataset) -> Result<Ext, String> {
     let params_out = "/tmp/g2o_bal.txt";
     run_ext(std::process::Command::new("cpp/build/g2o_bal"),
         &[path, params_out], params_out, ds)
@@ -538,13 +556,27 @@ fn cov_benchmark(selected: &[&Bench], bench_dir: &std::path::Path) {
 }
 
 /// 9-value camera lines, then 3-value point lines.
-fn read_solution(path: &str, n_cams: usize, n_points: usize) -> Solution {
-    let text = std::fs::read_to_string(path).unwrap();
+/// Read an external system's solution back. `Err` names what was wrong with the
+/// file rather than indexing off the end of a short line: a runner that died
+/// mid-write, or one whose write failed (a full disk truncates the last line
+/// mid-number), leaves a file that parses fine until it does not.
+fn read_solution(path: &str, n_cams: usize, n_points: usize) -> Result<Solution, String> {
+    let text = std::fs::read_to_string(path)
+        .map_err(|e| format!("cannot read {}: {}", path, e))?;
     let mut lines = text.lines();
+    let mut row = |want: usize, what: &str, i: usize| -> Result<Vec<f64>, String> {
+        let line = lines.next()
+            .ok_or_else(|| format!("{}: truncated, {} {} missing", path, what, i))?;
+        let v: Vec<f64> = line.split_whitespace().filter_map(|t| t.parse().ok()).collect();
+        if v.len() < want {
+            return Err(format!("{}: {} {} has {} of {} numbers -- truncated file",
+                path, what, i, v.len(), want));
+        }
+        Ok(v)
+    };
     let mut cameras = Vec::with_capacity(n_cams);
-    for _ in 0..n_cams {
-        let v: Vec<f64> = lines.next().unwrap()
-            .split_whitespace().map(|t| t.parse().unwrap()).collect();
+    for i in 0..n_cams {
+        let v = row(9, "camera", i)?;
         cameras.push(bal::CameraIn {
             rodrigues: vect3d::new(v[0], v[1], v[2]),
             t: vect3d::new(v[3], v[4], v[5]),
@@ -554,12 +586,11 @@ fn read_solution(path: &str, n_cams: usize, n_points: usize) -> Solution {
         });
     }
     let mut points = Vec::with_capacity(n_points);
-    for _ in 0..n_points {
-        let v: Vec<f64> = lines.next().unwrap()
-            .split_whitespace().map(|t| t.parse().unwrap()).collect();
+    for i in 0..n_points {
+        let v = row(3, "point", i)?;
         points.push(vect3d::new(v[0], v[1], v[2]));
     }
-    Solution { cameras, points }
+    Ok(Solution { cameras, points })
 }
 
 // The geometry the shared table is generic over.
@@ -587,5 +618,43 @@ impl bench_harness::table::Geometry for Geo<'_> {
     fn distance(a: &Solution, b: &Solution) -> f64 {
         bal::aligned_relative_rmse(&bal::camera_centers(&a.cameras),
                                    &bal::camera_centers(&b.cameras))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// A runner that dies mid-write -- or whose write fails, which a full disk
+    /// does -- leaves a solution file whose last line stops mid-number. Reading
+    /// it used to index off the end of that line and take the whole benchmark
+    /// down with it, after every other row had already been measured.
+    #[test]
+    fn a_truncated_solution_file_is_reported_not_indexed_off_the_end() {
+        let dir = std::env::temp_dir().join("bal_read_solution_test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("truncated.txt");
+        // one whole camera (9 numbers), one whole point, then a cut-off one
+        let mut text = String::from("0 0 0 0 0 0 1 0 0\n1 2 3\n");
+        text.push_str("-1.38572563124");
+        std::fs::write(&path, &text).unwrap();
+
+        let Err(e) = super::read_solution(path.to_str().unwrap(), 1, 2) else {
+            panic!("a truncated last line must not parse");
+        };
+        assert!(e.contains("truncated"), "{}", e);
+        assert!(e.contains("point 1"), "{}", e);
+
+        // the same file is fine for what it does hold
+        let ok = super::read_solution(path.to_str().unwrap(), 1, 1).expect("one point is there");
+        assert_eq!(ok.cameras.len(), 1);
+        assert_eq!(ok.points.len(), 1);
+        assert_eq!(ok.points[0].x, 1.0);
+
+        // and a file that stops between lines is caught too
+        std::fs::write(&path, "0 0 0 0 0 0 1 0 0\n").unwrap();
+        let Err(e) = super::read_solution(path.to_str().unwrap(), 1, 1) else {
+            panic!("no point lines at all");
+        };
+        assert!(e.contains("truncated"), "{}", e);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

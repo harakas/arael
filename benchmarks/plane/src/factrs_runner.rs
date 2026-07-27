@@ -269,7 +269,7 @@ fn extract(raw: &RawScene, values: &Values) -> Solution {
     Solution { poses, planes }
 }
 
-pub fn run(raw: &RawScene) -> crate::arael_runner::RunOut {
+pub fn run(raw: &RawScene) -> bench_harness::table::Row<crate::scene::Solution> {
     bench_harness::solver::run(200, |max_iter| {
         // Building the graph is the probe's reset, not the solve -- the clock
         // starts at the optimize() below, the same boundary the C++ runners

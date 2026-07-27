@@ -13,7 +13,7 @@ use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::refs::Ref;
 use arael::transform::TransformParam;
 use arael::unitvec::UnitVecParam;
-use arael::simple_lm::{lm_solve, LmConfig, LmResult, SparseFaer};
+use arael::simple_lm::{lm_solve, LmConfig, LmResult, SolveFailure, SparseFaer};
 use arael::matrix::matrix3;
 use arael::utils::Float;
 use arael::vect::vect3;
@@ -275,8 +275,8 @@ impl bench_harness::arael::Model for World {
     fn deserialize(&mut self, x: &[f64]) { self.deserialize64(x); }
     fn solution(&self) -> Solution { extract(self) }
     fn solve(_: &RawScene, params: &[f64], m: &mut Self, cfg: &LmConfig<f64>)
-        -> LmResult<f64> {
-        lm_solve(params, &mut SparseFaer::<f64>::new(), m, cfg).unwrap()
+        -> Result<LmResult<f64>, SolveFailure<f64>> {
+        lm_solve(params, &mut SparseFaer::<f64>::new(), m, cfg)
     }
     fn tune(cfg: &mut LmConfig<f64>) {
         cfg.abs_precision = tolerance();
@@ -284,7 +284,8 @@ impl bench_harness::arael::Model for World {
     }
 }
 
-pub type RunOut = bench_harness::table::Row<Solution>;
+/// `Err` is why the solve failed, for the table to show in place of the row.
+pub type RunOut = Result<bench_harness::table::Row<Solution>, String>;
 
 pub fn run(raw: &RawScene) -> RunOut { bench_harness::arael::run::<World>(raw) }
 pub fn run_f32(raw: &RawScene) -> RunOut { bench_harness::arael::run::<WorldF>(raw) }
@@ -333,8 +334,8 @@ impl bench_harness::arael::Model for WorldF {
     fn deserialize(&mut self, x: &[f32]) { self.deserialize32(x); }
     fn solution(&self) -> Solution { extract_f32(self) }
     fn solve(_: &RawScene, params: &[f32], m: &mut Self, cfg: &LmConfig<f32>)
-        -> LmResult<f32> {
-        lm_solve(params, &mut SparseFaer::<f32>::new(), m, cfg).unwrap()
+        -> Result<LmResult<f32>, SolveFailure<f32>> {
+        lm_solve(params, &mut SparseFaer::<f32>::new(), m, cfg)
     }
     fn tune(cfg: &mut LmConfig<f32>) {
         cfg.abs_precision = tolerance_f32() as f32;
