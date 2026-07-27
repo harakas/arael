@@ -1555,7 +1555,7 @@ impl LmTiming {
 }
 
 /// Result returned by the Levenberg-Marquardt solver.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct LmResult<T> {
     /// Final parameter vector.
     pub x: Vec<T>,
@@ -1583,6 +1583,26 @@ pub struct LmResult<T> {
     /// Per-phase wall-clock timing: `Some` iff [`LmConfig::gather_timing`]
     /// was set, `None` otherwise (see [`LmTiming`]).
     pub timing: Option<LmTiming>,
+}
+
+/// `x` prints as its length, not its contents. Derived, this formats every
+/// parameter, and a `Result::unwrap` on a [`SolveFailure`] -- which carries an
+/// `LmResult` -- then emits one line per solve of megabytes on a real problem
+/// (485k parameters is 5.6 MB). Read the values off the field.
+impl<T: std::fmt::Debug> std::fmt::Debug for LmResult<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LmResult")
+            .field("x", &format_args!("<{} values>", self.x.len()))
+            .field("start_cost", &self.start_cost)
+            .field("end_cost", &self.end_cost)
+            .field("iterations", &self.iterations)
+            .field("accepted_iterations", &self.accepted_iterations)
+            .field("status", &self.status)
+            .field("final_lambda", &self.final_lambda)
+            .field("solver", &self.solver)
+            .field("timing", &self.timing)
+            .finish()
+    }
 }
 
 /// How a report is drawn. [`LmResult::report`] uses [`Style::PLAIN`],
@@ -6373,6 +6393,39 @@ pub fn solve_spd_band_f32(n: usize, kd: usize, band: &mut [f32], b: &mut [f32]) 
 #[cfg(test)]
 mod tests {
     use super::{ordering_for, ReducedOrdering};
+
+    /// A failed solve is usually seen through `unwrap`, which formats with
+    /// Debug. Derived, that walks the whole parameter vector: on Ladybug-1723
+    /// the panic message came to 5.6 MB on one line. Bound it, and keep the
+    /// count, which is the part worth reading.
+    #[test]
+    fn a_failed_solve_does_not_print_its_whole_parameter_vector() {
+        let n = 485_013;
+        let r = super::LmResult::<f64> {
+            x: vec![0.5; n],
+            start_cost: 1.0,
+            end_cost: 0.5,
+            iterations: 3,
+            accepted_iterations: 2,
+            status: super::LmStatus::Aborted,
+            final_lambda: 1e-4,
+            solver: None,
+            timing: None,
+        };
+        let e = super::SolveFailure {
+            kind: super::SolveFailureKind::DegenerateDiagonal {
+                param: 5015,
+                fault: super::DiagonalFault::Nan,
+            },
+            partial: Some(Box::new(r)),
+        };
+        let shown = format!("{:?}", e);
+        assert!(shown.len() < 500, "Debug is {} bytes: {}", shown.len(), &shown[..200]);
+        assert!(shown.contains(&format!("<{} values>", n)), "{}", shown);
+        // the kind still has to survive, it is what names the fault
+        assert!(shown.contains("DegenerateDiagonal"), "{}", shown);
+        assert!(shown.contains("5015"), "{}", shown);
+    }
 
     /// The reduced system's ordering is picked from its shape, and the shape
     /// is what decides whether a fill-reducing pass is worth running at all.
