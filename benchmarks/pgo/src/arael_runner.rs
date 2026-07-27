@@ -134,6 +134,30 @@ pub(crate) fn ordering() -> arael::simple_lm::FaerOrdering {
     }
 }
 
+/// PGO_SCHUR overrides the marginalization decision the backend makes for
+/// itself. A pose graph is not the shape Schur elimination was meant for --
+/// every entity is a pose coupled to other poses, with no separate class to
+/// eliminate -- so the default `Auto` policy weighs the reduction and declines
+/// it. `force` takes it anyway, which is how to see what the analysis turned
+/// down; `never` pins the whole-system factorization; `auto` is the default
+/// spelled out. A typo is rejected rather than silently ignored: it would
+/// otherwise produce a row labelled as one route and measured on another.
+pub(crate) fn schur_policy() -> arael::simple_lm::SchurPolicy {
+    parse_schur(std::env::var("PGO_SCHUR").ok().as_deref())
+}
+
+fn parse_schur(v: Option<&str>) -> arael::simple_lm::SchurPolicy {
+    use arael::simple_lm::SchurPolicy;
+    match v {
+        Some("force") | Some("1") => SchurPolicy::Force,
+        Some("never") | Some("0") => SchurPolicy::Never,
+        Some("auto") | None => SchurPolicy::default(),
+        Some(other) => panic!(
+            "PGO_SCHUR={}: expected force (marginalize anyway), never (do not), \
+             or auto (let the backend decide, the default)", other),
+    }
+}
+
 pub type Solved<T> = Result<arael::simple_lm::LmResult<T>, arael::simple_lm::SolveFailure<T>>;
 
 /// The two solvers, one per scalar. This is the one thing the generic pipeline
@@ -143,7 +167,9 @@ pub fn solve_f64<P: arael::simple_lm::LmProblem<f64>>(
     p: &mut P,
     cfg: &arael::simple_lm::LmConfig<f64>,
 ) -> Solved<f64> {
-    let mut solver = arael::simple_lm::SparseFaer::new().with_ordering(ordering());
+    let mut solver = arael::simple_lm::SparseFaer::new()
+        .with_ordering(ordering())
+        .with_policy(schur_policy());
     arael::simple_lm::lm_solve(params, &mut solver, p, cfg)
 }
 
@@ -152,7 +178,9 @@ pub fn solve_f32<P: arael::simple_lm::LmProblem<f32>>(
     p: &mut P,
     cfg: &arael::simple_lm::LmConfig<f32>,
 ) -> Solved<f32> {
-    let mut solver = arael::simple_lm::SparseFaerF32::new().with_ordering(ordering());
+    let mut solver = arael::simple_lm::SparseFaerF32::new()
+        .with_ordering(ordering())
+        .with_policy(schur_policy());
     arael::simple_lm::lm_solve(params, &mut solver, p, cfg)
 }
 
@@ -199,3 +227,26 @@ pub type RunOut = Result<Row<Vec<PoseIn>>, String>;
 pub fn run_f64(ds: &Dataset) -> RunOut { run::<Graph>(ds) }
 pub fn run_f32(ds: &Dataset) -> RunOut { run::<GraphF>(ds) }
 
+
+#[cfg(test)]
+mod tests {
+    use arael::simple_lm::SchurPolicy;
+
+    /// A mistyped value must not fall through to the default: the run would be
+    /// labelled as one route in the header and measured on another.
+    #[test]
+    fn pgo_schur_parses_every_documented_spelling() {
+        assert!(matches!(super::parse_schur(Some("force")), SchurPolicy::Force));
+        assert!(matches!(super::parse_schur(Some("1")), SchurPolicy::Force));
+        assert!(matches!(super::parse_schur(Some("never")), SchurPolicy::Never));
+        assert!(matches!(super::parse_schur(Some("0")), SchurPolicy::Never));
+        assert!(matches!(super::parse_schur(Some("auto")), SchurPolicy::Auto { .. }));
+        assert!(matches!(super::parse_schur(None), SchurPolicy::Auto { .. }));
+    }
+
+    #[test]
+    #[should_panic(expected = "PGO_SCHUR=froce")]
+    fn pgo_schur_rejects_a_typo() {
+        super::parse_schur(Some("froce"));
+    }
+}

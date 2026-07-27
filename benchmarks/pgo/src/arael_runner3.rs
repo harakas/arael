@@ -274,12 +274,12 @@ pub(crate) mod tests {
         }
         assert!(reference_cost3(&ds, &ds.poses) > 1e-2);
 
-        let out = run_f64(&ds);
+        let out = run_f64(&ds).expect("f64 solve failed");
         assert!(reference_cost3(&ds, &out.solution) < 1e-8,
             "f64 did not reach the optimum: {}", reference_cost3(&ds, &out.solution));
         assert!(aligned_rmse3(&out.solution, &truth) < 1e-4);
 
-        let out32 = run_f32(&ds);
+        let out32 = run_f32(&ds).expect("f32 solve failed");
         assert!(reference_cost3(&ds, &out32.solution) < 1e-4,
             "f32 did not reach the optimum: {}", reference_cost3(&ds, &out32.solution));
     }

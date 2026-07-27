@@ -333,6 +333,8 @@ fn print_header(rounds: usize, only: &Option<String>) {
         _ => "",
     };
     println!("arael ordering    : {:?}{} [PGO_ORDERING: auto|nd]", ordering, resolves_to);
+    println!("arael schur       : {:?} [PGO_SCHUR: auto|force|never]",
+        arael_runner::schur_policy());
     println!("arael termination : abs {:e}, rel {:e}, patience {}, min_iters {}",
         c64.abs_precision, c64.rel_precision, c64.patience, c64.min_iters);
     println!("solver verbose    : {} [VERBOSE], per-solve timing {} [TIMING]",
@@ -364,26 +366,31 @@ fn mem_pass() -> bool {
     let path = std::env::var("PGO_MEM_DATASET").expect("PGO_MEM_DATASET");
     let weighted = std::env::var("PGO_MEM_WEIGHTED").is_ok();
     let three_d = std::env::var("PGO_MEM_3D").is_ok();
-    if three_d {
+    // A peak measured from a solve that never finished is not this system's
+    // peak, so a failed run reports no number and says why.
+    let failed = if three_d {
         let ds = g2o3::load3(&path);
         match which.as_str() {
-            "arael LM f64" => { arael_runner3::run_f64(&ds); }
-            "arael LM f32" => { arael_runner3::run_f32(&ds); }
-            "factrs GN" => { factrs_runner3::run_gn(&ds); }
-            "factrs LM" => { factrs_runner3::run_lm(&ds); }
+            "arael LM f64" => arael_runner3::run_f64(&ds).err(),
+            "arael LM f32" => arael_runner3::run_f32(&ds).err(),
+            "factrs GN" => { factrs_runner3::run_gn(&ds); None }
+            "factrs LM" => { factrs_runner3::run_lm(&ds); None }
             other => panic!("unknown system for the memory pass: {}", other),
         }
     } else {
         let ds = g2o::load(&path, !weighted);
         match which.as_str() {
-            "arael LM f64" => { arael_runner::run_f64(&ds); }
-            "arael LM f32" => { arael_runner::run_f32(&ds); }
-            "factrs GN" => { factrs_runner::run_gn(&ds); }
-            "factrs LM" => { factrs_runner::run_lm(&ds); }
+            "arael LM f64" => arael_runner::run_f64(&ds).err(),
+            "arael LM f32" => arael_runner::run_f32(&ds).err(),
+            "factrs GN" => { factrs_runner::run_gn(&ds); None }
+            "factrs LM" => { factrs_runner::run_lm(&ds); None }
             other => panic!("unknown system for the memory pass: {}", other),
         }
+    };
+    match failed {
+        Some(why) => eprintln!("memory pass: {} did not finish: {}", which, why),
+        None => bench_harness::mem::report_peak(),
     }
-    bench_harness::mem::report_peak();
     true
 }
 

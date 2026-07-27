@@ -307,6 +307,7 @@ carries the settings that produced it):
 | `ARAEL_LAMBDA0`, `CERES_RADIUS0`, `G2O_LAMBDA_INIT`, `TINY_RADIUS0`, `GTSAM_LAMBDA0`, `SYMFORCE_LAMBDA0` | initial damping, per system |
 | `PGO_DRIVER=nielsen` | arael's gain-ratio damping driver instead of the fixed ladder |
 | `PGO_ORDERING=nd` | arael factorizes under nested dissection instead of AMD |
+| `PGO_SCHUR` | arael's marginalization policy: `auto` (default), `never`, `force` |
 
 `make_chart.py` (stdlib only) generates both charts into
 `../charts/v<version>/`: `pgo-*.svg`, the per-iteration chart embedded in
