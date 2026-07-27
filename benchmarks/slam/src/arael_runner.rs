@@ -463,17 +463,30 @@ pub fn run_f32_capped(scene: &Scene, max_iters: usize) -> Solution {
 
 // ---------------------------------------------------------------- pipeline
 
-// Problem-appropriate initial damping. The f32 build wants more of it at the
-// small size: at 60 poses the f32 solution lands a hair above the 1e-5 stop
-// threshold at 1e-8 and then bounces in the f32 noise floor -- a
-// termination/precision interaction, not divergence -- and 1e-7 makes the last
-// step small enough to stop cleanly. The larger sizes are clean at 1e-8 (1e-7
-// would grind there instead; no single value is clean at every size).
+/// Problem-appropriate initial damping, per scene size and precision. No single
+/// value is clean at every size, so each size takes the one that stops cleanly
+/// there: 1e-8 at 60 and 300 poses, 3e-7 at 120, both precisions -- except f32
+/// at 60, which takes 1e-7. At 1e-8 the f32 solution lands a hair above the 1e-5
+/// stop threshold there and then bounces in the f32 noise floor (a
+/// termination/precision interaction, not divergence); 1e-7 makes the last step
+/// small enough to stop cleanly, and would grind at the large size.
+///
+/// ARAEL_LAMBDA0 overrides every size and both precisions with one value.
+fn lambda0(poses: usize, single_precision: bool) -> f64 {
+    if poses <= 60 {
+        if single_precision { 1e-7 } else { 1e-8 }
+    } else if poses <= 120 {
+        3e-7
+    } else {
+        1e-8
+    }
+}
+
 impl bench_harness::arael::Model for Path {
     type Scalar = f64;
     type Input = Scene;
     type Solution = Solution;
-    fn lambda0(_: &Scene) -> f64 { 1e-8 }
+    fn lambda0(scene: &Scene) -> f64 { lambda0(scene.poses.len(), false) }
     fn build(scene: &Scene) -> Self { build(scene) }
     fn serialize(&mut self, out: &mut Vec<f64>) { self.serialize64(out); }
     fn deserialize(&mut self, x: &[f64]) { self.deserialize64(x); }
@@ -490,9 +503,7 @@ impl bench_harness::arael::Model for PathF {
     type Scalar = f32;
     type Input = Scene;
     type Solution = Solution;
-    fn lambda0(scene: &Scene) -> f64 {
-        if scene.poses.len() <= 60 { 1e-7 } else { 1e-8 }
-    }
+    fn lambda0(scene: &Scene) -> f64 { lambda0(scene.poses.len(), true) }
     fn build(scene: &Scene) -> Self { build_f32(scene) }
     fn serialize(&mut self, out: &mut Vec<f32>) { self.serialize32(out); }
     fn deserialize(&mut self, x: &[f32]) { self.deserialize32(x); }
@@ -591,5 +602,21 @@ pub fn cov_bench(scene: &Scene, budget_s: f64, cap: usize) -> CovScaling {
         allmarg_reps,
         mid_pose,
         sd_mid_pose,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// The published tables are measured at these values, and the README's
+    /// Damping section names them. A run whose damping quietly differs from the
+    /// documented one produces a table nobody can reproduce.
+    #[test]
+    fn documented_damping_per_scene_size() {
+        for (poses, f64_lambda, f32_lambda) in
+            [(60, 1e-8, 1e-7), (120, 3e-7, 3e-7), (300, 1e-8, 1e-8)]
+        {
+            assert_eq!(super::lambda0(poses, false), f64_lambda, "f64 at {} poses", poses);
+            assert_eq!(super::lambda0(poses, true), f32_lambda, "f32 at {} poses", poses);
+        }
     }
 }
