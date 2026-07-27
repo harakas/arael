@@ -100,7 +100,7 @@ Schur-complement solve (`schur`: points marginalized on every damped solve, only
 the camera system factorized). They reach the same optimum by construction, so
 the rows compare linear solvers directly.
 
-## Results (2026-07-26, Apple M4 Pro, single core enforced by the harness; min of 32 interleaved rounds at Ladybug-49, 8 at 138, 4 at 372)
+## Results (2026-07-27, Apple M4 Pro, single core enforced by the harness; min of 32 interleaved rounds at Ladybug-49, 8 at 138, 4 at 372)
 
 What each column means:
 
@@ -120,87 +120,94 @@ iteration was not a single accepted step: such an iteration is mostly wasted
 factorizations, and every number derived from it inherits that.
 
 t(1) and t(2) are each minimized over rounds before being subtracted, so a row
-whose t(1) happened to sample unusually well reads a full-iter below its own
-ms/iter. The `arael LM f64 sparse` row at Ladybug-49 is the case in the tables
-below.
+whose t(1) happened to sample unusually well reads a full-iter below what its
+own iterations cost. For the same reason 1st-iter minus full-iter is not the
+setup: it is the setup plus the difference between the first iteration and the
+second.
 
 ### Ladybug-49 (23769 parameters)
 
 | system                | total ms |  iters | ms/iter | full-iter | full-norm | 1st-iter ms | peak MB | final cost |
 |-----------------------|---------:|-------:|--------:|----------:|----------:|------------:|--------:|-----------:|
-| arael LM f64 sparse   |   442.21 | 21(21) |   21.06 |     16.62 |     1.512 |       40.11 |    70.9 | 26689.2948 |
-| arael LM f32 sparse   |   362.53 | 18(21) |   17.26 |     17.07 |     1.553 |       30.52 |    59.5 | 26691.0295 |
-| arael LM f64 schur    |   234.91 | 21(21) |   11.19 |     10.99 |     1.000 |       15.91 |    40.8 | 26689.2948 |
-| arael LM f32 schur    |   183.68 | 18(22) |    8.35 |      8.89 |     0.809 |       13.29 |    30.2 | 26690.8931 |
-| ceres dense_schur     |   434.59 | 22(22) |   19.75 |     19.69 |     1.792 |       38.52 |    38.3 | 26689.7174 |
-| ceres sparse_schur    |   457.42 | 22(22) |   20.79 |     18.41 |     1.675 |       49.21 |    41.6 | 26689.7174 |
-| ceres iterative_schur\* |   661.45 | 24(24) |   27.56 |     29.46 |     2.681 |       35.51 |    36.9 | 26689.5841 |
-| g2o LM (schur)        |   973.61 | 42(58) |   16.79 |     20.35 |     1.852 |       33.57 |    45.2 | 26714.5561 |
+| arael LM f64 sparse   |   431.93 | 21(21) |   20.57 |     19.56 |     1.905 |       34.52 |    70.9 | 26689.2948 |
+| arael LM f32 sparse   |   354.96 | 18(21) |   16.90 |     17.01 |     1.656 |       29.67 |    59.6 | 26691.0295 |
+| arael LM f64 schur    |   229.44 | 21(21) |   10.93 |     10.27 |     1.000 |       15.50 |    40.2 | 26689.2948 |
+| arael LM f32 schur    |   179.75 | 18(22) |    8.17 |      8.03 |     0.782 |       13.09 |    29.4 | 26690.8931 |
+| ceres dense_schur     |   423.26 | 22(22) |   19.24 |     19.21 |     1.870 |       37.38 |    38.3 | 26689.7174 |
+| ceres sparse_schur    |   445.83 | 22(22) |   20.26 |     18.79 |     1.830 |       48.24 |    41.6 | 26689.7174 |
+| ceres iterative_schur\* |   657.86 | 24(24) |   27.41 |     30.09 |     2.930 |       34.35 |    36.9 | 26689.5841 |
+| g2o LM (schur)        |   953.72 | 42(58) |   16.44 |     19.46 |     1.895 |       33.00 |    45.3 | 26714.5561 |
 
 ### Ladybug-138 (60876 parameters)
 
 | system                | total ms |  iters | ms/iter | full-iter | full-norm | 1st-iter ms | peak MB |  final cost |
 |-----------------------|---------:|-------:|--------:|----------:|----------:|------------:|--------:|------------:|
-| arael LM f64 sparse   |  1769.68 | 21(24) |   73.74 |     69.86 |     1.637 |      184.86 |   184.2 | 119055.9244 |
-| arael LM f32 sparse   |  1476.83 | 21(24) |   61.53 |     56.80 |     1.331 |      168.71 |   151.7 | 119054.7050 |
-| arael LM f64 schur    |  1020.50 | 21(24) |   42.52 |     42.67 |     1.000 |       68.43 |   123.3 | 119055.9244 |
-| arael LM f32 schur    |   716.19 | 21(24) |   29.84 |     30.81 |     0.722 |       48.37 |    86.7 | 119054.9954 |
-| ceres dense_schur     |  1844.81 | 23(24) |   76.87 |     74.48 |     1.745 |      139.34 |    97.9 | 119056.6359 |
-| ceres sparse_schur    |  1679.91 | 23(24) |   70.00 |     69.35 |     1.625 |      164.71 |   105.6 | 119056.6359 |
-| ceres iterative_schur\* |  2483.85 | 23(27) |   91.99 |     53.75 |     1.260 |      113.77 |    85.3 | 118753.5001 |
-| g2o LM (schur)        |  3480.60 | 40(59) |   58.99 |     68.54 |     1.606 |      121.40 |   120.4 | 118904.3429 |
+| arael LM f64 sparse   |  1772.44 | 21(24) |   73.85 |     68.65 |     1.700 |      183.65 |   184.2 | 119055.9244 |
+| arael LM f32 sparse   |  1489.73 | 21(24) |   62.07 |     58.18 |     1.441 |      167.38 |   151.7 | 119054.7050 |
+| arael LM f64 schur    |   987.99 | 21(24) |   41.17 |     40.38 |     1.000 |       64.12 |   117.6 | 119055.9244 |
+| arael LM f32 schur    |   701.29 | 21(24) |   29.22 |     29.73 |     0.736 |       47.12 |    84.3 | 119054.9954 |
+| ceres dense_schur     |  1801.76 | 23(24) |   75.07 |     75.99 |     1.882 |      134.37 |    97.9 | 119056.6359 |
+| ceres sparse_schur    |  1663.23 | 23(24) |   69.30 |     69.22 |     1.714 |      164.10 |   105.6 | 119056.6359 |
+| ceres iterative_schur\* |  2486.21 | 23(27) |   92.08 |     52.15 |     1.291 |      111.52 |    85.3 | 118753.5001 |
+| g2o LM (schur)        |  3453.82 | 40(59) |   58.54 |     66.55 |     1.648 |      120.07 |   120.4 | 118904.3429 |
 
 ### Ladybug-372 (145617 parameters)
 
 | system                | total ms |  iters | ms/iter | full-iter | full-norm | 1st-iter ms | peak MB |  final cost |
 |-----------------------|---------:|-------:|--------:|----------:|----------:|------------:|--------:|------------:|
-| arael LM f64 sparse   |  5185.41 | 10(19) |  272.92 |    261.97 |     1.307 |      581.74 |   472.4 | 225431.3936 |
-| arael LM f32 sparse   |  3793.28 | 11(19) |  199.65 |    190.65 |     0.951 |      493.80 |   368.1 | 225483.8390 |
-| arael LM f64 schur    |  3710.14 | 10(19) |  195.27 |    200.46 |     1.000 |      294.97 |   360.3 | 225431.3936 |
-| arael LM f32 schur    |  2235.55 | 10(18) |  124.20 |    128.80 |     0.643 |      204.17 |   257.9 | 225474.0976 |
-| ceres dense_schur     |  7531.79 | 10(17) |  443.05 |    464.63 |     2.318 |      658.42 |   285.4 | 225447.1709 |
-| ceres sparse_schur    |  4331.96 | 10(17) |  254.82 |    267.07 |     1.332 |      568.15 |   287.2 | 225447.1709 |
-| ceres iterative_schur\* |  2288.38 | 13(17) |  134.61 |    145.55 |     0.726 |      313.79 |   190.9 | 225696.1695 |
-| g2o LM (schur)        |  9134.99 | 28(35) |  261.00 |    275.15 |     1.373 |      421.34 |   357.8 | 226586.4232 |
+| arael LM f64 sparse   |  4998.23 | 10(19) |  263.06 |    250.71 |     1.275 |      567.49 |   472.4 | 225431.3936 |
+| arael LM f32 sparse   |  3798.27 | 11(19) |  199.91 |    188.82 |     0.960 |      486.72 |   368.1 | 225483.8390 |
+| arael LM f64 schur    |  3636.09 | 10(19) |  191.37 |    196.64 |     1.000 |      285.86 |   356.3 | 225431.3936 |
+| arael LM f32 schur    |  2201.58 | 10(18) |  122.31 |    124.88 |     0.635 |      198.52 |   245.9 | 225474.0976 |
+| ceres dense_schur     |  7412.69 | 10(17) |  436.04 |    463.86 |     2.359 |      641.63 |   285.4 | 225447.1709 |
+| ceres sparse_schur    |  4248.73 | 10(17) |  249.93 |    267.02 |     1.358 |      558.51 |   287.2 | 225447.1709 |
+| ceres iterative_schur\* |  2245.66 | 13(17) |  132.10 |    142.63 |     0.725 |      309.69 |   191.0 | 225696.1695 |
+| g2o LM (schur)        |  9127.34 | 28(35) |  260.78 |    272.30 |     1.385 |      419.09 |   357.8 | 226586.4232 |
 
 All eight rows validate on all three datasets.
 
-### Ladybug-1723 (485k parameters, exploratory: `BAL_ONLY=1723`, measured 2026-07-14)
+### Ladybug-1723 (485k parameters, exploratory: `BAL_ONLY=1723`, measured 2026-07-27, one round)
 
-**Not a validated result, and the table below is not a ranking.** With the damping
-in the Damping section the iterations are measurable -- the four rows that run
-report a full-iter -- but no system reaches the shared 1e-5 tolerances here. They
-stop on different plateaus of a long descent, 765376 to 772215, a 0.9% spread, so
-the mutual validation gate cannot pass and the run has nothing to anchor against.
-The dataset is excluded from the default suite until it has a termination
-criterion the systems can share. `full-iter` is the only column here that means
-what it means elsewhere; `total ms`, `iters` and `final cost` are each reporting a
-different, arbitrary stopping point.
+**Not a ranking.** With the damping in the Damping section the iterations are
+measurable -- every row that runs reports a full-iter -- but no system reaches the
+shared 1e-5 tolerances here. They stop on different plateaus of a long descent,
+765376 to 772215, a 0.9% spread. The dataset is excluded from the default suite
+until it has a termination criterion the systems can share. `full-iter` is the
+only column here that means what it means elsewhere; `total ms`, `iters` and
+`final cost` are each reporting a different, arbitrary stopping point.
 
 | system                | total ms |   iters | ms/iter | full-iter | full-norm | 1st-iter ms | peak MB |  final cost |
 |-----------------------|---------:|--------:|--------:|----------:|----------:|------------:|--------:|------------:|
-| arael LM f64 sparse   |  88469.0 |  20(30) | 2948.97 |   2910.07 |     1.612 |      3925.5 |  1818.2 |  769222.381 |
-| arael LM f64 schur    |  54161.6 |  20(30) | 1805.39 |   1805.54 |     1.000 |      2198.2 |  1345.0 |  769222.381 |
-| ceres sparse_schur    |  89710.9 |  24(31) | 2893.90 |   2813.32 |     1.558 |      4057.8 |  1250.1 |  766134.386 |
-| ceres iterative_schur\* |   8706.3 |  16(23) |  378.53 |    397.21 |     0.220 |      1191.1 |   621.3 |  772215.452 |
-| g2o LM (schur)        | 364393.4 | 84(112) | 3253.51 |   2318.33 |     1.284 |      2942.3 |  1540.0 |  765376.644 |
+| arael LM f64 sparse   | 85666.21 |  20(30) | 2855.54 |   2820.94 |     1.571 |     4053.87 |  1818.2 | 769222.3809 |
+| arael LM f32 sparse\*\* |        - |       - |       - |         - |         - |           - |       - |           - |
+| arael LM f64 schur    | 53723.60 |  20(30) | 1790.79 |   1795.93 |     1.000 |     2252.61 |  1372.9 | 769222.3809 |
+| arael LM f32 schur\*\* |        - |       - |       - |         - |         - |           - |       - |           - |
+| ceres sparse_schur    | 90541.76 |  25(32) | 2829.43 |   2835.45 |     1.579 |     4093.28 |  1250.1 | 766134.3856 |
+| ceres iterative_schur\* |  8741.73 |  17(24) |  364.24 |    403.98 |     0.225 |     1188.57 |   619.7 | 772215.4515 |
+| g2o LM (schur)        | 365509.20 | 84(112) | 3263.47 |   2304.76 |     1.283 |     2945.06 |  1540.2 | 765376.6444 |
 
-The Schur route still has the cheaper iteration here (1806 vs 2910 ms), on the
+4/7 at the common optimum, anchored by two external systems. The three that miss
+are the two f32 rows, which cannot run at all here (see below), and Ceres
+`sparse_schur`, whose camera centres land 6.3e-3 out against a 5e-3 gate -- the
+plateaus are close in cost and further apart in geometry.
+
+The Schur route still has the cheaper iteration here (1796 vs 2821 ms), on the
 largest reduced system in the suite -- 15,507 parameters. That holds only under
 nested dissection; see the section below.
 
 `iterative_schur`'s result suggests that on larger systems a conjugate-gradient
 method is likely the more viable route than a factorization. Its iteration against
-arael's Schur route, across the suite: 2.7x more expensive at Ladybug-49, 1.3x at
-138, then 1.4x CHEAPER at 372 and 4.5x cheaper here. It crosses over, and the lead
+arael's Schur route, across the suite: 2.9x more expensive at Ladybug-49, 1.3x at
+138, then 1.4x CHEAPER at 372 and 4.4x cheaper here. It crosses over, and the lead
 grows with the problem. It stops on a plateau like everything else on this
 dataset, so read it as a direction, not a measurement.
 
-**arael's f32 rows cannot run here at all** (0 accepted steps). The input data is
-bad: 199 observations lie behind the camera and fourteen sit on the optical centre
-(`pc.z` down to 3.65e-9). In f32 those cancel to exactly zero and the perspective
-divide becomes 0/0, which arrives as a NaN on the Hessian diagonal. f64 has the
-digits to survive it; f32 does not, and no damping value changes that. Running f32
+\*\* **arael's f32 rows cannot run here at all** -- the dashes above are a solve
+that failed at iteration 0. The input data is bad: 199 observations lie behind the
+camera and fourteen sit on the optical centre (`pc.z` down to 3.65e-9). In f32
+those cancel to exactly zero and the perspective divide becomes 0/0, which arrives
+as a NaN on the Hessian diagonal and stops the solve. f64 has the digits to
+survive it; f32 does not, and no damping value changes that. Running f32
 here would need the data fixed and/or a loss function that tolerates a degenerate
 projection. The smaller datasets carry no such observation, which is why f32
 solves them.
@@ -224,13 +231,13 @@ benchmark therefore orders S with nested dissection (`BAL_ORDERING=amd` goes bac
 to AMD, which is arael's own default). It is not a small effect: `cargo run -r
 --bin schur_stats` measures S under AMD and reports 4716 ms to factorize it on
 Ladybug-1723, where under nested dissection the WHOLE Schur iteration -- assembly,
-reduction, factorization, solve -- takes 1806 ms. The same swap moves the fill
+reduction, factorization, solve -- takes 1796 ms. The same swap moves the fill
 ratio the policy decides on from 1.21 to 0.55, which is the difference between
 declining the reduction and taking it.
 
 With that ordering the Schur route has the cheaper iteration on every dataset in
-the suite, including the 1723 exploratory one (1806 ms against the full system's
-2910). `schur_stats` reports S's size, density, fill and the split between forming
+the suite, including the 1723 exploratory one (1796 ms against the full system's
+2821). `schur_stats` reports S's size, density, fill and the split between forming
 it and factorizing it, per dataset.
 
 ## Covariance recovery (2026-07-26, Apple M4 Pro, single core)
