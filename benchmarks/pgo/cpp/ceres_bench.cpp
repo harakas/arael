@@ -169,7 +169,7 @@ int main(int argc, char** argv) {
     std::vector<Pose> result;
     bench::report(
         [&](int n) { return solve(poses, edges, prior, n, nullptr); },
-        [&]() { return solve(poses, edges, prior, 100, &result); });
+        [&]() { return solve(poses, edges, prior, bench::full_iters(100), &result); });
 
     std::ofstream out(argv[2]);
     for (const Pose& p : result) out << p.x << " " << p.y << " " << p.th << "\n";

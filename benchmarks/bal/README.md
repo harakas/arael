@@ -11,6 +11,10 @@ marginalized so g2o performs its Schur elimination (its sparse-BA
 heritage), CHOLMOD on the reduced camera system, the residual
 autodiffed with g2o's bundled AD. With unit information g2o's chi2 IS
 the reference cost, asserted at the initial estimate like the others.
+A second g2o row solves that reduced system with block-Jacobi
+preconditioned conjugate gradient instead of factorizing it -- the
+configuration Ceres calls `iterative_schur`. `BAL_PCG_ITERS` and
+`BAL_PCG_TOLS` make one row per inner-solve setting.
 
 It runs on the shared [benchmarks/harness](../harness) -- the same probes,
 timing rules, table and core pin as [pgo](../pgo/README.md),
@@ -347,6 +351,8 @@ produced it.
 | `BAL_SYSTEMS` | comma-separated substrings; runs only the matching rows (a filtered run cannot validate across systems) |
 | `ARAEL_LAMBDA0`, `G2O_LAMBDA_INIT`, `CERES_RADIUS0` | initial damping, per system |
 | `BAL_LAMBDAS` | comma-separated damping values: sweep them instead of running the benchmark (below) |
+| `BAL_PCG_ITERS` | comma-separated CG iteration caps for g2o's PCG row, one row each; `0` is uncapped |
+| `BAL_PCG_TOLS` | comma-separated inner-solve tolerances, same (crossed with the caps) |
 | `DRIVER=fixed` | arael's fixed damping ladder instead of the gain-ratio driver it defaults to here |
 | `BAL_ORDERING=amd` | AMD on the reduced camera system instead of nested dissection |
 | `BAL_SCHUR_POLICY=auto` | let the fill analysis decide the reduction instead of forcing it |

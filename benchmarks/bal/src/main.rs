@@ -107,6 +107,9 @@ fn print_header(rounds: usize, only: &Option<String>, systems: &Option<String>,
         .rounds(rounds)
         .line("datasets", format!("{} [BAL_ONLY]", only.as_deref().unwrap_or("all")))
         .line("systems", format!("{} [BAL_SYSTEMS]", systems.as_deref().unwrap_or("all")))
+        .line("g2o rows", g2o_rows().iter().map(|r| r.label.as_str())
+            .collect::<Vec<_>>().join(", ")
+            + " [BAL_PCG_TOLS, BAL_PCG_ITERS]")
         .line("arael lambda0", match std::env::var("ARAEL_LAMBDA0") {
             Ok(v) => format!("{} -- ARAEL_LAMBDA0 overrides every dataset", v),
             Err(_) => format!("per dataset: {} [ARAEL_LAMBDA0]",
@@ -242,13 +245,25 @@ fn lambda_sweep(b: &Bench, ds: &Rc<Dataset>, lambdas: &[f64],
             }
         }
     }
-    if std::path::Path::new("cpp/build/g2o_bal").exists() && want("g2o LM (schur)") {
-        for &lambda in lambdas {
-            let params_out = "/tmp/g2o_bal.txt";
-            let mut cmd = std::process::Command::new("cpp/build/g2o_bal");
-            cmd.env("BENCH_QUICK", "1").env("G2O_LAMBDA_INIT", format!("{:e}", lambda));
-            sweep_external("g2o LM (schur)", lambda, cmd,
-                &[path, params_out], params_out, ds);
+    if std::path::Path::new("cpp/build/g2o_bal").exists() {
+        for row in g2o_rows() {
+            if !want(&row.label) {
+                continue;
+            }
+            let params_out = if row.pcg { "/tmp/g2o_bal_pcg.txt" } else { "/tmp/g2o_bal.txt" };
+            let mode = if row.pcg { "pcg" } else { "schur" };
+            for &lambda in lambdas {
+                let mut cmd = std::process::Command::new("cpp/build/g2o_bal");
+                cmd.env("BENCH_QUICK", "1").env("G2O_LAMBDA_INIT", format!("{:e}", lambda));
+                if let Some(t) = &row.tol {
+                    cmd.env("G2O_PCG_TOL", t);
+                }
+                if let Some(m) = &row.maxiter {
+                    cmd.env("G2O_PCG_MAXITER", m);
+                }
+                sweep_external(&row.label, lambda, cmd,
+                    &[path, params_out, mode], params_out, ds);
+            }
         }
     }
 }
@@ -395,13 +410,18 @@ fn main() {
                     }
                 }
             }
-            if g2o_ok && want("g2o LM (schur)") {
-                match run_g2o(path, &ds) {
-                    Ok(e) => {
-                        check_initial("g2o LM (schur)", e.initial_cost, initial_cost);
-                        t.record("g2o LM (schur)", e.row);
+            if g2o_ok {
+                for row in g2o_rows() {
+                    if !want(&row.label) {
+                        continue;
                     }
-                    Err(why) => t.record_failure("g2o LM (schur)", why),
+                    match run_g2o(path, &ds, &row) {
+                        Ok(e) => {
+                            check_initial(&row.label, e.initial_cost, initial_cost);
+                            t.record(&row.label, e.row);
+                        }
+                        Err(why) => t.record_failure(&row.label, why),
+                    }
                 }
             }
         }
@@ -469,12 +489,65 @@ fn run_ceres(path: &str, linsolver: &str, radius0: f64, ds: &Dataset) -> Result<
     run_ext(cmd, &[path, &params_out, linsolver], &params_out, ds)
 }
 
-/// g2o's own BA configuration (its bal_example): marginalized point vertices ->
-/// Schur elimination, CHOLMOD on the reduced camera system.
-fn run_g2o(path: &str, ds: &Dataset) -> Result<Ext, String> {
-    let params_out = "/tmp/g2o_bal.txt";
-    run_ext(std::process::Command::new("cpp/build/g2o_bal"),
-        &[path, params_out], params_out, ds)
+/// One g2o row: its label, and the inner-solve settings that produce it.
+/// `pcg` false is g2o's own BA configuration (its bal_example): marginalized
+/// point vertices -> Schur elimination, CHOLMOD on the reduced camera system.
+/// `pcg` true keeps the elimination and solves that reduced system iteratively.
+struct G2oRow {
+    label: String,
+    pcg: bool,
+    tol: Option<String>,
+    maxiter: Option<String>,
+}
+
+/// The g2o rows to run: the direct one, then one per PCG setting.
+///
+/// BAL_PCG_TOLS and BAL_PCG_ITERS are comma-separated lists; every
+/// combination becomes its own row. Unset means one PCG row at g2o's
+/// shipped settings.
+///
+///   BAL_ONLY=49 BAL_PCG_ITERS=10,25,50 cargo run -r
+fn g2o_rows() -> Vec<G2oRow> {
+    // "0" is the shipped setting spelled explicitly, so a sweep can ask for
+    // the uncapped row alongside the capped ones in a single list.
+    let list = |var: &str| -> Vec<Option<String>> {
+        match std::env::var(var) {
+            Ok(v) => v.split(',').map(str::trim).filter(|s| !s.is_empty())
+                      .map(|s| if s == "0" { None } else { Some(s.to_string()) })
+                      .collect(),
+            Err(_) => vec![None],
+        }
+    };
+    let mut rows = vec![G2oRow {
+        label: "g2o LM (schur)".to_string(), pcg: false, tol: None, maxiter: None,
+    }];
+    for tol in list("BAL_PCG_TOLS") {
+        for maxiter in list("BAL_PCG_ITERS") {
+            let mut label = "g2o LM (pcg".to_string();
+            if let Some(t) = &tol {
+                label.push_str(&format!(" tol={t}"));
+            }
+            if let Some(m) = &maxiter {
+                label.push_str(&format!(" it={m}"));
+            }
+            label.push(')');
+            rows.push(G2oRow { label, pcg: true, tol: tol.clone(), maxiter });
+        }
+    }
+    rows
+}
+
+fn run_g2o(path: &str, ds: &Dataset, row: &G2oRow) -> Result<Ext, String> {
+    let params_out = if row.pcg { "/tmp/g2o_bal_pcg.txt" } else { "/tmp/g2o_bal.txt" };
+    let mut cmd = std::process::Command::new("cpp/build/g2o_bal");
+    if let Some(t) = &row.tol {
+        cmd.env("G2O_PCG_TOL", t);
+    }
+    if let Some(m) = &row.maxiter {
+        cmd.env("G2O_PCG_MAXITER", m);
+    }
+    let mode = if row.pcg { "pcg" } else { "schur" };
+    run_ext(cmd, &[path, params_out, mode], params_out, ds)
 }
 
 // ---- Covariance-scaling benchmark (BAL_COV=1) ------------------------------

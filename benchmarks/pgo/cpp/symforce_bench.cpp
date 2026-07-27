@@ -151,7 +151,7 @@ void run(const char* g2o, const char* poses_out, bool unit) {
     std::vector<PoseIn> result;
     bench::report(
         [&](int n) { return solve<Scalar>(poses, edges, n, nullptr); },
-        [&]() { return solve<Scalar>(poses, edges, 100, &result); });
+        [&]() { return solve<Scalar>(poses, edges, bench::full_iters(100), &result); });
 
     std::ofstream out(poses_out);
     for (const PoseIn& p : result) {

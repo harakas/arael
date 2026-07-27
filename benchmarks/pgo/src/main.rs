@@ -207,22 +207,35 @@ fn run_dataset3(name: &str, path: &str, rounds: usize) {
     let mut t = bench_harness::table::Table::new(&geo);
 
     for round in 0..rounds {
-        let a64 = arael_runner3::run_f64(&ds);
-        t.record_result("arael LM f64", a64);
-        let a32 = arael_runner3::run_f32(&ds);
-        t.record_result("arael LM f32", a32);
-        if !skip_tiny() {
+        if system_selected("arael LM f64") {
+            let a64 = arael_runner3::run_f64(&ds);
+            t.record_result("arael LM f64", a64);
+        }
+        if system_selected("arael LM f32") {
+            let a32 = arael_runner3::run_f32(&ds);
+            t.record_result("arael LM f32", a32);
+        }
+        if !skip_tiny() && system_selected("tiny-solver GN") {
             let tgn = tiny_runner3::run_gn(&ds);
             t.record("tiny-solver GN", tgn);
+        }
+        if !skip_tiny() && system_selected("tiny-solver LM") {
             let tlm = tiny_runner3::run_lm(&ds);
             t.record("tiny-solver LM", tlm);
         }
-        let fgn = factrs_runner3::run_gn(&ds);
-        t.record("factrs GN", fgn);
-        let flm = factrs_runner3::run_lm(&ds);
-        t.record("factrs LM", flm);
+        if system_selected("factrs GN") {
+            let fgn = factrs_runner3::run_gn(&ds);
+            t.record("factrs GN", fgn);
+        }
+        if system_selected("factrs LM") {
+            let flm = factrs_runner3::run_lm(&ds);
+            t.record("factrs LM", flm);
+        }
         if factrs32_3d_available {
             for (kind, label) in [("gn", "factrs GN f32"), ("lm", "factrs LM f32")] {
+                if !system_selected(label) {
+                    continue;
+                }
                 match run_factrs32_3d(path, kind, ds.poses.len()) {
                     Some(row) => t.record(label, row),
                     None => {
@@ -239,12 +252,26 @@ fn run_dataset3(name: &str, path: &str, rounds: usize) {
                     "external initial cost {} disagrees with reference {}",
                     line_cost, initial_cost);
             };
-            let row = run_external3_checked(
-                std::process::Command::new("cpp/build/ceres_bench3"),
-                &[path, "/tmp/ceres3_poses.txt"], "/tmp/ceres3_poses.txt",
-                ds.poses.len(), Some("initial_cost"), &check);
-            t.record("ceres LM", row);
-            for kind in ["lm", "gn"] {
+            if system_selected("ceres LM") {
+                let row = run_external3_checked(
+                    std::process::Command::new("cpp/build/ceres_bench3"),
+                    &[path, "/tmp/ceres3_poses.txt"], "/tmp/ceres3_poses.txt",
+                    ds.poses.len(), Some("initial_cost"), &check);
+                t.record("ceres LM", row);
+            }
+            let g2o_kinds: &[&str] = if skip_pcg() {
+                &["lm", "gn"]
+            } else {
+                &["lm", "gn", "lm-pcg", "gn-pcg"]
+            };
+            for kind in g2o_kinds {
+                let label = match kind.strip_suffix("-pcg") {
+                    Some(algo) => format!("g2o {} PCG", algo.to_uppercase()),
+                    None => format!("g2o {}", kind.to_uppercase()),
+                };
+                if !system_selected(&label) {
+                    continue;
+                }
                 let poses_out = format!("/tmp/g2o3_poses_{}.txt", kind);
                 let mut g2o_cmd = std::process::Command::new("cpp/build/g2o_bench3");
                 g2o_cmd.env("G2O_LAMBDA_INIT", g2o_lambda(name));
@@ -252,16 +279,19 @@ fn run_dataset3(name: &str, path: &str, rounds: usize) {
                     g2o_cmd,
                     &[path, kind, &poses_out], &poses_out,
                     ds.poses.len(), Some("initial_cost"), &check);
-                t.record(&format!("g2o {}", kind.to_uppercase()), row);
+                t.record(&label, row);
             }
             if symforce3_available {
                 for prec in ["f64", "f32"] {
+                    let label = if prec == "f32" { "symforce LM f32" } else { "symforce LM" };
+                    if !system_selected(label) {
+                        continue;
+                    }
                     let poses_out = format!("/tmp/symforce3_poses_{}.txt", prec);
                     let row = run_external3_checked(
                         std::process::Command::new("cpp/build/symforce_bench3"),
                         &[path, prec, &poses_out], &poses_out,
                         ds.poses.len(), Some("initial_cost"), &check);
-                    let label = if prec == "f32" { "symforce LM f32" } else { "symforce LM" };
                     t.record(label, row);
                 }
             }
@@ -273,12 +303,16 @@ fn run_dataset3(name: &str, path: &str, rounds: usize) {
         // validation gates judge its solutions like everyone else's.
         if let Some(py) = gtsam_available() {
             for kind in ["lm", "gn"] {
+                let label = format!("gtsam {}", kind.to_uppercase());
+                if !system_selected(&label) {
+                    continue;
+                }
                 let poses_out = format!("/tmp/gtsam3_poses_{}.txt", kind);
                 let row = run_external3_checked(
                     std::process::Command::new(&py),
                     &["gtsam_bench.py", path, kind, &poses_out], &poses_out,
                     ds.poses.len(), None, &|_| {});
-                t.record(&format!("gtsam {}", kind.to_uppercase()), row);
+                t.record(&label, row);
             }
         }
         eprintln!("  round {}/{} done", round + 1, rounds);
@@ -293,6 +327,14 @@ fn run_dataset3(name: &str, path: &str, rounds: usize) {
 
 fn skip_tiny() -> bool {
     std::env::var("RUN_TINY").is_err()
+}
+
+/// g2o's iterative PCG backend is off by default (RUN_PCG=1 brings it back).
+/// It answers a different question from the direct rows -- an inexact step
+/// bought by a second termination rule -- and on these pose graphs it costs
+/// orders of magnitude more than the CHOLMOD factorization it replaces.
+fn skip_pcg() -> bool {
+    std::env::var("RUN_PCG").is_err()
 }
 
 /// GTSAM's ISAM2 is off by default (RUN_ISAM=1 brings it back). It answers the
@@ -319,8 +361,8 @@ fn print_header(rounds: usize, only: &Option<String>) {
     println!("systems           : {} [PGO_SYSTEMS]",
         std::env::var("PGO_SYSTEMS").unwrap_or_else(|_| "all".to_string()));
     let on_off = |skipped: bool| if skipped { "skipped" } else { "run" };
-    println!("optional systems  : tiny-solver {} [RUN_TINY], isam {} [RUN_ISAM]",
-        on_off(skip_tiny()), on_off(skip_isam()));
+    println!("optional systems  : tiny-solver {} [RUN_TINY], isam {} [RUN_ISAM], g2o PCG {} [RUN_PCG]",
+        on_off(skip_tiny()), on_off(skip_isam()), on_off(skip_pcg()));
     println!("arael lambda0     : {:e} (2D), {:e} (3D) [ARAEL_LAMBDA0]",
         arael_runner::LAMBDA0_2D,
         arael_runner3::LAMBDA0_3D);
@@ -523,6 +565,14 @@ fn main() {
                 }
                 if system_selected("g2o GN") {
                     t.record("g2o GN", run_g2o(path, "gn", *weighted, ds.poses.len()));
+                }
+                if !skip_pcg() {
+                    for kind in ["lm-pcg", "gn-pcg"] {
+                        let label = format!("g2o {} PCG", &kind[..2].to_uppercase());
+                        if system_selected(&label) {
+                            t.record(&label, run_g2o(path, kind, *weighted, ds.poses.len()));
+                        }
+                    }
                 }
             }
             eprintln!("  round {}/{} done", round + 1, rounds);

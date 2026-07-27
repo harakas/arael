@@ -1,18 +1,22 @@
 // g2o runner for the 2D pose-graph benchmark. Same protocol as the
 // other runners:
-//   g2o_bench <file.g2o> <lm|gn> <poses_out> <info|unit>
+//   g2o_bench <file.g2o> <lm|gn|lm-pcg|gn-pcg> <poses_out> <info|unit>
 // prints JSON {solve_ms, first_iter_ms, iterations, cpus_allowed} and
 // writes "x y theta" lines to poses_out. Timing wraps initialize +
 // optimize. The gauge prior is a proper soft unit-weight EdgeSE2Prior
 // (same convention as every other runner), not a fixed vertex.
+//
+// The -pcg kinds swap the CHOLMOD factorization for g2o's iterative
+// block-Jacobi preconditioned conjugate gradient, leaving the rest of
+// the run identical, so the pair isolates the linear solver.
 
 #include "../../cpp/bench.h"
-#include <g2o/core/block_solver.h>
+#include "../../cpp/g2o_linear.h"
+#include <g2o/core/batch_stats.h>
 #include <g2o/core/optimization_algorithm_gauss_newton.h>
 #include <g2o/core/optimization_algorithm_levenberg.h>
 #include <g2o/core/sparse_optimizer.h>
 #include <g2o/core/sparse_optimizer_terminate_action.h>
-#include <g2o/solvers/cholmod/linear_solver_cholmod.h>
 #include <g2o/types/slam2d/types_slam2d.h>
 
 #include <chrono>
@@ -71,11 +75,10 @@ struct TrialCounter : public g2o::HyperGraphAction {
     }
 };
 
+template <typename BS>
 static bench::Result solve(const std::vector<PoseIn>& poses, const std::vector<EdgeIn>& edges,
-                       bool lm, int max_iters, std::vector<PoseIn>* out) {
-    using BlockSolver = g2o::BlockSolver<g2o::BlockSolverTraits<-1, -1>>;
-    auto linear = std::make_unique<g2o::LinearSolverCholmod<BlockSolver::PoseMatrixType>>();
-    auto block = std::make_unique<BlockSolver>(std::move(linear));
+                       bool lm, bool pcg, int max_iters, std::vector<PoseIn>* out) {
+    auto block = g2olin::make_block_solver<BS>(pcg);
     g2o::OptimizationAlgorithm* algo;
     auto* counter = new TrialCounter();
     if (lm) {
@@ -95,6 +98,7 @@ static bench::Result solve(const std::vector<PoseIn>& poses, const std::vector<E
     g2o::SparseOptimizer opt;
     opt.setVerbose(false);
     opt.setAlgorithm(algo);
+    if (pcg && g2olin::pcg_stats_wanted()) opt.setComputeBatchStatistics(true);
 
     for (size_t i = 0; i < poses.size(); i++) {
         auto* v = new g2o::VertexSE2();
@@ -142,6 +146,8 @@ static bench::Result solve(const std::vector<PoseIn>& poses, const std::vector<E
     double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 
     if (out) {
+        int cg = g2olin::pcg_total_iterations(opt);
+        if (cg >= 0) fprintf(stderr, "  [pcg] %d CG iterations over %d solver iterations\n", cg, iters);
         out->resize(poses.size());
         for (size_t i = 0; i < poses.size(); i++) {
             auto* v = static_cast<g2o::VertexSE2*>(opt.vertex((int)i));
@@ -153,17 +159,30 @@ static bench::Result solve(const std::vector<PoseIn>& poses, const std::vector<E
 }
 
 int main(int argc, char** argv) {
-    if (argc < 5) { fprintf(stderr, "usage: %s <g2o> <lm|gn> <poses_out> <info|unit>\n", argv[0]); return 1; }
-    bool lm = std::string(argv[2]) == "lm";
+    if (argc < 5) {
+        fprintf(stderr, "usage: %s <g2o> <lm|gn|lm-pcg|gn-pcg> <poses_out> <info|unit>\n", argv[0]);
+        return 1;
+    }
+    const std::string kind = argv[2];
+    bool lm = kind.rfind("lm", 0) == 0;
+    bool pcg = kind.find("-pcg") != std::string::npos;
     bool unit = std::string(argv[4]) == "unit";
     std::vector<PoseIn> poses;
     std::vector<EdgeIn> edges;
     parse_g2o(argv[1], unit, poses, edges);
 
+    // SE2 poses are 3-dimensional; BlockSolver_3_2's landmark slot is
+    // unused on a pose graph.
+    const bool fixed = g2olin::fixed_blocks(pcg);
+    auto run = [&](int n, std::vector<PoseIn>* out) {
+        return fixed ? solve<g2o::BlockSolver_3_2>(poses, edges, lm, pcg, n, out)
+                     : solve<g2o::BlockSolverX>(poses, edges, lm, pcg, n, out);
+    };
+
     std::vector<PoseIn> result;
     bench::report(
-        [&](int n) { return solve(poses, edges, lm, n, nullptr); },
-        [&]() { return solve(poses, edges, lm, 100, &result); });
+        [&](int n) { return run(n, nullptr); },
+        [&]() { return run(bench::full_iters(100), &result); });
 
     std::ofstream out(argv[3]);
     for (const PoseIn& p : result) out << p.x << " " << p.y << " " << p.th << "\n";

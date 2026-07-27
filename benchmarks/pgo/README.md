@@ -265,6 +265,12 @@ under the problem-appropriate policy above.
   retries inside `iterate()` and its API exposes no way to count them.
   Every other row divides by attempts.
 
+- **g2o PCG** (`RUN_PCG=1`) swaps the CHOLMOD factorization for block-Jacobi
+  preconditioned conjugate gradient. Off by default: it takes 3-5x more
+  iterations, and on three of the four datasets it lands inside the 1% cost
+  gate but outside the 5 cm geometric one. It pays on the reduced camera
+  system of a bundle problem instead -- see [bal](../bal/README.md).
+
 - **g2o GN on sphere2500** stalls at cost 3053.9 (2.3x the optimum): the
   translations reach the optimum (0.5 mm aligned RMSE to the best
   solution), the rotations do not. Relaxing the gain stop to 1e-12 lets
@@ -302,6 +308,11 @@ carries the settings that produced it):
 | `GTSAM_PYTHON` | python with GTSAM; `sudo apt install python3-gtsam` and point it at `/usr/bin/python3` |
 | `RUN_TINY` | include tiny-solver (off by default: an order of magnitude slower than the field) |
 | `RUN_ISAM` | include the GTSAM ISAM2 row (off by default: incremental, so not comparable to the batch rows) |
+| `RUN_PCG` | include g2o's iterative PCG rows (off by default; see below) |
+| `PGO_SYSTEMS` | comma-separated substrings; runs only the matching rows (a filtered run cannot validate across systems) |
+| `BENCH_MAX_ITERS` | cap the solve below the 100-iteration ceiling. C++ runners only, so a capped run is a diagnostic, not a table |
+| `G2O_PCG_TOL`, `G2O_PCG_ABSTOL`, `G2O_PCG_MAXITER` | PCG's inner-solve termination; defaults are g2o's shipped ones |
+| `G2O_PCG_STATS` | print PCG's CG iterations per solve; costs time inside the timed region, so never for a measurement |
 | `VERBOSE` | arael's per-iteration solver trace |
 | `TIMING` | arael's per-solve breakdown (assembly / linear solve) |
 | `ARAEL_LAMBDA0`, `CERES_RADIUS0`, `G2O_LAMBDA_INIT`, `TINY_RADIUS0`, `GTSAM_LAMBDA0`, `SYMFORCE_LAMBDA0` | initial damping, per system |

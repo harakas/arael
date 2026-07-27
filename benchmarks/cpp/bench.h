@@ -124,7 +124,15 @@ inline bool quick() { return getenv("BENCH_QUICK") != nullptr; }
 
 // How many iterations the reported solve runs. The runner passes what the
 // benchmark wants; the sweep cuts it to two.
-inline int full_iters(int wanted) { return quick() ? 2 : wanted; }
+//
+// BENCH_MAX_ITERS overrides it, to hold a configuration known not to converge
+// below the 100-iteration ceiling. The in-process rows (arael, factrs) do not
+// read it, so a capped run is a diagnostic, not a table.
+inline int full_iters(int wanted) {
+    if (quick()) return 2;
+    if (const char* m = getenv("BENCH_MAX_ITERS")) return atoi(m);
+    return wanted;
+}
 
 // Fastest of PROBE_SUBROUNDS runs of the same capped solve, after a discarded
 // warmup. Solve is any callable: Result(int max_iters).

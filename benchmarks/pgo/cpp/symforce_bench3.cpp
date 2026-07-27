@@ -186,7 +186,7 @@ void run(const char* g2o, const char* poses_out) {
     bench::report(
         [&](int n) { return solve<Scalar>(poses, edges, n, nullptr); },
         [&]() {
-            bench::Result r = solve<Scalar>(poses, edges, 100, &result);
+            bench::Result r = solve<Scalar>(poses, edges, bench::full_iters(100), &result);
             // The cross-check the harness asserts: SymForce's own generated
             // residual functions, in double, must value the initial estimate at
             // the reference cost -- which is what proves it minimizes the same

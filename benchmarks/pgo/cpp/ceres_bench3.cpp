@@ -177,7 +177,7 @@ int main(int argc, char** argv) {
     std::vector<PoseIn> result;
     bench::report(
         [&](int n) { return solve(poses, edges, n, nullptr); },
-        [&]() { return solve(poses, edges, 100, &result); });
+        [&]() { return solve(poses, edges, bench::full_iters(100), &result); });
 
     std::ofstream out(argv[2]);
     for (const PoseIn& p : result) {

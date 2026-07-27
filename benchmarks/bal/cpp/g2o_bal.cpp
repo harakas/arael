@@ -7,23 +7,26 @@
 // reprojection error autodiffed with g2o's bundled AD. Unit
 // information, so g2o's chi2 IS the reference cost -- asserted by the
 // harness at the initial estimate. Protocol:
-//   g2o_bal <problem.txt> <params_out>
+//   g2o_bal <problem.txt> <params_out> [schur|pcg]
 // prints the shared benchmark protocol line (see ../../cpp/bench.h) --
 // iterations counts every damped lambda trial, accepted the outer Levenberg
 // iterations; params_out carries one camera per line (9 values) followed by
 // one point per line (3 values).
+//
+// pcg keeps the point marginalization and replaces only the CHOLMOD
+// factorization of the reduced camera system with block-Jacobi
+// preconditioned conjugate gradient -- the configuration Ceres calls
+// iterative_schur. Its termination knobs are in ../../cpp/g2o_linear.h.
 
 #include "../../cpp/bench.h"
+#include "../../cpp/g2o_linear.h"
 
 #include <g2o/core/auto_differentiation.h>
 #include <g2o/core/base_binary_edge.h>
 #include <g2o/core/base_vertex.h>
-#include <g2o/core/block_solver.h>
 #include <g2o/core/optimization_algorithm_levenberg.h>
 #include <g2o/core/sparse_block_matrix.h>
-#include <g2o/core/sparse_optimizer.h>
 #include <g2o/core/sparse_optimizer_terminate_action.h>
-#include <g2o/solvers/cholmod/linear_solver_cholmod.h>
 
 #include <Eigen/Core>
 #include <chrono>
@@ -213,11 +216,10 @@ struct TrialCounter : public g2o::HyperGraphAction {
     }
 };
 
-static bench::Result solve(const Bal& b, int max_iters, std::vector<double>* cams_out,
+static bench::Result solve(const Bal& b, bool pcg, int max_iters, std::vector<double>* cams_out,
                            std::vector<double>* points_out) {
     using BlockSolver = g2o::BlockSolver<g2o::BlockSolverTraits<9, 3>>;
-    auto linear = std::make_unique<g2o::LinearSolverCholmod<BlockSolver::PoseMatrixType>>();
-    auto block = std::make_unique<BlockSolver>(std::move(linear));
+    auto block = g2olin::make_block_solver<BlockSolver>(pcg);
     auto* lev = new g2o::OptimizationAlgorithmLevenberg(std::move(block));
     // g2o's auto lambda heuristic by default -- BA is the problem family
     // it was built for. Env-overridable like the other runners.
@@ -229,6 +231,7 @@ static bench::Result solve(const Bal& b, int max_iters, std::vector<double>* cam
     opt.setVerbose(false);
     opt.setAlgorithm(lev);
     opt.addPostIterationAction(counter);
+    if (pcg && g2olin::pcg_stats_wanted()) opt.setComputeBatchStatistics(true);
 
     std::vector<VertexCameraBAL*> cams(b.n_cams);
     for (int i = 0; i < b.n_cams; i++) {
@@ -280,6 +283,8 @@ static bench::Result solve(const Bal& b, int max_iters, std::vector<double>* cam
     double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
 
     if (cams_out) {
+        int cg = g2olin::pcg_total_iterations(opt);
+        if (cg >= 0) fprintf(stderr, "  [pcg] %d CG iterations over %d solver iterations\n", cg, iters);
         cams_out->resize(9 * b.n_cams);
         for (int i = 0; i < b.n_cams; i++) {
             Eigen::Map<Eigen::Matrix<double, 9, 1>> m(&(*cams_out)[9 * i]);
@@ -409,15 +414,20 @@ static int cov_mode(const Bal& b) {
 }
 
 int main(int argc, char** argv) {
-    if (argc < 3) { fprintf(stderr, "usage: %s <problem.txt> <params_out|cov>\n", argv[0]); return 1; }
+    if (argc < 3) {
+        fprintf(stderr, "usage: %s <problem.txt> <params_out|cov> [schur|pcg]\n", argv[0]);
+        return 1;
+    }
     Bal b = load(argv[1]);
 
     if (std::string(argv[2]) == "cov") return cov_mode(b);
 
+    const bool pcg = argc > 3 && std::string(argv[3]) == "pcg";
+
     std::vector<double> cams, points;
     bench::report(
-        [&](int n) { return solve(b, n, nullptr, nullptr); },
-        [&]() { return solve(b, bench::full_iters(100), &cams, &points); });
+        [&](int n) { return solve(b, pcg, n, nullptr, nullptr); },
+        [&]() { return solve(b, pcg, bench::full_iters(100), &cams, &points); });
 
     std::ofstream out(argv[2]);
     out.precision(17);
