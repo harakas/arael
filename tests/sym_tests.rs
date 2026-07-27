@@ -1160,6 +1160,8 @@ fn test_sympy_error_suppression_numerical() {
 // ============================================================
 
 #[test]
+// "3.14" is parser input, not an approximation of PI.
+#[allow(clippy::approx_constant)]
 fn test_parse_basic_arithmetic() {
     sym! {
         let x = symbol("x");

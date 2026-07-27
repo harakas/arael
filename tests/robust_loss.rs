@@ -199,6 +199,8 @@ fn identity_loss_is_bit_identical_to_no_loss() {
 }
 
 #[test]
+// The row*n+col arithmetic is kept literal so the indexing reads as a matrix.
+#[allow(clippy::erasing_op, clippy::identity_op)]
 fn cauchy_scales_gradient_and_hessian_by_weight() {
     let (mut w, params) = build_self();
     let (grad, hess) = gh(&mut w, &params);
@@ -213,6 +215,8 @@ fn cauchy_scales_gradient_and_hessian_by_weight() {
 }
 
 #[test]
+// The row*n+col arithmetic is kept literal so the indexing reads as a matrix.
+#[allow(clippy::erasing_op, clippy::identity_op)]
 fn geman_mcclure_scales_gradient_and_hessian_by_weight() {
     let (mut w, params) = build_self();
     let (grad, hess) = gh(&mut w, &params);
@@ -242,6 +246,8 @@ fn mixed_precision_gm_weight_applies() {
 }
 
 #[test]
+// The row*n+col arithmetic is kept literal so the indexing reads as a matrix.
+#[allow(clippy::erasing_op, clippy::identity_op)]
 fn huber_scales_gradient_and_hessian_beyond_threshold() {
     let (mut w, params) = build_self();
     let (grad, hess) = gh(&mut w, &params);
@@ -345,6 +351,8 @@ struct CrossCauchy {
 }
 
 #[test]
+// The row*n+col arithmetic is kept literal so the indexing reads as a matrix.
+#[allow(clippy::erasing_op, clippy::identity_op)]
 fn cross_block_loss_scales_the_cross_hessian() {
     // Two nodes with residual (0.4, -0.5) -> s = 0.41, same as the self case.
     let n0 = (0.0_f64, 0.0_f64);

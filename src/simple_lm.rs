@@ -223,7 +223,7 @@ pub struct LmConfig<T: Float> {
     /// min_diagonal` of damping, so the system stays positive definite and the
     /// parameter simply does not move (its gradient is zero too). Without one the
     /// damped diagonal is `(1 + lambda) * 0 = 0` and the solve ends with
-    /// [`LmStatus::DegenerateDiagonal`].
+    /// [`SolveFailureKind::DegenerateDiagonal`].
     ///
     /// **A zero diagonal means the system is badly formulated: a parameter that
     /// nothing constrains. This is a bandaid, and it should be avoided.** It lets
@@ -547,7 +547,7 @@ impl std::error::Error for BandOverflow {}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SolveError {
     /// A Hessian element fell outside the band half-bandwidth `kd` declared for
-    /// the [`Band`] / [`BandLapack`] backend.
+    /// the [`Band`] / `BandLapack` backend.
     BandOverflow {
         /// Row index of the offending element.
         row: usize,
@@ -1002,8 +1002,8 @@ pub trait FitProblem<T: Float>: LmProblem<T> + Sized {
     /// dense `p x p` matrix in f64 (in the parameters' serialize order). A fit
     /// optimizes a single small dense block, so this inverts the Hessian
     /// directly. Call it after [`fit`](Self::fit) to get the covariance at the
-    /// solution. Errors: [`CovError::NotPositiveDefinite`] on a singular
-    /// Hessian (an under-determined fit), [`CovError::Empty`] on a fit with
+    /// solution. Errors: [`CovError::NotPositiveDefinite`](crate::covariance::CovError::NotPositiveDefinite) on a singular
+    /// Hessian (an under-determined fit), [`CovError::Empty`](crate::covariance::CovError::Empty) on a fit with
     /// no optimizable parameters.
     ///
     /// This assumes the residuals are whitened by their measurement noise, so it
@@ -1974,7 +1974,7 @@ pub trait LmSolver<T: Float> {
     /// Returns [`SolveError`] when the linear system cannot be built or its
     /// structure factored (band overflow, an unconstrained parameter, a failed
     /// symbolic factorization, an illegal marginalization). The loop turns that
-    /// into [`LmStatus::SetupFailed`] and stops without a step.
+    /// into [`SolveFailureKind::Setup`] and stops without a step.
     fn compute(&mut self, problem: &mut dyn LmProblem<T>, params: &[T], grad: &mut [T], matrix: &mut Self::Matrix) -> Result<T, SolveError>;
 
     /// Extract all diagonal elements from the matrix.
@@ -2782,7 +2782,7 @@ fn lm_solve_on<T: Float, S: LmSolver<T>>(
                 // test would let it fall through and be reported as a zero -- and
                 // then advise min_diagonal, which floors a zero and does nothing
                 // for a NaN.
-                let (fault, why) = if !(*d == *d) {
+                let (fault, why) = if d.is_nan() {
                     (DiagonalFault::Nan,
                      "not a number -- the assembly is poisoned (a residual or a derivative went NaN)")
                 } else if *d < T::zero() {
@@ -4034,18 +4034,18 @@ pub enum SolverKind {
         /// Half-bandwidth (superdiagonals).
         kd: usize,
     },
-    /// LAPACK band Cholesky ([`BandLapack`], feature `lapack`).
+    /// LAPACK band Cholesky (`BandLapack`, feature `lapack`).
     BandLapack {
         /// Half-bandwidth (superdiagonals).
         kd: usize,
     },
     /// faer sparse Cholesky ([`SparseFaer`]), configured by the options.
     Sparse(SparseFaerOptions),
-    /// Eigen sparse Cholesky ([`SparseEigen`], feature `eigen`).
+    /// Eigen sparse Cholesky (`SparseEigen`, feature `eigen`).
     Eigen,
-    /// CHOLMOD, simplicial ([`SparseCholmod`], feature `cholmod`, f64 only).
+    /// CHOLMOD, simplicial (`SparseCholmod`, feature `cholmod`, f64 only).
     Cholmod,
-    /// CHOLMOD, supernodal ([`SparseCholmodSupernodal`], feature `cholmod-gpl`,
+    /// CHOLMOD, supernodal (`SparseCholmodSupernodal`, feature `cholmod-gpl`,
     /// f64 only).
     CholmodSupernodal,
 }
@@ -5700,7 +5700,7 @@ fn eigen_ffi_solve<T>(
 
 /// Scalar dispatch for the Eigen LLT shim: implemented by `f64` and
 /// `f32`, selecting the per-precision extern entry points. An
-/// implementation detail of [`SparseEigen`].
+/// implementation detail of `SparseEigen`.
 #[cfg(feature = "eigen")]
 pub trait EigenScalar: Sized {
     #[doc(hidden)]
@@ -5861,7 +5861,7 @@ pub fn solve_sparse_cholmod(x0: &[f64], problem: &mut impl LmProblem<f64>, confi
 /// Eigen CholmodSupernodalLLT sparse Cholesky solver (f64 only).
 ///
 /// **WARNING (license):** this binds CHOLMOD's Supernodal module, which is
-/// **GPL-licensed** (the Simplicial module behind [`SparseCholmod`] is LGPL).
+/// **GPL-licensed** (the Simplicial module behind `SparseCholmod` is LGPL).
 /// A binary built with the `cholmod-gpl` feature is subject to the GPL.
 #[cfg(feature = "cholmod-gpl")]
 pub struct SparseCholmodSupernodal {
@@ -7447,6 +7447,8 @@ mod tests {
 
 
     #[test]
+    // The row*n+col arithmetic is kept literal so the indexing reads as a matrix.
+    #[allow(clippy::erasing_op, clippy::identity_op)]
     fn spd_band_guards_reject_nan_not_just_negative() {
         // Regression (B5): the SPD guards used `x <= 0.0`, which NaN
         // passes. A NaN on the band diagonal must fail the
@@ -7500,12 +7502,15 @@ mod tests {
                 (x[0]-1.0).powi(2) + (x[1]-2.0).powi(2) + (x[2]-3.0).powi(2) + (x[3]-4.0).powi(2)
                     + (x[0]-x[2]).powi(2) + (x[1]-x[3]).powi(2)
             }
+            // The row*4+col arithmetic is kept literal so the matrix reads as
+            // a matrix.
+            #[allow(clippy::erasing_op, clippy::identity_op)]
             fn calc_grad_hessian_dense(&mut self, x: &[f64], g: &mut [f64], h: &mut [f64]) -> f64 {
                 g[0] = 2.0*(x[0]-1.0) + 2.0*(x[0]-x[2]);
                 g[1] = 2.0*(x[1]-2.0) + 2.0*(x[1]-x[3]);
                 g[2] = 2.0*(x[2]-3.0) - 2.0*(x[0]-x[2]);
                 g[3] = 2.0*(x[3]-4.0) - 2.0*(x[1]-x[3]);
-                // Row-major 4x4
+                // Row-major 4x4.
                 h[0*4+0]=4.0; h[0*4+1]=0.0; h[0*4+2]=-2.0; h[0*4+3]=0.0;
                 h[1*4+0]=0.0; h[1*4+1]=4.0; h[1*4+2]=0.0;  h[1*4+3]=-2.0;
                 h[2*4+0]=-2.0;h[2*4+1]=0.0; h[2*4+2]=4.0;  h[2*4+3]=0.0;

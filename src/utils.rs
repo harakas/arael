@@ -90,7 +90,7 @@ pub trait Float : num::Float + std::fmt::Debug + num::NumCast + std::ops::AddAss
 
     /// Fast polynomial approximation of atan. Max error < 1e-6 radians.
     fn fast_atan(self) -> Self {
-      let half_pi = Self::from(1.5707963267948966e+00).unwrap();
+      let half_pi = Self::from(std::f64::consts::FRAC_PI_2).unwrap();
       let sixth_pi = Self::from(5.235_987_755_982_988e-1).unwrap();
       let tan_sixth_pi = Self::from(5.773_502_691_896_257e-1).unwrap();
       let tan_twelfth_pi = Self::from(2.679_491_924_311_227e-1).unwrap();

@@ -53,6 +53,8 @@ struct Graph {
     edges: std::vec::Vec<Edge>,
 }
 
+// The expected values are rounded to four decimals on purpose.
+#[allow(clippy::approx_constant)]
 fn build() -> Graph {
     // A 4-pose square loop with a slight perturbation to leave residual.
     let gt = [(0.0, 0.0, 0.0), (1.0, 0.0, 1.5708), (1.0, 1.0, 3.1416), (0.0, 1.0, -1.5708)];

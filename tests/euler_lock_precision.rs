@@ -112,6 +112,8 @@ fn quat_roundtrip<T: Float>(roll: f64, pitch: f64, yaw: f64) -> (f64, vect3<T>, 
 /// match the inputs (the "no garbage angles above the threshold" sanity
 /// check; generous margins so architecture/libm variation cannot trip
 /// it, while actual garbage is orders of magnitude away).
+// 0.7854 is a rounded test input, not a stand-in for FRAC_PI_4.
+#[allow(clippy::approx_constant)]
 fn spot_checks<T: Float>(label: &str, rt: Roundtrip<T>, hi_mult: f64) {
     let sqrt_eps = T::epsilon().to_f64().unwrap().sqrt(); // = band edge, rad
     let bound = hi_mult * sqrt_eps; // path's worst-case constant + ~10% margin
