@@ -14,6 +14,11 @@ The block-structured pieces a large sparse solve needs:
   blocks from a block-CSC matrix and factorize only what is left. This is the
   landmark/point marginalization that makes bundle adjustment and SLAM
   tractable, and it needs the block structure to be cheap.
+- **Conjugate gradients** (`cg`) -- solve a symmetric block-CSC system by
+  repeated multiplication instead of factorizing it, preconditioned by the
+  Cholesky factor of each diagonal block. No fill and no factor to store, at
+  the price of an inexact solution; the reductions run in f64 whatever the
+  storage type.
 - **Band Cholesky** (`band`) -- factorize a block-CSC matrix that is banded in
   natural order directly in block form, fill confined to each column's
   envelope. A trajectory's Hessian, and its reduced pose system, are banded, so

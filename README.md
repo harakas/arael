@@ -41,7 +41,7 @@ Solve problems like linear and nonlinear regression, sensor fusion, SLAM, bundle
   - **Eigen SimplicialLLT** and **CHOLMOD** -- optional C++ backends via FFI (`--features eigen`, `--features cholmod`)
   - **CHOLMOD supernodal** -- optional `--features cholmod-gpl`. **License warning:** CHOLMOD's Supernodal module is GPL (the `cholmod` feature binds only the LGPL Simplicial module), so the resulting binary is subject to the GPL
   - **LAPACK band** -- optional dpbsv/spbsv backend (`--features lapack`)
-- **Schur marginalization** -- mutually uncoupled parameter blocks are eliminated before the factorization and recovered by back-substitution. The sparse backend detects them and applies it when it is faster; `SchurPolicy` overrides
+- **Schur marginalization** -- mutually uncoupled parameter blocks are eliminated before the factorization and recovered by back-substitution. The sparse backend detects them and applies it when it is faster; `SchurPolicy` overrides. `SchurSolve::Iterative` then solves the reduced system by preconditioned conjugate gradients instead of factorizing it, for problems where the factorization dominates
 - **Indexed sparse assembly** -- precomputed position lists for zero-overhead hessian assembly after first iteration
 - **Precomputed rotations** -- every rotation param caches its rotation matrix and the matrix's Jacobian once per linearization; constraints that differentiate through a rotation read them as constants instead of rebuilding them per observation
 - **Warm re-solve** -- `LmSession` keeps what a solve learns about the problem's structure (pattern, ordering, symbolic factorization) so repeated solves of the same problem skip the analysis

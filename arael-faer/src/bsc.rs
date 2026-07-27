@@ -595,6 +595,77 @@ impl<I: Index, T: ComplexField> SparseBlockColMat<I, T> {
     }
 }
 
+impl<I: Index, T> SparseBlockColMat<I, T>
+where
+    T: ComplexField + Copy + core::ops::Add<Output = T> + core::ops::Mul<Output = T>,
+{
+    /// `y = A * x` for a symmetric matrix held as the upper block triangle.
+    ///
+    /// Each stored off-diagonal tile is applied twice, once as itself and
+    /// once transposed, since its mirror is not stored. A DIAGONAL tile is
+    /// read as its upper scalar triangle only, and mirrored the same way:
+    /// producers fill the upper triangle (the scalar CSC this expands to
+    /// goes to faer as `Side::Upper`), so the strictly-lower half of a
+    /// diagonal tile is the zero it was allocated with, not the transpose.
+    /// Reading the whole tile there would silently drop half of every
+    /// diagonal block's contribution.
+    ///
+    /// Requires the symmetric convention: square, with equal row and column
+    /// partitions. `y` is overwritten, not accumulated into.
+    pub fn mul_symmetric_upper(&self, x: &[T], y: &mut [T]) {
+        let sym = &self.symbolic;
+        assert_eq!(x.len(), sym.ncols(), "x length must match the column count");
+        assert_eq!(y.len(), sym.nrows(), "y length must match the row count");
+        debug_assert_eq!(sym.row_part(), sym.col_part(), "not a symmetric partition");
+        for v in y.iter_mut() {
+            *v = zero();
+        }
+        for j in 0..sym.nblk_cols() {
+            let cols = sym.col_span(j);
+            for b in sym.col_range(j) {
+                let r = sym.blk_row(b);
+                let rows = sym.row_span(r);
+                let nr = rows.len();
+                let payload = &self.vals[sym.val_range(b)];
+                if r == j {
+                    for (lc, cj) in cols.clone().enumerate() {
+                        for lr in 0..=lc {
+                            let a = payload[lc * nr + lr];
+                            let ri = rows.start + lr;
+                            y[ri] = y[ri] + a * x[cj];
+                            if lr != lc {
+                                y[cj] = y[cj] + a * x[ri];
+                            }
+                        }
+                    }
+                } else {
+                    // Both directions in one pass over the tile. The column's
+                    // x entry is loop-invariant and its y entry is a pure
+                    // reduction, so both stay in registers and the inner loop
+                    // is a straight walk of three contiguous slices -- which
+                    // is what lets it vectorize and drops the bounds checks
+                    // an indexed form pays twice per element.
+                    let xr = &x[rows.clone()];
+                    for (lc, cj) in cols.clone().enumerate() {
+                        let xcj = x[cj];
+                        let col = &payload[lc * nr..lc * nr + nr];
+                        let mut acc = zero::<T>();
+                        {
+                            let yr = &mut y[rows.clone()];
+                            for lr in 0..nr {
+                                let a = col[lr];
+                                yr[lr] = yr[lr] + a * xcj;
+                                acc = acc + a * xr[lr];
+                            }
+                        }
+                        y[cj] = y[cj] + acc;
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Memoized scalar-coordinate -> value-buffer position resolver over a
 /// built structure: one block lookup per RUN of same-cell coordinates
 /// (contributions arrive block-object by block-object), arithmetic only
@@ -841,5 +912,90 @@ mod tests {
         );
         assert_eq!(back.symbolic().nblocks(), m.symbolic().nblocks());
         assert_eq!(back.vals(), m.vals());
+    }
+
+    // The doodle's structure under the SYMMETRIC convention: producers write
+    // the upper triangle only, so the strictly-lower half of each diagonal
+    // tile stays zero (P1's 21. and P2's 43. become 0.).
+    fn doodle_symmetric() -> SparseBlockColMat<usize, f64> {
+        let mut m = doodle();
+        let p1 = m.symbolic().val_range(0);
+        m.vals_mut()[p1.start + 1] = 0.;
+        let p2 = m.symbolic().val_range(1);
+        m.vals_mut()[p2.start + 1] = 0.;
+        m
+    }
+
+    /// The full symmetric matrix the storage stands for: every stored tile
+    /// mirrored, diagonal tiles mirrored from their upper triangle.
+    fn mirrored_dense(m: &SparseBlockColMat<usize, f64>) -> Vec<Vec<f64>> {
+        let sym = m.symbolic();
+        let n = sym.nrows();
+        let mut out = vec![vec![0.0; n]; n];
+        for j in 0..sym.nblk_cols() {
+            let cols = sym.col_span(j);
+            for b in sym.col_range(j) {
+                let rows = sym.row_span(sym.blk_row(b));
+                let nr = rows.len();
+                let payload = &m.vals()[sym.val_range(b)];
+                for (lc, cj) in cols.clone().enumerate() {
+                    for (lr, ri) in rows.clone().enumerate() {
+                        if sym.blk_row(b) == j && lr > lc {
+                            continue; // not written by the convention
+                        }
+                        let v = payload[lc * nr + lr];
+                        out[ri][cj] = v;
+                        out[cj][ri] = v;
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn symmetric_matvec_matches_dense() {
+        let m = doodle_symmetric();
+        let dense = mirrored_dense(&m);
+        let n = m.symbolic().nrows();
+        // a vector with no zeros or repeats, so a dropped term shows up
+        let x: Vec<f64> = (0..n).map(|i| 1.0 + i as f64 * 0.5).collect();
+
+        let mut want = vec![0.0; n];
+        for i in 0..n {
+            for k in 0..n {
+                want[i] += dense[i][k] * x[k];
+            }
+        }
+        let mut got = vec![0.0; n];
+        m.mul_symmetric_upper(&x, &mut got);
+        for i in 0..n {
+            assert!((got[i] - want[i]).abs() < 1e-12,
+                "row {}: got {}, want {}", i, got[i], want[i]);
+        }
+    }
+
+    // A diagonal tile's strictly-lower half is allocated zero and never
+    // written, so reading the whole tile there loses the off-diagonal
+    // coupling. Guards against a "simplification" back to a full-tile read.
+    #[test]
+    fn symmetric_matvec_mirrors_diagonal_tiles() {
+        let m = doodle_symmetric();
+        let n = m.symbolic().nrows();
+        // e1 hits P1's (0,1) entry, whose mirror at (1,0) is only reachable
+        // by mirroring the upper triangle.
+        let mut x = vec![0.0; n];
+        x[1] = 1.0;
+        let mut got = vec![0.0; n];
+        m.mul_symmetric_upper(&x, &mut got);
+        assert_eq!(got[0], 12.); // P1[0,1]
+        assert_eq!(got[1], 22.); // P1[1,1]
+
+        let mut x = vec![0.0; n];
+        x[0] = 1.0;
+        let mut got = vec![0.0; n];
+        m.mul_symmetric_upper(&x, &mut got);
+        assert_eq!(got[0], 11.); // P1[0,0]
+        assert_eq!(got[1], 12.); // the mirror, NOT the stored zero
     }
 }

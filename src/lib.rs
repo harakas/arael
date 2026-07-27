@@ -54,7 +54,9 @@
 //! - **Schur marginalization** -- mutually uncoupled parameter blocks are
 //!   eliminated before the factorization and recovered by back-substitution.
 //!   The sparse backend detects them and applies it when it is faster;
-//!   `SchurPolicy` overrides
+//!   `SchurPolicy` overrides. [`SchurSolve::Iterative`](simple_lm::SchurSolve)
+//!   then solves the reduced system by preconditioned conjugate gradients
+//!   instead of factorizing it, for problems where the factorization dominates
 //! - **Indexed sparse assembly** -- precomputed position lists for
 //!   zero-overhead hessian assembly after first iteration
 //! - **Precomputed rotations** -- every rotation param caches its rotation

@@ -119,5 +119,6 @@ pub use faer;
 
 pub mod band;
 pub mod bsc;
+pub mod cg;
 pub mod nd;
 pub mod schur;

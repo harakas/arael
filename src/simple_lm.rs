@@ -583,6 +583,12 @@ pub enum SolveError {
     /// The set of blocks selected for marginalization is not a valid set of
     /// whole parameter blocks.
     BadMarginalizeSet,
+    /// [`SchurSolve::Iterative`] was asked for, but this solve has no reduced
+    /// system to run it on: nothing was marginalized, or the policy declined
+    /// the reduction. Factorizing the whole system instead would answer a
+    /// different question silently, so the solve stops here. Pair
+    /// `Iterative` with [`SchurPolicy::Force`].
+    IterativeSchurWithoutReduction,
     /// The requested [`SolverKind`] is not available: its cargo feature is not
     /// compiled in, or it does not support this scalar type. Reported by
     /// [`LmProblem::solve`] before any solve is attempted, so the parameters
@@ -616,6 +622,10 @@ impl std::fmt::Display for SolveError {
             ),
             SolveError::BadMarginalizeSet => write!(
                 f, "the set of blocks selected for marginalization is not a valid whole-block set"
+            ),
+            SolveError::IterativeSchurWithoutReduction => write!(
+                f, "iterative Schur was requested but nothing was marginalized, \
+                    so there is no reduced system to solve"
             ),
             SolveError::SolverUnavailable { solver, reason } => write!(
                 f, "solver {solver} is not available: {reason}"
@@ -3943,6 +3953,35 @@ impl Default for FaerOrdering {
     }
 }
 
+/// Settings and outcome of the inner conjugate-gradient solve
+/// ([`SchurSolve::Iterative`]), re-exported so configuring the solver does not
+/// mean naming arael-faer.
+pub use arael_faer::cg::{CgOptions, CgStats};
+
+/// How the reduced system is solved once the Schur reduction has formed it.
+///
+/// Only consulted on the reduced route: with nothing marginalized there is no
+/// reduced system, and [`SchurSolve::Iterative`] then fails the solve rather
+/// than quietly falling back to factorizing the whole thing.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum SchurSolve {
+    /// Cholesky. The default.
+    Factorize,
+    /// Preconditioned conjugate gradients: no factorization, so no fill and
+    /// no factor to store, at the price of an inexact step and no covariance.
+    ///
+    /// Worth it when factorizing the reduced system dominates the iteration,
+    /// which is a question of how much fill it takes -- on the bundle
+    /// benchmark that share runs from 12% at 49 cameras to 96% at 1723.
+    Iterative(arael_faer::cg::CgOptions),
+}
+
+impl Default for SchurSolve {
+    fn default() -> Self {
+        SchurSolve::Factorize
+    }
+}
+
 /// Configuration for the [`SparseFaer`] backend as plain data: which system to
 /// factorize and how. Build one and hand it to [`SolverKind::Sparse`], or turn
 /// it into a solver with [`SparseFaer::from_options`].
@@ -3950,6 +3989,8 @@ impl Default for FaerOrdering {
 pub struct SparseFaerOptions {
     /// Whether and when to marginalize -- see [`SchurPolicy`].
     pub policy: SchurPolicy,
+    /// How to solve the reduced system -- see [`SchurSolve`].
+    pub schur_solve: SchurSolve,
     /// Elimination ordering of the factorized system -- see [`FaerOrdering`].
     pub ordering: FaerOrdering,
     /// Factorize supernodally (dense panels, BLAS3). On by default.
@@ -3973,11 +4014,21 @@ impl SparseFaerOptions {
     pub fn auto() -> Self {
         SparseFaerOptions {
             policy: SchurPolicy::default(),
+            schur_solve: SchurSolve::default(),
             ordering: FaerOrdering::default(),
             supernodal: true,
             narrow_band: false,
             marginalize: Vec::new(),
         }
+    }
+
+    /// Solve the reduced system by preconditioned conjugate gradients instead
+    /// of factorizing it ([`SchurSolve::Iterative`]). Pair with
+    /// [`SchurPolicy::Force`]: without a reduction there is nothing for it to
+    /// solve, and the solve fails rather than silently taking another route.
+    pub fn with_iterative_schur(mut self, cg: arael_faer::cg::CgOptions) -> Self {
+        self.schur_solve = SchurSolve::Iterative(cg);
+        self
     }
 
     /// Never marginalize: factorize the whole system ([`SchurPolicy::Never`]).
@@ -4222,6 +4273,11 @@ pub struct SchurPlan {
     /// exact comparison's verdict (decline when
     /// `reduced > flop_margin * full`). `Some` exactly when `fill_ratio` is.
     pub route_flops: Option<(f64, f64)>,
+    /// Conjugate-gradient iterations summed over the solve, when the reduced
+    /// system was solved iteratively ([`SchurSolve::Iterative`]). `None` on a
+    /// factorizing route. Each one is a matrix-vector product against S, so
+    /// this divided by the attempt count is what an inexact step cost.
+    pub cg_iterations: Option<usize>,
     /// The cheap statistic: the reduced route with its factorization priced
     /// at the worst it could cost, over a fill-free floor under any
     /// whole-system factorization. `Some` whenever the policy was
@@ -4334,6 +4390,13 @@ pub struct SparseFaer<T = f64> {
     narrow_band_active: bool,
     narrow_band_sym: Option<arael_faer::band::BandSymbolic>,
     narrow_band_factor: Vec<T>,
+    // Conjugate gradients on the reduced system ([`SchurSolve::Iterative`]).
+    // The preconditioner is rebuilt per damped solve -- S changes with every
+    // lambda -- while the scratch vectors persist so no iteration allocates.
+    // cg_iters accumulates over the solve, for LmResult to report.
+    schur_solve: SchurSolve,
+    cg_work: arael_faer::cg::CgWorkspace<T>,
+    cg_iters: usize,
 }
 
 /// Alias of [`SparseFaer<f32>`].
@@ -4379,6 +4442,9 @@ impl<T> SparseFaer<T> {
             narrow_band_active: false,
             narrow_band_sym: None,
             narrow_band_factor: Vec::new(),
+            schur_solve: SchurSolve::default(),
+            cg_work: arael_faer::cg::CgWorkspace::default(),
+            cg_iters: 0,
         }
     }
 
@@ -4470,10 +4536,19 @@ impl<T> SparseFaer<T> {
             .with_ordering(opts.ordering)
             .with_supernodal(opts.supernodal)
             .with_narrow_band(opts.narrow_band);
+        solver.schur_solve = opts.schur_solve;
         for range in &opts.marginalize {
             solver = solver.with_marginalize(range.clone());
         }
         solver
+    }
+
+    /// Solve the reduced system by preconditioned conjugate gradients
+    /// ([`SchurSolve::Iterative`]) instead of factorizing it. See
+    /// [`SparseFaerOptions::with_iterative_schur`].
+    pub fn with_iterative_schur(mut self, cg: arael_faer::cg::CgOptions) -> Self {
+        self.schur_solve = SchurSolve::Iterative(cg);
+        self
     }
 }
 
@@ -4519,6 +4594,11 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
         )>,
         vb: bool,
     ) -> Result<T, SolveError> {
+        // This route factorizes the whole system, so there is no reduced one
+        // for conjugate gradients to run on.
+        if matches!(self.schur_solve, SchurSolve::Iterative(_)) {
+            return Err(SolveError::IterativeSchurWithoutReduction);
+        }
         // No block storage on this route, and nothing left over from a
         // reduction that was considered and dropped.
         matrix.h = None;
@@ -4629,6 +4709,10 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
         band: usize,
         vb: bool,
     ) -> Result<T, SolveError> {
+        // Same as setup_full: banding the whole system is not a reduction.
+        if matches!(self.schur_solve, SchurSolve::Iterative(_)) {
+            return Err(SolveError::IterativeSchurWithoutReduction);
+        }
         let n = *partition.last().unwrap();
         let nblk = partition.len() - 1;
         // No scalar CSC, no Schur, no faer factorization on this route.
@@ -4690,6 +4774,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
             kept_params: n,
             fill_ratio: None,
             route_flops: None,
+            cg_iterations: None,
             flop_ratio: None,
             ordering: Some(ReducedOrdering::NaturalBanded),
             kept_bandwidth: band,
@@ -4838,6 +4923,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         self.narrow_band_sym = None;
         self.narrow_band_active = false;
         self.plan = None;
+        self.cg_iters = 0;
         // Buffer allocations are kept; they are resized when the next
         // structure is built. The elimination hint and the policy are
         // configuration, not cache, and survive.
@@ -4953,6 +5039,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 kept_params: n,
                 fill_ratio: None,
                 route_flops: None,
+                cg_iterations: None,
                 flop_ratio: None,
                 ordering: None,
                 kept_bandwidth: 0,
@@ -5057,6 +5144,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 kept_params: n,
                 fill_ratio: None,
                 route_flops: None,
+                cg_iterations: None,
                 flop_ratio: None,
                 ordering: None,
                 kept_bandwidth: 0,
@@ -5308,6 +5396,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             kept_params: if reduced { schur.s.nrows() } else { n },
             fill_ratio,
             route_flops,
+            cg_iterations: None,
             flop_ratio,
             // Filled in below, once the reduced system's pattern exists: the
             // ordering is chosen from it, and rebuilding the pattern here just
@@ -5566,8 +5655,25 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             }
         }
 
-        // Factor the reduced system and solve for the kept blocks.
-        if self.narrow_band_active {
+        // Solve the reduced system for the kept blocks: conjugate gradients
+        // when asked for, otherwise a factorization.
+        if let SchurSolve::Iterative(cg) = self.schur_solve {
+            let s = self.s.as_ref().unwrap();
+            let precond = match arael_faer::cg::BlockJacobi::build(s) {
+                Ok(p) => p,
+                // A diagonal block of S is not positive definite. Reported the
+                // same way a failed Cholesky is: the loop raises lambda and
+                // tries again, which is what makes the block definite.
+                Err(_) => return false,
+            };
+            let stats = arael_faer::cg::solve(
+                s, &precond, &self.rhs_kept, &mut self.x_kept, &cg, &mut self.cg_work,
+            );
+            self.cg_iters += stats.iters;
+            if let Some(plan) = self.plan.as_mut() {
+                plan.cg_iterations = Some(self.cg_iters);
+            }
+        } else if self.narrow_band_active {
             // Narrow-band Cholesky on S in block form: no scalar CSC round trip.
             let bsym = self.narrow_band_sym.as_ref().unwrap();
             let s = self.s.as_ref().unwrap();

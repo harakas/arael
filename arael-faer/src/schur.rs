@@ -42,6 +42,14 @@ pub trait SchurReal:
     const ZERO: Self;
     fn sqrt(self) -> Self;
 
+    /// Widen to f64. Iterative solvers accumulate their reductions here
+    /// whatever the storage type: a dot product over the whole system is
+    /// where single precision loses its digits first, and widening it costs
+    /// O(n) against an O(nnz) matrix-vector product.
+    fn to_f64(self) -> f64;
+    /// Narrow back from f64, for a scalar computed in the widened form.
+    fn from_f64(v: f64) -> Self;
+
     /// `dst -= C_a * Z_b` for a tile shape with no unrolled kernel (see
     /// [`FIXED_SHAPES`]). nano-gemm takes the widths at run time, so it covers every
     /// shape, and on the shapes it is asked for it is up to 4x faster than the plain
@@ -88,6 +96,12 @@ macro_rules! impl_schur_real {
             const ZERO: Self = 0.0;
             fn sqrt(self) -> Self {
                 <$t>::sqrt(self)
+            }
+            fn to_f64(self) -> f64 {
+                self as f64
+            }
+            fn from_f64(v: f64) -> Self {
+                v as $t
             }
 
             fn gemm_sub_nano(
@@ -729,7 +743,7 @@ pub fn schur_symbolic<I: Index>(
 
 /// in-place lower-Cholesky of a `w x w` column-major tile; false if a
 /// pivot is not strictly positive
-fn llt_in_place<T: SchurReal>(a: &mut [T], w: usize) -> bool {
+pub(crate) fn llt_in_place<T: SchurReal>(a: &mut [T], w: usize) -> bool {
     for k in 0..w {
         let mut d = a[k + k * w];
         for p in 0..k {
@@ -754,7 +768,7 @@ fn llt_in_place<T: SchurReal>(a: &mut [T], w: usize) -> bool {
 
 /// solve `(L L^T) Z = P` in place on a `w x m` column-major panel,
 /// `L` lower from [`llt_in_place`]
-fn llt_solve_panel<T: SchurReal>(l: &[T], panel: &mut [T], w: usize, m: usize) {
+pub(crate) fn llt_solve_panel<T: SchurReal>(l: &[T], panel: &mut [T], w: usize, m: usize) {
     for c in 0..m {
         let col = &mut panel[c * w..(c + 1) * w];
         for i in 0..w {
