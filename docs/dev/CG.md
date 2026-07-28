@@ -109,10 +109,31 @@ scalars, and it went from 2.7 ms to ~1.3 ms per product when the inner loop
 started accumulating in registers over slices instead of indexing twice per
 element. Remaining ideas, in the order I would try them:
 
-- **Fixed-size tile kernels.** Every tile in a BAL reduced system is 9x9. The
-  reduction already does this (`schur.rs` `FIXED_SHAPES` / `gemm_sub_fixed`,
-  measured 2x against the runtime-dimension loop) and the same dispatch would
-  apply here. Pose graphs would want 3x3 and 6x6.
+- **Fixed-size tile kernels -- DONE, +3%.** Widths 3, 6 and 9 take a
+  specialized inner loop. Measured on Ladybug-372, three interleaved
+  alternations, all in the same direction: full-iter 114.68 -> 111.22 ms.
+  Much less than the 2x the reduction's GEMM kernels got, which is the first
+  hint that this loop is not compute-bound.
+
+  The row-spanning arguments must arrive as `&[T; NR]`, not `&[T]`. A const
+  trip count over a runtime-length slice still bounds-checks every element,
+  because nothing tells the compiler the slice is `NR` long -- that version
+  measured 4% SLOWER than no specialization at all. Typing them as arrays is
+  the entire difference between -4% and +3%.
+
+- **The product looks memory-bound, so kernel work has a low ceiling.** At
+  Ladybug-372 one product reads S's 2.23M scalars = 17.8 MB in ~1.3 ms, about
+  13.7 GB/s, which is a plausible single-core figure for this machine.
+  Consistent with it: f32 schur-cg runs 85.95 ms full-iter against f64's
+  112.18 -- roughly what halving the bytes buys, and not what halving nothing
+  (f32 has the same flop count) would buy.
+
+  If that holds, the levers are bytes and passes, not kernels: f32 storage,
+  a stronger preconditioner (fewer full passes over S), or not forming S.
+  nano-gemm does not help here -- `schur.rs` already records that its
+  function-pointer dispatch costs more than the arithmetic at these sizes,
+  and with `wb == 1` there is no reuse for a microkernel to exploit anyway.
+  **Worth confirming with a bandwidth probe before acting on it.**
 - **Parallelism.** Block-columns are independent except that both `y[rows]` and
   `y[cj]` are written, so a naive rayon split races. Per-thread output buffers
   reduced at the end, or a coloring of the block-columns, would work. The

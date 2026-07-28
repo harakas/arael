@@ -595,6 +595,64 @@ impl<I: Index, T: ComplexField> SparseBlockColMat<I, T> {
     }
 }
 
+/// One off-diagonal tile applied both ways: `y_rows += A x_cols` and
+/// `y_cols += A^T x_rows`, in a single pass so the tile is read once.
+///
+/// The row width is a const parameter AND the row-spanning slices arrive as
+/// arrays. Both matter: a constant trip count over a runtime-length slice
+/// still bounds-checks every element, because nothing tells the compiler the
+/// slice is `NR` long. Converting once per tile moves that check out of the
+/// inner loop, which is the whole point of specializing.
+#[inline(always)]
+fn tile_both_ways<T, const NR: usize>(
+    payload: &[T],
+    xr: &[T; NR],
+    yr: &mut [T; NR],
+    xc: &[T],
+    yc: &mut [T],
+    ncols: usize,
+) where
+    T: ComplexField + Copy + core::ops::Add<Output = T> + core::ops::Mul<Output = T>,
+{
+    for lc in 0..ncols {
+        let xcj = xc[lc];
+        let col: &[T; NR] = payload[lc * NR..lc * NR + NR].try_into().unwrap();
+        let mut acc = zero::<T>();
+        for lr in 0..NR {
+            let a = col[lr];
+            yr[lr] = yr[lr] + a * xcj;
+            acc = acc + a * xr[lr];
+        }
+        yc[lc] = yc[lc] + acc;
+    }
+}
+
+/// [`tile_both_ways`] for a width with no specialization.
+#[inline]
+fn tile_both_ways_dyn<T>(
+    payload: &[T],
+    xr: &[T],
+    yr: &mut [T],
+    xc: &[T],
+    yc: &mut [T],
+    ncols: usize,
+    nr: usize,
+) where
+    T: ComplexField + Copy + core::ops::Add<Output = T> + core::ops::Mul<Output = T>,
+{
+    for lc in 0..ncols {
+        let xcj = xc[lc];
+        let col = &payload[lc * nr..lc * nr + nr];
+        let mut acc = zero::<T>();
+        for lr in 0..nr {
+            let a = col[lr];
+            yr[lr] = yr[lr] + a * xcj;
+            acc = acc + a * xr[lr];
+        }
+        yc[lc] = yc[lc] + acc;
+    }
+}
+
 impl<I: Index, T> SparseBlockColMat<I, T>
 where
     T: ComplexField + Copy + core::ops::Add<Output = T> + core::ops::Mul<Output = T>,
@@ -645,20 +703,33 @@ where
                     // is a straight walk of three contiguous slices -- which
                     // is what lets it vectorize and drops the bounds checks
                     // an indexed form pays twice per element.
+                    //
+                    // r < j for a stored tile, so the row span ends at or
+                    // before the column span starts and the two output slices
+                    // can be split apart.
+                    let ncols = cols.len();
+                    let (head, tail) = y.split_at_mut(cols.start);
+                    let yr = &mut head[rows.clone()];
+                    let yc = &mut tail[..ncols];
                     let xr = &x[rows.clone()];
-                    for (lc, cj) in cols.clone().enumerate() {
-                        let xcj = x[cj];
-                        let col = &payload[lc * nr..lc * nr + nr];
-                        let mut acc = zero::<T>();
-                        {
-                            let yr = &mut y[rows.clone()];
-                            for lr in 0..nr {
-                                let a = col[lr];
-                                yr[lr] = yr[lr] + a * xcj;
-                                acc = acc + a * xr[lr];
-                            }
-                        }
-                        y[cj] = y[cj] + acc;
+                    let xc = &x[cols.clone()];
+                    macro_rules! fixed {
+                        ($w:expr) => {
+                            tile_both_ways::<T, $w>(
+                                payload,
+                                xr.try_into().unwrap(),
+                                (&mut yr[..]).try_into().unwrap(),
+                                xc,
+                                yc,
+                                ncols,
+                            )
+                        };
+                    }
+                    match nr {
+                        3 => fixed!(3),
+                        6 => fixed!(6),
+                        9 => fixed!(9),
+                        _ => tile_both_ways_dyn(payload, xr, yr, xc, yc, ncols, nr),
                     }
                 }
             }
@@ -971,6 +1042,52 @@ mod tests {
         m.mul_symmetric_upper(&x, &mut got);
         for i in 0..n {
             assert!((got[i] - want[i]).abs() < 1e-12,
+                "row {}: got {}, want {}", i, got[i], want[i]);
+        }
+    }
+
+    /// Widths 9, 3 and 5: the first two take a specialized inner loop, the
+    /// last the dynamic fallback, and the off-diagonal tiles cover every
+    /// dispatch arm. Guards the specializations against disagreeing with the
+    /// dense reference or with each other.
+    #[test]
+    fn symmetric_matvec_over_specialized_widths() {
+        let part = vec![0usize, 9, 12, 17];
+        // col 0: {0}; col 1: {0,1}; col 2: {0,1,2}
+        let blk_col_ptr = vec![0usize, 1, 3, 6];
+        let blk_row_idx = vec![0usize, 0, 1, 0, 1, 2];
+        let val_ptr = vec![0usize, 81, 108, 117, 162, 177, 202];
+        let symbolic = SymbolicSparseBlockColMat::new_checked(
+            part.clone(), part, blk_col_ptr, blk_row_idx, val_ptr,
+        );
+        // Distinct, non-zero, non-repeating values so a dropped or
+        // double-counted term cannot cancel.
+        let vals: Vec<f64> = (0..202).map(|k| 1.0 + (k % 37) as f64 * 0.25).collect();
+        let mut m = SparseBlockColMat::new(symbolic, vals);
+        // Apply the storage convention: diagonal tiles keep only their upper
+        // triangle, the rest is the zero it was allocated with.
+        for (b, w) in [(0usize, 9usize), (2, 3), (5, 5)] {
+            let r = m.symbolic().val_range(b);
+            for lc in 0..w {
+                for lr in (lc + 1)..w {
+                    m.vals_mut()[r.start + lc * w + lr] = 0.0;
+                }
+            }
+        }
+
+        let dense = mirrored_dense(&m);
+        let n = m.symbolic().nrows();
+        let x: Vec<f64> = (0..n).map(|i| 0.5 + i as f64 * 0.125).collect();
+        let mut want = vec![0.0; n];
+        for i in 0..n {
+            for k in 0..n {
+                want[i] += dense[i][k] * x[k];
+            }
+        }
+        let mut got = vec![0.0; n];
+        m.mul_symmetric_upper(&x, &mut got);
+        for i in 0..n {
+            assert!((got[i] - want[i]).abs() < 1e-9,
                 "row {}: got {}, want {}", i, got[i], want[i]);
         }
     }
