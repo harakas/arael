@@ -13,6 +13,18 @@
 
 ### Changed
 
+- **The reduced Schur system is factorized under its own envelope, in block
+  form, by default.** Where the reduction leaves a naturally-ordered system --
+  banded or dense -- `S` is factored in place in panels sized to its envelope,
+  instead of being flattened to a scalar CSC and handed to faer's sparse
+  Cholesky. That drops the scalar copy of `S`, its pattern, the symbolic
+  analysis and the supernodal scratch. Across a landmark-span sweep (a reduced
+  system from 2% to 69% dense) it is faster AND smaller at every point: 1-11%
+  less time, 8-39% less peak memory, same optimum.
+  `SparseFaer::with_envelope_schur(false)` goes back to faer. A reduction
+  ordered by AMD or nested dissection has no envelope to exploit and is
+  unaffected, as are the iterative routes. `with_narrow_band` is unchanged and
+  remains the separate, opt-in whole-system route.
 - **Assembly keeps one scatter target per tile, not per value.** Blocks with a
   static tile shape derive every position from a tile origin and stride stored
   beside their parameter indices, so the per-scalar position map is gone for

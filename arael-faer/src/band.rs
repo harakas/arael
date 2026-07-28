@@ -24,9 +24,30 @@ use crate::bsc::{SparseBlockColMat, SymbolicSparseBlockColMat};
 use crate::{value_index, ValueIndex};
 use crate::schur::SchurReal;
 
+/// `-1` in the scalar type, for the GEMM that subtracts the left updates.
+#[inline]
+fn minus_one<T: SchurReal>() -> T {
+    let one = <T as faer::traits::ComplexField>::one_impl();
+    T::ZERO - one
+}
+
 /// Marks a factor tile whose `S` source is a structural zero (an envelope
 /// position `S` does not store; it is filled in during factorization).
 const NO_SRC: ValueIndex = ValueIndex::MAX;
+
+/// Widest a super-panel may get, in scalar columns. Past roughly this the
+/// GEMM stops gaining from being wider, while the fill from snapping the
+/// envelope top to a panel boundary keeps growing.
+const PANEL_WIDTH_MAX: usize = 32;
+
+/// Narrowest worth grouping at all: below this the GEMM is no better than
+/// the per-column panels it replaces.
+const PANEL_WIDTH_MIN: usize = 8;
+
+/// Grouping is abandoned when it would store this much more than the exact
+/// envelope -- which is what happens on a genuinely narrow band, where the
+/// envelope is the whole point and widening it is pure loss.
+const PANEL_FILL_SLACK: f64 = 4.0;
 
 /// Failure of a band factorization.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,11 +68,38 @@ pub struct BandSymbolic {
     part: Vec<usize>,
     /// topmost stored block-row of `S`'s column `j` (the envelope top)
     top: Vec<usize>,
-    /// factor pattern: column `j` holds the contiguous rows `top[j]..=j`
-    factor: SymbolicSparseBlockColMat<crate::SparseIndex>,
-    /// per factor tile, the start offset of the matching `S` tile in `S`'s
-    /// value buffer, or [`NO_SRC`] if `S` has no tile there
+    /// Super-panel grouping: block columns `sup_start[S]..sup_start[S + 1]`
+    /// share one panel, so the factorization's GEMMs are ~[`PANEL_WIDTH`]
+    /// wide on both sides instead of one block. `sup_of` maps a block column
+    /// to its super-panel, `sup_top` the super-block its rows start at (the
+    /// envelope top, snapped down to a super boundary so every operand is a
+    /// whole row-block).
+    sup_start: Vec<usize>,
+    sup_top: Vec<usize>,
+    sup_off: Vec<usize>,
+    sup_rows: Vec<usize>,
+    /// Where block column `j`'s envelope panel starts in the factor buffer.
+    ///
+    /// A column is ONE dense column-major panel of `col_rows[j]` scalar rows
+    /// (covering `part[top[j]]..part[j + 1]`) by `wj` columns, not a run of
+    /// separate tiles. Same bytes either way, but it makes a column's tiles
+    /// a strided submatrix, so the whole `sum_k R_ki^T R_kj` update is one
+    /// GEMM over the shared row range rather than one per `k`.
+    col_off: Vec<usize>,
+    /// scalar rows in column `j`'s panel
+    col_rows: Vec<usize>,
+    /// scalar row column `j`'s panel starts at -- its SUPER-panel's envelope
+    /// top, which reaches at or above `top[j]`
+    col_r0: Vec<usize>,
+    /// whether the columns were grouped at all (false = one column per panel,
+    /// the exact envelope; true = grouped, storing a little more)
+    grouped: bool,
+    /// per (column `j`, envelope row `i`) the matching `S` tile offset, or
+    /// [`NO_SRC`]; column `j`'s run starts at `src_ptr[j]`
     s_src: Vec<ValueIndex>,
+    src_ptr: Vec<usize>,
+    /// scalars in the whole factor buffer
+    n_vals: usize,
     /// largest `row_width * col_width` over all factor tiles (scratch size)
     max_tile: usize,
 }
@@ -80,22 +128,91 @@ impl BandSymbolic {
             assert!(top[j] <= j, "S must be stored as its upper block triangle");
         }
 
-        let mut blk_col_ptr = Vec::with_capacity(nb + 1);
-        blk_col_ptr.push(0);
-        let mut blk_row_idx = Vec::new();
-        let mut val_ptr = Vec::new();
-        val_ptr.push(0usize);
-        let mut s_src = Vec::new();
-        let mut max_tile = 0usize;
+        // Exact per-column envelope cost, the yardstick the grouping must not
+        // stray far from.
+        let exact: usize = (0..nb)
+            .map(|j| (part[j + 1] - part[top[j]]) * (part[j + 1] - part[j]))
+            .sum();
 
+        // Greedy grouping by width, then measure what it actually costs. The
+        // panels' tops snap down to a super boundary, so a group is only
+        // affordable when its columns reach back to roughly the same row.
+        let group = |width: usize| -> (Vec<usize>, Vec<usize>, Vec<usize>, usize) {
+            let mut sup_start = vec![0usize];
+            let mut j0 = 0usize;
+            while j0 < nb {
+                let mut j1 = j0 + 1;
+                while j1 < nb && part[j1 + 1] - part[j0] <= width {
+                    j1 += 1;
+                }
+                sup_start.push(j1);
+                j0 = j1;
+            }
+            let ns = sup_start.len() - 1;
+            let mut sup_of = vec![0usize; nb];
+            for sidx in 0..ns {
+                for j in sup_start[sidx]..sup_start[sidx + 1] {
+                    sup_of[j] = sidx;
+                }
+            }
+            // Panel top: the lowest envelope top any of the group's columns
+            // reaches, snapped down to the super-block holding it.
+            let mut sup_top = vec![0usize; ns];
+            let mut cost = 0usize;
+            for sidx in 0..ns {
+                let (c0, c1) = (sup_start[sidx], sup_start[sidx + 1]);
+                let t = (c0..c1).map(|j| top[j]).min().unwrap();
+                sup_top[sidx] = sup_of[t];
+                let rows = part[c1] - part[sup_start[sup_of[t]]];
+                cost += rows * (part[c1] - part[c0]);
+            }
+            (sup_start, sup_of, sup_top, cost)
+        };
+
+        // Never group wider than the envelope is tall. A panel `w` wide over
+        // an envelope `h` tall does `w * h` useful work and carries about
+        // `w^2 / 2` of fill from snapping its top, so grouping pays only
+        // while `w` stays well under `h` -- and a narrow band is exactly
+        // where it does not. Measured across a landmark-span sweep: at a
+        // half-bandwidth of 18 scalars a 32-wide panel costs 18% of the
+        // solve, an 18-wide one wins.
+        let mean_height = exact / n.max(1);
+        let pw = (mean_height / 2).clamp(PANEL_WIDTH_MIN, PANEL_WIDTH_MAX);
+        let (sup_start, sup_of, sup_top, cost) = {
+            let wide = group(pw);
+            if (wide.3 as f64) <= PANEL_FILL_SLACK * exact as f64 {
+                wide
+            } else {
+                // Narrow band: grouping would widen the envelope for nothing.
+                group(1)
+            }
+        };
+        let grouped = sup_start.len() - 1 != nb;
+        let _ = cost;
+
+        // Panel layout, one dense column-major block per super-panel.
+        let ns = sup_start.len() - 1;
+        let mut sup_off = Vec::with_capacity(ns);
+        let mut sup_rows = Vec::with_capacity(ns);
+        let mut acc = 0usize;
+        let mut max_tile = 0usize;
+        for sidx in 0..ns {
+            let (c0, c1) = (sup_start[sidx], sup_start[sidx + 1]);
+            let w = part[c1] - part[c0];
+            let rows = part[c1] - part[sup_start[sup_top[sidx]]];
+            sup_off.push(acc);
+            sup_rows.push(rows);
+            acc += rows * w;
+            max_tile = max_tile.max(w * w);
+        }
+
+        // Per (column j, envelope row i), where S's matching tile lives.
+        let mut src_ptr = Vec::with_capacity(nb);
+        let mut s_src = Vec::new();
         for j in 0..nb {
-            let wj = part[j + 1] - part[j];
-            // walk S's stored rows of this column alongside the envelope
-            // rows top[j]..=j; both are ascending, so one merge pass maps
-            // each envelope tile to its S source (or NO_SRC).
+            src_ptr.push(s_src.len());
             let mut sb = s.col_range(j).peekable();
             for i in top[j]..=j {
-                let wi = part[i + 1] - part[i];
                 let mut src = NO_SRC;
                 while let Some(&b) = sb.peek() {
                     let br = s.blk_row(b);
@@ -109,39 +226,47 @@ impl BandSymbolic {
                         break;
                     }
                 }
-                blk_row_idx.push(i);
-                let end = val_ptr.last().unwrap() + wi * wj;
-                val_ptr.push(end);
                 s_src.push(src);
-                max_tile = max_tile.max(wi * wj);
             }
-            blk_col_ptr.push(blk_row_idx.len());
         }
 
-        let idx = |v: &[usize]| -> Vec<crate::SparseIndex> {
-            v.iter().map(|&x| x as crate::SparseIndex).collect()
-        };
-        let factor = SymbolicSparseBlockColMat::new_checked(
-            idx(&part),
-            idx(&part),
-            idx(&blk_col_ptr),
-            idx(&blk_row_idx),
-            idx(&val_ptr),
-        );
+        // Per-column views into the super-panels, for the solve.
+        let mut col_off = Vec::with_capacity(nb);
+        let mut col_rows = Vec::with_capacity(nb);
+        let mut col_r0 = Vec::with_capacity(nb);
+        for j in 0..nb {
+            let sidx = sup_of[j];
+            let rows = sup_rows[sidx];
+            col_off.push(sup_off[sidx] + (part[j] - part[sup_start[sidx]]) * rows);
+            col_rows.push(rows);
+            col_r0.push(part[sup_start[sup_top[sidx]]]);
+        }
 
-        Self { n, part, top, factor, s_src, max_tile }
+        Self {
+            n, part, top, sup_start, sup_top, sup_off, sup_rows,
+            col_off, col_rows, col_r0, grouped, s_src, src_ptr, n_vals: acc, max_tile,
+        }
     }
 
     /// number of scalar values the factor buffer must hold
     #[inline]
     pub fn factor_val_count(&self) -> usize {
-        self.factor.val_count()
+        self.n_vals
     }
 
     /// scalar dimension of the system
     #[inline]
     pub fn dim(&self) -> usize {
         self.n
+    }
+
+    /// Whether the columns were grouped into wide panels. False means one
+    /// panel per block column and the exact envelope, which is what a narrow
+    /// band gets -- grouping there would store a multiple of the envelope for
+    /// no gain.
+    #[inline]
+    pub fn grouped(&self) -> bool {
+        self.grouped
     }
 
     /// number of block columns
@@ -151,17 +276,17 @@ impl BandSymbolic {
     }
 
     /// factor value-buffer offset of tile `(row i, column j)`; both must lie
-    /// in the envelope (`top[j] <= i <= j`).
+    /// in the envelope (`top[j] <= i <= j`). The tile is column-major with
+    /// column stride [`col_stride`](Self::col_stride), NOT its own row count.
     #[inline]
     fn tile_off(&self, i: usize, j: usize) -> usize {
-        let b = self.factor.col_range(j).start + (i - self.top[j]);
-        self.factor.val_range(b).start
+        self.col_off[j] + (self.part[i] - self.col_r0[j])
     }
 
-    /// factor value-buffer offset of the tile at factor block index `b`.
+    /// column stride of every tile in block column `j`
     #[inline]
-    fn tile_val(&self, b: usize) -> usize {
-        self.factor.val_range(b).start
+    fn col_stride(&self, j: usize) -> usize {
+        self.col_rows[j]
     }
 }
 
@@ -174,64 +299,112 @@ pub fn band_factorize<T: SchurReal>(
     factor: &mut [T],
 ) -> Result<(), BandError> {
     assert_eq!(factor.len(), sym.factor_val_count());
-    let nb = sym.nblocks();
     let part = &sym.part;
     let top = &sym.top;
     let s_vals = s.vals();
+    let ns = sym.sup_start.len() - 1;
     let mut scratch = vec![T::ZERO; sym.max_tile];
 
-    for j in 0..nb {
-        let wj = part[j + 1] - part[j];
-        // Block index of column j's first tile; its tiles run top[j]..=j, one
-        // per envelope row, so tile (i, j) is block `cj + (i - top[j])`.
-        let cj = sym.factor.col_range(j).start;
-        for i in top[j]..=j {
-            let wi = part[i + 1] - part[i];
-            let dst_len = wi * wj;
-            let buf = &mut scratch[..dst_len];
+    // Scalar start of super-panel `S`, and of its first stored row.
+    let cstart = |sidx: usize| part[sym.sup_start[sidx]];
+    let cend = |sidx: usize| part[sym.sup_start[sidx + 1]];
+    let rstart = |sidx: usize| part[sym.sup_start[sym.sup_top[sidx]]];
 
-            // seed with S(i, j) (a structural zero when S has no tile here)
-            let src = sym.s_src[cj + (i - top[j])];
-            if src == NO_SRC {
-                buf.fill(T::ZERO);
-            } else {
-                let src = src as usize;
-                buf.clone_from_slice(&s_vals[src..src + dst_len]);
+    for jsup in 0..ns {
+        let wj = cend(jsup) - cstart(jsup);
+        let hj = sym.sup_rows[jsup];
+        let base_j = sym.sup_off[jsup];
+        let r0j = rstart(jsup);
+
+        // Seed the panel: zero, then drop in every S tile of its columns.
+        factor[base_j..base_j + hj * wj].fill(T::ZERO);
+        for j in sym.sup_start[jsup]..sym.sup_start[jsup + 1] {
+            let wjb = part[j + 1] - part[j];
+            let cj = part[j] - cstart(jsup);
+            for i in top[j]..=j {
+                let src = sym.s_src[sym.src_ptr[j] + (i - top[j])];
+                if src == NO_SRC {
+                    continue;
+                }
+                let (src, wi) = (src as usize, part[i + 1] - part[i]);
+                let ri = part[i] - r0j;
+                for c in 0..wjb {
+                    let dst = base_j + (cj + c) * hj + ri;
+                    factor[dst..dst + wi]
+                        .clone_from_slice(&s_vals[src + c * wi..src + c * wi + wi]);
+                }
             }
+        }
 
-            // R_ij -= sum_k R_ki^T R_kj over rows k shared by both columns'
-            // envelopes and above i (already-final factor tiles). gemm_sub
-            // takes the unrolled kernel for pose-pose-pose shapes (6x6x6,
-            // 3x3x3), else nano-gemm.
-            let ci = sym.factor.col_range(i).start;
-            let kstart = top[i].max(top[j]);
-            for k in kstart..i {
-                let wk = part[k + 1] - part[k];
-                let rki = sym.tile_val(ci + (k - top[i]));
-                let rkj = sym.tile_val(cj + (k - top[j]));
-                crate::schur::gemm_sub(
-                    buf,
-                    &factor[rki..rki + wk * wi],
-                    true,
-                    wi,
-                    wk,
-                    &factor[rkj..rkj + wk * wj],
-                    wj,
+        for isup in sym.sup_top[jsup]..=jsup {
+            let wi = cend(isup) - cstart(isup);
+            let hi = sym.sup_rows[isup];
+            let base_i = sym.sup_off[isup];
+            let r0i = rstart(isup);
+            // Row block `isup` sits this far down panel jsup.
+            let dst_off = base_j + (cstart(isup) - r0j);
+
+            // R_IJ -= sum_K R_KI^T R_KJ over the row blocks both panels
+            // share above I -- one GEMM, ~PANEL_WIDTH on each side.
+            let kstart = sym.sup_top[isup].max(sym.sup_top[jsup]);
+            let krows = cstart(isup) - cstart(kstart);
+            if krows > 0 {
+                let a_off = base_i + (cstart(kstart) - r0i);
+                let b_off = base_j + (cstart(kstart) - r0j);
+                let a = unsafe {
+                    faer::MatRef::from_raw_parts(
+                        factor.as_ptr().add(a_off), krows, wi, 1, hi as isize,
+                    )
+                };
+                let b = unsafe {
+                    faer::MatRef::from_raw_parts(
+                        factor.as_ptr().add(b_off), krows, wj, 1, hj as isize,
+                    )
+                };
+                let d = unsafe {
+                    faer::MatMut::from_raw_parts_mut(
+                        factor.as_mut_ptr().add(dst_off), wi, wj, 1, hj as isize,
+                    )
+                };
+                faer::linalg::matmul::matmul(
+                    d, faer::Accum::Add, a.transpose(), b, minus_one::<T>(), faer::Par::Seq,
                 );
             }
 
-            let off = sym.tile_val(cj + (i - top[j]));
-            if i < j {
-                // R_ij = R_ii^{-T} buf
-                let rii = sym.tile_val(ci + (i - top[i]));
-                trsm_upper_transpose(&factor[rii..rii + wi * wi], buf, wi, wj);
-                factor[off..off + dst_len].clone_from_slice(buf);
+            if isup < jsup {
+                // R_IJ = R_II^{-T} R_IJ: R_II is upper, so its transpose is
+                // the lower triangle faer solves against, in place.
+                let rii = base_i + (cstart(isup) - r0i);
+                let l = unsafe {
+                    faer::MatRef::from_raw_parts(
+                        factor.as_ptr().add(rii), wi, wi, 1, hi as isize,
+                    )
+                };
+                let x = unsafe {
+                    faer::MatMut::from_raw_parts_mut(
+                        factor.as_mut_ptr().add(dst_off), wi, wj, 1, hj as isize,
+                    )
+                };
+                faer::linalg::triangular_solve::solve_lower_triangular_in_place(
+                    l.transpose(), x, faer::Par::Seq,
+                );
             } else {
-                // R_jj: upper Cholesky of the accumulated diagonal tile
-                if !chol_upper_in_place(&mut buf[..wj * wj], wj) {
+                // R_JJ: upper Cholesky of the diagonal block. O(w^3) once per
+                // panel, so it runs on a contiguous copy.
+                let buf = &mut scratch[..wj * wj];
+                for c in 0..wj {
+                    for r in 0..wj {
+                        buf[r + c * wj] = factor[dst_off + r + c * hj];
+                    }
+                }
+                if !chol_upper_in_place(buf, wj) {
                     return Err(BandError::NotPositiveDefinite);
                 }
-                factor[off..off + dst_len].clone_from_slice(buf);
+                for c in 0..wj {
+                    for r in 0..wj {
+                        factor[dst_off + r + c * hj] = buf[r + c * wj];
+                    }
+                }
             }
         }
     }
@@ -251,22 +424,22 @@ pub fn band_solve<T: SchurReal>(sym: &BandSymbolic, factor: &[T], rhs: &mut [T])
     for j in 0..nb {
         let (js, je) = (part[j], part[j + 1]);
         let wj = je - js;
+        let hj = sym.col_stride(j);
         for i in top[j]..j {
             let wi = part[i + 1] - part[i];
             let off = sym.tile_off(i, j);
-            let rij = &factor[off..off + wi * wj];
             let is = part[i];
             // y_j -= R_ij^T y_i : (R_ij^T)[c, r] = R_ij[r, c]
             for c in 0..wj {
                 let mut acc = T::ZERO;
                 for r in 0..wi {
-                    acc = acc + rij[r + c * wi] * rhs[is + r];
+                    acc = acc + factor[off + r + c * hj] * rhs[is + r];
                 }
                 rhs[js + c] = rhs[js + c] - acc;
             }
         }
         let djj = sym.tile_off(j, j);
-        solve_upper_transpose(&factor[djj..djj + wj * wj], &mut rhs[js..je], wj);
+        solve_upper_transpose_strided(&factor[djj..], &mut rhs[js..je], wj, hj);
     }
 
     // backward: R x = y (R is upper block triangular), column-oriented so
@@ -274,18 +447,18 @@ pub fn band_solve<T: SchurReal>(sym: &BandSymbolic, factor: &[T], rhs: &mut [T])
     for j in (0..nb).rev() {
         let (js, je) = (part[j], part[j + 1]);
         let wj = je - js;
+        let hj = sym.col_stride(j);
         let djj = sym.tile_off(j, j);
-        solve_upper(&factor[djj..djj + wj * wj], &mut rhs[js..je], wj);
+        solve_upper_strided(&factor[djj..], &mut rhs[js..je], wj, hj);
         for i in top[j]..j {
             let wi = part[i + 1] - part[i];
             let off = sym.tile_off(i, j);
-            let rij = &factor[off..off + wi * wj];
             let is = part[i];
             // rhs_i -= R_ij x_j
             for r in 0..wi {
                 let mut acc = T::ZERO;
                 for c in 0..wj {
-                    acc = acc + rij[r + c * wi] * rhs[js + c];
+                    acc = acc + factor[off + r + c * hj] * rhs[js + c];
                 }
                 rhs[is + r] = rhs[is + r] - acc;
             }
@@ -319,42 +492,27 @@ fn chol_upper_in_place<T: SchurReal>(a: &mut [T], w: usize) -> bool {
     true
 }
 
-/// Solves `R^T X = B` in place on a `w x m` column-major panel, `R` the
-/// upper factor tile (only its upper triangle is read). `R^T` is lower, so
-/// this is forward substitution per column.
-fn trsm_upper_transpose<T: SchurReal>(r: &[T], panel: &mut [T], w: usize, m: usize) {
-    for c in 0..m {
-        for row in 0..w {
-            let mut s = panel[row + c * w];
-            for k in 0..row {
-                s = s - r[k + row * w] * panel[k + c * w];
-            }
-            panel[row + c * w] = s / r[row + row * w];
-        }
-    }
-}
 
-/// Solves `R^T x = b` in place for a single `w`-vector (forward
-/// substitution; `R` upper factor tile, upper triangle read).
-fn solve_upper_transpose<T: SchurReal>(r: &[T], x: &mut [T], w: usize) {
+/// [`solve_upper_transpose`] on a tile whose column stride is the whole
+/// panel's height rather than its own width.
+fn solve_upper_transpose_strided<T: SchurReal>(r: &[T], x: &mut [T], w: usize, stride: usize) {
     for row in 0..w {
         let mut s = x[row];
         for k in 0..row {
-            s = s - r[k + row * w] * x[k];
+            s = s - r[k + row * stride] * x[k];
         }
-        x[row] = s / r[row + row * w];
+        x[row] = s / r[row + row * stride];
     }
 }
 
-/// Solves `R x = b` in place for a single `w`-vector (back substitution;
-/// `R` upper factor tile, upper triangle read).
-fn solve_upper<T: SchurReal>(r: &[T], x: &mut [T], w: usize) {
+/// [`solve_upper`] on a tile with a panel column stride.
+fn solve_upper_strided<T: SchurReal>(r: &[T], x: &mut [T], w: usize, stride: usize) {
     for row in (0..w).rev() {
         let mut s = x[row];
         for k in row + 1..w {
-            s = s - r[row + k * w] * x[k];
+            s = s - r[row + k * stride] * x[k];
         }
-        x[row] = s / r[row + row * w];
+        x[row] = s / r[row + row * stride];
     }
 }
 
@@ -512,8 +670,9 @@ mod tests {
         let sym = BandSymbolic::new(s.symbolic());
         let mut factor = vec![0.0f64; sym.factor_val_count()];
         band_factorize(&sym, &s, &mut factor).unwrap();
-        // factor stores strictly more tiles than S (envelope fill of (1,3),(2,3))
-        assert!(sym.factor.nblocks() > s.symbolic().nblocks());
+        // the factor covers strictly more than S: the envelope fills in
+        // (1,3) and (2,3), which S does not store
+        assert!(sym.factor_val_count() > s.vals().len());
         let mut x = rhs.clone();
         band_solve(&sym, &factor, &mut x);
         assert!(rel_resid(&full, *part.last().unwrap(), &x, &rhs) < 1e-10);
@@ -556,6 +715,65 @@ mod tests {
         band_solve(&sym, &factor, &mut x32);
         let x: Vec<f64> = x32.iter().map(|&v| v as f64).collect();
         assert!(rel_resid(&full, *part.last().unwrap(), &x, &rhs64) < 1e-3);
+    }
+
+    /// Several super-panels, which is the case every other test misses: they
+    /// are all narrower than PANEL_WIDTH, so they exercise one panel and
+    /// nothing about the grouping. A wrong panel row-origin shows up here
+    /// and nowhere else.
+    #[test]
+    fn multi_panel_dense() {
+        // 40 blocks of 6 = 240 scalars, so ~4 panels at PANEL_WIDTH.
+        let part: Vec<usize> = (0..=40).map(|i| i * 6).collect();
+        let nb = part.len() - 1;
+        // dense upper block triangle: every column reaches row 0
+        let mut cells = Vec::new();
+        for j in 0..nb {
+            for i in 0..j {
+                cells.push((i, j));
+            }
+        }
+        let (s, full, rhs) = build_banded(&part, &cells, 11);
+        let sym = BandSymbolic::new(s.symbolic());
+        assert!(sym.sup_start.len() - 1 > 1, "test needs more than one panel");
+        let mut factor = vec![0.0f64; sym.factor_val_count()];
+        band_factorize(&sym, &s, &mut factor).unwrap();
+        let mut x = rhs.clone();
+        band_solve(&sym, &factor, &mut x);
+        assert!(rel_resid(&full, *part.last().unwrap(), &x, &rhs) < 1e-10);
+    }
+
+    /// Multiple panels over a NARROW band: grouping is allowed (it is matched
+    /// to the envelope height), but the factor must stay a band -- nowhere
+    /// near the dense triangle -- and the solve must still be exact.
+    #[test]
+    fn multi_panel_narrow_band() {
+        let part: Vec<usize> = (0..=40).map(|i| i * 6).collect();
+        let nb = part.len() - 1;
+        let mut cells = Vec::new();
+        for j in 0..nb {
+            for i in j.saturating_sub(2)..j {
+                cells.push((i, j));
+            }
+        }
+        let (s, full, rhs) = build_banded(&part, &cells, 13);
+        let sym = BandSymbolic::new(s.symbolic());
+        // The envelope must still be exploited: a 240-wide system whose band
+        // is 2 blocks deep has a dense triangle of 28920 values, and the
+        // factor must stay a small fraction of it.
+        let n = *part.last().unwrap();
+        let dense_triangle = n * (n + 1) / 2;
+        assert!(
+            sym.factor_val_count() * 4 < dense_triangle,
+            "narrow band factor {} is not a band against a dense triangle of {}",
+            sym.factor_val_count(),
+            dense_triangle,
+        );
+        let mut factor = vec![0.0f64; sym.factor_val_count()];
+        band_factorize(&sym, &s, &mut factor).unwrap();
+        let mut x = rhs.clone();
+        band_solve(&sym, &factor, &mut x);
+        assert!(rel_resid(&full, *part.last().unwrap(), &x, &rhs) < 1e-10);
     }
 
     #[test]

@@ -139,17 +139,37 @@ fn solve(solver: &mut SparseFaer<f64>, win: usize) -> (Vec<f64>, f64) {
     (out, r.end_cost)
 }
 
-/// The reduced system here is banded, so the default backend already orders it
-/// NaturalBanded -- but it still factorizes through faer, not the narrow-band route.
+/// The reduced system here is banded, so it is naturally ordered and the
+/// envelope route takes it -- which is the default.
 #[test]
-fn default_route_is_faer_even_when_banded() {
+fn envelope_route_is_the_default_when_naturally_ordered() {
     let mut solver = SparseFaer::new();
     let (_, cost) = solve(&mut solver, 2);
     let plan = solver.plan().expect("a plan");
     assert!(plan.reduced, "the landmarks should marginalize");
     assert_eq!(plan.ordering, Some(ReducedOrdering::NaturalBanded));
-    assert!(!plan.narrow_band, "with_narrow_band is off by default");
+    assert!(plan.narrow_band, "the envelope route is on by default");
     assert!(cost < 1e-12, "end_cost {}", cost);
+}
+
+/// with_envelope_schur(false) puts the reduced system back on faer, and both
+/// routes reach the same optimum.
+#[test]
+fn envelope_route_can_be_switched_off() {
+    let mut off = SparseFaer::new().with_envelope_schur(false);
+    let (x_faer, c_faer) = solve(&mut off, 2);
+    let plan = off.plan().expect("a plan");
+    assert!(plan.reduced);
+    assert!(!plan.narrow_band, "with_envelope_schur(false) must not take it");
+
+    let mut on = SparseFaer::new();
+    let (x_env, c_env) = solve(&mut on, 2);
+    assert!(on.plan().expect("a plan").narrow_band);
+
+    assert!(c_faer < 1e-12 && c_env < 1e-12, "{} {}", c_faer, c_env);
+    for (a, b) in std::iter::zip(&x_faer, &x_env) {
+        assert!((a - b).abs() < 1e-9, "routes disagree: {} vs {}", a, b);
+    }
 }
 
 /// with_narrow_band takes the narrow-band Cholesky and reaches the same optimum.

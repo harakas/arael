@@ -311,6 +311,12 @@ fn narrow_band_enabled() -> bool {
     std::env::var("SLAM_NARROW_BAND").map_or(false, |v| v == "1")
 }
 
+// SLAM_NO_ENVELOPE=1 puts the reduced Schur system back on faer's sparse
+// Cholesky; the envelope route is arael's default.
+fn envelope_enabled() -> bool {
+    std::env::var("SLAM_NO_ENVELOPE").map_or(true, |v| v != "1")
+}
+
 type Solved<T> = Result<arael::simple_lm::LmResult<T>, arael::simple_lm::SolveFailure<T>>;
 
 fn solve64(params: &[f64], path: &mut Path, cfg: &arael::simple_lm::LmConfig<f64>)
@@ -353,7 +359,8 @@ fn solve64(params: &[f64], path: &mut Path, cfg: &arael::simple_lm::LmConfig<f64
             // factorizing only the reduced pose system.
             arael::simple_lm::lm_solve(
                 params,
-                &mut arael::simple_lm::SparseFaer::new().with_narrow_band(narrow_band_enabled()),
+                &mut arael::simple_lm::SparseFaer::new().with_narrow_band(narrow_band_enabled())
+                    .with_envelope_schur(envelope_enabled()),
                 path,
                 cfg,
             )
@@ -437,7 +444,8 @@ fn solve32(params: &[f32], path: &mut PathF, cfg: &arael::simple_lm::LmConfig<f3
         );
     }
     arael::simple_lm::lm_solve(
-        params, &mut arael::simple_lm::SparseFaerF32::new().with_narrow_band(narrow_band_enabled()), path, cfg)
+        params, &mut arael::simple_lm::SparseFaerF32::new().with_narrow_band(narrow_band_enabled())
+                    .with_envelope_schur(envelope_enabled()), path, cfg)
 }
 
 // Capped single solve (no timing) -- used for peak-memory measurement.
