@@ -5700,7 +5700,8 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 Err(_) => return false,
             };
             let stats = arael_faer::cg::solve(
-                s, &precond, &self.rhs_kept, &mut self.x_kept, &cg, &mut self.cg_work,
+                |u, v| s.mul_symmetric_upper(u, v),
+                &precond, &self.rhs_kept, &mut self.x_kept, &cg, &mut self.cg_work,
             );
             self.cg_iters += stats.iters;
             if let Some(plan) = self.plan.as_mut() {

@@ -117,6 +117,31 @@ impl<T: SchurReal> BlockJacobi<T> {
         Ok(BlockJacobi { factors, at, span })
     }
 
+    /// Factor diagonal blocks handed over directly, for an operator with no
+    /// matrix to read them off. `spans` is `(scalar offset, width)` per block
+    /// in ascending order; `blocks` holds each one FULL and symmetric,
+    /// column-major, concatenated in the same order.
+    pub fn from_diagonal_blocks(
+        spans: &[(usize, usize)],
+        blocks: &[T],
+    ) -> Result<Self, CgError> {
+        let mut factors = Vec::with_capacity(blocks.len());
+        let mut at = Vec::with_capacity(spans.len());
+        let mut scratch: Vec<T> = Vec::new();
+        let mut read = 0usize;
+        for (j, &(_, w)) in spans.iter().enumerate() {
+            at.push(factors.len());
+            scratch.clear();
+            scratch.extend_from_slice(&blocks[read..read + w * w]);
+            read += w * w;
+            if !llt_in_place(&mut scratch, w) {
+                return Err(CgError::IndefiniteBlock(j));
+            }
+            factors.extend_from_slice(&scratch);
+        }
+        Ok(BlockJacobi { factors, at, span: spans.to_vec() })
+    }
+
     /// `z = M^-1 r`, block by block.
     pub fn apply(&self, r: &[T], z: &mut [T]) {
         for (b, &(start, w)) in self.span.iter().enumerate() {
@@ -162,10 +187,15 @@ fn dot<T: SchurReal>(a: &[T], b: &[T]) -> f64 {
     acc
 }
 
-/// Solve `a x = b` by preconditioned conjugate gradients, starting from
+/// Solve `A x = b` by preconditioned conjugate gradients, starting from
 /// `x = 0`. `x` is overwritten.
-pub fn solve<I: Index, T: SchurReal>(
-    a: &SparseBlockColMat<I, T>,
+///
+/// `apply` is the operator: `apply(x, y)` must leave `y = A x`. Taking it as a
+/// closure rather than a matrix lets the caller supply either a system it has
+/// built ([`SparseBlockColMat::mul_symmetric_upper`]) or one it applies
+/// without building, which is the whole point of an iterative solve.
+pub fn solve<T: SchurReal>(
+    mut apply: impl FnMut(&[T], &mut [T]),
     m: &BlockJacobi<T>,
     b: &[T],
     x: &mut [T],
@@ -175,11 +205,13 @@ pub fn solve<I: Index, T: SchurReal>(
     let n = b.len();
     w.resize(n);
     x.iter_mut().for_each(|v| *v = T::ZERO);
+    // Destructured so `apply` can borrow two of them at once.
+    let CgWorkspace { r, z, p, q } = w;
 
-    w.r.copy_from_slice(b);
-    m.apply(&w.r, &mut w.z);
-    w.p.copy_from_slice(&w.z);
-    let mut rho = dot(&w.r, &w.z);
+    r.copy_from_slice(b);
+    m.apply(r, z);
+    p.copy_from_slice(z);
+    let mut rho = dot(r, z);
     let rho0 = rho;
 
     // A zero right-hand side is already solved; so is a starting residual the
@@ -193,8 +225,8 @@ pub fn solve<I: Index, T: SchurReal>(
     let mut iters = 0;
     let mut converged = rho <= target;
     while !converged && iters < cap {
-        a.mul_symmetric_upper(&w.p, &mut w.q);
-        let pq = dot(&w.p, &w.q);
+        apply(p, q);
+        let pq = dot(p, q);
         // Non-positive curvature means A is not positive definite along p;
         // continuing would step the wrong way. Stop with what we have.
         if !(pq > 0.0) {
@@ -203,23 +235,23 @@ pub fn solve<I: Index, T: SchurReal>(
         let alpha = rho / pq;
         let alpha_t = T::from_f64(alpha);
         for i in 0..n {
-            x[i] = x[i] + alpha_t * w.p[i];
+            x[i] = x[i] + alpha_t * p[i];
         }
         iters += 1;
 
         if opts.restart_every != 0 && iters % opts.restart_every == 0 {
-            a.mul_symmetric_upper(x, &mut w.q);
+            apply(x, q);
             for i in 0..n {
-                w.r[i] = b[i] - w.q[i];
+                r[i] = b[i] - q[i];
             }
         } else {
             for i in 0..n {
-                w.r[i] = w.r[i] - alpha_t * w.q[i];
+                r[i] = r[i] - alpha_t * q[i];
             }
         }
 
-        m.apply(&w.r, &mut w.z);
-        let rho_new = dot(&w.r, &w.z);
+        m.apply(r, z);
+        let rho_new = dot(r, z);
         converged = rho_new <= target;
         if converged {
             rho = rho_new;
@@ -227,7 +259,7 @@ pub fn solve<I: Index, T: SchurReal>(
         }
         let beta = T::from_f64(rho_new / rho);
         for i in 0..n {
-            w.p[i] = w.z[i] + beta * w.p[i];
+            p[i] = z[i] + beta * p[i];
         }
         rho = rho_new;
     }
@@ -297,7 +329,7 @@ mod tests {
         let mut x = vec![0.0; 4];
         let mut w = CgWorkspace::default();
         let opts = CgOptions { tol: 1e-14, ..Default::default() };
-        let stats = solve(&a, &m, &b, &mut x, &opts, &mut w);
+        let stats = solve(|u, v| a.mul_symmetric_upper(u, v), &m, &b, &mut x, &opts, &mut w);
         assert!(stats.converged, "did not converge: {:?}", stats);
         assert!(stats.iters <= 4, "took {} iterations on a 4x4", stats.iters);
 
@@ -317,7 +349,7 @@ mod tests {
         let mut x = vec![0.0; 4];
         let mut w = CgWorkspace::default();
         let opts = CgOptions { tol: 1e-14, max_iters: 1, ..Default::default() };
-        let stats = solve(&a, &m, &b, &mut x, &opts, &mut w);
+        let stats = solve(|u, v| a.mul_symmetric_upper(u, v), &m, &b, &mut x, &opts, &mut w);
         assert_eq!(stats.iters, 1);
         assert!(!stats.converged);
     }
@@ -330,7 +362,7 @@ mod tests {
         let mut w = CgWorkspace::default();
         let opts = CgOptions { tol: 1e-14, restart_every: 1, ..Default::default() };
         let mut x = vec![0.0; 4];
-        let stats = solve(&a, &m, &b, &mut x, &opts, &mut w);
+        let stats = solve(|u, v| a.mul_symmetric_upper(u, v), &m, &b, &mut x, &opts, &mut w);
         assert!(stats.converged);
         let mut ax = vec![0.0; 4];
         a.mul_symmetric_upper(&x, &mut ax);
@@ -355,7 +387,7 @@ mod tests {
         let b = vec![1.0f32, 2.0, 3.0, 4.0];
         let mut x = vec![0.0f32; 4];
         let mut w = CgWorkspace::default();
-        let stats = solve(&a, &m, &b, &mut x, &CgOptions::default(), &mut w);
+        let stats = solve(|u, v| a.mul_symmetric_upper(u, v), &m, &b, &mut x, &CgOptions::default(), &mut w);
         assert!(stats.converged, "{:?}", stats);
         let mut ax = vec![0.0f32; 4];
         a.mul_symmetric_upper(&x, &mut ax);
