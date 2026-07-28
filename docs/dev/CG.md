@@ -72,20 +72,35 @@ mostly S itself.
 Never form S. Each product applies `B x - E C^-1 (E^T x)` by walking the block
 Hessian, which is what Ceres's `iterative_schur` does by default.
 
-Removes S's own storage and the whole reduction from the iteration. At
-Ladybug-1723 the reduction is 183 ms of a ~350 ms iteration, so this is worth
-roughly 1.5x on time, plus S's storage.
+It removes S's storage and the reduction, but it does not remove the work --
+it trades ONE reduction for ONE product per CG iteration, and an implicit
+product is the more expensive of the two. It walks E twice (once for `E^T x`,
+once for `E u`) plus a triangular solve per eliminated block, against a single
+pass over S. So the trade turns on how many CG iterations a solve takes:
 
-Prerequisite: **cache the per-block Cholesky factors of C.** Today
-`schur_reduce` and `schur_backsub` each factorize the eliminated blocks
-independently (`schur.rs:1268` and `:1476`). An implicit product needs `C^-1`
-per matvec, so the factors have to be kept. That caching is a small win for the
-existing route on its own, since it removes the duplicate work in backsub.
+| | S nnz | E nnz | CG/solve | explicit | implicit |
+|---|------:|------:|---------:|---------|----------|
+| Ladybug-372 | 2.23M | 5.52M | ~35 | 51 + 35x1.3 = **96 ms** | 35x~3.3 = 115 ms |
+| Ladybug-1723 | 9.7M | 18.3M | ~6 | 183 + 6x5 = 213 ms | 6x~11 = **69 ms** |
 
-Cost to weigh: each matvec becomes a pass over the whole block Hessian rather
-than over S, so it is more expensive per CG iteration. Whether that pays
-depends on the CG count -- at 372 it is ~35 per solve, at 1723 ~14. Measure
-before committing to it.
+(matvec costs scaled from the measured 1.3 ms per S product at 372; the
+implicit figures are estimates, not measurements.)
+
+So implicit **loses on 372 and wins roughly 3x on 1723**, and the crossover is
+CG-iterations-per-solve rather than problem size -- which at `tol=1e-3` is ~35
+on 372 against ~6 on 1723. It is therefore a THIRD option, not a replacement
+for the explicit route, and the solver would need a rule to pick between them.
+
+**Prerequisite DONE**: the per-block Cholesky factors of the eliminated blocks
+are cached in `SchurContext` by `schur_reduce`, and `schur_backsub` uses them
+instead of factoring the same tiles again (`schur.rs`). That removes 47423
+redundant 3x3 Choleskys per solve at Ladybug-372. An implicit product needs
+those same factors per matvec, so this is the shared groundwork.
+
+Still to build: the implicit product itself (`B x - E C^-1 (E^T x)` over the
+flattened observer arrays the symbolic already carries), a block-Jacobi
+preconditioner built from S's diagonal blocks without forming S, an operator
+abstraction so `cg::solve` takes either form, and the rule that chooses.
 
 ## 3. The matrix-vector product
 

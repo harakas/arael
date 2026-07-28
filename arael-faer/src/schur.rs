@@ -373,6 +373,14 @@ pub struct SchurContext<T> {
     /// solve panel `Z = D^-1 [C^T | b_e]`, column-major, width
     /// `sum(observer widths) + 1`
     panel: Vec<T>,
+    /// every eliminated block's lower-LLT factor, concatenated in
+    /// `elim_diag` order, written by [`schur_reduce`]. Kept so that
+    /// [`schur_backsub`] -- which by construction runs on the same `h` and
+    /// context, since it consumes the solution of the system the reduction
+    /// produced -- does not factor the same tiles a second time.
+    efactors: Vec<T>,
+    /// where each eliminated block's factor starts in `efactors`
+    efactor_at: Vec<usize>,
     /// per-stage breakdown of the last [`schur_reduce`] call, gathered
     /// only when enabled (the clock is never read otherwise)
     timing: Option<SchurTiming>,
@@ -380,7 +388,13 @@ pub struct SchurContext<T> {
 
 impl<T> Default for SchurContext<T> {
     fn default() -> Self {
-        Self { dwork: Vec::new(), panel: Vec::new(), timing: None }
+        Self {
+            dwork: Vec::new(),
+            panel: Vec::new(),
+            efactors: Vec::new(),
+            efactor_at: Vec::new(),
+            timing: None,
+        }
     }
 }
 
@@ -1250,6 +1264,19 @@ pub fn schur_reduce<I: Index, T: SchurReal>(
     assert_eq!(rhs_out.len(), sym.s.nrows());
     ctx.dwork.resize(sym.max_ew * sym.max_ew, T::ZERO);
     ctx.panel.resize(sym.max_panel, T::ZERO);
+    // Offsets of every eliminated block's factor, and the room to hold them.
+    // Widths come from the structure, so this settles on the first call.
+    if ctx.efactor_at.len() != sym.elim_diag.len() + 1 {
+        ctx.efactor_at.clear();
+        let mut at = 0usize;
+        for slot in 0..sym.elim_diag.len() {
+            ctx.efactor_at.push(at);
+            let we = hs.col_span(hs.blk_row(sym.elim_diag[slot].zx())).len();
+            at += we * we;
+        }
+        ctx.efactor_at.push(at);
+        ctx.efactors.resize(at, T::ZERO);
+    }
     let gather = ctx.timing.is_some();
     let mut t = SchurTiming::default();
     let mut sw = Stopwatch::new(gather);
@@ -1282,6 +1309,9 @@ pub fn schur_reduce<I: Index, T: SchurReal>(
         if !llt_in_place(dwork, we) {
             return Err(SchurError::NotPositiveDefinite { block: e });
         }
+        // Kept for back-substitution, which would otherwise redo it.
+        ctx.efactors[ctx.efactor_at[slot]..ctx.efactor_at[slot + 1]]
+            .copy_from_slice(dwork);
         sw.lap(&mut t.factor);
 
         // 2b panel: gather [C^T | b_e], then Z = D_e^-1 [C^T | b_e]
@@ -1477,20 +1507,12 @@ pub fn schur_backsub<I: Index, T: SchurReal>(
             );
         }
 
-        // x_e = D_e^-1 t (same two triangular solves as the reduction)
-        let dwork = &mut ctx.dwork[..we * we];
-        let dtile = &h.vals()[hs.val_range(d_blk)];
-        for j in 0..we {
-            for i in 0..=j {
-                let v = dtile[i + j * we];
-                dwork[i + j * we] = v;
-                dwork[j + i * we] = v;
-            }
-        }
-        if !llt_in_place(dwork, we) {
-            return Err(SchurError::NotPositiveDefinite { block: e });
-        }
-        llt_solve_panel(dwork, t, we, 1);
+        // x_e = D_e^-1 t, on the factor the reduction already computed for
+        // this block -- the same two triangular solves, without redoing the
+        // Cholesky. A reduction on this `h` and context always precedes us:
+        // `x_kept` is the solution of the system it produced.
+        let f = &ctx.efactors[ctx.efactor_at[slot]..ctx.efactor_at[slot + 1]];
+        llt_solve_panel(f, t, we, 1);
         x_full[hs.col_span(e)].copy_from_slice(t);
     }
     Ok(())
