@@ -97,10 +97,32 @@ instead of factoring the same tiles again (`schur.rs`). That removes 47423
 redundant 3x3 Choleskys per solve at Ladybug-372. An implicit product needs
 those same factors per matvec, so this is the shared groundwork.
 
-Still to build: the implicit product itself (`B x - E C^-1 (E^T x)` over the
-flattened observer arrays the symbolic already carries), a block-Jacobi
-preconditioner built from S's diagonal blocks without forming S, an operator
-abstraction so `cg::solve` takes either form, and the rule that chooses.
+**Operator DONE**: `schur_factor_eliminated` factors the eliminated blocks
+without reducing, and `schur_apply` computes `B x - E C^-1 (E^T x)` over the
+flattened observer arrays the symbolic already carries. A test checks it
+column by column against `schur_reduce` + `mul_symmetric_upper` over four
+elimination sets, so the two operators are pinned to each other.
+
+Still to wire, in order:
+
+1. **The reduced right-hand side without S.** `schur_reduce` produces
+   `rhs_kept` as a side effect; the implicit route needs the same vector and
+   nothing else from it. One pass over the observers, the same shape as the
+   gather in `schur_apply`.
+2. **Block Jacobi without S.** The preconditioner needs S's diagonal blocks,
+   `S_aa = B_aa - sum_e C_ae C_e^-1 C_ae^T` -- the `a == b` subset of the
+   reduction's pair loop. Everything else in `cg::BlockJacobi` stays.
+3. **`cg::solve` over a closure** rather than `&SparseBlockColMat`. Lighter
+   than a trait and serves both forms: the explicit route passes
+   `|x, y| s.mul_symmetric_upper(x, y)`.
+4. **`SchurSolve::IterativeImplicit(CgOptions)`** and a benchmark route, so it
+   can be measured. No selection rule yet -- deliberately, until there are
+   numbers on both.
+
+Watch for, when measuring: `schur_apply` walks S's structure to place H's
+kept-kept tiles, and S's structure includes fill the elimination created that
+H never had. Those tiles are skipped, but the traversal still visits them, so
+a very fill-heavy reduced system pays for structure it does not use.
 
 ## 3. The matrix-vector product
 

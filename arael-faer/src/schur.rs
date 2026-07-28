@@ -381,6 +381,10 @@ pub struct SchurContext<T> {
     efactors: Vec<T>,
     /// where each eliminated block's factor starts in `efactors`
     efactor_at: Vec<usize>,
+    /// S block index -> H block index for the kept-kept tiles, built lazily
+    /// by the implicit product ([`schur_apply`]), which reads H through S's
+    /// geometry. `usize::MAX` where S has a tile the elimination created.
+    s_to_h: Vec<usize>,
     /// per-stage breakdown of the last [`schur_reduce`] call, gathered
     /// only when enabled (the clock is never read otherwise)
     timing: Option<SchurTiming>,
@@ -393,6 +397,7 @@ impl<T> Default for SchurContext<T> {
             panel: Vec::new(),
             efactors: Vec::new(),
             efactor_at: Vec::new(),
+            s_to_h: Vec::new(),
             timing: None,
         }
     }
@@ -1212,6 +1217,176 @@ pub(crate) fn gemm_sub<T: SchurReal>(
     T::gemm_sub_nano(dst, ca, trans, wa, we, zb, wb);
 }
 
+/// Factor every eliminated block's diagonal tile into the context, without
+/// reducing anything. [`schur_reduce`] does this as its first stage; the
+/// implicit product needs the same factors but never forms S, so it calls
+/// this once per damped solve and then multiplies.
+pub fn schur_factor_eliminated<I: Index, T: SchurReal>(
+    sym: &SchurSymbolic<I>,
+    h: &SparseBlockColMat<I, T>,
+    ctx: &mut SchurContext<T>,
+) -> Result<(), SchurError> {
+    let hs = h.symbolic();
+    ctx.dwork.resize(sym.max_ew * sym.max_ew, T::ZERO);
+    size_efactors(sym, hs, ctx);
+    for slot in 0..sym.elim_diag.len() {
+        let d_blk = sym.elim_diag[slot].zx();
+        let e = hs.blk_row(d_blk);
+        let we = hs.col_span(e).len();
+        let dwork = &mut ctx.dwork[..we * we];
+        read_symmetric_tile(&h.vals()[hs.val_range(d_blk)], dwork, we);
+        if !llt_in_place(dwork, we) {
+            return Err(SchurError::NotPositiveDefinite { block: e });
+        }
+        ctx.efactors[ctx.efactor_at[slot]..ctx.efactor_at[slot + 1]]
+            .copy_from_slice(dwork);
+    }
+    Ok(())
+}
+
+/// `y = (B - E C^-1 E^T) x` over the KEPT numbering, without forming S.
+///
+/// The same operator [`schur_reduce`] builds explicitly, applied instead. It
+/// trades one reduction for one pass per call, so it pays only when a solve
+/// takes few enough products -- see docs/dev/CG.md.
+///
+/// Requires a preceding [`schur_factor_eliminated`] (or [`schur_reduce`]) on
+/// this `h` and context, for the `C^-1`.
+pub fn schur_apply<I: Index, T: SchurReal>(
+    sym: &SchurSymbolic<I>,
+    h: &SparseBlockColMat<I, T>,
+    ctx: &mut SchurContext<T>,
+    x: &[T],
+    y: &mut [T],
+) {
+    let hs = h.symbolic();
+    assert_eq!(x.len(), sym.s.nrows());
+    assert_eq!(y.len(), sym.s.nrows());
+    build_s_to_h(sym, ctx);
+    y.iter_mut().for_each(|v| *v = T::ZERO);
+
+    // B x -- the kept-kept tiles, read out of H but placed by S's geometry.
+    // Same upper-triangle convention as bsc::mul_symmetric_upper: a diagonal
+    // tile carries only its upper half, so it is mirrored rather than read
+    // whole.
+    for j in 0..sym.s.nblk_cols() {
+        let cols = sym.s.col_span(j);
+        for b in sym.s.col_range(j) {
+            let hb = ctx.s_to_h[b];
+            if hb == usize::MAX {
+                continue; // pure fill: exists in S, has no counterpart in H
+            }
+            let r = sym.s.blk_row(b);
+            let rows = sym.s.row_span(r);
+            let nr = rows.len();
+            let payload = &h.vals()[hs.val_range(hb)];
+            if r == j {
+                for (lc, cj) in cols.clone().enumerate() {
+                    for lr in 0..=lc {
+                        let a = payload[lc * nr + lr];
+                        let ri = rows.start + lr;
+                        y[ri] = y[ri] + a * x[cj];
+                        if lr != lc {
+                            y[cj] = y[cj] + a * x[ri];
+                        }
+                    }
+                }
+            } else {
+                for (lc, cj) in cols.clone().enumerate() {
+                    let xcj = x[cj];
+                    let mut acc = T::ZERO;
+                    for lr in 0..nr {
+                        let a = payload[lc * nr + lr];
+                        let ri = rows.start + lr;
+                        y[ri] = y[ri] + a * xcj;
+                        acc = acc + a * x[ri];
+                    }
+                    y[cj] = y[cj] + acc;
+                }
+            }
+        }
+    }
+
+    // - E C^-1 E^T x, one eliminated block at a time
+    ctx.panel.resize(sym.max_panel.max(sym.max_ew), T::ZERO);
+    for slot in 0..sym.elim_diag.len() {
+        let d_blk = sym.elim_diag[slot].zx();
+        let we = hs.col_span(hs.blk_row(d_blk)).len();
+        let orange = sym.elim_obs_ptr[slot].zx()..sym.elim_obs_ptr[slot + 1].zx();
+
+        // t = -sum_a C_a^T x_a, then negated: gemm_sub only subtracts.
+        let t = &mut ctx.panel[..we];
+        t.iter_mut().for_each(|v| *v = T::ZERO);
+        for o in orange.clone() {
+            let wa = sym.obs_w[o].zx();
+            let ca = sym.obs_ca_off[o].zx();
+            let off = sym.obs_kept_off[o].zx();
+            gemm_sub(t, &h.vals()[ca..ca + wa * we], !sym.obs_trans[o], we, wa,
+                     &x[off..off + wa], 1);
+        }
+        for v in t.iter_mut() {
+            *v = T::ZERO - *v;
+        }
+        let f = &ctx.efactors[ctx.efactor_at[slot]..ctx.efactor_at[slot + 1]];
+        llt_solve_panel(f, t, we, 1);
+
+        // y_a -= C_a u
+        for o in orange {
+            let wa = sym.obs_w[o].zx();
+            let ca = sym.obs_ca_off[o].zx();
+            let off = sym.obs_kept_off[o].zx();
+            gemm_sub(&mut y[off..off + wa], &h.vals()[ca..ca + wa * we],
+                     sym.obs_trans[o], wa, we, &ctx.panel[..we], 1);
+        }
+    }
+}
+
+/// Read a tile stored upper-only into a full symmetric `w x w` scratch.
+#[inline]
+fn read_symmetric_tile<T: SchurReal>(tile: &[T], out: &mut [T], w: usize) {
+    for j in 0..w {
+        for i in 0..=j {
+            let v = tile[i + j * w];
+            out[i + j * w] = v;
+            out[j + i * w] = v;
+        }
+    }
+}
+
+/// Size the eliminated-block factor buffer and its offsets. Widths come from
+/// the structure, so this settles on the first call.
+fn size_efactors<I: Index, T: SchurReal>(
+    sym: &SchurSymbolic<I>,
+    hs: &SymbolicSparseBlockColMat<I>,
+    ctx: &mut SchurContext<T>,
+) {
+    if ctx.efactor_at.len() == sym.elim_diag.len() + 1 {
+        return;
+    }
+    ctx.efactor_at.clear();
+    let mut at = 0usize;
+    for slot in 0..sym.elim_diag.len() {
+        ctx.efactor_at.push(at);
+        let we = hs.col_span(hs.blk_row(sym.elim_diag[slot].zx())).len();
+        at += we * we;
+    }
+    ctx.efactor_at.push(at);
+    ctx.efactors.resize(at, T::ZERO);
+}
+
+/// S block index -> H block index for the kept-kept tiles, `usize::MAX` where
+/// S has a tile that the elimination created and H never had.
+fn build_s_to_h<I: Index, T>(sym: &SchurSymbolic<I>, ctx: &mut SchurContext<T>) {
+    if ctx.s_to_h.len() == sym.s.nblocks() {
+        return;
+    }
+    ctx.s_to_h.clear();
+    ctx.s_to_h.resize(sym.s.nblocks(), usize::MAX);
+    for i in 0..sym.copy_dst.len() {
+        ctx.s_to_h[sym.copy_dst[i].zx()] = sym.copy_src[i].zx();
+    }
+}
+
 /// numeric Schur reduction: fills `s` (allocated via
 /// [`SchurSymbolic::alloc_s`]) with `S = Hkk - Hke Hee^-1 Hek` and
 /// `rhs_out` (length `s.nrows()`, the kept blocks compacted in order)
@@ -1264,19 +1439,7 @@ pub fn schur_reduce<I: Index, T: SchurReal>(
     assert_eq!(rhs_out.len(), sym.s.nrows());
     ctx.dwork.resize(sym.max_ew * sym.max_ew, T::ZERO);
     ctx.panel.resize(sym.max_panel, T::ZERO);
-    // Offsets of every eliminated block's factor, and the room to hold them.
-    // Widths come from the structure, so this settles on the first call.
-    if ctx.efactor_at.len() != sym.elim_diag.len() + 1 {
-        ctx.efactor_at.clear();
-        let mut at = 0usize;
-        for slot in 0..sym.elim_diag.len() {
-            ctx.efactor_at.push(at);
-            let we = hs.col_span(hs.blk_row(sym.elim_diag[slot].zx())).len();
-            at += we * we;
-        }
-        ctx.efactor_at.push(at);
-        ctx.efactors.resize(at, T::ZERO);
-    }
+    size_efactors(sym, hs, ctx);
     let gather = ctx.timing.is_some();
     let mut t = SchurTiming::default();
     let mut sw = Stopwatch::new(gather);
@@ -1967,6 +2130,65 @@ mod tests {
         // would let those stages sit on the fallback unseen.
         for &((wa, we, wb), _) in sym.gemm_shapes() {
             assert!(has_fixed_kernel(wa, we, wb), "no kernel for ({}, {}, {})", wa, we, wb);
+        }
+    }
+
+    /// The implicit product must agree with the explicit one it replaces:
+    /// same operator, one formed and multiplied, the other multiplied
+    /// directly. Checked over a basis so every column of S is compared, not
+    /// just one direction.
+    #[test]
+    fn implicit_apply_matches_the_reduced_system() {
+        // Uncoupled sets only -- the symbolic rejects anything else, and it
+        // has its own test for that.
+        for elim in [&[2usize][..], &[1, 4][..], &[0][..], &[5][..]] {
+            let (h, rhs) = fixture();
+            let sym = schur_symbolic(h.symbolic(), elim).unwrap();
+            let nk = sym.s.nrows();
+
+            // explicit: form S, multiply by it
+            let mut s = sym.alloc_s::<f64>();
+            let mut ctx = SchurContext::new();
+            let mut rk = vec![0.0; nk];
+            schur_reduce(&sym, &h, &rhs, &mut ctx, &mut s, &mut rk).unwrap();
+
+            // implicit: factor the eliminated blocks, then apply
+            let mut ictx = SchurContext::new();
+            schur_factor_eliminated(&sym, &h, &mut ictx).unwrap();
+
+            for k in 0..nk {
+                let mut e = vec![0.0; nk];
+                e[k] = 1.0;
+                let mut want = vec![0.0; nk];
+                s.mul_symmetric_upper(&e, &mut want);
+                let mut got = vec![0.0; nk];
+                schur_apply(&sym, &h, &mut ictx, &e, &mut got);
+                for i in 0..nk {
+                    assert!(
+                        (got[i] - want[i]).abs() < 1e-9,
+                        "elim {:?}, column {}, row {}: implicit {} vs explicit {}",
+                        elim, k, i, got[i], want[i]
+                    );
+                }
+            }
+        }
+    }
+
+    /// The factors the implicit path computes are the ones the reduction
+    /// computes -- so a reduction can hand them over, and vice versa.
+    #[test]
+    fn standalone_factoring_matches_the_reduction() {
+        let (h, rhs) = fixture();
+        let sym = schur_symbolic(h.symbolic(), &[1, 4]).unwrap();
+        let mut s = sym.alloc_s::<f64>();
+        let mut rk = vec![0.0; s.symbolic().nrows()];
+        let mut a = SchurContext::new();
+        schur_reduce(&sym, &h, &rhs, &mut a, &mut s, &mut rk).unwrap();
+        let mut b = SchurContext::new();
+        schur_factor_eliminated(&sym, &h, &mut b).unwrap();
+        assert_eq!(a.efactor_at, b.efactor_at);
+        for i in 0..a.efactors.len() {
+            assert!((a.efactors[i] - b.efactors[i]).abs() < 1e-12, "factor {}", i);
         }
     }
 
