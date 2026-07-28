@@ -97,6 +97,26 @@ instead of factoring the same tiles again (`schur.rs`). That removes 47423
 redundant 3x3 Choleskys per solve at Ladybug-372. An implicit product needs
 those same factors per matvec, so this is the shared groundwork.
 
+**DONE and measured.** `SchurSolve::IterativeImplicit`, benchmark route
+`schur-cg-implicit`. On Ladybug-372 it reaches the explicit route's cost
+bit-identically (225347.2179) at the same 9(16) iterations -- the operator is
+exact through a whole solve -- and loses on time as predicted:
+
+| Ladybug-372, f64 | full-iter | total ms |
+|------------------|----------:|---------:|
+| schur (factorize) | 206.28 | 3908.78 |
+| schur-cg (explicit) | 116.92 | 1735.84 |
+| schur-cg-implicit | 203.90 | 2956.07 |
+
+Worse than the estimate above, though: ~5.5 ms per implicit product against
+~1.5 ms explicit, so 3.7x rather than the projected 2.5x. Two candidates, both
+untested: `schur_apply` walks S's structure for the `B x` part and so visits
+fill tiles it then skips, and it calls `gemm_sub` once per observer per
+product where the explicit route pays that once per solve.
+
+Ladybug-1723 is the case it was built for (~6 products per solve against 372's
+~35) and is not yet measured.
+
 **Operator DONE**: `schur_factor_eliminated` factors the eliminated blocks
 without reducing, and `schur_apply` computes `B x - E C^-1 (E^T x)` over the
 flattened observer arrays the symbolic already carries. A test checks it

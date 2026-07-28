@@ -3974,6 +3974,28 @@ pub enum SchurSolve {
     /// which is a question of how much fill it takes -- on the bundle
     /// benchmark that share runs from 12% at 49 cameras to 96% at 1723.
     Iterative(arael_faer::cg::CgOptions),
+    /// The same conjugate gradients, on a reduced system that is never built:
+    /// each product applies `B x - E C^-1 (E^T x)` by walking the Hessian.
+    ///
+    /// Trades one reduction for one product per CG iteration, so it pays only
+    /// where a solve takes few products -- which is a property of the problem,
+    /// not its size. Nothing picks between this and [`Self::Iterative`]; the
+    /// caller does.
+    IterativeImplicit(arael_faer::cg::CgOptions),
+}
+
+impl SchurSolve {
+    /// The CG settings, on either iterative route.
+    fn cg(self) -> Option<arael_faer::cg::CgOptions> {
+        match self {
+            SchurSolve::Factorize => None,
+            SchurSolve::Iterative(c) | SchurSolve::IterativeImplicit(c) => Some(c),
+        }
+    }
+    /// Whether the reduced system is never formed.
+    fn implicit(self) -> bool {
+        matches!(self, SchurSolve::IterativeImplicit(_))
+    }
 }
 
 impl Default for SchurSolve {
@@ -4028,6 +4050,13 @@ impl SparseFaerOptions {
     /// solve, and the solve fails rather than silently taking another route.
     pub fn with_iterative_schur(mut self, cg: arael_faer::cg::CgOptions) -> Self {
         self.schur_solve = SchurSolve::Iterative(cg);
+        self
+    }
+
+    /// As [`Self::with_iterative_schur`], but never forming the reduced
+    /// system ([`SchurSolve::IterativeImplicit`]).
+    pub fn with_implicit_schur(mut self, cg: arael_faer::cg::CgOptions) -> Self {
+        self.schur_solve = SchurSolve::IterativeImplicit(cg);
         self
     }
 
@@ -4397,6 +4426,10 @@ pub struct SparseFaer<T = f64> {
     schur_solve: SchurSolve,
     cg_work: arael_faer::cg::CgWorkspace<T>,
     cg_iters: usize,
+    // Implicit route only: S's diagonal blocks and their spans, rebuilt per
+    // damped solve because S changes with lambda.
+    cg_diag: Vec<T>,
+    cg_spans: Vec<(usize, usize)>,
 }
 
 /// Alias of [`SparseFaer<f32>`].
@@ -4445,6 +4478,8 @@ impl<T> SparseFaer<T> {
             schur_solve: SchurSolve::default(),
             cg_work: arael_faer::cg::CgWorkspace::default(),
             cg_iters: 0,
+            cg_diag: Vec::new(),
+            cg_spans: Vec::new(),
         }
     }
 
@@ -4550,6 +4585,13 @@ impl<T> SparseFaer<T> {
         self.schur_solve = SchurSolve::Iterative(cg);
         self
     }
+
+    /// As [`Self::with_iterative_schur`], but never forming the reduced
+    /// system ([`SchurSolve::IterativeImplicit`]).
+    pub fn with_implicit_schur(mut self, cg: arael_faer::cg::CgOptions) -> Self {
+        self.schur_solve = SchurSolve::IterativeImplicit(cg);
+        self
+    }
 }
 
 impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
@@ -4596,7 +4638,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
     ) -> Result<T, SolveError> {
         // This route factorizes the whole system, so there is no reduced one
         // for conjugate gradients to run on.
-        if matches!(self.schur_solve, SchurSolve::Iterative(_)) {
+        if self.schur_solve.cg().is_some() {
             return Err(SolveError::IterativeSchurWithoutReduction);
         }
         // No block storage on this route, and nothing left over from a
@@ -4710,7 +4752,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
         vb: bool,
     ) -> Result<T, SolveError> {
         // Same as setup_full: banding the whole system is not a reduction.
-        if matches!(self.schur_solve, SchurSolve::Iterative(_)) {
+        if self.schur_solve.cg().is_some() {
             return Err(SolveError::IterativeSchurWithoutReduction);
         }
         let n = *partition.last().unwrap();
@@ -5208,7 +5250,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         // not going to build.
         // Nothing is factorized on the iterative route, so there is no fill to
         // reduce and the ordering is not worth computing.
-        let iterative = matches!(self.schur_solve, SchurSolve::Iterative(_));
+        let iterative = self.schur_solve.cg().is_some();
         let nd = (!iterative && matches!(self.ordering, FaerOrdering::NestedDissection))
             .then(|| {
                 arael_faer::nd::NestedDissection::of_blocks(
@@ -5485,7 +5527,10 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             &mut positions,
         );
 
-        let s = schur.alloc_s::<T>();
+        // The implicit route never forms S, so it is not allocated either --
+        // that storage is the memory the route exists to avoid.
+        let implicit = self.schur_solve.implicit();
+        let s = (!implicit).then(|| schur.alloc_s::<T>());
         if iterative {
             // Conjugate gradients reads S in block form and never factorizes
             // it, so everything the factorizing routes set up here -- the
@@ -5590,7 +5635,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         }
         self.rhs_kept.resize(nk, T::zero());
         self.x_kept.resize(nk, T::zero());
-        self.s = Some(s);
+        self.s = s;
         self.schur = Some(schur);
 
         // First numeric fill. Everything above it in this call was analysis.
@@ -5676,8 +5721,54 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             return true;
         }
 
-        // Reduce: S and the reduced rhs from the damped H.
         let nk = self.rhs_kept.len();
+
+        // Implicit route: no reduction at all. Only the reduced rhs and S's
+        // diagonal blocks are built; the operator itself is applied per CG
+        // product, straight off the damped H.
+        if let SchurSolve::IterativeImplicit(cg) = self.schur_solve {
+            // Borrows split out so the product closure can hold the context
+            // mutably while cg::solve holds its own scratch.
+            let schur = self.schur.as_ref().unwrap();
+            let ctx = &mut self.ctx;
+            let rhs_kept = &mut self.rhs_kept;
+            let x_kept = &mut self.x_kept;
+            let work = &mut self.cg_work;
+            let diag = &mut self.cg_diag;
+            let spans = &mut self.cg_spans;
+
+            if arael_faer::schur::schur_prepare_implicit(
+                schur, h, grad, ctx, rhs_kept, diag, spans,
+            )
+            .is_err()
+            {
+                return false;
+            }
+            let precond =
+                match arael_faer::cg::BlockJacobi::from_diagonal_blocks(spans, diag) {
+                    Ok(p) => p,
+                    Err(_) => return false,
+                };
+            let stats = arael_faer::cg::solve(
+                |u, v| arael_faer::schur::schur_apply(schur, h, ctx, u, v),
+                &precond,
+                rhs_kept,
+                x_kept,
+                &cg,
+                work,
+            );
+            self.cg_iters += stats.iters;
+            if let Some(plan) = self.plan.as_mut() {
+                plan.cg_iterations = Some(self.cg_iters);
+            }
+            let schur = self.schur.as_ref().unwrap();
+            return arael_faer::schur::schur_backsub(
+                schur, h, grad, &self.x_kept, &mut self.ctx, delta,
+            )
+            .is_ok();
+        }
+
+        // Reduce: S and the reduced rhs from the damped H.
         {
             let schur = self.schur.as_ref().unwrap();
             let s = self.s.as_mut().unwrap();

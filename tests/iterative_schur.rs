@@ -219,6 +219,53 @@ fn cg_iterations_are_reported() {
     assert_eq!(plan.cg_iterations, None, "factorizing route reported CG work");
 }
 
+/// The implicit route solves the same system without building it, so it must
+/// land where both the factorizing and the explicit-CG routes land.
+#[test]
+fn implicit_matches_the_other_routes() {
+    let cfg = LmConfig { max_iters: 50, ..Default::default() };
+
+    let mut wf = build(0.05);
+    let rf = lm_solve(
+        &x0_of(&mut wf),
+        &mut SparseFaer::new().with_policy(SchurPolicy::Force),
+        &mut wf,
+        &cfg,
+    )
+    .unwrap();
+    wf.deserialize(&rf.x);
+
+    let mut wi = build(0.05);
+    let ri = lm_solve(
+        &x0_of(&mut wi),
+        &mut SparseFaer::new()
+            .with_policy(SchurPolicy::Force)
+            .with_implicit_schur(cg(1e-10)),
+        &mut wi,
+        &cfg,
+    )
+    .unwrap();
+    wi.deserialize(&ri.x);
+
+    assert!(ri.end_cost < 1e-12, "implicit end_cost {}", ri.end_cost);
+    for j in 0..N_LANDMARKS {
+        let (a, b) = (&wf.landmarks[j], &wi.landmarks[j]);
+        assert!((a.x.value - b.x.value).abs() < 1e-6, "landmark {} x", j);
+        assert!((a.y.value - b.y.value).abs() < 1e-6, "landmark {} y", j);
+    }
+    for i in 0..N_POSES {
+        let (a, b) = (&wf.poses[i], &wi.poses[i]);
+        assert!((a.x.value - b.x.value).abs() < 1e-6, "pose {} x", i);
+        assert!((a.y.value - b.y.value).abs() < 1e-6, "pose {} y", i);
+    }
+
+    let Some(SolverReport::Schur(plan)) = ri.solver else {
+        panic!("no Schur plan");
+    };
+    assert!(plan.cg_iterations.unwrap() > 0, "no CG work recorded");
+    assert_eq!(plan.ordering, None, "implicit route ordered the reduced system");
+}
+
 /// CG never factorizes the reduced system, so nothing orders it either. A
 /// reported ordering would mean the symbolic analysis -- and the factor buffers
 /// sized from it -- were built and thrown away.

@@ -99,6 +99,8 @@ fn routes() -> Vec<(Route, bool)> {
         (Route::Schur, true),
         (Route::SchurCg, false),
         (Route::SchurCg, true),
+        (Route::SchurCgImplicit, false),
+        (Route::SchurCgImplicit, true),
     ];
     #[cfg(feature = "cholmod-gpl")]
     r.push((Route::CholmodGpl, false));

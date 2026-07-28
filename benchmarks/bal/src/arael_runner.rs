@@ -139,6 +139,10 @@ pub enum Route {
     /// BAL_CG_MAXITER the iteration cap, BAL_CG_RESTART the true-residual
     /// recompute interval.
     SchurCg,
+    /// The same conjugate gradients on a reduced system that is never built:
+    /// each product walks the Hessian instead. Trades one reduction for one
+    /// product per CG iteration, so it pays where a solve takes few products.
+    SchurCgImplicit,
     /// CHOLMOD's supernodal factorization of the Schur-reduced system (GPL
     /// module; see the cholmod-gpl feature warning in the arael Cargo.toml).
     #[cfg(feature = "cholmod-gpl")]
@@ -152,6 +156,7 @@ impl Route {
             Route::Sparse => "sparse",
             Route::Schur => "schur",
             Route::SchurCg => "schur-cg",
+            Route::SchurCgImplicit => "schur-cg-implicit",
             #[cfg(feature = "cholmod-gpl")]
             Route::CholmodGpl => "cholmod-gpl",
         };
@@ -260,6 +265,28 @@ fn solve64_schur_cg(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmCon
     r
 }
 
+fn solve64_schur_cg_implicit(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmConfig<f64>) -> Solved<f64> {
+    let mut solver = arael::simple_lm::SparseFaer::new()
+        .with_policy(arael::simple_lm::SchurPolicy::Force)
+        .with_ordering(schur_ordering())
+        .with_implicit_schur(cg_options());
+    let r = arael::simple_lm::lm_solve(params, &mut solver, s, cfg);
+    if std::env::var("BAL_SCHUR_PLAN").is_ok() {
+        if let Some(p) = solver.plan() {
+            eprintln!("schur plan: {:?}", p);
+        }
+    }
+    r
+}
+
+fn solve32_schur_cg_implicit(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmConfig<f32>) -> Solved<f32> {
+    let mut solver = arael::simple_lm::SparseFaerF32::new()
+        .with_policy(arael::simple_lm::SchurPolicy::Force)
+        .with_ordering(schur_ordering())
+        .with_implicit_schur(cg_options());
+    arael::simple_lm::lm_solve(params, &mut solver, s, cfg)
+}
+
 fn solve32_schur_cg(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmConfig<f32>) -> Solved<f32> {
     let ordering = schur_ordering();
     let mut solver = arael::simple_lm::SparseFaerF32::new()
@@ -337,6 +364,7 @@ impl bench_harness::arael::Model for Scene {
             Route::Sparse => solve64(params, m, cfg),
             Route::Schur => solve64_schur(params, m, cfg),
             Route::SchurCg => solve64_schur_cg(params, m, cfg),
+            Route::SchurCgImplicit => solve64_schur_cg_implicit(params, m, cfg),
             #[cfg(feature = "cholmod-gpl")]
             Route::CholmodGpl =>
                 arael::simple_lm::solve_sparse_cholmod_supernodal(params, m, cfg),
@@ -464,6 +492,7 @@ impl bench_harness::arael::Model for SceneF {
             Route::Sparse => solve32(params, m, cfg),
             Route::Schur => solve32_schur(params, m, cfg),
             Route::SchurCg => solve32_schur_cg(params, m, cfg),
+            Route::SchurCgImplicit => solve32_schur_cg_implicit(params, m, cfg),
             // CHOLMOD's supernodal module is double-precision only.
             #[cfg(feature = "cholmod-gpl")]
             Route::CholmodGpl => unreachable!("cholmod-gpl is an f64-only row"),
