@@ -5206,7 +5206,10 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         // it. Computed once: the viability gate and the factorization must both
         // weigh the SAME ordering, or the gate is deciding about a system it is
         // not going to build.
-        let nd = matches!(self.ordering, FaerOrdering::NestedDissection)
+        // Nothing is factorized on the iterative route, so there is no fill to
+        // reduce and the ordering is not worth computing.
+        let iterative = matches!(self.schur_solve, SchurSolve::Iterative(_));
+        let nd = (!iterative && matches!(self.ordering, FaerOrdering::NestedDissection))
             .then(|| {
                 arael_faer::nd::NestedDissection::of_blocks(
                     &schur.s,
@@ -5451,9 +5454,13 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             Some(_) => ReducedOrdering::Nd,
             None => ordering_for(schur.s.val_count(), nk, band),
         };
-        self.narrow_band_active = self.narrow_band_enabled && matches!(ord, ReducedOrdering::NaturalBanded);
+        // Conjugate gradients multiplies by S; it neither orders nor factors
+        // it, so neither the ordering nor the band route applies.
+        self.narrow_band_active = !iterative
+            && self.narrow_band_enabled
+            && matches!(ord, ReducedOrdering::NaturalBanded);
         if let Some(plan) = self.plan.as_mut() {
-            plan.ordering = Some(ord);
+            plan.ordering = (!iterative).then_some(ord);
             plan.narrow_band = self.narrow_band_active;
         }
         // The caller asked for the narrow-band route and the system is banded,
@@ -5479,7 +5486,33 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         );
 
         let s = schur.alloc_s::<T>();
-        if self.narrow_band_active {
+        if iterative {
+            // Conjugate gradients reads S in block form and never factorizes
+            // it, so everything the factorizing routes set up here -- the
+            // scalar CSC pattern and values, the symbolic Cholesky, the factor
+            // and its scratch -- is not built. Measured at Ladybug-372: peak
+            // 308.3 -> 234.6 MB, and setup 186.9 -> 144.9 ms.
+            //
+            // Dropped rather than left alone: a solver reused across problems
+            // would otherwise hold the previous one's factor buffers.
+            self.narrow_band_sym = None;
+            self.llt_symbolic = None;
+            self.s_col_ptr = Vec::new();
+            self.s_row_idx = Vec::new();
+            self.s_vals = Vec::new();
+            self.l_vals = Vec::new();
+            self.factor_mem = Vec::new();
+            self.solve_mem = Vec::new();
+            if vb {
+                info!(
+                    "schur: reduced system {} params ({:.0}% dense), solving it with \
+                     conjugate gradients -- no ordering, no symbolic, no factor",
+                    nk,
+                    100.0 * schur.s.scalar_upper_nnz() as f64
+                        / (nk as f64 * (nk as f64 + 1.0) / 2.0),
+                );
+            }
+        } else if self.narrow_band_active {
             // Narrow-band Cholesky: factor S directly in block form -- no
             // scalar CSC, no faer symbolic analysis, fill confined to the band.
             let bsym = arael_faer::band::BandSymbolic::new(&schur.s);

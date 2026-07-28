@@ -219,6 +219,46 @@ fn cg_iterations_are_reported() {
     assert_eq!(plan.cg_iterations, None, "factorizing route reported CG work");
 }
 
+/// CG never factorizes the reduced system, so nothing orders it either. A
+/// reported ordering would mean the symbolic analysis -- and the factor buffers
+/// sized from it -- were built and thrown away.
+#[test]
+fn iterative_orders_nothing() {
+    let cfg = LmConfig { max_iters: 50, ..Default::default() };
+
+    let mut wi = build(0.05);
+    let ri = lm_solve(
+        &x0_of(&mut wi),
+        &mut SparseFaer::new()
+            .with_policy(SchurPolicy::Force)
+            .with_iterative_schur(cg(1e-10)),
+        &mut wi,
+        &cfg,
+    )
+    .unwrap();
+    let Some(SolverReport::Schur(plan)) = ri.solver else {
+        panic!("no Schur plan reported");
+    };
+    assert!(plan.reduced);
+    assert_eq!(plan.ordering, None, "iterative route ordered the reduced system");
+    assert!(!plan.narrow_band, "iterative route took the band factorization");
+
+    // The factorizing route does order it -- so the assertion above is about
+    // the route, not about the plan never carrying an ordering.
+    let mut wf = build(0.05);
+    let rf = lm_solve(
+        &x0_of(&mut wf),
+        &mut SparseFaer::new().with_policy(SchurPolicy::Force),
+        &mut wf,
+        &cfg,
+    )
+    .unwrap();
+    let Some(SolverReport::Schur(plan)) = rf.solver else {
+        panic!("no Schur plan reported");
+    };
+    assert!(plan.ordering.is_some(), "factorizing route reported no ordering");
+}
+
 /// No reduction, nothing to run CG on. Factorizing the whole system instead
 /// would answer a different question without saying so, so it is an error.
 #[test]
