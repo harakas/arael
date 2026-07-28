@@ -5526,6 +5526,14 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             &mut |i, j| resolver.resolve(i as usize, j as usize),
             &mut positions,
         );
+        if vb {
+            info!(
+                "assembly: {} scatter positions ({:.1} MB), against {} Hessian values",
+                positions.len(),
+                (positions.len() * std::mem::size_of::<usize>()) as f64 / 1e6,
+                hsym.val_count(),
+            );
+        }
 
         // The implicit route never forms S, so it is not allocated either --
         // that storage is the memory the route exists to avoid.
