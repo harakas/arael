@@ -723,8 +723,8 @@ pub fn order_graph(g: &Graph, p: NdParams) -> Vec<usize> {
 /// `SymmetricOrdering::Custom(nd.perm())` -- no change to faer is needed, the
 /// custom ordering is part of its public API.
 pub struct NestedDissection {
-    fwd: Vec<usize>,
-    inv: Vec<usize>,
+    fwd: Vec<crate::SparseIndex>,
+    inv: Vec<crate::SparseIndex>,
 }
 
 impl NestedDissection {
@@ -736,24 +736,24 @@ impl NestedDissection {
         let block_order = order_graph(&g, p);
 
         let n = sym.ncols();
-        let mut fwd = Vec::with_capacity(n);
+        let mut fwd: Vec<crate::SparseIndex> = Vec::with_capacity(n);
         for &b in &block_order {
-            fwd.extend(sym.col_span(b));
+            fwd.extend(sym.col_span(b).map(|i| i as crate::SparseIndex));
         }
-        let mut inv = vec![0usize; n];
+        let mut inv = vec![0 as crate::SparseIndex; n];
         for (new, &old) in fwd.iter().enumerate() {
-            inv[old] = new;
+            inv[old as usize] = new as crate::SparseIndex;
         }
         NestedDissection { fwd, inv }
     }
 
     /// The permutation, as faer wants it.
-    pub fn perm(&self) -> PermRef<'_, usize> {
+    pub fn perm(&self) -> PermRef<'_, crate::SparseIndex> {
         PermRef::new_checked(&self.fwd, &self.inv, self.fwd.len())
     }
 
     /// `fwd[k]` is the scalar index eliminated k-th.
-    pub fn forward(&self) -> &[usize] {
+    pub fn forward(&self) -> &[crate::SparseIndex] {
         &self.fwd
     }
 }
@@ -939,6 +939,7 @@ mod tests {
 
         let mut seen = vec![false; 9];
         for &i in fwd {
+            let i = i as usize;
             assert!(!seen[i], "scalar {} appears twice", i);
             seen[i] = true;
         }

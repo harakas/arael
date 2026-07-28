@@ -19,6 +19,13 @@
   them. It survives for `TripletBlock` and COO-built patterns, which have no
   static shape. Every indexed backend benefits. At Ladybug-372 this is 47 MB
   off the peak of each route with no change in assembly time.
+- **The sparse structures are indexed 32 bits wide.** Block rows, column
+  pointers, permutations and the offsets the Schur analysis keeps were `usize`
+  and are now `arael_faer::SparseIndex`, an alias for `u32`. faer's sparse
+  Cholesky is generic over its index type, so the reduced system is analysed
+  and factorized at that width too. Worth 14-16% of peak memory on a pose
+  graph and 9-10% on bundle adjustment: at 1000 SLAM poses 394 -> 332 MB, at
+  Ladybug-1723-clean 557 -> 501 MB iterative and 1240 -> 1110 MB factorizing.
 - **Value-buffer offsets are `ValueIndex`, 32 bits wide.** Every map that
   addresses a matrix's values -- the assembly scatter map, `CscMatrix::diag_pos`,
   the block Hessian's damping map, the CG preconditioner's factor offsets, the

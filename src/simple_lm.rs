@@ -39,7 +39,7 @@
 //! ```
 
 use crate::utils::Float;
-use arael_faer::{value_index, ValueIndex};
+use arael_faer::{value_index, SparseIndex, ValueIndex};
 use std::fmt;
 use std::time::Duration;
 #[cfg(target_arch = "wasm32")]
@@ -3746,6 +3746,11 @@ impl KeptCscPattern {
     }
 }
 
+/// A scalar block partition in the index type the sparse structures use.
+fn partition_idx(partition: &[usize]) -> std::vec::Vec<SparseIndex> {
+    partition.iter().map(|&p| p as SparseIndex).collect()
+}
+
 /// Fill-reducing ordering, but only where there is fill to reduce.
 /// Marginalizing shared landmarks makes the reduced system dense (69% of
 /// the upper triangle at slam-300), and on such a matrix AMD finds nothing
@@ -3799,7 +3804,7 @@ const NARROW_BAND_WIDE_KD: usize = 128;
 /// sum-of-squared-column-counts, the unit the Schur gate's route comparison
 /// is priced in. For a supernodal factor, column `j` of a supernode of
 /// width `w` with `p` sub-diagonal rows holds `(w - j) + p` entries.
-fn symbolic_factor_flops(sym: &faer::sparse::linalg::cholesky::SymbolicCholesky<usize>) -> f64 {
+fn symbolic_factor_flops(sym: &faer::sparse::linalg::cholesky::SymbolicCholesky<SparseIndex>) -> f64 {
     use faer::sparse::linalg::cholesky::SymbolicCholeskyRaw;
     match sym.raw() {
         SymbolicCholeskyRaw::Simplicial(s) => {
@@ -3829,7 +3834,7 @@ fn symbolic_factor_flops(sym: &faer::sparse::linalg::cholesky::SymbolicCholesky<
     }
 }
 
-fn block_half_bandwidth(hsym: &arael_faer::bsc::SymbolicSparseBlockColMat<usize>) -> usize {
+fn block_half_bandwidth(hsym: &arael_faer::bsc::SymbolicSparseBlockColMat<SparseIndex>) -> usize {
     let mut b = 0usize;
     for j in 0..hsym.nblk_cols() {
         let col_end = hsym.col_span(j).end;
@@ -3858,7 +3863,7 @@ fn ordering_for(nnz: usize, n: usize, band: usize) -> ReducedOrdering {
 }
 
 impl ReducedOrdering {
-    fn faer<'a>(self) -> faer::sparse::linalg::cholesky::SymmetricOrdering<'a, usize> {
+    fn faer<'a>(self) -> faer::sparse::linalg::cholesky::SymmetricOrdering<'a, SparseIndex> {
         use faer::sparse::linalg::cholesky::SymmetricOrdering;
         match self {
             ReducedOrdering::Amd => SymmetricOrdering::Amd,
@@ -3911,7 +3916,7 @@ pub struct FaerMatrix<T> {
     /// Block form (arael-faer block CSC) over the model's entity
     /// partition. This is what the reduction works on, and it is only
     /// built when the solver is going to reduce.
-    h: Option<arael_faer::bsc::SparseBlockColMat<usize, T>>,
+    h: Option<arael_faer::bsc::SparseBlockColMat<SparseIndex, T>>,
     /// Scalar CSC -- what the whole system is assembled into and
     /// factorized from when it is not reduced.
     csc: Option<CscMatrix<T>>,
@@ -4512,23 +4517,23 @@ pub struct SparseFaer<T = f64> {
     needs_rebind: bool,
     tiled_pattern: bool,
     bdiag_pos: Vec<ValueIndex>,
-    schur: Option<arael_faer::schur::SchurSymbolic<usize>>,
-    s: Option<arael_faer::bsc::SparseBlockColMat<usize, T>>,
+    schur: Option<arael_faer::schur::SchurSymbolic<SparseIndex>>,
+    s: Option<arael_faer::bsc::SparseBlockColMat<SparseIndex, T>>,
     ctx: arael_faer::schur::SchurContext<T>,
     rhs_kept: Vec<T>,
     x_kept: Vec<T>,
     // S's scalar CSC: the pattern is cached once, only the values are
     // regathered per damped solve (csc_pattern / csc_vals_into).
-    s_col_ptr: Vec<usize>,
-    s_row_idx: Vec<usize>,
+    s_col_ptr: Vec<SparseIndex>,
+    s_row_idx: Vec<SparseIndex>,
     s_vals: Vec<T>,
     // The "marginalized parameters first" permutation, when that is the
     // ordering (FaerOrdering::MarginalizeFirst, or Auto with a named set).
-    perm_fwd: Vec<usize>,
-    perm_inv: Vec<usize>,
+    perm_fwd: Vec<SparseIndex>,
+    perm_inv: Vec<SparseIndex>,
     // faer LLT state on the system actually factorized -- the reduced one,
     // or the whole one. Sized once.
-    llt_symbolic: Option<faer::sparse::linalg::cholesky::SymbolicCholesky<usize>>,
+    llt_symbolic: Option<faer::sparse::linalg::cholesky::SymbolicCholesky<SparseIndex>>,
     l_vals: Vec<T>,
     factor_mem: Vec<std::mem::MaybeUninit<u8>>,
     solve_mem: Vec<std::mem::MaybeUninit<u8>>,
@@ -4720,6 +4725,7 @@ impl<T> SparseFaer<T> {
 }
 
 impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
+
     /// The marginalize set somebody NAMED: the caller's, or failing that the
     /// model's own `marginalize(..)`. Empty means nobody named one and the
     /// solver is free to detect its own -- a distinction that matters,
@@ -4756,8 +4762,8 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
         n: usize,
         structure: Option<(&[usize], &[(u32, u32)])>,
         prebuilt: Option<(
-            (Vec<usize>, Vec<usize>),
-            faer::sparse::linalg::cholesky::SymbolicCholesky<usize>,
+            (Vec<SparseIndex>, Vec<SparseIndex>),
+            faer::sparse::linalg::cholesky::SymbolicCholesky<SparseIndex>,
         )>,
         vb: bool,
     ) -> Result<T, SolveError> {
@@ -4807,8 +4813,8 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
             .then(|| {
                 structure.map(|(partition, cells)| {
                     let (hsym, _) = arael_faer::bsc::SymbolicSparseBlockColMat::from_scalar_coords(
-                        partition.to_vec(),
-                        partition.to_vec(),
+                        partition_idx(partition),
+                        partition_idx(partition),
                         cells.len(),
                         |k| (cells[k].0 as usize, cells[k].1 as usize),
                     );
@@ -4820,7 +4826,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
             })
             .flatten();
 
-        // faer wants usize row indices; the analysis may already have them.
+        // The analysis may already have built the pattern.
         let reused = prebuilt.is_some();
         let llt = match prebuilt {
             Some(((col_ptr, row_idx), llt)) => {
@@ -4830,9 +4836,9 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
             }
             None => {
                 self.s_col_ptr.clear();
-                self.s_col_ptr.extend_from_slice(&csc.col_ptr);
+                self.s_col_ptr.extend(csc.col_ptr.iter().map(|&p| p as SparseIndex));
                 self.s_row_idx.clear();
-                self.s_row_idx.extend(csc.row_idx.iter().map(|&r| r as usize));
+                self.s_row_idx.extend(csc.row_idx.iter().map(|&r| r as SparseIndex));
                 self.full_symbolic(n, vb, nd.as_ref())?
             }
         };
@@ -4876,7 +4882,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
         grad: &mut [T],
         matrix: &mut FaerMatrix<T>,
         partition: &[usize],
-        hsym: arael_faer::bsc::SymbolicSparseBlockColMat<usize>,
+        hsym: arael_faer::bsc::SymbolicSparseBlockColMat<SparseIndex>,
         band: usize,
         vb: bool,
     ) -> Result<T, SolveError> {
@@ -4974,7 +4980,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
         n: usize,
         vb: bool,
         nd: Option<&arael_faer::nd::NestedDissection>,
-    ) -> Result<faer::sparse::linalg::cholesky::SymbolicCholesky<usize>, SolveError> {
+    ) -> Result<faer::sparse::linalg::cholesky::SymbolicCholesky<SparseIndex>, SolveError> {
         use faer::sparse::linalg::cholesky::*;
 
         // "Marginalized parameters first, everything else in natural order"
@@ -4995,19 +5001,19 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
                 for i in r.clone().filter(|&i| i < n) {
                     if !taken[i] {
                         taken[i] = true;
-                        self.perm_fwd.push(i);
+                        self.perm_fwd.push(i as SparseIndex);
                     }
                 }
             }
             for (i, &t) in taken.iter().enumerate() {
                 if !t {
-                    self.perm_fwd.push(i);
+                    self.perm_fwd.push(i as SparseIndex);
                 }
             }
             self.perm_inv.clear();
             self.perm_inv.resize(n, 0);
             for (new, &old) in self.perm_fwd.iter().enumerate() {
-                self.perm_inv[old] = new;
+                self.perm_inv[old as usize] = new as SparseIndex;
             }
         }
         let ordering = if let Some(nd) = nd {
@@ -5063,7 +5069,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
     /// (the reduced system's, or the whole system's when it is not reduced).
     fn size_llt_buffers(
         &mut self,
-        llt: &faer::sparse::linalg::cholesky::SymbolicCholesky<usize>,
+        llt: &faer::sparse::linalg::cholesky::SymbolicCholesky<SparseIndex>,
     ) {
         // Sized for self.par, NOT for Par::Seq: a rayon factorization asks for a
         // different amount of scratch, and sizing for the wrong one under-allocates.
@@ -5338,8 +5344,8 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             // block band Cholesky instead of faer's general sparse Cholesky.
             if self.narrow_band_enabled {
                 let (hsym, _) = arael_faer::bsc::SymbolicSparseBlockColMat::from_scalar_coords(
-                    partition.clone(),
-                    partition.clone(),
+                    partition_idx(&partition),
+                    partition_idx(&partition),
                     cells.len(),
                     |k| (cells[k].0 as usize, cells[k].1 as usize),
                 );
@@ -5370,8 +5376,8 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         // diagonal tiles (damping and extract_diagonal read and write
         // through those). Only the reducing route needs either.
         let (hsym, _) = arael_faer::bsc::SymbolicSparseBlockColMat::from_scalar_coords(
-            partition.clone(),
-            partition.clone(),
+            partition_idx(&partition),
+            partition_idx(&partition),
             cells.len(),
             |k| (cells[k].0 as usize, cells[k].1 as usize),
         );
@@ -5493,12 +5499,12 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         // The full system's symbolic factorization, computed by the gate and
         // reused when it declines -- at BAL scale this is seconds of work,
         // and the declined route needs exactly this object.
-        let mut declined_llt: Option<faer::sparse::linalg::cholesky::SymbolicCholesky<usize>> = None;
-        let mut declined_pat: Option<(Vec<usize>, Vec<usize>)> = None;
+        let mut declined_llt: Option<faer::sparse::linalg::cholesky::SymbolicCholesky<SparseIndex>> = None;
+        let mut declined_pat: Option<(Vec<SparseIndex>, Vec<SparseIndex>)> = None;
         // The reduced system's symbolic factorization, when the gate built one:
         // it is exactly what the reduction needs next, so it is kept rather
         // than recomputed.
-        let mut reduced_llt: Option<faer::sparse::linalg::cholesky::SymbolicCholesky<usize>> = None;
+        let mut reduced_llt: Option<faer::sparse::linalg::cholesky::SymbolicCholesky<SparseIndex>> = None;
         // Verbose accounting of the one-time work, phase by phase.
         let mut t_sym_reduced = 0.0;
         let mut t_amd_full = 0.0;
@@ -5515,7 +5521,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         {
             use faer::sparse::linalg::cholesky::*;
             let supernodal = self.supernodal;
-            let analyze = |col_ptr: &[usize], row_idx: &[usize], dim: usize, ordering| {
+            let analyze = |col_ptr: &[SparseIndex], row_idx: &[SparseIndex], dim: usize, ordering| {
                 let r = faer::sparse::SymbolicSparseColMatRef::new_checked(
                     dim, dim, col_ptr, None, row_idx,
                 );
@@ -5528,7 +5534,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             let t0 = vb.then(Instant::now);
             let s_ord = match &nd {
                 Some(nd) => SymmetricOrdering::Custom(nd.perm()),
-                None => ordering_for(s_pat.0.last().copied().unwrap_or(0), nk, band).faer(),
+                None => ordering_for(s_pat.0.last().copied().unwrap_or(0) as usize, nk, band).faer(),
             };
             let s_llt = analyze(&s_pat.0, &s_pat.1, nk, s_ord);
             t_sym_reduced = t0.map_or(0.0, |t| t.elapsed().as_secs_f64() * 1e3);
@@ -5828,6 +5834,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         self.positions = Some(positions);
         Ok(cost)
     }
+
 
     fn extract_diagonal(&self, matrix: &FaerMatrix<T>, diagonal: &mut [T]) {
         if let Some(csc) = matrix.csc.as_ref() {

@@ -253,6 +253,15 @@ impl<I: Index> SymbolicSparseBlockColMat<I> {
             let row_w = row_part[br + 1].zx() - row_part[br].zx();
             let col_w = col_part[bc + 1].zx() - col_part[bc].zx();
             val_total += row_w * col_w;
+            // `I::truncate` wraps silently, so the one count everything else
+            // is derived from is checked here: every offset the structure and
+            // the Schur analysis keep is bounded by it.
+            assert!(
+                val_total <= I::MAX.zx(),
+                "matrix holds {} values; the index type addresses at most {}",
+                val_total,
+                I::MAX.zx(),
+            );
             val_ptr.push(I::truncate(val_total));
         }
         while col < nblk_cols {

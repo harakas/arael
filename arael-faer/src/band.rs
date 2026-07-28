@@ -48,7 +48,7 @@ pub struct BandSymbolic {
     /// topmost stored block-row of `S`'s column `j` (the envelope top)
     top: Vec<usize>,
     /// factor pattern: column `j` holds the contiguous rows `top[j]..=j`
-    factor: SymbolicSparseBlockColMat<usize>,
+    factor: SymbolicSparseBlockColMat<crate::SparseIndex>,
     /// per factor tile, the start offset of the matching `S` tile in `S`'s
     /// value buffer, or [`NO_SRC`] if `S` has no tile there
     s_src: Vec<ValueIndex>,
@@ -60,7 +60,7 @@ impl BandSymbolic {
     /// Analyzes `s` (the symbolic structure of a symmetric block-CSC matrix
     /// stored as its upper block triangle, in natural order) and builds the
     /// envelope factor pattern.
-    pub fn new(s: &SymbolicSparseBlockColMat<usize>) -> Self {
+    pub fn new(s: &SymbolicSparseBlockColMat<crate::SparseIndex>) -> Self {
         let nb = s.nblk_cols();
         assert_eq!(nb, s.nblk_rows(), "band Cholesky needs a square matrix");
         let n = s.ncols();
@@ -118,12 +118,15 @@ impl BandSymbolic {
             blk_col_ptr.push(blk_row_idx.len());
         }
 
+        let idx = |v: &[usize]| -> Vec<crate::SparseIndex> {
+            v.iter().map(|&x| x as crate::SparseIndex).collect()
+        };
         let factor = SymbolicSparseBlockColMat::new_checked(
-            part.clone(),
-            part.clone(),
-            blk_col_ptr,
-            blk_row_idx,
-            val_ptr,
+            idx(&part),
+            idx(&part),
+            idx(&blk_col_ptr),
+            idx(&blk_row_idx),
+            idx(&val_ptr),
         );
 
         Self { n, part, top, factor, s_src, max_tile }
@@ -167,7 +170,7 @@ impl BandSymbolic {
 /// `sym` was built from. Reuses `sym` across damped solves.
 pub fn band_factorize<T: SchurReal>(
     sym: &BandSymbolic,
-    s: &SparseBlockColMat<usize, T>,
+    s: &SparseBlockColMat<crate::SparseIndex, T>,
     factor: &mut [T],
 ) -> Result<(), BandError> {
     assert_eq!(factor.len(), sym.factor_val_count());
@@ -377,7 +380,7 @@ mod tests {
         part: &[usize],
         cells: &[(usize, usize)],
         seed: u64,
-    ) -> (SparseBlockColMat<usize, f64>, Vec<f64>, Vec<f64>) {
+    ) -> (SparseBlockColMat<crate::SparseIndex, f64>, Vec<f64>, Vec<f64>) {
         let n = *part.last().unwrap();
         let nb = part.len() - 1;
         let mut all: Vec<(usize, usize)> = (0..nb).map(|b| (b, b)).collect();
@@ -424,13 +427,15 @@ mod tests {
                 }
             }
         }
+        let idx: Vec<crate::SparseIndex> =
+            part.iter().map(|&p| p as crate::SparseIndex).collect();
         let (sym, pos) = SymbolicSparseBlockColMat::from_scalar_coords(
-            part.to_vec(),
-            part.to_vec(),
+            idx.clone(),
+            idx,
             coords.len(),
             |k| coords[k],
         );
-        let mut s = SparseBlockColMat::<usize, f64>::zeroed(sym);
+        let mut s = SparseBlockColMat::<crate::SparseIndex, f64>::zeroed(sym);
         for (k, &(r, c)) in coords.iter().enumerate() {
             s.vals_mut()[pos[k] as usize] = full[r + c * n];
         }
@@ -453,7 +458,7 @@ mod tests {
         (num / den).sqrt()
     }
 
-    fn solve_f64(s: &SparseBlockColMat<usize, f64>, rhs: &[f64]) -> Vec<f64> {
+    fn solve_f64(s: &SparseBlockColMat<crate::SparseIndex, f64>, rhs: &[f64]) -> Vec<f64> {
         let sym = BandSymbolic::new(s.symbolic());
         let mut factor = vec![0.0f64; sym.factor_val_count()];
         band_factorize(&sym, s, &mut factor).unwrap();
@@ -540,7 +545,7 @@ mod tests {
             }
         }
         let (s64, full, rhs64) = build_banded(&part, &cells, 5);
-        let s32 = SparseBlockColMat::<usize, f32>::new(
+        let s32 = SparseBlockColMat::<crate::SparseIndex, f32>::new(
             s64.symbolic().clone(),
             s64.vals().iter().map(|&v| v as f32).collect(),
         );

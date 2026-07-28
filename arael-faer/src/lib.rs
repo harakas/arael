@@ -117,6 +117,20 @@
 
 pub use faer;
 
+/// The index type the sparse structures are instantiated with: block rows,
+/// column pointers, permutations, and the offsets the Schur analysis keeps.
+///
+/// These are the largest structures a solve holds after the values
+/// themselves -- the Schur symbolic alone runs to tens of megabytes on a
+/// bundle problem -- and every one of them is generic, so the width is a
+/// single choice. 32 bits addresses 4e9 of anything, which no problem that
+/// fits in memory reaches; widening the library is this alias and a rebuild.
+///
+/// faer's `Index` is implemented for `u32`, `u64` and `usize`, so its sparse
+/// Cholesky takes whichever this names (verified identical factor and
+/// solution in `tests/u32_cholesky.rs`).
+pub type SparseIndex = u32;
+
 /// An offset into a matrix's value buffer, as the position maps and tile
 /// origins store it.
 ///
