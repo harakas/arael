@@ -159,6 +159,18 @@ impl Route {
     }
 }
 
+/// Elimination ordering for the reduced camera system. Nested dissection by
+/// default: a 3D point makes a clique of the cameras that see it, and AMD
+/// drowns in cliques -- at Ladybug-1723 it factorizes S in 1508 ms against
+/// AMD's 4730. `amd` is the only value read; anything else is the default.
+pub fn schur_ordering() -> arael::simple_lm::FaerOrdering {
+    if std::env::var("BAL_ORDERING").as_deref() == Ok("amd") {
+        arael::simple_lm::FaerOrdering::Auto
+    } else {
+        arael::simple_lm::FaerOrdering::NestedDissection
+    }
+}
+
 // Damping floor (env ARAEL_LAMBDA_FLOOR, library default 1e-12). Under
 // the fixed schedule bundle adjustment needed a raised floor against
 // gauge-driven Cholesky failure spirals; the Nielsen driver's gain
@@ -198,15 +210,7 @@ fn solve64_schur(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmConfig
     } else {
         arael::simple_lm::SchurPolicy::Force
     };
-    // Nested dissection on the reduced camera system: a 3D point makes a
-    // clique of the cameras that see it, and AMD drowns in cliques. At
-    // Ladybug-1723 it factorizes S in 1508 ms against AMD's 4730.
-    // BAL_ORDERING=amd goes back to AMD for comparison.
-    let ordering = if std::env::var("BAL_ORDERING").as_deref() == Ok("amd") {
-        arael::simple_lm::FaerOrdering::Auto
-    } else {
-        arael::simple_lm::FaerOrdering::NestedDissection
-    };
+    let ordering = schur_ordering();
     let mut solver = arael::simple_lm::SparseFaer::new()
         .with_policy(policy)
         .with_ordering(ordering);
@@ -219,16 +223,20 @@ fn solve64_schur(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmConfig
     r
 }
 
-/// Inner-solve settings for the conjugate-gradient route. The defaults are
-/// arael's own; each is a separate knob because the trade between inner
-/// accuracy and outer steps is per problem.
-fn cg_options() -> arael::simple_lm::CgOptions {
+/// Inner-solve settings for the conjugate-gradient route. Each is a separate
+/// knob because the trade between inner accuracy and outer steps is per
+/// problem; only `tol` departs from arael's own default, see below.
+pub fn cg_options() -> arael::simple_lm::CgOptions {
     fn env<T: std::str::FromStr>(k: &str) -> Option<T> {
         std::env::var(k).ok().and_then(|v| v.parse().ok())
     }
     let d = arael::simple_lm::CgOptions::default();
+    // 1e-3, not the library's 1e-6: measured on Ladybug-372 and -1723 it halves
+    // the CG work for two or three extra outer steps, and reaches a lower cost
+    // on both. Intermediate values are worse than either end -- 1e-4 and 1e-5
+    // cost 3-5x the outer steps of 1e-3.
     arael::simple_lm::CgOptions {
-        tol: env("BAL_CG_TOL").unwrap_or(d.tol),
+        tol: env("BAL_CG_TOL").unwrap_or(1e-3),
         max_iters: env("BAL_CG_MAXITER").unwrap_or(d.max_iters),
         restart_every: env("BAL_CG_RESTART").unwrap_or(d.restart_every),
     }
@@ -238,11 +246,7 @@ fn solve64_schur_cg(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmCon
     // Force, not Auto: Iterative has nothing to solve without a reduction and
     // says so rather than falling back, and the benchmark wants the route it
     // asked for.
-    let ordering = if std::env::var("BAL_ORDERING").as_deref() == Ok("amd") {
-        arael::simple_lm::FaerOrdering::Auto
-    } else {
-        arael::simple_lm::FaerOrdering::NestedDissection
-    };
+    let ordering = schur_ordering();
     let mut solver = arael::simple_lm::SparseFaer::new()
         .with_policy(arael::simple_lm::SchurPolicy::Force)
         .with_ordering(ordering)
@@ -257,11 +261,7 @@ fn solve64_schur_cg(params: &[f64], s: &mut Scene, cfg: &arael::simple_lm::LmCon
 }
 
 fn solve32_schur_cg(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmConfig<f32>) -> Solved<f32> {
-    let ordering = if std::env::var("BAL_ORDERING").as_deref() == Ok("amd") {
-        arael::simple_lm::FaerOrdering::Auto
-    } else {
-        arael::simple_lm::FaerOrdering::NestedDissection
-    };
+    let ordering = schur_ordering();
     let mut solver = arael::simple_lm::SparseFaerF32::new()
         .with_policy(arael::simple_lm::SchurPolicy::Force)
         .with_ordering(ordering)
@@ -278,11 +278,7 @@ fn solve32(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmConfig<f32>
 }
 
 fn solve32_schur(params: &[f32], s: &mut SceneF, cfg: &arael::simple_lm::LmConfig<f32>) -> Solved<f32> {
-    let ordering = if std::env::var("BAL_ORDERING").as_deref() == Ok("amd") {
-        arael::simple_lm::FaerOrdering::Auto
-    } else {
-        arael::simple_lm::FaerOrdering::NestedDissection
-    };
+    let ordering = schur_ordering();
     let mut solver = arael::simple_lm::SparseFaerF32::new()
         .with_policy(arael::simple_lm::SchurPolicy::Force)
         .with_ordering(ordering);

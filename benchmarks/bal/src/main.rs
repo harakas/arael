@@ -122,6 +122,12 @@ fn print_header(rounds: usize, only: &Option<String>, systems: &Option<String>,
         .line("g2o rows", g2o_rows().iter().map(|r| r.label.as_str())
             .collect::<Vec<_>>().join(", ")
             + " [BAL_PCG_TOLS, BAL_PCG_ITERS]")
+        .line("arael schur-cg", {
+            let cg = arael_runner::cg_options();
+            format!("tol {:e} [BAL_CG_TOL], max iters {} [BAL_CG_MAXITER], \
+                     restart {} [BAL_CG_RESTART] (0 = off)",
+                cg.tol, cg.max_iters, cg.restart_every)
+        })
         .line("arael lambda0", match std::env::var("ARAEL_LAMBDA0") {
             Ok(v) => format!("{} -- ARAEL_LAMBDA0 overrides every dataset", v),
             Err(_) => format!("per dataset: {} [ARAEL_LAMBDA0]",
@@ -142,9 +148,13 @@ fn print_header(rounds: usize, only: &Option<String>, systems: &Option<String>,
             } else {
                 "fixed ladder"
             }))
-        .line("arael schur ordering", format!("{} [BAL_ORDERING: nd|amd]",
-            if std::env::var("BAL_ORDERING").as_deref() == Ok("amd") { "AMD" }
-            else { "nested dissection" }))
+        // FaerOrdering::Auto resolves to AMD on this problem, so its Debug name
+        // would say less than the ordering it picks.
+        .line("arael schur ordering", format!("{} [BAL_ORDERING=amd]",
+            match arael_runner::schur_ordering() {
+                arael::simple_lm::FaerOrdering::NestedDissection => "nested dissection",
+                _ => "AMD",
+            }))
         .line("arael termination", format!("abs {:e}, rel {:e}, patience {}, min_iters {}",
             cfg.abs_precision, cfg.rel_precision, cfg.patience, cfg.min_iters))
         .line("solver verbose", format!("{} [VERBOSE], per-solve timing {} [TIMING]",

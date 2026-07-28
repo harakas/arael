@@ -351,6 +351,8 @@ produced it.
 | `BAL_SYSTEMS` | comma-separated substrings; runs only the matching rows (a filtered run cannot validate across systems) |
 | `ARAEL_LAMBDA0`, `G2O_LAMBDA_INIT`, `CERES_RADIUS0` | initial damping, per system |
 | `BAL_LAMBDAS` | comma-separated damping values: sweep them instead of running the benchmark (below) |
+| `BAL_CG_TOL` | arael's schur-cg inner tolerance (default 1e-3, not the library's 1e-6) |
+| `BAL_CG_MAXITER`, `BAL_CG_RESTART` | its CG iteration cap, and how often to recompute the residual rather than update it; 0 for neither |
 | `BAL_PCG_ITERS` | comma-separated CG iteration caps for g2o's PCG row, one row each; `0` is uncapped |
 | `BAL_PCG_TOLS` | comma-separated inner-solve tolerances, same (crossed with the caps) |
 | `DRIVER=fixed` | arael's fixed damping ladder instead of the gain-ratio driver it defaults to here |
