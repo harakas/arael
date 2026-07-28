@@ -21,11 +21,12 @@
 //! hand-rolled routines below.
 
 use crate::bsc::{SparseBlockColMat, SymbolicSparseBlockColMat};
+use crate::{value_index, ValueIndex};
 use crate::schur::SchurReal;
 
 /// Marks a factor tile whose `S` source is a structural zero (an envelope
 /// position `S` does not store; it is filled in during factorization).
-const NO_SRC: usize = usize::MAX;
+const NO_SRC: ValueIndex = ValueIndex::MAX;
 
 /// Failure of a band factorization.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -50,7 +51,7 @@ pub struct BandSymbolic {
     factor: SymbolicSparseBlockColMat<usize>,
     /// per factor tile, the start offset of the matching `S` tile in `S`'s
     /// value buffer, or [`NO_SRC`] if `S` has no tile there
-    s_src: Vec<usize>,
+    s_src: Vec<ValueIndex>,
     /// largest `row_width * col_width` over all factor tiles (scratch size)
     max_tile: usize,
 }
@@ -102,7 +103,7 @@ impl BandSymbolic {
                         sb.next();
                     } else {
                         if br == i {
-                            src = s.val_range(b).start;
+                            src = value_index(s.val_range(b).start);
                             sb.next();
                         }
                         break;
@@ -191,6 +192,7 @@ pub fn band_factorize<T: SchurReal>(
             if src == NO_SRC {
                 buf.fill(T::ZERO);
             } else {
+                let src = src as usize;
                 buf.clone_from_slice(&s_vals[src..src + dst_len]);
             }
 
@@ -430,7 +432,7 @@ mod tests {
         );
         let mut s = SparseBlockColMat::<usize, f64>::zeroed(sym);
         for (k, &(r, c)) in coords.iter().enumerate() {
-            s.vals_mut()[pos[k]] = full[r + c * n];
+            s.vals_mut()[pos[k] as usize] = full[r + c * n];
         }
         let rhs: Vec<f64> = (0..n).map(|_| rng.next()).collect();
         (s, full, rhs)

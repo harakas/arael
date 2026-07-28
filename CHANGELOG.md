@@ -19,6 +19,15 @@
   them. It survives for `TripletBlock` and COO-built patterns, which have no
   static shape. Every indexed backend benefits. At Ladybug-372 this is 47 MB
   off the peak of each route with no change in assembly time.
+- **Value-buffer offsets are `ValueIndex`, 32 bits wide.** Every map that
+  addresses a matrix's values -- the assembly scatter map, `CscMatrix::diag_pos`,
+  the block Hessian's damping map, the CG preconditioner's factor offsets, the
+  band factor's source map -- was `usize` and is now `arael::ValueIndex`, an
+  alias for `u32`. 32 bits addresses 4e9 values (34 GB of `f64`); a problem
+  past that needs the alias widened in `arael-faer` and a rebuild, with no
+  other edit. `CooMatrix::to_csc_with_map`, `build_scatter_map` and
+  `scatter_into`, and `LmProblem::calc_grad_hessian_sparse_indexed` carry the
+  new type.
 - **`Model::accumulate_hessian_positions64` / `_32` are now
   `bind_hessian_positions64` / `_32`**, taking `&mut self` and a
   `HessianBinder` in place of a position callback. Same for

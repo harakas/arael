@@ -103,8 +103,8 @@ fn main() {
         );
         // Levenberg damping, as a real solve would apply before factorizing.
         for i in 0..n {
-            csc.vals[csc.diag_pos[i]] *= 1.0 + 1e-6;
-            csc.vals[csc.diag_pos[i]] += 1e-9;
+            csc.vals[csc.diag_pos[i] as usize] *= 1.0 + 1e-6;
+            csc.vals[csc.diag_pos[i] as usize] += 1e-9;
         }
 
         use std::io::Write;

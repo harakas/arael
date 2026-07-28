@@ -108,7 +108,7 @@ fn main() {
             |k| (cells[k].0 as usize, cells[k].1 as usize),
         );
         let mut resolver = PositionResolver::new(&hsym);
-        let mut positions: Vec<usize> = Vec::new();
+        let mut positions: Vec<arael::ValueIndex> = Vec::new();
         arael::model::Model::bind_hessian_positions64(
             &mut scene,
             &mut arael::model::HessianBinder::Tiled(&mut |i, j| {

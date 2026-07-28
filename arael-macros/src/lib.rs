@@ -2234,11 +2234,11 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                 let _ = &out;
                 #(#collect_cells32_stmts)*
             }
-            fn bind_hessian_positions64(&mut self, binder: &mut arael::model::HessianBinder, out: &mut std::vec::Vec<usize>) {
+            fn bind_hessian_positions64(&mut self, binder: &mut arael::model::HessianBinder, out: &mut std::vec::Vec<arael::ValueIndex>) {
                 let _ = (&binder, &out);
                 #(#positions64_stmts)*
             }
-            fn bind_hessian_positions32(&mut self, binder: &mut arael::model::HessianBinder, out: &mut std::vec::Vec<usize>) {
+            fn bind_hessian_positions32(&mut self, binder: &mut arael::model::HessianBinder, out: &mut std::vec::Vec<arael::ValueIndex>) {
                 let _ = (&binder, &out);
                 #(#positions32_stmts)*
             }
@@ -2271,10 +2271,10 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
             fn accumulate_hessian_sparse_direct64(&self, csc: &mut arael::simple_lm::CscMatrix<f64>) {
                 #(#accumulate_hessian_sparse_direct64_stmts)*
             }
-            fn accumulate_hessian_sparse_indexed32(&self, vals: &mut [f32], positions: &[usize], cursor: &mut usize) {
+            fn accumulate_hessian_sparse_indexed32(&self, vals: &mut [f32], positions: &[arael::ValueIndex], cursor: &mut usize) {
                 #(#accumulate_hessian_sparse_indexed32_stmts)*
             }
-            fn accumulate_hessian_sparse_indexed64(&self, vals: &mut [f64], positions: &[usize], cursor: &mut usize) {
+            fn accumulate_hessian_sparse_indexed64(&self, vals: &mut [f64], positions: &[arael::ValueIndex], cursor: &mut usize) {
                 #(#accumulate_hessian_sparse_indexed64_stmts)*
             }
         }
@@ -3843,7 +3843,7 @@ fn generate_fit_impl(
                 _params: &[#prec_type],
                 _grad: &mut [#prec_type],
                 _vals: &mut [#prec_type],
-                _positions: &[usize],
+                _positions: &[arael::ValueIndex],
             ) -> #prec_type {
                 unimplemented!("fit models do not support sparse indexed assembly")
             }

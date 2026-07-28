@@ -15,6 +15,7 @@
 //! O(nnz) matrix-vector product, so widening them is close to free.
 
 use crate::bsc::SparseBlockColMat;
+use crate::{value_index, ValueIndex};
 use crate::schur::{llt_in_place, llt_solve_panel, SchurReal};
 use faer::Index;
 
@@ -70,7 +71,7 @@ pub struct BlockJacobi<T> {
     /// Lower Cholesky factors, column-major, concatenated block by block.
     factors: Vec<T>,
     /// Where each block's factor starts in `factors`.
-    at: Vec<usize>,
+    at: Vec<ValueIndex>,
     /// Scalar offset and width of each block.
     span: Vec<(usize, usize)>,
 }
@@ -92,7 +93,7 @@ impl<T: SchurReal> BlockJacobi<T> {
         for j in 0..nblk {
             let cols = sym.col_span(j);
             let w = cols.len();
-            at.push(factors.len());
+            at.push(value_index(factors.len()));
             span.push((cols.start, w));
 
             let tile = a
@@ -130,7 +131,7 @@ impl<T: SchurReal> BlockJacobi<T> {
         let mut scratch: Vec<T> = Vec::new();
         let mut read = 0usize;
         for (j, &(_, w)) in spans.iter().enumerate() {
-            at.push(factors.len());
+            at.push(value_index(factors.len()));
             scratch.clear();
             scratch.extend_from_slice(&blocks[read..read + w * w]);
             read += w * w;
@@ -147,7 +148,7 @@ impl<T: SchurReal> BlockJacobi<T> {
         for (b, &(start, w)) in self.span.iter().enumerate() {
             let seg = &mut z[start..start + w];
             seg.copy_from_slice(&r[start..start + w]);
-            llt_solve_panel(&self.factors[self.at[b]..], seg, w, 1);
+            llt_solve_panel(&self.factors[self.at[b] as usize..], seg, w, 1);
         }
     }
 }

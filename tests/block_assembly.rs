@@ -236,7 +236,7 @@ fn two_scan_matches_coo_route() {
         |k| (cells[k].0 as usize, cells[k].1 as usize),
     );
     let mut resolver = PositionResolver::new(&sym2);
-    let mut pos2: Vec<usize> = Vec::new();
+    let mut pos2: Vec<arael::ValueIndex> = Vec::new();
     arael::model::Model::bind_hessian_positions64(
         &mut w,
         &mut HessianBinder::Scalar(&mut |i, j| resolver.resolve(i as usize, j as usize)),
@@ -275,7 +275,7 @@ fn two_scan_matches_coo_route() {
         |k| (cells[k].0 as usize, cells[k].1 as usize),
     );
     let mut resolver = PositionResolver::new(&sym2);
-    let mut pos2: Vec<usize> = Vec::new();
+    let mut pos2: Vec<arael::ValueIndex> = Vec::new();
     arael::model::Model::bind_hessian_positions64(
         &mut w,
         &mut HessianBinder::Scalar(&mut |i, j| resolver.resolve(i as usize, j as usize)),
@@ -313,7 +313,7 @@ fn scalar_fast_path_matches_coo_route() {
     let mut cells = Vec::new();
     LmProblem::collect_hessian_cells(&w, &mut cells);
     let (mut csc_fast, mut resolver) = csc_from_cells::<f64>(&partition, &cells);
-    let mut positions = Vec::new();
+    let mut positions: Vec<arael::ValueIndex> = Vec::new();
     LmProblem::bind_hessian_positions(
         &mut w,
         &mut HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i, j)),
@@ -329,9 +329,9 @@ fn scalar_fast_path_matches_coo_route() {
     assert_eq!(grad, grad_f);
     // diag_pos must point at true diagonals
     for j in 0..n {
-        assert_eq!(csc_fast.row_idx[csc_fast.diag_pos[j]] as usize, j);
-        assert!(csc_fast.diag_pos[j] >= csc_fast.col_ptr[j]
-            && csc_fast.diag_pos[j] < csc_fast.col_ptr[j + 1]);
+        let d = csc_fast.diag_pos[j] as usize;
+        assert_eq!(csc_fast.row_idx[d] as usize, j);
+        assert!(d >= csc_fast.col_ptr[j] && d < csc_fast.col_ptr[j + 1]);
     }
     let dense_ref = densify_scalar(&csc_ref);
     let dense_fast = densify_scalar(&csc_fast);
@@ -368,7 +368,7 @@ fn assert_routes_agree(w: &mut World) {
     let mut cells = Vec::new();
     LmProblem::collect_hessian_cells(w, &mut cells);
     let (mut csc_fast, mut resolver) = csc_from_cells::<f64>(&partition, &cells);
-    let mut positions = Vec::new();
+    let mut positions: Vec<arael::ValueIndex> = Vec::new();
     LmProblem::bind_hessian_positions(
         w,
         &mut HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i, j)),
@@ -382,7 +382,7 @@ fn assert_routes_agree(w: &mut World) {
 
     assert_eq!(grad_ref, grad_fast);
     for j in 0..n {
-        assert_eq!(csc_fast.row_idx[csc_fast.diag_pos[j]] as usize, j);
+        assert_eq!(csc_fast.row_idx[csc_fast.diag_pos[j] as usize] as usize, j);
     }
     let dense_ref = densify_scalar(&csc_ref);
     let dense_fast = densify_scalar(&csc_fast);
@@ -404,7 +404,7 @@ fn assert_routes_agree(w: &mut World) {
         |k| (cells[k].0 as usize, cells[k].1 as usize),
     );
     let mut resolver = PositionResolver::new(&sym2);
-    let mut pos2: Vec<usize> = Vec::new();
+    let mut pos2: Vec<arael::ValueIndex> = Vec::new();
     arael::model::Model::bind_hessian_positions64(
         w,
         &mut HessianBinder::Scalar(&mut |i, j| resolver.resolve(i as usize, j as usize)),
@@ -431,7 +431,7 @@ fn assert_tiled_matches_mapped(w: &mut World) {
 
     // Scalar CSC: same pattern, filled once through each path.
     let (csc, _) = csc_from_cells::<f64>(&partition, &cells);
-    let mut mapped = Vec::new();
+    let mut mapped: Vec<arael::ValueIndex> = Vec::new();
     {
         let (_, mut resolver) = csc_from_cells::<f64>(&partition, &cells);
         LmProblem::bind_hessian_positions(
@@ -444,7 +444,7 @@ fn assert_tiled_matches_mapped(w: &mut World) {
     w.calc_grad_hessian_sparse_indexed(&params, &mut grad, &mut vals_mapped, &mapped);
 
     let (_, mut resolver) = csc_from_cells::<f64>(&partition, &cells);
-    let mut tiled = Vec::new();
+    let mut tiled: Vec<arael::ValueIndex> = Vec::new();
     LmProblem::bind_hessian_positions(
         w,
         &mut HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i, j)),
@@ -462,7 +462,7 @@ fn assert_tiled_matches_mapped(w: &mut World) {
         cells.len(),
         |k| (cells[k].0 as usize, cells[k].1 as usize),
     );
-    let mut bmapped = Vec::new();
+    let mut bmapped: Vec<arael::ValueIndex> = Vec::new();
     {
         let mut resolver = PositionResolver::new(&sym);
         LmProblem::bind_hessian_positions(
@@ -475,7 +475,7 @@ fn assert_tiled_matches_mapped(w: &mut World) {
     w.calc_grad_hessian_sparse_indexed(&params, &mut grad, bsc_mapped.vals_mut(), &bmapped);
 
     let mut resolver = PositionResolver::new(&sym);
-    let mut btiled = Vec::new();
+    let mut btiled: Vec<arael::ValueIndex> = Vec::new();
     LmProblem::bind_hessian_positions(
         w,
         &mut HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i as usize, j as usize)),

@@ -117,8 +117,51 @@
 
 pub use faer;
 
+/// An offset into a matrix's value buffer, as the position maps and tile
+/// origins store it.
+///
+/// One entry per stored scalar is the largest index structure a solve carries,
+/// so the width is worth spending a type on: 32 bits addresses 4e9 values --
+/// 34 GB of `f64` -- which is past what any problem that fits in memory
+/// reaches. Widening the library is this alias and a rebuild.
+pub type ValueIndex = u32;
+
+/// Convert a `usize` offset into a [`ValueIndex`].
+///
+/// Checked rather than assumed: overflowing would put a value in the wrong
+/// slot instead of failing, which is a silently wrong matrix. Goes through
+/// `TryFrom` so widening the alias needs no edit here -- and costs nothing
+/// once the range is statically known.
+#[inline]
+pub fn value_index(p: usize) -> ValueIndex {
+    ValueIndex::try_from(p).unwrap_or_else(|_| {
+        panic!(
+            "value buffer holds {} entries; a ValueIndex addresses at most {}",
+            p,
+            ValueIndex::MAX,
+        )
+    })
+}
+
 pub mod band;
 pub mod bsc;
 pub mod cg;
 pub mod nd;
 pub mod schur;
+
+#[cfg(test)]
+mod value_index_tests {
+    use super::*;
+
+    /// The conversion is checked, so a buffer too large for the alias fails
+    /// loudly instead of scattering into a wrapped-around slot.
+    #[test]
+    fn value_index_rejects_an_unaddressable_offset() {
+        let max = ValueIndex::MAX as usize;
+        assert_eq!(value_index(max), ValueIndex::MAX);
+        assert_eq!(value_index(0), 0);
+        if max < usize::MAX {
+            assert!(std::panic::catch_unwind(|| value_index(max + 1)).is_err());
+        }
+    }
+}

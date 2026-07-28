@@ -2172,6 +2172,11 @@ pub mod user_fn;
 pub use inventory;
 /// Re-export of the `arael-sym` symbolic math crate.
 pub use arael_sym as sym;
+/// Offset into an assembled Hessian's value buffer: the width of every
+/// scatter position and tile origin the solver stores. 32 bits by default,
+/// which addresses 4e9 values (34 GB of `f64`); a problem past that needs the
+/// alias widened in `arael-faer` and a rebuild.
+pub use arael_faer::ValueIndex;
 /// Model trait, parameter types, and Hessian blocks.
 pub mod angle;
 pub mod model;

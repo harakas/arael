@@ -47,7 +47,7 @@ impl LmProblem<f64> for Rosenbrock {
     fn calc_grad_hessian_sparse_direct(&mut self, _p: &[f64], _g: &mut [f64], _c: &mut CscMatrix<f64>) -> f64 {
         unimplemented!("dense only")
     }
-    fn calc_grad_hessian_sparse_indexed(&mut self, _p: &[f64], _g: &mut [f64], _v: &mut [f64], _pos: &[usize]) -> f64 {
+    fn calc_grad_hessian_sparse_indexed(&mut self, _p: &[f64], _g: &mut [f64], _v: &mut [f64], _pos: &[arael::ValueIndex]) -> f64 {
         unimplemented!("dense only")
     }
 }

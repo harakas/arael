@@ -278,7 +278,7 @@ impl LmProblem<f64> for BandOverflowProblem {
     }
     fn calc_grad_hessian_sparse(&mut self, _x: &[f64], _g: &mut [f64], _coo: &mut CooMatrix<f64>) -> f64 { unimplemented!() }
     fn calc_grad_hessian_sparse_direct(&mut self, _x: &[f64], _g: &mut [f64], _csc: &mut CscMatrix<f64>) -> f64 { unimplemented!() }
-    fn calc_grad_hessian_sparse_indexed(&mut self, _x: &[f64], _g: &mut [f64], _v: &mut [f64], _p: &[usize]) -> f64 { unimplemented!() }
+    fn calc_grad_hessian_sparse_indexed(&mut self, _x: &[f64], _g: &mut [f64], _v: &mut [f64], _p: &[arael::ValueIndex]) -> f64 { unimplemented!() }
 }
 
 #[test]
@@ -303,7 +303,7 @@ impl LmProblem<f64> for UnconstrainedSparseProblem {
         1.0
     }
     fn calc_grad_hessian_sparse_direct(&mut self, _x: &[f64], _g: &mut [f64], _csc: &mut CscMatrix<f64>) -> f64 { unimplemented!() }
-    fn calc_grad_hessian_sparse_indexed(&mut self, _x: &[f64], _g: &mut [f64], _v: &mut [f64], _p: &[usize]) -> f64 { unimplemented!() }
+    fn calc_grad_hessian_sparse_indexed(&mut self, _x: &[f64], _g: &mut [f64], _v: &mut [f64], _p: &[arael::ValueIndex]) -> f64 { unimplemented!() }
 }
 
 #[test]

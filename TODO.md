@@ -1,14 +1,20 @@
 # TODO
 
-- **arael**: narrow the remaining assembly scatter map to `u32`. Blocks with
-  a static tile shape now carry their own tile origin and stride
-  (`docs/dev/INDEX_PACKING.md`), so the per-scalar map survives only for
-  `TripletBlock` and COO-built patterns. Halving what is left is free of the
-  risk that made the tiled path worth measuring -- it adds no arithmetic to
-  the assembly loop -- and positions index a value buffer that would need
-  4e9 entries (34 GB of `f64`) to overflow `u32`. Not done because the
-  models that still use the map are the small ones; the map is already gone
-  where it was large.
+- **arael**: narrow the value-buffer offset maps -- DONE (2026-07-28). Every
+  offset into a matrix's values is now `arael::ValueIndex` (an alias, `u32`
+  by default): the assembly scatter map, `CscMatrix::diag_pos`, the block
+  Hessian's `bdiag_pos`, `BlockJacobi::at`, and the band factor's `s_src`.
+  `arael_faer::value_index` is the one checked conversion, so widening the
+  library to `u64` is the alias plus a rebuild -- verified by building and
+  passing the whole suite both ways. NOT converted, and why: `CscMatrix`'s
+  `col_ptr` (handed to the Eigen/CHOLMOD FFI as `*const i64`, relying on
+  `usize == u64` layout), `s_col_ptr` / `s_row_idx` / `perm_fwd` / `perm_inv`
+  (faer's symbolic API takes `usize`), `SymbolicSparseBlockColMat`'s own
+  arrays (generic over faer's `Index`, instantiated as `usize` and shared
+  with faer paths), and the nested-dissection graph (analysis scratch, freed
+  before the solve). Worth 1.9 MB at Ladybug-1723-clean, where the scatter
+  map is already gone and only `bdiag_pos` remains; the halving pays on
+  `TripletBlock` and extended-constraint models, which still carry a map.
 
 - **Unscented-transform utility for covariance mapping**. Pushing a
   parameter-space marginal through a nonlinear embedding currently

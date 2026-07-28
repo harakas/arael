@@ -111,11 +111,25 @@ otherwise every solve pays a second bind on its second iteration, which
 measured 99.4 ms against 78.0 for that iteration's assembly at 1723.
 `tests/lm_session.rs::each_solve_binds_the_blocks_once` pins it.
 
-## Left
+## The width of what is left
 
-- The fallback map is still `usize`. It now survives only for `TripletBlock`
-  and COO-built patterns, where narrowing it to `u32` would still be free of
-  the assembly-time risk: positions index a value buffer that would need 4e9
-  entries (34 GB of `f64`) to overflow.
-- Ladybug-1723-clean is unmeasured here; 154.7 MB of a 705 MB peak is the
-  prediction.
+Every offset into a matrix's value buffer is `arael::ValueIndex`, an alias for
+`u32`: the fallback scatter map, `CscMatrix::diag_pos`, the block Hessian's
+`bdiag_pos`, `BlockJacobi::at`, and the band factor's `s_src`.
+`arael_faer::value_index` is the single checked conversion, so widening the
+library to `u64` is the alias plus a rebuild. Building and passing the suite
+both ways is also what caught three arrays the alias had been applied to by
+mistake -- CSC row indices, COO coordinates and a block-index table, none of
+which are value offsets, and all of which a `u32` build accepted silently.
+
+At Ladybug-1723-clean this is 1.9 MB, all of it `bdiag_pos`: the scatter map
+is already empty there, and `diag_pos` belongs to the scalar-CSC route the
+Schur paths do not use. It pays where a map survives -- `TripletBlock` and
+extended-constraint models.
+
+Left `usize`, deliberately: `CscMatrix::col_ptr` goes to the Eigen and CHOLMOD
+FFI as `*const i64` on the `usize == u64` layout; `s_col_ptr`, `s_row_idx` and
+the permutations are what faer's symbolic API takes;
+`SymbolicSparseBlockColMat`'s own arrays are generic over faer's `Index` and
+shared with faer paths; the nested-dissection graph is analysis scratch, freed
+before the solve.

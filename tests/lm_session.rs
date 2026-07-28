@@ -190,7 +190,7 @@ impl LmProblem<f64> for BindCounter<'_> {
     fn bind_hessian_positions(
         &mut self,
         binder: &mut arael::model::HessianBinder,
-        out: &mut Vec<usize>,
+        out: &mut Vec<arael::ValueIndex>,
     ) {
         self.binds += 1;
         self.inner.bind_hessian_positions(binder, out)
@@ -213,7 +213,7 @@ impl LmProblem<f64> for BindCounter<'_> {
         self.inner.calc_grad_hessian_sparse_direct(x, g, csc)
     }
     fn calc_grad_hessian_sparse_indexed(
-        &mut self, x: &[f64], g: &mut [f64], vals: &mut [f64], pos: &[usize],
+        &mut self, x: &[f64], g: &mut [f64], vals: &mut [f64], pos: &[arael::ValueIndex],
     ) -> f64 {
         self.inner.calc_grad_hessian_sparse_indexed(x, g, vals, pos)
     }
@@ -361,23 +361,23 @@ impl LmProblem<f64> for Spy {
         self.calc_cost(p)
     }
 
-    fn calc_grad_hessian_sparse_indexed(&mut self, p: &[f64], grad: &mut [f64], vals: &mut [f64], positions: &[usize]) -> f64 {
+    fn calc_grad_hessian_sparse_indexed(&mut self, p: &[f64], grad: &mut [f64], vals: &mut [f64], positions: &[arael::ValueIndex]) -> f64 {
         self.indexed_calls += 1;
         grad.fill(0.0);
         vals.fill(0.0);
         let mut k = 0;
         for (i, (&x, &t)) in std::iter::zip(p, &self.target).enumerate() {
             grad[i] += x - t;
-            vals[positions[k]] += 1.0;
+            vals[positions[k] as usize] += 1.0;
             k += 1;
         }
         for &(a, b) in &self.pairs {
             let r = p[a] + p[b] - self.target[a] - self.target[b] - PAIR_BIAS;
             grad[a] += r;
             grad[b] += r;
-            vals[positions[k]] += 1.0;
-            vals[positions[k + 1]] += 1.0;
-            vals[positions[k + 2]] += 1.0;
+            vals[positions[k] as usize] += 1.0;
+            vals[positions[k + 1] as usize] += 1.0;
+            vals[positions[k + 2] as usize] += 1.0;
             k += 3;
         }
         self.calc_cost(p)

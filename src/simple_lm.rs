@@ -39,6 +39,7 @@
 //! ```
 
 use crate::utils::Float;
+use arael_faer::{value_index, ValueIndex};
 use std::fmt;
 use std::time::Duration;
 #[cfg(target_arch = "wasm32")]
@@ -907,7 +908,7 @@ pub fn csc_from_cells<T: Float>(
     // stored (0 otherwise -- degenerate model, matching to_csc)
     let nnz = col_ptr[n];
     let mut row_idx = std::vec::Vec::with_capacity(nnz);
-    let mut diag_pos = vec![0usize; n];
+    let mut diag_pos = vec![0 as ValueIndex; n];
     {
         let mut c = 0;
         while c < keys.len() {
@@ -920,7 +921,7 @@ pub fn csc_from_cells<T: Float>(
                 for k in c..e {
                     let br = keys[k] as u32 as usize;
                     if br == bc {
-                        diag_pos[j] = col_ptr[j] + prefix[k] + (j - partition[br]);
+                        diag_pos[j] = value_index(col_ptr[j] + prefix[k] + (j - partition[br]));
                     }
                     for i in partition[br]..partition[br + 1] {
                         row_idx.push(i as u32);
@@ -1079,7 +1080,7 @@ pub trait LmProblem<T> {
     fn calc_grad_hessian_sparse_direct(&mut self, params: &[T], grad: &mut [T], csc: &mut CscMatrix<T>) -> T;
     /// Assemble gradient and accumulate Hessian into CSC vals using a
     /// precomputed position map. Returns the cost at `params`.
-    fn calc_grad_hessian_sparse_indexed(&mut self, params: &[T], grad: &mut [T], vals: &mut [T], positions: &[usize]) -> T;
+    fn calc_grad_hessian_sparse_indexed(&mut self, params: &[T], grad: &mut [T], vals: &mut [T], positions: &[ValueIndex]) -> T;
     /// Called after each accepted LM step to let the problem update internal state.
     /// Default: no-op.
     fn advance(&mut self, _params: &mut [T]) {}
@@ -1263,7 +1264,7 @@ pub trait LmProblem<T> {
     fn bind_hessian_positions(
         &mut self,
         _binder: &mut crate::model::HessianBinder,
-        _out: &mut std::vec::Vec<usize>,
+        _out: &mut std::vec::Vec<ValueIndex>,
     ) {}
     /// Append the entity parameter spans (see
     /// [`RootProblem::param_block_spans`]). Default: nothing.
@@ -1363,7 +1364,7 @@ where
     fn calc_grad_hessian_sparse_direct(&mut self, _params: &[T], _grad: &mut [T], _csc: &mut CscMatrix<T>) -> T {
         unimplemented!("FnProblem does not support sparse direct assembly")
     }
-    fn calc_grad_hessian_sparse_indexed(&mut self, _params: &[T], _grad: &mut [T], _vals: &mut [T], _positions: &[usize]) -> T {
+    fn calc_grad_hessian_sparse_indexed(&mut self, _params: &[T], _grad: &mut [T], _vals: &mut [T], _positions: &[ValueIndex]) -> T {
         unimplemented!("FnProblem does not support sparse indexed assembly")
     }
 }
@@ -3484,12 +3485,12 @@ impl LmSolver<f64> for SparseCoo {
 
     fn extract_diagonal(&self, matrix: &SparseMatrix<f64>, diagonal: &mut [f64]) {
         for i in 0..diagonal.len() {
-            diagonal[i] = matrix.csc.vals[matrix.csc.diag_pos[i]];
+            diagonal[i] = matrix.csc.vals[matrix.csc.diag_pos[i] as usize];
         }
     }
 
     fn solve_damped(&mut self, n: usize, matrix: &mut SparseMatrix<f64>, diagonal: &[f64], damp: &[f64], lambda: f64, grad: &[f64], delta: &mut [f64]) -> bool {
-        for i in 0..n { matrix.csc.vals[matrix.csc.diag_pos[i]] = diagonal[i] + lambda * damp[i]; }
+        for i in 0..n { matrix.csc.vals[matrix.csc.diag_pos[i] as usize] = diagonal[i] + lambda * damp[i]; }
         let mut dense = vec![0.0f64; n * n];
         for j in 0..n {
             for k in matrix.csc.col_ptr[j]..matrix.csc.col_ptr[j + 1] {
@@ -3568,12 +3569,12 @@ impl LmSolver<f64> for SparseDirectCsc {
 
     fn extract_diagonal(&self, matrix: &SparseMatrix<f64>, diagonal: &mut [f64]) {
         for i in 0..diagonal.len() {
-            diagonal[i] = matrix.csc.vals[matrix.csc.diag_pos[i]];
+            diagonal[i] = matrix.csc.vals[matrix.csc.diag_pos[i] as usize];
         }
     }
 
     fn solve_damped(&mut self, n: usize, matrix: &mut SparseMatrix<f64>, diagonal: &[f64], damp: &[f64], lambda: f64, grad: &[f64], delta: &mut [f64]) -> bool {
-        for i in 0..n { matrix.csc.vals[matrix.csc.diag_pos[i]] = diagonal[i] + lambda * damp[i]; }
+        for i in 0..n { matrix.csc.vals[matrix.csc.diag_pos[i] as usize] = diagonal[i] + lambda * damp[i]; }
         // Use dense fallback for now
         let mut dense = vec![0.0f64; n * n];
         for j in 0..n {
@@ -3616,7 +3617,7 @@ fn assemble_first_csc<T: Float>(
     params: &[T],
     grad: &mut [T],
     csc: &mut CscMatrix<T>,
-) -> Result<(T, std::vec::Vec<usize>, bool), SolveError> {
+) -> Result<(T, std::vec::Vec<ValueIndex>, bool), SolveError> {
     let n = csc.n;
     if !problem.hessian_pattern_requires_compute() {
         let mut cells = std::vec::Vec::new();
@@ -3651,7 +3652,7 @@ fn assemble_first_csc<T: Float>(
         &mut crate::model::HessianBinder::Scalar(&mut |_, _| {
             let p = positions[k];
             k += 1;
-            p
+            p as usize
         }),
         &mut replayed,
     );
@@ -3668,7 +3669,7 @@ fn assemble_first_csc<T: Float>(
 fn rebind_blocks<T: Float>(
     problem: &mut dyn LmProblem<T>,
     binder: &mut crate::model::HessianBinder,
-    positions: &[usize],
+    positions: &[ValueIndex],
 ) {
     let mut rebound = std::vec::Vec::new();
     problem.bind_hessian_positions(binder, &mut rebound);
@@ -3698,7 +3699,7 @@ fn csc_tile_binder<T: Float>(csc: &CscMatrix<T>) -> impl FnMut(u32, u32) -> (usi
 #[allow(dead_code)] // only the feature-gated scalar backends keep one
 struct KeptCscPattern {
     /// Positions for blocks with no static tile shape; empty otherwise.
-    positions: std::vec::Vec<usize>,
+    positions: std::vec::Vec<ValueIndex>,
     /// The pattern is tile-expanded, so blocks derive their own positions.
     tiled: bool,
     /// Cleared once this solve's blocks have been bound.
@@ -3707,7 +3708,7 @@ struct KeptCscPattern {
 
 #[allow(dead_code)]
 impl KeptCscPattern {
-    fn new(positions: std::vec::Vec<usize>, tiled: bool) -> Self {
+    fn new(positions: std::vec::Vec<ValueIndex>, tiled: bool) -> Self {
         Self { positions, tiled, needs_rebind: false }
     }
 
@@ -3735,7 +3736,7 @@ impl KeptCscPattern {
                     &mut crate::model::HessianBinder::Scalar(&mut |_, _| {
                         let p = positions[k];
                         k += 1;
-                        p
+                        p as usize
                     }),
                     positions,
                 );
@@ -4502,7 +4503,7 @@ pub struct SparseFaer<T = f64> {
     did_setup: bool,
     // Structure, built on the first compute of a solve and reused for
     // every following iteration and damping retry.
-    positions: Option<Vec<usize>>,
+    positions: Option<Vec<ValueIndex>>,
     // Blocks carry their own scatter targets, so a kept pattern is only half
     // the state: a warm solve may arrive with a different model instance
     // whose blocks were never bound to it. Set at every solve entry, cleared
@@ -4510,7 +4511,7 @@ pub struct SparseFaer<T = f64> {
     // kept pattern needs.
     needs_rebind: bool,
     tiled_pattern: bool,
-    bdiag_pos: Vec<usize>,
+    bdiag_pos: Vec<ValueIndex>,
     schur: Option<arael_faer::schur::SchurSymbolic<usize>>,
     s: Option<arael_faer::bsc::SparseBlockColMat<usize, T>>,
     ctx: arael_faer::schur::SchurContext<T>,
@@ -4896,7 +4897,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
         // Scalar diagonal positions inside the block Hessian's diagonal tiles
         // (damping and extract_diagonal read and write through these).
         self.bdiag_pos.clear();
-        self.bdiag_pos.resize(n, usize::MAX);
+        self.bdiag_pos.resize(n, ValueIndex::MAX);
         for b in 0..nblk {
             let w = partition[b + 1] - partition[b];
             let diag = hsym
@@ -4905,7 +4906,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
                 .ok_or(SolveError::UnconstrainedParameter { param: partition[b] })?;
             let base = hsym.val_range(diag).start;
             for k in 0..w {
-                self.bdiag_pos[partition[b] + k] = base + k * (w + 1);
+                self.bdiag_pos[partition[b] + k] = value_index(base + k * (w + 1));
             }
         }
 
@@ -5177,7 +5178,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                             &mut crate::model::HessianBinder::Scalar(&mut |_, _| {
                                 let p = positions[k];
                                 k += 1;
-                                p
+                                p as usize
                             }),
                             positions,
                         );
@@ -5375,7 +5376,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             |k| (cells[k].0 as usize, cells[k].1 as usize),
         );
         self.bdiag_pos.clear();
-        self.bdiag_pos.resize(n, usize::MAX);
+        self.bdiag_pos.resize(n, ValueIndex::MAX);
         for b in 0..nblk {
             let w = partition[b + 1] - partition[b];
             let diag = hsym
@@ -5384,7 +5385,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 .ok_or(SolveError::UnconstrainedParameter { param: partition[b] })?;
             let base = hsym.val_range(diag).start;
             for k in 0..w {
-                self.bdiag_pos[partition[b] + k] = base + k * (w + 1);
+                self.bdiag_pos[partition[b] + k] = value_index(base + k * (w + 1));
             }
         }
 
@@ -5831,14 +5832,14 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
     fn extract_diagonal(&self, matrix: &FaerMatrix<T>, diagonal: &mut [T]) {
         if let Some(csc) = matrix.csc.as_ref() {
             for (i, d) in diagonal.iter_mut().enumerate() {
-                *d = csc.vals[csc.diag_pos[i]];
+                *d = csc.vals[csc.diag_pos[i] as usize];
             }
             return;
         }
         // INVARIANT: lm_solve calls compute() (which sets matrix.h) before this.
         let vals = matrix.h.as_ref().expect("compute before extract_diagonal").vals();
         for (i, d) in diagonal.iter_mut().enumerate() {
-            *d = vals[self.bdiag_pos[i]];
+            *d = vals[self.bdiag_pos[i] as usize];
         }
     }
 
@@ -5851,7 +5852,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         // back-substitution. This is the plain sparse route.
         if let Some(csc) = matrix.csc.as_mut() {
             for i in 0..n {
-                csc.vals[csc.diag_pos[i]] = diagonal[i] + lambda * damp[i];
+                csc.vals[csc.diag_pos[i] as usize] = diagonal[i] + lambda * damp[i];
             }
             let sym_ref = faer::sparse::SymbolicSparseColMatRef::new_checked(
                 n, n, &self.s_col_ptr, None, &self.s_row_idx,
@@ -5882,7 +5883,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         {
             let vals = h.vals_mut();
             for i in 0..n {
-                vals[self.bdiag_pos[i]] = diagonal[i] + lambda * damp[i];
+                vals[self.bdiag_pos[i] as usize] = diagonal[i] + lambda * damp[i];
             }
         }
 
@@ -6197,10 +6198,10 @@ impl<T: EigenScalar + crate::utils::Float> LmSolver<T> for SparseEigen<T> {
         Ok(cost)
     }
     fn extract_diagonal(&self, matrix: &SparseMatrix<T>, diagonal: &mut [T]) {
-        for i in 0..diagonal.len() { diagonal[i] = matrix.csc.vals[matrix.csc.diag_pos[i]]; }
+        for i in 0..diagonal.len() { diagonal[i] = matrix.csc.vals[matrix.csc.diag_pos[i] as usize]; }
     }
     fn solve_damped(&mut self, n: usize, matrix: &mut SparseMatrix<T>, diagonal: &[T], damp: &[T], lambda: T, grad: &[T], delta: &mut [T]) -> bool {
-        for i in 0..n { matrix.csc.vals[matrix.csc.diag_pos[i]] = diagonal[i] + lambda * damp[i]; }
+        for i in 0..n { matrix.csc.vals[matrix.csc.diag_pos[i] as usize] = diagonal[i] + lambda * damp[i]; }
         eigen_ffi_solve(T::LLT_SOLVE, self.handle, &matrix.csc, grad, delta)
     }
 }
@@ -6249,10 +6250,10 @@ impl LmSolver<f64> for SparseCholmod {
         Ok(cost)
     }
     fn extract_diagonal(&self, matrix: &SparseMatrix<f64>, diagonal: &mut [f64]) {
-        for i in 0..diagonal.len() { diagonal[i] = matrix.csc.vals[matrix.csc.diag_pos[i]]; }
+        for i in 0..diagonal.len() { diagonal[i] = matrix.csc.vals[matrix.csc.diag_pos[i] as usize]; }
     }
     fn solve_damped(&mut self, n: usize, matrix: &mut SparseMatrix<f64>, diagonal: &[f64], damp: &[f64], lambda: f64, grad: &[f64], delta: &mut [f64]) -> bool {
-        for i in 0..n { matrix.csc.vals[matrix.csc.diag_pos[i]] = diagonal[i] + lambda * damp[i]; }
+        for i in 0..n { matrix.csc.vals[matrix.csc.diag_pos[i] as usize] = diagonal[i] + lambda * damp[i]; }
         eigen_ffi_solve(eigen_cholmod_f64_solve, self.handle, &matrix.csc, grad, delta)
     }
 }
@@ -6323,10 +6324,10 @@ impl LmSolver<f64> for SparseCholmodSupernodal {
         Ok(cost)
     }
     fn extract_diagonal(&self, matrix: &SparseMatrix<f64>, diagonal: &mut [f64]) {
-        for i in 0..diagonal.len() { diagonal[i] = matrix.csc.vals[matrix.csc.diag_pos[i]]; }
+        for i in 0..diagonal.len() { diagonal[i] = matrix.csc.vals[matrix.csc.diag_pos[i] as usize]; }
     }
     fn solve_damped(&mut self, n: usize, matrix: &mut SparseMatrix<f64>, diagonal: &[f64], damp: &[f64], lambda: f64, grad: &[f64], delta: &mut [f64]) -> bool {
-        for i in 0..n { matrix.csc.vals[matrix.csc.diag_pos[i]] = diagonal[i] + lambda * damp[i]; }
+        for i in 0..n { matrix.csc.vals[matrix.csc.diag_pos[i] as usize] = diagonal[i] + lambda * damp[i]; }
         eigen_ffi_solve(eigen_cholmod_supernodal_f64_solve, self.handle, &matrix.csc, grad, delta)
     }
 }
@@ -6426,12 +6427,12 @@ impl<T: Float> CooMatrix<T> {
         // model (no constraint touches that parameter): fail here with
         // the parameter index instead of letting diag_pos[j] = 0 corrupt
         // vals[0] and surface as an unexplained Cholesky failure.
-        let mut diag_pos = vec![0usize; n];
+        let mut diag_pos = vec![0 as ValueIndex; n];
         for j in 0..n {
             let mut found = false;
             for k in col_ptr[j]..col_ptr[j + 1] {
                 if row_idx[k] as usize == j {
-                    diag_pos[j] = k;
+                    diag_pos[j] = value_index(k);
                     found = true;
                     break;
                 }
@@ -6447,18 +6448,18 @@ impl<T: Float> CooMatrix<T> {
     /// Scatter COO values into an existing CSC with matching structure.
     /// The CSC must have been created from a previous COO with the same pattern.
     /// `coo_to_csc` maps COO entry index -> CSC vals index (with duplicate summing).
-    pub fn scatter_into(&self, csc: &mut CscMatrix<T>, coo_to_csc: &[usize]) {
+    pub fn scatter_into(&self, csc: &mut CscMatrix<T>, coo_to_csc: &[ValueIndex]) {
         csc.vals.iter_mut().for_each(|v| *v = T::zero());
         for (i, &csc_idx) in coo_to_csc.iter().enumerate() {
-            csc.vals[csc_idx] += self.vals[i];
+            csc.vals[csc_idx as usize] += self.vals[i];
         }
     }
 
     /// Build the COO-to-CSC mapping for scatter_into.
     /// Must be called after to_csc() on the same COO pattern.
-    pub fn build_scatter_map(&self, csc: &CscMatrix<T>) -> Vec<usize> {
+    pub fn build_scatter_map(&self, csc: &CscMatrix<T>) -> Vec<ValueIndex> {
         let nnz_raw = self.nnz();
-        let mut map = vec![0usize; nnz_raw];
+        let mut map = vec![0 as ValueIndex; nnz_raw];
 
         // Sort by (col, row) -- same order as to_csc
         let mut order: Vec<usize> = (0..nnz_raw).collect();
@@ -6475,9 +6476,9 @@ impl<T: Float> CooMatrix<T> {
             let c = self.cols[orig_idx];
             if c == prev_col && r == prev_row {
                 // Duplicate maps to same CSC position
-                map[orig_idx] = csc_idx - 1;
+                map[orig_idx] = value_index(csc_idx - 1);
             } else {
-                map[orig_idx] = csc_idx;
+                map[orig_idx] = value_index(csc_idx);
                 csc_idx += 1;
                 prev_col = c;
                 prev_row = r;
@@ -6492,7 +6493,7 @@ impl<T: Float> CooMatrix<T> {
     /// Convert to CSC and build scatter map in one pass using counting sort.
     /// Returns (CscMatrix, positions) where positions maps each COO entry to
     /// its CSC vals index for use with calc_grad_hessian_sparse_indexed.
-    pub fn to_csc_with_map(&self) -> Result<(CscMatrix<T>, Vec<usize>), SolveError> {
+    pub fn to_csc_with_map(&self) -> Result<(CscMatrix<T>, Vec<ValueIndex>), SolveError> {
         let n = self.n;
         let nnz_raw = self.nnz();
 
@@ -6528,7 +6529,7 @@ impl<T: Float> CooMatrix<T> {
         // Pass 4: compress (merge duplicates), build row_idx + vals + map
         let mut row_idx = Vec::with_capacity(nnz_raw);
         let mut vals = Vec::with_capacity(nnz_raw);
-        let mut map = vec![0usize; nnz_raw];
+        let mut map = vec![0 as ValueIndex; nnz_raw];
         let mut new_col_ptr = vec![0usize; n + 1];
 
         let mut prev_col = u32::MAX;
@@ -6543,12 +6544,12 @@ impl<T: Float> CooMatrix<T> {
             if c == prev_col && r == prev_row {
                 // Duplicate: sum into last entry
                 *vals.last_mut().unwrap() = *vals.last().unwrap() + v;
-                map[orig_idx] = csc_idx - 1;
+                map[orig_idx] = value_index(csc_idx - 1);
             } else {
                 row_idx.push(r);
                 vals.push(v);
                 new_col_ptr[c as usize + 1] += 1;
-                map[orig_idx] = csc_idx;
+                map[orig_idx] = value_index(csc_idx);
                 csc_idx += 1;
                 prev_col = c;
                 prev_row = r;
@@ -6562,12 +6563,12 @@ impl<T: Float> CooMatrix<T> {
 
         // Find diagonal positions; missing diagonal = degenerate model,
         // see to_csc.
-        let mut diag_pos = vec![0usize; n];
+        let mut diag_pos = vec![0 as ValueIndex; n];
         for j in 0..n {
             let mut found = false;
             for k in new_col_ptr[j]..new_col_ptr[j + 1] {
                 if row_idx[k] as usize == j {
-                    diag_pos[j] = k;
+                    diag_pos[j] = value_index(k);
                     found = true;
                     break;
                 }
@@ -6593,7 +6594,7 @@ pub struct CscMatrix<T> {
     /// Nonzero values, length nnz.
     pub vals: Vec<T>,
     /// Position of the diagonal element in vals, per column.
-    pub diag_pos: Vec<usize>,
+    pub diag_pos: Vec<ValueIndex>,
 }
 
 impl<T: Float> CscMatrix<T> {
@@ -6924,7 +6925,7 @@ mod tests {
             fn calc_grad_hessian_sparse_direct(&mut self, _: &[f64], _: &mut [f64], _: &mut CscMatrix<f64>) -> f64 {
                 unreachable!("dense-only test problem")
             }
-            fn calc_grad_hessian_sparse_indexed(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: &[usize]) -> f64 {
+            fn calc_grad_hessian_sparse_indexed(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: &[ValueIndex]) -> f64 {
                 unreachable!("dense-only test problem")
             }
         }
@@ -7665,7 +7666,7 @@ mod tests {
                 unimplemented!()
             }
             fn calc_grad_hessian_sparse_direct(&mut self, _: &[f64], _: &mut [f64], _: &mut CscMatrix<f64>) -> f64 { unimplemented!() }
-            fn calc_grad_hessian_sparse_indexed(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: &[usize]) -> f64 { unimplemented!() }
+            fn calc_grad_hessian_sparse_indexed(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: &[ValueIndex]) -> f64 { unimplemented!() }
             fn calc_grad_hessian_sparse(&mut self, x: &[f64], grad: &mut [f64], coo: &mut CooMatrix<f64>) -> f64 {
                 grad[0] = 2.0 * (x[0] - 3.0); grad[1] = 2.0 * (x[1] - 7.0);
                 coo.clear();
@@ -7700,12 +7701,12 @@ mod tests {
             }
             fn calc_grad_hessian_band(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: usize) -> Result<f64, BandOverflow> { unimplemented!() }
             fn calc_grad_hessian_sparse_direct(&mut self, _: &[f64], _: &mut [f64], _: &mut CscMatrix<f64>) -> f64 { unimplemented!() }
-            fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], grad: &mut [f64], vals: &mut [f64], positions: &[usize]) -> f64 {
+            fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], grad: &mut [f64], vals: &mut [f64], positions: &[ValueIndex]) -> f64 {
                 grad[0] = 2.0 * (x[0] - 3.0); grad[1] = 2.0 * (x[1] - 7.0);
                 vals.iter_mut().for_each(|v| *v = 0.0);
                 // Same order as sparse COO push: (0,0)=2.0, (1,1)=2.0
-                vals[positions[0]] += 2.0;
-                vals[positions[1]] += 2.0;
+                vals[positions[0] as usize] += 2.0;
+                vals[positions[1] as usize] += 2.0;
                 self.calc_cost(x)
             }
             fn calc_grad_hessian_sparse(&mut self, x: &[f64], grad: &mut [f64], coo: &mut CooMatrix<f64>) -> f64 {
@@ -7744,11 +7745,11 @@ mod tests {
                 self.direct_calls += 1;
                 grad[0] = 2.0 * (x[0] - 3.0); grad[1] = 2.0 * (x[1] - 7.0);
                 csc.vals.iter_mut().for_each(|v| *v = 0.0);
-                csc.vals[csc.diag_pos[0]] += 2.0;
-                csc.vals[csc.diag_pos[1]] += 2.0;
+                csc.vals[csc.diag_pos[0] as usize] += 2.0;
+                csc.vals[csc.diag_pos[1] as usize] += 2.0;
                 self.calc_cost(x)
             }
-            fn calc_grad_hessian_sparse_indexed(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: &[usize]) -> f64 { unimplemented!() }
+            fn calc_grad_hessian_sparse_indexed(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: &[ValueIndex]) -> f64 { unimplemented!() }
             fn calc_grad_hessian_sparse(&mut self, x: &[f64], grad: &mut [f64], coo: &mut CooMatrix<f64>) -> f64 {
                 self.coo_calls += 1;
                 grad[0] = 2.0 * (x[0] - 3.0); grad[1] = 2.0 * (x[1] - 7.0);
@@ -7788,15 +7789,15 @@ mod tests {
             fn calc_grad_hessian_sparse_direct(&mut self, x: &[f64], grad: &mut [f64], csc: &mut CscMatrix<f64>) -> f64 {
                 grad[0] = 2.0 * (x[0] - 3.0); grad[1] = 2.0 * (x[1] - 7.0);
                 csc.vals.iter_mut().for_each(|v| *v = 0.0);
-                csc.vals[csc.diag_pos[0]] += 2.0;
-                csc.vals[csc.diag_pos[1]] += 2.0;
+                csc.vals[csc.diag_pos[0] as usize] += 2.0;
+                csc.vals[csc.diag_pos[1] as usize] += 2.0;
                 self.calc_cost(x)
             }
-            fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], grad: &mut [f64], vals: &mut [f64], positions: &[usize]) -> f64 {
+            fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], grad: &mut [f64], vals: &mut [f64], positions: &[ValueIndex]) -> f64 {
                 grad[0] = 2.0 * (x[0] - 3.0); grad[1] = 2.0 * (x[1] - 7.0);
                 vals.iter_mut().for_each(|v| *v = 0.0);
-                vals[positions[0]] += 2.0;
-                vals[positions[1]] += 2.0;
+                vals[positions[0] as usize] += 2.0;
+                vals[positions[1] as usize] += 2.0;
                 self.calc_cost(x)
             }
             fn calc_grad_hessian_sparse(&mut self, x: &[f64], grad: &mut [f64], coo: &mut CooMatrix<f64>) -> f64 {
@@ -7817,15 +7818,15 @@ mod tests {
             fn calc_grad_hessian_dense(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64]) -> f64 { unimplemented!() }
             fn calc_grad_hessian_band(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: usize) -> Result<f64, BandOverflow> { unimplemented!() }
             fn calc_grad_hessian_sparse_direct(&mut self, _: &[f64], _: &mut [f64], _: &mut CscMatrix<f64>) -> f64 { unimplemented!() }
-            fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], grad: &mut [f64], vals: &mut [f64], positions: &[usize]) -> f64 {
+            fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], grad: &mut [f64], vals: &mut [f64], positions: &[ValueIndex]) -> f64 {
                 grad[0] = 2.0 * (x[0] - 1.0) + 2.0 * (x[0] - x[2]);
                 grad[1] = 2.0 * (x[1] - 2.0);
                 grad[2] = 2.0 * (x[2] - 3.0) - 2.0 * (x[0] - x[2]);
                 vals.iter_mut().for_each(|v| *v = 0.0);
-                vals[positions[0]] += 4.0;
-                vals[positions[1]] += 2.0;
-                vals[positions[2]] += -2.0;
-                vals[positions[3]] += 4.0;
+                vals[positions[0] as usize] += 4.0;
+                vals[positions[1] as usize] += 2.0;
+                vals[positions[2] as usize] += -2.0;
+                vals[positions[3] as usize] += 4.0;
                 self.calc_cost(x)
             }
             fn calc_grad_hessian_sparse(&mut self, x: &[f64], grad: &mut [f64], coo: &mut CooMatrix<f64>) -> f64 {
@@ -7939,7 +7940,7 @@ mod tests {
             }
             fn calc_grad_hessian_band(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: usize) -> Result<f64, BandOverflow> { unimplemented!() }
             fn calc_grad_hessian_sparse_direct(&mut self, _: &[f64], _: &mut [f64], _: &mut CscMatrix<f64>) -> f64 { unimplemented!() }
-            fn calc_grad_hessian_sparse_indexed(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: &[usize]) -> f64 { unimplemented!() }
+            fn calc_grad_hessian_sparse_indexed(&mut self, _: &[f64], _: &mut [f64], _: &mut [f64], _: &[ValueIndex]) -> f64 { unimplemented!() }
             fn calc_grad_hessian_sparse(&mut self, x: &[f64], g: &mut [f64], coo: &mut CooMatrix<f64>) -> f64 {
                 g[0] = 2.0*(x[0]-1.0) + 2.0*(x[0]-x[2]);
                 g[1] = 2.0*(x[1]-2.0) + 2.0*(x[1]-x[3]);
@@ -8023,10 +8024,10 @@ mod tests {
             }
             fn calc_grad_hessian_band(&mut self,_:&[f64],_:&mut[f64],_:&mut[f64],_:usize)->Result<f64,BandOverflow>{unimplemented!()}
             fn calc_grad_hessian_sparse_direct(&mut self,_:&[f64],_:&mut[f64],_:&mut CscMatrix<f64>)->f64{unimplemented!()}
-            fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], g: &mut [f64], vals: &mut [f64], pos: &[usize]) -> f64 {
+            fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], g: &mut [f64], vals: &mut [f64], pos: &[ValueIndex]) -> f64 {
                 g[0]=2.0*(x[0]-3.0); g[1]=2.0*(x[1]-7.0);
                 vals.iter_mut().for_each(|v| *v = 0.0);
-                vals[pos[0]] += 2.0; vals[pos[1]] += 2.0;
+                vals[pos[0] as usize] += 2.0; vals[pos[1] as usize] += 2.0;
                 self.calc_cost(x)
             }
             fn calc_grad_hessian_sparse(&mut self, x: &[f64], g: &mut [f64], coo: &mut CooMatrix<f64>) -> f64 {
@@ -8063,13 +8064,13 @@ mod tests {
             }
             fn calc_grad_hessian_band(&mut self,_:&[f64],_:&mut[f64],_:&mut[f64],_:usize)->Result<f64,BandOverflow>{unimplemented!()}
             fn calc_grad_hessian_sparse_direct(&mut self,_:&[f64],_:&mut[f64],_:&mut CscMatrix<f64>)->f64{unimplemented!()}
-            fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], g: &mut [f64], vals: &mut [f64], pos: &[usize]) -> f64 {
+            fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], g: &mut [f64], vals: &mut [f64], pos: &[ValueIndex]) -> f64 {
                 g[0]=2.0*(x[0]-1.0)+2.0*(x[0]-x[2]); g[1]=2.0*(x[1]-2.0)+2.0*(x[1]-x[3]);
                 g[2]=2.0*(x[2]-3.0)-2.0*(x[0]-x[2]); g[3]=2.0*(x[3]-4.0)-2.0*(x[1]-x[3]);
                 vals.iter_mut().for_each(|v| *v = 0.0);
-                vals[pos[0]] += 4.0; vals[pos[1]] += -2.0;
-                vals[pos[2]] += 4.0; vals[pos[3]] += -2.0;
-                vals[pos[4]] += 4.0; vals[pos[5]] += 4.0;
+                vals[pos[0] as usize] += 4.0; vals[pos[1] as usize] += -2.0;
+                vals[pos[2] as usize] += 4.0; vals[pos[3] as usize] += -2.0;
+                vals[pos[4] as usize] += 4.0; vals[pos[5] as usize] += 4.0;
                 self.calc_cost(x)
             }
             fn calc_grad_hessian_sparse(&mut self, x: &[f64], g: &mut [f64], coo: &mut CooMatrix<f64>) -> f64 {
@@ -8105,10 +8106,10 @@ mod tests {
             }
             fn calc_grad_hessian_band(&mut self,_:&[f64],_:&mut[f64],_:&mut[f64],_:usize)->Result<f64,BandOverflow>{unimplemented!()}
             fn calc_grad_hessian_sparse_direct(&mut self,_:&[f64],_:&mut[f64],_:&mut CscMatrix<f64>)->f64{unimplemented!()}
-            fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], g: &mut [f64], vals: &mut [f64], pos: &[usize]) -> f64 {
+            fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], g: &mut [f64], vals: &mut [f64], pos: &[ValueIndex]) -> f64 {
                 g[0]=2.0*(x[0]-3.0); g[1]=2.0*(x[1]-7.0);
                 vals.iter_mut().for_each(|v| *v = 0.0);
-                vals[pos[0]] += 2.0; vals[pos[1]] += 2.0;
+                vals[pos[0] as usize] += 2.0; vals[pos[1] as usize] += 2.0;
                 self.calc_cost(x)
             }
             fn calc_grad_hessian_sparse(&mut self, x: &[f64], g: &mut [f64], coo: &mut CooMatrix<f64>) -> f64 {
@@ -8139,10 +8140,10 @@ mod tests {
             }
             fn calc_grad_hessian_band(&mut self,_:&[f64],_:&mut[f64],_:&mut[f64],_:usize)->Result<f64,BandOverflow>{unimplemented!()}
             fn calc_grad_hessian_sparse_direct(&mut self,_:&[f64],_:&mut[f64],_:&mut CscMatrix<f64>)->f64{unimplemented!()}
-            fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], g: &mut [f64], vals: &mut [f64], pos: &[usize]) -> f64 {
+            fn calc_grad_hessian_sparse_indexed(&mut self, x: &[f64], g: &mut [f64], vals: &mut [f64], pos: &[ValueIndex]) -> f64 {
                 g[0]=2.0*(x[0]-3.0); g[1]=2.0*(x[1]-7.0);
                 vals.iter_mut().for_each(|v| *v = 0.0);
-                vals[pos[0]] += 2.0; vals[pos[1]] += 2.0;
+                vals[pos[0] as usize] += 2.0; vals[pos[1] as usize] += 2.0;
                 self.calc_cost(x)
             }
             fn calc_grad_hessian_sparse(&mut self, x: &[f64], g: &mut [f64], coo: &mut CooMatrix<f64>) -> f64 {

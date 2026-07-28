@@ -191,13 +191,13 @@ pub trait Model {
     fn bind_hessian_positions64(
         &mut self,
         _binder: &mut HessianBinder,
-        _out: &mut std::vec::Vec<usize>,
+        _out: &mut std::vec::Vec<ValueIndex>,
     ) {}
     /// f32-block variant of [`bind_hessian_positions64`](Self::bind_hessian_positions64).
     fn bind_hessian_positions32(
         &mut self,
         _binder: &mut HessianBinder,
-        _out: &mut std::vec::Vec<usize>,
+        _out: &mut std::vec::Vec<ValueIndex>,
     ) {}
 
     /// Free every heap-backed (`Boxed*`) block's Hessian storage in this model
@@ -227,8 +227,8 @@ pub trait Model {
     fn accumulate_hessian_sparse64(&self, _coo: &mut crate::simple_lm::CooMatrix<f64>) {}
     fn accumulate_hessian_sparse_direct32(&self, _csc: &mut crate::simple_lm::CscMatrix<f32>) {}
     fn accumulate_hessian_sparse_direct64(&self, _csc: &mut crate::simple_lm::CscMatrix<f64>) {}
-    fn accumulate_hessian_sparse_indexed32(&self, _vals: &mut [f32], _positions: &[usize], _cursor: &mut usize) {}
-    fn accumulate_hessian_sparse_indexed64(&self, _vals: &mut [f64], _positions: &[usize], _cursor: &mut usize) {}
+    fn accumulate_hessian_sparse_indexed32(&self, _vals: &mut [f32], _positions: &[ValueIndex], _cursor: &mut usize) {}
+    fn accumulate_hessian_sparse_indexed64(&self, _vals: &mut [f64], _positions: &[ValueIndex], _cursor: &mut usize) {}
 }
 
 // ---------------------------------------------------------------------------
@@ -1193,10 +1193,10 @@ macro_rules! impl_model_collection {
             fn collect_hessian_cells32(&self, out: &mut std::vec::Vec<(u32, u32)>) {
                 for item in self.iter() { item.collect_hessian_cells32(out); }
             }
-            fn bind_hessian_positions64(&mut self, binder: &mut HessianBinder, out: &mut std::vec::Vec<usize>) {
+            fn bind_hessian_positions64(&mut self, binder: &mut HessianBinder, out: &mut std::vec::Vec<ValueIndex>) {
                 for item in self.$iter_mut() { item.bind_hessian_positions64(binder, out); }
             }
-            fn bind_hessian_positions32(&mut self, binder: &mut HessianBinder, out: &mut std::vec::Vec<usize>) {
+            fn bind_hessian_positions32(&mut self, binder: &mut HessianBinder, out: &mut std::vec::Vec<ValueIndex>) {
                 for item in self.$iter_mut() { item.bind_hessian_positions32(binder, out); }
             }
             fn release_blocks(&mut self) {
@@ -1231,10 +1231,10 @@ macro_rules! impl_model_collection {
             fn accumulate_hessian_sparse_direct64(&self, csc: &mut crate::simple_lm::CscMatrix<f64>) {
                 for item in self.iter() { item.accumulate_hessian_sparse_direct64(csc); }
             }
-            fn accumulate_hessian_sparse_indexed32(&self, vals: &mut [f32], positions: &[usize], cursor: &mut usize) {
+            fn accumulate_hessian_sparse_indexed32(&self, vals: &mut [f32], positions: &[ValueIndex], cursor: &mut usize) {
                 for item in self.iter() { item.accumulate_hessian_sparse_indexed32(vals, positions, cursor); }
             }
-            fn accumulate_hessian_sparse_indexed64(&self, vals: &mut [f64], positions: &[usize], cursor: &mut usize) {
+            fn accumulate_hessian_sparse_indexed64(&self, vals: &mut [f64], positions: &[ValueIndex], cursor: &mut usize) {
                 for item in self.iter() { item.accumulate_hessian_sparse_indexed64(vals, positions, cursor); }
             }
         }
@@ -1286,10 +1286,10 @@ impl<T: Model> Model for crate::refs::Arena<T> {
     fn collect_hessian_cells32(&self, out: &mut std::vec::Vec<(u32, u32)>) {
         for item in self.iter() { item.collect_hessian_cells32(out); }
     }
-    fn bind_hessian_positions64(&mut self, binder: &mut HessianBinder, out: &mut std::vec::Vec<usize>) {
+    fn bind_hessian_positions64(&mut self, binder: &mut HessianBinder, out: &mut std::vec::Vec<ValueIndex>) {
         for item in self.iter_mut() { item.bind_hessian_positions64(binder, out); }
     }
-    fn bind_hessian_positions32(&mut self, binder: &mut HessianBinder, out: &mut std::vec::Vec<usize>) {
+    fn bind_hessian_positions32(&mut self, binder: &mut HessianBinder, out: &mut std::vec::Vec<ValueIndex>) {
         for item in self.iter_mut() { item.bind_hessian_positions32(binder, out); }
     }
     fn release_blocks(&mut self) {
@@ -1324,10 +1324,10 @@ impl<T: Model> Model for crate::refs::Arena<T> {
     fn accumulate_hessian_sparse_direct64(&self, csc: &mut crate::simple_lm::CscMatrix<f64>) {
         for item in self.iter() { item.accumulate_hessian_sparse_direct64(csc); }
     }
-    fn accumulate_hessian_sparse_indexed32(&self, vals: &mut [f32], positions: &[usize], cursor: &mut usize) {
+    fn accumulate_hessian_sparse_indexed32(&self, vals: &mut [f32], positions: &[ValueIndex], cursor: &mut usize) {
         for item in self.iter() { item.accumulate_hessian_sparse_indexed32(vals, positions, cursor); }
     }
-    fn accumulate_hessian_sparse_indexed64(&self, vals: &mut [f64], positions: &[usize], cursor: &mut usize) {
+    fn accumulate_hessian_sparse_indexed64(&self, vals: &mut [f64], positions: &[ValueIndex], cursor: &mut usize) {
         for item in self.iter() { item.accumulate_hessian_sparse_indexed64(vals, positions, cursor); }
     }
 }
@@ -1375,10 +1375,10 @@ impl<T: Model> Model for Option<T> {
     fn collect_hessian_cells32(&self, out: &mut std::vec::Vec<(u32, u32)>) {
         if let Some(inner) = self { inner.collect_hessian_cells32(out); }
     }
-    fn bind_hessian_positions64(&mut self, binder: &mut HessianBinder, out: &mut std::vec::Vec<usize>) {
+    fn bind_hessian_positions64(&mut self, binder: &mut HessianBinder, out: &mut std::vec::Vec<ValueIndex>) {
         if let Some(inner) = self { inner.bind_hessian_positions64(binder, out); }
     }
-    fn bind_hessian_positions32(&mut self, binder: &mut HessianBinder, out: &mut std::vec::Vec<usize>) {
+    fn bind_hessian_positions32(&mut self, binder: &mut HessianBinder, out: &mut std::vec::Vec<ValueIndex>) {
         if let Some(inner) = self { inner.bind_hessian_positions32(binder, out); }
     }
     fn release_blocks(&mut self) {
@@ -1410,10 +1410,10 @@ impl<T: Model> Model for Option<T> {
     fn accumulate_hessian_sparse_direct64(&self, csc: &mut crate::simple_lm::CscMatrix<f64>) {
         if let Some(inner) = self { inner.accumulate_hessian_sparse_direct64(csc); }
     }
-    fn accumulate_hessian_sparse_indexed32(&self, vals: &mut [f32], positions: &[usize], cursor: &mut usize) {
+    fn accumulate_hessian_sparse_indexed32(&self, vals: &mut [f32], positions: &[ValueIndex], cursor: &mut usize) {
         if let Some(inner) = self { inner.accumulate_hessian_sparse_indexed32(vals, positions, cursor); }
     }
-    fn accumulate_hessian_sparse_indexed64(&self, vals: &mut [f64], positions: &[usize], cursor: &mut usize) {
+    fn accumulate_hessian_sparse_indexed64(&self, vals: &mut [f64], positions: &[ValueIndex], cursor: &mut usize) {
         if let Some(inner) = self { inner.accumulate_hessian_sparse_indexed64(vals, positions, cursor); }
     }
 }
@@ -1427,6 +1427,8 @@ impl<T: Model> Model for Option<T> {
 fn tri_idx(n: usize, i: usize, j: usize) -> usize {
     i * (2 * n - i - 1) / 2 + j
 }
+
+use arael_faer::{value_index, ValueIndex};
 
 /// Where a block scatters into the assembled Hessian's value buffer.
 ///
@@ -1443,13 +1445,13 @@ fn tri_idx(n: usize, i: usize, j: usize) -> usize {
 /// fixed and scatters nothing at all ([`UNBOUND`](TilePosition::UNBOUND)).
 #[derive(Clone, Copy, Debug)]
 struct TilePosition {
-    base: u32,
-    stride: u32,
+    base: ValueIndex,
+    stride: ValueIndex,
 }
 
 impl TilePosition {
     /// All parameters fixed: no tile, and the index walk emits nothing.
-    const UNBOUND: Self = TilePosition { base: u32::MAX, stride: 0 };
+    const UNBOUND: Self = TilePosition { base: ValueIndex::MAX, stride: 0 };
     /// Pattern not tile-expanded: fall back to the per-scalar map.
     const MAPPED: Self = TilePosition { base: 0, stride: 0 };
 
@@ -1460,14 +1462,7 @@ impl TilePosition {
     /// Narrow a resolved position into the packed 32-bit slot.
     #[inline]
     fn bound(base: usize, stride: usize) -> Self {
-        assert!(
-            base < u32::MAX as usize,
-            "Hessian value buffer holds {} entries; block tile positions are 32-bit \
-             and address at most {}",
-            base,
-            u32::MAX,
-        );
-        TilePosition { base: base as u32, stride: stride as u32 }
+        TilePosition { base: value_index(base), stride: value_index(stride) }
     }
 }
 
@@ -1621,7 +1616,7 @@ impl<A, const N: usize, const M: usize, T: crate::utils::Float> SelfBlock<A, N, 
     pub fn bind_hessian_positions(
         &mut self,
         binder: &mut HessianBinder,
-        out: &mut std::vec::Vec<usize>,
+        out: &mut std::vec::Vec<ValueIndex>,
     ) {
         let resolve = match binder {
             HessianBinder::Tiled(bind) => {
@@ -1638,7 +1633,7 @@ impl<A, const N: usize, const M: usize, T: crate::utils::Float> SelfBlock<A, N, 
                 let gj = self.indices[j];
                 if gj == u32::MAX { continue; }
                 let (lo, hi) = if gi <= gj { (gi, gj) } else { (gj, gi) };
-                out.push(resolve(lo, hi));
+                out.push(value_index(resolve(lo, hi)));
             }
         }
     }
@@ -1778,7 +1773,7 @@ impl<A, const N: usize, const M: usize, T: crate::utils::Float> SelfBlock<A, N, 
     /// Accumulate into the assembled value buffer through this block's bound
     /// tile, leaving `positions` and `cursor` untouched. Blocks bound against
     /// a pattern with no tile to walk fall back to the map.
-    pub fn accumulate_hessian_sparse_indexed(&self, vals: &mut [T], positions: &[usize], cursor: &mut usize) {
+    pub fn accumulate_hessian_sparse_indexed(&self, vals: &mut [T], positions: &[ValueIndex], cursor: &mut usize) {
         if !self.pos.tiled() {
             return self.accumulate_mapped_indexed(vals, positions, cursor);
         }
@@ -1808,13 +1803,13 @@ impl<A, const N: usize, const M: usize, T: crate::utils::Float> SelfBlock<A, N, 
     /// [`accumulate_hessian_sparse_indexed`](Self::accumulate_hessian_sparse_indexed):
     /// one cached position per entry, `cursor` advancing in lockstep with the
     /// block traversal. An all-fixed block emits nothing and so consumes none.
-    fn accumulate_mapped_indexed(&self, vals: &mut [T], positions: &[usize], cursor: &mut usize) {
+    fn accumulate_mapped_indexed(&self, vals: &mut [T], positions: &[ValueIndex], cursor: &mut usize) {
         for i in 0..N {
             let gi = self.indices[i];
             if gi == u32::MAX { continue; }
             for j in i..N {
                 if self.indices[j] == u32::MAX { continue; }
-                vals[positions[*cursor]] += self.hessian[tri_idx(N, i, j)];
+                vals[positions[*cursor] as usize] += self.hessian[tri_idx(N, i, j)];
                 *cursor += 1;
             }
         }
@@ -1934,7 +1929,7 @@ impl<A, const N: usize, const M: usize, T: crate::utils::Float> BoxedSelfBlock<A
     pub fn bind_hessian_positions(
         &mut self,
         binder: &mut HessianBinder,
-        out: &mut std::vec::Vec<usize>,
+        out: &mut std::vec::Vec<ValueIndex>,
     ) {
         if let Some(b) = &mut self.inner { b.bind_hessian_positions(binder, out); }
     }
@@ -1950,7 +1945,7 @@ impl<A, const N: usize, const M: usize, T: crate::utils::Float> BoxedSelfBlock<A
     }
 
     /// Scatter this block into CSC values through cached positions.
-    pub fn accumulate_hessian_sparse_indexed(&self, vals: &mut [T], positions: &[usize], cursor: &mut usize) {
+    pub fn accumulate_hessian_sparse_indexed(&self, vals: &mut [T], positions: &[ValueIndex], cursor: &mut usize) {
         if let Some(b) = &self.inner {
             b.accumulate_hessian_sparse_indexed(vals, positions, cursor);
         }
@@ -2134,7 +2129,7 @@ impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Fl
     pub fn bind_hessian_positions(
         &mut self,
         binder: &mut HessianBinder,
-        out: &mut std::vec::Vec<usize>,
+        out: &mut std::vec::Vec<ValueIndex>,
     ) {
         let resolve = match binder {
             HessianBinder::Tiled(bind) => {
@@ -2151,7 +2146,7 @@ impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Fl
                 let gj = self.indices_b[j];
                 if gj == u32::MAX { continue; }
                 let (lo, hi) = if gi <= gj { (gi, gj) } else { (gj, gi) };
-                out.push(resolve(lo, hi));
+                out.push(value_index(resolve(lo, hi)));
             }
         }
     }
@@ -2197,7 +2192,7 @@ impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Fl
     /// Accumulate into the assembled value buffer through this block's bound
     /// tile; see the note on
     /// [`SelfBlock::accumulate_hessian_sparse_indexed`].
-    pub fn accumulate_hessian_sparse_indexed(&self, vals: &mut [T], positions: &[usize], cursor: &mut usize) {
+    pub fn accumulate_hessian_sparse_indexed(&self, vals: &mut [T], positions: &[ValueIndex], cursor: &mut usize) {
         if !self.pos.tiled() {
             return self.accumulate_mapped_indexed(vals, positions, cursor);
         }
@@ -2254,7 +2249,7 @@ impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Fl
     /// The untiled case of
     /// [`accumulate_hessian_sparse_indexed`](Self::accumulate_hessian_sparse_indexed):
     /// one cached position per entry.
-    fn accumulate_mapped_indexed(&self, vals: &mut [T], positions: &[usize], cursor: &mut usize) {
+    fn accumulate_mapped_indexed(&self, vals: &mut [T], positions: &[ValueIndex], cursor: &mut usize) {
         for i in 0..NA {
             let gi = self.indices_a[i];
             if gi == u32::MAX { continue; }
@@ -2265,7 +2260,7 @@ impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Fl
                 let val = self.cross_hessian[row + j];
                 // Aliased diagonal: see accumulate_hessian_band.
                 let val = if gi == gj { val + val } else { val };
-                vals[positions[*cursor]] += val;
+                vals[positions[*cursor] as usize] += val;
                 *cursor += 1;
             }
         }
@@ -2378,7 +2373,7 @@ impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Fl
     pub fn bind_hessian_positions(
         &mut self,
         binder: &mut HessianBinder,
-        out: &mut std::vec::Vec<usize>,
+        out: &mut std::vec::Vec<ValueIndex>,
     ) {
         if let Some(b) = &mut self.inner { b.bind_hessian_positions(binder, out); }
     }
@@ -2394,7 +2389,7 @@ impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Fl
     }
 
     /// Scatter this block into CSC values through cached positions.
-    pub fn accumulate_hessian_sparse_indexed(&self, vals: &mut [T], positions: &[usize], cursor: &mut usize) {
+    pub fn accumulate_hessian_sparse_indexed(&self, vals: &mut [T], positions: &[ValueIndex], cursor: &mut usize) {
         if let Some(b) = &self.inner {
             b.accumulate_hessian_sparse_indexed(vals, positions, cursor);
         }
@@ -2633,13 +2628,13 @@ impl<T: crate::utils::Float> TripletBlock<T> {
     pub fn bind_hessian_positions(
         &mut self,
         binder: &mut HessianBinder,
-        out: &mut std::vec::Vec<usize>,
+        out: &mut std::vec::Vec<ValueIndex>,
     ) {
         for &(i, j, _) in &self.hessian {
-            out.push(match binder {
+            out.push(value_index(match binder {
                 HessianBinder::Tiled(bind) => bind(i, j).0,
                 HessianBinder::Scalar(resolve) => resolve(i, j),
-            });
+            }));
         }
     }
 
@@ -2664,13 +2659,13 @@ impl<T: crate::utils::Float> TripletBlock<T> {
     /// The position list is built once per solve from the first
     /// iteration's entry sequence; this block must push the same number
     /// of tuples every iteration (see `ExtendedModel` contract notes).
-    pub fn accumulate_hessian_sparse_indexed(&self, vals: &mut [T], positions: &[usize], cursor: &mut usize) {
+    pub fn accumulate_hessian_sparse_indexed(&self, vals: &mut [T], positions: &[ValueIndex], cursor: &mut usize) {
         assert!(*cursor + self.hessian.len() <= positions.len(),
             "sparsity pattern changed between iterations: TripletBlock holds {} \
              entries but only {} slots remain in the cached pattern",
             self.hessian.len(), positions.len() - *cursor);
         for &(_, _, v) in &self.hessian {
-            vals[positions[*cursor]] += v;
+            vals[positions[*cursor] as usize] += v;
             *cursor += 1;
         }
     }
@@ -2711,7 +2706,7 @@ macro_rules! block_model_methods {
             self.accumulate_hessian_sparse_direct(csc);
         }
         #[inline]
-        fn accumulate_hessian_sparse_indexed32(&self, vals: &mut [f32], positions: &[usize], cursor: &mut usize) {
+        fn accumulate_hessian_sparse_indexed32(&self, vals: &mut [f32], positions: &[ValueIndex], cursor: &mut usize) {
             self.accumulate_hessian_sparse_indexed(vals, positions, cursor);
         }
         #[inline]
@@ -2722,7 +2717,7 @@ macro_rules! block_model_methods {
         fn bind_hessian_positions32(
             &mut self,
             binder: &mut HessianBinder,
-            out: &mut std::vec::Vec<usize>,
+            out: &mut std::vec::Vec<ValueIndex>,
         ) {
             self.bind_hessian_positions(binder, out);
         }
@@ -2750,7 +2745,7 @@ macro_rules! block_model_methods {
             self.accumulate_hessian_sparse_direct(csc);
         }
         #[inline]
-        fn accumulate_hessian_sparse_indexed64(&self, vals: &mut [f64], positions: &[usize], cursor: &mut usize) {
+        fn accumulate_hessian_sparse_indexed64(&self, vals: &mut [f64], positions: &[ValueIndex], cursor: &mut usize) {
             self.accumulate_hessian_sparse_indexed(vals, positions, cursor);
         }
         #[inline]
@@ -2761,7 +2756,7 @@ macro_rules! block_model_methods {
         fn bind_hessian_positions64(
             &mut self,
             binder: &mut HessianBinder,
-            out: &mut std::vec::Vec<usize>,
+            out: &mut std::vec::Vec<ValueIndex>,
         ) {
             self.bind_hessian_positions(binder, out);
         }

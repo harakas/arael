@@ -117,7 +117,7 @@ fn main() {
     // scan 2: position map by replaying the emission order
     let (t_pos2, positions2) = min_ms(rounds, || {
         let mut resolver = PositionResolver::new(&sym2);
-        let mut out: Vec<usize> = Vec::with_capacity(positions_block.len());
+        let mut out: Vec<arael::ValueIndex> = Vec::with_capacity(positions_block.len());
         arael::model::Model::bind_hessian_positions64(
             &mut path,
             &mut arael::model::HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i as usize, j as usize)),
@@ -136,7 +136,7 @@ fn main() {
     let (_, resolver_proto) = csc_from_cells::<f64>(&partition, &cells);
     let (t_spos, _spos) = min_ms(rounds, || {
         let mut resolver = resolver_proto.clone();
-        let mut out: Vec<usize> = Vec::with_capacity(positions_scalar.len());
+        let mut out: Vec<arael::ValueIndex> = Vec::with_capacity(positions_scalar.len());
         arael::model::Model::bind_hessian_positions64(
             &mut path,
             &mut arael::model::HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i, j)),

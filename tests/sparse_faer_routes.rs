@@ -354,7 +354,7 @@ impl LmProblem<f64> for LineFit {
     }
 
     fn calc_grad_hessian_sparse_indexed(
-        &mut self, p: &[f64], grad: &mut [f64], vals: &mut [f64], positions: &[usize],
+        &mut self, p: &[f64], grad: &mut [f64], vals: &mut [f64], positions: &[arael::ValueIndex],
     ) -> f64 {
         grad.fill(0.0);
         vals.fill(0.0);
@@ -365,7 +365,7 @@ impl LmProblem<f64> for LineFit {
             for a in 0..2 {
                 grad[a] += j[a] * r;
                 for b in a..2 {
-                    vals[positions[k]] += j[a] * j[b];
+                    vals[positions[k] as usize] += j[a] * j[b];
                     k += 1;
                 }
             }

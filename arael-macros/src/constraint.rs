@@ -5905,7 +5905,7 @@ pub fn generate_root_methods(
             fn collect_hessian_cells(&self, out: &mut std::vec::Vec<(u32, u32)>) {
                 arael::model::Model::#cells_method(self, out)
             }
-            fn bind_hessian_positions(&mut self, binder: &mut arael::model::HessianBinder, out: &mut std::vec::Vec<usize>) {
+            fn bind_hessian_positions(&mut self, binder: &mut arael::model::HessianBinder, out: &mut std::vec::Vec<arael::ValueIndex>) {
                 arael::model::Model::#positions_method(self, binder, out)
             }
             fn collect_param_block_spans(&self, out: &mut std::vec::Vec<(u32, u32)>) {
@@ -5961,7 +5961,7 @@ pub fn generate_root_methods(
                 __cost
             }
 
-            fn calc_grad_hessian_sparse_indexed(&mut self, params: &[#prec_type], grad: &mut [#prec_type], vals: &mut [#prec_type], positions: &[usize]) -> #prec_type {
+            fn calc_grad_hessian_sparse_indexed(&mut self, params: &[#prec_type], grad: &mut [#prec_type], vals: &mut [#prec_type], positions: &[arael::ValueIndex]) -> #prec_type {
                 grad.iter_mut().for_each(|g| *g = 0.0);
                 let mut __cost = self.__compute_blocks(params, grad);
                 #extended_cost_call

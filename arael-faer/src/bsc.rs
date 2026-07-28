@@ -21,6 +21,7 @@
 //! Uses only faer's public API; written as an upstream candidate for
 //! a future `faer::sparse::bsc` module.
 
+use crate::{value_index, ValueIndex};
 use core::iter;
 use faer::sparse::{SparseColMat, SparseColMatRef, SymbolicSparseColMat};
 use faer::traits::ComplexField;
@@ -194,7 +195,7 @@ impl<I: Index> SymbolicSparseBlockColMat<I> {
         col_part: Vec<I>,
         n_coords: usize,
         coord: impl Fn(usize) -> (usize, usize),
-    ) -> (Self, Vec<usize>) {
+    ) -> (Self, Vec<ValueIndex>) {
         // scalar index -> block index lookup tables, O(n) once
         let of = |part: &[I]| {
             let nblk = part.len() - 1;
@@ -283,7 +284,7 @@ impl<I: Index> SymbolicSparseBlockColMat<I> {
                 row_start = this.row_span(br).start;
                 col_start = this.col_span(bc).start;
             }
-            positions.push(base + (j - col_start) * row_w + (i - row_start));
+            positions.push(value_index(base + (j - col_start) * row_w + (i - row_start)));
         }
 
         (this, positions)
@@ -948,7 +949,7 @@ mod tests {
             for (_, v) in
                 iter::zip(csc.row_idx_of_col(j), csc.val_of_col(j))
             {
-                rebuilt.vals_mut()[positions[k]] += *v;
+                rebuilt.vals_mut()[positions[k] as usize] += *v;
                 k += 1;
             }
         }
