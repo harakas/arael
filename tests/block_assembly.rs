@@ -6,7 +6,7 @@
 // from SymbolicSparseBlockColMat::from_scalar_coords over the entity
 // partition (RootProblem::param_block_spans + block_partition_from_spans).
 
-use arael::model::{CrossBlock, Param, SelfBlock};
+use arael::model::{CrossBlock, HessianBinder, Param, SelfBlock};
 use arael::refs::{self, Ref};
 use arael::simple_lm::{block_partition_from_spans, csc_from_cells, CooMatrix, LmProblem, RootProblem};
 use arael_faer::bsc::{PositionResolver, SparseBlockColMat, SymbolicSparseBlockColMat};
@@ -237,9 +237,9 @@ fn two_scan_matches_coo_route() {
     );
     let mut resolver = PositionResolver::new(&sym2);
     let mut pos2: Vec<usize> = Vec::new();
-    arael::model::Model::accumulate_hessian_positions64(
-        &w,
-        &mut |i, j| resolver.resolve(i as usize, j as usize),
+    arael::model::Model::bind_hessian_positions64(
+        &mut w,
+        &mut HessianBinder::Scalar(&mut |i, j| resolver.resolve(i as usize, j as usize)),
         &mut pos2,
     );
 
@@ -276,9 +276,9 @@ fn two_scan_matches_coo_route() {
     );
     let mut resolver = PositionResolver::new(&sym2);
     let mut pos2: Vec<usize> = Vec::new();
-    arael::model::Model::accumulate_hessian_positions64(
-        &w,
-        &mut |i, j| resolver.resolve(i as usize, j as usize),
+    arael::model::Model::bind_hessian_positions64(
+        &mut w,
+        &mut HessianBinder::Scalar(&mut |i, j| resolver.resolve(i as usize, j as usize)),
         &mut pos2,
     );
     assert_eq!(sym2.parts().4, sym_coo.parts().4);
@@ -314,8 +314,13 @@ fn scalar_fast_path_matches_coo_route() {
     LmProblem::collect_hessian_cells(&w, &mut cells);
     let (mut csc_fast, mut resolver) = csc_from_cells::<f64>(&partition, &cells);
     let mut positions = Vec::new();
-    LmProblem::accumulate_hessian_positions(&w, &mut |i, j| resolver.resolve(i, j), &mut positions);
-    assert_eq!(positions.len(), pos_ref.len());
+    LmProblem::bind_hessian_positions(
+        &mut w,
+        &mut HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i, j)),
+        &mut positions,
+    );
+    // Every block here has a static tile shape, so nothing needs a map.
+    assert!(positions.is_empty());
     let mut vals = vec![0.0; csc_fast.vals.len()];
     let mut grad_f = vec![0.0; n];
     w.calc_grad_hessian_sparse_indexed(&params, &mut grad_f, &mut vals, &positions);
@@ -364,8 +369,12 @@ fn assert_routes_agree(w: &mut World) {
     LmProblem::collect_hessian_cells(w, &mut cells);
     let (mut csc_fast, mut resolver) = csc_from_cells::<f64>(&partition, &cells);
     let mut positions = Vec::new();
-    LmProblem::accumulate_hessian_positions(w, &mut |i, j| resolver.resolve(i, j), &mut positions);
-    assert_eq!(positions.len(), pos_ref.len());
+    LmProblem::bind_hessian_positions(
+        w,
+        &mut HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i, j)),
+        &mut positions,
+    );
+    assert!(positions.is_empty());
     let mut vals = vec![0.0; csc_fast.vals.len()];
     let mut grad_fast = vec![0.0; n];
     w.calc_grad_hessian_sparse_indexed(&params, &mut grad_fast, &mut vals, &positions);
@@ -396,14 +405,110 @@ fn assert_routes_agree(w: &mut World) {
     );
     let mut resolver = PositionResolver::new(&sym2);
     let mut pos2: Vec<usize> = Vec::new();
-    arael::model::Model::accumulate_hessian_positions64(
+    arael::model::Model::bind_hessian_positions64(
         w,
-        &mut |i, j| resolver.resolve(i as usize, j as usize),
+        &mut HessianBinder::Scalar(&mut |i, j| resolver.resolve(i as usize, j as usize)),
         &mut pos2,
     );
     assert_eq!(sym2.parts().3, sym_coo.parts().3);
     assert_eq!(sym2.parts().4, sym_coo.parts().4);
     assert_eq!(pos2, pos_coo);
+}
+
+/// Blocks that keep only their tile origin and column stride must scatter
+/// into exactly the slots the per-scalar map names -- on the scalar CSC and
+/// on the block CSC, with fixed params punching holes in both.
+fn assert_tiled_matches_mapped(w: &mut World) {
+    let mut params = Vec::new();
+    RootProblem::serialize(w, &mut params);
+    let n = params.len();
+    let mut spans = Vec::new();
+    LmProblem::collect_param_block_spans(w, &mut spans);
+    let partition = block_partition_from_spans(&spans, n);
+    let mut cells = Vec::new();
+    LmProblem::collect_hessian_cells(w, &mut cells);
+    let mut grad = vec![0.0; n];
+
+    // Scalar CSC: same pattern, filled once through each path.
+    let (csc, _) = csc_from_cells::<f64>(&partition, &cells);
+    let mut mapped = Vec::new();
+    {
+        let (_, mut resolver) = csc_from_cells::<f64>(&partition, &cells);
+        LmProblem::bind_hessian_positions(
+            w,
+            &mut HessianBinder::Scalar(&mut |i, j| resolver.resolve(i, j)),
+            &mut mapped,
+        );
+    }
+    let mut vals_mapped = vec![0.0; csc.vals.len()];
+    w.calc_grad_hessian_sparse_indexed(&params, &mut grad, &mut vals_mapped, &mapped);
+
+    let (_, mut resolver) = csc_from_cells::<f64>(&partition, &cells);
+    let mut tiled = Vec::new();
+    LmProblem::bind_hessian_positions(
+        w,
+        &mut HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i, j)),
+        &mut tiled,
+    );
+    assert!(tiled.is_empty(), "static tile shapes need no per-scalar map");
+    let mut vals_tiled = vec![0.0; csc.vals.len()];
+    w.calc_grad_hessian_sparse_indexed(&params, &mut grad, &mut vals_tiled, &tiled);
+    assert_eq!(vals_mapped, vals_tiled, "scalar CSC: tiled fill differs from mapped");
+
+    // Block CSC: the other resolver, over the same cells.
+    let (sym, _) = SymbolicSparseBlockColMat::from_scalar_coords(
+        partition.clone(),
+        partition,
+        cells.len(),
+        |k| (cells[k].0 as usize, cells[k].1 as usize),
+    );
+    let mut bmapped = Vec::new();
+    {
+        let mut resolver = PositionResolver::new(&sym);
+        LmProblem::bind_hessian_positions(
+            w,
+            &mut HessianBinder::Scalar(&mut |i, j| resolver.resolve(i as usize, j as usize)),
+            &mut bmapped,
+        );
+    }
+    let mut bsc_mapped = SparseBlockColMat::<usize, f64>::zeroed(sym.clone());
+    w.calc_grad_hessian_sparse_indexed(&params, &mut grad, bsc_mapped.vals_mut(), &bmapped);
+
+    let mut resolver = PositionResolver::new(&sym);
+    let mut btiled = Vec::new();
+    LmProblem::bind_hessian_positions(
+        w,
+        &mut HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i as usize, j as usize)),
+        &mut btiled,
+    );
+    assert!(btiled.is_empty());
+    let mut bsc_tiled = SparseBlockColMat::<usize, f64>::zeroed(sym);
+    w.calc_grad_hessian_sparse_indexed(&params, &mut grad, bsc_tiled.vals_mut(), &btiled);
+    assert_eq!(
+        bsc_mapped.vals(), bsc_tiled.vals(),
+        "block CSC: tiled fill differs from mapped",
+    );
+}
+
+/// The tile fast path and the per-scalar map must fill identically, with
+/// every combination of live and fixed parameters.
+#[test]
+fn tiled_fill_matches_mapped_fill() {
+    assert_tiled_matches_mapped(&mut build());
+
+    // one param fixed inside a pose and inside a landmark
+    let mut w = build();
+    w.poses[1].y = Param::fixed(0.1);
+    w.landmarks[3].x = Param::fixed(1.8);
+    assert_tiled_matches_mapped(&mut w);
+
+    // whole entities fixed: they leave the partition entirely
+    let mut w = build();
+    w.poses[2].x = Param::fixed(2.0);
+    w.poses[2].y = Param::fixed(0.2);
+    w.landmarks[0].x = Param::fixed(0.0);
+    w.landmarks[0].y = Param::fixed(1.0);
+    assert_tiled_matches_mapped(&mut w);
 }
 
 /// One fixed param inside a pose and inside a landmark: entities

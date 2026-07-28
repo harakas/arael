@@ -800,6 +800,15 @@ impl<'a, I: Index> PositionResolver<'a, I> {
         }
         self.base + (j - self.col_start) * self.row_w + (i - self.row_start)
     }
+
+    /// Position of scalar (i, j) plus the column stride of its tile, so a
+    /// caller holding the tile origin can derive every other position in the
+    /// tile as `origin + (c - col_start) * stride + (r - row_start)`.
+    #[inline]
+    pub fn resolve_tile(&mut self, i: usize, j: usize) -> (usize, usize) {
+        let pos = self.resolve(i, j);
+        (pos, self.row_w)
+    }
 }
 
 #[cfg(test)]

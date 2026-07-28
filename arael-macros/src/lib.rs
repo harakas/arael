@@ -2062,10 +2062,10 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                     arael::model::Model::collect_hessian_cells64(&self.#ident, out);
                 });
                 positions32_stmts.push(quote! {
-                    arael::model::Model::accumulate_hessian_positions32(&self.#ident, resolve, out);
+                    arael::model::Model::bind_hessian_positions32(&mut self.#ident, binder, out);
                 });
                 positions64_stmts.push(quote! {
-                    arael::model::Model::accumulate_hessian_positions64(&self.#ident, resolve, out);
+                    arael::model::Model::bind_hessian_positions64(&mut self.#ident, binder, out);
                 });
                 release_blocks_stmts.push(quote! {
                     arael::model::Model::release_blocks(&mut self.#ident);
@@ -2234,12 +2234,12 @@ fn impl_model(input: &syn::DeriveInput) -> syn::Result<TokenStream2> {
                 let _ = &out;
                 #(#collect_cells32_stmts)*
             }
-            fn accumulate_hessian_positions64(&self, resolve: &mut dyn FnMut(u32, u32) -> usize, out: &mut std::vec::Vec<usize>) {
-                let _ = (&resolve, &out);
+            fn bind_hessian_positions64(&mut self, binder: &mut arael::model::HessianBinder, out: &mut std::vec::Vec<usize>) {
+                let _ = (&binder, &out);
                 #(#positions64_stmts)*
             }
-            fn accumulate_hessian_positions32(&self, resolve: &mut dyn FnMut(u32, u32) -> usize, out: &mut std::vec::Vec<usize>) {
-                let _ = (&resolve, &out);
+            fn bind_hessian_positions32(&mut self, binder: &mut arael::model::HessianBinder, out: &mut std::vec::Vec<usize>) {
+                let _ = (&binder, &out);
                 #(#positions32_stmts)*
             }
             fn release_blocks(&mut self) {

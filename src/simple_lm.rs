@@ -832,6 +832,16 @@ impl ScalarCscResolver {
         }
         self.col_ptr[j] + self.memo_prefix + (i - self.memo_row_start)
     }
+
+    /// Position of scalar (row, col) plus the column stride of its tile. Every
+    /// scalar column of a block column stores the same rows, so the stride is
+    /// the block column's height and the tile is affine in both coordinates.
+    #[inline]
+    pub fn resolve_tile(&mut self, i: u32, j: u32) -> (usize, usize) {
+        let pos = self.resolve(i, j);
+        let j = j as usize;
+        (pos, self.col_ptr[j + 1] - self.col_ptr[j])
+    }
 }
 
 /// Build a scalar CSC pattern by tile-expanding the block cells of an
@@ -1244,12 +1254,15 @@ pub trait LmProblem<T> {
     /// cell (see `Model::collect_hessian_cells64`). Default: nothing
     /// (structure walk unsupported -- backends fall back to COO).
     fn collect_hessian_cells(&self, _out: &mut std::vec::Vec<(u32, u32)>) {}
-    /// Push every Hessian scatter position in the exact emission order
-    /// of [`calc_grad_hessian_sparse_indexed`](Self::calc_grad_hessian_sparse_indexed),
-    /// resolving each scalar coordinate through `resolve`.
-    fn accumulate_hessian_positions(
-        &self,
-        _resolve: &mut dyn FnMut(u32, u32) -> usize,
+    /// Bind every block to its tile in the assembled value buffer, ready for
+    /// [`calc_grad_hessian_sparse_indexed`](Self::calc_grad_hessian_sparse_indexed).
+    /// `binder` hands out scatter targets (see `Model::bind_hessian_positions64`):
+    /// against a tile-expanded pattern a block keeps its tile origin and
+    /// column stride, otherwise it pushes one position per entry into `out`.
+    /// Must be redone whenever the pattern or the indices change.
+    fn bind_hessian_positions(
+        &mut self,
+        _binder: &mut crate::model::HessianBinder,
         _out: &mut std::vec::Vec<usize>,
     ) {}
     /// Append the entity parameter spans (see
@@ -3603,7 +3616,7 @@ fn assemble_first_csc<T: Float>(
     params: &[T],
     grad: &mut [T],
     csc: &mut CscMatrix<T>,
-) -> Result<(T, std::vec::Vec<usize>), SolveError> {
+) -> Result<(T, std::vec::Vec<usize>, bool), SolveError> {
     let n = csc.n;
     if !problem.hessian_pattern_requires_compute() {
         let mut cells = std::vec::Vec::new();
@@ -3614,20 +3627,122 @@ fn assemble_first_csc<T: Float>(
             let partition = block_partition_from_spans(&spans, n);
             let (built, mut resolver) = csc_from_cells::<T>(&partition, &cells);
             let mut positions = std::vec::Vec::new();
-            problem.accumulate_hessian_positions(
-                &mut |i, j| resolver.resolve(i, j),
+            problem.bind_hessian_positions(
+                &mut crate::model::HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i, j)),
                 &mut positions,
             );
             *csc = built;
             let cost = problem.calc_grad_hessian_sparse_indexed(params, grad, &mut csc.vals, &positions);
-            return Ok((cost, positions));
+            return Ok((cost, positions, true));
         }
     }
     let mut coo = CooMatrix::new(n);
     let cost = problem.calc_grad_hessian_sparse(params, grad, &mut coo);
     let (built, positions) = coo.to_csc_with_map()?;
     *csc = built;
-    Ok((cost, positions))
+    // A COO-built pattern stores only the coordinates that occur, so a block's
+    // entries are not contiguous and there is no tile to walk. Replay the map
+    // in emission order to put every block back on the map path -- the same
+    // model may have been bound to a tile-expanded pattern by an earlier
+    // solve. Hand-written problems have no blocks and bind nothing.
+    let mut k = 0usize;
+    let mut replayed = std::vec::Vec::new();
+    problem.bind_hessian_positions(
+        &mut crate::model::HessianBinder::Scalar(&mut |_, _| {
+            let p = positions[k];
+            k += 1;
+            p
+        }),
+        &mut replayed,
+    );
+    debug_assert!(replayed.is_empty() || replayed == positions);
+    Ok((cost, positions, false))
+}
+
+/// Rebind a model's blocks to a pattern the solver already holds.
+///
+/// Keeping the pattern is only half the state: blocks carry their own scatter
+/// targets, so a warm solve arriving with a different model instance has
+/// blocks that were never bound to it. Runs once per solve, at the first
+/// compute, and costs one lookup per block.
+fn rebind_blocks<T: Float>(
+    problem: &mut dyn LmProblem<T>,
+    binder: &mut crate::model::HessianBinder,
+    positions: &[usize],
+) {
+    let mut rebound = std::vec::Vec::new();
+    problem.bind_hessian_positions(binder, &mut rebound);
+    // Blocks with no static tile shape push a map, which must come out
+    // identical -- the kept pattern was built from the same emission order.
+    assert!(
+        rebound.is_empty() || rebound == positions,
+        "kept sparsity pattern no longer matches the model's emission order",
+    );
+}
+
+/// A [`crate::model::HessianBinder::Tiled`] source over a kept scalar CSC:
+/// every stored cell holds a full dense tile, so a block column's height is
+/// the tile stride.
+fn csc_tile_binder<T: Float>(csc: &CscMatrix<T>) -> impl FnMut(u32, u32) -> (usize, usize) + '_ {
+    move |i, j| {
+        let j = j as usize;
+        let pos = csc
+            .find_pos(i as usize, j)
+            .expect("coordinate outside the kept pattern");
+        (pos, csc.col_ptr[j + 1] - csc.col_ptr[j])
+    }
+}
+
+/// A scalar-CSC scatter pattern kept for the whole solve, with what a warm
+/// re-solve needs to rebind a fresh model instance's blocks to it.
+#[allow(dead_code)] // only the feature-gated scalar backends keep one
+struct KeptCscPattern {
+    /// Positions for blocks with no static tile shape; empty otherwise.
+    positions: std::vec::Vec<usize>,
+    /// The pattern is tile-expanded, so blocks derive their own positions.
+    tiled: bool,
+    /// Cleared once this solve's blocks have been bound.
+    needs_rebind: bool,
+}
+
+#[allow(dead_code)]
+impl KeptCscPattern {
+    fn new(positions: std::vec::Vec<usize>, tiled: bool) -> Self {
+        Self { positions, tiled, needs_rebind: false }
+    }
+
+    /// Assemble into the kept pattern, binding this solve's blocks to it
+    /// first if they have not been bound yet.
+    fn assemble<T: Float>(
+        &mut self,
+        problem: &mut dyn LmProblem<T>,
+        params: &[T],
+        grad: &mut [T],
+        csc: &mut CscMatrix<T>,
+    ) -> T {
+        if std::mem::take(&mut self.needs_rebind) {
+            let positions = &self.positions;
+            if self.tiled {
+                rebind_blocks(
+                    problem,
+                    &mut crate::model::HessianBinder::Tiled(&mut csc_tile_binder(csc)),
+                    positions,
+                );
+            } else {
+                let mut k = 0usize;
+                rebind_blocks(
+                    problem,
+                    &mut crate::model::HessianBinder::Scalar(&mut |_, _| {
+                        let p = positions[k];
+                        k += 1;
+                        p
+                    }),
+                    positions,
+                );
+            }
+        }
+        problem.calc_grad_hessian_sparse_indexed(params, grad, &mut csc.vals, &self.positions)
+    }
 }
 
 /// Fill-reducing ordering, but only where there is fill to reduce.
@@ -4388,6 +4503,13 @@ pub struct SparseFaer<T = f64> {
     // Structure, built on the first compute of a solve and reused for
     // every following iteration and damping retry.
     positions: Option<Vec<usize>>,
+    // Blocks carry their own scatter targets, so a kept pattern is only half
+    // the state: a warm solve may arrive with a different model instance
+    // whose blocks were never bound to it. Set at every solve entry, cleared
+    // once the blocks are bound; `tiled_pattern` records which binder the
+    // kept pattern needs.
+    needs_rebind: bool,
+    tiled_pattern: bool,
     bdiag_pos: Vec<usize>,
     schur: Option<arael_faer::schur::SchurSymbolic<usize>>,
     s: Option<arael_faer::bsc::SparseBlockColMat<usize, T>>,
@@ -4456,6 +4578,8 @@ impl<T> SparseFaer<T> {
             assembly_time: Duration::ZERO,
             did_setup: false,
             positions: None,
+            needs_rebind: false,
+            tiled_pattern: false,
             bdiag_pos: Vec::new(),
             schur: None,
             s: None,
@@ -4656,14 +4780,18 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
             Some((partition, cells)) => {
                 let (csc, mut resolver) = csc_from_cells::<T>(partition, cells);
                 let mut positions = std::vec::Vec::new();
-                problem
-                    .accumulate_hessian_positions(&mut |i, j| resolver.resolve(i, j), &mut positions);
+                problem.bind_hessian_positions(
+                    &mut crate::model::HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i, j)),
+                    &mut positions,
+                );
+                self.tiled_pattern = true;
                 (csc, positions, None)
             }
             None => {
                 let mut csc = CscMatrix::empty(n);
                 let t_a = self.measure.then(Instant::now);
-                let (cost, positions) = assemble_first_csc(problem, params, grad, &mut csc)?;
+                let (cost, positions, tiled) = assemble_first_csc(problem, params, grad, &mut csc)?;
+                self.tiled_pattern = tiled;
                 if let Some(t) = t_a {
                     self.assembly_time += t.elapsed();
                 }
@@ -4804,8 +4932,10 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
         self.narrow_band_sym = Some(bsym);
         let mut resolver = arael_faer::bsc::PositionResolver::new(&hsym);
         let mut positions = std::vec::Vec::new();
-        problem.accumulate_hessian_positions(
-            &mut |i, j| resolver.resolve(i as usize, j as usize),
+        problem.bind_hessian_positions(
+            &mut crate::model::HessianBinder::Tiled(&mut |i, j| {
+                resolver.resolve_tile(i as usize, j as usize)
+            }),
             &mut positions,
         );
 
@@ -4977,6 +5107,9 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
 
     fn configure(&mut self, config: &LmConfig<T>) {
         self.verbose = config.verbose;
+        // Entry of a solve: a kept pattern may be about to meet a model
+        // instance whose blocks have never been bound to it.
+        self.needs_rebind = true;
         // The clock is only read when the caller asked for timing.
         self.measure = config.gather_timing;
         // Before the first compute, so size_llt_buffers sizes the scratch for
@@ -5010,7 +5143,18 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         self.did_setup = false;
         let t_a = self.measure.then(Instant::now);
         if let Some(positions) = &self.positions {
+            let rebind = std::mem::take(&mut self.needs_rebind);
             if let Some(h) = matrix.h.as_mut() {
+                if rebind {
+                    let mut r = arael_faer::bsc::PositionResolver::new(h.symbolic());
+                    rebind_blocks(
+                        problem,
+                        &mut crate::model::HessianBinder::Tiled(&mut |i, j| {
+                            r.resolve_tile(i as usize, j as usize)
+                        }),
+                        positions,
+                    );
+                }
                 let cost =
                     problem.calc_grad_hessian_sparse_indexed(params, grad, h.vals_mut(), positions);
                 if let Some(t) = t_a {
@@ -5019,6 +5163,26 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 return Ok(cost);
             }
             if let Some(csc) = matrix.csc.as_mut() {
+                if rebind {
+                    if self.tiled_pattern {
+                        rebind_blocks(
+                            problem,
+                            &mut crate::model::HessianBinder::Tiled(&mut csc_tile_binder(csc)),
+                            positions,
+                        );
+                    } else {
+                        let mut k = 0usize;
+                        rebind_blocks(
+                            problem,
+                            &mut crate::model::HessianBinder::Scalar(&mut |_, _| {
+                                let p = positions[k];
+                                k += 1;
+                                p
+                            }),
+                            positions,
+                        );
+                    }
+                }
                 let cost = problem
                     .calc_grad_hessian_sparse_indexed(params, grad, &mut csc.vals, positions);
                 if let Some(t) = t_a {
@@ -5029,6 +5193,10 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         }
         // Past the fast path: this compute is doing the structural work.
         self.did_setup = true;
+        // Setup binds the blocks as it builds the pattern, so the next compute
+        // must not rebind on top of it -- that is a lookup per block for
+        // nothing, once per solve.
+        self.needs_rebind = false;
         self.narrow_band_active = false;
         let n = matrix.n;
 
@@ -5522,13 +5690,15 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         // block Hessian) is built here, now that the reduction is going ahead.
         let mut resolver = arael_faer::bsc::PositionResolver::new(&hsym);
         let mut positions = std::vec::Vec::new();
-        problem.accumulate_hessian_positions(
-            &mut |i, j| resolver.resolve(i as usize, j as usize),
+        problem.bind_hessian_positions(
+            &mut crate::model::HessianBinder::Tiled(&mut |i, j| {
+                resolver.resolve_tile(i as usize, j as usize)
+            }),
             &mut positions,
         );
         if vb {
             info!(
-                "assembly: {} scatter positions ({:.1} MB), against {} Hessian values",
+                "assembly: {} residual scatter positions ({:.1} MB), against {} Hessian values",
                 positions.len(),
                 (positions.len() * std::mem::size_of::<usize>()) as f64 / 1e6,
                 hsym.val_count(),
@@ -5975,7 +6145,7 @@ impl EigenScalar for f32 {
 #[cfg(feature = "eigen")]
 pub struct SparseEigen<T: EigenScalar = f64> {
     handle: *mut std::ffi::c_void,
-    positions: Option<Vec<usize>>,
+    positions: Option<KeptCscPattern>,
     _scalar: std::marker::PhantomData<T>,
 }
 
@@ -6006,6 +6176,11 @@ impl<T: EigenScalar + crate::utils::Float> LmSolver<T> for SparseEigen<T> {
     fn reset(&mut self) {
         self.positions = None;
     }
+    fn configure(&mut self, _config: &LmConfig<T>) {
+        // Entry of a solve: the kept pattern may be about to meet a model
+        // instance whose blocks have never been bound to it.
+        if let Some(p) = &mut self.positions { p.needs_rebind = true; }
+    }
     fn matrix_nonfinite_count(&self, matrix: &SparseMatrix<T>) -> usize {
         matrix.csc.vals.iter().filter(|v| !v.is_finite()).count()
     }
@@ -6014,11 +6189,11 @@ impl<T: EigenScalar + crate::utils::Float> LmSolver<T> for SparseEigen<T> {
         SparseMatrix { csc: CscMatrix::empty(n) }
     }
     fn compute(&mut self, problem: &mut dyn LmProblem<T>, params: &[T], grad: &mut [T], matrix: &mut SparseMatrix<T>) -> Result<T, SolveError> {
-        if let Some(positions) = &self.positions {
-            return Ok(problem.calc_grad_hessian_sparse_indexed(params, grad, &mut matrix.csc.vals, positions));
+        if let Some(kept) = &mut self.positions {
+            return Ok(kept.assemble(problem, params, grad, &mut matrix.csc));
         }
-        let (cost, positions) = assemble_first_csc(problem, params, grad, &mut matrix.csc)?;
-        self.positions = Some(positions);
+        let (cost, positions, tiled) = assemble_first_csc(problem, params, grad, &mut matrix.csc)?;
+        self.positions = Some(KeptCscPattern::new(positions, tiled));
         Ok(cost)
     }
     fn extract_diagonal(&self, matrix: &SparseMatrix<T>, diagonal: &mut [T]) {
@@ -6034,7 +6209,7 @@ impl<T: EigenScalar + crate::utils::Float> LmSolver<T> for SparseEigen<T> {
 #[cfg(feature = "cholmod")]
 pub struct SparseCholmod {
     handle: *mut std::ffi::c_void,
-    positions: Option<Vec<usize>>,
+    positions: Option<KeptCscPattern>,
 }
 
 #[cfg(feature = "cholmod")]
@@ -6055,6 +6230,9 @@ impl LmSolver<f64> for SparseCholmod {
     fn reset(&mut self) {
         self.positions = None;
     }
+    fn configure(&mut self, _config: &LmConfig<f64>) {
+        if let Some(p) = &mut self.positions { p.needs_rebind = true; }
+    }
     fn matrix_nonfinite_count(&self, matrix: &SparseMatrix<f64>) -> usize {
         matrix.csc.vals.iter().filter(|v| !v.is_finite()).count()
     }
@@ -6063,11 +6241,11 @@ impl LmSolver<f64> for SparseCholmod {
         SparseMatrix { csc: CscMatrix::empty(n) }
     }
     fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], matrix: &mut SparseMatrix<f64>) -> Result<f64, SolveError> {
-        if let Some(positions) = &self.positions {
-            return Ok(problem.calc_grad_hessian_sparse_indexed(params, grad, &mut matrix.csc.vals, positions));
+        if let Some(kept) = &mut self.positions {
+            return Ok(kept.assemble(problem, params, grad, &mut matrix.csc));
         }
-        let (cost, positions) = assemble_first_csc(problem, params, grad, &mut matrix.csc)?;
-        self.positions = Some(positions);
+        let (cost, positions, tiled) = assemble_first_csc(problem, params, grad, &mut matrix.csc)?;
+        self.positions = Some(KeptCscPattern::new(positions, tiled));
         Ok(cost)
     }
     fn extract_diagonal(&self, matrix: &SparseMatrix<f64>, diagonal: &mut [f64]) {
@@ -6105,7 +6283,7 @@ pub fn solve_sparse_cholmod(x0: &[f64], problem: &mut impl LmProblem<f64>, confi
 #[cfg(feature = "cholmod-gpl")]
 pub struct SparseCholmodSupernodal {
     handle: *mut std::ffi::c_void,
-    positions: Option<Vec<usize>>,
+    positions: Option<KeptCscPattern>,
 }
 
 #[cfg(feature = "cholmod-gpl")]
@@ -6126,6 +6304,9 @@ impl LmSolver<f64> for SparseCholmodSupernodal {
     fn reset(&mut self) {
         self.positions = None;
     }
+    fn configure(&mut self, _config: &LmConfig<f64>) {
+        if let Some(p) = &mut self.positions { p.needs_rebind = true; }
+    }
     fn matrix_nonfinite_count(&self, matrix: &SparseMatrix<f64>) -> usize {
         matrix.csc.vals.iter().filter(|v| !v.is_finite()).count()
     }
@@ -6134,11 +6315,11 @@ impl LmSolver<f64> for SparseCholmodSupernodal {
         SparseMatrix { csc: CscMatrix::empty(n) }
     }
     fn compute(&mut self, problem: &mut dyn LmProblem<f64>, params: &[f64], grad: &mut [f64], matrix: &mut SparseMatrix<f64>) -> Result<f64, SolveError> {
-        if let Some(positions) = &self.positions {
-            return Ok(problem.calc_grad_hessian_sparse_indexed(params, grad, &mut matrix.csc.vals, positions));
+        if let Some(kept) = &mut self.positions {
+            return Ok(kept.assemble(problem, params, grad, &mut matrix.csc));
         }
-        let (cost, positions) = assemble_first_csc(problem, params, grad, &mut matrix.csc)?;
-        self.positions = Some(positions);
+        let (cost, positions, tiled) = assemble_first_csc(problem, params, grad, &mut matrix.csc)?;
+        self.positions = Some(KeptCscPattern::new(positions, tiled));
         Ok(cost)
     }
     fn extract_diagonal(&self, matrix: &SparseMatrix<f64>, diagonal: &mut [f64]) {

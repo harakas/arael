@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased (0.8.1)
+
+### Added
+
+- **Iterative Schur.** `SparseFaer::with_iterative_schur` solves the reduced
+  system by preconditioned conjugate gradients instead of factorizing it, and
+  `with_implicit_schur` does the same without ever forming the reduced matrix.
+  Both take a `CgOptions` (tolerance, iteration cap, restart period); the
+  factorizing route stays the default. `SchurPlan::cg_iterations` reports the
+  work done.
+
+### Changed
+
+- **Assembly keeps one scatter target per tile, not per value.** Blocks with a
+  static tile shape derive every position from a tile origin and stride stored
+  beside their parameter indices, so the per-scalar position map is gone for
+  them. It survives for `TripletBlock` and COO-built patterns, which have no
+  static shape. Every indexed backend benefits. At Ladybug-372 this is 47 MB
+  off the peak of each route with no change in assembly time.
+- **`Model::accumulate_hessian_positions64` / `_32` are now
+  `bind_hessian_positions64` / `_32`**, taking `&mut self` and a
+  `HessianBinder` in place of a position callback. Same for
+  `LmProblem::accumulate_hessian_positions` ->
+  `LmProblem::bind_hessian_positions`. Generated code moves with the macro;
+  hand-written implementations of these methods need updating.
+
 ## 0.8.0 - 2026-07-27
 
 ### Added

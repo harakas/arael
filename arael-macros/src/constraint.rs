@@ -5777,9 +5777,9 @@ pub fn generate_root_methods(
     };
     let requires_compute = custom || has_triplet_block;
     let (cells_method, positions_method) = if precision == "f32" {
-        (quote! { collect_hessian_cells32 }, quote! { accumulate_hessian_positions32 })
+        (quote! { collect_hessian_cells32 }, quote! { bind_hessian_positions32 })
     } else {
-        (quote! { collect_hessian_cells64 }, quote! { accumulate_hessian_positions64 })
+        (quote! { collect_hessian_cells64 }, quote! { bind_hessian_positions64 })
     };
 
     let ref_issue_walker = generate_ref_issue_walker(&root_name.to_string());
@@ -5905,8 +5905,8 @@ pub fn generate_root_methods(
             fn collect_hessian_cells(&self, out: &mut std::vec::Vec<(u32, u32)>) {
                 arael::model::Model::#cells_method(self, out)
             }
-            fn accumulate_hessian_positions(&self, resolve: &mut dyn FnMut(u32, u32) -> usize, out: &mut std::vec::Vec<usize>) {
-                arael::model::Model::#positions_method(self, resolve, out)
+            fn bind_hessian_positions(&mut self, binder: &mut arael::model::HessianBinder, out: &mut std::vec::Vec<usize>) {
+                arael::model::Model::#positions_method(self, binder, out)
             }
             fn collect_param_block_spans(&self, out: &mut std::vec::Vec<(u32, u32)>) {
                 arael::model::Model::collect_param_blocks(self, out)

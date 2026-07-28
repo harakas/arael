@@ -114,9 +114,9 @@ fn main() {
     );
     let mut resolver = PositionResolver::new(&hsym);
     let mut positions: Vec<usize> = Vec::new();
-    arael::model::Model::accumulate_hessian_positions64(
-        &path,
-        &mut |i, j| resolver.resolve(i as usize, j as usize),
+    arael::model::Model::bind_hessian_positions64(
+        &mut path,
+        &mut arael::model::HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i as usize, j as usize)),
         &mut positions,
     );
     let mut h = SparseBlockColMat::<usize, f64>::zeroed(hsym);

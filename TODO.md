@@ -1,5 +1,15 @@
 # TODO
 
+- **arael**: narrow the remaining assembly scatter map to `u32`. Blocks with
+  a static tile shape now carry their own tile origin and stride
+  (`docs/dev/INDEX_PACKING.md`), so the per-scalar map survives only for
+  `TripletBlock` and COO-built patterns. Halving what is left is free of the
+  risk that made the tiled path worth measuring -- it adds no arithmetic to
+  the assembly loop -- and positions index a value buffer that would need
+  4e9 entries (34 GB of `f64`) to overflow `u32`. Not done because the
+  models that still use the map are the small ones; the map is already gone
+  where it was large.
+
 - **Unscented-transform utility for covariance mapping**. Pushing a
   parameter-space marginal through a nonlinear embedding currently
   linearizes: slam_demo_gm maps its inverse-depth landmark marginal

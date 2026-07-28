@@ -168,6 +168,80 @@ fn warm_equals_cold<S: LmSolver<f64>>(mk: impl Fn() -> S, label: &str) {
     assert_eq!(written, warm.x, "{}: model not updated from the warm solve", label);
 }
 
+/// Counts how often a solver binds the model's blocks to a pattern. Blocks
+/// carry their own scatter targets, so binding is per model instance, not per
+/// pattern -- but each solve needs exactly one, and paying a second costs a
+/// lookup per block for nothing.
+struct BindCounter<'a> {
+    inner: &'a mut World,
+    binds: usize,
+}
+
+impl LmProblem<f64> for BindCounter<'_> {
+    fn hessian_pattern_requires_compute(&self) -> bool {
+        self.inner.hessian_pattern_requires_compute()
+    }
+    fn collect_hessian_cells(&self, out: &mut Vec<(u32, u32)>) {
+        self.inner.collect_hessian_cells(out)
+    }
+    fn collect_param_block_spans(&self, out: &mut Vec<(u32, u32)>) {
+        self.inner.collect_param_block_spans(out)
+    }
+    fn bind_hessian_positions(
+        &mut self,
+        binder: &mut arael::model::HessianBinder,
+        out: &mut Vec<usize>,
+    ) {
+        self.binds += 1;
+        self.inner.bind_hessian_positions(binder, out)
+    }
+    fn calc_cost(&mut self, x: &[f64]) -> f64 {
+        self.inner.calc_cost(x)
+    }
+    fn calc_grad_hessian_dense(&mut self, x: &[f64], g: &mut [f64], h: &mut [f64]) -> f64 {
+        self.inner.calc_grad_hessian_dense(x, g, h)
+    }
+    fn calc_grad_hessian_band(
+        &mut self, x: &[f64], g: &mut [f64], b: &mut [f64], kd: usize,
+    ) -> Result<f64, BandOverflow> {
+        self.inner.calc_grad_hessian_band(x, g, b, kd)
+    }
+    fn calc_grad_hessian_sparse(&mut self, x: &[f64], g: &mut [f64], coo: &mut CooMatrix<f64>) -> f64 {
+        self.inner.calc_grad_hessian_sparse(x, g, coo)
+    }
+    fn calc_grad_hessian_sparse_direct(&mut self, x: &[f64], g: &mut [f64], csc: &mut CscMatrix<f64>) -> f64 {
+        self.inner.calc_grad_hessian_sparse_direct(x, g, csc)
+    }
+    fn calc_grad_hessian_sparse_indexed(
+        &mut self, x: &[f64], g: &mut [f64], vals: &mut [f64], pos: &[usize],
+    ) -> f64 {
+        self.inner.calc_grad_hessian_sparse_indexed(x, g, vals, pos)
+    }
+}
+
+/// A solve binds the blocks exactly once. The setup that builds the pattern
+/// binds as it goes, so the next iteration must not bind on top of it; a warm
+/// solve, which skips setup, must bind once for its own model instance.
+#[test]
+fn each_solve_binds_the_blocks_once() {
+    let mut w = build(0.05);
+    let mut x0 = Vec::new();
+    RootProblem::serialize(&mut w, &mut x0);
+    let mut p = BindCounter { inner: &mut w, binds: 0 };
+
+    let mut session = LmSession::new(SparseFaer::new());
+    let cold = session.solve_x0(&x0, &mut p, &cfg()).unwrap();
+    assert!(cold.iterations > 1, "need a steady-state iteration to see a rebind");
+    assert_eq!(p.binds, 1, "cold solve bound the blocks {} times", p.binds);
+
+    // Warm: same pattern, so setup is skipped -- but the blocks still have to
+    // be bound to it once, and only once.
+    p.binds = 0;
+    let warm = session.solve_x0(&x0, &mut p, &cfg()).unwrap();
+    assert!(warm.iterations > 1);
+    assert_eq!(p.binds, 1, "warm solve bound the blocks {} times", p.binds);
+}
+
 #[test]
 fn warm_equals_cold_sparse_auto() {
     warm_equals_cold(SparseFaer::new, "sparse auto");

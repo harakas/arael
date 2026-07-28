@@ -653,7 +653,7 @@ pub struct LmTiming {
 ### What the setup costs -- `LmTiming::analysis`
 
 Before the backend can factorize anything it discovers the sparsity pattern and
-the value-position map, detects the marginalizable blocks, weighs the Schur
+binds each block's scatter target in it, detects the marginalizable blocks, weighs the Schur
 reduction (two trial symbolic factorizations), chooses the fill-reducing ordering,
 and factorizes symbolically. All of it runs inside the first `compute`, and
 `analysis` is what it cost.
@@ -714,8 +714,8 @@ retry actually cost.
 
 Every phase records `{total, first, count}`. The first call is broken out
 because the first iteration carries a one-time structure cost the steady
-state does not: the first assembly discovers the sparsity pattern and builds
-the value-position map, and the first solve runs the symbolic factorization
+state does not: the first assembly discovers the sparsity pattern and binds
+each block's scatter target in it, and the first solve runs the symbolic factorization
 (fill-reducing ordering + elimination tree). On a fresh sparse problem those
 two often dominate the whole solve; a warm re-solve pays neither. Each
 `first_*` is part of its phase total (`first_assembly` ⊂ `assembly`, etc.).

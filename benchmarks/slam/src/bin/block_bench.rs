@@ -118,9 +118,9 @@ fn main() {
     let (t_pos2, positions2) = min_ms(rounds, || {
         let mut resolver = PositionResolver::new(&sym2);
         let mut out: Vec<usize> = Vec::with_capacity(positions_block.len());
-        arael::model::Model::accumulate_hessian_positions64(
-            &path,
-            &mut |i, j| resolver.resolve(i as usize, j as usize),
+        arael::model::Model::bind_hessian_positions64(
+            &mut path,
+            &mut arael::model::HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i as usize, j as usize)),
             &mut out,
         );
         out
@@ -137,9 +137,9 @@ fn main() {
     let (t_spos, _spos) = min_ms(rounds, || {
         let mut resolver = resolver_proto.clone();
         let mut out: Vec<usize> = Vec::with_capacity(positions_scalar.len());
-        arael::model::Model::accumulate_hessian_positions64(
-            &path,
-            &mut |i, j| resolver.resolve(i, j),
+        arael::model::Model::bind_hessian_positions64(
+            &mut path,
+            &mut arael::model::HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i, j)),
             &mut out,
         );
         out

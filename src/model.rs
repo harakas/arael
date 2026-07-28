@@ -179,19 +179,24 @@ pub trait Model {
     fn collect_hessian_cells64(&self, _out: &mut std::vec::Vec<(u32, u32)>) {}
     /// f32-block variant of [`collect_hessian_cells64`](Self::collect_hessian_cells64).
     fn collect_hessian_cells32(&self, _out: &mut std::vec::Vec<(u32, u32)>) {}
-    /// Push every f64 Hessian scatter position in exactly the emission
-    /// order of `accumulate_hessian_sparse64` / `_indexed64`, resolving
-    /// each scalar coordinate through `resolve`. Builds the indexed
-    /// position map without a COO pass.
-    fn accumulate_hessian_positions64(
-        &self,
-        _resolve: &mut dyn FnMut(u32, u32) -> usize,
+    /// Bind every f64 block to its tile in the assembled value buffer, ready
+    /// for `accumulate_hessian_sparse_indexed64`. `bind` maps a scalar
+    /// coordinate to its position and the column stride of its tile; blocks
+    /// with a static tile shape keep the pair and derive the rest. Blocks
+    /// with no static shape ([`TripletBlock`]) instead push one position per
+    /// entry into `out`, in the emission order of
+    /// `accumulate_hessian_sparse64`. Builds the indexed map without a COO
+    /// pass. Valid after `serialize`, and must be redone whenever parameter
+    /// indices or the Hessian pattern change.
+    fn bind_hessian_positions64(
+        &mut self,
+        _binder: &mut HessianBinder,
         _out: &mut std::vec::Vec<usize>,
     ) {}
-    /// f32-block variant of [`accumulate_hessian_positions64`](Self::accumulate_hessian_positions64).
-    fn accumulate_hessian_positions32(
-        &self,
-        _resolve: &mut dyn FnMut(u32, u32) -> usize,
+    /// f32-block variant of [`bind_hessian_positions64`](Self::bind_hessian_positions64).
+    fn bind_hessian_positions32(
+        &mut self,
+        _binder: &mut HessianBinder,
         _out: &mut std::vec::Vec<usize>,
     ) {}
 
@@ -1188,11 +1193,11 @@ macro_rules! impl_model_collection {
             fn collect_hessian_cells32(&self, out: &mut std::vec::Vec<(u32, u32)>) {
                 for item in self.iter() { item.collect_hessian_cells32(out); }
             }
-            fn accumulate_hessian_positions64(&self, resolve: &mut dyn FnMut(u32, u32) -> usize, out: &mut std::vec::Vec<usize>) {
-                for item in self.iter() { item.accumulate_hessian_positions64(resolve, out); }
+            fn bind_hessian_positions64(&mut self, binder: &mut HessianBinder, out: &mut std::vec::Vec<usize>) {
+                for item in self.$iter_mut() { item.bind_hessian_positions64(binder, out); }
             }
-            fn accumulate_hessian_positions32(&self, resolve: &mut dyn FnMut(u32, u32) -> usize, out: &mut std::vec::Vec<usize>) {
-                for item in self.iter() { item.accumulate_hessian_positions32(resolve, out); }
+            fn bind_hessian_positions32(&mut self, binder: &mut HessianBinder, out: &mut std::vec::Vec<usize>) {
+                for item in self.$iter_mut() { item.bind_hessian_positions32(binder, out); }
             }
             fn release_blocks(&mut self) {
                 for item in self.$iter_mut() { item.release_blocks(); }
@@ -1281,11 +1286,11 @@ impl<T: Model> Model for crate::refs::Arena<T> {
     fn collect_hessian_cells32(&self, out: &mut std::vec::Vec<(u32, u32)>) {
         for item in self.iter() { item.collect_hessian_cells32(out); }
     }
-    fn accumulate_hessian_positions64(&self, resolve: &mut dyn FnMut(u32, u32) -> usize, out: &mut std::vec::Vec<usize>) {
-        for item in self.iter() { item.accumulate_hessian_positions64(resolve, out); }
+    fn bind_hessian_positions64(&mut self, binder: &mut HessianBinder, out: &mut std::vec::Vec<usize>) {
+        for item in self.iter_mut() { item.bind_hessian_positions64(binder, out); }
     }
-    fn accumulate_hessian_positions32(&self, resolve: &mut dyn FnMut(u32, u32) -> usize, out: &mut std::vec::Vec<usize>) {
-        for item in self.iter() { item.accumulate_hessian_positions32(resolve, out); }
+    fn bind_hessian_positions32(&mut self, binder: &mut HessianBinder, out: &mut std::vec::Vec<usize>) {
+        for item in self.iter_mut() { item.bind_hessian_positions32(binder, out); }
     }
     fn release_blocks(&mut self) {
         for item in self.iter_mut() { item.release_blocks(); }
@@ -1370,11 +1375,11 @@ impl<T: Model> Model for Option<T> {
     fn collect_hessian_cells32(&self, out: &mut std::vec::Vec<(u32, u32)>) {
         if let Some(inner) = self { inner.collect_hessian_cells32(out); }
     }
-    fn accumulate_hessian_positions64(&self, resolve: &mut dyn FnMut(u32, u32) -> usize, out: &mut std::vec::Vec<usize>) {
-        if let Some(inner) = self { inner.accumulate_hessian_positions64(resolve, out); }
+    fn bind_hessian_positions64(&mut self, binder: &mut HessianBinder, out: &mut std::vec::Vec<usize>) {
+        if let Some(inner) = self { inner.bind_hessian_positions64(binder, out); }
     }
-    fn accumulate_hessian_positions32(&self, resolve: &mut dyn FnMut(u32, u32) -> usize, out: &mut std::vec::Vec<usize>) {
-        if let Some(inner) = self { inner.accumulate_hessian_positions32(resolve, out); }
+    fn bind_hessian_positions32(&mut self, binder: &mut HessianBinder, out: &mut std::vec::Vec<usize>) {
+        if let Some(inner) = self { inner.bind_hessian_positions32(binder, out); }
     }
     fn release_blocks(&mut self) {
         if let Some(inner) = self { inner.release_blocks(); }
@@ -1423,6 +1428,113 @@ fn tri_idx(n: usize, i: usize, j: usize) -> usize {
     i * (2 * n - i - 1) / 2 + j
 }
 
+/// Where a block scatters into the assembled Hessian's value buffer.
+///
+/// A block with a static tile shape needs no per-scalar position map: the
+/// whole tile follows from its origin and column stride, as
+/// `origin + (col - col_start) * stride + (row - row_start)`, with the two
+/// starts read off the block's own parameter indices. Storing this pair
+/// beside the indices replaces a map that runs about one entry per Hessian
+/// value.
+///
+/// A zero stride means there is no tile to walk, and the block scatters
+/// through the per-scalar map instead: either the pattern is not
+/// tile-expanded ([`MAPPED`](TilePosition::MAPPED)) or the block is entirely
+/// fixed and scatters nothing at all ([`UNBOUND`](TilePosition::UNBOUND)).
+#[derive(Clone, Copy, Debug)]
+struct TilePosition {
+    base: u32,
+    stride: u32,
+}
+
+impl TilePosition {
+    /// All parameters fixed: no tile, and the index walk emits nothing.
+    const UNBOUND: Self = TilePosition { base: u32::MAX, stride: 0 };
+    /// Pattern not tile-expanded: fall back to the per-scalar map.
+    const MAPPED: Self = TilePosition { base: 0, stride: 0 };
+
+    /// True if this block scatters through its tile rather than the map.
+    #[inline]
+    fn tiled(&self) -> bool { self.stride != 0 }
+
+    /// Narrow a resolved position into the packed 32-bit slot.
+    #[inline]
+    fn bound(base: usize, stride: usize) -> Self {
+        assert!(
+            base < u32::MAX as usize,
+            "Hessian value buffer holds {} entries; block tile positions are 32-bit \
+             and address at most {}",
+            base,
+            u32::MAX,
+        );
+        TilePosition { base: base as u32, stride: stride as u32 }
+    }
+}
+
+/// Smallest live index in `indices`, or `u32::MAX` if every slot is fixed.
+///
+/// Parameters serialize in declaration order and the index arrays are filled
+/// in that same order, so live indices ascend with the slot and the first one
+/// found is the smallest. `bind_tile` asserts this before relying on it.
+#[inline]
+fn tile_start(indices: &[u32]) -> u32 {
+    for &i in indices {
+        if i != u32::MAX {
+            return i;
+        }
+    }
+    u32::MAX
+}
+
+/// How a backend hands out scatter targets during
+/// [`Model::bind_hessian_positions64`].
+pub enum HessianBinder<'a> {
+    /// Tile-expanded pattern: every stored cell holds a full dense tile, so
+    /// one lookup fixes a whole block and only the tile's origin and column
+    /// stride need keeping.
+    Tiled(&'a mut dyn FnMut(u32, u32) -> (usize, usize)),
+    /// Pattern built from a COO pass: a cell's entries are not contiguous in
+    /// the value buffer, so every scalar needs its own position and the
+    /// blocks fall back to the per-scalar map.
+    Scalar(&'a mut dyn FnMut(u32, u32) -> usize),
+}
+
+/// Bind one tile, checking the ascending-index invariant that lets
+/// [`tile_start`] stop at the first live slot and lets the assembly derive a
+/// local coordinate by subtraction.
+#[inline]
+fn bind_tile(
+    bind: &mut dyn FnMut(u32, u32) -> (usize, usize),
+    row: &[u32],
+    col: &[u32],
+) -> TilePosition {
+    let (r, c) = (tile_start(row), tile_start(col));
+    if r == u32::MAX || c == u32::MAX {
+        return TilePosition::UNBOUND;
+    }
+    // Runs once per block per setup, so it is cheap next to the map it
+    // replaces, and the failure it guards against is a silently wrong
+    // Hessian rather than a crash.
+    assert!(ascending(row) && ascending(col), "live parameter indices must ascend with slot order");
+    let (base, stride) = bind(r.min(c), r.max(c));
+    TilePosition::bound(base, stride)
+}
+
+/// True if the live entries of `indices` are strictly ascending.
+fn ascending(indices: &[u32]) -> bool {
+    let mut last = None;
+    for &i in indices {
+        if i == u32::MAX {
+            continue;
+        }
+        if last.is_some_and(|l| i <= l) {
+            return false;
+        }
+        last = Some(i);
+    }
+    true
+}
+
 
 /// Hessian block for a single model type.
 ///
@@ -1436,6 +1548,10 @@ fn tri_idx(n: usize, i: usize, j: usize) -> usize {
 #[derive(Clone)]
 pub struct SelfBlock<A, const N: usize, const M: usize, T: crate::utils::Float = f64> {
     indices: [u32; N],
+    /// Value-buffer position of this block's tile origin and the tile's
+    /// column stride, from [`bind_hessian_positions`](Self::bind_hessian_positions).
+    /// `u32::MAX` base means unbound; see [`TilePosition`].
+    pos: TilePosition,
     hessian: [T; M], // upper triangle, M = N(N+1)/2 (the macro sizes this)
     _marker: std::marker::PhantomData<(A, T)>,
 }
@@ -1454,6 +1570,7 @@ impl<A, const N: usize, const M: usize, T: crate::utils::Float> SelfBlock<A, N, 
         let () = Self::CHECK_M;
         SelfBlock {
             indices: [u32::MAX; N],
+            pos: TilePosition::UNBOUND,
             hessian: [T::zero(); M],
             _marker: std::marker::PhantomData,
         }
@@ -1494,13 +1611,26 @@ impl<A, const N: usize, const M: usize, T: crate::utils::Float> SelfBlock<A, N, 
         }
     }
 
-    /// Push scatter positions in exactly the emission order of
+    /// Bind this block's diagonal tile for
+    /// [`accumulate_hessian_sparse_indexed`](Self::accumulate_hessian_sparse_indexed).
+    /// All of the block's parameters live in one entity span, so the whole
+    /// upper triangle sits in a single tile and a tiled binder leaves `out`
+    /// untouched. A scalar binder pushes one position per entry, in the
+    /// emission order of
     /// [`accumulate_hessian_sparse`](Self::accumulate_hessian_sparse).
-    pub fn accumulate_hessian_positions(
-        &self,
-        resolve: &mut dyn FnMut(u32, u32) -> usize,
+    pub fn bind_hessian_positions(
+        &mut self,
+        binder: &mut HessianBinder,
         out: &mut std::vec::Vec<usize>,
     ) {
+        let resolve = match binder {
+            HessianBinder::Tiled(bind) => {
+                self.pos = bind_tile(*bind, &self.indices, &self.indices);
+                return;
+            }
+            HessianBinder::Scalar(resolve) => resolve,
+        };
+        self.pos = TilePosition::MAPPED;
         for i in 0..N {
             let gi = self.indices[i];
             if gi == u32::MAX { continue; }
@@ -1645,17 +1775,46 @@ impl<A, const N: usize, const M: usize, T: crate::utils::Float> SelfBlock<A, N, 
         }
     }
 
-    /// Accumulate into CSC vals using precomputed position list.
-    /// `cursor` advances through `positions` in lockstep with block traversal.
+    /// Accumulate into the assembled value buffer through this block's bound
+    /// tile, leaving `positions` and `cursor` untouched. Blocks bound against
+    /// a pattern with no tile to walk fall back to the map.
     pub fn accumulate_hessian_sparse_indexed(&self, vals: &mut [T], positions: &[usize], cursor: &mut usize) {
+        if !self.pos.tiled() {
+            return self.accumulate_mapped_indexed(vals, positions, cursor);
+        }
+        let start = tile_start(&self.indices);
+        let (base, stride, start) =
+            (self.pos.base as usize, self.pos.stride as usize, start as usize);
+        // Column offset of each live slot: invariant across the outer loop.
+        let mut col = [0usize; N];
+        for (c, &g) in std::iter::zip(&mut col, &self.indices) {
+            if g != u32::MAX {
+                *c = (g as usize - start) * stride;
+            }
+        }
+        for i in 0..N {
+            let gi = self.indices[i];
+            if gi == u32::MAX { continue; }
+            let row = base + (gi as usize - start);
+            let tri = i * (2 * N - i - 1) / 2;
+            for j in i..N {
+                if self.indices[j] == u32::MAX { continue; }
+                vals[row + col[j]] += self.hessian[tri + j];
+            }
+        }
+    }
+
+    /// The untiled case of
+    /// [`accumulate_hessian_sparse_indexed`](Self::accumulate_hessian_sparse_indexed):
+    /// one cached position per entry, `cursor` advancing in lockstep with the
+    /// block traversal. An all-fixed block emits nothing and so consumes none.
+    fn accumulate_mapped_indexed(&self, vals: &mut [T], positions: &[usize], cursor: &mut usize) {
         for i in 0..N {
             let gi = self.indices[i];
             if gi == u32::MAX { continue; }
             for j in i..N {
-                let gj = self.indices[j];
-                if gj == u32::MAX { continue; }
-                let val = self.hessian[tri_idx(N, i, j)];
-                vals[positions[*cursor]] += val;
+                if self.indices[j] == u32::MAX { continue; }
+                vals[positions[*cursor]] += self.hessian[tri_idx(N, i, j)];
                 *cursor += 1;
             }
         }
@@ -1771,13 +1930,13 @@ impl<A, const N: usize, const M: usize, T: crate::utils::Float> BoxedSelfBlock<A
         if let Some(b) = &self.inner { b.collect_hessian_cells(out); }
     }
 
-    /// Scatter this block into CSC values through a precomputed position map.
-    pub fn accumulate_hessian_positions(
-        &self,
-        resolve: &mut dyn FnMut(u32, u32) -> usize,
+    /// Bind this block's tile in the assembled value buffer.
+    pub fn bind_hessian_positions(
+        &mut self,
+        binder: &mut HessianBinder,
         out: &mut std::vec::Vec<usize>,
     ) {
-        if let Some(b) = &self.inner { b.accumulate_hessian_positions(resolve, out); }
+        if let Some(b) = &mut self.inner { b.bind_hessian_positions(binder, out); }
     }
 
     /// Scatter this block into COO triplets.
@@ -1811,6 +1970,8 @@ impl<A, const N: usize, const M: usize, T: crate::utils::Float> BoxedSelfBlock<A
 pub struct CrossBlock<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Float = f64> {
     indices_a: [u32; NA],
     indices_b: [u32; NB],
+    /// Origin and column stride of the A-B tile; see [`TilePosition`].
+    pos: TilePosition,
     cross_hessian: [T; P],    // NA*NB row-major (the macro sizes this)
     _marker: std::marker::PhantomData<(A, B, T)>,
 }
@@ -1828,6 +1989,7 @@ impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Fl
         CrossBlock {
             indices_a: [u32::MAX; NA],
             indices_b: [u32::MAX; NB],
+            pos: TilePosition::UNBOUND,
             cross_hessian: [T::zero(); P],
             _marker: std::marker::PhantomData,
         }
@@ -1963,13 +2125,25 @@ impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Fl
         }
     }
 
-    /// Push scatter positions in exactly the emission order of
-    /// [`accumulate_hessian_sparse`](Self::accumulate_hessian_sparse).
-    pub fn accumulate_hessian_positions(
-        &self,
-        resolve: &mut dyn FnMut(u32, u32) -> usize,
+    /// Bind this block's tile for
+    /// [`accumulate_hessian_sparse_indexed`](Self::accumulate_hessian_sparse_indexed).
+    /// Both entities are contiguous spans, so every cross pair lands in the
+    /// one tile (the diagonal tile when the two slots alias one entity).
+    /// A scalar binder falls back to the map; see
+    /// [`SelfBlock::bind_hessian_positions`].
+    pub fn bind_hessian_positions(
+        &mut self,
+        binder: &mut HessianBinder,
         out: &mut std::vec::Vec<usize>,
     ) {
+        let resolve = match binder {
+            HessianBinder::Tiled(bind) => {
+                self.pos = bind_tile(*bind, &self.indices_a, &self.indices_b);
+                return;
+            }
+            HessianBinder::Scalar(resolve) => resolve,
+        };
+        self.pos = TilePosition::MAPPED;
         for i in 0..NA {
             let gi = self.indices_a[i];
             if gi == u32::MAX { continue; }
@@ -2020,8 +2194,67 @@ impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Fl
         }
     }
 
-    /// Accumulate into CSC vals via precomputed position list.
+    /// Accumulate into the assembled value buffer through this block's bound
+    /// tile; see the note on
+    /// [`SelfBlock::accumulate_hessian_sparse_indexed`].
     pub fn accumulate_hessian_sparse_indexed(&self, vals: &mut [T], positions: &[usize], cursor: &mut usize) {
+        if !self.pos.tiled() {
+            return self.accumulate_mapped_indexed(vals, positions, cursor);
+        }
+        let (sa, sb) = (tile_start(&self.indices_a), tile_start(&self.indices_b));
+        let (base, stride) = (self.pos.base as usize, self.pos.stride as usize);
+        if sa == sb {
+            // Aliased: both slots index one entity, so the pairs land on a
+            // diagonal tile and which side is the row flips per element.
+            return self.accumulate_aliased_indexed(vals, base, stride, sa as usize);
+        }
+        // The tile holds the upper block triangle, so the lower-numbered
+        // entity walks the rows and the other walks the columns.
+        let (step_a, step_b) = if sa < sb { (1, stride) } else { (stride, 1) };
+        let (sa, sb) = (sa as usize, sb as usize);
+        // Offset of each live B slot: invariant across the outer loop.
+        let mut off_b = [0usize; NB];
+        for (o, &g) in std::iter::zip(&mut off_b, &self.indices_b) {
+            if g != u32::MAX {
+                *o = (g as usize - sb) * step_b;
+            }
+        }
+        for i in 0..NA {
+            let gi = self.indices_a[i];
+            if gi == u32::MAX { continue; }
+            let pos = base + (gi as usize - sa) * step_a;
+            let row = i * NB;
+            for j in 0..NB {
+                if self.indices_b[j] == u32::MAX { continue; }
+                vals[pos + off_b[j]] += self.cross_hessian[row + j];
+            }
+        }
+    }
+
+    /// The aliased case of [`accumulate_hessian_sparse_indexed`](Self::accumulate_hessian_sparse_indexed):
+    /// one entity in both slots, every pair on its diagonal tile.
+    fn accumulate_aliased_indexed(&self, vals: &mut [T], base: usize, stride: usize, start: usize) {
+        for i in 0..NA {
+            let gi = self.indices_a[i];
+            if gi == u32::MAX { continue; }
+            let row = i * NB;
+            for j in 0..NB {
+                let gj = self.indices_b[j];
+                if gj == u32::MAX { continue; }
+                let (lo, hi) = if gi <= gj { (gi, gj) } else { (gj, gi) };
+                let val = self.cross_hessian[row + j];
+                // The triangle stores each symmetric pair once, so a pair that
+                // lands on the diagonal needs both contributions.
+                let val = if gi == gj { val + val } else { val };
+                vals[base + (hi as usize - start) * stride + (lo as usize - start)] += val;
+            }
+        }
+    }
+
+    /// The untiled case of
+    /// [`accumulate_hessian_sparse_indexed`](Self::accumulate_hessian_sparse_indexed):
+    /// one cached position per entry.
+    fn accumulate_mapped_indexed(&self, vals: &mut [T], positions: &[usize], cursor: &mut usize) {
         for i in 0..NA {
             let gi = self.indices_a[i];
             if gi == u32::MAX { continue; }
@@ -2141,13 +2374,13 @@ impl<A, B, const NA: usize, const NB: usize, const P: usize, T: crate::utils::Fl
         if let Some(b) = &self.inner { b.collect_hessian_cells(out); }
     }
 
-    /// Scatter this block into CSC values through a precomputed position map.
-    pub fn accumulate_hessian_positions(
-        &self,
-        resolve: &mut dyn FnMut(u32, u32) -> usize,
+    /// Bind this block's tile in the assembled value buffer.
+    pub fn bind_hessian_positions(
+        &mut self,
+        binder: &mut HessianBinder,
         out: &mut std::vec::Vec<usize>,
     ) {
-        if let Some(b) = &self.inner { b.accumulate_hessian_positions(resolve, out); }
+        if let Some(b) = &mut self.inner { b.bind_hessian_positions(binder, out); }
     }
 
     /// Scatter this block into COO triplets.
@@ -2391,15 +2624,22 @@ impl<T: crate::utils::Float> TripletBlock<T> {
         }
     }
 
-    /// Push scatter positions in exactly the emission order of
+    /// Push one scatter position per entry, in the emission order of
     /// [`accumulate_hessian_sparse`](Self::accumulate_hessian_sparse).
-    pub fn accumulate_hessian_positions(
-        &self,
-        resolve: &mut dyn FnMut(u32, u32) -> usize,
+    ///
+    /// The entries carry no static tile shape -- the pattern is only known
+    /// after a compute -- so this block keeps the per-scalar map that
+    /// [`SelfBlock`] and [`CrossBlock`] no longer need.
+    pub fn bind_hessian_positions(
+        &mut self,
+        binder: &mut HessianBinder,
         out: &mut std::vec::Vec<usize>,
     ) {
         for &(i, j, _) in &self.hessian {
-            out.push(resolve(i, j));
+            out.push(match binder {
+                HessianBinder::Tiled(bind) => bind(i, j).0,
+                HessianBinder::Scalar(resolve) => resolve(i, j),
+            });
         }
     }
 
@@ -2479,12 +2719,12 @@ macro_rules! block_model_methods {
             self.collect_hessian_cells(out);
         }
         #[inline]
-        fn accumulate_hessian_positions32(
-            &self,
-            resolve: &mut dyn FnMut(u32, u32) -> usize,
+        fn bind_hessian_positions32(
+            &mut self,
+            binder: &mut HessianBinder,
             out: &mut std::vec::Vec<usize>,
         ) {
-            self.accumulate_hessian_positions(resolve, out);
+            self.bind_hessian_positions(binder, out);
         }
     };
     (f64) => {
@@ -2518,12 +2758,12 @@ macro_rules! block_model_methods {
             self.collect_hessian_cells(out);
         }
         #[inline]
-        fn accumulate_hessian_positions64(
-            &self,
-            resolve: &mut dyn FnMut(u32, u32) -> usize,
+        fn bind_hessian_positions64(
+            &mut self,
+            binder: &mut HessianBinder,
             out: &mut std::vec::Vec<usize>,
         ) {
-            self.accumulate_hessian_positions(resolve, out);
+            self.bind_hessian_positions(binder, out);
         }
     };
 }

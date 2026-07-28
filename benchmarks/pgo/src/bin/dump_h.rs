@@ -92,9 +92,9 @@ fn main() {
         let partition = block_partition_from_spans(&spans, n);
         let (mut csc, mut resolver) = csc_from_cells::<f64>(&partition, &cells);
         let mut positions = std::vec::Vec::new();
-        LmProblem::accumulate_hessian_positions(
+        LmProblem::bind_hessian_positions(
             &mut g,
-            &mut |i, j| resolver.resolve(i, j),
+            &mut arael::model::HessianBinder::Tiled(&mut |i, j| resolver.resolve_tile(i, j)),
             &mut positions,
         );
         let mut grad = vec![0.0; n];
