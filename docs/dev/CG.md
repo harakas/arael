@@ -102,11 +102,16 @@ those same factors per matvec, so this is the shared groundwork.
 bit-identically (225347.2179) at the same 9(16) iterations -- the operator is
 exact through a whole solve -- and loses on time as predicted:
 
-| Ladybug-372, f64 | full-iter | total ms |
-|------------------|----------:|---------:|
-| schur (factorize) | 206.28 | 3908.78 |
-| schur-cg (explicit) | 116.92 | 1735.84 |
-| schur-cg-implicit | 203.90 | 2956.07 |
+| Ladybug-372, f64 | full-iter | total ms | peak MB |
+|------------------|----------:|---------:|--------:|
+| schur (factorize) | 189.00 | 3549 | 356.3 |
+| schur-cg (explicit) | 106.06 | 1582 | 234.6 |
+| schur-cg-implicit | 186.85 | 2748 | 217.6 |
+
+It buys 17 MB for 1.76x the time there -- and 17 MB is what S weighs, so the
+accounting is exact: not forming S saves only S. At 372 that is 18 MB of a
+235 MB peak, the rest being H and the model, which the implicit route does not
+touch. The memory case therefore scales with S, and S is ~78 MB at 1723.
 
 Worse than the estimate above, though: ~5.5 ms per implicit product against
 ~1.5 ms explicit, so 3.7x rather than the projected 2.5x. Two candidates, both
@@ -129,9 +134,9 @@ the 3x projected, because the implicit product costs more than estimated (see
 above). Against Ceres iterative_schur there (393.97 ms/iter, 9269 ms) it is
 1.51x per iteration and 1.11x overall.
 
-Not yet measured: peak memory on this route, which should be below the
-explicit one's since S is never allocated. Both 1723 runs above used
-BAL_NO_MEM.
+Not yet measured: peak memory at 1723, where S is ~78 MB rather than 372's
+18 MB, so the saving should be correspondingly larger. Both 1723 runs above
+used BAL_NO_MEM.
 
 The pieces, all done and each pinned against the explicit route: `schur_apply`
 (the product) and `schur_factor_eliminated`, checked column by column against
