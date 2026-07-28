@@ -121,11 +121,11 @@ product where the explicit route pays that once per solve.
 
 On Ladybug-1723-clean, the case it was built for, it wins:
 
-| Ladybug-1723-clean, f64 | full-iter | total ms |
-|-------------------------|----------:|---------:|
-| schur (factorize) | 1766.22 | 47634 |
-| schur-cg (explicit) | 314.83 | 9583 |
-| schur-cg-implicit | **261.12** | **8322** |
+| Ladybug-1723-clean, f64 | full-iter | total ms | peak MB |
+|-------------------------|----------:|---------:|--------:|
+| schur (factorize) | 1735.78 | 46424 | 1388.0 |
+| schur-cg (explicit) | 306.37 | 9333 | 778.6 |
+| schur-cg-implicit | **264.42** | **8099** | **704.8** |
 
 1.21x per iteration and 1.15x total over the explicit route, same cost
 bit-identically at the same 23(32) iterations. So the crossover is real and
@@ -134,9 +134,16 @@ the 3x projected, because the implicit product costs more than estimated (see
 above). Against Ceres iterative_schur there (393.97 ms/iter, 9269 ms) it is
 1.51x per iteration and 1.11x overall.
 
-Not yet measured: peak memory at 1723, where S is ~78 MB rather than 372's
-18 MB, so the saving should be correspondingly larger. Both 1723 runs above
-used BAL_NO_MEM.
+Memory: 73.8 MB below the explicit route, which is what S weighs there -- the
+same exact accounting as 372's 17 MB. And 683 MB below the factorizing route,
+roughly half its peak.
+
+Against Ceres iterative_schur (393.97 ms, 618.4 MB): 1.49x per iteration, 14%
+more memory. That last number is where the memory story now ends for this
+work. Nothing is held for the linear solve beyond H itself -- no factor, no S,
+no ordering, no symbolic -- so the remaining gap is H and the model
+representation (H alone is ~160 MB at 678k observations with 9x3 cross tiles).
+Further memory work belongs there, not in the solver.
 
 The pieces, all done and each pinned against the explicit route: `schur_apply`
 (the product) and `schur_factor_eliminated`, checked column by column against
