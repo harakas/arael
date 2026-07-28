@@ -114,35 +114,36 @@ untested: `schur_apply` walks S's structure for the `B x` part and so visits
 fill tiles it then skips, and it calls `gemm_sub` once per observer per
 product where the explicit route pays that once per solve.
 
-Ladybug-1723 is the case it was built for (~6 products per solve against 372's
-~35) and is not yet measured.
+On Ladybug-1723-clean, the case it was built for, it wins:
 
-**Operator DONE**: `schur_factor_eliminated` factors the eliminated blocks
-without reducing, and `schur_apply` computes `B x - E C^-1 (E^T x)` over the
-flattened observer arrays the symbolic already carries. A test checks it
-column by column against `schur_reduce` + `mul_symmetric_upper` over four
-elimination sets, so the two operators are pinned to each other.
+| Ladybug-1723-clean, f64 | full-iter | total ms |
+|-------------------------|----------:|---------:|
+| schur (factorize) | 1766.22 | 47634 |
+| schur-cg (explicit) | 314.83 | 9583 |
+| schur-cg-implicit | **261.12** | **8322** |
 
-Still to wire, in order:
+1.21x per iteration and 1.15x total over the explicit route, same cost
+bit-identically at the same 23(32) iterations. So the crossover is real and
+sits where the products-per-solve model put it -- but the margin is 1.21x, not
+the 3x projected, because the implicit product costs more than estimated (see
+above). Against Ceres iterative_schur there (393.97 ms/iter, 9269 ms) it is
+1.51x per iteration and 1.11x overall.
 
-1. **The reduced right-hand side without S.** `schur_reduce` produces
-   `rhs_kept` as a side effect; the implicit route needs the same vector and
-   nothing else from it. One pass over the observers, the same shape as the
-   gather in `schur_apply`.
-2. **Block Jacobi without S.** The preconditioner needs S's diagonal blocks,
-   `S_aa = B_aa - sum_e C_ae C_e^-1 C_ae^T` -- the `a == b` subset of the
-   reduction's pair loop. Everything else in `cg::BlockJacobi` stays.
-3. **`cg::solve` over a closure** rather than `&SparseBlockColMat`. Lighter
-   than a trait and serves both forms: the explicit route passes
-   `|x, y| s.mul_symmetric_upper(x, y)`.
-4. **`SchurSolve::IterativeImplicit(CgOptions)`** and a benchmark route, so it
-   can be measured. No selection rule yet -- deliberately, until there are
-   numbers on both.
+Not yet measured: peak memory on this route, which should be below the
+explicit one's since S is never allocated. Both 1723 runs above used
+BAL_NO_MEM.
 
-Watch for, when measuring: `schur_apply` walks S's structure to place H's
-kept-kept tiles, and S's structure includes fill the elimination created that
-H never had. Those tiles are skipped, but the traversal still visits them, so
-a very fill-heavy reduced system pays for structure it does not use.
+The pieces, all done and each pinned against the explicit route: `schur_apply`
+(the product) and `schur_factor_eliminated`, checked column by column against
+`schur_reduce` + `mul_symmetric_upper`; `schur_prepare_implicit` (the reduced
+rhs and S's diagonal blocks), checked against `schur_reduce`'s own; `cg::solve`
+over a closure rather than a matrix; `BlockJacobi::from_diagonal_blocks`.
+
+Where the extra cost may be, if it is worth chasing: `schur_apply` walks S's
+structure to place H's kept-kept tiles, so it visits fill tiles the elimination
+created and then skips them -- a kept-kept-only tile list would not. And it
+calls `gemm_sub` once per observer per product, where the explicit route pays
+that once per solve.
 
 ## 3. The matrix-vector product
 
