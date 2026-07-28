@@ -1341,6 +1341,110 @@ pub fn schur_apply<I: Index, T: SchurReal>(
     }
 }
 
+/// Everything the implicit route needs that [`schur_apply`] does not supply:
+/// the reduced right-hand side CG solves for, and S's diagonal blocks, which
+/// its preconditioner factors. Neither requires S.
+///
+/// Also leaves the eliminated blocks' Cholesky factors in `ctx`, so a
+/// [`schur_apply`] that follows needs no separate
+/// [`schur_factor_eliminated`].
+///
+/// `diag` is filled with each kept block's `S_aa`, FULL and symmetric,
+/// column-major, concatenated in kept order, and `spans` with its
+/// `(scalar offset, width)` -- together the layout
+/// `cg::BlockJacobi::from_diagonal_blocks` reads.
+pub fn schur_prepare_implicit<I: Index, T: SchurReal>(
+    sym: &SchurSymbolic<I>,
+    h: &SparseBlockColMat<I, T>,
+    rhs: &[T],
+    ctx: &mut SchurContext<T>,
+    rhs_kept: &mut [T],
+    diag: &mut std::vec::Vec<T>,
+    spans: &mut std::vec::Vec<(usize, usize)>,
+) -> Result<(), SchurError> {
+    let hs = h.symbolic();
+    assert_eq!(rhs_kept.len(), sym.s.nrows());
+    ctx.dwork.resize(sym.max_ew * sym.max_ew, T::ZERO);
+    ctx.panel.resize(sym.max_panel, T::ZERO);
+    size_efactors(sym, hs, ctx);
+
+    // Seed: the kept rhs is b_kept, and S's diagonal starts as H's.
+    spans.clear();
+    diag.clear();
+    let mut diag_at = std::vec::Vec::with_capacity(sym.kept.len());
+    for k in 0..sym.kept.len() {
+        let orig = sym.kept[k].zx();
+        let hspan = hs.col_span(orig);
+        let kspan = sym.s.col_span(k);
+        let w = kspan.len();
+        rhs_kept[kspan.clone()].copy_from_slice(&rhs[hspan]);
+        spans.push((kspan.start, w));
+        diag_at.push(diag.len());
+        let base = diag.len();
+        diag.resize(base + w * w, T::ZERO);
+        if let Some(b) = hs.col_range(orig).find(|&b| hs.blk_row(b) == orig) {
+            let tile = &h.vals()[hs.val_range(b)];
+            read_symmetric_tile(tile, &mut diag[base..base + w * w], w);
+        }
+    }
+
+    // Subtract each eliminated block's contribution: the same panel solve the
+    // reduction does, but only the a == a pairs and the rhs column are used.
+    for slot in 0..sym.elim_diag.len() {
+        let d_blk = sym.elim_diag[slot].zx();
+        let e = hs.blk_row(d_blk);
+        let we = hs.col_span(e).len();
+
+        let dwork = &mut ctx.dwork[..we * we];
+        read_symmetric_tile(&h.vals()[hs.val_range(d_blk)], dwork, we);
+        if !llt_in_place(dwork, we) {
+            return Err(SchurError::NotPositiveDefinite { block: e });
+        }
+        ctx.efactors[ctx.efactor_at[slot]..ctx.efactor_at[slot + 1]]
+            .copy_from_slice(dwork);
+
+        let orange = sym.elim_obs_ptr[slot].zx()..sym.elim_obs_ptr[slot + 1].zx();
+        let col = sym.elim_ncols[slot].zx();
+        for o in orange.clone() {
+            let wo = sym.obs_w[o].zx();
+            let ca = sym.obs_ca_off[o].zx();
+            let tile = &h.vals()[ca..ca + wo * we];
+            let ocol = sym.obs_panel_col[o].zx();
+            let dst = &mut ctx.panel[ocol * we..(ocol + wo) * we];
+            if sym.obs_trans[o] {
+                dst.copy_from_slice(tile);
+            } else {
+                for cc in 0..wo {
+                    for rr in 0..we {
+                        dst[rr + cc * we] = tile[cc + rr * wo];
+                    }
+                }
+            }
+        }
+        ctx.panel[col * we..col * we + we].copy_from_slice(&rhs[hs.col_span(e)]);
+        llt_solve_panel(dwork, &mut ctx.panel[..(col + 1) * we], we, col + 1);
+
+        for o in orange {
+            let wa = sym.obs_w[o].zx();
+            let ca = sym.obs_ca_off[o].zx();
+            let tile = &h.vals()[ca..ca + wa * we];
+            let trans = sym.obs_trans[o];
+            let kept_off = sym.obs_kept_off[o].zx();
+            // Kept ids are ascending in `spans`, and an observer's kept offset
+            // IS the start of its span, so this locates its diagonal block.
+            let ki = spans.binary_search_by_key(&kept_off, |&(s, _)| s).unwrap();
+            let base = diag_at[ki];
+            let ocol = sym.obs_panel_col[o].zx();
+            let z_a = &ctx.panel[ocol * we..(ocol + wa) * we];
+            gemm_sub(&mut diag[base..base + wa * wa], tile, trans, wa, we, z_a, wa);
+            // b_kept(a) -= C_a z_b
+            let z_b = &ctx.panel[col * we..col * we + we];
+            gemm_sub(&mut rhs_kept[kept_off..kept_off + wa], tile, trans, wa, we, z_b, 1);
+        }
+    }
+    Ok(())
+}
+
 /// Read a tile stored upper-only into a full symmetric `w x w` scratch.
 #[inline]
 fn read_symmetric_tile<T: SchurReal>(tile: &[T], out: &mut [T], w: usize) {
@@ -2170,6 +2274,54 @@ mod tests {
                         elim, k, i, got[i], want[i]
                     );
                 }
+            }
+        }
+    }
+
+    /// The implicit route's right-hand side and diagonal blocks must be the
+    /// ones the reduction produces -- the rhs it solves for, and the blocks
+    /// its preconditioner factors.
+    #[test]
+    fn implicit_rhs_and_diagonal_match_the_reduction() {
+        for elim in [&[2usize][..], &[1, 4][..], &[0][..]] {
+            let (h, rhs) = fixture();
+            let sym = schur_symbolic(h.symbolic(), elim).unwrap();
+            let nk = sym.s.nrows();
+
+            let mut s = sym.alloc_s::<f64>();
+            let mut ctx = SchurContext::new();
+            let mut rk = vec![0.0; nk];
+            schur_reduce(&sym, &h, &rhs, &mut ctx, &mut s, &mut rk).unwrap();
+
+            let mut ictx = SchurContext::new();
+            let mut irk = vec![0.0; nk];
+            let mut diag = std::vec::Vec::new();
+            let mut spans = std::vec::Vec::new();
+            schur_prepare_implicit(&sym, &h, &rhs, &mut ictx, &mut irk,
+                                   &mut diag, &mut spans).unwrap();
+
+            for i in 0..nk {
+                assert!((irk[i] - rk[i]).abs() < 1e-9,
+                    "elim {:?}, rhs {}: implicit {} vs explicit {}", elim, i, irk[i], rk[i]);
+            }
+
+            // Every diagonal block, against the same block read out of S.
+            let mut at = 0usize;
+            for (k, &(start, w)) in spans.iter().enumerate() {
+                assert_eq!(start, sym.s.col_span(k).start);
+                let tile = s.get_block(k, k).expect("S has no diagonal tile");
+                for c in 0..w {
+                    for r in 0..w {
+                        // S stores the upper triangle only; diag is full.
+                        let (lo, hi) = if r <= c { (r, c) } else { (c, r) };
+                        let want = tile[(lo, hi)];
+                        let got = diag[at + c * w + r];
+                        assert!((got - want).abs() < 1e-9,
+                            "elim {:?}, block {} ({},{}) : {} vs {}",
+                            elim, k, r, c, got, want);
+                    }
+                }
+                at += w * w;
             }
         }
     }
