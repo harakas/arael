@@ -154,14 +154,20 @@ class PriorRef:
 
 
 class Edge:
-    """A `Edge` in its owner's storage; a thin pointer wrapper
-    (validity follows the storage)."""
+    """A `Edge` in its owner's storage, addressed by key rather than by
+    pointer: the pointer is re-resolved on every access, so growing the
+    collection cannot leave this wrapper dangling."""
 
-    __slots__ = ("_p",)
+    __slots__ = ("_at",)
     param_count = 0
 
-    def __init__(self, p):
-        self._p = p
+    def __init__(self, at):
+        # Zero-argument callable returning a currently-valid pointer.
+        self._at = at
+
+    @property
+    def _p(self):
+        return self._at()
 
     @property
     def a(self):
@@ -213,14 +219,20 @@ class Edge:
 
 
 class Pose2:
-    """A `Pose2` in its owner's storage; a thin pointer wrapper
-    (validity follows the storage)."""
+    """A `Pose2` in its owner's storage, addressed by key rather than by
+    pointer: the pointer is re-resolved on every access, so growing the
+    collection cannot leave this wrapper dangling."""
 
-    __slots__ = ("_p",)
+    __slots__ = ("_at",)
     param_count = 3
 
-    def __init__(self, p):
-        self._p = p
+    def __init__(self, at):
+        # Zero-argument callable returning a currently-valid pointer.
+        self._at = at
+
+    @property
+    def _p(self):
+        return self._at()
 
     @property
     def pos(self):
@@ -261,14 +273,20 @@ class Pose2:
 
 
 class Prior:
-    """A `Prior` in its owner's storage; a thin pointer wrapper
-    (validity follows the storage)."""
+    """A `Prior` in its owner's storage, addressed by key rather than by
+    pointer: the pointer is re-resolved on every access, so growing the
+    collection cannot leave this wrapper dangling."""
 
-    __slots__ = ("_p",)
+    __slots__ = ("_at",)
     param_count = 0
 
-    def __init__(self, p):
-        self._p = p
+    def __init__(self, at):
+        # Zero-argument callable returning a currently-valid pointer.
+        self._at = at
+
+    @property
+    def _p(self):
+        return self._at()
 
     @property
     def p(self):
@@ -380,17 +398,17 @@ class GraphPosesVec:
 
     def __getitem__(self, i):
         if isinstance(i, Pose2Ref):
-            return Pose2(_f.graph_poses_get(self._p, i.raw))
+            return Pose2(lambda r=i.raw: _f.graph_poses_get(self._p, r))
         n = len(self)
         if i < 0:
             i += n
         if not 0 <= i < n:
             raise IndexError(i)
-        return Pose2(_f.graph_poses_at(self._p, i))
+        return Pose2(lambda i=i: _f.graph_poses_at(self._p, i))
 
     def __iter__(self):
         for i in range(len(self)):
-            yield Pose2(_f.graph_poses_at(self._p, i))
+            yield Pose2(lambda i=i: _f.graph_poses_at(self._p, i))
 
     def clear(self):
         _f.graph_poses_clear(self._p)
@@ -399,14 +417,15 @@ class GraphPosesVec:
         _f.graph_poses_truncate(self._p, n)
 
     def push(self):
-        return Pose2(_f.graph_poses_push(self._p))
+        _f.graph_poses_push(self._p)
+        return self[self.ref_at(len(self) - 1)]
 
     def pop(self):
         """Drops the last element; False when already empty."""
         return _f.graph_poses_pop(self._p)
 
     def get(self, r):
-        return Pose2(_f.graph_poses_get(self._p, _raw(r)))
+        return Pose2(lambda k=_raw(r): _f.graph_poses_get(self._p, k))
 
     def __contains__(self, r):
         return _f.graph_poses_contains(self._p, _raw(r))
@@ -414,7 +433,7 @@ class GraphPosesVec:
     def try_get(self, r):
         """The element, or None for a stale or foreign ref."""
         p = _f.graph_poses_try_get(self._p, _raw(r))
-        return Pose2(p) if p else None
+        return Pose2(lambda k=_raw(r): _f.graph_poses_get(self._p, k)) if p else None
 
     def ref_at(self, i):
         return Pose2Ref(_f.graph_poses_ref_at(self._p, i))
@@ -449,11 +468,11 @@ class GraphEdgesVec:
             i += n
         if not 0 <= i < n:
             raise IndexError(i)
-        return Edge(_f.graph_edges_at(self._p, i))
+        return Edge(lambda i=i: _f.graph_edges_at(self._p, i))
 
     def __iter__(self):
         for i in range(len(self)):
-            yield Edge(_f.graph_edges_at(self._p, i))
+            yield Edge(lambda i=i: _f.graph_edges_at(self._p, i))
 
     def clear(self):
         _f.graph_edges_clear(self._p)
@@ -462,7 +481,8 @@ class GraphEdgesVec:
         _f.graph_edges_truncate(self._p, n)
 
     def push(self):
-        return Edge(_f.graph_edges_push(self._p))
+        _f.graph_edges_push(self._p)
+        return self[len(self) - 1]
 
     def pop(self):
         """Drops the last element; False when already empty."""
@@ -553,11 +573,13 @@ class Graph:
     @property
     def prior(self):
         """The `Prior`, or None while absent (make_prior() creates)."""
-        p = _f.graph_prior(self._p)
-        return Prior(p) if p else None
+        if not _f.graph_prior(self._p):
+            return None
+        return Prior(lambda: _f.graph_prior(self._p))
 
     def make_prior(self):
-        return Prior(_f.graph_make_prior(self._p))
+        _f.graph_make_prior(self._p)
+        return Prior(lambda: _f.graph_prior(self._p))
 
     def clear_prior(self):
         _f.graph_clear_prior(self._p)

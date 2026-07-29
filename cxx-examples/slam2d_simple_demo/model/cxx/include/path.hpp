@@ -221,7 +221,16 @@ public:
     uint32_t size() const { return ffi::path_landmark_frines_len(h_); }
     bool empty() const { return size() == 0; }
     void reserve(uint32_t additional) { ffi::path_landmark_frines_reserve(h_, additional); }
+    /// Appends a default element and returns a wrapper for it.
+    ///
+    /// The wrapper holds a pointer INTO the collection, so it follows the
+    /// std::vector rule: any later push may reallocate, and every wrapper
+    /// taken before it -- including wrappers into collections nested inside
+    /// these elements -- is then dangling. Either reserve() the count up
+    /// front, or re-take the wrapper with operator[] after the growth.
+    /// To hold on to an element across pushes, keep its Ref, not a wrapper.
     Frine push() { return Frine(ffi::path_landmark_frines_push(h_)); }
+    /// Wrapper for element `i`; see push() on how long it stays valid.
     Frine operator[](uint32_t i) { return Frine(ffi::path_landmark_frines_at(h_, i)); }
     /// Front/back of a non-empty vec (empty = UB, like STL).
     Frine front() { return (*this)[0]; }
@@ -433,8 +442,18 @@ public:
     uint32_t size() const { return ffi::path_poses_len(h_); }
     bool empty() const { return size() == 0; }
     void reserve(uint32_t additional) { ffi::path_poses_reserve(h_, additional); }
+    /// Appends a default element and returns a wrapper for it.
+    ///
+    /// The wrapper holds a pointer INTO the collection, so it follows the
+    /// std::deque rule: a later push may move the elements, and every
+    /// wrapper taken before it -- including wrappers into collections
+    /// nested inside these elements -- is then dangling. Either reserve()
+    /// the count up front, or re-take the wrapper with operator[] after
+    /// the growth. To hold on to an element across pushes, keep its Ref.
     Pose push_back() { return Pose(ffi::path_poses_push_back(h_)); }
+    /// See push_back() on how long the wrapper stays valid.
     Pose push_front() { return Pose(ffi::path_poses_push_front(h_)); }
+    /// Wrapper for element `i`; see push_back() on validity.
     Pose operator[](uint32_t i) { return Pose(ffi::path_poses_at(h_, i)); }
     /// Front/back of a non-empty deque (empty = UB, like STL).
     Pose front() { return (*this)[0]; }
@@ -520,7 +539,16 @@ public:
     uint32_t size() const { return ffi::path_pose_pairs_len(h_); }
     bool empty() const { return size() == 0; }
     void reserve(uint32_t additional) { ffi::path_pose_pairs_reserve(h_, additional); }
+    /// Appends a default element and returns a wrapper for it.
+    ///
+    /// The wrapper holds a pointer INTO the collection, so it follows the
+    /// std::vector rule: any later push may reallocate, and every wrapper
+    /// taken before it -- including wrappers into collections nested inside
+    /// these elements -- is then dangling. Either reserve() the count up
+    /// front, or re-take the wrapper with operator[] after the growth.
+    /// To hold on to an element across pushes, keep its Ref, not a wrapper.
     PosePair push() { return PosePair(ffi::path_pose_pairs_push(h_)); }
+    /// Wrapper for element `i`; see push() on how long it stays valid.
     PosePair operator[](uint32_t i) { return PosePair(ffi::path_pose_pairs_at(h_, i)); }
     /// Front/back of a non-empty vec (empty = UB, like STL).
     PosePair front() { return (*this)[0]; }

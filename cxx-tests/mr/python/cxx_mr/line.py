@@ -106,14 +106,20 @@ class ObRef:
 
 
 class Ob:
-    """A `Ob` in its owner's storage; a thin pointer wrapper
-    (validity follows the storage)."""
+    """A `Ob` in its owner's storage, addressed by key rather than by
+    pointer: the pointer is re-resolved on every access, so growing the
+    collection cannot leave this wrapper dangling."""
 
-    __slots__ = ("_p",)
+    __slots__ = ("_at",)
     param_count = 0
 
-    def __init__(self, p):
-        self._p = p
+    def __init__(self, at):
+        # Zero-argument callable returning a currently-valid pointer.
+        self._at = at
+
+    @property
+    def _p(self):
+        return self._at()
 
     @property
     def x(self):
@@ -206,11 +212,11 @@ class LineObsVec:
             i += n
         if not 0 <= i < n:
             raise IndexError(i)
-        return Ob(_f.line_obs_at(self._p, i))
+        return Ob(lambda i=i: _f.line_obs_at(self._p, i))
 
     def __iter__(self):
         for i in range(len(self)):
-            yield Ob(_f.line_obs_at(self._p, i))
+            yield Ob(lambda i=i: _f.line_obs_at(self._p, i))
 
     def clear(self):
         _f.line_obs_clear(self._p)
@@ -219,7 +225,8 @@ class LineObsVec:
         _f.line_obs_truncate(self._p, n)
 
     def push(self):
-        return Ob(_f.line_obs_push(self._p))
+        _f.line_obs_push(self._p)
+        return self[len(self) - 1]
 
     def pop(self):
         """Drops the last element; False when already empty."""

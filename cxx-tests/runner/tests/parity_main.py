@@ -348,3 +348,16 @@ try:
 except AraelError as e:
     pi("bad_status", e.status)
     pi("bad_has_error", 1 if len(e.message) > 0 else 0)
+
+# A wrapper is keyed, not a cached pointer: growing the collection past its
+# capacity must not leave an earlier wrapper reading the old buffer. Checked
+# here rather than against the Rust mirror -- Rust indexes its collections
+# directly and has nothing to mirror.
+f11 = fit.Fit()
+held = f11.rigs.push()
+held.target_g = 1.75
+for _ in range(200):
+    f11.rigs.push()
+f11.rigs[0].target_g = 9.99          # write through a fresh lookup
+assert held.target_g == 9.99, (
+    "wrapper went stale after the collection grew: %r" % held.target_g)

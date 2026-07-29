@@ -178,14 +178,20 @@ class PosePairRef:
 
 
 class Frine:
-    """A `Frine` in its owner's storage; a thin pointer wrapper
-    (validity follows the storage)."""
+    """A `Frine` in its owner's storage, addressed by key rather than by
+    pointer: the pointer is re-resolved on every access, so growing the
+    collection cannot leave this wrapper dangling."""
 
-    __slots__ = ("_p",)
+    __slots__ = ("_at",)
     param_count = 0
 
-    def __init__(self, p):
-        self._p = p
+    def __init__(self, at):
+        # Zero-argument callable returning a currently-valid pointer.
+        self._at = at
+
+    @property
+    def _p(self):
+        return self._at()
 
     @property
     def pose(self):
@@ -233,11 +239,11 @@ class LandmarkFrinesVec:
             i += n
         if not 0 <= i < n:
             raise IndexError(i)
-        return Frine(_f.path_landmark_frines_at(self._p, i))
+        return Frine(lambda i=i: _f.path_landmark_frines_at(self._p, i))
 
     def __iter__(self):
         for i in range(len(self)):
-            yield Frine(_f.path_landmark_frines_at(self._p, i))
+            yield Frine(lambda i=i: _f.path_landmark_frines_at(self._p, i))
 
     def clear(self):
         _f.path_landmark_frines_clear(self._p)
@@ -246,7 +252,8 @@ class LandmarkFrinesVec:
         _f.path_landmark_frines_truncate(self._p, n)
 
     def push(self):
-        return Frine(_f.path_landmark_frines_push(self._p))
+        _f.path_landmark_frines_push(self._p)
+        return self[len(self) - 1]
 
     def pop(self):
         """Drops the last element; False when already empty."""
@@ -254,14 +261,20 @@ class LandmarkFrinesVec:
 
 
 class Landmark:
-    """A `Landmark` in its owner's storage; a thin pointer wrapper
-    (validity follows the storage)."""
+    """A `Landmark` in its owner's storage, addressed by key rather than by
+    pointer: the pointer is re-resolved on every access, so growing the
+    collection cannot leave this wrapper dangling."""
 
-    __slots__ = ("_p",)
+    __slots__ = ("_at",)
     param_count = 2
 
-    def __init__(self, p):
-        self._p = p
+    def __init__(self, at):
+        # Zero-argument callable returning a currently-valid pointer.
+        self._at = at
+
+    @property
+    def _p(self):
+        return self._at()
 
     @property
     def pos(self):
@@ -285,14 +298,20 @@ class Landmark:
 
 
 class Pose:
-    """A `Pose` in its owner's storage; a thin pointer wrapper
-    (validity follows the storage)."""
+    """A `Pose` in its owner's storage, addressed by key rather than by
+    pointer: the pointer is re-resolved on every access, so growing the
+    collection cannot leave this wrapper dangling."""
 
-    __slots__ = ("_p",)
+    __slots__ = ("_at",)
     param_count = 3
 
-    def __init__(self, p):
-        self._p = p
+    def __init__(self, at):
+        # Zero-argument callable returning a currently-valid pointer.
+        self._at = at
+
+    @property
+    def _p(self):
+        return self._at()
 
     @property
     def pos(self):
@@ -360,14 +379,20 @@ class Pose:
 
 
 class PosePair:
-    """A `PosePair` in its owner's storage; a thin pointer wrapper
-    (validity follows the storage)."""
+    """A `PosePair` in its owner's storage, addressed by key rather than by
+    pointer: the pointer is re-resolved on every access, so growing the
+    collection cannot leave this wrapper dangling."""
 
-    __slots__ = ("_p",)
+    __slots__ = ("_at",)
     param_count = 0
 
-    def __init__(self, p):
-        self._p = p
+    def __init__(self, at):
+        # Zero-argument callable returning a currently-valid pointer.
+        self._at = at
+
+    @property
+    def _p(self):
+        return self._at()
 
     @property
     def prev(self):
@@ -504,17 +529,17 @@ class PathPosesDeque:
 
     def __getitem__(self, i):
         if isinstance(i, PoseRef):
-            return Pose(_f.path_poses_get(self._p, i.raw))
+            return Pose(lambda r=i.raw: _f.path_poses_get(self._p, r))
         n = len(self)
         if i < 0:
             i += n
         if not 0 <= i < n:
             raise IndexError(i)
-        return Pose(_f.path_poses_at(self._p, i))
+        return Pose(lambda i=i: _f.path_poses_at(self._p, i))
 
     def __iter__(self):
         for i in range(len(self)):
-            yield Pose(_f.path_poses_at(self._p, i))
+            yield Pose(lambda i=i: _f.path_poses_at(self._p, i))
 
     def clear(self):
         _f.path_poses_clear(self._p)
@@ -523,10 +548,12 @@ class PathPosesDeque:
         _f.path_poses_truncate(self._p, n)
 
     def push_back(self):
-        return Pose(_f.path_poses_push_back(self._p))
+        _f.path_poses_push_back(self._p)
+        return self[self.ref_at(len(self) - 1)]
 
     def push_front(self):
-        return Pose(_f.path_poses_push_front(self._p))
+        _f.path_poses_push_front(self._p)
+        return self[self.ref_at(0)]
 
     def pop_back(self):
         """Drops one end; False when already empty."""
@@ -537,7 +564,7 @@ class PathPosesDeque:
         return _f.path_poses_pop_front(self._p)
 
     def get(self, r):
-        return Pose(_f.path_poses_get(self._p, _raw(r)))
+        return Pose(lambda k=_raw(r): _f.path_poses_get(self._p, k))
 
     def __contains__(self, r):
         return _f.path_poses_contains(self._p, _raw(r))
@@ -545,7 +572,7 @@ class PathPosesDeque:
     def try_get(self, r):
         """The element, or None for a stale or foreign ref."""
         p = _f.path_poses_try_get(self._p, _raw(r))
-        return Pose(p) if p else None
+        return Pose(lambda k=_raw(r): _f.path_poses_get(self._p, k)) if p else None
 
     def ref_at(self, i):
         return PoseRef(_f.path_poses_ref_at(self._p, i))
@@ -580,11 +607,11 @@ class PathPosePairsVec:
             i += n
         if not 0 <= i < n:
             raise IndexError(i)
-        return PosePair(_f.path_pose_pairs_at(self._p, i))
+        return PosePair(lambda i=i: _f.path_pose_pairs_at(self._p, i))
 
     def __iter__(self):
         for i in range(len(self)):
-            yield PosePair(_f.path_pose_pairs_at(self._p, i))
+            yield PosePair(lambda i=i: _f.path_pose_pairs_at(self._p, i))
 
     def clear(self):
         _f.path_pose_pairs_clear(self._p)
@@ -593,7 +620,8 @@ class PathPosePairsVec:
         _f.path_pose_pairs_truncate(self._p, n)
 
     def push(self):
-        return PosePair(_f.path_pose_pairs_push(self._p))
+        _f.path_pose_pairs_push(self._p)
+        return self[len(self) - 1]
 
     def pop(self):
         """Drops the last element; False when already empty."""
@@ -626,14 +654,14 @@ class PathLandmarksArena:
         _f.path_landmarks_clear(self._p)
 
     def __getitem__(self, r):
-        return Landmark(_f.path_landmarks_get(self._p, _raw(r)))
+        return Landmark(lambda k=_raw(r): _f.path_landmarks_get(self._p, k))
 
     def __iter__(self):
         """Live slots in order; yields element wrappers (refs() for
         the refs)."""
         r = _f.path_landmarks_first(self._p)
         while r != 0xFFFFFFFF:
-            yield Landmark(_f.path_landmarks_get(self._p, r))
+            yield Landmark(lambda k=r: _f.path_landmarks_get(self._p, k))
             r = _f.path_landmarks_next(self._p, r)
 
     def refs(self):
@@ -643,7 +671,7 @@ class PathLandmarksArena:
             r = _f.path_landmarks_next(self._p, r)
 
     def get(self, r):
-        return Landmark(_f.path_landmarks_get(self._p, _raw(r)))
+        return Landmark(lambda k=_raw(r): _f.path_landmarks_get(self._p, k))
 
     def __contains__(self, r):
         return _f.path_landmarks_contains(self._p, _raw(r))
@@ -651,7 +679,7 @@ class PathLandmarksArena:
     def try_get(self, r):
         """The element, or None for a stale or foreign ref."""
         p = _f.path_landmarks_try_get(self._p, _raw(r))
-        return Landmark(p) if p else None
+        return Landmark(lambda k=_raw(r): _f.path_landmarks_get(self._p, k)) if p else None
 
 
 class Path:

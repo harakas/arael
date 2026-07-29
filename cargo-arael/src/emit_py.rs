@@ -149,10 +149,19 @@ fn collection_py(
             sig(py, &format!("{prefix}_clear"), &["ctypes.c_void_p"], "None");
             sig(py, &format!("{prefix}_truncate"),
                 &["ctypes.c_void_p", "ctypes.c_uint32"], "None");
+            // Key the freshly pushed element: a Ref where the collection
+            // has generations (so a later removal invalidates it loudly),
+            // otherwise its index.
+            let new_key = if refs_flavor {
+                "self.ref_at(len(self) - 1)"
+            } else {
+                "len(self) - 1"
+            };
+            let front_key = if refs_flavor { "self.ref_at(0)" } else { "0" };
             let getitem_ref = if refs_flavor {
                 format!(
 "        if isinstance(i, {elem}Ref):
-            return {elem}(_f.{prefix}_get(self._p, i.raw))
+            return {elem}(lambda r=i.raw: _f.{prefix}_get(self._p, r))
 ")
             } else {
                 String::new()
@@ -164,11 +173,11 @@ fn collection_py(
             i += n
         if not 0 <= i < n:
             raise IndexError(i)
-        return {elem}(_f.{prefix}_at(self._p, i))
+        return {elem}(lambda i=i: _f.{prefix}_at(self._p, i))
 
     def __iter__(self):
         for i in range(len(self)):
-            yield {elem}(_f.{prefix}_at(self._p, i))
+            yield {elem}(lambda i=i: _f.{prefix}_at(self._p, i))
 
     def clear(self):
         _f.{prefix}_clear(self._p)
@@ -184,7 +193,8 @@ fn collection_py(
                     "ctypes.c_bool");
                 cls.push_str(&format!(
 "    def push(self):
-        return {elem}(_f.{prefix}_push(self._p))
+        _f.{prefix}_push(self._p)
+        return self[{new_key}]
 
     def pop(self):
         \"\"\"Drops the last element; False when already empty.\"\"\"
@@ -192,12 +202,13 @@ fn collection_py(
 
 "));
             } else {
-                for m in ["push_back", "push_front"] {
+                for (m, new_key) in [("push_back", new_key), ("push_front", front_key)] {
                     sig(py, &format!("{prefix}_{m}"), &["ctypes.c_void_p"],
                         "ctypes.c_void_p");
                     cls.push_str(&format!(
 "    def {m}(self):
-        return {elem}(_f.{prefix}_{m}(self._p))
+        _f.{prefix}_{m}(self._p)
+        return self[{new_key}]
 
 "));
                 }
@@ -239,14 +250,14 @@ fn collection_py(
         _f.{prefix}_clear(self._p)
 
     def __getitem__(self, r):
-        return {elem}(_f.{prefix}_get(self._p, _raw(r)))
+        return {elem}(lambda k=_raw(r): _f.{prefix}_get(self._p, k))
 
     def __iter__(self):
         \"\"\"Live slots in order; yields element wrappers (refs() for
         the refs).\"\"\"
         r = _f.{prefix}_first(self._p)
         while r != 0xFFFFFFFF:
-            yield {elem}(_f.{prefix}_get(self._p, r))
+            yield {elem}(lambda k=r: _f.{prefix}_get(self._p, k))
             r = _f.{prefix}_next(self._p, r)
 
     def refs(self):
@@ -269,7 +280,7 @@ fn collection_py(
             &["ctypes.c_void_p", "ctypes.c_uint32"], "ctypes.c_void_p");
         cls.push_str(&format!(
 "    def get(self, r):
-        return {elem}(_f.{prefix}_get(self._p, _raw(r)))
+        return {elem}(lambda k=_raw(r): _f.{prefix}_get(self._p, k))
 
     def __contains__(self, r):
         return _f.{prefix}_contains(self._p, _raw(r))
@@ -277,7 +288,7 @@ fn collection_py(
     def try_get(self, r):
         \"\"\"The element, or None for a stale or foreign ref.\"\"\"
         p = _f.{prefix}_try_get(self._p, _raw(r))
-        return {elem}(p) if p else None
+        return {elem}(lambda k=_raw(r): _f.{prefix}_get(self._p, k)) if p else None
 
 "));
         if container != "arena" {
@@ -414,7 +425,7 @@ fn field_py(
                 owner_cls.push_str(&format!(
 "    @property
     def {name}(self):
-        return {of}(_f.{prefix}_{name}_ptr(self._p))
+        return {of}(lambda: _f.{prefix}_{name}_ptr(self._p))
 
 "));
             }
@@ -425,7 +436,7 @@ fn field_py(
             owner_cls.push_str(&format!(
 "    @property
     def {name}(self):
-        return {of}(_f.{prefix}_{name}_ptr(self._p))
+        return {of}(lambda: _f.{prefix}_{name}_ptr(self._p))
 
 "));
         }
@@ -442,11 +453,13 @@ fn field_py(
 "    @property
     def {name}(self):
         \"\"\"The `{of}`, or None while absent (make_{name}() creates).\"\"\"
-        p = _f.{prefix}_{name}(self._p)
-        return {of}(p) if p else None
+        if not _f.{prefix}_{name}(self._p):
+            return None
+        return {of}(lambda: _f.{prefix}_{name}(self._p))
 
     def make_{name}(self):
-        return {of}(_f.{prefix}_make_{name}(self._p))
+        _f.{prefix}_make_{name}(self._p)
+        return {of}(lambda: _f.{prefix}_{name}(self._p))
 
     def clear_{name}(self):
         _f.{prefix}_clear_{name}(self._p)
@@ -532,14 +545,20 @@ pub fn emit(model: &Model, lib_ident: &str) -> Result<(String, String), String> 
         let prefix = format!("{root_sn}_{}", snake(tn));
         let mut cls = format!(
 "class {tn}:
-    \"\"\"A `{tn}` in its owner's storage; a thin pointer wrapper
-    (validity follows the storage).\"\"\"
+    \"\"\"A `{tn}` in its owner's storage, addressed by key rather than by
+    pointer: the pointer is re-resolved on every access, so growing the
+    collection cannot leave this wrapper dangling.\"\"\"
 
-    __slots__ = (\"_p\",)
+    __slots__ = (\"_at\",)
     param_count = {}
 
-    def __init__(self, p):
-        self._p = p
+    def __init__(self, at):
+        # Zero-argument callable returning a currently-valid pointer.
+        self._at = at
+
+    @property
+    def _p(self):
+        return self._at()
 
 ", t.param_count);
         for f in &t.fields {

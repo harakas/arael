@@ -106,14 +106,20 @@ class CellRef:
 
 
 class Cell:
-    """A `Cell` in its owner's storage; a thin pointer wrapper
-    (validity follows the storage)."""
+    """A `Cell` in its owner's storage, addressed by key rather than by
+    pointer: the pointer is re-resolved on every access, so growing the
+    collection cannot leave this wrapper dangling."""
 
-    __slots__ = ("_p",)
+    __slots__ = ("_at",)
     param_count = 1
 
-    def __init__(self, p):
-        self._p = p
+    def __init__(self, at):
+        # Zero-argument callable returning a currently-valid pointer.
+        self._at = at
+
+    @property
+    def _p(self):
+        return self._at()
 
     @property
     def v(self):
@@ -233,17 +239,17 @@ class DecayCellsVec:
 
     def __getitem__(self, i):
         if isinstance(i, CellRef):
-            return Cell(_f.decay_cells_get(self._p, i.raw))
+            return Cell(lambda r=i.raw: _f.decay_cells_get(self._p, r))
         n = len(self)
         if i < 0:
             i += n
         if not 0 <= i < n:
             raise IndexError(i)
-        return Cell(_f.decay_cells_at(self._p, i))
+        return Cell(lambda i=i: _f.decay_cells_at(self._p, i))
 
     def __iter__(self):
         for i in range(len(self)):
-            yield Cell(_f.decay_cells_at(self._p, i))
+            yield Cell(lambda i=i: _f.decay_cells_at(self._p, i))
 
     def clear(self):
         _f.decay_cells_clear(self._p)
@@ -252,14 +258,15 @@ class DecayCellsVec:
         _f.decay_cells_truncate(self._p, n)
 
     def push(self):
-        return Cell(_f.decay_cells_push(self._p))
+        _f.decay_cells_push(self._p)
+        return self[self.ref_at(len(self) - 1)]
 
     def pop(self):
         """Drops the last element; False when already empty."""
         return _f.decay_cells_pop(self._p)
 
     def get(self, r):
-        return Cell(_f.decay_cells_get(self._p, _raw(r)))
+        return Cell(lambda k=_raw(r): _f.decay_cells_get(self._p, k))
 
     def __contains__(self, r):
         return _f.decay_cells_contains(self._p, _raw(r))
@@ -267,7 +274,7 @@ class DecayCellsVec:
     def try_get(self, r):
         """The element, or None for a stale or foreign ref."""
         p = _f.decay_cells_try_get(self._p, _raw(r))
-        return Cell(p) if p else None
+        return Cell(lambda k=_raw(r): _f.decay_cells_get(self._p, k)) if p else None
 
     def ref_at(self, i):
         return CellRef(_f.decay_cells_ref_at(self._p, i))

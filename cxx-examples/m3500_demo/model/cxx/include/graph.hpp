@@ -276,7 +276,16 @@ public:
     uint32_t size() const { return ffi::graph_poses_len(h_); }
     bool empty() const { return size() == 0; }
     void reserve(uint32_t additional) { ffi::graph_poses_reserve(h_, additional); }
+    /// Appends a default element and returns a wrapper for it.
+    ///
+    /// The wrapper holds a pointer INTO the collection, so it follows the
+    /// std::vector rule: any later push may reallocate, and every wrapper
+    /// taken before it -- including wrappers into collections nested inside
+    /// these elements -- is then dangling. Either reserve() the count up
+    /// front, or re-take the wrapper with operator[] after the growth.
+    /// To hold on to an element across pushes, keep its Ref, not a wrapper.
     Pose2 push() { return Pose2(ffi::graph_poses_push(h_)); }
+    /// Wrapper for element `i`; see push() on how long it stays valid.
     Pose2 operator[](uint32_t i) { return Pose2(ffi::graph_poses_at(h_, i)); }
     /// Front/back of a non-empty vec (empty = UB, like STL).
     Pose2 front() { return (*this)[0]; }
@@ -361,7 +370,16 @@ public:
     uint32_t size() const { return ffi::graph_edges_len(h_); }
     bool empty() const { return size() == 0; }
     void reserve(uint32_t additional) { ffi::graph_edges_reserve(h_, additional); }
+    /// Appends a default element and returns a wrapper for it.
+    ///
+    /// The wrapper holds a pointer INTO the collection, so it follows the
+    /// std::vector rule: any later push may reallocate, and every wrapper
+    /// taken before it -- including wrappers into collections nested inside
+    /// these elements -- is then dangling. Either reserve() the count up
+    /// front, or re-take the wrapper with operator[] after the growth.
+    /// To hold on to an element across pushes, keep its Ref, not a wrapper.
     Edge push() { return Edge(ffi::graph_edges_push(h_)); }
+    /// Wrapper for element `i`; see push() on how long it stays valid.
     Edge operator[](uint32_t i) { return Edge(ffi::graph_edges_at(h_, i)); }
     /// Front/back of a non-empty vec (empty = UB, like STL).
     Edge front() { return (*this)[0]; }

@@ -274,14 +274,20 @@ class TieRef:
 
 
 class Gain:
-    """A `Gain` in its owner's storage; a thin pointer wrapper
-    (validity follows the storage)."""
+    """A `Gain` in its owner's storage, addressed by key rather than by
+    pointer: the pointer is re-resolved on every access, so growing the
+    collection cannot leave this wrapper dangling."""
 
-    __slots__ = ("_p",)
+    __slots__ = ("_at",)
     param_count = 1
 
-    def __init__(self, p):
-        self._p = p
+    def __init__(self, at):
+        # Zero-argument callable returning a currently-valid pointer.
+        self._at = at
+
+    @property
+    def _p(self):
+        return self._at()
 
     @property
     def ref_g(self):
@@ -317,14 +323,20 @@ class Gain:
 
 
 class GpsObs:
-    """A `GpsObs` in its owner's storage; a thin pointer wrapper
-    (validity follows the storage)."""
+    """A `GpsObs` in its owner's storage, addressed by key rather than by
+    pointer: the pointer is re-resolved on every access, so growing the
+    collection cannot leave this wrapper dangling."""
 
-    __slots__ = ("_p",)
+    __slots__ = ("_at",)
     param_count = 0
 
-    def __init__(self, p):
-        self._p = p
+    def __init__(self, at):
+        # Zero-argument callable returning a currently-valid pointer.
+        self._at = at
+
+    @property
+    def _p(self):
+        return self._at()
 
     @property
     def pos(self):
@@ -344,37 +356,51 @@ class GpsObs:
 
 
 class Info:
-    """A `Info` in its owner's storage; a thin pointer wrapper
-    (validity follows the storage)."""
+    """A `Info` in its owner's storage, addressed by key rather than by
+    pointer: the pointer is re-resolved on every access, so growing the
+    collection cannot leave this wrapper dangling."""
 
-    __slots__ = ("_p",)
+    __slots__ = ("_at",)
     param_count = 0
 
-    def __init__(self, p):
-        self._p = p
+    def __init__(self, at):
+        # Zero-argument callable returning a currently-valid pointer.
+        self._at = at
+
+    @property
+    def _p(self):
+        return self._at()
 
     @property
     def gps(self):
         """The `GpsObs`, or None while absent (make_gps() creates)."""
-        p = _f.fit_info_gps(self._p)
-        return GpsObs(p) if p else None
+        if not _f.fit_info_gps(self._p):
+            return None
+        return GpsObs(lambda: _f.fit_info_gps(self._p))
 
     def make_gps(self):
-        return GpsObs(_f.fit_info_make_gps(self._p))
+        _f.fit_info_make_gps(self._p)
+        return GpsObs(lambda: _f.fit_info_gps(self._p))
 
     def clear_gps(self):
         _f.fit_info_clear_gps(self._p)
 
 
 class N:
-    """A `N` in its owner's storage; a thin pointer wrapper
-    (validity follows the storage)."""
+    """A `N` in its owner's storage, addressed by key rather than by
+    pointer: the pointer is re-resolved on every access, so growing the
+    collection cannot leave this wrapper dangling."""
 
-    __slots__ = ("_p",)
+    __slots__ = ("_at",)
     param_count = 1
 
-    def __init__(self, p):
-        self._p = p
+    def __init__(self, at):
+        # Zero-argument callable returning a currently-valid pointer.
+        self._at = at
+
+    @property
+    def _p(self):
+        return self._at()
 
     @property
     def v(self):
@@ -410,14 +436,20 @@ class N:
 
 
 class Obs:
-    """A `Obs` in its owner's storage; a thin pointer wrapper
-    (validity follows the storage)."""
+    """A `Obs` in its owner's storage, addressed by key rather than by
+    pointer: the pointer is re-resolved on every access, so growing the
+    collection cannot leave this wrapper dangling."""
 
-    __slots__ = ("_p",)
+    __slots__ = ("_at",)
     param_count = 0
 
-    def __init__(self, p):
-        self._p = p
+    def __init__(self, at):
+        # Zero-argument callable returning a currently-valid pointer.
+        self._at = at
+
+    @property
+    def _p(self):
+        return self._at()
 
     @property
     def x(self):
@@ -437,14 +469,20 @@ class Obs:
 
 
 class Pose:
-    """A `Pose` in its owner's storage; a thin pointer wrapper
-    (validity follows the storage)."""
+    """A `Pose` in its owner's storage, addressed by key rather than by
+    pointer: the pointer is re-resolved on every access, so growing the
+    collection cannot leave this wrapper dangling."""
 
-    __slots__ = ("_p",)
+    __slots__ = ("_at",)
     param_count = 7
 
-    def __init__(self, p):
-        self._p = p
+    def __init__(self, at):
+        # Zero-argument callable returning a currently-valid pointer.
+        self._at = at
+
+    @property
+    def _p(self):
+        return self._at()
 
     @property
     def ea(self):
@@ -517,18 +555,24 @@ class Pose:
 
     @property
     def info(self):
-        return Info(_f.fit_pose_info_ptr(self._p))
+        return Info(lambda: _f.fit_pose_info_ptr(self._p))
 
 
 class Rig:
-    """A `Rig` in its owner's storage; a thin pointer wrapper
-    (validity follows the storage)."""
+    """A `Rig` in its owner's storage, addressed by key rather than by
+    pointer: the pointer is re-resolved on every access, so growing the
+    collection cannot leave this wrapper dangling."""
 
-    __slots__ = ("_p",)
+    __slots__ = ("_at",)
     param_count = 7
 
-    def __init__(self, p):
-        self._p = p
+    def __init__(self, at):
+        # Zero-argument callable returning a currently-valid pointer.
+        self._at = at
+
+    @property
+    def _p(self):
+        return self._at()
 
     @property
     def ea_u(self):
@@ -564,7 +608,7 @@ class Rig:
 
     @property
     def gain(self):
-        return Gain(_f.fit_rig_gain_ptr(self._p))
+        return Gain(lambda: _f.fit_rig_gain_ptr(self._p))
 
     @property
     def target_u0(self):
@@ -608,14 +652,20 @@ class Rig:
 
 
 class Tie:
-    """A `Tie` in its owner's storage; a thin pointer wrapper
-    (validity follows the storage)."""
+    """A `Tie` in its owner's storage, addressed by key rather than by
+    pointer: the pointer is re-resolved on every access, so growing the
+    collection cannot leave this wrapper dangling."""
 
-    __slots__ = ("_p",)
+    __slots__ = ("_at",)
     param_count = 0
 
-    def __init__(self, p):
-        self._p = p
+    def __init__(self, at):
+        # Zero-argument callable returning a currently-valid pointer.
+        self._at = at
+
+    @property
+    def _p(self):
+        return self._at()
 
     @property
     def a(self):
@@ -823,11 +873,11 @@ class FitObsVec:
             i += n
         if not 0 <= i < n:
             raise IndexError(i)
-        return Obs(_f.fit_obs_at(self._p, i))
+        return Obs(lambda i=i: _f.fit_obs_at(self._p, i))
 
     def __iter__(self):
         for i in range(len(self)):
-            yield Obs(_f.fit_obs_at(self._p, i))
+            yield Obs(lambda i=i: _f.fit_obs_at(self._p, i))
 
     def clear(self):
         _f.fit_obs_clear(self._p)
@@ -836,7 +886,8 @@ class FitObsVec:
         _f.fit_obs_truncate(self._p, n)
 
     def push(self):
-        return Obs(_f.fit_obs_push(self._p))
+        _f.fit_obs_push(self._p)
+        return self[len(self) - 1]
 
     def pop(self):
         """Drops the last element; False when already empty."""
@@ -860,17 +911,17 @@ class FitItemsVec:
 
     def __getitem__(self, i):
         if isinstance(i, NRef):
-            return N(_f.fit_items_get(self._p, i.raw))
+            return N(lambda r=i.raw: _f.fit_items_get(self._p, r))
         n = len(self)
         if i < 0:
             i += n
         if not 0 <= i < n:
             raise IndexError(i)
-        return N(_f.fit_items_at(self._p, i))
+        return N(lambda i=i: _f.fit_items_at(self._p, i))
 
     def __iter__(self):
         for i in range(len(self)):
-            yield N(_f.fit_items_at(self._p, i))
+            yield N(lambda i=i: _f.fit_items_at(self._p, i))
 
     def clear(self):
         _f.fit_items_clear(self._p)
@@ -879,14 +930,15 @@ class FitItemsVec:
         _f.fit_items_truncate(self._p, n)
 
     def push(self):
-        return N(_f.fit_items_push(self._p))
+        _f.fit_items_push(self._p)
+        return self[self.ref_at(len(self) - 1)]
 
     def pop(self):
         """Drops the last element; False when already empty."""
         return _f.fit_items_pop(self._p)
 
     def get(self, r):
-        return N(_f.fit_items_get(self._p, _raw(r)))
+        return N(lambda k=_raw(r): _f.fit_items_get(self._p, k))
 
     def __contains__(self, r):
         return _f.fit_items_contains(self._p, _raw(r))
@@ -894,7 +946,7 @@ class FitItemsVec:
     def try_get(self, r):
         """The element, or None for a stale or foreign ref."""
         p = _f.fit_items_try_get(self._p, _raw(r))
-        return N(p) if p else None
+        return N(lambda k=_raw(r): _f.fit_items_get(self._p, k)) if p else None
 
     def ref_at(self, i):
         return NRef(_f.fit_items_ref_at(self._p, i))
@@ -925,17 +977,17 @@ class FitPosesDeque:
 
     def __getitem__(self, i):
         if isinstance(i, PoseRef):
-            return Pose(_f.fit_poses_get(self._p, i.raw))
+            return Pose(lambda r=i.raw: _f.fit_poses_get(self._p, r))
         n = len(self)
         if i < 0:
             i += n
         if not 0 <= i < n:
             raise IndexError(i)
-        return Pose(_f.fit_poses_at(self._p, i))
+        return Pose(lambda i=i: _f.fit_poses_at(self._p, i))
 
     def __iter__(self):
         for i in range(len(self)):
-            yield Pose(_f.fit_poses_at(self._p, i))
+            yield Pose(lambda i=i: _f.fit_poses_at(self._p, i))
 
     def clear(self):
         _f.fit_poses_clear(self._p)
@@ -944,10 +996,12 @@ class FitPosesDeque:
         _f.fit_poses_truncate(self._p, n)
 
     def push_back(self):
-        return Pose(_f.fit_poses_push_back(self._p))
+        _f.fit_poses_push_back(self._p)
+        return self[self.ref_at(len(self) - 1)]
 
     def push_front(self):
-        return Pose(_f.fit_poses_push_front(self._p))
+        _f.fit_poses_push_front(self._p)
+        return self[self.ref_at(0)]
 
     def pop_back(self):
         """Drops one end; False when already empty."""
@@ -958,7 +1012,7 @@ class FitPosesDeque:
         return _f.fit_poses_pop_front(self._p)
 
     def get(self, r):
-        return Pose(_f.fit_poses_get(self._p, _raw(r)))
+        return Pose(lambda k=_raw(r): _f.fit_poses_get(self._p, k))
 
     def __contains__(self, r):
         return _f.fit_poses_contains(self._p, _raw(r))
@@ -966,7 +1020,7 @@ class FitPosesDeque:
     def try_get(self, r):
         """The element, or None for a stale or foreign ref."""
         p = _f.fit_poses_try_get(self._p, _raw(r))
-        return Pose(p) if p else None
+        return Pose(lambda k=_raw(r): _f.fit_poses_get(self._p, k)) if p else None
 
     def ref_at(self, i):
         return PoseRef(_f.fit_poses_ref_at(self._p, i))
@@ -1001,11 +1055,11 @@ class FitTiesVec:
             i += n
         if not 0 <= i < n:
             raise IndexError(i)
-        return Tie(_f.fit_ties_at(self._p, i))
+        return Tie(lambda i=i: _f.fit_ties_at(self._p, i))
 
     def __iter__(self):
         for i in range(len(self)):
-            yield Tie(_f.fit_ties_at(self._p, i))
+            yield Tie(lambda i=i: _f.fit_ties_at(self._p, i))
 
     def clear(self):
         _f.fit_ties_clear(self._p)
@@ -1014,7 +1068,8 @@ class FitTiesVec:
         _f.fit_ties_truncate(self._p, n)
 
     def push(self):
-        return Tie(_f.fit_ties_push(self._p))
+        _f.fit_ties_push(self._p)
+        return self[len(self) - 1]
 
     def pop(self):
         """Drops the last element; False when already empty."""
@@ -1047,14 +1102,14 @@ class FitMarksArena:
         _f.fit_marks_clear(self._p)
 
     def __getitem__(self, r):
-        return N(_f.fit_marks_get(self._p, _raw(r)))
+        return N(lambda k=_raw(r): _f.fit_marks_get(self._p, k))
 
     def __iter__(self):
         """Live slots in order; yields element wrappers (refs() for
         the refs)."""
         r = _f.fit_marks_first(self._p)
         while r != 0xFFFFFFFF:
-            yield N(_f.fit_marks_get(self._p, r))
+            yield N(lambda k=r: _f.fit_marks_get(self._p, k))
             r = _f.fit_marks_next(self._p, r)
 
     def refs(self):
@@ -1064,7 +1119,7 @@ class FitMarksArena:
             r = _f.fit_marks_next(self._p, r)
 
     def get(self, r):
-        return N(_f.fit_marks_get(self._p, _raw(r)))
+        return N(lambda k=_raw(r): _f.fit_marks_get(self._p, k))
 
     def __contains__(self, r):
         return _f.fit_marks_contains(self._p, _raw(r))
@@ -1072,7 +1127,7 @@ class FitMarksArena:
     def try_get(self, r):
         """The element, or None for a stale or foreign ref."""
         p = _f.fit_marks_try_get(self._p, _raw(r))
-        return N(p) if p else None
+        return N(lambda k=_raw(r): _f.fit_marks_get(self._p, k)) if p else None
 
 
 class FitRigsVec:
@@ -1092,17 +1147,17 @@ class FitRigsVec:
 
     def __getitem__(self, i):
         if isinstance(i, RigRef):
-            return Rig(_f.fit_rigs_get(self._p, i.raw))
+            return Rig(lambda r=i.raw: _f.fit_rigs_get(self._p, r))
         n = len(self)
         if i < 0:
             i += n
         if not 0 <= i < n:
             raise IndexError(i)
-        return Rig(_f.fit_rigs_at(self._p, i))
+        return Rig(lambda i=i: _f.fit_rigs_at(self._p, i))
 
     def __iter__(self):
         for i in range(len(self)):
-            yield Rig(_f.fit_rigs_at(self._p, i))
+            yield Rig(lambda i=i: _f.fit_rigs_at(self._p, i))
 
     def clear(self):
         _f.fit_rigs_clear(self._p)
@@ -1111,14 +1166,15 @@ class FitRigsVec:
         _f.fit_rigs_truncate(self._p, n)
 
     def push(self):
-        return Rig(_f.fit_rigs_push(self._p))
+        _f.fit_rigs_push(self._p)
+        return self[self.ref_at(len(self) - 1)]
 
     def pop(self):
         """Drops the last element; False when already empty."""
         return _f.fit_rigs_pop(self._p)
 
     def get(self, r):
-        return Rig(_f.fit_rigs_get(self._p, _raw(r)))
+        return Rig(lambda k=_raw(r): _f.fit_rigs_get(self._p, k))
 
     def __contains__(self, r):
         return _f.fit_rigs_contains(self._p, _raw(r))
@@ -1126,7 +1182,7 @@ class FitRigsVec:
     def try_get(self, r):
         """The element, or None for a stale or foreign ref."""
         p = _f.fit_rigs_try_get(self._p, _raw(r))
-        return Rig(p) if p else None
+        return Rig(lambda k=_raw(r): _f.fit_rigs_get(self._p, k)) if p else None
 
     def ref_at(self, i):
         return RigRef(_f.fit_rigs_ref_at(self._p, i))
