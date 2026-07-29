@@ -5,6 +5,14 @@
 // Landmarks are FIXED constants baked into the bearing residual (single
 // variable over the pose), so every residual equals scene::reference_cost.
 // Whitening is baked into the residual (plain Gaussian, no robust kernel).
+//
+// The scene is f32/f64 arael types and the shared Solution is f64; factrs's
+// scalar is whatever `dtype` the crate was built with, since its f32 support
+// is a crate-global feature rather than a type parameter. The casts at those
+// boundaries are what let this file compile under either, so an f32 row would
+// be the same code and not a second implementation of it -- the arrangement
+// benchmarks/pgo uses, where the f32 rows come from a separate binary because
+// both precisions cannot coexist in one build graph.
 
 use bench_harness::factrs::{counts, since, CountingSolver, StepCounter};
 use crate::scene::{Scene, Solution};
@@ -31,12 +39,12 @@ fn v2a(v: vect3f) -> [f64; 3] { [v.x as f64, v.y as f64, v.z as f64] }
 
 fn mat<T: Numeric>(a: &[[f64; 3]; 3]) -> Matrix3<T> {
     Matrix3::new(
-        T::from(a[0][0]), T::from(a[0][1]), T::from(a[0][2]),
-        T::from(a[1][0]), T::from(a[1][1]), T::from(a[1][2]),
-        T::from(a[2][0]), T::from(a[2][1]), T::from(a[2][2]))
+        T::from(a[0][0] as dtype), T::from(a[0][1] as dtype), T::from(a[0][2] as dtype),
+        T::from(a[1][0] as dtype), T::from(a[1][1] as dtype), T::from(a[1][2] as dtype),
+        T::from(a[2][0] as dtype), T::from(a[2][1] as dtype), T::from(a[2][2] as dtype))
 }
 fn vec3<T: Numeric>(a: &[f64; 3]) -> Vector3<T> {
-    Vector3::new(T::from(a[0]), T::from(a[1]), T::from(a[2]))
+    Vector3::new(T::from(a[0] as dtype), T::from(a[1] as dtype), T::from(a[2] as dtype))
 }
 
 fn euler_to_rot<T: Numeric>(roll: T, pitch: T, yaw: T) -> Matrix3<T> {
@@ -70,12 +78,12 @@ impl Residual1 for DriftRes {
     type Differ = ForwardProp<Const<6>>;
     fn residual1<T: Numeric>(&self, p: VectorVar<6, T>) -> VectorX<T> {
         VectorX::from_vec(vec![
-            (p.0[0] - T::from(self.prior[0])) * T::from(self.pi),
-            (p.0[1] - T::from(self.prior[1])) * T::from(self.pi),
-            (p.0[2] - T::from(self.prior[2])) * T::from(self.pi),
-            (p.0[3] - T::from(self.prior[3])) * T::from(self.ei),
-            (p.0[4] - T::from(self.prior[4])) * T::from(self.ei),
-            (p.0[5] - T::from(self.prior[5])) * T::from(self.ei)])
+            (p.0[0] - T::from(self.prior[0] as dtype)) * T::from(self.pi as dtype),
+            (p.0[1] - T::from(self.prior[1] as dtype)) * T::from(self.pi as dtype),
+            (p.0[2] - T::from(self.prior[2] as dtype)) * T::from(self.pi as dtype),
+            (p.0[3] - T::from(self.prior[3] as dtype)) * T::from(self.ei as dtype),
+            (p.0[4] - T::from(self.prior[4] as dtype)) * T::from(self.ei as dtype),
+            (p.0[5] - T::from(self.prior[5] as dtype)) * T::from(self.ei as dtype)])
     }
 }
 
@@ -89,8 +97,8 @@ impl Residual1 for TiltRes {
     type Differ = ForwardProp<Const<6>>;
     fn residual1<T: Numeric>(&self, p: VectorVar<6, T>) -> VectorX<T> {
         VectorX::from_vec(vec![
-            (p.0[3] - T::from(self.roll)) * T::from(self.isigma),
-            (p.0[4] - T::from(self.pitch)) * T::from(self.isigma)])
+            (p.0[3] - T::from(self.roll as dtype)) * T::from(self.isigma as dtype),
+            (p.0[4] - T::from(self.pitch as dtype)) * T::from(self.isigma as dtype)])
     }
 }
 
@@ -109,8 +117,8 @@ impl Residual1 for BearingRes {
         let lm_r = mr2w.transpose() * (lm_v - pose_pos(&pose));
         let r_r = lm_r - vec3::<T>(&self.camera_pos);
         let r_f = mat::<T>(&self.mf2r).transpose() * r_r;
-        let plain1 = r_f[1].atan2(r_f[0]) * T::from(self.isigma[0] * self.scale);
-        let plain2 = r_f[2].atan2(r_f[0]) * T::from(self.isigma[1] * self.scale);
+        let plain1 = r_f[1].atan2(r_f[0]) * T::from((self.isigma[0] * self.scale) as dtype);
+        let plain2 = r_f[2].atan2(r_f[0]) * T::from((self.isigma[1] * self.scale) as dtype);
         VectorX::from_vec(vec![plain1, plain2])
     }
 }
@@ -135,7 +143,7 @@ impl Residual2 for OdoRes {
         let pos_err = pos_diff - vec3::<T>(&self.delta_pos);
         let pos_w = mat::<T>(&self.pos_cov_r).transpose() * pos_err;
         let d = &self.delta_ea;
-        let expected = mr2w_prev * euler_to_rot::<T>(T::from(d[0]), T::from(d[1]), T::from(d[2]));
+        let expected = mr2w_prev * euler_to_rot::<T>(T::from(d[0] as dtype), T::from(d[1] as dtype), T::from(d[2] as dtype));
         let error_rot = expected.transpose() * mr2w_cur;
         let ea_err = rot_to_euler(&error_rot);
         let ea_w = mat::<T>(&self.ea_cov_r).transpose() * Vector3::new(ea_err[0], ea_err[1], ea_err[2]);
@@ -149,7 +157,8 @@ impl Residual2 for OdoRes {
 
 fn pv(pos: vect3f, ea: vect3f) -> VectorVar6 {
     VectorVar(factrs::linalg::Vector::<6, dtype>::new(
-        pos.x as f64, pos.y as f64, pos.z as f64, ea.x as f64, ea.y as f64, ea.z as f64))
+        pos.x as dtype, pos.y as dtype, pos.z as dtype,
+        ea.x as dtype, ea.y as dtype, ea.z as dtype))
 }
 
 fn build(scene: &Scene) -> (Graph, Values) {
@@ -181,7 +190,8 @@ fn extract(scene: &Scene, v: &Values) -> Solution {
     Solution {
         poses: (0..scene.poses.len()).map(|i| {
             let p: &VectorVar6 = v.get(P(i as u32)).unwrap();
-            (vect3d::new(p.0[0], p.0[1], p.0[2]), vect3d::new(p.0[3], p.0[4], p.0[5]))
+            (vect3d::new(p.0[0] as f64, p.0[1] as f64, p.0[2] as f64),
+             vect3d::new(p.0[3] as f64, p.0[4] as f64, p.0[5] as f64))
         }).collect(),
     }
 }
@@ -202,7 +212,9 @@ fn base(max_iterations: usize) -> BaseOptParams {
 
 /// Sum of squared residuals at the init -- harness cross-check.
 pub fn initial_cost(scene: &Scene) -> f64 {
-    let sq = |r: VectorX<f64>| r.iter().map(|x| x * x).sum::<f64>();
+    // The residuals evaluate in factrs's dtype; the cost this reports is f64
+    // whatever that is, so it is comparable with every other system's.
+    let sq = |r: VectorX<dtype>| r.iter().map(|x| (*x as f64) * (*x as f64)).sum::<f64>();
     let mut cost = 0.0;
     for p in &scene.poses {
         let pb = pv(p.init_pos, p.init_ea);
@@ -222,8 +234,8 @@ pub fn initial_cost(scene: &Scene) -> f64 {
     }
     for o in &scene.odo {
         let mk = |pd: &crate::scene::PoseData| VectorVar(factrs::linalg::Vector::<6, dtype>::new(
-            pd.init_pos.x as f64, pd.init_pos.y as f64, pd.init_pos.z as f64,
-            pd.init_ea.x as f64, pd.init_ea.y as f64, pd.init_ea.z as f64));
+            pd.init_pos.x as dtype, pd.init_pos.y as dtype, pd.init_pos.z as dtype,
+            pd.init_ea.x as dtype, pd.init_ea.y as dtype, pd.init_ea.z as dtype));
         cost += sq(OdoRes { delta_pos: v2a(o.delta_pos), delta_ea: v2a(o.delta_ea),
             pos_cov_r: m2a(&o.pos_cov_r), pos_isigma: v2a(o.pos_cov_isigma),
             ea_cov_r: m2a(&o.ea_cov_r), ea_isigma: v2a(o.ea_cov_isigma) }
