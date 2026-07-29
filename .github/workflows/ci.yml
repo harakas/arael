@@ -20,7 +20,7 @@ jobs:
     name: workspace tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install system dependencies (egui/eframe build deps)
         run: |
           sudo apt-get update
@@ -67,7 +67,7 @@ jobs:
           - features: "rayon"
             key: "rayon"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install solver backend dependencies
         run: |
           sudo apt-get update
@@ -92,7 +92,7 @@ jobs:
     name: arael no-default-features
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - name: Install pinned toolchain (from rust-toolchain.toml)
         run: rustup toolchain install && rustup show
       - uses: Swatinem/rust-cache@v2
