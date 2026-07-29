@@ -23,6 +23,9 @@ def pi(n, v):
 
 
 def fill(f):
+    # The counts are known, so reserve them.
+    f.obs.reserve(6)
+    f.items.reserve(3)
     for i in range(6):
         o = f.obs.push()
         o.x = float(i)
@@ -126,6 +129,7 @@ ea_a = vect3d(0.2, -0.3, 0.7)
 ea_b = vect3d(-0.4, 0.1, -1.2)
 rot_a = matrix3d.rotation_from_euler_angles(ea_a)
 rot_b = matrix3d.rotation_from_euler_angles(ea_b)
+f10.rigs.reserve(2)
 rig0 = f10.rigs.push()
 rig0.target_u0 = rot_a.row(0)
 rig0.target_u2 = rot_a.row(2)
@@ -196,6 +200,8 @@ fill(f3)
 f3.cal = (0.25, -0.5)
 
 targets = [(0, 0, 0), (1, 0.5, 0), (2, 1, 0)]
+f3.poses.reserve(3)
+f3.ties.reserve(2)
 p1 = f3.poses.push_back()
 p2 = f3.poses.push_back()
 p0 = f3.poses.push_front()

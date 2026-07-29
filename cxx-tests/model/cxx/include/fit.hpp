@@ -626,7 +626,16 @@ public:
     uint32_t size() const { return ffi::fit_obs_len(h_); }
     bool empty() const { return size() == 0; }
     void reserve(uint32_t additional) { ffi::fit_obs_reserve(h_, additional); }
+    /// Appends a default element and returns a wrapper for it.
+    ///
+    /// The wrapper holds a pointer INTO the collection, so it follows the
+    /// std::vector rule: any later push may reallocate, and every wrapper
+    /// taken before it -- including wrappers into collections nested inside
+    /// these elements -- is then dangling. Either reserve() the count up
+    /// front, or re-take the wrapper with operator[] after the growth.
+    /// To hold on to an element across pushes, keep its Ref, not a wrapper.
     Obs push() { return Obs(ffi::fit_obs_push(h_)); }
+    /// Wrapper for element `i`; see push() on how long it stays valid.
     Obs operator[](uint32_t i) { return Obs(ffi::fit_obs_at(h_, i)); }
     /// Front/back of a non-empty vec (empty = UB, like STL).
     Obs front() { return (*this)[0]; }
@@ -699,7 +708,16 @@ public:
     uint32_t size() const { return ffi::fit_items_len(h_); }
     bool empty() const { return size() == 0; }
     void reserve(uint32_t additional) { ffi::fit_items_reserve(h_, additional); }
+    /// Appends a default element and returns a wrapper for it.
+    ///
+    /// The wrapper holds a pointer INTO the collection, so it follows the
+    /// std::vector rule: any later push may reallocate, and every wrapper
+    /// taken before it -- including wrappers into collections nested inside
+    /// these elements -- is then dangling. Either reserve() the count up
+    /// front, or re-take the wrapper with operator[] after the growth.
+    /// To hold on to an element across pushes, keep its Ref, not a wrapper.
     N push() { return N(ffi::fit_items_push(h_)); }
+    /// Wrapper for element `i`; see push() on how long it stays valid.
     N operator[](uint32_t i) { return N(ffi::fit_items_at(h_, i)); }
     /// Front/back of a non-empty vec (empty = UB, like STL).
     N front() { return (*this)[0]; }
@@ -784,8 +802,18 @@ public:
     uint32_t size() const { return ffi::fit_poses_len(h_); }
     bool empty() const { return size() == 0; }
     void reserve(uint32_t additional) { ffi::fit_poses_reserve(h_, additional); }
+    /// Appends a default element and returns a wrapper for it.
+    ///
+    /// The wrapper holds a pointer INTO the collection, so it follows the
+    /// std::deque rule: a later push may move the elements, and every
+    /// wrapper taken before it -- including wrappers into collections
+    /// nested inside these elements -- is then dangling. Either reserve()
+    /// the count up front, or re-take the wrapper with operator[] after
+    /// the growth. To hold on to an element across pushes, keep its Ref.
     Pose push_back() { return Pose(ffi::fit_poses_push_back(h_)); }
+    /// See push_back() on how long the wrapper stays valid.
     Pose push_front() { return Pose(ffi::fit_poses_push_front(h_)); }
+    /// Wrapper for element `i`; see push_back() on validity.
     Pose operator[](uint32_t i) { return Pose(ffi::fit_poses_at(h_, i)); }
     /// Front/back of a non-empty deque (empty = UB, like STL).
     Pose front() { return (*this)[0]; }
@@ -871,7 +899,16 @@ public:
     uint32_t size() const { return ffi::fit_ties_len(h_); }
     bool empty() const { return size() == 0; }
     void reserve(uint32_t additional) { ffi::fit_ties_reserve(h_, additional); }
+    /// Appends a default element and returns a wrapper for it.
+    ///
+    /// The wrapper holds a pointer INTO the collection, so it follows the
+    /// std::vector rule: any later push may reallocate, and every wrapper
+    /// taken before it -- including wrappers into collections nested inside
+    /// these elements -- is then dangling. Either reserve() the count up
+    /// front, or re-take the wrapper with operator[] after the growth.
+    /// To hold on to an element across pushes, keep its Ref, not a wrapper.
     Tie push() { return Tie(ffi::fit_ties_push(h_)); }
+    /// Wrapper for element `i`; see push() on how long it stays valid.
     Tie operator[](uint32_t i) { return Tie(ffi::fit_ties_at(h_, i)); }
     /// Front/back of a non-empty vec (empty = UB, like STL).
     Tie front() { return (*this)[0]; }
@@ -1024,7 +1061,16 @@ public:
     uint32_t size() const { return ffi::fit_rigs_len(h_); }
     bool empty() const { return size() == 0; }
     void reserve(uint32_t additional) { ffi::fit_rigs_reserve(h_, additional); }
+    /// Appends a default element and returns a wrapper for it.
+    ///
+    /// The wrapper holds a pointer INTO the collection, so it follows the
+    /// std::vector rule: any later push may reallocate, and every wrapper
+    /// taken before it -- including wrappers into collections nested inside
+    /// these elements -- is then dangling. Either reserve() the count up
+    /// front, or re-take the wrapper with operator[] after the growth.
+    /// To hold on to an element across pushes, keep its Ref, not a wrapper.
     Rig push() { return Rig(ffi::fit_rigs_push(h_)); }
+    /// Wrapper for element `i`; see push() on how long it stays valid.
     Rig operator[](uint32_t i) { return Rig(ffi::fit_rigs_at(h_, i)); }
     /// Front/back of a non-empty vec (empty = UB, like STL).
     Rig front() { return (*this)[0]; }

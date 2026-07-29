@@ -222,6 +222,10 @@ def main():
     est_pos = vect2f(0, 0)
     est_gamma = 0.0
 
+    # Reserve the known counts: growing a collection one push at a time
+    # reallocates repeatedly.
+    path.poses.reserve(len(gt_poses))
+    path.pose_pairs.reserve(len(gt_poses))
     for pi in range(len(gt_poses)):
         pose = path.poses.push_back()
         if pi == 0:
@@ -256,6 +260,7 @@ def main():
     lm_to_gt = []
     lm_sightings = []
     n_frines = 0
+    path.landmarks.reserve(len(gt_lms))
     for li in range(len(gt_lms)):
         sightings = []
         for pi in range(len(gt_poses)):
@@ -273,6 +278,7 @@ def main():
         world_b = p0.gamma + first_b
         lm.pos = p0.pos + vect2f(cfg.init_range * math.cos(world_b),
                                  cfg.init_range * math.sin(world_b))
+        lm.frines.reserve(len(sightings))
         for pose_i, bearing in sightings:
             fr = lm.frines.push()
             fr.pose = path.poses.ref_at(pose_i)

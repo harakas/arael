@@ -115,7 +115,16 @@ fn collection_cpp(
                 "bool {prefix}_pop({owner}*);\nvoid {prefix}_clear({owner}*);\n\
                  void {prefix}_truncate({owner}*, uint32_t);\n"));
             methods.push_str(&format!(
-                "    {elem} push() {{ return {elem}(ffi::{prefix}_push(h_)); }}\n\
+                "    /// Appends a default element and returns a wrapper for it.\n\
+                 \x20   ///\n\
+                 \x20   /// The wrapper holds a pointer INTO the collection, so it follows the\n\
+                 \x20   /// std::vector rule: any later push may reallocate, and every wrapper\n\
+                 \x20   /// taken before it -- including wrappers into collections nested inside\n\
+                 \x20   /// these elements -- is then dangling. Either reserve() the count up\n\
+                 \x20   /// front, or re-take the wrapper with operator[] after the growth.\n\
+                 \x20   /// To hold on to an element across pushes, keep its Ref, not a wrapper.\n\
+                 \x20   {elem} push() {{ return {elem}(ffi::{prefix}_push(h_)); }}\n\
+                 \x20   /// Wrapper for element `i`; see push() on how long it stays valid.\n\
                  \x20   {elem} operator[](uint32_t i) {{ return {elem}(ffi::{prefix}_at(h_, i)); }}\n\
                  \x20   /// Front/back of a non-empty vec (empty = UB, like STL).\n\
                  \x20   {elem} front() {{ return (*this)[0]; }}\n\
@@ -134,8 +143,18 @@ fn collection_cpp(
                 "bool {prefix}_pop_back({owner}*);\nbool {prefix}_pop_front({owner}*);\n\
                  void {prefix}_clear({owner}*);\nvoid {prefix}_truncate({owner}*, uint32_t);\n"));
             methods.push_str(&format!(
-                "    {elem} push_back() {{ return {elem}(ffi::{prefix}_push_back(h_)); }}\n\
+                "    /// Appends a default element and returns a wrapper for it.\n\
+                 \x20   ///\n\
+                 \x20   /// The wrapper holds a pointer INTO the collection, so it follows the\n\
+                 \x20   /// std::deque rule: a later push may move the elements, and every\n\
+                 \x20   /// wrapper taken before it -- including wrappers into collections\n\
+                 \x20   /// nested inside these elements -- is then dangling. Either reserve()\n\
+                 \x20   /// the count up front, or re-take the wrapper with operator[] after\n\
+                 \x20   /// the growth. To hold on to an element across pushes, keep its Ref.\n\
+                 \x20   {elem} push_back() {{ return {elem}(ffi::{prefix}_push_back(h_)); }}\n\
+                 \x20   /// See push_back() on how long the wrapper stays valid.\n\
                  \x20   {elem} push_front() {{ return {elem}(ffi::{prefix}_push_front(h_)); }}\n\
+                 \x20   /// Wrapper for element `i`; see push_back() on validity.\n\
                  \x20   {elem} operator[](uint32_t i) {{ return {elem}(ffi::{prefix}_at(h_, i)); }}\n\
                  \x20   /// Front/back of a non-empty deque (empty = UB, like STL).\n\
                  \x20   {elem} front() {{ return (*this)[0]; }}\n\

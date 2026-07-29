@@ -12,6 +12,10 @@ static void p(const char* n, double v) { std::printf("%s %.17e\n", n, v); }
 static void pi(const char* n, long v) { std::printf("%s %ld\n", n, v); }
 
 static void fill(Fit& fit) {
+    // Reserved up front: a wrapper taken from push() dangles if a later
+    // push grows the collection (see the push() docs in the header).
+    fit.obs().reserve(6);
+    fit.items().reserve(3);
     for (int i = 0; i < 6; i++) {
         auto o = fit.obs().push();
         o.set_x(double(i));
@@ -122,6 +126,7 @@ int main() {
     vect3d ea_b{-0.4, 0.1, -1.2};
     matrix3d rot_a = matrix3d::rotation_from_euler_angles(ea_a);
     matrix3d rot_b = matrix3d::rotation_from_euler_angles(ea_b);
+    f10.rigs().reserve(2);
     auto rig0 = f10.rigs().push();
     rig0.set_target_u0(rot_a.row(0));
     rig0.set_target_u2(rot_a.row(2));
@@ -188,6 +193,10 @@ int main() {
     f3.set_cal({0.25, -0.5});
 
     vect3d targets[3] = {{0, 0, 0}, {1, 0.5, 0}, {2, 1, 0}};
+    // p0/p1/p2 are held while further pushes happen, so the capacity has
+    // to be there before the first one.
+    f3.poses().reserve(3);
+    f3.ties().reserve(2);
     auto p1 = f3.poses().push_back();
     auto p2 = f3.poses().push_back();
     auto p0 = f3.poses().push_front();

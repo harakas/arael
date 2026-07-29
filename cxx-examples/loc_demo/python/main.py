@@ -112,6 +112,9 @@ def build_path(cfg, rng, path, gt_poses, gt_landmarks):
     # (landmark index, observing-pose index, feature ref).
     frine_data = []
 
+    # Reserve the known counts: growing a collection one push at a time
+    # reallocates repeatedly.
+    path.poses.reserve(len(gt_poses))
     for pi, (pos, ea) in enumerate(gt_poses):
         mr2w = matrix3f.rotation_from_euler_angles(ea)
 
@@ -187,18 +190,21 @@ def build_path(cfg, rng, path, gt_poses, gt_landmarks):
         info.tilt_pitch = ea.y + tilt_sigma_rad * rng.gauss(0, 1)
 
     # Landmarks with frines (fixed at their GT positions).
+    path.landmarks.reserve(len(gt_landmarks))
     for li, lm_pos in enumerate(gt_landmarks):
         obs = [fd for fd in frine_data if fd[0] == li]
         if not obs:
             continue
         lm = path.landmarks[path.landmarks.push()]
         lm.pos = lm_pos
+        lm.frines.reserve(len(obs))
         for _, pose_i, feat_ref in obs:
             fr = lm.frines.push()
             fr.pose = path.poses.ref_at(pose_i)
             fr.feature = feat_ref
 
     # Pose pairs for odometry.
+    path.pose_pairs.reserve(len(path.poses) - 1)
     for i in range(1, len(path.poses)):
         pp = path.pose_pairs.push()
         pp.prev = path.poses.ref_at(i - 1)

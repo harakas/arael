@@ -143,7 +143,16 @@ public:
     uint32_t size() const { return ffi::line_obs_len(h_); }
     bool empty() const { return size() == 0; }
     void reserve(uint32_t additional) { ffi::line_obs_reserve(h_, additional); }
+    /// Appends a default element and returns a wrapper for it.
+    ///
+    /// The wrapper holds a pointer INTO the collection, so it follows the
+    /// std::vector rule: any later push may reallocate, and every wrapper
+    /// taken before it -- including wrappers into collections nested inside
+    /// these elements -- is then dangling. Either reserve() the count up
+    /// front, or re-take the wrapper with operator[] after the growth.
+    /// To hold on to an element across pushes, keep its Ref, not a wrapper.
     Ob push() { return Ob(ffi::line_obs_push(h_)); }
+    /// Wrapper for element `i`; see push() on how long it stays valid.
     Ob operator[](uint32_t i) { return Ob(ffi::line_obs_at(h_, i)); }
     /// Front/back of a non-empty vec (empty = UB, like STL).
     Ob front() { return (*this)[0]; }

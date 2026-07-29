@@ -37,6 +37,10 @@ def rad_diff(a, b):
 
 def load_g2o(path, weighted, graph):
     ds = g2o.Dataset2.load(path)
+    # Reserve the known counts: growing a collection one push at a time
+    # reallocates repeatedly.
+    graph.poses.reserve(len(ds.poses))
+    graph.edges.reserve(len(ds.deltas))
     for p in ds.poses:
         pose = graph.poses.push()
         pose.pos = p.t
