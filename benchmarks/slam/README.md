@@ -512,7 +512,8 @@ update its `PANELS` and re-run after re-measuring.
 cmake -B cpp/build cpp && cmake --build cpp/build   # Ceres, g2o, GTSAM
 # g2o needs libg2o-dev + cholmod; GTSAM needs libgtsam-dev (plus its
 #   undeclared deps libboost-all-dev and libtbb-dev)
-# add -DSYMFORCE_DIR=/path/to/symforce for the SymForce runner
+# add -DSYMFORCE_DIR=/path/to/symforce for the SymForce runner -- a checkout
+#   that has been BUILT, since its libraries are read from build/temp.*
 # (regenerate its factor headers with:
 #  symforce-venv/bin/python3 symforce_gen.py cpp/symforce_gen)
 export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1     # before load; see Methodology
