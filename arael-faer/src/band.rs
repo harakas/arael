@@ -35,10 +35,27 @@ fn minus_one<T: SchurReal>() -> T {
 /// position `S` does not store; it is filled in during factorization).
 const NO_SRC: ValueIndex = ValueIndex::MAX;
 
-/// Widest a super-panel may get, in scalar columns. Past roughly this the
-/// GEMM stops gaining from being wider, while the fill from snapping the
-/// envelope top to a panel boundary keeps growing.
-const PANEL_WIDTH_MAX: usize = 32;
+/// Widest a super-panel may get, in scalar columns.
+///
+/// The update GEMM gains efficiency with width and saturates around here; past
+/// that only the fill keeps growing, since a panel `w` wide takes its envelope
+/// top as the deepest of its columns and so factorizes `n * (b + w)` values
+/// against a true envelope of `n * b`. Below ~30 the GEMM is too narrow to
+/// pay; past ~90 the fill dominates and it is slower at every size measured.
+///
+/// Between those the curve is not smooth: it moves a few percent either way
+/// with no relation to width, and which width is best changes with the
+/// problem -- 72 beat 48 at one size and lost to it at two others. That is
+/// the panel's stride landing well or badly in cache, not arithmetic, so
+/// there is nothing to derive here. 48 is chosen for being at or ahead of the
+/// general sparse route at every size measured rather than best at any; a
+/// caller who cares can measure their own case through
+/// [`BandSymbolic::with_panel_width`].
+///
+/// The panel takes whole block columns, so the width it reaches is this
+/// rounded DOWN to a multiple of the block size: 48 is exactly 8 six-wide
+/// poses, where 64 would reach only 60 and waste the rest of its budget.
+const PANEL_WIDTH_MAX: usize = 48;
 
 /// Narrowest worth grouping at all: below this the GEMM is no better than
 /// the per-column panels it replaces.
@@ -109,6 +126,22 @@ impl BandSymbolic {
     /// stored as its upper block triangle, in natural order) and builds the
     /// envelope factor pattern.
     pub fn new(s: &SymbolicSparseBlockColMat<crate::SparseIndex>) -> Self {
+        Self::with_panel_width(s, None)
+    }
+
+    /// [`new`](Self::new) with the super-panel width chosen by the caller
+    /// rather than from the envelope.
+    ///
+    /// `None` derives it: half the mean envelope height, bounded by
+    /// [`PANEL_WIDTH_MIN`] and [`PANEL_WIDTH_MAX`]. That is the right shape --
+    /// a wide panel pays for itself only while it stays well under the band it
+    /// sits on -- and it is what a caller should normally leave alone. An
+    /// explicit width is for measuring the curve, and is clamped to a width
+    /// that can actually be grouped.
+    pub fn with_panel_width(
+        s: &SymbolicSparseBlockColMat<crate::SparseIndex>,
+        panel_width: Option<usize>,
+    ) -> Self {
         let nb = s.nblk_cols();
         assert_eq!(nb, s.nblk_rows(), "band Cholesky needs a square matrix");
         let n = s.ncols();
@@ -177,7 +210,10 @@ impl BandSymbolic {
         // half-bandwidth of 18 scalars a 32-wide panel costs 18% of the
         // solve, an 18-wide one wins.
         let mean_height = exact / n.max(1);
-        let pw = (mean_height / 2).clamp(PANEL_WIDTH_MIN, PANEL_WIDTH_MAX);
+        let pw = match panel_width {
+            Some(w) => w.max(1),
+            None => (mean_height / 2).clamp(PANEL_WIDTH_MIN, PANEL_WIDTH_MAX),
+        };
         let (sup_start, sup_of, sup_top, cost) = {
             let wide = group(pw);
             if (wide.3 as f64) <= PANEL_FILL_SLACK * exact as f64 {
@@ -741,6 +777,39 @@ mod tests {
         let mut x = rhs.clone();
         band_solve(&sym, &factor, &mut x);
         assert!(rel_resid(&full, *part.last().unwrap(), &x, &rhs) < 1e-10);
+    }
+
+    /// An explicit panel width overrides the derived one, and a wider panel
+    /// stores strictly more: it snaps its envelope top to a panel boundary, so
+    /// every column in it reaches as deep as the deepest. That growth is what
+    /// bounds how wide a panel is worth making.
+    #[test]
+    fn a_wider_panel_stores_more() {
+        let part: Vec<usize> = (0..=40).map(|i| i * 6).collect();
+        let nb = part.len() - 1;
+        let mut cells = Vec::new();
+        for j in 0..nb {
+            for i in j.saturating_sub(8)..j {
+                cells.push((i, j));
+            }
+        }
+        let (s, full, rhs) = build_banded(&part, &cells, 17);
+        let sizes: Vec<usize> = [8usize, 16, 32, 64]
+            .iter()
+            .map(|&w| BandSymbolic::with_panel_width(s.symbolic(), Some(w)).factor_val_count())
+            .collect();
+        for pair in sizes.windows(2) {
+            assert!(pair[1] > pair[0], "widening a panel must store more: {:?}", sizes);
+        }
+        // and every width still factorizes the same matrix exactly
+        for &w in &[8usize, 64] {
+            let sym = BandSymbolic::with_panel_width(s.symbolic(), Some(w));
+            let mut factor = vec![0.0f64; sym.factor_val_count()];
+            band_factorize(&sym, &s, &mut factor).unwrap();
+            let mut x = rhs.clone();
+            band_solve(&sym, &factor, &mut x);
+            assert!(rel_resid(&full, *part.last().unwrap(), &x, &rhs) < 1e-10, "width {}", w);
+        }
     }
 
     /// Multiple panels over a NARROW band: grouping is allowed (it is matched

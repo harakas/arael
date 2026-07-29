@@ -1,58 +1,7 @@
 # Changelog
 
-## Unreleased (0.8.1)
-
-### Added
-
-- **Iterative Schur.** `SparseFaer::with_iterative_schur` solves the reduced
-  system by preconditioned conjugate gradients instead of factorizing it, and
-  `with_implicit_schur` does the same without ever forming the reduced matrix.
-  Both take a `CgOptions` (tolerance, iteration cap, restart period); the
-  factorizing route stays the default. `SchurPlan::cg_iterations` reports the
-  work done.
-
-### Changed
-
-- **The reduced Schur system is factorized under its own envelope, in block
-  form, by default.** Where the reduction leaves a naturally-ordered system --
-  banded or dense -- `S` is factored in place in panels sized to its envelope,
-  instead of being flattened to a scalar CSC and handed to faer's sparse
-  Cholesky. That drops the scalar copy of `S`, its pattern, the symbolic
-  analysis and the supernodal scratch. Across a landmark-span sweep (a reduced
-  system from 2% to 69% dense) it is faster AND smaller at every point: 1-11%
-  less time, 8-39% less peak memory, same optimum.
-  `SparseFaer::with_envelope_schur(false)` goes back to faer. A reduction
-  ordered by AMD or nested dissection has no envelope to exploit and is
-  unaffected, as are the iterative routes. `with_narrow_band` is unchanged and
-  remains the separate, opt-in whole-system route.
-- **Assembly keeps one scatter target per tile, not per value.** Blocks with a
-  static tile shape derive every position from a tile origin and stride stored
-  beside their parameter indices, so the per-scalar position map is gone for
-  them. It survives for `TripletBlock` and COO-built patterns, which have no
-  static shape. Every indexed backend benefits. At Ladybug-372 this is 47 MB
-  off the peak of each route with no change in assembly time.
-- **The sparse structures are indexed 32 bits wide.** Block rows, column
-  pointers, permutations and the offsets the Schur analysis keeps were `usize`
-  and are now `arael_faer::SparseIndex`, an alias for `u32`. faer's sparse
-  Cholesky is generic over its index type, so the reduced system is analysed
-  and factorized at that width too. Worth 14-16% of peak memory on a pose
-  graph and 9-10% on bundle adjustment: at 1000 SLAM poses 394 -> 332 MB, at
-  Ladybug-1723-clean 557 -> 501 MB iterative and 1240 -> 1110 MB factorizing.
-- **Value-buffer offsets are `ValueIndex`, 32 bits wide.** Every map that
-  addresses a matrix's values -- the assembly scatter map, `CscMatrix::diag_pos`,
-  the block Hessian's damping map, the CG preconditioner's factor offsets, the
-  band factor's source map -- was `usize` and is now `arael::ValueIndex`, an
-  alias for `u32`. 32 bits addresses 4e9 values (34 GB of `f64`); a problem
-  past that needs the alias widened in `arael-faer` and a rebuild, with no
-  other edit. `CooMatrix::to_csc_with_map`, `build_scatter_map` and
-  `scatter_into`, and `LmProblem::calc_grad_hessian_sparse_indexed` carry the
-  new type.
-- **`Model::accumulate_hessian_positions64` / `_32` are now
-  `bind_hessian_positions64` / `_32`**, taking `&mut self` and a
-  `HessianBinder` in place of a position callback. Same for
-  `LmProblem::accumulate_hessian_positions` ->
-  `LmProblem::bind_hessian_positions`. Generated code moves with the macro;
-  hand-written implementations of these methods need updating.
+Released versions only; entries are written from the commit log when a release
+is cut.
 
 ## 0.8.0 - 2026-07-27
 

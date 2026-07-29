@@ -4546,6 +4546,9 @@ pub struct SparseFaer<T = f64> {
     // took the route (only when the reduction is banded). narrow_band_sym and
     // narrow_band_factor are the envelope structure and factor buffer, sized once.
     narrow_band_enabled: bool,
+    // Super-panel width for the envelope factorization; None derives it from
+    // the envelope (see BandSymbolic::with_panel_width).
+    envelope_panel_width: Option<usize>,
     // The reduced Schur system's envelope Cholesky, ON by default. Distinct
     // from narrow_band_enabled, which is the whole-system route: this one
     // factorizes S in block form under its own envelope, and beats faer's
@@ -4611,6 +4614,7 @@ impl<T> SparseFaer<T> {
             factor_mem: Vec::new(),
             solve_mem: Vec::new(),
             narrow_band_enabled: false,
+            envelope_panel_width: None,
             envelope_enabled: true,
             narrow_band_active: false,
             narrow_band_sym: None,
@@ -4719,6 +4723,20 @@ impl<T> SparseFaer<T> {
     /// the whole-system route for a Hessian banded before any reduction.
     pub fn with_envelope_schur(mut self, on: bool) -> Self {
         self.envelope_enabled = on;
+        self
+    }
+
+    /// Super-panel width, in scalar columns, for the envelope factorization.
+    ///
+    /// `None` (the default) derives it from the envelope, which is what a
+    /// caller should normally leave alone: a wide panel makes the update GEMM
+    /// efficient but factorizes more of the structural zeros it snaps over, so
+    /// the useful width is bounded by the band it sits on and by where the
+    /// GEMM stops gaining. Set it to measure that curve on a given machine.
+    ///
+    /// Ignored unless the envelope route runs at all.
+    pub fn with_envelope_panel_width(mut self, width: Option<usize>) -> Self {
+        self.envelope_panel_width = width;
         self
     }
 
@@ -4951,7 +4969,8 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
 
         // Band factorization structure over the whole Hessian, and the scatter
         // map into the block Hessian.
-        let bsym = arael_faer::band::BandSymbolic::new(&hsym);
+        let bsym =
+            arael_faer::band::BandSymbolic::with_panel_width(&hsym, self.envelope_panel_width);
         self.narrow_band_factor.resize(bsym.factor_val_count(), T::zero());
         self.narrow_band_active = true;
         if vb {
@@ -5769,7 +5788,8 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         } else if self.narrow_band_active {
             // Narrow-band Cholesky: factor S directly in block form -- no
             // scalar CSC, no faer symbolic analysis, fill confined to the band.
-            let bsym = arael_faer::band::BandSymbolic::new(&schur.s);
+            let bsym = arael_faer::band::BandSymbolic::with_panel_width(
+                &schur.s, self.envelope_panel_width);
             self.narrow_band_factor.resize(bsym.factor_val_count(), T::zero());
             if vb {
                 info!(
