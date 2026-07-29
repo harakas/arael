@@ -57,6 +57,17 @@ impl<S> Row<S> {
         self
     }
 
+    /// What one COMPLETE iteration cost: `t(2 iterations) - t(1 iteration)`.
+    /// `None` where the pair cannot be differenced -- no `t(2)`, or a first
+    /// iteration that was not one clean accepted step, which leaves nothing
+    /// meaningful to subtract.
+    pub fn full_iter_ms(&self) -> Option<f64> {
+        match self.full_ms {
+            Some(two) if two > self.first_iter_ms => Some(two - self.first_iter_ms),
+            _ => None,
+        }
+    }
+
     pub fn peak_mb(mut self, peak_mb: Option<f64>) -> Self {
         self.peak_mb = peak_mb;
         self
@@ -105,6 +116,12 @@ pub struct Table<'a, G: Geometry> {
     order: Vec<String>,
     /// Reported under the table: a system that crashed, a note about a row.
     pub notes: BTreeSet<String>,
+    /// Which row full-iter is normalized against for the `full-norm` column
+    /// (that row reads 1.000). Named rather than detected: a benchmark whose
+    /// arael rows span several linear solvers has to say WHICH one is the
+    /// reference, and the first one recorded is not always it. No reference,
+    /// no column.
+    reference: Option<String>,
 }
 
 impl<'a, G: Geometry> Table<'a, G> {
@@ -115,7 +132,32 @@ impl<'a, G: Geometry> Table<'a, G> {
             failed: Vec::new(),
             order: Vec::new(),
             notes: BTreeSet::new(),
+            reference: None,
         }
+    }
+
+    /// Normalize `full-iter` against this row: it reads 1.000 and every other
+    /// row reads its per-iteration cost in units of that one. Without this
+    /// there is no `full-norm` column.
+    ///
+    /// The label need not have been recorded yet -- the column resolves when
+    /// the table prints, and is dropped if the row never arrived or has no
+    /// full-iter of its own.
+    pub fn set_reference(&mut self, label: &str) {
+        self.reference = Some(label.to_string());
+    }
+
+    /// The figure `full-norm` divides by: the reference row's full-iter.
+    /// `None` when no reference was named, when that row never arrived (it
+    /// failed, or was filtered out of this run), or when it has no full-iter
+    /// of its own -- in which case the column is dropped rather than
+    /// normalized against something arbitrary.
+    fn reference_full_iter(&self) -> Option<f64> {
+        let label = self.reference.as_ref()?;
+        self.cells
+            .iter()
+            .find(|(l, _, _)| l == label)
+            .and_then(|(_, r, _)| r.full_iter_ms())
     }
 
     fn note_order(&mut self, label: &str) {
@@ -203,20 +245,25 @@ impl<'a, G: Geometry> Table<'a, G> {
         let w = self.order.iter().map(|l| l.len()).max().unwrap_or(18).max(6);
         let any_mem = self.cells.iter().any(|(_, r, _)| r.peak_mb.is_some());
         let mem_head = if any_mem { format!("{:>9}", "peak MB") } else { String::new() };
+        // full-norm needs a reference row that itself has a full-iter; without
+        // one there is nothing to divide by and the column is dropped whole.
+        let reference = self.reference_full_iter();
+        let norm_head = if reference.is_some() { format!(" {:>10}", "full-norm") } else { String::new() };
         // ms/iter divides the whole solve by every ATTEMPT, so it carries the
         // one-time setup amortized over however many iterations the solver took.
         // full-iter is what one COMPLETE iteration costs: min t(2 iters) - min
         // t(1 iter), the minima taken before the subtraction so a noisy pair
         // cannot difference into nonsense. It is blank where t(1) was not one
         // clean accepted iteration.
-        println!("\n{:<w$} {:>10} {:>9} {:>10} {:>10} {:>12}{} {:>14}",
-            "system", "total ms", "iters", "ms/iter", "full-iter", "1st-iter ms",
-            mem_head, "final cost", w = w);
+        println!("\n{:<w$} {:>10} {:>9} {:>10} {:>10}{} {:>12}{} {:>14}",
+            "system", "total ms", "iters", "ms/iter", "full-iter", norm_head,
+            "1st-iter ms", mem_head, "final cost", w = w);
         for label in &self.order {
             if let Some((_, why)) = self.failed.iter().find(|(l, _)| l == label) {
                 let mem = if any_mem { format!("{:>9}", "-") } else { String::new() };
-                println!("{:<w$} {:>10} {:>9} {:>10} {:>10} {:>12}{} {:>14}  <- {}",
-                    label, "-", "-", "-", "-", "-", mem, "-", why, w = w);
+                let norm = if reference.is_some() { format!(" {:>10}", "-") } else { String::new() };
+                println!("{:<w$} {:>10} {:>9} {:>10} {:>10}{} {:>12}{} {:>14}  <- {}",
+                    label, "-", "-", "-", "-", norm, "-", mem, "-", why, w = w);
                 continue;
             }
             let (_, row, cost) = self.cells.iter().find(|(l, _, _)| l == label)
@@ -226,11 +273,18 @@ impl<'a, G: Geometry> Table<'a, G> {
                 Some(a) => format!("{}({})", a, row.iterations),
                 None => format!("{}", row.iterations),
             };
-            let full = match row.full_ms {
-                Some(two) if two > row.first_iter_ms => {
-                    format!("{:.2}", two - row.first_iter_ms)
-                }
-                _ => "-".to_string(),
+            let full = match row.full_iter_ms() {
+                Some(ms) => format!("{:.2}", ms),
+                None => "-".to_string(),
+            };
+            // A row with no full-iter has nothing to normalize, so it reads
+            // "-" here too rather than borrowing another row's figure.
+            let norm = match reference {
+                Some(base) => match row.full_iter_ms() {
+                    Some(ms) => format!(" {:>10.3}", ms / base),
+                    None => format!(" {:>10}", "-"),
+                },
+                None => String::new(),
             };
             let mem = if any_mem {
                 match row.peak_mb {
@@ -250,10 +304,10 @@ impl<'a, G: Geometry> Table<'a, G> {
             } else {
                 String::new()
             };
-            println!("{:<w$} {:>10.2} {:>9} {:>10.2} {:>10} {:>12}{} {:>14.4}{}",
+            println!("{:<w$} {:>10.2} {:>9} {:>10.2} {:>10}{} {:>12}{} {:>14.4}{}",
                 label, row.solve_ms, iters,
                 row.solve_ms / row.iterations.max(1) as f64,
-                full, fmt_ms(row.first_iter_ms), mem, cost, miss, w = w);
+                full, norm, fmt_ms(row.first_iter_ms), mem, cost, miss, w = w);
         }
 
         // A row that missed is marked on its own line above and counted in
@@ -278,5 +332,88 @@ impl<'a, G: Geometry> Table<'a, G> {
                   1%, {}; f32 rows {:.0}x that), anchored by {} external system(s)",
             conv, self.order.len(), best, G::DISTANCE_GATE_NAME,
             G::DISTANCE_GATE_F32 / G::DISTANCE_GATE, external_agree);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Scalar;
+    impl Geometry for Scalar {
+        type Solution = f64;
+        fn cost(&self, s: &f64) -> f64 { *s }
+        fn distance(a: &f64, b: &f64) -> f64 { (a - b).abs() }
+    }
+
+    /// t(1) and t(2) into a row; `two` of `None` is a system that never gave
+    /// a two-iteration probe.
+    fn row(one: f64, two: Option<f64>) -> Row<f64> {
+        Row::new(one * 2.0, one, 2, 1.0).full_ms(two)
+    }
+
+    /// full-iter is t(2) - t(1), and undefined unless t(2) exceeds t(1) --
+    /// a pair that does not difference is not a small number, it is no number.
+    #[test]
+    fn full_iter_needs_a_pair_that_differences() {
+        assert_eq!(row(10.0, Some(18.0)).full_iter_ms(), Some(8.0));
+        assert_eq!(row(10.0, None).full_iter_ms(), None);
+        assert_eq!(row(10.0, Some(10.0)).full_iter_ms(), None);
+        assert_eq!(row(10.0, Some(4.0)).full_iter_ms(), None);
+        // A first iteration that was not one clean accepted step is NaN, and
+        // every comparison against it is false, so it yields no full-iter.
+        assert_eq!(row(f64::NAN, Some(18.0)).full_iter_ms(), None);
+    }
+
+    /// The reference row is named, and normalizing against it makes that row
+    /// read exactly 1.
+    #[test]
+    fn reference_normalizes_to_one() {
+        let g = Scalar;
+        let mut t = Table::new(&g);
+        t.record("arael LM f64 schur", row(15.50, Some(25.77)));
+        t.record("arael LM f64 sparse", row(34.52, Some(54.08)));
+        t.set_reference("arael LM f64 schur");
+
+        let base = t.reference_full_iter().expect("the reference row has a full-iter");
+        assert!((base - 10.27).abs() < 1e-9, "base {}", base);
+        // The reference reads 1.000, and a row twice its cost reads ~1.905 --
+        // the figure the published tables carry for this pair.
+        let sparse = t.cells.iter().find(|(l, _, _)| l == "arael LM f64 sparse")
+            .and_then(|(_, r, _)| r.full_iter_ms()).unwrap();
+        assert!(((sparse / base) - 1.905).abs() < 5e-4, "{}", sparse / base);
+    }
+
+    /// No reference named, a reference that never ran, and a reference with no
+    /// full-iter of its own all drop the column rather than inventing a base.
+    #[test]
+    fn an_unusable_reference_drops_the_column() {
+        let g = Scalar;
+
+        let mut none_named = Table::new(&g);
+        none_named.record("arael LM f64", row(10.0, Some(18.0)));
+        assert_eq!(none_named.reference_full_iter(), None);
+
+        let mut absent = Table::new(&g);
+        absent.record("arael LM f64", row(10.0, Some(18.0)));
+        absent.set_reference("a system that did not run");
+        assert_eq!(absent.reference_full_iter(), None);
+
+        let mut no_full = Table::new(&g);
+        no_full.record("arael LM f64", row(10.0, None));
+        no_full.set_reference("arael LM f64");
+        assert_eq!(no_full.reference_full_iter(), None);
+    }
+
+    /// A reference that only FAILED is not a reference: the row exists in the
+    /// table, but it has no timing to divide by.
+    #[test]
+    fn a_failed_reference_drops_the_column() {
+        let g = Scalar;
+        let mut t = Table::new(&g);
+        t.record_failure("arael LM f64", "did not converge");
+        t.record("factrs LM", row(10.0, Some(18.0)));
+        t.set_reference("arael LM f64");
+        assert_eq!(t.reference_full_iter(), None);
     }
 }

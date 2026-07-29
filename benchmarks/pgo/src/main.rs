@@ -205,6 +205,8 @@ fn run_dataset3(name: &str, path: &str, rounds: usize) {
 
     let geo = Geo3(&ds);
     let mut t = bench_harness::table::Table::new(&geo);
+    // full-iter is normalized against this row, which reads 1.000.
+    t.set_reference("arael LM f64");
 
     for round in 0..rounds {
         if system_selected("arael LM f64") {
@@ -502,6 +504,8 @@ fn main() {
 
         let geo = Geo2(&ds);
         let mut t = bench_harness::table::Table::new(&geo);
+        // full-iter is normalized against this row, which reads 1.000.
+        t.set_reference("arael LM f64");
 
         for round in 0..rounds {
             if system_selected("arael LM f64") {

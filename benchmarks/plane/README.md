@@ -134,7 +134,7 @@ What each column means:
 | **peak MB** | process high-water mark (`VmHWM`), each solver measured in a process of its own. |
 | **final cost** | evaluated by the one reference cost function for every system, so the values are directly comparable. |
 
-full-iter and 1st-iter are dropped ("-") for any system whose first iteration
+full-iter, full-norm and 1st-iter are dropped ("-") for any system whose first iteration
 was not a single accepted step.
 
 All eight rows reach the common optimum at all four sizes.

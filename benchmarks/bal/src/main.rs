@@ -404,6 +404,9 @@ fn main() {
 
         let geo = Geo(&ds);
         let mut t = bench_harness::table::Table::new(&geo);
+        // full-iter is normalized against the schur route -- the one arael's
+        // policy picks here -- which reads 1.000.
+        t.set_reference(&label_of(Route::Schur, false));
 
         for _ in 0..rounds {
             for (route, f32_row) in routes() {

@@ -139,6 +139,8 @@ fn main() {
 
     let geo = Geo(raw);
     let mut t = bench_harness::table::Table::new(&geo);
+    // full-iter is normalized against this row, which reads 1.000.
+    t.set_reference("arael LM f64");
 
     // g2o and Ceres run as subprocesses over an exported copy of the scene.
     let scene_path = "/tmp/plane_scene.txt";
