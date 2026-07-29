@@ -35,6 +35,10 @@ static double rad_diff(double a, double b) {
 
 static void load_g2o(const char* path, bool weighted, Graph& graph) {
     arael::g2o::Dataset2 ds = arael::g2o::Dataset2::load(path);
+    // Reserve before filling: a push that grows the collection moves its
+    // elements, which invalidates any handle already taken into it.
+    graph.poses().reserve(ds.poses.size());
+    graph.edges().reserve(ds.deltas.size());
     for (const auto& p : ds.poses) {
         auto pose = graph.poses().push();
         pose.set_pos(p.t);

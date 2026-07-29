@@ -283,6 +283,10 @@ int main() {
     vect2f est_pos{0, 0};
     float est_gamma = 0;
 
+    // Reserve before filling: a push that grows the collection moves its
+    // elements, which invalidates any handle already taken into it.
+    path.poses().reserve(gt_poses.size());
+    path.pose_pairs().reserve(gt_poses.size());
     for (size_t pi = 0; pi < gt_poses.size(); pi++) {
         auto pose = path.poses().push_back();
         if (pi == 0) {
@@ -320,6 +324,7 @@ int main() {
     std::vector<int> lm_to_gt;
     std::vector<std::vector<Sighting>> lm_sightings;
     int n_frines = 0;
+    path.landmarks().reserve(gt_lms.size());
     for (size_t li = 0; li < gt_lms.size(); li++) {
         std::vector<Sighting> sightings;
         for (size_t pi = 0; pi < gt_poses.size(); pi++) {
@@ -331,6 +336,7 @@ int main() {
 
         LandmarkRef r = path.landmarks().push();
         auto lm = path.landmarks().get(r);
+        lm.frines().reserve(sightings.size());
         size_t first_pi = sightings[0].pose;
         float first_b = sightings[0].bearing;
         auto p0 = path.poses()[uint32_t(first_pi)];

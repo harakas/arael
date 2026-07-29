@@ -166,6 +166,9 @@ static std::vector<size_t> build_path(const SceneConfig& cfg, Rng& rng, Path& pa
     struct FrineData { size_t li; size_t pi; PointFeatureRef feature; };
     std::vector<FrineData> frine_data;
 
+    // Reserve before filling: a push that grows the collection moves its
+    // elements, which invalidates any handle already taken into it.
+    path.poses().reserve(gt_poses.size());
     for (size_t pi = 0; pi < gt_poses.size(); pi++) {
         vect3f pos = gt_poses[pi].pos;
         vect3f ea = gt_poses[pi].ea;
@@ -282,6 +285,7 @@ static std::vector<size_t> build_path(const SceneConfig& cfg, Rng& rng, Path& pa
     // snapshotted at its initial position; direction and inverse range
     // initialize from the noisy landmark guess.
     std::vector<size_t> kept_gt;
+    path.landmarks().reserve(gt_landmarks.size());
     for (size_t li = 0; li < gt_landmarks.size(); li++) {
         vect3f lm_pos = gt_landmarks[li].pos;
         vect3f noisy_lm{lm_pos.x + 0.5f * rng.normal(),
@@ -302,6 +306,7 @@ static std::vector<size_t> build_path(const SceneConfig& cfg, Rng& rng, Path& pa
         lm.set_anchor_pose(anchor_pose);
         lm.set_dir_unit(d * (1.0f / d.norm()));
         lm.set_rho(1.0f / d.norm());
+        lm.frines().reserve(obs.size());
         for (const auto* fd : obs) {
             auto fr = lm.frines().push();
             fr.set_pose(path.poses().ref_at(uint32_t(fd->pi)));
