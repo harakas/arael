@@ -53,12 +53,19 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        features:
-          - "lapack"
-          - "eigen"
-          - "cholmod"
-          - "lapack,cholmod"
-          - "rayon"
+        # `key` is `features` made safe for the cache action, which rejects
+        # commas in a key.
+        include:
+          - features: "lapack"
+            key: "lapack"
+          - features: "eigen"
+            key: "eigen"
+          - features: "cholmod"
+            key: "cholmod"
+          - features: "lapack,cholmod"
+            key: "lapack-cholmod"
+          - features: "rayon"
+            key: "rayon"
     steps:
       - uses: actions/checkout@v4
       - name: Install solver backend dependencies
@@ -70,7 +77,7 @@ jobs:
         run: rustup toolchain install && rustup show
       - uses: Swatinem/rust-cache@v2
         with:
-          key: ${{ matrix.features }}
+          key: ${{ matrix.key }}
       # Full test suite, not just --lib: the feature-gated integration
       # assertions (BandLapack/eigen/cholmod/rayon equivalence) only run
       # when the features are on.
