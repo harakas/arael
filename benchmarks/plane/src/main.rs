@@ -119,7 +119,7 @@ fn main() {
     let initial_cost = scene::reference_cost(raw, &init_sol);
     println!("scene: {} poses, {} planes, {} odometry pairs, {} observations, {} parameters",
         raw.poses.len(), raw.planes.len(), raw.odos.len(), raw.obs.len(),
-        raw.poses.len() * 7 + raw.planes.len() * 3);
+        arael_runner::parameter_count(raw));
     println!("initial reference cost: {:.4}", initial_cost);
 
     // Cross-checks: every in-process system must compute the same cost at the

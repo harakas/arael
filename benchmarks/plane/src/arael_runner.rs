@@ -141,6 +141,19 @@ pub struct World {
 /// Termination class for this benchmark, shared by every system in the
 /// table (see the C++ runners' matching constants).
 ///
+/// How many parameters the solver actually optimizes, read off the model
+/// rather than recomputed from entity counts.
+///
+/// Not `poses * 7 + planes * 3`: a pose is a `TransformParam`, which stores 7
+/// numbers but optimizes a 6-DOF twist, and pose 0 is fixed as the gauge so it
+/// contributes none at all. A plane is a 2-DOF direction plus its distance.
+pub fn parameter_count(raw: &RawScene) -> usize {
+    let mut world = build(raw);
+    let mut params: Vec<f64> = Vec::new();
+    world.serialize64(&mut params);
+    params.len()
+}
+
 /// Tighter than the harness default of 1e-5, because these costs are
 /// large: 1e-5 RELATIVE at a cost of 12000 means "stop once a step gains
 /// less than 0.12", which leaves a solve short of the table's 5 cm
@@ -340,5 +353,26 @@ impl bench_harness::arael::Model for WorldF {
     fn tune(cfg: &mut LmConfig<f32>) {
         cfg.abs_precision = tolerance_f32() as f32;
         cfg.rel_precision = tolerance_f32() as f32;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// The README's table headings quote these, so a drift between what the
+    /// model optimizes and what the run reports would be published.
+    ///
+    /// (poses - 1) * 6 + planes * 3: the pose is a 6-DOF twist, pose 0 is the
+    /// fixed gauge, and a plane is a 2-DOF direction plus its distance.
+    #[test]
+    fn parameter_count_matches_the_model() {
+        for (poses, planes, expect) in
+            [(60, 24, 426), (120, 45, 849), (300, 114, 2136), (900, 339, 6411)]
+        {
+            let raw = crate::scene::make_scene_with(poses).raw;
+            assert_eq!(raw.poses.len(), poses);
+            assert_eq!(raw.planes.len(), planes, "planes at {} poses", poses);
+            assert_eq!(super::parameter_count(&raw), expect, "params at {} poses", poses);
+            assert_eq!(expect, (poses - 1) * 6 + planes * 3);
+        }
     }
 }

@@ -199,7 +199,12 @@ pub struct Scene {
 }
 
 pub fn make_scene() -> Scene {
-    let n = n_poses();
+    make_scene_with(n_poses())
+}
+
+/// [`make_scene`] at an explicit pose count, for callers that must not depend
+/// on the environment.
+pub fn make_scene_with(n: usize) -> Scene {
     let mut rng = StdRng::seed_from_u64(SEED);
     let shared = std::env::var("PLANE_SHARED").is_ok();
     let (planes, centers) = if shared {

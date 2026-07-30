@@ -139,7 +139,7 @@ was not a single accepted step.
 
 All eight rows reach the common optimum at all four sizes.
 
-### 60 poses (24 planes, 59 odometry pairs, 312 observations, 492 parameters)
+### 60 poses (24 planes, 59 odometry pairs, 312 observations, 426 parameters)
 
 | system          | total ms |  iters | ms/iter | full-iter | full-norm | 1st-iter ms | peak MB | final cost |
 |-----------------|---------:|-------:|--------:|----------:|----------:|------------:|--------:|-----------:|
@@ -152,7 +152,7 @@ All eight rows reach the common optimum at all four sizes.
 | factrs LM       |     4.42 |   6(6) |    0.74 |      0.62 |     5.130 |        1.14 |     5.0 |   866.5573 |
 | g2o LM          |     6.31 |   6(6) |    1.05 |      1.04 |     8.663 |        1.12 |     6.0 |   866.5573 |
 
-### 120 poses (45 planes, 119 odometry pairs, 585 observations, 975 parameters)
+### 120 poses (45 planes, 119 odometry pairs, 585 observations, 849 parameters)
 
 | system          | total ms |  iters | ms/iter | full-iter | full-norm | 1st-iter ms | peak MB | final cost |
 |-----------------|---------:|-------:|--------:|----------:|----------:|------------:|--------:|-----------:|
@@ -165,7 +165,7 @@ All eight rows reach the common optimum at all four sizes.
 | factrs LM       |     7.60 |   5(5) |    1.52 |      1.34 |     5.581 |        2.36 |     7.1 |  1630.3923 |
 | g2o LM          |    10.23 |   5(5) |    2.05 |      2.03 |     8.418 |        2.16 |     6.9 |  1630.3923 |
 
-### 300 poses (114 planes, 299 odometry pairs, 1482 observations, 2442 parameters)
+### 300 poses (114 planes, 299 odometry pairs, 1482 observations, 2136 parameters)
 
 | system          | total ms |  iters | ms/iter | full-iter | full-norm | 1st-iter ms | peak MB | final cost |
 |-----------------|---------:|-------:|--------:|----------:|----------:|------------:|--------:|-----------:|
@@ -178,7 +178,7 @@ All eight rows reach the common optimum at all four sizes.
 | factrs LM       |    19.77 |   5(5) |    3.95 |      3.34 |     5.516 |        6.59 |    13.3 |  4046.0548 |
 | g2o LM          |    26.45 |   5(5) |    5.29 |      5.19 |     8.570 |        5.51 |     9.8 |  4046.0548 |
 
-### 900 poses (339 planes, 899 odometry pairs, 4407 observations, 7317 parameters)
+### 900 poses (339 planes, 899 odometry pairs, 4407 observations, 6411 parameters)
 
 | system          | total ms |  iters | ms/iter | full-iter | full-norm | 1st-iter ms | peak MB | final cost |
 |-----------------|---------:|-------:|--------:|----------:|----------:|------------:|--------:|-----------:|
