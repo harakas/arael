@@ -30,8 +30,9 @@ arael is compared against:
 
 ## Problem
 
-A robot drives an S-curve (60/120/300 poses); 3D landmarks are observed
-by 5 cameras giving 360-degree coverage. The factor graph:
+A robot drives an S-curve (60/120/300 poses), or a closed loop with
+`SLAM_TRAJECTORY=loop`; 3D landmarks are observed by 5 cameras giving
+360-degree coverage. The factor graph:
 
 | factor | arity | residuals | content |
 |--------|-------|----------:|---------|
@@ -57,6 +58,19 @@ system dense, so it is where the solvers actually differ. Below ~120 poses
 the mechanism is inert -- a quarter of a short trajectory is no wider than
 an ordinary landmark's 31-pose window -- so the small scenes have no heavy
 tail at all.
+
+`SLAM_TRAJECTORY=loop` drives a closed circle, measuring visibility
+distance the short way round: no window is clipped at the ends, and
+landmarks at the seam couple the first poses to the last (5,370
+observations to 6,133 at 60 poses). Circumference is `num_poses *
+step_size`, so the step is unchanged. The pose chain stays open.
+
+`eight` drives a figure-8 of the same length. It crosses itself once, and
+visibility there is spatial rather than by pose index, so both passes
+through the crossing see the same landmarks -- coupling the middle of the
+pose ordering instead of its ends.
+
+Results below are the S-curve.
 
 This is the **outlier-free** scenario: the bearing and GPS residuals are
 plain Gaussian (max-likelihood when there are no outliers). The
@@ -520,6 +534,7 @@ cmake -B cpp/build cpp && cmake --build cpp/build   # Ceres, g2o, GTSAM
 export OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1     # before load; see Methodology
 ROUNDS=32 cargo run --release --bin slam-bench                       # 60 poses (default)
 SLAM_POSES=300 ROUNDS=32 cargo run --release --bin slam-bench
+SLAM_TRAJECTORY=loop cargo run --release --bin slam-bench            # closed loop instead of the S-curve
 SLAM_POSES=300 SLAM_COV=1 cargo run --release --bin slam-bench       # covariance recovery (above)
 RUN_TINY=1 cargo run --release --bin slam-bench                      # include tiny-solver (off by default)
 VERBOSE=1 cargo run --release --bin slam-bench                       # arael per-iteration trace

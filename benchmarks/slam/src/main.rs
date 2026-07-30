@@ -8,7 +8,7 @@ mod factrs_runner;
 mod scene;
 mod tiny_runner;
 
-use scene::{Scene, SceneConfig, Solution};
+use scene::{Scene, SceneConfig, Solution, Trajectory};
 
 
 /// The settings this run used, printed before anything else: a pasted result has
@@ -22,6 +22,12 @@ fn print_header(scene: &Scene, cfg: &SceneConfig, rounds: usize, skip_tiny: bool
         .rounds(rounds)
         .line("scene", format!("{} poses, {} landmarks, seed {} [SLAM_POSES]",
             cfg.num_poses, cfg.num_landmarks, cfg.seed))
+        .line("trajectory", format!("{} [SLAM_TRAJECTORY: scurve|loop|eight]",
+            match cfg.trajectory {
+                Trajectory::SCurve => "S-curve, open ends",
+                Trajectory::Loop => "closed loop, landmark visibility wraps",
+                Trajectory::Eight => "figure-8, landmarks shared at the crossing",
+            }))
         .line("systems", format!("{} [SLAM_SYSTEMS]",
             systems_filter.as_deref().unwrap_or("all")))
         .line("optional systems", format!("tiny-solver {} [RUN_TINY]", on_off(skip_tiny)))
@@ -62,6 +68,19 @@ fn config() -> SceneConfig {
             cfg.lm_visibility_range = s / 2;
             cfg.wide_fraction = 0.0;
         }
+    }
+    // SLAM_TRAJECTORY=loop drives a closed circle instead of the open S-curve
+    // and wraps landmark visibility across the seam, so no landmark's window is
+    // clipped by the start or the end of the pose list. A typo here would
+    // silently benchmark a different dataset, so an unknown value is an error.
+    if let Ok(t) = std::env::var("SLAM_TRAJECTORY") {
+        cfg.trajectory = match t.as_str() {
+            "scurve" => Trajectory::SCurve,
+            "loop" => Trajectory::Loop,
+            "eight" => Trajectory::Eight,
+            other => panic!(
+                "SLAM_TRAJECTORY: expected scurve, loop or eight, got {:?}", other),
+        };
     }
     cfg
 }

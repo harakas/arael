@@ -82,7 +82,30 @@ pub struct Solution {
     pub landmarks: Vec<vect3d>,
 }
 
+/// Which path the robot drives.
+///
+/// On the `SCurve` the trajectory has two ends, so a landmark anchored near
+/// either one is seen by fewer poses than its range allows -- its window is
+/// clipped by the start or the end. `Loop` closes the path into a circle and
+/// measures pose-index distance the short way round, so no window is clipped
+/// and landmarks near the seam are observed from both ends of the pose list.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Trajectory {
+    SCurve,
+    Loop,
+    /// A figure-8. The path crosses itself once, so two stretches of the
+    /// trajectory that are far apart in time run through the same place.
+    ///
+    /// Visibility here is spatial -- a pose sees a landmark when it is within
+    /// the anchor's radius on the ground -- because a pose-index rule cannot
+    /// express "these two passes are at the same spot". That puts the shared
+    /// landmarks in the middle of the pose ordering rather than at its ends,
+    /// which is a different shape of coupling from [`Self::Loop`].
+    Eight,
+}
+
 pub struct SceneConfig {
+    pub trajectory: Trajectory,
     pub num_poses: usize,
     pub num_landmarks: usize,
     pub seed: u64,
@@ -118,6 +141,7 @@ pub struct SceneConfig {
 impl Default for SceneConfig {
     fn default() -> Self {
         SceneConfig {
+            trajectory: Trajectory::SCurve,
             num_poses: 60,
             num_landmarks: 240,
             seed: 42,
@@ -173,19 +197,105 @@ fn create_cameras() -> Vec<Camera> {
 }
 
 fn ground_truth_poses(cfg: &SceneConfig) -> Vec<(vect3f, vect3f)> {
-    let mut poses = Vec::new();
-    let mut t = 0.0_f32;
-    for _ in 0..cfg.num_poses {
-        let x = t;
-        let y = cfg.s_amplitude * (cfg.s_frequency * t).sin();
-        let pos = vect3f::new(x, y, 0.0);
-        let dx = 1.0;
-        let dy = cfg.s_amplitude * cfg.s_frequency * (cfg.s_frequency * t).cos();
-        let yaw = dy.atan2(dx);
-        poses.push((pos, vect3f::new(0.0, 0.0, yaw)));
-        t += cfg.step_size;
+    match cfg.trajectory {
+        Trajectory::SCurve => {
+            let mut poses = Vec::new();
+            let mut t = 0.0_f32;
+            for _ in 0..cfg.num_poses {
+                let x = t;
+                let y = cfg.s_amplitude * (cfg.s_frequency * t).sin();
+                let pos = vect3f::new(x, y, 0.0);
+                let dx = 1.0;
+                let dy = cfg.s_amplitude * cfg.s_frequency * (cfg.s_frequency * t).cos();
+                let yaw = dy.atan2(dx);
+                poses.push((pos, vect3f::new(0.0, 0.0, yaw)));
+                t += cfg.step_size;
+            }
+            poses
+        }
+        Trajectory::Loop => loop_poses(cfg),
+        Trajectory::Eight => eight_poses(cfg),
+    }
+}
+
+/// Poses evenly spaced along a lemniscate of Gerono, `(cos t, sin t cos t)`,
+/// which closes and crosses itself once at the origin.
+///
+/// Sized and stepped like [`loop_poses`]: the curve is scaled so its total
+/// length is `num_poses * step_size`, then resampled at equal arc length, so a
+/// pose advances the same distance it does on every other trajectory.
+fn eight_poses(cfg: &SceneConfig) -> Vec<(vect3f, vect3f)> {
+    use std::f32::consts::{PI, TAU};
+    let n = cfg.num_poses;
+    // Dense polyline of the unit curve, to measure arc length and resample.
+    // 64 samples per pose is far finer than the spacing we read back off it.
+    let dense = (n * 64).max(4096);
+    let pt = |t: f32| vect3f::new(t.cos(), t.sin() * t.cos(), 0.0);
+    let mut cum = Vec::with_capacity(dense + 1);
+    cum.push(0.0f32);
+    for k in 1..=dense {
+        let (a, b) = (TAU * (k - 1) as f32 / dense as f32, TAU * k as f32 / dense as f32);
+        let d = (pt(b) - pt(a)).norm();
+        cum.push(cum[k - 1] + d);
+    }
+    let unit_len = cum[dense];
+    let scale = n as f32 * cfg.step_size / unit_len;
+
+    let mut poses = Vec::with_capacity(n);
+    let mut k = 0usize;
+    for i in 0..n {
+        let target = unit_len * (i as f32) / (n as f32);
+        while k + 1 < dense && cum[k + 1] < target {
+            k += 1;
+        }
+        // Linear interpolation in t across the segment holding `target`.
+        let seg = (cum[k + 1] - cum[k]).max(1e-20);
+        let frac = ((target - cum[k]) / seg).clamp(0.0, 1.0);
+        let t = TAU * (k as f32 + frac) / dense as f32;
+        let p = pt(t) * scale;
+        // Tangent d/dt (cos t, sin t cos t) = (-sin t, cos 2t).
+        let mut yaw = (2.0 * t).cos().atan2(-t.sin());
+        while yaw > PI { yaw -= TAU; }
+        while yaw <= -PI { yaw += TAU; }
+        poses.push((p, vect3f::new(0.0, 0.0, yaw)));
     }
     poses
+}
+
+/// Poses evenly spaced around a circle, heading along the tangent.
+///
+/// The radius comes from the distance the robot travels: the circumference is
+/// `num_poses * step_size`, so a pose still advances `step_size` along the path
+/// and the odometry deltas keep the size they have on the S-curve. The circle
+/// is therefore small on a short trajectory (2.4 m at 60 poses) and grows with
+/// the pose count.
+fn loop_poses(cfg: &SceneConfig) -> Vec<(vect3f, vect3f)> {
+    use std::f32::consts::{FRAC_PI_2, PI, TAU};
+    let n = cfg.num_poses;
+    let radius = n as f32 * cfg.step_size / TAU;
+    let mut poses = Vec::new();
+    for i in 0..n {
+        let theta = TAU * (i as f32) / (n as f32);
+        let pos = vect3f::new(radius * theta.cos(), radius * theta.sin(), 0.0);
+        // Tangent of a counter-clockwise circle, wrapped to (-pi, pi] so the
+        // stored euler angles stay in the same range the S-curve produces --
+        // a yaw that ran past pi would make the drift prior and the reference
+        // cost disagree with a solver that landed on the equivalent angle.
+        let mut yaw = theta + FRAC_PI_2;
+        while yaw > PI { yaw -= TAU; }
+        poses.push((pos, vect3f::new(0.0, 0.0, yaw)));
+    }
+    poses
+}
+
+/// How far apart two poses are along the trajectory, counted in poses.
+///
+/// `wrap` closes the path: with no ends, the short way round is the distance
+/// and the last pose neighbours the first. Trajectories whose visibility is
+/// spatial rather than topological do not use this at all.
+fn pose_index_distance(wrap: bool, a: usize, b: usize, num_poses: usize) -> usize {
+    let d = a.abs_diff(b);
+    if wrap { d.min(num_poses - d) } else { d }
 }
 
 /// A landmark's visibility SPAN is how many consecutive poses observe it.
@@ -312,8 +422,18 @@ pub fn generate(cfg: &SceneConfig) -> Scene {
 
         // Features (only for landmarks visible from this pose).
         for (li, &(lm_pos, anchor_idx, range)) in gt_landmarks.iter().enumerate() {
-            let dist_to_anchor = pi.abs_diff(anchor_idx);
-            if dist_to_anchor > range { continue; }
+            let visible = match cfg.trajectory {
+                Trajectory::SCurve | Trajectory::Loop => {
+                    let wrap = cfg.trajectory == Trajectory::Loop;
+                    pose_index_distance(wrap, pi, anchor_idx, gt_poses.len()) <= range
+                }
+                // Range is a count of poses; a pose covers step_size of ground,
+                // so the same window in metres is range * step_size.
+                Trajectory::Eight => {
+                    (pos - gt_poses[anchor_idx].0).norm() <= range as f32 * cfg.step_size
+                }
+            };
+            if !visible { continue; }
             if rng.random::<f32>() > cfg.lm_visibility_prob { continue; }
             for cam in &cameras {
                 let p_cam = cam.world_to_camera(lm_pos, pos, mr2w);
@@ -564,4 +684,203 @@ pub fn read_solution(path: &str, n_poses: usize, n_landmarks: usize) -> Solution
     }).collect();
     let landmarks = (0..n_landmarks).map(|_| vect3d::new(next(), next(), next())).collect();
     Solution { poses, landmarks }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn initial_solution(scene: &Scene) -> Solution {
+        Solution {
+            poses: scene.poses.iter()
+                .map(|p| (vect3d::from(p.init_pos), vect3d::from(p.init_ea)))
+                .collect(),
+            landmarks: scene.landmarks_init.iter().map(|l| vect3d::from(*l)).collect(),
+        }
+    }
+
+    /// The published tables are all measured on the default scene, so a change
+    /// that shifts it -- an extra rng draw, a moved visibility test -- silently
+    /// invalidates every number in the README. These are the counts and the
+    /// initial cost the 60-pose table was produced from.
+    #[test]
+    fn default_scene_is_unchanged() {
+        let cfg = SceneConfig::default();
+        assert_eq!(cfg.trajectory, Trajectory::SCurve, "the default scene is the S-curve");
+        let scene = generate(&cfg);
+        assert_eq!(scene.poses.len(), 60);
+        assert_eq!(scene.landmarks_init.len(), 240);
+        assert_eq!(scene.frines.len(), 5370);
+        assert_eq!(scene.odo.len(), 59);
+        let cost = reference_cost(&scene, &initial_solution(&scene));
+        assert!((cost - 630337.3712).abs() < 1e-3, "initial reference cost {:.4}", cost);
+    }
+
+    /// Adding the loop must not perturb the S-curve's rng draw sequence.
+    #[test]
+    fn loop_mode_leaves_the_scurve_scene_alone() {
+        let a = generate(&SceneConfig::default());
+        let b = generate(&SceneConfig { trajectory: Trajectory::SCurve, ..Default::default() });
+        assert_eq!(a.frines.len(), b.frines.len());
+        let (sa, sb) = (initial_solution(&a), initial_solution(&b));
+        assert_eq!(reference_cost(&a, &sa), reference_cost(&b, &sb));
+    }
+
+    fn loop_cfg(num_poses: usize) -> SceneConfig {
+        SceneConfig { trajectory: Trajectory::Loop, num_poses,
+                      num_landmarks: 4 * num_poses, ..Default::default() }
+    }
+
+    /// Every step is step_size long, including the one from the last pose back
+    /// to the first: that closing step is what makes the ends meet.
+    #[test]
+    fn loop_trajectory_closes() {
+        let cfg = loop_cfg(60);
+        let poses = ground_truth_poses(&cfg);
+        assert_eq!(poses.len(), 60);
+        let step = |a: usize, b: usize| (poses[b].0 - poses[a].0).norm();
+        // A chord is slightly shorter than the arc it subtends; at 60 poses the
+        // circle is coarse enough for that to show, so allow 1%.
+        for i in 1..poses.len() {
+            let d = step(i - 1, i);
+            assert!((d - cfg.step_size).abs() < 0.01 * cfg.step_size, "step {} is {}", i, d);
+        }
+        let closing = step(poses.len() - 1, 0);
+        assert!((closing - cfg.step_size).abs() < 0.01 * cfg.step_size,
+                "closing step is {}", closing);
+    }
+
+    /// Poses ride a circle whose circumference is the distance travelled, and
+    /// the stored yaw stays in the range the S-curve produces.
+    #[test]
+    fn loop_geometry() {
+        let cfg = loop_cfg(300);
+        let poses = ground_truth_poses(&cfg);
+        let radius = cfg.num_poses as f32 * cfg.step_size / std::f32::consts::TAU;
+        for (pos, ea) in &poses {
+            assert!((pos.norm() - radius).abs() < 1e-3, "radius {}", pos.norm());
+            assert_eq!(pos.z, 0.0);
+            assert!(ea.z > -std::f32::consts::PI && ea.z <= std::f32::consts::PI,
+                    "yaw {} outside (-pi, pi]", ea.z);
+        }
+    }
+
+    #[test]
+    fn pose_index_distance_wraps_only_when_asked() {
+        // 2 apart the short way round a 60-pose loop, 58 along an open path.
+        assert_eq!(pose_index_distance(false, 59, 1, 60), 58);
+        assert_eq!(pose_index_distance(true, 59, 1, 60), 2);
+        // Half way round is the farthest two poses on a loop can be.
+        assert_eq!(pose_index_distance(true, 0, 30, 60), 30);
+        assert_eq!(pose_index_distance(true, 0, 0, 60), 0);
+    }
+
+    /// The point of the mode: landmarks straddle the seam, so the first and last
+    /// poses share observations instead of each seeing a clipped window.
+    #[test]
+    fn loop_landmarks_span_the_seam() {
+        let edge = 5;
+        let spanning = |scene: &Scene, n: usize| {
+            let mut lo = vec![false; scene.landmarks_init.len()];
+            let mut hi = vec![false; scene.landmarks_init.len()];
+            for f in &scene.frines {
+                if (f.pose as usize) < edge { lo[f.landmark as usize] = true; }
+                if (f.pose as usize) >= n - edge { hi[f.landmark as usize] = true; }
+            }
+            (0..lo.len()).filter(|&i| lo[i] && hi[i]).count()
+        };
+        let n = 60;
+        let looped = generate(&loop_cfg(n));
+        assert!(spanning(&looped, n) > 0, "no landmark crosses the loop seam");
+        // On the open path the ends are 59 poses apart and no window is that
+        // wide, so nothing is shared -- the clipping this mode removes.
+        let open = generate(&SceneConfig { num_poses: n, num_landmarks: 4 * n,
+                                           ..Default::default() });
+        assert_eq!(spanning(&open, n), 0, "the S-curve should not share end observations");
+    }
+
+    fn eight_cfg(num_poses: usize) -> SceneConfig {
+        SceneConfig { trajectory: Trajectory::Eight, num_poses,
+                      num_landmarks: 4 * num_poses, ..Default::default() }
+    }
+
+    /// The lemniscate is resampled at equal arc length, so every step is
+    /// step_size -- the same distance a pose covers on the other trajectories.
+    #[test]
+    fn eight_is_evenly_spaced_and_closes() {
+        let cfg = eight_cfg(300);
+        let poses = ground_truth_poses(&cfg);
+        assert_eq!(poses.len(), 300);
+        for i in 1..poses.len() {
+            let d = (poses[i].0 - poses[i - 1].0).norm();
+            assert!((d - cfg.step_size).abs() < 0.02 * cfg.step_size, "step {} is {}", i, d);
+        }
+        let closing = (poses[0].0 - poses[poses.len() - 1].0).norm();
+        assert!((closing - cfg.step_size).abs() < 0.02 * cfg.step_size,
+                "closing step is {}", closing);
+    }
+
+    /// The path crosses itself: two poses far apart in the ordering come back
+    /// to the same place. That is what the mode exists to produce.
+    #[test]
+    fn eight_crosses_itself() {
+        let poses = ground_truth_poses(&eight_cfg(300));
+        let n = poses.len();
+        let mut best = f32::MAX;
+        for i in 0..n {
+            for j in 0..n {
+                // Far apart along the path, measured the short way round.
+                let d = i.abs_diff(j);
+                if d.min(n - d) < n / 8 { continue; }
+                best = best.min((poses[i].0 - poses[j].0).norm());
+            }
+        }
+        assert!(best < 0.5, "closest far-apart pair is {} apart", best);
+    }
+
+    /// Landmarks at the crossing are seen from both passes, coupling poses in
+    /// the middle of the ordering rather than at its ends.
+    #[test]
+    fn eight_shares_landmarks_across_the_crossing() {
+        let n = 300;
+        let scene = generate(&eight_cfg(n));
+        let mut lo = vec![false; scene.landmarks_init.len()];
+        let mut hi = vec![false; scene.landmarks_init.len()];
+        // The two passes through the origin are near 1/4 and 3/4 of the path.
+        for f in &scene.frines {
+            let p = f.pose as usize;
+            if p.abs_diff(n / 4) < n / 16 { lo[f.landmark as usize] = true; }
+            if p.abs_diff(3 * n / 4) < n / 16 { hi[f.landmark as usize] = true; }
+        }
+        let shared = (0..lo.len()).filter(|&i| lo[i] && hi[i]).count();
+        assert!(shared > 0, "no landmark is seen from both passes of the crossing");
+    }
+
+    /// No pose sits in a visibility shadow at the ends, which is the whole
+    /// reason for the mode: on the open path the first and last poses carry
+    /// noticeably fewer observations than the middle ones.
+    #[test]
+    fn loop_has_no_observation_falloff_at_the_ends() {
+        let n = 300;
+        let per_pose = |scene: &Scene| {
+            let mut c = vec![0usize; n];
+            for f in &scene.frines { c[f.pose as usize] += 1; }
+            c
+        };
+        let edge = 10;
+        let mean = |v: &[usize]| v.iter().sum::<usize>() as f64 / v.len() as f64;
+
+        let c = per_pose(&generate(&loop_cfg(n)));
+        let ends: Vec<usize> = c[..edge].iter().chain(&c[n - edge..]).copied().collect();
+        let middle = &c[n / 2 - edge..n / 2 + edge];
+        assert!(mean(&ends) > 0.8 * mean(middle),
+                "loop ends {:.1} vs middle {:.1}", mean(&ends), mean(middle));
+
+        let c = per_pose(&generate(&SceneConfig { num_poses: n, num_landmarks: 4 * n,
+                                                  ..Default::default() }));
+        let ends: Vec<usize> = c[..edge].iter().chain(&c[n - edge..]).copied().collect();
+        let middle = &c[n / 2 - edge..n / 2 + edge];
+        assert!(mean(&ends) < 0.8 * mean(middle),
+                "S-curve ends {:.1} vs middle {:.1}", mean(&ends), mean(middle));
+    }
 }
