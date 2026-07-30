@@ -14,48 +14,48 @@
 # Per panel: (title, [ (label, full_iter_ms, first_iter_ms, kind) ]).
 # full-iter is one complete iteration (t(2 iters) - t(1 iter), setup cancelled).
 # first-iter is that same iteration plus the setup paid once. Their difference
-# is the setup, drawn faded. 2026-07-26, min of 128 rounds (64 at 900 poses).
+# is the setup, drawn faded. 2026-07-29, min of 128 rounds (64 at 900 poses).
 # kind: "arael" solid blue, "other" neutral, "arael*" adds a star to the value.
 # full_iter None -> italic text row (no clean first iteration to measure).
 PANELS = [
     ("60 poses, 24 planes (492 params)", [
-        ("arael (f32)", 0.11, 0.31, "arael"),
-        ("arael (f64)", 0.12, 0.34, "arael"),
+        ("arael (f32)", 0.11, 0.29, "arael"),
+        ("arael (f64)", 0.12, 0.31, "arael"),
         ("SymForce (f32)", 0.16, 0.91, "other"),
-        ("SymForce (f64)", 0.19, 0.92, "other"),
-        ("Ceres", 0.39, 0.87, "other"),
-        ("GTSAM", 0.58, 0.65, "other"),
-        ("factrs", 0.62, 1.21, "other"),
-        ("g2o", 1.05, 1.14, "other"),
+        ("SymForce (f64)", 0.20, 0.91, "other"),
+        ("Ceres", 0.38, 0.87, "other"),
+        ("GTSAM", 0.54, 0.65, "other"),
+        ("factrs", 0.62, 1.14, "other"),
+        ("g2o", 1.04, 1.12, "other"),
     ]),
     ("120 poses, 45 planes (975 params)", [
-        ("arael (f32)", 0.22, 0.86, "arael"),
-        ("arael (f64)", 0.26, 0.90, "arael"),
-        ("SymForce (f64)", 0.36, 1.83, "other"),
-        ("SymForce (f32)", 0.37, 1.76, "other"),
-        ("Ceres", 0.84, 1.71, "other"),
-        ("GTSAM", 1.12, 1.30, "other"),
-        ("factrs", 1.28, 2.44, "other"),
-        ("g2o", 2.08, 2.17, "other"),
+        ("arael (f32)", 0.22, 0.82, "arael"),
+        ("arael (f64)", 0.24, 0.87, "arael"),
+        ("SymForce (f32)", 0.37, 1.74, "other"),
+        ("SymForce (f64)", 0.39, 1.77, "other"),
+        ("Ceres", 0.78, 1.73, "other"),
+        ("GTSAM", 1.16, 1.27, "other"),
+        ("factrs", 1.34, 2.36, "other"),
+        ("g2o", 2.03, 2.16, "other"),
     ]),
     ("300 poses, 114 planes (2442 params)", [
-        ("arael (f32)", 0.57, 2.22, "arael"),
-        ("arael (f64)", 0.65, 2.32, "arael"),
-        ("SymForce (f32)", 0.98, 4.78, "other"),
-        ("SymForce (f64)", 1.22, 4.75, "other"),
-        ("Ceres", 2.06, 4.55, "other"),
-        ("GTSAM", 3.03, 3.31, "other"),
-        ("factrs", 3.33, 6.66, "other"),
-        ("g2o", 5.21, 5.52, "other"),
+        ("arael (f32)", 0.57, 2.12, "arael"),
+        ("arael (f64)", 0.61, 2.22, "arael"),
+        ("SymForce (f32)", 1.01, 4.68, "other"),
+        ("SymForce (f64)", 1.16, 4.73, "other"),
+        ("Ceres", 1.99, 4.51, "other"),
+        ("GTSAM", 3.03, 3.26, "other"),
+        ("factrs", 3.34, 6.59, "other"),
+        ("g2o", 5.19, 5.51, "other"),
     ]),
     ("900 poses, 339 planes (7317 params)", [
-        ("arael (f32)", 1.97, 6.95, "arael*"),
-        ("arael (f64)", 2.18, 7.26, "arael"),
-        ("SymForce (f32)", 3.30, 15.57, "other"),
-        ("SymForce (f64)", 3.64, 15.85, "other"),
-        ("Ceres", 6.66, 14.19, "other"),
-        ("GTSAM", 9.27, 56.79, "other"),
-        ("g2o", 15.89, 17.16, "other"),
+        ("arael (f32)", 1.81, 6.62, "arael*"),
+        ("arael (f64)", 2.00, 6.88, "arael"),
+        ("SymForce (f32)", 3.23, 15.54, "other"),
+        ("SymForce (f64)", 3.87, 15.62, "other"),
+        ("Ceres", 6.42, 14.24, "other"),
+        ("GTSAM", 9.34, 56.19, "other"),
+        ("g2o", 15.81, 16.82, "other"),
         ("factrs", None, None, "other"),
     ]),
 ]
@@ -121,6 +121,18 @@ def bar_path(x0, y, w, h, r):
             f"L{x0},{y + h} Z")
 
 
+def panel_decimals(rows):
+    """Decimals for a panel's value labels.
+
+    One decimal reads best, but on a panel of sub-millisecond solves it can
+    round two different rows onto the same label. Use two whenever that would
+    happen rather than keying off the axis, which does not track how close the
+    rows actually are.
+    """
+    at_one = [f"{full:.1f}" for _, full, _, _ in rows if full is not None]
+    return 2 if len(set(at_one)) < len(at_one) else 1
+
+
 def render_panel(s, c, px, py, title, x_max, tick, rows):
     plot_x = px + LABEL_W
     plot_top = py + PANEL_TITLE_H
@@ -162,9 +174,7 @@ def render_panel(s, c, px, py, title, x_max, tick, rows):
             s.append(f'<path d="{bar_path(x2, y, w2, BAR_H, 3)}" '
                      f'fill="{fill}" fill-opacity="0.38"/>')
         end = plot_x + w + 2 + w2
-        # Two decimals on the small scenes: at one decimal a whole column of
-        # sub-millisecond solves rounds onto the same label.
-        d = 2 if x_max <= 3.0 else 1
+        d = panel_decimals(rows)
         s.append(f'<text x="{end + 6:.1f}" y="{ty:.1f}" font-size="10.5"'
                  f'{weight} fill="{c["ink"]}">{full:.{d}f}{star} + '
                  f'{setup:.{d}f}</text>')
