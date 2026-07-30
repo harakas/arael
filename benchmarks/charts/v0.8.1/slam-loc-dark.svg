@@ -1,0 +1,136 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="510" viewBox="0 0 880 510" font-family="ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif">
+<rect x="0.5" y="0.5" width="879" height="509" rx="8" fill="#1a1a19" stroke="#2c2c2a"/>
+<text x="18" y="30" font-size="15" font-weight="600" fill="#ffffff">Landmark SLAM and localization: time per iteration and peak memory</text>
+<text x="862" y="30" font-size="11.5" text-anchor="end" fill="#908f88">arael 0.8.1</text>
+<text x="18" y="48" font-size="11.5" fill="#c0bfb8">Landmark SLAM on a desktop core, fixed-map localization on an edge board; single thread, best validated configuration per system. Lower is better.</text>
+<text x="18" y="70" font-size="12.5" font-weight="600" fill="#ffffff">Landmark SLAM -- 300 poses, 5.4k params (Apple M4 Pro)</text>
+<line x1="110.0" y1="78" x2="110.0" y2="214" stroke="#2c2c2a" stroke-width="1"/>
+<text x="110.0" y="226" font-size="10" text-anchor="middle" fill="#908f88">0</text>
+<line x1="195.9" y1="78" x2="195.9" y2="214" stroke="#2c2c2a" stroke-width="1"/>
+<text x="195.9" y="226" font-size="10" text-anchor="middle" fill="#908f88">50</text>
+<line x1="281.8" y1="78" x2="281.8" y2="214" stroke="#2c2c2a" stroke-width="1"/>
+<text x="281.8" y="226" font-size="10" text-anchor="middle" fill="#908f88">100</text>
+<line x1="367.6" y1="78" x2="367.6" y2="214" stroke="#2c2c2a" stroke-width="1"/>
+<text x="367.6" y="226" font-size="10" text-anchor="middle" fill="#908f88">150 ms</text>
+<text x="102" y="91.0" font-size="11.5" text-anchor="end" font-weight="600" fill="#ffffff">arael (f32)</text>
+<path d="M110,81.5 L153.5825882352941,81.5 Q156.5825882352941,81.5 156.5825882352941,84.5 L156.5825882352941,90.5 Q156.5825882352941,93.5 153.5825882352941,93.5 L110,93.5 Z" fill="#3987e5"/>
+<text x="162.6" y="91.0" font-size="10.5" font-weight="600" fill="#ffffff">27.1</text>
+<text x="102" y="110.0" font-size="11.5" text-anchor="end" font-weight="600" fill="#ffffff">arael (f64)</text>
+<path d="M110,100.5 L176.13529411764705,100.5 Q179.13529411764705,100.5 179.13529411764705,103.5 L179.13529411764705,109.5 Q179.13529411764705,112.5 176.13529411764705,112.5 L110,112.5 Z" fill="#3987e5"/>
+<text x="185.1" y="110.0" font-size="10.5" font-weight="600" fill="#ffffff">40.2</text>
+<text x="102" y="129.0" font-size="11.5" text-anchor="end" fill="#c0bfb8">g2o (LM)</text>
+<path d="M110,119.5 L211.4329411764706,119.5 Q214.4329411764706,119.5 214.4329411764706,122.5 L214.4329411764706,128.5 Q214.4329411764706,131.5 211.4329411764706,131.5 L110,131.5 Z" fill="#77766f"/>
+<text x="220.4" y="129.0" font-size="10.5" fill="#ffffff">60.8</text>
+<text x="102" y="148.0" font-size="11.5" text-anchor="end" fill="#c0bfb8">Ceres (LM)</text>
+<path d="M110,138.5 L250.33764705882353,138.5 Q253.33764705882353,138.5 253.33764705882353,141.5 L253.33764705882353,147.5 Q253.33764705882353,150.5 250.33764705882353,150.5 L110,150.5 Z" fill="#77766f"/>
+<text x="259.3" y="148.0" font-size="10.5" fill="#ffffff">83.5</text>
+<text x="102" y="167.0" font-size="11.5" text-anchor="end" fill="#c0bfb8">factrs (LM)</text>
+<path d="M110,157.5 L317.7896470588235,157.5 Q320.7896470588235,157.5 320.7896470588235,160.5 L320.7896470588235,166.5 Q320.7896470588235,169.5 317.7896470588235,169.5 L110,169.5 Z" fill="#77766f"/>
+<text x="326.8" y="167.0" font-size="10.5" fill="#ffffff">122.7</text>
+<text x="102" y="186.0" font-size="11.5" text-anchor="end" fill="#c0bfb8">SymForce (f64)</text>
+<path d="M110,176.5 L329.5555294117647,176.5 Q332.5555294117647,176.5 332.5555294117647,179.5 L332.5555294117647,185.5 Q332.5555294117647,188.5 329.5555294117647,188.5 L110,188.5 Z" fill="#77766f"/>
+<text x="338.6" y="186.0" font-size="10.5" fill="#ffffff">129.6</text>
+<text x="102" y="205.0" font-size="11.5" text-anchor="end" fill="#c0bfb8">GTSAM (LM)</text>
+<path d="M110,195.5 L368.11670588235296,195.5 Q371.11670588235296,195.5 371.11670588235296,198.5 L371.11670588235296,204.5 Q371.11670588235296,207.5 368.11670588235296,207.5 L110,207.5 Z" fill="#77766f"/>
+<text x="377.1" y="205.0" font-size="10.5" fill="#ffffff">152.0</text>
+<text x="444" y="70" font-size="12.5" font-weight="600" fill="#ffffff">Localization -- 60 poses, 360 params (Raspberry Pi 5)</text>
+<line x1="536.0" y1="78" x2="536.0" y2="214" stroke="#2c2c2a" stroke-width="1"/>
+<text x="536.0" y="226" font-size="10" text-anchor="middle" fill="#908f88">0</text>
+<line x1="609.0" y1="78" x2="609.0" y2="214" stroke="#2c2c2a" stroke-width="1"/>
+<text x="609.0" y="226" font-size="10" text-anchor="middle" fill="#908f88">4</text>
+<line x1="682.0" y1="78" x2="682.0" y2="214" stroke="#2c2c2a" stroke-width="1"/>
+<text x="682.0" y="226" font-size="10" text-anchor="middle" fill="#908f88">8</text>
+<line x1="755.0" y1="78" x2="755.0" y2="214" stroke="#2c2c2a" stroke-width="1"/>
+<text x="755.0" y="226" font-size="10" text-anchor="middle" fill="#908f88">12</text>
+<line x1="828.0" y1="78" x2="828.0" y2="214" stroke="#2c2c2a" stroke-width="1"/>
+<text x="828.0" y="226" font-size="10" text-anchor="middle" fill="#908f88">16 ms</text>
+<text x="528" y="91.0" font-size="11.5" text-anchor="end" font-weight="600" fill="#ffffff">arael (f32)</text>
+<path d="M536,81.5 L551.615,81.5 Q554.615,81.5 554.615,84.5 L554.615,90.5 Q554.615,93.5 551.615,93.5 L536,93.5 Z" fill="#3987e5"/>
+<text x="560.6" y="91.0" font-size="10.5" font-weight="600" fill="#ffffff">1.02</text>
+<text x="528" y="110.0" font-size="11.5" text-anchor="end" font-weight="600" fill="#ffffff">arael (f64)</text>
+<path d="M536,100.5 L552.345,100.5 Q555.345,100.5 555.345,103.5 L555.345,109.5 Q555.345,112.5 552.345,112.5 L536,112.5 Z" fill="#3987e5"/>
+<text x="561.3" y="110.0" font-size="10.5" font-weight="600" fill="#ffffff">1.06</text>
+<text x="528" y="129.0" font-size="11.5" text-anchor="end" fill="#c0bfb8">SymForce (f64)</text>
+<path d="M536,119.5 L557.455,119.5 Q560.455,119.5 560.455,122.5 L560.455,128.5 Q560.455,131.5 557.455,131.5 L536,131.5 Z" fill="#77766f"/>
+<text x="566.5" y="129.0" font-size="10.5" fill="#ffffff">1.34</text>
+<text x="528" y="148.0" font-size="11.5" text-anchor="end" fill="#c0bfb8">g2o (LM)</text>
+<path d="M536,138.5 L606.73,138.5 Q609.73,138.5 609.73,141.5 L609.73,147.5 Q609.73,150.5 606.73,150.5 L536,150.5 Z" fill="#77766f"/>
+<text x="615.7" y="148.0" font-size="10.5" fill="#ffffff">4.04</text>
+<text x="528" y="167.0" font-size="11.5" text-anchor="end" fill="#c0bfb8">Ceres (LM)</text>
+<path d="M536,157.5 L630.455,157.5 Q633.455,157.5 633.455,160.5 L633.455,166.5 Q633.455,169.5 630.455,169.5 L536,169.5 Z" fill="#77766f"/>
+<text x="639.5" y="167.0" font-size="10.5" fill="#ffffff">5.34</text>
+<text x="528" y="186.0" font-size="11.5" text-anchor="end" fill="#c0bfb8">factrs (LM)</text>
+<path d="M536,176.5 L771.345,176.5 Q774.345,176.5 774.345,179.5 L774.345,185.5 Q774.345,188.5 771.345,188.5 L536,188.5 Z" fill="#77766f"/>
+<text x="780.3" y="186.0" font-size="10.5" fill="#ffffff">13.06</text>
+<text x="528" y="205.0" font-size="11.5" text-anchor="end" fill="#c0bfb8">GTSAM (LM)</text>
+<path d="M536,195.5 L783.755,195.5 Q786.755,195.5 786.755,198.5 L786.755,204.5 Q786.755,207.5 783.755,207.5 L536,207.5 Z" fill="#77766f"/>
+<text x="792.8" y="205.0" font-size="10.5" fill="#ffffff">13.74</text>
+<text x="18" y="265" font-size="12.5" font-weight="600" fill="#ffffff">Landmark SLAM -- peak process memory</text>
+<line x1="110.0" y1="273" x2="110.0" y2="409" stroke="#2c2c2a" stroke-width="1"/>
+<text x="110.0" y="421" font-size="10" text-anchor="middle" fill="#908f88">0</text>
+<line x1="183.0" y1="273" x2="183.0" y2="409" stroke="#2c2c2a" stroke-width="1"/>
+<text x="183.0" y="421" font-size="10" text-anchor="middle" fill="#908f88">160</text>
+<line x1="256.0" y1="273" x2="256.0" y2="409" stroke="#2c2c2a" stroke-width="1"/>
+<text x="256.0" y="421" font-size="10" text-anchor="middle" fill="#908f88">320</text>
+<line x1="329.0" y1="273" x2="329.0" y2="409" stroke="#2c2c2a" stroke-width="1"/>
+<text x="329.0" y="421" font-size="10" text-anchor="middle" fill="#908f88">480</text>
+<line x1="402.0" y1="273" x2="402.0" y2="409" stroke="#2c2c2a" stroke-width="1"/>
+<text x="402.0" y="421" font-size="10" text-anchor="middle" fill="#908f88">640 MB</text>
+<text x="102" y="286.0" font-size="11.5" text-anchor="end" font-weight="600" fill="#ffffff">arael (f32)</text>
+<path d="M110,276.5 L123.014375,276.5 Q126.014375,276.5 126.014375,279.5 L126.014375,285.5 Q126.014375,288.5 123.014375,288.5 L110,288.5 Z" fill="#3987e5"/>
+<text x="132.0" y="286.0" font-size="10.5" font-weight="600" fill="#ffffff">35.1</text>
+<text x="102" y="305.0" font-size="11.5" text-anchor="end" font-weight="600" fill="#ffffff">arael (f64)</text>
+<path d="M110,295.5 L131.455,295.5 Q134.455,295.5 134.455,298.5 L134.455,304.5 Q134.455,307.5 131.455,307.5 L110,307.5 Z" fill="#3987e5"/>
+<text x="140.5" y="305.0" font-size="10.5" font-weight="600" fill="#ffffff">53.6</text>
+<text x="102" y="324.0" font-size="11.5" text-anchor="end" fill="#c0bfb8">Ceres (LM)</text>
+<path d="M110,314.5 L146.739375,314.5 Q149.739375,314.5 149.739375,317.5 L149.739375,323.5 Q149.739375,326.5 146.739375,326.5 L110,326.5 Z" fill="#77766f"/>
+<text x="155.7" y="324.0" font-size="10.5" fill="#ffffff">87.1</text>
+<text x="102" y="343.0" font-size="11.5" text-anchor="end" fill="#c0bfb8">g2o (LM)</text>
+<path d="M110,333.5 L159.10375,333.5 Q162.10375,333.5 162.10375,336.5 L162.10375,342.5 Q162.10375,345.5 159.10375,345.5 L110,345.5 Z" fill="#77766f"/>
+<text x="168.1" y="343.0" font-size="10.5" fill="#ffffff">114.2</text>
+<text x="102" y="362.0" font-size="11.5" text-anchor="end" fill="#c0bfb8">SymForce (f64)</text>
+<path d="M110,352.5 L187.801875,352.5 Q190.801875,352.5 190.801875,355.5 L190.801875,361.5 Q190.801875,364.5 187.801875,364.5 L110,364.5 Z" fill="#77766f"/>
+<text x="196.8" y="362.0" font-size="10.5" fill="#ffffff">177.1</text>
+<text x="102" y="381.0" font-size="11.5" text-anchor="end" fill="#c0bfb8">factrs (LM)</text>
+<path d="M110,371.5 L193.09437499999999,371.5 Q196.09437499999999,371.5 196.09437499999999,374.5 L196.09437499999999,380.5 Q196.09437499999999,383.5 193.09437499999999,383.5 L110,383.5 Z" fill="#77766f"/>
+<text x="202.1" y="381.0" font-size="10.5" fill="#ffffff">188.7</text>
+<text x="102" y="400.0" font-size="11.5" text-anchor="end" fill="#c0bfb8">GTSAM (LM)</text>
+<path d="M110,390.5 L384.30875,390.5 Q387.30875,390.5 387.30875,393.5 L387.30875,399.5 Q387.30875,402.5 384.30875,402.5 L110,402.5 Z" fill="#77766f"/>
+<text x="393.3" y="400.0" font-size="10.5" fill="#ffffff">607.8</text>
+<text x="444" y="265" font-size="12.5" font-weight="600" fill="#ffffff">Localization -- peak process memory</text>
+<line x1="536.0" y1="273" x2="536.0" y2="409" stroke="#2c2c2a" stroke-width="1"/>
+<text x="536.0" y="421" font-size="10" text-anchor="middle" fill="#908f88">0</text>
+<line x1="609.0" y1="273" x2="609.0" y2="409" stroke="#2c2c2a" stroke-width="1"/>
+<text x="609.0" y="421" font-size="10" text-anchor="middle" fill="#908f88">6</text>
+<line x1="682.0" y1="273" x2="682.0" y2="409" stroke="#2c2c2a" stroke-width="1"/>
+<text x="682.0" y="421" font-size="10" text-anchor="middle" fill="#908f88">12</text>
+<line x1="755.0" y1="273" x2="755.0" y2="409" stroke="#2c2c2a" stroke-width="1"/>
+<text x="755.0" y="421" font-size="10" text-anchor="middle" fill="#908f88">18</text>
+<line x1="828.0" y1="273" x2="828.0" y2="409" stroke="#2c2c2a" stroke-width="1"/>
+<text x="828.0" y="421" font-size="10" text-anchor="middle" fill="#908f88">24 MB</text>
+<text x="528" y="286.0" font-size="11.5" text-anchor="end" font-weight="600" fill="#ffffff">arael (f32)</text>
+<path d="M536,276.5 L585.3166666666667,276.5 Q588.3166666666667,276.5 588.3166666666667,279.5 L588.3166666666667,285.5 Q588.3166666666667,288.5 585.3166666666667,288.5 L536,288.5 Z" fill="#3987e5"/>
+<text x="594.3" y="286.0" font-size="10.5" font-weight="600" fill="#ffffff">4.3</text>
+<text x="528" y="305.0" font-size="11.5" text-anchor="end" font-weight="600" fill="#ffffff">arael (f64)</text>
+<path d="M536,295.5 L592.6166666666667,295.5 Q595.6166666666667,295.5 595.6166666666667,298.5 L595.6166666666667,304.5 Q595.6166666666667,307.5 592.6166666666667,307.5 L536,307.5 Z" fill="#3987e5"/>
+<text x="601.6" y="305.0" font-size="10.5" font-weight="600" fill="#ffffff">4.9</text>
+<text x="528" y="324.0" font-size="11.5" text-anchor="end" fill="#c0bfb8">g2o (LM)</text>
+<path d="M536,314.5 L655.8833333333333,314.5 Q658.8833333333333,314.5 658.8833333333333,317.5 L658.8833333333333,323.5 Q658.8833333333333,326.5 655.8833333333333,326.5 L536,326.5 Z" fill="#77766f"/>
+<text x="664.9" y="324.0" font-size="10.5" fill="#ffffff">10.1</text>
+<text x="528" y="343.0" font-size="11.5" text-anchor="end" fill="#c0bfb8">Ceres (LM)</text>
+<path d="M536,333.5 L672.9166666666667,333.5 Q675.9166666666667,333.5 675.9166666666667,336.5 L675.9166666666667,342.5 Q675.9166666666667,345.5 672.9166666666667,345.5 L536,345.5 Z" fill="#77766f"/>
+<text x="681.9" y="343.0" font-size="10.5" fill="#ffffff">11.5</text>
+<text x="528" y="362.0" font-size="11.5" text-anchor="end" fill="#c0bfb8">factrs (LM)</text>
+<path d="M536,352.5 L680.2166666666667,352.5 Q683.2166666666667,352.5 683.2166666666667,355.5 L683.2166666666667,361.5 Q683.2166666666667,364.5 680.2166666666667,364.5 L536,364.5 Z" fill="#77766f"/>
+<text x="689.2" y="362.0" font-size="10.5" fill="#ffffff">12.1</text>
+<text x="528" y="381.0" font-size="11.5" text-anchor="end" fill="#c0bfb8">GTSAM (LM)</text>
+<path d="M536,371.5 L720.3666666666667,371.5 Q723.3666666666667,371.5 723.3666666666667,374.5 L723.3666666666667,380.5 Q723.3666666666667,383.5 720.3666666666667,383.5 L536,383.5 Z" fill="#77766f"/>
+<text x="729.4" y="381.0" font-size="10.5" fill="#ffffff">15.4</text>
+<text x="528" y="400.0" font-size="11.5" text-anchor="end" fill="#c0bfb8">SymForce (f64)</text>
+<path d="M536,390.5 L782.4166666666666,390.5 Q785.4166666666666,390.5 785.4166666666666,393.5 L785.4166666666666,399.5 Q785.4166666666666,402.5 782.4166666666666,402.5 L536,402.5 Z" fill="#77766f"/>
+<text x="791.4" y="400.0" font-size="10.5" fill="#ffffff">20.5</text>
+<text x="18" y="444" font-size="10.5" fill="#908f88">Time excludes setup -- assembly, ordering and symbolic factorization -- which every system pays once, during its first iteration.</text>
+<text x="18" y="458" font-size="10.5" fill="#908f88">Peak memory is the process high-water mark (VmHWM), each solver measured in a process of its own. Each row is ordered by its own metric.</text>
+<text x="18" y="472" font-size="10.5" fill="#908f88">Every bar reaches its problem's common optimum, cross-validated against all systems.</text>
+<text x="18" y="486" font-size="10.5" fill="#908f88">arael solves the SLAM panel with its Schur solver, the localization panel with its band solver.</text>
+</svg>

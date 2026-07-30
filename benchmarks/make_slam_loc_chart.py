@@ -2,12 +2,14 @@
 # chart-slam-loc-light.svg / chart-slam-loc-dark.svg and embedded in the
 # top-level README.md and src/lib.rs.
 #
-# Two panels side by side, both on ms per solver iteration: landmark
-# SLAM at 300 poses on an Apple M4 Pro (benchmarks/slam README, 300-pose
-# table) and fixed-map localization at 60 poses on a Raspberry Pi 5
-# (benchmarks/loc README, Pi 5 table). One bar per system showing its
-# best validated configuration, all arael rows shown. Update the data
-# from the results tables after re-running the benchmarks, then run:
+# Two panels side by side -- landmark SLAM at 300 poses on an Apple M4 Pro
+# (benchmarks/slam README, 300-pose table) and fixed-map localization at 60
+# poses on a Raspberry Pi 5 (benchmarks/loc README, Pi 5 table) -- over two
+# rows: ms per solver iteration, then peak memory for those same runs. One
+# bar per system showing its best validated configuration, all arael rows
+# shown. Each row is ordered by its own metric, so a system does not sit at
+# the same height in both. Update the data from the results tables after
+# re-running the benchmarks, then run:
 #
 #   python3 make_slam_loc_chart.py
 #
@@ -19,17 +21,17 @@
 # the setup, which the second chart draws.
 # kind: "arael" solid blue bar, "other" neutral bar.
 PANELS = [
-    # 2026-07-27, min of 16 rounds (benchmarks/slam README, 300-pose table). Best
+    # 2026-07-30, min of 32 rounds (benchmarks/slam README, 300-pose table). Best
     # validated configuration per system: Ceres is sparse_schur (iterative_schur
     # is inexact and misses the gate), SymForce is f64.
     ("Landmark SLAM -- 300 poses, 5.4k params (Apple M4 Pro)", 1, [
-        ("arael (f32)", 26.90, 35.80, "arael"),
-        ("arael (f64)", 39.62, 50.42, "arael"),
-        ("g2o (LM)", 59.71, 109.29, "other"),
-        ("Ceres (LM)", 80.29, 154.40, "other"),
-        ("factrs (LM)", 116.69, 168.03, "other"),
-        ("SymForce (f64)", 125.79, 223.28, "other"),
-        ("GTSAM (LM)", 150.31, 165.81, "other"),
+        ("arael (f32)", 27.12, 33.24, "arael"),
+        ("arael (f64)", 40.25, 46.47, "arael"),
+        ("g2o (LM)", 60.80, 110.33, "other"),
+        ("Ceres (LM)", 83.45, 159.51, "other"),
+        ("factrs (LM)", 122.72, 177.29, "other"),
+        ("SymForce (f64)", 129.57, 226.54, "other"),
+        ("GTSAM (LM)", 152.02, 165.94, "other"),
     ]),
     # 2026-07-26, min of 32 rounds (benchmarks/loc README, Pi 5 table). Best
     # validated configuration per system: Ceres is sparse_cholesky (a fixed
@@ -46,11 +48,36 @@ PANELS = [
     ]),
 ]
 
+# The second row: peak MB from the same two tables, the same systems in the
+# same configurations, ordered by memory rather than by time.
+# Per panel: (title, value decimals, [(label, peak_mb, kind)])
+MEM_PANELS = [
+    ("Landmark SLAM -- peak process memory", 1, [
+        ("arael (f32)", 35.1, "arael"),
+        ("arael (f64)", 53.6, "arael"),
+        ("Ceres (LM)", 87.1, "other"),
+        ("g2o (LM)", 114.2, "other"),
+        ("SymForce (f64)", 177.1, "other"),
+        ("factrs (LM)", 188.7, "other"),
+        ("GTSAM (LM)", 607.8, "other"),
+    ]),
+    ("Localization -- peak process memory", 1, [
+        ("arael (f32)", 4.3, "arael"),
+        ("arael (f64)", 4.9, "arael"),
+        ("g2o (LM)", 10.1, "other"),
+        ("Ceres (LM)", 11.5, "other"),
+        ("factrs (LM)", 12.1, "other"),
+        ("GTSAM (LM)", 15.4, "other"),
+        ("SymForce (f64)", 20.5, "other"),
+    ]),
+]
+
 # Axis per panel, per chart: the two charts plot different quantities, so they do
 # not share a scale. (x_max, tick), in PANELS order.
 AXES = {
     "iter":  [(170.0, 50.0), (16.0, 4.0)],
     "setup": [(240.0, 60.0), (25.0, 5.0)],
+    "mem":   [(640.0, 160.0), (24.0, 6.0)],
 }
 
 # The two charts. "iter" is the front-page one: one bar, the durable cross-system
@@ -61,13 +88,18 @@ CHARTS = {
     "iter": {
         "file": "slam-loc",
         "value_w": 34,
-        "title": "Landmark SLAM and localization: time per solver iteration",
+        "mem_row": True,
+        "title": "Landmark SLAM and localization: time per iteration and peak memory",
         "subtitle": ("Landmark SLAM on a desktop core, fixed-map localization on "
                      "an edge board; single thread, best validated configuration "
                      "per system. Lower is better."),
         "foot": [
-            ("Excludes setup -- assembly, ordering and symbolic factorization -- "
-             "which every system pays once, during its first iteration."),
+            ("Time excludes setup -- assembly, ordering and symbolic "
+             "factorization -- which every system pays once, during its first "
+             "iteration."),
+            ("Peak memory is the process high-water mark (VmHWM), each solver "
+             "measured in a process of its own. Each row is ordered by its own "
+             "metric."),
         ],
     },
     "setup": {
@@ -127,9 +159,10 @@ BAR_H = 12
 PITCH = 19
 PANEL_TITLE_H = 20
 AXIS_H = 20
-ROWS = max(len(rows) for _, _, rows in PANELS)
+ROWS = max(len(rows) for _, _, rows in PANELS + MEM_PANELS)
 PANEL_H = PANEL_TITLE_H + ROWS * PITCH + AXIS_H
 HEADER_H = 58
+ROW_GAP = 22    # between the time band and the memory band
 
 
 def bar_path(x0, y, w, h, r):
@@ -140,7 +173,7 @@ def bar_path(x0, y, w, h, r):
 
 
 def render_panel(s, c, px, py, title, x_max, tick, decimals, rows,
-                 with_setup, plot_w):
+                 with_setup, plot_w, unit):
     plot_x = px + LABEL_W
     plot_top = py + PANEL_TITLE_H
     plot_h = ROWS * PITCH  # common height so the two panels' axes align
@@ -153,12 +186,16 @@ def render_panel(s, c, px, py, title, x_max, tick, decimals, rows,
         s.append(f'<line x1="{x:.1f}" y1="{plot_top}" x2="{x:.1f}" '
                  f'y2="{plot_top + plot_h + 3}" stroke="{c["grid"]}" '
                  f'stroke-width="1"/>')
-        label = f"{t:.0f} ms" if t + tick > x_max + 1e-9 else f"{t:.0f}"
+        label = f"{t:.0f} {unit}" if t + tick > x_max + 1e-9 else f"{t:.0f}"
         s.append(f'<text x="{x:.1f}" y="{plot_top + plot_h + 15}" '
                  f'font-size="10" text-anchor="middle" '
                  f'fill="{c["muted"]}">{label}</text>')
         t += tick
-    for i, (label, full, first, kind) in enumerate(rows):
+    for i, row in enumerate(rows):
+        # Time rows carry (label, full, first, kind); memory rows have no
+        # second segment and drop the middle field.
+        label, full, kind = row[0], row[1], row[-1]
+        first = row[2] if len(row) == 4 else full
         is_arael = kind.startswith("arael")
         y = plot_top + i * PITCH + (PITCH - BAR_H) / 2
         ty = y + BAR_H / 2 + 3.5
@@ -214,7 +251,12 @@ def render(theme, chart):
     cfg = CHARTS[chart]
     foot = cfg["foot"] + FOOT
     plot_w = PANEL_W - LABEL_W - cfg["value_w"]
-    foot_y = HEADER_H + PANEL_H + 18
+    # Bands drawn top to bottom: (panels, axis key, unit, draws a setup segment)
+    bands = [(PANELS, chart, "ms", chart == "setup")]
+    if cfg.get("mem_row"):
+        bands.append((MEM_PANELS, "mem", "MB", False))
+    band_y = [HEADER_H + i * (PANEL_H + ROW_GAP) for i in range(len(bands))]
+    foot_y = band_y[-1] + PANEL_H + 18
     height = foot_y + len(foot) * 14 + 10
 
     s = []
@@ -232,11 +274,12 @@ def render(theme, chart):
     s.append(f'<text x="{MARGIN}" y="48" font-size="11.5" '
              f'fill="{c["secondary"]}">{cfg["subtitle"]}</text>')
 
-    for k, (title, decimals, rows) in enumerate(PANELS):
-        px = MARGIN + k * (PANEL_W + COL_GAP)
-        x_max, tick = AXES[chart][k]
-        render_panel(s, c, px, HEADER_H, title, x_max, tick, decimals, rows,
-                     chart == "setup", plot_w)
+    for bi, (panels, axis_key, unit, with_setup) in enumerate(bands):
+        for k, (title, decimals, rows) in enumerate(panels):
+            px = MARGIN + k * (PANEL_W + COL_GAP)
+            x_max, tick = AXES[axis_key][k]
+            render_panel(s, c, px, band_y[bi], title, x_max, tick, decimals,
+                         rows, with_setup, plot_w, unit)
 
     for i, line in enumerate(foot):
         s.append(f'<text x="{MARGIN}" y="{foot_y + i * 14}" font-size="10.5" '

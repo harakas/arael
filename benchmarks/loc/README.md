@@ -74,8 +74,8 @@ each system's damping schedule.
 cannot be compared one on one.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/charts/v0.8.0/slam-loc-setup-dark.svg">
-  <img alt="Two bar charts, landmark SLAM and localization: each system's bar is split into one complete iteration and the setup it pays once" src="../charts/v0.8.0/slam-loc-setup-light.svg">
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/harakas/arael/master/benchmarks/charts/v0.8.1/slam-loc-setup-dark.svg">
+  <img alt="Two bar charts, landmark SLAM and localization: each system's bar is split into one complete iteration and the setup it pays once" src="../charts/v0.8.1/slam-loc-setup-light.svg">
 </picture>
 
 The same two panels as the chart on the front page, with the setup drawn
@@ -182,7 +182,9 @@ cell per machine:
 `../charts/v<version>/`: `slam-loc-*.svg`, the per-iteration chart embedded in
 the top-level README, and `slam-loc-setup-*.svg`, the one further up. Both read
 the same `PANELS` table -- the localization panel from the Raspberry Pi 5 rows,
-the SLAM panel from `benchmarks/slam`'s 300-pose rows.
+the SLAM panel from `benchmarks/slam`'s 300-pose rows. `slam-loc-*.svg` carries a
+second row of panels for peak memory, from `MEM_PANELS` and the `peak MB` column
+of those same two tables.
 
 `../make_loc_chart.py` writes the localization-only 2x2 above (`loc-*.svg`),
 one cell per results table. Both scripts are stdlib only; after re-running the
