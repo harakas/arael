@@ -3834,6 +3834,17 @@ fn symbolic_factor_flops(sym: &faer::sparse::linalg::cholesky::SymbolicCholesky<
     }
 }
 
+/// Share of the parameters a reduction may keep and still be waved through by
+/// [`SchurPolicy::Auto`]'s cheap pre-filter.
+///
+/// A reduction earns its keep by leaving a smaller system to factor. One that
+/// keeps most of the parameters pays for the reduction and then factors nearly
+/// what it started with, so it is never obviously right and is priced exactly
+/// instead. Measured: the landmark reductions this is meant to wave through
+/// keep about a third (slam), while the one that must be priced keeps 84%
+/// (plane, whose planes are few next to its poses).
+const KEPT_FRACTION_OBVIOUS: f64 = 0.5;
+
 fn block_half_bandwidth(hsym: &arael_faer::bsc::SymbolicSparseBlockColMat<SparseIndex>) -> usize {
     let mut b = 0usize;
     for j in 0..hsym.nblk_cols() {
@@ -5528,6 +5539,9 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         let mut fill_ratio = None;
         let mut route_flops = None;
         let band = if eliminated.is_empty() { 0 } else { schur.kept_bandwidth() };
+        // Set when the reduction barely shrinks the system, which disqualifies
+        // the shortcut below however good the flop ratio looks.
+        let mut keeps_most_of_the_system = false;
         let flop_ratio = match self.policy {
             SchurPolicy::Auto { .. } if !eliminated.is_empty() => {
                 let nk = schur.s.nrows() as f64;
@@ -5544,6 +5558,20 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 // cannot lose, however the orderings come out.
                 let h_nnz = hsym.scalar_upper_nnz() as f64;
                 let floor = h_nnz.max(h_nnz * h_nnz / n as f64).max(1.0);
+                // The floor is a bound, not a cost: a route within
+                // `obvious_flop_ratio` of it may still be several times worse
+                // than what the whole system actually factors for, since a
+                // fill-reducing ordering can get much closer to the floor than
+                // the bar assumes. The ratio alone therefore cannot tell a
+                // reduction that pays from one that does not.
+                //
+                // What separates them is how much of the system the reduction
+                // removes. Its entire benefit is factoring something smaller,
+                // so a reduction that keeps most of the parameters pays the
+                // reduction AND factors nearly the same system -- never
+                // obviously right, whatever the flop ratio says. Price those
+                // exactly.
+                keeps_most_of_the_system = nk >= KEPT_FRACTION_OBVIOUS * n as f64;
                 Some((schur.reduce_flops() + worst) / floor)
             }
             _ => None,
@@ -5569,7 +5597,8 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             // reduction cannot lose and the ordering comparison -- whose
             // fill-reducing pass over the whole matrix is the expensive
             // part -- is not worth running.
-            && flop_ratio.is_some_and(|r| r > obvious_flop_ratio)
+            && (flop_ratio.is_some_and(|r| r > obvious_flop_ratio)
+                || keeps_most_of_the_system)
         {
             use faer::sparse::linalg::cholesky::*;
             let supernodal = self.supernodal;
@@ -5644,13 +5673,19 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                     flop, bar,
                 ),
                 (Some(flop), Some((red, full))) => info!(
-                    "schur: {} -- not obviously right ({:.1}x the whole system's \
-                     floor, bar {:.0}x), so both routes were priced exactly: \
-                     reduction + reduced factor {:.2e} flops/iter vs whole \
-                     factor {:.2e} -- {} (factor sizes {:.2}x)",
+                    "schur: {} -- not obviously right ({}), so both routes were \
+                     priced exactly: reduction + reduced factor {:.2e} flops/iter \
+                     vs whole factor {:.2e} -- {} (factor sizes {:.2}x)",
                     if reduced { "REDUCING" } else { "NOT reducing, factorizing the whole system" },
-                    flop,
-                    bar,
+                    if keeps_most_of_the_system {
+                        std::format!(
+                            "the reduction keeps {:.0}% of the parameters, too much \
+                             to be worth it on the flop ratio alone ({:.1}x the \
+                             whole system's floor)",
+                            100.0 * schur.s.nrows() as f64 / n as f64, flop)
+                    } else {
+                        std::format!("{:.1}x the whole system's floor, bar {:.0}x", flop, bar)
+                    },
                     red,
                     full,
                     if reduced { "the reduced route wins" } else { "the whole system is cheaper" },
