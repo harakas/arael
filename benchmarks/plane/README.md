@@ -42,6 +42,12 @@ system is denser than the whole one. `PLANE_SHARED=1` switches to a degenerate
 6-plane room where every pose sees every plane; there the reduced system is
 fully dense, and it exists as the gate's stress case.
 
+`PLANE_SCHUR=force` reduces anyway, for studying the reduced system on this
+model rather than solving it fastest. The path is a closed loop, so that system
+carries the loop's coupling: at 60 poses it stays naturally ordered and has an
+envelope to factor under, and above that it takes a fill-reducing ordering
+instead, which leaves none.
+
 ## The systems
 
 Every system optimizes the identical problem (the exported scene) and is scored
@@ -229,6 +235,8 @@ produced it.
 |-----|--------|
 | `PLANE_POSES` | scene size (64 default; planes and observations scale with it) |
 | `PLANE_SHARED` | the degenerate 6-plane room instead of local landmarks |
+| `PLANE_SCHUR` | `auto` (default, declines here), `force` (marginalize the planes anyway) or `never` |
+| `PLANE_ENVELOPE` | `auto` (default), `always` or `never` -- how a reduced system is factored; needs `PLANE_SCHUR=force` to bite |
 | `ROUNDS` | interleaved rounds; the reported time is the minimum over them |
 | `PLANE_SYSTEMS` | comma-separated substrings; runs only the matching rows (a filtered run cannot validate across systems) |
 | `PLANE_TOL`, `PLANE_TOL_F32` | the termination class, f64 and f32 |

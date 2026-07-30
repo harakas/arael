@@ -29,6 +29,20 @@ fn print_header(raw: &RawScene, rounds: usize, systems_filter: &Option<String>) 
         .line("arael damping", format!("{} [DRIVER: fixed|nielsen]",
             if bench_harness::arael::nielsen::<arael_runner::World>() { "Nielsen gain-ratio driver" }
             else { "fixed ladder (default driver)" }))
+        .line("path", format!("{} [PLANE_OPEN]",
+            if std::env::var("PLANE_OPEN").is_ok() {
+                "open half-turn arc, ends uncoupled"
+            } else {
+                "closed loop"
+            }))
+        .line("arael schur", format!("{} [PLANE_SCHUR: auto|force|never], envelope {:?} \
+             [PLANE_ENVELOPE: auto|always|never]",
+            match arael_runner::schur_policy() {
+                arael::simple_lm::SchurPolicy::Force => "force the reduction",
+                arael::simple_lm::SchurPolicy::Never => "never reduce",
+                _ => "auto (prices both routes)",
+            },
+            arael_runner::envelope_mode()))
         .line("termination", format!("{:e} [PLANE_TOL], f32 rows {:e} [PLANE_TOL_F32]",
             arael_runner::tolerance(), arael_runner::tolerance_f32()))
         .line("arael termination", format!("abs {:e}, rel {:e}, patience {}, min_iters {}",

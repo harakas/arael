@@ -94,12 +94,28 @@ fn gauss(rng: &mut StdRng, sigma: f64) -> f64 {
     x * sigma
 }
 
-fn path_radius(n: usize) -> f64 {
-    n as f64 * POSE_STEP / std::f64::consts::TAU
+/// How far around the circle the path runs.
+///
+/// A full turn brings the last pose back beside the first, so planes near the
+/// join are seen from both ends and the reduced pose system is coupled corner
+/// to corner. `PLANE_OPEN=1` sweeps half a turn instead: the ends finish a
+/// diameter apart, nothing is shared between them, and the reduced system
+/// stays banded. Pose spacing is unchanged either way -- the radius follows
+/// from the sweep, so the arc is still `n * POSE_STEP` long.
+fn path_sweep() -> f64 {
+    if std::env::var("PLANE_OPEN").is_ok() {
+        std::f64::consts::PI
+    } else {
+        std::f64::consts::TAU
+    }
 }
 
-fn gt_pose(i: usize, n: usize) -> Pose {
-    let th = i as f64 / n as f64 * std::f64::consts::TAU;
+fn path_radius(n: usize, sweep: f64) -> f64 {
+    n as f64 * POSE_STEP / sweep
+}
+
+fn gt_pose(i: usize, n: usize, sweep: f64) -> Pose {
+    let th = i as f64 / n as f64 * sweep;
     let yaw = th + std::f64::consts::FRAC_PI_2;
     // A little roll/pitch wobble: with yaw-only poses the floor/ceiling
     // normals sit exactly on the azimuth chart's pole (atan2(0,0)) in the
@@ -112,7 +128,8 @@ fn gt_pose(i: usize, n: usize) -> Pose {
             * quaternd::from_axis_angle(vect3d::new(1.0, 0.0, 0.0), roll)
             * quaternd::from_axis_angle(vect3d::new(0.0, 1.0, 0.0), pitch))
         .unit(),
-        t: vect3d::new(path_radius(n) * th.cos(), path_radius(n) * th.sin(), 1.0),
+        t: vect3d::new(path_radius(n, sweep) * th.cos(),
+                       path_radius(n, sweep) * th.sin(), 1.0),
     }
 }
 
@@ -120,8 +137,8 @@ fn gt_pose(i: usize, n: usize) -> Pose {
 /// all of them -- a tiny landmark family shared by everyone, which makes the
 /// reduced Schur system fully dense (the gate stress case). The room walls
 /// sit 4 m outside the loop, whatever its radius.
-fn shared_planes(n_poses: usize) -> Vec<Plane> {
-    let room = path_radius(n_poses) + 4.0;
+fn shared_planes(n_poses: usize, sweep: f64) -> Vec<Plane> {
+    let room = path_radius(n_poses, sweep) + 4.0;
     vec![
         Plane { n: vect3d::new(-1.0, 0.0, 0.0), c: room },
         Plane { n: vect3d::new(1.0, 0.0, 0.0), c: room },
@@ -145,14 +162,14 @@ fn plane_at(point: vect3d, n: vect3d) -> Plane {
     Plane { n, c: -(n * point) }
 }
 
-fn scaled_planes(n_poses: usize) -> (Vec<Plane>, Vec<usize>) {
-    let r = path_radius(n_poses);
+fn scaled_planes(n_poses: usize, sweep: f64) -> (Vec<Plane>, Vec<usize>) {
+    let r = path_radius(n_poses, sweep);
     let n_anchors = (n_poses + ANCHOR_SPACING - 1) / ANCHOR_SPACING;
     let mut planes = Vec::new();
     let mut centers = Vec::new();
     for a in 0..n_anchors {
         let center = a * ANCHOR_SPACING + ANCHOR_SPACING / 2;
-        let th = center as f64 / n_poses as f64 * std::f64::consts::TAU;
+        let th = center as f64 / n_poses as f64 * sweep;
         let dir = vect3d::new(th.cos(), th.sin(), 0.0);
         let tang = vect3d::new(-th.sin(), th.cos(), 0.0);
         // inward wall outside the path
@@ -169,9 +186,14 @@ fn scaled_planes(n_poses: usize) -> (Vec<Plane>, Vec<usize>) {
     (planes, centers)
 }
 
-fn wrapped_dist(i: usize, c: usize, n: usize) -> usize {
+/// Pose-index distance from a pose to a plane's anchor.
+///
+/// `wrap` closes the path: the last pose neighbours the first, so an anchor
+/// near the join is visible from both ends. On an open arc the ends are simply
+/// far apart, and wrapping would couple them where the geometry does not.
+fn anchor_dist(i: usize, c: usize, n: usize, wrap: bool) -> usize {
     let d = (i as i64 - c as i64).unsigned_abs() as usize % n;
-    d.min(n - d)
+    if wrap { d.min(n - d) } else { d }
 }
 
 fn fmt_pose(p: &Pose) -> String {
@@ -202,17 +224,23 @@ pub fn make_scene() -> Scene {
     make_scene_with(n_poses())
 }
 
-/// [`make_scene`] at an explicit pose count, for callers that must not depend
-/// on the environment.
+/// [`make_scene`] at an explicit pose count.
 pub fn make_scene_with(n: usize) -> Scene {
+    make_scene_with_sweep(n, path_sweep())
+}
+
+/// [`make_scene`] at an explicit pose count and path sweep, for callers that
+/// must not depend on the environment. A full turn (`TAU`) closes the loop.
+pub fn make_scene_with_sweep(n: usize, sweep: f64) -> Scene {
+    let closed = (sweep - std::f64::consts::TAU).abs() < 1e-12;
     let mut rng = StdRng::seed_from_u64(SEED);
     let shared = std::env::var("PLANE_SHARED").is_ok();
     let (planes, centers) = if shared {
-        (shared_planes(n), Vec::new())
+        (shared_planes(n, sweep), Vec::new())
     } else {
-        scaled_planes(n)
+        scaled_planes(n, sweep)
     };
-    let gt: Vec<Pose> = (0..n).map(|i| gt_pose(i, n)).collect();
+    let gt: Vec<Pose> = (0..n).map(|i| gt_pose(i, n, sweep)).collect();
     let (wt, wr) = (1.0 / SIGMA_ODO_T, 1.0 / SIGMA_ODO_R);
     let (wa, wd) = (1.0 / SIGMA_OBS_ANG, 1.0 / SIGMA_OBS_D);
 
@@ -234,7 +262,7 @@ pub fn make_scene_with(n: usize) -> Scene {
     }
     for (i, gp) in gt.iter().enumerate() {
         for (j, pl) in planes.iter().enumerate() {
-            if !shared && wrapped_dist(i, centers[j], n) > VIS_WINDOW {
+            if !shared && anchor_dist(i, centers[j], n, closed) > VIS_WINDOW {
                 continue;
             }
             let local = pl.transform(gp.inverse()).oplus([

@@ -13,7 +13,9 @@ use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::refs::Ref;
 use arael::transform::TransformParam;
 use arael::unitvec::UnitVecParam;
-use arael::simple_lm::{lm_solve, LmConfig, LmResult, SolveFailure, SparseFaer};
+use arael::simple_lm::{
+    lm_solve, EnvelopeMode, LmConfig, LmResult, SchurPolicy, SolveFailure, SparseFaer,
+};
 use arael::matrix::matrix3;
 use arael::utils::Float;
 use arael::vect::vect3;
@@ -138,9 +140,6 @@ pub struct World {
     obs: std::vec::Vec<Obsv<f64>>,
 }
 
-/// Termination class for this benchmark, shared by every system in the
-/// table (see the C++ runners' matching constants).
-///
 /// How many parameters the solver actually optimizes, read off the model
 /// rather than recomputed from entity counts.
 ///
@@ -154,6 +153,38 @@ pub fn parameter_count(raw: &RawScene) -> usize {
     params.len()
 }
 
+/// PLANE_SCHUR=auto|force|never picks whether the planes are marginalized.
+///
+/// `auto` (the default) prices both routes and, on this scene, declines: the
+/// planes are few next to the poses, so reducing barely shrinks the system
+/// while filling in the pose block. `force` reduces anyway -- what to set to
+/// study the reduced system on this model rather than to solve it fastest.
+/// An unknown value is an error, not a silent fallback.
+pub fn schur_policy() -> SchurPolicy {
+    match std::env::var("PLANE_SCHUR").as_deref() {
+        Err(_) | Ok("auto") => SchurPolicy::default(),
+        Ok("force") => SchurPolicy::Force,
+        Ok("never") => SchurPolicy::Never,
+        Ok(other) => panic!("PLANE_SCHUR: expected auto, force or never, got {:?}", other),
+    }
+}
+
+/// PLANE_ENVELOPE=auto|always|never picks how a reduced system is factored.
+///
+/// Only bites when there is a reduced system, so on this scene it needs
+/// `PLANE_SCHUR=force` alongside it to have any effect.
+pub fn envelope_mode() -> EnvelopeMode {
+    match std::env::var("PLANE_ENVELOPE").as_deref() {
+        Err(_) | Ok("auto") => EnvelopeMode::Auto,
+        Ok("always") => EnvelopeMode::Always,
+        Ok("never") => EnvelopeMode::Never,
+        Ok(other) => panic!("PLANE_ENVELOPE: expected auto, always or never, got {:?}", other),
+    }
+}
+
+/// Termination class for this benchmark, shared by every system in the
+/// table (see the C++ runners' matching constants).
+///
 /// Tighter than the harness default of 1e-5, because these costs are
 /// large: 1e-5 RELATIVE at a cost of 12000 means "stop once a step gains
 /// less than 0.12", which leaves a solve short of the table's 5 cm
@@ -289,7 +320,9 @@ impl bench_harness::arael::Model for World {
     fn solution(&self) -> Solution { extract(self) }
     fn solve(_: &RawScene, params: &[f64], m: &mut Self, cfg: &LmConfig<f64>)
         -> Result<LmResult<f64>, SolveFailure<f64>> {
-        lm_solve(params, &mut SparseFaer::<f64>::new(), m, cfg)
+        lm_solve(params, &mut SparseFaer::<f64>::new()
+            .with_policy(schur_policy())
+            .with_envelope_schur(envelope_mode()), m, cfg)
     }
     fn tune(cfg: &mut LmConfig<f64>) {
         cfg.abs_precision = tolerance();
@@ -348,7 +381,9 @@ impl bench_harness::arael::Model for WorldF {
     fn solution(&self) -> Solution { extract_f32(self) }
     fn solve(_: &RawScene, params: &[f32], m: &mut Self, cfg: &LmConfig<f32>)
         -> Result<LmResult<f32>, SolveFailure<f32>> {
-        lm_solve(params, &mut SparseFaer::<f32>::new(), m, cfg)
+        lm_solve(params, &mut SparseFaer::<f32>::new()
+            .with_policy(schur_policy())
+            .with_envelope_schur(envelope_mode()), m, cfg)
     }
     fn tune(cfg: &mut LmConfig<f32>) {
         cfg.abs_precision = tolerance_f32() as f32;
@@ -363,6 +398,67 @@ mod tests {
     ///
     /// (poses - 1) * 6 + planes * 3: the pose is a 6-DOF twist, pose 0 is the
     /// fixed gauge, and a plane is a 2-DOF direction plus its distance.
+    /// The closed loop lets a plane be seen from both ends of the pose list;
+    /// the open arc must not, since that coupling is what it exists to remove.
+    #[test]
+    fn open_path_leaves_the_ends_uncoupled() {
+        use std::f64::consts::{PI, TAU};
+        let n = 120;
+        let edge = 6;
+        let shares_ends = |sweep: f64| {
+            let raw = crate::scene::make_scene_with_sweep(n, sweep).raw;
+            let mut lo = vec![false; raw.planes.len()];
+            let mut hi = vec![false; raw.planes.len()];
+            for &(i, j, ..) in &raw.obs {
+                if i < edge { lo[j] = true; }
+                if i >= n - edge { hi[j] = true; }
+            }
+            (0..lo.len()).filter(|&j| lo[j] && hi[j]).count()
+        };
+        assert!(shares_ends(TAU) > 0, "the closed loop should share planes across the join");
+        assert_eq!(shares_ends(PI), 0, "the open arc must share nothing between its ends");
+    }
+
+    /// Poses stay POSE_STEP apart whichever way the path runs -- the radius
+    /// follows the sweep, so only the shape changes, not the spacing.
+    #[test]
+    fn open_path_keeps_the_pose_spacing() {
+        use std::f64::consts::{PI, TAU};
+        for sweep in [TAU, PI] {
+            let gt = crate::scene::make_scene_with_sweep(120, sweep).gt_poses;
+            for i in 1..gt.len() {
+                let d = (gt[i].t - gt[i - 1].t).norm();
+                assert!((d - 0.6).abs() < 0.01, "sweep {} step {} is {}", sweep, i, d);
+            }
+        }
+    }
+
+    /// The auto gate declines the reduction on this scene, and Force overrides
+    /// it. Driven through the API, not PLANE_SCHUR: the env is process-global
+    /// and these run in parallel.
+    #[test]
+    fn schur_can_be_forced() {
+        use arael::simple_lm::{lm_solve, EnvelopeMode, LmConfig, SchurPolicy, SparseFaer};
+        let raw = crate::scene::make_scene_with(120).raw;
+        let solve_with = |policy| {
+            let mut world = super::build(&raw);
+            let mut params: Vec<f64> = Vec::new();
+            world.serialize64(&mut params);
+            let mut solver = SparseFaer::<f64>::new()
+                .with_policy(policy)
+                .with_envelope_schur(EnvelopeMode::Always);
+            let mut cfg = LmConfig::<f64>::default();
+            cfg.max_iters = 1;
+            let r = lm_solve(&params, &mut solver, &mut world, &cfg);
+            (solver.plan().expect("a plan"), r.is_ok())
+        };
+        let (auto, auto_ok) = solve_with(SchurPolicy::default());
+        assert!(!auto.reduced, "the auto gate is expected to decline here");
+        let (forced, forced_ok) = solve_with(SchurPolicy::Force);
+        assert!(forced.reduced, "PLANE_SCHUR=force must reduce");
+        assert!(auto_ok && forced_ok, "both routes must still solve");
+    }
+
     #[test]
     fn parameter_count_matches_the_model() {
         for (poses, planes, expect) in
