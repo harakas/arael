@@ -40,6 +40,8 @@ fn print_header(scene: &Scene, cfg: &SceneConfig, rounds: usize, skip_tiny: bool
             else { "fixed ladder (default driver)" }))
         .line("arael backend", format!("{} [SLAM_ARAEL_SOLVER: schur|faer|cholmod]",
             std::env::var("SLAM_ARAEL_SOLVER").unwrap_or_else(|_| "schur".to_string())))
+        .line("arael envelope", format!("{:?} [SLAM_ENVELOPE: auto|always|never]",
+            arael_runner::envelope_mode()))
         .line("arael termination", format!("abs {:e}, rel {:e}, patience {}, min_iters {}",
             arael_cfg.abs_precision, arael_cfg.rel_precision,
             arael_cfg.patience, arael_cfg.min_iters))

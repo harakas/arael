@@ -9,7 +9,9 @@
 
 use arael::model::{CrossBlock, Param, SelfBlock};
 use arael::refs::{self, Ref};
-use arael::simple_lm::{lm_solve, LmConfig, ReducedOrdering, RootProblem, SparseFaer};
+use arael::simple_lm::{
+    lm_solve, EnvelopeMode, LmConfig, ReducedOrdering, RootProblem, SparseFaer,
+};
 
 #[arael::model]
 #[arael(constraint(hb, {
@@ -152,17 +154,53 @@ fn envelope_route_is_the_default_when_naturally_ordered() {
     assert!(cost < 1e-12, "end_cost {}", cost);
 }
 
-/// with_envelope_schur(false) puts the reduced system back on faer, and both
-/// routes reach the same optimum.
+/// Auto prices the envelope against the ordered sparse factor and takes it
+/// only with a margin. This scene is banded, which is what the envelope is
+/// for, so Auto must take it -- and reach the same answer as forcing it.
+#[test]
+fn auto_takes_the_envelope_on_a_banded_reduction() {
+    let mut auto = SparseFaer::new().with_envelope_schur(EnvelopeMode::Auto);
+    let (x_auto, c_auto) = solve(&mut auto, 2);
+    assert!(auto.plan().expect("a plan").narrow_band,
+            "a banded reduction is what the envelope route is for");
+
+    let mut always = SparseFaer::new().with_envelope_schur(EnvelopeMode::Always);
+    let (x_always, c_always) = solve(&mut always, 2);
+    assert!(c_auto < 1e-12 && c_always < 1e-12, "{} {}", c_auto, c_always);
+    for (a, b) in std::iter::zip(&x_auto, &x_always) {
+        assert!((a - b).abs() < 1e-9, "Auto and Always disagree: {} vs {}", a, b);
+    }
+}
+
+/// Whatever Auto decides, the answer must not depend on it.
+#[test]
+fn every_envelope_mode_reaches_the_same_optimum() {
+    let modes = [EnvelopeMode::Auto, EnvelopeMode::Always, EnvelopeMode::Never];
+    let mut first: Option<Vec<f64>> = None;
+    for m in modes {
+        let mut s = SparseFaer::new().with_envelope_schur(m);
+        let (x, c) = solve(&mut s, 2);
+        assert!(c < 1e-12, "{:?} end_cost {}", m, c);
+        match &first {
+            None => first = Some(x),
+            Some(f) => for (a, b) in std::iter::zip(f, &x) {
+                assert!((a - b).abs() < 1e-9, "{:?} differs: {} vs {}", m, a, b);
+            },
+        }
+    }
+}
+
+/// EnvelopeMode::Never puts the reduced system back on faer, and both routes
+/// reach the same optimum.
 #[test]
 fn envelope_route_can_be_switched_off() {
-    let mut off = SparseFaer::new().with_envelope_schur(false);
+    let mut off = SparseFaer::new().with_envelope_schur(EnvelopeMode::Never);
     let (x_faer, c_faer) = solve(&mut off, 2);
     let plan = off.plan().expect("a plan");
     assert!(plan.reduced);
-    assert!(!plan.narrow_band, "with_envelope_schur(false) must not take it");
+    assert!(!plan.narrow_band, "EnvelopeMode::Never must not take it");
 
-    let mut on = SparseFaer::new();
+    let mut on = SparseFaer::new().with_envelope_schur(EnvelopeMode::Always);
     let (x_env, c_env) = solve(&mut on, 2);
     assert!(on.plan().expect("a plan").narrow_band);
 
@@ -261,6 +299,24 @@ fn solve_chain(solver: &mut SparseFaer<f64>) -> (Vec<f64>, f64) {
     let mut out = Vec::new();
     RootProblem::serialize(&mut w, &mut out);
     (out, r.end_cost)
+}
+
+/// The two band routes are separate features that happen to share internals:
+/// `with_narrow_band` factors the WHOLE Hessian, `EnvelopeMode` factors the
+/// REDUCED system. Turning the second off must not touch the first.
+#[test]
+fn envelope_mode_does_not_reach_the_whole_system_band_route() {
+    for mode in [EnvelopeMode::Auto, EnvelopeMode::Always, EnvelopeMode::Never] {
+        let mut s = SparseFaer::new()
+            .with_narrow_band(true)
+            .with_envelope_schur(mode);
+        let (_, cost) = solve_chain(&mut s);
+        let plan = s.plan().expect("a plan");
+        assert!(!plan.reduced, "a pose chain marginalizes nothing");
+        assert!(plan.narrow_band,
+                "{:?} must not disable the whole-system band route", mode);
+        assert!(cost < 1e-12, "{:?} end_cost {}", mode, cost);
+    }
 }
 
 #[test]

@@ -121,6 +121,38 @@ pub struct BandSymbolic {
     max_tile: usize,
 }
 
+/// Flops to factor `s` under its own envelope: `sum over columns of
+/// height^2 * width`, where a column's height reaches from its topmost stored
+/// block-row down to its diagonal.
+///
+/// Exact rather than an estimate, because Cholesky preserves the envelope --
+/// column `j` fills only rows `top(j)..=j`. One pass over the block columns,
+/// so it is cheap enough to price the route before choosing it.
+///
+/// f64 because the count overflows 32 bits on a system of any size.
+pub fn envelope_flops(s: &SymbolicSparseBlockColMat<crate::SparseIndex>) -> f64 {
+    let nb = s.nblk_cols();
+    assert_eq!(nb, s.nblk_rows(), "envelope flops need a square matrix");
+
+    let mut part = Vec::with_capacity(nb + 1);
+    for j in 0..nb {
+        part.push(s.col_span(j).start);
+    }
+    part.push(s.ncols());
+
+    let mut flops = 0.0f64;
+    for j in 0..nb {
+        // Columns are ascending by block-row, so the first stored tile is the
+        // topmost; a column always stores its diagonal.
+        let top = s.blk_row(s.col_range(j).start);
+        debug_assert!(top <= j, "S must be stored as its upper block triangle");
+        let width = (part[j + 1] - part[j]) as f64;
+        let height = (part[j + 1] - part[top]) as f64;
+        flops += height * height * width;
+    }
+    flops
+}
+
 impl BandSymbolic {
     /// Analyzes `s` (the symbolic structure of a symmetric block-CSC matrix
     /// stored as its upper block triangle, in natural order) and builds the
@@ -861,5 +893,37 @@ mod tests {
             band_factorize(&bsym, &s, &mut factor),
             Err(BandError::NotPositiveDefinite)
         );
+    }
+
+    /// On a tridiagonal block matrix the envelope IS the band, so the cost is
+    /// the band's: one short column and 19 of height 6.
+    #[test]
+    fn envelope_flops_on_a_pure_band() {
+        let part: Vec<usize> = (0..=20).map(|i| i * 3).collect();
+        let cells: Vec<(usize, usize)> = (0..19).map(|b| (b, b + 1)).collect();
+        let f = envelope_flops(build_banded(&part, &cells, 7).0.symbolic());
+        assert_eq!(f, (3.0 * 3.0 * 3.0) + 19.0 * (6.0 * 6.0 * 3.0));
+    }
+
+    /// A seam -- the blocks a returning trajectory couples across the join --
+    /// leaves the pattern nearly untouched but makes every column after it
+    /// reach back to the top. Height enters the work squared, so the cost goes
+    /// up by more than an order while the matrix is barely denser.
+    ///
+    /// One lone corner entry would not show this: `top(j)` is per column, so a
+    /// single far entry inflates only its own column. It takes a band of them.
+    #[test]
+    fn envelope_flops_expose_a_seam() {
+        let part: Vec<usize> = (0..=60).map(|i| i * 3).collect();
+        let band: Vec<(usize, usize)> = (0..59).map(|b| (b, b + 1)).collect();
+        let mut closed = band.clone();
+        for lo in 0..3 {
+            for hi in 57..60 {
+                closed.push((lo, hi));
+            }
+        }
+        let a = envelope_flops(build_banded(&part, &band, 7).0.symbolic());
+        let b = envelope_flops(build_banded(&part, &closed, 7).0.symbolic());
+        assert!(b > 20.0 * a, "seam {} vs band {}", b, a);
     }
 }

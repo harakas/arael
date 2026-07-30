@@ -548,6 +548,8 @@ what produced it.
 | env | effect |
 |-----|--------|
 | `SLAM_POSES` | scene size (60 default; 120, 300) |
+| `SLAM_TRAJECTORY` | `scurve` (default, open ends), `loop` (closed circle, landmark visibility wraps across the seam) or `eight` (figure-8, both passes through the crossing share landmarks) |
+| `SLAM_ENVELOPE` | `always` (default), `auto` or `never` -- how the reduced Schur system is factored. The tables are the envelope route, pinned rather than left to arael's `auto` gate |
 | `SLAM_COV` | covariance-recovery benchmark instead of the solve (`COV_BUDGET_S`, `COV_CELL_CAP_S`) |
 | `ROUNDS` | interleaved rounds; the reported time is the minimum over them |
 | `RUN_TINY` | include tiny-solver (off by default: an order of magnitude slower than the field) |

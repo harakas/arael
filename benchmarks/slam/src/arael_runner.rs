@@ -311,10 +311,22 @@ fn narrow_band_enabled() -> bool {
     std::env::var("SLAM_NARROW_BAND").map_or(false, |v| v == "1")
 }
 
-// SLAM_NO_ENVELOPE=1 puts the reduced Schur system back on faer's sparse
-// Cholesky; the envelope route is arael's default.
-fn envelope_enabled() -> bool {
-    std::env::var("SLAM_NO_ENVELOPE").map_or(true, |v| v != "1")
+// SLAM_ENVELOPE=auto|always|never picks how the reduced Schur system is
+// factored. A typo here would silently benchmark the other route, so an
+// unknown value is an error rather than a fallback.
+//
+// The default is `always`, not arael's `auto`: the published tables are the
+// envelope route, and a benchmark should pin what it measures rather than let
+// a gate re-decide it as the gate's threshold moves. `auto` is still selectable
+// to measure the gate itself.
+pub fn envelope_mode() -> arael::simple_lm::EnvelopeMode {
+    use arael::simple_lm::EnvelopeMode;
+    match std::env::var("SLAM_ENVELOPE").as_deref() {
+        Err(_) | Ok("always") => EnvelopeMode::Always,
+        Ok("auto") => EnvelopeMode::Auto,
+        Ok("never") => EnvelopeMode::Never,
+        Ok(other) => panic!("SLAM_ENVELOPE: expected auto, always or never, got {:?}", other),
+    }
 }
 
 // SLAM_PANEL_WIDTH=N sets the envelope factorization's super-panel width,
@@ -366,7 +378,7 @@ fn solve64(params: &[f64], path: &mut Path, cfg: &arael::simple_lm::LmConfig<f64
             arael::simple_lm::lm_solve(
                 params,
                 &mut arael::simple_lm::SparseFaer::new().with_narrow_band(narrow_band_enabled())
-                    .with_envelope_schur(envelope_enabled())
+                    .with_envelope_schur(envelope_mode())
                     .with_envelope_panel_width(envelope_panel_width()),
                 path,
                 cfg,
@@ -452,7 +464,7 @@ fn solve32(params: &[f32], path: &mut PathF, cfg: &arael::simple_lm::LmConfig<f3
     }
     arael::simple_lm::lm_solve(
         params, &mut arael::simple_lm::SparseFaerF32::new().with_narrow_band(narrow_band_enabled())
-                    .with_envelope_schur(envelope_enabled())
+                    .with_envelope_schur(envelope_mode())
                     .with_envelope_panel_width(envelope_panel_width()), path, cfg)
 }
 

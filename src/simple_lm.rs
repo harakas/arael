@@ -3834,6 +3834,21 @@ fn symbolic_factor_flops(sym: &faer::sparse::linalg::cholesky::SymbolicCholesky<
     }
 }
 
+/// The most arithmetic the envelope factorization may cost, as a fraction of
+/// what the ordered sparse factorization of the same system costs, for
+/// [`EnvelopeMode::Auto`] to choose the envelope.
+///
+/// At 0.97 the envelope has to be at least 3% cheaper. Equal arithmetic is not
+/// enough to choose it: the two routes read and write memory differently, and
+/// where their operation counts came out equal the envelope still measured up
+/// to 18% slower.
+///
+/// The 3% is a safety margin, not a measured boundary. Choosing the envelope
+/// where it does not suit costs time on every iteration; refusing it where it
+/// would have suited costs only the gain it would have made, which was under
+/// 1% wherever this margin refused one.
+const ENVELOPE_FLOP_MARGIN: f64 = 0.97;
+
 /// Share of the parameters a reduction may keep and still be waved through by
 /// [`SchurPolicy::Auto`]'s cheap pre-filter.
 ///
@@ -4089,6 +4104,52 @@ impl Default for FaerOrdering {
 /// ([`SchurSolve::Iterative`]), re-exported so configuring the solver does not
 /// mean naming arael-faer.
 pub use arael_faer::cg::{CgOptions, CgStats};
+
+/// Whether the reduced system is factored under its own envelope.
+///
+/// The envelope route keeps `S` in block form and factors it in place, with no
+/// ordering, no symbolic phase and no scalar copy of it. What that reliably
+/// buys is **memory**: 12-48% lower peak on every problem measured, the saving
+/// growing with problem size.
+///
+/// Solve time is not reliably better or worse. The envelope gains a few
+/// percent while it stays narrow, and loses where the reduction couples
+/// distant parameters -- a trajectory that returns to where it started shares
+/// landmarks between its first poses and its last, and the envelope then
+/// reaches back across the whole matrix for every column after the join.
+/// Measured across landmark SLAM on three trajectories and a landmark-span
+/// sweep, per iteration: 8% faster to 18% slower, median 1% faster.
+///
+/// [`Self::Auto`] decides on time, so on those loop-closing problems it
+/// declines the envelope and gives up the memory saving along with it. Choose
+/// [`Self::Always`] where memory is the binding constraint -- it stays the
+/// smaller route even where it is the slower one.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum EnvelopeMode {
+    /// Price the envelope against the ordered sparse factor it would replace,
+    /// and take it only when it is clearly cheaper.
+    ///
+    /// Costs one symbolic analysis of the reduced system, which is what makes
+    /// the comparison possible at all; it is reused when the gate declines, and
+    /// under [`LmSession`] it is paid once across every warm re-solve.
+    #[default]
+    Auto,
+    /// Always factor under the envelope where the reduction leaves a
+    /// naturally-ordered system.
+    ///
+    /// The only mode that skips the setup work outright: no fill-reducing
+    /// ordering, no symbolic factorization, no scalar copy of `S`. That took
+    /// 5-19% off the first iteration where it applied. [`Self::Auto`] cannot
+    /// skip it -- pricing the two routes means building the symbolic the
+    /// envelope would have avoided.
+    ///
+    /// Worth choosing when memory is the binding constraint, or when the
+    /// problem is known to suit the envelope: it stays the smaller route even
+    /// where it is the slower one.
+    Always,
+    /// Never; the reduced system goes to faer's sparse Cholesky.
+    Never,
+}
 
 /// How the reduced system is solved once the Schur reduction has formed it.
 ///
@@ -4560,13 +4621,11 @@ pub struct SparseFaer<T = f64> {
     // Super-panel width for the envelope factorization; None derives it from
     // the envelope (see BandSymbolic::with_panel_width).
     envelope_panel_width: Option<usize>,
-    // The reduced Schur system's envelope Cholesky, ON by default. Distinct
-    // from narrow_band_enabled, which is the whole-system route: this one
-    // factorizes S in block form under its own envelope, and beats faer's
-    // sparse Cholesky on both time and memory wherever the reduction leaves a
-    // naturally-ordered system (measured across a landmark-span sweep from 2%
-    // to 69% dense). with_envelope_schur(false) puts S back on faer.
-    envelope_enabled: bool,
+    // The reduced Schur system's envelope Cholesky. Distinct from
+    // narrow_band_enabled, which is the whole-system route: this one
+    // factorizes S in block form under its own envelope rather than handing
+    // it to faer's sparse Cholesky. See EnvelopeMode.
+    envelope_mode: EnvelopeMode,
     narrow_band_active: bool,
     narrow_band_sym: Option<arael_faer::band::BandSymbolic>,
     narrow_band_factor: Vec<T>,
@@ -4626,7 +4685,7 @@ impl<T> SparseFaer<T> {
             solve_mem: Vec::new(),
             narrow_band_enabled: false,
             envelope_panel_width: None,
-            envelope_enabled: true,
+            envelope_mode: EnvelopeMode::default(),
             narrow_band_active: false,
             narrow_band_sym: None,
             narrow_band_factor: Vec::new(),
@@ -4732,10 +4791,11 @@ impl<T> SparseFaer<T> {
     ///
     /// Distinct from [`with_narrow_band`](Self::with_narrow_band), which is
     /// the whole-system route for a Hessian banded before any reduction.
-    pub fn with_envelope_schur(mut self, on: bool) -> Self {
-        self.envelope_enabled = on;
+    pub fn with_envelope_schur(mut self, mode: EnvelopeMode) -> Self {
+        self.envelope_mode = mode;
         self
     }
+
 
     /// Super-panel width, in scalar columns, for the envelope factorization.
     ///
@@ -5763,9 +5823,58 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         // A naturally-ordered reduction -- banded or dense -- has an envelope
         // to factor under. Anything reordered (AMD, nested dissection) does
         // not, and the iterative routes never factor at all.
-        self.narrow_band_active = !iterative
-            && self.envelope_enabled
-            && matches!(ord, ReducedOrdering::NaturalBanded | ReducedOrdering::NaturalDense);
+        let natural =
+            matches!(ord, ReducedOrdering::NaturalBanded | ReducedOrdering::NaturalDense);
+        let mut take_envelope =
+            !iterative && natural && self.envelope_mode != EnvelopeMode::Never;
+        if take_envelope && self.envelope_mode == EnvelopeMode::Auto {
+            // Auto prices the envelope against the factorization it replaces.
+            // The envelope's own cost is exact -- Cholesky preserves the
+            // envelope, so the pattern gives the flops -- but its competition
+            // is the ORDERED sparse factor, and pricing that means analysing
+            // it: the step the envelope route exists to skip.
+            //
+            // Worth paying. The analysis is one-time per structure and is
+            // handed on below when the gate declines, so it is only wasted
+            // where the envelope wins, while a wrong choice is paid on every
+            // iteration.
+            let env_flops = arael_faer::band::envelope_flops(&schur.s);
+            let (col_ptr, row_idx) = schur.s.csc_pattern();
+            let sym_ref = faer::sparse::SymbolicSparseColMatRef::new_checked(
+                nk, nk, &col_ptr, None, &row_idx,
+            );
+            let faer_ord = match &nd {
+                Some(nd) => faer::sparse::linalg::cholesky::SymmetricOrdering::Custom(nd.perm()),
+                None => ord.faer(),
+            };
+            match faer::sparse::linalg::cholesky::factorize_symbolic_cholesky(
+                sym_ref, faer::Side::Upper, faer_ord, chol_params(self.supernodal),
+            ) {
+                Ok(llt) => {
+                    let sparse_flops = symbolic_factor_flops(&llt);
+                    take_envelope = env_flops <= ENVELOPE_FLOP_MARGIN * sparse_flops;
+                    if vb {
+                        info!(
+                            "schur: reduced system -- envelope {:.2e} flops, sparse \
+                             {:.2e} ({:.0}% of sparse, threshold {:.0}%): {}",
+                            env_flops, sparse_flops,
+                            100.0 * env_flops / sparse_flops,
+                            100.0 * ENVELOPE_FLOP_MARGIN,
+                            if take_envelope { "below threshold, using the envelope" }
+                            else { "above threshold, using the sparse Cholesky" },
+                        );
+                    }
+                    // Reused by the sparse route below rather than rebuilt.
+                    if !take_envelope && reduced_llt.is_none() {
+                        reduced_llt = Some(llt);
+                    }
+                }
+                // The analysis failed, so the sparse route cannot run either.
+                // Leave the envelope to it and let the error surface there.
+                Err(_) => {}
+            }
+        }
+        self.narrow_band_active = take_envelope;
         if let Some(plan) = self.plan.as_mut() {
             plan.ordering = (!iterative).then_some(ord);
             plan.narrow_band = self.narrow_band_active;
@@ -5821,15 +5930,17 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
                 );
             }
         } else if self.narrow_band_active {
-            // Narrow-band Cholesky: factor S directly in block form -- no
-            // scalar CSC, no faer symbolic analysis, fill confined to the band.
+            // The envelope route ([`EnvelopeMode`]): factor S directly in block
+            // form -- no scalar CSC, no faer symbolic analysis, fill confined
+            // to the envelope. Distinct from the whole-system band route above,
+            // which factors H rather than the reduction.
             let bsym = arael_faer::band::BandSymbolic::with_panel_width(
                 &schur.s, self.envelope_panel_width);
             self.narrow_band_factor.resize(bsym.factor_val_count(), T::zero());
             if vb {
                 info!(
                     "schur: reduced system {} params ({:.0}% dense, half-bandwidth {}), \
-                     factoring with a narrow-band Cholesky ({} factor values)",
+                     factoring it under its envelope ({} factor values)",
                     nk,
                     100.0 * schur.s.scalar_upper_nnz() as f64
                         / (nk as f64 * (nk as f64 + 1.0) / 2.0),

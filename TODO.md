@@ -1,5 +1,13 @@
 # TODO
 
+- **arael: gate `EnvelopeMode::Auto`** -- DONE (2026-07-30). Auto prices the
+  envelope against the ordered sparse factor of the same reduced system and
+  takes it below `ENVELOPE_FLOP_MARGIN`. Cheap shape statistics of the envelope
+  do not separate the cases -- a figure-8 at 300 poses has an envelope holding
+  exactly what the pattern stores, and still regresses 18% -- so the comparison
+  is against the competing factorization itself, which costs a symbolic
+  analysis of `S` (reused when the gate declines).
+
 - **arael**: narrow the value-buffer offset maps -- DONE (2026-07-28). Every
   offset into a matrix's values is now `arael::ValueIndex` (an alias, `u32`
   by default): the assembly scatter map, `CscMatrix::diag_pos`, the block
