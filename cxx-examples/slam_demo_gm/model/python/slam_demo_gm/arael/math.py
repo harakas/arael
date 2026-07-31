@@ -595,4 +595,65 @@ def _make_quatern(name, vec, ct, eps):
 
 quaternf = _make_quatern("quaternf", vect3f, ctypes.c_float, 1.1920929e-07)
 quaternd = _make_quatern("quaternd", vect3d, ctypes.c_double,
-                         2.220446049250313e-16)
+                        2.220446049250313e-16)
+
+quaternf.cast = lambda self: quaternd(self.t, self.v.cast())
+quaternd.cast = lambda self: quaternf(self.t, self.v.cast())
+
+# similar / is_finite / null_space, mirroring the Rust methods (and
+# the C++ headers). Attached here like cast: both variants must exist.
+_EPS_F = 1.1920929e-07
+_EPS_D = 2.220446049250313e-16
+
+
+def _vec_similar(eps):
+    def similar(self, other):
+        """Equal within ~10 ulps at this type's precision."""
+        return ((self - other).norm()
+                < 10.0 * (self.norm() + other.norm() + eps) * eps)
+    return similar
+
+
+def _mat_similar(nrows):
+    def similar(self, other):
+        """Row-wise `similar`."""
+        return all(self[i].similar(other[i]) for i in range(nrows))
+    return similar
+
+
+def _quat_similar(eps):
+    def similar(self, other):
+        """Equal within ~10 ulps at this type's precision."""
+        return (abs(self.t - other.t)
+                < 10.0 * (abs(self.t) + abs(other.t) + eps) * eps
+                and self.v.similar(other.v))
+    return similar
+
+
+def _null_space(mat):
+    def null_space(n):
+        """Orthonormal basis with unit `n` as the third column (the
+        caller supplies a unit vector)."""
+        x = n.across()
+        return mat.from_cols(x, n % x, n)
+    return staticmethod(null_space)
+
+
+for _v, _e in ((vect2f, _EPS_F), (vect2d, _EPS_D),
+               (vect3f, _EPS_F), (vect3d, _EPS_D)):
+    _v.similar = _vec_similar(_e)
+vect2f.is_finite = vect2d.is_finite = (
+    lambda self: _pm.isfinite(self.x) and _pm.isfinite(self.y))
+vect3f.is_finite = vect3d.is_finite = (
+    lambda self: _pm.isfinite(self.x) and _pm.isfinite(self.y)
+    and _pm.isfinite(self.z))
+matrix2f.similar = matrix2d.similar = _mat_similar(2)
+matrix3f.similar = matrix3d.similar = _mat_similar(3)
+matrix2f.is_finite = matrix2d.is_finite = (
+    lambda self: self[0].is_finite() and self[1].is_finite())
+quaternf.similar = _quat_similar(_EPS_F)
+quaternd.similar = _quat_similar(_EPS_D)
+quaternf.is_finite = quaternd.is_finite = (
+    lambda self: _pm.isfinite(self.t) and self.v.is_finite())
+matrix3f.null_space = _null_space(matrix3f)
+matrix3d.null_space = _null_space(matrix3d)

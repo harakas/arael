@@ -70,6 +70,17 @@ pub fn verify(got: &std::collections::HashMap<String, f64>) {
     fill(&mut fit);
     assert!(fit.validate().is_clean());
     assert_eq!(g("log_smoke"), 1.0);
+    {
+        use arael::simple_lm::LmStatus::*;
+        for s in [Converged, CostThreshold, MaxIterations, GradientTolerance,
+                  ParameterTolerance, PredictedReduction, LambdaCeiling,
+                  DriverTerminated, ObserverTerminated, TimeLimit,
+                  RetryBudgetExhausted, Aborted] {
+            let c = code(&s) as i64;
+            assert_eq!(g(&format!("st_ok_{c}")), s.is_success() as u8 as f64);
+            assert_eq!(g(&format!("st_len_{c}")), s.as_str().len() as f64);
+        }
+    }
     assert_eq!(g("clean"), 1.0);
     assert_eq!(g("n_obs"), 6.0);
     assert_eq!(g("n_items"), 3.0);

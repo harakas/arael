@@ -185,10 +185,16 @@ views are named by their container's nature: `PathPosesDeque`,
 - **result / option** mirror Rust's shapes; reading the wrong side
   prints the failed check and aborts (`arael_assert_true` -- always
   on).
-- **Failures**: a solve failure or a caught Rust panic comes back as
+- **Status helpers**: `is_success(r->status)` / `as_str(r->status)`
+  mirror the Rust helpers -- note success is NOT `code >= 0` (hitting
+  max_iters or the time limit is Ok-side but not a success).
+- **Failures**: a solve failure comes back as
   `Err(SolveError{status, message, partial})` -- `partial` holds the
   best accepted state when the solve got past its first assembly,
-  usable for diagnosis (its report renders like any result).
+  usable for diagnosis (its report renders like any result). A caught
+  Rust panic (a stale ref, an unguarded Option read, a bad options
+  tag) THROWS `arael::PanicError` with the panic text; the model's
+  parameters are unchanged and a session in use was invalidated.
   `validate()` returns the diagnostic text ("" when clean).
 - **Covariance**: `assemble_covariance(CovMode)` at the solution
   returns a `Covariance` view; `cov->marginal(entity)` answers the

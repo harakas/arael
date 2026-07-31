@@ -43,6 +43,12 @@ def fill(f):
 fit.set_log_level(fit.LogLevel.WARN)
 pi("log_smoke", 1)
 
+# LmStatus helpers mirror Rust's is_success / as_str.
+for i in range(12):
+    s = fit.LmStatus(i)
+    pi("st_ok_%d" % i, 1 if s.is_success() else 0)
+    pi("st_len_%d" % i, len(s.as_str()))
+
 f = fit.Fit()
 fill(f)
 pi("clean", 1 if len(f.validate()) == 0 else 0)

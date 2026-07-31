@@ -108,6 +108,14 @@ surface reference); the differences are Python idiom:
   matrix2d/3d, row-major tuples), `cross(a, b)` tuples, `std_dev(e)`
   a list.
 
+Idiom notes: where C++ has `front()`/`back()`/`empty()` on views,
+Python spells them `view[0]` / `view[-1]` / `len(view)`; where C++
+returns `option<T>` from a method (`r.plan()`), Python uses a
+property returning the value or `None` (`r.plan`).
+`r.status.is_success()` and `r.status.as_str()` mirror the Rust
+helpers -- note success is NOT `status >= 0` (hitting max_iters or
+the time limit is Ok-side but not a success).
+
 One model, one thread. Unlike C++, element wrappers are not raw
 pointers: they re-resolve by index or ref on every access, so growing
 a collection cannot leave a held wrapper dangling (a removed arena

@@ -216,6 +216,21 @@ pm3("g2o3_u_tt", u_tt)
 pm3("g2o3_u_tr", u_tr)
 pm3("g2o3_u_rr", u_rr)
 
+# similar / is_finite / null_space / quatern cast.
+a2 = vect3d(1.2, -0.5, 2.0)
+b2 = vect3d(0.3, 0.9, -1.1)
+r2 = matrix3d.rotation_from_euler_angles(vect3d(0.3, -0.7, 1.9))
+q2 = quaternd.from_euler_angles(vect3d(0.3, -0.7, 1.9))
+p("sim_v3_same", 1.0 if a2.similar(a2) else 0.0)
+p("sim_v3_diff", 1.0 if a2.similar(b2) else 0.0)
+p("sim_m3_same", 1.0 if r2.similar(r2) else 0.0)
+p("sim_q_same", 1.0 if q2.similar(q2) else 0.0)
+p("fin_v3", 1.0 if a2.is_finite() else 0.0)
+p("fin_v3_nan", 1.0 if vect3d(float("nan"), 0.0, 0.0).is_finite() else 0.0)
+ax = vect3d(1.0, 2.0, -2.0).unit()
+pm3("m3_nullspace", matrix3d.null_space(ax))
+pq("f32_q_cast", quaternf.from_euler_angles(vect3f(0.3, -0.7, 1.9)).cast())
+
 # f32 smoke: euler round trip, printed at double precision.
 eaf_back = quaternf.from_euler_angles(vect3f(0.3, -0.7, 1.9)).get_euler_angles()
 pv3("f32_ea_back", eaf_back.cast())

@@ -35,6 +35,15 @@ int main() {
     // chatter for this run.
     set_log_level(LogLevel::Warn);
     pi("log_smoke", 1);
+
+    // LmStatus helpers mirror Rust's is_success / as_str.
+    for (int i = 0; i <= 11; i++) {
+        char nm[24];
+        std::snprintf(nm, sizeof nm, "st_ok_%d", i);
+        pi(nm, is_success(LmStatus(i)) ? 1 : 0);
+        std::snprintf(nm, sizeof nm, "st_len_%d", i);
+        pi(nm, long(std::strlen(as_str(LmStatus(i)))));
+    }
     Fit fit;
     fill(fit);
     pi("clean", std::strlen(fit.validate()) == 0 ? 1 : 0);

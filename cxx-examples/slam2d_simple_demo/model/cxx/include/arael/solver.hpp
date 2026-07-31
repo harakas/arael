@@ -40,6 +40,44 @@ enum class LmStatus : int32_t {
     Panicked = -2,
 };
 
+/// Rust's LmStatus::is_success: did the solve reach a minimum, as
+/// opposed to running out of something?
+inline bool is_success(LmStatus s) {
+    switch (s) {
+        case LmStatus::Converged:
+        case LmStatus::CostThreshold:
+        case LmStatus::GradientTolerance:
+        case LmStatus::ParameterTolerance:
+        case LmStatus::PredictedReduction:
+        case LmStatus::DriverTerminated:
+        case LmStatus::ObserverTerminated:
+            return true;
+        default:
+            return false;
+    }
+}
+
+/// Rust's LmStatus::as_str (plus the two skin-only codes).
+inline const char* as_str(LmStatus s) {
+    switch (s) {
+        case LmStatus::Converged: return "converged";
+        case LmStatus::CostThreshold: return "cost threshold reached";
+        case LmStatus::MaxIterations: return "hit max_iters";
+        case LmStatus::GradientTolerance: return "gradient flat";
+        case LmStatus::ParameterTolerance: return "step negligible";
+        case LmStatus::PredictedReduction: return "predicted gain negligible";
+        case LmStatus::LambdaCeiling: return "damping exhausted";
+        case LmStatus::DriverTerminated: return "driver stopped it";
+        case LmStatus::ObserverTerminated: return "observer stopped it";
+        case LmStatus::TimeLimit: return "out of time";
+        case LmStatus::RetryBudgetExhausted: return "retry budget exhausted";
+        case LmStatus::Aborted: return "aborted";
+        case LmStatus::SolverFailed: return "solver failed";
+        case LmStatus::Panicked: return "panicked";
+    }
+    return "?";
+}
+
 /// The base preset a config starts from; it also supplies the one
 /// Rust field the struct does not expose, the lambda driver.
 /// IllConditioned selects the Nielsen driver (its other fields match

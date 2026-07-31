@@ -163,6 +163,17 @@ struct matrix3 {
         return {r, d};
     }
 
+    bool similar(matrix3 other) const {
+        return rows[0].similar(other.rows[0]) && rows[1].similar(other.rows[1])
+            && rows[2].similar(other.rows[2]);
+    }
+    /// Orthonormal basis with unit `n` as the third column (the
+    /// caller supplies a unit vector).
+    static matrix3 null_space(vect3<T> n) {
+        vect3<T> x = n.across();
+        vect3<T> y = n % x;
+        return from_cols(x, y, n);
+    }
     vect3<T>& operator[](std::size_t i) { return rows[i]; }
     const vect3<T>& operator[](std::size_t i) const { return rows[i]; }
     matrix3 operator+(matrix3 m) const {
@@ -250,6 +261,9 @@ struct matrix2 {
         return {r, vect2<T>{T(l0), T(l1)}};
     }
 
+    bool similar(matrix2 other) const {
+        return rows[0].similar(other.rows[0]) && rows[1].similar(other.rows[1]);
+    }
     vect2<T>& operator[](std::size_t i) { return rows[i]; }
     const vect2<T>& operator[](std::size_t i) const { return rows[i]; }
     matrix2 operator+(matrix2 m) const {

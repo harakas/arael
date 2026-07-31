@@ -212,6 +212,25 @@ int main() {
         pm3("g2o3_u_rr", u.u_rr);
     }
 
+    // similar / is_finite / null_space / quatern cast.
+    {
+        vect3d a2{1.2, -0.5, 2.0};
+        vect3d b2{0.3, 0.9, -1.1};
+        matrix3d r2 = matrix3d::rotation_from_euler_angles({0.3, -0.7, 1.9});
+        quaternd q2 = quaternd::from_euler_angles({0.3, -0.7, 1.9});
+        p("sim_v3_same", a2.similar(a2) ? 1.0 : 0.0);
+        p("sim_v3_diff", a2.similar(b2) ? 1.0 : 0.0);
+        p("sim_m3_same", r2.similar(r2) ? 1.0 : 0.0);
+        p("sim_q_same", q2.similar(q2) ? 1.0 : 0.0);
+        p("fin_v3", a2.is_finite() ? 1.0 : 0.0);
+        p("fin_v3_nan",
+          vect3d{std::nan(""), 0.0, 0.0}.is_finite() ? 1.0 : 0.0);
+        vect3d ax = vect3d{1.0, 2.0, -2.0}.unit();
+        pm3("m3_nullspace", matrix3d::null_space(ax));
+        quaternf qf = quaternf::from_euler_angles({0.3f, -0.7f, 1.9f});
+        pq("f32_q_cast", qf.cast<double>());
+    }
+
     // f32 smoke: euler round trip, printed at double precision.
     vect3<float> eaf{0.3f, -0.7f, 1.9f};
     vect3<float> eaf_back = quatern<float>::from_euler_angles(eaf).get_euler_angles();

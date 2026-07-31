@@ -43,6 +43,38 @@ class LmStatus(enum.IntEnum):
     SOLVER_FAILED = -1
     PANICKED = -2
 
+    def is_success(self):
+        """Did the solve reach a minimum, as opposed to running out
+        of something? (Rust's LmStatus::is_success.)"""
+        return self in (LmStatus.CONVERGED, LmStatus.COST_THRESHOLD,
+                        LmStatus.GRADIENT_TOLERANCE,
+                        LmStatus.PARAMETER_TOLERANCE,
+                        LmStatus.PREDICTED_REDUCTION,
+                        LmStatus.DRIVER_TERMINATED,
+                        LmStatus.OBSERVER_TERMINATED)
+
+    def as_str(self):
+        """Rust's LmStatus::as_str (plus the two skin-only codes)."""
+        return _STATUS_STR[self]
+
+
+_STATUS_STR = {
+    LmStatus.CONVERGED: "converged",
+    LmStatus.COST_THRESHOLD: "cost threshold reached",
+    LmStatus.MAX_ITERATIONS: "hit max_iters",
+    LmStatus.GRADIENT_TOLERANCE: "gradient flat",
+    LmStatus.PARAMETER_TOLERANCE: "step negligible",
+    LmStatus.PREDICTED_REDUCTION: "predicted gain negligible",
+    LmStatus.LAMBDA_CEILING: "damping exhausted",
+    LmStatus.DRIVER_TERMINATED: "driver stopped it",
+    LmStatus.OBSERVER_TERMINATED: "observer stopped it",
+    LmStatus.TIME_LIMIT: "out of time",
+    LmStatus.RETRY_BUDGET_EXHAUSTED: "retry budget exhausted",
+    LmStatus.ABORTED: "aborted",
+    LmStatus.SOLVER_FAILED: "solver failed",
+    LmStatus.PANICKED: "panicked",
+}
+
 
 class LmPreset(enum.IntEnum):
     """The base preset a config starts from; it also supplies the one

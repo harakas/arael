@@ -231,6 +231,26 @@ pub fn golden() -> Vec<(String, f64)> {
         pm3(&mut out, "g2o3_u_rr", u_rr);
     }
 
+    // similar / is_finite / null_space / quatern cast.
+    {
+        use arael::vect::Similar as _;
+        let a2 = vect3d::new(1.2, -0.5, 2.0);
+        let b2 = vect3d::new(0.3, 0.9, -1.1);
+        let r2 = matrix3d::rotation_from_euler_angles(vect3d::new(0.3, -0.7, 1.9));
+        let q2 = quaternd::from_euler_angles(vect3d::new(0.3, -0.7, 1.9));
+        p(&mut out, "sim_v3_same", a2.similar(a2) as u8 as f64);
+        p(&mut out, "sim_v3_diff", a2.similar(b2) as u8 as f64);
+        p(&mut out, "sim_m3_same", r2.similar(r2) as u8 as f64);
+        p(&mut out, "sim_q_same", q2.similar(q2) as u8 as f64);
+        p(&mut out, "fin_v3", a2.is_finite() as u8 as f64);
+        p(&mut out, "fin_v3_nan",
+            vect3d::new(f64::NAN, 0.0, 0.0).is_finite() as u8 as f64);
+        let ax = vect3d::new(1.0, 2.0, -2.0).unit();
+        pm3(&mut out, "m3_nullspace", matrix3d::null_space(ax));
+        let qf = quatern::<f32>::from_euler_angles(vect3::<f32>::new(0.3, -0.7, 1.9));
+        pq(&mut out, "f32_q_cast", qf.cast::<f64>());
+    }
+
     let eaf = vect3::<f32>::new(0.3, -0.7, 1.9);
     let eaf_back = quatern::<f32>::from_euler_angles(eaf).get_euler_angles();
     pv3(&mut out, "f32_ea_back",

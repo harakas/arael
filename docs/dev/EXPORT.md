@@ -255,7 +255,7 @@ priority.
   catches, returning NaN with the text in last_error. The shim never
   aborts.]
 
-### 10. Status helpers [S]
+### 10. Status helpers [S] [DONE 2026-07-31]
 
 `LmStatus::is_success` is not exported and the obvious substitute
 (code >= 0) is WRONG: `MaxIterations`, `LambdaCeiling`, `TimeLimit`,
@@ -311,7 +311,17 @@ optimized one back out.
 - `cost()`/`cost_table()` at an explicit params vector -- blocked on
   the deferred serialize/deserialize item; pick up together.
 
-### 17. Math/vocabulary parity [S]
+### 17. Math/vocabulary parity [S] [DONE 2026-07-31, se3 excluded]
+
+As built: Python gained `is_finite` / `similar` on every value type,
+`quatern.cast`, and `matrix3.null_space`; C++ gained
+`matrix2/3::similar` and `matrix3::null_space`; the golden parity now
+exercises them (plus `is_success` / `as_str` from item 10, pinned
+per-status against Rust in the fixture parity). The se3 twist type
+stays out (user decision). Views: Python's spellings are `view[0]` /
+`view[-1]` / `len(view)` for C++'s front/back/empty -- documented,
+not added. Result accessor idioms (Python property + None, C++
+method + option) stay per-skin, documented.
 
 - Python lags C++: `is_finite` (only matrix3), `similar` (absent),
   `quatern.cast` (absent) -- and the golden parity never calls them
