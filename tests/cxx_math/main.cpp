@@ -212,6 +212,42 @@ int main() {
         pm3("g2o3_u_rr", u.u_rr);
     }
 
+    // g2o write-back: the rendered text re-parses to the same values
+    // and is byte-identical across the three writers (length +
+    // FNV-1a pins).
+    {
+        auto fnv32 = [](const std::string& s) {
+            uint32_t h = 2166136261u;
+            for (unsigned char c : s) {
+                h ^= c;
+                h *= 16777619u;
+            }
+            return double(h);
+        };
+        arael::g2o::Dataset2 ds = arael::g2o::Dataset2::parse(
+            "VERTEX_SE2 0 0.25 -1.5 0.125\n"
+            "VERTEX_SE2 1 1.75 0.5 -0.25\n"
+            "FIX 0\n"
+            "EDGE_SE2 0 1 1.5 2.0 -0.375 100 0 0 100 0 400\n");
+        std::string txt = ds.to_g2o();
+        p("g2o_save_len", double(txt.size()));
+        p("g2o_save_fnv", fnv32(txt));
+        arael::g2o::Dataset2 rt = arael::g2o::Dataset2::parse(txt);
+        p("g2o_save_p1_th", rt.poses[1].th);
+        p("g2o_save_d0_i5", rt.deltas[0].info[5]);
+        arael::g2o::Dataset3 ds3 = arael::g2o::Dataset3::parse(
+            "VERTEX_SE3:QUAT 0 0 0 0 0 0 0 1\n"
+            "VERTEX_SE3:QUAT 1 1.0 2.0 -0.5 0.2 0.4 -0.4 1.0\n"
+            "EDGE_SE3:QUAT 0 1 1.5 -0.25 0.75 0.1 -0.2 0.3 0.9 "
+            "100 1 2 0 0 0 100 3 0 0 0 100 0 0 0 400 4 0 400 5 400\n");
+        std::string t3 = ds3.to_g2o();
+        p("g2o3_save_len", double(t3.size()));
+        p("g2o3_save_fnv", fnv32(t3));
+        arael::g2o::Dataset3 rt3 = arael::g2o::Dataset3::parse(t3);
+        p("g2o3_save_qx", rt3.poses[1].q.v.x);
+        p("g2o3_save_i34", rt3.deltas[0].info[3][4]);
+    }
+
     // similar / is_finite / null_space / quatern cast.
     {
         vect3d a2{1.2, -0.5, 2.0};

@@ -57,9 +57,10 @@ surface reference); the differences are Python idiom:
   `symmetric_eigen`, euler/quaternion conversions...).
   The `arael.geometry` pinhole camera (`cameraf` / `camerad`;
   `Camera` is a legacy alias of `cameraf`) and the `arael.g2o`
-  pose-graph readers
+  pose-graph file I/O
   (`Dataset2` for SE2, `Dataset3` for SE3:QUAT with sqrt-information
-  Cholesky blocks) complete the support library.
+  Cholesky blocks; `to_g2o()`/`save(path)` write the graph back out,
+  byte-identical to the Rust writer) complete the support library.
 - **Collections** speak Python: `len(f.obs)`, `f.obs[3]` (negative
   indices too), `for n in f.items:`, the `push`/`pop` families,
   `reserve`/`clear`/`truncate`. Ref lookups -- `ref_at`/end refs,

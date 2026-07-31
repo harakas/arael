@@ -216,6 +216,29 @@ pm3("g2o3_u_tt", u_tt)
 pm3("g2o3_u_tr", u_tr)
 pm3("g2o3_u_rr", u_rr)
 
+
+# g2o write-back: the rendered text re-parses to the same values and
+# is byte-identical across the three writers (length + FNV-1a pins).
+def fnv32(s):
+    h = 2166136261
+    for b in s.encode():
+        h = ((h ^ b) * 16777619) & 0xFFFFFFFF
+    return float(h)
+
+
+txt = ds.to_g2o()
+p("g2o_save_len", float(len(txt)))
+p("g2o_save_fnv", fnv32(txt))
+rt = g2o.Dataset2.parse(txt)
+p("g2o_save_p1_th", rt.poses[1].th)
+p("g2o_save_d0_i5", rt.deltas[0].info[5])
+t3 = ds3.to_g2o()
+p("g2o3_save_len", float(len(t3)))
+p("g2o3_save_fnv", fnv32(t3))
+rt3 = g2o.Dataset3.parse(t3)
+p("g2o3_save_qx", rt3.poses[1].q.v.x)
+p("g2o3_save_i34", rt3.deltas[0].info[3][4])
+
 # similar / is_finite / null_space / quatern cast.
 a2 = vect3d(1.2, -0.5, 2.0)
 b2 = vect3d(0.3, 0.9, -1.1)

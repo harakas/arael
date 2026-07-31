@@ -325,6 +325,16 @@ The vendored readers stop at `parse`/`load`; `save`/`to_g2o` have no
 counterpart, so a host can load a pose graph but not write the
 optimized one back out.
 
+[DONE 2026-07-31] `to_g2o()`/`save(path)` on both Dataset classes in
+both vendored skins, mirrors like the readers (the vendored layer
+has no FFI to wrap). Output is byte-identical to the Rust writer: a
+shortest-round-trip positional float formatter mirrors Rust's `{}`
+Display, pinned by length + FNV-1a of the rendered fixtures in the
+golden three-way suite (`g2o_save_*`/`g2o3_save_*`). The pin also
+caught a real reader deviation: the Python quaternion normalization
+divided all four components where Rust/C++ scale the vector by
+`1/n` -- now the same arithmetic.
+
 ### 16. Diagnostics detail [S-M each, on demand]
 
 - `LmTiming::steps` / `LmStep` per-iteration timeline (observer

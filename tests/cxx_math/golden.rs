@@ -231,6 +231,42 @@ pub fn golden() -> Vec<(String, f64)> {
         pm3(&mut out, "g2o3_u_rr", u_rr);
     }
 
+    // g2o write-back: the rendered text re-parses to the same values
+    // and is byte-identical across the three writers (length +
+    // FNV-1a pins).
+    {
+        fn fnv32(s: &str) -> f64 {
+            let mut h: u32 = 2166136261;
+            for b in s.bytes() {
+                h ^= b as u32;
+                h = h.wrapping_mul(16777619);
+            }
+            h as f64
+        }
+        let ds = arael::g2o::Dataset2::parse(
+            "VERTEX_SE2 0 0.25 -1.5 0.125\n\
+             VERTEX_SE2 1 1.75 0.5 -0.25\n\
+             FIX 0\n\
+             EDGE_SE2 0 1 1.5 2.0 -0.375 100 0 0 100 0 400\n").unwrap();
+        let txt = ds.to_g2o();
+        p(&mut out, "g2o_save_len", txt.len() as f64);
+        p(&mut out, "g2o_save_fnv", fnv32(&txt));
+        let rt = arael::g2o::Dataset2::parse(&txt).unwrap();
+        p(&mut out, "g2o_save_p1_th", rt.poses[1].th);
+        p(&mut out, "g2o_save_d0_i5", rt.deltas[0].info[5]);
+        let ds3 = arael::g2o::Dataset3::parse(
+            "VERTEX_SE3:QUAT 0 0 0 0 0 0 0 1\n\
+             VERTEX_SE3:QUAT 1 1.0 2.0 -0.5 0.2 0.4 -0.4 1.0\n\
+             EDGE_SE3:QUAT 0 1 1.5 -0.25 0.75 0.1 -0.2 0.3 0.9 \
+             100 1 2 0 0 0 100 3 0 0 0 100 0 0 0 400 4 0 400 5 400\n").unwrap();
+        let t3 = ds3.to_g2o();
+        p(&mut out, "g2o3_save_len", t3.len() as f64);
+        p(&mut out, "g2o3_save_fnv", fnv32(&t3));
+        let rt3 = arael::g2o::Dataset3::parse(&t3).unwrap();
+        p(&mut out, "g2o3_save_qx", rt3.poses[1].q.v.x);
+        p(&mut out, "g2o3_save_i34", rt3.deltas[0].info[3][4]);
+    }
+
     // similar / is_finite / null_space / quatern cast.
     {
         use arael::vect::Similar as _;

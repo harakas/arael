@@ -19,6 +19,45 @@
 namespace arael {
 namespace g2o {
 
+/// Append the shortest decimal that round-trips to `v`, positional
+/// notation (no exponent) -- byte-identical to the Rust writer.
+inline void g2o_num(std::string& out, double v) {
+    char buf[32];
+    for (int prec = 0; prec < 17; prec++) {
+        std::snprintf(buf, sizeof buf, "%.*e", prec, v);
+        if (std::strtod(buf, nullptr) == v)
+            break;
+    }
+    const char* s = buf;
+    if (*s == '-') {
+        out += '-';
+        s++;
+    }
+    char digits[24];
+    int nd = 0;
+    digits[nd++] = *s++;
+    if (*s == '.') {
+        s++;
+        while (*s && *s != 'e')
+            digits[nd++] = *s++;
+    }
+    arael_assert_true(*s == 'e');
+    int exp = std::atoi(s + 1);
+    if (exp >= 0) {
+        for (int i = 0; i <= exp || i < nd; i++) {
+            if (i == exp + 1)
+                out += '.';
+            out += i < nd ? digits[i] : '0';
+        }
+    } else {
+        out += "0.";
+        for (int i = 0; i < -exp - 1; i++)
+            out += '0';
+        for (int i = 0; i < nd; i++)
+            out += digits[i];
+    }
+}
+
 /// One 2D pose from a VERTEX_SE2 record.
 struct Pose2 {
     vect2d t;
@@ -107,6 +146,46 @@ struct Dataset2 {
             text.append(buf, n);
         std::fclose(f);
         return parse(text);
+    }
+
+    /// Render the pose graph as .g2o text -- byte-identical to the
+    /// Rust writer.
+    std::string to_g2o() const {
+        std::string out;
+        for (size_t i = 0; i < poses.size(); i++) {
+            out += "VERTEX_SE2 ";
+            out += std::to_string(i);
+            out += ' '; g2o_num(out, poses[i].t.x);
+            out += ' '; g2o_num(out, poses[i].t.y);
+            out += ' '; g2o_num(out, poses[i].th);
+            out += '\n';
+        }
+        for (const auto& d : deltas) {
+            out += "EDGE_SE2 ";
+            out += std::to_string(d.a);
+            out += ' ';
+            out += std::to_string(d.b);
+            out += ' '; g2o_num(out, d.dt.x);
+            out += ' '; g2o_num(out, d.dt.y);
+            out += ' '; g2o_num(out, d.dth);
+            for (double v : d.info) {
+                out += ' ';
+                g2o_num(out, v);
+            }
+            out += '\n';
+        }
+        return out;
+    }
+
+    /// Write the pose graph back out as .g2o. Aborts when the file
+    /// cannot be written.
+    void save(const char* path) const {
+        std::string text = to_g2o();
+        std::FILE* f = std::fopen(path, "wb");
+        arael_assert_true(f != nullptr);
+        arael_assert_true(
+            std::fwrite(text.data(), 1, text.size(), f) == text.size());
+        std::fclose(f);
     }
 };
 
@@ -255,6 +334,57 @@ struct Dataset3 {
             text.append(buf, n);
         std::fclose(f);
         return parse(text);
+    }
+
+    /// Render the pose graph as .g2o text -- byte-identical to the
+    /// Rust writer.
+    std::string to_g2o() const {
+        std::string out;
+        for (size_t i = 0; i < poses.size(); i++) {
+            const Pose3& p = poses[i];
+            out += "VERTEX_SE3:QUAT ";
+            out += std::to_string(i);
+            out += ' '; g2o_num(out, p.t.x);
+            out += ' '; g2o_num(out, p.t.y);
+            out += ' '; g2o_num(out, p.t.z);
+            out += ' '; g2o_num(out, p.q.v.x);
+            out += ' '; g2o_num(out, p.q.v.y);
+            out += ' '; g2o_num(out, p.q.v.z);
+            out += ' '; g2o_num(out, p.q.t);
+            out += '\n';
+        }
+        for (const auto& d : deltas) {
+            out += "EDGE_SE3:QUAT ";
+            out += std::to_string(d.a);
+            out += ' ';
+            out += std::to_string(d.b);
+            out += ' '; g2o_num(out, d.dt.x);
+            out += ' '; g2o_num(out, d.dt.y);
+            out += ' '; g2o_num(out, d.dt.z);
+            out += ' '; g2o_num(out, d.dq.v.x);
+            out += ' '; g2o_num(out, d.dq.v.y);
+            out += ' '; g2o_num(out, d.dq.v.z);
+            out += ' '; g2o_num(out, d.dq.t);
+            for (int i = 0; i < 6; i++) {
+                for (int j = i; j < 6; j++) {
+                    out += ' ';
+                    g2o_num(out, d.info[i][j]);
+                }
+            }
+            out += '\n';
+        }
+        return out;
+    }
+
+    /// Write the pose graph back out as .g2o. Aborts when the file
+    /// cannot be written.
+    void save(const char* path) const {
+        std::string text = to_g2o();
+        std::FILE* f = std::fopen(path, "wb");
+        arael_assert_true(f != nullptr);
+        arael_assert_true(
+            std::fwrite(text.data(), 1, text.size(), f) == text.size());
+        std::fclose(f);
     }
 };
 

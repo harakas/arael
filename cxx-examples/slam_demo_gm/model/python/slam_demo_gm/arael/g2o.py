@@ -4,7 +4,20 @@
 # record types are skipped, vertex ids must be dense and ordered.
 # Malformed records raise ValueError with the 1-based line number.
 
+from decimal import Decimal
+
 from .math import matrix3d, quaternd, vect2d, vect3d
+
+
+def _fmt(v):
+    """The shortest decimal that round-trips to v, positional
+    notation (no exponent) -- byte-identical to the Rust writer."""
+    r = repr(float(v))
+    if "e" in r:
+        return format(Decimal(r), "f")
+    if r.endswith(".0"):
+        return r[:-2]
+    return r
 
 
 class Pose2:
@@ -79,13 +92,34 @@ class Dataset2:
         with open(path, "r") as f:
             return cls.parse(f.read())
 
+    def to_g2o(self):
+        """Render the pose graph as .g2o text -- byte-identical to
+        the Rust writer."""
+        out = []
+        for i, p in enumerate(self.poses):
+            out.append("VERTEX_SE2 %d %s %s %s"
+                       % (i, _fmt(p.t.x), _fmt(p.t.y), _fmt(p.th)))
+        for d in self.deltas:
+            row = ["EDGE_SE2 %d %d %s %s %s"
+                   % (d.a, d.b, _fmt(d.dt.x), _fmt(d.dt.y), _fmt(d.dth))]
+            row += [_fmt(v) for v in d.info]
+            out.append(" ".join(row))
+        return "".join(line + "\n" for line in out)
+
+    def save(self, path):
+        """Write the pose graph back out as .g2o."""
+        with open(path, "w") as f:
+            f.write(self.to_g2o())
+
 
 def _unit_quat(qx, qy, qz, qw):
-    """The file's qx qy qz qw, normalized."""
-    n = (qw * qw + qx * qx + qy * qy + qz * qz) ** 0.5
+    """The file's qx qy qz qw, normalized (the same arithmetic as the
+    Rust reader: scalar divided by n, vector scaled by 1/n)."""
+    n = (qw * qw + (qx * qx + qy * qy + qz * qz)) ** 0.5
     if n < 1e-12:
         raise ValueError("zero-length quaternion")
-    return quaternd(qw / n, (qx / n, qy / n, qz / n))
+    inv = 1.0 / n
+    return quaternd(qw / n, (qx * inv, qy * inv, qz * inv))
 
 
 class Pose3:
@@ -205,3 +239,28 @@ class Dataset3:
         """Read a 3D pose graph from a .g2o file."""
         with open(path, "r") as f:
             return cls.parse(f.read())
+
+    def to_g2o(self):
+        """Render the pose graph as .g2o text -- byte-identical to
+        the Rust writer."""
+        out = []
+        for i, p in enumerate(self.poses):
+            out.append("VERTEX_SE3:QUAT %d %s %s %s %s %s %s %s"
+                       % (i, _fmt(p.t.x), _fmt(p.t.y), _fmt(p.t.z),
+                          _fmt(p.q.v.x), _fmt(p.q.v.y), _fmt(p.q.v.z),
+                          _fmt(p.q.t)))
+        for d in self.deltas:
+            row = ["EDGE_SE3:QUAT %d %d %s %s %s %s %s %s %s"
+                   % (d.a, d.b, _fmt(d.dt.x), _fmt(d.dt.y), _fmt(d.dt.z),
+                      _fmt(d.dq.v.x), _fmt(d.dq.v.y), _fmt(d.dq.v.z),
+                      _fmt(d.dq.t))]
+            for i in range(6):
+                for j in range(i, 6):
+                    row.append(_fmt(d.info[i][j]))
+            out.append(" ".join(row))
+        return "".join(line + "\n" for line in out)
+
+    def save(self, path):
+        """Write the pose graph back out as .g2o."""
+        with open(path, "w") as f:
+            f.write(self.to_g2o())
