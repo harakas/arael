@@ -325,6 +325,12 @@ pub fn verify(got: &std::collections::HashMap<String, f64>) {
         assert_eq!(g("cg_iters"), p15.cg_iterations.unwrap() as f64);
     }
 
+    // The Python enum setters validate (C++ is typed; the C++ driver
+    // does not print this name, so it is optional).
+    if let Some(v) = got.get("enum_setter_validates") {
+        assert_eq!(*v, 1.0, "python enum setter must reject bad values");
+    }
+
     // Observer + timing + report + conditional covariance mirrored.
     {
         use std::cell::Cell;

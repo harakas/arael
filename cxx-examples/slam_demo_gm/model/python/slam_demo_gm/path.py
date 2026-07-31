@@ -114,8 +114,6 @@ class LmSession:
         load()
         self._s = _f.path_session_new(
             ctypes.byref(opts) if opts is not None else None)
-        if not self._s:
-            raise AraelError(-1, "invalid sparse options")
 
     def free(self):
         if self._s:

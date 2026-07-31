@@ -93,8 +93,9 @@ Rust prerequisite landed first: `SparseFaerOptions` gained
 applies them (tests/narrow_band_cholesky.rs pins it). FFI:
 `CSparseOptions` with u32 enum tags, `{root}_sparse_options` fills
 the Rust defaults, `{root}_solve_sparse` takes a nullable options
-pointer; unknown tags fail the solve with text rather than being
-clamped. Parity pins the defaults field-for-field and two forced
+pointer; an out-of-range tag aborts loudly (since 2026-07-31; it is
+a programmer error, unreachable through the typed wrappers and the
+validating Python setters). Parity pins the defaults field-for-field and two forced
 routes (Force+Natural+Always takes the envelope, Force+Amd+Never
 declines it) against Rust driving `SparseFaer::from_options` with
 the same options.
@@ -230,6 +231,11 @@ priority.
 - C++ `LmSession` stores `session_new`'s return unchecked; invalid
   options return null and the next `solve()` dereferences it. Python
   raises. Validate in the ctor (or give the session a bool).
+  [DONE 2026-07-31, user decision: an out-of-range options tag now
+  ABORTS loudly (panic in the shim) everywhere -- session_new never
+  fails, the null path is gone -- and the Python enum setters
+  validate, raising ValueError on a value outside the enum (parity
+  pins it). Reaching the abort now requires poking raw struct bytes.]
 - `cost_table()` on a panic: C++ returns an empty vector (ambiguous
   -- empty is a legitimate table), Python raises. Align on the
   C++ side distinguishing the failure.

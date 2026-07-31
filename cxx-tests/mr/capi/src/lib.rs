@@ -297,7 +297,9 @@ pub struct CSparseOptions {
 }
 
 impl CSparseOptions {
-    fn to_options(&self) -> Result<SparseFaerOptions, String> {
+    /// An out-of-range enum tag aborts loudly: it is a programmer
+    /// error, unreachable through the typed wrappers.
+    fn to_options(&self) -> SparseFaerOptions {
         use arael::simple_lm::{EnvelopeMode, FaerOrdering, SchurPolicy};
         let policy = match self.schur {
             0 => SchurPolicy::Auto {
@@ -306,7 +308,7 @@ impl CSparseOptions {
             },
             1 => SchurPolicy::Force,
             2 => SchurPolicy::Never,
-            t => return Err(format!("unknown schur policy tag {t}")),
+            t => panic!("unknown schur policy tag {t}"),
         };
         let ordering = match self.ordering {
             0 => FaerOrdering::Auto,
@@ -314,13 +316,13 @@ impl CSparseOptions {
             2 => FaerOrdering::MarginalizeFirst,
             3 => FaerOrdering::Natural,
             4 => FaerOrdering::NestedDissection,
-            t => return Err(format!("unknown ordering tag {t}")),
+            t => panic!("unknown ordering tag {t}"),
         };
         let envelope = match self.envelope {
             0 => EnvelopeMode::Auto,
             1 => EnvelopeMode::Always,
             2 => EnvelopeMode::Never,
-            t => return Err(format!("unknown envelope mode tag {t}")),
+            t => panic!("unknown envelope mode tag {t}"),
         };
         let width = self.envelope_panel_width;
         let opts = SparseFaerOptions::auto()
@@ -335,12 +337,12 @@ impl CSparseOptions {
             max_iters: self.cg_max_iters as usize,
             restart_every: self.cg_restart_every as usize,
         };
-        Ok(match self.schur_solve {
+        match self.schur_solve {
             0 => opts,
             1 => opts.with_iterative_schur(cg),
             2 => opts.with_implicit_schur(cg),
-            t => return Err(format!("unknown schur solve tag {t}")),
-        })
+            t => panic!("unknown schur solve tag {t}"),
+        }
     }
 }
 
@@ -780,13 +782,7 @@ pub unsafe extern "C" fn decay_solve_sparse(
     let solver = if opts.is_null() {
         None
     } else {
-        match (*opts).to_options() {
-            Ok(o) => Some(SparseFaer::<f32>::from_options(&o)),
-            Err(e) => {
-                set_text(hh, &e);
-                return -1;
-            }
-        }
+        Some(SparseFaer::<f32>::from_options(&(*opts).to_options()))
     };
     match catch_unwind(AssertUnwindSafe(|| match solver {
         Some(mut s) => hh.model.solve_with(&mut s, &c),
@@ -828,7 +824,7 @@ pub struct DecaySession {
 }
 
 /// New session; `opts` as in decay_solve_sparse (null =
-/// defaults). Returns null when the options are invalid.
+/// defaults). Never fails (an out-of-range options tag aborts).
 #[no_mangle]
 pub unsafe extern "C" fn decay_session_new(
     opts: *const CSparseOptions,
@@ -836,10 +832,7 @@ pub unsafe extern "C" fn decay_session_new(
     let solver = if opts.is_null() {
         SparseFaer::<f32>::new()
     } else {
-        match (*opts).to_options() {
-            Ok(o) => SparseFaer::<f32>::from_options(&o),
-            Err(_) => return std::ptr::null_mut(),
-        }
+        SparseFaer::<f32>::from_options(&(*opts).to_options())
     };
     Box::into_raw(Box::new(DecaySession {
         session: LmSession::new(solver),
@@ -1543,7 +1536,9 @@ pub struct CSparseOptions {
 }
 
 impl CSparseOptions {
-    fn to_options(&self) -> Result<SparseFaerOptions, String> {
+    /// An out-of-range enum tag aborts loudly: it is a programmer
+    /// error, unreachable through the typed wrappers.
+    fn to_options(&self) -> SparseFaerOptions {
         use arael::simple_lm::{EnvelopeMode, FaerOrdering, SchurPolicy};
         let policy = match self.schur {
             0 => SchurPolicy::Auto {
@@ -1552,7 +1547,7 @@ impl CSparseOptions {
             },
             1 => SchurPolicy::Force,
             2 => SchurPolicy::Never,
-            t => return Err(format!("unknown schur policy tag {t}")),
+            t => panic!("unknown schur policy tag {t}"),
         };
         let ordering = match self.ordering {
             0 => FaerOrdering::Auto,
@@ -1560,13 +1555,13 @@ impl CSparseOptions {
             2 => FaerOrdering::MarginalizeFirst,
             3 => FaerOrdering::Natural,
             4 => FaerOrdering::NestedDissection,
-            t => return Err(format!("unknown ordering tag {t}")),
+            t => panic!("unknown ordering tag {t}"),
         };
         let envelope = match self.envelope {
             0 => EnvelopeMode::Auto,
             1 => EnvelopeMode::Always,
             2 => EnvelopeMode::Never,
-            t => return Err(format!("unknown envelope mode tag {t}")),
+            t => panic!("unknown envelope mode tag {t}"),
         };
         let width = self.envelope_panel_width;
         let opts = SparseFaerOptions::auto()
@@ -1581,12 +1576,12 @@ impl CSparseOptions {
             max_iters: self.cg_max_iters as usize,
             restart_every: self.cg_restart_every as usize,
         };
-        Ok(match self.schur_solve {
+        match self.schur_solve {
             0 => opts,
             1 => opts.with_iterative_schur(cg),
             2 => opts.with_implicit_schur(cg),
-            t => return Err(format!("unknown schur solve tag {t}")),
-        })
+            t => panic!("unknown schur solve tag {t}"),
+        }
     }
 }
 
@@ -2026,13 +2021,7 @@ pub unsafe extern "C" fn line_solve_sparse(
     let solver = if opts.is_null() {
         None
     } else {
-        match (*opts).to_options() {
-            Ok(o) => Some(SparseFaer::<f64>::from_options(&o)),
-            Err(e) => {
-                set_text(hh, &e);
-                return -1;
-            }
-        }
+        Some(SparseFaer::<f64>::from_options(&(*opts).to_options()))
     };
     match catch_unwind(AssertUnwindSafe(|| match solver {
         Some(mut s) => hh.model.solve_with(&mut s, &c),
@@ -2074,7 +2063,7 @@ pub struct LineSession {
 }
 
 /// New session; `opts` as in line_solve_sparse (null =
-/// defaults). Returns null when the options are invalid.
+/// defaults). Never fails (an out-of-range options tag aborts).
 #[no_mangle]
 pub unsafe extern "C" fn line_session_new(
     opts: *const CSparseOptions,
@@ -2082,10 +2071,7 @@ pub unsafe extern "C" fn line_session_new(
     let solver = if opts.is_null() {
         SparseFaer::<f64>::new()
     } else {
-        match (*opts).to_options() {
-            Ok(o) => SparseFaer::<f64>::from_options(&o),
-            Err(_) => return std::ptr::null_mut(),
-        }
+        SparseFaer::<f64>::from_options(&(*opts).to_options())
     };
     Box::into_raw(Box::new(LineSession {
         session: LmSession::new(solver),

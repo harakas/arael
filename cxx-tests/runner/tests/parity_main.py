@@ -220,6 +220,14 @@ p15 = r15.plan
 pi("cg_iters_has", 1 if p15.cg_iterations is not None else 0)
 pi("cg_iters", p15.cg_iterations if p15.cg_iterations is not None else -1)
 
+# Enum setters validate: a value outside the enum raises.
+try:
+    so_bad = fit.SparseOptions()
+    so_bad.schur = 7
+    pi("enum_setter_validates", 0)
+except ValueError:
+    pi("enum_setter_validates", 1)
+
 # Observer callback + timing + report + conditional covariance.
 f7 = fit.Fit()
 pi("report_default_empty", 1 if len(fit.LmResult().report()) == 0 else 0)

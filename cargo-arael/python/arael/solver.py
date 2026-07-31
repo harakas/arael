@@ -116,13 +116,14 @@ class EnvelopeMode(enum.IntEnum):
 
 
 def _enum_property(field, enum_cls):
-    """Property mapping a raw u32 field to an enum (any int in)."""
+    """Property mapping a raw u32 field to an enum. The setter
+    validates: a value outside the enum raises ValueError."""
 
     def get(self):
         return enum_cls(getattr(self, field))
 
     def set(self, value):
-        setattr(self, field, int(value))
+        setattr(self, field, int(enum_cls(value)))
 
     return property(get, set)
 
