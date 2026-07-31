@@ -1,14 +1,17 @@
-//! Block-band (envelope) Cholesky for a symmetric positive-definite
-//! block-CSC matrix in its natural order.
+//! Envelope Cholesky for a symmetric positive-definite block-CSC matrix in
+//! its natural order. Also called a profile or skyline factorization.
 //!
-//! The reduced Schur system of a trajectory is banded: block `(i, j)` is
-//! nonzero only when some eliminated block couples the two, and in natural
-//! (trajectory) order that reach is a short span. A band factorization
-//! exploits this directly -- no fill-reducing ordering, no symbolic
-//! analysis, no scalar-CSC round trip. Fill is confined to each column's
-//! envelope by construction (George-Liu: Cholesky preserves the envelope,
-//! so column `j` fills only rows `top(j)..=j`, where `top(j)` is the
-//! topmost stored block-row of `S`'s column `j`).
+//! A column's envelope runs from its topmost stored block-row down to the
+//! diagonal. Cholesky preserves it -- column `j` fills only rows
+//! `top(j)..=j` -- so the factor's pattern is known from the matrix alone,
+//! with no fill-reducing ordering, no symbolic analysis and no scalar-CSC
+//! round trip.
+//!
+//! That pays when the envelope is smaller than what an ordered sparse factor
+//! would hold, which is why callers price it (see `EnvelopeMode` in arael).
+//! A band is the special case of a uniformly short envelope: two routes use
+//! this module, one over a banded whole Hessian and one over a reduced Schur
+//! system whose envelope may be much wider.
 //!
 //! Convention: upper factor `R` with `R^T R = S`, matching the block-CSC
 //! upper-triangle storage of `S`. Left-looking by block-column: column `j`
@@ -50,7 +53,7 @@ const NO_SRC: ValueIndex = ValueIndex::MAX;
 /// there is nothing to derive here. 48 is chosen for being at or ahead of the
 /// general sparse route at every size measured rather than best at any; a
 /// caller who cares can measure their own case through
-/// [`BandSymbolic::with_panel_width`].
+/// [`EnvelopeSymbolic::with_panel_width`].
 ///
 /// The panel takes whole block columns, so the width it reaches is this
 /// rounded DOWN to a multiple of the block size: 48 is exactly 8 six-wide
@@ -66,19 +69,19 @@ const PANEL_WIDTH_MIN: usize = 8;
 /// envelope is the whole point and widening it is pure loss.
 const PANEL_FILL_SLACK: f64 = 4.0;
 
-/// Failure of a band factorization.
+/// Failure of an envelope factorization.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum BandError {
+pub enum EnvelopeError {
     /// A diagonal tile was not positive definite (the reduced system is
     /// singular or indefinite at this damping).
     NotPositiveDefinite,
 }
 
-/// One-time structural analysis of a banded block-CSC matrix `S`: the
+/// One-time structural analysis of a block-CSC matrix `S`: the
 /// factor's envelope pattern and the map from each factor tile back to
 /// `S`'s value buffer. Reused across damped solves; only the values change.
 #[derive(Clone, Debug)]
-pub struct BandSymbolic {
+pub struct EnvelopeSymbolic {
     /// scalar dimension of the (square, symmetric) system
     n: usize,
     /// scalar partition: block `j` spans `part[j]..part[j+1]`
@@ -153,7 +156,7 @@ pub fn envelope_flops(s: &SymbolicSparseBlockColMat<crate::SparseIndex>) -> f64 
     flops
 }
 
-impl BandSymbolic {
+impl EnvelopeSymbolic {
     /// Analyzes `s` (the symbolic structure of a symmetric block-CSC matrix
     /// stored as its upper block triangle, in natural order) and builds the
     /// envelope factor pattern.
@@ -175,7 +178,7 @@ impl BandSymbolic {
         panel_width: Option<usize>,
     ) -> Self {
         let nb = s.nblk_cols();
-        assert_eq!(nb, s.nblk_rows(), "band Cholesky needs a square matrix");
+        assert_eq!(nb, s.nblk_rows(), "envelope Cholesky needs a square matrix");
         let n = s.ncols();
 
         let mut part = Vec::with_capacity(nb + 1);
@@ -359,13 +362,13 @@ impl BandSymbolic {
 }
 
 /// Numeric factorization `R^T R = S` into `factor` (laid out per
-/// [`BandSymbolic::factor_val_count`]). `s` must have the exact structure
+/// [`EnvelopeSymbolic::factor_val_count`]). `s` must have the exact structure
 /// `sym` was built from. Reuses `sym` across damped solves.
-pub fn band_factorize<T: SchurReal>(
-    sym: &BandSymbolic,
+pub fn envelope_factorize<T: SchurReal>(
+    sym: &EnvelopeSymbolic,
     s: &SparseBlockColMat<crate::SparseIndex, T>,
     factor: &mut [T],
-) -> Result<(), BandError> {
+) -> Result<(), EnvelopeError> {
     assert_eq!(factor.len(), sym.factor_val_count());
     let part = &sym.part;
     let top = &sym.top;
@@ -466,7 +469,7 @@ pub fn band_factorize<T: SchurReal>(
                     }
                 }
                 if !chol_upper_in_place(buf, wj) {
-                    return Err(BandError::NotPositiveDefinite);
+                    return Err(EnvelopeError::NotPositiveDefinite);
                 }
                 for c in 0..wj {
                     for r in 0..wj {
@@ -480,8 +483,8 @@ pub fn band_factorize<T: SchurReal>(
 }
 
 /// Solves `S x = rhs` in place given a factor produced by
-/// [`band_factorize`]. `rhs` has length [`BandSymbolic::dim`].
-pub fn band_solve<T: SchurReal>(sym: &BandSymbolic, factor: &[T], rhs: &mut [T]) {
+/// [`envelope_factorize`]. `rhs` has length [`EnvelopeSymbolic::dim`].
+pub fn envelope_solve<T: SchurReal>(sym: &EnvelopeSymbolic, factor: &[T], rhs: &mut [T]) {
     assert_eq!(rhs.len(), sym.dim());
     let nb = sym.nblocks();
     let part = &sym.part;
@@ -685,11 +688,11 @@ mod tests {
     }
 
     fn solve_f64(s: &SparseBlockColMat<crate::SparseIndex, f64>, rhs: &[f64]) -> Vec<f64> {
-        let sym = BandSymbolic::new(s.symbolic());
+        let sym = EnvelopeSymbolic::new(s.symbolic());
         let mut factor = vec![0.0f64; sym.factor_val_count()];
-        band_factorize(&sym, s, &mut factor).unwrap();
+        envelope_factorize(&sym, s, &mut factor).unwrap();
         let mut x = rhs.to_vec();
-        band_solve(&sym, &factor, &mut x);
+        envelope_solve(&sym, &factor, &mut x);
         x
     }
 
@@ -735,14 +738,14 @@ mod tests {
         let part: Vec<usize> = (0..=5).map(|i| i * 2).collect();
         let cells = vec![(0, 1), (1, 2), (2, 3), (3, 4), (0, 3)];
         let (s, full, rhs) = build_banded(&part, &cells, 21);
-        let sym = BandSymbolic::new(s.symbolic());
+        let sym = EnvelopeSymbolic::new(s.symbolic());
         let mut factor = vec![0.0f64; sym.factor_val_count()];
-        band_factorize(&sym, &s, &mut factor).unwrap();
+        envelope_factorize(&sym, &s, &mut factor).unwrap();
         // the factor covers strictly more than S: the envelope fills in
         // (1,3) and (2,3), which S does not store
         assert!(sym.factor_val_count() > s.vals().len());
         let mut x = rhs.clone();
-        band_solve(&sym, &factor, &mut x);
+        envelope_solve(&sym, &factor, &mut x);
         assert!(rel_resid(&full, *part.last().unwrap(), &x, &rhs) < 1e-10);
     }
 
@@ -776,11 +779,11 @@ mod tests {
             s64.symbolic().clone(),
             s64.vals().iter().map(|&v| v as f32).collect(),
         );
-        let sym = BandSymbolic::new(s32.symbolic());
+        let sym = EnvelopeSymbolic::new(s32.symbolic());
         let mut factor = vec![0.0f32; sym.factor_val_count()];
-        band_factorize(&sym, &s32, &mut factor).unwrap();
+        envelope_factorize(&sym, &s32, &mut factor).unwrap();
         let mut x32 = rhs64.iter().map(|&v| v as f32).collect::<Vec<_>>();
-        band_solve(&sym, &factor, &mut x32);
+        envelope_solve(&sym, &factor, &mut x32);
         let x: Vec<f64> = x32.iter().map(|&v| v as f64).collect();
         assert!(rel_resid(&full, *part.last().unwrap(), &x, &rhs64) < 1e-3);
     }
@@ -802,12 +805,12 @@ mod tests {
             }
         }
         let (s, full, rhs) = build_banded(&part, &cells, 11);
-        let sym = BandSymbolic::new(s.symbolic());
+        let sym = EnvelopeSymbolic::new(s.symbolic());
         assert!(sym.sup_start.len() - 1 > 1, "test needs more than one panel");
         let mut factor = vec![0.0f64; sym.factor_val_count()];
-        band_factorize(&sym, &s, &mut factor).unwrap();
+        envelope_factorize(&sym, &s, &mut factor).unwrap();
         let mut x = rhs.clone();
-        band_solve(&sym, &factor, &mut x);
+        envelope_solve(&sym, &factor, &mut x);
         assert!(rel_resid(&full, *part.last().unwrap(), &x, &rhs) < 1e-10);
     }
 
@@ -828,18 +831,18 @@ mod tests {
         let (s, full, rhs) = build_banded(&part, &cells, 17);
         let sizes: Vec<usize> = [8usize, 16, 32, 64]
             .iter()
-            .map(|&w| BandSymbolic::with_panel_width(s.symbolic(), Some(w)).factor_val_count())
+            .map(|&w| EnvelopeSymbolic::with_panel_width(s.symbolic(), Some(w)).factor_val_count())
             .collect();
         for pair in sizes.windows(2) {
             assert!(pair[1] > pair[0], "widening a panel must store more: {:?}", sizes);
         }
         // and every width still factorizes the same matrix exactly
         for &w in &[8usize, 64] {
-            let sym = BandSymbolic::with_panel_width(s.symbolic(), Some(w));
+            let sym = EnvelopeSymbolic::with_panel_width(s.symbolic(), Some(w));
             let mut factor = vec![0.0f64; sym.factor_val_count()];
-            band_factorize(&sym, &s, &mut factor).unwrap();
+            envelope_factorize(&sym, &s, &mut factor).unwrap();
             let mut x = rhs.clone();
-            band_solve(&sym, &factor, &mut x);
+            envelope_solve(&sym, &factor, &mut x);
             assert!(rel_resid(&full, *part.last().unwrap(), &x, &rhs) < 1e-10, "width {}", w);
         }
     }
@@ -858,7 +861,7 @@ mod tests {
             }
         }
         let (s, full, rhs) = build_banded(&part, &cells, 13);
-        let sym = BandSymbolic::new(s.symbolic());
+        let sym = EnvelopeSymbolic::new(s.symbolic());
         // The envelope must still be exploited: a 240-wide system whose band
         // is 2 blocks deep has a dense triangle of 28920 values, and the
         // factor must stay a small fraction of it.
@@ -871,9 +874,9 @@ mod tests {
             dense_triangle,
         );
         let mut factor = vec![0.0f64; sym.factor_val_count()];
-        band_factorize(&sym, &s, &mut factor).unwrap();
+        envelope_factorize(&sym, &s, &mut factor).unwrap();
         let mut x = rhs.clone();
-        band_solve(&sym, &factor, &mut x);
+        envelope_solve(&sym, &factor, &mut x);
         assert!(rel_resid(&full, *part.last().unwrap(), &x, &rhs) < 1e-10);
     }
 
@@ -887,11 +890,11 @@ mod tests {
         let diag_b = sym.col_range(2).find(|&b| sym.blk_row(b) == 2).unwrap();
         let off = sym.val_range(diag_b).start;
         s.vals_mut()[off] = -50.0;
-        let bsym = BandSymbolic::new(s.symbolic());
+        let bsym = EnvelopeSymbolic::new(s.symbolic());
         let mut factor = vec![0.0f64; bsym.factor_val_count()];
         assert_eq!(
-            band_factorize(&bsym, &s, &mut factor),
-            Err(BandError::NotPositiveDefinite)
+            envelope_factorize(&bsym, &s, &mut factor),
+            Err(EnvelopeError::NotPositiveDefinite)
         );
     }
 

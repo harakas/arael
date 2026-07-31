@@ -92,28 +92,30 @@
 //! any other solver), then calls `schur_backsub`. See
 //! `arael::simple_lm::SparseFaer` for the whole loop.
 //!
-//! # band -- narrow-band Cholesky
+//! # envelope -- envelope (profile, skyline) Cholesky
 //!
-//! Given a symmetric positive-definite block-CSC matrix banded in natural
-//! order, factor `R^T R = S` in block form. Cholesky preserves each column's
-//! envelope (George-Liu), so fill stays inside the band: no fill-reducing
+//! Given a symmetric positive-definite block-CSC matrix in natural order,
+//! factor `R^T R = S` in block form. Cholesky preserves each column's
+//! envelope, so the factor's pattern follows from the matrix: no fill-reducing
 //! ordering, no symbolic analysis, no scalar-CSC round trip. Works on the
 //! whole Hessian (a pose graph or localization system) or on a reduced Schur
-//! system -- anything banded in its natural order.
+//! system -- anything left in its natural order.
 //!
-//! * [`BandSymbolic::new`](band::BandSymbolic::new) -- analyse once: the
+//! * [`EnvelopeSymbolic::new`](envelope::EnvelopeSymbolic::new) -- analyse once: the
 //!   factor's envelope pattern and the map back to the matrix's values. The
-//!   half-bandwidth falls out of the block structure; the caller supplies none
-//! * [`band_factorize`](band::band_factorize) -- numeric: `R^T R = S` into a
+//!   envelope falls out of the block structure; the caller supplies nothing
+//! * [`envelope_factorize`](envelope::envelope_factorize) -- numeric: `R^T R = S` into a
 //!   factor buffer. Left-looking by block column, reusing schur's unrolled tile
 //!   kernels
-//! * [`band_solve`](band::band_solve) -- solve `S x = rhs` from the factor
-//! * [`BandError`](band::BandError) -- the matrix was not positive definite
+//! * [`envelope_solve`](envelope::envelope_solve) -- solve `S x = rhs` from the factor
+//! * [`EnvelopeError`](envelope::EnvelopeError) -- the matrix was not positive definite
 //!
-//! Worth it only when the band is narrow: in benchmarks a wide band factorizes
-//! faster as a general sparse matrix (faer's supernodal Cholesky).
-//! `SparseFaer::with_narrow_band` wires it into the LM loop and warns when the
-//! band is too wide to pay.
+//! It holds less than an ordered sparse factor while the envelope stays
+//! narrow, and more once it widens, so the choice is worth pricing:
+//! [`envelope_flops`](envelope::envelope_flops) costs one pass over the
+//! pattern. `arael::simple_lm::EnvelopeMode` does that for the reduced Schur
+//! system; `SparseFaer::with_narrow_band` takes the whole Hessian and warns
+//! when its band is too wide to pay.
 
 pub use faer;
 
@@ -157,7 +159,7 @@ pub fn value_index(p: usize) -> ValueIndex {
     })
 }
 
-pub mod band;
+pub mod envelope;
 pub mod bsc;
 pub mod cg;
 pub mod nd;

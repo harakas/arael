@@ -4634,7 +4634,7 @@ pub struct SparseFaer<T = f64> {
     // envelope_factor are the envelope structure and factor buffer, sized once.
     narrow_band_enabled: bool,
     // Super-panel width for the envelope factorization; None derives it from
-    // the envelope (see BandSymbolic::with_panel_width).
+    // the envelope (see EnvelopeSymbolic::with_panel_width).
     envelope_panel_width: Option<usize>,
     // The reduced Schur system's envelope Cholesky. Distinct from
     // narrow_band_enabled, which is the whole-system route: this one
@@ -4642,7 +4642,7 @@ pub struct SparseFaer<T = f64> {
     // it to faer's sparse Cholesky. See EnvelopeMode.
     envelope_mode: EnvelopeMode,
     envelope_active: bool,
-    envelope_sym: Option<arael_faer::band::BandSymbolic>,
+    envelope_sym: Option<arael_faer::envelope::EnvelopeSymbolic>,
     envelope_factor: Vec<T>,
     // Conjugate gradients on the reduced system ([`SchurSolve::Iterative`]).
     // The preconditioner is rebuilt per damped solve -- S changes with every
@@ -5055,7 +5055,7 @@ impl<T: crate::utils::Float + faer::traits::RealField> SparseFaer<T> {
         // Band factorization structure over the whole Hessian, and the scatter
         // map into the block Hessian.
         let bsym =
-            arael_faer::band::BandSymbolic::with_panel_width(&hsym, self.envelope_panel_width);
+            arael_faer::envelope::EnvelopeSymbolic::with_panel_width(&hsym, self.envelope_panel_width);
         self.envelope_factor.resize(bsym.factor_val_count(), T::zero());
         self.envelope_active = true;
         if vb {
@@ -5852,7 +5852,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             // handed on below when the gate declines, so it is only wasted
             // where the envelope wins, while a wrong choice is paid on every
             // iteration.
-            let env_flops = arael_faer::band::envelope_flops(&schur.s);
+            let env_flops = arael_faer::envelope::envelope_flops(&schur.s);
             let (col_ptr, row_idx) = schur.s.csc_pattern();
             let sym_ref = faer::sparse::SymbolicSparseColMatRef::new_checked(
                 nk, nk, &col_ptr, None, &row_idx,
@@ -5948,7 +5948,7 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             // form -- no scalar CSC, no faer symbolic analysis, fill confined
             // to the envelope. Distinct from the whole-system band route above,
             // which factors H rather than the reduction.
-            let bsym = arael_faer::band::BandSymbolic::with_panel_width(
+            let bsym = arael_faer::envelope::EnvelopeSymbolic::with_panel_width(
                 &schur.s, self.envelope_panel_width);
             self.envelope_factor.resize(bsym.factor_val_count(), T::zero());
             if vb {
@@ -6103,11 +6103,11 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
         // Schur symbolic (matrix.h is block form only in these two cases).
         if self.schur.is_none() {
             let bsym = self.envelope_sym.as_ref().unwrap();
-            if arael_faer::band::band_factorize(bsym, h, &mut self.envelope_factor).is_err() {
+            if arael_faer::envelope::envelope_factorize(bsym, h, &mut self.envelope_factor).is_err() {
                 return false;
             }
             delta.copy_from_slice(grad);
-            arael_faer::band::band_solve(bsym, &self.envelope_factor, delta);
+            arael_faer::envelope::envelope_solve(bsym, &self.envelope_factor, delta);
             return true;
         }
 
@@ -6192,11 +6192,11 @@ impl<T: crate::utils::Float + faer::traits::RealField + arael_faer::schur::Schur
             // Narrow-band Cholesky on S in block form: no scalar CSC round trip.
             let bsym = self.envelope_sym.as_ref().unwrap();
             let s = self.s.as_ref().unwrap();
-            if arael_faer::band::band_factorize(bsym, s, &mut self.envelope_factor).is_err() {
+            if arael_faer::envelope::envelope_factorize(bsym, s, &mut self.envelope_factor).is_err() {
                 return false;
             }
             self.x_kept.copy_from_slice(&self.rhs_kept);
-            arael_faer::band::band_solve(bsym, &self.envelope_factor, &mut self.x_kept);
+            arael_faer::envelope::envelope_solve(bsym, &self.envelope_factor, &mut self.x_kept);
         } else {
             self.s.as_ref().unwrap().csc_vals_into(&mut self.s_vals);
             let sym_ref = faer::sparse::SymbolicSparseColMatRef::new_checked(
