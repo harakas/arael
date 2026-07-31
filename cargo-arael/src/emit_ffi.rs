@@ -594,6 +594,18 @@ pub fn emit_body(model: &Model, model_crate: &str) -> Result<String, String> {
     let root_sn = snake(root);
     let fp = &model.precision;
     let handle = format!("{root}Handle");
+    // The cost-table surface exists only for `#[arael(root, jacobian)]`
+    // roots (the sidecar's `jacobian` flag).
+    let ct_field = if model.jacobian {
+        "\n    cost_table: Vec<(CString, f64)>,"
+    } else {
+        ""
+    };
+    let ct_init = if model.jacobian {
+        "\n        cost_table: Vec::new(),"
+    } else {
+        ""
+    };
 
     let mut used: Vec<&str> = vec![root.as_str()];
     for (tn, _) in surfaced_types(model) {
@@ -619,7 +631,7 @@ use {model_crate}::{{{}}};
 pub struct {handle} {{
     model: {root},
     text: CString,
-    cov: Option<CovAssembly>,
+    cov: Option<CovAssembly>,{ct_field}
 }}
 
 /// The Rust side of a solve result, boxed behind `CLmResult::detail`:
@@ -1130,7 +1142,7 @@ pub extern \"C\" fn {root_sn}_new() -> *mut {handle} {{
     Box::into_raw(Box::new({handle} {{
         model: Default::default(),
         text: CString::default(),
-        cov: None,
+        cov: None,{ct_init}
     }}))
 }}
 
@@ -1460,6 +1472,61 @@ pub unsafe extern \"C\" fn {root_sn}_cost(h: *mut {handle}) -> f64 {{
     m.calc_cost(&params){cast}
 }}
 "));
+
+    // Per-constraint cost breakdown, only for `#[arael(root, jacobian)]`
+    // roots (calc_cost_table lives on the JacobianModel trait the
+    // attribute generates).
+    if model.jacobian {
+        out.push_str(&format!(
+"
+/// Per-constraint cost breakdown at the current parameters: each
+/// block's robustified cost (a `loss` applied) grouped by constraint
+/// label (`name = \"...\"` on the constraint attribute, else the
+/// struct name); the table sums to {root_sn}_cost. Sorts the
+/// table by label, stores it on the handle, and returns the row count
+/// (-2: panic, text via {root_sn}_last_error). Read the rows with
+/// {root_sn}_cost_table_name / _value.
+#[no_mangle]
+pub unsafe extern \"C\" fn {root_sn}_cost_table(h: *mut {handle}) -> i32 {{
+    let hh = &mut *h;
+    match catch_unwind(AssertUnwindSafe(|| {{
+        let mut params = Vec::new();
+        hh.model.{ser}(&mut params);
+        arael::model::JacobianModel::calc_cost_table(&mut hh.model, &params)
+    }})) {{
+        Ok(t) => {{
+            let mut rows: Vec<(&str, f64)> =
+                t.into_iter().map(|(k, v)| (k, v{cast})).collect();
+            rows.sort_by(|a, b| a.0.cmp(b.0));
+            hh.cost_table = rows.into_iter()
+                .map(|(k, v)| (CString::new(k).unwrap_or_default(), v))
+                .collect();
+            hh.cost_table.len() as i32
+        }}
+        Err(p) => {{
+            let msg = panic_text(p);
+            set_text(hh, &msg);
+            -2
+        }}
+    }}
+}}
+
+/// Label of cost-table row `i`; valid until the next
+/// {root_sn}_cost_table call.
+#[no_mangle]
+pub unsafe extern \"C\" fn {root_sn}_cost_table_name(h: *const {handle}, i: u32) -> *const c_char {{
+    let hh = &*h;
+    hh.cost_table[i as usize].0.as_ptr()
+}}
+
+/// Value of cost-table row `i`.
+#[no_mangle]
+pub unsafe extern \"C\" fn {root_sn}_cost_table_value(h: *const {handle}, i: u32) -> f64 {{
+    let hh = &*h;
+    hh.cost_table[i as usize].1
+}}
+"));
+    }
 
     // Covariance: assemble on the handle, then per-entity marginals.
     out.push_str(&format!(

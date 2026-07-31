@@ -170,6 +170,10 @@ views are named by their container's nature: `PathPosesDeque`,
   only the first pays for it. Warm solves are bit-identical to cold
   ones. A parameter-count change re-analyzes by itself; call
   `invalidate()` after a structural change at the same count.
+- **cost_table()** -- only when the root is `#[arael(root, jacobian)]`:
+  per-constraint cost breakdown, label -> that group's robustified
+  cost, sorted by label and summing to `cost()`. Labels come from
+  `name = "..."` on the constraint attribute, else the struct name.
 - **Reports and the plan**: the returned `LmResult` owns the full
   Rust-side result. `r.report()` / `r.pretty_report()` render it --
   status, costs, iterations, the timing breakdown, the backend's

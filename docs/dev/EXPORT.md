@@ -164,7 +164,7 @@ session takes the envelope. Both slam_demo_gm drivers run their ramp
 through one session; the pretty report shows analysis paid on pass 1
 only.
 
-## 6. Per-constraint cost breakdown [M, needs a decision]
+## 6. Per-constraint cost breakdown [M, needs a decision] [DONE 2026-07-31]
 
 `calc_cost_table` (per-label sum of squared residuals) is a debugging
 aid worth having in every skin, but it lives on `JacobianModel`,
@@ -174,6 +174,21 @@ models do not set. Options: emit it only when the sidecar says the
 root has `jacobian`, or add a lighter per-label cost pass to the
 macro that does not need the jacobian machinery. Decide when picked
 up.
+
+As built (user decision: gate on `jacobian`): the sidecar gained a
+`jacobian` flag; the emitters gate `{root}_cost_table` /
+`_cost_table_name` / `_cost_table_value` and the C++/Python
+`cost_table()` on it. The review also surfaced and fixed a REAL BUG:
+the row-derived `calc_cost_table` ignored robust losses (the gm
+frine label read 1.57M raw against a robustified cost of 9.4k), so
+the macro now generates a direct table pass -- each constraint's
+cost blob shadowed into its label's slot, `rho(s)` applied per block
+-- and the table sums to `calc_cost` (tests/jacobian.rs pins it).
+`calc_jacobian` rows/entries are likewise weighted by
+`sqrt(rho'(s))` so `J^T J` and `2 J^T r` reproduce the assembled
+Gauss-Newton system (pinned on a lossy model). slam_demo_gm names its
+constraints (gps, tilt, drift, frine, odometry) and the Python
+driver prints the table after the ramp.
 
 ## 7. Covariance for param-bearing components [DROPPED 2026-07-31]
 

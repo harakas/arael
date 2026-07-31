@@ -7,6 +7,8 @@
 #include <cmath>
 #include <iterator>
 #include <memory>
+#include <utility>
+#include <vector>
 #include "arael/math.hpp"
 #include "arael/result.hpp"
 #include "arael/solver.hpp"
@@ -268,6 +270,9 @@ double path_frine_cauchy(const Path*);
 void path_set_frine_cauchy(Path*, double);
 double path_gps_c2(const Path*);
 void path_set_gps_c2(Path*, double);
+int32_t path_cost_table(Path*);
+const char* path_cost_table_name(const Path*, uint32_t);
+double path_cost_table_value(const Path*, uint32_t);
 double path_cost(Path*);
 int32_t path_solve_band(Path*, uint32_t, const LmConfig*, LmResultT<double>*);
 void path_lm_config(uint32_t, LmConfig*);
@@ -1085,6 +1090,20 @@ public:
     }
     /// Total cost at the current parameter values (f64 evaluation).
     double cost() { return ffi::path_cost(h_); }
+    /// Per-constraint cost breakdown at the current parameters:
+    /// label -> that group's robustified cost (a `loss` applied),
+    /// sorted by label (the label is `name = "..."` on the
+    /// constraint attribute, else the struct name); the table sums to
+    /// cost(). Empty on a panic (text via last_error()).
+    std::vector<std::pair<const char*, double>> cost_table() {
+        int32_t n = ffi::path_cost_table(h_);
+        std::vector<std::pair<const char*, double>> out;
+        for (int32_t i = 0; i < n; i++)
+            out.emplace_back(ffi::path_cost_table_name(h_, uint32_t(i)),
+                             ffi::path_cost_table_value(h_, uint32_t(i)));
+        return out;
+    }
+
     /// Prepare the covariance at the current (solved) parameters; query
     /// per-entity marginals on the returned view.
     result<Covariance, CovError> assemble_covariance(CovMode mode = CovMode::AllMarginals) {

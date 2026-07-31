@@ -133,6 +133,19 @@ pub fn verify(got: &std::collections::HashMap<String, f64>) {
         assert_eq!(g("cov_item0"), m[(0, 0)]);
     }
 
+    // Per-constraint cost breakdown: identical labels, exact sums.
+    {
+        use arael::model::JacobianModel;
+        use arael::simple_lm::RootProblem;
+        let mut x = Vec::new();
+        RootProblem::serialize(&mut fit, &mut x);
+        let table = fit.calc_cost_table(&x);
+        assert_eq!(g("ct_n"), table.len() as f64);
+        for (label, value) in &table {
+            assert_eq!(g(&format!("ct_{label}")), *value, "label {label}");
+        }
+    }
+
     let mut fit2 = Fit::default();
     fill(&mut fit2);
     let r2 = fit2.solve_sparse(&cfg).unwrap();

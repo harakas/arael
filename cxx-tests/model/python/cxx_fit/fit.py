@@ -1361,6 +1361,21 @@ class Fit:
         """Total cost at the current parameter values (no solve)."""
         return _f.fit_cost(self._p)
 
+    def cost_table(self):
+        """Per-constraint cost breakdown at the current parameters:
+        {label: that group's robustified cost} (a `loss` applied;
+        the label is `name` on the constraint attribute, else the
+        struct name). The table sums to cost(). Raises on a
+        panic."""
+        n = _f.fit_cost_table(self._p)
+        if n < 0:
+            raise AraelError(n, _err(self._p))
+        return {
+            _f.fit_cost_table_name(self._p, i).decode():
+                _f.fit_cost_table_value(self._p, i)
+            for i in range(n)
+        }
+
     def validate(self):
         """Empty string when the model is clean, the diagnostic text
         otherwise."""

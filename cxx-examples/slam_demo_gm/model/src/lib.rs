@@ -58,7 +58,7 @@ pub struct PoseInfo {
 /// se(3) twist, so a rotation correction carries the translation with
 /// it. GPS + odometry + tilt determine every pose at all ramp scales.
 #[arael::model]
-#[arael(constraint(hb_pose, guard = self.info.gps.is_some(),
+#[arael(constraint(hb_pose, name = "gps", guard = self.info.gps.is_some(),
     loss = |s| loss_geman_mcclure(s, path.gps_c2), {
     let raw = pose.r2w.translation - pose.info.gps.pos;
     let rt_raw = pose.info.gps.cov_r.transpose() * raw;
@@ -66,7 +66,7 @@ pub struct PoseInfo {
      rt_raw.y * pose.info.gps.cov_isigma.y,
      rt_raw.z * pose.info.gps.cov_isigma.z]
 }))]
-#[arael(constraint(hb_pose, {
+#[arael(constraint(hb_pose, name = "tilt", {
     // The accelerometer observes the world up direction in the body
     // frame -- the third row of the rotation. The raw difference of the
     // two unit vectors is the chord: its length equals the angular error
@@ -89,7 +89,7 @@ pub struct Pose {
 /// The direction is pinned by its initializing measurement, so the
 /// drift regularizer reduces to a weak prior on rho alone.
 #[arael::model]
-#[arael(constraint(hb_drift, {
+#[arael(constraint(hb_drift, name = "drift", {
     [(pointlandmark.rho - pointlandmark.rho_value) * path.drift_rho_isigma]
 }))]
 #[derive(Default)]
@@ -111,7 +111,7 @@ pub struct PointLandmark {
 /// (u.x - 1, u.y, u.z). No trig anywhere; smooth everywhere except a
 /// landmark exactly at the camera.
 #[arael::model]
-#[arael(constraint(hb, parent=lm, loss = |s| branch(path.frine_cauchy,
+#[arael(constraint(hb, parent=lm, name = "frine", loss = |s| branch(path.frine_cauchy,
     loss_cauchy(s, path.frine_c2), loss_geman_mcclure(s, path.frine_c2)), {
     let mr2w = pose.r2w.rotation_matrix;
     let cam_w = pose.r2w.translation + mr2w * feature.camera_pos;
@@ -135,7 +135,7 @@ pub struct PointFrine {
 /// is the small-rotation vector of the error rotation -- no euler
 /// angles anywhere in the residual.
 #[arael::model]
-#[arael(constraint(hb, {
+#[arael(constraint(hb, name = "odometry", {
     let mr2w_prev = prev.r2w.rotation_matrix;
     let pos_diff = mr2w_prev.transpose() * (cur.r2w.translation - prev.r2w.translation);
     let pos_err = pos_diff - cur.info.delta_pos;
@@ -160,7 +160,7 @@ pub struct PosePair {
 }
 
 #[arael::model]
-#[arael(root)]
+#[arael(root, jacobian)]
 #[derive(Default)]
 pub struct Path {
     pub poses: refs::Deque<Pose>,

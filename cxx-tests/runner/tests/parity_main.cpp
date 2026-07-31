@@ -95,6 +95,12 @@ int main() {
         p("cov_item0", m.value());
     }
 
+    // Per-constraint cost breakdown (the root is jacobian-enabled).
+    auto ct = fit.cost_table();
+    pi("ct_n", long(ct.size()));
+    for (const auto& row : ct)
+        p((std::string("ct_") + row.first).c_str(), row.second);
+
     Fit fit2;
     fill(fit2);
     LmResult r2 = fit2.solve_sparse(cfg).value();

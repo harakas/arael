@@ -97,6 +97,12 @@ m0 = cov.marginal(f.items[0])
 pi("cov_item0_ok", 1 if isinstance(m0, float) else 0)
 p("cov_item0", m0)
 
+# Per-constraint cost breakdown (the root is jacobian-enabled).
+ct = f.cost_table()
+pi("ct_n", len(ct))
+for name in sorted(ct):
+    p("ct_" + name, ct[name])
+
 fit2 = fit.Fit()
 fill(fit2)
 r2 = fit2.solve_sparse(cfg)

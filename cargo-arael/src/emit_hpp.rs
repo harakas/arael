@@ -631,6 +631,38 @@ public:
     for f in &root_ty.fields {
         field_cpp(&mut cpp, model, root, &root_sn, &mut world_methods, f)?;
     }
+    // The cost-table surface exists only for `#[arael(root, jacobian)]`
+    // roots (the sidecar's `jacobian` flag).
+    if model.jacobian {
+        cpp.ffi.push_str(&format!(
+            "int32_t {root_sn}_cost_table({root}*);\n\
+             const char* {root_sn}_cost_table_name(const {root}*, uint32_t);\n\
+             double {root_sn}_cost_table_value(const {root}*, uint32_t);\n"));
+    }
+    let extra_includes = if model.jacobian {
+        "#include <utility>\n#include <vector>\n"
+    } else {
+        ""
+    };
+    let cost_table_method = if model.jacobian {
+        format!(
+"    /// Per-constraint cost breakdown at the current parameters:
+    /// label -> that group's robustified cost (a `loss` applied),
+    /// sorted by label (the label is `name = \"...\"` on the
+    /// constraint attribute, else the struct name); the table sums to
+    /// cost(). Empty on a panic (text via last_error()).
+    std::vector<std::pair<const char*, double>> cost_table() {{
+        int32_t n = ffi::{root_sn}_cost_table(h_);
+        std::vector<std::pair<const char*, double>> out;
+        for (int32_t i = 0; i < n; i++)
+            out.emplace_back(ffi::{root_sn}_cost_table_name(h_, uint32_t(i)),
+                             ffi::{root_sn}_cost_table_value(h_, uint32_t(i)));
+        return out;
+    }}
+")
+    } else {
+        String::new()
+    };
     cpp.ffi.push_str(&format!(
         "double {root_sn}_cost({root}*);\n\
          int32_t {root_sn}_solve_band({root}*, uint32_t, const LmConfig*, LmResultT<{fp}>*);\n\
@@ -664,7 +696,7 @@ public:
 #include <cmath>
 #include <iterator>
 #include <memory>
-#include \"arael/math.hpp\"
+{extra_includes}#include \"arael/math.hpp\"
 #include \"arael/result.hpp\"
 #include \"arael/solver.hpp\"
 
@@ -835,6 +867,7 @@ public:
     }}
     /// Total cost at the current parameter values (f64 evaluation).
     double cost() {{ return ffi::{root_sn}_cost(h_); }}
+{cost_table_method}
     /// Prepare the covariance at the current (solved) parameters; query
     /// per-entity marginals on the returned view.
     result<Covariance, CovError> assemble_covariance(CovMode mode = CovMode::AllMarginals) {{

@@ -2,6 +2,7 @@
   "schema": 1,
   "root": "Fit",
   "precision": "f64",
+  "jacobian": true,
   "types": {
     "AngleParam": {
       "role": "component",

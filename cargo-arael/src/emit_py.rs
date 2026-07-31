@@ -717,6 +717,37 @@ class Covariance:
         "None");
     sig(&mut py, &format!("{root_sn}_cost"), &["ctypes.c_void_p"],
         "ctypes.c_double");
+    // The cost-table surface exists only for `#[arael(root, jacobian)]`
+    // roots (the sidecar's `jacobian` flag).
+    if model.jacobian {
+        sig(&mut py, &format!("{root_sn}_cost_table"), &["ctypes.c_void_p"],
+            "ctypes.c_int32");
+        sig(&mut py, &format!("{root_sn}_cost_table_name"),
+            &["ctypes.c_void_p", "ctypes.c_uint32"], "ctypes.c_char_p");
+        sig(&mut py, &format!("{root_sn}_cost_table_value"),
+            &["ctypes.c_void_p", "ctypes.c_uint32"], "ctypes.c_double");
+    }
+    let ct_method = if model.jacobian {
+        format!(
+"    def cost_table(self):
+        \"\"\"Per-constraint cost breakdown at the current parameters:
+        {{label: that group's robustified cost}} (a `loss` applied;
+        the label is `name` on the constraint attribute, else the
+        struct name). The table sums to cost(). Raises on a
+        panic.\"\"\"
+        n = _f.{root_sn}_cost_table(self._p)
+        if n < 0:
+            raise AraelError(n, _err(self._p))
+        return {{
+            _f.{root_sn}_cost_table_name(self._p, i).decode():
+                _f.{root_sn}_cost_table_value(self._p, i)
+            for i in range(n)
+        }}
+
+")
+    } else {
+        String::new()
+    };
     sig(&mut py, &format!("{root_sn}_lm_config"),
         &["ctypes.c_uint32", "ctypes.POINTER(LmConfigRaw)"], "None");
     sig(&mut py, &format!("{root_sn}_sparse_options"),
@@ -805,7 +836,7 @@ class Covariance:
         \"\"\"Total cost at the current parameter values (no solve).\"\"\"
         return _f.{root_sn}_cost(self._p)
 
-    def validate(self):
+{ct_method}    def validate(self):
         \"\"\"Empty string when the model is clean, the diagnostic text
         otherwise.\"\"\"
         return _f.{root_sn}_validate(self._p).decode()

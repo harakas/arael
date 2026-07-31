@@ -7,6 +7,8 @@
 #include <cmath>
 #include <iterator>
 #include <memory>
+#include <utility>
+#include <vector>
 #include "arael/math.hpp"
 #include "arael/result.hpp"
 #include "arael/solver.hpp"
@@ -307,6 +309,9 @@ uint32_t fit_rigs_last_ref(const Fit*);
 Rig* fit_rigs_get(Fit*, uint32_t);
 bool fit_rigs_contains(const Fit*, uint32_t);
 Rig* fit_rigs_try_get(Fit*, uint32_t);
+int32_t fit_cost_table(Fit*);
+const char* fit_cost_table_name(const Fit*, uint32_t);
+double fit_cost_table_value(const Fit*, uint32_t);
 double fit_cost(Fit*);
 int32_t fit_solve_band(Fit*, uint32_t, const LmConfig*, LmResultT<double>*);
 void fit_lm_config(uint32_t, LmConfig*);
@@ -1285,6 +1290,20 @@ public:
     }
     /// Total cost at the current parameter values (f64 evaluation).
     double cost() { return ffi::fit_cost(h_); }
+    /// Per-constraint cost breakdown at the current parameters:
+    /// label -> that group's robustified cost (a `loss` applied),
+    /// sorted by label (the label is `name = "..."` on the
+    /// constraint attribute, else the struct name); the table sums to
+    /// cost(). Empty on a panic (text via last_error()).
+    std::vector<std::pair<const char*, double>> cost_table() {
+        int32_t n = ffi::fit_cost_table(h_);
+        std::vector<std::pair<const char*, double>> out;
+        for (int32_t i = 0; i < n; i++)
+            out.emplace_back(ffi::fit_cost_table_name(h_, uint32_t(i)),
+                             ffi::fit_cost_table_value(h_, uint32_t(i)));
+        return out;
+    }
+
     /// Prepare the covariance at the current (solved) parameters; query
     /// per-entity marginals on the returned view.
     result<Covariance, CovError> assemble_covariance(CovMode mode = CovMode::AllMarginals) {

@@ -343,6 +343,7 @@ public:
     }
     /// Total cost at the current parameter values (f64 evaluation).
     double cost() { return ffi::line_cost(h_); }
+
     /// Prepare the covariance at the current (solved) parameters; query
     /// per-entity marginals on the returned view.
     result<Covariance, CovError> assemble_covariance(CovMode mode = CovMode::AllMarginals) {

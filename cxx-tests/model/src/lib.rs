@@ -152,7 +152,7 @@ pub struct Rig {
 }
 
 #[arael::model]
-#[arael(root)]
+#[arael(root, jacobian)]
 #[derive(Default)]
 pub struct Fit {
     pub m: Param<f64>,

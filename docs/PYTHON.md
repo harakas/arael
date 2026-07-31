@@ -100,7 +100,9 @@ surface reference); the differences are Python idiom:
   r.final_lambda` re-enters at the previous damping; the optimized
   parameters already live in the model. `set_log_level(LogLevel.WARN)`
   quiets arael's diagnostics process-wide (INFO, everything, is the
-  default).
+  default). When the root is `#[arael(root, jacobian)]`,
+  `cost_table()` returns the per-constraint cost breakdown as a dict
+  (label -> that group's robustified cost, summing to `cost()`).
 - **Covariance**: `assemble_covariance(mode)` returns a view or
   raises; `marginal`/`conditional` shaped by param count (float,
   matrix2d/3d, row-major tuples), `cross(a, b)` tuples, `std_dev(e)`

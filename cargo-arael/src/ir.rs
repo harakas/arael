@@ -14,6 +14,10 @@ pub struct Model {
     pub schema: u32,
     pub root: String,
     pub precision: String,
+    /// The root was declared `#[arael(root, jacobian)]`; gates the
+    /// per-constraint cost-table surface.
+    #[serde(default)]
+    pub jacobian: bool,
     pub types: BTreeMap<String, Type>,
     #[serde(default)]
     pub constraints: Vec<Constraint>,

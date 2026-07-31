@@ -379,6 +379,12 @@ def main():
                        - gt_poses[i][1]).norm()
     n = len(path.poses)
     print("\nFinal cost: %.4f" % path.cost())
+
+    # Robustified cost per constraint; the table sums to the cost above.
+    print("\n--- Cost by constraint ---")
+    for name, value in sorted(path.cost_table().items()):
+        print("  %-10s %12.4f" % (name, value))
+
     print("Mean pose error vs GT: pos=%.4fm  ea=%.3fdeg"
           % (pos_err_sum / n, math.degrees(ea_err_sum / n)))
 

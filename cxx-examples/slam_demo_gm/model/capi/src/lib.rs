@@ -18,6 +18,7 @@ pub struct PathHandle {
     model: Path,
     text: CString,
     cov: Option<CovAssembly>,
+    cost_table: Vec<(CString, f64)>,
 }
 
 /// The Rust side of a solve result, boxed behind `CLmResult::detail`:
@@ -619,6 +620,7 @@ pub extern "C" fn path_new() -> *mut PathHandle {
         model: Default::default(),
         text: CString::default(),
         cov: None,
+        cost_table: Vec::new(),
     }))
 }
 
@@ -923,6 +925,53 @@ pub unsafe extern "C" fn path_cost(h: *mut PathHandle) -> f64 {
     let mut params = Vec::new();
     m.serialize64(&mut params);
     m.calc_cost(&params)
+}
+
+/// Per-constraint cost breakdown at the current parameters: each
+/// block's robustified cost (a `loss` applied) grouped by constraint
+/// label (`name = "..."` on the constraint attribute, else the
+/// struct name); the table sums to path_cost. Sorts the
+/// table by label, stores it on the handle, and returns the row count
+/// (-2: panic, text via path_last_error). Read the rows with
+/// path_cost_table_name / _value.
+#[no_mangle]
+pub unsafe extern "C" fn path_cost_table(h: *mut PathHandle) -> i32 {
+    let hh = &mut *h;
+    match catch_unwind(AssertUnwindSafe(|| {
+        let mut params = Vec::new();
+        hh.model.serialize64(&mut params);
+        arael::model::JacobianModel::calc_cost_table(&mut hh.model, &params)
+    })) {
+        Ok(t) => {
+            let mut rows: Vec<(&str, f64)> =
+                t.into_iter().map(|(k, v)| (k, v)).collect();
+            rows.sort_by(|a, b| a.0.cmp(b.0));
+            hh.cost_table = rows.into_iter()
+                .map(|(k, v)| (CString::new(k).unwrap_or_default(), v))
+                .collect();
+            hh.cost_table.len() as i32
+        }
+        Err(p) => {
+            let msg = panic_text(p);
+            set_text(hh, &msg);
+            -2
+        }
+    }
+}
+
+/// Label of cost-table row `i`; valid until the next
+/// path_cost_table call.
+#[no_mangle]
+pub unsafe extern "C" fn path_cost_table_name(h: *const PathHandle, i: u32) -> *const c_char {
+    let hh = &*h;
+    hh.cost_table[i as usize].0.as_ptr()
+}
+
+/// Value of cost-table row `i`.
+#[no_mangle]
+pub unsafe extern "C" fn path_cost_table_value(h: *const PathHandle, i: u32) -> f64 {
+    let hh = &*h;
+    hh.cost_table[i as usize].1
 }
 
 /// mode: 0 = PerQuery, 1 = AllMarginals, 2 = TriDiagonal. Returns 0,
