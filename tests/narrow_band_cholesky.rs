@@ -210,6 +210,29 @@ fn envelope_route_can_be_switched_off() {
     }
 }
 
+/// SparseFaerOptions carries the envelope fields into the solver it builds,
+/// so SolverKind::Sparse can select the route.
+#[test]
+fn the_options_struct_carries_the_envelope_mode() {
+    use arael::simple_lm::SparseFaerOptions;
+    let mut on = SparseFaer::from_options(
+        &SparseFaerOptions::auto().with_envelope_schur(EnvelopeMode::Always));
+    let (x_on, c_on) = solve(&mut on, 2);
+    assert!(on.plan().expect("a plan").envelope,
+            "Always through the options struct must take the envelope");
+
+    let mut off = SparseFaer::from_options(
+        &SparseFaerOptions::auto().with_envelope_schur(EnvelopeMode::Never));
+    let (x_off, c_off) = solve(&mut off, 2);
+    assert!(!off.plan().expect("a plan").envelope,
+            "Never through the options struct must not take it");
+
+    assert!(c_on < 1e-12 && c_off < 1e-12, "{} {}", c_on, c_off);
+    for (a, b) in std::iter::zip(&x_on, &x_off) {
+        assert!((a - b).abs() < 1e-9, "routes disagree: {} vs {}", a, b);
+    }
+}
+
 /// with_narrow_band takes the narrow-band Cholesky and reaches the same optimum.
 #[test]
 fn band_route_matches_faer_route() {

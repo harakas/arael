@@ -4223,6 +4223,11 @@ pub struct SparseFaerOptions {
     /// Factor a banded system with the narrow-band Cholesky instead of faer's
     /// general sparse route. Off by default.
     pub narrow_band: bool,
+    /// How to factor the reduced Schur system -- see [`EnvelopeMode`].
+    pub envelope: EnvelopeMode,
+    /// Block-column panel width for the envelope factorization; `None` picks
+    /// it automatically (see [`SparseFaer::with_envelope_panel_width`]).
+    pub envelope_panel_width: Option<usize>,
     /// Parameter ranges to marginalize, named explicitly rather than left to
     /// the policy to detect.
     pub marginalize: Vec<std::ops::Range<usize>>,
@@ -4243,6 +4248,8 @@ impl SparseFaerOptions {
             ordering: FaerOrdering::default(),
             supernodal: true,
             narrow_band: false,
+            envelope: EnvelopeMode::default(),
+            envelope_panel_width: None,
             marginalize: Vec::new(),
         }
     }
@@ -4293,6 +4300,18 @@ impl SparseFaerOptions {
     /// [`SparseFaer::with_narrow_band`]).
     pub fn with_narrow_band(mut self, on: bool) -> Self {
         self.narrow_band = on;
+        self
+    }
+    /// Set how the reduced Schur system is factored (see
+    /// [`SparseFaer::with_envelope_schur`]).
+    pub fn with_envelope_schur(mut self, mode: EnvelopeMode) -> Self {
+        self.envelope = mode;
+        self
+    }
+    /// Set the envelope factorization's panel width (see
+    /// [`SparseFaer::with_envelope_panel_width`]).
+    pub fn with_envelope_panel_width(mut self, width: Option<usize>) -> Self {
+        self.envelope_panel_width = width;
         self
     }
     /// Add a parameter range to marginalize (may be called several times).
@@ -4836,7 +4855,9 @@ impl<T> SparseFaer<T> {
             .with_policy(opts.policy)
             .with_ordering(opts.ordering)
             .with_supernodal(opts.supernodal)
-            .with_narrow_band(opts.narrow_band);
+            .with_narrow_band(opts.narrow_band)
+            .with_envelope_schur(opts.envelope)
+            .with_envelope_panel_width(opts.envelope_panel_width);
         solver.schur_solve = opts.schur_solve;
         for range in &opts.marginalize {
             solver = solver.with_marginalize(range.clone());
