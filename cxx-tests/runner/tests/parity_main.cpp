@@ -587,6 +587,10 @@ int main() {
     pi("bad_has_error", rb.is_err() && std::strlen(rb.error().message) > 0 ? 1 : 0);
     pi("bad_partial_has",
        rb.is_err() && rb.error().partial.has_value() ? 1 : 0);
+    // The structured failure: kind, fault, and the parameter index.
+    pi("bad_kind", rb.is_err() ? long(rb.error().failure.kind) : -99);
+    pi("bad_fault", rb.is_err() ? long(rb.error().failure.fault) : -99);
+    pi("bad_param", rb.is_err() ? long(rb.error().failure.param) : -99);
 
     return 0;
 }

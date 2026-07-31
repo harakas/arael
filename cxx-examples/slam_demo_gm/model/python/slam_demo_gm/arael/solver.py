@@ -19,11 +19,14 @@ class AraelError(Exception):
     invalidated; validate() reports the underlying mistake as
     text."""
 
-    def __init__(self, status, message, partial=None):
+    def __init__(self, status, message, partial=None, failure=None):
         super().__init__("%s (status %d)" % (message, status))
         self.status = int(status)
         self.message = message
         self.partial = partial
+        # A SolveFailure (the structured kind and indices) for a
+        # solver failure (-1), None otherwise.
+        self.failure = failure
 
 
 class LmStatus(enum.IntEnum):
@@ -127,6 +130,53 @@ class FaerOrdering(enum.IntEnum):
     MARGINALIZE_FIRST = 2
     NATURAL = 3
     NESTED_DISSECTION = 4
+
+
+class SolveFailureKind(enum.IntEnum):
+    """What broke a solve (mirrors Rust's SolveFailureKind with its
+    Setup payload flattened in)."""
+    NONE = 0
+    BAND_OVERFLOW = 1
+    UNCONSTRAINED_PARAMETER = 2
+    SYMBOLIC_FACTORIZATION = 3
+    COUPLED_MARGINALIZATION = 4
+    MARGINALIZE_MISSING_DIAGONAL = 5
+    BAD_MARGINALIZE_SET = 6
+    ITERATIVE_SCHUR_WITHOUT_REDUCTION = 7
+    SOLVER_UNAVAILABLE = 8
+    DEGENERATE_DIAGONAL = 9
+
+
+class DiagonalFault(enum.IntEnum):
+    """How a Gauss-Newton diagonal entry was bad
+    (DEGENERATE_DIAGONAL): NaN or negative mean a poisoned assembly,
+    zero means no constraint curvature reaches the parameter at this
+    iterate."""
+    NONE = -1
+    NAN = 0
+    NEGATIVE = 1
+    ZERO = 2
+
+
+class SolveFailure(ctypes.Structure):
+    """The structured failure behind AraelError.failure: the kind and
+    the indices a caller can act on (-1 where not applicable). param
+    is the scalar parameter index (UNCONSTRAINED_PARAMETER,
+    DEGENERATE_DIAGONAL); row/col the element (BAND_OVERFLOW) or
+    block (COUPLED_MARGINALIZATION) position; kd the declared
+    half-bandwidth; block the marginalization block index; reduced
+    whether the failed symbolic factorization was of the reduced
+    system."""
+    _fields_ = [
+        ("kind", ctypes.c_int32),
+        ("fault", ctypes.c_int32),
+        ("param", ctypes.c_int64),
+        ("row", ctypes.c_int64),
+        ("col", ctypes.c_int64),
+        ("kd", ctypes.c_int64),
+        ("block", ctypes.c_int64),
+        ("reduced", ctypes.c_bool),
+    ]
 
 
 class SchurSolve(enum.IntEnum):

@@ -199,9 +199,14 @@ views are named by their container's nature: `PathPosesDeque`,
   mirror the Rust helpers -- note success is NOT `code >= 0` (hitting
   max_iters or the time limit is Ok-side but not a success).
 - **Failures**: a solve failure comes back as
-  `Err(SolveError{status, message, partial})` -- `partial` holds the
-  best accepted state when the solve got past its first assembly,
-  usable for diagnosis (its report renders like any result). A caught
+  `Err(SolveError{status, message, partial, failure})` -- `partial`
+  holds the best accepted state when the solve got past its first
+  assembly, usable for diagnosis (its report renders like any
+  result); `failure` is the structured cause (`SolveFailureKind` plus
+  the indices a caller can act on: the offending parameter for
+  `UnconstrainedParameter` / `DegenerateDiagonal` with its
+  `DiagonalFault`, row/col/kd for `BandOverflow`, and so on; -1
+  where not applicable). A caught
   Rust panic (a stale ref, an unguarded Option read, a bad options
   tag) THROWS `arael::PanicError` with the panic text; the model's
   parameters are unchanged and a session in use was invalidated.

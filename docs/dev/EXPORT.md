@@ -341,6 +341,15 @@ optimized one back out.
   extra bool on `result_report`).
 - `SolveFailureKind`'s param index reaches the skins only as prose;
   the number is what a caller acts on. Decide explicitly.
+  [DONE 2026-07-31] Flattened into `CSolveFailure` (kind + fault +
+  param/row/col/kd/block/reduced, -1 sentinels), stored on the
+  handle by every solve path (sessions included, cleared on
+  success/panic), read via `{root_sn}_last_failure`. C++
+  `SolveError.failure` (`SolveFailureKind`/`DiagonalFault` enums in
+  solver.hpp), Python `AraelError.failure` (a `SolveFailure` struct,
+  fetched on -1 only). Parity pins kind/fault/param on the
+  degenerate fixture (`bad_kind`/`bad_fault`/`bad_param`).
+  `SolverUnavailable`'s strings stay prose in the message.
 - `cost()`/`cost_table()` at an explicit params vector -- blocked on
   the deferred serialize/deserialize item; pick up together.
 

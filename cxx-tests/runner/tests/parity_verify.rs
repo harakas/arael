@@ -680,4 +680,22 @@ pub fn verify(got: &std::collections::HashMap<String, f64>) {
     assert_eq!(g("bad_status"), -1.0);
     assert_eq!(g("bad_has_error"), 1.0);
     assert_eq!(g("bad_partial_has"), e.partial.is_some() as u8 as f64);
+    // The structured failure crosses with its indices intact.
+    {
+        use arael::simple_lm::DiagonalFault;
+        let (fault, param) = match e.kind {
+            SolveFailureKind::DegenerateDiagonal { param, fault } => (
+                match fault {
+                    DiagonalFault::Nan => 0.0,
+                    DiagonalFault::Negative => 1.0,
+                    DiagonalFault::Zero => 2.0,
+                },
+                param as f64,
+            ),
+            _ => unreachable!(),
+        };
+        assert_eq!(g("bad_kind"), 9.0);
+        assert_eq!(g("bad_fault"), fault);
+        assert_eq!(g("bad_param"), param);
+    }
 }

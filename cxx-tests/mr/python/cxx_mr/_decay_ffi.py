@@ -33,6 +33,7 @@ SIGS = [
     ("decay_new", [], ctypes.c_void_p),
     ("decay_free", [ctypes.c_void_p], None),
     ("decay_last_error", [ctypes.c_void_p], ctypes.c_char_p),
+    ("decay_last_failure", [ctypes.c_void_p, ctypes.POINTER(_solver.SolveFailure)], ctypes.c_bool),
     ("decay_validate", [ctypes.c_void_p], ctypes.c_char_p),
     ("decay_set_log_level", [ctypes.c_uint32], None),
     ("decay_result_report", [ctypes.c_void_p, ctypes.c_bool], ctypes.c_char_p),

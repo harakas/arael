@@ -77,6 +77,66 @@ inline const char* as_str(LmStatus s) {
     return "?";
 }
 
+/// What broke a solve (mirrors Rust's SolveFailureKind with its
+/// Setup payload flattened in).
+enum class SolveFailureKind : int32_t {
+    /// No structured failure stored (the last solve did not fail).
+    None = 0,
+    /// A Hessian element fell outside the declared band half-bandwidth.
+    BandOverflow = 1,
+    /// A parameter no constraint touches: the system is singular.
+    UnconstrainedParameter = 2,
+    /// The symbolic Cholesky factorization failed.
+    SymbolicFactorization = 3,
+    /// Two blocks selected for marginalization are coupled by a
+    /// constraint.
+    CoupledMarginalization = 4,
+    /// A block selected for marginalization has no diagonal tile.
+    MarginalizeMissingDiagonal = 5,
+    /// The marginalization set is not a valid whole-block set.
+    BadMarginalizeSet = 6,
+    /// Iterative Schur was asked for but nothing was marginalized.
+    IterativeSchurWithoutReduction = 7,
+    /// The requested solver is not compiled in / not for this scalar.
+    SolverUnavailable = 8,
+    /// A parameter's Gauss-Newton diagonal went bad at this iterate.
+    DegenerateDiagonal = 9,
+};
+
+/// How a Gauss-Newton diagonal entry was bad (DegenerateDiagonal).
+enum class DiagonalFault : int32_t {
+    /// Not applicable (the failure is not DegenerateDiagonal).
+    None = -1,
+    /// NaN: a residual or derivative evaluated to NaN.
+    Nan = 0,
+    /// Negative: impossible for a sum of squares; poisoned assembly.
+    Negative = 1,
+    /// Zero: no constraint curvature reaches the parameter here.
+    Zero = 2,
+};
+
+/// The structured failure behind a SolverFailed result: the kind and
+/// the indices a caller can act on (-1 where not applicable). Layout
+/// is part of the C ABI.
+struct SolveFailure {
+    SolveFailureKind kind = SolveFailureKind::None;
+    /// DegenerateDiagonal only.
+    DiagonalFault fault = DiagonalFault::None;
+    /// Scalar parameter index (UnconstrainedParameter,
+    /// DegenerateDiagonal).
+    int64_t param = -1;
+    /// Element row/col (BandOverflow) or block row/col
+    /// (CoupledMarginalization).
+    int64_t row = -1;
+    int64_t col = -1;
+    /// The declared half-bandwidth (BandOverflow).
+    int64_t kd = -1;
+    /// Block index (MarginalizeMissingDiagonal).
+    int64_t block = -1;
+    /// SymbolicFactorization: the reduced system, not the whole one.
+    bool reduced = false;
+};
+
 /// The base preset a config starts from; it also supplies the one
 /// Rust field the struct does not expose, the lambda driver.
 /// IllConditioned selects the Nielsen driver (its other fields match

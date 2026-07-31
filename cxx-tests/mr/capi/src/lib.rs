@@ -19,6 +19,7 @@ use cxx_mr::{Cell, Decay};
 pub struct DecayHandle {
     model: Decay,
     text: CString,
+    failure: CSolveFailure,
 }
 
 /// The Rust side of a solve result, boxed behind `CLmResult::detail`:
@@ -139,6 +140,101 @@ fn status_code(s: &LmStatus) -> i32 {
 
 fn set_text(h: &mut DecayHandle, msg: &str) {
     h.text = CString::new(msg.replace('\0', " ")).unwrap();
+}
+
+/// SolveFailureKind flattened for the FFI: what broke a solve, plus
+/// the indices a caller can act on (-1 where not applicable).
+/// Layout must match the C++ SolveFailure.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct CSolveFailure {
+    /// 0 none stored, 1 BandOverflow, 2 UnconstrainedParameter,
+    /// 3 SymbolicFactorization, 4 CoupledMarginalization,
+    /// 5 MarginalizeMissingDiagonal, 6 BadMarginalizeSet,
+    /// 7 IterativeSchurWithoutReduction, 8 SolverUnavailable,
+    /// 9 DegenerateDiagonal.
+    pub kind: i32,
+    /// DegenerateDiagonal: 0 Nan, 1 Negative, 2 Zero.
+    pub fault: i32,
+    /// Scalar parameter index (UnconstrainedParameter,
+    /// DegenerateDiagonal).
+    pub param: i64,
+    /// Element row/col (BandOverflow) or block row/col
+    /// (CoupledMarginalization).
+    pub row: i64,
+    pub col: i64,
+    /// The declared half-bandwidth (BandOverflow).
+    pub kd: i64,
+    /// Block index (MarginalizeMissingDiagonal).
+    pub block: i64,
+    /// SymbolicFactorization: the reduced system, not the whole one.
+    pub reduced: bool,
+}
+
+impl Default for CSolveFailure {
+    fn default() -> Self {
+        CSolveFailure {
+            kind: 0, fault: -1, param: -1, row: -1, col: -1,
+            kd: -1, block: -1, reduced: false,
+        }
+    }
+}
+
+fn failure_of(k: &arael::simple_lm::SolveFailureKind) -> CSolveFailure {
+    use arael::simple_lm::{DiagonalFault as D, SolveError as E,
+                          SolveFailureKind as K};
+    let mut c = CSolveFailure::default();
+    match k {
+        K::Setup(e) => match e {
+            E::BandOverflow { row, col, kd } => {
+                c.kind = 1;
+                c.row = *row as i64;
+                c.col = *col as i64;
+                c.kd = *kd as i64;
+            }
+            E::UnconstrainedParameter { param } => {
+                c.kind = 2;
+                c.param = *param as i64;
+            }
+            E::SymbolicFactorization { reduced } => {
+                c.kind = 3;
+                c.reduced = *reduced;
+            }
+            E::CoupledMarginalization { row, col } => {
+                c.kind = 4;
+                c.row = *row as i64;
+                c.col = *col as i64;
+            }
+            E::MarginalizeMissingDiagonal { block } => {
+                c.kind = 5;
+                c.block = *block as i64;
+            }
+            E::BadMarginalizeSet => c.kind = 6,
+            E::IterativeSchurWithoutReduction => c.kind = 7,
+            E::SolverUnavailable { .. } => c.kind = 8,
+        },
+        K::DegenerateDiagonal { param, fault } => {
+            c.kind = 9;
+            c.param = *param as i64;
+            c.fault = match fault {
+                D::Nan => 0,
+                D::Negative => 1,
+                D::Zero => 2,
+            };
+        }
+    }
+    c
+}
+
+/// The structured failure of the last solve that returned -1 on this
+/// model (any entry point, sessions included). False with kind 0
+/// when the last solve did not fail that way; the prose stays on
+/// decay_last_error.
+#[no_mangle]
+pub unsafe extern "C" fn decay_last_failure(h: *const DecayHandle, out: *mut CSolveFailure) -> bool {
+    let hh = &*h;
+    *out = hh.failure;
+    hh.failure.kind != 0
 }
 
 fn panic_text(p: Box<dyn std::any::Any + Send>) -> String {
@@ -670,6 +766,7 @@ pub extern "C" fn decay_new() -> *mut DecayHandle {
     Box::into_raw(Box::new(DecayHandle {
         model: Default::default(),
         text: CString::default(),
+        failure: CSolveFailure::default(),
     }))
 }
 
@@ -799,10 +896,12 @@ pub unsafe extern "C" fn decay_solve_dense(
             let code = fill_result(out, &r);
             (*out).detail = boxed(r);
             set_text(hh, "");
+            hh.failure = CSolveFailure::default();
             code
         }
         Ok(Err(f)) => {
             set_text(hh, &f.to_string());
+            hh.failure = failure_of(&f.kind);
             if let Some(p) = f.partial {
                 fill_result(out, &p);
                 (*out).status = -1;
@@ -813,6 +912,7 @@ pub unsafe extern "C" fn decay_solve_dense(
         Err(p) => {
             let msg = panic_text(p);
             set_text(hh, &msg);
+            hh.failure = CSolveFailure::default();
             (*out).status = -2;
             -2
         }
@@ -844,10 +944,12 @@ pub unsafe extern "C" fn decay_solve_sparse(
             let code = fill_result(out, &r);
             (*out).detail = boxed(r);
             set_text(hh, "");
+            hh.failure = CSolveFailure::default();
             code
         }
         Ok(Err(f)) => {
             set_text(hh, &f.to_string());
+            hh.failure = failure_of(&f.kind);
             if let Some(p) = f.partial {
                 fill_result(out, &p);
                 (*out).status = -1;
@@ -858,6 +960,7 @@ pub unsafe extern "C" fn decay_solve_sparse(
         Err(p) => {
             let msg = panic_text(p);
             set_text(hh, &msg);
+            hh.failure = CSolveFailure::default();
             (*out).status = -2;
             -2
         }
@@ -936,10 +1039,12 @@ pub unsafe extern "C" fn decay_session_solve(
             let code = fill_result(out, &r);
             (*out).detail = boxed(r);
             set_text(hh, "");
+            hh.failure = CSolveFailure::default();
             code
         }
         Ok(Err(f)) => {
             set_text(hh, &f.to_string());
+            hh.failure = failure_of(&f.kind);
             if let Some(p) = f.partial {
                 fill_result(out, &p);
                 (*out).status = -1;
@@ -953,6 +1058,7 @@ pub unsafe extern "C" fn decay_session_solve(
             session.invalidate();
             let msg = panic_text(p);
             set_text(hh, &msg);
+            hh.failure = CSolveFailure::default();
             (*out).status = -2;
             -2
         }
@@ -985,10 +1091,12 @@ pub unsafe extern "C" fn decay_solve_band(
             let code = fill_result(out, &r);
             (*out).detail = boxed(r);
             set_text(hh, "");
+            hh.failure = CSolveFailure::default();
             code
         }
         Ok(Err(f)) => {
             set_text(hh, &f.to_string());
+            hh.failure = failure_of(&f.kind);
             if let Some(p) = f.partial {
                 fill_result(out, &p);
                 (*out).status = -1;
@@ -999,6 +1107,7 @@ pub unsafe extern "C" fn decay_solve_band(
         Err(p) => {
             let msg = panic_text(p);
             set_text(hh, &msg);
+            hh.failure = CSolveFailure::default();
             (*out).status = -2;
             -2
         }
@@ -1353,6 +1462,7 @@ use cxx_mr::{Line, Ob};
 pub struct LineHandle {
     model: Line,
     text: CString,
+    failure: CSolveFailure,
 }
 
 /// The Rust side of a solve result, boxed behind `CLmResult::detail`:
@@ -1473,6 +1583,101 @@ fn status_code(s: &LmStatus) -> i32 {
 
 fn set_text(h: &mut LineHandle, msg: &str) {
     h.text = CString::new(msg.replace('\0', " ")).unwrap();
+}
+
+/// SolveFailureKind flattened for the FFI: what broke a solve, plus
+/// the indices a caller can act on (-1 where not applicable).
+/// Layout must match the C++ SolveFailure.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct CSolveFailure {
+    /// 0 none stored, 1 BandOverflow, 2 UnconstrainedParameter,
+    /// 3 SymbolicFactorization, 4 CoupledMarginalization,
+    /// 5 MarginalizeMissingDiagonal, 6 BadMarginalizeSet,
+    /// 7 IterativeSchurWithoutReduction, 8 SolverUnavailable,
+    /// 9 DegenerateDiagonal.
+    pub kind: i32,
+    /// DegenerateDiagonal: 0 Nan, 1 Negative, 2 Zero.
+    pub fault: i32,
+    /// Scalar parameter index (UnconstrainedParameter,
+    /// DegenerateDiagonal).
+    pub param: i64,
+    /// Element row/col (BandOverflow) or block row/col
+    /// (CoupledMarginalization).
+    pub row: i64,
+    pub col: i64,
+    /// The declared half-bandwidth (BandOverflow).
+    pub kd: i64,
+    /// Block index (MarginalizeMissingDiagonal).
+    pub block: i64,
+    /// SymbolicFactorization: the reduced system, not the whole one.
+    pub reduced: bool,
+}
+
+impl Default for CSolveFailure {
+    fn default() -> Self {
+        CSolveFailure {
+            kind: 0, fault: -1, param: -1, row: -1, col: -1,
+            kd: -1, block: -1, reduced: false,
+        }
+    }
+}
+
+fn failure_of(k: &arael::simple_lm::SolveFailureKind) -> CSolveFailure {
+    use arael::simple_lm::{DiagonalFault as D, SolveError as E,
+                          SolveFailureKind as K};
+    let mut c = CSolveFailure::default();
+    match k {
+        K::Setup(e) => match e {
+            E::BandOverflow { row, col, kd } => {
+                c.kind = 1;
+                c.row = *row as i64;
+                c.col = *col as i64;
+                c.kd = *kd as i64;
+            }
+            E::UnconstrainedParameter { param } => {
+                c.kind = 2;
+                c.param = *param as i64;
+            }
+            E::SymbolicFactorization { reduced } => {
+                c.kind = 3;
+                c.reduced = *reduced;
+            }
+            E::CoupledMarginalization { row, col } => {
+                c.kind = 4;
+                c.row = *row as i64;
+                c.col = *col as i64;
+            }
+            E::MarginalizeMissingDiagonal { block } => {
+                c.kind = 5;
+                c.block = *block as i64;
+            }
+            E::BadMarginalizeSet => c.kind = 6,
+            E::IterativeSchurWithoutReduction => c.kind = 7,
+            E::SolverUnavailable { .. } => c.kind = 8,
+        },
+        K::DegenerateDiagonal { param, fault } => {
+            c.kind = 9;
+            c.param = *param as i64;
+            c.fault = match fault {
+                D::Nan => 0,
+                D::Negative => 1,
+                D::Zero => 2,
+            };
+        }
+    }
+    c
+}
+
+/// The structured failure of the last solve that returned -1 on this
+/// model (any entry point, sessions included). False with kind 0
+/// when the last solve did not fail that way; the prose stays on
+/// line_last_error.
+#[no_mangle]
+pub unsafe extern "C" fn line_last_failure(h: *const LineHandle, out: *mut CSolveFailure) -> bool {
+    let hh = &*h;
+    *out = hh.failure;
+    hh.failure.kind != 0
 }
 
 fn panic_text(p: Box<dyn std::any::Any + Send>) -> String {
@@ -2004,6 +2209,7 @@ pub extern "C" fn line_new() -> *mut LineHandle {
     Box::into_raw(Box::new(LineHandle {
         model: Default::default(),
         text: CString::default(),
+        failure: CSolveFailure::default(),
     }))
 }
 
@@ -2133,10 +2339,12 @@ pub unsafe extern "C" fn line_solve_dense(
             let code = fill_result(out, &r);
             (*out).detail = boxed(r);
             set_text(hh, "");
+            hh.failure = CSolveFailure::default();
             code
         }
         Ok(Err(f)) => {
             set_text(hh, &f.to_string());
+            hh.failure = failure_of(&f.kind);
             if let Some(p) = f.partial {
                 fill_result(out, &p);
                 (*out).status = -1;
@@ -2147,6 +2355,7 @@ pub unsafe extern "C" fn line_solve_dense(
         Err(p) => {
             let msg = panic_text(p);
             set_text(hh, &msg);
+            hh.failure = CSolveFailure::default();
             (*out).status = -2;
             -2
         }
@@ -2178,10 +2387,12 @@ pub unsafe extern "C" fn line_solve_sparse(
             let code = fill_result(out, &r);
             (*out).detail = boxed(r);
             set_text(hh, "");
+            hh.failure = CSolveFailure::default();
             code
         }
         Ok(Err(f)) => {
             set_text(hh, &f.to_string());
+            hh.failure = failure_of(&f.kind);
             if let Some(p) = f.partial {
                 fill_result(out, &p);
                 (*out).status = -1;
@@ -2192,6 +2403,7 @@ pub unsafe extern "C" fn line_solve_sparse(
         Err(p) => {
             let msg = panic_text(p);
             set_text(hh, &msg);
+            hh.failure = CSolveFailure::default();
             (*out).status = -2;
             -2
         }
@@ -2270,10 +2482,12 @@ pub unsafe extern "C" fn line_session_solve(
             let code = fill_result(out, &r);
             (*out).detail = boxed(r);
             set_text(hh, "");
+            hh.failure = CSolveFailure::default();
             code
         }
         Ok(Err(f)) => {
             set_text(hh, &f.to_string());
+            hh.failure = failure_of(&f.kind);
             if let Some(p) = f.partial {
                 fill_result(out, &p);
                 (*out).status = -1;
@@ -2287,6 +2501,7 @@ pub unsafe extern "C" fn line_session_solve(
             session.invalidate();
             let msg = panic_text(p);
             set_text(hh, &msg);
+            hh.failure = CSolveFailure::default();
             (*out).status = -2;
             -2
         }
@@ -2319,10 +2534,12 @@ pub unsafe extern "C" fn line_solve_band(
             let code = fill_result(out, &r);
             (*out).detail = boxed(r);
             set_text(hh, "");
+            hh.failure = CSolveFailure::default();
             code
         }
         Ok(Err(f)) => {
             set_text(hh, &f.to_string());
+            hh.failure = failure_of(&f.kind);
             if let Some(p) = f.partial {
                 fill_result(out, &p);
                 (*out).status = -1;
@@ -2333,6 +2550,7 @@ pub unsafe extern "C" fn line_solve_band(
         Err(p) => {
             let msg = panic_text(p);
             set_text(hh, &msg);
+            hh.failure = CSolveFailure::default();
             (*out).status = -2;
             -2
         }

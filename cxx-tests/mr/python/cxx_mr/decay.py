@@ -10,10 +10,10 @@ import os
 
 from . import _decay_ffi as _f
 from .arael import math as _m
-from .arael.solver import (AraelError, CovMode, EnvelopeMode, FaerOrdering,
-                           LmPreset, LmStatus, LmStep, LmTiming, LogLevel,
-                           ReducedOrdering, SchurPlan, SchurPolicy,
-                           SchurSolve)
+from .arael.solver import (AraelError, CovMode, DiagonalFault, EnvelopeMode,
+                           FaerOrdering, LmPreset, LmStatus, LmStep, LmTiming,
+                           LogLevel, ReducedOrdering, SchurPlan, SchurPolicy,
+                           SchurSolve, SolveFailure, SolveFailureKind)
 
 LmIter = _f.LmIter
 
@@ -431,8 +431,13 @@ class Decay:
 
     def _solved(self, code, res):
         if code < 0:
+            failure = None
+            if code == -1:
+                fl = SolveFailure()
+                if _f.decay_last_failure(self._p, ctypes.byref(fl)):
+                    failure = fl
             raise AraelError(code, _err(self._p),
-                             res if res._detail else None)
+                             res if res._detail else None, failure)
         return res
 
     def solve_dense(self, cfg=None):

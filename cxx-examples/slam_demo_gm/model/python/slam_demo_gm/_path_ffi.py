@@ -112,6 +112,7 @@ SIGS = [
     ("path_new", [], ctypes.c_void_p),
     ("path_free", [ctypes.c_void_p], None),
     ("path_last_error", [ctypes.c_void_p], ctypes.c_char_p),
+    ("path_last_failure", [ctypes.c_void_p, ctypes.POINTER(_solver.SolveFailure)], ctypes.c_bool),
     ("path_validate", [ctypes.c_void_p], ctypes.c_char_p),
     ("path_set_log_level", [ctypes.c_uint32], None),
     ("path_result_report", [ctypes.c_void_p, ctypes.c_bool], ctypes.c_char_p),

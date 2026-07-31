@@ -25,6 +25,7 @@ SIGS = [
     ("line_new", [], ctypes.c_void_p),
     ("line_free", [ctypes.c_void_p], None),
     ("line_last_error", [ctypes.c_void_p], ctypes.c_char_p),
+    ("line_last_failure", [ctypes.c_void_p, ctypes.POINTER(_solver.SolveFailure)], ctypes.c_bool),
     ("line_validate", [ctypes.c_void_p], ctypes.c_char_p),
     ("line_set_log_level", [ctypes.c_uint32], None),
     ("line_result_report", [ctypes.c_void_p, ctypes.c_bool], ctypes.c_char_p),

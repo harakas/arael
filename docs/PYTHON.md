@@ -95,7 +95,10 @@ surface reference); the differences are Python idiom:
   solves follow; `r.plan` is the sparse backend's `SchurPlan` as data
   (`None` for dense and band solves). A failed solve raises
   `AraelError(status, message)` whose `.partial` holds the best
-  accepted state when the solve got that far. `cost()`, `validate()`,
+  accepted state when the solve got that far and whose `.failure`
+  carries the structured cause (a `SolveFailure`: `SolveFailureKind`
+  plus the parameter / row / block indices, `DiagonalFault` for a
+  degenerate diagonal; -1 where not applicable). `cost()`, `validate()`,
   `last_error()` as in C++; a model frees on garbage collection
   (`free()` to force it). Warm restart: `cfg.initial_lambda =
   r.final_lambda` re-enters at the previous damping; the optimized

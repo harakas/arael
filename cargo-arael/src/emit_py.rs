@@ -723,6 +723,9 @@ class Covariance:
     sig(&mut py, &format!("{root_sn}_free"), &["ctypes.c_void_p"], "None");
     sig(&mut py, &format!("{root_sn}_last_error"), &["ctypes.c_void_p"],
         "ctypes.c_char_p");
+    sig(&mut py, &format!("{root_sn}_last_failure"),
+        &["ctypes.c_void_p", "ctypes.POINTER(_solver.SolveFailure)"],
+        "ctypes.c_bool");
     sig(&mut py, &format!("{root_sn}_validate"), &["ctypes.c_void_p"],
         "ctypes.c_char_p");
     sig(&mut py, &format!("{root_sn}_set_log_level"), &["ctypes.c_uint32"],
@@ -909,8 +912,13 @@ class Covariance:
 
     def _solved(self, code, res):
         if code < 0:
+            failure = None
+            if code == -1:
+                fl = SolveFailure()
+                if _f.{root_sn}_last_failure(self._p, ctypes.byref(fl)):
+                    failure = fl
             raise AraelError(code, _err(self._p),
-                             res if res._detail else None)
+                             res if res._detail else None, failure)
         return res
 
     def solve_dense(self, cfg=None):
@@ -1009,10 +1017,10 @@ import os
 
 from . import _{root_sn}_ffi as _f
 from .arael import math as _m
-from .arael.solver import (AraelError, CovMode, EnvelopeMode, FaerOrdering,
-                           LmPreset, LmStatus, LmStep, LmTiming, LogLevel,
-                           ReducedOrdering, SchurPlan, SchurPolicy,
-                           SchurSolve)
+from .arael.solver import (AraelError, CovMode, DiagonalFault, EnvelopeMode,
+                           FaerOrdering, LmPreset, LmStatus, LmStep, LmTiming,
+                           LogLevel, ReducedOrdering, SchurPlan, SchurPolicy,
+                           SchurSolve, SolveFailure, SolveFailureKind)
 
 LmIter = _f.LmIter
 

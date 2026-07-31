@@ -41,6 +41,9 @@ using arael::LmResultT;
 using arael::LmIterT;
 using arael::LmStep;
 using arael::LmTiming;
+using arael::SolveFailureKind;
+using arael::DiagonalFault;
+using arael::SolveFailure;
 using arael::SchurPlan;
 using arael::ReducedOrdering;
 using arael::RouteFlops;
@@ -332,6 +335,7 @@ void fit_lm_config(uint32_t, LmConfig*);
 Fit* fit_new(void);
 void fit_free(Fit*);
 const char* fit_last_error(const Fit*);
+bool fit_last_failure(const Fit*, SolveFailure*);
 const char* fit_validate(Fit*);
 void fit_set_log_level(uint32_t);
 void fit_sparse_options(SparseOptions*);
@@ -409,12 +413,15 @@ private:
 };
 
 /// The Err side of a solve: SolverFailed, the text from
-/// last_error() (valid until the next call on the model), and the
-/// best accepted state before the break when the solve got that far.
+/// last_error() (valid until the next call on the model), the
+/// best accepted state before the break when the solve got that
+/// far, and the structured failure (which kind, which parameter /
+/// row / block index) in `failure`.
 struct SolveError {
     LmStatus status;
     const char* message;
     option<LmResult> partial;
+    SolveFailure failure;
 };
 
 using SolveResult = result<LmResult, SolveError>;
@@ -1424,7 +1431,8 @@ private:
     SolveResult finish_(int32_t code, const LmResultT<double>& raw) {
         if (code == -2) throw PanicError(last_error());
         if (code >= 0) return SolveResult::ok(LmResult(raw));
-        SolveError e{static_cast<LmStatus>(code), last_error(), {}};
+        SolveError e{static_cast<LmStatus>(code), last_error(), {}, {}};
+        ffi::fit_last_failure(h_, &e.failure);
         if (raw.detail) e.partial = LmResult(raw);
         return SolveResult::err(e);
     }

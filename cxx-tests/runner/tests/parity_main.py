@@ -556,10 +556,17 @@ try:
     pi("bad_status", 0)
     pi("bad_has_error", 0)
     pi("bad_partial_has", 0)
+    pi("bad_kind", -99)
+    pi("bad_fault", -99)
+    pi("bad_param", -99)
 except AraelError as e:
     pi("bad_status", e.status)
     pi("bad_has_error", 1 if len(e.message) > 0 else 0)
     pi("bad_partial_has", 1 if e.partial is not None else 0)
+    # The structured failure: kind, fault, and the parameter index.
+    pi("bad_kind", e.failure.kind if e.failure else -99)
+    pi("bad_fault", e.failure.fault if e.failure else -99)
+    pi("bad_param", e.failure.param if e.failure else -99)
 
 # A wrapper is keyed, not a cached pointer: growing the collection past its
 # capacity must not leave an earlier wrapper reading the old buffer. Checked

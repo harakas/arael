@@ -753,6 +753,7 @@ private:
          {root}* {root_sn}_new(void);\n\
          void {root_sn}_free({root}*);\n\
          const char* {root_sn}_last_error(const {root}*);\n\
+         bool {root_sn}_last_failure(const {root}*, SolveFailure*);\n\
          const char* {root_sn}_validate({root}*);\n\
          void {root_sn}_set_log_level(uint32_t);\n\
          void {root_sn}_sparse_options(SparseOptions*);\n\
@@ -813,6 +814,9 @@ using arael::LmResultT;
 using arael::LmIterT;
 using arael::LmStep;
 using arael::LmTiming;
+using arael::SolveFailureKind;
+using arael::DiagonalFault;
+using arael::SolveFailure;
 using arael::SchurPlan;
 using arael::ReducedOrdering;
 using arael::RouteFlops;
@@ -913,12 +917,15 @@ private:
 }};
 
 /// The Err side of a solve: SolverFailed, the text from
-/// last_error() (valid until the next call on the model), and the
-/// best accepted state before the break when the solve got that far.
+/// last_error() (valid until the next call on the model), the
+/// best accepted state before the break when the solve got that
+/// far, and the structured failure (which kind, which parameter /
+/// row / block index) in `failure`.
 struct SolveError {{
     LmStatus status;
     const char* message;
     option<LmResult> partial;
+    SolveFailure failure;
 }};
 
 using SolveResult = result<LmResult, SolveError>;
@@ -991,7 +998,8 @@ private:
     SolveResult finish_(int32_t code, const LmResultT<{fp}>& raw) {{
         if (code == -2) throw PanicError(last_error());
         if (code >= 0) return SolveResult::ok(LmResult(raw));
-        SolveError e{{static_cast<LmStatus>(code), last_error(), {{}}}};
+        SolveError e{{static_cast<LmStatus>(code), last_error(), {{}}, {{}}}};
+        ffi::{root_sn}_last_failure(h_, &e.failure);
         if (raw.detail) e.partial = LmResult(raw);
         return SolveResult::err(e);
     }}

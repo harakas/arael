@@ -52,6 +52,7 @@ SIGS = [
     ("graph_new", [], ctypes.c_void_p),
     ("graph_free", [ctypes.c_void_p], None),
     ("graph_last_error", [ctypes.c_void_p], ctypes.c_char_p),
+    ("graph_last_failure", [ctypes.c_void_p, ctypes.POINTER(_solver.SolveFailure)], ctypes.c_bool),
     ("graph_validate", [ctypes.c_void_p], ctypes.c_char_p),
     ("graph_set_log_level", [ctypes.c_uint32], None),
     ("graph_result_report", [ctypes.c_void_p, ctypes.c_bool], ctypes.c_char_p),
