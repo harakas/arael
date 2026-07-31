@@ -2629,6 +2629,9 @@ pub fn generate_root_methods(
 
     let constraint_impls: Vec<TokenStream2> = Vec::new();
     let mut cost_loops: Vec<TokenStream2> = Vec::new();
+    // calc_cost_table twins: the same traversals with each constraint's
+    // cost shadowed into a per-label table entry (jacobian roots only).
+    let mut ct_loops: Vec<TokenStream2> = Vec::new();
     let mut grad_hessian_loops: Vec<TokenStream2> = Vec::new();
     let mut jacobian_loops: Vec<TokenStream2> = Vec::new();
     let mut set_block_indices_loops: Vec<TokenStream2> = Vec::new();
@@ -2652,6 +2655,7 @@ pub fn generate_root_methods(
         root_var_ident: syn::Ident,
         // Per-attribute entries (with guards baked in, matching SelfBlock pattern)
         cost_entries: Vec<TokenStream2>,
+        ct_entries: Vec<TokenStream2>,
         gh_entries: Vec<TokenStream2>,
         jac_entries: Vec<TokenStream2>,
     }
@@ -2700,6 +2704,7 @@ pub fn generate_root_methods(
         entity_index_copies: Vec<TokenStream2>,
         root_var_ident: syn::Ident,
         cost_entries: Vec<TokenStream2>,
+        ct_entries: Vec<TokenStream2>,
         gh_entries: Vec<TokenStream2>,
         jac_entries: Vec<TokenStream2>,
         /// Non-empty only for multi-cross constraints. When populated,
@@ -2731,10 +2736,12 @@ pub fn generate_root_methods(
         self_block: Option<SelfBlockInfo>,
         // Cost/GH/Jacobian entries that go directly in the outer loop (SelfBlock constraints)
         cost_entries: Vec<TokenStream2>,
+        ct_entries: Vec<TokenStream2>,
         gh_entries: Vec<TokenStream2>,
         jac_entries: Vec<TokenStream2>,
         // Nested CrossBlock: inner loops over frines
         nested_cost_loops: Vec<TokenStream2>,
+        nested_ct_loops: Vec<TokenStream2>,
         nested_gh_loops: Vec<TokenStream2>,
         nested_jac_loops: Vec<TokenStream2>,
     }
@@ -2763,6 +2770,7 @@ pub fn generate_root_methods(
         block_ident: syn::Ident,
         constraint_index_field: Option<syn::Ident>,
         cost_entries: Vec<TokenStream2>,
+        ct_entries: Vec<TokenStream2>,
         gh_entries: Vec<TokenStream2>,
         jac_entries: Vec<TokenStream2>,
     }
@@ -2902,7 +2910,7 @@ pub fn generate_root_methods(
     if let Ok(dir) = std::env::var("ARAEL_SIDECAR_DIR") {
         let mut sorted: Vec<String> = reachable.iter().cloned().collect();
         sorted.sort();
-        crate::sidecar::emit(&dir, &root_name.to_string(), precision, &sorted)
+        crate::sidecar::emit(&dir, &root_name.to_string(), precision, jacobian, &sorted)
             .map_err(|e| syn::Error::new(root_name.span(),
                 format!("arael sidecar: {}", e)))?;
     }
@@ -3854,6 +3862,19 @@ pub fn generate_root_methods(
         };
         let loss_cost_finalize = emit_loss(false)?;
         let loss_gh_finalize = emit_loss(true)?;
+        // calc_cost_table twin of a finished cost blob: identical
+        // statements with the accumulator shadowed, so this constraint's
+        // robustified cost (rho(s) under a loss, the raw row sum without)
+        // lands on its label.
+        let ct_wrap = |blob: &TokenStream2| -> TokenStream2 {
+            quote! {
+                {
+                    let mut __cost = 0.0 as #cast_type;
+                    #blob
+                    *__table.entry(#label_literal).or_insert(0.0 as #cast_type) += __cost;
+                }
+            }
+        };
         // Per-row cost accumulator: into __block_cost under a loss, else __cost.
         let cost_acc: TokenStream2 = if loss_present { quote! { __block_cost } } else { quote! { __cost } };
         // Row-squared term for the accumulator: __cost is #cast_type, so
@@ -4330,11 +4351,46 @@ pub fn generate_root_methods(
                 let code: Expr = parse_sym_code(&expr.to_rust(""))?;
                 jac_stmts.push(quote! { let #name_ident= #code; });
             }
+            // Under a robust loss, rows and entries are scaled by
+            // sqrt(rho'(s)) -- the same weight the gradient/Hessian
+            // assembly applies -- so J^T J and 2 J^T r reproduce the
+            // assembled Gauss-Newton system. Residuals come first (the
+            // weight needs the whole block's s), then the rows.
+            let (jac_w_finalize, row_scale): (TokenStream2, TokenStream2) = if loss_present {
+                let loss_e = loss_expr.as_ref().unwrap();
+                let mut exprs = vec![loss_e.diff(LOSS_ARG_SYM)];
+                apply_substitutions(&mut exprs, &all_subs);
+                if fast_atan { replace_atan_fast(&mut exprs); }
+                let (ints, simplified) = arael_sym::cse(&exprs);
+                let mut stmts = Vec::new();
+                for (name, expr) in &ints {
+                    let ni = syn::Ident::new(name, proc_macro2::Span::call_site());
+                    let code: Expr = parse_sym_code(&expr.to_rust(""))?;
+                    stmts.push(quote! { let #ni = #code; });
+                }
+                let w_code: Expr = parse_sym_code(&simplified[0].to_rust(""))?;
+                (
+                    quote! {
+                        #(#stmts)*
+                        let __jac_sw = (((#w_code) as #cast_type).max(0.0 as #cast_type)).sqrt();
+                    },
+                    quote! { * __jac_sw },
+                )
+            } else {
+                (quote! {}, quote! {})
+            };
+            if loss_present {
+                jac_stmts.push(quote! { let mut __block_cost = 0.0; });
+            }
+            let mut push_stmts: Vec<TokenStream2> = Vec::new();
             let mut jidx = 0;
             for ri in 0..n_residuals {
                 let r_ident = syn::Ident::new(&format!("__r_{}", ri), proc_macro2::Span::call_site());
                 let r_expr: Expr = parse_sym_code(&gh_simplified[jidx].to_rust(""))?;
                 jac_stmts.push(quote! { let #r_ident= #r_expr; });
+                if loss_present {
+                    jac_stmts.push(quote! { __block_cost += #r_ident * #r_ident; });
+                }
                 jidx += 1;
 
                 let mut dr_idents = Vec::new();
@@ -4345,16 +4401,18 @@ pub fn generate_root_methods(
                     dr_idents.push(dr_ident);
                     jidx += 1;
                 }
-                let dr_f64: Vec<TokenStream2> = dr_idents.iter().map(|d| quote! { #d as #cast_type }).collect();
-                jac_stmts.push(quote! {
+                let dr_f64: Vec<TokenStream2> = dr_idents.iter().map(|d| quote! { (#d as #cast_type) #row_scale }).collect();
+                push_stmts.push(quote! {
                     __jac_rows.push(arael::model::JacobianRow {
                         constraint: __jac_cid,
                         label: #label_literal,
-                        residual: #r_ident as #cast_type,
+                        residual: (#r_ident as #cast_type) #row_scale,
                         entries: arael::model::jacobian_entries(&__jac_idx, &[#(#dr_f64),*]),
                     });
                 });
             }
+            jac_stmts.push(jac_w_finalize);
+            jac_stmts.extend(push_stmts);
         }
 
         // Build index setup code — separate A (parent) and B (ref) indices.
@@ -4565,7 +4623,7 @@ pub fn generate_root_methods(
 
             // Cost loop: iterate parent -> frines, resolve refs, evaluate
             if parent_is_root {
-                cost_loops.push(quote! {
+                let __cl = quote! {
                     {
                         #marker
                         for __frine in self.#frines_ident.iter() {
@@ -4576,9 +4634,11 @@ pub fn generate_root_methods(
                             #remote_guarded_cost
                         }
                     }
-                });
+                };
+                if jacobian { ct_loops.push(ct_wrap(&__cl)); }
+                cost_loops.push(__cl);
             } else {
-                cost_loops.push(quote! {
+                let __cl = quote! {
                     {
                         #marker
                         for __lm in self.#coll_ident.iter() {
@@ -4590,7 +4650,9 @@ pub fn generate_root_methods(
                             }
                         }
                     }
-                });
+                };
+                if jacobian { ct_loops.push(ct_wrap(&__cl)); }
+                cost_loops.push(__cl);
             }
 
             // Grad+hessian loop: same traversal but get mutable access
@@ -4815,10 +4877,10 @@ pub fn generate_root_methods(
                             self_var: self_var.clone(),
                             a_type_ident: a_type_ident.clone(),
                             self_block: None,
-                            cost_entries: Vec::new(),
+                            cost_entries: Vec::new(), ct_entries: Vec::new(),
                             gh_entries: Vec::new(),
                             jac_entries: Vec::new(),
-                            nested_cost_loops: Vec::new(),
+                            nested_cost_loops: Vec::new(), nested_ct_loops: Vec::new(),
                             nested_gh_loops: Vec::new(),
                             nested_jac_loops: Vec::new(),
                         });
@@ -4835,6 +4897,7 @@ pub fn generate_root_methods(
                                 block_ident: block_ident.clone(),
                             });
                         }
+                        if jacobian { group.ct_entries.push(ct_wrap(&cost_entry)); }
                         group.cost_entries.push(cost_entry.clone());
                         group.gh_entries.push(gh_entry.clone());
                         if let Some(ref je) = jac_entry { group.jac_entries.push(je.clone()); }
@@ -4902,11 +4965,12 @@ pub fn generate_root_methods(
                         a_idx_stmts: a_idx_stmts.clone(),
                         block_ident: block_ident.clone(),
                         constraint_index_field: ci_field,
-                        cost_entries: Vec::new(),
+                        cost_entries: Vec::new(), ct_entries: Vec::new(),
                         gh_entries: Vec::new(),
                         jac_entries: Vec::new(),
                     });
-                    group.cost_entries.push(cost_entry);
+                    if jacobian { group.ct_entries.push(ct_wrap(&cost_entry)); }
+            group.cost_entries.push(cost_entry);
                     group.gh_entries.push(gh_entry);
                     if let Some(je) = jac_entry { group.jac_entries.push(je); }
                 }
@@ -4996,7 +5060,7 @@ pub fn generate_root_methods(
                     resolve_stmts: resolve_stmts.clone(),
                     entity_index_copies: entity_index_copies.clone(),
                     root_var_ident: root_var_ident.clone(),
-                    cost_entries: Vec::new(),
+                    cost_entries: Vec::new(), ct_entries: Vec::new(),
                     gh_entries: Vec::new(),
                     jac_entries: Vec::new(),
                     multi_cross_blocks: mcb.clone(),
@@ -5010,6 +5074,7 @@ pub fn generate_root_methods(
                 return Err(syn::Error::new_spanned(&struct_ident,
                     format!("on `{}`: cannot mix TripletBlock and multi-CrossBlock constraint attributes on the same struct", struct_ident)));
             }
+            if jacobian { group.ct_entries.push(ct_wrap(&cost_entry)); }
             group.cost_entries.push(cost_entry);
             group.gh_entries.push(gh_entry);
             if let Some(je) = jac_entry { group.jac_entries.push(je); }
@@ -5057,11 +5122,12 @@ pub fn generate_root_methods(
                     b_idx_stmts: b_idx_stmts.clone(),
                     resolve_stmts: resolve_stmts.clone(),
                     root_var_ident: root_var_ident.clone(),
-                    cost_entries: Vec::new(),
+                    cost_entries: Vec::new(), ct_entries: Vec::new(),
                     gh_entries: Vec::new(),
                     jac_entries: Vec::new(),
                 }
             });
+            if jacobian { group.ct_entries.push(ct_wrap(&cost_entry)); }
             group.cost_entries.push(cost_entry);
             group.gh_entries.push(gh_entry);
             if let Some(je) = jac_entry { group.jac_entries.push(je); }
@@ -5158,13 +5224,14 @@ pub fn generate_root_methods(
                 self_var: self_var.clone(),
                 a_type_ident: a_type_ident.clone(),
                 self_block: None,
-                cost_entries: Vec::new(),
+                cost_entries: Vec::new(), ct_entries: Vec::new(),
                 gh_entries: Vec::new(),
                 jac_entries: Vec::new(),
-                nested_cost_loops: Vec::new(),
+                nested_cost_loops: Vec::new(), nested_ct_loops: Vec::new(),
                 nested_gh_loops: Vec::new(),
                 nested_jac_loops: Vec::new(),
             });
+            if jacobian { group.nested_ct_loops.push(ct_wrap(&nested_cost)); }
             group.nested_cost_loops.push(nested_cost);
             group.nested_gh_loops.push(nested_gh);
             if let Some(nj) = nested_jac { group.nested_jac_loops.push(nj); }
@@ -5197,6 +5264,7 @@ pub fn generate_root_methods(
     // non-merged loops. This ensures SelfBlock entities get lower constraint
     // IDs than cross-block/triplet constraints.
     let mut merged_cost: Vec<TokenStream2> = Vec::new();
+    let mut merged_ct: Vec<TokenStream2> = Vec::new();
     let mut merged_gh: Vec<TokenStream2> = Vec::new();
     let mut merged_jac: Vec<TokenStream2> = Vec::new();
     let mut merged_sbi: Vec<TokenStream2> = Vec::new();
@@ -5223,6 +5291,18 @@ pub fn generate_root_methods(
                 #(#nested_cost)*
             }
         }));
+        if jacobian {
+            let ct_entries = &group.ct_entries;
+            let nested_ct = &group.nested_ct_loops;
+            merged_ct.push(wrap_in_prefix(prefix, false, quote! {
+                for __item in #ctn.#coll.iter() {
+                    let #self_var = __item;
+                    let #root_var_ident = &*__self_ref;
+                    #(#ct_entries)*
+                    #(#nested_ct)*
+                }
+            }));
+        }
 
         // Merged grad+hessian loop. Entries access the entity as `__item`
         // and the root as `self` directly (renamed at entry creation) --
@@ -5496,6 +5576,14 @@ pub fn generate_root_methods(
             let #root_var = &*__self_ref;
             #(#cost_entries)*
         }));
+        if jacobian {
+            let ct_entries = &group.ct_entries;
+            merged_ct.push(wrap(accessor_read, quote! {
+                let #self_var = __item;
+                let #root_var = &*__self_ref;
+                #(#ct_entries)*
+            }));
+        }
 
         merged_gh.push(wrap(accessor_write, quote! {
             #(#gh_entries)*
@@ -5552,6 +5640,16 @@ pub fn generate_root_methods(
                 #(#cost_entries)*
             }
         }));
+        if jacobian {
+            let ct_entries = &group.ct_entries;
+            ct_loops.push(wrap_in_prefix(prefix, false, quote! {
+                for __frine in #ctn.#rc_ident.iter() {
+                    #(#resolve_stmts)*
+                    let #root_var = &*__self_ref;
+                    #(#ct_entries)*
+                }
+            }));
+        }
 
         // Entries carry their own ref rereads at the top; root reads go
         // through `self` (renamed at entry creation).
@@ -5619,6 +5717,16 @@ pub fn generate_root_methods(
                 #(#cost_entries)*
             }
         });
+        if jacobian {
+            let ct_entries = &group.ct_entries;
+            ct_loops.push(quote! {
+                for __frine in self.#rc_ident.iter() {
+                    #(#resolve_stmts)*
+                    let #root_var = &*__self_ref;
+                    #(#ct_entries)*
+                }
+            });
+        }
 
         let entity_offsets = &group.entity_offsets;
         let entity_offsets_len = entity_offsets.len();
@@ -5704,6 +5812,8 @@ pub fn generate_root_methods(
     // Prepend merged SelfBlock loops before cross/triplet loops
     // so entities get lower constraint IDs than cross-block constraints.
     let mut ordered_cost = merged_cost; ordered_cost.append(&mut cost_loops);
+    let mut ordered_ct = merged_ct; ordered_ct.append(&mut ct_loops);
+    let ct_loops = ordered_ct;
     let cost_loops = ordered_cost;
     let mut ordered_gh = merged_gh; ordered_gh.append(&mut grad_hessian_loops);
     let grad_hessian_loops = ordered_gh;
@@ -5848,8 +5958,38 @@ pub fn generate_root_methods(
     // Generate JacobianModel impl if requested
     if jacobian {
         let ext_update = if custom { extended_update_call.clone() } else { quote! {} };
+        // Extended cost joins the table under its own label.
+        let ext_ct = if custom {
+            quote! {
+                {
+                    let mut __cost = 0.0 as #prec_type;
+                    #extended_cost_call
+                    *__table.entry("extended").or_insert(0.0 as #prec_type) += __cost;
+                }
+            }
+        } else {
+            quote! {}
+        };
         tokens.extend(quote! {
             impl arael::model::JacobianModel<#prec_type> for #root_name {
+                fn calc_cost_table(&mut self, params: &[#prec_type])
+                    -> std::collections::HashMap<&'static str, #prec_type>
+                {
+                    // The robustified per-label cost: each constraint's
+                    // cost pass (rho(s) under a loss) shadowed into its
+                    // label's slot, so the table sums to calc_cost.
+                    use arael::utils::Float as _;
+                    arael::model::Model::#update_method(self, params);
+                    #ext_update
+                    #[allow(unused_variables)]
+                    let __self_ref = &*self;
+                    let mut __table: std::collections::HashMap<&'static str, #prec_type> =
+                        std::collections::HashMap::new();
+                    #(#ct_loops)*
+                    #ext_ct
+                    __table
+                }
+
                 fn calc_jacobian(&mut self, params: &[#prec_type]) -> arael::model::Jacobian<#prec_type> {
                     // Generated expressions may call Float trait methods
                     // (e.g. heaviside from safe-function derivatives).

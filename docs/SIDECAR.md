@@ -25,12 +25,16 @@ force expansion. `cargo arael export` handles this automatically.
   "schema": 1,
   "root": "Path",
   "precision": "f32",
+  "jacobian": false,
   "types": { "<TypeName>": { ... }, ... },
   "constraints": [
     {"on": "PoseTie", "label": "PoseTie", "file": "src/model.rs", "line": 51}
   ]
 }
 ```
+
+`jacobian` says whether the root was declared `#[arael(root, jacobian)]`
+-- generators gate the per-constraint cost-table surface on it.
 
 `types` holds every model type reachable from the root, keyed by bare
 type name. Each entry:

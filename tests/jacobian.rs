@@ -290,3 +290,111 @@ fn jacobian_gradient_matches() {
         );
     }
 }
+
+// --- Robustified cost table: the loss is applied per block ---
+
+#[arael::model]
+#[arael(constraint(hb, name = "robust", loss = |s| loss_geman_mcclure(s, lossworld.c2), {
+    [(lossitem.v - lossitem.target) * 10.0]
+}))]
+struct LossItem {
+    v: Param<f64>,
+    target: f64,
+    hb: SelfBlock<LossItem>,
+}
+
+#[arael::model]
+#[arael(constraint(hb, name = "anchor", {
+    [lossworld.a - lossworld.a_target]
+}))]
+#[arael(root, jacobian)]
+struct LossWorld {
+    a: Param<f64>,
+    a_target: f64,
+    c2: f64,
+    items: arael::refs::Vec<LossItem>,
+    hb: SelfBlock<LossWorld>,
+}
+
+fn loss_world() -> (LossWorld, Vec<f64>) {
+    let mut w = LossWorld {
+        a: Param::new(1.0),
+        a_target: 3.0,
+        c2: 2.99,
+        items: arael::refs::Vec::new(),
+        hb: SelfBlock::new(),
+    };
+    // One inlier and one gross outlier; Geman-McClure saturates the
+    // outlier's block below c2.
+    w.items.push(LossItem { v: Param::new(0.01), target: 0.0, hb: SelfBlock::new() });
+    w.items.push(LossItem { v: Param::new(50.0), target: 0.0, hb: SelfBlock::new() });
+    let mut x = Vec::new();
+    arael::simple_lm::RootProblem::serialize(&mut w, &mut x);
+    (w, x)
+}
+
+/// calc_cost_table reports the ROBUSTIFIED cost per label (rho(s) per
+/// block), summing to calc_cost.
+#[test]
+fn cost_table_applies_the_robust_loss() {
+    let (mut w, x) = loss_world();
+    let table = w.calc_cost_table(&x);
+    let cost = w.calc_cost(&x);
+
+    // The table is the robustified cost split by label: it sums to
+    // calc_cost (up to accumulation order).
+    let total: f64 = table.values().sum();
+    assert!((total - cost).abs() <= 1e-12 * (1.0 + cost.abs()),
+        "table total {} vs cost {}", total, cost);
+
+    // Raw outlier mass is (50*10)^2 = 2.5e5; robustified it caps near c2.
+    let robust = table["robust"];
+    assert!(robust < 2.0 * 2.99, "robust label not robustified: {}", robust);
+
+    // A label without a loss is the plain squared-residual sum.
+    assert!((table["anchor"] - 4.0).abs() < 1e-12, "anchor {}", table["anchor"]);
+}
+
+/// calc_jacobian scales rows and entries by sqrt(rho'(s)), so the
+/// weighted rows reproduce the assembled Gauss-Newton system
+/// (2 J^T r the gradient, 2 J^T J the Hessian).
+#[test]
+fn jacobian_applies_the_robust_loss() {
+    let (mut w, x) = loss_world();
+    let j = w.calc_jacobian(&x);
+
+    // Row-square total per label is rho'(s)*s per block.
+    let weighted: f64 = j.rows.iter()
+        .filter(|r| r.label == "robust")
+        .map(|r| r.residual * r.residual)
+        .sum();
+    let rho_w = |s: f64| (2.99 / (2.99 + s)).powi(2);
+    let expected = rho_w(0.01) * 0.01 + rho_w(250_000.0) * 250_000.0;
+    assert!((weighted - expected).abs() < 1e-9 * (1.0 + expected),
+        "weighted {} vs expected {}", weighted, expected);
+
+    // 2 J^T r reproduces the assembled gradient and 2 J^T J the
+    // assembled Gauss-Newton Hessian.
+    let n = j.num_params;
+    let mut gj = vec![0.0; n];
+    let mut hj = vec![0.0; n * n];
+    for row in &j.rows {
+        for &(i, di) in &row.entries {
+            gj[i as usize] += 2.0 * row.residual * di;
+            for &(k, dk) in &row.entries {
+                hj[i as usize * n + k as usize] += 2.0 * di * dk;
+            }
+        }
+    }
+    let mut grad = vec![0.0; n];
+    let mut hess = vec![0.0; n * n];
+    w.calc_grad_hessian_dense(&x, &mut grad, &mut hess);
+    for i in 0..n {
+        assert!((gj[i] - grad[i]).abs() < 1e-9 * (1.0 + grad[i].abs()),
+            "grad[{}]: 2 J^T r {} vs assembled {}", i, gj[i], grad[i]);
+    }
+    for i in 0..n * n {
+        assert!((hj[i] - hess[i]).abs() < 1e-9 * (1.0 + hess[i].abs()),
+            "hessian[{}]: J^T J {} vs assembled {}", i, hj[i], hess[i]);
+    }
+}

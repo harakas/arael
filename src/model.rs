@@ -3135,16 +3135,18 @@ pub trait JacobianModel<T: crate::utils::Float> {
     /// Compute the sparse Jacobian at the given parameter vector. Each
     /// emitted row carries its source constraint ID
     /// ([`JacobianRow::constraint`]) and static label
-    /// ([`JacobianRow::label`]).
+    /// ([`JacobianRow::label`]). A robust `loss` scales rows and
+    /// entries by `sqrt(rho'(s))`, so `J^T J` and `2 J^T r` match the
+    /// assembled Gauss-Newton system.
     fn calc_jacobian(&mut self, params: &[T]) -> Jacobian<T>;
 
-    /// Return the per-label squared-residual total (`sum r^2` grouped
-    /// by [`JacobianRow::label`]). Useful for seeing which constraint
-    /// group is contributing how much cost at a given parameter point.
+    /// Return the per-label cost total: which constraint group is
+    /// contributing how much cost at a given parameter point.
     ///
-    /// Default implementation derives from `calc_jacobian`. Roots can
-    /// override to skip derivative computation if they only need the
-    /// cost split, but the default is usually fine.
+    /// The macro-generated impl computes each block's ROBUSTIFIED cost
+    /// (`rho(s)` under a `loss`), so the table sums to the solver's
+    /// `calc_cost`. The row-derived default below does NOT apply
+    /// losses; it serves hand-written impls without them.
     fn calc_cost_table(&mut self, params: &[T]) -> std::collections::HashMap<&'static str, T> {
         let j = self.calc_jacobian(params);
         let mut out = std::collections::HashMap::new();
