@@ -159,6 +159,22 @@ pub fn verify(got: &std::collections::HashMap<String, f64>) {
         for (label, value) in &table {
             assert_eq!(g(&format!("ct_{label}")), *value, "label {label}");
         }
+
+        // Jacobian diagnostics mirrored exactly.
+        let jac = fit.calc_jacobian(&x);
+        assert_eq!(g("jac_m"), jac.num_residuals() as f64);
+        assert_eq!(g("jac_n"), jac.num_params as f64);
+        let sv = jac.singular_values();
+        assert_eq!(g("jac_sv_n"), sv.len() as f64);
+        assert_eq!(g("jac_sv0"), sv[0]);
+        assert_eq!(g("jac_sv_last"), *sv.last().unwrap());
+        let svn = jac.singular_values_column_normalised();
+        assert_eq!(g("jac_svn0"), svn[0]);
+        assert_eq!(g("jac_svn_last"), *svn.last().unwrap());
+        let cn = jac.column_l2_norms();
+        assert_eq!(g("jac_cn_n"), cn.len() as f64);
+        assert_eq!(g("jac_cn0"), cn[0]);
+        assert_eq!(g("jac_cn_last"), *cn.last().unwrap());
     }
 
     let mut fit2 = Fit::default();

@@ -103,7 +103,11 @@ surface reference); the differences are Python idiom:
   quiets arael's diagnostics process-wide (INFO, everything, is the
   default). When the root is `#[arael(root, jacobian)]`,
   `cost_table()` returns the per-constraint cost breakdown as a dict
-  (label -> that group's robustified cost, summing to `cost()`).
+  (label -> that group's robustified cost, summing to `cost()`), and
+  `calc_jacobian()` an owned snapshot for DOF/rank analysis:
+  `num_residuals` / `num_params` properties,
+  `singular_values(column_normalised=False)` and `column_l2_norms()`
+  as lists (freed on garbage collection, `free()` to force it).
 - **Covariance**: `assemble_covariance(mode)` returns a view or
   raises; `marginal`/`conditional` shaped by param count (float,
   matrix2d/3d, row-major tuples), `cross(a, b)` tuples, `std_dev(e)`

@@ -749,6 +749,88 @@ class Covariance:
             &["ctypes.c_void_p", "ctypes.c_uint32"], "ctypes.c_char_p");
         sig(&mut py, &format!("{root_sn}_cost_table_value"),
             &["ctypes.c_void_p", "ctypes.c_uint32"], "ctypes.c_double");
+        sig(&mut py, &format!("{root_sn}_calc_jacobian"),
+            &["ctypes.c_void_p", "ctypes.POINTER(ctypes.c_void_p)"],
+            "ctypes.c_int32");
+        sig(&mut py, &format!("{root_sn}_jac_error"), &["ctypes.c_void_p"],
+            "ctypes.c_char_p");
+        sig(&mut py, &format!("{root_sn}_jac_free"), &["ctypes.c_void_p"],
+            "None");
+        sig(&mut py, &format!("{root_sn}_jac_num_residuals"),
+            &["ctypes.c_void_p"], "ctypes.c_uint64");
+        sig(&mut py, &format!("{root_sn}_jac_num_params"),
+            &["ctypes.c_void_p"], "ctypes.c_uint64");
+        sig(&mut py, &format!("{root_sn}_jac_singular_values"),
+            &["ctypes.c_void_p", "ctypes.c_bool",
+              "ctypes.POINTER(ctypes.c_double)", "ctypes.c_uint64"],
+            "ctypes.c_int64");
+        sig(&mut py, &format!("{root_sn}_jac_column_l2_norms"),
+            &["ctypes.c_void_p", "ctypes.POINTER(ctypes.c_double)",
+              "ctypes.c_uint64"],
+            "ctypes.c_int64");
+        py.body.push_str(&format!(
+"class Jacobian:
+    \"\"\"A computed Jacobian, OWNED: released on garbage collection
+    (free() to force it). A snapshot of the parameters at the call;
+    later solves or edits do not touch it.\"\"\"
+
+    __slots__ = (\"_h\",)
+
+    def __init__(self, h):
+        self._h = h
+
+    def free(self):
+        if self._h:
+            _f.{root_sn}_jac_free(self._h)
+            self._h = None
+
+    def __del__(self):
+        try:
+            self.free()
+        except Exception:
+            pass
+
+    @property
+    def num_residuals(self):
+        \"\"\"Number of residual rows.\"\"\"
+        return _f.{root_sn}_jac_num_residuals(self._h)
+
+    @property
+    def num_params(self):
+        \"\"\"Number of parameter columns.\"\"\"
+        return _f.{root_sn}_jac_num_params(self._h)
+
+    def singular_values(self, column_normalised=False):
+        \"\"\"Singular values, descending, always f64 (near-zero
+        values count the free DOF). column_normalised scales each
+        column to unit L2 norm first, so the spectrum reflects
+        row-space rank alone, not per-parameter scale.\"\"\"
+        return self._vals(
+            lambda buf, cap: _f.{root_sn}_jac_singular_values(
+                self._h, column_normalised, buf, cap))
+
+    def column_l2_norms(self):
+        \"\"\"L2 norm of each Jacobian column, in parameter-index
+        order.\"\"\"
+        return self._vals(
+            lambda buf, cap: _f.{root_sn}_jac_column_l2_norms(
+                self._h, buf, cap))
+
+    def _vals(self, fn):
+        def ck(n):
+            if n < 0:
+                raise AraelError(
+                    n, (_f.{root_sn}_jac_error(self._h) or b\"\").decode())
+            return n
+        n = ck(fn(None, 0))
+        if n == 0:
+            return []
+        buf = (ctypes.c_double * n)()
+        ck(fn(buf, n))
+        return list(buf)
+
+
+"));
     }
     let ct_method = if model.jacobian {
         format!(
@@ -766,6 +848,15 @@ class Covariance:
                 _f.{root_sn}_cost_table_value(self._p, i)
             for i in range(n)
         }}
+
+    def calc_jacobian(self):
+        \"\"\"The sparse Jacobian at the current parameters (a
+        snapshot). Raises on a panic.\"\"\"
+        j = ctypes.c_void_p()
+        code = _f.{root_sn}_calc_jacobian(self._p, ctypes.byref(j))
+        if code != 0:
+            raise AraelError(code, _err(self._p))
+        return Jacobian(j)
 
 ")
     } else {

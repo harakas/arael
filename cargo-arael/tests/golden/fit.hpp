@@ -318,6 +318,14 @@ Rig* fit_rigs_try_get(Fit*, uint32_t);
 int32_t fit_cost_table(Fit*);
 const char* fit_cost_table_name(const Fit*, uint32_t);
 double fit_cost_table_value(const Fit*, uint32_t);
+struct FitJac;
+int32_t fit_calc_jacobian(Fit*, FitJac**);
+const char* fit_jac_error(const FitJac*);
+void fit_jac_free(FitJac*);
+uint64_t fit_jac_num_residuals(const FitJac*);
+uint64_t fit_jac_num_params(const FitJac*);
+int64_t fit_jac_singular_values(FitJac*, bool, double*, uint64_t);
+int64_t fit_jac_column_l2_norms(FitJac*, double*, uint64_t);
 double fit_cost(Fit*);
 int32_t fit_solve_band(Fit*, uint32_t, const LmConfig*, LmResultT<double>*);
 void fit_lm_config(uint32_t, LmConfig*);
@@ -1257,6 +1265,58 @@ private:
     ffi::Fit* h_;
 };
 
+/// A computed Jacobian (root.calc_jacobian), OWNED: copies share
+/// it, the last copy releases it. A snapshot of the parameters at
+/// the call; later solves or edits do not touch it.
+class Jacobian {
+public:
+    Jacobian() : j_(nullptr) {}
+    explicit Jacobian(ffi::FitJac* j)
+        : j_(j), guard_(j, ffi::fit_jac_free) {}
+    /// Error text of the last failed query on this Jacobian.
+    const char* last_error() const { return ffi::fit_jac_error(j_); }
+    /// Number of residual rows.
+    uint64_t num_residuals() const {
+        return ffi::fit_jac_num_residuals(j_);
+    }
+    /// Number of parameter columns.
+    uint64_t num_params() const {
+        return ffi::fit_jac_num_params(j_);
+    }
+    /// Singular values, descending, always f64 (near-zero values
+    /// count the free DOF). `column_normalised` scales each column
+    /// to unit L2 norm first, so the spectrum reflects row-space
+    /// rank alone, not per-parameter scale.
+    std::vector<double> singular_values(bool column_normalised = false) const {
+        std::vector<double> out;
+        out.resize(size_t(ck_(ffi::fit_jac_singular_values(
+            j_, column_normalised, nullptr, 0))));
+        if (!out.empty())
+            ck_(ffi::fit_jac_singular_values(
+                j_, column_normalised, out.data(), out.size()));
+        return out;
+    }
+    /// L2 norm of each Jacobian column, in parameter-index order.
+    std::vector<double> column_l2_norms() const {
+        std::vector<double> out;
+        out.resize(size_t(ck_(ffi::fit_jac_column_l2_norms(
+            j_, nullptr, 0))));
+        if (!out.empty())
+            ck_(ffi::fit_jac_column_l2_norms(
+                j_, out.data(), out.size()));
+        return out;
+    }
+
+private:
+    /// A caught Rust panic (-2) throws.
+    int64_t ck_(int64_t n) const {
+        if (n == -2) throw PanicError(ffi::fit_jac_error(j_));
+        return n;
+    }
+    ffi::FitJac* j_;
+    std::shared_ptr<void> guard_;
+};
+
 /// The `Fit` model. Owns the Rust-side object; move-only.
 class Fit {
 public:
@@ -1332,6 +1392,14 @@ public:
             out.emplace_back(ffi::fit_cost_table_name(h_, uint32_t(i)),
                              ffi::fit_cost_table_value(h_, uint32_t(i)));
         return out;
+    }
+    /// The sparse Jacobian at the current parameters (a snapshot).
+    /// Throws PanicError on a caught Rust panic.
+    Jacobian calc_jacobian() {
+        ffi::FitJac* j = nullptr;
+        if (ffi::fit_calc_jacobian(h_, &j) != 0)
+            throw PanicError(last_error());
+        return Jacobian(j);
     }
 
     /// Prepare the covariance at the current (solved) parameters; query

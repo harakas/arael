@@ -120,6 +120,22 @@ int main() {
     for (const auto& row : ct)
         p((std::string("ct_") + row.first).c_str(), row.second);
 
+    // Jacobian diagnostics (owned snapshot).
+    auto jac = fit.calc_jacobian();
+    pi("jac_m", long(jac.num_residuals()));
+    pi("jac_n", long(jac.num_params()));
+    auto sv = jac.singular_values();
+    pi("jac_sv_n", long(sv.size()));
+    p("jac_sv0", sv.front());
+    p("jac_sv_last", sv.back());
+    auto svn = jac.singular_values(true);
+    p("jac_svn0", svn.front());
+    p("jac_svn_last", svn.back());
+    auto cn = jac.column_l2_norms();
+    pi("jac_cn_n", long(cn.size()));
+    p("jac_cn0", cn.front());
+    p("jac_cn_last", cn.back());
+
     Fit fit2;
     fill(fit2);
     LmResult r2 = fit2.solve_sparse(cfg).value();

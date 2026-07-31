@@ -1076,6 +1076,119 @@ pub unsafe extern "C" fn fit_cost_table_value(h: *const FitHandle, i: u32) -> f6
     hh.cost_table[i as usize].1
 }
 
+/// A computed Jacobian, owned by the caller (release with
+/// fit_jac_free). A snapshot of the current parameters: later
+/// solves or edits do not touch it.
+pub struct FitJac {
+    jac: arael::model::Jacobian<f64>,
+    text: CString,
+}
+
+fn jac_text(j: &mut FitJac, msg: &str) {
+    j.text = CString::new(msg.replace('\0', " ")).unwrap_or_default();
+}
+
+/// Error text of the last failed query on this Jacobian.
+#[no_mangle]
+pub unsafe extern "C" fn fit_jac_error(j: *const FitJac) -> *const c_char {
+    (&*j).text.as_ptr()
+}
+
+/// Release a Jacobian. Null is fine.
+#[no_mangle]
+pub unsafe extern "C" fn fit_jac_free(j: *mut FitJac) {
+    if !j.is_null() {
+        drop(Box::from_raw(j));
+    }
+}
+
+/// The sparse Jacobian at the current parameters. 0 with the owned
+/// box in `out`; -2 (panic, text via fit_last_error).
+#[no_mangle]
+pub unsafe extern "C" fn fit_calc_jacobian(h: *mut FitHandle, out: *mut *mut FitJac) -> i32 {
+    let hh = &mut *h;
+    *out = std::ptr::null_mut();
+    match catch_unwind(AssertUnwindSafe(|| {
+        let mut params = Vec::new();
+        hh.model.serialize64(&mut params);
+        arael::model::JacobianModel::calc_jacobian(&mut hh.model, &params)
+    })) {
+        Ok(j) => {
+            *out = Box::into_raw(Box::new(FitJac {
+                jac: j,
+                text: CString::default(),
+            }));
+            set_text(hh, "");
+            0
+        }
+        Err(p) => {
+            let msg = panic_text(p);
+            set_text(hh, &msg);
+            -2
+        }
+    }
+}
+
+/// Number of residual rows.
+#[no_mangle]
+pub unsafe extern "C" fn fit_jac_num_residuals(j: *const FitJac) -> u64 {
+    (&*j).jac.num_residuals() as u64
+}
+
+/// Number of parameter columns.
+#[no_mangle]
+pub unsafe extern "C" fn fit_jac_num_params(j: *const FitJac) -> u64 {
+    (&*j).jac.num_params as u64
+}
+
+/// Singular values, descending, always f64. `column_normalised`
+/// scales each column to unit L2 norm first, so the spectrum
+/// reflects rank alone (near-zero values count the free DOF). Copies
+/// up to `cap` values into `out` and returns the total count (cap 0
+/// sizes the buffer); -2 (panic, text via fit_jac_error).
+#[no_mangle]
+pub unsafe extern "C" fn fit_jac_singular_values(j: *mut FitJac, column_normalised: bool, out: *mut f64, cap: u64) -> i64 {
+    let jj = &mut *j;
+    match catch_unwind(AssertUnwindSafe(|| if column_normalised {
+        jj.jac.singular_values_column_normalised()
+    } else {
+        jj.jac.singular_values()
+    })) {
+        Ok(sv) => {
+            for (i, v) in sv.iter().take(cap as usize).enumerate() {
+                *out.add(i) = *v;
+            }
+            sv.len() as i64
+        }
+        Err(p) => {
+            let msg = panic_text(p);
+            jac_text(jj, &msg);
+            -2
+        }
+    }
+}
+
+/// L2 norm of each Jacobian column, in parameter-index order. Copies
+/// up to `cap` values into `out` and returns the total count (cap 0
+/// sizes the buffer); -2 (panic, text via fit_jac_error).
+#[no_mangle]
+pub unsafe extern "C" fn fit_jac_column_l2_norms(j: *mut FitJac, out: *mut f64, cap: u64) -> i64 {
+    let jj = &mut *j;
+    match catch_unwind(AssertUnwindSafe(|| jj.jac.column_l2_norms())) {
+        Ok(norms) => {
+            for (i, v) in norms.iter().take(cap as usize).enumerate() {
+                *out.add(i) = *v;
+            }
+            norms.len() as i64
+        }
+        Err(p) => {
+            let msg = panic_text(p);
+            jac_text(jj, &msg);
+            -2
+        }
+    }
+}
+
 /// An assembled covariance, owned by the caller (release with
 /// fit_cov_free). Independent of later assemblies; entity
 /// arguments to its queries must come from the live model.

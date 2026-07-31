@@ -115,6 +115,22 @@ pi("ct_n", len(ct))
 for name in sorted(ct):
     p("ct_" + name, ct[name])
 
+# Jacobian diagnostics (owned snapshot).
+jac = f.calc_jacobian()
+pi("jac_m", jac.num_residuals)
+pi("jac_n", jac.num_params)
+sv = jac.singular_values()
+pi("jac_sv_n", len(sv))
+p("jac_sv0", sv[0])
+p("jac_sv_last", sv[-1])
+svn = jac.singular_values(True)
+p("jac_svn0", svn[0])
+p("jac_svn_last", svn[-1])
+cn = jac.column_l2_norms()
+pi("jac_cn_n", len(cn))
+p("jac_cn0", cn[0])
+p("jac_cn_last", cn[-1])
+
 fit2 = fit.Fit()
 fill(fit2)
 r2 = fit2.solve_sparse(cfg)

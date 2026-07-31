@@ -177,6 +177,13 @@ views are named by their container's nature: `PathPosesDeque`,
   per-constraint cost breakdown, label -> that group's robustified
   cost, sorted by label and summing to `cost()`. Labels come from
   `name = "..."` on the constraint attribute, else the struct name.
+- **calc_jacobian()** -- same gate: an owned snapshot of the sparse
+  Jacobian for DOF/rank analysis. `num_residuals()` / `num_params()`,
+  `singular_values()` (descending, always f64; pass `true` to
+  column-normalise first, so near-zero values count the free DOF
+  without per-parameter scale leaking in), `column_l2_norms()`.
+  Copies share it, the last copy releases it; later solves or edits
+  do not touch it.
 - **Reports and the plan**: the returned `LmResult` owns the full
   Rust-side result. `r.report()` / `r.pretty_report()` render it --
   status, costs, iterations, the timing breakdown, the backend's

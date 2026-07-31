@@ -271,6 +271,18 @@ not -- the DOF/rank analysis the `jacobian` opt-in exists for.
 Minimum viable: `{root}_singular_values(out, cap)` +
 `_column_l2_norms` + `_num_residuals`.
 
+[DONE 2026-07-31] `{root_sn}_calc_jacobian(h, out)` boxes an owned
+`{root}Jac` snapshot (same lifecycle as `{root}Cov`: `jac_error` /
+`jac_free`, panics -2 with text). Queries: `jac_num_residuals` /
+`jac_num_params`, `jac_singular_values(j, column_normalised, out,
+cap)` (raw and column-normalised spectra), `jac_column_l2_norms` --
+copy-up-to-cap, total returned, cap 0 sizes. C++ `calc_jacobian()`
+-> `Jacobian` class, Python `calc_jacobian()` -> `Jacobian` with
+properties/list methods. Gated on the sidecar `jacobian` flag like
+cost_table. Parity pins the counts and both spectra's extremes
+exactly (`jac_*`). The full `svd()` (U/V factors) stays Rust-side
+[on demand].
+
 ### 12. Gradient check with a chosen tolerance [S-M]
 
 `check_gradients_tol` has no FFI entry; `validate()` runs the check

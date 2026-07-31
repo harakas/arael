@@ -649,7 +649,69 @@ public:
         cpp.ffi.push_str(&format!(
             "int32_t {root_sn}_cost_table({root}*);\n\
              const char* {root_sn}_cost_table_name(const {root}*, uint32_t);\n\
-             double {root_sn}_cost_table_value(const {root}*, uint32_t);\n"));
+             double {root_sn}_cost_table_value(const {root}*, uint32_t);\n\
+             struct {root}Jac;\n\
+             int32_t {root_sn}_calc_jacobian({root}*, {root}Jac**);\n\
+             const char* {root_sn}_jac_error(const {root}Jac*);\n\
+             void {root_sn}_jac_free({root}Jac*);\n\
+             uint64_t {root_sn}_jac_num_residuals(const {root}Jac*);\n\
+             uint64_t {root_sn}_jac_num_params(const {root}Jac*);\n\
+             int64_t {root_sn}_jac_singular_values({root}Jac*, bool, double*, uint64_t);\n\
+             int64_t {root_sn}_jac_column_l2_norms({root}Jac*, double*, uint64_t);\n"));
+        cpp.body.push_str(&format!(
+"/// A computed Jacobian (root.calc_jacobian), OWNED: copies share
+/// it, the last copy releases it. A snapshot of the parameters at
+/// the call; later solves or edits do not touch it.
+class Jacobian {{
+public:
+    Jacobian() : j_(nullptr) {{}}
+    explicit Jacobian(ffi::{root}Jac* j)
+        : j_(j), guard_(j, ffi::{root_sn}_jac_free) {{}}
+    /// Error text of the last failed query on this Jacobian.
+    const char* last_error() const {{ return ffi::{root_sn}_jac_error(j_); }}
+    /// Number of residual rows.
+    uint64_t num_residuals() const {{
+        return ffi::{root_sn}_jac_num_residuals(j_);
+    }}
+    /// Number of parameter columns.
+    uint64_t num_params() const {{
+        return ffi::{root_sn}_jac_num_params(j_);
+    }}
+    /// Singular values, descending, always f64 (near-zero values
+    /// count the free DOF). `column_normalised` scales each column
+    /// to unit L2 norm first, so the spectrum reflects row-space
+    /// rank alone, not per-parameter scale.
+    std::vector<double> singular_values(bool column_normalised = false) const {{
+        std::vector<double> out;
+        out.resize(size_t(ck_(ffi::{root_sn}_jac_singular_values(
+            j_, column_normalised, nullptr, 0))));
+        if (!out.empty())
+            ck_(ffi::{root_sn}_jac_singular_values(
+                j_, column_normalised, out.data(), out.size()));
+        return out;
+    }}
+    /// L2 norm of each Jacobian column, in parameter-index order.
+    std::vector<double> column_l2_norms() const {{
+        std::vector<double> out;
+        out.resize(size_t(ck_(ffi::{root_sn}_jac_column_l2_norms(
+            j_, nullptr, 0))));
+        if (!out.empty())
+            ck_(ffi::{root_sn}_jac_column_l2_norms(
+                j_, out.data(), out.size()));
+        return out;
+    }}
+
+private:
+    /// A caught Rust panic (-2) throws.
+    int64_t ck_(int64_t n) const {{
+        if (n == -2) throw PanicError(ffi::{root_sn}_jac_error(j_));
+        return n;
+    }}
+    ffi::{root}Jac* j_;
+    std::shared_ptr<void> guard_;
+}};
+
+"));
     }
     let extra_includes = if model.jacobian {
         "#include <utility>\n"
@@ -671,6 +733,14 @@ public:
             out.emplace_back(ffi::{root_sn}_cost_table_name(h_, uint32_t(i)),
                              ffi::{root_sn}_cost_table_value(h_, uint32_t(i)));
         return out;
+    }}
+    /// The sparse Jacobian at the current parameters (a snapshot).
+    /// Throws PanicError on a caught Rust panic.
+    Jacobian calc_jacobian() {{
+        ffi::{root}Jac* j = nullptr;
+        if (ffi::{root_sn}_calc_jacobian(h_, &j) != 0)
+            throw PanicError(last_error());
+        return Jacobian(j);
     }}
 ")
     } else {
