@@ -300,10 +300,10 @@ def main():
     cfg_lm = pathmod.LmConfig.well_conditioned()
     cfg_lm.verbose = True
     cfg_lm.gather_timing = True
-    path.solve_sparse(cfg_lm)  # raises on failure
+    r = path.solve_sparse(cfg_lm)  # raises on failure
     # The result prints itself: status, cost, where the time went --
     # rendered by the Rust side from the full solve result.
-    print("\n%s\n" % path.last_pretty_report(), flush=True)
+    print("\n%s\n" % r.pretty_report(), flush=True)
 
     print("-- Pose errors vs GT --")
     est_poses = []

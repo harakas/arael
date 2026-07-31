@@ -745,10 +745,11 @@ in priority order:
    (`has_timing` flags validity; the per-step records stay
    Rust-side). Counts are parity-pinned (deterministic), durations
    as positivity.
-3. **report() / pretty_report().** SHIPPED 2026-07-25: the handle
-   keeps the last completed LmResult and `last_report(pretty)`
-   renders it Rust-side on demand (carrying SolverReport and timing
-   that the C mirror drops), exposed like last_error.
+3. **report() / pretty_report().** SHIPPED 2026-07-25 as handle-held
+   `last_report(pretty)`; superseded 2026-07-31: the result itself
+   owns the boxed Rust LmResult and renders its own reports/plan,
+   and the model-level last_report is gone (docs/dev/EXPORT.md
+   item 4).
 4. **LmSession warm reuse** -- in TODO.md; the one real performance
    gap (ramps re-analyze sparsity every pass).
 5. **conditional_cov** -- SHIPPED 2026-07-25 as

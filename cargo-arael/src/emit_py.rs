@@ -126,8 +126,9 @@ fn collection_py(
 
     let mut cls = format!(
 "class {view}:
-    \"\"\"View of `{field}` ({} of {elem}); wrappers stay valid per the
-    C++ contract, mutating while iterating is undefined.\"\"\"
+    \"\"\"View of `{field}` ({} of {elem}); element wrappers re-resolve
+    their pointer by key on every access, so growing the collection
+    cannot leave them dangling. Mutating while iterating is undefined.\"\"\"
 
     __slots__ = (\"_p\",)
 
@@ -483,7 +484,11 @@ fn field_py(
 "));
         }
         "collection" => collection_py(py, owner, prefix, owner_cls, f)?,
-        "skip" | "opaque" | "self_block" | "cross_block" | "triplet_block" => {}
+        "opaque" => {
+            owner_cls.push_str(&format!(
+                "    # field `{name}`: {of} -- opaque, no accessor generated\n\n"));
+        }
+        "skip" | "self_block" | "cross_block" | "triplet_block" => {}
         other => return Err(format!("`{owner}.{name}`: kind `{other}`?")),
     }
     Ok(())
@@ -699,10 +704,15 @@ class Covariance:
     sig(&mut py, &format!("{root_sn}_free"), &["ctypes.c_void_p"], "None");
     sig(&mut py, &format!("{root_sn}_last_error"), &["ctypes.c_void_p"],
         "ctypes.c_char_p");
-    sig(&mut py, &format!("{root_sn}_last_report"),
-        &["ctypes.c_void_p", "ctypes.c_bool"], "ctypes.c_char_p");
     sig(&mut py, &format!("{root_sn}_validate"), &["ctypes.c_void_p"],
         "ctypes.c_char_p");
+    sig(&mut py, &format!("{root_sn}_result_report"),
+        &["ctypes.c_void_p", "ctypes.c_bool"], "ctypes.c_char_p");
+    sig(&mut py, &format!("{root_sn}_result_plan"),
+        &["ctypes.c_void_p", "ctypes.POINTER(_solver.SchurPlan)"],
+        "ctypes.c_bool");
+    sig(&mut py, &format!("{root_sn}_result_free"), &["ctypes.c_void_p"],
+        "None");
     sig(&mut py, &format!("{root_sn}_cost"), &["ctypes.c_void_p"],
         "ctypes.c_double");
     sig(&mut py, &format!("{root_sn}_lm_config"),
@@ -739,7 +749,8 @@ class Covariance:
 
     def _solved(self, code, res):
         if code < 0:
-            raise AraelError(code, _err(self._p))
+            raise AraelError(code, _err(self._p),
+                             res if res._detail else None)
         return res
 
     def solve_dense(self, cfg=None):
@@ -782,14 +793,6 @@ class Covariance:
 
     def last_error(self):
         return _err(self._p)
-
-    def last_report(self):
-        \"\"\"Text report of the last completed solve; '' before one.\"\"\"
-        return _f.{root_sn}_last_report(self._p, False).decode()
-
-    def last_pretty_report(self):
-        \"\"\"last_report() with colour and box-drawing glyphs.\"\"\"
-        return _f.{root_sn}_last_report(self._p, True).decode()
 
 ");
     for f in &root_ty.fields {
@@ -839,7 +842,8 @@ import os
 
 from . import _{root_sn}_ffi as _f
 from .arael import math as _m
-from .arael.solver import AraelError, CovMode, LmPreset, LmStatus
+from .arael.solver import (AraelError, CovMode, LmPreset, LmStatus,
+                           LmTiming, ReducedOrdering, SchurPlan)
 
 LmIter = _f.LmIter
 
@@ -905,9 +909,45 @@ class LmConfig(_f.LmConfigRaw):
     def well_conditioned(cls):
         return cls(LmPreset.WELL_CONDITIONED)
 
+    @classmethod
+    def ill_conditioned(cls):
+        return cls(LmPreset.ILL_CONDITIONED)
+
 
 class LmResult(_f.LmResultRaw):
-    \"\"\"A completed solve (see arael.solver for the fields).\"\"\"
+    \"\"\"A completed solve (see arael.solver for the fields); owns the
+    full Rust-side result until garbage collected.\"\"\"
+
+    def report(self):
+        \"\"\"Text report: status, cost, iterations, damping, plus the
+        timing breakdown and the backend's plan when gathered.\"\"\"
+        if not self._detail:
+            return \"\"
+        return _f.{root_sn}_result_report(self._detail, False).decode()
+
+    def pretty_report(self):
+        \"\"\"report() with colour and box-drawing glyphs.\"\"\"
+        if not self._detail:
+            return \"\"
+        return _f.{root_sn}_result_report(self._detail, True).decode()
+
+    @property
+    def plan(self):
+        \"\"\"The sparse backend's SchurPlan, or None when the solve
+        carried none (dense and band solves).\"\"\"
+        p = SchurPlan()
+        if self._detail and _f.{root_sn}_result_plan(self._detail,
+                                                     ctypes.byref(p)):
+            return p
+        return None
+
+    def __del__(self):
+        d, self._detail = self._detail, None
+        if d:
+            try:
+                _f.{root_sn}_result_free(d)
+            except Exception:
+                pass
 
 
 {body}", body = py.body);

@@ -11,13 +11,15 @@ import enum
 
 class AraelError(Exception):
     """A failed solve (status < 0), a caught Rust panic, or a failed
-    covariance query; carries the status code and the last_error
-    text."""
+    covariance query; carries the status code, the last_error text,
+    and -- for a solve that got past its first assembly -- the
+    partial LmResult."""
 
-    def __init__(self, status, message):
+    def __init__(self, status, message, partial=None):
         super().__init__("%s (status %d)" % (message, status))
         self.status = int(status)
         self.message = message
+        self.partial = partial
 
 
 class LmStatus(enum.IntEnum):
@@ -39,15 +41,85 @@ class LmStatus(enum.IntEnum):
 
 
 class LmPreset(enum.IntEnum):
+    """The base preset a config starts from; it also supplies the one
+    Rust field the struct does not expose, the lambda driver.
+    ILL_CONDITIONED selects the Nielsen driver (its other fields match
+    CONSERVATIVE); DEFAULTS and CONSERVATIVE are the same config."""
     DEFAULTS = 0
     CONSERVATIVE = 1
     WELL_CONDITIONED = 2
+    ILL_CONDITIONED = 3
 
 
 class CovMode(enum.IntEnum):
     PER_QUERY = 0
     ALL_MARGINALS = 1
     TRI_DIAGONAL = 2
+
+
+class ReducedOrdering(enum.IntEnum):
+    """How the reduced system was ordered (matches the Rust enum)."""
+    NATURAL_BANDED = 0
+    NATURAL_DENSE = 1
+    AMD = 2
+    ND = 3
+
+
+class _OptDouble(ctypes.Structure):
+    _fields_ = [("has", ctypes.c_bool), ("v", ctypes.c_double)]
+
+
+class _OptU32(ctypes.Structure):
+    _fields_ = [("has", ctypes.c_bool), ("v", ctypes.c_uint32)]
+
+
+class _OptI32(ctypes.Structure):
+    _fields_ = [("has", ctypes.c_bool), ("v", ctypes.c_int32)]
+
+
+class _RouteFlops(ctypes.Structure):
+    _fields_ = [("reduced", ctypes.c_double), ("full", ctypes.c_double)]
+
+
+class _OptRouteFlops(ctypes.Structure):
+    _fields_ = [("has", ctypes.c_bool), ("v", _RouteFlops)]
+
+
+def _plan_opt(field, shape):
+    """Read-only property mapping an {has, v} field to a value or None."""
+
+    def get(self):
+        c = getattr(self, field)
+        return shape(c.v) if c.has else None
+
+    return property(get)
+
+
+class SchurPlan(ctypes.Structure):
+    """What the sparse backend decided (mirror of the Rust SchurPlan):
+    whether the Schur reduction ran, what it eliminated, how the
+    factored system was ordered, and the evidence behind the Auto
+    decisions. `envelope` says the system was factored in block form
+    under its envelope; optional statistics read as None when absent."""
+    _fields_ = [
+        ("reduced", ctypes.c_bool),
+        ("eliminated_blocks", ctypes.c_uint32),
+        ("eliminated_params", ctypes.c_uint32),
+        ("kept_params", ctypes.c_uint32),
+        ("_fill_ratio", _OptDouble),
+        ("_route_flops", _OptRouteFlops),
+        ("_cg_iterations", _OptU32),
+        ("_flop_ratio", _OptDouble),
+        ("_ordering", _OptI32),
+        ("kept_bandwidth", ctypes.c_uint32),
+        ("envelope", ctypes.c_bool),
+    ]
+
+    fill_ratio = _plan_opt("_fill_ratio", float)
+    route_flops = _plan_opt("_route_flops", lambda v: (v.reduced, v.full))
+    cg_iterations = _plan_opt("_cg_iterations", int)
+    flop_ratio = _plan_opt("_flop_ratio", float)
+    ordering = _plan_opt("_ordering", ReducedOrdering)
 
 
 class LmTiming(ctypes.Structure):
@@ -186,7 +258,10 @@ def lm_types(fp):
 
     class LmResult(ctypes.Structure):
         """A completed solve: costs, iterations, status, damping, and
-        (when gathered) the timing breakdown."""
+        (when gathered) the timing breakdown. `_detail` owns the full
+        Rust-side result; the generated module's LmResult subclass
+        renders reports and the backend plan from it and frees it on
+        garbage collection."""
         _fields_ = [
             ("start_cost", fp),
             ("end_cost", fp),
@@ -196,6 +271,7 @@ def lm_types(fp):
             ("final_lambda", fp),
             ("_timing", LmTiming),
             ("has_timing", ctypes.c_bool),
+            ("_detail", ctypes.c_void_p),
         ]
 
         @property

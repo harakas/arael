@@ -56,6 +56,17 @@ int main() {
     pi("cfg_time_has", defs.time_limit_seconds.has_value() ? 1 : 0);
     p("cfg_wc_lambda", LmConfig::well_conditioned().initial_lambda);
 
+    // The ill_conditioned preset selects the Nielsen lambda driver;
+    // its exposed fields equal conservative's, so only a solve's
+    // trajectory can pin that the driver crossed the FFI.
+    Fit fic;
+    fill(fic);
+    LmResult ric = fic.solve_dense(LmConfig::ill_conditioned()).value();
+    pi("ic_status", long(ric.status));
+    pi("ic_iters", ric.iterations);
+    p("ic_end", ric.end_cost);
+    p("ic_lambda", ric.final_lambda);
+
     LmConfig cfg;
     cfg.max_iters = 50;
     LmResult r = fit.solve_dense(cfg).value();
@@ -88,9 +99,27 @@ int main() {
     p("sparse_m", fit2.m());
     p("sparse_c", fit2.c());
 
+    // The sparse backend's plan crosses as data; a dense result
+    // carries none.
+    auto plan2 = r2.plan();
+    pi("plan_has", plan2.has_value() ? 1 : 0);
+    pi("plan_reduced", plan2.has_value() && plan2->reduced ? 1 : 0);
+    pi("plan_elim_blocks", plan2.has_value() ? plan2->eliminated_blocks : 0);
+    pi("plan_elim_params", plan2.has_value() ? plan2->eliminated_params : 0);
+    pi("plan_kept_params", plan2.has_value() ? plan2->kept_params : 0);
+    pi("plan_bandwidth", plan2.has_value() ? plan2->kept_bandwidth : 0);
+    pi("plan_envelope", plan2.has_value() && plan2->envelope ? 1 : 0);
+    pi("plan_ordering", plan2.has_value() && plan2->ordering.has_value()
+        ? long(plan2->ordering.value()) : -1);
+    pi("plan_flop_ratio_has",
+       plan2.has_value() && plan2->flop_ratio.has_value() ? 1 : 0);
+    p("plan_flop_ratio", plan2.has_value() && plan2->flop_ratio.has_value()
+        ? plan2->flop_ratio.value() : -1.0);
+    pi("plan_dense_none", r.plan().has_value() ? 0 : 1);
+
     // Observer callback + timing + report + conditional covariance.
     Fit f7;
-    pi("report_empty_before", std::strlen(f7.last_report()) == 0 ? 1 : 0);
+    pi("report_default_empty", std::strlen(LmResult().report()) == 0 ? 1 : 0);
     fill(f7);
     LmConfig cfg7 = cfg;
     cfg7.gather_timing = true;
@@ -111,12 +140,17 @@ int main() {
     pi("tm_assembly_count", r7.timing.assembly_count);
     pi("tm_solve_count", r7.timing.linear_solve_count);
     pi("tm_cost_count", r7.timing.cost_eval_count);
-    pi("report_nonempty", std::strlen(f7.last_report()) > 0 ? 1 : 0);
-    pi("report_pretty_nonempty", std::strlen(f7.last_pretty_report()) > 0 ? 1 : 0);
+    pi("report_nonempty", std::strlen(r7.report()) > 0 ? 1 : 0);
+    pi("report_pretty_nonempty", std::strlen(r7.pretty_report()) > 0 ? 1 : 0);
     auto cov7 = f7.assemble_covariance(CovMode::AllMarginals).value();
     double cc[1];
     pi("cond_n", cov7.conditional(f7.items()[0], cc, 1));
     p("cond_item0", cc[0]);
+    // The report lives on the result: another solve on the same model
+    // must not disturb it.
+    std::string rep7 = r7.report();
+    f7.solve_dense(cfg).value();
+    pi("report_survives_next_solve", rep7 == r7.report() ? 1 : 0);
 
     // Compound params: the universal euler-angle param, the quaternion
     // param, and a user component, pinned to rotation-row targets.
@@ -385,6 +419,8 @@ int main() {
     SolveResult rb = bad.solve_dense(cfg);
     pi("bad_status", long(rb.is_err() ? rb.error().status : rb.value().status));
     pi("bad_has_error", rb.is_err() && std::strlen(rb.error().message) > 0 ? 1 : 0);
+    pi("bad_partial_has",
+       rb.is_err() && rb.error().partial.has_value() ? 1 : 0);
 
     return 0;
 }

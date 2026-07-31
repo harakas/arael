@@ -18,8 +18,11 @@ sequence is, never required).
   but fields are properties, collections speak `len`/`[]`/iteration,
   absent options are `None`, and solve failures raise. No invented
   vocabulary.
-- **Relaxed contract, same as C++.** Wrappers hold raw pointers;
-  validity discipline is the caller's. One model, one thread.
+- **Relaxed contract.** One model, one thread. Element wrappers
+  re-resolve their pointer by key (index or ref) on every access
+  instead of caching it, so collection growth cannot dangle them --
+  the one place the skins diverge: C++ keeps raw pointers and the
+  vector invalidation rule.
 - **Self-contained output.** The generated package vendors its own
   copy of the support library (math, camera, g2o, solver mirrors),
   like the C++ tree vendors `arael/*.hpp`. `import` works with one
@@ -128,7 +131,7 @@ f.marks[mark].t = 0.4            # __getitem__ by ref (arena) /
                                  # index (vec, deque)
 cov = f.assemble_covariance(CovMode.ALL_MARGINALS)
 print(cov.marginal(f.items[0]))  # 1x1 -> float
-print(f.last_report())
+print(r.report())                # the result renders itself
 ```
 
 ## Field-kind mapping (the emitter's table)
@@ -174,8 +177,10 @@ ref only.
   `AraelError(status, last_error_text)` -- the Err side of the C++
   `result`, as an exception. `cfg.gather_timing = True` fills
   `r.timing`.
-- **Reports**: `m.last_report()` / `m.last_pretty_report()` return
-  `str`. `m.cost()`, `m.validate()` (returns "" when clean) as in C++.
+- **Reports**: `r.report()` / `r.pretty_report()` on the result
+  return `str`; `r.plan` is the backend's SchurPlan or None (moved
+  onto the result 2026-07-31, EXPORT.md item 4). `m.cost()`,
+  `m.validate()` (returns "" when clean) as in C++.
 
 ## Covariance
 
@@ -224,7 +229,7 @@ Each `main.py` inserts the sibling `../model/python` on `sys.path`
 and states the one build command it needs. Content:
 
 - **slam2d_simple_demo**: world gen with `random.Random`, compose,
-  verbose + gather_timing solve, `last_pretty_report()`, pose and
+  verbose + gather_timing solve, the result's `pretty_report()`, pose and
   landmark errors, covariance ellipses (matrix2 symmetric_eigen), the
   same hand-rolled EPS plot (stdlib file I/O -- no matplotlib).
 - **slam_demo_gm**: the graduated ramp, re-anchoring, relative

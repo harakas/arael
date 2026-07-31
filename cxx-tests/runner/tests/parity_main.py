@@ -62,6 +62,17 @@ pi("cfg_grad_has", 1 if defs.gradient_tolerance is not None else 0)
 pi("cfg_time_has", 1 if defs.time_limit_seconds is not None else 0)
 p("cfg_wc_lambda", fit.LmConfig.well_conditioned().initial_lambda)
 
+# The ill_conditioned preset selects the Nielsen lambda driver; its
+# exposed fields equal conservative's, so only a solve's trajectory
+# can pin that the driver crossed the FFI.
+fic = fit.Fit()
+fill(fic)
+ric = fic.solve_dense(fit.LmConfig.ill_conditioned())
+pi("ic_status", int(ric.status))
+pi("ic_iters", ric.iterations)
+p("ic_end", ric.end_cost)
+p("ic_lambda", ric.final_lambda)
+
 cfg = fit.LmConfig()
 cfg.max_iters = 50
 r = f.solve_dense(cfg)
@@ -89,9 +100,27 @@ p("sparse_end", r2.end_cost)
 p("sparse_m", fit2.m)
 p("sparse_c", fit2.c)
 
+# The sparse backend's plan crosses as data; a dense result carries
+# none.
+plan2 = r2.plan
+pi("plan_has", 1 if plan2 is not None else 0)
+pi("plan_reduced", 1 if plan2 is not None and plan2.reduced else 0)
+pi("plan_elim_blocks", plan2.eliminated_blocks if plan2 is not None else 0)
+pi("plan_elim_params", plan2.eliminated_params if plan2 is not None else 0)
+pi("plan_kept_params", plan2.kept_params if plan2 is not None else 0)
+pi("plan_bandwidth", plan2.kept_bandwidth if plan2 is not None else 0)
+pi("plan_envelope", 1 if plan2 is not None and plan2.envelope else 0)
+pi("plan_ordering", int(plan2.ordering)
+   if plan2 is not None and plan2.ordering is not None else -1)
+pi("plan_flop_ratio_has",
+   1 if plan2 is not None and plan2.flop_ratio is not None else 0)
+p("plan_flop_ratio", plan2.flop_ratio
+  if plan2 is not None and plan2.flop_ratio is not None else -1.0)
+pi("plan_dense_none", 0 if r.plan is not None else 1)
+
 # Observer callback + timing + report + conditional covariance.
 f7 = fit.Fit()
-pi("report_empty_before", 1 if len(f7.last_report()) == 0 else 0)
+pi("report_default_empty", 1 if len(fit.LmResult().report()) == 0 else 0)
 fill(f7)
 cfg7 = fit.LmConfig()
 cfg7.max_iters = 50
@@ -115,12 +144,17 @@ pi("tm_total_pos", 1 if r7.timing.total > 0.0 else 0)
 pi("tm_assembly_count", r7.timing.assembly_count)
 pi("tm_solve_count", r7.timing.linear_solve_count)
 pi("tm_cost_count", r7.timing.cost_eval_count)
-pi("report_nonempty", 1 if len(f7.last_report()) > 0 else 0)
-pi("report_pretty_nonempty", 1 if len(f7.last_pretty_report()) > 0 else 0)
+pi("report_nonempty", 1 if len(r7.report()) > 0 else 0)
+pi("report_pretty_nonempty", 1 if len(r7.pretty_report()) > 0 else 0)
 cov7 = f7.assemble_covariance()
 cc = cov7.conditional(f7.items[0])
 pi("cond_n", 1 if isinstance(cc, float) else 0)
 p("cond_item0", cc)
+# The report lives on the result: another solve on the same model
+# must not disturb it.
+rep7 = r7.report()
+f7.solve_dense(cfg)
+pi("report_survives_next_solve", 1 if rep7 == r7.report() else 0)
 
 # Compound params: universal euler, quaternion param, user component.
 f10 = fit.Fit()
@@ -345,9 +379,11 @@ try:
     bad.solve_dense(cfg)
     pi("bad_status", 0)
     pi("bad_has_error", 0)
+    pi("bad_partial_has", 0)
 except AraelError as e:
     pi("bad_status", e.status)
     pi("bad_has_error", 1 if len(e.message) > 0 else 0)
+    pi("bad_partial_has", 1 if e.partial is not None else 0)
 
 # A wrapper is keyed, not a cached pointer: growing the collection past its
 # capacity must not leave an earlier wrapper reading the old buffer. Checked

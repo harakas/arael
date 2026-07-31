@@ -10,7 +10,8 @@ import os
 
 from . import _path_ffi as _f
 from .arael import math as _m
-from .arael.solver import AraelError, CovMode, LmPreset, LmStatus
+from .arael.solver import (AraelError, CovMode, LmPreset, LmStatus,
+                           LmTiming, ReducedOrdering, SchurPlan)
 
 LmIter = _f.LmIter
 
@@ -76,9 +77,45 @@ class LmConfig(_f.LmConfigRaw):
     def well_conditioned(cls):
         return cls(LmPreset.WELL_CONDITIONED)
 
+    @classmethod
+    def ill_conditioned(cls):
+        return cls(LmPreset.ILL_CONDITIONED)
+
 
 class LmResult(_f.LmResultRaw):
-    """A completed solve (see arael.solver for the fields)."""
+    """A completed solve (see arael.solver for the fields); owns the
+    full Rust-side result until garbage collected."""
+
+    def report(self):
+        """Text report: status, cost, iterations, damping, plus the
+        timing breakdown and the backend's plan when gathered."""
+        if not self._detail:
+            return ""
+        return _f.path_result_report(self._detail, False).decode()
+
+    def pretty_report(self):
+        """report() with colour and box-drawing glyphs."""
+        if not self._detail:
+            return ""
+        return _f.path_result_report(self._detail, True).decode()
+
+    @property
+    def plan(self):
+        """The sparse backend's SchurPlan, or None when the solve
+        carried none (dense and band solves)."""
+        p = SchurPlan()
+        if self._detail and _f.path_result_plan(self._detail,
+                                                     ctypes.byref(p)):
+            return p
+        return None
+
+    def __del__(self):
+        d, self._detail = self._detail, None
+        if d:
+            try:
+                _f.path_result_free(d)
+            except Exception:
+                pass
 
 
 class PointFeatureRef:
@@ -308,8 +345,9 @@ class PointFrine:
 
 
 class PointLandmarkFrinesVec:
-    """View of `frines` (vec of PointFrine); wrappers stay valid per the
-    C++ contract, mutating while iterating is undefined."""
+    """View of `frines` (vec of PointFrine); element wrappers re-resolve
+    their pointer by key on every access, so growing the collection
+    cannot leave them dangling. Mutating while iterating is undefined."""
 
     __slots__ = ("_p",)
 
@@ -379,8 +417,9 @@ class PointLandmark:
 
 
 class PoseInfoFeaturesVec:
-    """View of `features` (vec of PointFeature); wrappers stay valid per the
-    C++ contract, mutating while iterating is undefined."""
+    """View of `features` (vec of PointFeature); element wrappers re-resolve
+    their pointer by key on every access, so growing the collection
+    cannot leave them dangling. Mutating while iterating is undefined."""
 
     __slots__ = ("_p",)
 
@@ -684,8 +723,9 @@ class Covariance:
 
 
 class PathPosesDeque:
-    """View of `poses` (deque of Pose); wrappers stay valid per the
-    C++ contract, mutating while iterating is undefined."""
+    """View of `poses` (deque of Pose); element wrappers re-resolve
+    their pointer by key on every access, so growing the collection
+    cannot leave them dangling. Mutating while iterating is undefined."""
 
     __slots__ = ("_p",)
 
@@ -758,8 +798,9 @@ class PathPosesDeque:
 
 
 class PathLandmarksArena:
-    """View of `landmarks` (arena of PointLandmark); wrappers stay valid per the
-    C++ contract, mutating while iterating is undefined."""
+    """View of `landmarks` (arena of PointLandmark); element wrappers re-resolve
+    their pointer by key on every access, so growing the collection
+    cannot leave them dangling. Mutating while iterating is undefined."""
 
     __slots__ = ("_p",)
 
@@ -812,8 +853,9 @@ class PathLandmarksArena:
 
 
 class PathPosePairsVec:
-    """View of `pose_pairs` (vec of PosePair); wrappers stay valid per the
-    C++ contract, mutating while iterating is undefined."""
+    """View of `pose_pairs` (vec of PosePair); element wrappers re-resolve
+    their pointer by key on every access, so growing the collection
+    cannot leave them dangling. Mutating while iterating is undefined."""
 
     __slots__ = ("_p",)
 
@@ -874,7 +916,8 @@ class Path:
 
     def _solved(self, code, res):
         if code < 0:
-            raise AraelError(code, _err(self._p))
+            raise AraelError(code, _err(self._p),
+                             res if res._detail else None)
         return res
 
     def solve_dense(self, cfg=None):
@@ -917,14 +960,6 @@ class Path:
 
     def last_error(self):
         return _err(self._p)
-
-    def last_report(self):
-        """Text report of the last completed solve; '' before one."""
-        return _f.path_last_report(self._p, False).decode()
-
-    def last_pretty_report(self):
-        """last_report() with colour and box-drawing glyphs."""
-        return _f.path_last_report(self._p, True).decode()
 
     @property
     def poses(self):

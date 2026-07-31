@@ -375,8 +375,8 @@ int main() {
     }
     // The result prints itself: status, cost, where the time went --
     // rendered by the Rust side from the full solve result.
-    // last_report() is the same text in plain ASCII, for a log.
-    std::printf("\n%s\n", path.last_pretty_report());
+    // report() is the same text in plain ASCII, for a log.
+    std::printf("\n%s\n", r.value().pretty_report());
 
     std::printf("\n-- Pose errors vs GT --\n");
     std::vector<std::pair<vect2f, float>> est_poses;

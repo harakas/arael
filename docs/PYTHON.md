@@ -57,9 +57,12 @@ surface reference); the differences are Python idiom:
   `symmetric_eigen`, euler/quaternion conversions...). `arael.geometry.Camera`
   and `arael.g2o.Dataset2` complete the support library.
 - **Collections** speak Python: `len(f.obs)`, `f.obs[3]` (negative
-  indices too), `for n in f.items:`, `push`/`pop` families,
-  `ref_at`/end refs, `r in view` for containment, `try_get` returns
-  `None` for a stale ref, arena `view[ref]` and `view.refs()`.
+  indices too), `for n in f.items:`, the `push`/`pop` families,
+  `reserve`/`clear`/`truncate`. Ref lookups -- `ref_at`/end refs,
+  `r in view`, `try_get` returning `None` for a stale ref, arena
+  `view[ref]` and `view.refs()` -- exist on the refs-flavoured
+  containers (`refs::Vec`/`Deque`/`Arena`); a plain `std::vec::Vec`
+  field has index access and iteration only.
 - **Options**: `info.gps` is the entity or `None`; `make_gps()` /
   `clear_gps()`.
 - **Refs** are small typed handles (`raw`, `.valid`, equality,
@@ -67,19 +70,32 @@ surface reference); the differences are Python idiom:
 - **Solves**: `solve_dense/solve_sparse/solve_band(kd)` return an
   `LmResult` for every healthy termination and raise
   `AraelError(status, message)` for a solver failure or a caught Rust
-  panic. `cfg.observer = fn` gets an `LmIter` per damped attempt
-  (return `False` to stop); `cfg.gather_timing = True` fills
-  `r.timing`; `cfg.gradient_tolerance = 1e-8` / `= None` for the
-  optional fields. `last_report()` / `last_pretty_report()`, `cost()`,
-  `validate()` as in C++.
+  panic. `LmConfig` starts from a preset -- `defaults()`,
+  `conservative()`, `well_conditioned()`, `ill_conditioned()` -- with
+  the actual Rust values filled in. `cfg.observer = fn` gets an
+  `LmIter` per damped attempt (`it.lambda_`, `it.param(i)`,
+  `it.param_list()`; return `False` to stop); `cfg.gather_timing =
+  True` fills `r.timing`; `cfg.gradient_tolerance = 1e-8` / `= None`
+  for the optional fields. The result owns the full Rust-side solve:
+  `r.report()` / `r.pretty_report()` render it (status, costs, the
+  timing breakdown, the backend's plan) and stay valid however many
+  solves follow; `r.plan` is the sparse backend's `SchurPlan` as data
+  (`None` for dense and band solves). A failed solve raises
+  `AraelError(status, message)` whose `.partial` holds the best
+  accepted state when the solve got that far. `cost()`, `validate()`,
+  `last_error()` as in C++; a model frees on garbage collection
+  (`free()` to force it).
 - **Covariance**: `assemble_covariance(mode)` returns a view or
   raises; `marginal`/`conditional` shaped by param count (float,
   matrix2d/3d, row-major tuples), `cross(a, b)` tuples, `std_dev(e)`
   a list.
 
-Contract as in C++: wrappers are raw pointers, validity is yours, one
-model one thread. The GIL is released around foreign calls, so solves
-do not block other Python threads.
+One model, one thread. Unlike C++, element wrappers are not raw
+pointers: they re-resolve by index or ref on every access, so growing
+a collection cannot leave a held wrapper dangling (a removed arena
+slot still fails loudly through the generation check). The GIL is
+released around foreign calls, so solves do not block other Python
+threads.
 
 Worked examples live in `cxx-examples/<demo>/python/` -- each demo
 directory holds the shared model crate plus its C++ (`cxx/`) and

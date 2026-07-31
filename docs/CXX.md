@@ -132,7 +132,9 @@ views are named by their container's nature: `PathPosesDeque`,
   returning `option<X>`.
 - **LmConfig** is a plain struct holding the chosen preset's
   Rust values (fetched through the FFI at construction) -- inspect the
-  real defaults, edit fields, pass it back whole. Every Rust field is
+  real defaults, edit fields, pass it back whole. Presets:
+  `defaults()`, `conservative()`, `well_conditioned()`,
+  `ill_conditioned()` (the Nielsen lambda driver). Every Rust field is
   there except the lambda driver (the preset supplies it); Rust
   `Option` fields are `arael::option<F>`
   (`cfg.gradient_tolerance = 1e-8;` or `= {};`), `time_limit` in
@@ -146,17 +148,22 @@ views are named by their container's nature: `PathPosesDeque`,
 - **Timing**: set `cfg.gather_timing`; the result then carries
   `timing` (per-phase wall-clock seconds plus call counts,
   `has_timing` flags validity).
-- **last_report() / last_pretty_report()** on the root render the
-  Rust-side report of the last completed solve -- status, costs,
-  iterations, the timing breakdown, and the backend's plan (what the
-  sparse solver decided), which the plain result struct does not
-  carry.
+- **Reports and the plan**: the returned `LmResult` owns the full
+  Rust-side result. `r.report()` / `r.pretty_report()` render it --
+  status, costs, iterations, the timing breakdown, the backend's
+  plan -- and stay valid however many solves follow. `r.plan()`
+  returns the sparse backend's `SchurPlan` as data (reduction taken
+  or not, eliminated/kept parameters, ordering, bandwidth, envelope
+  route, the Auto policy's evidence); empty for dense and band
+  solves. Copies of a result share ownership.
 - **result / option** mirror Rust's shapes; reading the wrong side
   prints the failed check and aborts (`arael_assert_true` -- always
   on).
 - **Failures**: a solve failure or a caught Rust panic comes back as
-  `Err(SolveError{status, message})`; `validate()` returns the
-  diagnostic text ("" when clean).
+  `Err(SolveError{status, message, partial})` -- `partial` holds the
+  best accepted state when the solve got past its first assembly,
+  usable for diagnosis (its report renders like any result).
+  `validate()` returns the diagnostic text ("" when clean).
 - **Covariance**: `assemble_covariance(CovMode)` at the solution
   returns a `Covariance` view; `cov->marginal(entity)` answers the
   entity's marginal block, typed by size (1 param -> `double`, 2 ->

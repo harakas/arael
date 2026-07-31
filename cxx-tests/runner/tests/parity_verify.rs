@@ -80,6 +80,19 @@ pub fn verify(got: &std::collections::HashMap<String, f64>) {
         assert_eq!(g("cfg_wc_lambda"), LmConfig::<f64>::well_conditioned().initial_lambda);
     }
 
+    // The ill_conditioned preset selects the Nielsen lambda driver;
+    // its exposed fields equal conservative's, so only a solve's
+    // trajectory can pin that the driver crossed the FFI.
+    {
+        let mut fic = Fit::default();
+        fill(&mut fic);
+        let ric = fic.solve_dense(&LmConfig::ill_conditioned()).unwrap();
+        assert_eq!(g("ic_status"), code(&ric.status));
+        assert_eq!(g("ic_iters"), ric.iterations as f64);
+        assert_eq!(g("ic_end"), ric.end_cost);
+        assert_eq!(g("ic_lambda"), ric.final_lambda);
+    }
+
     let r = fit.solve_dense(&cfg).unwrap();
     assert!(r.status.is_success(), "{:?}", r.status);
     assert_eq!(g("dense_status"), code(&r.status));
@@ -114,6 +127,36 @@ pub fn verify(got: &std::collections::HashMap<String, f64>) {
     assert_eq!(g("sparse_m"), fit2.m.value);
     assert_eq!(g("sparse_c"), fit2.c.value);
 
+    // The sparse backend's plan crosses the FFI field for field; the
+    // dense result carries none.
+    {
+        use arael::simple_lm::{ReducedOrdering, SolverReport};
+        let plan = match &r2.solver {
+            Some(SolverReport::Schur(p)) => *p,
+            _ => panic!("rust sparse solve carried no plan"),
+        };
+        assert_eq!(g("plan_has"), 1.0);
+        assert_eq!(g("plan_reduced"), plan.reduced as u8 as f64);
+        assert_eq!(g("plan_elim_blocks"), plan.eliminated_blocks as f64);
+        assert_eq!(g("plan_elim_params"), plan.eliminated_params as f64);
+        assert_eq!(g("plan_kept_params"), plan.kept_params as f64);
+        assert_eq!(g("plan_bandwidth"), plan.kept_bandwidth as f64);
+        assert_eq!(g("plan_envelope"), plan.envelope as u8 as f64);
+        let ord = match plan.ordering {
+            Some(ReducedOrdering::NaturalBanded) => 0.0,
+            Some(ReducedOrdering::NaturalDense) => 1.0,
+            Some(ReducedOrdering::Amd) => 2.0,
+            Some(ReducedOrdering::Nd) => 3.0,
+            None => -1.0,
+        };
+        assert_eq!(g("plan_ordering"), ord);
+        assert_eq!(g("plan_flop_ratio_has"),
+            plan.flop_ratio.is_some() as u8 as f64);
+        assert_eq!(g("plan_flop_ratio"), plan.flop_ratio.unwrap_or(-1.0));
+        assert!(r.solver.is_none(), "dense result must carry no plan");
+        assert_eq!(g("plan_dense_none"), 1.0);
+    }
+
     // Observer + timing + report + conditional covariance mirrored.
     {
         use std::cell::Cell;
@@ -131,7 +174,7 @@ pub fn verify(got: &std::collections::HashMap<String, f64>) {
                 ControlFlow::Continue(())
             });
         let r7 = f7.solve_dense(&cfg7).unwrap();
-        assert_eq!(g("report_empty_before"), 1.0);
+        assert_eq!(g("report_default_empty"), 1.0);
         assert_eq!(g("obs_calls_eq_iters"),
             (calls.get() == r7.iterations as u32) as i32 as f64);
         assert_eq!(g("obs_params_len"), plen.get() as f64);
@@ -146,6 +189,7 @@ pub fn verify(got: &std::collections::HashMap<String, f64>) {
         assert!(!r7.report().is_empty());
         assert_eq!(g("report_nonempty"), 1.0);
         assert_eq!(g("report_pretty_nonempty"), 1.0);
+        assert_eq!(g("report_survives_next_solve"), 1.0);
         {
             use arael::covariance::{CovMode, Covariance};
             let cov = f7.assemble_covariance(CovMode::AllMarginals).unwrap();
@@ -409,4 +453,5 @@ pub fn verify(got: &std::collections::HashMap<String, f64>) {
         "{:?}", e.kind);
     assert_eq!(g("bad_status"), -1.0);
     assert_eq!(g("bad_has_error"), 1.0);
+    assert_eq!(g("bad_partial_has"), e.partial.is_some() as u8 as f64);
 }

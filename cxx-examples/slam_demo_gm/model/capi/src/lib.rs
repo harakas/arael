@@ -10,15 +10,21 @@ use arael::simple_lm::{LmConfig, LmProblem, LmStatus};
 use slam_demo_gm::{GpsData, Path, PointFeature, PointFrine, PointLandmark, Pose, PoseInfo, PosePair};
 
 /// The opaque handle the C ABI hands out: the model, the error /
-/// diagnostic text buffer `last_error` points into, the covariance
-/// assembly once requested, and the last completed solve result
-/// (`last_report` renders from it into `report`).
+/// diagnostic text buffer `last_error` points into, and the
+/// covariance assembly once requested.
 pub struct PathHandle {
     model: Path,
     text: CString,
-    report: CString,
     cov: Option<CovAssembly>,
-    last: Option<arael::simple_lm::LmResult<f64>>,
+}
+
+/// The Rust side of a solve result, boxed behind `CLmResult::detail`:
+/// the full `LmResult` (report text, backend plan, per-step timing)
+/// plus the buffer `path_result_report` renders into. Owned by
+/// the caller; released with `path_result_free`.
+pub struct ResultDetail {
+    result: arael::simple_lm::LmResult<f64>,
+    buf: CString,
 }
 
 macro_rules! c_vec2 {
@@ -252,12 +258,13 @@ fn preset_config(preset: u32) -> LmConfig<f64> {
     match preset {
         1 => LmConfig::conservative(),
         2 => LmConfig::well_conditioned(),
+        3 => LmConfig::ill_conditioned(),
         _ => LmConfig::default(),
     }
 }
 
 /// Fill `out` with the preset's actual Rust values (0 = defaults,
-/// 1 = conservative, 2 = well_conditioned).
+/// 1 = conservative, 2 = well_conditioned, 3 = ill_conditioned).
 #[no_mangle]
 pub unsafe extern "C" fn path_lm_config(preset: u32, out: *mut CLmConfig) {
     let c = preset_config(preset);
@@ -348,6 +355,110 @@ pub struct CLmResult {
     /// Valid iff has_timing (config.gather_timing was set).
     pub timing: CLmTiming,
     pub has_timing: bool,
+    /// The full Rust result (render it with path_result_report,
+    /// read its plan with path_result_plan). Owned by the caller:
+    /// release with path_result_free. On a failed solve it holds
+    /// the partial result when the solver produced one, else null.
+    pub detail: *mut ResultDetail,
+}
+
+/// {has, v} mirrors of `arael::option<T>` for the plan's optional
+/// statistics (layouts must match the C++ side).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct COptDouble {
+    pub has: bool,
+    pub v: f64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct COptU32 {
+    pub has: bool,
+    pub v: u32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct COptI32 {
+    pub has: bool,
+    pub v: i32,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct CRouteFlops {
+    pub reduced: f64,
+    pub full: f64,
+}
+
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct COptRouteFlops {
+    pub has: bool,
+    pub v: CRouteFlops,
+}
+
+/// Mirror of arael's SchurPlan: what the sparse backend decided.
+/// Field order is C ABI and follows the Rust struct.
+#[repr(C)]
+pub struct CSchurPlan {
+    pub reduced: bool,
+    pub eliminated_blocks: u32,
+    pub eliminated_params: u32,
+    pub kept_params: u32,
+    pub fill_ratio: COptDouble,
+    pub route_flops: COptRouteFlops,
+    pub cg_iterations: COptU32,
+    pub flop_ratio: COptDouble,
+    /// ReducedOrdering: 0 NaturalBanded, 1 NaturalDense, 2 Amd, 3 Nd.
+    pub ordering: COptI32,
+    pub kept_bandwidth: u32,
+    pub envelope: bool,
+}
+
+unsafe fn fill_plan(out: *mut CSchurPlan, p: &arael::simple_lm::SchurPlan) {
+    use arael::simple_lm::ReducedOrdering;
+    let od = |o: Option<f64>| match o {
+        Some(v) => COptDouble { has: true, v },
+        None => COptDouble { has: false, v: 0.0 },
+    };
+    *out = CSchurPlan {
+        reduced: p.reduced,
+        eliminated_blocks: p.eliminated_blocks as u32,
+        eliminated_params: p.eliminated_params as u32,
+        kept_params: p.kept_params as u32,
+        fill_ratio: od(p.fill_ratio),
+        route_flops: match p.route_flops {
+            Some((reduced, full)) => COptRouteFlops {
+                has: true,
+                v: CRouteFlops { reduced, full },
+            },
+            None => COptRouteFlops {
+                has: false,
+                v: CRouteFlops { reduced: 0.0, full: 0.0 },
+            },
+        },
+        cg_iterations: match p.cg_iterations {
+            Some(n) => COptU32 { has: true, v: n as u32 },
+            None => COptU32 { has: false, v: 0 },
+        },
+        flop_ratio: od(p.flop_ratio),
+        ordering: match p.ordering {
+            Some(o) => COptI32 {
+                has: true,
+                v: match o {
+                    ReducedOrdering::NaturalBanded => 0,
+                    ReducedOrdering::NaturalDense => 1,
+                    ReducedOrdering::Amd => 2,
+                    ReducedOrdering::Nd => 3,
+                },
+            },
+            None => COptI32 { has: false, v: 0 },
+        },
+        kept_bandwidth: p.kept_bandwidth as u32,
+        envelope: p.envelope,
+    };
 }
 
 unsafe fn zero_result(out: *mut CLmResult) {
@@ -355,6 +466,7 @@ unsafe fn zero_result(out: *mut CLmResult) {
         start_cost: 0.0, end_cost: 0.0, iterations: 0,
         accepted_iterations: 0, status: -1, final_lambda: 0.0,
         timing: CLmTiming::default(), has_timing: false,
+        detail: std::ptr::null_mut(),
     };
 }
 
@@ -389,8 +501,13 @@ unsafe fn fill_result(out: *mut CLmResult, r: &arael::simple_lm::LmResult<f64>) 
         final_lambda: r.final_lambda,
         timing,
         has_timing,
+        detail: std::ptr::null_mut(),
     };
     code
+}
+
+fn boxed(r: arael::simple_lm::LmResult<f64>) -> *mut ResultDetail {
+    Box::into_raw(Box::new(ResultDetail { result: r, buf: CString::default() }))
 }
 
 #[no_mangle]
@@ -398,9 +515,7 @@ pub extern "C" fn path_new() -> *mut PathHandle {
     Box::into_raw(Box::new(PathHandle {
         model: Default::default(),
         text: CString::default(),
-        report: CString::default(),
         cov: None,
-        last: None,
     }))
 }
 
@@ -416,20 +531,39 @@ pub unsafe extern "C" fn path_last_error(h: *const PathHandle) -> *const c_char 
     (*h).text.as_ptr()
 }
 
-/// Text report of the last completed solve (status, cost, iterations,
+/// Text report of the result behind `d` (status, cost, iterations,
 /// damping, plus the timing breakdown and the backend's plan when it
-/// has them). "" before the first solve or after a failed one.
-/// `pretty` adds colour and box-drawing glyphs. Valid until the next
-/// call to this function.
+/// has them). `pretty` adds colour and box-drawing glyphs. The
+/// pointer is valid until the next report call on the same result or
+/// path_result_free.
 #[no_mangle]
-pub unsafe extern "C" fn path_last_report(h: *mut PathHandle, pretty: bool) -> *const c_char {
-    let hh = &mut *h;
-    let text = match &hh.last {
-        Some(r) => if pretty { r.pretty_report() } else { r.report() },
-        None => String::new(),
-    };
-    hh.report = CString::new(text).unwrap_or_default();
-    hh.report.as_ptr()
+pub unsafe extern "C" fn path_result_report(d: *mut ResultDetail, pretty: bool) -> *const c_char {
+    let dd = &mut *d;
+    let text = if pretty { dd.result.pretty_report() } else { dd.result.report() };
+    dd.buf = CString::new(text.replace('\0', " ")).unwrap_or_default();
+    dd.buf.as_ptr()
+}
+
+/// The sparse backend's plan for the result behind `d`. Returns false
+/// with `out` untouched when the solve carried none (dense and band
+/// solves).
+#[no_mangle]
+pub unsafe extern "C" fn path_result_plan(d: *const ResultDetail, out: *mut CSchurPlan) -> bool {
+    match &(*d).result.solver {
+        Some(arael::simple_lm::SolverReport::Schur(p)) => {
+            fill_plan(out, p);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Release the Rust result behind a CLmResult. Null is fine.
+#[no_mangle]
+pub unsafe extern "C" fn path_result_free(d: *mut ResultDetail) {
+    if !d.is_null() {
+        drop(Box::from_raw(d));
+    }
 }
 
 /// Empty string when the model is clean, the Diagnostic text otherwise.
@@ -448,7 +582,10 @@ pub unsafe extern "C" fn path_validate(h: *mut PathHandle) -> *const c_char {
 }
 
 /// Returns the status code (>= 0: LmStatus; -1: solve failure; -2:
-/// panic). Failure text via path_last_error.
+/// panic). Failure text via path_last_error. On success (and on
+/// a failure that got past its first assembly, where `out` carries
+/// the partial result) `out.detail` owns the full Rust result --
+/// release it with path_result_free.
 #[no_mangle]
 pub unsafe extern "C" fn path_solve_dense(
     h: *mut PathHandle,
@@ -458,17 +595,20 @@ pub unsafe extern "C" fn path_solve_dense(
     let hh = &mut *h;
     let c = (*cfg).to_config();
     zero_result(out);
-    hh.last = None;
     match catch_unwind(AssertUnwindSafe(|| hh.model.solve_dense(&c))) {
         Ok(Ok(r)) => {
             let code = fill_result(out, &r);
-            hh.last = Some(r);
+            (*out).detail = boxed(r);
             set_text(hh, "");
             code
         }
         Ok(Err(f)) => {
-            set_text(hh, &format!("solve failure: {:?}", f.kind));
-            (*out).status = -1;
+            set_text(hh, &f.to_string());
+            if let Some(p) = f.partial {
+                fill_result(out, &p);
+                (*out).status = -1;
+                (*out).detail = boxed(*p);
+            }
             -1
         }
         Err(p) => {
@@ -481,7 +621,10 @@ pub unsafe extern "C" fn path_solve_dense(
 }
 
 /// Returns the status code (>= 0: LmStatus; -1: solve failure; -2:
-/// panic). Failure text via path_last_error.
+/// panic). Failure text via path_last_error. On success (and on
+/// a failure that got past its first assembly, where `out` carries
+/// the partial result) `out.detail` owns the full Rust result --
+/// release it with path_result_free.
 #[no_mangle]
 pub unsafe extern "C" fn path_solve_sparse(
     h: *mut PathHandle,
@@ -491,17 +634,20 @@ pub unsafe extern "C" fn path_solve_sparse(
     let hh = &mut *h;
     let c = (*cfg).to_config();
     zero_result(out);
-    hh.last = None;
     match catch_unwind(AssertUnwindSafe(|| hh.model.solve_sparse(&c))) {
         Ok(Ok(r)) => {
             let code = fill_result(out, &r);
-            hh.last = Some(r);
+            (*out).detail = boxed(r);
             set_text(hh, "");
             code
         }
         Ok(Err(f)) => {
-            set_text(hh, &format!("solve failure: {:?}", f.kind));
-            (*out).status = -1;
+            set_text(hh, &f.to_string());
+            if let Some(p) = f.partial {
+                fill_result(out, &p);
+                (*out).status = -1;
+                (*out).detail = boxed(*p);
+            }
             -1
         }
         Err(p) => {
@@ -515,7 +661,8 @@ pub unsafe extern "C" fn path_solve_sparse(
 
 /// Band Cholesky solve; `kd` is the Hessian half-bandwidth in scalar
 /// parameters. Returns the status code (>= 0: LmStatus; -1: solve
-/// failure; -2: panic). Failure text via path_last_error.
+/// failure; -2: panic). Failure text via path_last_error;
+/// `out.detail` as in the other solves.
 #[no_mangle]
 pub unsafe extern "C" fn path_solve_band(
     h: *mut PathHandle,
@@ -526,7 +673,6 @@ pub unsafe extern "C" fn path_solve_band(
     let hh = &mut *h;
     let c = (*cfg).to_config();
     zero_result(out);
-    hh.last = None;
     match catch_unwind(AssertUnwindSafe(|| {
         let mut x0 = Vec::new();
         hh.model.serialize64(&mut x0);
@@ -537,13 +683,17 @@ pub unsafe extern "C" fn path_solve_band(
     })) {
         Ok(Ok(r)) => {
             let code = fill_result(out, &r);
-            hh.last = Some(r);
+            (*out).detail = boxed(r);
             set_text(hh, "");
             code
         }
         Ok(Err(f)) => {
-            set_text(hh, &format!("solve failure: {:?}", f.kind));
-            (*out).status = -1;
+            set_text(hh, &f.to_string());
+            if let Some(p) = f.partial {
+                fill_result(out, &p);
+                (*out).status = -1;
+                (*out).detail = boxed(*p);
+            }
             -1
         }
         Err(p) => {

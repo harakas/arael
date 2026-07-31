@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cmath>
 #include <iterator>
+#include <memory>
 #include "arael/math.hpp"
 #include "arael/result.hpp"
 #include "arael/solver.hpp"
@@ -37,23 +38,23 @@ using arael::LmConfigT;
 using arael::LmResultT;
 using arael::LmIterT;
 using arael::LmTiming;
-using arael::SolveResultT;
-using arael::SolveError;
+using arael::SchurPlan;
+using arael::ReducedOrdering;
+using arael::RouteFlops;
 using arael::CovMode;
 using arael::CovError;
 
 /// Instantiations of the shared solver surface (arael/solver.hpp) at
 /// this model's precision, plus the config constructor that fetches
 /// the preset's actual Rust values through this root's FFI.
-using LmResult = LmResultT<double>;
 using LmIter = LmIterT<double>;
-using SolveResult = SolveResultT<double>;
 
 struct LmConfig : LmConfigT<double> {
     LmConfig(LmPreset p = LmPreset::Defaults);
     static LmConfig defaults() { return LmConfig(LmPreset::Defaults); }
     static LmConfig conservative() { return LmConfig(LmPreset::Conservative); }
     static LmConfig well_conditioned() { return LmConfig(LmPreset::WellConditioned); }
+    static LmConfig ill_conditioned() { return LmConfig(LmPreset::IllConditioned); }
 };
 
 /// Typed handle into the collection that issued it -- the C++
@@ -142,21 +143,67 @@ Prior* graph_make_prior(Graph*);
 void graph_clear_prior(Graph*);
 Prior* graph_prior(Graph*);
 double graph_cost(Graph*);
-int32_t graph_solve_band(Graph*, uint32_t, const LmConfig*, LmResult*);
+int32_t graph_solve_band(Graph*, uint32_t, const LmConfig*, LmResultT<double>*);
 void graph_lm_config(uint32_t, LmConfig*);
 Graph* graph_new(void);
 void graph_free(Graph*);
 const char* graph_last_error(const Graph*);
-const char* graph_last_report(Graph*, bool);
 const char* graph_validate(Graph*);
-int32_t graph_solve_dense(Graph*, const LmConfig*, LmResult*);
-int32_t graph_solve_sparse(Graph*, const LmConfig*, LmResult*);
+int32_t graph_solve_dense(Graph*, const LmConfig*, LmResultT<double>*);
+int32_t graph_solve_sparse(Graph*, const LmConfig*, LmResultT<double>*);
+const char* graph_result_report(void*, bool);
+bool graph_result_plan(const void*, SchurPlan*);
+void graph_result_free(void*);
 }
 } // namespace ffi
 
 inline LmConfig::LmConfig(LmPreset p) {
     ffi::graph_lm_config(uint32_t(p), this);
 }
+
+/// A completed solve: the plain result fields plus ownership of the
+/// full Rust result behind them. report()/pretty_report() render the
+/// Rust-side text (status, cost, the timing breakdown and the
+/// backend's plan when gathered); plan() returns the sparse backend's
+/// SchurPlan as data. Copies share ownership of the Rust result.
+class LmResult : public LmResultT<double> {
+public:
+    LmResult() : LmResultT<double>() {}
+    explicit LmResult(const LmResultT<double>& raw) : LmResultT<double>(raw) {
+        if (detail)
+            guard_ = std::shared_ptr<void>(detail, ffi::graph_result_free);
+    }
+    /// Text report; the pointer is valid until the next report call
+    /// on this result or the destruction of its last copy.
+    const char* report() const {
+        return detail ? ffi::graph_result_report(detail, false) : "";
+    }
+    /// report() with colour and box-drawing glyphs.
+    const char* pretty_report() const {
+        return detail ? ffi::graph_result_report(detail, true) : "";
+    }
+    /// The sparse backend's plan; empty for dense and band solves.
+    option<SchurPlan> plan() const {
+        SchurPlan p;
+        if (detail && ffi::graph_result_plan(detail, &p))
+            return p;
+        return {};
+    }
+
+private:
+    std::shared_ptr<void> guard_;
+};
+
+/// The Err side of a solve: SolverFailed or Panicked, the text from
+/// last_error() (valid until the next call on the model), and the
+/// best accepted state before the break when the solve got that far.
+struct SolveError {
+    LmStatus status;
+    const char* message;
+    option<LmResult> partial;
+};
+
+using SolveResult = result<LmResult, SolveError>;
 
 /// A `Edge` in its owner's storage; a thin pointer wrapper (validity
 /// follows the storage -- see the owning container).
@@ -474,26 +521,21 @@ public:
 
     /// Ok(LmResult) for every healthy termination, Err(SolveError) for
     /// a solve failure (-1) or a caught panic (-2) -- the same split
-    /// Rust's SolveResult makes.
+    /// Rust's SolveResult makes. The error carries the partial result
+    /// when the solver got past its first assembly.
     SolveResult solve_dense(const LmConfig& cfg = LmConfig{}) {
-        LmResult r;
-        int32_t code = ffi::graph_solve_dense(h_, &cfg, &r);
-        if (code >= 0) return SolveResult::ok(r);
-        return SolveResult::err({static_cast<LmStatus>(code), last_error()});
+        LmResultT<double> raw;
+        return finish_(ffi::graph_solve_dense(h_, &cfg, &raw), raw);
     }
     SolveResult solve_sparse(const LmConfig& cfg = LmConfig{}) {
-        LmResult r;
-        int32_t code = ffi::graph_solve_sparse(h_, &cfg, &r);
-        if (code >= 0) return SolveResult::ok(r);
-        return SolveResult::err({static_cast<LmStatus>(code), last_error()});
+        LmResultT<double> raw;
+        return finish_(ffi::graph_solve_sparse(h_, &cfg, &raw), raw);
     }
     /// Band Cholesky solve for banded Hessians; kd is the half-bandwidth
     /// in scalar parameters.
     SolveResult solve_band(uint32_t kd, const LmConfig& cfg = LmConfig{}) {
-        LmResult r;
-        int32_t code = ffi::graph_solve_band(h_, kd, &cfg, &r);
-        if (code >= 0) return SolveResult::ok(r);
-        return SolveResult::err({static_cast<LmStatus>(code), last_error()});
+        LmResultT<double> raw;
+        return finish_(ffi::graph_solve_band(h_, kd, &cfg, &raw), raw);
     }
     /// Total cost at the current parameter values (f64 evaluation).
     double cost() { return ffi::graph_cost(h_); }
@@ -509,14 +551,15 @@ public:
     /// this model.
     const char* validate() { return ffi::graph_validate(h_); }
     const char* last_error() const { return ffi::graph_last_error(h_); }
-    /// Text report of the last completed solve (status, cost,
-    /// iterations, timing and the backend's plan when gathered); ""
-    /// before the first solve. Valid until the next report call.
-    const char* last_report() { return ffi::graph_last_report(h_, false); }
-    /// last_report() with colour and box-drawing glyphs.
-    const char* last_pretty_report() { return ffi::graph_last_report(h_, true); }
 
 private:
+    SolveResult finish_(int32_t code, const LmResultT<double>& raw) {
+        if (code >= 0) return SolveResult::ok(LmResult(raw));
+        SolveError e{static_cast<LmStatus>(code), last_error(), {}};
+        if (raw.detail) e.partial = LmResult(raw);
+        return SolveResult::err(e);
+    }
+
     ffi::Graph* h_;
 };
 

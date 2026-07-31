@@ -31,13 +31,15 @@ enum class LmStatus : int32_t {
     Panicked = -2,
 };
 
-/// The base preset a config starts from; it also supplies the Rust
-/// fields the struct does not expose (lambda driver, observer,
-/// gather_timing).
+/// The base preset a config starts from; it also supplies the one
+/// Rust field the struct does not expose, the lambda driver.
+/// IllConditioned selects the Nielsen driver (its other fields match
+/// Conservative); Defaults and Conservative are the same config.
 enum class LmPreset : uint32_t {
     Defaults = 0,
     Conservative = 1,
     WellConditioned = 2,
+    IllConditioned = 3,
 };
 
 /// One damped attempt, as the observer callback sees it. `params`
@@ -120,17 +122,64 @@ struct LmResultT {
     /// Valid iff has_timing (config.gather_timing was set).
     LmTiming timing;
     bool has_timing;
+    /// The full Rust result behind this one (reports, the backend's
+    /// plan). Owned: the generated LmResult class manages it; null on
+    /// a failure that produced no partial result.
+    void* detail;
 };
 
-/// The Err side of a solve: SolverFailed or Panicked, with the text
-/// from last_error() (valid until the next call on the model).
-struct SolveError {
-    LmStatus status;
-    const char* message;
+/// How the reduced system was ordered (mirrors arael's
+/// ReducedOrdering).
+enum class ReducedOrdering : int32_t {
+    NaturalBanded = 0,
+    NaturalDense = 1,
+    Amd = 2,
+    Nd = 3,
 };
 
-template<class F>
-using SolveResultT = result<LmResultT<F>, SolveError>;
+/// Per-iteration flops down the two routes the Auto policy priced:
+/// the reduction plus the reduced factor, against the whole system's
+/// factor.
+struct RouteFlops {
+    double reduced;
+    double full;
+};
+
+/// What the sparse backend decided (mirrors arael's SchurPlan); read
+/// it with LmResult::plan(). Layout is part of the C ABI -- field
+/// order matters.
+struct SchurPlan {
+    /// Whether the Schur reduction was used; false means the full
+    /// system was factorized instead.
+    bool reduced;
+    /// Parameter blocks marginalized.
+    uint32_t eliminated_blocks;
+    /// Parameters marginalized, and parameters left in the reduced
+    /// system.
+    uint32_t eliminated_params;
+    uint32_t kept_params;
+    /// fill(L_S) / fill(L_H), when the exact route comparison ran.
+    option<double> fill_ratio;
+    /// The exact comparison's verdict; present exactly when
+    /// fill_ratio is.
+    option<RouteFlops> route_flops;
+    /// Conjugate-gradient iterations, when the reduced system was
+    /// solved iteratively.
+    option<uint32_t> cg_iterations;
+    /// The cheap statistic the Auto policy screens with; present
+    /// whenever the policy was Auto.
+    option<double> flop_ratio;
+    /// How the reduced system was ordered; absent when there was no
+    /// reduction.
+    option<ReducedOrdering> ordering;
+    /// The reduced system's half-bandwidth in scalars; 0 when there
+    /// was no reduction.
+    uint32_t kept_bandwidth;
+    /// Factored in block form under its envelope rather than by the
+    /// general sparse Cholesky: the reduced system when `reduced`,
+    /// the whole Hessian otherwise.
+    bool envelope;
+};
 
 /// How much covariance to prepare (mirrors arael's CovMode).
 enum class CovMode : uint32_t {

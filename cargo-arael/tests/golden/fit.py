@@ -10,7 +10,8 @@ import os
 
 from . import _fit_ffi as _f
 from .arael import math as _m
-from .arael.solver import AraelError, CovMode, LmPreset, LmStatus
+from .arael.solver import (AraelError, CovMode, LmPreset, LmStatus,
+                           LmTiming, ReducedOrdering, SchurPlan)
 
 LmIter = _f.LmIter
 
@@ -76,9 +77,45 @@ class LmConfig(_f.LmConfigRaw):
     def well_conditioned(cls):
         return cls(LmPreset.WELL_CONDITIONED)
 
+    @classmethod
+    def ill_conditioned(cls):
+        return cls(LmPreset.ILL_CONDITIONED)
+
 
 class LmResult(_f.LmResultRaw):
-    """A completed solve (see arael.solver for the fields)."""
+    """A completed solve (see arael.solver for the fields); owns the
+    full Rust-side result until garbage collected."""
+
+    def report(self):
+        """Text report: status, cost, iterations, damping, plus the
+        timing breakdown and the backend's plan when gathered."""
+        if not self._detail:
+            return ""
+        return _f.fit_result_report(self._detail, False).decode()
+
+    def pretty_report(self):
+        """report() with colour and box-drawing glyphs."""
+        if not self._detail:
+            return ""
+        return _f.fit_result_report(self._detail, True).decode()
+
+    @property
+    def plan(self):
+        """The sparse backend's SchurPlan, or None when the solve
+        carried none (dense and band solves)."""
+        p = SchurPlan()
+        if self._detail and _f.fit_result_plan(self._detail,
+                                                     ctypes.byref(p)):
+            return p
+        return None
+
+    def __del__(self):
+        d, self._detail = self._detail, None
+        if d:
+            try:
+                _f.fit_result_free(d)
+            except Exception:
+                pass
 
 
 class GainRef:
@@ -384,6 +421,8 @@ class Info:
 
     def clear_gps(self):
         _f.fit_info_clear_gps(self._p)
+
+    # field `note`: String -- opaque, no accessor generated
 
 
 class N:
@@ -853,8 +892,9 @@ class Covariance:
 
 
 class FitObsVec:
-    """View of `obs` (vec of Obs); wrappers stay valid per the
-    C++ contract, mutating while iterating is undefined."""
+    """View of `obs` (vec of Obs); element wrappers re-resolve
+    their pointer by key on every access, so growing the collection
+    cannot leave them dangling. Mutating while iterating is undefined."""
 
     __slots__ = ("_p",)
 
@@ -895,8 +935,9 @@ class FitObsVec:
 
 
 class FitItemsVec:
-    """View of `items` (vec of N); wrappers stay valid per the
-    C++ contract, mutating while iterating is undefined."""
+    """View of `items` (vec of N); element wrappers re-resolve
+    their pointer by key on every access, so growing the collection
+    cannot leave them dangling. Mutating while iterating is undefined."""
 
     __slots__ = ("_p",)
 
@@ -961,8 +1002,9 @@ class FitItemsVec:
 
 
 class FitPosesDeque:
-    """View of `poses` (deque of Pose); wrappers stay valid per the
-    C++ contract, mutating while iterating is undefined."""
+    """View of `poses` (deque of Pose); element wrappers re-resolve
+    their pointer by key on every access, so growing the collection
+    cannot leave them dangling. Mutating while iterating is undefined."""
 
     __slots__ = ("_p",)
 
@@ -1035,8 +1077,9 @@ class FitPosesDeque:
 
 
 class FitTiesVec:
-    """View of `ties` (vec of Tie); wrappers stay valid per the
-    C++ contract, mutating while iterating is undefined."""
+    """View of `ties` (vec of Tie); element wrappers re-resolve
+    their pointer by key on every access, so growing the collection
+    cannot leave them dangling. Mutating while iterating is undefined."""
 
     __slots__ = ("_p",)
 
@@ -1077,8 +1120,9 @@ class FitTiesVec:
 
 
 class FitMarksArena:
-    """View of `marks` (arena of N); wrappers stay valid per the
-    C++ contract, mutating while iterating is undefined."""
+    """View of `marks` (arena of N); element wrappers re-resolve
+    their pointer by key on every access, so growing the collection
+    cannot leave them dangling. Mutating while iterating is undefined."""
 
     __slots__ = ("_p",)
 
@@ -1131,8 +1175,9 @@ class FitMarksArena:
 
 
 class FitRigsVec:
-    """View of `rigs` (vec of Rig); wrappers stay valid per the
-    C++ contract, mutating while iterating is undefined."""
+    """View of `rigs` (vec of Rig); element wrappers re-resolve
+    their pointer by key on every access, so growing the collection
+    cannot leave them dangling. Mutating while iterating is undefined."""
 
     __slots__ = ("_p",)
 
@@ -1217,7 +1262,8 @@ class Fit:
 
     def _solved(self, code, res):
         if code < 0:
-            raise AraelError(code, _err(self._p))
+            raise AraelError(code, _err(self._p),
+                             res if res._detail else None)
         return res
 
     def solve_dense(self, cfg=None):
@@ -1261,14 +1307,6 @@ class Fit:
     def last_error(self):
         return _err(self._p)
 
-    def last_report(self):
-        """Text report of the last completed solve; '' before one."""
-        return _f.fit_last_report(self._p, False).decode()
-
-    def last_pretty_report(self):
-        """last_report() with colour and box-drawing glyphs."""
-        return _f.fit_last_report(self._p, True).decode()
-
     @property
     def m(self):
         return _f.fit_m(self._p)
@@ -1308,6 +1346,8 @@ class Fit:
     @cal.setter
     def cal(self, v):
         _f.fit_set_cal(self._p, v if isinstance(v, _m.vect2d) else _m.vect2d(v))
+
+    # field `tag`: String -- opaque, no accessor generated
 
     @property
     def obs(self):
