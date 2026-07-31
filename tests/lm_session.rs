@@ -267,7 +267,7 @@ fn warm_equals_cold_narrow_band() {
     let mut w = build(0.05);
     session.solve(&mut w, &cfg()).unwrap();
     let plan = session.solver().plan().expect("a plan");
-    assert!(plan.reduced && plan.narrow_band, "expected the narrow-band route: {:?}", plan);
+    assert!(plan.reduced && plan.envelope, "expected the envelope route: {:?}", plan);
 }
 
 #[test]

@@ -150,7 +150,7 @@ fn envelope_route_is_the_default_when_naturally_ordered() {
     let plan = solver.plan().expect("a plan");
     assert!(plan.reduced, "the landmarks should marginalize");
     assert_eq!(plan.ordering, Some(ReducedOrdering::NaturalBanded));
-    assert!(plan.narrow_band, "the envelope route is on by default");
+    assert!(plan.envelope, "the envelope route is on by default");
     assert!(cost < 1e-12, "end_cost {}", cost);
 }
 
@@ -161,7 +161,7 @@ fn envelope_route_is_the_default_when_naturally_ordered() {
 fn auto_takes_the_envelope_on_a_banded_reduction() {
     let mut auto = SparseFaer::new().with_envelope_schur(EnvelopeMode::Auto);
     let (x_auto, c_auto) = solve(&mut auto, 2);
-    assert!(auto.plan().expect("a plan").narrow_band,
+    assert!(auto.plan().expect("a plan").envelope,
             "a banded reduction is what the envelope route is for");
 
     let mut always = SparseFaer::new().with_envelope_schur(EnvelopeMode::Always);
@@ -198,11 +198,11 @@ fn envelope_route_can_be_switched_off() {
     let (x_faer, c_faer) = solve(&mut off, 2);
     let plan = off.plan().expect("a plan");
     assert!(plan.reduced);
-    assert!(!plan.narrow_band, "EnvelopeMode::Never must not take it");
+    assert!(!plan.envelope, "EnvelopeMode::Never must not take it");
 
     let mut on = SparseFaer::new().with_envelope_schur(EnvelopeMode::Always);
     let (x_env, c_env) = solve(&mut on, 2);
-    assert!(on.plan().expect("a plan").narrow_band);
+    assert!(on.plan().expect("a plan").envelope);
 
     assert!(c_faer < 1e-12 && c_env < 1e-12, "{} {}", c_faer, c_env);
     for (a, b) in std::iter::zip(&x_faer, &x_env) {
@@ -221,7 +221,7 @@ fn band_route_matches_faer_route() {
 
         let plan = band_solver.plan().expect("a plan");
         assert!(plan.reduced, "win {}: expected a reduction", win);
-        assert!(plan.narrow_band, "win {}: expected the narrow-band route to be taken", win);
+        assert!(plan.envelope, "win {}: expected the narrow-band route to be taken", win);
         assert_eq!(plan.ordering, Some(ReducedOrdering::NaturalBanded));
 
         assert!(c_band < 1e-12, "win {}: band end_cost {}", win, c_band);
@@ -249,7 +249,7 @@ fn wider_band_still_agrees() {
     let mut band_solver = SparseFaer::new().with_narrow_band(true);
     let (band, cost) = solve(&mut band_solver, win);
     let plan = band_solver.plan().expect("a plan");
-    assert!(plan.narrow_band && plan.kept_bandwidth >= 2, "bandwidth {}", plan.kept_bandwidth);
+    assert!(plan.envelope && plan.kept_bandwidth >= 2, "bandwidth {}", plan.kept_bandwidth);
     assert!(cost < 1e-12, "end_cost {}", cost);
     for (a, b) in std::iter::zip(&band, &faer) {
         assert!((a - b).abs() < 1e-8);
@@ -301,6 +301,22 @@ fn solve_chain(solver: &mut SparseFaer<f64>) -> (Vec<f64>, f64) {
     (out, r.end_cost)
 }
 
+/// The report has to say which way the reduced system was factored. A reader
+/// cannot infer it: a naturally-ordered system goes either way depending on
+/// [`EnvelopeMode`], and the ordering line looks identical for both.
+#[test]
+fn the_report_says_how_the_reduced_system_was_factored() {
+    let mut on = SparseFaer::new().with_envelope_schur(EnvelopeMode::Always);
+    let (_, _) = solve(&mut on, 2);
+    let mut off = SparseFaer::new().with_envelope_schur(EnvelopeMode::Never);
+    let (_, _) = solve(&mut off, 2);
+
+    let on_txt = format!("{:?}", on.plan().expect("a plan"));
+    let off_txt = format!("{:?}", off.plan().expect("a plan"));
+    assert!(on_txt.contains("envelope: true"), "{}", on_txt);
+    assert!(off_txt.contains("envelope: false"), "{}", off_txt);
+}
+
 /// The two band routes are separate features that happen to share internals:
 /// `with_narrow_band` factors the WHOLE Hessian, `EnvelopeMode` factors the
 /// REDUCED system. Turning the second off must not touch the first.
@@ -313,7 +329,7 @@ fn envelope_mode_does_not_reach_the_whole_system_band_route() {
         let (_, cost) = solve_chain(&mut s);
         let plan = s.plan().expect("a plan");
         assert!(!plan.reduced, "a pose chain marginalizes nothing");
-        assert!(plan.narrow_band,
+        assert!(plan.envelope,
                 "{:?} must not disable the whole-system band route", mode);
         assert!(cost < 1e-12, "{:?} end_cost {}", mode, cost);
     }
@@ -328,7 +344,7 @@ fn whole_system_band_route_matches_faer() {
 
     let plan = band_solver.plan().expect("a plan");
     assert!(!plan.reduced, "a pose chain marginalizes nothing");
-    assert!(plan.narrow_band, "the whole banded Hessian should take the band route");
+    assert!(plan.envelope, "the whole banded Hessian should take the band route");
     assert!(c_band < 1e-12, "band end_cost {}", c_band);
     assert!((c_band - c_faer).abs() < 1e-12, "band {} vs faer {}", c_band, c_faer);
     for (i, (a, b)) in std::iter::zip(&band, &faer).enumerate() {

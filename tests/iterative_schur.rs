@@ -288,7 +288,7 @@ fn iterative_orders_nothing() {
     };
     assert!(plan.reduced);
     assert_eq!(plan.ordering, None, "iterative route ordered the reduced system");
-    assert!(!plan.narrow_band, "iterative route took the band factorization");
+    assert!(!plan.envelope, "iterative route took the envelope factorization");
 
     // The factorizing route does order it -- so the assertion above is about
     // the route, not about the plan never carrying an ordering.
